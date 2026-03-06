@@ -72,8 +72,12 @@ void AdaptiveExecutionEngine::recordExecution(const std::string &kernelName,
                 (executionMs / 1000.0)
           : 0.0;
 
-  totalGflops_ = currentGflops; // Current instantaneous throughput
-  totalBandwidth_ = currentBandwidth;
+  // Update moving average throughputs (alpha = 0.3)
+  const double alpha = 0.3;
+  totalGflops_ = (totalGflops_ * (1.0 - alpha)) + (currentGflops * alpha);
+  totalBandwidth_ =
+      (totalBandwidth_ * (1.0 - alpha)) + (currentBandwidth * alpha);
+
   totalLatencyMs_ += executionMs;
   totalExecutions_++;
 }
@@ -213,10 +217,11 @@ double AdaptiveExecutionEngine::getAvgLatencyMs() const {
 }
 
 float AdaptiveExecutionEngine::getSimulatedTemperature() const {
-  // Basic thermal model: base 35C + load-based increase
-  // max load (e.g. 500 GFLOPS) -> 85C
-  double load = std::min(totalGflops_, 500.0);
-  return static_cast<float>(35.0 + (load / 500.0) * 50.0);
+  // Realistic thermal slope: base idle (30C) + workload delta.
+  // We use the moving average GFLOPS to avoid jittery thermal spikes.
+  // Assume a peak load of 1000 GFLOPS might reach 85C on high-end desktop.
+  double normalizedLoad = std::min(totalGflops_ / 1000.0, 1.0);
+  return static_cast<float>(30.0 + normalizedLoad * 55.0);
 }
 
 // ── Singleton ──────────────────────────────────────────────────────────────

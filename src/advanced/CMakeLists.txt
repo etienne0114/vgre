@@ -5,6 +5,7 @@ add_library(vgre_advanced OBJECT
     runtime_profiler.cpp
     vgre_simulation_engine.cpp
     ipc_manager.cpp
+    tcp_cluster.cpp
 )
 
 target_include_directories(vgre_advanced PUBLIC

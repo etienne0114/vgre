@@ -1,6 +1,7 @@
 #ifndef VGRE_CORE_GRAPH_MANAGER_H
 #define VGRE_CORE_GRAPH_MANAGER_H
 
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
 #include <memory>
@@ -17,17 +18,17 @@ struct GraphNode {
   GraphNodeType type;
 
   // Kernel data
-  KernelId kernelId;
+  KernelId kernelId = 0;
   std::string kernelName;
-  dim3 gridDim;
-  dim3 blockDim;
+  dim3 gridDim = {1, 1, 1};
+  dim3 blockDim = {1, 1, 1};
   std::vector<std::vector<uint8_t>> capturedArgs; // deep-copied arg data
 
   // Memcpy data
-  void *dst;
-  const void *src;
-  size_t count;
-  MemcpyKind kind;
+  void *dst = nullptr;
+  void *src = nullptr;
+  size_t count = 0;
+  int kind = VGRE_MEMCPY_HOST_TO_DEVICE;
 };
 
 class Graph {
@@ -54,6 +55,9 @@ public:
                                  const std::string &name, const dim3 &grid,
                                  const dim3 &block, void **args,
                                  const std::vector<ArgType> &argTypes);
+
+  vgre::VGREResult addMemcpyNode(GraphId id, void *dst, void *src, size_t count,
+                                 int kind);
 
   vgre::VGREResult instantiate(GraphId id, GraphExecId &outExecId);
   vgre::VGREResult destroyGraphExec(GraphExecId id);

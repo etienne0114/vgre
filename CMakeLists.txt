@@ -84,6 +84,22 @@ add_subdirectory(tests)
 # ── Examples ────────────────────────────────────────────────────────────────
 add_subdirectory(examples)
 
+# ── Dashboard (Flutter) ──────────────────────────────────────────────────────
+option(VGRE_BUILD_DASHBOARD "Build the Flutter dashboard" ON)
+if(VGRE_BUILD_DASHBOARD)
+    find_program(FLUTTER_EXECUTABLE flutter)
+    if(FLUTTER_EXECUTABLE)
+        add_custom_target(vgre_dashboard ALL
+            COMMAND ${FLUTTER_EXECUTABLE} build linux --release
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/vgre_dashboard
+            COMMENT "Building VGRE Flutter Dashboard (Release)"
+            VERBATIM
+        )
+        add_dependencies(vgre_dashboard vgre)
+    else()
+        message(WARNING "flutter executable not found. Dashboard will not be built automatically.")
+    endif()
+endif()
 # ── Install rules ───────────────────────────────────────────────────────────
 install(TARGETS vgre LIBRARY DESTINATION lib)
 install(DIRECTORY include/vgre DESTINATION include)

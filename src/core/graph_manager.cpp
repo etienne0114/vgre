@@ -1,5 +1,6 @@
 #include "vgre/core/graph_manager.h"
 #include "vgre/common/logger.h"
+#include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/scheduler.h"
 #include <cstring>
@@ -63,6 +64,23 @@ vgre::VGREResult GraphManager::addKernelNode(
   return vgre::VGREResult::SUCCESS;
 }
 
+vgre::VGREResult GraphManager::addMemcpyNode(GraphId id, void *dst, void *src,
+                                             size_t count, int kind) {
+  auto it = graphs_.find(id);
+  if (it == graphs_.end())
+    return vgre::VGREResult::ERROR_INVALID_VALUE;
+
+  GraphNode node;
+  node.type = GraphNodeType::MEMCPY;
+  node.dst = dst;
+  node.src = src;
+  node.count = count;
+  node.kind = kind;
+
+  it->second->nodes.push_back(node);
+  return vgre::VGREResult::SUCCESS;
+}
+
 vgre::VGREResult GraphManager::instantiate(GraphId id, GraphExecId &outExecId) {
   auto it = graphs_.find(id);
   if (it == graphs_.end())
@@ -117,6 +135,26 @@ vgre::VGREResult GraphManager::launch(GraphExecId execId, StreamId stream) {
         // until after the kernel that uses this data has completed.
         (void)launchArgs;
       });
+    } else if (node.type == GraphNodeType::MEMCPY) {
+      auto &mm = engine.getMemoryManager();
+      // Dispatch asynchronous memory copy on the stream.
+      // Currently, we'll wrap synchronous copies inside an async task so it
+      // sequences with the kernels correctly.
+      auto dst = node.dst;
+      auto src = node.src;
+      auto count = node.count;
+      auto kind = node.kind;
+
+      engine.getScheduler().submitStreamTask(
+          stream, [&mm, dst, src, count, kind]() {
+            if (kind == VGRE_MEMCPY_HOST_TO_DEVICE) {
+              mm.copyHostToDevice(dst, src, count);
+            } else if (kind == VGRE_MEMCPY_DEVICE_TO_HOST) {
+              mm.copyDeviceToHost(dst, src, count);
+            } else if (kind == VGRE_MEMCPY_DEVICE_TO_DEVICE) {
+              mm.copyDeviceToDevice(dst, src, count);
+            }
+          });
     }
   }
 

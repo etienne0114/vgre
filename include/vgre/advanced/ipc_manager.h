@@ -1,6 +1,5 @@
 #ifndef VGRE_IPC_MANAGER_H
 #define VGRE_IPC_MANAGER_H
-
 #include "vgre/api/vgre_c_api.h"
 #include <mutex>
 

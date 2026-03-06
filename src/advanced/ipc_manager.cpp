@@ -1,4 +1,5 @@
 #include "vgre/advanced/ipc_manager.h"
+#include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
 #include <cstring>
 #include <fcntl.h>
@@ -97,6 +98,7 @@ bool IPCManager::initialize(bool isMaster) {
   enabled_ = true;
   VGRE_LOG_INFO("IPCManager",
                 "Process registered in slot " + std::to_string(local_slot_));
+  TCPClusterManager::instance().initialize(isMaster);
   return true;
 }
 
@@ -124,6 +126,8 @@ void IPCManager::shutdown() {
     shm_unlink(VGRE_SHM_NAME);
   }
 
+  TCPClusterManager::instance().shutdown();
+
   enabled_ = false;
   VGRE_LOG_INFO("IPCManager", "IPC Shutdown complete");
 }
@@ -132,6 +136,8 @@ void IPCManager::updateLocalTelemetry(const vgre_telemetry_t &telemetry) {
   if (!enabled_ || !state_ || local_slot_ == -1)
     return;
   state_->slots[local_slot_].telemetry = telemetry;
+
+  TCPClusterManager::instance().broadcastLocalTelemetry(telemetry);
 }
 
 void IPCManager::getGlobalTelemetry(vgre_telemetry_t &outCombined) {

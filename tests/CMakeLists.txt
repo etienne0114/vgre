@@ -38,3 +38,7 @@ add_test(NAME MultiDeviceIntegration COMMAND test_multi_device)
 add_executable(test_stream_concurrency integration/test_stream_concurrency.cpp)
 target_link_libraries(test_stream_concurrency PRIVATE vgre)
 add_test(NAME test_stream_concurrency COMMAND test_stream_concurrency)
+
+add_executable(test_tcp_cluster integration/test_tcp_cluster.cpp)
+target_link_libraries(test_tcp_cluster PRIVATE vgre)
+add_test(NAME TCPClusterIntegration COMMAND test_tcp_cluster)
