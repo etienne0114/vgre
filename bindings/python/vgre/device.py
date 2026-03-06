@@ -1,0 +1,193 @@
+"""
+VGRE Virtual Device — Python wrapper for the virtual GPU device.
+
+Provides device enumeration, property queries, and context management
+via ctypes FFI to the libvgre shared library.
+"""
+
+import ctypes
+import ctypes.util
+import os
+import platform
+from typing import Optional, Dict, Any
+
+try:
+    from vgre._native import (
+        NATIVE_AVAILABLE,
+        native_get_device_properties,
+        native_synchronize,
+    )
+except ImportError:
+    NATIVE_AVAILABLE = False
+
+
+class DeviceProperties:
+    """Virtual GPU device properties."""
+
+    def __init__(self):
+        self.name: str = "VGRE Virtual GPU"
+        self.total_global_mem: int = 4 * 1024 * 1024 * 1024  # 4 GB
+        self.shared_mem_per_block: int = 48 * 1024
+        self.max_threads_per_block: int = 1024
+        self.max_threads_dim: list = [1024, 1024, 64]
+        self.max_grid_size: list = [2147483647, 65535, 65535]
+        self.warp_size: int = 32
+        self.multi_processor_count: int = os.cpu_count() or 4
+        self.major: int = 8
+        self.minor: int = 6
+        self.clock_rate: int = 1500000
+        self.total_const_mem: int = 64 * 1024
+        self.compute_capability: int = 86
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "total_global_mem_mb": self.total_global_mem // (1024 * 1024),
+            "shared_mem_per_block_kb": self.shared_mem_per_block // 1024,
+            "max_threads_per_block": self.max_threads_per_block,
+            "max_threads_dim": self.max_threads_dim,
+            "max_grid_size": self.max_grid_size,
+            "warp_size": self.warp_size,
+            "multi_processor_count": self.multi_processor_count,
+            "compute_capability": f"{self.major}.{self.minor}",
+            "clock_rate_mhz": self.clock_rate // 1000,
+        }
+
+    def __repr__(self) -> str:
+        d = self.to_dict()
+        lines = [f"  {k}: {v}" for k, v in d.items()]
+        return "DeviceProperties(\n" + "\n".join(lines) + "\n)"
+
+
+class VirtualDevice:
+    """
+    Represents a VGRE virtual GPU device.
+
+    Usage:
+        device = VirtualDevice()
+        props = device.get_properties()
+        print(props)
+    """
+
+    _lib: Optional[ctypes.CDLL] = None
+    _devices: list = []
+
+    def __init__(self, device_id: int = 0):
+        self.device_id = device_id
+        self._properties = DeviceProperties()
+        self._context_active = False
+        self._detect_hardware()
+
+    def _detect_hardware(self) -> None:
+        """Detect actual CPU hardware to populate device properties."""
+        # Try native C++ backend first
+        if NATIVE_AVAILABLE:
+            try:
+                props = native_get_device_properties(self.device_id)
+                self._properties.name = props.name.decode("utf-8", errors="replace")
+                self._properties.total_global_mem = props.total_global_mem
+                self._properties.shared_mem_per_block = props.shared_mem_per_block
+                self._properties.max_threads_per_block = props.max_threads_per_block
+                self._properties.max_threads_dim = list(props.max_threads_dim)
+                self._properties.max_grid_size = list(props.max_grid_size)
+                self._properties.warp_size = props.warp_size
+                self._properties.multi_processor_count = props.multi_processor_count
+                self._properties.major = props.major
+                self._properties.minor = props.minor
+                self._properties.clock_rate = props.clock_rate
+                self._properties.total_const_mem = props.total_const_mem
+                return
+            except Exception:
+                pass  # Fall through to pure Python detection
+
+        # Pure Python fallback
+        cpu_count = os.cpu_count() or 4
+        self._properties.multi_processor_count = cpu_count
+
+        cpu_name = self._read_cpu_name()
+        self._properties.name = f"VGRE Virtual GPU [{cpu_name}]"
+
+        total_ram = self._read_total_ram()
+        if total_ram > 0:
+            half_ram = total_ram // 2
+            cap = 16 * 1024 * 1024 * 1024
+            self._properties.total_global_mem = min(half_ram, cap)
+
+    @staticmethod
+    def _read_cpu_name() -> str:
+        """Read CPU model name from /proc/cpuinfo."""
+        try:
+            with open("/proc/cpuinfo", "r") as f:
+                for line in f:
+                    if "model name" in line:
+                        return line.split(":")[1].strip()
+        except (FileNotFoundError, PermissionError, IndexError):
+            pass
+        return platform.processor() or "Unknown CPU"
+
+    @staticmethod
+    def _read_total_ram() -> int:
+        """Read total RAM in bytes from /proc/meminfo."""
+        try:
+            with open("/proc/meminfo", "r") as f:
+                for line in f:
+                    if "MemTotal" in line:
+                        parts = line.split()
+                        return int(parts[1]) * 1024  # kB → bytes
+        except (FileNotFoundError, PermissionError, ValueError):
+            pass
+        return 0
+
+    @staticmethod
+    def get_device_count() -> int:
+        """Return the number of virtual GPU devices."""
+        return 1
+
+    def get_properties(self) -> DeviceProperties:
+        """Return the device properties."""
+        return self._properties
+
+    def create_context(self) -> None:
+        """Create a device context."""
+        if self._context_active:
+            raise RuntimeError("Context already active")
+        self._context_active = True
+
+    def destroy_context(self) -> None:
+        """Destroy the device context."""
+        if not self._context_active:
+            raise RuntimeError("No active context")
+        self._context_active = False
+
+    def has_context(self) -> bool:
+        """Check if a context is active."""
+        return self._context_active
+
+    def synchronize(self) -> None:
+        """Synchronize the device."""
+        if NATIVE_AVAILABLE:
+            native_synchronize()
+
+    def __repr__(self) -> str:
+        return (f"VirtualDevice(id={self.device_id}, "
+                f"name='{self._properties.name}', "
+                f"cores={self._properties.multi_processor_count})")
+
+
+# ── Module-level convenience ────────────────────────────────────────────────
+def get_device(device_id: int = 0) -> VirtualDevice:
+    """Get a virtual device by ID."""
+    return VirtualDevice(device_id)
+
+
+def get_device_count() -> int:
+    """Get the number of virtual devices."""
+    return VirtualDevice.get_device_count()
+
+
+if __name__ == "__main__":
+    # Self-test
+    dev = VirtualDevice()
+    print(f"Device: {dev}")
+    print(f"Properties:\n{dev.get_properties()}")
+    print(f"Device count: {get_device_count()}")
