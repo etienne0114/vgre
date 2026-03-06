@@ -1,0 +1,39 @@
+# Native build artifacts
+/build/
+/cmake-build-*/
+/out/
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+env/
+venv/
+.env
+
+# Flutter / Dart
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+vgre_dashboard/build/
+vgre_dashboard/.dart_tool/
+vgre_dashboard/linux/flutter/generated_plugin_registrant.cc
+vgre_dashboard/linux/flutter/generated_plugins.cmake
+vgre_dashboard/linux/flutter/ephemeral/
+
+# VGRE Install & logs
+/install_local.sh
+launch.sh
+*.log

@@ -1,0 +1,97 @@
+#ifndef VGRE_COMMON_TYPES_H
+#define VGRE_COMMON_TYPES_H
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace vgre {
+
+// ── Identifiers ────────────────────────────────────────────────────────────
+using DeviceId = int32_t;
+using StreamId = uint64_t;
+using KernelId = uint64_t;
+using MemoryHandle = void *;
+using ModuleHandle = void *;
+using GraphId = uint64_t;
+using GraphExecId = uint64_t;
+
+// ── 3-D dimension descriptor (mirrors CUDA dim3) ──────────────────────────
+struct dim3 {
+  uint32_t x = 1;
+  uint32_t y = 1;
+  uint32_t z = 1;
+
+  dim3() = default;
+  dim3(uint32_t x_, uint32_t y_ = 1, uint32_t z_ = 1) : x(x_), y(y_), z(z_) {}
+
+  uint32_t total() const { return x * y * z; }
+};
+
+// ── Kernel argument descriptor ─────────────────────────────────────────────
+enum class ArgType : uint8_t {
+  POINTER,
+  INT32,
+  INT64,
+  FLOAT32,
+  FLOAT64,
+  UINT32,
+  UINT64
+};
+
+struct KernelArg {
+  ArgType type = ArgType::POINTER;
+  void *data = nullptr;
+  size_t size = 0;
+};
+
+// ── Device properties (mirrors cudaDeviceProp subset) ──────────────────────
+struct DeviceProperties {
+  char name[256] = "VGRE Virtual GPU";
+  size_t totalGlobalMem = 4ULL * 1024 * 1024 * 1024; // 4 GB default
+  size_t sharedMemPerBlock = 48 * 1024;              // 48 KB
+  int maxThreadsPerBlock = 1024;
+  int maxThreadsDim[3] = {1024, 1024, 64};
+  int maxGridSize[3] = {2147483647, 65535, 65535};
+  int warpSize = 32;
+  int multiProcessorCount = 0; // set at runtime from CPU cores
+  int major = 8;
+  int minor = 6;
+  int clockRate = 1500000; // kHz
+  size_t totalConstMem = 64 * 1024;
+  int computeCapability = 86;
+};
+
+// ── Kernel intermediate representation ─────────────────────────────────────
+struct KernelIR {
+  std::string name;
+  std::string source;
+  std::string irCode; // LLVM IR text
+  std::vector<ArgType> argTypes;
+  bool usesSharedMem = false;
+  size_t sharedMemSize = 0;
+};
+
+// ── Compiled kernel function pointer ───────────────────────────────────────
+// Signature: void kernel(void** args, dim3 blockIdx, dim3 threadIdx,
+//                        dim3 blockDim, dim3 gridDim)
+using CompiledKernelFn =
+    std::function<void(void **args, const dim3 &blockIdx, const dim3 &threadIdx,
+                       const dim3 &blockDim, const dim3 &gridDim)>;
+
+// ── Memory copy direction ──────────────────────────────────────────────────
+enum class MemcpyKind : uint8_t {
+  HOST_TO_DEVICE,
+  DEVICE_TO_HOST,
+  DEVICE_TO_DEVICE,
+  HOST_TO_HOST
+};
+
+// ── Stream state ───────────────────────────────────────────────────────────
+enum class StreamState : uint8_t { IDLE, EXECUTING, SYNCHRONIZING, ERROR };
+
+} // namespace vgre
+
+#endif // VGRE_COMMON_TYPES_H
