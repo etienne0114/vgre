@@ -47,7 +47,7 @@ public:
 
     // Detect all available compute resources
     VGREResult detectResources();
-    const ComputeResources& getResources() const;
+    ComputeResources getResources() const;
 
     // Select best backend for a given workload
     ComputeBackend selectBackend(size_t workloadSize,
@@ -57,7 +57,7 @@ public:
     VGREResult addRemoteNode(const std::string& address, int port);
     VGREResult removeRemoteNode(const std::string& address);
     VGREResult pingRemoteNode(const std::string& address, double& latencyMs);
-    const std::vector<RemoteNode>& getRemoteNodes() const;
+    std::vector<RemoteNode> getRemoteNodes() const;
 
     // Workload distribution
     VGREResult distributeWorkload(const CompiledKernelFn& fn,
@@ -65,6 +65,16 @@ public:
                                   const dim3& blockDim,
                                   void** args,
                                   ComputeBackend backend = ComputeBackend::AUTO);
+
+    // Dispatch a registered runtime kernel by ID. This path supports
+    // remote-node execution over the TCP cluster manager.
+    VGREResult distributeRegisteredKernel(KernelId kernelId,
+                                          const dim3& gridDim,
+                                          const dim3& blockDim,
+                                          void** args,
+                                          int numArgs,
+                                          size_t sharedMem = 0,
+                                          ComputeBackend backend = ComputeBackend::AUTO);
 
     // Singleton
     static HybridComputeManager& instance();

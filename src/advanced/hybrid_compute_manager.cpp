@@ -1,4 +1,5 @@
 #include "vgre/advanced/hybrid_compute_manager.h"
+#include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
@@ -9,9 +10,16 @@
 #include <sstream>
 #include <thread>
 
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#include <windows.h>
+#else
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 namespace vgre {
 namespace advanced {
@@ -45,7 +53,8 @@ VGREResult HybridComputeManager::detectResources() {
   return VGREResult::SUCCESS;
 }
 
-const ComputeResources &HybridComputeManager::getResources() const {
+ComputeResources HybridComputeManager::getResources() const {
+  std::lock_guard<std::mutex> lock(mutex_);
   return resources_;
 }
 
@@ -55,7 +64,15 @@ void HybridComputeManager::detectCPU() {
   if (resources_.cpuCores <= 0)
     resources_.cpuCores = 4;
 
-  // Read total memory from /proc/meminfo
+#if defined(_WIN32)
+  // Read total memory from GlobalMemoryStatusEx on Windows
+  MEMORYSTATUSEX memInfo;
+  memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+  if (GlobalMemoryStatusEx(&memInfo)) {
+    resources_.cpuMemoryBytes = static_cast<size_t>(memInfo.ullTotalPhys);
+  }
+#else
+  // Read total memory from /proc/meminfo on Linux
   std::ifstream meminfo("/proc/meminfo");
   std::string line;
   while (std::getline(meminfo, line)) {
@@ -68,11 +85,22 @@ void HybridComputeManager::detectCPU() {
       break;
     }
   }
+#endif
+
+  if (resources_.cpuMemoryBytes == 0) {
+    // Conservative fallback when host memory detection fails.
+    resources_.cpuMemoryBytes = static_cast<size_t>(8) * 1024 * 1024 * 1024;
+  }
 }
 
 // ── Detect integrated GPU ──────────────────────────────────────────────────
 void HybridComputeManager::detectIntegratedGPU() {
-  // Check for Intel/AMD integrated GPU via sysfs
+#if defined(_WIN32)
+  // On Windows, iGPU detection would require DXGI/WMI enumeration.
+  // Until that integration lands, this backend is reported unavailable.
+  resources_.hasIntegratedGPU = false;
+#else
+  // Check for Intel/AMD integrated GPU via sysfs (Linux)
   std::ifstream driCards("/sys/class/drm/card0/device/vendor");
   if (driCards.is_open()) {
     std::string vendor;
@@ -89,12 +117,14 @@ void HybridComputeManager::detectIntegratedGPU() {
       }
     }
   }
+#endif
 }
 
 // ── Backend selection ──────────────────────────────────────────────────────
 ComputeBackend
 HybridComputeManager::selectBackend(size_t workloadSize,
                                     size_t memoryRequired) const {
+  std::lock_guard<std::mutex> lock(mutex_);
 
   // If workload fits in CPU comfortably, use CPU
   if (memoryRequired < resources_.cpuMemoryBytes / 4) {
@@ -103,21 +133,12 @@ HybridComputeManager::selectBackend(size_t workloadSize,
       return ComputeBackend::CPU;
     }
 
-    // For larger workloads, prefer iGPU if available
-    if (resources_.hasIntegratedGPU && workloadSize > 100000) {
-      return ComputeBackend::INTEGRATED_GPU;
-    }
+    // iGPU backend is not implemented as a distinct execution pipeline yet.
+    // Keep AUTO on CPU to avoid misreporting CPU execution as iGPU execution.
   }
 
-  // If memory requirement exceeds local, try remote
-  if (memoryRequired > resources_.cpuMemoryBytes / 2) {
-    for (const auto &node : resources_.remoteNodes) {
-      if (node.available && node.memoryBytes > memoryRequired) {
-        return ComputeBackend::REMOTE_NODE;
-      }
-    }
-  }
-
+  (void)memoryRequired;
+  // AUTO currently resolves only to backends with a complete dispatch path.
   return ComputeBackend::CPU;
 }
 
@@ -125,6 +146,9 @@ HybridComputeManager::selectBackend(size_t workloadSize,
 VGREResult HybridComputeManager::addRemoteNode(const std::string &address,
                                                int port) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (address.empty() || port <= 0 || port > 65535) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
 
   // Check for duplicates
   for (const auto &node : resources_.remoteNodes) {
@@ -160,17 +184,27 @@ VGREResult HybridComputeManager::removeRemoteNode(const std::string &address) {
 
 VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
                                                 double &latencyMs) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  RemoteNode *targetNode = nullptr;
-  for (auto &node : resources_.remoteNodes) {
-    if (node.address == address) {
-      targetNode = &node;
-      break;
+  latencyMs = 0.0;
+  int targetPort = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto &node : resources_.remoteNodes) {
+      if (node.address == address) {
+        targetPort = node.port;
+        break;
+      }
     }
   }
 
-  if (!targetNode)
+  if (targetPort == 0)
     return VGREResult::ERROR_INVALID_VALUE;
+
+#if defined(_WIN32)
+  // Windows: use WinSock for TCP connection test
+  WSADATA wsaData;
+  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+    return VGREResult::ERROR_IO;
+  }
 
   auto start = std::chrono::steady_clock::now();
 
@@ -178,33 +212,105 @@ VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
 
-  if (getaddrinfo(address.c_str(), std::to_string(targetNode->port).c_str(),
+  if (getaddrinfo(address.c_str(), std::to_string(targetPort).c_str(),
                   &hints, &res) != 0) {
+    WSACleanup();
     return VGREResult::ERROR_INVALID_VALUE;
   }
 
-  int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-  if (sock < 0) {
-    freeaddrinfo(res);
-    return VGREResult::ERROR_UNKNOWN;
+  bool connected = false;
+  for (addrinfo *it = res; it != nullptr; it = it->ai_next) {
+    SOCKET sock = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+    if (sock == INVALID_SOCKET) {
+      continue;
+    }
+
+    if (connect(sock, it->ai_addr, static_cast<int>(it->ai_addrlen)) !=
+        SOCKET_ERROR) {
+      connected = true;
+      closesocket(sock);
+      break;
+    }
+    closesocket(sock);
   }
 
-  if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
-    close(sock);
+  if (!connected) {
     freeaddrinfo(res);
-    targetNode->available = false;
-    return VGREResult::ERROR_UNKNOWN;
+    WSACleanup();
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto &node : resources_.remoteNodes) {
+      if (node.address == address) {
+        node.available = false;
+        break;
+      }
+    }
+    return VGREResult::ERROR_IO;
   }
 
-  close(sock);
   freeaddrinfo(res);
 
   auto end = std::chrono::steady_clock::now();
   latencyMs = std::chrono::duration<double, std::milli>(end - start).count();
+  WSACleanup();
+#else
+  auto start = std::chrono::steady_clock::now();
 
-  targetNode->latencyMs = latencyMs;
-  targetNode->available = true;
-  targetNode->cpuCores = 4; // Default remote capability until handshaked
+  struct addrinfo hints{}, *res = nullptr;
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+
+  if (getaddrinfo(address.c_str(), std::to_string(targetPort).c_str(),
+                  &hints, &res) != 0) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+
+  bool connected = false;
+  for (addrinfo *it = res; it != nullptr; it = it->ai_next) {
+    int sock = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+    if (sock < 0) {
+      continue;
+    }
+
+    if (connect(sock, it->ai_addr, it->ai_addrlen) == 0) {
+      connected = true;
+      close(sock);
+      break;
+    }
+    close(sock);
+  }
+
+  if (!connected) {
+    freeaddrinfo(res);
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto &node : resources_.remoteNodes) {
+      if (node.address == address) {
+        node.available = false;
+        break;
+      }
+    }
+    return VGREResult::ERROR_IO;
+  }
+
+  freeaddrinfo(res);
+
+  auto end = std::chrono::steady_clock::now();
+  latencyMs = std::chrono::duration<double, std::milli>(end - start).count();
+#endif
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto &node : resources_.remoteNodes) {
+      if (node.address == address) {
+        node.latencyMs = latencyMs;
+        node.available = true;
+        // Default remote capability until handshaked
+        if (node.cpuCores <= 0) {
+          node.cpuCores = 4;
+        }
+        break;
+      }
+    }
+  }
 
   VGRE_LOG_INFO("HybridComputeManager",
                 "TCP Pinged " + address +
@@ -213,7 +319,8 @@ VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
   return VGREResult::SUCCESS;
 }
 
-const std::vector<RemoteNode> &HybridComputeManager::getRemoteNodes() const {
+std::vector<RemoteNode> HybridComputeManager::getRemoteNodes() const {
+  std::lock_guard<std::mutex> lock(mutex_);
   return resources_.remoteNodes;
 }
 
@@ -223,6 +330,19 @@ VGREResult HybridComputeManager::distributeWorkload(const CompiledKernelFn &fn,
                                                     const dim3 &blockDim,
                                                     void **args,
                                                     ComputeBackend backend) {
+  if (!fn || gridDim.x == 0 || blockDim.x == 0) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+
+  int cpuCores = 0;
+  bool hasIntegratedGPU = false;
+  std::vector<RemoteNode> remoteNodes;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cpuCores = resources_.cpuCores;
+    hasIntegratedGPU = resources_.hasIntegratedGPU;
+    remoteNodes = resources_.remoteNodes;
+  }
 
   if (backend == ComputeBackend::AUTO) {
     size_t workload = static_cast<size_t>(gridDim.total()) *
@@ -234,41 +354,90 @@ VGREResult HybridComputeManager::distributeWorkload(const CompiledKernelFn &fn,
   case ComputeBackend::CPU:
   case ComputeBackend::AUTO: {
     // Use standard CPU parallel executor
-    runtime::CPUParallelExecutor executor(resources_.cpuCores);
+    runtime::CPUParallelExecutor executor(cpuCores);
     return executor.execute(fn, gridDim, blockDim, args);
   }
 
   case ComputeBackend::INTEGRATED_GPU: {
-    VGRE_LOG_INFO("HybridComputeManager",
-                  "Dispatching workload to Integrated GPU pipeline");
-    // Utilize a dedicated executor scaled to typical iGPU execution units
-    // (e.g., 24-48 EUs)
-    int igpu_threads = resources_.hasIntegratedGPU ? 24 : resources_.cpuCores;
-    runtime::CPUParallelExecutor executor(igpu_threads);
-    return executor.execute(fn, gridDim, blockDim, args);
+    (void)hasIntegratedGPU;
+    VGRE_LOG_ERROR("HybridComputeManager",
+                   "Integrated GPU backend requested but no native iGPU "
+                   "execution pipeline is available");
+    return VGREResult::ERROR_NOT_SUPPORTED;
   }
 
   case ComputeBackend::REMOTE_NODE: {
     VGRE_LOG_INFO("HybridComputeManager",
                   "Routing workload to Remote Node topology");
 
-    // Select the optimal active remote node and apply its physical network
-    // latency penalty
-    int remote_cores = 4; // fallback
-    for (const auto &node : resources_.remoteNodes) {
-      if (node.available) {
-        remote_cores = node.cpuCores;
-        // Apply the actual TCP round-trip latency measured during node
-        // registration
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(static_cast<int>(node.latencyMs)));
-        break;
+    const RemoteNode *best = nullptr;
+    for (const auto &node : remoteNodes) {
+      if (!node.available)
+        continue;
+      if (!best || node.latencyMs < best->latencyMs) {
+        best = &node;
       }
     }
 
-    // Execute scaled to the remote node's physical core count
-    runtime::CPUParallelExecutor executor(remote_cores);
-    return executor.execute(fn, gridDim, blockDim, args);
+    if (!best || best->cpuCores <= 0) {
+      return VGREResult::ERROR_NOT_SUPPORTED;
+    }
+
+    // Function-pointer dispatch cannot be serialized and executed remotely over
+    // the cluster API. Rejecting this path avoids fake-local execution that
+    // would misreport remote behavior.
+    return VGREResult::ERROR_NOT_SUPPORTED;
+  }
+  }
+
+  return VGREResult::ERROR_NOT_SUPPORTED;
+}
+
+VGREResult HybridComputeManager::distributeRegisteredKernel(
+    KernelId kernelId, const dim3 &gridDim, const dim3 &blockDim, void **args,
+    int numArgs, size_t sharedMem, ComputeBackend backend) {
+  if (kernelId == 0 || gridDim.x == 0 || blockDim.x == 0 || numArgs < 0) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+  if (numArgs > 0 && !args) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+
+  if (backend == ComputeBackend::AUTO) {
+    size_t workload = static_cast<size_t>(gridDim.total()) *
+                      static_cast<size_t>(blockDim.total());
+    backend = selectBackend(workload, 0);
+  }
+
+  switch (backend) {
+  case ComputeBackend::CPU:
+  case ComputeBackend::AUTO:
+    return core::RuntimeEngine::instance().launchKernel(kernelId, gridDim,
+                                                        blockDim, args,
+                                                        sharedMem, 0);
+  case ComputeBackend::INTEGRATED_GPU:
+    return VGREResult::ERROR_NOT_SUPPORTED;
+  case ComputeBackend::REMOTE_NODE: {
+    auto &cluster = TCPClusterManager::instance();
+    if (!cluster.isEnabled() || !cluster.isMaster()) {
+      VGRE_LOG_ERROR("HybridComputeManager",
+                     "Remote kernel dispatch requested but TCP cluster master "
+                     "is not active");
+      return VGREResult::ERROR_NOT_INITIALIZED;
+    }
+
+    int worker = cluster.getFirstActiveWorker();
+    if (worker < 0) {
+      VGRE_LOG_ERROR("HybridComputeManager",
+                     "Remote kernel dispatch requested but no active workers "
+                     "are connected");
+      return VGREResult::ERROR_NOT_INITIALIZED;
+    }
+
+    uint32_t gd[3] = {gridDim.x, gridDim.y, gridDim.z};
+    uint32_t bd[3] = {blockDim.x, blockDim.y, blockDim.z};
+    return cluster.launchRemoteKernel(worker, kernelId, gd, bd, args, numArgs,
+                                      sharedMem);
   }
   }
 

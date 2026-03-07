@@ -8,6 +8,7 @@
 #include <vector>
 #include <unordered_map>
 #include <chrono>
+#include <atomic>
 #include <mutex>
 
 namespace vgre {
@@ -73,7 +74,7 @@ public:
 private:
     void updateStats(const std::string& name, const ProfileEvent& event);
 
-    bool                                          enabled_ = false;
+    std::atomic<bool>                             enabled_{false};
     std::vector<ProfileEvent>                     events_;
     std::unordered_map<std::string, KernelStats>  stats_;
     std::unordered_map<std::string,

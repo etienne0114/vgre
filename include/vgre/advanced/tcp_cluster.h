@@ -3,6 +3,7 @@
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #if defined(_WIN32)
 typedef unsigned long long
@@ -26,12 +27,14 @@ enum class PacketType : uint32_t {
 
 struct RemoteCommandPacket {
   PacketType type;
+  uint64_t auth_token;
   uint64_t kernel_id;
   uint32_t grid_dim[3];
   uint32_t block_dim[3];
   size_t shared_mem;
-  // Simplified: only supporting numeric/static args for now in proto
-  double args[8];
+  // Numeric argument marshalling (pointer args are rejected by sender).
+  uint8_t arg_types[8];
+  uint64_t args[8];
   int num_args;
 };
 
@@ -56,6 +59,7 @@ public:
                                 const uint32_t grid_dim[3],
                                 const uint32_t block_dim[3], void **args,
                                 int num_args, size_t shared_mem);
+  int getFirstActiveWorker() const;
 
   bool isEnabled() const { return enabled_.load(); }
   bool isMaster() const { return is_master_; }
@@ -70,6 +74,7 @@ private:
   void handleRemoteCommand(const RemoteCommandPacket &pkt);
 
   std::atomic<bool> enabled_{false};
+  uint64_t auth_token_ = 0;
   bool is_master_ = false;
   int port_ = 7777;
   std::string host_;
@@ -83,13 +88,17 @@ private:
     vgre_socket_t socket_fd;
     vgre_telemetry_t last_telemetry;
     bool active;
+    std::vector<uint8_t> rx_buffer;
+    bool expecting_type = true;
+    PacketType pending_type = PacketType::TELEMETRY;
   };
   std::vector<ClientConnection> clients_;
-  std::mutex clients_mutex_;
+  mutable std::mutex clients_mutex_;
 
   // Client State
   vgre_socket_t client_fd_ = (vgre_socket_t)-1;
   vgre_telemetry_t client_telemetry_buffer_{};
+  std::vector<uint8_t> client_rx_buffer_;
   std::mutex client_mutex_;
 };
 

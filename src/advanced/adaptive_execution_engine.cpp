@@ -5,7 +5,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <thread>
+
+#if defined(__linux__)
+#include <dirent.h>
+#endif
 
 namespace vgre {
 namespace advanced {
@@ -61,6 +66,7 @@ void AdaptiveExecutionEngine::recordExecution(const std::string &kernelName,
   }
 
   analyzeProfile(profile);
+  activeKernels_ = static_cast<int>(profiles_.size());
 
   // Update aggregates
   double currentGflops =
@@ -138,14 +144,14 @@ int AdaptiveExecutionEngine::getOptimalVectorWidth(
   return it->second.optimalVectorWidth;
 }
 
-const KernelProfile *
-AdaptiveExecutionEngine::getProfile(const std::string &kernelName) const {
-
+bool AdaptiveExecutionEngine::getProfile(const std::string &kernelName,
+                                         KernelProfile &out) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = profiles_.find(kernelName);
   if (it == profiles_.end())
-    return nullptr;
-  return &it->second;
+    return false;
+  out = it->second;
+  return true;
 }
 
 // ── Auto-tune ──────────────────────────────────────────────────────────────
@@ -170,6 +176,7 @@ VGREResult AdaptiveExecutionEngine::autoTune(const std::string &kernelName,
     threadCounts.push_back(maxCores_);
   }
 
+  bool anySuccess = false;
   for (int threads : threadCounts) {
     runtime::CPUParallelExecutor executor(threads);
 
@@ -179,6 +186,7 @@ VGREResult AdaptiveExecutionEngine::autoTune(const std::string &kernelName,
 
     if (r != VGREResult::SUCCESS)
       continue;
+    anySuccess = true;
 
     double ms = std::chrono::duration<double, std::milli>(end - start).count();
 
@@ -195,10 +203,17 @@ VGREResult AdaptiveExecutionEngine::autoTune(const std::string &kernelName,
     recordExecution(kernelName, threads, 0, ms, 0, 0);
   }
 
-  VGRE_LOG_INFO(
-      "AdaptiveExecutionEngine",
-      "Auto-tune result: optimal threads=" + std::to_string(bestThreads) +
-          " best time=" + std::to_string(bestTime) + " ms");
+  if (!anySuccess) {
+    VGRE_LOG_ERROR("AdaptiveExecutionEngine",
+                   "Auto-tune failed: no successful executions for " +
+                       kernelName);
+    return VGREResult::ERROR_LAUNCH_FAILURE;
+  }
+
+  VGRE_LOG_INFO("AdaptiveExecutionEngine",
+                "Auto-tune result: optimal threads=" +
+                    std::to_string(bestThreads) + " best time=" +
+                    std::to_string(bestTime) + " ms");
 
   return VGREResult::SUCCESS;
 }
@@ -210,6 +225,7 @@ void AdaptiveExecutionEngine::clearProfiles() {
   totalGflops_ = 0;
   totalLatencyMs_ = 0;
   totalExecutions_ = 0;
+  activeKernels_ = 0;
 }
 
 double AdaptiveExecutionEngine::getAvgLatencyMs() const {
@@ -219,18 +235,61 @@ double AdaptiveExecutionEngine::getAvgLatencyMs() const {
 
 float AdaptiveExecutionEngine::getDeviceTemperature() const {
 #if defined(__linux__)
-  // Read real thermal zone 0 (CPU package)
-  std::ifstream thermalFile("/sys/class/thermal/thermal_zone0/temp");
-  if (thermalFile.is_open()) {
-    int milliC;
-    thermalFile >> milliC;
-    return static_cast<float>(milliC) / 1000.0f;
+  // Read maximum reported thermal zone temperature as host device temperature.
+  float maxTempC = 0.0f;
+  DIR *dir = opendir("/sys/class/thermal");
+  if (dir) {
+    struct dirent *entry = nullptr;
+    while ((entry = readdir(dir)) != nullptr) {
+      if (std::strncmp(entry->d_name, "thermal_zone", 12) != 0) {
+        continue;
+      }
+      std::ifstream thermalFile(std::string("/sys/class/thermal/") +
+                                entry->d_name + "/temp");
+      if (!thermalFile.is_open()) {
+        continue;
+      }
+      int milliC = 0;
+      if (thermalFile >> milliC) {
+        float tempC = static_cast<float>(milliC) / 1000.0f;
+        if (tempC > maxTempC) {
+          maxTempC = tempC;
+        }
+      }
+    }
+    closedir(dir);
+  }
+  if (maxTempC > 0.0f) {
+    return maxTempC;
   }
 #endif
 
-  // Fallback to idle 30C + workload delta if sysfs is read-blocked
-  double normalizedLoad = std::min(totalGflops_ / 1000.0, 1.0);
-  return static_cast<float>(30.0 + normalizedLoad * 55.0);
+  // Temperature sensor unavailable on this platform or environment.
+  return 0.0f;
+}
+
+double AdaptiveExecutionEngine::getTotalGFLOPS() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return totalGflops_;
+}
+
+double AdaptiveExecutionEngine::getMaxGFLOPS() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return maxGflops_;
+}
+
+int AdaptiveExecutionEngine::getActiveKernelCount() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return activeKernels_;
+}
+
+double AdaptiveExecutionEngine::getMemoryBandwidth() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return totalBandwidth_;
+}
+
+double AdaptiveExecutionEngine::getMaxMemoryBandwidth() const {
+  return 64.0;
 }
 
 // ── Singleton ──────────────────────────────────────────────────────────────

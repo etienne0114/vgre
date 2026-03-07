@@ -9,6 +9,36 @@
 namespace vgre {
 namespace advanced {
 
+namespace {
+static std::string escapeJsonString(const std::string &s) {
+  std::string out;
+  out.reserve(s.size());
+  for (char c : s) {
+    switch (c) {
+    case '\\':
+      out += "\\\\";
+      break;
+    case '"':
+      out += "\\\"";
+      break;
+    case '\n':
+      out += "\\n";
+      break;
+    case '\r':
+      out += "\\r";
+      break;
+    case '\t':
+      out += "\\t";
+      break;
+    default:
+      out += c;
+      break;
+    }
+  }
+  return out;
+}
+} // namespace
+
 RuntimeProfiler::RuntimeProfiler() {
     VGRE_LOG_DEBUG("RuntimeProfiler", "Initialized (disabled by default)");
 }
@@ -17,17 +47,19 @@ RuntimeProfiler::~RuntimeProfiler() = default;
 
 // ── Enable/disable ─────────────────────────────────────────────────────────
 void RuntimeProfiler::setEnabled(bool enabled) {
-    enabled_ = enabled;
+    enabled_.store(enabled, std::memory_order_relaxed);
     VGRE_LOG_INFO("RuntimeProfiler",
                   std::string("Profiling ") +
                   (enabled ? "enabled" : "disabled"));
 }
 
-bool RuntimeProfiler::isEnabled() const { return enabled_; }
+bool RuntimeProfiler::isEnabled() const {
+    return enabled_.load(std::memory_order_relaxed);
+}
 
 // ── Record event ───────────────────────────────────────────────────────────
 void RuntimeProfiler::recordEvent(const ProfileEvent& event) {
-    if (!enabled_) return;
+    if (!enabled_.load(std::memory_order_relaxed)) return;
 
     std::lock_guard<std::mutex> lock(mutex_);
     events_.push_back(event);
@@ -36,13 +68,13 @@ void RuntimeProfiler::recordEvent(const ProfileEvent& event) {
 
 // ── Timer ──────────────────────────────────────────────────────────────────
 void RuntimeProfiler::startTimer(const std::string& kernelName) {
-    if (!enabled_) return;
+    if (!enabled_.load(std::memory_order_relaxed)) return;
     std::lock_guard<std::mutex> lock(mutex_);
     timers_[kernelName] = std::chrono::steady_clock::now();
 }
 
 double RuntimeProfiler::stopTimer(const std::string& kernelName) {
-    if (!enabled_) return 0.0;
+    if (!enabled_.load(std::memory_order_relaxed)) return 0.0;
 
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = timers_.find(kernelName);
@@ -87,6 +119,7 @@ KernelStats RuntimeProfiler::getKernelStats(
     if (it == stats_.end()) {
         KernelStats empty;
         empty.kernelName = kernelName;
+        empty.minTimeMs = 0.0;
         return empty;
     }
     return it->second;
@@ -123,7 +156,7 @@ std::string RuntimeProfiler::toJSON() const {
         if (!first) oss << ",\n";
         first = false;
         oss << "    {\n";
-        oss << "      \"name\": \"" << s.kernelName << "\",\n";
+        oss << "      \"name\": \"" << escapeJsonString(s.kernelName) << "\",\n";
         oss << "      \"invocations\": " << s.invocations << ",\n";
         oss << "      \"total_time_ms\": " << s.totalTimeMs << ",\n";
         oss << "      \"avg_time_ms\": " << s.avgTimeMs << ",\n";

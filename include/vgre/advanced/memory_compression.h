@@ -45,7 +45,7 @@ public:
     bool   shouldCompress(size_t transferSize) const;
 
     // Statistics
-    const CompressionStats& getStats() const;
+    CompressionStats getStats() const;
     void  resetStats();
 
     // Singleton

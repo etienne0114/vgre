@@ -3,10 +3,26 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 
 namespace vgre {
 namespace advanced {
+
+namespace {
+constexpr uint32_t kCompressionMagic = 0x56475245U; // "VGRE"
+constexpr uint8_t kCompressionVersion = 1;
+constexpr uint8_t kFlagCompressed = 0x1;
+
+struct CompressionHeader {
+  uint32_t magic = kCompressionMagic;
+  uint8_t version = kCompressionVersion;
+  uint8_t flags = 0;
+  uint16_t reserved = 0;
+  uint64_t originalSize = 0;
+  uint64_t payloadSize = 0;
+};
+} // namespace
 
 MemoryCompression::MemoryCompression() {
   VGRE_LOG_INFO("MemoryCompression", "Initialized with min transfer size " +
@@ -124,21 +140,34 @@ size_t MemoryCompression::lz4Decompress(const uint8_t *src, size_t srcSize,
 // ── Public compress ────────────────────────────────────────────────────────
 VGREResult MemoryCompression::compress(const void *src, size_t srcSize,
                                        std::vector<uint8_t> &dst) {
+  if (!src && srcSize > 0) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
   auto start = std::chrono::steady_clock::now();
 
-  // Allocate worst-case output buffer
-  dst.resize(srcSize + (srcSize / 255) + 64);
+  std::vector<uint8_t> compressed;
+  compressed.resize(srcSize + (srcSize / 255) + 64);
+  size_t compressedSize = lz4Compress(static_cast<const uint8_t *>(src), srcSize,
+                                      compressed.data(), compressed.size());
 
-  size_t compressedSize = lz4Compress(static_cast<const uint8_t *>(src),
-                                      srcSize, dst.data(), dst.size());
+  const bool useCompressed = (compressedSize > 0 && compressedSize < srcSize);
+  const uint64_t payloadSize =
+      static_cast<uint64_t>(useCompressed ? compressedSize : srcSize);
 
-  if (compressedSize == 0 || compressedSize >= srcSize) {
-    // Compression didn't help — store uncompressed
-    dst.resize(srcSize);
-    std::memcpy(dst.data(), src, srcSize);
-    compressedSize = srcSize;
-  } else {
-    dst.resize(compressedSize);
+  CompressionHeader hdr{};
+  hdr.flags = useCompressed ? kFlagCompressed : 0;
+  hdr.originalSize = static_cast<uint64_t>(srcSize);
+  hdr.payloadSize = payloadSize;
+
+  dst.resize(sizeof(CompressionHeader) + static_cast<size_t>(payloadSize));
+  std::memcpy(dst.data(), &hdr, sizeof(CompressionHeader));
+  if (payloadSize > 0) {
+    if (useCompressed) {
+      std::memcpy(dst.data() + sizeof(CompressionHeader), compressed.data(),
+                  static_cast<size_t>(payloadSize));
+    } else if (srcSize > 0) {
+      std::memcpy(dst.data() + sizeof(CompressionHeader), src, srcSize);
+    }
   }
 
   auto end = std::chrono::steady_clock::now();
@@ -146,7 +175,7 @@ VGREResult MemoryCompression::compress(const void *src, size_t srcSize,
 
   std::lock_guard<std::mutex> lock(mutex_);
   stats_.totalBytesIn += srcSize;
-  stats_.totalBytesOut += compressedSize;
+  stats_.totalBytesOut += dst.size();
   stats_.compressCount++;
   stats_.avgCompressTimeMs =
       (stats_.avgCompressTimeMs * (stats_.compressCount - 1) + ms) /
@@ -156,7 +185,7 @@ VGREResult MemoryCompression::compress(const void *src, size_t srcSize,
 
   VGRE_LOG_DEBUG("MemoryCompression",
                  "Compressed " + std::to_string(srcSize) + " → " +
-                     std::to_string(compressedSize) + " bytes (" +
+                     std::to_string(dst.size()) + " bytes (" +
                      std::to_string(ms) + " ms)");
 
   return VGREResult::SUCCESS;
@@ -166,22 +195,65 @@ VGREResult MemoryCompression::compress(const void *src, size_t srcSize,
 VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
                                          void *dst, size_t dstCapacity,
                                          size_t &outActualSize) {
+  if ((!src && srcSize > 0) || !dst) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
   auto start = std::chrono::steady_clock::now();
 
-  size_t decompressedSize =
-      lz4Decompress(static_cast<const uint8_t *>(src), srcSize,
-                    static_cast<uint8_t *>(dst), dstCapacity);
+  outActualSize = 0;
 
-  if (decompressedSize == 0) {
-    // Fallback: data was stored uncompressed
-    if (srcSize <= dstCapacity) {
-      std::memcpy(dst, src, srcSize);
-      decompressedSize = srcSize;
-    } else {
-      return VGREResult::ERROR_COMPRESSION;
+  if (srcSize >= sizeof(CompressionHeader)) {
+    CompressionHeader hdr{};
+    std::memcpy(&hdr, src, sizeof(CompressionHeader));
+    if (hdr.magic == kCompressionMagic && hdr.version == kCompressionVersion) {
+      const uint8_t *payload =
+          static_cast<const uint8_t *>(src) + sizeof(CompressionHeader);
+      const size_t payloadSize = static_cast<size_t>(hdr.payloadSize);
+      const size_t originalSize = static_cast<size_t>(hdr.originalSize);
+      if (sizeof(CompressionHeader) + payloadSize > srcSize ||
+          originalSize > dstCapacity) {
+        return VGREResult::ERROR_COMPRESSION;
+      }
+
+      if ((hdr.flags & kFlagCompressed) != 0) {
+        size_t decompressedSize =
+            lz4Decompress(payload, payloadSize, static_cast<uint8_t *>(dst),
+                          dstCapacity);
+        if (decompressedSize != originalSize) {
+          return VGREResult::ERROR_COMPRESSION;
+        }
+      } else {
+        if (payloadSize != originalSize) {
+          return VGREResult::ERROR_COMPRESSION;
+        }
+        if (originalSize > 0) {
+          std::memcpy(dst, payload, originalSize);
+        }
+      }
+      outActualSize = originalSize;
+
+      auto end = std::chrono::steady_clock::now();
+      double ms = std::chrono::duration<double, std::milli>(end - start).count();
+      std::lock_guard<std::mutex> lock(mutex_);
+      stats_.decompressCount++;
+      stats_.avgDecompressTimeMs =
+          (stats_.avgDecompressTimeMs * (stats_.decompressCount - 1) + ms) /
+          stats_.decompressCount;
+      return VGREResult::SUCCESS;
     }
   }
 
+  // Legacy fallback for pre-header payloads.
+  size_t decompressedSize =
+      lz4Decompress(static_cast<const uint8_t *>(src), srcSize,
+                    static_cast<uint8_t *>(dst), dstCapacity);
+  if (decompressedSize == 0) {
+    if (srcSize > dstCapacity) {
+      return VGREResult::ERROR_COMPRESSION;
+    }
+    std::memcpy(dst, src, srcSize);
+    decompressedSize = srcSize;
+  }
   outActualSize = decompressedSize;
 
   auto end = std::chrono::steady_clock::now();
@@ -210,7 +282,10 @@ bool MemoryCompression::shouldCompress(size_t transferSize) const {
 }
 
 // ── Statistics ─────────────────────────────────────────────────────────────
-const CompressionStats &MemoryCompression::getStats() const { return stats_; }
+CompressionStats MemoryCompression::getStats() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return stats_;
+}
 
 void MemoryCompression::resetStats() {
   std::lock_guard<std::mutex> lock(mutex_);

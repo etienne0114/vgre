@@ -40,7 +40,7 @@ public:
   int getOptimalVectorWidth(const std::string &kernelName) const;
 
   // Get full profile
-  const KernelProfile *getProfile(const std::string &kernelName) const;
+  bool getProfile(const std::string &kernelName, KernelProfile &out) const;
 
   // Auto-tune: runs a kernel with varying parameters to find optimum
   VGREResult autoTune(const std::string &kernelName, const CompiledKernelFn &fn,
@@ -50,15 +50,13 @@ public:
   void clearProfiles();
 
   // Aggregates for Telemetry
-  double getTotalGFLOPS() const { return totalGflops_; }
-  double getMaxGFLOPS() const { return maxGflops_; }
+  double getTotalGFLOPS() const;
+  double getMaxGFLOPS() const;
   double getAvgLatencyMs() const;
-  int getActiveKernelCount() const { return activeKernels_; }
+  int getActiveKernelCount() const;
   float getDeviceTemperature() const;
-  double getMemoryBandwidth() const { return totalBandwidth_; }
-  double getMaxMemoryBandwidth() const {
-    return 64.0;
-  } // Typical dual-channel DDR4/5 peak
+  double getMemoryBandwidth() const;
+  double getMaxMemoryBandwidth() const;
 
   // Singleton
   static AdaptiveExecutionEngine &instance();
