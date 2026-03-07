@@ -99,30 +99,53 @@ option(VGRE_BUILD_DASHBOARD "Build the Flutter dashboard" ON)
 if(VGRE_BUILD_DASHBOARD)
     find_program(FLUTTER_EXECUTABLE flutter)
     if(FLUTTER_EXECUTABLE)
+        if(APPLE)
+            set(FLUTTER_PLATFORM macos)
+            set(FLUTTER_OUT_DIR ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/macos/Build/Products/Release)
+            set(LIB_PREFIX "lib")
+            set(LIB_SUFFIX ".dylib")
+        elseif(WIN32)
+            set(FLUTTER_PLATFORM windows)
+            set(FLUTTER_OUT_DIR ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/windows/x64/runner/Release)
+            set(LIB_PREFIX "")
+            set(LIB_SUFFIX ".dll")
+        else()
+            set(FLUTTER_PLATFORM linux)
+            set(FLUTTER_OUT_DIR ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/lib)
+            set(LIB_PREFIX "lib")
+            set(LIB_SUFFIX ".so")
+        endif()
+
         add_custom_target(vgre_dashboard ALL
-            COMMAND ${FLUTTER_EXECUTABLE} build linux --release
+            COMMAND ${FLUTTER_EXECUTABLE} build ${FLUTTER_PLATFORM} --release
+            
             # Post-build: Copy native binaries into the bundle for true portability
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/lib
-            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgre> ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/lib/libvgre.so
-            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgre_cudart> ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/lib/libvgre_cudart.so
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${FLUTTER_OUT_DIR}
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgre> ${FLUTTER_OUT_DIR}/${LIB_PREFIX}vgre${LIB_SUFFIX}
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgre_cudart> ${FLUTTER_OUT_DIR}/${LIB_PREFIX}vgre_cudart${LIB_SUFFIX}
             
-            # Desktop Integration: Create a launcher so it shows up in the app menu
-            COMMAND ${CMAKE_COMMAND} -E echo "[Desktop Entry]" > ${PROJECT_SOURCE_DIR}/vgre.desktop
-            COMMAND ${CMAKE_COMMAND} -E echo "Name=VGRE Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-            COMMAND ${CMAKE_COMMAND} -E echo "Comment=Virtual GPU Runtime Engine Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-            COMMAND ${CMAKE_COMMAND} -E echo "Exec=${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/vgre_dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-            COMMAND ${CMAKE_COMMAND} -E echo "Icon=${PROJECT_SOURCE_DIR}/vgre_dashboard/assets/icon.png" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-            COMMAND ${CMAKE_COMMAND} -E echo "Terminal=false" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-            COMMAND ${CMAKE_COMMAND} -E echo "Type=Application" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-            COMMAND ${CMAKE_COMMAND} -E echo "Categories=Development;System;" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-            
-            # Copy to user's local applications folder
-            COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/vgre.desktop $ENV{HOME}/.local/share/applications/vgre.desktop
+            # True Portability: Bundle JIT headers
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/include/vgre ${FLUTTER_OUT_DIR}/../include/vgre
             
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/vgre_dashboard
-            COMMENT "Building VGRE Flutter Dashboard & Bundling native libraries & Desktop Launcher"
+            COMMENT "Building VGRE Flutter Dashboard & Bundling native libraries"
             VERBATIM
         )
+
+        if(NOT WIN32 AND NOT APPLE)
+            # Desktop Integration: Linux only
+            add_custom_command(TARGET vgre_dashboard POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E echo "[Desktop Entry]" > ${PROJECT_SOURCE_DIR}/vgre.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Name=VGRE Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Comment=Virtual GPU Runtime Engine Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Exec=${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/vgre_dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Icon=${PROJECT_SOURCE_DIR}/vgre_dashboard/assets/icon.png" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Terminal=false" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Type=Application" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Categories=Development\\;System\\;" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+                COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/vgre.desktop $ENV{HOME}/.local/share/applications/vgre.desktop
+            )
+        endif()
         add_dependencies(vgre_dashboard vgre)
     else()
         message(WARNING "flutter executable not found. Dashboard will not be built automatically.")
