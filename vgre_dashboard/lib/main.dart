@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'dart:io';
 import 'application/telemetry_bloc.dart';
 import 'core/theme/vgre_theme.dart';
 import 'infrastructure/bridge/vgre_ffi.dart';
@@ -15,9 +16,19 @@ void main() {
   } else if (Platform.isMacOS) {
     libPath = 'libvgre.dylib';
   } else {
-    // Default Linux path for local development
-    libPath = Platform.environment['VGRE_LIB_PATH'] ?? 
-        '/home/umwami/Desktop/GPU emulator/virtual-gpu-runtime/build/libvgre.so';
+    // Portable loading: check local lib/ directory (relative to executable)
+    // then fall back to development path.
+    final String executablePath = Platform.resolvedExecutable;
+    final String localPath = '${executablePath.substring(0, executablePath.lastIndexOf('/'))}/lib/libvgre.so';
+    
+    if (File(localPath).existsSync()) {
+      libPath = localPath;
+    } else {
+      libPath = Platform.environment['VGRE_LIB_PATH'] ?? 
+          (File('../build/libvgre.so').existsSync() 
+              ? '../build/libvgre.so' 
+              : 'libvgre.so');
+    }
   }
   
   final VgreBridge bridge = VgreBridge(libPath);

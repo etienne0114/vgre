@@ -5,21 +5,25 @@ import 'package:ffi/ffi.dart';
 
 // ── VGRE C API Types ───────────────────────────────────────────────────────
 final class VgreTelemetry extends Struct {
-  @Int64()
+  @Uint64()
   external int timestamp;
+  @Uint64()
+  external int versionMajor;
+  @Uint64()
+  external int versionMinor;
 
-  @Float()
+  @Double()
   external double gflops;
-  @Float()
+  @Double()
   external double maxGflops;
-  @Float()
+  @Double()
   external double computeUtilization;
 
-  @Float()
+  @Double()
   external double memoryBandwidthGbps;
-  @Float()
+  @Double()
   external double maxMemoryBandwidthGbps;
-  @Float()
+  @Double()
   external double memoryBusUtilization;
 
   @Uint64()
@@ -33,27 +37,27 @@ final class VgreTelemetry extends Struct {
   external int residentPages;
   @Uint64()
   external int evictedPages;
-  @Float()
+  @Double()
   external double pageFaultRate;
+
+  @Int64()
+  external int activeKernels;
+  @Int64()
+  external int activeThreads;
+
+  @Double()
+  external double deviceClockMhz;
+  @Double()
+  external double avgKernelLatencyMs;
+  @Double()
+  external double deviceTemperature;
+  @Int64()
+  external int eccEnabled;
+  @Int64()
+  external int backgroundComputeActive;
 
   @Array(1024)
   external Array<Uint8> uvmMap;
-
-  @Int32()
-  external int activeKernels;
-  @Int32()
-  external int activeThreads;
-
-  @Float()
-  external double deviceClockMhz;
-  @Float()
-  external double avgKernelLatencyMs;
-  @Float()
-  external double deviceTemperature;
-  @Int32()
-  external int eccEnabled;
-  @Int32()
-  external int simulationEnabled;
 }
 
 final class VgreDeviceProperties extends Struct {
@@ -92,8 +96,8 @@ typedef Shutdown = int Function();
 typedef GetVersionFunc = Pointer<Utf8> Function();
 typedef GetVersion = Pointer<Utf8> Function();
 
-typedef SetSimulationModeFunc = Int32 Function(Int32);
-typedef SetSimulationMode = int Function(int);
+typedef SetBackgroundComputeFunc = Int32 Function(Int32);
+typedef SetBackgroundCompute = int Function(int);
 
 typedef SetServiceModeFunc = Int32 Function(Int32);
 typedef SetServiceMode = int Function(int);
@@ -122,7 +126,7 @@ class VgreBridge {
   late final GetLogs _getLogs;
   late final FreeLogs _freeLogs;
   late final GetVersion _getVersion;
-  late final SetSimulationMode _setSimulationMode;
+  late final SetBackgroundCompute _setBackgroundCompute;
   late final SetServiceMode _setServiceMode;
 
   VgreBridge(String libPath) {
@@ -137,8 +141,8 @@ class VgreBridge {
     _freeLogs = _lib.lookupFunction<FreeLogsFunc, FreeLogs>('vgre_free_logs');
     _getVersion =
         _lib.lookupFunction<GetVersionFunc, GetVersion>('vgre_get_version');
-    _setSimulationMode = _lib.lookupFunction<SetSimulationModeFunc,
-        SetSimulationMode>('vgre_set_simulation_mode');
+    _setBackgroundCompute = _lib.lookupFunction<SetBackgroundComputeFunc,
+        SetBackgroundCompute>('vgre_set_background_compute');
     _setServiceMode = _lib.lookupFunction<SetServiceModeFunc,
         SetServiceMode>('vgre_set_service_mode');
   }
@@ -146,7 +150,7 @@ class VgreBridge {
   int init() => _init();
   int shutdown() => _shutdown();
   String getVersion() => _getVersion().toDartString();
-  int setSimulationMode(bool enabled) => _setSimulationMode(enabled ? 1 : 0);
+  int setBackgroundCompute(bool enabled) => _setBackgroundCompute(enabled ? 1 : 0);
   int setServiceMode(bool isMaster) => _setServiceMode(isMaster ? 1 : 0);
 
   Map<String, dynamic> getDeviceProperties(int deviceId) {

@@ -22,9 +22,9 @@ class StopPolling extends TelemetryEvent {
   const StopPolling();
 }
 
-class ToggleSimulation extends TelemetryEvent {
+class ToggleBackgroundCompute extends TelemetryEvent {
   final bool enabled;
-  const ToggleSimulation(this.enabled);
+  const ToggleBackgroundCompute(this.enabled);
   @override
   List<Object> get props => [enabled];
 }
@@ -58,7 +58,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
   Timer? _timer;
 
   String _deviceName = "VGRE_VIRTUAL_GPU";
-  bool _simulationEnabled = false;
+  bool _backgroundComputeActive = false;
 
   TelemetryBloc(this.bridge) : super(TelemetryInitial()) {
     on<StartPolling>((event, emit) {
@@ -105,8 +105,10 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
             avgLatency: raw.avgKernelLatencyMs,
             temperature: raw.deviceTemperature,
             eccEnabled: raw.eccEnabled != 0,
-            simulationEnabled: _simulationEnabled, // Use local state
+            backgroundComputeActive: _backgroundComputeActive, // Use local state
             deviceName: _deviceName,
+            versionMajor: raw.versionMajor,
+            versionMinor: raw.versionMinor,
             logs: logs,
           );
           calloc.free(ptr);
@@ -117,9 +119,9 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       });
     });
 
-    on<ToggleSimulation>((event, emit) {
-      _simulationEnabled = event.enabled;
-      bridge.setSimulationMode(event.enabled);
+    on<ToggleBackgroundCompute>((event, emit) {
+      _backgroundComputeActive = event.enabled;
+      bridge.setBackgroundCompute(event.enabled);
     });
 
     on<StopPolling>((event, emit) {

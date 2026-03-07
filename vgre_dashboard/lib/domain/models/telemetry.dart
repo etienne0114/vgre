@@ -29,8 +29,10 @@ class Telemetry extends Equatable {
   final double avgLatency;
   final double temperature;
   final bool eccEnabled;
-  final bool simulationEnabled;
+  final bool backgroundComputeActive;
   final String deviceName;
+  final int versionMajor;
+  final int versionMinor;
   final List<String> logs;
 
   const Telemetry({
@@ -54,8 +56,10 @@ class Telemetry extends Equatable {
     required this.avgLatency,
     required this.temperature,
     required this.eccEnabled,
-    this.simulationEnabled = false,
+    this.backgroundComputeActive = false,
     this.deviceName = "VGRE_DEVICE",
+    this.versionMajor = 1,
+    this.versionMinor = 0,
     this.logs = const [],
   });
 
@@ -83,7 +87,7 @@ class Telemetry extends Equatable {
       avgLatency,
       temperature,
       eccEnabled,
-      simulationEnabled,
+      backgroundComputeActive,
       deviceName,
       logs,
     ];

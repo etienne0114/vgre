@@ -18,9 +18,9 @@ class DashboardPage extends StatelessWidget {
         decoration: const BoxDecoration(
           color: VgreTheme.background,
           image: DecorationImage(
-            image: NetworkImage(
-                "https://www.transparenttextures.com/patterns/carbon-fibre.png"),
-            opacity: 0.05,
+            image: AssetImage("assets/background.png"),
+            fit: BoxFit.cover,
+            opacity: 0.1,
           ),
         ),
         child: SafeArea(
@@ -158,8 +158,8 @@ class DashboardPage extends StatelessWidget {
           const SizedBox(width: 24),
           _headerInfoItem("ECC", data.eccEnabled ? "ENABLED" : "DISABLED"),
           const SizedBox(width: 24),
-          _headerToggle("AUTO-PILOT", data.simulationEnabled, (val) {
-            context.read<TelemetryBloc>().add(ToggleSimulation(val));
+          _headerToggle("BACKGROUND COMPUTE", data.backgroundComputeActive, (val) {
+            context.read<TelemetryBloc>().add(ToggleBackgroundCompute(val));
           }),
           const SizedBox(width: 24),
           _headerToggle("SERVICE", true, (val) {
