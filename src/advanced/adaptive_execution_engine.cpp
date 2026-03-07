@@ -7,6 +7,13 @@
 #include <cmath>
 #include <cstring>
 #include <thread>
+#include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+#include "vgre/runtime/vector_engine.h"
 
 #if defined(__linux__)
 #include <dirent.h>
@@ -19,12 +26,13 @@ AdaptiveExecutionEngine::AdaptiveExecutionEngine()
     : maxCores_(static_cast<int>(std::thread::hardware_concurrency())) {
   if (maxCores_ <= 0)
     maxCores_ = 4;
-  // Heuristic for Max GFLOPS: Cores * Clock(1.5GHz) * 8 (AVX2 lanes)
-  maxGflops_ = maxCores_ * 1.5 * 8.0;
+  
+  // No hardcoded defaults—start at zero and wait for benchmark/discovery
+  maxGflops_ = 0.0; 
+  maxMemoryBandwidth_ = 0.0;
+
   VGRE_LOG_INFO("AdaptiveExecutionEngine",
-                "Initialized with " + std::to_string(maxCores_) +
-                    " max cores | Peak=" + std::to_string(maxGflops_) +
-                    " GFLOPS");
+                "Initialized with " + std::to_string(maxCores_) + " max cores");
 }
 
 AdaptiveExecutionEngine::~AdaptiveExecutionEngine() = default;
@@ -52,7 +60,6 @@ void AdaptiveExecutionEngine::recordExecution(const std::string &kernelName,
   }
 
   // Determine if memory-bound or compute-bound
-  // Heuristic: if memory bandwidth > compute throughput, it's memory-bound
   if (executionMs > 0 && memoryAccessed > 0 && flops > 0) {
     double bandwidthGBps =
         (static_cast<double>(memoryAccessed) / (1024.0 * 1024.0 * 1024.0)) /
@@ -60,9 +67,10 @@ void AdaptiveExecutionEngine::recordExecution(const std::string &kernelName,
     double computeGflops =
         (static_cast<double>(flops) / 1e9) / (executionMs / 1000.0);
 
-    // Typical DDR4 bandwidth is ~40 GB/s; typical CPU ~100 GFLOPS
-    profile.isMemoryBound = (bandwidthGBps > 20.0);
-    profile.isComputeBound = (computeGflops > 50.0 && !profile.isMemoryBound);
+    // Adaptive bound detection using measured host peaks
+    profile.isMemoryBound = (bandwidthGBps > (maxMemoryBandwidth_ * 0.6));
+    profile.isComputeBound =
+        (computeGflops > (maxGflops_ * 0.6) && !profile.isMemoryBound);
   }
 
   analyzeProfile(profile);
@@ -118,18 +126,16 @@ void AdaptiveExecutionEngine::analyzeProfile(KernelProfile &profile) {
 // ── Get optimal parameters ─────────────────────────────────────────────────
 int AdaptiveExecutionEngine::getOptimalThreadCount(
     const std::string &kernelName) const {
-
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = profiles_.find(kernelName);
   if (it == profiles_.end() || it->second.optimalThreads == 0) {
-    return maxCores_; // default to all cores
+    return maxCores_;
   }
   return it->second.optimalThreads;
 }
 
 int AdaptiveExecutionEngine::getOptimalVectorWidth(
     const std::string &kernelName) const {
-
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = profiles_.find(kernelName);
   if (it == profiles_.end() || it->second.optimalVectorWidth == 0) {
@@ -142,6 +148,62 @@ int AdaptiveExecutionEngine::getOptimalVectorWidth(
 #endif
   }
   return it->second.optimalVectorWidth;
+}
+
+void AdaptiveExecutionEngine::updateHardwareMetrics(int cores, double clockGHz,
+                                                    double memoryBandwidth) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  maxCores_ = std::max(1, cores);
+  
+  // Only update if not already benchmarked (initial guess based on arch)
+  if (maxGflops_ == 0.0) {
+      // 16 FLOPS/cycle for AVX2 FMA (8 lanes * 2 for FMA)
+      maxGflops_ = maxCores_ * clockGHz * 16.0; 
+  }
+  if (maxMemoryBandwidth_ == 0.0) {
+      maxMemoryBandwidth_ = memoryBandwidth;
+  }
+  
+  VGRE_LOG_INFO("AdaptiveExecutionEngine",
+                "Hardware metrics sensed: Peak=" + std::to_string(maxGflops_) +
+                " GFLOPS | Bandwidth=" + std::to_string(maxMemoryBandwidth_) + " GB/s");
+}
+
+void AdaptiveExecutionEngine::runBenchmark() {
+    VGRE_LOG_INFO("AdaptiveExecutionEngine", "Performing high-precision Ground Truth calibration...");
+    
+    auto& ve = runtime::VectorEngine::instance();
+    
+    // Stage 1: Peak GFLOPS (Compute-Bound, Register-Saturated via VectorEngine)
+    // 1M elements, 1000 iterations
+    VGRE_LOG_INFO("AdaptiveExecutionEngine", "Calibrating Peak GFLOPS via specialized SIMD benchmark...");
+    double gflops = ve.benchmarkFMA(1024 * 1024, 1000);
+
+    // Stage 2: Memory Bandwidth (Memory-Bound, Large Streaming)
+    const size_t streamN = 16 * 1024 * 1024; // 64MB reads + 64MB writes
+    std::vector<float> s1(streamN, 1.0f), s2(streamN, 0.0f);
+    
+    auto start = std::chrono::steady_clock::now();
+    const int memIterations = 100;
+    for (int i = 0; i < memIterations; ++i) {
+        ve.vectorCopy(s1.data(), s2.data(), streamN);
+    }
+    auto end = std::chrono::steady_clock::now();
+    double memSec = std::chrono::duration<double>(end - start).count();
+    
+    // Copy is Read + Write = 2 * N * sizeof(float)
+    double bandwidthGBps = (static_cast<double>(streamN) * sizeof(float) * 2.0 * memIterations) / 
+                           (memSec * 1024.0 * 1024.0 * 1024.0);
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        maxGflops_ = gflops;
+        maxMemoryBandwidth_ = bandwidthGBps;
+    }
+
+    VGRE_LOG_INFO("AdaptiveExecutionEngine", 
+                  "Ground Truth Calibrated: Peak=" + std::to_string(gflops) + 
+                  " GFLOPS | Measured Bandwidth=" + std::to_string(bandwidthGBps) + " GB/s");
 }
 
 bool AdaptiveExecutionEngine::getProfile(const std::string &kernelName,
@@ -289,7 +351,8 @@ double AdaptiveExecutionEngine::getMemoryBandwidth() const {
 }
 
 double AdaptiveExecutionEngine::getMaxMemoryBandwidth() const {
-  return 64.0;
+  std::lock_guard<std::mutex> lock(mutex_);
+  return maxMemoryBandwidth_;
 }
 
 // ── Singleton ──────────────────────────────────────────────────────────────

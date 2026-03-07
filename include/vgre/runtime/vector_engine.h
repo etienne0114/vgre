@@ -1,8 +1,7 @@
 #ifndef VGRE_RUNTIME_VECTOR_ENGINE_H
 #define VGRE_RUNTIME_VECTOR_ENGINE_H
 
-#include "vgre/common/types.h"
-#include "vgre/common/error_codes.h"
+
 
 #include <cstddef>
 #include <string>
@@ -40,12 +39,17 @@ public:
     void vectorScale(const float* a, float scalar, float* out, size_t n);
     float vectorDot(const float* a, const float* b, size_t n);
     float vectorSum(const float* a, size_t n);
+    void  vectorDiv(const float* a, const float* b, float* c, size_t n);
+    void  vectorSqrt(const float* a, float* c, size_t n);
+    double benchmarkFMA(size_t n, int iterations);
 
     // ── Vectorized double operations ───────────────────────────────────────
     void vectorAdd(const double* a, const double* b, double* c, size_t n);
     void vectorMul(const double* a, const double* b, double* c, size_t n);
-    void vectorScale(const double* a, double scalar, double* out, size_t n);
+    void   vectorScale(const double* a, double scalar, double* out, size_t n);
     double vectorDot(const double* a, const double* b, size_t n);
+    void   vectorDiv(const double* a, const double* b, double* c, size_t n);
+    void   vectorSqrt(const double* a, double* c, size_t n);
 
     // ── Memory operations ──────────────────────────────────────────────────
     void vectorFill(float* dst, float value, size_t n);

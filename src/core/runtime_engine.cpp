@@ -11,8 +11,15 @@
 #include "vgre/runtime/cpu_parallel_executor.h"
 #include "vgre/runtime/vector_engine.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
+#include <set>
+#include <thread>
+#include <thread>
 
 namespace vgre {
 namespace core {
@@ -42,16 +49,73 @@ VGREResult RuntimeEngine::initialize() {
   vectorEngine_ = std::make_unique<runtime::VectorEngine>();
   graphManager_ = std::make_unique<GraphManager>();
 
-  // Create multiple virtual devices (e.g., 4 for complex topology testing)
-  for (int i = 0; i < 4; ++i) {
+  // Create virtual devices based on hardware resources or Environment Override.
+  // We aim for 1 virtual device per NUMA node to model real-world memory topology.
+  int deviceCount = 1;
+  const char *envCount = std::getenv("VGRE_DEVICE_COUNT");
+  if (envCount) {
+    deviceCount = std::atoi(envCount);
+  } else {
+#if defined(__linux__)
+    // Count NUMA nodes via sysfs
+    std::set<int> numaNodes;
+    for (int i = 0; i < 1024; ++i) { // Check reasonable range of CPUs
+      std::string path = "/sys/devices/system/cpu/cpu" + std::to_string(i) + "/node";
+      std::ifstream nodeFile(path);
+      int node;
+      if (nodeFile >> node) {
+        numaNodes.insert(node);
+      } else {
+        break; // Assume contiguous CPU numbering
+      }
+    }
+    if (!numaNodes.empty()) {
+      deviceCount = static_cast<int>(numaNodes.size());
+    } else {
+      int cores = static_cast<int>(std::thread::hardware_concurrency());
+      deviceCount = std::max(1, cores / 8);
+    }
+#elif defined(_WIN32)
+    ULONG numaNodeCount = 0;
+    if (GetNumaHighestNodeNumber(&numaNodeCount)) {
+      deviceCount = static_cast<int>(numaNodeCount) + 1;
+    } else {
+      int cores = static_cast<int>(std::thread::hardware_concurrency());
+      deviceCount = std::max(1, cores / 8);
+    }
+#elif defined(__APPLE__)
+    // macOS Unified Memory means a single 'device' is often most efficient,
+    // but we can model performance/efficiency core partitions.
+    uint32_t packages = 1;
+    size_t len = sizeof(packages);
+    if (sysctlbyname("hw.packages", &packages, &len, NULL, 0) != 0) {
+        packages = 1;
+    }
+    deviceCount = static_cast<int>(packages);
+#else
+    int cores = static_cast<int>(std::thread::hardware_concurrency());
+    deviceCount = std::max(1, cores / 8);
+#endif
+    // Safety cap for stability
+    deviceCount = std::min(deviceCount, 16);
+  }
+
+  VGRE_LOG_INFO("RuntimeEngine",
+                "Creating " + std::to_string(deviceCount) +
+                    " hardware-aligned virtual devices...");
+  
+  for (int i = 0; i < deviceCount; ++i) {
     auto dev = std::make_unique<VirtualGPUDevice>(i);
     dev->detectHardware();
 
-    // Customize topology: 2 pairs of devices, each pair on a different PCI bus
-    auto props = dev->getProperties();
-    props.pciBusId = (i < 2) ? 0 : 1;
-    dev->setProperties(props);
-
+    // Link Adaptive Execution Engine to real hardware metrics
+    if (i == 0) {
+      vgre::DeviceProperties dp = dev->getProperties();
+      int cores = static_cast<int>(std::thread::hardware_concurrency());
+      auto& aee = advanced::AdaptiveExecutionEngine::instance();
+      aee.updateHardwareMetrics(cores, dp.clockRate / 1000.0, 0.0);
+      aee.runBenchmark(); // Perform real micro-benchmark to override initial guess
+    }
     dev->createContext();
     devices_.push_back(std::move(dev));
   }
@@ -360,24 +424,60 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       kName = irIt->second.name;
   }
 
-  auto fut = scheduler_->submitStreamTask(stream, [exec, fn, gridDim, blockDim,
-                                                   safeArgs, argValues, kName,
+  auto fut = scheduler_->submitStreamTask(stream, [this, exec, fn, gridDim, blockDim,
+                                                   safeArgs, argValues, id,
                                                    sharedMem]() mutable {
     auto start = std::chrono::steady_clock::now();
     exec->execute(fn, gridDim, blockDim, safeArgs->data(), sharedMem);
     auto end = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(end - start).count();
 
-    // Workload estimation for GFLOPS/Bandwidth tracking
+    // Real-world performance estimation based on IR and execution time
     size_t flops = 0;
     size_t memBytes = 0;
-    if (kName == "background_compute") {
-      flops = 50ULL * 2 * gridDim.total() * blockDim.total();
-      memBytes = gridDim.total() * blockDim.total() * 3 * sizeof(float);
+    std::string kName = "unknown";
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      auto irIt = kernelIRCache_.find(id);
+      if (irIt != kernelIRCache_.end()) {
+        kName = irIt->second.name;
+
+        // More accurate metric modeling
+        size_t totalThreads = gridDim.total() * blockDim.total();
+
+        // 1. Calculate realistic memory bandwidth usage based on argument types
+        memBytes = 0;
+        for (auto type : irIt->second.argTypes) {
+          switch (type) {
+          case ArgType::POINTER:
+          case ArgType::INT64:
+          case ArgType::UINT64:
+          case ArgType::FLOAT64:
+            memBytes += 8;
+            break;
+          default:
+            memBytes += 4;
+            break;
+          }
+        }
+        memBytes *= totalThreads;
+
+        // 2. Realistic FLOPs based on IR content (if available) or instruction density
+        // For a "real" system, we look at actual IR instruction count if possible.
+        // Currently, we use a proxy based on arg count (complexity) and thread count.
+        size_t instructionsPerThread = 50 + (irIt->second.argTypes.size() * 10);
+        flops = totalThreads * instructionsPerThread;
+      }
     }
 
     vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
         kName, blockDim.total(), 8, ms, memBytes, flops);
+
+    VGRE_LOG_DEBUG("RuntimeEngine", "Kernel completed: " + kName +
+                                        " | Time: " + std::to_string(ms) +
+                                        "ms | Est. GFLOPS: " +
+                                        std::to_string(flops / (ms * 1e6)));
   });
 
   if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
