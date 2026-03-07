@@ -38,6 +38,13 @@ include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 llvm_map_components_to_libnames(llvm_libs Core ExecutionEngine OrcJIT Support Target native)
 
+option(VGRE_USE_OPENCL_BACKEND "Enable OpenCL Integrated GPU Backend" ON)
+if(VGRE_USE_OPENCL_BACKEND)
+    find_package(OpenCL REQUIRED)
+    message(STATUS "Found OpenCL ${OpenCL_VERSION_STRING}")
+    add_compile_definitions(VGRE_HAS_OPENCL_BACKEND)
+endif()
+
 # ── Global include directory ────────────────────────────────────────────────
 include_directories(${PROJECT_SOURCE_DIR}/include)
 
@@ -61,6 +68,9 @@ target_link_libraries(vgre PUBLIC
     Threads::Threads
     ${llvm_libs}
 )
+if(VGRE_USE_OPENCL_BACKEND)
+    target_link_libraries(vgre PUBLIC OpenCL::OpenCL)
+endif()
 set_target_properties(vgre PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION 0

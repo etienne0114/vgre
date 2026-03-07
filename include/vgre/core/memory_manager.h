@@ -66,6 +66,7 @@ public:
   size_t getFreeMemory() const;
   bool isValidHandle(MemoryHandle handle) const;
   size_t getAllocationSize(MemoryHandle handle) const;
+  size_t getAllocationSizeFromPointer(void *ptr) const;
 
   // UVM Residency for Dashboard
   void getPageResidency(uint8_t outMap[1024]) const;

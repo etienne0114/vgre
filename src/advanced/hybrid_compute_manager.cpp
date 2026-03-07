@@ -1,8 +1,13 @@
 #include "vgre/advanced/hybrid_compute_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
+#include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
+
+#ifdef VGRE_HAS_OPENCL_BACKEND
+#include "vgre/runtime/igpu_opencl_executor.h"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -95,6 +100,15 @@ void HybridComputeManager::detectCPU() {
 
 // ── Detect integrated GPU ──────────────────────────────────────────────────
 void HybridComputeManager::detectIntegratedGPU() {
+#ifdef VGRE_HAS_OPENCL_BACKEND
+  auto &igpu = vgre::runtime::IGPUOpenCLExecutor::instance();
+  if (igpu.initialize() == VGREResult::SUCCESS && igpu.isAvailable()) {
+    resources_.hasIntegratedGPU = true;
+    resources_.igpuName = igpu.getDeviceName();
+  } else {
+    resources_.hasIntegratedGPU = false;
+  }
+#else
 #if defined(_WIN32)
   // On Windows, iGPU detection would require DXGI/WMI enumeration.
   // Until that integration lands, this backend is reported unavailable.
@@ -117,6 +131,7 @@ void HybridComputeManager::detectIntegratedGPU() {
       }
     }
   }
+#endif
 #endif
 }
 
@@ -212,8 +227,8 @@ VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
 
-  if (getaddrinfo(address.c_str(), std::to_string(targetPort).c_str(),
-                  &hints, &res) != 0) {
+  if (getaddrinfo(address.c_str(), std::to_string(targetPort).c_str(), &hints,
+                  &res) != 0) {
     WSACleanup();
     return VGREResult::ERROR_INVALID_VALUE;
   }
@@ -259,8 +274,8 @@ VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
 
-  if (getaddrinfo(address.c_str(), std::to_string(targetPort).c_str(),
-                  &hints, &res) != 0) {
+  if (getaddrinfo(address.c_str(), std::to_string(targetPort).c_str(), &hints,
+                  &res) != 0) {
     return VGREResult::ERROR_INVALID_VALUE;
   }
 
@@ -412,11 +427,34 @@ VGREResult HybridComputeManager::distributeRegisteredKernel(
   switch (backend) {
   case ComputeBackend::CPU:
   case ComputeBackend::AUTO:
-    return core::RuntimeEngine::instance().launchKernel(kernelId, gridDim,
-                                                        blockDim, args,
-                                                        sharedMem, 0);
-  case ComputeBackend::INTEGRATED_GPU:
+    return core::RuntimeEngine::instance().launchKernel(
+        kernelId, gridDim, blockDim, args, sharedMem, 0);
+  case ComputeBackend::INTEGRATED_GPU: {
+#ifdef VGRE_HAS_OPENCL_BACKEND
+    auto &engine = core::RuntimeEngine::instance();
+    const auto *ir = engine.getKernelIR(kernelId);
+    if (!ir)
+      return VGREResult::ERROR_INVALID_KERNEL;
+
+    std::vector<size_t> argSizes;
+    for (int i = 0; i < numArgs; ++i) {
+      if (ir->argTypes[i] == ArgType::POINTER) {
+        void *p = *reinterpret_cast<void **>(args[i]);
+        argSizes.push_back(engine.getMemoryManager().getAllocationSize(p));
+      } else {
+        argSizes.push_back(
+            0); // Primitives deduce size automatically inside OpenCLExecutor
+      }
+    }
+
+    return runtime::IGPUOpenCLExecutor::instance().execute(
+        ir->name, ir->source, ir->argTypes, gridDim, blockDim, args, argSizes);
+#else
+    VGRE_LOG_ERROR("HybridComputeManager",
+                   "VGRE was not compiled with OpenCL iGPU support.");
     return VGREResult::ERROR_NOT_SUPPORTED;
+#endif
+  }
   case ComputeBackend::REMOTE_NODE: {
     auto &cluster = TCPClusterManager::instance();
     if (!cluster.isEnabled() || !cluster.isMaster()) {

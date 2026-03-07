@@ -236,6 +236,15 @@ VGREResult RuntimeEngine::getKernelArgTypes(KernelId id,
   return VGREResult::SUCCESS;
 }
 
+const KernelIR *RuntimeEngine::getKernelIR(KernelId id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = kernelIRCache_.find(id);
+  if (it != kernelIRCache_.end()) {
+    return &it->second;
+  }
+  return nullptr;
+}
+
 VGREResult RuntimeEngine::unloadModule(ModuleHandle module) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!initialized_)
@@ -351,26 +360,25 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       kName = irIt->second.name;
   }
 
-  auto fut = scheduler_->submitStreamTask(
-      stream, [exec, fn, gridDim, blockDim, safeArgs, argValues, kName,
-               sharedMem]() mutable {
-        auto start = std::chrono::steady_clock::now();
-        exec->execute(fn, gridDim, blockDim, safeArgs->data(), sharedMem);
-        auto end = std::chrono::steady_clock::now();
-        double ms =
-            std::chrono::duration<double, std::milli>(end - start).count();
+  auto fut = scheduler_->submitStreamTask(stream, [exec, fn, gridDim, blockDim,
+                                                   safeArgs, argValues, kName,
+                                                   sharedMem]() mutable {
+    auto start = std::chrono::steady_clock::now();
+    exec->execute(fn, gridDim, blockDim, safeArgs->data(), sharedMem);
+    auto end = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(end - start).count();
 
-        // Workload estimation for GFLOPS/Bandwidth tracking
-        size_t flops = 0;
-        size_t memBytes = 0;
-        if (kName == "background_compute") {
-          flops = 50ULL * 2 * gridDim.total() * blockDim.total();
-          memBytes = gridDim.total() * blockDim.total() * 3 * sizeof(float);
-        }
+    // Workload estimation for GFLOPS/Bandwidth tracking
+    size_t flops = 0;
+    size_t memBytes = 0;
+    if (kName == "background_compute") {
+      flops = 50ULL * 2 * gridDim.total() * blockDim.total();
+      memBytes = gridDim.total() * blockDim.total() * 3 * sizeof(float);
+    }
 
-        vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
-            kName, blockDim.total(), 8, ms, memBytes, flops);
-      });
+    vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
+        kName, blockDim.total(), 8, ms, memBytes, flops);
+  });
 
   if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
     auto submitResult = fut.get();

@@ -50,6 +50,7 @@ public:
                                  KernelId &outId);
 
   VGREResult getKernelArgTypes(KernelId id, std::vector<ArgType> &outTypes);
+  const KernelIR *getKernelIR(KernelId id) const;
 
   VGREResult unloadModule(ModuleHandle module);
 

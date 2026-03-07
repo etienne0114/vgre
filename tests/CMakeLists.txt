@@ -50,3 +50,7 @@ add_test(NAME TCPClusterIntegration COMMAND test_tcp_cluster)
 add_executable(test_p2p_performance integration/test_p2p_performance.cpp)
 target_link_libraries(test_p2p_performance PRIVATE vgre)
 add_test(NAME P2PPerformanceIntegration COMMAND test_p2p_performance)
+
+add_executable(test_igpu_backend integration/test_igpu_backend.cpp)
+target_link_libraries(test_igpu_backend PRIVATE vgre)
+add_test(NAME IGPUBackendIntegration COMMAND test_igpu_backend)
