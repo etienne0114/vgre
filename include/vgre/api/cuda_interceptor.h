@@ -164,7 +164,6 @@ private:
   cudaError_t convertResult(VGREResult r);
 
   bool initialized_ = false;
-  cudaError_t lastError_ = cudaSuccess;
 };
 
 } // namespace api

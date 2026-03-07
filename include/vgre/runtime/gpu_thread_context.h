@@ -50,6 +50,15 @@ public:
   const void *raw() const { return buffer_; }
   size_t size() const { return size_; }
 
+  void ensureCapacity(size_t sizeBytes) {
+    if (sizeBytes > size_) {
+      delete[] buffer_;
+      buffer_ = new uint8_t[sizeBytes];
+      size_ = sizeBytes;
+    }
+    reset();
+  }
+
   void reset() {
     if (buffer_ && size_ > 0)
       std::memset(buffer_, 0, size_);

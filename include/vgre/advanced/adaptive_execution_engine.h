@@ -4,7 +4,6 @@
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
 
-#include <chrono>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -42,9 +41,15 @@ public:
   // Get full profile
   bool getProfile(const std::string &kernelName, KernelProfile &out) const;
 
-  // Auto-tune: runs a kernel with varying parameters to find optimum
   VGREResult autoTune(const std::string &kernelName, const CompiledKernelFn &fn,
                       const dim3 &gridDim, const dim3 &blockDim, void **args);
+
+  // Update peak metrics from hardware detection
+  void updateHardwareMetrics(int cores, double clockGHz,
+                              double memoryBandwidth);
+
+  // Run a startup benchmark to measure real Peak GFLOPS and Bandwidth
+  void runBenchmark();
 
   // Clear all profiles
   void clearProfiles();
@@ -72,6 +77,7 @@ private:
   double totalGflops_ = 0.0;
   double maxGflops_ = 0.0;
   double totalBandwidth_ = 0.0;
+  double maxMemoryBandwidth_ = 64.0;
   double totalLatencyMs_ = 0.0;
   int totalExecutions_ = 0;
   int activeKernels_ = 0;

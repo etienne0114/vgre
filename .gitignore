@@ -1,5 +1,5 @@
 # Native build artifacts
-/build/
+/build*/
 /cmake-build-*/
 /out/
 *.o
@@ -7,6 +7,8 @@
 *.dylib
 *.dll
 *.exe
+test_cudart
+vgre_test_*
 
 # IDEs and Editors
 .vscode/
@@ -41,4 +43,5 @@ launch.sh
 
 compile_commands.json
 build_local/
+build_jit/
 

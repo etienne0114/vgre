@@ -48,18 +48,12 @@ public:
   size_t getCacheSize() const;
 
 private:
-  // Generate the CPU-parallel version of a kernel
-  CompiledKernelFn generateParallelKernel(const KernelIR &ir);
+  // Generate a C++ wrapper that provides the CUDA execution environment
+  std::string generateWrapperSource(const KernelIR &ir);
 
-  // Pattern matchers for common kernel types
-  CompiledKernelFn matchVectorOp(const KernelIR &ir);
-  CompiledKernelFn matchReduction(const KernelIR &ir);
-  CompiledKernelFn matchMatrixOp(const KernelIR &ir);
-  CompiledKernelFn matchDeepLearningOp(const KernelIR &ir);
-  CompiledKernelFn matchGenericKernel(const KernelIR &ir);
-
-  // Generate LLVM IR text from kernel IR
-  std::string generateLLVMIR(const KernelIR &ir);
+  // Compile the generated C++ into LLVM IR using a clang++ subprocess
+  VGREResult compileToLLVMIR(const std::string &cppSource,
+                             const std::string &kernelName, std::string &outIR);
 
   // Actual JIT compilation using LLVM ORC
   CompiledKernelFn compileJIT(const std::string &irCode,

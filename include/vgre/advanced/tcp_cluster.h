@@ -22,7 +22,9 @@ namespace advanced {
 enum class PacketType : uint32_t {
   TELEMETRY = 1,
   LAUNCH_KERNEL = 2,
-  RESPONSE = 3
+  RESPONSE = 3,
+  DATA_HEADER = 4, // size and target pointer
+  DATA_BODY = 5    // raw bytes
 };
 
 struct RemoteCommandPacket {
@@ -32,10 +34,15 @@ struct RemoteCommandPacket {
   uint32_t grid_dim[3];
   uint32_t block_dim[3];
   size_t shared_mem;
-  // Numeric argument marshalling (pointer args are rejected by sender).
   uint8_t arg_types[8];
   uint64_t args[8];
   int num_args;
+};
+
+struct DataHeaderPacket {
+  PacketType type;
+  uint64_t target_ptr;
+  uint64_t size;
 };
 
 class TCPClusterManager {
