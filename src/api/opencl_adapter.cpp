@@ -3,6 +3,8 @@
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 
 namespace vgre {
@@ -27,23 +29,28 @@ cl_int OpenCLAdapter::getDeviceIDs(cl_platform_id platform, cl_uint numEntries,
                                    cl_device_id *devices, cl_uint *numDevices) {
   if (platform != 1)
     return CL_INVALID_PLATFORM;
+
+  auto initResult = core::RuntimeEngine::instance().initialize();
+  if (initResult != VGREResult::SUCCESS)
+    return CL_OUT_OF_HOST_MEMORY;
+
+  // Query actual device count from the RuntimeEngine
+  int deviceCount = core::RuntimeEngine::instance().getDeviceCount();
+
   if (numDevices)
-    *numDevices = 1;
-  if (devices && numEntries > 0) {
-    devices[0] = 1; // VGRE virtual device
+    *numDevices = static_cast<cl_uint>(deviceCount);
+  if (devices) {
+    cl_uint count = std::min(numEntries, static_cast<cl_uint>(deviceCount));
+    for (cl_uint i = 0; i < count; ++i) {
+      devices[i] = i + 1; // VGRE virtual device IDs (1-based)
+    }
   }
   return CL_SUCCESS;
 }
 
 // ── Context ────────────────────────────────────────────────────────────────
 cl_context OpenCLAdapter::createContext(cl_device_id device, cl_int *errcode) {
-  if (device != 1) {
-    if (errcode)
-      *errcode = CL_INVALID_DEVICE;
-    return 0;
-  }
-
-  // Ensure VGRE engine is initialized
+  // Ensure VGRE engine is initialized before validating device ordinal.
   auto r = core::RuntimeEngine::instance().initialize();
   if (r != VGREResult::SUCCESS) {
     if (errcode)
@@ -51,9 +58,16 @@ cl_context OpenCLAdapter::createContext(cl_device_id device, cl_int *errcode) {
     return 0;
   }
 
+  int deviceCount = core::RuntimeEngine::instance().getDeviceCount();
+  if (device < 1 || device > static_cast<cl_device_id>(deviceCount)) {
+    if (errcode)
+      *errcode = CL_INVALID_DEVICE;
+    return 0;
+  }
+
   std::lock_guard<std::mutex> lock(mutex_);
   cl_context ctx = nextId_++;
-  contexts_[ctx] = true;
+  contexts_[ctx] = device;
 
   if (errcode)
     *errcode = CL_SUCCESS;
@@ -65,6 +79,13 @@ cl_int OpenCLAdapter::releaseContext(cl_context context) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (contexts_.erase(context) == 0)
     return CL_INVALID_CONTEXT;
+  for (auto it = queues_.begin(); it != queues_.end();) {
+    if (it->second == context) {
+      it = queues_.erase(it);
+    } else {
+      ++it;
+    }
+  }
   VGRE_LOG_DEBUG("OpenCLAdapter",
                  "Context released: " + std::to_string(context));
   return CL_SUCCESS;
@@ -74,11 +95,16 @@ cl_int OpenCLAdapter::releaseContext(cl_context context) {
 cl_command_queue OpenCLAdapter::createCommandQueue(cl_context ctx,
                                                    cl_device_id device,
                                                    cl_int *errcode) {
-  (void)device;
   std::lock_guard<std::mutex> lock(mutex_);
-  if (contexts_.find(ctx) == contexts_.end()) {
+  auto ctxIt = contexts_.find(ctx);
+  if (ctxIt == contexts_.end()) {
     if (errcode)
       *errcode = CL_INVALID_CONTEXT;
+    return 0;
+  }
+  if (device != 0 && device != ctxIt->second) {
+    if (errcode)
+      *errcode = CL_INVALID_DEVICE;
     return 0;
   }
 
@@ -100,6 +126,11 @@ cl_int OpenCLAdapter::releaseCommandQueue(cl_command_queue queue) {
 cl_mem OpenCLAdapter::createBuffer(cl_context ctx, cl_int flags, size_t size,
                                    void *hostPtr, cl_int *errcode) {
   (void)flags;
+  if (size == 0) {
+    if (errcode)
+      *errcode = CL_INVALID_VALUE;
+    return nullptr;
+  }
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (contexts_.find(ctx) == contexts_.end()) {
@@ -107,6 +138,11 @@ cl_mem OpenCLAdapter::createBuffer(cl_context ctx, cl_int flags, size_t size,
         *errcode = CL_INVALID_CONTEXT;
       return nullptr;
     }
+  }
+  if (!core::RuntimeEngine::instance().isInitialized()) {
+    if (errcode)
+      *errcode = CL_INVALID_CONTEXT;
+    return nullptr;
   }
 
   MemoryHandle handle;
@@ -132,6 +168,8 @@ cl_mem OpenCLAdapter::createBuffer(cl_context ctx, cl_int flags, size_t size,
 cl_int OpenCLAdapter::releaseMemObject(cl_mem memObj) {
   if (!memObj)
     return CL_INVALID_MEM_OBJECT;
+  if (!core::RuntimeEngine::instance().isInitialized())
+    return CL_INVALID_MEM_OBJECT;
   auto r = core::RuntimeEngine::instance().getMemoryManager().free(memObj);
   return (r == VGREResult::SUCCESS) ? CL_SUCCESS : CL_INVALID_MEM_OBJECT;
 }
@@ -146,10 +184,20 @@ cl_int OpenCLAdapter::enqueueWriteBuffer(cl_command_queue queue, cl_mem buffer,
   }
   if (!buffer || !ptr)
     return CL_INVALID_VALUE;
+  if (!core::RuntimeEngine::instance().isInitialized())
+    return CL_INVALID_CONTEXT;
 
-  auto r = core::RuntimeEngine::instance().getMemoryManager().copyHostToDevice(
-      static_cast<char *>(buffer) + offset, ptr, size);
-  return (r == VGREResult::SUCCESS) ? CL_SUCCESS : CL_INVALID_VALUE;
+  auto &mm = core::RuntimeEngine::instance().getMemoryManager();
+  if (!mm.isValidHandle(buffer))
+    return CL_INVALID_MEM_OBJECT;
+  size_t allocSize = mm.getAllocationSize(buffer);
+  if (offset > allocSize || size > (allocSize - offset))
+    return CL_INVALID_VALUE;
+  void *base = mm.getPointer(buffer);
+  if (!base)
+    return CL_INVALID_MEM_OBJECT;
+  std::memcpy(static_cast<char *>(base) + offset, ptr, size);
+  return CL_SUCCESS;
 }
 
 cl_int OpenCLAdapter::enqueueReadBuffer(cl_command_queue queue, cl_mem buffer,
@@ -161,10 +209,20 @@ cl_int OpenCLAdapter::enqueueReadBuffer(cl_command_queue queue, cl_mem buffer,
   }
   if (!buffer || !ptr)
     return CL_INVALID_VALUE;
+  if (!core::RuntimeEngine::instance().isInitialized())
+    return CL_INVALID_CONTEXT;
 
-  auto r = core::RuntimeEngine::instance().getMemoryManager().copyDeviceToHost(
-      ptr, static_cast<char *>(buffer) + offset, size);
-  return (r == VGREResult::SUCCESS) ? CL_SUCCESS : CL_INVALID_VALUE;
+  auto &mm = core::RuntimeEngine::instance().getMemoryManager();
+  if (!mm.isValidHandle(buffer))
+    return CL_INVALID_MEM_OBJECT;
+  size_t allocSize = mm.getAllocationSize(buffer);
+  if (offset > allocSize || size > (allocSize - offset))
+    return CL_INVALID_VALUE;
+  void *base = mm.getPointer(buffer);
+  if (!base)
+    return CL_INVALID_MEM_OBJECT;
+  std::memcpy(ptr, static_cast<char *>(base) + offset, size);
+  return CL_SUCCESS;
 }
 
 // ── Program ────────────────────────────────────────────────────────────────
@@ -208,6 +266,13 @@ cl_int OpenCLAdapter::releaseProgram(cl_program program) {
   auto it = programs_.find(program);
   if (it == programs_.end())
     return CL_INVALID_PROGRAM;
+  for (auto kit = kernels_.begin(); kit != kernels_.end();) {
+    if (kit->second.program == program) {
+      kit = kernels_.erase(kit);
+    } else {
+      ++kit;
+    }
+  }
   programs_.erase(it);
   return CL_SUCCESS;
 }
@@ -252,28 +317,43 @@ cl_int OpenCLAdapter::setKernelArg(cl_kernel_handle kernel, cl_uint argIndex,
   auto it = kernels_.find(kernel);
   if (it == kernels_.end())
     return CL_INVALID_VALUE;
+  if (argSize > 0 && !argValue)
+    return CL_INVALID_VALUE;
+  if (argSize > sizeof(uint64_t))
+    return CL_INVALID_VALUE;
 
   // Grow args vector if needed
   if (argIndex >= it->second.args.size()) {
     it->second.args.resize(argIndex + 1);
   }
 
-  KernelArg arg;
+  OwnedKernelArg arg;
+  // Deep-copy the argument data into an owned buffer to prevent
+  // dangling pointer access when the kernel is launched later.
+  if (argValue && argSize > 0) {
+    arg.ownedData.resize(argSize);
+    std::memcpy(arg.ownedData.data(), argValue, argSize);
+  }
+
   if (argSize == sizeof(cl_mem)) {
     arg.type = ArgType::POINTER;
-    arg.data = argValue ? *static_cast<void *const *>(argValue) : nullptr;
   } else if (argSize == sizeof(int)) {
     arg.type = ArgType::INT32;
-    arg.data = const_cast<void *>(argValue);
+  } else if (argSize == sizeof(uint32_t)) {
+    arg.type = ArgType::UINT32;
   } else if (argSize == sizeof(float)) {
     arg.type = ArgType::FLOAT32;
-    arg.data = const_cast<void *>(argValue);
+  } else if (argSize == sizeof(double)) {
+    arg.type = ArgType::FLOAT64;
+  } else if (argSize == sizeof(uint64_t)) {
+    arg.type = ArgType::UINT64;
+  } else if (argSize == sizeof(int64_t)) {
+    arg.type = ArgType::INT64;
   } else {
-    arg.type = ArgType::POINTER;
-    arg.data = const_cast<void *>(argValue);
+    arg.type = ArgType::UINT64;
   }
   arg.size = argSize;
-  it->second.args[argIndex] = arg;
+  it->second.args[argIndex] = std::move(arg);
 
   return CL_SUCCESS;
 }
@@ -283,18 +363,40 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
                                            cl_uint workDim,
                                            const size_t *globalWorkSize,
                                            const size_t *localWorkSize) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (queues_.find(queue) == queues_.end())
-    return CL_INVALID_COMMAND_QUEUE;
+  KernelInfo kernelInfo;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queues_.find(queue) == queues_.end())
+      return CL_INVALID_COMMAND_QUEUE;
 
-  auto it = kernels_.find(kernel);
-  if (it == kernels_.end())
+    auto it = kernels_.find(kernel);
+    if (it == kernels_.end())
+      return CL_INVALID_VALUE;
+    kernelInfo = it->second;
+  }
+  if (!core::RuntimeEngine::instance().isInitialized())
+    return CL_INVALID_CONTEXT;
+  if (!globalWorkSize)
     return CL_INVALID_VALUE;
+  if (kernelInfo.args.empty())
+    return CL_INVALID_VALUE;
+  if ((workDim >= 1 && globalWorkSize[0] == 0) ||
+      (workDim >= 2 && globalWorkSize[1] == 0) ||
+      (workDim >= 3 && globalWorkSize[2] == 0)) {
+    return CL_INVALID_VALUE;
+  }
 
   dim3 gridDim, blockDim;
+  if (workDim == 0 || workDim > 3)
+    return CL_INVALID_VALUE;
 
   // Map NDRange to CUDA grid/block
   if (localWorkSize) {
+    if ((workDim >= 1 && localWorkSize[0] == 0) ||
+        (workDim >= 2 && localWorkSize[1] == 0) ||
+        (workDim >= 3 && localWorkSize[2] == 0)) {
+      return CL_INVALID_VALUE;
+    }
     blockDim.x = (workDim >= 1) ? static_cast<uint32_t>(localWorkSize[0]) : 1;
     blockDim.y = (workDim >= 2) ? static_cast<uint32_t>(localWorkSize[1]) : 1;
     blockDim.z = (workDim >= 3) ? static_cast<uint32_t>(localWorkSize[2]) : 1;
@@ -317,14 +419,52 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
                     : 1;
   }
 
-  // Build args array
+  // Build args array from deep-copied owned buffers
+  std::vector<ArgType> expectedTypes;
+  if (core::RuntimeEngine::instance().getKernelArgTypes(kernelInfo.vgreKernelId,
+                                                         expectedTypes) !=
+      VGREResult::SUCCESS) {
+    return CL_INVALID_VALUE;
+  }
+  if (kernelInfo.args.size() != expectedTypes.size()) {
+    return CL_INVALID_VALUE;
+  }
+
   std::vector<void *> argPtrs;
-  for (auto &arg : it->second.args) {
-    argPtrs.push_back(arg.data);
+  auto &mm = core::RuntimeEngine::instance().getMemoryManager();
+  for (size_t i = 0; i < kernelInfo.args.size(); ++i) {
+    auto &arg = kernelInfo.args[i];
+    if (arg.ownedData.empty())
+      return CL_INVALID_VALUE;
+    if (arg.type != expectedTypes[i])
+      return CL_INVALID_VALUE;
+
+    if (arg.type == ArgType::POINTER &&
+        arg.ownedData.size() >= sizeof(void *)) {
+      void *memObj = *reinterpret_cast<void **>(arg.ownedData.data());
+      if (!mm.isValidHandle(memObj))
+        return CL_INVALID_MEM_OBJECT;
+      // For pointer args, the ownedData contains a cl_mem (void*) value.
+      // We need to dereference it: the kernel expects a void** pointing to the
+      // cl_mem.
+      argPtrs.push_back(arg.ownedData.data());
+    } else {
+      if ((arg.type == ArgType::INT32 || arg.type == ArgType::UINT32 ||
+           arg.type == ArgType::FLOAT32) &&
+          arg.ownedData.size() < sizeof(uint32_t)) {
+        return CL_INVALID_VALUE;
+      }
+      if ((arg.type == ArgType::INT64 || arg.type == ArgType::UINT64 ||
+           arg.type == ArgType::FLOAT64) &&
+          arg.ownedData.size() < sizeof(uint64_t)) {
+        return CL_INVALID_VALUE;
+      }
+      argPtrs.push_back(arg.ownedData.data());
+    }
   }
 
   auto r = core::RuntimeEngine::instance().launchKernel(
-      it->second.vgreKernelId, gridDim, blockDim, argPtrs.data());
+      kernelInfo.vgreKernelId, gridDim, blockDim, argPtrs.data());
 
   return (r == VGREResult::SUCCESS) ? CL_SUCCESS : CL_INVALID_VALUE;
 }

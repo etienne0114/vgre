@@ -18,7 +18,9 @@
 #include "vgre/core/virtual_gpu_device.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 
 // ── Helper: convert VGREResult to C status code ────────────────────────────
 static int to_status(vgre::VGREResult r) {
@@ -35,20 +37,25 @@ static int to_status(vgre::VGREResult r) {
     return VGRE_ERROR_LAUNCH_FAILURE;
   case vgre::VGREResult::ERROR_IO:
     return VGRE_ERROR_IO;
+  case vgre::VGREResult::ERROR_NOT_INITIALIZED:
+    return VGRE_ERROR_NOT_INIT;
   default:
     return VGRE_ERROR_GENERIC;
   }
+}
+
+static int require_initialized() {
+  if (!vgre::core::RuntimeEngine::instance().isInitialized()) {
+    return VGRE_ERROR_NOT_INIT;
+  }
+  return VGRE_SUCCESS;
 }
 
 // ── Initialization ─────────────────────────────────────────────────────────
 
 int vgre_init(void) {
   auto result = vgre::core::RuntimeEngine::instance().initialize();
-  if (result == vgre::VGREResult::SUCCESS) {
-    // Try to attach to global session as client by default
-    vgre::advanced::IPCManager::instance().initialize(false);
-  }
-  return static_cast<int>(result);
+  return to_status(result);
 }
 
 int vgre_shutdown(void) {
@@ -61,11 +68,15 @@ int vgre_shutdown(void) {
 int vgre_get_device_count(int *count) {
   if (!count)
     return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
   *count = vgre::core::RuntimeEngine::instance().getDeviceCount();
   return VGRE_SUCCESS;
 }
 
 int vgre_set_device(int device_id) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
   auto r = vgre::core::RuntimeEngine::instance().setDevice(device_id);
   return to_status(r);
 }
@@ -73,6 +84,8 @@ int vgre_set_device(int device_id) {
 int vgre_get_device(int *device_id) {
   if (!device_id)
     return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
   *device_id = vgre::core::RuntimeEngine::instance().getDeviceId();
   return VGRE_SUCCESS;
 }
@@ -80,6 +93,8 @@ int vgre_get_device(int *device_id) {
 int vgre_get_device_properties(int device_id, vgre_device_properties_t *props) {
   if (!props)
     return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
 
   vgre::DeviceProperties dp;
   auto r =
@@ -106,6 +121,8 @@ int vgre_get_device_properties(int device_id, vgre_device_properties_t *props) {
 }
 
 int vgre_synchronize(void) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
   auto r = vgre::core::RuntimeEngine::instance().synchronize();
   return to_status(r);
 }
@@ -115,6 +132,8 @@ int vgre_synchronize(void) {
 int vgre_malloc(void **ptr, size_t size) {
   if (!ptr || size == 0)
     return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
 
   vgre::MemoryHandle handle;
   auto r = vgre::core::RuntimeEngine::instance().malloc(size, handle);
@@ -128,6 +147,8 @@ int vgre_malloc(void **ptr, size_t size) {
 int vgre_malloc_managed(void **ptr, size_t size) {
   if (!ptr || size == 0)
     return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
 
   vgre::MemoryHandle handle;
   auto r = vgre::core::RuntimeEngine::instance().mallocManaged(size, handle);
@@ -141,6 +162,8 @@ int vgre_malloc_managed(void **ptr, size_t size) {
 int vgre_free(void *ptr) {
   if (!ptr)
     return VGRE_SUCCESS; // freeing NULL is valid
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
   auto r = vgre::core::RuntimeEngine::instance().getMemoryManager().free(ptr);
   return to_status(r);
 }
@@ -148,6 +171,8 @@ int vgre_free(void *ptr) {
 int vgre_memcpy(void *dst, const void *src, size_t count, int direction) {
   if (!dst || !src || count == 0)
     return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
 
   auto &mm = vgre::core::RuntimeEngine::instance().getMemoryManager();
   vgre::VGREResult r;
@@ -172,23 +197,43 @@ int vgre_memcpy(void *dst, const void *src, size_t count, int direction) {
 int vgre_memset(void *ptr, int value, size_t count) {
   if (!ptr || count == 0)
     return VGRE_ERROR_INVALID_VALUE;
-  std::memset(ptr, value, count);
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+
+  auto &mm = vgre::core::RuntimeEngine::instance().getMemoryManager();
+  if (!mm.isValidHandle(ptr))
+    return VGRE_ERROR_INVALID_VALUE;
+  size_t allocSize = mm.getAllocationSize(ptr);
+  if (count > allocSize)
+    return VGRE_ERROR_INVALID_VALUE;
+  void *raw = mm.getPointer(ptr);
+  if (!raw)
+    return VGRE_ERROR_INVALID_VALUE;
+  std::memset(raw, value, count);
   return VGRE_SUCCESS;
 }
 
 int vgre_device_can_access_peer(int *can_access, int device, int peer_device) {
+  if (!can_access)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
   auto r = vgre::core::RuntimeEngine::instance().deviceCanAccessPeer(
       device, peer_device, can_access);
   return to_status(r);
 }
 
 int vgre_device_enable_peer_access(int peer_device) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
   auto r =
       vgre::core::RuntimeEngine::instance().deviceEnablePeerAccess(peer_device);
   return to_status(r);
 }
 
 int vgre_device_disable_peer_access(int peer_device) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
   auto r = vgre::core::RuntimeEngine::instance().deviceDisablePeerAccess(
       peer_device);
   return to_status(r);
@@ -200,6 +245,8 @@ int vgre_register_kernel(const char *name, const char *source,
                          uint64_t *out_kernel_id) {
   if (!name || !source || !out_kernel_id)
     return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
 
   vgre::KernelId kid;
   auto r = vgre::core::RuntimeEngine::instance().registerKernel(
@@ -214,7 +261,20 @@ int vgre_register_kernel(const char *name, const char *source,
 int vgre_launch_kernel(uint64_t kernel_id, const uint32_t grid_dim[3],
                        const uint32_t block_dim[3], void **args, int num_args,
                        size_t shared_mem, uint64_t stream_id) {
-  (void)num_args; // args count is for callers' bookkeeping
+  if (!grid_dim || !block_dim)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  if (num_args < 0)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (num_args > 0 && !args)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (grid_dim[0] == 0 || block_dim[0] == 0)
+    return VGRE_ERROR_INVALID_VALUE;
+  if ((grid_dim[1] == 0 && grid_dim[2] != 0) ||
+      (block_dim[1] == 0 && block_dim[2] != 0)) {
+    return VGRE_ERROR_INVALID_VALUE;
+  }
 
   vgre::dim3 gd(grid_dim[0], grid_dim[1], grid_dim[2]);
   vgre::dim3 bd(block_dim[0], block_dim[1], block_dim[2]);
@@ -230,6 +290,8 @@ int vgre_launch_kernel(uint64_t kernel_id, const uint32_t grid_dim[3],
 int vgre_stream_create(uint64_t *out_stream_id) {
   if (!out_stream_id)
     return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
 
   vgre::StreamId id;
   auto r = vgre::core::RuntimeEngine::instance().getDevice().createStream(id);
@@ -243,6 +305,8 @@ int vgre_stream_create(uint64_t *out_stream_id) {
 int vgre_stream_create_with_priority(uint64_t *out_stream_id, int priority) {
   if (!out_stream_id)
     return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
 
   vgre::StreamId id;
   auto r = vgre::core::RuntimeEngine::instance().getDevice().createStream(
@@ -255,12 +319,16 @@ int vgre_stream_create_with_priority(uint64_t *out_stream_id, int priority) {
 }
 
 int vgre_stream_synchronize(uint64_t stream_id) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
   auto r = vgre::core::RuntimeEngine::instance().streamSynchronize(
       static_cast<vgre::StreamId>(stream_id));
   return to_status(r);
 }
 
 int vgre_stream_destroy(uint64_t stream_id) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
   auto r = vgre::core::RuntimeEngine::instance().getDevice().destroyStream(
       static_cast<vgre::StreamId>(stream_id));
   return to_status(r);
@@ -272,6 +340,9 @@ int vgre_stream_destroy(uint64_t stream_id) {
 int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
   if (!telemetry)
     return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  std::memset(telemetry, 0, sizeof(*telemetry));
 
   auto &ae = vgre::advanced::AdaptiveExecutionEngine::instance();
   auto &mm = vgre::core::RuntimeEngine::instance().getMemoryManager();
@@ -290,6 +361,10 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
       (telemetry->max_gflops > 0.0)
           ? (telemetry->gflops / telemetry->max_gflops) * 100.0
           : 0.0;
+  if (telemetry->compute_utilization < 0.0)
+    telemetry->compute_utilization = 0.0;
+  if (telemetry->compute_utilization > 100.0)
+    telemetry->compute_utilization = 100.0;
 
   // Memory
   telemetry->memory_bandwidth_gbps = ae.getMemoryBandwidth();
@@ -300,6 +375,10 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
              telemetry->max_memory_bandwidth_gbps) *
                 100.0
           : 0.0;
+  if (telemetry->memory_bus_utilization < 0.0)
+    telemetry->memory_bus_utilization = 0.0;
+  if (telemetry->memory_bus_utilization > 100.0)
+    telemetry->memory_bus_utilization = 100.0;
 
   telemetry->memory_used_bytes = mm.getUsedMemory();
   telemetry->memory_total_bytes = mm.getTotalMemory();
@@ -309,8 +388,16 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
   mm.getPageResidency(telemetry->uvm_map);
 
   // Normalize resident pages for the 1024-cell UI grid
-  int residentCells = mm.getResidentPageCount(); // 0-1024
-  telemetry->resident_pages = (telemetry->total_pages * residentCells) / 1024;
+  int residentCells = mm.getResidentPageCount();
+  if (residentCells < 0)
+    residentCells = 0;
+  if (residentCells > 1024)
+    residentCells = 1024;
+  telemetry->resident_pages =
+      (telemetry->total_pages * static_cast<uint64_t>(residentCells)) / 1024;
+  if (telemetry->resident_pages > telemetry->total_pages) {
+    telemetry->resident_pages = telemetry->total_pages;
+  }
   telemetry->evicted_pages = telemetry->total_pages - telemetry->resident_pages;
   telemetry->page_faults_per_sec = static_cast<double>(mm.getPageFaultRate());
 
@@ -349,6 +436,9 @@ int vgre_get_logs(char ***buffer, int *count) {
     return VGRE_ERROR_INVALID_VALUE;
 
   auto logs = vgre::Logger::instance().getRecentLogs();
+  if (logs.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    return VGRE_ERROR_OUT_OF_MEMORY;
+  }
   *count = static_cast<int>(logs.size());
 
   if (*count == 0) {
@@ -357,8 +447,27 @@ int vgre_get_logs(char ***buffer, int *count) {
   }
 
   char **lines = (char **)malloc(sizeof(char *) * (*count));
+  if (!lines) {
+    *buffer = nullptr;
+    *count = 0;
+    return VGRE_ERROR_OUT_OF_MEMORY;
+  }
   for (int i = 0; i < *count; ++i) {
-    lines[i] = strdup(logs[i].c_str());
+    const auto &line = logs[static_cast<size_t>(i)];
+    size_t len = line.size();
+    lines[i] = static_cast<char *>(malloc(len + 1));
+    if (lines[i]) {
+      std::memcpy(lines[i], line.c_str(), len + 1);
+    }
+    if (!lines[i]) {
+      for (int j = 0; j < i; ++j) {
+        free(lines[j]);
+      }
+      free(lines);
+      *buffer = nullptr;
+      *count = 0;
+      return VGRE_ERROR_OUT_OF_MEMORY;
+    }
   }
 
   *buffer = lines;
@@ -375,12 +484,18 @@ void vgre_free_logs(char **buffer, int count) {
 }
 
 int vgre_set_background_compute(int enabled) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
   vgre::advanced::WorkloadEngine::instance().setEnabled(enabled != 0);
   return VGRE_SUCCESS;
 }
 
 int vgre_set_service_mode(int is_master) {
-  vgre::advanced::IPCManager::instance().initialize(is_master != 0);
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  if (!vgre::advanced::IPCManager::instance().initialize(is_master != 0)) {
+    return VGRE_ERROR_IO;
+  }
   return VGRE_SUCCESS;
 }
 

@@ -6,7 +6,9 @@
 #include "vgre/core/texture_manager.h"
 #include "vgre/core/virtual_gpu_device.h"
 
+#include <chrono>
 #include <cstring>
+#include <stdexcept>
 
 namespace vgre {
 namespace api {
@@ -16,7 +18,7 @@ CUDAInterceptor::~CUDAInterceptor() = default;
 
 // ── Init ───────────────────────────────────────────────────────────────────
 cudaError_t CUDAInterceptor::init() {
-  if (initialized_)
+  if (initialized_ && core::RuntimeEngine::instance().isInitialized())
     return cudaSuccess;
 
   auto r = core::RuntimeEngine::instance().initialize();
@@ -32,6 +34,11 @@ cudaError_t CUDAInterceptor::init() {
 
 // ── Device Management ──────────────────────────────────────────────────────
 cudaError_t CUDAInterceptor::getDeviceCount(int *count) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   if (!count)
     return cudaErrorInvalidValue;
   *count = core::RuntimeEngine::instance().getDeviceCount();
@@ -39,12 +46,22 @@ cudaError_t CUDAInterceptor::getDeviceCount(int *count) {
 }
 
 cudaError_t CUDAInterceptor::setDevice(int device) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   auto r = core::RuntimeEngine::instance().setDevice(device);
   lastError_ = convertResult(r);
   return lastError_;
 }
 
 cudaError_t CUDAInterceptor::getDevice(int *device) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   if (!device)
     return cudaErrorInvalidValue;
   *device = core::RuntimeEngine::instance().getDeviceId();
@@ -53,6 +70,11 @@ cudaError_t CUDAInterceptor::getDevice(int *device) {
 
 cudaError_t CUDAInterceptor::getDeviceProperties(cudaDeviceProp_t *prop,
                                                  int device) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   if (!prop)
     return cudaErrorInvalidValue;
 
@@ -80,7 +102,7 @@ cudaError_t CUDAInterceptor::getDeviceProperties(cudaDeviceProp_t *prop,
 }
 
 cudaError_t CUDAInterceptor::deviceSynchronize() {
-  if (!initialized_) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
     if (err != cudaSuccess)
       return err;
@@ -92,7 +114,7 @@ cudaError_t CUDAInterceptor::deviceSynchronize() {
 
 // ── Memory Management ──────────────────────────────────────────────────────
 cudaError_t CUDAInterceptor::malloc(void **devPtr, size_t size) {
-  if (!initialized_) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
     if (err != cudaSuccess)
       return err;
@@ -114,7 +136,7 @@ cudaError_t CUDAInterceptor::malloc(void **devPtr, size_t size) {
 
 cudaError_t CUDAInterceptor::mallocManaged(void **devPtr, size_t size,
                                            unsigned int flags) {
-  if (!initialized_) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
     if (err != cudaSuccess)
       return err;
@@ -134,8 +156,11 @@ cudaError_t CUDAInterceptor::mallocManaged(void **devPtr, size_t size,
 }
 
 cudaError_t CUDAInterceptor::free(void *devPtr) {
-  if (!initialized_)
-    return cudaErrorInvalidValue;
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   if (!devPtr)
     return cudaSuccess; // cudaFree(NULL) is valid
 
@@ -146,7 +171,7 @@ cudaError_t CUDAInterceptor::free(void *devPtr) {
 
 cudaError_t CUDAInterceptor::memcpy(void *dst, const void *src, size_t count,
                                     cudaMemcpyKind_t kind) {
-  if (!initialized_) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
     if (err != cudaSuccess)
       return err;
@@ -185,7 +210,7 @@ cudaError_t CUDAInterceptor::memcpy(void *dst, const void *src, size_t count,
 cudaError_t CUDAInterceptor::memcpyAsync(void *dst, const void *src,
                                          size_t count, cudaMemcpyKind_t kind,
                                          cudaStream_t stream) {
-  if (!initialized_) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
     if (err != cudaSuccess)
       return err;
@@ -195,35 +220,76 @@ cudaError_t CUDAInterceptor::memcpyAsync(void *dst, const void *src,
 
   // We capture the parameters and perform the synchronous copy on the stream's
   // worker thread
-  core::Scheduler::instance().submitStreamTask(
-      stream, [=]() { this->memcpy(dst, src, count, kind); });
+  auto fut = core::Scheduler::instance().submitStreamTask(stream, [=]() {
+    auto err = this->memcpy(dst, src, count, kind);
+    if (err != cudaSuccess) {
+      throw std::runtime_error("async memcpy failed");
+    }
+  });
+  if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    auto r = fut.get();
+    lastError_ = convertResult(r);
+    return lastError_;
+  }
 
   return cudaSuccess;
 }
 
 cudaError_t CUDAInterceptor::memset(void *devPtr, int value, size_t count) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   if (!devPtr || count == 0)
     return cudaErrorInvalidValue;
-  std::memset(devPtr, value, count);
+
+  auto &mm = core::RuntimeEngine::instance().getMemoryManager();
+  if (!mm.isValidHandle(devPtr))
+    return cudaErrorInvalidValue;
+
+  size_t allocSize = mm.getAllocationSize(devPtr);
+  if (count > allocSize)
+    return cudaErrorInvalidValue;
+
+  void *raw = mm.getPointer(devPtr);
+  if (!raw)
+    return cudaErrorInvalidValue;
+
+  std::memset(raw, value, count);
   return cudaSuccess;
 }
 
 cudaError_t CUDAInterceptor::memsetAsync(void *devPtr, int value, size_t count,
                                          cudaStream_t stream) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   if (!devPtr || count == 0)
     return cudaErrorInvalidValue;
 
   // We capture the parameters and perform the synchronous set on the stream's
   // worker thread
-  core::Scheduler::instance().submitStreamTask(
-      stream, [=]() { this->memset(devPtr, value, count); });
+  auto fut = core::Scheduler::instance().submitStreamTask(stream, [=]() {
+    auto err = this->memset(devPtr, value, count);
+    if (err != cudaSuccess) {
+      throw std::runtime_error("async memset failed");
+    }
+  });
+  if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    auto r = fut.get();
+    lastError_ = convertResult(r);
+    return lastError_;
+  }
 
   return cudaSuccess;
 }
 
 // ── Stream Management ──────────────────────────────────────────────────────
 cudaError_t CUDAInterceptor::streamCreate(cudaStream_t *stream) {
-  if (!initialized_) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
     if (err != cudaSuccess)
       return err;
@@ -242,23 +308,36 @@ cudaError_t CUDAInterceptor::streamCreate(cudaStream_t *stream) {
 }
 
 cudaError_t CUDAInterceptor::streamDestroy(cudaStream_t stream) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   auto r = core::RuntimeEngine::instance().getDevice().destroyStream(stream);
   lastError_ = convertResult(r);
   return lastError_;
 }
 
 cudaError_t CUDAInterceptor::streamSynchronize(cudaStream_t stream) {
-  if (!initialized_)
-    return cudaErrorInvalidValue;
-  // High-level business logic: We explicitly wait on the core Scheduler's
-  // independent stream queue.
-  core::Scheduler::instance().waitStream(stream);
-  return cudaSuccess;
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
+  if (stream == 0) {
+    auto r = core::RuntimeEngine::instance().streamSynchronize(stream);
+    lastError_ = convertResult(r);
+    return lastError_;
+  }
+
+  auto r = core::RuntimeEngine::instance().getDevice().synchronizeStream(stream);
+  lastError_ = convertResult(r);
+  return lastError_;
 }
 
 // ── Event Management ───────────────────────────────────────────────────
 cudaError_t CUDAInterceptor::eventCreate(cudaEvent_t *event) {
-  if (!initialized_) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
     if (err != cudaSuccess)
       return err;
@@ -278,7 +357,12 @@ cudaError_t CUDAInterceptor::eventCreateWithFlags(cudaEvent_t *event,
 
 cudaError_t CUDAInterceptor::eventRecord(cudaEvent_t event,
                                          cudaStream_t stream) {
-  if (!initialized_ || !event)
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
+  if (!event)
     return cudaErrorInvalidValue;
 
   VGREResult r = event->record(stream);
@@ -286,7 +370,12 @@ cudaError_t CUDAInterceptor::eventRecord(cudaEvent_t event,
 }
 
 cudaError_t CUDAInterceptor::eventSynchronize(cudaEvent_t event) {
-  if (!initialized_ || !event)
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
+  if (!event)
     return cudaErrorInvalidValue;
 
   VGREResult r = event->synchronize();
@@ -295,7 +384,12 @@ cudaError_t CUDAInterceptor::eventSynchronize(cudaEvent_t event) {
 
 cudaError_t CUDAInterceptor::eventElapsedTime(float *ms, cudaEvent_t start,
                                               cudaEvent_t end) {
-  if (!initialized_ || !ms || !start || !end)
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
+  if (!ms || !start || !end)
     return cudaErrorInvalidValue;
 
   VGREResult r = end->elapsedTime(*start, *ms);
@@ -303,8 +397,11 @@ cudaError_t CUDAInterceptor::eventElapsedTime(float *ms, cudaEvent_t start,
 }
 
 cudaError_t CUDAInterceptor::eventDestroy(cudaEvent_t event) {
-  if (!initialized_)
-    return cudaErrorInvalidValue;
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   if (!event)
     return cudaSuccess;
 
@@ -318,7 +415,7 @@ cudaError_t CUDAInterceptor::launchKernel(const std::string &name,
                                           dim3 gridDim, dim3 blockDim,
                                           void **args, size_t sharedMem,
                                           cudaStream_t stream) {
-  if (!initialized_) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
     if (err != cudaSuccess)
       return err;
@@ -332,7 +429,7 @@ cudaError_t CUDAInterceptor::launchKernel(const std::string &name,
 
 // ── Module Management (Driver API style) ───────────────────────────────────
 cudaError_t CUDAInterceptor::moduleLoad(CUmodule *module, const char *fname) {
-  if (!initialized_) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
     if (err != cudaSuccess)
       return err;
@@ -347,8 +444,11 @@ cudaError_t CUDAInterceptor::moduleLoad(CUmodule *module, const char *fname) {
 
 cudaError_t CUDAInterceptor::moduleGetFunction(CUfunction *hfunc, CUmodule hmod,
                                                const char *name) {
-  if (!initialized_)
-    return cudaErrorInvalidValue;
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   if (!hfunc || !hmod || !name)
     return cudaErrorInvalidValue;
 
@@ -359,6 +459,11 @@ cudaError_t CUDAInterceptor::moduleGetFunction(CUfunction *hfunc, CUmodule hmod,
 }
 
 cudaError_t CUDAInterceptor::moduleUnload(CUmodule hmod) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   auto r = core::RuntimeEngine::instance().unloadModule(hmod);
   lastError_ = convertResult(r);
   return lastError_;
@@ -366,6 +471,11 @@ cudaError_t CUDAInterceptor::moduleUnload(CUmodule hmod) {
 
 // ── CUDA Graphs API ────────────────────────────────────────────────────────
 cudaError_t CUDAInterceptor::streamBeginCapture(cudaStream_t stream) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   auto r = core::RuntimeEngine::instance().streamBeginCapture(stream);
   lastError_ = convertResult(r);
   return lastError_;
@@ -373,6 +483,11 @@ cudaError_t CUDAInterceptor::streamBeginCapture(cudaStream_t stream) {
 
 cudaError_t CUDAInterceptor::streamEndCapture(cudaStream_t stream,
                                               cudaGraph_t *graph) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   if (!graph)
     return cudaErrorInvalidValue;
   auto r = core::RuntimeEngine::instance().streamEndCapture(stream, *graph);
@@ -382,6 +497,11 @@ cudaError_t CUDAInterceptor::streamEndCapture(cudaStream_t stream,
 
 cudaError_t CUDAInterceptor::graphInstantiate(cudaGraphExec_t *exec,
                                               cudaGraph_t graph) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   if (!exec)
     return cudaErrorInvalidValue;
   auto r = core::RuntimeEngine::instance().graphInstantiate(graph, *exec);
@@ -391,18 +511,33 @@ cudaError_t CUDAInterceptor::graphInstantiate(cudaGraphExec_t *exec,
 
 cudaError_t CUDAInterceptor::graphLaunch(cudaGraphExec_t exec,
                                          cudaStream_t stream) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   auto r = core::RuntimeEngine::instance().graphLaunch(exec, stream);
   lastError_ = convertResult(r);
   return lastError_;
 }
 
 cudaError_t CUDAInterceptor::graphDestroy(cudaGraph_t graph) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   auto r = core::RuntimeEngine::instance().graphDestroy(graph);
   lastError_ = convertResult(r);
   return lastError_;
 }
 
 cudaError_t CUDAInterceptor::graphExecDestroy(cudaGraphExec_t exec) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
   auto r = core::RuntimeEngine::instance().graphExecDestroy(exec);
   lastError_ = convertResult(r);
   return lastError_;
@@ -438,6 +573,8 @@ cudaError_t CUDAInterceptor::getLastError() {
   return e;
 }
 
+cudaError_t CUDAInterceptor::peekLastError() const { return lastError_; }
+
 // ── Result conversion ──────────────────────────────────────────────────────
 cudaError_t CUDAInterceptor::convertResult(VGREResult r) {
   switch (r) {
@@ -451,6 +588,8 @@ cudaError_t CUDAInterceptor::convertResult(VGREResult r) {
     return cudaErrorInvalidDevice;
   case VGREResult::ERROR_INVALID_KERNEL:
     return cudaErrorInvalidDeviceFunction;
+  case VGREResult::ERROR_NOT_INITIALIZED:
+    return cudaErrorInvalidValue;
   case VGREResult::ERROR_LAUNCH_FAILURE:
     return cudaErrorLaunchFailure;
   case VGREResult::ERROR_IO:
@@ -470,7 +609,7 @@ CUDAInterceptor &CUDAInterceptor::instance() {
 cudaError_t CUDAInterceptor::createTextureObject(
     cudaTextureObject_t *pTexObject, const cudaResourceDesc *pResDesc,
     const cudaTextureDesc *pTexDesc, const void *pResViewDesc) {
-  if (!initialized_) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
     if (err != cudaSuccess)
       return err;
@@ -519,8 +658,11 @@ cudaError_t CUDAInterceptor::createTextureObject(
 
 cudaError_t
 CUDAInterceptor::destroyTextureObject(cudaTextureObject_t texObject) {
-  if (!initialized_)
-    return cudaErrorInvalidValue;
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
 
   auto r = core::TextureManager::instance().destroyTexture(texObject);
   lastError_ = convertResult(r);

@@ -12,6 +12,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // To avoid name conflicts, we define exactly the symbols frameworks need.
 extern "C" {
@@ -37,25 +38,16 @@ public:
   }
 
   void **registerFatBinary(void *fatCubin) {
+    if (!fatCubin) {
+      return nullptr;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     auto handle = new ModuleHandleWrapper{nextModuleId_++, fatCubin};
 
-    // Attempt to extract PTX source code from the fatBinary payload
+    // Do not scan arbitrary memory from fatCubin.
+    // Raw payload layouts are toolchain-dependent and unsafe to probe without
+    // trusted bounds metadata.
     std::string extractedSource;
-    if (fatCubin) {
-      // Very basic structural scan: look for the ".version" directive which
-      // starts all PTX text. In a real NV fatBinary, the PTX text is embedded
-      // as a null-terminated string inside an ELF/fatbin structure.
-      const char *payload = static_cast<const char *>(fatCubin);
-      // Scan up to 1MB looking for ".version"
-      for (size_t i = 0; i < 1024 * 1024; ++i) {
-        if (std::memcmp(payload + i, ".version", 8) == 0) {
-          // Found start of PTX, copy until null terminator
-          extractedSource = std::string(payload + i);
-          break;
-        }
-      }
-    }
 
     modules_[handle] = {};
     moduleSources_[handle] = extractedSource; // Store extracted PTX
@@ -63,23 +55,43 @@ public:
   }
 
   void unregisterFatBinary(void **handlePtr) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!handlePtr)
-      return;
-    auto *handle = reinterpret_cast<ModuleHandleWrapper *>(handlePtr);
-    if (modules_.find(handle) != modules_.end()) {
-      for (const auto &funcPtr : modules_[handle]) {
-        hostToName_.erase(funcPtr);
-        hostToSource_.erase(funcPtr);
+    std::vector<void *> varsToFree;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!handlePtr)
+        return;
+      auto *handle = reinterpret_cast<ModuleHandleWrapper *>(handlePtr);
+      if (modules_.find(handle) != modules_.end()) {
+        for (const auto &funcPtr : modules_[handle]) {
+          hostToName_.erase(funcPtr);
+          hostToSource_.erase(funcPtr);
+        }
+        auto mvIt = moduleVariables_.find(handle);
+        if (mvIt != moduleVariables_.end()) {
+          for (const auto &hostVar : mvIt->second) {
+            auto vit = hostVarToDevicePtr_.find(hostVar);
+            if (vit != hostVarToDevicePtr_.end()) {
+              varsToFree.push_back(vit->second);
+              hostVarToDevicePtr_.erase(vit);
+            }
+          }
+          moduleVariables_.erase(mvIt);
+        }
+        modules_.erase(handle);
+        moduleSources_.erase(handle);
+        delete handle;
       }
-      modules_.erase(handle);
-      moduleSources_.erase(handle);
-      delete handle;
+    }
+    for (void *ptr : varsToFree) {
+      vgre::api::CUDAInterceptor::instance().free(ptr);
     }
   }
 
   void registerFunction(void **handlePtr, const void *hostFun,
                         const char *deviceName) {
+    if (!hostFun) {
+      return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     std::string name =
         deviceName ? deviceName
@@ -101,7 +113,7 @@ public:
     auto it = hostToName_.find(hostFun);
     if (it != hostToName_.end())
       return it->second;
-    return "vgre_dynamic_kernel_" + std::to_string(nextFunctionId_++);
+    return "";
   }
 
   std::string lookupKernelSource(const void *hostFun) {
@@ -109,16 +121,44 @@ public:
     auto it = hostToSource_.find(hostFun);
     if (it != hostToSource_.end() && !it->second.empty())
       return it->second;
-    // Fallback stub if no source extracted
-    return "/* VGRE Native Execution Stub */";
+    return "";
   }
 
-  void registerVariable(const void *hostVar, size_t size) {
+  void registerVariable(void **handlePtr, const void *hostVar, size_t size) {
+    if (!hostVar || size == 0) {
+      return;
+    }
+
+    ModuleHandleWrapper *owner = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (handlePtr) {
+        owner = reinterpret_cast<ModuleHandleWrapper *>(handlePtr);
+        if (modules_.find(owner) == modules_.end()) {
+          owner = nullptr;
+        }
+      }
+      if (owner) {
+        moduleVariables_[owner].push_back(hostVar);
+      }
+      if (hostVarToDevicePtr_.find(hostVar) != hostVarToDevicePtr_.end()) {
+        return;
+      }
+    }
+
+    // Allocate outside registry lock to avoid lock inversion with runtime
+    // allocation paths.
+    void *devPtr = nullptr;
+    auto err = vgre::api::CUDAInterceptor::instance().malloc(&devPtr, size);
+    if (err != cudaSuccess || !devPtr) {
+      return;
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
-    if (hostVarToDevicePtr_.find(hostVar) == hostVarToDevicePtr_.end()) {
-      void *devPtr = nullptr;
-      vgre::api::CUDAInterceptor::instance().malloc(&devPtr, size);
-      hostVarToDevicePtr_[hostVar] = devPtr;
+    auto [it, inserted] = hostVarToDevicePtr_.emplace(hostVar, devPtr);
+    if (!inserted) {
+      vgre::api::CUDAInterceptor::instance().free(devPtr);
+      (void)it;
     }
   }
 
@@ -141,6 +181,8 @@ private:
   uint64_t nextFunctionId_ = 1;
 
   std::unordered_map<ModuleHandleWrapper *, std::vector<const void *>> modules_;
+  std::unordered_map<ModuleHandleWrapper *, std::vector<const void *>>
+      moduleVariables_;
   std::unordered_map<ModuleHandleWrapper *, std::string> moduleSources_;
   std::unordered_map<const void *, std::string> hostToName_;
   std::unordered_map<const void *, std::string> hostToSource_;
@@ -154,7 +196,8 @@ cudaError_t cudaGetLastError(void) {
 }
 
 cudaError_t cudaPeekAtLastError(void) {
-  return vgre::api::CUDAInterceptor::instance().getLastError();
+  // Peek returns the last error WITHOUT clearing it (unlike cudaGetLastError)
+  return vgre::api::CUDAInterceptor::instance().peekLastError();
 }
 
 const char *cudaGetErrorString(cudaError_t error) {
@@ -309,11 +352,15 @@ void __cudaRegisterVar(void **fatCubinHandle, char *hostVar,
   // global variable so that ML frameworks can transparently copy data into/out
   // of `.cu` constant boundaries.
   if (size > 0 && hostVar) {
-    CUDAModuleRegistry::instance().registerVariable(hostVar, size);
+    CUDAModuleRegistry::instance().registerVariable(fatCubinHandle, hostVar,
+                                                    size);
   }
 }
 
 cudaError_t cudaGetSymbolAddress(void **devPtr, const void *symbol) {
+  if (!devPtr || !symbol) {
+    return cudaErrorInvalidValue;
+  }
   *devPtr = CUDAModuleRegistry::instance().lookupVariable(symbol);
   if (!*devPtr)
     return cudaErrorInvalidValue;
@@ -323,16 +370,21 @@ cudaError_t cudaGetSymbolAddress(void **devPtr, const void *symbol) {
 cudaError_t cudaLaunchKernel(const void *hostFun, dim3 gridDim, dim3 blockDim,
                              void **args, size_t sharedMem,
                              cudaStream_t stream) {
+  if (!hostFun || gridDim.x == 0 || blockDim.x == 0) {
+    return cudaErrorInvalidValue;
+  }
   std::string kernelName =
       CUDAModuleRegistry::instance().lookupKernelName(hostFun);
   std::string kernelSource =
       CUDAModuleRegistry::instance().lookupKernelSource(hostFun);
+  if (kernelName.empty() || kernelSource.empty()) {
+    return cudaErrorInvalidDeviceFunction;
+  }
 
   vgre::dim3 vgreGrid(gridDim.x, gridDim.y, gridDim.z);
   vgre::dim3 vgreBlock(blockDim.x, blockDim.y, blockDim.z);
 
-  // Launch via VGRE interceptor using the real extracted source code
-  // or the fallback stub if missing.
+  // Launch via VGRE interceptor using extracted source code.
   return vgre::api::CUDAInterceptor::instance().launchKernel(
       kernelName, kernelSource, vgreGrid, vgreBlock, args, sharedMem, stream);
 }

@@ -111,7 +111,8 @@ public:
 
   // ── Error Handling ─────────────────────────────────────────────────────
   const char *getErrorString(cudaError_t error);
-  cudaError_t getLastError();
+  cudaError_t getLastError();        // Returns and clears last error
+  cudaError_t peekLastError() const; // Returns last error without clearing
 
   // ── Texture/Surface Memory API ──────────────────────────────────────────
   using cudaTextureObject_t = uint64_t;

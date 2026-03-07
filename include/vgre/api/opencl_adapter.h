@@ -96,16 +96,22 @@ private:
     bool built = false;
   };
 
+  struct OwnedKernelArg {
+    ArgType type = ArgType::POINTER;
+    std::vector<uint8_t> ownedData; // Deep-copied arg value
+    size_t size = 0;
+  };
+
   struct KernelInfo {
     std::string name;
     cl_program program = 0;
-    std::vector<KernelArg> args;
+    std::vector<OwnedKernelArg> args;
     KernelId vgreKernelId = 0;
   };
 
   std::unordered_map<cl_program, ProgramInfo> programs_;
   std::unordered_map<cl_kernel_handle, KernelInfo> kernels_;
-  std::unordered_map<cl_context, bool> contexts_;
+  std::unordered_map<cl_context, cl_device_id> contexts_;
   std::unordered_map<cl_command_queue, cl_context> queues_;
   uint64_t nextId_ = 100;
   mutable std::mutex mutex_;
