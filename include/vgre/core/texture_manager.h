@@ -1,0 +1,105 @@
+#ifndef VGRE_CORE_TEXTURE_MANAGER_H
+#define VGRE_CORE_TEXTURE_MANAGER_H
+
+#include "vgre/common/error_codes.h"
+#include "vgre/common/types.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace vgre {
+namespace core {
+
+// ── Texture addressing and filter modes ────────────────────────────────────
+enum class TextureAddressMode : uint8_t { CLAMP, WRAP, MIRROR, BORDER };
+
+enum class TextureFilterMode : uint8_t { POINT, LINEAR };
+
+// ── Texture descriptor ─────────────────────────────────────────────────────
+struct TextureDescriptor {
+  TextureAddressMode addressMode = TextureAddressMode::CLAMP;
+  TextureFilterMode filterMode = TextureFilterMode::POINT;
+  bool normalizedCoords = false;
+  float borderColor = 0.0f;
+};
+
+// ── Texture object ─────────────────────────────────────────────────────────
+using TextureId = uint64_t;
+
+struct TextureObject {
+  TextureId id = 0;
+  const void *data = nullptr; // Pointer to underlying memory
+  size_t width = 0;           // Width in elements
+  size_t height = 0;          // Height in elements (1 for 1D textures)
+  size_t elementSize = 0;     // Size per element in bytes
+  TextureDescriptor desc;
+};
+
+// ── Surface object ─────────────────────────────────────────────────────────
+using SurfaceId = uint64_t;
+
+struct SurfaceObject {
+  SurfaceId id = 0;
+  void *data = nullptr; // Writable memory
+  size_t width = 0;
+  size_t height = 0;
+  size_t elementSize = 0;
+};
+
+// ── Texture Manager ────────────────────────────────────────────────────────
+// Provides CUDA-compatible texture/surface memory APIs with CPU-side
+// bilinear interpolation and configurable addressing modes.
+class TextureManager {
+public:
+  TextureManager();
+  ~TextureManager();
+
+  // ── Texture object lifecycle ─────────────────────────────────────────────
+  VGREResult createTexture(TextureId &outId, const void *data, size_t width,
+                           size_t height, size_t elementSize,
+                           const TextureDescriptor &desc);
+  VGREResult destroyTexture(TextureId id);
+
+  // ── Surface object lifecycle ─────────────────────────────────────────────
+  VGREResult createSurface(SurfaceId &outId, void *data, size_t width,
+                           size_t height, size_t elementSize);
+  VGREResult destroySurface(SurfaceId id);
+
+  // ── Texture fetch operations ─────────────────────────────────────────────
+  // 1D integer-coordinate fetch (like tex1Dfetch)
+  float tex1Dfetch(TextureId id, int x) const;
+
+  // 2D floating-point fetch with optional interpolation (like tex2D)
+  float tex2D(TextureId id, float x, float y) const;
+
+  // ── Surface write operations ─────────────────────────────────────────────
+  VGREResult surf2Dwrite(SurfaceId id, float value, int x, int y);
+  VGREResult surf2Dread(SurfaceId id, float &value, int x, int y) const;
+
+  // ── Queries ──────────────────────────────────────────────────────────────
+  size_t getTextureCount() const;
+  size_t getSurfaceCount() const;
+
+  // ── Singleton ────────────────────────────────────────────────────────────
+  static TextureManager &instance();
+
+private:
+  // Address mode helper: translates coordinates based on addressing mode
+  int applyAddressMode(int coord, int size, TextureAddressMode mode) const;
+
+  std::unordered_map<TextureId, TextureObject> textures_;
+  std::unordered_map<SurfaceId, SurfaceObject> surfaces_;
+  mutable std::mutex mutex_;
+  TextureId nextTextureId_ = 1;
+  SurfaceId nextSurfaceId_ = 1;
+};
+
+} // namespace core
+} // namespace vgre
+
+#endif // VGRE_CORE_TEXTURE_MANAGER_H
