@@ -51,16 +51,22 @@ cl_context OpenCLAdapter::createContext(cl_device_id device, cl_int *errcode) {
     return 0;
   }
 
+  std::lock_guard<std::mutex> lock(mutex_);
+  cl_context ctx = nextId_++;
+  contexts_[ctx] = true;
+
   if (errcode)
     *errcode = CL_SUCCESS;
-  VGRE_LOG_INFO("OpenCLAdapter", "Context created");
-  return 100; // virtual context handle
+  VGRE_LOG_INFO("OpenCLAdapter", "Context created: " + std::to_string(ctx));
+  return ctx;
 }
 
 cl_int OpenCLAdapter::releaseContext(cl_context context) {
-  if (context == 0)
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (contexts_.erase(context) == 0)
     return CL_INVALID_CONTEXT;
-  VGRE_LOG_DEBUG("OpenCLAdapter", "Context released");
+  VGRE_LOG_DEBUG("OpenCLAdapter",
+                 "Context released: " + std::to_string(context));
   return CL_SUCCESS;
 }
 
@@ -69,18 +75,23 @@ cl_command_queue OpenCLAdapter::createCommandQueue(cl_context ctx,
                                                    cl_device_id device,
                                                    cl_int *errcode) {
   (void)device;
-  if (ctx == 0) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (contexts_.find(ctx) == contexts_.end()) {
     if (errcode)
       *errcode = CL_INVALID_CONTEXT;
     return 0;
   }
+
+  cl_command_queue queue = nextId_++;
+  queues_[queue] = ctx;
   if (errcode)
     *errcode = CL_SUCCESS;
-  return 200; // virtual queue handle
+  return queue;
 }
 
 cl_int OpenCLAdapter::releaseCommandQueue(cl_command_queue queue) {
-  if (queue == 0)
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (queues_.erase(queue) == 0)
     return CL_INVALID_COMMAND_QUEUE;
   return CL_SUCCESS;
 }
@@ -89,10 +100,13 @@ cl_int OpenCLAdapter::releaseCommandQueue(cl_command_queue queue) {
 cl_mem OpenCLAdapter::createBuffer(cl_context ctx, cl_int flags, size_t size,
                                    void *hostPtr, cl_int *errcode) {
   (void)flags;
-  if (ctx == 0) {
-    if (errcode)
-      *errcode = CL_INVALID_CONTEXT;
-    return nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (contexts_.find(ctx) == contexts_.end()) {
+      if (errcode)
+        *errcode = CL_INVALID_CONTEXT;
+      return nullptr;
+    }
   }
 
   MemoryHandle handle;
@@ -125,7 +139,11 @@ cl_int OpenCLAdapter::releaseMemObject(cl_mem memObj) {
 cl_int OpenCLAdapter::enqueueWriteBuffer(cl_command_queue queue, cl_mem buffer,
                                          size_t offset, size_t size,
                                          const void *ptr) {
-  (void)queue;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queues_.find(queue) == queues_.end())
+      return CL_INVALID_COMMAND_QUEUE;
+  }
   if (!buffer || !ptr)
     return CL_INVALID_VALUE;
 
@@ -136,7 +154,11 @@ cl_int OpenCLAdapter::enqueueWriteBuffer(cl_command_queue queue, cl_mem buffer,
 
 cl_int OpenCLAdapter::enqueueReadBuffer(cl_command_queue queue, cl_mem buffer,
                                         size_t offset, size_t size, void *ptr) {
-  (void)queue;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queues_.find(queue) == queues_.end())
+      return CL_INVALID_COMMAND_QUEUE;
+  }
   if (!buffer || !ptr)
     return CL_INVALID_VALUE;
 
@@ -149,10 +171,13 @@ cl_int OpenCLAdapter::enqueueReadBuffer(cl_command_queue queue, cl_mem buffer,
 cl_program OpenCLAdapter::createProgramWithSource(cl_context ctx,
                                                   const std::string &source,
                                                   cl_int *errcode) {
-  if (ctx == 0) {
-    if (errcode)
-      *errcode = CL_INVALID_CONTEXT;
-    return 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (contexts_.find(ctx) == contexts_.end()) {
+      if (errcode)
+        *errcode = CL_INVALID_CONTEXT;
+      return 0;
+    }
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
@@ -258,8 +283,9 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
                                            cl_uint workDim,
                                            const size_t *globalWorkSize,
                                            const size_t *localWorkSize) {
-  (void)queue;
   std::lock_guard<std::mutex> lock(mutex_);
+  if (queues_.find(queue) == queues_.end())
+    return CL_INVALID_COMMAND_QUEUE;
 
   auto it = kernels_.find(kernel);
   if (it == kernels_.end())
@@ -314,7 +340,11 @@ cl_int OpenCLAdapter::releaseKernel(cl_kernel_handle kernel) {
 
 // ── Synchronization ────────────────────────────────────────────────────────
 cl_int OpenCLAdapter::finish(cl_command_queue queue) {
-  (void)queue;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queues_.find(queue) == queues_.end())
+      return CL_INVALID_COMMAND_QUEUE;
+  }
   auto r = core::RuntimeEngine::instance().synchronize();
   return (r == VGREResult::SUCCESS) ? CL_SUCCESS : CL_INVALID_COMMAND_QUEUE;
 }
