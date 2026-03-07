@@ -62,6 +62,41 @@ static int getCPUCoreCount() {
   return cores > 0 ? cores : 4;
 }
 
+#if defined(__linux__)
+static int readCPUMaxFrequencyKHz() {
+  std::ifstream freqFile(
+      "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
+  if (freqFile.is_open()) {
+    uint64_t kHz = 0;
+    if (freqFile >> kHz && kHz > 0) {
+      return static_cast<int>(kHz);
+    }
+  }
+
+  std::ifstream cpuinfo("/proc/cpuinfo");
+  std::string line;
+  while (std::getline(cpuinfo, line)) {
+    if (line.find("cpu MHz") == std::string::npos) {
+      continue;
+    }
+    auto pos = line.find(':');
+    if (pos == std::string::npos) {
+      continue;
+    }
+    try {
+      double mhz = std::stod(line.substr(pos + 1));
+      if (mhz > 0.0) {
+        return static_cast<int>(mhz * 1000.0);
+      }
+    } catch (...) {
+      // Continue searching next lines.
+    }
+  }
+
+  return 0;
+}
+#endif
+
 // ── Constructor / Destructor ───────────────────────────────────────────────
 VirtualGPUDevice::VirtualGPUDevice(DeviceId id) : id_(id) {
   props_ = DeviceProperties{};
@@ -90,17 +125,24 @@ VirtualGPUDevice::VirtualGPUDevice(DeviceId id) : id_(id) {
 }
 
 VirtualGPUDevice::~VirtualGPUDevice() {
-  if (contextActive_) {
+  if (hasContext()) {
     destroyContext();
   }
 }
 
-void VirtualGPUDevice::setId(DeviceId id) { id_ = id; }
+void VirtualGPUDevice::setId(DeviceId id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  id_ = id;
+}
 
-DeviceId VirtualGPUDevice::getId() const { return id_; }
+DeviceId VirtualGPUDevice::getId() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return id_;
+}
 
 // ── Hardware detection ─────────────────────────────────────────────────────
 void VirtualGPUDevice::detectHardware() {
+  std::lock_guard<std::mutex> lock(mutex_);
   std::string cpuName = readCPUModelName();
   std::string deviceName = "VGRE Virtual GPU [" + cpuName + "]";
   std::strncpy(props_.name, deviceName.c_str(), sizeof(props_.name) - 1);
@@ -144,18 +186,11 @@ void VirtualGPUDevice::detectHardware() {
 #endif
 
 #if defined(__linux__)
-  // 1. Detect Real Max Clock Speed (from sysfs)
-  std::ifstream freqFile(
-      "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
-  if (freqFile.is_open()) {
-    uint64_t kHz = 0;
-    if (freqFile >> kHz && kHz > 0) {
-      props_.clockRate = static_cast<int>(kHz); // kHz
-    } else {
-      props_.clockRate = 3500000; // 3.5 GHz fallback if read fails
-    }
+  // 1. Detect max clock speed from sysfs or /proc/cpuinfo
+  int detectedClockKHz = readCPUMaxFrequencyKHz();
+  if (detectedClockKHz > 0) {
+    props_.clockRate = detectedClockKHz;
   } else {
-    // Fallback if sysfs is restricted
     props_.clockRate = 3000000;
   }
 
@@ -231,7 +266,8 @@ void VirtualGPUDevice::detectHardware() {
                     std::to_string(props_.pciDeviceId));
 }
 
-const DeviceProperties &VirtualGPUDevice::getProperties() const {
+DeviceProperties VirtualGPUDevice::getProperties() const {
+  std::lock_guard<std::mutex> lock(mutex_);
   return props_;
 }
 
@@ -264,7 +300,10 @@ VGREResult VirtualGPUDevice::destroyContext() {
   return VGREResult::SUCCESS;
 }
 
-bool VirtualGPUDevice::hasContext() const { return contextActive_; }
+bool VirtualGPUDevice::hasContext() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return contextActive_;
+}
 
 // ── Streams ────────────────────────────────────────────────────────────────
 VGREResult VirtualGPUDevice::createStream(StreamId &outId, int priority) {
@@ -286,6 +325,9 @@ VGREResult VirtualGPUDevice::createStream(StreamId &outId, int priority) {
 
 VGREResult VirtualGPUDevice::destroyStream(StreamId id) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (!contextActive_) {
+    return VGREResult::ERROR_NOT_INITIALIZED;
+  }
   auto it = streams_.find(id);
   if (it == streams_.end()) {
     return VGREResult::ERROR_INVALID_VALUE;
@@ -299,6 +341,9 @@ VGREResult VirtualGPUDevice::destroyStream(StreamId id) {
 VGREResult VirtualGPUDevice::synchronizeStream(StreamId id) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!contextActive_) {
+      return VGREResult::ERROR_NOT_INITIALIZED;
+    }
     auto it = streams_.find(id);
     if (it == streams_.end()) {
       return VGREResult::ERROR_INVALID_VALUE;
@@ -313,11 +358,25 @@ VGREResult VirtualGPUDevice::synchronizeStream(StreamId id) {
 
   // 2. Mark stream IDLE
   std::lock_guard<std::mutex> lock(mutex_);
-  streams_[id].state = StreamState::IDLE;
+  if (!contextActive_) {
+    return VGREResult::ERROR_NOT_INITIALIZED;
+  }
+  auto it = streams_.find(id);
+  if (it == streams_.end()) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+  it->second.state = StreamState::IDLE;
   return VGREResult::SUCCESS;
 }
 
 VGREResult VirtualGPUDevice::synchronizeDevice() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!contextActive_) {
+      return VGREResult::ERROR_NOT_INITIALIZED;
+    }
+  }
+
   auto &engine = vgre::core::RuntimeEngine::instance();
   if (engine.isInitialized()) {
     engine.getScheduler().waitAll();

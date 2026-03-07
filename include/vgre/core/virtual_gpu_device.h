@@ -27,7 +27,7 @@ public:
   ~VirtualGPUDevice();
 
   // Properties
-  const DeviceProperties &getProperties() const;
+  DeviceProperties getProperties() const;
   void setProperties(const DeviceProperties &props);
   void setId(DeviceId id);
   DeviceId getId() const;

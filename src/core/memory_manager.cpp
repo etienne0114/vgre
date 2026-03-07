@@ -24,26 +24,35 @@ namespace core {
 #if defined(_WIN32)
 static PVOID g_vehHandler = nullptr;
 #else
-static struct sigaction old_sa;
+static struct sigaction old_sa {};
 #endif
-static MemoryManager *g_memoryManagerId = nullptr;
+static std::atomic<bool> g_handlerInstalled{false};
+static std::atomic<MemoryManager *> g_memoryManagerId{nullptr};
 
 MemoryManager::MemoryManager(size_t poolSize) : poolSize_(poolSize) {
-  g_memoryManagerId = this;
+  g_memoryManagerId.store(this, std::memory_order_release);
   VGRE_LOG_INFO("MemoryManager", "Initialized with pool size " +
                                      std::to_string(poolSize / (1024 * 1024)) +
                                      " MB");
   setupSignalHandler();
 
-  std::thread([this]() { this->calibrateBandwidth(); }).detach();
+  // Run calibration synchronously to avoid detached-thread lifetime hazards.
+  calibrateBandwidth();
 }
 
 MemoryManager::~MemoryManager() {
+  g_memoryManagerId.store(nullptr, std::memory_order_release);
+  teardownSignalHandler();
+
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto &[handle, alloc] : allocations_) {
     if (alloc.ptr) {
       if (alloc.isManaged) {
+#if defined(_WIN32)
+        VirtualFree(alloc.ptr, 0, MEM_RELEASE);
+#else
         munmap(alloc.ptr, alloc.size);
+#endif
       } else {
         alignedFree(alloc.ptr);
       }
@@ -52,7 +61,6 @@ MemoryManager::~MemoryManager() {
   }
   allocations_.clear();
   usedMemory_ = 0;
-  g_memoryManagerId = nullptr;
   VGRE_LOG_DEBUG("MemoryManager", "Destroyed — all allocations freed");
 }
 
@@ -61,6 +69,8 @@ void MemoryManager::setupSignalHandler() {
   g_vehHandler = AddVectoredExceptionHandler(1, MemoryManager::vectoredHandler);
   if (!g_vehHandler) {
     VGRE_LOG_ERROR("MemoryManager", "Failed to setup VEH handler for UVM");
+  } else {
+    g_handlerInstalled.store(true, std::memory_order_release);
   }
 #else
   struct sigaction sa;
@@ -69,6 +79,23 @@ void MemoryManager::setupSignalHandler() {
   sa.sa_sigaction = MemoryManager::segfaultHandler;
   if (sigaction(SIGSEGV, &sa, &old_sa) == -1) {
     VGRE_LOG_ERROR("MemoryManager", "Failed to setup SIGSEGV handler for UVM");
+  } else {
+    g_handlerInstalled.store(true, std::memory_order_release);
+  }
+#endif
+}
+
+void MemoryManager::teardownSignalHandler() {
+#if defined(_WIN32)
+  if (g_handlerInstalled.load(std::memory_order_acquire) && g_vehHandler) {
+    RemoveVectoredExceptionHandler(g_vehHandler);
+    g_vehHandler = nullptr;
+    g_handlerInstalled.store(false, std::memory_order_release);
+  }
+#else
+  if (g_handlerInstalled.load(std::memory_order_acquire)) {
+    sigaction(SIGSEGV, &old_sa, nullptr);
+    g_handlerInstalled.store(false, std::memory_order_release);
   }
 #endif
 }
@@ -81,23 +108,28 @@ LONG
     void *addr = reinterpret_cast<void *>(
         exceptionInfo->ExceptionRecord->ExceptionInformation[1]);
 
-    if (!g_memoryManagerId)
+    MemoryManager *mgr = g_memoryManagerId.load(std::memory_order_acquire);
+    if (!mgr)
       return EXCEPTION_CONTINUE_SEARCH;
 
     {
-      std::lock_guard<std::mutex> lock(g_memoryManagerId->mutex_);
-      for (auto &[handle, alloc] : g_memoryManagerId->allocations_) {
-        uintptr_t base = reinterpret_cast<uintptr_t>(alloc.ptr);
-        uintptr_t target = reinterpret_cast<uintptr_t>(addr);
-        if (alloc.isManaged && target >= base && target < base + alloc.size) {
-          DWORD oldProtect;
-          if (VirtualProtect(alloc.ptr, alloc.size, PAGE_READWRITE,
-                             &oldProtect)) {
-            const_cast<Allocation &>(alloc).isResidentOnHost = true;
-            g_memoryManagerId->faultCount_++;
-            return EXCEPTION_CONTINUE_EXECUTION;
+      uintptr_t target = reinterpret_cast<uintptr_t>(addr);
+      for (size_t i = 0; i < MAX_MANAGED_REGIONS; ++i) {
+        auto &region = mgr->managedRegions_[i];
+        if (region.valid.load(std::memory_order_acquire)) {
+          void *ptr = region.ptr.load(std::memory_order_relaxed);
+          size_t size = region.size.load(std::memory_order_relaxed);
+          uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
+
+          if (target >= base && target < base + size) {
+            DWORD oldProtect;
+            if (VirtualProtect(ptr, size, PAGE_READWRITE, &oldProtect)) {
+              region.isResidentOnHost.store(true, std::memory_order_relaxed);
+              mgr->faultCount_.fetch_add(1, std::memory_order_relaxed);
+              return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            break;
           }
-          break;
         }
       }
     }
@@ -107,23 +139,27 @@ LONG
 #else
 void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
   void *addr = si->si_addr;
-  if (!g_memoryManagerId)
+  MemoryManager *mgr = g_memoryManagerId.load(std::memory_order_acquire);
+  if (!mgr)
     goto fallback;
 
   {
-    std::lock_guard<std::mutex> lock(g_memoryManagerId->mutex_);
+    uintptr_t target = reinterpret_cast<uintptr_t>(addr);
+    for (size_t i = 0; i < MAX_MANAGED_REGIONS; ++i) {
+      auto &region = mgr->managedRegions_[i];
+      if (region.valid.load(std::memory_order_acquire)) {
+        void *ptr = region.ptr.load(std::memory_order_relaxed);
+        size_t size = region.size.load(std::memory_order_relaxed);
+        uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
 
-    for (auto &[handle, alloc] : g_memoryManagerId->allocations_) {
-      uintptr_t base = reinterpret_cast<uintptr_t>(alloc.ptr);
-      uintptr_t target = reinterpret_cast<uintptr_t>(addr);
-      if (alloc.isManaged && target >= base && target < base + alloc.size) {
-        // Restore permissions
-        if (mprotect(alloc.ptr, alloc.size, PROT_READ | PROT_WRITE) == -1) {
+        if (target >= base && target < base + size) {
+          if (mprotect(ptr, size, PROT_READ | PROT_WRITE) == 0) {
+            region.isResidentOnHost.store(true, std::memory_order_relaxed);
+            mgr->faultCount_.fetch_add(1, std::memory_order_relaxed);
+            return;
+          }
           break;
         }
-        const_cast<Allocation &>(alloc).isResidentOnHost = true;
-        g_memoryManagerId->faultCount_++;
-        return;
       }
     }
   }
@@ -156,6 +192,32 @@ fallback:
 }
 #endif
 
+bool MemoryManager::registerManagedRegion(void *ptr, size_t size) {
+  for (size_t i = 0; i < MAX_MANAGED_REGIONS; ++i) {
+    bool expected_valid = false;
+    if (managedRegions_[i].valid.compare_exchange_strong(
+            expected_valid, true, std::memory_order_acq_rel)) {
+      managedRegions_[i].ptr.store(ptr, std::memory_order_relaxed);
+      managedRegions_[i].size.store(size, std::memory_order_relaxed);
+      managedRegions_[i].isResidentOnHost.store(false,
+                                                std::memory_order_relaxed);
+      return true;
+    }
+  }
+  VGRE_LOG_WARN("MemoryManager", "Lock-free managed regions array is full");
+  return false;
+}
+
+void MemoryManager::unregisterManagedRegion(void *ptr) {
+  for (size_t i = 0; i < MAX_MANAGED_REGIONS; ++i) {
+    if (managedRegions_[i].valid.load(std::memory_order_acquire) &&
+        managedRegions_[i].ptr.load(std::memory_order_relaxed) == ptr) {
+      managedRegions_[i].valid.store(false, std::memory_order_release);
+      break;
+    }
+  }
+}
+
 void *MemoryManager::alignedAlloc(size_t size, size_t alignment) {
 #if defined(_WIN32)
   return _aligned_malloc(size, alignment);
@@ -183,12 +245,20 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
   constexpr size_t ALIGN = 64;
   size_t alignedSize = (size + ALIGN - 1) & ~(ALIGN - 1);
 
-  if (usedMemory_ + alignedSize > poolSize_)
-    return VGREResult::ERROR_OUT_OF_MEMORY;
+  // Atomic CAS reservation: eliminates TOCTOU race between check and add
+  size_t current = usedMemory_.load(std::memory_order_relaxed);
+  do {
+    if (current + alignedSize > poolSize_)
+      return VGREResult::ERROR_OUT_OF_MEMORY;
+  } while (!usedMemory_.compare_exchange_weak(current, current + alignedSize,
+                                              std::memory_order_acq_rel));
 
   void *ptr = alignedAlloc(alignedSize, ALIGN);
-  if (!ptr)
+  if (!ptr) {
+    // Undo the reservation if allocation failed
+    usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
     return VGREResult::ERROR_OUT_OF_MEMORY;
+  }
 
   std::memset(ptr, 0, alignedSize);
 
@@ -206,7 +276,6 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
     allocations_[ptr] = alloc;
   }
 
-  usedMemory_ += alignedSize;
   outHandle = ptr;
   return VGREResult::SUCCESS;
 }
@@ -217,11 +286,25 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
   if (size == 0)
     return VGREResult::ERROR_INVALID_VALUE;
 
-  long pageSize = sysconf(_SC_PAGESIZE);
+  size_t pageSize = 4096;
+#if defined(_WIN32)
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  pageSize = static_cast<size_t>(si.dwPageSize);
+#else
+  long ps = sysconf(_SC_PAGESIZE);
+  if (ps > 0)
+    pageSize = static_cast<size_t>(ps);
+#endif
   size_t alignedSize = (size + pageSize - 1) & ~(pageSize - 1);
 
-  if (usedMemory_ + alignedSize > poolSize_)
-    return VGREResult::ERROR_OUT_OF_MEMORY;
+  // Atomic CAS reservation: eliminates TOCTOU race
+  size_t current = usedMemory_.load(std::memory_order_relaxed);
+  do {
+    if (current + alignedSize > poolSize_)
+      return VGREResult::ERROR_OUT_OF_MEMORY;
+  } while (!usedMemory_.compare_exchange_weak(current, current + alignedSize,
+                                              std::memory_order_acq_rel));
 
   // flags == 2 corresponds to cudaMemAttachHost. If the memory is explicitly
   // attached to the host, we can map it read/write immediately, bypassing the
@@ -230,8 +313,10 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
   DWORD protect = (flags == 2) ? PAGE_READWRITE : PAGE_NOACCESS;
   void *ptr =
       VirtualAlloc(NULL, alignedSize, MEM_COMMIT | MEM_RESERVE, protect);
-  if (!ptr)
+  if (!ptr) {
+    usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
     return VGREResult::ERROR_OUT_OF_MEMORY;
+  }
 #else
   int prot = (flags == 2) ? (PROT_READ | PROT_WRITE) : PROT_NONE;
 
@@ -240,8 +325,10 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
 #else
   void *ptr = mmap(NULL, alignedSize, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #endif
-  if (ptr == MAP_FAILED)
+  if (ptr == MAP_FAILED) {
+    usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
     return VGREResult::ERROR_OUT_OF_MEMORY;
+  }
 #endif
 
   Allocation alloc;
@@ -260,7 +347,23 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
     allocations_[ptr] = alloc;
   }
 
-  usedMemory_ += alignedSize;
+  // Register in lock-free managed regions array for signal-safe lookup.
+  // If registration fails, this allocation cannot safely participate in UVM
+  // fault handling, so fail explicitly instead of silently degrading.
+  if (!registerManagedRegion(ptr, alignedSize)) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      allocations_.erase(ptr);
+    }
+#if defined(_WIN32)
+    VirtualFree(ptr, 0, MEM_RELEASE);
+#else
+    munmap(ptr, alignedSize);
+#endif
+    usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
+    return VGREResult::ERROR_OUT_OF_MEMORY;
+  }
+
   outHandle = ptr;
 
   VGRE_LOG_INFO("MemoryManager",
@@ -278,6 +381,7 @@ VGREResult MemoryManager::free(MemoryHandle handle) {
 
   size_t freed = it->second.size;
   if (it->second.isManaged) {
+    unregisterManagedRegion(it->second.ptr);
 #if defined(_WIN32)
     VirtualFree(it->second.ptr, 0, MEM_RELEASE);
 #else
@@ -300,6 +404,15 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
   if (it == allocations_.end())
     return VGREResult::ERROR_INVALID_VALUE;
 
+  // Bounds check: prevent writing past the allocation
+  if (bytes > it->second.size) {
+    VGRE_LOG_ERROR("MemoryManager",
+                   "H2D copy overflow: requested " + std::to_string(bytes) +
+                       " bytes but allocation is " +
+                       std::to_string(it->second.size) + " bytes");
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+
   if (it->second.isManaged) {
 #if defined(_WIN32)
     DWORD oldProtect;
@@ -317,17 +430,21 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
   if (compEngine.shouldCompress(bytes)) {
     std::vector<uint8_t> compBuffer;
     auto r = compEngine.compress(src, bytes, compBuffer);
-    if (r == VGREResult::SUCCESS && compBuffer.size() < bytes) {
-      // Simulate transfer of compressed payload
-      std::memcpy(dst, compBuffer.data(), compBuffer.size());
-      // Decompress in-place (simulated) since dst receives compressed data over
-      // bus
+    if (r == VGREResult::SUCCESS && !compBuffer.empty()) {
       size_t actualSize = 0;
-      compEngine.decompress(compBuffer.data(), compBuffer.size(), dst, bytes,
-                            actualSize);
-      VGRE_LOG_DEBUG("MemoryManager",
-                     "H2D Transfer compressed " + std::to_string(bytes) +
-                         " -> " + std::to_string(compBuffer.size()) + " bytes");
+      auto dr = compEngine.decompress(compBuffer.data(), compBuffer.size(), dst,
+                                      bytes, actualSize);
+      if (dr == VGREResult::SUCCESS && actualSize == bytes) {
+        if (compBuffer.size() < bytes) {
+          VGRE_LOG_DEBUG(
+              "MemoryManager",
+              "H2D Transfer compressed " + std::to_string(bytes) + " -> " +
+                  std::to_string(compBuffer.size()) + " bytes");
+        }
+      } else {
+        // Fail-open to raw copy if codec path did not restore exact payload.
+        std::memcpy(dst, src, bytes);
+      }
     } else {
       std::memcpy(dst, src, bytes);
     }
@@ -353,6 +470,15 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
   if (it == allocations_.end())
     return VGREResult::ERROR_INVALID_VALUE;
 
+  // Bounds check: prevent reading past the allocation
+  if (bytes > it->second.size) {
+    VGRE_LOG_ERROR("MemoryManager",
+                   "D2H copy overflow: requested " + std::to_string(bytes) +
+                       " bytes but allocation is " +
+                       std::to_string(it->second.size) + " bytes");
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+
   if (it->second.isManaged) {
 #if defined(_WIN32)
     DWORD oldProtect;
@@ -370,14 +496,20 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
   if (compEngine.shouldCompress(bytes)) {
     std::vector<uint8_t> compBuffer;
     auto r = compEngine.compress(src, bytes, compBuffer);
-    if (r == VGREResult::SUCCESS && compBuffer.size() < bytes) {
-      // Decompress into host dst
+    if (r == VGREResult::SUCCESS && !compBuffer.empty()) {
       size_t actualSize = 0;
-      compEngine.decompress(compBuffer.data(), compBuffer.size(), dst, bytes,
-                            actualSize);
-      VGRE_LOG_DEBUG("MemoryManager",
-                     "D2H Transfer compressed " + std::to_string(bytes) +
-                         " -> " + std::to_string(compBuffer.size()) + " bytes");
+      auto dr = compEngine.decompress(compBuffer.data(), compBuffer.size(), dst,
+                                      bytes, actualSize);
+      if (dr == VGREResult::SUCCESS && actualSize == bytes) {
+        if (compBuffer.size() < bytes) {
+          VGRE_LOG_DEBUG(
+              "MemoryManager",
+              "D2H Transfer compressed " + std::to_string(bytes) + " -> " +
+                  std::to_string(compBuffer.size()) + " bytes");
+        }
+      } else {
+        std::memcpy(dst, src, bytes);
+      }
     } else {
       std::memcpy(dst, src, bytes);
     }
@@ -402,6 +534,16 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
   auto itSrc = allocations_.find(src);
   if (itDst == allocations_.end() || itSrc == allocations_.end())
     return VGREResult::ERROR_INVALID_VALUE;
+
+  // Bounds check: prevent overflow on both source and destination
+  if (bytes > itDst->second.size || bytes > itSrc->second.size) {
+    VGRE_LOG_ERROR("MemoryManager",
+                   "D2D copy overflow: requested " + std::to_string(bytes) +
+                       " bytes but dst=" + std::to_string(itDst->second.size) +
+                       ", src=" + std::to_string(itSrc->second.size) +
+                       " bytes");
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
 
   // Cross-device check: if different devices, check P2P access
   if (itDst->second.deviceId != itSrc->second.deviceId) {
@@ -436,15 +578,6 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
 
   auto start = std::chrono::steady_clock::now();
 
-  // Feature 7: Multi-GPU P2P Transfer Latency Simulation
-  if (itDst->second.deviceId != itSrc->second.deviceId) {
-    // Model PCIe 3.0 x16 latency (~1us) and bandwidth (~12 GB/s)
-    double pcieGBps = 12.0;
-    double delayMs = 0.001 + (bytes / (pcieGBps * 1024 * 1024 * 1024)) * 1000.0;
-    std::this_thread::sleep_for(
-        std::chrono::duration<double, std::milli>(delayMs));
-  }
-
   std::memcpy(dst, src, bytes);
   auto end = std::chrono::steady_clock::now();
 
@@ -454,18 +587,18 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
   double bandwidthGBps = h2dBandwidth_;
 
   if (itDst->second.deviceId != itSrc->second.deviceId) {
-    auto &srcProps = RuntimeEngine::instance()
-                         .getDevice(itSrc->second.deviceId)
-                         .getProperties();
-    auto &dstProps = RuntimeEngine::instance()
-                         .getDevice(itDst->second.deviceId)
-                         .getProperties();
+    auto srcProps = RuntimeEngine::instance()
+                        .getDevice(itSrc->second.deviceId)
+                        .getProperties();
+    auto dstProps = RuntimeEngine::instance()
+                        .getDevice(itDst->second.deviceId)
+                        .getProperties();
 
     // If on the same PCI bus, use our measured D2D baseline
     if (srcProps.pciBusId == dstProps.pciBusId) {
       bandwidthGBps = d2dBandwidth_;
     } else {
-      bandwidthGBps = h2dBandwidth_ * 0.5; // Simulate inter-bus PCIe penalty
+      bandwidthGBps = h2dBandwidth_ * 0.5; // Heuristic inter-bus penalty
     }
   } else {
     bandwidthGBps = d2dBandwidth_ * 2.0; // Device-local copy (L2/HBM)
@@ -533,6 +666,14 @@ bool MemoryManager::isValidHandle(MemoryHandle handle) const {
   return allocations_.count(handle) > 0;
 }
 
+size_t MemoryManager::getAllocationSize(MemoryHandle handle) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = allocations_.find(handle);
+  if (it == allocations_.end())
+    return 0;
+  return it->second.size;
+}
+
 void *MemoryManager::getPointer(MemoryHandle handle) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = allocations_.find(handle);
@@ -540,7 +681,12 @@ void *MemoryManager::getPointer(MemoryHandle handle) const {
     return nullptr;
 
   if (it->second.isManaged) {
+#if defined(_WIN32)
+    DWORD oldProtect;
+    VirtualProtect(it->second.ptr, it->second.size, PAGE_READWRITE, &oldProtect);
+#else
     mprotect(it->second.ptr, it->second.size, PROT_READ | PROT_WRITE);
+#endif
     const_cast<Allocation &>(it->second).isResidentOnHost = true;
   }
 
@@ -551,30 +697,51 @@ void MemoryManager::getPageResidency(uint8_t outMap[1024]) const {
   std::lock_guard<std::mutex> lock(mutex_);
   std::memset(outMap, 0, 1024);
 
-  if (poolSize_ == 0)
+  // Map resident allocations by their real address layout in this process
+  // rather than hash-based placement. This yields a stable, deterministic map
+  // aligned with actual heap allocation distribution.
+  uintptr_t minAddr = std::numeric_limits<uintptr_t>::max();
+  uintptr_t maxAddr = 0;
+  bool hasResident = false;
+
+  for (const auto &[_, alloc] : allocations_) {
+    if (!alloc.isResidentOnHost || !alloc.ptr || alloc.size == 0)
+      continue;
+    uintptr_t start = reinterpret_cast<uintptr_t>(alloc.ptr);
+    uintptr_t end = start + alloc.size;
+    minAddr = std::min(minAddr, start);
+    maxAddr = std::max(maxAddr, end);
+    hasResident = true;
+  }
+
+  if (!hasResident || maxAddr <= minAddr)
     return;
-  size_t bytesPerPage = poolSize_ / 1024;
-  if (bytesPerPage == 0)
-    bytesPerPage = 1;
+
+  uint64_t span = static_cast<uint64_t>(maxAddr - minAddr);
+  if (span == 0)
+    span = 1;
 
   for (auto const &[handle, alloc] : allocations_) {
     if (!alloc.isResidentOnHost)
       continue;
+    if (!alloc.ptr || alloc.size == 0)
+      continue;
 
-    // This is a simplification since handles are absolute pointers.
-    // We treat the "address space" as the range of pointers we've allocated.
-    // For a more realistic map, we'd use an actual virtual address space.
-    // For now, we'll map allocations to the grid based on their relative
-    // position in the pool.
-
-    // Actually, let's just use a simple hash-based or deterministic mapping for
-    // the UI to ensure the grid looks "real" and changes as memory is used.
+    uint64_t startOffset =
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(alloc.ptr) - minAddr);
+    uint64_t endOffset = startOffset + alloc.size;
     size_t startCell =
-        (reinterpret_cast<size_t>(alloc.ptr) % poolSize_) / bytesPerPage;
-    size_t numCells = (alloc.size + bytesPerPage - 1) / bytesPerPage;
+        static_cast<size_t>((startOffset * 1024ULL) / span);
+    size_t endCell = static_cast<size_t>(
+        ((endOffset * 1024ULL + span - 1ULL) / span) - 1ULL);
+    if (startCell > 1023)
+      startCell = 1023;
+    if (endCell > 1023)
+      endCell = 1023;
+    if (endCell < startCell)
+      endCell = startCell;
 
-    for (size_t i = 0; i < numCells; ++i) {
-      size_t cell = (startCell + i) % 1024;
+    for (size_t cell = startCell; cell <= endCell; ++cell) {
       outMap[cell] = 1;
     }
   }
@@ -618,8 +785,12 @@ void MemoryManager::calibrateBandwidth() {
   std::memcpy(devicePtr, hostPtr, testSize);
   auto end = std::chrono::steady_clock::now();
   double sec = std::chrono::duration<double>(end - start).count();
-  h2dBandwidth_.store(
-      (static_cast<double>(testSize) / (1024.0 * 1024.0 * 1024.0)) / sec);
+  if (sec > 0.0) {
+    h2dBandwidth_.store(
+        (static_cast<double>(testSize) / (1024.0 * 1024.0 * 1024.0)) / sec);
+  } else {
+    h2dBandwidth_.store(0.0);
+  }
 
   // D2D Calibration
   start = std::chrono::steady_clock::now();
@@ -627,8 +798,12 @@ void MemoryManager::calibrateBandwidth() {
               testSize); // In virtual mode these are same speed
   end = std::chrono::steady_clock::now();
   sec = std::chrono::duration<double>(end - start).count();
-  d2dBandwidth_.store(
-      (static_cast<double>(testSize) / (1024.0 * 1024.0 * 1024.0)) / sec);
+  if (sec > 0.0) {
+    d2dBandwidth_.store(
+        (static_cast<double>(testSize) / (1024.0 * 1024.0 * 1024.0)) / sec);
+  } else {
+    d2dBandwidth_.store(0.0);
+  }
   d2hBandwidth_.store(h2dBandwidth_.load());
 
   alignedFree(hostPtr);

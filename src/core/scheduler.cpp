@@ -48,11 +48,18 @@ void Scheduler::workerLoop() {
     }
 
     // Execute the generic task for this work-item (outside mutex!)
-    if (item.execute) {
-      item.execute();
+    try {
+      if (item.execute) {
+        item.execute();
+      }
+    } catch (...) {
+      // Prevent worker death on unexpected task exceptions.
+      VGRE_LOG_ERROR("Scheduler", "Unhandled exception in scheduled task");
     }
 
-    pending_--;
+    if (pending_.load() > 0) {
+      pending_--;
+    }
     completed_++;
     cv_.notify_all(); // Wake waitStream/waitAll
   }
@@ -62,12 +69,27 @@ void Scheduler::workerLoop() {
 std::future<VGREResult>
 Scheduler::submitStreamTask(StreamId stream, std::function<void()> taskFn,
                             int priority) {
+  if (!taskFn) {
+    std::promise<VGREResult> p;
+    p.set_value(VGREResult::ERROR_INVALID_VALUE);
+    return p.get_future();
+  }
+  if (shutdown_.load()) {
+    std::promise<VGREResult> p;
+    p.set_value(VGREResult::ERROR_NOT_INITIALIZED);
+    return p.get_future();
+  }
+
   auto node = std::make_shared<StreamTaskNode>();
   node->task = std::move(taskFn);
   auto future = node->promise.get_future();
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (shutdown_.load()) {
+      node->promise.set_value(VGREResult::ERROR_NOT_INITIALIZED);
+      return future;
+    }
     auto &sq = streamQueues_[stream];
     if (!sq) {
       sq = std::make_shared<StreamQueue>();
@@ -110,15 +132,30 @@ void Scheduler::tryProcessStream(StreamId stream) {
       if (node->task) {
         node->task();
       }
-      node->promise.set_value(VGREResult::SUCCESS);
+      try {
+        node->promise.set_value(VGREResult::SUCCESS);
+      } catch (...) {
+      }
     } catch (...) {
-      node->promise.set_value(VGREResult::ERROR_LAUNCH_FAILURE);
+      try {
+        node->promise.set_value(VGREResult::ERROR_LAUNCH_FAILURE);
+      } catch (...) {
+      }
     }
 
     // Chain next task: lock mutex, pop completed, schedule next
     {
       std::lock_guard<std::mutex> lock(this->mutex_);
-      auto &sq2 = *this->streamQueues_[stream];
+      auto it = this->streamQueues_.find(stream);
+      if (it == this->streamQueues_.end() || !it->second) {
+        return;
+      }
+      auto &sq2 = *it->second;
+      if (sq2.pendingTasks.empty()) {
+        sq2.isProcessing = false;
+        this->cv_.notify_all();
+        return;
+      }
       sq2.pendingTasks.pop();
       this->tryProcessStream(stream);
     }

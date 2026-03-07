@@ -20,7 +20,7 @@ namespace core {
 // ── Constructor / Destructor ───────────────────────────────────────────────
 RuntimeEngine::RuntimeEngine() = default;
 RuntimeEngine::~RuntimeEngine() {
-  if (initialized_) {
+  if (isInitialized()) {
     shutdown();
   }
 }
@@ -58,7 +58,7 @@ VGREResult RuntimeEngine::initialize() {
 
   currentDeviceId_ = 0;
 
-  // Global memory manager (shared for now, pool sized to first device)
+  // Global memory manager shared by active devices.
   memoryManager_ = std::make_unique<MemoryManager>(
       devices_[0]->getProperties().totalGlobalMem);
 
@@ -88,6 +88,8 @@ VGREResult RuntimeEngine::shutdown() {
 
   VGRE_LOG_INFO("RuntimeEngine", "Shutting down VGRE Runtime Engine...");
 
+  vgre::advanced::IPCManager::instance().shutdown();
+
   scheduler_ = nullptr;
   executor_.reset();
   vectorEngine_.reset();
@@ -98,6 +100,9 @@ VGREResult RuntimeEngine::shutdown() {
 
   kernelCache_.clear();
   kernelIRCache_.clear();
+  captureState_.clear();
+  nextKernelId_ = 1;
+  currentDeviceId_ = 0;
   initialized_ = false;
 
   VGRE_LOG_INFO("RuntimeEngine", "Shutdown complete");
@@ -106,6 +111,7 @@ VGREResult RuntimeEngine::shutdown() {
 
 // ── Device management ──────────────────────────────────────────────────────
 int RuntimeEngine::getDeviceCount() const {
+  std::lock_guard<std::mutex> lock(mutex_);
   return static_cast<int>(devices_.size());
 }
 
@@ -119,10 +125,14 @@ VGREResult RuntimeEngine::setDevice(DeviceId id) {
   return VGREResult::SUCCESS;
 }
 
-DeviceId RuntimeEngine::getDeviceId() const { return currentDeviceId_; }
+DeviceId RuntimeEngine::getDeviceId() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return currentDeviceId_;
+}
 
 VGREResult RuntimeEngine::getDeviceProperties(DeviceId id,
                                               DeviceProperties &outProps) {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (id < 0 || id >= static_cast<DeviceId>(devices_.size())) {
     return VGREResult::ERROR_INVALID_DEVICE;
   }
@@ -130,7 +140,10 @@ VGREResult RuntimeEngine::getDeviceProperties(DeviceId id,
   return VGREResult::SUCCESS;
 }
 
-bool RuntimeEngine::isInitialized() const { return initialized_; }
+bool RuntimeEngine::isInitialized() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return initialized_;
+}
 
 // ── Kernel registration ────────────────────────────────────────────────────
 VGREResult RuntimeEngine::registerKernel(const std::string &name,
@@ -235,6 +248,13 @@ VGREResult RuntimeEngine::unloadModule(ModuleHandle module) {
 VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
                                        const dim3 &blockDim, void **args,
                                        size_t sharedMem, StreamId stream) {
+  if (gridDim.x == 0 || blockDim.x == 0)
+    return VGREResult::ERROR_INVALID_VALUE;
+  if ((gridDim.y == 0 && gridDim.z != 0) ||
+      (blockDim.y == 0 && blockDim.z != 0)) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+
   CompiledKernelFn fn;
   std::shared_ptr<std::vector<uint64_t>> argValues;
   std::shared_ptr<std::vector<void *>> safeArgs;
@@ -293,7 +313,7 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
     safeArgs = std::make_shared<std::vector<void *>>(numArgs);
 
     for (size_t i = 0; i < numArgs; ++i) {
-      if (args[i]) {
+      if (args && args[i]) {
         // Safe type-aware copy into 8-byte slots
         switch (irIt->second.argTypes[i]) {
         case ArgType::INT32:
@@ -304,8 +324,9 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
           ::memcpy(&(*argValues)[i], args[i], 4);
           break;
         default:
-          // Copy full 8 bytes (pointers, 64-bit types)
-          (*argValues)[i] = *reinterpret_cast<uint64_t *>(args[i]);
+          // Copy full 8 bytes (pointers, 64-bit types) without alignment UB
+          (*argValues)[i] = 0;
+          ::memcpy(&(*argValues)[i], args[i], sizeof(uint64_t));
           break;
         }
         // safeArgs[i] points to our stable copy
@@ -330,24 +351,33 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       kName = irIt->second.name;
   }
 
-  scheduler_->submitStreamTask(stream, [exec, fn, gridDim, blockDim, safeArgs,
-                                        argValues, kName, sharedMem]() mutable {
-    auto start = std::chrono::steady_clock::now();
-    exec->execute(fn, gridDim, blockDim, safeArgs->data(), sharedMem);
-    auto end = std::chrono::steady_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(end - start).count();
+  auto fut = scheduler_->submitStreamTask(
+      stream, [exec, fn, gridDim, blockDim, safeArgs, argValues, kName,
+               sharedMem]() mutable {
+        auto start = std::chrono::steady_clock::now();
+        exec->execute(fn, gridDim, blockDim, safeArgs->data(), sharedMem);
+        auto end = std::chrono::steady_clock::now();
+        double ms =
+            std::chrono::duration<double, std::milli>(end - start).count();
 
-    // Workload estimation for GFLOPS/Bandwidth tracking
-    size_t flops = 0;
-    size_t memBytes = 0;
-    if (kName == "background_compute") {
-      flops = 50ULL * 2 * gridDim.total() * blockDim.total();
-      memBytes = gridDim.total() * blockDim.total() * 3 * sizeof(float);
+        // Workload estimation for GFLOPS/Bandwidth tracking
+        size_t flops = 0;
+        size_t memBytes = 0;
+        if (kName == "background_compute") {
+          flops = 50ULL * 2 * gridDim.total() * blockDim.total();
+          memBytes = gridDim.total() * blockDim.total() * 3 * sizeof(float);
+        }
+
+        vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
+            kName, blockDim.total(), 8, ms, memBytes, flops);
+      });
+
+  if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    auto submitResult = fut.get();
+    if (submitResult != VGREResult::SUCCESS) {
+      return submitResult;
     }
-
-    vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
-        kName, blockDim.total(), 8, ms, memBytes, flops);
-  });
+  }
 
   return VGREResult::SUCCESS;
 }
@@ -367,23 +397,51 @@ VGREResult RuntimeEngine::launchKernel(const std::string &name,
 
 // ── Synchronization ────────────────────────────────────────────────────────
 VGREResult RuntimeEngine::synchronize() {
-  if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
-  scheduler_->waitAll();
+  Scheduler *sched = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_ || !scheduler_)
+      return VGREResult::ERROR_NOT_INITIALIZED;
+    sched = scheduler_;
+  }
+  sched->waitAll();
   return VGREResult::SUCCESS;
 }
 
 VGREResult RuntimeEngine::streamSynchronize(StreamId stream) {
-  if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
-  scheduler_->waitStream(stream);
+  Scheduler *sched = nullptr;
+  VirtualGPUDevice *dev = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_ || !scheduler_)
+      return VGREResult::ERROR_NOT_INITIALIZED;
+    sched = scheduler_;
+    if (stream != 0) {
+      if (currentDeviceId_ < 0 ||
+          currentDeviceId_ >= static_cast<DeviceId>(devices_.size())) {
+        return VGREResult::ERROR_INVALID_DEVICE;
+      }
+      dev = devices_[currentDeviceId_].get();
+    }
+  }
+  if (stream != 0) {
+    return dev->synchronizeStream(stream);
+  }
+  sched->waitStream(stream);
   return VGREResult::SUCCESS;
 }
 
 VGREResult RuntimeEngine::malloc(size_t size, MemoryHandle &outHandle) {
-  if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
-  return memoryManager_->allocate(size, outHandle, currentDeviceId_);
+  MemoryManager *mm = nullptr;
+  DeviceId deviceId = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_ || !memoryManager_)
+      return VGREResult::ERROR_NOT_INITIALIZED;
+    mm = memoryManager_.get();
+    deviceId = currentDeviceId_;
+  }
+  return mm->allocate(size, outHandle, deviceId);
 }
 
 VGREResult RuntimeEngine::mallocManaged(size_t size, MemoryHandle &outHandle,
@@ -399,32 +457,68 @@ VGREResult RuntimeEngine::mallocManaged(size_t size, MemoryHandle &outHandle,
 VGREResult RuntimeEngine::deviceCanAccessPeer(DeviceId device,
                                               DeviceId peerDevice,
                                               int *canAccess) {
-  if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+  MemoryManager *mm = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_ || !memoryManager_)
+      return VGREResult::ERROR_NOT_INITIALIZED;
+    if (device < 0 || peerDevice < 0 ||
+        device >= static_cast<DeviceId>(devices_.size()) ||
+        peerDevice >= static_cast<DeviceId>(devices_.size())) {
+      return VGREResult::ERROR_INVALID_DEVICE;
+    }
+    mm = memoryManager_.get();
+  }
   if (!canAccess)
     return VGREResult::ERROR_INVALID_VALUE;
 
   // Virtual devices in the same process can always "technically" access each
   // other, but we enforce specific hardware-aware peer access rules.
-  *canAccess = memoryManager_->canAccessPeer(device, peerDevice) ? 1 : 0;
+  *canAccess = mm->canAccessPeer(device, peerDevice) ? 1 : 0;
   return VGREResult::SUCCESS;
 }
 
 VGREResult RuntimeEngine::deviceEnablePeerAccess(DeviceId peerDevice) {
-  if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
-  return memoryManager_->enablePeerAccess(currentDeviceId_, peerDevice);
+  MemoryManager *mm = nullptr;
+  DeviceId current = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_ || !memoryManager_)
+      return VGREResult::ERROR_NOT_INITIALIZED;
+    current = currentDeviceId_;
+    if (current < 0 || current >= static_cast<DeviceId>(devices_.size()) ||
+        peerDevice < 0 ||
+        peerDevice >= static_cast<DeviceId>(devices_.size())) {
+      return VGREResult::ERROR_INVALID_DEVICE;
+    }
+    mm = memoryManager_.get();
+  }
+  return mm->enablePeerAccess(current, peerDevice);
 }
 
 VGREResult RuntimeEngine::deviceDisablePeerAccess(DeviceId peerDevice) {
-  if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
-  return memoryManager_->disablePeerAccess(currentDeviceId_, peerDevice);
+  MemoryManager *mm = nullptr;
+  DeviceId current = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_ || !memoryManager_)
+      return VGREResult::ERROR_NOT_INITIALIZED;
+    current = currentDeviceId_;
+    if (current < 0 || current >= static_cast<DeviceId>(devices_.size()) ||
+        peerDevice < 0 ||
+        peerDevice >= static_cast<DeviceId>(devices_.size())) {
+      return VGREResult::ERROR_INVALID_DEVICE;
+    }
+    mm = memoryManager_.get();
+  }
+  return mm->disablePeerAccess(current, peerDevice);
 }
 
 // ── CUDA Graphs API ────────────────────────────────────────────────────────
 VGREResult RuntimeEngine::streamBeginCapture(StreamId stream) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_ || !graphManager_)
+    return VGREResult::ERROR_NOT_INITIALIZED;
   if (captureState_.count(stream))
     return VGREResult::ERROR_INVALID_VALUE;
 
@@ -441,6 +535,8 @@ VGREResult RuntimeEngine::streamBeginCapture(StreamId stream) {
 
 VGREResult RuntimeEngine::streamEndCapture(StreamId stream, GraphId &outGraph) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_ || !graphManager_)
+    return VGREResult::ERROR_NOT_INITIALIZED;
   auto it = captureState_.find(stream);
   if (it == captureState_.end())
     return VGREResult::ERROR_INVALID_VALUE;
@@ -455,31 +551,73 @@ VGREResult RuntimeEngine::streamEndCapture(StreamId stream, GraphId &outGraph) {
 
 VGREResult RuntimeEngine::graphInstantiate(GraphId graph,
                                            GraphExecId &outExec) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_ || !graphManager_)
+    return VGREResult::ERROR_NOT_INITIALIZED;
   return graphManager_->instantiate(graph, outExec);
 }
 
 VGREResult RuntimeEngine::graphLaunch(GraphExecId exec, StreamId stream) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_ || !graphManager_)
+      return VGREResult::ERROR_NOT_INITIALIZED;
+  }
   return graphManager_->launch(exec, stream);
 }
 
 VGREResult RuntimeEngine::graphDestroy(GraphId graph) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_ || !graphManager_)
+    return VGREResult::ERROR_NOT_INITIALIZED;
   return graphManager_->destroyGraph(graph);
 }
 
 VGREResult RuntimeEngine::graphExecDestroy(GraphExecId exec) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_ || !graphManager_)
+    return VGREResult::ERROR_NOT_INITIALIZED;
   return graphManager_->destroyGraphExec(exec);
 }
 
 // ── Sub-system access ──────────────────────────────────────────────────────
-MemoryManager &RuntimeEngine::getMemoryManager() { return *memoryManager_; }
+MemoryManager &RuntimeEngine::getMemoryManager() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_ || !memoryManager_) {
+    throw VGREException(VGREResult::ERROR_NOT_INITIALIZED,
+                        "Runtime engine is not initialized");
+  }
+  return *memoryManager_;
+}
 
-Scheduler &RuntimeEngine::getScheduler() { return *scheduler_; }
+Scheduler &RuntimeEngine::getScheduler() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_ || !scheduler_) {
+    throw VGREException(VGREResult::ERROR_NOT_INITIALIZED,
+                        "Runtime engine is not initialized");
+  }
+  return *scheduler_;
+}
 
 VirtualGPUDevice &RuntimeEngine::getDevice() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_ || devices_.empty()) {
+    throw VGREException(VGREResult::ERROR_NOT_INITIALIZED,
+                        "Runtime engine is not initialized");
+  }
+  if (currentDeviceId_ < 0 ||
+      currentDeviceId_ >= static_cast<DeviceId>(devices_.size())) {
+    throw VGREException(VGREResult::ERROR_INVALID_DEVICE, "Invalid device ID");
+  }
   return *devices_[currentDeviceId_];
 }
 
 VirtualGPUDevice &RuntimeEngine::getDevice(DeviceId id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_) {
+    throw VGREException(VGREResult::ERROR_NOT_INITIALIZED,
+                        "Runtime engine is not initialized");
+  }
   if (id < 0 || id >= static_cast<DeviceId>(devices_.size())) {
     throw VGREException(VGREResult::ERROR_INVALID_DEVICE, "Invalid device ID");
   }

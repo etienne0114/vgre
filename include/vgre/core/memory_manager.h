@@ -32,7 +32,16 @@ struct Allocation {
       0; // Support for cudaMemAttachGlobal / cudaMemAttachHost
 };
 
-// ── Memory Manager (simulates GPU VRAM) ────────────────────────────────────
+// ── Lock-free UVM region tracking for signal handler ───────────────────────
+constexpr size_t MAX_MANAGED_REGIONS = 1024;
+struct ManagedRegion {
+  std::atomic<void *> ptr{nullptr};
+  std::atomic<size_t> size{0};
+  std::atomic<bool> isResidentOnHost{false};
+  std::atomic<bool> valid{false};
+};
+
+// ── Memory Manager (virtual GPU memory backing) ────────────────────────────
 class MemoryManager {
 public:
   explicit MemoryManager(size_t poolSize = 4ULL * 1024 * 1024 * 1024);
@@ -56,6 +65,7 @@ public:
   size_t getUsedMemory() const;
   size_t getFreeMemory() const;
   bool isValidHandle(MemoryHandle handle) const;
+  size_t getAllocationSize(MemoryHandle handle) const;
 
   // UVM Residency for Dashboard
   void getPageResidency(uint8_t outMap[1024]) const;
@@ -81,8 +91,12 @@ private:
   static void segfaultHandler(int sig, siginfo_t *si, void *unused);
 #endif
   void setupSignalHandler();
+  void teardownSignalHandler();
   void *alignedAlloc(size_t size, size_t alignment);
   void alignedFree(void *ptr);
+
+  bool registerManagedRegion(void *ptr, size_t size);
+  void unregisterManagedRegion(void *ptr);
 
   void calibrateBandwidth();
 
@@ -90,6 +104,9 @@ private:
   std::atomic<size_t> usedMemory_{0};
   std::unordered_map<MemoryHandle, Allocation> allocations_;
   mutable std::mutex mutex_;
+
+  // Lock-free array for signal-safe page fault handling
+  ManagedRegion managedRegions_[MAX_MANAGED_REGIONS];
 
   // Calibrated baselines
   std::atomic<double> h2dBandwidth_{25.0};

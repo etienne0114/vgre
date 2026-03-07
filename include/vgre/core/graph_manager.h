@@ -5,6 +5,7 @@
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -68,6 +69,7 @@ private:
   std::unordered_map<GraphExecId, std::shared_ptr<GraphExec>> executables_;
   GraphId nextGraphId_ = 1;
   GraphExecId nextExecId_ = 1;
+  mutable std::mutex mutex_;
 };
 
 } // namespace core

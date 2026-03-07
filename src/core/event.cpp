@@ -27,9 +27,13 @@ VGREResult Event::record(StreamId stream) {
   // we care about the inner lambda executing.
   try {
     auto fut = Scheduler::instance().submitStreamTask(stream, task);
-    res = VGREResult::SUCCESS;
+    if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+      res = fut.get();
+    } else {
+      res = VGREResult::SUCCESS;
+    }
   } catch (...) {
-    res = VGREResult::ERROR_UNKNOWN;
+    res = VGREResult::ERROR_LAUNCH_FAILURE;
   }
 
   if (res == VGREResult::SUCCESS) {
@@ -55,19 +59,35 @@ VGREResult Event::synchronize() const {
     fut.wait();
     return VGREResult::SUCCESS;
   }
-  return VGREResult::ERROR_UNKNOWN;
+  return VGREResult::ERROR_INVALID_VALUE;
 }
 
 VGREResult Event::elapsedTime(const Event &start, float &outMs) const {
+  if (&start == this) {
+    outMs = 0.0f;
+    return VGREResult::SUCCESS;
+  }
+
   // Synchronize both events to ensure they have timestamps
   if (start.synchronize() != VGREResult::SUCCESS ||
       this->synchronize() != VGREResult::SUCCESS) {
     return VGREResult::ERROR_INVALID_VALUE;
   }
 
+  std::shared_future<TimePoint> startFuture;
+  std::shared_future<TimePoint> endFuture;
+  {
+    std::scoped_lock lock(start.mutex_, mutex_);
+    startFuture = start.future_;
+    endFuture = future_;
+  }
+  if (!startFuture.valid() || !endFuture.valid()) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+
   // Both are valid and resolved at this point
-  TimePoint tStart = start.future_.get();
-  TimePoint tEnd = this->future_.get();
+  TimePoint tStart = startFuture.get();
+  TimePoint tEnd = endFuture.get();
 
   std::chrono::duration<float, std::milli> diff = tEnd - tStart;
   outMs = diff.count();
