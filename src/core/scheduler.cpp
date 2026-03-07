@@ -1,6 +1,13 @@
 #include "vgre/core/scheduler.h"
 #include "vgre/common/logger.h"
 
+#if defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace vgre {
 namespace core {
 
@@ -13,7 +20,17 @@ Scheduler::Scheduler(int numThreads) : numThreads_(numThreads) {
   }
 
   for (int i = 0; i < numThreads_; ++i) {
-    workers_.emplace_back(&Scheduler::workerLoop, this);
+    workers_.emplace_back([this, i]() {
+#if defined(__linux__)
+      cpu_set_t cpuset;
+      CPU_ZERO(&cpuset);
+      CPU_SET(static_cast<int>(i % std::thread::hardware_concurrency()), &cpuset);
+      pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+#elif defined(_WIN32)
+      SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << (static_cast<DWORD_PTR>(i) % 64));
+#endif
+      this->workerLoop();
+    });
   }
 
   VGRE_LOG_INFO("Scheduler", "Started thread pool with " +
@@ -215,7 +232,17 @@ void Scheduler::setThreadCount(int n) {
   shutdown_ = false;
   numThreads_ = n;
   for (int i = 0; i < numThreads_; ++i) {
-    workers_.emplace_back(&Scheduler::workerLoop, this);
+    workers_.emplace_back([this, i]() {
+#if defined(__linux__)
+      cpu_set_t cpuset;
+      CPU_ZERO(&cpuset);
+      CPU_SET(static_cast<int>(i % std::thread::hardware_concurrency()), &cpuset);
+      pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+#elif defined(_WIN32)
+      SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << (static_cast<DWORD_PTR>(i) % 64));
+#endif
+      this->workerLoop();
+    });
   }
 
   VGRE_LOG_INFO("Scheduler", "Thread pool resized to " +

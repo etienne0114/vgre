@@ -13,6 +13,10 @@
 namespace vgre {
 namespace api {
 
+namespace {
+static thread_local cudaError_t g_lastError = cudaSuccess;
+}
+
 CUDAInterceptor::CUDAInterceptor() = default;
 CUDAInterceptor::~CUDAInterceptor() = default;
 
@@ -23,8 +27,8 @@ cudaError_t CUDAInterceptor::init() {
 
   auto r = core::RuntimeEngine::instance().initialize();
   if (r != VGREResult::SUCCESS) {
-    lastError_ = convertResult(r);
-    return lastError_;
+    g_lastError = convertResult(r);
+    return g_lastError;
   }
 
   initialized_ = true;
@@ -52,8 +56,8 @@ cudaError_t CUDAInterceptor::setDevice(int device) {
       return err;
   }
   auto r = core::RuntimeEngine::instance().setDevice(device);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::getDevice(int *device) {
@@ -108,8 +112,8 @@ cudaError_t CUDAInterceptor::deviceSynchronize() {
       return err;
   }
   auto r = core::RuntimeEngine::instance().synchronize();
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 // ── Memory Management ──────────────────────────────────────────────────────
@@ -126,8 +130,8 @@ cudaError_t CUDAInterceptor::malloc(void **devPtr, size_t size) {
   auto r =
       core::RuntimeEngine::instance().getMemoryManager().allocate(size, handle);
   if (r != VGREResult::SUCCESS) {
-    lastError_ = convertResult(r);
-    return lastError_;
+    g_lastError = convertResult(r);
+    return g_lastError;
   }
 
   *devPtr = handle;
@@ -147,8 +151,8 @@ cudaError_t CUDAInterceptor::mallocManaged(void **devPtr, size_t size,
   MemoryHandle handle;
   auto r = core::RuntimeEngine::instance().mallocManaged(size, handle, flags);
   if (r != VGREResult::SUCCESS) {
-    lastError_ = convertResult(r);
-    return lastError_;
+    g_lastError = convertResult(r);
+    return g_lastError;
   }
 
   *devPtr = handle;
@@ -165,8 +169,8 @@ cudaError_t CUDAInterceptor::free(void *devPtr) {
     return cudaSuccess; // cudaFree(NULL) is valid
 
   auto r = core::RuntimeEngine::instance().getMemoryManager().free(devPtr);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::memcpy(void *dst, const void *src, size_t count,
@@ -203,8 +207,8 @@ cudaError_t CUDAInterceptor::memcpy(void *dst, const void *src, size_t count,
     return cudaErrorInvalidValue;
   }
 
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::memcpyAsync(void *dst, const void *src,
@@ -228,8 +232,8 @@ cudaError_t CUDAInterceptor::memcpyAsync(void *dst, const void *src,
   });
   if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
     auto r = fut.get();
-    lastError_ = convertResult(r);
-    return lastError_;
+    g_lastError = convertResult(r);
+    return g_lastError;
   }
 
   return cudaSuccess;
@@ -280,8 +284,8 @@ cudaError_t CUDAInterceptor::memsetAsync(void *devPtr, int value, size_t count,
   });
   if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
     auto r = fut.get();
-    lastError_ = convertResult(r);
-    return lastError_;
+    g_lastError = convertResult(r);
+    return g_lastError;
   }
 
   return cudaSuccess;
@@ -300,8 +304,8 @@ cudaError_t CUDAInterceptor::streamCreate(cudaStream_t *stream) {
   StreamId id;
   auto r = core::RuntimeEngine::instance().getDevice().createStream(id);
   if (r != VGREResult::SUCCESS) {
-    lastError_ = convertResult(r);
-    return lastError_;
+    g_lastError = convertResult(r);
+    return g_lastError;
   }
   *stream = id;
   return cudaSuccess;
@@ -314,8 +318,8 @@ cudaError_t CUDAInterceptor::streamDestroy(cudaStream_t stream) {
       return err;
   }
   auto r = core::RuntimeEngine::instance().getDevice().destroyStream(stream);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::streamSynchronize(cudaStream_t stream) {
@@ -326,13 +330,13 @@ cudaError_t CUDAInterceptor::streamSynchronize(cudaStream_t stream) {
   }
   if (stream == 0) {
     auto r = core::RuntimeEngine::instance().streamSynchronize(stream);
-    lastError_ = convertResult(r);
-    return lastError_;
+    g_lastError = convertResult(r);
+    return g_lastError;
   }
 
   auto r = core::RuntimeEngine::instance().getDevice().synchronizeStream(stream);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 // ── Event Management ───────────────────────────────────────────────────
@@ -423,8 +427,8 @@ cudaError_t CUDAInterceptor::launchKernel(const std::string &name,
 
   auto r = core::RuntimeEngine::instance().launchKernel(
       name, source, gridDim, blockDim, args, sharedMem, stream);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 // ── Module Management (Driver API style) ───────────────────────────────────
@@ -438,8 +442,8 @@ cudaError_t CUDAInterceptor::moduleLoad(CUmodule *module, const char *fname) {
     return cudaErrorInvalidValue;
 
   auto r = core::RuntimeEngine::instance().loadModule(fname, *module);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::moduleGetFunction(CUfunction *hfunc, CUmodule hmod,
@@ -454,8 +458,8 @@ cudaError_t CUDAInterceptor::moduleGetFunction(CUfunction *hfunc, CUmodule hmod,
 
   auto r =
       core::RuntimeEngine::instance().getKernelFromModule(hmod, name, *hfunc);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::moduleUnload(CUmodule hmod) {
@@ -465,8 +469,8 @@ cudaError_t CUDAInterceptor::moduleUnload(CUmodule hmod) {
       return err;
   }
   auto r = core::RuntimeEngine::instance().unloadModule(hmod);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 // ── CUDA Graphs API ────────────────────────────────────────────────────────
@@ -477,8 +481,8 @@ cudaError_t CUDAInterceptor::streamBeginCapture(cudaStream_t stream) {
       return err;
   }
   auto r = core::RuntimeEngine::instance().streamBeginCapture(stream);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::streamEndCapture(cudaStream_t stream,
@@ -491,8 +495,8 @@ cudaError_t CUDAInterceptor::streamEndCapture(cudaStream_t stream,
   if (!graph)
     return cudaErrorInvalidValue;
   auto r = core::RuntimeEngine::instance().streamEndCapture(stream, *graph);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::graphInstantiate(cudaGraphExec_t *exec,
@@ -505,8 +509,8 @@ cudaError_t CUDAInterceptor::graphInstantiate(cudaGraphExec_t *exec,
   if (!exec)
     return cudaErrorInvalidValue;
   auto r = core::RuntimeEngine::instance().graphInstantiate(graph, *exec);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::graphLaunch(cudaGraphExec_t exec,
@@ -517,8 +521,8 @@ cudaError_t CUDAInterceptor::graphLaunch(cudaGraphExec_t exec,
       return err;
   }
   auto r = core::RuntimeEngine::instance().graphLaunch(exec, stream);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::graphDestroy(cudaGraph_t graph) {
@@ -528,8 +532,8 @@ cudaError_t CUDAInterceptor::graphDestroy(cudaGraph_t graph) {
       return err;
   }
   auto r = core::RuntimeEngine::instance().graphDestroy(graph);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::graphExecDestroy(cudaGraphExec_t exec) {
@@ -539,8 +543,8 @@ cudaError_t CUDAInterceptor::graphExecDestroy(cudaGraphExec_t exec) {
       return err;
   }
   auto r = core::RuntimeEngine::instance().graphExecDestroy(exec);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 // ── Error Handling ─────────────────────────────────────────────────────────
@@ -568,12 +572,12 @@ const char *CUDAInterceptor::getErrorString(cudaError_t error) {
 }
 
 cudaError_t CUDAInterceptor::getLastError() {
-  cudaError_t e = lastError_;
-  lastError_ = cudaSuccess;
+  cudaError_t e = g_lastError;
+  g_lastError = cudaSuccess;
   return e;
 }
 
-cudaError_t CUDAInterceptor::peekLastError() const { return lastError_; }
+cudaError_t CUDAInterceptor::peekLastError() const { return g_lastError; }
 
 // ── Result conversion ──────────────────────────────────────────────────────
 cudaError_t CUDAInterceptor::convertResult(VGREResult r) {
@@ -648,8 +652,8 @@ cudaError_t CUDAInterceptor::createTextureObject(
       elementSize, desc);
 
   if (r != VGREResult::SUCCESS) {
-    lastError_ = convertResult(r);
-    return lastError_;
+    g_lastError = convertResult(r);
+    return g_lastError;
   }
 
   *pTexObject = texID;
@@ -665,8 +669,8 @@ CUDAInterceptor::destroyTextureObject(cudaTextureObject_t texObject) {
   }
 
   auto r = core::TextureManager::instance().destroyTexture(texObject);
-  lastError_ = convertResult(r);
-  return lastError_;
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 } // namespace api

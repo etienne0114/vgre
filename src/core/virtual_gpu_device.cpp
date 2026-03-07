@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
-#include <sstream>
 #include <thread>
 
 #if defined(_WIN32)
@@ -117,9 +116,6 @@ VirtualGPUDevice::VirtualGPUDevice(DeviceId id) : id_(id) {
   props_.totalConstMem = 64 * 1024;
   props_.computeCapability = 86;
 
-  // Topology defaults
-  props_.pciDomainId = 0;
-  props_.pciBusId = static_cast<int>(id_);
   props_.pciDeviceId = 0;
   props_.isP2PCapable = true;
 }
@@ -150,14 +146,14 @@ void VirtualGPUDevice::detectHardware() {
 
   props_.multiProcessorCount = getCPUCoreCount();
 
-  // Scale VRAM to half of physical RAM (cap at 16 GB)
+  // Scale VRAM to 75% of physical RAM (cap at 32 GB) to be more realistic for a high-end vGPU
 #if defined(_WIN32)
   MEMORYSTATUSEX memInfo;
   memInfo.dwLength = sizeof(MEMORYSTATUSEX);
   GlobalMemoryStatusEx(&memInfo);
-  size_t halfRam = static_cast<size_t>(memInfo.ullTotalPhys) / 2;
-  size_t cap = 16ULL * 1024 * 1024 * 1024;
-  props_.totalGlobalMem = std::min(halfRam, cap);
+  size_t vram = static_cast<size_t>(memInfo.ullTotalPhys * 0.75);
+  size_t cap = 32ULL * 1024 * 1024 * 1024;
+  props_.totalGlobalMem = std::min(vram, cap);
 #elif defined(__APPLE__)
   int mib[2];
   mib[0] = CTL_HW;
@@ -165,24 +161,25 @@ void VirtualGPUDevice::detectHardware() {
   int64_t physical_memory = 0;
   size_t length = sizeof(int64_t);
   sysctl(mib, 2, &physical_memory, &length, NULL, 0);
-  size_t halfRam = static_cast<size_t>(physical_memory) / 2;
-  size_t cap = 16ULL * 1024 * 1024 * 1024;
-  props_.totalGlobalMem = std::min(halfRam, cap);
+  size_t vram = static_cast<size_t>(physical_memory * 0.75);
+  size_t cap = 32ULL * 1024 * 1024 * 1024;
+  props_.totalGlobalMem = std::min(vram, cap);
 #else
   std::ifstream meminfo("/proc/meminfo");
   std::string line;
+  size_t totalKb = 0;
+  size_t availableKb = 0;
   while (std::getline(meminfo, line)) {
     if (line.find("MemTotal") != std::string::npos) {
-      std::istringstream iss(line);
-      std::string label;
-      size_t kb;
-      iss >> label >> kb;
-      size_t halfRam = (kb * 1024) / 2;
-      size_t cap = 16ULL * 1024 * 1024 * 1024;
-      props_.totalGlobalMem = std::min(halfRam, cap);
-      break;
+      std::sscanf(line.c_str(), "MemTotal: %zu", &totalKb);
+    } else if (line.find("MemAvailable") != std::string::npos) {
+      std::sscanf(line.c_str(), "MemAvailable: %zu", &availableKb);
     }
   }
+  // Use 90% of available memory if detected, otherwise fallback to 75% of total
+  size_t vram = (availableKb > 0) ? (availableKb * 1024 * 9) / 10 : (totalKb * 1024 * 3) / 4;
+  size_t cap = 32ULL * 1024 * 1024 * 1024;
+  props_.totalGlobalMem = std::min(vram, cap);
 #endif
 
 #if defined(__linux__)
@@ -191,15 +188,14 @@ void VirtualGPUDevice::detectHardware() {
   if (detectedClockKHz > 0) {
     props_.clockRate = detectedClockKHz;
   } else {
-    props_.clockRate = 3000000;
+    props_.clockRate = 2400000; 
   }
 
   // 2. Detect Real PCI Topology for VGA
-  // We search for the first VGA/3D controller in sysfs
-  bool pciDetected = false;
   DIR *dir = opendir("/sys/bus/pci/devices");
   if (dir) {
     struct dirent *entry;
+    bool found = false;
     while ((entry = readdir(dir)) != nullptr) {
       if (entry->d_name[0] == '.')
         continue;
@@ -214,54 +210,111 @@ void VirtualGPUDevice::detectHardware() {
         if (classCode.find("0x030") != std::string::npos) {
           unsigned int bus, dev, func;
           if (sscanf(entry->d_name, "%*x:%x:%x.%u", &bus, &dev, &func) == 3) {
-            props_.pciBusId = static_cast<int>(bus);
+            props_.pciBusId = static_cast<int>(bus) + static_cast<int>(id_);
             props_.pciDeviceId = static_cast<int>(dev);
             props_.pciDomainId = 0;
-            pciDetected = true;
+            found = true;
             break;
           }
         }
       }
     }
+    if (!found) {
+        // Fallback synthetic PCI on Linux if no VGA class found (e.g. headless server)
+        props_.pciBusId = 1;
+        props_.pciDeviceId = static_cast<int>(id_) + 1;
+        props_.pciDomainId = 0;
+    }
     closedir(dir);
   }
+#elif defined(_WIN32)
+  // Windows clock rate via Power Information
+  typedef struct _PROCESSOR_POWER_INFORMATION {
+    ULONG Number;
+    ULONG MaxMhz;
+    ULONG CurrentMhz;
+    ULONG MhzLimit;
+    ULONG MaxIdleState;
+    ULONG CurrentIdleState;
+  } PROCESSOR_POWER_INFORMATION;
 
-  if (!pciDetected) {
-    props_.pciBusId = 0;
-    props_.pciDeviceId = 2; // Default for many integrated chips
+  std::vector<PROCESSOR_POWER_INFORMATION> dpi(getCPUCoreCount());
+  typedef LONG(WINAPI * PCallNtPowerInformation)(POWER_INFORMATION_LEVEL, PVOID, ULONG, PVOID, ULONG);
+  HMODULE hPowrProf = LoadLibraryA("powrprof.dll");
+  if (hPowrProf) {
+    PCallNtPowerInformation pCallNtPowerInformation = (PCallNtPowerInformation)GetProcAddress(hPowrProf, "CallNtPowerInformation");
+    if (pCallNtPowerInformation && pCallNtPowerInformation(ProcessorInformation, NULL, 0, &dpi[0], sizeof(PROCESSOR_POWER_INFORMATION) * (ULONG)dpi.size()) == 0) {
+      props_.clockRate = static_cast<int>(dpi[0].MaxMhz * 1000);
+    } else {
+      props_.clockRate = 2600000;
+    }
+    FreeLibrary(hPowrProf);
+  } else {
+    props_.clockRate = 2200000;
   }
-#else
-  // Fallback if sysfs is restricted or not on Linux (Windows/macOS)
-  props_.clockRate = 3000000;
+  // Synthetic PCI for Windows
   props_.pciBusId = 0;
-  props_.pciDeviceId = 2; // Default for many integrated chips
+  props_.pciDeviceId = static_cast<int>(id_) + 1;
+  props_.pciDomainId = 0;
+#elif defined(__APPLE__)
+  props_.clockRate = 3200000; // M-series is generally high frequency
+  // Synthetic PCI for macOS
+  props_.pciBusId = 1;
+  props_.pciDeviceId = static_cast<int>(id_) + 1;
+  props_.pciDomainId = 1; 
+#else
+  props_.clockRate = 2500000;
+  props_.pciBusId = 0;
+  props_.pciDeviceId = static_cast<int>(id_) + 1;
+  props_.pciDomainId = 0;
 #endif
 
-  // 3. Map Compute Capability based on hardware features
-  // We use the CPU feature set as a proxy for our virtual Sm level
-  // AVX-512 -> Sm 8.0 (Ampere level)
-  // AVX2 -> Sm 7.5 (Turing level)
-  // SSE -> Sm 6.x
+  // 3. Robustly map Compute Capability based on hardware features
   props_.major = 6;
-  props_.minor = 0;
+  props_.minor = 1;
 
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__GNUC__) || defined(__clang__)
   if (__builtin_cpu_supports("avx512f")) {
     props_.major = 8;
     props_.minor = 0;
+    props_.sharedMemPerBlock = 164 * 1024; // Sm 8.0 capacity
   } else if (__builtin_cpu_supports("avx2")) {
     props_.major = 7;
     props_.minor = 5;
+    props_.sharedMemPerBlock = 64 * 1024; // Sm 7.5 capacity
+  } else if (__builtin_cpu_supports("avx")) {
+    props_.major = 7;
+    props_.minor = 0;
+    props_.sharedMemPerBlock = 48 * 1024; // Sm 7.0 capacity
+  } else {
+    props_.sharedMemPerBlock = 48 * 1024;
   }
+#else
+  // Fallback for non-gcc compilers on x86
+  props_.major = 7;
+  props_.minor = 5;
+  props_.sharedMemPerBlock = 64 * 1024;
+#endif
+#elif defined(__aarch64__) || defined(_M_ARM64)
+  // Apple Silicon or modern ARM64 server
+  props_.major = 8;
+  props_.minor = 6;
+  props_.sharedMemPerBlock = 100 * 1024;
+#else
+  props_.sharedMemPerBlock = 48 * 1024;
+#endif
 
+  props_.computeCapability = props_.major * 10 + props_.minor;
   props_.warpSize = 32;
-  props_.sharedMemPerBlock = 49152; // 48KB standard
   props_.maxThreadsPerBlock = 1024;
   props_.isP2PCapable = 1;
 
   VGRE_LOG_INFO("VirtualGPUDevice",
-                "Detected: " + std::string(props_.name) + " | Cores=" +
-                    std::to_string(props_.multiProcessorCount) + " | VRAM=" +
-                    std::to_string(props_.totalGlobalMem / (1024 * 1024)) +
+                "Detected: " + std::string(props_.name) + " | Sm=" +
+                    std::to_string(props_.major) + "." + std::to_string(props_.minor) +
+                    " | Cores=" + std::to_string(props_.multiProcessorCount) +
+                    " | VRAM=" + std::to_string(props_.totalGlobalMem / (1024 * 1024)) +
                     " MB | PCI=" + std::to_string(props_.pciBusId) + ":" +
                     std::to_string(props_.pciDeviceId));
 }

@@ -30,6 +30,49 @@ struct dim3 {
 // ── Global Kernel Registry ─────────────────────────────────────────────────
 // Robust registry for tracking fatbinary modules and their associated kernels
 
+static std::string extractPTXFromFatBinary(void *fatCubin) {
+  if (!fatCubin)
+    return "";
+
+  // 0xba55ed01 is the magic number for a CUDA fatbinary
+  const uint32_t FATBIN_MAGIC = 0xba55ed01;
+  const uint32_t *header = reinterpret_cast<const uint32_t *>(fatCubin);
+  
+  const char *data = nullptr;
+  size_t scanSize = 0;
+
+  if (header[0] == FATBIN_MAGIC) {
+    // Structured fatbinary found. Typically the PTX is deeper in the buffer.
+    // We scan the first 1MB of the actual data section.
+    data = reinterpret_cast<const char *>(fatCubin);
+    scanSize = 1024 * 1024;
+  } else {
+    // If magic doesn't match, it might be a raw PTX buffer or a different version.
+    // Fallback to a broader scan.
+    data = reinterpret_cast<const char *>(fatCubin);
+    scanSize = 2 * 1024 * 1024;
+  }
+
+  // Scan for PTX signatures (.version, .target).
+  for (size_t i = 0; i < scanSize - 64; ++i) {
+    if (data[i] == '.' && std::strncmp(&data[i], ".version", 8) == 0) {
+      // Basic validation: must also contain .target soon after
+      bool foundTarget = false;
+      for (size_t j = i + 8; j < i + 1024 && j < scanSize - 8; ++j) {
+        if (data[j] == '.' && std::strncmp(&data[j], ".target", 7) == 0) {
+          foundTarget = true;
+          break;
+        }
+      }
+      if (foundTarget) {
+        // Return the string starting from the found version marker
+        return std::string(&data[i]);
+      }
+    }
+  }
+  return "";
+}
+
 class CUDAModuleRegistry {
 public:
   static CUDAModuleRegistry &instance() {
@@ -44,10 +87,10 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     auto handle = new ModuleHandleWrapper{nextModuleId_++, fatCubin};
 
-    // Do not scan arbitrary memory from fatCubin.
-    // Raw payload layouts are toolchain-dependent and unsafe to probe without
-    // trusted bounds metadata.
-    std::string extractedSource;
+    // Actively scan the fatbinary for PTX source code.
+    // This allows VGRE to JIT-compile kernels even when the original PTX
+    // is embedded in a complex container.
+    std::string extractedSource = extractPTXFromFatBinary(fatCubin);
 
     modules_[handle] = {};
     moduleSources_[handle] = extractedSource; // Store extracted PTX

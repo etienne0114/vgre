@@ -148,8 +148,10 @@ HybridComputeManager::selectBackend(size_t workloadSize,
       return ComputeBackend::CPU;
     }
 
-    // iGPU backend is not implemented as a distinct execution pipeline yet.
-    // Keep AUTO on CPU to avoid misreporting CPU execution as iGPU execution.
+    // Prefer Integrated GPU for medium-to-large workloads if available
+    if (resources_.hasIntegratedGPU) {
+      return ComputeBackend::INTEGRATED_GPU;
+    }
   }
 
   (void)memoryRequired;
@@ -374,11 +376,20 @@ VGREResult HybridComputeManager::distributeWorkload(const CompiledKernelFn &fn,
   }
 
   case ComputeBackend::INTEGRATED_GPU: {
-    (void)hasIntegratedGPU;
+    if (!hasIntegratedGPU) {
+      VGRE_LOG_WARN("HybridComputeManager", "iGPU requested but not available, falling back to CPU");
+      return distributeWorkload(fn, gridDim, blockDim, args, ComputeBackend::CPU);
+    }
+#ifdef VGRE_HAS_OPENCL_BACKEND
+    // Note: distributeWorkload with direct CompiledKernelFn is harder for iGPU
+    // because we need the source for transpilation. 
+    // Usually, code should use distributeRegisteredKernel.
     VGRE_LOG_ERROR("HybridComputeManager",
-                   "Integrated GPU backend requested but no native iGPU "
-                   "execution pipeline is available");
+                   "Function-pointer dispatch not supported on iGPU (requires source for JIT)");
     return VGREResult::ERROR_NOT_SUPPORTED;
+#else
+    return VGREResult::ERROR_NOT_SUPPORTED;
+#endif
   }
 
   case ComputeBackend::REMOTE_NODE: {

@@ -70,26 +70,41 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
        smem.size());
   } else {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic)                                     \
-    num_threads(maxThreads_) if (totalBlocksI > 4)
-#endif
+#pragma omp parallel num_threads(maxThreads_) if (totalBlocksI > 1)
+    {
+      // Thread-local shared memory buffer, allocated once per OpenMP thread
+      SharedMemory threadSmem(sharedMemSize);
+
+#pragma omp for schedule(dynamic)
+      for (int linearIdx = 0; linearIdx < totalBlocksI; ++linearIdx) {
+        uint32_t gz = static_cast<uint32_t>(linearIdx) / (gridDim.x * gridDim.y);
+        uint32_t rem = static_cast<uint32_t>(linearIdx) % (gridDim.x * gridDim.y);
+        uint32_t gy = rem / gridDim.x;
+        uint32_t gx = rem % gridDim.x;
+
+        dim3 blockIdx(gx, gy, gz);
+
+        // Zero the shared memory for the new block
+        threadSmem.reset();
+
+        fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, threadSmem.raw(),
+           threadSmem.size());
+      }
+    }
+#else
     for (int linearIdx = 0; linearIdx < totalBlocksI; ++linearIdx) {
-      // Convert linear index back to 3D block index
       uint32_t gz = static_cast<uint32_t>(linearIdx) / (gridDim.x * gridDim.y);
       uint32_t rem = static_cast<uint32_t>(linearIdx) % (gridDim.x * gridDim.y);
       uint32_t gy = rem / gridDim.x;
       uint32_t gx = rem % gridDim.x;
 
       dim3 blockIdx(gx, gy, gz);
-
-      // Allocate per-block shared memory (each block gets its own buffer)
       SharedMemory smem(sharedMemSize);
 
-      // Execute the kernel function for this block.
-      // The kernel function internally iterates threads within the block.
       fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, smem.raw(),
          smem.size());
     }
+#endif
   }
 
   totalBlocks_ += totalBlocks;

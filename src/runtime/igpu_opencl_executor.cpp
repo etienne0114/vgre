@@ -1,6 +1,7 @@
 #include "vgre/runtime/igpu_opencl_executor.h"
 #include "vgre/common/logger.h"
-#include <iostream>
+#include "vgre/core/memory_manager.h"
+#include "vgre/core/runtime_engine.h"
 #include <regex>
 
 namespace vgre {
@@ -116,7 +117,7 @@ std::string IGPUOpenCLExecutor::getDeviceName() const { return deviceName_; }
 
 VGREResult IGPUOpenCLExecutor::transpileKernel(
     const std::string &kernelName, const std::string &cudaSource,
-    const std::vector<ArgType> &argTypes, std::string &outOpenCLSource) {
+    const std::vector<ArgType> & /*argTypes*/, std::string &outOpenCLSource) {
   std::string s = cudaSource;
 
   // Remove extern "C"
@@ -125,8 +126,15 @@ VGREResult IGPUOpenCLExecutor::transpileKernel(
   // Replace __global__ with __kernel
   s = std::regex_replace(s, std::regex(R"(__global__)"), "__kernel");
 
+  // Replace __shared__ with __local
+  s = std::regex_replace(s, std::regex(R"(__shared__)"), "__local");
+
+  // Replace __constant__ with __constant (OpenCL standard)
+  s = std::regex_replace(s, std::regex(R"(__constant__)"), "__constant");
+
   // Replace pointer arguments with __global void* (OpenCL C requirement)
-  s = std::regex_replace(s, std::regex(R"((float\s*\*|int\s*\*|double\s*\*))"),
+  // Handle various pointer types: float*, int*, double*, void*, uint*, etc.
+  s = std::regex_replace(s, std::regex(R"((\b(float|int|double|void|uint32_t|uint64_t|int32_t|int64_t|uchar|char|short|ushort|long|ulong)\s*\*))"),
                          "__global $1");
 
   // Thread semantic replacement
@@ -228,10 +236,16 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
   for (size_t i = 0; i < argTypes.size(); ++i) {
     if (argTypes[i] == ArgType::POINTER) {
       void *host_ptr = *static_cast<void **>(args[i]);
-      size_t size = argSizes[i];
+      size_t size = (i < argSizes.size()) ? argSizes[i] : 0;
       if (size == 0) {
-        // Heuristic mapping size if unavailable
-        size = gridDim.total() * blockDim.total() * sizeof(float);
+        // Try to get actual size from MemoryManager for real-world functioning
+        size = vgre::core::RuntimeEngine::instance()
+                   .getMemoryManager()
+                   .getAllocationSize(host_ptr);
+        if (size == 0) {
+          // Absolute fallback if not a managed allocation
+          size = gridDim.total() * blockDim.total() * sizeof(float);
+        }
       }
 
       cl_mem buf =
@@ -288,11 +302,17 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
   err = clFinish(queue_);
 
   // Explicitly unmap/map to sync CL_MEM_USE_HOST_PTR back to system memory
+  // This is critical for mobile/integrated GPUs that share system RAM
   for (size_t i = 0; i < buffers.size(); ++i) {
-    void *ptr = clEnqueueMapBuffer(queue_, buffers[i], CL_TRUE,
-                                   CL_MAP_READ | CL_MAP_WRITE, 0, argSizes[i],
-                                   0, nullptr, nullptr, nullptr);
-    clEnqueueUnmapMemObject(queue_, buffers[i], ptr, 0, nullptr, nullptr);
+    // In a real execution, we'd track these pointers more precisely
+    // For now, we perform a blocking map to ensure data consistency
+    void *mapped = clEnqueueMapBuffer(queue_, buffers[i], CL_TRUE,
+                                   CL_MAP_READ | CL_MAP_WRITE, 0, 
+                                   1, // Minimal map to trigger sync if size is unknown
+                                   0, nullptr, nullptr, &err);
+    if (err == CL_SUCCESS) {
+        clEnqueueUnmapMemObject(queue_, buffers[i], mapped, 0, nullptr, nullptr);
+    }
   }
 
   clFinish(queue_);

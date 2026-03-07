@@ -16,8 +16,6 @@
 #include <unistd.h>
 #endif
 
-#include <thread>
-
 namespace vgre {
 namespace core {
 
@@ -594,14 +592,23 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
                         .getDevice(itDst->second.deviceId)
                         .getProperties();
 
-    // If on the same PCI bus, use our measured D2D baseline
-    if (srcProps.pciBusId == dstProps.pciBusId) {
+    // Modeling based on PCI distance:
+    // Distance 0: Same Bus, Same Device (Internal) -> d2dBandwidth_ * 2
+    // Distance 1: Same Bus, Different Device -> d2dBandwidth_
+    // Distance 2: Different Bus -> h2dBandwidth_
+    // Distance 3: Different Domain -> h2dBandwidth_ * 0.5
+    
+    if (srcProps.pciDomainId != dstProps.pciDomainId) {
+      bandwidthGBps = h2dBandwidth_ * 0.5;
+    } else if (srcProps.pciBusId != dstProps.pciBusId) {
+      bandwidthGBps = h2dBandwidth_;
+    } else if (srcProps.pciDeviceId != dstProps.pciDeviceId) {
       bandwidthGBps = d2dBandwidth_;
     } else {
-      bandwidthGBps = h2dBandwidth_ * 0.5; // Heuristic inter-bus penalty
+      bandwidthGBps = d2dBandwidth_ * 2.0;
     }
   } else {
-    bandwidthGBps = d2dBandwidth_ * 2.0; // Device-local copy (L2/HBM)
+    bandwidthGBps = d2dBandwidth_ * 2.5; // Intra-device L1/L2 speed
   }
 
   // Telemetry: Record P2P execution metrics

@@ -1,5 +1,6 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
+#include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
 #include <algorithm>
 #include <cstdlib>
@@ -75,7 +76,7 @@ TCPClusterManager::~TCPClusterManager() { shutdown(); }
 
 VGREResult TCPClusterManager::initialize(bool is_master,
                                          const std::string &host, int port) {
-  if (enabled_.exchange(true))
+  if (enabled_)
     return VGREResult::SUCCESS;
 
 #if defined(_WIN32)
@@ -107,12 +108,14 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     }
 
     int opt = 1;
-#if defined(_WIN32) && !defined(SO_REUSEPORT)
+#if defined(_WIN32)
     setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt,
                sizeof(opt));
 #else
-    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt,
-               sizeof(opt));
+    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
 #endif
 
     struct sockaddr_in address;
@@ -185,6 +188,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     cluster_thread_ = std::thread(&TCPClusterManager::clientLoop, this);
   }
 
+  enabled_ = true;
   return VGREResult::SUCCESS;
 }
 
@@ -310,22 +314,70 @@ void TCPClusterManager::clientLoop() {
     }
 
     // 2. Check for incoming commands from Master
-    char temp[2048];
+    char temp[4096];
     int n = recv(client_fd_, temp, sizeof(temp), MSG_DONTWAIT);
     if (n > 0) {
       client_rx_buffer_.insert(client_rx_buffer_.end(), temp, temp + n);
-      while (client_rx_buffer_.size() >= sizeof(RemoteCommandPacket)) {
-        RemoteCommandPacket pkt{};
-        std::memcpy(&pkt, client_rx_buffer_.data(), sizeof(RemoteCommandPacket));
-        client_rx_buffer_.erase(
-            client_rx_buffer_.begin(),
-            client_rx_buffer_.begin() +
-                static_cast<long>(sizeof(RemoteCommandPacket)));
-        if (pkt.type == PacketType::LAUNCH_KERNEL) {
+      while (true) {
+        if (client_rx_buffer_.size() < sizeof(PacketType))
+          break;
+        
+        PacketType type;
+        std::memcpy(&type, client_rx_buffer_.data(), sizeof(PacketType));
+
+        if (type == PacketType::LAUNCH_KERNEL) {
+          if (client_rx_buffer_.size() < sizeof(RemoteCommandPacket))
+            break;
+          RemoteCommandPacket pkt{};
+          std::memcpy(&pkt, client_rx_buffer_.data(), sizeof(RemoteCommandPacket));
+          client_rx_buffer_.erase(client_rx_buffer_.begin(),
+                                  client_rx_buffer_.begin() + sizeof(RemoteCommandPacket));
           handleRemoteCommand(pkt);
+        } else if (type == PacketType::DATA_HEADER) {
+          if (client_rx_buffer_.size() < sizeof(DataHeaderPacket))
+            break;
+          DataHeaderPacket dpkt{};
+          std::memcpy(&dpkt, client_rx_buffer_.data(), sizeof(DataHeaderPacket));
+          client_rx_buffer_.erase(client_rx_buffer_.begin(),
+                                  client_rx_buffer_.begin() + sizeof(DataHeaderPacket));
+          
+          // Next we expect DATA_BODY
+          size_t remaining = dpkt.size;
+          std::vector<uint8_t> body;
+          body.reserve(remaining);
+
+          // We might need to wait for DATA_BODY packet type and then data
+          // Simplifying: assume DATA_BODY follows immediately without extra type header
+          // OR we check for DATA_BODY type header.
+          // Let's assume Master sends: DATA_HEADER, then DATA_BODY (type), then RAW BYTES.
+          
+          // For simplicity in this implementation, we'll wait for enough data
+          // in a real system we'd use a state machine.
+          while (client_rx_buffer_.size() < sizeof(PacketType) + remaining) {
+             int loop_n = recv(client_fd_, temp, sizeof(temp), 0); // Blocking read for simplicity
+             if (loop_n <= 0) break;
+             client_rx_buffer_.insert(client_rx_buffer_.end(), temp, temp + loop_n);
+          }
+
+          if (client_rx_buffer_.size() >= sizeof(PacketType) + remaining) {
+            PacketType btype;
+            std::memcpy(&btype, client_rx_buffer_.data(), sizeof(PacketType));
+            if (btype == PacketType::DATA_BODY) {
+                void* target = reinterpret_cast<void*>(dpkt.target_ptr);
+                // If it's a managed pointer, we update it
+                auto& mm = core::RuntimeEngine::instance().getMemoryManager();
+                if (mm.isValidHandle(target)) {
+                    std::memcpy(mm.getPointer(target), 
+                                client_rx_buffer_.data() + sizeof(PacketType), 
+                                remaining);
+                }
+                client_rx_buffer_.erase(client_rx_buffer_.begin(),
+                                        client_rx_buffer_.begin() + sizeof(PacketType) + remaining);
+            }
+          }
         } else {
-          VGRE_LOG_ERROR("TCPCluster", "Unknown command packet type");
-          enabled_ = false;
+          // Unknown or out of sync: clear buffer or handle error
+          client_rx_buffer_.clear();
           break;
         }
       }
@@ -386,8 +438,31 @@ VGREResult TCPClusterManager::launchRemoteKernel(
       return VGREResult::ERROR_INVALID_KERNEL;
     }
     if (argTypes[i] == ArgType::POINTER) {
-      VGRE_LOG_ERROR("TCPCluster", "Remote execution with pointer arguments is "
-                                   "currently unsupported over TCP");
+      void* host_ptr = *static_cast<void **>(args[i]);
+      if (host_ptr) {
+        auto &mm = core::RuntimeEngine::instance().getMemoryManager();
+        if (mm.isValidHandle(host_ptr)) {
+          size_t size = mm.getAllocationSize(host_ptr);
+          
+          // 1. Send DATA_HEADER
+          DataHeaderPacket dptr_pkt{};
+          dptr_pkt.type = PacketType::DATA_HEADER;
+          dptr_pkt.target_ptr = reinterpret_cast<uintptr_t>(host_ptr);
+          dptr_pkt.size = size;
+          send_all(clients_[worker_idx].socket_fd, &dptr_pkt, sizeof(DataHeaderPacket));
+
+          // 2. Send DATA_BODY type and content
+          PacketType body_type = PacketType::DATA_BODY;
+          send_all(clients_[worker_idx].socket_fd, &body_type, sizeof(PacketType));
+          send_all(clients_[worker_idx].socket_fd, mm.getPointer(host_ptr), size);
+
+          // The actual argument in the LAUNCH_KERNEL packet is the pointer value
+          pkt.args[i] = reinterpret_cast<uint64_t>(host_ptr);
+          pkt.arg_types[i] = static_cast<uint8_t>(ArgType::POINTER);
+          continue;
+        }
+      }
+      VGRE_LOG_ERROR("TCPCluster", "Remote execution failed: pointer argument is not a managed VGRE handle");
       return VGREResult::ERROR_INVALID_VALUE;
     }
 
@@ -503,10 +578,11 @@ void TCPClusterManager::handleRemoteCommand(const RemoteCommandPacket &pkt) {
       local_args[i] = static_cast<void *>(&arg_f64[i]);
       break;
     }
-    case ArgType::POINTER:
-      VGRE_LOG_ERROR("TCPCluster",
-                     "Rejected remote command: pointer arguments are unsupported");
-      return;
+    case ArgType::POINTER: {
+      arg_u64[i] = pkt.args[i];
+      local_args[i] = static_cast<void*>(&arg_u64[i]);
+      break;
+    }
     default:
       VGRE_LOG_ERROR("TCPCluster",
                      "Rejected remote command: unknown argument type " +
