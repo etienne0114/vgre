@@ -16,6 +16,7 @@ namespace core {
 // ── Stream descriptor ──────────────────────────────────────────────────────
 struct Stream {
   StreamId id = 0;
+  int priority = 0;
   StreamState state = StreamState::IDLE;
 };
 
@@ -27,6 +28,7 @@ public:
 
   // Properties
   const DeviceProperties &getProperties() const;
+  void setProperties(const DeviceProperties &props);
   void setId(DeviceId id);
   DeviceId getId() const;
 
@@ -36,7 +38,7 @@ public:
   bool hasContext() const;
 
   // Streams
-  VGREResult createStream(StreamId &outId);
+  VGREResult createStream(StreamId &outId, int priority = 0);
   VGREResult destroyStream(StreamId id);
   VGREResult synchronizeStream(StreamId id);
   VGREResult synchronizeDevice();

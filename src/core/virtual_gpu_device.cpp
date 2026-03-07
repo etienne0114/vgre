@@ -1,5 +1,7 @@
 #include "vgre/core/virtual_gpu_device.h"
 #include "vgre/common/logger.h"
+#include "vgre/core/runtime_engine.h"
+#include "vgre/core/scheduler.h"
 
 #include <algorithm>
 #include <cstring>
@@ -7,21 +9,52 @@
 #include <sstream>
 #include <thread>
 
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach/machine.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#else
+#include <dirent.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
 namespace vgre {
 namespace core {
 
 // ── Helpers: read CPU info from /proc/cpuinfo ──────────────────────────────
 static std::string readCPUModelName() {
+#if defined(_WIN32)
+  return "VGRE Virtual GPU (Windows CPU)";
+#elif defined(__APPLE__)
+  char buffer[256];
+  size_t size = sizeof(buffer);
+  if (sysctlbyname("machdep.cpu.brand_string", &buffer, &size, NULL, 0) == 0) {
+    // Remove trailing whitespace if any
+    std::string result(buffer);
+    while (!result.empty() && std::isspace(result.back()))
+      result.pop_back();
+    return result;
+  }
+  return "VGRE Virtual GPU (Apple CPU)";
+#else
   std::ifstream cpuinfo("/proc/cpuinfo");
   std::string line;
   while (std::getline(cpuinfo, line)) {
     if (line.find("model name") != std::string::npos) {
       auto pos = line.find(':');
-      if (pos != std::string::npos)
-        return line.substr(pos + 2);
+      if (pos != std::string::npos) {
+        std::string name = line.substr(pos + 2);
+        while (!name.empty() && std::isspace(name.back()))
+          name.pop_back();
+        return name;
+      }
     }
   }
   return "VGRE Virtual GPU (Unknown CPU)";
+#endif
 }
 
 static int getCPUCoreCount() {
@@ -48,6 +81,12 @@ VirtualGPUDevice::VirtualGPUDevice(DeviceId id) : id_(id) {
   props_.clockRate = 1500000;
   props_.totalConstMem = 64 * 1024;
   props_.computeCapability = 86;
+
+  // Topology defaults
+  props_.pciDomainId = 0;
+  props_.pciBusId = static_cast<int>(id_);
+  props_.pciDeviceId = 0;
+  props_.isP2PCapable = true;
 }
 
 VirtualGPUDevice::~VirtualGPUDevice() {
@@ -70,6 +109,24 @@ void VirtualGPUDevice::detectHardware() {
   props_.multiProcessorCount = getCPUCoreCount();
 
   // Scale VRAM to half of physical RAM (cap at 16 GB)
+#if defined(_WIN32)
+  MEMORYSTATUSEX memInfo;
+  memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+  GlobalMemoryStatusEx(&memInfo);
+  size_t halfRam = static_cast<size_t>(memInfo.ullTotalPhys) / 2;
+  size_t cap = 16ULL * 1024 * 1024 * 1024;
+  props_.totalGlobalMem = std::min(halfRam, cap);
+#elif defined(__APPLE__)
+  int mib[2];
+  mib[0] = CTL_HW;
+  mib[1] = HW_MEMSIZE;
+  int64_t physical_memory = 0;
+  size_t length = sizeof(int64_t);
+  sysctl(mib, 2, &physical_memory, &length, NULL, 0);
+  size_t halfRam = static_cast<size_t>(physical_memory) / 2;
+  size_t cap = 16ULL * 1024 * 1024 * 1024;
+  props_.totalGlobalMem = std::min(halfRam, cap);
+#else
   std::ifstream meminfo("/proc/meminfo");
   std::string line;
   while (std::getline(meminfo, line)) {
@@ -84,16 +141,103 @@ void VirtualGPUDevice::detectHardware() {
       break;
     }
   }
+#endif
+
+#if defined(__linux__)
+  // 1. Detect Real Max Clock Speed (from sysfs)
+  std::ifstream freqFile(
+      "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
+  if (freqFile.is_open()) {
+    uint64_t kHz = 0;
+    if (freqFile >> kHz && kHz > 0) {
+      props_.clockRate = static_cast<int>(kHz); // kHz
+    } else {
+      props_.clockRate = 3500000; // 3.5 GHz fallback if read fails
+    }
+  } else {
+    // Fallback if sysfs is restricted
+    props_.clockRate = 3000000;
+  }
+
+  // 2. Detect Real PCI Topology for VGA
+  // We search for the first VGA/3D controller in sysfs
+  bool pciDetected = false;
+  DIR *dir = opendir("/sys/bus/pci/devices");
+  if (dir) {
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+      if (entry->d_name[0] == '.')
+        continue;
+
+      std::string classPath =
+          "/sys/bus/pci/devices/" + std::string(entry->d_name) + "/class";
+      std::ifstream classFile(classPath);
+      if (classFile.is_open()) {
+        std::string classCode;
+        classFile >> classCode;
+        // 0x030000 is VGA, 0x030200 is 3D controller
+        if (classCode.find("0x030") != std::string::npos) {
+          unsigned int bus, dev, func;
+          if (sscanf(entry->d_name, "%*x:%x:%x.%u", &bus, &dev, &func) == 3) {
+            props_.pciBusId = static_cast<int>(bus);
+            props_.pciDeviceId = static_cast<int>(dev);
+            props_.pciDomainId = 0;
+            pciDetected = true;
+            break;
+          }
+        }
+      }
+    }
+    closedir(dir);
+  }
+
+  if (!pciDetected) {
+    props_.pciBusId = 0;
+    props_.pciDeviceId = 2; // Default for many integrated chips
+  }
+#else
+  // Fallback if sysfs is restricted or not on Linux (Windows/macOS)
+  props_.clockRate = 3000000;
+  props_.pciBusId = 0;
+  props_.pciDeviceId = 2; // Default for many integrated chips
+#endif
+
+  // 3. Map Compute Capability based on hardware features
+  // We use the CPU feature set as a proxy for our virtual Sm level
+  // AVX-512 -> Sm 8.0 (Ampere level)
+  // AVX2 -> Sm 7.5 (Turing level)
+  // SSE -> Sm 6.x
+  props_.major = 6;
+  props_.minor = 0;
+
+  if (__builtin_cpu_supports("avx512f")) {
+    props_.major = 8;
+    props_.minor = 0;
+  } else if (__builtin_cpu_supports("avx2")) {
+    props_.major = 7;
+    props_.minor = 5;
+  }
+
+  props_.warpSize = 32;
+  props_.sharedMemPerBlock = 49152; // 48KB standard
+  props_.maxThreadsPerBlock = 1024;
+  props_.isP2PCapable = 1;
 
   VGRE_LOG_INFO("VirtualGPUDevice",
                 "Detected: " + std::string(props_.name) + " | Cores=" +
                     std::to_string(props_.multiProcessorCount) + " | VRAM=" +
                     std::to_string(props_.totalGlobalMem / (1024 * 1024)) +
-                    " MB");
+                    " MB | PCI=" + std::to_string(props_.pciBusId) + ":" +
+                    std::to_string(props_.pciDeviceId));
 }
 
 const DeviceProperties &VirtualGPUDevice::getProperties() const {
   return props_;
+}
+
+void VirtualGPUDevice::setProperties(const DeviceProperties &props) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  props_ = props;
 }
 
 // ── Context ────────────────────────────────────────────────────────────────
@@ -123,7 +267,7 @@ VGREResult VirtualGPUDevice::destroyContext() {
 bool VirtualGPUDevice::hasContext() const { return contextActive_; }
 
 // ── Streams ────────────────────────────────────────────────────────────────
-VGREResult VirtualGPUDevice::createStream(StreamId &outId) {
+VGREResult VirtualGPUDevice::createStream(StreamId &outId, int priority) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!contextActive_) {
     return VGREResult::ERROR_NOT_INITIALIZED;
@@ -131,6 +275,7 @@ VGREResult VirtualGPUDevice::createStream(StreamId &outId) {
   StreamId id = nextStreamId_++;
   Stream s;
   s.id = id;
+  s.priority = priority;
   s.state = StreamState::IDLE;
   streams_[id] = s;
   outId = id;
@@ -152,16 +297,32 @@ VGREResult VirtualGPUDevice::destroyStream(StreamId id) {
 }
 
 VGREResult VirtualGPUDevice::synchronizeStream(StreamId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = streams_.find(id);
-  if (it == streams_.end()) {
-    return VGREResult::ERROR_INVALID_VALUE;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = streams_.find(id);
+    if (it == streams_.end()) {
+      return VGREResult::ERROR_INVALID_VALUE;
+    }
   }
-  it->second.state = StreamState::IDLE;
+
+  // 1. Wait for scheduler to finish queue if the engine is initialized
+  auto &engine = vgre::core::RuntimeEngine::instance();
+  if (engine.isInitialized()) {
+    engine.getScheduler().waitStream(id);
+  }
+
+  // 2. Mark stream IDLE
+  std::lock_guard<std::mutex> lock(mutex_);
+  streams_[id].state = StreamState::IDLE;
   return VGREResult::SUCCESS;
 }
 
 VGREResult VirtualGPUDevice::synchronizeDevice() {
+  auto &engine = vgre::core::RuntimeEngine::instance();
+  if (engine.isInitialized()) {
+    engine.getScheduler().waitAll();
+  }
+
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto &[_, stream] : streams_) {
     stream.state = StreamState::IDLE;

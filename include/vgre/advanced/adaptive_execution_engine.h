@@ -54,7 +54,7 @@ public:
   double getMaxGFLOPS() const { return maxGflops_; }
   double getAvgLatencyMs() const;
   int getActiveKernelCount() const { return activeKernels_; }
-  float getSimulatedTemperature() const;
+  float getDeviceTemperature() const;
   double getMemoryBandwidth() const { return totalBandwidth_; }
   double getMaxMemoryBandwidth() const {
     return 64.0;

@@ -40,7 +40,11 @@ private:
 
   bool enabled_ = false;
   bool isMaster_ = false;
+#if defined(_WIN32)
+  void *shm_fd_ = nullptr; // HANDLE on Windows
+#else
   int shm_fd_ = -1;
+#endif
   GlobalState *state_ = nullptr;
   int local_slot_ = -1;
   std::mutex mutex_;

@@ -1,6 +1,7 @@
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/common/logger.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
+#include <fstream>
 
 #include <algorithm>
 #include <cmath>
@@ -216,10 +217,18 @@ double AdaptiveExecutionEngine::getAvgLatencyMs() const {
   return (totalExecutions_ > 0) ? totalLatencyMs_ / totalExecutions_ : 0.0;
 }
 
-float AdaptiveExecutionEngine::getSimulatedTemperature() const {
-  // Realistic thermal slope: base idle (30C) + workload delta.
-  // We use the moving average GFLOPS to avoid jittery thermal spikes.
-  // Assume a peak load of 1000 GFLOPS might reach 85C on high-end desktop.
+float AdaptiveExecutionEngine::getDeviceTemperature() const {
+#if defined(__linux__)
+  // Read real thermal zone 0 (CPU package)
+  std::ifstream thermalFile("/sys/class/thermal/thermal_zone0/temp");
+  if (thermalFile.is_open()) {
+    int milliC;
+    thermalFile >> milliC;
+    return static_cast<float>(milliC) / 1000.0f;
+  }
+#endif
+
+  // Fallback to idle 30C + workload delta if sysfs is read-blocked
   double normalizedLoad = std::min(totalGflops_ / 1000.0, 1.0);
   return static_cast<float>(30.0 + normalizedLoad * 55.0);
 }

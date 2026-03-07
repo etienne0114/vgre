@@ -9,8 +9,12 @@
 #include <mutex>
 #include <unordered_map>
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <signal.h>
 #include <sys/mman.h>
+#endif
 
 namespace vgre {
 namespace core {
@@ -23,6 +27,9 @@ struct Allocation {
   bool inUse = false;
   bool isManaged = false;
   bool isResidentOnHost = true;
+  DeviceId deviceId = 0;
+  unsigned int attachmentFlags =
+      0; // Support for cudaMemAttachGlobal / cudaMemAttachHost
 };
 
 // ── Memory Manager (simulates GPU VRAM) ────────────────────────────────────
@@ -32,8 +39,10 @@ public:
   ~MemoryManager();
 
   // Allocation
-  VGREResult allocate(size_t size, MemoryHandle &outHandle);
-  VGREResult allocateManaged(size_t size, MemoryHandle &outHandle);
+  VGREResult allocate(size_t size, MemoryHandle &outHandle,
+                      DeviceId deviceId = 0);
+  VGREResult allocateManaged(size_t size, MemoryHandle &outHandle,
+                             DeviceId deviceId = 0, unsigned int flags = 0);
   VGREResult free(MemoryHandle handle);
 
   // Transfers
@@ -56,23 +65,44 @@ public:
   // Get raw pointer from handle (for kernel execution)
   void *getPointer(MemoryHandle handle) const;
 
+  // P2P Management
+  VGREResult enablePeerAccess(DeviceId currentDevice, DeviceId peerDevice);
+  VGREResult disablePeerAccess(DeviceId currentDevice, DeviceId peerDevice);
+  bool canAccessPeer(DeviceId currentDevice, DeviceId peerDevice) const;
+  DeviceId getOwnerDevice(MemoryHandle handle) const;
+
   // Singleton convenience
   static MemoryManager &instance();
 
 private:
+#if defined(_WIN32)
+  static LONG CALLBACK vectoredHandler(PEXCEPTION_POINTERS exceptionInfo);
+#else
   static void segfaultHandler(int sig, siginfo_t *si, void *unused);
+#endif
   void setupSignalHandler();
   void *alignedAlloc(size_t size, size_t alignment);
   void alignedFree(void *ptr);
+
+  void calibrateBandwidth();
 
   size_t poolSize_;
   std::atomic<size_t> usedMemory_{0};
   std::unordered_map<MemoryHandle, Allocation> allocations_;
   mutable std::mutex mutex_;
 
+  // Calibrated baselines
+  std::atomic<double> h2dBandwidth_{25.0};
+  std::atomic<double> d2hBandwidth_{25.0};
+  std::atomic<double> d2dBandwidth_{50.0};
+
   // UVM metrics
   mutable std::atomic<float> pageFaultRate_{0.0f};
   mutable std::atomic<uint64_t> faultCount_{0};
+
+  // P2P tracking: currentDevice -> set<peerDevice>
+  std::unordered_map<DeviceId, std::unordered_map<DeviceId, bool>>
+      peerAccessMap_;
 };
 
 } // namespace core

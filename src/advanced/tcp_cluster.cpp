@@ -1,10 +1,36 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
-#include <arpa/inet.h>
+#include "vgre/core/runtime_engine.h"
 #include <cstring>
+
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+
+#define CLOSE_SOCKET(s) closesocket(s)
+#define IOCTL_NONBLOCK(s)                                                      \
+  do {                                                                         \
+    u_long mode = 1;                                                           \
+    ioctlsocket(s, FIONBIO, &mode);                                            \
+  } while (0)
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0
+#endif
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+typedef int socklen_t;
+
+#else
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#define CLOSE_SOCKET(s) close(s)
+#define IOCTL_NONBLOCK(s)                                                      \
+  fcntl((s), F_SETFL, fcntl((s), F_GETFL, 0) | O_NONBLOCK)
+#endif
 
 namespace vgre {
 namespace advanced {
@@ -18,6 +44,14 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   if (enabled_.exchange(true))
     return VGREResult::SUCCESS;
 
+#if defined(_WIN32)
+  WSADATA wsaData;
+  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+    VGRE_LOG_ERROR("TCPCluster", "WSAStartup failed");
+    return VGREResult::ERROR_IO;
+  }
+#endif
+
   is_master_ = is_master;
   host_ = host;
   port_ = port;
@@ -25,14 +59,19 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   if (is_master_) {
     // Master Node (Server)
     server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd_ < 0) {
+    if (server_fd_ == (vgre_socket_t)-1) {
       VGRE_LOG_ERROR("TCPCluster", "Failed to create socket");
       return VGREResult::ERROR_IO;
     }
 
     int opt = 1;
+#if defined(_WIN32) && !defined(SO_REUSEPORT)
+    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt,
+               sizeof(opt));
+#else
     setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt,
                sizeof(opt));
+#endif
 
     struct sockaddr_in address;
     address.sin_family = AF_INET;
@@ -51,7 +90,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     }
 
     // Set non-blocking
-    fcntl(server_fd_, F_SETFL, fcntl(server_fd_, F_GETFL, 0) | O_NONBLOCK);
+    IOCTL_NONBLOCK(server_fd_);
 
     VGRE_LOG_INFO("TCPCluster",
                   "Master Server Listening on port " + std::to_string(port_));
@@ -59,7 +98,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   } else {
     // Client Node (Worker)
     client_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (client_fd_ < 0) {
+    if (client_fd_ == (vgre_socket_t)-1) {
       VGRE_LOG_ERROR("TCPCluster", "Failed to create client socket");
       return VGREResult::ERROR_IO;
     }
@@ -80,13 +119,13 @@ VGREResult TCPClusterManager::initialize(bool is_master,
                                        " (Will run locally only)");
       // Don't fully fail, just don't enable the background loop.
       enabled_ = false;
-      close(client_fd_);
-      client_fd_ = -1;
+      CLOSE_SOCKET(client_fd_);
+      client_fd_ = (vgre_socket_t)-1;
       return VGREResult::SUCCESS;
     }
 
     // Set non-blocking
-    fcntl(client_fd_, F_SETFL, fcntl(client_fd_, F_GETFL, 0) | O_NONBLOCK);
+    IOCTL_NONBLOCK(client_fd_);
 
     VGRE_LOG_INFO("TCPCluster", "Connected to Remote Master Node at " + host_);
     cluster_thread_ = std::thread(&TCPClusterManager::clientLoop, this);
@@ -106,16 +145,20 @@ void TCPClusterManager::shutdown() {
   if (is_master_) {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     for (auto &client : clients_) {
-      if (client.socket_fd >= 0)
-        close(client.socket_fd);
+      if (client.socket_fd != (vgre_socket_t)-1)
+        CLOSE_SOCKET(client.socket_fd);
     }
     clients_.clear();
-    if (server_fd_ >= 0)
-      close(server_fd_);
+    if (server_fd_ != (vgre_socket_t)-1)
+      CLOSE_SOCKET(server_fd_);
   } else {
-    if (client_fd_ >= 0)
-      close(client_fd_);
+    if (client_fd_ != (vgre_socket_t)-1)
+      CLOSE_SOCKET(client_fd_);
   }
+
+#if defined(_WIN32)
+  WSACleanup();
+#endif
 }
 
 void TCPClusterManager::serverLoop() {
@@ -123,11 +166,11 @@ void TCPClusterManager::serverLoop() {
     // Accept new connections
     struct sockaddr_in address;
     int addrlen = sizeof(address);
-    int new_socket =
+    vgre_socket_t new_socket =
         accept(server_fd_, (struct sockaddr *)&address, (socklen_t *)&addrlen);
 
-    if (new_socket >= 0) {
-      fcntl(new_socket, F_SETFL, fcntl(new_socket, F_GETFL, 0) | O_NONBLOCK);
+    if (new_socket != (vgre_socket_t)-1) {
+      IOCTL_NONBLOCK(new_socket);
       std::lock_guard<std::mutex> lock(clients_mutex_);
       clients_.push_back(
           {new_socket, {}, true}); // Initialize with zero'd struct
@@ -135,41 +178,32 @@ void TCPClusterManager::serverLoop() {
       VGRE_LOG_INFO("TCPCluster", "New remote node connected via TCP.");
     }
 
-    // Read telemetry from all clients
+    // Read data from all clients
     {
       std::lock_guard<std::mutex> lock(clients_mutex_);
       for (auto &client : clients_) {
         if (!client.active)
           continue;
 
-        // Robust read for potentially partial TCP packets
-        uint8_t *ptr = reinterpret_cast<uint8_t *>(&client.last_telemetry);
-        int total_read = 0;
-        const int expected = sizeof(vgre_telemetry_t);
-
-        while (total_read < expected) {
-          int valread =
-              read(client.socket_fd, ptr + total_read, expected - total_read);
-          if (valread > 0) {
-            total_read += valread;
-          } else if (valread == 0) {
-            // Disconnected
-            client.active = false;
-            close(client.socket_fd);
-            client.socket_fd = -1;
-            VGRE_LOG_INFO("TCPCluster", "Remote node disconnected.");
-            break;
-          } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // No more data for now
-            break;
-          } else {
-            // Error
-            client.active = false;
-            close(client.socket_fd);
-            client.socket_fd = -1;
-            VGRE_LOG_ERROR("TCPCluster", "Read error on remote node.");
-            break;
+        // Read Packet Type
+        PacketType type;
+        int n = recv(client.socket_fd, (char *)&type, sizeof(PacketType),
+                     MSG_DONTWAIT);
+        if (n == sizeof(PacketType)) {
+          if (type == PacketType::TELEMETRY) {
+            ssize_t bytes_read =
+                recv(client.socket_fd, (char *)&client.last_telemetry,
+                     sizeof(vgre_telemetry_t), 0);
+            if (bytes_read < 0 && (errno != EAGAIN && errno != EWOULDBLOCK)) {
+              client.active = false;
+            }
           }
+        } else if (n == 0 ||
+                   (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+          client.active = false;
+          CLOSE_SOCKET(client.socket_fd);
+          client.socket_fd = (vgre_socket_t)-1;
+          VGRE_LOG_INFO("TCPCluster", "Remote node disconnected.");
         }
       }
     }
@@ -179,20 +213,99 @@ void TCPClusterManager::serverLoop() {
 
 void TCPClusterManager::clientLoop() {
   while (enabled_) {
-    vgre_telemetry_t payload;
+    // 1. Send Telemetry to Master
+    vgre_telemetry_t telemetry;
     {
       std::lock_guard<std::mutex> lock(client_mutex_);
-      payload = client_telemetry_buffer_;
+      telemetry = client_telemetry_buffer_;
     }
 
-    // Ignore empty/zero payloads if not populated yet
-    if (payload.timestamp > 0) {
-      send(client_fd_, &payload, sizeof(vgre_telemetry_t), MSG_NOSIGNAL);
+    if (telemetry.timestamp > 0) {
+      PacketType type = PacketType::TELEMETRY;
+      send(client_fd_, (const char *)&type, sizeof(PacketType), MSG_NOSIGNAL);
+      send(client_fd_, (const char *)&telemetry, sizeof(vgre_telemetry_t),
+           MSG_NOSIGNAL);
     }
 
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(100)); // 10Hz streaming TCP
+    // 2. Check for incoming commands from Master
+    RemoteCommandPacket pkt;
+    int n = recv(client_fd_, (char *)&pkt, sizeof(RemoteCommandPacket),
+                 MSG_DONTWAIT);
+    if (n == sizeof(RemoteCommandPacket)) {
+      if (pkt.type == PacketType::LAUNCH_KERNEL) {
+        handleRemoteCommand(pkt);
+      }
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
+}
+
+VGREResult TCPClusterManager::launchRemoteKernel(
+    int worker_idx, uint64_t kernel_id, const uint32_t grid_dim[3],
+    const uint32_t block_dim[3], void **args, int num_args, size_t shared_mem) {
+  if (!is_master_)
+    return VGREResult::ERROR_INVALID_VALUE;
+
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  if (worker_idx < 0 || worker_idx >= static_cast<int>(clients_.size()) ||
+      !clients_[worker_idx].active) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+
+  std::vector<ArgType> argTypes;
+  if (core::RuntimeEngine::instance().getKernelArgTypes(kernel_id, argTypes) !=
+      VGREResult::SUCCESS) {
+    return VGREResult::ERROR_INVALID_KERNEL;
+  }
+
+  RemoteCommandPacket pkt;
+  pkt.type = PacketType::LAUNCH_KERNEL;
+  pkt.kernel_id = kernel_id;
+  std::memcpy(pkt.grid_dim, grid_dim, sizeof(pkt.grid_dim));
+  std::memcpy(pkt.block_dim, block_dim, sizeof(pkt.block_dim));
+  pkt.shared_mem = shared_mem;
+  pkt.num_args = std::min(num_args, 8);
+
+  // Simplified: only supporting numeric args for now
+  for (int i = 0; i < pkt.num_args; ++i) {
+    if (i < argTypes.size() && argTypes[i] == ArgType::POINTER) {
+      VGRE_LOG_ERROR("TCPCluster", "Remote execution with pointer arguments is "
+                                   "currently unsupported over TCP");
+      return VGREResult::ERROR_INVALID_VALUE;
+    }
+
+    if (args[i]) {
+      // Best-effort value cast for the protocol
+      pkt.args[i] = *reinterpret_cast<double *>(args[i]);
+    } else {
+      pkt.args[i] = 0;
+    }
+  }
+
+  send(clients_[worker_idx].socket_fd, (const char *)&pkt,
+       sizeof(RemoteCommandPacket), MSG_NOSIGNAL);
+  VGRE_LOG_INFO("TCPCluster", "Dispatched remote kernel launch to worker " +
+                                  std::to_string(worker_idx));
+
+  return VGREResult::SUCCESS;
+}
+
+void TCPClusterManager::handleRemoteCommand(const RemoteCommandPacket &pkt) {
+  VGRE_LOG_INFO("TCPCluster",
+                "Executing remote kernel launch request (Kernel ID: " +
+                    std::to_string(pkt.kernel_id) + ")");
+
+  void *local_args[8];
+  for (int i = 0; i < pkt.num_args; ++i) {
+    local_args[i] = (void *)&pkt.args[i];
+  }
+
+  dim3 gd(pkt.grid_dim[0], pkt.grid_dim[1], pkt.grid_dim[2]);
+  dim3 bd(pkt.block_dim[0], pkt.block_dim[1], pkt.block_dim[2]);
+
+  vgre::core::RuntimeEngine::instance().launchKernel(
+      pkt.kernel_id, gd, bd, local_args, pkt.shared_mem, 0);
 }
 
 void TCPClusterManager::broadcastLocalTelemetry(

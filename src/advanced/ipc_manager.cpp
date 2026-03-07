@@ -3,9 +3,14 @@
 #include "vgre/common/logger.h"
 #include <cstring>
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 namespace vgre {
 namespace advanced {
@@ -35,16 +40,43 @@ bool IPCManager::initialize(bool isMaster) {
     if (state_ && local_slot_ != -1) {
       state_->slots[local_slot_].active = false;
     }
+#if defined(_WIN32)
+    if (state_)
+      UnmapViewOfFile(state_);
+    if (shm_fd_)
+      CloseHandle(shm_fd_);
+    shm_fd_ = nullptr;
+#else
     if (state_)
       munmap(state_, sizeof(GlobalState));
     if (shm_fd_ != -1)
       close(shm_fd_);
+    shm_fd_ = -1;
+#endif
     enabled_ = false;
     state_ = nullptr;
-    shm_fd_ = -1;
   }
 
   isMaster_ = isMaster;
+
+#if defined(_WIN32)
+  std::string shmName = "Local\\VGRE_GLOBAL_STATE";
+  shm_fd_ = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
+                               sizeof(GlobalState), shmName.c_str());
+  if (!shm_fd_) {
+    VGRE_LOG_ERROR("IPCManager", "Failed to open shared memory: " + shmName);
+    return false;
+  }
+
+  state_ = (GlobalState *)MapViewOfFile(shm_fd_, FILE_MAP_ALL_ACCESS, 0, 0,
+                                        sizeof(GlobalState));
+  if (!state_) {
+    VGRE_LOG_ERROR("IPCManager", "Failed to map shared memory");
+    CloseHandle(shm_fd_);
+    shm_fd_ = nullptr;
+    return false;
+  }
+#else
   shm_fd_ = shm_open(VGRE_SHM_NAME, O_CREAT | O_RDWR, 0666);
   if (shm_fd_ == -1) {
     VGRE_LOG_ERROR("IPCManager", "Failed to open shared memory: " +
@@ -68,6 +100,7 @@ bool IPCManager::initialize(bool isMaster) {
     VGRE_LOG_ERROR("IPCManager", "Failed to mmap shared memory");
     return false;
   }
+#endif
 
   if (isMaster_) {
     // Master initializes the state
@@ -78,15 +111,39 @@ bool IPCManager::initialize(bool isMaster) {
   }
 
   // Register local process
+#if defined(_WIN32)
+  int32_t myPid = (int32_t)GetCurrentProcessId();
+#else
   int32_t myPid = (int32_t)getpid();
+#endif
+
   for (int i = 0; i < VGRE_MAX_PROCESSES; ++i) {
-    // Atomic-like claim: if slot is inactive or matching our PID (re-init)
-    if (!state_->slots[i].active || state_->slots[i].pid == myPid) {
-      state_->slots[i].pid = myPid;
+    // Atomic slot claim
+    if (state_->slots[i].pid == myPid) {
+      // Re-claiming our own slot
       state_->slots[i].active = true;
       local_slot_ = i;
       break;
     }
+
+    // Attempt to claim an empty slot (pid == 0)
+    int32_t expected = 0;
+#if defined(_WIN32)
+    if (_InterlockedCompareExchange((volatile long *)&state_->slots[i].pid,
+                                    myPid, expected) == expected) {
+      state_->slots[i].active = true;
+      local_slot_ = i;
+      break;
+    }
+#else
+    if (__atomic_compare_exchange_n(&state_->slots[i].pid, &expected, myPid,
+                                    false, __ATOMIC_SEQ_CST,
+                                    __ATOMIC_SEQ_CST)) {
+      state_->slots[i].active = true;
+      local_slot_ = i;
+      break;
+    }
+#endif
   }
 
   if (local_slot_ == -1) {
@@ -113,10 +170,20 @@ void IPCManager::shutdown() {
   }
 
   if (state_) {
+#if defined(_WIN32)
+    UnmapViewOfFile(state_);
+#else
     munmap(state_, sizeof(GlobalState));
+#endif
     state_ = nullptr;
   }
 
+#if defined(_WIN32)
+  if (shm_fd_) {
+    CloseHandle(shm_fd_);
+    shm_fd_ = nullptr;
+  }
+#else
   if (shm_fd_ != -1) {
     close(shm_fd_);
     shm_fd_ = -1;
@@ -125,6 +192,7 @@ void IPCManager::shutdown() {
   if (isMaster_) {
     shm_unlink(VGRE_SHM_NAME);
   }
+#endif
 
   TCPClusterManager::instance().shutdown();
 
@@ -177,8 +245,8 @@ void IPCManager::getGlobalTelemetry(vgre_telemetry_t &outCombined) {
 
   // Preserve essential state from the local slot
   if (local_slot_ != -1) {
-    outCombined.simulation_enabled =
-        state_->slots[local_slot_].telemetry.simulation_enabled;
+    outCombined.background_compute_active =
+        state_->slots[local_slot_].telemetry.background_compute_active;
     outCombined.ecc_enabled = state_->slots[local_slot_].telemetry.ecc_enabled;
   }
 }
