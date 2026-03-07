@@ -129,14 +129,14 @@ class Runtime:
         if self._initialized:
             return
 
-        # Initialize native C++ engine if available
-        self._use_native = False
-        if NATIVE_AVAILABLE:
-            try:
-                native_init()
-                self._use_native = True
-            except Exception:
-                pass  # Fall back to pure Python
+        if not NATIVE_AVAILABLE:
+            raise RuntimeError(
+                "VGRE native execution engine is required. "
+                "Pure Python simulations are no longer supported."
+            )
+
+        native_init()
+        self._use_native = True
 
         self._device = VirtualDevice(device_id)
         self._device.create_context()
@@ -144,8 +144,7 @@ class Runtime:
         self._initialized = True
 
         props = self._device.get_properties()
-        backend = "native" if self._use_native else "python"
-        print(f"[VGRE] Initialized virtual GPU: {props.name} ({backend})")
+        print(f"[VGRE] Initialized virtual GPU: {props.name} (native)")
         print(f"[VGRE] Cores: {props.multi_processor_count}, "
               f"VRAM: {props.total_global_mem // (1024*1024)} MB")
 
@@ -197,6 +196,9 @@ class Runtime:
                              (grid_dim.x, grid_dim.y, grid_dim.z), 
                              (block_dim.x, block_dim.y, block_dim.z), 
                              args, shared_mem)
+        if not parallel:
+            # Caller requested serialized semantics for this launch.
+            native_synchronize()
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         kernel._launch_count += 1
         kernel._total_time_ms += elapsed_ms

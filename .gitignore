@@ -38,3 +38,7 @@ vgre_dashboard/linux/flutter/ephemeral/
 /install_local.sh
 launch.sh
 *.log
+
+compile_commands.json
+build_local/
+

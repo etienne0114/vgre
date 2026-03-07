@@ -49,14 +49,14 @@ class DeviceArray:
         self.nbytes = size * self.dtype.itemsize
         self._freed = False
 
-        if NATIVE_AVAILABLE:
-            self._ptr = native_malloc(self.nbytes)
-            self._native = True
-        else:
-            # Fallback: allocate host-side buffer that simulates device memory
-            self._buffer = np.zeros(size, dtype=self.dtype)
-            self._ptr = self._buffer.ctypes.data_as(ctypes.c_void_p)
-            self._native = False
+        if not NATIVE_AVAILABLE:
+            raise RuntimeError(
+                "VGRE native execution engine is required. "
+                "Pure Python simulations are no longer supported."
+            )
+
+        self._ptr = native_malloc(self.nbytes)
+        self._native = True
 
     @classmethod
     def from_numpy(cls, arr: np.ndarray) -> "DeviceArray":
@@ -102,8 +102,6 @@ class DeviceArray:
             src_ptr = src.ctypes.data_as(ctypes.c_void_p)
             native_memcpy(self._ptr, src_ptr, src.nbytes,
                           VGRE_MEMCPY_HOST_TO_DEVICE)
-        else:
-            np.copyto(self._buffer[:src.size], src.ravel())
 
     def copy_to_host(self, host_arr: Optional[np.ndarray] = None) -> np.ndarray:
         """
@@ -126,8 +124,6 @@ class DeviceArray:
             native_memcpy(dst_ptr, self._ptr,
                           min(host_arr.nbytes, self.nbytes),
                           VGRE_MEMCPY_DEVICE_TO_HOST)
-        else:
-            np.copyto(host_arr[:self.size], self._buffer)
 
         return host_arr
 
@@ -144,8 +140,6 @@ class DeviceArray:
         if self._native and other._native:
             native_memcpy(self._ptr, other._ptr, count,
                           VGRE_MEMCPY_DEVICE_TO_DEVICE)
-        else:
-            np.copyto(self._buffer[:other.size], other._buffer[:other.size])
 
     def as_pointer(self) -> ctypes.c_void_p:
         """Get the raw device pointer for kernel arguments."""
@@ -173,6 +167,6 @@ class DeviceArray:
         self.free()
 
     def __repr__(self) -> str:
-        backend = "native" if self._native else "python"
+        backend = "native"
         state = "freed" if self._freed else f"{self.size} x {self.dtype}"
         return f"DeviceArray({state}, backend={backend})"

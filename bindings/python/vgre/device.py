@@ -7,8 +7,6 @@ via ctypes FFI to the libvgre shared library.
 
 import ctypes
 import ctypes.util
-import os
-import platform
 from typing import Optional, Dict, Any
 
 try:
@@ -19,6 +17,10 @@ try:
     )
 except ImportError:
     NATIVE_AVAILABLE = False
+
+_NATIVE_REQUIRED_MSG = (
+    "VGRE native backend is required. Pure Python device simulation is not supported."
+)
 
 
 class DeviceProperties:
@@ -80,68 +82,30 @@ class VirtualDevice:
 
     def _detect_hardware(self) -> None:
         """Detect actual CPU hardware to populate device properties."""
-        # Try native C++ backend first
-        if NATIVE_AVAILABLE:
-            try:
-                props = native_get_device_properties(self.device_id)
-                self._properties.name = props.name.decode("utf-8", errors="replace")
-                self._properties.total_global_mem = props.total_global_mem
-                self._properties.shared_mem_per_block = props.shared_mem_per_block
-                self._properties.max_threads_per_block = props.max_threads_per_block
-                self._properties.max_threads_dim = list(props.max_threads_dim)
-                self._properties.max_grid_size = list(props.max_grid_size)
-                self._properties.warp_size = props.warp_size
-                self._properties.multi_processor_count = props.multi_processor_count
-                self._properties.major = props.major
-                self._properties.minor = props.minor
-                self._properties.clock_rate = props.clock_rate
-                self._properties.total_const_mem = props.total_const_mem
-                return
-            except Exception:
-                pass  # Fall through to pure Python detection
+        if not NATIVE_AVAILABLE:
+            raise RuntimeError(_NATIVE_REQUIRED_MSG)
 
-        # Pure Python fallback
-        cpu_count = os.cpu_count() or 4
-        self._properties.multi_processor_count = cpu_count
-
-        cpu_name = self._read_cpu_name()
-        self._properties.name = f"VGRE Virtual GPU [{cpu_name}]"
-
-        total_ram = self._read_total_ram()
-        if total_ram > 0:
-            half_ram = total_ram // 2
-            cap = 16 * 1024 * 1024 * 1024
-            self._properties.total_global_mem = min(half_ram, cap)
-
-    @staticmethod
-    def _read_cpu_name() -> str:
-        """Read CPU model name from /proc/cpuinfo."""
-        try:
-            with open("/proc/cpuinfo", "r") as f:
-                for line in f:
-                    if "model name" in line:
-                        return line.split(":")[1].strip()
-        except (FileNotFoundError, PermissionError, IndexError):
-            pass
-        return platform.processor() or "Unknown CPU"
-
-    @staticmethod
-    def _read_total_ram() -> int:
-        """Read total RAM in bytes from /proc/meminfo."""
-        try:
-            with open("/proc/meminfo", "r") as f:
-                for line in f:
-                    if "MemTotal" in line:
-                        parts = line.split()
-                        return int(parts[1]) * 1024  # kB → bytes
-        except (FileNotFoundError, PermissionError, ValueError):
-            pass
-        return 0
+        props = native_get_device_properties(self.device_id)
+        self._properties.name = props.name.decode("utf-8", errors="replace")
+        self._properties.total_global_mem = props.total_global_mem
+        self._properties.shared_mem_per_block = props.shared_mem_per_block
+        self._properties.max_threads_per_block = props.max_threads_per_block
+        self._properties.max_threads_dim = list(props.max_threads_dim)
+        self._properties.max_grid_size = list(props.max_grid_size)
+        self._properties.warp_size = props.warp_size
+        self._properties.multi_processor_count = props.multi_processor_count
+        self._properties.major = props.major
+        self._properties.minor = props.minor
+        self._properties.clock_rate = props.clock_rate
+        self._properties.total_const_mem = props.total_const_mem
 
     @staticmethod
     def get_device_count() -> int:
         """Return the number of virtual GPU devices."""
-        return 1
+        if not NATIVE_AVAILABLE:
+            raise RuntimeError(_NATIVE_REQUIRED_MSG)
+        from vgre._native import native_get_device_count
+        return native_get_device_count()
 
     def get_properties(self) -> DeviceProperties:
         """Return the device properties."""
@@ -165,8 +129,9 @@ class VirtualDevice:
 
     def synchronize(self) -> None:
         """Synchronize the device."""
-        if NATIVE_AVAILABLE:
-            native_synchronize()
+        if not NATIVE_AVAILABLE:
+            raise RuntimeError(_NATIVE_REQUIRED_MSG)
+        native_synchronize()
 
     def __repr__(self) -> str:
         return (f"VirtualDevice(id={self.device_id}, "
