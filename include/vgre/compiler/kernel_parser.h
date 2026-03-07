@@ -76,7 +76,7 @@ private:
                                bool& outIsGlobal);
 
     // Map C type string to ArgType
-    ArgType mapType(const std::string& typeName, bool isPointer);
+    ArgType mapType(const std::string& typeName, bool isPointer, bool& recognized);
 
     // Built-in variable set
     static const std::unordered_map<std::string, std::string> builtinVars_;

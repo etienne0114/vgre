@@ -9,6 +9,21 @@
 namespace vgre {
 namespace compiler {
 
+namespace {
+std::string normalizeTypeName(std::string typeName) {
+    typeName = std::regex_replace(typeName, std::regex("\\b(const|volatile|restrict|__restrict__|__restrict)\\b"), "");
+    typeName = std::regex_replace(typeName, std::regex("[\\t\\n\\r]+"), " ");
+    typeName = std::regex_replace(typeName, std::regex("\\s+"), " ");
+    if (!typeName.empty() && typeName.front() == ' ') {
+        typeName.erase(0, typeName.find_first_not_of(' '));
+    }
+    if (!typeName.empty() && typeName.back() == ' ') {
+        typeName.erase(typeName.find_last_not_of(' ') + 1);
+    }
+    return typeName;
+}
+} // namespace
+
 // ── Built-in CUDA variables ────────────────────────────────────────────────
 const std::unordered_map<std::string, std::string> KernelParser::builtinVars_ = {
     {"threadIdx",  "threadIdx"},
@@ -247,8 +262,36 @@ VGREResult KernelParser::parseParameters(const std::string& signature,
             pp.typeName = param.substr(0, lastSpace);
             pp.name     = param.substr(lastSpace + 1);
         } else {
-            pp.typeName = param;
-            pp.name     = "arg" + std::to_string(outParams.size());
+            static const std::vector<std::string> kTypePrefixes = {
+                "unsigned long long", "signed long long", "unsigned long",
+                "signed long", "long long", "unsigned int", "signed int",
+                "long int", "short int", "size_t", "uint64_t", "int64_t",
+                "uint32_t", "int32_t", "uint16_t", "int16_t", "uint8_t",
+                "int8_t", "double", "float", "unsigned", "signed", "long",
+                "short", "char", "bool", "int"};
+            bool splitFound = false;
+            for (const auto& prefix : kTypePrefixes) {
+                if (param.size() > prefix.size() &&
+                    param.compare(0, prefix.size(), prefix) == 0) {
+                    pp.typeName = prefix;
+                    pp.name = param.substr(prefix.size());
+                    splitFound = true;
+                    break;
+                }
+            }
+
+            if (!splitFound) {
+                pp.typeName = param;
+                pp.name     = "arg" + std::to_string(outParams.size());
+            }
+        }
+
+        pp.name.erase(0, pp.name.find_first_not_of(" \t"));
+        if (!pp.name.empty()) {
+            pp.name.erase(pp.name.find_last_not_of(" \t") + 1);
+        }
+        if (pp.name.empty()) {
+            pp.name = "arg" + std::to_string(outParams.size());
         }
 
         // Remove * from name if attached
@@ -261,7 +304,14 @@ VGREResult KernelParser::parseParameters(const std::string& signature,
         pp.typeName.erase(0, pp.typeName.find_first_not_of(" \t"));
         pp.typeName.erase(pp.typeName.find_last_not_of(" \t") + 1);
 
-        pp.argType = mapType(pp.typeName, isPointer);
+        bool recognized = false;
+        pp.argType = mapType(pp.typeName, isPointer, recognized);
+        if (!recognized) {
+            VGRE_LOG_ERROR("KernelParser",
+                           "Unsupported kernel parameter type '" + pp.typeName +
+                               "' in signature: " + signature);
+            return VGREResult::ERROR_INVALID_KERNEL;
+        }
         outParams.push_back(pp);
     }
 
@@ -269,20 +319,92 @@ VGREResult KernelParser::parseParameters(const std::string& signature,
 }
 
 // ── Map C type to ArgType ──────────────────────────────────────────────────
-ArgType KernelParser::mapType(const std::string& typeName, bool isPointer) {
-    if (isPointer)            return ArgType::POINTER;
-    if (typeName == "float")  return ArgType::FLOAT32;
-    if (typeName == "double") return ArgType::FLOAT64;
-    if (typeName == "int" || typeName == "int32_t")
-                              return ArgType::INT32;
-    if (typeName == "long" || typeName == "int64_t")
-                              return ArgType::INT64;
-    if (typeName == "unsigned" || typeName == "uint32_t" ||
-        typeName == "unsigned int")
-                              return ArgType::UINT32;
-    if (typeName == "uint64_t" || typeName == "unsigned long")
-                              return ArgType::UINT64;
-    return ArgType::INT32;    // fallback
+ArgType KernelParser::mapType(const std::string& typeName, bool isPointer,
+                              bool& recognized) {
+    if (isPointer) {
+        recognized = true;
+        return ArgType::POINTER;
+    }
+
+    const std::string norm = normalizeTypeName(typeName);
+
+    if (norm == "float") {
+        recognized = true;
+        return ArgType::FLOAT32;
+    }
+    if (norm == "double") {
+        recognized = true;
+        return ArgType::FLOAT64;
+    }
+    if (norm == "int" || norm == "int32_t" || norm == "signed" ||
+        norm == "signed int" || norm == "char" || norm == "signed char" ||
+        norm == "short" || norm == "short int" || norm == "int16_t" ||
+        norm == "int8_t" || norm == "bool") {
+        recognized = true;
+        return ArgType::INT32;
+    }
+    if (norm == "unsigned" || norm == "unsigned int" || norm == "uint32_t" ||
+        norm == "unsigned short" || norm == "unsigned short int" ||
+        norm == "uint16_t" || norm == "unsigned char" || norm == "uint8_t") {
+        recognized = true;
+        return ArgType::UINT32;
+    }
+    if (norm == "int64_t" || norm == "long long" || norm == "long long int" ||
+        norm == "signed long long" || norm == "signed long long int") {
+        recognized = true;
+        return ArgType::INT64;
+    }
+    if (norm == "uint64_t" || norm == "unsigned long long" ||
+        norm == "unsigned long long int") {
+        recognized = true;
+        return ArgType::UINT64;
+    }
+    if (norm == "long" || norm == "long int" || norm == "signed long" ||
+        norm == "signed long int") {
+        recognized = true;
+        return (sizeof(long) >= 8) ? ArgType::INT64 : ArgType::INT32;
+    }
+    if (norm == "unsigned long" || norm == "unsigned long int") {
+        recognized = true;
+        return (sizeof(unsigned long) >= 8) ? ArgType::UINT64 : ArgType::UINT32;
+    }
+    if (norm == "size_t") {
+        recognized = true;
+        return (sizeof(size_t) >= 8) ? ArgType::UINT64 : ArgType::UINT32;
+    }
+
+    // Handle compact signatures where extractor concatenates type+name
+    // (e.g., "intN", "floatx", "unsignedCount").
+    const std::regex intNamePattern(R"(^int[A-Za-z_][A-Za-z0-9_]*$)");
+    const std::regex floatNamePattern(R"(^float[A-Za-z_][A-Za-z0-9_]*$)");
+    const std::regex doubleNamePattern(R"(^double[A-Za-z_][A-Za-z0-9_]*$)");
+    const std::regex longNamePattern(R"(^long[A-Za-z_][A-Za-z0-9_]*$)");
+    const std::regex ulongNamePattern(R"(^unsigned ?long[A-Za-z_][A-Za-z0-9_]*$)");
+    const std::regex unsignedNamePattern(R"(^unsigned[A-Za-z_][A-Za-z0-9_]*$)");
+    if (std::regex_match(norm, intNamePattern)) {
+        recognized = true;
+        return ArgType::INT32;
+    }
+    if (std::regex_match(norm, floatNamePattern)) {
+        recognized = true;
+        return ArgType::FLOAT32;
+    }
+    if (std::regex_match(norm, doubleNamePattern)) {
+        recognized = true;
+        return ArgType::FLOAT64;
+    }
+    if (std::regex_match(norm, longNamePattern)) {
+        recognized = true;
+        return (sizeof(long) >= 8) ? ArgType::INT64 : ArgType::INT32;
+    }
+    if (std::regex_match(norm, ulongNamePattern) ||
+        std::regex_match(norm, unsignedNamePattern)) {
+        recognized = true;
+        return ArgType::UINT32;
+    }
+
+    recognized = false;
+    return ArgType::INT32;
 }
 
 // ── Find built-in variables ────────────────────────────────────────────────
@@ -319,7 +441,10 @@ VGREResult KernelParser::parse(const std::string& name,
 
     // Parse parameters
     std::vector<ParsedParam> params;
-    parseParameters(signature, params);
+    auto paramResult = parseParameters(signature, params);
+    if (paramResult != VGREResult::SUCCESS) {
+        return paramResult;
+    }
 
     // Build KernelIR
     outIR.name   = name.empty() ? funcName : name;

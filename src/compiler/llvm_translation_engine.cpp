@@ -731,6 +731,18 @@ std::string LLVMTranslationEngine::generateLLVMIR(const KernelIR &ir) {
 
   // Load operands and store result (assuming C[i] = A[i] OP B[i] for 3
   // pointers)
+  bool canEmitBinaryOp = ir.source.find("+") != std::string::npos ||
+                         ir.source.find("-") != std::string::npos ||
+                         ir.source.find("*") != std::string::npos ||
+                         ir.source.find("/") != std::string::npos;
+  if (!canEmitBinaryOp) {
+    VGRE_LOG_ERROR("LLVMTranslationEngine",
+                   "Refusing generic LLVM IR fallback for unsupported "
+                   "operation in kernel: " +
+                       ir.name);
+    return "";
+  }
+
   if (ir.argTypes.size() >= 3 && ir.argTypes[0] == ArgType::POINTER &&
       ir.argTypes[1] == ArgType::POINTER &&
       ir.argTypes[2] == ArgType::POINTER) {
@@ -748,7 +760,7 @@ std::string LLVMTranslationEngine::generateLLVMIR(const KernelIR &ir) {
     } else if (ir.source.find("/") != std::string::npos) {
       oss << "  %res = fdiv float %a_val, %b_val\n";
     } else {
-      oss << "  %res = fadd float %a_val, %b_val\n"; // default to addition
+      oss << "  %res = fadd float %a_val, %b_val\n";
     }
     oss << "  store float %res, float* %c_ptr\n";
   }
