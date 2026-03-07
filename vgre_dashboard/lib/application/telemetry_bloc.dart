@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:ffi';
+import 'package:flutter/foundation.dart';
 import 'package:ffi/ffi.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:equatable/equatable.dart';
-import 'dart:convert';
 import '../domain/models/telemetry.dart';
 import '../infrastructure/bridge/vgre_ffi.dart';
 
@@ -29,6 +29,13 @@ class ToggleBackgroundCompute extends TelemetryEvent {
   List<Object> get props => [enabled];
 }
 
+class ToggleServiceMode extends TelemetryEvent {
+  final bool isMaster;
+  const ToggleServiceMode(this.isMaster);
+  @override
+  List<Object> get props => [isMaster];
+}
+
 class UpdateTelemetry extends TelemetryEvent {
   final Telemetry telemetry;
   const UpdateTelemetry(this.telemetry);
@@ -44,6 +51,7 @@ abstract class TelemetryState extends Equatable {
 }
 
 class TelemetryInitial extends TelemetryState {}
+
 class TelemetryActive extends TelemetryState {
   final Telemetry telemetry;
   final List<Telemetry> history;
@@ -59,6 +67,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
 
   String _deviceName = "VGRE_VIRTUAL_GPU";
   bool _backgroundComputeActive = false;
+  bool _serviceModeActive = true;
 
   TelemetryBloc(this.bridge) : super(TelemetryInitial()) {
     on<StartPolling>((event, emit) {
@@ -66,7 +75,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       try {
         bridge.setServiceMode(true);
       } catch (e) {
-        print("Failed to start VGRE IPC Service: $e");
+        debugPrint("Failed to start VGRE IPC Service: $e");
       }
 
       // Fetch device info once
@@ -74,47 +83,52 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         final props = bridge.getDeviceProperties(0);
         _deviceName = props['name'] as String;
       } catch (e) {
-        print("Failed to fetch device info: $e");
+        debugPrint("Failed to fetch device info: $e");
       }
 
       _timer?.cancel();
       _timer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
         try {
           final ptr = calloc<VgreTelemetry>();
-          final raw = bridge.getTelemetryWith(ptr);
-          final logs = bridge.getLogs();
-          
-          final data = Telemetry(
-            timestamp: DateTime.fromMillisecondsSinceEpoch(raw.timestamp),
-            gflops: raw.gflops,
-            maxGflops: raw.maxGflops,
-            computeUtilization: raw.computeUtilization,
-            memoryBandwidth: raw.memoryBandwidthGbps,
-            maxMemoryBandwidth: raw.maxMemoryBandwidthGbps,
-            memoryBusUtilization: raw.memoryBusUtilization,
-            memoryUsed: raw.memoryUsedBytes,
-            memoryTotal: raw.memoryTotalBytes,
-            totalPages: raw.totalPages,
-            residentPages: raw.residentPages,
-            evictedPages: raw.evictedPages,
-            pageFaultRate: raw.pageFaultRate,
-            uvmMap: List.generate(1024, (i) => raw.uvmMap[i]),
-            activeKernels: raw.activeKernels,
-            activeThreads: raw.activeThreads,
-            clockSpeed: raw.deviceClockMhz.toInt(),
-            avgLatency: raw.avgKernelLatencyMs,
-            temperature: raw.deviceTemperature,
-            eccEnabled: raw.eccEnabled != 0,
-            backgroundComputeActive: _backgroundComputeActive, // Use local state
-            deviceName: _deviceName,
-            versionMajor: raw.versionMajor,
-            versionMinor: raw.versionMinor,
-            logs: logs,
-          );
-          calloc.free(ptr);
-          add(UpdateTelemetry(data));
+          try {
+            final raw = bridge.getTelemetryWith(ptr);
+            final logs = bridge.getLogs();
+
+            final data = Telemetry(
+              timestamp: DateTime.fromMillisecondsSinceEpoch(raw.timestamp),
+              gflops: raw.gflops,
+              maxGflops: raw.maxGflops,
+              computeUtilization: raw.computeUtilization,
+              memoryBandwidth: raw.memoryBandwidthGbps,
+              maxMemoryBandwidth: raw.maxMemoryBandwidthGbps,
+              memoryBusUtilization: raw.memoryBusUtilization,
+              memoryUsed: raw.memoryUsedBytes,
+              memoryTotal: raw.memoryTotalBytes,
+              totalPages: raw.totalPages,
+              residentPages: raw.residentPages,
+              evictedPages: raw.evictedPages,
+              pageFaultRate: raw.pageFaultRate,
+              uvmMap: List.generate(1024, (i) => raw.uvmMap[i]),
+              activeKernels: raw.activeKernels,
+              activeThreads: raw.activeThreads,
+              clockSpeed: raw.deviceClockMhz.toInt(),
+              avgLatency: raw.avgKernelLatencyMs,
+              temperature: raw.deviceTemperature,
+              eccEnabled: raw.eccEnabled != 0,
+              backgroundComputeActive:
+                  _backgroundComputeActive, // Use local state
+              serviceModeActive: _serviceModeActive,
+              deviceName: _deviceName,
+              versionMajor: raw.versionMajor,
+              versionMinor: raw.versionMinor,
+              logs: logs,
+            );
+            add(UpdateTelemetry(data));
+          } finally {
+            calloc.free(ptr);
+          }
         } catch (e) {
-          print('FFI Error: $e');
+          debugPrint('FFI Error: $e');
         }
       });
     });
@@ -124,13 +138,23 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       bridge.setBackgroundCompute(event.enabled);
     });
 
+    on<ToggleServiceMode>((event, emit) {
+      final res = bridge.setServiceMode(event.isMaster);
+      if (res == 0) {
+        _serviceModeActive = event.isMaster;
+      } else {
+        debugPrint("Failed to switch service mode: $res");
+      }
+    });
+
     on<StopPolling>((event, emit) {
       _timer?.cancel();
     });
 
     on<UpdateTelemetry>((event, emit) {
       final List<Telemetry> newHistory = List.from(
-          (state is TelemetryActive) ? (state as TelemetryActive).history : []);
+        (state is TelemetryActive) ? (state as TelemetryActive).history : [],
+      );
       newHistory.add(event.telemetry);
       if (newHistory.length > 50) newHistory.removeAt(0);
 

@@ -59,16 +59,16 @@ class DashboardPage extends StatelessWidget {
                                         {
                                           'key': 'Util',
                                           'value':
-                                              '${data.computeUtilization.toStringAsFixed(0)}%'
+                                              '${data.computeUtilization.toStringAsFixed(0)}%',
                                         },
                                         {
                                           'key': 'Cores',
-                                          'value': '${data.activeThreads}'
+                                          'value': '${data.activeThreads}',
                                         },
                                         {
                                           'key': 'Temp',
                                           'value':
-                                              '${data.temperature.toStringAsFixed(1)}°C'
+                                              '${data.temperature.toStringAsFixed(1)}°C',
                                         },
                                       ],
                                     ),
@@ -87,24 +87,24 @@ class DashboardPage extends StatelessWidget {
                                         {
                                           'key': 'HBM2',
                                           'value':
-                                              '${data.memoryUsagePercent.toStringAsFixed(0)}%'
+                                              '${data.memoryUsagePercent.toStringAsFixed(0)}%',
                                         },
                                         {
                                           'key': 'Clock',
-                                          'value': '${data.clockSpeed} MHz'
+                                          'value': '${data.clockSpeed} MHz',
                                         },
                                         {
                                           'key': 'ECC',
-                                          'value': data.eccEnabled ? 'OK' : 'ERR'
+                                          'value': data.eccEnabled
+                                              ? 'OK'
+                                              : 'ERR',
                                         },
                                       ],
                                     ),
                                   ),
                                 ),
                                 const SizedBox(width: 20),
-                                Expanded(
-                                  child: _buildMemoryMapPanel(data),
-                                ),
+                                Expanded(child: _buildMemoryMapPanel(data)),
                               ],
                             ),
                           ),
@@ -137,7 +137,7 @@ class DashboardPage extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.03),
+        color: Colors.white.withValues(alpha: 0.03),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.white10),
       ),
@@ -158,33 +158,41 @@ class DashboardPage extends StatelessWidget {
           const SizedBox(width: 24),
           _headerInfoItem("ECC", data.eccEnabled ? "ENABLED" : "DISABLED"),
           const SizedBox(width: 24),
-          _headerToggle("BACKGROUND COMPUTE", data.backgroundComputeActive, (val) {
+          _headerToggle("BACKGROUND COMPUTE", data.backgroundComputeActive, (
+            val,
+          ) {
             context.read<TelemetryBloc>().add(ToggleBackgroundCompute(val));
           }),
           const SizedBox(width: 24),
-          _headerToggle("SERVICE", true, (val) {
-            // Service is always on for now if dashboard is running
+          _headerToggle("SERVICE", data.serviceModeActive, (val) {
+            context.read<TelemetryBloc>().add(ToggleServiceMode(val));
           }, color: VgreTheme.primaryNeon),
         ],
       ),
     );
   }
 
-  Widget _headerToggle(String label, bool value, ValueChanged<bool> onChanged,
-      {Color? color}) {
+  Widget _headerToggle(
+    String label,
+    bool value,
+    ValueChanged<bool> onChanged, {
+    Color? color,
+  }) {
     return Row(
       children: [
-        Text("$label: ",
-            style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10)),
+        Text(
+          "$label: ",
+          style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10),
+        ),
         SizedBox(
           height: 24,
           child: Switch(
             value: value,
             onChanged: onChanged,
-            activeColor: Colors.white,
+            activeThumbColor: Colors.white,
             activeTrackColor: color ?? VgreTheme.secondaryNeon,
             inactiveThumbColor: VgreTheme.textMuted,
-            inactiveTrackColor: Colors.white.withOpacity(0.05),
+            inactiveTrackColor: Colors.white.withValues(alpha: 0.05),
             materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
         ),
@@ -195,8 +203,10 @@ class DashboardPage extends StatelessWidget {
   Widget _headerInfoItem(String label, String value, {Color? color}) {
     return Row(
       children: [
-        Text("$label: ",
-            style: const TextStyle(color: VgreTheme.textMuted, fontSize: 11)),
+        Text(
+          "$label: ",
+          style: const TextStyle(color: VgreTheme.textMuted, fontSize: 11),
+        ),
         Text(
           value,
           style: TextStyle(
@@ -218,13 +228,18 @@ class DashboardPage extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text("UVM MEMORY MAP",
-                  style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.5,
-                      fontSize: 12)),
-              Text("32x32 GRID",
-                  style: TextStyle(color: VgreTheme.textMuted, fontSize: 10)),
+              const Text(
+                "UVM MEMORY MAP",
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.5,
+                  fontSize: 12,
+                ),
+              ),
+              Text(
+                "32x32 GRID",
+                style: TextStyle(color: VgreTheme.textMuted, fontSize: 10),
+              ),
             ],
           ),
           const SizedBox(height: 16),
@@ -242,14 +257,15 @@ class DashboardPage extends StatelessWidget {
                 return Container(
                   decoration: BoxDecoration(
                     color: isResident
-                        ? VgreTheme.primaryNeon.withOpacity(0.8)
-                        : Colors.white.withOpacity(0.05),
+                        ? VgreTheme.primaryNeon.withValues(alpha: 0.8)
+                        : Colors.white.withValues(alpha: 0.05),
                     borderRadius: BorderRadius.circular(1),
                     boxShadow: isResident
                         ? [
                             BoxShadow(
-                                color: VgreTheme.primaryNeon.withOpacity(0.3),
-                                blurRadius: 2)
+                              color: VgreTheme.primaryNeon.withValues(alpha: 0.3),
+                              blurRadius: 2,
+                            ),
                           ]
                         : null,
                   ),
@@ -262,8 +278,11 @@ class DashboardPage extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               _uvmLegendItem("TOTAL PAGES", "${data.totalPages}"),
-              _uvmLegendItem("RESIDENT (GREEN)", "${data.residentPages}",
-                  color: VgreTheme.primaryNeon),
+              _uvmLegendItem(
+                "RESIDENT (GREEN)",
+                "${data.residentPages}",
+                color: VgreTheme.primaryNeon,
+              ),
             ],
           ),
           const SizedBox(height: 8),
@@ -272,7 +291,9 @@ class DashboardPage extends StatelessWidget {
             children: [
               _uvmLegendItem("EVICTED (DIM)", "${data.evictedPages}"),
               _uvmLegendItem(
-                  "PAGE FAULTS", "${data.pageFaultRate.toStringAsFixed(1)}/s"),
+                "PAGE FAULTS",
+                "${data.pageFaultRate.toStringAsFixed(1)}/s",
+              ),
             ],
           ),
         ],
@@ -287,16 +308,20 @@ class DashboardPage extends StatelessWidget {
           width: 8,
           height: 8,
           decoration: BoxDecoration(
-            color: color ?? Colors.white.withOpacity(0.1),
+            color: color ?? Colors.white.withValues(alpha: 0.1),
             borderRadius: BorderRadius.circular(1),
           ),
         ),
         const SizedBox(width: 8),
-        Text(label,
-            style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10)),
+        Text(
+          label,
+          style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10),
+        ),
         const SizedBox(width: 4),
-        Text(value,
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 10)),
+        Text(
+          value,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 10),
+        ),
       ],
     );
   }
@@ -308,11 +333,14 @@ class DashboardPage extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Text("GPU WORKLOAD & HEAT",
-                  style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.5,
-                      fontSize: 12)),
+              const Text(
+                "GPU WORKLOAD & HEAT",
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.5,
+                  fontSize: 12,
+                ),
+              ),
               const Spacer(),
               _chartLabel("COMPUTE", VgreTheme.primaryNeon),
               const SizedBox(width: 16),
@@ -328,19 +356,26 @@ class DashboardPage extends StatelessWidget {
                 minY: 0,
                 maxY: 100,
                 gridData: FlGridData(
-                    show: true,
-                    drawVerticalLine: false,
-                    getDrawingHorizontalLine: (v) =>
-                        FlLine(color: Colors.white.withOpacity(0.05))),
+                  show: true,
+                  drawVerticalLine: false,
+                  getDrawingHorizontalLine: (v) =>
+                      FlLine(color: Colors.white.withValues(alpha: 0.05)),
+                ),
                 titlesData: const FlTitlesData(show: false),
                 borderData: FlBorderData(show: false),
                 lineBarsData: [
-                  _lineData(VgreTheme.primaryNeon,
-                      history.map((t) => t.computeUtilization).toList()),
-                  _lineData(VgreTheme.secondaryNeon,
-                      history.map((t) => t.memoryBusUtilization).toList()),
-                  _lineData(Colors.redAccent,
-                      history.map((t) => t.temperature).toList()),
+                  _lineData(
+                    VgreTheme.primaryNeon,
+                    history.map((t) => t.computeUtilization).toList(),
+                  ),
+                  _lineData(
+                    VgreTheme.secondaryNeon,
+                    history.map((t) => t.memoryBusUtilization).toList(),
+                  ),
+                  _lineData(
+                    Colors.redAccent,
+                    history.map((t) => t.temperature).toList(),
+                  ),
                 ],
               ),
             ),
@@ -362,7 +397,7 @@ class DashboardPage extends StatelessWidget {
       barWidth: 2,
       isStrokeCapRound: true,
       dotData: const FlDotData(show: false),
-      belowBarData: BarAreaData(show: true, color: color.withOpacity(0.1)),
+      belowBarData: BarAreaData(show: true, color: color.withValues(alpha: 0.1)),
     );
   }
 
@@ -371,8 +406,10 @@ class DashboardPage extends StatelessWidget {
       children: [
         Container(width: 12, height: 12, color: color),
         const SizedBox(width: 8),
-        Text(text,
-            style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10)),
+        Text(
+          text,
+          style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10),
+        ),
       ],
     );
   }
@@ -416,16 +453,22 @@ class _TerminalConsoleState extends State<_TerminalConsole> {
             ),
             child: const Row(
               children: [
-                Text("TERMINAL CONSOLE / KERNEL LOGS",
-                    style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 1.5,
-                        fontSize: 11)),
+                Text(
+                  "TERMINAL CONSOLE / KERNEL LOGS",
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.5,
+                    fontSize: 11,
+                  ),
+                ),
                 Spacer(),
                 Icon(Icons.remove, size: 16, color: VgreTheme.textMuted),
                 SizedBox(width: 12),
-                Icon(Icons.check_box_outline_blank,
-                    size: 14, color: VgreTheme.textMuted),
+                Icon(
+                  Icons.check_box_outline_blank,
+                  size: 14,
+                  color: VgreTheme.textMuted,
+                ),
                 SizedBox(width: 12),
                 Icon(Icons.close, size: 16, color: VgreTheme.textMuted),
               ],
@@ -456,8 +499,9 @@ class _TerminalConsoleState extends State<_TerminalConsole> {
         text,
         style: GoogleFonts.firaCode(
           fontSize: 12,
-          color:
-              text.contains('[ERROR]') ? Colors.redAccent : VgreTheme.textBody,
+          color: text.contains('[ERROR]')
+              ? Colors.redAccent
+              : VgreTheme.textBody,
         ),
       ),
     );

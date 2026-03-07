@@ -1,5 +1,4 @@
 import 'dart:ffi';
-import 'dart:io';
 import 'dart:convert';
 import 'package:ffi/ffi.dart';
 
@@ -105,12 +104,12 @@ typedef SetServiceMode = int Function(int);
 typedef GetTelemetryFunc = Int32 Function(Pointer<VgreTelemetry>);
 typedef GetTelemetry = int Function(Pointer<VgreTelemetry>);
 
-typedef GetDevicePropertiesFunc = Int32 Function(
-    Int32, Pointer<VgreDeviceProperties>);
+typedef GetDevicePropertiesFunc =
+    Int32 Function(Int32, Pointer<VgreDeviceProperties>);
 typedef GetDeviceProperties = int Function(int, Pointer<VgreDeviceProperties>);
 
-typedef GetLogsFunc = Int32 Function(
-    Pointer<Pointer<Pointer<Utf8>>>, Pointer<Int32>);
+typedef GetLogsFunc =
+    Int32 Function(Pointer<Pointer<Pointer<Utf8>>>, Pointer<Int32>);
 typedef GetLogs = int Function(Pointer<Pointer<Pointer<Utf8>>>, Pointer<Int32>);
 
 typedef FreeLogsFunc = Void Function(Pointer<Pointer<Utf8>>, Int32);
@@ -133,24 +132,32 @@ class VgreBridge {
     _lib = DynamicLibrary.open(libPath);
     _init = _lib.lookupFunction<InitFunc, Init>('vgre_init');
     _shutdown = _lib.lookupFunction<ShutdownFunc, Shutdown>('vgre_shutdown');
-    _getTelemetry =
-        _lib.lookupFunction<GetTelemetryFunc, GetTelemetry>('vgre_get_telemetry');
-    _getDeviceProperties = _lib.lookupFunction<GetDevicePropertiesFunc,
-        GetDeviceProperties>('vgre_get_device_properties');
+    _getTelemetry = _lib.lookupFunction<GetTelemetryFunc, GetTelemetry>(
+      'vgre_get_telemetry',
+    );
+    _getDeviceProperties = _lib
+        .lookupFunction<GetDevicePropertiesFunc, GetDeviceProperties>(
+          'vgre_get_device_properties',
+        );
     _getLogs = _lib.lookupFunction<GetLogsFunc, GetLogs>('vgre_get_logs');
     _freeLogs = _lib.lookupFunction<FreeLogsFunc, FreeLogs>('vgre_free_logs');
-    _getVersion =
-        _lib.lookupFunction<GetVersionFunc, GetVersion>('vgre_get_version');
-    _setBackgroundCompute = _lib.lookupFunction<SetBackgroundComputeFunc,
-        SetBackgroundCompute>('vgre_set_background_compute');
-    _setServiceMode = _lib.lookupFunction<SetServiceModeFunc,
-        SetServiceMode>('vgre_set_service_mode');
+    _getVersion = _lib.lookupFunction<GetVersionFunc, GetVersion>(
+      'vgre_get_version',
+    );
+    _setBackgroundCompute = _lib
+        .lookupFunction<SetBackgroundComputeFunc, SetBackgroundCompute>(
+          'vgre_set_background_compute',
+        );
+    _setServiceMode = _lib.lookupFunction<SetServiceModeFunc, SetServiceMode>(
+      'vgre_set_service_mode',
+    );
   }
 
   int init() => _init();
   int shutdown() => _shutdown();
   String getVersion() => _getVersion().toDartString();
-  int setBackgroundCompute(bool enabled) => _setBackgroundCompute(enabled ? 1 : 0);
+  int setBackgroundCompute(bool enabled) =>
+      _setBackgroundCompute(enabled ? 1 : 0);
   int setServiceMode(bool isMaster) => _setServiceMode(isMaster ? 1 : 0);
 
   Map<String, dynamic> getDeviceProperties(int deviceId) {
@@ -158,14 +165,14 @@ class VgreBridge {
     try {
       final res = _getDeviceProperties(deviceId, ptr);
       if (res != 0) throw Exception('Failed to get device properties: $res');
-      
+
       final props = ptr.ref;
       final List<int> nameBytes = [];
       for (int i = 0; i < 256; i++) {
         if (props.name[i] == 0) break;
         nameBytes.add(props.name[i]);
       }
-      
+
       return {
         'name': utf8.decode(nameBytes),
         'clockRate': props.clockRate,

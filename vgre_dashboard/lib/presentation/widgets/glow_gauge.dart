@@ -107,23 +107,6 @@ class GlowGauge extends StatelessWidget {
       ],
     );
   }
-
-  IconData _getIcon(String key) {
-    switch (key.toLowerCase()) {
-      case 'util':
-        return Icons.speed;
-      case 'cores':
-        return Icons.memory;
-      case 'temp':
-        return Icons.thermostat;
-      case 'clock':
-        return Icons.timer;
-      case 'hbm2':
-        return Icons.storage;
-      default:
-        return Icons.info_outline;
-    }
-  }
 }
 
 class _GaugePainter extends CustomPainter {
@@ -140,7 +123,7 @@ class _GaugePainter extends CustomPainter {
 
     // Background track
     final bgPaint = Paint()
-      ..color = Colors.white.withOpacity(0.05)
+      ..color = Colors.white.withValues(alpha: 0.05)
       ..style = PaintingStyle.stroke
       ..strokeWidth = strokeWidth;
 
@@ -155,7 +138,7 @@ class _GaugePainter extends CustomPainter {
 
     // Glow effect
     final glowPaint = Paint()
-      ..color = color.withOpacity(0.3)
+      ..color = color.withValues(alpha: 0.3)
       ..style = PaintingStyle.stroke
       ..strokeWidth = strokeWidth * 2.5
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);

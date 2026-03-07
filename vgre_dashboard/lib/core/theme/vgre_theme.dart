@@ -29,11 +29,11 @@ class VgreTheme {
         ),
       ),
       cardTheme: CardThemeData(
-        color: surface.withOpacity(0.8),
+        color: surface.withValues(alpha: 0.8),
         elevation: 0,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: BorderSide(color: textMuted.withOpacity(0.2)),
+          side: BorderSide(color: textMuted.withValues(alpha: 0.2)),
         ),
       ),
     );

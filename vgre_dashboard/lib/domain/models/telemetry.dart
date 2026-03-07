@@ -30,6 +30,7 @@ class Telemetry extends Equatable {
   final double temperature;
   final bool eccEnabled;
   final bool backgroundComputeActive;
+  final bool serviceModeActive;
   final String deviceName;
   final int versionMajor;
   final int versionMinor;
@@ -57,13 +58,15 @@ class Telemetry extends Equatable {
     required this.temperature,
     required this.eccEnabled,
     this.backgroundComputeActive = false,
+    this.serviceModeActive = true,
     this.deviceName = "VGRE_DEVICE",
     this.versionMajor = 1,
     this.versionMinor = 0,
     this.logs = const [],
   });
 
-  double get memoryUsagePercent => (memoryUsed / memoryTotal) * 100;
+  double get memoryUsagePercent =>
+      memoryTotal > 0 ? (memoryUsed / memoryTotal) * 100 : 0;
 
   @override
   List<Object?> get props => [
@@ -88,6 +91,7 @@ class Telemetry extends Equatable {
       temperature,
       eccEnabled,
       backgroundComputeActive,
+      serviceModeActive,
       deviceName,
       logs,
     ];
