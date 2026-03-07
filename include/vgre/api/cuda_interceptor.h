@@ -113,6 +113,41 @@ public:
   const char *getErrorString(cudaError_t error);
   cudaError_t getLastError();
 
+  // ── Texture/Surface Memory API ──────────────────────────────────────────
+  using cudaTextureObject_t = uint64_t;
+  using cudaSurfaceObject_t = uint64_t;
+
+  struct cudaResourceDesc {
+    int resType;
+    struct {
+      void *devPtr;
+      size_t sizeInBytes;
+      size_t width;
+      size_t height;
+      size_t pitchInBytes;
+    } res;
+  };
+
+  struct cudaTextureDesc {
+    int addressMode[3];
+    int filterMode;
+    int readMode;
+    int sRGB;
+    float borderColor[4];
+    int normalizedCoords;
+    unsigned int maxAnisotropy;
+    int mipmapFilterMode;
+    float mipmapLevelBias;
+    float minMipmapLevelClamp;
+    float maxMipmapLevelClamp;
+  };
+
+  cudaError_t createTextureObject(cudaTextureObject_t *pTexObject,
+                                  const cudaResourceDesc *pResDesc,
+                                  const cudaTextureDesc *pTexDesc,
+                                  const void *pResViewDesc);
+  cudaError_t destroyTextureObject(cudaTextureObject_t texObject);
+
   // ── CUDA Graphs API ────────────────────────────────────────────────────────
   cudaError_t streamBeginCapture(cudaStream_t stream);
   cudaError_t streamEndCapture(cudaStream_t stream, cudaGraph_t *graph);

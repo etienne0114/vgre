@@ -5,6 +5,7 @@ add_library(vgre_core OBJECT
     event.cpp
     runtime_engine.cpp
     graph_manager.cpp
+    texture_manager.cpp
 )
 
 target_include_directories(vgre_core PUBLIC

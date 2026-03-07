@@ -3,7 +3,7 @@ add_library(vgre_advanced OBJECT
     adaptive_execution_engine.cpp
     memory_compression.cpp
     runtime_profiler.cpp
-    vgre_simulation_engine.cpp
+    vgre_workload_engine.cpp
     ipc_manager.cpp
     tcp_cluster.cpp
 )

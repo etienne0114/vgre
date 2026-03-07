@@ -3,6 +3,7 @@
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/scheduler.h"
+#include "vgre/core/texture_manager.h"
 #include "vgre/core/virtual_gpu_device.h"
 
 #include <cstring>
@@ -113,7 +114,6 @@ cudaError_t CUDAInterceptor::malloc(void **devPtr, size_t size) {
 
 cudaError_t CUDAInterceptor::mallocManaged(void **devPtr, size_t size,
                                            unsigned int flags) {
-  (void)flags;
   if (!initialized_) {
     auto err = init();
     if (err != cudaSuccess)
@@ -123,7 +123,7 @@ cudaError_t CUDAInterceptor::mallocManaged(void **devPtr, size_t size,
     return cudaErrorInvalidValue;
 
   MemoryHandle handle;
-  auto r = core::RuntimeEngine::instance().mallocManaged(size, handle);
+  auto r = core::RuntimeEngine::instance().mallocManaged(size, handle, flags);
   if (r != VGREResult::SUCCESS) {
     lastError_ = convertResult(r);
     return lastError_;
@@ -464,6 +464,67 @@ cudaError_t CUDAInterceptor::convertResult(VGREResult r) {
 CUDAInterceptor &CUDAInterceptor::instance() {
   static CUDAInterceptor interceptor;
   return interceptor;
+}
+
+// ── Texture/Surface Memory API ──────────────────────────────────────────
+cudaError_t CUDAInterceptor::createTextureObject(
+    cudaTextureObject_t *pTexObject, const cudaResourceDesc *pResDesc,
+    const cudaTextureDesc *pTexDesc, const void *pResViewDesc) {
+  if (!initialized_) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
+  if (!pTexObject || !pResDesc || !pTexDesc)
+    return cudaErrorInvalidValue;
+
+  (void)pResViewDesc; // Not currently used by VGRE
+
+  vgre::core::TextureDescriptor desc;
+  // Interpret CUDA address mode
+  if (pTexDesc->addressMode[0] == 0) // cudaAddressModeWrap
+    desc.addressMode = vgre::core::TextureAddressMode::WRAP;
+  else if (pTexDesc->addressMode[0] == 1) // cudaAddressModeClamp
+    desc.addressMode = vgre::core::TextureAddressMode::CLAMP;
+  else if (pTexDesc->addressMode[0] == 2) // cudaAddressModeMirror
+    desc.addressMode = vgre::core::TextureAddressMode::MIRROR;
+  else if (pTexDesc->addressMode[0] == 3) // cudaAddressModeBorder
+    desc.addressMode = vgre::core::TextureAddressMode::BORDER;
+
+  // Interpret CUDA filter mode
+  if (pTexDesc->filterMode == 0) // cudaFilterModePoint
+    desc.filterMode = vgre::core::TextureFilterMode::POINT;
+  else // cudaFilterModeLinear
+    desc.filterMode = vgre::core::TextureFilterMode::LINEAR;
+
+  desc.normalizedCoords = pTexDesc->normalizedCoords;
+  desc.borderColor = pTexDesc->borderColor[0];
+
+  // Default type sizes
+  size_t elementSize = 4; // Assume float/int
+
+  vgre::core::TextureId texID;
+  auto r = core::TextureManager::instance().createTexture(
+      texID, pResDesc->res.devPtr, pResDesc->res.width, pResDesc->res.height,
+      elementSize, desc);
+
+  if (r != VGREResult::SUCCESS) {
+    lastError_ = convertResult(r);
+    return lastError_;
+  }
+
+  *pTexObject = texID;
+  return cudaSuccess;
+}
+
+cudaError_t
+CUDAInterceptor::destroyTextureObject(cudaTextureObject_t texObject) {
+  if (!initialized_)
+    return cudaErrorInvalidValue;
+
+  auto r = core::TextureManager::instance().destroyTexture(texObject);
+  lastError_ = convertResult(r);
+  return lastError_;
 }
 
 } // namespace api

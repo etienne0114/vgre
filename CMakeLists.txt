@@ -91,8 +91,26 @@ if(VGRE_BUILD_DASHBOARD)
     if(FLUTTER_EXECUTABLE)
         add_custom_target(vgre_dashboard ALL
             COMMAND ${FLUTTER_EXECUTABLE} build linux --release
+            # Post-build: Copy native binaries into the bundle for true portability
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/lib
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgre> ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/lib/libvgre.so
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgre_cudart> ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/lib/libvgre_cudart.so
+            
+            # Desktop Integration: Create a launcher so it shows up in the app menu
+            COMMAND ${CMAKE_COMMAND} -E echo "[Desktop Entry]" > ${PROJECT_SOURCE_DIR}/vgre.desktop
+            COMMAND ${CMAKE_COMMAND} -E echo "Name=VGRE Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+            COMMAND ${CMAKE_COMMAND} -E echo "Comment=Virtual GPU Runtime Engine Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+            COMMAND ${CMAKE_COMMAND} -E echo "Exec=${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/vgre_dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+            COMMAND ${CMAKE_COMMAND} -E echo "Icon=${PROJECT_SOURCE_DIR}/vgre_dashboard/assets/icon.png" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+            COMMAND ${CMAKE_COMMAND} -E echo "Terminal=false" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+            COMMAND ${CMAKE_COMMAND} -E echo "Type=Application" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+            COMMAND ${CMAKE_COMMAND} -E echo "Categories=Development;System;" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
+            
+            # Copy to user's local applications folder
+            COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/vgre.desktop $ENV{HOME}/.local/share/applications/vgre.desktop
+            
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/vgre_dashboard
-            COMMENT "Building VGRE Flutter Dashboard (Release)"
+            COMMENT "Building VGRE Flutter Dashboard & Bundling native libraries & Desktop Launcher"
             VERBATIM
         )
         add_dependencies(vgre_dashboard vgre)

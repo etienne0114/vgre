@@ -8,6 +8,7 @@
 
 #include "vgre/api/cuda_interceptor.h"
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -37,9 +38,27 @@ public:
 
   void **registerFatBinary(void *fatCubin) {
     std::lock_guard<std::mutex> lock(mutex_);
-    // Provide a stable pointer handle representing this abstract module
     auto handle = new ModuleHandleWrapper{nextModuleId_++, fatCubin};
+
+    // Attempt to extract PTX source code from the fatBinary payload
+    std::string extractedSource;
+    if (fatCubin) {
+      // Very basic structural scan: look for the ".version" directive which
+      // starts all PTX text. In a real NV fatBinary, the PTX text is embedded
+      // as a null-terminated string inside an ELF/fatbin structure.
+      const char *payload = static_cast<const char *>(fatCubin);
+      // Scan up to 1MB looking for ".version"
+      for (size_t i = 0; i < 1024 * 1024; ++i) {
+        if (std::memcmp(payload + i, ".version", 8) == 0) {
+          // Found start of PTX, copy until null terminator
+          extractedSource = std::string(payload + i);
+          break;
+        }
+      }
+    }
+
     modules_[handle] = {};
+    moduleSources_[handle] = extractedSource; // Store extracted PTX
     return reinterpret_cast<void **>(handle);
   }
 
@@ -49,11 +68,12 @@ public:
       return;
     auto *handle = reinterpret_cast<ModuleHandleWrapper *>(handlePtr);
     if (modules_.find(handle) != modules_.end()) {
-      // Clean up host-to-name mappings associated with this module
       for (const auto &funcPtr : modules_[handle]) {
         hostToName_.erase(funcPtr);
+        hostToSource_.erase(funcPtr);
       }
       modules_.erase(handle);
+      moduleSources_.erase(handle);
       delete handle;
     }
   }
@@ -70,6 +90,8 @@ public:
       auto *handle = reinterpret_cast<ModuleHandleWrapper *>(handlePtr);
       if (modules_.find(handle) != modules_.end()) {
         modules_[handle].push_back(hostFun);
+        // Link the host function to its module's extracted PTX source
+        hostToSource_[hostFun] = moduleSources_[handle];
       }
     }
   }
@@ -77,10 +99,18 @@ public:
   std::string lookupKernelName(const void *hostFun) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = hostToName_.find(hostFun);
-    if (it != hostToName_.end()) {
+    if (it != hostToName_.end())
       return it->second;
-    }
     return "vgre_dynamic_kernel_" + std::to_string(nextFunctionId_++);
+  }
+
+  std::string lookupKernelSource(const void *hostFun) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = hostToSource_.find(hostFun);
+    if (it != hostToSource_.end() && !it->second.empty())
+      return it->second;
+    // Fallback stub if no source extracted
+    return "/* VGRE Native Execution Stub */";
   }
 
   void registerVariable(const void *hostVar, size_t size) {
@@ -95,9 +125,8 @@ public:
   void *lookupVariable(const void *hostVar) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = hostVarToDevicePtr_.find(hostVar);
-    if (it != hostVarToDevicePtr_.end()) {
+    if (it != hostVarToDevicePtr_.end())
       return it->second;
-    }
     return nullptr;
   }
 
@@ -111,11 +140,10 @@ private:
   uint64_t nextModuleId_ = 1;
   uint64_t nextFunctionId_ = 1;
 
-  // Maps a ModuleHandle to a list of host function pointers registered to it
   std::unordered_map<ModuleHandleWrapper *, std::vector<const void *>> modules_;
-  // Maps a host function pointer directly to its kernel string name
+  std::unordered_map<ModuleHandleWrapper *, std::string> moduleSources_;
   std::unordered_map<const void *, std::string> hostToName_;
-  // Maps a host variable pointer to a device-allocated VGRE memory handle
+  std::unordered_map<const void *, std::string> hostToSource_;
   std::unordered_map<const void *, void *> hostVarToDevicePtr_;
 };
 
@@ -297,20 +325,16 @@ cudaError_t cudaLaunchKernel(const void *hostFun, dim3 gridDim, dim3 blockDim,
                              cudaStream_t stream) {
   std::string kernelName =
       CUDAModuleRegistry::instance().lookupKernelName(hostFun);
+  std::string kernelSource =
+      CUDAModuleRegistry::instance().lookupKernelSource(hostFun);
 
   vgre::dim3 vgreGrid(gridDim.x, gridDim.y, gridDim.z);
   vgre::dim3 vgreBlock(blockDim.x, blockDim.y, blockDim.z);
 
-  // Launch via VGRE interceptor.
-  // The source string includes a pseudo-marker '__attribute__((global))' and an
-  // empty body. The VGRE LLVMTranslationEngine parses this in matchMatrixOp(),
-  // matchVectorOp(), etc., falling back to CPU parallel simulated execution if
-  // a pattern is recognized natively.
+  // Launch via VGRE interceptor using the real extracted source code
+  // or the fallback stub if missing.
   return vgre::api::CUDAInterceptor::instance().launchKernel(
-      kernelName,
-      "__attribute__((global)) void " + kernelName +
-          "() { /* VGRE Emulated Block */ }",
-      vgreGrid, vgreBlock, args, sharedMem, stream);
+      kernelName, kernelSource, vgreGrid, vgreBlock, args, sharedMem, stream);
 }
 
 } // extern "C"

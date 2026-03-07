@@ -55,6 +55,7 @@ private:
   CompiledKernelFn matchVectorOp(const KernelIR &ir);
   CompiledKernelFn matchReduction(const KernelIR &ir);
   CompiledKernelFn matchMatrixOp(const KernelIR &ir);
+  CompiledKernelFn matchDeepLearningOp(const KernelIR &ir);
   CompiledKernelFn matchGenericKernel(const KernelIR &ir);
 
   // Generate LLVM IR text from kernel IR

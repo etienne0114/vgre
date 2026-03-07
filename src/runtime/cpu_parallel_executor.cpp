@@ -1,7 +1,9 @@
 #include "vgre/runtime/cpu_parallel_executor.h"
 #include "vgre/common/logger.h"
+#include "vgre/runtime/gpu_thread_context.h"
 
 #include <algorithm>
+#include <cstring>
 #include <thread>
 
 #ifdef _OPENMP
@@ -38,7 +40,8 @@ CPUParallelExecutor::~CPUParallelExecutor() = default;
 // ── Execute kernel across full grid ────────────────────────────────────────
 VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
                                         const dim3 &gridDim,
-                                        const dim3 &blockDim, void **args) {
+                                        const dim3 &blockDim, void **args,
+                                        size_t sharedMemSize) {
   if (!fn) {
     VGRE_LOG_ERROR("CPUParallelExecutor", "Null kernel function");
     return VGREResult::ERROR_INVALID_KERNEL;
@@ -47,11 +50,13 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
   totalLaunches_++;
   uint32_t totalBlocks = gridDim.total();
 
-  VGRE_LOG_DEBUG("CPUParallelExecutor",
-                 "Executing " + std::to_string(totalBlocks) + " blocks (" +
-                     std::to_string(gridDim.x) + "x" +
-                     std::to_string(gridDim.y) + "x" +
-                     std::to_string(gridDim.z) + ")");
+  VGRE_LOG_DEBUG(
+      "CPUParallelExecutor",
+      "Executing " + std::to_string(totalBlocks) + " blocks (" +
+          std::to_string(gridDim.x) + "x" + std::to_string(gridDim.y) + "x" +
+          std::to_string(gridDim.z) + ")" +
+          (sharedMemSize > 0 ? " sharedMem=" + std::to_string(sharedMemSize)
+                             : ""));
 
   // Linearize the 3D grid into a 1D loop for OpenMP parallelism
   int totalBlocksI = static_cast<int>(totalBlocks);
@@ -59,7 +64,10 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
   // Optimization: Skip parallel overhead for very small grids
   if (totalBlocksI == 1) {
     dim3 blockIdx(0, 0, 0);
-    fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim);
+    // Allocate per-block shared memory
+    SharedMemory smem(sharedMemSize);
+    fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, smem.raw(),
+       smem.size());
   } else {
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic)                                     \
@@ -74,9 +82,13 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
 
       dim3 blockIdx(gx, gy, gz);
 
+      // Allocate per-block shared memory (each block gets its own buffer)
+      SharedMemory smem(sharedMemSize);
+
       // Execute the kernel function for this block.
       // The kernel function internally iterates threads within the block.
-      fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim);
+      fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, smem.raw(),
+         smem.size());
     }
   }
 
