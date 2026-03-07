@@ -54,3 +54,7 @@ add_test(NAME P2PPerformanceIntegration COMMAND test_p2p_performance)
 add_executable(test_igpu_backend integration/test_igpu_backend.cpp)
 target_link_libraries(test_igpu_backend PRIVATE vgre)
 add_test(NAME IGPUBackendIntegration COMMAND test_igpu_backend)
+
+add_executable(test_complex_jit integration/test_complex_jit.cpp)
+target_link_libraries(test_complex_jit PRIVATE vgre)
+add_test(NAME ComplexJITIntegration COMMAND test_complex_jit)
