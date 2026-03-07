@@ -68,7 +68,6 @@ public:
 
 private:
   mutable std::mutex mutex_;
-  std::promise<TimePoint> promise_;
   std::shared_future<TimePoint> future_;
   bool recorded_;
 };

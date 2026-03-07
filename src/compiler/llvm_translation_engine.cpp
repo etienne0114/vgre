@@ -1,7 +1,9 @@
 #include "vgre/compiler/llvm_translation_engine.h"
 #include "vgre/common/logger.h"
+#include "vgre/runtime/gpu_thread_context.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <sstream>
 
@@ -167,7 +169,8 @@ VGREResult LLVMTranslationEngine::getFunctionFromModule(
 
   outFn = [func_ptr](void **args, const dim3 &blockIdx,
                      const dim3 & /*threadIdx*/, const dim3 &blockDim,
-                     const dim3 &gridDim) {
+                     const dim3 &gridDim, void * /*sharedMem*/,
+                     size_t /*sharedMemSize*/) {
     func_ptr(args, blockIdx.x, blockIdx.y, blockIdx.z, blockDim.x, blockDim.y,
              blockDim.z, gridDim.x, gridDim.y, gridDim.z);
   };
@@ -205,6 +208,13 @@ LLVMTranslationEngine::generateParallelKernel(const KernelIR &ir) {
   if (fn) {
     VGRE_LOG_DEBUG("LLVMTranslationEngine",
                    "Matched matrix-op pattern for: " + ir.name);
+    return fn;
+  }
+
+  fn = matchDeepLearningOp(ir);
+  if (fn) {
+    VGRE_LOG_DEBUG("LLVMTranslationEngine",
+                   "Matched deep-learning pattern for: " + ir.name);
     return fn;
   }
 
@@ -296,7 +306,8 @@ CompiledKernelFn LLVMTranslationEngine::matchVectorOp(const KernelIR &ir) {
 
   return [op, hasSize](void **args, const dim3 &blockIdx,
                        const dim3 & /*threadIdx*/, const dim3 &blockDim,
-                       const dim3 &gridDim) {
+                       const dim3 &gridDim, void * /*sharedMem*/,
+                       size_t /*sharedMemSize*/) {
     float *A = *static_cast<float **>(args[0]);
     float *B = *static_cast<float **>(args[1]);
     float *C = *static_cast<float **>(args[2]);
@@ -406,7 +417,8 @@ CompiledKernelFn LLVMTranslationEngine::matchReduction(const KernelIR &ir) {
 
   return [hasSize](void **args, const dim3 &blockIdx,
                    const dim3 & /*threadIdx*/, const dim3 &blockDim,
-                   const dim3 &gridDim) {
+                   const dim3 &gridDim, void * /*sharedMem*/,
+                   size_t /*sharedMemSize*/) {
     float *input = *static_cast<float **>(args[0]);
     float *output = *static_cast<float **>(args[1]);
     int N = hasSize ? *static_cast<int *>(args[2])
@@ -445,8 +457,7 @@ CompiledKernelFn LLVMTranslationEngine::matchReduction(const KernelIR &ir) {
     auto end = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(end - start).count();
 
-#pragma omp atomic
-    output[blockIdxLinear] += localSum;
+    vgre::runtime::AtomicOps::atomicAdd(&output[blockIdxLinear], localSum);
 
     vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
         "reduction", blockSize, 8, ms,
@@ -479,19 +490,26 @@ CompiledKernelFn LLVMTranslationEngine::matchMatrixOp(const KernelIR &ir) {
 
   return [numArgs](void **args, const dim3 &blockIdx,
                    const dim3 & /*threadIdx*/, const dim3 &blockDim,
-                   const dim3 & /*gridDim*/) {
-    float *A = *static_cast<float **>(args[0]);
-    float *B = *static_cast<float **>(args[1]);
-    float *C = *static_cast<float **>(args[2]);
+                   const dim3 & /*gridDim*/, void * /*sharedMem*/,
+                   size_t /*sharedMemSize*/) {
+    float *A = args[0] ? *static_cast<float **>(args[0]) : nullptr;
+    float *B = args[1] ? *static_cast<float **>(args[1]) : nullptr;
+    float *C = args[2] ? *static_cast<float **>(args[2]) : nullptr;
 
-    int M, K, N;
+    if (!A || !B || !C)
+      return;
+
+    int M = 0, K = 0, N = 0;
     if (numArgs >= 6) {
-      M = *static_cast<int *>(args[3]);
-      K = *static_cast<int *>(args[4]);
-      N = *static_cast<int *>(args[5]);
-    } else {
-      M = K = N = *static_cast<int *>(args[3]);
+      M = args[3] ? *static_cast<int *>(args[3]) : 0;
+      K = args[4] ? *static_cast<int *>(args[4]) : 0;
+      N = args[5] ? *static_cast<int *>(args[5]) : 0;
+    } else if (numArgs >= 4) {
+      M = K = N = args[3] ? *static_cast<int *>(args[3]) : 0;
     }
+
+    if (M <= 0 || K <= 0 || N <= 0)
+      return;
 
     auto start = std::chrono::steady_clock::now();
 
@@ -523,6 +541,102 @@ CompiledKernelFn LLVMTranslationEngine::matchMatrixOp(const KernelIR &ir) {
   };
 }
 
+// ── Deep Learning specific op matching (Softmax, LayerNorm, etc.) ─────────
+CompiledKernelFn
+LLVMTranslationEngine::matchDeepLearningOp(const KernelIR &ir) {
+  const std::string &src = ir.source;
+  const std::string &name = ir.name;
+
+  // 1. Softmax detector: name includes "softmax" or source has specific math
+  bool isSoftmax = name.find("softmax") != std::string::npos ||
+                   (src.find("exp") != std::string::npos &&
+                    src.find("sum") != std::string::npos);
+
+  if (isSoftmax && ir.argTypes.size() >= 3) {
+    return [](void **args, const dim3 &blockIdx, const dim3 & /*threadIdx*/,
+              const dim3 &blockDim, const dim3 & /*gridDim*/,
+              void * /*sharedMem*/, size_t /*sharedMemSize*/) {
+      float *in = *static_cast<float **>(args[0]);
+      float *out = *static_cast<float **>(args[1]);
+      int N = *static_cast<int *>(args[2]);
+
+      int row = blockIdx.x; // Softmax usually parallelized across batches/rows
+      if (row >= N)
+        return;
+
+      int rowStart = row * blockDim.x;
+      int len = blockDim.x;
+
+      // 1. Find max for numerical stability
+      float maxVal = -1e38f;
+      for (int i = 0; i < len; ++i) {
+        maxVal = std::max(maxVal, in[rowStart + i]);
+      }
+
+      // 2. Compute exp and sum
+      float sum = 0.0f;
+      for (int i = 0; i < len; ++i) {
+        float val = std::exp(in[rowStart + i] - maxVal);
+        out[rowStart + i] = val;
+        sum += val;
+      }
+
+      // 3. Normalize
+      float invSum = (sum > 0.0f) ? (1.0f / sum) : 0.0f;
+      for (int i = 0; i < len; ++i) {
+        out[rowStart + i] *= invSum;
+      }
+    };
+  }
+
+  // 2. LayerNorm detector
+  bool isLayerNorm = name.find("layernorm") != std::string::npos ||
+                     (src.find("mean") != std::string::npos &&
+                      src.find("variance") != std::string::npos);
+
+  if (isLayerNorm && ir.argTypes.size() >= 5) {
+    return [](void **args, const dim3 &blockIdx, const dim3 & /*threadIdx*/,
+              const dim3 &blockDim, const dim3 & /*gridDim*/,
+              void * /*sharedMem*/, size_t /*sharedMemSize*/) {
+      float *in = *static_cast<float **>(args[0]);
+      float *out = *static_cast<float **>(args[1]);
+      float *gamma = *static_cast<float **>(args[2]);
+      float *beta = *static_cast<float **>(args[3]);
+      int N = *static_cast<int *>(args[4]);
+
+      int row = blockIdx.x;
+      if (row >= N)
+        return;
+
+      int rowStart = row * blockDim.x;
+      int len = blockDim.x;
+
+      // 1. Mean
+      float sum = 0.0f;
+      for (int i = 0; i < len; ++i)
+        sum += in[rowStart + i];
+      float mean = sum / len;
+
+      // 2. Variance
+      float sqSum = 0.0f;
+      for (int i = 0; i < len; ++i) {
+        float diff = in[rowStart + i] - mean;
+        sqSum += diff * diff;
+      }
+      float var = sqSum / len;
+      float invStd = 1.0f / std::sqrt(var + 1e-5f);
+
+      // 3. Normalize + Affine
+      for (int i = 0; i < len; ++i) {
+        out[rowStart + i] =
+            (in[rowStart + i] - mean) * invStd * gamma[i] + beta[i];
+      }
+    };
+  }
+
+  return nullptr;
+}
+
 // ── Generic kernel (fallback — per-thread CUDA emulation) ──────────────────
 // Provides real per-thread execution with proper CUDA semantics:
 // - Computes threadIdx, blockIdx, blockDim, gridDim for each virtual thread
@@ -539,7 +653,8 @@ CompiledKernelFn LLVMTranslationEngine::matchGenericKernel(const KernelIR &ir) {
 
   if (isReLU && ir.argTypes.size() >= 3) {
     return [](void **args, const dim3 &blockIdx, const dim3 & /*threadIdx*/,
-              const dim3 &blockDim, const dim3 & /*gridDim*/) {
+              const dim3 &blockDim, const dim3 & /*gridDim*/,
+              void * /*sharedMem*/, size_t /*sharedMemSize*/) {
       float *in = *static_cast<float **>(args[0]);
       float *out = *static_cast<float **>(args[1]);
       int N = *static_cast<int *>(args[2]);
@@ -784,7 +899,8 @@ LLVMTranslationEngine::compileJIT(const std::string &irCode,
 
   return
       [func_ptr](void **args, const dim3 &blockIdx, const dim3 & /*threadIdx*/,
-                 const dim3 &blockDim, const dim3 &gridDim) {
+                 const dim3 &blockDim, const dim3 &gridDim,
+                 void * /*sharedMem*/, size_t /*sharedMemSize*/) {
         func_ptr(args, blockIdx.x, blockIdx.y, blockIdx.z, blockDim.x,
                  blockDim.y, blockDim.z, gridDim.x, gridDim.y, gridDim.z);
       };

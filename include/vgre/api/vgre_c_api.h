@@ -49,37 +49,43 @@ typedef struct {
   uint64_t total_const_mem;
 } vgre_device_properties_t;
 
+#pragma pack(push, 8)
 typedef struct {
   uint64_t timestamp;
+  uint64_t version_major;
+  uint64_t version_minor;
 
   // GFLOPS Performance
-  float gflops;
-  float max_gflops; // Device peak
-  float compute_utilization;
+  double gflops;
+  double max_gflops;
+  double compute_utilization;
 
   // Memory Bandwidth
-  float memory_bandwidth_gbps;
-  float max_memory_bandwidth_gbps;
-  float memory_bus_utilization;
+  double memory_bandwidth_gbps;
+  double max_memory_bandwidth_gbps;
+  double memory_bus_utilization;
   uint64_t memory_used_bytes;
   uint64_t memory_total_bytes;
 
   // UVM Stats
-  int total_pages;
-  int resident_pages;
-  int evicted_pages;
-  float page_faults_per_sec;
-  uint8_t uvm_map[1024]; // Residency bitmask/byte-array for 32x32 grid
+  uint64_t total_pages;
+  uint64_t resident_pages;
+  uint64_t evicted_pages;
+  double page_faults_per_sec;
 
   // Device Stats
-  int active_kernels;
-  int active_threads;
-  int device_clock_mhz;
-  float avg_kernel_latency_ms;
-  float device_temperature;
-  int ecc_enabled;
-  int simulation_enabled;
+  int64_t active_kernels;
+  int64_t active_threads;
+  double device_clock_mhz;
+  double avg_kernel_latency_ms;
+  double device_temperature;
+  int64_t ecc_enabled;
+  int64_t background_compute_active;
+
+  // Byte array at the end to prevent alignment shifts
+  uint8_t uvm_map[1024];
 } vgre_telemetry_t;
+#pragma pack(pop)
 
 /* ── Initialization ─────────────────────────────────────────────────────────
  */
@@ -97,9 +103,16 @@ int vgre_synchronize(void);
 /* ── Memory Management ──────────────────────────────────────────────────────
  */
 int vgre_malloc(void **ptr, size_t size);
+int vgre_malloc_managed(void **ptr, size_t size);
 int vgre_free(void *ptr);
 int vgre_memcpy(void *dst, const void *src, size_t count, int direction);
 int vgre_memset(void *ptr, int value, size_t count);
+
+/* ── Peer-to-Peer (P2P) ─────────────────────────────────────────────────────
+ */
+int vgre_device_can_access_peer(int *can_access, int device, int peer_device);
+int vgre_device_enable_peer_access(int peer_device);
+int vgre_device_disable_peer_access(int peer_device);
 
 /* ── Kernel Registration & Launch ───────────────────────────────────────────
  */
@@ -123,6 +136,7 @@ int vgre_launch_kernel(uint64_t kernel_id, const uint32_t grid_dim[3],
 /* ── Stream Management ──────────────────────────────────────────────────────
  */
 int vgre_stream_create(uint64_t *out_stream_id);
+int vgre_stream_create_with_priority(uint64_t *out_stream_id, int priority);
 int vgre_stream_synchronize(uint64_t stream_id);
 int vgre_stream_destroy(uint64_t stream_id);
 
@@ -145,10 +159,10 @@ int vgre_get_logs(char ***buffer, int *count);
 void vgre_free_logs(char **buffer, int count);
 
 /**
- * @brief Enables or disables the internal background simulation engine.
- * Useful for automatic dashboard functioning without external apps.
+ * @brief Enables or disables the internal background compute engine.
+ * Useful for maintaining realistic load without external apps.
  */
-int vgre_set_simulation_mode(int enabled);
+int vgre_set_background_compute(int enabled);
 
 /**
  * @brief Sets the IPC service mode.

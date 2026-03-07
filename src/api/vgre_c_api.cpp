@@ -9,7 +9,7 @@
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/advanced/ipc_manager.h"
-#include "vgre/advanced/vgre_simulation_engine.h"
+#include "vgre/advanced/vgre_workload_engine.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/common/logger.h"
 #include "vgre/core/memory_manager.h"
@@ -117,8 +117,20 @@ int vgre_malloc(void **ptr, size_t size) {
     return VGRE_ERROR_INVALID_VALUE;
 
   vgre::MemoryHandle handle;
-  auto r = vgre::core::RuntimeEngine::instance().getMemoryManager().allocate(
-      size, handle);
+  auto r = vgre::core::RuntimeEngine::instance().malloc(size, handle);
+  if (r != vgre::VGREResult::SUCCESS)
+    return to_status(r);
+
+  *ptr = handle;
+  return VGRE_SUCCESS;
+}
+
+int vgre_malloc_managed(void **ptr, size_t size) {
+  if (!ptr || size == 0)
+    return VGRE_ERROR_INVALID_VALUE;
+
+  vgre::MemoryHandle handle;
+  auto r = vgre::core::RuntimeEngine::instance().mallocManaged(size, handle);
   if (r != vgre::VGREResult::SUCCESS)
     return to_status(r);
 
@@ -162,6 +174,24 @@ int vgre_memset(void *ptr, int value, size_t count) {
     return VGRE_ERROR_INVALID_VALUE;
   std::memset(ptr, value, count);
   return VGRE_SUCCESS;
+}
+
+int vgre_device_can_access_peer(int *can_access, int device, int peer_device) {
+  auto r = vgre::core::RuntimeEngine::instance().deviceCanAccessPeer(
+      device, peer_device, can_access);
+  return to_status(r);
+}
+
+int vgre_device_enable_peer_access(int peer_device) {
+  auto r =
+      vgre::core::RuntimeEngine::instance().deviceEnablePeerAccess(peer_device);
+  return to_status(r);
+}
+
+int vgre_device_disable_peer_access(int peer_device) {
+  auto r = vgre::core::RuntimeEngine::instance().deviceDisablePeerAccess(
+      peer_device);
+  return to_status(r);
 }
 
 // ── Kernel Registration & Launch ───────────────────────────────────────────
@@ -210,6 +240,20 @@ int vgre_stream_create(uint64_t *out_stream_id) {
   return VGRE_SUCCESS;
 }
 
+int vgre_stream_create_with_priority(uint64_t *out_stream_id, int priority) {
+  if (!out_stream_id)
+    return VGRE_ERROR_INVALID_VALUE;
+
+  vgre::StreamId id;
+  auto r = vgre::core::RuntimeEngine::instance().getDevice().createStream(
+      id, priority);
+  if (r != vgre::VGREResult::SUCCESS)
+    return to_status(r);
+
+  *out_stream_id = id;
+  return VGRE_SUCCESS;
+}
+
 int vgre_stream_synchronize(uint64_t stream_id) {
   auto r = vgre::core::RuntimeEngine::instance().streamSynchronize(
       static_cast<vgre::StreamId>(stream_id));
@@ -236,47 +280,59 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::system_clock::now().time_since_epoch())
           .count());
+  telemetry->version_major = 2;
+  telemetry->version_minor = 1;
 
   // GFLOPS
-  telemetry->gflops = static_cast<float>(ae.getTotalGFLOPS());
-  telemetry->max_gflops = static_cast<float>(ae.getMaxGFLOPS());
+  telemetry->gflops = ae.getTotalGFLOPS();
+  telemetry->max_gflops = ae.getMaxGFLOPS();
   telemetry->compute_utilization =
-      (telemetry->max_gflops > 0)
-          ? (telemetry->gflops / telemetry->max_gflops) * 100.0f
-          : 0.0f;
+      (telemetry->max_gflops > 0.0)
+          ? (telemetry->gflops / telemetry->max_gflops) * 100.0
+          : 0.0;
 
   // Memory
-  telemetry->memory_bandwidth_gbps =
-      static_cast<float>(ae.getMemoryBandwidth());
-  telemetry->max_memory_bandwidth_gbps =
-      static_cast<float>(ae.getMaxMemoryBandwidth());
+  telemetry->memory_bandwidth_gbps = ae.getMemoryBandwidth();
+  telemetry->max_memory_bandwidth_gbps = ae.getMaxMemoryBandwidth();
   telemetry->memory_bus_utilization =
-      (telemetry->max_memory_bandwidth_gbps > 0)
+      (telemetry->max_memory_bandwidth_gbps > 0.0)
           ? (telemetry->memory_bandwidth_gbps /
              telemetry->max_memory_bandwidth_gbps) *
-                100.0f
-          : 0.0f;
+                100.0
+          : 0.0;
 
   telemetry->memory_used_bytes = mm.getUsedMemory();
   telemetry->memory_total_bytes = mm.getTotalMemory();
 
   // UVM Stats
-  telemetry->total_pages = 1024;
+  telemetry->total_pages = mm.getTotalMemory() / 4096;
   mm.getPageResidency(telemetry->uvm_map);
-  telemetry->resident_pages = mm.getResidentPageCount();
+
+  // Normalize resident pages for the 1024-cell UI grid
+  int residentCells = mm.getResidentPageCount(); // 0-1024
+  telemetry->resident_pages = (telemetry->total_pages * residentCells) / 1024;
   telemetry->evicted_pages = telemetry->total_pages - telemetry->resident_pages;
-  telemetry->page_faults_per_sec = mm.getPageFaultRate();
+  telemetry->page_faults_per_sec = static_cast<double>(mm.getPageFaultRate());
 
   // Device Stats
-  telemetry->active_kernels = ae.getActiveKernelCount();
+  telemetry->active_kernels = static_cast<int64_t>(ae.getActiveKernelCount());
   telemetry->active_threads =
-      vgre::core::Scheduler::instance().getThreadCount();
-  telemetry->device_clock_mhz =
-      1550; // Dynamic clock if possible, or static per props
-  telemetry->avg_kernel_latency_ms = static_cast<float>(ae.getAvgLatencyMs());
-  telemetry->ecc_enabled = 1;
-  telemetry->simulation_enabled =
-      vgre::advanced::SimulationEngine::instance().isEnabled() ? 1 : 0;
+      static_cast<int64_t>(vgre::core::Scheduler::instance().getThreadCount());
+
+  // Real device properties
+  auto &dev = vgre::core::RuntimeEngine::instance().getDevice();
+  auto props = dev.getProperties();
+  telemetry->device_clock_mhz = static_cast<double>(props.clockRate) / 1000.0;
+
+  // Real ECC reporting: DISABLED for Intel Integrated Graphics
+  bool is_intel = std::string(props.name).find("Intel") != std::string::npos;
+  telemetry->ecc_enabled = is_intel ? 0 : (props.major >= 7 ? 1 : 0);
+
+  telemetry->avg_kernel_latency_ms = ae.getAvgLatencyMs();
+  telemetry->device_temperature =
+      static_cast<double>(ae.getDeviceTemperature());
+  telemetry->background_compute_active = static_cast<int64_t>(
+      vgre::advanced::WorkloadEngine::instance().isEnabled() ? 1 : 0);
 
   // Add IPC aggregation if we are the master (Dashboard)
   auto &ipc = vgre::advanced::IPCManager::instance();
@@ -318,8 +374,8 @@ void vgre_free_logs(char **buffer, int count) {
   free(buffer);
 }
 
-int vgre_set_simulation_mode(int enabled) {
-  vgre::advanced::SimulationEngine::instance().setEnabled(enabled != 0);
+int vgre_set_background_compute(int enabled) {
+  vgre::advanced::WorkloadEngine::instance().setEnabled(enabled != 0);
   return VGRE_SUCCESS;
 }
 

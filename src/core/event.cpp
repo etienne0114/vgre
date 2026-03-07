@@ -4,30 +4,21 @@
 namespace vgre {
 namespace core {
 
-Event::Event() : recorded_(false) { future_ = promise_.get_future().share(); }
+Event::Event() : recorded_(false) {}
 
 VGREResult Event::record(StreamId stream) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // Reset promise/future if this event is being recorded again
-  if (recorded_) {
-    promise_ = std::promise<TimePoint>();
-    future_ = promise_.get_future().share();
-    recorded_ = false;
-  }
-
-  // We must extract the promise into a shared_ptr so the lambda can capture it
-  // and resolve it when the task executes on the stream thread.
-  auto sharedPromise =
-      std::make_shared<std::promise<TimePoint>>(std::move(promise_));
-
-  // Create a replacement promise for the class member, though we shouldn't
-  // really need it unless recorded again (handled above). But to keep
-  // `promise_` valid:
-  promise_ = std::promise<TimePoint>();
+  // Create a new promise for this specific recording execution
+  auto sharedPromise = std::make_shared<std::promise<TimePoint>>();
+  future_ = sharedPromise->get_future().share();
 
   auto task = [sharedPromise]() {
-    sharedPromise->set_value(std::chrono::steady_clock::now());
+    try {
+      sharedPromise->set_value(std::chrono::steady_clock::now());
+    } catch (...) {
+      // Ignore if value is already set or promise is broken
+    }
   };
 
   VGREResult res;
@@ -43,6 +34,8 @@ VGREResult Event::record(StreamId stream) {
 
   if (res == VGREResult::SUCCESS) {
     recorded_ = true;
+  } else {
+    recorded_ = false;
   }
   return res;
 }
