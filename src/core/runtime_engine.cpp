@@ -1,4 +1,5 @@
 #include "vgre/core/runtime_engine.h"
+#include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/advanced/ipc_manager.h"
 #include "vgre/common/logger.h"
 #include "vgre/compiler/kernel_parser.h"
@@ -41,10 +42,16 @@ VGREResult RuntimeEngine::initialize() {
   vectorEngine_ = std::make_unique<runtime::VectorEngine>();
   graphManager_ = std::make_unique<GraphManager>();
 
-  // Create multiple virtual devices (e.g., 2 by default)
-  for (int i = 0; i < 2; ++i) {
+  // Create multiple virtual devices (e.g., 4 for complex topology testing)
+  for (int i = 0; i < 4; ++i) {
     auto dev = std::make_unique<VirtualGPUDevice>(i);
     dev->detectHardware();
+
+    // Customize topology: 2 pairs of devices, each pair on a different PCI bus
+    auto props = dev->getProperties();
+    props.pciBusId = (i < 2) ? 0 : 1;
+    dev->setProperties(props);
+
     dev->createContext();
     devices_.push_back(std::move(dev));
   }
@@ -202,6 +209,20 @@ VGREResult RuntimeEngine::getKernelFromModule(ModuleHandle module,
   return VGREResult::SUCCESS;
 }
 
+VGREResult RuntimeEngine::getKernelArgTypes(KernelId id,
+                                            std::vector<ArgType> &outTypes) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_)
+    return VGREResult::ERROR_NOT_INITIALIZED;
+
+  auto it = kernelIRCache_.find(id);
+  if (it == kernelIRCache_.end())
+    return VGREResult::ERROR_INVALID_KERNEL;
+
+  outTypes = it->second.argTypes;
+  return VGREResult::SUCCESS;
+}
+
 VGREResult RuntimeEngine::unloadModule(ModuleHandle module) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!initialized_)
@@ -301,11 +322,32 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
   // We submit a coarse-grained task: one Scheduler worker thread will invoke
   // the CPUParallelExecutor, which parallelizes blocks via OpenMP.
   auto exec = executor_.get();
+  std::string kName = "unknown";
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto irIt = kernelIRCache_.find(id);
+    if (irIt != kernelIRCache_.end())
+      kName = irIt->second.name;
+  }
 
-  scheduler_->submitStreamTask(
-      stream, [exec, fn, gridDim, blockDim, safeArgs, argValues]() mutable {
-        exec->execute(fn, gridDim, blockDim, safeArgs->data());
-      });
+  scheduler_->submitStreamTask(stream, [exec, fn, gridDim, blockDim, safeArgs,
+                                        argValues, kName, sharedMem]() mutable {
+    auto start = std::chrono::steady_clock::now();
+    exec->execute(fn, gridDim, blockDim, safeArgs->data(), sharedMem);
+    auto end = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+    // Workload estimation for GFLOPS/Bandwidth tracking
+    size_t flops = 0;
+    size_t memBytes = 0;
+    if (kName == "background_compute") {
+      flops = 50ULL * 2 * gridDim.total() * blockDim.total();
+      memBytes = gridDim.total() * blockDim.total() * 3 * sizeof(float);
+    }
+
+    vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
+        kName, blockDim.total(), 8, ms, memBytes, flops);
+  });
 
   return VGREResult::SUCCESS;
 }
@@ -338,10 +380,46 @@ VGREResult RuntimeEngine::streamSynchronize(StreamId stream) {
   return VGREResult::SUCCESS;
 }
 
-VGREResult RuntimeEngine::mallocManaged(size_t size, MemoryHandle &outHandle) {
+VGREResult RuntimeEngine::malloc(size_t size, MemoryHandle &outHandle) {
   if (!initialized_)
     return VGREResult::ERROR_NOT_INITIALIZED;
-  return memoryManager_->allocateManaged(size, outHandle);
+  return memoryManager_->allocate(size, outHandle, currentDeviceId_);
+}
+
+VGREResult RuntimeEngine::mallocManaged(size_t size, MemoryHandle &outHandle,
+                                        unsigned int flags) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_)
+    return VGREResult::ERROR_NOT_INITIALIZED;
+
+  return memoryManager_->allocateManaged(size, outHandle, currentDeviceId_,
+                                         flags);
+}
+
+VGREResult RuntimeEngine::deviceCanAccessPeer(DeviceId device,
+                                              DeviceId peerDevice,
+                                              int *canAccess) {
+  if (!initialized_)
+    return VGREResult::ERROR_NOT_INITIALIZED;
+  if (!canAccess)
+    return VGREResult::ERROR_INVALID_VALUE;
+
+  // Virtual devices in the same process can always "technically" access each
+  // other, but we enforce specific hardware-aware peer access rules.
+  *canAccess = memoryManager_->canAccessPeer(device, peerDevice) ? 1 : 0;
+  return VGREResult::SUCCESS;
+}
+
+VGREResult RuntimeEngine::deviceEnablePeerAccess(DeviceId peerDevice) {
+  if (!initialized_)
+    return VGREResult::ERROR_NOT_INITIALIZED;
+  return memoryManager_->enablePeerAccess(currentDeviceId_, peerDevice);
+}
+
+VGREResult RuntimeEngine::deviceDisablePeerAccess(DeviceId peerDevice) {
+  if (!initialized_)
+    return VGREResult::ERROR_NOT_INITIALIZED;
+  return memoryManager_->disablePeerAccess(currentDeviceId_, peerDevice);
 }
 
 // ── CUDA Graphs API ────────────────────────────────────────────────────────

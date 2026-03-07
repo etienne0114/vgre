@@ -38,9 +38,10 @@ public:
   explicit Scheduler(int numThreads = 0); // 0 = auto-detect
   ~Scheduler();
 
-  // Submit a generic task to a stream sequentially
+  // Submit a generic task to a stream sequentially, with optional priority
   std::future<VGREResult> submitStreamTask(StreamId stream,
-                                           std::function<void()> taskFn);
+                                           std::function<void()> taskFn,
+                                           int priority = 0);
 
   // Control
   void waitAll();
@@ -64,6 +65,7 @@ private:
 
   // Per-stream serialization: StreamId -> Queue of task nodes
   struct StreamQueue {
+    int streamPriority = 0;
     std::queue<std::shared_ptr<StreamTaskNode>> pendingTasks;
     bool isProcessing = false;
   };

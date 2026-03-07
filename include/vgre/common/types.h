@@ -62,6 +62,12 @@ struct DeviceProperties {
   int clockRate = 1500000; // kHz
   size_t totalConstMem = 64 * 1024;
   int computeCapability = 86;
+
+  // Topology for P2P refinement
+  int pciBusId = 0;
+  int pciDeviceId = 0;
+  int pciDomainId = 0;
+  bool isP2PCapable = true;
 };
 
 // ── Kernel intermediate representation ─────────────────────────────────────
@@ -76,10 +82,12 @@ struct KernelIR {
 
 // ── Compiled kernel function pointer ───────────────────────────────────────
 // Signature: void kernel(void** args, dim3 blockIdx, dim3 threadIdx,
-//                        dim3 blockDim, dim3 gridDim)
+//                        dim3 blockDim, dim3 gridDim,
+//                        void* sharedMem, size_t sharedMemSize)
 using CompiledKernelFn =
     std::function<void(void **args, const dim3 &blockIdx, const dim3 &threadIdx,
-                       const dim3 &blockDim, const dim3 &gridDim)>;
+                       const dim3 &blockDim, const dim3 &gridDim,
+                       void *sharedMem, size_t sharedMemSize)>;
 
 // ── Memory copy direction ──────────────────────────────────────────────────
 enum class MemcpyKind : uint8_t {

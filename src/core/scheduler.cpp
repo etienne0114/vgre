@@ -60,7 +60,8 @@ void Scheduler::workerLoop() {
 
 // ── Submit Generic Stream Task ─────────────────────────────────────────────
 std::future<VGREResult>
-Scheduler::submitStreamTask(StreamId stream, std::function<void()> taskFn) {
+Scheduler::submitStreamTask(StreamId stream, std::function<void()> taskFn,
+                            int priority) {
   auto node = std::make_shared<StreamTaskNode>();
   node->task = std::move(taskFn);
   auto future = node->promise.get_future();
@@ -70,6 +71,9 @@ Scheduler::submitStreamTask(StreamId stream, std::function<void()> taskFn) {
     auto &sq = streamQueues_[stream];
     if (!sq) {
       sq = std::make_shared<StreamQueue>();
+      sq->streamPriority = priority;
+    } else {
+      sq->streamPriority = priority;
     }
 
     sq->pendingTasks.push(node);
@@ -99,6 +103,7 @@ void Scheduler::tryProcessStream(StreamId stream) {
 
   WorkItem item;
   item.streamId = stream;
+  item.priority = sq.streamPriority;
   item.execute = [node, stream, this]() {
     // Execute the actual kernel/task work
     try {

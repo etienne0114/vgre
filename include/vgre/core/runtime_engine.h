@@ -49,6 +49,8 @@ public:
   VGREResult getKernelFromModule(ModuleHandle module, const std::string &name,
                                  KernelId &outId);
 
+  VGREResult getKernelArgTypes(KernelId id, std::vector<ArgType> &outTypes);
+
   VGREResult unloadModule(ModuleHandle module);
 
   VGREResult launchKernel(KernelId id, const dim3 &gridDim,
@@ -72,7 +74,15 @@ public:
   VGREResult streamSynchronize(StreamId stream);
 
   // Unified Virtual Memory
-  VGREResult mallocManaged(size_t size, MemoryHandle &outHandle);
+  VGREResult malloc(size_t size, MemoryHandle &outHandle);
+  VGREResult mallocManaged(size_t size, MemoryHandle &outHandle,
+                           unsigned int flags = 0);
+
+  // Peer-to-Peer (P2P)
+  VGREResult deviceCanAccessPeer(DeviceId device, DeviceId peerDevice,
+                                 int *canAccess);
+  VGREResult deviceEnablePeerAccess(DeviceId peerDevice);
+  VGREResult deviceDisablePeerAccess(DeviceId peerDevice);
 
   // CUDA Graphs API
   VGREResult streamBeginCapture(StreamId stream);
