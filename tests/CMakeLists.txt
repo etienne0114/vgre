@@ -39,6 +39,10 @@ add_executable(test_stream_concurrency integration/test_stream_concurrency.cpp)
 target_link_libraries(test_stream_concurrency PRIVATE vgre)
 add_test(NAME test_stream_concurrency COMMAND test_stream_concurrency)
 
+add_executable(test_cudart_shim_regression integration/test_cudart_shim_regression.cpp)
+target_link_libraries(test_cudart_shim_regression PRIVATE vgre_cudart)
+add_test(NAME CUDARTShimRegression COMMAND test_cudart_shim_regression)
+
 add_executable(test_tcp_cluster integration/test_tcp_cluster.cpp)
 target_link_libraries(test_tcp_cluster PRIVATE vgre)
 add_test(NAME TCPClusterIntegration COMMAND test_tcp_cluster)

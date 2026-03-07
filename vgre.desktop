@@ -1,9 +1,8 @@
 [Desktop Entry]
 Name=VGRE Dashboard
 Comment=Virtual GPU Runtime Engine Dashboard
-Exec="/home/umwami/Desktop/GPU emulator/virtual-gpu-runtime/vgre_dashboard/build/linux/x64/release/bundle/vgre_dashboard"
-Icon="/home/umwami/Desktop/GPU emulator/virtual-gpu-runtime/vgre_dashboard/assets/icon.png"
+Exec=/home/umwami/Desktop/GPUemulator/virtual-gpu-runtime/vgre_dashboard/build/linux/x64/release/bundle/vgre_dashboard
+Icon=/home/umwami/Desktop/GPUemulator/virtual-gpu-runtime/vgre_dashboard/assets/icon.png
 Terminal=false
 Type=Application
-Categories=Development;
-Keywords=VGRE;vgre;GPU;emulator;dashboard;
+Categories=Development;System;

@@ -60,8 +60,10 @@ int main() {
     d_c2[i] = 0.0f;
   }
 
-  cudaStream_t stream1 = 1;
-  cudaStream_t stream2 = 2;
+  cudaStream_t stream1 = 0;
+  cudaStream_t stream2 = 0;
+  CHECK_CUDA(interceptor.streamCreate(&stream1));
+  CHECK_CUDA(interceptor.streamCreate(&stream2));
 
   std::cout << "Launching vec_add on Stream 1 and Stream 2..." << std::endl;
 
@@ -85,6 +87,7 @@ int main() {
 
   CHECK_CUDA(interceptor.streamSynchronize(stream1));
   CHECK_CUDA(interceptor.streamSynchronize(stream2));
+  assert(interceptor.streamSynchronize(999999) != cudaSuccess);
 
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> diff = end - start;
@@ -127,6 +130,8 @@ int main() {
   interceptor.free(d_a2);
   interceptor.free(d_b2);
   interceptor.free(d_c2);
+  CHECK_CUDA(interceptor.streamDestroy(stream1));
+  CHECK_CUDA(interceptor.streamDestroy(stream2));
 
   return 0;
 }
