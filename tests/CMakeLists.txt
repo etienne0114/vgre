@@ -42,3 +42,7 @@ add_test(NAME test_stream_concurrency COMMAND test_stream_concurrency)
 add_executable(test_tcp_cluster integration/test_tcp_cluster.cpp)
 target_link_libraries(test_tcp_cluster PRIVATE vgre)
 add_test(NAME TCPClusterIntegration COMMAND test_tcp_cluster)
+
+add_executable(test_p2p_performance integration/test_p2p_performance.cpp)
+target_link_libraries(test_p2p_performance PRIVATE vgre)
+add_test(NAME P2PPerformanceIntegration COMMAND test_p2p_performance)

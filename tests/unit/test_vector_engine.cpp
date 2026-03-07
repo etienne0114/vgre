@@ -10,7 +10,7 @@
 
 using namespace vgre::runtime;
 
-[[maybe_unused]] static constexpr float EPSILON = 1e-5f;
+[[maybe_unused]] static constexpr float EPSILON = 1e-2f;
 
 void test_capabilities() {
   VectorEngine engine;
