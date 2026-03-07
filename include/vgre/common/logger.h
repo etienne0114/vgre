@@ -4,6 +4,7 @@
 #include <chrono>
 #include <ctime>
 #include <deque>
+#include <atomic>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -30,12 +31,12 @@ public:
     return inst;
   }
 
-  void setLevel(LogLevel level) { minLevel_ = level; }
-  LogLevel getLevel() const { return minLevel_; }
+  void setLevel(LogLevel level) { minLevel_.store(level, std::memory_order_relaxed); }
+  LogLevel getLevel() const { return minLevel_.load(std::memory_order_relaxed); }
 
   void log(LogLevel level, const std::string &component,
            const std::string &message) {
-    if (level < minLevel_)
+    if (level < minLevel_.load(std::memory_order_relaxed))
       return;
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -47,7 +48,11 @@ public:
               1000;
 
     std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &timeT);
+#else
     localtime_r(&timeT, &tm);
+#endif
 
     std::ostringstream oss;
     oss << std::put_time(&tm, "%H:%M:%S") << '.' << std::setfill('0')
@@ -89,7 +94,7 @@ private:
     }
   }
 
-  LogLevel minLevel_ = LogLevel::INFO;
+  std::atomic<LogLevel> minLevel_{LogLevel::INFO};
   std::mutex mutex_;
   std::deque<std::string> logBuffer_;
 };

@@ -12,7 +12,7 @@ namespace runtime {
 // ── CPU Parallel Executor ──────────────────────────────────────────────────
 // Maps CUDA grid/block execution model to OpenMP parallel loops.
 // Each block is a parallel work unit; threads within a block are
-// simulated via inner loops with optional SIMD vectorization.
+// executed via inner loops with optional SIMD vectorization.
 class CPUParallelExecutor {
 public:
   explicit CPUParallelExecutor(int maxThreads = 0);
