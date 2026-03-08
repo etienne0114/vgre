@@ -140,14 +140,17 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       return VGREResult::ERROR_IO;
     }
 
-    // Set non-blocking
     IOCTL_NONBLOCK(server_fd_);
 
     VGRE_LOG_INFO("TCPCluster",
                   "Master Server Listening on port " + std::to_string(port_));
     cluster_thread_ = std::thread(&TCPClusterManager::serverLoop, this);
+    udp_thread_ = std::thread(&TCPClusterManager::udpAnnouncerLoop, this);
   } else {
     // Client Node (Worker)
+    if (host_ == "auto" || host_.empty()) {
+      cluster_thread_ = std::thread(&TCPClusterManager::udpDiscoveryLoop, this);
+    } else {
     client_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (client_fd_ == (vgre_socket_t)-1) {
       VGRE_LOG_ERROR("TCPCluster", "Failed to create client socket");
@@ -186,6 +189,8 @@ VGREResult TCPClusterManager::initialize(bool is_master,
 
     VGRE_LOG_INFO("TCPCluster", "Connected to Remote Master Node at " + host_);
     cluster_thread_ = std::thread(&TCPClusterManager::clientLoop, this);
+    data_processor_thread_ = std::thread(&TCPClusterManager::processClientStagingBuffer, this);
+    }
   }
 
   enabled_ = true;
@@ -196,6 +201,19 @@ void TCPClusterManager::shutdown() {
   if (!enabled_.exchange(false))
     return;
 
+  // Unblock wait conditions
+  {
+    std::lock_guard<std::mutex> lock(staging_mutex_);
+    staging_ready_ = true;
+  }
+  staging_cv_.notify_all();
+
+  if (udp_thread_.joinable()) {
+    udp_thread_.join();
+  }
+  if (data_processor_thread_.joinable()) {
+    data_processor_thread_.join();
+  }
   if (cluster_thread_.joinable()) {
     cluster_thread_.join();
   }
@@ -313,12 +331,43 @@ void TCPClusterManager::clientLoop() {
       }
     }
 
-    // 2. Check for incoming commands from Master
+    // 2. Buffer incoming commands from Master asynchronously
     char temp[4096];
     int n = recv(client_fd_, temp, sizeof(temp), MSG_DONTWAIT);
     if (n > 0) {
-      client_rx_buffer_.insert(client_rx_buffer_.end(), temp, temp + n);
-      while (true) {
+      std::lock_guard<std::mutex> lock(staging_mutex_);
+      active_staging_->insert(active_staging_->end(), temp, temp + n);
+      staging_ready_ = true;
+      staging_cv_.notify_one();
+    } else if (n == 0 || (n < 0 && !socket_would_block())) {
+      VGRE_LOG_ERROR("TCPCluster", "Client command channel disconnected");
+      enabled_ = false;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+}
+
+void TCPClusterManager::processClientStagingBuffer() {
+  while (enabled_) {
+    std::unique_lock<std::mutex> lock(staging_mutex_);
+    staging_cv_.wait(lock, [this]() { return staging_ready_.load() || !enabled_; });
+    if (!enabled_) break;
+    
+    // Swap buffers
+    std::swap(active_staging_, processing_staging_);
+    staging_ready_ = false;
+    lock.unlock();
+
+    if (processing_staging_->empty()) continue;
+
+    // Append to internal rx buffer and process
+    client_rx_buffer_.insert(client_rx_buffer_.end(), 
+                             processing_staging_->begin(), 
+                             processing_staging_->end());
+    processing_staging_->clear();
+
+    while (true) {
         if (client_rx_buffer_.size() < sizeof(PacketType))
           break;
         
@@ -326,69 +375,142 @@ void TCPClusterManager::clientLoop() {
         std::memcpy(&type, client_rx_buffer_.data(), sizeof(PacketType));
 
         if (type == PacketType::LAUNCH_KERNEL) {
-          if (client_rx_buffer_.size() < sizeof(RemoteCommandPacket))
-            break;
-          RemoteCommandPacket pkt{};
-          std::memcpy(&pkt, client_rx_buffer_.data(), sizeof(RemoteCommandPacket));
-          client_rx_buffer_.erase(client_rx_buffer_.begin(),
-                                  client_rx_buffer_.begin() + sizeof(RemoteCommandPacket));
-          handleRemoteCommand(pkt);
+            if (client_rx_buffer_.size() < sizeof(RemoteCommandPacket) + sizeof(PacketType))
+              break;
+            RemoteCommandPacket pkt{};
+            std::memcpy(&pkt, client_rx_buffer_.data() + sizeof(PacketType), sizeof(RemoteCommandPacket));
+            client_rx_buffer_.erase(client_rx_buffer_.begin(),
+                                    client_rx_buffer_.begin() + sizeof(PacketType) + sizeof(RemoteCommandPacket));
+            handleRemoteCommand(pkt);
         } else if (type == PacketType::DATA_HEADER) {
-          if (client_rx_buffer_.size() < sizeof(DataHeaderPacket))
-            break;
-          DataHeaderPacket dpkt{};
-          std::memcpy(&dpkt, client_rx_buffer_.data(), sizeof(DataHeaderPacket));
-          client_rx_buffer_.erase(client_rx_buffer_.begin(),
-                                  client_rx_buffer_.begin() + sizeof(DataHeaderPacket));
-          
-          // Next we expect DATA_BODY
-          size_t remaining = dpkt.size;
-          std::vector<uint8_t> body;
-          body.reserve(remaining);
+            if (client_rx_buffer_.size() < sizeof(DataHeaderPacket) + sizeof(PacketType))
+              break;
+            DataHeaderPacket dpkt{};
+            std::memcpy(&dpkt, client_rx_buffer_.data() + sizeof(PacketType), sizeof(DataHeaderPacket));
+            
+            size_t required = sizeof(DataHeaderPacket) + sizeof(PacketType) * 2 + dpkt.size;
+            if (client_rx_buffer_.size() < required) break; 
 
-          // We might need to wait for DATA_BODY packet type and then data
-          // Simplifying: assume DATA_BODY follows immediately without extra type header
-          // OR we check for DATA_BODY type header.
-          // Let's assume Master sends: DATA_HEADER, then DATA_BODY (type), then RAW BYTES.
-          
-          // For simplicity in this implementation, we'll wait for enough data
-          // in a real system we'd use a state machine.
-          while (client_rx_buffer_.size() < sizeof(PacketType) + remaining) {
-             int loop_n = recv(client_fd_, temp, sizeof(temp), 0); // Blocking read for simplicity
-             if (loop_n <= 0) break;
-             client_rx_buffer_.insert(client_rx_buffer_.end(), temp, temp + loop_n);
-          }
-
-          if (client_rx_buffer_.size() >= sizeof(PacketType) + remaining) {
+            // We have the full data!
+            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(DataHeaderPacket) + sizeof(PacketType));
+            
             PacketType btype;
             std::memcpy(&btype, client_rx_buffer_.data(), sizeof(PacketType));
             if (btype == PacketType::DATA_BODY) {
                 void* target = reinterpret_cast<void*>(dpkt.target_ptr);
-                // If it's a managed pointer, we update it
                 auto& mm = core::RuntimeEngine::instance().getMemoryManager();
                 if (mm.isValidHandle(target)) {
                     std::memcpy(mm.getPointer(target), 
                                 client_rx_buffer_.data() + sizeof(PacketType), 
-                                remaining);
+                                dpkt.size);
                 }
-                client_rx_buffer_.erase(client_rx_buffer_.begin(),
-                                        client_rx_buffer_.begin() + sizeof(PacketType) + remaining);
             }
-          }
+            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(PacketType) + dpkt.size);
         } else {
-          // Unknown or out of sync: clear buffer or handle error
-          client_rx_buffer_.clear();
-          break;
+            client_rx_buffer_.clear(); // Corrupt state
+            break;
         }
-      }
-    } else if (n == 0 || (n < 0 && !socket_would_block())) {
-      VGRE_LOG_ERROR("TCPCluster", "Client command channel disconnected");
-      enabled_ = false;
     }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 }
+
+void TCPClusterManager::udpAnnouncerLoop() {
+  vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (udp_fd == (vgre_socket_t)-1) return;
+  
+  int opt = 1;
+#if defined(_WIN32)
+  setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
+#else
+  setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+#endif
+
+  struct sockaddr_in broadcast_addr{};
+  broadcast_addr.sin_family = AF_INET;
+  broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
+  broadcast_addr.sin_port = htons(7778);
+
+  const char* ping_msg = "VGRE_DISCOVERY_PING";
+
+  while (enabled_ && is_master_) {
+    sendto(udp_fd, ping_msg, strlen(ping_msg), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+  CLOSE_SOCKET(udp_fd);
+}
+
+void TCPClusterManager::udpDiscoveryLoop() {
+  vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (udp_fd == (vgre_socket_t)-1) return;
+
+  int opt = 1;
+#if defined(_WIN32)
+  setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#else
+  setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+  setsockopt(udp_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
+#endif
+
+  struct sockaddr_in listen_addr{};
+  listen_addr.sin_family = AF_INET;
+  listen_addr.sin_addr.s_addr = INADDR_ANY;
+  listen_addr.sin_port = htons(7778);
+
+  bind(udp_fd, (struct sockaddr*)&listen_addr, sizeof(listen_addr));
+
+  struct timeval tv;
+  tv.tv_sec = 1;
+  tv.tv_usec = 0;
+#if defined(_WIN32)
+  DWORD timeout = 1000;
+  setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+#else
+  setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+
+  char buffer[64];
+  struct sockaddr_in sender_addr{};
+  socklen_t sender_len = sizeof(sender_addr);
+
+  VGRE_LOG_INFO("TCPCluster", "Scanning local subnet for Master node broadcasts...");
+
+  while (enabled_ && client_fd_ == (vgre_socket_t)-1) {
+    int n = recvfrom(udp_fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr*)&sender_addr, &sender_len);
+    if (n > 0) {
+      buffer[n] = '\0';
+      if (std::string(buffer) == "VGRE_DISCOVERY_PING") {
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(sender_addr.sin_addr), ip, INET_ADDRSTRLEN);
+        host_ = ip;
+        VGRE_LOG_INFO("TCPCluster", "Discovered Master node at " + host_);
+        
+        client_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in serv_addr;
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_port = htons(port_);
+        inet_pton(AF_INET, host_.c_str(), &serv_addr.sin_addr);
+        
+        if (connect(client_fd_, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) >= 0) {
+            IOCTL_NONBLOCK(client_fd_);
+            VGRE_LOG_INFO("TCPCluster", "Connected to Remote Master Node at " + host_);
+            break;
+        } else {
+            CLOSE_SOCKET(client_fd_);
+            client_fd_ = (vgre_socket_t)-1;
+        }
+      }
+    }
+  }
+  CLOSE_SOCKET(udp_fd);
+
+  if (client_fd_ != (vgre_socket_t)-1 && enabled_) {
+      data_processor_thread_ = std::thread(&TCPClusterManager::processClientStagingBuffer, this);
+      clientLoop();
+  }
+}
+
 
 VGREResult TCPClusterManager::launchRemoteKernel(
     int worker_idx, uint64_t kernel_id, const uint32_t grid_dim[3],

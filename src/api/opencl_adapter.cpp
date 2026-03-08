@@ -362,7 +362,13 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
                                            cl_kernel_handle kernel,
                                            cl_uint workDim,
                                            const size_t *globalWorkSize,
-                                           const size_t *localWorkSize) {
+                                           const size_t *localWorkSize,
+                                           cl_uint numEventsInWaitList,
+                                           const cl_event *eventWaitList,
+                                           cl_event *event) {
+  (void)numEventsInWaitList;
+  (void)eventWaitList;
+
   KernelInfo kernelInfo;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -390,7 +396,7 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
   if (workDim == 0 || workDim > 3)
     return CL_INVALID_VALUE;
 
-  // Map NDRange to CUDA grid/block
+  // Exact NDRange to CUDA grid/block mapping
   if (localWorkSize) {
     if ((workDim >= 1 && localWorkSize[0] == 0) ||
         (workDim >= 2 && localWorkSize[1] == 0) ||
@@ -405,6 +411,8 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
   }
 
   if (globalWorkSize) {
+    // OpenCL global_work_size is TOTAL threads, not blocks
+    // Rigorous ceiling division mapping
     gridDim.x = (workDim >= 1)
                     ? static_cast<uint32_t>(
                           (globalWorkSize[0] + blockDim.x - 1) / blockDim.x)
@@ -444,9 +452,6 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
       void *memObj = *reinterpret_cast<void **>(arg.ownedData.data());
       if (!mm.isValidHandle(memObj))
         return CL_INVALID_MEM_OBJECT;
-      // For pointer args, the ownedData contains a cl_mem (void*) value.
-      // We need to dereference it: the kernel expects a void** pointing to the
-      // cl_mem.
       argPtrs.push_back(arg.ownedData.data());
     } else {
       if ((arg.type == ArgType::INT32 || arg.type == ArgType::UINT32 ||
@@ -463,8 +468,30 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
     }
   }
 
+  uint64_t startT = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::high_resolution_clock::now().time_since_epoch())
+                        .count();
+
   auto r = core::RuntimeEngine::instance().launchKernel(
       kernelInfo.vgreKernelId, gridDim, blockDim, argPtrs.data());
+
+  uint64_t endT = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::high_resolution_clock::now().time_since_epoch())
+                      .count();
+
+  if (event) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cl_event eid = nextId_++;
+    EventInfo ei;
+    ei.queue = queue;
+    ei.timeQueued = startT;
+    ei.timeSubmit = startT;
+    ei.timeStart = startT;
+    ei.timeEnd = endT;
+    ei.completed = true;
+    events_[eid] = ei;
+    *event = eid;
+  }
 
   return (r == VGREResult::SUCCESS) ? CL_SUCCESS : CL_INVALID_VALUE;
 }
@@ -475,6 +502,48 @@ cl_int OpenCLAdapter::releaseKernel(cl_kernel_handle kernel) {
   if (it == kernels_.end())
     return CL_INVALID_VALUE;
   kernels_.erase(it);
+  return CL_SUCCESS;
+}
+
+// ── Events & Profiling ─────────────────────────────────────────────────
+cl_int OpenCLAdapter::waitForEvents(cl_uint numEvents, const cl_event *eventList) {
+  if (numEvents > 0 && !eventList) return CL_INVALID_VALUE;
+  // Execution is currently synchronous, so events are already finished. 
+  // We just validate they exist.
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (cl_uint i = 0; i < numEvents; ++i) {
+    if (events_.find(eventList[i]) == events_.end()) return CL_INVALID_VALUE;
+  }
+  return CL_SUCCESS;
+}
+
+cl_int OpenCLAdapter::releaseEvent(cl_event event) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = events_.find(event);
+  if (it == events_.end()) return CL_INVALID_VALUE;
+  events_.erase(it);
+  return CL_SUCCESS;
+}
+
+cl_int OpenCLAdapter::getEventProfilingInfo(cl_event event, cl_profiling_info paramName,
+                                            size_t paramValueSize, void *paramValue,
+                                            size_t *paramValueSizeRet) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = events_.find(event);
+  if (it == events_.end()) return CL_INVALID_VALUE;
+  
+  cl_ulong val = 0;
+  if (paramName == CL_PROFILING_COMMAND_QUEUED) val = it->second.timeQueued;
+  else if (paramName == CL_PROFILING_COMMAND_SUBMIT) val = it->second.timeSubmit;
+  else if (paramName == CL_PROFILING_COMMAND_START) val = it->second.timeStart;
+  else if (paramName == CL_PROFILING_COMMAND_END) val = it->second.timeEnd;
+  else return CL_INVALID_VALUE;
+
+  if (paramValue) {
+    if (paramValueSize < sizeof(cl_ulong)) return CL_INVALID_VALUE;
+    std::memcpy(paramValue, &val, sizeof(cl_ulong));
+  }
+  if (paramValueSizeRet) *paramValueSizeRet = sizeof(cl_ulong);
   return CL_SUCCESS;
 }
 

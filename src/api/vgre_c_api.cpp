@@ -9,6 +9,7 @@
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/advanced/ipc_manager.h"
+#include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/vgre_workload_engine.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/common/logger.h"
@@ -426,6 +427,16 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
   if (ipc.isEnabled()) {
     ipc.updateLocalTelemetry(*telemetry);
     ipc.getGlobalTelemetry(*telemetry);
+  }
+
+  // Add TCP Cluster aggregation
+  auto &tcp = vgre::advanced::TCPClusterManager::instance();
+  if (tcp.isEnabled()) {
+    if (tcp.isMaster()) {
+      tcp.aggregateRemoteTelemetry(*telemetry);
+    } else {
+      tcp.broadcastLocalTelemetry(*telemetry);
+    }
   }
 
   return VGRE_SUCCESS;

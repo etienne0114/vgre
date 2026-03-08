@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <condition_variable>
 #if defined(_WIN32)
 typedef unsigned long long
     vgre_socket_t; // Abstracting Windows SOCKET (UINT_PTR)
@@ -79,6 +80,11 @@ private:
   void serverLoop();
   void clientLoop();
   void handleRemoteCommand(const RemoteCommandPacket &pkt);
+  
+  // UDP Auto-Discovery
+  void udpAnnouncerLoop();  // Master
+  void udpDiscoveryLoop();  // Client
+  void processClientStagingBuffer(); // Client data processor
 
   std::atomic<bool> enabled_{false};
   uint64_t auth_token_ = 0;
@@ -88,6 +94,8 @@ private:
 
   // Threading
   std::thread cluster_thread_;
+  std::thread udp_thread_;
+  std::thread data_processor_thread_;
 
   // Master State
   vgre_socket_t server_fd_ = (vgre_socket_t)-1;
@@ -107,6 +115,15 @@ private:
   vgre_telemetry_t client_telemetry_buffer_{};
   std::vector<uint8_t> client_rx_buffer_;
   std::mutex client_mutex_;
+
+  // Double-buffered async data receiving
+  std::vector<uint8_t> client_rx_staging_A_;
+  std::vector<uint8_t> client_rx_staging_B_;
+  std::vector<uint8_t>* active_staging_ = &client_rx_staging_A_;
+  std::vector<uint8_t>* processing_staging_ = &client_rx_staging_B_;
+  std::mutex staging_mutex_;
+  std::condition_variable staging_cv_;
+  std::atomic<bool> staging_ready_{false};
 };
 
 } // namespace advanced
