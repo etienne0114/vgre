@@ -503,7 +503,7 @@ VGREResult RuntimeEngine::launchKernel(const std::string &name,
   return launchKernel(id, gridDim, blockDim, args, sharedMem, stream);
 }
 
-// ── Fused Dispatch ─────────────────────────────────────────────────────────
+// ── Native Graph Dispatch ──────────────────────────────────────────────────
 
 struct OwnedFusedLaunchArgs {
   std::vector<std::vector<uint8_t>> ownedData;
@@ -514,76 +514,103 @@ struct OwnedFusedLaunchArgs {
   size_t memBytes;
 };
 
-VGREResult RuntimeEngine::launchFusedKernelGroup(const std::vector<GraphNode>& group, StreamId stream) {
-  if (group.empty()) return VGREResult::SUCCESS;
+struct NativeGraphOperation {
+  GraphNodeType type;
+  // Kernel data
+  OwnedFusedLaunchArgs kernelArgs;
+  dim3 gridDim;
+  dim3 blockDim;
+  // Memcpy data
+  void *dst;
+  void *src;
+  size_t count;
+  int kind;
+};
 
-  // Pre-resolve all kernels and arguments
-  auto launchData = std::make_shared<std::vector<OwnedFusedLaunchArgs>>();
-  launchData->reserve(group.size());
+VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode>& nodes, StreamId stream) {
+  if (nodes.empty()) return VGREResult::SUCCESS;
 
-  const dim3 gridDim = group[0].gridDim;
-  const dim3 blockDim = group[0].blockDim;
+  // Pre-resolve all nodes into a natively executable directed sequence
+  auto compiledOps = std::make_shared<std::vector<NativeGraphOperation>>();
+  compiledOps->reserve(nodes.size());
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!initialized_) return VGREResult::ERROR_NOT_INITIALIZED;
 
-    for (const auto& node : group) {
-      auto it = kernelCache_.find(node.kernelId);
-      if (it == kernelCache_.end()) return VGREResult::ERROR_INVALID_KERNEL;
+    for (const auto& node : nodes) {
+      NativeGraphOperation op;
+      op.type = node.type;
 
-      auto irIt = kernelIRCache_.find(node.kernelId);
-      std::string kName = (irIt != kernelIRCache_.end()) ? irIt->second.name : "unknown";
+      if (node.type == GraphNodeType::KERNEL) {
+        auto it = kernelCache_.find(node.kernelId);
+        if (it == kernelCache_.end()) return VGREResult::ERROR_INVALID_KERNEL;
 
-      OwnedFusedLaunchArgs args;
-      args.fn = it->second;
-      args.name = kName;
-      args.ownedData.reserve(node.capturedArgs.size());
-      args.argPtrs.reserve(node.capturedArgs.size());
+        auto irIt = kernelIRCache_.find(node.kernelId);
+        std::string kName = (irIt != kernelIRCache_.end()) ? irIt->second.name : "unknown";
 
-      size_t memBytes = 0;
-      if (irIt != kernelIRCache_.end()) {
-        for (auto type : irIt->second.argTypes) {
-           memBytes += (type == ArgType::POINTER || type == ArgType::INT64 || type == ArgType::UINT64 || type == ArgType::FLOAT64) ? 8 : 4;
+        op.gridDim = node.gridDim;
+        op.blockDim = node.blockDim;
+        op.kernelArgs.fn = it->second;
+        op.kernelArgs.name = kName;
+        op.kernelArgs.ownedData.reserve(node.capturedArgs.size());
+        op.kernelArgs.argPtrs.reserve(node.capturedArgs.size());
+
+        size_t memBytes = 0;
+        if (irIt != kernelIRCache_.end()) {
+          for (auto type : irIt->second.argTypes) {
+             memBytes += (type == ArgType::POINTER || type == ArgType::INT64 || type == ArgType::UINT64 || type == ArgType::FLOAT64) ? 8 : 4;
+          }
         }
-      }
-      size_t totalThreads = gridDim.total() * blockDim.total();
-      args.memBytes = memBytes * totalThreads;
-      args.flops = totalThreads * (50 + (node.capturedArgs.size() * 10));
+        size_t totalThreads = node.gridDim.total() * node.blockDim.total();
+        op.kernelArgs.memBytes = memBytes * totalThreads;
+        op.kernelArgs.flops = totalThreads * (50 + (node.capturedArgs.size() * 10));
 
-      for (const auto &buf : node.capturedArgs) {
-        args.ownedData.push_back(buf);
-        args.argPtrs.push_back(args.ownedData.back().data());
+        for (const auto &buf : node.capturedArgs) {
+          op.kernelArgs.ownedData.push_back(buf);
+          op.kernelArgs.argPtrs.push_back(op.kernelArgs.ownedData.back().data());
+        }
+      } else if (node.type == GraphNodeType::MEMCPY) {
+        op.dst = node.dst;
+        op.src = node.src;
+        op.count = node.count;
+        op.kind = node.kind;
       }
-      launchData->push_back(std::move(args));
+      
+      compiledOps->push_back(std::move(op));
     }
   }
 
-  VGRE_LOG_INFO("RuntimeEngine", "Submitting Fused Kernel Group of size " + 
-                std::to_string(group.size()) + " on stream " + std::to_string(stream));
+  VGRE_LOG_INFO("RuntimeEngine", "Submitting Native Graph DAG of size " + 
+                std::to_string(nodes.size()) + " on stream " + std::to_string(stream));
 
   auto exec = executor_.get();
+  auto mm = memoryManager_.get();
   
-  // Submit single task to scheduler
-  auto fut = scheduler_->submitStreamTask(stream, [exec, launchData, gridDim, blockDim]() {
-    for (auto& args : *launchData) {
-      auto start = std::chrono::steady_clock::now();
-      exec->execute(args.fn, gridDim, blockDim, args.argPtrs.data(), 0);
-      auto end = std::chrono::steady_clock::now();
-      double ms = std::chrono::duration<double, std::milli>(end - start).count();
+  // Submit single authoritative task to scheduler
+  auto fut = scheduler_->submitStreamTask(stream, [exec, mm, compiledOps]() {
+    for (auto& op : *compiledOps) {
+      if (op.type == GraphNodeType::KERNEL) {
+        auto start = std::chrono::steady_clock::now();
+        exec->execute(op.kernelArgs.fn, op.gridDim, op.blockDim, op.kernelArgs.argPtrs.data(), 0);
+        auto end = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(end - start).count();
 
-      vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
-          args.name, blockDim.total(), 8, ms, args.memBytes, args.flops);
+        vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
+            op.kernelArgs.name, op.blockDim.total(), 8, ms, op.kernelArgs.memBytes, op.kernelArgs.flops);
+      } else if (op.type == GraphNodeType::MEMCPY) {
+        if (op.kind == VGRE_MEMCPY_HOST_TO_DEVICE) {
+          mm->copyHostToDevice(op.dst, op.src, op.count);
+        } else if (op.kind == VGRE_MEMCPY_DEVICE_TO_HOST) {
+          mm->copyDeviceToHost(op.dst, op.src, op.count);
+        } else if (op.kind == VGRE_MEMCPY_DEVICE_TO_DEVICE) {
+          mm->copyDeviceToDevice(op.dst, op.src, op.count);
+        }
+      }
     }
   });
 
-  if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-    auto submitResult = fut.get();
-    if (submitResult != VGREResult::SUCCESS) {
-      return submitResult;
-    }
-  }
-
+  // Async dispatch return. Wait/synchronize will propagate via main engine APIs.
   return VGREResult::SUCCESS;
 }
 

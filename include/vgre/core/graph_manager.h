@@ -42,7 +42,6 @@ class GraphExec {
 public:
   GraphExecId id;
   std::shared_ptr<Graph> sourceGraph;
-  std::vector<std::vector<GraphNode>> fusedGroups;
 };
 
 class GraphManager {

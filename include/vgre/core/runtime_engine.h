@@ -65,8 +65,8 @@ public:
                           void **args, size_t sharedMem = 0,
                           StreamId stream = 0);
 
-  // Fused Dispatch
-  VGREResult launchFusedKernelGroup(const std::vector<GraphNode>& group, StreamId stream);
+  // Native Graph Dispatch
+  VGREResult dispatchGraphNodes(const std::vector<GraphNode>& nodes, StreamId stream);
 
   // Device management
   int getDeviceCount() const;
