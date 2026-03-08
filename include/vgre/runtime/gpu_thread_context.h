@@ -1,6 +1,7 @@
 #ifndef VGRE_RUNTIME_GPU_THREAD_CONTEXT_H
 #define VGRE_RUNTIME_GPU_THREAD_CONTEXT_H
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -40,17 +41,20 @@ public:
   SharedMemory(const SharedMemory &) = delete;
   SharedMemory &operator=(const SharedMemory &) = delete;
   SharedMemory(SharedMemory &&other) noexcept
-      : size_(other.size_), buffer_(other.buffer_) {
+      : size_(other.size_), buffer_(other.buffer_),
+        conflicts_(other.conflicts_.load()) {
     other.buffer_ = nullptr;
     other.size_ = 0;
   }
 
   // Typed accessor — equivalent to `extern __shared__ T sdata[];`
   template <typename T> T *as(size_t byteOffset = 0) {
+    trackAccess(byteOffset, sizeof(T));
     return reinterpret_cast<T *>(buffer_ + byteOffset);
   }
 
   template <typename T> const T *as(size_t byteOffset = 0) const {
+    const_cast<SharedMemory*>(this)->trackAccess(byteOffset, sizeof(T));
     return reinterpret_cast<const T *>(buffer_ + byteOffset);
   }
 
@@ -70,11 +74,33 @@ public:
   void reset() {
     if (buffer_ && size_ > 0)
       std::memset(buffer_, 0, size_);
+    conflicts_ = 0;
   }
 
+  uint64_t getConflictCount() const { return conflicts_; }
+
 private:
+  void trackAccess(size_t offset, size_t size) {
+    (void)size;
+    // Virtual Bank Conflict Profiling (Simplified Warp Model)
+    // Assume warp size 32, 4-byte banks.
+    // In a real warp, 32 threads access simultaneously.
+    // Here we track if sequential accesses in the same 'wave' hit the same bank
+    // without hitting the same address (broadcast is fine).
+    static thread_local uint32_t lastBank = 0xFFFFFFFF;
+    static thread_local uint32_t lastOffset = 0xFFFFFFFF;
+    
+    uint32_t bank = (offset / 4) % 32;
+    if (bank == lastBank && offset != lastOffset) {
+        conflicts_++;
+    }
+    lastBank = bank;
+    lastOffset = offset;
+  }
+
   size_t size_;
   uint8_t *buffer_;
+  std::atomic<uint64_t> conflicts_{0};
 };
 
 // ── Block Barrier ──────────────────────────────────────────────────────────

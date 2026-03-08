@@ -32,13 +32,25 @@ struct StreamTaskNode {
   std::promise<VGREResult> promise;
 };
 
-// ── Scheduler (work-stealing thread pool) ──────────────────────────────────
+/**
+ * @brief High-performance task scheduler for VGRE streams.
+ *
+ * Implements a hybrid work-stealing/serialization model where tasks in a
+ * given stream are executed sequentially, while multiple streams execute
+ * concurrently across a worker thread pool.
+ */
 class Scheduler {
 public:
   explicit Scheduler(int numThreads = 0); // 0 = auto-detect
   ~Scheduler();
 
-  // Submit a generic task to a stream sequentially, with optional priority
+  /**
+   * @brief Submits a task to be executed sequentially relative to other tasks in the same stream.
+   * @param stream The stream handle.
+   * @param taskFn The function to execute.
+   * @param priority Task priority (higher is more urgent).
+   * @return A future containing the task result.
+   */
   std::future<VGREResult> submitStreamTask(StreamId stream,
                                            std::function<void()> taskFn,
                                            int priority = 0);

@@ -66,6 +66,21 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
 
 LLVMTranslationEngine::~LLVMTranslationEngine() = default;
 
+static size_t computeStableHash(const std::string& str) {
+  size_t hash = 5381;
+  for (char c : str)
+    hash = ((hash << 5) + hash) + c;
+  return hash;
+}
+
+static std::string getCacheDir() {
+  const char* home = std::getenv("HOME");
+  std::string path = home ? std::string(home) + "/.vgre_cache" : ".vgre_cache";
+  std::filesystem::create_directories(path);
+  return path;
+}
+
+
 VGREResult LLVMTranslationEngine::translate(const KernelIR &ir,
                                             CompiledKernelFn &outFn) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -76,13 +91,33 @@ VGREResult LLVMTranslationEngine::translate(const KernelIR &ir,
     return VGREResult::SUCCESS;
   }
 
-  VGRE_LOG_INFO("LLVMTranslationEngine", "Compiling kernel: " + ir.name);
-
   std::string wrapper = generateWrapperSource(ir);
+  size_t h = computeStableHash(wrapper);
+  std::string cachePath = getCacheDir() + "/" + std::to_string(h) + ".ll";
+  
   std::string irCode;
-  VGREResult r = compileToLLVMIR(wrapper, ir.name, irCode);
-  if (r != VGREResult::SUCCESS) {
-    return r;
+  bool loadedFromCache = false;
+
+  if (std::filesystem::exists(cachePath)) {
+    std::ifstream ifs(cachePath);
+    std::stringstream ss;
+    ss << ifs.rdbuf();
+    irCode = ss.str();
+    if (!irCode.empty()) {
+        loadedFromCache = true;
+        VGRE_LOG_INFO("LLVMTranslationEngine", "JIT Cache HIT for kernel: " + ir.name + " (Hash: " + std::to_string(h) + ")");
+    }
+  }
+
+  if (!loadedFromCache) {
+    VGRE_LOG_INFO("LLVMTranslationEngine", "Compiling kernel: " + ir.name + " (Cache MISS)");
+    VGREResult r = compileToLLVMIR(wrapper, ir.name, irCode);
+    if (r != VGREResult::SUCCESS) {
+      return r;
+    }
+    // Save to disk cache
+    std::ofstream ofs(cachePath);
+    ofs << irCode;
   }
 
   outFn = compileJIT(irCode, ir.name + "_wrapper");
@@ -127,8 +162,8 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
 
   // True LLVM SIMD Auto-Vectorization
   // We force Clang to map CUDA tx,ty,tz threads directly to physical AVX/SIMD hardware CPU lanes.
-  // This removes the "OpenMP thread virtualization" simulation by utilizing actual hardware concurrency
-  // for threads within a block, avoiding POSIX thread explosion and TLS crashes.
+  // This replaces the "OpenMP thread virtualization" logic by utilizing actual hardware concurrency
+  // for threads within a block via SIMD auto-vectorization, avoiding POSIX thread explosion and TLS crashes.
   oss << "  #pragma clang loop vectorize(enable) interleave(enable)\n";
   oss << "  for (uint32_t tz = 0; tz < bdz; ++tz) {\n";
   oss << "    #pragma clang loop vectorize(enable) interleave(enable)\n";

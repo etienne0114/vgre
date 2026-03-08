@@ -1,6 +1,10 @@
 #ifndef VGRE_RUNTIME_IGPU_OPENCL_EXECUTOR_H
 #define VGRE_RUNTIME_IGPU_OPENCL_EXECUTOR_H
 
+#ifndef CL_TARGET_OPENCL_VERSION
+#define CL_TARGET_OPENCL_VERSION 300
+#endif
+
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
 #ifdef __APPLE__

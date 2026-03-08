@@ -30,18 +30,36 @@ class VectorEngine;
 
 namespace core {
 
-// ── Runtime Engine (top-level orchestrator) ────────────────────────────────
+/**
+ * @brief Top-level orchestrator for the VGRE Engine.
+ *
+ * The RuntimeEngine manages device lifecycle, kernel compilation/dispatch,
+ * and unified virtual memory across iGPU and CPU backends.
+ */
 class RuntimeEngine {
 public:
   RuntimeEngine();
   ~RuntimeEngine();
 
-  // Initialization
+  /**
+   * @brief Bootstraps the VGRE environment, sensing hardware and initializing backends.
+   * @return VGREResult::SUCCESS on success.
+   */
   VGREResult initialize();
+
+  /**
+   * @brief Synchronously shuts down all executors and releases hardware resources.
+   */
   VGREResult shutdown();
+  
   bool isInitialized() const;
 
-  // Kernel management
+  /**
+   * @brief Transpiles and JIT-compiles a CUDA kernel for the current backend.
+   * @param name Symbolic name of the kernel.
+   * @param source CUDA C++ source code.
+   * @param outId Handle to the registered kernel.
+   */
   VGREResult registerKernel(const std::string &name, const std::string &source,
                             KernelId &outId);
 

@@ -1,19 +1,19 @@
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/common/logger.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
-#include <fstream>
+#include "vgre/runtime/vector_engine.h"
 
+// System Headers
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <thread>
 #include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
-
-#include "vgre/runtime/vector_engine.h"
 
 #if defined(__linux__)
 #include <dirent.h>

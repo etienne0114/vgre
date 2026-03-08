@@ -2,6 +2,8 @@
 #include "vgre/common/logger.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
+
+// System Headers
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -458,7 +460,11 @@ void TCPClusterManager::udpDiscoveryLoop() {
   listen_addr.sin_addr.s_addr = INADDR_ANY;
   listen_addr.sin_port = htons(7778);
 
-  bind(udp_fd, (struct sockaddr*)&listen_addr, sizeof(listen_addr));
+  if (bind(udp_fd, (struct sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
+    VGRE_LOG_WARN("TCPCluster", "UDP discovery bind failed");
+    CLOSE_SOCKET(udp_fd);
+    return;
+  }
 
   struct timeval tv;
   tv.tv_sec = 1;

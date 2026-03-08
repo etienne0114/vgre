@@ -15,10 +15,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <fstream>
 #include <functional>
 #include <set>
-#include <thread>
 #include <thread>
 
 namespace vgre {

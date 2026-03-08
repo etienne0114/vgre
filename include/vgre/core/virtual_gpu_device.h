@@ -5,10 +5,8 @@
 #include "vgre/common/types.h"
 
 #include <atomic>
-#include <memory>
 #include <mutex>
 #include <unordered_map>
-#include <vector>
 
 namespace vgre {
 namespace core {
@@ -20,13 +18,20 @@ struct Stream {
   StreamState state = StreamState::IDLE;
 };
 
-// ── Virtual GPU Device ─────────────────────────────────────────────────────
+/**
+ * @brief Representation of a Virtual GPU device instance.
+ *
+ * Each VirtualGPUDevice instance maps to a set of hardware resources
+ * (physical cores, memory pools) and maintains its own stream/context state.
+ */
 class VirtualGPUDevice {
 public:
   VirtualGPUDevice(DeviceId id = 0);
   ~VirtualGPUDevice();
 
-  // Properties
+  /**
+   * @brief Returns the sensed or assigned properties for this virtual device.
+   */
   DeviceProperties getProperties() const;
   void setProperties(const DeviceProperties &props);
   void setId(DeviceId id);

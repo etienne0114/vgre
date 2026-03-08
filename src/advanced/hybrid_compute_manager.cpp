@@ -9,16 +9,17 @@
 #include "vgre/runtime/igpu_opencl_executor.h"
 #endif
 
+// System Headers
 #include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <mutex>
 
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
 #include <windows.h>
 #else
 #include <netdb.h>

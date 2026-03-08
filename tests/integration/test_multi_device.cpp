@@ -1,7 +1,6 @@
 #include "vgre/api/cuda_interceptor.h"
 #include <cassert>
 #include <iostream>
-#include <vector>
 
 using namespace vgre;
 using namespace vgre::api;

@@ -1,7 +1,6 @@
 #ifndef VGRE_API_OPENCL_ADAPTER_H
 #define VGRE_API_OPENCL_ADAPTER_H
 
-#include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
 
 #include <mutex>

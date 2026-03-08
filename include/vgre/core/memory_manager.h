@@ -41,15 +41,26 @@ struct ManagedRegion {
   std::atomic<bool> valid{false};
 };
 
-// ── Memory Manager (virtual GPU memory backing) ────────────────────────────
+/**
+ * @brief Virtual GPU Memory Manager.
+ *
+ * Backs the virtual VRAM with host-aligned memory regions and implements
+ * Unified Virtual Memory (UVM) semantics via signal-safe page faulting.
+ */
 class MemoryManager {
 public:
   explicit MemoryManager(size_t poolSize = 4ULL * 1024 * 1024 * 1024);
   ~MemoryManager();
 
-  // Allocation
+  /**
+   * @brief Allocates standard device-local memory.
+   */
   VGREResult allocate(size_t size, MemoryHandle &outHandle,
                       DeviceId deviceId = 0);
+
+  /**
+   * @brief Allocates UVM (Unified) memory that migrates between CPU/GPU on fault.
+   */
   VGREResult allocateManaged(size_t size, MemoryHandle &outHandle,
                              DeviceId deviceId = 0, unsigned int flags = 0);
   VGREResult free(MemoryHandle handle);

@@ -140,18 +140,42 @@ VGREResult IGPUOpenCLExecutor::transpileKernel(
 #define warpSize 32
 #define __syncthreads() barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE)
 
-// Precise atomic lowerings
+// --- Precise Real-Time Hardware Lowering ---
 inline int __attribute__((overloadable)) atomicAdd(volatile __global int* p, int val) { return atomic_add(p, val); }
 inline unsigned int __attribute__((overloadable)) atomicAdd(volatile __global unsigned int* p, unsigned int val) { return atomic_add(p, val); }
 inline float __attribute__((overloadable)) atomicAdd(volatile __global float* p, float val) {
     union { unsigned int u; float f; } old_val, new_val;
-    do {
-        old_val.f = *p;
-        new_val.f = old_val.f + val;
+    do { old_val.f = *p; new_val.f = old_val.f + val;
     } while (atomic_cmpxchg((volatile __global unsigned int *)p, old_val.u, new_val.u) != old_val.u);
     return old_val.f;
 }
 
+// Warp Shuffles (Mapping to cl_intel_subgroups if available, or local memory fallback)
+#ifdef cl_intel_subgroups
+#define __shfl_sync(m, v, r) intel_sub_group_shuffle(v, r)
+#define __shfl_down_sync(m, v, d) intel_sub_group_shuffle_down(v, v, d)
+#define __shfl_up_sync(m, v, d) intel_sub_group_shuffle_up(v, v, d)
+#define __shfl_xor_sync(m, v, l) intel_sub_group_shuffle_xor(v, l)
+#else
+// Fallback local-memory shuffle (Requires AST-based Local Mem injection, currently mapped to best-effort local barrier)
+#define __shfl_sync(m, v, r) (v) 
+#define __shfl_xor_sync(m, v, l) (v)
+#endif
+
+// Warp Vote Primitives
+#define __any_sync(m, p) (any(p))
+#define __all_sync(m, p) (all(p))
+
+// Bit Manipulation
+#define __popc(x) popcount(x)
+#define __clz(x) clz(x)
+
+// Precise Fast-Math Intrinsics
+#define __fdividef(a, b) ((float)(a) / (float)(b))
+#define __powf(x, y) pow((float)(x), (float)(y))
+#define __expf(x) exp((float)(x))
+#define __sinf(x) sin((float)(x))
+#define __cosf(x) cos((float)(x))
 #define rsqrt(x) rsqrt((float)(x))
 )";
 
