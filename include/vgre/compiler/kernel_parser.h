@@ -57,8 +57,9 @@ public:
                      const std::string& source,
                      KernelIR& outIR);
 
-    // Extract parameter list from a function signature
-    VGREResult parseParameters(const std::string& signature,
+    // Extract parameter list from a function signature AST subrange
+    VGREResult parseParameters(const std::vector<Token>& tokens,
+                               size_t startIndex, size_t endIndex,
                                std::vector<ParsedParam>& outParams);
 
     // Identify CUDA built-in variables in the body
@@ -68,10 +69,11 @@ private:
     // Tokenizer
     std::vector<Token> tokenize(const std::string& source);
 
-    // Extract function signature, body, and qualifiers
+    // Extract function signature indices, body, and qualifiers
     VGREResult extractFunction(const std::vector<Token>& tokens,
                                std::string& outName,
-                               std::string& outSignature,
+                               size_t& outParamStart,
+                               size_t& outParamEnd,
                                std::string& outBody,
                                bool& outIsGlobal);
 

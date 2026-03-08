@@ -1,7 +1,6 @@
 #include "vgre/compiler/kernel_parser.h"
 #include "vgre/common/logger.h"
 
-#include <sstream>
 #include <algorithm>
 #include <cctype>
 #include <regex>
@@ -160,7 +159,8 @@ std::vector<Token> KernelParser::tokenize(const std::string& source) {
 // ── Extract function ───────────────────────────────────────────────────────
 VGREResult KernelParser::extractFunction(const std::vector<Token>& tokens,
                                           std::string& outName,
-                                          std::string& outSignature,
+                                          size_t& outParamStart,
+                                          size_t& outParamEnd,
                                           std::string& outBody,
                                           bool& outIsGlobal) {
     outIsGlobal = false;
@@ -177,7 +177,6 @@ VGREResult KernelParser::extractFunction(const std::vector<Token>& tokens,
         ++i;
     }
 
-    // If not found, restart and look for any function
     if (!outIsGlobal) {
         i = 0;
     }
@@ -185,7 +184,8 @@ VGREResult KernelParser::extractFunction(const std::vector<Token>& tokens,
     // Skip return type
     while (i < tokens.size() &&
            (tokens[i].type == TokenType::TYPE ||
-            tokens[i].type == TokenType::KEYWORD)) {
+            tokens[i].type == TokenType::KEYWORD ||
+            tokens[i].value == "::")) {
         ++i;
     }
 
@@ -199,19 +199,21 @@ VGREResult KernelParser::extractFunction(const std::vector<Token>& tokens,
 
     // Parameter list
     if (i < tokens.size() && tokens[i].type == TokenType::LPAREN) {
+        outParamStart = i + 1;
         int depth = 1;
-        outSignature = "(";
         ++i;
         while (i < tokens.size() && depth > 0) {
             if (tokens[i].type == TokenType::LPAREN) ++depth;
             if (tokens[i].type == TokenType::RPAREN) --depth;
-            if (depth > 0) {
-                outSignature += tokens[i].value;
-                if (tokens[i].type == TokenType::COMMA) outSignature += " ";
+            if (depth == 0) {
+                outParamEnd = i;
+                break;
             }
             ++i;
         }
-        outSignature += ")";
+        if (i < tokens.size()) ++i;
+    } else {
+        return VGREResult::ERROR_INVALID_KERNEL;
     }
 
     // Body
@@ -225,7 +227,8 @@ VGREResult KernelParser::extractFunction(const std::vector<Token>& tokens,
                 outBody += tokens[i].value;
                 if (tokens[i].type != TokenType::SEMICOLON &&
                     tokens[i].type != TokenType::LBRACE &&
-                    tokens[i].type != TokenType::RBRACE) {
+                    tokens[i].type != TokenType::RBRACE &&
+                    tokens[i].type != TokenType::OPERATOR) {
                     outBody += " ";
                 }
             }
@@ -237,84 +240,87 @@ VGREResult KernelParser::extractFunction(const std::vector<Token>& tokens,
 }
 
 // ── Parse parameters ───────────────────────────────────────────────────────
-VGREResult KernelParser::parseParameters(const std::string& signature,
-                                          std::vector<ParsedParam>& outParams) {
-    // Strip outer parentheses
-    std::string sig = signature;
-    if (!sig.empty() && sig.front() == '(') sig = sig.substr(1);
-    if (!sig.empty() && sig.back()  == ')') sig.pop_back();
+VGREResult KernelParser::parseParameters(const std::vector<Token>& tokens,
+                                         size_t startIndex, size_t endIndex,
+                                         std::vector<ParsedParam>& outParams) {
+    if (startIndex >= endIndex || endIndex > tokens.size()) return VGREResult::SUCCESS;
+    
+    std::vector<Token> currentParam;
+    int templateDepth = 0;
+    int parenDepth = 0;
 
-    std::istringstream iss(sig);
-    std::string param;
-    while (std::getline(iss, param, ',')) {
-        // Trim
-        param.erase(0, param.find_first_not_of(" \t\n\r"));
-        param.erase(param.find_last_not_of(" \t\n\r") + 1);
-        if (param.empty()) continue;
-
+    auto processParam = [&](const std::vector<Token>& pTokens) -> VGREResult {
+        if (pTokens.empty()) return VGREResult::SUCCESS;
         ParsedParam pp;
-        bool isPointer = param.find('*') != std::string::npos;
-        pp.isPointer = isPointer;
-
-        // Split type and name
-        auto lastSpace = param.rfind(' ');
-        if (lastSpace != std::string::npos) {
-            pp.typeName = param.substr(0, lastSpace);
-            pp.name     = param.substr(lastSpace + 1);
+        pp.isPointer = false;
+        
+        std::string typeStr;
+        std::string nameStr;
+        
+        int nameIdx = static_cast<int>(pTokens.size()) - 1;
+        
+        while (nameIdx >= 0 && 
+               (pTokens[nameIdx].type == TokenType::RBRACKET || 
+                pTokens[nameIdx].type == TokenType::LBRACKET || 
+                pTokens[nameIdx].value == "restrict" || 
+                pTokens[nameIdx].value == "__restrict__")) {
+            nameIdx--;
+        }
+        
+        if (nameIdx >= 0 && 
+           (pTokens[nameIdx].type == TokenType::IDENTIFIER || pTokens[nameIdx].type == TokenType::KEYWORD)) {
+            nameStr = pTokens[nameIdx].value;
         } else {
-            static const std::vector<std::string> kTypePrefixes = {
-                "unsigned long long", "signed long long", "unsigned long",
-                "signed long", "long long", "unsigned int", "signed int",
-                "long int", "short int", "size_t", "uint64_t", "int64_t",
-                "uint32_t", "int32_t", "uint16_t", "int16_t", "uint8_t",
-                "int8_t", "double", "float", "unsigned", "signed", "long",
-                "short", "char", "bool", "int"};
-            bool splitFound = false;
-            for (const auto& prefix : kTypePrefixes) {
-                if (param.size() > prefix.size() &&
-                    param.compare(0, prefix.size(), prefix) == 0) {
-                    pp.typeName = prefix;
-                    pp.name = param.substr(prefix.size());
-                    splitFound = true;
-                    break;
-                }
-            }
-
-            if (!splitFound) {
-                pp.typeName = param;
-                pp.name     = "arg" + std::to_string(outParams.size());
+            nameStr = "arg" + std::to_string(outParams.size());
+            nameIdx = static_cast<int>(pTokens.size());
+        }
+        
+        for (int j = 0; j < nameIdx; ++j) {
+            if (pTokens[j].value == "*") pp.isPointer = true;
+            if (pTokens[j].type != TokenType::KEYWORD || 
+               (pTokens[j].value != "const" && pTokens[j].value != "restrict" && pTokens[j].value != "volatile")) {
+                typeStr += pTokens[j].value;
             }
         }
-
-        pp.name.erase(0, pp.name.find_first_not_of(" \t"));
-        if (!pp.name.empty()) {
-            pp.name.erase(pp.name.find_last_not_of(" \t") + 1);
-        }
-        if (pp.name.empty()) {
-            pp.name = "arg" + std::to_string(outParams.size());
-        }
-
-        // Remove * from name if attached
-        pp.name.erase(std::remove(pp.name.begin(), pp.name.end(), '*'),
-                       pp.name.end());
-        pp.typeName.erase(std::remove(pp.typeName.begin(),
-                                       pp.typeName.end(), '*'),
-                           pp.typeName.end());
-        // Trim again
-        pp.typeName.erase(0, pp.typeName.find_first_not_of(" \t"));
-        pp.typeName.erase(pp.typeName.find_last_not_of(" \t") + 1);
-
+        
+        typeStr.erase(std::remove(typeStr.begin(), typeStr.end(), '*'), typeStr.end());
+        nameStr.erase(std::remove(nameStr.begin(), nameStr.end(), '*'), nameStr.end());
+        if (typeStr.empty()) typeStr = nameStr;
+        
+        pp.typeName = typeStr;
+        pp.name = nameStr;
         bool recognized = false;
-        pp.argType = mapType(pp.typeName, isPointer, recognized);
+        pp.argType = mapType(pp.typeName, pp.isPointer, recognized);
+        
         if (!recognized) {
-            VGRE_LOG_ERROR("KernelParser",
-                           "Unsupported kernel parameter type '" + pp.typeName +
-                               "' in signature: " + signature);
-            return VGREResult::ERROR_INVALID_KERNEL;
+             VGRE_LOG_ERROR("KernelParser", "Unsupported type: " + pp.typeName);
+             return VGREResult::ERROR_INVALID_KERNEL;
         }
         outParams.push_back(pp);
-    }
+        return VGREResult::SUCCESS;
+    };
 
+    for (size_t i = startIndex; i < endIndex; ++i) {
+        const auto& tok = tokens[i];
+        if (tok.value == "<") templateDepth++;
+        else if (tok.value == ">") templateDepth--;
+        else if (tok.type == TokenType::LPAREN) parenDepth++;
+        else if (tok.type == TokenType::RPAREN) parenDepth--;
+        
+        if (tok.type == TokenType::COMMA && templateDepth == 0 && parenDepth == 0) {
+            auto r = processParam(currentParam);
+            if (r != VGREResult::SUCCESS) return r;
+            currentParam.clear();
+        } else {
+            currentParam.push_back(tok);
+        }
+    }
+    
+    if (!currentParam.empty()) {
+        auto r = processParam(currentParam);
+        if (r != VGREResult::SUCCESS) return r;
+    }
+    
     return VGREResult::SUCCESS;
 }
 
@@ -422,17 +428,18 @@ std::vector<std::string> KernelParser::findBuiltinVars(const std::string& body) 
 VGREResult KernelParser::parse(const std::string& name,
                                 const std::string& source,
                                 KernelIR& outIR) {
-    VGRE_LOG_INFO("KernelParser", "Parsing kernel: " + name);
+    VGRE_LOG_INFO("KernelParser", "Parsing kernel AST: " + name);
 
     auto tokens = tokenize(source);
     if (tokens.empty()) {
         return VGREResult::ERROR_INVALID_KERNEL;
     }
 
-    std::string funcName, signature, body;
+    std::string funcName, body;
+    size_t paramStart = 0, paramEnd = 0;
     bool isGlobal = false;
 
-    auto r = extractFunction(tokens, funcName, signature, body, isGlobal);
+    auto r = extractFunction(tokens, funcName, paramStart, paramEnd, body, isGlobal);
     if (r != VGREResult::SUCCESS) {
         VGRE_LOG_ERROR("KernelParser",
                        "Failed to extract function from kernel source");
@@ -441,7 +448,7 @@ VGREResult KernelParser::parse(const std::string& name,
 
     // Parse parameters
     std::vector<ParsedParam> params;
-    auto paramResult = parseParameters(signature, params);
+    auto paramResult = parseParameters(tokens, paramStart, paramEnd, params);
     if (paramResult != VGREResult::SUCCESS) {
         return paramResult;
     }
@@ -461,7 +468,7 @@ VGREResult KernelParser::parse(const std::string& name,
 
     auto builtins = findBuiltinVars(body);
     VGRE_LOG_INFO("KernelParser",
-                  "Parsed kernel '" + outIR.name + "' with " +
+                  "Parsed AST for kernel '" + outIR.name + "' with " +
                   std::to_string(params.size()) + " params, " +
                   std::to_string(builtins.size()) + " built-in vars");
 

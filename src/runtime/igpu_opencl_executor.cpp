@@ -123,21 +123,44 @@ VGREResult IGPUOpenCLExecutor::transpileKernel(
   // Remove extern "C"
   s = std::regex_replace(s, std::regex(R"(extern\s+"C"\s+)"), "");
 
-  // Replace __global__ with __kernel
-  s = std::regex_replace(s, std::regex(R"(__global__)"), "__kernel");
+  // Construct rigorous OpenCL Hardware Lowering Shim
+  std::string openclShim = R"(
+// --- VGRE Precise CUDA to OpenCL Hardware Shim ---
+#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics : enable
+#pragma OPENCL EXTENSION cl_khr_local_int32_base_atomics : enable
+#pragma OPENCL EXTENSION cl_khr_global_int32_extended_atomics : enable
+#pragma OPENCL EXTENSION cl_khr_local_int32_extended_atomics : enable
 
-  // Replace __shared__ with __local
-  s = std::regex_replace(s, std::regex(R"(__shared__)"), "__local");
+#define __global__ __kernel
+#define __device__ 
+#define __shared__ __local
+#define __constant__ __constant
 
-  // Replace __constant__ with __constant (OpenCL standard)
-  s = std::regex_replace(s, std::regex(R"(__constant__)"), "__constant");
+#define warpSize 32
+#define __syncthreads() barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE)
 
-  // Replace pointer arguments with __global void* (OpenCL C requirement)
-  // Handle various pointer types: float*, int*, double*, void*, uint*, etc.
+// Precise atomic lowerings
+inline int atomicAdd(volatile __global int* p, int val) { return atomic_add(p, val); }
+inline unsigned int atomicAdd(volatile __global unsigned int* p, unsigned int val) { return atomic_add(p, val); }
+inline float atomicAdd_float(volatile __global float* p, float val) {
+    union { unsigned int u; float f; } old_val, new_val;
+    do {
+        old_val.f = *p;
+        new_val.f = old_val.f + val;
+    } while (atomic_cmpxchg((volatile __global unsigned int *)p, old_val.u, new_val.u) != old_val.u);
+    return old_val.f;
+}
+#define atomicAdd_f(p, val) atomicAdd_float((p), (val))
+
+#define rsqrt(x) rsqrt((float)(x))
+)";
+
+  // Enforce OpenCL __global address space on kernel signature pointers
   s = std::regex_replace(s, std::regex(R"((\b(float|int|double|void|uint32_t|uint64_t|int32_t|int64_t|uchar|char|short|ushort|long|ulong)\s*\*))"),
                          "__global $1");
 
-  // Thread semantic replacement
+  // Thread semantic hardware coordinate replacement
   s = std::regex_replace(s, std::regex(R"(blockIdx\.x)"), "get_group_id(0)");
   s = std::regex_replace(s, std::regex(R"(blockIdx\.y)"), "get_group_id(1)");
   s = std::regex_replace(s, std::regex(R"(blockIdx\.z)"), "get_group_id(2)");
@@ -153,8 +176,12 @@ VGREResult IGPUOpenCLExecutor::transpileKernel(
   s = std::regex_replace(s, std::regex(R"(gridDim\.x)"), "get_num_groups(0)");
   s = std::regex_replace(s, std::regex(R"(gridDim\.y)"), "get_num_groups(1)");
   s = std::regex_replace(s, std::regex(R"(gridDim\.z)"), "get_num_groups(2)");
+  
+  // Apply float atomic macro hack since OpenCL 1.2 lacks overloading for volatile floats
+  s = std::regex_replace(s, std::regex(R"(atomicAdd\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\))"), 
+                         "atomicAdd_f($1, $2)");
 
-  outOpenCLSource = s;
+  outOpenCLSource = openclShim + "\n" + s;
   VGRE_LOG_DEBUG("IGPUOpenCLExecutor",
                  "Transpiled Kernel [" + kernelName + "]:\n" + outOpenCLSource);
   return VGREResult::SUCCESS;
