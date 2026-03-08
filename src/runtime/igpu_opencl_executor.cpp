@@ -141,9 +141,9 @@ VGREResult IGPUOpenCLExecutor::transpileKernel(
 #define __syncthreads() barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE)
 
 // Precise atomic lowerings
-inline int atomicAdd(volatile __global int* p, int val) { return atomic_add(p, val); }
-inline unsigned int atomicAdd(volatile __global unsigned int* p, unsigned int val) { return atomic_add(p, val); }
-inline float atomicAdd_float(volatile __global float* p, float val) {
+inline int __attribute__((overloadable)) atomicAdd(volatile __global int* p, int val) { return atomic_add(p, val); }
+inline unsigned int __attribute__((overloadable)) atomicAdd(volatile __global unsigned int* p, unsigned int val) { return atomic_add(p, val); }
+inline float __attribute__((overloadable)) atomicAdd(volatile __global float* p, float val) {
     union { unsigned int u; float f; } old_val, new_val;
     do {
         old_val.f = *p;
@@ -151,7 +151,6 @@ inline float atomicAdd_float(volatile __global float* p, float val) {
     } while (atomic_cmpxchg((volatile __global unsigned int *)p, old_val.u, new_val.u) != old_val.u);
     return old_val.f;
 }
-#define atomicAdd_f(p, val) atomicAdd_float((p), (val))
 
 #define rsqrt(x) rsqrt((float)(x))
 )";
@@ -177,10 +176,7 @@ inline float atomicAdd_float(volatile __global float* p, float val) {
   s = std::regex_replace(s, std::regex(R"(gridDim\.y)"), "get_num_groups(1)");
   s = std::regex_replace(s, std::regex(R"(gridDim\.z)"), "get_num_groups(2)");
   
-  // Apply float atomic macro hack since OpenCL 1.2 lacks overloading for volatile floats
-  s = std::regex_replace(s, std::regex(R"(atomicAdd\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\))"), 
-                         "atomicAdd_f($1, $2)");
-
+  // No longer need the atomicAdd_f hack if we use 'overloadable'
   outOpenCLSource = openclShim + "\n" + s;
   VGRE_LOG_DEBUG("IGPUOpenCLExecutor",
                  "Transpiled Kernel [" + kernelName + "]:\n" + outOpenCLSource);

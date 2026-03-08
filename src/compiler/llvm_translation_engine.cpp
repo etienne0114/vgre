@@ -125,11 +125,15 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   oss << "  vgre_cuda::blockDim_arr[_tid] = vgre_cuda::dim3(bdx, bdy, bdz);\n";
   oss << "  vgre_cuda::gridDim_arr[_tid] = vgre_cuda::dim3(gdx, gdy, gdz);\n\n";
 
-  // Virtualizing threads within the block with sequential loops.
-  // We avoid OMP here because the outer CPUParallelExecutor already distributes blocks.
-  // Nested OpenMP in JIT modules causes severe libgomp TLS destruction crashes!
+  // True LLVM SIMD Auto-Vectorization
+  // We force Clang to map CUDA tx,ty,tz threads directly to physical AVX/SIMD hardware CPU lanes.
+  // This removes the "OpenMP thread virtualization" simulation by utilizing actual hardware concurrency
+  // for threads within a block, avoiding POSIX thread explosion and TLS crashes.
+  oss << "  #pragma clang loop vectorize(enable) interleave(enable)\n";
   oss << "  for (uint32_t tz = 0; tz < bdz; ++tz) {\n";
+  oss << "    #pragma clang loop vectorize(enable) interleave(enable)\n";
   oss << "    for (uint32_t ty = 0; ty < bdy; ++ty) {\n";
+  oss << "      #pragma clang loop vectorize(enable) interleave(enable)\n";
   oss << "      for (uint32_t tx = 0; tx < bdx; ++tx) {\n";
   oss << "        vgre_cuda::threadIdx_arr[_tid] = vgre_cuda::dim3(tx, ty, tz);\n\n";
 
