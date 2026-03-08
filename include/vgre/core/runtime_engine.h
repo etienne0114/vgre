@@ -17,6 +17,7 @@ class KernelParser;
 class LLVMTranslationEngine;
 } // namespace compiler
 namespace core {
+struct GraphNode;
 class Scheduler;
 class MemoryManager;
 class VirtualGPUDevice;
@@ -64,6 +65,9 @@ public:
                           void **args, size_t sharedMem = 0,
                           StreamId stream = 0);
 
+  // Fused Dispatch
+  VGREResult launchFusedKernelGroup(const std::vector<GraphNode>& group, StreamId stream);
+
   // Device management
   int getDeviceCount() const;
   VGREResult setDevice(DeviceId id);
@@ -92,6 +96,10 @@ public:
   VGREResult graphLaunch(GraphExecId exec, StreamId stream);
   VGREResult graphDestroy(GraphId graph);
   VGREResult graphExecDestroy(GraphExecId exec);
+  
+  // Internal Graph Recording
+  bool isStreamCapturing(StreamId stream) const;
+  VGREResult recordMemcpyToGraph(StreamId stream, void *dst, const void *src, size_t count, int kind);
 
   // Access sub-systems
   MemoryManager &getMemoryManager();

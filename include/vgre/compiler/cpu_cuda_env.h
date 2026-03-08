@@ -12,12 +12,20 @@ struct dim3 {
       : x(_x), y(_y), z(_z) {}
 };
 
-// Global thread/block indices provided by the wrapper
-extern thread_local dim3 threadIdx;
-extern thread_local dim3 blockIdx;
-extern thread_local void* sharedMem;
-extern dim3 blockDim;
-extern dim3 gridDim;
+// Global thread/block indices provided by the wrapper, using an array mapping to bypass JIT TLS corruption
+extern "C" int vgre_jit_get_thread_id();
+
+extern dim3 threadIdx_arr[256];
+extern dim3 blockIdx_arr[256];
+extern void* sharedMem_arr[256];
+extern dim3 blockDim_arr[256];
+extern dim3 gridDim_arr[256];
+
+#define threadIdx (vgre_cuda::threadIdx_arr[vgre_jit_get_thread_id()])
+#define blockIdx  (vgre_cuda::blockIdx_arr[vgre_jit_get_thread_id()])
+#define blockDim  (vgre_cuda::blockDim_arr[vgre_jit_get_thread_id()])
+#define gridDim   (vgre_cuda::gridDim_arr[vgre_jit_get_thread_id()])
+#define sharedMem (vgre_cuda::sharedMem_arr[vgre_jit_get_thread_id()])
 
 // Atomic mappings for CPU
 #define atomicAdd(addr, val) __atomic_fetch_add(addr, val, __ATOMIC_SEQ_CST)

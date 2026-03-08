@@ -106,12 +106,36 @@ vgre::VGREResult GraphManager::instantiate(GraphId id, GraphExecId &outExecId) {
   auto exec = std::make_shared<GraphExec>();
   exec->id = nextExecId_++;
   exec->sourceGraph = it->second;
+
+  // Node Fusing Optimization Pass
+  for (const auto &node : exec->sourceGraph->nodes) {
+    if (exec->fusedGroups.empty()) {
+      exec->fusedGroups.push_back({node});
+    } else {
+      auto &lastGroup = exec->fusedGroups.back();
+      const auto &lastNode = lastGroup.back();
+      
+      // We can fuse if they are both kernels and have the exact same Grid/Block topology.
+      // This reduces dispatch overhead by grouping matching topologies into a single Executor submission.
+      if (node.type == GraphNodeType::KERNEL && lastNode.type == GraphNodeType::KERNEL &&
+          node.gridDim.x == lastNode.gridDim.x && node.gridDim.y == lastNode.gridDim.y && node.gridDim.z == lastNode.gridDim.z &&
+          node.blockDim.x == lastNode.blockDim.x && node.blockDim.y == lastNode.blockDim.y && node.blockDim.z == lastNode.blockDim.z) {
+        lastGroup.push_back(node);
+      } else {
+        exec->fusedGroups.push_back({node});
+      }
+    }
+  }
+
+  VGRE_LOG_INFO(
+      "GraphManager",
+      "Instantiated graph " + std::to_string(id) + " into executable " +
+          std::to_string(outExecId) + " (Fused down to " +
+          std::to_string(exec->fusedGroups.size()) + " dispatch chunks)");
+
   executables_[exec->id] = exec;
   outExecId = exec->id;
 
-  VGRE_LOG_INFO("GraphManager", "Instantiated graph " + std::to_string(id) +
-                                    " into executable " +
-                                    std::to_string(outExecId));
   return vgre::VGREResult::SUCCESS;
 }
 
@@ -123,14 +147,14 @@ vgre::VGREResult GraphManager::destroyGraphExec(GraphExecId id) {
 
 vgre::VGREResult GraphManager::launch(GraphExecId execId, StreamId stream) {
   std::shared_ptr<GraphExec> exec;
-  std::vector<GraphNode> nodes;
+  std::vector<std::vector<GraphNode>> groups;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = executables_.find(execId);
     if (it == executables_.end())
       return vgre::VGREResult::ERROR_INVALID_VALUE;
     exec = it->second;
-    nodes = exec->sourceGraph->nodes;
+    groups = exec->fusedGroups;
   }
 
   auto &engine = RuntimeEngine::instance();
@@ -138,64 +162,63 @@ vgre::VGREResult GraphManager::launch(GraphExecId execId, StreamId stream) {
                                     std::to_string(execId) + " on stream " +
                                     std::to_string(stream));
 
-  for (const auto &node : nodes) {
-    if (node.type == GraphNodeType::KERNEL) {
-      // Deep-copy captured arg data into a fully self-contained struct.
-      // This ensures args survive even if the source Graph is destroyed
-      // before async execution on this stream completes.
-      struct OwnedLaunchArgs {
-        std::vector<std::vector<uint8_t>> ownedData;
-        std::vector<void *> argPtrs;
-      };
-      auto launchArgs = std::make_shared<OwnedLaunchArgs>();
-      launchArgs->ownedData.reserve(node.capturedArgs.size());
-      launchArgs->argPtrs.reserve(node.capturedArgs.size());
-      for (const auto &buf : node.capturedArgs) {
-        launchArgs->ownedData.push_back(buf); // deep copy
-        launchArgs->argPtrs.push_back(launchArgs->ownedData.back().data());
+  for (const auto &group : groups) {
+    if (group.empty()) continue;
+
+    if (group[0].type == GraphNodeType::KERNEL) {
+      if (group.size() == 1) {
+        // Fast path for single kernel to avoid overhead of creating vectors
+        const auto &node = group[0];
+        struct OwnedLaunchArgs {
+          std::vector<std::vector<uint8_t>> ownedData;
+          std::vector<void *> argPtrs;
+        };
+        auto launchArgs = std::make_shared<OwnedLaunchArgs>();
+        launchArgs->ownedData.reserve(node.capturedArgs.size());
+        launchArgs->argPtrs.reserve(node.capturedArgs.size());
+        for (const auto &buf : node.capturedArgs) {
+          launchArgs->ownedData.push_back(buf); // deep copy
+          launchArgs->argPtrs.push_back(launchArgs->ownedData.back().data());
+        }
+
+        auto r = engine.launchKernel(node.kernelId, node.gridDim, node.blockDim,
+                                     launchArgs->argPtrs.data(), 0, stream);
+        if (r != vgre::VGREResult::SUCCESS)
+          return r;
+
+        auto holdFut = engine.getScheduler().submitStreamTask(
+            stream, [launchArgs]() { (void)launchArgs; });
+      } else {
+        // Dispatch fused multi-kernel group
+        auto r = engine.launchFusedKernelGroup(group, stream);
+        if (r != vgre::VGREResult::SUCCESS)
+          return r;
       }
+    } else if (group[0].type == GraphNodeType::MEMCPY) {
+      // Memory copies cannot currently be fused easily due to different sizes/ptrs
+      for (const auto &node : group) {
+        auto &mm = engine.getMemoryManager();
+        auto dst = node.dst;
+        auto src = node.src;
+        auto count = node.count;
+        auto kind = node.kind;
 
-      auto r = engine.launchKernel(node.kernelId, node.gridDim, node.blockDim,
-                                   launchArgs->argPtrs.data(), 0, stream);
-      if (r != vgre::VGREResult::SUCCESS)
-        return r;
-
-      // Keep launchArgs alive: submit a no-op follow-up task on the same stream
-      // that captures the shared_ptr, ensuring the owned data lives until
-      // after the kernel that uses these pointers has completed.
-      auto holdFut = engine.getScheduler().submitStreamTask(
-          stream, [launchArgs]() { (void)launchArgs; });
-      if (holdFut.wait_for(std::chrono::seconds(0)) ==
-          std::future_status::ready) {
-        auto holdRes = holdFut.get();
-        if (holdRes != vgre::VGREResult::SUCCESS)
-          return holdRes;
-      }
-    } else if (node.type == GraphNodeType::MEMCPY) {
-      auto &mm = engine.getMemoryManager();
-      // Dispatch asynchronous memory copy on the stream.
-      // Currently, we'll wrap synchronous copies inside an async task so it
-      // sequences with the kernels correctly.
-      auto dst = node.dst;
-      auto src = node.src;
-      auto count = node.count;
-      auto kind = node.kind;
-
-      auto memcpyFut = engine.getScheduler().submitStreamTask(
-          stream, [&mm, dst, src, count, kind]() {
-            if (kind == VGRE_MEMCPY_HOST_TO_DEVICE) {
-              mm.copyHostToDevice(dst, src, count);
-            } else if (kind == VGRE_MEMCPY_DEVICE_TO_HOST) {
-              mm.copyDeviceToHost(dst, src, count);
-            } else if (kind == VGRE_MEMCPY_DEVICE_TO_DEVICE) {
-              mm.copyDeviceToDevice(dst, src, count);
-            }
-          });
-      if (memcpyFut.wait_for(std::chrono::seconds(0)) ==
-          std::future_status::ready) {
-        auto memcpyRes = memcpyFut.get();
-        if (memcpyRes != vgre::VGREResult::SUCCESS)
-          return memcpyRes;
+        auto memcpyFut = engine.getScheduler().submitStreamTask(
+            stream, [&mm, dst, src, count, kind]() {
+              if (kind == VGRE_MEMCPY_HOST_TO_DEVICE) {
+                mm.copyHostToDevice(dst, src, count);
+              } else if (kind == VGRE_MEMCPY_DEVICE_TO_HOST) {
+                mm.copyDeviceToHost(dst, src, count);
+              } else if (kind == VGRE_MEMCPY_DEVICE_TO_DEVICE) {
+                mm.copyDeviceToDevice(dst, src, count);
+              }
+            });
+        if (memcpyFut.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::ready) {
+          auto memcpyRes = memcpyFut.get();
+          if (memcpyRes != vgre::VGREResult::SUCCESS)
+            return memcpyRes;
+        }
       }
     }
   }

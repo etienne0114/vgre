@@ -34,8 +34,8 @@ namespace vgre {
 namespace compiler {
 
 struct LLVMState {
-  std::unique_ptr<llvm::orc::LLJIT> jit;
   llvm::orc::ThreadSafeContext context;
+  std::unique_ptr<llvm::orc::LLJIT> jit;
 };
 
 LLVMTranslationEngine::LLVMTranslationEngine() {
@@ -98,13 +98,14 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   std::ostringstream oss;
   oss << "#include \"vgre/compiler/cpu_cuda_env.h\"\n\n";
 
-  // Provide thread_local storage for indices and shared memory
+  // Provide array storage for indices and shared memory
+  oss << "extern \"C\" int vgre_jit_get_thread_id();\n";
   oss << "namespace vgre_cuda {\n";
-  oss << "thread_local dim3 threadIdx;\n";
-  oss << "thread_local dim3 blockIdx;\n";
-  oss << "thread_local void* sharedMem;\n";
-  oss << "dim3 blockDim;\n";
-  oss << "dim3 gridDim;\n";
+  oss << "dim3 threadIdx_arr[256];\n";
+  oss << "dim3 blockIdx_arr[256];\n";
+  oss << "void* sharedMem_arr[256];\n";
+  oss << "dim3 blockDim_arr[256];\n";
+  oss << "dim3 gridDim_arr[256];\n";
   oss << "}\n\n";
 
   // Embed the actual kernel
@@ -116,18 +117,21 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
       << "uint32_t bdx, uint32_t bdy, uint32_t bdz, "
       << "uint32_t gdx, uint32_t gdy, uint32_t gdz, "
       << "void* smem, size_t smemSize) {\n";
-  oss << "  vgre_cuda::sharedMem = smem;\n";
+      
+  oss << "  int _tid = vgre_jit_get_thread_id();\n";
+  oss << "  vgre_cuda::sharedMem_arr[_tid] = smem;\n";
 
-  oss << "  vgre_cuda::blockIdx = vgre_cuda::dim3(bx, by, bz);\n";
-  oss << "  vgre_cuda::blockDim = vgre_cuda::dim3(bdx, bdy, bdz);\n";
-  oss << "  vgre_cuda::gridDim = vgre_cuda::dim3(gdx, gdy, gdz);\n\n";
+  oss << "  vgre_cuda::blockIdx_arr[_tid] = vgre_cuda::dim3(bx, by, bz);\n";
+  oss << "  vgre_cuda::blockDim_arr[_tid] = vgre_cuda::dim3(bdx, bdy, bdz);\n";
+  oss << "  vgre_cuda::gridDim_arr[_tid] = vgre_cuda::dim3(gdx, gdy, gdz);\n\n";
 
-  // Virtualizing threads within the block with OpenMP parallelism
-  oss << "  #pragma omp parallel for collapse(3)\n";
+  // Virtualizing threads within the block with sequential loops.
+  // We avoid OMP here because the outer CPUParallelExecutor already distributes blocks.
+  // Nested OpenMP in JIT modules causes severe libgomp TLS destruction crashes!
   oss << "  for (uint32_t tz = 0; tz < bdz; ++tz) {\n";
   oss << "    for (uint32_t ty = 0; ty < bdy; ++ty) {\n";
   oss << "      for (uint32_t tx = 0; tx < bdx; ++tx) {\n";
-  oss << "        vgre_cuda::threadIdx = vgre_cuda::dim3(tx, ty, tz);\n\n";
+  oss << "        vgre_cuda::threadIdx_arr[_tid] = vgre_cuda::dim3(tx, ty, tz);\n\n";
 
   // Unpack arguments
   std::vector<std::string> argCall;
@@ -236,11 +240,11 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
 
   // Use platform-aware include path
 #if defined(_WIN32)
-  std::string cmd = "clang++ -S -emit-llvm -O3 -Xclang -fopenmp -I\"" + includePath + "\" \"" + tmpCpp + "\" -o \"" +
+  std::string cmd = "clang++ -S -emit-llvm -O3 -Xclang -I\"" + includePath + "\" \"" + tmpCpp + "\" -o \"" +
                     tmpIR + "\" > \"" + logFile + "\" 2>&1";
 #else
-  // Use libgomp to match the host runtime and ensure symbol compatibility
-  std::string cmd = "clang++ -S -emit-llvm -O3 -fopenmp=libgomp -I\"" + includePath + "\" \"" + tmpCpp + "\" -o \"" +
+  // Do NOT use -fopenmp=libgomp here, as JIT module teardown causes dangling TLS in libgomp leading to crash.
+  std::string cmd = "clang++ -S -emit-llvm -O3 -I\"" + includePath + "\" \"" + tmpCpp + "\" -o \"" +
                     tmpIR + "\" > \"" + logFile + "\" 2>&1";
 #endif
   int status = std::system(cmd.c_str());

@@ -120,6 +120,13 @@ void test_statistics() {
 
   auto f = sched.submitStreamTask(0, []() {});
   f.get();
+  sched.waitAll();
+
+  // The promise is fulfilled slightly before completed_ is incremented in the worker.
+  // Wait briefly to allow the worker thread to finish the loop iteration.
+  while (sched.getCompletedTasks() < 1) {
+    std::this_thread::yield();
+  }
 
   assert(sched.getCompletedTasks() >= 1);
 

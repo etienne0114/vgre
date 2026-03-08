@@ -222,6 +222,14 @@ cudaError_t CUDAInterceptor::memcpyAsync(void *dst, const void *src,
   if (!dst || !src || count == 0)
     return cudaErrorInvalidValue;
 
+  // Check if this stream is currently capturing a graph
+  if (core::RuntimeEngine::instance().isStreamCapturing(stream)) {
+    auto r = core::RuntimeEngine::instance().recordMemcpyToGraph(
+        stream, dst, src, count, static_cast<int>(kind));
+    g_lastError = convertResult(r);
+    return g_lastError;
+  }
+
   // We capture the parameters and perform the synchronous copy on the stream's
   // worker thread
   auto fut = core::Scheduler::instance().submitStreamTask(stream, [=]() {

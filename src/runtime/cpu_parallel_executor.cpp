@@ -2,13 +2,25 @@
 #include "vgre/common/logger.h"
 #include "vgre/runtime/gpu_thread_context.h"
 
-#include <algorithm>
 #include <cstring>
 #include <thread>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+
+#include <atomic>
+
+extern "C" {
+__attribute__((visibility("default"))) int vgre_jit_get_thread_id() {
+    static std::atomic<int> s_next_id{0};
+    static __thread int s_my_id = -1;
+    if (s_my_id == -1) {
+        s_my_id = (s_next_id++) % 256;
+    }
+    return s_my_id;
+}
+}
 
 namespace vgre {
 namespace runtime {
@@ -75,34 +87,47 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
       // Thread-local shared memory buffer, allocated once per OpenMP thread
       SharedMemory threadSmem(sharedMemSize);
 
-#pragma omp for schedule(dynamic)
-      for (int linearIdx = 0; linearIdx < totalBlocksI; ++linearIdx) {
-        uint32_t gz = static_cast<uint32_t>(linearIdx) / (gridDim.x * gridDim.y);
-        uint32_t rem = static_cast<uint32_t>(linearIdx) % (gridDim.x * gridDim.y);
-        uint32_t gy = rem / gridDim.x;
-        uint32_t gx = rem % gridDim.x;
+      // True 3D Grid Unrolling using OpenMP collapse
+      // This ensures proper 3D mapping and thread data locality instead of artificial linearization
+#pragma omp for collapse(3) schedule(dynamic)
+      for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
+        for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
+          for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
+            dim3 blockIdx(gx, gy, gz);
 
-        dim3 blockIdx(gx, gy, gz);
+            // Zero the shared memory for the new block
+            threadSmem.reset();
 
-        // Zero the shared memory for the new block
-        threadSmem.reset();
+            // Setup active Warp Thread Masking simulate (Divergence Tracking)
+            // In a real JIT, __activemask() intrinsic reads this thread-local state.
+            // Here, we initialize all 32 lanes mapped to this block's iterations as active.
+            uint32_t activeMask = 0xFFFFFFFF;
+            vgre::runtime::GPUThreadContext::setWarpMask(activeMask);
 
-        fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, threadSmem.raw(),
-           threadSmem.size());
+            fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, threadSmem.raw(),
+               threadSmem.size());
+            
+            vgre::runtime::GPUThreadContext::clearWarpMask();
+          }
+        }
       }
     }
 #else
-    for (int linearIdx = 0; linearIdx < totalBlocksI; ++linearIdx) {
-      uint32_t gz = static_cast<uint32_t>(linearIdx) / (gridDim.x * gridDim.y);
-      uint32_t rem = static_cast<uint32_t>(linearIdx) % (gridDim.x * gridDim.y);
-      uint32_t gy = rem / gridDim.x;
-      uint32_t gx = rem % gridDim.x;
+    for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
+      for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
+        for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
+          dim3 blockIdx(gx, gy, gz);
+          SharedMemory smem(sharedMemSize);
 
-      dim3 blockIdx(gx, gy, gz);
-      SharedMemory smem(sharedMemSize);
+          uint32_t activeMask = 0xFFFFFFFF;
+          vgre::runtime::GPUThreadContext::setWarpMask(activeMask);
 
-      fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, smem.raw(),
-         smem.size());
+          fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, smem.raw(),
+             smem.size());
+             
+          vgre::runtime::GPUThreadContext::clearWarpMask();
+        }
+      }
     }
 #endif
   }

@@ -503,6 +503,90 @@ VGREResult RuntimeEngine::launchKernel(const std::string &name,
   return launchKernel(id, gridDim, blockDim, args, sharedMem, stream);
 }
 
+// ── Fused Dispatch ─────────────────────────────────────────────────────────
+
+struct OwnedFusedLaunchArgs {
+  std::vector<std::vector<uint8_t>> ownedData;
+  std::vector<void *> argPtrs;
+  CompiledKernelFn fn;
+  std::string name;
+  size_t flops;
+  size_t memBytes;
+};
+
+VGREResult RuntimeEngine::launchFusedKernelGroup(const std::vector<GraphNode>& group, StreamId stream) {
+  if (group.empty()) return VGREResult::SUCCESS;
+
+  // Pre-resolve all kernels and arguments
+  auto launchData = std::make_shared<std::vector<OwnedFusedLaunchArgs>>();
+  launchData->reserve(group.size());
+
+  const dim3 gridDim = group[0].gridDim;
+  const dim3 blockDim = group[0].blockDim;
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_) return VGREResult::ERROR_NOT_INITIALIZED;
+
+    for (const auto& node : group) {
+      auto it = kernelCache_.find(node.kernelId);
+      if (it == kernelCache_.end()) return VGREResult::ERROR_INVALID_KERNEL;
+
+      auto irIt = kernelIRCache_.find(node.kernelId);
+      std::string kName = (irIt != kernelIRCache_.end()) ? irIt->second.name : "unknown";
+
+      OwnedFusedLaunchArgs args;
+      args.fn = it->second;
+      args.name = kName;
+      args.ownedData.reserve(node.capturedArgs.size());
+      args.argPtrs.reserve(node.capturedArgs.size());
+
+      size_t memBytes = 0;
+      if (irIt != kernelIRCache_.end()) {
+        for (auto type : irIt->second.argTypes) {
+           memBytes += (type == ArgType::POINTER || type == ArgType::INT64 || type == ArgType::UINT64 || type == ArgType::FLOAT64) ? 8 : 4;
+        }
+      }
+      size_t totalThreads = gridDim.total() * blockDim.total();
+      args.memBytes = memBytes * totalThreads;
+      args.flops = totalThreads * (50 + (node.capturedArgs.size() * 10));
+
+      for (const auto &buf : node.capturedArgs) {
+        args.ownedData.push_back(buf);
+        args.argPtrs.push_back(args.ownedData.back().data());
+      }
+      launchData->push_back(std::move(args));
+    }
+  }
+
+  VGRE_LOG_INFO("RuntimeEngine", "Submitting Fused Kernel Group of size " + 
+                std::to_string(group.size()) + " on stream " + std::to_string(stream));
+
+  auto exec = executor_.get();
+  
+  // Submit single task to scheduler
+  auto fut = scheduler_->submitStreamTask(stream, [exec, launchData, gridDim, blockDim]() {
+    for (auto& args : *launchData) {
+      auto start = std::chrono::steady_clock::now();
+      exec->execute(args.fn, gridDim, blockDim, args.argPtrs.data(), 0);
+      auto end = std::chrono::steady_clock::now();
+      double ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+      vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
+          args.name, blockDim.total(), 8, ms, args.memBytes, args.flops);
+    }
+  });
+
+  if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    auto submitResult = fut.get();
+    if (submitResult != VGREResult::SUCCESS) {
+      return submitResult;
+    }
+  }
+
+  return VGREResult::SUCCESS;
+}
+
 // ── Synchronization ────────────────────────────────────────────────────────
 VGREResult RuntimeEngine::synchronize() {
   Scheduler *sched = nullptr;
@@ -655,6 +739,25 @@ VGREResult RuntimeEngine::streamEndCapture(StreamId stream, GraphId &outGraph) {
                                      std::to_string(stream) + " -> Graph " +
                                      std::to_string(outGraph));
   return VGREResult::SUCCESS;
+}
+
+bool RuntimeEngine::isStreamCapturing(StreamId stream) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return captureState_.count(stream) > 0;
+}
+
+VGREResult RuntimeEngine::recordMemcpyToGraph(StreamId stream, void *dst, const void *src, size_t count, int kind) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_ || !graphManager_)
+    return VGREResult::ERROR_NOT_INITIALIZED;
+  
+  auto it = captureState_.find(stream);
+  if (it == captureState_.end())
+    return VGREResult::ERROR_INVALID_VALUE;
+
+  VGRE_LOG_DEBUG("RuntimeEngine", "Capturing memcpy on stream " + std::to_string(stream));
+  // We must cast away constness for the graph manager (which copies data anyway)
+  return graphManager_->addMemcpyNode(it->second, dst, const_cast<void*>(src), count, kind);
 }
 
 VGREResult RuntimeEngine::graphInstantiate(GraphId graph,

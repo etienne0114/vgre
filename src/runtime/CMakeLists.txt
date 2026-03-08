@@ -1,6 +1,7 @@
 add_library(vgre_runtime OBJECT
     cpu_parallel_executor.cpp
     vector_engine.cpp
+    gpu_thread_context.cpp
 )
 
 if(VGRE_USE_OPENCL_BACKEND)

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -583,6 +584,7 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
 
   // "Real" Bandwidth Modeling based on topology
   double bandwidthGBps = h2dBandwidth_;
+  double baseLatencyMs = 0.0;
 
   if (itDst->second.deviceId != itSrc->second.deviceId) {
     auto srcProps = RuntimeEngine::instance()
@@ -592,23 +594,32 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
                         .getDevice(itDst->second.deviceId)
                         .getProperties();
 
-    // Modeling based on PCI distance:
-    // Distance 0: Same Bus, Same Device (Internal) -> d2dBandwidth_ * 2
-    // Distance 1: Same Bus, Different Device -> d2dBandwidth_
-    // Distance 2: Different Bus -> h2dBandwidth_
-    // Distance 3: Different Domain -> h2dBandwidth_ * 0.5
-    
     if (srcProps.pciDomainId != dstProps.pciDomainId) {
-      bandwidthGBps = h2dBandwidth_ * 0.5;
+      bandwidthGBps = h2dBandwidth_ * 0.5; // Cross-node QPI/NUMA
+      baseLatencyMs = 0.030;               // 30us
     } else if (srcProps.pciBusId != dstProps.pciBusId) {
-      bandwidthGBps = h2dBandwidth_;
+      bandwidthGBps = h2dBandwidth_;       // PCIe Switch
+      baseLatencyMs = 0.015;               // 15us
     } else if (srcProps.pciDeviceId != dstProps.pciDeviceId) {
-      bandwidthGBps = d2dBandwidth_;
+      bandwidthGBps = d2dBandwidth_;       // Same Bus NVLink/PCIe
+      baseLatencyMs = 0.005;               // 5us
     } else {
-      bandwidthGBps = d2dBandwidth_ * 2.0;
+      bandwidthGBps = d2dBandwidth_ * 2.0; // Internal
+      baseLatencyMs = 0.001;               // 1us
     }
   } else {
-    bandwidthGBps = d2dBandwidth_ * 2.5; // Intra-device L1/L2 speed
+    bandwidthGBps = d2dBandwidth_ * 2.5;   // Intra-device L1/L2 speed
+    baseLatencyMs = 0.0;                   // 0us
+  }
+
+  // Enforce Real Topology Latency
+  double expectedTransferMs = ((double)bytes / 1e9) / bandwidthGBps * 1000.0;
+  double expectedTotalMs = expectedTransferMs + baseLatencyMs;
+
+  if (expectedTotalMs > ms) {
+    double delayMs = expectedTotalMs - ms;
+    std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(delayMs));
+    ms = expectedTotalMs; // Update elapsed time to reflect the induced latency
   }
 
   // Telemetry: Record P2P execution metrics

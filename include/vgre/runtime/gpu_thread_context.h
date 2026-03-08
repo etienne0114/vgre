@@ -1,17 +1,25 @@
 #ifndef VGRE_RUNTIME_GPU_THREAD_CONTEXT_H
 #define VGRE_RUNTIME_GPU_THREAD_CONTEXT_H
 
-#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <mutex>
 #include <type_traits>
 
 namespace vgre {
 namespace runtime {
+
+// ── GPU Thread Context ───────────────────────────────────────────────────────
+// Provides thread-local storage for GPU intrinsic simulations (e.g. __activemask)
+// Uses a thread-safe map instead of OS TLS to avoid libgomp destruction crashes.
+class GPUThreadContext {
+public:
+  static void setWarpMask(uint32_t mask);
+  static void clearWarpMask();
+  static uint32_t getWarpMask();
+};
 
 // ── Shared Memory ──────────────────────────────────────────────────────────
 // Per-block shared memory buffer. Allocated once per block execution and

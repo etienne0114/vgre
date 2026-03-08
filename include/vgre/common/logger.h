@@ -27,8 +27,8 @@ enum class LogLevel : uint8_t {
 class Logger {
 public:
   static Logger &instance() {
-    static Logger inst;
-    return inst;
+    static Logger* inst = new Logger();
+    return *inst;
   }
 
   void setLevel(LogLevel level) { minLevel_.store(level, std::memory_order_relaxed); }
