@@ -20,19 +20,22 @@ WorkloadEngine::WorkloadEngine() = default;
 WorkloadEngine::~WorkloadEngine() { setEnabled(false); }
 
 void WorkloadEngine::setEnabled(bool enabled) {
-  bool expected = !enabled;
-  if (running_.compare_exchange_strong(expected, enabled)) {
-    if (enabled) {
-      workerThread_ = std::thread([this]() { this->workloadLoop(); });
-      VGRE_LOG_INFO("WorkloadEngine",
-                    "VGRE Background Workload Engine STARTED");
-    } else {
-      running_ = false;
-      if (workerThread_.joinable()) {
-        workerThread_.join();
-      }
-      VGRE_LOG_INFO("WorkloadEngine",
-                    "VGRE Background Workload Engine STOPPED");
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (enabled == running_.load())
+    return;
+
+  if (enabled) {
+    VGRE_LOG_INFO("WorkloadEngine", "Starting background compute...");
+    running_.store(true);
+    if (workerThread_.joinable()) {
+      workerThread_.join();
+    }
+    workerThread_ = std::thread(&WorkloadEngine::workloadLoop, this);
+  } else {
+    VGRE_LOG_INFO("WorkloadEngine", "Stopping background compute...");
+    running_.store(false);
+    if (workerThread_.joinable()) {
+      workerThread_.join();
     }
   }
 }
@@ -72,7 +75,7 @@ void WorkloadEngine::workloadLoop() {
     return;
   }
 
-  // Allocate VRAM
+  // Allocate VRAM and Initialize Data
   auto &mm = runtime.getMemoryManager();
   if (mm.allocate(N * sizeof(float), d_A) != VGREResult::SUCCESS ||
       mm.allocate(N * sizeof(float), d_B) != VGREResult::SUCCESS ||
@@ -90,6 +93,13 @@ void WorkloadEngine::workloadLoop() {
     return;
   }
 
+  // Real Data Initialization (Removes simulation/uninitialized memory)
+  std::vector<float> h_init(N);
+  for (size_t i = 0; i < N; ++i) h_init[i] = static_cast<float>(i % 100) / 100.0f;
+  mm.copyHostToDevice(d_A, h_init.data(), N * sizeof(float));
+  for (size_t i = 0; i < N; ++i) h_init[i] = 1.01f; // Slow growth factor
+  mm.copyHostToDevice(d_B, h_init.data(), N * sizeof(float));
+
   dim3 grid(static_cast<uint32_t>((N + 255) / 256), 1, 1);
   dim3 block(256, 1, 1);
   int n_val = static_cast<int>(N);
@@ -106,8 +116,13 @@ void WorkloadEngine::workloadLoop() {
     }
 
     // Controlled frequency to maintain high but stable performance recording
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // Higher load
   }
+
+  // CRITICAL FIX: Synchronize stream 0 to ensure all kernels are DONE 
+  // before we free the memory buffers (d_A, d_B, d_C).
+  // This prevents the SIGSEGV/Invalid Access during dashboard toggle.
+  runtime.streamSynchronize(0);
 
   // Cleanup
   if (d_A)

@@ -19,6 +19,11 @@ class VgreTheme {
         secondary: secondaryNeon,
         surface: surface,
       ),
+      textSelectionTheme: const TextSelectionThemeData(
+        selectionColor: Color(0x4D00FFD1), // primaryNeon with 0.3 alpha
+        selectionHandleColor: primaryNeon,
+        cursorColor: primaryNeon,
+      ),
       textTheme: GoogleFonts.orbitronTextTheme().copyWith(
         bodyLarge: GoogleFonts.inter(color: textBody),
         bodyMedium: GoogleFonts.inter(color: textBody),

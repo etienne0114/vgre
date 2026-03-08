@@ -66,8 +66,10 @@ bool IPCManager::initialize(bool isMaster) {
   // If we are upgrading from client to master, we must shutdown first.
   if (enabled_ && isMaster && !isMaster_) {
     VGRE_LOG_DEBUG("IPCManager", "Upgrading from Client to Master mode");
-    // Note: shutdown() also takes the mutex, so we shouldn't call it here
-    // directly. We inline the necessary cleanup.
+    
+    // Reset TCP cluster if it was active as a client
+    TCPClusterManager::instance().shutdown();
+
     if (state_ && local_slot_ != -1) {
       state_->slots[local_slot_].active = false;
     }
@@ -324,23 +326,21 @@ void IPCManager::updateLocalTelemetry(const vgre_telemetry_t &telemetry) {
 }
 
 void IPCManager::getGlobalTelemetry(vgre_telemetry_t &outCombined) {
-  std::memset(&outCombined, 0, sizeof(vgre_telemetry_t));
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!enabled_ || !state_)
       return;
 
-    // Use master metadata or first slot
-    if (local_slot_ >= 0 && local_slot_ < VGRE_MAX_PROCESSES) {
-      outCombined = state_->slots[local_slot_].telemetry;
-    }
-
-    // sum performance metrics from ALL active processes
-    float total_gflops = 0;
-    float total_bw = 0;
-    size_t total_used_mem = 0;
-    int total_kernels = 0;
-    int total_threads = 0;
+    // Use master metadata or first slot as base for non-additive fields
+    // (We do NOT memset to 0 because outCombined might already contain 
+    // local hardware stats from vgre_get_telemetry)
+    
+    // Sum performance metrics from ALL active processes
+    double total_gflops = 0;
+    double total_bw = 0;
+    uint64_t total_used_mem = 0;
+    int64_t total_kernels = 0;
+    int64_t total_threads = 0;
 
     for (int i = 0; i < VGRE_MAX_PROCESSES; ++i) {
       if (state_->slots[i].active) {
@@ -358,11 +358,9 @@ void IPCManager::getGlobalTelemetry(vgre_telemetry_t &outCombined) {
     outCombined.active_kernels = total_kernels;
     outCombined.active_threads = total_threads;
 
-    // Preserve essential state from the local slot
-    if (local_slot_ >= 0 && local_slot_ < VGRE_MAX_PROCESSES) {
-      outCombined.background_compute_active =
-          state_->slots[local_slot_].telemetry.background_compute_active;
-      outCombined.ecc_enabled = state_->slots[local_slot_].telemetry.ecc_enabled;
+    // Aggregate compute utilization
+    if (outCombined.max_gflops > 0) {
+      outCombined.compute_utilization = (outCombined.gflops / outCombined.max_gflops) * 100.0;
     }
   }
 

@@ -33,6 +33,8 @@
 namespace vgre {
 namespace compiler {
 
+extern "C" int vgre_jit_get_thread_id();
+
 struct LLVMState {
   llvm::orc::ThreadSafeContext context;
   std::unique_ptr<llvm::orc::LLJIT> jit;
@@ -283,7 +285,7 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
                     tmpIR + "\" > \"" + logFile + "\" 2>&1";
 #else
   // Do NOT use -fopenmp=libgomp here, as JIT module teardown causes dangling TLS in libgomp leading to crash.
-  std::string cmd = "clang++ -S -emit-llvm -O3 -I\"" + includePath + "\" \"" + tmpCpp + "\" -o \"" +
+  std::string cmd = "clang++ -S -emit-llvm -O3 -fvisibility=default -I\"" + includePath + "\" \"" + tmpCpp + "\" -o \"" +
                     tmpIR + "\" > \"" + logFile + "\" 2>&1";
 #endif
   int status = std::system(cmd.c_str());
@@ -335,10 +337,66 @@ LLVMTranslationEngine::compileJIT(const std::string &irCode,
     return nullptr;
   }
 
-  auto sym = llvmState_->jit->lookup(entryPoint);
+  // Mangle and intern the entry point name for reliable JIT resolution
+  auto &ES = llvmState_->jit->getExecutionSession();
+  auto &MainJD = llvmState_->jit->getMainJITDylib();
+
+  // CRITICAL: Explicitly set a silent error reporter to avoid printing to stderr
+  // and causing crashes if a lookup fails.
+  ES.setErrorReporter([](llvm::Error Err) {
+    if (Err) {
+      std::string msg;
+      llvm::raw_string_ostream os(msg);
+      os << Err;
+      VGRE_LOG_WARN("LLVMTranslationEngine", "JIT Session Error: " + msg);
+      llvm::consumeError(std::move(Err));
+    }
+  });
+
+  // Ensure we can find host symbols (like vgre_jit_get_thread_id)
+  // even if the library was loaded with RTLD_LOCAL by Flutter.
+  // We use the direct function address for 100% reliability.
+  static bool symbolsBound = false;
+  if (!symbolsBound) {
+    void* sym_ptr = reinterpret_cast<void*>(vgre_jit_get_thread_id);
+    
+    auto Mangle = llvm::orc::MangleAndInterner(ES, llvmState_->jit->getDataLayout());
+    llvm::orc::SymbolMap Symbols;
+    Symbols[Mangle("vgre_jit_get_thread_id")] = {
+        llvm::orc::ExecutorAddr::fromPtr(sym_ptr),
+        llvm::JITSymbolFlags::Exported
+    };
+    llvm::cantFail(MainJD.define(llvm::orc::absoluteSymbols(std::move(Symbols))));
+    symbolsBound = true;
+    VGRE_LOG_INFO("LLVMTranslationEngine", "Directly bound vgre_jit_get_thread_id at " + 
+                  std::to_string(reinterpret_cast<uintptr_t>(sym_ptr)));
+
+    // Still add process generator as fallback for other symbols
+    MainJD.addGenerator(
+        llvm::cantFail(llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
+            llvmState_->jit->getDataLayout().getGlobalPrefix())));
+  }
+
+  auto Mangle = llvm::orc::MangleAndInterner(ES, llvmState_->jit->getDataLayout());
+  auto sym = ES.lookup({&MainJD}, Mangle(entryPoint));
+
   if (!sym) {
+    std::string mangledName = (*Mangle(entryPoint)).str();
     VGRE_LOG_ERROR("LLVMTranslationEngine",
-                   "Symbol not found in JIT: " + entryPoint);
+                   "Symbol not found in JIT: " + entryPoint + " (Mangled: " + mangledName + ")");
+    
+    // CRITICAL: Consume the Expected error to prevent crash on destruction
+    llvm::consumeError(sym.takeError());
+
+    // Deep Diagnostic: Dump all module symbols
+    std::string symbols;
+    tsm.withModuleDo([&symbols](llvm::Module &M) { 
+        for (auto &f : M) {
+            symbols += f.getName().str() + " ";
+        }
+    });
+    VGRE_LOG_INFO("LLVMTranslationEngine", "Full Module Symbol Dump: " + symbols);
+    
     return nullptr;
   }
 
@@ -346,7 +404,7 @@ LLVMTranslationEngine::compileJIT(const std::string &irCode,
                               uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
                               void *, size_t);
 
-  uint64_t addr_val = sym->getValue();
+  uint64_t addr_val = sym->getAddress().getValue();
   jit_func_t func_ptr = reinterpret_cast<jit_func_t>(addr_val);
 
   return [func_ptr](void **args, const vgre::dim3 &blockIdx,

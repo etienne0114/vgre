@@ -78,8 +78,12 @@ TCPClusterManager::~TCPClusterManager() { shutdown(); }
 
 VGREResult TCPClusterManager::initialize(bool is_master,
                                          const std::string &host, int port) {
-  if (enabled_)
+  if (enabled_ && is_master_ == is_master)
     return VGREResult::SUCCESS;
+
+  if (enabled_) {
+    shutdown();
+  }
 
 #if defined(_WIN32)
   WSADATA wsaData;
@@ -175,7 +179,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
 
     if (connect(client_fd_, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) <
         0) {
-      VGRE_LOG_ERROR("TCPCluster", "Connection failed to " + host_ + ":" +
+      VGRE_LOG_WARN("TCPCluster", "Connection failed to " + host_ + ":" +
                                        std::to_string(port_));
       enabled_ = false;
       CLOSE_SOCKET(client_fd_);

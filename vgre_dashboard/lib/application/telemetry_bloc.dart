@@ -134,8 +134,13 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
     });
 
     on<ToggleBackgroundCompute>((event, emit) {
-      _backgroundComputeActive = event.enabled;
-      bridge.setBackgroundCompute(event.enabled);
+      try {
+        _backgroundComputeActive = event.enabled;
+        bridge.setBackgroundCompute(event.enabled);
+      } catch (e) {
+        debugPrint("Failed to toggle background compute: $e");
+        _backgroundComputeActive = !event.enabled; // Revert on failure
+      }
     });
 
     on<ToggleServiceMode>((event, emit) {

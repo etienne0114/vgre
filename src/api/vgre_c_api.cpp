@@ -425,7 +425,9 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
   // Add IPC aggregation if we are the master (Dashboard)
   auto &ipc = vgre::advanced::IPCManager::instance();
   if (ipc.isEnabled()) {
+    // 1. Update our slot in shared memory with current local stats
     ipc.updateLocalTelemetry(*telemetry);
+    // 2. Aggregate global stats (local + other processes + remote cluster)
     ipc.getGlobalTelemetry(*telemetry);
   }
 

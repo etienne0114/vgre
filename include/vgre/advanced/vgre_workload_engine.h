@@ -2,6 +2,7 @@
 #define VGRE_WORKLOAD_ENGINE_H
 
 #include <atomic>
+#include <mutex>
 #include <thread>
 
 namespace vgre {
@@ -26,6 +27,7 @@ private:
 
   std::atomic<bool> running_{false};
   std::thread workerThread_;
+  mutable std::mutex mutex_;
 
   // Workload resources
   void *d_A = nullptr;

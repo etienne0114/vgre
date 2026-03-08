@@ -141,33 +141,69 @@ class DashboardPage extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.white10),
       ),
-      child: Row(
-        children: [
-          const Icon(Icons.memory, color: VgreTheme.primaryNeon, size: 28),
-          const SizedBox(width: 16),
-          Text(
-            data.deviceName.toUpperCase(),
-            style: GoogleFonts.orbitron(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 2,
-            ),
-          ),
-          const Spacer(),
-          _headerInfoItem("CLOCK", "${data.clockSpeed} MHz"),
-          const SizedBox(width: 24),
-          _headerInfoItem("ECC", data.eccEnabled ? "ENABLED" : "DISABLED"),
-          const SizedBox(width: 24),
-          _headerToggle("BACKGROUND COMPUTE", data.backgroundComputeActive, (
-            val,
-          ) {
-            context.read<TelemetryBloc>().add(ToggleBackgroundCompute(val));
-          }),
-          const SizedBox(width: 24),
-          _headerToggle("SERVICE", data.serviceModeActive, (val) {
-            context.read<TelemetryBloc>().add(ToggleServiceMode(val));
-          }, color: VgreTheme.primaryNeon),
-        ],
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final bool isNarrow = constraints.maxWidth < 1100;
+          
+          final infoItems = [
+            _headerInfoItem("CLOCK", "${data.clockSpeed} MHz"),
+            const SizedBox(width: 24),
+            _headerInfoItem("ECC", data.eccEnabled ? "ENABLED" : "DISABLED"),
+            const SizedBox(width: 24),
+            _headerToggle("BACKGROUND COMPUTE", data.backgroundComputeActive, (val) {
+              context.read<TelemetryBloc>().add(ToggleBackgroundCompute(val));
+            }),
+            const SizedBox(width: 24),
+            _headerToggle("SERVICE", data.serviceModeActive, (val) {
+              context.read<TelemetryBloc>().add(ToggleServiceMode(val));
+            }, color: VgreTheme.primaryNeon),
+          ];
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.memory, color: VgreTheme.primaryNeon, size: 28),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Text(
+                      data.deviceName.toUpperCase(),
+                      style: GoogleFonts.orbitron(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 2,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (!isNarrow) ...[
+                    const Spacer(),
+                    ...infoItems,
+                  ],
+                ],
+              ),
+              if (isNarrow) ...[
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 24,
+                  runSpacing: 12,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    _headerInfoItem("CLOCK", "${data.clockSpeed} MHz"),
+                    _headerInfoItem("ECC", data.eccEnabled ? "ENABLED" : "DISABLED"),
+                    _headerToggle("BACKGROUND COMPUTE", data.backgroundComputeActive, (val) {
+                      context.read<TelemetryBloc>().add(ToggleBackgroundCompute(val));
+                    }),
+                    _headerToggle("SERVICE", data.serviceModeActive, (val) {
+                      context.read<TelemetryBloc>().add(ToggleServiceMode(val));
+                    }, color: VgreTheme.primaryNeon),
+                  ],
+                ),
+              ],
+            ],
+          );
+        },
       ),
     );
   }
@@ -477,13 +513,15 @@ class _TerminalConsoleState extends State<_TerminalConsole> {
           Expanded(
             child: Padding(
               padding: const EdgeInsets.all(20),
-              child: ListView.builder(
-                itemCount: _allLogs.length,
-                reverse: true, // Show latest at bottom
-                itemBuilder: (context, index) {
-                  final log = _allLogs[_allLogs.length - 1 - index];
-                  return _consoleLine(log);
-                },
+              child: SelectionArea(
+                child: ListView.builder(
+                  itemCount: _allLogs.length,
+                  reverse: true, // Show latest at bottom
+                  itemBuilder: (context, index) {
+                    final log = _allLogs[_allLogs.length - 1 - index];
+                    return _consoleLine(log);
+                  },
+                ),
               ),
             ),
           ),

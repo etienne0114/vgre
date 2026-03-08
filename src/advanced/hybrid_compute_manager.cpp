@@ -1,8 +1,6 @@
 #include "vgre/advanced/hybrid_compute_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
-#include "vgre/core/memory_manager.h"
-#include "vgre/core/runtime_engine.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
 
 #ifdef VGRE_HAS_OPENCL_BACKEND
@@ -10,12 +8,16 @@
 #endif
 
 // System Headers
-#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <fstream>
-#include <sstream>
-#include <thread>
 #include <mutex>
+#include <signal.h> // Required for siginfo_t in signal mapping
+#include <sstream>
+#include "vgre/core/memory_manager.h"
+#include "vgre/core/runtime_engine.h"
+#include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #include <winsock2.h>
