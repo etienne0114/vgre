@@ -12,6 +12,7 @@ from typing import Optional, Dict, List, Any
 
 from vgre.device import VirtualDevice, DeviceProperties
 from vgre.kernel import Kernel, Dim3
+from vgre.graph import Graph
 
 try:
     from vgre._native import (
@@ -171,6 +172,12 @@ class Runtime:
         if not self._initialized:
             raise RuntimeError("Runtime not initialized")
         return self._device
+
+    def create_graph(self) -> Graph:
+        """Create a native CUDA graph (DAG) wrapper."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        return Graph()
 
     def launch(self, kernel: Kernel, grid_dim: Dim3, block_dim: Dim3,
                args: list, shared_mem: int = 0,

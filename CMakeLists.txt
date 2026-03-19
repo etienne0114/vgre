@@ -30,7 +30,12 @@ endif()
 # ── Dependencies ────────────────────────────────────────────────────────────
 find_package(OpenMP REQUIRED)
 find_package(Threads REQUIRED)
-
+ 
+# ── LLVM & Support Dependencies ─────────────────────────────────────────────
+# Manually hint paths for LibEdit/CURL if CMake's default search misses them
+find_path(CURL_INCLUDE_DIR NAMES curl/curl.h PATHS /usr/include/x86_64-linux-gnu /usr/local/include)
+find_path(LibEdit_INCLUDE_DIRS NAMES editline/readline.h PATHS /usr/include /usr/local/include)
+ 
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
@@ -79,6 +84,7 @@ set_target_properties(vgre PROPERTIES
 # ── CUDART Shim (LD_PRELOAD wrapper) ────────────────────────────────────────
 add_library(vgre_cudart SHARED
     src/api/cudart_shim.cpp
+    src/api/cuda_driver_shim.cpp
 )
 target_link_libraries(vgre_cudart PRIVATE vgre)
 target_include_directories(vgre_cudart PRIVATE ${PROJECT_SOURCE_DIR}/include)

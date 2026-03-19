@@ -45,7 +45,7 @@ When `RuntimeEngine::launchKernel()` is invoked, it:
 
 ## 3. The Execution Subsystem
 
-VGRE's execution architecture is deeply multithreaded to simulate GPU concurrency on standard host CPUs.
+VGRE's execution architecture is deeply multithreaded to replicate GPU concurrency on standard host CPUs.
 
 ### The Scheduler (`scheduler.cpp`)
 The Scheduler manages multiple independent CUDA streams. Each stream maintains its own queue of pending tasks. The Scheduler uses a persistent pool of `std::thread` workers (scaled to the CPU's hardware concurrency limit). 
@@ -60,10 +60,10 @@ It then utilizes `#pragma omp parallel for schedule(dynamic)` to scatter these b
 
 ## 4. LLVM Translation Engine (JIT)
 
-The `LLVMTranslationEngine` bridges the gap between abstract mock kernels and machine instructions.
+The `LLVMTranslationEngine` bridges the gap between parsed kernel source and machine instructions.
 
 ### Dynamic Compilation Flow
-1. **Fallback Matching**: Initially, standard linear algebra kernels (like `vector_add` or GEMM) are statically pattern-matched to highly optimized C++ loop structures featuring AVX2 vectorization support natively.
+1. **Dynamic JIT Compilation**: All kernels are dynamically compiled through the LLVM ORC JIT pipeline with host-native CPU feature detection (AVX2/AVX-512/FMA) and aggressive O3 optimization.
 2. **LLVM IR Generation**: If dynamic JIT is enabled, the Engine explicitly builds LLVM IR strings mapping the `blockIdx`, `gridDim`, and `args[]` arrays.
 3. **ORC JIT**: The IR is parsed into an `llvm::Module` and pushed into an LLVM ORC JIT Engine (`llvmState_->jit`). The engine returns an executable function pointer (`CompiledKernelFn`).
 

@@ -29,6 +29,15 @@ VGRE_MEMCPY_HOST_TO_DEVICE = 0
 VGRE_MEMCPY_DEVICE_TO_HOST = 1
 VGRE_MEMCPY_DEVICE_TO_DEVICE = 2
 
+# Kernel argument types
+VGRE_ARG_POINTER = 0
+VGRE_ARG_INT32 = 1
+VGRE_ARG_INT64 = 2
+VGRE_ARG_FLOAT32 = 3
+VGRE_ARG_FLOAT64 = 4
+VGRE_ARG_UINT32 = 5
+VGRE_ARG_UINT64 = 6
+
 
 # ── Device properties struct ────────────────────────────────────────────────
 class VGREDeviceProperties(ctypes.Structure):
@@ -89,7 +98,11 @@ def _load_library() -> Optional[ctypes.CDLL]:
         return None
 
     try:
-        lib = ctypes.CDLL(path)
+        mode = getattr(ctypes, "RTLD_GLOBAL", None)
+        if mode is None:
+            lib = ctypes.CDLL(path)
+        else:
+            lib = ctypes.CDLL(path, mode=mode)
     except OSError:
         return None
 
@@ -170,6 +183,78 @@ def _load_library() -> Optional[ctypes.CDLL]:
 
     lib.vgre_stream_destroy.argtypes = [ctypes.c_uint64]
     lib.vgre_stream_destroy.restype = ctypes.c_int
+
+    # Graphs (DAG)
+    lib.vgre_graphCreate.argtypes = [ctypes.POINTER(ctypes.c_uint64)]
+    lib.vgre_graphCreate.restype = ctypes.c_int
+
+    lib.vgre_graphDestroy.argtypes = [ctypes.c_uint64]
+    lib.vgre_graphDestroy.restype = ctypes.c_int
+
+    lib.vgre_graphInstantiate.argtypes = [
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint64),
+    ]
+    lib.vgre_graphInstantiate.restype = ctypes.c_int
+
+    lib.vgre_graphExecDestroy.argtypes = [ctypes.c_uint64]
+    lib.vgre_graphExecDestroy.restype = ctypes.c_int
+
+    lib.vgre_graphLaunch.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
+    lib.vgre_graphLaunch.restype = ctypes.c_int
+
+    lib.vgre_graphAddKernelNodeEx.argtypes = [
+        ctypes.c_uint64,  # graph
+        ctypes.c_uint64,  # kernel_id
+        ctypes.c_char_p,  # name
+        ctypes.c_uint32 * 3,  # grid
+        ctypes.c_uint32 * 3,  # block
+        ctypes.POINTER(ctypes.c_void_p),  # args
+        ctypes.POINTER(ctypes.c_uint8),  # arg types
+        ctypes.c_int,  # num args
+        ctypes.POINTER(ctypes.c_uint64),  # deps
+        ctypes.c_int,  # num deps
+        ctypes.POINTER(ctypes.c_uint64),  # out node id
+    ]
+    lib.vgre_graphAddKernelNodeEx.restype = ctypes.c_int
+
+    lib.vgre_graphAddMemcpyNodeEx.argtypes = [
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_uint64),
+    ]
+    lib.vgre_graphAddMemcpyNodeEx.restype = ctypes.c_int
+
+    lib.vgre_graphAddDependency.argtypes = [
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+    ]
+    lib.vgre_graphAddDependency.restype = ctypes.c_int
+
+    lib.vgre_graphUpdateKernelNode.argtypes = [
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_int,
+    ]
+    lib.vgre_graphUpdateKernelNode.restype = ctypes.c_int
+
+    lib.vgre_graphUpdateMemcpyNode.argtypes = [
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_int,
+    ]
+    lib.vgre_graphUpdateMemcpyNode.restype = ctypes.c_int
 
     # Version
     lib.vgre_get_version.argtypes = []
@@ -262,6 +347,145 @@ def native_synchronize() -> None:
     if _lib is None:
         raise VGREError(VGRE_ERROR_NOT_INIT)
     _check(_lib.vgre_synchronize(), "vgre_synchronize")
+
+
+def native_graph_create() -> int:
+    if _lib is None:
+        raise VGREError(VGRE_ERROR_NOT_INIT)
+    gid = ctypes.c_uint64(0)
+    _check(_lib.vgre_graphCreate(ctypes.byref(gid)), "vgre_graphCreate")
+    return int(gid.value)
+
+
+def native_graph_destroy(graph_id: int) -> None:
+    if _lib is None:
+        raise VGREError(VGRE_ERROR_NOT_INIT)
+    _check(_lib.vgre_graphDestroy(ctypes.c_uint64(graph_id)),
+           "vgre_graphDestroy")
+
+
+def native_graph_instantiate(graph_id: int) -> int:
+    if _lib is None:
+        raise VGREError(VGRE_ERROR_NOT_INIT)
+    exec_id = ctypes.c_uint64(0)
+    _check(_lib.vgre_graphInstantiate(ctypes.c_uint64(graph_id),
+                                      ctypes.byref(exec_id)),
+           "vgre_graphInstantiate")
+    return int(exec_id.value)
+
+
+def native_graph_exec_destroy(exec_id: int) -> None:
+    if _lib is None:
+        raise VGREError(VGRE_ERROR_NOT_INIT)
+    _check(_lib.vgre_graphExecDestroy(ctypes.c_uint64(exec_id)),
+           "vgre_graphExecDestroy")
+
+
+def native_graph_launch(exec_id: int, stream_id: int = 0) -> None:
+    if _lib is None:
+        raise VGREError(VGRE_ERROR_NOT_INIT)
+    _check(_lib.vgre_graphLaunch(ctypes.c_uint64(exec_id),
+                                 ctypes.c_uint64(stream_id)),
+           "vgre_graphLaunch")
+
+
+def native_graph_add_kernel_node(graph_id: int, kernel_id: int, name: str,
+                                 grid_dim, block_dim, args,
+                                 arg_types, deps=None) -> int:
+    if _lib is None:
+        raise VGREError(VGRE_ERROR_NOT_INIT)
+    deps = deps or []
+    grid = (ctypes.c_uint32 * 3)(*grid_dim)
+    block = (ctypes.c_uint32 * 3)(*block_dim)
+    args_arr = (ctypes.c_void_p * len(args))(*args)
+    arg_types_arr = (ctypes.c_uint8 * len(arg_types))(*arg_types)
+    deps_arr = (ctypes.c_uint64 * len(deps))(*deps) if deps else None
+    out_id = ctypes.c_uint64(0)
+    _check(
+        _lib.vgre_graphAddKernelNodeEx(
+            ctypes.c_uint64(graph_id),
+            ctypes.c_uint64(kernel_id),
+            name.encode("utf-8"),
+            grid,
+            block,
+            args_arr,
+            arg_types_arr,
+            ctypes.c_int(len(arg_types)),
+            deps_arr,
+            ctypes.c_int(len(deps)),
+            ctypes.byref(out_id),
+        ),
+        "vgre_graphAddKernelNodeEx",
+    )
+    return int(out_id.value)
+
+
+def native_graph_add_memcpy_node(graph_id: int, dst, src, count, kind,
+                                 deps=None) -> int:
+    if _lib is None:
+        raise VGREError(VGRE_ERROR_NOT_INIT)
+    deps = deps or []
+    deps_arr = (ctypes.c_uint64 * len(deps))(*deps) if deps else None
+    out_id = ctypes.c_uint64(0)
+    _check(
+        _lib.vgre_graphAddMemcpyNodeEx(
+            ctypes.c_uint64(graph_id),
+            ctypes.c_void_p(dst),
+            ctypes.c_void_p(src),
+            ctypes.c_size_t(count),
+            ctypes.c_int(kind),
+            deps_arr,
+            ctypes.c_int(len(deps)),
+            ctypes.byref(out_id),
+        ),
+        "vgre_graphAddMemcpyNodeEx",
+    )
+    return int(out_id.value)
+
+
+def native_graph_add_dependency(graph_id: int, node_id: int,
+                                depends_on: int) -> None:
+    if _lib is None:
+        raise VGREError(VGRE_ERROR_NOT_INIT)
+    _check(_lib.vgre_graphAddDependency(ctypes.c_uint64(graph_id),
+                                        ctypes.c_uint64(node_id),
+                                        ctypes.c_uint64(depends_on)),
+           "vgre_graphAddDependency")
+
+
+def native_graph_update_kernel_node(graph_id: int, node_id: int, args,
+                                    arg_types) -> None:
+    if _lib is None:
+        raise VGREError(VGRE_ERROR_NOT_INIT)
+    args_arr = (ctypes.c_void_p * len(args))(*args)
+    arg_types_arr = (ctypes.c_uint8 * len(arg_types))(*arg_types)
+    _check(
+        _lib.vgre_graphUpdateKernelNode(
+            ctypes.c_uint64(graph_id),
+            ctypes.c_uint64(node_id),
+            args_arr,
+            arg_types_arr,
+            ctypes.c_int(len(arg_types)),
+        ),
+        "vgre_graphUpdateKernelNode",
+    )
+
+
+def native_graph_update_memcpy_node(graph_id: int, node_id: int, dst, src,
+                                    count, kind) -> None:
+    if _lib is None:
+        raise VGREError(VGRE_ERROR_NOT_INIT)
+    _check(
+        _lib.vgre_graphUpdateMemcpyNode(
+            ctypes.c_uint64(graph_id),
+            ctypes.c_uint64(node_id),
+            ctypes.c_void_p(dst),
+            ctypes.c_void_p(src),
+            ctypes.c_size_t(count),
+            ctypes.c_int(kind),
+        ),
+        "vgre_graphUpdateMemcpyNode",
+    )
 
 
 def native_malloc(size: int) -> ctypes.c_void_p:

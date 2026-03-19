@@ -64,12 +64,12 @@ Both route all operations through the `RuntimeEngine`.
 
 ### 2. Core
 
-**Purpose:** Virtual GPU device, memory simulation, scheduling.
+**Purpose:** Virtual GPU device, memory management, scheduling.
 
 | Component | Role |
 |-----------|------|
-| `VirtualGPUDevice` | Emulates GPU hardware — device properties, context, streams |
-| `MemoryManager` | Simulates VRAM via aligned CPU heap allocations |
+| `VirtualGPUDevice` | Virtualizes GPU hardware — device properties, context, streams |
+| `MemoryManager` | Manages VRAM-equivalent memory via aligned host allocations |
 | `Scheduler` | Work-stealing thread pool distributing blocks across cores |
 | `RuntimeEngine` | Top-level orchestrator wiring all subsystems together |
 
@@ -80,7 +80,7 @@ Both route all operations through the `RuntimeEngine`.
 | Component | Role |
 |-----------|------|
 | `KernelParser` | Tokenizes and parses CUDA-like kernel source |
-| `LLVMTranslationEngine` | Pattern-matches kernel types (vector op, reduction, matrix) and generates optimized CPU parallel functions with AVX2 vectorization |
+| `LLVMTranslationEngine` | Multi-stage LLVM ORC JIT pipeline with host-native vectorization (AVX2/AVX-512/FMA) and aggressive O3 optimization |
 
 ### 4. Runtime
 
@@ -110,7 +110,7 @@ Both route all operations through the `RuntimeEngine`.
 5. RuntimeEngine → CPUParallelExecutor.execute(fn, grid, block, args)
 6. CPUParallelExecutor → OpenMP parallel for over blocks
 7. Each block: CompiledKernelFn runs with AVX2 vectorization
-8. Results written directly to simulated VRAM (host memory)
+8. Results written directly to VRAM-equivalent host memory
 ```
 
 ## Performance Optimization Strategy
@@ -121,3 +121,7 @@ Both route all operations through the `RuntimeEngine`.
 4. **Kernel caching** — compiled kernels cached by name to avoid re-translation
 5. **Adaptive tuning** — runtime profiler feeds optimal parameters back
 6. **Memory alignment** — 64-byte aligned allocations for cache-line efficiency
+
+## Feature Coverage
+
+For a current snapshot of which features are fully implemented vs simulated or partial, see `docs/feature_matrix.md`.

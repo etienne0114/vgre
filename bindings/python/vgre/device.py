@@ -7,11 +7,13 @@ via ctypes FFI to the libvgre shared library.
 
 import ctypes
 import ctypes.util
+import os
 from typing import Optional, Dict, Any
 
 try:
     from vgre._native import (
         NATIVE_AVAILABLE,
+        native_init,
         native_get_device_properties,
         native_synchronize,
     )
@@ -21,6 +23,12 @@ except ImportError:
 _NATIVE_REQUIRED_MSG = (
     "VGRE native backend is required. Pure Python device simulation is not supported."
 )
+
+
+def _ensure_native_init() -> None:
+    if not NATIVE_AVAILABLE:
+        raise RuntimeError(_NATIVE_REQUIRED_MSG)
+    native_init()
 
 
 class DeviceProperties:
@@ -82,8 +90,7 @@ class VirtualDevice:
 
     def _detect_hardware(self) -> None:
         """Detect actual CPU hardware to populate device properties."""
-        if not NATIVE_AVAILABLE:
-            raise RuntimeError(_NATIVE_REQUIRED_MSG)
+        _ensure_native_init()
 
         props = native_get_device_properties(self.device_id)
         self._properties.name = props.name.decode("utf-8", errors="replace")
@@ -102,8 +109,7 @@ class VirtualDevice:
     @staticmethod
     def get_device_count() -> int:
         """Return the number of virtual GPU devices."""
-        if not NATIVE_AVAILABLE:
-            raise RuntimeError(_NATIVE_REQUIRED_MSG)
+        _ensure_native_init()
         from vgre._native import native_get_device_count
         return native_get_device_count()
 
@@ -129,8 +135,7 @@ class VirtualDevice:
 
     def synchronize(self) -> None:
         """Synchronize the device."""
-        if not NATIVE_AVAILABLE:
-            raise RuntimeError(_NATIVE_REQUIRED_MSG)
+        _ensure_native_init()
         native_synchronize()
 
     def __repr__(self) -> str:

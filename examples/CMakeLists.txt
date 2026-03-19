@@ -5,3 +5,6 @@ target_link_libraries(vector_addition PRIVATE vgre)
 
 add_executable(matrix_multiply matrix_multiply.cpp)
 target_link_libraries(matrix_multiply PRIVATE vgre)
+
+add_executable(graph_struct_test graph_struct_test.cpp)
+target_link_libraries(graph_struct_test PRIVATE vgre)

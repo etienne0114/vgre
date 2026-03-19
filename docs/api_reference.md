@@ -39,7 +39,7 @@ Represents an executable logic unit dynamically compiled via the JIT engine.
 Represents the emulated generic compute instance.
 
 - **`get_properties() -> DeviceProperties`**
-  Returns maximum threads per block, core counts, and VRAM memory properties currently simulated on the host.
+  Returns maximum threads per block, core counts, and VRAM memory properties detected from the host hardware.
 
 ### `vgre.Dim3`
 CUDA-style multi-dimensional Grid and Block wrapper logic.
@@ -57,7 +57,7 @@ This is the exported interface loaded dynamically by `ctypes`, or utilized by na
 
 ### Memory Managment
 - **`int vgre_malloc(void **ptr, size_t size)`**
-  Allocates unmanaged VRAM memory on the emulated device scope.
+  Allocates unmanaged VRAM memory on the virtual device scope.
 - **`int vgre_free(void *ptr)`**
 - **`int vgre_memcpy(void *dst, const void *src, size_t count, int direction)`**
   Emulates `cudaMemcpy`. Supports mapping between Host vectors, and the Virtual Device memory pool.
@@ -75,3 +75,21 @@ This is the exported interface loaded dynamically by `ctypes`, or utilized by na
 - **`int vgre_stream_destroy(uint64_t stream_id)`**
 - **`int vgre_synchronize(void)`**
   A global blocking barrier resolving all pending enqueued kernels.
+
+---
+
+## 3. OpenCL Compatibility Layer
+
+VGRE provides a minimal OpenCL 1.2 compatible facade for applications using `libOpenCL.so`.
+
+### Platform & Device
+- **`clGetPlatformIDs`**: Returns the `VGRE Virtual Platform`.
+- **`clGetDeviceIDs`**: Returns the `VGRE Virtual Device`.
+- **Robust IDs**: Platform and Device IDs are generated based on a machine-specific hash to ensure stability across restarts.
+
+### Context & Queues
+- **`clCreateContext`**: Maps an OpenCL context to a VGRE device.
+- **`clCreateCommandQueue`**: Maps an OpenCL queue to a VGRE asynchronous stream.
+
+### Kernel Dispatch
+- **`clEnqueueNDRangeKernel`**: Automatically translates OpenCL C source to VGRE Kernel IR and dispatches via the LLVM JIT engine.

@@ -1,14 +1,14 @@
 # VGRE — Virtual GPU Runtime Engine
 
-**A research-grade GPU emulation and virtualization layer** that allows AI frameworks to run GPU workloads on CPUs by translating GPU instructions into highly optimized parallel CPU execution.
+**A high-fidelity GPU virtualization layer** that allows AI frameworks to run GPU workloads on CPUs by translating GPU instructions into highly optimized parallel CPU execution.
 
 ## Overview
 
 VGRE intercepts CUDA/OpenCL operations and translates them into CPU-parallel instructions using:
 - **OpenMP** multithreading
-- **AVX2/SSE4** SIMD vectorization
-- **LLVM IR**-based kernel translation
-- **Adaptive execution** with runtime profiling
+- **AVX2/AVX-512/FMA** SIMD vectorization (host-native auto-detection)
+- **LLVM ORC JIT** kernel translation with aggressive O3 optimization
+- **Adaptive execution** with runtime profiling and hardware calibration
 
 This enables PyTorch, TensorFlow, and other GPU-dependent frameworks to run on machines **without a physical GPU**.
 
@@ -127,7 +127,7 @@ virtual-gpu-runtime/
 - **CMake** ≥ 3.16
 - **GCC** ≥ 9 or **Clang** ≥ 10 (C++17)
 - **OpenMP**
-- **LLVM-14** (Required for Dynamic JIT Execution)
+- **LLVM-18** (Required for Dynamic JIT Execution with ORC API)
 - **Python 3** + **NumPy** (for Python bindings)
 
 ## Documentation
