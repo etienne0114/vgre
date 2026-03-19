@@ -8,11 +8,9 @@
 #endif
 
 // System Headers
-#include <atomic>
 #include <chrono>
 #include <fstream>
 #include <mutex>
-#include <signal.h> // Required for siginfo_t in signal mapping
 #include <sstream>
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
@@ -69,8 +67,10 @@ ComputeResources HybridComputeManager::getResources() const {
 // ── Detect CPU ─────────────────────────────────────────────────────────────
 void HybridComputeManager::detectCPU() {
   resources_.cpuCores = static_cast<int>(std::thread::hardware_concurrency());
-  if (resources_.cpuCores <= 0)
-    resources_.cpuCores = 4;
+  if (resources_.cpuCores == 0) {
+    VGRE_LOG_ERROR("HybridComputeManager", "Failed to detect CPU cores. This system is non-authoritative.");
+    // We keep 0 to indicate failure rather than a fake number.
+  }
 
 #if defined(_WIN32)
   // Read total memory from GlobalMemoryStatusEx on Windows
@@ -96,8 +96,7 @@ void HybridComputeManager::detectCPU() {
 #endif
 
   if (resources_.cpuMemoryBytes == 0) {
-    // Conservative fallback when host memory detection fails.
-    resources_.cpuMemoryBytes = static_cast<size_t>(8) * 1024 * 1024 * 1024;
+    VGRE_LOG_ERROR("HybridComputeManager", "Failed to detect host memory. This system is non-authoritative.");
   }
 }
 
@@ -144,21 +143,20 @@ HybridComputeManager::selectBackend(size_t workloadSize,
                                     size_t memoryRequired) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // If workload fits in CPU comfortably, use CPU
-  if (memoryRequired < resources_.cpuMemoryBytes / 4) {
-    // For small workloads, CPU is always fastest (no transfer overhead)
-    if (workloadSize < 10000) {
-      return ComputeBackend::CPU;
-    }
-
-    // Prefer Integrated GPU for medium-to-large workloads if available
-    if (resources_.hasIntegratedGPU) {
-      return ComputeBackend::INTEGRATED_GPU;
+  // Prefer Remote Node for very large workloads if available and latency is acceptable (Zero-Simulation)
+  if (workloadSize > 100000 && memoryRequired < resources_.cpuMemoryBytes) {
+    for (const auto &node : resources_.remoteNodes) {
+      if (node.available && node.latencyMs < 50.0) {
+        return ComputeBackend::REMOTE_NODE;
+      }
     }
   }
 
-  (void)memoryRequired;
-  // AUTO currently resolves only to backends with a complete dispatch path.
+  // If local workload is medium, use Integrated GPU
+  if (resources_.hasIntegratedGPU && workloadSize > 20000) {
+    return ComputeBackend::INTEGRATED_GPU;
+  }
+
   return ComputeBackend::CPU;
 }
 
@@ -199,6 +197,44 @@ VGREResult HybridComputeManager::removeRemoteNode(const std::string &address) {
     return VGREResult::ERROR_INVALID_VALUE;
   }
   resources_.remoteNodes.erase(it, resources_.remoteNodes.end());
+  return VGREResult::SUCCESS;
+}
+
+VGREResult HybridComputeManager::updateRemoteNodeCapability(const std::string &address, int cores,
+                                                           size_t memory, bool hasIGPU,
+                                                           const std::string &igpuName) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool found = false;
+  for (auto &node : resources_.remoteNodes) {
+    if (node.address == address) {
+      node.cpuCores = cores;
+      node.cpuMemoryBytes = memory;
+      node.hasIntegratedGPU = hasIGPU;
+      node.igpuName = igpuName;
+      node.available = true;
+      found = true;
+      break;
+    }
+  }
+  
+  if (!found) {
+    RemoteNode node;
+    node.address = address;
+    node.port = 7780; // Default cluster port
+    node.cpuCores = cores;
+    node.cpuMemoryBytes = memory;
+    node.hasIntegratedGPU = hasIGPU;
+    node.igpuName = igpuName;
+    node.available = true;
+    resources_.remoteNodes.push_back(node);
+  }
+
+  // Recalculate authoritative total units
+  resources_.totalComputeUnits = resources_.cpuCores;
+  for (const auto &node : resources_.remoteNodes) {
+    if (node.available) resources_.totalComputeUnits += node.cpuCores;
+  }
+  
   return VGREResult::SUCCESS;
 }
 
@@ -323,10 +359,7 @@ VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
       if (node.address == address) {
         node.latencyMs = latencyMs;
         node.available = true;
-        // Default remote capability until handshaked
-        if (node.cpuCores <= 0) {
-          node.cpuCores = 4;
-        }
+        // Capability will be handshaked via TCPClusterManager
         break;
       }
     }
@@ -380,8 +413,8 @@ VGREResult HybridComputeManager::distributeWorkload(const CompiledKernelFn &fn,
 
   case ComputeBackend::INTEGRATED_GPU: {
     if (!hasIntegratedGPU) {
-      VGRE_LOG_WARN("HybridComputeManager", "iGPU requested but not available, falling back to CPU");
-      return distributeWorkload(fn, gridDim, blockDim, args, ComputeBackend::CPU);
+      VGRE_LOG_ERROR("HybridComputeManager", "iGPU requested but not available. Failing in authoritative mode.");
+      return VGREResult::ERROR_NOT_SUPPORTED;
     }
 #ifdef VGRE_HAS_OPENCL_BACKEND
     // Note: distributeWorkload with direct CompiledKernelFn is harder for iGPU

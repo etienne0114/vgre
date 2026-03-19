@@ -259,8 +259,8 @@ bool IPCManager::initialize(bool isMaster) {
       shutdown();
       return false;
     }
-    VGRE_LOG_WARN("IPCManager",
-                  "TCP cluster client initialization failed (optional)");
+    VGRE_LOG_DEBUG("IPCManager",
+                   "TCP cluster client initialization failed (optional)");
   }
   return true;
 }

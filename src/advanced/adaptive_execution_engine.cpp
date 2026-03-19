@@ -23,13 +23,15 @@ namespace vgre {
 namespace advanced {
 
 AdaptiveExecutionEngine::AdaptiveExecutionEngine()
-    : maxCores_(static_cast<int>(std::thread::hardware_concurrency())) {
+    : maxCores_(static_cast<int>(std::thread::hardware_concurrency())),
+      realFlopsAcct_(0),
+      realBytesAcct_(0) {
   if (maxCores_ <= 0)
     maxCores_ = 4;
   
   // No hardcoded defaults—start at zero and wait for benchmark/discovery
-  maxGflops_ = 0.0; 
-  maxMemoryBandwidth_ = 0.0;
+  maxGflops_ = 100.0; 
+  maxMemoryBandwidth_ = 12.0;
 
   VGRE_LOG_INFO("AdaptiveExecutionEngine",
                 "Initialized with " + std::to_string(maxCores_) + " max cores");
@@ -71,6 +73,11 @@ void AdaptiveExecutionEngine::recordExecution(const std::string &kernelName,
     profile.isMemoryBound = (bandwidthGBps > (maxMemoryBandwidth_ * 0.6));
     profile.isComputeBound =
         (computeGflops > (maxGflops_ * 0.6) && !profile.isMemoryBound);
+
+    // Update per-thread performance tracker
+    auto &tp = profile.threadToPerf[threadsUsed];
+    tp.executionCount++;
+    tp.avgExecutionMs = (tp.avgExecutionMs * (tp.executionCount - 1) + executionMs) / tp.executionCount;
   }
 
   analyzeProfile(profile);
@@ -97,23 +104,47 @@ void AdaptiveExecutionEngine::recordExecution(const std::string &kernelName,
   totalExecutions_++;
 }
 
+void AdaptiveExecutionEngine::recordRealFlops(uint64_t flops) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  realFlopsAcct_ += flops;
+  
+  // Also update the moving average throughput for real-time display
+  // We use a small window to show "current" GFLOPS
+  double currentGflops = (static_cast<double>(flops) / 1e9); 
+  totalGflops_ = (totalGflops_ * 0.9) + (currentGflops * 0.1);
+}
+
+void AdaptiveExecutionEngine::recordRealMemoryAccess(uint64_t bytes) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  realBytesAcct_ += bytes;
+  
+  double currentBandwidth = (static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
+  totalBandwidth_ = (totalBandwidth_ * 0.9) + (currentBandwidth * 0.1);
+}
+
 // ── Analyze profile and update optimal parameters ──────────────────────────
 void AdaptiveExecutionEngine::analyzeProfile(KernelProfile &profile) {
   // If we haven't run enough times, keep exploring
-  if (profile.executionCount < 3)
-    return;
-
-  // Adjust thread count based on bound type
-  if (profile.isMemoryBound) {
-    // Memory-bound: more threads may cause contention
-    // Reduce to ~75% of max
-    profile.optimalThreads = std::max(1, static_cast<int>(maxCores_ * 0.75));
-  } else if (profile.isComputeBound) {
-    // Compute-bound: use all cores
+  if (profile.executionCount < 5) {
     profile.optimalThreads = maxCores_;
+    return;
   }
 
-// Vector width: prefer wider if no penalty detected
+  // Data-Driven: Find the thread count with the lowest average execution time
+  int bestThreads = maxCores_;
+  double minAvgMs = 1e12;
+
+  for (auto const& [threads, perf] : profile.threadToPerf) {
+    if (perf.executionCount >= 2 && perf.avgExecutionMs < minAvgMs) {
+      minAvgMs = perf.avgExecutionMs;
+      bestThreads = threads;
+    }
+  }
+
+  // Refine: if the best recorded is significantly better, switch to it
+  profile.optimalThreads = bestThreads;
+
+  // Vector width: prefer wider if no penalty detected
 #ifdef VGRE_HAS_AVX2
   profile.optimalVectorWidth = 8; // 256-bit / 32-bit = 8 lanes
 #elif defined(VGRE_HAS_SSE4)
@@ -131,6 +162,26 @@ int AdaptiveExecutionEngine::getOptimalThreadCount(
   if (it == profiles_.end() || it->second.optimalThreads == 0) {
     return maxCores_;
   }
+
+  // Exploration Logic: 10% chance to try a different core count
+  // to avoid getting stuck in a local optimum.
+  static std::atomic<unsigned int> seed_initialized{0};
+  static thread_local unsigned int seed = 0;
+  if (seed_initialized.load() == 0) {
+      seed = static_cast<unsigned int>(std::chrono::system_clock::now().time_since_epoch().count());
+      seed_initialized.store(1);
+  }
+  
+  if (rand_r(&seed) % 10 == 0) {
+    // Generate a reasonable power-of-two or core-aligned choice
+    int maxPower = 0;
+    while ((1 << (maxPower + 1)) <= maxCores_) maxPower++;
+    
+    int choicePower = rand_r(&seed) % (maxPower + 2);
+    int choice = (choicePower <= maxPower) ? (1 << choicePower) : maxCores_;
+    return std::min(choice, maxCores_);
+  }
+
   return it->second.optimalThreads;
 }
 
@@ -170,6 +221,9 @@ void AdaptiveExecutionEngine::updateHardwareMetrics(int cores, double clockGHz,
 }
 
 void AdaptiveExecutionEngine::runBenchmark() {
+    if (calibrated_.load()) {
+        return;
+    }
     VGRE_LOG_INFO("AdaptiveExecutionEngine", "Performing high-precision Ground Truth calibration...");
     
     auto& ve = runtime::VectorEngine::instance();
@@ -204,6 +258,11 @@ void AdaptiveExecutionEngine::runBenchmark() {
     VGRE_LOG_INFO("AdaptiveExecutionEngine", 
                   "Ground Truth Calibrated: Peak=" + std::to_string(gflops) + 
                   " GFLOPS | Measured Bandwidth=" + std::to_string(bandwidthGBps) + " GB/s");
+    calibrated_.store(true);
+}
+
+bool AdaptiveExecutionEngine::isCalibrated() const {
+  return calibrated_.load();
 }
 
 bool AdaptiveExecutionEngine::getProfile(const std::string &kernelName,

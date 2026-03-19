@@ -3,6 +3,7 @@
 #include "vgre/common/types.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
+#include "vgre/core/virtual_gpu_device.h"
 #include <chrono>
 #include <exception>
 #include <string>
@@ -51,6 +52,17 @@ void WorkloadEngine::workloadLoop() {
     return;
   }
 
+  // Create a dedicated stream for background compute to avoid contention.
+  if (workloadStream_ == 0) {
+    auto &dev = runtime.getDevice();
+    if (dev.createStream(workloadStream_, 0) != VGREResult::SUCCESS) {
+      VGRE_LOG_ERROR("WorkloadEngine",
+                     "Failed to create stream for background workload");
+      running_ = false;
+      return;
+    }
+  }
+
   // Register a real background workload kernel (Iterative Matrix Transform)
   std::string kernelName = "background_compute";
   std::string source = "extern \"C\" __global__ void background_compute(float* "
@@ -93,7 +105,7 @@ void WorkloadEngine::workloadLoop() {
     return;
   }
 
-  // Real Data Initialization (Removes simulation/uninitialized memory)
+  // Authoritative Data Initialization (Ensures valid shared state)
   std::vector<float> h_init(N);
   for (size_t i = 0; i < N; ++i) h_init[i] = static_cast<float>(i % 100) / 100.0f;
   mm.copyHostToDevice(d_A, h_init.data(), N * sizeof(float));
@@ -106,8 +118,11 @@ void WorkloadEngine::workloadLoop() {
   void *args[] = {&d_A, &d_B, &d_C, &n_val};
 
   while (running_.load()) {
-    // Launch workload on default stream 0
-    auto launchRes = runtime.launchKernel(kid, grid, block, args, 0, 0);
+    auto t1 = std::chrono::steady_clock::now();
+
+    // Launch workload on dedicated stream
+    auto launchRes = runtime.launchKernel(kid, grid, block, args, 0,
+                                          workloadStream_);
     if (launchRes != VGREResult::SUCCESS) {
       VGRE_LOG_ERROR("WorkloadEngine",
                      "Background workload kernel launch failed");
@@ -115,14 +130,34 @@ void WorkloadEngine::workloadLoop() {
       break;
     }
 
-    // Controlled frequency to maintain high but stable performance recording
-    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // Higher load
+    // Synchronize to measure actual Host-side busy time
+    runtime.streamSynchronize(workloadStream_);
+    
+    auto t2 = std::chrono::steady_clock::now();
+    double busyMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+    // Duty Cycle scaling: AvgUtil = Busy / (Busy + Sleep)
+    // Sleep = (Busy / LoadFactor) - Busy
+    double factor = loadFactor_.load();
+    if (factor < 0.01) factor = 0.01; // Avoid divide by zero
+    if (factor > 1.0) factor = 1.0;
+
+    double sleepTargetMs = (busyMs / factor) - busyMs;
+    
+    // Clamp sleep to avoid excessive context switching or hanging
+    if (sleepTargetMs > 1000.0) sleepTargetMs = 1000.0;
+
+    if (sleepTargetMs > 0.5) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(sleepTargetMs)));
+    }
   }
 
   // CRITICAL FIX: Synchronize stream 0 to ensure all kernels are DONE 
   // before we free the memory buffers (d_A, d_B, d_C).
   // This prevents the SIGSEGV/Invalid Access during dashboard toggle.
-  runtime.streamSynchronize(0);
+  if (workloadStream_ != 0) {
+    runtime.streamSynchronize(workloadStream_);
+  }
 
   // Cleanup
   if (d_A)
@@ -132,6 +167,11 @@ void WorkloadEngine::workloadLoop() {
   if (d_C)
     mm.free(d_C);
   d_A = d_B = d_C = nullptr;
+
+  if (workloadStream_ != 0) {
+    runtime.getDevice().destroyStream(workloadStream_);
+    workloadStream_ = 0;
+  }
   } catch (const std::exception &e) {
     VGRE_LOG_ERROR("WorkloadEngine",
                    std::string("Background workload loop failed: ") + e.what());

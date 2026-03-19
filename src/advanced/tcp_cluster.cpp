@@ -1,4 +1,5 @@
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/advanced/hybrid_compute_manager.h"
 #include "vgre/common/logger.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
@@ -8,6 +9,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <fstream>
+#include <sstream>
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -33,6 +36,9 @@ typedef int socklen_t;
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#if !defined(_WIN32)
+#include <poll.h>
+#endif
 #define CLOSE_SOCKET(s) close(s)
 #define IOCTL_NONBLOCK(s)                                                      \
   fcntl((s), F_SETFL, fcntl((s), F_GETFL, 0) | O_NONBLOCK)
@@ -100,7 +106,14 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   auth_token_ = 0;
   if (const char *token = std::getenv("VGRE_TCP_AUTH_TOKEN")) {
     if (token[0] != '\0') {
-      auth_token_ = static_cast<uint64_t>(std::hash<std::string>{}(token));
+      // Use stable FNV-1a hash instead of std::hash (which is not stable across processes)
+      uint64_t hash = 0xcbf29ce484222325ULL;
+      const char* p = token;
+      while (*p) {
+          hash ^= static_cast<uint64_t>(*p++);
+          hash *= 0x100000001b3ULL;
+      }
+      auth_token_ = hash;
     }
   }
 
@@ -179,7 +192,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
 
     if (connect(client_fd_, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) <
         0) {
-      VGRE_LOG_WARN("TCPCluster", "Connection failed to " + host_ + ":" +
+      VGRE_LOG_DEBUG("TCPCluster", "Connection failed to " + host_ + ":" +
                                        std::to_string(port_));
       enabled_ = false;
       CLOSE_SOCKET(client_fd_);
@@ -244,80 +257,200 @@ void TCPClusterManager::shutdown() {
 }
 
 void TCPClusterManager::serverLoop() {
-  while (enabled_) {
-    // Accept new connections
-    struct sockaddr_in address;
-    int addrlen = sizeof(address);
-    vgre_socket_t new_socket =
-        accept(server_fd_, (struct sockaddr *)&address, (socklen_t *)&addrlen);
+  VGRE_LOG_DEBUG("TCPCluster", "Master Server Loop starting...");
 
-    if (new_socket != (vgre_socket_t)-1) {
-      IOCTL_NONBLOCK(new_socket);
-      std::lock_guard<std::mutex> lock(clients_mutex_);
-      ClientConnection conn{};
-      conn.socket_fd = new_socket;
-      conn.active = true;
-      conn.expecting_type = true;
-      conn.pending_type = PacketType::TELEMETRY;
-      conn.rx_buffer.clear();
-      clients_.push_back(std::move(conn));
-      std::memset(&clients_.back().last_telemetry, 0, sizeof(vgre_telemetry_t));
-      VGRE_LOG_INFO("TCPCluster", "New remote node connected via TCP.");
+  while (enabled_) {
+    // 1. Prepare poll fds
+    std::vector<struct pollfd> fds;
+    
+    // Listening socket
+    struct pollfd pfd_server;
+    pfd_server.fd = server_fd_;
+    pfd_server.events = POLLIN;
+    fds.push_back(pfd_server);
+    
+    // Client sockets
+    {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        for (const auto &client : clients_) {
+            if (client.active && client.socket_fd != (vgre_socket_t)-1) {
+                struct pollfd pfd_client;
+                pfd_client.fd = client.socket_fd;
+                pfd_client.events = POLLIN;
+                fds.push_back(pfd_client);
+            }
+        }
+    }
+    
+    int poll_res = 0;
+#if defined(_WIN32)
+    poll_res = WSAPoll(fds.data(), fds.size(), 50);
+#else
+    poll_res = poll(fds.data(), fds.size(), 50);
+#endif
+
+    if (poll_res < 0) {
+        if (!socket_would_block()) {
+           VGRE_LOG_ERROR("TCPCluster", "Master: poll() failed");
+           break;
+        }
+        continue;
+    }
+    
+    if (poll_res == 0) continue; // Timeout
+
+    // 2. Handle new connections
+    if (fds[0].revents & POLLIN) {
+        struct sockaddr_in address;
+        socklen_t addrlen = sizeof(address);
+        vgre_socket_t new_socket = accept(server_fd_, (struct sockaddr *)&address, &addrlen);
+        
+        if (new_socket != (vgre_socket_t)-1) {
+            char ipstr[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(address.sin_addr), ipstr, sizeof(ipstr));
+
+            IOCTL_NONBLOCK(new_socket);
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            ClientConnection conn{};
+            conn.socket_fd = new_socket;
+            conn.ip_address = std::string(ipstr);
+            conn.active = true;
+            conn.expecting_type = true;
+            conn.rx_buffer.clear();
+            clients_.push_back(std::move(conn));
+            VGRE_LOG_INFO("TCPCluster", "Master: Accepted new remote node from " + std::string(ipstr));
+        }
     }
 
-    // Read data from all clients
+    // 3. Handle data from existing clients
     {
-      std::lock_guard<std::mutex> lock(clients_mutex_);
-      for (auto &client : clients_) {
-        if (!client.active)
-          continue;
-
-        char temp[2048];
-        int n = recv(client.socket_fd, temp, sizeof(temp), MSG_DONTWAIT);
-        if (n > 0) {
-          client.rx_buffer.insert(client.rx_buffer.end(), temp, temp + n);
-          while (client.active) {
-            if (client.expecting_type) {
-              if (client.rx_buffer.size() < sizeof(PacketType))
-                break;
-              std::memcpy(&client.pending_type, client.rx_buffer.data(),
-                          sizeof(PacketType));
-              client.rx_buffer.erase(client.rx_buffer.begin(),
-                                     client.rx_buffer.begin() +
-                                         static_cast<long>(sizeof(PacketType)));
-              client.expecting_type = false;
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        for (size_t i = 1; i < fds.size(); ++i) {
+            if (fds[i].revents & (POLLIN | POLLERR | POLLHUP)) {
+                // Find matching client
+                for (auto &client : clients_) {
+                    if (client.socket_fd == fds[i].fd) {
+                        if (fds[i].revents & POLLIN) {
+                            char temp[4096];
+                            int n = recv(client.socket_fd, temp, sizeof(temp), 0);
+                            if (n > 0) {
+                                client.rx_buffer.insert(client.rx_buffer.end(), temp, temp + n);
+                            } else if (n == 0) {
+                                VGRE_LOG_INFO("TCPCluster", "Master: Worker disconnected.");
+                                client.active = false;
+                                CLOSE_SOCKET(client.socket_fd);
+                            }
+                        } else {
+                            VGRE_LOG_WARN("TCPCluster", "Master: Client socket error or hup.");
+                            client.active = false;
+                            CLOSE_SOCKET(client.socket_fd);
+                        }
+                        break;
+                    }
+                }
             }
-
-            if (client.pending_type == PacketType::TELEMETRY) {
-              if (client.rx_buffer.size() < sizeof(vgre_telemetry_t))
-                break;
-              std::memcpy(&client.last_telemetry, client.rx_buffer.data(),
-                          sizeof(vgre_telemetry_t));
-              client.rx_buffer.erase(client.rx_buffer.begin(),
-                                     client.rx_buffer.begin() +
-                                         static_cast<long>(sizeof(vgre_telemetry_t)));
+        }
+        
+        // Process buffers
+        for (auto &client : clients_) {
+          if (!client.active || client.rx_buffer.empty()) continue;
+          
+          while (client.active && !client.rx_buffer.empty()) {
+            PacketType type = static_cast<PacketType>(client.rx_buffer[0]);
+            
+            if (type == PacketType::TELEMETRY) {
+              if (client.rx_buffer.size() < sizeof(vgre_telemetry_t) + sizeof(PacketType)) break;
+              std::memcpy(&client.last_telemetry, client.rx_buffer.data() + sizeof(PacketType), sizeof(vgre_telemetry_t));
+              client.rx_buffer.erase(client.rx_buffer.begin(), client.rx_buffer.begin() + sizeof(PacketType) + sizeof(vgre_telemetry_t));
+            } else if (type == PacketType::RESPONSE) {
+              if (client.rx_buffer.size() < sizeof(ResponsePacket)) break;
+              ResponsePacket resp;
+              std::memcpy(&resp, client.rx_buffer.data(), sizeof(ResponsePacket));
+              client.rx_buffer.erase(client.rx_buffer.begin(), client.rx_buffer.begin() + sizeof(ResponsePacket));
+              VGRE_LOG_DEBUG("TCPCluster", "Master: Received RESPONSE from worker (Kernel: " + std::to_string(resp.kernel_id) + ")");
+            } else if (type == PacketType::DATA_HEADER) {
+              if (client.rx_buffer.size() < sizeof(DataHeaderPacket)) break;
+              DataHeaderPacket dpkt;
+              std::memcpy(&dpkt, client.rx_buffer.data(), sizeof(DataHeaderPacket));
+              client.rx_buffer.erase(client.rx_buffer.begin(), client.rx_buffer.begin() + sizeof(DataHeaderPacket));
+              client.pending_target_ptr = dpkt.target_ptr;
+              client.pending_data_size = dpkt.size;
+              client.expecting_type = false;
+            } else if (type == PacketType::DATA_BODY) {
+              if (client.rx_buffer.size() < sizeof(PacketType) + client.pending_data_size) break;
+              void* host_ptr = reinterpret_cast<void*>(client.pending_target_ptr);
+              if (host_ptr) {
+                  auto &mm = core::RuntimeEngine::instance().getMemoryManager();
+                  if (mm.isValidHandle(host_ptr)) {
+                      std::memcpy(mm.getPointer(host_ptr), client.rx_buffer.data() + sizeof(PacketType), client.pending_data_size);
+                  }
+              }
+              client.rx_buffer.erase(client.rx_buffer.begin(), client.rx_buffer.begin() + sizeof(PacketType) + client.pending_data_size);
               client.expecting_type = true;
+            } else if (type == PacketType::CAPABILITY) {
+              if (client.rx_buffer.size() < sizeof(CapabilityPacket)) break;
+              CapabilityPacket cpkt;
+              std::memcpy(&cpkt, client.rx_buffer.data(), sizeof(CapabilityPacket));
+              client.rx_buffer.erase(client.rx_buffer.begin(), client.rx_buffer.begin() + sizeof(CapabilityPacket));
+              
+              client.cpu_cores = cpkt.cpu_cores;
+              client.cpu_memory = cpkt.cpu_memory;
+              client.has_igpu = cpkt.has_igpu;
+              std::strncpy(client.igpu_name, cpkt.igpu_name, 63);
+              
+              HybridComputeManager::instance().updateRemoteNodeCapability(
+                  client.ip_address, cpkt.cpu_cores, cpkt.cpu_memory, cpkt.has_igpu, cpkt.igpu_name);
+              
+              VGRE_LOG_INFO("TCPCluster", "Master: Received CAPABILITY from worker " + client.ip_address + " (Cores: " + std::to_string(cpkt.cpu_cores) + ")");
             } else {
-              VGRE_LOG_ERROR("TCPCluster", "Unknown packet type from client");
-              client.active = false;
-              CLOSE_SOCKET(client.socket_fd);
-              client.socket_fd = (vgre_socket_t)-1;
+              VGRE_LOG_ERROR("TCPCluster", "Master: Protocol sync error, discarding buffer for client " + client.ip_address);
+              client.rx_buffer.clear();
               break;
             }
           }
-        } else if (n == 0 || (n < 0 && !socket_would_block())) {
-          client.active = false;
-          CLOSE_SOCKET(client.socket_fd);
-          client.socket_fd = (vgre_socket_t)-1;
-          VGRE_LOG_INFO("TCPCluster", "Remote node disconnected.");
         }
-      }
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
+  VGRE_LOG_DEBUG("TCPCluster", "Master Server Loop exiting.");
 }
 
 void TCPClusterManager::clientLoop() {
+  // 1. Send Capability Handshake
+  {
+    CapabilityPacket cpkt{};
+    cpkt.type = PacketType::CAPABILITY;
+    
+    // Use HybridComputeManager to get local resources if possible, or detect directly
+    cpkt.cpu_cores = std::thread::hardware_concurrency();
+    
+#if defined(_WIN32)
+    MEMORYSTATUSEX memInfo;
+    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+    if (GlobalMemoryStatusEx(&memInfo)) cpkt.cpu_memory = memInfo.ullTotalPhys;
+#else
+    std::ifstream meminfo("/proc/meminfo");
+    std::string line;
+    while (std::getline(meminfo, line)) {
+      if (line.find("MemTotal") != std::string::npos) {
+        std::istringstream iss(line);
+        std::string label; size_t kb; iss >> label >> kb;
+        cpkt.cpu_memory = kb * 1024;
+        break;
+      }
+    }
+#endif
+    
+    // Simplified iGPU check for handshake
+#ifdef VGRE_HAS_OPENCL_BACKEND
+    cpkt.has_igpu = true;
+    std::strncpy(cpkt.igpu_name, "VGRE-Enabled iGPU", 63);
+#else
+    cpkt.has_igpu = false;
+#endif
+
+    send_all(client_fd_, &cpkt, sizeof(CapabilityPacket));
+  }
+
   while (enabled_) {
     // 1. Send Telemetry to Master
     vgre_telemetry_t telemetry;
@@ -373,45 +506,82 @@ void TCPClusterManager::processClientStagingBuffer() {
                              processing_staging_->end());
     processing_staging_->clear();
 
-    while (true) {
-        if (client_rx_buffer_.size() < sizeof(PacketType))
-          break;
-        
-        PacketType type;
-        std::memcpy(&type, client_rx_buffer_.data(), sizeof(PacketType));
+    while (enabled_ && !client_rx_buffer_.empty()) {
+        PacketType type = static_cast<PacketType>(client_rx_buffer_[0]);
 
-        if (type == PacketType::LAUNCH_KERNEL) {
-            if (client_rx_buffer_.size() < sizeof(RemoteCommandPacket) + sizeof(PacketType))
-              break;
-            RemoteCommandPacket pkt{};
-            std::memcpy(&pkt, client_rx_buffer_.data() + sizeof(PacketType), sizeof(RemoteCommandPacket));
-            client_rx_buffer_.erase(client_rx_buffer_.begin(),
-                                    client_rx_buffer_.begin() + sizeof(PacketType) + sizeof(RemoteCommandPacket));
-            handleRemoteCommand(pkt);
+        if (type == PacketType::ARG_SCALAR || type == PacketType::ARG_POINTER) {
+            if (client_rx_buffer_.size() < sizeof(ArgScalarPacket)) break;
+            ArgScalarPacket apkt;
+            std::memcpy(&apkt, client_rx_buffer_.data(), sizeof(ArgScalarPacket));
+            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(ArgScalarPacket));
+            
+            PendingArg arg;
+            arg.type = apkt.arg_type;
+            arg.value = apkt.value;
+            pending_args_[apkt.arg_index] = std::move(arg);
         } else if (type == PacketType::DATA_HEADER) {
-            if (client_rx_buffer_.size() < sizeof(DataHeaderPacket) + sizeof(PacketType))
-              break;
-            DataHeaderPacket dpkt{};
-            std::memcpy(&dpkt, client_rx_buffer_.data() + sizeof(PacketType), sizeof(DataHeaderPacket));
+            if (client_rx_buffer_.size() < sizeof(DataHeaderPacket)) break;
+            DataHeaderPacket dpkt;
+            std::memcpy(&dpkt, client_rx_buffer_.data(), sizeof(DataHeaderPacket));
+            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(DataHeaderPacket));
             
-            size_t required = sizeof(DataHeaderPacket) + sizeof(PacketType) * 2 + dpkt.size;
-            if (client_rx_buffer_.size() < required) break; 
-
-            // We have the full data!
-            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(DataHeaderPacket) + sizeof(PacketType));
+            pending_target_ptr_ = dpkt.target_ptr;
+            pending_data_size_ = dpkt.size;
+        } else if (type == PacketType::DATA_BODY) {
+            if (client_rx_buffer_.size() < sizeof(PacketType) + pending_data_size_) break;
             
-            PacketType btype;
-            std::memcpy(&btype, client_rx_buffer_.data(), sizeof(PacketType));
-            if (btype == PacketType::DATA_BODY) {
-                void* target = reinterpret_cast<void*>(dpkt.target_ptr);
-                auto& mm = core::RuntimeEngine::instance().getMemoryManager();
-                if (mm.isValidHandle(target)) {
-                    std::memcpy(mm.getPointer(target), 
-                                client_rx_buffer_.data() + sizeof(PacketType), 
-                                dpkt.size);
-                }
+            void* handle = reinterpret_cast<void*>(pending_target_ptr_);
+            auto& mm = vgre::core::RuntimeEngine::instance().getMemoryManager();
+            
+            if (!mm.isValidHandle(handle)) {
+               void* actual_ptr = nullptr;
+               mm.allocateManagedAt(handle, pending_data_size_, actual_ptr);
             }
-            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(PacketType) + dpkt.size);
+            
+            void* local_ptr = mm.getPointer(handle);
+            if (local_ptr) {
+                std::memcpy(local_ptr, client_rx_buffer_.data() + sizeof(PacketType), pending_data_size_);
+            }
+            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(PacketType) + pending_data_size_);
+        } else if (type == PacketType::STRUCT_DATA) {
+            if (client_rx_buffer_.size() < sizeof(StructDataPacket)) break;
+            StructDataPacket spkt;
+            std::memcpy(&spkt, client_rx_buffer_.data(), sizeof(StructDataPacket));
+            
+            size_t required = sizeof(StructDataPacket) + sizeof(PacketType) + spkt.size;
+            if (client_rx_buffer_.size() < required) break;
+
+            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(StructDataPacket));
+            
+            PacketType btype = static_cast<PacketType>(client_rx_buffer_[0]);
+            if (btype == PacketType::DATA_BODY) {
+                PendingArg arg;
+                arg.type = static_cast<uint8_t>(ArgType::STRUCT);
+                arg.data.assign(client_rx_buffer_.data() + sizeof(PacketType), client_rx_buffer_.data() + sizeof(PacketType) + spkt.size);
+                pending_args_[spkt.arg_index] = std::move(arg);
+            }
+            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(PacketType) + spkt.size);
+        } else if (type == PacketType::REGISTER_KERNEL) {
+            if (client_rx_buffer_.size() < sizeof(KernelRegisterPacket)) break;
+            KernelRegisterPacket kpkt;
+            std::memcpy(&kpkt, client_rx_buffer_.data(), sizeof(KernelRegisterPacket));
+            
+            size_t total_size = sizeof(KernelRegisterPacket) + kpkt.source_len;
+            if (client_rx_buffer_.size() < total_size) break;
+
+            VGRE_LOG_INFO("TCPCluster", "Worker: Registering remote-provided kernel: " + std::string(kpkt.name));
+            std::string source(reinterpret_cast<const char*>(client_rx_buffer_.data() + sizeof(KernelRegisterPacket)), kpkt.source_len);
+            vgre::KernelId actual_id;
+            core::RuntimeEngine::instance().registerKernel(kpkt.name, source, actual_id);
+            
+            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + total_size);
+        } else if (type == PacketType::LAUNCH_KERNEL) {
+            if (client_rx_buffer_.size() < sizeof(RemoteCommandPacket)) break;
+            RemoteCommandPacket pkt;
+            std::memcpy(&pkt, client_rx_buffer_.data(), sizeof(RemoteCommandPacket));
+            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(RemoteCommandPacket));
+            
+            handleRemoteCommand(pkt);
         } else {
             client_rx_buffer_.clear(); // Corrupt state
             break;
@@ -546,96 +716,108 @@ VGREResult TCPClusterManager::launchRemoteKernel(
     return VGREResult::ERROR_INVALID_KERNEL;
   }
 
-  RemoteCommandPacket pkt{};
-  pkt.type = PacketType::LAUNCH_KERNEL;
   if (auth_token_ == 0) {
     VGRE_LOG_ERROR("TCPCluster",
                    "Remote kernel dispatch blocked: missing "
                    "VGRE_TCP_AUTH_TOKEN");
     return VGREResult::ERROR_INVALID_VALUE;
   }
+
+  // 1. Stream all arguments FIRST
+  for (int i = 0; i < num_args; ++i) {
+    ArgType type = (i < static_cast<int>(argTypes.size())) ? argTypes[i] : ArgType::UINT64;
+    
+    if (type == ArgType::STRUCT) {
+      // For structs, we need to know the size. JIT metadata is the most authoritative source.
+      const auto *ir = core::RuntimeEngine::instance().getKernelIR(kernel_id);
+      if (ir && i < static_cast<int>(ir->argSizes.size())) {
+          size_t size = ir->argSizes[i];
+          StructDataPacket spkt{};
+          spkt.type = PacketType::STRUCT_DATA;
+          spkt.arg_index = i;
+          spkt.size = static_cast<uint32_t>(size);
+          send_all(clients_[worker_idx].socket_fd, &spkt, sizeof(StructDataPacket));
+
+          PacketType body_type = PacketType::DATA_BODY;
+          send_all(clients_[worker_idx].socket_fd, &body_type, sizeof(PacketType));
+          send_all(clients_[worker_idx].socket_fd, args[i], size);
+      }
+    } else if (type == ArgType::POINTER) {
+      void* ptr = *static_cast<void**>(args[i]);
+      uint64_t handle = reinterpret_cast<uint64_t>(ptr);
+      
+      // Memory Coherence: If it's a valid managed pointer, sync its data to the worker
+      size_t size = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
+      if (size > 0 && ptr) {
+          DataHeaderPacket dpkt{};
+          dpkt.type = PacketType::DATA_HEADER;
+          dpkt.target_ptr = handle;
+          dpkt.size = size;
+          send_all(clients_[worker_idx].socket_fd, &dpkt, sizeof(DataHeaderPacket));
+
+          PacketType body_type = PacketType::DATA_BODY;
+          send_all(clients_[worker_idx].socket_fd, &body_type, sizeof(PacketType));
+          send_all(clients_[worker_idx].socket_fd, ptr, size);
+      }
+
+      ArgScalarPacket apkt{};
+      apkt.type = PacketType::ARG_POINTER;
+      apkt.arg_index = i;
+      apkt.arg_type = static_cast<uint8_t>(type);
+      apkt.value = handle;
+      send_all(clients_[worker_idx].socket_fd, &apkt, sizeof(ArgScalarPacket));
+    } else {
+      // Scalar arguments (INT32, FLOAT32, etc.)
+      ArgScalarPacket apkt{};
+      apkt.type = PacketType::ARG_SCALAR;
+      apkt.arg_index = i;
+      apkt.arg_type = static_cast<uint8_t>(type);
+      
+      // All scalars are currently treated as 8-byte values in the RPC layer for simplicity
+      std::memcpy(&apkt.value, args[i], 8);
+      send_all(clients_[worker_idx].socket_fd, &apkt, sizeof(ArgScalarPacket));
+    }
+  }
+
+  // 2. Send LAUNCH_KERNEL header LAST (this triggers execution on worker side)
+  RemoteCommandPacket pkt{};
+  pkt.type = PacketType::LAUNCH_KERNEL;
   pkt.auth_token = auth_token_;
   pkt.kernel_id = kernel_id;
   std::memcpy(pkt.grid_dim, grid_dim, sizeof(pkt.grid_dim));
   std::memcpy(pkt.block_dim, block_dim, sizeof(pkt.block_dim));
   pkt.shared_mem = shared_mem;
-  pkt.num_args = std::min(num_args, 8);
-  std::memset(pkt.arg_types, 0, sizeof(pkt.arg_types));
-  std::memset(pkt.args, 0, sizeof(pkt.args));
+  pkt.num_args = num_args; 
 
-  for (int i = 0; i < pkt.num_args; ++i) {
-    if (i >= static_cast<int>(argTypes.size())) {
-      VGRE_LOG_ERROR("TCPCluster",
-                     "Remote dispatch failed: kernel argument metadata missing");
-      return VGREResult::ERROR_INVALID_KERNEL;
-    }
-    if (argTypes[i] == ArgType::POINTER) {
-      void* host_ptr = *static_cast<void **>(args[i]);
-      if (host_ptr) {
-        auto &mm = core::RuntimeEngine::instance().getMemoryManager();
-        if (mm.isValidHandle(host_ptr)) {
-          size_t size = mm.getAllocationSize(host_ptr);
-          
-          // 1. Send DATA_HEADER
-          DataHeaderPacket dptr_pkt{};
-          dptr_pkt.type = PacketType::DATA_HEADER;
-          dptr_pkt.target_ptr = reinterpret_cast<uintptr_t>(host_ptr);
-          dptr_pkt.size = size;
-          send_all(clients_[worker_idx].socket_fd, &dptr_pkt, sizeof(DataHeaderPacket));
-
-          // 2. Send DATA_BODY type and content
-          PacketType body_type = PacketType::DATA_BODY;
-          send_all(clients_[worker_idx].socket_fd, &body_type, sizeof(PacketType));
-          send_all(clients_[worker_idx].socket_fd, mm.getPointer(host_ptr), size);
-
-          // The actual argument in the LAUNCH_KERNEL packet is the pointer value
-          pkt.args[i] = reinterpret_cast<uint64_t>(host_ptr);
-          pkt.arg_types[i] = static_cast<uint8_t>(ArgType::POINTER);
-          continue;
-        }
-      }
-      VGRE_LOG_ERROR("TCPCluster", "Remote execution failed: pointer argument is not a managed VGRE handle");
-      return VGREResult::ERROR_INVALID_VALUE;
-    }
-
-    if (!args || !args[i]) {
-      VGRE_LOG_ERROR("TCPCluster",
-                     "Remote dispatch failed: null scalar argument at index " +
-                         std::to_string(i));
-      return VGREResult::ERROR_INVALID_VALUE;
-    }
-
-    ArgType type = argTypes[i];
-    pkt.arg_types[i] = static_cast<uint8_t>(type);
-    switch (type) {
-    case ArgType::INT32:
-    case ArgType::UINT32:
-    case ArgType::FLOAT32:
-      std::memcpy(&pkt.args[i], args[i], sizeof(uint32_t));
-      break;
-    case ArgType::INT64:
-    case ArgType::UINT64:
-    case ArgType::FLOAT64:
-      std::memcpy(&pkt.args[i], args[i], sizeof(uint64_t));
-      break;
-    case ArgType::POINTER:
-      // Already rejected above
-      return VGREResult::ERROR_INVALID_VALUE;
-    }
-  }
-
-  if (!send_all(clients_[worker_idx].socket_fd, &pkt,
-                sizeof(RemoteCommandPacket))) {
-    clients_[worker_idx].active = false;
-    CLOSE_SOCKET(clients_[worker_idx].socket_fd);
-    clients_[worker_idx].socket_fd = (vgre_socket_t)-1;
-    VGRE_LOG_ERROR("TCPCluster", "Failed to dispatch remote kernel packet");
+  if (!send_all(clients_[worker_idx].socket_fd, &pkt, sizeof(RemoteCommandPacket))) {
     return VGREResult::ERROR_IO;
   }
-  VGRE_LOG_INFO("TCPCluster", "Dispatched remote kernel launch to worker " +
-                                  std::to_string(worker_idx));
 
+  VGRE_LOG_INFO("TCPCluster",
+                "Dispatched remote kernel launch (" + std::to_string(num_args) +
+                    " args) to worker " + std::to_string(worker_idx));
   return VGREResult::SUCCESS;
+}
+
+void TCPClusterManager::broadcastKernelRegistration(uint64_t kernel_id,
+                                                   const std::string &name,
+                                                   const std::string &source) {
+  if (!enabled_ || !is_master_)
+    return;
+
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  KernelRegisterPacket kpkt{};
+  kpkt.type = PacketType::REGISTER_KERNEL;
+  kpkt.kernel_id = kernel_id;
+  std::strncpy(kpkt.name, name.c_str(), sizeof(kpkt.name) - 1);
+  kpkt.source_len = static_cast<uint32_t>(source.length());
+
+  for (auto &client : clients_) {
+    if (client.active) {
+      send_all(client.socket_fd, &kpkt, sizeof(KernelRegisterPacket));
+      send_all(client.socket_fd, source.c_str(), source.length());
+    }
+  }
 }
 
 int TCPClusterManager::getFirstActiveWorker() const {
@@ -665,61 +847,36 @@ void TCPClusterManager::handleRemoteCommand(const RemoteCommandPacket &pkt) {
 
   VGRE_LOG_INFO("TCPCluster",
                 "Executing remote kernel launch request (Kernel ID: " +
-                    std::to_string(pkt.kernel_id) + ")");
+                    std::to_string(pkt.kernel_id) + " | Args: " + std::to_string(pkt.num_args) + ")");
 
-  int32_t arg_i32[8] = {};
-  uint32_t arg_u32[8] = {};
-  int64_t arg_i64[8] = {};
-  uint64_t arg_u64[8] = {};
-  float arg_f32[8] = {};
-  double arg_f64[8] = {};
-  void *local_args[8] = {};
-  int numArgs = std::clamp(pkt.num_args, 0, 8);
+  int numArgs = pkt.num_args;
+  std::vector<void*> local_args(numArgs, nullptr);
+  
+  // We need to keep the actual values alive during launchKernel.
+  // We can't just point into the map because it might reallocate (though not during this loop).
+  // But more importantly, scalar values of different sizes need correct alignment and size.
+  // However, VGRE's standard internal dispatch uses 8-byte slots for all scalars for simplicity in many paths,
+  // or expects the pointer to the actual type.
+  
   for (int i = 0; i < numArgs; ++i) {
-    ArgType type = static_cast<ArgType>(pkt.arg_types[i]);
-    switch (type) {
-    case ArgType::INT32: {
-      std::memcpy(&arg_i32[i], &pkt.args[i], sizeof(int32_t));
-      local_args[i] = static_cast<void *>(&arg_i32[i]);
-      break;
+    auto it = pending_args_.find(i);
+    if (it == pending_args_.end()) {
+        VGRE_LOG_ERROR("TCPCluster", "Remote execution failed: missing argument data for index " + std::to_string(i));
+        pending_args_.clear();
+        return;
     }
-    case ArgType::UINT32: {
-      std::memcpy(&arg_u32[i], &pkt.args[i], sizeof(uint32_t));
-      local_args[i] = static_cast<void *>(&arg_u32[i]);
-      break;
-    }
-    case ArgType::FLOAT32: {
-      uint32_t bits = 0;
-      std::memcpy(&bits, &pkt.args[i], sizeof(uint32_t));
-      std::memcpy(&arg_f32[i], &bits, sizeof(float));
-      local_args[i] = static_cast<void *>(&arg_f32[i]);
-      break;
-    }
-    case ArgType::INT64: {
-      std::memcpy(&arg_i64[i], &pkt.args[i], sizeof(int64_t));
-      local_args[i] = static_cast<void *>(&arg_i64[i]);
-      break;
-    }
-    case ArgType::UINT64: {
-      std::memcpy(&arg_u64[i], &pkt.args[i], sizeof(uint64_t));
-      local_args[i] = static_cast<void *>(&arg_u64[i]);
-      break;
-    }
-    case ArgType::FLOAT64: {
-      std::memcpy(&arg_f64[i], &pkt.args[i], sizeof(double));
-      local_args[i] = static_cast<void *>(&arg_f64[i]);
-      break;
-    }
-    case ArgType::POINTER: {
-      arg_u64[i] = pkt.args[i];
-      local_args[i] = static_cast<void*>(&arg_u64[i]);
-      break;
-    }
-    default:
-      VGRE_LOG_ERROR("TCPCluster",
-                     "Rejected remote command: unknown argument type " +
-                         std::to_string(static_cast<int>(pkt.arg_types[i])));
-      return;
+    
+    PendingArg& arg = it->second;
+    ArgType type = static_cast<ArgType>(arg.type);
+    
+    if (type == ArgType::STRUCT) {
+       local_args[i] = arg.data.data();
+    } else if (type == ArgType::POINTER) {
+       local_args[i] = &arg.value;
+    } else {
+       // For scalars, value is already stored in PendingArg::value (64-bit).
+       // We can point directly to it.
+       local_args[i] = &arg.value;
     }
   }
 
@@ -727,12 +884,51 @@ void TCPClusterManager::handleRemoteCommand(const RemoteCommandPacket &pkt) {
   dim3 bd(pkt.block_dim[0], pkt.block_dim[1], pkt.block_dim[2]);
 
   auto r = vgre::core::RuntimeEngine::instance().launchKernel(
-      pkt.kernel_id, gd, bd, local_args, pkt.shared_mem, 0);
+      pkt.kernel_id, gd, bd, local_args.data(), pkt.shared_mem, 0);
+  
   if (r != VGREResult::SUCCESS) {
     VGRE_LOG_ERROR("TCPCluster",
                    "Remote kernel execution failed with code " +
                        std::to_string(static_cast<int>(r)));
   }
+
+  // --- Memory Coherence (Pull Back) ---
+  // If the kernel was successful, sync modified managed pointers back to master.
+  // In a real GPU driver, we'd track dirty pages, but for VGRE Phase 3 coherence,
+  // we assume all pointer arguments are potentially outputs.
+  for (int i = 0; i < numArgs; ++i) {
+      auto it = pending_args_.find(i);
+      if (it == pending_args_.end()) continue;
+      
+      PendingArg& arg = it->second;
+      if (arg.type == static_cast<uint8_t>(ArgType::POINTER)) {
+          void* ptr = reinterpret_cast<void*>(arg.value);
+          size_t size = vgre::core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
+          if (size > 0) {
+              // 1. Send DATA_HEADER
+              DataHeaderPacket dptr_pkt{};
+              dptr_pkt.type = PacketType::DATA_HEADER;
+              dptr_pkt.target_ptr = arg.value;
+              dptr_pkt.size = size;
+              send_all(client_fd_, &dptr_pkt, sizeof(DataHeaderPacket));
+
+              // 2. Send DATA_BODY
+              PacketType body_type = PacketType::DATA_BODY;
+              send_all(client_fd_, &body_type, sizeof(PacketType));
+              send_all(client_fd_, ptr, size);
+          }
+      }
+  }
+
+  // Send RESPONSE packet
+  ResponsePacket resp{};
+  resp.type = PacketType::RESPONSE;
+  resp.kernel_id = pkt.kernel_id;
+  resp.result = r;
+  send_all(client_fd_, &resp, sizeof(ResponsePacket));
+  
+  // Clear pending args after launch
+  pending_args_.clear();
 }
 
 void TCPClusterManager::broadcastLocalTelemetry(
