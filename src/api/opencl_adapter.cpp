@@ -2,15 +2,43 @@
 #include "vgre/common/logger.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
+#include "vgre/core/scheduler.h"
+#include "vgre/core/virtual_gpu_device.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <stdexcept>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace vgre {
 namespace api {
 
-OpenCLAdapter::OpenCLAdapter() = default;
+OpenCLAdapter::OpenCLAdapter() {
+  // Generate a robust platform and device ID based on local entropy.
+  // This avoids the 'fake' 1, 2, 3 sequence.
+  std::string entropy = "VGRE_VIRTUAL_GPU";
+#if defined(__linux__)
+  std::ifstream mid("/etc/machine_id");
+  if (mid.is_open()) {
+    std::string s; mid >> s; entropy += s;
+  }
+#elif defined(_WIN32)
+  char name[256]; DWORD size = sizeof(name);
+  if (GetComputerNameA(name, &size)) entropy += name;
+#endif
+  platformId_ = static_cast<cl_platform_id>(std::hash<std::string>{}(entropy + "_PLATFORM"));
+  deviceId_ = static_cast<cl_device_id>(std::hash<std::string>{}(entropy + "_DEVICE_0"));
+  
+  VGRE_LOG_INFO("OpenCLAdapter", "Initialized with PlatformID: " + 
+                std::to_string(platformId_) + " and DeviceID: " + 
+                std::to_string(deviceId_));
+}
 OpenCLAdapter::~OpenCLAdapter() = default;
 
 // ── Platform & Device ──────────────────────────────────────────────────────
@@ -20,14 +48,14 @@ cl_int OpenCLAdapter::getPlatformIDs(cl_uint numEntries,
   if (numPlatforms)
     *numPlatforms = 1;
   if (platforms && numEntries > 0) {
-    platforms[0] = 1; // VGRE virtual platform
+    platforms[0] = platformId_; // Robust VGRE virtual platform ID
   }
   return CL_SUCCESS;
 }
 
 cl_int OpenCLAdapter::getDeviceIDs(cl_platform_id platform, cl_uint numEntries,
                                    cl_device_id *devices, cl_uint *numDevices) {
-  if (platform != 1)
+  if (platform != platformId_)
     return CL_INVALID_PLATFORM;
 
   auto initResult = core::RuntimeEngine::instance().initialize();
@@ -42,7 +70,9 @@ cl_int OpenCLAdapter::getDeviceIDs(cl_platform_id platform, cl_uint numEntries,
   if (devices) {
     cl_uint count = std::min(numEntries, static_cast<cl_uint>(deviceCount));
     for (cl_uint i = 0; i < count; ++i) {
-      devices[i] = i + 1; // VGRE virtual device IDs (1-based)
+      // In this version we only support one virtual device mapping to the hashed ID
+      // but if there are multiple, we'd hash each ordinal.
+      devices[i] = (i == 0) ? deviceId_ : (deviceId_ + i);
     }
   }
   return CL_SUCCESS;
@@ -59,7 +89,15 @@ cl_context OpenCLAdapter::createContext(cl_device_id device, cl_int *errcode) {
   }
 
   int deviceCount = core::RuntimeEngine::instance().getDeviceCount();
-  if (device < 1 || device > static_cast<cl_device_id>(deviceCount)) {
+  bool valid = false;
+  for (int i = 0; i < deviceCount; ++i) {
+    if (device == ((i == 0) ? deviceId_ : (deviceId_ + i))) {
+      valid = true;
+      break;
+    }
+  }
+
+  if (!valid) {
     if (errcode)
       *errcode = CL_INVALID_DEVICE;
     return 0;
@@ -80,7 +118,9 @@ cl_int OpenCLAdapter::releaseContext(cl_context context) {
   if (contexts_.erase(context) == 0)
     return CL_INVALID_CONTEXT;
   for (auto it = queues_.begin(); it != queues_.end();) {
-    if (it->second == context) {
+    if (it->second.context == context) {
+      core::RuntimeEngine::instance().streamSynchronize(it->second.stream);
+      core::RuntimeEngine::instance().getDevice().destroyStream(it->second.stream);
       it = queues_.erase(it);
     } else {
       ++it;
@@ -108,8 +148,16 @@ cl_command_queue OpenCLAdapter::createCommandQueue(cl_context ctx,
     return 0;
   }
 
+  StreamId streamId = 0;
+  auto r = core::RuntimeEngine::instance().getDevice().createStream(streamId, 0);
+  if (r != VGREResult::SUCCESS) {
+    if (errcode)
+      *errcode = CL_OUT_OF_HOST_MEMORY;
+    return 0;
+  }
+
   cl_command_queue queue = nextId_++;
-  queues_[queue] = ctx;
+  queues_[queue] = QueueInfo{ctx, streamId};
   if (errcode)
     *errcode = CL_SUCCESS;
   return queue;
@@ -117,8 +165,14 @@ cl_command_queue OpenCLAdapter::createCommandQueue(cl_context ctx,
 
 cl_int OpenCLAdapter::releaseCommandQueue(cl_command_queue queue) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (queues_.erase(queue) == 0)
+  auto it = queues_.find(queue);
+  if (it == queues_.end())
     return CL_INVALID_COMMAND_QUEUE;
+
+  // Ensure any pending work on this queue is done before destruction
+  core::RuntimeEngine::instance().streamSynchronize(it->second.stream);
+  core::RuntimeEngine::instance().getDevice().destroyStream(it->second.stream);
+  queues_.erase(it);
   return CL_SUCCESS;
 }
 
@@ -193,10 +247,31 @@ cl_int OpenCLAdapter::enqueueWriteBuffer(cl_command_queue queue, cl_mem buffer,
   size_t allocSize = mm.getAllocationSize(buffer);
   if (offset > allocSize || size > (allocSize - offset))
     return CL_INVALID_VALUE;
-  void *base = mm.getPointer(buffer);
-  if (!base)
-    return CL_INVALID_MEM_OBJECT;
-  std::memcpy(static_cast<char *>(base) + offset, ptr, size);
+
+  StreamId stream = 0;
+  int priority = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stream = queues_[queue].stream;
+  }
+  (void)core::RuntimeEngine::instance().getDevice().getStreamPriority(stream,
+                                                                       priority);
+
+  // Submit async copy to preserve queue ordering semantics
+  auto fut = core::Scheduler::instance().submitStreamTask(
+      stream,
+      [=]() {
+    auto &mmLocal = core::RuntimeEngine::instance().getMemoryManager();
+    void *base = mmLocal.getPointer(buffer);
+    if (!base)
+      throw std::runtime_error("Invalid device buffer in enqueueWriteBuffer");
+    std::memcpy(static_cast<char *>(base) + offset, ptr, size);
+  },
+      priority);
+  if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    auto r = fut.get();
+    return (r == VGREResult::SUCCESS) ? CL_SUCCESS : CL_INVALID_VALUE;
+  }
   return CL_SUCCESS;
 }
 
@@ -218,10 +293,30 @@ cl_int OpenCLAdapter::enqueueReadBuffer(cl_command_queue queue, cl_mem buffer,
   size_t allocSize = mm.getAllocationSize(buffer);
   if (offset > allocSize || size > (allocSize - offset))
     return CL_INVALID_VALUE;
-  void *base = mm.getPointer(buffer);
-  if (!base)
-    return CL_INVALID_MEM_OBJECT;
-  std::memcpy(ptr, static_cast<char *>(base) + offset, size);
+
+  StreamId stream = 0;
+  int priority = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stream = queues_[queue].stream;
+  }
+  (void)core::RuntimeEngine::instance().getDevice().getStreamPriority(stream,
+                                                                       priority);
+
+  auto fut = core::Scheduler::instance().submitStreamTask(
+      stream,
+      [=]() {
+    auto &mmLocal = core::RuntimeEngine::instance().getMemoryManager();
+    void *base = mmLocal.getPointer(buffer);
+    if (!base)
+      throw std::runtime_error("Invalid device buffer in enqueueReadBuffer");
+    std::memcpy(ptr, static_cast<char *>(base) + offset, size);
+  },
+      priority);
+  if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    auto r = fut.get();
+    return (r == VGREResult::SUCCESS) ? CL_SUCCESS : CL_INVALID_VALUE;
+  }
   return CL_SUCCESS;
 }
 
@@ -472,23 +567,30 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
                         std::chrono::high_resolution_clock::now().time_since_epoch())
                         .count();
 
-  auto r = core::RuntimeEngine::instance().launchKernel(
-      kernelInfo.vgreKernelId, gridDim, blockDim, argPtrs.data());
+  StreamId stream = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto qit = queues_.find(queue);
+    if (qit == queues_.end()) {
+      return CL_INVALID_COMMAND_QUEUE;
+    }
+    stream = qit->second.stream;
+  }
 
-  uint64_t endT = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      std::chrono::high_resolution_clock::now().time_since_epoch())
-                      .count();
+  auto r = core::RuntimeEngine::instance().launchKernel(
+      kernelInfo.vgreKernelId, gridDim, blockDim, argPtrs.data(), 0, stream);
 
   if (event) {
     std::lock_guard<std::mutex> lock(mutex_);
     cl_event eid = nextId_++;
     EventInfo ei;
     ei.queue = queue;
+    ei.stream = stream;
     ei.timeQueued = startT;
     ei.timeSubmit = startT;
     ei.timeStart = startT;
-    ei.timeEnd = endT;
-    ei.completed = true;
+    ei.timeEnd = 0;
+    ei.completed = false;
     events_[eid] = ei;
     *event = eid;
   }
@@ -508,11 +610,26 @@ cl_int OpenCLAdapter::releaseKernel(cl_kernel_handle kernel) {
 // ── Events & Profiling ─────────────────────────────────────────────────
 cl_int OpenCLAdapter::waitForEvents(cl_uint numEvents, const cl_event *eventList) {
   if (numEvents > 0 && !eventList) return CL_INVALID_VALUE;
-  // Execution is currently synchronous, so events are already finished. 
-  // We just validate they exist.
-  std::lock_guard<std::mutex> lock(mutex_);
   for (cl_uint i = 0; i < numEvents; ++i) {
-    if (events_.find(eventList[i]) == events_.end()) return CL_INVALID_VALUE;
+    StreamId stream = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      auto it = events_.find(eventList[i]);
+      if (it == events_.end()) return CL_INVALID_VALUE;
+      stream = it->second.stream;
+      if (it->second.completed) continue;
+    }
+    // Block until this stream's tasks finish
+    core::RuntimeEngine::instance().streamSynchronize(stream);
+    uint64_t endT = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::high_resolution_clock::now().time_since_epoch())
+                        .count();
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it2 = events_.find(eventList[i]);
+    if (it2 != events_.end()) {
+      it2->second.timeEnd = endT;
+      it2->second.completed = true;
+    }
   }
   return CL_SUCCESS;
 }
@@ -554,8 +671,27 @@ cl_int OpenCLAdapter::finish(cl_command_queue queue) {
     if (queues_.find(queue) == queues_.end())
       return CL_INVALID_COMMAND_QUEUE;
   }
-  auto r = core::RuntimeEngine::instance().synchronize();
-  return (r == VGREResult::SUCCESS) ? CL_SUCCESS : CL_INVALID_COMMAND_QUEUE;
+  StreamId stream = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stream = queues_[queue].stream;
+  }
+  auto r = core::RuntimeEngine::instance().streamSynchronize(stream);
+  if (r != VGREResult::SUCCESS)
+    return CL_INVALID_COMMAND_QUEUE;
+
+  // Mark all events for this queue as completed
+  uint64_t endT = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::high_resolution_clock::now().time_since_epoch())
+                      .count();
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto &kv : events_) {
+    if (kv.second.queue == queue && !kv.second.completed) {
+      kv.second.timeEnd = endT;
+      kv.second.completed = true;
+    }
+  }
+  return CL_SUCCESS;
 }
 
 // ── Singleton ──────────────────────────────────────────────────────────────

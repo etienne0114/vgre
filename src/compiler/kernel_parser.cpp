@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <regex>
+#include <sstream>
 
 namespace vgre {
 namespace compiler {
@@ -92,7 +93,10 @@ std::vector<Token> KernelParser::tokenize(const std::string& source) {
                        word == "return"     || word == "if"      ||
                        word == "else"       || word == "for"     ||
                        word == "while"      || word == "const"   ||
-                       word == "kernel") {
+                       word == "kernel"     || word == "struct"  ||
+                       word == "template"   || word == "typename"||
+                       word == "class"      || word == "typedef"||
+                       word == "enum"       || word == "union") {
                 tok.type = TokenType::KEYWORD;
             } else if (word == "float"  || word == "double" ||
                        word == "int"    || word == "long"   ||
@@ -409,8 +413,8 @@ ArgType KernelParser::mapType(const std::string& typeName, bool isPointer,
         return ArgType::UINT32;
     }
 
-    recognized = false;
-    return ArgType::INT32;
+    recognized = true;
+    return ArgType::STRUCT;
 }
 
 // ── Find built-in variables ────────────────────────────────────────────────
@@ -459,12 +463,45 @@ VGREResult KernelParser::parse(const std::string& name,
     outIR.irCode = "";  // Will be filled by LLVMTranslationEngine
 
     outIR.argTypes.clear();
+    outIR.argTypeNames.clear();
+    outIR.argSizes.clear();
     for (const auto& p : params) {
         outIR.argTypes.push_back(p.argType);
+        outIR.argTypeNames.push_back(p.typeName);
+        if (p.argType == ArgType::STRUCT) {
+            size_t sz = computeStructSize(p.typeName, source);
+            outIR.argSizes.push_back(sz);
+        } else {
+            outIR.argSizes.push_back(0); // 0 = deduce from ArgType
+        }
     }
 
     // Check for shared memory usage
     outIR.usesSharedMem = (source.find("__shared__") != std::string::npos);
+    outIR.usesSyncthreads = (source.find("__syncthreads()") != std::string::npos);
+
+    // Estimate instruction and memory count
+    uint64_t estOps = 0;
+    uint64_t estMem = 0;
+    for (size_t k = 0; k < tokens.size(); ++k) {
+        const auto& tok = tokens[k];
+        if (tok.type == TokenType::OPERATOR) {
+            if (tok.value == "+" || tok.value == "-" || tok.value == "*" || tok.value == "/" ||
+                tok.value == "&" || tok.value == "|" || tok.value == "^" || tok.value == "!" ||
+                tok.value == "=" || tok.value == "<" || tok.value == ">") {
+                estOps += 1;
+            }
+            if (tok.value == "*" && k + 1 < tokens.size() && tokens[k+1].type == TokenType::IDENTIFIER) {
+                if (k > 0 && tokens[k-1].type != TokenType::TYPE && tokens[k-1].type != TokenType::KEYWORD) {
+                    estMem += 4;
+                }
+            }
+        } else if (tok.type == TokenType::LBRACKET) {
+            estMem += 4;
+        }
+    }
+    outIR.estimatedInstructionCount = estOps > 0 ? estOps : 10;
+    outIR.estimatedMemoryAccessCount = estMem > 0 ? estMem : 8;
 
     auto builtins = findBuiltinVars(body);
     VGRE_LOG_INFO("KernelParser",
@@ -473,6 +510,111 @@ VGREResult KernelParser::parse(const std::string& name,
                   std::to_string(builtins.size()) + " built-in vars");
 
     return VGREResult::SUCCESS;
+}
+
+// ── Extract struct body from source ────────────────────────────────────────
+bool KernelParser::extractStructBody(const std::string& typeName,
+                                     const std::string& source,
+                                     std::string& outBody) {
+    // Search for "struct TypeName {" pattern
+    std::string pattern = "struct\\s+" + typeName + "\\s*\\{";
+    std::regex re(pattern);
+    std::smatch m;
+    if (!std::regex_search(source, m, re)) {
+        return false;
+    }
+
+    // Find the matching closing brace
+    size_t braceStart = static_cast<size_t>(m.position()) + m.length() - 1;
+    int depth = 1;
+    size_t pos = braceStart + 1;
+    while (pos < source.size() && depth > 0) {
+        if (source[pos] == '{') ++depth;
+        if (source[pos] == '}') --depth;
+        ++pos;
+    }
+
+    if (depth != 0) return false;
+
+    outBody = source.substr(braceStart + 1, pos - braceStart - 2);
+    return true;
+}
+
+// ── Compute struct size from its member declarations ───────────────────────
+size_t KernelParser::computeStructSize(const std::string& typeName,
+                                       const std::string& fullSource) const {
+    std::string body;
+    if (!extractStructBody(typeName, fullSource, body)) {
+        // Cannot parse struct definition; use a conservative default
+        VGRE_LOG_INFO("KernelParser",
+                      "Cannot find struct definition for '" + typeName +
+                      "', using opaque size hint");
+        return 0;
+    }
+
+    // Parse semicolon-delimited member declarations and sum sizes
+    size_t totalSize = 0;
+    std::istringstream ss(body);
+    std::string decl;
+    while (std::getline(ss, decl, ';')) {
+        auto trimmed = normalizeTypeName(decl);
+        if (trimmed.empty()) continue;
+
+        // Determine base type size
+        size_t memberSize = 0;
+        if (trimmed.find("double") != std::string::npos ||
+            trimmed.find("int64_t") != std::string::npos ||
+            trimmed.find("uint64_t") != std::string::npos ||
+            trimmed.find("long long") != std::string::npos ||
+            trimmed.find("size_t") != std::string::npos) {
+            memberSize = 8;
+        } else if (trimmed.find("float") != std::string::npos ||
+                   trimmed.find("int32_t") != std::string::npos ||
+                   trimmed.find("uint32_t") != std::string::npos ||
+                   trimmed.find("int") != std::string::npos ||
+                   trimmed.find("unsigned") != std::string::npos) {
+            memberSize = 4;
+        } else if (trimmed.find("int16_t") != std::string::npos ||
+                   trimmed.find("uint16_t") != std::string::npos ||
+                   trimmed.find("short") != std::string::npos) {
+            memberSize = 2;
+        } else if (trimmed.find("char") != std::string::npos ||
+                   trimmed.find("int8_t") != std::string::npos ||
+                   trimmed.find("uint8_t") != std::string::npos ||
+                   trimmed.find("bool") != std::string::npos) {
+            memberSize = 1;
+        } else if (trimmed.find('*') != std::string::npos) {
+            memberSize = sizeof(void*);
+        } else {
+            // Nested struct or unknown — assume 4 bytes
+            memberSize = 4;
+        }
+
+        // Check for array syntax: e.g. "float data[16]"
+        auto bracket = trimmed.find('[');
+        if (bracket != std::string::npos) {
+            auto closeBracket = trimmed.find(']', bracket);
+            if (closeBracket != std::string::npos) {
+                std::string countStr = trimmed.substr(
+                    bracket + 1, closeBracket - bracket - 1);
+                int count = 1;
+                try { count = std::stoi(countStr); } catch (...) {}
+                if (count > 0) memberSize *= static_cast<size_t>(count);
+            }
+        }
+
+        totalSize += memberSize;
+    }
+
+    // Apply alignment padding (round up to 8-byte boundary)
+    if (totalSize > 0 && totalSize % 8 != 0) {
+        totalSize = (totalSize / 8 + 1) * 8;
+    }
+
+    VGRE_LOG_INFO("KernelParser",
+                  "Computed struct '" + typeName + "' size: " +
+                  std::to_string(totalSize) + " bytes");
+    return totalSize;
 }
 
 } // namespace compiler

@@ -9,6 +9,7 @@
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/advanced/ipc_manager.h"
+#include "vgre/advanced/runtime_profiler.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/vgre_workload_engine.h"
 #include "vgre/common/error_codes.h"
@@ -18,10 +19,15 @@
 #include "vgre/core/scheduler.h"
 #include "vgre/core/virtual_gpu_device.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <limits>
+#include <mutex>
+#include <sstream>
+#include <vector>
 
 // ── Helper: convert VGREResult to C status code ────────────────────────────
 static int to_status(vgre::VGREResult r) {
@@ -45,11 +51,86 @@ static int to_status(vgre::VGREResult r) {
   }
 }
 
+static uint64_t telemetry_now_ms() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+}
+
+static std::string json_escape(const std::string &s) {
+  std::string out;
+  out.reserve(s.size());
+  for (char c : s) {
+    switch (c) {
+    case '\\':
+      out += "\\\\";
+      break;
+    case '"':
+      out += "\\\"";
+      break;
+    case '\n':
+      out += "\\n";
+      break;
+    case '\r':
+      out += "\\r";
+      break;
+    case '\t':
+      out += "\\t";
+      break;
+    default:
+      out += c;
+      break;
+    }
+  }
+  return out;
+}
+
 static int require_initialized() {
   if (!vgre::core::RuntimeEngine::instance().isInitialized()) {
     return VGRE_ERROR_NOT_INIT;
   }
   return VGRE_SUCCESS;
+}
+
+static bool to_arg_types(const uint8_t *types, int count,
+                         std::vector<vgre::ArgType> &out) {
+  out.clear();
+  if (count < 0)
+    return false;
+  out.reserve(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    uint8_t t = types ? types[i] : VGRE_ARG_POINTER;
+    switch (t) {
+    case VGRE_ARG_POINTER:
+      out.push_back(vgre::ArgType::POINTER);
+      break;
+    case VGRE_ARG_INT32:
+      out.push_back(vgre::ArgType::INT32);
+      break;
+    case VGRE_ARG_INT64:
+      out.push_back(vgre::ArgType::INT64);
+      break;
+    case VGRE_ARG_FLOAT32:
+      out.push_back(vgre::ArgType::FLOAT32);
+      break;
+    case VGRE_ARG_FLOAT64:
+      out.push_back(vgre::ArgType::FLOAT64);
+      break;
+    case VGRE_ARG_UINT32:
+      out.push_back(vgre::ArgType::UINT32);
+      break;
+    case VGRE_ARG_UINT64:
+      out.push_back(vgre::ArgType::UINT64);
+      break;
+    case VGRE_ARG_STRUCT:
+      out.push_back(vgre::ArgType::STRUCT);
+      break;
+    default:
+      return false;
+    }
+  }
+  return true;
 }
 
 // ── Initialization ─────────────────────────────────────────────────────────
@@ -255,8 +336,66 @@ int vgre_register_kernel(const char *name, const char *source,
   if (r != vgre::VGREResult::SUCCESS)
     return to_status(r);
 
+  // Broadcast to cluster if enabled
+  vgre::advanced::TCPClusterManager::instance().broadcastKernelRegistration(kid, std::string(name), std::string(source));
+
   *out_kernel_id = kid;
   return VGRE_SUCCESS;
+}
+
+int vgre_module_load(void **module, const char *path) {
+  if (!module || !path)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+
+  auto r = vgre::core::RuntimeEngine::instance().loadModule(path, *module);
+  return to_status(r);
+}
+
+int vgre_module_get_function(uint64_t *kernel, void *module, const char *name) {
+  if (!kernel || !module || !name)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+
+  vgre::KernelId kid;
+  auto r = vgre::core::RuntimeEngine::instance().getKernelFromModule(
+      module, name, kid);
+  if (r != vgre::VGREResult::SUCCESS)
+    return to_status(r);
+
+  *kernel = kid;
+  return VGRE_SUCCESS;
+}
+
+int vgre_module_get_global(void *module, const char *name, void **dptr,
+                           size_t *bytes) {
+  if (!module || !name || !dptr || !bytes)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+
+  void *addr = nullptr;
+  size_t size = 0;
+  auto r = vgre::core::RuntimeEngine::instance().getModuleGlobal(module, name,
+                                                                 addr, size);
+  if (r != vgre::VGREResult::SUCCESS)
+    return to_status(r);
+
+  *dptr = addr;
+  *bytes = size;
+  return VGRE_SUCCESS;
+}
+
+int vgre_module_unload(void *module) {
+  if (!module)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+
+  auto r = vgre::core::RuntimeEngine::instance().unloadModule(module);
+  return to_status(r);
 }
 
 int vgre_launch_kernel(uint64_t kernel_id, const uint32_t grid_dim[3],
@@ -335,6 +474,153 @@ int vgre_stream_destroy(uint64_t stream_id) {
   return to_status(r);
 }
 
+/* ── CUDA Graphs (DAG) ──────────────────────────────────────────────────────
+ */
+int vgre_graphCreate(uint64_t *out_graph) {
+  if (!out_graph)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  vgre::GraphId gid = 0;
+  auto r = vgre::core::RuntimeEngine::instance().graphCreate(gid);
+  if (r != vgre::VGREResult::SUCCESS)
+    return to_status(r);
+  *out_graph = gid;
+  return VGRE_SUCCESS;
+}
+
+int vgre_graphDestroy(uint64_t graph) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  auto r = vgre::core::RuntimeEngine::instance().graphDestroy(
+      static_cast<vgre::GraphId>(graph));
+  return to_status(r);
+}
+
+int vgre_graphInstantiate(uint64_t graph, uint64_t *out_exec) {
+  if (!out_exec)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  vgre::GraphExecId exec = 0;
+  auto r = vgre::core::RuntimeEngine::instance().graphInstantiate(
+      static_cast<vgre::GraphId>(graph), exec);
+  if (r != vgre::VGREResult::SUCCESS)
+    return to_status(r);
+  *out_exec = exec;
+  return VGRE_SUCCESS;
+}
+
+int vgre_graphExecDestroy(uint64_t exec) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  auto r = vgre::core::RuntimeEngine::instance().graphExecDestroy(
+      static_cast<vgre::GraphExecId>(exec));
+  return to_status(r);
+}
+
+int vgre_graphLaunch(uint64_t exec, uint64_t stream) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  auto r = vgre::core::RuntimeEngine::instance().graphLaunch(
+      static_cast<vgre::GraphExecId>(exec),
+      static_cast<vgre::StreamId>(stream));
+  return to_status(r);
+}
+
+int vgre_graphAddKernelNodeEx(uint64_t graph, uint64_t kernel_id,
+                              const char *name, const uint32_t grid_dim[3],
+                              const uint32_t block_dim[3], void **args,
+                              const uint8_t *arg_types, int num_args,
+                              const uint64_t *deps, int num_deps,
+                              uint64_t *out_node_id) {
+  if (!name || !grid_dim || !block_dim || num_args < 0 || num_deps < 0 ||
+      !out_node_id) {
+    return VGRE_ERROR_INVALID_VALUE;
+  }
+  if (num_args > 0 && !args)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (num_deps > 0 && !deps)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+
+  std::vector<vgre::ArgType> argTypes;
+  if (!to_arg_types(arg_types, num_args, argTypes))
+    return VGRE_ERROR_INVALID_VALUE;
+  std::vector<uint64_t> depList;
+  depList.assign(deps, deps + num_deps);
+
+  vgre::dim3 gd(grid_dim[0], grid_dim[1], grid_dim[2]);
+  vgre::dim3 bd(block_dim[0], block_dim[1], block_dim[2]);
+  uint64_t nodeId = 0;
+  auto r = vgre::core::RuntimeEngine::instance().graphAddKernelNode(
+      static_cast<vgre::GraphId>(graph),
+      static_cast<vgre::KernelId>(kernel_id), std::string(name), gd, bd, args,
+      argTypes, depList, nodeId);
+  if (r != vgre::VGREResult::SUCCESS)
+    return to_status(r);
+  *out_node_id = nodeId;
+  return VGRE_SUCCESS;
+}
+
+int vgre_graphAddMemcpyNodeEx(uint64_t graph, void *dst, void *src,
+                              size_t count, int kind, const uint64_t *deps,
+                              int num_deps, uint64_t *out_node_id) {
+  if (!dst || !src || count == 0 || num_deps < 0 || !out_node_id)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (num_deps > 0 && !deps)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  std::vector<uint64_t> depList;
+  depList.assign(deps, deps + num_deps);
+  uint64_t nodeId = 0;
+  auto r = vgre::core::RuntimeEngine::instance().graphAddMemcpyNode(
+      static_cast<vgre::GraphId>(graph), dst, src, count, kind, depList,
+      nodeId);
+  if (r != vgre::VGREResult::SUCCESS)
+    return to_status(r);
+  *out_node_id = nodeId;
+  return VGRE_SUCCESS;
+}
+
+int vgre_graphAddDependency(uint64_t graph, uint64_t node_id,
+                            uint64_t depends_on) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  auto r = vgre::core::RuntimeEngine::instance().graphAddDependency(
+      static_cast<vgre::GraphId>(graph), node_id, depends_on);
+  return to_status(r);
+}
+
+int vgre_graphUpdateKernelNode(uint64_t graph, uint64_t node_id, void **args,
+                               const uint8_t *arg_types, int num_args) {
+  if (num_args < 0)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (num_args > 0 && !args)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  std::vector<vgre::ArgType> argTypes;
+  if (!to_arg_types(arg_types, num_args, argTypes))
+    return VGRE_ERROR_INVALID_VALUE;
+  auto r = vgre::core::RuntimeEngine::instance().graphUpdateKernelNode(
+      static_cast<vgre::GraphId>(graph), node_id, args, argTypes);
+  return to_status(r);
+}
+
+int vgre_graphUpdateMemcpyNode(uint64_t graph, uint64_t node_id, void *dst,
+                               void *src, size_t count, int kind) {
+  if (!dst || !src || count == 0)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  auto r = vgre::core::RuntimeEngine::instance().graphUpdateMemcpyNode(
+      static_cast<vgre::GraphId>(graph), node_id, dst, src, count, kind);
+  return to_status(r);
+}
+
 /* ── Telemetry ──────────────────────────────────────────────────────────────
  */
 
@@ -347,6 +633,7 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
 
   auto &ae = vgre::advanced::AdaptiveExecutionEngine::instance();
   auto &mm = vgre::core::RuntimeEngine::instance().getMemoryManager();
+  auto &profiler = vgre::advanced::RuntimeProfiler::instance();
 
   telemetry->timestamp = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -403,9 +690,18 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
   telemetry->page_faults_per_sec = static_cast<double>(mm.getPageFaultRate());
 
   // Device Stats
-  telemetry->active_kernels = static_cast<int64_t>(ae.getActiveKernelCount());
+  auto &sched = vgre::core::Scheduler::instance();
+  auto pendingTasks = sched.getPendingTasks();
+  telemetry->active_kernels =
+      pendingTasks > 0 ? static_cast<int64_t>(pendingTasks)
+                       : static_cast<int64_t>(ae.getActiveKernelCount());
+  auto threadCount = sched.getThreadCount();
   telemetry->active_threads =
-      static_cast<int64_t>(vgre::core::Scheduler::instance().getThreadCount());
+      pendingTasks > 0
+          ? static_cast<int64_t>(
+                std::min<uint64_t>(pendingTasks,
+                                   static_cast<uint64_t>(threadCount)))
+          : 0;
 
   // Real device properties
   auto &dev = vgre::core::RuntimeEngine::instance().getDevice();
@@ -417,6 +713,100 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
   telemetry->ecc_enabled = is_intel ? 0 : (props.major >= 7 ? 1 : 0);
 
   telemetry->avg_kernel_latency_ms = ae.getAvgLatencyMs();
+
+  // If runtime profiler is enabled, prefer measured averages.
+  if (profiler.isEnabled()) {
+    auto stats = profiler.getAllStats();
+    if (!stats.empty()) {
+      double totalInv = 0.0;
+      double gflops = 0.0;
+      double bw = 0.0;
+      double avgMs = 0.0;
+      for (const auto &s : stats) {
+        totalInv += static_cast<double>(s.invocations);
+        gflops += s.avgGflops * static_cast<double>(s.invocations);
+        bw += s.avgThroughputGBps * static_cast<double>(s.invocations);
+        avgMs += s.avgTimeMs * static_cast<double>(s.invocations);
+      }
+      if (totalInv > 0.0) {
+        telemetry->gflops = gflops / totalInv;
+        telemetry->memory_bandwidth_gbps = bw / totalInv;
+        telemetry->avg_kernel_latency_ms = avgMs / totalInv;
+        telemetry->compute_utilization =
+            (telemetry->max_gflops > 0.0)
+                ? (telemetry->gflops / telemetry->max_gflops) * 100.0
+                : 0.0;
+        if (telemetry->compute_utilization < 0.0)
+          telemetry->compute_utilization = 0.0;
+        if (telemetry->compute_utilization > 100.0)
+          telemetry->compute_utilization = 100.0;
+
+        telemetry->memory_bus_utilization =
+            (telemetry->max_memory_bandwidth_gbps > 0.0)
+                ? (telemetry->memory_bandwidth_gbps /
+                   telemetry->max_memory_bandwidth_gbps) *
+                      100.0
+                : 0.0;
+        if (telemetry->memory_bus_utilization < 0.0)
+          telemetry->memory_bus_utilization = 0.0;
+        if (telemetry->memory_bus_utilization > 100.0)
+          telemetry->memory_bus_utilization = 100.0;
+      }
+    }
+  }
+
+  // Smooth jitter for dashboard consumption (EMA).
+  // Keeps UI stable without hiding trend direction.
+  {
+    static std::mutex s_telemetry_mutex;
+    static bool s_has_prev = false;
+    static double s_gflops = 0.0;
+    static double s_bw = 0.0;
+    static double s_latency = 0.0;
+    static uint64_t s_last_ts = 0;
+
+    std::lock_guard<std::mutex> lock(s_telemetry_mutex);
+    const uint64_t ts = telemetry->timestamp;
+    const double alpha = 0.35;
+
+    if (!s_has_prev) {
+      s_gflops = telemetry->gflops;
+      s_bw = telemetry->memory_bandwidth_gbps;
+      s_latency = telemetry->avg_kernel_latency_ms;
+      s_last_ts = ts;
+      s_has_prev = true;
+    } else if (ts >= s_last_ts) {
+      s_gflops = s_gflops * (1.0 - alpha) + telemetry->gflops * alpha;
+      s_bw = s_bw * (1.0 - alpha) + telemetry->memory_bandwidth_gbps * alpha;
+      s_latency =
+          s_latency * (1.0 - alpha) + telemetry->avg_kernel_latency_ms * alpha;
+      s_last_ts = ts;
+    }
+
+    telemetry->gflops = s_gflops;
+    telemetry->memory_bandwidth_gbps = s_bw;
+    telemetry->avg_kernel_latency_ms = s_latency;
+
+    telemetry->compute_utilization =
+        (telemetry->max_gflops > 0.0)
+            ? (telemetry->gflops / telemetry->max_gflops) * 100.0
+            : 0.0;
+    if (telemetry->compute_utilization < 0.0)
+      telemetry->compute_utilization = 0.0;
+    if (telemetry->compute_utilization > 100.0)
+      telemetry->compute_utilization = 100.0;
+
+    telemetry->memory_bus_utilization =
+        (telemetry->max_memory_bandwidth_gbps > 0.0)
+            ? (telemetry->memory_bandwidth_gbps /
+               telemetry->max_memory_bandwidth_gbps) *
+                  100.0
+            : 0.0;
+    if (telemetry->memory_bus_utilization < 0.0)
+      telemetry->memory_bus_utilization = 0.0;
+    if (telemetry->memory_bus_utilization > 100.0)
+      telemetry->memory_bus_utilization = 100.0;
+  }
   telemetry->device_temperature =
       static_cast<double>(ae.getDeviceTemperature());
   telemetry->background_compute_active = static_cast<int64_t>(
@@ -496,6 +886,65 @@ void vgre_free_logs(char **buffer, int count) {
   free(buffer);
 }
 
+int vgre_get_profiler_json(char **out_json, int top_n) {
+  if (!out_json)
+    return VGRE_ERROR_INVALID_VALUE;
+
+  auto &profiler = vgre::advanced::RuntimeProfiler::instance();
+  if (!profiler.isEnabled()) {
+    *out_json = nullptr;
+    return VGRE_SUCCESS;
+  }
+
+  auto stats = profiler.getAllStats();
+  if (top_n > 0 && static_cast<size_t>(top_n) < stats.size()) {
+    stats.resize(static_cast<size_t>(top_n));
+  }
+
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(4);
+  oss << "{\n";
+  oss << "  \"timestamp_ms\": " << telemetry_now_ms() << ",\n";
+  oss << "  \"total_kernels\": " << stats.size() << ",\n";
+  oss << "  \"top_kernels\": [\n";
+
+  for (size_t i = 0; i < stats.size(); ++i) {
+    const auto &s = stats[i];
+    oss << "    {\n";
+    oss << "      \"name\": \"" << json_escape(s.kernelName) << "\",\n";
+    oss << "      \"invocations\": " << s.invocations << ",\n";
+    oss << "      \"total_time_ms\": " << s.totalTimeMs << ",\n";
+    oss << "      \"avg_time_ms\": " << s.avgTimeMs << ",\n";
+    oss << "      \"min_time_ms\": " << s.minTimeMs << ",\n";
+    oss << "      \"max_time_ms\": " << s.maxTimeMs << ",\n";
+    oss << "      \"avg_throughput_gbps\": " << s.avgThroughputGBps << ",\n";
+    oss << "      \"avg_gflops\": " << s.avgGflops << "\n";
+    oss << "    }" << (i + 1 < stats.size() ? "," : "") << "\n";
+  }
+  oss << "  ]\n";
+  oss << "}\n";
+
+  const std::string json = oss.str();
+  char *buf = static_cast<char *>(malloc(json.size() + 1));
+  if (!buf)
+    return VGRE_ERROR_OUT_OF_MEMORY;
+  std::memcpy(buf, json.c_str(), json.size() + 1);
+  *out_json = buf;
+  return VGRE_SUCCESS;
+}
+
+void vgre_free_string(char *str) {
+  if (str)
+    free(str);
+}
+
+int vgre_set_profiler_enabled(int enabled) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  vgre::advanced::RuntimeProfiler::instance().setEnabled(enabled != 0);
+  return VGRE_SUCCESS;
+}
+
 int vgre_set_background_compute(int enabled) {
   if (int s = require_initialized(); s != VGRE_SUCCESS)
     return s;
@@ -510,6 +959,63 @@ int vgre_set_service_mode(int is_master) {
     return VGRE_ERROR_IO;
   }
   return VGRE_SUCCESS;
+}
+
+int vgre_set_block_threads(int enabled) {
+  const char *value = enabled ? "1" : "0";
+#if defined(_WIN32)
+  if (_putenv_s("VGRE_BLOCK_THREADS", value) != 0) {
+    return VGRE_ERROR_IO;
+  }
+#else
+  if (setenv("VGRE_BLOCK_THREADS", value, 1) != 0) {
+    return VGRE_ERROR_IO;
+  }
+#endif
+  VGRE_LOG_INFO("VGRE", std::string("VGRE_BLOCK_THREADS set to ") + value);
+  return VGRE_SUCCESS;
+}
+
+// ── JIT Telemetry Reporting ───────────────────────────────────────────────
+
+extern "C" void vgre_jit_report_flops(uint64_t flops) {
+  vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(flops);
+}
+
+extern "C" void vgre_jit_report_memory(uint64_t bytes) {
+  vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytes);
+}
+
+// ── Memory Pool C-API ─────────────────────────────────────────────────────
+
+int vgre_pool_create(uint64_t *out_pool, size_t block_size) {
+  if (!out_pool) return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS) return s;
+  auto r = vgre::core::MemoryManager::instance().createPool(*out_pool, block_size);
+  return to_status(r);
+}
+
+int vgre_pool_alloc(uint64_t pool, size_t size, void **out_ptr) {
+  if (!out_ptr || size == 0) return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS) return s;
+  vgre::MemoryHandle handle;
+  auto r = vgre::core::MemoryManager::instance().allocateFromPool(pool, size, handle);
+  if (r != vgre::VGREResult::SUCCESS) return to_status(r);
+  *out_ptr = handle;
+  return VGRE_SUCCESS;
+}
+
+int vgre_pool_free(uint64_t pool, void *ptr) {
+  if (!ptr) return VGRE_SUCCESS;
+  if (int s = require_initialized(); s != VGRE_SUCCESS) return s;
+  auto r = vgre::core::MemoryManager::instance().freeToPool(pool, ptr);
+  return to_status(r);
+}
+
+int vgre_pool_destroy(uint64_t pool) {
+  if (int s = require_initialized(); s != VGRE_SUCCESS) return s;
+  auto r = vgre::core::MemoryManager::instance().destroyPool(pool);
+  return to_status(r);
 }
 
 // ── Version Info ───────────────────────────────────────────────────────────
