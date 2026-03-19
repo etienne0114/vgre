@@ -183,6 +183,47 @@ void Scheduler::tryProcessStream(StreamId stream) {
   cv_.notify_all();
 }
 
+std::future<VGREResult>
+Scheduler::submitConcurrentTask(std::function<void()> taskFn, int priority) {
+  if (!taskFn) {
+    std::promise<VGREResult> p;
+    p.set_value(VGREResult::ERROR_INVALID_VALUE);
+    return p.get_future();
+  }
+  if (shutdown_.load()) {
+    std::promise<VGREResult> p;
+    p.set_value(VGREResult::ERROR_NOT_INITIALIZED);
+    return p.get_future();
+  }
+
+  auto node = std::make_shared<StreamTaskNode>();
+  node->task = std::move(taskFn);
+  auto future = node->promise.get_future();
+
+  WorkItem item;
+  item.streamId = 0;      // No stream association
+  item.priority = priority;
+  item.execute = [node]() {
+    try {
+      if (node->task) {
+        node->task();
+      }
+      node->promise.set_value(VGREResult::SUCCESS);
+    } catch (...) {
+      node->promise.set_value(VGREResult::ERROR_LAUNCH_FAILURE);
+    }
+  };
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.push(std::move(item));
+    pending_++;
+  }
+  cv_.notify_all();
+
+  return future;
+}
+
 // ── Control ────────────────────────────────────────────────────────────────
 void Scheduler::waitStream(StreamId stream) {
   std::unique_lock<std::mutex> lock(mutex_);
@@ -193,6 +234,15 @@ void Scheduler::waitStream(StreamId stream) {
     auto &sq = *it->second;
     return !sq.isProcessing && sq.pendingTasks.empty();
   });
+}
+
+bool Scheduler::isStreamIdle(StreamId stream) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = streamQueues_.find(stream);
+  if (it == streamQueues_.end())
+    return true;
+  auto &sq = *it->second;
+  return !sq.isProcessing && sq.pendingTasks.empty();
 }
 
 // ── Control ────────────────────────────────────────────────────────────────

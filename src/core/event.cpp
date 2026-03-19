@@ -1,4 +1,6 @@
 #include "vgre/core/event.h"
+#include "vgre/core/runtime_engine.h"
+#include "vgre/core/virtual_gpu_device.h"
 #include "vgre/core/scheduler.h"
 
 namespace vgre {
@@ -22,11 +24,14 @@ VGREResult Event::record(StreamId stream) {
   };
 
   VGREResult res;
+  int priority = 0;
+  (void)vgre::core::RuntimeEngine::instance().getDevice().getStreamPriority(
+      stream, priority);
   // Submit the task to the given stream via the Scheduler singleton.
   // The future returned by submitStreamTask isn't directly the event future,
   // we care about the inner lambda executing.
   try {
-    auto fut = Scheduler::instance().submitStreamTask(stream, task);
+    auto fut = Scheduler::instance().submitStreamTask(stream, task, priority);
     if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
       res = fut.get();
     } else {

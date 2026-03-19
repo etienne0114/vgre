@@ -176,8 +176,9 @@ void VirtualGPUDevice::detectHardware() {
       std::sscanf(line.c_str(), "MemAvailable: %zu", &availableKb);
     }
   }
-  // Use 90% of available memory if detected, otherwise fallback to 75% of total
-  size_t vram = (availableKb > 0) ? (availableKb * 1024 * 9) / 10 : (totalKb * 1024 * 3) / 4;
+  // Use 100% of available memory if detected, otherwise conservatively use 50% of total host memory.
+  // This avoids non-authoritative "multiplier" heuristics while protecting host stability.
+  size_t vram = (availableKb > 0) ? (availableKb * 1024) : (totalKb > 0 ? (totalKb * 1024 / 2) : 1024ULL * 1024 * 1024);
   size_t cap = 32ULL * 1024 * 1024 * 1024;
   props_.totalGlobalMem = std::min(vram, cap);
 #endif
@@ -440,6 +441,24 @@ VGREResult VirtualGPUDevice::synchronizeDevice() {
     stream.state = StreamState::IDLE;
   }
   VGRE_LOG_DEBUG("VirtualGPUDevice", "Device synchronized");
+  return VGREResult::SUCCESS;
+}
+
+VGREResult VirtualGPUDevice::getStreamPriority(StreamId id,
+                                               int &outPriority) const {
+  if (id == 0) {
+    outPriority = 0;
+    return VGREResult::SUCCESS;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!contextActive_) {
+    return VGREResult::ERROR_NOT_INITIALIZED;
+  }
+  auto it = streams_.find(id);
+  if (it == streams_.end()) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+  outPriority = it->second.priority;
   return VGREResult::SUCCESS;
 }
 

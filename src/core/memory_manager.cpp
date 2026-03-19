@@ -279,6 +279,93 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
   return VGREResult::SUCCESS;
 }
 
+VGREResult MemoryManager::free(MemoryHandle handle) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = allocations_.find(handle);
+  if (it == allocations_.end())
+    return VGREResult::ERROR_INVALID_VALUE;
+
+  size_t freed = it->second.size;
+  if (it->second.isManaged) {
+    unregisterManagedRegion(it->second.ptr);
+#if defined(_WIN32)
+    VirtualFree(it->second.ptr, 0, MEM_RELEASE);
+#else
+    munmap(it->second.ptr, it->second.size);
+#endif
+  } else {
+    alignedFree(it->second.ptr);
+  }
+  allocations_.erase(it);
+  usedMemory_.fetch_sub(freed, std::memory_order_acq_rel);
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, DeviceId deviceId) {
+  (void)deviceId;
+  if (!ptr || count == 0) return VGREResult::SUCCESS;
+
+#if defined(__linux__) || defined(__APPLE__)
+  // Align pointer to page boundary as required by madvise
+  long pageSize = sysconf(_SC_PAGESIZE);
+  if (pageSize <= 0) pageSize = 4096;
+  
+  uintptr_t pBase = reinterpret_cast<uintptr_t>(ptr);
+  uintptr_t pAligned = pBase & ~(pageSize - 1);
+  size_t alignedCount = count + (pBase - pAligned);
+  
+  int madvFlags = 0;
+  // cudaMemAdviseSetReadMostly = 1, cudaMemAdviseUnsetReadMostly = 2
+  // cudaMemAdviseSetPreferredLocation = 3, cudaMemAdviseUnsetPreferredLocation = 4
+  // cudaMemAdviseSetAccessedBy = 5, cudaMemAdviseUnsetAccessedBy = 6
+  switch (advice) {
+      case 1: // SetReadMostly -> Random/Read-only behavior
+          madvFlags = MADV_RANDOM;
+          break;
+      case 2: // UnsetReadMostly -> Back to default
+          madvFlags = MADV_NORMAL; 
+          break;
+      case 3: // SetPreferredLocation -> Prefetch/Locate
+      case 5: // SetAccessedBy -> Expected access
+          madvFlags = MADV_WILLNEED;
+          break;
+      case 4: // UnsetPreferredLocation
+      case 6: // UnsetAccessedBy
+          madvFlags = MADV_DONTNEED; 
+          break;
+  }
+  
+  if (madvFlags != 0) {
+      int ret = ::madvise(reinterpret_cast<void*>(pAligned), alignedCount, madvFlags);
+      if (ret != 0) {
+          VGRE_LOG_WARN("MemoryManager", "madvise failed for " + std::to_string(alignedCount) + " bytes: " + std::string(strerror(errno)));
+      } else {
+          VGRE_LOG_INFO("MemoryManager", "Applied physical madvise (" + std::to_string(madvFlags) + ") to " + std::to_string(alignedCount) + " bytes.");
+      }
+  }
+#endif
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::memPrefetchAsync(const void *ptr, size_t count, DeviceId dstDevice) {
+  (void)dstDevice;
+  if (!ptr || count == 0) return VGREResult::SUCCESS;
+
+  // Physically force page faults ahead of time on the CPU executor thread.
+  // This physically migrates pages into the active resident set before bulk kernel execution.
+  volatile const char *p = static_cast<volatile const char *>(ptr);
+  const size_t PAGE_SIZE = 4096;
+  for (size_t i = 0; i < count; i += PAGE_SIZE) {
+    char dummy = p[i];
+    (void)dummy;
+  }
+  // Fault the last byte just in case it crosses a boundary
+  char dummyLast = p[count - 1];
+  (void)dummyLast;
+
+  return VGREResult::SUCCESS;
+}
+
 VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
                                           DeviceId deviceId,
                                           unsigned int flags) {
@@ -364,50 +451,121 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
   }
 
   outHandle = ptr;
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandle &outHandle,
+                                           DeviceId deviceId,
+                                           unsigned int flags) {
+  if (!addr || size == 0)
+    return VGREResult::ERROR_INVALID_VALUE;
+  
+  // Align size to page boundary
+  size_t pageSize = 4096;
+#if defined(_WIN32)
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  pageSize = static_cast<size_t>(si.dwPageSize);
+#else
+  long ps = sysconf(_SC_PAGESIZE);
+  if (ps > 0) pageSize = static_cast<size_t>(ps);
+#endif
+  size_t alignedSize = (size + pageSize - 1) & ~(pageSize - 1);
+
+  // Check if address is aligned
+  if (reinterpret_cast<uintptr_t>(addr) & (pageSize - 1))
+      return VGREResult::ERROR_INVALID_VALUE;
+
+  // Reservation
+  size_t current = usedMemory_.load(std::memory_order_relaxed);
+  do {
+    if (current + alignedSize > poolSize_)
+      return VGREResult::ERROR_OUT_OF_MEMORY;
+  } while (!usedMemory_.compare_exchange_weak(current, current + alignedSize,
+                                               std::memory_order_acq_rel));
+
+#if defined(_WIN32)
+  DWORD protect = (flags == 2) ? PAGE_READWRITE : PAGE_NOACCESS;
+  void *ptr = VirtualAlloc(addr, alignedSize, MEM_COMMIT | MEM_RESERVE, protect);
+#else
+  int prot = (flags == 2) ? (PROT_READ | PROT_WRITE) : PROT_NONE;
+  // Use MAP_FIXED to force the specific address provided by the Master
+  void *ptr = mmap(addr, alignedSize, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+#endif
+
+  if (!ptr || ptr == (void*)-1 || ptr != addr) {
+    usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
+    VGRE_LOG_ERROR("MemoryManager", "Failed to allocate at specific address " + 
+                  std::to_string(reinterpret_cast<uintptr_t>(addr)));
+    return VGREResult::ERROR_OUT_OF_MEMORY;
+  }
+
+  Allocation alloc;
+  alloc.ptr = ptr;
+  alloc.size = alignedSize;
+  alloc.alignment = pageSize;
+  alloc.inUse = true;
+  alloc.isManaged = true;
+  alloc.isResidentOnHost = (flags == 2);
+  alloc.deviceId = deviceId;
+  alloc.attachmentFlags = flags;
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    allocations_[ptr] = alloc;
+  }
+
+  // Register in lock-free managed regions array for signal-safe lookup.
+  if (!registerManagedRegion(ptr, alignedSize)) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      allocations_.erase(ptr);
+    }
+#if defined(_WIN32)
+    VirtualFree(ptr, 0, MEM_RELEASE);
+#else
+    munmap(ptr, alignedSize);
+#endif
+    usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
+    return VGREResult::ERROR_OUT_OF_MEMORY;
+  }
+
+  outHandle = ptr;
 
   VGRE_LOG_INFO("MemoryManager",
-                "Allocated UVM Managed memory: " + std::to_string(alignedSize) +
+                "Allocated FIXED UVM Managed memory: " + std::to_string(alignedSize) +
                     " bytes at " +
                     std::to_string(reinterpret_cast<uintptr_t>(ptr)));
   return VGREResult::SUCCESS;
 }
 
-VGREResult MemoryManager::free(MemoryHandle handle) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = allocations_.find(handle);
-  if (it == allocations_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
-
-  size_t freed = it->second.size;
-  if (it->second.isManaged) {
-    unregisterManagedRegion(it->second.ptr);
-#if defined(_WIN32)
-    VirtualFree(it->second.ptr, 0, MEM_RELEASE);
-#else
-    munmap(it->second.ptr, it->second.size);
-#endif
-  } else {
-    alignedFree(it->second.ptr);
-  }
-  allocations_.erase(it);
-  usedMemory_ -= freed;
-  return VGREResult::SUCCESS;
-}
 
 VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
                                            size_t bytes) {
   if (!dst || !src || bytes == 0)
     return VGREResult::ERROR_INVALID_VALUE;
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = allocations_.find(dst);
+  
+  auto it = allocations_.end();
+  size_t offset = 0;
+  for (auto probe = allocations_.begin(); probe != allocations_.end(); ++probe) {
+      uint8_t* base = static_cast<uint8_t*>(probe->first);
+      uint8_t* target = static_cast<uint8_t*>(dst);
+      if (target >= base && target < base + probe->second.size) {
+          it = probe;
+          offset = target - base;
+          break;
+      }
+  }
+
   if (it == allocations_.end())
     return VGREResult::ERROR_INVALID_VALUE;
 
-  // Bounds check: prevent writing past the allocation
-  if (bytes > it->second.size) {
+  // Bounds check: prevent writing past the parent allocation
+  if (offset + bytes > it->second.size) {
     VGRE_LOG_ERROR("MemoryManager",
                    "H2D copy overflow: requested " + std::to_string(bytes) +
-                       " bytes but allocation is " +
+                       " bytes at offset " + std::to_string(offset) + " but allocation is " +
                        std::to_string(it->second.size) + " bytes");
     return VGREResult::ERROR_INVALID_VALUE;
   }
@@ -465,15 +623,27 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
   if (!dst || !src || bytes == 0)
     return VGREResult::ERROR_INVALID_VALUE;
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = allocations_.find(src);
+  
+  auto it = allocations_.end();
+  size_t offset = 0;
+  for (auto probe = allocations_.begin(); probe != allocations_.end(); ++probe) {
+      uint8_t* base = static_cast<uint8_t*>(probe->first);
+      uint8_t* target = static_cast<uint8_t*>(src);
+      if (target >= base && target < base + probe->second.size) {
+          it = probe;
+          offset = target - base;
+          break;
+      }
+  }
+
   if (it == allocations_.end())
     return VGREResult::ERROR_INVALID_VALUE;
 
-  // Bounds check: prevent reading past the allocation
-  if (bytes > it->second.size) {
+  // Bounds check: prevent reading past the parent allocation
+  if (offset + bytes > it->second.size) {
     VGRE_LOG_ERROR("MemoryManager",
                    "D2H copy overflow: requested " + std::to_string(bytes) +
-                       " bytes but allocation is " +
+                       " bytes at offset " + std::to_string(offset) + " but allocation is " +
                        std::to_string(it->second.size) + " bytes");
     return VGREResult::ERROR_INVALID_VALUE;
   }
@@ -529,17 +699,40 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
   if (!dst || !src || bytes == 0)
     return VGREResult::ERROR_INVALID_VALUE;
   std::lock_guard<std::mutex> lock(mutex_);
-  auto itDst = allocations_.find(dst);
-  auto itSrc = allocations_.find(src);
+  
+  auto itDst = allocations_.end();
+  size_t offsetDst = 0;
+  for (auto probe = allocations_.begin(); probe != allocations_.end(); ++probe) {
+      uint8_t* base = static_cast<uint8_t*>(probe->first);
+      uint8_t* target = static_cast<uint8_t*>(dst);
+      if (target >= base && target < base + probe->second.size) {
+          itDst = probe;
+          offsetDst = target - base;
+          break;
+      }
+  }
+
+  auto itSrc = allocations_.end();
+  size_t offsetSrc = 0;
+  for (auto probe = allocations_.begin(); probe != allocations_.end(); ++probe) {
+      uint8_t* base = static_cast<uint8_t*>(probe->first);
+      uint8_t* target = static_cast<uint8_t*>(src);
+      if (target >= base && target < base + probe->second.size) {
+          itSrc = probe;
+          offsetSrc = target - base;
+          break;
+      }
+  }
+
   if (itDst == allocations_.end() || itSrc == allocations_.end())
     return VGREResult::ERROR_INVALID_VALUE;
 
-  // Bounds check: prevent overflow on both source and destination
-  if (bytes > itDst->second.size || bytes > itSrc->second.size) {
+  // Bounds check: prevent overflow on both source and destination parent allocations
+  if (offsetDst + bytes > itDst->second.size || offsetSrc + bytes > itSrc->second.size) {
     VGRE_LOG_ERROR("MemoryManager",
                    "D2D copy overflow: requested " + std::to_string(bytes) +
-                       " bytes but dst=" + std::to_string(itDst->second.size) +
-                       ", src=" + std::to_string(itSrc->second.size) +
+                       " bytes but dst is " + std::to_string(itDst->second.size) +
+                       " bytes, src is " + std::to_string(itSrc->second.size) +
                        " bytes");
     return VGREResult::ERROR_INVALID_VALUE;
   }
@@ -681,20 +874,38 @@ size_t MemoryManager::getFreeMemory() const {
 
 bool MemoryManager::isValidHandle(MemoryHandle handle) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return allocations_.count(handle) > 0;
+  for (auto const& [base, alloc] : allocations_) {
+      uint8_t* b = static_cast<uint8_t*>(base);
+      uint8_t* t = static_cast<uint8_t*>(handle);
+      if (t >= b && t < b + alloc.size) return true;
+  }
+  return false;
 }
 
 size_t MemoryManager::getAllocationSize(MemoryHandle handle) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = allocations_.find(handle);
-  if (it == allocations_.end())
-    return 0;
-  return it->second.size;
+  for (auto const& [base, alloc] : allocations_) {
+      uint8_t* b = static_cast<uint8_t*>(base);
+      uint8_t* t = static_cast<uint8_t*>(handle);
+      if (t >= b && t < b + alloc.size) return alloc.size;
+  }
+  return 0;
 }
 
 void *MemoryManager::getPointer(MemoryHandle handle) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = allocations_.find(handle);
+  auto it = allocations_.end();
+  size_t offset = 0;
+  for (auto probe = allocations_.begin(); probe != allocations_.end(); ++probe) {
+      uint8_t* b = static_cast<uint8_t*>(probe->first);
+      uint8_t* t = static_cast<uint8_t*>(handle);
+      if (t >= b && t < b + probe->second.size) {
+          it = probe;
+          offset = t - b;
+          break;
+      }
+  }
+
   if (it == allocations_.end())
     return nullptr;
 
@@ -708,7 +919,7 @@ void *MemoryManager::getPointer(MemoryHandle handle) const {
     const_cast<Allocation &>(it->second).isResidentOnHost = true;
   }
 
-  return it->second.ptr;
+  return static_cast<uint8_t*>(it->second.ptr) + offset;
 }
 
 void MemoryManager::getPageResidency(uint8_t outMap[1024]) const {
@@ -786,43 +997,39 @@ int MemoryManager::getResidentPageCount() const {
 }
 
 void MemoryManager::calibrateBandwidth() {
-  const size_t testSize = 4 * 1024 * 1024; // 4MB calibration
+  const size_t testSize = 64 * 1024 * 1024; // 64MB for better cache pressure
   void *hostPtr = alignedAlloc(testSize, 64);
   void *devicePtr = alignedAlloc(testSize, 64);
 
   if (!hostPtr || !devicePtr) {
-    if (hostPtr)
-      alignedFree(hostPtr);
-    if (devicePtr)
-      alignedFree(devicePtr);
+    if (hostPtr) alignedFree(hostPtr);
+    if (devicePtr) alignedFree(devicePtr);
     return;
   }
 
-  // H2D Calibration
-  auto start = std::chrono::steady_clock::now();
-  std::memcpy(devicePtr, hostPtr, testSize);
-  auto end = std::chrono::steady_clock::now();
-  double sec = std::chrono::duration<double>(end - start).count();
-  if (sec > 0.0) {
-    h2dBandwidth_.store(
-        (static_cast<double>(testSize) / (1024.0 * 1024.0 * 1024.0)) / sec);
-  } else {
-    h2dBandwidth_.store(0.0);
-  }
+  auto runTest = [&](void* dst, void* src, size_t size, int iterations) {
+    // Warmup
+    for (int i = 0; i < 5; ++i) {
+      std::memcpy(dst, src, size);
+    }
+    
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+      std::memcpy(dst, src, size);
+    }
+    auto end = std::chrono::steady_clock::now();
+    
+    double sec = std::chrono::duration<double>(end - start).count();
+    if (sec <= 0.0) return 0.0;
+    return (static_cast<double>(size) * iterations / (1024.0 * 1024.0 * 1024.0)) / sec;
+  };
 
-  // D2D Calibration
-  start = std::chrono::steady_clock::now();
-  std::memcpy(devicePtr, hostPtr,
-              testSize); // In virtual mode these are same speed
-  end = std::chrono::steady_clock::now();
-  sec = std::chrono::duration<double>(end - start).count();
-  if (sec > 0.0) {
-    d2dBandwidth_.store(
-        (static_cast<double>(testSize) / (1024.0 * 1024.0 * 1024.0)) / sec);
-  } else {
-    d2dBandwidth_.store(0.0);
-  }
-  d2hBandwidth_.store(h2dBandwidth_.load());
+  double h2d = runTest(devicePtr, hostPtr, testSize, 50);
+  double d2d = runTest(devicePtr, hostPtr, testSize, 50);
+
+  h2dBandwidth_.store(h2d);
+  d2dBandwidth_.store(d2d);
+  d2hBandwidth_.store(h2d);
 
   alignedFree(hostPtr);
   alignedFree(devicePtr);
@@ -830,6 +1037,130 @@ void MemoryManager::calibrateBandwidth() {
   VGRE_LOG_INFO("MemoryManager", "Bandwidth Calibrated — Host-to-Device: " +
                                      std::to_string(h2dBandwidth_.load()) +
                                      " GB/s");
+}
+
+// ── Memory Pool APIs ──────────────────────────────────────────────────────
+
+VGREResult MemoryManager::createPool(PoolHandle &outHandle, size_t blockSize) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  MemoryPool pool;
+  pool.id = nextPoolId_++;
+  pool.blockSize = (blockSize < 64) ? 64 : blockSize;
+  outHandle = pool.id;
+  pools_[pool.id] = std::move(pool);
+
+  VGRE_LOG_INFO("MemoryManager",
+                "Created memory pool " + std::to_string(outHandle) +
+                " (block size: " + std::to_string(blockSize) + ")");
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::destroyPool(PoolHandle handle) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = pools_.find(handle);
+  if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
+
+  auto &pool = it->second;
+
+  // Free all active blocks
+  for (auto &block : pool.activeList) {
+    if (block.ptr) {
+      alignedFree(block.ptr);
+      usedMemory_.fetch_sub(block.size);
+    }
+  }
+  // Free all cached/free blocks
+  for (auto &block : pool.freeList) {
+    if (block.ptr) {
+      alignedFree(block.ptr);
+      usedMemory_.fetch_sub(block.size);
+    }
+  }
+
+  VGRE_LOG_INFO("MemoryManager",
+                "Destroyed pool " + std::to_string(handle) +
+                " (allocs: " + std::to_string(pool.allocCount) +
+                ", frees: " + std::to_string(pool.freeCount) +
+                ", peak: " + std::to_string(pool.peakAllocated) + ")");
+  pools_.erase(it);
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
+                                           MemoryHandle &outHandle) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = pools_.find(poolHandle);
+  if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
+
+  auto &pool = it->second;
+
+  // Round up to block size boundary
+  size_t allocSize = ((size + pool.blockSize - 1) / pool.blockSize) * pool.blockSize;
+
+  // Try to find a suitable block in the free list
+  for (auto fit = pool.freeList.begin(); fit != pool.freeList.end(); ++fit) {
+    if (fit->size >= allocSize) {
+      PoolBlock block = *fit;
+      pool.freeList.erase(fit);
+      pool.activeList.push_back(block);
+      outHandle = block.ptr;
+      pool.allocCount++;
+      return VGREResult::SUCCESS;
+    }
+  }
+
+  // Check pool size limit before new allocation
+  size_t currentUsed = usedMemory_.load(std::memory_order_relaxed);
+  if (currentUsed + allocSize > poolSize_) {
+    return VGREResult::ERROR_OUT_OF_MEMORY;
+  }
+
+  // No suitable free block — allocate new
+  void *ptr = alignedAlloc(allocSize, 64);
+  if (!ptr) return VGREResult::ERROR_OUT_OF_MEMORY;
+
+  std::memset(ptr, 0, allocSize);
+  usedMemory_.fetch_add(allocSize);
+
+  PoolBlock block;
+  block.ptr = ptr;
+  block.size = allocSize;
+  pool.activeList.push_back(block);
+  pool.totalAllocated += allocSize;
+  pool.allocCount++;
+  if (pool.totalAllocated > pool.peakAllocated)
+    pool.peakAllocated = pool.totalAllocated;
+
+  outHandle = ptr;
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
+                                     MemoryHandle handle) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = pools_.find(poolHandle);
+  if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
+
+  auto &pool = it->second;
+
+  // Find the block in active list and move to free list
+  for (auto ait = pool.activeList.begin(); ait != pool.activeList.end();
+       ++ait) {
+    if (ait->ptr == handle) {
+      pool.freeList.push_back(*ait);
+      pool.activeList.erase(ait);
+      pool.freeCount++;
+      return VGREResult::SUCCESS;
+    }
+  }
+
+  return VGREResult::ERROR_INVALID_VALUE;
+}
+
+// ── Singleton accessor ────────────────────────────────────────────────────
+// Routes through RuntimeEngine which owns the MemoryManager instance.
+MemoryManager &MemoryManager::instance() {
+  return RuntimeEngine::instance().getMemoryManager();
 }
 
 } // namespace core
