@@ -3,6 +3,7 @@
 #include <cmath>
 #include <iostream>
 #include <vector>
+#include "vgre/core/runtime_engine.h"
 
 using namespace vgre;
 using namespace vgre::api;
@@ -103,6 +104,50 @@ int main() {
   free(h_a);
   free(h_b);
   free(h_c);
+
+  // --- Native Graph with Dependencies ---
+  std::cout << "--- Step 4: Native graph with dependencies ---" << std::endl;
+  auto &engine = vgre::core::RuntimeEngine::instance();
+  engine.initialize();
+
+  KernelId kid = 0;
+  engine.registerKernel("vadd_native", source, kid);
+
+  GraphId graph2 = 0;
+  engine.graphCreate(graph2);
+
+  uint64_t node1 = 0;
+  uint64_t node2 = 0;
+  uint64_t node3 = 0;
+  void *args2[] = {&d_a, &d_b, &d_c, (void *)&N};
+
+  std::vector<ArgType> argTypes = {ArgType::POINTER, ArgType::POINTER,
+                                   ArgType::POINTER, ArgType::INT32};
+  engine.graphAddKernelNode(graph2, kid, "vadd_native", grid, block, args2,
+                            argTypes, {}, node1);
+  engine.graphAddKernelNode(graph2, kid, "vadd_native", grid, block, args2,
+                            argTypes, {node1}, node2);
+  engine.graphAddKernelNode(graph2, kid, "vadd_native", grid, block, args2,
+                            argTypes, {node2}, node3);
+
+  GraphExecId exec2 = 0;
+  engine.graphInstantiate(graph2, exec2);
+  engine.graphLaunch(exec2, 0);
+  engine.streamSynchronize(0);
+
+  std::cout << "  ✓ Native dependency graph executed" << std::endl;
+
+  // --- Update node args ---
+  std::cout << "--- Step 5: Updating graph node args ---" << std::endl;
+  int N2 = 512;
+  void *args3[] = {&d_a, &d_b, &d_c, (void *)&N2};
+  engine.graphUpdateKernelNode(graph2, node1, args3, argTypes);
+  engine.graphUpdateKernelNode(graph2, node2, args3, argTypes);
+  engine.graphUpdateKernelNode(graph2, node3, args3, argTypes);
+
+  engine.graphLaunch(exec2, 0);
+  engine.streamSynchronize(0);
+  std::cout << "  ✓ Graph node args updated and executed" << std::endl;
 
   return 0;
 }

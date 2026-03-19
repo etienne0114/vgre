@@ -5,9 +5,10 @@ Tests tensor operations using the VGRE Python runtime,
 simulating how TensorFlow eager-mode ops would flow through the engine.
 """
 import sys
+from pathlib import Path
 import numpy as np
 
-sys.path.insert(0, "../bindings/python")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "bindings/python"))
 
 from vgre import VirtualDevice, Runtime
 from vgre.kernel import Kernel, Dim3
@@ -147,7 +148,15 @@ def test_dense_layer_forward():
     # Step 3: ReLU
     out_flat = np.zeros(batch * out_features, dtype=np.float32)
     z_flat = Z.flatten()
-    relu_kernel = Kernel("dense_relu", RELU_SOURCE)
+    DENSE_RELU_SOURCE = """
+    extern "C" __global__ void dense_relu(float* x, float* out, int n) {
+        int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i < n) {
+            out[i] = (x[i] > 0.0f) ? x[i] : 0.0f;
+        }
+    }
+    """
+    relu_kernel = Kernel("dense_relu", DENSE_RELU_SOURCE)
     total = batch * out_features
     rt.launch(
         relu_kernel,

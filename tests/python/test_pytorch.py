@@ -5,10 +5,11 @@ Tests vector operations using the VGRE Python runtime,
 simulating how PyTorch tensor ops would flow through the engine.
 """
 import sys
+from pathlib import Path
 import numpy as np
 
-# Add bindings to path
-sys.path.insert(0, "../bindings/python")
+# Add bindings to path (repo-root relative)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "bindings/python"))
 
 from vgre import VirtualDevice, Kernel, Runtime
 from vgre.kernel import Dim3, vector_add_kernel, vector_mul_kernel
