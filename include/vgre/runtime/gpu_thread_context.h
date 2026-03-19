@@ -12,15 +12,26 @@
 namespace vgre {
 namespace runtime {
 
+class BlockBarrier;
+
 // ── GPU Thread Context ───────────────────────────────────────────────────────
-// Provides thread-local storage for GPU intrinsic simulations (e.g. __activemask)
+// Provides thread-local storage for GPU intrinsic authoritative state (e.g. __activemask)
 // Uses a thread-safe map instead of OS TLS to avoid libgomp destruction crashes.
 class GPUThreadContext {
 public:
   static void setWarpMask(uint32_t mask);
   static void clearWarpMask();
   static uint32_t getWarpMask();
+  // Optional per-block barrier for __syncthreads
+  static void setBlockBarrier(BlockBarrier *barrier);
+  static void clearBlockBarrier();
+  static void blockBarrier();
 };
+
+// C-friendly wrappers exported for JIT symbol resolution.
+extern "C" void vgre_jit_set_block_barrier(void *barrier);
+extern "C" void vgre_jit_clear_block_barrier();
+extern "C" void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
 
 // ── Shared Memory ──────────────────────────────────────────────────────────
 // Per-block shared memory buffer. Allocated once per block execution and

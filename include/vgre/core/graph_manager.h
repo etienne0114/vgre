@@ -17,6 +17,8 @@ enum class GraphNodeType { KERNEL, MEMCPY };
 
 struct GraphNode {
   GraphNodeType type;
+  uint64_t nodeId = 0;
+  std::vector<uint64_t> deps;
 
   // Kernel data
   KernelId kernelId = 0;
@@ -35,6 +37,7 @@ struct GraphNode {
 class Graph {
 public:
   GraphId id;
+  uint64_t nextNodeId = 1;
   std::vector<GraphNode> nodes;
 };
 
@@ -56,11 +59,37 @@ public:
                                  const std::string &name, const dim3 &grid,
                                  const dim3 &block, void **args,
                                  const std::vector<ArgType> &argTypes);
+  vgre::VGREResult addKernelNodeWithDeps(GraphId id, KernelId kernelId,
+                                        const std::string &name,
+                                        const dim3 &grid, const dim3 &block,
+                                        void **args,
+                                        const std::vector<ArgType> &argTypes,
+                                        const std::vector<uint64_t> &deps);
+  vgre::VGREResult addKernelNodeWithDepsOut(
+      GraphId id, KernelId kernelId, const std::string &name, const dim3 &grid,
+      const dim3 &block, void **args, const std::vector<ArgType> &argTypes,
+      const std::vector<uint64_t> &deps, uint64_t &outNodeId);
 
   vgre::VGREResult addMemcpyNode(GraphId id, void *dst, void *src, size_t count,
                                  int kind);
+  vgre::VGREResult addMemcpyNodeWithDeps(GraphId id, void *dst, void *src,
+                                        size_t count, int kind,
+                                        const std::vector<uint64_t> &deps);
+  vgre::VGREResult addMemcpyNodeWithDepsOut(GraphId id, void *dst, void *src,
+                                           size_t count, int kind,
+                                           const std::vector<uint64_t> &deps,
+                                           uint64_t &outNodeId);
+
+  vgre::VGREResult addDependency(GraphId id, uint64_t nodeId,
+                                 uint64_t dependsOn);
+  vgre::VGREResult updateKernelNodeArgs(GraphId id, uint64_t nodeId,
+                                        void **args,
+                                        const std::vector<ArgType> &argTypes);
+  vgre::VGREResult updateMemcpyNode(GraphId id, uint64_t nodeId, void *dst,
+                                    void *src, size_t count, int kind);
 
   vgre::VGREResult instantiate(GraphId id, GraphExecId &outExecId);
+  vgre::VGREResult updateExec(GraphExecId execId, GraphId newGraphId);
   vgre::VGREResult destroyGraphExec(GraphExecId id);
   vgre::VGREResult launch(GraphExecId execId, StreamId stream);
 

@@ -28,6 +28,19 @@ class Logger {
 public:
   static Logger &instance() {
     static Logger* inst = new Logger();
+    static bool envChecked = false;
+    if (!envChecked) {
+      envChecked = true;
+      const char* envVal = std::getenv("VGRE_LOG_LEVEL");
+      if (envVal) {
+        std::string s(envVal);
+        if (s == "DEBUG") inst->setLevel(LogLevel::DEBUG);
+        else if (s == "INFO") inst->setLevel(LogLevel::INFO);
+        else if (s == "WARN") inst->setLevel(LogLevel::WARN);
+        else if (s == "ERROR") inst->setLevel(LogLevel::ERROR);
+        else if (s == "NONE") inst->setLevel(LogLevel::NONE);
+      }
+    }
     return *inst;
   }
 

@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include "vgre/runtime/gpu_thread_context.h"
 
 namespace vgre_cuda {
 
@@ -13,19 +14,24 @@ struct dim3 {
 };
 
 // Global thread/block indices provided by the wrapper, using an array mapping to bypass JIT TLS corruption
-extern "C" int vgre_jit_get_thread_id();
+extern "C" {
+  int vgre_jit_get_thread_id();
+  void vgre_jit_set_block_barrier(void*);
+  void vgre_jit_clear_block_barrier();
+  
+  // Dynamic TLS-based built-ins for stable parallel JIT linkage
+  vgre_cuda::dim3* vgre_jit_get_threadIdx();
+  vgre_cuda::dim3* vgre_jit_get_blockIdx();
+  vgre_cuda::dim3* vgre_jit_get_blockDim();
+  vgre_cuda::dim3* vgre_jit_get_gridDim();
+  void** vgre_jit_get_sharedMem();
+}
 
-extern dim3 threadIdx_arr[256];
-extern dim3 blockIdx_arr[256];
-extern void* sharedMem_arr[256];
-extern dim3 blockDim_arr[256];
-extern dim3 gridDim_arr[256];
-
-#define threadIdx (vgre_cuda::threadIdx_arr[vgre_jit_get_thread_id()])
-#define blockIdx  (vgre_cuda::blockIdx_arr[vgre_jit_get_thread_id()])
-#define blockDim  (vgre_cuda::blockDim_arr[vgre_jit_get_thread_id()])
-#define gridDim   (vgre_cuda::gridDim_arr[vgre_jit_get_thread_id()])
-#define sharedMem (vgre_cuda::sharedMem_arr[vgre_jit_get_thread_id()])
+#define threadIdx (*vgre_jit_get_threadIdx())
+#define blockIdx  (*vgre_jit_get_blockIdx())
+#define blockDim  (*vgre_jit_get_blockDim())
+#define gridDim   (*vgre_jit_get_gridDim())
+#define sharedMem (*vgre_jit_get_sharedMem())
 
 // Atomic mappings for CPU
 #define atomicAdd(addr, val) __atomic_fetch_add(addr, val, __ATOMIC_SEQ_CST)
@@ -36,7 +42,8 @@ extern dim3 gridDim_arr[256];
     __atomic_compare_exchange_n(addr, &_comp, val, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); \
     _comp; \
 })
-#define __syncthreads() 
+// Block barrier: no-op when not executing in a true multi-threaded block
+#define __syncthreads() vgre::runtime::GPUThreadContext::blockBarrier()
 
 // CUDA-like math functions for the CPU
 inline float __fdividef(float a, float b) { return a / b; }
@@ -47,7 +54,7 @@ inline float __fmul_rn(float a, float b) { return a * b; }
 #define __device__
 #define __host__
 
-// For JIT emulation, we map __shared__ to a pointer into our block buffer.
+// For JIT translation, we map __shared__ to a pointer into our block buffer.
 // This requires the parser to replace declarations, but for dynamic shared memory (extern),
 // we can use this macro. 
 #define __shared__ 

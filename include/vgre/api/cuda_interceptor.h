@@ -15,6 +15,7 @@ namespace api {
 using cudaError_t = int;
 constexpr cudaError_t cudaSuccess = 0;
 constexpr cudaError_t cudaErrorInvalidDevice = 10;
+constexpr cudaError_t cudaErrorNotInitialized = 3;
 constexpr cudaError_t cudaErrorMemoryAllocation = 2;
 constexpr cudaError_t cudaErrorInvalidValue = 1;
 constexpr cudaError_t cudaErrorLaunchFailure = 4;
@@ -72,6 +73,15 @@ public:
   cudaError_t getDevice(int *device);
   cudaError_t getDeviceProperties(cudaDeviceProp_t *prop, int device);
   cudaError_t deviceSynchronize();
+  cudaError_t deviceReset();
+  cudaError_t setDeviceFlags(unsigned int flags);
+  cudaError_t getDeviceFlags(unsigned int *flags);
+  cudaError_t deviceGetPCIBusId(char *pciBusId, int len, int device);
+  cudaError_t deviceGetByPCIBusId(int *device, const char *pciBusId);
+  cudaError_t deviceCanAccessPeer(int *canAccessPeer, int device,
+                                  int peerDevice);
+  cudaError_t deviceEnablePeerAccess(int peerDevice, unsigned int flags);
+  cudaError_t deviceDisablePeerAccess(int peerDevice);
 
   // ── Memory Management ──────────────────────────────────────────────────
   cudaError_t malloc(void **devPtr, size_t size);
@@ -81,14 +91,42 @@ public:
                      cudaMemcpyKind_t kind);
   cudaError_t memcpyAsync(void *dst, const void *src, size_t count,
                           cudaMemcpyKind_t kind, cudaStream_t stream);
+  cudaError_t memcpy2D(void *dst, size_t dpitch, const void *src, size_t spitch,
+                       size_t width, size_t height, cudaMemcpyKind_t kind);
+  cudaError_t memcpy2DAsync(void *dst, size_t dpitch, const void *src,
+                            size_t spitch, size_t width, size_t height,
+                            cudaMemcpyKind_t kind, cudaStream_t stream);
+  cudaError_t memcpyPeer(void *dst, int dstDevice, const void *src,
+                         int srcDevice, size_t count);
+  cudaError_t memcpyPeerAsync(void *dst, int dstDevice, const void *src,
+                              int srcDevice, size_t count,
+                              cudaStream_t stream);
   cudaError_t memset(void *devPtr, int value, size_t count);
   cudaError_t memsetAsync(void *devPtr, int value, size_t count,
                           cudaStream_t stream);
+  cudaError_t mallocPitch(void **devPtr, size_t *pitch, size_t width,
+                          size_t height);
+  cudaError_t hostAlloc(void **pHost, size_t size, unsigned int flags);
+  cudaError_t freeHost(void *pHost);
+  cudaError_t hostRegister(void *pHost, size_t size, unsigned int flags);
+  cudaError_t hostUnregister(void *pHost);
+
+  // ── UVM Migration Hints ────────────────────────────────────────────────
+  cudaError_t memAdvise(const void *devPtr, size_t count, int advice, int device);
+  cudaError_t memPrefetchAsync(const void *devPtr, size_t count, int dstDevice, cudaStream_t stream);
 
   // ── Stream Management ──────────────────────────────────────────────────
   cudaError_t streamCreate(cudaStream_t *stream);
+  cudaError_t streamCreateWithFlags(cudaStream_t *stream, unsigned int flags);
+  cudaError_t streamCreateWithPriority(cudaStream_t *stream, unsigned int flags,
+                                       int priority);
   cudaError_t streamDestroy(cudaStream_t stream);
   cudaError_t streamSynchronize(cudaStream_t stream);
+  cudaError_t streamQuery(cudaStream_t stream);
+  cudaError_t streamWaitEvent(cudaStream_t stream, cudaEvent_t event,
+                              unsigned int flags);
+  cudaError_t deviceGetStreamPriorityRange(int *leastPriority,
+                                           int *greatestPriority);
 
   // ── Event Management ───────────────────────────────────────────────────
   cudaError_t eventCreate(cudaEvent_t *event);
@@ -108,6 +146,12 @@ public:
   cudaError_t moduleGetFunction(CUfunction *hfunc, CUmodule hmod,
                                 const char *name);
   cudaError_t moduleUnload(CUmodule hmod);
+
+  // ── Device Attributes / Version / Memory Info ─────────────────────────
+  cudaError_t deviceGetAttribute(int *value, int attr, int device);
+  cudaError_t driverGetVersion(int *version);
+  cudaError_t runtimeGetVersion(int *version);
+  cudaError_t memGetInfo(size_t *freeBytes, size_t *totalBytes);
 
   // ── Error Handling ─────────────────────────────────────────────────────
   const char *getErrorString(cudaError_t error);
@@ -149,7 +193,45 @@ public:
                                   const void *pResViewDesc);
   cudaError_t destroyTextureObject(cudaTextureObject_t texObject);
 
+  cudaError_t createSurfaceObject(cudaSurfaceObject_t *pSurfObject,
+                                  const cudaResourceDesc *pResDesc);
+  cudaError_t destroySurfaceObject(cudaSurfaceObject_t surfObject);
+
   // ── CUDA Graphs API ────────────────────────────────────────────────────────
+  using cudaGraphNode_t = uint64_t;
+
+  enum cudaGraphExecUpdateResult {
+      cudaGraphExecUpdateSuccess = 0,
+      cudaGraphExecUpdateError = 1,
+      cudaGraphExecUpdateErrorTopologyChanged = 2,
+      cudaGraphExecUpdateErrorNodeTypeChanged = 3,
+      cudaGraphExecUpdateErrorFunctionChanged = 4,
+      cudaGraphExecUpdateErrorParametersChanged = 5,
+      cudaGraphExecUpdateErrorNotSupported = 6,
+      cudaGraphExecUpdateErrorUnsupportedFunctionChange = 7,
+      cudaGraphExecUpdateErrorAttributesChanged = 8
+  };
+
+  struct cudaPitchedPtr {
+      void   *ptr;
+      size_t  pitch;
+      size_t  xsize;
+      size_t  ysize;
+  };
+  struct cudaPos { size_t x, y, z; };
+  struct cudaExtent { size_t width, height, depth; };
+  struct cudaMemcpy3DParms {
+      void*                  srcArray; // placeholder for cudaArray_t
+      struct cudaPos         srcPos;
+      struct cudaPitchedPtr  srcPtr;
+      void*                  dstArray; // placeholder for cudaArray_t
+      struct cudaPos         dstPos;
+      struct cudaPitchedPtr  dstPtr;
+      struct cudaExtent      extent;
+      cudaMemcpyKind_t       kind;
+  };
+
+  cudaError_t graphCreate(cudaGraph_t *graph, unsigned int flags);
   cudaError_t streamBeginCapture(cudaStream_t stream);
   cudaError_t streamEndCapture(cudaStream_t stream, cudaGraph_t *graph);
   cudaError_t graphInstantiate(cudaGraphExec_t *exec, cudaGraph_t graph);
@@ -157,13 +239,26 @@ public:
   cudaError_t graphDestroy(cudaGraph_t graph);
   cudaError_t graphExecDestroy(cudaGraphExec_t exec);
 
+  cudaError_t graphAddMemcpyNode(cudaGraphNode_t *pGraphNode, cudaGraph_t graph,
+                                 const cudaGraphNode_t *pDependencies, size_t numDependencies,
+                                 const cudaMemcpy3DParms *pCopyParams);
+  
+  cudaError_t graphAddMemcpyNode1D(cudaGraphNode_t *pGraphNode, cudaGraph_t graph,
+                                   const cudaGraphNode_t *pDependencies, size_t numDependencies,
+                                   void *dst, const void *src, size_t count, cudaMemcpyKind_t kind);
+
+  cudaError_t graphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
+                              cudaGraphNode_t *hErrorNode_out, cudaGraphExecUpdateResult *updateResult_out);
+
   // Singleton
   static CUDAInterceptor &instance();
 
 private:
   cudaError_t convertResult(VGREResult r);
+  int convertMemcpyKind(cudaMemcpyKind_t kind);
 
   bool initialized_ = false;
+  unsigned int deviceFlags_ = 0;
 };
 
 } // namespace api

@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace vgre {
 
@@ -68,6 +69,9 @@ public:
   VGREResult getKernelFromModule(ModuleHandle module, const std::string &name,
                                  KernelId &outId);
 
+  VGREResult getModuleGlobal(ModuleHandle module, const std::string &name,
+                             void *&outAddr, size_t &outSize);
+
   VGREResult getKernelArgTypes(KernelId id, std::vector<ArgType> &outTypes);
   const KernelIR *getKernelIR(KernelId id) const;
 
@@ -82,6 +86,11 @@ public:
                           const dim3 &gridDim, const dim3 &blockDim,
                           void **args, size_t sharedMem = 0,
                           StreamId stream = 0);
+
+  // Cooperative kernel launch: grid-wide barrier via serialized block phases
+  VGREResult launchCooperativeKernel(KernelId id, const dim3 &gridDim,
+                                     const dim3 &blockDim, void **args,
+                                     size_t sharedMem = 0, StreamId stream = 0);
 
   // Native Graph Dispatch
   VGREResult dispatchGraphNodes(const std::vector<GraphNode>& nodes, StreamId stream);
@@ -108,12 +117,30 @@ public:
   VGREResult deviceDisablePeerAccess(DeviceId peerDevice);
 
   // CUDA Graphs API
+  VGREResult graphCreate(GraphId &outGraph);
   VGREResult streamBeginCapture(StreamId stream);
   VGREResult streamEndCapture(StreamId stream, GraphId &outGraph);
   VGREResult graphInstantiate(GraphId graph, GraphExecId &outExec);
+  VGREResult graphUpdateExec(GraphExecId exec, GraphId graph);
   VGREResult graphLaunch(GraphExecId exec, StreamId stream);
   VGREResult graphDestroy(GraphId graph);
   VGREResult graphExecDestroy(GraphExecId exec);
+  VGREResult graphAddKernelNode(GraphId graph, KernelId kernelId,
+                                const std::string &name, const dim3 &grid,
+                                const dim3 &block, void **args,
+                                const std::vector<ArgType> &argTypes,
+                                const std::vector<uint64_t> &deps,
+                                uint64_t &outNodeId);
+  VGREResult graphAddMemcpyNode(GraphId graph, void *dst, void *src,
+                                size_t count, int kind,
+                                const std::vector<uint64_t> &deps,
+                                uint64_t &outNodeId);
+  VGREResult graphAddDependency(GraphId graph, uint64_t nodeId,
+                                uint64_t dependsOn);
+  VGREResult graphUpdateKernelNode(GraphId graph, uint64_t nodeId, void **args,
+                                   const std::vector<ArgType> &argTypes);
+  VGREResult graphUpdateMemcpyNode(GraphId graph, uint64_t nodeId, void *dst,
+                                   void *src, size_t count, int kind);
   
   // Internal Graph Recording
   bool isStreamCapturing(StreamId stream) const;
@@ -147,7 +174,8 @@ private:
   std::unordered_map<KernelId, CompiledKernelFn> kernelCache_;
   std::unordered_map<KernelId, KernelIR> kernelIRCache_;
   KernelId nextKernelId_ = 1;
-  mutable std::mutex mutex_;
+  std::unordered_set<KernelId> warnedSyncthreads_;
+  mutable std::recursive_mutex mutex_;
 };
 
 } // namespace core

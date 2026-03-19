@@ -65,6 +65,15 @@ public:
     // Identify CUDA built-in variables in the body
     std::vector<std::string> findBuiltinVars(const std::string& body);
 
+    // Parse struct definitions from kernel source and compute sizes
+    size_t computeStructSize(const std::string& typeName,
+                             const std::string& fullSource) const;
+
+    // Extract inline struct definitions from kernel source
+    static bool extractStructBody(const std::string& typeName,
+                                  const std::string& source,
+                                  std::string& outBody);
+
 private:
     // Tokenizer
     std::vector<Token> tokenize(const std::string& source);

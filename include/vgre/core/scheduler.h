@@ -55,9 +55,19 @@ public:
                                            std::function<void()> taskFn,
                                            int priority = 0);
 
+  /**
+   * @brief Submits a task to the global concurrent pool without stream serialization.
+   * @param taskFn The function to execute.
+   * @param priority Task priority.
+   * @return A future containing the task result.
+   */
+  std::future<VGREResult> submitConcurrentTask(std::function<void()> taskFn,
+                                               int priority = 0);
+
   // Control
   void waitAll();
   void waitStream(StreamId stream);
+  bool isStreamIdle(StreamId stream) const;
   int getThreadCount() const;
   void setThreadCount(int n);
 
@@ -83,7 +93,7 @@ private:
   };
   std::unordered_map<StreamId, std::shared_ptr<StreamQueue>> streamQueues_;
 
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::condition_variable cv_;
   std::atomic<bool> shutdown_{false};
   std::atomic<uint64_t> completed_{0};

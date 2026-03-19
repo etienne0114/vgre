@@ -128,6 +128,7 @@ private:
 
   struct EventInfo {
     cl_command_queue queue = 0;
+    StreamId stream = 0;
     cl_ulong timeQueued = 0;
     cl_ulong timeSubmit = 0;
     cl_ulong timeStart = 0;
@@ -135,11 +136,18 @@ private:
     bool completed = false;
   };
 
+  struct QueueInfo {
+    cl_context context = 0;
+    StreamId stream = 0;
+  };
+
   std::unordered_map<cl_program, ProgramInfo> programs_;
   std::unordered_map<cl_kernel_handle, KernelInfo> kernels_;
   std::unordered_map<cl_event, EventInfo> events_;
   std::unordered_map<cl_context, cl_device_id> contexts_;
-  std::unordered_map<cl_command_queue, cl_context> queues_;
+  std::unordered_map<cl_command_queue, QueueInfo> queues_;
+  cl_platform_id platformId_ = 0;
+  cl_device_id deviceId_ = 0;
   uint64_t nextId_ = 100;
   mutable std::mutex mutex_;
 };

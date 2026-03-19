@@ -4,12 +4,18 @@
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
 
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 
 namespace vgre {
 namespace advanced {
+
+struct ThreadPerformance {
+  double avgExecutionMs = 0.0;
+  int executionCount = 0;
+};
 
 // ── Kernel execution profile ───────────────────────────────────────────────
 struct KernelProfile {
@@ -21,6 +27,7 @@ struct KernelProfile {
   int executionCount = 0;
   bool isMemoryBound = false;
   bool isComputeBound = false;
+  std::unordered_map<int, ThreadPerformance> threadToPerf;
 };
 
 // ── Adaptive Execution Engine ──────────────────────────────────────────────
@@ -33,6 +40,10 @@ public:
   void recordExecution(const std::string &kernelName, int threadsUsed,
                        int vectorWidth, double executionMs,
                        size_t memoryAccessed, size_t flops);
+
+  // Real-world accountancy (reported by JIT kernels)
+  void recordRealFlops(uint64_t flops);
+  void recordRealMemoryAccess(uint64_t bytes);
 
   // Get optimal parameters for a kernel
   int getOptimalThreadCount(const std::string &kernelName) const;
@@ -50,6 +61,7 @@ public:
 
   // Run a startup benchmark to measure real Peak GFLOPS and Bandwidth
   void runBenchmark();
+  bool isCalibrated() const;
 
   // Clear all profiles
   void clearProfiles();
@@ -81,6 +93,9 @@ private:
   double totalLatencyMs_ = 0.0;
   int totalExecutions_ = 0;
   int activeKernels_ = 0;
+  uint64_t realFlopsAcct_ = 0;
+  uint64_t realBytesAcct_ = 0;
+  std::atomic<bool> calibrated_{false};
 };
 
 } // namespace advanced

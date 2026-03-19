@@ -47,6 +47,7 @@ public:
   VGREResult destroyStream(StreamId id);
   VGREResult synchronizeStream(StreamId id);
   VGREResult synchronizeDevice();
+  VGREResult getStreamPriority(StreamId id, int &outPriority) const;
 
   void detectHardware();
 

@@ -20,10 +20,23 @@ enum class TextureAddressMode : uint8_t { CLAMP, WRAP, MIRROR, BORDER };
 
 enum class TextureFilterMode : uint8_t { POINT, LINEAR };
 
+// ── Texture element types ──────────────────────────────────────────────────
+enum class TextureElementType : uint8_t {
+  FLOAT32,
+  FLOAT64,
+  INT8,
+  INT16,
+  INT32,
+  UINT8,
+  UINT16,
+  UINT32
+};
+
 // ── Texture descriptor ─────────────────────────────────────────────────────
 struct TextureDescriptor {
   TextureAddressMode addressMode = TextureAddressMode::CLAMP;
   TextureFilterMode filterMode = TextureFilterMode::POINT;
+  TextureElementType elementType = TextureElementType::FLOAT32;
   bool normalizedCoords = false;
   float borderColor = 0.0f;
 };
@@ -36,6 +49,7 @@ struct TextureObject {
   const void *data = nullptr; // Pointer to underlying memory
   size_t width = 0;           // Width in elements
   size_t height = 0;          // Height in elements (1 for 1D textures)
+  size_t depth = 0;           // Depth in elements (1 for 1D/2D textures)
   size_t elementSize = 0;     // Size per element in bytes
   TextureDescriptor desc;
 };
@@ -74,8 +88,18 @@ public:
   // 1D integer-coordinate fetch (like tex1Dfetch)
   float tex1Dfetch(TextureId id, int x) const;
 
+  // 1D texture fetch with optional interpolation (like tex1D)
+  float tex1D(TextureId id, float x) const;
+
   // 2D floating-point fetch with optional interpolation (like tex2D)
   float tex2D(TextureId id, float x, float y) const;
+
+  // 3D floating-point fetch with optional trilinear interpolation (like tex3D)
+  float tex3D(TextureId id, float x, float y, float z) const;
+
+  // ── Type-aware fetch operations ───────────────────────────────────────────
+  // Read a single element as double (supports all element types)
+  double readElementAsDouble(TextureId id, int linearIndex) const;
 
   // ── Surface write operations ─────────────────────────────────────────────
   VGREResult surf2Dwrite(SurfaceId id, float value, int x, int y);

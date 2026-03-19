@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <list>
 #include <mutex>
 #include <unordered_map>
 
@@ -30,6 +31,25 @@ struct Allocation {
   DeviceId deviceId = 0;
   unsigned int attachmentFlags =
       0; // Support for cudaMemAttachGlobal / cudaMemAttachHost
+};
+
+// ── Memory pool handle ─────────────────────────────────────────────────────
+using PoolHandle = uint64_t;
+
+struct PoolBlock {
+  void *ptr = nullptr;
+  size_t size = 0;
+};
+
+struct MemoryPool {
+  PoolHandle id = 0;
+  size_t blockSize = 0;            // Minimum allocation granularity
+  std::list<PoolBlock> freeList;   // Available blocks for reuse
+  std::list<PoolBlock> activeList; // Currently allocated blocks
+  size_t totalAllocated = 0;
+  size_t peakAllocated = 0;
+  size_t allocCount = 0;
+  size_t freeCount = 0;
 };
 
 // ── Lock-free UVM region tracking for signal handler ───────────────────────
@@ -63,7 +83,18 @@ public:
    */
   VGREResult allocateManaged(size_t size, MemoryHandle &outHandle,
                              DeviceId deviceId = 0, unsigned int flags = 0);
+  
+  /**
+   * @brief Allocates UVM memory at a specific virtual address (for cluster identity mapping).
+   */
+  VGREResult allocateManagedAt(void* addr, size_t size, MemoryHandle &outHandle,
+                               DeviceId deviceId = 0, unsigned int flags = 0);
+
   VGREResult free(MemoryHandle handle);
+
+  // UVM Migration Hints
+  VGREResult memAdvise(const void *ptr, size_t count, int advice, DeviceId deviceId);
+  VGREResult memPrefetchAsync(const void *ptr, size_t count, DeviceId dstDevice);
 
   // Transfers
   VGREResult copyHostToDevice(MemoryHandle dst, const void *src, size_t bytes);
@@ -92,6 +123,13 @@ public:
   VGREResult disablePeerAccess(DeviceId currentDevice, DeviceId peerDevice);
   bool canAccessPeer(DeviceId currentDevice, DeviceId peerDevice) const;
   DeviceId getOwnerDevice(MemoryHandle handle) const;
+
+  // Memory Pool APIs
+  VGREResult createPool(PoolHandle &outHandle, size_t blockSize = 256);
+  VGREResult destroyPool(PoolHandle handle);
+  VGREResult allocateFromPool(PoolHandle poolHandle, size_t size,
+                              MemoryHandle &outHandle);
+  VGREResult freeToPool(PoolHandle poolHandle, MemoryHandle handle);
 
   // Singleton convenience
   static MemoryManager &instance();
@@ -132,6 +170,10 @@ private:
   // P2P tracking: currentDevice -> set<peerDevice>
   std::unordered_map<DeviceId, std::unordered_map<DeviceId, bool>>
       peerAccessMap_;
+
+  // Memory pools
+  std::unordered_map<PoolHandle, MemoryPool> pools_;
+  PoolHandle nextPoolId_ = 1;
 };
 
 } // namespace core

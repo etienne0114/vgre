@@ -32,6 +32,17 @@ extern "C" {
 #define VGRE_MEMCPY_DEVICE_TO_HOST 1
 #define VGRE_MEMCPY_DEVICE_TO_DEVICE 2
 
+/* ── Kernel argument types ─────────────────────────────────────────────────
+ */
+#define VGRE_ARG_POINTER 0
+#define VGRE_ARG_INT32 1
+#define VGRE_ARG_INT64 2
+#define VGRE_ARG_FLOAT32 3
+#define VGRE_ARG_FLOAT64 4
+#define VGRE_ARG_UINT32 5
+#define VGRE_ARG_UINT64 6
+#define VGRE_ARG_STRUCT 7
+
 /* ── Device properties struct (C-compatible) ────────────────────────────────
  */
 typedef struct {
@@ -140,6 +151,35 @@ int vgre_stream_create_with_priority(uint64_t *out_stream_id, int priority);
 int vgre_stream_synchronize(uint64_t stream_id);
 int vgre_stream_destroy(uint64_t stream_id);
 
+/* ── CUDA Graphs (DAG) ──────────────────────────────────────────────────────
+ */
+int vgre_graphCreate(uint64_t *out_graph);
+int vgre_graphDestroy(uint64_t graph);
+int vgre_graphInstantiate(uint64_t graph, uint64_t *out_exec);
+int vgre_graphExecDestroy(uint64_t exec);
+int vgre_graphLaunch(uint64_t exec, uint64_t stream);
+
+int vgre_graphAddKernelNodeEx(uint64_t graph, uint64_t kernel_id,
+                              const char *name, const uint32_t grid_dim[3],
+                              const uint32_t block_dim[3], void **args,
+                              const uint8_t *arg_types, int num_args,
+                              const uint64_t *deps, int num_deps,
+                              uint64_t *out_node_id);
+
+int vgre_graphAddMemcpyNodeEx(uint64_t graph, void *dst, void *src,
+                              size_t count, int kind,
+                              const uint64_t *deps, int num_deps,
+                              uint64_t *out_node_id);
+
+int vgre_graphAddDependency(uint64_t graph, uint64_t node_id,
+                            uint64_t depends_on);
+
+int vgre_graphUpdateKernelNode(uint64_t graph, uint64_t node_id, void **args,
+                               const uint8_t *arg_types, int num_args);
+
+int vgre_graphUpdateMemcpyNode(uint64_t graph, uint64_t node_id, void *dst,
+                               void *src, size_t count, int kind);
+
 /* ── Version Info ───────────────────────────────────────────────────────────
  */
 const char *vgre_get_version(void);
@@ -147,6 +187,14 @@ const char *vgre_get_version(void);
 /* ── Telemetry ──────────────────────────────────────────────────────────────
  */
 int vgre_get_telemetry(vgre_telemetry_t *telemetry);
+/**
+ * @brief Returns profiler JSON with top-N kernels (by total time).
+ * @param out_json Allocated C string. Must be freed with vgre_free_string().
+ * @param top_n If <= 0, returns all kernels.
+ */
+int vgre_get_profiler_json(char **out_json, int top_n);
+void vgre_free_string(char *str);
+int vgre_set_profiler_enabled(int enabled);
 
 /**
  * @brief Retrieves recent log lines from the engine.
@@ -170,6 +218,12 @@ int vgre_set_background_compute(int enabled);
  *                  If 0, initializes as a client.
  */
 int vgre_set_service_mode(int is_master);
+
+/**
+ * @brief Enables or disables per-block OS thread execution for __syncthreads correctness.
+ * This toggles the VGRE_BLOCK_THREADS environment flag at runtime.
+ */
+int vgre_set_block_threads(int enabled);
 
 #ifdef __cplusplus
 } /* extern "C" */

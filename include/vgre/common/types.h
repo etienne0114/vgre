@@ -38,7 +38,8 @@ enum class ArgType : uint8_t {
   FLOAT32,
   FLOAT64,
   UINT32,
-  UINT64
+  UINT64,
+  STRUCT
 };
 
 struct KernelArg {
@@ -76,8 +77,13 @@ struct KernelIR {
   std::string source;
   std::string irCode; // LLVM IR text
   std::vector<ArgType> argTypes;
+  std::vector<std::string> argTypeNames;
+  std::vector<size_t> argSizes; // Explicit sizes for structs/templates
   bool usesSharedMem = false;
+  bool usesSyncthreads = false;
   size_t sharedMemSize = 0;
+  uint64_t estimatedInstructionCount = 0;
+  uint64_t estimatedMemoryAccessCount = 0;
 };
 
 // ── Compiled kernel function pointer ───────────────────────────────────────

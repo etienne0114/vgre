@@ -22,11 +22,13 @@ enum class ComputeBackend : uint8_t {
 // ── Remote node descriptor ─────────────────────────────────────────────────
 struct RemoteNode {
     std::string address;
-    int         port        = 50051;
-    int         cpuCores    = 0;
-    size_t      memoryBytes = 0;
-    bool        available   = false;
-    double      latencyMs   = 0.0;
+    int         port             = 7780;
+    int         cpuCores         = 0;
+    size_t      cpuMemoryBytes   = 0;
+    bool        hasIntegratedGPU = false;
+    std::string igpuName;
+    bool        available        = false;
+    double      latencyMs        = 0.0;
 };
 
 // ── Compute resource summary ───────────────────────────────────────────────
@@ -55,8 +57,11 @@ public:
 
     // Remote node management
     VGREResult addRemoteNode(const std::string& address, int port);
-    VGREResult removeRemoteNode(const std::string& address);
-    VGREResult pingRemoteNode(const std::string& address, double& latencyMs);
+    VGREResult removeRemoteNode(const std::string &address);
+    VGREResult updateRemoteNodeCapability(const std::string &address, int cores,
+                                        size_t memory, bool hasIGPU,
+                                        const std::string &igpuName);
+    VGREResult pingRemoteNode(const std::string &address, double &latencyMs);
     std::vector<RemoteNode> getRemoteNodes() const;
 
     // Workload distribution
