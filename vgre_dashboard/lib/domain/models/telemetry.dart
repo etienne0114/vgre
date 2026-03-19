@@ -1,5 +1,24 @@
 import 'package:equatable/equatable.dart';
 
+enum MetricQuality {
+  measured,
+  estimated,
+  simulated,
+}
+
+extension MetricQualityLabel on MetricQuality {
+  String get label {
+    switch (this) {
+      case MetricQuality.measured:
+        return "MEASURED";
+      case MetricQuality.estimated:
+        return "ESTIMATED";
+      case MetricQuality.simulated:
+        return "SIMULATED";
+    }
+  }
+}
+
 class Telemetry extends Equatable {
   final DateTime timestamp;
   
@@ -31,10 +50,16 @@ class Telemetry extends Equatable {
   final bool eccEnabled;
   final bool backgroundComputeActive;
   final bool serviceModeActive;
+  final bool blockThreadsActive;
   final String deviceName;
   final int versionMajor;
   final int versionMinor;
   final List<String> logs;
+  final List<KernelStat> topKernels;
+  final MetricQuality computeQuality;
+  final MetricQuality memoryQuality;
+  final MetricQuality uvmQuality;
+  final MetricQuality temperatureQuality;
 
   const Telemetry({
     required this.timestamp,
@@ -59,10 +84,16 @@ class Telemetry extends Equatable {
     required this.eccEnabled,
     this.backgroundComputeActive = false,
     this.serviceModeActive = true,
+    this.blockThreadsActive = false,
     this.deviceName = "VGRE_DEVICE",
     this.versionMajor = 1,
     this.versionMinor = 0,
     this.logs = const [],
+    this.topKernels = const [],
+    this.computeQuality = MetricQuality.estimated,
+    this.memoryQuality = MetricQuality.estimated,
+    this.uvmQuality = MetricQuality.simulated,
+    this.temperatureQuality = MetricQuality.estimated,
   });
 
   double get memoryUsagePercent =>
@@ -92,7 +123,41 @@ class Telemetry extends Equatable {
       eccEnabled,
       backgroundComputeActive,
       serviceModeActive,
+      blockThreadsActive,
       deviceName,
       logs,
+      topKernels,
+      computeQuality,
+      memoryQuality,
+      uvmQuality,
+      temperatureQuality,
     ];
+}
+
+class KernelStat extends Equatable {
+  final String name;
+  final int invocations;
+  final double totalTimeMs;
+  final double avgTimeMs;
+  final double avgThroughputGbps;
+  final double avgGflops;
+
+  const KernelStat({
+    required this.name,
+    required this.invocations,
+    required this.totalTimeMs,
+    required this.avgTimeMs,
+    required this.avgThroughputGbps,
+    required this.avgGflops,
+  });
+
+  @override
+  List<Object?> get props => [
+        name,
+        invocations,
+        totalTimeMs,
+        avgTimeMs,
+        avgThroughputGbps,
+        avgGflops,
+      ];
 }

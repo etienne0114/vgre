@@ -101,6 +101,9 @@ typedef SetBackgroundCompute = int Function(int);
 typedef SetServiceModeFunc = Int32 Function(Int32);
 typedef SetServiceMode = int Function(int);
 
+typedef SetBlockThreadsFunc = Int32 Function(Int32);
+typedef SetBlockThreads = int Function(int);
+
 typedef GetTelemetryFunc = Int32 Function(Pointer<VgreTelemetry>);
 typedef GetTelemetry = int Function(Pointer<VgreTelemetry>);
 
@@ -115,6 +118,15 @@ typedef GetLogs = int Function(Pointer<Pointer<Pointer<Utf8>>>, Pointer<Int32>);
 typedef FreeLogsFunc = Void Function(Pointer<Pointer<Utf8>>, Int32);
 typedef FreeLogs = void Function(Pointer<Pointer<Utf8>>, int);
 
+typedef GetProfilerJsonFunc = Int32 Function(Pointer<Pointer<Utf8>>, Int32);
+typedef GetProfilerJson = int Function(Pointer<Pointer<Utf8>>, int);
+
+typedef FreeStringFunc = Void Function(Pointer<Utf8>);
+typedef FreeString = void Function(Pointer<Utf8>);
+
+typedef SetProfilerEnabledFunc = Int32 Function(Int32);
+typedef SetProfilerEnabled = int Function(int);
+
 // ── VGRE FFI Bridge ────────────────────────────────────────────────────────
 class VgreBridge {
   late final DynamicLibrary _lib;
@@ -124,9 +136,13 @@ class VgreBridge {
   late final GetDeviceProperties _getDeviceProperties;
   late final GetLogs _getLogs;
   late final FreeLogs _freeLogs;
+  late final GetProfilerJson _getProfilerJson;
+  late final FreeString _freeString;
+  late final SetProfilerEnabled _setProfilerEnabled;
   late final GetVersion _getVersion;
   late final SetBackgroundCompute _setBackgroundCompute;
   late final SetServiceMode _setServiceMode;
+  late final SetBlockThreads _setBlockThreads;
 
   VgreBridge(String libPath) {
     _lib = DynamicLibrary.open(libPath);
@@ -141,6 +157,16 @@ class VgreBridge {
         );
     _getLogs = _lib.lookupFunction<GetLogsFunc, GetLogs>('vgre_get_logs');
     _freeLogs = _lib.lookupFunction<FreeLogsFunc, FreeLogs>('vgre_free_logs');
+    _getProfilerJson =
+        _lib.lookupFunction<GetProfilerJsonFunc, GetProfilerJson>(
+          'vgre_get_profiler_json',
+        );
+    _freeString =
+        _lib.lookupFunction<FreeStringFunc, FreeString>('vgre_free_string');
+    _setProfilerEnabled =
+        _lib.lookupFunction<SetProfilerEnabledFunc, SetProfilerEnabled>(
+          'vgre_set_profiler_enabled',
+        );
     _getVersion = _lib.lookupFunction<GetVersionFunc, GetVersion>(
       'vgre_get_version',
     );
@@ -151,6 +177,10 @@ class VgreBridge {
     _setServiceMode = _lib.lookupFunction<SetServiceModeFunc, SetServiceMode>(
       'vgre_set_service_mode',
     );
+    _setBlockThreads =
+        _lib.lookupFunction<SetBlockThreadsFunc, SetBlockThreads>(
+          'vgre_set_block_threads',
+        );
   }
 
   int init() => _init();
@@ -159,6 +189,8 @@ class VgreBridge {
   int setBackgroundCompute(bool enabled) =>
       _setBackgroundCompute(enabled ? 1 : 0);
   int setServiceMode(bool isMaster) => _setServiceMode(isMaster ? 1 : 0);
+  int setBlockThreads(bool enabled) => _setBlockThreads(enabled ? 1 : 0);
+  int setProfilerEnabled(bool enabled) => _setProfilerEnabled(enabled ? 1 : 0);
 
   Map<String, dynamic> getDeviceProperties(int deviceId) {
     final ptr = calloc<VgreDeviceProperties>();
@@ -211,6 +243,20 @@ class VgreBridge {
     } finally {
       calloc.free(countPtr);
       calloc.free(bufferPtr);
+    }
+  }
+
+  String? getProfilerJson({int topN = 5}) {
+    final outPtr = calloc<Pointer<Utf8>>();
+    try {
+      final res = _getProfilerJson(outPtr, topN);
+      if (res != 0) throw Exception('Failed to get profiler json: $res');
+      if (outPtr.value == nullptr) return null;
+      final jsonStr = outPtr.value.toDartString();
+      _freeString(outPtr.value);
+      return jsonStr;
+    } finally {
+      calloc.free(outPtr);
     }
   }
 }

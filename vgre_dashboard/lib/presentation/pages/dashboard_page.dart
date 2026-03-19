@@ -57,6 +57,10 @@ class DashboardPage extends StatelessWidget {
                                       color: VgreTheme.primaryNeon,
                                       info: [
                                         {
+                                          'key': 'Quality',
+                                          'value': data.computeQuality.label,
+                                        },
+                                        {
                                           'key': 'Util',
                                           'value':
                                               '${data.computeUtilization.toStringAsFixed(0)}%',
@@ -84,6 +88,10 @@ class DashboardPage extends StatelessWidget {
                                       unit: "GB/s",
                                       color: VgreTheme.secondaryNeon,
                                       info: [
+                                        {
+                                          'key': 'Quality',
+                                          'value': data.memoryQuality.label,
+                                        },
                                         {
                                           'key': 'HBM2',
                                           'value':
@@ -118,7 +126,19 @@ class DashboardPage extends StatelessWidget {
                           // Bottom Section: Console
                           Expanded(
                             flex: 3,
-                            child: _TerminalConsole(logs: data.logs),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  flex: 2,
+                                  child: _buildKernelPanel(data),
+                                ),
+                                const SizedBox(width: 20),
+                                Expanded(
+                                  flex: 3,
+                                  child: _TerminalConsole(logs: data.logs),
+                                ),
+                              ],
+                            ),
                           ),
                         ],
                       ),
@@ -157,6 +177,10 @@ class DashboardPage extends StatelessWidget {
             _headerToggle("SERVICE", data.serviceModeActive, (val) {
               context.read<TelemetryBloc>().add(ToggleServiceMode(val));
             }, color: VgreTheme.primaryNeon),
+            const SizedBox(width: 24),
+            _headerToggle("BLOCK THREADS", data.blockThreadsActive, (val) {
+              context.read<TelemetryBloc>().add(ToggleBlockThreads(val));
+            }, color: VgreTheme.secondaryNeon),
           ];
 
           return Column(
@@ -198,6 +222,9 @@ class DashboardPage extends StatelessWidget {
                     _headerToggle("SERVICE", data.serviceModeActive, (val) {
                       context.read<TelemetryBloc>().add(ToggleServiceMode(val));
                     }, color: VgreTheme.primaryNeon),
+                    _headerToggle("BLOCK THREADS", data.blockThreadsActive, (val) {
+                      context.read<TelemetryBloc>().add(ToggleBlockThreads(val));
+                    }, color: VgreTheme.secondaryNeon),
                   ],
                 ),
               ],
@@ -275,6 +302,15 @@ class DashboardPage extends StatelessWidget {
               Text(
                 "32x32 GRID",
                 style: TextStyle(color: VgreTheme.textMuted, fontSize: 10),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                data.uvmQuality.label,
+                style: const TextStyle(
+                  color: VgreTheme.textMuted,
+                  fontSize: 10,
+                  letterSpacing: 1,
+                ),
               ),
             ],
           ),
@@ -447,6 +483,74 @@ class DashboardPage extends StatelessWidget {
           style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10),
         ),
       ],
+    );
+  }
+
+  Widget _buildKernelPanel(Telemetry data) {
+    return GlassCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            "HOT KERNELS (TOP 5)",
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              letterSpacing: 1.5,
+              fontSize: 12,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Expanded(
+            child: data.topKernels.isEmpty
+                ? Center(
+                    child: Text(
+                      "Profiler disabled or no data yet",
+                      style: TextStyle(
+                        color: VgreTheme.textMuted,
+                        fontSize: 12,
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    itemCount: data.topKernels.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    itemBuilder: (context, index) {
+                      final k = data.topKernels[index];
+                      return Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              k.name,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            "${k.avgTimeMs.toStringAsFixed(2)} ms",
+                            style: TextStyle(
+                              color: VgreTheme.textMuted,
+                              fontSize: 11,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Text(
+                            "${k.avgGflops.toStringAsFixed(1)} GF",
+                            style: TextStyle(
+                              color: VgreTheme.primaryNeon,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }
