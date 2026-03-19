@@ -16,7 +16,7 @@ __attribute__((visibility("default"))) int vgre_jit_get_thread_id() {
     static std::atomic<int> s_next_id{0};
     static __thread int s_my_id = -1;
     if (s_my_id == -1) {
-        s_my_id = (s_next_id++) % 256;
+        s_my_id = (s_next_id++) % 1024;
     }
     return s_my_id;
 }
@@ -82,7 +82,17 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
        smem.size());
   } else {
 #ifdef _OPENMP
-#pragma omp parallel num_threads(maxThreads_) if (totalBlocksI > 1)
+    // Cap OpenMP parallel threads to prevent oversubscribing the 1024-thread WorkerPool limit.
+    // Each block using __syncthreads relies on an exact concurrent allocation.
+    int omp_threads = maxThreads_;
+    uint32_t tCount = blockDim.total();
+    /* We don't have block_threads_enabled explicitly here, but if tCount > 1 we assume it might use BlockWorkerPool */
+    if (tCount > 1) {
+        int maxConcurrentBlocks = std::max(1, 1024 / (int)tCount);
+        omp_threads = std::min(omp_threads, maxConcurrentBlocks);
+    }
+
+#pragma omp parallel num_threads(omp_threads) if (totalBlocksI > 1)
     {
       // Thread-local shared memory buffer, allocated once per OpenMP thread
       SharedMemory threadSmem(sharedMemSize);
@@ -98,16 +108,18 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
             // Zero the shared memory for the new block
             threadSmem.reset();
 
-            // Setup active Warp Thread Masking simulate (Divergence Tracking)
+            // Setup active Warp Thread Masking (Divergence Tracking)
             // In a real JIT, __activemask() intrinsic reads this thread-local state.
             // Here, we initialize all 32 lanes mapped to this block's iterations as active.
             uint32_t activeMask = 0xFFFFFFFF;
             vgre::runtime::GPUThreadContext::setWarpMask(activeMask);
+            vgre::runtime::GPUThreadContext::clearBlockBarrier();
 
             fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, threadSmem.raw(),
                threadSmem.size());
             
             vgre::runtime::GPUThreadContext::clearWarpMask();
+            vgre::runtime::GPUThreadContext::clearBlockBarrier();
           }
         }
       }
@@ -121,11 +133,13 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
 
           uint32_t activeMask = 0xFFFFFFFF;
           vgre::runtime::GPUThreadContext::setWarpMask(activeMask);
+          vgre::runtime::GPUThreadContext::clearBlockBarrier();
 
           fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, smem.raw(),
              smem.size());
              
           vgre::runtime::GPUThreadContext::clearWarpMask();
+          vgre::runtime::GPUThreadContext::clearBlockBarrier();
         }
       }
     }

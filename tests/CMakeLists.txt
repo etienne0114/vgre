@@ -31,6 +31,10 @@ add_executable(test_cuda_graphs integration/test_cuda_graphs.cpp)
 target_link_libraries(test_cuda_graphs PRIVATE vgre)
 add_test(NAME CUDAGraphsIntegration COMMAND test_cuda_graphs)
 
+add_executable(test_graph_c_api integration/test_graph_c_api.cpp)
+target_link_libraries(test_graph_c_api PRIVATE vgre)
+add_test(NAME GraphCAPIIntegration COMMAND test_graph_c_api)
+
 add_executable(test_multi_device integration/test_multi_device.cpp)
 target_link_libraries(test_multi_device PRIVATE vgre)
 add_test(NAME MultiDeviceIntegration COMMAND test_multi_device)
@@ -58,3 +62,58 @@ add_test(NAME IGPUBackendIntegration COMMAND test_igpu_backend)
 add_executable(test_complex_jit integration/test_complex_jit.cpp)
 target_link_libraries(test_complex_jit PRIVATE vgre)
 add_test(NAME ComplexJITIntegration COMMAND test_complex_jit)
+
+add_executable(test_syncthreads integration/test_syncthreads.cpp)
+target_link_libraries(test_syncthreads PRIVATE vgre)
+add_test(NAME SyncthreadsIntegration COMMAND test_syncthreads)
+
+add_executable(test_extern_shared integration/test_extern_shared.cpp)
+target_link_libraries(test_extern_shared PRIVATE vgre)
+add_test(NAME ExternSharedIntegration COMMAND test_extern_shared)
+
+add_executable(test_extern_c_kernel integration/test_extern_c_kernel.cpp)
+target_link_libraries(test_extern_c_kernel PRIVATE vgre)
+add_test(NAME ExternCKernelIntegration COMMAND test_extern_c_kernel)
+
+add_executable(test_static_shared integration/test_static_shared.cpp)
+target_link_libraries(test_static_shared PRIVATE vgre)
+add_test(NAME StaticSharedIntegration COMMAND test_static_shared)
+
+add_executable(test_cuda_api_attrs integration/test_cuda_api_attrs.cpp)
+target_link_libraries(test_cuda_api_attrs PRIVATE vgre)
+add_test(NAME CUDAAPIAttributesIntegration COMMAND test_cuda_api_attrs)
+
+add_executable(test_driver_api integration/test_driver_api.cpp)
+target_link_libraries(test_driver_api PRIVATE vgre_cudart)
+add_test(NAME DriverAPIIntegration COMMAND test_driver_api)
+add_executable(test_cubin_load integration/test_cubin_load.cpp)
+target_link_libraries(test_cubin_load PRIVATE vgre_cudart)
+add_executable(test_texture_driver_api integration/test_texture_driver_api.cpp)
+target_link_libraries(test_texture_driver_api vgre)
+
+add_executable(test_async_sync integration/test_async_sync.cpp)
+target_link_libraries(test_async_sync vgre)
+
+add_executable(test_graph_cycle integration/test_graph_cycle.cpp)
+target_link_libraries(test_graph_cycle vgre)
+
+add_executable(test_struct_args integration/test_struct_args.cpp)
+target_link_libraries(test_struct_args vgre)
+add_test(NAME StructArgsIntegration COMMAND test_struct_args)
+
+add_test(NAME test_cubin_load COMMAND test_cubin_load)
+add_test(NAME test_texture_driver_api COMMAND test_texture_driver_api)
+add_test(NAME test_async_sync COMMAND test_async_sync)
+add_test(NAME test_graph_cycle COMMAND test_graph_cycle)
+
+add_executable(test_uvm_hints integration/test_uvm_hints.cpp)
+target_link_libraries(test_uvm_hints PRIVATE vgre)
+add_test(NAME test_uvm_hints COMMAND test_uvm_hints)
+
+add_executable(test_graph_update integration/test_graph_update.cpp)
+target_link_libraries(test_graph_update PRIVATE vgre)
+add_test(NAME test_graph_update COMMAND test_graph_update)
+
+add_executable(test_phase3_cluster integration/test_phase3_cluster.cpp)
+target_link_libraries(test_phase3_cluster PRIVATE vgre)
+add_test(NAME test_phase3_cluster COMMAND test_phase3_cluster)
