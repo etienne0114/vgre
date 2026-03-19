@@ -23,6 +23,7 @@ __pycache__/
 env/
 venv/
 .env
+.venv/
 
 # Flutter / Dart
 .dart_tool/
