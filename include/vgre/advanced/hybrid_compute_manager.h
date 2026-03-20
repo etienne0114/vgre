@@ -3,6 +3,7 @@
 
 #include "vgre/common/types.h"
 #include "vgre/common/error_codes.h"
+#include "vgre/advanced/workload_partitioner.h"
 
 #include <string>
 #include <vector>
@@ -49,6 +50,8 @@ public:
 
     // Detect all available compute resources
     VGREResult detectResources();
+
+    // Accessors
     ComputeResources getResources() const;
 
     // Select best backend for a given workload
@@ -80,6 +83,11 @@ public:
                                           int numArgs,
                                           size_t sharedMem = 0,
                                           ComputeBackend backend = ComputeBackend::AUTO);
+
+    // Phase 5: Partitioned distributed kernel execution across multiple nodes
+    VGREResult distributePartitionedKernel(
+        KernelId kernelId, const dim3 &gridDim, const dim3 &blockDim,
+        void **args, int numArgs, size_t sharedMem = 0);
 
     // Singleton
     static HybridComputeManager& instance();

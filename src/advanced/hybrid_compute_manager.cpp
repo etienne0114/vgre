@@ -529,6 +529,52 @@ VGREResult HybridComputeManager::distributeRegisteredKernel(
   return VGREResult::ERROR_NOT_SUPPORTED;
 }
 
+// ── Phase 5: Partitioned Kernel Distribution ──────────────────────────────
+VGREResult HybridComputeManager::distributePartitionedKernel(
+    KernelId kernelId, const dim3 &gridDim, const dim3 &blockDim,
+    void **args, int numArgs, size_t sharedMem) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto &cluster = TCPClusterManager::instance();
+  if (!cluster.isEnabled() || !cluster.isMaster()) {
+    // No cluster available — fall back to local execution
+    VGRE_LOG_WARN("HybridCompute",
+                  "No active cluster for partitioned dispatch — executing locally");
+    return core::RuntimeEngine::instance().launchKernel(
+        kernelId, gridDim, blockDim, args, sharedMem, 0);
+  }
+
+  // Count active remote workers
+  int activeWorkers = 0;
+  {
+    std::vector<TCPClusterManager::ClusterNodeInfo> connections;
+    cluster.getConnectedNodes(connections);
+    for (const auto &c : connections) {
+      if (c.active && c.cpu_cores > 0)
+        ++activeWorkers;
+    }
+  }
+
+  if (activeWorkers == 0) {
+    // No remote workers — execute locally
+    return core::RuntimeEngine::instance().launchKernel(
+        kernelId, gridDim, blockDim, args, sharedMem, 0);
+  }
+
+  uint32_t gd[3] = {gridDim.x, gridDim.y, gridDim.z};
+  uint32_t bd[3] = {blockDim.x, blockDim.y, blockDim.z};
+
+  VGREResult r = cluster.launchPartitionedKernel(
+      kernelId, gd, bd, args, numArgs, sharedMem);
+  if (r != VGREResult::SUCCESS) {
+    return r;
+  }
+
+  // Collect results from all partitions
+  uint32_t totalPartitions = static_cast<uint32_t>(activeWorkers + 1); // +1 for local
+  return cluster.collectPartitionResults(kernelId, totalPartitions, 30000);
+}
+
 // ── Singleton ──────────────────────────────────────────────────────────────
 HybridComputeManager &HybridComputeManager::instance() {
   static HybridComputeManager mgr;
