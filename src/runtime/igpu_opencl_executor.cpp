@@ -84,10 +84,12 @@ VGREResult IGPUOpenCLExecutor::initialize() {
 
   // Create command queue with Profiling and Out-of-Order Execution Enabled
   cl_command_queue_properties props = CL_QUEUE_PROFILING_ENABLE | CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE;
-  queue_ = clCreateCommandQueue(context_, device_, props, &err);
+  cl_queue_properties qprops[] = {CL_QUEUE_PROPERTIES, props, 0};
+  queue_ = clCreateCommandQueueWithProperties(context_, device_, qprops, &err);
   if (err != CL_SUCCESS) {
     // Fallback without out-of-order if the device doesn't support it
-    queue_ = clCreateCommandQueue(context_, device_, CL_QUEUE_PROFILING_ENABLE, &err);
+    cl_queue_properties fprops[] = {CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0};
+    queue_ = clCreateCommandQueueWithProperties(context_, device_, fprops, &err);
     if (err != CL_SUCCESS) {
       clReleaseContext(context_);
       context_ = nullptr;

@@ -50,6 +50,7 @@ extern "C" {
   void vgre_jit_clear_block_barrier();
   void vgre_jit_report_flops(uint64_t);
   void vgre_jit_report_memory(uint64_t);
+  void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
 
   struct dim3_pod { uint32_t x, y, z; };
   static __thread dim3_pod t_threadIdx = {1, 1, 1};
@@ -123,8 +124,61 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
       }
     }
 
-    // Crucial: Link host process symbols into JIT so OpenMP runtime is available
+    // Crucial: Link host process symbols into JIT so OpenMP runtime is available.
+    // We also explicitly bind all vgre_jit_* symbols to ensure they are resolved
+    // even if the library was loaded with RTLD_LOCAL.
     auto &MainJD = llvmState_->jit->getMainJITDylib();
+    auto &ES = llvmState_->jit->getExecutionSession();
+    auto Mangle = llvm::orc::MangleAndInterner(ES, llvmState_->jit->getDataLayout());
+    
+    llvm::orc::SymbolMap Symbols;
+    Symbols[Mangle("vgre_jit_get_thread_id")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_get_thread_id)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_set_block_barrier")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_set_block_barrier)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_clear_block_barrier")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_clear_block_barrier)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_report_flops")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_report_flops)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_report_memory")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_report_memory)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_get_threadIdx")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_get_threadIdx)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_get_blockIdx")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_get_blockIdx)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_get_blockDim")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_get_blockDim)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_get_gridDim")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_get_gridDim)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_get_sharedMem")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_get_sharedMem)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_block_dispatch")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_block_dispatch)),
+        llvm::JITSymbolFlags::Exported
+    };
+    
+    llvm::cantFail(MainJD.define(llvm::orc::absoluteSymbols(std::move(Symbols))));
+    
     MainJD.addGenerator(
         llvm::cantFail(llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
             llvmState_->jit->getDataLayout().getGlobalPrefix())));
@@ -697,48 +751,6 @@ LLVMTranslationEngine::compileJIT(const std::string &irCode,
       llvm::consumeError(std::move(Err));
     }
   });
-
-  // Ensure we can find host symbols (like vgre_jit_get_thread_id)
-  // even if the library was loaded with RTLD_LOCAL by Flutter.
-  // We use the direct function address for 100% reliability.
-  static bool symbolsBound = false;
-  if (!symbolsBound) {
-    void* sym_ptr = reinterpret_cast<void*>(vgre_jit_get_thread_id);
-    void* sym_set_barrier = reinterpret_cast<void*>(vgre_jit_set_block_barrier);
-    void* sym_clear_barrier = reinterpret_cast<void*>(vgre_jit_clear_block_barrier);
-    
-    auto Mangle = llvm::orc::MangleAndInterner(ES, llvmState_->jit->getDataLayout());
-    llvm::orc::SymbolMap Symbols;
-    Symbols[Mangle("vgre_jit_get_thread_id")] = {
-        llvm::orc::ExecutorAddr::fromPtr(sym_ptr),
-        llvm::JITSymbolFlags::Exported
-    };
-    Symbols[Mangle("vgre_jit_set_block_barrier")] = {
-        llvm::orc::ExecutorAddr::fromPtr(sym_set_barrier),
-        llvm::JITSymbolFlags::Exported
-    };
-    Symbols[Mangle("vgre_jit_clear_block_barrier")] = {
-        llvm::orc::ExecutorAddr::fromPtr(sym_clear_barrier),
-        llvm::JITSymbolFlags::Exported
-    };
-    Symbols[Mangle("vgre_jit_report_flops")] = {
-        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_report_flops)),
-        llvm::JITSymbolFlags::Exported
-    };
-    Symbols[Mangle("vgre_jit_report_memory")] = {
-        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_report_memory)),
-        llvm::JITSymbolFlags::Exported
-    };
-    llvm::cantFail(MainJD.define(llvm::orc::absoluteSymbols(std::move(Symbols))));
-    symbolsBound = true;
-    VGRE_LOG_INFO("LLVMTranslationEngine", "Directly bound vgre_jit_get_thread_id at " + 
-                  std::to_string(reinterpret_cast<uintptr_t>(sym_ptr)));
-
-    // Still add process generator as fallback for other symbols
-    MainJD.addGenerator(
-        llvm::cantFail(llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
-            llvmState_->jit->getDataLayout().getGlobalPrefix())));
-  }
 
   auto Mangle = llvm::orc::MangleAndInterner(ES, llvmState_->jit->getDataLayout());
   auto sym = ES.lookup({&JD}, Mangle(entryPoint));

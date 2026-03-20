@@ -22,18 +22,12 @@ int main() {
   // Regression: null fatbinary must be rejected safely.
   assert(__cudaRegisterFatBinary(nullptr) == nullptr);
 
-  dim3 grid{1, 1, 1};
-  dim3 block{1, 1, 1};
-
   // Regression: null host function must return invalid value.
-  auto r = cudaLaunchKernel(nullptr, grid, block, nullptr, 0, 0);
-  assert(r == vgre::api::cudaErrorInvalidValue);
+  assert(cudaLaunchKernel(nullptr, {1, 1, 1}, {1, 1, 1}, nullptr, 0, 0) == vgre::api::cudaErrorInvalidValue);
 
   // Regression: unregistered host function must return invalid device function
   // instead of attempting a fallback launch path.
-  auto fakeHostFun = reinterpret_cast<const void *>(0x1);
-  r = cudaLaunchKernel(fakeHostFun, grid, block, nullptr, 0, 0);
-  assert(r == vgre::api::cudaErrorInvalidDeviceFunction);
+  assert(cudaLaunchKernel(reinterpret_cast<const void *>(0x1), {1, 1, 1}, {1, 1, 1}, nullptr, 0, 0) == vgre::api::cudaErrorInvalidDeviceFunction);
 
   std::cout << "[PASS] CUDART shim regression guards validated\n";
   return 0;

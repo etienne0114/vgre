@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <functional>
+#include <mutex>
 #include <fstream>
 #include <sstream>
 
@@ -34,14 +34,21 @@ typedef int socklen_t;
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
-#if !defined(_WIN32)
 #include <poll.h>
-#endif
+
 #define CLOSE_SOCKET(s) close(s)
 #define IOCTL_NONBLOCK(s)                                                      \
-  fcntl((s), F_SETFL, fcntl((s), F_GETFL, 0) | O_NONBLOCK)
+  do {                                                                         \
+    int mode = 1;                                                              \
+    ioctl(s, FIONBIO, &mode);                                                  \
+  } while (0)
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 #endif
 
 namespace vgre {
@@ -396,7 +403,7 @@ void TCPClusterManager::serverLoop() {
               client.cpu_cores = cpkt.cpu_cores;
               client.cpu_memory = cpkt.cpu_memory;
               client.has_igpu = cpkt.has_igpu;
-              std::strncpy(client.igpu_name, cpkt.igpu_name, 63);
+              std::snprintf(client.igpu_name, sizeof(client.igpu_name), "%s", cpkt.igpu_name);
               
               HybridComputeManager::instance().updateRemoteNodeCapability(
                   client.ip_address, cpkt.cpu_cores, cpkt.cpu_memory, cpkt.has_igpu, cpkt.igpu_name);
@@ -954,6 +961,11 @@ void TCPClusterManager::aggregateRemoteTelemetry(
       outCombined.active_threads += client.last_telemetry.active_threads;
     }
   }
+}
+
+void TCPClusterManager::getConnectedNodes(std::vector<ClientConnection> &outNodes) const {
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  outNodes = clients_;
 }
 
 } // namespace advanced

@@ -113,6 +113,24 @@ public:
                                  const std::string &source);
 
   int getFirstActiveWorker() const;
+  
+  struct ClientConnection {
+    vgre_socket_t socket_fd;
+    vgre_telemetry_t last_telemetry;
+    bool active;
+    std::vector<uint8_t> rx_buffer;
+    bool expecting_type = true;
+    PacketType pending_type = PacketType::TELEMETRY;
+    uint64_t pending_target_ptr = 0;
+    uint64_t pending_data_size = 0;
+    int cpu_cores = 0;
+    uint64_t cpu_memory = 0;
+    bool has_igpu = false;
+    char igpu_name[64] = {};
+    std::string ip_address;
+  };
+  
+  void getConnectedNodes(std::vector<ClientConnection> &outNodes) const;
 
   bool isEnabled() const { return enabled_.load(); }
   bool isMaster() const { return is_master_; }
@@ -150,21 +168,6 @@ private:
 
   // Master State
   vgre_socket_t server_fd_ = (vgre_socket_t)-1;
-  struct ClientConnection {
-    vgre_socket_t socket_fd;
-    vgre_telemetry_t last_telemetry;
-    bool active;
-    std::vector<uint8_t> rx_buffer;
-    bool expecting_type = true;
-    PacketType pending_type = PacketType::TELEMETRY;
-    uint64_t pending_target_ptr = 0;
-    uint64_t pending_data_size = 0;
-    int cpu_cores = 0;
-    uint64_t cpu_memory = 0;
-    bool has_igpu = false;
-    char igpu_name[64] = {};
-    std::string ip_address;
-  };
   std::vector<ClientConnection> clients_;
   mutable std::mutex clients_mutex_;
 

@@ -1018,6 +1018,39 @@ int vgre_pool_destroy(uint64_t pool) {
   return to_status(r);
 }
 
+int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
+  if (!count) return VGRE_ERROR_INVALID_VALUE;
+  
+  auto &tcp = vgre::advanced::TCPClusterManager::instance();
+  if (!tcp.isEnabled() || !tcp.isMaster()) {
+    *count = 0;
+    return VGRE_SUCCESS;
+  }
+
+  std::vector<vgre::advanced::TCPClusterManager::ClientConnection> connections;
+  tcp.getConnectedNodes(connections);
+
+  int max_count = *count;
+  int actual_count = static_cast<int>(connections.size());
+  *count = actual_count;
+
+  if (!nodes || max_count <= 0) return VGRE_SUCCESS;
+
+  int copy_count = std::min(max_count, actual_count);
+  for (int i = 0; i < copy_count; ++i) {
+    const auto &conn = connections[i];
+    std::strncpy(nodes[i].address, conn.ip_address.c_str(), sizeof(nodes[i].address) - 1);
+    nodes[i].port = 7780; // Standardized Phase 3 Port
+    nodes[i].cpu_cores = conn.cpu_cores;
+    nodes[i].memory_bytes = conn.cpu_memory;
+    nodes[i].latency_ms = conn.last_telemetry.avg_kernel_latency_ms;
+    nodes[i].available = conn.active ? 1 : 0;
+    std::strncpy(nodes[i].igpu_name, conn.igpu_name, sizeof(nodes[i].igpu_name) - 1);
+  }
+
+  return VGRE_SUCCESS;
+}
+
 // ── Version Info ───────────────────────────────────────────────────────────
 
 const char *vgre_get_version(void) { return "0.1.0"; }

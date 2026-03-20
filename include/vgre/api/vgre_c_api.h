@@ -60,6 +60,16 @@ typedef struct {
   uint64_t total_const_mem;
 } vgre_device_properties_t;
 
+typedef struct {
+  char address[64];
+  int port;
+  int cpu_cores;
+  uint64_t memory_bytes;
+  double latency_ms;
+  int available;
+  char igpu_name[64];
+} vgre_cluster_node_t;
+
 #pragma pack(push, 8)
 typedef struct {
   uint64_t timestamp;
@@ -205,6 +215,13 @@ int vgre_set_profiler_enabled(int enabled);
  */
 int vgre_get_logs(char ***buffer, int *count);
 void vgre_free_logs(char **buffer, int count);
+
+/**
+ * @brief Retrieves information about all connected cluster nodes.
+ * @param nodes Array of vgre_cluster_node_t to be filled.
+ * @param count On entry, size of nodes array. On exit, number of nodes filled.
+ */
+int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count);
 
 /**
  * @brief Enables or disables the internal background compute engine.

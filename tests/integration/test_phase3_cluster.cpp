@@ -1,9 +1,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/api/vgre_c_api.h"
-#include "vgre/core/runtime_engine.h"
 #include "vgre/common/logger.h"
 #include <iostream>
-#include <vector>
 #include <thread>
 #include <chrono>
 #include <cassert>
