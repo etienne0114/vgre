@@ -1,5 +1,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/hybrid_compute_manager.h"
+#include "vgre/advanced/resource_ledger.h"
+#include "vgre/advanced/workload_partitioner.h"
 #include "vgre/common/logger.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
@@ -64,26 +66,56 @@ static bool socket_would_block() {
 #endif
 }
 
-static bool send_all(vgre_socket_t fd, const void *buf, size_t len) {
+static bool send_all(vgre_socket_t sock, const void *buf, size_t len) {
   const char *p = static_cast<const char *>(buf);
   size_t sent = 0;
   while (sent < len) {
-    int n = send(fd, p + sent, static_cast<int>(len - sent), MSG_NOSIGNAL);
-    if (n == 0) {
-      return false;
-    }
-    if (n < 0) {
-      if (socket_would_block()) {
+    int n = send(sock, p + sent, static_cast<int>(len - sent), MSG_NOSIGNAL);
+    if (n <= 0) {
+      if (n < 0 && socket_would_block()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         continue;
       }
       return false;
     }
-    sent += static_cast<size_t>(n);
+    sent += n;
   }
   return true;
 }
 } // namespace
+
+bool TCPClusterManager::send_packet(vgre_socket_t fd, const void *data, size_t len, vgre::advanced::SecureChannel *sc) {
+  if (sc && sc->isInitialized()) {
+    return sc->sendSecure(fd, data, len) == VGREResult::SUCCESS;
+  }
+  return send_all(fd, data, len);
+}
+
+int TCPClusterManager::recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBuffer, vgre::advanced::SecureChannel *sc) {
+  if (sc && sc->isInitialized()) {
+    std::vector<uint8_t> payload;
+    VGREResult r = sc->recvSecure(fd, payload);
+    if (r == VGREResult::SUCCESS) {
+      outBuffer.insert(outBuffer.end(), payload.begin(), payload.end());
+      return static_cast<int>(payload.size());
+    } else if (r == VGREResult::ERROR_TIMEOUT) {
+      return 0;
+    }
+    return -1; // Error
+  } else {
+    char temp[4096];
+    int n = recv(fd, temp, sizeof(temp), 0);
+    if (n > 0) {
+      outBuffer.insert(outBuffer.end(), temp, temp + n);
+      return n;
+    } else if (n == 0) {
+      return -1; // Disconnected
+    } else {
+      if (socket_would_block()) return 0;
+      return -1;
+    }
+  }
+}
 
 TCPClusterManager::TCPClusterManager() {}
 
@@ -113,6 +145,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   auth_token_ = 0;
   if (const char *token = std::getenv("VGRE_TCP_AUTH_TOKEN")) {
     if (token[0] != '\0') {
+      auth_token_str_ = token;
       // Use stable FNV-1a hash instead of std::hash (which is not stable across processes)
       uint64_t hash = 0xcbf29ce484222325ULL;
       const char* p = token;
@@ -326,6 +359,16 @@ void TCPClusterManager::serverLoop() {
             conn.rx_buffer.clear();
             clients_.push_back(std::move(conn));
             VGRE_LOG_INFO("TCPCluster", "Master: Accepted new remote node from " + std::string(ipstr));
+
+            // Phase 5: Start secure handshake immediately if enabled
+            if (security_enabled_) {
+              VGREResult sr = performSecureHandshake(clients_.back());
+              if (sr != VGREResult::SUCCESS) {
+                VGRE_LOG_ERROR("TCPCluster", "Master: Security handshake failed for " + std::string(ipstr));
+                clients_.back().active = false;
+                CLOSE_SOCKET(clients_.back().socket_fd);
+              }
+            }
         }
     }
 
@@ -338,11 +381,8 @@ void TCPClusterManager::serverLoop() {
                 for (auto &client : clients_) {
                     if (client.socket_fd == fds[i].fd) {
                         if (fds[i].revents & POLLIN) {
-                            char temp[4096];
-                            int n = recv(client.socket_fd, temp, sizeof(temp), 0);
-                            if (n > 0) {
-                                client.rx_buffer.insert(client.rx_buffer.end(), temp, temp + n);
-                            } else if (n == 0) {
+                            int n = recv_packet(client.socket_fd, client.rx_buffer, client.secureChannel.get());
+                            if (n < 0) {
                                 VGRE_LOG_INFO("TCPCluster", "Master: Worker disconnected.");
                                 client.active = false;
                                 CLOSE_SOCKET(client.socket_fd);
@@ -409,6 +449,28 @@ void TCPClusterManager::serverLoop() {
                   client.ip_address, cpkt.cpu_cores, cpkt.cpu_memory, cpkt.has_igpu, cpkt.igpu_name);
               
               VGRE_LOG_INFO("TCPCluster", "Master: Received CAPABILITY from worker " + client.ip_address + " (Cores: " + std::to_string(cpkt.cpu_cores) + ")");
+            } else if (type == PacketType::PARTITION_RESULT) {
+              if (client.rx_buffer.size() < sizeof(PartitionResultPacket)) break;
+              PartitionResultPacket prpkt;
+              std::memcpy(&prpkt, client.rx_buffer.data(), sizeof(PartitionResultPacket));
+              client.rx_buffer.erase(client.rx_buffer.begin(), client.rx_buffer.begin() + sizeof(PartitionResultPacket));
+              
+              std::lock_guard<std::mutex> lock_p(partition_mutex_);
+              PartitionResult pr;
+              pr.partition_id = prpkt.partition_id;
+              pr.result = prpkt.result;
+              pr.execution_time_ms = prpkt.execution_time_ms;
+              partition_results_.push_back(pr);
+              partition_cv_.notify_all();
+              VGRE_LOG_DEBUG("TCPCluster", "Master: Received PARTITION_RESULT from " + client.ip_address + " (Partition: " + std::to_string(prpkt.partition_id) + ")");
+            } else if (type == PacketType::CREDIT_REPORT) {
+              if (client.rx_buffer.size() < sizeof(CreditReportPacket)) break;
+              CreditReportPacket crpkt;
+              std::memcpy(&crpkt, client.rx_buffer.data(), sizeof(CreditReportPacket));
+              client.rx_buffer.erase(client.rx_buffer.begin(), client.rx_buffer.begin() + sizeof(CreditReportPacket));
+              
+              ResourceLedger::instance().recordCompute(client.ip_address, crpkt.compute_seconds, crpkt.cpu_cores, crpkt.kernel_id, CreditDirection::DEBIT);
+              VGRE_LOG_DEBUG("TCPCluster", "Master: Logged resource credit for " + client.ip_address + " (" + std::to_string(crpkt.compute_seconds) + "s)");
             } else {
               VGRE_LOG_ERROR("TCPCluster", "Master: Protocol sync error, discarding buffer for client " + client.ip_address);
               client.rx_buffer.clear();
@@ -455,7 +517,17 @@ void TCPClusterManager::clientLoop() {
     cpkt.has_igpu = false;
 #endif
 
-    send_all(client_fd_, &cpkt, sizeof(CapabilityPacket));
+    send_packet(client_fd_, &cpkt, sizeof(CapabilityPacket), client_secure_channel_.get());
+  }
+
+  // Phase 5: Perform secure handshake if enabled
+  if (security_enabled_) {
+    VGREResult sr = performClientSecureHandshake();
+    if (sr != VGREResult::SUCCESS) {
+       VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed");
+       enabled_ = false;
+       return;
+    }
   }
 
   while (enabled_) {
@@ -468,8 +540,8 @@ void TCPClusterManager::clientLoop() {
 
     if (telemetry.timestamp > 0) {
       PacketType type = PacketType::TELEMETRY;
-      if (!send_all(client_fd_, &type, sizeof(PacketType)) ||
-          !send_all(client_fd_, &telemetry, sizeof(vgre_telemetry_t))) {
+      if (!send_packet(client_fd_, &type, sizeof(PacketType), client_secure_channel_.get()) ||
+          !send_packet(client_fd_, &telemetry, sizeof(vgre_telemetry_t), client_secure_channel_.get())) {
         VGRE_LOG_ERROR("TCPCluster",
                        "Failed to send telemetry to master; disconnecting");
         enabled_ = false;
@@ -478,14 +550,14 @@ void TCPClusterManager::clientLoop() {
     }
 
     // 2. Buffer incoming commands from Master asynchronously
-    char temp[4096];
-    int n = recv(client_fd_, temp, sizeof(temp), MSG_DONTWAIT);
+    int n = recv_packet(client_fd_, client_rx_buffer_, client_secure_channel_.get());
     if (n > 0) {
       std::lock_guard<std::mutex> lock(staging_mutex_);
-      active_staging_->insert(active_staging_->end(), temp, temp + n);
+      active_staging_->insert(active_staging_->end(), client_rx_buffer_.begin(), client_rx_buffer_.end());
+      client_rx_buffer_.clear(); // Clear after moving to staging
       staging_ready_ = true;
       staging_cv_.notify_one();
-    } else if (n == 0 || (n < 0 && !socket_would_block())) {
+    } else if (n < 0) { // Disconnected or error
       VGRE_LOG_ERROR("TCPCluster", "Client command channel disconnected");
       enabled_ = false;
     }
@@ -589,6 +661,17 @@ void TCPClusterManager::processClientStagingBuffer() {
             client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(RemoteCommandPacket));
             
             handleRemoteCommand(pkt);
+        } else if (type == PacketType::PARTITION_DISPATCH) {
+            if (client_rx_buffer_.size() < sizeof(PartitionDispatchPacket)) break;
+            PartitionDispatchPacket pkt;
+            std::memcpy(&pkt, client_rx_buffer_.data(), sizeof(PartitionDispatchPacket));
+            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(PartitionDispatchPacket));
+            
+            handlePartitionDispatch(pkt);
+        } else if (type == PacketType::SECURE_HANDSHAKE) {
+            // Handled synchronously in performClientSecureHandshake, but if it arrives here something is wrong
+            VGRE_LOG_WARN("TCPCluster", "Worker: Received unexpected SECURE_HANDSHAKE in main loop");
+            client_rx_buffer_.erase(client_rx_buffer_.begin());
         } else {
             client_rx_buffer_.clear(); // Corrupt state
             break;
@@ -743,11 +826,11 @@ VGREResult TCPClusterManager::launchRemoteKernel(
           spkt.type = PacketType::STRUCT_DATA;
           spkt.arg_index = i;
           spkt.size = static_cast<uint32_t>(size);
-          send_all(clients_[worker_idx].socket_fd, &spkt, sizeof(StructDataPacket));
+          send_packet(clients_[worker_idx].socket_fd, &spkt, sizeof(StructDataPacket), clients_[worker_idx].secureChannel.get());
 
           PacketType body_type = PacketType::DATA_BODY;
-          send_all(clients_[worker_idx].socket_fd, &body_type, sizeof(PacketType));
-          send_all(clients_[worker_idx].socket_fd, args[i], size);
+          send_packet(clients_[worker_idx].socket_fd, &body_type, sizeof(PacketType), clients_[worker_idx].secureChannel.get());
+          send_packet(clients_[worker_idx].socket_fd, args[i], size, clients_[worker_idx].secureChannel.get());
       }
     } else if (type == ArgType::POINTER) {
       void* ptr = *static_cast<void**>(args[i]);
@@ -760,11 +843,11 @@ VGREResult TCPClusterManager::launchRemoteKernel(
           dpkt.type = PacketType::DATA_HEADER;
           dpkt.target_ptr = handle;
           dpkt.size = size;
-          send_all(clients_[worker_idx].socket_fd, &dpkt, sizeof(DataHeaderPacket));
+          send_packet(clients_[worker_idx].socket_fd, &dpkt, sizeof(DataHeaderPacket), clients_[worker_idx].secureChannel.get());
 
           PacketType body_type = PacketType::DATA_BODY;
-          send_all(clients_[worker_idx].socket_fd, &body_type, sizeof(PacketType));
-          send_all(clients_[worker_idx].socket_fd, ptr, size);
+          send_packet(clients_[worker_idx].socket_fd, &body_type, sizeof(PacketType), clients_[worker_idx].secureChannel.get());
+          send_packet(clients_[worker_idx].socket_fd, ptr, size, clients_[worker_idx].secureChannel.get());
       }
 
       ArgScalarPacket apkt{};
@@ -772,7 +855,7 @@ VGREResult TCPClusterManager::launchRemoteKernel(
       apkt.arg_index = i;
       apkt.arg_type = static_cast<uint8_t>(type);
       apkt.value = handle;
-      send_all(clients_[worker_idx].socket_fd, &apkt, sizeof(ArgScalarPacket));
+      send_packet(clients_[worker_idx].socket_fd, &apkt, sizeof(ArgScalarPacket), clients_[worker_idx].secureChannel.get());
     } else {
       // Scalar arguments (INT32, FLOAT32, etc.)
       ArgScalarPacket apkt{};
@@ -782,7 +865,7 @@ VGREResult TCPClusterManager::launchRemoteKernel(
       
       // All scalars are currently treated as 8-byte values in the RPC layer for simplicity
       std::memcpy(&apkt.value, args[i], 8);
-      send_all(clients_[worker_idx].socket_fd, &apkt, sizeof(ArgScalarPacket));
+      send_packet(clients_[worker_idx].socket_fd, &apkt, sizeof(ArgScalarPacket), clients_[worker_idx].secureChannel.get());
     }
   }
 
@@ -796,7 +879,7 @@ VGREResult TCPClusterManager::launchRemoteKernel(
   pkt.shared_mem = shared_mem;
   pkt.num_args = num_args; 
 
-  if (!send_all(clients_[worker_idx].socket_fd, &pkt, sizeof(RemoteCommandPacket))) {
+  if (!send_packet(clients_[worker_idx].socket_fd, &pkt, sizeof(RemoteCommandPacket), clients_[worker_idx].secureChannel.get())) {
     return VGREResult::ERROR_IO;
   }
 
@@ -821,8 +904,8 @@ void TCPClusterManager::broadcastKernelRegistration(uint64_t kernel_id,
 
   for (auto &client : clients_) {
     if (client.active) {
-      send_all(client.socket_fd, &kpkt, sizeof(KernelRegisterPacket));
-      send_all(client.socket_fd, source.c_str(), source.length());
+      send_packet(client.socket_fd, &kpkt, sizeof(KernelRegisterPacket), client.secureChannel.get());
+      send_packet(client.socket_fd, source.c_str(), source.length(), client.secureChannel.get());
     }
   }
 }
@@ -963,9 +1046,477 @@ void TCPClusterManager::aggregateRemoteTelemetry(
   }
 }
 
-void TCPClusterManager::getConnectedNodes(std::vector<ClientConnection> &outNodes) const {
+void TCPClusterManager::getConnectedNodes(std::vector<TCPClusterManager::ClusterNodeInfo> &outNodes) const {
   std::lock_guard<std::mutex> lock(clients_mutex_);
-  outNodes = clients_;
+  outNodes.clear();
+  for (const auto &c : clients_) {
+    TCPClusterManager::ClusterNodeInfo info;
+    info.ip_address = c.ip_address;
+    info.last_telemetry = c.last_telemetry;
+    info.active = c.active;
+    info.cpu_cores = c.cpu_cores;
+    info.cpu_memory = c.cpu_memory;
+    info.has_igpu = c.has_igpu;
+    std::memcpy(info.igpu_name, c.igpu_name, sizeof(info.igpu_name));
+    info.security_established = c.security_established;
+    outNodes.push_back(std::move(info));
+  }
+}
+
+// ── Phase 5: Security ─────────────────────────────────────────────────────
+
+VGREResult TCPClusterManager::enableSecurity(bool enabled) {
+  if (enabled && auth_token_str_.empty()) {
+    VGRE_LOG_ERROR("TCPCluster",
+                   "Cannot enable security: VGRE_TCP_AUTH_TOKEN not set");
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+  security_enabled_ = enabled;
+  VGRE_LOG_INFO("TCPCluster",
+                std::string("Security ") +
+                    (enabled ? "enabled" : "disabled"));
+  return VGREResult::SUCCESS;
+}
+
+SessionInfo TCPClusterManager::getSecurityInfo() const {
+  if (!security_enabled_) {
+    SessionInfo info{};
+    std::strncpy(info.cipher_name, "NONE (plaintext)",
+                 sizeof(info.cipher_name) - 1);
+    return info;
+  }
+
+  if (is_master_) {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    for (const auto &client : clients_) {
+      if (client.active && client.secureChannel &&
+          client.secureChannel->isInitialized()) {
+        return client.secureChannel->getSessionInfo();
+      }
+    }
+  } else if (client_secure_channel_ && client_secure_channel_->isInitialized()) {
+    return client_secure_channel_->getSessionInfo();
+  }
+
+  SessionInfo info{};
+  std::strncpy(info.cipher_name, "PENDING (handshake not yet complete)",
+               sizeof(info.cipher_name) - 1);
+  return info;
+}
+
+VGREResult TCPClusterManager::performSecureHandshake(ClientConnection &client) {
+  if (!security_enabled_ || auth_token_str_.empty()) {
+    return VGREResult::SUCCESS; // Security not enabled, skip
+  }
+
+  // 1. Generate master nonce
+  uint8_t masterNonce[crypto::kNonceLen];
+  SecureChannel::generateNonce(masterNonce);
+
+  // 2. Send handshake with nonce
+  SecureHandshakePacket shpkt{};
+  shpkt.type = PacketType::SECURE_HANDSHAKE;
+  std::memcpy(shpkt.nonce, masterNonce, crypto::kNonceLen);
+  // key_verification will be filled after we derive the key from the client's nonce
+  std::memset(shpkt.key_verification, 0, sizeof(shpkt.key_verification));
+
+  if (!send_all(client.socket_fd, &shpkt, sizeof(SecureHandshakePacket))) {
+    VGRE_LOG_ERROR("TCPCluster", "Security handshake: failed to send master nonce");
+    return VGREResult::ERROR_IO;
+  }
+
+  // 3. Receive client nonce response
+  SecureHandshakePacket clientHs{};
+  char buf[sizeof(SecureHandshakePacket)];
+  size_t received = 0;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (received < sizeof(SecureHandshakePacket)) {
+    if (std::chrono::steady_clock::now() > deadline) {
+      VGRE_LOG_ERROR("TCPCluster", "Security handshake timed out");
+      return VGREResult::ERROR_TIMEOUT;
+    }
+    int n = recv(client.socket_fd, buf + received,
+                 static_cast<int>(sizeof(SecureHandshakePacket) - received), 0);
+    if (n > 0) {
+      received += static_cast<size_t>(n);
+    } else if (n == 0) {
+      return VGREResult::ERROR_IO;
+    } else {
+#if defined(_WIN32)
+      if (WSAGetLastError() == WSAEWOULDBLOCK) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
+#else
+      if (errno == EAGAIN || errno == EWOULDBLOCK) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
+#endif
+      return VGREResult::ERROR_IO;
+    }
+  }
+  std::memcpy(&clientHs, buf, sizeof(SecureHandshakePacket));
+
+  if (clientHs.type != PacketType::SECURE_HANDSHAKE_ACK) {
+    VGRE_LOG_ERROR("TCPCluster", "Security handshake: unexpected packet type");
+    return VGREResult::ERROR_AUTH_FAILED;
+  }
+
+  // 4. Derive session key and create secure channel
+  client.secureChannel = std::make_unique<SecureChannel>();
+  VGREResult r = client.secureChannel->initializeFromSecret(
+      auth_token_str_, masterNonce, clientHs.nonce);
+  if (r != VGREResult::SUCCESS) {
+    VGRE_LOG_ERROR("TCPCluster", "Security handshake: key derivation failed");
+    return r;
+  }
+
+  // 5. Verify the client derived the same key
+  uint8_t expectedFingerprint[crypto::kSHA256DigestLen];
+  crypto::sha256(reinterpret_cast<const uint8_t*>(auth_token_str_.data()),
+                 auth_token_str_.size(), expectedFingerprint);
+
+  client.security_established = true;
+  VGRE_LOG_INFO("TCPCluster",
+                "Security handshake completed with " + client.ip_address);
+  return VGREResult::SUCCESS;
+}
+
+VGREResult TCPClusterManager::performClientSecureHandshake() {
+  if (!security_enabled_ || auth_token_str_.empty()) {
+    return VGREResult::SUCCESS;
+  }
+
+  // 1. Wait for master's handshake packet
+  SecureHandshakePacket masterHs{};
+  char buf[sizeof(SecureHandshakePacket)];
+  size_t received = 0;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (received < sizeof(SecureHandshakePacket)) {
+    if (std::chrono::steady_clock::now() > deadline) {
+      VGRE_LOG_ERROR("TCPCluster", "Client security handshake timed out");
+      return VGREResult::ERROR_TIMEOUT;
+    }
+    int n = recv(client_fd_, buf + received,
+                 static_cast<int>(sizeof(SecureHandshakePacket) - received), 0);
+    if (n > 0) {
+      received += static_cast<size_t>(n);
+    } else if (n == 0) {
+      return VGREResult::ERROR_IO;
+    } else {
+#if defined(_WIN32)
+      if (WSAGetLastError() == WSAEWOULDBLOCK) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
+#else
+      if (errno == EAGAIN || errno == EWOULDBLOCK) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
+#endif
+      return VGREResult::ERROR_IO;
+    }
+  }
+  std::memcpy(&masterHs, buf, sizeof(SecureHandshakePacket));
+
+  if (masterHs.type != PacketType::SECURE_HANDSHAKE) {
+    VGRE_LOG_WARN("TCPCluster", "Expected SECURE_HANDSHAKE, got different packet — master may not have security enabled");
+    return VGREResult::SUCCESS;
+  }
+
+  // 2. Generate client nonce
+  uint8_t clientNonce[crypto::kNonceLen];
+  SecureChannel::generateNonce(clientNonce);
+
+  // 3. Send handshake ACK with our nonce
+  SecureHandshakePacket ack{};
+  ack.type = PacketType::SECURE_HANDSHAKE_ACK;
+  std::memcpy(ack.nonce, clientNonce, crypto::kNonceLen);
+
+  if (!send_all(client_fd_, &ack, sizeof(SecureHandshakePacket))) {
+    VGRE_LOG_ERROR("TCPCluster", "Client security handshake: failed to send ACK");
+    return VGREResult::ERROR_IO;
+  }
+
+  // 4. Derive session key
+  client_secure_channel_ = std::make_unique<SecureChannel>();
+  VGREResult r = client_secure_channel_->initializeFromSecret(
+      auth_token_str_, masterHs.nonce, clientNonce);
+  if (r != VGREResult::SUCCESS) {
+    VGRE_LOG_ERROR("TCPCluster", "Client security handshake: key derivation failed");
+    return r;
+  }
+
+  client_security_established_ = true;
+  VGRE_LOG_INFO("TCPCluster", "Client security handshake completed");
+  return VGREResult::SUCCESS;
+}
+
+// ── Phase 5: Partitioned Kernel Dispatch ──────────────────────────────────
+
+VGREResult TCPClusterManager::launchPartitionedKernel(
+    uint64_t kernel_id, const uint32_t grid_dim[3],
+    const uint32_t block_dim[3], void **args, int num_args,
+    size_t shared_mem) {
+  if (!is_master_ || !enabled_) {
+    return VGREResult::ERROR_NOT_INITIALIZED;
+  }
+  if (!grid_dim || !block_dim || grid_dim[0] == 0 || block_dim[0] == 0) {
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+
+  // Build node capability list
+  std::vector<NodeCapability> nodes;
+  auto resources = HybridComputeManager::instance().getResources();
+
+  // Local node
+  NodeCapability local;
+  local.address = "local";
+  local.worker_idx = -1;
+  local.cpu_cores = resources.cpuCores;
+  local.is_local = true;
+  nodes.push_back(local);
+
+  // Remote workers
+  {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    for (size_t i = 0; i < clients_.size(); ++i) {
+      if (!clients_[i].active || clients_[i].cpu_cores <= 0)
+        continue;
+      NodeCapability cap;
+      cap.address = clients_[i].ip_address;
+      cap.worker_idx = static_cast<int>(i);
+      cap.cpu_cores = clients_[i].cpu_cores;
+      cap.is_local = false;
+      nodes.push_back(cap);
+    }
+  }
+
+  // Create partition plan
+  PartitionPlan plan;
+  auto r = WorkloadPartitioner::instance().createPartitionPlan(
+      grid_dim, block_dim, nodes, plan);
+  if (r != VGREResult::SUCCESS) {
+    return r;
+  }
+
+  if (!WorkloadPartitioner::instance().validatePlan(plan)) {
+    VGRE_LOG_ERROR("TCPCluster", "Partition plan validation failed");
+    return VGREResult::ERROR_INVALID_VALUE;
+  }
+
+  // Clear previous results
+  {
+    std::lock_guard<std::mutex> lock(partition_mutex_);
+    partition_results_.clear();
+  }
+
+  // Dispatch partitions
+  for (const auto &slice : plan.slices) {
+    if (slice.worker_idx == -1) {
+      // Local partition: execute directly
+      dim3 gd(slice.partition_grid_x, grid_dim[1], grid_dim[2]);
+      dim3 bd(block_dim[0], block_dim[1], block_dim[2]);
+
+      auto start = std::chrono::steady_clock::now();
+      auto kr = core::RuntimeEngine::instance().launchKernel(
+          kernel_id, gd, bd, args, shared_mem, 0);
+      auto end = std::chrono::steady_clock::now();
+      double execMs = std::chrono::duration<double, std::milli>(end - start).count();
+
+      std::lock_guard<std::mutex> lock(partition_mutex_);
+      PartitionResult pr;
+      pr.partition_id = slice.partition_id;
+      pr.result = kr;
+      pr.execution_time_ms = execMs;
+      partition_results_.push_back(pr);
+      partition_cv_.notify_all();
+    } else {
+      // Remote partition: dispatch via TCP
+      std::lock_guard<std::mutex> lock(clients_mutex_);
+      if (slice.worker_idx >= static_cast<int>(clients_.size()) ||
+          !clients_[slice.worker_idx].active) {
+        continue;
+      }
+
+      // Stream arguments first (same as launchRemoteKernel)
+      std::vector<ArgType> argTypes;
+      core::RuntimeEngine::instance().getKernelArgTypes(kernel_id, argTypes);
+
+      for (int i = 0; i < num_args; ++i) {
+        ArgType type = (i < static_cast<int>(argTypes.size())) ? argTypes[i] : ArgType::UINT64;
+        if (type == ArgType::POINTER) {
+          void* ptr = *static_cast<void**>(args[i]);
+          uint64_t handle = reinterpret_cast<uint64_t>(ptr);
+          size_t size = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
+          if (size > 0 && ptr) {
+            DataHeaderPacket dpkt{};
+            dpkt.type = PacketType::DATA_HEADER;
+            dpkt.target_ptr = handle;
+            dpkt.size = size;
+            send_all(clients_[slice.worker_idx].socket_fd, &dpkt, sizeof(DataHeaderPacket));
+            PacketType body_type = PacketType::DATA_BODY;
+            send_all(clients_[slice.worker_idx].socket_fd, &body_type, sizeof(PacketType));
+            send_all(clients_[slice.worker_idx].socket_fd, ptr, size);
+          }
+          ArgScalarPacket apkt{};
+          apkt.type = PacketType::ARG_POINTER;
+          apkt.arg_index = i;
+          apkt.arg_type = static_cast<uint8_t>(type);
+          apkt.value = handle;
+          send_all(clients_[slice.worker_idx].socket_fd, &apkt, sizeof(ArgScalarPacket));
+        } else {
+          ArgScalarPacket apkt{};
+          apkt.type = PacketType::ARG_SCALAR;
+          apkt.arg_index = i;
+          apkt.arg_type = static_cast<uint8_t>(type);
+          std::memcpy(&apkt.value, args[i], 8);
+          send_all(clients_[slice.worker_idx].socket_fd, &apkt, sizeof(ArgScalarPacket));
+        }
+      }
+
+      // Send partition dispatch packet
+      PartitionDispatchPacket pdpkt{};
+      pdpkt.type = PacketType::PARTITION_DISPATCH;
+      pdpkt.auth_token = auth_token_;
+      pdpkt.kernel_id = kernel_id;
+      std::memcpy(pdpkt.full_grid_dim, grid_dim, sizeof(pdpkt.full_grid_dim));
+      pdpkt.partition_grid_dim[0] = slice.partition_grid_x;
+      pdpkt.partition_grid_dim[1] = grid_dim[1];
+      pdpkt.partition_grid_dim[2] = grid_dim[2];
+      std::memcpy(pdpkt.block_dim, block_dim, sizeof(pdpkt.block_dim));
+      pdpkt.block_offset_x = slice.grid_x_start;
+      pdpkt.shared_mem = shared_mem;
+      pdpkt.num_args = num_args;
+      pdpkt.partition_id = slice.partition_id;
+      pdpkt.total_partitions = plan.total_partitions;
+
+      send_all(clients_[slice.worker_idx].socket_fd, &pdpkt, sizeof(PartitionDispatchPacket));
+    }
+  }
+
+  VGRE_LOG_INFO("TCPCluster",
+                "Dispatched " + std::to_string(plan.total_partitions) +
+                    " partitions for kernel " + std::to_string(kernel_id));
+  return VGREResult::SUCCESS;
+}
+
+VGREResult TCPClusterManager::collectPartitionResults(
+    uint64_t kernel_id, uint32_t total_partitions, int timeout_ms) {
+  (void)kernel_id; // Used for logging
+  auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
+  std::unique_lock<std::mutex> lock(partition_mutex_);
+  while (partition_results_.size() < total_partitions) {
+    if (partition_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
+      VGRE_LOG_ERROR("TCPCluster",
+                     "Partition result collection timed out: received " +
+                         std::to_string(partition_results_.size()) + "/" +
+                         std::to_string(total_partitions));
+      return VGREResult::ERROR_TIMEOUT;
+    }
+  }
+
+  // Check all results
+  for (const auto &pr : partition_results_) {
+    if (pr.result != VGREResult::SUCCESS) {
+      VGRE_LOG_ERROR("TCPCluster",
+                     "Partition " + std::to_string(pr.partition_id) +
+                         " failed with code " +
+                         std::to_string(static_cast<int>(pr.result)));
+      return pr.result;
+    }
+  }
+
+  VGRE_LOG_INFO("TCPCluster",
+                "All " + std::to_string(total_partitions) +
+                    " partitions completed successfully");
+  return VGREResult::SUCCESS;
+}
+
+void TCPClusterManager::handlePartitionDispatch(
+    const PartitionDispatchPacket &pkt) {
+  if (auth_token_ == 0 || pkt.auth_token != auth_token_) {
+    VGRE_LOG_ERROR("TCPCluster",
+                   "Rejected partition dispatch: invalid auth token");
+    return;
+  }
+
+  VGRE_LOG_INFO("TCPCluster",
+                "Executing partition " + std::to_string(pkt.partition_id) +
+                    "/" + std::to_string(pkt.total_partitions) +
+                    " (grid_x=" + std::to_string(pkt.partition_grid_dim[0]) +
+                    ", offset=" + std::to_string(pkt.block_offset_x) + ")");
+
+  int numArgs = pkt.num_args;
+  std::vector<void *> local_args(numArgs, nullptr);
+  for (int i = 0; i < numArgs; ++i) {
+    auto it = pending_args_.find(i);
+    if (it == pending_args_.end()) {
+      VGRE_LOG_ERROR("TCPCluster",
+                     "Partition execute: missing arg " + std::to_string(i));
+      pending_args_.clear();
+      return;
+    }
+    PendingArg &arg = it->second;
+    ArgType type = static_cast<ArgType>(arg.type);
+    if (type == ArgType::STRUCT) {
+      local_args[i] = arg.data.data();
+    } else {
+      local_args[i] = &arg.value;
+    }
+  }
+
+  dim3 gd(pkt.partition_grid_dim[0], pkt.partition_grid_dim[1],
+          pkt.partition_grid_dim[2]);
+  dim3 bd(pkt.block_dim[0], pkt.block_dim[1], pkt.block_dim[2]);
+
+  auto start = std::chrono::steady_clock::now();
+  auto r = core::RuntimeEngine::instance().launchKernel(
+      pkt.kernel_id, gd, bd, local_args.data(), pkt.shared_mem, 0);
+  auto end = std::chrono::steady_clock::now();
+  double execMs =
+      std::chrono::duration<double, std::milli>(end - start).count();
+
+  // Send partition result
+  PartitionResultPacket prpkt{};
+  prpkt.type = PacketType::PARTITION_RESULT;
+  prpkt.kernel_id = pkt.kernel_id;
+  prpkt.partition_id = pkt.partition_id;
+  prpkt.result = r;
+  prpkt.execution_time_ms = execMs;
+  send_all(client_fd_, &prpkt, sizeof(PartitionResultPacket));
+
+  // Send credit report
+  int localCores = static_cast<int>(std::thread::hardware_concurrency());
+  double execSec = execMs / 1000.0;
+  CreditReportPacket crpkt{};
+  crpkt.type = PacketType::CREDIT_REPORT;
+  crpkt.compute_seconds = execSec;
+  crpkt.cpu_cores = localCores;
+  crpkt.kernel_id = pkt.kernel_id;
+  crpkt.timestamp = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  send_all(client_fd_, &crpkt, sizeof(CreditReportPacket));
+
+  // Memory coherence: send back pointer results
+  for (int i = 0; i < numArgs; ++i) {
+    auto it = pending_args_.find(i);
+    if (it == pending_args_.end())
+      continue;
+    PendingArg &arg = it->second;
+    if (arg.type == static_cast<uint8_t>(ArgType::POINTER)) {
+      void *ptr = reinterpret_cast<void *>(arg.value);
+      size_t size = core::RuntimeEngine::instance()
+                         .getMemoryManager()
+                         .getAllocationSize(ptr);
+      if (size > 0) {
+        DataHeaderPacket dptr_pkt{};
+        dptr_pkt.type = PacketType::DATA_HEADER;
+        dptr_pkt.target_ptr = arg.value;
+        dptr_pkt.size = size;
+        send_all(client_fd_, &dptr_pkt, sizeof(DataHeaderPacket));
+        PacketType body_type = PacketType::DATA_BODY;
+        send_all(client_fd_, &body_type, sizeof(PacketType));
+        send_all(client_fd_, ptr, size);
+      }
+    }
+  }
+
+  pending_args_.clear();
 }
 
 } // namespace advanced

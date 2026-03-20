@@ -23,6 +23,8 @@ enum class VGREResult : int {
     ERROR_IO                = 12,
     ERROR_COMPRESSION       = 13,
     ERROR_NETWORK           = 14,
+    ERROR_AUTH_FAILED       = 15,
+    ERROR_CRYPTO            = 16,
     ERROR_UNKNOWN           = 99
 };
 
@@ -44,6 +46,8 @@ inline const char* resultToString(VGREResult r) {
         case VGREResult::ERROR_IO:              return "I/O error";
         case VGREResult::ERROR_COMPRESSION:     return "Compression error";
         case VGREResult::ERROR_NETWORK:         return "Network error";
+        case VGREResult::ERROR_AUTH_FAILED:     return "Authentication failed";
+        case VGREResult::ERROR_CRYPTO:          return "Cryptographic error";
         case VGREResult::ERROR_UNKNOWN:         return "Unknown error";
         default:                                return "Unrecognized error code";
     }

@@ -2,6 +2,7 @@
 
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
+#include "vgre/advanced/secure_channel.h"
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -31,7 +32,13 @@ enum class PacketType : uint32_t {
   ARG_SCALAR = 7,     // scalar arg (8 bytes)
   ARG_POINTER = 8,    // pointer arg (handle)
   CAPABILITY = 9,     // per-node hardware info
-  REGISTER_KERNEL = 10
+  REGISTER_KERNEL = 10,
+  // Phase 5: Global Compute Network
+  SECURE_HANDSHAKE = 11,      // nonce exchange for key derivation
+  SECURE_HANDSHAKE_ACK = 12,  // handshake acknowledgment
+  PARTITION_DISPATCH = 13,    // sub-grid dispatch for partitioned kernel
+  PARTITION_RESULT = 14,      // result from a partition execution
+  CREDIT_REPORT = 15          // compute-unit-seconds billing report
 };
 
 struct KernelRegisterPacket {
@@ -84,6 +91,46 @@ struct CapabilityPacket {
   char igpu_name[64];
 };
 
+// Phase 5: Security handshake — exchanges nonces for PBKDF2 key derivation
+struct SecureHandshakePacket {
+  PacketType type;
+  uint8_t nonce[crypto::kNonceLen];
+  uint8_t key_verification[crypto::kSHA256DigestLen]; // SHA256(derived_key) for verification
+};
+
+// Phase 5: Partition dispatch — sub-grid for distributed kernel execution
+struct PartitionDispatchPacket {
+  PacketType type;
+  uint64_t auth_token;
+  uint64_t kernel_id;
+  uint32_t full_grid_dim[3];   // original full grid
+  uint32_t partition_grid_dim[3]; // this partition's grid
+  uint32_t block_dim[3];
+  uint32_t block_offset_x;     // X offset for blockIdx remapping
+  size_t shared_mem;
+  int num_args;
+  uint32_t partition_id;
+  uint32_t total_partitions;
+};
+
+// Phase 5: Partition result — response from a completed partition
+struct PartitionResultPacket {
+  PacketType type;
+  uint64_t kernel_id;
+  uint32_t partition_id;
+  VGREResult result;
+  double execution_time_ms;
+};
+
+// Phase 5: Credit report — compute usage billing
+struct CreditReportPacket {
+  PacketType type;
+  double compute_seconds;  // wall-clock execution time
+  int cpu_cores;           // cores used during execution
+  uint64_t kernel_id;
+  uint64_t timestamp;
+};
+
 class TCPClusterManager {
 public:
   static TCPClusterManager &instance() {
@@ -113,6 +160,27 @@ public:
                                  const std::string &source);
 
   int getFirstActiveWorker() const;
+
+  // Phase 5: Secure Packet I/O
+  bool send_packet(vgre_socket_t fd, const void *data, size_t len, SecureChannel *sc = nullptr);
+  int recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBuffer, SecureChannel *sc = nullptr);
+  void reportComputeFromWorker(double seconds, int cores, uint64_t kernel_id);
+
+
+  // ── Phase 5: Security ────────────────────────────────────────────────
+  VGREResult enableSecurity(bool enabled);
+  bool isSecurityEnabled() const { return security_enabled_.load(); }
+  SessionInfo getSecurityInfo() const;
+
+  // ── Phase 5: Partitioned Dispatch ────────────────────────────────────
+  VGREResult launchPartitionedKernel(uint64_t kernel_id,
+                                     const uint32_t grid_dim[3],
+                                     const uint32_t block_dim[3],
+                                     void **args, int num_args,
+                                     size_t shared_mem);
+  VGREResult collectPartitionResults(uint64_t kernel_id,
+                                     uint32_t total_partitions,
+                                     int timeout_ms = 30000);
   
   struct ClientConnection {
     vgre_socket_t socket_fd;
@@ -128,9 +196,22 @@ public:
     bool has_igpu = false;
     char igpu_name[64] = {};
     std::string ip_address;
+    std::unique_ptr<SecureChannel> secureChannel;
+    bool security_established = false;
   };
-  
-  void getConnectedNodes(std::vector<ClientConnection> &outNodes) const;
+
+  struct ClusterNodeInfo {
+    std::string ip_address;
+    vgre_telemetry_t last_telemetry;
+    bool active;
+    int cpu_cores;
+    uint64_t cpu_memory;
+    bool has_igpu;
+    char igpu_name[64];
+    bool security_established;
+  };
+
+  void getConnectedNodes(std::vector<ClusterNodeInfo> &outNodes) const;
 
   bool isEnabled() const { return enabled_.load(); }
   bool isMaster() const { return is_master_; }
@@ -144,14 +225,21 @@ private:
   void serverLoop();
   void clientLoop();
   void handleRemoteCommand(const RemoteCommandPacket &pkt);
+  void handlePartitionDispatch(const PartitionDispatchPacket &pkt);
   
   // UDP Auto-Discovery
   void udpAnnouncerLoop();  // Master
   void udpDiscoveryLoop();  // Client
   void processClientStagingBuffer(); // Client data processor
 
+  // Phase 5: Security handshake
+  VGREResult performSecureHandshake(ClientConnection &client);
+  VGREResult performClientSecureHandshake();
+
   std::atomic<bool> enabled_{false};
+  std::atomic<bool> security_enabled_{false};
   uint64_t auth_token_ = 0;
+  std::string auth_token_str_; // raw token string for PBKDF2
   
   // Worker-side state for incoming data
   uint64_t pending_target_ptr_ = 0;
@@ -174,6 +262,8 @@ private:
   // Client State
   vgre_socket_t client_fd_ = (vgre_socket_t)-1;
   vgre_telemetry_t client_telemetry_buffer_{};
+  std::unique_ptr<SecureChannel> client_secure_channel_;
+  bool client_security_established_ = false;
   std::vector<uint8_t> client_rx_buffer_;
   std::mutex client_mutex_;
 
@@ -193,6 +283,16 @@ private:
     std::vector<uint8_t> data;
   };
   std::map<uint32_t, PendingArg> pending_args_;
+
+  // Phase 5: Partition results collected on master
+  struct PartitionResult {
+    uint32_t partition_id;
+    VGREResult result;
+    double execution_time_ms;
+  };
+  std::vector<PartitionResult> partition_results_;
+  std::mutex partition_mutex_;
+  std::condition_variable partition_cv_;
 };
 
 } // namespace advanced
