@@ -122,15 +122,47 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
             final raw = bridge.getTelemetryWith(ptr);
             final logs = bridge.getLogs();
             final clusterData = bridge.getClusterNodes();
-            final List<ClusterNode> clusterNodes = clusterData.map((m) => ClusterNode(
-              address: m['address'] as String,
-              port: m['port'] as int,
-              cpuCores: m['cpuCores'] as int,
-              memoryBytes: m['memoryBytes'] as int,
-              latencyMs: m['latencyMs'] as double,
-              available: m['available'] as bool,
-              igpuName: m['igpuName'] as String,
-            )).toList();
+            
+            // Phase 5: Fetch Security and Credits
+            SecurityInfo? securityInfo;
+            try {
+              final s = bridge.getSecurityInfo();
+              securityInfo = SecurityInfo(
+                cipherName: s['cipherName'] as String,
+                keyFingerprint: s['keyFingerprint'] as String,
+                sessionSeconds: s['sessionSeconds'] as double,
+                isEncrypted: s['isEncrypted'] as bool,
+                packetsSent: s['packetsSent'] as int,
+                packetsReceived: s['packetsReceived'] as int,
+                bytesSent: s['bytesSent'] as int,
+                bytesReceived: s['bytesReceived'] as int,
+              );
+            } catch (e) {
+              debugPrint("Failed to fetch security info: $e");
+            }
+
+            final creditData = bridge.getCreditsAll();
+            final Map<String, Map<String, dynamic>> creditsByAddr = {
+              for (var c in creditData) c['address'] as String: c
+            };
+
+            final List<ClusterNode> clusterNodes = clusterData.map((m) {
+              final addr = m['address'] as String;
+              final cred = creditsByAddr[addr];
+              return ClusterNode(
+                address: addr,
+                port: m['port'] as int,
+                cpuCores: m['cpuCores'] as int,
+                memoryBytes: m['memoryBytes'] as int,
+                latencyMs: m['latencyMs'] as double,
+                available: m['available'] as bool,
+                igpuName: m['igpuName'] as String,
+                totalCredits: (cred?['totalCredits'] ?? 0.0) as double,
+                totalDebits: (cred?['totalDebits'] ?? 0.0) as double,
+                balance: (cred?['balance'] ?? 0.0) as double,
+                transactionCount: (cred?['transactionCount'] ?? 0) as int,
+              );
+            }).toList();
 
             List<KernelStat> topKernels = const [];
             try {
@@ -159,6 +191,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
               debugPrint('Profiler JSON parse failed: $e');
               topKernels = const [];
             }
+
 
           final bool hasProfilerStats = topKernels.isNotEmpty;
           final data = Telemetry(
@@ -200,6 +233,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
               uvmQuality: MetricQuality.simulated,
               temperatureQuality: MetricQuality.estimated,
               clusterNodes: clusterNodes,
+              securityInfo: securityInfo,
             );
             add(UpdateTelemetry(data));
           } finally {
@@ -321,6 +355,8 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       logs: current.logs,
       topKernels: current.topKernels,
       clusterNodes: current.clusterNodes,
+      securityInfo: current.securityInfo,
     );
   }
 }
+

@@ -266,16 +266,47 @@ class DashboardOverviewContent extends StatelessWidget {
                   const Icon(Icons.memory, color: VgreTheme.primaryNeon, size: 28),
                   const SizedBox(width: 16),
                   Expanded(
-                    child: Text(
-                      data.deviceName.toUpperCase(),
-                      style: GoogleFonts.orbitron(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 2,
-                      ),
-                      overflow: TextOverflow.ellipsis,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          data.deviceName.toUpperCase(),
+                          style: GoogleFonts.orbitron(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 2,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        if (data.securityInfo?.isEncrypted ?? false) ...[
+                          const SizedBox(width: 12),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: VgreTheme.neonGreen.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: VgreTheme.neonGreen.withValues(alpha: 0.5)),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(Icons.lock_outline, size: 12, color: VgreTheme.neonGreen),
+                                SizedBox(width: 4),
+                                Text(
+                                  "SECURE",
+                                  style: TextStyle(
+                                    color: VgreTheme.neonGreen,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
+
                   if (!isNarrow) ...[
                     const Spacer(),
                     ...infoItems,

@@ -103,6 +103,41 @@ final class VgreClusterNode extends Struct {
   external Array<Uint8> igpuName;
 }
 
+final class VgreSecurityInfo extends Struct {
+  @Array(64)
+  external Array<Uint8> cipherName;
+  @Array(65)
+  external Array<Uint8> keyFingerprint;
+  @Double()
+  external double sessionSeconds;
+  @Int32()
+  external int isEncrypted;
+  @Uint64()
+  external int packetsSent;
+  @Uint64()
+  external int packetsReceived;
+  @Uint64()
+  external int bytesSent;
+  @Uint64()
+  external int bytesReceived;
+}
+
+final class VgreCreditInfo extends Struct {
+  @Array(64)
+  external Array<Uint8> address;
+  @Double()
+  external double totalCredits;
+  @Double()
+  external double totalDebits;
+  @Double()
+  external double balance;
+  @Uint64()
+  external int lastActivity;
+  @Int32()
+  external int transactionCount;
+}
+
+
 typedef InitFunc = Int32 Function();
 typedef Init = int Function();
 
@@ -144,8 +179,23 @@ typedef FreeString = void Function(Pointer<Utf8>);
 typedef SetProfilerEnabledFunc = Int32 Function(Int32);
 typedef SetProfilerEnabled = int Function(int);
 
-typedef GetClusterNodesFunc = Int32 Function(Pointer<VgreClusterNode>, Pointer<Int32>);
 typedef GetClusterNodes = int Function(Pointer<VgreClusterNode>, Pointer<Int32>);
+
+typedef ClusterSetSecurityFunc = Int32 Function(Int32);
+typedef ClusterSetSecurity = int Function(int);
+
+typedef GetSecurityInfoFunc = Int32 Function(Pointer<VgreSecurityInfo>);
+typedef GetSecurityInfo = int Function(Pointer<VgreSecurityInfo>);
+
+typedef GetCreditBalanceFunc = Int32 Function(Pointer<Utf8>, Pointer<VgreCreditInfo>);
+typedef GetCreditBalance = int Function(Pointer<Utf8>, Pointer<VgreCreditInfo>);
+
+typedef GetCreditsAllFunc = Int32 Function(Pointer<VgreCreditInfo>, Pointer<Int32>);
+typedef GetCreditsAll = int Function(Pointer<VgreCreditInfo>, Pointer<Int32>);
+
+typedef CreditsResetFunc = Int32 Function();
+typedef CreditsReset = int Function();
+
 
 // ── VGRE FFI Bridge ────────────────────────────────────────────────────────
 class VgreBridge {
@@ -164,6 +214,12 @@ class VgreBridge {
   late final SetServiceMode _setServiceMode;
   late final SetBlockThreads _setBlockThreads;
   late final GetClusterNodes _getClusterNodes;
+  late final ClusterSetSecurity _clusterSetSecurity;
+  late final GetSecurityInfo _getSecurityInfo;
+  late final GetCreditBalance _getCreditBalance;
+  late final GetCreditsAll _getCreditsAll;
+  late final CreditsReset _creditsReset;
+
 
   VgreBridge(String libPath) {
     _lib = DynamicLibrary.open(libPath);
@@ -204,7 +260,18 @@ class VgreBridge {
         );
     _getClusterNodes = _lib.lookupFunction<GetClusterNodesFunc, GetClusterNodes>(
         'vgre_get_cluster_nodes');
+    _clusterSetSecurity = _lib.lookupFunction<ClusterSetSecurityFunc, ClusterSetSecurity>(
+        'vgre_cluster_set_security');
+    _getSecurityInfo = _lib.lookupFunction<GetSecurityInfoFunc, GetSecurityInfo>(
+        'vgre_cluster_get_security_info');
+    _getCreditBalance = _lib.lookupFunction<GetCreditBalanceFunc, GetCreditBalance>(
+        'vgre_credits_get_balance');
+    _getCreditsAll = _lib.lookupFunction<GetCreditsAllFunc, GetCreditsAll>(
+        'vgre_credits_get_all');
+    _creditsReset = _lib.lookupFunction<CreditsResetFunc, CreditsReset>(
+        'vgre_credits_reset');
   }
+
 
   int init() => _init();
   int shutdown() => _shutdown();
@@ -325,4 +392,79 @@ class VgreBridge {
       calloc.free(nodesPtr);
     }
   }
+
+  int clusterSetSecurity(bool enabled) => _clusterSetSecurity(enabled ? 1 : 0);
+
+  Map<String, dynamic> getSecurityInfo() {
+    final ptr = calloc<VgreSecurityInfo>();
+    try {
+      final res = _getSecurityInfo(ptr);
+      if (res != 0) throw Exception('Failed to get security info: $res');
+
+      final info = ptr.ref;
+      final cipherBytes = <int>[];
+      for (int i = 0; i < 64; i++) {
+        if (info.cipherName[i] == 0) break;
+        cipherBytes.add(info.cipherName[i]);
+      }
+
+      final fpBytes = <int>[];
+      for (int i = 0; i < 65; i++) {
+        if (info.keyFingerprint[i] == 0) break;
+        fpBytes.add(info.keyFingerprint[i]);
+      }
+
+      return {
+        'cipherName': utf8.decode(cipherBytes),
+        'keyFingerprint': utf8.decode(fpBytes),
+        'sessionSeconds': info.sessionSeconds,
+        'isEncrypted': info.isEncrypted != 0,
+        'packetsSent': info.packetsSent,
+        'packetsReceived': info.packetsReceived,
+        'bytesSent': info.bytesSent,
+        'bytesReceived': info.bytesReceived,
+      };
+    } finally {
+      calloc.free(ptr);
+    }
+  }
+
+  List<Map<String, dynamic>> getCreditsAll() {
+    final countPtr = calloc<Int32>();
+    countPtr.value = 32;
+    final nodesPtr = calloc<VgreCreditInfo>(32);
+
+    try {
+      final res = _getCreditsAll(nodesPtr, countPtr);
+      if (res != 0) throw Exception('Failed to get credits: $res');
+
+      final count = countPtr.value;
+      final List<Map<String, dynamic>> credits = [];
+
+      for (int i = 0; i < count; i++) {
+        final info = nodesPtr[i];
+        final addrBytes = <int>[];
+        for (int j = 0; j < 64; j++) {
+          if (info.address[j] == 0) break;
+          addrBytes.add(info.address[j]);
+        }
+
+        credits.add({
+          'address': utf8.decode(addrBytes),
+          'totalCredits': info.totalCredits,
+          'totalDebits': info.totalDebits,
+          'balance': info.balance,
+          'lastActivity': info.lastActivity,
+          'transactionCount': info.transactionCount,
+        });
+      }
+      return credits;
+    } finally {
+      calloc.free(countPtr);
+      calloc.free(nodesPtr);
+    }
+  }
+
+  int creditsReset() => _creditsReset();
 }
+

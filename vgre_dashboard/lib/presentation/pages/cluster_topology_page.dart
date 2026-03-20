@@ -26,11 +26,14 @@ class ClusterTopologyPage extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildHeader(),
+              const SizedBox(height: 24),
+              _buildSecuritySummary(telemetry.securityInfo),
               const SizedBox(height: 32),
               _buildTopologyGraph(context, nodes),
               const SizedBox(height: 32),
               _buildNodeList(nodes),
             ],
+
           ),
         );
       },
@@ -156,7 +159,132 @@ class ClusterTopologyPage extends StatelessWidget {
     );
   }
 
+    );
+  }
+
+  Widget _buildSecuritySummary(SecurityInfo? info) {
+    final bool isSecured = info?.isEncrypted ?? false;
+    final color = isSecured ? VgreTheme.neonGreen : Colors.orangeAccent;
+
+    return GlassCard(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                isSecured ? Icons.security : Icons.security_update_warning,
+                color: color,
+                size: 24,
+              ),
+              const SizedBox(width: 12),
+              Text(
+                "CLUSTER SECURITY: ${isSecured ? 'ENCRYPTED' : 'LOW'}",
+                style: VgreTheme.headingStyle.copyWith(
+                  fontSize: 14,
+                  color: color,
+                  letterSpacing: 2,
+                ),
+              ),
+              const Spacer(),
+              if (isSecured)
+                _securityStat("SESSION", "${info!.sessionSeconds.toInt()}s"),
+              const SizedBox(width: 24),
+              if (isSecured)
+                _securityStat("CIPHER", info!.cipherName),
+            ],
+          ),
+          if (isSecured) ...[
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: _securityDetail(
+                    "FINGERPRINT",
+                    info!.keyFingerprint,
+                    Icons.fingerprint,
+                  ),
+                ),
+                const SizedBox(width: 32),
+                _securityDetail(
+                  "TRAFFIC",
+                  "${(info.bytesSent / 1024).toStringAsFixed(1)} KB SENT",
+                  Icons.swap_vert,
+                ),
+                const SizedBox(width: 32),
+                _securityDetail(
+                  "PACKETS",
+                  "${info.packetsSent} PKTS",
+                  Icons.inventory_2_outlined,
+                ),
+              ],
+            ),
+          ] else
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(
+                "Communication is currently unencrypted. Set VGRE_TCP_AUTH_TOKEN to enable Phase 5 Secure Channel.",
+                style: VgreTheme.bodyStyle.copyWith(
+                  fontSize: 12,
+                  color: Colors.white38,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _securityStat(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(color: Colors.white38, fontSize: 10),
+        ),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+            fontSize: 12,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _securityDetail(String label, String value, IconData icon) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: Colors.white30),
+        const SizedBox(width: 8),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: const TextStyle(color: Colors.white30, fontSize: 9),
+            ),
+            Text(
+              value,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 11,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   Widget _buildNodeList(List<ClusterNode> nodes) {
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -204,26 +332,65 @@ class ClusterTopologyPage extends StatelessWidget {
               ],
             ),
           ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  "${node.latencyMs.toStringAsFixed(2)} ms",
+                  style: VgreTheme.bodyStyle.copyWith(
+                    color: VgreTheme.neonCyan,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                Text(
+                  "LATENCY",
+                  style: VgreTheme.bodyStyle.copyWith(fontSize: 10, color: Colors.white38),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 24),
+          _buildBillingCol(node),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBillingCol(ClusterNode node) {
+    return SizedBox(
+      width: 120,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
+              const Icon(Icons.account_balance_wallet_outlined, size: 14, color: VgreTheme.neonGreen),
+              const SizedBox(width: 4),
               Text(
-                "${node.latencyMs.toStringAsFixed(2)} ms",
-                style: VgreTheme.bodyStyle.copyWith(
-                  color: VgreTheme.neonCyan,
+                node.balance.toStringAsFixed(2),
+                style: GoogleFonts.firaCode(
+                  color: VgreTheme.neonGreen,
                   fontWeight: FontWeight.bold,
+                  fontSize: 14,
                 ),
               ),
-              Text(
-                "LATENCY",
-                style: VgreTheme.bodyStyle.copyWith(fontSize: 10, color: Colors.white38),
-              ),
             ],
+          ),
+          Text(
+            "CREDITS",
+            style: VgreTheme.bodyStyle.copyWith(fontSize: 10, color: Colors.white38),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            "${node.transactionCount} TX",
+            style: VgreTheme.bodyStyle.copyWith(fontSize: 9, color: Colors.white30),
           ),
         ],
       ),
     );
   }
+
 
   Widget _buildStatusIndicator(bool active) {
     return Container(

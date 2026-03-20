@@ -19,6 +19,40 @@ extension MetricQualityLabel on MetricQuality {
   }
 }
 
+class SecurityInfo extends Equatable {
+  final String cipherName;
+  final String keyFingerprint;
+  final double sessionSeconds;
+  final bool isEncrypted;
+  final int packetsSent;
+  final int packetsReceived;
+  final int bytesSent;
+  final int bytesReceived;
+
+  const SecurityInfo({
+    required this.cipherName,
+    required this.keyFingerprint,
+    required this.sessionSeconds,
+    required this.isEncrypted,
+    required this.packetsSent,
+    required this.packetsReceived,
+    required this.bytesSent,
+    required this.bytesReceived,
+  });
+
+  @override
+  List<Object?> get props => [
+        cipherName,
+        keyFingerprint,
+        sessionSeconds,
+        isEncrypted,
+        packetsSent,
+        packetsReceived,
+        bytesSent,
+        bytesReceived,
+      ];
+}
+
 class ClusterNode extends Equatable {
   final String address;
   final int port;
@@ -27,6 +61,12 @@ class ClusterNode extends Equatable {
   final double latencyMs;
   final bool available;
   final String igpuName;
+  
+  // Phase 5: Credits
+  final double totalCredits;
+  final double totalDebits;
+  final double balance;
+  final int transactionCount;
 
   const ClusterNode({
     required this.address,
@@ -36,11 +76,28 @@ class ClusterNode extends Equatable {
     required this.latencyMs,
     required this.available,
     required this.igpuName,
+    this.totalCredits = 0.0,
+    this.totalDebits = 0.0,
+    this.balance = 0.0,
+    this.transactionCount = 0,
   });
 
   @override
-  List<Object?> get props => [address, port, cpuCores, memoryBytes, latencyMs, available, igpuName];
+  List<Object?> get props => [
+        address,
+        port,
+        cpuCores,
+        memoryBytes,
+        latencyMs,
+        available,
+        igpuName,
+        totalCredits,
+        totalDebits,
+        balance,
+        transactionCount,
+      ];
 }
+
 
 class Telemetry extends Equatable {
   final DateTime timestamp;
@@ -84,6 +141,7 @@ class Telemetry extends Equatable {
   final MetricQuality uvmQuality;
   final MetricQuality temperatureQuality;
   final List<ClusterNode> clusterNodes;
+  final SecurityInfo? securityInfo;
 
   const Telemetry({
     required this.timestamp,
@@ -119,6 +177,7 @@ class Telemetry extends Equatable {
     this.uvmQuality = MetricQuality.simulated,
     this.temperatureQuality = MetricQuality.estimated,
     this.clusterNodes = const [],
+    this.securityInfo,
   });
 
   double get memoryUsagePercent =>
@@ -157,8 +216,10 @@ class Telemetry extends Equatable {
       uvmQuality,
       temperatureQuality,
       clusterNodes,
+      securityInfo,
     ];
 }
+
 
 class KernelStat extends Equatable {
   final String name;
