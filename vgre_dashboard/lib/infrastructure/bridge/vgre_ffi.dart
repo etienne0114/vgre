@@ -179,7 +179,9 @@ typedef FreeString = void Function(Pointer<Utf8>);
 typedef SetProfilerEnabledFunc = Int32 Function(Int32);
 typedef SetProfilerEnabled = int Function(int);
 
+typedef GetClusterNodesFunc = Int32 Function(Pointer<VgreClusterNode>, Pointer<Int32>);
 typedef GetClusterNodes = int Function(Pointer<VgreClusterNode>, Pointer<Int32>);
+
 
 typedef ClusterSetSecurityFunc = Int32 Function(Int32);
 typedef ClusterSetSecurity = int Function(int);

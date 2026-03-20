@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'dart:math' as math;
+import 'package:google_fonts/google_fonts.dart';
 import '../../application/telemetry_bloc.dart';
+
 import '../../domain/models/telemetry.dart';
 import '../widgets/glass_card.dart';
 import '../../core/theme/vgre_theme.dart';
@@ -159,10 +161,9 @@ class ClusterTopologyPage extends StatelessWidget {
     );
   }
 
-    );
-  }
-
   Widget _buildSecuritySummary(SecurityInfo? info) {
+
+
     final bool isSecured = info?.isEncrypted ?? false;
     final color = isSecured ? VgreTheme.neonGreen : Colors.orangeAccent;
 
@@ -332,23 +333,23 @@ class ClusterTopologyPage extends StatelessWidget {
               ],
             ),
           ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(
-                  "${node.latencyMs.toStringAsFixed(2)} ms",
-                  style: VgreTheme.bodyStyle.copyWith(
-                    color: VgreTheme.neonCyan,
-                    fontWeight: FontWeight.bold,
-                  ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                "${node.latencyMs.toStringAsFixed(2)} ms",
+                style: VgreTheme.bodyStyle.copyWith(
+                  color: VgreTheme.neonCyan,
+                  fontWeight: FontWeight.bold,
                 ),
-                Text(
-                  "LATENCY",
-                  style: VgreTheme.bodyStyle.copyWith(fontSize: 10, color: Colors.white38),
-                ),
-              ],
-            ),
+              ),
+              Text(
+                "LATENCY",
+                style: VgreTheme.bodyStyle.copyWith(fontSize: 10, color: Colors.white38),
+              ),
+            ],
           ),
+
           const SizedBox(width: 24),
           _buildBillingCol(node),
         ],
