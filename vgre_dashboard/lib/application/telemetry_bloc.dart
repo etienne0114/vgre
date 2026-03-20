@@ -51,6 +51,13 @@ class UpdateTelemetry extends TelemetryEvent {
   List<Object?> get props => [telemetry];
 }
 
+class SelectKernel extends TelemetryEvent {
+  final String? kernelName;
+  const SelectKernel(this.kernelName);
+  @override
+  List<Object?> get props => [kernelName];
+}
+
 // ── State ──────────────────────────────────────────────────────────────────
 abstract class TelemetryState extends Equatable {
   const TelemetryState();
@@ -63,9 +70,14 @@ class TelemetryInitial extends TelemetryState {}
 class TelemetryActive extends TelemetryState {
   final Telemetry telemetry;
   final List<Telemetry> history;
-  const TelemetryActive({required this.telemetry, required this.history});
+  final String? selectedKernelName;
+  const TelemetryActive({
+    required this.telemetry,
+    required this.history,
+    this.selectedKernelName,
+  });
   @override
-  List<Object?> get props => [telemetry, history];
+  List<Object?> get props => [telemetry, history, selectedKernelName];
 }
 
 // ── BLoC ───────────────────────────────────────────────────────────────────
@@ -78,6 +90,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
   bool _serviceModeActive = true;
   bool _blockThreadsActive = false;
   Telemetry? _lastSmoothed;
+  String? _selectedKernelName;
 
   TelemetryBloc(this.bridge) : super(TelemetryInitial()) {
     on<StartPolling>((event, emit) {
@@ -132,9 +145,13 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
                     invocations: (m['invocations'] ?? 0) as int,
                     totalTimeMs: (m['total_time_ms'] ?? 0).toDouble(),
                     avgTimeMs: (m['avg_time_ms'] ?? 0).toDouble(),
+                    minTimeMs: (m['min_time_ms'] ?? 0).toDouble(),
+                    maxTimeMs: (m['max_time_ms'] ?? 0).toDouble(),
                     avgThroughputGbps:
                         (m['avg_throughput_gbps'] ?? 0).toDouble(),
                     avgGflops: (m['avg_gflops'] ?? 0).toDouble(),
+                    sourceCode: (m['source_code'] ?? '').toString(),
+                    irCode: (m['ir_code'] ?? '').toString(),
                   );
                 }).toList(growable: false);
               }
@@ -229,6 +246,18 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       _timer?.cancel();
     });
 
+    on<SelectKernel>((event, emit) {
+      _selectedKernelName = event.kernelName;
+      if (state is TelemetryActive) {
+        final s = state as TelemetryActive;
+        emit(TelemetryActive(
+          telemetry: s.telemetry,
+          history: s.history,
+          selectedKernelName: _selectedKernelName,
+        ));
+      }
+    });
+
     on<UpdateTelemetry>((event, emit) {
       final List<Telemetry> newHistory = List.from(
         (state is TelemetryActive) ? (state as TelemetryActive).history : [],
@@ -238,7 +267,11 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       newHistory.add(smoothed);
       if (newHistory.length > 50) newHistory.removeAt(0);
 
-      emit(TelemetryActive(telemetry: event.telemetry, history: newHistory));
+      emit(TelemetryActive(
+        telemetry: event.telemetry,
+        history: newHistory,
+        selectedKernelName: _selectedKernelName,
+      ));
     });
   }
 

@@ -31,6 +31,8 @@ struct ProfileEvent {
 // ── Kernel aggregate stats ─────────────────────────────────────────────────
 struct KernelStats {
     std::string kernelName;
+    std::string sourceCode;      // Original CUDA-like source
+    std::string irCode;          // Compiled LLVM-IR
     int         invocations      = 0;
     double      totalTimeMs      = 0.0;
     double      avgTimeMs        = 0.0;
@@ -56,6 +58,11 @@ public:
     // Start/stop a timer for a kernel
     void startTimer(const std::string& kernelName);
     double stopTimer(const std::string& kernelName); // returns ms
+
+    // Register source code for a kernel
+    void setKernelSource(const std::string& name, 
+                         const std::string& source,
+                         const std::string& ir);
 
     // Get statistics
     KernelStats getKernelStats(const std::string& kernelName) const;

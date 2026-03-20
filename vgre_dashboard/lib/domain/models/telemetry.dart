@@ -165,16 +165,24 @@ class KernelStat extends Equatable {
   final int invocations;
   final double totalTimeMs;
   final double avgTimeMs;
+  final double minTimeMs;
+  final double maxTimeMs;
   final double avgThroughputGbps;
   final double avgGflops;
+  final String sourceCode;
+  final String irCode;
 
   const KernelStat({
     required this.name,
     required this.invocations,
     required this.totalTimeMs,
     required this.avgTimeMs,
+    required this.minTimeMs,
+    required this.maxTimeMs,
     required this.avgThroughputGbps,
     required this.avgGflops,
+    required this.sourceCode,
+    required this.irCode,
   });
 
   @override
@@ -183,7 +191,11 @@ class KernelStat extends Equatable {
         invocations,
         totalTimeMs,
         avgTimeMs,
+        minTimeMs,
+        maxTimeMs,
         avgThroughputGbps,
         avgGflops,
+        sourceCode,
+        irCode,
       ];
 }

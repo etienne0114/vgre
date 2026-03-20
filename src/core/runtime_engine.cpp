@@ -243,6 +243,9 @@ VGREResult RuntimeEngine::registerKernel(const std::string &name,
   kernelIRCache_[id] = ir;
   outId = id;
 
+  // Track kernel source for runtime profiling/inspection
+  vgre::advanced::RuntimeProfiler::instance().setKernelSource(name, ir.source, ir.irCode);
+
   VGRE_LOG_INFO("RuntimeEngine", "Kernel '" + name + "' registered with ID " +
                                      std::to_string(id));
   return VGREResult::SUCCESS;

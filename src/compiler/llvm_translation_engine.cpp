@@ -400,6 +400,7 @@ VGREResult LLVMTranslationEngine::translate(KernelIR &ir,
   }
 
   cache_[ir.name] = outFn;
+  ir.irCode = irCode; // Propagate compiled IR back for telemetry
   return VGREResult::SUCCESS;
 }
 

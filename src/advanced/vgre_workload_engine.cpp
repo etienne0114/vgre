@@ -130,6 +130,11 @@ void WorkloadEngine::workloadLoop() {
       break;
     }
 
+    static int iteration = 0;
+    if (++iteration % 50 == 0) {
+      VGRE_LOG_INFO("WorkloadEngine", "Iteration " + std::to_string(iteration) + ": Background compute heart-beat [OK]");
+    }
+
     // Synchronize to measure actual Host-side busy time
     runtime.streamSynchronize(workloadStream_);
     

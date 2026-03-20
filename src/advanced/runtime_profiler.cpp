@@ -88,6 +88,16 @@ double RuntimeProfiler::stopTimer(const std::string& kernelName) {
     return ms;
 }
 
+// ── Kernel Source Registration ─────────────────────────────────────────────
+void RuntimeProfiler::setKernelSource(const std::string& name,
+                                       const std::string& source,
+                                       const std::string& ir) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stats_[name].kernelName = name;
+    stats_[name].sourceCode = source;
+    stats_[name].irCode     = ir;
+}
+
 // ── Update aggregate stats ─────────────────────────────────────────────────
 void RuntimeProfiler::updateStats(const std::string& name,
                                    const ProfileEvent& event) {
@@ -163,7 +173,9 @@ std::string RuntimeProfiler::toJSON() const {
         oss << "      \"min_time_ms\": " << s.minTimeMs << ",\n";
         oss << "      \"max_time_ms\": " << s.maxTimeMs << ",\n";
         oss << "      \"avg_throughput_gbps\": " << s.avgThroughputGBps << ",\n";
-        oss << "      \"avg_gflops\": " << s.avgGflops << "\n";
+        oss << "      \"avg_gflops\": " << s.avgGflops << ",\n";
+        oss << "      \"source_code\": \"" << escapeJsonString(s.sourceCode) << "\",\n";
+        oss << "      \"ir_code\": \"" << escapeJsonString(s.irCode) << "\"\n";
         oss << "    }";
     }
 
