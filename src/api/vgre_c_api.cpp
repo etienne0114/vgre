@@ -8,7 +8,9 @@
 
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
+#include "vgre/advanced/hybrid_compute_manager.h"
 #include "vgre/advanced/ipc_manager.h"
+#include "vgre/advanced/resource_ledger.h"
 #include "vgre/advanced/runtime_profiler.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/vgre_workload_engine.h"
@@ -46,6 +48,10 @@ static int to_status(vgre::VGREResult r) {
     return VGRE_ERROR_IO;
   case vgre::VGREResult::ERROR_NOT_INITIALIZED:
     return VGRE_ERROR_NOT_INIT;
+  case vgre::VGREResult::ERROR_AUTH_FAILED:
+    return VGRE_ERROR_AUTH_FAILED;
+  case vgre::VGREResult::ERROR_CRYPTO:
+    return VGRE_ERROR_CRYPTO;
   default:
     return VGRE_ERROR_GENERIC;
   }
@@ -917,9 +923,11 @@ int vgre_get_profiler_json(char **out_json, int top_n) {
     oss << "      \"avg_time_ms\": " << s.avgTimeMs << ",\n";
     oss << "      \"min_time_ms\": " << s.minTimeMs << ",\n";
     oss << "      \"max_time_ms\": " << s.maxTimeMs << ",\n";
-    oss << "      \"avg_throughput_gbps\": " << s.avgThroughputGBps << ",\n";
-    oss << "      \"avg_gflops\": " << s.avgGflops << "\n";
-    oss << "    }" << (i + 1 < stats.size() ? "," : "") << "\n";
+      oss << "      \"avg_throughput_gbps\": " << s.avgThroughputGBps << ",\n";
+      oss << "      \"avg_gflops\": " << s.avgGflops << ",\n";
+      oss << "      \"source_code\": \"" << json_escape(s.sourceCode) << "\",\n";
+      oss << "      \"ir_code\": \"" << json_escape(s.irCode) << "\"\n";
+      oss << "    }" << (i + 1 < stats.size() ? "," : "") << "\n";
   }
   oss << "  ]\n";
   oss << "}\n";
@@ -976,10 +984,89 @@ int vgre_set_block_threads(int enabled) {
   return VGRE_SUCCESS;
 }
 
+// ── Phase 5: Global Compute Network ──────────────────────────────────────
+
+int vgre_cluster_set_security(int enabled) {
+  return to_status(vgre::advanced::TCPClusterManager::instance().enableSecurity(enabled != 0));
+}
+
+int vgre_cluster_get_security_info(vgre_security_info_t *info) {
+  if (!info) return VGRE_ERROR_INVALID_VALUE;
+  
+  auto sinfo = vgre::advanced::TCPClusterManager::instance().getSecurityInfo();
+  std::strncpy(info->cipher_name, sinfo.cipher_name, sizeof(info->cipher_name) - 1);
+  info->cipher_name[sizeof(info->cipher_name) - 1] = '\0'; // Ensure null termination
+  std::strncpy(info->key_fingerprint, sinfo.key_fingerprint, sizeof(info->key_fingerprint) - 1);
+  info->key_fingerprint[sizeof(info->key_fingerprint) - 1] = '\0'; // Ensure null termination
+  info->session_seconds = sinfo.session_seconds;
+  info->is_encrypted = sinfo.is_encrypted ? 1 : 0;
+  info->packets_sent = sinfo.packets_sent;
+  info->packets_received = sinfo.packets_received;
+  info->bytes_sent = sinfo.bytes_sent;
+  info->bytes_received = sinfo.bytes_received;
+  
+  return VGRE_SUCCESS;
+}
+
+int vgre_credits_get_balance(const char *address, vgre_credit_info_t *info) {
+  if (!address || !info) return VGRE_ERROR_INVALID_VALUE;
+  
+  vgre::advanced::NodeBalance bal;
+  vgre::VGREResult r = vgre::advanced::ResourceLedger::instance().getBalance(address, bal);
+  if (r != vgre::VGREResult::SUCCESS) return to_status(r);
+  
+  std::strncpy(info->address, bal.address.c_str(), sizeof(info->address) - 1);
+  info->address[sizeof(info->address) - 1] = '\0'; // Ensure null termination
+  info->total_credits = bal.total_credits;
+  info->total_debits = bal.total_debits;
+  info->balance = bal.balance;
+  info->last_activity = bal.last_activity;
+  info->transaction_count = bal.transaction_count;
+  
+  return VGRE_SUCCESS;
+}
+
+int vgre_credits_get_all(vgre_credit_info_t *nodes, int *count) {
+  if (!count) return VGRE_ERROR_INVALID_VALUE;
+  
+  auto balances = vgre::advanced::ResourceLedger::instance().getAllBalances();
+  int total = static_cast<int>(balances.size());
+  
+  if (!nodes) {
+    *count = total;
+    return VGRE_SUCCESS;
+  }
+  
+  int to_fill = std::min(*count, total);
+  for (int i = 0; i < to_fill; ++i) {
+    std::strncpy(nodes[i].address, balances[i].address.c_str(), sizeof(nodes[i].address) - 1);
+    nodes[i].address[sizeof(nodes[i].address) - 1] = '\0'; // Ensure null termination
+    nodes[i].total_credits = balances[i].total_credits;
+    nodes[i].total_debits = balances[i].total_debits;
+    nodes[i].balance = balances[i].balance;
+    nodes[i].last_activity = balances[i].last_activity;
+    nodes[i].transaction_count = balances[i].transaction_count;
+  }
+  
+  *count = to_fill;
+  return VGRE_SUCCESS;
+}
+
+int vgre_credits_reset(void) {
+  vgre::advanced::ResourceLedger::instance().reset();
+  return VGRE_SUCCESS;
+}
+
 // ── JIT Telemetry Reporting ───────────────────────────────────────────────
 
 extern "C" void vgre_jit_report_flops(uint64_t flops) {
   vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(flops);
+  // Phase 5: Report compute time to master for billing if we are a worker
+  auto &cluster = vgre::advanced::TCPClusterManager::instance();
+  if (cluster.isEnabled() && cluster.isWorker()) {
+     // For now, we don't have a direct GFLOP to second mapping here, 
+     // but we trigger the wall-clock reporting in the handler.
+  }
 }
 
 extern "C" void vgre_jit_report_memory(uint64_t bytes) {
@@ -1027,7 +1114,7 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
     return VGRE_SUCCESS;
   }
 
-  std::vector<vgre::advanced::TCPClusterManager::ClientConnection> connections;
+  std::vector<vgre::advanced::TCPClusterManager::ClusterNodeInfo> connections;
   tcp.getConnectedNodes(connections);
 
   int max_count = *count;

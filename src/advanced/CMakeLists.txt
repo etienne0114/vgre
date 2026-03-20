@@ -6,6 +6,9 @@ add_library(vgre_advanced OBJECT
     vgre_workload_engine.cpp
     ipc_manager.cpp
     tcp_cluster.cpp
+    secure_channel.cpp
+    workload_partitioner.cpp
+    resource_ledger.cpp
 )
 
 target_include_directories(vgre_advanced PUBLIC

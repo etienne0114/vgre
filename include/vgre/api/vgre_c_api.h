@@ -24,6 +24,8 @@ extern "C" {
 #define VGRE_ERROR_INVALID_KERNEL -4
 #define VGRE_ERROR_LAUNCH_FAILURE -5
 #define VGRE_ERROR_IO -6
+#define VGRE_ERROR_AUTH_FAILED -7
+#define VGRE_ERROR_CRYPTO -8
 #define VGRE_ERROR_GENERIC -99
 
 /* ── Memcpy direction ───────────────────────────────────────────────────────
@@ -241,6 +243,63 @@ int vgre_set_service_mode(int is_master);
  * This toggles the VGRE_BLOCK_THREADS environment flag at runtime.
  */
 int vgre_set_block_threads(int enabled);
+
+/* ── Phase 5: Global Compute Network ──────────────────────────────────────
+ */
+
+/**
+ * @brief Security session information.
+ */
+typedef struct {
+  char cipher_name[64];
+  char key_fingerprint[65];
+  double session_seconds;
+  int is_encrypted;
+  uint64_t packets_sent;
+  uint64_t packets_received;
+  uint64_t bytes_sent;
+  uint64_t bytes_received;
+} vgre_security_info_t;
+
+/**
+ * @brief Credit/billing information for a compute node.
+ */
+typedef struct {
+  char address[64];
+  double total_credits;
+  double total_debits;
+  double balance;
+  uint64_t last_activity;
+  int transaction_count;
+} vgre_credit_info_t;
+
+/**
+ * @brief Enables or disables encrypted cluster communication.
+ * Requires VGRE_TCP_AUTH_TOKEN environment variable to be set.
+ */
+int vgre_cluster_set_security(int enabled);
+
+/**
+ * @brief Retrieves the current security session information.
+ */
+int vgre_cluster_get_security_info(vgre_security_info_t *info);
+
+/**
+ * @brief Retrieves the credit balance for a specific node.
+ */
+int vgre_credits_get_balance(const char *address, vgre_credit_info_t *info);
+
+/**
+ * @brief Retrieves credit balances for all nodes.
+ * @param nodes Array to fill. On entry, *count is array capacity.
+ *              On exit, *count is number of nodes filled.
+ */
+int vgre_credits_get_all(vgre_credit_info_t *nodes, int *count);
+
+/**
+ * @brief Resets the credit ledger.
+ */
+int vgre_credits_reset(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

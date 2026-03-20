@@ -117,3 +117,16 @@ add_test(NAME test_graph_update COMMAND test_graph_update)
 add_executable(test_phase3_cluster integration/test_phase3_cluster.cpp)
 target_link_libraries(test_phase3_cluster PRIVATE vgre)
 add_test(NAME test_phase3_cluster COMMAND test_phase3_cluster)
+
+# ── Phase 5 tests ───────────────────────────────────────────────────────────
+add_executable(test_phase5_secure_channel unit/test_phase5_secure_channel.cpp)
+target_link_libraries(test_phase5_secure_channel PRIVATE vgre)
+add_test(NAME test_phase5_secure_channel COMMAND test_phase5_secure_channel)
+
+add_executable(test_phase5_workload_partition unit/test_phase5_workload_partition.cpp)
+target_link_libraries(test_phase5_workload_partition PRIVATE vgre)
+add_test(NAME test_phase5_workload_partition COMMAND test_phase5_workload_partition)
+
+add_executable(test_phase5_resource_ledger unit/test_phase5_resource_ledger.cpp)
+target_link_libraries(test_phase5_resource_ledger PRIVATE vgre)
+add_test(NAME test_phase5_resource_ledger COMMAND test_phase5_resource_ledger)
