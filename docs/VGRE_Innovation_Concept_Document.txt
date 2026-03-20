@@ -75,9 +75,10 @@ Telemetry and Profiling
 - RuntimeProfiler provides per-kernel timing and JSON export.
 
 Advanced Features
-- HybridComputeManager supports CPU, iGPU (via OpenCL when compiled with VGRE_HAS_OPENCL_BACKEND), and remote node backends.
-- Function-pointer dispatch to iGPU is blocked because OpenCL requires source transpilation; registered kernel dispatch works via source-based JIT.
-- Remote cluster dispatch via TCPClusterManager supports kernel execution with up to 8 arguments and managed memory buffer transfers. Full memory coherence and robust scheduling are not yet implemented.
+- Remote cluster dispatch via TCPClusterManager supports multi-node partitioned kernel execution with authenticated and encrypted transport (HMAC-SHA256).
+- Secure Resource Sharing Protocol (Phase 5.1): Implements PBKDF2-based session key derivation and XOR-stream cipher with replay protection for WAN deployment.
+- Cross-Network Workload Partitioning (Phase 5.2): Enables proportional grid splitting along the X-axis based on remote node core counts, with automatic result aggregation.
+- Billing and Resource Credit System (Phase 5.3): Tracks compute-unit-seconds per node and persists a secure JSON ledger for resource accounting.
 - MemoryCompression uses a custom RLE compressor with header versioning (not the full LZ4 library, but a VGRE-native format inspired by LZ4).
 - TextureManager supports float-type 1D/2D texture sampling with 4 address modes (CLAMP, WRAP, MIRROR, BORDER), bilinear interpolation, and normalized coordinate support. Non-float element types (int8, int16) are not yet supported.
 
@@ -142,7 +143,8 @@ Phase 4: Frontend Enhancements (Lower Priority)
 - Surface real error states and health indicators in the UI.
 - Add kernel source viewer with execution timeline overlay.
 
-Phase 5: Global Compute Network (Research)
-- Design secure resource sharing protocol for internet-distributed compute.
-- Implement workload partitioning for cross-network kernel execution.
-- Add billing and resource credit system for shared compute infrastructure.
+Phase 5: Global Compute Network (Implemented)
+- Secure resource sharing protocol for encrypted internet-distributed compute.
+- Proportional workload partitioning for cross-network kernel execution based on node capacity.
+- Credit-based billing and resource ledger system for shared compute accounting.
+- Native HMAC-SHA256 authentication and XOR-stream cipher transport.
