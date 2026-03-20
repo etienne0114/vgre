@@ -8,26 +8,33 @@ import 'presentation/pages/dashboard_page.dart';
 
 void main() {
   // Initialize the bridge to the native VGRE engine
+  // Initialize the bridge to the native VGRE engine using path-agnostic discovery
   String libPath;
-  if (Platform.isWindows) {
-    libPath = 'libvgre.dll'; // Must be in PATH or executable dir
-  } else if (Platform.isMacOS) {
-    libPath = 'libvgre.dylib';
-  } else {
-    // Portable loading: check local lib/ directory (relative to executable)
-    // then fall back to development path.
-    final String executablePath = Platform.resolvedExecutable;
-    final String localPath =
-        '${executablePath.substring(0, executablePath.lastIndexOf('/'))}/lib/libvgre.so';
+  final String libName = Platform.isWindows
+      ? 'vgre.dll'
+      : (Platform.isMacOS ? 'libvgre.dylib' : 'libvgre.so');
 
+  // 1. Check relative 'lib' directory (standard production bundle layout)
+  final String executablePath = Platform.resolvedExecutable;
+  final String executableDir =
+      executablePath.substring(0, executablePath.lastIndexOf(Platform.pathSeparator));
+  final String bundlePath =
+      '$executableDir${Platform.pathSeparator}lib${Platform.pathSeparator}$libName';
+
+  if (File(bundlePath).existsSync()) {
+    libPath = bundlePath;
+  } else {
+    // 2. Check current directory (fallback for side-by-side deployment)
+    final String localPath = '$executableDir${Platform.pathSeparator}$libName';
     if (File(localPath).existsSync()) {
       libPath = localPath;
     } else {
+      // 3. Fallback to development/environment paths
       libPath =
           Platform.environment['VGRE_LIB_PATH'] ??
-          (File('../build/libvgre.so').existsSync()
-              ? '../build/libvgre.so'
-              : 'libvgre.so');
+          (File('../build/$libName').existsSync()
+              ? '../build/$libName'
+              : libName);
     }
   }
 
