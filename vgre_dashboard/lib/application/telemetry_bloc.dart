@@ -108,6 +108,17 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
           try {
             final raw = bridge.getTelemetryWith(ptr);
             final logs = bridge.getLogs();
+            final clusterData = bridge.getClusterNodes();
+            final List<ClusterNode> clusterNodes = clusterData.map((m) => ClusterNode(
+              address: m['address'] as String,
+              port: m['port'] as int,
+              cpuCores: m['cpuCores'] as int,
+              memoryBytes: m['memoryBytes'] as int,
+              latencyMs: m['latencyMs'] as double,
+              available: m['available'] as bool,
+              igpuName: m['igpuName'] as String,
+            )).toList();
+
             List<KernelStat> topKernels = const [];
             try {
               final jsonStr = bridge.getProfilerJson(topN: 5);
@@ -171,6 +182,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
                   : MetricQuality.estimated,
               uvmQuality: MetricQuality.simulated,
               temperatureQuality: MetricQuality.estimated,
+              clusterNodes: clusterNodes,
             );
             add(UpdateTelemetry(data));
           } finally {
@@ -275,6 +287,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       versionMinor: current.versionMinor,
       logs: current.logs,
       topKernels: current.topKernels,
+      clusterNodes: current.clusterNodes,
     );
   }
 }

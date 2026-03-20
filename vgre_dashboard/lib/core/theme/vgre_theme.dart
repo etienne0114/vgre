@@ -8,6 +8,33 @@ class VgreTheme {
   static const Color surface = Color(0xFF161618);
   static const Color textBody = Color(0xFFE1E1E1);
   static const Color textMuted = Color(0xFF888888);
+  static const Color neonCyan = Color(0xFF00E5FF);
+  static const Color neonGreen = Color(0xFF39FF14);
+  static const Color neonBlue = Color(0xFF007BFF);
+
+  static TextStyle get bodyStyle => GoogleFonts.inter(
+        color: textBody,
+        fontSize: 13,
+      );
+
+  static TextStyle get headingStyle => GoogleFonts.orbitron(
+        color: primaryNeon,
+        fontWeight: FontWeight.bold,
+        letterSpacing: 1.5,
+      );
+
+  static const double mobileLimit = 600;
+  static const double desktopLimit = 1024;
+
+  static bool isMobile(BuildContext context) =>
+      MediaQuery.sizeOf(context).width < mobileLimit;
+
+  static bool isTablet(BuildContext context) =>
+      MediaQuery.sizeOf(context).width >= mobileLimit &&
+      MediaQuery.sizeOf(context).width < desktopLimit;
+
+  static bool isDesktop(BuildContext context) =>
+      MediaQuery.sizeOf(context).width >= desktopLimit;
 
   static ThemeData get darkTheme {
     return ThemeData(

@@ -8,8 +8,20 @@ import '../../core/theme/vgre_theme.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/glow_gauge.dart';
 
-class DashboardPage extends StatelessWidget {
+import '../widgets/navigation_sidebar.dart';
+import 'kernel_explorer_page.dart';
+import 'cluster_topology_page.dart';
+import 'hardware_tuning_page.dart';
+
+class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
+
+  @override
+  State<DashboardPage> createState() => _DashboardPageState();
+}
+
+class _DashboardPageState extends State<DashboardPage> {
+  int _selectedIndex = 0;
 
   @override
   Widget build(BuildContext context) {
@@ -17,137 +29,200 @@ class DashboardPage extends StatelessWidget {
       body: Container(
         decoration: const BoxDecoration(
           color: VgreTheme.background,
-          image: DecorationImage(
-            image: AssetImage("assets/background.png"),
-            fit: BoxFit.cover,
-            opacity: 0.1,
-          ),
         ),
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: BlocBuilder<TelemetryBloc, TelemetryState>(
-              builder: (context, state) {
-                if (state is! TelemetryActive) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                final activeState = state;
-                final data = activeState.telemetry;
-                final history = activeState.history;
-
-                return Column(
-                  children: [
-                    _buildHeader(context, data),
-                    const SizedBox(height: 24),
-                    Expanded(
-                      child: Column(
-                        children: [
-                          // Top Section: Gauges and UVM Map
-                          Expanded(
-                            flex: 5,
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: GlassCard(
-                                    child: GlowGauge(
-                                      value: data.gflops,
-                                      max: data.maxGflops,
-                                      label: "GFLOPS Performance",
-                                      unit: "GFLOPS",
-                                      color: VgreTheme.primaryNeon,
-                                      info: [
-                                        {
-                                          'key': 'Quality',
-                                          'value': data.computeQuality.label,
-                                        },
-                                        {
-                                          'key': 'Util',
-                                          'value':
-                                              '${data.computeUtilization.toStringAsFixed(0)}%',
-                                        },
-                                        {
-                                          'key': 'Cores',
-                                          'value': '${data.activeThreads}',
-                                        },
-                                        {
-                                          'key': 'Temp',
-                                          'value':
-                                              '${data.temperature.toStringAsFixed(1)}°C',
-                                        },
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 20),
-                                Expanded(
-                                  child: GlassCard(
-                                    child: GlowGauge(
-                                      value: data.memoryBandwidth,
-                                      max: data.maxMemoryBandwidth,
-                                      label: "Memory Bandwidth",
-                                      unit: "GB/s",
-                                      color: VgreTheme.secondaryNeon,
-                                      info: [
-                                        {
-                                          'key': 'Quality',
-                                          'value': data.memoryQuality.label,
-                                        },
-                                        {
-                                          'key': 'HBM2',
-                                          'value':
-                                              '${data.memoryUsagePercent.toStringAsFixed(0)}%',
-                                        },
-                                        {
-                                          'key': 'Clock',
-                                          'value': '${data.clockSpeed} MHz',
-                                        },
-                                        {
-                                          'key': 'ECC',
-                                          'value': data.eccEnabled
-                                              ? 'OK'
-                                              : 'ERR',
-                                        },
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 20),
-                                Expanded(child: _buildMemoryMapPanel(data)),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 20),
-                          // Middle Section: Workload Chart
-                          Expanded(
-                            flex: 3,
-                            child: _buildWorkloadChart(history),
-                          ),
-                          const SizedBox(height: 20),
-                          // Bottom Section: Console
-                          Expanded(
-                            flex: 3,
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  flex: 2,
-                                  child: _buildKernelPanel(data),
-                                ),
-                                const SizedBox(width: 20),
-                                Expanded(
-                                  flex: 3,
-                                  child: _TerminalConsole(logs: data.logs),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+        child: Row(
+          children: [
+            // Left Sidebar
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final bool isCompact =
+                    MediaQuery.sizeOf(context).width < VgreTheme.desktopLimit;
+                return VgreNavigationSidebar(
+                  selectedIndex: _selectedIndex,
+                  isCompact: isCompact,
+                  onDestinationSelected: (index) {
+                    setState(() {
+                      _selectedIndex = index;
+                    });
+                  },
                 );
               },
             ),
+
+            // Main Content Area
+            Expanded(
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 300),
+                transitionBuilder: (Widget child, Animation<double> animation) {
+                  return FadeTransition(
+                    opacity: animation,
+                    child: SlideTransition(
+                      position: Tween<Offset>(
+                        begin: const Offset(0.02, 0),
+                        end: Offset.zero,
+                      ).animate(animation),
+                      child: child,
+                    ),
+                  );
+                },
+                child: _buildCurrentScreen(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCurrentScreen() {
+    switch (_selectedIndex) {
+      case 0:
+        return const DashboardOverviewContent();
+      case 1:
+        return const KernelExplorerPage();
+      case 2:
+        return const ClusterTopologyPage();
+      case 3:
+        return const HardwareTuningPage();
+      default:
+        return Center(
+          child: Text(
+            "FEATURE ${_selectedIndex + 1} (WIP)",
+            style: const TextStyle(color: VgreTheme.textMuted, letterSpacing: 2),
           ),
+        );
+    }
+  }
+}
+
+class DashboardOverviewContent extends StatelessWidget {
+  const DashboardOverviewContent({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: BlocBuilder<TelemetryBloc, TelemetryState>(
+          builder: (context, state) {
+            if (state is! TelemetryActive) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            final activeState = state;
+            final data = activeState.telemetry;
+            final history = activeState.history;
+
+            return Column(
+              children: [
+                _buildHeader(context, data),
+                const SizedBox(height: 24),
+                Expanded(
+                  child: Column(
+                    children: [
+                      // Top Section: Gauges and UVM Map
+                      Expanded(
+                        flex: 5,
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: GlassCard(
+                                child: GlowGauge(
+                                  value: data.gflops,
+                                  max: data.maxGflops,
+                                  label: "GFLOPS Performance",
+                                  unit: "GFLOPS",
+                                  color: VgreTheme.primaryNeon,
+                                  info: [
+                                    {
+                                      'key': 'Quality',
+                                      'value': data.computeQuality.label,
+                                    },
+                                    {
+                                      'key': 'Util',
+                                      'value':
+                                          '${data.computeUtilization.toStringAsFixed(0)}%',
+                                    },
+                                    {
+                                      'key': 'Cores',
+                                      'value': '${data.activeThreads}',
+                                    },
+                                    {
+                                      'key': 'Temp',
+                                      'value':
+                                          '${data.temperature.toStringAsFixed(1)}°C',
+                                    },
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 20),
+                            Expanded(
+                              child: GlassCard(
+                                child: GlowGauge(
+                                  value: data.memoryBandwidth,
+                                  max: data.maxMemoryBandwidth,
+                                  label: "Memory Bandwidth",
+                                  unit: "GB/s",
+                                  color: VgreTheme.secondaryNeon,
+                                  info: [
+                                    {
+                                      'key': 'Quality',
+                                      'value': data.memoryQuality.label,
+                                    },
+                                    {
+                                      'key': 'HBM2',
+                                      'value':
+                                          '${data.memoryUsagePercent.toStringAsFixed(0)}%',
+                                    },
+                                    {
+                                      'key': 'Clock',
+                                      'value': '${data.clockSpeed} MHz',
+                                    },
+                                    {
+                                      'key': 'ECC',
+                                      'value': data.eccEnabled
+                                          ? 'OK'
+                                          : 'ERR',
+                                    },
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 20),
+                            Expanded(child: _buildMemoryMapPanel(data)),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      // Middle Section: Workload Chart
+                      Expanded(
+                        flex: 3,
+                        child: _buildWorkloadChart(history),
+                      ),
+                      const SizedBox(height: 20),
+                      // Bottom Section: Console
+                      Expanded(
+                        flex: 3,
+                        child: Row(
+                          children: [
+                            Expanded(
+                              flex: 2,
+                              child: _buildKernelPanel(data),
+                            ),
+                            const SizedBox(width: 20),
+                            Expanded(
+                              flex: 3,
+                              child: _TerminalConsole(logs: data.logs),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -291,14 +366,18 @@ class DashboardPage extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
-                "UVM MEMORY MAP",
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 1.5,
-                  fontSize: 12,
+              const Expanded(
+                child: Text(
+                  "UVM MEMORY MAP",
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.5,
+                    fontSize: 12,
+                  ),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
+              const SizedBox(width: 8),
               Text(
                 "32x32 GRID",
                 style: TextStyle(color: VgreTheme.textMuted, fontSize: 10),
@@ -349,11 +428,14 @@ class DashboardPage extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              _uvmLegendItem("TOTAL PAGES", "${data.totalPages}"),
-              _uvmLegendItem(
-                "RESIDENT (GREEN)",
-                "${data.residentPages}",
-                color: VgreTheme.primaryNeon,
+              Expanded(child: _uvmLegendItem("TOTAL PAGES", "${data.totalPages}")),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _uvmLegendItem(
+                  "RESIDENT (GREEN)",
+                  "${data.residentPages}",
+                  color: VgreTheme.primaryNeon,
+                ),
               ),
             ],
           ),
@@ -361,10 +443,13 @@ class DashboardPage extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              _uvmLegendItem("EVICTED (DIM)", "${data.evictedPages}"),
-              _uvmLegendItem(
-                "PAGE FAULTS",
-                "${data.pageFaultRate.toStringAsFixed(1)}/s",
+              Expanded(child: _uvmLegendItem("EVICTED (DIM)", "${data.evictedPages}")),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _uvmLegendItem(
+                  "PAGE FAULTS",
+                  "${data.pageFaultRate.toStringAsFixed(1)}/s",
+                ),
               ),
             ],
           ),
@@ -375,6 +460,7 @@ class DashboardPage extends StatelessWidget {
 
   Widget _uvmLegendItem(String label, String value, {Color? color}) {
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
         Container(
           width: 8,
@@ -385,9 +471,12 @@ class DashboardPage extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 8),
-        Text(
-          label,
-          style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10),
+        Flexible(
+          child: Text(
+            label,
+            style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10),
+            overflow: TextOverflow.ellipsis,
+          ),
         ),
         const SizedBox(width: 4),
         Text(
@@ -513,7 +602,7 @@ class DashboardPage extends StatelessWidget {
                   )
                 : ListView.separated(
                     itemCount: data.topKernels.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    separatorBuilder: (_, index) => const SizedBox(height: 8),
                     itemBuilder: (context, index) {
                       final k = data.topKernels[index];
                       return Row(

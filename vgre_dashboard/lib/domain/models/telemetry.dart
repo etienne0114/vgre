@@ -19,6 +19,29 @@ extension MetricQualityLabel on MetricQuality {
   }
 }
 
+class ClusterNode extends Equatable {
+  final String address;
+  final int port;
+  final int cpuCores;
+  final int memoryBytes;
+  final double latencyMs;
+  final bool available;
+  final String igpuName;
+
+  const ClusterNode({
+    required this.address,
+    required this.port,
+    required this.cpuCores,
+    required this.memoryBytes,
+    required this.latencyMs,
+    required this.available,
+    required this.igpuName,
+  });
+
+  @override
+  List<Object?> get props => [address, port, cpuCores, memoryBytes, latencyMs, available, igpuName];
+}
+
 class Telemetry extends Equatable {
   final DateTime timestamp;
   
@@ -60,6 +83,7 @@ class Telemetry extends Equatable {
   final MetricQuality memoryQuality;
   final MetricQuality uvmQuality;
   final MetricQuality temperatureQuality;
+  final List<ClusterNode> clusterNodes;
 
   const Telemetry({
     required this.timestamp,
@@ -94,6 +118,7 @@ class Telemetry extends Equatable {
     this.memoryQuality = MetricQuality.estimated,
     this.uvmQuality = MetricQuality.simulated,
     this.temperatureQuality = MetricQuality.estimated,
+    this.clusterNodes = const [],
   });
 
   double get memoryUsagePercent =>
@@ -131,6 +156,7 @@ class Telemetry extends Equatable {
       memoryQuality,
       uvmQuality,
       temperatureQuality,
+      clusterNodes,
     ];
 }
 

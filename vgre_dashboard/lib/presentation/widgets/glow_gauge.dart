@@ -23,88 +23,104 @@ class GlowGauge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label.toUpperCase(),
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                letterSpacing: 2,
-                fontWeight: FontWeight.bold,
-                color: Colors.white70,
-              ),
-        ),
-        const SizedBox(height: 12),
-        Center(
-          child: SizedBox(
-            width: 140,
-            height: 140,
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                CustomPaint(
-                  size: const Size(140, 140),
-                  painter: _GaugePainter(
-                    percent: value / max,
-                    color: color,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Calculate dynamic gauge size based on available height
+        // Total height = label (20) + spacing (12) + gauge + spacing (4) + info (variable)
+        final double labelHeight = 20.0;
+        final double infoItemHeight = 14.0;
+        final double reservedHeight = labelHeight + 12 + 4 + (info.length * infoItemHeight);
+        
+        // Ensure gauge doesn't disappear on extremely small heights
+        final double initialGaugeSize = (constraints.maxHeight - reservedHeight).clamp(60.0, 140.0);
+
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label.toUpperCase(),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    letterSpacing: 2,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white70,
                   ),
-                ),
-                Column(
-                  mainAxisSize: MainAxisSize.min,
+            ),
+            const SizedBox(height: 12),
+            Center(
+              child: SizedBox(
+                width: initialGaugeSize,
+                height: initialGaugeSize,
+                child: Stack(
+                  alignment: Alignment.center,
                   children: [
-                    Text(
-                      value >= 1000 ? (value / 1000).toStringAsFixed(1) : value.toStringAsFixed(1),
-                      style: Theme.of(context).textTheme.displayLarge?.copyWith(
-                            fontSize: 32,
-                            color: Colors.white,
-                          ),
+                    CustomPaint(
+                      size: Size(initialGaugeSize, initialGaugeSize),
+                      painter: _GaugePainter(
+                        percent: value / max,
+                        color: color,
+                      ),
                     ),
-                    Text(
-                      value >= 1000 ? "T${unit.substring(1)}" : unit,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: VgreTheme.textMuted,
-                            fontSize: 12,
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          value >= 1000 ? (value / 1000).toStringAsFixed(1) : value.toStringAsFixed(1),
+                          style: Theme.of(context).textTheme.displayLarge?.copyWith(
+                                fontSize: initialGaugeSize < 100 ? 20 : 32,
+                                color: Colors.white,
+                              ),
+                        ),
+                        Text(
+                          value >= 1000 ? "T${unit.substring(1)}" : unit,
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: VgreTheme.textMuted,
+                                fontSize: initialGaugeSize < 100 ? 9 : 12,
+                              ),
+                        ),
+                        if (initialGaugeSize > 110) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            "Max: ${max.toStringAsFixed(1)} $unit",
+                            style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10),
                           ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      "Max: ${max.toStringAsFixed(1)} $unit",
-                      style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10),
+                        ],
+                      ],
                     ),
                   ],
                 ),
-              ],
+              ),
             ),
-          ),
-        ),
-        const SizedBox(height: 4),
-        // Gauge Info Rows
-        Flexible(
-          child: ListView(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            children: info.map((item) => Padding(
-                  padding: const EdgeInsets.only(bottom: 2),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(item['key']!.toUpperCase(),
-                          style: const TextStyle(
-                              color: VgreTheme.textMuted,
-                              fontSize: 9,
-                              fontWeight: FontWeight.bold)),
-                      Text(item['value']!,
-                          style: GoogleFonts.firaCode(
-                              color: color,
-                              fontSize: 9,
-                              fontWeight: FontWeight.bold)),
-                    ],
-                  ),
-                )).toList(),
-          ),
-        ),
-      ],
+            const SizedBox(height: 4),
+            // Gauge Info Rows
+            if (constraints.maxHeight > 180) 
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  children: info.map((item) => Padding(
+                        padding: const EdgeInsets.only(bottom: 2),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(item['key']!.toUpperCase(),
+                                style: const TextStyle(
+                                    color: VgreTheme.textMuted,
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.bold)),
+                            Text(item['value']!,
+                                style: GoogleFonts.firaCode(
+                                    color: color,
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      )).toList(),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }

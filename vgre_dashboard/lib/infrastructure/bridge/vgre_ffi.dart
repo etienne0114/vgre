@@ -86,6 +86,23 @@ final class VgreDeviceProperties extends Struct {
   external int totalConstMem;
 }
 
+final class VgreClusterNode extends Struct {
+  @Array(64)
+  external Array<Uint8> address;
+  @Int32()
+  external int port;
+  @Int32()
+  external int cpuCores;
+  @Uint64()
+  external int memoryBytes;
+  @Double()
+  external double latencyMs;
+  @Int32()
+  external int available;
+  @Array(64)
+  external Array<Uint8> igpuName;
+}
+
 typedef InitFunc = Int32 Function();
 typedef Init = int Function();
 
@@ -127,6 +144,9 @@ typedef FreeString = void Function(Pointer<Utf8>);
 typedef SetProfilerEnabledFunc = Int32 Function(Int32);
 typedef SetProfilerEnabled = int Function(int);
 
+typedef GetClusterNodesFunc = Int32 Function(Pointer<VgreClusterNode>, Pointer<Int32>);
+typedef GetClusterNodes = int Function(Pointer<VgreClusterNode>, Pointer<Int32>);
+
 // ── VGRE FFI Bridge ────────────────────────────────────────────────────────
 class VgreBridge {
   late final DynamicLibrary _lib;
@@ -143,6 +163,7 @@ class VgreBridge {
   late final SetBackgroundCompute _setBackgroundCompute;
   late final SetServiceMode _setServiceMode;
   late final SetBlockThreads _setBlockThreads;
+  late final GetClusterNodes _getClusterNodes;
 
   VgreBridge(String libPath) {
     _lib = DynamicLibrary.open(libPath);
@@ -181,6 +202,8 @@ class VgreBridge {
         _lib.lookupFunction<SetBlockThreadsFunc, SetBlockThreads>(
           'vgre_set_block_threads',
         );
+    _getClusterNodes = _lib.lookupFunction<GetClusterNodesFunc, GetClusterNodes>(
+        'vgre_get_cluster_nodes');
   }
 
   int init() => _init();
@@ -257,6 +280,49 @@ class VgreBridge {
       return jsonStr;
     } finally {
       calloc.free(outPtr);
+    }
+  }
+
+  List<Map<String, dynamic>> getClusterNodes() {
+    final countPtr = calloc<Int32>();
+    countPtr.value = 32; // Max 32 nodes for now
+    final nodesPtr = calloc<VgreClusterNode>(32);
+
+    try {
+      final res = _getClusterNodes(nodesPtr, countPtr);
+      if (res != 0) throw Exception('Failed to get cluster nodes: $res');
+
+      final count = countPtr.value;
+      final List<Map<String, dynamic>> nodes = [];
+
+      for (int i = 0; i < count; i++) {
+        final node = nodesPtr[i];
+        final List<int> addrBytes = [];
+        for (int j = 0; j < 64; j++) {
+          if (node.address[j] == 0) break;
+          addrBytes.add(node.address[j]);
+        }
+
+        final List<int> igpuBytes = [];
+        for (int j = 0; j < 64; j++) {
+          if (node.igpuName[j] == 0) break;
+          igpuBytes.add(node.igpuName[j]);
+        }
+
+        nodes.add({
+          'address': utf8.decode(addrBytes),
+          'port': node.port,
+          'cpuCores': node.cpuCores,
+          'memoryBytes': node.memoryBytes,
+          'latencyMs': node.latencyMs,
+          'available': node.available != 0,
+          'igpuName': utf8.decode(igpuBytes),
+        });
+      }
+      return nodes;
+    } finally {
+      calloc.free(countPtr);
+      calloc.free(nodesPtr);
     }
   }
 }
