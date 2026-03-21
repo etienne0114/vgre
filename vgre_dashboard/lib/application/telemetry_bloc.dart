@@ -325,14 +325,40 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
 
       List<KernelStat> topKernels = const [];
       try {
-        final jsonStr = bridge.getProfilerJson(topN: 20); // Increase to 20 for better history
+        final jsonStr = bridge.getProfilerJson(topN: 20);
         if (jsonStr != null) {
           final decoded = jsonDecode(jsonStr) as Map<String, dynamic>;
           final items = decoded['top_kernels'] as List<dynamic>? ?? [];
+
+          // Fetch history for selected kernel if any
+          List<KernelExecution> selectedHistory = const [];
+          if (_selectedKernelName != null) {
+            try {
+              final historyStr = bridge.getKernelHistoryJson(_selectedKernelName!);
+              if (historyStr != null) {
+                final historyItems = jsonDecode(historyStr) as List<dynamic>;
+                selectedHistory = historyItems.map((h) {
+                  final hm = h as Map<String, dynamic>;
+                  return KernelExecution(
+                    timestamp: DateTime.fromMillisecondsSinceEpoch(
+                        (hm['timestamp_ms'] ?? 0) as int),
+                    durationMs: (hm['duration_ms'] ?? 0).toDouble(),
+                    throughputGbps: (hm['throughput_gbps'] ?? 0).toDouble(),
+                    gflops: (hm['gflops'] ?? 0).toDouble(),
+                    threadsUsed: (hm['threads_used'] ?? 0) as int,
+                  );
+                }).toList();
+              }
+            } catch (e) {
+              debugPrint("History fetch failed for $_selectedKernelName: $e");
+            }
+          }
+
           topKernels = items.map((item) {
             final m = item as Map<String, dynamic>;
+            final name = (m['name'] ?? 'kernel').toString();
             final k = KernelStat(
-              name: (m['name'] ?? 'kernel').toString(),
+              name: name,
               invocations: (m['invocations'] ?? 0) as int,
               totalTimeMs: (m['total_time_ms'] ?? 0).toDouble(),
               avgTimeMs: (m['avg_time_ms'] ?? 0).toDouble(),
@@ -342,6 +368,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
               avgGflops: (m['avg_gflops'] ?? 0).toDouble(),
               sourceCode: (m['source_code'] ?? '').toString(),
               irCode: (m['ir_code'] ?? '').toString(),
+              history: name == _selectedKernelName ? selectedHistory : const [],
             );
             // Cache if this is the currently selected kernel
             if (k.name == _selectedKernelName) {

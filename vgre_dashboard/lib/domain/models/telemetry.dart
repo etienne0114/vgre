@@ -317,6 +317,31 @@ class Telemetry extends Equatable {
 }
 
 
+class KernelExecution extends Equatable {
+  final DateTime timestamp;
+  final double durationMs;
+  final double throughputGbps;
+  final double gflops;
+  final int threadsUsed;
+
+  const KernelExecution({
+    required this.timestamp,
+    required this.durationMs,
+    required this.throughputGbps,
+    required this.gflops,
+    required this.threadsUsed,
+  });
+
+  @override
+  List<Object?> get props => [
+        timestamp,
+        durationMs,
+        throughputGbps,
+        gflops,
+        threadsUsed,
+      ];
+}
+
 class KernelStat extends Equatable {
   final String name;
   final int invocations;
@@ -328,6 +353,7 @@ class KernelStat extends Equatable {
   final double avgGflops;
   final String sourceCode;
   final String irCode;
+  final List<KernelExecution> history;
 
   const KernelStat({
     required this.name,
@@ -340,6 +366,7 @@ class KernelStat extends Equatable {
     required this.avgGflops,
     required this.sourceCode,
     required this.irCode,
+    this.history = const [],
   });
 
   @override
@@ -354,5 +381,6 @@ class KernelStat extends Equatable {
         avgGflops,
         sourceCode,
         irCode,
+        history,
       ];
 }

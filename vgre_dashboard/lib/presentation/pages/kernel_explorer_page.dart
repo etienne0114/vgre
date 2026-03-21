@@ -15,6 +15,17 @@ class KernelExplorerPage extends StatefulWidget {
 
 class _KernelExplorerPageState extends State<KernelExplorerPage> {
   // Selection is now managed by TelemetryBloc for persistence
+  final Set<String> _expandedKernels = {};
+
+  void _toggleExpansion(String name) {
+    setState(() {
+      if (_expandedKernels.contains(name)) {
+        _expandedKernels.remove(name);
+      } else {
+        _expandedKernels.add(name);
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -150,8 +161,9 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // --- SECTION 1: REGISTRY HEADER ---
             Padding(
-              padding: const EdgeInsets.all(20.0),
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -159,14 +171,15 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
                     "REGISTERED KERNELS",
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                      letterSpacing: 1,
+                      fontSize: 11,
+                      letterSpacing: 1.5,
+                      color: VgreTheme.textMuted,
                     ),
                   ),
                   IconButton(
                     icon: const Icon(
                       Icons.refresh,
-                      size: 16,
+                      size: 14,
                       color: VgreTheme.primaryNeon,
                     ),
                     padding: EdgeInsets.zero,
@@ -178,116 +191,62 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
                 ],
               ),
             ),
-            const Divider(color: Colors.white10, height: 1),
-            Expanded(
+            
+            // --- SECTION 2: COMPACT REGISTRY LIST ---
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 140),
               child: kernels.isEmpty
                   ? const Center(
                       child: Text(
                         "No kernels active",
-                        style: TextStyle(color: VgreTheme.textMuted),
+                        style: TextStyle(color: VgreTheme.textMuted, fontSize: 11),
                       ),
                     )
-                  : ListView.separated(
+                  : ListView.builder(
+                      shrinkWrap: true,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
                       itemCount: kernels.length,
-                      separatorBuilder: (_, index) =>
-                          const Divider(color: Colors.white10, height: 1),
                       itemBuilder: (context, index) {
                         final kernel = kernels[index];
-                        final bool isSelected =
-                            selectedKernel?.name == kernel.name;
+                        final bool isSelected = selectedKernel?.name == kernel.name;
+                        
                         return Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 4,
-                          ),
-                          child: Material(
-                            color: isSelected
-                                ? VgreTheme.primaryNeon.withValues(alpha: 0.15)
-                                : Colors.transparent,
-                            borderRadius: BorderRadius.circular(12),
-                            clipBehavior: Clip.antiAlias,
-                            child: InkWell(
-                              onTap: () {
-                                context.read<TelemetryBloc>().add(
-                                  SelectKernel(kernel.name),
-                                );
-                              },
-                              hoverColor: VgreTheme.primaryNeon.withValues(
-                                alpha: 0.05,
-                              ),
-                              splashColor: VgreTheme.primaryNeon.withValues(
-                                alpha: 0.2,
-                              ),
-                              child: Container(
-                                padding: const EdgeInsets.all(12),
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(
-                                    color: isSelected
-                                        ? VgreTheme.primaryNeon.withValues(
-                                            alpha: 0.5,
-                                          )
-                                        : Colors.white.withValues(alpha: 0.05),
-                                    width: 1,
-                                  ),
-                                  boxShadow: isSelected
-                                      ? [
-                                          BoxShadow(
-                                            color: VgreTheme.primaryNeon
-                                                .withValues(alpha: 0.1),
-                                            blurRadius: 10,
-                                            spreadRadius: 1,
-                                          ),
-                                        ]
-                                      : [],
+                          padding: const EdgeInsets.only(bottom: 6),
+                          child: InkWell(
+                            onTap: () {
+                              context.read<TelemetryBloc>().add(SelectKernel(kernel.name));
+                            },
+                            borderRadius: BorderRadius.circular(8),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: isSelected 
+                                      ? VgreTheme.primaryNeon.withValues(alpha: 0.4) 
+                                      : Colors.white.withValues(alpha: 0.05),
                                 ),
-                                child: Row(
-                                  children: [
-                                    _PulseIndicator(active: isSelected),
-                                    const SizedBox(width: 16),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            kernel.name,
-                                            style: TextStyle(
-                                              fontSize: 14,
-                                              fontWeight: isSelected
-                                                  ? FontWeight.bold
-                                                  : FontWeight.w500,
-                                              color: isSelected
-                                                  ? Colors.white
-                                                  : Colors.white70,
-                                              letterSpacing: 0.5,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            "${kernel.invocations} executions",
-                                            style: TextStyle(
-                                              fontSize: 11,
-                                              color: isSelected
-                                                  ? VgreTheme.primaryNeon
-                                                        .withValues(alpha: 0.8)
-                                                  : VgreTheme.textMuted,
-                                            ),
-                                          ),
-                                        ],
+                                color: isSelected 
+                                    ? VgreTheme.primaryNeon.withValues(alpha: 0.05) 
+                                    : Colors.transparent,
+                              ),
+                              child: Row(
+                                children: [
+                                  _PulseIndicator(active: isSelected),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      kernel.name,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                                        color: isSelected ? Colors.white : Colors.white70,
                                       ),
                                     ),
-                                    Icon(
-                                      isSelected
-                                          ? Icons.radio_button_checked
-                                          : Icons.chevron_right,
-                                      color: isSelected
-                                          ? VgreTheme.primaryNeon
-                                          : VgreTheme.textMuted,
-                                      size: 18,
-                                    ),
-                                  ],
-                                ),
+                                  ),
+                                  if (isSelected)
+                                    const Icon(Icons.check_circle, size: 12, color: VgreTheme.primaryNeon),
+                                ],
                               ),
                             ),
                           ),
@@ -295,8 +254,106 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
                       },
                     ),
             ),
+
+            const Divider(color: Colors.white10, height: 16),
+
+            // --- SECTION 3: EXPANDED HISTORY PANEL ---
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 0),
+              child: Row(
+                children: [
+                  const Icon(Icons.history, size: 14, color: VgreTheme.secondaryNeon),
+                  const SizedBox(width: 8),
+                  Text(
+                    selectedKernel != null 
+                        ? "${selectedKernel.name.toUpperCase()} HISTORY" 
+                        : "EXECUTION HISTORY",
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 11,
+                      letterSpacing: 1.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            
+            Expanded(
+              child: selectedKernel == null || selectedKernel.history.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.timeline, size: 32, color: Colors.white.withValues(alpha: 0.1)),
+                          const SizedBox(height: 12),
+                          const Text(
+                            "No execution data available",
+                            style: TextStyle(color: VgreTheme.textMuted, fontSize: 11, fontStyle: FontStyle.italic),
+                          ),
+                        ],
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      itemCount: selectedKernel.history.length,
+                      itemBuilder: (context, index) {
+                        // Show most recent first
+                        final exec = selectedKernel.history.reversed.toList()[index];
+                        return _buildExecutionRow(exec, context);
+                      },
+                    ),
+            ),
+            const SizedBox(height: 12),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildExecutionRow(KernelExecution exec, BuildContext context) {
+    final timeStr =
+        "${exec.timestamp.hour.toString().padLeft(2, '0')}:${exec.timestamp.minute.toString().padLeft(2, '0')}:${exec.timestamp.second.toString().padLeft(2, '0')}";
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 8),
+      child: Row(
+        children: [
+          Container(
+            width: 4,
+            height: 4,
+            decoration: const BoxDecoration(
+              color: VgreTheme.primaryNeon,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            timeStr,
+            style: const TextStyle(
+              fontFamily: 'FiraCode',
+              fontSize: 9,
+              color: VgreTheme.textMuted,
+            ),
+          ),
+          const Spacer(),
+          Text(
+            "${exec.durationMs.toStringAsFixed(3)} ms",
+            style: const TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+              color: Colors.white70,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(
+            "${exec.gflops.toStringAsFixed(1)} GF",
+            style: const TextStyle(
+              fontSize: 10,
+              color: VgreTheme.secondaryNeon,
+            ),
+          ),
+        ],
       ),
     );
   }
