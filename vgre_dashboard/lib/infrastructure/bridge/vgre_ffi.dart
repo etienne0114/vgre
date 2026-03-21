@@ -158,6 +158,8 @@ typedef SetBlockThreads = int Function(int);
 
 typedef GetTelemetryFunc = Int32 Function(Pointer<VgreTelemetry>);
 typedef GetTelemetry = int Function(Pointer<VgreTelemetry>);
+typedef GetMemoryInfoJsonFunc = Int32 Function(Pointer<Pointer<Utf8>>);
+typedef GetMemoryInfoJson = int Function(Pointer<Pointer<Utf8>>);
 
 typedef GetDevicePropertiesFunc =
     Int32 Function(Int32, Pointer<VgreDeviceProperties>);
@@ -208,6 +210,7 @@ class VgreBridge {
   late final GetProfilerJson _getProfilerJson;
   late final FreeString _freeString;
   late final SetProfilerEnabled _setProfilerEnabled;
+  late final GetMemoryInfoJson _getMemoryInfoJson;
   late final GetVersion _getVersion;
   late final SetBackgroundCompute _setBackgroundCompute;
   late final SetServiceMode _setServiceMode;
@@ -241,6 +244,10 @@ class VgreBridge {
     _setProfilerEnabled =
         _lib.lookupFunction<SetProfilerEnabledFunc, SetProfilerEnabled>(
           'vgre_set_profiler_enabled',
+        );
+    _getMemoryInfoJson =
+        _lib.lookupFunction<GetMemoryInfoJsonFunc, GetMemoryInfoJson>(
+          'vgre_get_memory_info_json',
         );
     _getVersion = _lib.lookupFunction<GetVersionFunc, GetVersion>(
       'vgre_get_version',
@@ -337,6 +344,20 @@ class VgreBridge {
     try {
       final res = _getProfilerJson(outPtr, topN);
       if (res != 0) throw Exception('Failed to get profiler json: $res');
+      if (outPtr.value == nullptr) return null;
+      final jsonStr = outPtr.value.toDartString();
+      _freeString(outPtr.value);
+      return jsonStr;
+    } finally {
+      calloc.free(outPtr);
+    }
+  }
+
+  String? getMemoryInfoJson() {
+    final outPtr = calloc<Pointer<Utf8>>();
+    try {
+      final res = _getMemoryInfoJson(outPtr);
+      if (res != 0) throw Exception('Failed to get memory info json: $res');
       if (outPtr.value == nullptr) return null;
       final jsonStr = outPtr.value.toDartString();
       _freeString(outPtr.value);

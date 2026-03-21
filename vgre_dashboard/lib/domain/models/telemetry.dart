@@ -121,6 +121,53 @@ class CreditEntry extends Equatable {
       ];
 }
 
+class MemoryAllocation extends Equatable {
+  final String ptr;
+  final int size;
+  final bool isManaged;
+  final bool isResident;
+  final int deviceId;
+
+  const MemoryAllocation({
+    required this.ptr,
+    required this.size,
+    required this.isManaged,
+    required this.isResident,
+    required this.deviceId,
+  });
+
+  @override
+  List<Object?> get props => [ptr, size, isManaged, isResident, deviceId];
+}
+
+class MemoryPool extends Equatable {
+  final int id;
+  final int blockSize;
+  final int totalAllocated;
+  final int peakAllocated;
+  final int activeCount;
+  final int freeCount;
+
+  const MemoryPool({
+    required this.id,
+    required this.blockSize,
+    required this.totalAllocated,
+    required this.peakAllocated,
+    required this.activeCount,
+    required this.freeCount,
+  });
+
+  @override
+  List<Object?> get props => [
+        id,
+        blockSize,
+        totalAllocated,
+        peakAllocated,
+        activeCount,
+        freeCount,
+      ];
+}
+
 
 class Telemetry extends Equatable {
   final DateTime timestamp;
@@ -171,6 +218,8 @@ class Telemetry extends Equatable {
   final bool clusterSecurityActive;
   final bool clusterSecuritySupported;
   final KernelStat? lastSelectedKernelStats;
+  final List<MemoryAllocation> allocations;
+  final List<MemoryPool> memoryPools;
 
   const Telemetry({
     required this.timestamp,
@@ -213,6 +262,8 @@ class Telemetry extends Equatable {
     this.clusterSecurityActive = false,
     this.clusterSecuritySupported = false,
     this.lastSelectedKernelStats,
+    this.allocations = const [],
+    this.memoryPools = const [],
   });
 
   double get memoryUsagePercent =>
@@ -260,6 +311,8 @@ class Telemetry extends Equatable {
         clusterSecurityActive,
         clusterSecuritySupported,
         lastSelectedKernelStats,
+        allocations,
+        memoryPools,
       ];
 }
 
