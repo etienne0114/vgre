@@ -170,6 +170,7 @@ class Telemetry extends Equatable {
   final String backendVersion;
   final bool clusterSecurityActive;
   final bool clusterSecuritySupported;
+  final KernelStat? lastSelectedKernelStats;
 
   const Telemetry({
     required this.timestamp,
@@ -211,6 +212,7 @@ class Telemetry extends Equatable {
     this.backendVersion = '0.0.0',
     this.clusterSecurityActive = false,
     this.clusterSecuritySupported = false,
+    this.lastSelectedKernelStats,
   });
 
   double get memoryUsagePercent =>
@@ -257,6 +259,7 @@ class Telemetry extends Equatable {
         backendVersion,
         clusterSecurityActive,
         clusterSecuritySupported,
+        lastSelectedKernelStats,
       ];
 }
 

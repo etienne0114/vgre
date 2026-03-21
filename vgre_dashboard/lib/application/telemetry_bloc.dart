@@ -110,6 +110,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
   bool _blockThreadsActive = false;
   Telemetry? _lastSmoothed;
   String? _selectedKernelName;
+  KernelStat? _lastSelectedKernelStats;
   bool _profilerEnabled = true;
   bool _clusterSecurityActive = false;
   String _backendVersion = '0.0.0';
@@ -231,6 +232,8 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
 
     on<SelectKernel>((event, emit) {
       _selectedKernelName = event.kernelName;
+      // We don't reset _lastSelectedKernelStats here because the next poll will update it
+      // if it exists in the new topKernels list.
       if (state is TelemetryActive) {
         final s = state as TelemetryActive;
         emit(TelemetryActive(
@@ -322,25 +325,29 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
 
       List<KernelStat> topKernels = const [];
       try {
-        final jsonStr = bridge.getProfilerJson(topN: 5);
+        final jsonStr = bridge.getProfilerJson(topN: 20); // Increase to 20 for better history
         if (jsonStr != null) {
           final decoded = jsonDecode(jsonStr) as Map<String, dynamic>;
           final items = decoded['top_kernels'] as List<dynamic>? ?? [];
           topKernels = items.map((item) {
             final m = item as Map<String, dynamic>;
-            return KernelStat(
+            final k = KernelStat(
               name: (m['name'] ?? 'kernel').toString(),
               invocations: (m['invocations'] ?? 0) as int,
               totalTimeMs: (m['total_time_ms'] ?? 0).toDouble(),
               avgTimeMs: (m['avg_time_ms'] ?? 0).toDouble(),
               minTimeMs: (m['min_time_ms'] ?? 0).toDouble(),
               maxTimeMs: (m['max_time_ms'] ?? 0).toDouble(),
-              avgThroughputGbps:
-                  (m['avg_throughput_gbps'] ?? 0).toDouble(),
+              avgThroughputGbps: (m['avg_throughput_gbps'] ?? 0).toDouble(),
               avgGflops: (m['avg_gflops'] ?? 0).toDouble(),
               sourceCode: (m['source_code'] ?? '').toString(),
               irCode: (m['ir_code'] ?? '').toString(),
             );
+            // Cache if this is the currently selected kernel
+            if (k.name == _selectedKernelName) {
+              _lastSelectedKernelStats = k;
+            }
+            return k;
           }).toList(growable: false);
         }
       } catch (e) {
@@ -348,7 +355,6 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         topKernels = const [];
       }
 
-      final bool hasProfilerStats = topKernels.isNotEmpty;
       final data = Telemetry(
         timestamp: DateTime.fromMillisecondsSinceEpoch(raw.timestamp),
         gflops: raw.gflops,
@@ -389,6 +395,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         backendVersion: _backendVersion,
         clusterSecurityActive: _clusterSecurityActive,
         clusterSecuritySupported: _clusterSecuritySupported,
+        lastSelectedKernelStats: _lastSelectedKernelStats,
       );
       add(UpdateTelemetry(data));
     } catch (e) {
@@ -453,6 +460,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       memoryQuality: current.memoryQuality,
       uvmQuality: current.uvmQuality,
       temperatureQuality: current.temperatureQuality,
+      lastSelectedKernelStats: current.lastSelectedKernelStats,
     );
   }
 }
