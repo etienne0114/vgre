@@ -40,6 +40,7 @@ private:
   void *d_B = nullptr;
   void *d_C = nullptr;
   StreamId workloadStream_ = 0;
+  KernelId workloadKernel_ = 0; 
   const size_t N = 4 * 1024 * 1024; // Increase to 4M for better measurement
 };
 
