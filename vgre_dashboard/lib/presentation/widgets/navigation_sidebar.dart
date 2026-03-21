@@ -36,9 +36,11 @@ class _VgreNavigationSidebarState extends State<VgreNavigationSidebar> {
         children: [
           // Logo Section
           Padding(
-            padding: EdgeInsets.symmetric(
-              vertical: 32.0,
-              horizontal: widget.isCompact ? 0 : 32.0,
+            padding: EdgeInsets.fromLTRB(
+              widget.isCompact ? 0 : 32.0,
+              16.0,
+              widget.isCompact ? 0 : 32.0,
+              32.0,
             ),
             child: widget.isCompact
                 ? _compactLogo()

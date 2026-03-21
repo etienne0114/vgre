@@ -55,6 +55,16 @@ class _DashboardPageState extends State<DashboardPage> {
             Expanded(
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
+                layoutBuilder: (Widget? currentChild, List<Widget> previousChildren) {
+                  return Stack(
+                    alignment: Alignment.topLeft,
+                    fit: StackFit.expand,
+                    children: <Widget>[
+                      ...previousChildren,
+                      if (currentChild != null) currentChild,
+                    ],
+                  );
+                },
                 transitionBuilder: (Widget child, Animation<double> animation) {
                   return FadeTransition(
                     opacity: animation,
@@ -121,9 +131,8 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(24.0),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
         child: BlocBuilder<TelemetryBloc, TelemetryState>(
           builder: (context, state) {
             if (state is! TelemetryActive) {
@@ -236,7 +245,6 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
             );
           },
         ),
-      ),
     );
   }
 

@@ -18,12 +18,12 @@ class HardwareTuningPage extends StatelessWidget {
         final telemetry = state.telemetry;
 
         return SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildHeader(),
-              const SizedBox(height: 32),
+              const SizedBox(height: 16),
               LayoutBuilder(
                 builder: (context, constraints) {
                   return Wrap(
@@ -110,9 +110,9 @@ class HardwareTuningPage extends StatelessWidget {
       children: [
         Text(
           "HARDWARE TUNING",
-          style: VgreTheme.headingStyle.copyWith(fontSize: 28),
+          style: VgreTheme.headingStyle.copyWith(fontSize: 24),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 4),
         Text(
           "Authoritative control over virtual hardware and runtime heuristics.",
           style: VgreTheme.bodyStyle.copyWith(color: Colors.white70),
