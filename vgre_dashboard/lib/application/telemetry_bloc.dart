@@ -355,6 +355,41 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         topKernels = const [];
       }
 
+      List<MemoryAllocation> allocations = const [];
+      List<MemoryPool> memoryPools = const [];
+      try {
+        final memJson = bridge.getMemoryInfoJson();
+        if (memJson != null) {
+          final decoded = jsonDecode(memJson) as Map<String, dynamic>;
+          final allocs = decoded['allocations'] as List<dynamic>? ?? [];
+          allocations = allocs.map((a) {
+            final m = a as Map<String, dynamic>;
+            return MemoryAllocation(
+              ptr: (m['ptr'] ?? '0x0').toString(),
+              size: (m['size'] ?? 0) as int,
+              isManaged: (m['managed'] ?? false) as bool,
+              isResident: (m['resident'] ?? false) as bool,
+              deviceId: (m['device'] ?? 0) as int,
+            );
+          }).toList(growable: false);
+
+          final pools = decoded['pools'] as List<dynamic>? ?? [];
+          memoryPools = pools.map((p) {
+            final m = p as Map<String, dynamic>;
+            return MemoryPool(
+              id: (m['id'] ?? 0) as int,
+              blockSize: (m['blockSize'] ?? 0) as int,
+              totalAllocated: (m['total'] ?? 0) as int,
+              peakAllocated: (m['peak'] ?? 0) as int,
+              activeCount: (m['active'] ?? 0) as int,
+              freeCount: (m['free'] ?? 0) as int,
+            );
+          }).toList(growable: false);
+        }
+      } catch (e) {
+        debugPrint('Memory JSON parse failed: $e');
+      }
+
       final data = Telemetry(
         timestamp: DateTime.fromMillisecondsSinceEpoch(raw.timestamp),
         gflops: raw.gflops,
@@ -396,6 +431,8 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         clusterSecurityActive: _clusterSecurityActive,
         clusterSecuritySupported: _clusterSecuritySupported,
         lastSelectedKernelStats: _lastSelectedKernelStats,
+        allocations: allocations,
+        memoryPools: memoryPools,
       );
       add(UpdateTelemetry(data));
     } catch (e) {
@@ -461,6 +498,8 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       uvmQuality: current.uvmQuality,
       temperatureQuality: current.temperatureQuality,
       lastSelectedKernelStats: current.lastSelectedKernelStats,
+      allocations: current.allocations,
+      memoryPools: current.memoryPools,
     );
   }
 }
