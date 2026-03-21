@@ -131,6 +131,9 @@ public:
                               MemoryHandle &outHandle);
   VGREResult freeToPool(PoolHandle poolHandle, MemoryHandle handle);
 
+  const std::unordered_map<MemoryHandle, Allocation>& getAllocations() const { return allocations_; }
+  const std::unordered_map<PoolHandle, MemoryPool>& getPools() const { return pools_; }
+
   // Singleton convenience
   static MemoryManager &instance();
 

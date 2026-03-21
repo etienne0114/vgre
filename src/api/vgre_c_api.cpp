@@ -840,6 +840,49 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
   return VGRE_SUCCESS;
 }
 
+int vgre_get_memory_info_json(char **out_json) {
+  if (!out_json)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+
+  auto &mm = vgre::core::MemoryManager::instance();
+  
+  std::stringstream ss;
+  ss << "{\"allocations\":[";
+  
+  bool first = true;
+  for (const auto& [handle, alloc] : mm.getAllocations()) {
+    if (!first) ss << ",";
+    ss << "{\"ptr\":\"" << handle << "\","
+       << "\"size\":" << alloc.size << ","
+       << "\"managed\":" << (alloc.isManaged ? "true" : "false") << ","
+       << "\"resident\":" << (alloc.isResidentOnHost ? "true" : "false") << ","
+       << "\"device\":" << alloc.deviceId << "}";
+    first = false;
+  }
+  
+  ss << "],\"pools\":[";
+  first = true;
+  for (const auto& [id, pool] : mm.getPools()) {
+    if (!first) ss << ",";
+    ss << "{\"id\":" << id << ","
+       << "\"blockSize\":" << pool.blockSize << ","
+       << "\"total\":" << pool.totalAllocated << ","
+       << "\"peak\":" << pool.peakAllocated << ","
+       << "\"active\":" << pool.activeList.size() << ","
+       << "\"free\":" << pool.freeList.size() << "}";
+    first = false;
+  }
+  ss << "]}";
+  
+  std::string s = ss.str();
+  *out_json = (char *)std::malloc(s.size() + 1);
+  if (!*out_json) return VGRE_ERROR_OUT_OF_MEMORY;
+  std::strcpy(*out_json, s.c_str());
+  return VGRE_SUCCESS;
+}
+
 int vgre_get_logs(char ***buffer, int *count) {
   if (!buffer || !count)
     return VGRE_ERROR_INVALID_VALUE;
