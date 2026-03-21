@@ -62,8 +62,13 @@ void RuntimeProfiler::recordEvent(const ProfileEvent& event) {
     if (!enabled_.load(std::memory_order_relaxed)) return;
 
     std::lock_guard<std::mutex> lock(mutex_);
-    events_.push_back(event);
-    updateStats(event.kernelName, event);
+    ProfileEvent ev = event;
+    if (ev.timestamp_ms == 0) {
+        ev.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+    events_.push_back(ev);
+    updateStats(ev.kernelName, ev);
 }
 
 // ── Timer ──────────────────────────────────────────────────────────────────
@@ -147,6 +152,23 @@ std::vector<KernelStats> RuntimeProfiler::getAllStats() const {
               [](const KernelStats& a, const KernelStats& b) {
                   return a.totalTimeMs > b.totalTimeMs;
               });
+    return result;
+}
+ 
+std::vector<ProfileEvent> RuntimeProfiler::getEventsByKernel(
+    const std::string& kernelName) const {
+ 
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ProfileEvent> result;
+    for (const auto& ev : events_) {
+        if (ev.kernelName == kernelName) {
+            result.push_back(ev);
+        }
+    }
+    // Return last 100 events to avoid bloat
+    if (result.size() > 100) {
+        result.erase(result.begin(), result.end() - 100);
+    }
     return result;
 }
 

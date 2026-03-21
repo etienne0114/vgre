@@ -208,6 +208,7 @@ int vgre_get_profiler_json(char **out_json, int top_n);
 void vgre_free_string(char *str);
 int vgre_set_profiler_enabled(int enabled);
 int vgre_get_memory_info_json(char **out_json);
+int vgre_get_kernel_history_json(const char *kernel_name, char **out_json);
 
 /**
  * @brief Retrieves recent log lines from the engine.

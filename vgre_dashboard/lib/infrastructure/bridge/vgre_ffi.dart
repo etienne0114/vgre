@@ -175,6 +175,11 @@ typedef FreeLogs = void Function(Pointer<Pointer<Utf8>>, int);
 typedef GetProfilerJsonFunc = Int32 Function(Pointer<Pointer<Utf8>>, Int32);
 typedef GetProfilerJson = int Function(Pointer<Pointer<Utf8>>, int);
 
+typedef GetKernelHistoryJsonFunc = Int32 Function(
+    Pointer<Utf8>, Pointer<Pointer<Utf8>>);
+typedef GetKernelHistoryJson = int Function(
+    Pointer<Utf8>, Pointer<Pointer<Utf8>>);
+
 typedef FreeStringFunc = Void Function(Pointer<Utf8>);
 typedef FreeString = void Function(Pointer<Utf8>);
 
@@ -208,6 +213,7 @@ class VgreBridge {
   late final GetLogs _getLogs;
   late final FreeLogs _freeLogs;
   late final GetProfilerJson _getProfilerJson;
+  late final GetKernelHistoryJson _getKernelHistoryJson;
   late final FreeString _freeString;
   late final SetProfilerEnabled _setProfilerEnabled;
   late final GetMemoryInfoJson _getMemoryInfoJson;
@@ -239,6 +245,8 @@ class VgreBridge {
         _lib.lookupFunction<GetProfilerJsonFunc, GetProfilerJson>(
           'vgre_get_profiler_json',
         );
+    _getKernelHistoryJson = _lib.lookupFunction<GetKernelHistoryJsonFunc,
+        GetKernelHistoryJson>('vgre_get_kernel_history_json');
     _freeString =
         _lib.lookupFunction<FreeStringFunc, FreeString>('vgre_free_string');
     _setProfilerEnabled =
@@ -483,4 +491,20 @@ class VgreBridge {
   }
 
   int creditsReset() => _creditsReset();
+
+  String? getKernelHistoryJson(String kernelName) {
+    final namePtr = kernelName.toNativeUtf8();
+    final outPtr = calloc<Pointer<Utf8>>();
+    try {
+      final res = _getKernelHistoryJson(namePtr, outPtr);
+      if (res != 0) throw Exception('Failed to get kernel history: $res');
+      if (outPtr.value == nullptr) return null;
+      final jsonStr = outPtr.value.toDartString();
+      _freeString(outPtr.value);
+      return jsonStr;
+    } finally {
+      calloc.free(namePtr);
+      calloc.free(outPtr);
+    }
+  }
 }

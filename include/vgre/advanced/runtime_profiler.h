@@ -26,6 +26,7 @@ struct ProfileEvent {
     dim3        blockDim;
     int         threadsUsed     = 0;
     std::chrono::steady_clock::time_point timestamp;
+    uint64_t    timestamp_ms    = 0;
 };
 
 // ── Kernel aggregate stats ─────────────────────────────────────────────────
@@ -67,6 +68,7 @@ public:
     // Get statistics
     KernelStats getKernelStats(const std::string& kernelName) const;
     std::vector<KernelStats> getAllStats() const;
+    std::vector<ProfileEvent> getEventsByKernel(const std::string& kernelName) const;
 
     // Export
     std::string toJSON() const;

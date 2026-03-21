@@ -984,6 +984,36 @@ int vgre_get_profiler_json(char **out_json, int top_n) {
   return VGRE_SUCCESS;
 }
 
+int vgre_get_kernel_history_json(const char *kernel_name, char **out_json) {
+  if (!kernel_name || !out_json)
+    return VGRE_ERROR_INVALID_VALUE;
+  
+  auto &profiler = vgre::advanced::RuntimeProfiler::instance();
+  auto events = profiler.getEventsByKernel(kernel_name);
+
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(4);
+  oss << "[\n";
+  for (size_t i = 0; i < events.size(); ++i) {
+    const auto &ev = events[i];
+    oss << "  {\n";
+    oss << "    \"timestamp_ms\": " << ev.timestamp_ms << ",\n";
+    oss << "    \"duration_ms\": " << ev.durationMs << ",\n";
+    oss << "    \"throughput_gbps\": " << ev.throughputGBps << ",\n";
+    oss << "    \"gflops\": " << ev.gflops << ",\n";
+    oss << "    \"threads_used\": " << ev.threadsUsed << "\n";
+    oss << "  }" << (i + 1 < events.size() ? "," : "") << "\n";
+  }
+  oss << "]\n";
+
+  const std::string json = oss.str();
+  char *buf = static_cast<char *>(malloc(json.size() + 1));
+  if (!buf) return VGRE_ERROR_OUT_OF_MEMORY;
+  std::memcpy(buf, json.c_str(), json.size() + 1);
+  *out_json = buf;
+  return VGRE_SUCCESS;
+}
+
 void vgre_free_string(char *str) {
   if (str)
     free(str);
