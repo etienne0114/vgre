@@ -220,6 +220,7 @@ class Telemetry extends Equatable {
   final KernelStat? lastSelectedKernelStats;
   final List<MemoryAllocation> allocations;
   final List<MemoryPool> memoryPools;
+  final int deviceCount;
 
   const Telemetry({
     required this.timestamp,
@@ -264,10 +265,103 @@ class Telemetry extends Equatable {
     this.lastSelectedKernelStats,
     this.allocations = const [],
     this.memoryPools = const [],
+    this.deviceCount = 1,
   });
 
   double get memoryUsagePercent =>
       memoryTotal > 0 ? (memoryUsed / memoryTotal) * 100 : 0;
+
+  Telemetry copyWith({
+    DateTime? timestamp,
+    double? gflops,
+    double? maxGflops,
+    double? computeUtilization,
+    double? memoryBandwidth,
+    double? maxMemoryBandwidth,
+    double? memoryBusUtilization,
+    int? memoryUsed,
+    int? memoryTotal,
+    int? totalPages,
+    int? residentPages,
+    int? evictedPages,
+    double? pageFaultRate,
+    List<int>? uvmMap,
+    int? activeKernels,
+    int? activeThreads,
+    int? clockSpeed,
+    double? avgLatency,
+    double? temperature,
+    bool? eccEnabled,
+    bool? backgroundComputeActive,
+    bool? serviceModeActive,
+    bool? blockThreadsActive,
+    String? deviceName,
+    int? versionMajor,
+    int? versionMinor,
+    List<String>? logs,
+    List<KernelStat>? topKernels,
+    MetricQuality? computeQuality,
+    MetricQuality? memoryQuality,
+    MetricQuality? uvmQuality,
+    MetricQuality? temperatureQuality,
+    List<ClusterNode>? clusterNodes,
+    SecurityInfo? securityInfo,
+    List<CreditEntry>? creditLedger,
+    bool? profilerEnabled,
+    String? backendVersion,
+    bool? clusterSecurityActive,
+    bool? clusterSecuritySupported,
+    KernelStat? lastSelectedKernelStats,
+    List<MemoryAllocation>? allocations,
+    List<MemoryPool>? memoryPools,
+    int? deviceCount,
+  }) {
+    return Telemetry(
+      timestamp: timestamp ?? this.timestamp,
+      gflops: gflops ?? this.gflops,
+      maxGflops: maxGflops ?? this.maxGflops,
+      computeUtilization: computeUtilization ?? this.computeUtilization,
+      memoryBandwidth: memoryBandwidth ?? this.memoryBandwidth,
+      maxMemoryBandwidth: maxMemoryBandwidth ?? this.maxMemoryBandwidth,
+      memoryBusUtilization: memoryBusUtilization ?? this.memoryBusUtilization,
+      memoryUsed: memoryUsed ?? this.memoryUsed,
+      memoryTotal: memoryTotal ?? this.memoryTotal,
+      totalPages: totalPages ?? this.totalPages,
+      residentPages: residentPages ?? this.residentPages,
+      evictedPages: evictedPages ?? this.evictedPages,
+      pageFaultRate: pageFaultRate ?? this.pageFaultRate,
+      uvmMap: uvmMap ?? this.uvmMap,
+      activeKernels: activeKernels ?? this.activeKernels,
+      activeThreads: activeThreads ?? this.activeThreads,
+      clockSpeed: clockSpeed ?? this.clockSpeed,
+      avgLatency: avgLatency ?? this.avgLatency,
+      temperature: temperature ?? this.temperature,
+      eccEnabled: eccEnabled ?? this.eccEnabled,
+      backgroundComputeActive: backgroundComputeActive ?? this.backgroundComputeActive,
+      serviceModeActive: serviceModeActive ?? this.serviceModeActive,
+      blockThreadsActive: blockThreadsActive ?? this.blockThreadsActive,
+      deviceName: deviceName ?? this.deviceName,
+      versionMajor: versionMajor ?? this.versionMajor,
+      versionMinor: versionMinor ?? this.versionMinor,
+      logs: logs ?? this.logs,
+      topKernels: topKernels ?? this.topKernels,
+      computeQuality: computeQuality ?? this.computeQuality,
+      memoryQuality: memoryQuality ?? this.memoryQuality,
+      uvmQuality: uvmQuality ?? this.uvmQuality,
+      temperatureQuality: temperatureQuality ?? this.temperatureQuality,
+      clusterNodes: clusterNodes ?? this.clusterNodes,
+      securityInfo: securityInfo ?? this.securityInfo,
+      creditLedger: creditLedger ?? this.creditLedger,
+      profilerEnabled: profilerEnabled ?? this.profilerEnabled,
+      backendVersion: backendVersion ?? this.backendVersion,
+      clusterSecurityActive: clusterSecurityActive ?? this.clusterSecurityActive,
+      clusterSecuritySupported: clusterSecuritySupported ?? this.clusterSecuritySupported,
+      lastSelectedKernelStats: lastSelectedKernelStats ?? this.lastSelectedKernelStats,
+      allocations: allocations ?? this.allocations,
+      memoryPools: memoryPools ?? this.memoryPools,
+      deviceCount: deviceCount ?? this.deviceCount,
+    );
+  }
 
   @override
   List<Object?> get props => [
@@ -313,6 +407,7 @@ class Telemetry extends Equatable {
         lastSelectedKernelStats,
         allocations,
         memoryPools,
+        deviceCount,
       ];
 }
 
