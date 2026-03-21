@@ -417,5 +417,106 @@ float TextureManager::tex3D(TextureId id, float x, float y, float z) const {
   return front * (1.0f - fracZ) + back * fracZ;
 }
 
+// ── 3D Texture creation (explicit depth) ─────────────────────────────────────
+VGREResult TextureManager::createTexture3D(TextureId &outId, const void *data,
+                                           size_t width, size_t height,
+                                           size_t depth, size_t elementSize,
+                                           const TextureDescriptor &desc) {
+  if (!data || width == 0 || height == 0 || depth == 0 || elementSize == 0)
+    return VGREResult::ERROR_INVALID_VALUE;
+
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  TextureObject tex;
+  tex.id = nextTextureId_++;
+  tex.data = data;
+  tex.width = width;
+  tex.height = height;
+  tex.depth = depth;
+  tex.elementSize = elementSize;
+  tex.desc = desc;
+
+  textures_[tex.id] = tex;
+  outId = tex.id;
+
+  VGRE_LOG_INFO("TextureManager",
+                "Created 3D texture " + std::to_string(tex.id) + " (" +
+                    std::to_string(width) + "x" + std::to_string(height) +
+                    "x" + std::to_string(depth) + ", " +
+                    std::to_string(elementSize) + " bytes/element)");
+
+  return VGREResult::SUCCESS;
+}
+
+// ── cudaArray lifecycle (owns backing memory) ─────────────────────────────────
+VGREResult TextureManager::createCudaArray(TextureId &outId, size_t width,
+                                           size_t height, size_t elementSize,
+                                           const TextureDescriptor &desc) {
+  if (width == 0 || elementSize == 0)
+    return VGREResult::ERROR_INVALID_VALUE;
+
+  size_t h = (height == 0) ? 1 : height;
+  size_t totalBytes = width * h * elementSize;
+
+  // Allocate managed backing memory
+  std::vector<uint8_t> backing(totalBytes, 0);
+
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  TextureObject tex;
+  tex.id = nextTextureId_++;
+  tex.width = width;
+  tex.height = h;
+  tex.depth = 1;
+  tex.elementSize = elementSize;
+  tex.desc = desc;
+
+  // Store the owned backing buffer first, then point the texture to it
+  ownedArrays_[tex.id] = std::move(backing);
+  tex.data = ownedArrays_[tex.id].data();
+
+  textures_[tex.id] = tex;
+  outId = tex.id;
+
+  VGRE_LOG_INFO("TextureManager",
+                "Created cudaArray " + std::to_string(tex.id) + " (" +
+                    std::to_string(width) + "x" + std::to_string(h) +
+                    ", " + std::to_string(totalBytes) + " bytes owned)");
+
+  return VGREResult::SUCCESS;
+}
+
+VGREResult TextureManager::destroyCudaArray(TextureId id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto texIt = textures_.find(id);
+  auto arrIt = ownedArrays_.find(id);
+
+  if (texIt == textures_.end() && arrIt == ownedArrays_.end())
+    return VGREResult::ERROR_INVALID_VALUE;
+
+  if (texIt != textures_.end())
+    textures_.erase(texIt);
+  if (arrIt != ownedArrays_.end())
+    ownedArrays_.erase(arrIt);
+
+  VGRE_LOG_DEBUG("TextureManager",
+                 "Destroyed cudaArray " + std::to_string(id));
+  return VGREResult::SUCCESS;
+}
+
+void *TextureManager::getCudaArrayData(TextureId id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = ownedArrays_.find(id);
+  if (it == ownedArrays_.end()) return nullptr;
+  return it->second.data();
+}
+
+const void *TextureManager::getCudaArrayData(TextureId id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = ownedArrays_.find(id);
+  if (it == ownedArrays_.end()) return nullptr;
+  return it->second.data();
+}
+
 } // namespace core
 } // namespace vgre

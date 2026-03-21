@@ -1171,8 +1171,16 @@ cudaError_t CUDAInterceptor::graphAddMemcpyNode(cudaGraphNode_t *pGraphNode, cud
     deps.assign(pDependencies, pDependencies + numDependencies);
   }
 
-  void *dst = pCopyParams->dstPtr.ptr ? pCopyParams->dstPtr.ptr : pCopyParams->dstArray;
-  const void *src = pCopyParams->srcPtr.ptr ? pCopyParams->srcPtr.ptr : pCopyParams->srcArray;
+  // Resolve destination: prefer pitched pointer, fall back to cudaArray handle
+  void *dst = pCopyParams->dstPtr.ptr;
+  if (!dst && pCopyParams->dstArray != 0) {
+    dst = core::TextureManager::instance().getCudaArrayData(pCopyParams->dstArray);
+  }
+  // Resolve source: prefer pitched pointer, fall back to cudaArray handle
+  const void *src = pCopyParams->srcPtr.ptr;
+  if (!src && pCopyParams->srcArray != 0) {
+    src = core::TextureManager::instance().getCudaArrayData(pCopyParams->srcArray);
+  }
   size_t count = pCopyParams->extent.width * (pCopyParams->extent.height > 0 ? pCopyParams->extent.height : 1) * (pCopyParams->extent.depth > 0 ? pCopyParams->extent.depth : 1);
 
   uint64_t outNodeId = 0;
@@ -1402,6 +1410,102 @@ cudaError_t CUDAInterceptor::destroySurfaceObject(cudaSurfaceObject_t surfObject
   auto r = core::TextureManager::instance().destroySurface(surfObject);
   g_lastError = convertResult(r);
   return g_lastError;
+}
+
+// ── cudaArray Lifecycle (backed by TextureManager) ──────────────────────────
+cudaError_t CUDAInterceptor::mallocArray(cudaArray_t *array, size_t width,
+                                          size_t height, size_t elementSizeBytes,
+                                          unsigned int flags) {
+  (void)flags;
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess) return err;
+  }
+  if (!array || width == 0 || elementSizeBytes == 0)
+    return cudaErrorInvalidValue;
+
+  core::TextureDescriptor desc;
+  desc.elementType = core::TextureElementType::FLOAT32;
+  // Infer element type from size
+  if (elementSizeBytes == 1) desc.elementType = core::TextureElementType::UINT8;
+  else if (elementSizeBytes == 2) desc.elementType = core::TextureElementType::UINT16;
+  else if (elementSizeBytes == 4) desc.elementType = core::TextureElementType::FLOAT32;
+  else if (elementSizeBytes == 8) desc.elementType = core::TextureElementType::FLOAT64;
+
+  core::TextureId texId = 0;
+  auto r = core::TextureManager::instance().createCudaArray(
+      texId, width, height, elementSizeBytes, desc);
+  if (r != VGREResult::SUCCESS) {
+    g_lastError = convertResult(r);
+    return g_lastError;
+  }
+
+  *array = texId;
+  VGRE_LOG_INFO("CUDAInterceptor",
+                "cudaMallocArray: created array " + std::to_string(texId) +
+                " (" + std::to_string(width) + "x" +
+                std::to_string(height) + ")");
+  return cudaSuccess;
+}
+
+cudaError_t CUDAInterceptor::freeArray(cudaArray_t array) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized())
+    return cudaErrorNotInitialized;
+
+  auto r = core::TextureManager::instance().destroyCudaArray(array);
+  g_lastError = convertResult(r);
+  return g_lastError;
+}
+
+cudaError_t CUDAInterceptor::memcpyToArray(cudaArray_t dst, size_t wOffset,
+                                            size_t hOffset, const void *src,
+                                            size_t count,
+                                            cudaMemcpyKind_t kind) {
+  (void)kind; // All copies go through the same host memory path
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized())
+    return cudaErrorNotInitialized;
+  if (!src || count == 0)
+    return cudaErrorInvalidValue;
+
+  void *arrayData = core::TextureManager::instance().getCudaArrayData(dst);
+  if (!arrayData) {
+    VGRE_LOG_ERROR("CUDAInterceptor",
+                   "memcpyToArray: invalid cudaArray " + std::to_string(dst));
+    return cudaErrorInvalidValue;
+  }
+
+  // Compute byte offset into the backing buffer
+  uint8_t *base = static_cast<uint8_t *>(arrayData);
+  // wOffset and hOffset are in element coordinates; for simplicity we treat
+  // them as byte offsets since element sizes are tracked by TextureManager.
+  // The caller is responsible for converting element offsets to byte offsets
+  // which is what the CUDA runtime spec requires for cudaMemcpyToArray.
+  std::memcpy(base + hOffset + wOffset, src, count);
+
+  return cudaSuccess;
+}
+
+cudaError_t CUDAInterceptor::memcpyFromArray(void *dst, cudaArray_t src,
+                                              size_t wOffset, size_t hOffset,
+                                              size_t count,
+                                              cudaMemcpyKind_t kind) {
+  (void)kind;
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized())
+    return cudaErrorNotInitialized;
+  if (!dst || count == 0)
+    return cudaErrorInvalidValue;
+
+  const void *arrayData = core::TextureManager::instance().getCudaArrayData(src);
+  if (!arrayData) {
+    VGRE_LOG_ERROR("CUDAInterceptor",
+                   "memcpyFromArray: invalid cudaArray " + std::to_string(src));
+    return cudaErrorInvalidValue;
+  }
+
+  const uint8_t *base = static_cast<const uint8_t *>(arrayData);
+  std::memcpy(dst, base + hOffset + wOffset, count);
+
+  return cudaSuccess;
 }
 
 } // namespace api

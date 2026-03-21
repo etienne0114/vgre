@@ -109,6 +109,20 @@ public:
   size_t getTextureCount() const;
   size_t getSurfaceCount() const;
 
+  // ── 3D Texture creation (explicit depth) ─────────────────────────────────
+  VGREResult createTexture3D(TextureId &outId, const void *data,
+                             size_t width, size_t height, size_t depth,
+                             size_t elementSize, const TextureDescriptor &desc);
+
+  // ── cudaArray lifecycle (owns backing memory) ────────────────────────────
+  // Allocates a managed memory block and wraps it as a texture for sampling.
+  VGREResult createCudaArray(TextureId &outId, size_t width, size_t height,
+                             size_t elementSize, const TextureDescriptor &desc);
+  VGREResult destroyCudaArray(TextureId id);
+  // Returns raw pointer to the cudaArray's owned backing memory for memcpy.
+  void *getCudaArrayData(TextureId id);
+  const void *getCudaArrayData(TextureId id) const;
+
   // ── Singleton ────────────────────────────────────────────────────────────
   static TextureManager &instance();
 
@@ -118,6 +132,8 @@ private:
 
   std::unordered_map<TextureId, TextureObject> textures_;
   std::unordered_map<SurfaceId, SurfaceObject> surfaces_;
+  // Backing memory owned by cudaArray lifecycle (freed on destroyCudaArray)
+  std::unordered_map<TextureId, std::vector<uint8_t>> ownedArrays_;
   mutable std::mutex mutex_;
   TextureId nextTextureId_ = 1;
   SurfaceId nextSurfaceId_ = 1;

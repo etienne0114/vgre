@@ -220,16 +220,28 @@ public:
   };
   struct cudaPos { size_t x, y, z; };
   struct cudaExtent { size_t width, height, depth; };
+  // cudaArray handle backed by TextureManager::TextureId
+  using cudaArray_t = uint64_t;
+
   struct cudaMemcpy3DParms {
-      void*                  srcArray; // placeholder for cudaArray_t
+      cudaArray_t            srcArray;  // TextureManager-backed array handle
       struct cudaPos         srcPos;
       struct cudaPitchedPtr  srcPtr;
-      void*                  dstArray; // placeholder for cudaArray_t
+      cudaArray_t            dstArray;  // TextureManager-backed array handle
       struct cudaPos         dstPos;
       struct cudaPitchedPtr  dstPtr;
       struct cudaExtent      extent;
       cudaMemcpyKind_t       kind;
   };
+
+  // ── cudaArray Lifecycle (backed by TextureManager) ──────────────────────
+  cudaError_t mallocArray(cudaArray_t *array, size_t width, size_t height,
+                          size_t elementSizeBytes, unsigned int flags);
+  cudaError_t freeArray(cudaArray_t array);
+  cudaError_t memcpyToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
+                            const void *src, size_t count, cudaMemcpyKind_t kind);
+  cudaError_t memcpyFromArray(void *dst, cudaArray_t src, size_t wOffset,
+                              size_t hOffset, size_t count, cudaMemcpyKind_t kind);
 
   cudaError_t graphCreate(cudaGraph_t *graph, unsigned int flags);
   cudaError_t streamBeginCapture(cudaStream_t stream);
