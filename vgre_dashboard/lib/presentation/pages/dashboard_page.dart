@@ -101,8 +101,23 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 }
 
-class DashboardOverviewContent extends StatelessWidget {
+enum _ExpandedPanel { none, workload, uvm, logs }
+
+class DashboardOverviewContent extends StatefulWidget {
   const DashboardOverviewContent({super.key});
+
+  @override
+  State<DashboardOverviewContent> createState() => _DashboardOverviewContentState();
+}
+
+class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
+  _ExpandedPanel _expanded = _ExpandedPanel.none;
+
+  void _toggleExpand(_ExpandedPanel panel) {
+    setState(() {
+      _expanded = (_expanded == panel) ? _ExpandedPanel.none : panel;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -126,103 +141,94 @@ class DashboardOverviewContent extends StatelessWidget {
                   child: Column(
                     children: [
                       // Top Section: Gauges and UVM Map
-                      Expanded(
-                        flex: 5,
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: GlassCard(
-                                child: GlowGauge(
-                                  value: data.gflops,
-                                  max: data.maxGflops,
-                                  label: "GFLOPS Performance",
-                                  unit: "GFLOPS",
-                                  color: VgreTheme.primaryNeon,
-                                  info: [
-                                    {
-                                      'key': 'Quality',
-                                      'value': data.computeQuality.label,
-                                    },
-                                    {
-                                      'key': 'Util',
-                                      'value':
-                                          '${data.computeUtilization.toStringAsFixed(0)}%',
-                                    },
-                                    {
-                                      'key': 'Cores',
-                                      'value': '${data.activeThreads}',
-                                    },
-                                    {
-                                      'key': 'Temp',
-                                      'value':
-                                          '${data.temperature.toStringAsFixed(1)}°C',
-                                    },
-                                  ],
+                      if (_expanded == _ExpandedPanel.none || _expanded == _ExpandedPanel.uvm)
+                        Expanded(
+                          flex: _expanded == _ExpandedPanel.uvm ? 1 : 5,
+                          child: Row(
+                            children: [
+                              if (_expanded == _ExpandedPanel.none) ...[
+                                Expanded(
+                                  flex: 2,
+                                  child: GlassCard(
+                                    child: GlowGauge(
+                                      value: data.gflops,
+                                      max: data.maxGflops,
+                                      label: "GFLOPS Performance",
+                                      unit: "GFLOPS",
+                                      color: VgreTheme.primaryNeon,
+                                      info: [
+                                        {'key': 'Quality', 'value': data.computeQuality.label},
+                                        {'key': 'Util', 'value': '${data.computeUtilization.toStringAsFixed(0)}%'},
+                                        {'key': 'Cores', 'value': '${data.activeThreads}'},
+                                        {'key': 'Temp', 'value': '${data.temperature.toStringAsFixed(1)}°C'},
+                                      ],
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ),
-                            const SizedBox(width: 20),
-                            Expanded(
-                              child: GlassCard(
-                                child: GlowGauge(
-                                  value: data.memoryBandwidth,
-                                  max: data.maxMemoryBandwidth,
-                                  label: "Memory Bandwidth",
-                                  unit: "GB/s",
-                                  color: VgreTheme.secondaryNeon,
-                                  info: [
-                                    {
-                                      'key': 'Quality',
-                                      'value': data.memoryQuality.label,
-                                    },
-                                    {
-                                      'key': 'HBM2',
-                                      'value':
-                                          '${data.memoryUsagePercent.toStringAsFixed(0)}%',
-                                    },
-                                    {
-                                      'key': 'Clock',
-                                      'value': '${data.clockSpeed} MHz',
-                                    },
-                                    {
-                                      'key': 'ECC',
-                                      'value': data.eccEnabled
-                                          ? 'OK'
-                                          : 'ERR',
-                                    },
-                                  ],
+                                const SizedBox(width: 16),
+                                Expanded(
+                                  flex: 2,
+                                  child: GlassCard(
+                                    child: GlowGauge(
+                                      value: data.memoryBandwidth,
+                                      max: data.maxMemoryBandwidth,
+                                      label: "Memory Bandwidth",
+                                      unit: "GB/s",
+                                      color: VgreTheme.secondaryNeon,
+                                      info: [
+                                        {'key': 'Quality', 'value': data.memoryQuality.label},
+                                        {'key': 'HBM2', 'value': '${data.memoryUsagePercent.toStringAsFixed(0)}%'},
+                                        {'key': 'Clock', 'value': '${data.clockSpeed} MHz'},
+                                        {'key': 'ECC', 'value': data.eccEnabled ? 'OK' : 'ERR'},
+                                      ],
+                                    ),
+                                  ),
                                 ),
+                                const SizedBox(width: 16),
+                              ],
+                              Expanded(
+                                flex: 3,
+                                child: _buildMemoryMapPanel(data),
                               ),
-                            ),
-                            const SizedBox(width: 20),
-                            Expanded(child: _buildMemoryMapPanel(data)),
-                          ],
+                            ],
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 20),
+                      
+                      if (_expanded == _ExpandedPanel.none) const SizedBox(height: 20),
+
                       // Middle Section: Workload Chart
-                      Expanded(
-                        flex: 3,
-                        child: _buildWorkloadChart(history),
-                      ),
-                      const SizedBox(height: 20),
-                      // Bottom Section: Console
-                      Expanded(
-                        flex: 3,
-                        child: Row(
-                          children: [
-                            Expanded(
-                              flex: 2,
-                              child: _buildKernelPanel(data),
-                            ),
-                            const SizedBox(width: 20),
-                            Expanded(
-                              flex: 3,
-                              child: _TerminalConsole(logs: data.logs),
-                            ),
-                          ],
+                      if (_expanded == _ExpandedPanel.none || _expanded == _ExpandedPanel.workload)
+                        Expanded(
+                          flex: _expanded == _ExpandedPanel.workload ? 1 : 3,
+                          child: _buildWorkloadChart(history),
                         ),
-                      ),
+
+                      if (_expanded == _ExpandedPanel.none) const SizedBox(height: 20),
+
+                      // Bottom Section: Console
+                      if (_expanded == _ExpandedPanel.none || _expanded == _ExpandedPanel.logs)
+                        Expanded(
+                          flex: _expanded == _ExpandedPanel.logs ? 1 : 3,
+                          child: Row(
+                            children: [
+                              if (_expanded == _ExpandedPanel.none) ...[
+                                Expanded(
+                                  flex: 2,
+                                  child: _buildKernelPanel(data),
+                                ),
+                                const SizedBox(width: 20),
+                              ],
+                              Expanded(
+                                flex: 3,
+                                child: _TerminalConsole(
+                                  logs: data.logs,
+                                  isExpanded: _expanded == _ExpandedPanel.logs,
+                                  onToggleExpand: () => _toggleExpand(_ExpandedPanel.logs),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -242,107 +248,68 @@ class DashboardOverviewContent extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.white10),
       ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final bool isNarrow = constraints.maxWidth < 1100;
-          
-          final infoItems = [
-            _headerInfoItem("CLOCK", "${data.clockSpeed} MHz"),
-            const SizedBox(width: 24),
-            _headerInfoItem("ECC", data.eccEnabled ? "ENABLED" : "DISABLED"),
-            const SizedBox(width: 24),
-            _headerToggle("BACKGROUND COMPUTE", data.backgroundComputeActive, (val) {
-              context.read<TelemetryBloc>().add(ToggleBackgroundCompute(val));
-            }),
-            const SizedBox(width: 24),
-            _headerToggle("SERVICE", data.serviceModeActive, (val) {
-              context.read<TelemetryBloc>().add(ToggleServiceMode(val));
-            }, color: VgreTheme.primaryNeon),
-            const SizedBox(width: 24),
-            _headerToggle("BLOCK THREADS", data.blockThreadsActive, (val) {
-              context.read<TelemetryBloc>().add(ToggleBlockThreads(val));
-            }, color: VgreTheme.secondaryNeon),
-          ];
-
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          const Icon(Icons.memory, color: VgreTheme.primaryNeon, size: 28),
+          const SizedBox(width: 16),
+          Text(
+            data.deviceName.toUpperCase(),
+            style: GoogleFonts.orbitron(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 2,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+          if (data.securityInfo?.isEncrypted ?? false) ...[
+            const SizedBox(width: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: VgreTheme.neonGreen.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: VgreTheme.neonGreen.withValues(alpha: 0.5)),
+              ),
+              child: const Row(
                 children: [
-                  const Icon(Icons.memory, color: VgreTheme.primaryNeon, size: 28),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          data.deviceName.toUpperCase(),
-                          style: GoogleFonts.orbitron(
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 2,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        if (data.securityInfo?.isEncrypted ?? false) ...[
-                          const SizedBox(width: 12),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: VgreTheme.neonGreen.withValues(alpha: 0.1),
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: VgreTheme.neonGreen.withValues(alpha: 0.5)),
-                            ),
-                            child: const Row(
-                              children: [
-                                Icon(Icons.lock_outline, size: 12, color: VgreTheme.neonGreen),
-                                SizedBox(width: 4),
-                                Text(
-                                  "SECURE",
-                                  style: TextStyle(
-                                    color: VgreTheme.neonGreen,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ],
+                  Icon(Icons.lock_outline, size: 12, color: VgreTheme.neonGreen),
+                  SizedBox(width: 4),
+                  Text(
+                    "SECURE",
+                    style: TextStyle(
+                      color: VgreTheme.neonGreen,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
-
-                  if (!isNarrow) ...[
-                    const Spacer(),
-                    ...infoItems,
-                  ],
                 ],
               ),
-              if (isNarrow) ...[
-                const SizedBox(height: 16),
-                Wrap(
-                  spacing: 24,
-                  runSpacing: 12,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    _headerInfoItem("CLOCK", "${data.clockSpeed} MHz"),
-                    _headerInfoItem("ECC", data.eccEnabled ? "ENABLED" : "DISABLED"),
-                    _headerToggle("BACKGROUND COMPUTE", data.backgroundComputeActive, (val) {
-                      context.read<TelemetryBloc>().add(ToggleBackgroundCompute(val));
-                    }),
-                    _headerToggle("SERVICE", data.serviceModeActive, (val) {
-                      context.read<TelemetryBloc>().add(ToggleServiceMode(val));
-                    }, color: VgreTheme.primaryNeon),
-                    _headerToggle("BLOCK THREADS", data.blockThreadsActive, (val) {
-                      context.read<TelemetryBloc>().add(ToggleBlockThreads(val));
-                    }, color: VgreTheme.secondaryNeon),
-                  ],
-                ),
+            ),
+          ],
+          const SizedBox(width: 24),
+          Expanded(
+            child: Wrap(
+              spacing: 24,
+              runSpacing: 12,
+              alignment: WrapAlignment.end,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                _headerInfoItem("CLOCK", "${data.clockSpeed} MHz"),
+                _headerInfoItem("ECC", data.eccEnabled ? "ENABLED" : "DISABLED"),
+                _headerToggle("BACKGROUND COMPUTE", data.backgroundComputeActive, (val) {
+                  context.read<TelemetryBloc>().add(ToggleBackgroundCompute(val));
+                }),
+                _headerToggle("SERVICE", data.serviceModeActive, (val) {
+                  context.read<TelemetryBloc>().add(ToggleServiceMode(val));
+                }, color: VgreTheme.primaryNeon),
+                _headerToggle("BLOCK THREADS", data.blockThreadsActive, (val) {
+                  context.read<TelemetryBloc>().add(ToggleBlockThreads(val));
+                }, color: VgreTheme.secondaryNeon),
               ],
-            ],
-          );
-        },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -403,15 +370,30 @@ class DashboardOverviewContent extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Expanded(
-                child: Text(
-                  "UVM MEMORY MAP",
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1.5,
-                    fontSize: 12,
-                  ),
-                  overflow: TextOverflow.ellipsis,
+              Expanded(
+                child: Row(
+                  children: [
+                    const Text(
+                      "UVM MEMORY MAP",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.5,
+                        fontSize: 12,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      icon: Icon(
+                        _expanded == _ExpandedPanel.uvm ? Icons.close_fullscreen : Icons.open_in_full,
+                        size: 14,
+                        color: VgreTheme.textMuted,
+                      ),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                      onPressed: () => _toggleExpand(_ExpandedPanel.uvm),
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(width: 8),
@@ -531,13 +513,24 @@ class DashboardOverviewContent extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Text(
+              Text(
                 "GPU WORKLOAD & HEAT",
-                style: TextStyle(
+                style: const TextStyle(
                   fontWeight: FontWeight.bold,
                   letterSpacing: 1.5,
                   fontSize: 12,
                 ),
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                icon: Icon(
+                  _expanded == _ExpandedPanel.workload ? Icons.close_fullscreen : Icons.open_in_full,
+                  size: 14,
+                  color: VgreTheme.textMuted,
+                ),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: () => _toggleExpand(_ExpandedPanel.workload),
               ),
               const Spacer(),
               _chartLabel("COMPUTE", VgreTheme.primaryNeon),
@@ -553,14 +546,63 @@ class DashboardOverviewContent extends StatelessWidget {
               LineChartData(
                 minY: 0,
                 maxY: 100,
+                lineTouchData: LineTouchData(
+                  touchTooltipData: LineTouchTooltipData(
+                    getTooltipColor: (_) => Colors.black87,
+                    tooltipRoundedRadius: 8,
+                    getTooltipItems: (touchedSpots) {
+                      return touchedSpots.map((spot) {
+                        final color = spot.bar.color ?? Colors.white;
+                        final label = spot.barIndex == 0 ? "COMPUTE" : spot.barIndex == 1 ? "MEM I/O" : "HEAT";
+                        final unit = spot.barIndex == 2 ? "°C" : "%";
+                        return LineTooltipItem(
+                          "$label: ${spot.y.toStringAsFixed(1)}$unit",
+                          TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 11),
+                        );
+                      }).toList();
+                    },
+                  ),
+                ),
                 gridData: FlGridData(
                   show: true,
                   drawVerticalLine: false,
-                  getDrawingHorizontalLine: (v) =>
-                      FlLine(color: Colors.white.withValues(alpha: 0.05)),
+                  horizontalInterval: 25,
+                  getDrawingHorizontalLine: (v) => FlLine(
+                    color: Colors.white.withValues(alpha: 0.05),
+                    strokeWidth: 1,
+                  ),
                 ),
-                titlesData: const FlTitlesData(show: false),
+                titlesData: FlTitlesData(
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      getTitlesWidget: (value, meta) => Text(
+                        "${value.toInt()}%",
+                        style: const TextStyle(color: VgreTheme.textMuted, fontSize: 8),
+                      ),
+                      reservedSize: 30,
+                    ),
+                  ),
+                  rightTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      getTitlesWidget: (value, meta) => Text(
+                        "${value.toInt()}°C",
+                        style: const TextStyle(color: VgreTheme.textMuted, fontSize: 8),
+                      ),
+                      reservedSize: 30,
+                    ),
+                  ),
+                  bottomTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                ),
                 borderData: FlBorderData(show: false),
+                extraLinesData: ExtraLinesData(
+                  horizontalLines: [
+                    HorizontalLine(y: 90, color: Colors.redAccent.withValues(alpha: 0.2), strokeWidth: 1, dashArray: [5, 5]),
+                    HorizontalLine(y: 70, color: Colors.orangeAccent.withValues(alpha: 0.1), strokeWidth: 1, dashArray: [5, 5]),
+                  ],
+                ),
                 lineBarsData: [
                   _lineData(
                     VgreTheme.primaryNeon,
@@ -595,7 +637,17 @@ class DashboardOverviewContent extends StatelessWidget {
       barWidth: 2,
       isStrokeCapRound: true,
       dotData: const FlDotData(show: false),
-      belowBarData: BarAreaData(show: true, color: color.withValues(alpha: 0.1)),
+      belowBarData: BarAreaData(
+        show: true,
+        gradient: LinearGradient(
+          colors: [
+            color.withValues(alpha: 0.3),
+            color.withValues(alpha: 0.0),
+          ],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ),
+      ),
     );
   }
 
@@ -683,7 +735,13 @@ class DashboardOverviewContent extends StatelessWidget {
 
 class _TerminalConsole extends StatefulWidget {
   final List<String> logs;
-  const _TerminalConsole({required this.logs});
+  final bool isExpanded;
+  final VoidCallback onToggleExpand;
+  const _TerminalConsole({
+    required this.logs,
+    this.isExpanded = false,
+    required this.onToggleExpand,
+  });
 
   @override
   State<_TerminalConsole> createState() => _TerminalConsoleState();
@@ -717,26 +775,28 @@ class _TerminalConsoleState extends State<_TerminalConsole> {
             decoration: const BoxDecoration(
               border: Border(bottom: BorderSide(color: Colors.white10)),
             ),
-            child: const Row(
+            child: Row(
               children: [
-                Text(
+                const Text(
                   "TERMINAL CONSOLE / KERNEL LOGS",
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
                     letterSpacing: 1.5,
-                    fontSize: 11,
+                    fontSize: 10,
                   ),
                 ),
-                Spacer(),
-                Icon(Icons.remove, size: 16, color: VgreTheme.textMuted),
-                SizedBox(width: 12),
-                Icon(
-                  Icons.check_box_outline_blank,
-                  size: 14,
-                  color: VgreTheme.textMuted,
+                const SizedBox(width: 8),
+                IconButton(
+                  icon: Icon(
+                    widget.isExpanded ? Icons.close_fullscreen : Icons.open_in_full,
+                    size: 14,
+                    color: VgreTheme.textMuted,
+                  ),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  onPressed: widget.onToggleExpand,
                 ),
-                SizedBox(width: 12),
-                Icon(Icons.close, size: 16, color: VgreTheme.textMuted),
+                const Spacer(),
               ],
             ),
           ),
@@ -745,10 +805,10 @@ class _TerminalConsoleState extends State<_TerminalConsole> {
               padding: const EdgeInsets.all(20),
               child: SelectionArea(
                 child: ListView.builder(
+                  padding: EdgeInsets.zero,
                   itemCount: _allLogs.length,
-                  reverse: true, // Show latest at bottom
                   itemBuilder: (context, index) {
-                    final log = _allLogs[_allLogs.length - 1 - index];
+                    final log = _allLogs[index];
                     return _consoleLine(log);
                   },
                 ),
