@@ -202,6 +202,9 @@ typedef GetCreditsAll = int Function(Pointer<VgreCreditInfo>, Pointer<Int32>);
 typedef CreditsResetFunc = Int32 Function();
 typedef CreditsReset = int Function();
 
+typedef GetDeviceCountFunc = Int32 Function(Pointer<Int32>);
+typedef GetDeviceCount = int Function(Pointer<Int32>);
+
 
 // ── VGRE FFI Bridge ────────────────────────────────────────────────────────
 class VgreBridge {
@@ -226,10 +229,21 @@ class VgreBridge {
   late final GetSecurityInfo _getSecurityInfo;
   late final GetCreditsAll _getCreditsAll;
   late final CreditsReset _creditsReset;
+  late final GetDeviceCount _getDeviceCount;
+  
+  // Libc setenv for propagating tokens to native code
+  late final int Function(Pointer<Utf8>, Pointer<Utf8>, int) _setenv;
 
 
   VgreBridge(String libPath) {
     _lib = DynamicLibrary.open(libPath);
+    
+    // Lookup setenv from the process itself (libc is usually available)
+    final process = DynamicLibrary.process();
+    _setenv = process.lookupFunction<
+        Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32),
+        int Function(Pointer<Utf8>, Pointer<Utf8>, int)>('setenv');
+
     _init = _lib.lookupFunction<InitFunc, Init>('vgre_init');
     _shutdown = _lib.lookupFunction<ShutdownFunc, Shutdown>('vgre_shutdown');
     _getTelemetry = _lib.lookupFunction<GetTelemetryFunc, GetTelemetry>(
@@ -280,9 +294,35 @@ class VgreBridge {
     _getCreditsAll = _lib.lookupFunction<GetCreditsAllFunc, GetCreditsAll>(
         'vgre_credits_get_all');
     _creditsReset = _lib.lookupFunction<CreditsResetFunc, CreditsReset>(
-        'vgre_credits_reset');
+      'vgre_credits_reset',
+    );
+    _getDeviceCount = _lib.lookupFunction<GetDeviceCountFunc, GetDeviceCount>(
+      'vgre_get_device_count',
+    );
   }
 
+
+  void setEnvironmentVariable(String name, String value) {
+    final namePtr = name.toNativeUtf8();
+    final valuePtr = value.toNativeUtf8();
+    try {
+      _setenv(namePtr, valuePtr, 1);
+    } finally {
+      calloc.free(namePtr);
+      calloc.free(valuePtr);
+    }
+  }
+
+  int getDeviceCount() {
+    final ptr = calloc<Int32>();
+    try {
+      final res = _getDeviceCount(ptr);
+      if (res != 0) throw Exception('Failed to get device count: $res');
+      return ptr.value;
+    } finally {
+      calloc.free(ptr);
+    }
+  }
 
   int init() => _init();
   int shutdown() => _shutdown();

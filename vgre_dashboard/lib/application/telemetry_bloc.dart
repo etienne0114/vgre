@@ -3,11 +3,14 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:ffi/ffi.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:equatable/equatable.dart';
+import 'package:csv/csv.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:ffi/ffi.dart';
 import '../domain/models/telemetry.dart';
 import '../infrastructure/bridge/vgre_ffi.dart';
+import '../infrastructure/services/sqlite_service.dart';
 
 // ── Events ─────────────────────────────────────────────────────────────────
 abstract class TelemetryEvent extends Equatable {
@@ -63,6 +66,20 @@ class ResetCredits extends TelemetryEvent {
   const ResetCredits();
 }
 
+class SwitchDevice extends TelemetryEvent {
+  final int deviceId;
+  const SwitchDevice(this.deviceId);
+  @override
+  List<Object> get props => [deviceId];
+}
+
+class ExportKernelHistory extends TelemetryEvent {
+  final String kernelName;
+  const ExportKernelHistory(this.kernelName);
+  @override
+  List<Object> get props => [kernelName];
+}
+
 class UpdateTelemetry extends TelemetryEvent {
   final Telemetry telemetry;
   const UpdateTelemetry(this.telemetry);
@@ -90,20 +107,32 @@ class TelemetryActive extends TelemetryState {
   final Telemetry telemetry;
   final List<Telemetry> history;
   final String? selectedKernelName;
+  final String deviceName;
+  final String backendVersion;
+  final int deviceCount;
+
   const TelemetryActive({
     required this.telemetry,
     required this.history,
+    required this.deviceName,
+    required this.backendVersion,
+    required this.deviceCount,
     this.selectedKernelName,
   });
   @override
-  List<Object?> get props => [telemetry, history, selectedKernelName];
+  List<Object?> get props =>
+      [telemetry, history, selectedKernelName, deviceName, backendVersion, deviceCount];
 }
 
 // ── BLoC ───────────────────────────────────────────────────────────────────
 class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
   final VgreBridge bridge;
+  final SqliteService sqlite;
   Timer? _timer;
 
+  int _currentDeviceId = 0;
+  int get currentDeviceId => _currentDeviceId;
+  int _deviceCount = 1;
   String _deviceName = "VGRE_VIRTUAL_GPU";
   bool _backgroundComputeActive = false;
   bool _serviceModeActive = true;
@@ -114,11 +143,25 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
   bool _profilerEnabled = true;
   bool _clusterSecurityActive = false;
   String _backendVersion = '0.0.0';
-  final bool _clusterSecuritySupported =
-      Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN');
+  static bool _checkClusterSecuritySupport() {
+    if (Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN')) return true;
+    try {
+      final home = Platform.environment['HOME'] ?? '';
+      if (home.isNotEmpty) {
+        final tokenFile = File('$home/.vgre/token');
+        if (tokenFile.existsSync()) {
+          final token = tokenFile.readAsStringSync().trim();
+          return token.isNotEmpty;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
 
-  TelemetryBloc(this.bridge) : super(TelemetryInitial()) {
-    on<StartPolling>((event, emit) {
+  late final bool _clusterSecuritySupported = _checkClusterSecuritySupport();
+
+  TelemetryBloc({required this.bridge, required this.sqlite}) : super(TelemetryInitial()) {
+    on<StartPolling>((event, emit) async {
       // Initialize as master service (Dashboard)
       try {
         bridge.setServiceMode(true);
@@ -131,9 +174,33 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         debugPrint("Failed to enable profiler: $e");
       }
 
+      // Load history from SQLite
+      try {
+        final history = await sqlite.getTelemetryHistory(_currentDeviceId);
+        if (history.isNotEmpty) {
+          _lastSmoothed = history.last;
+          emit(TelemetryActive(
+            telemetry: history.last,
+            history: history,
+            deviceName: _deviceName,
+            backendVersion: _backendVersion,
+            deviceCount: _deviceCount,
+            selectedKernelName: _selectedKernelName,
+          ));
+        }
+      } catch (e) {
+        debugPrint("Failed to load telemetry history: $e");
+      }
+
+      try {
+        _deviceCount = bridge.getDeviceCount();
+      } catch (e) {
+        debugPrint("Failed to fetch device count: $e");
+      }
+
       // Fetch device info once
       try {
-        final props = bridge.getDeviceProperties(0);
+        final props = bridge.getDeviceProperties(_currentDeviceId);
         _deviceName = props['name'] as String;
       } catch (e) {
         debugPrint("Failed to fetch device info: $e");
@@ -157,6 +224,19 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         final res = bridge.setBackgroundCompute(event.enabled);
         if (res == 0) {
           _backgroundComputeActive = event.enabled;
+          
+          // REFINEMENT: Emit immediate state update so UI feels responsive
+          if (state is TelemetryActive) {
+            final s = state as TelemetryActive;
+            emit(TelemetryActive(
+              telemetry: s.telemetry.copyWith(backgroundComputeActive: event.enabled),
+              history: s.history,
+              deviceName: s.deviceName,
+              backendVersion: s.backendVersion,
+              deviceCount: s.deviceCount,
+              selectedKernelName: s.selectedKernelName,
+            ));
+          }
         } else {
           debugPrint("Failed to toggle background compute: $res");
         }
@@ -226,6 +306,49 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       }
     });
 
+    on<SwitchDevice>((event, emit) {
+      _currentDeviceId = event.deviceId;
+      _lastSmoothed = null; // Reset smoothing for new device
+      // Refresh device info
+      try {
+        final props = bridge.getDeviceProperties(_currentDeviceId);
+        _deviceName = props['name'] as String;
+      } catch (e) {
+        debugPrint("Failed to fetch device info: $e");
+      }
+      add(const StartPolling());
+    });
+
+    on<ExportKernelHistory>((event, emit) async {
+      try {
+        final history = await sqlite.getKernelHistory(event.kernelName, _currentDeviceId);
+        if (history.isEmpty) {
+          debugPrint("No history found for ${event.kernelName} to export");
+          return;
+        }
+
+        final List<List<dynamic>> rows = [
+          ["Timestamp", "Duration (ms)", "GFLOPS", "Throughput (GB/s)", "Threads"],
+          ...history.map((e) => [
+                e.timestamp.toIso8601String(),
+                e.durationMs,
+                e.gflops,
+                e.throughputGbps,
+                e.threadsUsed,
+              ])
+        ];
+
+        final csvData = const ListToCsvConverter().convert(rows);
+        final directory = await getDownloadsDirectory() ?? await getApplicationDocumentsDirectory();
+        final path = "${directory.path}/vgre_${event.kernelName}_history_${DateTime.now().millisecondsSinceEpoch}.csv";
+        final file = File(path);
+        await file.writeAsString(csvData);
+        debugPrint("Hardware-authoritative export completed: $path");
+      } catch (e) {
+        debugPrint("Failed to export kernel history: $e");
+      }
+    });
+
     on<StopPolling>((event, emit) {
       _timer?.cancel();
     });
@@ -239,6 +362,9 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         emit(TelemetryActive(
           telemetry: s.telemetry,
           history: s.history,
+          deviceName: _deviceName,
+          backendVersion: _backendVersion,
+          deviceCount: s.deviceCount,
           selectedKernelName: _selectedKernelName,
         ));
       }
@@ -253,9 +379,15 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       newHistory.add(smoothed);
       if (newHistory.length > 50) newHistory.removeAt(0);
 
+      // Persist to SQLite
+      sqlite.saveTelemetry(event.telemetry, _currentDeviceId);
+
       emit(TelemetryActive(
         telemetry: event.telemetry,
         history: newHistory,
+        deviceName: _deviceName,
+        backendVersion: _backendVersion,
+        deviceCount: _deviceCount,
         selectedKernelName: _selectedKernelName,
       ));
     });
@@ -357,6 +489,14 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
           topKernels = items.map((item) {
             final m = item as Map<String, dynamic>;
             final name = (m['name'] ?? 'kernel').toString();
+            
+            // Check for new history items to persist
+            if (name == _selectedKernelName && selectedHistory.isNotEmpty) {
+                // In a real app we'd compare timestamps to only save new ones.
+                // For this implementation, we'll save the latest execution if it's new.
+                sqlite.saveKernelExecution(name, selectedHistory.last, _currentDeviceId);
+            }
+
             final k = KernelStat(
               name: name,
               invocations: (m['invocations'] ?? 0) as int,
@@ -389,7 +529,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         if (memJson != null) {
           final decoded = jsonDecode(memJson) as Map<String, dynamic>;
           final allocs = decoded['allocations'] as List<dynamic>? ?? [];
-          allocations = allocs.map((a) {
+          allocations = allocs.map<MemoryAllocation>((a) {
             final m = a as Map<String, dynamic>;
             return MemoryAllocation(
               ptr: (m['ptr'] ?? '0x0').toString(),
@@ -401,7 +541,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
           }).toList(growable: false);
 
           final pools = decoded['pools'] as List<dynamic>? ?? [];
-          memoryPools = pools.map((p) {
+          memoryPools = pools.map<MemoryPool>((p) {
             final m = p as Map<String, dynamic>;
             return MemoryPool(
               id: (m['id'] ?? 0) as int,
@@ -417,14 +557,32 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         debugPrint('Memory JSON parse failed: $e');
       }
 
-      final data = Telemetry(
+      // Dynamic Smoothing: React faster to spikes, smoother for stable regions
+      double alpha = 0.25;
+      if (_lastSmoothed != null) {
+        final gflopsDiff = (raw.gflops - _lastSmoothed!.gflops).abs();
+        if (gflopsDiff > 10.0) alpha = 0.55; // Fast reaction to heavy workloads
+      }
+
+      final smoothed = Telemetry(
         timestamp: DateTime.fromMillisecondsSinceEpoch(raw.timestamp),
-        gflops: raw.gflops,
+        gflops: _lastSmoothed == null
+            ? raw.gflops
+            : _lastSmoothed!.gflops * (1 - alpha) + raw.gflops * alpha,
         maxGflops: raw.maxGflops,
-        computeUtilization: raw.computeUtilization,
-        memoryBandwidth: raw.memoryBandwidthGbps,
+        computeUtilization: _lastSmoothed == null
+            ? raw.computeUtilization
+            : _lastSmoothed!.computeUtilization * (1 - alpha) +
+                raw.computeUtilization * alpha,
+        memoryBandwidth: _lastSmoothed == null
+            ? raw.memoryBandwidthGbps
+            : _lastSmoothed!.memoryBandwidth * (1 - alpha) +
+                raw.memoryBandwidthGbps * alpha,
         maxMemoryBandwidth: raw.maxMemoryBandwidthGbps,
-        memoryBusUtilization: raw.memoryBusUtilization,
+        memoryBusUtilization: _lastSmoothed == null
+            ? raw.memoryBusUtilization
+            : _lastSmoothed!.memoryBusUtilization * (1 - alpha) +
+                raw.memoryBusUtilization * alpha,
         memoryUsed: raw.memoryUsedBytes,
         memoryTotal: raw.memoryTotalBytes,
         totalPages: raw.totalPages,
@@ -460,8 +618,9 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         lastSelectedKernelStats: _lastSelectedKernelStats,
         allocations: allocations,
         memoryPools: memoryPools,
+        deviceCount: _deviceCount,
       );
-      add(UpdateTelemetry(data));
+      add(UpdateTelemetry(smoothed));
     } catch (e) {
       debugPrint('FFI Error: $e');
     } finally {

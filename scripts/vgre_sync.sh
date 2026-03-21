@@ -15,6 +15,9 @@ if [[ -z "$VGRE_TCP_AUTH_TOKEN" ]]; then
     echo "⚠️  VGRE_TCP_AUTH_TOKEN is not set; Phase 5 security will remain disabled in the dashboard."
 else
     echo "🔐 VGRE_TCP_AUTH_TOKEN provided; secure cluster mode can be enabled."
+    # Persist token for Dashboard development (fallback mechanism)
+    mkdir -p "$HOME/.vgre"
+    echo "$VGRE_TCP_AUTH_TOKEN" > "$HOME/.vgre/token"
 fi
 
 FLUTTER_CACHE_PATH="${FLUTTER_CACHE_PATH:-$HOME/.cache/flutter}"
@@ -34,6 +37,15 @@ echo "🚀 Starting VGRE Global Sync..."
 # 1. Build Native Engine
 echo "📦 Building VGRE Native Engine..."
 mkdir -p build && cd build
+
+# Hint GCC on Linux to avoid OpenMP detection issues with Clang 18 without libomp-dev
+if [[ "$(uname)" == "Linux" ]] && [[ -z "$CC" ]] && [[ -z "$CXX" ]]; then
+    export CC=gcc
+    export CXX=g++
+    # Clear cache to force Re-detection with correct compiler
+    rm -f CMakeCache.txt
+fi
+
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) vgre vgre_cudart
 cd ..
@@ -41,6 +53,24 @@ cd ..
 # 2. Build Flutter Dashboard
 echo "🎨 Building VGRE Dashboard (Release)..."
 cd vgre_dashboard
+
+# Unset CC/CXX to allow Flutter to use its own system-appropriate toolchain (usually clang)
+# and avoid linker resolution issues in LLVM directories.
+unset CC
+unset CXX
+
+# Workaround for Flutter/Dart linker resolution issue on Ubuntu with LLVM-18
+# Dart's AOT compiler often expects 'ld' to be in the same dir as the compiler.
+# If 'clang' is version 18, it looks in /usr/lib/llvm-18/bin where 'ld' is missing.
+# We create a local bin dir and provide 'clang'/'clang++' symlinks to 'gcc'/'g++'
+# alongside a symlinked 'ld' and 'ld.lld'. This tricks Dart into using GCC.
+mkdir -p "$PROJECT_ROOT/build/vgre_bin"
+ln -sf /usr/bin/gcc "$PROJECT_ROOT/build/vgre_bin/clang"
+ln -sf /usr/bin/g++ "$PROJECT_ROOT/build/vgre_bin/clang++"
+ln -sf /usr/bin/ld "$PROJECT_ROOT/build/vgre_bin/ld"
+ln -sf /usr/bin/ld "$PROJECT_ROOT/build/vgre_bin/ld.lld"
+export PATH="$PROJECT_ROOT/build/vgre_bin:$PATH"
+
 flutter build $(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/macos/') --release
 cd ..
 

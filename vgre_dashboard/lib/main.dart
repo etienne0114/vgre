@@ -4,6 +4,7 @@ import 'dart:io';
 import 'application/telemetry_bloc.dart';
 import 'core/theme/vgre_theme.dart';
 import 'infrastructure/bridge/vgre_ffi.dart';
+import 'infrastructure/services/sqlite_service.dart';
 import 'presentation/pages/dashboard_page.dart';
 
 void main() {
@@ -39,22 +40,42 @@ void main() {
   }
 
   final VgreBridge bridge = VgreBridge(libPath);
+  final SqliteService sqlite = SqliteService();
+
+  // Sync persistent auth token for security features
+  if (!Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN')) {
+    try {
+      final home = Platform.environment['HOME'] ?? '';
+      if (home.isNotEmpty) {
+        final tokenFile = File('$home/.vgre/token');
+        if (tokenFile.existsSync()) {
+          final token = tokenFile.readAsStringSync().trim();
+          if (token.isNotEmpty) {
+            bridge.setEnvironmentVariable('VGRE_TCP_AUTH_TOKEN', token);
+          }
+        }
+      }
+    } catch (_) {
+      // Ignore errors in persistent token sync
+    }
+  }
 
   // Initialize the VGRE backend (equivalent to vgre_init)
   bridge.init();
 
-  runApp(VgreDashboardApp(bridge: bridge));
+  runApp(VgreDashboardApp(bridge: bridge, sqlite: sqlite));
 }
 
 class VgreDashboardApp extends StatelessWidget {
   final VgreBridge bridge;
+  final SqliteService sqlite;
 
-  const VgreDashboardApp({super.key, required this.bridge});
+  const VgreDashboardApp({super.key, required this.bridge, required this.sqlite});
 
   @override
   Widget build(BuildContext context) {
     return BlocProvider(
-      create: (context) => TelemetryBloc(bridge)..add(StartPolling()),
+      create: (context) => TelemetryBloc(bridge: bridge, sqlite: sqlite)..add(const StartPolling()),
       child: MaterialApp(
         title: 'VGRE Dashboard',
         debugShowCheckedModeBanner: false,
