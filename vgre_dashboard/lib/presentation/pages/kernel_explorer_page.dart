@@ -14,19 +14,6 @@ class KernelExplorerPage extends StatefulWidget {
 }
 
 class _KernelExplorerPageState extends State<KernelExplorerPage> {
-  // Selection is now managed by TelemetryBloc for persistence
-  final Set<String> _expandedKernels = {};
-
-  void _toggleExpansion(String name) {
-    setState(() {
-      if (_expandedKernels.contains(name)) {
-        _expandedKernels.remove(name);
-      } else {
-        _expandedKernels.add(name);
-      }
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
     final bool isDesktop = VgreTheme.isDesktop(context);
@@ -274,6 +261,27 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
                       letterSpacing: 1.5,
                     ),
                   ),
+                  const Spacer(),
+                  if (selectedKernel != null && selectedKernel.history.isNotEmpty)
+                    TextButton.icon(
+                      onPressed: () {
+                        context.read<TelemetryBloc>().add(ExportKernelHistory(selectedKernel.name));
+                      },
+                      icon: const Icon(Icons.download, size: 14, color: VgreTheme.secondaryNeon),
+                      label: const Text(
+                        "EXPORT CSV",
+                        style: TextStyle(
+                          color: VgreTheme.secondaryNeon,
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
                 ],
               ),
             ),

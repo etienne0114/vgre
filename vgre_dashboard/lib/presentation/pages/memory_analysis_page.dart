@@ -1,6 +1,7 @@
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:google_fonts/google_fonts.dart';
 import '../../application/telemetry_bloc.dart';
 import '../../domain/models/telemetry.dart';
 import '../../core/theme/vgre_theme.dart';
@@ -87,7 +88,7 @@ class MemoryAnalysisPage extends StatelessWidget {
                                 : ListView.separated(
                                     padding: const EdgeInsets.all(12),
                                     itemCount: telemetry.allocations.length,
-                                    separatorBuilder: (_, __) => Divider(color: Colors.white.withValues(alpha: 0.05), height: 1),
+                                    separatorBuilder: (_, unused) => Divider(color: Colors.white.withValues(alpha: 0.05), height: 1),
                                     itemBuilder: (context, index) {
                                       final a = telemetry.allocations[index];
                                       return _allocationRow(a);
@@ -378,6 +379,49 @@ class MemoryAnalysisPage extends StatelessWidget {
               LineChartData(
                 minY: 0,
                 maxY: 100,
+                lineTouchData: LineTouchData(
+                  touchTooltipData: LineTouchTooltipData(
+                    getTooltipColor: (_) => Colors.black.withValues(alpha: 0.8),
+                    tooltipRoundedRadius: 8,
+                    getTooltipItems: (touchedSpots) {
+                      return touchedSpots.map((spot) {
+                        final index = spot.x.toInt();
+                        if (index < 0 || index >= history.length) return null;
+                        final t = history[index];
+                        final color = spot.bar.color ?? Colors.white;
+                        final isResident = spot.barIndex == 1;
+                        final label = isResident ? "RESIDENT" : "USED";
+                        final val = isResident ? t.residentPages : (t.memoryUsagePercent * t.totalPages / 100).round();
+                        
+                        return LineTooltipItem(
+                          "$label\n",
+                          GoogleFonts.orbitron(
+                            color: color,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 10,
+                          ),
+                          children: [
+                            TextSpan(
+                              text: "${spot.y.toStringAsFixed(1)}% ",
+                              style: GoogleFonts.firaCode(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                            TextSpan(
+                              text: "(${_formatNumber(val)} pgs)",
+                              style: GoogleFonts.firaCode(
+                                color: Colors.white70,
+                                fontSize: 9,
+                              ),
+                            ),
+                          ],
+                        );
+                      }).toList();
+                    },
+                  ),
+                ),
                 gridData: FlGridData(
                   show: true,
                   drawHorizontalLine: true,
@@ -431,6 +475,16 @@ class MemoryAnalysisPage extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  String _formatNumber(num value) {
+    if (value >= 1000000) {
+      return "${(value / 1000000).toStringAsFixed(1)}M";
+    } else if (value >= 1000) {
+      return "${(value / 1000).toStringAsFixed(1)}K";
+    } else {
+      return value.toString();
+    }
   }
 
   String _formatBytes(int bytes) {
