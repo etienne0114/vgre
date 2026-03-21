@@ -21,23 +21,32 @@ WorkloadEngine::WorkloadEngine() = default;
 WorkloadEngine::~WorkloadEngine() { setEnabled(false); }
 
 void WorkloadEngine::setEnabled(bool enabled) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (enabled == running_.load())
-    return;
+  std::thread toJoin;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (enabled == running_.load())
+      return;
 
-  if (enabled) {
-    VGRE_LOG_INFO("WorkloadEngine", "Starting background compute...");
-    running_.store(true);
-    if (workerThread_.joinable()) {
-      workerThread_.join();
+    if (enabled) {
+      VGRE_LOG_INFO("WorkloadEngine", "Starting background compute...");
+      running_.store(true);
+      if (workerThread_.joinable()) {
+        toJoin = std::move(workerThread_);
+      }
+      workerThread_ = std::thread(&WorkloadEngine::workloadLoop, this);
+    } else {
+      VGRE_LOG_INFO("WorkloadEngine", "Stopping background compute...");
+      running_.store(false);
+      if (workerThread_.joinable()) {
+        toJoin = std::move(workerThread_);
+      }
     }
-    workerThread_ = std::thread(&WorkloadEngine::workloadLoop, this);
-  } else {
-    VGRE_LOG_INFO("WorkloadEngine", "Stopping background compute...");
-    running_.store(false);
-    if (workerThread_.joinable()) {
-      workerThread_.join();
-    }
+  }
+
+  // Join outside the lock to avoid blocking other threads (like telemetry) 
+  // that might want to check status or re-enable.
+  if (toJoin.joinable()) {
+    toJoin.join();
   }
 }
 
@@ -79,12 +88,13 @@ void WorkloadEngine::workloadLoop() {
                        "  }\n"
                        "}";
 
-  KernelId kid = 0;
-  if (runtime.registerKernel(kernelName, source, kid) != VGREResult::SUCCESS) {
-    VGRE_LOG_ERROR("WorkloadEngine",
-                   "Failed to register background workload kernel");
-    running_ = false;
-    return;
+  if (workloadKernel_ == 0) {
+    if (runtime.registerKernel(kernelName, source, workloadKernel_) != VGREResult::SUCCESS) {
+      VGRE_LOG_ERROR("WorkloadEngine",
+                     "Failed to register background workload kernel");
+      running_ = false;
+      return;
+    }
   }
 
   // Allocate VRAM and Initialize Data
@@ -121,7 +131,7 @@ void WorkloadEngine::workloadLoop() {
     auto t1 = std::chrono::steady_clock::now();
 
     // Launch workload on dedicated stream
-    auto launchRes = runtime.launchKernel(kid, grid, block, args, 0,
+    auto launchRes = runtime.launchKernel(workloadKernel_, grid, block, args, 0,
                                           workloadStream_);
     if (launchRes != VGREResult::SUCCESS) {
       VGRE_LOG_ERROR("WorkloadEngine",

@@ -141,15 +141,9 @@ float TextureManager::tex1Dfetch(TextureId id, int x) const {
     return 0.0f;
 
   const auto &tex = it->second;
-  int idx =
-      applyAddressMode(x, static_cast<int>(tex.width), tex.desc.addressMode);
-
-  if (idx < 0) // Border mode, out of bounds
-    return tex.desc.borderColor;
-
-  // Read float value from the texture data
-  const auto *fdata = static_cast<const float *>(tex.data);
-  return fdata[idx];
+  double value =
+      sampleTexel(tex, x, 0, 0);
+  return static_cast<float>(value);
 }
 
 // ── 2D texture fetch (floating-point coordinates with interpolation) ──────
@@ -160,7 +154,6 @@ float TextureManager::tex2D(TextureId id, float x, float y) const {
     return 0.0f;
 
   const auto &tex = it->second;
-  const auto *fdata = static_cast<const float *>(tex.data);
   int w = static_cast<int>(tex.width);
   int h = static_cast<int>(tex.height);
 
@@ -176,13 +169,8 @@ float TextureManager::tex2D(TextureId id, float x, float y) const {
     int ix = static_cast<int>(std::floor(sampleX));
     int iy = static_cast<int>(std::floor(sampleY));
 
-    ix = applyAddressMode(ix, w, tex.desc.addressMode);
-    iy = applyAddressMode(iy, h, tex.desc.addressMode);
-
-    if (ix < 0 || iy < 0)
-      return tex.desc.borderColor;
-
-    return fdata[iy * w + ix];
+    double value = sampleTexel(tex, ix, iy, 0);
+    return static_cast<float>(value);
   }
 
   // Bilinear interpolation
@@ -196,23 +184,18 @@ float TextureManager::tex2D(TextureId id, float x, float y) const {
   float fracY = fy - static_cast<float>(y0);
 
   // Apply address modes
-  auto sample = [&](int sx, int sy) -> float {
-    sx = applyAddressMode(sx, w, tex.desc.addressMode);
-    sy = applyAddressMode(sy, h, tex.desc.addressMode);
-    if (sx < 0 || sy < 0)
-      return tex.desc.borderColor;
-    return fdata[sy * w + sx];
+  auto sample = [&](int sx, int sy) -> double {
+    return sampleTexel(tex, sx, sy, 0);
   };
 
-  float v00 = sample(x0, y0);
-  float v10 = sample(x1, y0);
-  float v01 = sample(x0, y1);
-  float v11 = sample(x1, y1);
+  double v00 = sample(x0, y0);
+  double v10 = sample(x1, y0);
+  double v01 = sample(x0, y1);
+  double v11 = sample(x1, y1);
 
-  // Bilinear blend
-  float top = v00 * (1.0f - fracX) + v10 * fracX;
-  float bot = v01 * (1.0f - fracX) + v11 * fracX;
-  return top * (1.0f - fracY) + bot * fracY;
+  double top = v00 * (1.0 - fracX) + v10 * fracX;
+  double bot = v01 * (1.0 - fracX) + v11 * fracX;
+  return static_cast<float>(top * (1.0 - fracY) + bot * fracY);
 }
 
 float TextureManager::tex1D(TextureId id, float x) const {
@@ -222,7 +205,6 @@ float TextureManager::tex1D(TextureId id, float x) const {
     return 0.0f;
 
   const auto &tex = it->second;
-  const auto *fdata = static_cast<const float *>(tex.data);
   int w = static_cast<int>(tex.width);
 
   if (tex.desc.normalizedCoords) {
@@ -231,10 +213,8 @@ float TextureManager::tex1D(TextureId id, float x) const {
 
   if (tex.desc.filterMode == TextureFilterMode::POINT) {
     int ix = static_cast<int>(std::floor(x));
-    ix = applyAddressMode(ix, w, tex.desc.addressMode);
-    if (ix < 0)
-      return tex.desc.borderColor;
-    return fdata[ix];
+    double value = sampleTexel(tex, ix, 0, 0);
+    return static_cast<float>(value);
   }
 
   // Linear interpolation
@@ -243,16 +223,13 @@ float TextureManager::tex1D(TextureId id, float x) const {
   int x1 = x0 + 1;
   float fracX = fx - static_cast<float>(x0);
 
-  auto sample = [&](int sx) -> float {
-    sx = applyAddressMode(sx, w, tex.desc.addressMode);
-    if (sx < 0)
-      return tex.desc.borderColor;
-    return fdata[sx];
+  auto sample = [&](int sx) -> double {
+    return sampleTexel(tex, sx, 0, 0);
   };
 
-  float v0 = sample(x0);
-  float v1 = sample(x1);
-  return v0 * (1.0f - fracX) + v1 * fracX;
+  double v0 = sample(x0);
+  double v1 = sample(x1);
+  return static_cast<float>(v0 * (1.0 - fracX) + v1 * fracX);
 }
 
 // ── Surface write ──────────────────────────────────────────────────────────
@@ -346,6 +323,56 @@ double TextureManager::readElementAsDouble(TextureId id, int linearIndex) const 
   return 0.0;
 }
 
+// ── Read element as float (no internal locking) ──────────────────────────────
+float TextureManager::readElementAsFloat(const TextureObject &tex, size_t linearIndex) const {
+  size_t totalElements = tex.width * tex.height * tex.depth;
+  if (linearIndex >= totalElements)
+    return 0.0f;
+
+  if (!tex.data) return 0.0f;
+
+  const uint8_t *base = static_cast<const uint8_t *>(tex.data);
+  const uint8_t *elem = base + linearIndex * tex.elementSize;
+
+  switch (tex.desc.elementType) {
+  case TextureElementType::FLOAT32:
+    return *reinterpret_cast<const float *>(elem);
+  case TextureElementType::FLOAT64:
+    return static_cast<float>(*reinterpret_cast<const double *>(elem));
+  case TextureElementType::INT8:
+    return static_cast<float>(*reinterpret_cast<const int8_t *>(elem));
+  case TextureElementType::INT16:
+    return static_cast<float>(*reinterpret_cast<const int16_t *>(elem));
+  case TextureElementType::INT32:
+    return static_cast<float>(*reinterpret_cast<const int32_t *>(elem));
+  case TextureElementType::UINT8:
+    return static_cast<float>(*reinterpret_cast<const uint8_t *>(elem));
+  case TextureElementType::UINT16:
+    return static_cast<float>(*reinterpret_cast<const uint16_t *>(elem));
+  case TextureElementType::UINT32:
+    return static_cast<float>(*reinterpret_cast<const uint32_t *>(elem));
+  }
+  return 0.0f;
+}
+
+double TextureManager::sampleTexel(const TextureObject &tex, int x, int y, int z) const {
+  if (tex.width == 0 || tex.height == 0 || tex.depth == 0)
+    return tex.desc.borderColor;
+
+  int rx = applyAddressMode(x, static_cast<int>(tex.width), tex.desc.addressMode);
+  int ry = applyAddressMode(y, static_cast<int>(tex.height), tex.desc.addressMode);
+  int rz = applyAddressMode(z, static_cast<int>(tex.depth), tex.desc.addressMode);
+
+  if (rx < 0 || ry < 0 || rz < 0)
+    return tex.desc.borderColor;
+
+  size_t linear = static_cast<size_t>(rz) * tex.width * tex.height +
+                  static_cast<size_t>(ry) * tex.width +
+                  static_cast<size_t>(rx);
+
+  return static_cast<double>(readElementAsFloat(tex, linear));
+}
+
 // ── 3D texture fetch ─────────────────────────────────────────────────────────
 float TextureManager::tex3D(TextureId id, float x, float y, float z) const {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -353,7 +380,6 @@ float TextureManager::tex3D(TextureId id, float x, float y, float z) const {
   if (it == textures_.end()) return 0.0f;
 
   const auto &tex = it->second;
-  const auto *fdata = static_cast<const float *>(tex.data);
   int w = static_cast<int>(tex.width);
   int h = static_cast<int>(tex.height);
   int d = static_cast<int>(tex.depth);
@@ -370,11 +396,8 @@ float TextureManager::tex3D(TextureId id, float x, float y, float z) const {
     int ix = static_cast<int>(std::floor(sampleX));
     int iy = static_cast<int>(std::floor(sampleY));
     int iz = static_cast<int>(std::floor(sampleZ));
-    ix = applyAddressMode(ix, w, tex.desc.addressMode);
-    iy = applyAddressMode(iy, h, tex.desc.addressMode);
-    iz = applyAddressMode(iz, d, tex.desc.addressMode);
-    if (ix < 0 || iy < 0 || iz < 0) return tex.desc.borderColor;
-    return fdata[iz * w * h + iy * w + ix];
+    double value = sampleTexel(tex, ix, iy, iz);
+    return static_cast<float>(value);
   }
 
   // Trilinear interpolation
@@ -389,32 +412,28 @@ float TextureManager::tex3D(TextureId id, float x, float y, float z) const {
   float fracY = fy - static_cast<float>(y0);
   float fracZ = fz - static_cast<float>(z0);
 
-  auto sample3D = [&](int sx, int sy, int sz) -> float {
-    sx = applyAddressMode(sx, w, tex.desc.addressMode);
-    sy = applyAddressMode(sy, h, tex.desc.addressMode);
-    sz = applyAddressMode(sz, d, tex.desc.addressMode);
-    if (sx < 0 || sy < 0 || sz < 0) return tex.desc.borderColor;
-    return fdata[sz * w * h + sy * w + sx];
+  auto sample3D = [&](int sx, int sy, int sz) -> double {
+    return sampleTexel(tex, sx, sy, sz);
   };
 
   // Interpolate along x for each (y, z) corner
-  float c000 = sample3D(x0, y0, z0), c100 = sample3D(x1, y0, z0);
-  float c010 = sample3D(x0, y1, z0), c110 = sample3D(x1, y1, z0);
-  float c001 = sample3D(x0, y0, z1), c101 = sample3D(x1, y0, z1);
-  float c011 = sample3D(x0, y1, z1), c111 = sample3D(x1, y1, z1);
+  double c000 = sample3D(x0, y0, z0), c100 = sample3D(x1, y0, z0);
+  double c010 = sample3D(x0, y1, z0), c110 = sample3D(x1, y1, z0);
+  double c001 = sample3D(x0, y0, z1), c101 = sample3D(x1, y0, z1);
+  double c011 = sample3D(x0, y1, z1), c111 = sample3D(x1, y1, z1);
 
   // Bilinear on z=0 plane
-  float t0 = c000 * (1.0f - fracX) + c100 * fracX;
-  float b0 = c010 * (1.0f - fracX) + c110 * fracX;
-  float front = t0 * (1.0f - fracY) + b0 * fracY;
+  double t0 = c000 * (1.0 - fracX) + c100 * fracX;
+  double b0 = c010 * (1.0 - fracX) + c110 * fracX;
+  double front = t0 * (1.0 - fracY) + b0 * fracY;
 
   // Bilinear on z=1 plane
-  float t1 = c001 * (1.0f - fracX) + c101 * fracX;
-  float b1 = c011 * (1.0f - fracX) + c111 * fracX;
-  float back = t1 * (1.0f - fracY) + b1 * fracY;
+  double t1 = c001 * (1.0 - fracX) + c101 * fracX;
+  double b1 = c011 * (1.0 - fracX) + c111 * fracX;
+  double back = t1 * (1.0 - fracY) + b1 * fracY;
 
   // Linear between front and back
-  return front * (1.0f - fracZ) + back * fracZ;
+  return static_cast<float>(front * (1.0 - fracZ) + back * fracZ);
 }
 
 // ── 3D Texture creation (explicit depth) ─────────────────────────────────────

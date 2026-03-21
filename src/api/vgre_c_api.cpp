@@ -52,6 +52,8 @@ static int to_status(vgre::VGREResult r) {
     return VGRE_ERROR_AUTH_FAILED;
   case vgre::VGREResult::ERROR_CRYPTO:
     return VGRE_ERROR_CRYPTO;
+  case vgre::VGREResult::ERROR_INVALID_DEVICE:
+    return VGRE_ERROR_INVALID_VALUE; // Map to invalid value for now, or add specific C code
   default:
     return VGRE_ERROR_GENERIC;
   }
@@ -187,8 +189,10 @@ int vgre_get_device_properties(int device_id, vgre_device_properties_t *props) {
   vgre::DeviceProperties dp;
   auto r =
       vgre::core::RuntimeEngine::instance().getDeviceProperties(device_id, dp);
-  if (r != vgre::VGREResult::SUCCESS)
+  if (r != vgre::VGREResult::SUCCESS) {
+    VGRE_LOG_ERROR("C_API", "getDeviceProperties failed for ID " + std::to_string(device_id) + " with code " + std::to_string(static_cast<int>(r)));
     return to_status(r);
+  }
 
   std::memset(props, 0, sizeof(vgre_device_properties_t));
   std::snprintf(props->name, sizeof(props->name), "%s", dp.name);

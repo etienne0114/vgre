@@ -13,6 +13,7 @@
 
 #ifndef _WIN32
 #include <dlfcn.h>
+#include <sys/wait.h>
 #endif
 
 #pragma GCC diagnostic push
@@ -615,8 +616,13 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
 #endif
 
     if (!libPath.empty()) {
+      // 0. Check current lib dir (local deployment)
+      if (std::filesystem::exists(libPath / "include/vgre/compiler/cpu_cuda_env.h")) {
+        includePath = (libPath / "include").string();
+        found = true;
+      }
       // 1. Check ../include (standard bundle layout)
-      if (std::filesystem::exists(libPath.parent_path() / "include/vgre/compiler/cpu_cuda_env.h")) {
+      else if (std::filesystem::exists(libPath.parent_path() / "include/vgre/compiler/cpu_cuda_env.h")) {
         includePath = (libPath.parent_path() / "include").string();
         found = true;
       }
@@ -657,13 +663,19 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
                     tmpIR + "\" > \"" + logFile + "\" 2>&1";
 #endif
   int status = std::system(cmd.c_str());
+#ifndef _WIN32
+  int exitCode = WEXITSTATUS(status);
+#else
+  int exitCode = status;
+#endif
 
-  if (status != 0) {
+  if (exitCode != 0) {
     std::ifstream lfs(logFile);
     std::stringstream lss;
     lss << lfs.rdbuf();
     VGRE_LOG_ERROR("LLVMTranslationEngine",
-                   "Clang compilation failed for " + kernelName + ":\n" + lss.str());
+                   "Clang compilation failed (Code: " + std::to_string(exitCode) + ") for " + kernelName + ":\n" + lss.str());
+    VGRE_LOG_DEBUG("LLVMTranslationEngine", "Failed Command: " + cmd);
     std::remove(logFile.c_str());
     std::remove(tmpCpp.c_str());
     return VGREResult::ERROR_COMPILATION;

@@ -185,6 +185,7 @@ int RuntimeEngine::getDeviceCount() const {
 VGREResult RuntimeEngine::setDevice(DeviceId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (id < 0 || id >= static_cast<DeviceId>(devices_.size())) {
+    VGRE_LOG_ERROR("RuntimeEngine", "Invalid device ID: " + std::to_string(id) + " (Device Count: " + std::to_string(devices_.size()) + ")");
     return VGREResult::ERROR_INVALID_DEVICE;
   }
   currentDeviceId_ = id;
@@ -201,6 +202,7 @@ VGREResult RuntimeEngine::getDeviceProperties(DeviceId id,
                                               DeviceProperties &outProps) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (id < 0 || id >= static_cast<DeviceId>(devices_.size())) {
+    VGRE_LOG_ERROR("RuntimeEngine", "Invalid device ID: " + std::to_string(id) + " (Device Count: " + std::to_string(devices_.size()) + ")");
     return VGREResult::ERROR_INVALID_DEVICE;
   }
   outProps = devices_[id]->getProperties();
@@ -1110,6 +1112,7 @@ VirtualGPUDevice &RuntimeEngine::getDevice(DeviceId id) {
                         "Runtime engine is not initialized");
   }
   if (id < 0 || id >= static_cast<DeviceId>(devices_.size())) {
+    VGRE_LOG_ERROR("RuntimeEngine", "Invalid device ID: " + std::to_string(id) + " (Device Count: " + std::to_string(devices_.size()) + ")");
     throw VGREException(VGREResult::ERROR_INVALID_DEVICE, "Invalid device ID");
   }
   return *devices_[id];

@@ -100,6 +100,9 @@ public:
   // ── Type-aware fetch operations ───────────────────────────────────────────
   // Read a single element as double (supports all element types)
   double readElementAsDouble(TextureId id, int linearIndex) const;
+  
+  // Read a single element as float from the raw data pointer based on its descriptor type
+  float readElementAsFloat(const TextureObject &tex, size_t linearIndex) const;
 
   // ── Surface write operations ─────────────────────────────────────────────
   VGREResult surf2Dwrite(SurfaceId id, float value, int x, int y);
@@ -137,6 +140,11 @@ private:
   mutable std::mutex mutex_;
   TextureId nextTextureId_ = 1;
   SurfaceId nextSurfaceId_ = 1;
+
+  // ── Helpers ─────────────────────────────────────────────────────────────
+  double readElementValue(const TextureObject &tex,
+                          size_t linearIndex) const;
+  double sampleTexel(const TextureObject &tex, int x, int y, int z) const;
 };
 
 } // namespace core
