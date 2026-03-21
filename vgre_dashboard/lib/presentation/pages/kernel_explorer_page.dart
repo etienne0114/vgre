@@ -16,7 +16,6 @@ class KernelExplorerPage extends StatefulWidget {
 class _KernelExplorerPageState extends State<KernelExplorerPage> {
   // Selection is now managed by TelemetryBloc for persistence
 
-
   @override
   Widget build(BuildContext context) {
     final bool isDesktop = VgreTheme.isDesktop(context);
@@ -32,15 +31,19 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
         // Reactive Selection Resolution (from BLoC state)
         final String? effectiveSelectionName = state.selectedKernelName;
         KernelStat? selectedKernel;
-        
+
         if (effectiveSelectionName != null && kernels.isNotEmpty) {
           try {
-            selectedKernel = kernels.firstWhere((k) => k.name == effectiveSelectionName);
+            selectedKernel = kernels.firstWhere(
+              (k) => k.name == effectiveSelectionName,
+            );
           } catch (_) {}
         }
 
         // Auto-select "background_compute" or first available IF no selection exists
-        if (selectedKernel == null && kernels.isNotEmpty && effectiveSelectionName == null) {
+        if (selectedKernel == null &&
+            kernels.isNotEmpty &&
+            effectiveSelectionName == null) {
           final bgKernel = kernels.any((k) => k.name == "background_compute")
               ? kernels.firstWhere((k) => k.name == "background_compute")
               : kernels.first;
@@ -59,9 +62,9 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
               Text(
                 "KERNEL EXPLORER",
                 style: Theme.of(context).textTheme.displayLarge?.copyWith(
-                      fontSize: 24,
-                      letterSpacing: 4,
-                    ),
+                  fontSize: 24,
+                  letterSpacing: 4,
+                ),
               ),
               const SizedBox(height: 8),
               const Text(
@@ -91,7 +94,11 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
                       )
                     : ListView(
                         children: [
-                          _buildKernelList(kernels, selectedKernel, height: 400),
+                          _buildKernelList(
+                            kernels,
+                            selectedKernel,
+                            height: 400,
+                          ),
                           const SizedBox(height: 24),
                           _buildDetailsColumn(selectedKernel, height: 600),
                         ],
@@ -128,7 +135,11 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
     );
   }
 
-  Widget _buildKernelList(List<KernelStat> kernels, KernelStat? selectedKernel, {double? height}) {
+  Widget _buildKernelList(
+    List<KernelStat> kernels,
+    KernelStat? selectedKernel, {
+    double? height,
+  }) {
     return SizedBox(
       height: height,
       child: GlassCard(
@@ -150,7 +161,11 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.refresh, size: 16, color: VgreTheme.primaryNeon),
+                    icon: const Icon(
+                      Icons.refresh,
+                      size: 16,
+                      color: VgreTheme.primaryNeon,
+                    ),
                     padding: EdgeInsets.zero,
                     constraints: const BoxConstraints(),
                     onPressed: () {
@@ -175,34 +190,53 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
                           const Divider(color: Colors.white10, height: 1),
                       itemBuilder: (context, index) {
                         final kernel = kernels[index];
-                        final bool isSelected = selectedKernel?.name == kernel.name;
+                        final bool isSelected =
+                            selectedKernel?.name == kernel.name;
                         return Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 4,
+                          ),
                           child: Material(
-                            color: isSelected ? VgreTheme.primaryNeon.withValues(alpha: 0.15) : Colors.transparent,
+                            color: isSelected
+                                ? VgreTheme.primaryNeon.withValues(alpha: 0.15)
+                                : Colors.transparent,
                             borderRadius: BorderRadius.circular(12),
                             clipBehavior: Clip.antiAlias,
                             child: InkWell(
                               onTap: () {
-                                context.read<TelemetryBloc>().add(SelectKernel(kernel.name));
+                                context.read<TelemetryBloc>().add(
+                                  SelectKernel(kernel.name),
+                                );
                               },
-                              hoverColor: VgreTheme.primaryNeon.withValues(alpha: 0.05),
-                              splashColor: VgreTheme.primaryNeon.withValues(alpha: 0.2),
+                              hoverColor: VgreTheme.primaryNeon.withValues(
+                                alpha: 0.05,
+                              ),
+                              splashColor: VgreTheme.primaryNeon.withValues(
+                                alpha: 0.2,
+                              ),
                               child: Container(
                                 padding: const EdgeInsets.all(12),
                                 decoration: BoxDecoration(
                                   borderRadius: BorderRadius.circular(12),
                                   border: Border.all(
-                                    color: isSelected ? VgreTheme.primaryNeon.withValues(alpha: 0.5) : Colors.white.withValues(alpha: 0.05),
+                                    color: isSelected
+                                        ? VgreTheme.primaryNeon.withValues(
+                                            alpha: 0.5,
+                                          )
+                                        : Colors.white.withValues(alpha: 0.05),
                                     width: 1,
                                   ),
-                                  boxShadow: isSelected ? [
-                                    BoxShadow(
-                                      color: VgreTheme.primaryNeon.withValues(alpha: 0.1),
-                                      blurRadius: 10,
-                                      spreadRadius: 1,
-                                    )
-                                  ] : [],
+                                  boxShadow: isSelected
+                                      ? [
+                                          BoxShadow(
+                                            color: VgreTheme.primaryNeon
+                                                .withValues(alpha: 0.1),
+                                            blurRadius: 10,
+                                            spreadRadius: 1,
+                                          ),
+                                        ]
+                                      : [],
                                 ),
                                 child: Row(
                                   children: [
@@ -210,14 +244,19 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
                                     const SizedBox(width: 16),
                                     Expanded(
                                       child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
                                         children: [
                                           Text(
                                             kernel.name,
                                             style: TextStyle(
                                               fontSize: 14,
-                                              fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                                              color: isSelected ? Colors.white : Colors.white70,
+                                              fontWeight: isSelected
+                                                  ? FontWeight.bold
+                                                  : FontWeight.w500,
+                                              color: isSelected
+                                                  ? Colors.white
+                                                  : Colors.white70,
                                               letterSpacing: 0.5,
                                             ),
                                           ),
@@ -226,15 +265,22 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
                                             "${kernel.invocations} executions",
                                             style: TextStyle(
                                               fontSize: 11,
-                                              color: isSelected ? VgreTheme.primaryNeon.withValues(alpha: 0.8) : VgreTheme.textMuted,
+                                              color: isSelected
+                                                  ? VgreTheme.primaryNeon
+                                                        .withValues(alpha: 0.8)
+                                                  : VgreTheme.textMuted,
                                             ),
                                           ),
                                         ],
                                       ),
                                     ),
                                     Icon(
-                                      isSelected ? Icons.radio_button_checked : Icons.chevron_right,
-                                      color: isSelected ? VgreTheme.primaryNeon : VgreTheme.textMuted,
+                                      isSelected
+                                          ? Icons.radio_button_checked
+                                          : Icons.chevron_right,
+                                      color: isSelected
+                                          ? VgreTheme.primaryNeon
+                                          : VgreTheme.textMuted,
                                       size: 18,
                                     ),
                                   ],
@@ -290,19 +336,47 @@ class _KernelDetailsPanel extends StatelessWidget {
                   children: [
                     Row(
                       children: [
-                        Expanded(child: _metricTile("AVG LATENCY", "${selectedKernel!.avgTimeMs.toStringAsFixed(2)} ms", VgreTheme.primaryNeon)),
-                        Expanded(child: _metricTile("LATENCY RANGE", "${selectedKernel!.minTimeMs.toStringAsFixed(2)} - ${selectedKernel!.maxTimeMs.toStringAsFixed(2)} ms", VgreTheme.textMuted)),
+                        Expanded(
+                          child: _metricTile(
+                            "AVG LATENCY",
+                            "${selectedKernel!.avgTimeMs.toStringAsFixed(2)} ms",
+                            VgreTheme.primaryNeon,
+                          ),
+                        ),
+                        Expanded(
+                          child: _metricTile(
+                            "LATENCY RANGE",
+                            "${selectedKernel!.minTimeMs.toStringAsFixed(2)} - ${selectedKernel!.maxTimeMs.toStringAsFixed(2)} ms",
+                            VgreTheme.textMuted,
+                          ),
+                        ),
                       ],
                     ),
                     const Divider(color: Color(0x0DFFFFFF), height: 16),
                     Row(
                       children: [
-                        Expanded(child: _metricTile("AVG GFLOPS", selectedKernel!.avgGflops.toStringAsFixed(1), VgreTheme.secondaryNeon)),
-                        Expanded(child: _metricTile("THROUGHPUT", "${selectedKernel!.avgThroughputGbps.toStringAsFixed(1)} GB/s", Colors.orangeAccent)),
+                        Expanded(
+                          child: _metricTile(
+                            "AVG GFLOPS",
+                            selectedKernel!.avgGflops.toStringAsFixed(1),
+                            VgreTheme.secondaryNeon,
+                          ),
+                        ),
+                        Expanded(
+                          child: _metricTile(
+                            "THROUGHPUT",
+                            "${selectedKernel!.avgThroughputGbps.toStringAsFixed(1)} GB/s",
+                            Colors.orangeAccent,
+                          ),
+                        ),
                       ],
                     ),
                     const Divider(color: Color(0x0DFFFFFF), height: 16),
-                    _metricTile("TOTAL INVOCATIONS", selectedKernel!.invocations.toString(), Colors.purpleAccent),
+                    _metricTile(
+                      "TOTAL INVOCATIONS",
+                      selectedKernel!.invocations.toString(),
+                      Colors.purpleAccent,
+                    ),
                   ],
                 ),
               ),
@@ -318,7 +392,11 @@ class _KernelDetailsPanel extends StatelessWidget {
       children: [
         Text(
           label,
-          style: const TextStyle(color: VgreTheme.textMuted, fontSize: 9, letterSpacing: 1),
+          style: const TextStyle(
+            color: VgreTheme.textMuted,
+            fontSize: 9,
+            letterSpacing: 1,
+          ),
         ),
         const SizedBox(height: 4),
         Text(
@@ -363,7 +441,11 @@ class _KernelSourcePanelState extends State<_KernelSourcePanel> {
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.code, size: 16, color: VgreTheme.primaryNeon),
+                    const Icon(
+                      Icons.code,
+                      size: 16,
+                      color: VgreTheme.primaryNeon,
+                    ),
                     const SizedBox(width: 12),
                     Text(
                       widget.selectedKernel != null
@@ -393,7 +475,10 @@ class _KernelSourcePanelState extends State<_KernelSourcePanel> {
                 ? const Center(
                     child: Text(
                       "Select a kernel to view cross-compiled IR",
-                      style: TextStyle(color: VgreTheme.textMuted, fontSize: 12),
+                      style: TextStyle(
+                        color: VgreTheme.textMuted,
+                        fontSize: 12,
+                      ),
                     ),
                   )
                 : Container(
@@ -405,11 +490,11 @@ class _KernelSourcePanelState extends State<_KernelSourcePanel> {
                       child: SelectableText(
                         _showIR
                             ? (widget.selectedKernel!.irCode.isNotEmpty
-                                ? widget.selectedKernel!.irCode
-                                : "// No LLVM-IR available [Binary Module]")
+                                  ? widget.selectedKernel!.irCode
+                                  : "// No LLVM-IR available [Binary Module]")
                             : (widget.selectedKernel!.sourceCode.isNotEmpty
-                                ? widget.selectedKernel!.sourceCode
-                                : "// No source available [Pre-registered]"),
+                                  ? widget.selectedKernel!.sourceCode
+                                  : "// No source available [Pre-registered]"),
                         style: GoogleFonts.firaCode(
                           color: _showIR
                               ? Colors.greenAccent.withValues(alpha: 0.8)
@@ -432,10 +517,14 @@ class _KernelSourcePanelState extends State<_KernelSourcePanel> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
-          color: active ? VgreTheme.primaryNeon.withValues(alpha: 0.1) : Colors.transparent,
+          color: active
+              ? VgreTheme.primaryNeon.withValues(alpha: 0.1)
+              : Colors.transparent,
           borderRadius: BorderRadius.circular(4),
           border: Border.all(
-            color: active ? VgreTheme.primaryNeon.withValues(alpha: 0.5) : Colors.white10,
+            color: active
+                ? VgreTheme.primaryNeon.withValues(alpha: 0.5)
+                : Colors.white10,
           ),
         ),
         child: Text(
@@ -453,13 +542,14 @@ class _KernelSourcePanelState extends State<_KernelSourcePanel> {
 
 class _PulseIndicator extends StatefulWidget {
   final bool active;
-  const _PulseIndicator({required this.active, super.key});
+  const _PulseIndicator({required this.active});
 
   @override
   State<_PulseIndicator> createState() => _PulseIndicatorState();
 }
 
-class _PulseIndicatorState extends State<_PulseIndicator> with SingleTickerProviderStateMixin {
+class _PulseIndicatorState extends State<_PulseIndicator>
+    with SingleTickerProviderStateMixin {
   late AnimationController _controller;
 
   @override
@@ -501,7 +591,9 @@ class _PulseIndicatorState extends State<_PulseIndicator> with SingleTickerProvi
             color: VgreTheme.primaryNeon,
             boxShadow: [
               BoxShadow(
-                color: VgreTheme.primaryNeon.withValues(alpha: 0.8 * (1.0 - _controller.value)),
+                color: VgreTheme.primaryNeon.withValues(
+                  alpha: 0.8 * (1.0 - _controller.value),
+                ),
                 blurRadius: 10 * _controller.value,
                 spreadRadius: 4 * _controller.value,
               ),
@@ -521,7 +613,9 @@ class _KernelLogsPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     return BlocBuilder<TelemetryBloc, TelemetryState>(
       builder: (context, state) {
-        final logs = (state is TelemetryActive) ? state.telemetry.logs : <String>[];
+        final logs = (state is TelemetryActive)
+            ? state.telemetry.logs
+            : <String>[];
         final filteredLogs = kernelName == null
             ? logs
             : logs.where((log) => log.contains(kernelName!)).toList();
@@ -532,7 +626,10 @@ class _KernelLogsPanel extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 12,
+                ),
                 decoration: const BoxDecoration(
                   border: Border(bottom: BorderSide(color: Colors.white10)),
                 ),
@@ -541,7 +638,11 @@ class _KernelLogsPanel extends StatelessWidget {
                   children: [
                     Row(
                       children: [
-                        const Icon(Icons.list_alt, size: 16, color: Colors.orangeAccent),
+                        const Icon(
+                          Icons.list_alt,
+                          size: 16,
+                          color: Colors.orangeAccent,
+                        ),
                         const SizedBox(width: 12),
                         Text(
                           kernelName != null
@@ -557,11 +658,16 @@ class _KernelLogsPanel extends StatelessWidget {
                     ),
                     if (kernelName != null)
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
                         decoration: BoxDecoration(
                           color: Colors.orangeAccent.withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(4),
-                          border: Border.all(color: Colors.orangeAccent.withValues(alpha: 0.3)),
+                          border: Border.all(
+                            color: Colors.orangeAccent.withValues(alpha: 0.3),
+                          ),
                         ),
                         child: const Text(
                           "FILTERED",
@@ -582,7 +688,10 @@ class _KernelLogsPanel extends StatelessWidget {
                           kernelName == null
                               ? "No system logs available"
                               : "No logs found for '$kernelName'",
-                          style: const TextStyle(color: VgreTheme.textMuted, fontSize: 11),
+                          style: const TextStyle(
+                            color: VgreTheme.textMuted,
+                            fontSize: 11,
+                          ),
                         ),
                       )
                     : Container(
@@ -596,18 +705,22 @@ class _KernelLogsPanel extends StatelessWidget {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: filteredLogs.map((log) {
                                 final bool isError = log.contains("[ERROR]");
-                                final bool isHeartbeat = log.contains("heart-beat");
+                                final bool isHeartbeat = log.contains(
+                                  "heart-beat",
+                                );
                                 return Padding(
                                   padding: const EdgeInsets.only(bottom: 4),
                                   child: Text(
                                     log,
                                     style: GoogleFonts.firaCode(
                                       fontSize: 10,
-                                      color: isError 
-                                          ? Colors.redAccent 
-                                          : isHeartbeat 
-                                              ? VgreTheme.secondaryNeon.withValues(alpha: 0.9)
-                                              : Colors.white70,
+                                      color: isError
+                                          ? Colors.redAccent
+                                          : isHeartbeat
+                                          ? VgreTheme.secondaryNeon.withValues(
+                                              alpha: 0.9,
+                                            )
+                                          : Colors.white70,
                                     ),
                                   ),
                                 );

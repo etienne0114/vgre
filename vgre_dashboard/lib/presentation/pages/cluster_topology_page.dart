@@ -31,7 +31,7 @@ class ClusterTopologyPage extends StatelessWidget {
               const SizedBox(height: 24),
               _buildSecuritySummary(telemetry.securityInfo),
               const SizedBox(height: 32),
-              _buildTopologyGraph(context, nodes),
+              _Topology3DView(nodes: nodes),
               const SizedBox(height: 32),
               _buildNodeList(nodes),
             ],
@@ -52,120 +52,17 @@ class ClusterTopologyPage extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text(
-          "Real-time node discovery and interconnect visualization.",
+          "Real-time 3D node discovery and interconnect visualization.",
           style: VgreTheme.bodyStyle.copyWith(color: Colors.white70),
         ),
       ],
     );
   }
 
-  Widget _buildTopologyGraph(BuildContext context, List<ClusterNode> nodes) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final double size = math.min(constraints.maxWidth, constraints.maxHeight);
-        final double radius = (size / 2.8).clamp(100.0, 180.0);
-
-        return GlassCard(
-          height: 500,
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: CustomPaint(
-                  painter: TopologyPainter(nodes.length, radius: radius),
-                ),
-              ),
-              Center(
-                child: _buildNodeIcon(
-                  "MASTER",
-                  "Localhost",
-                  VgreTheme.neonBlue,
-                  isMaster: true,
-                ),
-              ),
-              ...List.generate(nodes.length, (index) {
-                final angle = (2 * math.pi * index) / nodes.length;
-                final x = radius * math.cos(angle);
-                final y = radius * math.sin(angle);
-
-                final node = nodes[index];
-                return Center(
-                  child: Transform.translate(
-                    offset: Offset(x, y),
-                    child: _buildNodeIcon(
-                      "WORKER ${index + 1}",
-                      node.address,
-                      node.available ? VgreTheme.neonGreen : Colors.redAccent,
-                      latency: "${node.latencyMs.toStringAsFixed(1)}ms",
-                    ),
-                  ),
-                );
-              }),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildNodeIcon(String label, String sublabel, Color color,
-      {bool isMaster = false, String? latency}) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: isMaster ? 80 : 60,
-          height: isMaster ? 80 : 60,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: color.withValues(alpha: 0.1),
-            border: Border.all(color: color, width: 2),
-            boxShadow: [
-              BoxShadow(
-                color: color.withValues(alpha: 0.3),
-                blurRadius: 15,
-                spreadRadius: 2,
-              ),
-            ],
-          ),
-          child: Icon(
-            isMaster ? Icons.dns : Icons.settings_input_component,
-            color: color,
-            size: isMaster ? 40 : 30,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          label,
-          style: VgreTheme.bodyStyle.copyWith(
-            fontWeight: FontWeight.bold,
-            color: color,
-            fontSize: 12,
-          ),
-        ),
-        Text(
-          sublabel,
-          style: VgreTheme.bodyStyle.copyWith(
-            fontSize: 10,
-            color: Colors.white60,
-          ),
-        ),
-        if (latency != null)
-          Text(
-            latency,
-            style: VgreTheme.bodyStyle.copyWith(
-              fontSize: 10,
-              color: VgreTheme.neonCyan,
-            ),
-          ),
-      ],
-    );
-  }
-
   Widget _buildSecuritySummary(SecurityInfo? info) {
-
-
-    final bool isSecured = info?.isEncrypted ?? false;
-    final color = isSecured ? VgreTheme.neonGreen : Colors.orangeAccent;
+    final bool isSecure = info?.isEncrypted ?? false;
+    final bool isPending =
+        isSecure && (info?.cipherName.contains("PENDING") ?? false);
 
     return GlassCard(
       padding: const EdgeInsets.all(20),
@@ -175,39 +72,39 @@ class ClusterTopologyPage extends StatelessWidget {
           Row(
             children: [
               Icon(
-                isSecured ? Icons.security : Icons.security_update_warning,
-                color: color,
-                size: 24,
+                isSecure ? Icons.vpn_lock : Icons.gpp_bad,
+                color: isSecure
+                    ? (isPending ? Colors.orangeAccent : VgreTheme.neonGreen)
+                    : Colors.redAccent,
+                size: 20,
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 8),
               Text(
-                "CLUSTER SECURITY: ${isSecured ? 'ENCRYPTED' : 'LOW'}",
-                style: VgreTheme.headingStyle.copyWith(
-                  fontSize: 14,
-                  color: color,
-                  letterSpacing: 2,
+                "VGRE BUILT-IN VPN: ${isSecure ? (isPending ? 'CONNECTING...' : 'SECURED') : 'DISABLED'}",
+                style: TextStyle(
+                  color: isSecure
+                      ? (isPending ? Colors.orangeAccent : VgreTheme.neonGreen)
+                      : Colors.redAccent,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.2,
                 ),
               ),
-              const Spacer(),
-              if (isSecured)
-                _securityStat("SESSION", "${info!.sessionSeconds.toInt()}s"),
-              const SizedBox(width: 24),
-              if (isSecured)
-                _securityStat("CIPHER", info!.cipherName),
             ],
           ),
-          if (isSecured) ...[
-            const SizedBox(height: 20),
+          if (isSecure && info != null) ...[
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                _securityStat("CIPHER", info.cipherName),
+                _securityStat("FINGERPRINT", info.keyFingerprint),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Divider(color: Colors.white10),
+            const SizedBox(height: 8),
             Row(
               children: [
-                Expanded(
-                  child: _securityDetail(
-                    "FINGERPRINT",
-                    info!.keyFingerprint,
-                    Icons.fingerprint,
-                  ),
-                ),
-                const SizedBox(width: 32),
                 _securityDetail(
                   "TRAFFIC",
                   "${(info.bytesSent / 1024).toStringAsFixed(1)} KB SENT",
@@ -225,7 +122,7 @@ class ClusterTopologyPage extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(top: 12),
               child: Text(
-                "Communication is currently unencrypted. Set VGRE_TCP_AUTH_TOKEN to enable Phase 5 Secure Channel.",
+                "Phase 5 VPN unencrypted. Enable 'Secure cluster channel' in Dashboard Settings.",
                 style: VgreTheme.bodyStyle.copyWith(
                   fontSize: 12,
                   color: Colors.white38,
@@ -411,43 +308,247 @@ class ClusterTopologyPage extends StatelessWidget {
   }
 }
 
-class TopologyPainter extends CustomPainter {
-  final int nodeCount;
-  final double radius;
+// ── Animated 3D Topology View ──────────────────────────────────────────────
 
-  TopologyPainter(this.nodeCount, {required this.radius});
+class _Topology3DView extends StatefulWidget {
+  final List<ClusterNode> nodes;
+
+  const _Topology3DView({required this.nodes});
 
   @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white12
-      ..strokeWidth = 1.5
-      ..style = PaintingStyle.stroke;
+  State<_Topology3DView> createState() => _Topology3DViewState();
+}
 
-    final center = Offset(size.width / 2, size.height / 2);
+class _Topology3DViewState extends State<_Topology3DView>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
 
-    for (int i = 0; i < nodeCount; i++) {
-      final angle = (2 * math.pi * i) / nodeCount;
-      final x = center.dx + radius * math.cos(angle);
-      final y = center.dy + radius * math.sin(angle);
-
-      // Draw connection line
-      canvas.drawLine(center, Offset(x, y), paint);
-
-      // Draw pulse glow effect
-      final glowPaint = Paint()
-        ..shader = LinearGradient(
-          colors: [VgreTheme.neonBlue.withValues(alpha: 0.5), VgreTheme.neonBlue.withValues(alpha: 0)],
-        ).createShader(Rect.fromPoints(center, Offset(x, y)))
-        ..strokeWidth = 3;
-      
-      canvas.drawLine(center, Offset(x, y), glowPaint);
-    }
-
-    // Draw circular orbits
-    canvas.drawCircle(center, radius, paint);
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 20),
+    )..repeat();
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      height: 520,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          return CustomPaint(
+            size: const Size(double.infinity, 520),
+            painter: Topology3DPainter(
+              nodeCount: widget.nodes.length,
+              nodes: widget.nodes,
+              rotationAngle: _controller.value * 2 * math.pi,
+              pulsePhase: _controller.value,
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ── 3D Perspective Projected Topology Painter ──────────────────────────────
+
+class _Node3D {
+  final double x, y, z;
+  _Node3D(this.x, this.y, this.z);
+}
+
+class Topology3DPainter extends CustomPainter {
+  final int nodeCount;
+  final List<ClusterNode> nodes;
+  final double rotationAngle;
+  final double pulsePhase;
+
+  Topology3DPainter({
+    required this.nodeCount,
+    required this.nodes,
+    required this.rotationAngle,
+    required this.pulsePhase,
+  });
+
+  /// Perspective projection: maps 3D coordinates to 2D screen space.
+  Offset _projectToScreen(_Node3D node, Size size, double focalLength) {
+    // Camera at z = -focalLength looking towards +Z
+    double perspective = focalLength / (focalLength + node.z);
+    double sx = size.width / 2 + node.x * perspective;
+    double sy = size.height / 2 + node.y * perspective;
+    return Offset(sx, sy);
+  }
+
+  /// Scale factor for depth-based size attenuation
+  double _depthScale(double z, double focalLength) {
+    return focalLength / (focalLength + z);
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const double focalLength = 600.0;
+    const double orbitRadius = 160.0;
+
+    // Master node at center (slight Z offset for depth)
+    final master = _Node3D(0, 0, 0);
+    final masterScreen = _projectToScreen(master, size, focalLength);
+
+    // Position worker nodes in a 3D orbital ring
+    List<_Node3D> workerPositions = [];
+    List<Offset> workerScreenPositions = [];
+    List<double> workerDepths = [];
+
+    for (int i = 0; i < nodeCount; i++) {
+      double baseAngle = (2 * math.pi * i) / nodeCount;
+      double angle = baseAngle + rotationAngle;
+
+      // 3D ring with Y-axis tilt for perspective effect
+      double x = orbitRadius * math.cos(angle);
+      double z = orbitRadius * math.sin(angle) * 0.4; // Flatten the Z for a tilted ring
+      double y = orbitRadius * math.sin(angle) * 0.6; // Some Y spread
+
+      final node3d = _Node3D(x, y, z);
+      workerPositions.add(node3d);
+      workerScreenPositions.add(_projectToScreen(node3d, size, focalLength));
+      workerDepths.add(z);
+    }
+
+    // Draw orbital path (elliptical ring)
+    _drawOrbitalPath(canvas, size, focalLength, orbitRadius);
+
+    // Sort by depth for correct rendering order (back to front)
+    List<int> sortedIndices = List.generate(nodeCount, (i) => i);
+    sortedIndices.sort((a, b) => workerDepths[b].compareTo(workerDepths[a]));
+
+    // Draw connections from master to each worker
+    for (int idx in sortedIndices) {
+      final workerScreen = workerScreenPositions[idx];
+      double ds = _depthScale(workerDepths[idx], focalLength);
+      double alpha = (ds * 0.8).clamp(0.15, 0.9);
+
+      // Animated pulse: packet traveling along the connection
+      double pulse = (pulsePhase * 3 + idx * 0.3) % 1.0;
+      Offset pulsePos = Offset.lerp(masterScreen, workerScreen, pulse)!;
+
+      // Connection line with gradient
+      final linePaint = Paint()
+        ..shader = LinearGradient(
+          colors: [
+            VgreTheme.neonBlue.withValues(alpha: alpha * 0.6),
+            VgreTheme.neonCyan.withValues(alpha: alpha * 0.3),
+          ],
+        ).createShader(Rect.fromPoints(masterScreen, workerScreen))
+        ..strokeWidth = 1.5 * ds
+        ..style = PaintingStyle.stroke;
+
+      canvas.drawLine(masterScreen, workerScreen, linePaint);
+
+      // Pulse dot
+      final pulsePaint = Paint()
+        ..color = VgreTheme.neonCyan.withValues(alpha: alpha * 0.8)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3);
+      canvas.drawCircle(pulsePos, 3.0 * ds, pulsePaint);
+    }
+
+    // Draw master node
+    _drawNodeGlow(canvas, masterScreen, VgreTheme.neonBlue, 22, 1.0, "MASTER");
+
+    // Draw worker nodes (back to front)
+    for (int idx in sortedIndices) {
+      double ds = _depthScale(workerDepths[idx], focalLength);
+      double nodeRadius = 14 * ds;
+
+      Color nodeColor;
+      if (idx < nodes.length) {
+        nodeColor = nodes[idx].available ? VgreTheme.neonGreen : Colors.redAccent;
+      } else {
+        nodeColor = VgreTheme.neonGreen;
+      }
+
+      String label = "W${idx + 1}";
+      _drawNodeGlow(canvas, workerScreenPositions[idx], nodeColor, nodeRadius, ds, label);
+    }
+  }
+
+  void _drawOrbitalPath(Canvas canvas, Size size, double focalLength, double radius) {
+    final path = Path();
+    const int segments = 64;
+    for (int i = 0; i <= segments; i++) {
+      double angle = (2 * math.pi * i / segments) + rotationAngle;
+      double x = radius * math.cos(angle);
+      double z = radius * math.sin(angle) * 0.4;
+      double y = radius * math.sin(angle) * 0.6;
+
+      final pt = _projectToScreen(_Node3D(x, y, z), size, focalLength);
+      if (i == 0) {
+        path.moveTo(pt.dx, pt.dy);
+      } else {
+        path.lineTo(pt.dx, pt.dy);
+      }
+    }
+    path.close();
+
+    final orbitPaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.06)
+      ..strokeWidth = 1.0
+      ..style = PaintingStyle.stroke;
+    canvas.drawPath(path, orbitPaint);
+  }
+
+  void _drawNodeGlow(
+      Canvas canvas, Offset pos, Color color, double radius, double scale, String label) {
+    // Outer glow
+    final glowPaint = Paint()
+      ..color = color.withValues(alpha: 0.15 * scale)
+      ..maskFilter = MaskFilter.blur(BlurStyle.normal, 12 * scale);
+    canvas.drawCircle(pos, radius * 1.6, glowPaint);
+
+    // Node circle background
+    final bgPaint = Paint()
+      ..color = color.withValues(alpha: 0.12 * scale);
+    canvas.drawCircle(pos, radius, bgPaint);
+
+    // Node circle border
+    final borderPaint = Paint()
+      ..color = color.withValues(alpha: 0.7 * scale)
+      ..strokeWidth = 2.0 * scale
+      ..style = PaintingStyle.stroke;
+    canvas.drawCircle(pos, radius, borderPaint);
+
+    // Label
+    final textSpan = TextSpan(
+      text: label,
+      style: TextStyle(
+        color: color.withValues(alpha: 0.9 * scale),
+        fontSize: 9 * scale,
+        fontWeight: FontWeight.bold,
+        letterSpacing: 1.5,
+      ),
+    );
+    final textPainter = TextPainter(
+      text: textSpan,
+      textDirection: TextDirection.ltr,
+    );
+    textPainter.layout();
+    textPainter.paint(
+      canvas,
+      Offset(pos.dx - textPainter.width / 2, pos.dy + radius + 6 * scale),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant Topology3DPainter oldDelegate) =>
+      rotationAngle != oldDelegate.rotationAngle ||
+      pulsePhase != oldDelegate.pulsePhase ||
+      nodeCount != oldDelegate.nodeCount;
 }

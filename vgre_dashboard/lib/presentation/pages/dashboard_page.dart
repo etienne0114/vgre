@@ -12,6 +12,8 @@ import '../widgets/navigation_sidebar.dart';
 import 'kernel_explorer_page.dart';
 import 'cluster_topology_page.dart';
 import 'hardware_tuning_page.dart';
+import 'memory_analysis_page.dart';
+import 'dashboard_settings_page.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -75,18 +77,22 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Widget _buildCurrentScreen() {
-    switch (_selectedIndex) {
-      case 0:
-        return const DashboardOverviewContent();
-      case 1:
-        return const KernelExplorerPage();
-      case 2:
-        return const ClusterTopologyPage();
-      case 3:
-        return const HardwareTuningPage();
-      default:
-        return Center(
-          child: Text(
+      switch (_selectedIndex) {
+        case 0:
+          return const DashboardOverviewContent();
+        case 1:
+          return const KernelExplorerPage();
+        case 2:
+          return const ClusterTopologyPage();
+        case 3:
+          return const HardwareTuningPage();
+        case 4:
+          return const MemoryAnalysisPage();
+        case 5:
+          return const DashboardSettingsPage();
+        default:
+          return Center(
+            child: Text(
             "FEATURE ${_selectedIndex + 1} (WIP)",
             style: const TextStyle(color: VgreTheme.textMuted, letterSpacing: 2),
           ),

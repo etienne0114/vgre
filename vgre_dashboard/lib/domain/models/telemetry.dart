@@ -2,8 +2,6 @@ import 'package:equatable/equatable.dart';
 
 enum MetricQuality {
   measured,
-  estimated,
-  simulated,
 }
 
 extension MetricQualityLabel on MetricQuality {
@@ -11,10 +9,6 @@ extension MetricQualityLabel on MetricQuality {
     switch (this) {
       case MetricQuality.measured:
         return "MEASURED";
-      case MetricQuality.estimated:
-        return "ESTIMATED";
-      case MetricQuality.simulated:
-        return "SIMULATED";
     }
   }
 }
@@ -99,6 +93,35 @@ class ClusterNode extends Equatable {
 }
 
 
+class CreditEntry extends Equatable {
+  final String address;
+  final double totalCredits;
+  final double totalDebits;
+  final double balance;
+  final int transactionCount;
+  final int lastActivity;
+
+  const CreditEntry({
+    required this.address,
+    required this.totalCredits,
+    required this.totalDebits,
+    required this.balance,
+    required this.transactionCount,
+    required this.lastActivity,
+  });
+
+  @override
+  List<Object?> get props => [
+        address,
+        totalCredits,
+        totalDebits,
+        balance,
+        transactionCount,
+        lastActivity,
+      ];
+}
+
+
 class Telemetry extends Equatable {
   final DateTime timestamp;
   
@@ -142,6 +165,11 @@ class Telemetry extends Equatable {
   final MetricQuality temperatureQuality;
   final List<ClusterNode> clusterNodes;
   final SecurityInfo? securityInfo;
+  final List<CreditEntry> creditLedger;
+  final bool profilerEnabled;
+  final String backendVersion;
+  final bool clusterSecurityActive;
+  final bool clusterSecuritySupported;
 
   const Telemetry({
     required this.timestamp,
@@ -172,12 +200,17 @@ class Telemetry extends Equatable {
     this.versionMinor = 0,
     this.logs = const [],
     this.topKernels = const [],
-    this.computeQuality = MetricQuality.estimated,
-    this.memoryQuality = MetricQuality.estimated,
-    this.uvmQuality = MetricQuality.simulated,
-    this.temperatureQuality = MetricQuality.estimated,
+    this.computeQuality = MetricQuality.measured,
+    this.memoryQuality = MetricQuality.measured,
+    this.uvmQuality = MetricQuality.measured,
+    this.temperatureQuality = MetricQuality.measured,
     this.clusterNodes = const [],
     this.securityInfo,
+    this.creditLedger = const [],
+    this.profilerEnabled = true,
+    this.backendVersion = '0.0.0',
+    this.clusterSecurityActive = false,
+    this.clusterSecuritySupported = false,
   });
 
   double get memoryUsagePercent =>
@@ -201,23 +234,30 @@ class Telemetry extends Equatable {
         uvmMap,
         activeKernels,
         activeThreads,
-      clockSpeed,
-      avgLatency,
-      temperature,
-      eccEnabled,
-      backgroundComputeActive,
-      serviceModeActive,
-      blockThreadsActive,
-      deviceName,
-      logs,
-      topKernels,
-      computeQuality,
-      memoryQuality,
-      uvmQuality,
-      temperatureQuality,
-      clusterNodes,
-      securityInfo,
-    ];
+        clockSpeed,
+        avgLatency,
+        temperature,
+        eccEnabled,
+        backgroundComputeActive,
+        serviceModeActive,
+        blockThreadsActive,
+        deviceName,
+        versionMajor,
+        versionMinor,
+        logs,
+        topKernels,
+        computeQuality,
+        memoryQuality,
+        uvmQuality,
+        temperatureQuality,
+        clusterNodes,
+        securityInfo,
+        creditLedger,
+        profilerEnabled,
+        backendVersion,
+        clusterSecurityActive,
+        clusterSecuritySupported,
+      ];
 }
 
 

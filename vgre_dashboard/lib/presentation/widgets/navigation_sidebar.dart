@@ -166,41 +166,44 @@ class _VgreNavigationSidebarState extends State<VgreNavigationSidebar> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: VgreTheme.primaryNeon.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: VgreTheme.primaryNeon.withValues(alpha: 0.5),
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: VgreTheme.primaryNeon.withValues(alpha: 0.2),
-                    blurRadius: 10,
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: VgreTheme.primaryNeon.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: VgreTheme.primaryNeon.withValues(alpha: 0.5),
                   ),
-                ],
+                  boxShadow: [
+                    BoxShadow(
+                      color: VgreTheme.primaryNeon.withValues(alpha: 0.2),
+                      blurRadius: 10,
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.memory,
+                  color: VgreTheme.primaryNeon,
+                  size: 24,
+                ),
               ),
-              child: const Icon(
-                Icons.memory,
-                color: VgreTheme.primaryNeon,
-                size: 24,
+              const SizedBox(width: 16),
+              Flexible(
+                child: Text(
+                  "VGRE / X",
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.orbitron(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 2,
+                    color: Colors.white,
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(width: 16),
-            Text(
-              "VGRE / X",
-              style: GoogleFonts.orbitron(
-                fontSize: 22,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 2,
-                color: Colors.white,
-              ),
-            ),
-          ],
-        ),
+            ],
+          ),
         const SizedBox(height: 8),
         Text(
           "VIRTUAL GPU RUNTIME",

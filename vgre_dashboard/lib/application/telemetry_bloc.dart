@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:ffi/ffi.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -42,6 +43,24 @@ class ToggleBlockThreads extends TelemetryEvent {
   const ToggleBlockThreads(this.enabled);
   @override
   List<Object> get props => [enabled];
+}
+
+class ToggleProfiler extends TelemetryEvent {
+  final bool enabled;
+  const ToggleProfiler(this.enabled);
+  @override
+  List<Object> get props => [enabled];
+}
+
+class ToggleClusterSecurity extends TelemetryEvent {
+  final bool enabled;
+  const ToggleClusterSecurity(this.enabled);
+  @override
+  List<Object> get props => [enabled];
+}
+
+class ResetCredits extends TelemetryEvent {
+  const ResetCredits();
 }
 
 class UpdateTelemetry extends TelemetryEvent {
@@ -91,6 +110,11 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
   bool _blockThreadsActive = false;
   Telemetry? _lastSmoothed;
   String? _selectedKernelName;
+  bool _profilerEnabled = true;
+  bool _clusterSecurityActive = false;
+  String _backendVersion = '0.0.0';
+  final bool _clusterSecuritySupported =
+      Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN');
 
   TelemetryBloc(this.bridge) : super(TelemetryInitial()) {
     on<StartPolling>((event, emit) {
@@ -114,135 +138,17 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         debugPrint("Failed to fetch device info: $e");
       }
 
+      try {
+        _backendVersion = bridge.getVersion();
+      } catch (e) {
+        debugPrint("Failed to read backend version: $e");
+      }
+
       _timer?.cancel();
-      _timer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
-          try {
-            final ptr = calloc<VgreTelemetry>();
-          try {
-            final raw = bridge.getTelemetryWith(ptr);
-            final logs = bridge.getLogs();
-            final clusterData = bridge.getClusterNodes();
-            
-            // Phase 5: Fetch Security and Credits
-            SecurityInfo? securityInfo;
-            try {
-              final s = bridge.getSecurityInfo();
-              securityInfo = SecurityInfo(
-                cipherName: s['cipherName'] as String,
-                keyFingerprint: s['keyFingerprint'] as String,
-                sessionSeconds: s['sessionSeconds'] as double,
-                isEncrypted: s['isEncrypted'] as bool,
-                packetsSent: s['packetsSent'] as int,
-                packetsReceived: s['packetsReceived'] as int,
-                bytesSent: s['bytesSent'] as int,
-                bytesReceived: s['bytesReceived'] as int,
-              );
-            } catch (e) {
-              debugPrint("Failed to fetch security info: $e");
-            }
-
-            final creditData = bridge.getCreditsAll();
-            final Map<String, Map<String, dynamic>> creditsByAddr = {
-              for (var c in creditData) c['address'] as String: c
-            };
-
-            final List<ClusterNode> clusterNodes = clusterData.map((m) {
-              final addr = m['address'] as String;
-              final cred = creditsByAddr[addr];
-              return ClusterNode(
-                address: addr,
-                port: m['port'] as int,
-                cpuCores: m['cpuCores'] as int,
-                memoryBytes: m['memoryBytes'] as int,
-                latencyMs: m['latencyMs'] as double,
-                available: m['available'] as bool,
-                igpuName: m['igpuName'] as String,
-                totalCredits: (cred?['totalCredits'] ?? 0.0) as double,
-                totalDebits: (cred?['totalDebits'] ?? 0.0) as double,
-                balance: (cred?['balance'] ?? 0.0) as double,
-                transactionCount: (cred?['transactionCount'] ?? 0) as int,
-              );
-            }).toList();
-
-            List<KernelStat> topKernels = const [];
-            try {
-              final jsonStr = bridge.getProfilerJson(topN: 5);
-              if (jsonStr != null) {
-                final decoded = jsonDecode(jsonStr) as Map<String, dynamic>;
-                final items = decoded['top_kernels'] as List<dynamic>? ?? [];
-                topKernels = items.map((item) {
-                  final m = item as Map<String, dynamic>;
-                  return KernelStat(
-                    name: (m['name'] ?? 'kernel').toString(),
-                    invocations: (m['invocations'] ?? 0) as int,
-                    totalTimeMs: (m['total_time_ms'] ?? 0).toDouble(),
-                    avgTimeMs: (m['avg_time_ms'] ?? 0).toDouble(),
-                    minTimeMs: (m['min_time_ms'] ?? 0).toDouble(),
-                    maxTimeMs: (m['max_time_ms'] ?? 0).toDouble(),
-                    avgThroughputGbps:
-                        (m['avg_throughput_gbps'] ?? 0).toDouble(),
-                    avgGflops: (m['avg_gflops'] ?? 0).toDouble(),
-                    sourceCode: (m['source_code'] ?? '').toString(),
-                    irCode: (m['ir_code'] ?? '').toString(),
-                  );
-                }).toList(growable: false);
-              }
-            } catch (e) {
-              debugPrint('Profiler JSON parse failed: $e');
-              topKernels = const [];
-            }
-
-
-          final bool hasProfilerStats = topKernels.isNotEmpty;
-          final data = Telemetry(
-              timestamp: DateTime.fromMillisecondsSinceEpoch(raw.timestamp),
-              gflops: raw.gflops,
-              maxGflops: raw.maxGflops,
-              computeUtilization: raw.computeUtilization,
-              memoryBandwidth: raw.memoryBandwidthGbps,
-              maxMemoryBandwidth: raw.maxMemoryBandwidthGbps,
-              memoryBusUtilization: raw.memoryBusUtilization,
-              memoryUsed: raw.memoryUsedBytes,
-              memoryTotal: raw.memoryTotalBytes,
-              totalPages: raw.totalPages,
-              residentPages: raw.residentPages,
-              evictedPages: raw.evictedPages,
-              pageFaultRate: raw.pageFaultRate,
-              uvmMap: List.generate(1024, (i) => raw.uvmMap[i]),
-              activeKernels: raw.activeKernels,
-              activeThreads: raw.activeThreads,
-              clockSpeed: raw.deviceClockMhz.toInt(),
-              avgLatency: raw.avgKernelLatencyMs,
-              temperature: raw.deviceTemperature,
-              eccEnabled: raw.eccEnabled != 0,
-              backgroundComputeActive:
-                  _backgroundComputeActive, // Use local state
-              serviceModeActive: _serviceModeActive,
-              blockThreadsActive: _blockThreadsActive,
-              deviceName: _deviceName,
-              versionMajor: raw.versionMajor,
-              versionMinor: raw.versionMinor,
-              logs: logs,
-              topKernels: topKernels,
-              computeQuality: hasProfilerStats
-                  ? MetricQuality.measured
-                  : MetricQuality.estimated,
-              memoryQuality: hasProfilerStats
-                  ? MetricQuality.measured
-                  : MetricQuality.estimated,
-              uvmQuality: MetricQuality.simulated,
-              temperatureQuality: MetricQuality.estimated,
-              clusterNodes: clusterNodes,
-              securityInfo: securityInfo,
-            );
-            add(UpdateTelemetry(data));
-          } finally {
-            calloc.free(ptr);
-          }
-        } catch (e) {
-          debugPrint('FFI Error: $e');
-        }
+      _timer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+        _pollOnce();
       });
+      _pollOnce();
     });
 
     on<ToggleBackgroundCompute>((event, emit) {
@@ -255,6 +161,49 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         }
       } catch (e) {
         debugPrint("Failed to toggle background compute: $e");
+      }
+    });
+
+    on<ToggleProfiler>((event, emit) {
+      try {
+        final res = bridge.setProfilerEnabled(event.enabled);
+        if (res == 0) {
+          _profilerEnabled = event.enabled;
+        } else {
+          debugPrint("Failed to toggle profiler: $res");
+        }
+      } catch (e) {
+        debugPrint("Failed to toggle profiler: $e");
+      }
+    });
+
+    on<ToggleClusterSecurity>((event, emit) {
+      if (!_clusterSecuritySupported) {
+        debugPrint("Cluster security toggle blocked: token not set");
+        return;
+      }
+      try {
+        final res = bridge.clusterSetSecurity(event.enabled);
+        if (res == 0) {
+          _clusterSecurityActive = event.enabled;
+        } else {
+          debugPrint("Failed to toggle cluster security: $res");
+        }
+      } catch (e) {
+        debugPrint("Failed to toggle cluster security: $e");
+      }
+    });
+
+    on<ResetCredits>((event, emit) {
+      try {
+        final res = bridge.creditsReset();
+        if (res != 0) {
+          debugPrint("Failed to reset credits: $res");
+          return;
+        }
+        _pollOnce();
+      } catch (e) {
+        debugPrint("Failed to reset credits: $e");
       }
     });
 
@@ -309,6 +258,146 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
     });
   }
 
+  void _pollOnce() {
+    final ptr = calloc<VgreTelemetry>();
+    try {
+      final raw = bridge.getTelemetryWith(ptr);
+      final logs = bridge.getLogs();
+      final clusterData = bridge.getClusterNodes();
+
+      SecurityInfo? securityInfo;
+      try {
+        final s = bridge.getSecurityInfo();
+        securityInfo = SecurityInfo(
+          cipherName: s['cipherName'] as String,
+          keyFingerprint: s['keyFingerprint'] as String,
+          sessionSeconds: s['sessionSeconds'] as double,
+          isEncrypted: s['isEncrypted'] as bool,
+          packetsSent: s['packetsSent'] as int,
+          packetsReceived: s['packetsReceived'] as int,
+          bytesSent: s['bytesSent'] as int,
+          bytesReceived: s['bytesReceived'] as int,
+        );
+      } catch (e) {
+        debugPrint("Failed to fetch security info: $e");
+      }
+
+      final creditData = bridge.getCreditsAll();
+      final creditLedger = creditData.map((c) {
+        return CreditEntry(
+          address: c['address'] as String,
+          totalCredits: (c['totalCredits'] ?? 0.0) as double,
+          totalDebits: (c['totalDebits'] ?? 0.0) as double,
+          balance: (c['balance'] ?? 0.0) as double,
+          transactionCount: (c['transactionCount'] ?? 0) as int,
+          lastActivity: (c['lastActivity'] ?? 0) as int,
+        );
+      }).toList(growable: false);
+
+      final Map<String, Map<String, dynamic>> creditsByAddr = {
+        for (var c in creditData) c['address'] as String: c
+      };
+
+      final List<ClusterNode> clusterNodes = clusterData.map((m) {
+        final addr = m['address'] as String;
+        final cred = creditsByAddr[addr];
+        return ClusterNode(
+          address: addr,
+          port: m['port'] as int,
+          cpuCores: m['cpuCores'] as int,
+          memoryBytes: m['memoryBytes'] as int,
+          latencyMs: m['latencyMs'] as double,
+          available: m['available'] as bool,
+          igpuName: m['igpuName'] as String,
+          totalCredits: (cred?['totalCredits'] ?? 0.0) as double,
+          totalDebits: (cred?['totalDebits'] ?? 0.0) as double,
+          balance: (cred?['balance'] ?? 0.0) as double,
+          transactionCount: (cred?['transactionCount'] ?? 0) as int,
+        );
+      }).toList(growable: false);
+
+      if (securityInfo != null) {
+        _clusterSecurityActive = securityInfo.isEncrypted;
+      }
+
+      List<KernelStat> topKernels = const [];
+      try {
+        final jsonStr = bridge.getProfilerJson(topN: 5);
+        if (jsonStr != null) {
+          final decoded = jsonDecode(jsonStr) as Map<String, dynamic>;
+          final items = decoded['top_kernels'] as List<dynamic>? ?? [];
+          topKernels = items.map((item) {
+            final m = item as Map<String, dynamic>;
+            return KernelStat(
+              name: (m['name'] ?? 'kernel').toString(),
+              invocations: (m['invocations'] ?? 0) as int,
+              totalTimeMs: (m['total_time_ms'] ?? 0).toDouble(),
+              avgTimeMs: (m['avg_time_ms'] ?? 0).toDouble(),
+              minTimeMs: (m['min_time_ms'] ?? 0).toDouble(),
+              maxTimeMs: (m['max_time_ms'] ?? 0).toDouble(),
+              avgThroughputGbps:
+                  (m['avg_throughput_gbps'] ?? 0).toDouble(),
+              avgGflops: (m['avg_gflops'] ?? 0).toDouble(),
+              sourceCode: (m['source_code'] ?? '').toString(),
+              irCode: (m['ir_code'] ?? '').toString(),
+            );
+          }).toList(growable: false);
+        }
+      } catch (e) {
+        debugPrint('Profiler JSON parse failed: $e');
+        topKernels = const [];
+      }
+
+      final bool hasProfilerStats = topKernels.isNotEmpty;
+      final data = Telemetry(
+        timestamp: DateTime.fromMillisecondsSinceEpoch(raw.timestamp),
+        gflops: raw.gflops,
+        maxGflops: raw.maxGflops,
+        computeUtilization: raw.computeUtilization,
+        memoryBandwidth: raw.memoryBandwidthGbps,
+        maxMemoryBandwidth: raw.maxMemoryBandwidthGbps,
+        memoryBusUtilization: raw.memoryBusUtilization,
+        memoryUsed: raw.memoryUsedBytes,
+        memoryTotal: raw.memoryTotalBytes,
+        totalPages: raw.totalPages,
+        residentPages: raw.residentPages,
+        evictedPages: raw.evictedPages,
+        pageFaultRate: raw.pageFaultRate,
+        uvmMap: List.generate(1024, (i) => raw.uvmMap[i]),
+        activeKernels: raw.activeKernels,
+        activeThreads: raw.activeThreads,
+        clockSpeed: raw.deviceClockMhz.toInt(),
+        avgLatency: raw.avgKernelLatencyMs,
+        temperature: raw.deviceTemperature,
+        eccEnabled: raw.eccEnabled != 0,
+        backgroundComputeActive: _backgroundComputeActive,
+        serviceModeActive: _serviceModeActive,
+        blockThreadsActive: _blockThreadsActive,
+        deviceName: _deviceName,
+        versionMajor: raw.versionMajor,
+        versionMinor: raw.versionMinor,
+        logs: logs,
+        topKernels: topKernels,
+        computeQuality: MetricQuality.measured,
+        memoryQuality: MetricQuality.measured,
+        uvmQuality: MetricQuality.measured,
+        temperatureQuality: MetricQuality.measured,
+        clusterNodes: clusterNodes,
+        securityInfo: securityInfo,
+        creditLedger: creditLedger,
+        profilerEnabled: _profilerEnabled,
+        backendVersion: _backendVersion,
+        clusterSecurityActive: _clusterSecurityActive,
+        clusterSecuritySupported: _clusterSecuritySupported,
+      );
+      add(UpdateTelemetry(data));
+    } catch (e) {
+      debugPrint('FFI Error: $e');
+    } finally {
+      calloc.free(ptr);
+    }
+  }
+
   @override
   Future<void> close() {
     _timer?.cancel();
@@ -356,7 +445,14 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       topKernels: current.topKernels,
       clusterNodes: current.clusterNodes,
       securityInfo: current.securityInfo,
+      creditLedger: current.creditLedger,
+      profilerEnabled: current.profilerEnabled,
+      backendVersion: current.backendVersion,
+      clusterSecurityActive: current.clusterSecurityActive,
+      computeQuality: current.computeQuality,
+      memoryQuality: current.memoryQuality,
+      uvmQuality: current.uvmQuality,
+      temperatureQuality: current.temperatureQuality,
     );
   }
 }
-
