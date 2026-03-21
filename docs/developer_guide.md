@@ -9,8 +9,8 @@ VGRE is designed to intercept CUDA-like compute requests from high-level framewo
 The system is composed of four primary layers:
 1. **API Layer (`bindings/python`, `src/api`)**: Exposes the `vgre.Runtime` for Python integration and `libvgre_cudart.so` for binary interception of compiled CUDA applications.
 2. **Runtime Engine (`src/core/runtime_engine.cpp`)**: The central coordinator that manages devices, registers kernels, and handles stream-based asynchronous execution dispatching.
-3. **Execution Engine (`src/core/scheduler.cpp`, `src/runtime/cpu_parallel_executor.cpp`)**: The OpenMP-backed multithreaded task dispatcher that schedules and executes grid/block dimensions across available CPU cores.
-4. **LLVM JIT Compiler (`src/compiler/llvm_translation_engine.cpp`)**: Dynamically translates virtual kernel operations or parsed Python kernel mockups into executable machine code at runtime.
+3. **Execution Engine (`src/core/scheduler.cpp`, `src/runtime/cpu_parallel_executor.cpp`)**: The OpenMP-backed multithreaded task dispatcher that schedules and executes grid/block dimensions across available CPU cores authoritatively.
+4. **LLVM JIT Compiler (`src/compiler/llvm_translation_engine.cpp`)**: Dynamically translates virtual kernel operations or parsed Python kernel source into executable machine code at runtime.
 
 ---
 
@@ -87,3 +87,14 @@ If managed memory is requested (`cudaMallocManaged` interception), VGRE utilizes
 
 ## Conclusion
 Extending VGRE typically involves modifying the `LLVMTranslationEngine` to support broader IR instructions, or updating the `vgre_c_api.cpp` shim to intercept more advanced framework operations. By isolating the JIT, the Memory pool, and the OpenMP Task queues, VGRE remains highly modular for both testing and embedded integration.
+
+---
+
+## Approved Future Innovations Roadmap
+
+As part of transforming VGRE into an extraordinary, sophisticated, real-functioning tool, the following enhancements are upcoming:
+
+1. **Full Texture & Surface API Implementation**: Complete hardware-backed realization of `cudaArray_t` APIs.
+2. **Dynamic JIT Kernel Fusion**: A runtime pass to fuse consecutive PTX kernels into a single LLVM IR module, drastically cutting launch overhead.
+3. **Interactive 3D Hardware Topology Viewer**: A Flutter frontend update featuring a fully interactive 3D representation of cluster and Node PCIe/Memory topology.
+4. **Agentic "AI Tuner" Interface**: An embedded AI chat UI in the dashboard enabling real-time, natural-language tuning commands routed securely to the backend.

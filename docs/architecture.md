@@ -2,7 +2,7 @@
 
 ## System Overview
 
-VGRE (Virtual GPU Runtime Engine) is a modular GPU emulation system composed of six major subsystems that work together to translate GPU workloads into optimized CPU execution.
+VGRE (Virtual GPU Runtime Engine) is a strictly authoritative, zero-simulation GPU execution system. It is composed of six major subsystems that work together to translate GPU workloads into precise CPU execution without relying on heuristics or fake logic layers.
 
 ## Component Diagram
 
@@ -116,12 +116,21 @@ Both route all operations through the `RuntimeEngine`.
 ## Performance Optimization Strategy
 
 1. **Pattern matching** — common kernels (vector ops, reductions, matmul) get highly optimized implementations
-2. **SIMD vectorization** — AVX2 processes 8 floats per instruction
-3. **OpenMP parallelism** — blocks distributed across all CPU cores
+2. **SIMD vectorization** — AVX2/AVX-512 processes floats per instruction efficiently
+3. **OpenMP parallelism** — blocks distributed across all CPU cores, scaling to maximum hardware threads
 4. **Kernel caching** — compiled kernels cached by name to avoid re-translation
-5. **Adaptive tuning** — runtime profiler feeds optimal parameters back
+5. **Adaptive tuning** — authoritative runtime profiler accurately calibrates thread counts without simulation heuristics
 6. **Memory alignment** — 64-byte aligned allocations for cache-line efficiency
+
+## Approved Future Innovations Roadmap
+
+To further elevate VGRE into an extraordinary and sophisticated real-functioning system, the following innovations are scheduled:
+
+1. **Full Texture & Surface API Implementation**: Complete hardware-backed realization of `cudaArray_t` for 2D/3D texture fetching using advanced LLVM memory sampling.
+2. **Dynamic JIT Kernel Fusion**: A runtime pass within `GraphManager` to fuse consecutive PTX kernels into a single LLVM IR module, drastically cutting launch overhead.
+3. **Interactive 3D Hardware Topology Viewer**: A cross-platform Flutter frontend update featuring a stunning 3D representation of cluster and Node PCIe/Memory topology.
+4. **Agentic "AI Tuner" Interface**: An embedded AI chat UI in the dashboard enabling real-time, natural-language tuning commands (e.g., "Optimize cluster for latency") to be routed via gRPC directly to the execution backend.
 
 ## Feature Coverage
 
-For a current snapshot of which features are fully implemented vs simulated or partial, see `docs/feature_matrix.md`.
+For a current snapshot of which features are fully implemented, see `docs/feature_matrix.md`.

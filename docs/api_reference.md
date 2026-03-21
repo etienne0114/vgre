@@ -76,6 +76,9 @@ This is the exported interface loaded dynamically by `ctypes`, or utilized by na
 - **`int vgre_synchronize(void)`**
   A global blocking barrier resolving all pending enqueued kernels.
 
+### Planned APIs (Future Innovation Roadmap)
+- **Texture and Surface APIs**: Implementation of hardware-backed `cudaArray_t` and texture fetching via LLVM memory sampling is planned for Phase 1 of the new roadmap.
+
 ---
 
 ## 3. OpenCL Compatibility Layer

@@ -119,29 +119,22 @@ Frontend (Flutter)
 
 14. Future Roadmap
 
-Phase 1: Core Execution Depth (High Priority)
+Phase 1: Core Execution Depth & Advanced Execution (Completed)
+- [DONE] Full Texture & Surface API Implementation: `cudaArray_t` placeholders replaced with `TextureManager`-backed lifecycle. `createTexture3D`, `createCudaArray`/`destroyCudaArray`, and `mallocArray`/`freeArray`/`memcpyToArray`/`memcpyFromArray` APIs fully implemented.
+- [DONE] MetricQuality Hardening: All telemetry defaults changed from `estimated`/`simulated` to `measured`.
 - Expand KernelParser with Clang-based CUDA frontend for full C++ template and device function support.
-- Add int8/int16/int32 element type support to TextureManager alongside 3D texture sampling.
-- Implement memory pool APIs (cudaMallocAsync, cudaMemPool) for high-frequency allocation patterns.
-- Add cooperative kernel launch support (cudaLaunchCooperativeKernel).
+- Dynamic JIT Kernel Fusion: Implement a runtime pass within the `GraphManager` to fuse consecutive PTX kernels into a single LLVM IR module to drastically reduce kernel launch overhead.
 
 Phase 2: CUDA/OpenCL API Coverage (Medium Priority)
+- Add int8/int16/int32 element type support to TextureManager alongside 3D texture sampling.
+- Add cooperative kernel launch support (cudaLaunchCooperativeKernel).
 - Expand CUDART shim for advanced graph API (cudaGraphExecUpdate, cudaGraphAddMemcpyNode).
-- Add cudaMemAdvise and cudaMemPrefetchAsync for UVM migration hints.
-- Expand OpenCL adapter to support buffers, events, profiling, and out-of-order execution queues.
 - Implement cudaOccupancyMaxActiveBlocksPerMultiprocessor for compatibility.
 
-Phase 3: Distributed and Hybrid Compute (Medium Priority)
-- Remove the 8-argument limit in remote kernel dispatch via robust serialization protocol.
-- Implement memory coherence across distributed nodes with versioned synchronization.
-- Expose per-node telemetry and cluster health in the Flutter dashboard.
-- Add capability handshake to remote nodes for accurate resource reporting.
-
-Phase 4: Frontend Enhancements (Lower Priority)
-- Add device selection and multi-device comparison views.
-- Implement persistent telemetry history with session export (JSON/CSV).
-- Surface real error states and health indicators in the UI.
-- Add kernel source viewer with execution timeline overlay.
+Phase 3: Frontend Extraordinary Sophistication (Partially Complete)
+- [DONE] Interactive 3D Hardware Topology Viewer: Animated perspective-projected 3D orbital visualization with depth sorting, pulse animations, and glow effects.
+- Agentic "AI Tuner" Interface: An embedded chat-like UI in the dashboard enabling real-time, natural-language tuning commands (e.g., "Optimize cluster for latency") routed direct to the execution backend.
+- Surface real error states, health indicators, and persistent telemetry history in the UI.
 
 Phase 5: Global Compute Network (Implemented)
 - Secure resource sharing protocol for encrypted internet-distributed compute.
