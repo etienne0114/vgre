@@ -39,6 +39,9 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
             );
           } catch (_) {}
         }
+        
+        // PERSISTENCE FALLBACK: If not in live top-list, use cached version from model
+        selectedKernel ??= data.lastSelectedKernelStats;
 
         // Auto-select "background_compute" or first available IF no selection exists
         if (selectedKernel == null &&
@@ -114,23 +117,23 @@ class _KernelExplorerPageState extends State<KernelExplorerPage> {
   Widget _buildDetailsColumn(KernelStat? selectedKernel, {double? height}) {
     return SizedBox(
       height: height,
-      child: Column(
-        children: [
-          Expanded(
-            flex: 2,
-            child: _KernelDetailsPanel(selectedKernel: selectedKernel),
-          ),
-          const SizedBox(height: 16),
-          Expanded(
-            flex: 3,
-            child: _KernelSourcePanel(selectedKernel: selectedKernel),
-          ),
-          const SizedBox(height: 16),
-          Expanded(
-            flex: 2,
-            child: _KernelLogsPanel(kernelName: selectedKernel?.name),
-          ),
-        ],
+      child: SingleChildScrollView(
+        physics: const BouncingScrollPhysics(),
+        child: Column(
+          children: [
+            _KernelDetailsPanel(selectedKernel: selectedKernel),
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 400, // Explicit height for the IDE view to give it scrolling room
+              child: _KernelSourcePanel(selectedKernel: selectedKernel),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 300, // Explicit height for terminal logs
+              child: _KernelLogsPanel(kernelName: selectedKernel?.name),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -308,6 +311,7 @@ class _KernelDetailsPanel extends StatelessWidget {
     return GlassCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
           const Text(
             "EXECUTION METRICS",
@@ -317,9 +321,10 @@ class _KernelDetailsPanel extends StatelessWidget {
               letterSpacing: 1,
             ),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
           if (selectedKernel == null)
-            const Expanded(
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 32),
               child: Center(
                 child: Text(
                   "No kernel selected",
@@ -328,88 +333,129 @@ class _KernelDetailsPanel extends StatelessWidget {
               ),
             )
           else
-            Expanded(
-              child: Padding(
+            Padding(
                 padding: const EdgeInsets.symmetric(vertical: 4),
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     Row(
                       children: [
-                        Expanded(
-                          child: _metricTile(
-                            "AVG LATENCY",
-                            "${selectedKernel!.avgTimeMs.toStringAsFixed(2)} ms",
-                            VgreTheme.primaryNeon,
-                          ),
-                        ),
-                        Expanded(
-                          child: _metricTile(
-                            "LATENCY RANGE",
-                            "${selectedKernel!.minTimeMs.toStringAsFixed(2)} - ${selectedKernel!.maxTimeMs.toStringAsFixed(2)} ms",
-                            VgreTheme.textMuted,
-                          ),
-                        ),
+                        Expanded(child: _buildStatCard("AVG LATENCY", "${selectedKernel!.avgTimeMs.toStringAsFixed(2)} ms", VgreTheme.primaryNeon, Icons.timer)),
+                        const SizedBox(width: 16),
+                        Expanded(child: _buildStatCard("RANGE", "${selectedKernel!.minTimeMs.toStringAsFixed(2)}-${selectedKernel!.maxTimeMs.toStringAsFixed(2)} ms", VgreTheme.textMuted, Icons.compare_arrows)),
                       ],
                     ),
-                    const Divider(color: Color(0x0DFFFFFF), height: 16),
-                    Row(
+                    const SizedBox(height: 16),
+                    _buildLinearGauge("AVG GFLOPS", selectedKernel!.avgGflops, 200.0, VgreTheme.secondaryNeon),
+                    const SizedBox(height: 16),
+                    _buildLinearGauge("THROUGHPUT", selectedKernel!.avgThroughputGbps, 1500.0, Colors.orangeAccent, unit: "GB/s"),
+                    const SizedBox(height: 16),
+                     Row(
                       children: [
-                        Expanded(
-                          child: _metricTile(
-                            "AVG GFLOPS",
-                            selectedKernel!.avgGflops.toStringAsFixed(1),
-                            VgreTheme.secondaryNeon,
+                        const Icon(Icons.data_usage, size: 14, color: Colors.purpleAccent),
+                        const SizedBox(width: 8),
+                         const Text(
+                          "TOTAL INVOCATIONS:",
+                          style: TextStyle(
+                            color: VgreTheme.textMuted,
+                            fontSize: 10,
+                            letterSpacing: 1,
                           ),
                         ),
-                        Expanded(
-                          child: _metricTile(
-                            "THROUGHPUT",
-                            "${selectedKernel!.avgThroughputGbps.toStringAsFixed(1)} GB/s",
-                            Colors.orangeAccent,
+                        const Spacer(),
+                        Text(
+                          selectedKernel!.invocations.toString(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            fontFamily: 'Orbitron',
                           ),
                         ),
                       ],
-                    ),
-                    const Divider(color: Color(0x0DFFFFFF), height: 16),
-                    _metricTile(
-                      "TOTAL INVOCATIONS",
-                      selectedKernel!.invocations.toString(),
-                      Colors.purpleAccent,
                     ),
                   ],
                 ),
               ),
-            ),
         ],
       ),
     );
   }
 
-  Widget _metricTile(String label, String value, Color color) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(
-            color: VgreTheme.textMuted,
-            fontSize: 9,
-            letterSpacing: 1,
+  Widget _buildStatCard(String label, String value, Color color, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.2)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 14, color: color),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10, letterSpacing: 0.5),
+              ),
+            ],
           ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          value,
-          style: TextStyle(
-            color: color,
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-            fontFamily: 'Orbitron',
+          const SizedBox(height: 8),
+          Text(
+            value,
+            style: TextStyle(color: color, fontSize: 16, fontWeight: FontWeight.bold, fontFamily: 'Orbitron'),
           ),
-        ),
-      ],
+        ],
+      ),
     );
+  }
+
+  Widget _buildLinearGauge(String label, double value, double max, Color color, {String unit = "GFlops"}) {
+     final fraction = (max > 0) ? (value / max).clamp(0.0, 1.0) : 0.0;
+     return Column(
+       crossAxisAlignment: CrossAxisAlignment.start,
+       children: [
+         Row(
+           mainAxisAlignment: MainAxisAlignment.spaceBetween,
+           children: [
+             Text(
+               label,
+               style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1),
+             ),
+             Text(
+               "${value.toStringAsFixed(1)} $unit",
+               style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold, fontFamily: 'Orbitron'),
+             ),
+           ],
+         ),
+         const SizedBox(height: 8),
+         Stack(
+           children: [
+             Container(
+               height: 6,
+               decoration: BoxDecoration(
+                 color: Colors.white.withValues(alpha: 0.05),
+                 borderRadius: BorderRadius.circular(3),
+               ),
+             ),
+             FractionallySizedBox(
+               widthFactor: fraction,
+               child: Container(
+                 height: 6,
+                 decoration: BoxDecoration(
+                   color: color,
+                   borderRadius: BorderRadius.circular(3),
+                   boxShadow: [BoxShadow(color: color.withValues(alpha: 0.5), blurRadius: 4)],
+                 ),
+               ),
+             ),
+           ],
+         ),
+       ],
+     );
   }
 }
 
@@ -481,32 +527,62 @@ class _KernelSourcePanelState extends State<_KernelSourcePanel> {
                       ),
                     ),
                   )
-                : Container(
-                    padding: const EdgeInsets.all(20),
-                    width: double.infinity,
-                    color: Colors.black26,
-                    child: SingleChildScrollView(
-                      physics: const BouncingScrollPhysics(),
-                      child: SelectableText(
-                        _showIR
-                            ? (widget.selectedKernel!.irCode.isNotEmpty
-                                  ? widget.selectedKernel!.irCode
-                                  : "// No LLVM-IR available [Binary Module]")
-                            : (widget.selectedKernel!.sourceCode.isNotEmpty
-                                  ? widget.selectedKernel!.sourceCode
-                                  : "// No source available [Pre-registered]"),
-                        style: GoogleFonts.firaCode(
-                          color: _showIR
-                              ? Colors.greenAccent.withValues(alpha: 0.8)
-                              : Colors.blueAccent.withValues(alpha: 0.8),
-                          fontSize: 12,
-                          height: 1.5,
-                        ),
-                      ),
-                    ),
-                  ),
+                : _buildIdeViewer(),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildIdeViewer() {
+    final code = _showIR
+        ? (widget.selectedKernel!.irCode.isNotEmpty
+            ? widget.selectedKernel!.irCode
+            : "// No LLVM-IR available [Binary Module]")
+        : (widget.selectedKernel!.sourceCode.isNotEmpty
+            ? widget.selectedKernel!.sourceCode
+            : "// No source available [Pre-registered]");
+    
+    final lines = code.split('\n');
+
+    return Container(
+      width: double.infinity,
+      color: const Color(0xFF1E1E1E), // Classic IDE dark theme
+      child: ListView.builder(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        itemCount: lines.length,
+        itemBuilder: (context, index) {
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 48,
+                padding: const EdgeInsets.only(right: 12),
+                alignment: Alignment.centerRight,
+                decoration: const BoxDecoration(
+                  border: Border(right: BorderSide(color: Color(0xFF333333))),
+                ),
+                child: Text(
+                  "${index + 1}",
+                  style: const TextStyle(color: Color(0xFF6E7681), fontSize: 12, fontFamily: 'FiraCode'),
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: SelectableText(
+                  lines[index],
+                  style: GoogleFonts.firaCode(
+                    color: _showIR
+                        ? Colors.greenAccent.withValues(alpha: 0.9)
+                        : const Color(0xFF9CDCFE), // VS Code Light Blue
+                    fontSize: 12,
+                    height: 1.5,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -632,6 +708,7 @@ class _KernelLogsPanel extends StatelessWidget {
                 ),
                 decoration: const BoxDecoration(
                   border: Border(bottom: BorderSide(color: Colors.white10)),
+                  color: Color(0xFF18181A),
                 ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -639,14 +716,14 @@ class _KernelLogsPanel extends StatelessWidget {
                     Row(
                       children: [
                         const Icon(
-                          Icons.list_alt,
+                          Icons.terminal,
                           size: 16,
-                          color: Colors.orangeAccent,
+                          color: Colors.white,
                         ),
                         const SizedBox(width: 12),
                         Text(
                           kernelName != null
-                              ? "${kernelName!.toUpperCase()} ACTIVITY"
+                              ? "${kernelName!.toUpperCase()} STDOUT/STDERR"
                               : "SYSTEM KERNEL LOGS",
                           style: const TextStyle(
                             fontWeight: FontWeight.bold,
@@ -663,16 +740,16 @@ class _KernelLogsPanel extends StatelessWidget {
                           vertical: 2,
                         ),
                         decoration: BoxDecoration(
-                          color: Colors.orangeAccent.withValues(alpha: 0.1),
+                          color: Colors.white.withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(4),
                           border: Border.all(
-                            color: Colors.orangeAccent.withValues(alpha: 0.3),
+                            color: Colors.white.withValues(alpha: 0.3),
                           ),
                         ),
                         child: const Text(
                           "FILTERED",
                           style: TextStyle(
-                            color: Colors.orangeAccent,
+                            color: Colors.white,
                             fontSize: 8,
                             fontWeight: FontWeight.bold,
                           ),
@@ -695,37 +772,21 @@ class _KernelLogsPanel extends StatelessWidget {
                         ),
                       )
                     : Container(
-                        padding: const EdgeInsets.all(16),
+                        padding: EdgeInsets.zero,
                         width: double.infinity,
-                        color: Colors.black12,
-                        child: SingleChildScrollView(
-                          reverse: true,
-                          child: SelectionArea(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: filteredLogs.map((log) {
-                                final bool isError = log.contains("[ERROR]");
-                                final bool isHeartbeat = log.contains(
-                                  "heart-beat",
-                                );
-                                return Padding(
-                                  padding: const EdgeInsets.only(bottom: 4),
-                                  child: Text(
-                                    log,
-                                    style: GoogleFonts.firaCode(
-                                      fontSize: 10,
-                                      color: isError
-                                          ? Colors.redAccent
-                                          : isHeartbeat
-                                          ? VgreTheme.secondaryNeon.withValues(
-                                              alpha: 0.9,
-                                            )
-                                          : Colors.white70,
-                                    ),
-                                  ),
-                                );
-                              }).toList(),
-                            ),
+                        color: const Color(0xFF0D0D0E),
+                        child: SelectionArea(
+                          child: ListView.separated(
+                            padding: const EdgeInsets.all(16),
+                            physics: const BouncingScrollPhysics(),
+                            reverse: true, // Auto-scroll behavior via reverse logic
+                            itemCount: filteredLogs.length,
+                            separatorBuilder: (context, index) => const Divider(color: Colors.white10, height: 8),
+                            itemBuilder: (context, index) {
+                              // We use reverse because we want newest at bottom (ListView reverse flips ordering)
+                              final rawLog = filteredLogs[filteredLogs.length - 1 - index];
+                              return _buildLogEntry(rawLog);
+                            },
                           ),
                         ),
                       ),
@@ -735,5 +796,54 @@ class _KernelLogsPanel extends StatelessWidget {
         );
       },
     );
+  }
+
+  Widget _buildLogEntry(String log) {
+     final bool isError = log.contains("[ERROR]");
+     final bool isWarning = log.contains("[WARN]");
+     final bool isSuccess = log.contains("COMPLETED") || log.contains("SUCCESS");
+     
+     Color levelColor = Colors.white70;
+     if (isError) {
+       levelColor = Colors.redAccent;
+     } else if (isWarning) {
+       levelColor = Colors.orangeAccent;
+     } else if (isSuccess) {
+       levelColor = VgreTheme.neonGreen;
+     } else if (log.contains("heart-beat")) {
+       levelColor = VgreTheme.secondaryNeon;
+     }
+
+     // Attempt to extract timestamp: [2026-03-21 ...]
+     String timestamp = "";
+     String content = log;
+     final tMatch = RegExp(r'^\[(.*?)\]\s*(.*)$').firstMatch(log);
+     if (tMatch != null) {
+       timestamp = "[${tMatch.group(1)}]";
+       content = tMatch.group(2) ?? "";
+     }
+
+     return Row(
+       crossAxisAlignment: CrossAxisAlignment.start,
+       children: [
+         if (timestamp.isNotEmpty)
+           SizedBox(
+             width: 155,
+             child: Text(
+               timestamp,
+               style: GoogleFonts.firaCode(color: const Color(0xFF555555), fontSize: 10),
+             ),
+           ),
+         Expanded(
+           child: Text(
+             content,
+             style: GoogleFonts.firaCode(
+               color: levelColor,
+               fontSize: 11,
+             ),
+           ),
+         ),
+       ],
+     );
   }
 }
