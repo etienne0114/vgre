@@ -9,6 +9,24 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DIR="$HOME/.local/share/VGRE"
 BIN_DIR="$HOME/.local/bin"
 
+VGRE_TCP_AUTH_TOKEN="${VGRE_TCP_AUTH_TOKEN:-05797da125ffccc4f57e80f86b3c26ac4bb2c261198e99bc0e09758e9d84f9d5}"
+export VGRE_TCP_AUTH_TOKEN
+if [[ -z "$VGRE_TCP_AUTH_TOKEN" ]]; then
+    echo "⚠️  VGRE_TCP_AUTH_TOKEN is not set; Phase 5 security will remain disabled in the dashboard."
+else
+    echo "🔐 VGRE_TCP_AUTH_TOKEN provided; secure cluster mode can be enabled."
+fi
+
+FLUTTER_CACHE_PATH="${FLUTTER_CACHE_PATH:-$HOME/.cache/flutter}"
+mkdir -p "$FLUTTER_CACHE_PATH"
+export FLUTTER_CACHE_PATH
+
+if pgrep -f vgre_dashboard >/dev/null 2>&1; then
+    echo "🛑 Stopping running VGRE Dashboard (pkg conflict)..."
+    pkill -f vgre_dashboard || true
+    sleep 1
+fi
+
 cd "$PROJECT_ROOT"
 
 echo "🚀 Starting VGRE Global Sync..."
@@ -54,14 +72,25 @@ else
     # Copy icon for desktop integration
     cp "$PROJECT_ROOT/vgre_dashboard/assets/icon.png" "$INSTALL_DIR/vgre_icon.png" 2>/dev/null || true
     
-    # Create a robust launch wrapper
-    cat <<EOF > "$INSTALL_DIR/vgre-launch.sh"
-#!/bin/bash
-export LD_LIBRARY_PATH="\$LD_LIBRARY_PATH:$INSTALL_DIR/lib"
-cd "$INSTALL_DIR"
-exec ./vgre_dashboard "\$@"
-EOF
-    chmod +x "$INSTALL_DIR/vgre-launch.sh"
+    # Create a robust launch wrapper. We inject the known token directly into the 
+    # wrapper to bypass unreliability with GUI launchers sourcing .bashrc without TTYs.
+    LAUNCH_SCRIPT="$INSTALL_DIR/vgre-launch.sh"
+    echo '#!/bin/bash' > "$LAUNCH_SCRIPT"
+    echo '# Source user profiles to inherit env vars if possible' >> "$LAUNCH_SCRIPT"
+    echo '[ -f "$HOME/.profile" ] && source "$HOME/.profile"' >> "$LAUNCH_SCRIPT"
+    echo '[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"' >> "$LAUNCH_SCRIPT"
+    echo '' >> "$LAUNCH_SCRIPT"
+    
+    if [[ -n "$VGRE_TCP_AUTH_TOKEN" ]]; then
+        echo "# Injecting known install-time auth token for guaranteed Dashboard visibility" >> "$LAUNCH_SCRIPT"
+        echo "export VGRE_TCP_AUTH_TOKEN=\"$VGRE_TCP_AUTH_TOKEN\"" >> "$LAUNCH_SCRIPT"
+    fi
+    
+    echo "export LD_LIBRARY_PATH=\"\$LD_LIBRARY_PATH:$INSTALL_DIR/lib\"" >> "$LAUNCH_SCRIPT"
+    echo "cd \"$INSTALL_DIR\"" >> "$LAUNCH_SCRIPT"
+    echo 'exec ./vgre_dashboard "$@"' >> "$LAUNCH_SCRIPT"
+    
+    chmod +x "$LAUNCH_SCRIPT"
     
     # Desktop Integration
     DESKTOP_DIR="$HOME/.local/share/applications"
@@ -76,7 +105,7 @@ Version=1.0
 Type=Application
 Name=VGRE Dashboard
 Comment=Virtual GPU Runtime Engine
-Exec=$INSTALL_DIR/vgre-launch.sh
+Exec=bash -ic "$INSTALL_DIR/vgre-launch.sh"
 Icon=$INSTALL_DIR/vgre_icon.png
 Terminal=false
 Categories=Development;System;Utility;

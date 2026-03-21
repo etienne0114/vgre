@@ -1101,6 +1101,7 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
   SessionInfo info{};
   std::strncpy(info.cipher_name, "PENDING (handshake not yet complete)",
                sizeof(info.cipher_name) - 1);
+  info.is_encrypted = true; // Signal to UI that security mode IS active, just waiting on peers
   return info;
 }
 

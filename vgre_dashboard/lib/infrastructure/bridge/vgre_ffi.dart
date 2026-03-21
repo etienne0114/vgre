@@ -189,9 +189,6 @@ typedef ClusterSetSecurity = int Function(int);
 typedef GetSecurityInfoFunc = Int32 Function(Pointer<VgreSecurityInfo>);
 typedef GetSecurityInfo = int Function(Pointer<VgreSecurityInfo>);
 
-typedef GetCreditBalanceFunc = Int32 Function(Pointer<Utf8>, Pointer<VgreCreditInfo>);
-typedef GetCreditBalance = int Function(Pointer<Utf8>, Pointer<VgreCreditInfo>);
-
 typedef GetCreditsAllFunc = Int32 Function(Pointer<VgreCreditInfo>, Pointer<Int32>);
 typedef GetCreditsAll = int Function(Pointer<VgreCreditInfo>, Pointer<Int32>);
 
@@ -218,7 +215,6 @@ class VgreBridge {
   late final GetClusterNodes _getClusterNodes;
   late final ClusterSetSecurity _clusterSetSecurity;
   late final GetSecurityInfo _getSecurityInfo;
-  late final GetCreditBalance _getCreditBalance;
   late final GetCreditsAll _getCreditsAll;
   late final CreditsReset _creditsReset;
 
@@ -266,8 +262,6 @@ class VgreBridge {
         'vgre_cluster_set_security');
     _getSecurityInfo = _lib.lookupFunction<GetSecurityInfoFunc, GetSecurityInfo>(
         'vgre_cluster_get_security_info');
-    _getCreditBalance = _lib.lookupFunction<GetCreditBalanceFunc, GetCreditBalance>(
-        'vgre_credits_get_balance');
     _getCreditsAll = _lib.lookupFunction<GetCreditsAllFunc, GetCreditsAll>(
         'vgre_credits_get_all');
     _creditsReset = _lib.lookupFunction<CreditsResetFunc, CreditsReset>(
@@ -469,4 +463,3 @@ class VgreBridge {
 
   int creditsReset() => _creditsReset();
 }
-
