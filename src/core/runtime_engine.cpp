@@ -9,6 +9,7 @@
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/scheduler.h"
 #include "vgre/core/virtual_gpu_device.h"
+#include "vgre/compiler/clang_kernel_parser.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
 #include "vgre/runtime/vector_engine.h"
 
@@ -43,7 +44,7 @@ VGREResult RuntimeEngine::initialize() {
 
   // Create sub-systems
   scheduler_ = &Scheduler::instance();
-  parser_ = std::make_unique<compiler::KernelParser>();
+  parser_ = std::make_unique<compiler::ClangKernelParser>();
   translator_ = std::make_unique<compiler::LLVMTranslationEngine>();
   executor_ = std::make_unique<runtime::CPUParallelExecutor>(
       scheduler_->getThreadCount());

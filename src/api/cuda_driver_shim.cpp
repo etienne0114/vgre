@@ -216,31 +216,35 @@ struct CUtexref_st {
 using CUtexref = CUtexref_st*;
 using CUsurfref = void*;
 
-CUresult cuModuleLoadData(CUmodule *module, const void *image) {
-  if (!module || !image) return CUDA_ERROR_INVALID_VALUE;
-  
-  // High-level logic: Determine image size for the registry.
-  // cuModuleLoadData image is typically a NULL-terminated PTX string,
-  // but for ELF/cubin images we must be careful.
-  const uint32_t ELF_MAGIC = 0x464c457f;
-  const uint32_t *header = reinterpret_cast<const uint32_t *>(image);
-  
-  size_t len = 0;
-  if (header[0] == ELF_MAGIC) {
-    // In a cubin, we'd ideally know the size. For now, we use a large enough
-    // window or trust the registry's scan limit.
-    // Real-world cuModuleLoadData for binaries often comes via LoadDataEx
-    // where options might specify size, but here we estimate.
-    len = 4 * 1024 * 1024; // 4MB default scan for binaries
-  } else {
-    len = std::strlen(reinterpret_cast<const char *>(image));
-  }
+// CUDA array formats
+static constexpr int CU_AD_FORMAT_UNSIGNED_INT8  = 0x01;
+static constexpr int CU_AD_FORMAT_UNSIGNED_INT16 = 0x02;
+static constexpr int CU_AD_FORMAT_UNSIGNED_INT32 = 0x03;
+static constexpr int CU_AD_FORMAT_SIGNED_INT8    = 0x08;
+static constexpr int CU_AD_FORMAT_SIGNED_INT16   = 0x09;
+static constexpr int CU_AD_FORMAT_SIGNED_INT32   = 0x0a;
+static constexpr int CU_AD_FORMAT_FLOAT          = 0x20;
 
-  if (len == 0) return CUDA_ERROR_INVALID_VALUE;
-  void *h = vgre_register_module_data(image, len);
-  if (!h) return CUDA_ERROR_INVALID_VALUE;
-  *module = reinterpret_cast<CUmodule>(h);
-  return CUDA_SUCCESS;
+CUresult cuModuleLoadData(CUmodule *module, const void *image) {
+    if (!module || !image) return CUDA_ERROR_INVALID_VALUE;
+    
+    const uint32_t ELF_MAGIC = 0x464c457f;
+    const uint32_t *header = reinterpret_cast<const uint32_t *>(image);
+    
+    size_t len = 0;
+    if (header[0] == ELF_MAGIC) {
+        // Authoritative: For ELF binaries, we scan for a common large window.
+        // In a full implementation, we would parse the ELF headers to find the exact size.
+        len = 8 * 1024 * 1024; 
+    } else {
+        len = std::strlen(reinterpret_cast<const char *>(image));
+    }
+
+    if (len == 0) return CUDA_ERROR_INVALID_VALUE;
+    void *h = vgre_register_module_data(image, len);
+    if (!h) return CUDA_ERROR_INVALID_VALUE;
+    *module = reinterpret_cast<CUmodule>(h);
+    return CUDA_SUCCESS;
 }
 
 CUresult cuModuleLoadDataEx(CUmodule *module, const void *image,
@@ -384,7 +388,19 @@ CUresult cuTexRefSetAddress(size_t *ByteOffset, CUtexref hTexRef, CUdeviceptr dp
 
 CUresult cuTexRefSetFormat(CUtexref hTexRef, int fmt, int NumPackedComponents) {
   if (!hTexRef) return CUDA_ERROR_INVALID_VALUE;
-  (void)fmt; (void)NumPackedComponents;
+  
+  switch(fmt) {
+    case CU_AD_FORMAT_UNSIGNED_INT8:  hTexRef->desc.elementType = vgre::core::TextureElementType::UINT8; break;
+    case CU_AD_FORMAT_UNSIGNED_INT16: hTexRef->desc.elementType = vgre::core::TextureElementType::UINT16; break;
+    case CU_AD_FORMAT_UNSIGNED_INT32: hTexRef->desc.elementType = vgre::core::TextureElementType::UINT32; break;
+    case CU_AD_FORMAT_SIGNED_INT8:    hTexRef->desc.elementType = vgre::core::TextureElementType::INT8; break;
+    case CU_AD_FORMAT_SIGNED_INT16:   hTexRef->desc.elementType = vgre::core::TextureElementType::INT16; break;
+    case CU_AD_FORMAT_SIGNED_INT32:   hTexRef->desc.elementType = vgre::core::TextureElementType::INT32; break;
+    case CU_AD_FORMAT_FLOAT:          hTexRef->desc.elementType = vgre::core::TextureElementType::FLOAT32; break;
+    default:
+        return CUDA_ERROR_NOT_SUPPORTED;
+  }
+  (void)NumPackedComponents; // VGRE currently supports 1-4 components via elementSize
   return CUDA_SUCCESS;
 }
 

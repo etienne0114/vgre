@@ -100,8 +100,9 @@ VGREResult TextureManager::destroyTexture(TextureId id) {
 // ── Create surface ─────────────────────────────────────────────────────────
 VGREResult TextureManager::createSurface(SurfaceId &outId, void *data,
                                          size_t width, size_t height,
-                                         size_t elementSize) {
-  if (!data || width == 0 || elementSize == 0)
+                                         size_t elementSize,
+                                         TextureElementType elementType) {
+  if (!data || width == 0 || height == 0 || elementSize == 0)
     return VGREResult::ERROR_INVALID_VALUE;
 
   std::lock_guard<std::mutex> lock(mutex_);
@@ -110,15 +111,18 @@ VGREResult TextureManager::createSurface(SurfaceId &outId, void *data,
   surf.id = nextSurfaceId_++;
   surf.data = data;
   surf.width = width;
-  surf.height = (height == 0) ? 1 : height;
+  surf.height = height;
   surf.elementSize = elementSize;
+  surf.elementType = elementType;
 
   surfaces_[surf.id] = surf;
   outId = surf.id;
 
   VGRE_LOG_INFO("TextureManager", "Created surface " + std::to_string(surf.id) +
                                       " (" + std::to_string(width) + "x" +
-                                      std::to_string(surf.height) + ")");
+                                      std::to_string(surf.height) + ", " +
+                                      std::to_string(elementSize) + " bytes/element, type=" +
+                                      std::to_string(static_cast<int>(elementType)) + ")");
 
   return VGREResult::SUCCESS;
 }
@@ -239,16 +243,39 @@ VGREResult TextureManager::surf2Dwrite(SurfaceId id, float value, int x,
   auto it = surfaces_.find(id);
   if (it == surfaces_.end())
     return VGREResult::ERROR_INVALID_VALUE;
-
   auto &surf = it->second;
   int w = static_cast<int>(surf.width);
   int h = static_cast<int>(surf.height);
-
   if (x < 0 || x >= w || y < 0 || y >= h)
     return VGREResult::ERROR_INVALID_VALUE;
-
-  auto *fdata = static_cast<float *>(surf.data);
-  fdata[y * w + x] = value;
+  uint8_t *base = static_cast<uint8_t *>(surf.data);
+  uint8_t *elem = base + (static_cast<size_t>(y) * w + x) * surf.elementSize;
+  switch (surf.elementType) {
+  case TextureElementType::FLOAT32:
+    *reinterpret_cast<float *>(elem) = value;
+    break;
+  case TextureElementType::FLOAT64:
+    *reinterpret_cast<double *>(elem) = static_cast<double>(value);
+    break;
+  case TextureElementType::INT8:
+    *reinterpret_cast<int8_t *>(elem) = static_cast<int8_t>(value);
+    break;
+  case TextureElementType::INT16:
+    *reinterpret_cast<int16_t *>(elem) = static_cast<int16_t>(value);
+    break;
+  case TextureElementType::INT32:
+    *reinterpret_cast<int32_t *>(elem) = static_cast<int32_t>(value);
+    break;
+  case TextureElementType::UINT8:
+    *reinterpret_cast<uint8_t *>(elem) = static_cast<uint8_t>(value);
+    break;
+  case TextureElementType::UINT16:
+    *reinterpret_cast<uint16_t *>(elem) = static_cast<uint16_t>(value);
+    break;
+  case TextureElementType::UINT32:
+    *reinterpret_cast<uint32_t *>(elem) = static_cast<uint32_t>(value);
+    break;
+  }
   return VGREResult::SUCCESS;
 }
 
@@ -258,16 +285,39 @@ VGREResult TextureManager::surf2Dread(SurfaceId id, float &value, int x,
   auto it = surfaces_.find(id);
   if (it == surfaces_.end())
     return VGREResult::ERROR_INVALID_VALUE;
-
   const auto &surf = it->second;
   int w = static_cast<int>(surf.width);
   int h = static_cast<int>(surf.height);
-
   if (x < 0 || x >= w || y < 0 || y >= h)
     return VGREResult::ERROR_INVALID_VALUE;
-
-  const auto *fdata = static_cast<const float *>(surf.data);
-  value = fdata[y * w + x];
+  const uint8_t *base = static_cast<const uint8_t *>(surf.data);
+  const uint8_t *elem = base + (static_cast<size_t>(y) * w + x) * surf.elementSize;
+  switch (surf.elementType) {
+  case TextureElementType::FLOAT32:
+    value = *reinterpret_cast<const float *>(elem);
+    break;
+  case TextureElementType::FLOAT64:
+    value = static_cast<float>(*reinterpret_cast<const double *>(elem));
+    break;
+  case TextureElementType::INT8:
+    value = static_cast<float>(*reinterpret_cast<const int8_t *>(elem));
+    break;
+  case TextureElementType::INT16:
+    value = static_cast<float>(*reinterpret_cast<const int16_t *>(elem));
+    break;
+  case TextureElementType::INT32:
+    value = static_cast<float>(*reinterpret_cast<const int32_t *>(elem));
+    break;
+  case TextureElementType::UINT8:
+    value = static_cast<float>(*reinterpret_cast<const uint8_t *>(elem));
+    break;
+  case TextureElementType::UINT16:
+    value = static_cast<float>(*reinterpret_cast<const uint16_t *>(elem));
+    break;
+  case TextureElementType::UINT32:
+    value = static_cast<float>(*reinterpret_cast<const uint32_t *>(elem));
+    break;
+  }
   return VGREResult::SUCCESS;
 }
 
@@ -289,18 +339,9 @@ TextureManager &TextureManager::instance() {
 }
 
 // ── Type-aware element read ───────────────────────────────────────────────────
-double TextureManager::readElementAsDouble(TextureId id, int linearIndex) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = textures_.find(id);
-  if (it == textures_.end()) return 0.0;
-
-  const auto &tex = it->second;
-  size_t totalElements = tex.width * tex.height * tex.depth;
-  if (linearIndex < 0 || static_cast<size_t>(linearIndex) >= totalElements)
-    return 0.0;
-
+double TextureManager::readElementValue(const TextureObject &tex, size_t linearIndex) const {
   const uint8_t *base = static_cast<const uint8_t *>(tex.data);
-  const uint8_t *elem = base + static_cast<size_t>(linearIndex) * tex.elementSize;
+  const uint8_t *elem = base + linearIndex * tex.elementSize;
 
   switch (tex.desc.elementType) {
   case TextureElementType::FLOAT32:
@@ -321,6 +362,21 @@ double TextureManager::readElementAsDouble(TextureId id, int linearIndex) const 
     return static_cast<double>(*reinterpret_cast<const uint32_t *>(elem));
   }
   return 0.0;
+}
+
+double TextureManager::readElementAsDouble(TextureId id, int linearIndex) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = textures_.find(id);
+  if (it == textures_.end()) return 0.0;
+
+  const auto &tex = it->second;
+  size_t totalElements = tex.width * tex.height * tex.depth;
+  if (linearIndex < 0 || static_cast<size_t>(linearIndex) >= totalElements)
+    return 0.0;
+
+  if (!tex.data) return 0.0;
+
+  return readElementValue(tex, static_cast<size_t>(linearIndex));
 }
 
 // ── Read element as float (no internal locking) ──────────────────────────────
@@ -370,7 +426,7 @@ double TextureManager::sampleTexel(const TextureObject &tex, int x, int y, int z
                   static_cast<size_t>(ry) * tex.width +
                   static_cast<size_t>(rx);
 
-  return static_cast<double>(readElementAsFloat(tex, linear));
+  return readElementValue(tex, linear);
 }
 
 // ── 3D texture fetch ─────────────────────────────────────────────────────────

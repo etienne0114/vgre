@@ -63,6 +63,7 @@ struct SurfaceObject {
   size_t width = 0;
   size_t height = 0;
   size_t elementSize = 0;
+  TextureElementType elementType = TextureElementType::FLOAT32;
 };
 
 // ── Texture Manager ────────────────────────────────────────────────────────
@@ -81,7 +82,8 @@ public:
 
   // ── Surface object lifecycle ─────────────────────────────────────────────
   VGREResult createSurface(SurfaceId &outId, void *data, size_t width,
-                           size_t height, size_t elementSize);
+                           size_t height, size_t elementSize,
+                           TextureElementType elementType = TextureElementType::FLOAT32);
   VGREResult destroySurface(SurfaceId id);
 
   // ── Texture fetch operations ─────────────────────────────────────────────

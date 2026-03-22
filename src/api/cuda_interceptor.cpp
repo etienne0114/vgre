@@ -609,6 +609,37 @@ cudaError_t CUDAInterceptor::streamSynchronize(cudaStream_t stream) {
   return g_lastError;
 }
 
+cudaError_t CUDAInterceptor::mallocArray(cudaArray_t *array, const cudaChannelFormatDesc *desc,
+                                          size_t width, size_t height,
+                                          unsigned int flags) {
+  (void)flags;
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess) return err;
+  }
+  if (!array || !desc || width == 0)
+    return cudaErrorInvalidValue;
+
+  vgre::core::TextureDescriptor tdesc;
+  tdesc.elementType = mapChannelDesc(*desc);
+  size_t elementSize = (desc->x + desc->y + desc->z + desc->w) / 8;
+  if (elementSize == 0) {
+    VGRE_LOG_ERROR("CUDAInterceptor", "mallocArray: Invalid channel descriptor (zero bits).");
+    return cudaErrorInvalidValue;
+  }
+
+  vgre::core::TextureId arrID;
+  auto r = core::TextureManager::instance().createCudaArray(
+      arrID, width, height, elementSize, tdesc);
+  
+  if (r != VGREResult::SUCCESS) {
+    g_lastError = convertResult(r);
+    return g_lastError;
+  }
+
+  *array = arrID;
+  return cudaSuccess;
+}
 cudaError_t CUDAInterceptor::streamQuery(cudaStream_t stream) {
   if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
@@ -1313,7 +1344,10 @@ cudaError_t CUDAInterceptor::createTextureObject(
   if (!pTexObject || !pResDesc || !pTexDesc)
     return cudaErrorInvalidValue;
 
-  (void)pResViewDesc; // Not currently used by VGRE
+  // Note: pResViewDesc (texture views) is not yet supported in the virtual GPU model.
+  if (pResViewDesc) {
+      VGRE_LOG_WARN("CUDAInterceptor", "texture views (pResViewDesc) are not yet implemented; using base resource descriptor.");
+  }
 
   vgre::core::TextureDescriptor desc;
   // Interpret CUDA address mode
@@ -1334,19 +1368,15 @@ cudaError_t CUDAInterceptor::createTextureObject(
 
   desc.normalizedCoords = pTexDesc->normalizedCoords;
   desc.borderColor = pTexDesc->borderColor[0];
+  desc.elementType = mapChannelDesc(pResDesc->res.desc);
 
-  // Default type sizes
-  // Calculate element size from resource descriptors
-  size_t elementSize = 0;
-  if (pResDesc->res.width > 0 && pResDesc->res.height > 0) {
-    elementSize = pResDesc->res.sizeInBytes / (pResDesc->res.width * pResDesc->res.height);
-  } else if (pResDesc->res.width > 0) {
-    elementSize = pResDesc->res.sizeInBytes / pResDesc->res.width;
-  }
+  // Calculate element size from channel descriptor
+  size_t elementSize = (pResDesc->res.desc.x + pResDesc->res.desc.y +
+                        pResDesc->res.desc.z + pResDesc->res.desc.w) / 8;
   
   if (elementSize == 0) {
-    VGRE_LOG_WARN("CUDAInterceptor", "Could not deduce element size from resource descriptor. Defaulting to 4 bytes.");
-    elementSize = 4;
+    VGRE_LOG_ERROR("CUDAInterceptor", "Invalid channel descriptor: total bits is zero.");
+    return cudaErrorInvalidValue;
   }
 
   vgre::core::TextureId texID;
@@ -1387,9 +1417,13 @@ cudaError_t CUDAInterceptor::createSurfaceObject(cudaSurfaceObject_t *pSurfObjec
     return cudaErrorInvalidValue;
 
   vgre::core::SurfaceId surfID;
+  size_t elementSize = (pResDesc->res.desc.x + pResDesc->res.desc.y +
+                        pResDesc->res.desc.z + pResDesc->res.desc.w) / 8;
+  auto elementType = mapChannelDesc(pResDesc->res.desc);
+
   auto r = core::TextureManager::instance().createSurface(
       surfID, pResDesc->res.devPtr, pResDesc->res.width, pResDesc->res.height,
-      4); // Assume 4-byte elements for now
+      elementSize, elementType);
 
   if (r != VGREResult::SUCCESS) {
     g_lastError = convertResult(r);
@@ -1412,41 +1446,23 @@ cudaError_t CUDAInterceptor::destroySurfaceObject(cudaSurfaceObject_t surfObject
   return g_lastError;
 }
 
-// ── cudaArray Lifecycle (backed by TextureManager) ──────────────────────────
-cudaError_t CUDAInterceptor::mallocArray(cudaArray_t *array, size_t width,
-                                          size_t height, size_t elementSizeBytes,
-                                          unsigned int flags) {
-  (void)flags;
-  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
-    auto err = init();
-    if (err != cudaSuccess) return err;
+vgre::core::TextureElementType
+CUDAInterceptor::mapChannelDesc(const cudaChannelFormatDesc &cd) {
+  if (cd.f == 0) { // float
+    return (cd.x == 64) ? vgre::core::TextureElementType::FLOAT64
+                        : vgre::core::TextureElementType::FLOAT32;
+  } else if (cd.f == 1) { // signed
+    if (cd.x == 8) return vgre::core::TextureElementType::INT8;
+    if (cd.x == 16) return vgre::core::TextureElementType::INT16;
+    return vgre::core::TextureElementType::INT32;
+  } else { // unsigned
+    if (cd.x == 8) return vgre::core::TextureElementType::UINT8;
+    if (cd.x == 16) return vgre::core::TextureElementType::UINT16;
+    return vgre::core::TextureElementType::UINT32;
   }
-  if (!array || width == 0 || elementSizeBytes == 0)
-    return cudaErrorInvalidValue;
-
-  core::TextureDescriptor desc;
-  desc.elementType = core::TextureElementType::FLOAT32;
-  // Infer element type from size
-  if (elementSizeBytes == 1) desc.elementType = core::TextureElementType::UINT8;
-  else if (elementSizeBytes == 2) desc.elementType = core::TextureElementType::UINT16;
-  else if (elementSizeBytes == 4) desc.elementType = core::TextureElementType::FLOAT32;
-  else if (elementSizeBytes == 8) desc.elementType = core::TextureElementType::FLOAT64;
-
-  core::TextureId texId = 0;
-  auto r = core::TextureManager::instance().createCudaArray(
-      texId, width, height, elementSizeBytes, desc);
-  if (r != VGREResult::SUCCESS) {
-    g_lastError = convertResult(r);
-    return g_lastError;
-  }
-
-  *array = texId;
-  VGRE_LOG_INFO("CUDAInterceptor",
-                "cudaMallocArray: created array " + std::to_string(texId) +
-                " (" + std::to_string(width) + "x" +
-                std::to_string(height) + ")");
-  return cudaSuccess;
 }
+
+// ── cudaArray Lifecycle (backed by TextureManager) ──────────────────────────
 
 cudaError_t CUDAInterceptor::freeArray(cudaArray_t array) {
   if (!initialized_ || !core::RuntimeEngine::instance().isInitialized())
