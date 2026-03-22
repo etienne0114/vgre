@@ -57,7 +57,7 @@ class DashboardSettingsPage extends StatelessWidget {
                           const SizedBox(height: 16),
                           _infoRow("Version", telemetry.backendVersion),
                           const SizedBox(height: 8),
-                          _infoRow("Protocol", "v${telemetry.versionMajor}.${telemetry.versionMinor}"),
+                          _infoRow("Protocol", "v${telemetry.versionMajor}.${telemetry.versionMinor}.${telemetry.versionPatch}"),
                           const SizedBox(height: 8),
                           _infoRow(
                             "Last Update",

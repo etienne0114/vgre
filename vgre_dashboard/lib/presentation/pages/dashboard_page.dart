@@ -507,32 +507,13 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
           ),
           const SizedBox(height: 16),
           Expanded(
-            child: GridView.builder(
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 32,
-                mainAxisSpacing: 2,
-                crossAxisSpacing: 2,
-              ),
-              itemCount: 1024,
-              itemBuilder: (context, index) {
-                bool isResident = data.uvmMap[index] == 1;
-                return Container(
-                  decoration: BoxDecoration(
-                    color: isResident
-                        ? VgreTheme.primaryNeon.withValues(alpha: 0.8)
-                        : Colors.white.withValues(alpha: 0.05),
-                    borderRadius: BorderRadius.circular(1),
-                    boxShadow: isResident
-                        ? [
-                            BoxShadow(
-                              color: VgreTheme.primaryNeon.withValues(
-                                alpha: 0.3,
-                              ),
-                              blurRadius: 2,
-                            ),
-                          ]
-                        : null,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                return CustomPaint(
+                  size: constraints.biggest,
+                  painter: UvmMapPainter(
+                    uvmMap: data.uvmMap,
+                    primaryColor: VgreTheme.primaryNeon,
                   ),
                 );
               },
@@ -981,3 +962,63 @@ class _TerminalConsoleState extends State<_TerminalConsole> {
 }
 
 // Removed mesh gradient background per user request
+
+class UvmMapPainter extends CustomPainter {
+  final List<int> uvmMap;
+  final Color primaryColor;
+
+  UvmMapPainter({required this.uvmMap, required this.primaryColor});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const int gridCount = 32;
+    const double spacing = 2.0;
+
+    // Safety check for empty map or invalid size
+    if (uvmMap.length < gridCount * gridCount || size.width <= 0 || size.height <= 0) return;
+
+    final double cellWidth = (size.width - (gridCount - 1) * spacing) / gridCount;
+    final double cellHeight = (size.height - (gridCount - 1) * spacing) / gridCount;
+
+    final basePaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.05)
+      ..style = PaintingStyle.fill;
+
+    final residentPaint = Paint()
+      ..color = primaryColor.withValues(alpha: 0.8)
+      ..style = PaintingStyle.fill;
+
+    final glowPaint = Paint()
+      ..color = primaryColor.withValues(alpha: 0.2)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2);
+
+    for (int i = 0; i < 1024; i++) {
+      final int row = i ~/ gridCount;
+      final int col = i % gridCount;
+
+      final double x = col * (cellWidth + spacing);
+      final double y = row * (cellHeight + spacing);
+
+      final rect = Rect.fromLTWH(x, y, cellWidth, cellHeight);
+      final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(1));
+
+      if (uvmMap[i] == 1) {
+        // Draw glow for resident pages
+        canvas.drawRRect(rrect.inflate(1), glowPaint);
+        canvas.drawRRect(rrect, residentPaint);
+      } else {
+        canvas.drawRRect(rrect, basePaint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant UvmMapPainter oldDelegate) {
+    // Only repaint if the data has actually changed
+    if (oldDelegate.uvmMap.length != uvmMap.length) return true;
+    for (int i = 0; i < uvmMap.length; i++) {
+      if (oldDelegate.uvmMap[i] != uvmMap[i]) return true;
+    }
+    return false;
+  }
+}

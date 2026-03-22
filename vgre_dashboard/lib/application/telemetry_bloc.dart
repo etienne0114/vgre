@@ -11,6 +11,7 @@ import 'package:ffi/ffi.dart';
 import '../domain/models/telemetry.dart';
 import '../infrastructure/bridge/vgre_ffi.dart';
 import '../infrastructure/services/sqlite_service.dart';
+import 'dart:isolate';
 
 // ── Events ─────────────────────────────────────────────────────────────────
 abstract class TelemetryEvent extends Equatable {
@@ -128,7 +129,12 @@ class TelemetryActive extends TelemetryState {
 class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
   final VgreBridge bridge;
   final SqliteService sqlite;
+  final String libPath;
   Timer? _timer;
+
+  SendPort? _pollSendPort;
+  ReceivePort? _pollReceivePort;
+  Isolate? _pollIsolate;
 
   int _currentDeviceId = 0;
   int get currentDeviceId => _currentDeviceId;
@@ -143,189 +149,104 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
   bool _profilerEnabled = true;
   bool _clusterSecurityActive = false;
   String _backendVersion = '0.0.0';
-  static bool _checkClusterSecuritySupport() {
-    if (Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN')) return true;
-    try {
-      final home = Platform.environment['HOME'] ?? '';
-      if (home.isNotEmpty) {
-        final tokenFile = File('$home/.vgre/token');
-        if (tokenFile.existsSync()) {
-          final token = tokenFile.readAsStringSync().trim();
-          return token.isNotEmpty;
-        }
-      }
-    } catch (_) {}
-    return false;
-  }
 
-  late final bool _clusterSecuritySupported = _checkClusterSecuritySupport();
+  bool _clusterSecuritySupported = false;
 
-  TelemetryBloc({required this.bridge, required this.sqlite}) : super(TelemetryInitial()) {
+  TelemetryBloc({required this.bridge, required this.sqlite, required this.libPath})
+      : super(TelemetryInitial()) {
     on<StartPolling>((event, emit) async {
-      // Initialize as master service (Dashboard)
-      try {
-        bridge.setServiceMode(true);
-      } catch (e) {
-        debugPrint("Failed to start VGRE IPC Service: $e");
-      }
-      try {
-        bridge.setProfilerEnabled(true);
-      } catch (e) {
-        debugPrint("Failed to enable profiler: $e");
-      }
-
-      // Load history from SQLite
-      try {
-        final history = await sqlite.getTelemetryHistory(_currentDeviceId);
-        if (history.isNotEmpty) {
-          _lastSmoothed = history.last;
-          emit(TelemetryActive(
-            telemetry: history.last,
-            history: history,
-            deviceName: _deviceName,
-            backendVersion: _backendVersion,
-            deviceCount: _deviceCount,
-            selectedKernelName: _selectedKernelName,
-          ));
-        }
-      } catch (e) {
-        debugPrint("Failed to load telemetry history: $e");
-      }
-
-      try {
-        _deviceCount = bridge.getDeviceCount();
-      } catch (e) {
-        debugPrint("Failed to fetch device count: $e");
-      }
-
-      // Fetch device info once
-      try {
-        final props = bridge.getDeviceProperties(_currentDeviceId);
-        _deviceName = props['name'] as String;
-      } catch (e) {
-        debugPrint("Failed to fetch device info: $e");
-      }
-
-      try {
-        _backendVersion = bridge.getVersion();
-      } catch (e) {
-        debugPrint("Failed to read backend version: $e");
-      }
-
+      await _startIsolate();
       _timer?.cancel();
       _timer = Timer.periodic(const Duration(milliseconds: 500), (_) {
-        _pollOnce();
+        _requestPoll();
       });
-      _pollOnce();
+      _requestPoll();
     });
 
     on<ToggleBackgroundCompute>((event, emit) {
-      try {
-        final res = bridge.setBackgroundCompute(event.enabled);
-        if (res == 0) {
-          _backgroundComputeActive = event.enabled;
-          
-          // REFINEMENT: Emit immediate state update so UI feels responsive
-          if (state is TelemetryActive) {
-            final s = state as TelemetryActive;
-            emit(TelemetryActive(
-              telemetry: s.telemetry.copyWith(backgroundComputeActive: event.enabled),
-              history: s.history,
-              deviceName: s.deviceName,
-              backendVersion: s.backendVersion,
-              deviceCount: s.deviceCount,
-              selectedKernelName: s.selectedKernelName,
-            ));
-          }
-        } else {
-          debugPrint("Failed to toggle background compute: $res");
-        }
-      } catch (e) {
-        debugPrint("Failed to toggle background compute: $e");
+      _pollSendPort?.send({'type': 'setBackgroundCompute', 'enabled': event.enabled});
+      _backgroundComputeActive = event.enabled;
+      if (state is TelemetryActive) {
+        final s = state as TelemetryActive;
+        emit(TelemetryActive(
+          telemetry: s.telemetry.copyWith(backgroundComputeActive: event.enabled),
+          history: s.history,
+          deviceName: s.deviceName,
+          backendVersion: s.backendVersion,
+          deviceCount: s.deviceCount,
+          selectedKernelName: s.selectedKernelName,
+        ));
       }
     });
 
     on<ToggleProfiler>((event, emit) {
-      try {
-        final res = bridge.setProfilerEnabled(event.enabled);
-        if (res == 0) {
-          _profilerEnabled = event.enabled;
-        } else {
-          debugPrint("Failed to toggle profiler: $res");
-        }
-      } catch (e) {
-        debugPrint("Failed to toggle profiler: $e");
+      _pollSendPort?.send({'type': 'setProfilerEnabled', 'enabled': event.enabled});
+      _profilerEnabled = event.enabled;
+      if (state is TelemetryActive) {
+        final s = state as TelemetryActive;
+        emit(TelemetryActive(
+          telemetry: s.telemetry.copyWith(profilerEnabled: event.enabled),
+          history: s.history,
+          deviceName: s.deviceName,
+          backendVersion: s.backendVersion,
+          deviceCount: s.deviceCount,
+          selectedKernelName: s.selectedKernelName,
+        ));
       }
     });
 
     on<ToggleClusterSecurity>((event, emit) {
-      if (!_clusterSecuritySupported) {
-        debugPrint("Cluster security toggle blocked: token not set");
-        return;
-      }
-      try {
-        final res = bridge.clusterSetSecurity(event.enabled);
-        if (res == 0) {
-          _clusterSecurityActive = event.enabled;
-        } else {
-          debugPrint("Failed to toggle cluster security: $res");
-        }
-      } catch (e) {
-        debugPrint("Failed to toggle cluster security: $e");
-      }
+      if (!_clusterSecuritySupported) return;
+      _pollSendPort?.send({'type': 'clusterSetSecurity', 'enabled': event.enabled});
     });
 
     on<ResetCredits>((event, emit) {
-      try {
-        final res = bridge.creditsReset();
-        if (res != 0) {
-          debugPrint("Failed to reset credits: $res");
-          return;
-        }
-        _pollOnce();
-      } catch (e) {
-        debugPrint("Failed to reset credits: $e");
-      }
+      _pollSendPort?.send({'type': 'creditsReset'});
     });
 
     on<ToggleServiceMode>((event, emit) {
-      final res = bridge.setServiceMode(event.isMaster);
-      if (res == 0) {
-        _serviceModeActive = event.isMaster;
-      } else {
-        debugPrint("Failed to switch service mode: $res");
+      _pollSendPort?.send({'type': 'setServiceMode', 'enabled': event.isMaster});
+      _serviceModeActive = event.isMaster;
+      if (state is TelemetryActive) {
+        final s = state as TelemetryActive;
+        emit(TelemetryActive(
+          telemetry: s.telemetry.copyWith(serviceModeActive: event.isMaster),
+          history: s.history,
+          deviceName: s.deviceName,
+          backendVersion: s.backendVersion,
+          deviceCount: s.deviceCount,
+          selectedKernelName: s.selectedKernelName,
+        ));
       }
     });
 
     on<ToggleBlockThreads>((event, emit) {
-      final res = bridge.setBlockThreads(event.enabled);
-      if (res == 0) {
-        _blockThreadsActive = event.enabled;
-      } else {
-        debugPrint("Failed to toggle block threads: $res");
+      _pollSendPort?.send({'type': 'setBlockThreads', 'enabled': event.enabled});
+      _blockThreadsActive = event.enabled;
+      if (state is TelemetryActive) {
+        final s = state as TelemetryActive;
+        emit(TelemetryActive(
+          telemetry: s.telemetry.copyWith(blockThreadsActive: event.enabled),
+          history: s.history,
+          deviceName: s.deviceName,
+          backendVersion: s.backendVersion,
+          deviceCount: s.deviceCount,
+          selectedKernelName: s.selectedKernelName,
+        ));
       }
     });
 
     on<SwitchDevice>((event, emit) {
       _currentDeviceId = event.deviceId;
-      _lastSmoothed = null; // Reset smoothing for new device
-      // Refresh device info
-      try {
-        final props = bridge.getDeviceProperties(_currentDeviceId);
-        _deviceName = props['name'] as String;
-      } catch (e) {
-        debugPrint("Failed to fetch device info: $e");
-      }
+      _lastSmoothed = null;
+      _pollSendPort?.send({'type': 'switchDevice', 'deviceId': event.deviceId});
       add(const StartPolling());
     });
 
     on<ExportKernelHistory>((event, emit) async {
       try {
         final history = await sqlite.getKernelHistory(event.kernelName, _currentDeviceId);
-        if (history.isEmpty) {
-          debugPrint("No history found for ${event.kernelName} to export");
-          return;
-        }
+        if (history.isEmpty) return;
 
         final List<List<dynamic>> rows = [
           ["Timestamp", "Duration (ms)", "GFLOPS", "Throughput (GB/s)", "Threads"],
@@ -343,20 +264,19 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         final path = "${directory.path}/vgre_${event.kernelName}_history_${DateTime.now().millisecondsSinceEpoch}.csv";
         final file = File(path);
         await file.writeAsString(csvData);
-        debugPrint("Hardware-authoritative export completed: $path");
       } catch (e) {
-        debugPrint("Failed to export kernel history: $e");
+        debugPrint("Export failed: $e");
       }
     });
 
     on<StopPolling>((event, emit) {
       _timer?.cancel();
+      _stopIsolate();
     });
 
     on<SelectKernel>((event, emit) {
       _selectedKernelName = event.kernelName;
-      // We don't reset _lastSelectedKernelStats here because the next poll will update it
-      // if it exists in the new topKernels list.
+      _pollSendPort?.send({'type': 'selectKernel', 'kernelName': event.kernelName});
       if (state is TelemetryActive) {
         final s = state as TelemetryActive;
         emit(TelemetryActive(
@@ -379,11 +299,14 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
       newHistory.add(smoothed);
       if (newHistory.length > 50) newHistory.removeAt(0);
 
-      // Persist to SQLite
       sqlite.saveTelemetry(event.telemetry, _currentDeviceId);
 
       emit(TelemetryActive(
-        telemetry: event.telemetry,
+        telemetry: event.telemetry.copyWith(
+          backgroundComputeActive: _backgroundComputeActive,
+          profilerEnabled: _profilerEnabled,
+          blockThreadsActive: _blockThreadsActive,
+        ),
         history: newHistory,
         deviceName: _deviceName,
         backendVersion: _backendVersion,
@@ -393,248 +316,58 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
     });
   }
 
-  void _pollOnce() {
-    final ptr = calloc<VgreTelemetry>();
-    try {
-      final raw = bridge.getTelemetryWith(ptr);
-      final logs = bridge.getLogs();
-      final clusterData = bridge.getClusterNodes();
+  Future<void> _startIsolate() async {
+    if (_pollIsolate != null) return;
 
-      SecurityInfo? securityInfo;
-      try {
-        final s = bridge.getSecurityInfo();
-        securityInfo = SecurityInfo(
-          cipherName: s['cipherName'] as String,
-          keyFingerprint: s['keyFingerprint'] as String,
-          sessionSeconds: s['sessionSeconds'] as double,
-          isEncrypted: s['isEncrypted'] as bool,
-          packetsSent: s['packetsSent'] as int,
-          packetsReceived: s['packetsReceived'] as int,
-          bytesSent: s['bytesSent'] as int,
-          bytesReceived: s['bytesReceived'] as int,
-        );
-      } catch (e) {
-        debugPrint("Failed to fetch security info: $e");
-      }
+    _pollReceivePort = ReceivePort();
+    _pollIsolate = await Isolate.spawn(_vgreIsolateEntryPoint, {
+      'sendPort': _pollReceivePort!.sendPort,
+      'libPath': libPath,
+      'deviceId': _currentDeviceId,
+    });
 
-      final creditData = bridge.getCreditsAll();
-      final creditLedger = creditData.map((c) {
-        return CreditEntry(
-          address: c['address'] as String,
-          totalCredits: (c['totalCredits'] ?? 0.0) as double,
-          totalDebits: (c['totalDebits'] ?? 0.0) as double,
-          balance: (c['balance'] ?? 0.0) as double,
-          transactionCount: (c['transactionCount'] ?? 0) as int,
-          lastActivity: (c['lastActivity'] ?? 0) as int,
-        );
-      }).toList(growable: false);
-
-      final Map<String, Map<String, dynamic>> creditsByAddr = {
-        for (var c in creditData) c['address'] as String: c
-      };
-
-      final List<ClusterNode> clusterNodes = clusterData.map((m) {
-        final addr = m['address'] as String;
-        final cred = creditsByAddr[addr];
-        return ClusterNode(
-          address: addr,
-          port: m['port'] as int,
-          cpuCores: m['cpuCores'] as int,
-          memoryBytes: m['memoryBytes'] as int,
-          latencyMs: m['latencyMs'] as double,
-          available: m['available'] as bool,
-          igpuName: m['igpuName'] as String,
-          totalCredits: (cred?['totalCredits'] ?? 0.0) as double,
-          totalDebits: (cred?['totalDebits'] ?? 0.0) as double,
-          balance: (cred?['balance'] ?? 0.0) as double,
-          transactionCount: (cred?['transactionCount'] ?? 0) as int,
-        );
-      }).toList(growable: false);
-
-      if (securityInfo != null) {
-        _clusterSecurityActive = securityInfo.isEncrypted;
-      }
-
-      List<KernelStat> topKernels = const [];
-      try {
-        final jsonStr = bridge.getProfilerJson(topN: 20);
-        if (jsonStr != null) {
-          final decoded = jsonDecode(jsonStr) as Map<String, dynamic>;
-          final items = decoded['top_kernels'] as List<dynamic>? ?? [];
-
-          // Fetch history for selected kernel if any
-          List<KernelExecution> selectedHistory = const [];
-          if (_selectedKernelName != null) {
-            try {
-              final historyStr = bridge.getKernelHistoryJson(_selectedKernelName!);
-              if (historyStr != null) {
-                final historyItems = jsonDecode(historyStr) as List<dynamic>;
-                selectedHistory = historyItems.map((h) {
-                  final hm = h as Map<String, dynamic>;
-                  return KernelExecution(
-                    timestamp: DateTime.fromMillisecondsSinceEpoch(
-                        (hm['timestamp_ms'] ?? 0) as int),
-                    durationMs: (hm['duration_ms'] ?? 0).toDouble(),
-                    throughputGbps: (hm['throughput_gbps'] ?? 0).toDouble(),
-                    gflops: (hm['gflops'] ?? 0).toDouble(),
-                    threadsUsed: (hm['threads_used'] ?? 0) as int,
-                  );
-                }).toList();
-              }
-            } catch (e) {
-              debugPrint("History fetch failed for $_selectedKernelName: $e");
-            }
-          }
-
-          topKernels = items.map((item) {
-            final m = item as Map<String, dynamic>;
-            final name = (m['name'] ?? 'kernel').toString();
-            
-            // Check for new history items to persist (authoritative timestamp comparison)
-            if (name == _selectedKernelName && selectedHistory.isNotEmpty) {
-                final lastSavedTs = _lastSelectedKernelStats?.history.isNotEmpty == true 
-                    ? _lastSelectedKernelStats!.history.last.timestamp 
-                    : DateTime.fromMillisecondsSinceEpoch(0);
-                
-                if (selectedHistory.last.timestamp.isAfter(lastSavedTs)) {
-                    sqlite.saveKernelExecution(name, selectedHistory.last, _currentDeviceId);
-                }
-            }
-
-            final k = KernelStat(
-              name: name,
-              invocations: (m['invocations'] ?? 0) as int,
-              totalTimeMs: (m['total_time_ms'] ?? 0).toDouble(),
-              avgTimeMs: (m['avg_time_ms'] ?? 0).toDouble(),
-              minTimeMs: (m['min_time_ms'] ?? 0).toDouble(),
-              maxTimeMs: (m['max_time_ms'] ?? 0).toDouble(),
-              avgThroughputGbps: (m['avg_throughput_gbps'] ?? 0).toDouble(),
-              avgGflops: (m['avg_gflops'] ?? 0).toDouble(),
-              sourceCode: (m['source_code'] ?? '').toString(),
-              irCode: (m['ir_code'] ?? '').toString(),
-              history: name == _selectedKernelName ? selectedHistory : const [],
-            );
-            // Cache if this is the currently selected kernel
-            if (k.name == _selectedKernelName) {
-              _lastSelectedKernelStats = k;
-            }
-            return k;
-          }).toList(growable: false);
+    _pollReceivePort!.listen((message) {
+      if (message is SendPort) {
+        _pollSendPort = message;
+        // Apply initial config
+        _pollSendPort!.send({
+          'type': 'configure',
+          'backgroundCompute': _backgroundComputeActive,
+          'serviceMode': _serviceModeActive,
+          'blockThreads': _blockThreadsActive,
+          'profilerEnabled': _profilerEnabled,
+        });
+      } else if (message is Map<String, dynamic>) {
+        if (message['type'] == 'telemetry') {
+          final t = message['data'] as Telemetry;
+          _deviceCount = t.deviceCount;
+          _deviceName = t.deviceName;
+          _backendVersion = t.backendVersion;
+          _clusterSecuritySupported = t.clusterSecuritySupported;
+          _lastSelectedKernelStats = t.lastSelectedKernelStats;
+          add(UpdateTelemetry(t));
+        } else if (message['type'] == 'log') {
+          debugPrint("[VGRE Isolate] ${message['message']}");
         }
-      } catch (e) {
-        debugPrint('Profiler JSON parse failed: $e');
-        topKernels = const [];
       }
+    });
+  }
 
-      List<MemoryAllocation> allocations = const [];
-      List<MemoryPool> memoryPools = const [];
-      try {
-        final memJson = bridge.getMemoryInfoJson();
-        if (memJson != null) {
-          final decoded = jsonDecode(memJson) as Map<String, dynamic>;
-          final allocs = decoded['allocations'] as List<dynamic>? ?? [];
-          allocations = allocs.map<MemoryAllocation>((a) {
-            final m = a as Map<String, dynamic>;
-            return MemoryAllocation(
-              ptr: (m['ptr'] ?? '0x0').toString(),
-              size: (m['size'] ?? 0) as int,
-              isManaged: (m['managed'] ?? false) as bool,
-              isResident: (m['resident'] ?? false) as bool,
-              deviceId: (m['device'] ?? 0) as int,
-            );
-          }).toList(growable: false);
+  void _stopIsolate() {
+    _pollIsolate?.kill(priority: Isolate.immediate);
+    _pollIsolate = null;
+    _pollReceivePort?.close();
+    _pollSendPort = null;
+  }
 
-          final pools = decoded['pools'] as List<dynamic>? ?? [];
-          memoryPools = pools.map<MemoryPool>((p) {
-            final m = p as Map<String, dynamic>;
-            return MemoryPool(
-              id: (m['id'] ?? 0) as int,
-              blockSize: (m['blockSize'] ?? 0) as int,
-              totalAllocated: (m['total'] ?? 0) as int,
-              peakAllocated: (m['peak'] ?? 0) as int,
-              activeCount: (m['active'] ?? 0) as int,
-              freeCount: (m['free'] ?? 0) as int,
-            );
-          }).toList(growable: false);
-        }
-      } catch (e) {
-        debugPrint('Memory JSON parse failed: $e');
-      }
-
-      // Dynamic Smoothing: React faster to spikes, smoother for stable regions
-      double alpha = 0.25;
-      if (_lastSmoothed != null) {
-        final gflopsDiff = (raw.gflops - _lastSmoothed!.gflops).abs();
-        if (gflopsDiff > 10.0) alpha = 0.55; // Fast reaction to heavy workloads
-      }
-
-      final smoothed = Telemetry(
-        timestamp: DateTime.fromMillisecondsSinceEpoch(raw.timestamp),
-        gflops: _lastSmoothed == null
-            ? raw.gflops
-            : _lastSmoothed!.gflops * (1 - alpha) + raw.gflops * alpha,
-        maxGflops: raw.maxGflops,
-        computeUtilization: _lastSmoothed == null
-            ? raw.computeUtilization
-            : _lastSmoothed!.computeUtilization * (1 - alpha) +
-                raw.computeUtilization * alpha,
-        memoryBandwidth: _lastSmoothed == null
-            ? raw.memoryBandwidthGbps
-            : _lastSmoothed!.memoryBandwidth * (1 - alpha) +
-                raw.memoryBandwidthGbps * alpha,
-        maxMemoryBandwidth: raw.maxMemoryBandwidthGbps,
-        memoryBusUtilization: _lastSmoothed == null
-            ? raw.memoryBusUtilization
-            : _lastSmoothed!.memoryBusUtilization * (1 - alpha) +
-                raw.memoryBusUtilization * alpha,
-        memoryUsed: raw.memoryUsedBytes,
-        memoryTotal: raw.memoryTotalBytes,
-        totalPages: raw.totalPages,
-        residentPages: raw.residentPages,
-        evictedPages: raw.evictedPages,
-        pageFaultRate: raw.pageFaultRate,
-        uvmMap: List.generate(1024, (i) => raw.uvmMap[i]),
-        activeKernels: raw.activeKernels,
-        activeThreads: raw.activeThreads,
-        clockSpeed: raw.deviceClockMhz.toInt(),
-        avgLatency: raw.avgKernelLatencyMs,
-        temperature: raw.deviceTemperature,
-        eccEnabled: raw.eccEnabled != 0,
-        backgroundComputeActive: _backgroundComputeActive,
-        serviceModeActive: _serviceModeActive,
-        blockThreadsActive: _blockThreadsActive,
-        deviceName: _deviceName,
-        versionMajor: raw.versionMajor,
-        versionMinor: raw.versionMinor,
-        logs: logs,
-        topKernels: topKernels,
-        computeQuality: MetricQuality.measured,
-        memoryQuality: MetricQuality.measured,
-        uvmQuality: MetricQuality.measured,
-        temperatureQuality: MetricQuality.measured,
-        clusterNodes: clusterNodes,
-        securityInfo: securityInfo,
-        creditLedger: creditLedger,
-        profilerEnabled: _profilerEnabled,
-        backendVersion: _backendVersion,
-        clusterSecurityActive: _clusterSecurityActive,
-        clusterSecuritySupported: _clusterSecuritySupported,
-        lastSelectedKernelStats: _lastSelectedKernelStats,
-        allocations: allocations,
-        memoryPools: memoryPools,
-        deviceCount: _deviceCount,
-      );
-      add(UpdateTelemetry(smoothed));
-    } catch (e) {
-      debugPrint('FFI Error: $e');
-    } finally {
-      calloc.free(ptr);
-    }
+  void _requestPoll() {
+    _pollSendPort?.send({'type': 'poll'});
   }
 
   @override
   Future<void> close() {
     _timer?.cancel();
+    _stopIsolate();
     return super.close();
   }
 
@@ -648,48 +381,244 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
     final smoothedTemp =
         prev.temperature * (1.0 - alpha) + current.temperature * alpha;
 
-    return Telemetry(
-      timestamp: current.timestamp,
-      gflops: current.gflops,
-      maxGflops: current.maxGflops,
+    return current.copyWith(
       computeUtilization: smoothedCompute,
-      memoryBandwidth: current.memoryBandwidth,
-      maxMemoryBandwidth: current.maxMemoryBandwidth,
       memoryBusUtilization: smoothedMem,
-      memoryUsed: current.memoryUsed,
-      memoryTotal: current.memoryTotal,
-      totalPages: current.totalPages,
-      residentPages: current.residentPages,
-      evictedPages: current.evictedPages,
-      pageFaultRate: current.pageFaultRate,
-      uvmMap: current.uvmMap,
-      activeKernels: current.activeKernels,
-      activeThreads: current.activeThreads,
-      clockSpeed: current.clockSpeed,
-      avgLatency: current.avgLatency,
       temperature: smoothedTemp,
-      eccEnabled: current.eccEnabled,
-      backgroundComputeActive: current.backgroundComputeActive,
-      serviceModeActive: current.serviceModeActive,
-      blockThreadsActive: current.blockThreadsActive,
-      deviceName: current.deviceName,
-      versionMajor: current.versionMajor,
-      versionMinor: current.versionMinor,
-      logs: current.logs,
-      topKernels: current.topKernels,
-      clusterNodes: current.clusterNodes,
-      securityInfo: current.securityInfo,
-      creditLedger: current.creditLedger,
-      profilerEnabled: current.profilerEnabled,
-      backendVersion: current.backendVersion,
-      clusterSecurityActive: current.clusterSecurityActive,
-      computeQuality: current.computeQuality,
-      memoryQuality: current.memoryQuality,
-      uvmQuality: current.uvmQuality,
-      temperatureQuality: current.temperatureQuality,
-      lastSelectedKernelStats: current.lastSelectedKernelStats,
-      allocations: current.allocations,
-      memoryPools: current.memoryPools,
     );
+  }
+}
+
+// ── Background Polling Isolate ─────────────────────────────────────────────
+
+void _vgreIsolateEntryPoint(Map<String, dynamic> args) {
+  final SendPort mainSendPort = args['sendPort'];
+  final String libPath = args['libPath'];
+  final ReceivePort isolateReceivePort = ReceivePort();
+  mainSendPort.send(isolateReceivePort.sendPort);
+
+  final bridge = VgreBridge(libPath);
+  int currentDeviceId = args['deviceId'];
+
+  bool securitySupported = Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN');
+
+  // --- Auth Token Propagation ---
+  if (!securitySupported) {
+     try {
+       final home = Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'] ?? '/home/${Platform.environment['USER']}';
+       final tokenFile = File('$home/.vgre/token');
+       if (tokenFile.existsSync()) {
+         final token = tokenFile.readAsStringSync().trim();
+         if (token.isNotEmpty) {
+            bridge.setEnvironmentVariable('VGRE_TCP_AUTH_TOKEN', token);
+            securitySupported = true;
+            mainSendPort.send({'type': 'log', 'message': 'Loaded auth token from file: $home/.vgre/token'});
+         }
+       }
+     } catch (e) {
+       mainSendPort.send({'type': 'log', 'message': 'Failed to load auth token file: $e'});
+     }
+  }
+  
+  // Fetch real device name and version string once at start
+  String deviceName = "VGRE Virtual GPU";
+  String versionString = "0.1.1";
+  try {
+    final props = bridge.getDeviceProperties(currentDeviceId);
+    deviceName = props['name'] as String;
+    versionString = bridge.getVersion();
+  } catch (_) {}
+
+  String? selectedKernelName;
+  KernelStat? lastSelectedKernelStats;
+
+  isolateReceivePort.listen((message) {
+    if (message is! Map<String, dynamic>) return;
+
+    try {
+      switch (message['type']) {
+        case 'configure':
+          bridge.setServiceMode(message['serviceMode']);
+          bridge.setProfilerEnabled(message['profilerEnabled']);
+          bridge.setBackgroundCompute(message['backgroundCompute']);
+          bridge.setBlockThreads(message['blockThreads']);
+          break;
+        case 'poll':
+          final t = _doPollSync(bridge, currentDeviceId, deviceName, versionString, securitySupported, selectedKernelName, lastSelectedKernelStats);
+          lastSelectedKernelStats = t.lastSelectedKernelStats;
+          mainSendPort.send({'type': 'telemetry', 'data': t});
+          break;
+        case 'setBackgroundCompute':
+          bridge.setBackgroundCompute(message['enabled']);
+          break;
+        case 'setProfilerEnabled':
+          bridge.setProfilerEnabled(message['enabled']);
+          break;
+        case 'clusterSetSecurity':
+          bridge.clusterSetSecurity(message['enabled']);
+          break;
+        case 'creditsReset':
+          bridge.creditsReset();
+          break;
+        case 'setServiceMode':
+          bridge.setServiceMode(message['enabled']);
+          break;
+        case 'setBlockThreads':
+          bridge.setBlockThreads(message['enabled']);
+          break;
+        case 'switchDevice':
+          currentDeviceId = message['deviceId'];
+          try {
+            final props = bridge.getDeviceProperties(currentDeviceId);
+            deviceName = props['name'] as String;
+          } catch (_) {}
+          break;
+        case 'selectKernel':
+          selectedKernelName = message['kernelName'];
+          break;
+      }
+    } catch (e) {
+      mainSendPort.send({'type': 'log', 'message': 'Poll Isolate Error: $e'});
+    }
+  });
+}
+
+Telemetry _doPollSync(
+  VgreBridge bridge, 
+  int currentDeviceId, 
+  String deviceName, 
+  String versionString,
+  bool securitySupported,
+  String? selectedKernelName, 
+  KernelStat? lastSelectedKernelStats
+) {
+  final ptr = calloc<VgreTelemetry>();
+  try {
+    final raw = bridge.getTelemetryWith(ptr);
+    final logs = bridge.getLogs();
+    final clusterData = bridge.getClusterNodes();
+    
+    SecurityInfo? securityInfo;
+    try {
+      final s = bridge.getSecurityInfo();
+      securityInfo = SecurityInfo(
+        cipherName: s['cipherName'] as String,
+        keyFingerprint: s['keyFingerprint'] as String,
+        sessionSeconds: s['sessionSeconds'] as double,
+        isEncrypted: s['isEncrypted'] as bool,
+        packetsSent: s['packetsSent'] as int,
+        packetsReceived: s['packetsReceived'] as int,
+        bytesSent: s['bytesSent'] as int,
+        bytesReceived: s['bytesReceived'] as int,
+      );
+    } catch (_) {}
+
+    final creditData = bridge.getCreditsAll();
+    final List<ClusterNode> clusterNodes = clusterData.map((m) {
+      final addr = m['address'] as String;
+      final cred = creditData.firstWhere((c) => c['address'] == addr, orElse: () => {});
+      return ClusterNode(
+        address: addr,
+        port: m['port'] as int,
+        cpuCores: m['cpuCores'] as int,
+        memoryBytes: m['memoryBytes'] as int,
+        latencyMs: m['latencyMs'] as double,
+        available: m['available'] as bool,
+        igpuName: m['igpuName'] as String,
+        totalCredits: (cred['totalCredits'] ?? 0.0) as double,
+        totalDebits: (cred['totalDebits'] ?? 0.0) as double,
+        balance: (cred['balance'] ?? 0.0) as double,
+        transactionCount: (cred['transactionCount'] ?? 0) as int,
+      );
+    }).toList();
+
+    List<KernelStat> topKernels = const [];
+    try {
+      final jsonStr = bridge.getProfilerJson(topN: 20);
+      if (jsonStr != null) {
+        final decoded = jsonDecode(jsonStr) as Map<String, dynamic>;
+        final items = decoded['top_kernels'] as List<dynamic>? ?? [];
+
+        List<KernelExecution> selectedHistory = const [];
+        if (selectedKernelName != null) {
+          final historyStr = bridge.getKernelHistoryJson(selectedKernelName);
+          if (historyStr != null) {
+            final historyItems = jsonDecode(historyStr) as List<dynamic>;
+            selectedHistory = historyItems.map((h) {
+              final hm = h as Map<String, dynamic>;
+              return KernelExecution(
+                timestamp: DateTime.fromMillisecondsSinceEpoch((hm['timestamp_ms'] ?? 0) as int),
+                durationMs: (hm['duration_ms'] ?? 0).toDouble(),
+                throughputGbps: (hm['throughput_gbps'] ?? 0).toDouble(),
+                gflops: (hm['gflops'] ?? 0).toDouble(),
+                threadsUsed: (hm['threads_used'] ?? 0) as int,
+              );
+            }).toList();
+          }
+        }
+
+        topKernels = items.map((item) {
+          final m = item as Map<String, dynamic>;
+          final name = (m['name'] ?? 'kernel').toString();
+          final k = KernelStat(
+            name: name,
+            invocations: (m['invocations'] ?? 0) as int,
+            totalTimeMs: (m['total_time_ms'] ?? 0).toDouble(),
+            avgTimeMs: (m['avg_time_ms'] ?? 0).toDouble(),
+            minTimeMs: (m['min_time_ms'] ?? 0).toDouble(),
+            maxTimeMs: (m['max_time_ms'] ?? 0).toDouble(),
+            avgThroughputGbps: (m['avg_throughput_gbps'] ?? 0).toDouble(),
+            avgGflops: (m['avg_gflops'] ?? 0).toDouble(),
+            sourceCode: (m['source_code'] ?? '').toString(),
+            irCode: (m['ir_code'] ?? '').toString(),
+            history: name == selectedKernelName ? selectedHistory : const [],
+          );
+          if (name == selectedKernelName) lastSelectedKernelStats = k;
+          return k;
+        }).toList();
+      }
+    } catch (_) {}
+
+    return Telemetry(
+      timestamp: DateTime.fromMillisecondsSinceEpoch(raw.timestamp),
+      gflops: raw.gflops,
+      maxGflops: raw.maxGflops,
+      computeUtilization: raw.computeUtilization,
+      memoryBandwidth: raw.memoryBandwidthGbps,
+      maxMemoryBandwidth: raw.maxMemoryBandwidthGbps,
+      memoryBusUtilization: raw.memoryBusUtilization,
+      memoryUsed: raw.memoryUsedBytes,
+      memoryTotal: raw.memoryTotalBytes,
+      totalPages: raw.totalPages,
+      residentPages: raw.residentPages,
+      evictedPages: raw.evictedPages,
+      pageFaultRate: raw.pageFaultRate,
+      uvmMap: List.generate(1024, (i) => raw.uvmMap[i]),
+      activeKernels: raw.activeKernels,
+      activeThreads: raw.activeThreads,
+      clockSpeed: raw.deviceClockMhz.toInt(),
+      avgLatency: raw.avgKernelLatencyMs,
+      temperature: raw.deviceTemperature,
+      eccEnabled: raw.eccEnabled != 0,
+      backgroundComputeActive: raw.backgroundComputeActive != 0,
+      serviceModeActive: true, // Master by definition in dashboard
+      blockThreadsActive: false, // Default
+      deviceName: deviceName,
+      versionMajor: raw.versionMajor,
+      versionMinor: raw.versionMinor,
+      versionPatch: raw.versionPatch,
+      logs: logs,
+      topKernels: topKernels,
+      clusterNodes: clusterNodes,
+      securityInfo: securityInfo,
+      profilerEnabled: true,
+      backendVersion: versionString,
+      clusterSecurityActive: (securityInfo?.isEncrypted ?? false) || (securityInfo?.isHandshakePending ?? false),
+      clusterSecuritySupported: securitySupported,
+      deviceCount: 1, // Will be updated by props if needed
+      lastSelectedKernelStats: lastSelectedKernelStats,
+    );
+  } finally {
+    calloc.free(ptr);
   }
 }
