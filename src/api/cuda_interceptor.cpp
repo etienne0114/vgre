@@ -1333,60 +1333,103 @@ CUDAInterceptor &CUDAInterceptor::instance() {
 }
 
 // ── Texture/Surface Memory API ──────────────────────────────────────────
+vgre::core::TextureElementType CUDAInterceptor::mapViewFormat(CUresourceViewFormat format) {
+    switch (format) {
+        case CU_RES_VIEW_FORMAT_UINT_8X1:
+        case CU_RES_VIEW_FORMAT_UINT_8X2:
+        case CU_RES_VIEW_FORMAT_UINT_8X4: return vgre::core::TextureElementType::UINT8;
+        case CU_RES_VIEW_FORMAT_SINT_8X1:
+        case CU_RES_VIEW_FORMAT_SINT_8X2:
+        case CU_RES_VIEW_FORMAT_SINT_8X4: return vgre::core::TextureElementType::INT8;
+        case CU_RES_VIEW_FORMAT_UINT_16X1:
+        case CU_RES_VIEW_FORMAT_UINT_16X2:
+        case CU_RES_VIEW_FORMAT_UINT_16X4: return vgre::core::TextureElementType::UINT16;
+        case CU_RES_VIEW_FORMAT_SINT_16X1:
+        case CU_RES_VIEW_FORMAT_SINT_16X2:
+        case CU_RES_VIEW_FORMAT_SINT_16X4: return vgre::core::TextureElementType::INT16;
+        case CU_RES_VIEW_FORMAT_UINT_32X1:
+        case CU_RES_VIEW_FORMAT_UINT_32X2:
+        case CU_RES_VIEW_FORMAT_UINT_32X4: return vgre::core::TextureElementType::UINT32;
+        case CU_RES_VIEW_FORMAT_SINT_32X1:
+        case CU_RES_VIEW_FORMAT_SINT_32X2:
+        case CU_RES_VIEW_FORMAT_SINT_32X4: return vgre::core::TextureElementType::INT32;
+        case CU_RES_VIEW_FORMAT_FLOAT_16X1:
+        case CU_RES_VIEW_FORMAT_FLOAT_16X2:
+        case CU_RES_VIEW_FORMAT_FLOAT_16X4: return vgre::core::TextureElementType::FLOAT32; // VGRE handles FP16 as FP32 internally for sampling
+        case CU_RES_VIEW_FORMAT_FLOAT_32X1:
+        case CU_RES_VIEW_FORMAT_FLOAT_32X2:
+        case CU_RES_VIEW_FORMAT_FLOAT_32X4: return vgre::core::TextureElementType::FLOAT32;
+        default: return vgre::core::TextureElementType::FLOAT32;
+    }
+}
+
 cudaError_t CUDAInterceptor::createTextureObject(
     cudaTextureObject_t *pTexObject, const cudaResourceDesc *pResDesc,
     const cudaTextureDesc *pTexDesc, const void *pResViewDesc) {
   if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
-    if (err != cudaSuccess)
-      return err;
+    if (err != cudaSuccess) return err;
   }
-  if (!pTexObject || !pResDesc || !pTexDesc)
-    return cudaErrorInvalidValue;
-
-  // Note: pResViewDesc (texture views) is not yet supported in the virtual GPU model.
-  if (pResViewDesc) {
-      VGRE_LOG_WARN("CUDAInterceptor", "texture views (pResViewDesc) are not yet implemented; using base resource descriptor.");
-  }
+  if (!pTexObject || !pResDesc || !pTexDesc) return cudaErrorInvalidValue;
 
   vgre::core::TextureDescriptor desc;
-  // Interpret CUDA address mode
-  if (pTexDesc->addressMode[0] == 0) // cudaAddressModeWrap
-    desc.addressMode = vgre::core::TextureAddressMode::WRAP;
-  else if (pTexDesc->addressMode[0] == 1) // cudaAddressModeClamp
-    desc.addressMode = vgre::core::TextureAddressMode::CLAMP;
-  else if (pTexDesc->addressMode[0] == 2) // cudaAddressModeMirror
-    desc.addressMode = vgre::core::TextureAddressMode::MIRROR;
-  else if (pTexDesc->addressMode[0] == 3) // cudaAddressModeBorder
-    desc.addressMode = vgre::core::TextureAddressMode::BORDER;
+  // Interpret CUDA address mode (0=wrap, 1=clamp, 2=mirror, 3=border)
+  desc.addressMode = (pTexDesc->addressMode[0] == 0) ? vgre::core::TextureAddressMode::WRAP :
+                     (pTexDesc->addressMode[0] == 1) ? vgre::core::TextureAddressMode::CLAMP :
+                     (pTexDesc->addressMode[0] == 2) ? vgre::core::TextureAddressMode::MIRROR :
+                                                    vgre::core::TextureAddressMode::BORDER;
 
-  // Interpret CUDA filter mode
-  if (pTexDesc->filterMode == 0) // cudaFilterModePoint
-    desc.filterMode = vgre::core::TextureFilterMode::POINT;
-  else // cudaFilterModeLinear
-    desc.filterMode = vgre::core::TextureFilterMode::LINEAR;
-
+  desc.filterMode = (pTexDesc->filterMode == 0) ? vgre::core::TextureFilterMode::POINT :
+                                               vgre::core::TextureFilterMode::LINEAR;
   desc.normalizedCoords = pTexDesc->normalizedCoords;
   desc.borderColor = pTexDesc->borderColor[0];
-  desc.elementType = mapChannelDesc(pResDesc->res.desc);
 
-  // Calculate element size from channel descriptor
-  size_t elementSize = (pResDesc->res.desc.x + pResDesc->res.desc.y +
-                        pResDesc->res.desc.z + pResDesc->res.desc.w) / 8;
-  
-  if (elementSize == 0) {
-    VGRE_LOG_ERROR("CUDAInterceptor", "Invalid channel descriptor: total bits is zero.");
-    return cudaErrorInvalidValue;
+  vgre::core::TextureId baseID = 0;
+  vgre::core::TextureId texID = 0;
+  VGREResult r = VGREResult::SUCCESS;
+
+  // ── Step 1: Resolve or Create Base Texture ─────────────────────────────
+  if (pResDesc->resType == 0x01) { // CU_RESOURCETYPE_ARRAY
+      // In our interceptor, cudaArray_t is stored in devPtr field and is a TextureId (uint64_t)
+      baseID = reinterpret_cast<uint64_t>(pResDesc->res.devPtr);
+  } else if (pResDesc->resType == 0x02) { // CU_RESOURCETYPE_MIPMAPPED_ARRAY
+      baseID = reinterpret_cast<uint64_t>(pResDesc->res.devPtr);
+  } else {
+      // Linear (0x03) or Pitch2D (0x04)
+      size_t width = pResDesc->res.width;
+      size_t height = (pResDesc->res.height == 0) ? 1 : pResDesc->res.height;
+      size_t elementSize = (pResDesc->res.desc.x + pResDesc->res.desc.y + 
+                            pResDesc->res.desc.z + pResDesc->res.desc.w) / 8;
+      unsigned int layers = (pResDesc->res.layers == 0) ? 1 : pResDesc->res.layers;
+      
+      desc.elementType = mapChannelDesc(pResDesc->res.desc);
+      r = core::TextureManager::instance().createTexture(
+          baseID, pResDesc->res.devPtr, width, height, elementSize, desc, layers);
+      if (r != VGREResult::SUCCESS) return convertResult(r);
   }
 
-  vgre::core::TextureId texID;
-  auto r = core::TextureManager::instance().createTexture(
-      texID, pResDesc->res.devPtr, pResDesc->res.width, pResDesc->res.height,
-      elementSize, desc);
+  // ── Step 2: Apply View Descriptor ──────────────────────────────────────
+  if (pResViewDesc) {
+      const auto *viewDesc = reinterpret_cast<const CUDA_RESOURCE_VIEW_DESC*>(pResViewDesc);
+      vgre::core::ResourceViewDescriptor vdesc;
+      vdesc.format = mapViewFormat(viewDesc->format);
+      vdesc.width = (viewDesc->width == 0) ? pResDesc->res.width : viewDesc->width;
+      vdesc.height = (viewDesc->height == 0) ? ((pResDesc->res.height == 0) ? 1 : pResDesc->res.height) : viewDesc->height;
+      vdesc.depth = (viewDesc->depth == 0) ? ((pResDesc->res.depth == 0) ? 1 : pResDesc->res.depth) : viewDesc->depth;
+      vdesc.firstMipmapLevel = viewDesc->firstMipmapLevel;
+      vdesc.lastMipmapLevel = viewDesc->lastMipmapLevel;
+      vdesc.firstLayer = viewDesc->firstLayer;
+      vdesc.lastLayer = (viewDesc->lastLayer == 0 && viewDesc->firstLayer == 0) ? (pResDesc->res.layers > 0 ? pResDesc->res.layers - 1 : 0) : viewDesc->lastLayer;
+      vdesc.offsetInBytes = 0; 
+
+      r = core::TextureManager::instance().createTextureView(texID, baseID, vdesc, desc);
+  } else {
+      texID = baseID;
+  }
 
   if (r != VGREResult::SUCCESS) {
-    g_lastError = convertResult(r);
-    return g_lastError;
+      g_lastError = convertResult(r);
+      return g_lastError;
   }
 
   *pTexObject = texID;
