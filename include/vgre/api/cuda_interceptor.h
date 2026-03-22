@@ -167,6 +167,56 @@ public:
     int f; // 0=float, 1=signed, 2=unsigned
   };
 
+  enum CUresourceViewFormat {
+    CU_RES_VIEW_FORMAT_NONE = 0x00,
+    CU_RES_VIEW_FORMAT_UINT_8X1 = 0x01,
+    CU_RES_VIEW_FORMAT_UINT_8X2 = 0x02,
+    CU_RES_VIEW_FORMAT_UINT_8X4 = 0x03,
+    CU_RES_VIEW_FORMAT_SINT_8X1 = 0x04,
+    CU_RES_VIEW_FORMAT_SINT_8X2 = 0x05,
+    CU_RES_VIEW_FORMAT_SINT_8X4 = 0x06,
+    CU_RES_VIEW_FORMAT_UINT_16X1 = 0x07,
+    CU_RES_VIEW_FORMAT_UINT_16X2 = 0x08,
+    CU_RES_VIEW_FORMAT_UINT_16X4 = 0x09,
+    CU_RES_VIEW_FORMAT_SINT_16X1 = 0x0a,
+    CU_RES_VIEW_FORMAT_SINT_16X2 = 0x0b,
+    CU_RES_VIEW_FORMAT_SINT_16X4 = 0x0c,
+    CU_RES_VIEW_FORMAT_UINT_32X1 = 0x0d,
+    CU_RES_VIEW_FORMAT_UINT_32X2 = 0x0e,
+    CU_RES_VIEW_FORMAT_UINT_32X4 = 0x0f,
+    CU_RES_VIEW_FORMAT_SINT_32X1 = 0x10,
+    CU_RES_VIEW_FORMAT_SINT_32X2 = 0x11,
+    CU_RES_VIEW_FORMAT_SINT_32X4 = 0x12,
+    CU_RES_VIEW_FORMAT_FLOAT_16X1 = 0x13,
+    CU_RES_VIEW_FORMAT_FLOAT_16X2 = 0x14,
+    CU_RES_VIEW_FORMAT_FLOAT_16X4 = 0x15,
+    CU_RES_VIEW_FORMAT_FLOAT_32X1 = 0x16,
+    CU_RES_VIEW_FORMAT_FLOAT_32X2 = 0x17,
+    CU_RES_VIEW_FORMAT_FLOAT_32X4 = 0x18,
+    CU_RES_VIEW_FORMAT_UNSIGNED_BC1 = 0x19,
+    CU_RES_VIEW_FORMAT_UNSIGNED_BC2 = 0x1a,
+    CU_RES_VIEW_FORMAT_UNSIGNED_BC3 = 0x1b,
+    CU_RES_VIEW_FORMAT_UNSIGNED_BC4 = 0x1c,
+    CU_RES_VIEW_FORMAT_SIGNED_BC4 = 0x1d,
+    CU_RES_VIEW_FORMAT_UNSIGNED_BC5 = 0x1e,
+    CU_RES_VIEW_FORMAT_SIGNED_BC5 = 0x1f,
+    CU_RES_VIEW_FORMAT_UNSIGNED_BC6H = 0x20,
+    CU_RES_VIEW_FORMAT_SIGNED_BC6H = 0x21,
+    CU_RES_VIEW_FORMAT_UNSIGNED_BC7 = 0x22
+  };
+
+  struct CUDA_RESOURCE_VIEW_DESC {
+    CUresourceViewFormat format;
+    size_t width;
+    size_t height;
+    size_t depth;
+    unsigned int firstMipmapLevel;
+    unsigned int lastMipmapLevel;
+    unsigned int firstLayer;
+    unsigned int lastLayer;
+    unsigned int reserved[16];
+  };
+
   struct cudaResourceDesc {
     int resType;
     struct {
@@ -177,6 +227,7 @@ public:
       size_t height;
       size_t depth;
       size_t pitchInBytes;
+      unsigned int layers;
     } res;
   };
 
@@ -276,6 +327,7 @@ private:
   cudaError_t convertResult(VGREResult r);
   int convertMemcpyKind(cudaMemcpyKind_t kind);
 
+  vgre::core::TextureElementType mapViewFormat(CUresourceViewFormat format);
   vgre::core::TextureElementType mapChannelDesc(const cudaChannelFormatDesc &cd);
 
   bool initialized_ = false;
