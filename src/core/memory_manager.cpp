@@ -615,6 +615,8 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
   vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
       "h2d_copy", 1, 1, ms, bytes, 0);
 
+  it->second.isResidentOnHost = true;
+
   return VGREResult::SUCCESS;
 }
 
@@ -691,6 +693,7 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
 
   vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
       "d2h_copy", 1, 1, ms, bytes, 0);
+  it->second.isResidentOnHost = true;
   return VGREResult::SUCCESS;
 }
 
@@ -926,53 +929,48 @@ void MemoryManager::getPageResidency(uint8_t outMap[1024]) const {
   std::lock_guard<std::mutex> lock(mutex_);
   std::memset(outMap, 0, 1024);
 
-  // Map resident allocations by their real address layout in this process
-  // rather than hash-based placement. This yields a stable, deterministic map
-  // aligned with actual heap allocation distribution.
-  uintptr_t minAddr = std::numeric_limits<uintptr_t>::max();
-  uintptr_t maxAddr = 0;
-  bool hasResident = false;
+  if (poolSize_ == 0) return;
 
-  for (const auto &[_, alloc] : allocations_) {
-    if (!alloc.isResidentOnHost || !alloc.ptr || alloc.size == 0)
-      continue;
-    uintptr_t start = reinterpret_cast<uintptr_t>(alloc.ptr);
-    uintptr_t end = start + alloc.size;
-    minAddr = std::min(minAddr, start);
-    maxAddr = std::max(maxAddr, end);
-    hasResident = true;
-  }
-
-  if (!hasResident || maxAddr <= minAddr)
-    return;
-
-  uint64_t span = static_cast<uint64_t>(maxAddr - minAddr);
-  if (span == 0)
-    span = 1;
-
+  uint64_t virtualOffset = 0;
   for (auto const &[handle, alloc] : allocations_) {
-    if (!alloc.isResidentOnHost)
-      continue;
     if (!alloc.ptr || alloc.size == 0)
       continue;
 
-    uint64_t startOffset =
-        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(alloc.ptr) - minAddr);
-    uint64_t endOffset = startOffset + alloc.size;
-    size_t startCell =
-        static_cast<size_t>((startOffset * 1024ULL) / span);
-    size_t endCell = static_cast<size_t>(
-        ((endOffset * 1024ULL + span - 1ULL) / span) - 1ULL);
-    if (startCell > 1023)
-      startCell = 1023;
-    if (endCell > 1023)
-      endCell = 1023;
-    if (endCell < startCell)
-      endCell = startCell;
+    // Map this allocation to its virtual position in the pool based on its entry order
+    // This provides a stable "spatial" layout in the UI that represents the pool occupancy.
+    size_t startCell = static_cast<size_t>((virtualOffset * 1024ULL) / poolSize_);
+    uint64_t endOffset = virtualOffset + alloc.size;
+    size_t endCell = static_cast<size_t>(((endOffset * 1024ULL + poolSize_ - 1ULL) / poolSize_) - 1ULL);
+    
+    if (startCell > 1023) startCell = 1023;
+    if (endCell > 1023) endCell = 1023;
+    if (endCell < startCell) endCell = startCell;
+
+    // Feature 12: Real-time UVM Residency sync from lock-free tracking
+    bool isActuallyResident = alloc.isResidentOnHost;
+    if (!isActuallyResident) {
+      for (size_t i = 0; i < MAX_MANAGED_REGIONS; ++i) {
+        if (managedRegions_[i].valid.load(std::memory_order_relaxed) &&
+            managedRegions_[i].ptr.load(std::memory_order_relaxed) == alloc.ptr) {
+          if (managedRegions_[i].isResidentOnHost.load(std::memory_order_relaxed)) {
+            isActuallyResident = true;
+          }
+          break;
+        }
+      }
+    }
+
+    uint8_t status = isActuallyResident ? 1 : 2; // 1=Resident, 2=Allocated but swapped/not-resident
 
     for (size_t cell = startCell; cell <= endCell; ++cell) {
-      outMap[cell] = 1;
+      // If multiple allocations fall into one cell, prefer showing Resident status
+      if (outMap[cell] == 0 || status == 1) {
+          outMap[cell] = status;
+      }
     }
+    
+    virtualOffset += alloc.size;
+    if (virtualOffset >= poolSize_) break;
   }
 
   // Update fault rate (exponential moving average)

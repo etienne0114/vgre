@@ -34,6 +34,8 @@ class SecurityInfo extends Equatable {
     required this.bytesReceived,
   });
 
+  bool get isHandshakePending => cipherName.contains("PENDING");
+
   @override
   List<Object?> get props => [
         cipherName,
@@ -204,6 +206,7 @@ class Telemetry extends Equatable {
   final String deviceName;
   final int versionMajor;
   final int versionMinor;
+  final int versionPatch;
   final List<String> logs;
   final List<KernelStat> topKernels;
   final MetricQuality computeQuality;
@@ -247,8 +250,9 @@ class Telemetry extends Equatable {
     this.serviceModeActive = true,
     this.blockThreadsActive = false,
     this.deviceName = "VGRE_DEVICE",
-    this.versionMajor = 1,
-    this.versionMinor = 0,
+    this.versionMajor = 0,
+    this.versionMinor = 1,
+    this.versionPatch = 1,
     this.logs = const [],
     this.topKernels = const [],
     this.computeQuality = MetricQuality.measured,
@@ -298,6 +302,7 @@ class Telemetry extends Equatable {
     String? deviceName,
     int? versionMajor,
     int? versionMinor,
+    int? versionPatch,
     List<String>? logs,
     List<KernelStat>? topKernels,
     MetricQuality? computeQuality,
@@ -343,6 +348,7 @@ class Telemetry extends Equatable {
       deviceName: deviceName ?? this.deviceName,
       versionMajor: versionMajor ?? this.versionMajor,
       versionMinor: versionMinor ?? this.versionMinor,
+      versionPatch: versionPatch ?? this.versionPatch,
       logs: logs ?? this.logs,
       topKernels: topKernels ?? this.topKernels,
       computeQuality: computeQuality ?? this.computeQuality,
@@ -391,6 +397,7 @@ class Telemetry extends Equatable {
         deviceName,
         versionMajor,
         versionMinor,
+        versionPatch,
         logs,
         topKernels,
         computeQuality,

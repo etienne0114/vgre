@@ -10,6 +10,8 @@ final class VgreTelemetry extends Struct {
   external int versionMajor;
   @Uint64()
   external int versionMinor;
+  @Uint64()
+  external int versionPatch;
 
   @Double()
   external double gflops;

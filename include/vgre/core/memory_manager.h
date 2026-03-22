@@ -53,7 +53,7 @@ struct MemoryPool {
 };
 
 // ── Lock-free UVM region tracking for signal handler ───────────────────────
-constexpr size_t MAX_MANAGED_REGIONS = 1024;
+constexpr size_t MAX_MANAGED_REGIONS = 4096;
 struct ManagedRegion {
   std::atomic<void *> ptr{nullptr};
   std::atomic<size_t> size{0};
