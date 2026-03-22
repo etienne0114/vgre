@@ -5,7 +5,6 @@
  */
 
 #include "vgre/api/cuda_interceptor.h"
-#include "vgre/common/logger.h"
 #include "vgre/common/elf_reader.h"
 #include "vgre/core/runtime_engine.h"
 

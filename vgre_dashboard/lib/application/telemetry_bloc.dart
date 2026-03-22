@@ -490,11 +490,15 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
             final m = item as Map<String, dynamic>;
             final name = (m['name'] ?? 'kernel').toString();
             
-            // Check for new history items to persist
+            // Check for new history items to persist (authoritative timestamp comparison)
             if (name == _selectedKernelName && selectedHistory.isNotEmpty) {
-                // In a real app we'd compare timestamps to only save new ones.
-                // For this implementation, we'll save the latest execution if it's new.
-                sqlite.saveKernelExecution(name, selectedHistory.last, _currentDeviceId);
+                final lastSavedTs = _lastSelectedKernelStats?.history.isNotEmpty == true 
+                    ? _lastSelectedKernelStats!.history.last.timestamp 
+                    : DateTime.fromMillisecondsSinceEpoch(0);
+                
+                if (selectedHistory.last.timestamp.isAfter(lastSavedTs)) {
+                    sqlite.saveKernelExecution(name, selectedHistory.last, _currentDeviceId);
+                }
             }
 
             final k = KernelStat(

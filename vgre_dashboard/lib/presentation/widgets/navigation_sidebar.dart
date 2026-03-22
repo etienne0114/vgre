@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../application/telemetry_bloc.dart';
 import '../../core/theme/vgre_theme.dart';
 
 class VgreNavigationSidebar extends StatefulWidget {
@@ -117,20 +119,27 @@ class _VgreNavigationSidebarState extends State<VgreNavigationSidebar> {
           if (!widget.isCompact)
             Padding(
               padding: const EdgeInsets.all(24.0),
-              child: Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.03),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: Column(
-                  children: [
-                    _footerItem("RUNTIME", "v2.1.0-ALPHA"),
-                    const SizedBox(height: 12),
-                    _footerItem("NODES", "3 CONNECTED"),
-                  ],
-                ),
+              child: BlocBuilder<TelemetryBloc, TelemetryState>(
+                builder: (context, state) {
+                  final String version = (state is TelemetryActive) ? state.backendVersion : "v0.0.0";
+                  final int nodeCount = (state is TelemetryActive) ? state.telemetry.clusterNodes.length : 0;
+                  
+                  return Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.03),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: Column(
+                      children: [
+                        _footerItem("RUNTIME", "v$version"),
+                        const SizedBox(height: 12),
+                        _footerItem("NODES", "$nodeCount CONNECTED"),
+                      ],
+                    ),
+                  );
+                },
               ),
             ),
         ],
