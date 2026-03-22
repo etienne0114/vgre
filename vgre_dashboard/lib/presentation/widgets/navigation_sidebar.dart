@@ -111,6 +111,7 @@ class _VgreNavigationSidebarState extends State<VgreNavigationSidebar> {
                   selectedIndex: widget.selectedIndex,
                   onTap: () => widget.onDestinationSelected(5),
                 ),
+                const SizedBox(height: 16),
               ],
             ),
           ),

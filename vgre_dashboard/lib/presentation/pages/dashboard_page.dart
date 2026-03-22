@@ -14,6 +14,7 @@ import 'cluster_topology_page.dart';
 import 'hardware_tuning_page.dart';
 import 'memory_analysis_page.dart';
 import 'dashboard_settings_page.dart';
+import '../widgets/cluster_heatmap_widget.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -95,6 +96,8 @@ class _DashboardPageState extends State<DashboardPage> {
         return const HardwareTuningPage();
       case 4:
         return const MemoryAnalysisPage();
+      case 5:
+        return const DashboardSettingsPage();
       case 5:
         return const DashboardSettingsPage();
       default:

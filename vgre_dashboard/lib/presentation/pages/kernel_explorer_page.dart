@@ -406,8 +406,6 @@ class _KernelDetailsPanel extends StatelessWidget {
                     Row(
                       children: [
                         Expanded(child: _buildStatCard("AVG LATENCY", "${selectedKernel!.avgTimeMs.toStringAsFixed(2)} ms", VgreTheme.primaryNeon, Icons.timer)),
-                        const SizedBox(width: 16),
-                        Expanded(child: _buildStatCard("RANGE", "${selectedKernel!.minTimeMs.toStringAsFixed(2)}-${selectedKernel!.maxTimeMs.toStringAsFixed(2)} ms", VgreTheme.textMuted, Icons.compare_arrows)),
                       ],
                     ),
                     const SizedBox(height: 16),
@@ -447,33 +445,37 @@ class _KernelDetailsPanel extends StatelessWidget {
     );
   }
 
-  Widget _buildStatCard(String label, String value, Color color, IconData icon) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.05),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color.withValues(alpha: 0.2)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(icon, size: 14, color: color),
-              const SizedBox(width: 6),
-              Text(
-                label,
-                style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10, letterSpacing: 0.5),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            value,
-            style: TextStyle(color: color, fontSize: 16, fontWeight: FontWeight.bold, fontFamily: 'Orbitron'),
-          ),
-        ],
+  Widget _buildStatCard(String label, String value, Color color, IconData icon, {VoidCallback? onTap}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withValues(alpha: 0.2)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(icon, size: 14, color: color),
+                const SizedBox(width: 6),
+                Text(
+                  label,
+                  style: const TextStyle(color: VgreTheme.textMuted, fontSize: 10, letterSpacing: 0.5),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              value,
+              style: TextStyle(color: color, fontSize: 16, fontWeight: FontWeight.bold, fontFamily: 'Orbitron'),
+            ),
+          ],
+        ),
       ),
     );
   }

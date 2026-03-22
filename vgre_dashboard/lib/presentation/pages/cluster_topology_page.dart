@@ -7,6 +7,7 @@ import '../../application/telemetry_bloc.dart';
 import '../../domain/models/telemetry.dart';
 import '../widgets/glass_card.dart';
 import '../../core/theme/vgre_theme.dart';
+import '../widgets/cluster_heatmap_widget.dart';
 
 class ClusterTopologyPage extends StatelessWidget {
   const ClusterTopologyPage({super.key});
@@ -30,6 +31,18 @@ class ClusterTopologyPage extends StatelessWidget {
               _buildHeader(),
               const SizedBox(height: 24),
               _buildSecuritySummary(telemetry.securityInfo),
+              const SizedBox(height: 32),
+              SizedBox(
+                height: 200,
+                child: ClusterHeatmapWidget(
+                  nodeTemperatures: {
+                    for (var node in nodes) node.address: 35.0 + (node.latencyMs.clamp(0.0, 50.0)),
+                  },
+                  nodePowerUsage: {
+                    for (var node in nodes) node.address: 5.0 + (node.cpuCores * 15.0),
+                  },
+                ),
+              ),
               const SizedBox(height: 32),
               _Topology3DView(nodes: nodes),
               const SizedBox(height: 32),
