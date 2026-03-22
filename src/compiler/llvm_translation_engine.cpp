@@ -1,5 +1,6 @@
 #include "vgre/compiler/llvm_translation_engine.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/system_utils.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -12,7 +13,6 @@
 #include <cctype>
 
 #ifndef _WIN32
-#include <dlfcn.h>
 #include <sys/wait.h>
 #endif
 
@@ -38,12 +38,7 @@
 #include <llvm/Target/TargetMachine.h>
 #pragma GCC diagnostic pop
 
-namespace vgre_cuda {
-  struct dim3 {
-    uint32_t x = 1, y = 1, z = 1;
-    dim3(uint32_t x_ = 1, uint32_t y_ = 1, uint32_t z_ = 1) : x(x_), y(y_), z(z_) {}
-  };
-}
+#include "vgre/common/types.h"
 
 extern "C" {
   int vgre_jit_get_thread_id();
@@ -60,10 +55,10 @@ extern "C" {
   static __thread dim3_pod t_gridDim = {1, 1, 1};
   static __thread void* t_sharedMem = nullptr;
 
-  __attribute__((visibility("default"))) vgre_cuda::dim3* vgre_jit_get_threadIdx() { return (vgre_cuda::dim3*)&t_threadIdx; }
-  __attribute__((visibility("default"))) vgre_cuda::dim3* vgre_jit_get_blockIdx() { return (vgre_cuda::dim3*)&t_blockIdx; }
-  __attribute__((visibility("default"))) vgre_cuda::dim3* vgre_jit_get_blockDim() { return (vgre_cuda::dim3*)&t_blockDim; }
-  __attribute__((visibility("default"))) vgre_cuda::dim3* vgre_jit_get_gridDim() { return (vgre_cuda::dim3*)&t_gridDim; }
+  __attribute__((visibility("default"))) vgre::dim3* vgre_jit_get_threadIdx() { return (vgre::dim3*)&t_threadIdx; }
+  __attribute__((visibility("default"))) vgre::dim3* vgre_jit_get_blockIdx() { return (vgre::dim3*)&t_blockIdx; }
+  __attribute__((visibility("default"))) vgre::dim3* vgre_jit_get_blockDim() { return (vgre::dim3*)&t_blockDim; }
+  __attribute__((visibility("default"))) vgre::dim3* vgre_jit_get_gridDim() { return (vgre::dim3*)&t_gridDim; }
   __attribute__((visibility("default"))) void** vgre_jit_get_sharedMem() { return &t_sharedMem; }
 }
 
@@ -341,8 +336,7 @@ static size_t computeStableHash(const std::string& str) {
 }
 
 static std::string getCacheDir() {
-  const char* home = std::getenv("HOME");
-  std::string path = home ? std::string(home) + "/.vgre_cache" : ".vgre_cache";
+  std::string path = vgre::common::getCacheRoot();
   std::filesystem::create_directories(path);
   return path;
 }
@@ -414,7 +408,7 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   oss << "#include <thread>\n";
   oss << "#include <vector>\n";
   oss << "#include <cstring>\n";
-  oss << "#include <cstdlib>\n#include <cstddef>\n\n";
+  oss << "#include <cstdlib>\n#include <cstddef>\n#include \"vgre/runtime/gpu_thread_context.h\"\n\n";
 
   // Provide declarations for JIT-specific telemetry and barriers
   oss << "extern \"C\" {\n";
@@ -597,55 +591,10 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
   std::string logFile = (tmpDir / ("vgre_jit_" + kernelName + ".log")).string();
 
   // Robust Include Discovery
-  std::string includePath = "./include";
-  bool found = false;
-
-  const char* envPath = std::getenv("VGRE_INCLUDE_DIR");
-  if (envPath) {
-    includePath = envPath;
-    found = true;
-  } else {
-    // Try to find relative to this library's location (libvgre.so)
-    std::filesystem::path libPath;
-#ifndef _WIN32
-    Dl_info info;
-    static int dummy = 0;
-    if (dladdr((void*)&dummy, &info) && info.dli_fname) {
-      libPath = std::filesystem::path(info.dli_fname).parent_path();
-    }
-#endif
-
-    if (!libPath.empty()) {
-      // 0. Check current lib dir (local deployment)
-      if (std::filesystem::exists(libPath / "include/vgre/compiler/cpu_cuda_env.h")) {
-        includePath = (libPath / "include").string();
-        found = true;
-      }
-      // 1. Check ../include (standard bundle layout)
-      else if (std::filesystem::exists(libPath.parent_path() / "include/vgre/compiler/cpu_cuda_env.h")) {
-        includePath = (libPath.parent_path() / "include").string();
-        found = true;
-      }
-      // 2. Check ../../include (dev build layout: build/compiler/libvgre.so)
-      else if (std::filesystem::exists(libPath.parent_path().parent_path() / "include/vgre/compiler/cpu_cuda_env.h")) {
-        includePath = (libPath.parent_path().parent_path() / "include").string();
-        found = true;
-      }
-    }
-
-    if (!found) {
-      // Fallback: Search upwards from current working directory
-      auto cur = std::filesystem::current_path();
-      for (int i = 0; i < 5; ++i) {
-        if (std::filesystem::exists(cur / "include/vgre/compiler/cpu_cuda_env.h")) {
-          includePath = (cur / "include").string();
-          found = true;
-          break;
-        }
-        if (cur.has_parent_path()) cur = cur.parent_path();
-        else break;
-      }
-    }
+  std::string includePath = vgre::common::findIncludeDir();
+  if (includePath.empty()) {
+    VGRE_LOG_ERROR("LLVMTranslationEngine", "Could not find VGRE include directory");
+    return VGREResult::ERROR_IO;
   }
 
   {
