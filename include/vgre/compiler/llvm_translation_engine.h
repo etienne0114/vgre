@@ -28,6 +28,12 @@ public:
   LLVMTranslationEngine();
   ~LLVMTranslationEngine();
 
+  // Perform static analysis on LLVM module to count FP operations
+  uint64_t analyzeStaticFlops(const llvm::Module &module);
+
+  // Recalibrate instruction count for a kernel using the JIT compiler
+  uint64_t getInstructionCount(const std::string &source);
+
   // Translate KernelIR to a compiled function
   VGREResult translate(KernelIR &ir, CompiledKernelFn &outFn);
 
@@ -53,12 +59,6 @@ public:
 
   // Get compilation statistics
   size_t getCacheSize() const;
-
-  // Recalibrate instruction count for a kernel using the JIT compiler
-  uint64_t getInstructionCount(const std::string &source);
-
-  // Perform static analysis on LLVM module to count FP operations
-  uint64_t analyzeStaticFlops(const llvm::Module &module);
 
 private:
   // Generate a C++ wrapper that provides the CUDA execution environment

@@ -84,6 +84,7 @@ struct KernelIR {
   size_t sharedMemSize = 0;
   uint64_t estimatedInstructionCount = 0;
   uint64_t estimatedMemoryAccessCount = 0;
+  uint64_t staticFlopCount = 0;
 };
 
 // ── Compiled kernel function pointer ───────────────────────────────────────

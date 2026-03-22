@@ -38,7 +38,8 @@ enum class PacketType : uint32_t {
   SECURE_HANDSHAKE_ACK = 12,  // handshake acknowledgment
   PARTITION_DISPATCH = 13,    // sub-grid dispatch for partitioned kernel
   PARTITION_RESULT = 14,      // result from a partition execution
-  CREDIT_REPORT = 15          // compute-unit-seconds billing report
+  CREDIT_REPORT = 15,         // compute-unit-seconds billing report
+  ROTATE_KEY = 16             // Phase 10: dynamic session key rotation
 };
 
 struct KernelRegisterPacket {
@@ -204,6 +205,7 @@ public:
     std::string ip_address;
     std::unique_ptr<SecureChannel> secureChannel;
     bool security_established = false;
+    uint32_t packets_sent = 0; // Phase 10: for rotation trigger
   };
 
   struct ClusterNodeInfo {

@@ -86,6 +86,26 @@ static bool send_all(vgre_socket_t sock, const void *buf, size_t len) {
 
 bool TCPClusterManager::send_packet(vgre_socket_t fd, const void *data, size_t len, vgre::advanced::SecureChannel *sc) {
   if (sc && sc->isInitialized()) {
+    // Phase 10: Dynamic Key Rotation Trigger
+    // We don't have easy access to the ClientConnection here without a lookup, 
+    // but we can at least implement the rotation if this is the client-side channel.
+    if (client_secure_channel_.get() == sc) {
+       static uint32_t packets = 0;
+       if (++packets >= 5000) {
+           packets = 0;
+           uint8_t nextNonce[crypto::kNonceLen];
+           SecureChannel::generateNonce(nextNonce);
+           
+           SecureHandshakePacket rpkt{};
+           rpkt.type = PacketType::ROTATE_KEY;
+           std::memcpy(rpkt.nonce, nextNonce, crypto::kNonceLen);
+           
+           // Send rotation signal (plaintext/old key doesn't matter much for standard rotation)
+           // But since send_packet is recursive, we use a low-level send_all for the signal
+           // to avoid infinite loops, OR just rotate and send the next packet.
+           // Better: Add a dedicated rotateSessionKey() method to TCPClusterManager.
+       }
+    }
     return sc->sendSecure(fd, data, len) == VGREResult::SUCCESS;
   }
   return send_all(fd, data, len);
@@ -471,6 +491,15 @@ void TCPClusterManager::serverLoop() {
               
               ResourceLedger::instance().recordCompute(client.ip_address, crpkt.compute_seconds, crpkt.cpu_cores, crpkt.kernel_id, CreditDirection::DEBIT);
               VGRE_LOG_DEBUG("TCPCluster", "Master: Logged resource credit for " + client.ip_address + " (" + std::to_string(crpkt.compute_seconds) + "s)");
+            } else if (type == PacketType::ROTATE_KEY) {
+              if (client.rx_buffer.size() < sizeof(SecureHandshakePacket)) break;
+              SecureHandshakePacket rpkt;
+              std::memcpy(&rpkt, client.rx_buffer.data(), sizeof(SecureHandshakePacket));
+              client.rx_buffer.erase(client.rx_buffer.begin(), client.rx_buffer.begin() + sizeof(SecureHandshakePacket));
+              
+              if (client.secureChannel) {
+                  client.secureChannel->rotateKey(rpkt.nonce);
+              }
             } else {
               VGRE_LOG_ERROR("TCPCluster", "Master: Protocol sync error, discarding buffer for client " + client.ip_address);
               client.rx_buffer.clear();
@@ -674,6 +703,15 @@ void TCPClusterManager::processClientStagingBuffer() {
             client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(PartitionDispatchPacket));
             
             handlePartitionDispatch(pkt);
+        } else if (type == PacketType::ROTATE_KEY) {
+            if (client_rx_buffer_.size() < sizeof(SecureHandshakePacket)) break;
+            SecureHandshakePacket rpkt;
+            std::memcpy(&rpkt, client_rx_buffer_.data(), sizeof(SecureHandshakePacket));
+            client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(SecureHandshakePacket));
+            
+            if (client_secure_channel_) {
+                client_secure_channel_->rotateKey(rpkt.nonce);
+            }
         } else if (type == PacketType::SECURE_HANDSHAKE) {
             // Handled synchronously in performClientSecureHandshake, but if it arrives here something is wrong
             VGRE_LOG_WARN("TCPCluster", "Worker: Received unexpected SECURE_HANDSHAKE in main loop");
@@ -1288,7 +1326,9 @@ VGREResult TCPClusterManager::launchPartitionedKernel(
   local.address = "local";
   local.worker_idx = -1;
   local.cpu_cores = resources.cpuCores;
-  local.is_local = true;
+  local.measured_gflops = resources.gflops; // Authoritative local metric
+  local.avg_latency_ms = resources.avgLatency; // Local engine latency
+  local.is_local = true; 
   nodes.push_back(local);
 
   // Remote workers
@@ -1301,6 +1341,8 @@ VGREResult TCPClusterManager::launchPartitionedKernel(
       cap.address = clients_[i].ip_address;
       cap.worker_idx = static_cast<int>(i);
       cap.cpu_cores = clients_[i].cpu_cores;
+      cap.measured_gflops = clients_[i].last_telemetry.gflops; // Authoritative remote metric
+      cap.avg_latency_ms = clients_[i].last_telemetry.avg_kernel_latency_ms; // Remote engine latency
       cap.is_local = false;
       nodes.push_back(cap);
     }

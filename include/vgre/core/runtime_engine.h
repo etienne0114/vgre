@@ -75,6 +75,13 @@ public:
   VGREResult getKernelArgTypes(KernelId id, std::vector<ArgType> &outTypes);
   const KernelIR *getKernelIR(KernelId id) const;
 
+  /**
+   * @brief Dynamically fuses multiple kernels into a single JIT unit.
+   * @param ids Ordered list of kernel IDs to fuse.
+   * @param outFusedId New kernel ID representing the fused unit.
+   */
+  VGREResult fuseKernels(const std::vector<KernelId> &ids, KernelId &outFusedId);
+
   VGREResult unloadModule(ModuleHandle module);
 
   VGREResult launchKernel(KernelId id, const dim3 &gridDim,

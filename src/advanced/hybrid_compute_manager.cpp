@@ -1,4 +1,5 @@
 #include "vgre/advanced/hybrid_compute_manager.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
@@ -61,7 +62,17 @@ VGREResult HybridComputeManager::detectResources() {
 
 ComputeResources HybridComputeManager::getResources() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return resources_;
+  ComputeResources res = resources_;
+
+  // Phase 10: Pull authoritative metrics for local node from RuntimeEngine
+  // This ensures the Load Balancer has ground-truth data.
+  vgre_telemetry_t tele = {};
+  if (vgre_get_telemetry(&tele) == 0) { // VGRE_SUCCESS
+    res.gflops = tele.gflops;
+    res.avgLatency = tele.avg_kernel_latency_ms;
+  }
+
+  return res;
 }
 
 // ── Detect CPU ─────────────────────────────────────────────────────────────

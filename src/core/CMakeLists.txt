@@ -5,6 +5,7 @@ add_library(vgre_core OBJECT
     event.cpp
     runtime_engine.cpp
     graph_manager.cpp
+    graph_optimizer.cpp
     texture_manager.cpp
 )
 
