@@ -5,6 +5,8 @@
  */
 
 #include "vgre/api/cuda_interceptor.h"
+#include "vgre/common/logger.h"
+#include "vgre/common/elf_reader.h"
 #include "vgre/core/runtime_engine.h"
 
 #include <cstring>
@@ -204,6 +206,7 @@ extern "C" void *vgre_register_module_data(const void *data, size_t size);
 extern "C" bool vgre_unregister_module_data(void *handle);
 extern "C" const char *vgre_get_module_source(void *handle);
 extern "C" void *vgre_lookup_symbol(void *handle, const char *name, size_t *size);
+extern "C" void *vgre_lookup_texture_ref(void *handle, const char *name);
 #include "vgre/core/texture_manager.h"
 
 struct CUtexref_st {
@@ -233,9 +236,10 @@ CUresult cuModuleLoadData(CUmodule *module, const void *image) {
     
     size_t len = 0;
     if (header[0] == ELF_MAGIC) {
-        // Authoritative: For ELF binaries, we scan for a common large window.
-        // In a full implementation, we would parse the ELF headers to find the exact size.
-        len = 8 * 1024 * 1024; 
+        // Authoritative: Parse ELF headers to find the exact image size
+        vgre::common::ELFReader reader(image, 1024 * 1024); // Initial scan size
+        len = reader.getTotalSize();
+        if (len == 0) len = 8 * 1024 * 1024; // Fallback to conservative estimate
     } else {
         len = std::strlen(reinterpret_cast<const char *>(image));
     }
@@ -410,10 +414,16 @@ CUresult cuTexRefSetFlags(CUtexref hTexRef, unsigned int Flags) {
   return CUDA_SUCCESS;
 }
 
-CUresult cuModuleGetTexRef(CUtexref *pTexRef, CUmodule /*hmod*/, const char * /*name*/) {
-  if (!pTexRef) return CUDA_ERROR_INVALID_VALUE;
-  // This would ideally lookup a texture reference defined in the module.
-  // For now, we return a new one.
+CUresult cuModuleGetTexRef(CUtexref *pTexRef, CUmodule hmod, const char *name) {
+  if (!pTexRef || !name) return CUDA_ERROR_INVALID_VALUE;
+  
+  void *tex = vgre_lookup_texture_ref(hmod, name);
+  if (tex) {
+    *pTexRef = reinterpret_cast<CUtexref>(tex);
+    return CUDA_SUCCESS;
+  }
+
+  // Authoritative fallback: return a fresh one if it doesn't exist in the module
   return cuTexRefCreate(pTexRef);
 }
 

@@ -8,6 +8,7 @@
 
 #include "vgre/api/cuda_interceptor.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/elf_reader.h"
 #include "vgre/core/memory_manager.h"
 #include <cstdio>
 #include <cstring>
@@ -34,129 +35,7 @@ struct dim3 {
 // ── Global Kernel Registry ─────────────────────────────────────────────────
 // Robust registry for tracking fatbinary modules and their associated kernels
 
-class ELFReader {
-public:
-  struct Header {
-    uint8_t  magic[4]; // 0x7f, 'E', 'L', 'F'
-    uint8_t  cls;
-    uint8_t  data_encoding;
-    uint8_t  version;
-    uint8_t  osabi;
-    uint8_t  abiversion;
-    uint8_t  pad[7];
-    uint16_t type;
-    uint16_t machine;
-    uint32_t version2;
-    uint64_t entry;
-    uint64_t phoff;
-    uint64_t shoff;
-    uint32_t flags;
-    uint16_t ehsize;
-    uint16_t phentsize;
-    uint16_t phnum;
-    uint16_t shentsize;
-    uint16_t shnum;
-    uint16_t shstrndx;
-  };
-
-  struct SectionHeader {
-    uint32_t name;
-    uint32_t type;
-    uint64_t flags;
-    uint64_t addr;
-    uint64_t offset;
-    uint64_t size;
-    uint32_t link;
-    uint32_t info;
-    uint64_t addralign;
-    uint64_t entsize;
-  };
-
-  struct Symbol {
-    uint32_t name;
-    uint8_t  info;
-    uint8_t  other;
-    uint16_t shndx;
-    uint64_t value;
-    uint64_t size;
-  };
-
-  ELFReader(const void* data, size_t size) : data_(reinterpret_cast<const uint8_t*>(data)), size_(size) {}
-
-  bool isValid() const {
-    if (size_ < sizeof(Header)) return false;
-    const Header* h = reinterpret_cast<const Header*>(data_);
-    return h->magic[0] == 0x7f && h->magic[1] == 'E' && h->magic[2] == 'L' && h->magic[3] == 'F';
-  }
-
-  const char* getSectionData(const char* targetName, size_t& outSize) {
-    if (!isValid()) return nullptr;
-    const Header* h = reinterpret_cast<const Header*>(data_);
-    if (h->shoff == 0 || h->shnum == 0) return nullptr;
-
-    const SectionHeader* shstr = reinterpret_cast<const SectionHeader*>(data_ + h->shoff + h->shstrndx * h->shentsize);
-    const char* strtab = reinterpret_cast<const char*>(data_ + shstr->offset);
-
-    for (int i = 0; i < h->shnum; ++i) {
-      const SectionHeader* sh = reinterpret_cast<const SectionHeader*>(data_ + h->shoff + i * h->shentsize);
-      const char* name = strtab + sh->name;
-      if (std::strcmp(name, targetName) == 0) {
-        outSize = sh->size;
-        return reinterpret_cast<const char*>(data_ + sh->offset);
-      }
-    }
-    return nullptr;
-  }
-
-  struct SymbolInfo {
-    std::string name;
-    uint64_t value;
-    uint64_t size;
-  };
-
-  std::vector<SymbolInfo> getGlobalSymbols() {
-    std::vector<SymbolInfo> results;
-    if (!isValid()) return results;
-    const Header* h = reinterpret_cast<const Header*>(data_);
-    
-    const SectionHeader* symtab_sh = nullptr;
-    const SectionHeader* strtab_sh = nullptr;
-
-    const SectionHeader* shstr = reinterpret_cast<const SectionHeader*>(data_ + h->shoff + h->shstrndx * h->shentsize);
-    const char* shstrtab = reinterpret_cast<const char*>(data_ + shstr->offset);
-
-    for (int i = 0; i < h->shnum; ++i) {
-      const SectionHeader* sh = reinterpret_cast<const SectionHeader*>(data_ + h->shoff + i * h->shentsize);
-      const char* name = shstrtab + sh->name;
-      if (sh->type == 2) { // SHT_SYMTAB
-        symtab_sh = sh;
-      } else if (std::strcmp(name, ".strtab") == 0) {
-        strtab_sh = sh;
-      }
-    }
-
-    if (symtab_sh && strtab_sh) {
-      const Symbol* syms = reinterpret_cast<const Symbol*>(data_ + symtab_sh->offset);
-      const char* strings = reinterpret_cast<const char*>(data_ + strtab_sh->offset);
-      size_t numSyms = symtab_sh->size / sizeof(Symbol);
-
-      for (size_t i = 0; i < numSyms; ++i) {
-        const Symbol& s = syms[i];
-        uint8_t bind = s.info >> 4;
-        uint8_t type = s.info & 0xf;
-        // STB_GLOBAL and (STT_OBJECT or STT_FUNC)
-        if (bind == 1 && (type == 1 || type == 2) && s.name != 0) {
-          results.push_back({strings + s.name, s.value, s.size});
-        }
-      }
-    }
-    return results;
-  }
-
-private:
-  const uint8_t* data_;
-  size_t size_;
-};
+using namespace vgre::common;
 
 static std::string extractPTXFromImage(const void *image, size_t sizeHint = 0) {
   if (!image)
@@ -416,6 +295,26 @@ public:
     return nullptr;
   }
 
+  void registerTextureRef(void *handlePtr, const char *name, void *texRef) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto *handle = reinterpret_cast<ModuleHandleWrapper *>(handlePtr);
+    moduleTextureRefs_[handle][name] = texRef;
+    VGRE_LOG_INFO("CUDART", "Registered texture reference '" + std::string(name) + "' for module " + std::to_string(handle->id));
+  }
+
+  void *lookupTextureRef(void *handlePtr, const char *name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto *handle = reinterpret_cast<ModuleHandleWrapper *>(handlePtr);
+    auto it = moduleTextureRefs_.find(handle);
+    if (it != moduleTextureRefs_.end()) {
+      auto tit = it->second.find(name);
+      if (tit != it->second.end()) {
+        return tit->second;
+      }
+    }
+    return nullptr;
+  }
+
 private:
   struct ModuleHandleWrapper {
     uint64_t id;
@@ -464,6 +363,7 @@ private:
   std::unordered_map<const void *, std::string> hostToSource_;
   std::unordered_map<const void *, void *> hostVarToDevicePtr_;
   std::unordered_map<ModuleHandleWrapper *, std::unordered_map<std::string, VariableMetadata>> moduleNamedVariables_;
+  std::unordered_map<ModuleHandleWrapper *, std::unordered_map<std::string, void *>> moduleTextureRefs_;
 };
 
 extern "C" void *vgre_lookup_symbol(void *handle, const char *name, size_t *size) {
@@ -477,6 +377,14 @@ extern "C" bool vgre_unregister_module_data(void *handle) {
 
 extern "C" void *vgre_register_module_data(const void *data, size_t size) {
   return CUDAModuleRegistry::instance().registerModuleData(data, size);
+}
+
+extern "C" void vgre_register_texture_ref(void *handle, const char *name, void *texRef) {
+  CUDAModuleRegistry::instance().registerTextureRef(handle, name, texRef);
+}
+
+extern "C" void *vgre_lookup_texture_ref(void *handle, const char *name) {
+  return CUDAModuleRegistry::instance().lookupTextureRef(handle, name);
 }
 
 extern "C" const char *vgre_get_module_source(void *handle) {
