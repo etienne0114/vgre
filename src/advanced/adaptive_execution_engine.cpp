@@ -25,7 +25,10 @@ namespace advanced {
 AdaptiveExecutionEngine::AdaptiveExecutionEngine()
     : maxCores_(static_cast<int>(std::thread::hardware_concurrency())),
       realFlopsAcct_(0),
-      realBytesAcct_(0) {
+      realBytesAcct_(0),
+      lastFlops_(0),
+      lastBytes_(0),
+      lastSampleTime_(std::chrono::steady_clock::now()) {
   if (maxCores_ <= 0)
     maxCores_ = 4;
   
@@ -105,21 +108,49 @@ void AdaptiveExecutionEngine::recordExecution(const std::string &kernelName,
 }
 
 void AdaptiveExecutionEngine::recordRealFlops(uint64_t flops) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  realFlopsAcct_ += flops;
-  
-  // Also update the moving average throughput for real-time display
-  // We use a small window to show "current" GFLOPS
-  double currentGflops = (static_cast<double>(flops) / 1e9); 
-  totalGflops_ = (totalGflops_ * 0.9) + (currentGflops * 0.1);
+  realFlopsAcct_.fetch_add(flops, std::memory_order_relaxed);
 }
 
 void AdaptiveExecutionEngine::recordRealMemoryAccess(uint64_t bytes) {
+  realBytesAcct_.fetch_add(bytes, std::memory_order_relaxed);
+}
+
+void AdaptiveExecutionEngine::updateInstantaneousMetrics() {
   std::lock_guard<std::mutex> lock(mutex_);
-  realBytesAcct_ += bytes;
   
-  double currentBandwidth = (static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
-  totalBandwidth_ = (totalBandwidth_ * 0.9) + (currentBandwidth * 0.1);
+  auto now = std::chrono::steady_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(now - lastSampleTime_).count();
+  
+  if (duration < 10000) return; // Sample at most 100Hz
+
+  uint64_t currentFlops = realFlopsAcct_.load(std::memory_order_relaxed);
+  uint64_t currentBytes = realBytesAcct_.load(std::memory_order_relaxed);
+  
+  uint64_t deltaFlops = (currentFlops >= lastFlops_) ? (currentFlops - static_cast<uint64_t>(lastFlops_)) : 0;
+  uint64_t deltaBytes = (currentBytes >= lastBytes_) ? (currentBytes - static_cast<uint64_t>(lastBytes_)) : 0;
+  
+  double dt_sec = static_cast<double>(duration) / 1000000.0;
+  
+  instantGflops_ = (static_cast<double>(deltaFlops) / 1e9) / dt_sec;
+  instantBandwidth_ = (static_cast<double>(deltaBytes) / (1024.0 * 1024.0 * 1024.0)) / dt_sec;
+  
+  // Apply a very light smoothing to avoid extreme jitter on the UI gauges
+  totalGflops_ = (totalGflops_ * 0.2) + (instantGflops_ * 0.8);
+  totalBandwidth_ = (totalBandwidth_ * 0.2) + (instantBandwidth_ * 0.8);
+  
+  lastFlops_ = currentFlops;
+  lastBytes_ = currentBytes;
+  lastSampleTime_ = now;
+}
+
+double AdaptiveExecutionEngine::getInstantaneousGFLOPS() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return instantGflops_;
+}
+
+double AdaptiveExecutionEngine::getInstantaneousBandwidth() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return instantBandwidth_;
 }
 
 // ── Analyze profile and update optimal parameters ──────────────────────────

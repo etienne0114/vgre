@@ -16,6 +16,35 @@ namespace compiler {
 ClangKernelParser::ClangKernelParser() = default;
 ClangKernelParser::~ClangKernelParser() = default;
 
+static uint64_t countInstructionsRecursively(const llvm::json::Object* obj) {
+    if (!obj) return 0;
+    uint64_t count = 0;
+    
+    std::string kind = obj->getString("kind").value_or("").str();
+    // Core Compute & Memory Ops
+    if (kind == "BinaryOperator" || kind == "UnaryOperator" || 
+        kind == "ArraySubscriptExpr" || kind == "MemberExpr" ||
+        kind == "CallExpr" || kind == "ImplicitCastExpr") {
+        count = 1;
+    }
+    // Control Flow and Structure
+    if (kind == "ForStmt" || kind == "WhileStmt" || kind == "DoStmt") {
+        count = 20; // Loops are assumed to have at least some iterations for estimation
+    } else if (kind == "IfStmt" || kind == "SwitchStmt" || kind == "ConditionalOperator") {
+        count = 5;
+    }
+    
+    const auto* inner = obj->getArray("inner");
+    if (inner) {
+        for (const auto& node : *inner) {
+            if (const auto* child = node.getAsObject()) {
+                count += countInstructionsRecursively(child);
+            }
+        }
+    }
+    return count;
+}
+
 std::string ClangKernelParser::runClangAstDump(const std::string& source) {
     auto tmpDir = std::filesystem::temp_directory_path();
     std::string tempPath = (tmpDir / "vgre_kernel_tmp.cu").string();
@@ -171,6 +200,10 @@ VGREResult ClangKernelParser::parse(const std::string& name,
         }
         outIR.usesSharedMem = (source.find("__shared__") != std::string::npos);
         outIR.usesSyncthreads = (source.find("__syncthreads()") != std::string::npos);
+
+        // Feature 15: Authoritative Instruction Estimation (AST-based)
+        outIR.estimatedInstructionCount = countInstructionsRecursively(kernelObj);
+        if (outIR.estimatedInstructionCount < 5) outIR.estimatedInstructionCount = 5; // Minimum baseline
     }
 
     if (!found) {

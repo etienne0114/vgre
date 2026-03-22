@@ -118,9 +118,10 @@ VGREResult RuntimeEngine::initialize() {
       int cores = static_cast<int>(std::thread::hardware_concurrency());
       auto& aee = advanced::AdaptiveExecutionEngine::instance();
       aee.updateHardwareMetrics(cores, dp.clockRate / 1000000.0, 0.0);
-      if (!aee.isCalibrated()) {
-        aee.runBenchmark(); // Perform real micro-benchmark to override initial guess
-      }
+      // Perform real micro-benchmark in a background thread to avoid blocking initialization
+      std::thread([&aee]() {
+        aee.runBenchmark();
+      }).detach();
     }
     dev->createContext();
     devices_.push_back(std::move(dev));
@@ -549,19 +550,18 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
     auto start = std::chrono::steady_clock::now();
     size_t totalSharedMem = sharedMem + staticSharedMem;
     
-    exec->execute(fn, gridDim, blockDim, safeArgs->data(), totalSharedMem);
+    // Calculate per-block metrics for real-time instrumentation
+    uint64_t flopsPerBlock = 0;
+    uint64_t bytesPerBlock = 0;
     
-    auto end = std::chrono::steady_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(end - start).count();
-
-    size_t memBytes = 0;
-    size_t flops = 0;
     size_t totalThreads = gridDim.total() * blockDim.total();
+    uint32_t totalBlocksCount = gridDim.total();
 
     // 1. Authoritative memory accounting
     auto mm = &vgre::core::RuntimeEngine::instance().getMemoryManager();
     const auto *ir = vgre::core::RuntimeEngine::instance().getKernelIR(id);
     
+    size_t totalMemBytes = 0;
     for (size_t i = 0; i < argTypes.size(); ++i) {
       if (argTypes[i] == ArgType::POINTER) {
         void *ptr = nullptr;
@@ -569,21 +569,30 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
           ::memcpy(&ptr, (*argValues)[i].data(), sizeof(void*));
         }
         if (ptr && mm && mm->isValidHandle(ptr)) {
-          memBytes += mm->getAllocationSize(ptr);
+          totalMemBytes += mm->getAllocationSize(ptr);
         }
       } else if (argTypes[i] == ArgType::STRUCT) {
         if (ir && i < ir->argSizes.size()) {
-          memBytes += ir->argSizes[i] * totalThreads;
+          totalMemBytes += ir->argSizes[i] * totalThreads;
         }
       }
     }
+    bytesPerBlock = (totalBlocksCount > 0) ? (totalMemBytes / totalBlocksCount) : 0;
 
     // 2. Authoritative FLOPs
     if (ir && ir->estimatedInstructionCount > 0) {
-      flops = totalThreads * ir->estimatedInstructionCount;
+      flopsPerBlock = blockDim.total() * ir->estimatedInstructionCount;
     } else {
-      flops = totalThreads; // absolute minimum baseline
+      flopsPerBlock = blockDim.total(); // absolute minimum baseline
     }
+
+    exec->execute(fn, gridDim, blockDim, safeArgs->data(), totalSharedMem, flopsPerBlock, bytesPerBlock);
+    
+    auto end = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+    size_t memBytes = totalMemBytes;
+    size_t flops = flopsPerBlock * totalBlocksCount;
 
     vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
         kName, blockDim.total(), 8, ms, memBytes, flops);

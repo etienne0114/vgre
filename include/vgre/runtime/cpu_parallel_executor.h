@@ -21,7 +21,9 @@ public:
   // Execute a compiled kernel across the full grid
   VGREResult execute(const CompiledKernelFn &fn, const dim3 &gridDim,
                      const dim3 &blockDim, void **args,
-                     size_t sharedMemSize = 0);
+                     size_t sharedMemSize = 0,
+                     uint64_t flopsPerBlock = 0,
+                     uint64_t bytesPerBlock = 0);
 
   // Setters
   void setMaxThreads(int n);

@@ -22,6 +22,8 @@ __attribute__((visibility("default"))) int vgre_jit_get_thread_id() {
 }
 }
 
+#include "vgre/advanced/adaptive_execution_engine.h"
+
 namespace vgre {
 namespace runtime {
 
@@ -53,7 +55,9 @@ CPUParallelExecutor::~CPUParallelExecutor() = default;
 VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
                                         const dim3 &gridDim,
                                         const dim3 &blockDim, void **args,
-                                        size_t sharedMemSize) {
+                                        size_t sharedMemSize,
+                                        uint64_t flopsPerBlock,
+                                        uint64_t bytesPerBlock) {
   if (!fn) {
     VGRE_LOG_ERROR("CPUParallelExecutor", "Null kernel function");
     return VGREResult::ERROR_INVALID_KERNEL;
@@ -80,6 +84,10 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
     SharedMemory smem(sharedMemSize);
     fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, smem.raw(),
        smem.size());
+    
+    // Record metrics
+    if (flopsPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(flopsPerBlock);
+    if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
   } else {
 #ifdef _OPENMP
     // Cap OpenMP parallel threads to prevent oversubscribing the 1024-thread WorkerPool limit.
@@ -118,6 +126,10 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
             fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, threadSmem.raw(),
                threadSmem.size());
             
+            // Record metrics per block completion
+            if (flopsPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(flopsPerBlock);
+            if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
+
             vgre::runtime::GPUThreadContext::clearWarpMask();
             vgre::runtime::GPUThreadContext::clearBlockBarrier();
           }
@@ -138,6 +150,10 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
           fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, smem.raw(),
              smem.size());
              
+          // Record metrics per block completion
+          if (flopsPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(flopsPerBlock);
+          if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
+
           vgre::runtime::GPUThreadContext::clearWarpMask();
           vgre::runtime::GPUThreadContext::clearBlockBarrier();
         }
