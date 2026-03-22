@@ -41,16 +41,32 @@ struct TextureDescriptor {
   float borderColor = 0.0f;
 };
 
+// ── Resource view descriptor ───────────────────────────────────────────────
+struct ResourceViewDescriptor {
+  TextureElementType format;
+  size_t width;
+  size_t height;
+  size_t depth;
+  size_t offsetInBytes = 0;
+  unsigned int firstMipmapLevel = 0;
+  unsigned int lastMipmapLevel = 0;
+  unsigned int firstLayer = 0;
+  unsigned int lastLayer = 0;
+};
+
 // ── Texture object ─────────────────────────────────────────────────────────
 using TextureId = uint64_t;
 
 struct TextureObject {
   TextureId id = 0;
   const void *data = nullptr; // Pointer to underlying memory
+  size_t offsetInBytes = 0;   // Offset into data for views
   size_t width = 0;           // Width in elements
   size_t height = 0;          // Height in elements (1 for 1D textures)
   size_t depth = 0;           // Depth in elements (1 for 1D/2D textures)
   size_t elementSize = 0;     // Size per element in bytes
+  unsigned int layers = 1;    // Number of layers for array textures
+  unsigned int mips = 1;      // Number of mipmap levels
   TextureDescriptor desc;
 };
 
@@ -77,7 +93,14 @@ public:
   // ── Texture object lifecycle ─────────────────────────────────────────────
   VGREResult createTexture(TextureId &outId, const void *data, size_t width,
                            size_t height, size_t elementSize,
-                           const TextureDescriptor &desc);
+                           const TextureDescriptor &desc,
+                           unsigned int layers = 1);
+
+  // Create a view of an existing texture with a different format/size/offset
+  VGREResult createTextureView(TextureId &outId, TextureId baseTextureId,
+                               const ResourceViewDescriptor &viewDesc,
+                               const TextureDescriptor &texDesc);
+
   VGREResult destroyTexture(TextureId id);
 
   // ── Surface object lifecycle ─────────────────────────────────────────────
