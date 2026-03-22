@@ -645,6 +645,12 @@ void TCPClusterManager::processClientStagingBuffer() {
             KernelRegisterPacket kpkt;
             std::memcpy(&kpkt, client_rx_buffer_.data(), sizeof(KernelRegisterPacket));
             
+            if (auth_token_ != 0 && kpkt.auth_token != auth_token_) {
+                VGRE_LOG_ERROR("TCPCluster", "Rejected kernel registration: invalid auth token");
+                client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(KernelRegisterPacket) + kpkt.source_len);
+                break;
+            }
+
             size_t total_size = sizeof(KernelRegisterPacket) + kpkt.source_len;
             if (client_rx_buffer_.size() < total_size) break;
 
@@ -863,8 +869,20 @@ VGREResult TCPClusterManager::launchRemoteKernel(
       apkt.arg_index = i;
       apkt.arg_type = static_cast<uint8_t>(type);
       
-      // All scalars are currently treated as 8-byte values in the RPC layer for simplicity
-      std::memcpy(&apkt.value, args[i], 8);
+      size_t arg_size = 8;
+      switch (type) {
+        case ArgType::INT32:
+        case ArgType::UINT32:
+        case ArgType::FLOAT32:
+          arg_size = 4;
+          break;
+        default:
+          arg_size = 8;
+          break;
+      }
+      
+      std::memset(&apkt.value, 0, 8);
+      std::memcpy(&apkt.value, args[i], arg_size);
       send_packet(clients_[worker_idx].socket_fd, &apkt, sizeof(ArgScalarPacket), clients_[worker_idx].secureChannel.get());
     }
   }
@@ -898,6 +916,7 @@ void TCPClusterManager::broadcastKernelRegistration(uint64_t kernel_id,
   std::lock_guard<std::mutex> lock(clients_mutex_);
   KernelRegisterPacket kpkt{};
   kpkt.type = PacketType::REGISTER_KERNEL;
+  kpkt.auth_token = auth_token_;
   kpkt.kernel_id = kernel_id;
   std::strncpy(kpkt.name, name.c_str(), sizeof(kpkt.name) - 1);
   kpkt.source_len = static_cast<uint32_t>(source.length());
@@ -1000,12 +1019,12 @@ void TCPClusterManager::handleRemoteCommand(const RemoteCommandPacket &pkt) {
               dptr_pkt.type = PacketType::DATA_HEADER;
               dptr_pkt.target_ptr = arg.value;
               dptr_pkt.size = size;
-              send_all(client_fd_, &dptr_pkt, sizeof(DataHeaderPacket));
+              send_packet(client_fd_, &dptr_pkt, sizeof(DataHeaderPacket), client_secure_channel_.get());
 
               // 2. Send DATA_BODY
               PacketType body_type = PacketType::DATA_BODY;
-              send_all(client_fd_, &body_type, sizeof(PacketType));
-              send_all(client_fd_, ptr, size);
+              send_packet(client_fd_, &body_type, sizeof(PacketType), client_secure_channel_.get());
+              send_packet(client_fd_, ptr, size, client_secure_channel_.get());
           }
       }
   }
@@ -1015,7 +1034,7 @@ void TCPClusterManager::handleRemoteCommand(const RemoteCommandPacket &pkt) {
   resp.type = PacketType::RESPONSE;
   resp.kernel_id = pkt.kernel_id;
   resp.result = r;
-  send_all(client_fd_, &resp, sizeof(ResponsePacket));
+  send_packet(client_fd_, &resp, sizeof(ResponsePacket), client_secure_channel_.get());
   
   // Clear pending args after launch
   pending_args_.clear();
@@ -1026,6 +1045,10 @@ void TCPClusterManager::broadcastLocalTelemetry(
   if (enabled_ && !is_master_) {
     std::lock_guard<std::mutex> lock(client_mutex_);
     client_telemetry_buffer_ = telemetry;
+    TelemetryPacket tpkt{};
+    tpkt.type = PacketType::TELEMETRY;
+    tpkt.telemetry = telemetry;
+    send_packet(client_fd_, &tpkt, sizeof(TelemetryPacket), client_secure_channel_.get());
   }
 }
 
@@ -1477,7 +1500,7 @@ void TCPClusterManager::handlePartitionDispatch(
   prpkt.partition_id = pkt.partition_id;
   prpkt.result = r;
   prpkt.execution_time_ms = execMs;
-  send_all(client_fd_, &prpkt, sizeof(PartitionResultPacket));
+  send_packet(client_fd_, &prpkt, sizeof(PartitionResultPacket), client_secure_channel_.get());
 
   // Send credit report
   int localCores = static_cast<int>(std::thread::hardware_concurrency());
@@ -1491,7 +1514,7 @@ void TCPClusterManager::handlePartitionDispatch(
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::system_clock::now().time_since_epoch())
           .count());
-  send_all(client_fd_, &crpkt, sizeof(CreditReportPacket));
+  send_packet(client_fd_, &crpkt, sizeof(CreditReportPacket), client_secure_channel_.get());
 
   // Memory coherence: send back pointer results
   for (int i = 0; i < numArgs; ++i) {
@@ -1509,10 +1532,10 @@ void TCPClusterManager::handlePartitionDispatch(
         dptr_pkt.type = PacketType::DATA_HEADER;
         dptr_pkt.target_ptr = arg.value;
         dptr_pkt.size = size;
-        send_all(client_fd_, &dptr_pkt, sizeof(DataHeaderPacket));
+        send_packet(client_fd_, &dptr_pkt, sizeof(DataHeaderPacket), client_secure_channel_.get());
         PacketType body_type = PacketType::DATA_BODY;
-        send_all(client_fd_, &body_type, sizeof(PacketType));
-        send_all(client_fd_, ptr, size);
+        send_packet(client_fd_, &body_type, sizeof(PacketType), client_secure_channel_.get());
+        send_packet(client_fd_, ptr, size, client_secure_channel_.get());
       }
     }
   }

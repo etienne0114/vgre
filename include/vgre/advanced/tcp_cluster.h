@@ -43,9 +43,15 @@ enum class PacketType : uint32_t {
 
 struct KernelRegisterPacket {
   PacketType type;
+  uint64_t auth_token;
   uint64_t kernel_id;
   char name[64];
   uint32_t source_len;
+};
+
+struct TelemetryPacket {
+  PacketType type;
+  vgre_telemetry_t telemetry;
 };
 
 struct RemoteCommandPacket {
