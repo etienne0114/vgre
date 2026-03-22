@@ -3,15 +3,11 @@
 
 #include <cmath>
 #include <cstdint>
-#include "vgre/runtime/gpu_thread_context.h"
+
+#include "vgre/common/types.h"
 
 namespace vgre_cuda {
-
-struct dim3 {
-  uint32_t x, y, z;
-  dim3(uint32_t _x = 1, uint32_t _y = 1, uint32_t _z = 1)
-      : x(_x), y(_y), z(_z) {}
-};
+    using vgre::dim3;
 
 // Global thread/block indices provided by the wrapper, using an array mapping to bypass JIT TLS corruption
 extern "C" {
@@ -20,10 +16,10 @@ extern "C" {
   void vgre_jit_clear_block_barrier();
   
   // Dynamic TLS-based built-ins for stable parallel JIT linkage
-  vgre_cuda::dim3* vgre_jit_get_threadIdx();
-  vgre_cuda::dim3* vgre_jit_get_blockIdx();
-  vgre_cuda::dim3* vgre_jit_get_blockDim();
-  vgre_cuda::dim3* vgre_jit_get_gridDim();
+  vgre::dim3* vgre_jit_get_threadIdx();
+  vgre::dim3* vgre_jit_get_blockIdx();
+  vgre::dim3* vgre_jit_get_blockDim();
+  vgre::dim3* vgre_jit_get_gridDim();
   void** vgre_jit_get_sharedMem();
 }
 
@@ -34,24 +30,26 @@ extern "C" {
 #define sharedMem (*vgre_jit_get_sharedMem())
 
 // Atomic mappings for CPU
-#define atomicAdd(addr, val) __atomic_fetch_add(addr, val, __ATOMIC_SEQ_CST)
-#define atomicSub(addr, val) __atomic_fetch_sub(addr, val, __ATOMIC_SEQ_CST)
-#define atomicExch(addr, val) __atomic_exchange_n(addr, val, __ATOMIC_SEQ_CST)
-#define atomicCAS(addr, comp, val) ({ \
-    auto _comp = (comp); \
-    __atomic_compare_exchange_n(addr, &_comp, val, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); \
-    _comp; \
-})
+template <typename T> inline T atomicAdd(T *addr, T val) { return __atomic_fetch_add(addr, val, __ATOMIC_SEQ_CST); }
+template <typename T> inline T atomicSub(T *addr, T val) { return __atomic_fetch_sub(addr, val, __ATOMIC_SEQ_CST); }
+template <typename T> inline T atomicExch(T *addr, T val) { return __atomic_exchange_n(addr, val, __ATOMIC_SEQ_CST); }
+template <typename T> inline T atomicCAS(T *addr, T comp, T val) { 
+    T expected = comp; 
+    __atomic_compare_exchange_n(addr, &expected, val, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); 
+    return expected; 
+}
+
 // Block barrier: no-op when not executing in a true multi-threaded block
-#define __syncthreads() vgre::runtime::GPUThreadContext::blockBarrier()
+// The actual parallel implementation is handled in the JIT wrapper
+inline void __syncthreads() {}
 
 // CUDA-like math functions for the CPU
 inline float __fdividef(float a, float b) { return a / b; }
 inline float __fadd_rn(float a, float b) { return a + b; }
 inline float __fmul_rn(float a, float b) { return a * b; }
 
-#define __global__
-#define __device__
+#define __global__ __attribute__((section("vgre_global")))
+#define __device__ __attribute__((section("vgre_device")))
 #define __host__
 
 // For JIT translation, we map __shared__ to a pointer into our block buffer.
@@ -64,6 +62,42 @@ struct ptr_unwrapper {
   template<typename T>
   operator T*() const { return static_cast<T*>(p); }
 };
+
+// ── Texture/Surface Built-ins ──────────────────────────────────────────────
+extern "C" {
+  float vgre_tex1D_f32(uint64_t tex, float x);
+  float vgre_tex2D_f32(uint64_t tex, float x, float y);
+  float vgre_tex3D_f32(uint64_t tex, float x, float y, float z);
+  void vgre_surf2Dwrite_f32(uint64_t surf, float val, int x, int y);
+  void vgre_surf2Dread_f32(uint64_t surf, float* val, int x, int y);
+}
+
+template<typename T>
+inline T tex1D(uint64_t tex, float x) {
+  return static_cast<T>(vgre_tex1D_f32(tex, x));
+}
+
+template<typename T>
+inline T tex2D(uint64_t tex, float x, float y) {
+  return static_cast<T>(vgre_tex2D_f32(tex, x, y));
+}
+
+template<typename T>
+inline T tex3D(uint64_t tex, float x, float y, float z) {
+  return static_cast<T>(vgre_tex3D_f32(tex, x, y, z));
+}
+
+template<typename T>
+inline void surf2Dwrite(T val, uint64_t surf, int x, int y) {
+  vgre_surf2Dwrite_f32(surf, static_cast<float>(val), x, y);
+}
+
+template<typename T>
+inline void surf2Dread(T* val, uint64_t surf, int x, int y) {
+  float fval;
+  vgre_surf2Dread_f32(surf, &fval, x, y);
+  *val = static_cast<T>(fval);
+}
 
 } // namespace vgre_cuda
 
