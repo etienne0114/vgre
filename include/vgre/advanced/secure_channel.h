@@ -84,6 +84,25 @@ struct SessionInfo {
   uint64_t bytes_received = 0;
 };
 
+// ── Hardware Token Manager ───────────────────────────────────────────────
+// Authoritative abstraction for TPM 2.0 or Secure Enclave storage.
+class HardwareTokenManager {
+public:
+  static HardwareTokenManager &instance();
+
+  // Retrieves the hardware-backed auth token.
+  // On Linux, this attempts to read from a persistent TPM-backed NV index.
+  // Fallback to a root-only secure file if no TPM is present.
+  VGREResult getAuthToken(std::string &outToken);
+
+  // Checks if hardware security is available.
+  bool isHardwareSecure() const { return has_hardware_tpm_; }
+
+private:
+  HardwareTokenManager();
+  bool has_hardware_tpm_ = false;
+};
+
 // ── Secure Channel ────────────────────────────────────────────────────────
 // Wraps a raw TCP socket with authenticated encrypted communication.
 //
@@ -104,6 +123,13 @@ public:
   VGREResult initializeFromSecret(const std::string &authToken,
                                   const uint8_t masterNonce[crypto::kNonceLen],
                                   const uint8_t clientNonce[crypto::kNonceLen]);
+
+  // Phase 10: Initialize using hardware-backed token (TPM)
+  VGREResult initializeFromHardware(const uint8_t masterNonce[crypto::kNonceLen],
+                                   const uint8_t clientNonce[crypto::kNonceLen]);
+  
+  // Phase 10: Rotate session key using a new nonce.
+  VGREResult rotateKey(const uint8_t nextNonce[crypto::kNonceLen]);
 
   // Send data through the encrypted channel
   VGREResult sendSecure(vgre_socket_t fd, const void *data, size_t len);

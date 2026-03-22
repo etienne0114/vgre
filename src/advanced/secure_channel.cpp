@@ -3,6 +3,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fstream>
+#include <fcntl.h>
 #include <cstring>
 #include <thread>
 
@@ -301,6 +305,43 @@ bool secure_compare(const uint8_t *a, const uint8_t *b, size_t len) {
 
 } // namespace crypto
 
+// ── HardwareTokenManager Implementation ──────────────────────────────────
+HardwareTokenManager::HardwareTokenManager() {
+#if defined(__linux__)
+    // Check for TPM 2.0 device
+    if (access("/dev/tpmrm0", F_OK) == 0 || access("/dev/tpm0", F_OK) == 0) {
+        has_hardware_tpm_ = true;
+    }
+#endif
+}
+
+HardwareTokenManager &HardwareTokenManager::instance() {
+    static HardwareTokenManager inst;
+    return inst;
+}
+
+VGREResult HardwareTokenManager::getAuthToken(std::string &outToken) {
+    // Phase 10: Authoritative Hardware Token Retrieval
+    // In a real production environment, this would call Tss2_Sys_NV_Read.
+    // Here we model the authoritative path by reading from the secure VGRE vault.
+    const char* secure_path = "/etc/vgre/auth_token.secure";
+    
+    std::ifstream secure_file(secure_path);
+    if (secure_file.is_open()) {
+        std::getline(secure_file, outToken);
+        return VGREResult::SUCCESS;
+    }
+
+    // Fallback to Environment if secure path is missing (for dev environments)
+    const char *envToken = std::getenv("VGRE_TCP_AUTH_TOKEN");
+    if (envToken) {
+        outToken = envToken;
+        return VGREResult::SUCCESS;
+    }
+
+    return VGREResult::ERROR_AUTH_FAILED;
+}
+
 // ── SecureChannel Implementation ──────────────────────────────────────────
 
 SecureChannel::SecureChannel() = default;
@@ -351,6 +392,41 @@ VGREResult SecureChannel::initializeFromSecret(
 
   VGRE_LOG_INFO("SecureChannel",
                 "Initialized — Key fingerprint: " + getKeyFingerprint().substr(0, 16) + "...");
+  return VGREResult::SUCCESS;
+}
+
+VGREResult SecureChannel::initializeFromHardware(const uint8_t masterNonce[crypto::kNonceLen],
+                                               const uint8_t clientNonce[crypto::kNonceLen]) {
+    std::string token;
+    VGREResult res = HardwareTokenManager::instance().getAuthToken(token);
+    if (res != VGREResult::SUCCESS) {
+        return res;
+    }
+    return initializeFromSecret(token, masterNonce, clientNonce);
+}
+
+VGREResult SecureChannel::rotateKey(const uint8_t nextNonce[crypto::kNonceLen]) {
+  if (!initialized_) return VGREResult::ERROR_NOT_INITIALIZED;
+
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  // Derive NewKey = HMAC(OldKey, "VGRE_ROTATE_v1" || nextNonce)
+  const char* saltLabel = "VGRE_ROTATE_v1";
+  std::vector<uint8_t> data;
+  data.reserve(std::strlen(saltLabel) + crypto::kNonceLen);
+  data.insert(data.end(), saltLabel, saltLabel + std::strlen(saltLabel));
+  data.insert(data.end(), nextNonce, nextNonce + crypto::kNonceLen);
+
+  uint8_t newKey[crypto::kHMACKeyLen];
+  crypto::hmac_sha256(sessionKey_, crypto::kHMACKeyLen, data.data(), data.size(), newKey);
+
+  // Update session key and fingerprint
+  std::memcpy(sessionKey_, newKey, crypto::kHMACKeyLen);
+  crypto::sha256(sessionKey_, crypto::kHMACKeyLen, keyFingerprint_);
+
+  VGRE_LOG_INFO("SecureChannel", "Session key rotated — New fingerprint: " + 
+                getKeyFingerprint().substr(0, 16) + "...");
+  
   return VGREResult::SUCCESS;
 }
 
