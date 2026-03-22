@@ -4,7 +4,7 @@
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
 #include "vgre/core/event.h"
-
+#include "vgre/core/texture_manager.h"
 #include <cstddef>
 #include <string>
 
@@ -162,13 +162,20 @@ public:
   using cudaTextureObject_t = uint64_t;
   using cudaSurfaceObject_t = uint64_t;
 
+  struct cudaChannelFormatDesc {
+    int x, y, z, w;
+    int f; // 0=float, 1=signed, 2=unsigned
+  };
+
   struct cudaResourceDesc {
     int resType;
     struct {
       void *devPtr;
+      cudaChannelFormatDesc desc;
       size_t sizeInBytes;
       size_t width;
       size_t height;
+      size_t depth;
       size_t pitchInBytes;
     } res;
   };
@@ -235,8 +242,8 @@ public:
   };
 
   // ── cudaArray Lifecycle (backed by TextureManager) ──────────────────────
-  cudaError_t mallocArray(cudaArray_t *array, size_t width, size_t height,
-                          size_t elementSizeBytes, unsigned int flags);
+  cudaError_t mallocArray(cudaArray_t *array, const cudaChannelFormatDesc *desc,
+                          size_t width, size_t height, unsigned int flags);
   cudaError_t freeArray(cudaArray_t array);
   cudaError_t memcpyToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
                             const void *src, size_t count, cudaMemcpyKind_t kind);
@@ -268,6 +275,8 @@ public:
 private:
   cudaError_t convertResult(VGREResult r);
   int convertMemcpyKind(cudaMemcpyKind_t kind);
+
+  vgre::core::TextureElementType mapChannelDesc(const cudaChannelFormatDesc &cd);
 
   bool initialized_ = false;
   unsigned int deviceFlags_ = 0;

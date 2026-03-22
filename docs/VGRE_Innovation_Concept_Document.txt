@@ -113,7 +113,7 @@ Backend (Python)
 - tests/python/torch_mock/torch is a test-only stubbed tensor API for pytest; it is not production code.
 
 Frontend (Flutter)
-- Background compute uses synthetic workloads for telemetry visualization; it does not reflect real application behavior.
+- Background compute uses authoritative workload kernels (Iterative Matrix Transform) with duty-cycle scaling to generate real hardware utilization for telemetry validation.
 - The dashboard image in Section 8 remains a placeholder.
 - No persistent history export or multi-device views.
 
