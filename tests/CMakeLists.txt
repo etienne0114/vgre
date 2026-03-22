@@ -130,3 +130,10 @@ add_test(NAME test_phase5_workload_partition COMMAND test_phase5_workload_partit
 add_executable(test_phase5_resource_ledger unit/test_phase5_resource_ledger.cpp)
 target_link_libraries(test_phase5_resource_ledger PRIVATE vgre)
 add_test(NAME test_phase5_resource_ledger COMMAND test_phase5_resource_ledger)
+add_executable(test_texture_depth unit/test_texture_depth.cpp)
+target_link_libraries(test_texture_depth PRIVATE vgre)
+add_test(NAME TextureDepth COMMAND test_texture_depth)
+
+add_executable(test_clang_parser unit/test_clang_parser.cpp)
+target_link_libraries(test_clang_parser PRIVATE vgre)
+add_test(NAME ClangParser COMMAND test_clang_parser)

@@ -50,12 +50,12 @@ struct ParsedParam {
 class KernelParser {
 public:
     KernelParser();
-    ~KernelParser();
+    virtual ~KernelParser();
 
     // Parse a CUDA-like kernel source to KernelIR
-    VGREResult parse(const std::string& name,
-                     const std::string& source,
-                     KernelIR& outIR);
+    virtual VGREResult parse(const std::string& name,
+                             const std::string& source,
+                             KernelIR& outIR);
 
     // Extract parameter list from a function signature AST subrange
     VGREResult parseParameters(const std::vector<Token>& tokens,
@@ -74,7 +74,7 @@ public:
                                   const std::string& source,
                                   std::string& outBody);
 
-private:
+protected:
     // Tokenizer
     std::vector<Token> tokenize(const std::string& source);
 

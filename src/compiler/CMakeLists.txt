@@ -1,6 +1,8 @@
-add_library(vgre_compiler OBJECT
+add_library(vgre_compiler STATIC
     kernel_parser.cpp
+    clang_kernel_parser.cpp
     llvm_translation_engine.cpp
+    texture_builtins.cpp
 )
 
 target_include_directories(vgre_compiler PUBLIC
