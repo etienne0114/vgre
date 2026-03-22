@@ -1,7 +1,7 @@
 #include "vgre/core/runtime_engine.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
-#include "vgre/advanced/ipc_manager.h"
 #include "vgre/advanced/runtime_profiler.h"
+#include "vgre/advanced/ipc_manager.h"
 #include "vgre/common/logger.h"
 #include "vgre/compiler/kernel_parser.h"
 #include "vgre/compiler/llvm_translation_engine.h"
@@ -30,6 +30,8 @@ namespace core {
 RuntimeEngine::RuntimeEngine() = default;
 RuntimeEngine::~RuntimeEngine() {
   if (isInitialized()) {
+    // Phase 10: Automatic Chrome Trace Export on shutdown
+    advanced::RuntimeProfiler::instance().exportToFile("vgre_trace.json");
     shutdown();
   }
 }
@@ -303,6 +305,72 @@ VGREResult RuntimeEngine::getKernelFromModule(ModuleHandle module,
                                      "' retrieved from module as ID " +
                                      std::to_string(outId));
   return VGREResult::SUCCESS;
+}
+
+VGREResult RuntimeEngine::fuseKernels(const std::vector<KernelId> &ids,
+                                      KernelId &outFusedId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (ids.size() < 2) return VGREResult::ERROR_INVALID_VALUE;
+
+  VGRE_LOG_INFO("RuntimeEngine", "Fusing " + std::to_string(ids.size()) + " kernels into a single JIT unit.");
+
+  std::ostringstream oss;
+  oss << "#include \"vgre/compiler/cpu_cuda_env.h\"\n\n";
+
+  std::vector<KernelIR> components;
+  std::vector<std::string> internalNames;
+  std::string fusedName = "vgre_fused";
+  for (size_t k = 0; k < ids.size(); ++k) {
+      auto it = kernelIRCache_.find(ids[k]);
+      if (it == kernelIRCache_.end()) return VGREResult::ERROR_INVALID_KERNEL;
+      
+      KernelIR ir = it->second;
+      components.push_back(ir);
+      fusedName += "_" + ir.name;
+
+      // Rename kernel in source to avoid collisions
+      std::string internalName = "fused_c" + std::to_string(k) + "_" + ir.name;
+      internalNames.push_back(internalName);
+      
+      std::string source = ir.source;
+      size_t pos = source.find(ir.name);
+      if (pos != std::string::npos) {
+          source.replace(pos, ir.name.length(), internalName);
+      }
+      
+      oss << "// Component: " << ir.name << "\n";
+      oss << source << "\n\n";
+  }
+
+  // Generate the fused wrapper
+  oss << "extern \"C\" __global__ void " << fusedName << "(";
+  
+  // Total arguments: concat all.
+  bool firstArg = true;
+  for (size_t k = 0; k < components.size(); ++k) {
+      for (size_t i = 0; i < components[k].argTypeNames.size(); ++i) {
+          if (!firstArg) oss << ", ";
+          oss << components[k].argTypeNames[i] << " k" << k << "_a" << i;
+          firstArg = false;
+      }
+  }
+  oss << ") {\n";
+
+  // Invoke each renamed component
+  for (size_t k = 0; k < components.size(); ++k) {
+      oss << "  " << internalNames[k] << "(";
+      for (size_t i = 0; i < components[k].argTypeNames.size(); ++i) {
+          oss << (i == 0 ? "" : ", ") << "k" << k << "_a" << i;
+      }
+      oss << ");\n";
+  }
+  oss << "}\n";
+
+  VGREResult res = registerKernel(fusedName, oss.str(), outFusedId);
+  if (res == VGREResult::SUCCESS) {
+      VGRE_LOG_INFO("RuntimeEngine", "Fused kernel '" + fusedName + "' registered as ID " + std::to_string(outFusedId));
+  }
+  return res;
 }
 
 VGREResult RuntimeEngine::getKernelArgTypes(KernelId id,

@@ -72,6 +72,7 @@ public:
 
     // Export
     std::string toJSON() const;
+    std::string toChromeTraceJSON() const; // Phase 10: standard tracing
     VGREResult  exportToFile(const std::string& filepath) const;
 
     // Reset

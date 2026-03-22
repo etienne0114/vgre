@@ -1,6 +1,7 @@
 #include "vgre/core/graph_manager.h"
 #include "vgre/common/logger.h"
 #include "vgre/core/runtime_engine.h"
+#include "vgre/core/graph_optimizer.h"
 #include <cstring>
 #include <queue>
 
@@ -272,6 +273,10 @@ vgre::VGREResult GraphManager::instantiate(GraphId id, GraphExecId &outExecId) {
   if (nodes.empty()) {
     return vgre::VGREResult::ERROR_INVALID_VALUE;
   }
+
+  // Phase 9: Dynamic JIT Fusion
+  // Optimize the graph before instantiation to merge kernels.
+  GraphOptimizer::optimize(*it->second);
 
   // Topological sort for cycle detection
   std::unordered_map<uint64_t, size_t> nodeIndex;

@@ -173,6 +173,36 @@ std::vector<ProfileEvent> RuntimeProfiler::getEventsByKernel(
 }
 
 // ── JSON export ────────────────────────────────────────────────────────────
+// ── Chrome Trace Export (chrome://tracing) ─────────────────────────────────
+std::string RuntimeProfiler::toChromeTraceJSON() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    std::ostringstream oss;
+    oss << "[\n";
+    
+    bool first = true;
+    for (const auto& ev : events_) {
+        if (!first) oss << ",\n";
+        first = false;
+        
+        // Duration event (X)
+        oss << "  { \"name\": \"" << escapeJsonString(ev.kernelName) << "\", "
+            << "\"cat\": \"kernel\", \"ph\": \"X\", "
+            << "\"ts\": " << (ev.timestamp_ms * 1000) << ", "
+            << "\"dur\": " << (ev.durationMs * 1000) << ", "
+            << "\"pid\": 1, \"tid\": " << ev.threadsUsed << ", "
+            << "\"args\": { "
+            << "\"gflops\": " << ev.gflops << ", "
+            << "\"throughput_gbps\": " << ev.throughputGBps << ", "
+            << "\"grid\": [" << ev.gridDim.x << "," << ev.gridDim.y << "," << ev.gridDim.z << "], "
+            << "\"block\": [" << ev.blockDim.x << "," << ev.blockDim.y << "," << ev.blockDim.z << "] "
+            << "} }";
+    }
+    
+    oss << "\n]\n";
+    return oss.str();
+}
+
 std::string RuntimeProfiler::toJSON() const {
     std::lock_guard<std::mutex> lock(mutex_);
 
