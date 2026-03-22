@@ -75,6 +75,11 @@ public:
   double getMemoryBandwidth() const;
   double getMaxMemoryBandwidth() const;
 
+  // Instantaneous rates for Dashboard "Source of Truth"
+  void updateInstantaneousMetrics();
+  double getInstantaneousGFLOPS() const;
+  double getInstantaneousBandwidth() const;
+
   // Singleton
   static AdaptiveExecutionEngine &instance();
 
@@ -91,10 +96,18 @@ private:
   double totalBandwidth_ = 0.0;
   double maxMemoryBandwidth_ = 64.0;
   double totalLatencyMs_ = 0.0;
-  int totalExecutions_ = 0;
+  uint64_t totalExecutions_ = 0;
   int activeKernels_ = 0;
-  uint64_t realFlopsAcct_ = 0;
-  uint64_t realBytesAcct_ = 0;
+  std::atomic<uint64_t> realFlopsAcct_{0};
+  std::atomic<uint64_t> realBytesAcct_{0};
+  
+  // Instantaneous calculation state
+  std::atomic<uint64_t> lastFlops_{0};
+  std::atomic<uint64_t> lastBytes_{0};
+  std::chrono::steady_clock::time_point lastSampleTime_;
+  double instantGflops_{0.0};
+  double instantBandwidth_{0.0};
+
   std::atomic<bool> calibrated_{false};
 };
 
