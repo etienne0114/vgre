@@ -3,21 +3,21 @@ VGRE — Virtual GPU Runtime Engine
 Python Bindings Package
 """
 
-from vgre.device import VirtualDevice
-from vgre.kernel import Kernel
-from vgre.runtime import Runtime
-from vgre.memory import DeviceArray
-from vgre.stream import Stream
-from vgre.graph import Graph
+from .device import VirtualDevice  # type: ignore
+from .kernel import Kernel  # type: ignore
+from .runtime import Runtime  # type: ignore
+from .memory import DeviceArray, ManagedArray  # type: ignore
+from .stream import Stream  # type: ignore
+from .graph import Graph  # type: ignore
 
 try:
-    from vgre._native import NATIVE_AVAILABLE
+    from ._native import NATIVE_AVAILABLE  # type: ignore
 except ImportError:
     NATIVE_AVAILABLE = False
 
 __version__ = "0.1.0"
 __all__ = [
     "VirtualDevice", "Kernel", "Runtime",
-    "DeviceArray", "Stream", "Graph",
+    "DeviceArray", "ManagedArray", "Stream", "Graph",
     "NATIVE_AVAILABLE",
 ]

@@ -6,17 +6,18 @@ on the virtual GPU device, with seamless numpy conversion.
 """
 
 import ctypes
-import numpy as np
-from typing import Optional
+import numpy as np  # type: ignore
+from typing import Optional, Any, cast
 
 try:
-    from vgre._native import (
+    from ._native import (  # type: ignore
         NATIVE_AVAILABLE,
-        native_malloc, native_free, native_memcpy, native_memset,
+        native_malloc, native_malloc_managed, native_free,
+        native_memcpy, native_memset,
         VGRE_MEMCPY_HOST_TO_DEVICE, VGRE_MEMCPY_DEVICE_TO_HOST,
         VGRE_MEMCPY_DEVICE_TO_DEVICE,
     )
-except ImportError:
+except (ImportError, ModuleNotFoundError):
     NATIVE_AVAILABLE = False
 
 
@@ -36,7 +37,7 @@ class DeviceArray:
         d_arr.free()
     """
 
-    def __init__(self, size: int, dtype: np.dtype = np.float32):
+    def __init__(self, size: int, dtype: Any = np.float32):
         """
         Allocate a device array of the given size (in elements).
 
@@ -55,8 +56,9 @@ class DeviceArray:
                 "Pure Python simulations are no longer supported."
             )
 
-        self._ptr = native_malloc(self.nbytes)
+        self._ptr = cast(Any, native_malloc(self.nbytes))
         self._native = True
+        self._allocated_on_device = True
 
     @classmethod
     def from_numpy(cls, arr: np.ndarray) -> "DeviceArray":
@@ -170,3 +172,27 @@ class DeviceArray:
         backend = "native"
         state = "freed" if self._freed else f"{self.size} x {self.dtype}"
         return f"DeviceArray({state}, backend={backend})"
+
+
+class ManagedArray(DeviceArray):
+    """
+    A Unified Virtual Memory (UVM) managed array.
+    
+    Accessible from both host and device without explicit memcpy.
+    """
+    def __init__(self, size: int, dtype: Any = np.float32):
+        self.size = size
+        self.dtype = np.dtype(dtype)
+        self.nbytes = size * self.dtype.itemsize
+        self._freed = False
+
+        if not NATIVE_AVAILABLE:
+            raise RuntimeError("VGRE native engine required for Managed Memory")
+
+        self._ptr = cast(Any, native_malloc_managed(self.nbytes))
+        self._native = True
+        self._allocated_on_device = True
+
+    def __repr__(self) -> str:
+        state = "freed" if self._freed else f"{self.size} x {self.dtype}"
+        return f"ManagedArray({state}, backend=native)"

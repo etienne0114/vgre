@@ -11,13 +11,18 @@ import os
 from typing import Optional, Dict, Any
 
 try:
-    from vgre._native import (
+    from vgre._native import (  # type: ignore
         NATIVE_AVAILABLE,
         native_init,
         native_get_device_properties,
         native_synchronize,
+        native_device_can_access_peer,
+        native_device_enable_peer_access,
+        native_device_disable_peer_access,
+        native_get_telemetry,
     )
-except ImportError:
+except (ImportError, ModuleNotFoundError):
+    # This might fail during linting if PYTHONPATH is not set
     NATIVE_AVAILABLE = False
 
 _NATIVE_REQUIRED_MSG = (
@@ -110,7 +115,7 @@ class VirtualDevice:
     def get_device_count() -> int:
         """Return the number of virtual GPU devices."""
         _ensure_native_init()
-        from vgre._native import native_get_device_count
+        from vgre._native import native_get_device_count  # type: ignore
         return native_get_device_count()
 
     def get_properties(self) -> DeviceProperties:
@@ -137,6 +142,42 @@ class VirtualDevice:
         """Synchronize the device."""
         _ensure_native_init()
         native_synchronize()
+
+    def can_access_peer(self, peer: int) -> bool:
+        """Check if this device can access the peer's memory."""
+        _ensure_native_init()
+        return native_device_can_access_peer(self.device_id, peer)
+
+    def enable_peer_access(self, peer: int) -> None:
+        """Enable memory access to a peer device."""
+        _ensure_native_init()
+        native_device_enable_peer_access(peer)
+
+    def disable_peer_access(self, peer: int) -> None:
+        """Disable memory access to a peer device."""
+        _ensure_native_init()
+        native_device_disable_peer_access(peer)
+
+    def get_telemetry(self) -> Dict[str, Any]:
+        """Get live telemetry from the virtual device."""
+        _ensure_native_init()
+        t = native_get_telemetry()
+        return {
+            "timestamp": t.timestamp,
+            "gflops": t.gflops,
+            "max_gflops": t.max_gflops,
+            "compute_utilization": t.compute_utilization,
+            "memory_bandwidth_gbps": t.memory_bandwidth_gbps,
+            "memory_bus_utilization": t.memory_bus_utilization,
+            "memory_used_bytes": t.memory_used_bytes,
+            "memory_total_bytes": t.memory_total_bytes,
+            "active_kernels": t.active_kernels,
+            "active_threads": t.active_threads,
+            "device_temperature": t.device_temperature,
+            "background_compute_active": bool(t.background_compute_active),
+            "resident_pages": t.resident_pages,
+            "page_faults_per_sec": t.page_faults_per_sec,
+        }
 
     def __repr__(self) -> str:
         return (f"VirtualDevice(id={self.device_id}, "

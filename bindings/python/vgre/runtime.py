@@ -4,24 +4,36 @@ VGRE Runtime — High-level Python runtime API.
 Provides init/launch/sync/profiling for the VGRE virtual GPU system.
 """
 
-import numpy as np
+import numpy as np  # type: ignore
 import time
 import json
 import os
 from typing import Optional, Dict, List, Any
 
-from vgre.device import VirtualDevice, DeviceProperties
-from vgre.kernel import Kernel, Dim3
-from vgre.graph import Graph
+from .device import VirtualDevice, DeviceProperties  # type: ignore
+from .kernel import Kernel, Dim3  # type: ignore
+from .graph import Graph  # type: ignore
 
 try:
-    from vgre._native import (
+    from ._native import (  # type: ignore
         NATIVE_AVAILABLE,
         native_init,
         native_shutdown,
         native_synchronize,
+        native_set_profiler_enabled,
+        native_get_profiler_json,
+        native_get_memory_info_json,
+        native_get_logs,
+        native_set_background_compute,
+        native_set_service_mode,
+        native_set_block_threads,
+        native_cluster_set_security,
+        native_cluster_get_security_info,
+        native_credits_get_balance,
+        native_credits_get_all,
+        native_credits_reset,
     )
-except ImportError:
+except (ImportError, ModuleNotFoundError):
     NATIVE_AVAILABLE = False
 
 
@@ -139,12 +151,13 @@ class Runtime:
         native_init()
         self._use_native = True
 
-        self._device = VirtualDevice(device_id)
-        self._device.create_context()
+        dev = VirtualDevice(device_id)
+        dev.create_context()
+        self._device = dev
         self._profiling_enabled = enable_profiling
         self._initialized = True
 
-        props = self._device.get_properties()
+        props = dev.get_properties()
         print(f"[VGRE] Initialized virtual GPU: {props.name} (native)")
         print(f"[VGRE] Cores: {props.multi_processor_count}, "
               f"VRAM: {props.total_global_mem // (1024*1024)} MB")
@@ -153,8 +166,11 @@ class Runtime:
         """Shutdown the runtime."""
         if not self._initialized:
             return
-        if self._device and self._device.has_context():
-            self._device.destroy_context()
+        
+        dev = self._device
+        if dev and dev.has_context():
+            dev.destroy_context()
+        
         if self._use_native:
             try:
                 native_shutdown()
@@ -162,6 +178,7 @@ class Runtime:
                 pass
         self._initialized = False
         self._use_native = False
+        self._device = None
         print("[VGRE] Runtime shut down")
 
     def is_initialized(self) -> bool:
@@ -195,7 +212,7 @@ class Runtime:
         if not self._use_native:
             raise RuntimeError("VGRE native execution engine is required. Pure Python simulations are no longer supported.")
 
-        from vgre._native import native_register_kernel, native_launch_kernel
+        from ._native import native_register_kernel, native_launch_kernel  # type: ignore
         if kernel._kernel_id is None:
             kernel._kernel_id = native_register_kernel(kernel.name, getattr(kernel, "source", ""))
         
@@ -226,8 +243,10 @@ class Runtime:
         """Synchronize the device."""
         if self._use_native:
             native_synchronize()
-        elif self._device:
-            self._device.synchronize()
+        else:
+            dev = self._device
+            if dev:
+                dev.synchronize()
 
     def enable_profiling(self) -> None:
         self._profiling_enabled = True
@@ -240,6 +259,100 @@ class Runtime:
 
     def clear_profiling(self) -> None:
         self._profile = ProfilingReport()
+
+    def get_native_profiler_report(self, top_n: int = 0) -> str:
+        """Get authoritative JSON profiling report from the C++ engine."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        return native_get_profiler_json(top_n)
+
+    def set_native_profiler_enabled(self, enabled: bool) -> None:
+        """Enable or disable authoritative profiling in the C++ engine."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        native_set_profiler_enabled(enabled)
+
+    def get_memory_info(self) -> str:
+        """Get JSON memory usage info from the C++ engine."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        return native_get_memory_info_json()
+
+    def get_engine_logs(self) -> List[str]:
+        """Retrieve recent log lines from the C++ engine."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        return native_get_logs()
+
+    def set_background_compute(self, enabled: bool) -> None:
+        """Enable/disable internal background compute engine."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        native_set_background_compute(enabled)
+
+    def set_service_mode(self, is_master: bool) -> None:
+        """Set IPC service mode (Master/Dashboard or Client)."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        native_set_service_mode(is_master)
+
+    def set_block_threads(self, enabled: bool) -> None:
+        """Enable/disable per-block OS thread execution."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        native_set_block_threads(enabled)
+
+    def cluster_set_security(self, enabled: bool) -> None:
+        """Enable/disable encrypted cluster communication."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        native_cluster_set_security(enabled)
+
+    def cluster_get_security_info(self) -> Dict[str, Any]:
+        """Get current cluster security session info."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        info = native_cluster_get_security_info()
+        return {
+            "cipher_name": info.cipher_name.decode("utf-8"),
+            "key_fingerprint": info.key_fingerprint.decode("utf-8"),
+            "session_seconds": info.session_seconds,
+            "is_encrypted": bool(info.is_encrypted),
+            "packets_sent": info.packets_sent,
+            "packets_received": info.packets_received,
+            "bytes_sent": info.bytes_sent,
+            "bytes_received": info.bytes_received,
+        }
+
+    def credits_get_balance(self, address: str) -> Dict[str, Any]:
+        """Get credit balance for a node."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        info = native_credits_get_balance(address)
+        return {
+            "address": info.address.decode("utf-8"),
+            "balance": info.balance,
+            "total_credits": info.total_credits,
+            "total_debits": info.total_debits,
+            "transaction_count": info.transaction_count,
+        }
+
+    def credits_get_all(self) -> List[Dict[str, Any]]:
+        """Get credit balances for all known nodes."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        nodes = native_credits_get_all()
+        return [{
+            "address": n.address.decode("utf-8"),
+            "balance": n.balance,
+            "transaction_count": n.transaction_count,
+        } for n in nodes]
+
+    def credits_reset(self) -> None:
+        """Reset the credit ledger."""
+        if not self._initialized:
+            raise RuntimeError("Runtime not initialized")
+        native_credits_reset()
 
     def __enter__(self):
         self.init()
