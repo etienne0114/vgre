@@ -9,7 +9,7 @@ namespace advanced {
 
 VGREResult WorkloadPartitioner::createPartitionPlan(
     const uint32_t gridDim[3], const uint32_t blockDim[3],
-    const std::vector<NodeCapability> &nodes, PartitionPlan &outPlan) {
+    const std::vector<vgre::advanced::NodeCapability> &nodes, vgre::advanced::PartitionPlan &outPlan) {
   if (!gridDim || !blockDim || gridDim[0] == 0 || blockDim[0] == 0) {
     VGRE_LOG_ERROR("WorkloadPartitioner",
                    "Cannot partition: invalid grid or block dimensions");
@@ -17,7 +17,7 @@ VGREResult WorkloadPartitioner::createPartitionPlan(
   }
 
   // Filter to available nodes with valid capability
-  std::vector<NodeCapability> validNodes;
+  std::vector<vgre::advanced::NodeCapability> validNodes;
   for (const auto &node : nodes) {
     if (node.cpu_cores > 0) {
       validNodes.push_back(node);
@@ -44,19 +44,28 @@ VGREResult WorkloadPartitioner::createPartitionPlan(
   size_t effectiveNodes =
       std::min(static_cast<size_t>(totalBlocksX), validNodes.size());
 
-  // Calculate total compute units across selected nodes
-  int totalCores = 0;
+  // Phase 10: Calculate Ground-Truth capacity for each node
+  // Formula: Capacity = (Cores * Gflops) / (Latency + 0.1)
+  // This incorporates compute power and network overhead.
+  std::vector<double> capacities;
+  double totalCapacity = 0.0;
   for (size_t i = 0; i < effectiveNodes; ++i) {
-    totalCores += validNodes[i].cpu_cores;
+    const NodeCapability& node = validNodes[i];
+    double cores = static_cast<double>(node.cpu_cores);
+    double gflops = node.measured_gflops;
+    double latency = node.avg_latency_ms;
+
+    double cap = (cores * gflops) / (latency + 0.1); 
+    capacities.push_back(cap);
+    totalCapacity += cap;
   }
 
-  if (totalCores <= 0) {
-    VGRE_LOG_ERROR("WorkloadPartitioner",
-                   "Cannot partition: total compute cores is zero");
+  if (totalCapacity <= 0.0) {
+    VGRE_LOG_ERROR("WorkloadPartitioner", "Cannot partition: total compute capacity is zero");
     return VGREResult::ERROR_INVALID_VALUE;
   }
 
-  // Proportional allocation along X dimension
+  // Proportional allocation along X dimension using Ground-Truth weights
   outPlan.slices.clear();
   outPlan.slices.reserve(effectiveNodes);
 
@@ -66,24 +75,17 @@ VGREResult WorkloadPartitioner::createPartitionPlan(
     slice.node_address = validNodes[i].address;
     slice.worker_idx = validNodes[i].worker_idx;
     slice.cpu_cores = validNodes[i].cpu_cores;
+    slice.measured_capacity = capacities[i];
     slice.partition_id = static_cast<uint32_t>(i);
     slice.grid_x_start = allocatedBlocks;
 
     if (i == effectiveNodes - 1) {
-      // Last node gets the remainder to avoid rounding gaps
       slice.partition_grid_x = totalBlocksX - allocatedBlocks;
     } else {
-      // Proportional allocation: floor(totalBlocksX × node_cores / totalCores)
-      double ratio = static_cast<double>(validNodes[i].cpu_cores) /
-                     static_cast<double>(totalCores);
-      uint32_t blocks =
-          static_cast<uint32_t>(std::floor(ratio * totalBlocksX));
-      // Ensure at least 1 block per node
-      if (blocks == 0)
-        blocks = 1;
-      // Don't exceed remaining blocks
-      if (allocatedBlocks + blocks > totalBlocksX)
-        blocks = totalBlocksX - allocatedBlocks;
+      double ratio = capacities[i] / totalCapacity;
+      uint32_t blocks = static_cast<uint32_t>(std::floor(ratio * totalBlocksX));
+      if (blocks == 0) blocks = 1;
+      if (allocatedBlocks + blocks > totalBlocksX) blocks = totalBlocksX - allocatedBlocks;
       slice.partition_grid_x = blocks;
     }
 

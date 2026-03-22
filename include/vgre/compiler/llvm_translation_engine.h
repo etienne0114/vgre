@@ -9,6 +9,10 @@
 #include <string>
 #include <unordered_map>
 
+namespace llvm {
+class Module;
+}
+
 namespace vgre {
 namespace compiler {
 
@@ -26,6 +30,7 @@ public:
 
   // Translate KernelIR to a compiled function
   VGREResult translate(KernelIR &ir, CompiledKernelFn &outFn);
+
 
   // Load a pre-compiled binary module (Bitcode, PTX, etc.)
   VGREResult loadBitcodeModule(const std::string &path,
@@ -52,10 +57,12 @@ public:
   // Recalibrate instruction count for a kernel using the JIT compiler
   uint64_t getInstructionCount(const std::string &source);
 
+  // Perform static analysis on LLVM module to count FP operations
+  uint64_t analyzeStaticFlops(const llvm::Module &module);
+
 private:
   // Generate a C++ wrapper that provides the CUDA execution environment
   std::string generateWrapperSource(const KernelIR &ir);
-
   // Compile the generated C++ into LLVM IR using a clang++ subprocess
   VGREResult compileToLLVMIR(const std::string &cppSource,
                              const std::string &kernelName, std::string &outIR);

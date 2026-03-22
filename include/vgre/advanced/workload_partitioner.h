@@ -2,9 +2,7 @@
 #define VGRE_ADVANCED_WORKLOAD_PARTITIONER_H
 
 #include "vgre/common/error_codes.h"
-#include "vgre/common/types.h"
 
-#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -21,6 +19,7 @@ struct PartitionSlice {
   uint32_t partition_grid_x = 0; // grid_x_end - grid_x_start
   uint32_t partition_id = 0;
   int cpu_cores = 0;             // capability used for weighting
+  double measured_capacity = 0.0; // Phase 10: Ground-Truth weight
 };
 
 // ── Complete partition plan across all nodes ───────────────────────────────
@@ -33,9 +32,11 @@ struct PartitionPlan {
 
 // ── Node capability descriptor (simplified from RemoteNode) ───────────────
 struct NodeCapability {
-  std::string address;
-  int worker_idx = -1;     // -1 means local
+  double measured_gflops = 100.0;
+  double avg_latency_ms = 1.0;
   int cpu_cores = 0;
+  int worker_idx = -1;
+  std::string address;
   bool is_local = false;
 };
 

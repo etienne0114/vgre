@@ -36,6 +36,9 @@
 #include <llvm/TargetParser/Host.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/Target/TargetMachine.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/DerivedTypes.h>
 #pragma GCC diagnostic pop
 
 #include "vgre/common/types.h"
@@ -394,6 +397,18 @@ VGREResult LLVMTranslationEngine::translate(KernelIR &ir,
     return VGREResult::ERROR_COMPILATION;
   }
 
+  // Phase 8: Extract precise FLOP count from JIT-ed module before completion
+  // This ensures the dashboard gets the most authoritative performance metric.
+  {
+      auto buffer = llvm::MemoryBuffer::getMemBuffer(irCode);
+      llvm::SMDiagnostic err;
+      auto module = llvm::parseIR(*buffer, err, *llvmState_->context.getContext());
+      if (module) {
+          ir.staticFlopCount = analyzeStaticFlops(*module);
+          VGRE_LOG_INFO("LLVMTranslationEngine", "Static IR FLOP Analysis for '" + ir.name + "': " + std::to_string(ir.staticFlopCount) + " FLOPs/thread.");
+      }
+  }
+
   cache_[ir.name] = outFn;
   ir.irCode = irCode; // Propagate compiled IR back for telemetry
   return VGREResult::SUCCESS;
@@ -484,7 +499,7 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   oss << "    *vgre_jit_get_gridDim() = vgre_cuda::dim3(gdx, gdy, gdz);\n";
   oss << "    *vgre_jit_get_threadIdx() = vgre_cuda::dim3(tx, ty, tz);\n\n";
   oss << "    // Real-world performance accountancy\n";
-  oss << "    vgre_jit_report_flops(" << ir.estimatedInstructionCount << ");\n";
+  oss << "    vgre_jit_report_flops(" << (ir.staticFlopCount > 0 ? std::to_string(ir.staticFlopCount) : std::to_string(ir.estimatedInstructionCount)) << ");\n";
   oss << "    vgre_jit_report_memory(" << ir.estimatedMemoryAccessCount << ");\n";
 
   // Unpack arguments
@@ -752,6 +767,62 @@ LLVMTranslationEngine::compileJIT(const std::string &irCode,
              blockDim.z, gridDim.x, gridDim.y, gridDim.z, sharedMem,
              sharedMemSize);
   };
+}
+
+uint64_t LLVMTranslationEngine::analyzeStaticFlops(const llvm::Module &module) {
+    uint64_t flops = 0;
+    for (const auto &F : module) {
+        if (F.isDeclaration()) continue;
+        for (const auto &BB : F) {
+            for (const auto &I : BB) {
+                uint64_t instFlops = 0;
+                switch (I.getOpcode()) {
+                    case llvm::Instruction::FAdd:
+                    case llvm::Instruction::FSub:
+                    case llvm::Instruction::FMul:
+                    case llvm::Instruction::FDiv:
+                    case llvm::Instruction::FRem:
+                        instFlops = 1;
+                        break;
+                    case llvm::Instruction::Call: {
+                        const auto *call = llvm::cast<llvm::CallInst>(&I);
+                        const auto *callee = call->getCalledFunction();
+                        if (callee && callee->isIntrinsic()) {
+                            auto id = callee->getIntrinsicID();
+                            if (id == llvm::Intrinsic::fma || id == llvm::Intrinsic::fmuladd) {
+                                instFlops = 2;
+                            } else if (id == llvm::Intrinsic::sqrt || id == llvm::Intrinsic::sin || 
+                                       id == llvm::Intrinsic::cos || id == llvm::Intrinsic::exp || 
+                                       id == llvm::Intrinsic::log || id == llvm::Intrinsic::pow) {
+                                // Transcendental operations count as multiple FLOPs (standard authoritative weight)
+                                instFlops = 8;
+                            }
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+                
+                // If it's a vector instruction, multiply by vector width
+                if (instFlops > 0) {
+                    if (auto *vTy = llvm::dyn_cast<llvm::FixedVectorType>(I.getType())) {
+                        instFlops *= vTy->getNumElements();
+                    } else {
+                        // Check operands for vector types (e.g., store/call might not have vector return type)
+                        for (unsigned i = 0; i < I.getNumOperands(); ++i) {
+                             if (auto *ovTy = llvm::dyn_cast<llvm::FixedVectorType>(I.getOperand(i)->getType())) {
+                                 instFlops *= ovTy->getNumElements();
+                                 break;
+                             }
+                        }
+                    }
+                    flops += instFlops;
+                }
+            }
+        }
+    }
+    return flops;
 }
 
 uint64_t LLVMTranslationEngine::getInstructionCount(const std::string &source) {
