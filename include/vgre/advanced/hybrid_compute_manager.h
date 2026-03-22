@@ -3,7 +3,6 @@
 
 #include "vgre/common/types.h"
 #include "vgre/common/error_codes.h"
-#include "vgre/advanced/workload_partitioner.h"
 
 #include <string>
 #include <vector>
@@ -40,6 +39,8 @@ struct ComputeResources {
     std::string igpuName;
     std::vector<RemoteNode> remoteNodes;
     size_t totalComputeUnits = 0; // aggregate across all backends
+    double gflops           = 100.0; // Phase 10: Authoritative local compute power
+    double avgLatency      = 1.0;   // Local engine latency
 };
 
 // ── Hybrid Compute Manager ────────────────────────────────────────────────

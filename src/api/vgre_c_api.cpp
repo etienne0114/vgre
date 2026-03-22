@@ -8,7 +8,6 @@
 
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
-#include "vgre/advanced/hybrid_compute_manager.h"
 #include "vgre/advanced/ipc_manager.h"
 #include "vgre/advanced/resource_ledger.h"
 #include "vgre/advanced/runtime_profiler.h"
@@ -1217,4 +1216,4 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
 
 // ── Version Info ───────────────────────────────────────────────────────────
 
-const char *vgre_get_version(void) { return "0.1.0"; }
+const char *vgre_get_version(void) { return "0.1.1"; }
