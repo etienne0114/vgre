@@ -63,19 +63,21 @@ void main() {
   // Initialize the VGRE backend (equivalent to vgre_init)
   bridge.init();
 
-  runApp(VgreDashboardApp(bridge: bridge, sqlite: sqlite));
+  runApp(VgreDashboardApp(bridge: bridge, sqlite: sqlite, libPath: libPath));
 }
 
 class VgreDashboardApp extends StatelessWidget {
   final VgreBridge bridge;
   final SqliteService sqlite;
+  final String libPath;
 
-  const VgreDashboardApp({super.key, required this.bridge, required this.sqlite});
+  const VgreDashboardApp({super.key, required this.bridge, required this.sqlite, required this.libPath});
 
   @override
   Widget build(BuildContext context) {
     return BlocProvider(
-      create: (context) => TelemetryBloc(bridge: bridge, sqlite: sqlite)..add(const StartPolling()),
+      create: (context) =>
+          TelemetryBloc(bridge: bridge, sqlite: sqlite, libPath: libPath)..add(const StartPolling()),
       child: MaterialApp(
         title: 'VGRE Dashboard',
         debugShowCheckedModeBanner: false,

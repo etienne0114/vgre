@@ -77,6 +77,7 @@ typedef struct {
   uint64_t timestamp;
   uint64_t version_major;
   uint64_t version_minor;
+  uint64_t version_patch;
 
   // GFLOPS Performance
   double gflops;

@@ -648,14 +648,16 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::system_clock::now().time_since_epoch())
           .count());
-  telemetry->version_major = 2;
+  telemetry->version_major = 0;
   telemetry->version_minor = 1;
+  telemetry->version_patch = 1;
 
   // GFLOPS
-  telemetry->gflops = ae.getTotalGFLOPS();
+  ae.updateInstantaneousMetrics();
+  telemetry->gflops = ae.getInstantaneousGFLOPS();
   telemetry->max_gflops = ae.getMaxGFLOPS();
   telemetry->compute_utilization =
-      (telemetry->max_gflops > 0.0)
+      (telemetry->max_gflops > 0.1)
           ? (telemetry->gflops / telemetry->max_gflops) * 100.0
           : 0.0;
   if (telemetry->compute_utilization < 0.0)
@@ -664,10 +666,10 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
     telemetry->compute_utilization = 100.0;
 
   // Memory
-  telemetry->memory_bandwidth_gbps = ae.getMemoryBandwidth();
+  telemetry->memory_bandwidth_gbps = ae.getInstantaneousBandwidth();
   telemetry->max_memory_bandwidth_gbps = ae.getMaxMemoryBandwidth();
   telemetry->memory_bus_utilization =
-      (telemetry->max_memory_bandwidth_gbps > 0.0)
+      (telemetry->max_memory_bandwidth_gbps > 0.1)
           ? (telemetry->memory_bandwidth_gbps /
              telemetry->max_memory_bandwidth_gbps) *
                 100.0
@@ -728,18 +730,14 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
     auto stats = profiler.getAllStats();
     if (!stats.empty()) {
       double totalInv = 0.0;
-      double gflops = 0.0;
-      double bw = 0.0;
       double avgMs = 0.0;
       for (const auto &s : stats) {
         totalInv += static_cast<double>(s.invocations);
-        gflops += s.avgGflops * static_cast<double>(s.invocations);
-        bw += s.avgThroughputGBps * static_cast<double>(s.invocations);
         avgMs += s.avgTimeMs * static_cast<double>(s.invocations);
       }
       if (totalInv > 0.0) {
-        telemetry->gflops = gflops / totalInv;
-        telemetry->memory_bandwidth_gbps = bw / totalInv;
+        // We use instantaneous rates for the main gauges (Source of Truth),
+        // but the profiler still provides the authoritative average latency.
         telemetry->avg_kernel_latency_ms = avgMs / totalInv;
         telemetry->compute_utilization =
             (telemetry->max_gflops > 0.0)
