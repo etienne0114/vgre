@@ -1,6 +1,7 @@
 add_library(vgre_compiler STATIC
     kernel_parser.cpp
     clang_kernel_parser.cpp
+    kernel_cache.cpp
     llvm_translation_engine.cpp
     texture_builtins.cpp
 )

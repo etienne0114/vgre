@@ -11,6 +11,7 @@
 #include <sstream>
 #include <vector>
 #include <cctype>
+#include <unordered_set>
 
 #ifndef _WIN32
 #include <sys/wait.h>
@@ -39,6 +40,8 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/DerivedTypes.h>
+#include <llvm/Linker/Linker.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 #pragma GCC diagnostic pop
 
 #include "vgre/common/types.h"
@@ -188,9 +191,16 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
     VGRE_LOG_ERROR("LLVMTranslationEngine",
                    "Failed to initialize LLVM JIT Engine.");
   }
+  workerThread_ = std::thread(&LLVMTranslationEngine::workerLoop, this);
 }
 
-LLVMTranslationEngine::~LLVMTranslationEngine() = default;
+LLVMTranslationEngine::~LLVMTranslationEngine() {
+    shutdown_ = true;
+    queueCv_.notify_all();
+    if (workerThread_.joinable()) {
+        workerThread_.join();
+    }
+}
 
 namespace {
 std::string trim_copy(const std::string &s) {
@@ -345,23 +355,23 @@ static std::string getCacheDir() {
 }
 
 
-VGREResult LLVMTranslationEngine::translate(KernelIR &ir,
-                                            CompiledKernelFn &outFn) {
+vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
+                                              vgre::CompiledKernelFn &outFn) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = cache_.find(ir.name);
   if (it != cache_.end()) {
     outFn = it->second;
-    return VGREResult::SUCCESS;
+    if (!outFn) {
+        VGRE_LOG_ERROR("LLVMTranslationEngine", "Cache HIT for '" + ir.name + "' but function is NULL!");
+    } else {
+        VGRE_LOG_INFO("LLVMTranslationEngine", "Cache HIT for '" + ir.name + "' returning valid function.");
+    }
+    return vgre::VGREResult::SUCCESS;
   }
 
-  // REFINEMENT: Use actual LLVM instruction counting for performance accountancy
-  // instead of the parser's regex-based estimation.
-  VGRE_LOG_DEBUG("LLVMTranslationEngine", "Recalibrating instruction count for kernel: " + ir.name);
-  uint64_t actualCount = getInstructionCount(ir.source);
-  if (actualCount > 0) {
-      ir.estimatedInstructionCount = actualCount;
-  }
+  // v0.1.2: Post-JIT Instruction & FLOP Recalibration is handled after compileJIT
+  // to avoid redundant Clang invocations.
 
   std::string wrapper = generateWrapperSource(ir);
   size_t h = computeStableHash(wrapper);
@@ -383,8 +393,8 @@ VGREResult LLVMTranslationEngine::translate(KernelIR &ir,
 
   if (!loadedFromCache) {
     VGRE_LOG_INFO("LLVMTranslationEngine", "Compiling kernel: " + ir.name + " (Cache MISS)");
-    VGREResult r = compileToLLVMIR(wrapper, ir.name, irCode);
-    if (r != VGREResult::SUCCESS) {
+    vgre::VGREResult r = compileToLLVMIR(wrapper, ir.name, irCode);
+    if (r != vgre::VGREResult::SUCCESS) {
       return r;
     }
     // Save to disk cache
@@ -394,24 +404,72 @@ VGREResult LLVMTranslationEngine::translate(KernelIR &ir,
 
   outFn = compileJIT(irCode, ir.name + "_wrapper", ir);
   if (!outFn) {
-    return VGREResult::ERROR_COMPILATION;
+    return vgre::VGREResult::ERROR_COMPILATION;
   }
 
-  // Phase 8: Extract precise FLOP count from JIT-ed module before completion
+  // Phase 8: Extract precise FLOP and Instruction count from JIT-ed module before completion
   // This ensures the dashboard gets the most authoritative performance metric.
   {
       auto buffer = llvm::MemoryBuffer::getMemBuffer(irCode);
       llvm::SMDiagnostic err;
       auto module = llvm::parseIR(*buffer, err, *llvmState_->context.getContext());
       if (module) {
-          ir.staticFlopCount = analyzeStaticFlops(*module);
-          VGRE_LOG_INFO("LLVMTranslationEngine", "Static IR FLOP Analysis for '" + ir.name + "': " + std::to_string(ir.staticFlopCount) + " FLOPs/thread.");
+          uint64_t instCount = 0;
+          ir.staticFlopCount = analyzeStaticFlops(*module, &instCount);
+          if (instCount > 0) {
+              ir.estimatedInstructionCount = instCount;
+          }
+          VGRE_LOG_INFO("LLVMTranslationEngine", "Static IR Analysis for '" + ir.name + "': " + 
+                        std::to_string(ir.staticFlopCount) + " FLOPs, " + 
+                        std::to_string(ir.estimatedInstructionCount) + " instructions.");
       }
   }
 
   cache_[ir.name] = outFn;
   ir.irCode = irCode; // Propagate compiled IR back for telemetry
-  return VGREResult::SUCCESS;
+  return vgre::VGREResult::SUCCESS;
+}
+
+vgre::VGREResult LLVMTranslationEngine::translate(vgre::KernelIR &ir,
+                                            vgre::CompiledKernelFn &outFn) {
+  return doTranslate(ir, outFn);
+}
+
+vgre::JITFuture LLVMTranslationEngine::prepare(vgre::KernelIR &ir) {
+  auto irPtr = std::make_shared<vgre::KernelIR>(ir);
+  std::promise<vgre::CompiledKernelFn> promise;
+  auto future = promise.get_future().share();
+  
+  {
+      std::lock_guard<std::mutex> lock(queueMutex_);
+      taskQueue_.push_back({irPtr, std::move(promise)});
+  }
+  queueCv_.notify_one();
+  
+  return future;
+}
+
+void LLVMTranslationEngine::workerLoop() {
+    while (!shutdown_) {
+        CompileTask task;
+        {
+            std::unique_lock<std::mutex> lock(queueMutex_);
+            queueCv_.wait(lock, [this] { return shutdown_ || !taskQueue_.empty(); });
+            if (shutdown_ && taskQueue_.empty()) break;
+            if (taskQueue_.empty()) continue;
+            
+            task = std::move(taskQueue_.front());
+            taskQueue_.pop_front();
+        }
+        
+        vgre::CompiledKernelFn fn = nullptr;
+        vgre::VGREResult res = this->doTranslate(*task.ir, fn);
+        if (res == vgre::VGREResult::SUCCESS) {
+            task.promise.set_value(fn);
+        } else {
+            task.promise.set_value(nullptr);
+        }
+    }
 }
 
 std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
@@ -486,21 +544,20 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   }
  
   oss << "  void " << ir.name << "_wrapper(void** args, \n"
-      << "    uint32_t bx, uint32_t by, uint32_t bz, \n"
-      << "    uint32_t bdx, uint32_t bdy, uint32_t bdz, \n"
-      << "    uint32_t gdx, uint32_t gdy, uint32_t gdz, \n"
-      << "    void* smem, size_t smemSize) {\n";
+      << "    vgre_cuda::dim3* pBlockIdx, vgre_cuda::dim3* pReserved, \n"
+      << "    vgre_cuda::dim3* pBlockDim, vgre_cuda::dim3* pGridDim, \n"
+      << "    void* smem, size_t smemSize) {\n\n"
+      << "    uint32_t bx = pBlockIdx->x, by = pBlockIdx->y, bz = pBlockIdx->z;\n"
+      << "    uint32_t bdx = pBlockDim->x, bdy = pBlockDim->y, bdz = pBlockDim->z;\n"
+      << "    uint32_t gdx = pGridDim->x, gdy = pGridDim->y, gdz = pGridDim->z;\n\n";
 
   // Thread-local kernel launcher
   oss << "  auto vgre_call_kernel = [&](uint32_t tx, uint32_t ty, uint32_t tz) {\n";
   oss << "    *vgre_jit_get_sharedMem() = smem;\n";
+  oss << "    *vgre_jit_get_threadIdx() = vgre_cuda::dim3(tx, ty, tz);\n";
   oss << "    *vgre_jit_get_blockIdx() = vgre_cuda::dim3(bx, by, bz);\n";
   oss << "    *vgre_jit_get_blockDim() = vgre_cuda::dim3(bdx, bdy, bdz);\n";
   oss << "    *vgre_jit_get_gridDim() = vgre_cuda::dim3(gdx, gdy, gdz);\n";
-  oss << "    *vgre_jit_get_threadIdx() = vgre_cuda::dim3(tx, ty, tz);\n\n";
-  oss << "    // Real-world performance accountancy\n";
-  oss << "    vgre_jit_report_flops(" << (ir.staticFlopCount > 0 ? std::to_string(ir.staticFlopCount) : std::to_string(ir.estimatedInstructionCount)) << ");\n";
-  oss << "    vgre_jit_report_memory(" << ir.estimatedMemoryAccessCount << ");\n";
 
   // Unpack arguments
   std::vector<std::string> argCall;
@@ -570,7 +627,7 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   oss << "        uint32_t ty = (tid / pCtx->bdx) % pCtx->bdy;\n";
   oss << "        uint32_t tz = tid / (pCtx->bdx * pCtx->bdy);\n";
   oss << "        vgre_jit_set_block_barrier(pCtx->barrier);\n";
-  oss << "        (*pCtx->launcher)(tx, ty, tz);\n";
+    oss << "        (*pCtx->launcher)(tx, ty, tz);\n";
   oss << "        vgre_jit_clear_block_barrier();\n";
   oss << "    };\n";
   oss << "    vgre_jit_block_dispatch(static_cast<int>(totalThreads), block_job, (void*)&ctx);\n";
@@ -581,13 +638,10 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   // We force Clang to map CUDA tx,ty,tz threads directly to physical AVX/SIMD hardware CPU lanes.
   // This replaces the "OpenMP thread virtualization" logic by utilizing actual hardware concurrency
   // for threads within a block via SIMD auto-vectorization, avoiding POSIX thread explosion and TLS crashes.
-  oss << "  #pragma clang loop vectorize(enable) interleave(enable)\n";
   oss << "  for (uint32_t tz = 0; tz < bdz; ++tz) {\n";
-  oss << "    #pragma clang loop vectorize(enable) interleave(enable)\n";
   oss << "    for (uint32_t ty = 0; ty < bdy; ++ty) {\n";
-  oss << "      #pragma clang loop vectorize(enable) interleave(enable)\n";
   oss << "      for (uint32_t tx = 0; tx < bdx; ++tx) {\n";
-  oss << "        vgre_call_kernel(tx, ty, tz);\n";
+    oss << "        vgre_call_kernel(tx, ty, tz);\n";
   oss << "      }\n";
   oss << "    }\n";
   oss << "  }\n";
@@ -601,9 +655,11 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
                                                   const std::string &kernelName,
                                                   std::string &outIR) {
   auto tmpDir = std::filesystem::temp_directory_path();
-  std::string tmpCpp = (tmpDir / ("vgre_jit_" + kernelName + ".cpp")).string();
-  std::string tmpIR = (tmpDir / ("vgre_jit_" + kernelName + ".ll")).string();
-  std::string logFile = (tmpDir / ("vgre_jit_" + kernelName + ".log")).string();
+  static std::atomic<uint32_t> s_jit_counter{0};
+  std::string uniqueId = std::to_string(s_jit_counter++) + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() % 1000000);
+  std::string tmpCpp = (tmpDir / ("vgre_jit_" + kernelName + "_" + uniqueId + ".cpp")).string();
+  std::string tmpIR = (tmpDir / ("vgre_jit_" + kernelName + "_" + uniqueId + ".ll")).string();
+  std::string logFile = (tmpDir / ("vgre_jit_" + kernelName + "_" + uniqueId + ".log")).string();
 
   // Robust Include Discovery
   std::string includePath = vgre::common::findIncludeDir();
@@ -619,11 +675,11 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
 
   // Use platform-aware include path
 #if defined(_WIN32)
-  std::string cmd = "clang++ -S -emit-llvm -O3 -Xclang -I\"" + includePath + "\" \"" + tmpCpp + "\" -o \"" +
+  std::string cmd = "clang++ -S -emit-llvm -O2 -Xclang -I\"" + includePath + "\" \"" + tmpCpp + "\" -o \"" +
                     tmpIR + "\" > \"" + logFile + "\" 2>&1";
 #else
   // Do NOT use -fopenmp=libgomp here, as JIT module teardown causes dangling TLS in libgomp leading to crash.
-  std::string cmd = "clang++ -S -emit-llvm -O3 -fvisibility=default -I\"" + includePath + "\" \"" + tmpCpp + "\" -o \"" +
+  std::string cmd = "clang++ -S -emit-llvm -O2 -fvisibility=default -I\"" + includePath + "\" \"" + tmpCpp + "\" -o \"" +
                     tmpIR + "\" > \"" + logFile + "\" 2>&1";
 #endif
   int status = std::system(cmd.c_str());
@@ -752,28 +808,36 @@ LLVMTranslationEngine::compileJIT(const std::string &irCode,
     return nullptr;
   }
 
-  using jit_func_t = void (*)(void **, uint32_t, uint32_t, uint32_t, uint32_t,
-                              uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+  using jit_func_t = void (*)(void **, const vgre::dim3*, const vgre::dim3*, const vgre::dim3*, const vgre::dim3*,
                               void *, size_t);
 
   uint64_t addr_val = sym->getAddress().getValue();
   jit_func_t func_ptr = reinterpret_cast<jit_func_t>(addr_val);
 
-  return [func_ptr](void **args, const vgre::dim3 &blockIdx,
-                    const vgre::dim3 & /*threadIdx*/,
-                    const vgre::dim3 &blockDim, const vgre::dim3 &gridDim,
-                    void *sharedMem, size_t sharedMemSize) {
-    func_ptr(args, blockIdx.x, blockIdx.y, blockIdx.z, blockDim.x, blockDim.y,
-             blockDim.z, gridDim.x, gridDim.y, gridDim.z, sharedMem,
-             sharedMemSize);
-  };
+  return std::make_shared<std::function<void(void **, const vgre::dim3*, const vgre::dim3*, const vgre::dim3*, const vgre::dim3*, void *, size_t)>>(
+      [func_ptr](void **args, const vgre::dim3 *blockIdx,
+                 const vgre::dim3 * /*threadIdx*/, const vgre::dim3 *blockDim,
+                 const vgre::dim3 *gridDim, void *sharedMem,
+                 size_t sharedMemSize) {
+        if (!func_ptr) {
+          VGRE_LOG_ERROR("LLVMTranslationEngine",
+                         "JIT call failed: func_ptr is null");
+          return;
+        }
+        // Pass dim3 objects by pointer to avoid ABI mismatches in value passing
+        vgre::dim3 reserved(0, 0, 0);
+        func_ptr(args, blockIdx, &reserved, blockDim, gridDim, sharedMem,
+                 sharedMemSize);
+      });
 }
 
-uint64_t LLVMTranslationEngine::analyzeStaticFlops(const llvm::Module &module) {
+uint64_t LLVMTranslationEngine::analyzeStaticFlops(const llvm::Module &module, uint64_t *outInstCount) {
     uint64_t flops = 0;
+    uint64_t insts = 0;
     for (const auto &F : module) {
         if (F.isDeclaration()) continue;
         for (const auto &BB : F) {
+            insts += BB.size();
             for (const auto &I : BB) {
                 uint64_t instFlops = 0;
                 switch (I.getOpcode()) {
@@ -822,6 +886,7 @@ uint64_t LLVMTranslationEngine::analyzeStaticFlops(const llvm::Module &module) {
             }
         }
     }
+    if (outInstCount) *outInstCount = insts;
     return flops;
 }
 
@@ -970,14 +1035,15 @@ VGREResult LLVMTranslationEngine::getFunctionFromModule(
   uint64_t addr_val = sym->getValue();
   jit_func_t func_ptr = reinterpret_cast<jit_func_t>(addr_val);
 
-  outFn = [func_ptr](void **args, const vgre::dim3 &blockIdx,
-                     const vgre::dim3 & /*threadIdx*/,
-                     const vgre::dim3 &blockDim, const vgre::dim3 &gridDim,
-                     void *sharedMem, size_t sharedMemSize) {
-    func_ptr(args, blockIdx.x, blockIdx.y, blockIdx.z, blockDim.x, blockDim.y,
-             blockDim.z, gridDim.x, gridDim.y, gridDim.z, sharedMem,
-             sharedMemSize);
-  };
+  outFn = std::make_shared<vgre::CompiledKernelFn::element_type>(
+      [func_ptr](void **args, const vgre::dim3 *blockIdx,
+                 const vgre::dim3 * /*threadIdx*/, const vgre::dim3 *blockDim,
+                 const vgre::dim3 *gridDim, void *sharedMem,
+                 size_t sharedMemSize) {
+        func_ptr(args, blockIdx->x, blockIdx->y, blockIdx->z, blockDim->x,
+                 blockDim->y, blockDim->z, gridDim->x, gridDim->y, gridDim->z,
+                 sharedMem, sharedMemSize);
+      });
 
   return VGREResult::SUCCESS;
 }
@@ -991,6 +1057,95 @@ VGREResult LLVMTranslationEngine::unloadModule(ModuleHandle module) {
   if (err) {
     llvm::consumeError(std::move(err));
     return VGREResult::ERROR_COMPILATION;
+  }
+
+  return VGREResult::SUCCESS;
+}
+
+VGREResult LLVMTranslationEngine::fuseKernels(const std::vector<KernelIR> &kernels,
+                                           const std::string &fusedName,
+                                           KernelIR &outFusedIR) {
+  if (kernels.size() < 2) return VGREResult::ERROR_INVALID_VALUE;
+
+  VGRE_LOG_INFO("LLVMTranslationEngine", "Performing C++-Level Fusion for " + std::to_string(kernels.size()) + " kernels into " + fusedName);
+
+  std::ostringstream oss;
+  oss << "#include \"vgre/compiler/cpu_cuda_env.h\"\n\n";
+
+  // 1. Collect unique original sources to avoid redefinition
+  std::vector<std::string> uniqueSources;
+  std::unordered_set<std::string> seenNames;
+  
+  for (const auto& k : kernels) {
+      if (k.name.find("vgre_fused_") == 0) {
+          // This is already a fused kernel; we don't want its wrapper source,
+          // but we DO want the original kernels it was built from.
+          // In this implementation, we assume the individual components were already 
+          // added or will be added. Ideally we'd recurse, but given RuntimeEngine 
+          // flattens components, we can just skip the fused wrapper itself.
+          continue; 
+      }
+      
+      if (seenNames.find(k.name) == seenNames.end()) {
+          uniqueSources.push_back(k.source);
+          seenNames.insert(k.name);
+          VGRE_LOG_DEBUG("LLVMTranslationEngine", "Added unique original source for kernel: " + k.name);
+      }
+  }
+
+  for (const auto& src : uniqueSources) {
+      oss << src << "\n\n";
+  }
+
+  // 2. Generate fused entry point
+  oss << "extern \"C\" __global__ void " << fusedName << "(";
+  
+  std::vector<std::string> allArgNames;
+  outFusedIR.argTypes.clear();
+  outFusedIR.argTypeNames.clear();
+  outFusedIR.argSizes.clear();
+
+  int totalArgCount = 0;
+  for (size_t kIdx = 0; kIdx < kernels.size(); ++kIdx) {
+      const auto& k = kernels[kIdx];
+      for (size_t aIdx = 0; aIdx < k.argTypes.size(); ++aIdx) {
+          if (totalArgCount > 0) oss << ", ";
+          
+          std::string typeName = (aIdx < k.argTypeNames.size()) ? k.argTypeNames[aIdx] : "void*";
+          std::string argName = "k" + std::to_string(kIdx) + "_arg" + std::to_string(aIdx);
+          
+          oss << typeName << " " << argName;
+          allArgNames.push_back(argName);
+          
+          outFusedIR.argTypes.push_back(k.argTypes[aIdx]);
+          outFusedIR.argTypeNames.push_back(typeName);
+          outFusedIR.argSizes.push_back(k.argSizes[aIdx]);
+          totalArgCount++;
+      }
+  }
+  oss << ") {\n";
+
+  // 3. Call sub-kernels in order
+  int globalArgIdx = 0;
+  for (size_t kIdx = 0; kIdx < kernels.size(); ++kIdx) {
+      const auto& k = kernels[kIdx];
+      oss << "  " << k.name << "(";
+      for (size_t aIdx = 0; aIdx < k.argTypes.size(); ++aIdx) {
+          if (aIdx > 0) oss << ", ";
+          oss << allArgNames[globalArgIdx++];
+      }
+      oss << ");\n";
+  }
+  oss << "}\n";
+
+  outFusedIR.name = fusedName;
+  outFusedIR.source = oss.str();
+  outFusedIR.usesSharedMem = false;
+  outFusedIR.usesSyncthreads = false;
+  
+  for (const auto& k : kernels) {
+      if (k.usesSharedMem) outFusedIR.usesSharedMem = true;
+      if (k.usesSyncthreads) outFusedIR.usesSyncthreads = true;
   }
 
   return VGREResult::SUCCESS;
