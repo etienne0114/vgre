@@ -58,6 +58,7 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
   node.nodeId = it->second->nextNodeId++;
   node.deps = deps;
   node.kernelId = kernelId;
+  VGRE_LOG_INFO("GraphManager", "Adding kernel node: " + name + " (ID " + std::to_string(kernelId) + ") to graph " + std::to_string(id));
   node.kernelName = name;
   node.gridDim = grid;
   node.blockDim = block;

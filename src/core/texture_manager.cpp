@@ -55,6 +55,17 @@ int TextureManager::applyAddressMode(int coord, int size,
   return std::max(0, std::min(coord, size - 1));
 }
 
+// ── Catmull-Rom cubic interpolation kernel ────────────────────────────────
+float cubicWeight(float x) {
+  float ax = std::abs(x);
+  if (ax < 1.0f) {
+    return (3.0f * ax * ax * ax - 5.0f * ax * ax + 2.0f) / 2.0f;
+  } else if (ax < 2.0f) {
+    return (-ax * ax * ax + 5.0f * ax * ax - 8.0f * ax + 4.0f) / 2.0f;
+  }
+  return 0.0f;
+}
+
 // ── Create texture ─────────────────────────────────────────────────────────
 VGREResult TextureManager::createTexture(TextureId &outId, const void *data,
                                          size_t width, size_t height,
@@ -239,29 +250,57 @@ float TextureManager::tex2D(TextureId id, float x, float y) const {
     return static_cast<float>(value);
   }
 
-  // Bilinear interpolation
-  float fx = sampleX - 0.5f; // Shift to texel center
-  float fy = sampleY - 0.5f;
-  int x0 = static_cast<int>(std::floor(fx));
-  int y0 = static_cast<int>(std::floor(fy));
-  int x1 = x0 + 1;
-  int y1 = y0 + 1;
-  float fracX = fx - static_cast<float>(x0);
-  float fracY = fy - static_cast<float>(y0);
+  if (tex.desc.filterMode == TextureFilterMode::LINEAR) {
+    // Bilinear interpolation
+    float fx = sampleX - 0.5f; // Shift to texel center
+    float fy = sampleY - 0.5f;
+    int x0 = static_cast<int>(std::floor(fx));
+    int y0 = static_cast<int>(std::floor(fy));
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+    float fracX = fx - static_cast<float>(x0);
+    float fracY = fy - static_cast<float>(y0);
 
-  // Apply address modes
+    // Apply address modes
+    auto sample = [&](int sx, int sy) -> double {
+      return sampleTexel(tex, sx, sy, 0);
+    };
+
+    double v00 = sample(x0, y0);
+    double v10 = sample(x1, y0);
+    double v01 = sample(x0, y1);
+    double v11 = sample(x1, y1);
+
+    double top = v00 * (1.0 - fracX) + v10 * fracX;
+    double bot = v01 * (1.0 - fracX) + v11 * fracX;
+    return static_cast<float>(top * (1.0 - fracY) + bot * fracY);
+  }
+
+  // Bicubic (Catmull-Rom) interpolation - 16 samples (4x4 neighborhood)
+  float fx = sampleX - 0.5f;
+  float fy = sampleY - 0.5f;
+  int x1 = static_cast<int>(std::floor(fx));
+  int y1 = static_cast<int>(std::floor(fy));
+  float fracX = fx - static_cast<float>(x1);
+  float fracY = fy - static_cast<float>(y1);
+
   auto sample = [&](int sx, int sy) -> double {
     return sampleTexel(tex, sx, sy, 0);
   };
 
-  double v00 = sample(x0, y0);
-  double v10 = sample(x1, y0);
-  double v01 = sample(x0, y1);
-  double v11 = sample(x1, y1);
+  // Sample 4x4 neighborhood and apply Catmull-Rom weights
+  double result = 0.0;
+  for (int dy = -1; dy <= 2; dy++) {
+    double rowSum = 0.0;
+    float wy = cubicWeight(fracY - static_cast<float>(dy));
+    for (int dx = -1; dx <= 2; dx++) {
+      float wx = cubicWeight(fracX - static_cast<float>(dx));
+      rowSum += sample(x1 + dx, y1 + dy) * wx;
+    }
+    result += rowSum * wy;
+  }
 
-  double top = v00 * (1.0 - fracX) + v10 * fracX;
-  double bot = v01 * (1.0 - fracX) + v11 * fracX;
-  return static_cast<float>(top * (1.0 - fracY) + bot * fracY);
+  return static_cast<float>(result);
 }
 
 float TextureManager::tex1D(TextureId id, float x) const {
@@ -283,19 +322,41 @@ float TextureManager::tex1D(TextureId id, float x) const {
     return static_cast<float>(value);
   }
 
-  // Linear interpolation
+  if (tex.desc.filterMode == TextureFilterMode::LINEAR) {
+    // Linear interpolation
+    float fx = x - 0.5f;
+    int x0 = static_cast<int>(std::floor(fx));
+    int x1 = x0 + 1;
+    float fracX = fx - static_cast<float>(x0);
+
+    auto sample = [&](int sx) -> double {
+      return sampleTexel(tex, sx, 0, 0);
+    };
+
+    double v0 = sample(x0);
+    double v1 = sample(x1);
+    return static_cast<float>(v0 * (1.0 - fracX) + v1 * fracX);
+  }
+
+  // Cubic (Catmull-Rom) interpolation - 4 samples
   float fx = x - 0.5f;
-  int x0 = static_cast<int>(std::floor(fx));
-  int x1 = x0 + 1;
-  float fracX = fx - static_cast<float>(x0);
+  int x1 = static_cast<int>(std::floor(fx));
+  int x0 = x1 - 1;
+  int x2 = x1 + 1;
+  int x3 = x1 + 2;
+  float fracX = fx - static_cast<float>(x1);
 
   auto sample = [&](int sx) -> double {
     return sampleTexel(tex, sx, 0, 0);
   };
 
-  double v0 = sample(x0);
-  double v1 = sample(x1);
-  return static_cast<float>(v0 * (1.0 - fracX) + v1 * fracX);
+  // Apply Catmull-Rom weights
+  double v0 = sample(x0) * cubicWeight(fracX + 1.0f);
+  double v1 = sample(x1) * cubicWeight(fracX);
+  double v2 = sample(x2) * cubicWeight(fracX - 1.0f);
+  double v3 = sample(x3) * cubicWeight(fracX - 2.0f);
+
+  return static_cast<float>(v0 + v1 + v2 + v3);
 }
 
 // ── Surface write ──────────────────────────────────────────────────────────

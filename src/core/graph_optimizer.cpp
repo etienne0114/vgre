@@ -61,10 +61,13 @@ bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
     if (a.gridDim.x != b.gridDim.x || a.gridDim.y != b.gridDim.y || a.gridDim.z != b.gridDim.z) return false;
     if (a.blockDim.x != b.blockDim.x || a.blockDim.y != b.blockDim.y || a.blockDim.z != b.blockDim.z) return false;
 
-    // 2. Both must be authoritative JIT-ed kernels
+    VGRE_LOG_INFO("GraphOptimizer", "areFusible check: NodeA=" + std::to_string(a.nodeId) + " (KernelID " + std::to_string(a.kernelId) + "), NodeB=" + std::to_string(b.nodeId) + " (KernelID " + std::to_string(b.kernelId) + ")");
     const auto* irA = RuntimeEngine::instance().getKernelIR(a.kernelId);
     const auto* irB = RuntimeEngine::instance().getKernelIR(b.kernelId);
-    if (!irA || !irB) return false;
+    if (!irA || !irB) {
+        VGRE_LOG_WARN("GraphOptimizer", "areFusible failed: Missing IR for IDs " + std::to_string(a.kernelId) + " or " + std::to_string(b.kernelId));
+        return false;
+    }
 
     // 3. Shared memory check (authoritative hardware limit)
     DeviceProperties props;
@@ -84,8 +87,8 @@ VGREResult GraphOptimizer::fuseNodes(Graph& graph, size_t idxA, size_t idxB) {
     
     std::vector<KernelId> ids = {nodeA.kernelId, nodeB.kernelId};
     KernelId fusedId = 0;
-    
-    auto r = RuntimeEngine::instance().fuseKernels(ids, fusedId);
+    std::string fusedName;
+    auto r = RuntimeEngine::instance().fuseKernels(ids, fusedId, &fusedName);
     if (r != VGREResult::SUCCESS) return r;
 
     // Create a new fused node
@@ -93,7 +96,7 @@ VGREResult GraphOptimizer::fuseNodes(Graph& graph, size_t idxA, size_t idxB) {
     fused.type = GraphNodeType::KERNEL;
     fused.nodeId = graph.nextNodeId++;
     fused.kernelId = fusedId;
-    fused.kernelName = nodeA.kernelName + "_" + nodeB.kernelName + "_fused";
+    fused.kernelName = fusedName;
     fused.gridDim = nodeA.gridDim;
     fused.blockDim = nodeA.blockDim;
     
