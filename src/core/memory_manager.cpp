@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <shared_mutex>
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -34,32 +35,45 @@ MemoryManager::MemoryManager(size_t poolSize) : poolSize_(poolSize) {
                                      std::to_string(poolSize / (1024 * 1024)) +
                                      " MB");
   setupSignalHandler();
-
-  // Run calibration synchronously to avoid detached-thread lifetime hazards.
   calibrateBandwidth();
+  
+  // Initialize empty active tree
+  activeTree_.store(new RegionTreeContainer{MemoryIntervalTree<ManagedRegion>(), 0}, std::memory_order_release);
 }
 
 MemoryManager::~MemoryManager() {
-  g_memoryManagerId.store(nullptr, std::memory_order_release);
   teardownSignalHandler();
-
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto &[handle, alloc] : allocations_) {
-    if (alloc.ptr) {
-      if (alloc.isManaged) {
+  g_memoryManagerId.store(nullptr, std::memory_order_release);
+  
+  for (auto const &[handle, alloc] : allocations_) {
+    if (alloc.ptr && alloc.isManaged) {
+      // MemoryManager::unregisterManagedRegion would have deleted dirtyPages
+      // But if we are force-cleaning in destructor:
 #if defined(_WIN32)
-        VirtualFree(alloc.ptr, 0, MEM_RELEASE);
+      VirtualFree(alloc.ptr, 0, MEM_RELEASE);
 #else
-        munmap(alloc.ptr, alloc.size);
+      munmap(alloc.ptr, alloc.size);
 #endif
-      } else {
-        alignedFree(alloc.ptr);
-      }
-      alloc.ptr = nullptr;
     }
+  }
+
+  // Cleanup remaining dirty bitsets in master list
+  for (auto& region : masterRegions_) {
+      delete[] region.dirtyPages;
+      region.dirtyPages = nullptr;
   }
   allocations_.clear();
   usedMemory_ = 0;
+
+  // Cleanup RCU trees
+  RegionTreeContainer* active = activeTree_.load(std::memory_order_relaxed);
+  if (active) {
+    delete active;
+  }
+  for (auto* tree : retiredTrees_) {
+    delete tree;
+  }
+  
   VGRE_LOG_DEBUG("MemoryManager", "Destroyed — all allocations freed");
 }
 
@@ -113,21 +127,23 @@ LONG
 
     {
       uintptr_t target = reinterpret_cast<uintptr_t>(addr);
-      for (size_t i = 0; i < MAX_MANAGED_REGIONS; ++i) {
-        auto &region = mgr->managedRegions_[i];
-        if (region.valid.load(std::memory_order_acquire)) {
-          void *ptr = region.ptr.load(std::memory_order_relaxed);
-          size_t size = region.size.load(std::memory_order_relaxed);
-          uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
-
-          if (target >= base && target < base + size) {
-            DWORD oldProtect;
-            if (VirtualProtect(ptr, size, PAGE_READWRITE, &oldProtect)) {
-              region.isResidentOnHost.store(true, std::memory_order_relaxed);
-              mgr->faultCount_.fetch_add(1, std::memory_order_relaxed);
-              return EXCEPTION_CONTINUE_EXECUTION;
+      RegionTreeContainer* container = mgr->activeTree_.load(std::memory_order_acquire);
+      if (container && container->count > 0) {
+        ManagedRegion* regionPtr = container->tree.findOverlap(target);
+        if (regionPtr) {
+          ManagedRegion &region = *regionPtr;
+          DWORD oldProtect;
+          // Precise Delta-Sync: Protect only the faulting page
+          void* pageAddr = reinterpret_cast<void*>(target & ~(4096 - 1));
+          if (VirtualProtect(pageAddr, 4096, PAGE_READWRITE, &oldProtect)) {
+            region.isResidentOnHost.store(true, std::memory_order_relaxed);
+            
+            if (exceptionInfo->ExceptionRecord->ExceptionInformation[0] == 1) {
+                region.markDirty(addr);
             }
-            break;
+            
+            mgr->faultCount_.fetch_add(1, std::memory_order_relaxed);
+            return EXCEPTION_CONTINUE_EXECUTION;
           }
         }
       }
@@ -144,20 +160,52 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
 
   {
     uintptr_t target = reinterpret_cast<uintptr_t>(addr);
-    for (size_t i = 0; i < MAX_MANAGED_REGIONS; ++i) {
-      auto &region = mgr->managedRegions_[i];
-      if (region.valid.load(std::memory_order_acquire)) {
-        void *ptr = region.ptr.load(std::memory_order_relaxed);
-        size_t size = region.size.load(std::memory_order_relaxed);
-        uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
-
-        if (target >= base && target < base + size) {
-          if (mprotect(ptr, size, PROT_READ | PROT_WRITE) == 0) {
-            region.isResidentOnHost.store(true, std::memory_order_relaxed);
-            mgr->faultCount_.fetch_add(1, std::memory_order_relaxed);
-            return;
+    RegionTreeContainer* container = mgr->activeTree_.load(std::memory_order_acquire);
+    if (container && container->count > 0) {
+      ManagedRegion* regionPtr = container->tree.findOverlap(target);
+      if (regionPtr) {
+        ManagedRegion &region = *regionPtr;
+        int prot = PROT_READ | PROT_WRITE;
+        // Precise Delta-Sync: Protect only the faulting page
+        void* pageAddr = reinterpret_cast<void*>(target & ~(4096 - 1));
+        if (mprotect(pageAddr, 4096, prot) == 0) {
+          region.isResidentOnHost.store(true, std::memory_order_relaxed);
+          
+          // Phase 11: Authoritative UVM LRU Tracking
+#if !defined(_WIN32)
+          struct timespec ts;
+          if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+              region.lastAccessTime.store(static_cast<long long>(ts.tv_sec) * 1000000000LL + ts.tv_nsec, std::memory_order_relaxed);
           }
-          break;
+#endif
+          region.accessCount.fetch_add(1, std::memory_order_relaxed);
+          
+          // Phase 12: Authoritative Memory Sync
+          int pref = region.preferredLocation.load(std::memory_order_relaxed);
+          if (pref > 0) { // Preferred on a Device, but faulting on Host
+              uint32_t c = region.conflictCount.fetch_add(1, std::memory_order_relaxed);
+              if (c == 100) { // Trigger warning threshold once
+                  VGRE_LOG_WARN("MemoryManager", "UVM Thrashing/Conflict detected on page " + 
+                                std::to_string(reinterpret_cast<uintptr_t>(pageAddr)) + 
+                                ". Continuous host-access violating Preferred Device preference (" + 
+                                std::to_string(pref) + ")");
+              }
+          }
+          
+          // Mark dirty if it's a write fault
+#if defined(__x86_64__) && !defined(_WIN32)
+          ucontext_t *uc = (ucontext_t *)unused;
+          // Bit 1 of error code is Write/Read (1=Write)
+          if (uc->uc_mcontext.gregs[REG_ERR] & 0x2) {
+              region.markDirty(addr);
+          }
+#else
+          // Fallback: mark dirty on any fault for non-x86 or if we can't detect
+          region.markDirty(addr);
+#endif
+          
+          mgr->faultCount_.fetch_add(1, std::memory_order_relaxed);
+          return;
         }
       }
     }
@@ -192,28 +240,61 @@ fallback:
 #endif
 
 bool MemoryManager::registerManagedRegion(void *ptr, size_t size) {
-  for (size_t i = 0; i < MAX_MANAGED_REGIONS; ++i) {
-    bool expected_valid = false;
-    if (managedRegions_[i].valid.compare_exchange_strong(
-            expected_valid, true, std::memory_order_acq_rel)) {
-      managedRegions_[i].ptr.store(ptr, std::memory_order_relaxed);
-      managedRegions_[i].size.store(size, std::memory_order_relaxed);
-      managedRegions_[i].isResidentOnHost.store(false,
-                                                std::memory_order_relaxed);
-      return true;
-    }
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  
+  ManagedRegion region;
+  region.ptr = ptr;
+  region.size = size;
+  region.isResidentOnHost.store(false);
+  
+  // Initialize dirty page tracking
+  region.pageCount = (size + 4095) / 4096;
+  region.dirtyPages = new uint8_t[region.pageCount];
+  std::memset(region.dirtyPages, 0, region.pageCount);
+  
+  masterRegions_.push_back(region);
+  
+  // Create new active tree (RCU swap)
+  RegionTreeContainer* newContainer = new RegionTreeContainer();
+  newContainer->count = masterRegions_.size();
+  for (auto &r : masterRegions_) {
+    newContainer->tree.insert(reinterpret_cast<uintptr_t>(r.ptr), 
+                             reinterpret_cast<uintptr_t>(r.ptr) + r.size, &r);
   }
-  VGRE_LOG_WARN("MemoryManager", "Lock-free managed regions array is full");
-  return false;
+  
+  RegionTreeContainer* oldContainer = activeTree_.exchange(newContainer, std::memory_order_acq_rel);
+  if (oldContainer) {
+    retiredTrees_.push_back(oldContainer);
+  }
+  
+  return true;
 }
 
 void MemoryManager::unregisterManagedRegion(void *ptr) {
-  for (size_t i = 0; i < MAX_MANAGED_REGIONS; ++i) {
-    if (managedRegions_[i].valid.load(std::memory_order_acquire) &&
-        managedRegions_[i].ptr.load(std::memory_order_relaxed) == ptr) {
-      managedRegions_[i].valid.store(false, std::memory_order_release);
-      break;
-    }
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  
+  auto it = std::find_if(masterRegions_.begin(), masterRegions_.end(),
+                         [ptr](const ManagedRegion& r) { return r.ptr == ptr; });
+  
+  if (it == masterRegions_.end()) return;
+  
+  // Owner deletes the shared dirty pages buffer
+  delete[] it->dirtyPages;
+  it->dirtyPages = nullptr; // Prevent double delete just in case
+  
+  masterRegions_.erase(it);
+  
+  // Create new active tree
+  RegionTreeContainer* newContainer = new RegionTreeContainer();
+  newContainer->count = masterRegions_.size();
+  for (auto &r : masterRegions_) {
+    newContainer->tree.insert(reinterpret_cast<uintptr_t>(r.ptr), 
+                             reinterpret_cast<uintptr_t>(r.ptr) + r.size, &r);
+  }
+  
+  RegionTreeContainer* oldContainer = activeTree_.exchange(newContainer, std::memory_order_acq_rel);
+  if (oldContainer) {
+    retiredTrees_.push_back(oldContainer);
   }
 }
 
@@ -271,7 +352,7 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
   alloc.deviceId = deviceId;
 
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     allocations_[ptr] = alloc;
   }
 
@@ -280,7 +361,7 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
 }
 
 VGREResult MemoryManager::free(MemoryHandle handle) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   auto it = allocations_.find(handle);
   if (it == allocations_.end())
     return VGREResult::ERROR_INVALID_VALUE;
@@ -341,6 +422,20 @@ VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, D
           VGRE_LOG_WARN("MemoryManager", "madvise failed for " + std::to_string(alignedCount) + " bytes: " + std::string(strerror(errno)));
       } else {
           VGRE_LOG_INFO("MemoryManager", "Applied physical madvise (" + std::to_string(madvFlags) + ") to " + std::to_string(alignedCount) + " bytes.");
+      }
+  }
+
+  // Phase 11: Authoritative UVM Usage Telemetry
+  {
+      std::unique_lock<std::shared_mutex> lock(mutex_);
+      for (auto& region : masterRegions_) {
+          uintptr_t base = reinterpret_cast<uintptr_t>(region.ptr);
+          if (pBase >= base && pBase < base + region.size) {
+              if (advice == 3) { // PreferredLocation
+                  region.preferredLocation.store(static_cast<int>(deviceId), std::memory_order_relaxed);
+              }
+              break;
+          }
       }
   }
 #endif
@@ -429,7 +524,7 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
   alloc.attachmentFlags = flags;
 
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     allocations_[ptr] = alloc;
   }
 
@@ -438,7 +533,7 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
   // fault handling, so fail explicitly instead of silently degrading.
   if (!registerManagedRegion(ptr, alignedSize)) {
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::unique_lock<std::shared_mutex> lock(mutex_);
       allocations_.erase(ptr);
     }
 #if defined(_WIN32)
@@ -511,14 +606,14 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
   alloc.attachmentFlags = flags;
 
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     allocations_[ptr] = alloc;
   }
 
   // Register in lock-free managed regions array for signal-safe lookup.
   if (!registerManagedRegion(ptr, alignedSize)) {
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::unique_lock<std::shared_mutex> lock(mutex_);
       allocations_.erase(ptr);
     }
 #if defined(_WIN32)
@@ -544,7 +639,7 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
                                            size_t bytes) {
   if (!dst || !src || bytes == 0)
     return VGREResult::ERROR_INVALID_VALUE;
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   
   auto it = allocations_.end();
   size_t offset = 0;
@@ -582,6 +677,8 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
 
   auto start = std::chrono::steady_clock::now();
 
+  void *dstPtr = static_cast<uint8_t *>(it->second.ptr) + offset;
+
   // Feature 8: Memory Compression Integration
   auto &compEngine = vgre::advanced::MemoryCompression::instance();
   if (compEngine.shouldCompress(bytes)) {
@@ -589,7 +686,7 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
     auto r = compEngine.compress(src, bytes, compBuffer);
     if (r == VGREResult::SUCCESS && !compBuffer.empty()) {
       size_t actualSize = 0;
-      auto dr = compEngine.decompress(compBuffer.data(), compBuffer.size(), dst,
+      auto dr = compEngine.decompress(compBuffer.data(), compBuffer.size(), dstPtr,
                                       bytes, actualSize);
       if (dr == VGREResult::SUCCESS && actualSize == bytes) {
         if (compBuffer.size() < bytes) {
@@ -600,13 +697,13 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
         }
       } else {
         // Fail-open to raw copy if codec path did not restore exact payload.
-        std::memcpy(dst, src, bytes);
+        std::memcpy(dstPtr, src, bytes);
       }
     } else {
-      std::memcpy(dst, src, bytes);
+      std::memcpy(dstPtr, src, bytes);
     }
   } else {
-    std::memcpy(dst, src, bytes);
+    std::memcpy(dstPtr, src, bytes);
   }
 
   auto end = std::chrono::steady_clock::now();
@@ -624,7 +721,7 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
                                            size_t bytes) {
   if (!dst || !src || bytes == 0)
     return VGREResult::ERROR_INVALID_VALUE;
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   
   auto it = allocations_.end();
   size_t offset = 0;
@@ -662,11 +759,13 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
 
   auto start = std::chrono::steady_clock::now();
 
+  void *srcPtr = static_cast<uint8_t *>(it->second.ptr) + offset;
+
   // Feature 8: Memory Compression Integration
   auto &compEngine = vgre::advanced::MemoryCompression::instance();
   if (compEngine.shouldCompress(bytes)) {
     std::vector<uint8_t> compBuffer;
-    auto r = compEngine.compress(src, bytes, compBuffer);
+    auto r = compEngine.compress(srcPtr, bytes, compBuffer);
     if (r == VGREResult::SUCCESS && !compBuffer.empty()) {
       size_t actualSize = 0;
       auto dr = compEngine.decompress(compBuffer.data(), compBuffer.size(), dst,
@@ -679,13 +778,13 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
                   std::to_string(compBuffer.size()) + " bytes");
         }
       } else {
-        std::memcpy(dst, src, bytes);
+        std::memcpy(dst, srcPtr, bytes);
       }
     } else {
-      std::memcpy(dst, src, bytes);
+      std::memcpy(dst, srcPtr, bytes);
     }
   } else {
-    std::memcpy(dst, src, bytes);
+    std::memcpy(dst, srcPtr, bytes);
   }
 
   auto end = std::chrono::steady_clock::now();
@@ -701,7 +800,7 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
                                              size_t bytes) {
   if (!dst || !src || bytes == 0)
     return VGREResult::ERROR_INVALID_VALUE;
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   
   auto itDst = allocations_.end();
   size_t offsetDst = 0;
@@ -831,7 +930,7 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
 
 VGREResult MemoryManager::enablePeerAccess(DeviceId currentDevice,
                                            DeviceId peerDevice) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   peerAccessMap_[currentDevice][peerDevice] = true;
   VGRE_LOG_INFO("MemoryManager", "Enabled P2P access: Dev" +
                                      std::to_string(currentDevice) + " -> Dev" +
@@ -841,7 +940,7 @@ VGREResult MemoryManager::enablePeerAccess(DeviceId currentDevice,
 
 VGREResult MemoryManager::disablePeerAccess(DeviceId currentDevice,
                                             DeviceId peerDevice) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   peerAccessMap_[currentDevice][peerDevice] = false;
   VGRE_LOG_INFO("MemoryManager", "Disabled P2P access: Dev" +
                                      std::to_string(currentDevice) + " -> Dev" +
@@ -851,7 +950,7 @@ VGREResult MemoryManager::disablePeerAccess(DeviceId currentDevice,
 
 bool MemoryManager::canAccessPeer(DeviceId currentDevice,
                                   DeviceId peerDevice) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   auto it = peerAccessMap_.find(currentDevice);
   if (it == peerAccessMap_.end())
     return false;
@@ -862,7 +961,7 @@ bool MemoryManager::canAccessPeer(DeviceId currentDevice,
 }
 
 DeviceId MemoryManager::getOwnerDevice(MemoryHandle handle) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   auto it = allocations_.find(handle);
   if (it == allocations_.end())
     return -1;
@@ -876,7 +975,7 @@ size_t MemoryManager::getFreeMemory() const {
 }
 
 bool MemoryManager::isValidHandle(MemoryHandle handle) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   for (auto const& [base, alloc] : allocations_) {
       uint8_t* b = static_cast<uint8_t*>(base);
       uint8_t* t = static_cast<uint8_t*>(handle);
@@ -886,7 +985,7 @@ bool MemoryManager::isValidHandle(MemoryHandle handle) const {
 }
 
 size_t MemoryManager::getAllocationSize(MemoryHandle handle) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   for (auto const& [base, alloc] : allocations_) {
       uint8_t* b = static_cast<uint8_t*>(base);
       uint8_t* t = static_cast<uint8_t*>(handle);
@@ -896,7 +995,7 @@ size_t MemoryManager::getAllocationSize(MemoryHandle handle) const {
 }
 
 void *MemoryManager::getPointer(MemoryHandle handle) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   auto it = allocations_.end();
   size_t offset = 0;
   for (auto probe = allocations_.begin(); probe != allocations_.end(); ++probe) {
@@ -926,7 +1025,7 @@ void *MemoryManager::getPointer(MemoryHandle handle) const {
 }
 
 void MemoryManager::getPageResidency(uint8_t outMap[1024]) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   std::memset(outMap, 0, 1024);
 
   if (poolSize_ == 0) return;
@@ -947,12 +1046,12 @@ void MemoryManager::getPageResidency(uint8_t outMap[1024]) const {
     if (endCell < startCell) endCell = startCell;
 
     // Feature 12: Real-time UVM Residency sync from lock-free tracking
+    // Feature 12: Real-time UVM Residency sync from lock-free tracking
     bool isActuallyResident = alloc.isResidentOnHost;
     if (!isActuallyResident) {
-      for (size_t i = 0; i < MAX_MANAGED_REGIONS; ++i) {
-        if (managedRegions_[i].valid.load(std::memory_order_relaxed) &&
-            managedRegions_[i].ptr.load(std::memory_order_relaxed) == alloc.ptr) {
-          if (managedRegions_[i].isResidentOnHost.load(std::memory_order_relaxed)) {
+      for (const auto& region : masterRegions_) {
+        if (region.ptr == alloc.ptr) {
+          if (region.isResidentOnHost.load(std::memory_order_relaxed)) {
             isActuallyResident = true;
           }
           break;
@@ -1040,7 +1139,7 @@ void MemoryManager::calibrateBandwidth() {
 // ── Memory Pool APIs ──────────────────────────────────────────────────────
 
 VGREResult MemoryManager::createPool(PoolHandle &outHandle, size_t blockSize) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   MemoryPool pool;
   pool.id = nextPoolId_++;
   pool.blockSize = (blockSize < 64) ? 64 : blockSize;
@@ -1054,7 +1153,7 @@ VGREResult MemoryManager::createPool(PoolHandle &outHandle, size_t blockSize) {
 }
 
 VGREResult MemoryManager::destroyPool(PoolHandle handle) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   auto it = pools_.find(handle);
   if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
 
@@ -1086,7 +1185,7 @@ VGREResult MemoryManager::destroyPool(PoolHandle handle) {
 
 VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
                                            MemoryHandle &outHandle) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   auto it = pools_.find(poolHandle);
   if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
 
@@ -1135,7 +1234,7 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
 
 VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
                                      MemoryHandle handle) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   auto it = pools_.find(poolHandle);
   if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
 
@@ -1153,6 +1252,62 @@ VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
   }
 
   return VGREResult::ERROR_INVALID_VALUE;
+}
+
+VGREResult MemoryManager::getDirtyPages(MemoryHandle handle, std::vector<std::pair<size_t, size_t>>& outDirtyRanges) const {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  
+  auto it = std::find_if(masterRegions_.begin(), masterRegions_.end(),
+                         [handle](const ManagedRegion& r) { return r.ptr == handle; });
+  
+  if (it == masterRegions_.end()) return VGREResult::ERROR_INVALID_VALUE;
+  
+  outDirtyRanges.clear();
+  if (!it->dirtyPages) return VGREResult::SUCCESS;
+  
+  size_t startIdx = 0;
+  bool inRange = false;
+  for (size_t i = 0; i < it->pageCount; ++i) {
+    if (it->dirtyPages[i]) {
+      if (!inRange) {
+        startIdx = i;
+        inRange = true;
+      }
+    } else {
+      if (inRange) {
+        outDirtyRanges.push_back({startIdx * 4096, i * 4096});
+        inRange = false;
+      }
+    }
+  }
+  if (inRange) {
+    outDirtyRanges.push_back({startIdx * 4096, it->pageCount * 4096});
+  }
+  
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  
+  auto it = std::find_if(masterRegions_.begin(), masterRegions_.end(),
+                         [handle](const ManagedRegion& r) { return r.ptr == handle; });
+  
+  if (it == masterRegions_.end()) return VGREResult::ERROR_INVALID_VALUE;
+  
+  if (it->dirtyPages) {
+    std::memset(it->dirtyPages, 0, it->pageCount);
+    
+    // Reset permissions to PROT_READ to catch the next write
+#if defined(_WIN32)
+    DWORD oldProtect;
+    VirtualProtect(it->ptr, it->size, PAGE_READONLY, &oldProtect);
+#else
+    mprotect(it->ptr, it->size, PROT_READ);
+#endif
+  }
+  
+  return VGREResult::SUCCESS;
 }
 
 // ── Singleton accessor ────────────────────────────────────────────────────

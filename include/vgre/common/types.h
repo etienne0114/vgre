@@ -6,6 +6,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include <future>
 
 namespace vgre {
 
@@ -85,6 +86,7 @@ struct KernelIR {
   uint64_t estimatedInstructionCount = 0;
   uint64_t estimatedMemoryAccessCount = 0;
   uint64_t staticFlopCount = 0;
+  std::vector<KernelId> fusedFrom; // IDs of kernels this was fused from
 };
 
 // ── Compiled kernel function pointer ───────────────────────────────────────
@@ -92,9 +94,12 @@ struct KernelIR {
 //                        dim3 blockDim, dim3 gridDim,
 //                        void* sharedMem, size_t sharedMemSize)
 using CompiledKernelFn =
-    std::function<void(void **args, const dim3 &blockIdx, const dim3 &threadIdx,
-                       const dim3 &blockDim, const dim3 &gridDim,
-                       void *sharedMem, size_t sharedMemSize)>;
+    std::shared_ptr<std::function<void(void **args, const dim3 *blockIdx, const dim3 *threadIdx,
+                       const dim3 *blockDim, const dim3 *gridDim,
+                       void *sharedMem, size_t sharedMemSize)>>;
+
+// ── JIT Future (Asynchronous handles) ──────────────────────────────────────
+using JITFuture = std::shared_future<CompiledKernelFn>;
 
 // ── Memory copy direction ──────────────────────────────────────────────────
 enum class MemcpyKind : uint8_t {

@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -80,24 +81,27 @@ public:
    * @param ids Ordered list of kernel IDs to fuse.
    * @param outFusedId New kernel ID representing the fused unit.
    */
-  VGREResult fuseKernels(const std::vector<KernelId> &ids, KernelId &outFusedId);
+  VGREResult fuseKernels(const std::vector<KernelId> &ids, KernelId &outFusedId, std::string* outName = nullptr);
 
   VGREResult unloadModule(ModuleHandle module);
 
   VGREResult launchKernel(KernelId id, const dim3 &gridDim,
                           const dim3 &blockDim, void **args,
-                          size_t sharedMem = 0, StreamId stream = 0);
+                          size_t sharedMem = 0, StreamId stream = 0,
+                          const dim3 &gridOffset = dim3(0, 0, 0));
 
   // Convenience: register + launch in one call
   VGREResult launchKernel(const std::string &name, const std::string &source,
                           const dim3 &gridDim, const dim3 &blockDim,
                           void **args, size_t sharedMem = 0,
-                          StreamId stream = 0);
+                          StreamId stream = 0,
+                          const dim3 &gridOffset = dim3(0, 0, 0));
 
   // Cooperative kernel launch: grid-wide barrier via serialized block phases
   VGREResult launchCooperativeKernel(KernelId id, const dim3 &gridDim,
                                      const dim3 &blockDim, void **args,
-                                     size_t sharedMem = 0, StreamId stream = 0);
+                                     size_t sharedMem = 0, StreamId stream = 0,
+                                     const dim3 &gridOffset = dim3(0, 0, 0));
 
   // Native Graph Dispatch
   VGREResult dispatchGraphNodes(const std::vector<GraphNode>& nodes, StreamId stream);
@@ -176,12 +180,16 @@ private:
 
   // Capture state: streamId -> graphId
   std::unordered_map<StreamId, GraphId> captureState_;
+  std::unordered_map<StreamId, uint64_t> lastCapturedNodeId_;
 
-  // Kernel cache: hash(source) → compiled function
+  // Kernel caches
   std::unordered_map<KernelId, CompiledKernelFn> kernelCache_;
   std::unordered_map<KernelId, KernelIR> kernelIRCache_;
+  std::unordered_map<KernelId, JITFuture> pendingKernels_;
+  std::unordered_map<std::string, KernelId> kernelNames_;
   KernelId nextKernelId_ = 1;
   std::unordered_set<KernelId> warnedSyncthreads_;
+  std::thread benchmarkThread_;
   mutable std::recursive_mutex mutex_;
 };
 

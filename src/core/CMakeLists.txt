@@ -7,6 +7,7 @@ add_library(vgre_core OBJECT
     graph_manager.cpp
     graph_optimizer.cpp
     texture_manager.cpp
+    shm_manager.cpp
 )
 
 target_include_directories(vgre_core PUBLIC

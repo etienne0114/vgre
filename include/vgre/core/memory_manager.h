@@ -3,12 +3,17 @@
 
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
+#include "vgre/core/interval_tree.h"
 
 #include <atomic>
 #include <cstddef>
 #include <list>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
+#include <cstring>
+#include <vector>
+#include <chrono>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -52,13 +57,57 @@ struct MemoryPool {
   size_t freeCount = 0;
 };
 
-// ── Lock-free UVM region tracking for signal handler ───────────────────────
-constexpr size_t MAX_MANAGED_REGIONS = 4096;
+// ── Dynamic UVM region tracking for signal-safe lookup ─────────────────────
 struct ManagedRegion {
-  std::atomic<void *> ptr{nullptr};
-  std::atomic<size_t> size{0};
-  std::atomic<bool> isResidentOnHost{false};
-  std::atomic<bool> valid{false};
+  void *ptr = nullptr;
+  size_t size = 0;
+  mutable std::atomic<bool> isResidentOnHost{false};
+
+  // Delta-Sync: Dirty page tracking
+  size_t pageCount = 0;
+  uint8_t* dirtyPages = nullptr; // Shared array (1 = dirty, 0 = clean)
+
+  // Authoritative UVM Usage Tracking
+  mutable std::atomic<long long> lastAccessTime{0};
+  mutable std::atomic<uint32_t> accessCount{0};
+  mutable std::atomic<int> preferredLocation{-1}; // -1 = None, 0 = Host, >0 = DeviceID
+  mutable std::atomic<uint32_t> conflictCount{0}; // Host-side faults against device preference
+
+  ManagedRegion() = default;
+  ManagedRegion(const ManagedRegion &other) : ptr(other.ptr), size(other.size), pageCount(other.pageCount), dirtyPages(other.dirtyPages) {
+    isResidentOnHost.store(other.isResidentOnHost.load(std::memory_order_relaxed));
+  }
+  ManagedRegion &operator=(const ManagedRegion &other) {
+    if (this != &other) {
+      ptr = other.ptr;
+      size = other.size;
+      pageCount = other.pageCount;
+      dirtyPages = other.dirtyPages;
+      isResidentOnHost.store(other.isResidentOnHost.load(std::memory_order_relaxed));
+      lastAccessTime.store(other.lastAccessTime.load(std::memory_order_relaxed));
+      accessCount.store(other.accessCount.load(std::memory_order_relaxed));
+      preferredLocation.store(other.preferredLocation.load(std::memory_order_relaxed));
+      conflictCount.store(other.conflictCount.load(std::memory_order_relaxed));
+    }
+    return *this;
+  }
+  
+  // Note: Destructor does NOT delete dirtyPages because it's shared across tables.
+  // MemoryManager::unregisterManagedRegion handles the actual deletion.
+  ~ManagedRegion() = default;
+
+  // Helper to mark page dirty in signal handler
+  void markDirty(void* faultAddr) const {
+      if (!dirtyPages || pageCount == 0 || !ptr) return;
+      uintptr_t offset = reinterpret_cast<uintptr_t>(faultAddr) - reinterpret_cast<uintptr_t>(ptr);
+      size_t pageIdx = offset / 4096;
+      if (pageIdx < pageCount) {
+          dirtyPages[pageIdx] = 1;
+      }
+  }
+
+  // For sorted array lookup
+  bool operator<(const ManagedRegion &other) const { return ptr < other.ptr; }
 };
 
 /**
@@ -127,9 +176,12 @@ public:
   // Memory Pool APIs
   VGREResult createPool(PoolHandle &outHandle, size_t blockSize = 256);
   VGREResult destroyPool(PoolHandle handle);
-  VGREResult allocateFromPool(PoolHandle poolHandle, size_t size,
-                              MemoryHandle &outHandle);
+  VGREResult allocateFromPool(PoolHandle poolHandle, size_t size, MemoryHandle &outHandle);
   VGREResult freeToPool(PoolHandle poolHandle, MemoryHandle handle);
+
+  // Delta-Sync: Dirty Page Management
+  VGREResult getDirtyPages(MemoryHandle handle, std::vector<std::pair<size_t, size_t>>& outDirtyRanges) const;
+  VGREResult clearDirtyPages(MemoryHandle handle);
 
   const std::unordered_map<MemoryHandle, Allocation>& getAllocations() const { return allocations_; }
   const std::unordered_map<PoolHandle, MemoryPool>& getPools() const { return pools_; }
@@ -156,12 +208,18 @@ private:
   size_t poolSize_;
   std::atomic<size_t> usedMemory_{0};
   std::unordered_map<MemoryHandle, Allocation> allocations_;
-  mutable std::mutex mutex_;
+  mutable std::shared_mutex mutex_;
 
-  // Lock-free array for signal-safe page fault handling
-  ManagedRegion managedRegions_[MAX_MANAGED_REGIONS];
+  // Signal-safe lookup structure (RCU-protected Interval Tree)
+  struct RegionTreeContainer {
+    MemoryIntervalTree<ManagedRegion> tree;
+    size_t count;
+  };
+  std::atomic<RegionTreeContainer*> activeTree_{nullptr};
+  std::vector<RegionTreeContainer*> retiredTrees_; // For cleanup in destructor
+  std::vector<ManagedRegion> masterRegions_; // Master list protected by mutex_
 
-  // Calibrated baselines
+  // Delta-Sync: Dirty Page Management
   std::atomic<double> h2dBandwidth_{25.0};
   std::atomic<double> d2hBandwidth_{25.0};
   std::atomic<double> d2dBandwidth_{50.0};
