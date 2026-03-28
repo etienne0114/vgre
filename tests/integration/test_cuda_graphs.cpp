@@ -95,6 +95,10 @@ int main() {
   } else {
     std::cout << "  ✗ Verification failed with " << errors << " errors"
               << std::endl;
+    std::cout << "  Sample values (first 10):" << std::endl;
+    for (int i = 0; i < 10; i++) {
+      std::cout << "    [" << i << "] = " << h_c[i] << " (expected 3.0)" << std::endl;
+    }
     return 1;
   }
 

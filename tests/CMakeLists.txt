@@ -138,8 +138,58 @@ add_executable(test_clang_parser unit/test_clang_parser.cpp)
 target_link_libraries(test_clang_parser PRIVATE vgre)
 add_test(NAME ClangParser COMMAND test_clang_parser)
 
+add_executable(test_clang_enhanced compiler/test_clang_enhanced.cpp)
+target_link_libraries(test_clang_enhanced PRIVATE vgre)
+add_test(NAME ClangEnhanced COMMAND test_clang_enhanced)
+set_tests_properties(ClangEnhanced PROPERTIES TIMEOUT 300)
+
+add_executable(test_kernel_parser_enhanced compiler/test_kernel_parser_enhanced.cpp)
+target_link_libraries(test_kernel_parser_enhanced PRIVATE vgre)
+add_test(NAME KernelParserEnhanced COMMAND test_kernel_parser_enhanced)
+
+add_executable(test_flop_counting compiler/test_flop_counting.cpp)
+target_link_libraries(test_flop_counting PRIVATE vgre)
+add_test(NAME FLOPCounting COMMAND test_flop_counting)
+
 add_executable(test_texture_view unit/test_texture_view.cpp)
 target_link_libraries(test_texture_view PRIVATE vgre)
+add_test(NAME TextureView COMMAND test_texture_view)
+
 add_executable(test_texture_view_advanced unit/test_texture_view_advanced.cpp)
 target_link_libraries(test_texture_view_advanced PRIVATE vgre)
 add_test(NAME TextureViewAdvanced COMMAND test_texture_view_advanced)
+
+add_executable(test_dirty_page_tracking core/test_dirty_page_tracking.cpp)
+target_link_libraries(test_dirty_page_tracking PRIVATE vgre)
+add_test(NAME DirtyPageTracking COMMAND test_dirty_page_tracking)
+add_executable(test_memory_concurrency unit/test_memory_concurrency.cpp)
+target_link_libraries(test_memory_concurrency PRIVATE vgre)
+add_test(NAME MemoryConcurrency COMMAND test_memory_concurrency)
+
+add_executable(test_tpm_auth unit/test_tpm_auth.cpp)
+target_link_libraries(test_tpm_auth PRIVATE vgre)
+add_test(NAME TPMAuth COMMAND test_tpm_auth)
+
+add_executable(test_tcp_poll advanced/test_tcp_poll.cpp)
+target_link_libraries(test_tcp_poll PRIVATE vgre)
+add_test(NAME TCPPoll COMMAND test_tcp_poll)
+
+add_executable(test_cost_benefit_model advanced/test_cost_benefit_model.cpp)
+target_link_libraries(test_cost_benefit_model PRIVATE vgre)
+add_test(NAME CostBenefitModel COMMAND test_cost_benefit_model)
+
+add_executable(test_hardware_token_manager advanced/test_hardware_token_manager.cpp)
+target_link_libraries(test_hardware_token_manager PRIVATE vgre)
+add_test(NAME HardwareTokenManager COMMAND test_hardware_token_manager)
+
+add_executable(test_input_validation unit/test_input_validation.cpp)
+target_link_libraries(test_input_validation PRIVATE vgre)
+add_test(NAME InputValidation COMMAND test_input_validation)
+
+add_executable(test_texture_manager core/test_texture_manager.cpp)
+target_link_libraries(test_texture_manager PRIVATE vgre)
+add_test(NAME TextureManager COMMAND test_texture_manager)
+
+add_executable(test_memory_pool unit/test_memory_pool.cpp)
+target_link_libraries(test_memory_pool PRIVATE vgre)
+add_test(NAME MemoryPool COMMAND test_memory_pool)

@@ -10,9 +10,9 @@ void test_basic_partitioning() {
     WorkloadPartitioner partitioner;
     
     std::vector<NodeCapability> nodes = {
-        {"10.0.0.1", -1, 4, false},
-        {"10.0.0.2", -1, 8, false},
-        {"local", -1, 4, true}
+        {100.0, 1.0, 4, -1, "10.0.0.1", false},
+        {100.0, 1.0, 8, -1, "10.0.0.2", false},
+        {100.0, 1.0, 4, -1, "local", true}
     };
     
     uint32_t gridDim[3] = {16, 1, 1};
@@ -45,8 +45,8 @@ void test_proportional_imbalance() {
     WorkloadPartitioner partitioner;
     
     std::vector<NodeCapability> nodes = {
-        {"powerful", -1, 32, false},
-        {"weak", -1, 4, false}
+        {100.0, 1.0, 32, -1, "powerful", false},
+        {100.0, 1.0, 4, -1, "weak", false}
     };
     
     uint32_t gridDim[3] = {100, 1, 1};

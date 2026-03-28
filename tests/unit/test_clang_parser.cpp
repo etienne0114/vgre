@@ -33,17 +33,20 @@ void test_templated_kernel() {
         #include "vgre/compiler/cpu_cuda_env.h"
         template<typename T>
         __global__ void templateAdd(T* a, T* b, int n) {
-            int i = 0;
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i < n) {
+                a[i] = a[i] + b[i];
+            }
         }
-        
-        template __global__ void templateAdd<float>(float*, float*, int);
     )";
     
+    // Parse the template function directly (Clang will see the template definition)
     VGREResult result = parser.parse("templateAdd", source, ir);
     assert(result == VGREResult::SUCCESS);
     assert(ir.name == "templateAdd");
     assert(ir.argTypes.size() == 3);
     assert(ir.argTypes[0] == ArgType::POINTER);
+    assert(ir.argTypes[1] == ArgType::POINTER);
     assert(ir.argTypes[2] == ArgType::INT32);
     std::cout << "[PASS] Templated Kernel Parsing" << std::endl;
 }

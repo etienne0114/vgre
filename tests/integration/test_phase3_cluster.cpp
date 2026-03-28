@@ -12,6 +12,8 @@
 using namespace vgre;
 using namespace vgre::advanced;
 
+std::atomic<bool> g_worker_stop{false};
+
 // Phase 3 Integration Test
 // Verifies 12-argument kernel dispatch with UVM coherence across isolated cluster nodes.
 
@@ -72,12 +74,14 @@ void master_node() {
     cluster.launchRemoteKernel(worker_id, kid, gd, bd, args, 12, 0);
 
     std::cout << "Master: Waiting for results (Memory Coherence)..." << std::endl;
-    int result = 0;
-    for(int i=0; i<50; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        result = *(int*)dev_out;
-        if (result == 155) break;
+    // Phase 10: Use the new synchronous wait API instead of polling
+    // This allows for sub-millisecond detection of kernel completion
+    int wait_res = vgre_cluster_wait(kid, 10000);
+    if (wait_res != VGRE_SUCCESS) {
+        std::cerr << "Master FAIL: Cluster wait timed out or failed with code " << wait_res << std::endl;
     }
+    
+    int result = *(int*)dev_out;
     
     std::cout << "Master: Final Result=" << result << std::endl;
     if (result == 155) {
@@ -103,12 +107,21 @@ void worker_node() {
     }
     
     std::cout << "Worker connected. Waiting for commands..." << std::endl;
-    while (worker_cluster.isEnabled()) {
+    while (worker_cluster.isEnabled() && !g_worker_stop.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
+    worker_cluster.shutdown();
+    std::cout << "Worker Node exiting cleanly." << std::endl;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    // Phase 10: Architectural Hardening - Disable background singleton tasks
+    // This prevents the global singleton from starting a client scan or benchmark
+    // which would interfere with our manual master/worker setup in the same process.
+    setenv("VGRE_IPC_MODE", "OFF", 1);
+    setenv("VGRE_BENCHMARK", "OFF", 1);
+    
     vgre_init();
 
     std::thread master_thread(master_node);
@@ -116,12 +129,13 @@ int main() {
     std::thread worker_thread(worker_node);
 
     master_thread.join();
-    // Signal worker to exit by shutting it down or just detach if we don't care about its cleanup
-    // But since it's a test, we want a clean exit.
+    
+    // Signal worker to exit and wait for it
+    g_worker_stop = true;
+    if (worker_thread.joinable()) {
+        worker_thread.join();
+    }
     
     vgre_shutdown();
-    if (worker_thread.joinable()) {
-        worker_thread.detach(); // Worker loop is infinite, detach is safer than join if we don't have a stop signal
-    }
     return 0;
 }
