@@ -5,7 +5,7 @@ namespace vgre {
 namespace runtime {
 
 BlockWorkerPool::BlockWorkerPool() {
-    int numThreads = 1024; // Scale to support full CUDA blocks for __syncthreads correctness
+    int numThreads = 64; // Sane limit for CPU-emulated block parallelism
     workers_.reserve(numThreads);
     for (int i = 0; i < numThreads; ++i) {
         workers_.emplace_back(&BlockWorkerPool::workerLoop, this);

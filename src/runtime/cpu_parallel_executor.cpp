@@ -52,16 +52,15 @@ CPUParallelExecutor::CPUParallelExecutor(int maxThreads)
 CPUParallelExecutor::~CPUParallelExecutor() = default;
 
 // ── Execute kernel across full grid ────────────────────────────────────────
-VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
+VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
                                         const dim3 &gridDim,
                                         const dim3 &blockDim, void **args,
                                         size_t sharedMemSize,
                                         uint64_t flopsPerBlock,
-                                        uint64_t bytesPerBlock) {
-  if (!fn) {
-    VGRE_LOG_ERROR("CPUParallelExecutor", "Null kernel function");
-    return VGREResult::ERROR_INVALID_KERNEL;
-  }
+                                        uint64_t bytesPerBlock,
+                                        const dim3 &gridOffset) {
+  
+  VGRE_LOG_DEBUG("CPUParallelExecutor", "Launching kernel");
 
   totalLaunches_++;
   uint32_t totalBlocks = gridDim.total();
@@ -79,10 +78,11 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
 
   // Optimization: Skip parallel overhead for very small grids
   if (totalBlocksI == 1) {
-    dim3 blockIdx(0, 0, 0);
+    dim3 blockIdx(gridOffset.x, gridOffset.y, gridOffset.z);
     // Allocate per-block shared memory
     SharedMemory smem(sharedMemSize);
-    fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, smem.raw(),
+    dim3 tIdx(0,0,0);
+    (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(),
        smem.size());
     
     // Record metrics
@@ -111,7 +111,7 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
       for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
         for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
           for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
-            dim3 blockIdx(gx, gy, gz);
+            dim3 blockIdx(gx + gridOffset.x, gy + gridOffset.y, gz + gridOffset.z);
 
             // Zero the shared memory for the new block
             threadSmem.reset();
@@ -123,7 +123,8 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
             vgre::runtime::GPUThreadContext::setWarpMask(activeMask);
             vgre::runtime::GPUThreadContext::clearBlockBarrier();
 
-            fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, threadSmem.raw(),
+            dim3 tIdx(0,0,0);
+            (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, threadSmem.raw(),
                threadSmem.size());
             
             // Record metrics per block completion
@@ -140,14 +141,15 @@ VGREResult CPUParallelExecutor::execute(const CompiledKernelFn &fn,
     for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
       for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
         for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
-          dim3 blockIdx(gx, gy, gz);
+          dim3 blockIdx(gx + gridOffset.x, gy + gridOffset.y, gz + gridOffset.z);
           SharedMemory smem(sharedMemSize);
 
           uint32_t activeMask = 0xFFFFFFFF;
           vgre::runtime::GPUThreadContext::setWarpMask(activeMask);
           vgre::runtime::GPUThreadContext::clearBlockBarrier();
 
-          fn(args, blockIdx, dim3(0, 0, 0), blockDim, gridDim, smem.raw(),
+          dim3 tIdx(0,0,0);
+          (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(),
              smem.size());
              
           // Record metrics per block completion
