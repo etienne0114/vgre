@@ -121,8 +121,14 @@ class TelemetryActive extends TelemetryState {
     this.selectedKernelName,
   });
   @override
-  List<Object?> get props =>
-      [telemetry, history, selectedKernelName, deviceName, backendVersion, deviceCount];
+  List<Object?> get props => [
+    telemetry,
+    history,
+    selectedKernelName,
+    deviceName,
+    backendVersion,
+    deviceCount,
+  ];
 }
 
 // ── BLoC ───────────────────────────────────────────────────────────────────
@@ -147,13 +153,16 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
   String? _selectedKernelName;
   KernelStat? _lastSelectedKernelStats;
   bool _profilerEnabled = true;
-  bool _clusterSecurityActive = false;
+  final bool _clusterSecurityActive = false;
   String _backendVersion = '0.0.0';
 
   bool _clusterSecuritySupported = false;
 
-  TelemetryBloc({required this.bridge, required this.sqlite, required this.libPath})
-      : super(TelemetryInitial()) {
+  TelemetryBloc({
+    required this.bridge,
+    required this.sqlite,
+    required this.libPath,
+  }) : super(TelemetryInitial()) {
     on<StartPolling>((event, emit) async {
       await _startIsolate();
       _timer?.cancel();
@@ -164,40 +173,55 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
     });
 
     on<ToggleBackgroundCompute>((event, emit) {
-      _pollSendPort?.send({'type': 'setBackgroundCompute', 'enabled': event.enabled});
+      _pollSendPort?.send({
+        'type': 'setBackgroundCompute',
+        'enabled': event.enabled,
+      });
       _backgroundComputeActive = event.enabled;
       if (state is TelemetryActive) {
         final s = state as TelemetryActive;
-        emit(TelemetryActive(
-          telemetry: s.telemetry.copyWith(backgroundComputeActive: event.enabled),
-          history: s.history,
-          deviceName: s.deviceName,
-          backendVersion: s.backendVersion,
-          deviceCount: s.deviceCount,
-          selectedKernelName: s.selectedKernelName,
-        ));
+        emit(
+          TelemetryActive(
+            telemetry: s.telemetry.copyWith(
+              backgroundComputeActive: event.enabled,
+            ),
+            history: s.history,
+            deviceName: s.deviceName,
+            backendVersion: s.backendVersion,
+            deviceCount: s.deviceCount,
+            selectedKernelName: s.selectedKernelName,
+          ),
+        );
       }
     });
 
     on<ToggleProfiler>((event, emit) {
-      _pollSendPort?.send({'type': 'setProfilerEnabled', 'enabled': event.enabled});
+      _pollSendPort?.send({
+        'type': 'setProfilerEnabled',
+        'enabled': event.enabled,
+      });
       _profilerEnabled = event.enabled;
       if (state is TelemetryActive) {
         final s = state as TelemetryActive;
-        emit(TelemetryActive(
-          telemetry: s.telemetry.copyWith(profilerEnabled: event.enabled),
-          history: s.history,
-          deviceName: s.deviceName,
-          backendVersion: s.backendVersion,
-          deviceCount: s.deviceCount,
-          selectedKernelName: s.selectedKernelName,
-        ));
+        emit(
+          TelemetryActive(
+            telemetry: s.telemetry.copyWith(profilerEnabled: event.enabled),
+            history: s.history,
+            deviceName: s.deviceName,
+            backendVersion: s.backendVersion,
+            deviceCount: s.deviceCount,
+            selectedKernelName: s.selectedKernelName,
+          ),
+        );
       }
     });
 
     on<ToggleClusterSecurity>((event, emit) {
       if (!_clusterSecuritySupported) return;
-      _pollSendPort?.send({'type': 'clusterSetSecurity', 'enabled': event.enabled});
+      _pollSendPort?.send({
+        'type': 'clusterSetSecurity',
+        'enabled': event.enabled,
+      });
     });
 
     on<ResetCredits>((event, emit) {
@@ -205,34 +229,44 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
     });
 
     on<ToggleServiceMode>((event, emit) {
-      _pollSendPort?.send({'type': 'setServiceMode', 'enabled': event.isMaster});
+      _pollSendPort?.send({
+        'type': 'setServiceMode',
+        'enabled': event.isMaster,
+      });
       _serviceModeActive = event.isMaster;
       if (state is TelemetryActive) {
         final s = state as TelemetryActive;
-        emit(TelemetryActive(
-          telemetry: s.telemetry.copyWith(serviceModeActive: event.isMaster),
-          history: s.history,
-          deviceName: s.deviceName,
-          backendVersion: s.backendVersion,
-          deviceCount: s.deviceCount,
-          selectedKernelName: s.selectedKernelName,
-        ));
+        emit(
+          TelemetryActive(
+            telemetry: s.telemetry.copyWith(serviceModeActive: event.isMaster),
+            history: s.history,
+            deviceName: s.deviceName,
+            backendVersion: s.backendVersion,
+            deviceCount: s.deviceCount,
+            selectedKernelName: s.selectedKernelName,
+          ),
+        );
       }
     });
 
     on<ToggleBlockThreads>((event, emit) {
-      _pollSendPort?.send({'type': 'setBlockThreads', 'enabled': event.enabled});
+      _pollSendPort?.send({
+        'type': 'setBlockThreads',
+        'enabled': event.enabled,
+      });
       _blockThreadsActive = event.enabled;
       if (state is TelemetryActive) {
         final s = state as TelemetryActive;
-        emit(TelemetryActive(
-          telemetry: s.telemetry.copyWith(blockThreadsActive: event.enabled),
-          history: s.history,
-          deviceName: s.deviceName,
-          backendVersion: s.backendVersion,
-          deviceCount: s.deviceCount,
-          selectedKernelName: s.selectedKernelName,
-        ));
+        emit(
+          TelemetryActive(
+            telemetry: s.telemetry.copyWith(blockThreadsActive: event.enabled),
+            history: s.history,
+            deviceName: s.deviceName,
+            backendVersion: s.backendVersion,
+            deviceCount: s.deviceCount,
+            selectedKernelName: s.selectedKernelName,
+          ),
+        );
       }
     });
 
@@ -245,23 +279,37 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
 
     on<ExportKernelHistory>((event, emit) async {
       try {
-        final history = await sqlite.getKernelHistory(event.kernelName, _currentDeviceId);
+        final history = await sqlite.getKernelHistory(
+          event.kernelName,
+          _currentDeviceId,
+        );
         if (history.isEmpty) return;
 
         final List<List<dynamic>> rows = [
-          ["Timestamp", "Duration (ms)", "GFLOPS", "Throughput (GB/s)", "Threads"],
-          ...history.map((e) => [
-                e.timestamp.toIso8601String(),
-                e.durationMs,
-                e.gflops,
-                e.throughputGbps,
-                e.threadsUsed,
-              ])
+          [
+            "Timestamp",
+            "Duration (ms)",
+            "GFLOPS",
+            "Throughput (GB/s)",
+            "Threads",
+          ],
+          ...history.map(
+            (e) => [
+              e.timestamp.toIso8601String(),
+              e.durationMs,
+              e.gflops,
+              e.throughputGbps,
+              e.threadsUsed,
+            ],
+          ),
         ];
 
         final csvData = const ListToCsvConverter().convert(rows);
-        final directory = await getDownloadsDirectory() ?? await getApplicationDocumentsDirectory();
-        final path = "${directory.path}/vgre_${event.kernelName}_history_${DateTime.now().millisecondsSinceEpoch}.csv";
+        final directory =
+            await getDownloadsDirectory() ??
+            await getApplicationDocumentsDirectory();
+        final path =
+            "${directory.path}/vgre_${event.kernelName}_history_${DateTime.now().millisecondsSinceEpoch}.csv";
         final file = File(path);
         await file.writeAsString(csvData);
       } catch (e) {
@@ -276,17 +324,22 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
 
     on<SelectKernel>((event, emit) {
       _selectedKernelName = event.kernelName;
-      _pollSendPort?.send({'type': 'selectKernel', 'kernelName': event.kernelName});
+      _pollSendPort?.send({
+        'type': 'selectKernel',
+        'kernelName': event.kernelName,
+      });
       if (state is TelemetryActive) {
         final s = state as TelemetryActive;
-        emit(TelemetryActive(
-          telemetry: s.telemetry,
-          history: s.history,
-          deviceName: _deviceName,
-          backendVersion: _backendVersion,
-          deviceCount: s.deviceCount,
-          selectedKernelName: _selectedKernelName,
-        ));
+        emit(
+          TelemetryActive(
+            telemetry: s.telemetry,
+            history: s.history,
+            deviceName: _deviceName,
+            backendVersion: _backendVersion,
+            deviceCount: s.deviceCount,
+            selectedKernelName: _selectedKernelName,
+          ),
+        );
       }
     });
 
@@ -301,18 +354,20 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
 
       sqlite.saveTelemetry(event.telemetry, _currentDeviceId);
 
-      emit(TelemetryActive(
-        telemetry: event.telemetry.copyWith(
-          backgroundComputeActive: _backgroundComputeActive,
-          profilerEnabled: _profilerEnabled,
-          blockThreadsActive: _blockThreadsActive,
+      emit(
+        TelemetryActive(
+          telemetry: event.telemetry.copyWith(
+            backgroundComputeActive: _backgroundComputeActive,
+            profilerEnabled: _profilerEnabled,
+            blockThreadsActive: _blockThreadsActive,
+          ),
+          history: newHistory,
+          deviceName: _deviceName,
+          backendVersion: _backendVersion,
+          deviceCount: _deviceCount,
+          selectedKernelName: _selectedKernelName,
         ),
-        history: newHistory,
-        deviceName: _deviceName,
-        backendVersion: _backendVersion,
-        deviceCount: _deviceCount,
-        selectedKernelName: _selectedKernelName,
-      ));
+      );
     });
   }
 
@@ -375,9 +430,11 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
     if (prev == null) return current;
     const double alpha = 0.35;
     final smoothedCompute =
-        prev.computeUtilization * (1.0 - alpha) + current.computeUtilization * alpha;
+        prev.computeUtilization * (1.0 - alpha) +
+        current.computeUtilization * alpha;
     final smoothedMem =
-        prev.memoryBusUtilization * (1.0 - alpha) + current.memoryBusUtilization * alpha;
+        prev.memoryBusUtilization * (1.0 - alpha) +
+        current.memoryBusUtilization * alpha;
     final smoothedTemp =
         prev.temperature * (1.0 - alpha) + current.temperature * alpha;
 
@@ -400,26 +457,37 @@ void _vgreIsolateEntryPoint(Map<String, dynamic> args) {
   final bridge = VgreBridge(libPath);
   int currentDeviceId = args['deviceId'];
 
-  bool securitySupported = Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN');
+  bool securitySupported = Platform.environment.containsKey(
+    'VGRE_TCP_AUTH_TOKEN',
+  );
 
   // --- Auth Token Propagation ---
   if (!securitySupported) {
-     try {
-       final home = Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'] ?? '/home/${Platform.environment['USER']}';
-       final tokenFile = File('$home/.vgre/token');
-       if (tokenFile.existsSync()) {
-         final token = tokenFile.readAsStringSync().trim();
-         if (token.isNotEmpty) {
-            bridge.setEnvironmentVariable('VGRE_TCP_AUTH_TOKEN', token);
-            securitySupported = true;
-            mainSendPort.send({'type': 'log', 'message': 'Loaded auth token from file: $home/.vgre/token'});
-         }
-       }
-     } catch (e) {
-       mainSendPort.send({'type': 'log', 'message': 'Failed to load auth token file: $e'});
-     }
+    try {
+      final home =
+          Platform.environment['HOME'] ??
+          Platform.environment['USERPROFILE'] ??
+          '/home/${Platform.environment['USER']}';
+      final tokenFile = File('$home/.vgre/token');
+      if (tokenFile.existsSync()) {
+        final token = tokenFile.readAsStringSync().trim();
+        if (token.isNotEmpty) {
+          bridge.setEnvironmentVariable('VGRE_TCP_AUTH_TOKEN', token);
+          securitySupported = true;
+          mainSendPort.send({
+            'type': 'log',
+            'message': 'Loaded auth token from file: $home/.vgre/token',
+          });
+        }
+      }
+    } catch (e) {
+      mainSendPort.send({
+        'type': 'log',
+        'message': 'Failed to load auth token file: $e',
+      });
+    }
   }
-  
+
   // Fetch real device name and version string once at start
   String deviceName = "VGRE Virtual GPU";
   String versionString = "0.1.1";
@@ -444,7 +512,15 @@ void _vgreIsolateEntryPoint(Map<String, dynamic> args) {
           bridge.setBlockThreads(message['blockThreads']);
           break;
         case 'poll':
-          final t = _doPollSync(bridge, currentDeviceId, deviceName, versionString, securitySupported, selectedKernelName, lastSelectedKernelStats);
+          final t = _doPollSync(
+            bridge,
+            currentDeviceId,
+            deviceName,
+            versionString,
+            securitySupported,
+            selectedKernelName,
+            lastSelectedKernelStats,
+          );
           lastSelectedKernelStats = t.lastSelectedKernelStats;
           mainSendPort.send({'type': 'telemetry', 'data': t});
           break;
@@ -484,20 +560,20 @@ void _vgreIsolateEntryPoint(Map<String, dynamic> args) {
 }
 
 Telemetry _doPollSync(
-  VgreBridge bridge, 
-  int currentDeviceId, 
-  String deviceName, 
+  VgreBridge bridge,
+  int currentDeviceId,
+  String deviceName,
   String versionString,
   bool securitySupported,
-  String? selectedKernelName, 
-  KernelStat? lastSelectedKernelStats
+  String? selectedKernelName,
+  KernelStat? lastSelectedKernelStats,
 ) {
   final ptr = calloc<VgreTelemetry>();
   try {
     final raw = bridge.getTelemetryWith(ptr);
     final logs = bridge.getLogs();
     final clusterData = bridge.getClusterNodes();
-    
+
     SecurityInfo? securityInfo;
     try {
       final s = bridge.getSecurityInfo();
@@ -516,7 +592,10 @@ Telemetry _doPollSync(
     final creditData = bridge.getCreditsAll();
     final List<ClusterNode> clusterNodes = clusterData.map((m) {
       final addr = m['address'] as String;
-      final cred = creditData.firstWhere((c) => c['address'] == addr, orElse: () => {});
+      final cred = creditData.firstWhere(
+        (c) => c['address'] == addr,
+        orElse: () => {},
+      );
       return ClusterNode(
         address: addr,
         port: m['port'] as int,
@@ -547,7 +626,9 @@ Telemetry _doPollSync(
             selectedHistory = historyItems.map((h) {
               final hm = h as Map<String, dynamic>;
               return KernelExecution(
-                timestamp: DateTime.fromMillisecondsSinceEpoch((hm['timestamp_ms'] ?? 0) as int),
+                timestamp: DateTime.fromMillisecondsSinceEpoch(
+                  (hm['timestamp_ms'] ?? 0) as int,
+                ),
                 durationMs: (hm['duration_ms'] ?? 0).toDouble(),
                 throughputGbps: (hm['throughput_gbps'] ?? 0).toDouble(),
                 gflops: (hm['gflops'] ?? 0).toDouble(),
@@ -613,7 +694,9 @@ Telemetry _doPollSync(
       securityInfo: securityInfo,
       profilerEnabled: true,
       backendVersion: versionString,
-      clusterSecurityActive: (securityInfo?.isEncrypted ?? false) || (securityInfo?.isHandshakePending ?? false),
+      clusterSecurityActive:
+          (securityInfo?.isEncrypted ?? false) ||
+          (securityInfo?.isHandshakePending ?? false),
       clusterSecuritySupported: securitySupported,
       deviceCount: 1, // Will be updated by props if needed
       lastSelectedKernelStats: lastSelectedKernelStats,

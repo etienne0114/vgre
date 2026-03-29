@@ -3,13 +3,13 @@ import 'dart:math' as math;
 
 class ClusterHeatmapWidget extends StatelessWidget {
   final Map<String, double> nodeTemperatures; // IP -> Temp
-  final Map<String, double> nodePowerUsage;   // IP -> Watts
+  final Map<String, double> nodePowerUsage; // IP -> Watts
 
   const ClusterHeatmapWidget({
-    Key? key,
+    super.key,
     required this.nodeTemperatures,
     required this.nodePowerUsage,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -30,9 +30,9 @@ class ClusterHeatmapWidget extends StatelessWidget {
               Text(
                 "Authoritative Cluster Heatmap",
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                    ),
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
             ],
           ),
@@ -72,7 +72,8 @@ class ClusterHeatmapWidget extends StatelessWidget {
                     )!;
 
                     return Tooltip(
-                      message: "Node: $ip\nTemp: ${temp.toStringAsFixed(1)}°C\nPower: ${power.toStringAsFixed(1)}W",
+                      message:
+                          "Node: $ip\nTemp: ${temp.toStringAsFixed(1)}°C\nPower: ${power.toStringAsFixed(1)}W",
                       child: Container(
                         decoration: BoxDecoration(
                           color: color,

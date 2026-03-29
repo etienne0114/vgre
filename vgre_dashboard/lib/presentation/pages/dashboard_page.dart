@@ -14,7 +14,6 @@ import 'cluster_topology_page.dart';
 import 'hardware_tuning_page.dart';
 import 'memory_analysis_page.dart';
 import 'dashboard_settings_page.dart';
-import '../widgets/cluster_heatmap_widget.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -55,15 +54,15 @@ class _DashboardPageState extends State<DashboardPage> {
               duration: const Duration(milliseconds: 300),
               layoutBuilder:
                   (Widget? currentChild, List<Widget> previousChildren) {
-                return Stack(
-                  alignment: Alignment.topLeft,
-                  fit: StackFit.expand,
-                  children: <Widget>[
-                    ...previousChildren,
-                    if (currentChild case final Widget child) child,
-                  ],
-                );
-              },
+                    return Stack(
+                      alignment: Alignment.topLeft,
+                      fit: StackFit.expand,
+                      children: <Widget>[
+                        ...previousChildren,
+                        if (currentChild case final Widget child) child,
+                      ],
+                    );
+                  },
               transitionBuilder: (Widget child, Animation<double> animation) {
                 return FadeTransition(
                   opacity: animation,
@@ -219,7 +218,9 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
                                       },
                                       {
                                         'key': 'ECC',
-                                        'value': data.eccEnabled ? 'ACTIVE' : 'OFF',
+                                        'value': data.eccEnabled
+                                            ? 'ACTIVE'
+                                            : 'OFF',
                                       },
                                     ],
                                   ),
@@ -300,7 +301,11 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
               color: VgreTheme.primaryGlow,
               shape: BoxShape.circle,
             ),
-            child: const Icon(Icons.memory, color: VgreTheme.primaryNeon, size: 24),
+            child: const Icon(
+              Icons.memory,
+              color: VgreTheme.primaryNeon,
+              size: 24,
+            ),
           ),
           const SizedBox(width: 20),
           DropdownButtonHideUnderline(
@@ -311,9 +316,11 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
               items: List.generate(state.deviceCount, (i) {
                 return DropdownMenuItem(
                   value: i,
-                  child: Text(i == context.read<TelemetryBloc>().currentDeviceId 
-                    ? "GPU-$i: ${state.deviceName}" 
-                    : "GPU-$i: Virtual VGRE Instance")
+                  child: Text(
+                    i == context.read<TelemetryBloc>().currentDeviceId
+                        ? "GPU-$i: ${state.deviceName}"
+                        : "GPU-$i: Virtual VGRE Instance",
+                  ),
                 );
               }),
               onChanged: (val) {
@@ -341,28 +348,25 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
               alignment: WrapAlignment.end,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                _headerInfoItem("SDK", state.backendVersion, color: VgreTheme.neonCyan),
-                _headerInfoItem("CLOCK", "${data.clockSpeed} MHz"),
-                _headerToggle(
-                  "BACKGROUND",
-                  data.backgroundComputeActive,
-                  (val) {
-                    context.read<TelemetryBloc>().add(
-                      ToggleBackgroundCompute(val),
-                    );
-                  },
+                _headerInfoItem(
+                  "SDK",
+                  state.backendVersion,
+                  color: VgreTheme.neonCyan,
                 ),
+                _headerInfoItem("CLOCK", "${data.clockSpeed} MHz"),
+                _headerToggle("BACKGROUND", data.backgroundComputeActive, (
+                  val,
+                ) {
+                  context.read<TelemetryBloc>().add(
+                    ToggleBackgroundCompute(val),
+                  );
+                }),
                 _headerToggle("SERVICE", data.serviceModeActive, (val) {
                   context.read<TelemetryBloc>().add(ToggleServiceMode(val));
                 }, color: VgreTheme.primaryNeon),
-                _headerToggle(
-                  "THREADS",
-                  data.blockThreadsActive,
-                  (val) {
-                    context.read<TelemetryBloc>().add(ToggleBlockThreads(val));
-                  },
-                  color: VgreTheme.secondaryNeon,
-                ),
+                _headerToggle("THREADS", data.blockThreadsActive, (val) {
+                  context.read<TelemetryBloc>().add(ToggleBlockThreads(val));
+                }, color: VgreTheme.secondaryNeon),
               ],
             ),
           ),
@@ -377,9 +381,7 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
       decoration: BoxDecoration(
         color: VgreTheme.neonGreen.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(
-          color: VgreTheme.neonGreen.withValues(alpha: 0.3),
-        ),
+        border: Border.all(color: VgreTheme.neonGreen.withValues(alpha: 0.3)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -599,7 +601,10 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
                 decoration: BoxDecoration(
                   color: VgreTheme.primaryNeon,
                   borderRadius: BorderRadius.circular(2),
-                  boxShadow: VgreTheme.neonShadow(VgreTheme.primaryNeon, blur: 8),
+                  boxShadow: VgreTheme.neonShadow(
+                    VgreTheme.primaryNeon,
+                    blur: 8,
+                  ),
                 ),
               ),
               const SizedBox(width: 8),
@@ -748,7 +753,11 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
     );
   }
 
-  LineChartBarData _lineData(Color color, List<double> values, {bool useGradient = false}) {
+  LineChartBarData _lineData(
+    Color color,
+    List<double> values, {
+    bool useGradient = false,
+  }) {
     return LineChartBarData(
       spots: values
           .asMap()
@@ -975,10 +984,15 @@ class UvmMapPainter extends CustomPainter {
     const double spacing = 2.0;
 
     // Safety check for empty map or invalid size
-    if (uvmMap.length < gridCount * gridCount || size.width <= 0 || size.height <= 0) return;
+    if (uvmMap.length < gridCount * gridCount ||
+        size.width <= 0 ||
+        size.height <= 0)
+      return;
 
-    final double cellWidth = (size.width - (gridCount - 1) * spacing) / gridCount;
-    final double cellHeight = (size.height - (gridCount - 1) * spacing) / gridCount;
+    final double cellWidth =
+        (size.width - (gridCount - 1) * spacing) / gridCount;
+    final double cellHeight =
+        (size.height - (gridCount - 1) * spacing) / gridCount;
 
     final basePaint = Paint()
       ..color = Colors.white.withValues(alpha: 0.05)
