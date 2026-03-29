@@ -127,18 +127,18 @@ VirtualGPUDevice::~VirtualGPUDevice() {
 }
 
 void VirtualGPUDevice::setId(DeviceId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   id_ = id;
 }
 
 DeviceId VirtualGPUDevice::getId() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return id_;
 }
 
 // ── Hardware detection ─────────────────────────────────────────────────────
 void VirtualGPUDevice::detectHardware() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   std::string cpuName = readCPUModelName();
   std::string deviceName = "VGRE Virtual GPU [" + cpuName + "]";
   std::strncpy(props_.name, deviceName.c_str(), sizeof(props_.name) - 1);
@@ -321,18 +321,18 @@ void VirtualGPUDevice::detectHardware() {
 }
 
 DeviceProperties VirtualGPUDevice::getProperties() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return props_;
 }
 
 void VirtualGPUDevice::setProperties(const DeviceProperties &props) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   props_ = props;
 }
 
 // ── Context ────────────────────────────────────────────────────────────────
 VGREResult VirtualGPUDevice::createContext() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (contextActive_) {
     return VGREResult::ERROR_ALREADY_EXISTS;
   }
@@ -343,7 +343,7 @@ VGREResult VirtualGPUDevice::createContext() {
 }
 
 VGREResult VirtualGPUDevice::destroyContext() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!contextActive_) {
     return VGREResult::ERROR_NOT_INITIALIZED;
   }
@@ -355,13 +355,13 @@ VGREResult VirtualGPUDevice::destroyContext() {
 }
 
 bool VirtualGPUDevice::hasContext() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return contextActive_;
 }
 
 // ── Streams ────────────────────────────────────────────────────────────────
 VGREResult VirtualGPUDevice::createStream(StreamId &outId, int priority) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!contextActive_) {
     return VGREResult::ERROR_NOT_INITIALIZED;
   }
@@ -378,7 +378,7 @@ VGREResult VirtualGPUDevice::createStream(StreamId &outId, int priority) {
 }
 
 VGREResult VirtualGPUDevice::destroyStream(StreamId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!contextActive_) {
     return VGREResult::ERROR_NOT_INITIALIZED;
   }
@@ -394,7 +394,7 @@ VGREResult VirtualGPUDevice::destroyStream(StreamId id) {
 
 VGREResult VirtualGPUDevice::synchronizeStream(StreamId id) {
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!contextActive_) {
       return VGREResult::ERROR_NOT_INITIALIZED;
     }
@@ -411,7 +411,7 @@ VGREResult VirtualGPUDevice::synchronizeStream(StreamId id) {
   }
 
   // 2. Mark stream IDLE
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!contextActive_) {
     return VGREResult::ERROR_NOT_INITIALIZED;
   }
@@ -425,7 +425,7 @@ VGREResult VirtualGPUDevice::synchronizeStream(StreamId id) {
 
 VGREResult VirtualGPUDevice::synchronizeDevice() {
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!contextActive_) {
       return VGREResult::ERROR_NOT_INITIALIZED;
     }
@@ -436,7 +436,7 @@ VGREResult VirtualGPUDevice::synchronizeDevice() {
     engine.getScheduler().waitAll();
   }
 
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   for (auto &[_, stream] : streams_) {
     stream.state = StreamState::IDLE;
   }
@@ -450,7 +450,7 @@ VGREResult VirtualGPUDevice::getStreamPriority(StreamId id,
     outPriority = 0;
     return VGREResult::SUCCESS;
   }
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!contextActive_) {
     return VGREResult::ERROR_NOT_INITIALIZED;
   }

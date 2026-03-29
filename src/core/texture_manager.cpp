@@ -13,7 +13,7 @@ TextureManager::TextureManager() {
 }
 
 TextureManager::~TextureManager() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   textures_.clear();
   surfaces_.clear();
 }
@@ -75,7 +75,7 @@ VGREResult TextureManager::createTexture(TextureId &outId, const void *data,
   if (!data || width == 0 || elementSize == 0)
     return VGREResult::ERROR_INVALID_VALUE;
 
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   TextureObject tex;
   tex.id = nextTextureId_++;
@@ -103,7 +103,7 @@ VGREResult TextureManager::createTextureView(TextureId &outId,
                                              TextureId baseTextureId,
                                              const ResourceViewDescriptor &viewDesc,
                                              const TextureDescriptor &texDesc) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = textures_.find(baseTextureId);
   if (it == textures_.end()) {
     VGRE_LOG_ERROR("TextureManager", "Base texture not found: " + std::to_string(baseTextureId));
@@ -160,7 +160,7 @@ VGREResult TextureManager::createTextureView(TextureId &outId,
 }
 
 VGREResult TextureManager::destroyTexture(TextureId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = textures_.find(id);
   if (it == textures_.end())
     return VGREResult::ERROR_INVALID_VALUE;
@@ -178,7 +178,7 @@ VGREResult TextureManager::createSurface(SurfaceId &outId, void *data,
   if (!data || width == 0 || height == 0 || elementSize == 0)
     return VGREResult::ERROR_INVALID_VALUE;
 
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   SurfaceObject surf;
   surf.id = nextSurfaceId_++;
@@ -201,7 +201,7 @@ VGREResult TextureManager::createSurface(SurfaceId &outId, void *data,
 }
 
 VGREResult TextureManager::destroySurface(SurfaceId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = surfaces_.find(id);
   if (it == surfaces_.end())
     return VGREResult::ERROR_INVALID_VALUE;
@@ -212,7 +212,7 @@ VGREResult TextureManager::destroySurface(SurfaceId id) {
 
 // ── 1D texture fetch (integer coordinate) ──────────────────────────────────
 float TextureManager::tex1Dfetch(TextureId id, int x) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = textures_.find(id);
   if (it == textures_.end())
     return 0.0f;
@@ -225,7 +225,7 @@ float TextureManager::tex1Dfetch(TextureId id, int x) const {
 
 // ── 2D texture fetch (floating-point coordinates with interpolation) ──────
 float TextureManager::tex2D(TextureId id, float x, float y) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = textures_.find(id);
   if (it == textures_.end())
     return 0.0f;
@@ -304,7 +304,7 @@ float TextureManager::tex2D(TextureId id, float x, float y) const {
 }
 
 float TextureManager::tex1D(TextureId id, float x) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = textures_.find(id);
   if (it == textures_.end())
     return 0.0f;
@@ -362,7 +362,7 @@ float TextureManager::tex1D(TextureId id, float x) const {
 // ── Surface write ──────────────────────────────────────────────────────────
 VGREResult TextureManager::surf2Dwrite(SurfaceId id, float value, int x,
                                        int y) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = surfaces_.find(id);
   if (it == surfaces_.end())
     return VGREResult::ERROR_INVALID_VALUE;
@@ -404,7 +404,7 @@ VGREResult TextureManager::surf2Dwrite(SurfaceId id, float value, int x,
 
 VGREResult TextureManager::surf2Dread(SurfaceId id, float &value, int x,
                                       int y) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = surfaces_.find(id);
   if (it == surfaces_.end())
     return VGREResult::ERROR_INVALID_VALUE;
@@ -446,12 +446,12 @@ VGREResult TextureManager::surf2Dread(SurfaceId id, float &value, int x,
 
 // ── Queries ────────────────────────────────────────────────────────────────
 size_t TextureManager::getTextureCount() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return textures_.size();
 }
 
 size_t TextureManager::getSurfaceCount() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return surfaces_.size();
 }
 
@@ -488,7 +488,7 @@ double TextureManager::readElementValue(const TextureObject &tex, size_t linearI
 }
 
 double TextureManager::readElementAsDouble(TextureId id, int linearIndex) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = textures_.find(id);
   if (it == textures_.end()) return 0.0;
 
@@ -554,7 +554,7 @@ double TextureManager::sampleTexel(const TextureObject &tex, int x, int y, int z
 
 // ── 3D texture fetch ─────────────────────────────────────────────────────────
 float TextureManager::tex3D(TextureId id, float x, float y, float z) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = textures_.find(id);
   if (it == textures_.end()) return 0.0f;
 
@@ -623,7 +623,7 @@ VGREResult TextureManager::createTexture3D(TextureId &outId, const void *data,
   if (!data || width == 0 || height == 0 || depth == 0 || elementSize == 0)
     return VGREResult::ERROR_INVALID_VALUE;
 
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   TextureObject tex;
   tex.id = nextTextureId_++;
@@ -660,7 +660,7 @@ VGREResult TextureManager::createCudaArray(TextureId &outId, size_t width,
   // Allocate managed backing memory
   std::vector<uint8_t> backing(totalBytes, 0);
 
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   TextureObject tex;
   tex.id = nextTextureId_++;
@@ -687,7 +687,7 @@ VGREResult TextureManager::createCudaArray(TextureId &outId, size_t width,
 }
 
 VGREResult TextureManager::destroyCudaArray(TextureId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto texIt = textures_.find(id);
   auto arrIt = ownedArrays_.find(id);
 
@@ -705,14 +705,14 @@ VGREResult TextureManager::destroyCudaArray(TextureId id) {
 }
 
 void *TextureManager::getCudaArrayData(TextureId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = ownedArrays_.find(id);
   if (it == ownedArrays_.end()) return nullptr;
   return it->second.data();
 }
 
 const void *TextureManager::getCudaArrayData(TextureId id) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = ownedArrays_.find(id);
   if (it == ownedArrays_.end()) return nullptr;
   return it->second.data();

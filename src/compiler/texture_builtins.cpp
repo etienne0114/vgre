@@ -8,6 +8,7 @@ extern "C" {
 float vgre_tex1D_f32(uint64_t tex, float x);
 float vgre_tex2D_f32(uint64_t tex, float x, float y);
 float vgre_tex3D_f32(uint64_t tex, float x, float y, float z);
+float vgre_tex1Dfetch_f32(uint64_t tex, int x);
 void vgre_surf2Dwrite_f32(uint64_t surf, float val, int x, int y);
 void vgre_surf2Dread_f32(uint64_t surf, float* val, int x, int y);
 }
@@ -24,6 +25,10 @@ float vgre_tex2D_f32(uint64_t tex, float x, float y) {
 
 float vgre_tex3D_f32(uint64_t tex, float x, float y, float z) {
     return TextureManager::instance().tex3D(tex, x, y, z);
+}
+
+float vgre_tex1Dfetch_f32(uint64_t tex, int x) {
+    return TextureManager::instance().tex1Dfetch(tex, x);
 }
 
 void vgre_surf2Dwrite_f32(uint64_t surf, float val, int x, int y) {

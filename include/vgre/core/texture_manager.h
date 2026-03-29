@@ -18,7 +18,7 @@ namespace core {
 // ── Texture addressing and filter modes ────────────────────────────────────
 enum class TextureAddressMode : uint8_t { CLAMP, WRAP, MIRROR, BORDER };
 
-enum class TextureFilterMode : uint8_t { POINT, LINEAR };
+enum class TextureFilterMode : uint8_t { POINT, LINEAR, CUBIC };
 
 // ── Texture element types ──────────────────────────────────────────────────
 enum class TextureElementType : uint8_t {
@@ -162,7 +162,7 @@ private:
   std::unordered_map<SurfaceId, SurfaceObject> surfaces_;
   // Backing memory owned by cudaArray lifecycle (freed on destroyCudaArray)
   std::unordered_map<TextureId, std::vector<uint8_t>> ownedArrays_;
-  mutable std::mutex mutex_;
+  mutable std::recursive_mutex mutex_;
   TextureId nextTextureId_ = 1;
   SurfaceId nextSurfaceId_ = 1;
 

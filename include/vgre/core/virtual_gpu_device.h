@@ -57,7 +57,7 @@ private:
   bool contextActive_ = false;
   std::atomic<StreamId> nextStreamId_{1};
   std::unordered_map<StreamId, Stream> streams_;
-  mutable std::mutex mutex_;
+  mutable std::recursive_mutex mutex_;
 };
 
 } // namespace core
