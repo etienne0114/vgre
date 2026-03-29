@@ -111,7 +111,7 @@ private:
 
   std::vector<CreditEntry> entries_;
   static constexpr size_t kMaxEntries = 10000;
-  mutable std::mutex mutex_;
+  mutable std::recursive_mutex mutex_;
 };
 
 } // namespace advanced

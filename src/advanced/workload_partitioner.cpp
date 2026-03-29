@@ -7,6 +7,98 @@
 namespace vgre {
 namespace advanced {
 
+// Hidden helper for 3D recursive bisection
+static void partitionRecursive(
+    uint32_t start[3], uint32_t end[3],
+    std::vector<vgre::advanced::NodeCapability> nodes,
+    vgre::advanced::PartitionPlan &outPlan) {
+    
+    if (nodes.empty()) return;
+
+    if (nodes.size() == 1) {
+        vgre::advanced::PartitionSlice slice;
+        slice.node_address = nodes[0].address;
+        slice.worker_idx = nodes[0].worker_idx;
+        slice.cpu_cores = nodes[0].cpu_cores;
+        slice.measured_capacity = (double(nodes[0].cpu_cores) * nodes[0].measured_gflops) / (nodes[0].avg_latency_ms + 0.1);
+        slice.partition_id = static_cast<uint32_t>(outPlan.slices.size());
+        
+        for (int i = 0; i < 3; ++i) {
+            slice.grid_start[i] = start[i];
+            slice.grid_end[i] = end[i];
+            slice.partition_dim[i] = end[i] - start[i];
+        }
+        
+        // Legacy compatibility
+        slice.grid_x_start = slice.grid_start[0];
+        slice.grid_x_end = slice.grid_end[0];
+        slice.partition_grid_x = slice.partition_dim[0];
+        
+        outPlan.slices.push_back(slice);
+        return;
+    }
+
+    // Choose the dimension with the largest number of blocks to split
+    int splitDim = 0;
+    uint32_t maxExtent = end[0] - start[0];
+    for (int i = 1; i < 3; ++i) {
+        if (end[i] - start[i] > maxExtent) {
+            maxExtent = end[i] - start[i];
+            splitDim = i;
+        }
+    }
+
+    // If maxExtent is 1, we can't split this grid further along any dimension effectively
+    // even if we have more nodes. In this case, we assign multiple nodes to the same slice or 
+    // just use one node for this atomic block. Here we use the first node.
+    if (maxExtent <= 1) {
+        partitionRecursive(start, end, {nodes[0]}, outPlan);
+        return;
+    }
+
+    // Sort nodes to ensure deterministic splitting based on capacity
+    std::sort(nodes.begin(), nodes.end(), [](const vgre::advanced::NodeCapability& a, const vgre::advanced::NodeCapability& b) {
+        double capA = (double(a.cpu_cores) * a.measured_gflops) / (a.avg_latency_ms + 0.1);
+        double capB = (double(b.cpu_cores) * b.measured_gflops) / (b.avg_latency_ms + 0.1);
+        return capA > capB;
+    });
+
+    double totalCap = 0;
+    for (const auto& n : nodes) {
+        totalCap += (double(n.cpu_cores) * n.measured_gflops) / (n.avg_latency_ms + 0.1);
+    }
+
+    // Partition nodes into two groups
+    std::vector<vgre::advanced::NodeCapability> groupA, groupB;
+    double currentCap = 0;
+    size_t splitIdx = 0;
+    for (size_t i = 0; i < nodes.size() - 1; ++i) {
+        currentCap += (double(nodes[i].cpu_cores) * nodes[i].measured_gflops) / (nodes[i].avg_latency_ms + 0.1);
+        groupA.push_back(nodes[i]);
+        if (currentCap >= totalCap / 2.0) {
+            splitIdx = i + 1;
+            break;
+        }
+    }
+    for (size_t i = splitIdx; i < nodes.size(); ++i) {
+        groupB.push_back(nodes[i]);
+    }
+
+    // Calculate split point in the chosen dimension
+    uint32_t splitPoint = start[splitDim] + static_cast<uint32_t>(std::round((currentCap / totalCap) * maxExtent));
+    if (splitPoint <= start[splitDim]) splitPoint = start[splitDim] + 1;
+    if (splitPoint >= end[splitDim]) splitPoint = end[splitDim] - 1;
+
+    // Recurse
+    uint32_t endA[3] = {end[0], end[1], end[2]};
+    endA[splitDim] = splitPoint;
+    partitionRecursive(start, endA, groupA, outPlan);
+
+    uint32_t startB[3] = {start[0], start[1], start[2]};
+    startB[splitDim] = splitPoint;
+    partitionRecursive(startB, end, groupB, outPlan);
+}
+
 VGREResult WorkloadPartitioner::createPartitionPlan(
     const uint32_t gridDim[3], const uint32_t blockDim[3],
     const std::vector<vgre::advanced::NodeCapability> &nodes, vgre::advanced::PartitionPlan &outPlan) {
@@ -38,78 +130,21 @@ VGREResult WorkloadPartitioner::createPartitionPlan(
   outPlan.block_dim[1] = blockDim[1];
   outPlan.block_dim[2] = blockDim[2];
 
-  uint32_t totalBlocksX = gridDim[0];
-
-  // If more nodes than blocks, limit nodes
-  size_t effectiveNodes =
-      std::min(static_cast<size_t>(totalBlocksX), validNodes.size());
-
-  // Phase 10: Calculate Ground-Truth capacity for each node
-  // Formula: Capacity = (Cores * Gflops) / (Latency + 0.1)
-  // This incorporates compute power and network overhead.
-  std::vector<double> capacities;
-  double totalCapacity = 0.0;
-  for (size_t i = 0; i < effectiveNodes; ++i) {
-    const NodeCapability& node = validNodes[i];
-    double cores = static_cast<double>(node.cpu_cores);
-    double gflops = node.measured_gflops;
-    double latency = node.avg_latency_ms;
-
-    double cap = (cores * gflops) / (latency + 0.1); 
-    capacities.push_back(cap);
-    totalCapacity += cap;
-  }
-
-  if (totalCapacity <= 0.0) {
-    VGRE_LOG_ERROR("WorkloadPartitioner", "Cannot partition: total compute capacity is zero");
-    return VGREResult::ERROR_INVALID_VALUE;
-  }
-
-  // Proportional allocation along X dimension using Ground-Truth weights
   outPlan.slices.clear();
-  outPlan.slices.reserve(effectiveNodes);
-
-  uint32_t allocatedBlocks = 0;
-  for (size_t i = 0; i < effectiveNodes; ++i) {
-    PartitionSlice slice;
-    slice.node_address = validNodes[i].address;
-    slice.worker_idx = validNodes[i].worker_idx;
-    slice.cpu_cores = validNodes[i].cpu_cores;
-    slice.measured_capacity = capacities[i];
-    slice.partition_id = static_cast<uint32_t>(i);
-    slice.grid_x_start = allocatedBlocks;
-
-    if (i == effectiveNodes - 1) {
-      slice.partition_grid_x = totalBlocksX - allocatedBlocks;
-    } else {
-      double ratio = capacities[i] / totalCapacity;
-      uint32_t blocks = static_cast<uint32_t>(std::floor(ratio * totalBlocksX));
-      if (blocks == 0) blocks = 1;
-      if (allocatedBlocks + blocks > totalBlocksX) blocks = totalBlocksX - allocatedBlocks;
-      slice.partition_grid_x = blocks;
-    }
-
-    slice.grid_x_end = slice.grid_x_start + slice.partition_grid_x;
-    allocatedBlocks += slice.partition_grid_x;
-    outPlan.slices.push_back(slice);
-  }
-
+  uint32_t start[3] = {0, 0, 0};
+  uint32_t end[3] = {gridDim[0], gridDim[1], gridDim[2]};
+  
+  partitionRecursive(start, end, validNodes, outPlan);
   outPlan.total_partitions = static_cast<uint32_t>(outPlan.slices.size());
-
-  // Log the partition plan
-  VGRE_LOG_INFO(
-      "WorkloadPartitioner",
-      "Created partition plan: " + std::to_string(totalBlocksX) +
-          " blocks across " + std::to_string(outPlan.total_partitions) +
-          " nodes");
+  VGREResult r = VGREResult::SUCCESS;
   for (const auto &slice : outPlan.slices) {
     VGRE_LOG_DEBUG("WorkloadPartitioner",
                    "  Partition " + std::to_string(slice.partition_id) +
                        " → " + slice.node_address + " [" +
-                       std::to_string(slice.grid_x_start) + ", " +
-                       std::to_string(slice.grid_x_end) + ") (" +
-                       std::to_string(slice.partition_grid_x) + " blocks, " +
-                       std::to_string(slice.cpu_cores) + " cores)");
+                       std::to_string(slice.grid_start[0]) + "," + std::to_string(slice.grid_end[0]) + ")x[" +
+                       std::to_string(slice.grid_start[1]) + "," + std::to_string(slice.grid_end[1]) + ")x[" +
+                       std::to_string(slice.grid_start[2]) + "," + std::to_string(slice.grid_end[2]) + ") (" +
+                       std::to_string(slice.partition_dim[0] * slice.partition_dim[1] * slice.partition_dim[2]) + " blocks)");
   }
 
   return VGREResult::SUCCESS;
@@ -120,44 +155,27 @@ bool WorkloadPartitioner::validatePlan(const PartitionPlan &plan) const {
     return false;
   }
 
-  uint32_t totalBlocksX = plan.original_grid[0];
-  if (totalBlocksX == 0) {
-    return false;
-  }
+  uint64_t expectedVolume = static_cast<uint64_t>(plan.original_grid[0]) * 
+                            static_cast<uint64_t>(plan.original_grid[1]) * 
+                            static_cast<uint64_t>(plan.original_grid[2]);
+  
+  if (expectedVolume == 0) return false;
 
-  // Check contiguous coverage: no gaps, no overlaps
-  uint32_t expectedStart = 0;
+  uint64_t actualVolume = 0;
   for (const auto &slice : plan.slices) {
-    if (slice.grid_x_start != expectedStart) {
-      VGRE_LOG_ERROR("WorkloadPartitioner",
-                     "Validation failed: gap or overlap at partition " +
-                         std::to_string(slice.partition_id) +
-                         " (expected start=" + std::to_string(expectedStart) +
-                         ", got=" + std::to_string(slice.grid_x_start) + ")");
-      return false;
+    uint64_t sliceVol = 1;
+    for (int i = 0; i < 3; ++i) {
+        if (slice.grid_end[i] < slice.grid_start[i]) return false;
+        if (slice.grid_end[i] > plan.original_grid[i]) return false;
+        sliceVol *= (slice.grid_end[i] - slice.grid_start[i]);
     }
-    if (slice.partition_grid_x == 0) {
-      VGRE_LOG_ERROR("WorkloadPartitioner",
-                     "Validation failed: empty partition " +
-                         std::to_string(slice.partition_id));
-      return false;
-    }
-    if (slice.grid_x_end != slice.grid_x_start + slice.partition_grid_x) {
-      VGRE_LOG_ERROR("WorkloadPartitioner",
-                     "Validation failed: inconsistent end in partition " +
-                         std::to_string(slice.partition_id));
-      return false;
-    }
-    expectedStart = slice.grid_x_end;
+    actualVolume += sliceVol;
   }
 
-  // Full coverage check
-  if (expectedStart != totalBlocksX) {
-    VGRE_LOG_ERROR(
-        "WorkloadPartitioner",
-        "Validation failed: partitions cover " +
-            std::to_string(expectedStart) + " blocks but grid has " +
-            std::to_string(totalBlocksX));
+  if (actualVolume != expectedVolume) {
+    VGRE_LOG_ERROR("WorkloadPartitioner",
+                   "Validation failed: volume mismatch (expected=" + std::to_string(expectedVolume) + 
+                   ", actual=" + std::to_string(actualVolume) + ")");
     return false;
   }
 

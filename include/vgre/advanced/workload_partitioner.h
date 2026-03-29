@@ -14,9 +14,16 @@ namespace advanced {
 struct PartitionSlice {
   std::string node_address;      // target node IP ("local" for master)
   int worker_idx = -1;           // worker index in TCPClusterManager (-1 = local)
-  uint32_t grid_x_start = 0;    // first block along X this partition owns
-  uint32_t grid_x_end = 0;      // last+1 block along X
-  uint32_t partition_grid_x = 0; // grid_x_end - grid_x_start
+  
+  // 3D Partition Boundaries
+  uint32_t grid_start[3] = {0, 0, 0}; // [x, y, z]
+  uint32_t grid_end[3] = {0, 0, 0};   // [x, y, z]
+  uint32_t partition_dim[3] = {0, 0, 0}; // grid_end - grid_start
+  
+  uint32_t grid_x_start = 0;    // Legacy X-only fields (kept for compatibility)
+  uint32_t grid_x_end = 0;
+  uint32_t partition_grid_x = 0;
+  
   uint32_t partition_id = 0;
   int cpu_cores = 0;             // capability used for weighting
   double measured_capacity = 0.0; // Phase 10: Ground-Truth weight

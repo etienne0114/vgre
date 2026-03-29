@@ -2,6 +2,7 @@
 #define VGRE_ADVANCED_HYBRID_COMPUTE_MANAGER_H
 
 #include "vgre/common/types.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
 
 #include <string>
@@ -29,6 +30,7 @@ struct RemoteNode {
     std::string igpuName;
     bool        available        = false;
     double      latencyMs        = 0.0;
+    vgre_telemetry_t lastTelemetry{};
 };
 
 // ── Compute resource summary ───────────────────────────────────────────────
@@ -65,6 +67,7 @@ public:
     VGREResult updateRemoteNodeCapability(const std::string &address, int cores,
                                         size_t memory, bool hasIGPU,
                                         const std::string &igpuName);
+    VGREResult updateRemoteNodeTelemetry(const std::string &address, const vgre_telemetry_t &telemetry);
     VGREResult pingRemoteNode(const std::string &address, double &latencyMs);
     std::vector<RemoteNode> getRemoteNodes() const;
 

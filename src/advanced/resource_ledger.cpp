@@ -63,7 +63,7 @@ VGREResult ResourceLedger::recordCompute(const std::string &nodeAddress,
   entry.kernel_id = kernelId;
   entry.direction = direction;
 
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   entries_.push_back(entry);
 
@@ -86,7 +86,7 @@ VGREResult ResourceLedger::recordCompute(const std::string &nodeAddress,
 
 VGREResult ResourceLedger::getBalance(const std::string &nodeAddress,
                                        NodeBalance &outBalance) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   outBalance = {};
   outBalance.address = nodeAddress;
@@ -117,7 +117,7 @@ VGREResult ResourceLedger::getBalance(const std::string &nodeAddress,
 }
 
 std::vector<NodeBalance> ResourceLedger::getAllBalances() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   // Aggregate per-node
   std::vector<std::string> uniqueAddresses;
@@ -157,13 +157,13 @@ std::vector<NodeBalance> ResourceLedger::getAllBalances() const {
 }
 
 void ResourceLedger::reset() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   entries_.clear();
   VGRE_LOG_INFO("ResourceLedger", "Ledger reset — all entries cleared");
 }
 
 size_t ResourceLedger::getEntryCount() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return entries_.size();
 }
 
@@ -352,7 +352,7 @@ VGREResult ResourceLedger::fromJSON(const std::string &json) {
 }
 
 VGREResult ResourceLedger::persist() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   std::string path = computeLedgerPath();
   std::string json = toJSON();
@@ -374,7 +374,7 @@ VGREResult ResourceLedger::persist() const {
 }
 
 VGREResult ResourceLedger::load() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   std::string path = computeLedgerPath();
   std::ifstream file(path);

@@ -1,4 +1,5 @@
 #include "vgre/advanced/hybrid_compute_manager.h"
+#include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
@@ -151,24 +152,52 @@ void HybridComputeManager::detectIntegratedGPU() {
 // ── Backend selection ──────────────────────────────────────────────────────
 ComputeBackend
 HybridComputeManager::selectBackend(size_t workloadSize,
-                                    size_t memoryRequired) const {
+                                    size_t /*memoryRequired*/) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // Prefer Remote Node for very large workloads if available and latency is acceptable (Zero-Simulation)
-  if (workloadSize > 100000 && memoryRequired < resources_.cpuMemoryBytes) {
-    for (const auto &node : resources_.remoteNodes) {
-      if (node.available && node.latencyMs < 50.0) {
-        return ComputeBackend::REMOTE_NODE;
+  // Multi-factor performance comparison via Cost Function: Time = Latency + (Workload / Throughput)
+  auto &aee = vgre::advanced::AdaptiveExecutionEngine::instance();
+  double localGflops = aee.getInstantaneousGFLOPS();
+  double localPeakGflops = aee.getMaxGFLOPS();
+  double currentLocalCapacity = (localGflops > 0.1) ? localGflops : (localPeakGflops * 0.1);
+  if (currentLocalCapacity < 0.1) currentLocalCapacity = 0.1;
+
+  double localTime = (static_cast<double>(workloadSize) / currentLocalCapacity); 
+  
+  ComputeBackend bestBackend = ComputeBackend::CPU;
+  double minTime = localTime;
+
+  // Check Remote Nodes: Higher authoritative comparison
+  for (const auto &node : resources_.remoteNodes) {
+    if (node.available) {
+      double remoteGflops = node.lastTelemetry.gflops > 0 ? node.lastTelemetry.gflops : 0.1;
+      double remoteLatency = node.lastTelemetry.avg_kernel_latency_ms > 0 ? node.lastTelemetry.avg_kernel_latency_ms : 50.0;
+      
+      // Authoritative Remote Time: Network Latency + Execution Time
+      double remoteTime = remoteLatency + (static_cast<double>(workloadSize) / remoteGflops);
+      
+      if (remoteTime < minTime) {
+        minTime = remoteTime;
+        bestBackend = ComputeBackend::REMOTE_NODE;
       }
     }
   }
 
-  // If local workload is medium, use Integrated GPU
-  if (resources_.hasIntegratedGPU && workloadSize > 20000) {
-    return ComputeBackend::INTEGRATED_GPU;
+  // Check Integrated GPU: Higher authoritative throughput assessment
+  if (resources_.hasIntegratedGPU) {
+    // iGPU typically has higher throughput but higher dispatch latency than CPU
+    double igpuGflops = 100.0; // Benchmark-derived or telemetry-based if available
+    double igpuLatency = 0.5; // Dispatch overhead
+    
+    double igpuTime = igpuLatency + (static_cast<double>(workloadSize) / igpuGflops);
+    
+    if (igpuTime < minTime) {
+      minTime = igpuTime;
+      bestBackend = ComputeBackend::INTEGRATED_GPU;
+    }
   }
 
-  return ComputeBackend::CPU;
+  return bestBackend;
 }
 
 // ── Remote node management ─────────────────────────────────────────────────
@@ -247,6 +276,17 @@ VGREResult HybridComputeManager::updateRemoteNodeCapability(const std::string &a
   }
   
   return VGREResult::SUCCESS;
+}
+
+VGREResult HybridComputeManager::updateRemoteNodeTelemetry(const std::string &address, const vgre_telemetry_t &telemetry) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto &node : resources_.remoteNodes) {
+    if (node.address == address) {
+      node.lastTelemetry = telemetry;
+      return VGREResult::SUCCESS;
+    }
+  }
+  return VGREResult::ERROR_INVALID_VALUE;
 }
 
 VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
