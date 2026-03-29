@@ -1,7 +1,12 @@
 #include "vgre/core/scheduler.h"
 #include "vgre/common/logger.h"
 
+#include <sstream>
+#include <cstring>
+
 #if defined(__linux__)
+#include <dirent.h>
+#include <fstream>
 #include <pthread.h>
 #include <sched.h>
 #elif defined(_WIN32)
@@ -19,11 +24,16 @@ Scheduler::Scheduler(int numThreads) : numThreads_(numThreads) {
       numThreads_ = 4;
   }
 
+  workerNumaNodes_.resize(numThreads_, -1);
   for (int i = 0; i < numThreads_; ++i) {
-    workers_.emplace_back([this]() {
-      this->workerLoop();
+    workers_.emplace_back([this, i]() {
+      this->workerLoop(i);
     });
   }
+
+  // Discover NUMA topology and pin worker threads.
+  // Called after workers_.emplace_back() so native_handle() is valid.
+  buildNumaTopology();
 
   VGRE_LOG_INFO("Scheduler", "Started thread pool with " +
                                  std::to_string(numThreads_) + " workers");
@@ -41,19 +51,148 @@ Scheduler::~Scheduler() {
                                   std::to_string(completed_.load()) + " tasks");
 }
 
+// ── NUMA Topology Discovery ────────────────────────────────────────────────
+void Scheduler::buildNumaTopology() {
+#if defined(__linux__)
+  // Struct is local to avoid cpu_set_t leaking into the header.
+  struct NodeInfo {
+    int nodeId;
+    cpu_set_t cpuSet;
+  };
+
+  // Helper: parse Linux cpulist format "0-3,8-11" into a cpu_set_t.
+  auto parseCpuList = [](const std::string &cpulist, cpu_set_t &cs) {
+    CPU_ZERO(&cs);
+    std::istringstream ss(cpulist);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+      if (token.empty()) continue;
+      auto dash = token.find('-');
+      if (dash == std::string::npos) {
+        int cpu = std::stoi(token);
+        if (cpu >= 0 && cpu < CPU_SETSIZE) CPU_SET(cpu, &cs);
+      } else {
+        int first = std::stoi(token.substr(0, dash));
+        int last  = std::stoi(token.substr(dash + 1));
+        for (int c = first; c <= last && c < CPU_SETSIZE; ++c) CPU_SET(c, &cs);
+      }
+    }
+  };
+
+  // Enumerate /sys/devices/system/node/nodeN directories.
+  std::vector<NodeInfo> nodes;
+  DIR *dir = opendir("/sys/devices/system/node");
+  if (dir) {
+    struct dirent *entry = nullptr;
+    while ((entry = readdir(dir)) != nullptr) {
+      if (std::strncmp(entry->d_name, "node", 4) != 0) continue;
+      char *numEnd = nullptr;
+      long nodeId = std::strtol(entry->d_name + 4, &numEnd, 10);
+      if (numEnd == entry->d_name + 4) continue;  // not a numeric suffix
+
+      std::string cpulistPath = std::string("/sys/devices/system/node/") +
+                                entry->d_name + "/cpulist";
+      std::ifstream f(cpulistPath);
+      if (!f.is_open()) continue;
+
+      std::string cpulist;
+      std::getline(f, cpulist);
+      // Strip trailing whitespace
+      while (!cpulist.empty() && (cpulist.back() == '\n' || cpulist.back() == '\r'))
+        cpulist.pop_back();
+      if (cpulist.empty()) continue;
+
+      NodeInfo ni;
+      ni.nodeId = static_cast<int>(nodeId);
+      parseCpuList(cpulist, ni.cpuSet);
+      nodes.push_back(ni);
+    }
+    closedir(dir);
+    std::sort(nodes.begin(), nodes.end(),
+              [](const NodeInfo &a, const NodeInfo &b) { return a.nodeId < b.nodeId; });
+  }
+
+  if (nodes.empty()) {
+    VGRE_LOG_DEBUG("Scheduler", "NUMA: no topology found — workers use any CPU");
+    return;
+  }
+
+  VGRE_LOG_INFO("Scheduler",
+                "NUMA topology: " + std::to_string(nodes.size()) + " node(s) detected");
+
+  // Assign workers to NUMA nodes round-robin and pin via pthread affinity.
+  int numNodes = static_cast<int>(nodes.size());
+  for (int i = 0; i < numThreads_ && i < static_cast<int>(workers_.size()); ++i) {
+    int nodeIdx  = i % numNodes;
+    int nodeId   = nodes[nodeIdx].nodeId;
+    workerNumaNodes_[i] = nodeId;
+
+    int rc = pthread_setaffinity_np(workers_[i].native_handle(),
+                                    sizeof(cpu_set_t),
+                                    &nodes[nodeIdx].cpuSet);
+    if (rc != 0) {
+      VGRE_LOG_WARN("Scheduler",
+                    "pthread_setaffinity_np failed for worker " + std::to_string(i) +
+                    " (node " + std::to_string(nodeId) + "): errno=" + std::to_string(rc));
+    } else {
+      VGRE_LOG_DEBUG("Scheduler",
+                     "Worker " + std::to_string(i) + " pinned to NUMA node " +
+                     std::to_string(nodeId));
+    }
+  }
+#else
+  // Non-Linux: no NUMA pinning; workerNumaNodes_ stays -1 for all workers.
+  VGRE_LOG_DEBUG("Scheduler", "NUMA thread pinning not supported on this platform");
+#endif
+}
+
 // ── Worker loop ────────────────────────────────────────────────────────────
-void Scheduler::workerLoop() {
+void Scheduler::workerLoop(int workerIdx) {
+  // My NUMA node, or -1 if topology is unavailable.
+  int myNode = (workerIdx >= 0 && workerIdx < static_cast<int>(workerNumaNodes_.size()))
+               ? workerNumaNodes_[workerIdx]
+               : -1;
+
   while (true) {
     WorkItem item;
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      cv_.wait(lock, [this] { return shutdown_ || !queue_.empty(); });
+      cv_.wait(lock, [this, myNode] {
+        if (shutdown_) return true;
+        if (!queue_.empty()) return true;
+        if (myNode >= 0) {
+          auto it = numaQueues_.find(myNode);
+          if (it != numaQueues_.end() && !it->second.empty()) return true;
+        }
+        return false;
+      });
 
-      if (shutdown_ && queue_.empty())
+      // Check all queues empty for shutdown
+      bool allEmpty = queue_.empty();
+      if (allEmpty && myNode >= 0) {
+        auto it = numaQueues_.find(myNode);
+        if (it != numaQueues_.end() && !it->second.empty()) allEmpty = false;
+      }
+      if (shutdown_ && allEmpty)
         return;
 
-      item = queue_.top();
-      queue_.pop();
+      // NUMA-local queue takes priority over the global work-stealing queue.
+      if (myNode >= 0) {
+        auto it = numaQueues_.find(myNode);
+        if (it != numaQueues_.end() && !it->second.empty()) {
+          item = it->second.top();
+          it->second.pop();
+        } else if (!queue_.empty()) {
+          item = queue_.top();
+          queue_.pop();
+        } else {
+          continue;  // Spurious wakeup
+        }
+      } else {
+        if (queue_.empty()) continue;
+        item = queue_.top();
+        queue_.pop();
+      }
     }
 
     // Execute the generic task for this work-item (outside mutex!)
@@ -166,6 +305,7 @@ void Scheduler::tryProcessStream(StreamId stream) {
         return;
       }
       sq2.pendingTasks.pop();
+      sq2.isProcessing = false;
       this->tryProcessStream(stream);
     }
   };
@@ -209,6 +349,52 @@ Scheduler::submitConcurrentTask(std::function<void()> taskFn, int priority) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     queue_.push(std::move(item));
+    pending_++;
+  }
+  cv_.notify_all();
+
+  return future;
+}
+
+// ── NUMA Task Submission ───────────────────────────────────────────────────
+std::future<VGREResult>
+Scheduler::submitNumaTask(StreamId stream, std::function<void()> taskFn,
+                          int numaNode, int priority) {
+  if (!taskFn) {
+    std::promise<VGREResult> p;
+    p.set_value(VGREResult::ERROR_INVALID_VALUE);
+    return p.get_future();
+  }
+  if (shutdown_.load()) {
+    std::promise<VGREResult> p;
+    p.set_value(VGREResult::ERROR_NOT_INITIALIZED);
+    return p.get_future();
+  }
+
+  auto node = std::make_shared<StreamTaskNode>();
+  node->task = std::move(taskFn);
+  auto future = node->promise.get_future();
+
+  WorkItem item;
+  item.streamId          = stream;
+  item.priority          = priority;
+  item.preferredNumaNode = numaNode;
+  item.execute = [node]() {
+    try {
+      if (node->task) node->task();
+      node->promise.set_value(VGREResult::SUCCESS);
+    } catch (...) {
+      node->promise.set_value(VGREResult::ERROR_LAUNCH_FAILURE);
+    }
+  };
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (numaNode >= 0) {
+      numaQueues_[numaNode].push(std::move(item));
+    } else {
+      queue_.push(std::move(item));
+    }
     pending_++;
   }
   cv_.notify_all();
@@ -273,11 +459,13 @@ void Scheduler::setThreadCount(int n) {
   // 3. Spawn new pool
   shutdown_ = false;
   numThreads_ = n;
+  workerNumaNodes_.assign(numThreads_, -1);
   for (int i = 0; i < numThreads_; ++i) {
-    workers_.emplace_back([this]() {
-      this->workerLoop();
+    workers_.emplace_back([this, i]() {
+      this->workerLoop(i);
     });
   }
+  buildNumaTopology();
 
   VGRE_LOG_INFO("Scheduler", "Thread pool resized to " +
                                  std::to_string(numThreads_) + " workers");

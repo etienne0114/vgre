@@ -11,6 +11,7 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace vgre {
@@ -19,7 +20,8 @@ namespace core {
 // ── Work item ──────────────────────────────────────────────────────────────
 struct WorkItem {
   StreamId streamId = 0;
-  int priority = 0; // higher = more urgent
+  int priority = 0;            // higher = more urgent
+  int preferredNumaNode = -1;  // -1 = any node (no NUMA preference)
   std::function<void()> execute;
 
   bool operator<(const WorkItem &o) const {
@@ -64,6 +66,25 @@ public:
   std::future<VGREResult> submitConcurrentTask(std::function<void()> taskFn,
                                                int priority = 0);
 
+  /**
+   * @brief Submits a task with a NUMA-node affinity hint.
+   *
+   * On Linux, worker threads are pinned to NUMA-local CPUs; tasks submitted
+   * with a matching numaNode are preferentially dispatched to those workers,
+   * reducing cross-NUMA memory-access latency.  Falls back to any worker when
+   * no NUMA information is available.
+   *
+   * @param stream    Stream handle (carried for tracking; task executes concurrently).
+   * @param taskFn    The function to execute.
+   * @param numaNode  Preferred NUMA node index (-1 = no preference).
+   * @param priority  Task priority (higher is more urgent).
+   * @return A future containing the task result.
+   */
+  std::future<VGREResult> submitNumaTask(StreamId stream,
+                                         std::function<void()> taskFn,
+                                         int numaNode,
+                                         int priority = 0);
+
   // Control
   void waitAll();
   void waitStream(StreamId stream);
@@ -79,11 +100,17 @@ public:
   static Scheduler &instance();
 
 private:
-  void workerLoop();
+  void buildNumaTopology();          // Discover NUMA nodes; pin worker threads
+  void workerLoop(int workerIdx);    // Worker body: NUMA-local queue first, then steal
   void tryProcessStream(StreamId stream);
 
   std::vector<std::thread> workers_;
-  std::priority_queue<WorkItem> queue_; // Global ready queue
+  std::priority_queue<WorkItem> queue_; // Global ready queue (work-stealing fallback)
+
+  // Per-NUMA dispatch queues: tasks submitted via submitNumaTask() land here.
+  std::unordered_map<int, std::priority_queue<WorkItem>> numaQueues_;
+  // NUMA node assigned to each worker thread (index == worker index in workers_).
+  std::vector<int> workerNumaNodes_;
 
   // Per-stream serialization: StreamId -> Queue of task nodes
   struct StreamQueue {
