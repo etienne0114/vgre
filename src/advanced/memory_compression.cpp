@@ -5,13 +5,14 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <lz4.h>
 
 namespace vgre {
 namespace advanced {
 
 namespace {
 constexpr uint32_t kCompressionMagic = 0x56475245U; // "VGRE"
-constexpr uint8_t kCompressionVersion = 1;
+constexpr uint8_t kCompressionVersion = 2; // Updated for industrial LZ4
 constexpr uint8_t kFlagCompressed = 0x1;
 
 struct CompressionHeader {
@@ -25,119 +26,13 @@ struct CompressionHeader {
 } // namespace
 
 MemoryCompression::MemoryCompression() {
-  VGRE_LOG_INFO("MemoryCompression", "Initialized with min transfer size " +
+  VGRE_LOG_INFO("MemoryCompression", "Initialized with industrial LZ4 (min transfer size " +
                                          std::to_string(minTransferSize_) +
-                                         " bytes");
+                                         " bytes)");
 }
 
 MemoryCompression::~MemoryCompression() = default;
 
-// ── LZ4-style fast compression ─────────────────────────────────────────────
-// Simplified run-length encoding with literal blocks for fast throughput.
-// Format: [literal_len(1 byte)][match_len(1 byte)][literal_data...]
-size_t MemoryCompression::lz4Compress(const uint8_t *src, size_t srcSize,
-                                      uint8_t *dst, size_t dstCapacity) {
-  if (srcSize == 0 || dstCapacity < srcSize + (srcSize / 255) + 16) {
-    // Not enough space — just copy
-    return 0;
-  }
-
-  size_t srcPos = 0, dstPos = 0;
-  size_t lastLiteral = 0;
-
-  while (srcPos < srcSize) {
-    // Search for a run of repeated bytes
-    size_t runStart = srcPos;
-    uint8_t runByte = src[srcPos];
-    size_t runLen = 0;
-
-    while (srcPos < srcSize && src[srcPos] == runByte && runLen < 255) {
-      ++srcPos;
-      ++runLen;
-    }
-
-    if (runLen >= 4) {
-      // Write literal block before the run
-      size_t litLen = runStart - lastLiteral;
-
-      while (litLen > 255) {
-        if (dstPos + 2 + 255 > dstCapacity)
-          return 0;
-        dst[dstPos++] = 255;
-        dst[dstPos++] = 0; // no run
-        std::memcpy(&dst[dstPos], &src[lastLiteral], 255);
-        dstPos += 255;
-        lastLiteral += 255;
-        litLen -= 255;
-      }
-
-      if (dstPos + 2 + litLen + 1 > dstCapacity)
-        return 0;
-      dst[dstPos++] = static_cast<uint8_t>(litLen);
-      dst[dstPos++] = static_cast<uint8_t>(runLen);
-
-      // Copy literal data
-      if (litLen > 0) {
-        std::memcpy(&dst[dstPos], &src[lastLiteral], litLen);
-        dstPos += litLen;
-      }
-
-      // Write run byte
-      dst[dstPos++] = runByte;
-
-      lastLiteral = srcPos;
-    }
-  }
-
-  // Final literal block
-  size_t remaining = srcSize - lastLiteral;
-  while (remaining > 0) {
-    size_t chunk = std::min(remaining, size_t(255));
-    if (dstPos + 2 + chunk > dstCapacity)
-      return 0;
-    dst[dstPos++] = static_cast<uint8_t>(chunk);
-    dst[dstPos++] = 0; // no run
-    std::memcpy(&dst[dstPos], &src[lastLiteral], chunk);
-    dstPos += chunk;
-    lastLiteral += chunk;
-    remaining -= chunk;
-  }
-
-  return dstPos;
-}
-
-// ── LZ4-style decompression ───────────────────────────────────────────────
-size_t MemoryCompression::lz4Decompress(const uint8_t *src, size_t srcSize,
-                                        uint8_t *dst, size_t dstCapacity) {
-  size_t srcPos = 0, dstPos = 0;
-
-  while (srcPos + 1 < srcSize) {
-    uint8_t litLen = src[srcPos++];
-    uint8_t runLen = src[srcPos++];
-
-    // Copy literal data
-    if (litLen > 0) {
-      if (srcPos + litLen > srcSize || dstPos + litLen > dstCapacity)
-        return 0;
-      std::memcpy(&dst[dstPos], &src[srcPos], litLen);
-      dstPos += litLen;
-      srcPos += litLen;
-    }
-
-    // Expand run
-    if (runLen > 0) {
-      if (srcPos >= srcSize || dstPos + runLen > dstCapacity)
-        return 0;
-      uint8_t runByte = src[srcPos++];
-      std::memset(&dst[dstPos], runByte, runLen);
-      dstPos += runLen;
-    }
-  }
-
-  return dstPos;
-}
-
-// ── Public compress ────────────────────────────────────────────────────────
 VGREResult MemoryCompression::compress(const void *src, size_t srcSize,
                                        std::vector<uint8_t> &dst) {
   if (!src && srcSize > 0) {
@@ -145,12 +40,21 @@ VGREResult MemoryCompression::compress(const void *src, size_t srcSize,
   }
   auto start = std::chrono::steady_clock::now();
 
+  const int maxCompressedSize = LZ4_compressBound(static_cast<int>(srcSize));
   std::vector<uint8_t> compressed;
-  compressed.resize(srcSize + (srcSize / 255) + 64);
-  size_t compressedSize = lz4Compress(static_cast<const uint8_t *>(src), srcSize,
-                                      compressed.data(), compressed.size());
+  const bool shouldTryCompress = shouldCompress(srcSize);
+  
+  int compressedSize = 0;
+  if (shouldTryCompress) {
+    compressed.resize(static_cast<size_t>(maxCompressedSize));
+    compressedSize = LZ4_compress_default(
+        static_cast<const char *>(src), 
+        reinterpret_cast<char *>(compressed.data()), 
+        static_cast<int>(srcSize), 
+        maxCompressedSize);
+  }
 
-  const bool useCompressed = (compressedSize > 0 && compressedSize < srcSize);
+  const bool useCompressed = (compressedSize > 0 && compressedSize < static_cast<int>(srcSize));
   const uint64_t payloadSize =
       static_cast<uint64_t>(useCompressed ? compressedSize : srcSize);
 
@@ -184,14 +88,13 @@ VGREResult MemoryCompression::compress(const void *src, size_t srcSize,
                                std::max(stats_.totalBytesOut, uint64_t(1));
 
   VGRE_LOG_DEBUG("MemoryCompression",
-                 "Compressed " + std::to_string(srcSize) + " → " +
+                 "Industrial LZ4: " + std::to_string(srcSize) + " → " +
                      std::to_string(dst.size()) + " bytes (" +
                      std::to_string(ms) + " ms)");
 
   return VGREResult::SUCCESS;
 }
 
-// ── Public decompress ──────────────────────────────────────────────────────
 VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
                                          void *dst, size_t dstCapacity,
                                          size_t &outActualSize) {
@@ -206,20 +109,25 @@ VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
     CompressionHeader hdr{};
     std::memcpy(&hdr, src, sizeof(CompressionHeader));
     if (hdr.magic == kCompressionMagic && hdr.version == kCompressionVersion) {
-      const uint8_t *payload =
-          static_cast<const uint8_t *>(src) + sizeof(CompressionHeader);
+      const char *payload =
+          static_cast<const char *>(src) + sizeof(CompressionHeader);
       const size_t payloadSize = static_cast<size_t>(hdr.payloadSize);
       const size_t originalSize = static_cast<size_t>(hdr.originalSize);
+      
       if (sizeof(CompressionHeader) + payloadSize > srcSize ||
           originalSize > dstCapacity) {
         return VGREResult::ERROR_COMPRESSION;
       }
 
       if ((hdr.flags & kFlagCompressed) != 0) {
-        size_t decompressedSize =
-            lz4Decompress(payload, payloadSize, static_cast<uint8_t *>(dst),
-                          dstCapacity);
-        if (decompressedSize != originalSize) {
+        int decompressedSize = LZ4_decompress_safe(
+            payload, static_cast<char *>(dst), 
+            static_cast<int>(payloadSize), 
+            static_cast<int>(dstCapacity));
+            
+        if (decompressedSize < 0 || static_cast<size_t>(decompressedSize) != originalSize) {
+          VGRE_LOG_ERROR("MemoryCompression", "LZ4 Decompression failed (err=" + 
+                         std::to_string(decompressedSize) + ")");
           return VGREResult::ERROR_COMPRESSION;
         }
       } else {
@@ -243,18 +151,20 @@ VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
     }
   }
 
-  // Legacy fallback for pre-header payloads.
-  size_t decompressedSize =
-      lz4Decompress(static_cast<const uint8_t *>(src), srcSize,
-                    static_cast<uint8_t *>(dst), dstCapacity);
-  if (decompressedSize == 0) {
+  // Legacy fallback if signature fails (direct LZ4 decompress attempt)
+  int decompressedSize = LZ4_decompress_safe(
+      static_cast<const char *>(src), static_cast<char *>(dst),
+      static_cast<int>(srcSize), static_cast<int>(dstCapacity));
+      
+  if (decompressedSize <= 0) {
+    // If not LZ4, assume raw copy as last resort
     if (srcSize > dstCapacity) {
       return VGREResult::ERROR_COMPRESSION;
     }
     std::memcpy(dst, src, srcSize);
-    decompressedSize = srcSize;
+    decompressedSize = static_cast<int>(srcSize);
   }
-  outActualSize = decompressedSize;
+  outActualSize = static_cast<size_t>(decompressedSize);
 
   auto end = std::chrono::steady_clock::now();
   double ms = std::chrono::duration<double, std::milli>(end - start).count();
@@ -268,7 +178,6 @@ VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
   return VGREResult::SUCCESS;
 }
 
-// ── Configuration ──────────────────────────────────────────────────────────
 void MemoryCompression::setMinTransferSize(size_t bytes) {
   minTransferSize_ = bytes;
 }
@@ -281,7 +190,6 @@ bool MemoryCompression::shouldCompress(size_t transferSize) const {
   return transferSize >= minTransferSize_;
 }
 
-// ── Statistics ─────────────────────────────────────────────────────────────
 CompressionStats MemoryCompression::getStats() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return stats_;
@@ -292,7 +200,6 @@ void MemoryCompression::resetStats() {
   stats_ = {};
 }
 
-// ── Singleton ──────────────────────────────────────────────────────────────
 MemoryCompression &MemoryCompression::instance() {
   static MemoryCompression mc;
   return mc;

@@ -52,12 +52,6 @@ public:
     static MemoryCompression& instance();
 
 private:
-    // Simple LZ4-like fast compression (run-length + literal)
-    size_t lz4Compress(const uint8_t* src, size_t srcSize,
-                        uint8_t* dst, size_t dstCapacity);
-    size_t lz4Decompress(const uint8_t* src, size_t srcSize,
-                          uint8_t* dst, size_t dstCapacity);
-
     size_t            minTransferSize_ = 4096; // 4 KB default threshold
     CompressionStats  stats_;
     mutable std::mutex mutex_;

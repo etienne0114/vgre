@@ -75,6 +75,30 @@ public:
     std::string toChromeTraceJSON() const; // Phase 10: standard tracing
     VGREResult  exportToFile(const std::string& filepath) const;
 
+    /**
+     * @brief Generates an OpenTelemetry OTLP/JSON trace payload.
+     *
+     * Produces a JSON document conforming to the OTLP trace protobuf-JSON
+     * mapping (opentelemetry-proto/trace/v1/trace.proto).  Each recorded
+     * ProfileEvent becomes one span with VGRE-specific attributes
+     * (vgre.gflops, vgre.throughput_gbps, vgre.grid_dim.*).
+     *
+     * The payload can be POSTed directly to any OpenTelemetry collector
+     * (Jaeger, Tempo, OTLP HTTP receiver) at `/v1/traces`.
+     */
+    std::string toOTLPJSON() const;
+
+    /**
+     * @brief POSTs the OTLP trace payload to a collector via raw TCP.
+     *
+     * Uses a plain HTTP/1.1 POST — no libcurl dependency.
+     * @param endpoint  URL in the form "http://host:port/path"
+     *                  (e.g. "http://localhost:4318/v1/traces").
+     * @return SUCCESS on HTTP 200/204, ERROR_IO on connection failure,
+     *         ERROR_UNKNOWN on non-2xx response.
+     */
+    VGREResult  exportOTLPToHTTP(const std::string& endpoint) const;
+
     // Reset
     void clear();
 
@@ -89,7 +113,7 @@ private:
     std::unordered_map<std::string, KernelStats>  stats_;
     std::unordered_map<std::string,
         std::chrono::steady_clock::time_point>    timers_;
-    mutable std::mutex                            mutex_;
+    mutable std::recursive_mutex                  mutex_;
 };
 
 } // namespace advanced
