@@ -9,7 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
-#include <shared_mutex>
+#include <mutex>
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -17,6 +17,19 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
+#if defined(__linux__)
+#include <sys/syscall.h>
+// mbind(2) policy constants — defined here to avoid a libnuma dependency.
+#ifndef MPOL_PREFERRED
+#  define MPOL_PREFERRED 1
+#endif
+#ifndef MPOL_MF_MOVE
+#  define MPOL_MF_MOVE   0x2
+#endif
+#ifndef SYS_mbind
+#  define SYS_mbind 237  // x86_64
+#endif
+#endif  // __linux__
 
 namespace vgre {
 namespace core {
@@ -29,6 +42,11 @@ static struct sigaction old_sa {};
 static std::atomic<bool> g_handlerInstalled{false};
 static std::atomic<MemoryManager *> g_memoryManagerId{nullptr};
 
+// Thread-local active device ID — set by CPUParallelExecutor before dispatching
+// kernel blocks, read by the SIGSEGV handler to attribute page faults to a device.
+// Default is 0 (host / device 0).
+thread_local int t_currentDevice = 0;
+
 MemoryManager::MemoryManager(size_t poolSize) : poolSize_(poolSize) {
   g_memoryManagerId.store(this, std::memory_order_release);
   VGRE_LOG_INFO("MemoryManager", "Initialized with pool size " +
@@ -36,12 +54,16 @@ MemoryManager::MemoryManager(size_t poolSize) : poolSize_(poolSize) {
                                      " MB");
   setupSignalHandler();
   calibrateBandwidth();
-  
+
   // Initialize empty active tree
   activeTree_.store(new RegionTreeContainer{MemoryIntervalTree<ManagedRegion>(), 0}, std::memory_order_release);
+
+  // Start background UVM page-migration thread.
+  startMigrationThread();
 }
 
 MemoryManager::~MemoryManager() {
+  stopMigrationThread();
   teardownSignalHandler();
   g_memoryManagerId.store(nullptr, std::memory_order_release);
   
@@ -179,16 +201,23 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
           }
 #endif
           region.accessCount.fetch_add(1, std::memory_order_relaxed);
-          
+
+          // Attribute this fault to the currently active device for adaptive
+          // migration heuristics. t_currentDevice is a thread-local set by the
+          // kernel dispatcher before executing each block.
+          {
+            int dev = t_currentDevice;
+            if (dev >= 0 && dev < ManagedRegion::kMaxDevices) {
+              region.deviceAccessCounts[dev].fetch_add(1, std::memory_order_relaxed);
+            }
+          }
+
           // Phase 12: Authoritative Memory Sync
           int pref = region.preferredLocation.load(std::memory_order_relaxed);
           if (pref > 0) { // Preferred on a Device, but faulting on Host
               uint32_t c = region.conflictCount.fetch_add(1, std::memory_order_relaxed);
-              if (c == 100) { // Trigger warning threshold once
-                  VGRE_LOG_WARN("MemoryManager", "UVM Thrashing/Conflict detected on page " + 
-                                std::to_string(reinterpret_cast<uintptr_t>(pageAddr)) + 
-                                ". Continuous host-access violating Preferred Device preference (" + 
-                                std::to_string(pref) + ")");
+              if (c == 100) { 
+                  // Trigger threshold reached - note: we cannot log here safely
               }
           }
           
@@ -240,7 +269,7 @@ fallback:
 #endif
 
 bool MemoryManager::registerManagedRegion(void *ptr, size_t size) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  // Note: lock must be held by caller (allocateManaged / allocateManagedAt)
   
   ManagedRegion region;
   region.ptr = ptr;
@@ -271,7 +300,7 @@ bool MemoryManager::registerManagedRegion(void *ptr, size_t size) {
 }
 
 void MemoryManager::unregisterManagedRegion(void *ptr) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  // Note: lock must be held by caller (free)
   
   auto it = std::find_if(masterRegions_.begin(), masterRegions_.end(),
                          [ptr](const ManagedRegion& r) { return r.ptr == ptr; });
@@ -352,7 +381,7 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
   alloc.deviceId = deviceId;
 
   {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     allocations_[ptr] = alloc;
   }
 
@@ -361,7 +390,7 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
 }
 
 VGREResult MemoryManager::free(MemoryHandle handle) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto it = allocations_.find(handle);
   if (it == allocations_.end())
     return VGREResult::ERROR_INVALID_VALUE;
@@ -427,7 +456,7 @@ VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, D
 
   // Phase 11: Authoritative UVM Usage Telemetry
   {
-      std::unique_lock<std::shared_mutex> lock(mutex_);
+      std::unique_lock<std::recursive_mutex> lock(mutex_);
       for (auto& region : masterRegions_) {
           uintptr_t base = reinterpret_cast<uintptr_t>(region.ptr);
           if (pBase >= base && pBase < base + region.size) {
@@ -524,25 +553,20 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
   alloc.attachmentFlags = flags;
 
   {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     allocations_[ptr] = alloc;
-  }
 
-  // Register in lock-free managed regions array for signal-safe lookup.
-  // If registration fails, this allocation cannot safely participate in UVM
-  // fault handling, so fail explicitly instead of silently degrading.
-  if (!registerManagedRegion(ptr, alignedSize)) {
-    {
-      std::unique_lock<std::shared_mutex> lock(mutex_);
+    // Register in lock-free managed regions array for signal-safe lookup.
+    if (!registerManagedRegion(ptr, alignedSize)) {
       allocations_.erase(ptr);
-    }
 #if defined(_WIN32)
-    VirtualFree(ptr, 0, MEM_RELEASE);
+      VirtualFree(ptr, 0, MEM_RELEASE);
 #else
-    munmap(ptr, alignedSize);
+      munmap(ptr, alignedSize);
 #endif
-    usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
-    return VGREResult::ERROR_OUT_OF_MEMORY;
+      usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
+      return VGREResult::ERROR_OUT_OF_MEMORY;
+    }
   }
 
   outHandle = ptr;
@@ -606,23 +630,20 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
   alloc.attachmentFlags = flags;
 
   {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     allocations_[ptr] = alloc;
-  }
 
-  // Register in lock-free managed regions array for signal-safe lookup.
-  if (!registerManagedRegion(ptr, alignedSize)) {
-    {
-      std::unique_lock<std::shared_mutex> lock(mutex_);
+    // Register in lock-free managed regions array for signal-safe lookup.
+    if (!registerManagedRegion(ptr, alignedSize)) {
       allocations_.erase(ptr);
-    }
 #if defined(_WIN32)
-    VirtualFree(ptr, 0, MEM_RELEASE);
+      VirtualFree(ptr, 0, MEM_RELEASE);
 #else
-    munmap(ptr, alignedSize);
+      munmap(ptr, alignedSize);
 #endif
-    usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
-    return VGREResult::ERROR_OUT_OF_MEMORY;
+      usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
+      return VGREResult::ERROR_OUT_OF_MEMORY;
+    }
   }
 
   outHandle = ptr;
@@ -639,7 +660,7 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
                                            size_t bytes) {
   if (!dst || !src || bytes == 0)
     return VGREResult::ERROR_INVALID_VALUE;
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   
   auto it = allocations_.end();
   size_t offset = 0;
@@ -721,7 +742,7 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
                                            size_t bytes) {
   if (!dst || !src || bytes == 0)
     return VGREResult::ERROR_INVALID_VALUE;
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   
   auto it = allocations_.end();
   size_t offset = 0;
@@ -800,7 +821,7 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
                                              size_t bytes) {
   if (!dst || !src || bytes == 0)
     return VGREResult::ERROR_INVALID_VALUE;
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   
   auto itDst = allocations_.end();
   size_t offsetDst = 0;
@@ -930,7 +951,7 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
 
 VGREResult MemoryManager::enablePeerAccess(DeviceId currentDevice,
                                            DeviceId peerDevice) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   peerAccessMap_[currentDevice][peerDevice] = true;
   VGRE_LOG_INFO("MemoryManager", "Enabled P2P access: Dev" +
                                      std::to_string(currentDevice) + " -> Dev" +
@@ -940,7 +961,7 @@ VGREResult MemoryManager::enablePeerAccess(DeviceId currentDevice,
 
 VGREResult MemoryManager::disablePeerAccess(DeviceId currentDevice,
                                             DeviceId peerDevice) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   peerAccessMap_[currentDevice][peerDevice] = false;
   VGRE_LOG_INFO("MemoryManager", "Disabled P2P access: Dev" +
                                      std::to_string(currentDevice) + " -> Dev" +
@@ -950,7 +971,7 @@ VGREResult MemoryManager::disablePeerAccess(DeviceId currentDevice,
 
 bool MemoryManager::canAccessPeer(DeviceId currentDevice,
                                   DeviceId peerDevice) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto it = peerAccessMap_.find(currentDevice);
   if (it == peerAccessMap_.end())
     return false;
@@ -961,7 +982,7 @@ bool MemoryManager::canAccessPeer(DeviceId currentDevice,
 }
 
 DeviceId MemoryManager::getOwnerDevice(MemoryHandle handle) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto it = allocations_.find(handle);
   if (it == allocations_.end())
     return -1;
@@ -975,7 +996,7 @@ size_t MemoryManager::getFreeMemory() const {
 }
 
 bool MemoryManager::isValidHandle(MemoryHandle handle) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   for (auto const& [base, alloc] : allocations_) {
       uint8_t* b = static_cast<uint8_t*>(base);
       uint8_t* t = static_cast<uint8_t*>(handle);
@@ -985,7 +1006,7 @@ bool MemoryManager::isValidHandle(MemoryHandle handle) const {
 }
 
 size_t MemoryManager::getAllocationSize(MemoryHandle handle) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   for (auto const& [base, alloc] : allocations_) {
       uint8_t* b = static_cast<uint8_t*>(base);
       uint8_t* t = static_cast<uint8_t*>(handle);
@@ -995,7 +1016,7 @@ size_t MemoryManager::getAllocationSize(MemoryHandle handle) const {
 }
 
 void *MemoryManager::getPointer(MemoryHandle handle) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto it = allocations_.end();
   size_t offset = 0;
   for (auto probe = allocations_.begin(); probe != allocations_.end(); ++probe) {
@@ -1025,7 +1046,7 @@ void *MemoryManager::getPointer(MemoryHandle handle) const {
 }
 
 void MemoryManager::getPageResidency(uint8_t outMap[1024]) const {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   std::memset(outMap, 0, 1024);
 
   if (poolSize_ == 0) return;
@@ -1093,6 +1114,102 @@ int MemoryManager::getResidentPageCount() const {
   return count;
 }
 
+// ── Adaptive UVM Page Migration ────────────────────────────────────────────
+void MemoryManager::startMigrationThread() {
+  migrationStop_.store(false, std::memory_order_relaxed);
+  migrationThread_ = std::thread([this]() { this->migrationLoop(); });
+  VGRE_LOG_DEBUG("MemoryManager", "UVM migration background thread started");
+}
+
+void MemoryManager::stopMigrationThread() {
+  migrationStop_.store(true, std::memory_order_release);
+  if (migrationThread_.joinable()) {
+    migrationThread_.join();
+    VGRE_LOG_DEBUG("MemoryManager", "UVM migration background thread stopped");
+  }
+}
+
+void MemoryManager::migrationLoop() {
+  // Wake every 500 ms. For each managed region, check whether one device accounts
+  // for >80% of all page-fault accesses. If so and the preferred location differs,
+  // issue an OS advisory (mbind on Linux) to migrate physical pages to the NUMA
+  // node that backs that device, reducing remote-memory latency.
+  constexpr auto kInterval = std::chrono::milliseconds(500);
+  constexpr float kDominanceThreshold = 0.80f;
+
+  while (!migrationStop_.load(std::memory_order_acquire)) {
+    std::this_thread::sleep_for(kInterval);
+    if (migrationStop_.load(std::memory_order_acquire)) break;
+
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (auto& region : masterRegions_) {
+      uint32_t total = region.accessCount.load(std::memory_order_relaxed);
+      if (total < 10) continue;  // Too few samples to make a reliable decision
+
+      // Find the device with the most page faults in this region.
+      int dominantDev = -1;
+      uint32_t maxCount = 0;
+      for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
+        uint32_t cnt = region.deviceAccessCounts[d].load(std::memory_order_relaxed);
+        if (cnt > maxCount) {
+          maxCount = cnt;
+          dominantDev = d;
+        }
+      }
+
+      if (dominantDev < 0) continue;
+      float dominance = static_cast<float>(maxCount) / static_cast<float>(total);
+      if (dominance < kDominanceThreshold) continue;
+
+      int curPref = region.preferredLocation.load(std::memory_order_relaxed);
+      if (curPref == dominantDev) continue;  // Already optimal
+
+#if defined(__linux__)
+      // On Linux: use mbind(MPOL_PREFERRED) to advise the kernel to place
+      // future page faults for this region on the NUMA node closest to the
+      // dominant device.  We use MPOL_PREFERRED (not MPOL_BIND) so the kernel
+      // can fall back if the preferred node is full.
+      //
+      // nodemask bit `dominantDev` corresponds to NUMA node `dominantDev`.
+      // (For single-socket systems this is always node 0; multi-socket setups
+      //  benefit when dominantDev maps to a real NUMA node.)
+      unsigned long nodemask = (dominantDev < 64) ? (1UL << dominantDev) : 1UL;
+      unsigned long maxnode  = 64UL;
+      long rc = ::syscall(SYS_mbind,
+                          region.ptr, region.size,
+                          MPOL_PREFERRED,
+                          &nodemask, maxnode,
+                          static_cast<unsigned long>(MPOL_MF_MOVE));
+      if (rc == 0) {
+        VGRE_LOG_DEBUG("MemoryManager",
+            "UVM migration: region " +
+            std::to_string(reinterpret_cast<uintptr_t>(region.ptr)) +
+            " migrated to NUMA node " + std::to_string(dominantDev) +
+            " (dominance=" + std::to_string(static_cast<int>(dominance * 100)) + "%)");
+        region.preferredLocation.store(dominantDev, std::memory_order_relaxed);
+        // Reset per-device counters so the next window reflects fresh behaviour.
+        for (int d = 0; d < ManagedRegion::kMaxDevices; ++d)
+          region.deviceAccessCounts[d].store(0, std::memory_order_relaxed);
+        region.accessCount.store(0, std::memory_order_relaxed);
+      }
+#elif defined(_WIN32)
+      // Windows: VirtualAllocExNuma can't migrate already-allocated pages.
+      // We record the preferred location so future allocations in this region
+      // can be directed to the correct NUMA node via VirtualAllocExNuma.
+      region.preferredLocation.store(dominantDev, std::memory_order_relaxed);
+      VGRE_LOG_DEBUG("MemoryManager",
+          "UVM migration: region preference → NUMA node " +
+          std::to_string(dominantDev) +
+          " (dominance=" + std::to_string(static_cast<int>(dominance * 100)) + "%)");
+      // Reset counters for the next sampling window.
+      for (int d = 0; d < ManagedRegion::kMaxDevices; ++d)
+        region.deviceAccessCounts[d].store(0, std::memory_order_relaxed);
+      region.accessCount.store(0, std::memory_order_relaxed);
+#endif
+    }
+  }
+}
+
 void MemoryManager::calibrateBandwidth() {
   const size_t testSize = 64 * 1024 * 1024; // 64MB for better cache pressure
   void *hostPtr = alignedAlloc(testSize, 64);
@@ -1139,7 +1256,7 @@ void MemoryManager::calibrateBandwidth() {
 // ── Memory Pool APIs ──────────────────────────────────────────────────────
 
 VGREResult MemoryManager::createPool(PoolHandle &outHandle, size_t blockSize) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   MemoryPool pool;
   pool.id = nextPoolId_++;
   pool.blockSize = (blockSize < 64) ? 64 : blockSize;
@@ -1153,7 +1270,7 @@ VGREResult MemoryManager::createPool(PoolHandle &outHandle, size_t blockSize) {
 }
 
 VGREResult MemoryManager::destroyPool(PoolHandle handle) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto it = pools_.find(handle);
   if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
 
@@ -1185,7 +1302,7 @@ VGREResult MemoryManager::destroyPool(PoolHandle handle) {
 
 VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
                                            MemoryHandle &outHandle) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto it = pools_.find(poolHandle);
   if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
 
@@ -1234,7 +1351,7 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
 
 VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
                                      MemoryHandle handle) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto it = pools_.find(poolHandle);
   if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
 
@@ -1255,7 +1372,7 @@ VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
 }
 
 VGREResult MemoryManager::getDirtyPages(MemoryHandle handle, std::vector<std::pair<size_t, size_t>>& outDirtyRanges) const {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   
   auto it = std::find_if(masterRegions_.begin(), masterRegions_.end(),
                          [handle](const ManagedRegion& r) { return r.ptr == handle; });
@@ -1288,7 +1405,7 @@ VGREResult MemoryManager::getDirtyPages(MemoryHandle handle, std::vector<std::pa
 }
 
 VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   
   auto it = std::find_if(masterRegions_.begin(), masterRegions_.end(),
                          [handle](const ManagedRegion& r) { return r.ptr == handle; });

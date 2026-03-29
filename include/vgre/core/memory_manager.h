@@ -6,19 +6,18 @@
 #include "vgre/core/interval_tree.h"
 
 #include <atomic>
+#include <signal.h>
 #include <cstddef>
 #include <list>
 #include <mutex>
-#include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 #include <cstring>
 #include <vector>
-#include <chrono>
 
 #if defined(_WIN32)
 #include <windows.h>
 #else
-#include <signal.h>
 #include <sys/mman.h>
 #endif
 
@@ -73,9 +72,21 @@ struct ManagedRegion {
   mutable std::atomic<int> preferredLocation{-1}; // -1 = None, 0 = Host, >0 = DeviceID
   mutable std::atomic<uint32_t> conflictCount{0}; // Host-side faults against device preference
 
+  // Per-device NUMA access counters (updated from SIGSEGV handler via signal-safe atomics).
+  // Migration background thread uses these to decide whether to mbind() pages to a
+  // different NUMA node when one device dominates (>80% of page-fault accesses).
+  static constexpr int kMaxDevices = 4;
+  mutable std::atomic<uint32_t> deviceAccessCounts[kMaxDevices];  // index = device id
+
   ManagedRegion() = default;
   ManagedRegion(const ManagedRegion &other) : ptr(other.ptr), size(other.size), pageCount(other.pageCount), dirtyPages(other.dirtyPages) {
     isResidentOnHost.store(other.isResidentOnHost.load(std::memory_order_relaxed));
+    lastAccessTime.store(other.lastAccessTime.load(std::memory_order_relaxed));
+    accessCount.store(other.accessCount.load(std::memory_order_relaxed));
+    preferredLocation.store(other.preferredLocation.load(std::memory_order_relaxed));
+    conflictCount.store(other.conflictCount.load(std::memory_order_relaxed));
+    for (int i = 0; i < kMaxDevices; ++i)
+      deviceAccessCounts[i].store(other.deviceAccessCounts[i].load(std::memory_order_relaxed));
   }
   ManagedRegion &operator=(const ManagedRegion &other) {
     if (this != &other) {
@@ -88,6 +99,8 @@ struct ManagedRegion {
       accessCount.store(other.accessCount.load(std::memory_order_relaxed));
       preferredLocation.store(other.preferredLocation.load(std::memory_order_relaxed));
       conflictCount.store(other.conflictCount.load(std::memory_order_relaxed));
+      for (int i = 0; i < kMaxDevices; ++i)
+        deviceAccessCounts[i].store(other.deviceAccessCounts[i].load(std::memory_order_relaxed));
     }
     return *this;
   }
@@ -204,11 +217,14 @@ private:
   void unregisterManagedRegion(void *ptr);
 
   void calibrateBandwidth();
+  void startMigrationThread();
+  void stopMigrationThread();
+  void migrationLoop();
 
   size_t poolSize_;
   std::atomic<size_t> usedMemory_{0};
   std::unordered_map<MemoryHandle, Allocation> allocations_;
-  mutable std::shared_mutex mutex_;
+  mutable std::recursive_mutex mutex_;
 
   // Signal-safe lookup structure (RCU-protected Interval Tree)
   struct RegionTreeContainer {
@@ -217,7 +233,7 @@ private:
   };
   std::atomic<RegionTreeContainer*> activeTree_{nullptr};
   std::vector<RegionTreeContainer*> retiredTrees_; // For cleanup in destructor
-  std::vector<ManagedRegion> masterRegions_; // Master list protected by mutex_
+  std::list<ManagedRegion> masterRegions_; // Master list with STABLE ADDRESSES protected by mutex_
 
   // Delta-Sync: Dirty Page Management
   std::atomic<double> h2dBandwidth_{25.0};
@@ -235,6 +251,10 @@ private:
   // Memory pools
   std::unordered_map<PoolHandle, MemoryPool> pools_;
   PoolHandle nextPoolId_ = 1;
+
+  // Adaptive UVM page-migration background thread
+  std::thread         migrationThread_;
+  std::atomic<bool>   migrationStop_{false};
 };
 
 } // namespace core
