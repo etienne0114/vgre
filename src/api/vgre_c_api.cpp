@@ -1069,9 +1069,9 @@ int vgre_cluster_get_security_info(vgre_security_info_t *info) {
   
   auto sinfo = vgre::advanced::TCPClusterManager::instance().getSecurityInfo();
   std::strncpy(info->cipher_name, sinfo.cipher_name, sizeof(info->cipher_name) - 1);
-  info->cipher_name[sizeof(info->cipher_name) - 1] = '\0'; // Ensure null termination
+  info->cipher_name[sizeof(info->cipher_name) - 1] = '\0';
   std::strncpy(info->key_fingerprint, sinfo.key_fingerprint, sizeof(info->key_fingerprint) - 1);
-  info->key_fingerprint[sizeof(info->key_fingerprint) - 1] = '\0'; // Ensure null termination
+  info->key_fingerprint[sizeof(info->key_fingerprint) - 1] = '\0';
   info->session_seconds = sinfo.session_seconds;
   info->is_encrypted = sinfo.is_encrypted ? 1 : 0;
   info->packets_sent = sinfo.packets_sent;
@@ -1080,6 +1080,13 @@ int vgre_cluster_get_security_info(vgre_security_info_t *info) {
   info->bytes_received = sinfo.bytes_received;
   
   return VGRE_SUCCESS;
+}
+
+int vgre_cluster_wait(uint64_t kernel_id, int timeout_ms) {
+    if (int s = require_initialized(); s != VGRE_SUCCESS)
+      return s;
+    auto r = vgre::advanced::TCPClusterManager::instance().waitForRemoteResult(kernel_id, timeout_ms);
+    return to_status(r);
 }
 
 int vgre_credits_get_balance(const char *address, vgre_credit_info_t *info) {
@@ -1212,6 +1219,39 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
   return VGRE_SUCCESS;
 }
 
+// ── Async Memory Pool C-API ───────────────────────────────────────────────
+
+int vgre_malloc_async(void **ptr, size_t size, uint64_t pool, uint64_t stream) {
+  (void)stream; // Pool alloc is synchronous, submitted to stream context
+  if (!ptr || size == 0)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+
+  vgre::MemoryHandle handle;
+  auto r =
+      vgre::core::RuntimeEngine::instance().getMemoryManager().allocateFromPool(
+          static_cast<vgre::core::PoolHandle>(pool), size, handle);
+  if (r != vgre::VGREResult::SUCCESS)
+    return to_status(r);
+
+  *ptr = handle;
+  return VGRE_SUCCESS;
+}
+
+int vgre_free_async(void *ptr, uint64_t pool, uint64_t stream) {
+  (void)stream;
+  if (!ptr)
+    return VGRE_SUCCESS; // freeing NULL is valid
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+
+  auto r =
+      vgre::core::RuntimeEngine::instance().getMemoryManager().freeToPool(
+          static_cast<vgre::core::PoolHandle>(pool), ptr);
+  return to_status(r);
+}
+
 // ── Version Info ───────────────────────────────────────────────────────────
 
-const char *vgre_get_version(void) { return "0.1.1"; }
+const char *vgre_get_version(void) { return "0.1.2"; }

@@ -52,7 +52,7 @@ public:
     if (level < minLevel_.load(std::memory_order_relaxed))
       return;
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     auto now = std::chrono::system_clock::now();
     auto timeT = std::chrono::system_clock::to_time_t(now);
@@ -83,7 +83,7 @@ public:
   }
 
   std::vector<std::string> getRecentLogs() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return std::vector<std::string>(logBuffer_.begin(), logBuffer_.end());
   }
 
@@ -108,7 +108,7 @@ private:
   }
 
   std::atomic<LogLevel> minLevel_{LogLevel::INFO};
-  std::mutex mutex_;
+  mutable std::recursive_mutex mutex_;
   std::deque<std::string> logBuffer_;
 };
 

@@ -1,6 +1,7 @@
 #include "vgre/api/cuda_interceptor.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/input_validation.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/scheduler.h"
@@ -217,8 +218,16 @@ cudaError_t CUDAInterceptor::malloc(void **devPtr, size_t size) {
     if (err != cudaSuccess)
       return err;
   }
-  if (!devPtr || size == 0)
+  
+  // CRITICAL: Validate pointer
+  if (common::InputValidator::validatePointer(devPtr) != VGREResult::SUCCESS) {
     return cudaErrorInvalidValue;
+  }
+  
+  // CRITICAL: Validate allocation size
+  if (common::InputValidator::validateAllocationSize(size) != VGREResult::SUCCESS) {
+    return cudaErrorInvalidValue;
+  }
 
   MemoryHandle handle;
   auto r =
@@ -291,8 +300,11 @@ cudaError_t CUDAInterceptor::memcpy(void *dst, const void *src, size_t count,
     if (err != cudaSuccess)
       return err;
   }
-  if (!dst || !src || count == 0)
+  
+  // CRITICAL: Validate memcpy parameters
+  if (common::InputValidator::validateMemcpyParams(dst, src, count) != VGREResult::SUCCESS) {
     return cudaErrorInvalidValue;
+  }
 
   auto &mm = core::RuntimeEngine::instance().getMemoryManager();
   VGREResult r;
@@ -330,8 +342,11 @@ cudaError_t CUDAInterceptor::memcpyAsync(void *dst, const void *src,
     if (err != cudaSuccess)
       return err;
   }
-  if (!dst || !src || count == 0)
+  
+  // CRITICAL: Validate memcpy parameters
+  if (common::InputValidator::validateMemcpyParams(dst, src, count) != VGREResult::SUCCESS) {
     return cudaErrorInvalidValue;
+  }
 
   // Check if this stream is currently capturing a graph
   if (core::RuntimeEngine::instance().isStreamCapturing(stream)) {

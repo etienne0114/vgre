@@ -288,6 +288,14 @@ int vgre_cluster_set_security(int enabled);
 int vgre_cluster_get_security_info(vgre_security_info_t *info);
 
 /**
+ * @brief Wait for a specific kernel to complete on the cluster.
+ * @param kernel_id The unique ID of the kernel to wait for.
+ * @param timeout_ms Maximum time to wait in milliseconds.
+ * @return VGRE_SUCCESS if completed, VGRE_ERROR_TIMEOUT if timed out.
+ */
+int vgre_cluster_wait(uint64_t kernel_id, int timeout_ms);
+
+/**
  * @brief Retrieves the credit balance for a specific node.
  */
 int vgre_credits_get_balance(const char *address, vgre_credit_info_t *info);

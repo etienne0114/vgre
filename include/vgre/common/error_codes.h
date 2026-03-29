@@ -25,6 +25,7 @@ enum class VGREResult : int {
     ERROR_NETWORK           = 14,
     ERROR_AUTH_FAILED       = 15,
     ERROR_CRYPTO            = 16,
+    ERROR_BUSY              = 17,
     ERROR_UNKNOWN           = 99
 };
 
@@ -48,6 +49,7 @@ inline const char* resultToString(VGREResult r) {
         case VGREResult::ERROR_NETWORK:         return "Network error";
         case VGREResult::ERROR_AUTH_FAILED:     return "Authentication failed";
         case VGREResult::ERROR_CRYPTO:          return "Cryptographic error";
+        case VGREResult::ERROR_BUSY:            return "Device or resource busy";
         case VGREResult::ERROR_UNKNOWN:         return "Unknown error";
         default:                                return "Unrecognized error code";
     }
