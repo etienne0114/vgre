@@ -24,7 +24,7 @@ void master_node() {
     auto &cluster = vgre::advanced::TCPClusterManager::instance();
     // In this test, we now use the singleton for master for simplicity in API calls,
     // but the worker WILL use its own instance.
-    cluster.initialize(true, "127.0.0.1", 7780);
+    cluster.initialize(true, "127.0.0.1", 7790);
     
     // Wait for worker
     int worker_id = -1;
@@ -100,7 +100,7 @@ void worker_node() {
     std::this_thread::sleep_for(std::chrono::seconds(2));
     
     vgre::advanced::TCPClusterManager worker_cluster;
-    VGREResult res = worker_cluster.initialize(false, "127.0.0.1", 7780);
+    VGREResult res = worker_cluster.initialize(false, "127.0.0.1", 7790);
     if (res != VGREResult::SUCCESS) {
         std::cerr << "Worker FAIL: init failed" << std::endl;
         return;

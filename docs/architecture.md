@@ -1,136 +1,232 @@
-# VGRE Architecture
+# VGRE Architecture (v0.1.2)
 
 ## System Overview
 
-VGRE (Virtual GPU Runtime Engine) is a strictly authoritative, zero-simulation GPU execution system. It is composed of six major subsystems that work together to translate GPU workloads into precise CPU execution without relying on heuristics or fake logic layers.
+VGRE (Virtual GPU Runtime Engine) is a strictly authoritative, zero-simulation GPU execution system. Unlike traditional emulators that "fake" GPU responses, VGRE executes CUDA and OpenCL kernels as native CPU code, leveraging LLVM JIT, OpenMP parallelism, and advanced SIMD (AVX2/AVX-512). Key features include:
+
+- **Full Texture & Surface API**: Hardware-backed realization of `cudaArray_t` for 1D/2D/3D texture fetching with bilinear/cubic filtering and all addressing modes.
+- **Dynamic JIT Kernel Fusion**: Automatic optimization pass within `GraphManager` to fuse consecutive compatible kernels into a single compiled unit.
+- **Auth Calibration**: Adaptive execution engine for ground-truth performance modeling with per-kernel thread-count tuning.
+- **Authenticated Cluster Networking**: VSBP protocol over TCP with HMAC-SHA256 authentication and AES-256-CTR encryption.
 
 ## Component Diagram
 
-```
-                    ┌─────────────────────┐
-                    │   Application       │
-                    │ (PyTorch/TF/Custom) │
-                    └─────────┬───────────┘
-                              │
-              ┌───────────────┴───────────────┐
-              │        API Layer              │
-              │  ┌──────────┐ ┌──────────┐    │
-              │  │  CUDA    │ │  OpenCL  │    │
-              │  │Interceptor│ │ Adapter  │    │
-              │  └─────┬────┘ └────┬─────┘    │
-              └────────┴──────────┴───────────┘
-                              │
-              ┌───────────────┴───────────────┐
-              │       Runtime Engine          │
-              │  (Orchestrates all subsystems) │
-              └─┬───────┬──────────┬──────────┘
-                │       │          │
-    ┌───────────┴┐ ┌────┴────┐ ┌──┴──────────┐
-    │  Compiler  │ │  Core   │ │  Runtime    │
-    │  ┌───────┐ │ │┌───────┐│ │┌───────────┐│
-    │  │Kernel │ │ ││Memory ││ ││CPU Parallel││
-    │  │Parser │ │ ││Manager││ ││Executor   ││
-    │  └───┬───┘ │ │└───────┘│ │└───────────┘│
-    │  ┌───┴───┐ │ │┌───────┐│ │┌───────────┐│
-    │  │ LLVM  │ │ ││Sched- ││ ││Vector     ││
-    │  │Engine │ │ ││uler   ││ ││Engine     ││
-    │  └───────┘ │ │└───────┘│ │└───────────┘│
-    └────────────┘ └─────────┘ └─────────────┘
-                              │
-              ┌───────────────┴───────────────┐
-              │       Advanced Features        │
-              │ ┌───────┐ ┌───────┐ ┌───────┐ │
-              │ │Hybrid │ │Adaptive│ │Memory │ │
-              │ │Compute│ │Exec.  │ │Compress│ │
-              │ └───────┘ └───────┘ └───────┘ │
-              │ ┌───────────────────────────┐  │
-              │ │   Runtime Profiler        │  │
-              │ └───────────────────────────┘  │
-              └────────────────────────────────┘
+```mermaid
+graph TD
+    App[Application: PyTorch/TF/Custom] --> API[API Layer: CUDA/OpenCL Shim]
+    API --> RE[Runtime Engine: Singleton Orchestrator]
+
+    subgraph "Core Subsystem"
+        RE --> MM[Memory Manager: UVM + SHM]
+        RE --> SCHED[Scheduler: Stream-Serialized Tasking]
+        RE --> DEV[Virtual Device: HW Properties]
+    end
+
+    subgraph "Compiler Subsystem"
+        RE --> PARSER[Clang Parser: AST Analysis + Cache]
+        RE --> LLVM[LLVM Engine: JIT + SIMD Auto-vec]
+    end
+
+    subgraph "Runtime Subsystem"
+        RE --> EXEC[Parallel Executor: 3D Grid Unrolling]
+        RE --> VEC[Vector Engine: Math Intrinsics]
+    end
+
+    RE --> ADAPT[Adaptive Engine: Auth Calibration]
+    RE --> PROF[Profiler: Chrome Trace / Telemetry]
+    RE --> TCP[TCP Cluster: VSBP Protocol]
+
+    PROF --> DASH[VGRE Dashboard: Flutter UI]
+    TCP --> REMOTE[Remote Worker Nodes]
 ```
 
-## Subsystem Details
+---
 
-### 1. API Layer
+## Deep-Dive: JIT Kernel Compilation Pipeline
 
-**Purpose:** Present CUDA/OpenCL-compatible APIs to applications.
-
-| Component | File | Role |
-|-----------|------|------|
-| `CUDAInterceptor` | `cuda_interceptor.cpp` | CUDA Runtime API shim (`cudaMalloc`, `cudaMemcpy`, `cudaLaunchKernel`, etc.) |
-| `OpenCLAdapter` | `opencl_adapter.cpp` | OpenCL API compatibility (`clCreateBuffer`, `clEnqueueNDRangeKernel`, etc.) |
-
-Both route all operations through the `RuntimeEngine`.
-
-### 2. Core
-
-**Purpose:** Virtual GPU device, memory management, scheduling.
-
-| Component | Role |
-|-----------|------|
-| `VirtualGPUDevice` | Virtualizes GPU hardware — device properties, context, streams |
-| `MemoryManager` | Manages VRAM-equivalent memory via aligned host allocations |
-| `Scheduler` | Work-stealing thread pool distributing blocks across cores |
-| `RuntimeEngine` | Top-level orchestrator wiring all subsystems together |
-
-### 3. Compiler
-
-**Purpose:** Parse GPU kernels and translate to CPU-executable code.
-
-| Component | Role |
-|-----------|------|
-| `KernelParser` | Tokenizes and parses CUDA-like kernel source |
-| `LLVMTranslationEngine` | Multi-stage LLVM ORC JIT pipeline with host-native vectorization (AVX2/AVX-512/FMA) and aggressive O3 optimization |
-
-### 4. Runtime
-
-**Purpose:** Execute compiled kernels on CPU with parallelism.
-
-| Component | Role |
-|-----------|------|
-| `CPUParallelExecutor` | Maps CUDA 3D grid to OpenMP parallel for loops |
-| `VectorEngine` | SIMD-accelerated math (add, mul, FMA, dot, sum) with AVX2/SSE4 |
-
-### 5. Advanced Features
-
-| Component | Role |
-|-----------|------|
-| `HybridComputeManager` | Detects CPU/iGPU/remote nodes; routes workloads |
-| `AdaptiveExecutionEngine` | Profiles kernels; auto-tunes thread count and SIMD width |
-| `MemoryCompression` | LZ4-style fast compression for memory transfers |
-| `RuntimeProfiler` | Per-kernel timing, throughput, GFLOPS; JSON export |
-
-## Data Flow: Kernel Launch
+Every kernel goes through a 4-stage pipeline on first launch:
 
 ```
-1. App calls cudaLaunchKernel("vector_add", source, grid, block, args)
-2. CUDAInterceptor → RuntimeEngine.launchKernel(...)
-3. RuntimeEngine → KernelParser.parse(source) → KernelIR
-4. RuntimeEngine → LLVMTranslationEngine.translate(ir) → CompiledKernelFn
-5. RuntimeEngine → CPUParallelExecutor.execute(fn, grid, block, args)
-6. CPUParallelExecutor → OpenMP parallel for over blocks
-7. Each block: CompiledKernelFn runs with AVX2 vectorization
-8. Results written directly to VRAM-equivalent host memory
+ Kernel source string (CUDA C)
+        │
+        ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │  Stage 1: ClangKernelParser (clang_kernel_parser.cpp)    │
+ │  • Invokes `clang++ -Xclang -ast-dump=json` subprocess  │
+ │  • Parses JSON AST: extracts argument names/types,       │
+ │    shared-memory declarations, __syncthreads usage,      │
+ │    template specialisations, FunctionTemplateDecl        │
+ │  • Two-level cache: memory (100 entries) + disk          │
+ │    ~/.vgre/cache/<hash16>/<hash>.ast.json                │
+ │  • Cache hit: 0ms; first parse: <1s typical              │
+ └──────────────────────────────────────────────────────────┘
+        │  KernelIR (name, args, sharedMemSize, argTypes)
+        ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │  Stage 2: LLVMTranslationEngine — Wrapper Generation     │
+ │  (llvm_translation_engine.cpp)                           │
+ │  • Generates a C++ wrapper that:                         │
+ │    – Substitutes threadIdx/blockIdx/blockDim/gridDim     │
+ │      via Thread-Local Storage pointers (zero-copy)       │
+ │    – Implements __syncthreads via per-block barrier       │
+ │    – Declares texture builtins (vgre_tex1D_f32, etc.)    │
+ │      resolved from absoluteSymbols JIT map               │
+ │    – Unpacks void** args using inferred ArgType array     │
+ │    – Dispatches blocks with vgre_jit_block_dispatch()    │
+ │  • Writes to /tmp/vgre_jit_<name>_<uid>.cpp             │
+ └──────────────────────────────────────────────────────────┘
+        │  Generated C++ source file
+        ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │  Stage 3: Clang Compilation → LLVM IR                    │
+ │  • clang++ -O3 -march=native -fopenmp -emit-llvm -S     │
+ │  • Produces .ll (LLVM IR text) with auto-vectorisation   │
+ └──────────────────────────────────────────────────────────┘
+        │  LLVM IR module
+        ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │  Stage 4: LLVM ORC JIT — Native Code Generation          │
+ │  • LLJITBuilder with O3 CodeGenOptLevel::Aggressive      │
+ │  • CPU feature string includes all detected SIMD caps    │
+ │    (AVX-512F, AVX2, FMA, SSE4.2, etc.)                  │
+ │  • absoluteSymbols registration for vgre_jit_*,          │
+ │    vgre_tex*_f32, vgre_surf2D*_f32 → live function ptrs │
+ │  • Result stored as CompiledKernelFn (shared_ptr to fn)  │
+ │  • Compilation can be async (prepare() → JITFuture)      │
+ └──────────────────────────────────────────────────────────┘
+        │  CompiledKernelFn
+        ▼
+ CPUParallelExecutor: iterates 3D grid,
+ dispatches blocks via OpenMP thread pool
 ```
 
-## Performance Optimization Strategy
+---
 
-1. **Pattern matching** — common kernels (vector ops, reductions, matmul) get highly optimized implementations
-2. **SIMD vectorization** — AVX2/AVX-512 processes floats per instruction efficiently
-3. **OpenMP parallelism** — blocks distributed across all CPU cores, scaling to maximum hardware threads
-4. **Kernel caching** — compiled kernels cached by name to avoid re-translation
-5. **Adaptive tuning** — authoritative runtime profiler accurately calibrates thread counts without simulation heuristics
-6. **Memory alignment** — 64-byte aligned allocations for cache-line efficiency
+## Deep-Dive: Unified Virtual Memory (UVM) Signal Handler
 
-## Approved Future Innovations Roadmap
+`cudaMallocManaged()` → `MemoryManager::allocateManaged()`:
 
-To further elevate VGRE into an extraordinary and sophisticated real-functioning system, the following innovations are scheduled:
+1. **Reserve with no-access mapping**:
+   - Linux: `mmap(addr, size, PROT_NONE, MAP_ANONYMOUS|MAP_PRIVATE)`
+   - Windows: `VirtualAlloc(addr, size, MEM_RESERVE, PAGE_NOACCESS)`
 
-1. **Full Texture & Surface API Implementation**: Complete hardware-backed realization of `cudaArray_t` for 2D/3D texture fetching using advanced LLVM memory sampling.
-2. **Dynamic JIT Kernel Fusion**: A runtime pass within `GraphManager` to fuse consecutive PTX kernels into a single LLVM IR module, drastically cutting launch overhead.
-3. **Interactive 3D Hardware Topology Viewer**: A cross-platform Flutter frontend update featuring a stunning 3D representation of cluster and Node PCIe/Memory topology.
-4. **Agentic "AI Tuner" Interface**: An embedded AI chat UI in the dashboard enabling real-time, natural-language tuning commands (e.g., "Optimize cluster for latency") to be routed via gRPC directly to the execution backend.
+2. **Register SIGSEGV / VEH handler** (done once at MemoryManager init):
+   - Linux: `sigaction(SIGSEGV, ...)` — handler stored in `struct sigaction`
+   - Windows: `AddVectoredExceptionHandler(1, vgreVEHHandler)`
+
+3. **Page fault on first access**:
+   - Signal/exception is caught; faulting address extracted (`si_addr` / `ExceptionInformation[1]`)
+   - `ManagedRegion` identified via `MemoryIntervalTree<ManagedRegion>` (RCU-protected, signal-safe)
+   - Linux: `mprotect(page_base, page_size, PROT_READ|PROT_WRITE)` unlocks the page
+   - Windows: `VirtualProtect(page_base, page_size, PAGE_READWRITE, ...)`
+   - Page marked as dirty in the region's dirty bitmap (4 KB granularity, atomic bit operations)
+
+4. **Access tracking**:
+   - UVM metrics: per-region atomic access count, nanosecond last-access timestamp
+   - Dirty page ranges exported via `getDirtyPages()` / `clearDirtyPages()`
+
+5. **Cluster dirty-page transfer** (`tcp_cluster.cpp`):
+   - Dirty ranges sent as `DATA_HEADER_DIRTY` + `DIRTY_RANGE` + `DATA_SHM_DIRTY` packets
+   - Remote node applies patches to its own managed memory copy
+   - Full coherence ensured before partitioned kernel dispatch
+
+---
+
+## Deep-Dive: TCP Cluster Architecture (VSBP v0.1.2)
+
+VGRE implements a master/worker cluster using the **VGRE Structured Binary Protocol (VSBP)**:
+
+```
+ Master node                              Worker node
+ ─────────────                            ───────────
+ TCPClusterManager (isMaster=true)        TCPClusterManager (isMaster=false)
+        │                                        │
+        │◄── UDP announcement (port 7778) ───────┤
+        │                                        │
+        │◄── TCP connect (port 7000) ────────────┤
+        │                                        │
+        │── SECURE_HANDSHAKE ──────────────────►│
+        │   • exchange 16-byte nonces             │
+        │   • both derive session key:            │
+        │     PBKDF2-HMAC-SHA256(                 │
+        │       auth_token, n_master||n_client,   │
+        │       200000 iterations)                │
+        │   • session cipher: AES-256-CTR        │
+        │   • MAC: HMAC-SHA256 (Encrypt-then-MAC)│
+        │◄── SECURE_HANDSHAKE_ACK ───────────────┤
+        │                                        │
+        │── CAPABILITY ──────────────────────────►│  cpu_cores, gflops, latency
+        │◄── CAPABILITY ─────────────────────────┤
+        │                                        │
+        │── REGISTER_KERNEL ─────────────────────►│  compile on worker
+        │◄── RESPONSE ───────────────────────────┤
+        │                                        │
+        │── PARTITION_DISPATCH ──────────────────►│  sub-grid bounds
+        │   (WorkloadPartitioner: recursive       │  + compressed memory (LZ4)
+        │    bisection by cpu_cores×gflops/lat)  │
+        │◄── PARTITION_RESULT ───────────────────┤  dirty pages
+        │                                        │
+        │── CREDIT_REPORT ───────────────────────►│  billing (CUS: compute-unit-seconds)
+```
+
+**22 VSBP packet types**: TELEMETRY, LAUNCH_KERNEL, RESPONSE, DATA_HEADER, DATA_BODY, STRUCT_DATA, ARG_SCALAR, ARG_POINTER, CAPABILITY, REGISTER_KERNEL, SECURE_HANDSHAKE, SECURE_HANDSHAKE_ACK, PARTITION_DISPATCH, PARTITION_RESULT, CREDIT_REPORT, ROTATE_KEY, SHM_INIT, DATA_SHM, DATA_HEADER_DIRTY, DATA_SHM_DIRTY, DIRTY_RANGE, COOP_BARRIER_SYNC.
+
+**Local-loopback optimisation**: When master and worker are on the same host (127.0.0.1), VSBP switches to POSIX/Windows shared-memory transport (`ShmManager`) with a 256 MB segment, bypassing TCP for data transfers.
+
+**Rate limiting**: The master enforces ≤10 new TCP connections per source IP per 60-second window to prevent PBKDF2 exhaustion DoS.
+
+---
+
+## Memory Architecture
+
+```
+ ┌─────────────────────────────────────────────────────────┐
+ │  MemoryManager (Singleton, 4 GB virtual pool)           │
+ │                                                         │
+ │  ┌───────────────────────────────────────────────────┐  │
+ │  │  Allocation Map (handle → AllocationInfo)        │  │
+ │  │  • cudaMalloc: aligned_alloc (no page protection)│  │
+ │  │  • cudaMallocManaged: mmap(PROT_NONE) + SIGSEGV  │  │
+ │  │  • Pool alloc: stream-ordered free-list reuse     │  │
+ │  └───────────────────────────────────────────────────┘  │
+ │                                                         │
+ │  ┌───────────────────────────────────────────────────┐  │
+ │  │  ManagedRegion Interval Tree (RCU-protected)     │  │
+ │  │  Signal-safe lookup for SIGSEGV handler          │  │
+ │  │  Stores: dirty bitmap, access counts, preferred  │  │
+ │  │          device, conflict counts, timestamps      │  │
+ │  └───────────────────────────────────────────────────┘  │
+ │                                                         │
+ │  Dirty Page Tracking: 4 KB granularity atomic bitmaps  │
+ │  P2P Access Matrix: per-device-pair access flags       │
+ └─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Security Architecture
+
+| Layer | Mechanism | Strength |
+|-------|-----------|---------|
+| Auth token storage | Linux keyring / macOS Keychain / Windows CredMan / TPM 2.0 | Platform-native OS security |
+| Token file fallback | PBKDF2-SHA256 (100k iter) + SHA-256-CTR + HMAC-SHA256 | Authenticated encryption |
+| Session key derivation | PBKDF2-HMAC-SHA256 (200k iter, per-session nonces) | Brute-force resistant |
+| Channel encryption | AES-256-CTR (software; AES-NI pending) | Confidentiality |
+| Channel authentication | HMAC-SHA256, Encrypt-then-MAC | Integrity + replay protection |
+| DoS protection | Per-IP rate limiter (10 connections / 60s) | Handshake flood mitigation |
+
+---
+
+## Future Innovations Roadmap
+
+To further elevate VGRE, the following innovations are planned:
+
+1. **Interactive 3D Hardware Topology Viewer**: A Flutter frontend update featuring a 3D representation of cluster and node PCIe/Memory topology.
+2. **Agentic "AI Tuner" Interface**: An embedded AI chat UI enabling real-time natural-language tuning commands ("Optimize cluster for latency").
+3. **AES-NI Acceleration**: Replace software AES with `__builtin_ia32_aesenc128` for hardware-accelerated throughput.
+4. **OpenTelemetry OTLP Export**: Push trace spans to Jaeger/Tempo collectors alongside Chrome trace.
+5. **NUMA-Aware Scheduling**: Pin scheduler worker threads to NUMA nodes matching the virtual device's NUMA topology.
 
 ## Feature Coverage
 
-For a current snapshot of which features are fully implemented, see `docs/feature_matrix.md`.
+For a current snapshot of which features are fully implemented, see [docs/feature_matrix.md](feature_matrix.md).

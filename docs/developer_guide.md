@@ -78,15 +78,25 @@ The translation engine is responsible for unpacking the generic `void** args` ar
 
 ## 5. Memory Management and UVM
 
-The `MemoryManager` creates an emulated `std::malloc` pool mimicking VRAM.
-VGRE fully supports **Unified Virtual Memory (UVM)**. 
-
-If managed memory is requested (`cudaMallocManaged` interception), VGRE utilizes POSIX `mmap()` to allocate host pages. A `SIGSEGV` fault handler intercepts memory violations globally to dynamically page-fault virtual GPU memory onto the host space when accessed directly by Python.
+The `MemoryManager` creates an emulated `std::malloc` pool mimicking VRAM. 
+- **Pool Size**: Default is 4GB (managed via `MAX_MANAGED_REGIONS = 4096`).
+- **UVM Implementation**: VGRE fully supports **Unified Virtual Memory (UVM)**. If managed memory is requested (`cudaMallocManaged`), VGRE utilizes POSIX `mmap()` to allocate host pages and sets up a global `SIGSEGV` signal handler.
+- **Page Faulting**: When the CPU or a kernel accesses a managed page that isn't resident, the signal handler intercepts the violation and triggers a "Page Fault" event, migrating the page from the managed pool to host residence.
 
 ---
 
+## 6. Performance Authority & Profiling
+
+### Authoritative Calibration
+VGRE does not "guess" performance. The `AdaptiveExecutionEngine` performs ground-truth calibration by running micro-benchmarks on the host CPU at startup. This determines the peak GFLOPS and memory bandwidth possible on the specific hardware, which are then used as the 100% baseline for telemetry.
+
+### Runtime Profiling
+The `RuntimeProfiler` records every kernel launch, memory copy, and synchronization event. 
+- **Event Recording**: Uses a lock-free buffer to avoid profiling overhead.
+- **Trace Export**: Supports exporting data to the Chrome Trace format (`chrome://tracing`). This allows developers to visualize overlapping streams and kernel execution timelines with microsecond precision.
+
 ## Conclusion
-Extending VGRE typically involves modifying the `LLVMTranslationEngine` to support broader IR instructions, or updating the `vgre_c_api.cpp` shim to intercept more advanced framework operations. By isolating the JIT, the Memory pool, and the OpenMP Task queues, VGRE remains highly modular for both testing and embedded integration.
+Extending VGRE typically involves modifying the `LLVMTranslationEngine` for new instructions or the `AdaptiveExecutionEngine` for more granular hardware sensing. The system is designed to be highly modular, with clear boundaries between the JIT compiler, the memory pool, and the OpenMP parallel executor.
 
 ---
 
