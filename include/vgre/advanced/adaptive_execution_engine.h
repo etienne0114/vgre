@@ -87,7 +87,7 @@ private:
   void analyzeProfile(KernelProfile &profile);
 
   std::unordered_map<std::string, KernelProfile> profiles_;
-  mutable std::mutex mutex_;
+  mutable std::recursive_mutex mutex_;
   int maxCores_;
 
   // Telemetry tracking

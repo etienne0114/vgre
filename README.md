@@ -1,16 +1,58 @@
 # VGRE — Virtual GPU Runtime Engine
 
-**A high-fidelity GPU virtualization layer** that allows AI frameworks to run GPU workloads on CPUs by translating GPU instructions into highly optimized parallel CPU execution.
+**A CUDA emulation runtime** that allows CUDA applications to run on CPU without a physical GPU.
 
-## Overview
+> **PROJECT STATUS**: BETA — Production hardening in progress (~75% of planned features implemented)
 
-VGRE intercepts CUDA/OpenCL operations and translates them into CPU-parallel instructions using:
-- **OpenMP** multithreading
-- **AVX2/AVX-512/FMA** SIMD vectorization (host-native auto-detection)
-- **LLVM ORC JIT** kernel translation with aggressive O3 optimization
-- **Adaptive execution** with runtime profiling and hardware calibration
+## What is VGRE?
 
-This enables PyTorch, TensorFlow, and other GPU-dependent frameworks to run on machines **without a physical GPU**.
+VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
+- LLVM-18 ORC JIT (Clang AST parsing → LLVM IR → native code, O3-optimised)
+- OpenMP + SIMD (AVX2/AVX-512) parallel execution
+- Unified Virtual Memory (UVM) with OS page-fault signal handler
+- Hardware-backed token storage (Linux keyring, macOS Keychain, Windows CredMan, TPM 2.0)
+- TCP cluster networking with authenticated AES-256-CTR encrypted channels
+- LZ4 memory compression for distributed transfers
+
+**Use Cases**:
+- ✅ Learning CUDA without a GPU
+- ✅ Development, CI/CD testing
+- ✅ Moderate CUDA applications (vector ops, matrix math, graph workloads)
+- ✅ Distributed CPU-cluster compute via VSBP protocol
+- ⚠️  Complex, performance-critical GPU workloads (10–100× slower than real GPU)
+- ⚠️  Applications that depend on GPU-specific memory bandwidth characteristics
+
+## Current Status
+
+**Overall Completion**: ~75% of planned features
+**Production Readiness**: ~75% for CPU-based CUDA emulation workloads
+
+### What Works ✅
+- Full CUDA Runtime API (~100 functions: memory, streams, events, device, textures)
+- OpenCL 1.2 compatibility layer
+- JIT kernel compilation with persistent disk + memory cache (0ms on cache hit)
+- 1D/2D/3D texture and surface sampling with multiple filter/addressing modes
+- UVM managed memory (`cudaMallocManaged`) with OS-level page fault handling
+- CUDA Graphs (graph capture, instantiation, replay, dynamic update)
+- Cooperative kernel launch with grid-wide barrier synchronisation
+- Stream-ordered memory pools (`cudaMallocAsync` / `cudaFreeAsync`)
+- CUDA Driver API (cuInit, cuCtxCreate, cuMemAlloc, cuModuleLoad, cuLaunchKernel)
+- P2P peer device access and transfers
+- Kernel fusion (consecutive compatible kernels fused into single JIT compilation)
+- TCP cluster networking: multi-node partitioned kernel dispatch, telemetry aggregation
+- Authenticated encrypted cluster channels (HMAC-SHA256 + AES-256-CTR)
+- Hardware-backed auth token storage (keyring/Keychain/CredMan/TPM 2.0)
+- Adaptive execution engine: auto-tunes thread count for each kernel
+- Chrome trace export (`toChromeTraceJSON`) and C API telemetry
+- Python bindings (`vgre_c_api` via ctypes), NumPy-compatible
+
+### Known Limitations ⚠️
+- 10–100× slower than real GPU (expected; CPU execution)
+- AES-256-CTR cipher: software implementation (no AES-NI acceleration yet)
+- Temperature sensing: fully implemented on Linux; heuristic on Windows/macOS
+- Vector SIMD width: auto-tuned at runtime by `AdaptiveExecutionEngine`
+- Fuzzing suite and CI/CD pipeline: Phase 5 (planned)
+- No OpenCL 2.0+ features (SVM, pipes, subgroups)
 
 ## Quick Start
 
@@ -87,8 +129,8 @@ To reproduce the engine throughput measurements:
 ├───────────┴──────────────────┴───────────────────────┤
 │  Core Engine                                          │
 │  ┌────────────┐  ┌───────────────┐  ┌───────────┐   │
-│  │Runtime     │→ │Kernel         │→ │LLVM        │   │
-│  │Engine      │  │Parser         │  │Translator  │   │
+│  │Runtime     │→ │Clang Parser   │→ │LLVM        │   │
+│  │Engine      │  │(AST + Cache)  │  │Translator  │   │
 │  └──────┬─────┘  └───────────────┘  └───────────┘   │
 │         │                                             │
 │  ┌──────┴─────┐  ┌───────────────┐  ┌───────────┐   │
@@ -98,8 +140,9 @@ To reproduce the engine throughput measurements:
 ├──────────────────────────────────────────────────────┤
 │  Infrastructure                                       │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐│
-│  │Memory    │ │Hybrid    │ │Adaptive  │ │Runtime   ││
-│  │Manager   │ │Compute   │ │Execution │ │Profiler  ││
+│  │Memory    │ │TCP       │ │Adaptive  │ │Runtime   ││
+│  │Manager   │ │Cluster   │ │Execution │ │Profiler  ││
+│  │(UVM+SHM) │ │(VSBP)    │ │Engine    │ │(Chrome)  ││
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘│
 └──────────────────────────────────────────────────────┘
 ```
@@ -109,15 +152,15 @@ To reproduce the engine throughput measurements:
 ```
 virtual-gpu-runtime/
 ├── include/vgre/          # Public headers
-│   ├── common/            #   types, error_codes, logger
-│   ├── core/              #   device, memory, scheduler, runtime
-│   ├── compiler/          #   kernel parser, LLVM translation
+│   ├── common/            #   types, error_codes, logger, input_validation
+│   ├── core/              #   device, memory (UVM), scheduler, runtime, graphs
+│   ├── compiler/          #   Clang kernel parser, LLVM translation engine, cache
 │   ├── api/               #   CUDA interceptor, OpenCL adapter
 │   ├── runtime/           #   parallel executor, vector engine
-│   └── advanced/          #   hybrid compute, adaptive, compression, profiler
+│   └── advanced/          #   TCP cluster, adaptive engine, profiler, compression, IPC
 ├── src/                   # Source implementations
-├── bindings/python/       # Python bindings
-├── tests/                 # Unit + integration tests
+├── bindings/python/       # Python bindings (ctypes over C API)
+├── tests/                 # 55+ unit + integration tests
 ├── examples/              # Runnable examples
 └── docs/                  # Documentation
 ```
@@ -127,13 +170,17 @@ virtual-gpu-runtime/
 - **CMake** ≥ 3.16
 - **GCC** ≥ 9 or **Clang** ≥ 10 (C++17)
 - **OpenMP**
-- **LLVM-18** (Required for Dynamic JIT Execution with ORC API)
+- **LLVM-18** (Required for JIT with ORC API)
 - **Python 3** + **NumPy** (for Python bindings)
+- **keyutils** (Linux, optional — hardware token storage)
+- **tss2-esys** (Linux, optional — TPM 2.0 token storage)
 
 ## Documentation
-For complete technical details on the architecture, thread-pool scheduling, and JIT pointer mapping, please visit:
+For complete technical details on the architecture, JIT pipeline, cluster protocol, and security model:
 - [Developer Guide](docs/developer_guide.md)
 - [API Reference](docs/api_reference.md)
+- [Architecture](docs/architecture.md)
+- [Feature Matrix](docs/feature_matrix.md)
 
 ## License
 

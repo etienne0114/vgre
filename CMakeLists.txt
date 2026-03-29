@@ -28,8 +28,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # ── Dependencies ────────────────────────────────────────────────────────────
-find_package(OpenMP REQUIRED)
+find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(Threads REQUIRED)
+# find_package(PkgConfig REQUIRED)
+# pkg_check_modules(LZ4 REQUIRED liblz4)
  
 # ── LLVM & Support Dependencies ─────────────────────────────────────────────
 # Manually hint paths for LibEdit/CURL if CMake's default search misses them
@@ -54,6 +56,7 @@ endif()
 include_directories(${PROJECT_SOURCE_DIR}/include)
 
 # ── Sub-projects ────────────────────────────────────────────────────────────
+add_subdirectory(src/common)
 add_subdirectory(src/core)
 add_subdirectory(src/compiler)
 add_subdirectory(src/api)
@@ -62,12 +65,61 @@ add_subdirectory(src/advanced)
 
 # ── Shared library ──────────────────────────────────────────────────────────
 add_library(vgre SHARED
+    $<TARGET_OBJECTS:vgre_common>
     $<TARGET_OBJECTS:vgre_core>
     $<TARGET_OBJECTS:vgre_compiler>
     $<TARGET_OBJECTS:vgre_api>
     $<TARGET_OBJECTS:vgre_runtime>
     $<TARGET_OBJECTS:vgre_advanced>
 )
+
+# Platform-specific libraries for hardware token storage
+if(UNIX AND NOT APPLE)
+    # Linux: keyutils for kernel keyring
+    find_library(KEYUTILS_LIB keyutils)
+    if(KEYUTILS_LIB)
+        target_link_libraries(vgre PUBLIC ${KEYUTILS_LIB})
+        message(STATUS "Found keyutils: ${KEYUTILS_LIB}")
+    else()
+        message(WARNING "keyutils not found - hardware token storage will use fallback")
+    endif()
+    
+    # TPM 2.0 support
+    find_package(PkgConfig)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(TSS2_ESYS tss2-esys)
+        pkg_check_modules(TSS2_MU tss2-mu)
+        pkg_check_modules(TSS2_TCTILDR tss2-tctildr)
+        
+        if(TSS2_ESYS_FOUND AND TSS2_MU_FOUND AND TSS2_TCTILDR_FOUND)
+            add_compile_definitions(VGRE_HAS_TPM2)
+            target_include_directories(vgre PUBLIC ${TSS2_ESYS_INCLUDE_DIRS})
+            target_link_libraries(vgre PUBLIC 
+                ${TSS2_ESYS_LIBRARIES}
+                ${TSS2_MU_LIBRARIES}
+                ${TSS2_TCTILDR_LIBRARIES}
+            )
+            message(STATUS "TPM 2.0 support enabled")
+            message(STATUS "  tss2-esys: ${TSS2_ESYS_VERSION}")
+            message(STATUS "  tss2-mu: ${TSS2_MU_VERSION}")
+            message(STATUS "  tss2-tctildr: ${TSS2_TCTILDR_VERSION}")
+        else()
+            message(STATUS "TPM 2.0 libraries not found - TPM support disabled")
+        endif()
+    endif()
+    
+elseif(APPLE)
+    # macOS: Security framework for Keychain
+    find_library(SECURITY_FRAMEWORK Security)
+    if(SECURITY_FRAMEWORK)
+        target_link_libraries(vgre PUBLIC ${SECURITY_FRAMEWORK})
+        message(STATUS "Found Security framework: ${SECURITY_FRAMEWORK}")
+    endif()
+elseif(WIN32)
+    # Windows: Credential Manager (part of Advapi32)
+    target_link_libraries(vgre PUBLIC Advapi32)
+endif()
+
 target_link_libraries(vgre PUBLIC
     OpenMP::OpenMP_CXX
     Threads::Threads
