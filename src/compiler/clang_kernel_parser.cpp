@@ -66,7 +66,7 @@ std::string ClangKernelParser::runClangAstDump(const std::string& source) {
     
     // Check in-memory AST cache (MEDIUM PATH)
     {
-        std::lock_guard<std::mutex> lock(cacheMutex_);
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
         auto it = astCache_.find(sourceHash);
         if (it != astCache_.end()) {
             VGRE_LOG_INFO("ClangKernelParser", "✓ Memory cache HIT");
@@ -125,7 +125,7 @@ std::string ClangKernelParser::runClangAstDump(const std::string& source) {
     
     // Cache the AST result in BOTH caches
     {
-        std::lock_guard<std::mutex> lock(cacheMutex_);
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
         astCache_[sourceHash] = result;
     }
     
@@ -142,7 +142,7 @@ VGREResult ClangKernelParser::parse(const std::string& name,
     // 1. Check in-memory cache first to avoid slow Clang process
     std::string cacheKey = name + ":::" + source;
     {
-        std::lock_guard<std::mutex> lock(cacheMutex_);
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
         auto it = cache_.find(cacheKey);
         if (it != cache_.end()) {
             VGRE_LOG_DEBUG("ClangKernelParser", "Parser Cache HIT for kernel: " + name);
@@ -161,7 +161,7 @@ VGREResult ClangKernelParser::parse(const std::string& name,
     if (KernelCache::instance().getKernelIR(sourceHash, name, outIR)) {
         VGRE_LOG_INFO("ClangKernelParser", "✓ KernelIR cache HIT for " + name + " (hash: " + sourceHash.substr(0,8) + ")");
         // Update memory cache
-        std::lock_guard<std::mutex> lock(cacheMutex_);
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
         cache_[cacheKey] = outIR;
         return VGREResult::SUCCESS;
     }
@@ -314,7 +314,7 @@ VGREResult ClangKernelParser::parse(const std::string& name,
     KernelCache::instance().putKernelIR(sourceHash, name, outIR);
 
     {
-        std::lock_guard<std::mutex> lock(cacheMutex_);
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
         cache_[cacheKey] = outIR;
     }
 
@@ -867,7 +867,7 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
     // Check enhanced cache
     std::string cacheKey = name + ":::" + source;
     {
-        std::lock_guard<std::mutex> lock(cacheMutex_);
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
         auto it = enhancedCache_.find(cacheKey);
         if (it != enhancedCache_.end()) {
             outIR = it->second;
@@ -953,7 +953,7 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
     
     // Cache the result
     {
-        std::lock_guard<std::mutex> lock(cacheMutex_);
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
         enhancedCache_[cacheKey] = outIR;
     }
     

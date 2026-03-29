@@ -7,7 +7,11 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <unordered_map>
+#include <deque>
+#include <condition_variable>
+#include <atomic>
+#include <thread>
+#include <future>
 
 namespace llvm {
 class Module;
@@ -29,13 +33,16 @@ public:
   ~LLVMTranslationEngine();
 
   // Perform static analysis on LLVM module to count FP operations
-  uint64_t analyzeStaticFlops(const llvm::Module &module);
+  uint64_t analyzeStaticFlops(const llvm::Module &module, uint64_t *outInstCount = nullptr);
 
   // Recalibrate instruction count for a kernel using the JIT compiler
   uint64_t getInstructionCount(const std::string &source);
 
-  // Translate KernelIR to a compiled function
+  // Translate KernelIR to a compiled function (Blocking)
   VGREResult translate(KernelIR &ir, CompiledKernelFn &outFn);
+
+  // Prepare kernel compilation in the background (Non-blocking)
+  JITFuture prepare(KernelIR &ir);
 
 
   // Load a pre-compiled binary module (Bitcode, PTX, etc.)
@@ -60,6 +67,11 @@ public:
   // Get compilation statistics
   size_t getCacheSize() const;
 
+  // IR-Level Kernel Fusion (Phase 13)
+  VGREResult fuseKernels(const std::vector<KernelIR> &kernels,
+                          const std::string &fusedName,
+                          KernelIR &outFusedIR);
+
 private:
   // Generate a C++ wrapper that provides the CUDA execution environment
   std::string generateWrapperSource(const KernelIR &ir);
@@ -72,9 +84,25 @@ private:
                               const std::string &entryPoint,
                               KernelIR &ir);
 
+  // Internal translation shared between sync/async paths
+  VGREResult doTranslate(KernelIR &ir, CompiledKernelFn &outFn);
+
+
+  // Background compilation queue
+  struct CompileTask {
+      std::shared_ptr<KernelIR> ir;
+      std::promise<CompiledKernelFn> promise;
+  };
+  std::deque<CompileTask> taskQueue_;
+  std::mutex queueMutex_;
+  std::condition_variable queueCv_;
+  std::thread workerThread_;
+  std::atomic<bool> shutdown_{false};
+  void workerLoop();
+
   // Cache: kernel name → compiled function
   std::unordered_map<std::string, CompiledKernelFn> cache_;
-  mutable std::mutex mutex_;
+  mutable std::recursive_mutex mutex_;
 
   // Global symbol size tracking: ModuleHandle -> SymbolName -> SizeInBytes
   std::unordered_map<ModuleHandle, std::unordered_map<std::string, size_t>> symbolSizes_;
