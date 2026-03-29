@@ -4,6 +4,7 @@
 #include "vgre/common/logger.h"
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace vgre {
 namespace core {
@@ -57,7 +58,7 @@ VGREResult GraphOptimizer::optimize(Graph& graph) {
 }
 
 bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
-    // 1. Dimensions must match exactly for point-wise fusion
+    // 1. Dimensions must match exactly for point-wise fusion.
     if (a.gridDim.x != b.gridDim.x || a.gridDim.y != b.gridDim.y || a.gridDim.z != b.gridDim.z) return false;
     if (a.blockDim.x != b.blockDim.x || a.blockDim.y != b.blockDim.y || a.blockDim.z != b.blockDim.z) return false;
 
@@ -69,12 +70,33 @@ bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
         return false;
     }
 
-    // 3. Shared memory check (authoritative hardware limit)
+    // 2. Output-output hazard detection: if both kernels write to the same pointer,
+    //    fusing them would create a WAW (write-after-write) race condition.
+    //    `capturedWritePtrs` holds all pointer-type args (conservative: any pointer
+    //    could be a write target).  Block fusion when A and B share a write target.
+    if (!a.capturedWritePtrs.empty() && !b.capturedWritePtrs.empty()) {
+        std::unordered_set<void*> writesA(a.capturedWritePtrs.begin(),
+                                          a.capturedWritePtrs.end());
+        for (void* p : b.capturedWritePtrs) {
+            if (p != nullptr && writesA.count(p)) {
+                VGRE_LOG_INFO("GraphOptimizer",
+                    "Fusion blocked: output-output hazard — nodes " +
+                    std::to_string(a.nodeId) + " and " + std::to_string(b.nodeId) +
+                    " share write target " + std::to_string(reinterpret_cast<uintptr_t>(p)));
+                return false;
+            }
+        }
+        // Producer-consumer path: if writesA ∩ readPtrs(B) ≠ ∅, fusion is beneficial
+        // (the intermediate buffer is eliminated).  This is already permitted by the
+        // single-successor chain check in the caller.  No extra action needed here.
+    }
+
+    // 3. Shared memory check (authoritative hardware limit).
     DeviceProperties props;
     if (RuntimeEngine::instance().getDeviceProperties(0, props) == VGREResult::SUCCESS) {
         if (irA->sharedMemSize + irB->sharedMemSize > props.sharedMemPerBlock) return false;
     } else {
-        // Fallback to conservative if properties lookup fails
+        // Fallback to conservative limit if properties lookup fails.
         if (irA->sharedMemSize + irB->sharedMemSize > 48 * 1024) return false;
     }
 

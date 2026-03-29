@@ -12,7 +12,7 @@ GraphManager::GraphManager() = default;
 GraphManager::~GraphManager() = default;
 
 vgre::VGREResult GraphManager::createGraph(GraphId &outId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto graph = std::make_shared<Graph>();
   graph->id = nextGraphId_++;
   graphs_[graph->id] = graph;
@@ -21,7 +21,7 @@ vgre::VGREResult GraphManager::createGraph(GraphId &outId) {
 }
 
 vgre::VGREResult GraphManager::destroyGraph(GraphId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   graphs_.erase(id);
   return vgre::VGREResult::SUCCESS;
 }
@@ -46,7 +46,7 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
     GraphId id, KernelId kernelId, const std::string &name, const dim3 &grid,
     const dim3 &block, void **args, const std::vector<ArgType> &argTypes,
     const std::vector<uint64_t> &deps, uint64_t &outNodeId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (grid.x == 0 || block.x == 0)
     return vgre::VGREResult::ERROR_INVALID_VALUE;
   auto it = graphs_.find(id);
@@ -99,6 +99,15 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
       return vgre::VGREResult::ERROR_INVALID_VALUE;
     }
     node.capturedArgs.push_back(buf);
+
+    // Track all pointer args as potential write targets for fusion hazard analysis.
+    if (argTypes[i] == ArgType::POINTER && buf.size() >= sizeof(void *)) {
+      void *p = nullptr;
+      std::memcpy(&p, buf.data(), sizeof(void *));
+      if (p != nullptr) {
+        node.capturedWritePtrs.push_back(p);
+      }
+    }
   }
 
   outNodeId = node.nodeId;
@@ -121,7 +130,7 @@ vgre::VGREResult GraphManager::addMemcpyNodeWithDeps(
 vgre::VGREResult GraphManager::addMemcpyNodeWithDepsOut(
     GraphId id, void *dst, void *src, size_t count, int kind,
     const std::vector<uint64_t> &deps, uint64_t &outNodeId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = graphs_.find(id);
   if (it == graphs_.end())
     return vgre::VGREResult::ERROR_INVALID_VALUE;
@@ -148,7 +157,7 @@ vgre::VGREResult GraphManager::addMemcpyNodeWithDepsOut(
 
 vgre::VGREResult GraphManager::addDependency(GraphId id, uint64_t nodeId,
                                              uint64_t dependsOn) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = graphs_.find(id);
   if (it == graphs_.end())
     return vgre::VGREResult::ERROR_INVALID_VALUE;
@@ -178,7 +187,7 @@ vgre::VGREResult GraphManager::addDependency(GraphId id, uint64_t nodeId,
 vgre::VGREResult GraphManager::updateKernelNodeArgs(
     GraphId id, uint64_t nodeId, void **args,
     const std::vector<ArgType> &argTypes) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = graphs_.find(id);
   if (it == graphs_.end())
     return vgre::VGREResult::ERROR_INVALID_VALUE;
@@ -236,7 +245,7 @@ vgre::VGREResult GraphManager::updateKernelNodeArgs(
 vgre::VGREResult GraphManager::updateMemcpyNode(GraphId id, uint64_t nodeId,
                                                 void *dst, void *src,
                                                 size_t count, int kind) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = graphs_.find(id);
   if (it == graphs_.end())
     return vgre::VGREResult::ERROR_INVALID_VALUE;
@@ -265,7 +274,7 @@ vgre::VGREResult GraphManager::updateMemcpyNode(GraphId id, uint64_t nodeId,
 }
 
 vgre::VGREResult GraphManager::instantiate(GraphId id, GraphExecId &outExecId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = graphs_.find(id);
   if (it == graphs_.end())
     return vgre::VGREResult::ERROR_INVALID_VALUE;
@@ -337,7 +346,7 @@ vgre::VGREResult GraphManager::instantiate(GraphId id, GraphExecId &outExecId) {
 }
 
 vgre::VGREResult GraphManager::updateExec(GraphExecId execId, GraphId newGraphId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto execIt = executables_.find(execId);
   if (execIt == executables_.end()) return vgre::VGREResult::ERROR_INVALID_VALUE;
 
@@ -373,7 +382,7 @@ vgre::VGREResult GraphManager::updateExec(GraphExecId execId, GraphId newGraphId
 }
 
 vgre::VGREResult GraphManager::destroyGraphExec(GraphExecId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   executables_.erase(id);
   return vgre::VGREResult::SUCCESS;
 }
@@ -381,7 +390,7 @@ vgre::VGREResult GraphManager::destroyGraphExec(GraphExecId id) {
 vgre::VGREResult GraphManager::launch(GraphExecId execId, StreamId stream) {
   std::shared_ptr<GraphExec> exec;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = executables_.find(execId);
     if (it == executables_.end())
       return vgre::VGREResult::ERROR_INVALID_VALUE;

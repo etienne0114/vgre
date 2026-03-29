@@ -25,7 +25,8 @@ struct GraphNode {
   std::string kernelName;
   dim3 gridDim = {1, 1, 1};
   dim3 blockDim = {1, 1, 1};
-  std::vector<std::vector<uint8_t>> capturedArgs; // deep-copied arg data
+  std::vector<std::vector<uint8_t>> capturedArgs;  // deep-copied arg data
+  std::vector<void *> capturedWritePtrs;            // pointer args (potential write targets)
 
   // Memcpy data
   void *dst = nullptr;
@@ -98,7 +99,7 @@ private:
   std::unordered_map<GraphExecId, std::shared_ptr<GraphExec>> executables_;
   GraphId nextGraphId_ = 1;
   GraphExecId nextExecId_ = 1;
-  mutable std::mutex mutex_;
+  mutable std::recursive_mutex mutex_;
 };
 
 } // namespace core
