@@ -49,7 +49,7 @@ IPCManager::IPCManager() = default;
 IPCManager::~IPCManager() { shutdown(); }
 
 bool IPCManager::initialize(bool isMaster) {
-  std::unique_lock<std::mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto logInitFailure = [isMaster](const std::string &msg) {
     if (isMaster) {
       VGRE_LOG_ERROR("IPCManager", msg);
@@ -266,7 +266,7 @@ bool IPCManager::initialize(bool isMaster) {
 }
 
 void IPCManager::shutdown() {
-  std::unique_lock<std::mutex> lock(mutex_);
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
   if (!enabled_)
     return;
 
@@ -314,7 +314,7 @@ void IPCManager::shutdown() {
 void IPCManager::updateLocalTelemetry(const vgre_telemetry_t &telemetry) {
   bool shouldBroadcast = false;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!enabled_ || !state_ || local_slot_ == -1)
       return;
     state_->slots[local_slot_].telemetry = telemetry;
@@ -327,7 +327,7 @@ void IPCManager::updateLocalTelemetry(const vgre_telemetry_t &telemetry) {
 
 void IPCManager::getGlobalTelemetry(vgre_telemetry_t &outCombined) {
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!enabled_ || !state_)
       return;
 

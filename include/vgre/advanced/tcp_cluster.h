@@ -3,6 +3,7 @@
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/advanced/secure_channel.h"
+#include "vgre/core/shm_manager.h"
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -17,10 +18,18 @@ typedef int vgre_socket_t;
 #include <string>
 #include <thread>
 #include <vector>
+#include <deque>
 #include <map>
+#include <unordered_map>
+#include <unordered_set>
+#include <chrono>
 
 namespace vgre {
 namespace advanced {
+
+// ── VGRE Structured Binary Protocol (VSBP) v0.1.2 ─────────────────────────
+constexpr uint32_t VSBP_MAGIC = 0x56475245; // 'VGRE'
+constexpr uint16_t VSBP_VERSION = 0x0102;   // v0.1.2
 
 enum class PacketType : uint32_t {
   TELEMETRY = 1,
@@ -39,11 +48,61 @@ enum class PacketType : uint32_t {
   PARTITION_DISPATCH = 13,    // sub-grid dispatch for partitioned kernel
   PARTITION_RESULT = 14,      // result from a partition execution
   CREDIT_REPORT = 15,         // compute-unit-seconds billing report
-  ROTATE_KEY = 16             // Phase 10: dynamic session key rotation
+  ROTATE_KEY = 16,            // Phase 10: dynamic session key rotation
+  SHM_INIT = 17,              // Phase 11: negotiate SHM segment
+  DATA_SHM = 18,               // Phase 11: data in SHM
+  DATA_HEADER_DIRTY = 19,     // Phase 11: dirty ranges header (TCP)
+  DATA_SHM_DIRTY = 20,         // Phase 11: dirty ranges header (SHM)
+  DIRTY_RANGE = 21,           // Phase 11: offset/size range packet
+  COOP_BARRIER_SYNC = 22,     // Phase 13: Decentralized Grid Barrier
+  COOP_BARRIER_RESUME = 23,   // Phase 13: Master resume signal
+  RAW_DATA = 24               // Generic unstructured payload
+};
+
+struct VSBPHeader {
+  uint32_t magic;      // Explicit 32-bit magic
+  uint16_t version;    // Platform-independent versioning
+  uint16_t type;       // PacketType as uint16
+  uint32_t sequence;   // Message sequencing
+  uint64_t payloadSize; // 64-bit size for massive transfers
+};
+
+enum class ReceiveState : uint8_t {
+  IDLE = 0,
+  EXPECTING_RANGES_TCP = 1,
+  EXPECTING_RANGES_SHM = 2,
+  EXPECTING_BODY = 3,
+  EXPECTING_KERNEL_SOURCE = 4
+};
+
+struct ShmInitPacket {
+  char shm_name[64];
+  uint64_t shm_size;
+};
+
+struct DataShmPacket {
+  uint64_t target_ptr;
+  uint64_t shm_offset;
+  uint64_t size;
+};
+
+struct DataHeaderDirtyPacket {
+  uint64_t target_ptr;
+  uint32_t num_ranges;
+};
+
+struct DataShmDirtyPacket {
+  uint64_t target_ptr;
+  uint32_t num_ranges;
+  uint64_t shm_offset;
+};
+
+struct DirtyRangePacket {
+  uint64_t offset;
+  uint64_t size;
 };
 
 struct KernelRegisterPacket {
-  PacketType type;
   uint64_t auth_token;
   uint64_t kernel_id;
   char name[64];
@@ -51,12 +110,10 @@ struct KernelRegisterPacket {
 };
 
 struct TelemetryPacket {
-  PacketType type;
   vgre_telemetry_t telemetry;
 };
 
 struct RemoteCommandPacket {
-  PacketType type;
   uint64_t auth_token;
   uint64_t kernel_id;
   uint32_t grid_dim[3];
@@ -66,74 +123,61 @@ struct RemoteCommandPacket {
 };
 
 struct ArgScalarPacket {
-  PacketType type;
   uint32_t arg_index;
   uint8_t arg_type;
   uint64_t value;
 };
 
 struct StructDataPacket {
-  PacketType type;
   uint32_t arg_index;
   uint32_t size;
 };
 
 struct DataHeaderPacket {
-  PacketType type;
   uint64_t target_ptr;
   uint64_t size;
 };
 
 struct ResponsePacket {
-  PacketType type;
   uint64_t kernel_id;
   VGREResult result;
 };
 
 struct CapabilityPacket {
-  PacketType type;
   int cpu_cores;
   uint64_t cpu_memory;
   bool has_igpu;
   char igpu_name[64];
 };
 
-// Phase 5: Security handshake — exchanges nonces for PBKDF2 key derivation
 struct SecureHandshakePacket {
-  PacketType type;
   uint8_t nonce[crypto::kNonceLen];
-  uint8_t key_verification[crypto::kSHA256DigestLen]; // SHA256(derived_key) for verification
+  uint8_t key_verification[crypto::kSHA256DigestLen];
 };
 
-// Phase 5: Partition dispatch — sub-grid for distributed kernel execution
 struct PartitionDispatchPacket {
-  PacketType type;
   uint64_t auth_token;
   uint64_t kernel_id;
-  uint32_t full_grid_dim[3];   // original full grid
-  uint32_t partition_grid_dim[3]; // this partition's grid
+  uint32_t full_grid_dim[3];
+  uint32_t partition_grid_dim[3];
   uint32_t block_dim[3];
-  uint32_t block_offset_x;     // X offset for blockIdx remapping
-  size_t shared_mem;
+  uint32_t grid_start[3];
+  uint64_t shared_mem;
   int num_args;
   uint32_t partition_id;
   uint32_t total_partitions;
 };
 
-// Phase 5: Partition result — response from a completed partition
 struct PartitionResultPacket {
-  PacketType type;
   uint64_t kernel_id;
   uint32_t partition_id;
   VGREResult result;
   double execution_time_ms;
 };
 
-// Phase 5: Credit report — compute usage billing
 struct CreditReportPacket {
-  PacketType type;
-  double compute_seconds;  // wall-clock execution time
-  int cpu_cores;           // cores used during execution
+  double compute_seconds;
+  int cpu_cores;
   uint64_t kernel_id;
   uint64_t timestamp;
 };
@@ -169,9 +213,11 @@ public:
   int getFirstActiveWorker() const;
 
   // Phase 5: Secure Packet I/O
-  bool send_packet(vgre_socket_t fd, const void *data, size_t len, SecureChannel *sc = nullptr);
+  // VSBP v0.1.2: Raw packet dispatch with automatic header construction
+  bool send_packet(vgre_socket_t fd, PacketType type, const void* payload, size_t payloadLen, SecureChannel* sc = nullptr);
   int recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBuffer, SecureChannel *sc = nullptr);
   void reportComputeFromWorker(double seconds, int cores, uint64_t kernel_id);
+  bool broadcastPacket(PacketType type, const void* payload, size_t payloadLen);
 
 
   // ── Phase 5: Security ────────────────────────────────────────────────
@@ -198,6 +244,10 @@ public:
     PacketType pending_type = PacketType::TELEMETRY;
     uint64_t pending_target_ptr = 0;
     uint64_t pending_data_size = 0;
+    uint32_t pending_num_ranges = 0;
+    uint64_t pending_shm_offset = 0;
+    uint64_t pending_range_offset = 0;
+    ReceiveState receive_state = ReceiveState::IDLE;
     int cpu_cores = 0;
     uint64_t cpu_memory = 0;
     bool has_igpu = false;
@@ -206,6 +256,22 @@ public:
     std::unique_ptr<SecureChannel> secureChannel;
     bool security_established = false;
     uint32_t packets_sent = 0; // Phase 10: for rotation trigger
+    
+    // Phase 12: TSS2 (Traffic-Shaping-Sync 2.0)
+    struct OutgoingPacket {
+      std::vector<uint8_t> data;
+      uint32_t priority; // 0 = high, 1 = low
+    };
+    std::mutex tx_mutex;
+    std::deque<OutgoingPacket> high_priority_tx;
+    std::deque<OutgoingPacket> low_priority_tx;
+    std::atomic<uint32_t> in_flight_kernels{0};
+    
+    // Phase 11: SHM Support
+    bool is_local = false;
+    std::unique_ptr<vgre::core::ShmManager> shmManager;
+    uint64_t shm_offset = 0;
+    std::unordered_set<void*> synced_handles;
   };
 
   struct ClusterNodeInfo {
@@ -218,8 +284,11 @@ public:
     char igpu_name[64];
     bool security_established;
   };
-
+  
   void getConnectedNodes(std::vector<ClusterNodeInfo> &outNodes) const;
+  
+  // Phase 10: Wait for a specific kernel result from the cluster
+  VGREResult waitForRemoteResult(uint64_t kernel_id, int timeout_ms = 30000);
 
   bool isEnabled() const { return enabled_.load(); }
   bool isMaster() const { return is_master_; }
@@ -229,6 +298,37 @@ public:
   ~TCPClusterManager();
 
 private:
+  // ── Connection rate limiter ─────────────────────────────────────────────
+  // Prevents handshake-flood DoS: limits new connections per source IP to
+  // kMaxPerWindow within a rolling kWindowSeconds window.
+  struct ConnectionRateLimiter {
+    static constexpr int kMaxPerWindow = 10;
+    static constexpr int kWindowSeconds = 60;
+
+    std::mutex mtx;
+    std::unordered_map<std::string,
+        std::deque<std::chrono::steady_clock::time_point>> attempts;
+
+    bool isAllowed(const std::string &ip) {
+      std::lock_guard<std::mutex> lk(mtx);
+      auto now = std::chrono::steady_clock::now();
+      auto &q = attempts[ip];
+      // Prune entries outside the window
+      while (!q.empty() &&
+             std::chrono::duration_cast<std::chrono::seconds>(now - q.front()).count()
+                 >= kWindowSeconds) {
+        q.pop_front();
+      }
+      return static_cast<int>(q.size()) < kMaxPerWindow;
+    }
+
+    void record(const std::string &ip) {
+      std::lock_guard<std::mutex> lk(mtx);
+      attempts[ip].push_back(std::chrono::steady_clock::now());
+    }
+  };
+  ConnectionRateLimiter rateLimiter_;
+
   // Socket logic
   void serverLoop();
   void clientLoop();
@@ -239,6 +339,7 @@ private:
   void udpAnnouncerLoop();  // Master
   void udpDiscoveryLoop();  // Client
   void processClientStagingBuffer(); // Client data processor
+  void flush_tx_queues(ClientConnection &client);
 
   // Phase 5: Security handshake
   VGREResult performSecureHandshake(ClientConnection &client);
@@ -252,6 +353,13 @@ private:
   // Worker-side state for incoming data
   uint64_t pending_target_ptr_ = 0;
   uint32_t pending_data_size_ = 0;
+  uint32_t pending_num_ranges_ = 0;
+  uint64_t pending_shm_offset_ = 0;
+  uint64_t pending_range_offset_ = 0;
+  uint64_t pending_kernel_id_ = 0;
+  std::string pending_kernel_name_;
+  uint32_t pending_kernel_source_len_ = 0;
+  ReceiveState receive_state_ = ReceiveState::IDLE;
 
   bool is_master_ = false;
   int port_ = 7777;
@@ -264,8 +372,8 @@ private:
 
   // Master State
   vgre_socket_t server_fd_ = (vgre_socket_t)-1;
-  std::vector<ClientConnection> clients_;
-  mutable std::mutex clients_mutex_;
+  std::vector<std::unique_ptr<ClientConnection>> clients_;
+  mutable std::recursive_mutex clients_mutex_;
 
   // Client State
   vgre_socket_t client_fd_ = (vgre_socket_t)-1;
@@ -274,6 +382,13 @@ private:
   bool client_security_established_ = false;
   std::vector<uint8_t> client_rx_buffer_;
   std::mutex client_mutex_;
+  std::mutex client_tx_mutex_;
+  std::deque<ClientConnection::OutgoingPacket> client_high_priority_tx_;
+  std::deque<ClientConnection::OutgoingPacket> client_low_priority_tx_;
+  
+  // Phase 11: Client-side SHM
+  std::unique_ptr<vgre::core::ShmManager> client_shm_manager_;
+  bool client_shm_enabled_ = false;
 
   // Double-buffered async data receiving
   std::vector<uint8_t> client_rx_staging_A_;
@@ -301,6 +416,16 @@ private:
   std::vector<PartitionResult> partition_results_;
   std::mutex partition_mutex_;
   std::condition_variable partition_cv_;
+
+  // Phase 10: General remote result tracking (Zero-Simulation Sync)
+  std::map<uint64_t, VGREResult> remote_kernel_results_;
+  std::mutex remote_results_mutex_;
+  std::condition_variable remote_results_cv_;
+
+  // Cooperative Barrier (Zero-Simulation)
+  std::mutex barrier_mutex_;
+  uint32_t barrier_count_ = 0;
+  std::condition_variable barrier_cv_;
 };
 
 } // namespace advanced

@@ -47,7 +47,7 @@ private:
 #endif
   GlobalState *state_ = nullptr;
   int local_slot_ = -1;
-  std::mutex mutex_;
+  std::recursive_mutex mutex_;
 };
 
 } // namespace advanced

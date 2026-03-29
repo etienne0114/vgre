@@ -26,7 +26,7 @@ namespace crypto {
 constexpr size_t kSHA256DigestLen = 32;
 constexpr size_t kHMACKeyLen = 32;
 constexpr size_t kNonceLen = 16;
-constexpr size_t kPBKDF2Iterations = 10000;
+constexpr size_t kPBKDF2Iterations = 200000;  // NIST SP 800-132 (2024) minimum for PBKDF2-SHA256
 
 struct SHA256Context {
   uint32_t state[8];
@@ -56,6 +56,13 @@ void random_bytes(uint8_t *buf, size_t len);
 // Constant-time comparison
 bool secure_compare(const uint8_t *a, const uint8_t *b, size_t len);
 
+// AES-256-CTR encryption/decryption (FIPS 197 + RFC 3686)
+// counter_block = nonce[12] || be32(initialCounter + block_index)
+// output may alias input (in-place operation is supported).
+void aes256_ctr(const uint8_t key[32], const uint8_t nonce[12],
+                uint64_t initialCounter,
+                const uint8_t *input, uint8_t *output, size_t len);
+
 } // namespace crypto
 
 // ── Secure Packet Header ──────────────────────────────────────────────────
@@ -74,7 +81,7 @@ struct SecurePacketHeader {
 
 // ── Session Info (exposed to C API) ───────────────────────────────────────
 struct SessionInfo {
-  char cipher_name[64] = "VGRE-HMAC-SHA256-XOR-STREAM";
+  char cipher_name[64] = "VGRE-HMAC-SHA256-AES256-CTR";
   char key_fingerprint[65] = {}; // hex-encoded SHA256 of session key
   double session_seconds = 0.0;
   bool is_encrypted = false;
@@ -85,33 +92,19 @@ struct SessionInfo {
 };
 
 // ── Hardware Token Manager ───────────────────────────────────────────────
-// Authoritative abstraction for TPM 2.0 or Secure Enclave storage.
-class HardwareTokenManager {
-public:
-  static HardwareTokenManager &instance();
-
-  // Retrieves the hardware-backed auth token.
-  // On Linux, this attempts to read from a persistent TPM-backed NV index.
-  // Fallback to a root-only secure file if no TPM is present.
-  VGREResult getAuthToken(std::string &outToken);
-
-  // Checks if hardware security is available.
-  bool isHardwareSecure() const { return has_hardware_tpm_; }
-
-private:
-  HardwareTokenManager();
-  bool has_hardware_tpm_ = false;
-};
+// Forward declaration - full implementation in hardware_token_manager.h
+class HardwareTokenManager;
 
 // ── Secure Channel ────────────────────────────────────────────────────────
 // Wraps a raw TCP socket with authenticated encrypted communication.
 //
 // Protocol:
 //   1. Master and client exchange nonces
-//   2. Session key = PBKDF2(auth_token, master_nonce || client_nonce, 10000)
+//   2. Session key = PBKDF2(auth_token, master_nonce || client_nonce, 200000)
 //   3. All subsequent packets: SecurePacketHeader + encrypted payload
 //   4. HMAC covers: version + sequence_number + payload_length + payload
-//   5. Encryption: XOR-stream cipher keyed from session key + sequence number
+//   5. Encryption: AES-256-CTR; nonce = sha256(sessionKey||"aes_nonce_v1")[0..11]
+//      counter = sequenceNum (unique per packet; blocks increment within packet)
 //
 class SecureChannel {
 public:
@@ -151,9 +144,9 @@ public:
   std::string getKeyFingerprint() const;
 
 private:
-  // XOR-stream cipher using session key + sequence number
-  void xorCipher(const uint8_t *input, uint8_t *output, size_t len,
-                 uint64_t sequenceNum);
+  // AES-256-CTR cipher: nonce derived from session key; counter = sequenceNum
+  void aesCtr(const uint8_t *input, uint8_t *output, size_t len,
+              uint64_t sequenceNum);
 
   // Compute HMAC for a packet
   void computePacketHMAC(const SecurePacketHeader &hdr,
