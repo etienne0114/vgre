@@ -109,6 +109,9 @@ int vgre_stream_destroy(uint64_t stream_id);
 ```c
 int vgre_graphCreate(uint64_t *out_graph);
 int vgre_graphDestroy(uint64_t graph);
+int vgre_graphInstantiate(uint64_t graph, uint64_t *out_exec);
+int vgre_graphExecDestroy(uint64_t exec);
+int vgre_graphLaunch(uint64_t exec, uint64_t stream);
 
 int vgre_graphAddKernelNodeEx(uint64_t graph, uint64_t kernel_id,
                                const char *name,
@@ -136,6 +139,39 @@ int vgre_graphExecDestroy(uint64_t exec);
 int vgre_graphLaunch(uint64_t exec, uint64_t stream);
 ```
 
+## 2.5 CUDA Runtime API Shim (`libvgre_cudart.so`)
+
+VGRE provides a comprehensive binary-compatible layer for application interception. Supported functions include:
+
+### Device & Context
+- `cudaGetDeviceCount`, `cudaSetDevice`, `cudaGetDevice`
+- `cudaGetDeviceProperties`, `cudaDeviceSynchronize`, `cudaDeviceReset`
+- `cudaSetDeviceFlags`, `cudaGetDeviceFlags`
+- `cudaDeviceGetPCIBusId`, `cudaDeviceGetByPCIBusId`
+
+### Memory Management
+- `cudaMalloc`, `cudaFree`, `cudaMemset`, `cudaMemsetAsync`
+- `cudaMemcpy`, `cudaMemcpyAsync`, `cudaMemcpy2D`, `cudaMemcpy2DAsync`
+- `cudaMallocPitch`, `cudaMemGetInfo`, `cudaGetSymbolAddress`
+- **Managed Memory**: `cudaMallocManaged`, `cudaMemAdvise`, `cudaMemPrefetchAsync`
+- **Host Memory**: `cudaHostAlloc`, `cudaFreeHost`, `cudaHostRegister`, `cudaHostUnregister`
+- **Async Pools**: `cudaMallocAsync`, `cudaFreeAsync`, `cudaMemPoolCreate`, `cudaMemPoolDestroy`
+
+### Streams & Events
+- `cudaStreamCreate`, `cudaStreamCreateWithFlags`, `cudaStreamCreateWithPriority`
+- `cudaStreamDestroy`, `cudaStreamSynchronize`, `cudaStreamQuery`
+- `cudaEventCreate`, `cudaEventCreateWithFlags`, `cudaEventRecord`, `cudaEventSynchronize`
+- `cudaEventElapsedTime`, `cudaEventDestroy`
+
+### Advanced Interop
+- `cudaDeviceCanAccessPeer`, `cudaDeviceEnablePeerAccess`, `cudaDeviceDisablePeerAccess`
+- `cudaMemcpyPeer`, `cudaMemcpyPeerAsync`
+- **CUDA Graphs**: `cudaGraphCreate`, `cudaStreamBeginCapture`, `cudaStreamEndCapture`, `cudaGraphInstantiate`, `cudaGraphLaunch`
+
+---
+
+## 3. Dashboard Telemetry API
+
 ### Telemetry & Profiling
 ```c
 int vgre_get_telemetry(vgre_telemetry_t *telemetry);
@@ -156,6 +192,7 @@ int vgre_get_kernel_history_json(const char *kernel_name, char **out_json);
 int vgre_get_logs(char ***buffer, int *count);
     // Returns last 100 log messages; caller must call vgre_free_logs(buffer, count)
 
+const char* vgre_get_version(void);
 void vgre_free_string(char *str);
 void vgre_free_logs(char **buffer, int count);
 ```
@@ -201,10 +238,11 @@ int vgre_set_background_compute(int enabled);
     // Enable/disable background GEMM workload for dashboard GFLOPS demo
 
 int vgre_set_block_threads(int enabled);
-    // 0 = async dispatch; 1 = block host until kernel completes
+    // 0 = serial/OpenMP hybrid; 1 = persistent WorkerPool for syncthreads correctness.
+    // This updates the internal engine state.
 
-int vgre_get_version(char **out_version);
-    // Returns version string "0.1.2"; caller must call vgre_free_string()
+const char* vgre_get_version(void);
+    // Returns version string "0.1.2".
 ```
 
 ---
@@ -218,8 +256,9 @@ The VGRE Dashboard uses an isolate-based background thread to poll the C API eve
 | `gflops` | AdaptiveExecutionEngine | Ground-truth GFLOPS from LLVM-calibrated instruction counts |
 | `memoryBandwidthGbps` | MemoryManager | Measured h2d/d2h/d2d transfer bandwidth |
 | `pageFaultRate` | UVM Handler | SIGSEGV-triggered page migrations per second |
-| `uvmMap` | MemoryManager | 32×32 occupancy grid for managed memory regions |
-| `deviceTemperature` | AdaptiveExecutionEngine | Linux: real sysfs thermal; Windows/macOS: load-based heuristic |
+| `uvmMap` | MemoryManager | bitset represented as `uint8_t[1024]` residency map |
+| `deviceTemperature` | AdaptiveExecutionEngine | Real-time thermal sensor reading (Linux/TPM) or calibrated heuristic |
+| `activeKernels` | RuntimeEngine | Number of kernels currently executing in the BlockWorkerPool |
 | `kernelLaunches` | RuntimeProfiler | Cumulative kernel invocation count |
 | `totalBytesTransferred` | MemoryManager | Cumulative bytes across all memcpy operations |
 | `clusterNodeCount` | TCPClusterManager | Number of connected worker nodes |
