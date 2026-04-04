@@ -24,12 +24,14 @@ void print_usage(const char* prog) {
     std::cout << "Options:\n";
     std::cout << "  --port <p>          Port to listen on (default: 9090)\n";
     std::cout << "  --auth-token <t>    Authentication token for secure cluster access\n";
+    std::cout << "  --master <ip>       IP address of the master node (default: auto-discovery)\n";
     std::cout << "  --help              Print this help message\n";
 }
 
 int main(int argc, char** argv) {
     int port = 9090;
     std::string auth_token;
+    std::string master_ip = "auto";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -37,6 +39,8 @@ int main(int argc, char** argv) {
             port = std::stoi(argv[++i]);
         } else if (arg == "--auth-token" && i + 1 < argc) {
             auth_token = argv[++i];
+        } else if (arg == "--master" && i + 1 < argc) {
+            master_ip = argv[++i];
         } else if (arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -58,7 +62,7 @@ int main(int argc, char** argv) {
     vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Initializing VGRE Remote Worker on port " + std::to_string(port));
     
     // Initialize as Worker (is_master = false)
-    if (cluster.initialize(false, "any", port) != vgre::VGREResult::SUCCESS) {
+    if (cluster.initialize(false, master_ip, port) != vgre::VGREResult::SUCCESS) {
         vgre::Logger::instance().log(vgre::LogLevel::ERROR, "Worker", "Failed to initialize TCP Cluster worker.");
         return 1;
     }
