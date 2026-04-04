@@ -12,6 +12,8 @@
 #include "vgre/compiler/clang_kernel_parser.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
 #include "vgre/runtime/vector_engine.h"
+#include "vgre/runtime/block_worker_pool.h"
+
 
 #include <algorithm>
 #include <chrono>
@@ -140,6 +142,10 @@ VGREResult RuntimeEngine::initialize() {
       devices_[0]->getProperties().totalGlobalMem);
 
   initialized_ = true;
+
+  // Initialize persistent BlockWorkerPool for authoritative block-level concurrency
+  runtime::BlockWorkerPool::instance().initialize();
+
 
   // Phase 10: Controllable Background Tasks (Zero-Simulation Hardening)
   // Register with global IPC service as a client by default, unless disabled.
@@ -482,11 +488,18 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
         auto pendIt = pendingKernels_.find(id);
         if (pendIt != pendingKernels_.end()) {
             VGRE_LOG_INFO("RuntimeEngine", "Resolving asynchronous JIT future for kernel: " + irIt->second.name);
-            fn = pendIt->second.get(); // Synchronize with pipelined JIT task
+            vgre::JITResult jres = pendIt->second.get(); // Synchronize with pipelined JIT task
+            fn = jres.fn;
             if (!fn) {
                 VGRE_LOG_ERROR("RuntimeEngine", "Asynchronous JIT failed for kernel: " + irIt->second.name);
                 return VGREResult::ERROR_COMPILATION;
             }
+            // Propagate authoritative metadata from JIT pipeline back into cache
+            irIt->second.sharedMemSize = jres.sharedMemSize;
+            irIt->second.argSizes = jres.argSizes;
+            irIt->second.estimatedInstructionCount = jres.estimatedInstructionCount;
+            irIt->second.staticFlopCount = jres.staticFlopCount;
+            
             kernelCache_[id] = fn;
             pendingKernels_.erase(id);
         } else {
@@ -530,6 +543,10 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       (*argValues)[i].resize(argSize);
       if (args && args[i]) {
         ::memcpy((*argValues)[i].data(), args[i], argSize);
+        if (irIt->second.argTypes[i] == ArgType::POINTER) {
+            void* ptrValue = *(void**)(*argValues)[i].data();
+            VGRE_LOG_DEBUG("RuntimeEngine", "Arg[" + std::to_string(i) + "] Type=POINTER Value=" + std::to_string((uintptr_t)ptrValue));
+        }
       } else {
         ::memset((*argValues)[i].data(), 0, argSize);
       }
@@ -546,6 +563,10 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
   std::vector<ArgType> argTypes;
   int streamPriority = 0;
   size_t staticSharedMem = 0;
+  uint64_t estimatedInstructionCount = 0;
+  bool usesSyncthreads = false;
+  MemoryManager* rawMm = memoryManager_.get();
+
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto irIt = kernelIRCache_.find(id);
@@ -553,7 +574,10 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       kName = irIt->second.name;
       argTypes = irIt->second.argTypes;
       staticSharedMem = irIt->second.sharedMemSize;
+      estimatedInstructionCount = irIt->second.estimatedInstructionCount;
+      usesSyncthreads = irIt->second.usesSyncthreads;
     }
+
     if (stream != 0 && currentDeviceId_ >= 0 &&
         currentDeviceId_ < static_cast<DeviceId>(devices_.size())) {
       (void)devices_[currentDeviceId_]->getStreamPriority(stream,
@@ -580,22 +604,19 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
 
   auto fut = scheduler_->submitStreamTask(stream,
                                            [exec, fn, gridDim, blockDim,
-                                            safeArgs, argValues, id, sharedMem,
-                                            argTypes, staticSharedMem, kName, gridOffset]() mutable {
+                                            safeArgs, argValues, sharedMem,
+                                            argTypes, staticSharedMem, kName, gridOffset,
+                                            estimatedInstructionCount, rawMm, usesSyncthreads]() mutable {
     auto start = std::chrono::steady_clock::now();
     size_t totalSharedMem = sharedMem + staticSharedMem;
-    
+
     // Calculate per-block metrics for real-time instrumentation
     uint64_t flopsPerBlock = 0;
     uint64_t bytesPerBlock = 0;
-    
-    size_t totalThreads = gridDim.total() * blockDim.total();
+
     uint32_t totalBlocksCount = gridDim.total();
 
-    // 1. Authoritative memory accounting
-    auto mm = &vgre::core::RuntimeEngine::instance().getMemoryManager();
-    const auto *ir = vgre::core::RuntimeEngine::instance().getKernelIR(id);
-    
+    // 1. Authoritative memory accounting — use pre-captured manager, not singleton
     size_t totalMemBytes = 0;
     for (size_t i = 0; i < argTypes.size(); ++i) {
       if (argTypes[i] == ArgType::POINTER) {
@@ -603,25 +624,22 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
         if (i < argValues->size() && !(*argValues)[i].empty()) {
           ::memcpy(&ptr, (*argValues)[i].data(), sizeof(void*));
         }
-        if (ptr && mm && mm->isValidHandle(ptr)) {
-          totalMemBytes += mm->getAllocationSize(ptr);
-        }
-      } else if (argTypes[i] == ArgType::STRUCT) {
-        if (ir && i < ir->argSizes.size()) {
-          totalMemBytes += ir->argSizes[i] * totalThreads;
+        if (ptr && rawMm && rawMm->isValidHandle(ptr)) {
+          totalMemBytes += rawMm->getAllocationSize(ptr);
         }
       }
     }
     bytesPerBlock = (totalBlocksCount > 0) ? (totalMemBytes / totalBlocksCount) : 0;
 
-    // 2. Authoritative FLOPs
-    if (ir && ir->estimatedInstructionCount > 0) {
-      flopsPerBlock = blockDim.total() * ir->estimatedInstructionCount;
+    // 2. Authoritative FLOPs — use pre-captured instruction count
+    if (estimatedInstructionCount > 0) {
+      flopsPerBlock = blockDim.total() * estimatedInstructionCount;
     } else {
       flopsPerBlock = blockDim.total(); // absolute minimum baseline
     }
 
-    exec->execute(fn, gridDim, blockDim, safeArgs->data(), totalSharedMem, flopsPerBlock, bytesPerBlock, gridOffset);
+    exec->execute(fn, gridDim, blockDim, safeArgs->data(), totalSharedMem, flopsPerBlock, bytesPerBlock, gridOffset, usesSyncthreads);
+
     
     auto end = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(end - start).count();
@@ -720,6 +738,7 @@ struct NativeGraphOperation {
   OwnedFusedLaunchArgs kernelArgs;
   dim3 gridDim;
   dim3 blockDim;
+  bool usesSyncthreads = false;
   // Memcpy data
   void *dst;
   void *src;
@@ -805,9 +824,16 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode>& nodes
             auto pendingIt = pendingKernels_.find(actualId);
             if (pendingIt != pendingKernels_.end()) {
                 VGRE_LOG_INFO("RuntimeEngine", "Graph dispatch waiting for JIT of kernel: " + node.kernelName + " (ID " + std::to_string(actualId) + ")");
-                CompiledKernelFn fn = pendingIt->second.get(); // Synchronize on future
+                vgre::JITResult jres = pendingIt->second.get(); // Synchronize on future
+                CompiledKernelFn fn = jres.fn;
                 if (!fn) {
                     VGRE_LOG_ERROR("RuntimeEngine", "JIT returned NULL for kernel: " + node.kernelName);
+                } else {
+                    auto& irCacheEntry = kernelIRCache_[actualId];
+                    irCacheEntry.sharedMemSize = jres.sharedMemSize;
+                    irCacheEntry.argSizes = jres.argSizes;
+                    irCacheEntry.estimatedInstructionCount = jres.estimatedInstructionCount;
+                    irCacheEntry.staticFlopCount = jres.staticFlopCount;
                 }
                 kernelCache_[actualId] = fn;
                 pendingKernels_.erase(pendingIt);
@@ -857,6 +883,8 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode>& nodes
         op.kernelArgs.flops = totalThreads * instCount;
         op.kernelArgs.sharedMemBytes =
             (irIt != kernelIRCache_.end()) ? irIt->second.sharedMemSize : 0;
+        op.usesSyncthreads =
+            (irIt != kernelIRCache_.end()) ? irIt->second.usesSyncthreads : false;
 
         for (size_t i = 0; i < node.capturedArgs.size(); ++i) {
           size_t copySize = node.capturedArgs[i].size();
@@ -932,9 +960,24 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode>& nodes
       if (op.type == GraphNodeType::KERNEL) {
         auto start = std::chrono::steady_clock::now();
         VGRE_LOG_INFO("RuntimeEngine", "Dispatching kernel '" + op.kernelArgs.name + "'");
-        exec->execute(op.kernelArgs.fn, op.gridDim, op.blockDim,
+
+        uint32_t blocksTotal = op.gridDim.total();
+        uint64_t flopsPerBlock = 0;
+        uint64_t bytesPerBlock = 0;
+        if (blocksTotal > 0) {
+          flopsPerBlock = op.kernelArgs.flops / blocksTotal;
+          bytesPerBlock = op.kernelArgs.memBytes / blocksTotal;
+        }
+
+        exec->execute(op.kernelArgs.fn,
+                      op.gridDim,
+                      op.blockDim,
                       op.kernelArgs.argPtrs.data(),
-                      op.kernelArgs.sharedMemBytes);
+                      op.kernelArgs.sharedMemBytes,
+                      flopsPerBlock,
+                      bytesPerBlock,
+                      dim3(0, 0, 0),
+                      op.usesSyncthreads);
         auto end = std::chrono::steady_clock::now();
         double ms = std::chrono::duration<double, std::milli>(end - start).count();
         vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(

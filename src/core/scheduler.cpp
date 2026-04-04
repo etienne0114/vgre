@@ -198,7 +198,27 @@ void Scheduler::workerLoop(int workerIdx) {
     // Execute the generic task for this work-item (outside mutex!)
     try {
       if (item.execute) {
+        // v0.1.3 Extraordinary Sophistication: Temporary Affinity Yielding
+        // If this worker is pinned to a specific core, and it launches an 
+        // OpenMP task, all OMP threads will be forced onto that same core.
+        // We yield affinity here so the OMP runtime can see and use all cores.
+        cpu_set_t oldAffinity;
+        bool affinityShifted = false;
+        if (pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t), &oldAffinity) == 0) {
+            cpu_set_t allCores;
+            CPU_ZERO(&allCores);
+            for (int k = 0; k < CPU_SETSIZE; k++) CPU_SET(k, &allCores);
+            if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &allCores) == 0) {
+                affinityShifted = true;
+            }
+        }
+
         item.execute();
+
+        // Restore pinning for next scheduler work selection
+        if (affinityShifted) {
+            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &oldAffinity);
+        }
       }
     } catch (...) {
       // Prevent worker death on unexpected task exceptions.
@@ -247,12 +267,15 @@ Scheduler::submitStreamTask(StreamId stream, std::function<void()> taskFn,
     }
 
     sq->pendingTasks.push(node);
+    pending_++; // Increment immediately to prevent waitAll() returning early
     if (!sq->isProcessing) {
       sq->isProcessing = true;
+      VGRE_LOG_DEBUG("Scheduler", "Started processing stream " + std::to_string(stream));
       tryProcessStream(stream);
     }
   }
 
+  VGRE_LOG_DEBUG("Scheduler", "Task submitted to stream " + std::to_string(stream));
   return future;
 }
 
@@ -270,6 +293,7 @@ void Scheduler::tryProcessStream(StreamId stream) {
   }
 
   auto node = sq.pendingTasks.front();
+  VGRE_LOG_DEBUG("Scheduler", "Dequeueing task from stream " + std::to_string(stream));
 
   WorkItem item;
   item.streamId = stream;
@@ -311,7 +335,6 @@ void Scheduler::tryProcessStream(StreamId stream) {
   };
 
   queue_.push(std::move(item));
-  pending_++;
   cv_.notify_all();
 }
 
@@ -404,14 +427,21 @@ Scheduler::submitNumaTask(StreamId stream, std::function<void()> taskFn,
 
 // ── Control ────────────────────────────────────────────────────────────────
 void Scheduler::waitStream(StreamId stream) {
+  VGRE_LOG_DEBUG("Scheduler", "Waiting for stream " + std::to_string(stream));
   std::unique_lock<std::mutex> lock(mutex_);
   cv_.wait(lock, [this, stream]() {
     auto it = streamQueues_.find(stream);
     if (it == streamQueues_.end())
       return true; // Stream never used
     auto &sq = *it->second;
-    return !sq.isProcessing && sq.pendingTasks.empty();
+    bool done = !sq.isProcessing && sq.pendingTasks.empty();
+    if (!done) {
+        VGRE_LOG_DEBUG("Scheduler", "Stream " + std::to_string(stream) + " still busy: isProcessing=" + 
+                       (sq.isProcessing ? "true" : "false") + " pending=" + std::to_string(sq.pendingTasks.size()));
+    }
+    return done;
   });
+  VGRE_LOG_DEBUG("Scheduler", "Stream " + std::to_string(stream) + " synchronization complete");
 }
 
 bool Scheduler::isStreamIdle(StreamId stream) const {

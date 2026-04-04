@@ -121,12 +121,18 @@ bool IPCManager::initialize(bool isMaster) {
     }
   };
 
+  // Phase 10: Dynamic SHM name for test isolation
+  std::string fullShmName = VGRE_SHM_NAME;
+  const char* shmSuffix = std::getenv("VGRE_SHM_SUFFIX");
+  if (shmSuffix) {
+      fullShmName += "_" + std::string(shmSuffix);
+  }
+
   // Restrict shared memory to owner-only: prevents unauthorized processes
   // from reading or corrupting VGRE global state.
-  shm_fd_ = shm_open(VGRE_SHM_NAME, O_CREAT | O_RDWR, 0600);
+  shm_fd_ = shm_open(fullShmName.c_str(), O_CREAT | O_RDWR, 0600);
   if (shm_fd_ == -1) {
-    logInitFailure("Failed to open shared memory: " +
-                   std::string(VGRE_SHM_NAME));
+    logInitFailure("Failed to open shared memory: " + fullShmName);
     return false;
   }
 
@@ -299,7 +305,12 @@ void IPCManager::shutdown() {
   }
 
   if (isMaster_) {
-    shm_unlink(VGRE_SHM_NAME);
+    std::string fullShmName = VGRE_SHM_NAME;
+    const char* shmSuffix = std::getenv("VGRE_SHM_SUFFIX");
+    if (shmSuffix) {
+        fullShmName += "_" + std::string(shmSuffix);
+    }
+    shm_unlink(fullShmName.c_str());
   }
 #endif
 
