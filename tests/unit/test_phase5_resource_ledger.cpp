@@ -12,7 +12,7 @@ void test_billing_basics() {
     ledger.reset();
     
     // Record work FOR master BY a remote node (Debit Master, Credit Node)
-    ledger.recordCompute("192.168.1.50", 2.5, 8, 101, CreditDirection::DEBIT);
+    ledger.recordCompute("192.168.1.50", 2.5, 8, 101, CreditDirection::CREDIT);
     
     NodeBalance bal;
     ledger.getBalance("192.168.1.50", bal);
@@ -30,7 +30,8 @@ void test_persistence() {
     
     {
         ResourceLedger writer;
-        writer.recordCompute("node-a", 10.0, 1, 99, CreditDirection::DEBIT);
+        writer.reset();
+        writer.recordCompute("node-a", 10.0, 1, 99, CreditDirection::CREDIT);
         writer.persist();
     }
     

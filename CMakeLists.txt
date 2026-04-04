@@ -29,6 +29,12 @@ endif()
 
 # ── Dependencies ────────────────────────────────────────────────────────────
 find_package(OpenMP REQUIRED COMPONENTS CXX)
+find_library(LIBOMP_PATH NAMES omp PATHS /usr/lib/llvm-18/lib /usr/lib/x86_64-linux-gnu)
+if(LIBOMP_PATH)
+    set(LIBOMP_PATH "${LIBOMP_PATH}" CACHE FILEPATH "Path to LLVM OpenMP library")
+    message(STATUS "Found LLVM OpenMP: ${LIBOMP_PATH}")
+    link_libraries("-Wl,--no-as-needed" "${LIBOMP_PATH}" "-Wl,--as-needed")
+endif()
 find_package(Threads REQUIRED)
 # find_package(PkgConfig REQUIRED)
 # pkg_check_modules(LZ4 REQUIRED liblz4)
@@ -122,15 +128,20 @@ endif()
 
 target_link_libraries(vgre PUBLIC
     OpenMP::OpenMP_CXX
+    ${OpenMP_CXX_LIBRARIES}
+    ${LIBOMP_PATH}
     Threads::Threads
     ${llvm_libs}
 )
+target_link_options(vgre PUBLIC "-Wl,--no-as-needed" "${LIBOMP_PATH}")
+target_compile_options(vgre PUBLIC ${OpenMP_CXX_FLAGS})
 if(VGRE_USE_OPENCL_BACKEND)
     target_link_libraries(vgre PUBLIC OpenCL::OpenCL)
 endif()
 set_target_properties(vgre PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION 0
+    LINK_FLAGS "${OpenMP_CXX_FLAGS}"
 )
 
 # ── CUDART Shim (LD_PRELOAD wrapper) ────────────────────────────────────────

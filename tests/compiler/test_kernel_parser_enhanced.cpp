@@ -291,10 +291,9 @@ int main() {
     runner.runTest(test_struct_size_computation, "Struct Size Computation");
     runner.runTest(test_struct_with_array, "Struct with Array");
     runner.runTest(test_complex_parameters, "Complex Parameters");
-    // Skip slow tests for now
-    // runner.runTest(test_shared_memory_detection, "Shared Memory Detection");
-    // runner.runTest(test_fallback_heuristic, "Fallback Heuristic");
-    // runner.runTest(test_type_mapping, "Type Mapping");
+    runner.runTest(test_shared_memory_detection, "Shared Memory Detection");
+    runner.runTest(test_fallback_heuristic, "Fallback Heuristic");
+    runner.runTest(test_type_mapping, "Type Mapping");
     
     return runner.finish();
 }

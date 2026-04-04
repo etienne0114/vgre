@@ -102,12 +102,8 @@ int main() {
     return 1;
   }
 
-  cuda.free(d_a);
-  cuda.free(d_b);
-  cuda.free(d_c);
-  free(h_a);
-  free(h_b);
-  free(h_c);
+  // NOTE: d_a/d_b/d_c are kept alive for Steps 4-5 native graph tests.
+  // They will be freed after all graph operations are complete.
 
   // --- Native Graph with Dependencies ---
   std::cout << "--- Step 4: Native graph with dependencies ---" << std::endl;
@@ -152,6 +148,14 @@ int main() {
   engine.graphLaunch(exec2, 0);
   engine.streamSynchronize(0);
   std::cout << "  ✓ Graph node args updated and executed" << std::endl;
+
+  // Free device memory now that all graph operations are complete
+  cuda.free(d_a);
+  cuda.free(d_b);
+  cuda.free(d_c);
+  free(h_a);
+  free(h_b);
+  free(h_c);
 
   return 0;
 }

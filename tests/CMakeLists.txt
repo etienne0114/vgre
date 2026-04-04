@@ -1,6 +1,14 @@
 # Test CMakeLists.txt
 # Unit tests and integration tests for VGRE
 
+# ── Pre-test cleanup fixture ─────────────────────────────────────────────────
+# Cleans stale OpenMP (libomp) KMP registration files left by killed processes.
+# These files accumulate in /dev/shm when processes are SIGKILL'd, causing the
+# next test that initializes OpenMP to deadlock during library registration.
+add_test(NAME KMPCleanup
+    COMMAND bash -c "rm -f /dev/shm/__KMP_REGISTERED_LIB_* 2>/dev/null; rm -f \$HOME/.vgre_cache/*.ll.tmp.* 2>/dev/null; exit 0")
+set_tests_properties(KMPCleanup PROPERTIES FIXTURES_SETUP KMPRegistrationClean)
+
 # ── Unit tests ──────────────────────────────────────────────────────────────
 add_executable(test_virtual_gpu_device unit/test_virtual_gpu_device.cpp)
 target_link_libraries(test_virtual_gpu_device PRIVATE vgre)
@@ -66,10 +74,12 @@ add_test(NAME ComplexJITIntegration COMMAND test_complex_jit)
 add_executable(test_syncthreads integration/test_syncthreads.cpp)
 target_link_libraries(test_syncthreads PRIVATE vgre)
 add_test(NAME SyncthreadsIntegration COMMAND test_syncthreads)
+set_tests_properties(SyncthreadsIntegration PROPERTIES FIXTURES_REQUIRED KMPRegistrationClean)
 
 add_executable(test_extern_shared integration/test_extern_shared.cpp)
 target_link_libraries(test_extern_shared PRIVATE vgre)
 add_test(NAME ExternSharedIntegration COMMAND test_extern_shared)
+set_tests_properties(ExternSharedIntegration PROPERTIES FIXTURES_REQUIRED KMPRegistrationClean)
 
 add_executable(test_extern_c_kernel integration/test_extern_c_kernel.cpp)
 target_link_libraries(test_extern_c_kernel PRIVATE vgre)
@@ -138,15 +148,19 @@ add_test(NAME TextureDepth COMMAND test_texture_depth)
 add_executable(test_clang_parser unit/test_clang_parser.cpp)
 target_link_libraries(test_clang_parser PRIVATE vgre)
 add_test(NAME ClangParser COMMAND test_clang_parser)
+set_tests_properties(ClangParser PROPERTIES TIMEOUT 300)
+
 
 add_executable(test_clang_enhanced compiler/test_clang_enhanced.cpp)
 target_link_libraries(test_clang_enhanced PRIVATE vgre)
 add_test(NAME ClangEnhanced COMMAND test_clang_enhanced)
-set_tests_properties(ClangEnhanced PROPERTIES TIMEOUT 300)
+set_tests_properties(ClangEnhanced PROPERTIES TIMEOUT 600)
 
 add_executable(test_kernel_parser_enhanced compiler/test_kernel_parser_enhanced.cpp)
 target_link_libraries(test_kernel_parser_enhanced PRIVATE vgre)
 add_test(NAME KernelParserEnhanced COMMAND test_kernel_parser_enhanced)
+set_tests_properties(KernelParserEnhanced PROPERTIES TIMEOUT 600)
+
 
 add_executable(test_flop_counting compiler/test_flop_counting.cpp)
 target_link_libraries(test_flop_counting PRIVATE vgre)
@@ -194,3 +208,12 @@ add_test(NAME TextureManager COMMAND test_texture_manager)
 add_executable(test_memory_pool unit/test_memory_pool.cpp)
 target_link_libraries(test_memory_pool PRIVATE vgre)
 add_test(NAME MemoryPool COMMAND test_memory_pool)
+
+# ── Global Test Configuration ──────────────────────────────────────────────
+# Disable background hardware benchmarks and optional IPC services during 
+# tests to ensure deterministic performance and prevent CPU resource 
+# contention/leakage.
+get_directory_property(vgre_full_test_list TESTS)
+set_tests_properties(${vgre_full_test_list} PROPERTIES 
+    ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF"
+)

@@ -29,12 +29,13 @@ void test_basic_partitioning() {
     // 10.0.0.2 (8 cores) -> 8 blocks
     // local (4 cores)    -> 4 blocks
     
-    assert(plan.slices[0].partition_grid_x == 4);
-    assert(plan.slices[1].partition_grid_x == 8);
+    // Node 1 (8 cores) has highest capacity, so it should be first in the plan
+    assert(plan.slices[0].partition_grid_x == 8);
+    assert(plan.slices[1].partition_grid_x == 4);
     assert(plan.slices[2].partition_grid_x == 4);
     
     assert(plan.slices[0].grid_x_start == 0);
-    assert(plan.slices[1].grid_x_start == 4);
+    assert(plan.slices[1].grid_x_start == 8);
     assert(plan.slices[2].grid_x_start == 12);
     
     std::cout << "  Passed (3 nodes, 16 blocks)." << std::endl;

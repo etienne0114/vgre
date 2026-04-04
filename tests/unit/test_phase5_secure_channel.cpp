@@ -59,7 +59,7 @@ void test_secure_transport() {
     
     SessionInfo info = master.getSessionInfo();
     assert(info.is_encrypted);
-    assert(std::string(info.cipher_name).find("XOR-STREAM") != std::string::npos);
+    assert(std::string(info.cipher_name).find("AES256-CTR") != std::string::npos);
     
     std::cout << "  Passed." << std::endl;
 }

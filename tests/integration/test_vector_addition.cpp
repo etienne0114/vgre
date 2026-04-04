@@ -66,10 +66,14 @@ void test_runtime_engine_vector_add() {
 
   // Kernel source
   const char *kernelSource = R"(
-        __global__ void vector_add(float* A, float* B, float* C, int N) {
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i < N) {
-                C[i] = A[i] + B[i];
+        extern "C" {
+            int printf(const char*, ...);
+            __global__ void vector_add(float* A, float* B, float* C, int N) {
+                int i = blockIdx.x * blockDim.x + threadIdx.x;
+                if (i == 0) printf("[Kernel Debug] i=%d A=%p B=%p C=%p N=%d\n", i, A, B, C, N);
+                if (i < N) {
+                    C[i] = A[i] + B[i];
+                }
             }
         }
     )";
