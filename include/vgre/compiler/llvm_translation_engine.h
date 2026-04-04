@@ -91,7 +91,7 @@ private:
   // Background compilation queue
   struct CompileTask {
       std::shared_ptr<KernelIR> ir;
-      std::promise<CompiledKernelFn> promise;
+      std::promise<JITResult> promise;
   };
   std::deque<CompileTask> taskQueue_;
   std::mutex queueMutex_;
@@ -109,6 +109,9 @@ private:
 
   // LLVM JIT state (PIMPL to avoid massive include leakage)
   std::unique_ptr<LLVMState> llvmState_;
+  
+  // High-performance JIT configuration flags
+  bool blockThreadsEnabled_ = false;
 };
 
 } // namespace compiler

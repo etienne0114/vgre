@@ -50,6 +50,7 @@ extern "C" {
   int vgre_jit_get_thread_id();
   void vgre_jit_set_block_barrier(void*);
   void vgre_jit_clear_block_barrier();
+  void vgre_jit_block_barrier_sync();
   void vgre_jit_report_flops(uint64_t);
   void vgre_jit_report_memory(uint64_t);
   void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
@@ -146,6 +147,10 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
         llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_clear_block_barrier)),
         llvm::JITSymbolFlags::Exported
     };
+    Symbols[Mangle("vgre_jit_block_barrier_sync")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_block_barrier_sync)),
+        llvm::JITSymbolFlags::Exported
+    };
     Symbols[Mangle("vgre_jit_report_flops")] = {
         llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_report_flops)),
         llvm::JITSymbolFlags::Exported
@@ -187,6 +192,14 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
 
     VGRE_LOG_INFO("LLVMTranslationEngine",
                   "Real LLVM JIT Engine with Clang pipeline initialized.");
+    
+    // Cache configuration flags once at startup to avoid thread-unsafe getenv() calls in the hot path.
+    const char* vStatic = std::getenv("VGRE_BLOCK_THREADS");
+    if (vStatic && (std::strcmp(vStatic, "1") == 0 || std::strcmp(vStatic, "true") == 0 ||
+              std::strcmp(vStatic, "TRUE") == 0 || std::strcmp(vStatic, "yes") == 0 ||
+              std::strcmp(vStatic, "YES") == 0)) {
+        blockThreadsEnabled_ = true;
+    }
   } else {
     VGRE_LOG_ERROR("LLVMTranslationEngine",
                    "Failed to initialize LLVM JIT Engine.");
@@ -357,7 +370,7 @@ static std::string getCacheDir() {
 
 vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
                                               vgre::CompiledKernelFn &outFn) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   auto it = cache_.find(ir.name);
   if (it != cache_.end()) {
@@ -397,9 +410,14 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
     if (r != vgre::VGREResult::SUCCESS) {
       return r;
     }
-    // Save to disk cache
-    std::ofstream ofs(cachePath);
-    ofs << irCode;
+    // Atomic write to disk cache: write to a temp file then rename.
+    // This prevents partial/corrupt cache files if the process is killed mid-write.
+    std::string tmpPath = cachePath + ".tmp." + std::to_string(::getpid());
+    {
+      std::ofstream ofs(tmpPath);
+      ofs << irCode;
+    }
+    std::filesystem::rename(tmpPath, cachePath);
   }
 
   outFn = compileJIT(irCode, ir.name + "_wrapper", ir);
@@ -437,7 +455,7 @@ vgre::VGREResult LLVMTranslationEngine::translate(vgre::KernelIR &ir,
 
 vgre::JITFuture LLVMTranslationEngine::prepare(vgre::KernelIR &ir) {
   auto irPtr = std::make_shared<vgre::KernelIR>(ir);
-  std::promise<vgre::CompiledKernelFn> promise;
+  std::promise<vgre::JITResult> promise;
   auto future = promise.get_future().share();
   
   {
@@ -464,10 +482,18 @@ void LLVMTranslationEngine::workerLoop() {
         
         vgre::CompiledKernelFn fn = nullptr;
         vgre::VGREResult res = this->doTranslate(*task.ir, fn);
-        if (res == vgre::VGREResult::SUCCESS) {
-            task.promise.set_value(fn);
+        if (res == vgre::VGREResult::SUCCESS && fn) {
+            vgre::JITResult jres;
+            jres.fn = fn;
+            jres.argSizes = task.ir->argSizes;
+            jres.sharedMemSize = task.ir->sharedMemSize;
+            jres.estimatedInstructionCount = task.ir->estimatedInstructionCount;
+            jres.staticFlopCount = task.ir->staticFlopCount;
+            task.promise.set_value(jres);
         } else {
-            task.promise.set_value(nullptr);
+            vgre::JITResult errRes;
+            errRes.fn = nullptr;
+            task.promise.set_value(errRes);
         }
     }
 }
@@ -517,13 +543,9 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   }
   oss << kernelSource << "\n\n";
 
-  // Helper: block-threading toggle
+  // Helper: block-threading toggle (using cached host-side configuration)
   oss << "static inline bool vgre_block_threads_enabled() {\n";
-  oss << "  const char* v = std::getenv(\"VGRE_BLOCK_THREADS\");\n";
-  oss << "  if (!v) return false;\n";
-  oss << "  return (std::strcmp(v, \"1\") == 0 || std::strcmp(v, \"true\") == 0 ||\n";
-  oss << "          std::strcmp(v, \"TRUE\") == 0 || std::strcmp(v, \"yes\") == 0 ||\n";
-  oss << "          std::strcmp(v, \"YES\") == 0);\n";
+  oss << "  return " << (blockThreadsEnabled_ ? "true" : "false") << ";\n";
   oss << "}\n\n";
 
   oss << "extern \"C\" {\n";
@@ -552,49 +574,40 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
       << "    uint32_t gdx = pGridDim->x, gdy = pGridDim->y, gdz = pGridDim->z;\n\n";
 
   // Thread-local kernel launcher
-  oss << "  auto vgre_call_kernel = [&](uint32_t tx, uint32_t ty, uint32_t tz) {\n";
+  oss << "  auto vgre_call_kernel = [=](uint32_t tx, uint32_t ty, uint32_t tz) {\n";
   oss << "    *vgre_jit_get_sharedMem() = smem;\n";
   oss << "    *vgre_jit_get_threadIdx() = vgre_cuda::dim3(tx, ty, tz);\n";
   oss << "    *vgre_jit_get_blockIdx() = vgre_cuda::dim3(bx, by, bz);\n";
   oss << "    *vgre_jit_get_blockDim() = vgre_cuda::dim3(bdx, bdy, bdz);\n";
   oss << "    *vgre_jit_get_gridDim() = vgre_cuda::dim3(gdx, gdy, gdz);\n";
+  // oss << "    if (tx == 0) printf(\"[JIT DEBUG] Thread 0 starting kernel execution with smem=%p\\n\", smem); fflush(stdout);\n";
+
 
   // Unpack arguments
   std::vector<std::string> argCall;
   for (size_t i = 0; i < ir.argTypes.size(); ++i) {
     std::string argName = "a" + std::to_string(i);
+    std::string typeName = (i < ir.argTypeNames.size()) ? ir.argTypeNames[i] : "void*";
     switch (ir.argTypes[i]) {
     case ArgType::POINTER:
-      // Robust pointer unwrapping to match kernel's specific pointer types
-      oss << "    vgre_cuda::ptr_unwrapper " << argName << " = { *(void**)args[" << i << "] };\n";
+      oss << "    " << typeName << " " << argName << " = (" << typeName << ")*(void**)args[" << i << "];\n";
       break;
     case ArgType::INT32:
     case ArgType::UINT32:
-      oss << "    uint32_t " << argName << " = *(uint32_t*)args[" << i
-          << "];\n";
+      oss << "    uint32_t " << argName << " = *(uint32_t*)args[" << i << "];\n";
       break;
     case ArgType::INT64:
     case ArgType::UINT64:
-      oss << "    uint64_t " << argName << " = *(uint64_t*)args[" << i
-          << "];\n";
+      oss << "    uint64_t " << argName << " = *(uint64_t*)args[" << i << "];\n";
       break;
     case ArgType::FLOAT32:
       oss << "    float " << argName << " = *(float*)args[" << i << "];\n";
       break;
     case ArgType::FLOAT64:
-      oss << "    double " << argName << " = *(double*)args[" << i
-          << "];\n";
+      oss << "    double " << argName << " = *(double*)args[" << i << "];\n";
       break;
     case ArgType::STRUCT:
-      {
-        std::string typeName = (i < ir.argTypeNames.size()) ? ir.argTypeNames[i] : "void";
-        if (typeName == "void" || typeName.empty()) {
-           VGRE_LOG_ERROR("LLVMTranslationEngine", "Cannot JIT STRUCT argument at index " + std::to_string(i) + ": type name missing");
-           return ""; // Error out
-        } else {
-           oss << "    " << typeName << " " << argName << " = *(" << typeName << "*)args[" << i << "];\n";
-        }
-      }
+      oss << "    " << typeName << " " << argName << " = *(" << typeName << "*)args[" << i << "];\n";
       break;
     }
     argCall.push_back(argName);
@@ -615,20 +628,16 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   oss << "  bool useThreads = (vgre_block_threads_enabled() || vgre_force_block_threads) &&\n";
   oss << "                   totalThreads > 1;\n";
   oss << "  if (useThreads) {\n";
-  oss << "    vgre::runtime::BlockBarrier barrier(static_cast<int>(totalThreads));\n";
   oss << "    struct JobContext {\n";
   oss << "      uint32_t bdx, bdy, bdz;\n";
-  oss << "      void* barrier;\n";
   oss << "      decltype(vgre_call_kernel)* launcher;\n";
-  oss << "    } ctx = {bdx, bdy, bdz, (void*)&barrier, &vgre_call_kernel};\n";
+  oss << "    } ctx = {bdx, bdy, bdz, &vgre_call_kernel};\n";
   oss << "    auto block_job = [](int tid, void* arg_ptr) {\n";
   oss << "        auto* pCtx = (JobContext*)arg_ptr;\n";
   oss << "        uint32_t tx = tid % pCtx->bdx;\n";
   oss << "        uint32_t ty = (tid / pCtx->bdx) % pCtx->bdy;\n";
   oss << "        uint32_t tz = tid / (pCtx->bdx * pCtx->bdy);\n";
-  oss << "        vgre_jit_set_block_barrier(pCtx->barrier);\n";
-    oss << "        (*pCtx->launcher)(tx, ty, tz);\n";
-  oss << "        vgre_jit_clear_block_barrier();\n";
+  oss << "        (*pCtx->launcher)(tx, ty, tz);\n";
   oss << "    };\n";
   oss << "    vgre_jit_block_dispatch(static_cast<int>(totalThreads), block_job, (void*)&ctx);\n";
   oss << "    return;\n";
@@ -930,17 +939,17 @@ uint64_t LLVMTranslationEngine::getInstructionCount(const std::string &source) {
 
 // ── Cache management ───────────────────────────────────────────────────────
 bool LLVMTranslationEngine::isCached(const std::string &kernelName) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return cache_.count(kernelName) > 0;
 }
 
 void LLVMTranslationEngine::clearCache() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   cache_.clear();
 }
 
 size_t LLVMTranslationEngine::getCacheSize() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return cache_.size();
 }
 
@@ -1029,8 +1038,7 @@ VGREResult LLVMTranslationEngine::getFunctionFromModule(
     return VGREResult::ERROR_INVALID_KERNEL;
   }
 
-  using jit_func_t = void (*)(void **, uint32_t, uint32_t, uint32_t, uint32_t,
-                              uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+  using jit_func_t = void (*)(void **, const vgre::dim3*, const vgre::dim3*, const vgre::dim3*, const vgre::dim3*,
                               void *, size_t);
   uint64_t addr_val = sym->getValue();
   jit_func_t func_ptr = reinterpret_cast<jit_func_t>(addr_val);
@@ -1040,9 +1048,9 @@ VGREResult LLVMTranslationEngine::getFunctionFromModule(
                  const vgre::dim3 * /*threadIdx*/, const vgre::dim3 *blockDim,
                  const vgre::dim3 *gridDim, void *sharedMem,
                  size_t sharedMemSize) {
-        func_ptr(args, blockIdx->x, blockIdx->y, blockIdx->z, blockDim->x,
-                 blockDim->y, blockDim->z, gridDim->x, gridDim->y, gridDim->z,
-                 sharedMem, sharedMemSize);
+        vgre::dim3 reserved(0, 0, 0);
+        func_ptr(args, blockIdx, &reserved, blockDim, gridDim, sharedMem,
+                 sharedMemSize);
       });
 
   return VGREResult::SUCCESS;

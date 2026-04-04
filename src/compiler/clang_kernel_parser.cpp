@@ -5,15 +5,189 @@
 
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Support/FormatVariadic.h>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
+
+#ifndef _WIN32
+#include <unistd.h>
+#include <pwd.h>
+#endif
 
 namespace vgre {
 namespace compiler {
+
+// ── Process-level caches shared across all ClangKernelParser instances ──────
+// Prevents repeated llvm::json::parse() (~12s per 378MB JSON) when different
+// test instances parse the same kernel within the same binary run.
+namespace {
+static std::recursive_mutex s_processCacheMutex;
+static std::unordered_map<std::string, EnhancedKernelIR> s_enhancedIRCache;
+
+// Return the vgre disk cache directory (mirrors KernelCache logic)
+static std::string getVgreCacheDir() {
+    const char* home = getenv("HOME");
+    if (!home) {
+#ifndef _WIN32
+        struct passwd* pw = getpwuid(getuid());
+        if (pw) home = pw->pw_dir;
+#endif
+    }
+    return home ? std::string(home) + "/.vgre/cache" : "/tmp/vgre_cache";
+}
+
+// Compute disk path for a cached EnhancedKernelIR
+static std::string enhancedCachePath(const std::string& hash) {
+    std::string dir = getVgreCacheDir() + "/" + hash.substr(0, 2);
+    try { std::filesystem::create_directories(dir); } catch (...) {}
+    return dir + "/" + hash + ".enh.json";
+}
+
+// Serialize EnhancedKernelIR to disk
+static void saveEnhancedIR(const std::string& hash, const EnhancedKernelIR& ir) {
+    std::string path = enhancedCachePath(hash);
+    llvm::json::Object obj;
+    // Basic KernelIR fields
+    obj["name"]   = ir.name;
+    obj["source"] = ir.source;
+    obj["irCode"] = ir.irCode;
+    llvm::json::Array types;
+    for (auto t : ir.argTypes) types.push_back(static_cast<int64_t>(t));
+    obj["argTypes"] = std::move(types);
+    llvm::json::Array anames;
+    for (const auto& n : ir.argTypeNames) anames.push_back(n);
+    obj["argTypeNames"] = std::move(anames);
+    llvm::json::Array sizes;
+    for (auto s : ir.argSizes) sizes.push_back(static_cast<int64_t>(s));
+    obj["argSizes"] = std::move(sizes);
+    obj["usesSharedMem"]              = ir.usesSharedMem;
+    obj["usesSyncthreads"]            = ir.usesSyncthreads;
+    obj["sharedMemSize"]              = static_cast<int64_t>(ir.sharedMemSize);
+    obj["estimatedInstructionCount"]  = static_cast<int64_t>(ir.estimatedInstructionCount);
+    obj["estimatedMemoryAccessCount"] = static_cast<int64_t>(ir.estimatedMemoryAccessCount);
+    obj["staticFlopCount"]            = static_cast<int64_t>(ir.staticFlopCount);
+    // Enhanced fields
+    llvm::json::Object flop;
+    flop["addOps"]             = static_cast<int64_t>(ir.flopAnalysis.addOps);
+    flop["mulOps"]             = static_cast<int64_t>(ir.flopAnalysis.mulOps);
+    flop["divOps"]             = static_cast<int64_t>(ir.flopAnalysis.divOps);
+    flop["fmaOps"]             = static_cast<int64_t>(ir.flopAnalysis.fmaOps);
+    flop["sqrtOps"]            = static_cast<int64_t>(ir.flopAnalysis.sqrtOps);
+    flop["transcendentalOps"]  = static_cast<int64_t>(ir.flopAnalysis.transcendentalOps);
+    flop["totalFLOPs"]         = static_cast<int64_t>(ir.flopAnalysis.totalFLOPs);
+    obj["flopAnalysis"] = std::move(flop);
+    llvm::json::Object prof;
+    prof["loadInstructions"]    = static_cast<int64_t>(ir.instructionProfile.loadInstructions);
+    prof["storeInstructions"]   = static_cast<int64_t>(ir.instructionProfile.storeInstructions);
+    prof["branchInstructions"]  = static_cast<int64_t>(ir.instructionProfile.branchInstructions);
+    prof["compareInstructions"] = static_cast<int64_t>(ir.instructionProfile.compareInstructions);
+    prof["castInstructions"]    = static_cast<int64_t>(ir.instructionProfile.castInstructions);
+    prof["callInstructions"]    = static_cast<int64_t>(ir.instructionProfile.callInstructions);
+    prof["totalInstructions"]   = static_cast<int64_t>(ir.instructionProfile.totalInstructions);
+    obj["instructionProfile"] = std::move(prof);
+    llvm::json::Array pats;
+    for (const auto& p : ir.memoryPatterns) {
+        llvm::json::Object po;
+        po["type"]             = static_cast<int64_t>(static_cast<int>(p.type));
+        po["stride"]           = static_cast<int64_t>(p.stride);
+        po["isCoalesced"]      = p.isCoalesced;
+        po["accessSize"]       = static_cast<int64_t>(p.accessSize);
+        po["estimatedAccesses"]= static_cast<int64_t>(p.estimatedAccesses);
+        pats.push_back(std::move(po));
+    }
+    obj["memoryPatterns"] = std::move(pats);
+    llvm::json::Array dfuncs;
+    for (const auto& f : ir.deviceFunctions) dfuncs.push_back(f);
+    obj["deviceFunctions"]        = std::move(dfuncs);
+    obj["hasRecursion"]           = ir.hasRecursion;
+    obj["hasTemplates"]           = ir.hasTemplates;
+    obj["templateSignature"]      = ir.templateSignature;
+    obj["estimatedMemoryAccesses"]= static_cast<int64_t>(ir.estimatedMemoryAccesses);
+    obj["arithmeticIntensity"]    = ir.arithmeticIntensity;
+    std::ofstream f(path);
+    if (f.is_open()) {
+        f << llvm::formatv("{0:2}", llvm::json::Value(std::move(obj))).str();
+    }
+}
+
+// Deserialize EnhancedKernelIR from disk; returns true on success
+static bool loadEnhancedIR(const std::string& hash, EnhancedKernelIR& outIR) {
+    std::string path = enhancedCachePath(hash);
+    std::ifstream f(path);
+    if (!f.is_open()) return false;
+    std::string json((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+    auto expected = llvm::json::parse(json);
+    if (!expected) return false;
+    const auto* obj = expected->getAsObject();
+    if (!obj) return false;
+    // Basic KernelIR
+    outIR.name   = obj->getString("name").value_or("").str();
+    outIR.source = obj->getString("source").value_or("").str();
+    outIR.irCode = obj->getString("irCode").value_or("").str();
+    if (const auto* arr = obj->getArray("argTypes"))
+        for (const auto& v : *arr)
+            outIR.argTypes.push_back(static_cast<ArgType>(v.getAsInteger().value_or(0)));
+    if (const auto* arr = obj->getArray("argTypeNames"))
+        for (const auto& v : *arr)
+            outIR.argTypeNames.push_back(v.getAsString().value_or("").str());
+    if (const auto* arr = obj->getArray("argSizes"))
+        for (const auto& v : *arr)
+            outIR.argSizes.push_back(static_cast<size_t>(v.getAsInteger().value_or(0)));
+    outIR.usesSharedMem              = obj->getBoolean("usesSharedMem").value_or(false);
+    outIR.usesSyncthreads            = obj->getBoolean("usesSyncthreads").value_or(false);
+    outIR.sharedMemSize              = static_cast<size_t>(obj->getInteger("sharedMemSize").value_or(0));
+    outIR.estimatedInstructionCount  = static_cast<uint64_t>(obj->getInteger("estimatedInstructionCount").value_or(0));
+    outIR.estimatedMemoryAccessCount = static_cast<uint64_t>(obj->getInteger("estimatedMemoryAccessCount").value_or(0));
+    outIR.staticFlopCount            = static_cast<uint64_t>(obj->getInteger("staticFlopCount").value_or(0));
+    // Enhanced fields
+    if (const auto* fl = obj->getObject("flopAnalysis")) {
+        outIR.flopAnalysis.addOps            = static_cast<uint64_t>(fl->getInteger("addOps").value_or(0));
+        outIR.flopAnalysis.mulOps            = static_cast<uint64_t>(fl->getInteger("mulOps").value_or(0));
+        outIR.flopAnalysis.divOps            = static_cast<uint64_t>(fl->getInteger("divOps").value_or(0));
+        outIR.flopAnalysis.fmaOps            = static_cast<uint64_t>(fl->getInteger("fmaOps").value_or(0));
+        outIR.flopAnalysis.sqrtOps           = static_cast<uint64_t>(fl->getInteger("sqrtOps").value_or(0));
+        outIR.flopAnalysis.transcendentalOps = static_cast<uint64_t>(fl->getInteger("transcendentalOps").value_or(0));
+        outIR.flopAnalysis.totalFLOPs        = static_cast<uint64_t>(fl->getInteger("totalFLOPs").value_or(0));
+    }
+    if (const auto* pr = obj->getObject("instructionProfile")) {
+        outIR.instructionProfile.loadInstructions    = static_cast<uint64_t>(pr->getInteger("loadInstructions").value_or(0));
+        outIR.instructionProfile.storeInstructions   = static_cast<uint64_t>(pr->getInteger("storeInstructions").value_or(0));
+        outIR.instructionProfile.branchInstructions  = static_cast<uint64_t>(pr->getInteger("branchInstructions").value_or(0));
+        outIR.instructionProfile.compareInstructions = static_cast<uint64_t>(pr->getInteger("compareInstructions").value_or(0));
+        outIR.instructionProfile.castInstructions    = static_cast<uint64_t>(pr->getInteger("castInstructions").value_or(0));
+        outIR.instructionProfile.callInstructions    = static_cast<uint64_t>(pr->getInteger("callInstructions").value_or(0));
+        outIR.instructionProfile.totalInstructions   = static_cast<uint64_t>(pr->getInteger("totalInstructions").value_or(0));
+    }
+    if (const auto* pats = obj->getArray("memoryPatterns")) {
+        for (const auto& pv : *pats) {
+            if (const auto* po = pv.getAsObject()) {
+                MemoryAccessPattern p;
+                p.type             = static_cast<MemoryAccessPattern::Type>(po->getInteger("type").value_or(4));
+                p.stride           = static_cast<size_t>(po->getInteger("stride").value_or(0));
+                p.isCoalesced      = po->getBoolean("isCoalesced").value_or(false);
+                p.accessSize       = static_cast<size_t>(po->getInteger("accessSize").value_or(4));
+                p.estimatedAccesses= static_cast<uint64_t>(po->getInteger("estimatedAccesses").value_or(0));
+                outIR.memoryPatterns.push_back(p);
+            }
+        }
+    }
+    if (const auto* df = obj->getArray("deviceFunctions"))
+        for (const auto& v : *df)
+            outIR.deviceFunctions.push_back(v.getAsString().value_or("").str());
+    outIR.hasRecursion            = obj->getBoolean("hasRecursion").value_or(false);
+    outIR.hasTemplates            = obj->getBoolean("hasTemplates").value_or(false);
+    outIR.templateSignature       = obj->getString("templateSignature").value_or("").str();
+    outIR.estimatedMemoryAccesses = static_cast<uint64_t>(obj->getInteger("estimatedMemoryAccesses").value_or(0));
+    outIR.arithmeticIntensity     = obj->getNumber("arithmeticIntensity").value_or(0.0);
+    return true;
+}
+} // anonymous namespace
 
 ClangKernelParser::ClangKernelParser() {
     // Initialize persistent cache on first use
@@ -35,9 +209,11 @@ static uint64_t countInstructionsRecursively(const llvm::json::Object* obj) {
     }
     // Control Flow and Structure
     if (kind == "ForStmt" || kind == "WhileStmt" || kind == "DoStmt") {
-        count = 20; // Loops are assumed to have at least some iterations for estimation
+        // Kernels typically run many iterations; 32 is a reasonable warp-aligned minimum for estimation
+        count = 32; 
     } else if (kind == "IfStmt" || kind == "SwitchStmt" || kind == "ConditionalOperator") {
-        count = 5;
+        // Branches have a cost of comparison + jump
+        count = 4;
     }
     
     const auto* inner = obj->getArray("inner");
@@ -291,7 +467,8 @@ VGREResult ClangKernelParser::parse(const std::string& name,
                 }
             }
         }
-        outIR.usesSharedMem = (source.find("__shared__") != std::string::npos);
+        outIR.usesSharedMem = (source.find("__shared__") != std::string::npos || 
+                               source.find("sharedMem") != std::string::npos);
         outIR.usesSyncthreads = (source.find("__syncthreads()") != std::string::npos);
 
         // Authoritative Instruction Estimation (AST-based)
@@ -847,14 +1024,63 @@ bool ClangKernelParser::detectTemplates(const llvm::json::Object* obj,
 VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
                                            const std::string& source,
                                            EnhancedKernelIR& outIR) {
-    // First do basic parsing
+    // Build cache keys up-front (needed by all cache tiers)
+    std::string cacheKey = name + ":::" + source;
+    std::string enhHash = std::to_string(std::hash<std::string>{}(cacheKey));
+    std::string sourceWithHeader = "#include \"vgre/compiler/cpu_cuda_env.h\"\n" + source;
+
+    // ── Fast paths: check all cache tiers BEFORE calling parse() so that
+    // the outIR is still empty when loadEnhancedIR() pushes into its vectors.
+
+    // 1. Process-level static cache (instant, within-binary sharing)
+    {
+        std::lock_guard<std::recursive_mutex> lock(s_processCacheMutex);
+        auto it = s_enhancedIRCache.find(cacheKey);
+        if (it != s_enhancedIRCache.end()) {
+            VGRE_LOG_DEBUG("ClangKernelParser", "EnhancedIR process-cache HIT for " + name);
+            outIR = it->second;
+            return VGREResult::SUCCESS;
+        }
+    }
+
+    // 2. Instance-level cache (intra-instance fast path)
+    {
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
+        auto it = enhancedCache_.find(cacheKey);
+        if (it != enhancedCache_.end()) {
+            outIR = it->second;
+            std::lock_guard<std::recursive_mutex> slock(s_processCacheMutex);
+            s_enhancedIRCache[cacheKey] = outIR;
+            return VGREResult::SUCCESS;
+        }
+    }
+
+    // 3. Disk cache (skips llvm::json::parse entirely on warm runs)
+    //    outIR must be default-constructed here so push_back starts from empty.
+    outIR = EnhancedKernelIR{};
+    if (loadEnhancedIR(enhHash, outIR)) {
+        VGRE_LOG_INFO("ClangKernelParser", "✓ EnhancedIR disk cache HIT for " + name);
+        {
+            std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
+            enhancedCache_[cacheKey] = outIR;
+        }
+        {
+            std::lock_guard<std::recursive_mutex> lock(s_processCacheMutex);
+            s_enhancedIRCache[cacheKey] = outIR;
+        }
+        return VGREResult::SUCCESS;
+    }
+
+    // ── Slow path: run full Clang analysis for the first time ────────────────
+    // Get basic IR first (may itself hit disk cache, so is fast after first run)
     KernelIR basicIR;
     VGREResult r = parse(name, source, basicIR);
     if (r != VGREResult::SUCCESS) {
         return r;
     }
-    
-    // Copy basic IR to enhanced IR
+
+    // Copy basic IR fields into outIR
+    outIR = EnhancedKernelIR{};
     outIR.name = basicIR.name;
     outIR.source = basicIR.source;
     outIR.argTypes = basicIR.argTypes;
@@ -863,20 +1089,7 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
     outIR.usesSharedMem = basicIR.usesSharedMem;
     outIR.usesSyncthreads = basicIR.usesSyncthreads;
     outIR.estimatedInstructionCount = basicIR.estimatedInstructionCount;
-    
-    // Check enhanced cache
-    std::string cacheKey = name + ":::" + source;
-    {
-        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
-        auto it = enhancedCache_.find(cacheKey);
-        if (it != enhancedCache_.end()) {
-            outIR = it->second;
-            return VGREResult::SUCCESS;
-        }
-    }
-    
-    // Run enhanced analysis
-    std::string sourceWithHeader = "#include \"vgre/compiler/cpu_cuda_env.h\"\n" + source;
+
     std::string jsonAst = runClangAstDump(sourceWithHeader);
     if (jsonAst.empty()) {
         return VGREResult::ERROR_COMPILATION;
@@ -951,12 +1164,17 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
         outIR.arithmeticIntensity = static_cast<double>(outIR.flopAnalysis.totalFLOPs) / totalBytes;
     }
     
-    // Cache the result
+    // Cache the result in all layers: instance, process-static, and disk
     {
         std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
         enhancedCache_[cacheKey] = outIR;
     }
-    
+    {
+        std::lock_guard<std::recursive_mutex> lock(s_processCacheMutex);
+        s_enhancedIRCache[cacheKey] = outIR;
+    }
+    saveEnhancedIR(enhHash, outIR);
+
     // Log detailed FLOP breakdown for transparency
     std::string flopBreakdown = "FLOP breakdown: ";
     if (outIR.flopAnalysis.addOps > 0) 

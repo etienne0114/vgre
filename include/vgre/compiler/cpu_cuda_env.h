@@ -39,9 +39,10 @@ template <typename T> inline T atomicCAS(T *addr, T comp, T val) {
     return expected; 
 }
 
-// Block barrier: no-op when not executing in a true multi-threaded block
-// The actual parallel implementation is handled in the JIT wrapper
-inline void __syncthreads() {}
+extern "C" void vgre_jit_block_barrier_sync();
+
+// Block barrier: synchronizes threads in a block using the host environment
+inline void __syncthreads() { vgre_jit_block_barrier_sync(); }
 
 // CUDA-like math functions for the CPU
 inline float __fdividef(float a, float b) { return a / b; }
