@@ -101,6 +101,27 @@ inline void surf2Dread(T* val, uint64_t surf, int x, int y) {
   *val = static_cast<T>(fval);
 }
 
+// ── BFloat16 Support ───────────────────────────────────────────────────────
+struct __nv_bfloat16 {
+    uint16_t __x;
+
+    __nv_bfloat16() = default;
+    __nv_bfloat16(float f) {
+        uint32_t i = *reinterpret_cast<uint32_t*>(&f);
+        uint32_t bias = 0x7FFF + ((i >> 16) & 1);
+        __x = static_cast<uint16_t>((i + bias) >> 16);
+    }
+    operator float() const {
+        uint32_t f = static_cast<uint32_t>(__x) << 16;
+        return *reinterpret_cast<float*>(&f);
+    }
+};
+
+inline __nv_bfloat16 __float2bfloat16(float f) { return __nv_bfloat16(f); }
+inline float __bfloat162float(__nv_bfloat16 h) { return static_cast<float>(h); }
+inline __nv_bfloat16 __hmul(__nv_bfloat16 a, __nv_bfloat16 b) { return __nv_bfloat16(float(a) * float(b)); }
+inline __nv_bfloat16 __hadd(__nv_bfloat16 a, __nv_bfloat16 b) { return __nv_bfloat16(float(a) + float(b)); }
+
 } // namespace vgre_cuda
 
 using namespace vgre_cuda;
