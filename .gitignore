@@ -37,6 +37,12 @@ vgre_dashboard/linux/flutter/generated_plugin_registrant.cc
 vgre_dashboard/linux/flutter/generated_plugins.cmake
 vgre_dashboard/linux/flutter/ephemeral/
 
+# Tooling and AI configuration
+.claude/
+
+# CTest artifacts
+Testing/
+
 # VGRE Install & logs
 /install_local.sh
 launch.sh
