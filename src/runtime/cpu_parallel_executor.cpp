@@ -1,6 +1,7 @@
 #include "vgre/runtime/cpu_parallel_executor.h"
 #include "vgre/common/logger.h"
 #include "vgre/runtime/gpu_thread_context.h"
+#include "vgre/runtime/block_worker_pool.h"
 
 #include <cstring>
 #include <thread>
@@ -10,6 +11,8 @@
 #endif
 
 #include <atomic>
+#include <unistd.h>
+
 
 extern "C" {
 __attribute__((visibility("default"))) int vgre_jit_get_thread_id() {
@@ -19,7 +22,7 @@ __attribute__((visibility("default"))) int vgre_jit_get_thread_id() {
         s_my_id = (s_next_id++) % 1024;
     }
     return s_my_id;
-}
+} 
 }
 
 #include "vgre/advanced/adaptive_execution_engine.h"
@@ -58,9 +61,11 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
                                         size_t sharedMemSize,
                                         uint64_t flopsPerBlock,
                                         uint64_t bytesPerBlock,
-                                        const dim3 &gridOffset) {
+                                        const dim3 &gridOffset,
+                                        bool usesSyncthreads) {
+
   
-  VGRE_LOG_DEBUG("CPUParallelExecutor", "Launching kernel");
+  VGRE_LOG_DEBUG("CPUParallelExecutor", "Launching kernel fn=" + std::to_string((uintptr_t)fn.get()));
 
   totalLaunches_++;
   uint32_t totalBlocks = gridDim.total();
@@ -88,19 +93,43 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
     // Record metrics
     if (flopsPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(flopsPerBlock);
     if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
+  } else if (usesSyncthreads) {
+    // Kernels with __syncthreads() MUST process blocks serially.
+    // Concurrent block dispatch creates competing barriers: if N OMP threads each
+    // dispatch M tasks simultaneously, all N*M workers may hit their respective
+    // barriers before all tasks are dequeued — causing permanent deadlock when
+    // pool workers starve. Serial execution guarantees only one block's M tasks
+    // are in-flight at a time, so exactly M workers arrive at each barrier.
+    for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
+      for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
+        for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
+          dim3 blockIdx(gx + gridOffset.x, gy + gridOffset.y, gz + gridOffset.z);
+          SharedMemory smem(sharedMemSize);
+          GPUThreadContext::setWarpMask(0xFFFFFFFF);
+          GPUThreadContext::clearBlockBarrier();
+          dim3 tIdx(0, 0, 0);
+          (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(), smem.size());
+          if (flopsPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(flopsPerBlock);
+          if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
+          GPUThreadContext::clearWarpMask();
+          GPUThreadContext::clearBlockBarrier();
+        }
+      }
+    }
   } else {
 #ifdef _OPENMP
-    // Cap OpenMP parallel threads to prevent oversubscribing the 1024-thread WorkerPool limit.
-    // Each block using __syncthreads relies on an exact concurrent allocation.
     int omp_threads = maxThreads_;
     uint32_t tCount = blockDim.total();
-    /* We don't have block_threads_enabled explicitly here, but if tCount > 1 we assume it might use BlockWorkerPool */
     if (tCount > 1) {
         int maxConcurrentBlocks = std::max(1, 1024 / (int)tCount);
         omp_threads = std::min(omp_threads, maxConcurrentBlocks);
     }
+    // Additional Safeguard: Don't exceed total blocks
+    omp_threads = std::min(omp_threads, (int)totalBlocksI);
 
+    VGRE_LOG_DEBUG("CPUParallelExecutor", "Starting OpenMP execution: totalBlocks=" + std::to_string(totalBlocksI) + " threads=" + std::to_string(omp_threads));
 #pragma omp parallel num_threads(omp_threads) if (totalBlocksI > 1)
+
     {
       // Thread-local shared memory buffer, allocated once per OpenMP thread
       SharedMemory threadSmem(sharedMemSize);
@@ -112,17 +141,9 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
         for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
           for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
             dim3 blockIdx(gx + gridOffset.x, gy + gridOffset.y, gz + gridOffset.z);
-
-            // Zero the shared memory for the new block
             threadSmem.reset();
-
-            // Setup active Warp Thread Masking (Divergence Tracking)
-            // In a real JIT, __activemask() intrinsic reads this thread-local state.
-            // Here, we initialize all 32 lanes mapped to this block's iterations as active.
-            uint32_t activeMask = 0xFFFFFFFF;
-            vgre::runtime::GPUThreadContext::setWarpMask(activeMask);
+            vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
             vgre::runtime::GPUThreadContext::clearBlockBarrier();
-
             dim3 tIdx(0,0,0);
             (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, threadSmem.raw(),
                threadSmem.size());

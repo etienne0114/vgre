@@ -24,7 +24,8 @@ public:
                      size_t sharedMemSize = 0,
                      uint64_t flopsPerBlock = 0,
                      uint64_t bytesPerBlock = 0,
-                     const dim3 &gridOffset = dim3(0, 0, 0));
+                     const dim3 &gridOffset = dim3(0, 0, 0),
+                     bool usesSyncthreads = false);
 
   // Setters
   void setMaxThreads(int n);
