@@ -204,15 +204,16 @@ if(VGRE_BUILD_DASHBOARD)
         if(NOT WIN32 AND NOT APPLE)
             # Desktop Integration: Linux only
             add_custom_command(TARGET vgre_dashboard POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E echo "[Desktop Entry]" > ${PROJECT_SOURCE_DIR}/vgre.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Name=VGRE Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Comment=Virtual GPU Runtime Engine Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Exec=${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/vgre_dashboard" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Icon=${PROJECT_SOURCE_DIR}/vgre_dashboard/assets/icon.png" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Terminal=false" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Type=Application" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Categories=Development\\;System\\;" >> ${PROJECT_SOURCE_DIR}/vgre.desktop
-                COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/vgre.desktop $ENV{HOME}/.local/share/applications/vgre.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "[Desktop Entry]" > ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Name=VGRE Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Comment=Virtual GPU Runtime Engine Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Exec=bash -ic \"$ENV{HOME}/.local/share/VGRE/vgre-launch.sh\"" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Icon=$ENV{HOME}/.local/share/VGRE/vgre_icon.png" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Terminal=false" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Type=Application" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
+                COMMAND ${CMAKE_COMMAND} -E echo "Categories=Development\\;System\\;" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
+                COMMAND ${CMAKE_COMMAND} -E remove $ENV{HOME}/.local/share/applications/vgre.desktop
+                COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop $ENV{HOME}/.local/share/applications/vgre-dashboard.desktop
             )
         endif()
         add_dependencies(vgre_dashboard vgre)

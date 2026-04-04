@@ -96,7 +96,7 @@ else
     cp -r "$BUNDLE_DIR"/* "$INSTALL_DIR/"
     cp build/libvgre.so "$INSTALL_DIR/lib/"
     cp build/libvgre_cudart.so "$INSTALL_DIR/lib/"
-    cp build/bin/vgre-worker "$INSTALL_DIR/" || cp build/vgre-worker "$INSTALL_DIR/" # Handle different CMake versions
+    cp build/src/advanced/vgre-worker "$INSTALL_DIR/" || cp build/bin/vgre-worker "$INSTALL_DIR/" || cp build/vgre-worker "$INSTALL_DIR/"
     
     # Copy essential JIT headers
     mkdir -p "$INSTALL_DIR/include"
@@ -129,8 +129,9 @@ else
     DESKTOP_DIR="$HOME/.local/share/applications"
     mkdir -p "$DESKTOP_DIR"
     
-    # Remove old conflicting entry
+    # Remove old conflicting entries
     rm -f "$DESKTOP_DIR/vgre.desktop"
+    rm -f "$DESKTOP_DIR/vgre-dashboard.desktop"
     
     cat <<EOF > "$DESKTOP_DIR/vgre-dashboard.desktop"
 [Desktop Entry]
