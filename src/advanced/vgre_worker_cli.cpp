@@ -3,7 +3,6 @@
 #include "vgre/common/error_codes.h"
 #include <iostream>
 #include <string>
-#include <vector>
 #include <csignal>
 #include <atomic>
 #include <thread>

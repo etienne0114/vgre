@@ -8,6 +8,7 @@
 #include "vgre/common/input_validation.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
+#include "vgre/runtime/vector_engine.h"
 
 // System Headers
 #include <algorithm>
@@ -60,6 +61,20 @@ namespace vgre {
 namespace advanced {
 
 namespace {
+template <typename T>
+void sum_reduce(T* dst, const T* src, size_t count) {
+    for (size_t i = 0; i < count; ++i) dst[i] += src[i];
+}
+
+// Specialization for BF16 (vgre_bf16)
+void sum_reduce_bf16(uint16_t* dst, const uint16_t* src, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        float d = vgre::runtime::bf16_to_fp32(dst[i]);
+        float s = vgre::runtime::bf16_to_fp32(src[i]);
+        dst[i] = vgre::runtime::fp32_to_bf16(d + s);
+    }
+}
+
 static bool socket_would_block() {
 #if defined(_WIN32)
   int err = WSAGetLastError();
@@ -774,6 +789,17 @@ void TCPClusterManager::serverLoop() {
                   barrier_count_++;
                 }
                 barrier_cv_.notify_all();
+              } else if (type == PacketType::COLLECTIVE_OP) {
+                if (hdr.payloadSize < sizeof(CollectiveOpPacket)) { client->rx_buffer.clear(); break; }
+                CollectiveOpPacket cpkt;
+                std::memcpy(&cpkt, payload, sizeof(CollectiveOpPacket));
+                client->rx_buffer.erase(client->rx_buffer.begin(), client->rx_buffer.begin() + totalLen);
+                // On Master, this is a response or data from worker.
+                // On Worker, this initiates the local allReduce.
+                if (!is_master_) {
+                   // Workers trigger local allReduce when Master broadcasts it
+                   // Note: this should be async or on a different thread to avoid loop stall
+                }
               } else {
                 // Unknown or unhandled packet type: skip entire packet
                 client->rx_buffer.erase(client->rx_buffer.begin(), client->rx_buffer.begin() + totalLen);
@@ -822,10 +848,37 @@ void TCPClusterManager::serverLoop() {
               if (bodyType == PacketType::DATA_BODY) {
                 void* ptr = core::RuntimeEngine::instance().getMemoryManager()
                                 .getPointer(reinterpret_cast<void*>(client->pending_target_ptr));
-                if (ptr)
+                if (ptr) {
                   std::memcpy(static_cast<uint8_t*>(ptr) + client->pending_range_offset,
                       client->rx_buffer.data() + sizeof(VSBPHeader),
                       hdr.payloadSize);
+                  
+                  // Phase 14: Master-side reduction accumulation
+                  {
+                      std::lock_guard<std::mutex> lock(reduction_mutex_);
+                      if (is_reducing_ && active_reduction_buffer_.size() >= hdr.payloadSize) {
+                          if (reduction_datatype_ == VGRE_ARG_FLOAT32) {
+                              sum_reduce(reinterpret_cast<float*>(active_reduction_buffer_.data()),
+                                         reinterpret_cast<const float*>(client->rx_buffer.data() + sizeof(VSBPHeader)),
+                                         hdr.payloadSize / 4);
+                          } else if (reduction_datatype_ == VGRE_ARG_FLOAT64) {
+                              sum_reduce(reinterpret_cast<double*>(active_reduction_buffer_.data()),
+                                         reinterpret_cast<const double*>(client->rx_buffer.data() + sizeof(VSBPHeader)),
+                                         hdr.payloadSize / 8);
+                          } else if (reduction_datatype_ == 10) { // BF16
+                              sum_reduce_bf16(reinterpret_cast<uint16_t*>(active_reduction_buffer_.data()),
+                                              reinterpret_cast<const uint16_t*>(client->rx_buffer.data() + sizeof(VSBPHeader)),
+                                              hdr.payloadSize / 2);
+                          }
+                          
+                          // If this was the full buffer from the worker, increment count
+                          if (hdr.payloadSize > 0) {
+                              reduction_count_++;
+                              reduction_cv_.notify_all();
+                          }
+                      }
+                  }
+                }
               }
               client->rx_buffer.erase(client->rx_buffer.begin(),
                   client->rx_buffer.begin() + sizeof(VSBPHeader) + hdr.payloadSize);
@@ -1129,6 +1182,25 @@ void TCPClusterManager::processClientStagingBuffer() {
                 client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(VSBPHeader));
                 VGRE_LOG_INFO("TCPCluster", "Cooperative Barrier: RESUME received. Resuming local workers.");
                 barrier_cv_.notify_all();
+            } else if (type == PacketType::COLLECTIVE_OP) {
+                CollectiveOpPacket pkt;
+                std::memcpy(&pkt, client_rx_buffer_.data() + sizeof(VSBPHeader), sizeof(CollectiveOpPacket));
+                client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(VSBPHeader) + sizeof(CollectiveOpPacket));
+                
+                // Workers trigger local allReduce when Master broadcasts it
+                // To avoid blocking the packet processor, we'll implement this as an event
+                // and the main thread or a separate work task will execute allReduce.
+            } else if (type == PacketType::COLLECTIVE_COMPLETE) {
+                client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(VSBPHeader));
+                {
+                    std::lock_guard<std::mutex> lock(reduction_mutex_);
+                    reduction_count_++;
+                    reduction_cv_.notify_all();
+                }
+            } else if (type == PacketType::RESPONSE) {
+                VGRE_LOG_WARN("TCPCluster", "Unknown Packet Type: " + std::to_string(header.type));
+                client_rx_buffer_.clear(); 
+                break;
             } else {
                 VGRE_LOG_WARN("TCPCluster", "Unknown Packet Type: " + std::to_string(header.type));
                 client_rx_buffer_.clear(); 
@@ -2217,5 +2289,101 @@ void TCPClusterManager::handlePartitionDispatch(
   pending_args_.clear();
 }
 
+VGREResult TCPClusterManager::allReduce(void* ptr, size_t count, int datatype) {
+    if (!enabled_) return VGREResult::ERROR_NOT_INITIALIZED;
+    
+    size_t element_size = 4;
+    if (datatype == VGRE_ARG_FLOAT64 || datatype == VGRE_ARG_INT64 || datatype == VGRE_ARG_UINT64) {
+        element_size = 8;
+    } else if (datatype == 10) { // BF16 (assumed index 10 for vgre_bf16)
+        element_size = 2;
+    }
+    
+    size_t total_bytes = count * element_size;
+    static std::atomic<uint64_t> s_coll_seq{1};
+    uint64_t seq = s_coll_seq.fetch_add(1);
+
+    if (is_master_) {
+        VGRE_LOG_INFO("TCPCluster", "Master: Initiating Collective AllReduce (Seq: " + std::to_string(seq) + ")");
+        
+        {
+            std::lock_guard<std::mutex> lock(reduction_mutex_);
+            is_reducing_ = true;
+            reduction_datatype_ = static_cast<uint32_t>(datatype);
+            reduction_element_count_ = count;
+            reduction_sequence_ = seq;
+            reduction_count_ = 0;
+            active_reduction_buffer_.assign(static_cast<uint8_t*>(ptr), static_cast<uint8_t*>(ptr) + total_bytes);
+        }
+
+        CollectiveOpPacket pkt;
+        pkt.op_type = 0; // all_reduce
+        pkt.datatype = static_cast<uint32_t>(datatype);
+        pkt.count = count;
+        pkt.sequence = seq;
+        
+        // 1. Broadcast request to all workers
+        broadcastPacket(PacketType::COLLECTIVE_OP, &pkt, sizeof(CollectiveOpPacket));
+        
+        // 2. Wait for all active workers to send their data
+        int active_workers = 0;
+        {
+            std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+            for (auto& n : clients_) if (n && n->active) active_workers++;
+        }
+        
+        if (active_workers > 0) {
+            std::unique_lock<std::mutex> lock(reduction_mutex_);
+            bool success = reduction_cv_.wait_for(lock, std::chrono::seconds(20), [&]{
+                return reduction_count_ >= active_workers;
+            });
+            if (!success) {
+                VGRE_LOG_ERROR("TCPCluster", "Master: Collective allReduce timed out waiting for workers.");
+                is_reducing_ = false;
+                return VGREResult::ERROR_TIMEOUT;
+            }
+        }
+        
+        // 3. Reduction completed by packet handlers. Final buffer back to the caller in-place.
+        std::memcpy(ptr, active_reduction_buffer_.data(), total_bytes);
+        is_reducing_ = false;
+
+        // 4. Broadcast the final reduced buffer back to all workers
+        DataHeaderPacket dh;
+        dh.target_ptr = reinterpret_cast<uintptr_t>(ptr); 
+        dh.size = total_bytes;
+        broadcastPacket(PacketType::DATA_HEADER, &dh, sizeof(DataHeaderPacket));
+        broadcastPacket(PacketType::DATA_BODY, ptr, total_bytes);
+
+        // 5. Signal completion to allow workers to exit their blocking wait
+        broadcastPacket(PacketType::COLLECTIVE_COMPLETE, nullptr, 0);
+        
+        return VGREResult::SUCCESS;
+    } else {
+        VGRE_LOG_INFO("TCPCluster", "Worker: Performing Collective AllReduce (Seq: " + std::to_string(seq) + ")");
+        
+        // 1. Send local data to Master
+        DataHeaderPacket dh;
+        dh.target_ptr = reinterpret_cast<uintptr_t>(ptr);
+        dh.size = total_bytes;
+        send_packet(client_fd_, PacketType::DATA_HEADER, &dh, sizeof(DataHeaderPacket));
+        send_packet(client_fd_, PacketType::DATA_BODY, ptr, total_bytes);
+        
+        // 2. Wait for Master to broadcast COLLECTIVE_COMPLETE (Authoritative Event-Driven Sync)
+        {
+            std::unique_lock<std::mutex> lock(reduction_mutex_);
+            reduction_cv_.wait_for(lock, std::chrono::seconds(20)); // Event-driven wait
+        }
+        
+        return VGREResult::SUCCESS;
+    }
+}
+
 } // namespace advanced
 } // namespace vgre
+
+extern "C" {
+    int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype) {
+        return static_cast<int>(vgre::advanced::TCPClusterManager::instance().allReduce(ptr, count, datatype));
+    }
+}
