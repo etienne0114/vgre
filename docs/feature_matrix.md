@@ -10,6 +10,8 @@ This matrix summarizes the **Zero-Simulation** features that are guaranteed by a
 | CUDA Driver API | Supported | cuInit/device/ctx/mem/stream/event coverage; supports cuModuleLoadData(Ex) for ELF/cubin and PTX. |
 | OpenCL Adapter | Strict | Synchronous, compatibility facade with robust machine-specific Platform/Device IDs. |
 | Kernel Parser | Supported | Metadata extraction via tokenizer; uses LLVM JIT for **accurate instruction counting**. No fake performance accounts. |
+| BF16 (bfloat16) | Hardware SIMD (VNNI) | JIT Optimized |
+| Collective AllReduce | Gather-Sum-Scatter | TCP/SHM Sync |
 | LLVM JIT | Robust | Full pipeline with wrapper generation, caching, and **Thread-Local Storage (TLS)** context. |
 | Execution Model | Functional | Hybrid: SIMD vectorization for pure kernels; **Persistent WorkerPool** for barrier/syncthreads kernels. |
 | Shared Memory | Strict | Static arrays packed; `extern` mapped to dynamic. Collision-free via TLS. |
