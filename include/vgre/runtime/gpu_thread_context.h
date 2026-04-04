@@ -24,6 +24,7 @@ public:
   static uint32_t getWarpMask();
   // Optional per-block barrier for __syncthreads
   static void setBlockBarrier(BlockBarrier *barrier);
+  static BlockBarrier* getBlockBarrier();
   static void clearBlockBarrier();
   static void blockBarrier();
 };
@@ -128,15 +129,20 @@ public:
   // Wait for all threads in the block to reach this point.
   // Safe for reuse across multiple syncthreads() calls.
   void arrive_and_wait() {
+    // Correct generation-based barrier using mutex + condition variable.
+    //
+    // The previous implementation used a spin + atomic-load on a non-atomic
+    // `waiting_` field, which can allow threads to "run ahead" before the last
+    // arrival resets `waiting_`, causing `waiting_` to overshoot `count_`.
+    // That leads to deadlock (all threads wait for a generation change that
+    // never happens).
     std::unique_lock<std::mutex> lock(mutex_);
-    int gen = generation_;
+    const int gen = generation_;
     if (++waiting_ == count_) {
-      // Last thread to arrive — release everyone
       waiting_ = 0;
       ++generation_;
       cv_.notify_all();
     } else {
-      // Wait until the generation advances
       cv_.wait(lock, [this, gen] { return generation_ != gen; });
     }
   }

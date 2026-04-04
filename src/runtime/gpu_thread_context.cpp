@@ -2,6 +2,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 #include "vgre/runtime/block_worker_pool.h"
 
 namespace vgre {
@@ -26,6 +27,10 @@ void GPUThreadContext::setBlockBarrier(BlockBarrier *barrier) {
   t_blockBarrier = barrier;
 }
 
+BlockBarrier* GPUThreadContext::getBlockBarrier() {
+  return t_blockBarrier;
+}
+
 void GPUThreadContext::clearBlockBarrier() {
   t_blockBarrier = nullptr;
 }
@@ -48,10 +53,22 @@ void vgre_jit_clear_block_barrier() {
 
 
 extern "C" __attribute__((visibility("default")))
+void vgre_jit_block_barrier_sync() {
+  // printf("[DEBUG] Thread entering block barrier\n"); fflush(stdout);
+  GPUThreadContext::blockBarrier();
+}
+
+
+extern "C" __attribute__((visibility("default")))
 void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg) {
-    vgre::runtime::BlockWorkerPool::getInstance().dispatch(threadCount, [task, arg](int tid) {
-        task(tid, arg);
-    });
+    if (threadCount <= 1) {
+        task(0, arg);
+        return;
+    }
+
+    // Utilize the persistent BlockWorkerPool to handle block-level concurrency 
+    // without the overhead of spawning/joining OS threads for every launch.
+    BlockWorkerPool::instance().dispatch(threadCount, task, arg);
 }
 
 } // namespace runtime
