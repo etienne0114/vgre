@@ -11,9 +11,9 @@ This matrix summarizes the **Zero-Simulation** features that are guaranteed by a
 | OpenCL Adapter | Strict | Synchronous, compatibility facade with robust machine-specific Platform/Device IDs. |
 | Kernel Parser | Supported | Metadata extraction via tokenizer; uses LLVM JIT for **accurate instruction counting**. No fake performance accounts. |
 | LLVM JIT | Robust | Full pipeline with wrapper generation, caching, and **Thread-Local Storage (TLS)** context. |
-| Execution Model | Functional | Hybrid: SIMD vectorization for pure kernels; **Thread-parallel (SIMT)** for barrier/syncthreads kernels. |
+| Execution Model | Functional | Hybrid: SIMD vectorization for pure kernels; **Persistent WorkerPool** for barrier/syncthreads kernels. |
 | Shared Memory | Strict | Static arrays packed; `extern` mapped to dynamic. Collision-free via TLS. |
-| __syncthreads | Supported | Correctly synchronized via per-block barrier; scales safely over parallel worker pool. |
+| __syncthreads | Supported | Correctly synchronized via per-block barrier; scales safely over **Persistent WorkerPool** with serial dispatch safeguard. |
 | Memory Manager | Managed | VRAM managed via aligned host allocations; UVM residency tracked authoritatively. Stream-ordered pool allocation (`cudaMallocAsync`/`cudaFreeAsync`) with block reuse. Configurable latency modeling accurately respects simulated network topologies without heuristic guesses. |
 | Telemetry | Reported | Real-time GFLOPS/BW reporting based on **strict LLVM-calibrated instruction counts**. No mock data. |
 | Runtime Profiler | Functional | Per-kernel timing and JSON export. Supports authoritative timestamp comparison. |

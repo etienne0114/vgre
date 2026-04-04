@@ -89,15 +89,18 @@ Every kernel goes through a 4-stage pipeline on first launch:
  │  • LLJITBuilder with O3 CodeGenOptLevel::Aggressive      │
  │  • CPU feature string includes all detected SIMD caps    │
  │    (AVX-512F, AVX2, FMA, SSE4.2, etc.)                  │
- │  • absoluteSymbols registration for vgre_jit_*,          │
- │    vgre_tex*_f32, vgre_surf2D*_f32 → live function ptrs │
- │  • Result stored as CompiledKernelFn (shared_ptr to fn)  │
- │  • Compilation can be async (prepare() → JITFuture)      │
+ │  • Result stored as JITResult (metadata-rich structure): │
+ │    – fn: raw CompiledKernelFn                            │
+ │    – argSizes: inferred from AST                         │
+ │    – sharedMemSize: static + dynamic                     │
+ │    – estimatedInstructionCount: from LLVM analysis       │
+ │  • Memory-persistent cache (with recursive_mutex guard)  │
  └──────────────────────────────────────────────────────────┘
-        │  CompiledKernelFn
+        │  JITResult
         ▼
- CPUParallelExecutor: iterates 3D grid,
- dispatches blocks via OpenMP thread pool
+ CPUParallelExecutor: Enqueues tasks to BlockWorkerPool.
+- For synchronized kernels: Uses persistent pool of workers.
+- For syncthreads detection: Enforces serial block dispatch to prevent pool starvation.
 ```
 
 ---
