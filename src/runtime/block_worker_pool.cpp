@@ -1,83 +1,167 @@
 #include "vgre/runtime/block_worker_pool.h"
+#include "vgre/runtime/gpu_thread_context.h"
+#include "vgre/common/logger.h"
+#include <unistd.h>
 #include <algorithm>
+#include <memory>
+#include <string>
 
 namespace vgre {
 namespace runtime {
 
-BlockWorkerPool::BlockWorkerPool() {
-    int numThreads = 64; // Sane limit for CPU-emulated block parallelism
-    workers_.reserve(numThreads);
-    for (int i = 0; i < numThreads; ++i) {
-        workers_.emplace_back(&BlockWorkerPool::workerLoop, this);
+// Internal synchronization handle for block-level completion.
+// Allocated on the heap and managed by shared_ptr to ensure it outlives
+// all workers even if the dispatcher returns early or is interrupted.
+struct BlockSignal {
+    std::atomic<int> remaining;
+    std::mutex completeMutex;            // Guards completeCv
+    std::condition_variable completeCv;  // Signaled when remaining hits 0
+    std::unique_ptr<BlockBarrier> barrier;
+
+    explicit BlockSignal(int threadCount) {
+        remaining.store(threadCount);
+        barrier = std::make_unique<BlockBarrier>(threadCount);
     }
-}
+};
 
 BlockWorkerPool::~BlockWorkerPool() {
-    {
-        std::lock_guard<std::mutex> lock(globalMutex_);
-        shutdown_ = true;
+    shutdown();
+}
+
+BlockWorkerPool& BlockWorkerPool::instance() {
+    static BlockWorkerPool inst;
+    return inst;
+}
+
+void BlockWorkerPool::initialize(size_t numThreads) {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    if (initialized_) return;
+
+    if (numThreads == 0) {
+        // Authoritative Concurrency: A single CUDA block can have up to 1024 threads.
+        // To avoid deadlocks where Block A threads occupy all workers but need 
+        // threads from Block B to complete a barrier (or simply to allow two
+        // active blocks to coexist), we must provide sufficient headspace.
+        // 2048 ensures at least 2 full blocks can execute side-by-side.
+        if (numThreads == 0) {
+            const char* pSize = std::getenv("VGRE_BLOCK_POOL_SIZE");
+            numThreads = pSize ? std::stoul(pSize) : 2048;
+        }
+        VGRE_LOG_INFO("BlockWorkerPool", "Initializing with " + std::to_string(numThreads) + " threads");
     }
-    globalCv_.notify_all();
-    for (auto& t : workers_) {
-        if (t.joinable()) t.join();
+
+    for (size_t i = 0; i < numThreads; ++i) {
+        workers_.emplace_back(&BlockWorkerPool::workerLoop, this);
+        
+        // Phase 12: Safe Affinity Propagation.
+        // Instead of blind pinning, we read the current process/parent affinity
+        // mask and propagate it to the workers. This ensures we respect 
+        // external constraints (ctest, cgroups) while still breaking the 
+        // unfortunate inheritance from a pinned Scheduler thread.
+#if defined(__linux__)
+        cpu_set_t cpuset;
+        if (pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) == 0) {
+            pthread_setaffinity_np(workers_.back().native_handle(), sizeof(cpu_set_t), &cpuset);
+        } else {
+            // Fallback: Bind to all accessible cores if getaffinity fails
+            CPU_ZERO(&cpuset);
+            for (int k = 0; k < CPU_SETSIZE; k++) CPU_SET(k, &cpuset);
+            pthread_setaffinity_np(workers_.back().native_handle(), sizeof(cpu_set_t), &cpuset);
+        }
+#endif
+    }
+    initialized_ = true;
+}
+
+
+void BlockWorkerPool::dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg) {
+    if (!initialized_) {
+        initialize();
+    }
+
+    auto signal = std::make_shared<BlockSignal>(threadCount);
+
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        for (int i = 0; i < threadCount; ++i) {
+            taskQueue_.push({task, i, arg, signal->barrier.get(), [signal]() {
+                // Decrement and notify dispatcher when last task completes.
+                // Lock ensures no lost-wakeup race between decrement and cv.wait().
+                std::lock_guard<std::mutex> lk(signal->completeMutex);
+                if (signal->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                    signal->completeCv.notify_one();
+                }
+            }});
+        }
+    }
+    queueCv_.notify_all();
+
+    // Hybrid wait: short spin for fast-completing kernels, then yield to condvar.
+    // This frees CPU cores for pool workers when multiple blocks dispatch concurrently,
+    // preventing starvation-induced barrier deadlocks.
+    uint32_t spin = 0;
+    while (spin < 500 && signal->remaining.load(std::memory_order_acquire) > 0) {
+        __builtin_ia32_pause();
+        ++spin;
+    }
+    if (signal->remaining.load(std::memory_order_acquire) > 0) {
+        std::unique_lock<std::mutex> lk(signal->completeMutex);
+        signal->completeCv.wait(lk, [&signal] {
+            return signal->remaining.load(std::memory_order_acquire) == 0;
+        });
     }
 }
 
-void BlockWorkerPool::dispatch(int threadCount, std::function<void(int tid)> task) {
-    if (threadCount <= 0) return;
-
-    auto job = std::make_shared<DispatchJob>();
-    job->task = std::move(task);
-    job->completed = 0;
-    job->nextTid = 0;
-    job->totalThreads = threadCount;
-
+void BlockWorkerPool::shutdown() {
     {
-        std::lock_guard<std::mutex> lock(globalMutex_);
-        jobQueue_.push_back(job);
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        if (!initialized_ || stop_) return;
+        stop_ = true;
     }
-    globalCv_.notify_all();
+    queueCv_.notify_all();
 
-    // Wait for completion
-    std::unique_lock<std::mutex> completionLock(job->mutex);
-    job->completionCv.wait(completionLock, [&] {
-        return job->completed.load() >= threadCount;
-    });
+    for (auto& worker : workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    workers_.clear();
+    initialized_ = false;
 }
 
 void BlockWorkerPool::workerLoop() {
     while (true) {
-        std::shared_ptr<DispatchJob> job;
+        Task task;
         {
-            std::unique_lock<std::mutex> lock(globalMutex_);
-            globalCv_.wait(lock, [this] {
-                // Clean up fully claimed jobs from the front
-                while (!jobQueue_.empty() && jobQueue_.front()->nextTid.load() >= jobQueue_.front()->totalThreads) {
-                    jobQueue_.pop_front();
-                }
-                return shutdown_ || !jobQueue_.empty(); 
-            });
+            std::unique_lock<std::mutex> lock(queueMutex_);
+            queueCv_.wait(lock, [this] { return stop_ || !taskQueue_.empty(); });
             
-            if (shutdown_ && jobQueue_.empty()) return;
-            if (!jobQueue_.empty()) {
-                job = jobQueue_.front();
-            }
+            if (stop_ && taskQueue_.empty()) break;
+            
+            if (taskQueue_.empty()) continue; // Spurious wakeup guard
+
+            task = std::move(taskQueue_.front());
+            taskQueue_.pop();
         }
-
-        if (!job) continue;
-
-        while (true) {
-            int tid = job->nextTid.fetch_add(1);
-            if (tid >= job->totalThreads) break;
-
-            job->task(tid);
-            
-            if (job->completed.fetch_add(1) + 1 == job->totalThreads) {
-                std::lock_guard<std::mutex> completionLock(job->mutex);
-                job->completionCv.notify_all();
-            }
+        
+        // Propagate barrier to thread local storage
+        vgre_jit_set_block_barrier(task.barrier);
+        
+        // Execute the task
+        task.func(task.tid, task.arg);
+        
+        // Cleanup barrier TLS
+        vgre_jit_clear_block_barrier();
+        
+        // Mark as done via callback
+        if (task.onDone) {
+            task.onDone();
         }
     }
+}
+
+size_t BlockWorkerPool::getCapacity() const {
+    return workers_.size();
 }
 
 } // namespace runtime
