@@ -61,6 +61,10 @@ private:
     std::condition_variable queueCv_;
     std::atomic<bool> stop_{false};
     bool initialized_{false};
+    // Pre-warm latch: workers increment once they've entered their wait loop.
+    // initialize() spins until all threads check in, eliminating ~5ms cold-start
+    // latency on the first dispatch() call.
+    std::atomic<int> readyCount_{0};
 };
 
 } // namespace runtime

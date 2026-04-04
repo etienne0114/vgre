@@ -52,11 +52,11 @@ void BlockWorkerPool::initialize(size_t numThreads) {
 
     for (size_t i = 0; i < numThreads; ++i) {
         workers_.emplace_back(&BlockWorkerPool::workerLoop, this);
-        
+
         // Phase 12: Safe Affinity Propagation.
         // Instead of blind pinning, we read the current process/parent affinity
-        // mask and propagate it to the workers. This ensures we respect 
-        // external constraints (ctest, cgroups) while still breaking the 
+        // mask and propagate it to the workers. This ensures we respect
+        // external constraints (ctest, cgroups) while still breaking the
         // unfortunate inheritance from a pinned Scheduler thread.
 #if defined(__linux__)
         cpu_set_t cpuset;
@@ -71,6 +71,17 @@ void BlockWorkerPool::initialize(size_t numThreads) {
 #endif
     }
     initialized_ = true;
+
+    // Pre-warm latch: spin until every worker has been OS-scheduled and entered
+    // its queueCv_.wait() loop. This eliminates the ~5ms cold-start latency where
+    // the first dispatch() call could fire notify_all() before any thread is waiting.
+    // The condition variable's predicate (taskQueue_ not empty) makes this race
+    // safe — but blocking here ensures workers are hot-cached and ready.
+    const int target = static_cast<int>(numThreads);
+    while (readyCount_.load(std::memory_order_acquire) < target) {
+        std::this_thread::yield();
+    }
+    VGRE_LOG_INFO("BlockWorkerPool", "All " + std::to_string(numThreads) + " workers ready");
 }
 
 
@@ -126,10 +137,16 @@ void BlockWorkerPool::shutdown() {
         }
     }
     workers_.clear();
+    readyCount_.store(0, std::memory_order_release);
     initialized_ = false;
 }
 
 void BlockWorkerPool::workerLoop() {
+    // Signal that this thread has been OS-scheduled and is about to enter
+    // its wait loop. initialize() spins on readyCount_ to ensure all
+    // workers are ready before the first dispatch() call.
+    readyCount_.fetch_add(1, std::memory_order_release);
+
     while (true) {
         Task task;
         {

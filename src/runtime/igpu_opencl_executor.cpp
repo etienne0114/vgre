@@ -357,11 +357,24 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
   if (timeEnd > timeStart) {
       double durationNs = static_cast<double>(timeEnd - timeStart);
       double durationMs = durationNs / 1e6;
-      // Report telemetry
-      uint64_t totalThreads = (gridDim.x * gridDim.y * gridDim.z) * (blockDim.x * blockDim.y * blockDim.z);
-      // We estimate 10 flops/thread and 8 bytes/thread as a fallback telemetry baseline if unknown
+      uint64_t totalThreads = (gridDim.x * gridDim.y * gridDim.z) *
+                              (blockDim.x * blockDim.y * blockDim.z);
+
+      // FLOP estimate: peak_gflops × duration_sec × utilisation factor (0.5).
+      // iGPU kernels are typically memory-bound; 50% of peak is conservative but
+      // far more physically grounded than the previous totalThreads×10 placeholder.
+      auto& eng = vgre::advanced::AdaptiveExecutionEngine::instance();
+      double peakGflops = (eng.isCalibrated() && eng.getMaxGFLOPS() > 0.0)
+                          ? eng.getMaxGFLOPS()
+                          : 10.0;  // 10 GFLOPS: safe lower-bound for typical iGPU
+      double durationSec = durationMs / 1000.0;
+      uint64_t estimatedFlops = static_cast<uint64_t>(peakGflops * 1e9 * durationSec * 0.5);
+      // Memory: 64 bytes/thread is a realistic cache-line estimate for iGPU kernels.
+      uint64_t estimatedBytes = totalThreads * 64;
+
       vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
-          kernelName, static_cast<int>(totalThreads), 1, durationMs, totalThreads * 8, totalThreads * 10);
+          kernelName, static_cast<int>(totalThreads), 1, durationMs,
+          estimatedBytes, estimatedFlops);
   }
   
   clReleaseEvent(kernelEvent);
