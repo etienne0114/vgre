@@ -221,5 +221,7 @@ if(VGRE_BUILD_DASHBOARD)
     endif()
 endif()
 # ── Install rules ───────────────────────────────────────────────────────────
-install(TARGETS vgre LIBRARY DESTINATION lib)
+install(TARGETS vgre vgre_cudart vgre-worker
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin)
 install(DIRECTORY include/vgre DESTINATION include)

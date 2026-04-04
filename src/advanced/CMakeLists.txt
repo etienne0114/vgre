@@ -26,3 +26,8 @@ target_link_libraries(vgre_advanced PUBLIC
 if(APPLE)
     target_link_libraries(vgre_advanced PUBLIC "-framework IOKit")
 endif()
+
+# ── Standalone Worker CLI ────────────────────────────────────────────────────
+add_executable(vgre-worker vgre_worker_cli.cpp)
+target_link_libraries(vgre-worker PRIVATE vgre)
+target_include_directories(vgre-worker PRIVATE ${PROJECT_SOURCE_DIR}/include)

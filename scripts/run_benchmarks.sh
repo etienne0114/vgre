@@ -12,7 +12,8 @@ if [ -d "venv" ]; then
 fi
 
 export PYTHONPATH="$PROJECT_ROOT/bindings/python:$PYTHONPATH"
-export LD_LIBRARY_PATH="$PROJECT_ROOT/build:$LD_LIBRARY_PATH"
+# Check both local build and system-wide install paths
+export LD_LIBRARY_PATH="$PROJECT_ROOT/build:$PROJECT_ROOT/build/lib:/usr/local/lib:$LD_LIBRARY_PATH"
 
 echo "Executing REAL VGRE Performance Benchmarks..."
 

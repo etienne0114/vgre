@@ -9,13 +9,15 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DIR="$HOME/.local/share/VGRE"
 BIN_DIR="$HOME/.local/bin"
 
-VGRE_TCP_AUTH_TOKEN="${VGRE_TCP_AUTH_TOKEN:-05797da125ffccc4f57e80f86b3c26ac4bb2c261198e99bc0e09758e9d84f9d5}"
-export VGRE_TCP_AUTH_TOKEN
+# Phase 10: Dynamic Auth Token Handling
+# If VGRE_TCP_AUTH_TOKEN is not in env, we do NOT default to a hardcoded string.
+# This ensures truth in the security model.
 if [[ -z "$VGRE_TCP_AUTH_TOKEN" ]]; then
-    echo "⚠️  VGRE_TCP_AUTH_TOKEN is not set; Phase 5 security will remain disabled in the dashboard."
+    echo "⚠️  VGRE_TCP_AUTH_TOKEN is not set."
+    echo "   Dashboard will fallback to Hardware Secure Storage (TPM) or allow manual input."
 else
-    echo "🔐 VGRE_TCP_AUTH_TOKEN provided; secure cluster mode can be enabled."
-    # Persist token for Dashboard development (fallback mechanism)
+    echo "🔐 VGRE_TCP_AUTH_TOKEN provided in environment; secure cluster mode active."
+    # Sync to local cache for dashboard dev fallback
     mkdir -p "$HOME/.vgre"
     echo "$VGRE_TCP_AUTH_TOKEN" > "$HOME/.vgre/token"
 fi
@@ -47,7 +49,7 @@ if [[ "$(uname)" == "Linux" ]] && [[ -z "$CC" ]] && [[ -z "$CXX" ]]; then
 fi
 
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) vgre vgre_cudart
+make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) vgre vgre_cudart vgre-worker
 cd ..
 
 # 2. Build Flutter Dashboard
@@ -94,6 +96,7 @@ else
     cp -r "$BUNDLE_DIR"/* "$INSTALL_DIR/"
     cp build/libvgre.so "$INSTALL_DIR/lib/"
     cp build/libvgre_cudart.so "$INSTALL_DIR/lib/"
+    cp build/bin/vgre-worker "$INSTALL_DIR/" || cp build/vgre-worker "$INSTALL_DIR/" # Handle different CMake versions
     
     # Copy essential JIT headers
     mkdir -p "$INSTALL_DIR/include"
@@ -143,7 +146,9 @@ Path=$INSTALL_DIR
 EOF
     
     chmod +x "$INSTALL_DIR/vgre_dashboard"
+    chmod +x "$INSTALL_DIR/vgre-worker"
     ln -sf "$INSTALL_DIR/vgre-launch.sh" "$BIN_DIR/vgre-dashboard"
+    ln -sf "$INSTALL_DIR/vgre-worker" "$BIN_DIR/vgre-worker"
 fi
 
 echo "✅ VGRE Sync Complete!"

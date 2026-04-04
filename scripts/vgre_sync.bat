@@ -11,7 +11,7 @@ echo 📦 Building VGRE Native Engine...
 if not exist build mkdir build
 cd build
 cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release --target vgre vgre_cudart
+cmake --build . --config Release --target vgre vgre_cudart vgre-worker
 cd ..
 
 :: 2. Build Flutter Dashboard
@@ -30,6 +30,7 @@ set BUNDLE_DIR=vgre_dashboard\build\windows\x64\runner\Release
 xcopy /E /Y /I "%BUNDLE_DIR%" "%INSTALL_DIR%"
 copy /Y build\Release\vgre.dll "%INSTALL_DIR%\lib\"
 copy /Y build\Release\vgre_cudart.dll "%INSTALL_DIR%\lib\"
+copy /Y build\Release\vgre-worker.exe "%INSTALL_DIR%\"
 
 :: Copy essential JIT headers
 if not exist "%INSTALL_DIR%\include" mkdir "%INSTALL_DIR%\include"
