@@ -44,6 +44,8 @@ void VectorEngine::detectCapabilities() {
     if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
         caps_.hasAVX2   = (ebx >> 5) & 1;
         caps_.hasAVX512 = (ebx >> 16) & 1;
+        caps_.hasVNNI   = (ecx >> 11) & 1;
+        caps_.hasAMX    = (edx >> 24) & 1;
     }
     #else
     // Non-x86: no SIMD detection
@@ -58,12 +60,15 @@ const SIMDCapabilities& VectorEngine::getCapabilities() const {
 std::string VectorEngine::getCapabilityString() const {
     std::ostringstream oss;
     oss << "SIMD: ";
+    if (caps_.hasAMX)    oss << "AMX ";
+    if (caps_.hasVNNI)   oss << "VNNI ";
     if (caps_.hasAVX512) oss << "AVX-512 ";
     if (caps_.hasAVX2)   oss << "AVX2 ";
     if (caps_.hasAVX)    oss << "AVX ";
     if (caps_.hasFMA)    oss << "FMA ";
     if (caps_.hasSSE4)   oss << "SSE4.1 ";
     if (caps_.hasSSE2)   oss << "SSE2 ";
+    if (caps_.hasAMX)    oss << "(Accelerated AI) ";
     if (!caps_.hasSSE2 && !caps_.hasAVX) oss << "none (scalar only)";
     return oss.str();
 }
@@ -182,6 +187,60 @@ double VectorEngine::benchmarkFMA(size_t n, int iterations) {
     double seconds = std::chrono::duration<double>(end - start).count();
     
     // Each inner loop iteration does 32 FMAs per 8 elements (if AVX2)
+    #ifdef VGRE_HAS_AVX2
+    double totalFlops = static_cast<double>(n & ~7) * 32.0 * 2.0 * iterations;
+    #else
+    double totalFlops = static_cast<double>(n) * 2.0 * iterations;
+    #endif
+    
+    return totalFlops / (seconds * 1e9);
+}
+
+double VectorEngine::benchmarkBF16(size_t n, int iterations) {
+    if (n == 0 || iterations == 0) return 0.0;
+    
+    std::vector<vgre_bf16> a(n, fp32_to_bf16(1.1f)), b(n, fp32_to_bf16(2.2f));
+    vgre_bf16* pa = a.data();
+    vgre_bf16* pb = b.data();
+
+    auto start = std::chrono::steady_clock::now();
+
+    #ifdef VGRE_HAS_AVX2
+    #pragma omp parallel
+    {
+        for (int iter = 0; iter < iterations; ++iter) {
+            #pragma omp for
+            for (size_t i = 0; i < (n & ~7); i += 8) {
+                __m128i raw_a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&pa[i]));
+                __m128i raw_b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&pb[i]));
+                
+                __m256i i_a = _mm256_cvtepu16_epi32(raw_a);
+                __m256i i_b = _mm256_cvtepu16_epi32(raw_b);
+                i_a = _mm256_slli_epi32(i_a, 16);
+                i_b = _mm256_slli_epi32(i_b, 16);
+                
+                __m256 va = _mm256_castsi256_ps(i_a);
+                __m256 vb = _mm256_castsi256_ps(i_b);
+                
+                __m256 vsum = _mm256_setzero_ps();
+                for (int k = 0; k < 32; ++k) {
+                    vsum = _mm256_fmadd_ps(va, vb, vsum);
+                }
+            }
+        }
+    }
+    #else
+    for (int iter = 0; iter < iterations; ++iter) {
+        float sum = 0.0f;
+        for (size_t i = 0; i < n; ++i) {
+            sum += bf16_to_fp32(pa[i]) * bf16_to_fp32(pb[i]);
+        }
+    }
+    #endif
+
+    auto end = std::chrono::steady_clock::now();
+    double seconds = std::chrono::duration<double>(end - start).count();
+    
     #ifdef VGRE_HAS_AVX2
     double totalFlops = static_cast<double>(n & ~7) * 32.0 * 2.0 * iterations;
     #else
@@ -444,6 +503,58 @@ void VectorEngine::vectorFill(float* dst, float value, size_t n) {
 
 void VectorEngine::vectorCopy(const float* src, float* dst, size_t n) {
     std::memcpy(dst, src, n * sizeof(float));
+}
+
+// ── BF16 dot product ───────────────────────────────────────────────────────
+float VectorEngine::vectorDot(const vgre_bf16* a, const vgre_bf16* b, size_t n) {
+    float sum = 0.0f;
+    size_t i = 0;
+
+    #ifdef VGRE_HAS_AVX2
+    __m256 vsum = _mm256_setzero_ps();
+    #pragma omp parallel num_threads(6)
+    {
+        __m256 local_vsum = _mm256_setzero_ps();
+        #pragma omp for
+        for (size_t j = 0; j < (n & ~7); j += 8) {
+            // Load 8 BF16s
+            __m128i raw_a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&a[j]));
+            __m128i raw_b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&b[j]));
+
+            // Convert BF16 to FP32 by shifting left 16 bits
+            // 1. Zero-extend 8 values to 32 bits
+            __m256i i_a = _mm256_cvtepu16_epi32(raw_a);
+            __m256i i_b = _mm256_cvtepu16_epi32(raw_b);
+            
+            // 2. Shift left 16 to move BF16 to the high 16 bits of FP32
+            i_a = _mm256_slli_epi32(i_a, 16);
+            i_b = _mm256_slli_epi32(i_b, 16);
+
+            // 3. Bitcast to float and FMA
+            __m256 va = _mm256_castsi256_ps(i_a);
+            __m256 vb = _mm256_castsi256_ps(i_b);
+            local_vsum = _mm256_fmadd_ps(va, vb, local_vsum);
+        }
+        #pragma omp critical
+        {
+            vsum = _mm256_add_ps(vsum, local_vsum);
+        }
+    }
+    i = n & ~7;
+    // Horizontal sum of 8 floats
+    __m128 hi  = _mm256_extractf128_ps(vsum, 1);
+    __m128 lo  = _mm256_castps256_ps128(vsum);
+    __m128 s   = _mm_add_ps(lo, hi);
+    s = _mm_hadd_ps(s, s);
+    s = _mm_hadd_ps(s, s);
+    sum = _mm_cvtss_f32(s);
+    #endif
+
+    for (; i < n; ++i) {
+        sum += bf16_to_fp32(a[i]) * bf16_to_fp32(b[i]);
+    }
+
+    return sum;
 }
 
 // ── Singleton ──────────────────────────────────────────────────────────────

@@ -62,6 +62,7 @@ private:
   std::string deviceName_;
 
   std::unordered_map<std::string, CompiledKernel> kernelCache_;
+  std::unordered_map<void*, cl_mem> bufferCache_;
   mutable std::mutex mutex_;
 };
 

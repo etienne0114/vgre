@@ -22,6 +22,11 @@ IGPUOpenCLExecutor::~IGPUOpenCLExecutor() {
       if (pair.second.program)
         clReleaseProgram(pair.second.program);
     }
+    for (auto &pair : bufferCache_) {
+        if (pair.second)
+            clReleaseMemObject(pair.second);
+    }
+    bufferCache_.clear();
     if (queue_)
       clReleaseCommandQueue(queue_);
     if (context_)
@@ -290,15 +295,26 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
         }
       }
 
-      cl_mem buf =
-          clCreateBuffer(context_, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
-                         size, host_ptr, &err);
-      if (err != CL_SUCCESS) {
+      cl_mem buf = nullptr;
+      {
+          std::lock_guard<std::mutex> lock(mutex_);
+          auto bit = bufferCache_.find(host_ptr);
+          if (bit != bufferCache_.end()) {
+              buf = bit->second;
+          } else {
+              buf = clCreateBuffer(context_, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                                 size, host_ptr, &err);
+              if (err == CL_SUCCESS) {
+                  bufferCache_[host_ptr] = buf;
+              }
+          }
+      }
+
+      if (err != CL_SUCCESS || !buf) {
         VGRE_LOG_ERROR("IGPUOpenCLExecutor",
-                       "Failed to create zero-copy buffer for arg " +
+                       "Failed to create/retrieve zero-copy buffer for arg " +
                            std::to_string(i));
-        for (auto b : buffers)
-          clReleaseMemObject(b);
+        // Note: we don't release other buffers here because some might be cached
         return VGREResult::ERROR_OUT_OF_MEMORY;
       }
       buffers.push_back(buf);
@@ -397,8 +413,9 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
   }
 
   clFinish(queue_);
-  for (auto b : buffers)
-    clReleaseMemObject(b);
+  clFinish(queue_);
+  // Note: we no longer release buffers here as they are now cached in bufferCache_
+  // for future reuse with the same host pointers.
 
   return VGREResult::SUCCESS;
 }

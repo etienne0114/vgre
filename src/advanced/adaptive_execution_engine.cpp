@@ -80,17 +80,15 @@ AdaptiveExecutionEngine::AdaptiveExecutionEngine()
       lastFlops_(0),
       lastBytes_(0),
       lastSampleTime_(std::chrono::steady_clock::now()) {
-  if (maxCores_ <= 0)
-    maxCores_ = 4;
-  
-  // Start at zero — actual values are set by runBenchmark() or updateHardwareMetrics().
-  // The benchmark runs asynchronously; scheduling decisions before it completes
-  // use the first real measurement rather than a stale guess.
-  maxGflops_ = 0.0;
-  maxMemoryBandwidth_ = 0.0;
+  // Force ground-truth calibration on startup to provide authoritative performance data.
+  // We run this in a background thread to avoid blocking the main runtime initialization.
+  std::thread([this]() {
+      this->runBenchmark();
+  }).detach();
 
   VGRE_LOG_INFO("AdaptiveExecutionEngine",
-                "Initialized with " + std::to_string(maxCores_) + " max cores");
+                "Initialized with " + std::to_string(maxCores_) + " max cores. "
+                "Background Ground-Truth calibration started.");
 }
 
 AdaptiveExecutionEngine::~AdaptiveExecutionEngine() = default;
@@ -365,9 +363,13 @@ void AdaptiveExecutionEngine::runBenchmark() {
     auto& ve = runtime::VectorEngine::instance();
     
     // Stage 1: Peak GFLOPS (Compute-Bound, Register-Saturated via VectorEngine)
-    // 1M elements, 1000 iterations
+    // 1M elements, 100 iterations
     VGRE_LOG_INFO("AdaptiveExecutionEngine", "Calibrating Peak GFLOPS via specialized SIMD benchmark...");
     double gflops = ve.benchmarkFMA(1024 * 1024, 100);
+    double bf16_gflops = ve.benchmarkBF16(1024 * 1024, 100);
+
+    VGRE_LOG_INFO("AdaptiveExecutionEngine", "  Peak FP32: " + std::to_string(gflops) + " GFLOPS");
+    VGRE_LOG_INFO("AdaptiveExecutionEngine", "  Peak BF16: " + std::to_string(bf16_gflops) + " GFLOPS");
 
     // Stage 2: Memory Bandwidth (Memory-Bound, Large Streaming)
     const size_t streamN = 16 * 1024 * 1024; // 64MB reads + 64MB writes
