@@ -550,13 +550,13 @@ VGREResult HardwareTokenManager::initTPM() {
     TSS2_TCTI_CONTEXT* tcti_ctx = nullptr;
     
     // Initialize TCTI (TPM Command Transmission Interface)
-    // Try device TCTI first, then mssim (simulator) for testing
+    // Authoritative Phase 3: Purely physical device access. No simulator fallbacks.
     rc = Tss2_TctiLdr_Initialize("device:/dev/tpmrm0", &tcti_ctx);
     if (rc != TSS2_RC_SUCCESS) {
         rc = Tss2_TctiLdr_Initialize("device:/dev/tpm0", &tcti_ctx);
         if (rc != TSS2_RC_SUCCESS) {
             VGRE_LOG_DEBUG("HardwareTokenManager", 
-                          "TPM device not available (rc=" + std::to_string(rc) + ")");
+                          "Physical TPM device not available (rc=" + std::to_string(rc) + ")");
             return VGREResult::ERROR_NOT_SUPPORTED;
         }
     }

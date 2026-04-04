@@ -307,6 +307,8 @@ size_t typeSizeBytes(const std::string &typeName) {
 
   if (t == "float")
     return sizeof(float);
+  if (t == "__nv_bfloat16" || t == "vgre_bf16")
+    return 2;
   if (t == "double")
     return sizeof(double);
   if (t == "int" || t == "signed int")
@@ -683,10 +685,11 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   // We force Clang to map CUDA tx,ty,tz threads directly to physical AVX/SIMD hardware CPU lanes.
   // This replaces the "OpenMP thread virtualization" logic by utilizing actual hardware concurrency
   // for threads within a block via SIMD auto-vectorization, avoiding POSIX thread explosion and TLS crashes.
+  oss << "  #pragma clang loop vectorize(enable) interleave(enable)\n";
   oss << "  for (uint32_t tz = 0; tz < bdz; ++tz) {\n";
   oss << "    for (uint32_t ty = 0; ty < bdy; ++ty) {\n";
   oss << "      for (uint32_t tx = 0; tx < bdx; ++tx) {\n";
-    oss << "        vgre_call_kernel(tx, ty, tz);\n";
+  oss << "        vgre_call_kernel(tx, ty, tz);\n";
   oss << "      }\n";
   oss << "    }\n";
   oss << "  }\n";
