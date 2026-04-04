@@ -55,6 +55,14 @@ extern "C" {
   void vgre_jit_report_memory(uint64_t);
   void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
 
+  // Texture and surface builtins (implemented in texture_builtins.cpp)
+  float vgre_tex1D_f32(uint64_t tex, float x);
+  float vgre_tex2D_f32(uint64_t tex, float x, float y);
+  float vgre_tex3D_f32(uint64_t tex, float x, float y, float z);
+  float vgre_tex1Dfetch_f32(uint64_t tex, int x);
+  void  vgre_surf2Dwrite_f32(uint64_t surf, float val, int x, int y);
+  void  vgre_surf2Dread_f32(uint64_t surf, float* val, int x, int y);
+
   struct dim3_pod { uint32_t x, y, z; };
   static __thread dim3_pod t_threadIdx = {1, 1, 1};
   static __thread dim3_pod t_blockIdx = {0, 0, 0};
@@ -183,7 +191,27 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
         llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_block_dispatch)),
         llvm::JITSymbolFlags::Exported
     };
-    
+
+    // Texture and surface builtins — JIT kernels calling tex2D() etc. resolve to these.
+    Symbols[Mangle("vgre_tex1D_f32")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_tex1D_f32)),
+        llvm::JITSymbolFlags::Exported};
+    Symbols[Mangle("vgre_tex2D_f32")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_tex2D_f32)),
+        llvm::JITSymbolFlags::Exported};
+    Symbols[Mangle("vgre_tex3D_f32")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_tex3D_f32)),
+        llvm::JITSymbolFlags::Exported};
+    Symbols[Mangle("vgre_tex1Dfetch_f32")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_tex1Dfetch_f32)),
+        llvm::JITSymbolFlags::Exported};
+    Symbols[Mangle("vgre_surf2Dwrite_f32")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_surf2Dwrite_f32)),
+        llvm::JITSymbolFlags::Exported};
+    Symbols[Mangle("vgre_surf2Dread_f32")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_surf2Dread_f32)),
+        llvm::JITSymbolFlags::Exported};
+
     llvm::cantFail(MainJD.define(llvm::orc::absoluteSymbols(std::move(Symbols))));
     
     MainJD.addGenerator(
@@ -227,10 +255,18 @@ std::string trim_copy(const std::string &s) {
   return s.substr(start, end - start);
 }
 
+// ── Static compiled regex patterns (compiled once, reused every call) ───────
+static const std::regex kReExternShared(
+    R"(extern\s+__shared__\s+([A-Za-z_][A-Za-z0-9_:\s<>]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*;)");
+static const std::regex kReStaticShared(
+    R"(__shared__\s+([A-Za-z_][A-Za-z0-9_:\s<>]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([0-9]+)\s*\]\s*;)");
+static const std::regex kReTypeQualifiers(
+    R"(\b(const|volatile|restrict|__restrict__|__restrict)\b)");
+static const std::regex kReWhitespace(R"(\s+)");
+
 bool rewriteExternShared(std::string &source, int &count, size_t baseOffset) {
   count = 0;
-  const std::regex pattern(
-      R"(extern\s+__shared__\s+([A-Za-z_][A-Za-z0-9_:\s<>]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*;)");
+  const std::regex& pattern = kReExternShared;
   std::string out;
   out.reserve(source.size());
 
@@ -266,11 +302,8 @@ bool rewriteExternShared(std::string &source, int &count, size_t baseOffset) {
 
 namespace {
 size_t typeSizeBytes(const std::string &typeName) {
-  const std::string norm = std::regex_replace(
-      typeName,
-      std::regex("\\b(const|volatile|restrict|__restrict__|__restrict)\\b"),
-      "");
-  const std::string t = std::regex_replace(norm, std::regex("\\s+"), " ");
+  const std::string norm = std::regex_replace(typeName, kReTypeQualifiers, "");
+  const std::string t = std::regex_replace(norm, kReWhitespace, " ");
 
   if (t == "float")
     return sizeof(float);
@@ -306,8 +339,7 @@ size_t typeSizeBytes(const std::string &typeName) {
 
 bool rewriteStaticShared(std::string &source, size_t &totalBytes) {
   totalBytes = 0;
-  const std::regex pattern(
-      R"(__shared__\s+([A-Za-z_][A-Za-z0-9_:\s<>]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([0-9]+)\s*\]\s*;)");
+  const std::regex& pattern = kReStaticShared;
   std::string out;
   out.reserve(source.size());
 
@@ -518,6 +550,10 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   oss << "  void vgre_jit_report_memory(unsigned long long);\n";
   oss << "  void vgre_jit_block_dispatch(int, void(*)(int, void*), void*);\n";
   oss << "}\n\n";
+  // Note: texture/surface builtins (vgre_tex1D_f32, vgre_tex2D_f32, etc.) are
+  // already declared via the #include "vgre/compiler/cpu_cuda_env.h" above.
+  // Adding duplicate declarations here would conflict on systems where
+  // uint64_t = unsigned long (not unsigned long long).
 
   // Embed the actual kernel (with shared memory rewrites when present)
   std::string kernelSource = ir.source;
