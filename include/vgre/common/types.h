@@ -98,8 +98,16 @@ using CompiledKernelFn =
                        const dim3 *blockDim, const dim3 *gridDim,
                        void *sharedMem, size_t sharedMemSize)>>;
 
-// ── JIT Future (Asynchronous handles) ──────────────────────────────────────
-using JITFuture = std::shared_future<CompiledKernelFn>;
+// ── JIT Result and Future (Asynchronous handles) ─────────────────────────────
+struct JITResult {
+  CompiledKernelFn fn;
+  std::vector<size_t> argSizes;
+  size_t sharedMemSize;
+  uint64_t estimatedInstructionCount;
+  uint64_t staticFlopCount;
+};
+
+using JITFuture = std::shared_future<JITResult>;
 
 // ── Memory copy direction ──────────────────────────────────────────────────
 enum class MemcpyKind : uint8_t {
