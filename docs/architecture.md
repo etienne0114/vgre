@@ -220,15 +220,25 @@ VGRE implements a master/worker cluster using the **VGRE Structured Binary Proto
 
 ---
 
-## Future Innovations Roadmap
+## Recently Implemented Innovations
 
-To further elevate VGRE, the following innovations are planned:
+The following items graduated from the roadmap and are fully implemented:
+
+4. **OpenTelemetry OTLP Export** ✅: `RuntimeProfiler::toOTLPJSON()` generates W3C OTLP JSON;
+   `exportOTLPToHTTP(endpoint)` posts to any OTLP HTTP collector (Jaeger, Tempo, Grafana) via
+   raw TCP — no libcurl dependency. Each kernel run becomes a span with `vgre.gflops`,
+   `vgre.throughput_gbps`, and `vgre.grid_dim` attributes.
+5. **NUMA-Aware Scheduling** ✅: `Scheduler::buildNumaTopology()` discovers NUMA nodes via
+   `/sys/devices/system/cpu/cpuN/node`, pins each worker thread with `pthread_setaffinity_np`,
+   and routes `submitNumaTask()` calls to per-NUMA priority queues. Work-steals to global queue
+   when local queue is empty.
+
+## Remaining Roadmap
 
 1. **Interactive 3D Hardware Topology Viewer**: A Flutter frontend update featuring a 3D representation of cluster and node PCIe/Memory topology.
 2. **Agentic "AI Tuner" Interface**: An embedded AI chat UI enabling real-time natural-language tuning commands ("Optimize cluster for latency").
 3. **AES-NI Acceleration**: Replace software AES with `__builtin_ia32_aesenc128` for hardware-accelerated throughput.
-4. **OpenTelemetry OTLP Export**: Push trace spans to Jaeger/Tempo collectors alongside Chrome trace.
-5. **NUMA-Aware Scheduling**: Pin scheduler worker threads to NUMA nodes matching the virtual device's NUMA topology.
+4. **libsecret Backend**: Link `libsecret` for GNOME Keyring integration on headless Linux servers where the kernel keyring isn't accessible.
 
 ## Feature Coverage
 
