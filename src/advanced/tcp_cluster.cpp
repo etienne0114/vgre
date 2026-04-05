@@ -247,11 +247,11 @@ void TCPClusterManager::flush_tx_queues(std::shared_ptr<ClientConnection> client
             success = send_all(client.socket_fd, qItem.data.data(), qItem.data.size(), &enabled_);
         }
         
-        if (is_master_ && qItem.data.size() >= sizeof(VSBPHeader)) {
-            VSBPHeader h;
-            std::memcpy(&h, qItem.data.data(), sizeof(VSBPHeader));
-            std::cout << "[MASTER TCP TRACE] Sent packet Type=" << (int)h.type << " Size=" << qItem.data.size() << " Success=" << success << std::endl;
-        }
+        // Trace disabled in production — uncomment for debugging only:
+        // if (is_master_ && qItem.data.size() >= sizeof(VSBPHeader)) {
+        //     VSBPHeader h; std::memcpy(&h, qItem.data.data(), sizeof(VSBPHeader));
+        //     VGRE_LOG_DEBUG("TCPCluster", "[TX] Type=" + std::to_string((int)h.type) + " Size=" + std::to_string(qItem.data.size()));
+        // }
 
         if (success) {
             global_packets_sent_++;
@@ -458,6 +458,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       enabled_ = false;
       vgre_close_socket(client_fd_);
       client_fd_ = VGRE_INVALID_SOCKET;
+      enabled_ = false; // ensure shutdown() WSACleanup runs via wasEnabled path
 #if defined(_WIN32)
       WSACleanup();
 #endif
@@ -556,6 +557,11 @@ void TCPClusterManager::shutdown() {
     std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
     clients_.clear();
   }
+
+#if defined(_WIN32)
+  // WSAStartup was called in initialize(); pair it with WSACleanup() here.
+  WSACleanup();
+#endif
 }
 
 void TCPClusterManager::serverLoop() {
@@ -652,21 +658,10 @@ void TCPClusterManager::serverLoop() {
             rateLimiter_.record(std::string(ipstr));
 
             vgre_ioctl_nonblock(new_socket);
-            // Enable TCP keepalive so hard crashes / network partitions are detected
-            // without waiting for a send to fail (typically within ~11s with these settings).
-            {
-                int ka = 1;
-                vgre_setsockopt(new_socket, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));
-#if defined(TCP_KEEPIDLE)
-                int idle = 5;   vgre_setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
-#endif
-#if defined(TCP_KEEPINTVL)
-                int intvl = 2;  vgre_setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
-#endif
-#if defined(TCP_KEEPCNT)
-                int cnt = 3;    vgre_setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,  sizeof(cnt));
-#endif
-            }
+            // Enable TCP keepalive via the cross-platform helper (works on both
+            // Linux and Windows via SIO_KEEPALIVE_VALS). Dead connections are
+            // detected within ~11 s (idle=5s, intvl=2s, cnt=3).
+            vgre::common::vgre_set_tcp_keepalive(new_socket, 5, 2, 3);
 
             // ── Worker fast-path ───────────────────────────────────────────
             // When a WORKER's server socket gets an inbound connection from
@@ -676,10 +671,30 @@ void TCPClusterManager::serverLoop() {
             // Just store the fd and let udpDiscoveryLoop → clientLoop handle
             // the full handshake + telemetry cycle.
             if (!is_master_) {
+                // Only accept the connection if we're not already connected to a master.
+                // If both serverLoop (inbound) and udpDiscoveryLoop (outbound) race to
+                // set client_fd_ at the same time, the second one must drop its socket.
+                vgre_socket_t expected = VGRE_INVALID_SOCKET;
+                vgre_socket_t desired  = new_socket;
+                // client_fd_ is not atomic, but it is only written here (serverLoop, single
+                // thread) and in udpDiscoveryLoop (also single-thread). Use client_mutex_
+                // to make the check-then-set atomic across both sites.
+                {
+                    std::lock_guard<std::mutex> lock(client_mutex_);
+                    if (client_fd_ != VGRE_INVALID_SOCKET) {
+                        // Already have a master connection — drop this one.
+                        VGRE_LOG_WARN("TCPCluster",
+                            "Worker: Duplicate master connection from " +
+                            std::string(ipstr) + " — dropping (already connected)");
+                        vgre_close_socket(new_socket);
+                        (void)expected; (void)desired;
+                        continue;
+                    }
+                    client_fd_ = new_socket;
+                }
                 VGRE_LOG_INFO("TCPCluster",
                     "Worker: Accepted inbound connection from Master at " +
                     std::string(ipstr) + " — handing off to clientLoop");
-                client_fd_ = new_socket;
                 continue; // Skip master-only clients_/IPC/handshake code below
             }
 
@@ -1540,7 +1555,20 @@ void TCPClusterManager::udpDiscoveryLoop() {
               // Keepalive so we detect a hard master crash quickly.
               vgre::common::vgre_set_tcp_keepalive(sock, 5, 2, 3);
               vgre_ioctl_nonblock(sock);
-              client_fd_ = sock;
+              // Protect client_fd_ assignment with client_mutex_ to avoid a race
+              // with serverLoop which may set it if the master proactively connects
+              // to us at the same time.
+              {
+                  std::lock_guard<std::mutex> lk(client_mutex_);
+                  if (client_fd_ != VGRE_INVALID_SOCKET) {
+                      // serverLoop already accepted an inbound connection — drop ours.
+                      vgre_close_socket(sock);
+                      VGRE_LOG_INFO("TCPCluster",
+                          "UDP discovery: already have master connection, discarding outbound socket");
+                      break;
+                  }
+                  client_fd_ = sock;
+              }
               VGRE_LOG_INFO("TCPCluster",
                   "Connected to Remote Master Node at " + host_);
               break; // exit inner discovery loop
@@ -2732,20 +2760,8 @@ void TCPClusterManager::proactiveConnectionLoop() {
             // Connection successful! Add as worker.
             VGRE_LOG_INFO("TCPCluster", "Master: Proactively connected to worker at " + ip + ":" + std::to_string(port));
 
-            // Enable TCP keepalive so a hard crash on the worker side is detected quickly.
-            {
-                int ka = 1;
-                vgre_setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));
-#if defined(TCP_KEEPIDLE)
-                int idle = 5;   vgre_setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
-#endif
-#if defined(TCP_KEEPINTVL)
-                int intvl = 2;  vgre_setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
-#endif
-#if defined(TCP_KEEPCNT)
-                int cnt = 3;    vgre_setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,  sizeof(cnt));
-#endif
-            }
+            // Enable TCP keepalive via cross-platform helper.
+            vgre::common::vgre_set_tcp_keepalive(sock, 5, 2, 3);
             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
             auto conn = std::make_shared<ClientConnection>();
             conn->socket_fd = sock;
