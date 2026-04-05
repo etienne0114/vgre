@@ -2,11 +2,13 @@
 #define VGRE_IPC_MANAGER_H
 #include "vgre/api/vgre_c_api.h"
 #include <mutex>
+#include <vector>
 
 namespace vgre {
 namespace advanced {
 
-#define VGRE_MAX_PROCESSES 16
+#define VGRE_MAX_PROCESSES 32
+#define VGRE_MAX_NODES 16
 #define VGRE_SHM_NAME "/vgre_global_state"
 
 struct ProcessSlot {
@@ -19,7 +21,12 @@ struct GlobalState {
   int32_t master_pid;
   uint32_t active_count;
   ProcessSlot slots[VGRE_MAX_PROCESSES];
-  char padding[256]; // Future expansion
+  
+  // Phase 12: Distributed Topology Synchronization
+  vgre_cluster_node_t cluster_nodes[VGRE_MAX_NODES];
+  uint32_t cluster_node_count;
+  
+  char padding[1024]; // Future expansion
 };
 
 class IPCManager {
@@ -31,6 +38,10 @@ public:
 
   void updateLocalTelemetry(const vgre_telemetry_t &telemetry);
   void getGlobalTelemetry(vgre_telemetry_t &outCombined);
+  
+  // Phase 12: Cluster Sync
+  void updateClusterNodes(const std::vector<vgre_cluster_node_t>& nodes);
+  void getClusterNodes(std::vector<vgre_cluster_node_t>& outNodes);
 
   bool isEnabled() const { return enabled_; }
 

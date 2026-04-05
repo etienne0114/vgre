@@ -379,5 +379,27 @@ void IPCManager::getGlobalTelemetry(vgre_telemetry_t &outCombined) {
   TCPClusterManager::instance().aggregateRemoteTelemetry(outCombined);
 }
 
+void IPCManager::updateClusterNodes(const std::vector<vgre_cluster_node_t>& nodes) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!enabled_ || !state_) return;
+  
+  uint32_t count = std::min(static_cast<uint32_t>(nodes.size()), static_cast<uint32_t>(VGRE_MAX_NODES));
+  state_->cluster_node_count = count;
+  for (uint32_t i = 0; i < count; ++i) {
+    state_->cluster_nodes[i] = nodes[i];
+  }
+}
+
+void IPCManager::getClusterNodes(std::vector<vgre_cluster_node_t>& outNodes) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!enabled_ || !state_) return;
+  
+  outNodes.clear();
+  uint32_t count = state_->cluster_node_count;
+  for (uint32_t i = 0; i < count; ++i) {
+    outNodes.push_back(state_->cluster_nodes[i]);
+  }
+}
+
 } // namespace advanced
 } // namespace vgre

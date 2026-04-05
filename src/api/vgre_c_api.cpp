@@ -828,11 +828,28 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
     ipc.getGlobalTelemetry(*telemetry);
   }
 
-  // Add TCP Cluster aggregation
+  // Add TCP Cluster aggregation and SHM synchronization
   auto &tcp = vgre::advanced::TCPClusterManager::instance();
   if (tcp.isEnabled()) {
     if (tcp.isMaster()) {
       tcp.aggregateRemoteTelemetry(*telemetry);
+      
+      // Phase 12: Sync cluster topology to SHM for Dashboard visibility
+      std::vector<vgre::advanced::TCPClusterManager::ClusterNodeInfo> connections;
+      tcp.getConnectedNodes(connections);
+      std::vector<vgre_cluster_node_t> to_sync;
+      for (const auto &conn : connections) {
+          vgre_cluster_node_t node{};
+          std::strncpy(node.address, conn.ip_address.c_str(), sizeof(node.address) - 1);
+          node.port = conn.port;
+          node.cpu_cores = conn.cpu_cores;
+          node.memory_bytes = conn.cpu_memory;
+          node.latency_ms = conn.last_telemetry.avg_kernel_latency_ms;
+          node.available = conn.active ? 1 : 0;
+          std::strncpy(node.igpu_name, conn.igpu_name, sizeof(node.igpu_name) - 1);
+          to_sync.push_back(node);
+      }
+      ipc.updateClusterNodes(to_sync);
     } else {
       tcp.broadcastLocalTelemetry(*telemetry);
     }
@@ -1190,14 +1207,34 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
   if (!count) return VGRE_ERROR_INVALID_VALUE;
   
   auto &tcp = vgre::advanced::TCPClusterManager::instance();
-  if (!tcp.isEnabled() || !tcp.isMaster()) {
-    *count = 0;
-    return VGRE_SUCCESS;
+  auto &ipc = vgre::advanced::IPCManager::instance();
+  
+  std::vector<vgre::advanced::TCPClusterManager::ClusterNodeInfo> connections;
+  bool isMaster = tcp.isEnabled() && tcp.isMaster();
+  
+  if (isMaster) {
+      tcp.getConnectedNodes(connections);
   }
 
-  std::vector<vgre::advanced::TCPClusterManager::ClusterNodeInfo> connections;
-  tcp.getConnectedNodes(connections);
+  // If we are not the master OR we have no local connections, try reading from SHM
+  if (connections.empty() && ipc.isEnabled()) {
+      std::vector<vgre_cluster_node_t> shm_nodes;
+      ipc.getClusterNodes(shm_nodes);
+      
+      int max_count = *count;
+      int actual_count = static_cast<int>(shm_nodes.size());
+      *count = actual_count;
+      
+      if (!nodes || max_count <= 0) return VGRE_SUCCESS;
+      
+      int copy_count = std::min(max_count, actual_count);
+      for (int i = 0; i < copy_count; ++i) {
+          nodes[i] = shm_nodes[i];
+      }
+      return VGRE_SUCCESS;
+  }
 
+  // Direct Master Mode: Populate the SHM if we are the master
   int max_count = *count;
   int actual_count = static_cast<int>(connections.size());
   *count = actual_count;
@@ -1205,6 +1242,8 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
   if (!nodes || max_count <= 0) return VGRE_SUCCESS;
 
   int copy_count = std::min(max_count, actual_count);
+  std::vector<vgre_cluster_node_t> to_sync;
+
   for (int i = 0; i < copy_count; ++i) {
     const auto &conn = connections[i];
     std::strncpy(nodes[i].address, conn.ip_address.c_str(), sizeof(nodes[i].address) - 1);
@@ -1214,6 +1253,12 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
     nodes[i].latency_ms = conn.last_telemetry.avg_kernel_latency_ms;
     nodes[i].available = conn.active ? 1 : 0;
     std::strncpy(nodes[i].igpu_name, conn.igpu_name, sizeof(nodes[i].igpu_name) - 1);
+    
+    if (isMaster) to_sync.push_back(nodes[i]);
+  }
+
+  if (isMaster && ipc.isEnabled()) {
+      ipc.updateClusterNodes(to_sync);
   }
 
   return VGRE_SUCCESS;
