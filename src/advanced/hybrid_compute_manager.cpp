@@ -260,7 +260,7 @@ VGREResult HybridComputeManager::updateRemoteNodeCapability(const std::string &a
   if (!found) {
     RemoteNode node;
     node.address = address;
-    node.port = 7780; // Default cluster port
+    node.port = 7777; // Default cluster port
     node.cpuCores = cores;
     node.cpuMemoryBytes = memory;
     node.hasIntegratedGPU = hasIGPU;

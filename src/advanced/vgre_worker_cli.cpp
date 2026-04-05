@@ -24,14 +24,14 @@ void print_usage(const char* prog) {
     std::cout << "VGRE Remote Worker Utility\n";
     std::cout << "Usage: " << prog << " [options]\n";
     std::cout << "Options:\n";
-    std::cout << "  --port <p>          Port to listen on (default: 9090)\n";
+    std::cout << "  --port <p>          Port to listen on (default: 7777)\n";
     std::cout << "  --auth-token <t>    Authentication token for secure cluster access\n";
     std::cout << "  --master <ip>       IP address of the master node (default: auto-discovery)\n";
     std::cout << "  --help              Print this help message\n";
 }
 
 int main(int argc, char** argv) {
-    int port = 9090;
+    int port = 7777;
     std::string auth_token;
     std::string master_ip = "auto";
 

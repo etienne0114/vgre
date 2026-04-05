@@ -89,21 +89,28 @@ VGRE includes a real-time monitor to visualize compute and memory utilization.
 
 ## 4. Distributed Cluster Setup
 
-VGRE allows you to aggregate multiple network-connected CPUs into a single Virtual GPU cluster.
+VGRE allows you to aggregate multiple network-connected CPUs into a single Virtual GPU cluster using a high-performance **Synchronized Discovery** protocol.
 
 ### 4.1 Start a Worker Node
-On a remote machine:
+On a remote machine, simply start the worker. It will listen on the standard VGRE port (**7777**) and begin broadcasting its availability to any Master nodes on the local subnet.
+
 ```bash
-vgre-worker --port 9090 --auth-token my-secret-key
+vgre-worker --auth-token my-secret-key
 ```
 
-### 4.2 Connect the Master Node
-On your local machine, set the environment variable:
+### 4.2 Master Node (Dashboard)
+On your local machine, run the dashboard or your CUDA application. The Master will proactively scan the network and connect to any available workers automatically—**no manual IP configuration is required** if nodes are on the same subnet.
+
+**Manual Connection (Optional/Advanced):**
+If nodes are on different subnets, you can still specify them manually:
 ```bash
-export VGRE_CLUSTER_NODES="192.168.1.50:9090"
+export VGRE_CLUSTER_NODES="192.168.1.50:7777"
 export VGRE_TCP_AUTH_TOKEN="my-secret-key"
 ./my_cuda_app
 ```
+
+> [!TIP]
+> **Security Synchronization**: If you toggle the "Secure cluster channel" in the dashboard, any discovered workers will automatically detect the change and restart their handshake to establish an encrypted tunnel.
 
 ---
 

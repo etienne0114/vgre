@@ -107,14 +107,6 @@ void sum_reduce(T* dst, const T* src, size_t count) {
     dst[i] += src[i];
 }
 
-void sum_reduce_bf16(uint16_t* dst, const uint16_t* src, size_t count) {
-  for (size_t i = 0; i < count; ++i) {
-    float d = vgre::runtime::bf16_to_fp32(dst[i]);
-    float s = vgre::runtime::bf16_to_fp32(src[i]);
-    dst[i] = vgre::runtime::fp32_to_bf16(d + s);
-  }
-}
-
 static bool socket_would_block() {
 #if defined(_WIN32)
   int err = WSAGetLastError();
@@ -477,6 +469,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
                   "Master Server Listening on port " + std::to_string(port_));
     cluster_thread_ = std::thread(&TCPClusterManager::serverLoop, this);
     udp_thread_ = std::thread(&TCPClusterManager::udpAnnouncerLoop, this);
+    master_discovery_thread_ = std::thread(&TCPClusterManager::udpMasterDiscoveryLoop, this);
 
     // Phase 12: Proactive Node Discovery
     parseProactiveNodes();
@@ -512,6 +505,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       }
 
       udp_thread_ = std::thread(&TCPClusterManager::udpDiscoveryLoop, this);
+      worker_announcer_thread_ = std::thread(&TCPClusterManager::udpWorkerAnnouncerLoop, this);
     } else {
     client_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (client_fd_ == (vgre_socket_t)-1) {
@@ -734,6 +728,9 @@ void TCPClusterManager::serverLoop() {
             if (security_enabled_) {
                 std::shared_ptr<ClientConnection> clientRef = clients_.back();
                 clientRef->is_authenticating = true;
+                clientRef->handshake_start_ms = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
                 clientRef->active = true; // Mark as active so it appears in UI (as authenticating)
                 
                 std::thread([this, clientRef]() {
@@ -1352,11 +1349,77 @@ void TCPClusterManager::udpAnnouncerLoop() {
   broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
   broadcast_addr.sin_port = htons(7778);
 
-  std::string ping_msg = "VGRE_DISCOVERY_PING:" + std::to_string(port_);
+  std::string security_str = (security_enabled_ ? ":SECURE" : ":PLAIN");
+  std::string ping_msg = "VGRE_DISCOVERY_PING:" + std::to_string(port_) + security_str;
+
+  VGRE_LOG_INFO("TCPCluster", "Master: UDP Announcer active (broadcasting master presence)...");
 
   while (enabled_ && is_master_) {
     sendto(udp_fd, ping_msg.c_str(), ping_msg.length(), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+  CLOSE_SOCKET(udp_fd);
+}
+
+void TCPClusterManager::udpMasterDiscoveryLoop() {
+  vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (udp_fd == (vgre_socket_t)-1) return;
+
+  int opt = 1;
+#if defined(_WIN32)
+  setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#else
+  setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
+
+  struct sockaddr_in listen_addr{};
+  listen_addr.sin_family = AF_INET;
+  listen_addr.sin_addr.s_addr = INADDR_ANY;
+  listen_addr.sin_port = htons(7779); // Dedicated port for worker announcements
+
+  if (bind(udp_fd, (struct sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
+    VGRE_LOG_WARN("TCPCluster", "Master: UDP Worker Discovery bind failed");
+    CLOSE_SOCKET(udp_fd);
+    return;
+  }
+
+  VGRE_LOG_INFO("TCPCluster", "Master: Active Worker Discovery enabled (scanning for remote nodes)...");
+
+  char buffer[128];
+  struct sockaddr_in sender_addr{};
+  socklen_t sender_len = sizeof(sender_addr);
+
+  while (enabled_ && is_master_) {
+    int n = recvfrom(udp_fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr*)&sender_addr, &sender_len);
+    if (n > 0) {
+      buffer[n] = '\0';
+      std::string msg(buffer);
+      if (msg.find("VGRE_WORKER_PING") == 0) {
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(sender_addr.sin_addr), ip, INET_ADDRSTRLEN);
+        
+        int worker_port = 7777;
+        size_t colon = msg.find(':');
+        if (colon != std::string::npos) {
+            worker_port = std::stoi(msg.substr(colon + 1));
+        }
+
+        std::string worker_addr = std::string(ip) + ":" + std::to_string(worker_port);
+        
+        // Add to proactive connection list if not already there
+        bool exists = false;
+        {
+          std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+          for(const auto& s : proactive_worker_addresses_) {
+            if (s == worker_addr) { exists = true; break; }
+          }
+          if (!exists) {
+            VGRE_LOG_INFO("TCPCluster", "Master: Automatically discovered worker at " + worker_addr);
+            proactive_worker_addresses_.push_back(worker_addr);
+          }
+        }
+      }
+    }
   }
   CLOSE_SOCKET(udp_fd);
 }
@@ -1412,11 +1475,23 @@ void TCPClusterManager::udpDiscoveryLoop() {
         inet_ntop(AF_INET, &(sender_addr.sin_addr), ip, INET_ADDRSTRLEN);
         host_ = ip;
         
-        // Parse port if present (ping format: VGRE_DISCOVERY_PING:PORT)
+        // Parse: VGRE_DISCOVERY_PING:PORT[:SECURE|PLAIN]
         int connect_port = port_;
-        size_t colon = msg.find(':');
-        if (colon != std::string::npos) {
-            connect_port = std::stoi(msg.substr(colon + 1));
+        size_t first_colon = msg.find(':');
+        size_t second_colon = std::string::npos;
+        
+        if (first_colon != std::string::npos) {
+            second_colon = msg.find(':', first_colon + 1);
+            if (second_colon != std::string::npos) {
+                connect_port = std::stoi(msg.substr(first_colon + 1, second_colon - first_colon - 1));
+                std::string sec_status = msg.substr(second_colon + 1);
+                if (sec_status == "SECURE" && !security_enabled_) {
+                    VGRE_LOG_INFO("TCPCluster", "Worker: Master requires security, auto-enabling encryption...");
+                    security_enabled_ = true;
+                }
+            } else {
+                connect_port = std::stoi(msg.substr(first_colon + 1));
+            }
         }
 
         VGRE_LOG_INFO("TCPCluster", "Discovered Master node at " + host_ + ":" + std::to_string(connect_port));
@@ -1444,6 +1519,33 @@ void TCPClusterManager::udpDiscoveryLoop() {
       data_processor_thread_ = std::thread(&TCPClusterManager::processClientStagingBuffer, this);
       clientLoop();
   }
+}
+
+void TCPClusterManager::udpWorkerAnnouncerLoop() {
+  vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (udp_fd == (vgre_socket_t)-1) return;
+
+  int opt = 1;
+#if defined(_WIN32)
+  setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
+#else
+  setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+#endif
+
+  struct sockaddr_in broadcast_addr{};
+  broadcast_addr.sin_family = AF_INET;
+  broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
+  broadcast_addr.sin_port = htons(7779); // Master scans this port
+
+  std::string ping_msg = "VGRE_WORKER_PING:" + std::to_string(port_);
+  
+  VGRE_LOG_INFO("TCPCluster", "Worker: Proactive Announcer active (seeking master)...");
+
+  while (enabled_ && !is_master_) {
+    sendto(udp_fd, ping_msg.c_str(), ping_msg.length(), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+  }
+  CLOSE_SOCKET(udp_fd);
 }
 
 
@@ -1879,6 +1981,9 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
 
   bool any_secure = false;
   bool any_pending = false;
+  uint64_t now_ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
 
   if (is_master_) {
     std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
@@ -1886,7 +1991,6 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
       if (client && client->active) {
         if (client->secureChannel && client->secureChannel->isInitialized()) {
           any_secure = true;
-          // Use cipher info from first secure client found
           if (std::strlen(total.cipher_name) == 0) {
             SessionInfo s = client->secureChannel->getSessionInfo();
             std::strncpy(total.cipher_name, s.cipher_name, sizeof(total.cipher_name) - 1);
@@ -1894,24 +1998,31 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
             total.session_seconds = s.session_seconds;
           }
         } else if (client->is_authenticating) {
-          any_pending = true;
+          // Monitor for stuck handshakes (15s timeout)
+          if (now_ms - client->handshake_start_ms < 15000) {
+            any_pending = true;
+          }
         }
       }
     }
   } else if (client_secure_channel_ && client_secure_channel_->isInitialized()) {
     any_secure = true;
     total = client_secure_channel_->getSessionInfo();
-    // Still use global counters for the summary (they might be higher due to heartbeats)
     total.packets_sent = global_packets_sent_.load();
     total.bytes_sent = global_bytes_sent_.load();
   } else if (is_authenticating_) {
-    any_pending = true;
+    if (now_ms - last_handshake_start_ms_ < 15000) {
+      any_pending = true;
+    }
   }
 
+  // Version identification for the dashboard
+  char build_info[64];
+  std::snprintf(build_info, sizeof(build_info), " [Build: %s %s]", __DATE__, __TIME__);
+
   if (any_secure) {
-    if (any_pending) {
-       // Optional: could append " (Partial)" but keep it simple for now
-    }
+    std::strncat(total.cipher_name, build_info, 
+                 sizeof(total.cipher_name) - std::strlen(total.cipher_name) - 1);
     return total;
   }
 
@@ -1923,14 +2034,20 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
                  sizeof(total.cipher_name) - 1);
   }
   
+  std::strncat(total.cipher_name, build_info, 
+               sizeof(total.cipher_name) - std::strlen(total.cipher_name) - 1);
   return total;
 }
 
 VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConnection> clientPtr) {
   if (!clientPtr) return VGREResult::ERR_INVALID_VALUE;
   auto &client = *clientPtr;
-  if (!security_enabled_ || auth_token_str_.empty()) {
+  if (!security_enabled_) {
     return VGREResult::SUCCESS; // Security not enabled, skip
+  }
+  if (auth_token_str_.empty()) {
+    VGRE_LOG_ERROR("TCPCluster", "Master: Security is enabled but VGRE_TCP_AUTH_TOKEN is not set. Handshake failed.");
+    return VGREResult::ERR_AUTH_FAILED;
   }
 
   // 1. Generate master nonce
@@ -2009,6 +2126,9 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
   }
   
   is_authenticating_ = true;
+  last_handshake_start_ms_ = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
   VGRE_LOG_INFO("TCPCluster", "Worker: Security handshake started (VGRE Built-in VPN Connecting...)");
 
   // 1. Wait for master's handshake packet using protocol-aware buffering

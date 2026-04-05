@@ -200,7 +200,7 @@ public:
 
   // Initialize as Master (Server) or Client (Worker) Node
   VGREResult initialize(bool is_master, const std::string &host = "127.0.0.1",
-                        int port = 7780);
+                        int port = 7777);
   void shutdown();
 
   // Telemetry Aggregation
@@ -253,6 +253,7 @@ public:
     vgre_telemetry_t last_telemetry;
     std::atomic<bool> active{false};
     std::atomic<bool> is_authenticating{false}; // Phase 13: Background handshake guard
+    uint64_t handshake_start_ms{0};
     std::vector<uint8_t> rx_buffer;
     bool expecting_type = true;
     PacketType pending_type = PacketType::TELEMETRY;
@@ -353,8 +354,10 @@ private:
   void handlePartitionDispatch(const PartitionDispatchPacket &pkt);
   
   // UDP Auto-Discovery
-  void udpAnnouncerLoop();  // Master
-  void udpDiscoveryLoop();  // Client
+  void udpAnnouncerLoop();       // Master (announces master to workers)
+  void udpMasterDiscoveryLoop();  // Master (discovers active workers)
+  void udpDiscoveryLoop();       // Worker (discovers master)
+  void udpWorkerAnnouncerLoop();  // Worker (announces worker to master)
   void proactiveConnectionLoop(); // Master (proactive worker connections)
   void processClientStagingBuffer(); // Client data processor
   void flush_tx_queues(std::shared_ptr<ClientConnection> client);
@@ -389,6 +392,8 @@ private:
   std::thread udp_thread_;
   std::thread proactive_thread_;
   std::thread data_processor_thread_;
+  std::thread master_discovery_thread_;
+  std::thread worker_announcer_thread_;
   std::atomic<bool> stop_proactive_{false};
   std::vector<std::string> proactive_worker_addresses_;
 
@@ -403,6 +408,7 @@ private:
   std::unique_ptr<SecureChannel> client_secure_channel_;
   bool client_security_established_ = false;
   std::atomic<bool> is_authenticating_{false};
+  uint64_t last_handshake_start_ms_{0};
   std::vector<uint8_t> client_rx_buffer_;
   std::mutex client_mutex_;
   std::mutex client_tx_mutex_;
