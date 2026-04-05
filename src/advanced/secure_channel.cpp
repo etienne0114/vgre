@@ -13,6 +13,13 @@
 #if defined(_WIN32)
 #include <bcrypt.h>
 #pragma comment(lib, "bcrypt.lib")
+#else
+// getrandom() is available since Linux 3.17 / glibc 2.25.
+// We prefer it over /dev/urandom because it works in chroot/sandbox environments
+// where /dev/urandom may not be accessible.
+#include <sys/random.h>
+#include <unistd.h>
+#include <fcntl.h>
 #endif
 
 namespace vgre {
@@ -272,17 +279,30 @@ void random_bytes(uint8_t *buf, size_t len) {
   BCryptGenRandom(NULL, buf, static_cast<ULONG>(len),
                   BCRYPT_USE_SYSTEM_PREFERRED_RNG);
 #else
-  // Use /dev/urandom for cryptographic randomness
-  int fd = open("/dev/urandom", O_RDONLY);
-  if (fd >= 0) {
-    size_t offset = 0;
-    while (offset < len) {
-      ssize_t n = read(fd, buf + offset, len - offset);
-      if (n <= 0)
-        break;
+  // Prefer getrandom() (Linux ≥ 3.17) — works in chroot and sandboxes
+  // where /dev/urandom may not be available.
+  size_t offset = 0;
+  while (offset < len) {
+    ssize_t n = ::getrandom(buf + offset, len - offset, 0);
+    if (n > 0) {
       offset += static_cast<size_t>(n);
+    } else if (n < 0 && errno == EINTR) {
+      continue; // interrupted by signal, retry
+    } else {
+      break; // getrandom not available or fatal error — fall through
     }
-    close(fd);
+  }
+  if (offset < len) {
+    // Fallback: /dev/urandom for environments without getrandom()
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+      while (offset < len) {
+        ssize_t n = read(fd, buf + offset, len - offset);
+        if (n <= 0) break;
+        offset += static_cast<size_t>(n);
+      }
+      close(fd);
+    }
   }
 #endif
 }
