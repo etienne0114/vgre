@@ -171,3 +171,30 @@ If time-limited, you can:
 **Next**: Will execute `vgre_sync.bat` once tools are in PATH  
 **Time Estimate**: 10-15 minutes for tool installation, then 8-13 minutes for VGRE build
 
+---
+
+## 🚀 Global Command Access (vgre-worker)
+
+By default, the VGRE build script (`vgre_sync.bat`) attempts to add the installation folder (`%LOCALAPPDATA%\VGRE`) to your User **PATH** permanently. This allows you to run `vgre-worker` from any terminal session started *after* the sync completes.
+
+### Manual Verification
+1.  Open a **NEW** Command Prompt or PowerShell window.
+2.  Type: `vgre-worker --help`
+3.  If you see "command not recognized", you may need to add it to your PATH manually.
+
+### Manual PATH Update (Standard Method)
+
+1.  Press `Win + R`, type `sysdm.cpl`, and press Enter.
+2.  Navigate to the **Advanced** tab.
+3.  Click **Environment Variables...**
+4.  In the **User variables** section, find the variable named **Path** and select it.
+5.  Click **Edit...**, then click **New**.
+6.  Paste: `%LOCALAPPDATA%\VGRE`
+7.  Click **OK** on all three open windows.
+8.  **Important**: You must close and reopen any existing terminal windows (CMD, PowerShell, or VS Code terminals) for the change to take effect.
+
+### Running with Dependencies
+`vgre-worker.exe` depends on `vgre.dll` and `vgre_cudart.dll`. Both are copied into the same folder (`%LOCALAPPDATA%\VGRE`) during the sync process to ensure the command "just works".
+
+---
+

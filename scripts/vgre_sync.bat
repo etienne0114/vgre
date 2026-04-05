@@ -166,13 +166,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
-copy /Y "%BUILD_DIR%\Release\vgre.dll" "%INSTALL_DIR%\lib\" >nul
+copy /Y "%BUILD_DIR%\Release\vgre.dll" "%INSTALL_DIR%\" >nul
 if errorlevel 1 (
     echo ERROR: Failed to copy vgre.dll
     exit /b 1
 )
 
-copy /Y "%BUILD_DIR%\Release\vgre_cudart.dll" "%INSTALL_DIR%\lib\" >nul
+copy /Y "%BUILD_DIR%\Release\vgre_cudart.dll" "%INSTALL_DIR%\" >nul
 if errorlevel 1 (
     echo ERROR: Failed to copy vgre_cudart.dll
     exit /b 1
@@ -218,9 +218,22 @@ if errorlevel 1 (
 )
 
 echo.
+echo === Updating System Path ===
+for /f "usebackq" %%I in (`powershell -NoProfile -Command "$dir='%INSTALL_DIR%'; $path=[Environment]::GetEnvironmentVariable('Path','User'); if($path -notlike '*'+$dir+'*'){ [Environment]::SetEnvironmentVariable('Path', $path+';'+$dir, 'User'); Write-Output 'CHANGED' } else { Write-Output 'EXISTS' }"`) do set "PATH_STATUS=%%I"
+
+if "%PATH_STATUS%"=="CHANGED" (
+    echo ✅ Added %INSTALL_DIR% to your User PATH.
+    echo ℹ️  Please RESTART your terminal for the changes to take effect.
+) else (
+    echo ✅ %INSTALL_DIR% is already in your PATH.
+)
+
+echo.
 echo VGRE Sync Complete.
 echo Installed to: %INSTALL_DIR%
 echo Desktop shortcut: %SHORTCUT_PATH%
+echo.
+echo 🚀 You can now run 'vgre-worker' from any NEW terminal.
 pause
 exit /b 0
 
