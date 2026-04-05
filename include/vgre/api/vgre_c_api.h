@@ -308,6 +308,11 @@ int vgre_credits_get_balance(const char *address, vgre_credit_info_t *info);
 int vgre_credits_get_all(vgre_credit_info_t *nodes, int *count);
 
 /**
+ * @brief Resets the credit ledger globally.
+ */
+int vgre_credits_reset(void);
+
+/**
  * @brief Performs a distributed all_reduce across the cluster.
  * @param ptr Pointer to local buffer (will be reduced in-place).
  * @param count Number of elements in the buffer.
