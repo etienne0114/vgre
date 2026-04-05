@@ -4,6 +4,7 @@
 #include "vgre/advanced/resource_ledger.h"
 #include "vgre/advanced/workload_partitioner.h"
 #include "vgre/advanced/hardware_token_manager.h"
+#include "vgre/advanced/ipc_manager.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/input_validation.h"
 #include "vgre/core/memory_manager.h"
@@ -45,6 +46,7 @@ typedef int socklen_t;
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <poll.h>
+#include <errno.h>
 
 #define CLOSE_SOCKET(s) close(s)
 #define IOCTL_NONBLOCK(s)                                                      \
@@ -611,6 +613,11 @@ void TCPClusterManager::shutdown() {
       proactive_thread_.join();
   }
 
+  // Clear SHM nodes on shutdown to prevent stale data in dashboard
+  if (is_master_) {
+    vgre::advanced::IPCManager::instance().updateClusterNodes({});
+  }
+
   if (!wasEnabled) return; // No further cleanup needed for second caller
 
   if (is_master_) {
@@ -724,6 +731,9 @@ void TCPClusterManager::serverLoop() {
                 }
             }
 
+            // Phase 13: Instant IPC Sync for accepted connection
+            syncToIPC();
+
             // Phase 13: Asynchronous Handshake Handover
             if (security_enabled_) {
                 std::shared_ptr<ClientConnection> clientRef = clients_.back();
@@ -748,6 +758,8 @@ void TCPClusterManager::serverLoop() {
                     } else {
                         VGRE_LOG_INFO("TCPCluster", "Master: Security established for " + clientRef->ip_address);
                     }
+                    // Inform IPC about status update
+                    this->syncToIPC();
                 }).detach();
             } else {
                 clients_.back()->active = true;
@@ -771,11 +783,13 @@ void TCPClusterManager::serverLoop() {
                                 VGRE_LOG_INFO("TCPCluster", "Master: Worker disconnected.");
                                 client->active = false;
                                 CLOSE_SOCKET(client->socket_fd);
+                                syncToIPC();
                             }
                         } else {
                             VGRE_LOG_WARN("TCPCluster", "Master: Client socket error or hup.");
                             client->active = false;
                             CLOSE_SOCKET(client->socket_fd);
+                            syncToIPC();
                         }
                         break;
                     }
@@ -1027,13 +1041,17 @@ void TCPClusterManager::clientLoop() {
     }
 #endif
     
-    // Simplified iGPU check for handshake
-#ifdef VGRE_HAS_OPENCL_BACKEND
-    cpkt.has_igpu = true;
-    std::strncpy(cpkt.igpu_name, "VGRE-Enabled iGPU", 63);
-#else
-    cpkt.has_igpu = false;
-#endif
+    // Authoritative hardware detection for handshake
+    auto &engine = core::RuntimeEngine::instance();
+    if (engine.isInitialized() && engine.getDeviceCount() > 0) {
+        cpkt.has_igpu = true;
+        DeviceProperties props;
+        engine.getDeviceProperties(0, props);
+        std::strncpy(cpkt.igpu_name, props.name, 63);
+    } else {
+        cpkt.has_igpu = false;
+        std::strncpy(cpkt.igpu_name, "None (CPU Hybrid)", 63);
+    }
 
     send_packet(client_fd_, PacketType::CAPABILITY, &cpkt, sizeof(CapabilityPacket), client_secure_channel_.get());
   }
@@ -2691,6 +2709,41 @@ void TCPClusterManager::proactiveConnectionLoop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
+}
+
+void TCPClusterManager::syncToIPC() {
+  if (!is_master_ || !enabled_) return;
+
+  std::vector<vgre_cluster_node_t> ipcNodes;
+  {
+      std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+      for (const auto& c : clients_) {
+          if (!c) continue;
+          
+          vgre_cluster_node_t node{};
+          std::strncpy(node.address, c->ip_address.c_str(), sizeof(node.address) - 1);
+          node.port = c->port;
+          node.cpu_cores = c->cpu_cores;
+          node.memory_bytes = c->cpu_memory;
+          node.latency_ms = c->last_telemetry.avg_kernel_latency_ms;
+          
+          if (c->security_established) {
+              node.available = 1; // Secure
+          } else if (c->is_authenticating) {
+              node.available = 2; // Syncing
+          } else if (c->active) {
+              node.available = 1; // Plain
+          } else {
+              node.available = 0;
+          }
+          
+          std::strncpy(node.igpu_name, c->igpu_name, sizeof(node.igpu_name) - 1);
+          ipcNodes.push_back(node);
+      }
+  }
+
+  // Push updated list to Shared Memory for dashboard visibility
+  vgre::advanced::IPCManager::instance().updateClusterNodes(ipcNodes);
 }
 
 } // namespace advanced

@@ -364,6 +364,9 @@ private:
   void parseProactiveNodes();
 
   // Phase 5: Security handshake
+  // ── Phase 13: IPC Visibility Support ──────────────────────────────────
+  void syncToIPC();
+
   VGREResult performSecureHandshake(std::shared_ptr<ClientConnection> client);
   VGREResult performClientSecureHandshake();
 
