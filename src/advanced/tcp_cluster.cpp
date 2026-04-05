@@ -474,11 +474,12 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     master_discovery_thread_ = std::thread(&TCPClusterManager::udpMasterDiscoveryLoop, this);
 
     // Phase 12: Proactive Node Discovery
+    // Always start the proactive thread so UDP-discovered workers (added
+    // dynamically by udpMasterDiscoveryLoop) are also picked up. The loop
+    // idles safely when the address list is empty.
     parseProactiveNodes();
-    if (!proactive_worker_addresses_.empty()) {
-        stop_proactive_ = false;
-        proactive_thread_ = std::thread(&TCPClusterManager::proactiveConnectionLoop, this);
-    }
+    stop_proactive_ = false;
+    proactive_thread_ = std::thread(&TCPClusterManager::proactiveConnectionLoop, this);
   } else {
     // Client Node (Worker)
     if (host_ == "auto" || host_.empty()) {
@@ -612,6 +613,16 @@ void TCPClusterManager::shutdown() {
   if (proactive_thread_.joinable()) {
       proactive_thread_.join();
   }
+  // These two threads were previously never joined, causing std::terminate()
+  // in ~std::thread() when the singleton was destroyed or re-initialized.
+  // udpMasterDiscoveryLoop now has SO_RCVTIMEO so recvfrom times out within 1s.
+  // udpWorkerAnnouncerLoop already sleeps in short increments checked against enabled_.
+  if (master_discovery_thread_.joinable()) {
+      master_discovery_thread_.join();
+  }
+  if (worker_announcer_thread_.joinable()) {
+      worker_announcer_thread_.join();
+  }
 
   // Clear SHM nodes on shutdown to prevent stale data in dashboard
   if (is_master_) {
@@ -630,6 +641,30 @@ void TCPClusterManager::serverLoop() {
   VGRE_LOG_DEBUG("TCPCluster", "Master Server Loop starting...");
 
   while (enabled_) {
+    // 0. Purge dead clients (active=false and no handshake in flight).
+    // Release the lock BEFORE calling syncToIPC() to avoid lock-order inversion
+    // between clients_mutex_ and IPCManager::mutex_.
+    {
+        bool anyRemoved = false;
+        {
+            std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+            auto before = clients_.size();
+            clients_.erase(
+                std::remove_if(clients_.begin(), clients_.end(),
+                    [](const std::shared_ptr<ClientConnection>& c) {
+                        return c && !c->active && !c->is_authenticating;
+                    }),
+                clients_.end());
+            if (clients_.size() != before) {
+                VGRE_LOG_DEBUG("TCPCluster",
+                    "Purged " + std::to_string(before - clients_.size()) +
+                    " dead client(s); remaining=" + std::to_string(clients_.size()));
+                anyRemoved = true;
+            }
+        } // release clients_mutex_ before touching IPC
+        if (anyRemoved) syncToIPC(); // push fresh (dead-free) snapshot
+    }
+
     // 1. Prepare poll fds
     std::vector<vgre_pollfd> fds;
     
@@ -696,6 +731,37 @@ void TCPClusterManager::serverLoop() {
             rateLimiter_.record(std::string(ipstr));
 
             IOCTL_NONBLOCK(new_socket);
+            // Enable TCP keepalive so hard crashes / network partitions are detected
+            // without waiting for a send to fail (typically within ~11s with these settings).
+            {
+                int ka = 1;
+                setsockopt(new_socket, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));
+#if defined(TCP_KEEPIDLE)
+                int idle = 5;   setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
+#endif
+#if defined(TCP_KEEPINTVL)
+                int intvl = 2;  setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+#endif
+#if defined(TCP_KEEPCNT)
+                int cnt = 3;    setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,  sizeof(cnt));
+#endif
+            }
+
+            // ── Worker fast-path ───────────────────────────────────────────
+            // When a WORKER's server socket gets an inbound connection from
+            // the master (proactive path), we must NOT add it to clients_ or
+            // run the server-side handshake from here — that would conflict
+            // with clientLoop() which is the proper owner of that socket.
+            // Just store the fd and let udpDiscoveryLoop → clientLoop handle
+            // the full handshake + telemetry cycle.
+            if (!is_master_) {
+                VGRE_LOG_INFO("TCPCluster",
+                    "Worker: Accepted inbound connection from Master at " +
+                    std::string(ipstr) + " — handing off to clientLoop");
+                client_fd_ = new_socket;
+                continue; // Skip master-only clients_/IPC/handshake code below
+            }
+
             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
             auto conn = std::make_shared<ClientConnection>();
             conn->socket_fd = new_socket;
@@ -705,24 +771,20 @@ void TCPClusterManager::serverLoop() {
             conn->expecting_type = true;
             conn->rx_buffer.clear();
             clients_.push_back(std::move(conn));
-            
-            if (is_master_) {
-                VGRE_LOG_INFO("TCPCluster", "Master: Accepted new remote node from " + std::string(ipstr) + ":" + std::to_string(ntohs(address.sin_port)));
-            } else {
-                VGRE_LOG_INFO("TCPCluster", "Worker: Accepted connection from Master at " + std::string(ipstr));
-                client_fd_ = new_socket;
-            }
-            
+
+            VGRE_LOG_INFO("TCPCluster", "Master: Accepted new remote node from " +
+                std::string(ipstr) + ":" + std::to_string(ntohs(address.sin_port)));
+
             // Phase 11: Detect local connection for SHM optimization
             if (std::string(ipstr) == "127.0.0.1" || std::string(ipstr) == "::1") {
                 VGRE_LOG_INFO("TCPCluster", "Master: Local connection detected, initiating SHM transport...");
                 clients_.back()->is_local = true;
-                
+
                 // Create unique SHM segment for this client
                 clients_.back()->shmManager = std::make_unique<vgre::core::ShmManager>();
                 std::string shmName = "vgre_shm_" + std::to_string(new_socket);
                 size_t shmSize = 256 * 1024 * 1024; // 256MB default
-                
+
                 if (clients_.back()->shmManager->open(shmName, shmSize, true) == VGREResult::SUCCESS) {
                     ShmInitPacket sipkt{};
                     std::strncpy(sipkt.shm_name, shmName.c_str(), sizeof(sipkt.shm_name) - 1);
@@ -746,19 +808,24 @@ void TCPClusterManager::serverLoop() {
                 std::thread([this, clientRef]() {
                     VGREResult sr = this->performSecureHandshake(clientRef);
                     clientRef->is_authenticating = false;
-                    
+
                     if (sr != VGREResult::SUCCESS) {
                         VGRE_LOG_ERROR("TCPCluster", "Master: Security handshake failed for " + clientRef->ip_address);
                         clientRef->active = false;
                         CLOSE_SOCKET(clientRef->socket_fd);
-                        
-                        // Remove from active list eventually
-                        std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
-                        clients_.erase(std::remove(clients_.begin(), clients_.end(), clientRef), clients_.end());
+                        {
+                            std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+                            clients_.erase(std::remove(clients_.begin(), clients_.end(), clientRef),
+                                           clients_.end());
+                        }
                     } else {
-                        VGRE_LOG_INFO("TCPCluster", "Master: Security established for " + clientRef->ip_address);
+                        // Mark fully authenticated so dashboard shows SECURED status.
+                        clientRef->security_established = true;
+                        VGRE_LOG_INFO("TCPCluster",
+                            "Master: Security established for " + clientRef->ip_address);
                     }
-                    // Inform IPC about status update
+                    // Always push the updated state to the IPC shared-memory segment
+                    // so the dashboard reflects the outcome immediately.
                     this->syncToIPC();
                 }).detach();
             } else {
@@ -1121,7 +1188,7 @@ void TCPClusterManager::clientLoop() {
         staging_cv_.notify_one();
       } else if (n < 0) { // Disconnected or error
         VGRE_LOG_ERROR("TCPCluster", "Client command channel disconnected");
-        enabled_ = false;
+        break; // Exit clientLoop; udpDiscoveryLoop will handle reconnect.
       }
     } else if (poll_res < 0) {
 #if defined(_WIN32)
@@ -1130,7 +1197,7 @@ void TCPClusterManager::clientLoop() {
       if (errno != EINTR) {
 #endif
         VGRE_LOG_ERROR("TCPCluster", "Client poll() failed");
-        enabled_ = false;
+        break; // Let udpDiscoveryLoop handle reconnect.
       }
     }
   }
@@ -1401,6 +1468,17 @@ void TCPClusterManager::udpMasterDiscoveryLoop() {
     return;
   }
 
+  // 1-second receive timeout so the while-loop condition is re-evaluated
+  // regularly and the thread can exit promptly when shutdown() sets enabled_=false.
+  // Without this, recvfrom blocks indefinitely, preventing shutdown from joining.
+#if defined(_WIN32)
+  DWORD rcvTimeout = 1000;
+  setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcvTimeout, sizeof(rcvTimeout));
+#else
+  struct timeval rcvTv{1, 0};
+  setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTv, sizeof(rcvTv));
+#endif
+
   VGRE_LOG_INFO("TCPCluster", "Master: Active Worker Discovery enabled (scanning for remote nodes)...");
 
   char buffer[128];
@@ -1443,100 +1521,173 @@ void TCPClusterManager::udpMasterDiscoveryLoop() {
 }
 
 void TCPClusterManager::udpDiscoveryLoop() {
-  vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (udp_fd == (vgre_socket_t)-1) return;
-
-  int opt = 1;
-#if defined(_WIN32)
-  setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-#else
-  setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#ifdef SO_REUSEPORT
-  setsockopt(udp_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-#endif
-#endif
-
-  struct sockaddr_in listen_addr{};
-  listen_addr.sin_family = AF_INET;
-  listen_addr.sin_addr.s_addr = INADDR_ANY;
-  listen_addr.sin_port = htons(7778);
-
-  if (bind(udp_fd, (struct sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
-    VGRE_LOG_WARN("TCPCluster", "UDP discovery bind failed");
-    CLOSE_SOCKET(udp_fd);
-    return;
+  // Start the staging data-processor once — it lives as long as the worker is
+  // enabled and is reused across reconnect cycles.
+  if (!data_processor_thread_.joinable()) {
+      data_processor_thread_ = std::thread(
+          &TCPClusterManager::processClientStagingBuffer, this);
   }
 
-  struct timeval tv;
-  tv.tv_sec = 1;
-  tv.tv_usec = 0;
+  // ── Outer reconnect loop ─────────────────────────────────────────────────
+  // After a master disconnect clientLoop() returns with enabled_ still true.
+  // We reset connection state and re-run discovery so the worker auto-rejoins.
+  while (enabled_) {
+    // Open a fresh UDP socket for this discovery attempt.
+    vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_fd == (vgre_socket_t)-1) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        continue;
+    }
+
+    {
+      int opt = 1;
 #if defined(_WIN32)
-  DWORD timeout = 1000;
-  setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+      setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 #else
-  setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+      setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+      setsockopt(udp_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
+#endif
+    }
+
+    struct sockaddr_in listen_addr{};
+    listen_addr.sin_family = AF_INET;
+    listen_addr.sin_addr.s_addr = INADDR_ANY;
+    listen_addr.sin_port = htons(7778);
+
+    if (bind(udp_fd, (struct sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
+      VGRE_LOG_WARN("TCPCluster", "UDP discovery bind failed, retrying in 3s...");
+      CLOSE_SOCKET(udp_fd);
+      std::this_thread::sleep_for(std::chrono::seconds(3));
+      continue;
+    }
+
+    // 1-second receive timeout so we can check enabled_ regularly.
+#if defined(_WIN32)
+    DWORD timeout = 1000;
+    setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+#else
+    struct timeval tv{1, 0};
+    setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 #endif
 
-  char buffer[64];
-  struct sockaddr_in sender_addr{};
-  socklen_t sender_len = sizeof(sender_addr);
+    VGRE_LOG_INFO("TCPCluster", "Scanning local subnet for Master node broadcasts...");
 
-  VGRE_LOG_INFO("TCPCluster", "Scanning local subnet for Master node broadcasts...");
+    // ── Inner discovery loop: wait for master UDP broadcast ─────────────────
+    char buffer[64];
+    struct sockaddr_in sender_addr{};
+    socklen_t sender_len = sizeof(sender_addr);
 
-  while (enabled_ && client_fd_ == (vgre_socket_t)-1) {
-    int n = recvfrom(udp_fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr*)&sender_addr, &sender_len);
-    if (n > 0) {
-      buffer[n] = '\0';
-      std::string msg(buffer);
-      if (msg.find("VGRE_DISCOVERY_PING") == 0) {
-        char ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &(sender_addr.sin_addr), ip, INET_ADDRSTRLEN);
-        host_ = ip;
-        
-        // Parse: VGRE_DISCOVERY_PING:PORT[:SECURE|PLAIN]
-        int connect_port = port_;
-        size_t first_colon = msg.find(':');
-        size_t second_colon = std::string::npos;
-        
-        if (first_colon != std::string::npos) {
-            second_colon = msg.find(':', first_colon + 1);
-            if (second_colon != std::string::npos) {
-                connect_port = std::stoi(msg.substr(first_colon + 1, second_colon - first_colon - 1));
-                std::string sec_status = msg.substr(second_colon + 1);
-                if (sec_status == "SECURE" && !security_enabled_) {
-                    VGRE_LOG_INFO("TCPCluster", "Worker: Master requires security, auto-enabling encryption...");
-                    security_enabled_ = true;
-                }
-            } else {
-                connect_port = std::stoi(msg.substr(first_colon + 1));
-            }
+    while (enabled_ && client_fd_ == (vgre_socket_t)-1) {
+      int n = recvfrom(udp_fd, buffer, sizeof(buffer) - 1, 0,
+                       (struct sockaddr*)&sender_addr, &sender_len);
+      if (n > 0) {
+        buffer[n] = '\0';
+        std::string msg(buffer);
+        if (msg.find("VGRE_DISCOVERY_PING") == 0) {
+          char ip[INET_ADDRSTRLEN];
+          inet_ntop(AF_INET, &(sender_addr.sin_addr), ip, INET_ADDRSTRLEN);
+          host_ = ip;
+
+          // Parse: VGRE_DISCOVERY_PING:PORT[:SECURE|PLAIN]
+          int connect_port = port_;
+          size_t first_colon = msg.find(':');
+          if (first_colon != std::string::npos) {
+              size_t second_colon = msg.find(':', first_colon + 1);
+              if (second_colon != std::string::npos) {
+                  try { connect_port = std::stoi(
+                      msg.substr(first_colon + 1, second_colon - first_colon - 1)); }
+                  catch (...) {}
+                  std::string sec_status = msg.substr(second_colon + 1);
+                  if (sec_status == "SECURE" && !security_enabled_) {
+                      VGRE_LOG_INFO("TCPCluster",
+                          "Worker: Master requires security, auto-enabling encryption...");
+                      security_enabled_ = true;
+                  }
+              } else {
+                  try { connect_port = std::stoi(msg.substr(first_colon + 1)); }
+                  catch (...) {}
+              }
+          }
+
+          VGRE_LOG_INFO("TCPCluster",
+              "Discovered Master node at " + host_ + ":" +
+              std::to_string(connect_port));
+
+          vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, 0);
+          if (sock == (vgre_socket_t)-1) continue;
+
+          struct sockaddr_in serv_addr{};
+          serv_addr.sin_family = AF_INET;
+          serv_addr.sin_port = htons(connect_port);
+          inet_pton(AF_INET, host_.c_str(), &serv_addr.sin_addr);
+
+          if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) >= 0) {
+              // Keepalive so we detect a hard master crash quickly.
+              {
+                  int ka = 1;
+                  setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));
+#if defined(TCP_KEEPIDLE)
+                  int idle = 5;  setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
+#endif
+#if defined(TCP_KEEPINTVL)
+                  int intvl = 2; setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+#endif
+#if defined(TCP_KEEPCNT)
+                  int cnt = 3;   setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,  sizeof(cnt));
+#endif
+              }
+              IOCTL_NONBLOCK(sock);
+              client_fd_ = sock;
+              VGRE_LOG_INFO("TCPCluster",
+                  "Connected to Remote Master Node at " + host_);
+              break; // exit inner discovery loop
+          } else {
+              CLOSE_SOCKET(sock);
+          }
         }
+      }
+    } // inner discovery loop
 
-        VGRE_LOG_INFO("TCPCluster", "Discovered Master node at " + host_ + ":" + std::to_string(connect_port));
-        
-        client_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-        struct sockaddr_in serv_addr;
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_port = htons(connect_port);
-        inet_pton(AF_INET, host_.c_str(), &serv_addr.sin_addr);
-        
-        if (connect(client_fd_, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) >= 0) {
-            IOCTL_NONBLOCK(client_fd_);
-            VGRE_LOG_INFO("TCPCluster", "Connected to Remote Master Node at " + host_);
-            break;
-        } else {
+    CLOSE_SOCKET(udp_fd);
+
+    if (!enabled_) break;
+
+    if (client_fd_ != (vgre_socket_t)-1) {
+        // Run the client protocol (capability exchange, telemetry, commands).
+        // clientLoop() breaks (not enabled_=false) on disconnect so we can retry.
+        clientLoop();
+
+        // ── Post-disconnect cleanup ──────────────────────────────────────────
+        // clientLoop exited — either a disconnect (break) or shutdown (enabled_=false).
+        if (client_fd_ != (vgre_socket_t)-1) {
             CLOSE_SOCKET(client_fd_);
             client_fd_ = (vgre_socket_t)-1;
         }
-      }
-    }
-  }
-  CLOSE_SOCKET(udp_fd);
+        // Reset security for the next session.
+        client_secure_channel_.reset();
+        client_security_established_ = false;
+        is_authenticating_ = false;
+        // Drain/reset receive buffers.
+        client_rx_buffer_.clear();
+        {
+            std::lock_guard<std::mutex> lk(staging_mutex_);
+            client_rx_staging_A_.clear();
+            client_rx_staging_B_.clear();
+            active_staging_   = &client_rx_staging_A_;
+            processing_staging_ = &client_rx_staging_B_;
+            staging_ready_ = false;
+        }
 
-  if (client_fd_ != (vgre_socket_t)-1 && enabled_) {
-      data_processor_thread_ = std::thread(&TCPClusterManager::processClientStagingBuffer, this);
-      clientLoop();
-  }
+        if (!enabled_) break; // proper shutdown — do not retry
+
+        VGRE_LOG_INFO("TCPCluster",
+            "Worker: Disconnected from master, retrying discovery in 3s...");
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        // outer loop continues → fresh UDP socket, fresh discovery
+    }
+  } // outer reconnect loop
 }
 
 void TCPClusterManager::udpWorkerAnnouncerLoop() {
@@ -1560,8 +1711,12 @@ void TCPClusterManager::udpWorkerAnnouncerLoop() {
   VGRE_LOG_INFO("TCPCluster", "Worker: Proactive Announcer active (seeking master)...");
 
   while (enabled_ && !is_master_) {
-    sendto(udp_fd, ping_msg.c_str(), ping_msg.length(), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    sendto(udp_fd, ping_msg.c_str(), ping_msg.length(), 0,
+           (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+    // Sleep in 200ms increments so shutdown() can join within 200ms.
+    for (int i = 0; i < 25 && enabled_ && !is_master_; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
   }
   CLOSE_SOCKET(udp_fd);
 }
@@ -1951,7 +2106,8 @@ void TCPClusterManager::getConnectedNodes(std::vector<TCPClusterManager::Cluster
   std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
   outNodes.clear();
   for (const auto &c : clients_) {
-    if (!c) continue;
+    // Only report nodes that are live or still handshaking — not dead ones.
+    if (!c || (!c->active && !c->is_authenticating)) continue;
     TCPClusterManager::ClusterNodeInfo info;
     info.ip_address = c->ip_address;
     info.port = c->port;
@@ -2592,20 +2748,36 @@ void TCPClusterManager::proactiveConnectionLoop() {
     VGRE_LOG_DEBUG("TCPCluster", "Master: Proactive Connection Loop starting...");
     
     while (enabled_ && !stop_proactive_) {
-        for (const auto& addr : proactive_worker_addresses_) {
+        // Snapshot the address list under the lock to avoid a data race with
+        // udpMasterDiscoveryLoop which appends addresses under clients_mutex_.
+        std::vector<std::string> addrSnapshot;
+        {
+            std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+            addrSnapshot = proactive_worker_addresses_;
+        }
+
+        for (const auto& addr : addrSnapshot) {
             if (!enabled_ || stop_proactive_) break;
 
-            // Check if already connected
+            // Extract IP and port before the alreadyConnected check so we can
+            // match by IP only (an inbound connection from the same worker has
+            // a random ephemeral port, not the worker's listening port).
+            std::string ip = addr;
+            int port = port_; // default: master's listening port
+            size_t colon = addr.find(':');
+            if (colon != std::string::npos) {
+                ip = addr.substr(0, colon);
+                try { port = std::stoi(addr.substr(colon + 1)); }
+                catch (...) { port = port_; }
+            }
+
+            // Check if already connected by IP (regardless of ephemeral port).
             bool alreadyConnected = false;
             {
                 std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
                 for (const auto& client : clients_) {
-                    if (client && client->active && client->ip_address + ":" + std::to_string(port_) == addr) {
-                        alreadyConnected = true;
-                        break;
-                    }
-                    // Also check just IP if port is default or implicit
-                    if (client && client->active && client->ip_address == addr) {
+                    if (client && (client->active || client->is_authenticating)
+                            && client->ip_address == ip) {
                         alreadyConnected = true;
                         break;
                     }
@@ -2613,15 +2785,6 @@ void TCPClusterManager::proactiveConnectionLoop() {
             }
 
             if (alreadyConnected) continue;
-
-            // Extract IP and Port
-            std::string ip = addr;
-            int port = port_; // Default to master's port
-            size_t colon = addr.find(':');
-            if (colon != std::string::npos) {
-                ip = addr.substr(0, colon);
-                port = std::stoi(addr.substr(colon + 1));
-            }
 
             VGRE_LOG_DEBUG("TCPCluster", "Master: Attempting proactive connection to " + ip + ":" + std::to_string(port));
 
@@ -2667,40 +2830,68 @@ void TCPClusterManager::proactiveConnectionLoop() {
 
             // Connection successful! Add as worker.
             VGRE_LOG_INFO("TCPCluster", "Master: Proactively connected to worker at " + ip + ":" + std::to_string(port));
-            
+
+            // Enable TCP keepalive so a hard crash on the worker side is detected quickly.
+            {
+                int ka = 1;
+                setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));
+#if defined(TCP_KEEPIDLE)
+                int idle = 5;   setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
+#endif
+#if defined(TCP_KEEPINTVL)
+                int intvl = 2;  setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+#endif
+#if defined(TCP_KEEPCNT)
+                int cnt = 3;    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,  sizeof(cnt));
+#endif
+            }
             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
             auto conn = std::make_shared<ClientConnection>();
             conn->socket_fd = sock;
             conn->ip_address = ip;
+            conn->port = port;         // record worker's listening port for display
             conn->active = true;
             conn->expecting_type = true;
             clients_.push_back(std::move(conn));
-            
-            // Phase 5: SecHandshake
-            // Phase 13: Asynchronous Handshake Handover for Proactive Connection
+
+            // Immediately push to IPC so the dashboard shows the new node without
+            // waiting for the next telemetry poll or handshake completion.
+            syncToIPC();
+
             if (security_enabled_) {
                 std::shared_ptr<ClientConnection> clientRef = clients_.back();
                 clientRef->is_authenticating = true;
                 clientRef->active = true;
-                
+
                 std::thread([this, clientRef]() {
                     VGREResult sr = this->performSecureHandshake(clientRef);
                     clientRef->is_authenticating = false;
-                    
+
                     if (sr != VGREResult::SUCCESS) {
-                        VGRE_LOG_ERROR("TCPCluster", "Master: Proactive handshake failed for " + clientRef->ip_address);
+                        VGRE_LOG_ERROR("TCPCluster",
+                            "Master: Proactive handshake failed for " + clientRef->ip_address);
                         clientRef->active = false;
                         CLOSE_SOCKET(clientRef->socket_fd);
-                        
-                        std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
-                        clients_.erase(std::remove(clients_.begin(), clients_.end(), clientRef), clients_.end());
+                        {
+                            std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+                            clients_.erase(std::remove(clients_.begin(), clients_.end(), clientRef),
+                                           clients_.end());
+                        }
                     } else {
-                        VGRE_LOG_INFO("TCPCluster", "Master: Security established (proactive) for " + clientRef->ip_address);
+                        // Mark fully authenticated so dashboard shows SECURED status.
+                        clientRef->security_established = true;
+                        VGRE_LOG_INFO("TCPCluster",
+                            "Master: Security established (proactive) for " + clientRef->ip_address);
                     }
+                    // Push outcome to IPC — success adds the node as SECURED/active,
+                    // failure removes it (because it was erased from clients_ above).
+                    this->syncToIPC();
                 }).detach();
             } else {
                 clients_.back()->security_established = true;
                 clients_.back()->active = true;
+                // No-security path: push immediately (no thread needed).
+                syncToIPC();
             }
         }
 
@@ -2718,8 +2909,11 @@ void TCPClusterManager::syncToIPC() {
   {
       std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
       for (const auto& c : clients_) {
-          if (!c) continue;
-          
+          // Skip dead nodes — do NOT include them in the IPC snapshot.
+          // Including available=0 nodes inflates cluster_node_count and
+          // causes the dashboard to show stale CONNECTED entries.
+          if (!c || (!c->active && !c->is_authenticating)) continue;
+
           vgre_cluster_node_t node{};
           std::strncpy(node.address, c->ip_address.c_str(), sizeof(node.address) - 1);
           node.port = c->port;
