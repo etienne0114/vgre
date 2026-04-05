@@ -123,6 +123,7 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
         llvm::orc::ThreadSafeContext(std::make_unique<llvm::LLVMContext>());
 
     // Ensure libstdc++ / libgcc symbols are available to the JIT.
+#ifndef _WIN32
     {
       std::string err;
       if (llvm::sys::DynamicLibrary::LoadLibraryPermanently("libstdc++.so.6", &err)) {
@@ -135,6 +136,7 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
                       "Failed to load libgcc_s.so.1 for JIT: " + err);
       }
     }
+#endif
 
     // Crucial: Link host process symbols into JIT so OpenMP runtime is available.
     // We also explicitly bind all vgre_jit_* symbols to ensure they are resolved

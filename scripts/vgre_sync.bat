@@ -39,6 +39,10 @@ call :find_flutter
 echo === VGRE Global Sync (Windows) ===
 echo Project root: %PROJECT_ROOT%
 
+echo Cleaning up stale VGRE processes...
+taskkill /F /IM vgre-worker.exe /IM vgre_dashboard.exe /T 2>NUL
+rem Ignore errorlevel as processes might not be running
+
 echo Checking CMake...
 if exist "%CMAKE_EXE%" (
     rem found explicit executable path

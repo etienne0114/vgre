@@ -29,16 +29,9 @@ namespace {
 static std::recursive_mutex s_processCacheMutex;
 static std::unordered_map<std::string, EnhancedKernelIR> s_enhancedIRCache;
 
-// Return the vgre disk cache directory (mirrors KernelCache logic)
+// Return the vgre disk cache directory
 static std::string getVgreCacheDir() {
-    const char* home = getenv("HOME");
-    if (!home) {
-#ifndef _WIN32
-        struct passwd* pw = getpwuid(getuid());
-        if (pw) home = pw->pw_dir;
-#endif
-    }
-    return home ? std::string(home) + "/.vgre/cache" : "/tmp/vgre_cache";
+    return vgre::common::getCacheRoot() + "/cache";
 }
 
 // Compute disk path for a cached EnhancedKernelIR
@@ -266,8 +259,10 @@ std::string ClangKernelParser::runClangAstDump(const std::string& source) {
 
     // Run clang++ to get JSON AST with optimizations
     std::string includePath = vgre::common::findIncludeDir();
+    std::string clangPath = vgre::common::findCompilerPath();
+    
     // Add -fno-delayed-template-parsing for faster parsing
-    std::string cmd = "clang++ -Xclang -ast-dump=json -fsyntax-only -xc++ -w "
+    std::string cmd = "\"" + clangPath + "\" -Xclang -ast-dump=json -fsyntax-only -xc++ -w "
                      "-fno-delayed-template-parsing -I\"" + includePath + "\" \"" + 
                      tempPath + "\" 2>&1";
     VGRE_LOG_DEBUG("ClangKernelParser", "Running: " + cmd);
@@ -282,15 +277,23 @@ std::string ClangKernelParser::runClangAstDump(const std::string& source) {
 #define VGRE_PCLOSE pclose
 #endif
     FILE* pipe = VGRE_POPEN(cmd.c_str(), "r");
+    int status = -1;
     if (pipe) {
         result.reserve(65536); // Pre-allocate for better performance
         while (fgets(buffer, sizeof(buffer), pipe)) {
             result += buffer;
         }
-        int status = VGRE_PCLOSE(pipe);
+        status = VGRE_PCLOSE(pipe);
         VGRE_LOG_DEBUG("ClangKernelParser", "Command finished with status: " + std::to_string(status));
     } else {
         VGRE_LOG_ERROR("ClangKernelParser", "popen failed for: " + cmd);
+        return "";
+    }
+
+    if (status != 0) {
+        VGRE_LOG_ERROR("ClangKernelParser", "Clang failed with status " + std::to_string(status) + ":\n" + result);
+        std::filesystem::remove(tempPath);
+        return "";
     }
 
     if (result.empty()) {

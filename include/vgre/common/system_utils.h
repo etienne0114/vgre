@@ -107,6 +107,36 @@ inline std::string findIncludeDir() {
     return "/usr/local/include";
 }
 
+/**
+ * @brief Robustly find the Clang compiler path.
+ */
+inline std::string findCompilerPath() {
+    // 0. Manual override
+    const char* envPath = std::getenv("VGRE_CLANG_PATH");
+    if (envPath) return envPath;
+
+#ifdef _WIN32
+    std::filesystem::path binPath = getBinaryPath();
+    if (!binPath.empty()) {
+        // Installed layout: AppData/Local/VGRE/BuildTools/llvm/bin/clang++.exe
+        auto p = binPath / "BuildTools/llvm/bin/clang++.exe";
+        if (std::filesystem::exists(p)) return p.string();
+        
+        // Also check if developer is running from project root
+        // binPath could be build/Release, so go up from build/Release to root
+        auto parent = binPath;
+        for (int i = 0; i < 3; ++i) {
+            auto check = parent / "BuildTools/llvm/bin/clang++.exe";
+            if (std::filesystem::exists(check)) return check.string();
+            if (parent.has_parent_path()) parent = parent.parent_path();
+        }
+    }
+#endif
+
+    // Fallback to hoping it's in the system PATH
+    return "clang++";
+}
+
 } // namespace common
 } // namespace vgre
 
