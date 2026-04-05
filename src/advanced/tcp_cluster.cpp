@@ -247,6 +247,9 @@ bool TCPClusterManager::send_packet_direct(vgre_socket_t fd, PacketType type, co
     std::memcpy(staging.data() + sizeof(VSBPHeader), payload, payloadLen);
   }
 
+  global_packets_sent_++;
+  global_bytes_sent_ += staging.size();
+
   if (sc && sc->isInitialized()) {
     return sc->sendSecure(fd, staging.data(), staging.size()) == VGREResult::SUCCESS;
   } else {
@@ -260,6 +263,8 @@ int TCPClusterManager::recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBu
     std::vector<uint8_t> payload;
     VGREResult r = sc->recvSecure(fd, payload);
     if (r == VGREResult::SUCCESS) {
+      global_packets_received_++;
+      global_bytes_received_ += static_cast<uint64_t>(payload.size() + sizeof(SecurePacketHeader)); // Total wire size
       outBuffer.insert(outBuffer.end(), payload.begin(), payload.end());
       return static_cast<int>(payload.size());
     } else if (r == VGREResult::ERR_TIMEOUT) {
@@ -270,6 +275,8 @@ int TCPClusterManager::recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBu
     char temp[8192];
     int n = recv(fd, temp, sizeof(temp), 0);
     if (n > 0) {
+      global_packets_received_++;
+      global_bytes_received_ += static_cast<uint64_t>(n);
       outBuffer.insert(outBuffer.end(), temp, temp + n);
       return n;
     } else if (n == 0) {
@@ -300,6 +307,8 @@ void TCPClusterManager::flush_tx_queues(std::shared_ptr<ClientConnection> client
         }
         
         if (success) {
+            global_packets_sent_++;
+            global_bytes_sent_ += pkt.data.size();
             client.high_priority_tx.pop_back();
         } else {
             return; // Socket buffer full
@@ -323,6 +332,8 @@ void TCPClusterManager::flush_tx_queues(std::shared_ptr<ClientConnection> client
         }
 
         if (success) {
+            global_packets_sent_++;
+            global_bytes_sent_ += qItem.data.size();
             client.low_priority_tx.pop_front();
         } else {
             return; // Socket buffer full
@@ -1859,23 +1870,60 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
     return info;
   }
 
+  SessionInfo total{};
+  total.is_encrypted = true;
+  total.packets_sent = global_packets_sent_.load();
+  total.packets_received = global_packets_received_.load();
+  total.bytes_sent = global_bytes_sent_.load();
+  total.bytes_received = global_bytes_received_.load();
+
+  bool any_secure = false;
+  bool any_pending = false;
+
   if (is_master_) {
     std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
     for (const auto &client : clients_) {
-      if (client && client->active && client->secureChannel &&
-          client->secureChannel->isInitialized()) {
-        return client->secureChannel->getSessionInfo();
+      if (client && client->active) {
+        if (client->secureChannel && client->secureChannel->isInitialized()) {
+          any_secure = true;
+          // Use cipher info from first secure client found
+          if (std::strlen(total.cipher_name) == 0) {
+            SessionInfo s = client->secureChannel->getSessionInfo();
+            std::strncpy(total.cipher_name, s.cipher_name, sizeof(total.cipher_name) - 1);
+            std::strncpy(total.key_fingerprint, s.key_fingerprint, sizeof(total.key_fingerprint) - 1);
+            total.session_seconds = s.session_seconds;
+          }
+        } else if (client->is_authenticating) {
+          any_pending = true;
+        }
       }
     }
   } else if (client_secure_channel_ && client_secure_channel_->isInitialized()) {
-    return client_secure_channel_->getSessionInfo();
+    any_secure = true;
+    total = client_secure_channel_->getSessionInfo();
+    // Still use global counters for the summary (they might be higher due to heartbeats)
+    total.packets_sent = global_packets_sent_.load();
+    total.bytes_sent = global_bytes_sent_.load();
+  } else if (is_authenticating_) {
+    any_pending = true;
   }
 
-  SessionInfo info{};
-  std::strncpy(info.cipher_name, "PENDING (handshake not yet complete)",
-               sizeof(info.cipher_name) - 1);
-  info.is_encrypted = true; // Signal to UI that security mode IS active, just waiting on peers
-  return info;
+  if (any_secure) {
+    if (any_pending) {
+       // Optional: could append " (Partial)" but keep it simple for now
+    }
+    return total;
+  }
+
+  if (any_pending) {
+    std::strncpy(total.cipher_name, "PENDING (handshake in progress...)",
+                 sizeof(total.cipher_name) - 1);
+  } else {
+    std::strncpy(total.cipher_name, "WAITING FOR PEERS",
+                 sizeof(total.cipher_name) - 1);
+  }
+  
+  return total;
 }
 
 VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConnection> clientPtr) {
@@ -1959,6 +2007,9 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
   if (!security_enabled_ || auth_token_str_.empty()) {
     return VGREResult::SUCCESS;
   }
+  
+  is_authenticating_ = true;
+  VGRE_LOG_INFO("TCPCluster", "Worker: Security handshake started (VGRE Built-in VPN Connecting...)");
 
   // 1. Wait for master's handshake packet using protocol-aware buffering
   SecureHandshakePacket masterHs{};
@@ -1967,33 +2018,32 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
   while (rx.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
     if (std::chrono::steady_clock::now() > deadline) {
       VGRE_LOG_ERROR("TCPCluster", "Client security handshake timed out");
+      is_authenticating_ = false;
       return VGREResult::ERR_TIMEOUT;
     }
     int n = recv_packet(client_fd_, rx, nullptr);
-    if (n < 0) return VGREResult::ERR_IO;
+    if (n < 0) {
+        is_authenticating_ = false;
+        return VGREResult::ERR_IO;
+    }
     if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
   VSBPHeader* header = reinterpret_cast<VSBPHeader*>(rx.data());
   if (header->magic != VSBP_MAGIC || header->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
       VGRE_LOG_ERROR("TCPCluster", "Client security handshake: invalid master packet");
+      is_authenticating_ = false;
       return VGREResult::ERR_AUTH_FAILED;
   }
   std::memcpy(&masterHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
 
-  // The packet type check is now handled by the receive logic in send_packet/recv_packet
-  // if (masterHs.header.type != (uint16_t)PacketType::SECURE_HANDSHAKE) {
-  //   VGRE_LOG_WARN("TCPCluster", "Expected SECURE_HANDSHAKE, got different packet — master may not have security enabled");
-  //   return VGREResult::SUCCESS;
-  // }
-
   // 2. Generate client nonce
   SecureHandshakePacket ack{};
   SecureChannel::generateNonce(ack.nonce);
-  // verification payload...
   
   if (!send_packet_direct(client_fd_, PacketType::SECURE_HANDSHAKE_ACK, &ack, sizeof(SecureHandshakePacket), client_secure_channel_.get())) {
     VGRE_LOG_ERROR("TCPCluster", "Client security handshake: failed to send ACK");
+    is_authenticating_ = false;
     return VGREResult::ERR_IO;
   }
 
@@ -2003,11 +2053,13 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
       auth_token_str_, masterHs.nonce, ack.nonce);
   if (r != VGREResult::SUCCESS) {
     VGRE_LOG_ERROR("TCPCluster", "Client security handshake: key derivation failed");
+    is_authenticating_ = false;
     return r;
   }
 
   client_security_established_ = true;
-  VGRE_LOG_INFO("TCPCluster", "Client security handshake completed");
+  is_authenticating_ = false;
+  VGRE_LOG_INFO("TCPCluster", "Client security handshake completed (VGRE Built-in VPN Active)");
   return VGREResult::SUCCESS;
 }
 

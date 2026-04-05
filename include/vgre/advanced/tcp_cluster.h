@@ -402,6 +402,7 @@ private:
   vgre_telemetry_t client_telemetry_buffer_{};
   std::unique_ptr<SecureChannel> client_secure_channel_;
   bool client_security_established_ = false;
+  std::atomic<bool> is_authenticating_{false};
   std::vector<uint8_t> client_rx_buffer_;
   std::mutex client_mutex_;
   std::mutex client_tx_mutex_;
@@ -453,6 +454,12 @@ private:
   uint32_t reduction_datatype_{0};
   size_t reduction_element_count_{0};
   uint64_t reduction_sequence_{0};
+  
+  // Phase 12: Global Traffic Telemetry
+  mutable std::atomic<uint64_t> global_packets_sent_{0};
+  mutable std::atomic<uint64_t> global_bytes_sent_{0};
+  mutable std::atomic<uint64_t> global_packets_received_{0};
+  mutable std::atomic<uint64_t> global_bytes_received_{0};
 
   // Cooperative Barrier (Zero-Simulation)
   std::mutex barrier_mutex_;
