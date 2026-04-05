@@ -167,12 +167,14 @@ if errorlevel 1 (
 )
 
 copy /Y "%BUILD_DIR%\Release\vgre.dll" "%INSTALL_DIR%\" >nul
+copy /Y "%BUILD_DIR%\Release\vgre.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Failed to copy vgre.dll
     exit /b 1
 )
 
 copy /Y "%BUILD_DIR%\Release\vgre_cudart.dll" "%INSTALL_DIR%\" >nul
+copy /Y "%BUILD_DIR%\Release\vgre_cudart.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Failed to copy vgre_cudart.dll
     exit /b 1

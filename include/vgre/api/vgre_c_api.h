@@ -15,6 +15,14 @@
 extern "C" {
 #endif
 
+#ifndef VGRE_EXPORT
+#if defined(_WIN32)
+#define VGRE_EXPORT __declspec(dllexport)
+#else
+#define VGRE_EXPORT __attribute__((visibility("default")))
+#endif
+#endif
+
 /* ── Status codes ───────────────────────────────────────────────────────────
  */
 #define VGRE_SUCCESS 0
@@ -113,30 +121,30 @@ typedef struct {
 
 /* ── Initialization ─────────────────────────────────────────────────────────
  */
-int vgre_init(void);
-int vgre_shutdown(void);
+VGRE_EXPORT int vgre_init(void);
+VGRE_EXPORT int vgre_shutdown(void);
 
 /* ── Device Management ──────────────────────────────────────────────────────
  */
-int vgre_get_device_count(int *count);
-int vgre_set_device(int device_id);
-int vgre_get_device(int *device_id);
-int vgre_get_device_properties(int device_id, vgre_device_properties_t *props);
-int vgre_synchronize(void);
+VGRE_EXPORT int vgre_get_device_count(int *count);
+VGRE_EXPORT int vgre_set_device(int device_id);
+VGRE_EXPORT int vgre_get_device(int *device_id);
+VGRE_EXPORT int vgre_get_device_properties(int device_id, vgre_device_properties_t *props);
+VGRE_EXPORT int vgre_synchronize(void);
 
 /* ── Memory Management ──────────────────────────────────────────────────────
  */
-int vgre_malloc(void **ptr, size_t size);
-int vgre_malloc_managed(void **ptr, size_t size);
-int vgre_free(void *ptr);
-int vgre_memcpy(void *dst, const void *src, size_t count, int direction);
-int vgre_memset(void *ptr, int value, size_t count);
+VGRE_EXPORT int vgre_malloc(void **ptr, size_t size);
+VGRE_EXPORT int vgre_malloc_managed(void **ptr, size_t size);
+VGRE_EXPORT int vgre_free(void *ptr);
+VGRE_EXPORT int vgre_memcpy(void *dst, const void *src, size_t count, int direction);
+VGRE_EXPORT int vgre_memset(void *ptr, int value, size_t count);
 
 /* ── Peer-to-Peer (P2P) ─────────────────────────────────────────────────────
  */
-int vgre_device_can_access_peer(int *can_access, int device, int peer_device);
-int vgre_device_enable_peer_access(int peer_device);
-int vgre_device_disable_peer_access(int peer_device);
+VGRE_EXPORT int vgre_device_can_access_peer(int *can_access, int device, int peer_device);
+VGRE_EXPORT int vgre_device_enable_peer_access(int peer_device);
+VGRE_EXPORT int vgre_device_disable_peer_access(int peer_device);
 
 /* ── Kernel Registration & Launch ───────────────────────────────────────────
  */
@@ -144,7 +152,7 @@ int vgre_device_disable_peer_access(int peer_device);
  * Register a kernel by name and source code.
  * Returns kernel ID via out_kernel_id.
  */
-int vgre_register_kernel(const char *name, const char *source,
+VGRE_EXPORT int vgre_register_kernel(const char *name, const char *source,
                          uint64_t *out_kernel_id);
 
 /**
@@ -153,63 +161,63 @@ int vgre_register_kernel(const char *name, const char *source,
  * args is a void** array of pointers-to-arguments (CUDA convention).
  * num_args is the count.
  */
-int vgre_launch_kernel(uint64_t kernel_id, const uint32_t grid_dim[3],
+VGRE_EXPORT int vgre_launch_kernel(uint64_t kernel_id, const uint32_t grid_dim[3],
                        const uint32_t block_dim[3], void **args, int num_args,
                        size_t shared_mem, uint64_t stream_id);
 
 /* ── Stream Management ──────────────────────────────────────────────────────
  */
-int vgre_stream_create(uint64_t *out_stream_id);
-int vgre_stream_create_with_priority(uint64_t *out_stream_id, int priority);
-int vgre_stream_synchronize(uint64_t stream_id);
-int vgre_stream_destroy(uint64_t stream_id);
+VGRE_EXPORT int vgre_stream_create(uint64_t *out_stream_id);
+VGRE_EXPORT int vgre_stream_create_with_priority(uint64_t *out_stream_id, int priority);
+VGRE_EXPORT int vgre_stream_synchronize(uint64_t stream_id);
+VGRE_EXPORT int vgre_stream_destroy(uint64_t stream_id);
 
 /* ── CUDA Graphs (DAG) ──────────────────────────────────────────────────────
  */
-int vgre_graphCreate(uint64_t *out_graph);
-int vgre_graphDestroy(uint64_t graph);
-int vgre_graphInstantiate(uint64_t graph, uint64_t *out_exec);
-int vgre_graphExecDestroy(uint64_t exec);
-int vgre_graphLaunch(uint64_t exec, uint64_t stream);
+VGRE_EXPORT int vgre_graphCreate(uint64_t *out_graph);
+VGRE_EXPORT int vgre_graphDestroy(uint64_t graph);
+VGRE_EXPORT int vgre_graphInstantiate(uint64_t graph, uint64_t *out_exec);
+VGRE_EXPORT int vgre_graphExecDestroy(uint64_t exec);
+VGRE_EXPORT int vgre_graphLaunch(uint64_t exec, uint64_t stream);
 
-int vgre_graphAddKernelNodeEx(uint64_t graph, uint64_t kernel_id,
+VGRE_EXPORT int vgre_graphAddKernelNodeEx(uint64_t graph, uint64_t kernel_id,
                               const char *name, const uint32_t grid_dim[3],
                               const uint32_t block_dim[3], void **args,
                               const uint8_t *arg_types, int num_args,
                               const uint64_t *deps, int num_deps,
                               uint64_t *out_node_id);
 
-int vgre_graphAddMemcpyNodeEx(uint64_t graph, void *dst, void *src,
+VGRE_EXPORT int vgre_graphAddMemcpyNodeEx(uint64_t graph, void *dst, void *src,
                               size_t count, int kind,
                               const uint64_t *deps, int num_deps,
                               uint64_t *out_node_id);
 
-int vgre_graphAddDependency(uint64_t graph, uint64_t node_id,
+VGRE_EXPORT int vgre_graphAddDependency(uint64_t graph, uint64_t node_id,
                             uint64_t depends_on);
 
-int vgre_graphUpdateKernelNode(uint64_t graph, uint64_t node_id, void **args,
+VGRE_EXPORT int vgre_graphUpdateKernelNode(uint64_t graph, uint64_t node_id, void **args,
                                const uint8_t *arg_types, int num_args);
 
-int vgre_graphUpdateMemcpyNode(uint64_t graph, uint64_t node_id, void *dst,
+VGRE_EXPORT int vgre_graphUpdateMemcpyNode(uint64_t graph, uint64_t node_id, void *dst,
                                void *src, size_t count, int kind);
 
 /* ── Version Info ───────────────────────────────────────────────────────────
  */
-const char *vgre_get_version(void);
+VGRE_EXPORT const char *vgre_get_version(void);
 
 /* ── Telemetry ──────────────────────────────────────────────────────────────
  */
-int vgre_get_telemetry(vgre_telemetry_t *telemetry);
+VGRE_EXPORT int vgre_get_telemetry(vgre_telemetry_t *telemetry);
 /**
  * @brief Returns profiler JSON with top-N kernels (by total time).
  * @param out_json Allocated C string. Must be freed with vgre_free_string().
  * @param top_n If <= 0, returns all kernels.
  */
-int vgre_get_profiler_json(char **out_json, int top_n);
-void vgre_free_string(char *str);
-int vgre_set_profiler_enabled(int enabled);
-int vgre_get_memory_info_json(char **out_json);
-int vgre_get_kernel_history_json(const char *kernel_name, char **out_json);
+VGRE_EXPORT int vgre_get_profiler_json(char **out_json, int top_n);
+VGRE_EXPORT void vgre_free_string(char *str);
+VGRE_EXPORT int vgre_set_profiler_enabled(int enabled);
+VGRE_EXPORT int vgre_get_memory_info_json(char **out_json);
+VGRE_EXPORT int vgre_get_kernel_history_json(const char *kernel_name, char **out_json);
 
 /**
  * @brief Retrieves recent log lines from the engine.
@@ -218,34 +226,34 @@ int vgre_get_kernel_history_json(const char *kernel_name, char **out_json);
  * API. Must be freed by the caller using vgre_free_logs().
  * @param count Pointer to int receiving the number of log lines.
  */
-int vgre_get_logs(char ***buffer, int *count);
-void vgre_free_logs(char **buffer, int count);
+VGRE_EXPORT int vgre_get_logs(char ***buffer, int *count);
+VGRE_EXPORT void vgre_free_logs(char **buffer, int count);
 
 /**
  * @brief Retrieves information about all connected cluster nodes.
  * @param nodes Array of vgre_cluster_node_t to be filled.
  * @param count On entry, size of nodes array. On exit, number of nodes filled.
  */
-int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count);
+VGRE_EXPORT int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count);
 
 /**
  * @brief Enables or disables the internal background compute engine.
  * Useful for maintaining realistic load without external apps.
  */
-int vgre_set_background_compute(int enabled);
+VGRE_EXPORT int vgre_set_background_compute(int enabled);
 
 /**
  * @brief Sets the IPC service mode.
  * @param is_master If 1, initializes as the master session (Dashboard).
  *                  If 0, initializes as a client.
  */
-int vgre_set_service_mode(int is_master);
+VGRE_EXPORT int vgre_set_service_mode(int is_master);
 
 /**
  * @brief Enables or disables per-block OS thread execution for __syncthreads correctness.
  * This toggles the VGRE_BLOCK_THREADS environment flag at runtime.
  */
-int vgre_set_block_threads(int enabled);
+VGRE_EXPORT int vgre_set_block_threads(int enabled);
 
 /* ── Phase 5: Global Compute Network ──────────────────────────────────────
  */
@@ -280,12 +288,12 @@ typedef struct {
  * @brief Enables or disables encrypted cluster communication.
  * Requires VGRE_TCP_AUTH_TOKEN environment variable to be set.
  */
-int vgre_cluster_set_security(int enabled);
+VGRE_EXPORT int vgre_cluster_set_security(int enabled);
 
 /**
  * @brief Retrieves the current security session information.
  */
-int vgre_cluster_get_security_info(vgre_security_info_t *info);
+VGRE_EXPORT int vgre_cluster_get_security_info(vgre_security_info_t *info);
 
 /**
  * @brief Wait for a specific kernel to complete on the cluster.
@@ -293,24 +301,24 @@ int vgre_cluster_get_security_info(vgre_security_info_t *info);
  * @param timeout_ms Maximum time to wait in milliseconds.
  * @return VGRE_SUCCESS if completed, VGRE_ERROR_TIMEOUT if timed out.
  */
-int vgre_cluster_wait(uint64_t kernel_id, int timeout_ms);
+VGRE_EXPORT int vgre_cluster_wait(uint64_t kernel_id, int timeout_ms);
 
 /**
  * @brief Retrieves the credit balance for a specific node.
  */
-int vgre_credits_get_balance(const char *address, vgre_credit_info_t *info);
+VGRE_EXPORT int vgre_credits_get_balance(const char *address, vgre_credit_info_t *info);
 
 /**
  * @brief Retrieves credit balances for all nodes.
  * @param nodes Array to fill. On entry, *count is array capacity.
  *              On exit, *count is number of nodes filled.
  */
-int vgre_credits_get_all(vgre_credit_info_t *nodes, int *count);
+VGRE_EXPORT int vgre_credits_get_all(vgre_credit_info_t *nodes, int *count);
 
 /**
  * @brief Resets the credit ledger globally.
  */
-int vgre_credits_reset(void);
+VGRE_EXPORT int vgre_credits_reset(void);
 
 /**
  * @brief Performs a distributed all_reduce across the cluster.
@@ -318,7 +326,7 @@ int vgre_credits_reset(void);
  * @param count Number of elements in the buffer.
  * @param datatype Argument type (VGRE_ARG_FLOAT32, etc.)
  */
-int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype);
+VGRE_EXPORT int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype);
 
 #ifdef __cplusplus
 } /* extern "C" */

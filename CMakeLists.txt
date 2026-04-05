@@ -120,7 +120,10 @@ add_library(vgre SHARED
     $<TARGET_OBJECTS:vgre_advanced>
 )
 if(WIN32)
-    set_target_properties(vgre PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    # Use an explicit module-definition file for reliable C API exports.
+    # WINDOWS_EXPORT_ALL_SYMBOLS does NOT export extern "C" symbols from
+    # OBJECT libraries, so we list them in a .def file instead.
+    target_sources(vgre PRIVATE ${PROJECT_SOURCE_DIR}/src/api/vgre_api.def)
 endif()
 
 # Platform-specific libraries for hardware token storage
