@@ -10,14 +10,12 @@
 #include <string>
 #include <vector>
 
-#if defined(_WIN32)
-typedef unsigned long long vgre_socket_t;
-#else
-typedef int vgre_socket_t;
-#endif
+#include "vgre/common/sockets.h"
 
 namespace vgre {
 namespace advanced {
+
+using vgre_socket_t = vgre::common::vgre_socket_t;
 
 // ── SHA-256 constants ──────────────────────────────────────────────────────
 // Built-in SHA-256 per RFC 6234 — no external dependency required.

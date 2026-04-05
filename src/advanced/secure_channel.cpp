@@ -8,31 +8,22 @@
 #include <cstring>
 #include <thread>
 
+#include "vgre/common/sockets.h"
+
 #if defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <bcrypt.h>
 #pragma comment(lib, "bcrypt.lib")
-#define CLOSE_SOCKET(s) closesocket(s)
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
-#else
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
-#include <dlfcn.h>
-#define CLOSE_SOCKET(s) close(s)
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
 #endif
 
 namespace vgre {
 namespace advanced {
+
+using vgre::common::vgre_setsockopt;
+using vgre::common::vgre_get_last_socket_error;
+using vgre::common::vgre_is_would_block;
+using vgre::common::vgre_pollfd;
+using vgre::common::vgre_poll;
+
 namespace crypto {
 
 // ── SHA-256 Implementation (RFC 6234) ──────────────────────────────────────
@@ -649,12 +640,7 @@ bool SecureChannel::sendAll(vgre_socket_t fd, const void *buf, size_t len) {
     if (n == 0)
       return false;
     if (n < 0) {
-#if defined(_WIN32)
-      int err = WSAGetLastError();
-      if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS) {
-#else
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-#endif
+      if (vgre_is_would_block(vgre_get_last_socket_error())) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         continue;
       }
@@ -677,49 +663,31 @@ int SecureChannel::recvAll(vgre_socket_t fd, void *buf, size_t len,
       return -2; // Timeout
     }
 
-#if defined(_WIN32)
-    fd_set readSet;
-    FD_ZERO(&readSet);
-    FD_SET(fd, &readSet);
-    struct timeval tv;
     int remaining =
         static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
                              deadline - std::chrono::steady_clock::now())
                              .count());
     if (remaining <= 0)
       remaining = 1;
-    tv.tv_sec = remaining / 1000;
-    tv.tv_usec = (remaining % 1000) * 1000;
-    int sel = select(0, &readSet, nullptr, nullptr, &tv);
-    if (sel <= 0)
-      continue;
-#else
-    struct pollfd pfd;
+
+    vgre::common::vgre_pollfd pfd;
     pfd.fd = fd;
     pfd.events = POLLIN;
-    int remaining =
-        static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                             deadline - std::chrono::steady_clock::now())
-                             .count());
-    if (remaining <= 0)
-      remaining = 1;
-    int ret = poll(&pfd, 1, remaining);
-    if (ret <= 0)
+    pfd.revents = 0;
+    int poll_ret = vgre::common::vgre_poll(&pfd, 1, remaining);
+    if (poll_ret <= 0) {
+      if (poll_ret < 0 && !vgre::common::vgre_is_would_block(vgre::common::vgre_get_last_socket_error())) {
+          return -1;
+      }
       continue;
-#endif
+    }
 
     int n = recv(fd, p + received, static_cast<int>(len - received), 0);
     if (n == 0)
       return -1; // Connection closed
     if (n < 0) {
-#if defined(_WIN32)
-      int err = WSAGetLastError();
-      if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS)
+      if (vgre::common::vgre_is_would_block(vgre::common::vgre_get_last_socket_error()))
         continue;
-#else
-      if (errno == EAGAIN || errno == EWOULDBLOCK)
-        continue;
-#endif
       return -1; // Error
     }
     received += static_cast<size_t>(n);
