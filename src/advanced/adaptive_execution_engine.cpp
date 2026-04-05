@@ -109,17 +109,25 @@ AdaptiveExecutionEngine::AdaptiveExecutionEngine()
       lastBytes_(0),
       lastSampleTime_(std::chrono::steady_clock::now()) {
   // Force ground-truth calibration on startup to provide authoritative performance data.
-  // We run this in a background thread to avoid blocking the main runtime initialization.
-  std::thread([this]() {
+  // Stored as a member thread (not detached) so the destructor can join it and
+  // prevent a segfault when the singleton is destroyed mid-benchmark.
+  benchmarkThread_ = std::thread([this]() {
       this->runBenchmark();
-  }).detach();
+  });
 
   VGRE_LOG_INFO("AdaptiveExecutionEngine",
                 "Initialized with " + std::to_string(maxCores_) + " max cores. "
                 "Background Ground-Truth calibration started.");
 }
 
-AdaptiveExecutionEngine::~AdaptiveExecutionEngine() = default;
+AdaptiveExecutionEngine::~AdaptiveExecutionEngine() {
+  // Signal runBenchmark() to exit its loops early, then join so we never
+  // access members after they have been destroyed.
+  shuttingDown_.store(true, std::memory_order_release);
+  if (benchmarkThread_.joinable()) {
+      benchmarkThread_.join();
+  }
+}
 
 // ── Record execution ───────────────────────────────────────────────────────
 void AdaptiveExecutionEngine::recordExecution(const std::string &kernelName,
@@ -371,38 +379,42 @@ void AdaptiveExecutionEngine::updateHardwareMetrics(int cores, double clockGHz,
 }
 
 void AdaptiveExecutionEngine::runBenchmark() {
-    if (calibrated_.load()) {
+    if (calibrated_.load() || shuttingDown_.load()) {
         return;
     }
     VGRE_LOG_INFO("AdaptiveExecutionEngine", "Performing high-precision Ground Truth calibration...");
-    
+
     auto& ve = runtime::VectorEngine::instance();
-    
+
     // Stage 1: Peak GFLOPS (Compute-Bound, Register-Saturated via VectorEngine)
-    // 1M elements, 100 iterations
+    if (shuttingDown_.load()) return;
     VGRE_LOG_INFO("AdaptiveExecutionEngine", "Calibrating Peak GFLOPS via specialized SIMD benchmark...");
     double gflops = ve.benchmarkFMA(1024 * 1024, 100);
+    if (shuttingDown_.load()) return;
     double bf16_gflops = ve.benchmarkBF16(1024 * 1024, 100);
 
     VGRE_LOG_INFO("AdaptiveExecutionEngine", "  Peak FP32: " + std::to_string(gflops) + " GFLOPS");
     VGRE_LOG_INFO("AdaptiveExecutionEngine", "  Peak BF16: " + std::to_string(bf16_gflops) + " GFLOPS");
 
     // Stage 2: Memory Bandwidth (Memory-Bound, Large Streaming)
+    if (shuttingDown_.load()) return;
     const size_t streamN = 16 * 1024 * 1024; // 64MB reads + 64MB writes
     std::vector<float> s1(streamN, 1.0f), s2(streamN, 0.0f);
-    
+
     auto start = std::chrono::steady_clock::now();
     const int memIterations = 10;
     for (int i = 0; i < memIterations; ++i) {
+        if (shuttingDown_.load()) return;
         ve.vectorCopy(s1.data(), s2.data(), streamN);
     }
     auto end = std::chrono::steady_clock::now();
     double memSec = std::chrono::duration<double>(end - start).count();
-    
+
     // Copy is Read + Write = 2 * N * sizeof(float)
-    double bandwidthGBps = (static_cast<double>(streamN) * sizeof(float) * 2.0 * memIterations) / 
+    double bandwidthGBps = (static_cast<double>(streamN) * sizeof(float) * 2.0 * memIterations) /
                            (memSec * 1024.0 * 1024.0 * 1024.0);
 
+    if (shuttingDown_.load()) return;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         maxGflops_ = gflops;
@@ -452,6 +464,7 @@ void AdaptiveExecutionEngine::runBenchmark() {
     }
 #endif // __linux__
 
+    if (shuttingDown_.load()) return;
     VGRE_LOG_INFO("AdaptiveExecutionEngine",
                   "Ground Truth Calibrated: Peak=" + std::to_string(gflops) +
                   " GFLOPS | Measured Bandwidth=" + std::to_string(bandwidthGBps) + " GB/s");
