@@ -346,20 +346,20 @@ VGREResult ClangKernelParser::parse(const std::string& name,
 
     if (jsonAst.empty()) {
         VGRE_LOG_ERROR("ClangKernelParser", "Failed to get AST from Clang");
-        return VGREResult::ERROR_COMPILATION;
+        return VGREResult::ERR_COMPILATION;
     }
 
     auto expectedAst = llvm::json::parse(jsonAst);
     if (!expectedAst) {
         VGRE_LOG_ERROR("ClangKernelParser", "Failed to parse Clang JSON AST");
-        return VGREResult::ERROR_INVALID_KERNEL;
+        return VGREResult::ERR_INVALID_KERNEL;
     }
 
     const auto* root = expectedAst->getAsObject();
-    if (!root) return VGREResult::ERROR_INVALID_KERNEL;
+    if (!root) return VGREResult::ERR_INVALID_KERNEL;
 
     const auto* inner = root->getArray("inner");
-    if (!inner) return VGREResult::ERROR_INVALID_KERNEL;
+    if (!inner) return VGREResult::ERR_INVALID_KERNEL;
 
     bool found = false;
     std::function<const llvm::json::Object*(const llvm::json::Array*, const std::string&)> findKernel;
@@ -484,7 +484,7 @@ VGREResult ClangKernelParser::parse(const std::string& name,
 
     if (!found) {
         VGRE_LOG_ERROR("ClangKernelParser", "Kernel function not found or not __global__: " + name);
-        return VGREResult::ERROR_INVALID_KERNEL;
+        return VGREResult::ERR_INVALID_KERNEL;
     }
 
     // Store to persistent cache for "Very Firster" speed in next sessions
@@ -1092,20 +1092,20 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
 
     std::string jsonAst = runClangAstDump(sourceWithHeader);
     if (jsonAst.empty()) {
-        return VGREResult::ERROR_COMPILATION;
+        return VGREResult::ERR_COMPILATION;
     }
     
     auto expectedAst = llvm::json::parse(jsonAst);
     if (!expectedAst) {
-        return VGREResult::ERROR_INVALID_KERNEL;
+        return VGREResult::ERR_INVALID_KERNEL;
     }
     
     const auto* root = expectedAst->getAsObject();
-    if (!root) return VGREResult::ERROR_INVALID_KERNEL;
+    if (!root) return VGREResult::ERR_INVALID_KERNEL;
     
     // Find kernel function in AST
     const auto* inner = root->getArray("inner");
-    if (!inner) return VGREResult::ERROR_INVALID_KERNEL;
+    if (!inner) return VGREResult::ERR_INVALID_KERNEL;
     
     std::function<const llvm::json::Object*(const llvm::json::Array*)> findKernel;
     findKernel = [&](const llvm::json::Array* innerArray) -> const llvm::json::Object* {
@@ -1129,7 +1129,7 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
     
     const auto* kernelObj = findKernel(inner);
     if (!kernelObj) {
-        return VGREResult::ERROR_INVALID_KERNEL;
+        return VGREResult::ERR_INVALID_KERNEL;
     }
     
     // Perform enhanced analysis

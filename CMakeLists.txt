@@ -11,6 +11,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+if(WIN32)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+endif()
+
 # ── Compiler flags ──────────────────────────────────────────────────────────
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic -O2)
@@ -29,11 +33,14 @@ endif()
 
 # ── Dependencies ────────────────────────────────────────────────────────────
 find_package(OpenMP REQUIRED COMPONENTS CXX)
-find_library(LIBOMP_PATH NAMES omp PATHS /usr/lib/llvm-18/lib /usr/lib/x86_64-linux-gnu)
-if(LIBOMP_PATH)
-    set(LIBOMP_PATH "${LIBOMP_PATH}" CACHE FILEPATH "Path to LLVM OpenMP library")
-    message(STATUS "Found LLVM OpenMP: ${LIBOMP_PATH}")
-    link_libraries("-Wl,--no-as-needed" "${LIBOMP_PATH}" "-Wl,--as-needed")
+set(LIBOMP_PATH "")
+if(UNIX AND NOT APPLE)
+    find_library(LIBOMP_PATH NAMES omp PATHS /usr/lib/llvm-18/lib /usr/lib/x86_64-linux-gnu)
+    if(LIBOMP_PATH)
+        set(LIBOMP_PATH "${LIBOMP_PATH}" CACHE FILEPATH "Path to LLVM OpenMP library")
+        message(STATUS "Found LLVM OpenMP: ${LIBOMP_PATH}")
+        link_libraries("-Wl,--no-as-needed" "${LIBOMP_PATH}" "-Wl,--as-needed")
+    endif()
 endif()
 find_package(Threads REQUIRED)
 # find_package(PkgConfig REQUIRED)
@@ -51,11 +58,44 @@ include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 llvm_map_components_to_libnames(llvm_libs Core ExecutionEngine OrcJIT Support Target native)
 
-option(VGRE_USE_OPENCL_BACKEND "Enable OpenCL Integrated GPU Backend" ON)
+if(WIN32)
+    set(VGRE_LLVM_DIA_FALLBACK "C:/Program Files/Microsoft Visual Studio/2022/Community/DIA SDK/lib/amd64/diaguids.lib")
+    if(EXISTS "${VGRE_LLVM_DIA_FALLBACK}")
+        if(TARGET LLVMDebugInfoPDB)
+            set_target_properties(LLVMDebugInfoPDB PROPERTIES
+                INTERFACE_LINK_LIBRARIES
+                "${VGRE_LLVM_DIA_FALLBACK};LLVMBinaryFormat;LLVMObject;LLVMSupport;LLVMDebugInfoCodeView;LLVMDebugInfoMSF")
+        endif()
+        foreach(llvm_target IN LISTS llvm_libs)
+            if(TARGET ${llvm_target})
+                get_target_property(_vgre_iface_libs ${llvm_target} INTERFACE_LINK_LIBRARIES)
+                if(_vgre_iface_libs)
+                    set(_vgre_updated_iface_libs "${_vgre_iface_libs}")
+                    list(TRANSFORM _vgre_updated_iface_libs REPLACE
+                        "C:/Program Files \\(x86\\)/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64/diaguids\\.lib"
+                        "${VGRE_LLVM_DIA_FALLBACK}")
+                    set_target_properties(${llvm_target} PROPERTIES
+                        INTERFACE_LINK_LIBRARIES "${_vgre_updated_iface_libs}")
+                endif()
+            endif()
+        endforeach()
+    endif()
+endif()
+
+set(VGRE_USE_OPENCL_BACKEND_DEFAULT ON)
+if(WIN32)
+    set(VGRE_USE_OPENCL_BACKEND_DEFAULT OFF)
+endif()
+option(VGRE_USE_OPENCL_BACKEND "Enable OpenCL Integrated GPU Backend" ${VGRE_USE_OPENCL_BACKEND_DEFAULT})
 if(VGRE_USE_OPENCL_BACKEND)
-    find_package(OpenCL REQUIRED)
-    message(STATUS "Found OpenCL ${OpenCL_VERSION_STRING}")
-    add_compile_definitions(VGRE_HAS_OPENCL_BACKEND)
+    find_package(OpenCL QUIET)
+    if(OpenCL_FOUND)
+        message(STATUS "Found OpenCL ${OpenCL_VERSION_STRING}")
+        add_compile_definitions(VGRE_HAS_OPENCL_BACKEND)
+    else()
+        message(STATUS "OpenCL not found - continuing without the optional OpenCL backend")
+        set(VGRE_USE_OPENCL_BACKEND OFF)
+    endif()
 endif()
 
 # ── Global include directory ────────────────────────────────────────────────
@@ -78,6 +118,9 @@ add_library(vgre SHARED
     $<TARGET_OBJECTS:vgre_runtime>
     $<TARGET_OBJECTS:vgre_advanced>
 )
+if(WIN32)
+    set_target_properties(vgre PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
 
 # Platform-specific libraries for hardware token storage
 if(UNIX AND NOT APPLE)
@@ -129,27 +172,63 @@ endif()
 target_link_libraries(vgre PUBLIC
     OpenMP::OpenMP_CXX
     ${OpenMP_CXX_LIBRARIES}
-    ${LIBOMP_PATH}
     Threads::Threads
     ${llvm_libs}
 )
-target_link_options(vgre PUBLIC "-Wl,--no-as-needed" "${LIBOMP_PATH}")
-target_compile_options(vgre PUBLIC ${OpenMP_CXX_FLAGS})
+if(LIBOMP_PATH)
+    target_link_libraries(vgre PUBLIC ${LIBOMP_PATH})
+endif()
+if(UNIX AND NOT APPLE AND LIBOMP_PATH)
+    target_link_options(vgre PUBLIC "-Wl,--no-as-needed" "${LIBOMP_PATH}")
+endif()
 if(VGRE_USE_OPENCL_BACKEND)
     target_link_libraries(vgre PUBLIC OpenCL::OpenCL)
 endif()
 set_target_properties(vgre PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION 0
-    LINK_FLAGS "${OpenMP_CXX_FLAGS}"
 )
 
 # ── CUDART Shim (LD_PRELOAD wrapper) ────────────────────────────────────────
 add_library(vgre_cudart SHARED
     src/api/cudart_shim.cpp
     src/api/cuda_driver_shim.cpp
+    src/api/cuda_interceptor.cpp
+    src/api/vgre_c_api.cpp
 )
-target_link_libraries(vgre_cudart PRIVATE vgre)
+if(WIN32)
+    set_target_properties(vgre_cudart PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+target_sources(vgre_cudart PRIVATE
+    $<TARGET_OBJECTS:vgre_common>
+    $<TARGET_OBJECTS:vgre_core>
+    $<TARGET_OBJECTS:vgre_compiler>
+    $<TARGET_OBJECTS:vgre_runtime>
+    $<TARGET_OBJECTS:vgre_advanced>
+)
+target_compile_definitions(vgre_cudart PRIVATE VGRE_CUDA_INTERCEPTOR_NO_EXPORTS)
+target_link_libraries(vgre_cudart PRIVATE
+    OpenMP::OpenMP_CXX
+    ${OpenMP_CXX_LIBRARIES}
+    Threads::Threads
+    ${llvm_libs}
+)
+if(WIN32)
+    target_link_libraries(vgre_cudart PRIVATE Advapi32)
+elseif(APPLE)
+    find_library(SECURITY_FRAMEWORK Security)
+    if(SECURITY_FRAMEWORK)
+        target_link_libraries(vgre_cudart PRIVATE ${SECURITY_FRAMEWORK})
+    endif()
+elseif(UNIX)
+    find_library(KEYUTILS_LIB keyutils)
+    if(KEYUTILS_LIB)
+        target_link_libraries(vgre_cudart PRIVATE ${KEYUTILS_LIB})
+    endif()
+endif()
+if(VGRE_USE_OPENCL_BACKEND)
+    target_link_libraries(vgre_cudart PRIVATE OpenCL::OpenCL)
+endif()
 target_include_directories(vgre_cudart PRIVATE ${PROJECT_SOURCE_DIR}/include)
 set_target_properties(vgre_cudart PROPERTIES
     VERSION ${PROJECT_VERSION}

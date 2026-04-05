@@ -202,8 +202,9 @@ void Scheduler::workerLoop(int workerIdx) {
         // If this worker is pinned to a specific core, and it launches an 
         // OpenMP task, all OMP threads will be forced onto that same core.
         // We yield affinity here so the OMP runtime can see and use all cores.
-        cpu_set_t oldAffinity;
         bool affinityShifted = false;
+#if defined(__linux__)
+        cpu_set_t oldAffinity;
         if (pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t), &oldAffinity) == 0) {
             cpu_set_t allCores;
             CPU_ZERO(&allCores);
@@ -212,12 +213,15 @@ void Scheduler::workerLoop(int workerIdx) {
                 affinityShifted = true;
             }
         }
+#endif
 
         item.execute();
 
         // Restore pinning for next scheduler work selection
         if (affinityShifted) {
+#if defined(__linux__)
             pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &oldAffinity);
+#endif
         }
       }
     } catch (...) {
@@ -239,12 +243,12 @@ Scheduler::submitStreamTask(StreamId stream, std::function<void()> taskFn,
                             int priority) {
   if (!taskFn) {
     std::promise<VGREResult> p;
-    p.set_value(VGREResult::ERROR_INVALID_VALUE);
+    p.set_value(VGREResult::ERR_INVALID_VALUE);
     return p.get_future();
   }
   if (shutdown_.load()) {
     std::promise<VGREResult> p;
-    p.set_value(VGREResult::ERROR_NOT_INITIALIZED);
+    p.set_value(VGREResult::ERR_NOT_INITIALIZED);
     return p.get_future();
   }
 
@@ -255,7 +259,7 @@ Scheduler::submitStreamTask(StreamId stream, std::function<void()> taskFn,
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutdown_.load()) {
-      node->promise.set_value(VGREResult::ERROR_NOT_INITIALIZED);
+      node->promise.set_value(VGREResult::ERR_NOT_INITIALIZED);
       return future;
     }
     auto &sq = streamQueues_[stream];
@@ -310,7 +314,7 @@ void Scheduler::tryProcessStream(StreamId stream) {
       }
     } catch (...) {
       try {
-        node->promise.set_value(VGREResult::ERROR_LAUNCH_FAILURE);
+        node->promise.set_value(VGREResult::ERR_LAUNCH_FAILURE);
       } catch (...) {
       }
     }
@@ -342,12 +346,12 @@ std::future<VGREResult>
 Scheduler::submitConcurrentTask(std::function<void()> taskFn, int priority) {
   if (!taskFn) {
     std::promise<VGREResult> p;
-    p.set_value(VGREResult::ERROR_INVALID_VALUE);
+    p.set_value(VGREResult::ERR_INVALID_VALUE);
     return p.get_future();
   }
   if (shutdown_.load()) {
     std::promise<VGREResult> p;
-    p.set_value(VGREResult::ERROR_NOT_INITIALIZED);
+    p.set_value(VGREResult::ERR_NOT_INITIALIZED);
     return p.get_future();
   }
 
@@ -365,7 +369,7 @@ Scheduler::submitConcurrentTask(std::function<void()> taskFn, int priority) {
       }
       node->promise.set_value(VGREResult::SUCCESS);
     } catch (...) {
-      node->promise.set_value(VGREResult::ERROR_LAUNCH_FAILURE);
+      node->promise.set_value(VGREResult::ERR_LAUNCH_FAILURE);
     }
   };
 
@@ -385,12 +389,12 @@ Scheduler::submitNumaTask(StreamId stream, std::function<void()> taskFn,
                           int numaNode, int priority) {
   if (!taskFn) {
     std::promise<VGREResult> p;
-    p.set_value(VGREResult::ERROR_INVALID_VALUE);
+    p.set_value(VGREResult::ERR_INVALID_VALUE);
     return p.get_future();
   }
   if (shutdown_.load()) {
     std::promise<VGREResult> p;
-    p.set_value(VGREResult::ERROR_NOT_INITIALIZED);
+    p.set_value(VGREResult::ERR_NOT_INITIALIZED);
     return p.get_future();
   }
 
@@ -407,7 +411,7 @@ Scheduler::submitNumaTask(StreamId stream, std::function<void()> taskFn,
       if (node->task) node->task();
       node->promise.set_value(VGREResult::SUCCESS);
     } catch (...) {
-      node->promise.set_value(VGREResult::ERROR_LAUNCH_FAILURE);
+      node->promise.set_value(VGREResult::ERR_LAUNCH_FAILURE);
     }
   };
 

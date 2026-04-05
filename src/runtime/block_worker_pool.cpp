@@ -1,10 +1,17 @@
 #include "vgre/runtime/block_worker_pool.h"
 #include "vgre/runtime/gpu_thread_context.h"
 #include "vgre/common/logger.h"
-#include <unistd.h>
 #include <algorithm>
 #include <memory>
 #include <string>
+
+#if defined(__linux__)
+#include <unistd.h>
+#include <pthread.h>
+#include <sched.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace vgre {
 namespace runtime {
@@ -101,7 +108,11 @@ void BlockWorkerPool::dispatch(int threadCount, void (*task)(int tid, void* arg)
     // preventing starvation-induced barrier deadlocks.
     uint32_t spin = 0;
     while (spin < 500 && signal->remaining.load(std::memory_order_acquire) > 0) {
+#if defined(_WIN32)
+        YieldProcessor();
+#else
         __builtin_ia32_pause();
+#endif
         ++spin;
     }
     if (signal->remaining.load(std::memory_order_acquire) > 0) {

@@ -454,7 +454,21 @@ void _vgreIsolateEntryPoint(Map<String, dynamic> args) {
   final ReceivePort isolateReceivePort = ReceivePort();
   mainSendPort.send(isolateReceivePort.sendPort);
 
-  final bridge = VgreBridge(libPath);
+  late final VgreBridge bridge;
+  try {
+    bridge = VgreBridge(libPath);
+    final initResult = bridge.init();
+    mainSendPort.send({
+      'type': 'log',
+      'message': 'VGRE init result: $initResult',
+    });
+  } catch (e) {
+    mainSendPort.send({
+      'type': 'log',
+      'message': 'Failed to initialize VGRE bridge: $e',
+    });
+    return;
+  }
   int currentDeviceId = args['deviceId'];
 
   bool securitySupported = Platform.environment.containsKey(

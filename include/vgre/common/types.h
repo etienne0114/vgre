@@ -118,7 +118,7 @@ enum class MemcpyKind : uint8_t {
 };
 
 // ── Stream state ───────────────────────────────────────────────────────────
-enum class StreamState : uint8_t { IDLE, EXECUTING, SYNCHRONIZING, ERROR };
+enum class StreamState : uint8_t { IDLE, EXECUTING, SYNCHRONIZING, FAILED };
 
 } // namespace vgre
 

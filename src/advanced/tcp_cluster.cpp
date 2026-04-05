@@ -60,6 +60,46 @@ namespace vgre {
 namespace advanced {
 
 namespace {
+struct vgre_pollfd {
+  vgre_socket_t fd;
+  short events;
+  short revents;
+};
+
+int vgre_poll(vgre_pollfd* fds, size_t count, int timeoutMs) {
+#if defined(_WIN32)
+  std::vector<WSAPOLLFD> nativeFds(count);
+  for (size_t i = 0; i < count; ++i) {
+    nativeFds[i].fd = fds[i].fd;
+    nativeFds[i].events = fds[i].events;
+    nativeFds[i].revents = 0;
+  }
+
+  int result = WSAPoll(nativeFds.data(), static_cast<ULONG>(count), timeoutMs);
+  if (result >= 0) {
+    for (size_t i = 0; i < count; ++i) {
+      fds[i].revents = nativeFds[i].revents;
+    }
+  }
+  return result;
+#else
+  std::vector<pollfd> nativeFds(count);
+  for (size_t i = 0; i < count; ++i) {
+    nativeFds[i].fd = fds[i].fd;
+    nativeFds[i].events = fds[i].events;
+    nativeFds[i].revents = 0;
+  }
+
+  int result = poll(nativeFds.data(), nativeFds.size(), timeoutMs);
+  if (result >= 0) {
+    for (size_t i = 0; i < count; ++i) {
+      fds[i].revents = nativeFds[i].revents;
+    }
+  }
+  return result;
+#endif
+}
+
 static bool socket_would_block() {
 #if defined(_WIN32)
   int err = WSAGetLastError();
@@ -182,7 +222,7 @@ int TCPClusterManager::recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBu
     if (r == VGREResult::SUCCESS) {
       outBuffer.insert(outBuffer.end(), payload.begin(), payload.end());
       return static_cast<int>(payload.size());
-    } else if (r == VGREResult::ERROR_TIMEOUT) {
+    } else if (r == VGREResult::ERR_TIMEOUT) {
       return 0;
     }
     return -1; // Error
@@ -281,7 +321,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
     VGRE_LOG_ERROR("TCPCluster", "WSAStartup failed");
     enabled_ = false;
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 #endif
 
@@ -302,7 +342,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       if (tokenMgr.initialize() != VGREResult::SUCCESS) {
           VGRE_LOG_ERROR("TCPCluster", "Failed to initialize hardware token manager");
           enabled_ = false;
-          return VGREResult::ERROR_NOT_INITIALIZED;
+          return VGREResult::ERR_NOT_INITIALIZED;
       }
       
       VGREResult tr = tokenMgr.getToken("vgre_tcp_cluster", auth_token_str_);
@@ -313,7 +353,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
           if (sr != VGREResult::SUCCESS) {
               VGRE_LOG_ERROR("TCPCluster", "Failed to store authentication token");
               enabled_ = false;
-              return VGREResult::ERROR_IO;
+              return VGREResult::ERR_IO;
           }
           VGRE_LOG_INFO("TCPCluster", "Generated and stored new authentication token using " + 
                         tokenMgr.getBackendName());
@@ -340,7 +380,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     if (server_fd_ == (vgre_socket_t)-1) {
       VGRE_LOG_ERROR("TCPCluster", "Failed to create socket");
       enabled_ = false;
-      return VGREResult::ERROR_IO;
+      return VGREResult::ERR_IO;
     }
 
     int opt = 1;
@@ -365,7 +405,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       CLOSE_SOCKET(server_fd_);
       server_fd_ = (vgre_socket_t)-1;
       enabled_ = false;
-      return VGREResult::ERROR_IO;
+      return VGREResult::ERR_IO;
     }
 
     if (listen(server_fd_, 10) < 0) {
@@ -373,7 +413,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       CLOSE_SOCKET(server_fd_);
       server_fd_ = (vgre_socket_t)-1;
       enabled_ = false;
-      return VGREResult::ERROR_IO;
+      return VGREResult::ERR_IO;
     }
 
     IOCTL_NONBLOCK(server_fd_);
@@ -391,7 +431,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     if (client_fd_ == (vgre_socket_t)-1) {
       VGRE_LOG_ERROR("TCPCluster", "Failed to create client socket");
       enabled_ = false;
-      return VGREResult::ERROR_IO;
+      return VGREResult::ERR_IO;
     }
 
     struct sockaddr_in serv_addr;
@@ -404,7 +444,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       CLOSE_SOCKET(client_fd_);
       client_fd_ = (vgre_socket_t)-1;
       enabled_ = false;
-      return VGREResult::ERROR_IO;
+      return VGREResult::ERR_IO;
     }
 
     if (connect(client_fd_, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) <
@@ -417,7 +457,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
 #if defined(_WIN32)
       WSACleanup();
 #endif
-      return VGREResult::ERROR_IO;
+      return VGREResult::ERR_IO;
     }
 
     // Set non-blocking
@@ -499,12 +539,13 @@ void TCPClusterManager::serverLoop() {
 
   while (enabled_) {
     // 1. Prepare poll fds
-    std::vector<struct pollfd> fds;
+    std::vector<vgre_pollfd> fds;
     
     // Listening socket
-    struct pollfd pfd_server;
+    vgre_pollfd pfd_server;
     pfd_server.fd = server_fd_;
     pfd_server.events = POLLIN;
+    pfd_server.revents = 0;
     fds.push_back(pfd_server);
     
     // Client sockets
@@ -512,25 +553,16 @@ void TCPClusterManager::serverLoop() {
         std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
         for (const auto &client : clients_) {
             if (client && client->active && client->socket_fd != (vgre_socket_t)-1) {
-                struct pollfd pfd_client;
+                vgre_pollfd pfd_client;
                 pfd_client.fd = client->socket_fd;
                 pfd_client.events = POLLIN;
+                pfd_client.revents = 0;
                 fds.push_back(pfd_client);
             }
         }
     }
     
-    int poll_res = 0;
-#if defined(_WIN32)
-    poll_res = WSAPoll(fds.data(), fds.size(), 50);
-#else
-        int poll_count = poll(fds.data(), fds.size(), 100);
-
-        if (poll_count < 0) {
-            break;
-        }
-        poll_res = poll_count;
-#endif
+    int poll_res = vgre_poll(fds.data(), fds.size(), 50);
 
     if (poll_res < 0) {
         if (!socket_would_block()) {
@@ -944,10 +976,11 @@ void TCPClusterManager::clientLoop() {
     }
 
     // 2. Buffer incoming commands from Master asynchronously via poll()
-    struct pollfd pfd;
+    vgre_pollfd pfd;
     pfd.fd = client_fd_;
     pfd.events = POLLIN;
-    int poll_res = poll(&pfd, 1, 1); // 1ms timeout for high responsiveness
+    pfd.revents = 0;
+    int poll_res = vgre_poll(&pfd, 1, 1); // 1ms timeout for high responsiveness
     
     if (poll_res > 0 && (pfd.revents & POLLIN)) {
       int n = recv_packet(client_fd_, client_rx_buffer_, client_secure_channel_.get());
@@ -962,7 +995,11 @@ void TCPClusterManager::clientLoop() {
         enabled_ = false;
       }
     } else if (poll_res < 0) {
+#if defined(_WIN32)
+      if (WSAGetLastError() != WSAEINTR) {
+#else
       if (errno != EINTR) {
+#endif
         VGRE_LOG_ERROR("TCPCluster", "Client poll() failed");
         enabled_ = false;
       }
@@ -1291,38 +1328,38 @@ VGREResult TCPClusterManager::launchRemoteKernel(
     int worker_idx, uint64_t kernel_id, const uint32_t grid_dim[3],
     const uint32_t block_dim[3], void **args, int num_args, size_t shared_mem) {
   if (!is_master_)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   if (!grid_dim || !block_dim || num_args < 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   if (num_args > 0 && !args)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   if (grid_dim[0] == 0 || block_dim[0] == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
   if (worker_idx < 0 || worker_idx >= static_cast<int>(clients_.size()) ||
       !clients_[worker_idx] || !clients_[worker_idx]->active) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   std::vector<ArgType> argTypes;
   if (core::RuntimeEngine::instance().getKernelArgTypes(kernel_id, argTypes) !=
       VGREResult::SUCCESS) {
-    return VGREResult::ERROR_INVALID_KERNEL;
+    return VGREResult::ERR_INVALID_KERNEL;
   }
 
   if (auth_token_ == 0) {
     VGRE_LOG_ERROR("TCPCluster",
                    "Remote kernel dispatch blocked: missing "
                    "VGRE_TCP_AUTH_TOKEN");
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Phase 12: TSS2 Congestion Window
   const uint32_t MAX_IN_FLIGHT = 16;
   if (clients_[worker_idx]->in_flight_kernels >= MAX_IN_FLIGHT) {
       VGRE_LOG_WARN("TCPCluster", "Congestion: Max in-flight kernels reached for " + clients_[worker_idx]->ip_address);
-      return VGREResult::ERROR_BUSY;
+      return VGREResult::ERR_BUSY;
   }
 
   // 1. Stream all arguments FIRST
@@ -1472,7 +1509,7 @@ full_sync:
   pkt.num_args = num_args; 
 
   if (!send_packet(clients_[worker_idx]->socket_fd, PacketType::LAUNCH_KERNEL, &pkt, sizeof(RemoteCommandPacket), clients_[worker_idx]->secureChannel.get())) {
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
   clients_[worker_idx]->in_flight_kernels++;
 
@@ -1691,7 +1728,7 @@ VGREResult TCPClusterManager::enableSecurity(bool enabled) {
   if (enabled && auth_token_str_.empty()) {
     VGRE_LOG_ERROR("TCPCluster",
                    "Cannot enable security: VGRE_TCP_AUTH_TOKEN not set");
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
   security_enabled_ = enabled;
   VGRE_LOG_INFO("TCPCluster",
@@ -1740,7 +1777,7 @@ VGREResult TCPClusterManager::performSecureHandshake(ClientConnection &client) {
 
   if (!send_packet(client.socket_fd, PacketType::SECURE_HANDSHAKE, &shpkt, sizeof(SecureHandshakePacket), client.secureChannel.get())) {
     VGRE_LOG_ERROR("TCPCluster", "Security handshake: failed to send master nonce");
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 
   // 3. Receive client nonce response using protocol-aware buffering
@@ -1750,28 +1787,28 @@ VGREResult TCPClusterManager::performSecureHandshake(ClientConnection &client) {
   while (rx.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
     if (std::chrono::steady_clock::now() > deadline) {
       VGRE_LOG_ERROR("TCPCluster", "Security handshake timed out while receiving response");
-      return VGREResult::ERROR_TIMEOUT;
+      return VGREResult::ERR_TIMEOUT;
     }
     int n = recv_packet(client.socket_fd, rx, nullptr);
-    if (n < 0) return VGREResult::ERROR_IO;
+    if (n < 0) return VGREResult::ERR_IO;
     if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   
   if (rx.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
-     return VGREResult::ERROR_IO;
+     return VGREResult::ERR_IO;
   }
   
   VSBPHeader* header = reinterpret_cast<VSBPHeader*>(rx.data());
   if (header->magic != VSBP_MAGIC || header->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) {
       VGRE_LOG_ERROR("TCPCluster", "Security handshake: invalid response packet type");
-      return VGREResult::ERROR_AUTH_FAILED;
+      return VGREResult::ERR_AUTH_FAILED;
   }
   std::memcpy(&clientHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
 
   // The packet type check is now handled by the receive logic in send_packet/recv_packet
   // if (clientHs.header.type != (uint16_t)PacketType::SECURE_HANDSHAKE_ACK) {
   //   VGRE_LOG_ERROR("TCPCluster", "Invalid Handshake ACK received");
-  //   return VGREResult::ERROR_AUTH_FAILED;
+  //   return VGREResult::ERR_AUTH_FAILED;
   // }
 
   // 4. Derive session key and create secure channel
@@ -1806,17 +1843,17 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
   while (rx.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
     if (std::chrono::steady_clock::now() > deadline) {
       VGRE_LOG_ERROR("TCPCluster", "Client security handshake timed out");
-      return VGREResult::ERROR_TIMEOUT;
+      return VGREResult::ERR_TIMEOUT;
     }
     int n = recv_packet(client_fd_, rx, nullptr);
-    if (n < 0) return VGREResult::ERROR_IO;
+    if (n < 0) return VGREResult::ERR_IO;
     if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
   VSBPHeader* header = reinterpret_cast<VSBPHeader*>(rx.data());
   if (header->magic != VSBP_MAGIC || header->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
       VGRE_LOG_ERROR("TCPCluster", "Client security handshake: invalid master packet");
-      return VGREResult::ERROR_AUTH_FAILED;
+      return VGREResult::ERR_AUTH_FAILED;
   }
   std::memcpy(&masterHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
 
@@ -1833,7 +1870,7 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
   
   if (!send_packet(client_fd_, PacketType::SECURE_HANDSHAKE_ACK, &ack, sizeof(SecureHandshakePacket), client_secure_channel_.get())) {
     VGRE_LOG_ERROR("TCPCluster", "Client security handshake: failed to send ACK");
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 
   // 4. Derive session key
@@ -1857,10 +1894,10 @@ VGREResult TCPClusterManager::launchPartitionedKernel(
     const uint32_t block_dim[3], void **args, int num_args,
     size_t shared_mem) {
   if (!is_master_ || !enabled_) {
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   }
   if (!grid_dim || !block_dim || grid_dim[0] == 0 || block_dim[0] == 0) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Build node capability list
@@ -1904,7 +1941,7 @@ VGREResult TCPClusterManager::launchPartitionedKernel(
 
   if (!WorkloadPartitioner::instance().validatePlan(plan)) {
     VGRE_LOG_ERROR("TCPCluster", "Partition plan validation failed");
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Clear previous results
@@ -2086,7 +2123,7 @@ VGREResult TCPClusterManager::collectPartitionResults(
                      "Partition result collection timed out: received " +
                          std::to_string(partition_results_.size()) + "/" +
                          std::to_string(total_partitions));
-      return VGREResult::ERROR_TIMEOUT;
+      return VGREResult::ERR_TIMEOUT;
     }
   }
 
@@ -2114,7 +2151,7 @@ VGREResult TCPClusterManager::waitForRemoteResult(uint64_t kernel_id, int timeou
     while (remote_kernel_results_.find(kernel_id) == remote_kernel_results_.end()) {
         if (remote_results_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
             VGRE_LOG_ERROR("TCPCluster", "Wait for remote result (kernel=" + std::to_string(kernel_id) + ") timed out");
-            return VGREResult::ERROR_TIMEOUT;
+            return VGREResult::ERR_TIMEOUT;
         }
     }
     

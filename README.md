@@ -62,7 +62,7 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 cd virtual-gpu-runtime
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
+cmake --build . --parallel
 ```
 
 ### Run Tests

@@ -35,23 +35,23 @@ static int to_status(vgre::VGREResult r) {
   switch (r) {
   case vgre::VGREResult::SUCCESS:
     return VGRE_SUCCESS;
-  case vgre::VGREResult::ERROR_OUT_OF_MEMORY:
+  case vgre::VGREResult::ERR_OUT_OF_MEMORY:
     return VGRE_ERROR_OUT_OF_MEMORY;
-  case vgre::VGREResult::ERROR_INVALID_VALUE:
+  case vgre::VGREResult::ERR_INVALID_VALUE:
     return VGRE_ERROR_INVALID_VALUE;
-  case vgre::VGREResult::ERROR_INVALID_KERNEL:
+  case vgre::VGREResult::ERR_INVALID_KERNEL:
     return VGRE_ERROR_INVALID_KERNEL;
-  case vgre::VGREResult::ERROR_LAUNCH_FAILURE:
+  case vgre::VGREResult::ERR_LAUNCH_FAILURE:
     return VGRE_ERROR_LAUNCH_FAILURE;
-  case vgre::VGREResult::ERROR_IO:
+  case vgre::VGREResult::ERR_IO:
     return VGRE_ERROR_IO;
-  case vgre::VGREResult::ERROR_NOT_INITIALIZED:
+  case vgre::VGREResult::ERR_NOT_INITIALIZED:
     return VGRE_ERROR_NOT_INIT;
-  case vgre::VGREResult::ERROR_AUTH_FAILED:
+  case vgre::VGREResult::ERR_AUTH_FAILED:
     return VGRE_ERROR_AUTH_FAILED;
-  case vgre::VGREResult::ERROR_CRYPTO:
+  case vgre::VGREResult::ERR_CRYPTO:
     return VGRE_ERROR_CRYPTO;
-  case vgre::VGREResult::ERROR_INVALID_DEVICE:
+  case vgre::VGREResult::ERR_INVALID_DEVICE:
     return VGRE_ERROR_INVALID_VALUE; // Map to invalid value for now, or add specific C code
   default:
     return VGRE_ERROR_GENERIC;

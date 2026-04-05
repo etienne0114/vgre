@@ -48,10 +48,10 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
     const std::vector<uint64_t> &deps, uint64_t &outNodeId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (grid.x == 0 || block.x == 0)
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
   auto it = graphs_.find(id);
   if (it == graphs_.end())
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
 
   GraphNode node;
   node.type = GraphNodeType::KERNEL;
@@ -96,7 +96,7 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
     if (size > 0 && args && args[i]) {
       std::memcpy(buf.data(), args[i], size);
     } else if (size > 0) {
-      return vgre::VGREResult::ERROR_INVALID_VALUE;
+      return vgre::VGREResult::ERR_INVALID_VALUE;
     }
     node.capturedArgs.push_back(buf);
 
@@ -133,12 +133,12 @@ vgre::VGREResult GraphManager::addMemcpyNodeWithDepsOut(
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = graphs_.find(id);
   if (it == graphs_.end())
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
   if (!dst || !src || count == 0)
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
   if (kind != VGRE_MEMCPY_HOST_TO_DEVICE && kind != VGRE_MEMCPY_DEVICE_TO_HOST &&
       kind != VGRE_MEMCPY_DEVICE_TO_DEVICE) {
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
   }
 
   GraphNode node;
@@ -160,7 +160,7 @@ vgre::VGREResult GraphManager::addDependency(GraphId id, uint64_t nodeId,
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = graphs_.find(id);
   if (it == graphs_.end())
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
 
   GraphNode *node = nullptr;
   bool depFound = false;
@@ -173,7 +173,7 @@ vgre::VGREResult GraphManager::addDependency(GraphId id, uint64_t nodeId,
     }
   }
   if (!node || !depFound)
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
 
   for (auto d : node->deps) {
     if (d == dependsOn) {
@@ -190,7 +190,7 @@ vgre::VGREResult GraphManager::updateKernelNodeArgs(
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = graphs_.find(id);
   if (it == graphs_.end())
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
 
   GraphNode *node = nullptr;
   for (auto &n : it->second->nodes) {
@@ -200,7 +200,7 @@ vgre::VGREResult GraphManager::updateKernelNodeArgs(
     }
   }
   if (!node || node->type != GraphNodeType::KERNEL)
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
 
   node->capturedArgs.clear();
   for (size_t i = 0; i < argTypes.size(); ++i) {
@@ -235,7 +235,7 @@ vgre::VGREResult GraphManager::updateKernelNodeArgs(
     if (size > 0 && args && args[i]) {
       std::memcpy(buf.data(), args[i], size);
     } else if (size > 0) {
-      return vgre::VGREResult::ERROR_INVALID_VALUE;
+      return vgre::VGREResult::ERR_INVALID_VALUE;
     }
     node->capturedArgs.push_back(std::move(buf));
   }
@@ -248,7 +248,7 @@ vgre::VGREResult GraphManager::updateMemcpyNode(GraphId id, uint64_t nodeId,
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = graphs_.find(id);
   if (it == graphs_.end())
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
 
   GraphNode *node = nullptr;
   for (auto &n : it->second->nodes) {
@@ -258,12 +258,12 @@ vgre::VGREResult GraphManager::updateMemcpyNode(GraphId id, uint64_t nodeId,
     }
   }
   if (!node || node->type != GraphNodeType::MEMCPY)
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
   if (!dst || !src || count == 0)
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
   if (kind != VGRE_MEMCPY_HOST_TO_DEVICE && kind != VGRE_MEMCPY_DEVICE_TO_HOST &&
       kind != VGRE_MEMCPY_DEVICE_TO_DEVICE) {
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
   }
 
   node->dst = dst;
@@ -277,11 +277,11 @@ vgre::VGREResult GraphManager::instantiate(GraphId id, GraphExecId &outExecId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = graphs_.find(id);
   if (it == graphs_.end())
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
 
   const auto &nodes = it->second->nodes;
   if (nodes.empty()) {
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
   }
 
   // Phase 9: Dynamic JIT Fusion
@@ -302,7 +302,7 @@ vgre::VGREResult GraphManager::instantiate(GraphId id, GraphExecId &outExecId) {
       if (depIt == nodeIndex.end()) {
         VGRE_LOG_ERROR("GraphManager", "Node " + std::to_string(nodes[i].nodeId) + 
                        " has invalid dependency " + std::to_string(depId));
-        return vgre::VGREResult::ERROR_INVALID_VALUE;
+        return vgre::VGREResult::ERR_INVALID_VALUE;
       }
       adj[depIt->second].push_back(i);
       indegree[i]++;
@@ -327,7 +327,7 @@ vgre::VGREResult GraphManager::instantiate(GraphId id, GraphExecId &outExecId) {
   if (count != nodes.size()) {
     VGRE_LOG_ERROR("GraphManager", "Failed to instantiate graph " + std::to_string(id) + 
                    ": Dependency cycle detected.");
-    return vgre::VGREResult::ERROR_INVALID_VALUE;
+    return vgre::VGREResult::ERR_INVALID_VALUE;
   }
 
   auto exec = std::make_shared<GraphExec>();
@@ -348,10 +348,10 @@ vgre::VGREResult GraphManager::instantiate(GraphId id, GraphExecId &outExecId) {
 vgre::VGREResult GraphManager::updateExec(GraphExecId execId, GraphId newGraphId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto execIt = executables_.find(execId);
-  if (execIt == executables_.end()) return vgre::VGREResult::ERROR_INVALID_VALUE;
+  if (execIt == executables_.end()) return vgre::VGREResult::ERR_INVALID_VALUE;
 
   auto graphIt = graphs_.find(newGraphId);
-  if (graphIt == graphs_.end()) return vgre::VGREResult::ERROR_INVALID_VALUE;
+  if (graphIt == graphs_.end()) return vgre::VGREResult::ERR_INVALID_VALUE;
 
   const auto& oldGraph = execIt->second->sourceGraph;
   const auto& newGraph = graphIt->second;
@@ -359,17 +359,17 @@ vgre::VGREResult GraphManager::updateExec(GraphExecId execId, GraphId newGraphId
   // Strict Topological Verification (Zero-Simulation, Authoritative Runtime Checking)
   if (oldGraph->nodes.size() != newGraph->nodes.size()) {
       VGRE_LOG_WARN("GraphManager", "updateExec topology mismatch: Node count changed.");
-      return vgre::VGREResult::ERROR_INVALID_VALUE; // Topology changed
+      return vgre::VGREResult::ERR_INVALID_VALUE; // Topology changed
   }
   
   for (size_t i = 0; i < oldGraph->nodes.size(); ++i) {
       if (oldGraph->nodes[i].type != newGraph->nodes[i].type) {
           VGRE_LOG_WARN("GraphManager", "updateExec topology mismatch: Node type changed at index " + std::to_string(i));
-          return vgre::VGREResult::ERROR_INVALID_VALUE;
+          return vgre::VGREResult::ERR_INVALID_VALUE;
       }
       if (oldGraph->nodes[i].deps.size() != newGraph->nodes[i].deps.size()) {
           VGRE_LOG_WARN("GraphManager", "updateExec topology mismatch: Dependency count changed at index " + std::to_string(i));
-          return vgre::VGREResult::ERROR_INVALID_VALUE;
+          return vgre::VGREResult::ERR_INVALID_VALUE;
       }
   }
 
@@ -393,7 +393,7 @@ vgre::VGREResult GraphManager::launch(GraphExecId execId, StreamId stream) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = executables_.find(execId);
     if (it == executables_.end())
-      return vgre::VGREResult::ERROR_INVALID_VALUE;
+      return vgre::VGREResult::ERR_INVALID_VALUE;
     exec = it->second;
   }
 

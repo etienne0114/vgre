@@ -9,6 +9,9 @@
 #include <thread>
 #include <chrono>
 #include <cstdlib>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 static std::atomic<bool> g_stop_requested(false);
 
@@ -54,7 +57,11 @@ int main(int argc, char** argv) {
     
     if (!auth_token.empty()) {
         vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Using provided auth token.");
+#if defined(_WIN32)
+        _putenv_s("VGRE_TCP_AUTH_TOKEN", auth_token.c_str());
+#else
         setenv("VGRE_TCP_AUTH_TOKEN", auth_token.c_str(), 1);
+#endif
     }
 
     vgre::advanced::TCPClusterManager& cluster = vgre::advanced::TCPClusterManager::instance();
@@ -63,7 +70,7 @@ int main(int argc, char** argv) {
     
     // Initialize as Worker (is_master = false)
     if (cluster.initialize(false, master_ip, port) != vgre::VGREResult::SUCCESS) {
-        vgre::Logger::instance().log(vgre::LogLevel::ERROR, "Worker", "Failed to initialize TCP Cluster worker.");
+        vgre::Logger::instance().log(vgre::LogLevel::ERR, "Worker", "Failed to initialize TCP Cluster worker.");
         return 1;
     }
 

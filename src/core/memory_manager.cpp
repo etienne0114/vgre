@@ -350,7 +350,7 @@ void MemoryManager::alignedFree(void *ptr) {
 VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
                                    DeviceId deviceId) {
   if (size == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   constexpr size_t ALIGN = 64;
   size_t alignedSize = (size + ALIGN - 1) & ~(ALIGN - 1);
 
@@ -358,7 +358,7 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
   size_t current = usedMemory_.load(std::memory_order_relaxed);
   do {
     if (current + alignedSize > poolSize_)
-      return VGREResult::ERROR_OUT_OF_MEMORY;
+      return VGREResult::ERR_OUT_OF_MEMORY;
   } while (!usedMemory_.compare_exchange_weak(current, current + alignedSize,
                                               std::memory_order_acq_rel));
 
@@ -366,7 +366,7 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
   if (!ptr) {
     // Undo the reservation if allocation failed
     usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
-    return VGREResult::ERROR_OUT_OF_MEMORY;
+    return VGREResult::ERR_OUT_OF_MEMORY;
   }
 
   std::memset(ptr, 0, alignedSize);
@@ -393,7 +393,7 @@ VGREResult MemoryManager::free(MemoryHandle handle) {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto it = allocations_.find(handle);
   if (it == allocations_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   size_t freed = it->second.size;
   if (it->second.isManaged) {
@@ -494,7 +494,7 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
                                           DeviceId deviceId,
                                           unsigned int flags) {
   if (size == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   size_t pageSize = 4096;
 #if defined(_WIN32)
@@ -512,7 +512,7 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
   size_t current = usedMemory_.load(std::memory_order_relaxed);
   do {
     if (current + alignedSize > poolSize_)
-      return VGREResult::ERROR_OUT_OF_MEMORY;
+      return VGREResult::ERR_OUT_OF_MEMORY;
   } while (!usedMemory_.compare_exchange_weak(current, current + alignedSize,
                                               std::memory_order_acq_rel));
 
@@ -525,7 +525,7 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
       VirtualAlloc(NULL, alignedSize, MEM_COMMIT | MEM_RESERVE, protect);
   if (!ptr) {
     usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
-    return VGREResult::ERROR_OUT_OF_MEMORY;
+    return VGREResult::ERR_OUT_OF_MEMORY;
   }
 #else
   int prot = (flags == 2) ? (PROT_READ | PROT_WRITE) : PROT_NONE;
@@ -537,7 +537,7 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
 #endif
   if (ptr == MAP_FAILED) {
     usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
-    return VGREResult::ERROR_OUT_OF_MEMORY;
+    return VGREResult::ERR_OUT_OF_MEMORY;
   }
 #endif
 
@@ -565,7 +565,7 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
       munmap(ptr, alignedSize);
 #endif
       usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
-      return VGREResult::ERROR_OUT_OF_MEMORY;
+      return VGREResult::ERR_OUT_OF_MEMORY;
     }
   }
 
@@ -577,7 +577,7 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
                                            DeviceId deviceId,
                                            unsigned int flags) {
   if (!addr || size == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   
   // Align size to page boundary
   size_t pageSize = 4096;
@@ -593,13 +593,13 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
 
   // Check if address is aligned
   if (reinterpret_cast<uintptr_t>(addr) & (pageSize - 1))
-      return VGREResult::ERROR_INVALID_VALUE;
+      return VGREResult::ERR_INVALID_VALUE;
 
   // Reservation
   size_t current = usedMemory_.load(std::memory_order_relaxed);
   do {
     if (current + alignedSize > poolSize_)
-      return VGREResult::ERROR_OUT_OF_MEMORY;
+      return VGREResult::ERR_OUT_OF_MEMORY;
   } while (!usedMemory_.compare_exchange_weak(current, current + alignedSize,
                                                std::memory_order_acq_rel));
 
@@ -616,7 +616,7 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
     usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
     VGRE_LOG_ERROR("MemoryManager", "Failed to allocate at specific address " + 
                   std::to_string(reinterpret_cast<uintptr_t>(addr)));
-    return VGREResult::ERROR_OUT_OF_MEMORY;
+    return VGREResult::ERR_OUT_OF_MEMORY;
   }
 
   Allocation alloc;
@@ -642,7 +642,7 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
       munmap(ptr, alignedSize);
 #endif
       usedMemory_.fetch_sub(alignedSize, std::memory_order_relaxed);
-      return VGREResult::ERROR_OUT_OF_MEMORY;
+      return VGREResult::ERR_OUT_OF_MEMORY;
     }
   }
 
@@ -659,7 +659,7 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
 VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
                                            size_t bytes) {
   if (!dst || !src || bytes == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   std::unique_lock<std::recursive_mutex> lock(mutex_);
   
   auto it = allocations_.end();
@@ -675,7 +675,7 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
   }
 
   if (it == allocations_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   // Bounds check: prevent writing past the parent allocation
   if (offset + bytes > it->second.size) {
@@ -683,7 +683,7 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
                    "H2D copy overflow: requested " + std::to_string(bytes) +
                        " bytes at offset " + std::to_string(offset) + " but allocation is " +
                        std::to_string(it->second.size) + " bytes");
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   if (it->second.isManaged) {
@@ -741,7 +741,7 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
 VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
                                            size_t bytes) {
   if (!dst || !src || bytes == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   std::unique_lock<std::recursive_mutex> lock(mutex_);
   
   auto it = allocations_.end();
@@ -757,7 +757,7 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
   }
 
   if (it == allocations_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   // Bounds check: prevent reading past the parent allocation
   if (offset + bytes > it->second.size) {
@@ -765,7 +765,7 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
                    "D2H copy overflow: requested " + std::to_string(bytes) +
                        " bytes at offset " + std::to_string(offset) + " but allocation is " +
                        std::to_string(it->second.size) + " bytes");
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   if (it->second.isManaged) {
@@ -820,7 +820,7 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
 VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
                                              size_t bytes) {
   if (!dst || !src || bytes == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   std::unique_lock<std::recursive_mutex> lock(mutex_);
   
   auto itDst = allocations_.end();
@@ -848,7 +848,7 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
   }
 
   if (itDst == allocations_.end() || itSrc == allocations_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   // Bounds check: prevent overflow on both source and destination parent allocations
   if (offsetDst + bytes > itDst->second.size || offsetSrc + bytes > itSrc->second.size) {
@@ -857,7 +857,7 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
                        " bytes but dst is " + std::to_string(itDst->second.size) +
                        " bytes, src is " + std::to_string(itSrc->second.size) +
                        " bytes");
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Cross-device check: if different devices, check P2P access
@@ -868,7 +868,7 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
                      "P2P access denied between device " +
                          std::to_string(itSrc->second.deviceId) + " and " +
                          std::to_string(itDst->second.deviceId));
-      return VGREResult::ERROR_INVALID_VALUE;
+      return VGREResult::ERR_INVALID_VALUE;
     }
   }
 
@@ -1272,7 +1272,7 @@ VGREResult MemoryManager::createPool(PoolHandle &outHandle, size_t blockSize) {
 VGREResult MemoryManager::destroyPool(PoolHandle handle) {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto it = pools_.find(handle);
-  if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
+  if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
 
   auto &pool = it->second;
 
@@ -1304,7 +1304,7 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
                                            MemoryHandle &outHandle) {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto it = pools_.find(poolHandle);
-  if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
+  if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
 
   auto &pool = it->second;
 
@@ -1326,12 +1326,12 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
   // Check pool size limit before new allocation
   size_t currentUsed = usedMemory_.load(std::memory_order_relaxed);
   if (currentUsed + allocSize > poolSize_) {
-    return VGREResult::ERROR_OUT_OF_MEMORY;
+    return VGREResult::ERR_OUT_OF_MEMORY;
   }
 
   // No suitable free block — allocate new
   void *ptr = alignedAlloc(allocSize, 64);
-  if (!ptr) return VGREResult::ERROR_OUT_OF_MEMORY;
+  if (!ptr) return VGREResult::ERR_OUT_OF_MEMORY;
 
   std::memset(ptr, 0, allocSize);
   usedMemory_.fetch_add(allocSize);
@@ -1353,7 +1353,7 @@ VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
                                      MemoryHandle handle) {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto it = pools_.find(poolHandle);
-  if (it == pools_.end()) return VGREResult::ERROR_INVALID_VALUE;
+  if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
 
   auto &pool = it->second;
 
@@ -1368,7 +1368,7 @@ VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
     }
   }
 
-  return VGREResult::ERROR_INVALID_VALUE;
+  return VGREResult::ERR_INVALID_VALUE;
 }
 
 VGREResult MemoryManager::getDirtyPages(MemoryHandle handle, std::vector<std::pair<size_t, size_t>>& outDirtyRanges) const {
@@ -1377,7 +1377,7 @@ VGREResult MemoryManager::getDirtyPages(MemoryHandle handle, std::vector<std::pa
   auto it = std::find_if(masterRegions_.begin(), masterRegions_.end(),
                          [handle](const ManagedRegion& r) { return r.ptr == handle; });
   
-  if (it == masterRegions_.end()) return VGREResult::ERROR_INVALID_VALUE;
+  if (it == masterRegions_.end()) return VGREResult::ERR_INVALID_VALUE;
   
   outDirtyRanges.clear();
   if (!it->dirtyPages) return VGREResult::SUCCESS;
@@ -1410,7 +1410,7 @@ VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
   auto it = std::find_if(masterRegions_.begin(), masterRegions_.end(),
                          [handle](const ManagedRegion& r) { return r.ptr == handle; });
   
-  if (it == masterRegions_.end()) return VGREResult::ERROR_INVALID_VALUE;
+  if (it == masterRegions_.end()) return VGREResult::ERR_INVALID_VALUE;
   
   if (it->dirtyPages) {
     std::memset(it->dirtyPages, 0, it->pageCount);

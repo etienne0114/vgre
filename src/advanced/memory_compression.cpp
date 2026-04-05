@@ -36,7 +36,7 @@ MemoryCompression::~MemoryCompression() = default;
 VGREResult MemoryCompression::compress(const void *src, size_t srcSize,
                                        std::vector<uint8_t> &dst) {
   if (!src && srcSize > 0) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
   auto start = std::chrono::steady_clock::now();
 
@@ -99,7 +99,7 @@ VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
                                          void *dst, size_t dstCapacity,
                                          size_t &outActualSize) {
   if ((!src && srcSize > 0) || !dst) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
   auto start = std::chrono::steady_clock::now();
 
@@ -116,7 +116,7 @@ VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
       
       if (sizeof(CompressionHeader) + payloadSize > srcSize ||
           originalSize > dstCapacity) {
-        return VGREResult::ERROR_COMPRESSION;
+        return VGREResult::ERR_COMPRESSION;
       }
 
       if ((hdr.flags & kFlagCompressed) != 0) {
@@ -128,11 +128,11 @@ VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
         if (decompressedSize < 0 || static_cast<size_t>(decompressedSize) != originalSize) {
           VGRE_LOG_ERROR("MemoryCompression", "LZ4 Decompression failed (err=" + 
                          std::to_string(decompressedSize) + ")");
-          return VGREResult::ERROR_COMPRESSION;
+          return VGREResult::ERR_COMPRESSION;
         }
       } else {
         if (payloadSize != originalSize) {
-          return VGREResult::ERROR_COMPRESSION;
+          return VGREResult::ERR_COMPRESSION;
         }
         if (originalSize > 0) {
           std::memcpy(dst, payload, originalSize);
@@ -159,7 +159,7 @@ VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
   if (decompressedSize <= 0) {
     // If not LZ4, assume raw copy as last resort
     if (srcSize > dstCapacity) {
-      return VGREResult::ERROR_COMPRESSION;
+      return VGREResult::ERR_COMPRESSION;
     }
     std::memcpy(dst, src, srcSize);
     decompressedSize = static_cast<int>(srcSize);

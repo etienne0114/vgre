@@ -8,8 +8,9 @@ Welcome to the Virtual GPU Runtime Engine (VGRE). This guide will help you set u
 
 ### 1.1 Prerequisites
 - **Linux**: Ubuntu 22.04+ (Recommended) or Fedora 38+.
+- **Windows**: Windows 10/11 with Visual Studio 2022 C++ tools.
 - **Compiler**: LLVM/Clang 16+.
-- **Dependencies**: `cmake`, `libssl-dev`, `libtpm2-tss-dev` (optional for hardware auth).
+- **Dependencies**: `cmake`, `libssl-dev`, `libtpm2-tss-dev` (optional for hardware auth on Linux).
 
 ### 1.2 Installation
 1. Clone the repository:
@@ -17,14 +18,23 @@ Welcome to the Virtual GPU Runtime Engine (VGRE). This guide will help you set u
    git clone https://github.com/vgre-org/vgre-runtime.git
    cd vgre-runtime
    ```
-2. Build the project:
+2. Build the project on Linux/macOS:
    ```bash
    mkdir build && cd build
-   cmake ..
-   make -j$(nproc)
-   sudo make install
+   cmake .. -DCMAKE_BUILD_TYPE=Release
+   cmake --build . --parallel
+   sudo cmake --install .
    ```
    This installs the core libraries to `/usr/local/lib/vgre/` and headers to `/usr/local/include/vgre/`.
+
+3. Build the project on Windows:
+   ```powershell
+   mkdir build
+   cd build
+   cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+   cmake --build . --config Release --target vgre vgre_cudart vgre-worker -- /m:1
+   ```
+   On Windows, do not use `make -j$(nproc)`. `make` and `nproc` are Unix tools and are not available in a normal PowerShell setup.
 
 ---
 

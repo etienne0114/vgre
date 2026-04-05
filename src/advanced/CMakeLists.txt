@@ -29,5 +29,31 @@ endif()
 
 # ── Standalone Worker CLI ────────────────────────────────────────────────────
 add_executable(vgre-worker vgre_worker_cli.cpp)
-target_link_libraries(vgre-worker PRIVATE vgre)
+target_sources(vgre-worker PRIVATE
+    $<TARGET_OBJECTS:vgre_common>
+    $<TARGET_OBJECTS:vgre_core>
+    $<TARGET_OBJECTS:vgre_compiler>
+    $<TARGET_OBJECTS:vgre_api>
+    $<TARGET_OBJECTS:vgre_runtime>
+    $<TARGET_OBJECTS:vgre_advanced>
+)
+target_link_libraries(vgre-worker PRIVATE
+    OpenMP::OpenMP_CXX
+    ${OpenMP_CXX_LIBRARIES}
+    Threads::Threads
+    ${llvm_libs}
+)
+if(WIN32)
+    target_link_libraries(vgre-worker PRIVATE Advapi32)
+elseif(APPLE)
+    target_link_libraries(vgre-worker PRIVATE "-framework Security")
+elseif(UNIX)
+    find_library(KEYUTILS_LIB keyutils)
+    if(KEYUTILS_LIB)
+        target_link_libraries(vgre-worker PRIVATE ${KEYUTILS_LIB})
+    endif()
+endif()
+if(VGRE_USE_OPENCL_BACKEND)
+    target_link_libraries(vgre-worker PRIVATE OpenCL::OpenCL)
+endif()
 target_include_directories(vgre-worker PRIVATE ${PROJECT_SOURCE_DIR}/include)

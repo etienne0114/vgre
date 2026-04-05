@@ -5,9 +5,11 @@
 
 // System Headers
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <random>
 #include <thread>
 #include <vector>
 
@@ -30,6 +32,32 @@
 
 namespace vgre {
 namespace advanced {
+
+namespace {
+int pickExplorationThreadCount(int maxCores) {
+  thread_local std::mt19937 rng(
+      static_cast<unsigned int>(
+          std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::uniform_int_distribution<int> exploreRoll(0, 9);
+  if (exploreRoll(rng) != 0) {
+    return -1;
+  }
+
+  std::vector<int> candidates;
+  candidates.push_back(1);
+  for (int threads = 2; threads < maxCores; threads <<= 1) {
+    candidates.push_back(threads);
+  }
+  if (maxCores > 1 &&
+      std::find(candidates.begin(), candidates.end(), maxCores) ==
+          candidates.end()) {
+    candidates.push_back(maxCores);
+  }
+
+  std::uniform_int_distribution<size_t> choice(0, candidates.size() - 1);
+  return candidates[choice(rng)];
+}
+} // namespace
 
 AdaptiveExecutionEngine::AdaptiveExecutionEngine()
     : maxCores_(static_cast<int>(std::thread::hardware_concurrency())),
@@ -248,21 +276,9 @@ int AdaptiveExecutionEngine::getOptimalThreadCount(
 
   // Exploration Logic: 10% chance to try a different core count
   // to avoid getting stuck in a local optimum.
-  static std::atomic<unsigned int> seed_initialized{0};
-  static thread_local unsigned int seed = 0;
-  if (seed_initialized.load() == 0) {
-      seed = static_cast<unsigned int>(std::chrono::system_clock::now().time_since_epoch().count());
-      seed_initialized.store(1);
-  }
-  
-  if (rand_r(&seed) % 10 == 0) {
-    // Generate a reasonable power-of-two or core-aligned choice
-    int maxPower = 0;
-    while ((1 << (maxPower + 1)) <= maxCores_) maxPower++;
-    
-    int choicePower = rand_r(&seed) % (maxPower + 2);
-    int choice = (choicePower <= maxPower) ? (1 << choicePower) : maxCores_;
-    return std::min(choice, maxCores_);
+  int exploratoryThreads = pickExplorationThreadCount(maxCores_);
+  if (exploratoryThreads > 0) {
+    return exploratoryThreads;
   }
 
   return it->second.optimalThreads;
@@ -411,7 +427,7 @@ VGREResult AdaptiveExecutionEngine::autoTune(const std::string &kernelName,
     VGRE_LOG_ERROR("AdaptiveExecutionEngine",
                    "Auto-tune failed: no successful executions for " +
                        kernelName);
-    return VGREResult::ERROR_LAUNCH_FAILURE;
+    return VGREResult::ERR_LAUNCH_FAILURE;
   }
 
   VGRE_LOG_INFO("AdaptiveExecutionEngine",

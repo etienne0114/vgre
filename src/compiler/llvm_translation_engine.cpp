@@ -1,5 +1,6 @@
 #include "vgre/compiler/llvm_translation_engine.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/platform.h"
 #include "vgre/common/system_utils.h"
 
 #include <cstdio>
@@ -56,17 +57,17 @@ extern "C" {
   void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
 
   struct dim3_pod { uint32_t x, y, z; };
-  static __thread dim3_pod t_threadIdx = {1, 1, 1};
-  static __thread dim3_pod t_blockIdx = {0, 0, 0};
-  static __thread dim3_pod t_blockDim = {1, 1, 1};
-  static __thread dim3_pod t_gridDim = {1, 1, 1};
-  static __thread void* t_sharedMem = nullptr;
+  static VGRE_THREAD_LOCAL dim3_pod t_threadIdx = {1, 1, 1};
+  static VGRE_THREAD_LOCAL dim3_pod t_blockIdx = {0, 0, 0};
+  static VGRE_THREAD_LOCAL dim3_pod t_blockDim = {1, 1, 1};
+  static VGRE_THREAD_LOCAL dim3_pod t_gridDim = {1, 1, 1};
+  static VGRE_THREAD_LOCAL void* t_sharedMem = nullptr;
 
-  __attribute__((visibility("default"))) vgre::dim3* vgre_jit_get_threadIdx() { return (vgre::dim3*)&t_threadIdx; }
-  __attribute__((visibility("default"))) vgre::dim3* vgre_jit_get_blockIdx() { return (vgre::dim3*)&t_blockIdx; }
-  __attribute__((visibility("default"))) vgre::dim3* vgre_jit_get_blockDim() { return (vgre::dim3*)&t_blockDim; }
-  __attribute__((visibility("default"))) vgre::dim3* vgre_jit_get_gridDim() { return (vgre::dim3*)&t_gridDim; }
-  __attribute__((visibility("default"))) void** vgre_jit_get_sharedMem() { return &t_sharedMem; }
+  VGRE_PUBLIC_API vgre::dim3* vgre_jit_get_threadIdx() { return (vgre::dim3*)&t_threadIdx; }
+  VGRE_PUBLIC_API vgre::dim3* vgre_jit_get_blockIdx() { return (vgre::dim3*)&t_blockIdx; }
+  VGRE_PUBLIC_API vgre::dim3* vgre_jit_get_blockDim() { return (vgre::dim3*)&t_blockDim; }
+  VGRE_PUBLIC_API vgre::dim3* vgre_jit_get_gridDim() { return (vgre::dim3*)&t_gridDim; }
+  VGRE_PUBLIC_API void** vgre_jit_get_sharedMem() { return &t_sharedMem; }
 }
 
 namespace vgre {
@@ -422,7 +423,7 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
 
   outFn = compileJIT(irCode, ir.name + "_wrapper", ir);
   if (!outFn) {
-    return vgre::VGREResult::ERROR_COMPILATION;
+    return vgre::VGREResult::ERR_COMPILATION;
   }
 
   // Phase 8: Extract precise FLOP and Instruction count from JIT-ed module before completion
@@ -674,7 +675,7 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
   std::string includePath = vgre::common::findIncludeDir();
   if (includePath.empty()) {
     VGRE_LOG_ERROR("LLVMTranslationEngine", "Could not find VGRE include directory");
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 
   {
@@ -707,7 +708,7 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
     VGRE_LOG_DEBUG("LLVMTranslationEngine", "Failed Command: " + cmd);
     std::remove(logFile.c_str());
     std::remove(tmpCpp.c_str());
-    return VGREResult::ERROR_COMPILATION;
+    return VGREResult::ERR_COMPILATION;
   }
   std::remove(logFile.c_str());
 
@@ -956,14 +957,14 @@ size_t LLVMTranslationEngine::getCacheSize() const {
 VGREResult LLVMTranslationEngine::loadBitcodeModule(const std::string &path,
                                                     ModuleHandle &outModule) {
   if (!llvmState_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   llvm::SMDiagnostic err;
   auto module = llvm::parseIRFile(path, err, *llvmState_->context.getContext());
   if (!module) {
     VGRE_LOG_ERROR("LLVMTranslationEngine", "Error loading IR file " + path +
                                                 ": " + err.getMessage().str());
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 
   static int moduleCounter = 0;
@@ -971,7 +972,7 @@ VGREResult LLVMTranslationEngine::loadBitcodeModule(const std::string &path,
   auto jd_or_err = llvmState_->jit->createJITDylib(libName);
   if (!jd_or_err) {
     consumeError(jd_or_err.takeError());
-    return VGREResult::ERROR_COMPILATION;
+    return VGREResult::ERR_COMPILATION;
   }
   auto &jd = *jd_or_err;
 
@@ -990,7 +991,7 @@ VGREResult LLVMTranslationEngine::loadBitcodeModule(const std::string &path,
   if (err_jit) {
     llvm::consumeError(std::move(err_jit));
     symbolSizes_.erase(&jd);
-    return VGREResult::ERROR_COMPILATION;
+    return VGREResult::ERR_COMPILATION;
   }
 
   outModule = static_cast<ModuleHandle>(&jd);
@@ -1002,12 +1003,12 @@ VGREResult LLVMTranslationEngine::getGlobalSymbol(ModuleHandle module,
                                                  void *&outAddr,
                                                  size_t &outSize) {
   if (!llvmState_ || !module)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   auto &jd = *static_cast<llvm::orc::JITDylib *>(module);
   auto sym = llvmState_->jit->lookup(jd, name);
   if (!sym) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   outAddr = reinterpret_cast<void *>(sym->getValue());
@@ -1030,12 +1031,12 @@ VGREResult LLVMTranslationEngine::getGlobalSymbol(ModuleHandle module,
 VGREResult LLVMTranslationEngine::getFunctionFromModule(
     ModuleHandle module, const std::string &name, CompiledKernelFn &outFn) {
   if (!llvmState_ || !module)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   auto &jd = *static_cast<llvm::orc::JITDylib *>(module);
   auto sym = llvmState_->jit->lookup(jd, name);
   if (!sym) {
-    return VGREResult::ERROR_INVALID_KERNEL;
+    return VGREResult::ERR_INVALID_KERNEL;
   }
 
   using jit_func_t = void (*)(void **, const vgre::dim3*, const vgre::dim3*, const vgre::dim3*, const vgre::dim3*,
@@ -1058,13 +1059,13 @@ VGREResult LLVMTranslationEngine::getFunctionFromModule(
 
 VGREResult LLVMTranslationEngine::unloadModule(ModuleHandle module) {
   if (!llvmState_ || !module)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   auto *jd = static_cast<llvm::orc::JITDylib *>(module);
   auto err = llvmState_->jit->getExecutionSession().removeJITDylib(*jd);
   if (err) {
     llvm::consumeError(std::move(err));
-    return VGREResult::ERROR_COMPILATION;
+    return VGREResult::ERR_COMPILATION;
   }
 
   return VGREResult::SUCCESS;
@@ -1073,7 +1074,7 @@ VGREResult LLVMTranslationEngine::unloadModule(ModuleHandle module) {
 VGREResult LLVMTranslationEngine::fuseKernels(const std::vector<KernelIR> &kernels,
                                            const std::string &fusedName,
                                            KernelIR &outFusedIR) {
-  if (kernels.size() < 2) return VGREResult::ERROR_INVALID_VALUE;
+  if (kernels.size() < 2) return VGREResult::ERR_INVALID_VALUE;
 
   VGRE_LOG_INFO("LLVMTranslationEngine", "Performing C++-Level Fusion for " + std::to_string(kernels.size()) + " kernels into " + fusedName);
 

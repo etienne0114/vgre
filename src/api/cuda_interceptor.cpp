@@ -1,4 +1,5 @@
 #include "vgre/api/cuda_interceptor.h"
+#include "vgre/common/platform.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/input_validation.h"
@@ -12,6 +13,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 
 namespace vgre {
 namespace api {
@@ -519,7 +524,11 @@ cudaError_t CUDAInterceptor::hostAlloc(void **pHost, size_t size,
   (void)flags;
   if (!pHost || size == 0)
     return cudaErrorInvalidValue;
+#if defined(_WIN32)
+  void *ptr = _aligned_malloc(((size + 63) / 64) * 64, 64);
+#else
   void *ptr = std::aligned_alloc(64, ((size + 63) / 64) * 64);
+#endif
   if (!ptr)
     return cudaErrorMemoryAllocation;
   std::memset(ptr, 0, size);
@@ -530,7 +539,11 @@ cudaError_t CUDAInterceptor::hostAlloc(void **pHost, size_t size,
 cudaError_t CUDAInterceptor::freeHost(void *pHost) {
   if (!pHost)
     return cudaSuccess;
+#if defined(_WIN32)
+  _aligned_free(pHost);
+#else
   std::free(pHost);
+#endif
   return cudaSuccess;
 }
 
@@ -1309,19 +1322,19 @@ cudaError_t CUDAInterceptor::convertResult(VGREResult r) {
   switch (r) {
   case VGREResult::SUCCESS:
     return cudaSuccess;
-  case VGREResult::ERROR_OUT_OF_MEMORY:
+  case VGREResult::ERR_OUT_OF_MEMORY:
     return cudaErrorMemoryAllocation;
-  case VGREResult::ERROR_INVALID_VALUE:
+  case VGREResult::ERR_INVALID_VALUE:
     return cudaErrorInvalidValue;
-  case VGREResult::ERROR_INVALID_DEVICE:
+  case VGREResult::ERR_INVALID_DEVICE:
     return cudaErrorInvalidDevice;
-  case VGREResult::ERROR_INVALID_KERNEL:
+  case VGREResult::ERR_INVALID_KERNEL:
     return cudaErrorInvalidDeviceFunction;
-  case VGREResult::ERROR_NOT_INITIALIZED:
+  case VGREResult::ERR_NOT_INITIALIZED:
     return cudaErrorInvalidValue;
-  case VGREResult::ERROR_LAUNCH_FAILURE:
+  case VGREResult::ERR_LAUNCH_FAILURE:
     return cudaErrorLaunchFailure;
-  case VGREResult::ERROR_IO:
+  case VGREResult::ERR_IO:
     return cudaErrorFileNotFound;
   default:
     return cudaErrorLaunchFailure;
@@ -1585,25 +1598,26 @@ cudaError_t CUDAInterceptor::memcpyFromArray(void *dst, cudaArray_t src,
 } // namespace api
 } // namespace vgre
 
+#ifndef VGRE_CUDA_INTERCEPTOR_NO_EXPORTS
 extern "C" {
 
-__attribute__((visibility("default")))
+VGRE_PUBLIC_API
 int cuInit(unsigned int flags) {
   (void)flags;
   return vgre::api::CUDAInterceptor::instance().init();
 }
 
-__attribute__((visibility("default")))
+VGRE_PUBLIC_API
 int cuMemAlloc(void** dptr, size_t bytesize) {
   return vgre::api::CUDAInterceptor::instance().malloc(dptr, bytesize);
 }
 
-__attribute__((visibility("default")))
+VGRE_PUBLIC_API
 int cuMemFree(void* dptr) {
   return vgre::api::CUDAInterceptor::instance().free(dptr);
 }
 
-__attribute__((visibility("default")))
+VGRE_PUBLIC_API
 int cuTexObjectCreate(uint64_t* pTexObject, 
                      const vgre::api::CUDAInterceptor::cudaResourceDesc* pResDesc,
                      const vgre::api::CUDAInterceptor::cudaTextureDesc* pTexDesc,
@@ -1611,9 +1625,10 @@ int cuTexObjectCreate(uint64_t* pTexObject,
   return vgre::api::CUDAInterceptor::instance().createTextureObject(pTexObject, pResDesc, pTexDesc, pResViewDesc);
 }
 
-__attribute__((visibility("default")))
+VGRE_PUBLIC_API
 int cuTexObjectDestroy(uint64_t texObject) {
   return vgre::api::CUDAInterceptor::instance().destroyTextureObject(texObject);
 }
 
 } // extern "C"
+#endif

@@ -73,7 +73,7 @@ VGREResult TextureManager::createTexture(TextureId &outId, const void *data,
                                          const TextureDescriptor &desc,
                                          unsigned int layers) {
   if (!data || width == 0 || elementSize == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -107,7 +107,7 @@ VGREResult TextureManager::createTextureView(TextureId &outId,
   auto it = textures_.find(baseTextureId);
   if (it == textures_.end()) {
     VGRE_LOG_ERROR("TextureManager", "Base texture not found: " + std::to_string(baseTextureId));
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   const auto &base = it->second;
@@ -144,7 +144,7 @@ VGREResult TextureManager::createTextureView(TextureId &outId,
   size_t totalBaseBytes = base.width * base.height * base.depth * base.elementSize * base.layers;
   if (view.offsetInBytes + (view.width * view.height * view.depth * view.elementSize * view.layers) > base.offsetInBytes + totalBaseBytes) {
       VGRE_LOG_ERROR("TextureManager", "Texture view exceeds base resource boundaries.");
-      return VGREResult::ERROR_INVALID_VALUE;
+      return VGREResult::ERR_INVALID_VALUE;
   }
 
   textures_[view.id] = view;
@@ -163,7 +163,7 @@ VGREResult TextureManager::destroyTexture(TextureId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = textures_.find(id);
   if (it == textures_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   textures_.erase(it);
   VGRE_LOG_DEBUG("TextureManager", "Destroyed texture " + std::to_string(id));
@@ -176,7 +176,7 @@ VGREResult TextureManager::createSurface(SurfaceId &outId, void *data,
                                          size_t elementSize,
                                          TextureElementType elementType) {
   if (!data || width == 0 || height == 0 || elementSize == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -204,7 +204,7 @@ VGREResult TextureManager::destroySurface(SurfaceId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = surfaces_.find(id);
   if (it == surfaces_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   surfaces_.erase(it);
   return VGREResult::SUCCESS;
@@ -365,12 +365,12 @@ VGREResult TextureManager::surf2Dwrite(SurfaceId id, float value, int x,
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = surfaces_.find(id);
   if (it == surfaces_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   auto &surf = it->second;
   int w = static_cast<int>(surf.width);
   int h = static_cast<int>(surf.height);
   if (x < 0 || x >= w || y < 0 || y >= h)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   uint8_t *base = static_cast<uint8_t *>(surf.data);
   uint8_t *elem = base + (static_cast<size_t>(y) * w + x) * surf.elementSize;
   switch (surf.elementType) {
@@ -407,12 +407,12 @@ VGREResult TextureManager::surf2Dread(SurfaceId id, float &value, int x,
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = surfaces_.find(id);
   if (it == surfaces_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   const auto &surf = it->second;
   int w = static_cast<int>(surf.width);
   int h = static_cast<int>(surf.height);
   if (x < 0 || x >= w || y < 0 || y >= h)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   const uint8_t *base = static_cast<const uint8_t *>(surf.data);
   const uint8_t *elem = base + (static_cast<size_t>(y) * w + x) * surf.elementSize;
   switch (surf.elementType) {
@@ -621,7 +621,7 @@ VGREResult TextureManager::createTexture3D(TextureId &outId, const void *data,
                                            size_t depth, size_t elementSize,
                                            const TextureDescriptor &desc) {
   if (!data || width == 0 || height == 0 || depth == 0 || elementSize == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -652,7 +652,7 @@ VGREResult TextureManager::createCudaArray(TextureId &outId, size_t width,
                                            size_t height, size_t elementSize,
                                            const TextureDescriptor &desc) {
   if (width == 0 || elementSize == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   size_t h = (height == 0) ? 1 : height;
   size_t totalBytes = width * h * elementSize;
@@ -692,7 +692,7 @@ VGREResult TextureManager::destroyCudaArray(TextureId id) {
   auto arrIt = ownedArrays_.find(id);
 
   if (texIt == textures_.end() && arrIt == ownedArrays_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   if (texIt != textures_.end())
     textures_.erase(texIt);

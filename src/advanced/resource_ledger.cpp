@@ -46,7 +46,7 @@ VGREResult ResourceLedger::recordCompute(const std::string &nodeAddress,
                                           int cpuCores, uint64_t kernelId,
                                           CreditDirection direction) {
   if (nodeAddress.empty() || executionTimeSec < 0.0 || cpuCores <= 0) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   double computeUnitSeconds = executionTimeSec * static_cast<double>(cpuCores);
@@ -110,7 +110,7 @@ VGREResult ResourceLedger::getBalance(const std::string &nodeAddress,
   outBalance.balance = outBalance.total_credits - outBalance.total_debits;
 
   if (!found) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   return VGREResult::SUCCESS;
@@ -266,13 +266,13 @@ VGREResult ResourceLedger::fromJSON(const std::string &json) {
   // Find entries array
   size_t entriesPos = json.find("\"entries\"");
   if (entriesPos == std::string::npos) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Find array start
   size_t arrayStart = json.find('[', entriesPos);
   if (arrayStart == std::string::npos) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Parse each entry
@@ -361,7 +361,7 @@ VGREResult ResourceLedger::persist() const {
   if (!file.is_open()) {
     VGRE_LOG_ERROR("ResourceLedger",
                    "Failed to open ledger file for writing: " + path);
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 
   file << json;
@@ -379,7 +379,7 @@ VGREResult ResourceLedger::load() {
   std::string path = computeLedgerPath();
   std::ifstream file(path);
   if (!file.is_open()) {
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 
   std::ostringstream oss;

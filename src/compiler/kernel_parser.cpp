@@ -199,7 +199,7 @@ VGREResult KernelParser::extractFunction(const std::vector<Token>& tokens,
         outName = tokens[i].value;
         ++i;
     } else {
-        return VGREResult::ERROR_INVALID_KERNEL;
+        return VGREResult::ERR_INVALID_KERNEL;
     }
 
     // Parameter list
@@ -218,7 +218,7 @@ VGREResult KernelParser::extractFunction(const std::vector<Token>& tokens,
         }
         if (i < tokens.size()) ++i;
     } else {
-        return VGREResult::ERROR_INVALID_KERNEL;
+        return VGREResult::ERR_INVALID_KERNEL;
     }
 
     // Body
@@ -299,7 +299,7 @@ VGREResult KernelParser::parseParameters(const std::vector<Token>& tokens,
         
         if (!recognized) {
              VGRE_LOG_ERROR("KernelParser", "Unsupported type: " + pp.typeName);
-             return VGREResult::ERROR_INVALID_KERNEL;
+             return VGREResult::ERR_INVALID_KERNEL;
         }
         outParams.push_back(pp);
         return VGREResult::SUCCESS;
@@ -437,7 +437,7 @@ VGREResult KernelParser::parse(const std::string& name,
 
     auto tokens = tokenize(source);
     if (tokens.empty()) {
-        return VGREResult::ERROR_INVALID_KERNEL;
+        return VGREResult::ERR_INVALID_KERNEL;
     }
 
     std::string funcName, body;

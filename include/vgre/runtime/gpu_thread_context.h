@@ -8,6 +8,7 @@
 #include <cstring>
 #include <mutex>
 #include <type_traits>
+#include "vgre/common/platform.h"
 
 namespace vgre {
 namespace runtime {
@@ -30,9 +31,9 @@ public:
 };
 
 // C-friendly wrappers exported for JIT symbol resolution.
-extern "C" void vgre_jit_set_block_barrier(void *barrier);
-extern "C" void vgre_jit_clear_block_barrier();
-extern "C" void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
+extern "C" VGRE_PUBLIC_API void vgre_jit_set_block_barrier(void *barrier);
+extern "C" VGRE_PUBLIC_API void vgre_jit_clear_block_barrier();
+extern "C" VGRE_PUBLIC_API void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
 
 // ── Shared Memory ──────────────────────────────────────────────────────────
 // Per-block shared memory buffer. Allocated once per block execution and
@@ -160,6 +161,115 @@ private:
 // These use GCC/Clang __atomic builtins for hardware-level atomicity.
 namespace AtomicOps {
 
+#if defined(_MSC_VER)
+
+template <typename T>
+inline typename std::enable_if<std::is_integral<T>::value, T>::type
+atomicAdd(T *addr, T val) {
+  return reinterpret_cast<std::atomic<T> *>(addr)->fetch_add(
+      val, std::memory_order_seq_cst);
+}
+
+inline float atomicAdd(float *addr, float val) {
+  static_assert(sizeof(float) == sizeof(uint32_t), "float must be 32-bit");
+  auto *bits = reinterpret_cast<std::atomic<uint32_t> *>(addr);
+  uint32_t oldBits = bits->load(std::memory_order_relaxed);
+  while (true) {
+    float oldVal;
+    std::memcpy(&oldVal, &oldBits, sizeof(float));
+    float newVal = oldVal + val;
+    uint32_t newBits;
+    std::memcpy(&newBits, &newVal, sizeof(uint32_t));
+    if (bits->compare_exchange_weak(oldBits, newBits, std::memory_order_seq_cst,
+                                    std::memory_order_relaxed)) {
+      return oldVal;
+    }
+  }
+}
+
+inline double atomicAdd(double *addr, double val) {
+  static_assert(sizeof(double) == sizeof(uint64_t), "double must be 64-bit");
+  auto *bits = reinterpret_cast<std::atomic<uint64_t> *>(addr);
+  uint64_t oldBits = bits->load(std::memory_order_relaxed);
+  while (true) {
+    double oldVal;
+    std::memcpy(&oldVal, &oldBits, sizeof(double));
+    double newVal = oldVal + val;
+    uint64_t newBits;
+    std::memcpy(&newBits, &newVal, sizeof(uint64_t));
+    if (bits->compare_exchange_weak(oldBits, newBits, std::memory_order_seq_cst,
+                                    std::memory_order_relaxed)) {
+      return oldVal;
+    }
+  }
+}
+
+template <typename T>
+inline typename std::enable_if<std::is_integral<T>::value, T>::type
+atomicSub(T *addr, T val) {
+  return reinterpret_cast<std::atomic<T> *>(addr)->fetch_sub(
+      val, std::memory_order_seq_cst);
+}
+
+template <typename T> inline T atomicMin(T *addr, T val) {
+  auto *a = reinterpret_cast<std::atomic<T> *>(addr);
+  T oldVal = a->load(std::memory_order_relaxed);
+  while (val < oldVal) {
+    if (a->compare_exchange_weak(oldVal, val, std::memory_order_seq_cst,
+                                 std::memory_order_relaxed)) {
+      return oldVal;
+    }
+  }
+  return oldVal;
+}
+
+template <typename T> inline T atomicMax(T *addr, T val) {
+  auto *a = reinterpret_cast<std::atomic<T> *>(addr);
+  T oldVal = a->load(std::memory_order_relaxed);
+  while (val > oldVal) {
+    if (a->compare_exchange_weak(oldVal, val, std::memory_order_seq_cst,
+                                 std::memory_order_relaxed)) {
+      return oldVal;
+    }
+  }
+  return oldVal;
+}
+
+template <typename T> inline T atomicCAS(T *addr, T compare, T val) {
+  auto *a = reinterpret_cast<std::atomic<T> *>(addr);
+  a->compare_exchange_strong(compare, val, std::memory_order_seq_cst,
+                             std::memory_order_seq_cst);
+  return compare;
+}
+
+template <typename T> inline T atomicExch(T *addr, T val) {
+  return reinterpret_cast<std::atomic<T> *>(addr)->exchange(
+      val, std::memory_order_seq_cst);
+}
+
+template <typename T>
+inline typename std::enable_if<std::is_integral<T>::value, T>::type
+atomicOr(T *addr, T val) {
+  return reinterpret_cast<std::atomic<T> *>(addr)->fetch_or(
+      val, std::memory_order_seq_cst);
+}
+
+template <typename T>
+inline typename std::enable_if<std::is_integral<T>::value, T>::type
+atomicAnd(T *addr, T val) {
+  return reinterpret_cast<std::atomic<T> *>(addr)->fetch_and(
+      val, std::memory_order_seq_cst);
+}
+
+template <typename T>
+inline typename std::enable_if<std::is_integral<T>::value, T>::type
+atomicXor(T *addr, T val) {
+  return reinterpret_cast<std::atomic<T> *>(addr)->fetch_xor(
+      val, std::memory_order_seq_cst);
+}
+
+#else
+
 // atomicAdd: returns old value at *addr, stores (old + val)
 template <typename T>
 inline typename std::enable_if<std::is_integral<T>::value, T>::type
@@ -268,6 +378,8 @@ inline typename std::enable_if<std::is_integral<T>::value, T>::type
 atomicXor(T *addr, T val) {
   return __atomic_fetch_xor(addr, val, __ATOMIC_SEQ_CST);
 }
+
+#endif
 
 } // namespace AtomicOps
 

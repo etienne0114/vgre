@@ -172,7 +172,7 @@ VGREResult RuntimeEngine::shutdown() {
 
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   VGRE_LOG_INFO("RuntimeEngine", "Shutting down VGRE Runtime Engine...");
 
@@ -211,7 +211,7 @@ VGREResult RuntimeEngine::setDevice(DeviceId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (id < 0 || id >= static_cast<DeviceId>(devices_.size())) {
     VGRE_LOG_ERROR("RuntimeEngine", "Invalid device ID: " + std::to_string(id) + " (Device Count: " + std::to_string(devices_.size()) + ")");
-    return VGREResult::ERROR_INVALID_DEVICE;
+    return VGREResult::ERR_INVALID_DEVICE;
   }
   currentDeviceId_ = id;
   VGRE_LOG_DEBUG("RuntimeEngine", "Switched to device " + std::to_string(id));
@@ -228,7 +228,7 @@ VGREResult RuntimeEngine::getDeviceProperties(DeviceId id,
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (id < 0 || id >= static_cast<DeviceId>(devices_.size())) {
     VGRE_LOG_ERROR("RuntimeEngine", "Invalid device ID: " + std::to_string(id) + " (Device Count: " + std::to_string(devices_.size()) + ")");
-    return VGREResult::ERROR_INVALID_DEVICE;
+    return VGREResult::ERR_INVALID_DEVICE;
   }
   outProps = devices_[id]->getProperties();
   return VGREResult::SUCCESS;
@@ -245,7 +245,7 @@ VGREResult RuntimeEngine::registerKernel(const std::string &name,
                                          KernelId &outId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   VGRE_LOG_INFO("RuntimeEngine", "Registering kernel: " + name);
 
@@ -281,7 +281,7 @@ VGREResult RuntimeEngine::loadModule(const std::string &path,
                                      ModuleHandle &outModule) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   VGRE_LOG_INFO("RuntimeEngine", "Loading binary module: " + path);
   return translator_->loadBitcodeModule(path, outModule);
@@ -292,7 +292,7 @@ VGREResult RuntimeEngine::getModuleGlobal(ModuleHandle module,
                                          void *&outAddr, size_t &outSize) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   return translator_->getGlobalSymbol(module, name, outAddr, outSize);
 }
@@ -302,7 +302,7 @@ VGREResult RuntimeEngine::getKernelFromModule(ModuleHandle module,
                                               KernelId &outId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   CompiledKernelFn fn;
   auto r = translator_->getFunctionFromModule(module, name, fn);
@@ -331,7 +331,7 @@ VGREResult RuntimeEngine::getKernelFromModule(ModuleHandle module,
 VGREResult RuntimeEngine::fuseKernels(const std::vector<KernelId> &ids,
                                       KernelId &outFusedId, std::string* outName) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (ids.size() < 2) return VGREResult::ERROR_INVALID_VALUE;
+  if (ids.size() < 2) return VGREResult::ERR_INVALID_VALUE;
 
   VGRE_LOG_INFO("RuntimeEngine", "Fusing " + std::to_string(ids.size()) + " kernels at the IR level (Link-Time Fusion).");
 
@@ -393,11 +393,11 @@ VGREResult RuntimeEngine::getKernelArgTypes(KernelId id,
                                             std::vector<ArgType> &outTypes) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   auto it = kernelIRCache_.find(id);
   if (it == kernelIRCache_.end())
-    return VGREResult::ERROR_INVALID_KERNEL;
+    return VGREResult::ERR_INVALID_KERNEL;
 
   outTypes = it->second.argTypes;
   return VGREResult::SUCCESS;
@@ -415,7 +415,7 @@ const KernelIR *RuntimeEngine::getKernelIR(KernelId id) const {
 VGREResult RuntimeEngine::unloadModule(ModuleHandle module) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   return translator_->unloadModule(module);
 }
@@ -426,10 +426,10 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
                                        size_t sharedMem, StreamId stream,
                                        const dim3 &gridOffset) {
   if (gridDim.x == 0 || blockDim.x == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   if ((gridDim.y == 0 && gridDim.z != 0) ||
       (blockDim.y == 0 && blockDim.z != 0)) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   CompiledKernelFn fn;
@@ -440,11 +440,11 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_)
-      return VGREResult::ERROR_NOT_INITIALIZED;
+      return VGREResult::ERR_NOT_INITIALIZED;
 
     auto irIt = kernelIRCache_.find(id);
     if (irIt == kernelIRCache_.end()) {
-      return VGREResult::ERROR_INVALID_KERNEL;
+      return VGREResult::ERR_INVALID_KERNEL;
     }
 
     VGRE_LOG_INFO("RuntimeEngine", "Launching kernel " + irIt->second.name +
@@ -492,7 +492,7 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
             fn = jres.fn;
             if (!fn) {
                 VGRE_LOG_ERROR("RuntimeEngine", "Asynchronous JIT failed for kernel: " + irIt->second.name);
-                return VGREResult::ERROR_COMPILATION;
+                return VGREResult::ERR_COMPILATION;
             }
             // Propagate authoritative metadata from JIT pipeline back into cache
             irIt->second.sharedMemSize = jres.sharedMemSize;
@@ -503,7 +503,7 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
             kernelCache_[id] = fn;
             pendingKernels_.erase(id);
         } else {
-            return VGREResult::ERROR_INVALID_KERNEL;
+            return VGREResult::ERR_INVALID_KERNEL;
         }
     }
 
@@ -533,7 +533,7 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
             break;
           case ArgType::STRUCT:
             VGRE_LOG_ERROR("RuntimeEngine", "Missing size for structural argument at index " + std::to_string(i));
-            return VGREResult::ERROR_INVALID_VALUE;
+            return VGREResult::ERR_INVALID_VALUE;
           default:
             argSize = 8;
             break;
@@ -758,7 +758,7 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode>& nodes
   nodeIndex.reserve(nodes.size());
   for (size_t i = 0; i < nodes.size(); ++i) {
     if (nodes[i].nodeId == 0) {
-      return VGREResult::ERROR_INVALID_VALUE;
+      return VGREResult::ERR_INVALID_VALUE;
     }
     nodeIndex[nodes[i].nodeId] = i;
   }
@@ -769,7 +769,7 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode>& nodes
     for (auto depId : nodes[i].deps) {
       auto it = nodeIndex.find(depId);
       if (it == nodeIndex.end()) {
-        return VGREResult::ERROR_INVALID_VALUE;
+        return VGREResult::ERR_INVALID_VALUE;
       }
       size_t depIdx = it->second;
       adj[depIdx].push_back(i);
@@ -798,12 +798,12 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode>& nodes
     VGRE_LOG_ERROR("RuntimeEngine",
                    "Graph dispatch failed: dependency cycle detected. "
                    "Verify graphAddDependency or node deps.");
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!initialized_) return VGREResult::ERROR_NOT_INITIALIZED;
+    if (!initialized_) return VGREResult::ERR_NOT_INITIALIZED;
 
     for (size_t orderIdx = 0; orderIdx < topoOrder.size(); ++orderIdx) {
       const auto &node = nodes[topoOrder[orderIdx]];
@@ -840,7 +840,7 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode>& nodes
                 it = kernelCache_.find(actualId);
             } else {
                 VGRE_LOG_ERROR("RuntimeEngine", "Graph dispatch failed: Kernel " + node.kernelName + " (ID " + std::to_string(actualId) + ") not found in cache or pending list.");
-                return VGREResult::ERROR_INVALID_KERNEL;
+                return VGREResult::ERR_INVALID_KERNEL;
             }
         }
 
@@ -1005,7 +1005,7 @@ VGREResult RuntimeEngine::synchronize() {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_ || !scheduler_)
-      return VGREResult::ERROR_NOT_INITIALIZED;
+      return VGREResult::ERR_NOT_INITIALIZED;
     sched = scheduler_;
   }
   sched->waitAll();
@@ -1018,12 +1018,12 @@ VGREResult RuntimeEngine::streamSynchronize(StreamId stream) {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_ || !scheduler_)
-      return VGREResult::ERROR_NOT_INITIALIZED;
+      return VGREResult::ERR_NOT_INITIALIZED;
     sched = scheduler_;
     if (stream != 0) {
       if (currentDeviceId_ < 0 ||
           currentDeviceId_ >= static_cast<DeviceId>(devices_.size())) {
-        return VGREResult::ERROR_INVALID_DEVICE;
+        return VGREResult::ERR_INVALID_DEVICE;
       }
       dev = devices_[currentDeviceId_].get();
     }
@@ -1041,7 +1041,7 @@ VGREResult RuntimeEngine::malloc(size_t size, MemoryHandle &outHandle) {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_ || !memoryManager_)
-      return VGREResult::ERROR_NOT_INITIALIZED;
+      return VGREResult::ERR_NOT_INITIALIZED;
     mm = memoryManager_.get();
     deviceId = currentDeviceId_;
   }
@@ -1052,7 +1052,7 @@ VGREResult RuntimeEngine::mallocManaged(size_t size, MemoryHandle &outHandle,
                                         unsigned int flags) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   return memoryManager_->allocateManaged(size, outHandle, currentDeviceId_,
                                          flags);
@@ -1065,16 +1065,16 @@ VGREResult RuntimeEngine::deviceCanAccessPeer(DeviceId device,
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_ || !memoryManager_)
-      return VGREResult::ERROR_NOT_INITIALIZED;
+      return VGREResult::ERR_NOT_INITIALIZED;
     if (device < 0 || peerDevice < 0 ||
         device >= static_cast<DeviceId>(devices_.size()) ||
         peerDevice >= static_cast<DeviceId>(devices_.size())) {
-      return VGREResult::ERROR_INVALID_DEVICE;
+      return VGREResult::ERR_INVALID_DEVICE;
     }
     mm = memoryManager_.get();
   }
   if (!canAccess)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   // Virtual devices in the same process can always "technically" access each
   // other, but we enforce specific hardware-aware peer access rules.
@@ -1088,12 +1088,12 @@ VGREResult RuntimeEngine::deviceEnablePeerAccess(DeviceId peerDevice) {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_ || !memoryManager_)
-      return VGREResult::ERROR_NOT_INITIALIZED;
+      return VGREResult::ERR_NOT_INITIALIZED;
     current = currentDeviceId_;
     if (current < 0 || current >= static_cast<DeviceId>(devices_.size()) ||
         peerDevice < 0 ||
         peerDevice >= static_cast<DeviceId>(devices_.size())) {
-      return VGREResult::ERROR_INVALID_DEVICE;
+      return VGREResult::ERR_INVALID_DEVICE;
     }
     mm = memoryManager_.get();
   }
@@ -1106,12 +1106,12 @@ VGREResult RuntimeEngine::deviceDisablePeerAccess(DeviceId peerDevice) {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_ || !memoryManager_)
-      return VGREResult::ERROR_NOT_INITIALIZED;
+      return VGREResult::ERR_NOT_INITIALIZED;
     current = currentDeviceId_;
     if (current < 0 || current >= static_cast<DeviceId>(devices_.size()) ||
         peerDevice < 0 ||
         peerDevice >= static_cast<DeviceId>(devices_.size())) {
-      return VGREResult::ERROR_INVALID_DEVICE;
+      return VGREResult::ERR_INVALID_DEVICE;
     }
     mm = memoryManager_.get();
   }
@@ -1122,16 +1122,16 @@ VGREResult RuntimeEngine::deviceDisablePeerAccess(DeviceId peerDevice) {
 VGREResult RuntimeEngine::graphCreate(GraphId &outGraph) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   return graphManager_->createGraph(outGraph);
 }
 
 VGREResult RuntimeEngine::streamBeginCapture(StreamId stream) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   if (captureState_.count(stream))
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   GraphId graph;
   auto r = graphManager_->createGraph(graph);
@@ -1148,10 +1148,10 @@ VGREResult RuntimeEngine::streamBeginCapture(StreamId stream) {
 VGREResult RuntimeEngine::streamEndCapture(StreamId stream, GraphId &outGraph) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   auto it = captureState_.find(stream);
   if (it == captureState_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   outGraph = it->second;
   captureState_.erase(it);
@@ -1170,11 +1170,11 @@ bool RuntimeEngine::isStreamCapturing(StreamId stream) const {
 VGREResult RuntimeEngine::recordMemcpyToGraph(StreamId stream, void *dst, const void *src, size_t count, int kind) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   
   auto it = captureState_.find(stream);
   if (it == captureState_.end())
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
   VGRE_LOG_DEBUG("RuntimeEngine", "Capturing memcpy on stream " + std::to_string(stream));
   // We must cast away constness for the graph manager (which copies data anyway)
@@ -1185,14 +1185,14 @@ VGREResult RuntimeEngine::graphInstantiate(GraphId graph,
                                            GraphExecId &outExec) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   return graphManager_->instantiate(graph, outExec);
 }
 
 VGREResult RuntimeEngine::graphUpdateExec(GraphExecId exec, GraphId graph) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   return graphManager_->updateExec(exec, graph);
 }
 
@@ -1200,7 +1200,7 @@ VGREResult RuntimeEngine::graphLaunch(GraphExecId exec, StreamId stream) {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_ || !graphManager_)
-      return VGREResult::ERROR_NOT_INITIALIZED;
+      return VGREResult::ERR_NOT_INITIALIZED;
   }
   return graphManager_->launch(exec, stream);
 }
@@ -1208,14 +1208,14 @@ VGREResult RuntimeEngine::graphLaunch(GraphExecId exec, StreamId stream) {
 VGREResult RuntimeEngine::graphDestroy(GraphId graph) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   return graphManager_->destroyGraph(graph);
 }
 
 VGREResult RuntimeEngine::graphExecDestroy(GraphExecId exec) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   return graphManager_->destroyGraphExec(exec);
 }
 
@@ -1226,7 +1226,7 @@ VGREResult RuntimeEngine::graphAddKernelNode(
     uint64_t &outNodeId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   KernelId actualId = kernelId;
   if (actualId == 0) {
@@ -1249,7 +1249,7 @@ VGREResult RuntimeEngine::graphAddMemcpyNode(
     const std::vector<uint64_t> &deps, uint64_t &outNodeId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   return graphManager_->addMemcpyNodeWithDepsOut(graph, dst, src, count, kind,
                                                  deps, outNodeId);
 }
@@ -1258,7 +1258,7 @@ VGREResult RuntimeEngine::graphAddDependency(GraphId graph, uint64_t nodeId,
                                              uint64_t dependsOn) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   return graphManager_->addDependency(graph, nodeId, dependsOn);
 }
 
@@ -1267,7 +1267,7 @@ VGREResult RuntimeEngine::graphUpdateKernelNode(
     const std::vector<ArgType> &argTypes) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   return graphManager_->updateKernelNodeArgs(graph, nodeId, args, argTypes);
 }
 
@@ -1276,7 +1276,7 @@ VGREResult RuntimeEngine::graphUpdateMemcpyNode(GraphId graph, uint64_t nodeId,
                                                 size_t count, int kind) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   return graphManager_->updateMemcpyNode(graph, nodeId, dst, src, count, kind);
 }
 
@@ -1284,7 +1284,7 @@ VGREResult RuntimeEngine::graphUpdateMemcpyNode(GraphId graph, uint64_t nodeId,
 MemoryManager &RuntimeEngine::getMemoryManager() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !memoryManager_) {
-    throw VGREException(VGREResult::ERROR_NOT_INITIALIZED,
+    throw VGREException(VGREResult::ERR_NOT_INITIALIZED,
                         "Runtime engine is not initialized");
   }
   return *memoryManager_;
@@ -1293,7 +1293,7 @@ MemoryManager &RuntimeEngine::getMemoryManager() {
 Scheduler &RuntimeEngine::getScheduler() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !scheduler_) {
-    throw VGREException(VGREResult::ERROR_NOT_INITIALIZED,
+    throw VGREException(VGREResult::ERR_NOT_INITIALIZED,
                         "Runtime engine is not initialized");
   }
   return *scheduler_;
@@ -1302,12 +1302,12 @@ Scheduler &RuntimeEngine::getScheduler() {
 VirtualGPUDevice &RuntimeEngine::getDevice() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || devices_.empty()) {
-    throw VGREException(VGREResult::ERROR_NOT_INITIALIZED,
+    throw VGREException(VGREResult::ERR_NOT_INITIALIZED,
                         "Runtime engine is not initialized");
   }
   if (currentDeviceId_ < 0 ||
       currentDeviceId_ >= static_cast<DeviceId>(devices_.size())) {
-    throw VGREException(VGREResult::ERROR_INVALID_DEVICE, "Invalid device ID");
+    throw VGREException(VGREResult::ERR_INVALID_DEVICE, "Invalid device ID");
   }
   return *devices_[currentDeviceId_];
 }
@@ -1315,12 +1315,12 @@ VirtualGPUDevice &RuntimeEngine::getDevice() {
 VirtualGPUDevice &RuntimeEngine::getDevice(DeviceId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_) {
-    throw VGREException(VGREResult::ERROR_NOT_INITIALIZED,
+    throw VGREException(VGREResult::ERR_NOT_INITIALIZED,
                         "Runtime engine is not initialized");
   }
   if (id < 0 || id >= static_cast<DeviceId>(devices_.size())) {
     VGRE_LOG_ERROR("RuntimeEngine", "Invalid device ID: " + std::to_string(id) + " (Device Count: " + std::to_string(devices_.size()) + ")");
-    throw VGREException(VGREResult::ERROR_INVALID_DEVICE, "Invalid device ID");
+    throw VGREException(VGREResult::ERR_INVALID_DEVICE, "Invalid device ID");
   }
   return *devices_[id];
 }

@@ -38,7 +38,7 @@ VGREResult Event::record(StreamId stream) {
       res = VGREResult::SUCCESS;
     }
   } catch (...) {
-    res = VGREResult::ERROR_LAUNCH_FAILURE;
+    res = VGREResult::ERR_LAUNCH_FAILURE;
   }
 
   if (res == VGREResult::SUCCESS) {
@@ -53,7 +53,7 @@ VGREResult Event::synchronize() const {
   std::unique_lock<std::mutex> lock(mutex_);
   if (!recorded_) {
     // Event hasn't even been submitted to record yet
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Future wait blocks until the promise is resolved by the worker thread
@@ -64,7 +64,7 @@ VGREResult Event::synchronize() const {
     fut.wait();
     return VGREResult::SUCCESS;
   }
-  return VGREResult::ERROR_INVALID_VALUE;
+  return VGREResult::ERR_INVALID_VALUE;
 }
 
 VGREResult Event::elapsedTime(const Event &start, float &outMs) const {
@@ -76,7 +76,7 @@ VGREResult Event::elapsedTime(const Event &start, float &outMs) const {
   // Synchronize both events to ensure they have timestamps
   if (start.synchronize() != VGREResult::SUCCESS ||
       this->synchronize() != VGREResult::SUCCESS) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   std::shared_future<TimePoint> startFuture;
@@ -87,7 +87,7 @@ VGREResult Event::elapsedTime(const Event &start, float &outMs) const {
     endFuture = future_;
   }
   if (!startFuture.valid() || !endFuture.valid()) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Both are valid and resolved at this point

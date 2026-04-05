@@ -8,62 +8,134 @@ import 'infrastructure/services/sqlite_service.dart';
 import 'presentation/pages/dashboard_page.dart';
 
 void main() {
-  // Initialize the bridge to the native VGRE engine
-  // Initialize the bridge to the native VGRE engine using path-agnostic discovery
-  String libPath;
-  final String libName = Platform.isWindows
-      ? 'vgre.dll'
-      : (Platform.isMacOS ? 'libvgre.dylib' : 'libvgre.so');
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const VgreBootstrapApp());
+}
 
-  // 1. Check relative 'lib' directory (standard production bundle layout)
-  final String executablePath = Platform.resolvedExecutable;
-  final String executableDir =
-      executablePath.substring(0, executablePath.lastIndexOf(Platform.pathSeparator));
-  final String bundlePath =
-      '$executableDir${Platform.pathSeparator}lib${Platform.pathSeparator}$libName';
+class VgreBootstrapApp extends StatefulWidget {
+  const VgreBootstrapApp({super.key});
 
-  if (File(bundlePath).existsSync()) {
-    libPath = bundlePath;
-  } else {
-    // 2. Check current directory (fallback for side-by-side deployment)
-    final String localPath = '$executableDir${Platform.pathSeparator}$libName';
-    if (File(localPath).existsSync()) {
-      libPath = localPath;
-    } else {
-      // 3. Fallback to development/environment paths
-      libPath =
-          Platform.environment['VGRE_LIB_PATH'] ??
-          (File('../build/$libName').existsSync()
-              ? '../build/$libName'
-              : libName);
-    }
+  @override
+  State<VgreBootstrapApp> createState() => _VgreBootstrapAppState();
+}
+
+class _VgreBootstrapAppState extends State<VgreBootstrapApp> {
+  VgreBridge? _bridge;
+  SqliteService? _sqlite;
+  String? _libPath;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _bootstrap();
   }
 
-  final VgreBridge bridge = VgreBridge(libPath);
-  final SqliteService sqlite = SqliteService();
-
-  // Sync persistent auth token for security features
-  if (!Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN')) {
+  Future<void> _bootstrap() async {
     try {
-      final home = Platform.environment['HOME'] ?? '';
-      if (home.isNotEmpty) {
-        final tokenFile = File('$home/.vgre/token');
-        if (tokenFile.existsSync()) {
-          final token = tokenFile.readAsStringSync().trim();
-          if (token.isNotEmpty) {
-            bridge.setEnvironmentVariable('VGRE_TCP_AUTH_TOKEN', token);
-          }
-        }
-      }
-    } catch (_) {
-      // Ignore errors in persistent token sync
+      final String libPath = _resolveLibPath();
+      final VgreBridge bridge = VgreBridge(libPath);
+      final SqliteService sqlite = SqliteService();
+
+      _syncPersistentToken(bridge);
+
+      if (!mounted) return;
+      setState(() {
+        _bridge = bridge;
+        _sqlite = sqlite;
+        _libPath = libPath;
+      });
+    } catch (e, stackTrace) {
+      debugPrint('VGRE bootstrap failed: $e');
+      debugPrint('$stackTrace');
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+      });
     }
   }
 
-  // Initialize the VGRE backend (equivalent to vgre_init)
-  bridge.init();
+  String _resolveLibPath() {
+    final String libName = Platform.isWindows
+        ? 'vgre.dll'
+        : (Platform.isMacOS ? 'libvgre.dylib' : 'libvgre.so');
 
-  runApp(VgreDashboardApp(bridge: bridge, sqlite: sqlite, libPath: libPath));
+    final String executablePath = Platform.resolvedExecutable;
+    final String executableDir = executablePath.substring(
+      0,
+      executablePath.lastIndexOf(Platform.pathSeparator),
+    );
+    final String bundlePath =
+        '$executableDir${Platform.pathSeparator}lib${Platform.pathSeparator}$libName';
+
+    if (File(bundlePath).existsSync()) {
+      return bundlePath;
+    }
+
+    final String localPath =
+        '$executableDir${Platform.pathSeparator}$libName';
+    if (File(localPath).existsSync()) {
+      return localPath;
+    }
+
+    return Platform.environment['VGRE_LIB_PATH'] ??
+        (File('../build/$libName').existsSync() ? '../build/$libName' : libName);
+  }
+
+  void _syncPersistentToken(VgreBridge bridge) {
+    if (Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN')) {
+      return;
+    }
+
+    try {
+      final String home =
+          Platform.environment['HOME'] ??
+          Platform.environment['USERPROFILE'] ??
+          '';
+      if (home.isEmpty) {
+        return;
+      }
+
+      final tokenFile = File('$home/.vgre/token');
+      if (!tokenFile.existsSync()) {
+        return;
+      }
+
+      final token = tokenFile.readAsStringSync().trim();
+      if (token.isNotEmpty) {
+        bridge.setEnvironmentVariable('VGRE_TCP_AUTH_TOKEN', token);
+      }
+    } catch (e) {
+      debugPrint('Token sync failed: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_error != null) {
+      return MaterialApp(
+        title: 'VGRE Dashboard',
+        debugShowCheckedModeBanner: false,
+        theme: VgreTheme.darkTheme,
+        home: _BootstrapErrorScreen(message: _error!),
+      );
+    }
+
+    if (_bridge == null || _sqlite == null || _libPath == null) {
+      return MaterialApp(
+        title: 'VGRE Dashboard',
+        debugShowCheckedModeBanner: false,
+        theme: VgreTheme.darkTheme,
+        home: const _BootstrapLoadingScreen(),
+      );
+    }
+
+    return VgreDashboardApp(
+      bridge: _bridge!,
+      sqlite: _sqlite!,
+      libPath: _libPath!,
+    );
+  }
 }
 
 class VgreDashboardApp extends StatelessWidget {
@@ -83,6 +155,78 @@ class VgreDashboardApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: VgreTheme.darkTheme,
         home: const DashboardPage(),
+      ),
+    );
+  }
+}
+
+class _BootstrapLoadingScreen extends StatelessWidget {
+  const _BootstrapLoadingScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: VgreTheme.background,
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text(
+              'Starting VGRE Dashboard...',
+              style: TextStyle(color: Colors.white70),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _BootstrapErrorScreen extends StatelessWidget {
+  final String message;
+
+  const _BootstrapErrorScreen({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: VgreTheme.background,
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 720),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'VGRE Dashboard failed to start',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Startup error:',
+                  style: TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 8),
+                SelectableText(
+                  message,
+                  style: const TextStyle(
+                    color: Colors.redAccent,
+                    fontFamily: 'Consolas',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

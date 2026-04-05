@@ -115,14 +115,14 @@ VGREResult HardwareTokenManager::initialize() {
     }
 
     VGRE_LOG_ERROR("HardwareTokenManager", "Failed to initialize any secure storage backend");
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::storeToken(const std::string& service, const std::string& token) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!initialized_) {
-        return VGREResult::ERROR_NOT_INITIALIZED;
+        return VGREResult::ERR_NOT_INITIALIZED;
     }
 
     switch (backend_) {
@@ -143,7 +143,7 @@ VGREResult HardwareTokenManager::storeToken(const std::string& service, const st
         case BackendType::FALLBACK_ENCRYPTED:
             return storeFallbackEncrypted(service, token);
         default:
-            return VGREResult::ERROR_NOT_SUPPORTED;
+            return VGREResult::ERR_NOT_SUPPORTED;
     }
 }
 
@@ -151,7 +151,7 @@ VGREResult HardwareTokenManager::getToken(const std::string& service, std::strin
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!initialized_) {
-        return VGREResult::ERROR_NOT_INITIALIZED;
+        return VGREResult::ERR_NOT_INITIALIZED;
     }
 
     switch (backend_) {
@@ -172,7 +172,7 @@ VGREResult HardwareTokenManager::getToken(const std::string& service, std::strin
         case BackendType::FALLBACK_ENCRYPTED:
             return getFallbackEncrypted(service, outToken);
         default:
-            return VGREResult::ERROR_NOT_SUPPORTED;
+            return VGREResult::ERR_NOT_SUPPORTED;
     }
 }
 
@@ -180,7 +180,7 @@ VGREResult HardwareTokenManager::deleteToken(const std::string& service) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!initialized_) {
-        return VGREResult::ERROR_NOT_INITIALIZED;
+        return VGREResult::ERR_NOT_INITIALIZED;
     }
 
     switch (backend_) {
@@ -201,7 +201,7 @@ VGREResult HardwareTokenManager::deleteToken(const std::string& service) {
         case BackendType::FALLBACK_ENCRYPTED:
             return deleteFallbackEncrypted(service);
         default:
-            return VGREResult::ERROR_NOT_SUPPORTED;
+            return VGREResult::ERR_NOT_SUPPORTED;
     }
 }
 
@@ -225,13 +225,13 @@ std::string HardwareTokenManager::getBackendName() const {
 std::string HardwareTokenManager::generateToken(size_t length) {
     std::random_device rd;
     std::mt19937_64 gen(rd());
-    std::uniform_int_distribution<uint8_t> dis(0, 255);
+    std::uniform_int_distribution<unsigned int> dis(0, 255);
     
     std::ostringstream oss;
     oss << std::hex << std::setfill('0');
     
     for (size_t i = 0; i < length; ++i) {
-        oss << std::setw(2) << static_cast<int>(dis(gen));
+        oss << std::setw(2) << dis(gen);
     }
     
     return oss.str();
@@ -255,7 +255,7 @@ VGREResult HardwareTokenManager::initLinuxKeyring() {
         // Create VGRE keyring
         keyring = add_key("keyring", "vgre", NULL, 0, KEY_SPEC_USER_KEYRING);
         if (keyring < 0) {
-            return VGREResult::ERROR_NOT_SUPPORTED;
+            return VGREResult::ERR_NOT_SUPPORTED;
         }
     }
     return VGREResult::SUCCESS;
@@ -264,7 +264,7 @@ VGREResult HardwareTokenManager::initLinuxKeyring() {
 VGREResult HardwareTokenManager::storeLinuxKeyring(const std::string& service, const std::string& token) {
     key_serial_t keyring = keyctl_search(KEY_SPEC_USER_KEYRING, "keyring", "vgre", 0);
     if (keyring < 0) {
-        return VGREResult::ERROR_NOT_INITIALIZED;
+        return VGREResult::ERR_NOT_INITIALIZED;
     }
     
     std::string key_desc = "vgre:" + service;
@@ -272,7 +272,7 @@ VGREResult HardwareTokenManager::storeLinuxKeyring(const std::string& service, c
     
     if (key < 0) {
         VGRE_LOG_ERROR("HardwareTokenManager", "Failed to store token in Linux keyring");
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     // Set timeout to 0 (persistent until reboot)
@@ -284,20 +284,20 @@ VGREResult HardwareTokenManager::storeLinuxKeyring(const std::string& service, c
 VGREResult HardwareTokenManager::getLinuxKeyring(const std::string& service, std::string& outToken) {
     key_serial_t keyring = keyctl_search(KEY_SPEC_USER_KEYRING, "keyring", "vgre", 0);
     if (keyring < 0) {
-        return VGREResult::ERROR_NOT_INITIALIZED;
+        return VGREResult::ERR_NOT_INITIALIZED;
     }
     
     std::string key_desc = "vgre:" + service;
     key_serial_t key = keyctl_search(keyring, "user", key_desc.c_str(), 0);
     
     if (key < 0) {
-        return VGREResult::ERROR_AUTH_FAILED;
+        return VGREResult::ERR_AUTH_FAILED;
     }
     
     // Get key size
     long size = keyctl_read(key, NULL, 0);
     if (size < 0) {
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     // Read key
@@ -305,7 +305,7 @@ VGREResult HardwareTokenManager::getLinuxKeyring(const std::string& service, std
     long read_size = keyctl_read(key, buffer.data(), size);
     
     if (read_size < 0) {
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     outToken = std::string(buffer.data(), read_size);
@@ -315,18 +315,18 @@ VGREResult HardwareTokenManager::getLinuxKeyring(const std::string& service, std
 VGREResult HardwareTokenManager::deleteLinuxKeyring(const std::string& service) {
     key_serial_t keyring = keyctl_search(KEY_SPEC_USER_KEYRING, "keyring", "vgre", 0);
     if (keyring < 0) {
-        return VGREResult::ERROR_NOT_INITIALIZED;
+        return VGREResult::ERR_NOT_INITIALIZED;
     }
     
     std::string key_desc = "vgre:" + service;
     key_serial_t key = keyctl_search(keyring, "user", key_desc.c_str(), 0);
     
     if (key < 0) {
-        return VGREResult::ERROR_AUTH_FAILED;
+        return VGREResult::ERR_AUTH_FAILED;
     }
     
     if (keyctl_revoke(key) < 0) {
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     return VGREResult::SUCCESS;
@@ -335,32 +335,32 @@ VGREResult HardwareTokenManager::deleteLinuxKeyring(const std::string& service) 
 VGREResult HardwareTokenManager::initLinuxLibsecret() {
     // libsecret requires D-Bus and GNOME Keyring daemon
     // For now, return not supported (would require linking libsecret)
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::storeLinuxLibsecret(const std::string&, const std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::getLinuxLibsecret(const std::string&, std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::deleteLinuxLibsecret(const std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 #else
 
 // Platform-specific implementations
-VGREResult HardwareTokenManager::initLinuxKeyring() { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::storeLinuxKeyring(const std::string&, const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::getLinuxKeyring(const std::string&, std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::deleteLinuxKeyring(const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::initLinuxLibsecret() { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::storeLinuxLibsecret(const std::string&, const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::getLinuxLibsecret(const std::string&, std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::deleteLinuxLibsecret(const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::initLinuxKeyring() { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::storeLinuxKeyring(const std::string&, const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::getLinuxKeyring(const std::string&, std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::deleteLinuxKeyring(const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::initLinuxLibsecret() { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::storeLinuxLibsecret(const std::string&, const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::getLinuxLibsecret(const std::string&, std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::deleteLinuxLibsecret(const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
 
 #endif
 
@@ -406,7 +406,7 @@ VGREResult HardwareTokenManager::storeMacOSKeychain(const std::string& service, 
     if (status != errSecSuccess) {
         VGRE_LOG_ERROR("HardwareTokenManager", 
                       "Failed to store token in macOS Keychain: " + std::to_string(status));
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     return VGREResult::SUCCESS;
@@ -428,7 +428,7 @@ VGREResult HardwareTokenManager::getMacOSKeychain(const std::string& service, st
     );
     
     if (status != errSecSuccess) {
-        return VGREResult::ERROR_AUTH_FAILED;
+        return VGREResult::ERR_AUTH_FAILED;
     }
     
     outToken = std::string(static_cast<const char*>(passwordData), passwordLength);
@@ -445,14 +445,14 @@ VGREResult HardwareTokenManager::deleteMacOSKeychain(const std::string& service)
     );
     
     if (status != errSecSuccess || !itemRef) {
-        return VGREResult::ERROR_AUTH_FAILED;
+        return VGREResult::ERR_AUTH_FAILED;
     }
     
     status = SecKeychainItemDelete(itemRef);
     CFRelease(itemRef);
     
     if (status != errSecSuccess) {
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     return VGREResult::SUCCESS;
@@ -461,10 +461,10 @@ VGREResult HardwareTokenManager::deleteMacOSKeychain(const std::string& service)
 #else
 
 // Platform-specific implementations
-VGREResult HardwareTokenManager::initMacOSKeychain() { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::storeMacOSKeychain(const std::string&, const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::getMacOSKeychain(const std::string&, std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::deleteMacOSKeychain(const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::initMacOSKeychain() { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::storeMacOSKeychain(const std::string&, const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::getMacOSKeychain(const std::string&, std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::deleteMacOSKeychain(const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
 
 #endif
 
@@ -494,7 +494,7 @@ VGREResult HardwareTokenManager::storeWindowsCredMan(const std::string& service,
         VGRE_LOG_ERROR("HardwareTokenManager", 
                       "Failed to store token in Windows Credential Manager: " + 
                       std::to_string(GetLastError()));
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     return VGREResult::SUCCESS;
@@ -506,7 +506,7 @@ VGREResult HardwareTokenManager::getWindowsCredMan(const std::string& service, s
     
     PCREDENTIALW pcred = NULL;
     if (!CredReadW(wtarget.c_str(), CRED_TYPE_GENERIC, 0, &pcred)) {
-        return VGREResult::ERROR_AUTH_FAILED;
+        return VGREResult::ERR_AUTH_FAILED;
     }
     
     outToken = std::string(
@@ -523,7 +523,7 @@ VGREResult HardwareTokenManager::deleteWindowsCredMan(const std::string& service
     std::wstring wtarget = L"VGRE:" + wservice;
     
     if (!CredDeleteW(wtarget.c_str(), CRED_TYPE_GENERIC, 0)) {
-        return VGREResult::ERROR_AUTH_FAILED;
+        return VGREResult::ERR_AUTH_FAILED;
     }
     
     return VGREResult::SUCCESS;
@@ -532,10 +532,10 @@ VGREResult HardwareTokenManager::deleteWindowsCredMan(const std::string& service
 #else
 
 // Platform-specific implementations
-VGREResult HardwareTokenManager::initWindowsCredMan() { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::storeWindowsCredMan(const std::string&, const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::getWindowsCredMan(const std::string&, std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::deleteWindowsCredMan(const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::initWindowsCredMan() { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::storeWindowsCredMan(const std::string&, const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::getWindowsCredMan(const std::string&, std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::deleteWindowsCredMan(const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
 
 #endif
 
@@ -557,7 +557,7 @@ VGREResult HardwareTokenManager::initTPM() {
         if (rc != TSS2_RC_SUCCESS) {
             VGRE_LOG_DEBUG("HardwareTokenManager", 
                           "TPM device not available (rc=" + std::to_string(rc) + ")");
-            return VGREResult::ERROR_NOT_SUPPORTED;
+            return VGREResult::ERR_NOT_SUPPORTED;
         }
     }
     
@@ -567,7 +567,7 @@ VGREResult HardwareTokenManager::initTPM() {
         VGRE_LOG_ERROR("HardwareTokenManager", 
                       "Failed to initialize TPM ESYS context (rc=" + std::to_string(rc) + ")");
         Tss2_TctiLdr_Finalize(&tcti_ctx);
-        return VGREResult::ERROR_NOT_SUPPORTED;
+        return VGREResult::ERR_NOT_SUPPORTED;
     }
     
     // Define NV index for VGRE tokens (0x01C00000 is user-defined range)
@@ -579,7 +579,7 @@ VGREResult HardwareTokenManager::initTPM() {
 
 VGREResult HardwareTokenManager::storeTPM(const std::string& service, const std::string& token) {
     if (!tpm_context_) {
-        return VGREResult::ERROR_NOT_INITIALIZED;
+        return VGREResult::ERR_NOT_INITIALIZED;
     }
     
     TSS2_RC rc;
@@ -606,7 +606,7 @@ VGREResult HardwareTokenManager::storeTPM(const std::string& service, const std:
         if (rc != TSS2_RC_SUCCESS) {
             VGRE_LOG_ERROR("HardwareTokenManager", 
                           "Failed to undefine existing NV space (rc=" + std::to_string(rc) + ")");
-            return VGREResult::ERROR_IO;
+            return VGREResult::ERR_IO;
         }
     }
     
@@ -635,7 +635,7 @@ VGREResult HardwareTokenManager::storeTPM(const std::string& service, const std:
     if (rc != TSS2_RC_SUCCESS) {
         VGRE_LOG_ERROR("HardwareTokenManager", 
                       "Failed to define NV space (rc=" + std::to_string(rc) + ")");
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     // Write token to NV space
@@ -653,7 +653,7 @@ VGREResult HardwareTokenManager::storeTPM(const std::string& service, const std:
     if (rc != TSS2_RC_SUCCESS) {
         VGRE_LOG_ERROR("HardwareTokenManager", 
                       "Failed to write to NV space (rc=" + std::to_string(rc) + ")");
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     VGRE_LOG_INFO("HardwareTokenManager", 
@@ -665,7 +665,7 @@ VGREResult HardwareTokenManager::storeTPM(const std::string& service, const std:
 
 VGREResult HardwareTokenManager::getTPM(const std::string& service, std::string& outToken) {
     if (!tpm_context_) {
-        return VGREResult::ERROR_NOT_INITIALIZED;
+        return VGREResult::ERR_NOT_INITIALIZED;
     }
     
     TSS2_RC rc;
@@ -684,7 +684,7 @@ VGREResult HardwareTokenManager::getTPM(const std::string& service, std::string&
                                &nv_handle);
     
     if (rc != TSS2_RC_SUCCESS) {
-        return VGREResult::ERROR_AUTH_FAILED;
+        return VGREResult::ERR_AUTH_FAILED;
     }
     
     // Read NV public to get size
@@ -697,7 +697,7 @@ VGREResult HardwareTokenManager::getTPM(const std::string& service, std::string&
                            &nv_name);
     
     if (rc != TSS2_RC_SUCCESS) {
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     uint16_t data_size = nv_public->nvPublic.dataSize;
@@ -717,7 +717,7 @@ VGREResult HardwareTokenManager::getTPM(const std::string& service, std::string&
     if (rc != TSS2_RC_SUCCESS) {
         VGRE_LOG_ERROR("HardwareTokenManager", 
                       "Failed to read from NV space (rc=" + std::to_string(rc) + ")");
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     outToken = std::string(reinterpret_cast<const char*>(nv_data->buffer), 
@@ -729,7 +729,7 @@ VGREResult HardwareTokenManager::getTPM(const std::string& service, std::string&
 
 VGREResult HardwareTokenManager::deleteTPM(const std::string& service) {
     if (!tpm_context_) {
-        return VGREResult::ERROR_NOT_INITIALIZED;
+        return VGREResult::ERR_NOT_INITIALIZED;
     }
     
     TSS2_RC rc;
@@ -748,7 +748,7 @@ VGREResult HardwareTokenManager::deleteTPM(const std::string& service) {
                                &nv_handle);
     
     if (rc != TSS2_RC_SUCCESS) {
-        return VGREResult::ERROR_AUTH_FAILED;
+        return VGREResult::ERR_AUTH_FAILED;
     }
     
     // Undefine NV space
@@ -760,7 +760,7 @@ VGREResult HardwareTokenManager::deleteTPM(const std::string& service) {
     if (rc != TSS2_RC_SUCCESS) {
         VGRE_LOG_ERROR("HardwareTokenManager", 
                       "Failed to undefine NV space (rc=" + std::to_string(rc) + ")");
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     return VGREResult::SUCCESS;
@@ -771,19 +771,19 @@ VGREResult HardwareTokenManager::deleteTPM(const std::string& service) {
 // TPM 2.0 implementation for security-hardened environments
 VGREResult HardwareTokenManager::initTPM() {
     // TPM 2.0 support requires tss2-esys library — currently not enabled in this build
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::storeTPM(const std::string&, const std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::getTPM(const std::string&, std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::deleteTPM(const std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 #endif // VGRE_HAS_TPM2
@@ -833,7 +833,7 @@ VGREResult HardwareTokenManager::storeFallbackEncrypted(const std::string& servi
     // Write back
     std::ofstream outfile(fallback_path_);
     if (!outfile.is_open()) {
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     for (const auto& [key, value] : tokens) {
@@ -852,7 +852,7 @@ VGREResult HardwareTokenManager::storeFallbackEncrypted(const std::string& servi
 VGREResult HardwareTokenManager::getFallbackEncrypted(const std::string& service, std::string& outToken) {
     std::ifstream infile(fallback_path_);
     if (!infile.is_open()) {
-        return VGREResult::ERROR_AUTH_FAILED;
+        return VGREResult::ERR_AUTH_FAILED;
     }
     
     std::string line;
@@ -870,7 +870,7 @@ VGREResult HardwareTokenManager::getFallbackEncrypted(const std::string& service
     }
     
     infile.close();
-    return VGREResult::ERROR_AUTH_FAILED;
+    return VGREResult::ERR_AUTH_FAILED;
 }
 
 VGREResult HardwareTokenManager::deleteFallbackEncrypted(const std::string& service) {
@@ -878,7 +878,7 @@ VGREResult HardwareTokenManager::deleteFallbackEncrypted(const std::string& serv
     std::map<std::string, std::string> tokens;
     std::ifstream infile(fallback_path_);
     if (!infile.is_open()) {
-        return VGREResult::ERROR_AUTH_FAILED;
+        return VGREResult::ERR_AUTH_FAILED;
     }
     
     std::string line;
@@ -898,13 +898,13 @@ VGREResult HardwareTokenManager::deleteFallbackEncrypted(const std::string& serv
     infile.close();
     
     if (!found) {
-        return VGREResult::ERROR_AUTH_FAILED;
+        return VGREResult::ERR_AUTH_FAILED;
     }
     
     // Write back
     std::ofstream outfile(fallback_path_);
     if (!outfile.is_open()) {
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     for (const auto& [key, value] : tokens) {

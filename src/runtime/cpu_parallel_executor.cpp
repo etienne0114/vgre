@@ -1,5 +1,6 @@
 #include "vgre/runtime/cpu_parallel_executor.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/platform.h"
 #include "vgre/runtime/gpu_thread_context.h"
 #include "vgre/runtime/block_worker_pool.h"
 
@@ -11,13 +12,12 @@
 #endif
 
 #include <atomic>
-#include <unistd.h>
 
 
 extern "C" {
-__attribute__((visibility("default"))) int vgre_jit_get_thread_id() {
+VGRE_PUBLIC_API int vgre_jit_get_thread_id() {
     static std::atomic<int> s_next_id{0};
-    static __thread int s_my_id = -1;
+    static thread_local int s_my_id = -1;
     if (s_my_id == -1) {
         s_my_id = (s_next_id++) % 1024;
     }

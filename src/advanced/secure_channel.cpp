@@ -4,15 +4,13 @@
 
 #include <algorithm>
 #include <chrono>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <fstream>
-#include <fcntl.h>
 #include <cstring>
 #include <thread>
 
 #if defined(_WIN32)
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <bcrypt.h>
 #pragma comment(lib, "bcrypt.lib")
 #define CLOSE_SOCKET(s) closesocket(s)
@@ -22,6 +20,7 @@
 #else
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -324,7 +323,7 @@ VGREResult SecureChannel::initializeFromSecret(
     const uint8_t clientNonce[crypto::kNonceLen]) {
   if (authToken.empty()) {
     VGRE_LOG_ERROR("SecureChannel", "Cannot initialize: empty auth token");
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Combine nonces for salt: master_nonce || client_nonce
@@ -372,7 +371,7 @@ VGREResult SecureChannel::initializeFromHardware(const uint8_t masterNonce[crypt
 }
 
 VGREResult SecureChannel::rotateKey(const uint8_t nextNonce[crypto::kNonceLen]) {
-  if (!initialized_) return VGREResult::ERROR_NOT_INITIALIZED;
+  if (!initialized_) return VGREResult::ERR_NOT_INITIALIZED;
 
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -733,7 +732,7 @@ int SecureChannel::recvAll(vgre_socket_t fd, void *buf, size_t len,
 VGREResult SecureChannel::sendSecure(vgre_socket_t fd, const void *data,
                                       size_t len) {
   if (!initialized_) {
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
@@ -757,13 +756,13 @@ VGREResult SecureChannel::sendSecure(vgre_socket_t fd, const void *data,
   // Send header + encrypted payload
   if (!sendAll(fd, &hdr, sizeof(SecurePacketHeader))) {
     VGRE_LOG_ERROR("SecureChannel", "Failed to send secure header");
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 
   if (len > 0) {
     if (!sendAll(fd, encrypted.data(), len)) {
       VGRE_LOG_ERROR("SecureChannel", "Failed to send secure payload");
-      return VGREResult::ERROR_IO;
+      return VGREResult::ERR_IO;
     }
   }
 
@@ -777,7 +776,7 @@ VGREResult SecureChannel::sendSecure(vgre_socket_t fd, const void *data,
 VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
                                       std::vector<uint8_t> &outData) {
   if (!initialized_) {
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   }
 
   // Read header
@@ -785,23 +784,23 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
   int headerResult = recvAll(fd, &hdr, sizeof(SecurePacketHeader));
   if (headerResult < 0) {
     if (headerResult == -2) {
-      return VGREResult::ERROR_TIMEOUT;
+      return VGREResult::ERR_TIMEOUT;
     }
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 
   // Validate magic
   if (hdr.magic != 0x56475345U || hdr.version != 1) {
     VGRE_LOG_ERROR("SecureChannel",
                    "Invalid secure packet magic or version");
-    return VGREResult::ERROR_CRYPTO;
+    return VGREResult::ERR_CRYPTO;
   }
 
   // Validate payload size (max 64 MB to prevent OOM)
   if (hdr.payload_length > 64 * 1024 * 1024) {
     VGRE_LOG_ERROR("SecureChannel", "Payload too large: " +
                                         std::to_string(hdr.payload_length));
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Read encrypted payload
@@ -809,8 +808,8 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
   if (hdr.payload_length > 0) {
     int payloadResult = recvAll(fd, encrypted.data(), hdr.payload_length);
     if (payloadResult < 0) {
-      return (payloadResult == -2) ? VGREResult::ERROR_TIMEOUT
-                                   : VGREResult::ERROR_IO;
+      return (payloadResult == -2) ? VGREResult::ERR_TIMEOUT
+                                   : VGREResult::ERR_IO;
     }
   }
 
@@ -825,7 +824,7 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
                               crypto::kSHA256DigestLen)) {
     VGRE_LOG_ERROR("SecureChannel",
                    "HMAC verification failed — packet integrity compromised");
-    return VGREResult::ERROR_AUTH_FAILED;
+    return VGREResult::ERR_AUTH_FAILED;
   }
 
   // Replay detection: sequence must be >= expected
@@ -837,7 +836,7 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
                        std::to_string(hdr.sequence_number) +
                        " expected>=" +
                        std::to_string(expectedRecvSequence_));
-    return VGREResult::ERROR_AUTH_FAILED;
+    return VGREResult::ERR_AUTH_FAILED;
   }
 
   // Update expected sequence

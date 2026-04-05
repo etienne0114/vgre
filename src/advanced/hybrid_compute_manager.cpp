@@ -205,13 +205,13 @@ VGREResult HybridComputeManager::addRemoteNode(const std::string &address,
                                                int port) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (address.empty() || port <= 0 || port > 65535) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Check for duplicates
   for (const auto &node : resources_.remoteNodes) {
     if (node.address == address && node.port == port) {
-      return VGREResult::ERROR_ALREADY_EXISTS;
+      return VGREResult::ERR_ALREADY_EXISTS;
     }
   }
 
@@ -234,7 +234,7 @@ VGREResult HybridComputeManager::removeRemoteNode(const std::string &address) {
       resources_.remoteNodes.begin(), resources_.remoteNodes.end(),
       [&](const RemoteNode &n) { return n.address == address; });
   if (it == resources_.remoteNodes.end()) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
   resources_.remoteNodes.erase(it, resources_.remoteNodes.end());
   return VGREResult::SUCCESS;
@@ -286,7 +286,7 @@ VGREResult HybridComputeManager::updateRemoteNodeTelemetry(const std::string &ad
       return VGREResult::SUCCESS;
     }
   }
-  return VGREResult::ERROR_INVALID_VALUE;
+  return VGREResult::ERR_INVALID_VALUE;
 }
 
 VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
@@ -304,13 +304,13 @@ VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
   }
 
   if (targetPort == 0)
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
 
 #if defined(_WIN32)
   // Windows: use WinSock for TCP connection test
   WSADATA wsaData;
   if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 
   auto start = std::chrono::steady_clock::now();
@@ -322,7 +322,7 @@ VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
   if (getaddrinfo(address.c_str(), std::to_string(targetPort).c_str(), &hints,
                   &res) != 0) {
     WSACleanup();
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   bool connected = false;
@@ -351,7 +351,7 @@ VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
         break;
       }
     }
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 
   freeaddrinfo(res);
@@ -368,7 +368,7 @@ VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
 
   if (getaddrinfo(address.c_str(), std::to_string(targetPort).c_str(), &hints,
                   &res) != 0) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   bool connected = false;
@@ -395,7 +395,7 @@ VGREResult HybridComputeManager::pingRemoteNode(const std::string &address,
         break;
       }
     }
-    return VGREResult::ERROR_IO;
+    return VGREResult::ERR_IO;
   }
 
   freeaddrinfo(res);
@@ -435,7 +435,7 @@ VGREResult HybridComputeManager::distributeWorkload(const CompiledKernelFn &fn,
                                                     void **args,
                                                     ComputeBackend backend) {
   if (!fn || gridDim.x == 0 || blockDim.x == 0) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   int cpuCores = 0;
@@ -465,7 +465,7 @@ VGREResult HybridComputeManager::distributeWorkload(const CompiledKernelFn &fn,
   case ComputeBackend::INTEGRATED_GPU: {
     if (!hasIntegratedGPU) {
       VGRE_LOG_ERROR("HybridComputeManager", "iGPU requested but not available. Failing in authoritative mode.");
-      return VGREResult::ERROR_NOT_SUPPORTED;
+      return VGREResult::ERR_NOT_SUPPORTED;
     }
 #ifdef VGRE_HAS_OPENCL_BACKEND
     // Note: distributeWorkload with direct CompiledKernelFn is harder for iGPU
@@ -473,9 +473,9 @@ VGREResult HybridComputeManager::distributeWorkload(const CompiledKernelFn &fn,
     // Usually, code should use distributeRegisteredKernel.
     VGRE_LOG_ERROR("HybridComputeManager",
                    "Function-pointer dispatch not supported on iGPU (requires source for JIT)");
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 #else
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 #endif
   }
 
@@ -493,27 +493,27 @@ VGREResult HybridComputeManager::distributeWorkload(const CompiledKernelFn &fn,
     }
 
     if (!best || best->cpuCores <= 0) {
-      return VGREResult::ERROR_NOT_SUPPORTED;
+      return VGREResult::ERR_NOT_SUPPORTED;
     }
 
     // Function-pointer dispatch cannot be serialized and executed remotely over
     // the cluster API. Rejecting this path avoids fake-local execution that
     // would misreport remote behavior.
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
   }
   }
 
-  return VGREResult::ERROR_NOT_SUPPORTED;
+  return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HybridComputeManager::distributeRegisteredKernel(
     KernelId kernelId, const dim3 &gridDim, const dim3 &blockDim, void **args,
     int numArgs, size_t sharedMem, ComputeBackend backend) {
   if (kernelId == 0 || gridDim.x == 0 || blockDim.x == 0 || numArgs < 0) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
   if (numArgs > 0 && !args) {
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   if (backend == ComputeBackend::AUTO) {
@@ -532,7 +532,7 @@ VGREResult HybridComputeManager::distributeRegisteredKernel(
     auto &engine = core::RuntimeEngine::instance();
     const auto *ir = engine.getKernelIR(kernelId);
     if (!ir)
-      return VGREResult::ERROR_INVALID_KERNEL;
+      return VGREResult::ERR_INVALID_KERNEL;
 
     std::vector<size_t> argSizes;
     for (int i = 0; i < numArgs; ++i) {
@@ -550,7 +550,7 @@ VGREResult HybridComputeManager::distributeRegisteredKernel(
 #else
     VGRE_LOG_ERROR("HybridComputeManager",
                    "VGRE was not compiled with OpenCL iGPU support.");
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 #endif
   }
   case ComputeBackend::REMOTE_NODE: {
@@ -559,7 +559,7 @@ VGREResult HybridComputeManager::distributeRegisteredKernel(
       VGRE_LOG_ERROR("HybridComputeManager",
                      "Remote kernel dispatch requested but TCP cluster master "
                      "is not active");
-      return VGREResult::ERROR_NOT_INITIALIZED;
+      return VGREResult::ERR_NOT_INITIALIZED;
     }
 
     int worker = cluster.getFirstActiveWorker();
@@ -567,7 +567,7 @@ VGREResult HybridComputeManager::distributeRegisteredKernel(
       VGRE_LOG_ERROR("HybridComputeManager",
                      "Remote kernel dispatch requested but no active workers "
                      "are connected");
-      return VGREResult::ERROR_NOT_INITIALIZED;
+      return VGREResult::ERR_NOT_INITIALIZED;
     }
 
     uint32_t gd[3] = {gridDim.x, gridDim.y, gridDim.z};
@@ -577,7 +577,7 @@ VGREResult HybridComputeManager::distributeRegisteredKernel(
   }
   }
 
-  return VGREResult::ERROR_NOT_SUPPORTED;
+  return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 // ── Phase 5: Partitioned Kernel Distribution ──────────────────────────────

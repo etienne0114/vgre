@@ -1,5 +1,6 @@
 import 'dart:ffi';
 import 'dart:convert';
+import 'dart:io';
 import 'package:ffi/ffi.dart';
 
 // ── VGRE C API Types ───────────────────────────────────────────────────────
@@ -233,18 +234,22 @@ class VgreBridge {
   late final CreditsReset _creditsReset;
   late final GetDeviceCount _getDeviceCount;
   
-  // Libc setenv for propagating tokens to native code
-  late final int Function(Pointer<Utf8>, Pointer<Utf8>, int) _setenv;
+  int Function(Pointer<Utf8>, Pointer<Utf8>, int)? _setenv;
 
 
   VgreBridge(String libPath) {
     _lib = DynamicLibrary.open(libPath);
-    
-    // Lookup setenv from the process itself (libc is usually available)
-    final process = DynamicLibrary.process();
-    _setenv = process.lookupFunction<
-        Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32),
-        int Function(Pointer<Utf8>, Pointer<Utf8>, int)>('setenv');
+
+    if (!Platform.isWindows) {
+      try {
+        final process = DynamicLibrary.process();
+        _setenv = process.lookupFunction<
+            Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32),
+            int Function(Pointer<Utf8>, Pointer<Utf8>, int)>('setenv');
+      } catch (_) {
+        _setenv = null;
+      }
+    }
 
     _init = _lib.lookupFunction<InitFunc, Init>('vgre_init');
     _shutdown = _lib.lookupFunction<ShutdownFunc, Shutdown>('vgre_shutdown');
@@ -305,10 +310,33 @@ class VgreBridge {
 
 
   void setEnvironmentVariable(String name, String value) {
+    if (Platform.isWindows) {
+      try {
+        final namePtr = name.toNativeUtf16();
+        final valuePtr = value.toNativeUtf16();
+        final kernel32 = DynamicLibrary.open('kernel32.dll');
+        final setEnvironmentVariable = kernel32.lookupFunction<
+            Int32 Function(Pointer<Utf16>, Pointer<Utf16>),
+            int Function(Pointer<Utf16>, Pointer<Utf16>)>(
+          'SetEnvironmentVariableW',
+        );
+        setEnvironmentVariable(namePtr, valuePtr);
+        calloc.free(namePtr);
+        calloc.free(valuePtr);
+      } catch (_) {
+        // Keep startup resilient even if env propagation is unavailable.
+      }
+      return;
+    }
+
+    if (_setenv == null) {
+      return;
+    }
+
     final namePtr = name.toNativeUtf8();
     final valuePtr = value.toNativeUtf8();
     try {
-      _setenv(namePtr, valuePtr, 1);
+      _setenv!(namePtr, valuePtr, 1);
     } finally {
       calloc.free(namePtr);
       calloc.free(valuePtr);

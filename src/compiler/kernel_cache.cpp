@@ -58,7 +58,7 @@ VGREResult KernelCache::initialize(const std::string& cacheDir) {
         VGRE_LOG_INFO("KernelCache", "Initialized cache directory: " + cacheDir_);
     } catch (const std::exception& e) {
         VGRE_LOG_ERROR("KernelCache", "Failed to create cache directory: " + std::string(e.what()));
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     
     return VGREResult::SUCCESS;

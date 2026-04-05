@@ -41,7 +41,7 @@ VGREResult IGPUOpenCLExecutor::initialize() {
   clGetPlatformIDs(0, nullptr, &num_platforms);
   if (num_platforms == 0) {
     VGRE_LOG_WARN("IGPUOpenCLExecutor", "No OpenCL platforms found.");
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
   }
 
   std::vector<cl_platform_id> platforms(num_platforms);
@@ -71,7 +71,7 @@ VGREResult IGPUOpenCLExecutor::initialize() {
   if (!device_) {
     VGRE_LOG_WARN("IGPUOpenCLExecutor",
                   "No OpenCL hardware device found. iGPU backend unavailable.");
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
   }
 
   cl_int err;
@@ -79,7 +79,7 @@ VGREResult IGPUOpenCLExecutor::initialize() {
   if (err != CL_SUCCESS) {
     VGRE_LOG_ERROR("IGPUOpenCLExecutor",
                    "Failed to create OpenCL context: " + std::to_string(err));
-    return VGREResult::ERROR_NOT_INITIALIZED;
+    return VGREResult::ERR_NOT_INITIALIZED;
   }
 
   // Create command queue with Profiling and Out-of-Order Execution Enabled
@@ -93,7 +93,7 @@ VGREResult IGPUOpenCLExecutor::initialize() {
     if (err != CL_SUCCESS) {
       clReleaseContext(context_);
       context_ = nullptr;
-      return VGREResult::ERROR_NOT_INITIALIZED;
+      return VGREResult::ERR_NOT_INITIALIZED;
     }
     VGRE_LOG_WARN("IGPUOpenCLExecutor", "Created queue without out-of-order execution support.");
   } else {
@@ -211,7 +211,7 @@ VGREResult IGPUOpenCLExecutor::compileOpenCL(const std::string &kernelName,
   compiled.program =
       clCreateProgramWithSource(context_, 1, &src_ptr, &src_len, &err);
   if (err != CL_SUCCESS)
-    return VGREResult::ERROR_COMPILATION;
+    return VGREResult::ERR_COMPILATION;
 
   err =
       clBuildProgram(compiled.program, 1, &device_, nullptr, nullptr, nullptr);
@@ -226,7 +226,7 @@ VGREResult IGPUOpenCLExecutor::compileOpenCL(const std::string &kernelName,
                                              kernelName + "':\n" +
                                              std::string(build_log.data()));
     clReleaseProgram(compiled.program);
-    return VGREResult::ERROR_COMPILATION;
+    return VGREResult::ERR_COMPILATION;
   }
 
   compiled.kernel = clCreateKernel(compiled.program, kernelName.c_str(), &err);
@@ -234,7 +234,7 @@ VGREResult IGPUOpenCLExecutor::compileOpenCL(const std::string &kernelName,
     VGRE_LOG_ERROR("IGPUOpenCLExecutor",
                    "Failed to create OpenCL kernel: " + kernelName);
     clReleaseProgram(compiled.program);
-    return VGREResult::ERROR_INVALID_KERNEL;
+    return VGREResult::ERR_INVALID_KERNEL;
   }
 
   return VGREResult::SUCCESS;
@@ -286,7 +286,7 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
         if (size == 0) {
           VGRE_LOG_ERROR("IGPUOpenCLExecutor", "Critical: Could not determine size for non-managed allocation at " +
                                                std::to_string(reinterpret_cast<uintptr_t>(host_ptr)));
-          return VGREResult::ERROR_INVALID_VALUE;
+          return VGREResult::ERR_INVALID_VALUE;
         }
       }
 
@@ -299,7 +299,7 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
                            std::to_string(i));
         for (auto b : buffers)
           clReleaseMemObject(b);
-        return VGREResult::ERROR_OUT_OF_MEMORY;
+        return VGREResult::ERR_OUT_OF_MEMORY;
       }
       buffers.push_back(buf);
       clSetKernelArg(compiled.kernel, i, sizeof(cl_mem), &buf);
@@ -343,7 +343,7 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
                        std::to_string(err));
     for (auto b : buffers)
       clReleaseMemObject(b);
-    return VGREResult::ERROR_LAUNCH_FAILURE;
+    return VGREResult::ERR_LAUNCH_FAILURE;
   }
 
   // Wait for execution to collect profiling data natively instead of host timing

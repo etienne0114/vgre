@@ -2,6 +2,8 @@
 #define VGRE_COMMON_LOGGER_H
 
 #include <chrono>
+#include <cstdlib>
+#include <cstdint>
 #include <ctime>
 #include <deque>
 #include <atomic>
@@ -19,7 +21,7 @@ enum class LogLevel : uint8_t {
   DEBUG = 0,
   INFO = 1,
   WARN = 2,
-  ERROR = 3,
+  ERR = 3,
   NONE = 4
 };
 
@@ -37,7 +39,7 @@ public:
         if (s == "DEBUG") inst->setLevel(LogLevel::DEBUG);
         else if (s == "INFO") inst->setLevel(LogLevel::INFO);
         else if (s == "WARN") inst->setLevel(LogLevel::WARN);
-        else if (s == "ERROR") inst->setLevel(LogLevel::ERROR);
+        else if (s == "ERROR") inst->setLevel(LogLevel::ERR);
         else if (s == "NONE") inst->setLevel(LogLevel::NONE);
       }
     }
@@ -100,7 +102,7 @@ private:
       return "INFO ";
     case LogLevel::WARN:
       return "WARN ";
-    case LogLevel::ERROR:
+    case LogLevel::ERR:
       return "ERROR";
     default:
       return "?????";
@@ -120,7 +122,7 @@ private:
 #define VGRE_LOG_WARN(comp, msg)                                               \
   ::vgre::Logger::instance().log(::vgre::LogLevel::WARN, comp, msg)
 #define VGRE_LOG_ERROR(comp, msg)                                              \
-  ::vgre::Logger::instance().log(::vgre::LogLevel::ERROR, comp, msg)
+  ::vgre::Logger::instance().log(::vgre::LogLevel::ERR, comp, msg)
 
 } // namespace vgre
 

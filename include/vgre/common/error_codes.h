@@ -9,48 +9,48 @@ namespace vgre {
 // ── Result / error code enum ───────────────────────────────────────────────
 enum class VGREResult : int {
     SUCCESS                 = 0,
-    ERROR_NOT_INITIALIZED   = 1,
-    ERROR_INVALID_DEVICE    = 2,
-    ERROR_OUT_OF_MEMORY     = 3,
-    ERROR_INVALID_VALUE     = 4,
-    ERROR_INVALID_KERNEL    = 5,
-    ERROR_LAUNCH_FAILURE    = 6,
-    ERROR_COMPILATION       = 7,
-    ERROR_NOT_SUPPORTED     = 8,
-    ERROR_STREAM            = 9,
-    ERROR_TIMEOUT           = 10,
-    ERROR_ALREADY_EXISTS    = 11,
-    ERROR_IO                = 12,
-    ERROR_COMPRESSION       = 13,
-    ERROR_NETWORK           = 14,
-    ERROR_AUTH_FAILED       = 15,
-    ERROR_CRYPTO            = 16,
-    ERROR_BUSY              = 17,
-    ERROR_UNKNOWN           = 99
+    ERR_NOT_INITIALIZED     = 1,
+    ERR_INVALID_DEVICE      = 2,
+    ERR_OUT_OF_MEMORY       = 3,
+    ERR_INVALID_VALUE       = 4,
+    ERR_INVALID_KERNEL      = 5,
+    ERR_LAUNCH_FAILURE      = 6,
+    ERR_COMPILATION         = 7,
+    ERR_NOT_SUPPORTED       = 8,
+    ERR_STREAM              = 9,
+    ERR_TIMEOUT             = 10,
+    ERR_ALREADY_EXISTS      = 11,
+    ERR_IO                  = 12,
+    ERR_COMPRESSION         = 13,
+    ERR_NETWORK             = 14,
+    ERR_AUTH_FAILED         = 15,
+    ERR_CRYPTO              = 16,
+    ERR_BUSY                = 17,
+    ERR_UNKNOWN             = 99
 };
 
 // ── Human-readable error string ────────────────────────────────────────────
 inline const char* resultToString(VGREResult r) {
     switch (r) {
         case VGREResult::SUCCESS:               return "Success";
-        case VGREResult::ERROR_NOT_INITIALIZED: return "Not initialized";
-        case VGREResult::ERROR_INVALID_DEVICE:  return "Invalid device";
-        case VGREResult::ERROR_OUT_OF_MEMORY:   return "Out of memory";
-        case VGREResult::ERROR_INVALID_VALUE:   return "Invalid value";
-        case VGREResult::ERROR_INVALID_KERNEL:  return "Invalid kernel";
-        case VGREResult::ERROR_LAUNCH_FAILURE:  return "Kernel launch failure";
-        case VGREResult::ERROR_COMPILATION:     return "Compilation error";
-        case VGREResult::ERROR_NOT_SUPPORTED:   return "Not supported";
-        case VGREResult::ERROR_STREAM:          return "Stream error";
-        case VGREResult::ERROR_TIMEOUT:         return "Timeout";
-        case VGREResult::ERROR_ALREADY_EXISTS:  return "Already exists";
-        case VGREResult::ERROR_IO:              return "I/O error";
-        case VGREResult::ERROR_COMPRESSION:     return "Compression error";
-        case VGREResult::ERROR_NETWORK:         return "Network error";
-        case VGREResult::ERROR_AUTH_FAILED:     return "Authentication failed";
-        case VGREResult::ERROR_CRYPTO:          return "Cryptographic error";
-        case VGREResult::ERROR_BUSY:            return "Device or resource busy";
-        case VGREResult::ERROR_UNKNOWN:         return "Unknown error";
+        case VGREResult::ERR_NOT_INITIALIZED: return "Not initialized";
+        case VGREResult::ERR_INVALID_DEVICE:  return "Invalid device";
+        case VGREResult::ERR_OUT_OF_MEMORY:   return "Out of memory";
+        case VGREResult::ERR_INVALID_VALUE:   return "Invalid value";
+        case VGREResult::ERR_INVALID_KERNEL:  return "Invalid kernel";
+        case VGREResult::ERR_LAUNCH_FAILURE:  return "Kernel launch failure";
+        case VGREResult::ERR_COMPILATION:     return "Compilation error";
+        case VGREResult::ERR_NOT_SUPPORTED:   return "Not supported";
+        case VGREResult::ERR_STREAM:          return "Stream error";
+        case VGREResult::ERR_TIMEOUT:         return "Timeout";
+        case VGREResult::ERR_ALREADY_EXISTS:  return "Already exists";
+        case VGREResult::ERR_IO:              return "I/O error";
+        case VGREResult::ERR_COMPRESSION:     return "Compression error";
+        case VGREResult::ERR_NETWORK:         return "Network error";
+        case VGREResult::ERR_AUTH_FAILED:     return "Authentication failed";
+        case VGREResult::ERR_CRYPTO:          return "Cryptographic error";
+        case VGREResult::ERR_BUSY:            return "Device or resource busy";
+        case VGREResult::ERR_UNKNOWN:         return "Unknown error";
         default:                                return "Unrecognized error code";
     }
 }

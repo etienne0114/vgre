@@ -262,7 +262,7 @@ std::string RuntimeProfiler::toJSON() const {
 VGREResult RuntimeProfiler::exportToFile(const std::string& filepath) const {
     std::ofstream file(filepath);
     if (!file.is_open()) {
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     file << toJSON();
     file.close();
@@ -397,14 +397,14 @@ VGREResult RuntimeProfiler::exportOTLPToHTTP(const std::string& endpoint) const 
     if (::getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) != 0 || !res) {
         VGRE_LOG_ERROR("RuntimeProfiler",
             "exportOTLPToHTTP: DNS resolution failed for " + host);
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
 
     SOCK_T sock = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (sock == INVALID_SOCK) {
         ::freeaddrinfo(res);
         VGRE_LOG_ERROR("RuntimeProfiler", "exportOTLPToHTTP: socket() failed");
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
 
     if (::connect(sock, res->ai_addr, static_cast<int>(res->ai_addrlen)) != 0) {
@@ -412,7 +412,7 @@ VGREResult RuntimeProfiler::exportOTLPToHTTP(const std::string& endpoint) const 
         CLOSE_SOCK(sock);
         VGRE_LOG_ERROR("RuntimeProfiler",
             "exportOTLPToHTTP: connect() failed to " + host + ":" + portStr);
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
     ::freeaddrinfo(res);
 
@@ -433,7 +433,7 @@ VGREResult RuntimeProfiler::exportOTLPToHTTP(const std::string& endpoint) const 
     if (sent <= 0) {
         CLOSE_SOCK(sock);
         VGRE_LOG_ERROR("RuntimeProfiler", "exportOTLPToHTTP: send() failed");
-        return VGREResult::ERROR_IO;
+        return VGREResult::ERR_IO;
     }
 
     // Read response status line to check HTTP status code.
@@ -442,7 +442,7 @@ VGREResult RuntimeProfiler::exportOTLPToHTTP(const std::string& endpoint) const 
     CLOSE_SOCK(sock);
 
     // Parse "HTTP/1.1 200 OK" — status is the second token.
-    VGREResult result = VGREResult::ERROR_UNKNOWN;
+    VGREResult result = VGREResult::ERR_UNKNOWN;
     const char* sp = std::strchr(respBuf, ' ');
     if (sp) {
         int statusCode = std::atoi(sp + 1);

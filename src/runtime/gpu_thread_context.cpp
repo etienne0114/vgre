@@ -1,4 +1,5 @@
 #include "vgre/runtime/gpu_thread_context.h"
+#include "vgre/common/platform.h"
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -41,25 +42,25 @@ void GPUThreadContext::blockBarrier() {
   }
 }
 
-extern "C" __attribute__((visibility("default")))
+extern "C" VGRE_PUBLIC_API
 void vgre_jit_set_block_barrier(void *barrier) {
   GPUThreadContext::setBlockBarrier(reinterpret_cast<BlockBarrier *>(barrier));
 }
 
-extern "C" __attribute__((visibility("default")))
+extern "C" VGRE_PUBLIC_API
 void vgre_jit_clear_block_barrier() {
   GPUThreadContext::clearBlockBarrier();
 }
 
 
-extern "C" __attribute__((visibility("default")))
+extern "C" VGRE_PUBLIC_API
 void vgre_jit_block_barrier_sync() {
   // printf("[DEBUG] Thread entering block barrier\n"); fflush(stdout);
   GPUThreadContext::blockBarrier();
 }
 
 
-extern "C" __attribute__((visibility("default")))
+extern "C" VGRE_PUBLIC_API
 void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg) {
     if (threadCount <= 1) {
         task(0, arg);

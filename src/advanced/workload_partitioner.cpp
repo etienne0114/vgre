@@ -105,7 +105,7 @@ VGREResult WorkloadPartitioner::createPartitionPlan(
   if (!gridDim || !blockDim || gridDim[0] == 0 || blockDim[0] == 0) {
     VGRE_LOG_ERROR("WorkloadPartitioner",
                    "Cannot partition: invalid grid or block dimensions");
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Filter to available nodes with valid capability
@@ -119,7 +119,7 @@ VGREResult WorkloadPartitioner::createPartitionPlan(
   if (validNodes.empty()) {
     VGRE_LOG_ERROR("WorkloadPartitioner",
                    "Cannot partition: no valid compute nodes available");
-    return VGREResult::ERROR_INVALID_VALUE;
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
   // Copy grid/block dims
