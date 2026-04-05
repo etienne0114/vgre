@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 #if defined(__linux__)
@@ -135,6 +136,13 @@ private:
   // Calibrated FLOPs-per-retired-instruction for this CPU/SIMD configuration.
   // Default 0.5 (conservative scalar): updated by runBenchmark() via perf_event.
   std::atomic<double> flopPerInstruction_{0.5};
+
+  // Background benchmark thread — stored so the destructor can join it and
+  // prevent a segfault when the singleton is destroyed while the thread is still
+  // writing to members like flopPerInstruction_ and calibrated_.
+  std::thread benchmarkThread_;
+  // Set to true in the destructor so runBenchmark() can exit its loops early.
+  std::atomic<bool> shuttingDown_{false};
 };
 
 } // namespace advanced
