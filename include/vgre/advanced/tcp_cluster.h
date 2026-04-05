@@ -224,6 +224,7 @@ public:
   // Phase 5: Secure Packet I/O
   // VSBP v0.1.2: Raw packet dispatch with automatic header construction
   bool send_packet(vgre_socket_t fd, PacketType type, const void* payload, size_t payloadLen, SecureChannel* sc = nullptr);
+  bool send_packet_direct(vgre_socket_t fd, PacketType type, const void* payload, size_t payloadLen, SecureChannel* sc = nullptr);
   int recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBuffer, SecureChannel *sc = nullptr);
   void reportComputeFromWorker(double seconds, int cores, uint64_t kernel_id);
   bool broadcastPacket(PacketType type, const void* payload, size_t payloadLen);
@@ -265,6 +266,7 @@ public:
     bool has_igpu = false;
     char igpu_name[64] = {};
     std::string ip_address;
+    int port = 0;
     std::unique_ptr<SecureChannel> secureChannel;
     bool security_established = false;
     uint32_t packets_sent = 0; // Phase 10: for rotation trigger
@@ -288,6 +290,7 @@ public:
 
   struct ClusterNodeInfo {
     std::string ip_address;
+    int port;
     vgre_telemetry_t last_telemetry;
     bool active;
     int cpu_cores;
@@ -350,8 +353,10 @@ private:
   // UDP Auto-Discovery
   void udpAnnouncerLoop();  // Master
   void udpDiscoveryLoop();  // Client
+  void proactiveConnectionLoop(); // Master (proactive worker connections)
   void processClientStagingBuffer(); // Client data processor
   void flush_tx_queues(ClientConnection &client);
+  void parseProactiveNodes();
 
   // Phase 5: Security handshake
   VGREResult performSecureHandshake(ClientConnection &client);
@@ -380,7 +385,10 @@ private:
   // Threading
   std::thread cluster_thread_;
   std::thread udp_thread_;
+  std::thread proactive_thread_;
   std::thread data_processor_thread_;
+  std::atomic<bool> stop_proactive_{false};
+  std::vector<std::string> proactive_worker_addresses_;
 
   // Master State
   vgre_socket_t server_fd_ = (vgre_socket_t)-1;
@@ -452,3 +460,5 @@ private:
 
 } // namespace advanced
 } // namespace vgre
+
+// End of file extension for proactive connections

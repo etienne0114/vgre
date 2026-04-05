@@ -1208,7 +1208,7 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
   for (int i = 0; i < copy_count; ++i) {
     const auto &conn = connections[i];
     std::strncpy(nodes[i].address, conn.ip_address.c_str(), sizeof(nodes[i].address) - 1);
-    nodes[i].port = 7780; // Standardized Phase 3 Port
+    nodes[i].port = conn.port;
     nodes[i].cpu_cores = conn.cpu_cores;
     nodes[i].memory_bytes = conn.cpu_memory;
     nodes[i].latency_ms = conn.last_telemetry.avg_kernel_latency_ms;

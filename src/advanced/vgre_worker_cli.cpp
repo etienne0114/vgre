@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Worker node is active and waiting for master connection...");
+    vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Worker node is active and waiting for master connection (UDP Discovery + Standing by on port " + std::to_string(port) + ")...");
     
     while (!g_stop_requested.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
