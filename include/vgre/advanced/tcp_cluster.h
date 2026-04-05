@@ -8,13 +8,7 @@
 #include <cstdint>
 #include <mutex>
 #include <condition_variable>
-#if defined(_WIN32)
-typedef unsigned long long
-    vgre_socket_t; // Abstracting Windows SOCKET (UINT_PTR)
-#else
-#include <netinet/in.h>
-typedef int vgre_socket_t;
-#endif
+#include "vgre/common/sockets.h"
 #include <string>
 #include <thread>
 #include <vector>
@@ -302,9 +296,9 @@ public:
     bool security_established;
     bool is_authenticating;
   };
-  
+
   void getConnectedNodes(std::vector<ClusterNodeInfo> &outNodes) const;
-  
+
   // Phase 10: Wait for a specific kernel result from the cluster
   VGREResult waitForRemoteResult(uint64_t kernel_id, int timeout_ms = 30000);
 
@@ -316,6 +310,8 @@ public:
   ~TCPClusterManager();
 
 private:
+  // Using vgre::common types
+  using vgre_pollfd = vgre::common::vgre_pollfd;
   // ── Connection rate limiter ─────────────────────────────────────────────
   // Prevents handshake-flood DoS: limits new connections per source IP to
   // kMaxPerWindow within a rolling kWindowSeconds window.

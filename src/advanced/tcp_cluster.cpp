@@ -10,6 +10,7 @@
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/runtime/vector_engine.h"
+#include "vgre/common/sockets.h"
 
 // System Headers
 #include <algorithm>
@@ -19,103 +20,30 @@
 #include <fstream>
 #include <sstream>
 
-#if defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
-
-#define CLOSE_SOCKET(s) closesocket(s)
-#define IOCTL_NONBLOCK(s)                                                      \
-  do {                                                                         \
-    u_long mode = 1;                                                           \
-    ioctlsocket(s, FIONBIO, &mode);                                            \
-  } while (0)
-#ifndef MSG_DONTWAIT
-#define MSG_DONTWAIT 0
-#endif
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
-typedef int socklen_t;
-
-#else
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
-#include <poll.h>
-#include <errno.h>
-
-#define CLOSE_SOCKET(s) close(s)
-#define IOCTL_NONBLOCK(s)                                                      \
-  do {                                                                         \
-    int mode = 1;                                                              \
-    ioctl(s, FIONBIO, &mode);                                                  \
-  } while (0)
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
-#endif
+#include <chrono>
 
 namespace vgre {
 namespace advanced {
 
 namespace {
-struct vgre_pollfd {
-  vgre_socket_t fd;
-  short events;
-  short revents;
-};
 
-int vgre_poll(vgre_pollfd* fds, size_t count, int timeoutMs) {
-#if defined(_WIN32)
-  std::vector<WSAPOLLFD> nativeFds(count);
-  for (size_t i = 0; i < count; ++i) {
-    nativeFds[i].fd = fds[i].fd;
-    nativeFds[i].events = fds[i].events;
-    nativeFds[i].revents = 0;
-  }
-
-  int result = WSAPoll(nativeFds.data(), static_cast<ULONG>(count), timeoutMs);
-  if (result >= 0) {
-    for (size_t i = 0; i < count; ++i) {
-      fds[i].revents = nativeFds[i].revents;
-    }
-  }
-  return result;
-#else
-  std::vector<pollfd> nativeFds(count);
-  for (size_t i = 0; i < count; ++i) {
-    nativeFds[i].fd = fds[i].fd;
-    nativeFds[i].events = fds[i].events;
-    nativeFds[i].revents = 0;
-  }
-
-  int result = poll(nativeFds.data(), nativeFds.size(), timeoutMs);
-  if (result >= 0) {
-    for (size_t i = 0; i < count; ++i) {
-      fds[i].revents = nativeFds[i].revents;
-    }
-  }
-  return result;
-#endif
-}
+// Using vgre::common types and helpers
+using vgre::common::vgre_socket_t;
+using vgre::common::VGRE_INVALID_SOCKET;
+using vgre::common::VGRE_SOCKET_ERROR;
+using vgre::common::vgre_close_socket;
+using vgre::common::vgre_pollfd;
+using vgre::common::vgre_poll;
+using vgre::common::vgre_setsockopt;
+using vgre::common::vgre_ioctl_nonblock;
+using vgre::common::vgre_set_recv_timeout;
+using vgre::common::vgre_get_last_socket_error;
+using vgre::common::vgre_is_would_block;
 
 template <typename T>
 void sum_reduce(T* dst, const T* src, size_t count) {
   for (size_t i = 0; i < count; ++i)
     dst[i] += src[i];
-}
-
-static bool socket_would_block() {
-#if defined(_WIN32)
-  int err = WSAGetLastError();
-  return err == WSAEWOULDBLOCK || err == WSAEINPROGRESS;
-#else
-  return errno == EAGAIN || errno == EWOULDBLOCK;
-#endif
 }
 
 static bool send_all(vgre_socket_t sock, const void *buf, size_t len, const std::atomic<bool>* enabled = nullptr) {
@@ -132,7 +60,7 @@ static bool send_all(vgre_socket_t sock, const void *buf, size_t len, const std:
 
     int n = send(sock, p + sent, static_cast<int>(len - sent), MSG_NOSIGNAL);
     if (n <= 0) {
-      if (n < 0 && socket_would_block()) {
+      if (n < 0 && vgre_is_would_block(vgre_get_last_socket_error())) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         continue;
       }
@@ -276,7 +204,7 @@ int TCPClusterManager::recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBu
     } else if (n == 0) {
       return -1; // Disconnected
     } else {
-      if (socket_would_block()) return 0;
+      if (vgre_is_would_block(vgre_get_last_socket_error())) return 0;
       return -1;
     }
   }
@@ -285,7 +213,7 @@ int TCPClusterManager::recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBu
 void TCPClusterManager::flush_tx_queues(std::shared_ptr<ClientConnection> clientPtr) {
     if (!clientPtr) return;
     auto &client = *clientPtr;
-    if (!client.active || client.socket_fd == (vgre_socket_t)-1) return;
+    if (!client.active || client.socket_fd == VGRE_INVALID_SOCKET) return;
     
     std::lock_guard<std::mutex> tx_lock(client.tx_mutex);
     
@@ -426,20 +354,17 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   if (is_master_) {
     // Master Node (Server)
     server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd_ == (vgre_socket_t)-1) {
+    if (server_fd_ == VGRE_INVALID_SOCKET) {
       VGRE_LOG_ERROR("TCPCluster", "Failed to create socket");
       enabled_ = false;
       return VGREResult::ERR_IO;
     }
 
     int opt = 1;
-#if defined(_WIN32)
-    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt,
-               sizeof(opt));
-#else
-    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    vgre_setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifndef _WIN32
 #ifdef SO_REUSEPORT
-    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+    vgre_setsockopt(server_fd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
 #endif
 
@@ -451,21 +376,21 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     if (bind(server_fd_, (struct sockaddr *)&address, sizeof(address)) < 0) {
       VGRE_LOG_ERROR("TCPCluster",
                      "Bind failed on port " + std::to_string(port_));
-      CLOSE_SOCKET(server_fd_);
-      server_fd_ = (vgre_socket_t)-1;
+      vgre_close_socket(server_fd_);
+      server_fd_ = VGRE_INVALID_SOCKET;
       enabled_ = false;
       return VGREResult::ERR_IO;
     }
 
     if (listen(server_fd_, 10) < 0) {
       VGRE_LOG_ERROR("TCPCluster", "Listen failed");
-      CLOSE_SOCKET(server_fd_);
-      server_fd_ = (vgre_socket_t)-1;
+      vgre_close_socket(server_fd_);
+      server_fd_ = VGRE_INVALID_SOCKET;
       enabled_ = false;
       return VGREResult::ERR_IO;
     }
 
-    IOCTL_NONBLOCK(server_fd_);
+    vgre_ioctl_nonblock(server_fd_);
 
     VGRE_LOG_INFO("TCPCluster",
                   "Master Server Listening on port " + std::to_string(port_));
@@ -487,20 +412,16 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       
       // Start a server socket for the worker as well, so the Master can proactively connect.
       server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-      if (server_fd_ != (vgre_socket_t)-1) {
+      if (server_fd_ != VGRE_INVALID_SOCKET) {
           int opt = 1;
-#if defined(_WIN32)
-          setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
-#else
-          setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#endif
+          vgre_setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
           struct sockaddr_in address;
           address.sin_family = AF_INET;
           address.sin_addr.s_addr = INADDR_ANY;
           address.sin_port = htons(port_);
 
           if (bind(server_fd_, (struct sockaddr *)&address, sizeof(address)) >= 0 && listen(server_fd_, 5) >= 0) {
-              IOCTL_NONBLOCK(server_fd_);
+              vgre_ioctl_nonblock(server_fd_);
               cluster_thread_ = std::thread(&TCPClusterManager::serverLoop, this);
           } else {
               VGRE_LOG_WARN("TCPCluster", "Worker: Failed to bind server socket, falling back to UDP discovery only.");
@@ -511,7 +432,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       worker_announcer_thread_ = std::thread(&TCPClusterManager::udpWorkerAnnouncerLoop, this);
     } else {
     client_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (client_fd_ == (vgre_socket_t)-1) {
+    if (client_fd_ == VGRE_INVALID_SOCKET) {
       VGRE_LOG_ERROR("TCPCluster", "Failed to create client socket");
       enabled_ = false;
       return VGREResult::ERR_IO;
@@ -524,8 +445,8 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     if (inet_pton(AF_INET, host_.c_str(), &serv_addr.sin_addr) <= 0) {
       VGRE_LOG_ERROR("TCPCluster",
                      "Invalid address or not supported: " + host_);
-      CLOSE_SOCKET(client_fd_);
-      client_fd_ = (vgre_socket_t)-1;
+      vgre_close_socket(client_fd_);
+      client_fd_ = VGRE_INVALID_SOCKET;
       enabled_ = false;
       return VGREResult::ERR_IO;
     }
@@ -535,8 +456,8 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       VGRE_LOG_DEBUG("TCPCluster", "Connection failed to " + host_ + ":" +
                                        std::to_string(port_));
       enabled_ = false;
-      CLOSE_SOCKET(client_fd_);
-      client_fd_ = (vgre_socket_t)-1;
+      vgre_close_socket(client_fd_);
+      client_fd_ = VGRE_INVALID_SOCKET;
 #if defined(_WIN32)
       WSACleanup();
 #endif
@@ -544,7 +465,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     }
 
     // Set non-blocking
-    IOCTL_NONBLOCK(client_fd_);
+    vgre_ioctl_nonblock(client_fd_);
 
     VGRE_LOG_INFO("TCPCluster", "Connected to Remote Master Node at " + host_);
     cluster_thread_ = std::thread(&TCPClusterManager::clientLoop, this);
@@ -566,21 +487,21 @@ void TCPClusterManager::shutdown() {
     if (is_master_) {
       std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
       for (auto &client : clients_) {
-        if (client && client->socket_fd != (vgre_socket_t)-1) {
-          CLOSE_SOCKET(client->socket_fd);
-          client->socket_fd = (vgre_socket_t)-1;
+        if (client && client->socket_fd != VGRE_INVALID_SOCKET) {
+          vgre_close_socket(client->socket_fd);
+          client->socket_fd = VGRE_INVALID_SOCKET;
           client->active = false;
         }
       }
-      if (server_fd_ != (vgre_socket_t)-1) {
-        CLOSE_SOCKET(server_fd_);
-        server_fd_ = (vgre_socket_t)-1;
+      if (server_fd_ != VGRE_INVALID_SOCKET) {
+        vgre_close_socket(server_fd_);
+        server_fd_ = VGRE_INVALID_SOCKET;
       }
     } else {
       std::lock_guard<std::mutex> lock(client_mutex_);
-      if (client_fd_ != (vgre_socket_t)-1) {
-        CLOSE_SOCKET(client_fd_);
-        client_fd_ = (vgre_socket_t)-1;
+      if (client_fd_ != VGRE_INVALID_SOCKET) {
+        vgre_close_socket(client_fd_);
+        client_fd_ = VGRE_INVALID_SOCKET;
       }
     }
   }
@@ -679,7 +600,7 @@ void TCPClusterManager::serverLoop() {
     {
         std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
         for (const auto &client : clients_) {
-            if (client && client->active && client->socket_fd != (vgre_socket_t)-1) {
+            if (client && client->active && client->socket_fd != VGRE_INVALID_SOCKET) {
                 vgre_pollfd pfd_client;
                 pfd_client.fd = client->socket_fd;
                 pfd_client.events = POLLIN;
@@ -692,7 +613,7 @@ void TCPClusterManager::serverLoop() {
     int poll_res = vgre_poll(fds.data(), fds.size(), 50);
 
     if (poll_res < 0) {
-        if (!socket_would_block()) {
+        if (!vgre_is_would_block(vgre_get_last_socket_error())) {
            VGRE_LOG_ERROR("TCPCluster", "Master: poll() failed");
            break;
         }
@@ -717,7 +638,7 @@ void TCPClusterManager::serverLoop() {
         socklen_t addrlen = sizeof(address);
         vgre_socket_t new_socket = accept(server_fd_, (struct sockaddr *)&address, &addrlen);
         
-        if (new_socket != (vgre_socket_t)-1) {
+        if (new_socket != VGRE_INVALID_SOCKET) {
             char ipstr[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &(address.sin_addr), ipstr, sizeof(ipstr));
 
@@ -726,24 +647,24 @@ void TCPClusterManager::serverLoop() {
                 VGRE_LOG_WARN("TCPCluster",
                     "Rate limit exceeded for " + std::string(ipstr) +
                     " — dropping connection");
-                CLOSE_SOCKET(new_socket);
+                vgre_close_socket(new_socket);
             } else {
             rateLimiter_.record(std::string(ipstr));
 
-            IOCTL_NONBLOCK(new_socket);
+            vgre_ioctl_nonblock(new_socket);
             // Enable TCP keepalive so hard crashes / network partitions are detected
             // without waiting for a send to fail (typically within ~11s with these settings).
             {
                 int ka = 1;
-                setsockopt(new_socket, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));
+                vgre_setsockopt(new_socket, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));
 #if defined(TCP_KEEPIDLE)
-                int idle = 5;   setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
+                int idle = 5;   vgre_setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
 #endif
 #if defined(TCP_KEEPINTVL)
-                int intvl = 2;  setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+                int intvl = 2;  vgre_setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
 #endif
 #if defined(TCP_KEEPCNT)
-                int cnt = 3;    setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,  sizeof(cnt));
+                int cnt = 3;    vgre_setsockopt(new_socket, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,  sizeof(cnt));
 #endif
             }
 
@@ -812,7 +733,7 @@ void TCPClusterManager::serverLoop() {
                     if (sr != VGREResult::SUCCESS) {
                         VGRE_LOG_ERROR("TCPCluster", "Master: Security handshake failed for " + clientRef->ip_address);
                         clientRef->active = false;
-                        CLOSE_SOCKET(clientRef->socket_fd);
+                        vgre_close_socket(clientRef->socket_fd);
                         {
                             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
                             clients_.erase(std::remove(clients_.begin(), clients_.end(), clientRef),
@@ -849,13 +770,13 @@ void TCPClusterManager::serverLoop() {
                             if (n < 0) {
                                 VGRE_LOG_INFO("TCPCluster", "Master: Worker disconnected.");
                                 client->active = false;
-                                CLOSE_SOCKET(client->socket_fd);
+                                vgre_close_socket(client->socket_fd);
                                 syncToIPC();
                             }
                         } else {
                             VGRE_LOG_WARN("TCPCluster", "Master: Client socket error or hup.");
                             client->active = false;
-                            CLOSE_SOCKET(client->socket_fd);
+                            vgre_close_socket(client->socket_fd);
                             syncToIPC();
                         }
                         break;
@@ -1420,13 +1341,13 @@ void TCPClusterManager::processClientStagingBuffer() {
 
 void TCPClusterManager::udpAnnouncerLoop() {
   vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (udp_fd == (vgre_socket_t)-1) return;
+  if (udp_fd == VGRE_INVALID_SOCKET) return;
   
   int opt = 1;
 #if defined(_WIN32)
-  setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
+  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
 #else
-  setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
 #endif
 
   struct sockaddr_in broadcast_addr{};
@@ -1443,18 +1364,18 @@ void TCPClusterManager::udpAnnouncerLoop() {
     sendto(udp_fd, ping_msg.c_str(), ping_msg.length(), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
     std::this_thread::sleep_for(std::chrono::seconds(2));
   }
-  CLOSE_SOCKET(udp_fd);
+  vgre_close_socket(udp_fd);
 }
 
 void TCPClusterManager::udpMasterDiscoveryLoop() {
   vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (udp_fd == (vgre_socket_t)-1) return;
+  if (udp_fd == VGRE_INVALID_SOCKET) return;
 
   int opt = 1;
 #if defined(_WIN32)
-  setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 #else
-  setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #endif
 
   struct sockaddr_in listen_addr{};
@@ -1464,7 +1385,7 @@ void TCPClusterManager::udpMasterDiscoveryLoop() {
 
   if (bind(udp_fd, (struct sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
     VGRE_LOG_WARN("TCPCluster", "Master: UDP Worker Discovery bind failed");
-    CLOSE_SOCKET(udp_fd);
+    vgre_close_socket(udp_fd);
     return;
   }
 
@@ -1473,10 +1394,10 @@ void TCPClusterManager::udpMasterDiscoveryLoop() {
   // Without this, recvfrom blocks indefinitely, preventing shutdown from joining.
 #if defined(_WIN32)
   DWORD rcvTimeout = 1000;
-  setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcvTimeout, sizeof(rcvTimeout));
+  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcvTimeout, sizeof(rcvTimeout));
 #else
   struct timeval rcvTv{1, 0};
-  setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTv, sizeof(rcvTv));
+  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTv, sizeof(rcvTv));
 #endif
 
   VGRE_LOG_INFO("TCPCluster", "Master: Active Worker Discovery enabled (scanning for remote nodes)...");
@@ -1517,7 +1438,7 @@ void TCPClusterManager::udpMasterDiscoveryLoop() {
       }
     }
   }
-  CLOSE_SOCKET(udp_fd);
+  vgre_close_socket(udp_fd);
 }
 
 void TCPClusterManager::udpDiscoveryLoop() {
@@ -1534,19 +1455,17 @@ void TCPClusterManager::udpDiscoveryLoop() {
   while (enabled_) {
     // Open a fresh UDP socket for this discovery attempt.
     vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp_fd == (vgre_socket_t)-1) {
+    if (udp_fd == VGRE_INVALID_SOCKET) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
         continue;
     }
 
     {
       int opt = 1;
-#if defined(_WIN32)
-      setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-#else
-      setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+      vgre_setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifndef _WIN32
 #ifdef SO_REUSEPORT
-      setsockopt(udp_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+      vgre_setsockopt(udp_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
 #endif
     }
@@ -1558,19 +1477,13 @@ void TCPClusterManager::udpDiscoveryLoop() {
 
     if (bind(udp_fd, (struct sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
       VGRE_LOG_WARN("TCPCluster", "UDP discovery bind failed, retrying in 3s...");
-      CLOSE_SOCKET(udp_fd);
+      vgre_close_socket(udp_fd);
       std::this_thread::sleep_for(std::chrono::seconds(3));
       continue;
     }
 
     // 1-second receive timeout so we can check enabled_ regularly.
-#if defined(_WIN32)
-    DWORD timeout = 1000;
-    setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-#else
-    struct timeval tv{1, 0};
-    setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-#endif
+    vgre::common::vgre_set_recv_timeout(udp_fd, 1000);
 
     VGRE_LOG_INFO("TCPCluster", "Scanning local subnet for Master node broadcasts...");
 
@@ -1579,7 +1492,7 @@ void TCPClusterManager::udpDiscoveryLoop() {
     struct sockaddr_in sender_addr{};
     socklen_t sender_len = sizeof(sender_addr);
 
-    while (enabled_ && client_fd_ == (vgre_socket_t)-1) {
+    while (enabled_ && client_fd_ == VGRE_INVALID_SOCKET) {
       int n = recvfrom(udp_fd, buffer, sizeof(buffer) - 1, 0,
                        (struct sockaddr*)&sender_addr, &sender_len);
       if (n > 0) {
@@ -1616,7 +1529,7 @@ void TCPClusterManager::udpDiscoveryLoop() {
               std::to_string(connect_port));
 
           vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, 0);
-          if (sock == (vgre_socket_t)-1) continue;
+          if (sock == VGRE_INVALID_SOCKET) continue;
 
           struct sockaddr_in serv_addr{};
           serv_addr.sin_family = AF_INET;
@@ -1625,45 +1538,33 @@ void TCPClusterManager::udpDiscoveryLoop() {
 
           if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) >= 0) {
               // Keepalive so we detect a hard master crash quickly.
-              {
-                  int ka = 1;
-                  setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));
-#if defined(TCP_KEEPIDLE)
-                  int idle = 5;  setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
-#endif
-#if defined(TCP_KEEPINTVL)
-                  int intvl = 2; setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
-#endif
-#if defined(TCP_KEEPCNT)
-                  int cnt = 3;   setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,  sizeof(cnt));
-#endif
-              }
-              IOCTL_NONBLOCK(sock);
+              vgre::common::vgre_set_tcp_keepalive(sock, 5, 2, 3);
+              vgre_ioctl_nonblock(sock);
               client_fd_ = sock;
               VGRE_LOG_INFO("TCPCluster",
                   "Connected to Remote Master Node at " + host_);
               break; // exit inner discovery loop
           } else {
-              CLOSE_SOCKET(sock);
+              vgre_close_socket(sock);
           }
         }
       }
     } // inner discovery loop
-
-    CLOSE_SOCKET(udp_fd);
-
+ 
+    vgre_close_socket(udp_fd);
+ 
     if (!enabled_) break;
-
-    if (client_fd_ != (vgre_socket_t)-1) {
+ 
+    if (client_fd_ != VGRE_INVALID_SOCKET) {
         // Run the client protocol (capability exchange, telemetry, commands).
         // clientLoop() breaks (not enabled_=false) on disconnect so we can retry.
         clientLoop();
-
+ 
         // ── Post-disconnect cleanup ──────────────────────────────────────────
         // clientLoop exited — either a disconnect (break) or shutdown (enabled_=false).
-        if (client_fd_ != (vgre_socket_t)-1) {
-            CLOSE_SOCKET(client_fd_);
-            client_fd_ = (vgre_socket_t)-1;
+        if (client_fd_ != VGRE_INVALID_SOCKET) {
+            vgre_close_socket(client_fd_);
+            client_fd_ = VGRE_INVALID_SOCKET;
         }
         // Reset security for the next session.
         client_secure_channel_.reset();
@@ -1692,13 +1593,13 @@ void TCPClusterManager::udpDiscoveryLoop() {
 
 void TCPClusterManager::udpWorkerAnnouncerLoop() {
   vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (udp_fd == (vgre_socket_t)-1) return;
+  if (udp_fd == VGRE_INVALID_SOCKET) return;
 
   int opt = 1;
 #if defined(_WIN32)
-  setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
+  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
 #else
-  setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
 #endif
 
   struct sockaddr_in broadcast_addr{};
@@ -1718,7 +1619,7 @@ void TCPClusterManager::udpWorkerAnnouncerLoop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
   }
-  CLOSE_SOCKET(udp_fd);
+  vgre_close_socket(udp_fd);
 }
 
 
@@ -2789,22 +2690,22 @@ void TCPClusterManager::proactiveConnectionLoop() {
             VGRE_LOG_DEBUG("TCPCluster", "Master: Attempting proactive connection to " + ip + ":" + std::to_string(port));
 
             vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, 0);
-            if (sock == (vgre_socket_t)-1) continue;
+            if (sock == VGRE_INVALID_SOCKET) continue;
 
             struct sockaddr_in serv_addr;
             serv_addr.sin_family = AF_INET;
             serv_addr.sin_port = htons(port);
             if (inet_pton(AF_INET, ip.c_str(), &serv_addr.sin_addr) <= 0) {
-                CLOSE_SOCKET(sock);
+                vgre_close_socket(sock);
                 continue;
             }
 
             // Use a non-blocking connect or a short timeout
-            IOCTL_NONBLOCK(sock);
+            vgre_ioctl_nonblock(sock);
             int res = connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
             
             if (res < 0) {
-                if (socket_would_block()) {
+                if (vgre_is_would_block(vgre_get_last_socket_error())) {
                     // Wait for connection with select/poll
                     vgre_pollfd pfd;
                     pfd.fd = sock;
@@ -2815,15 +2716,15 @@ void TCPClusterManager::proactiveConnectionLoop() {
                         socklen_t len = sizeof(error);
                         getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&error, &len);
                         if (error != 0) {
-                            CLOSE_SOCKET(sock);
+                            vgre_close_socket(sock);
                             continue;
                         }
                     } else {
-                        CLOSE_SOCKET(sock);
+                        vgre_close_socket(sock);
                         continue;
                     }
                 } else {
-                    CLOSE_SOCKET(sock);
+                    vgre_close_socket(sock);
                     continue;
                 }
             }
@@ -2834,15 +2735,15 @@ void TCPClusterManager::proactiveConnectionLoop() {
             // Enable TCP keepalive so a hard crash on the worker side is detected quickly.
             {
                 int ka = 1;
-                setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));
+                vgre_setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));
 #if defined(TCP_KEEPIDLE)
-                int idle = 5;   setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
+                int idle = 5;   vgre_setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
 #endif
 #if defined(TCP_KEEPINTVL)
-                int intvl = 2;  setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+                int intvl = 2;  vgre_setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
 #endif
 #if defined(TCP_KEEPCNT)
-                int cnt = 3;    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,  sizeof(cnt));
+                int cnt = 3;    vgre_setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,  sizeof(cnt));
 #endif
             }
             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
@@ -2871,7 +2772,7 @@ void TCPClusterManager::proactiveConnectionLoop() {
                         VGRE_LOG_ERROR("TCPCluster",
                             "Master: Proactive handshake failed for " + clientRef->ip_address);
                         clientRef->active = false;
-                        CLOSE_SOCKET(clientRef->socket_fd);
+                        vgre_close_socket(clientRef->socket_fd);
                         {
                             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
                             clients_.erase(std::remove(clients_.begin(), clients_.end(), clientRef),

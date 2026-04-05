@@ -122,7 +122,7 @@ echo === Building VGRE Native Engine ===
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 pushd "%BUILD_DIR%" || exit /b 1
 
-"%CMAKE_EXE%" "%PROJECT_ROOT%" -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="!LLVM_DIR!"
+"%CMAKE_EXE%" "%PROJECT_ROOT%" -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="!LLVM_DIR!" -DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=TRUE
 if errorlevel 1 (
     popd
     echo ERROR: CMake configure failed.
