@@ -46,7 +46,7 @@ VGREResult IGPUOpenCLExecutor::initialize() {
   clGetPlatformIDs(0, nullptr, &num_platforms);
   if (num_platforms == 0) {
     VGRE_LOG_WARN("IGPUOpenCLExecutor", "No OpenCL platforms found.");
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
   }
 
   std::vector<cl_platform_id> platforms(num_platforms);
@@ -76,7 +76,7 @@ VGREResult IGPUOpenCLExecutor::initialize() {
   if (!device_) {
     VGRE_LOG_WARN("IGPUOpenCLExecutor",
                   "No OpenCL hardware device found. iGPU backend unavailable.");
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
   }
 
   cl_int err;

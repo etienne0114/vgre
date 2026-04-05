@@ -115,7 +115,7 @@ VGREResult HardwareTokenManager::initialize() {
     }
 
     VGRE_LOG_ERROR("HardwareTokenManager", "Failed to initialize any secure storage backend");
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::storeToken(const std::string& service, const std::string& token) {
@@ -143,7 +143,7 @@ VGREResult HardwareTokenManager::storeToken(const std::string& service, const st
         case BackendType::FALLBACK_ENCRYPTED:
             return storeFallbackEncrypted(service, token);
         default:
-            return VGREResult::ERROR_NOT_SUPPORTED;
+            return VGREResult::ERR_NOT_SUPPORTED;
     }
 }
 
@@ -172,7 +172,7 @@ VGREResult HardwareTokenManager::getToken(const std::string& service, std::strin
         case BackendType::FALLBACK_ENCRYPTED:
             return getFallbackEncrypted(service, outToken);
         default:
-            return VGREResult::ERROR_NOT_SUPPORTED;
+            return VGREResult::ERR_NOT_SUPPORTED;
     }
 }
 
@@ -201,7 +201,7 @@ VGREResult HardwareTokenManager::deleteToken(const std::string& service) {
         case BackendType::FALLBACK_ENCRYPTED:
             return deleteFallbackEncrypted(service);
         default:
-            return VGREResult::ERROR_NOT_SUPPORTED;
+            return VGREResult::ERR_NOT_SUPPORTED;
     }
 }
 
@@ -225,7 +225,7 @@ std::string HardwareTokenManager::getBackendName() const {
 std::string HardwareTokenManager::generateToken(size_t length) {
     std::random_device rd;
     std::mt19937_64 gen(rd());
-    std::uniform_int_distribution<uint8_t> dis(0, 255);
+    std::uniform_int_distribution<int> dis(0, 255);
     
     std::ostringstream oss;
     oss << std::hex << std::setfill('0');
@@ -255,7 +255,7 @@ VGREResult HardwareTokenManager::initLinuxKeyring() {
         // Create VGRE keyring
         keyring = add_key("keyring", "vgre", NULL, 0, KEY_SPEC_USER_KEYRING);
         if (keyring < 0) {
-            return VGREResult::ERROR_NOT_SUPPORTED;
+            return VGREResult::ERR_NOT_SUPPORTED;
         }
     }
     return VGREResult::SUCCESS;
@@ -335,32 +335,32 @@ VGREResult HardwareTokenManager::deleteLinuxKeyring(const std::string& service) 
 VGREResult HardwareTokenManager::initLinuxLibsecret() {
     // libsecret requires D-Bus and GNOME Keyring daemon
     // For now, return not supported (would require linking libsecret)
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::storeLinuxLibsecret(const std::string&, const std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::getLinuxLibsecret(const std::string&, std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::deleteLinuxLibsecret(const std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 #else
 
 // Platform-specific implementations
-VGREResult HardwareTokenManager::initLinuxKeyring() { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::storeLinuxKeyring(const std::string&, const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::getLinuxKeyring(const std::string&, std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::deleteLinuxKeyring(const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::initLinuxLibsecret() { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::storeLinuxLibsecret(const std::string&, const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::getLinuxLibsecret(const std::string&, std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::deleteLinuxLibsecret(const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::initLinuxKeyring() { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::storeLinuxKeyring(const std::string&, const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::getLinuxKeyring(const std::string&, std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::deleteLinuxKeyring(const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::initLinuxLibsecret() { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::storeLinuxLibsecret(const std::string&, const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::getLinuxLibsecret(const std::string&, std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::deleteLinuxLibsecret(const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
 
 #endif
 
@@ -461,10 +461,10 @@ VGREResult HardwareTokenManager::deleteMacOSKeychain(const std::string& service)
 #else
 
 // Platform-specific implementations
-VGREResult HardwareTokenManager::initMacOSKeychain() { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::storeMacOSKeychain(const std::string&, const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::getMacOSKeychain(const std::string&, std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::deleteMacOSKeychain(const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::initMacOSKeychain() { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::storeMacOSKeychain(const std::string&, const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::getMacOSKeychain(const std::string&, std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::deleteMacOSKeychain(const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
 
 #endif
 
@@ -532,10 +532,10 @@ VGREResult HardwareTokenManager::deleteWindowsCredMan(const std::string& service
 #else
 
 // Platform-specific implementations
-VGREResult HardwareTokenManager::initWindowsCredMan() { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::storeWindowsCredMan(const std::string&, const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::getWindowsCredMan(const std::string&, std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
-VGREResult HardwareTokenManager::deleteWindowsCredMan(const std::string&) { return VGREResult::ERROR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::initWindowsCredMan() { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::storeWindowsCredMan(const std::string&, const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::getWindowsCredMan(const std::string&, std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
+VGREResult HardwareTokenManager::deleteWindowsCredMan(const std::string&) { return VGREResult::ERR_NOT_SUPPORTED; }
 
 #endif
 
@@ -771,19 +771,19 @@ VGREResult HardwareTokenManager::deleteTPM(const std::string& service) {
 // TPM 2.0 implementation for security-hardened environments
 VGREResult HardwareTokenManager::initTPM() {
     // TPM 2.0 support requires tss2-esys library — currently not enabled in this build
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::storeTPM(const std::string&, const std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::getTPM(const std::string&, std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 VGREResult HardwareTokenManager::deleteTPM(const std::string&) {
-    return VGREResult::ERROR_NOT_SUPPORTED;
+    return VGREResult::ERR_NOT_SUPPORTED;
 }
 
 #endif // VGRE_HAS_TPM2
