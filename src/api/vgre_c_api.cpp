@@ -1251,7 +1251,13 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
     nodes[i].cpu_cores = conn.cpu_cores;
     nodes[i].memory_bytes = conn.cpu_memory;
     nodes[i].latency_ms = conn.last_telemetry.avg_kernel_latency_ms;
-    nodes[i].available = conn.active ? 1 : 0;
+    if (conn.security_established) {
+        nodes[i].available = 1;
+    } else if (conn.is_authenticating) {
+        nodes[i].available = 2; // Signal "Authenticating" to dashboard
+    } else {
+        nodes[i].available = 0;
+    }
     std::strncpy(nodes[i].igpu_name, conn.igpu_name, sizeof(nodes[i].igpu_name) - 1);
     
     if (isMaster) to_sync.push_back(nodes[i]);

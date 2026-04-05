@@ -281,7 +281,9 @@ int TCPClusterManager::recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBu
   }
 }
 
-void TCPClusterManager::flush_tx_queues(ClientConnection &client) {
+void TCPClusterManager::flush_tx_queues(std::shared_ptr<ClientConnection> clientPtr) {
+    if (!clientPtr) return;
+    auto &client = *clientPtr;
     if (!client.active || client.socket_fd == (vgre_socket_t)-1) return;
     
     std::lock_guard<std::mutex> tx_lock(client.tx_mutex);
@@ -656,7 +658,7 @@ void TCPClusterManager::serverLoop() {
     {
         std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
         for (auto &client : clients_) {
-            if (client && client->active) flush_tx_queues(*client);
+            if (client && client->active) flush_tx_queues(client);
         }
     }
 
@@ -683,7 +685,7 @@ void TCPClusterManager::serverLoop() {
 
             IOCTL_NONBLOCK(new_socket);
             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
-            auto conn = std::make_unique<ClientConnection>();
+            auto conn = std::make_shared<ClientConnection>();
             conn->socket_fd = new_socket;
             conn->ip_address = std::string(ipstr);
             conn->port = ntohs(address.sin_port); // Remote port of the connection
@@ -717,14 +719,31 @@ void TCPClusterManager::serverLoop() {
                 }
             }
 
-            // Phase 5: Start secure handshake immediately if enabled
+            // Phase 13: Asynchronous Handshake Handover
             if (security_enabled_) {
-              VGREResult sr = performSecureHandshake(*clients_.back());
-              if (sr != VGREResult::SUCCESS) {
-                VGRE_LOG_ERROR("TCPCluster", "Master: Security handshake failed for " + std::string(ipstr));
-                clients_.back()->active = false;
-                CLOSE_SOCKET(clients_.back()->socket_fd);
-              }
+                std::shared_ptr<ClientConnection> clientRef = clients_.back();
+                clientRef->is_authenticating = true;
+                clientRef->active = true; // Mark as active so it appears in UI (as authenticating)
+                
+                std::thread([this, clientRef]() {
+                    VGREResult sr = this->performSecureHandshake(clientRef);
+                    clientRef->is_authenticating = false;
+                    
+                    if (sr != VGREResult::SUCCESS) {
+                        VGRE_LOG_ERROR("TCPCluster", "Master: Security handshake failed for " + clientRef->ip_address);
+                        clientRef->active = false;
+                        CLOSE_SOCKET(clientRef->socket_fd);
+                        
+                        // Remove from active list eventually
+                        std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+                        clients_.erase(std::remove(clients_.begin(), clients_.end(), clientRef), clients_.end());
+                    } else {
+                        VGRE_LOG_INFO("TCPCluster", "Master: Security established for " + clientRef->ip_address);
+                    }
+                }).detach();
+            } else {
+                clients_.back()->active = true;
+                clients_.back()->security_established = true;
             }
             } // end rate-limit else
         }
@@ -758,7 +777,7 @@ void TCPClusterManager::serverLoop() {
         
         // Phase 12: TSS2 Priority Flush
         for (auto &client : clients_) {
-            if (client && client->active) flush_tx_queues(*client);
+            if (client && client->active) flush_tx_queues(client);
         }
         
         // Process buffers — VSBP v0.1.2 framed parsing (mirrors processClientStagingBuffer)
@@ -967,7 +986,17 @@ void TCPClusterManager::serverLoop() {
 }
 
 void TCPClusterManager::clientLoop() {
-  // 1. Send Capability Handshake
+  // Phase 5: Perform secure handshake if enabled
+  if (security_enabled_) {
+    VGREResult sr = performClientSecureHandshake();
+    if (sr != VGREResult::SUCCESS) {
+       VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed");
+       enabled_ = false;
+       return;
+    }
+  }
+
+  // 1. Send Capability Handshake (AFTER security is established)
   {
     CapabilityPacket cpkt{};
     
@@ -981,12 +1010,11 @@ void TCPClusterManager::clientLoop() {
 #else
     std::ifstream meminfo("/proc/meminfo");
     std::string line;
-    while (std::getline(meminfo, line)) {
+    while (std::getline(meminfo, line) && cpkt.cpu_memory == 0) {
       if (line.find("MemTotal") != std::string::npos) {
         std::istringstream iss(line);
         std::string label; size_t kb; iss >> label >> kb;
         cpkt.cpu_memory = kb * 1024;
-        break;
       }
     }
 #endif
@@ -1000,16 +1028,6 @@ void TCPClusterManager::clientLoop() {
 #endif
 
     send_packet(client_fd_, PacketType::CAPABILITY, &cpkt, sizeof(CapabilityPacket), client_secure_channel_.get());
-  }
-
-  // Phase 5: Perform secure handshake if enabled
-  if (security_enabled_) {
-    VGREResult sr = performClientSecureHandshake();
-    if (sr != VGREResult::SUCCESS) {
-       VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed");
-       enabled_ = false;
-       return;
-    }
   }
 
   while (enabled_) {
@@ -1813,6 +1831,7 @@ void TCPClusterManager::getConnectedNodes(std::vector<TCPClusterManager::Cluster
     info.has_igpu = c->has_igpu;
     std::memcpy(info.igpu_name, c->igpu_name, sizeof(info.igpu_name));
     info.security_established = c->security_established;
+    info.is_authenticating = c->is_authenticating;
     outNodes.push_back(std::move(info));
   }
 }
@@ -1859,7 +1878,9 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
   return info;
 }
 
-VGREResult TCPClusterManager::performSecureHandshake(ClientConnection &client) {
+VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConnection> clientPtr) {
+  if (!clientPtr) return VGREResult::ERR_INVALID_VALUE;
+  auto &client = *clientPtr;
   if (!security_enabled_ || auth_token_str_.empty()) {
     return VGREResult::SUCCESS; // Security not enabled, skip
   }
@@ -1894,8 +1915,15 @@ VGREResult TCPClusterManager::performSecureHandshake(ClientConnection &client) {
   }
   
   VSBPHeader* header = reinterpret_cast<VSBPHeader*>(rx.data());
-  if (header->magic != VSBP_MAGIC || header->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) {
-      VGRE_LOG_ERROR("TCPCluster", "Security handshake: invalid response packet type");
+  if (header->magic != VSBP_MAGIC) {
+      VGRE_LOG_ERROR("TCPCluster", "Security handshake: invalid magic in response");
+      return VGREResult::ERR_AUTH_FAILED;
+  }
+  
+  if (header->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) {
+      VGRE_LOG_ERROR("TCPCluster", "Security handshake: received unexpected packet type " + 
+                     std::to_string(header->type) + " (expected SECURE_HANDSHAKE_ACK: " + 
+                     std::to_string(static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) + ")");
       return VGREResult::ERR_AUTH_FAILED;
   }
   std::memcpy(&clientHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
@@ -1920,6 +1948,7 @@ VGREResult TCPClusterManager::performSecureHandshake(ClientConnection &client) {
   crypto::sha256(reinterpret_cast<const uint8_t*>(auth_token_str_.data()),
                  auth_token_str_.size(), expectedFingerprint);
 
+  client.security_established = true;
   client.security_established = true;
   VGRE_LOG_INFO("TCPCluster",
                 "Security handshake completed with " + client.ip_address);
@@ -2450,7 +2479,7 @@ void TCPClusterManager::proactiveConnectionLoop() {
             VGRE_LOG_INFO("TCPCluster", "Master: Proactively connected to worker at " + ip + ":" + std::to_string(port));
             
             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
-            auto conn = std::make_unique<ClientConnection>();
+            auto conn = std::make_shared<ClientConnection>();
             conn->socket_fd = sock;
             conn->ip_address = ip;
             conn->active = true;
@@ -2458,8 +2487,30 @@ void TCPClusterManager::proactiveConnectionLoop() {
             clients_.push_back(std::move(conn));
             
             // Phase 5: SecHandshake
+            // Phase 13: Asynchronous Handshake Handover for Proactive Connection
             if (security_enabled_) {
-                performSecureHandshake(*clients_.back());
+                std::shared_ptr<ClientConnection> clientRef = clients_.back();
+                clientRef->is_authenticating = true;
+                clientRef->active = true;
+                
+                std::thread([this, clientRef]() {
+                    VGREResult sr = this->performSecureHandshake(clientRef);
+                    clientRef->is_authenticating = false;
+                    
+                    if (sr != VGREResult::SUCCESS) {
+                        VGRE_LOG_ERROR("TCPCluster", "Master: Proactive handshake failed for " + clientRef->ip_address);
+                        clientRef->active = false;
+                        CLOSE_SOCKET(clientRef->socket_fd);
+                        
+                        std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+                        clients_.erase(std::remove(clients_.begin(), clients_.end(), clientRef), clients_.end());
+                    } else {
+                        VGRE_LOG_INFO("TCPCluster", "Master: Security established (proactive) for " + clientRef->ip_address);
+                    }
+                }).detach();
+            } else {
+                clients_.back()->security_established = true;
+                clients_.back()->active = true;
             }
         }
 

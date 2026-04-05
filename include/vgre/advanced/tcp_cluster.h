@@ -251,7 +251,8 @@ public:
   struct ClientConnection {
     vgre_socket_t socket_fd;
     vgre_telemetry_t last_telemetry;
-    bool active;
+    std::atomic<bool> active{false};
+    std::atomic<bool> is_authenticating{false}; // Phase 13: Background handshake guard
     std::vector<uint8_t> rx_buffer;
     bool expecting_type = true;
     PacketType pending_type = PacketType::TELEMETRY;
@@ -268,7 +269,7 @@ public:
     std::string ip_address;
     int port = 0;
     std::unique_ptr<SecureChannel> secureChannel;
-    bool security_established = false;
+    std::atomic<bool> security_established{false};
     uint32_t packets_sent = 0; // Phase 10: for rotation trigger
     
     // Phase 12: TSS2 (Traffic-Shaping-Sync 2.0)
@@ -276,7 +277,7 @@ public:
       std::vector<uint8_t> data;
       uint32_t priority; // 0 = high, 1 = low
     };
-    std::mutex tx_mutex;
+    mutable std::mutex tx_mutex;
     std::deque<OutgoingPacket> high_priority_tx;
     std::deque<OutgoingPacket> low_priority_tx;
     std::atomic<uint32_t> in_flight_kernels{0};
@@ -298,6 +299,7 @@ public:
     bool has_igpu;
     char igpu_name[64];
     bool security_established;
+    bool is_authenticating;
   };
   
   void getConnectedNodes(std::vector<ClusterNodeInfo> &outNodes) const;
@@ -355,11 +357,11 @@ private:
   void udpDiscoveryLoop();  // Client
   void proactiveConnectionLoop(); // Master (proactive worker connections)
   void processClientStagingBuffer(); // Client data processor
-  void flush_tx_queues(ClientConnection &client);
+  void flush_tx_queues(std::shared_ptr<ClientConnection> client);
   void parseProactiveNodes();
 
   // Phase 5: Security handshake
-  VGREResult performSecureHandshake(ClientConnection &client);
+  VGREResult performSecureHandshake(std::shared_ptr<ClientConnection> client);
   VGREResult performClientSecureHandshake();
 
   std::atomic<bool> enabled_{false};
@@ -392,7 +394,7 @@ private:
 
   // Master State
   vgre_socket_t server_fd_ = (vgre_socket_t)-1;
-  std::vector<std::unique_ptr<ClientConnection>> clients_;
+  std::vector<std::shared_ptr<ClientConnection>> clients_;
   mutable std::recursive_mutex clients_mutex_;
 
   // Client State
