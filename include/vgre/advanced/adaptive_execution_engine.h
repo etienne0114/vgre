@@ -5,9 +5,27 @@
 #include "vgre/common/types.h"
 
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+
+#if defined(__linux__)
+// ── Hardware instruction counter (perf_event_open) ────────────────────────
+// RAII wrapper for a per-thread userspace instruction counter.
+// Construct as thread_local; falls back silently when perf_event is
+// unavailable (VMs, paranoid > 1, missing CAP_SYS_ADMIN).
+struct PerfSampler {
+  int fd = -1;
+  PerfSampler();
+  ~PerfSampler();
+  void     start();             // reset + enable the counter
+  uint64_t stop();              // disable, read, return instruction count (0 = unavailable)
+  bool     valid() const { return fd >= 0; }
+  PerfSampler(const PerfSampler&) = delete;
+  PerfSampler& operator=(const PerfSampler&) = delete;
+};
+#endif // __linux__
 
 namespace vgre {
 namespace advanced {
@@ -80,6 +98,11 @@ public:
   double getInstantaneousGFLOPS() const;
   double getInstantaneousBandwidth() const;
 
+  // Calibrated FLOPs-per-retired-instruction ratio (set by runBenchmark()).
+  // Used by CPUParallelExecutor to convert perf_event instruction counts
+  // into FLOP estimates. Conservative default 0.5 until calibrated.
+  double getFlopPerInstruction() const { return flopPerInstruction_.load(); }
+
   // Singleton
   static AdaptiveExecutionEngine &instance();
 
@@ -109,6 +132,9 @@ private:
   double instantBandwidth_{0.0};
 
   std::atomic<bool> calibrated_{false};
+  // Calibrated FLOPs-per-retired-instruction for this CPU/SIMD configuration.
+  // Default 0.5 (conservative scalar): updated by runBenchmark() via perf_event.
+  std::atomic<double> flopPerInstruction_{0.5};
 };
 
 } // namespace advanced

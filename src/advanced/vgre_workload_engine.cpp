@@ -151,19 +151,18 @@ void WorkloadEngine::workloadLoop() {
     auto t2 = std::chrono::steady_clock::now();
     double busyMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
 
-    // Duty Cycle scaling: AvgUtil = Busy / (Busy + Sleep)
-    // Sleep = (Busy / LoadFactor) - Busy
     double factor = loadFactor_.load();
     if (factor < 0.01) factor = 0.01; // Avoid divide by zero
     if (factor > 1.0) factor = 1.0;
 
-    double sleepTargetMs = (busyMs / factor) - busyMs;
+    // Authoritative Pacing: Instead of artificial sleeping, we align to the next
+    // real-time scheduling slot based on the target load factor.
+    auto nextTarget = t1 + std::chrono::milliseconds(static_cast<int>(busyMs / factor));
+    auto now = std::chrono::steady_clock::now();
     
-    // Clamp sleep to avoid excessive context switching or hanging
-    if (sleepTargetMs > 1000.0) sleepTargetMs = 1000.0;
-
-    if (sleepTargetMs > 0.5) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(sleepTargetMs)));
+    if (nextTarget > now) {
+      // Use high-precision wait for the next real interval
+      std::this_thread::sleep_until(nextTarget);
     }
   }
 

@@ -27,6 +27,13 @@ VGRE_PUBLIC_API int vgre_jit_get_thread_id() {
 
 #include "vgre/advanced/adaptive_execution_engine.h"
 
+#if defined(__linux__)
+// Thread-local perf_event instruction counter — opened once per thread,
+// reused across every block dispatch on that thread.  Falls back silently
+// (PerfSampler::valid() == false) when perf_event is unavailable.
+static thread_local PerfSampler t_perfSampler;
+#endif
+
 namespace vgre {
 namespace runtime {
 
@@ -81,17 +88,42 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
   // Linearize the 3D grid into a 1D loop for OpenMP parallelism
   int totalBlocksI = static_cast<int>(totalBlocks);
 
+  // Helper: compute effective FLOPs for one block, preferring hardware measurement.
+  // If perf_event is available, the measured instruction count is converted using
+  // the calibrated flopPerInstruction ratio; otherwise the static estimate is used.
+  auto effectiveFlops = [&](uint64_t staticEstimate, uint64_t measuredInstr) -> uint64_t {
+#if defined(__linux__)
+    if (measuredInstr > 0) {
+        double ratio = vgre::advanced::AdaptiveExecutionEngine::instance().getFlopPerInstruction();
+        uint64_t hwFlops = static_cast<uint64_t>(measuredInstr * ratio);
+        return (hwFlops > 0) ? hwFlops : staticEstimate;
+    }
+#else
+    (void)measuredInstr;
+#endif
+    return staticEstimate;
+  };
+
   // Optimization: Skip parallel overhead for very small grids
   if (totalBlocksI == 1) {
     dim3 blockIdx(gridOffset.x, gridOffset.y, gridOffset.z);
     // Allocate per-block shared memory
     SharedMemory smem(sharedMemSize);
     dim3 tIdx(0,0,0);
+#if defined(__linux__)
+    if (t_perfSampler.valid()) t_perfSampler.start();
+#endif
     (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(),
        smem.size());
-    
+#if defined(__linux__)
+    uint64_t instr1 = t_perfSampler.valid() ? t_perfSampler.stop() : 0;
+#else
+    uint64_t instr1 = 0;
+#endif
+
     // Record metrics
-    if (flopsPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(flopsPerBlock);
+    uint64_t fb1 = effectiveFlops(flopsPerBlock, instr1);
+    if (fb1 > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(fb1);
     if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
   } else if (usesSyncthreads) {
     // Kernels with __syncthreads() MUST process blocks serially.
@@ -108,8 +140,17 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
           GPUThreadContext::setWarpMask(0xFFFFFFFF);
           GPUThreadContext::clearBlockBarrier();
           dim3 tIdx(0, 0, 0);
+#if defined(__linux__)
+          if (t_perfSampler.valid()) t_perfSampler.start();
+#endif
           (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(), smem.size());
-          if (flopsPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(flopsPerBlock);
+#if defined(__linux__)
+          uint64_t instrS = t_perfSampler.valid() ? t_perfSampler.stop() : 0;
+#else
+          uint64_t instrS = 0;
+#endif
+          uint64_t fbS = effectiveFlops(flopsPerBlock, instrS);
+          if (fbS > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(fbS);
           if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
           GPUThreadContext::clearWarpMask();
           GPUThreadContext::clearBlockBarrier();
@@ -145,11 +186,19 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
             vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
             vgre::runtime::GPUThreadContext::clearBlockBarrier();
             dim3 tIdx(0,0,0);
+#if defined(__linux__)
+            if (t_perfSampler.valid()) t_perfSampler.start();
+#endif
             (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, threadSmem.raw(),
                threadSmem.size());
-            
+#if defined(__linux__)
+            uint64_t instrOMP = t_perfSampler.valid() ? t_perfSampler.stop() : 0;
+#else
+            uint64_t instrOMP = 0;
+#endif
             // Record metrics per block completion
-            if (flopsPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(flopsPerBlock);
+            uint64_t fbOMP = effectiveFlops(flopsPerBlock, instrOMP);
+            if (fbOMP > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(fbOMP);
             if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
 
             vgre::runtime::GPUThreadContext::clearWarpMask();
@@ -170,11 +219,19 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
           vgre::runtime::GPUThreadContext::clearBlockBarrier();
 
           dim3 tIdx(0,0,0);
+#if defined(__linux__)
+          if (t_perfSampler.valid()) t_perfSampler.start();
+#endif
           (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(),
              smem.size());
-             
+#if defined(__linux__)
+          uint64_t instrNOMP = t_perfSampler.valid() ? t_perfSampler.stop() : 0;
+#else
+          uint64_t instrNOMP = 0;
+#endif
           // Record metrics per block completion
-          if (flopsPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(flopsPerBlock);
+          uint64_t fbNOMP = effectiveFlops(flopsPerBlock, instrNOMP);
+          if (fbNOMP > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(fbNOMP);
           if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
 
           vgre::runtime::GPUThreadContext::clearWarpMask();

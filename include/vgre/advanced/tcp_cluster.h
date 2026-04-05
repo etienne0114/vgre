@@ -50,13 +50,15 @@ enum class PacketType : uint32_t {
   CREDIT_REPORT = 15,         // compute-unit-seconds billing report
   ROTATE_KEY = 16,            // Phase 10: dynamic session key rotation
   SHM_INIT = 17,              // Phase 11: negotiate SHM segment
-  DATA_SHM = 18,               // Phase 11: data in SHM
+  DATA_SHM = 18,              // Phase 11: data in SHM
   DATA_HEADER_DIRTY = 19,     // Phase 11: dirty ranges header (TCP)
-  DATA_SHM_DIRTY = 20,         // Phase 11: dirty ranges header (SHM)
+  DATA_SHM_DIRTY = 20,        // Phase 11: dirty ranges header (SHM)
   DIRTY_RANGE = 21,           // Phase 11: offset/size range packet
   COOP_BARRIER_SYNC = 22,     // Phase 13: Decentralized Grid Barrier
   COOP_BARRIER_RESUME = 23,   // Phase 13: Master resume signal
-  RAW_DATA = 24               // Generic unstructured payload
+  RAW_DATA = 24,              // Generic unstructured payload
+  COLLECTIVE_OP = 25,         // Phase 14: Collective Ops (all_reduce, etc.)
+  COLLECTIVE_COMPLETE = 26,   // Phase 14: Master signal that reduction is ready
 };
 
 struct VSBPHeader {
@@ -182,6 +184,13 @@ struct CreditReportPacket {
   uint64_t timestamp;
 };
 
+struct CollectiveOpPacket {
+  uint32_t op_type;    // 0 = all_reduce
+  uint32_t datatype;   // VGRE_ARG_...
+  uint64_t count;
+  uint64_t sequence;   // sync ID
+};
+
 class TCPClusterManager {
 public:
   static TCPClusterManager &instance() {
@@ -234,6 +243,9 @@ public:
   VGREResult collectPartitionResults(uint64_t kernel_id,
                                      uint32_t total_partitions,
                                      int timeout_ms = 30000);
+  
+  // Distributed Collective Operations
+  VGREResult allReduce(void* ptr, size_t count, int datatype);
   
   struct ClientConnection {
     vgre_socket_t socket_fd;
@@ -421,6 +433,16 @@ private:
   std::map<uint64_t, VGREResult> remote_kernel_results_;
   std::mutex remote_results_mutex_;
   std::condition_variable remote_results_cv_;
+
+  // Distributed Collective Primitives
+  std::mutex reduction_mutex_;
+  std::condition_variable reduction_cv_;
+  std::atomic<int> reduction_count_{0};
+  std::vector<uint8_t> active_reduction_buffer_;
+  bool is_reducing_{false};
+  uint32_t reduction_datatype_{0};
+  size_t reduction_element_count_{0};
+  uint64_t reduction_sequence_{0};
 
   // Cooperative Barrier (Zero-Simulation)
   std::mutex barrier_mutex_;

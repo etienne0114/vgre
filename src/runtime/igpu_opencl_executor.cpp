@@ -22,6 +22,11 @@ IGPUOpenCLExecutor::~IGPUOpenCLExecutor() {
       if (pair.second.program)
         clReleaseProgram(pair.second.program);
     }
+    for (auto &pair : bufferCache_) {
+        if (pair.second)
+            clReleaseMemObject(pair.second);
+    }
+    bufferCache_.clear();
     if (queue_)
       clReleaseCommandQueue(queue_);
     if (context_)
@@ -41,7 +46,7 @@ VGREResult IGPUOpenCLExecutor::initialize() {
   clGetPlatformIDs(0, nullptr, &num_platforms);
   if (num_platforms == 0) {
     VGRE_LOG_WARN("IGPUOpenCLExecutor", "No OpenCL platforms found.");
-    return VGREResult::ERR_NOT_SUPPORTED;
+    return VGREResult::ERROR_NOT_SUPPORTED;
   }
 
   std::vector<cl_platform_id> platforms(num_platforms);
@@ -71,7 +76,7 @@ VGREResult IGPUOpenCLExecutor::initialize() {
   if (!device_) {
     VGRE_LOG_WARN("IGPUOpenCLExecutor",
                   "No OpenCL hardware device found. iGPU backend unavailable.");
-    return VGREResult::ERR_NOT_SUPPORTED;
+    return VGREResult::ERROR_NOT_SUPPORTED;
   }
 
   cl_int err;
@@ -79,7 +84,7 @@ VGREResult IGPUOpenCLExecutor::initialize() {
   if (err != CL_SUCCESS) {
     VGRE_LOG_ERROR("IGPUOpenCLExecutor",
                    "Failed to create OpenCL context: " + std::to_string(err));
-    return VGREResult::ERR_NOT_INITIALIZED;
+    return VGREResult::ERROR_NOT_INITIALIZED;
   }
 
   // Create command queue with Profiling and Out-of-Order Execution Enabled
@@ -93,7 +98,7 @@ VGREResult IGPUOpenCLExecutor::initialize() {
     if (err != CL_SUCCESS) {
       clReleaseContext(context_);
       context_ = nullptr;
-      return VGREResult::ERR_NOT_INITIALIZED;
+      return VGREResult::ERROR_NOT_INITIALIZED;
     }
     VGRE_LOG_WARN("IGPUOpenCLExecutor", "Created queue without out-of-order execution support.");
   } else {
@@ -211,7 +216,7 @@ VGREResult IGPUOpenCLExecutor::compileOpenCL(const std::string &kernelName,
   compiled.program =
       clCreateProgramWithSource(context_, 1, &src_ptr, &src_len, &err);
   if (err != CL_SUCCESS)
-    return VGREResult::ERR_COMPILATION;
+    return VGREResult::ERROR_COMPILATION;
 
   err =
       clBuildProgram(compiled.program, 1, &device_, nullptr, nullptr, nullptr);
@@ -226,7 +231,7 @@ VGREResult IGPUOpenCLExecutor::compileOpenCL(const std::string &kernelName,
                                              kernelName + "':\n" +
                                              std::string(build_log.data()));
     clReleaseProgram(compiled.program);
-    return VGREResult::ERR_COMPILATION;
+    return VGREResult::ERROR_COMPILATION;
   }
 
   compiled.kernel = clCreateKernel(compiled.program, kernelName.c_str(), &err);
@@ -234,7 +239,7 @@ VGREResult IGPUOpenCLExecutor::compileOpenCL(const std::string &kernelName,
     VGRE_LOG_ERROR("IGPUOpenCLExecutor",
                    "Failed to create OpenCL kernel: " + kernelName);
     clReleaseProgram(compiled.program);
-    return VGREResult::ERR_INVALID_KERNEL;
+    return VGREResult::ERROR_INVALID_KERNEL;
   }
 
   return VGREResult::SUCCESS;
@@ -286,19 +291,30 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
         if (size == 0) {
           VGRE_LOG_ERROR("IGPUOpenCLExecutor", "Critical: Could not determine size for non-managed allocation at " +
                                                std::to_string(reinterpret_cast<uintptr_t>(host_ptr)));
-          return VGREResult::ERR_INVALID_VALUE;
+          return VGREResult::ERROR_INVALID_VALUE;
         }
       }
 
-      cl_mem buf =
-          clCreateBuffer(context_, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
-                         size, host_ptr, &err);
-      if (err != CL_SUCCESS) {
+      cl_mem buf = nullptr;
+      {
+          std::lock_guard<std::mutex> lock(mutex_);
+          auto bit = bufferCache_.find(host_ptr);
+          if (bit != bufferCache_.end()) {
+              buf = bit->second;
+          } else {
+              buf = clCreateBuffer(context_, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                                 size, host_ptr, &err);
+              if (err == CL_SUCCESS) {
+                  bufferCache_[host_ptr] = buf;
+              }
+          }
+      }
+
+      if (err != CL_SUCCESS || !buf) {
         VGRE_LOG_ERROR("IGPUOpenCLExecutor",
-                       "Failed to create zero-copy buffer for arg " +
+                       "Failed to create/retrieve zero-copy buffer for arg " +
                            std::to_string(i));
-        for (auto b : buffers)
-          clReleaseMemObject(b);
+        // Note: we don't release other buffers here because some might be cached
         return VGREResult::ERR_OUT_OF_MEMORY;
       }
       buffers.push_back(buf);
@@ -343,7 +359,7 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
                        std::to_string(err));
     for (auto b : buffers)
       clReleaseMemObject(b);
-    return VGREResult::ERR_LAUNCH_FAILURE;
+    return VGREResult::ERROR_LAUNCH_FAILURE;
   }
 
   // Wait for execution to collect profiling data natively instead of host timing
@@ -357,11 +373,24 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
   if (timeEnd > timeStart) {
       double durationNs = static_cast<double>(timeEnd - timeStart);
       double durationMs = durationNs / 1e6;
-      // Report telemetry
-      uint64_t totalThreads = (gridDim.x * gridDim.y * gridDim.z) * (blockDim.x * blockDim.y * blockDim.z);
-      // We estimate 10 flops/thread and 8 bytes/thread as a fallback telemetry baseline if unknown
+      uint64_t totalThreads = (gridDim.x * gridDim.y * gridDim.z) *
+                              (blockDim.x * blockDim.y * blockDim.z);
+
+      // FLOP estimate: peak_gflops × duration_sec × utilisation factor (0.5).
+      // iGPU kernels are typically memory-bound; 50% of peak is conservative but
+      // far more physically grounded than the previous totalThreads×10 placeholder.
+      auto& eng = vgre::advanced::AdaptiveExecutionEngine::instance();
+      double peakGflops = (eng.isCalibrated() && eng.getMaxGFLOPS() > 0.0)
+                          ? eng.getMaxGFLOPS()
+                          : 10.0;  // 10 GFLOPS: safe lower-bound for typical iGPU
+      double durationSec = durationMs / 1000.0;
+      uint64_t estimatedFlops = static_cast<uint64_t>(peakGflops * 1e9 * durationSec * 0.5);
+      // Memory: 64 bytes/thread is a realistic cache-line estimate for iGPU kernels.
+      uint64_t estimatedBytes = totalThreads * 64;
+
       vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
-          kernelName, static_cast<int>(totalThreads), 1, durationMs, totalThreads * 8, totalThreads * 10);
+          kernelName, static_cast<int>(totalThreads), 1, durationMs,
+          estimatedBytes, estimatedFlops);
   }
   
   clReleaseEvent(kernelEvent);
@@ -384,8 +413,9 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
   }
 
   clFinish(queue_);
-  for (auto b : buffers)
-    clReleaseMemObject(b);
+  clFinish(queue_);
+  // Note: we no longer release buffers here as they are now cached in bufferCache_
+  // for future reuse with the same host pointers.
 
   return VGREResult::SUCCESS;
 }

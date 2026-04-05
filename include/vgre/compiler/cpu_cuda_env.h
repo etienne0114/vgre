@@ -69,6 +69,7 @@ extern "C" {
   float vgre_tex1D_f32(uint64_t tex, float x);
   float vgre_tex2D_f32(uint64_t tex, float x, float y);
   float vgre_tex3D_f32(uint64_t tex, float x, float y, float z);
+  float vgre_tex1Dfetch_f32(uint64_t tex, int x);
   void vgre_surf2Dwrite_f32(uint64_t surf, float val, int x, int y);
   void vgre_surf2Dread_f32(uint64_t surf, float* val, int x, int y);
 }
@@ -99,6 +100,27 @@ inline void surf2Dread(T* val, uint64_t surf, int x, int y) {
   vgre_surf2Dread_f32(surf, &fval, x, y);
   *val = static_cast<T>(fval);
 }
+
+// ── BFloat16 Support ───────────────────────────────────────────────────────
+struct __nv_bfloat16 {
+    uint16_t __x;
+
+    __nv_bfloat16() = default;
+    __nv_bfloat16(float f) {
+        uint32_t i = *reinterpret_cast<uint32_t*>(&f);
+        uint32_t bias = 0x7FFF + ((i >> 16) & 1);
+        __x = static_cast<uint16_t>((i + bias) >> 16);
+    }
+    operator float() const {
+        uint32_t f = static_cast<uint32_t>(__x) << 16;
+        return *reinterpret_cast<float*>(&f);
+    }
+};
+
+inline __nv_bfloat16 __float2bfloat16(float f) { return __nv_bfloat16(f); }
+inline float __bfloat162float(__nv_bfloat16 h) { return static_cast<float>(h); }
+inline __nv_bfloat16 __hmul(__nv_bfloat16 a, __nv_bfloat16 b) { return __nv_bfloat16(float(a) * float(b)); }
+inline __nv_bfloat16 __hadd(__nv_bfloat16 a, __nv_bfloat16 b) { return __nv_bfloat16(float(a) + float(b)); }
 
 } // namespace vgre_cuda
 

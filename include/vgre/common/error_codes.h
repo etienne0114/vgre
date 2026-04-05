@@ -26,7 +26,27 @@ enum class VGREResult : int {
     ERR_AUTH_FAILED         = 15,
     ERR_CRYPTO              = 16,
     ERR_BUSY                = 17,
-    ERR_UNKNOWN             = 99
+    ERR_UNKNOWN             = 99,
+
+    // Backward-compatible aliases for older code paths still using ERROR_* names.
+    ERROR_NOT_INITIALIZED   = ERR_NOT_INITIALIZED,
+    ERROR_INVALID_DEVICE    = ERR_INVALID_DEVICE,
+    ERROR_OUT_OF_MEMORY     = ERR_OUT_OF_MEMORY,
+    ERROR_INVALID_VALUE     = ERR_INVALID_VALUE,
+    ERROR_INVALID_KERNEL    = ERR_INVALID_KERNEL,
+    ERROR_LAUNCH_FAILURE    = ERR_LAUNCH_FAILURE,
+    ERROR_COMPILATION       = ERR_COMPILATION,
+    ERROR_NOT_SUPPORTED     = ERR_NOT_SUPPORTED,
+    ERROR_STREAM            = ERR_STREAM,
+    ERROR_TIMEOUT           = ERR_TIMEOUT,
+    ERROR_ALREADY_EXISTS    = ERR_ALREADY_EXISTS,
+    ERROR_IO                = ERR_IO,
+    ERROR_COMPRESSION       = ERR_COMPRESSION,
+    ERROR_NETWORK           = ERR_NETWORK,
+    ERROR_AUTH_FAILED       = ERR_AUTH_FAILED,
+    ERROR_CRYPTO            = ERR_CRYPTO,
+    ERROR_BUSY              = ERR_BUSY,
+    ERROR_UNKNOWN           = ERR_UNKNOWN
 };
 
 // ── Human-readable error string ────────────────────────────────────────────

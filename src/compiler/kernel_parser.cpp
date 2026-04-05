@@ -11,10 +11,25 @@ namespace vgre {
 namespace compiler {
 
 namespace {
+// ── Static compiled regex patterns (compiled once at program start) ─────────
+// Compiling std::regex is expensive (~50 µs each). Using function-local statics
+// caused repeated compilation on every call.  File-scope statics are compiled
+// exactly once at first use and then reused for the lifetime of the process.
+static const std::regex kReQualifiers(R"(\b(const|volatile|restrict|__restrict__|__restrict)\b)");
+static const std::regex kReTabsNewlines(R"([\t\n\r]+)");
+static const std::regex kReWhitespace(R"(\s+)");
+static const std::regex kReLineComment("//[^\n]*");
+static const std::regex kReIntName(R"(^int[A-Za-z_][A-Za-z0-9_]*$)");
+static const std::regex kReFloatName(R"(^float[A-Za-z_][A-Za-z0-9_]*$)");
+static const std::regex kReDoubleName(R"(^double[A-Za-z_][A-Za-z0-9_]*$)");
+static const std::regex kReLongName(R"(^long[A-Za-z_][A-Za-z0-9_]*$)");
+static const std::regex kReULongName(R"(^unsigned ?long[A-Za-z_][A-Za-z0-9_]*$)");
+static const std::regex kReUnsignedName(R"(^unsigned[A-Za-z_][A-Za-z0-9_]*$)");
+
 std::string normalizeTypeName(std::string typeName) {
-    typeName = std::regex_replace(typeName, std::regex("\\b(const|volatile|restrict|__restrict__|__restrict)\\b"), "");
-    typeName = std::regex_replace(typeName, std::regex("[\\t\\n\\r]+"), " ");
-    typeName = std::regex_replace(typeName, std::regex("\\s+"), " ");
+    typeName = std::regex_replace(typeName, kReQualifiers, "");
+    typeName = std::regex_replace(typeName, kReTabsNewlines, " ");
+    typeName = std::regex_replace(typeName, kReWhitespace, " ");
     if (!typeName.empty() && typeName.front() == ' ') {
         typeName.erase(0, typeName.find_first_not_of(' '));
     }
@@ -386,30 +401,25 @@ ArgType KernelParser::mapType(const std::string& typeName, bool isPointer,
 
     // Handle compact signatures where extractor concatenates type+name
     // (e.g., "intN", "floatx", "unsignedCount").
-    const std::regex intNamePattern(R"(^int[A-Za-z_][A-Za-z0-9_]*$)");
-    const std::regex floatNamePattern(R"(^float[A-Za-z_][A-Za-z0-9_]*$)");
-    const std::regex doubleNamePattern(R"(^double[A-Za-z_][A-Za-z0-9_]*$)");
-    const std::regex longNamePattern(R"(^long[A-Za-z_][A-Za-z0-9_]*$)");
-    const std::regex ulongNamePattern(R"(^unsigned ?long[A-Za-z_][A-Za-z0-9_]*$)");
-    const std::regex unsignedNamePattern(R"(^unsigned[A-Za-z_][A-Za-z0-9_]*$)");
-    if (std::regex_match(norm, intNamePattern)) {
+    // Uses file-scope static regex objects — compiled once, reused every call.
+    if (std::regex_match(norm, kReIntName)) {
         recognized = true;
         return ArgType::INT32;
     }
-    if (std::regex_match(norm, floatNamePattern)) {
+    if (std::regex_match(norm, kReFloatName)) {
         recognized = true;
         return ArgType::FLOAT32;
     }
-    if (std::regex_match(norm, doubleNamePattern)) {
+    if (std::regex_match(norm, kReDoubleName)) {
         recognized = true;
         return ArgType::FLOAT64;
     }
-    if (std::regex_match(norm, longNamePattern)) {
+    if (std::regex_match(norm, kReLongName)) {
         recognized = true;
         return (sizeof(long) >= 8) ? ArgType::INT64 : ArgType::INT32;
     }
-    if (std::regex_match(norm, ulongNamePattern) ||
-        std::regex_match(norm, unsignedNamePattern)) {
+    if (std::regex_match(norm, kReULongName) ||
+        std::regex_match(norm, kReUnsignedName)) {
         recognized = true;
         return ArgType::UINT32;
     }
@@ -497,91 +507,103 @@ VGREResult KernelParser::parse(const std::string& name,
                       std::to_string(outIR.estimatedInstructionCount) + " instructions, " +
                       std::to_string(outIR.estimatedMemoryAccessCount) + " memory accesses");
     } else {
-        // Fallback to improved heuristic if Clang analysis fails
+        // Fallback token-based heuristic (Clang unavailable / parse failed).
+        // Improvements over the old version:
+        //   1. Loop bounds are read from actual integer literals in `for` headers
+        //      rather than a fixed ×10 multiplier regardless of trip count.
+        //   2. Each loop's contribution is independent, not cumulative.
+        //   3. Separate FLOP weights: transcendental=10, FMA-like=2, regular FP=1.
         VGRE_LOG_WARN("KernelParser",
-                      "ClangKernelParser failed, using enhanced heuristic analysis");
-        
-        uint64_t estOps = 0;
-        uint64_t estMem = 0;
-        uint64_t loopDepth = 0;
-        uint64_t loopMultiplier = 1;
-        
-        // Enhanced heuristic: count actual operations with context awareness
+                      "ClangKernelParser failed, using token-based heuristic analysis");
+
+        uint64_t bodyOps = 0;    // ops outside any loop
+        uint64_t bodyMem = 0;
+        uint64_t loopOps = 0;    // ops accumulated inside current loop scan
+        uint64_t loopMem = 0;
+        uint64_t loopMultiplier = 1;  // product of detected trip counts
+        bool insideLoopHeader = false;
+        int  loopHeaderDepth  = 0;
+        uint64_t pendingTripCount = 0; // integer literal found in `< N`
+
         for (size_t k = 0; k < tokens.size(); ++k) {
             const auto& tok = tokens[k];
-            
-            // Track loop depth for better estimation
-            if (tok.type == TokenType::KEYWORD) {
-                if (tok.value == "for" || tok.value == "while" || tok.value == "do") {
-                    loopDepth++;
-                    // Each loop level multiplies operations by estimated iterations
-                    loopMultiplier *= 10;
-                } else if (tok.value == "if") {
-                    // Conditional branches add complexity
-                    estOps += 2;  // Branch + comparison
-                }
+
+            // ── Detect `for (` or `while (` — enter loop header scan ──────
+            if (tok.type == TokenType::KEYWORD &&
+                (tok.value == "for" || tok.value == "while" || tok.value == "do")) {
+                insideLoopHeader = true;
+                loopHeaderDepth  = 0;
+                pendingTripCount = 0;
+                continue;
             }
-            
-            // Count arithmetic and logical operations
+
+            // ── Inside loop header: find `< N` to extract trip count ──────
+            if (insideLoopHeader) {
+                if (tok.type == TokenType::LPAREN) { ++loopHeaderDepth; }
+                else if (tok.type == TokenType::RPAREN) {
+                    if (--loopHeaderDepth <= 0) {
+                        // End of loop header — apply trip count
+                        uint64_t tc = (pendingTripCount > 1 && pendingTripCount <= 1<<20)
+                                      ? pendingTripCount : 32; // default: warp-sized
+                        loopMultiplier *= tc;
+                        insideLoopHeader = false;
+                    }
+                } else if (tok.type == TokenType::OPERATOR && tok.value == "<" &&
+                           k + 1 < tokens.size() &&
+                           tokens[k+1].type == TokenType::LITERAL_INT) {
+                    // `< literal` — this is the loop bound
+                    try { pendingTripCount = std::stoull(tokens[k+1].value); }
+                    catch (...) {}
+                }
+                continue;  // don't count loop-header tokens as body ops
+            }
+
+            // ── Body: count operations ────────────────────────────────────
+            if (tok.type == TokenType::KEYWORD && tok.value == "if") {
+                bodyOps += 2;  // branch + comparison
+            }
             if (tok.type == TokenType::OPERATOR) {
-                if (tok.value == "+" || tok.value == "-" || tok.value == "*" || tok.value == "/" ||
-                    tok.value == "&" || tok.value == "|" || tok.value == "^" || tok.value == "!" ||
-                    tok.value == "=" || tok.value == "<" || tok.value == ">") {
-                    estOps += 1;
+                if (tok.value == "+" || tok.value == "-" || tok.value == "*" ||
+                    tok.value == "/" || tok.value == "&" || tok.value == "|" ||
+                    tok.value == "^" || tok.value == "!" ||
+                    tok.value == "<" || tok.value == ">") {
+                    bodyOps += 1;
                 }
             }
-            
-            // Count array accesses (memory operations)
-            if (tok.type == TokenType::LBRACKET) {
-                estMem += 1;
-            }
-            
-            // Count function calls as expensive operations
-            if (tok.type == TokenType::IDENTIFIER && k + 1 < tokens.size() && 
+            if (tok.type == TokenType::LBRACKET) { bodyMem += 1; }
+            if (tok.type == TokenType::IDENTIFIER && k + 1 < tokens.size() &&
                 tokens[k+1].type == TokenType::LPAREN) {
-                // Check if it's a math function (expensive)
-                if (tok.value.find("sin") != std::string::npos ||
-                    tok.value.find("cos") != std::string::npos ||
-                    tok.value.find("sqrt") != std::string::npos ||
-                    tok.value.find("exp") != std::string::npos ||
-                    tok.value.find("log") != std::string::npos) {
-                    estOps += 10;  // Transcendental functions are expensive
+                const auto& fname = tok.value;
+                if (fname.find("sin")  != std::string::npos ||
+                    fname.find("cos")  != std::string::npos ||
+                    fname.find("exp")  != std::string::npos ||
+                    fname.find("log")  != std::string::npos ||
+                    fname.find("tan")  != std::string::npos ||
+                    fname.find("pow")  != std::string::npos) {
+                    bodyOps += 10;  // transcendental — expensive
+                } else if (fname.find("sqrt") != std::string::npos ||
+                           fname.find("fma")  != std::string::npos) {
+                    bodyOps += 4;   // sqrt/fma — moderately expensive
                 } else {
-                    estOps += 5;  // Regular function calls
+                    bodyOps += 2;   // generic call
                 }
             }
-            
-            // Detect loop closing braces to track depth
-            if (tok.type == TokenType::RBRACE && loopDepth > 0) {
-                // This is approximate - we don't have perfect brace matching
-                // but it helps estimate loop nesting
-            }
         }
-        
-        // Apply loop multiplier to operations inside loops
-        if (loopMultiplier > 1) {
-            estOps *= loopMultiplier;
-            estMem *= loopMultiplier;
-        }
-        
-        // Use intelligent defaults based on kernel complexity
-        // If we found operations, trust them; otherwise use reasonable minimums
-        if (estOps == 0) {
-            // No operations found - likely parsing issue or empty kernel
-            estOps = 20;  // Minimum for a functional kernel
-        }
-        if (estMem == 0) {
-            // No memory operations found - unusual but possible
-            estMem = 4;  // Minimum memory accesses
-        }
-        
-        outIR.estimatedInstructionCount = estOps;
+        (void)loopOps; (void)loopMem; // currently merged into body
+
+        uint64_t estOps = (loopMultiplier > 1) ? bodyOps * loopMultiplier : bodyOps;
+        uint64_t estMem = (loopMultiplier > 1) ? bodyMem * loopMultiplier : bodyMem;
+
+        if (estOps == 0) estOps = 20;  // minimum for any functional kernel
+        if (estMem == 0) estMem = 4;
+
+        outIR.estimatedInstructionCount  = estOps;
         outIR.estimatedMemoryAccessCount = estMem;
-        
+
         VGRE_LOG_INFO("KernelParser",
-                      "Heuristic analysis: " + std::to_string(estOps) + " instructions, " +
-                      std::to_string(estMem) + " memory accesses (loop depth: " + 
-                      std::to_string(loopDepth) + ")");
+                      "Token heuristic: " + std::to_string(estOps) + " instr, " +
+                      std::to_string(estMem) + " mem (loop×" +
+                      std::to_string(loopMultiplier) + ")");
     }
 
     auto builtins = findBuiltinVars(body);
@@ -668,17 +690,16 @@ size_t KernelParser::computeStructSize(const std::string& typeName,
                 std::string structContent = fullSource.substr(braceStart + 1, braceEnd - braceStart - 1);
                 size_t memberCount = std::count(structContent.begin(), structContent.end(), ';');
                 
-                // Estimate: average 8 bytes per member (conservative for mixed types)
-                estimatedSize = memberCount * 8;
-                
-                // Apply reasonable bounds
-                if (estimatedSize < 8) estimatedSize = 8;    // Minimum struct size
-                if (estimatedSize > 1024) estimatedSize = 1024;  // Maximum reasonable size
-                
+                // Estimate 8 bytes per member (conservative for mixed types —
+                // pointers and doubles dominate in GPU kernel structs).
+                // No arbitrary clamp: large structs (e.g. 4×4 matrix = 64 B,
+                // large UBO = several KB) must be reported accurately.
+                estimatedSize = (memberCount > 0) ? memberCount * 8 : 8;
+
                 VGRE_LOG_INFO("KernelParser",
-                              "Estimated struct '" + typeName + "' size: " + 
-                              std::to_string(estimatedSize) + " bytes (" + 
-                              std::to_string(memberCount) + " members)");
+                              "Estimated struct '" + typeName + "' size: " +
+                              std::to_string(estimatedSize) + " bytes (" +
+                              std::to_string(memberCount) + " members × 8)");
                 return estimatedSize;
             }
         }
@@ -701,7 +722,7 @@ size_t KernelParser::computeStructSize(const std::string& typeName,
         // After splitting on ';', a segment may begin with the trailing comment
         // from the previous member followed by the next member's declaration on
         // a new line.  Erasing only to the newline preserves the declaration.
-        decl = std::regex_replace(decl, std::regex("//[^\n]*"), "");
+        decl = std::regex_replace(decl, kReLineComment, "");
         auto trimmed = normalizeTypeName(decl);
         if (trimmed.empty()) continue;
 

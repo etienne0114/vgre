@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <cstddef>
 #include <list>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -221,9 +222,17 @@ private:
   void stopMigrationThread();
   void migrationLoop();
 
+  // O(log n) allocation range lookup — finds allocation containing ptr.
+  // Must be called with mutex_ held.
+  std::unordered_map<MemoryHandle, Allocation>::iterator
+  findAllocationForPtr(void* ptr, size_t& outOffset);
+
   size_t poolSize_;
   std::atomic<size_t> usedMemory_{0};
   std::unordered_map<MemoryHandle, Allocation> allocations_;
+  // Sorted by base address — enables O(log n) range lookup for H2D/D2H/D2D
+  // copies instead of the O(n) linear scan over allocations_.
+  std::map<uint8_t*, size_t> allocRange_;
   mutable std::recursive_mutex mutex_;
 
   // Signal-safe lookup structure (RCU-protected Interval Tree)

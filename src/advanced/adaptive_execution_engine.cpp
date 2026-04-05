@@ -19,6 +19,10 @@
 
 #if defined(__linux__)
 #include <dirent.h>
+#include <linux/perf_event.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 #if defined(__APPLE__)
@@ -29,6 +33,44 @@
 #if defined(_WIN32)
 #include <windows.h>
 #endif
+
+// ── PerfSampler implementation (Linux only) ────────────────────────────────
+#if defined(__linux__)
+PerfSampler::PerfSampler() {
+    struct perf_event_attr attr{};
+    attr.type           = PERF_TYPE_HARDWARE;
+    attr.size           = sizeof(attr);
+    attr.config         = PERF_COUNT_HW_INSTRUCTIONS;
+    attr.disabled       = 1;   // start disabled; caller calls start()
+    attr.exclude_kernel = 1;   // userspace instructions only
+    attr.exclude_hv     = 1;
+    // pid=0 → current thread, cpu=-1 → any CPU, group_fd=-1 → standalone
+    fd = static_cast<int>(syscall(SYS_perf_event_open, &attr,
+                                  /*pid=*/0, /*cpu=*/-1,
+                                  /*group_fd=*/-1, /*flags=*/0));
+    // fd == -1: perf_event unavailable (paranoid > 1, VM, no permission).
+    // All methods below are no-ops in that case.
+}
+
+PerfSampler::~PerfSampler() {
+    if (fd >= 0) { close(fd); fd = -1; }
+}
+
+void PerfSampler::start() {
+    if (fd < 0) return;
+    ioctl(fd, PERF_EVENT_IOC_RESET,  0);
+    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+}
+
+uint64_t PerfSampler::stop() {
+    if (fd < 0) return 0;
+    ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+    uint64_t count = 0;
+    if (::read(fd, &count, sizeof(count)) != static_cast<ssize_t>(sizeof(count)))
+        count = 0;
+    return count;
+}
+#endif // __linux__
 
 namespace vgre {
 namespace advanced {
@@ -66,15 +108,15 @@ AdaptiveExecutionEngine::AdaptiveExecutionEngine()
       lastFlops_(0),
       lastBytes_(0),
       lastSampleTime_(std::chrono::steady_clock::now()) {
-  if (maxCores_ <= 0)
-    maxCores_ = 4;
-  
-  // No hardcoded defaults—start at zero and wait for benchmark/discovery
-  maxGflops_ = 100.0; 
-  maxMemoryBandwidth_ = 12.0;
+  // Force ground-truth calibration on startup to provide authoritative performance data.
+  // We run this in a background thread to avoid blocking the main runtime initialization.
+  std::thread([this]() {
+      this->runBenchmark();
+  }).detach();
 
   VGRE_LOG_INFO("AdaptiveExecutionEngine",
-                "Initialized with " + std::to_string(maxCores_) + " max cores");
+                "Initialized with " + std::to_string(maxCores_) + " max cores. "
+                "Background Ground-Truth calibration started.");
 }
 
 AdaptiveExecutionEngine::~AdaptiveExecutionEngine() = default;
@@ -305,10 +347,19 @@ void AdaptiveExecutionEngine::updateHardwareMetrics(int cores, double clockGHz,
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   maxCores_ = std::max(1, cores);
   
-  // Only update if not already benchmarked (initial guess based on arch)
+  // Only use architectural estimate if benchmark hasn't run yet.
   if (maxGflops_ == 0.0) {
-      // 16 FLOPS/cycle for AVX2 FMA (8 lanes * 2 for FMA)
-      maxGflops_ = maxCores_ * clockGHz * 16.0; 
+      // Peak FLOPS/cycle per core with AVX2 FMA:
+      //   8 FP32 lanes × 2 FMA ports × 2 FLOPS/FMA = 32 FLOPS/cycle (Intel Haswell+)
+      // AVX-512: 16 lanes × 2 ports × 2 = 64 FLOPS/cycle (conservative; use 32 baseline)
+      // This is still an approximation — runBenchmark() will overwrite with measured value.
+#ifdef VGRE_HAS_AVX512F
+      maxGflops_ = maxCores_ * clockGHz * 64.0;
+#elif defined(VGRE_HAS_AVX2)
+      maxGflops_ = maxCores_ * clockGHz * 32.0;
+#else
+      maxGflops_ = maxCores_ * clockGHz * 8.0;  // SSE4: 4 lanes × 2 FLOPS/FMA
+#endif
   }
   if (maxMemoryBandwidth_ == 0.0) {
       maxMemoryBandwidth_ = memoryBandwidth;
@@ -328,9 +379,13 @@ void AdaptiveExecutionEngine::runBenchmark() {
     auto& ve = runtime::VectorEngine::instance();
     
     // Stage 1: Peak GFLOPS (Compute-Bound, Register-Saturated via VectorEngine)
-    // 1M elements, 1000 iterations
+    // 1M elements, 100 iterations
     VGRE_LOG_INFO("AdaptiveExecutionEngine", "Calibrating Peak GFLOPS via specialized SIMD benchmark...");
     double gflops = ve.benchmarkFMA(1024 * 1024, 100);
+    double bf16_gflops = ve.benchmarkBF16(1024 * 1024, 100);
+
+    VGRE_LOG_INFO("AdaptiveExecutionEngine", "  Peak FP32: " + std::to_string(gflops) + " GFLOPS");
+    VGRE_LOG_INFO("AdaptiveExecutionEngine", "  Peak BF16: " + std::to_string(bf16_gflops) + " GFLOPS");
 
     // Stage 2: Memory Bandwidth (Memory-Bound, Large Streaming)
     const size_t streamN = 16 * 1024 * 1024; // 64MB reads + 64MB writes
@@ -354,8 +409,51 @@ void AdaptiveExecutionEngine::runBenchmark() {
         maxMemoryBandwidth_ = bandwidthGBps;
     }
 
-    VGRE_LOG_INFO("AdaptiveExecutionEngine", 
-                  "Ground Truth Calibrated: Peak=" + std::to_string(gflops) + 
+#if defined(__linux__)
+    // Stage 3: Calibrate FLOPs-per-retired-instruction via perf_event.
+    // Run a single-threaded FMA loop with a known FLOP count (N × 2 FLOPs/FMA),
+    // measure retired instructions with PERF_COUNT_HW_INSTRUCTIONS, compute ratio.
+    // The result converts subsequent per-block instruction counts to FLOP estimates.
+    {
+        PerfSampler calib;
+        if (calib.valid()) {
+            constexpr int kCalibN = 2'000'000;
+            constexpr double kKnownFlops = kCalibN * 2.0; // FMA = multiply + add
+            volatile float x = 1.00001f, y = 1.99999f;
+            float acc = 0.5f;
+            calib.start();
+            // Unrolled to prevent the compiler from collapsing into a single SIMD op.
+            // The volatile reads prevent full dead-code elimination of the loop.
+            for (int i = 0; i < kCalibN; i += 4) {
+                acc = acc * x + y;
+                acc = acc * x + y;
+                acc = acc * x + y;
+                acc = acc * x + y;
+            }
+            uint64_t instrCount = calib.stop();
+            // Prevent the result from being optimized away.
+            if (acc == 0.0f) VGRE_LOG_DEBUG("AdaptiveExecutionEngine", "calibration sink");
+            if (instrCount > 1000) {
+                double ratio = kKnownFlops / static_cast<double>(instrCount);
+                flopPerInstruction_.store(ratio);
+                VGRE_LOG_INFO("AdaptiveExecutionEngine",
+                              "perf_event calibration: " + std::to_string(instrCount) +
+                              " instructions → " + std::to_string(ratio) +
+                              " FLOP/instruction");
+            } else {
+                VGRE_LOG_WARN("AdaptiveExecutionEngine",
+                              "perf_event calibration returned implausible instruction count (" +
+                              std::to_string(instrCount) + "); keeping default ratio 0.5");
+            }
+        } else {
+            VGRE_LOG_INFO("AdaptiveExecutionEngine",
+                          "perf_event unavailable (VM/paranoid); using default FLOP/instruction=0.5");
+        }
+    }
+#endif // __linux__
+
+    VGRE_LOG_INFO("AdaptiveExecutionEngine",
+                  "Ground Truth Calibrated: Peak=" + std::to_string(gflops) +
                   " GFLOPS | Measured Bandwidth=" + std::to_string(bandwidthGBps) + " GB/s");
     calibrated_.store(true);
 }

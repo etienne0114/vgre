@@ -564,6 +564,7 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
   int streamPriority = 0;
   size_t staticSharedMem = 0;
   uint64_t estimatedInstructionCount = 0;
+  uint64_t staticFlopCount = 0;
   bool usesSyncthreads = false;
   MemoryManager* rawMm = memoryManager_.get();
 
@@ -575,6 +576,7 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       argTypes = irIt->second.argTypes;
       staticSharedMem = irIt->second.sharedMemSize;
       estimatedInstructionCount = irIt->second.estimatedInstructionCount;
+      staticFlopCount = irIt->second.staticFlopCount;
       usesSyncthreads = irIt->second.usesSyncthreads;
     }
 
@@ -606,7 +608,8 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
                                            [exec, fn, gridDim, blockDim,
                                             safeArgs, argValues, sharedMem,
                                             argTypes, staticSharedMem, kName, gridOffset,
-                                            estimatedInstructionCount, rawMm, usesSyncthreads]() mutable {
+                                            estimatedInstructionCount, staticFlopCount,
+                                            rawMm, usesSyncthreads]() mutable {
     auto start = std::chrono::steady_clock::now();
     size_t totalSharedMem = sharedMem + staticSharedMem;
 
@@ -631,9 +634,18 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
     }
     bytesPerBlock = (totalBlocksCount > 0) ? (totalMemBytes / totalBlocksCount) : 0;
 
-    // 2. Authoritative FLOPs — use pre-captured instruction count
-    if (estimatedInstructionCount > 0) {
-      flopsPerBlock = blockDim.total() * estimatedInstructionCount;
+    // 2. Authoritative FLOPs — use LLVM IR static analysis when available.
+    // staticFlopCount is from analyzeStaticFlops() which weights actual FP
+    // instructions: fadd/fsub/fmul/fdiv = 1, fma = 2, sqrt/transcendental = 4.
+    // estimatedInstructionCount counts ALL instructions (loads, branches, casts)
+    // which is NOT a FLOP count — never use it raw as a FLOP proxy.
+    if (staticFlopCount > 0) {
+      // Real per-thread FLOP count from compiled LLVM IR × threads per block
+      flopsPerBlock = blockDim.total() * staticFlopCount;
+    } else if (estimatedInstructionCount > 0) {
+      // Fallback: conservatively assume ~30% of instructions are FP operations
+      flopsPerBlock = blockDim.total() *
+                      std::max(uint64_t(1), estimatedInstructionCount * 3 / 10);
     } else {
       flopsPerBlock = blockDim.total(); // absolute minimum baseline
     }

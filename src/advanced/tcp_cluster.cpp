@@ -8,6 +8,7 @@
 #include "vgre/common/input_validation.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
+#include "vgre/runtime/vector_engine.h"
 
 // System Headers
 #include <algorithm>
@@ -98,6 +99,20 @@ int vgre_poll(vgre_pollfd* fds, size_t count, int timeoutMs) {
   }
   return result;
 #endif
+}
+
+template <typename T>
+void sum_reduce(T* dst, const T* src, size_t count) {
+  for (size_t i = 0; i < count; ++i)
+    dst[i] += src[i];
+}
+
+void sum_reduce_bf16(uint16_t* dst, const uint16_t* src, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    float d = vgre::runtime::bf16_to_fp32(dst[i]);
+    float s = vgre::runtime::bf16_to_fp32(src[i]);
+    dst[i] = vgre::runtime::fp32_to_bf16(d + s);
+  }
 }
 
 static bool socket_would_block() {
