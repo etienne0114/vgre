@@ -1069,12 +1069,15 @@ void TCPClusterManager::clientLoop() {
     }
     if (!enabled_) return;
 
-    // ── Phase 1: Security handshake (once per new connection) ─────────────
-    if (security_enabled_) {
+    // ── Phase 1: Security auto-negotiate (once per new connection) ───────────
+    // performClientSecureHandshake() peeks for a SECURE_HANDSHAKE from the
+    // master (200ms window) and responds if one arrives, regardless of whether
+    // the worker's own security_enabled_ flag is set.  This lets the worker
+    // automatically adapt to master's security mode without prior configuration.
+    {
       VGREResult sr = performClientSecureHandshake();
       if (sr != VGREResult::SUCCESS) {
-        VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed");
-        // Close this connection and, for standby workers, wait for the next.
+        VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed — dropping connection");
         {
           std::lock_guard<std::mutex> lock(client_mutex_);
           if (client_fd_ != VGRE_INVALID_SOCKET) {
@@ -1170,17 +1173,18 @@ void TCPClusterManager::clientLoop() {
       }
 
       // 2. Receive incoming commands from Master via poll()
+      // NOTE: POLLHUP and POLLERR must NOT be set in pfd.events — they are
+      // output-only flags on all platforms (WSAPoll on Windows returns WSAEINVAL
+      // if they appear in events).  They are checked in revents only.
       vgre_pollfd pfd;
       pfd.fd = cur_fd;
-      pfd.events = POLLIN | POLLHUP | POLLERR;
+      pfd.events = POLLIN;
       pfd.revents = 0;
       int poll_res = vgre_poll(&pfd, 1, 1); // 1ms timeout for high responsiveness
 
       if (poll_res > 0) {
         if (pfd.revents & (POLLERR | POLLHUP)) {
-          // Peer closed or error — also try recv to drain any last bytes.
-          recv_packet(cur_fd, client_rx_buffer_, client_secure_channel_.get());
-          client_rx_buffer_.clear();
+          // Peer closed or error detected via revents.
           VGRE_LOG_INFO("TCPCluster", "Worker: Master closed connection (POLLHUP/POLLERR)");
           disconnected = true; break;
         }
@@ -1193,7 +1197,7 @@ void TCPClusterManager::clientLoop() {
             staging_ready_ = true;
             staging_cv_.notify_one();
           } else if (n < 0) {
-            VGRE_LOG_INFO("TCPCluster", "Worker: Master disconnected (recv error)");
+            VGRE_LOG_INFO("TCPCluster", "Worker: Master disconnected (recv returned error)");
             disconnected = true; break;
           }
         }
@@ -2411,41 +2415,88 @@ VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConne
 }
 
 VGREResult TCPClusterManager::performClientSecureHandshake() {
-  if (!security_enabled_ || auth_token_str_.empty()) {
+  // Auto-negotiate: do a short-timeout peek to detect whether the master is
+  // initiating a Phase 5 security handshake, regardless of whether the worker's
+  // own security_enabled_ flag is set.  This lets a worker that was started
+  // without --auth-token still complete the handshake when the master has
+  // security toggled on, and lets a worker skip it gracefully when the master
+  // is in plain mode.
+  //
+  // Peek window: 200 ms.  If the master sends SECURE_HANDSHAKE within that
+  // window, proceed with the full handshake.  If nothing arrives, or it arrives
+  // and is NOT SECURE_HANDSHAKE, push any received bytes back to client_rx_buffer_
+  // for normal processing and return SUCCESS (plain-text connection).
+
+  std::vector<uint8_t> peek;
+  {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    while (peek.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
+      if (std::chrono::steady_clock::now() > deadline) break;
+      int n = recv_packet(client_fd_, peek, nullptr);
+      if (n < 0) {
+        // Socket error during peek — surface it.
+        return VGREResult::ERR_IO;
+      }
+      if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+
+  // No data or partial data — master is in plain-text mode, proceed without security.
+  if (peek.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
+    // Save any partial bytes for normal processing.
+    if (!peek.empty()) {
+      std::lock_guard<std::mutex> lock(staging_mutex_);
+      active_staging_->insert(active_staging_->end(), peek.begin(), peek.end());
+      staging_ready_ = true;
+      staging_cv_.notify_one();
+    }
     return VGREResult::SUCCESS;
   }
-  
+
+  VSBPHeader* phdr = reinterpret_cast<VSBPHeader*>(peek.data());
+  if (phdr->magic != VSBP_MAGIC ||
+      phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
+    // First packet is NOT a handshake — plain-text connection, push bytes for normal use.
+    std::lock_guard<std::mutex> lock(staging_mutex_);
+    active_staging_->insert(active_staging_->end(), peek.begin(), peek.end());
+    staging_ready_ = true;
+    staging_cv_.notify_one();
+    return VGREResult::SUCCESS;
+  }
+
+  // Master wants Phase 5 security.  Check that we have an auth token.
+  if (auth_token_str_.empty()) {
+    VGRE_LOG_WARN("TCPCluster",
+        "Worker: Master requested Phase 5 security but VGRE_TCP_AUTH_TOKEN is not set "
+        "— connecting in plain-text (master may reject this connection)");
+    // Push the handshake bytes back so the staging processor sees them.
+    std::lock_guard<std::mutex> lock(staging_mutex_);
+    active_staging_->insert(active_staging_->end(), peek.begin(), peek.end());
+    staging_ready_ = true;
+    staging_cv_.notify_one();
+    return VGREResult::SUCCESS;
+  }
+
+  SecureHandshakePacket masterHs{};
+  std::memcpy(&masterHs, peek.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
+
+  // Save any bytes beyond the handshake packet.
+  {
+    const size_t consumed = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
+    if (peek.size() > consumed) {
+      std::lock_guard<std::mutex> lock(staging_mutex_);
+      active_staging_->insert(active_staging_->end(),
+                               peek.begin() + consumed, peek.end());
+      staging_ready_ = true;
+      staging_cv_.notify_one();
+    }
+  }
+
   is_authenticating_ = true;
   last_handshake_start_ms_ = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now().time_since_epoch()).count());
   VGRE_LOG_INFO("TCPCluster", "Worker: Security handshake started (VGRE Built-in VPN Connecting...)");
-
-  // 1. Wait for master's handshake packet using protocol-aware buffering
-  SecureHandshakePacket masterHs{};
-  std::vector<uint8_t> rx;
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (rx.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
-    if (std::chrono::steady_clock::now() > deadline) {
-      VGRE_LOG_ERROR("TCPCluster", "Client security handshake timed out");
-      is_authenticating_ = false;
-      return VGREResult::ERR_TIMEOUT;
-    }
-    int n = recv_packet(client_fd_, rx, nullptr);
-    if (n < 0) {
-        is_authenticating_ = false;
-        return VGREResult::ERR_IO;
-    }
-    if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-
-  VSBPHeader* header = reinterpret_cast<VSBPHeader*>(rx.data());
-  if (header->magic != VSBP_MAGIC || header->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
-      VGRE_LOG_ERROR("TCPCluster", "Client security handshake: invalid master packet");
-      is_authenticating_ = false;
-      return VGREResult::ERR_AUTH_FAILED;
-  }
-  std::memcpy(&masterHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
 
   // 2. Generate client nonce
   SecureHandshakePacket ack{};
