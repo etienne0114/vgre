@@ -602,11 +602,15 @@ void TCPClusterManager::serverLoop() {
     pfd_server.revents = 0;
     fds.push_back(pfd_server);
     
-    // Client sockets
+    // Client sockets — only poll clients whose handshake is complete.
+    // Authenticating clients are exclusively owned by a detached handshake
+    // thread that reads directly from the socket; including them here would
+    // create a data race (two threads consuming bytes from the same FD).
     {
         std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
         for (const auto &client : clients_) {
-            if (client && client->active && client->socket_fd != VGRE_INVALID_SOCKET) {
+            if (client && client->active && !client->is_authenticating
+                    && client->socket_fd != VGRE_INVALID_SOCKET) {
                 vgre_pollfd pfd_client;
                 pfd_client.fd = client->socket_fd;
                 pfd_client.events = POLLIN;
@@ -782,16 +786,23 @@ void TCPClusterManager::serverLoop() {
                     if (client && client->socket_fd == fds[i].fd) {
                         if (fds[i].revents & POLLIN) {
                             int n = recv_packet(client->socket_fd, client->rx_buffer, client->secureChannel.get());
-                            if (n < 0) {
-                                VGRE_LOG_INFO("TCPCluster", "Master: Worker disconnected.");
+                            // n < 0 → error/EOF from recv()
+                            // n == 0 with POLLHUP → peer closed gracefully but recvAll timed out
+                            bool hangup = (fds[i].revents & (POLLHUP | POLLERR)) != 0;
+                            if (n < 0 || (n == 0 && hangup)) {
+                                VGRE_LOG_INFO("TCPCluster", "Master: Worker " +
+                                    client->ip_address + " disconnected.");
                                 client->active = false;
                                 vgre_close_socket(client->socket_fd);
+                                client->socket_fd = VGRE_INVALID_SOCKET;
                                 syncToIPC();
                             }
                         } else {
-                            VGRE_LOG_WARN("TCPCluster", "Master: Client socket error or hup.");
+                            VGRE_LOG_WARN("TCPCluster", "Master: Client socket error or hup from " +
+                                client->ip_address);
                             client->active = false;
                             vgre_close_socket(client->socket_fd);
+                            client->socket_fd = VGRE_INVALID_SOCKET;
                             syncToIPC();
                         }
                         break;
@@ -903,6 +914,9 @@ void TCPClusterManager::serverLoop() {
                 HybridComputeManager::instance().updateRemoteNodeCapability(
                     client->ip_address, cpkt.cpu_cores, cpkt.cpu_memory,
                     cpkt.has_igpu, cpkt.igpu_name);
+                // Push real hardware info to IPC immediately so the dashboard
+                // shows actual CPU cores and RAM instead of the initial 0 values.
+                syncToIPC();
               } else if (type == PacketType::PARTITION_RESULT) {
                 if (hdr.payloadSize < sizeof(PartitionResultPacket)) { client->rx_buffer.clear(); break; }
                 PartitionResultPacket prpkt;
@@ -2075,12 +2089,16 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
     return info;
   }
 
+  // Always collect global traffic counters (both directions).
+  // bytes_sent   = master → worker (control packets, kernel launches)
+  // bytes_received = worker → master (telemetry, responses)
+  // is_encrypted is set to true ONLY when at least one live secure channel
+  // exists — not merely because security_enabled_ is set.
   SessionInfo total{};
-  total.is_encrypted = true;
-  total.packets_sent = global_packets_sent_.load();
+  total.packets_sent     = global_packets_sent_.load();
   total.packets_received = global_packets_received_.load();
-  total.bytes_sent = global_bytes_sent_.load();
-  total.bytes_received = global_bytes_received_.load();
+  total.bytes_sent       = global_bytes_sent_.load();
+  total.bytes_received   = global_bytes_received_.load();
 
   bool any_secure = false;
   bool any_pending = false;
@@ -2110,21 +2128,30 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
     }
   } else if (client_secure_channel_ && client_secure_channel_->isInitialized()) {
     any_secure = true;
-    total = client_secure_channel_->getSessionInfo();
-    total.packets_sent = global_packets_sent_.load();
-    total.bytes_sent = global_bytes_sent_.load();
+    SessionInfo s = client_secure_channel_->getSessionInfo();
+    std::strncpy(total.cipher_name,    s.cipher_name,    sizeof(total.cipher_name) - 1);
+    std::strncpy(total.key_fingerprint, s.key_fingerprint, sizeof(total.key_fingerprint) - 1);
+    total.session_seconds = s.session_seconds;
   } else if (is_authenticating_) {
     if (now_ms - last_handshake_start_ms_ < 15000) {
       any_pending = true;
     }
   }
 
+  // is_encrypted reflects whether the VPN overlay is active or handshaking:
+  //   true  + cipher contains "PENDING" → dashboard shows "CONNECTING..."
+  //   true  + real cipher                → dashboard shows "SECURED"
+  //   false                              → dashboard shows "DISABLED"
+  // We do NOT set is_encrypted=true when security_enabled_ but no peer is
+  // present — that was showing "SECURED" for a disconnected state (wrong).
+  total.is_encrypted = any_secure || any_pending;
+
   // Version identification for the dashboard
   char build_info[64];
   std::snprintf(build_info, sizeof(build_info), " [Build: %s %s]", __DATE__, __TIME__);
 
   if (any_secure) {
-    std::strncat(total.cipher_name, build_info, 
+    std::strncat(total.cipher_name, build_info,
                  sizeof(total.cipher_name) - std::strlen(total.cipher_name) - 1);
     return total;
   }

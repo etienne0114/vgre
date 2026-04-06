@@ -120,13 +120,13 @@ class ClusterTopologyPage extends StatelessWidget {
               children: [
                 _securityDetail(
                   "TRAFFIC",
-                  "${(info.bytesSent / 1024).toStringAsFixed(1)} KB SENT",
+                  "${((info.bytesSent + info.bytesReceived) / 1024).toStringAsFixed(1)} KB",
                   Icons.swap_vert,
                 ),
                 const SizedBox(width: 32),
                 _securityDetail(
                   "PACKETS",
-                  "${info.packetsSent} PKTS",
+                  "${info.packetsSent + info.packetsReceived} PKTS",
                   Icons.inventory_2_outlined,
                 ),
               ],
