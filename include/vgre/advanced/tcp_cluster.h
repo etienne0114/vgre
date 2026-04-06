@@ -388,6 +388,7 @@ private:
 
   // Threading
   std::thread cluster_thread_;
+  std::thread client_loop_thread_;   // standby worker: clientLoop when master dials in
   std::thread udp_thread_;
   std::thread proactive_thread_;
   std::thread data_processor_thread_;

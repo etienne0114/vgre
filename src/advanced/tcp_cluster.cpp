@@ -527,6 +527,9 @@ void TCPClusterManager::shutdown() {
   if (data_processor_thread_.joinable()) {
     data_processor_thread_.join();
   }
+  if (client_loop_thread_.joinable()) {
+    client_loop_thread_.join();
+  }
   if (cluster_thread_.joinable()) {
     cluster_thread_.join();
   }
@@ -698,7 +701,20 @@ void TCPClusterManager::serverLoop() {
                 }
                 VGRE_LOG_INFO("TCPCluster",
                     "Worker: Accepted inbound connection from Master at " +
-                    std::string(ipstr) + " — handing off to clientLoop");
+                    std::string(ipstr) + " — starting clientLoop");
+
+                // Start the data-processing and client threads now that we have
+                // a live connection to the master.  Guard with joinable() so a
+                // second accepted connection (duplicate, dropped above) never
+                // re-launches the threads.
+                if (!data_processor_thread_.joinable()) {
+                    data_processor_thread_ = std::thread(
+                        &TCPClusterManager::processClientStagingBuffer, this);
+                }
+                if (!client_loop_thread_.joinable()) {
+                    client_loop_thread_ = std::thread(
+                        &TCPClusterManager::clientLoop, this);
+                }
                 continue; // Skip master-only clients_/IPC/handshake code below
             }
 
@@ -1077,6 +1093,13 @@ void TCPClusterManager::clientLoop() {
   }
 
   while (enabled_) {
+    // Guard: if the master disconnected and client_fd_ was reset, idle until
+    // the standby serverLoop accepts a new connection and sets it again.
+    if (client_fd_ == VGRE_INVALID_SOCKET) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      continue;
+    }
+
     // 1. Send Telemetry to Master
     vgre_telemetry_t telemetry;
     {
@@ -2081,6 +2104,26 @@ VGREResult TCPClusterManager::enableSecurity(bool enabled) {
   VGRE_LOG_INFO("TCPCluster",
                 std::string("Security ") +
                     (enabled ? "enabled" : "disabled"));
+
+  // When security is toggled ON, drop any existing plaintext connections so
+  // the proactive loop reconnects them through the security handshake.
+  // Without this, existing connections stay plaintext indefinitely and the
+  // cipher always shows "WAITING FOR PEERS" even with connected workers.
+  if (enabled && is_master_) {
+    std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+    for (auto &c : clients_) {
+      if (c && c->active && !(c->secureChannel && c->secureChannel->isInitialized())) {
+        VGRE_LOG_INFO("TCPCluster",
+            "Security enabled — disconnecting plaintext node " +
+            c->ip_address + " to force re-handshake");
+        c->active = false;
+        vgre_close_socket(c->socket_fd);
+        c->socket_fd = VGRE_INVALID_SOCKET;
+      }
+    }
+    syncToIPC();
+  }
+
   return VGREResult::SUCCESS;
 }
 
@@ -2163,8 +2206,28 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
     std::strncpy(total.cipher_name, "PENDING (handshake in progress...)",
                  sizeof(total.cipher_name) - 1);
   } else {
-    std::strncpy(total.cipher_name, "WAITING FOR PEERS",
-                 sizeof(total.cipher_name) - 1);
+    // Check if there are any active plaintext connections before showing
+    // "WAITING FOR PEERS" — plaintext nodes exist but haven't done a
+    // security handshake (e.g., pre-existing connections when security
+    // was just toggled on).
+    int plaintext_count = 0;
+    if (is_master_) {
+      std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+      for (const auto &c : clients_) {
+        if (c && c->active && !c->is_authenticating &&
+            !(c->secureChannel && c->secureChannel->isInitialized())) {
+          plaintext_count++;
+        }
+      }
+    }
+    if (plaintext_count > 0) {
+      std::snprintf(total.cipher_name, sizeof(total.cipher_name),
+                    "CONNECTED (%d plaintext node%s — reconnecting to encrypt)",
+                    plaintext_count, plaintext_count == 1 ? "" : "s");
+    } else {
+      std::strncpy(total.cipher_name, "WAITING FOR PEERS",
+                   sizeof(total.cipher_name) - 1);
+    }
   }
   
   std::strncat(total.cipher_name, build_info, 
@@ -2862,10 +2925,12 @@ void TCPClusterManager::syncToIPC() {
   std::vector<vgre_cluster_node_t> ipcNodes;
   {
       std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+
       for (const auto& c : clients_) {
           // Skip dead nodes — do NOT include them in the IPC snapshot.
-          // Including available=0 nodes inflates cluster_node_count and
-          // causes the dashboard to show stale CONNECTED entries.
+          // Keeping dead entries in clients_ (with active=false) is intentional:
+          // launchRemoteKernel() uses index-based access, so removing entries
+          // would shift indices and corrupt outstanding worker_id values.
           if (!c || (!c->active && !c->is_authenticating)) continue;
 
           vgre_cluster_node_t node{};
@@ -2874,7 +2939,7 @@ void TCPClusterManager::syncToIPC() {
           node.cpu_cores = c->cpu_cores;
           node.memory_bytes = c->cpu_memory;
           node.latency_ms = c->last_telemetry.avg_kernel_latency_ms;
-          
+
           if (c->security_established) {
               node.available = 1; // Secure
           } else if (c->is_authenticating) {
@@ -2884,7 +2949,7 @@ void TCPClusterManager::syncToIPC() {
           } else {
               node.available = 0;
           }
-          
+
           std::strncpy(node.igpu_name, c->igpu_name, sizeof(node.igpu_name) - 1);
           ipcNodes.push_back(node);
       }

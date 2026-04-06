@@ -73,7 +73,10 @@ class ClusterTopologyPage extends StatelessWidget {
   }
 
   Widget _buildSecuritySummary(SecurityInfo? info) {
-    final bool isSecure = info?.isEncrypted ?? false;
+    // isSecure: true when security is active (either fully encrypted or
+    // enabled/standby with a configured cipher — not plaintext).
+    final bool isSecure =
+        (info?.isEncrypted ?? false) || (info?.isSecurityEnabled ?? false);
     final bool isPending =
         isSecure && (info?.cipherName.contains("PENDING") ?? false);
 
@@ -85,26 +88,39 @@ class ClusterTopologyPage extends StatelessWidget {
           Row(
             children: [
               Icon(
-                isSecure ? Icons.vpn_lock : Icons.gpp_bad,
-                color: isSecure
-                    ? (isPending ? Colors.orangeAccent : VgreTheme.neonGreen)
-                    : Colors.redAccent,
+                !isSecure
+                    ? Icons.gpp_bad
+                    : (info?.isEncrypted == true ? Icons.vpn_lock : Icons.vpn_key),
+                color: !isSecure
+                    ? Colors.redAccent
+                    : (info?.isEncrypted == true
+                        ? VgreTheme.neonGreen
+                        : Colors.orangeAccent),
                 size: 20,
               ),
               const SizedBox(width: 8),
               Text(
-                "VGRE BUILT-IN VPN: ${isSecure ? (isPending ? 'CONNECTING...' : 'SECURED') : 'DISABLED'}",
+                !isSecure
+                    ? 'VGRE BUILT-IN VPN: DISABLED'
+                    : (info?.isEncrypted == true
+                        ? 'VGRE BUILT-IN VPN: SECURED'
+                        : (isPending
+                            ? 'VGRE BUILT-IN VPN: CONNECTING...'
+                            : 'VGRE BUILT-IN VPN: STANDBY')),
                 style: TextStyle(
-                  color: isSecure
-                      ? (isPending ? Colors.orangeAccent : VgreTheme.neonGreen)
-                      : Colors.redAccent,
+                  color: !isSecure
+                      ? Colors.redAccent
+                      : (info?.isEncrypted == true
+                          ? VgreTheme.neonGreen
+                          : Colors.orangeAccent),
                   fontWeight: FontWeight.bold,
                   letterSpacing: 1.2,
                 ),
               ),
             ],
           ),
-          if (isSecure && info != null) ...[
+          if (info?.isEncrypted == true && info != null) ...[
+            // Fully encrypted session — show cipher details and traffic stats
             const SizedBox(height: 12),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -131,11 +147,22 @@ class ClusterTopologyPage extends StatelessWidget {
                 ),
               ],
             ),
+          ] else if (isSecure && info != null) ...[
+            // Security enabled but no fully-encrypted session yet (STANDBY)
+            const SizedBox(height: 8),
+            Text(
+              info.cipherName,
+              style: VgreTheme.bodyStyle.copyWith(
+                fontSize: 12,
+                color: Colors.orangeAccent,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
           ] else
             Padding(
               padding: const EdgeInsets.only(top: 12),
               child: Text(
-                "Phase 5 VPN unencrypted. Enable 'Secure cluster channel' in Dashboard Settings.",
+                "Phase 5 VPN disabled. Enable 'Secure cluster channel' in Dashboard Settings.",
                 style: VgreTheme.bodyStyle.copyWith(
                   fontSize: 12,
                   color: Colors.white38,
