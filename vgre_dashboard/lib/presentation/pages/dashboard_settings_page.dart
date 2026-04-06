@@ -148,17 +148,25 @@ class DashboardSettingsPage extends StatelessWidget {
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(4),
                             border: Border.all(
-                              color: telemetry.clusterSecurityActive
-                                  ? VgreTheme.neonGreen
-                                  : Colors.white10,
+                              color: !telemetry.clusterSecurityActive
+                                  ? Colors.white10
+                                  : (telemetry.securityInfo?.isEncrypted == true
+                                      ? VgreTheme.neonGreen
+                                      : Colors.orange),
                             ),
                           ),
                           child: Text(
-                            telemetry.clusterSecurityActive ? "ENCRYPTED" : "DISABLED",
+                            !telemetry.clusterSecurityActive
+                                ? "DISABLED"
+                                : (telemetry.securityInfo?.isEncrypted == true
+                                    ? "ENCRYPTED"
+                                    : "STANDBY"),
                             style: TextStyle(
-                              color: telemetry.clusterSecurityActive
-                                  ? VgreTheme.neonGreen
-                                  : VgreTheme.textMuted,
+                              color: !telemetry.clusterSecurityActive
+                                  ? VgreTheme.textMuted
+                                  : (telemetry.securityInfo?.isEncrypted == true
+                                      ? VgreTheme.neonGreen
+                                      : Colors.orange),
                               fontSize: 11,
                               fontWeight: FontWeight.bold,
                             ),

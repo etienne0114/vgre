@@ -817,8 +817,11 @@ void TCPClusterManager::serverLoop() {
         }
         
         // Process buffers — VSBP v0.1.2 framed parsing (mirrors processClientStagingBuffer)
+        // Skip clients still in the handshake thread (is_authenticating) to avoid
+        // a data race: the handshake thread may concurrently write leftover bytes
+        // to rx_buffer before setting is_authenticating=false.
         for (auto &client : clients_) {
-          if (!client || !client->active || client->rx_buffer.empty()) continue;
+          if (!client || !client->active || client->is_authenticating || client->rx_buffer.empty()) continue;
 
           while (client->active && !client->rx_buffer.empty()) {
             if (client->receive_state == ReceiveState::IDLE) {
@@ -2223,11 +2226,19 @@ VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConne
   }
   std::memcpy(&clientHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
 
-  // The packet type check is now handled by the receive logic in send_packet/recv_packet
-  // if (clientHs.header.type != (uint16_t)PacketType::SECURE_HANDSHAKE_ACK) {
-  //   VGRE_LOG_ERROR("TCPCluster", "Invalid Handshake ACK received");
-  //   return VGREResult::ERR_AUTH_FAILED;
-  // }
+  // Save any bytes read beyond the handshake ACK (e.g., pipelined CAPABILITY packet).
+  // The serverLoop is not polling this fd yet (is_authenticating == true), so writing
+  // to rx_buffer here is safe — no concurrent reader.
+  {
+    const size_t consumed = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
+    if (rx.size() > consumed) {
+      client.rx_buffer.insert(client.rx_buffer.end(),
+                              rx.begin() + consumed, rx.end());
+      VGRE_LOG_DEBUG("TCPCluster",
+          "Handshake: saved " + std::to_string(rx.size() - consumed) +
+          " extra bytes from rx to rx_buffer for serverLoop");
+    }
+  }
 
   // 4. Derive session key and create secure channel
   client.secureChannel = std::make_unique<SecureChannel>();
@@ -2243,7 +2254,6 @@ VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConne
   crypto::sha256(reinterpret_cast<const uint8_t*>(auth_token_str_.data()),
                  auth_token_str_.size(), expectedFingerprint);
 
-  client.security_established = true;
   client.security_established = true;
   VGRE_LOG_INFO("TCPCluster",
                 "Security handshake completed with " + client.ip_address);

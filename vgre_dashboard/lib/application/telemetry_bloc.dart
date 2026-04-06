@@ -471,12 +471,14 @@ void _vgreIsolateEntryPoint(Map<String, dynamic> args) {
   }
   int currentDeviceId = args['deviceId'];
 
-  bool securitySupported = Platform.environment.containsKey(
-    'VGRE_TCP_AUTH_TOKEN',
-  );
+  // The C++ HardwareTokenManager auto-generates and stores a token if none is
+  // provided via VGRE_TCP_AUTH_TOKEN, so security is always available.
+  // We still propagate the env-var token (if set) so the C++ picks it up
+  // when re-initialising, but the toggle is never disabled due to a missing token.
+  bool securitySupported = true;
 
-  // --- Auth Token Propagation ---
-  if (!securitySupported) {
+  // --- Auth Token Propagation (env-var → C++ process environment) ---
+  if (!Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN')) {
     try {
       final home =
           Platform.environment['HOME'] ??
@@ -487,7 +489,6 @@ void _vgreIsolateEntryPoint(Map<String, dynamic> args) {
         final token = tokenFile.readAsStringSync().trim();
         if (token.isNotEmpty) {
           bridge.setEnvironmentVariable('VGRE_TCP_AUTH_TOKEN', token);
-          securitySupported = true;
           mainSendPort.send({
             'type': 'log',
             'message': 'Loaded auth token from file: $home/.vgre/token',
@@ -710,7 +711,8 @@ Telemetry _doPollSync(
       backendVersion: versionString,
       clusterSecurityActive:
           (securityInfo?.isEncrypted ?? false) ||
-          (securityInfo?.isHandshakePending ?? false),
+          (securityInfo?.isHandshakePending ?? false) ||
+          (securityInfo?.isSecurityEnabled ?? false),
       clusterSecuritySupported: securitySupported,
       deviceCount: 1, // Will be updated by props if needed
       lastSelectedKernelStats: lastSelectedKernelStats,
