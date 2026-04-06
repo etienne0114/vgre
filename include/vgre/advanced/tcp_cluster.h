@@ -397,6 +397,16 @@ private:
   std::atomic<bool> stop_proactive_{false};
   std::vector<std::string> proactive_worker_addresses_;
 
+  // Proactive-connection handshake backoff (per remote IP).
+  // After consecutive handshake failures the proactive loop backs off
+  // exponentially (5 s → 20 s → 60 s → … up to 300 s) to avoid log spam
+  // and unnecessary network churn against workers that don't yet support
+  // Phase 5 security.  Cleared whenever enableSecurity() is called so the
+  // new security state takes effect with a fresh start.
+  mutable std::mutex proactive_backoff_mutex_;
+  std::map<std::string, int> proactive_fail_counts_;
+  std::map<std::string, std::chrono::steady_clock::time_point> proactive_backoff_until_;
+
   // Master State
   vgre_socket_t server_fd_ = (vgre_socket_t)-1;
   std::vector<std::shared_ptr<ClientConnection>> clients_;
