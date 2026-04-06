@@ -36,6 +36,11 @@ class SecurityInfo extends Equatable {
 
   bool get isHandshakePending => cipherName.contains("PENDING");
 
+  /// True when security_enabled_ is set on the C++ side (token provided,
+  /// enableSecurity() called). False only when cipher is "NONE (plaintext)".
+  bool get isSecurityEnabled =>
+      cipherName.isNotEmpty && cipherName != "NONE (plaintext)";
+
   @override
   List<Object?> get props => [
         cipherName,
