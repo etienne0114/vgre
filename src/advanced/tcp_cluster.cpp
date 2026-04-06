@@ -1044,138 +1044,217 @@ void TCPClusterManager::serverLoop() {
 }
 
 void TCPClusterManager::clientLoop() {
-  // Phase 5: Perform secure handshake if enabled
-  if (security_enabled_) {
-    VGREResult sr = performClientSecureHandshake();
-    if (sr != VGREResult::SUCCESS) {
-       VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed");
-       enabled_ = false;
-       return;
+  // Persistent reconnect loop.
+  //
+  // For standby workers (server_fd_ != INVALID_SOCKET) this loop runs for the
+  // lifetime of the process: after each master disconnect it resets client_fd_,
+  // clears per-connection state, and waits for serverLoop to accept the next
+  // inbound master connection.
+  //
+  // For workers that explicitly dialled out to a known master address
+  // (server_fd_ == INVALID_SOCKET) this is a one-shot: on disconnect enabled_
+  // is cleared and the function returns so udpDiscoveryLoop can reconnect.
+  while (enabled_) {
+    // ── Phase 0: Wait for a valid master connection ────────────────────────
+    // Standby workers start with client_fd_ = INVALID_SOCKET.  serverLoop
+    // sets it when a new master connects.  Non-standby workers already have
+    // a valid fd set in initialize().  100 ms granularity is fine because
+    // serverLoop accepts at most one connection every few seconds.
+    while (enabled_) {
+      {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+        if (client_fd_ != VGRE_INVALID_SOCKET) break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-  }
+    if (!enabled_) return;
 
-  // 1. Send Capability Handshake (AFTER security is established)
-  {
-    CapabilityPacket cpkt{};
-    
-    // Use HybridComputeManager to get local resources if possible, or detect directly
-    cpkt.cpu_cores = std::thread::hardware_concurrency();
-    
-#if defined(_WIN32)
-    MEMORYSTATUSEX memInfo;
-    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
-    if (GlobalMemoryStatusEx(&memInfo)) cpkt.cpu_memory = memInfo.ullTotalPhys;
-#else
-    std::ifstream meminfo("/proc/meminfo");
-    std::string line;
-    while (std::getline(meminfo, line) && cpkt.cpu_memory == 0) {
-      if (line.find("MemTotal") != std::string::npos) {
-        std::istringstream iss(line);
-        std::string label; size_t kb; iss >> label >> kb;
-        cpkt.cpu_memory = kb * 1024;
+    // ── Phase 1: Security handshake (once per new connection) ─────────────
+    if (security_enabled_) {
+      VGREResult sr = performClientSecureHandshake();
+      if (sr != VGREResult::SUCCESS) {
+        VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed");
+        // Close this connection and, for standby workers, wait for the next.
+        {
+          std::lock_guard<std::mutex> lock(client_mutex_);
+          if (client_fd_ != VGRE_INVALID_SOCKET) {
+            vgre_close_socket(client_fd_);
+            client_fd_ = VGRE_INVALID_SOCKET;
+          }
+        }
+        if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
+        continue; // standby: wait for next master
       }
     }
+
+    // ── Phase 2: Send Capability (once per new connection) ────────────────
+    {
+      CapabilityPacket cpkt{};
+      cpkt.cpu_cores = std::thread::hardware_concurrency();
+#if defined(_WIN32)
+      MEMORYSTATUSEX memInfo;
+      memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+      if (GlobalMemoryStatusEx(&memInfo)) cpkt.cpu_memory = memInfo.ullTotalPhys;
+#else
+      {
+        std::ifstream meminfo("/proc/meminfo");
+        std::string line;
+        while (std::getline(meminfo, line) && cpkt.cpu_memory == 0) {
+          if (line.find("MemTotal") != std::string::npos) {
+            std::istringstream iss(line);
+            std::string label; size_t kb; iss >> label >> kb;
+            cpkt.cpu_memory = kb * 1024;
+          }
+        }
+      }
 #endif
-    
-    // Authoritative hardware detection for handshake
-    auto &engine = core::RuntimeEngine::instance();
-    if (engine.isInitialized() && engine.getDeviceCount() > 0) {
+      auto &engine = core::RuntimeEngine::instance();
+      if (engine.isInitialized() && engine.getDeviceCount() > 0) {
         cpkt.has_igpu = true;
         DeviceProperties props;
         engine.getDeviceProperties(0, props);
         std::strncpy(cpkt.igpu_name, props.name, 63);
-    } else {
+      } else {
         cpkt.has_igpu = false;
         std::strncpy(cpkt.igpu_name, "None (CPU Hybrid)", 63);
+      }
+      send_packet(client_fd_, PacketType::CAPABILITY, &cpkt, sizeof(CapabilityPacket), client_secure_channel_.get());
     }
 
-    send_packet(client_fd_, PacketType::CAPABILITY, &cpkt, sizeof(CapabilityPacket), client_secure_channel_.get());
-  }
+    // ── Phase 3: Per-connection communication loop ─────────────────────────
+    bool disconnected = false;
+    while (enabled_) {
+      // Snapshot fd under lock — another thread may reset client_fd_ (e.g. shutdown)
+      vgre_socket_t cur_fd;
+      {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+        cur_fd = client_fd_;
+      }
+      if (cur_fd == VGRE_INVALID_SOCKET) { disconnected = true; break; }
 
-  while (enabled_) {
-    // Guard: if the master disconnected and client_fd_ was reset, idle until
-    // the standby serverLoop accepts a new connection and sets it again.
-    if (client_fd_ == VGRE_INVALID_SOCKET) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      continue;
-    }
+      // 1. Send Telemetry to Master
+      vgre_telemetry_t telemetry;
+      {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+        telemetry = client_telemetry_buffer_;
+      }
+      if (telemetry.timestamp > 0) {
+        send_packet(cur_fd, PacketType::TELEMETRY, &telemetry, sizeof(vgre_telemetry_t), client_secure_channel_.get());
+      }
 
-    // 1. Send Telemetry to Master
-    vgre_telemetry_t telemetry;
-    {
-      std::lock_guard<std::mutex> lock(client_mutex_);
-      telemetry = client_telemetry_buffer_;
-    }
-
-    if (telemetry.timestamp > 0) {
-      send_packet(client_fd_, PacketType::TELEMETRY, &telemetry, sizeof(vgre_telemetry_t), client_secure_channel_.get());
-    }
-
-    // Phase 12: TSS2 Priority Flush (Client side)
-    {
+      // Phase 12: TSS2 Priority Flush (Client side)
+      {
         std::lock_guard<std::mutex> lock(client_tx_mutex_);
         while (enabled_ && !client_high_priority_tx_.empty()) {
-            auto &pkt = client_high_priority_tx_.back();
-            bool success = false;
-            if (client_secure_channel_ && client_secure_channel_->isInitialized()) {
-                success = (client_secure_channel_->sendSecure(client_fd_, pkt.data.data(), pkt.data.size()) == VGREResult::SUCCESS);
-            } else {
-                success = send_all(client_fd_, pkt.data.data(), pkt.data.size(), &enabled_);
-            }
-            if (success) {
-                client_high_priority_tx_.pop_back();
-            } else {
-                // If send fails, back off to avoid busy-spin
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                break;
-            }
+          auto &pkt = client_high_priority_tx_.back();
+          bool success = false;
+          if (client_secure_channel_ && client_secure_channel_->isInitialized()) {
+            success = (client_secure_channel_->sendSecure(cur_fd, pkt.data.data(), pkt.data.size()) == VGREResult::SUCCESS);
+          } else {
+            success = send_all(cur_fd, pkt.data.data(), pkt.data.size(), &enabled_);
+          }
+          if (success) { client_high_priority_tx_.pop_back(); }
+          else { std::this_thread::sleep_for(std::chrono::milliseconds(10)); break; }
         }
         while (enabled_ && !client_low_priority_tx_.empty() && client_high_priority_tx_.empty()) {
-            auto &pkt = client_low_priority_tx_.front();
-            bool success = false;
-            if (client_secure_channel_ && client_secure_channel_->isInitialized()) {
-                success = (client_secure_channel_->sendSecure(client_fd_, pkt.data.data(), pkt.data.size()) == VGREResult::SUCCESS);
-            } else {
-                success = send_all(client_fd_, pkt.data.data(), pkt.data.size(), &enabled_);
-            }
-            if (success) {
-                client_low_priority_tx_.pop_front();
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                break;
-            }
+          auto &pkt = client_low_priority_tx_.front();
+          bool success = false;
+          if (client_secure_channel_ && client_secure_channel_->isInitialized()) {
+            success = (client_secure_channel_->sendSecure(cur_fd, pkt.data.data(), pkt.data.size()) == VGREResult::SUCCESS);
+          } else {
+            success = send_all(cur_fd, pkt.data.data(), pkt.data.size(), &enabled_);
+          }
+          if (success) { client_low_priority_tx_.pop_front(); }
+          else { std::this_thread::sleep_for(std::chrono::milliseconds(10)); break; }
         }
+      }
+
+      // 2. Receive incoming commands from Master via poll()
+      vgre_pollfd pfd;
+      pfd.fd = cur_fd;
+      pfd.events = POLLIN | POLLHUP | POLLERR;
+      pfd.revents = 0;
+      int poll_res = vgre_poll(&pfd, 1, 1); // 1ms timeout for high responsiveness
+
+      if (poll_res > 0) {
+        if (pfd.revents & (POLLERR | POLLHUP)) {
+          // Peer closed or error — also try recv to drain any last bytes.
+          recv_packet(cur_fd, client_rx_buffer_, client_secure_channel_.get());
+          client_rx_buffer_.clear();
+          VGRE_LOG_INFO("TCPCluster", "Worker: Master closed connection (POLLHUP/POLLERR)");
+          disconnected = true; break;
+        }
+        if (pfd.revents & POLLIN) {
+          int n = recv_packet(cur_fd, client_rx_buffer_, client_secure_channel_.get());
+          if (n > 0) {
+            std::lock_guard<std::mutex> lock(staging_mutex_);
+            active_staging_->insert(active_staging_->end(), client_rx_buffer_.begin(), client_rx_buffer_.end());
+            client_rx_buffer_.clear();
+            staging_ready_ = true;
+            staging_cv_.notify_one();
+          } else if (n < 0) {
+            VGRE_LOG_INFO("TCPCluster", "Worker: Master disconnected (recv error)");
+            disconnected = true; break;
+          }
+        }
+      } else if (poll_res < 0) {
+#if defined(_WIN32)
+        if (WSAGetLastError() != WSAEINTR) {
+#else
+        if (errno != EINTR) {
+#endif
+          VGRE_LOG_ERROR("TCPCluster", "Worker: poll() failed on client socket");
+          disconnected = true; break;
+        }
+      }
+    } // end per-connection loop
+
+    // ── Phase 4: Disconnect cleanup ────────────────────────────────────────
+    // Close and reset client_fd_ so serverLoop can accept the next master
+    // connection without seeing it as a "duplicate".
+    {
+      std::lock_guard<std::mutex> lock(client_mutex_);
+      if (client_fd_ != VGRE_INVALID_SOCKET) {
+        vgre_close_socket(client_fd_);
+        client_fd_ = VGRE_INVALID_SOCKET;
+      }
+    }
+    // Clear per-connection state so the next master gets a clean handshake.
+    {
+      std::lock_guard<std::mutex> lock(staging_mutex_);
+      active_staging_->clear();
+      processing_staging_->clear();
+      staging_ready_ = false;
+    }
+    {
+      std::lock_guard<std::mutex> lock(client_tx_mutex_);
+      client_high_priority_tx_.clear();
+      client_low_priority_tx_.clear();
+    }
+    pending_args_.clear();
+    client_rx_buffer_.clear();
+    client_secure_channel_.reset();
+    client_security_established_ = false;
+    receive_state_ = ReceiveState::IDLE;
+    pending_kernel_id_ = 0;
+    pending_kernel_name_.clear();
+    pending_kernel_source_len_ = 0;
+
+    if (!disconnected || !enabled_) {
+      // Shutdown requested — exit cleanly.
+      return;
     }
 
-    // 2. Buffer incoming commands from Master asynchronously via poll()
-    vgre_pollfd pfd;
-    pfd.fd = client_fd_;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
-    int poll_res = vgre_poll(&pfd, 1, 1); // 1ms timeout for high responsiveness
-    
-    if (poll_res > 0 && (pfd.revents & POLLIN)) {
-      int n = recv_packet(client_fd_, client_rx_buffer_, client_secure_channel_.get());
-      if (n > 0) {
-        std::lock_guard<std::mutex> lock(staging_mutex_);
-        active_staging_->insert(active_staging_->end(), client_rx_buffer_.begin(), client_rx_buffer_.end());
-        client_rx_buffer_.clear(); // Clear after moving to staging
-        staging_ready_ = true;
-        staging_cv_.notify_one();
-      } else if (n < 0) { // Disconnected or error
-        VGRE_LOG_ERROR("TCPCluster", "Client command channel disconnected");
-        break; // Exit clientLoop; udpDiscoveryLoop will handle reconnect.
-      }
-    } else if (poll_res < 0) {
-#if defined(_WIN32)
-      if (WSAGetLastError() != WSAEINTR) {
-#else
-      if (errno != EINTR) {
-#endif
-        VGRE_LOG_ERROR("TCPCluster", "Client poll() failed");
-        break; // Let udpDiscoveryLoop handle reconnect.
-      }
+    // Standby workers loop back and wait for the next master connection.
+    // Non-standby workers (dialled out) set enabled_=false so udpDiscoveryLoop
+    // can handle reconnection.
+    if (server_fd_ == VGRE_INVALID_SOCKET) {
+      VGRE_LOG_ERROR("TCPCluster", "Client command channel disconnected");
+      enabled_ = false;
+      return;
     }
+    VGRE_LOG_INFO("TCPCluster", "Worker: Standby — waiting for next master connection...");
+    // outer loop continues: Phase 0 will wait for new client_fd_
   }
 }
 
