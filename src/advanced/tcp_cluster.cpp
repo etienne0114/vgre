@@ -2105,6 +2105,14 @@ VGREResult TCPClusterManager::enableSecurity(bool enabled) {
                 std::string("Security ") +
                     (enabled ? "enabled" : "disabled"));
 
+  // Clear per-address handshake backoff so the proactive loop immediately
+  // attempts connections under the new security policy (plain or secure).
+  {
+    std::lock_guard<std::mutex> bk(proactive_backoff_mutex_);
+    proactive_fail_counts_.clear();
+    proactive_backoff_until_.clear();
+  }
+
   // When security is toggled ON, drop any existing plaintext connections so
   // the proactive loop reconnects them through the security handshake.
   // Without this, existing connections stay plaintext indefinitely and the
@@ -2815,6 +2823,16 @@ void TCPClusterManager::proactiveConnectionLoop() {
 
             if (alreadyConnected) continue;
 
+            // Skip addresses that are in the handshake-failure backoff window.
+            {
+                std::lock_guard<std::mutex> bk(proactive_backoff_mutex_);
+                auto it = proactive_backoff_until_.find(ip);
+                if (it != proactive_backoff_until_.end() &&
+                    std::chrono::steady_clock::now() < it->second) {
+                    continue;
+                }
+            }
+
             VGRE_LOG_DEBUG("TCPCluster", "Master: Attempting proactive connection to " + ip + ":" + std::to_string(port));
 
             vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -2885,16 +2903,47 @@ void TCPClusterManager::proactiveConnectionLoop() {
                     clientRef->is_authenticating = false;
 
                     if (sr != VGREResult::SUCCESS) {
-                        VGRE_LOG_ERROR("TCPCluster",
-                            "Master: Proactive handshake failed for " + clientRef->ip_address);
+                        // Exponential backoff: 5 s → 20 s → 60 s → 180 s → 300 s max.
+                        // Only log at ERROR level on the first failure; subsequent retries
+                        // are suppressed to WARN/DEBUG to avoid log spam.
+                        {
+                            std::lock_guard<std::mutex> bk(proactive_backoff_mutex_);
+                            int &count = proactive_fail_counts_[clientRef->ip_address];
+                            ++count;
+                            const int maxSec = 300;
+                            int backoffSec = std::min(5 * (1 << std::min(count - 1, 5)), maxSec);
+                            proactive_backoff_until_[clientRef->ip_address] =
+                                std::chrono::steady_clock::now() +
+                                std::chrono::seconds(backoffSec);
+                            if (count == 1) {
+                                VGRE_LOG_WARN("TCPCluster",
+                                    "Master: Proactive handshake failed for " +
+                                    clientRef->ip_address +
+                                    " — worker may not support Phase 5 security."
+                                    " Retrying in " + std::to_string(backoffSec) + "s.");
+                            } else {
+                                VGRE_LOG_DEBUG("TCPCluster",
+                                    "Master: Proactive handshake retry #" +
+                                    std::to_string(count) + " failed for " +
+                                    clientRef->ip_address + " — retrying in " +
+                                    std::to_string(backoffSec) + "s.");
+                            }
+                        }
                         clientRef->active = false;
                         vgre_close_socket(clientRef->socket_fd);
+                        clientRef->socket_fd = VGRE_INVALID_SOCKET;
                         {
                             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
                             clients_.erase(std::remove(clients_.begin(), clients_.end(), clientRef),
                                            clients_.end());
                         }
                     } else {
+                        // Handshake succeeded — reset backoff so future reconnects are immediate.
+                        {
+                            std::lock_guard<std::mutex> bk(proactive_backoff_mutex_);
+                            proactive_fail_counts_.erase(clientRef->ip_address);
+                            proactive_backoff_until_.erase(clientRef->ip_address);
+                        }
                         // Mark fully authenticated so dashboard shows SECURED status.
                         clientRef->security_established = true;
                         VGRE_LOG_INFO("TCPCluster",
