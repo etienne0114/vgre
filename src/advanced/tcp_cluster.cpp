@@ -428,6 +428,15 @@ VGREResult TCPClusterManager::initialize(bool is_master,
           }
       }
 
+      // Pre-start the persistent communication threads so they are ready
+      // regardless of whether the master connection comes via inbound
+      // (serverLoop) or outbound (udpDiscoveryLoop) path.  Both paths just
+      // set client_fd_; clientLoop() watches for it in Phase 0.
+      data_processor_thread_ = std::thread(
+          &TCPClusterManager::processClientStagingBuffer, this);
+      client_loop_thread_ = std::thread(
+          &TCPClusterManager::clientLoop, this);
+
       udp_thread_ = std::thread(&TCPClusterManager::udpDiscoveryLoop, this);
       worker_announcer_thread_ = std::thread(&TCPClusterManager::udpWorkerAnnouncerLoop, this);
     } else {
@@ -706,15 +715,9 @@ void TCPClusterManager::serverLoop() {
                 // Start the data-processing and client threads now that we have
                 // a live connection to the master.  Guard with joinable() so a
                 // second accepted connection (duplicate, dropped above) never
-                // re-launches the threads.
-                if (!data_processor_thread_.joinable()) {
-                    data_processor_thread_ = std::thread(
-                        &TCPClusterManager::processClientStagingBuffer, this);
-                }
-                if (!client_loop_thread_.joinable()) {
-                    client_loop_thread_ = std::thread(
-                        &TCPClusterManager::clientLoop, this);
-                }
+                // clientLoop and processClientStagingBuffer are already running
+                // (started in initialize()).  client_fd_ being set above is
+                // sufficient — clientLoop Phase 0 will wake up and proceed.
                 continue; // Skip master-only clients_/IPC/handshake code below
             }
 
@@ -1707,32 +1710,17 @@ void TCPClusterManager::udpDiscoveryLoop() {
     if (!enabled_) break;
  
     if (client_fd_ != VGRE_INVALID_SOCKET) {
-        // Run the client protocol (capability exchange, telemetry, commands).
-        // clientLoop() breaks (not enabled_=false) on disconnect so we can retry.
-        clientLoop();
- 
-        // ── Post-disconnect cleanup ──────────────────────────────────────────
-        // clientLoop exited — either a disconnect (break) or shutdown (enabled_=false).
-        if (client_fd_ != VGRE_INVALID_SOCKET) {
-            vgre_close_socket(client_fd_);
-            client_fd_ = VGRE_INVALID_SOCKET;
+        // clientLoop() (running in client_loop_thread_) owns the connection.
+        // Wait until it disconnects and resets client_fd_ to INVALID_SOCKET,
+        // then retry discovery.  Poll every 200ms to avoid busy-spin.
+        while (enabled_) {
+            {
+                std::lock_guard<std::mutex> lk(client_mutex_);
+                if (client_fd_ == VGRE_INVALID_SOCKET) break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
-        // Reset security for the next session.
-        client_secure_channel_.reset();
-        client_security_established_ = false;
-        is_authenticating_ = false;
-        // Drain/reset receive buffers.
-        client_rx_buffer_.clear();
-        {
-            std::lock_guard<std::mutex> lk(staging_mutex_);
-            client_rx_staging_A_.clear();
-            client_rx_staging_B_.clear();
-            active_staging_   = &client_rx_staging_A_;
-            processing_staging_ = &client_rx_staging_B_;
-            staging_ready_ = false;
-        }
-
-        if (!enabled_) break; // proper shutdown — do not retry
+        if (!enabled_) break;
 
         VGRE_LOG_INFO("TCPCluster",
             "Worker: Disconnected from master, retrying discovery in 3s...");
