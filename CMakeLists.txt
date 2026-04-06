@@ -34,13 +34,33 @@ endif()
 
 # ── Dependencies ────────────────────────────────────────────────────────────
 find_package(OpenMP REQUIRED COMPONENTS CXX)
-set(LIBOMP_PATH "")
 if(UNIX AND NOT APPLE)
-    find_library(LIBOMP_PATH NAMES omp PATHS /usr/lib/llvm-18/lib /usr/lib/x86_64-linux-gnu)
+    # find_library caches NOTFOUND on first miss and never retries; use NO_DEFAULT_PATH
+    # so cmake searches only our explicit candidate dirs, avoiding the system gomp.
+    # Also search via llvm-config to handle non-standard LLVM installs.
+    if(NOT LIBOMP_PATH)
+        execute_process(
+            COMMAND llvm-config-18 --libdir
+            OUTPUT_VARIABLE LLVM_LIBDIR OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(NOT LLVM_LIBDIR)
+            set(LLVM_LIBDIR "/usr/lib/llvm-18/lib")
+        endif()
+        find_library(LIBOMP_PATH
+            NAMES omp
+            HINTS "${LLVM_LIBDIR}"
+            PATHS /usr/lib/llvm-18/lib /usr/lib/x86_64-linux-gnu
+            NO_DEFAULT_PATH)
+        if(NOT LIBOMP_PATH)
+            # Last resort: allow system search
+            find_library(LIBOMP_PATH NAMES omp)
+        endif()
+    endif()
     if(LIBOMP_PATH)
-        set(LIBOMP_PATH "${LIBOMP_PATH}" CACHE FILEPATH "Path to LLVM OpenMP library")
         message(STATUS "Found LLVM OpenMP: ${LIBOMP_PATH}")
         link_libraries("-Wl,--no-as-needed" "${LIBOMP_PATH}" "-Wl,--as-needed")
+    else()
+        message(STATUS "LLVM libomp not found — using system OpenMP (libgomp)")
     endif()
 endif()
 find_package(Threads REQUIRED)
