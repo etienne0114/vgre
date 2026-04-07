@@ -721,43 +721,7 @@ void TCPClusterManager::serverLoop() {
                 continue; // Skip master-only clients_/IPC/handshake code below
             }
 
-            // Master: reject a second inbound connection from a worker that already
-            // has an active or authenticating connection (same IP).  This prevents
-            // the double-connection scenario where both the proactive (master→worker)
-            // and UDP-discovery (worker→master) paths establish connections simultaneously,
-            // which would create two ClientConnections with DIFFERENT session keys for
-            // the same worker.  Without this guard, the CAPABILITY encrypted with
-            // key_A could be matched against the rx-path of a client using key_B,
-            // causing immediate HMAC failure and disconnect.
-            //
-            // TOCTOU safety: the dup-check and push MUST be performed under a single
-            // lock acquisition.  Using two separate lock_guard scopes (check, release,
-            // re-acquire, push) introduces a window where proactiveConnectionLoop can
-            // push the same IP between the two acquisitions, defeating the guard.
-            // Since clients_mutex_ is recursive, holding it from check→push is safe.
             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
-            {
-                bool isDuplicate = false;
-                for (const auto &existing : clients_) {
-                    if (existing &&
-                        (existing->active || existing->is_authenticating) &&
-                        existing->ip_address == std::string(ipstr)) {
-                        isDuplicate = true;
-                        break;
-                    }
-                }
-                if (isDuplicate) {
-                    VGRE_LOG_WARN("TCPCluster",
-                        "Master: Dropping duplicate inbound connection from " +
-                        std::string(ipstr) +
-                        " — already have active/authenticating connection");
-                    vgre_close_socket(new_socket);
-                    continue;
-                }
-            }
-
-            // lock (clients_mutex_) already held above — do NOT re-acquire.
-            // The existing code below previously re-declared lock here; removed.
             auto conn = std::make_shared<ClientConnection>();
             conn->socket_fd = new_socket;
             conn->ip_address = std::string(ipstr);
@@ -2372,67 +2336,50 @@ VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConne
     return VGREResult::ERR_IO;
   }
 
-  // 3. Receive client nonce response — bounded read: EXACTLY sizeof(VSBPHeader) +
-  // sizeof(SecureHandshakePacket) bytes, no more.
-  //
-  // CRITICAL: Do NOT use recv_packet(nullptr) here. That function calls recv() with
-  // an 8192-byte buffer, which may consume bytes from the following encrypted
-  // CAPABILITY packet in the same TCP segment. Those bytes would be stored in
-  // rx_buffer as raw ciphertext, corrupting the SecureChannel framing: when
-  // recvSecure() later reads from the socket it gets the continuation of a
-  // SecurePacketHeader at the wrong byte offset, producing a garbage header whose
-  // HMAC can never match → "HMAC verification failed".
+  // 3. Receive client nonce response using protocol-aware buffering
   SecureHandshakePacket clientHs{};
-  {
-    const size_t needed = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
-    std::vector<uint8_t> rx(needed);
-    size_t got = 0;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (got < needed) {
-      int remaining_ms = static_cast<int>(
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              deadline - std::chrono::steady_clock::now()).count());
-      if (remaining_ms <= 0) {
-        VGRE_LOG_ERROR("TCPCluster", "Security handshake timed out while receiving response");
-        return VGREResult::ERR_TIMEOUT;
-      }
-      // Wait for data with poll() — avoid busy-spinning on a non-blocking socket.
-      vgre_pollfd pfd{};
-      pfd.fd = client.socket_fd;
-      pfd.events = POLLIN;
-      int pr = vgre_poll(&pfd, 1, std::min(remaining_ms, 100));
-      if (pr < 0) {
-        if (vgre_is_would_block(vgre_get_last_socket_error())) continue;
-        return VGREResult::ERR_IO;
-      }
-      if (pr == 0) continue; // timeout slice — re-check deadline
-      if (pfd.revents & (POLLERR | POLLHUP)) return VGREResult::ERR_IO;
-      int n = recv(client.socket_fd,
-                   reinterpret_cast<char *>(rx.data() + got),
-                   static_cast<int>(needed - got), 0);
-      if (n > 0) { got += static_cast<size_t>(n); continue; }
-      if (n == 0) { return VGREResult::ERR_IO; }  // graceful close
-      if (vgre_is_would_block(vgre_get_last_socket_error())) continue;
-      return VGREResult::ERR_IO;
+  std::vector<uint8_t> rx;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (rx.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
+    if (std::chrono::steady_clock::now() > deadline) {
+      VGRE_LOG_ERROR("TCPCluster", "Security handshake timed out while receiving response");
+      return VGREResult::ERR_TIMEOUT;
     }
-
-    VSBPHeader *header = reinterpret_cast<VSBPHeader *>(rx.data());
-    if (header->magic != VSBP_MAGIC) {
+    int n = recv_packet(client.socket_fd, rx, nullptr);
+    if (n < 0) return VGREResult::ERR_IO;
+    if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  
+  if (rx.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
+     return VGREResult::ERR_IO;
+  }
+  
+  VSBPHeader* header = reinterpret_cast<VSBPHeader*>(rx.data());
+  if (header->magic != VSBP_MAGIC) {
       VGRE_LOG_ERROR("TCPCluster", "Security handshake: invalid magic in response");
       return VGREResult::ERR_AUTH_FAILED;
-    }
-    if (header->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) {
-      VGRE_LOG_ERROR("TCPCluster",
-                     "Security handshake: received unexpected packet type " +
-                         std::to_string(header->type) +
-                         " (expected SECURE_HANDSHAKE_ACK: " +
-                         std::to_string(static_cast<uint16_t>(
-                             PacketType::SECURE_HANDSHAKE_ACK)) + ")");
+  }
+  
+  if (header->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) {
+      VGRE_LOG_ERROR("TCPCluster", "Security handshake: received unexpected packet type " + 
+                     std::to_string(header->type) + " (expected SECURE_HANDSHAKE_ACK: " + 
+                     std::to_string(static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) + ")");
       return VGREResult::ERR_AUTH_FAILED;
+  }
+  std::memcpy(&clientHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
+
+  // Save any bytes read beyond the handshake ACK (e.g., pipelined CAPABILITY packet).
+  // The serverLoop is not polling this fd yet (is_authenticating == true), so writing
+  // to rx_buffer here is safe — no concurrent reader.
+  {
+    const size_t consumed = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
+    if (rx.size() > consumed) {
+      client.rx_buffer.insert(client.rx_buffer.end(),
+                              rx.begin() + consumed, rx.end());
+      VGRE_LOG_DEBUG("TCPCluster",
+          "Handshake: saved " + std::to_string(rx.size() - consumed) +
+          " extra bytes from rx to rx_buffer for serverLoop");
     }
-    std::memcpy(&clientHs, rx.data() + sizeof(VSBPHeader),
-                sizeof(SecureHandshakePacket));
-    // Bounded read — no leftover bytes possible; nothing to save.
   }
 
   // 4. Derive session key and create secure channel
@@ -2468,43 +2415,17 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
   // and is NOT SECURE_HANDSHAKE, push any received bytes back to client_rx_buffer_
   // for normal processing and return SUCCESS (plain-text connection).
 
-  // Peek for the handshake packet using a bounded read — EXACTLY sizeof(VSBPHeader)
-  // + sizeof(SecureHandshakePacket) bytes per attempt.  Using recv_packet(nullptr)
-  // would read up to 8192 bytes per call, potentially consuming bytes from the
-  // first encrypted data packet and corrupting the SecureChannel framing.
-  const size_t kHsPktLen = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
   std::vector<uint8_t> peek;
-  peek.reserve(kHsPktLen);
   {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
-    while (peek.size() < kHsPktLen) {
-      int remaining_ms = static_cast<int>(
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              deadline - std::chrono::steady_clock::now()).count());
-      if (remaining_ms <= 0) break; // deadline expired — fall through to plaintext path
-      // Use poll() to wait for data: avoids busy-spinning on a non-blocking socket.
-      vgre_pollfd pfd{};
-      pfd.fd = client_fd_;
-      pfd.events = POLLIN;
-      int pr = vgre_poll(&pfd, 1, std::min(remaining_ms, 50));
-      if (pr < 0) {
-        if (vgre_is_would_block(vgre_get_last_socket_error())) continue;
+    while (peek.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
+      if (std::chrono::steady_clock::now() > deadline) break;
+      int n = recv_packet(client_fd_, peek, nullptr);
+      if (n < 0) {
+        // Socket error during peek — surface it.
         return VGREResult::ERR_IO;
       }
-      if (pr == 0) continue; // no data yet — re-check deadline
-      if (pfd.revents & (POLLERR | POLLHUP)) return VGREResult::ERR_IO;
-      size_t want = kHsPktLen - peek.size();
-      char tmp[256];
-      int n = recv(client_fd_, tmp,
-                   static_cast<int>(std::min(want, sizeof(tmp))), 0);
-      if (n > 0) {
-        peek.insert(peek.end(), tmp, tmp + n);
-      } else if (n == 0) {
-        return VGREResult::ERR_IO;  // graceful close
-      } else {
-        if (vgre_is_would_block(vgre_get_last_socket_error())) continue;
-        return VGREResult::ERR_IO;
-      }
+      if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   }
 
@@ -2546,7 +2467,18 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
 
   SecureHandshakePacket masterHs{};
   std::memcpy(&masterHs, peek.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
-  // Bounded read above — peek cannot exceed kHsPktLen, so no leftover bytes.
+
+  // Save any bytes beyond the handshake packet.
+  {
+    const size_t consumed = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
+    if (peek.size() > consumed) {
+      std::lock_guard<std::mutex> lock(staging_mutex_);
+      active_staging_->insert(active_staging_->end(),
+                               peek.begin() + consumed, peek.end());
+      staging_ready_ = true;
+      staging_cv_.notify_one();
+    }
+  }
 
   is_authenticating_ = true;
   last_handshake_start_ms_ = static_cast<uint64_t>(
@@ -3066,30 +2998,7 @@ void TCPClusterManager::proactiveConnectionLoop() {
 
             // Enable TCP keepalive via cross-platform helper.
             vgre::common::vgre_set_tcp_keepalive(sock, 5, 2, 3);
-
             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
-
-            // TOCTOU re-check: between the alreadyConnected check above and this
-            // lock acquisition, serverLoop may have accepted an inbound connection
-            // from the same worker (e.g. via UDP discovery).  Re-verify under the
-            // same lock used for push so the check and push are atomic.
-            {
-                bool raceConnected = false;
-                for (const auto& c : clients_) {
-                    if (c && (c->active || c->is_authenticating) && c->ip_address == ip) {
-                        raceConnected = true;
-                        break;
-                    }
-                }
-                if (raceConnected) {
-                    VGRE_LOG_INFO("TCPCluster",
-                        "Master: Proactive connection to " + ip +
-                        " superseded by inbound connection — closing proactive socket");
-                    vgre_close_socket(sock);
-                    continue;
-                }
-            }
-
             auto conn = std::make_shared<ClientConnection>();
             conn->socket_fd = sock;
             conn->ip_address = ip;
