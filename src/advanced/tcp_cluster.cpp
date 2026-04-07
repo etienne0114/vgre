@@ -2361,16 +2361,41 @@ VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConne
   }
   
   if (header->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) {
-      VGRE_LOG_ERROR("TCPCluster", "Security handshake: received unexpected packet type " + 
-                     std::to_string(header->type) + " (expected SECURE_HANDSHAKE_ACK: " + 
-                     std::to_string(static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) + ")");
-      return VGREResult::ERR_AUTH_FAILED;
+    // Worker sent a valid VSBP packet but NOT a SECURE_HANDSHAKE_ACK.  This
+    // happens when the remote node runs an older binary that doesn't implement
+    // Phase 5 security: it ignores our SECURE_HANDSHAKE and immediately sends
+    // its own first packet (typically CAPABILITY).  Rather than disconnecting,
+    // fall back to a plaintext connection so the worker still appears in the
+    // cluster and its hardware data (CPU cores, RAM) is visible in the dashboard.
+    //
+    // All bytes already read — including the leading packet — are saved to
+    // rx_buffer so serverLoop processes them normally (CAPABILITY → cpu_cores).
+    // secureChannel is intentionally left null: recv_packet() uses raw mode.
+    if (header->magic == VSBP_MAGIC) {
+      VGRE_LOG_WARN("TCPCluster",
+          "Master: Worker " + client.ip_address +
+          " sent packet type " + std::to_string(header->type) +
+          " instead of SECURE_HANDSHAKE_ACK — old worker detected, "
+          "accepting as plaintext connection");
+      // rx_buffer is safe to write: serverLoop skips this client while
+      // is_authenticating == true, so there is no concurrent reader.
+      client.rx_buffer.insert(client.rx_buffer.end(), rx.begin(), rx.end());
+      // Leave secureChannel null → plaintext path in recv_packet/flush_tx_queues
+      return VGREResult::SUCCESS;
+    }
+    VGRE_LOG_ERROR("TCPCluster",
+        "Security handshake: invalid magic or unexpected packet type " +
+        std::to_string(header->type) +
+        " (expected SECURE_HANDSHAKE_ACK=" +
+        std::to_string(static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) + ")");
+    return VGREResult::ERR_AUTH_FAILED;
   }
+
   std::memcpy(&clientHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
 
-  // Save any bytes read beyond the handshake ACK (e.g., pipelined CAPABILITY packet).
-  // The serverLoop is not polling this fd yet (is_authenticating == true), so writing
-  // to rx_buffer here is safe — no concurrent reader.
+  // Save any bytes read beyond the handshake ACK (e.g., pipelined CAPABILITY).
+  // serverLoop does not poll this fd while is_authenticating == true, so
+  // writing to rx_buffer here is safe — no concurrent reader.
   {
     const size_t consumed = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
     if (rx.size() > consumed) {
@@ -2390,11 +2415,6 @@ VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConne
     VGRE_LOG_ERROR("TCPCluster", "Security handshake: key derivation failed");
     return r;
   }
-
-  // 5. Verify the client derived the same key
-  uint8_t expectedFingerprint[crypto::kSHA256DigestLen];
-  crypto::sha256(reinterpret_cast<const uint8_t*>(auth_token_str_.data()),
-                 auth_token_str_.size(), expectedFingerprint);
 
   client.security_established = true;
   VGRE_LOG_INFO("TCPCluster",
