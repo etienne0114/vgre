@@ -722,6 +722,37 @@ void TCPClusterManager::serverLoop() {
             }
 
             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+
+            // ── Duplicate-connection guard ─────────────────────────────────
+            // Prevent the double-connection race: proactiveConnectionLoop may
+            // already have an active/authenticating entry for this worker IP.
+            // Accepting a second TCP session from the same worker produces two
+            // independent handshakes with different nonces → two session keys
+            // → guaranteed HMAC mismatch on the first encrypted packet.
+            // Drop the inbound duplicate so exactly ONE session key exists
+            // per peer.  The lock is already held so the check-and-drop is
+            // atomic — no TOCTOU window between check and push.
+            {
+                const std::string inbound_ip(ipstr);
+                bool is_duplicate = false;
+                for (const auto& ec : clients_) {
+                    if (ec && (ec->active || ec->is_authenticating) &&
+                            ec->socket_fd != VGRE_INVALID_SOCKET &&
+                            ec->ip_address == inbound_ip) {
+                        is_duplicate = true;
+                        break;
+                    }
+                }
+                if (is_duplicate) {
+                    VGRE_LOG_WARN("TCPCluster",
+                        "Master: Dropping duplicate inbound connection from " +
+                        inbound_ip + " — active connection already exists "
+                        "(prevents double-handshake HMAC key mismatch)");
+                    vgre_close_socket(new_socket);
+                    goto server_loop_next_iter; // skip past rate-limit else block
+                }
+            }
+
             auto conn = std::make_shared<ClientConnection>();
             conn->socket_fd = new_socket;
             conn->ip_address = std::string(ipstr);
@@ -1042,6 +1073,7 @@ void TCPClusterManager::serverLoop() {
           }
         }
     }
+    server_loop_next_iter: ; // jumped to by the duplicate-connection guard above
   }
   VGRE_LOG_DEBUG("TCPCluster", "Master Server Loop exiting.");
 }
@@ -1424,9 +1456,25 @@ void TCPClusterManager::processClientStagingBuffer() {
                 client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(VSBPHeader));
                 VGRE_LOG_INFO("TCPCluster", "Cooperative Barrier: RESUME received. Resuming local workers.");
                 barrier_cv_.notify_all();
+            } else if (type == PacketType::SECURE_HANDSHAKE ||
+                       type == PacketType::SECURE_HANDSHAKE_ACK) {
+                // A security handshake packet arrived in the staging buffer.
+                // This is a stale packet from a duplicate inbound connection that
+                // the serverLoop's duplicate-guard rejected — its bytes may have
+                // been partially received before the socket was closed.
+                // Discard the packet; the real handshake already completed on the
+                // correct socket via performClientSecureHandshake().
+                VGRE_LOG_WARN("TCPCluster",
+                    "Worker: Discarding unexpected security handshake packet "
+                    "(type " + std::to_string(header.type) + ") in staging buffer "
+                    "— stale bytes from a rejected duplicate connection");
+                client_rx_buffer_.erase(client_rx_buffer_.begin(),
+                    client_rx_buffer_.begin() +
+                    std::min(sizeof(VSBPHeader) + (size_t)header.payloadSize,
+                             client_rx_buffer_.size()));
             } else {
                 VGRE_LOG_WARN("TCPCluster", "Unknown Packet Type: " + std::to_string(header.type));
-                client_rx_buffer_.clear(); 
+                client_rx_buffer_.clear();
                 break;
             }
         } else if (receive_state_ == ReceiveState::EXPECTING_KERNEL_SOURCE) {
@@ -3019,6 +3067,36 @@ void TCPClusterManager::proactiveConnectionLoop() {
             // Enable TCP keepalive via cross-platform helper.
             vgre::common::vgre_set_tcp_keepalive(sock, 5, 2, 3);
             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+
+            // ── TOCTOU re-check ─────────────────────────────────────────────
+            // Between the pre-connect check above and now (connect() takes
+            // 1-10ms), an inbound connection from this same worker may have
+            // been accepted by serverLoop.  Without this re-check we would
+            // push a SECOND ClientConnection for the same IP, triggering two
+            // concurrent handshakes with different nonces → HMAC mismatch.
+            // We check socket_fd != INVALID to skip dead-but-not-yet-cleaned-up
+            // entries (which have active=false anyway), preventing the false-
+            // positive that previously caused CPU/RAM=0 after reconnect.
+            {
+                bool raced = false;
+                for (const auto& ec : clients_) {
+                    if (ec && (ec->active || ec->is_authenticating) &&
+                            ec->socket_fd != VGRE_INVALID_SOCKET &&
+                            ec->ip_address == ip) {
+                        raced = true;
+                        break;
+                    }
+                }
+                if (raced) {
+                    VGRE_LOG_INFO("TCPCluster",
+                        "Master: Proactive connect to " + ip + " lost race to "
+                        "inbound connection — closing proactive socket, "
+                        "inbound will handle handshake");
+                    vgre_close_socket(sock);
+                    continue; // for (const auto& addr : addrSnapshot)
+                }
+            }
+
             auto conn = std::make_shared<ClientConnection>();
             conn->socket_fd = sock;
             conn->ip_address = ip;
