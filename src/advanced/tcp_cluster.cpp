@@ -2394,7 +2394,19 @@ VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConne
       return VGREResult::ERR_TIMEOUT;
     }
     int n = recv_packet(client.socket_fd, rx, nullptr);
-    if (n < 0) return VGREResult::ERR_IO;
+    if (n < 0) {
+      // recv_packet returns -1 for both graceful close (recv=0) and real errors.
+      // errno is 0 on graceful close; otherwise it holds the socket error.
+      int saved_errno = errno;
+      VGRE_LOG_ERROR("TCPCluster",
+          "Master: Security handshake recv failed for " + client.ip_address +
+          " (fd=" + std::to_string(client.socket_fd) + "): " +
+          (saved_errno != 0
+               ? std::string(std::strerror(saved_errno))
+               : "peer closed connection — likely a connection-race (transient) "
+                 "or VGRE_TCP_AUTH_TOKEN mismatch"));
+      return VGREResult::ERR_IO;
+    }
     if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   
@@ -2490,7 +2502,15 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
       if (std::chrono::steady_clock::now() > deadline) break;
       int n = recv_packet(client_fd_, peek, nullptr);
       if (n < 0) {
-        // Socket error during peek — surface it.
+        // recv_packet returns -1 for both graceful close (recv=0) and real errors.
+        int saved_errno = errno;
+        VGRE_LOG_ERROR("TCPCluster",
+            "Worker: Security handshake peek recv failed"
+            " (fd=" + std::to_string(client_fd_) + "): " +
+            (saved_errno != 0
+                 ? std::string(std::strerror(saved_errno))
+                 : "peer closed connection — likely a connection-race (transient); "
+                   "clientLoop will reconnect automatically"));
         return VGREResult::ERR_IO;
       }
       if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -3089,10 +3109,21 @@ void TCPClusterManager::proactiveConnectionLoop() {
                 }
                 if (raced) {
                     VGRE_LOG_INFO("TCPCluster",
-                        "Master: Proactive connect to " + ip + " lost race to "
-                        "inbound connection — closing proactive socket, "
-                        "inbound will handle handshake");
+                        "Master: Proactive connect to " + ip + " raced with "
+                        "inbound connection — closing proactive socket. "
+                        "Setting 4s backoff so inbound path completes cleanly "
+                        "before proactive retries.");
                     vgre_close_socket(sock);
+                    // Add a 4-second backoff so the proactive loop does not
+                    // immediately retry and race again.  The UDP-discovery
+                    // reconnect fires at ~3s; by the time the backoff expires
+                    // the inbound connection is established and the proactive
+                    // alreadyConnected check will skip this address cleanly.
+                    {
+                        std::lock_guard<std::mutex> bk(proactive_backoff_mutex_);
+                        proactive_backoff_until_[ip] =
+                            std::chrono::steady_clock::now() + std::chrono::seconds(4);
+                    }
                     continue; // for (const auto& addr : addrSnapshot)
                 }
             }
@@ -3135,8 +3166,11 @@ void TCPClusterManager::proactiveConnectionLoop() {
                                 VGRE_LOG_WARN("TCPCluster",
                                     "Master: Proactive handshake failed for " +
                                     clientRef->ip_address +
-                                    " — worker may not support Phase 5 security."
-                                    " Retrying in " + std::to_string(backoffSec) + "s.");
+                                    " — likely causes: (1) connection race with"
+                                    " UDP-discovery (transient, resolves on retry),"
+                                    " (2) VGRE_TCP_AUTH_TOKEN mismatch between"
+                                    " master and worker. Retrying in " +
+                                    std::to_string(backoffSec) + "s.");
                             } else {
                                 VGRE_LOG_DEBUG("TCPCluster",
                                     "Master: Proactive handshake retry #" +
