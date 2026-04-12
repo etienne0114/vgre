@@ -201,6 +201,18 @@ add_executable(test_input_validation unit/test_input_validation.cpp)
 target_link_libraries(test_input_validation PRIVATE vgre)
 add_test(NAME InputValidation COMMAND test_input_validation)
 
+add_executable(test_tcp_cluster_missing_methods advanced/test_tcp_cluster_missing_methods.cpp)
+target_link_libraries(test_tcp_cluster_missing_methods PRIVATE vgre)
+add_test(NAME TCPClusterMissingMethods COMMAND test_tcp_cluster_missing_methods)
+
+add_executable(test_tcp_cluster_preservation advanced/test_tcp_cluster_preservation.cpp)
+target_link_libraries(test_tcp_cluster_preservation PRIVATE vgre)
+add_test(NAME TCPClusterPreservation COMMAND test_tcp_cluster_preservation)
+
+add_executable(test_tcp_cluster_security_policy advanced/test_tcp_cluster_security_policy.cpp)
+target_link_libraries(test_tcp_cluster_security_policy PRIVATE vgre)
+add_test(NAME TCPClusterSecurityPolicy COMMAND test_tcp_cluster_security_policy)
+
 add_executable(test_texture_manager core/test_texture_manager.cpp)
 target_link_libraries(test_texture_manager PRIVATE vgre)
 add_test(NAME TextureManager COMMAND test_texture_manager)
