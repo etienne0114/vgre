@@ -12,6 +12,13 @@
 #include "vgre/runtime/vector_engine.h"
 #include "vgre/common/sockets.h"
 
+// SIMD intrinsics headers
+#if defined(__AVX2__)
+#include <immintrin.h>  // AVX2
+#elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+#include <emmintrin.h>  // SSE2
+#endif
+
 // System Headers
 #include <algorithm>
 #include <cstdlib>
@@ -24,6 +31,56 @@
 
 namespace vgre {
 namespace advanced {
+
+// Forward declaration — defined later in this file, used in workerClientLoop().
+static size_t getTypeSizeFromDatatype(int datatype);
+
+// ── Named Constants ───────────────────────────────────────────────────────
+// All magic numbers are replaced with named constants for clarity and
+// maintainability. Constants are grouped by category for easy reference.
+namespace Constants {
+  // ── Timeouts ────────────────────────────────────────────────────────────
+  constexpr int SEND_TIMEOUT_SECONDS = 5;
+  constexpr int HANDSHAKE_TIMEOUT_SECONDS = 5;
+  constexpr int PEEK_TIMEOUT_MS = 200;
+  constexpr int POLL_TIMEOUT_MS = 50;
+  constexpr int RECV_TIMEOUT_MS = 1000;
+  constexpr int BACKOFF_AFTER_DISCONNECT_SECONDS = 8;
+  constexpr int HANDSHAKE_STUCK_TIMEOUT_MS = 15000;
+  
+  // ── Flow Control ────────────────────────────────────────────────────────
+  // Maximum number of in-flight kernels per worker before backpressure.
+  // Tuning: Increase for high-throughput workloads, decrease for memory-constrained systems.
+  constexpr uint32_t MAX_IN_FLIGHT_KERNELS = 16;
+  
+  // ── Memory ──────────────────────────────────────────────────────────────
+  // SHM result offset base: 128MB offset for partition results.
+  // Rationale: Keeps result data separate from main data region to avoid conflicts.
+  constexpr uint64_t SHM_RESULT_OFFSET_BASE = 128 * 1024 * 1024;  // 128MB
+  constexpr uint64_t DEFAULT_SHM_SIZE = 256 * 1024 * 1024;        // 256MB
+  
+  // ── Backoff ─────────────────────────────────────────────────────────────
+  constexpr int INITIAL_BACKOFF_SECONDS = 5;
+  constexpr int MAX_BACKOFF_SECONDS = 300;
+  constexpr int BACKOFF_MULTIPLIER = 4;
+  constexpr int PROACTIVE_BACKOFF_SECONDS = 4;
+  
+  // ── Discovery ───────────────────────────────────────────────────────────
+  constexpr int UDP_ANNOUNCE_INTERVAL_SECONDS = 2;
+  constexpr int UDP_DISCOVERY_PORT = 7778;
+  constexpr int UDP_WORKER_PORT = 7779;
+  
+  // ── Retry ───────────────────────────────────────────────────────────────
+  constexpr int MAX_DELTA_SYNC_RETRIES = 3;
+  constexpr int INITIAL_RETRY_BACKOFF_MS = 100;
+  constexpr int MAX_RETRY_BACKOFF_MS = 5000;
+}
+
+// ── Packet Priority Enum ──────────────────────────────────────────────────
+enum class PacketPriority : uint32_t {
+  HIGH = 0,  // Control/Sync packets (RESPONSE, TELEMETRY, BARRIER, etc.)
+  LOW = 1    // Data/Bulk packets (DATA_BODY, ARG_SCALAR, etc.)
+};
 
 namespace {
 
@@ -40,10 +97,283 @@ using vgre::common::vgre_set_recv_timeout;
 using vgre::common::vgre_get_last_socket_error;
 using vgre::common::vgre_is_would_block;
 
+// ── RAII Resource Wrappers ───────────────────────────────────────────────
+
+/**
+ * SocketGuard - RAII wrapper for socket file descriptors
+ * Ensures sockets are properly closed on all exit paths
+ */
+class SocketGuard {
+public:
+  explicit SocketGuard(vgre_socket_t fd = VGRE_INVALID_SOCKET) : fd_(fd) {}
+  
+  ~SocketGuard() {
+    if (fd_ != VGRE_INVALID_SOCKET) {
+      vgre_close_socket(fd_);
+    }
+  }
+  
+  // Delete copy operations
+  SocketGuard(const SocketGuard&) = delete;
+  SocketGuard& operator=(const SocketGuard&) = delete;
+  
+  // Move operations
+  SocketGuard(SocketGuard&& other) noexcept : fd_(other.fd_) {
+    other.fd_ = VGRE_INVALID_SOCKET;
+  }
+  
+  SocketGuard& operator=(SocketGuard&& other) noexcept {
+    if (this != &other) {
+      if (fd_ != VGRE_INVALID_SOCKET) {
+        vgre_close_socket(fd_);
+      }
+      fd_ = other.fd_;
+      other.fd_ = VGRE_INVALID_SOCKET;
+    }
+    return *this;
+  }
+  
+  // Accessors
+  vgre_socket_t get() const { return fd_; }
+  
+  // Release ownership without closing
+  vgre_socket_t release() {
+    vgre_socket_t temp = fd_;
+    fd_ = VGRE_INVALID_SOCKET;
+    return temp;
+  }
+  
+private:
+  vgre_socket_t fd_;
+};
+
+/**
+ * JoinableThread - RAII wrapper for std::thread
+ * Ensures threads are properly joined on destruction
+ */
+class JoinableThread {
+public:
+  JoinableThread() = default;
+  
+  template<typename Callable, typename... Args>
+  explicit JoinableThread(Callable&& func, Args&&... args)
+    : thread_(std::forward<Callable>(func), std::forward<Args>(args)...) {}
+  
+  ~JoinableThread() {
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+  
+  // Delete copy operations
+  JoinableThread(const JoinableThread&) = delete;
+  JoinableThread& operator=(const JoinableThread&) = delete;
+  
+  // Move operations
+  JoinableThread(JoinableThread&& other) noexcept : thread_(std::move(other.thread_)) {}
+  
+  JoinableThread& operator=(JoinableThread&& other) noexcept {
+    if (this != &other) {
+      if (thread_.joinable()) {
+        thread_.join();
+      }
+      thread_ = std::move(other.thread_);
+    }
+    return *this;
+  }
+  
+  // Thread operations
+  bool joinable() const { return thread_.joinable(); }
+  void join() { if (thread_.joinable()) thread_.join(); }
+  
+private:
+  std::thread thread_;
+};
+
+/**
+ * ExponentialBackoff - Helper class for retry backoff strategy
+ * Implements exponential backoff with configurable initial delay, max delay, and multiplier
+ */
+class ExponentialBackoff {
+public:
+  ExponentialBackoff(int initial_ms, int max_ms, double multiplier = 2.0)
+    : initial_ms_(initial_ms), max_ms_(max_ms), multiplier_(multiplier), current_ms_(initial_ms) {}
+  
+  // Get current delay and advance to next
+  int next() {
+    int delay = current_ms_;
+    current_ms_ = std::min(static_cast<int>(current_ms_ * multiplier_), max_ms_);
+    return delay;
+  }
+  
+  // Reset to initial delay
+  void reset() {
+    current_ms_ = initial_ms_;
+  }
+  
+private:
+  int initial_ms_;
+  int max_ms_;
+  double multiplier_;
+  int current_ms_;
+};
+
 template <typename T>
 void sum_reduce(T* dst, const T* src, size_t count) {
-  for (size_t i = 0; i < count; ++i)
+  // SIMD-optimized sum reduction with AVX2/SSE2 support
+  
+#if defined(__AVX2__)
+  // AVX2 path: process 8 floats, 4 doubles, 8 int32_t, or 4 int64_t per iteration
+  if constexpr (std::is_same_v<T, float>) {
+    size_t i = 0;
+    const size_t simd_width = 8;
+    const size_t simd_end = (count / simd_width) * simd_width;
+    
+    for (; i < simd_end; i += simd_width) {
+      __m256 dst_vec = _mm256_loadu_ps(dst + i);
+      __m256 src_vec = _mm256_loadu_ps(src + i);
+      __m256 result = _mm256_add_ps(dst_vec, src_vec);
+      _mm256_storeu_ps(dst + i, result);
+    }
+    
+    // Handle remaining elements
+    for (; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  } else if constexpr (std::is_same_v<T, double>) {
+    size_t i = 0;
+    const size_t simd_width = 4;
+    const size_t simd_end = (count / simd_width) * simd_width;
+    
+    for (; i < simd_end; i += simd_width) {
+      __m256d dst_vec = _mm256_loadu_pd(dst + i);
+      __m256d src_vec = _mm256_loadu_pd(src + i);
+      __m256d result = _mm256_add_pd(dst_vec, src_vec);
+      _mm256_storeu_pd(dst + i, result);
+    }
+    
+    // Handle remaining elements
+    for (; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  } else if constexpr (std::is_same_v<T, int32_t>) {
+    size_t i = 0;
+    const size_t simd_width = 8;
+    const size_t simd_end = (count / simd_width) * simd_width;
+    
+    for (; i < simd_end; i += simd_width) {
+      __m256i dst_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i));
+      __m256i src_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+      __m256i result = _mm256_add_epi32(dst_vec, src_vec);
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), result);
+    }
+    
+    // Handle remaining elements
+    for (; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  } else if constexpr (std::is_same_v<T, int64_t>) {
+    size_t i = 0;
+    const size_t simd_width = 4;
+    const size_t simd_end = (count / simd_width) * simd_width;
+    
+    for (; i < simd_end; i += simd_width) {
+      __m256i dst_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i));
+      __m256i src_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+      __m256i result = _mm256_add_epi64(dst_vec, src_vec);
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), result);
+    }
+    
+    // Handle remaining elements
+    for (; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  } else {
+    // Fallback for other types
+    for (size_t i = 0; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  }
+  
+#elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+  // SSE2 path: process 4 floats, 2 doubles, 4 int32_t, or 2 int64_t per iteration
+  if constexpr (std::is_same_v<T, float>) {
+    size_t i = 0;
+    const size_t simd_width = 4;
+    const size_t simd_end = (count / simd_width) * simd_width;
+    
+    for (; i < simd_end; i += simd_width) {
+      __m128 dst_vec = _mm_loadu_ps(dst + i);
+      __m128 src_vec = _mm_loadu_ps(src + i);
+      __m128 result = _mm_add_ps(dst_vec, src_vec);
+      _mm_storeu_ps(dst + i, result);
+    }
+    
+    // Handle remaining elements
+    for (; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  } else if constexpr (std::is_same_v<T, double>) {
+    size_t i = 0;
+    const size_t simd_width = 2;
+    const size_t simd_end = (count / simd_width) * simd_width;
+    
+    for (; i < simd_end; i += simd_width) {
+      __m128d dst_vec = _mm_loadu_pd(dst + i);
+      __m128d src_vec = _mm_loadu_pd(src + i);
+      __m128d result = _mm_add_pd(dst_vec, src_vec);
+      _mm_storeu_pd(dst + i, result);
+    }
+    
+    // Handle remaining elements
+    for (; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  } else if constexpr (std::is_same_v<T, int32_t>) {
+    size_t i = 0;
+    const size_t simd_width = 4;
+    const size_t simd_end = (count / simd_width) * simd_width;
+    
+    for (; i < simd_end; i += simd_width) {
+      __m128i dst_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dst + i));
+      __m128i src_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+      __m128i result = _mm_add_epi32(dst_vec, src_vec);
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), result);
+    }
+    
+    // Handle remaining elements
+    for (; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  } else if constexpr (std::is_same_v<T, int64_t>) {
+    size_t i = 0;
+    const size_t simd_width = 2;
+    const size_t simd_end = (count / simd_width) * simd_width;
+    
+    for (; i < simd_end; i += simd_width) {
+      __m128i dst_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dst + i));
+      __m128i src_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+      __m128i result = _mm_add_epi64(dst_vec, src_vec);
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), result);
+    }
+    
+    // Handle remaining elements
+    for (; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  } else {
+    // Fallback for other types
+    for (size_t i = 0; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  }
+  
+#else
+  // Scalar fallback for systems without SIMD support
+  for (size_t i = 0; i < count; ++i) {
     dst[i] += src[i];
+  }
+#endif
 }
 
 static bool send_all(vgre_socket_t sock, const void *buf, size_t len, const std::atomic<bool>* enabled = nullptr) {
@@ -53,8 +383,8 @@ static bool send_all(vgre_socket_t sock, const void *buf, size_t len, const std:
   while (sent < len) {
     if (enabled && !enabled->load()) return false;
     
-    // Check for 5 second timeout on blocking sends
-    if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() > 5) {
+    // Check for timeout on blocking sends
+    if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() > Constants::SEND_TIMEOUT_SECONDS) {
         return false;
     }
 
@@ -72,45 +402,431 @@ static bool send_all(vgre_socket_t sock, const void *buf, size_t len, const std:
 }
 } // namespace
 
-bool TCPClusterManager::send_packet(vgre_socket_t fd, PacketType type, const void *payload, size_t payloadLen, vgre::advanced::SecureChannel *sc) {
-  (void)sc;
+// ── Unified Packet Construction ──────────────────────────────────────────
+std::vector<uint8_t> TCPClusterManager::constructPacket(PacketType type, const void* payload, size_t payloadLen) {
   static std::atomic<uint32_t> s_vgre_seq{1};
-
-  // CRITICAL: Validate packet size to prevent buffer overflow
-  if (common::InputValidator::validatePacketSize(payloadLen) != VGREResult::SUCCESS) {
-    VGRE_LOG_ERROR("TCPCluster", "Packet size validation failed: " + std::to_string(payloadLen));
-    return false;
-  }
-
-  // VSBP v0.1.2: Construct header and stage with payload
+  
   size_t totalLen = sizeof(VSBPHeader) + payloadLen;
+  std::vector<uint8_t> packet(totalLen);
   
-  // Additional check for total packet size
-  if (common::InputValidator::validatePacketSize(totalLen) != VGREResult::SUCCESS) {
-    VGRE_LOG_ERROR("TCPCluster", "Total packet size validation failed: " + std::to_string(totalLen));
-    return false;
-  }
-  
-  std::vector<uint8_t> staging(totalLen);
-  
-  VSBPHeader* header = reinterpret_cast<VSBPHeader*>(staging.data());
+  VSBPHeader* header = reinterpret_cast<VSBPHeader*>(packet.data());
   header->magic = VSBP_MAGIC;
   header->version = VSBP_VERSION;
   header->type = static_cast<uint16_t>(type);
   header->sequence = s_vgre_seq.fetch_add(1, std::memory_order_relaxed);
   header->payloadSize = payloadLen;
-
+  
   if (payload && payloadLen > 0) {
-    std::memcpy(staging.data() + sizeof(VSBPHeader), payload, payloadLen);
+    std::memcpy(packet.data() + sizeof(VSBPHeader), payload, payloadLen);
+  }
+  
+  return packet;
+}
+
+// ── Delta-Sync Logic Extraction ──────────────────────────────────────────
+VGREResult TCPClusterManager::syncPointerToWorker(void* ptr, uint64_t handle, std::shared_ptr<ClientConnection> client) {
+  if (!ptr || !client) {
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+  
+  auto& mm = core::RuntimeEngine::instance().getMemoryManager();
+  size_t size = mm.getAllocationSize(ptr);
+  if (size == 0) {
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+  
+  // Check if pointer was previously synced
+  bool useDelta = client->synced_handles.count(ptr) > 0;
+  
+  if (useDelta) {
+    // Get dirty ranges from MemoryManager
+    std::vector<std::pair<size_t, size_t>> dirtyRanges;
+    mm.getDirtyPages(ptr, dirtyRanges);
+    
+    if (!dirtyRanges.empty()) {
+      // Use delta-sync with retry and automatic fallback to full sync
+      VGREResult result = sendDeltaSyncWithRetry(ptr, handle, dirtyRanges, client);
+      if (result == VGREResult::SUCCESS) {
+        mm.clearDirtyPages(ptr);
+        return VGREResult::SUCCESS;
+      }
+      // sendDeltaSyncWithRetry already handles fallback to full sync
+      return result;
+    }
+  }
+  
+  // Full sync (first time or no dirty ranges)
+  client->synced_handles.insert(ptr);
+  VGREResult result = sendFullSync(ptr, handle, size, client);
+  if (result == VGREResult::SUCCESS) {
+    mm.clearDirtyPages(ptr);
+  }
+  return result;
+}
+
+VGREResult TCPClusterManager::sendDeltaSync(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client) {
+  if (client->is_local && client->shmManager) {
+    return sendDeltaSyncSHM(ptr, handle, dirtyRanges, client);
+  } else {
+    return sendDeltaSyncTCP(ptr, handle, dirtyRanges, client);
+  }
+}
+
+VGREResult TCPClusterManager::sendDeltaSyncWithRetry(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client) {
+  ExponentialBackoff backoff(Constants::INITIAL_RETRY_BACKOFF_MS, Constants::MAX_RETRY_BACKOFF_MS);
+  
+  for (int attempt = 0; attempt < Constants::MAX_DELTA_SYNC_RETRIES; ++attempt) {
+    VGREResult result = sendDeltaSync(ptr, handle, dirtyRanges, client);
+    
+    if (result == VGREResult::SUCCESS) {
+      return VGREResult::SUCCESS;
+    }
+    
+    // If connection lost, don't retry
+    if (result == VGREResult::ERR_IO) {
+      VGRE_LOG_ERROR("TCPCluster", "Delta-sync failed due to I/O error (connection lost), not retrying");
+      return result;
+    }
+    
+    // For transient failures, sleep with exponential backoff and retry
+    if (attempt < Constants::MAX_DELTA_SYNC_RETRIES - 1) {
+      int delay_ms = backoff.next();
+      VGRE_LOG_DEBUG("TCPCluster", "Delta-sync attempt " + std::to_string(attempt + 1) + 
+                     " failed, retrying after " + std::to_string(delay_ms) + "ms");
+      std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    }
+  }
+  
+  // All retries exhausted, fall back to full sync
+  VGRE_LOG_WARN("TCPCluster", "Delta-sync failed after " + std::to_string(Constants::MAX_DELTA_SYNC_RETRIES) + 
+                " attempts, falling back to full sync");
+  size_t size = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
+  return sendFullSync(ptr, handle, size, client);
+}
+
+VGREResult TCPClusterManager::sendDeltaSyncSHM(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client) {
+  // Calculate total size of dirty ranges
+  uint64_t totalSize = 0;
+  for (const auto& range : dirtyRanges) {
+    totalSize += range.second;
+  }
+  
+  // Check SHM space availability
+  uint64_t baseOffset = client->shm_offset;
+  if (baseOffset + totalSize > client->shmManager->getSize()) {
+    // Not enough SHM space, fall back to full sync
+    size_t size = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
+    return sendFullSync(ptr, handle, size, client);
+  }
+  
+  // Update SHM offset
+  client->shm_offset += totalSize;
+  
+  // Send DataShmDirtyPacket
+  DataShmDirtyPacket dspkt{};
+  dspkt.target_ptr = handle;
+  dspkt.num_ranges = static_cast<uint32_t>(dirtyRanges.size());
+  dspkt.shm_offset = baseOffset;
+  
+  if (send_packet(client->socket_fd, PacketType::DATA_SHM_DIRTY, &dspkt, sizeof(DataShmDirtyPacket), client->secureChannel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  
+  // Send each dirty range
+  uint64_t currentOffset = baseOffset;
+  for (const auto& range : dirtyRanges) {
+    DirtyRangePacket rpkt{range.first, range.second};
+    if (send_packet(client->socket_fd, PacketType::DIRTY_RANGE, &rpkt, sizeof(DirtyRangePacket), client->secureChannel.get()) != VGREResult::SUCCESS) {
+      return VGREResult::ERR_IO;
+    }
+    
+    // Copy data to SHM
+    std::memcpy(static_cast<uint8_t*>(client->shmManager->getBasePtr()) + currentOffset,
+                static_cast<uint8_t*>(ptr) + range.first, range.second);
+    currentOffset += range.second;
+  }
+  
+  return VGREResult::SUCCESS;
+}
+
+VGREResult TCPClusterManager::sendDeltaSyncTCP(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client) {
+  // Send DataHeaderDirtyPacket
+  DataHeaderDirtyPacket dhpkt{};
+  dhpkt.target_ptr = handle;
+  dhpkt.num_ranges = static_cast<uint32_t>(dirtyRanges.size());
+  
+  if (send_packet(client->socket_fd, PacketType::DATA_HEADER_DIRTY, &dhpkt, sizeof(DataHeaderDirtyPacket), client->secureChannel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  
+  // Send each dirty range
+  for (const auto& range : dirtyRanges) {
+    DirtyRangePacket rpkt{range.first, range.second};
+    if (send_packet(client->socket_fd, PacketType::DIRTY_RANGE, &rpkt, sizeof(DirtyRangePacket), client->secureChannel.get()) != VGREResult::SUCCESS) {
+      return VGREResult::ERR_IO;
+    }
+    
+    // Send range data
+    if (send_packet(client->socket_fd, PacketType::DATA_BODY, static_cast<uint8_t*>(ptr) + range.first, range.second, client->secureChannel.get()) != VGREResult::SUCCESS) {
+      return VGREResult::ERR_IO;
+    }
+  }
+  
+  return VGREResult::SUCCESS;
+}
+
+VGREResult TCPClusterManager::sendFullSync(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client) {
+  if (client->is_local && client->shmManager) {
+    return sendFullSyncSHM(ptr, handle, size, client);
+  } else {
+    return sendFullSyncTCP(ptr, handle, size, client);
+  }
+}
+
+VGREResult TCPClusterManager::sendFullSyncSHM(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client) {
+  // Check SHM space availability
+  uint64_t offset = client->shm_offset;
+  if (offset + size > client->shmManager->getSize()) {
+    // Not enough SHM space, fall back to TCP
+    return sendFullSyncTCP(ptr, handle, size, client);
+  }
+  
+  // Update SHM offset
+  client->shm_offset += size;
+  
+  // Copy data to SHM
+  std::memcpy(static_cast<uint8_t*>(client->shmManager->getBasePtr()) + offset, ptr, size);
+  
+  // Send DataShmPacket
+  DataShmPacket dspkt{};
+  dspkt.target_ptr = handle;
+  dspkt.shm_offset = offset;
+  dspkt.size = size;
+  
+  if (send_packet(client->socket_fd, PacketType::DATA_SHM, &dspkt, sizeof(DataShmPacket), client->secureChannel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  
+  return VGREResult::SUCCESS;
+}
+
+VGREResult TCPClusterManager::sendFullSyncTCP(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client) {
+  // Send DataHeaderPacket
+  DataHeaderPacket dpkt{};
+  dpkt.target_ptr = handle;
+  dpkt.size = size;
+  
+  if (send_packet(client->socket_fd, PacketType::DATA_HEADER, &dpkt, sizeof(DataHeaderPacket), client->secureChannel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  
+  // Send data body
+  if (send_packet(client->socket_fd, PacketType::DATA_BODY, ptr, size, client->secureChannel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  
+  return VGREResult::SUCCESS;
+}
+
+// ── Argument Serialization Logic Extraction ──────────────────────────────
+VGREResult TCPClusterManager::streamArgumentsToWorker(void** args, int num_args, uint64_t kernel_id, std::shared_ptr<ClientConnection> client) {
+  if (!args || num_args <= 0 || !client) {
+    return VGREResult::SUCCESS; // No arguments to stream
+  }
+  
+  // Get argument types from RuntimeEngine
+  std::vector<ArgType> argTypes;
+  if (core::RuntimeEngine::instance().getKernelArgTypes(kernel_id, argTypes) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_INVALID_KERNEL;
+  }
+  
+  // Stream each argument
+  for (int i = 0; i < num_args; ++i) {
+    ArgType type = (i < static_cast<int>(argTypes.size())) ? argTypes[i] : ArgType::UINT64;
+    
+    VGREResult result = VGREResult::SUCCESS;
+    if (type == ArgType::STRUCT) {
+      result = sendStructArg(args[i], i, kernel_id, client);
+    } else if (type == ArgType::POINTER) {
+      result = sendPointerArg(args[i], i, client);
+    } else {
+      result = sendScalarArg(args[i], i, type, client);
+    }
+    
+    if (result != VGREResult::SUCCESS) {
+      return result;
+    }
+  }
+  
+  return VGREResult::SUCCESS;
+}
+
+VGREResult TCPClusterManager::sendStructArg(void* arg, int arg_index, uint64_t kernel_id, std::shared_ptr<ClientConnection> client) {
+  // Get struct size from kernel IR
+  const auto* ir = core::RuntimeEngine::instance().getKernelIR(kernel_id);
+  if (!ir || arg_index >= static_cast<int>(ir->argSizes.size())) {
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+  
+  size_t size = ir->argSizes[arg_index];
+  
+  // Send StructDataPacket
+  StructDataPacket spkt{};
+  spkt.arg_index = static_cast<uint32_t>(arg_index);
+  spkt.size = static_cast<uint32_t>(size);
+  
+  if (send_packet(client->socket_fd, PacketType::STRUCT_DATA, &spkt, sizeof(StructDataPacket), client->secureChannel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  
+  // Send struct contents
+  if (send_packet(client->socket_fd, PacketType::DATA_BODY, arg, size, client->secureChannel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  
+  return VGREResult::SUCCESS;
+}
+
+VGREResult TCPClusterManager::sendPointerArg(void* arg, int arg_index, std::shared_ptr<ClientConnection> client) {
+  // Dereference pointer to get actual address
+  void* ptr = *static_cast<void**>(arg);
+  uint64_t handle = reinterpret_cast<uint64_t>(ptr);
+  
+  // Sync memory if it's a valid managed pointer
+  size_t size = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
+  if (size > 0 && ptr) {
+    VGREResult syncResult = syncPointerToWorker(ptr, handle, client);
+    if (syncResult != VGREResult::SUCCESS) {
+      return syncResult;
+    }
+  }
+  
+  // Send ArgScalarPacket with pointer handle
+  ArgScalarPacket apkt{};
+  apkt.arg_index = static_cast<uint32_t>(arg_index);
+  apkt.arg_type = static_cast<uint8_t>(ArgType::POINTER);
+  apkt.value = handle;
+  
+  if (send_packet(client->socket_fd, PacketType::ARG_POINTER, &apkt, sizeof(ArgScalarPacket), client->secureChannel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  
+  return VGREResult::SUCCESS;
+}
+
+VGREResult TCPClusterManager::sendScalarArg(void* arg, int arg_index, ArgType type, std::shared_ptr<ClientConnection> client) {
+  // Determine argument size based on type
+  size_t arg_size = 8;
+  switch (type) {
+    case ArgType::INT32:
+    case ArgType::UINT32:
+    case ArgType::FLOAT32:
+      arg_size = 4;
+      break;
+    default:
+      arg_size = 8;
+      break;
+  }
+  
+  // Copy value to ArgScalarPacket
+  ArgScalarPacket apkt{};
+  apkt.arg_index = static_cast<uint32_t>(arg_index);
+  apkt.arg_type = static_cast<uint8_t>(type);
+  std::memset(&apkt.value, 0, 8);
+  std::memcpy(&apkt.value, arg, arg_size);
+  
+  if (send_packet(client->socket_fd, PacketType::ARG_SCALAR, &apkt, sizeof(ArgScalarPacket), client->secureChannel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  
+  return VGREResult::SUCCESS;
+}
+
+// ── Blocking I/O Helper ───────────────────────────────────────────────────
+VGREResult TCPClusterManager::waitForData(vgre_socket_t fd, int timeout_ms) {
+  if (fd == VGRE_INVALID_SOCKET) {
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+  
+  vgre_pollfd pfd;
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+  pfd.revents = 0;
+  
+  int result = vgre_poll(&pfd, 1, timeout_ms);
+  
+  if (result < 0) {
+    // Poll error
+    return VGREResult::ERR_IO;
+  } else if (result == 0) {
+    // Timeout
+    return VGREResult::ERR_TIMEOUT;
+  } else {
+    // Data available
+    if (pfd.revents & POLLIN) {
+      return VGREResult::SUCCESS;
+    } else if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+      return VGREResult::ERR_IO;
+    }
+    return VGREResult::SUCCESS;
+  }
+}
+
+// ── Diagnostic Helper ─────────────────────────────────────────────────────
+std::string TCPClusterManager::hexDump(const uint8_t* data, size_t max_bytes) {
+  if (!data || max_bytes == 0) {
+    return "";
+  }
+  
+  std::ostringstream oss;
+  for (size_t i = 0; i < max_bytes; ++i) {
+    if (i > 0 && i % 16 == 0) {
+      oss << "\n";
+    } else if (i > 0 && i % 8 == 0) {
+      oss << "  ";
+    } else if (i > 0) {
+      oss << " ";
+    }
+    
+    // Format as 2-digit hex
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%02x", data[i]);
+    oss << buf;
+  }
+  return oss.str();
+}
+
+VGREResult TCPClusterManager::send_packet(vgre_socket_t fd, PacketType type, const void *payload, size_t payloadLen, vgre::advanced::SecureChannel *sc) {
+  (void)sc;
+
+  // Validate socket
+  if (fd == VGRE_INVALID_SOCKET) {
+    return VGREResult::ERR_INVALID_VALUE;
   }
 
-  uint32_t priority = 1; // Default: LOW (Data/Bulk)
+  // CRITICAL: Validate packet size to prevent buffer overflow
+  if (common::InputValidator::validatePacketSize(payloadLen) != VGREResult::SUCCESS) {
+    VGRE_LOG_ERROR("TCPCluster", "Packet size validation failed: " + std::to_string(payloadLen));
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+
+  // Additional check for total packet size
+  size_t totalLen = sizeof(VSBPHeader) + payloadLen;
+  if (common::InputValidator::validatePacketSize(totalLen) != VGREResult::SUCCESS) {
+    VGRE_LOG_ERROR("TCPCluster", "Total packet size validation failed: " + std::to_string(totalLen));
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+  
+  // Use unified packet construction
+  std::vector<uint8_t> staging = constructPacket(type, payload, payloadLen);
+
+  uint32_t priority = static_cast<uint32_t>(PacketPriority::LOW); // Default: Data/Bulk
   if (type == PacketType::RESPONSE || type == PacketType::PARTITION_RESULT ||
       type == PacketType::TELEMETRY || type == PacketType::SECURE_HANDSHAKE ||
       type == PacketType::SECURE_HANDSHAKE_ACK || type == PacketType::ROTATE_KEY ||
       type == PacketType::CREDIT_REPORT || type == PacketType::COOP_BARRIER_SYNC ||
       type == PacketType::COOP_BARRIER_RESUME) {
-    priority = 0; // HIGH (Control/Sync)
+    priority = static_cast<uint32_t>(PacketPriority::HIGH); // Control/Sync
   }
 
   // Master side lookup — enqueue into per-client TSS2 queue
@@ -123,7 +839,7 @@ bool TCPClusterManager::send_packet(vgre_socket_t fd, PacketType type, const voi
               ClientConnection::OutgoingPacket pkt;
               pkt.data = std::move(staging);
               pkt.priority = priority;
-              if (priority == 0) {
+              if (priority == static_cast<uint32_t>(PacketPriority::HIGH)) {
                   client->high_priority_tx.push_front(std::move(pkt));
               } else {
                   client->low_priority_tx.push_back(std::move(pkt));
@@ -133,7 +849,7 @@ bool TCPClusterManager::send_packet(vgre_socket_t fd, PacketType type, const voi
           }
       }
   }
-  if (foundMasterClient) return true;
+  if (foundMasterClient) return VGREResult::SUCCESS;
 
   // Worker-side path: enqueue into worker-local TSS2 queues (drained by clientLoop)
   if (!is_master_ && fd == client_fd_) {
@@ -141,42 +857,35 @@ bool TCPClusterManager::send_packet(vgre_socket_t fd, PacketType type, const voi
       ClientConnection::OutgoingPacket pkt;
       pkt.data = std::move(staging);
       pkt.priority = priority;
-      if (priority == 0) {
+      if (priority == static_cast<uint32_t>(PacketPriority::HIGH)) {
           client_high_priority_tx_.push_front(std::move(pkt));
       } else {
           client_low_priority_tx_.push_back(std::move(pkt));
       }
-      return true;
+      return VGREResult::SUCCESS;
   }
 
-  return false;
+  return VGREResult::ERR_IO;
 }
 
-bool TCPClusterManager::send_packet_direct(vgre_socket_t fd, PacketType type, const void *payload, size_t payloadLen, vgre::advanced::SecureChannel *sc) {
-  static std::atomic<uint32_t> s_vgre_seq{1};
-
-  size_t totalLen = sizeof(VSBPHeader) + payloadLen;
-  std::vector<uint8_t> staging(totalLen);
-  
-  VSBPHeader* header = reinterpret_cast<VSBPHeader*>(staging.data());
-  header->magic = VSBP_MAGIC;
-  header->version = VSBP_VERSION;
-  header->type = static_cast<uint16_t>(type);
-  header->sequence = s_vgre_seq.fetch_add(1, std::memory_order_relaxed);
-  header->payloadSize = payloadLen;
-
-  if (payload && payloadLen > 0) {
-    std::memcpy(staging.data() + sizeof(VSBPHeader), payload, payloadLen);
+VGREResult TCPClusterManager::send_packet_direct(vgre_socket_t fd, PacketType type, const void *payload, size_t payloadLen, vgre::advanced::SecureChannel *sc) {
+  // Validate socket
+  if (fd == VGRE_INVALID_SOCKET) {
+    return VGREResult::ERR_INVALID_VALUE;
   }
+
+  // Use unified packet construction
+  std::vector<uint8_t> staging = constructPacket(type, payload, payloadLen);
 
   global_packets_sent_++;
   global_bytes_sent_ += staging.size();
 
   if (sc && sc->isInitialized()) {
-    return sc->sendSecure(fd, staging.data(), staging.size()) == VGREResult::SUCCESS;
+    return sc->sendSecure(fd, staging.data(), staging.size());
   } else {
     std::atomic<bool> enabled{true};
-    return send_all(fd, staging.data(), staging.size(), &enabled);
+    bool success = send_all(fd, staging.data(), staging.size(), &enabled);
+    return success ? VGREResult::SUCCESS : VGREResult::ERR_IO;
   }
 }
 
@@ -269,19 +978,20 @@ TCPClusterManager::TCPClusterManager() {
 
 TCPClusterManager::~TCPClusterManager() { shutdown(); }
 
-bool TCPClusterManager::broadcastPacket(PacketType type, const void *payload,
+VGREResult TCPClusterManager::broadcastPacket(PacketType type, const void *payload,
                                       size_t payloadLen) {
-  if (!is_master_) return false;
+  if (!is_master_) return VGREResult::ERR_NOT_SUPPORTED;
   std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
-  bool success = true;
+  VGREResult result = VGREResult::SUCCESS;
   for (auto &client : clients_) {
     if (client && client->active) {
-      if (!send_packet(client->socket_fd, type, payload, payloadLen, client->secureChannel.get())) {
-        success = false;
+      VGREResult send_result = send_packet(client->socket_fd, type, payload, payloadLen, client->secureChannel.get());
+      if (send_result != VGREResult::SUCCESS) {
+        result = send_result;  // Return last error encountered
       }
     }
   }
-  return success;
+  return result;
 }
 
 VGREResult TCPClusterManager::initialize(bool is_master,
@@ -576,6 +1286,41 @@ void TCPClusterManager::shutdown() {
 #endif
 }
 
+// ── Atomic Duplicate Connection Detection ────────────────────────────────
+bool TCPClusterManager::addClientIfNotDuplicate(const std::string& ip_address, vgre_socket_t socket_fd, const sockaddr_in& address) {
+  std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+  
+  // Check for duplicate: same IP and (active or is_authenticating)
+  for (const auto& client : clients_) {
+    if (client && (client->active || client->is_authenticating) &&
+        client->socket_fd != VGRE_INVALID_SOCKET &&
+        client->ip_address == ip_address) {
+      // Duplicate found - close new socket and return false
+      VGRE_LOG_WARN("TCPCluster",
+          "Master: Dropping duplicate inbound connection from " +
+          ip_address + " — active connection already exists "
+          "(prevents double-handshake HMAC key mismatch)");
+      vgre_close_socket(socket_fd);
+      return false;
+    }
+  }
+  
+  // No duplicate - create and add new ClientConnection
+  auto conn = std::make_shared<ClientConnection>();
+  conn->socket_fd = socket_fd;
+  conn->ip_address = ip_address;
+  conn->port = ntohs(address.sin_port);
+  conn->active = true;
+  conn->expecting_type = true;
+  conn->rx_buffer.clear();
+  clients_.push_back(std::move(conn));
+  
+  VGRE_LOG_INFO("TCPCluster", "Master: Accepted new remote node from " +
+      ip_address + ":" + std::to_string(ntohs(address.sin_port)));
+  
+  return true;
+}
+
 void TCPClusterManager::serverLoop() {
   VGRE_LOG_DEBUG("TCPCluster", "Master Server Loop starting...");
 
@@ -724,43 +1469,14 @@ void TCPClusterManager::serverLoop() {
             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
 
             // ── Duplicate-connection guard ─────────────────────────────────
-            // Prevent the double-connection race: proactiveConnectionLoop may
-            // already have an active/authenticating entry for this worker IP.
-            // Accepting a second TCP session from the same worker produces two
-            // independent handshakes with different nonces → two session keys
-            // → guaranteed HMAC mismatch on the first encrypted packet.
-            // Drop the inbound duplicate so exactly ONE session key exists
-            // per peer.  The lock is already held so the check-and-drop is
-            // atomic — no TOCTOU window between check and push.
-            {
-                const std::string inbound_ip(ipstr);
-                bool is_duplicate = false;
-                for (const auto& ec : clients_) {
-                    if (ec && (ec->active || ec->is_authenticating) &&
-                            ec->socket_fd != VGRE_INVALID_SOCKET &&
-                            ec->ip_address == inbound_ip) {
-                        is_duplicate = true;
-                        break;
-                    }
-                }
-                if (is_duplicate) {
-                    VGRE_LOG_WARN("TCPCluster",
-                        "Master: Dropping duplicate inbound connection from " +
-                        inbound_ip + " — active connection already exists "
-                        "(prevents double-handshake HMAC key mismatch)");
-                    vgre_close_socket(new_socket);
-                    goto server_loop_next_iter; // skip past rate-limit else block
-                }
+            // Atomic check-and-insert prevents double-connection race.
+            // If proactiveConnectionLoop already has an active/authenticating
+            // entry for this worker IP, drop the inbound duplicate to ensure
+            // exactly ONE session key exists per peer.
+            const std::string inbound_ip(ipstr);
+            if (!addClientIfNotDuplicate(inbound_ip, new_socket, address)) {
+                goto server_loop_next_iter; // skip past rate-limit else block
             }
-
-            auto conn = std::make_shared<ClientConnection>();
-            conn->socket_fd = new_socket;
-            conn->ip_address = std::string(ipstr);
-            conn->port = ntohs(address.sin_port); // Remote port of the connection
-            conn->active = true;
-            conn->expecting_type = true;
-            conn->rx_buffer.clear();
-            clients_.push_back(std::move(conn));
 
             VGRE_LOG_INFO("TCPCluster", "Master: Accepted new remote node from " +
                 std::string(ipstr) + ":" + std::to_string(ntohs(address.sin_port)));
@@ -846,6 +1562,13 @@ void TCPClusterManager::serverLoop() {
                                 vgre_close_socket(client->socket_fd);
                                 client->socket_fd = VGRE_INVALID_SOCKET;
                                 syncToIPC();
+                                // Give the dashboard a visible disconnect window before
+                                // the proactive loop reconnects.
+                                {
+                                    std::lock_guard<std::mutex> bk(proactive_backoff_mutex_);
+                                    proactive_backoff_until_[client->ip_address] =
+                                        std::chrono::steady_clock::now() + std::chrono::seconds(8);
+                                }
                             }
                         } else {
                             VGRE_LOG_WARN("TCPCluster", "Master: Client socket error or hup from " +
@@ -854,6 +1577,13 @@ void TCPClusterManager::serverLoop() {
                             vgre_close_socket(client->socket_fd);
                             client->socket_fd = VGRE_INVALID_SOCKET;
                             syncToIPC();
+                            // Give the dashboard a visible disconnect window before
+                            // the proactive loop reconnects.
+                            {
+                                std::lock_guard<std::mutex> bk(proactive_backoff_mutex_);
+                                proactive_backoff_until_[client->ip_address] =
+                                    std::chrono::steady_clock::now() + std::chrono::seconds(8);
+                            }
                         }
                         break;
                     }
@@ -882,9 +1612,16 @@ void TCPClusterManager::serverLoop() {
               std::memcpy(&hdr, client->rx_buffer.data(), sizeof(VSBPHeader));
 
               if (hdr.magic != VSBP_MAGIC || hdr.version != VSBP_VERSION) {
+                // Preserve buffer contents for diagnostics before clearing
+                size_t dump_size = std::min(client->rx_buffer.size(), size_t(64));
+                std::string hex = hexDump(client->rx_buffer.data(), dump_size);
                 VGRE_LOG_ERROR("TCPCluster",
                     "Master: VSBP protocol violation from " + client->ip_address +
-                    " — clearing buffer");
+                    " (magic=0x" + std::to_string(hdr.magic) + 
+                    ", version=" + std::to_string(hdr.version) +
+                    ", buffer_size=" + std::to_string(client->rx_buffer.size()) + ")" +
+                    "\nFirst " + std::to_string(dump_size) + " bytes (hex):\n" + hex +
+                    "\n— clearing buffer");
                 client->rx_buffer.clear();
                 break;
               }
@@ -1331,7 +2068,16 @@ void TCPClusterManager::processClientStagingBuffer() {
             
             // VSBP Validation
             if (header.magic != VSBP_MAGIC || header.version != VSBP_VERSION) {
-                VGRE_LOG_ERROR("TCPCluster", "VSBP Protocol Violation: Invalid Magic/Version. Clearing buffer.");
+                // Preserve buffer contents for diagnostics before clearing
+                size_t dump_size = std::min(client_rx_buffer_.size(), size_t(64));
+                std::string hex = hexDump(client_rx_buffer_.data(), dump_size);
+                VGRE_LOG_ERROR("TCPCluster", 
+                    std::string("VSBP Protocol Violation: Invalid Magic/Version") +
+                    " (magic=0x" + std::to_string(header.magic) + 
+                    ", version=" + std::to_string(header.version) +
+                    ", buffer_size=" + std::to_string(client_rx_buffer_.size()) + ")" +
+                    "\nFirst " + std::to_string(dump_size) + " bytes (hex):\n" + hex +
+                    "\nClearing buffer.");
                 client_rx_buffer_.clear();
                 break;
             }
@@ -1434,7 +2180,63 @@ void TCPClusterManager::processClientStagingBuffer() {
                 client_shm_manager_ = std::make_unique<core::ShmManager>();
                 if (client_shm_manager_->open(sipkt.shm_name, sipkt.shm_size, false) == VGREResult::SUCCESS) client_shm_enabled_ = true;
             } else if (type == PacketType::RAW_DATA || type == PacketType::DATA_BODY) {
+                // Handle RAW_DATA for collective operations
+                if (is_master_ && is_reducing_ && pending_collective_count_ > 0) {
+                    // Master receiving worker data for reduction
+                    size_t element_size = getTypeSizeFromDatatype(pending_collective_datatype_);
+                    size_t expected_bytes = pending_collective_count_ * element_size;
+                    
+                    if (header.payloadSize == expected_bytes) {
+                        std::lock_guard<std::mutex> lock(reduction_mutex_);
+                        
+                        // Perform sum reduction based on datatype
+                        if (pending_collective_datatype_ == static_cast<uint32_t>(ArgType::FLOAT32)) {
+                            sum_reduce(reinterpret_cast<float*>(active_reduction_buffer_.data()),
+                                      reinterpret_cast<const float*>(client_rx_buffer_.data() + sizeof(VSBPHeader)),
+                                      pending_collective_count_);
+                        } else if (pending_collective_datatype_ == static_cast<uint32_t>(ArgType::FLOAT64)) {
+                            sum_reduce(reinterpret_cast<double*>(active_reduction_buffer_.data()),
+                                      reinterpret_cast<const double*>(client_rx_buffer_.data() + sizeof(VSBPHeader)),
+                                      pending_collective_count_);
+                        } else if (pending_collective_datatype_ == static_cast<uint32_t>(ArgType::INT32)) {
+                            sum_reduce(reinterpret_cast<int32_t*>(active_reduction_buffer_.data()),
+                                      reinterpret_cast<const int32_t*>(client_rx_buffer_.data() + sizeof(VSBPHeader)),
+                                      pending_collective_count_);
+                        } else if (pending_collective_datatype_ == static_cast<uint32_t>(ArgType::INT64)) {
+                            sum_reduce(reinterpret_cast<int64_t*>(active_reduction_buffer_.data()),
+                                      reinterpret_cast<const int64_t*>(client_rx_buffer_.data() + sizeof(VSBPHeader)),
+                                      pending_collective_count_);
+                        }
+                        
+                        // Increment count and notify if all workers have contributed
+                        reduction_count_++;
+                        reduction_cv_.notify_all();
+                        
+                        // Reset pending collective state
+                        pending_collective_count_ = 0;
+                    }
+                } else if (!is_master_ && header.payloadSize > 0) {
+                    // Worker receiving result from master
+                    std::lock_guard<std::mutex> lock(reduction_mutex_);
+                    active_reduction_buffer_.assign(
+                        client_rx_buffer_.begin() + sizeof(VSBPHeader),
+                        client_rx_buffer_.begin() + sizeof(VSBPHeader) + header.payloadSize
+                    );
+                    reduction_cv_.notify_all();
+                }
                 client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(VSBPHeader) + header.payloadSize);
+            } else if (type == PacketType::COLLECTIVE_OP) {
+                // Master receives collective operation request from worker
+                if (is_master_) {
+                    CollectiveOpPacket op_packet;
+                    std::memcpy(&op_packet, client_rx_buffer_.data() + sizeof(VSBPHeader), sizeof(CollectiveOpPacket));
+                    client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(VSBPHeader) + sizeof(CollectiveOpPacket));
+                    
+                    // Set flag to expect RAW_DATA next with worker's data
+                    pending_collective_op_type_ = op_packet.op_type;
+                    pending_collective_datatype_ = op_packet.datatype;
+                    pending_collective_count_ = op_packet.count;
+                }
             } else if (type == PacketType::COOP_BARRIER_SYNC) {
                 client_rx_buffer_.erase(client_rx_buffer_.begin(), client_rx_buffer_.begin() + sizeof(VSBPHeader));
                 if (is_master_) {
@@ -1529,14 +2331,14 @@ void TCPClusterManager::processClientStagingBuffer() {
 }
 
 void TCPClusterManager::udpAnnouncerLoop() {
-  vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (udp_fd == VGRE_INVALID_SOCKET) return;
+  SocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
+  if (udp_guard.get() == VGRE_INVALID_SOCKET) return;
   
   int opt = 1;
 #if defined(_WIN32)
-  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
+  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
 #else
-  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
 #endif
 
   struct sockaddr_in broadcast_addr{};
@@ -1550,21 +2352,21 @@ void TCPClusterManager::udpAnnouncerLoop() {
   VGRE_LOG_INFO("TCPCluster", "Master: UDP Announcer active (broadcasting master presence)...");
 
   while (enabled_ && is_master_) {
-    sendto(udp_fd, ping_msg.c_str(), ping_msg.length(), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+    sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
     std::this_thread::sleep_for(std::chrono::seconds(2));
   }
-  vgre_close_socket(udp_fd);
+  // Socket automatically closed by SocketGuard destructor
 }
 
 void TCPClusterManager::udpMasterDiscoveryLoop() {
-  vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (udp_fd == VGRE_INVALID_SOCKET) return;
+  SocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
+  if (udp_guard.get() == VGRE_INVALID_SOCKET) return;
 
   int opt = 1;
 #if defined(_WIN32)
-  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 #else
-  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #endif
 
   struct sockaddr_in listen_addr{};
@@ -1572,9 +2374,8 @@ void TCPClusterManager::udpMasterDiscoveryLoop() {
   listen_addr.sin_addr.s_addr = INADDR_ANY;
   listen_addr.sin_port = htons(7779); // Dedicated port for worker announcements
 
-  if (bind(udp_fd, (struct sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
+  if (bind(udp_guard.get(), (struct sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
     VGRE_LOG_WARN("TCPCluster", "Master: UDP Worker Discovery bind failed");
-    vgre_close_socket(udp_fd);
     return;
   }
 
@@ -1583,10 +2384,10 @@ void TCPClusterManager::udpMasterDiscoveryLoop() {
   // Without this, recvfrom blocks indefinitely, preventing shutdown from joining.
 #if defined(_WIN32)
   DWORD rcvTimeout = 1000;
-  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcvTimeout, sizeof(rcvTimeout));
+  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcvTimeout, sizeof(rcvTimeout));
 #else
   struct timeval rcvTv{1, 0};
-  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTv, sizeof(rcvTv));
+  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_RCVTIMEO, &rcvTv, sizeof(rcvTv));
 #endif
 
   VGRE_LOG_INFO("TCPCluster", "Master: Active Worker Discovery enabled (scanning for remote nodes)...");
@@ -1596,7 +2397,7 @@ void TCPClusterManager::udpMasterDiscoveryLoop() {
   socklen_t sender_len = sizeof(sender_addr);
 
   while (enabled_ && is_master_) {
-    int n = recvfrom(udp_fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr*)&sender_addr, &sender_len);
+    int n = recvfrom(udp_guard.get(), buffer, sizeof(buffer) - 1, 0, (struct sockaddr*)&sender_addr, &sender_len);
     if (n > 0) {
       buffer[n] = '\0';
       std::string msg(buffer);
@@ -1627,7 +2428,7 @@ void TCPClusterManager::udpMasterDiscoveryLoop() {
       }
     }
   }
-  vgre_close_socket(udp_fd);
+  // Socket automatically closed by SocketGuard destructor
 }
 
 void TCPClusterManager::udpDiscoveryLoop() {
@@ -1779,14 +2580,14 @@ void TCPClusterManager::udpDiscoveryLoop() {
 }
 
 void TCPClusterManager::udpWorkerAnnouncerLoop() {
-  vgre_socket_t udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (udp_fd == VGRE_INVALID_SOCKET) return;
+  SocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
+  if (udp_guard.get() == VGRE_INVALID_SOCKET) return;
 
   int opt = 1;
 #if defined(_WIN32)
-  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
+  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
 #else
-  vgre_setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
 #endif
 
   struct sockaddr_in broadcast_addr{};
@@ -1799,14 +2600,14 @@ void TCPClusterManager::udpWorkerAnnouncerLoop() {
   VGRE_LOG_INFO("TCPCluster", "Worker: Proactive Announcer active (seeking master)...");
 
   while (enabled_ && !is_master_) {
-    sendto(udp_fd, ping_msg.c_str(), ping_msg.length(), 0,
+    sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0,
            (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
     // Sleep in 200ms increments so shutdown() can join within 200ms.
     for (int i = 0; i < 25 && enabled_ && !is_master_; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
   }
-  vgre_close_socket(udp_fd);
+  // Socket automatically closed by SocketGuard destructor
 }
 
 
@@ -1828,12 +2629,6 @@ VGREResult TCPClusterManager::launchRemoteKernel(
     return VGREResult::ERR_INVALID_VALUE;
   }
 
-  std::vector<ArgType> argTypes;
-  if (core::RuntimeEngine::instance().getKernelArgTypes(kernel_id, argTypes) !=
-      VGREResult::SUCCESS) {
-    return VGREResult::ERR_INVALID_KERNEL;
-  }
-
   if (auth_token_ == 0) {
     VGRE_LOG_ERROR("TCPCluster",
                    "Remote kernel dispatch blocked: missing "
@@ -1849,140 +2644,9 @@ VGREResult TCPClusterManager::launchRemoteKernel(
   }
 
   // 1. Stream all arguments FIRST
-  for (int i = 0; i < num_args; ++i) {
-    ArgType type = (i < static_cast<int>(argTypes.size())) ? argTypes[i] : ArgType::UINT64;
-    
-    if (type == ArgType::STRUCT) {
-      // For structs, we need to know the size. JIT metadata is the most authoritative source.
-      const auto *ir = core::RuntimeEngine::instance().getKernelIR(kernel_id);
-      if (ir && i < static_cast<int>(ir->argSizes.size())) {
-          size_t size = ir->argSizes[i];
-          StructDataPacket spkt{};
-          spkt.arg_index = i;
-          spkt.size = static_cast<uint32_t>(size);
-          send_packet(clients_[worker_idx]->socket_fd, PacketType::STRUCT_DATA, &spkt, sizeof(StructDataPacket), clients_[worker_idx]->secureChannel.get());
-
-          send_packet(clients_[worker_idx]->socket_fd, PacketType::DATA_BODY, args[i], size, clients_[worker_idx]->secureChannel.get());
-      }
-    } else if (type == ArgType::POINTER) {
-      void* ptr = *static_cast<void**>(args[i]);
-      uint64_t handle = reinterpret_cast<uint64_t>(ptr);
-      
-      // Memory Coherence: If it's a valid managed pointer, sync its data to the worker
-      size_t size = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
-      if (size > 0 && ptr) {
-          auto& mm = core::RuntimeEngine::instance().getMemoryManager();
-          std::vector<std::pair<size_t, size_t>> dirtyRanges;
-          bool useDelta = clients_[worker_idx]->synced_handles.count(ptr) > 0;
-          
-          if (useDelta) {
-              mm.getDirtyPages(ptr, dirtyRanges);
-          }
-
-          if (useDelta && !dirtyRanges.empty()) {
-              // Delta-Sync
-              if (clients_[worker_idx]->is_local && clients_[worker_idx]->shmManager) {
-                  uint32_t numRanges = static_cast<uint32_t>(dirtyRanges.size());
-                  DataShmDirtyPacket dspkt{};
-                  dspkt.target_ptr = handle;
-                  dspkt.num_ranges = numRanges;
-                  
-                  // Copy each range to SHM
-                  uint64_t totalSize = 0;
-                  for (auto& range : dirtyRanges) totalSize += range.second;
-                  
-                  uint64_t baseOffset = clients_[worker_idx]->shm_offset;
-                  clients_[worker_idx]->shm_offset += totalSize;
-                  if (baseOffset + totalSize <= clients_[worker_idx]->shmManager->getSize()) {
-                      dspkt.shm_offset = baseOffset;
-                      send_packet(clients_[worker_idx]->socket_fd, PacketType::DATA_SHM_DIRTY, &dspkt, sizeof(DataShmDirtyPacket), clients_[worker_idx]->secureChannel.get());
-                      
-                      uint64_t currentOffset = baseOffset;
-                      for (auto& range : dirtyRanges) {
-                          DirtyRangePacket rpkt{range.first, range.second};
-                          send_packet(clients_[worker_idx]->socket_fd, PacketType::DIRTY_RANGE, &rpkt, sizeof(DirtyRangePacket), clients_[worker_idx]->secureChannel.get());
-                          std::memcpy(static_cast<uint8_t*>(clients_[worker_idx]->shmManager->getBasePtr()) + currentOffset, 
-                                      static_cast<uint8_t*>(ptr) + range.first, range.second);
-                          currentOffset += range.second;
-                      }
-                  } else {
-                      goto full_sync; // Fallback
-                  }
-              } else {
-                  DataHeaderDirtyPacket dhpkt{};
-                  dhpkt.target_ptr = handle;
-                  dhpkt.num_ranges = static_cast<uint32_t>(dirtyRanges.size());
-                  send_packet(clients_[worker_idx]->socket_fd, PacketType::DATA_HEADER_DIRTY, &dhpkt, sizeof(DataHeaderDirtyPacket), clients_[worker_idx]->secureChannel.get());
-                  
-                  for (auto& range : dirtyRanges) {
-                      DirtyRangePacket rpkt{range.first, range.second};
-                      send_packet(clients_[worker_idx]->socket_fd, PacketType::DIRTY_RANGE, &rpkt, sizeof(DirtyRangePacket), clients_[worker_idx]->secureChannel.get());
-                      
-                      send_packet(clients_[worker_idx]->socket_fd, PacketType::DATA_BODY, static_cast<uint8_t*>(ptr) + range.first, range.second, clients_[worker_idx]->secureChannel.get());
-                  }
-              }
-              mm.clearDirtyPages(ptr);
-          } else {
-full_sync:
-              clients_[worker_idx]->synced_handles.insert(ptr);
-              if (clients_[worker_idx]->is_local && clients_[worker_idx]->shmManager) {
-                  // SHM Optimization
-                  uint64_t offset = clients_[worker_idx]->shm_offset;
-                  clients_[worker_idx]->shm_offset += size;
-                  if (offset + size <= clients_[worker_idx]->shmManager->getSize()) {
-                      std::memcpy(static_cast<uint8_t*>(clients_[worker_idx]->shmManager->getBasePtr()) + offset, ptr, size);
-                      DataShmPacket dspkt{};
-                      dspkt.target_ptr = handle;
-                      dspkt.shm_offset = offset;
-                      dspkt.size = size;
-                      send_packet(clients_[worker_idx]->socket_fd, PacketType::DATA_SHM, &dspkt, sizeof(DataShmPacket), clients_[worker_idx]->secureChannel.get());
-                  } else {
-                      DataHeaderPacket dpkt{};
-                      dpkt.target_ptr = handle;
-                      dpkt.size = size;
-                      send_packet(clients_[worker_idx]->socket_fd, PacketType::DATA_HEADER, &dpkt, sizeof(DataHeaderPacket), clients_[worker_idx]->secureChannel.get());
-
-                      send_packet(clients_[worker_idx]->socket_fd, PacketType::DATA_BODY, ptr, size, clients_[worker_idx]->secureChannel.get());
-                  }
-              } else {
-                  DataHeaderPacket dpkt{};
-                  dpkt.target_ptr = handle;
-                  dpkt.size = size;
-                  send_packet(clients_[worker_idx]->socket_fd, PacketType::DATA_HEADER, &dpkt, sizeof(DataHeaderPacket), clients_[worker_idx]->secureChannel.get());
-
-                  send_packet(clients_[worker_idx]->socket_fd, PacketType::DATA_BODY, ptr, size, clients_[worker_idx]->secureChannel.get());
-              }
-              mm.clearDirtyPages(ptr);
-          }
-      }
-
-      ArgScalarPacket apkt{};
-      apkt.arg_index = i;
-      apkt.arg_type = static_cast<uint8_t>(type);
-      apkt.value = handle;
-      send_packet(clients_[worker_idx]->socket_fd, PacketType::ARG_POINTER, &apkt, sizeof(ArgScalarPacket), clients_[worker_idx]->secureChannel.get());
-    } else {
-      // Scalar arguments (INT32, FLOAT32, etc.)
-      ArgScalarPacket apkt{};
-      apkt.arg_index = i;
-      apkt.arg_type = static_cast<uint8_t>(type);
-      
-      size_t arg_size = 8;
-      switch (type) {
-        case ArgType::INT32:
-        case ArgType::UINT32:
-        case ArgType::FLOAT32:
-          arg_size = 4;
-          break;
-        default:
-          arg_size = 8;
-          break;
-      }
-      
-      std::memset(&apkt.value, 0, 8);
-      std::memcpy(&apkt.value, args[i], arg_size);
-      send_packet(clients_[worker_idx]->socket_fd, PacketType::ARG_SCALAR, &apkt, sizeof(ArgScalarPacket), clients_[worker_idx]->secureChannel.get());
-    }
+  VGREResult argResult = streamArgumentsToWorker(args, num_args, kernel_id, clients_[worker_idx]);
+  if (argResult != VGREResult::SUCCESS) {
+      return argResult;
   }
 
   // 2. Send LAUNCH_KERNEL header LAST (this triggers execution on worker side)
@@ -1994,7 +2658,7 @@ full_sync:
   pkt.shared_mem = shared_mem;
   pkt.num_args = num_args; 
 
-  if (!send_packet(clients_[worker_idx]->socket_fd, PacketType::LAUNCH_KERNEL, &pkt, sizeof(RemoteCommandPacket), clients_[worker_idx]->secureChannel.get())) {
+  if (send_packet(clients_[worker_idx]->socket_fd, PacketType::LAUNCH_KERNEL, &pkt, sizeof(RemoteCommandPacket), clients_[worker_idx]->secureChannel.get()) != VGREResult::SUCCESS) {
     return VGREResult::ERR_IO;
   }
   clients_[worker_idx]->in_flight_kernels++;
@@ -2040,13 +2704,18 @@ int TCPClusterManager::getFirstActiveWorker() const {
 }
 
 void TCPClusterManager::handleRemoteCommand(const RemoteCommandPacket &pkt) {
+  // Early authentication validation - check auth BEFORE any processing
   if (auth_token_ == 0 || pkt.auth_token != auth_token_) {
     VGRE_LOG_ERROR("TCPCluster",
                    "Rejected remote command due to missing/invalid auth token");
+    pending_args_.clear(); // Clear any pending arguments on auth failure
     return;
   }
+  
+  // Packet structure validation after auth check
   if (pkt.grid_dim[0] == 0 || pkt.block_dim[0] == 0) {
     VGRE_LOG_ERROR("TCPCluster", "Invalid Remote Command Packet Received");
+    pending_args_.clear(); // Clear pending arguments on validation failure
     return;
   }
 
@@ -2194,8 +2863,8 @@ void TCPClusterManager::getConnectedNodes(std::vector<TCPClusterManager::Cluster
   std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
   outNodes.clear();
   for (const auto &c : clients_) {
-    // Only report nodes that are live or still handshaking — not dead ones.
-    if (!c || (!c->active && !c->is_authenticating)) continue;
+    // Only report fully active nodes — not dead or still-handshaking ones.
+    if (!c || !c->active) continue;
     TCPClusterManager::ClusterNodeInfo info;
     info.ip_address = c->ip_address;
     info.port = c->port;
@@ -2292,8 +2961,8 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
             total.session_seconds = s.session_seconds;
           }
         } else if (client->is_authenticating) {
-          // Monitor for stuck handshakes (15s timeout)
-          if (now_ms - client->handshake_start_ms < 15000) {
+          // Monitor for stuck handshakes
+          if (now_ms - client->handshake_start_ms < Constants::HANDSHAKE_STUCK_TIMEOUT_MS) {
             any_pending = true;
           }
         }
@@ -2306,7 +2975,7 @@ SessionInfo TCPClusterManager::getSecurityInfo() const {
     std::strncpy(total.key_fingerprint, s.key_fingerprint, sizeof(total.key_fingerprint) - 1);
     total.session_seconds = s.session_seconds;
   } else if (is_authenticating_) {
-    if (now_ms - last_handshake_start_ms_ < 15000) {
+    if (now_ms - last_handshake_start_ms_ < Constants::HANDSHAKE_STUCK_TIMEOUT_MS) {
       any_pending = true;
     }
   }
@@ -2379,24 +3048,54 @@ VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConne
   // key_verification will be filled after we derive the key from the client's nonce
   std::memset(shpkt.key_verification, 0, sizeof(shpkt.key_verification));
 
-  if (!send_packet_direct(client.socket_fd, PacketType::SECURE_HANDSHAKE, &shpkt, sizeof(SecureHandshakePacket), client.secureChannel.get())) {
+  if (send_packet_direct(client.socket_fd, PacketType::SECURE_HANDSHAKE, &shpkt, sizeof(SecureHandshakePacket), client.secureChannel.get()) != VGREResult::SUCCESS) {
     VGRE_LOG_ERROR("TCPCluster", "Security handshake: failed to send master nonce");
     return VGREResult::ERR_IO;
   }
 
-  // 3. Receive client nonce response using protocol-aware buffering
+  // 3. Receive client nonce response — exact-length bounded read.
+  // Reads at most (expectedLen - rx.size()) bytes per call so we never
+  // consume bytes belonging to the next (e.g. CAPABILITY) packet.
+  const size_t expectedLen = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
   SecureHandshakePacket clientHs{};
   std::vector<uint8_t> rx;
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (rx.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
-    if (std::chrono::steady_clock::now() > deadline) {
+  rx.reserve(expectedLen);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(Constants::HANDSHAKE_TIMEOUT_SECONDS);
+  while (rx.size() < expectedLen) {
+    // Calculate remaining timeout
+    auto now = std::chrono::steady_clock::now();
+    if (now > deadline) {
       VGRE_LOG_ERROR("TCPCluster", "Security handshake timed out while receiving response");
       return VGREResult::ERR_TIMEOUT;
     }
-    int n = recv_packet(client.socket_fd, rx, nullptr);
-    if (n < 0) {
-      // recv_packet returns -1 for both graceful close (recv=0) and real errors.
-      // errno is 0 on graceful close; otherwise it holds the socket error.
+    int remaining_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+    if (remaining_ms <= 0) {
+      VGRE_LOG_ERROR("TCPCluster", "Security handshake timed out while receiving response");
+      return VGREResult::ERR_TIMEOUT;
+    }
+    
+    // Wait for data with blocking I/O
+    VGREResult wait_result = waitForData(client.socket_fd, remaining_ms);
+    if (wait_result == VGREResult::ERR_TIMEOUT) {
+      VGRE_LOG_ERROR("TCPCluster", "Security handshake timed out while receiving response");
+      return VGREResult::ERR_TIMEOUT;
+    } else if (wait_result != VGREResult::SUCCESS) {
+      VGRE_LOG_ERROR("TCPCluster", "Security handshake: poll failed");
+      return VGREResult::ERR_IO;
+    }
+    
+    uint8_t buf[256];
+    size_t toRead = std::min(sizeof(buf), expectedLen - rx.size());
+    int n = recv(client.socket_fd, buf, static_cast<int>(toRead), 0);
+    if (n > 0) {
+      rx.insert(rx.end(), buf, buf + n);
+    } else if (n == 0) {
+      VGRE_LOG_ERROR("TCPCluster",
+          "Master: Security handshake recv failed for " + client.ip_address +
+          " (fd=" + std::to_string(client.socket_fd) + "): "
+          "peer closed connection");
+      return VGREResult::ERR_IO;
+    } else {
       int saved_errno = errno;
       VGRE_LOG_ERROR("TCPCluster",
           "Master: Security handshake recv failed for " + client.ip_address +
@@ -2407,65 +3106,39 @@ VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConne
                  "or VGRE_TCP_AUTH_TOKEN mismatch"));
       return VGREResult::ERR_IO;
     }
-    if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-  
-  if (rx.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
-     return VGREResult::ERR_IO;
   }
   
   VSBPHeader* header = reinterpret_cast<VSBPHeader*>(rx.data());
   if (header->magic != VSBP_MAGIC) {
-      VGRE_LOG_ERROR("TCPCluster", "Security handshake: invalid magic in response");
+      VGRE_LOG_ERROR("TCPCluster",
+          "Master: Security handshake failed - invalid magic number in response from " +
+          client.ip_address + " (received=0x" +
+          std::to_string(header->magic) + ", expected=0x" +
+          std::to_string(VSBP_MAGIC) + ") - closing connection");
+      vgre_close_socket(client.socket_fd);
+      client.socket_fd = VGRE_INVALID_SOCKET;
+      client.active = false;
       return VGREResult::ERR_AUTH_FAILED;
   }
   
   if (header->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) {
-    // Worker sent a valid VSBP packet but NOT a SECURE_HANDSHAKE_ACK.  This
-    // happens when the remote node runs an older binary that doesn't implement
-    // Phase 5 security: it ignores our SECURE_HANDSHAKE and immediately sends
-    // its own first packet (typically CAPABILITY).  Rather than disconnecting,
-    // fall back to a plaintext connection so the worker still appears in the
-    // cluster and its hardware data (CPU cores, RAM) is visible in the dashboard.
-    //
-    // All bytes already read — including the leading packet — are saved to
-    // rx_buffer so serverLoop processes them normally (CAPABILITY → cpu_cores).
-    // secureChannel is intentionally left null: recv_packet() uses raw mode.
-    if (header->magic == VSBP_MAGIC) {
-      VGRE_LOG_WARN("TCPCluster",
-          "Master: Worker " + client.ip_address +
-          " sent packet type " + std::to_string(header->type) +
-          " instead of SECURE_HANDSHAKE_ACK — old worker detected, "
-          "accepting as plaintext connection");
-      // rx_buffer is safe to write: serverLoop skips this client while
-      // is_authenticating == true, so there is no concurrent reader.
-      client.rx_buffer.insert(client.rx_buffer.end(), rx.begin(), rx.end());
-      // Leave secureChannel null → plaintext path in recv_packet/flush_tx_queues
-      return VGREResult::SUCCESS;
-    }
+    // Security policy enforcement: When security is enabled, we MUST receive
+    // SECURE_HANDSHAKE_ACK. Any other packet type (including valid VSBP packets
+    // from older workers) is rejected. No plaintext fallback is allowed.
     VGRE_LOG_ERROR("TCPCluster",
-        "Security handshake: invalid magic or unexpected packet type " +
-        std::to_string(header->type) +
-        " (expected SECURE_HANDSHAKE_ACK=" +
-        std::to_string(static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) + ")");
+        "Master: Security handshake failed - closing connection (no plaintext fallback). "
+        "Worker " + client.ip_address +
+        " sent packet type " + std::to_string(header->type) +
+        " instead of SECURE_HANDSHAKE_ACK (expected=" +
+        std::to_string(static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) + "). "
+        "This may indicate an incompatible worker version or VGRE_TCP_AUTH_TOKEN mismatch.");
+    vgre_close_socket(client.socket_fd);
+    client.socket_fd = VGRE_INVALID_SOCKET;
+    client.active = false;
     return VGREResult::ERR_AUTH_FAILED;
   }
 
   std::memcpy(&clientHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
-
-  // Save any bytes read beyond the handshake ACK (e.g., pipelined CAPABILITY).
-  // serverLoop does not poll this fd while is_authenticating == true, so
-  // writing to rx_buffer here is safe — no concurrent reader.
-  {
-    const size_t consumed = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
-    if (rx.size() > consumed) {
-      client.rx_buffer.insert(client.rx_buffer.end(),
-                              rx.begin() + consumed, rx.end());
-      VGRE_LOG_DEBUG("TCPCluster",
-          "Handshake: saved " + std::to_string(rx.size() - consumed) +
-          " extra bytes from rx to rx_buffer for serverLoop");
-    }
-  }
 
   // 4. Derive session key and create secure channel
   client.secureChannel = std::make_unique<SecureChannel>();
@@ -2478,7 +3151,8 @@ VGREResult TCPClusterManager::performSecureHandshake(std::shared_ptr<ClientConne
 
   client.security_established = true;
   VGRE_LOG_INFO("TCPCluster",
-                "Security handshake completed with " + client.ip_address);
+                "Master: Security handshake completed with " + client.ip_address +
+                " - connection secured (no plaintext fallback)");
   return VGREResult::SUCCESS;
 }
 
@@ -2497,9 +3171,24 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
 
   std::vector<uint8_t> peek;
   {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(Constants::PEEK_TIMEOUT_MS);
     while (peek.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
-      if (std::chrono::steady_clock::now() > deadline) break;
+      auto now = std::chrono::steady_clock::now();
+      if (now > deadline) break;
+      
+      // Calculate remaining timeout
+      int remaining_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+      if (remaining_ms <= 0) break;
+      
+      // Wait for data with blocking I/O
+      VGREResult wait_result = waitForData(client_fd_, remaining_ms);
+      if (wait_result == VGREResult::ERR_TIMEOUT) {
+        break; // Timeout - master is in plain-text mode
+      } else if (wait_result != VGREResult::SUCCESS) {
+        VGRE_LOG_ERROR("TCPCluster", "Worker: Security handshake peek poll failed");
+        return VGREResult::ERR_IO;
+      }
+      
       int n = recv_packet(client_fd_, peek, nullptr);
       if (n < 0) {
         // recv_packet returns -1 for both graceful close (recv=0) and real errors.
@@ -2513,7 +3202,6 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
                    "clientLoop will reconnect automatically"));
         return VGREResult::ERR_IO;
       }
-      if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   }
 
@@ -2542,15 +3230,13 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
 
   // Master wants Phase 5 security.  Check that we have an auth token.
   if (auth_token_str_.empty()) {
-    VGRE_LOG_WARN("TCPCluster",
-        "Worker: Master requested Phase 5 security but VGRE_TCP_AUTH_TOKEN is not set "
-        "— connecting in plain-text (master may reject this connection)");
-    // Push the handshake bytes back so the staging processor sees them.
-    std::lock_guard<std::mutex> lock(staging_mutex_);
-    active_staging_->insert(active_staging_->end(), peek.begin(), peek.end());
-    staging_ready_ = true;
-    staging_cv_.notify_one();
-    return VGREResult::SUCCESS;
+    VGRE_LOG_ERROR("TCPCluster",
+        "Worker: Security handshake failed - closing connection (no plaintext fallback). "
+        "Master requested Phase 5 security but VGRE_TCP_AUTH_TOKEN is not set. "
+        "Please set VGRE_TCP_AUTH_TOKEN environment variable and restart.");
+    vgre_close_socket(client_fd_);
+    client_fd_ = VGRE_INVALID_SOCKET;
+    return VGREResult::ERR_AUTH_FAILED;
   }
 
   SecureHandshakePacket masterHs{};
@@ -2578,7 +3264,7 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
   SecureHandshakePacket ack{};
   SecureChannel::generateNonce(ack.nonce);
   
-  if (!send_packet_direct(client_fd_, PacketType::SECURE_HANDSHAKE_ACK, &ack, sizeof(SecureHandshakePacket), client_secure_channel_.get())) {
+  if (send_packet_direct(client_fd_, PacketType::SECURE_HANDSHAKE_ACK, &ack, sizeof(SecureHandshakePacket), client_secure_channel_.get()) != VGREResult::SUCCESS) {
     VGRE_LOG_ERROR("TCPCluster", "Client security handshake: failed to send ACK");
     is_authenticating_ = false;
     return VGREResult::ERR_IO;
@@ -2617,14 +3303,15 @@ VGREResult TCPClusterManager::launchPartitionedKernel(
   std::vector<NodeCapability> nodes;
   auto resources = HybridComputeManager::instance().getResources();
 
-  // Local node
+  // Local node — no network penalty (loopback / shared memory)
   NodeCapability local;
   local.address = "local";
   local.worker_idx = -1;
   local.cpu_cores = resources.cpuCores;
-  local.measured_gflops = resources.gflops; // Authoritative local metric
-  local.avg_latency_ms = resources.avgLatency; // Local engine latency
-  local.is_local = true; 
+  local.measured_gflops = resources.gflops;
+  local.avg_latency_ms = resources.avgLatency;
+  local.is_local = true;
+  local.network_bandwidth_gbps = 1e6; // sentinel: local, no bandwidth bottleneck
   nodes.push_back(local);
 
   // Remote workers
@@ -2637,9 +3324,10 @@ VGREResult TCPClusterManager::launchPartitionedKernel(
       cap.address = clients_[i]->ip_address;
       cap.worker_idx = static_cast<int>(i);
       cap.cpu_cores = clients_[i]->cpu_cores;
-      cap.measured_gflops = clients_[i]->last_telemetry.gflops; // Authoritative remote metric
-      cap.avg_latency_ms = clients_[i]->last_telemetry.avg_kernel_latency_ms; // Remote engine latency
+      cap.measured_gflops = clients_[i]->last_telemetry.gflops;
+      cap.avg_latency_ms = clients_[i]->last_telemetry.avg_kernel_latency_ms;
       cap.is_local = false;
+      cap.network_bandwidth_gbps = clients_[i]->network_bandwidth_gbps;
       nodes.push_back(cap);
     }
   }
@@ -2699,103 +3387,10 @@ VGREResult TCPClusterManager::launchPartitionedKernel(
       }
 
       // Stream arguments first (same as launchRemoteKernel)
-      std::vector<ArgType> argTypes;
-      core::RuntimeEngine::instance().getKernelArgTypes(kernel_id, argTypes);
-
-      for (int i = 0; i < num_args; ++i) {
-        ArgType type = (i < static_cast<int>(argTypes.size())) ? argTypes[i] : ArgType::UINT64;
-        if (type == ArgType::POINTER) {
-          void* ptr = *static_cast<void**>(args[i]);
-          uint64_t handle = reinterpret_cast<uint64_t>(ptr);
-          size_t size = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
-          if (size > 0 && ptr) {
-            auto& mm = core::RuntimeEngine::instance().getMemoryManager();
-            std::vector<std::pair<size_t, size_t>> dirtyRanges;
-            bool useDelta = clients_[slice.worker_idx]->synced_handles.count(ptr) > 0;
-            if (useDelta) {
-                mm.getDirtyPages(ptr, dirtyRanges);
-            }
-            
-            if (useDelta && !dirtyRanges.empty()) {
-                // Delta-Sync
-                if (clients_[slice.worker_idx]->is_local && clients_[slice.worker_idx]->shmManager) {
-                    uint32_t numRanges = static_cast<uint32_t>(dirtyRanges.size());
-                    DataShmDirtyPacket dspkt{};
-                    dspkt.target_ptr = handle;
-                    dspkt.num_ranges = numRanges;
-                    
-                    uint64_t totalSize = 0;
-                    for (auto& range : dirtyRanges) totalSize += range.second;
-                    
-                    uint64_t baseOffset = clients_[slice.worker_idx]->shm_offset;
-                    clients_[slice.worker_idx]->shm_offset += totalSize;
-                    
-                    if (baseOffset + totalSize <= clients_[slice.worker_idx]->shmManager->getSize()) {
-                        dspkt.shm_offset = baseOffset;
-                        send_packet(clients_[slice.worker_idx]->socket_fd, PacketType::DATA_SHM_DIRTY, &dspkt, sizeof(DataShmDirtyPacket), clients_[slice.worker_idx]->secureChannel.get());
-                        
-                        uint64_t currentOffset = baseOffset;
-                        for (auto& range : dirtyRanges) {
-                            DirtyRangePacket rpkt{range.first, range.second};
-                            send_packet(clients_[slice.worker_idx]->socket_fd, PacketType::DIRTY_RANGE, &rpkt, sizeof(DirtyRangePacket), clients_[slice.worker_idx]->secureChannel.get());
-                            std::memcpy(static_cast<uint8_t*>(clients_[slice.worker_idx]->shmManager->getBasePtr()) + currentOffset, 
-                                        static_cast<uint8_t*>(ptr) + range.first, range.second);
-                            currentOffset += range.second;
-                        }
-                    } else {
-                        goto full_sync_partition;
-                    }
-                } else {
-                    DataHeaderDirtyPacket dhpkt{};
-                    dhpkt.target_ptr = handle;
-                    dhpkt.num_ranges = static_cast<uint32_t>(dirtyRanges.size());
-                    send_packet(clients_[slice.worker_idx]->socket_fd, PacketType::DATA_HEADER_DIRTY, &dhpkt, sizeof(DataHeaderDirtyPacket), clients_[slice.worker_idx]->secureChannel.get());
-                    for (auto& range : dirtyRanges) {
-                        DirtyRangePacket rpkt{range.first, range.second};
-                        send_packet(clients_[slice.worker_idx]->socket_fd, PacketType::DIRTY_RANGE, &rpkt, sizeof(DirtyRangePacket), clients_[slice.worker_idx]->secureChannel.get());
-                        send_packet(clients_[slice.worker_idx]->socket_fd, PacketType::DATA_BODY, static_cast<uint8_t*>(ptr) + range.first, range.second, clients_[slice.worker_idx]->secureChannel.get());
-                    }
-                }
-                mm.clearDirtyPages(ptr);
-            } else {
-full_sync_partition:
-                clients_[slice.worker_idx]->synced_handles.insert(ptr);
-                if (clients_[slice.worker_idx]->is_local && clients_[slice.worker_idx]->shmManager) {
-                    uint64_t offset = clients_[slice.worker_idx]->shm_offset;
-                    clients_[slice.worker_idx]->shm_offset += size;
-                    if (offset + size <= clients_[slice.worker_idx]->shmManager->getSize()) {
-                        std::memcpy(static_cast<uint8_t*>(clients_[slice.worker_idx]->shmManager->getBasePtr()) + offset, ptr, size);
-                        DataShmPacket dspkt{};
-                        dspkt.target_ptr = handle;
-                        dspkt.shm_offset = offset;
-                        dspkt.size = size;
-                        send_packet(clients_[slice.worker_idx]->socket_fd, PacketType::DATA_SHM, &dspkt, sizeof(DataShmPacket), clients_[slice.worker_idx]->secureChannel.get());
-                    } else {
-                        goto fallback_tcp_partition;
-                    }
-                } else {
-fallback_tcp_partition:
-                    DataHeaderPacket dpkt{};
-                    dpkt.target_ptr = handle;
-                    dpkt.size = size;
-                    send_packet(clients_[slice.worker_idx]->socket_fd, PacketType::DATA_HEADER, &dpkt, sizeof(DataHeaderPacket), clients_[slice.worker_idx]->secureChannel.get());
-                    send_packet(clients_[slice.worker_idx]->socket_fd, PacketType::DATA_BODY, ptr, size, clients_[slice.worker_idx]->secureChannel.get());
-                }
-                mm.clearDirtyPages(ptr);
-            }
-          }
-          ArgScalarPacket apkt{};
-          apkt.arg_index = i;
-          apkt.arg_type = static_cast<uint8_t>(type);
-          apkt.value = handle;
-          send_packet(clients_[slice.worker_idx]->socket_fd, PacketType::ARG_POINTER, &apkt, sizeof(ArgScalarPacket), clients_[slice.worker_idx]->secureChannel.get());
-        } else {
-          ArgScalarPacket apkt{};
-          apkt.arg_index = i;
-          apkt.arg_type = static_cast<uint8_t>(type);
-          std::memcpy(&apkt.value, args[i], 8);
-          send_packet(clients_[slice.worker_idx]->socket_fd, PacketType::ARG_SCALAR, &apkt, sizeof(ArgScalarPacket), clients_[slice.worker_idx]->secureChannel.get());
-        }
+      VGREResult argResult = streamArgumentsToWorker(args, num_args, kernel_id, clients_[slice.worker_idx]);
+      if (argResult != VGREResult::SUCCESS) {
+          VGRE_LOG_ERROR("TCPCluster", "Failed to stream arguments for partition " + std::to_string(slice.partition_id));
+          continue; // Skip this partition
       }
 
       // Send partition dispatch packet
@@ -2875,9 +3470,18 @@ VGREResult TCPClusterManager::waitForRemoteResult(uint64_t kernel_id, int timeou
 
 void TCPClusterManager::handlePartitionDispatch(
     const PartitionDispatchPacket &pkt) {
+  // Early authentication validation - check auth BEFORE any processing
   if (auth_token_ == 0 || pkt.auth_token != auth_token_) {
     VGRE_LOG_ERROR("TCPCluster",
                    "Rejected partition dispatch: invalid auth token");
+    pending_args_.clear(); // Clear any pending arguments on auth failure
+    return;
+  }
+  
+  // Packet structure validation after auth check
+  if (pkt.partition_grid_dim[0] == 0 || pkt.block_dim[0] == 0) {
+    VGRE_LOG_ERROR("TCPCluster", "Invalid Partition Dispatch Packet Received");
+    pending_args_.clear(); // Clear pending arguments on validation failure
     return;
   }
 
@@ -3226,11 +3830,12 @@ void TCPClusterManager::syncToIPC() {
       std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
 
       for (const auto& c : clients_) {
-          // Skip dead nodes — do NOT include them in the IPC snapshot.
+          // Skip dead or still-handshaking nodes — only push fully active nodes
+          // to avoid showing zeros for nodes that haven't delivered CAPABILITY yet.
           // Keeping dead entries in clients_ (with active=false) is intentional:
           // launchRemoteKernel() uses index-based access, so removing entries
           // would shift indices and corrupt outstanding worker_id values.
-          if (!c || (!c->active && !c->is_authenticating)) continue;
+          if (!c || !c->active) continue;
 
           vgre_cluster_node_t node{};
           std::strncpy(node.address, c->ip_address.c_str(), sizeof(node.address) - 1);
@@ -3239,15 +3844,7 @@ void TCPClusterManager::syncToIPC() {
           node.memory_bytes = c->cpu_memory;
           node.latency_ms = c->last_telemetry.avg_kernel_latency_ms;
 
-          if (c->security_established) {
-              node.available = 1; // Secure
-          } else if (c->is_authenticating) {
-              node.available = 2; // Syncing
-          } else if (c->active) {
-              node.available = 1; // Plain
-          } else {
-              node.available = 0;
-          }
+          node.available = 1; // active node (secure or plain)
 
           std::strncpy(node.igpu_name, c->igpu_name, sizeof(node.igpu_name) - 1);
           ipcNodes.push_back(node);
@@ -3256,6 +3853,152 @@ void TCPClusterManager::syncToIPC() {
 
   // Push updated list to Shared Memory for dashboard visibility
   vgre::advanced::IPCManager::instance().updateClusterNodes(ipcNodes);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Phase 1: Missing Method Implementations
+// ══════════════════════════════════════════════════════════════════════════════
+
+void TCPClusterManager::reportComputeFromWorker(double seconds, int cores, uint64_t kernel_id) {
+  // Validation: only workers can report compute metrics
+  if (!enabled_ || is_master_) {
+    return;
+  }
+
+  // Create credit report packet
+  CreditReportPacket packet;
+  packet.compute_seconds = seconds;
+  packet.cpu_cores = cores;
+  packet.kernel_id = kernel_id;
+  packet.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+
+  // Send to master
+  if (client_fd_ != VGRE_INVALID_SOCKET) {
+    send_packet(client_fd_, PacketType::CREDIT_REPORT, &packet, sizeof(packet), client_secure_channel_.get());
+    VGRE_LOG_DEBUG("TCPCluster", "Reported compute: " + std::to_string(seconds) + 
+                   "s on " + std::to_string(cores) + " cores for kernel " + 
+                   std::to_string(kernel_id));
+  }
+}
+
+// Helper function to get type size from datatype
+static size_t getTypeSizeFromDatatype(int datatype) {
+  switch (datatype) {
+    case static_cast<int>(ArgType::INT32):
+    case static_cast<int>(ArgType::UINT32):
+    case static_cast<int>(ArgType::FLOAT32):
+      return 4;
+    case static_cast<int>(ArgType::INT64):
+    case static_cast<int>(ArgType::UINT64):
+    case static_cast<int>(ArgType::FLOAT64):
+      return 8;
+    default:
+      return 8; // Default to 8 bytes
+  }
+}
+
+VGREResult TCPClusterManager::allReduce(void* ptr, size_t count, int datatype) {
+  if (!enabled_) {
+    return VGREResult::ERR_NOT_INITIALIZED;
+  }
+
+  size_t element_size = getTypeSizeFromDatatype(datatype);
+  size_t total_bytes = count * element_size;
+
+  if (is_master_) {
+    // ── Master Path ──
+    std::unique_lock<std::mutex> lock(reduction_mutex_);
+    
+    // Initialize reduction state
+    is_reducing_ = true;
+    reduction_count_ = 0;
+    reduction_datatype_ = datatype;
+    reduction_element_count_ = count;
+    reduction_sequence_++;
+    
+    // Allocate buffer and copy master's local data
+    active_reduction_buffer_.resize(total_bytes);
+    std::memcpy(active_reduction_buffer_.data(), ptr, total_bytes);
+    
+    // Get number of active workers
+    size_t num_workers = 0;
+    {
+      std::lock_guard<std::recursive_mutex> clients_lock(clients_mutex_);
+      for (const auto& c : clients_) {
+        if (c && c->active) {
+          num_workers++;
+        }
+      }
+    }
+    
+    // Wait for all workers to send their data (with 30-second timeout)
+    bool success = reduction_cv_.wait_for(lock, std::chrono::seconds(30), [this, num_workers]() {
+      return reduction_count_ >= static_cast<int>(num_workers) || !enabled_;
+    });
+    
+    if (!success || !enabled_) {
+      is_reducing_ = false;
+      return VGREResult::ERR_TIMEOUT;
+    }
+    
+    // Broadcast final result to all workers
+    {
+      std::lock_guard<std::recursive_mutex> clients_lock(clients_mutex_);
+      for (const auto& c : clients_) {
+        if (c && c->active) {
+          send_packet(c->socket_fd, PacketType::RAW_DATA, 
+                     active_reduction_buffer_.data(), total_bytes, 
+                     c->secureChannel.get());
+        }
+      }
+    }
+    
+    // Copy result back to master's ptr
+    std::memcpy(ptr, active_reduction_buffer_.data(), total_bytes);
+    
+    // Reset state
+    is_reducing_ = false;
+    reduction_cv_.notify_all();
+    
+    return VGREResult::SUCCESS;
+    
+  } else {
+    // ── Worker Path ──
+    
+    // Create collective operation packet
+    CollectiveOpPacket op_packet;
+    op_packet.op_type = 0; // all_reduce
+    op_packet.datatype = datatype;
+    op_packet.count = count;
+    op_packet.sequence = reduction_sequence_++;
+    
+    // Send collective op packet followed by raw data
+    if (client_fd_ == VGRE_INVALID_SOCKET) {
+      return VGREResult::ERR_NOT_INITIALIZED;
+    }
+    
+    send_packet(client_fd_, PacketType::COLLECTIVE_OP, &op_packet, sizeof(op_packet), 
+               client_secure_channel_.get());
+    send_packet(client_fd_, PacketType::RAW_DATA, ptr, total_bytes, 
+               client_secure_channel_.get());
+    
+    // Wait for result from master (with 30-second timeout)
+    std::unique_lock<std::mutex> lock(reduction_mutex_);
+    bool success = reduction_cv_.wait_for(lock, std::chrono::seconds(30), [this]() {
+      return !active_reduction_buffer_.empty() || !enabled_;
+    });
+    
+    if (!success || !enabled_ || active_reduction_buffer_.empty()) {
+      return VGREResult::ERR_TIMEOUT;
+    }
+    
+    // Copy result back to ptr
+    std::memcpy(ptr, active_reduction_buffer_.data(), total_bytes);
+    active_reduction_buffer_.clear();
+    
+    return VGREResult::SUCCESS;
+  }
 }
 
 } // namespace advanced
