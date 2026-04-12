@@ -2,6 +2,7 @@
 
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
+#include "vgre/common/types.h"
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/core/shm_manager.h"
 #include <atomic>
@@ -217,11 +218,11 @@ public:
 
   // Phase 5: Secure Packet I/O
   // VSBP v0.1.2: Raw packet dispatch with automatic header construction
-  bool send_packet(vgre_socket_t fd, PacketType type, const void* payload, size_t payloadLen, SecureChannel* sc = nullptr);
-  bool send_packet_direct(vgre_socket_t fd, PacketType type, const void* payload, size_t payloadLen, SecureChannel* sc = nullptr);
+  VGREResult send_packet(vgre_socket_t fd, PacketType type, const void* payload, size_t payloadLen, SecureChannel* sc = nullptr);
+  VGREResult send_packet_direct(vgre_socket_t fd, PacketType type, const void* payload, size_t payloadLen, SecureChannel* sc = nullptr);
   int recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBuffer, SecureChannel *sc = nullptr);
   void reportComputeFromWorker(double seconds, int cores, uint64_t kernel_id);
-  bool broadcastPacket(PacketType type, const void* payload, size_t payloadLen);
+  VGREResult broadcastPacket(PacketType type, const void* payload, size_t payloadLen);
 
 
   // ── Phase 5: Security ────────────────────────────────────────────────
@@ -282,6 +283,11 @@ public:
     std::unique_ptr<vgre::core::ShmManager> shmManager;
     uint64_t shm_offset = 0;
     std::unordered_set<void*> synced_handles;
+
+    // Measured inter-node bandwidth in Gb/s.
+    // Updated by the proactive connection loop after a micro-benchmark probe.
+    // Default 10.0 (typical 10GbE); local connections use a large sentinel.
+    double network_bandwidth_gbps = 10.0;
   };
 
   struct ClusterNodeInfo {
@@ -349,6 +355,34 @@ private:
   void handleRemoteCommand(const RemoteCommandPacket &pkt);
   void handlePartitionDispatch(const PartitionDispatchPacket &pkt);
   
+  // Duplicate connection detection (atomic check-and-insert)
+  bool addClientIfNotDuplicate(const std::string& ip_address, vgre_socket_t socket_fd, const sockaddr_in& address);
+  
+  // Packet construction helper
+  std::vector<uint8_t> constructPacket(PacketType type, const void* payload, size_t payloadLen);
+  
+  // Delta-sync helpers
+  VGREResult syncPointerToWorker(void* ptr, uint64_t handle, std::shared_ptr<ClientConnection> client);
+  VGREResult sendDeltaSync(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client);
+  VGREResult sendDeltaSyncWithRetry(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client);
+  VGREResult sendDeltaSyncSHM(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client);
+  VGREResult sendDeltaSyncTCP(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client);
+  VGREResult sendFullSync(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client);
+  VGREResult sendFullSyncSHM(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client);
+  VGREResult sendFullSyncTCP(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client);
+  
+  // Argument serialization helpers
+  VGREResult streamArgumentsToWorker(void** args, int num_args, uint64_t kernel_id, std::shared_ptr<ClientConnection> client);
+  VGREResult sendStructArg(void* arg, int arg_index, uint64_t kernel_id, std::shared_ptr<ClientConnection> client);
+  VGREResult sendPointerArg(void* arg, int arg_index, std::shared_ptr<ClientConnection> client);
+  VGREResult sendScalarArg(void* arg, int arg_index, ArgType type, std::shared_ptr<ClientConnection> client);
+  
+  // Blocking I/O helper
+  VGREResult waitForData(vgre_socket_t fd, int timeout_ms);
+  
+  // Diagnostic helper
+  std::string hexDump(const uint8_t* data, size_t max_bytes);
+  
   // UDP Auto-Discovery
   void udpAnnouncerLoop();       // Master (announces master to workers)
   void udpMasterDiscoveryLoop();  // Master (discovers active workers)
@@ -381,6 +415,11 @@ private:
   std::string pending_kernel_name_;
   uint32_t pending_kernel_source_len_ = 0;
   ReceiveState receive_state_ = ReceiveState::IDLE;
+  
+  // Collective operation state (master-side)
+  uint32_t pending_collective_op_type_ = 0;
+  uint32_t pending_collective_datatype_ = 0;
+  uint64_t pending_collective_count_ = 0;
 
   bool is_master_ = false;
   int port_ = 7777;
