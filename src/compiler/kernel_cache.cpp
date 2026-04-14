@@ -17,9 +17,9 @@
 namespace vgre {
 namespace compiler {
 
-KernelCache& KernelCache::instance() {
-    static KernelCache instance;
-    return instance;
+KernelCache &KernelCache::instance() {
+  static KernelCache* instance = new KernelCache();
+  return *instance;
 }
 
 VGREResult KernelCache::initialize(const std::string& cacheDir) {

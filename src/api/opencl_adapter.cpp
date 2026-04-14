@@ -14,6 +14,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace vgre {
@@ -31,6 +33,9 @@ OpenCLAdapter::OpenCLAdapter() {
 #elif defined(_WIN32)
   char name[256]; DWORD size = sizeof(name);
   if (GetComputerNameA(name, &size)) entropy += name;
+#elif defined(__APPLE__)
+  char host[256];
+  if (gethostname(host, sizeof(host)) == 0) entropy += host;
 #endif
   platformId_ = static_cast<cl_platform_id>(std::hash<std::string>{}(entropy + "_PLATFORM"));
   deviceId_ = static_cast<cl_device_id>(std::hash<std::string>{}(entropy + "_DEVICE_0"));
@@ -399,6 +404,13 @@ cl_kernel_handle OpenCLAdapter::createKernel(cl_program program,
     return 0;
   }
   ki.vgreKernelId = vgreId;
+  if (core::RuntimeEngine::instance().getKernelArgTypes(vgreId, ki.expectedArgTypes) !=
+      VGREResult::SUCCESS) {
+    if (errcode)
+      *errcode = CL_INVALID_VALUE;
+    return 0;
+  }
+  ki.args.resize(ki.expectedArgTypes.size());
 
   kernels_[kid] = ki;
   if (errcode)
@@ -412,15 +424,10 @@ cl_int OpenCLAdapter::setKernelArg(cl_kernel_handle kernel, cl_uint argIndex,
   auto it = kernels_.find(kernel);
   if (it == kernels_.end())
     return CL_INVALID_VALUE;
+  if (argIndex >= it->second.expectedArgTypes.size())
+    return CL_INVALID_VALUE;
   if (argSize > 0 && !argValue)
     return CL_INVALID_VALUE;
-  if (argSize > sizeof(uint64_t))
-    return CL_INVALID_VALUE;
-
-  // Grow args vector if needed
-  if (argIndex >= it->second.args.size()) {
-    it->second.args.resize(argIndex + 1);
-  }
 
   OwnedKernelArg arg;
   // Deep-copy the argument data into an owned buffer to prevent
@@ -430,22 +437,28 @@ cl_int OpenCLAdapter::setKernelArg(cl_kernel_handle kernel, cl_uint argIndex,
     std::memcpy(arg.ownedData.data(), argValue, argSize);
   }
 
-  if (argSize == sizeof(cl_mem)) {
-    arg.type = ArgType::POINTER;
-  } else if (argSize == sizeof(int)) {
-    arg.type = ArgType::INT32;
-  } else if (argSize == sizeof(uint32_t)) {
-    arg.type = ArgType::UINT32;
-  } else if (argSize == sizeof(float)) {
-    arg.type = ArgType::FLOAT32;
-  } else if (argSize == sizeof(double)) {
-    arg.type = ArgType::FLOAT64;
-  } else if (argSize == sizeof(uint64_t)) {
-    arg.type = ArgType::UINT64;
-  } else if (argSize == sizeof(int64_t)) {
-    arg.type = ArgType::INT64;
-  } else {
-    arg.type = ArgType::UINT64;
+  arg.type = it->second.expectedArgTypes[argIndex];
+  switch (arg.type) {
+  case ArgType::POINTER:
+    if (argSize != sizeof(cl_mem))
+      return CL_INVALID_VALUE;
+    break;
+  case ArgType::INT32:
+  case ArgType::UINT32:
+  case ArgType::FLOAT32:
+    if (argSize != sizeof(uint32_t))
+      return CL_INVALID_VALUE;
+    break;
+  case ArgType::INT64:
+  case ArgType::UINT64:
+  case ArgType::FLOAT64:
+    if (argSize != sizeof(uint64_t))
+      return CL_INVALID_VALUE;
+    break;
+  case ArgType::STRUCT:
+    if (argSize == 0)
+      return CL_INVALID_VALUE;
+    break;
   }
   arg.size = argSize;
   it->second.args[argIndex] = std::move(arg);
@@ -461,8 +474,9 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
                                            cl_uint numEventsInWaitList,
                                            const cl_event *eventWaitList,
                                            cl_event *event) {
-  (void)numEventsInWaitList;
-  (void)eventWaitList;
+  if (numEventsInWaitList > 0 && !eventWaitList) {
+    return CL_INVALID_VALUE;
+  }
 
   KernelInfo kernelInfo;
   {
@@ -502,34 +516,22 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
     blockDim.y = (workDim >= 2) ? static_cast<uint32_t>(localWorkSize[1]) : 1;
     blockDim.z = (workDim >= 3) ? static_cast<uint32_t>(localWorkSize[2]) : 1;
   } else {
-    blockDim = dim3(256); // default
+    // Preserve OpenCL global-work-size semantics exactly when local size is unspecified.
+    blockDim = dim3(1, 1, 1);
   }
 
-  if (globalWorkSize) {
-    // OpenCL global_work_size is TOTAL threads, not blocks
-    // Rigorous ceiling division mapping
-    gridDim.x = (workDim >= 1)
-                    ? static_cast<uint32_t>(
-                          (globalWorkSize[0] + blockDim.x - 1) / blockDim.x)
-                    : 1;
-    gridDim.y = (workDim >= 2)
-                    ? static_cast<uint32_t>(
-                          (globalWorkSize[1] + blockDim.y - 1) / blockDim.y)
-                    : 1;
-    gridDim.z = (workDim >= 3)
-                    ? static_cast<uint32_t>(
-                          (globalWorkSize[2] + blockDim.z - 1) / blockDim.z)
-                    : 1;
-  }
-
-  // Build args array from deep-copied owned buffers
-  std::vector<ArgType> expectedTypes;
-  if (core::RuntimeEngine::instance().getKernelArgTypes(kernelInfo.vgreKernelId,
-                                                         expectedTypes) !=
-      VGREResult::SUCCESS) {
+  // OpenCL global_work_size is total threads, not blocks.
+  if ((workDim >= 1 && (globalWorkSize[0] % blockDim.x) != 0) ||
+      (workDim >= 2 && (globalWorkSize[1] % blockDim.y) != 0) ||
+      (workDim >= 3 && (globalWorkSize[2] % blockDim.z) != 0)) {
     return CL_INVALID_VALUE;
   }
-  if (kernelInfo.args.size() != expectedTypes.size()) {
+  gridDim.x = (workDim >= 1) ? static_cast<uint32_t>(globalWorkSize[0] / blockDim.x) : 1;
+  gridDim.y = (workDim >= 2) ? static_cast<uint32_t>(globalWorkSize[1] / blockDim.y) : 1;
+  gridDim.z = (workDim >= 3) ? static_cast<uint32_t>(globalWorkSize[2] / blockDim.z) : 1;
+
+  // Build args array from deep-copied owned buffers
+  if (kernelInfo.args.size() != kernelInfo.expectedArgTypes.size()) {
     return CL_INVALID_VALUE;
   }
 
@@ -539,7 +541,7 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
     auto &arg = kernelInfo.args[i];
     if (arg.ownedData.empty())
       return CL_INVALID_VALUE;
-    if (arg.type != expectedTypes[i])
+    if (arg.type != kernelInfo.expectedArgTypes[i])
       return CL_INVALID_VALUE;
 
     if (arg.type == ArgType::POINTER &&
@@ -575,6 +577,13 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
       return CL_INVALID_COMMAND_QUEUE;
     }
     stream = qit->second.stream;
+  }
+
+  if (numEventsInWaitList > 0) {
+    cl_int w = waitForEvents(numEventsInWaitList, eventWaitList);
+    if (w != CL_SUCCESS) {
+      return w;
+    }
   }
 
   auto r = core::RuntimeEngine::instance().launchKernel(
@@ -696,8 +705,8 @@ cl_int OpenCLAdapter::finish(cl_command_queue queue) {
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 OpenCLAdapter &OpenCLAdapter::instance() {
-  static OpenCLAdapter adapter;
-  return adapter;
+  static OpenCLAdapter* adapter = new OpenCLAdapter();
+  return *adapter;
 }
 
 } // namespace api

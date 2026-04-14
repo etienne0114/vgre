@@ -217,8 +217,8 @@ void WorkloadPartitioner::recordActualExecution(const std::string &address,
 }
 
 WorkloadPartitioner &WorkloadPartitioner::instance() {
-  static WorkloadPartitioner inst;
-  return inst;
+  static WorkloadPartitioner* inst = new WorkloadPartitioner();
+  return *inst;
 }
 
 } // namespace advanced
