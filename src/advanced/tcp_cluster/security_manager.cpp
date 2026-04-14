@@ -11,7 +11,6 @@ namespace advanced {
 // Constants for security operations
 namespace {
   constexpr int HANDSHAKE_TIMEOUT_SECONDS = 5;
-  constexpr int PEEK_TIMEOUT_MS = 200;
   constexpr uint64_t HANDSHAKE_STUCK_TIMEOUT_MS = 10000; // 10 seconds
 }
 
@@ -299,78 +298,10 @@ VGREResult SecurityManager::performServerHandshake(
 }
 
 VGREResult SecurityManager::performClientHandshake() {
-  // Auto-negotiate: do a short-timeout peek to detect whether the master is
-  // initiating a Phase 5 security handshake, regardless of whether the worker's
-  // own security_enabled_ flag is set.  This lets a worker that was started
-  // without --auth-token still complete the handshake when the master has
-  // security toggled on, and lets a worker skip it gracefully when the master
-  // is in plain mode.
-  //
-  // Peek window: 200 ms.  If the master sends SECURE_HANDSHAKE within that
-  // window, proceed with the full handshake.  If nothing arrives, or it arrives
-  // and is NOT SECURE_HANDSHAKE, push any received bytes back to client_rx_buffer_
-  // for normal processing and return SUCCESS (plain-text connection).
-
-  std::vector<uint8_t> peek;
-  {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(PEEK_TIMEOUT_MS);
-    while (peek.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
-      auto now = std::chrono::steady_clock::now();
-      if (now > deadline) break;
-      
-      // Calculate remaining timeout
-      int remaining_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
-      if (remaining_ms <= 0) break;
-      
-      // Wait for data with blocking I/O
-      VGREResult wait_result = parent_->waitForData(parent_->client_fd_, remaining_ms);
-      if (wait_result == VGREResult::ERR_TIMEOUT) {
-        break; // Timeout - master is in plain-text mode
-      } else if (wait_result != VGREResult::SUCCESS) {
-        VGRE_LOG_ERROR("TCPCluster", "Worker: Security handshake peek poll failed");
-        return VGREResult::ERR_IO;
-      }
-      
-      int n = parent_->recv_packet(parent_->client_fd_, peek, nullptr);
-      if (n < 0) {
-        // recv_packet returns -1 for both graceful close (recv=0) and real errors.
-        int saved_errno = errno;
-        VGRE_LOG_ERROR("TCPCluster",
-            "Worker: Security handshake peek recv failed"
-            " (fd=" + std::to_string(parent_->client_fd_) + "): " +
-            (saved_errno != 0
-                 ? std::string(std::strerror(saved_errno))
-                 : "peer closed connection — likely a connection-race (transient); "
-                   "clientLoop will reconnect automatically"));
-        return VGREResult::ERR_IO;
-      }
-    }
-  }
-
-  // No data or partial data — master is in plain-text mode, proceed without security.
-  if (peek.size() < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) {
-    // Save any partial bytes for normal processing.
-    if (!peek.empty()) {
-      std::lock_guard<std::mutex> lock(parent_->staging_mutex_);
-      parent_->active_staging_->insert(parent_->active_staging_->end(), peek.begin(), peek.end());
-      parent_->staging_ready_ = true;
-      parent_->staging_cv_.notify_one();
-    }
+  if (!parent_->security_enabled_) {
     return VGREResult::SUCCESS;
   }
 
-  VSBPHeader* phdr = reinterpret_cast<VSBPHeader*>(peek.data());
-  if (phdr->magic != VSBP_MAGIC ||
-      phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
-    // First packet is NOT a handshake — plain-text connection, push bytes for normal use.
-    std::lock_guard<std::mutex> lock(parent_->staging_mutex_);
-    parent_->active_staging_->insert(parent_->active_staging_->end(), peek.begin(), peek.end());
-    parent_->staging_ready_ = true;
-    parent_->staging_cv_.notify_one();
-    return VGREResult::SUCCESS;
-  }
-
-  // Master wants Phase 5 security.  Check that we have an auth token.
   if (parent_->auth_token_str_.empty()) {
     VGRE_LOG_ERROR("TCPCluster",
         "Worker: Security handshake failed - closing connection (no plaintext fallback). "
@@ -381,16 +312,55 @@ VGREResult SecurityManager::performClientHandshake() {
     return VGREResult::ERR_AUTH_FAILED;
   }
 
-  SecureHandshakePacket masterHs{};
-  std::memcpy(&masterHs, peek.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
+  // Security is explicitly enabled: require SECURE_HANDSHAKE from master.
+  std::vector<uint8_t> rx;
+  const size_t expected = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
+  auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::seconds(HANDSHAKE_TIMEOUT_SECONDS);
+  while (rx.size() < expected) {
+    auto now = std::chrono::steady_clock::now();
+    if (now > deadline) {
+      VGRE_LOG_ERROR("TCPCluster", "Worker: Security handshake timed out waiting for master");
+      vgre::common::vgre_close_socket(parent_->client_fd_);
+      parent_->client_fd_ = vgre::common::VGRE_INVALID_SOCKET;
+      return VGREResult::ERR_TIMEOUT;
+    }
+    int remaining_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - now).count());
+    VGREResult wait_result = parent_->waitForData(parent_->client_fd_, remaining_ms);
+    if (wait_result == VGREResult::ERR_TIMEOUT) {
+      continue;
+    }
+    if (wait_result != VGREResult::SUCCESS) {
+      VGRE_LOG_ERROR("TCPCluster", "Worker: Security handshake poll failed");
+      return VGREResult::ERR_IO;
+    }
+    int n = parent_->recv_packet(parent_->client_fd_, rx, nullptr);
+    if (n < 0) {
+      VGRE_LOG_ERROR("TCPCluster", "Worker: Security handshake recv failed");
+      return VGREResult::ERR_IO;
+    }
+  }
 
-  // Save any bytes beyond the handshake packet.
+  VSBPHeader* phdr = reinterpret_cast<VSBPHeader*>(rx.data());
+  if (phdr->magic != VSBP_MAGIC ||
+      phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
+    VGRE_LOG_ERROR("TCPCluster",
+        "Worker: Security handshake failed - expected SECURE_HANDSHAKE first packet");
+    vgre::common::vgre_close_socket(parent_->client_fd_);
+    parent_->client_fd_ = vgre::common::VGRE_INVALID_SOCKET;
+    return VGREResult::ERR_AUTH_FAILED;
+  }
+
+  SecureHandshakePacket masterHs{};
+  std::memcpy(&masterHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
+
+  // Preserve bytes beyond handshake packet for normal staging processing.
   {
-    const size_t consumed = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
-    if (peek.size() > consumed) {
+    if (rx.size() > expected) {
       std::lock_guard<std::mutex> lock(parent_->staging_mutex_);
       parent_->active_staging_->insert(parent_->active_staging_->end(),
-                               peek.begin() + consumed, peek.end());
+                               rx.begin() + expected, rx.end());
       parent_->staging_ready_ = true;
       parent_->staging_cv_.notify_one();
     }

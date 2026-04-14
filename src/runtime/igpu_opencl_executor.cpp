@@ -46,8 +46,8 @@ IGPUOpenCLExecutor::~IGPUOpenCLExecutor() {
         clReleaseProgram(pair.second.program);
     }
     for (auto &pair : bufferCache_) {
-        if (pair.second)
-            clReleaseMemObject(pair.second);
+        if (pair.second.mem)
+            clReleaseMemObject(pair.second.mem);
     }
     bufferCache_.clear();
     if (queue_)
@@ -110,22 +110,45 @@ VGREResult IGPUOpenCLExecutor::initialize() {
     return VGREResult::ERROR_NOT_INITIALIZED;
   }
 
-  // Create command queue with Profiling and Out-of-Order Execution Enabled
-  cl_command_queue_properties props = CL_QUEUE_PROFILING_ENABLE | CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE;
-  cl_queue_properties qprops[] = {CL_QUEUE_PROPERTIES, props, 0};
-  queue_ = clCreateCommandQueueWithProperties(context_, device_, qprops, &err);
-  if (err != CL_SUCCESS) {
-    // Fallback without out-of-order if the device doesn't support it
-    cl_queue_properties fprops[] = {CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0};
-    queue_ = clCreateCommandQueueWithProperties(context_, device_, fprops, &err);
-    if (err != CL_SUCCESS) {
-      clReleaseContext(context_);
-      context_ = nullptr;
-      return VGREResult::ERROR_NOT_INITIALIZED;
+  // Create command queue with profiling; enable out-of-order when available.
+#if defined(CL_VERSION_2_0)
+  {
+    cl_command_queue_properties props =
+        CL_QUEUE_PROFILING_ENABLE | CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE;
+    cl_queue_properties qprops[] = {CL_QUEUE_PROPERTIES, props, 0};
+    queue_ = clCreateCommandQueueWithProperties(context_, device_, qprops, &err);
+    if (err == CL_SUCCESS) {
+      VGRE_LOG_INFO("IGPUOpenCLExecutor",
+                    "Created queue with out-of-order execution and profiling support.");
+    } else {
+      cl_queue_properties fprops[] = {CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0};
+      queue_ = clCreateCommandQueueWithProperties(context_, device_, fprops, &err);
+      if (err == CL_SUCCESS) {
+        VGRE_LOG_WARN("IGPUOpenCLExecutor",
+                      "Created queue without out-of-order execution support.");
+      }
     }
-    VGRE_LOG_WARN("IGPUOpenCLExecutor", "Created queue without out-of-order execution support.");
+  }
+#else
+  queue_ = clCreateCommandQueue(context_, device_, CL_QUEUE_PROFILING_ENABLE |
+                                                     CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE,
+                                &err);
+  if (err != CL_SUCCESS) {
+    queue_ = clCreateCommandQueue(context_, device_, CL_QUEUE_PROFILING_ENABLE,
+                                  &err);
+    if (err == CL_SUCCESS) {
+      VGRE_LOG_WARN("IGPUOpenCLExecutor",
+                    "Created queue without out-of-order execution support.");
+    }
   } else {
-    VGRE_LOG_INFO("IGPUOpenCLExecutor", "Created queue with out-of-order execution and profiling support.");
+    VGRE_LOG_INFO("IGPUOpenCLExecutor",
+                  "Created queue with out-of-order execution and profiling support.");
+  }
+#endif
+  if (err != CL_SUCCESS || !queue_) {
+    clReleaseContext(context_);
+    context_ = nullptr;
+    return VGREResult::ERROR_NOT_INITIALIZED;
   }
 
   initialized_ = true;
@@ -179,9 +202,11 @@ inline float __attribute__((overloadable)) atomicAdd(volatile __global float* p,
 #define __shfl_up_sync(m, v, d) intel_sub_group_shuffle_up(v, v, d)
 #define __shfl_xor_sync(m, v, l) intel_sub_group_shuffle_xor(v, l)
 #else
-// Authoritative local-memory shuffle (Requires AST-based Local Mem injection)
-#define __shfl_sync(m, v, r) (v) 
-#define __shfl_xor_sync(m, v, l) (v)
+// No identity fallback here: fail on use to avoid silent wrong results.
+#define __shfl_sync(m, v, r) VGRE_SHFL_UNSUPPORTED__requires_subgroup_extension(v)
+#define __shfl_down_sync(m, v, d) VGRE_SHFL_UNSUPPORTED__requires_subgroup_extension(v)
+#define __shfl_up_sync(m, v, d) VGRE_SHFL_UNSUPPORTED__requires_subgroup_extension(v)
+#define __shfl_xor_sync(m, v, l) VGRE_SHFL_UNSUPPORTED__requires_subgroup_extension(v)
 #endif
 
 // Warp Vote Primitives
@@ -300,6 +325,8 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
   }
 
   std::vector<cl_mem> buffers;
+  std::vector<size_t> bufferSizes;
+  std::vector<bool> bufferDirty;
   cl_int err;
   for (size_t i = 0; i < argTypes.size(); ++i) {
     if (argTypes[i] == ArgType::POINTER) {
@@ -318,17 +345,28 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
       }
 
       cl_mem buf = nullptr;
+      err = CL_SUCCESS;
       {
           std::lock_guard<std::mutex> lock(mutex_);
           auto bit = bufferCache_.find(host_ptr);
           if (bit != bufferCache_.end()) {
-              buf = bit->second;
-          } else {
-              buf = clCreateBuffer(context_, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
-                                 size, host_ptr, &err);
-              if (err == CL_SUCCESS) {
-                  bufferCache_[host_ptr] = buf;
+              if (bit->second.size >= size && bit->second.mem) {
+                buf = bit->second.mem;
+              } else {
+                if (bit->second.mem) {
+                  clReleaseMemObject(bit->second.mem);
+                }
+                bufferCache_.erase(bit);
               }
+          } else {
+              // no cached entry for this pointer
+          }
+          if (!buf) {
+            buf = clCreateBuffer(context_, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                                 size, host_ptr, &err);
+            if (err == CL_SUCCESS) {
+              bufferCache_[host_ptr] = CachedBuffer{buf, size};
+            }
           }
       }
 
@@ -340,7 +378,15 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
         return VGREResult::ERR_OUT_OF_MEMORY;
       }
       buffers.push_back(buf);
-      clSetKernelArg(compiled.kernel, i, sizeof(cl_mem), &buf);
+      bufferSizes.push_back(size);
+      bufferDirty.push_back(true);
+      err = clSetKernelArg(compiled.kernel, static_cast<cl_uint>(i),
+                           sizeof(cl_mem), &buf);
+      if (err != CL_SUCCESS) {
+        VGRE_LOG_ERROR("IGPUOpenCLExecutor",
+                       "Failed to set pointer kernel arg " + std::to_string(i));
+        return VGREResult::ERROR_INVALID_VALUE;
+      }
     } else {
       // For values, they are directly passed
       size_t primSize = 0;
@@ -359,17 +405,18 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
         primSize = 8;
         break;
       }
-      clSetKernelArg(compiled.kernel, i, primSize, args[i]);
+      err = clSetKernelArg(compiled.kernel, static_cast<cl_uint>(i), primSize, args[i]);
+      if (err != CL_SUCCESS) {
+        VGRE_LOG_ERROR("IGPUOpenCLExecutor",
+                       "Failed to set scalar kernel arg " + std::to_string(i));
+        return VGREResult::ERROR_INVALID_VALUE;
+      }
     }
   }
 
   size_t localWorkSize[3] = {blockDim.x, blockDim.y, blockDim.z};
   size_t globalWorkSize[3] = {gridDim.x * blockDim.x, gridDim.y * blockDim.y,
                               gridDim.z * blockDim.z};
-
-// Forward declare telemetry inclusion if needed or include at top:
-// Assuming include exists or we can just use the type if already included.
-// Actually, let's just make sure it's included at the top. I'll include it.
 
   cl_event kernelEvent;
   err = clEnqueueNDRangeKernel(queue_, compiled.kernel, 3, nullptr,
@@ -379,8 +426,6 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
     VGRE_LOG_ERROR("IGPUOpenCLExecutor",
                    "clEnqueueNDRangeKernel failed with code " +
                        std::to_string(err));
-    for (auto b : buffers)
-      clReleaseMemObject(b);
     return VGREResult::ERROR_LAUNCH_FAILURE;
   }
 
@@ -396,19 +441,18 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
       double durationNs = static_cast<double>(timeEnd - timeStart);
       double durationMs = durationNs / 1e6;
       uint64_t totalThreads = (gridDim.x * gridDim.y * gridDim.z) *
-                              (blockDim.x * blockDim.y * blockDim.z);
-
-      // FLOP estimate: peak_gflops × duration_sec × utilisation factor (0.5).
-      // iGPU kernels are typically memory-bound; 50% of peak is conservative but
-      // far more physically grounded than the previous totalThreads×10 placeholder.
+                              (blockDim.x * blockDim.y * blockDim.z);
+      uint64_t estimatedBytes = 0;
+      for (size_t sz : bufferSizes) {
+        estimatedBytes += sz;
+      }
       auto& eng = vgre::advanced::AdaptiveExecutionEngine::instance();
-      double peakGflops = (eng.isCalibrated() && eng.getMaxGFLOPS() > 0.0)
-                          ? eng.getMaxGFLOPS()
-                          : 10.0;  // 10 GFLOPS: safe lower-bound for typical iGPU
-      double durationSec = durationMs / 1000.0;
-      uint64_t estimatedFlops = static_cast<uint64_t>(peakGflops * 1e9 * durationSec * 0.5);
-      // Memory: 64 bytes/thread is a realistic cache-line estimate for iGPU kernels.
-      uint64_t estimatedBytes = totalThreads * 64;
+      uint64_t estimatedFlops = 0;
+      if (eng.isCalibrated() && eng.getMaxGFLOPS() > 0.0) {
+        double durationSec = durationMs / 1000.0;
+        estimatedFlops =
+            static_cast<uint64_t>(eng.getMaxGFLOPS() * 1e9 * durationSec);
+      }
 
       vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
           kernelName, static_cast<int>(totalThreads), 1, durationMs,
@@ -417,25 +461,26 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
   
   clReleaseEvent(kernelEvent);
 
-  // Still call clFinish to ensure queue is flushed downstream
   err = clFinish(queue_);
+  if (err != CL_SUCCESS) {
+    return VGREResult::ERROR_LAUNCH_FAILURE;
+  }
 
-  // Explicitly unmap/map to sync CL_MEM_USE_HOST_PTR back to system memory
-  // This is critical for mobile/integrated GPUs that share system RAM
+  // Explicitly map/unmap full buffer ranges to force host visibility
+  // for CL_MEM_USE_HOST_PTR-backed allocations.
   for (size_t i = 0; i < buffers.size(); ++i) {
-    // In a real execution, we'd track these pointers more precisely
-    // For now, we perform a blocking map to ensure data consistency
+    if (!bufferDirty[i] || bufferSizes[i] == 0) {
+      continue;
+    }
     void *mapped = clEnqueueMapBuffer(queue_, buffers[i], CL_TRUE,
                                    CL_MAP_READ | CL_MAP_WRITE, 0, 
-                                   1, // Minimal map to trigger sync if size is unknown
+                                   bufferSizes[i],
                                    0, nullptr, nullptr, &err);
     if (err == CL_SUCCESS) {
         clEnqueueUnmapMemObject(queue_, buffers[i], mapped, 0, nullptr, nullptr);
     }
   }
-
-  clFinish(queue_);
-  clFinish(queue_);
+  (void)clFinish(queue_);
   // Note: we no longer release buffers here as they are now cached in bufferCache_
   // for future reuse with the same host pointers.
 
@@ -444,3 +489,5 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
 
 } // namespace runtime
 } // namespace vgre
+
+

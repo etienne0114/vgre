@@ -16,7 +16,6 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
-#include <iostream>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -349,15 +348,6 @@ void TCPClusterManager::processClientStagingBuffer() {
     processing_staging_->clear();
 
     while (enabled_ && !client_rx_buffer_.empty()) {
-        if (!is_master_ && client_rx_buffer_.size() >= sizeof(VSBPHeader)) {
-            VSBPHeader h;
-            std::memcpy(&h, client_rx_buffer_.data(), sizeof(VSBPHeader));
-            std::cout << "[WORKER TCP TRACE] State=" << (int)receive_state_
-                      << " ValidSize=" << client_rx_buffer_.size()
-                      << " PktType=" << h.type
-                      << " PayloadSize=" << h.payloadSize << std::endl;
-        }
-
         if (receive_state_ == ReceiveState::IDLE) {
             if (client_rx_buffer_.size() < sizeof(VSBPHeader)) break;
 
@@ -442,13 +432,9 @@ void TCPClusterManager::processClientStagingBuffer() {
                 std::memcpy(&spkt, client_rx_buffer_.data() + sizeof(VSBPHeader), sizeof(StructDataPacket));
                 client_rx_buffer_.erase(client_rx_buffer_.begin(),
                     client_rx_buffer_.begin() + sizeof(VSBPHeader) + sizeof(StructDataPacket));
-                PendingArg arg;
-                arg.type = (uint8_t)ArgType::STRUCT;
-                arg.data.assign(client_rx_buffer_.begin(),
-                                client_rx_buffer_.begin() + spkt.size);
-                pending_args_[spkt.arg_index] = std::move(arg);
-                client_rx_buffer_.erase(client_rx_buffer_.begin(),
-                                        client_rx_buffer_.begin() + spkt.size);
+                pending_struct_arg_index_ = spkt.arg_index;
+                pending_struct_arg_size_ = spkt.size;
+                receive_state_ = ReceiveState::EXPECTING_STRUCT_BODY;
             } else if (type == PacketType::REGISTER_KERNEL) {
                 KernelRegisterPacket kpkt;
                 std::memcpy(&kpkt, client_rx_buffer_.data() + sizeof(VSBPHeader), sizeof(KernelRegisterPacket));
@@ -625,20 +611,40 @@ void TCPClusterManager::processClientStagingBuffer() {
                     client_rx_buffer_.begin() + sizeof(VSBPHeader) + header.payloadSize);
             }
         } else if (receive_state_ == ReceiveState::EXPECTING_RANGES_TCP) {
-            if (client_rx_buffer_.size() < sizeof(DirtyRangePacket)) break;
+            if (client_rx_buffer_.size() < sizeof(VSBPHeader) + sizeof(DirtyRangePacket)) break;
+            VSBPHeader hdr;
+            std::memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
+            if (hdr.magic != VSBP_MAGIC || hdr.version != VSBP_VERSION ||
+                static_cast<PacketType>(hdr.type) != PacketType::DIRTY_RANGE ||
+                hdr.payloadSize < sizeof(DirtyRangePacket)) {
+                VGRE_LOG_ERROR("TCPCluster", "Worker: invalid DIRTY_RANGE packet while expecting ranges");
+                client_rx_buffer_.clear();
+                receive_state_ = ReceiveState::IDLE;
+                break;
+            }
             DirtyRangePacket rpkt;
-            std::memcpy(&rpkt, client_rx_buffer_.data(), sizeof(DirtyRangePacket));
+            std::memcpy(&rpkt, client_rx_buffer_.data() + sizeof(VSBPHeader), sizeof(DirtyRangePacket));
             client_rx_buffer_.erase(client_rx_buffer_.begin(),
-                client_rx_buffer_.begin() + sizeof(DirtyRangePacket));
+                client_rx_buffer_.begin() + sizeof(VSBPHeader) + sizeof(DirtyRangePacket));
             pending_range_offset_ = rpkt.offset;
             pending_data_size_ = static_cast<uint32_t>(rpkt.size);
             receive_state_ = ReceiveState::EXPECTING_BODY;
         } else if (receive_state_ == ReceiveState::EXPECTING_RANGES_SHM) {
-            if (client_rx_buffer_.size() < sizeof(DirtyRangePacket)) break;
+            if (client_rx_buffer_.size() < sizeof(VSBPHeader) + sizeof(DirtyRangePacket)) break;
+            VSBPHeader hdr;
+            std::memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
+            if (hdr.magic != VSBP_MAGIC || hdr.version != VSBP_VERSION ||
+                static_cast<PacketType>(hdr.type) != PacketType::DIRTY_RANGE ||
+                hdr.payloadSize < sizeof(DirtyRangePacket)) {
+                VGRE_LOG_ERROR("TCPCluster", "Worker: invalid DIRTY_RANGE packet while expecting SHM ranges");
+                client_rx_buffer_.clear();
+                receive_state_ = ReceiveState::IDLE;
+                break;
+            }
             DirtyRangePacket rpkt;
-            std::memcpy(&rpkt, client_rx_buffer_.data(), sizeof(DirtyRangePacket));
+            std::memcpy(&rpkt, client_rx_buffer_.data() + sizeof(VSBPHeader), sizeof(DirtyRangePacket));
             client_rx_buffer_.erase(client_rx_buffer_.begin(),
-                client_rx_buffer_.begin() + sizeof(DirtyRangePacket));
+                client_rx_buffer_.begin() + sizeof(VSBPHeader) + sizeof(DirtyRangePacket));
             if (client_shm_enabled_ && client_shm_manager_) {
                 void* local_ptr = core::RuntimeEngine::instance().getMemoryManager()
                     .getPointer(reinterpret_cast<void*>(pending_target_ptr_));
@@ -650,7 +656,18 @@ void TCPClusterManager::processClientStagingBuffer() {
             }
             if (--pending_num_ranges_ == 0) receive_state_ = ReceiveState::IDLE;
         } else if (receive_state_ == ReceiveState::EXPECTING_BODY) {
-            if (client_rx_buffer_.size() < pending_data_size_) break;
+            if (client_rx_buffer_.size() < sizeof(VSBPHeader)) break;
+            VSBPHeader hdr;
+            std::memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
+            if (hdr.magic != VSBP_MAGIC || hdr.version != VSBP_VERSION ||
+                static_cast<PacketType>(hdr.type) != PacketType::DATA_BODY) {
+                VGRE_LOG_ERROR("TCPCluster", "Worker: invalid DATA_BODY packet while expecting body");
+                client_rx_buffer_.clear();
+                receive_state_ = ReceiveState::IDLE;
+                break;
+            }
+            if (hdr.payloadSize < pending_data_size_) break;
+            if (client_rx_buffer_.size() < sizeof(VSBPHeader) + hdr.payloadSize) break;
             void* handle = reinterpret_cast<void*>(pending_target_ptr_);
             auto& mm = core::RuntimeEngine::instance().getMemoryManager();
             if (!mm.isValidHandle(handle)) {
@@ -660,13 +677,36 @@ void TCPClusterManager::processClientStagingBuffer() {
             void* local_ptr = mm.getPointer(handle);
             if (local_ptr)
                 std::memcpy(static_cast<uint8_t*>(local_ptr) + pending_range_offset_,
-                            client_rx_buffer_.data(), pending_data_size_);
+                            client_rx_buffer_.data() + sizeof(VSBPHeader), pending_data_size_);
             client_rx_buffer_.erase(client_rx_buffer_.begin(),
-                client_rx_buffer_.begin() + pending_data_size_);
+                client_rx_buffer_.begin() + sizeof(VSBPHeader) + hdr.payloadSize);
             if (--pending_num_ranges_ == 0 || pending_num_ranges_ == (uint32_t)-1)
                 receive_state_ = ReceiveState::IDLE;
             else
                 receive_state_ = ReceiveState::EXPECTING_RANGES_TCP;
+        } else if (receive_state_ == ReceiveState::EXPECTING_STRUCT_BODY) {
+            if (client_rx_buffer_.size() < sizeof(VSBPHeader)) break;
+            VSBPHeader hdr;
+            std::memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
+            if (hdr.magic != VSBP_MAGIC || hdr.version != VSBP_VERSION ||
+                static_cast<PacketType>(hdr.type) != PacketType::DATA_BODY ||
+                hdr.payloadSize < pending_struct_arg_size_ ||
+                client_rx_buffer_.size() < sizeof(VSBPHeader) + hdr.payloadSize) {
+                VGRE_LOG_ERROR("TCPCluster", "Worker: invalid struct DATA_BODY payload");
+                client_rx_buffer_.clear();
+                receive_state_ = ReceiveState::IDLE;
+                break;
+            }
+            PendingArg arg;
+            arg.type = static_cast<uint8_t>(ArgType::STRUCT);
+            arg.data.assign(client_rx_buffer_.begin() + sizeof(VSBPHeader),
+                            client_rx_buffer_.begin() + sizeof(VSBPHeader) + pending_struct_arg_size_);
+            pending_args_[pending_struct_arg_index_] = std::move(arg);
+            client_rx_buffer_.erase(client_rx_buffer_.begin(),
+                client_rx_buffer_.begin() + sizeof(VSBPHeader) + hdr.payloadSize);
+            pending_struct_arg_index_ = 0;
+            pending_struct_arg_size_ = 0;
+            receive_state_ = ReceiveState::IDLE;
         }
     }
   }

@@ -122,6 +122,7 @@ private:
   struct KernelInfo {
     std::string name;
     cl_program program = 0;
+    std::vector<ArgType> expectedArgTypes;
     std::vector<OwnedKernelArg> args;
     KernelId vgreKernelId = 0;
   };

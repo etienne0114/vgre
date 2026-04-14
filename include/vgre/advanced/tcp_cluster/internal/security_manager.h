@@ -89,7 +89,8 @@ public:
    * @brief Rotate session key for a client connection
    * 
    * This method rotates the session key for an existing secure connection.
-   * Currently a placeholder for future implementation.
+   * It performs an authenticated ROTATE_KEY packet exchange and applies
+   * the nonce-derived key update on the active secure channel.
    * 
    * @param client Shared pointer to ClientConnection
    * @return VGREResult::SUCCESS on success, error code otherwise
