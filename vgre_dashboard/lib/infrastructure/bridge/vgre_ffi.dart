@@ -238,7 +238,20 @@ class VgreBridge {
 
 
   VgreBridge(String libPath) {
-    _lib = DynamicLibrary.open(libPath);
+    try {
+      _lib = DynamicLibrary.open(libPath);
+    } catch (e) {
+      // Enhanced error message to help diagnose DLL loading issues
+      String errorDetails = 'Failed to load VGRE native library from: $libPath\n';
+      errorDetails += 'Error: $e\n';
+      errorDetails += 'Common causes:\n';
+      errorDetails += '  1. DLL dependencies missing (LLVM, OpenMP)\n';
+      errorDetails += '  2. Unsupported architecture mismatch\n';
+      errorDetails += '  3. File is corrupted or incomplete\n';
+      errorDetails += 'Fix: Ensure PATH includes %LOCALAPPDATA%\\VGRE\\lib and rebuild using vgre_sync.bat\n';
+      print('VGRE FFI Error: $errorDetails');
+      rethrow;
+    }
 
     if (!Platform.isWindows) {
       try {
@@ -354,7 +367,21 @@ class VgreBridge {
     }
   }
 
-  int init() => _init();
+  int init() {
+    try {
+      final result = _init();
+      if (result != 0) {
+        print('VGRE Init returned error code: $result');
+        throw Exception('vgre_init() returned error $result');
+      }
+      print('VGRE Runtime Engine initialized successfully');
+      return result;
+    } catch (e, trace) {
+      print('VGRE initialization error: $e');
+      print('Stack trace: $trace');
+      rethrow;
+    }
+  }
   int shutdown() => _shutdown();
   String getVersion() => _getVersion().toDartString();
   int setBackgroundCompute(bool enabled) =>

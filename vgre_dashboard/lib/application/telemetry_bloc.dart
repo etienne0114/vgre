@@ -471,11 +471,7 @@ void _vgreIsolateEntryPoint(Map<String, dynamic> args) {
   }
   int currentDeviceId = args['deviceId'];
 
-  // The C++ HardwareTokenManager auto-generates and stores a token if none is
-  // provided via VGRE_TCP_AUTH_TOKEN, so security is always available.
-  // We still propagate the env-var token (if set) so the C++ picks it up
-  // when re-initialising, but the toggle is never disabled due to a missing token.
-  bool securitySupported = true;
+  bool securitySupported = false;
 
   // --- Auth Token Propagation (env-var → C++ process environment) ---
   if (!Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN')) {
@@ -504,13 +500,19 @@ void _vgreIsolateEntryPoint(Map<String, dynamic> args) {
   }
 
   // Fetch real device name and version string once at start
-  String deviceName = "VGRE Virtual GPU";
-  String versionString = "0.1.1";
+  String deviceName = "Unknown Device";
+  String versionString = "unknown";
   try {
     final props = bridge.getDeviceProperties(currentDeviceId);
     deviceName = props['name'] as String;
     versionString = bridge.getVersion();
   } catch (_) {}
+  try {
+    bridge.getSecurityInfo();
+    securitySupported = true;
+  } catch (_) {
+    securitySupported = false;
+  }
 
   String? selectedKernelName;
   KernelStat? lastSelectedKernelStats;
@@ -675,6 +677,14 @@ Telemetry _doPollSync(
       }
     } catch (_) {}
 
+    int deviceCount = 1;
+    try {
+      final count = bridge.getDeviceCount();
+      if (count > 0) {
+        deviceCount = count;
+      }
+    } catch (_) {}
+
     return Telemetry(
       timestamp: DateTime.fromMillisecondsSinceEpoch(raw.timestamp),
       gflops: raw.gflops,
@@ -714,7 +724,7 @@ Telemetry _doPollSync(
           (securityInfo?.isHandshakePending ?? false) ||
           (securityInfo?.isSecurityEnabled ?? false),
       clusterSecuritySupported: securitySupported,
-      deviceCount: 1, // Will be updated by props if needed
+      deviceCount: deviceCount,
       lastSelectedKernelStats: lastSelectedKernelStats,
     );
   } finally {

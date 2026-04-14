@@ -78,6 +78,21 @@ class _VgreBootstrapAppState extends State<VgreBootstrapApp> {
       return localPath;
     }
 
+    // Windows: Check %LOCALAPPDATA%\VGRE for installed version
+    if (Platform.isWindows) {
+      final String localAppData = Platform.environment['LOCALAPPDATA'] ?? '';
+      if (localAppData.isNotEmpty) {
+        final String vgreInstallPath = '$localAppData\\VGRE\\lib\\$libName';
+        if (File(vgreInstallPath).existsSync()) {
+          return vgreInstallPath;
+        }
+        final String vgreInstallRootPath = '$localAppData\\VGRE\\$libName';
+        if (File(vgreInstallRootPath).existsSync()) {
+          return vgreInstallRootPath;
+        }
+      }
+    }
+
     return Platform.environment['VGRE_LIB_PATH'] ??
         (File('../build/$libName').existsSync() ? '../build/$libName' : libName);
   }
@@ -223,11 +238,44 @@ class _BootstrapErrorScreen extends StatelessWidget {
                     fontFamily: 'Consolas',
                   ),
                 ),
+                const SizedBox(height: 24),
+                const Text(
+                  'Troubleshooting Steps:',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                ...buildTroubleshootingSteps(message),
               ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  List<Widget> buildTroubleshootingSteps(String errorMsg) {
+    List<Widget> steps = [];
+    
+    if (errorMsg.contains('Failed to load') || errorMsg.contains('DLL')) {
+      steps.addAll([
+        const Text('1. Rebuilt VGRE with: .\\scripts\\vgre_sync.bat', style: TextStyle(color: Colors.white54)),
+        const Text('2. Close all running instances and retry', style: TextStyle(color: Colors.white54)),
+        const Text('3. Verify PATH includes: %LOCALAPPDATA%\\VGRE and %LOCALAPPDATA%\\VGRE\\lib', style: TextStyle(color: Colors.white54)),
+        const Text('4. See docs/TROUBLESHOOTING_WINDOWS.md (error 1114 / 0xC000001D)', style: TextStyle(color: Colors.white54)),
+      ]);
+    } else if (errorMsg.contains('Cluster')) {
+      steps.addAll([
+        const Text('1. Ensure no other instance is running on port 7777', style: TextStyle(color: Colors.white54)),
+        const Text('2. Check network connectivity', style: TextStyle(color: Colors.white54)),
+      ]);
+    }
+    
+    return steps.map((step) => Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: step,
+    )).toList();
   }
 }

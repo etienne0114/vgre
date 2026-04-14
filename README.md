@@ -58,11 +58,10 @@ See [Cross-Platform Status](docs/CROSS_PLATFORM_STATUS.md) for detailed platform
 - Chrome trace export (`toChromeTraceJSON`) and C API telemetry
 - Python bindings (`vgre_c_api` via ctypes), NumPy-compatible
 
-### Recent Improvements (2026-04-12) 🎉
-- ✅ **Windows Shared Memory**: Fully implemented using CreateFileMapping/MapViewOfFile
-- ✅ **Cooperative Kernel Launch**: Improved with proper argument handling and graph capture support
-- ✅ **Verification Complete**: All claims verified by direct code inspection
-- ✅ **Zero Regressions**: All 9/9 tests passing
+### Recent Improvements (2026-04-14) 🎉
+- ✅ **Error 1114 Fixed**: Successfully resolved the "DLL initialization failure" by migrating to a Zero-Static-Initialization architecture for the VGRE engine DLL.
+- ✅ **Worker Resilience**: The `vgre-worker` now features a persistent retry loop and enhanced logging for remote discovery.
+- ✅ **Lazified Singletons**: Replaced all Meyers singletons with lazy static pointers for thread-safe, loader-lock-safe initialization on Windows.
 
 ### Known Limitations ⚠️
 - 10–100× slower than real GPU (expected; CPU execution)
