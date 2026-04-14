@@ -68,13 +68,16 @@ std::string normalizeTypeName(std::string typeName) {
 } // namespace
 
 // ── Built-in CUDA variables ────────────────────────────────────────────────
-const std::unordered_map<std::string, std::string> KernelParser::builtinVars_ = {
-    {"threadIdx",  "threadIdx"},
-    {"blockIdx",   "blockIdx"},
-    {"blockDim",   "blockDim"},
-    {"gridDim",    "gridDim"},
-    {"warpSize",   "warpSize"}
-};
+const std::unordered_map<std::string, std::string>& KernelParser::getBuiltinVars() {
+    static const std::unordered_map<std::string, std::string>* vars = new std::unordered_map<std::string, std::string>{
+        {"threadIdx",  "threadIdx"},
+        {"blockIdx",   "blockIdx"},
+        {"blockDim",   "blockDim"},
+        {"gridDim",    "gridDim"},
+        {"warpSize",   "warpSize"}
+    };
+    return *vars;
+}
 
 KernelParser::KernelParser()  = default;
 KernelParser::~KernelParser() = default;
@@ -129,7 +132,7 @@ std::vector<Token> KernelParser::tokenize(const std::string& source) {
             }
             col += static_cast<int>(word.size());
 
-            if (builtinVars_.count(word)) {
+            if (getBuiltinVars().count(word)) {
                 tok.type = TokenType::BUILTIN_VAR;
             } else if (word == "__global__" || word == "__device__" ||
                        word == "__host__"   || word == "void"    ||
@@ -458,7 +461,7 @@ ArgType KernelParser::mapType(const std::string& typeName, bool isPointer,
 // ── Find built-in variables ────────────────────────────────────────────────
 std::vector<std::string> KernelParser::findBuiltinVars(const std::string& body) {
     std::vector<std::string> found;
-    for (const auto& [name, _] : builtinVars_) {
+    for (const auto& [name, _] : getBuiltinVars()) {
         if (body.find(name) != std::string::npos) {
             found.push_back(name);
         }

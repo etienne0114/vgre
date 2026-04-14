@@ -90,7 +90,8 @@ protected:
     ArgType mapType(const std::string& typeName, bool isPointer, bool& recognized);
 
     // Built-in variable set
-    static const std::unordered_map<std::string, std::string> builtinVars_;
+    // Built-in variable map (lazily initialized)
+    static const std::unordered_map<std::string, std::string>& getBuiltinVars();
 
     // Cache for token-based fallback results (keyed by kernel source SHA)
     std::unordered_map<std::string, KernelIR> fallbackCache_;
