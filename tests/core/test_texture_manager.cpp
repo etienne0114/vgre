@@ -64,7 +64,7 @@ bool testIntegerFormats() {
 
   // Test INT32
   {
-    std::vector<int32_t> data = {-2147483648, -1000000, 0, 1000000,
+    std::vector<int32_t> data = {(-2147483647 - 1), -1000000, 0, 1000000,
                                  2147483647};
     TextureDescriptor desc;
     desc.elementType = TextureElementType::INT32;

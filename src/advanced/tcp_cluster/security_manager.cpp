@@ -228,7 +228,7 @@ VGREResult SecurityManager::performServerHandshake(
     
     uint8_t buf[256];
     size_t toRead = std::min(sizeof(buf), expectedLen - rx.size());
-    int n = recv(client.socket_fd, buf, static_cast<int>(toRead), 0);
+    int n = recv(client.socket_fd, reinterpret_cast<char*>(buf), static_cast<int>(toRead), 0);
     if (n > 0) {
       rx.insert(rx.end(), buf, buf + n);
     } else if (n == 0) {

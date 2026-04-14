@@ -15,6 +15,7 @@
 #ifndef VGRE_DISCOVERY_MANAGER_H
 #define VGRE_DISCOVERY_MANAGER_H
 
+#include "vgre/advanced/tcp_cluster.h"  // Need full TCPClusterManager definition for friend access
 #include <string>
 #include <vector>
 #include <thread>
@@ -24,13 +25,12 @@
 #include <functional>
 #include <memory>
 #include "vgre/common/sockets.h"
-#include "vgre/common/error_codes.h"
 
 namespace vgre {
 namespace advanced {
 
-// Forward declaration
-class TCPClusterManager;
+// TCPClusterManager is fully defined via tcp_cluster.h include above
+// (required for MSVC friend class access to work correctly)
 
 /**
  * DiscoveryManager - Handles UDP-based discovery and proactive connections

@@ -32,7 +32,7 @@ void test_concurrent_lookups() {
 
     std::vector<std::thread> threads;
     for (int t = 0; t < numThreads; ++t) {
-        threads.emplace_back([&mm, &handles, &totalLookups]() {
+        threads.emplace_back([&mm, &handles, &totalLookups, iterationsPerThread]() {
             for (int i = 0; i < iterationsPerThread; ++i) {
                 // Perform a mix of lookups
                 vgre::MemoryHandle h = handles[i % handles.size()];

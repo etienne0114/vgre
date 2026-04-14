@@ -10,6 +10,16 @@
 #include <chrono>
 #include <cstdlib>
 
+#ifdef _WIN32
+inline int setenv(const char *name, const char *value, int overwrite) {
+    if (!overwrite && getenv(name)) return 0;
+    return _putenv_s(name, value);
+}
+inline int unsetenv(const char *name) {
+    return _putenv_s(name, "");
+}
+#endif
+
 using namespace vgre::advanced;
 using namespace vgre;
 

@@ -29,6 +29,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
+#include "vgre/common/sockets.h"
 #include "vgre/api/vgre_c_api.h"
 #include <iostream>
 #include <cassert>
@@ -39,6 +40,7 @@
 #include <functional>
 
 using namespace vgre::advanced;
+using namespace vgre::common;
 using namespace vgre;
 
 // Test utilities
@@ -132,10 +134,11 @@ void test_worker_connection_preserved() {
     
     // For now, we'll test that the master is running and accepting connections
     // by checking that we can create a socket and connect to it
-    int test_socket = socket(AF_INET, SOCK_STREAM, 0);
-    assert(test_socket >= 0);
+    vgre_socket_t test_socket = socket(AF_INET, SOCK_STREAM, 0);
+    assert(test_socket != VGRE_INVALID_SOCKET);
     
     struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(17778);
     inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
@@ -145,7 +148,7 @@ void test_worker_connection_preserved() {
     // Connection should succeed (master is listening)
     assert(connect_result == 0);
     
-    close(test_socket);
+    vgre_close_socket(test_socket);
     
     std::cout << "[PASS] Worker connection establishment works correctly" << std::endl;
     
