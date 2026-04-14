@@ -11,6 +11,7 @@ set "TOOLS_ROOT=%LOCALAPPDATA%\VGRE\BuildTools"
 set "CMAKE_EXE=cmake"
 set "CLANG_EXE=clang"
 set "FLUTTER_CMD=flutter"
+set "VGRE_ENABLE_NATIVE_SIMD_FLAG=OFF"
 set "VCVARS64="
 for %%D in (
     "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
@@ -38,6 +39,9 @@ call :find_flutter
 
 echo === VGRE Global Sync (Windows) ===
 echo Project root: %PROJECT_ROOT%
+if /I "%VGRE_ENABLE_NATIVE_SIMD%"=="1" set "VGRE_ENABLE_NATIVE_SIMD_FLAG=ON"
+if /I "%VGRE_ENABLE_NATIVE_SIMD%"=="ON" set "VGRE_ENABLE_NATIVE_SIMD_FLAG=ON"
+echo SIMD tuning: %VGRE_ENABLE_NATIVE_SIMD_FLAG% (set VGRE_ENABLE_NATIVE_SIMD=1 to opt-in)
 
 echo Cleaning up stale VGRE processes...
 taskkill /F /IM vgre-worker.exe /IM vgre_dashboard.exe /T 2>NUL
@@ -122,7 +126,7 @@ echo === Building VGRE Native Engine ===
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 pushd "%BUILD_DIR%" || exit /b 1
 
-"%CMAKE_EXE%" "%PROJECT_ROOT%" -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="!LLVM_DIR!" -DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=TRUE
+"%CMAKE_EXE%" "%PROJECT_ROOT%" -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="!LLVM_DIR!" -DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=TRUE -DVGRE_ENABLE_NATIVE_SIMD=%VGRE_ENABLE_NATIVE_SIMD_FLAG%
 if errorlevel 1 (
     popd
     echo ERROR: CMake configure failed.
@@ -173,21 +177,91 @@ if errorlevel 1 (
 copy /Y "%BUILD_DIR%\Release\vgre.dll" "%INSTALL_DIR%\" >nul
 copy /Y "%BUILD_DIR%\Release\vgre.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Failed to copy vgre.dll
+    echo ERROR: Failed to copy vgre.dll from %BUILD_DIR%\Release\vgre.dll
     exit /b 1
 )
 
 copy /Y "%BUILD_DIR%\Release\vgre_cudart.dll" "%INSTALL_DIR%\" >nul
 copy /Y "%BUILD_DIR%\Release\vgre_cudart.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Failed to copy vgre_cudart.dll
+    echo ERROR: Failed to copy vgre_cudart.dll from %BUILD_DIR%\Release\vgre_cudart.dll
     exit /b 1
+)
+
+echo.
+echo === Validating Deployment ===
+if not exist "%INSTALL_DIR%\vgre.dll" (
+    echo ERROR: vgre.dll not found in %INSTALL_DIR%
+    exit /b 1
+) else (
+    echo ✓ vgre.dll deployed
+)
+
+if not exist "%INSTALL_DIR%\vgre_cudart.dll" (
+    echo ERROR: vgre_cudart.dll not found in %INSTALL_DIR%
+    exit /b 1
+) else (
+    echo ✓ vgre_cudart.dll deployed
+)
+
+if not exist "%INSTALL_DIR%\lib\vgre.dll" (
+    echo WARNING: vgre.dll not found in lib subdirectory (may cause issues)
+) else (
+    echo ✓ vgre.dll deployed to lib/
+)
+
+echo.
+echo === Attempting to copy LLVM/OpenMP Runtime Dependencies ===
+if exist "%TOOLS_ROOT%\llvm\bin\libomp.dll" (
+    echo Copying OpenMP runtime...
+    copy /Y "%TOOLS_ROOT%\llvm\bin\libomp.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
+    copy /Y "%TOOLS_ROOT%\llvm\bin\libomp.dll" "%INSTALL_DIR%\" >nul 2>&1
+) else (
+    echo WARNING: OpenMP runtime (libomp.dll) not found. Runtime errors may occur.
+)
+
+if exist "%TOOLS_ROOT%\llvm\bin\*.dll" (
+    echo Copying LLVM support libraries...
+    for %%F in ("%TOOLS_ROOT%\llvm\bin\*.dll") do (
+        copy /Y "%%F" "%INSTALL_DIR%\lib\" >nul 2>&1
+        copy /Y "%%F" "%INSTALL_DIR%\" >nul 2>&1
+    )
 )
 
 copy /Y "%BUILD_DIR%\src\advanced\Release\vgre-worker.exe" "%INSTALL_DIR%\" >nul
 if errorlevel 1 (
     echo ERROR: Failed to copy vgre-worker.exe
     exit /b 1
+) else (
+    echo ✓ vgre-worker.exe deployed
+)
+
+echo.
+echo === Configuring vgre-worker PATH ===
+rem Ensure vgre-worker can find its DLL dependencies
+if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
+echo @echo off > "%INSTALL_DIR%\vgre-worker.cmd"
+echo setlocal EnableExtensions EnableDelayedExpansion >> "%INSTALL_DIR%\vgre-worker.cmd"
+echo set "TOOLS_ROOT=%%LOCALAPPDATA%%\VGRE\BuildTools" >> "%INSTALL_DIR%\vgre-worker.cmd"
+echo set "PATH=%%~dp0lib;%%~dp0;%%TOOLS_ROOT%%\llvm\bin;%%PATH%%" >> "%INSTALL_DIR%\vgre-worker.cmd"
+echo "%%~dp0vgre-worker.exe" %%* >> "%INSTALL_DIR%\vgre-worker.cmd"
+
+echo.
+echo === Validating vgre-worker ===
+if not exist "%INSTALL_DIR%\vgre-worker.exe" (
+    echo ERROR: vgre-worker.exe not found after deployment
+    exit /b 1
+) else (
+    echo ✓ vgre-worker.exe verified
+)
+set "PATH=%INSTALL_DIR%\lib;%INSTALL_DIR%;%TOOLS_ROOT%\llvm\bin;%PATH%"
+"%INSTALL_DIR%\vgre-worker.exe" --help >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: vgre-worker failed startup self-check.
+    echo ERROR: see docs/TROUBLESHOOTING_WINDOWS.md
+    exit /b 1
+) else (
+    echo ✓ vgre-worker startup self-check passed
 )
 
 xcopy /E /Y /I "%PROJECT_ROOT%\include\vgre" "%INSTALL_DIR%\include\vgre" >nul
@@ -201,11 +275,24 @@ echo === Creating Launcher ===
 set "LAUNCHER_PATH=%INSTALL_DIR%\Launch-VGRE-Dashboard.cmd"
 (
     echo @echo off
-    echo setlocal EnableExtensions
+    echo setlocal EnableExtensions EnableDelayedExpansion
     echo set "APP_DIR=%%~dp0"
     echo set "TOOLS_ROOT=%%LOCALAPPDATA%%\VGRE\BuildTools"
-    echo set "PATH=%%APP_DIR%%lib;%%APP_DIR%%;%%TOOLS_ROOT%%\llvm\bin;%%PATH%%"
+    echo.
+    echo rem ── Critical PATH Setup for DLL Dependencies ──
+    echo rem Ensure LLVM, OpenMP, and VGRE libs are found first
+    echo set "PATH=%%APP_DIR%%lib;%%APP_DIR%%;%%TOOLS_ROOT%%\llvm\bin;%%TOOLS_ROOT%%\llvm\lib;%%PATH%%"
+    echo.
+    echo rem ── Set environment for hardware token storage
+    echo if defined VGRE_TCP_AUTH_TOKEN (
+    echo     set "VGRE_TCP_AUTH_TOKEN=%%VGRE_TCP_AUTH_TOKEN%%"
+    echo )
+    echo.
     echo cd /d "%%APP_DIR%%"
+    echo.
+    echo rem ── Add current directory to DLL search path (Windows-specific)
+    echo set "VGRE_LIB_PATH=%%APP_DIR%%vgre.dll"
+    echo.
     echo start "" "%%APP_DIR%%vgre_dashboard.exe"
 ) > "%LAUNCHER_PATH%"
 if errorlevel 1 (
