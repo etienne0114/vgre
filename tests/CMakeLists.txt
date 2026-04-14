@@ -213,6 +213,15 @@ add_executable(test_tcp_cluster_security_policy advanced/test_tcp_cluster_securi
 target_link_libraries(test_tcp_cluster_security_policy PRIVATE vgre)
 add_test(NAME TCPClusterSecurityPolicy COMMAND test_tcp_cluster_security_policy)
 
+add_executable(test_tcp_cluster_architecture advanced/test_tcp_cluster_architecture.cpp)
+target_link_libraries(test_tcp_cluster_architecture PRIVATE vgre)
+add_test(NAME TCPClusterArchitecture COMMAND test_tcp_cluster_architecture
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_executable(test_tcp_cluster_comprehensive_preservation advanced/test_tcp_cluster_comprehensive_preservation.cpp)
+target_link_libraries(test_tcp_cluster_comprehensive_preservation PRIVATE vgre)
+add_test(NAME TCPClusterComprehensivePreservation COMMAND test_tcp_cluster_comprehensive_preservation)
+
 add_executable(test_texture_manager core/test_texture_manager.cpp)
 target_link_libraries(test_texture_manager PRIVATE vgre)
 add_test(NAME TextureManager COMMAND test_texture_manager)
@@ -220,6 +229,42 @@ add_test(NAME TextureManager COMMAND test_texture_manager)
 add_executable(test_memory_pool unit/test_memory_pool.cpp)
 target_link_libraries(test_memory_pool PRIVATE vgre)
 add_test(NAME MemoryPool COMMAND test_memory_pool)
+
+# ── TCP Cluster Module Unit Tests (Phase 5, Tasks 33.4–39.4) ──────────────
+add_executable(test_packet_handler
+    advanced/tcp_cluster/test_packet_handler.cpp)
+target_link_libraries(test_packet_handler PRIVATE vgre)
+add_test(NAME PacketHandler COMMAND test_packet_handler)
+
+add_executable(test_collective_ops_manager
+    advanced/tcp_cluster/test_collective_ops_manager.cpp)
+target_link_libraries(test_collective_ops_manager PRIVATE vgre)
+add_test(NAME CollectiveOpsManager COMMAND test_collective_ops_manager)
+
+add_executable(test_connection_manager
+    advanced/tcp_cluster/test_connection_manager.cpp)
+target_link_libraries(test_connection_manager PRIVATE vgre)
+add_test(NAME ConnectionManager COMMAND test_connection_manager)
+
+add_executable(test_security_manager
+    advanced/tcp_cluster/test_security_manager.cpp)
+target_link_libraries(test_security_manager PRIVATE vgre)
+add_test(NAME SecurityManager COMMAND test_security_manager)
+
+add_executable(test_discovery_manager
+    advanced/tcp_cluster/test_discovery_manager.cpp)
+target_link_libraries(test_discovery_manager PRIVATE vgre)
+add_test(NAME DiscoveryManager COMMAND test_discovery_manager)
+
+add_executable(test_dispatch_manager
+    advanced/tcp_cluster/test_dispatch_manager.cpp)
+target_link_libraries(test_dispatch_manager PRIVATE vgre)
+add_test(NAME DispatchManager COMMAND test_dispatch_manager)
+
+add_executable(test_memory_sync_manager
+    advanced/tcp_cluster/test_memory_sync_manager.cpp)
+target_link_libraries(test_memory_sync_manager PRIVATE vgre)
+add_test(NAME MemorySyncManager COMMAND test_memory_sync_manager)
 
 # ── Global Test Configuration ──────────────────────────────────────────────
 # Disable background hardware benchmarks and optional IPC services during 
