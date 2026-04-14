@@ -103,8 +103,29 @@ inline std::string findIncludeDir() {
         if (cur.has_parent_path()) cur = cur.parent_path();
     }
 
-    // 3. Absolute fallback (likely will fail if not using standard install locations)
+    // 3. Platform-specific absolute fallbacks
+#ifdef _WIN32
+    const char* localAppData = std::getenv("LOCALAPPDATA");
+    if (localAppData) {
+        std::filesystem::path p(localAppData);
+        p /= "VGRE";
+        p /= "include";
+        if (std::filesystem::exists(p / "vgre/common/types.h")) {
+            return p.string();
+        }
+    }
+    return "C:/Program Files/VGRE/include";
+#elif defined(__APPLE__)
+    if (std::filesystem::exists("/usr/local/include/vgre/common/types.h")) {
+        return "/usr/local/include";
+    }
+    if (std::filesystem::exists("/opt/homebrew/include/vgre/common/types.h")) {
+        return "/opt/homebrew/include";
+    }
     return "/usr/local/include";
+#else
+    return "/usr/local/include";
+#endif
 }
 
 /**

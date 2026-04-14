@@ -44,6 +44,10 @@ private:
     cl_program program = nullptr;
     cl_kernel kernel = nullptr;
   };
+  struct CachedBuffer {
+    cl_mem mem = nullptr;
+    size_t size = 0;
+  };
 
   VGREResult transpileKernel(const std::string &kernelName,
                              const std::string &cudaSource,
@@ -62,7 +66,7 @@ private:
   std::string deviceName_;
 
   std::unordered_map<std::string, CompiledKernel> kernelCache_;
-  std::unordered_map<void*, cl_mem> bufferCache_;
+  std::unordered_map<void*, CachedBuffer> bufferCache_;
   mutable std::mutex mutex_;
 };
 

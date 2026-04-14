@@ -79,7 +79,8 @@ enum class ReceiveState : uint8_t {
   EXPECTING_RANGES_TCP = 1,
   EXPECTING_RANGES_SHM = 2,
   EXPECTING_BODY = 3,
-  EXPECTING_KERNEL_SOURCE = 4
+  EXPECTING_KERNEL_SOURCE = 4,
+  EXPECTING_STRUCT_BODY = 5
 };
 
 struct ShmInitPacket {
@@ -406,12 +407,7 @@ private:
   // Diagnostic helper
   std::string hexDump(const uint8_t* data, size_t max_bytes);
   
-  // UDP Auto-Discovery
-  void udpAnnouncerLoop();       // Master (announces master to workers)
-  void udpMasterDiscoveryLoop();  // Master (discovers active workers)
-  void udpDiscoveryLoop();       // Worker (discovers master)
-  void udpWorkerAnnouncerLoop();  // Worker (announces worker to master)
-  void proactiveConnectionLoop(); // Master (proactive worker connections)
+  // UDP auto-discovery loops are implemented inside DiscoveryManager.
   void processClientStagingBuffer(); // Client data processor
   void flush_tx_queues(std::shared_ptr<ClientConnection> client);
   void parseProactiveNodes();
@@ -437,6 +433,8 @@ private:
   uint64_t pending_kernel_id_ = 0;
   std::string pending_kernel_name_;
   uint32_t pending_kernel_source_len_ = 0;
+  uint32_t pending_struct_arg_index_ = 0;
+  uint32_t pending_struct_arg_size_ = 0;
   ReceiveState receive_state_ = ReceiveState::IDLE;
   
   // Collective operation state (master-side)

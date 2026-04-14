@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DIR="$HOME/.local/share/VGRE"
 BIN_DIR="$HOME/.local/bin"
+VGRE_ENABLE_NATIVE_SIMD_FLAG="${VGRE_ENABLE_NATIVE_SIMD:-0}"
 
 # Phase 10: Dynamic Auth Token Handling
 # If VGRE_TCP_AUTH_TOKEN is not in env, we do NOT default to a hardcoded string.
@@ -35,6 +36,12 @@ fi
 cd "$PROJECT_ROOT"
 
 echo "🚀 Starting VGRE Global Sync..."
+if [[ "$VGRE_ENABLE_NATIVE_SIMD_FLAG" == "1" || "$VGRE_ENABLE_NATIVE_SIMD_FLAG" == "ON" || "$VGRE_ENABLE_NATIVE_SIMD_FLAG" == "on" ]]; then
+    VGRE_ENABLE_NATIVE_SIMD_FLAG=ON
+else
+    VGRE_ENABLE_NATIVE_SIMD_FLAG=OFF
+fi
+echo "SIMD tuning: $VGRE_ENABLE_NATIVE_SIMD_FLAG (set VGRE_ENABLE_NATIVE_SIMD=1 to opt-in)"
 
 # 1. Build Native Engine
 echo "📦 Building VGRE Native Engine..."
@@ -48,7 +55,7 @@ if [[ "$(uname)" == "Linux" ]] && [[ -z "$CC" ]] && [[ -z "$CXX" ]]; then
     rm -f CMakeCache.txt
 fi
 
-cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake .. -DCMAKE_BUILD_TYPE=Release -DVGRE_ENABLE_NATIVE_SIMD="$VGRE_ENABLE_NATIVE_SIMD_FLAG"
 make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) vgre vgre_cudart vgre-worker
 cd ..
 
