@@ -18,9 +18,19 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <chrono>
+#include <memory>
 
 namespace vgre {
 namespace advanced {
+
+// Forward declarations for modular architecture
+class ConnectionManager;
+class DiscoveryManager;
+class PacketHandler;
+class SecurityManager;
+class MemorySyncManager;
+class CollectiveOpsManager;
+class DispatchManager;
 
 // ── VGRE Structured Binary Protocol (VSBP) v0.1.2 ─────────────────────────
 constexpr uint32_t VSBP_MAGIC = 0x56475245; // 'VGRE'
@@ -316,6 +326,22 @@ public:
   ~TCPClusterManager();
 
 private:
+  // Friend classes for modular architecture
+  friend class ConnectionManager;
+  friend class DiscoveryManager;
+  friend class SecurityManager;
+  friend class CollectiveOpsManager;
+  friend class DispatchManager;
+  
+  // Modular architecture components
+  std::unique_ptr<ConnectionManager> connection_manager_;
+  std::unique_ptr<DiscoveryManager> discovery_manager_;
+  std::unique_ptr<PacketHandler> packet_handler_;
+  std::unique_ptr<SecurityManager> security_manager_;
+  std::unique_ptr<MemorySyncManager> memory_sync_manager_;
+  std::unique_ptr<CollectiveOpsManager> collective_ops_manager_;
+  std::unique_ptr<DispatchManager> dispatch_manager_;
+  
   // Using vgre::common types
   using vgre_pollfd = vgre::common::vgre_pollfd;
   // ── Connection rate limiter ─────────────────────────────────────────────
@@ -354,9 +380,6 @@ private:
   void clientLoop();
   void handleRemoteCommand(const RemoteCommandPacket &pkt);
   void handlePartitionDispatch(const PartitionDispatchPacket &pkt);
-  
-  // Duplicate connection detection (atomic check-and-insert)
-  bool addClientIfNotDuplicate(const std::string& ip_address, vgre_socket_t socket_fd, const sockaddr_in& address);
   
   // Packet construction helper
   std::vector<uint8_t> constructPacket(PacketType type, const void* payload, size_t payloadLen);
@@ -428,12 +451,7 @@ private:
   // Threading
   std::thread cluster_thread_;
   std::thread client_loop_thread_;   // standby worker: clientLoop when master dials in
-  std::thread udp_thread_;
-  std::thread proactive_thread_;
   std::thread data_processor_thread_;
-  std::thread master_discovery_thread_;
-  std::thread worker_announcer_thread_;
-  std::atomic<bool> stop_proactive_{false};
   std::vector<std::string> proactive_worker_addresses_;
 
   // Proactive-connection handshake backoff (per remote IP).
@@ -485,22 +503,14 @@ private:
   };
   std::map<uint32_t, PendingArg> pending_args_;
 
-  // Phase 5: Partition results collected on master
-  struct PartitionResult {
-    uint32_t partition_id;
-    VGREResult result;
-    double execution_time_ms;
-  };
-  std::vector<PartitionResult> partition_results_;
+  // Dispatch result tracking (managed by DispatchManager but kept here for shutdown)
+  std::mutex remote_results_mutex_;
+  std::condition_variable remote_results_cv_;
   std::mutex partition_mutex_;
   std::condition_variable partition_cv_;
 
-  // Phase 10: General remote result tracking (Zero-Simulation Sync)
-  std::map<uint64_t, VGREResult> remote_kernel_results_;
-  std::mutex remote_results_mutex_;
-  std::condition_variable remote_results_cv_;
-
-  // Distributed Collective Primitives
+  // Distributed Collective Primitives (moved to CollectiveOpsManager, kept here for backward compat)
+  // Note: These are now managed by collective_ops_manager_ but kept as references for friend access
   std::mutex reduction_mutex_;
   std::condition_variable reduction_cv_;
   std::atomic<int> reduction_count_{0};
