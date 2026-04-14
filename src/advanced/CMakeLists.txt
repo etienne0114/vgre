@@ -7,6 +7,18 @@ add_library(vgre_advanced OBJECT
     vgre_workload_engine.cpp
     ipc_manager.cpp
     tcp_cluster.cpp
+    tcp_cluster/tcp_cluster_manager.cpp
+    tcp_cluster/connection_manager.cpp
+    tcp_cluster/discovery_manager.cpp
+    tcp_cluster/discovery_loops.cpp
+    tcp_cluster/packet_handler.cpp
+    tcp_cluster/security_manager.cpp
+    tcp_cluster/memory_sync_manager.cpp
+    tcp_cluster/collective_ops_manager.cpp
+    tcp_cluster/dispatch_manager.cpp
+    tcp_cluster/dispatch_impl.cpp
+    tcp_cluster/server_loop.cpp
+    tcp_cluster/client_loop.cpp
     secure_channel.cpp
     workload_partitioner.cpp
     resource_ledger.cpp
