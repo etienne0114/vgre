@@ -12,6 +12,10 @@ namespace advanced {
 namespace {
   constexpr int HANDSHAKE_TIMEOUT_SECONDS = 5;
   constexpr uint64_t HANDSHAKE_STUCK_TIMEOUT_MS = 10000; // 10 seconds
+  // Short peek window used by the worker to auto-detect whether the master
+  // is in secure mode. 500 ms is enough for the master to send
+  // SECURE_HANDSHAKE after the TCP connect returns, even on a loaded system.
+  constexpr int PEEK_TIMEOUT_MS = 500;
 }
 
 SecurityManager::SecurityManager(TCPClusterManager* parent)
@@ -298,21 +302,53 @@ VGREResult SecurityManager::performServerHandshake(
 }
 
 VGREResult SecurityManager::performClientHandshake() {
+  // ── Auto-detect master's security mode ──────────────────────────────────
+  // The worker peeks for a SECURE_HANDSHAKE within PEEK_TIMEOUT_MS regardless
+  // of its own security_enabled_ flag.  This lets a worker that hasn't been
+  // explicitly configured in secure mode automatically adapt when the master
+  // is running with VGRE_TCP_AUTH_TOKEN set, without requiring any manual
+  // worker-side configuration change.
+  //
+  // If no data arrives within the peek window → plaintext master, return SUCCESS.
+  // If data arrives:
+  //   • SECURE_HANDSHAKE  → auto-enable security and complete handshake.
+  //   • Any other packet  → stash in staging buffer and return SUCCESS
+  //                         (master sent data before handshake — unexpected
+  //                          but handled gracefully).
   if (!parent_->security_enabled_) {
-    return VGREResult::SUCCESS;
+    vgre_socket_t fd = parent_->client_fd_;
+    if (fd == vgre::common::VGRE_INVALID_SOCKET) return VGREResult::ERR_IO;
+
+    VGREResult wr = parent_->waitForData(fd, PEEK_TIMEOUT_MS);
+    if (wr == VGREResult::ERR_TIMEOUT) {
+      // No data in peek window → plaintext master, nothing to do.
+      return VGREResult::SUCCESS;
+    }
+    if (wr != VGREResult::SUCCESS) {
+      // Socket error
+      return VGREResult::ERR_IO;
+    }
+    // Data is waiting — likely SECURE_HANDSHAKE. Auto-enable security and
+    // fall through to the full handshake processing below.
+    VGRE_LOG_INFO("TCPCluster",
+        "Worker: Master sent data immediately after connect — "
+        "auto-enabling security to match master configuration...");
+    parent_->security_enabled_ = true;
   }
 
   if (parent_->auth_token_str_.empty()) {
     VGRE_LOG_ERROR("TCPCluster",
-        "Worker: Security handshake failed - closing connection (no plaintext fallback). "
-        "Master requested Phase 5 security but VGRE_TCP_AUTH_TOKEN is not set. "
-        "Please set VGRE_TCP_AUTH_TOKEN environment variable and restart.");
+        "Worker: Security handshake failed - VGRE_TCP_AUTH_TOKEN is not set. "
+        "Master requires security but worker has no auth token. "
+        "Set VGRE_TCP_AUTH_TOKEN on the worker node and restart.");
     vgre::common::vgre_close_socket(parent_->client_fd_);
     parent_->client_fd_ = vgre::common::VGRE_INVALID_SOCKET;
     return VGREResult::ERR_AUTH_FAILED;
   }
 
-  // Security is explicitly enabled: require SECURE_HANDSHAKE from master.
+  // Receive SECURE_HANDSHAKE from master using a bounded exact-length read.
+  // Uses PEEK_TIMEOUT_MS as initial wait (already confirmed data is pending
+  // above), then HANDSHAKE_TIMEOUT_SECONDS for subsequent recv iterations.
   std::vector<uint8_t> rx;
   const size_t expected = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
   auto deadline = std::chrono::steady_clock::now() +
@@ -340,16 +376,31 @@ VGREResult SecurityManager::performClientHandshake() {
       VGRE_LOG_ERROR("TCPCluster", "Worker: Security handshake recv failed");
       return VGREResult::ERR_IO;
     }
+    if (n == 0) {
+      VGRE_LOG_ERROR("TCPCluster", "Worker: Master closed connection during security handshake");
+      return VGREResult::ERR_IO;
+    }
   }
 
   VSBPHeader* phdr = reinterpret_cast<VSBPHeader*>(rx.data());
   if (phdr->magic != VSBP_MAGIC ||
       phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
-    VGRE_LOG_ERROR("TCPCluster",
-        "Worker: Security handshake failed - expected SECURE_HANDSHAKE first packet");
-    vgre::common::vgre_close_socket(parent_->client_fd_);
-    parent_->client_fd_ = vgre::common::VGRE_INVALID_SOCKET;
-    return VGREResult::ERR_AUTH_FAILED;
+    // Unexpected packet type (could be a race or protocol mismatch).
+    // Stash the bytes for the normal packet processor and return success
+    // (treat as a plaintext connection that pre-sent data before handshake).
+    VGRE_LOG_WARN("TCPCluster",
+        "Worker: Received unexpected packet type " +
+        std::to_string(phdr->type) + " instead of SECURE_HANDSHAKE — "
+        "treating connection as plaintext and forwarding to packet processor");
+    parent_->security_enabled_ = false;
+    {
+      std::lock_guard<std::mutex> lock(parent_->staging_mutex_);
+      parent_->active_staging_->insert(parent_->active_staging_->end(),
+                               rx.begin(), rx.end());
+      parent_->staging_ready_ = true;
+      parent_->staging_cv_.notify_one();
+    }
+    return VGREResult::SUCCESS;
   }
 
   SecureHandshakePacket masterHs{};
