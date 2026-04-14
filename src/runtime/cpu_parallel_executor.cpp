@@ -78,7 +78,11 @@ VGRE_PUBLIC_API void vgre_jit_syncgrid() {
 // Thread-local perf_event instruction counter — opened once per thread,
 // reused across every block dispatch on that thread.  Falls back silently
 // (PerfSampler::valid() == false) when perf_event is unavailable.
-static thread_local PerfSampler t_perfSampler;
+static thread_local PerfSampler* t_perfSamplerPtr = nullptr;
+static PerfSampler& getPerfSampler() {
+    if (!t_perfSamplerPtr) t_perfSamplerPtr = new PerfSampler();
+    return *t_perfSamplerPtr;
+}
 #endif
 
 namespace vgre {
@@ -158,12 +162,12 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
     SharedMemory smem(sharedMemSize);
     dim3 tIdx(0,0,0);
 #if defined(__linux__)
-    if (t_perfSampler.valid()) t_perfSampler.start();
+    if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
     (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(),
        smem.size());
 #if defined(__linux__)
-    uint64_t instr1 = t_perfSampler.valid() ? t_perfSampler.stop() : 0;
+    uint64_t instr1 = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
 #else
     uint64_t instr1 = 0;
 #endif
@@ -188,11 +192,11 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
           GPUThreadContext::clearBlockBarrier();
           dim3 tIdx(0, 0, 0);
 #if defined(__linux__)
-          if (t_perfSampler.valid()) t_perfSampler.start();
+          if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
           (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(), smem.size());
 #if defined(__linux__)
-          uint64_t instrS = t_perfSampler.valid() ? t_perfSampler.stop() : 0;
+          uint64_t instrS = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
 #else
           uint64_t instrS = 0;
 #endif
@@ -234,12 +238,12 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
             vgre::runtime::GPUThreadContext::clearBlockBarrier();
             dim3 tIdx(0,0,0);
 #if defined(__linux__)
-            if (t_perfSampler.valid()) t_perfSampler.start();
+            if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
             (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, threadSmem.raw(),
                threadSmem.size());
 #if defined(__linux__)
-            uint64_t instrOMP = t_perfSampler.valid() ? t_perfSampler.stop() : 0;
+            uint64_t instrOMP = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
 #else
             uint64_t instrOMP = 0;
 #endif

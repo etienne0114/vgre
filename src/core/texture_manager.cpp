@@ -585,8 +585,8 @@ size_t TextureManager::getSurfaceCount() const {
 
 // ── Singleton ────────────────────────────────────────────────────────────────────
 TextureManager &TextureManager::instance() {
-  static TextureManager mgr;
-  return mgr;
+  static TextureManager* mgr = new TextureManager();
+  return *mgr;
 }
 
 // ── Type-aware element read ───────────────────────────────────────────────────

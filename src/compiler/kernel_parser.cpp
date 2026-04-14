@@ -10,26 +10,53 @@
 namespace vgre {
 namespace compiler {
 
+// ── Static compiled regex patterns (lazily initialized to avoid Error 1114) ───
 namespace {
-// ── Static compiled regex patterns (compiled once at program start) ─────────
-// Compiling std::regex is expensive (~50 µs each). Using function-local statics
-// caused repeated compilation on every call.  File-scope statics are compiled
-// exactly once at first use and then reused for the lifetime of the process.
-static const std::regex kReQualifiers(R"(\b(const|volatile|restrict|__restrict__|__restrict)\b)");
-static const std::regex kReTabsNewlines(R"([\t\n\r]+)");
-static const std::regex kReWhitespace(R"(\s+)");
-static const std::regex kReLineComment("//[^\n]*");
-static const std::regex kReIntName(R"(^int[A-Za-z_][A-Za-z0-9_]*$)");
-static const std::regex kReFloatName(R"(^float[A-Za-z_][A-Za-z0-9_]*$)");
-static const std::regex kReDoubleName(R"(^double[A-Za-z_][A-Za-z0-9_]*$)");
-static const std::regex kReLongName(R"(^long[A-Za-z_][A-Za-z0-9_]*$)");
-static const std::regex kReULongName(R"(^unsigned ?long[A-Za-z_][A-Za-z0-9_]*$)");
-static const std::regex kReUnsignedName(R"(^unsigned[A-Za-z_][A-Za-z0-9_]*$)");
+const std::regex& getReQualifiers() {
+    static const std::regex* re = new std::regex(R"(\b(const|volatile|restrict|__restrict__|__restrict)\b)");
+    return *re;
+}
+const std::regex& getReTabsNewlines() {
+    static const std::regex* re = new std::regex(R"([\t\n\r]+)");
+    return *re;
+}
+const std::regex& getReWhitespace() {
+    static const std::regex* re = new std::regex(R"(\s+)");
+    return *re;
+}
+const std::regex& getReLineComment() {
+    static const std::regex* re = new std::regex("//[^\n]*");
+    return *re;
+}
+const std::regex& getReIntName() {
+    static const std::regex* re = new std::regex(R"(^int[A-Za-z_][A-Za-z0-9_]*$)");
+    return *re;
+}
+const std::regex& getReFloatName() {
+    static const std::regex* re = new std::regex(R"(^float[A-Za-z_][A-Za-z0-9_]*$)");
+    return *re;
+}
+const std::regex& getReDoubleName() {
+    static const std::regex* re = new std::regex(R"(^double[A-Za-z_][A-Za-z0-9_]*$)");
+    return *re;
+}
+const std::regex& getReLongName() {
+    static const std::regex* re = new std::regex(R"(^long[A-Za-z_][A-Za-z0-9_]*$)");
+    return *re;
+}
+const std::regex& getReULongName() {
+    static const std::regex* re = new std::regex(R"(^unsigned ?long[A-Za-z_][A-Za-z0-9_]*$)");
+    return *re;
+}
+const std::regex& getReUnsignedName() {
+    static const std::regex* re = new std::regex(R"(^unsigned[A-Za-z_][A-Za-z0-9_]*$)");
+    return *re;
+}
 
 std::string normalizeTypeName(std::string typeName) {
-    typeName = std::regex_replace(typeName, kReQualifiers, "");
-    typeName = std::regex_replace(typeName, kReTabsNewlines, " ");
-    typeName = std::regex_replace(typeName, kReWhitespace, " ");
+    typeName = std::regex_replace(typeName, getReQualifiers(), "");
+    typeName = std::regex_replace(typeName, getReTabsNewlines(), " ");
+    typeName = std::regex_replace(typeName, getReWhitespace(), " ");
     if (!typeName.empty() && typeName.front() == ' ') {
         typeName.erase(0, typeName.find_first_not_of(' '));
     }
@@ -402,24 +429,24 @@ ArgType KernelParser::mapType(const std::string& typeName, bool isPointer,
     // Handle compact signatures where extractor concatenates type+name
     // (e.g., "intN", "floatx", "unsignedCount").
     // Uses file-scope static regex objects — compiled once, reused every call.
-    if (std::regex_match(norm, kReIntName)) {
+    if (std::regex_match(norm, getReIntName())) {
         recognized = true;
         return ArgType::INT32;
     }
-    if (std::regex_match(norm, kReFloatName)) {
+    if (std::regex_match(norm, getReFloatName())) {
         recognized = true;
         return ArgType::FLOAT32;
     }
-    if (std::regex_match(norm, kReDoubleName)) {
+    if (std::regex_match(norm, getReDoubleName())) {
         recognized = true;
         return ArgType::FLOAT64;
     }
-    if (std::regex_match(norm, kReLongName)) {
+    if (std::regex_match(norm, getReLongName())) {
         recognized = true;
         return (sizeof(long) >= 8) ? ArgType::INT64 : ArgType::INT32;
     }
-    if (std::regex_match(norm, kReULongName) ||
-        std::regex_match(norm, kReUnsignedName)) {
+    if (std::regex_match(norm, getReULongName()) ||
+        std::regex_match(norm, getReUnsignedName())) {
         recognized = true;
         return ArgType::UINT32;
     }
@@ -742,7 +769,7 @@ size_t KernelParser::computeStructSize(const std::string& typeName,
         // After splitting on ';', a segment may begin with the trailing comment
         // from the previous member followed by the next member's declaration on
         // a new line.  Erasing only to the newline preserves the declaration.
-        decl = std::regex_replace(decl, kReLineComment, "");
+        decl = std::regex_replace(decl, getReLineComment(), "");
         auto trimmed = normalizeTypeName(decl);
         if (trimmed.empty()) continue;
 

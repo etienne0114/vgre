@@ -83,8 +83,8 @@ static std::string extractPTXFromImage(const void *image, size_t sizeHint = 0) {
 class CUDAModuleRegistry {
 public:
   static CUDAModuleRegistry &instance() {
-    static CUDAModuleRegistry registry;
-    return registry;
+    static CUDAModuleRegistry* inst = new CUDAModuleRegistry();
+    return *inst;
   }
 
   void **registerFatBinary(void *fatCubin) {
@@ -388,9 +388,11 @@ extern "C" void *vgre_lookup_texture_ref(void *handle, const char *name) {
 }
 
 extern "C" const char *vgre_get_module_source(void *handle) {
-  static thread_local std::string s_source;
-  s_source = CUDAModuleRegistry::instance().lookupModuleSource(handle);
-  return s_source.empty() ? nullptr : s_source.c_str();
+  static thread_local std::string* s_source_ptr = nullptr;
+  if (!s_source_ptr) s_source_ptr = new std::string();
+  
+  *s_source_ptr = CUDAModuleRegistry::instance().lookupModuleSource(handle);
+  return s_source_ptr->empty() ? nullptr : s_source_ptr->c_str();
 }
 
 // ── Initialization & Error Handling ────────────────────────────────────────

@@ -264,18 +264,29 @@ std::string trim_copy(const std::string &s) {
   return s.substr(start, end - start);
 }
 
-// ── Static compiled regex patterns (compiled once, reused every call) ───────
-static const std::regex kReExternShared(
-    R"(extern\s+__shared__\s+([A-Za-z_][A-Za-z0-9_:\s<>]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*;)");
-static const std::regex kReStaticShared(
-    R"(__shared__\s+([A-Za-z_][A-Za-z0-9_:\s<>]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([0-9]+)\s*\]\s*;)");
-static const std::regex kReTypeQualifiers(
-    R"(\b(const|volatile|restrict|__restrict__|__restrict)\b)");
-static const std::regex kReWhitespace(R"(\s+)");
+// ── Static compiled regex patterns (lazily initialized to avoid Error 1114) ───
+namespace {
+const std::regex& getReExternShared() {
+  static const std::regex* re = new std::regex(R"(extern\s+__shared__\s+([A-Za-z_][A-Za-z0-9_:\s<>]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*;)");
+  return *re;
+}
+const std::regex& getReStaticShared() {
+  static const std::regex* re = new std::regex(R"(__shared__\s+([A-Za-z_][A-Za-z0-9_:\s<>]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([0-9]+)\s*\]\s*;)");
+  return *re;
+}
+const std::regex& getReTypeQualifiers() {
+  static const std::regex* re = new std::regex(R"(\b(const|volatile|restrict|__restrict__|__restrict)\b)");
+  return *re;
+}
+const std::regex& getReWhitespace() {
+  static const std::regex* re = new std::regex(R"(\s+)");
+  return *re;
+}
+} // namespace
 
 bool rewriteExternShared(std::string &source, int &count, size_t baseOffset) {
   count = 0;
-  const std::regex& pattern = kReExternShared;
+  const std::regex& pattern = getReExternShared();
   std::string out;
   out.reserve(source.size());
 
@@ -311,8 +322,8 @@ bool rewriteExternShared(std::string &source, int &count, size_t baseOffset) {
 
 namespace {
 size_t typeSizeBytes(const std::string &typeName) {
-  const std::string norm = std::regex_replace(typeName, kReTypeQualifiers, "");
-  const std::string t = std::regex_replace(norm, kReWhitespace, " ");
+  const std::string norm = std::regex_replace(typeName, getReTypeQualifiers(), "");
+  const std::string t = std::regex_replace(norm, getReWhitespace(), " ");
 
   if (t == "float")
     return sizeof(float);
@@ -350,7 +361,7 @@ size_t typeSizeBytes(const std::string &typeName) {
 
 bool rewriteStaticShared(std::string &source, size_t &totalBytes) {
   totalBytes = 0;
-  const std::regex& pattern = kReStaticShared;
+  const std::regex& pattern = getReStaticShared();
   std::string out;
   out.reserve(source.size());
 

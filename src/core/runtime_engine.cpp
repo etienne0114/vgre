@@ -24,6 +24,9 @@
 #include <fstream>
 #include <set>
 #include <thread>
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
 
 namespace vgre {
 namespace core {
@@ -43,6 +46,13 @@ VGREResult RuntimeEngine::initialize() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (initialized_)
     return VGREResult::SUCCESS;
+
+#ifdef _WIN32
+  WSADATA wsaData;
+  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+      VGRE_LOG_ERROR("RuntimeEngine", "Failed to initialize Winsock (WSAStartup failed)");
+  }
+#endif
 
   VGRE_LOG_INFO("RuntimeEngine", "Initializing VGRE Runtime Engine...");
 
@@ -116,20 +126,12 @@ VGREResult RuntimeEngine::initialize() {
 
     // Link Adaptive Execution Engine to real hardware metrics
     if (i == 0) {
+      // Background Ground-Truth calibration is now managed internally by
+      // AdaptiveExecutionEngine to prevent deadlocks during DLL load.
       vgre::DeviceProperties dp = dev->getProperties();
       int cores = static_cast<int>(std::thread::hardware_concurrency());
       auto& aee = advanced::AdaptiveExecutionEngine::instance();
       aee.updateHardwareMetrics(cores, dp.clockRate / 1000000.0, 0.0);
-      
-      const char* bench_env = std::getenv("VGRE_BENCHMARK");
-      if (!bench_env || std::string(bench_env) != "OFF") {
-          // Perform real micro-benchmark in a background thread
-          benchmarkThread_ = std::thread([&aee]() {
-            aee.runBenchmark();
-          });
-      } else {
-          VGRE_LOG_INFO("RuntimeEngine", "Background benchmark disabled via VGRE_BENCHMARK=OFF");
-      }
     }
     dev->createContext();
     devices_.push_back(std::move(dev));
@@ -198,6 +200,11 @@ VGREResult RuntimeEngine::shutdown() {
   initialized_ = false;
 
   VGRE_LOG_INFO("RuntimeEngine", "Shutdown complete");
+
+#ifdef _WIN32
+  WSACleanup();
+#endif
+
   return VGREResult::SUCCESS;
 }
 
@@ -1809,8 +1816,8 @@ VirtualGPUDevice &RuntimeEngine::getDevice(DeviceId id) {
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 RuntimeEngine &RuntimeEngine::instance() {
-  static RuntimeEngine engine;
-  return engine;
+  static RuntimeEngine* inst = new RuntimeEngine();
+  return *inst;
 }
 
 } // namespace core
