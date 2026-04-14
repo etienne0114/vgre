@@ -39,6 +39,7 @@ vgre_dashboard/linux/flutter/ephemeral/
 
 # Tooling and AI configuration
 .claude/
+.kiro/
 
 # CTest artifacts
 Testing/
@@ -51,4 +52,5 @@ launch.sh
 compile_commands.json
 build_local/
 build_jit/
+
 
