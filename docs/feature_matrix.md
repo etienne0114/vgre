@@ -19,9 +19,9 @@ This matrix summarizes the **Zero-Simulation** features that are guaranteed by a
 | Memory Manager | Managed | VRAM managed via aligned host allocations; UVM residency tracked authoritatively. Stream-ordered pool allocation (`cudaMallocAsync`/`cudaFreeAsync`) with block reuse. Configurable latency modeling accurately respects simulated network topologies without heuristic guesses. |
 | Telemetry | Reported | Real-time GFLOPS/BW reporting based on **strict LLVM-calibrated instruction counts**. No mock data. |
 | Runtime Profiler | Functional | Per-kernel timing and JSON export. Supports authoritative timestamp comparison. |
-| CUDA Graphs | Supported | Serial topological DAG execution with rigorous cycle detection and **authoritative runtime checking**. |
+| CUDA Graphs | Supported | Serial topological DAG execution with rigorous cycle detection and **authoritative runtime checking**. Graph cloning (`cudaGraphClone`), stream capture (`cudaStreamBeginCapture`/`EndCapture`), serialization/deserialization, and **conditional nodes** (`cudaGraphAddConditionalNode` with IF/WHILE semantics) fully implemented. |
 | Global Symbols | Supported | Resolution of globally exported symbols between Host and JIT. |
-| Distributed Cluster | Advanced | Authoritative memory coherence across cluster nodes. Includes **authenticated encrypted channel (HMAC-SHA256 + AES-256-CTR)**. |
+| Distributed Cluster | Advanced | Authoritative memory coherence across cluster nodes. **Authenticated encrypted channel** (HMAC-SHA256 + AES-256-CTR). Modular 7-subsystem architecture (`ConnectionManager`, `DiscoveryManager`, `PacketHandler`, `SecurityManager`, `MemorySyncManager`, `CollectiveOpsManager`, `DispatchManager`). **Periodic key rotation** (ROTATE_KEY every 10,000 packets, master-initiated). **Partitioned dispatch** sends correct `grid_start` offset to both local and remote slices. Auth handshake threads are tracked and joined on shutdown (no dangling-pointer risk). No HMAC failures, real CPU/RAM in dashboard, disconnect visible in dashboard. |
 
 ## Dashboard (Frontend)
 
