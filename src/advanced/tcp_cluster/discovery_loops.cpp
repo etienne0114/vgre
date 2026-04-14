@@ -228,8 +228,12 @@ void DiscoveryManager::proactiveConnectionLoop() {
                     pfd.events = POLLOUT;
                     if (vgre_poll(&pfd, 1, 1000) > 0) {
                         int error = 0;
-                        socklen_t len = sizeof(error);
-                        getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&error, &len);
+                        // socklen_t is typedef'd to int in vgre/common/sockets.h
+                        // on Windows, matching WinSock2's getsockopt() int* parameter.
+                        // On POSIX, socklen_t is unsigned int and getsockopt takes
+                        // socklen_t*, so socklen_t is the correct portable type here.
+                        socklen_t errlen = sizeof(error);
+                        getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&error, &errlen);
                         if (error != 0) { vgre_close_socket(sock); continue; }
                     } else { vgre_close_socket(sock); continue; }
                 } else { vgre_close_socket(sock); continue; }
