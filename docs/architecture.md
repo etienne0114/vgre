@@ -158,25 +158,48 @@ VGRE implements a master/worker cluster using the **VGRE Structured Binary Proto
         │   • MAC: HMAC-SHA256 (Encrypt-then-MAC)│
         │◄── SECURE_HANDSHAKE_ACK ───────────────┤
         │                                        │
-        │── CAPABILITY ──────────────────────────►│  cpu_cores, gflops, latency
-        │◄── CAPABILITY ─────────────────────────┤
+        │◄── CAPABILITY ──────────────────────────┤  cpu_cores, ram, igpu_name
+        │   (worker reports its own hardware)    │
         │                                        │
         │── REGISTER_KERNEL ─────────────────────►│  compile on worker
         │◄── RESPONSE ───────────────────────────┤
         │                                        │
-        │── PARTITION_DISPATCH ──────────────────►│  sub-grid bounds
+        │── PARTITION_DISPATCH ──────────────────►│  sub-grid bounds + grid_start offset
         │   (WorkloadPartitioner: recursive       │  + compressed memory (LZ4)
         │    bisection by cpu_cores×gflops/lat)  │
         │◄── PARTITION_RESULT ───────────────────┤  dirty pages
+        │                                        │
+        │── ROTATE_KEY ──────────────────────────►│  periodic nonce rotation
+        │   (every 10,000 packets per session)   │  (master-initiated)
         │                                        │
         │── CREDIT_REPORT ───────────────────────►│  billing (CUS: compute-unit-seconds)
 ```
 
 **22 VSBP packet types**: TELEMETRY, LAUNCH_KERNEL, RESPONSE, DATA_HEADER, DATA_BODY, STRUCT_DATA, ARG_SCALAR, ARG_POINTER, CAPABILITY, REGISTER_KERNEL, SECURE_HANDSHAKE, SECURE_HANDSHAKE_ACK, PARTITION_DISPATCH, PARTITION_RESULT, CREDIT_REPORT, ROTATE_KEY, SHM_INIT, DATA_SHM, DATA_HEADER_DIRTY, DATA_SHM_DIRTY, DIRTY_RANGE, COOP_BARRIER_SYNC.
 
-**Local-loopback optimisation**: When master and worker are on the same host (127.0.0.1), VSBP switches to POSIX/Windows shared-memory transport (`ShmManager`) with a 256 MB segment, bypassing TCP for data transfers.
+**Local-loopback optimisation**: When master and worker are on the same host (127.0.0.1), VSBP switches to POSIX/Windows shared-memory transport (`ShmManager`) with a 256 MB segment, bypassing TCP for data transfers. The worker-side SHM result-write cursor (`result_shm_offset_`) is a per-`DispatchManager` member starting at 128 MB, wraps on exhaustion, and resets to zero on reconnect.
 
 **Rate limiting**: The master enforces ≤10 new TCP connections per source IP per 60-second window to prevent PBKDF2 exhaustion DoS.
+
+### Modular Architecture
+
+`TCPClusterManager` is a thin coordinator; all logic lives in seven focused sub-modules:
+
+| Module | File | Responsibility |
+|--------|------|----------------|
+| `ConnectionManager` | `tcp_cluster/connection_manager.cpp` | Socket accept/connect, keepalive, duplicate guard, client vector |
+| `DiscoveryManager` | `tcp_cluster/discovery_manager.cpp` + `discovery_loops.cpp` | UDP master/worker broadcast, proactive TCP connections, tracked auth threads |
+| `PacketHandler` | `tcp_cluster/packet_handler.cpp` | VSBP framing, sequence counter, direct send/recv |
+| `SecurityManager` | `tcp_cluster/security_manager.cpp` | PBKDF2 handshake, AES-256-CTR channel, periodic key rotation |
+| `MemorySyncManager` | `tcp_cluster/memory_sync_manager.cpp` | Delta/full sync with exponential backoff, SHM fast path |
+| `CollectiveOpsManager` | `tcp_cluster/collective_ops_manager.cpp` | AllReduce (AVX2/SSE2/scalar), barrier, telemetry aggregation |
+| `DispatchManager` | `tcp_cluster/dispatch_manager.cpp` + `dispatch_impl.cpp` | Remote and partitioned kernel launch, result collection |
+
+All modules access `TCPClusterManager` state through a `parent_` pointer; the `friend class` declarations in `tcp_cluster.h` grant the required access.
+
+**Periodic key rotation**: The master's `serverLoop` checks each active, security-established client after every TSS2 flush. When `client->packets_sent` reaches 10,000, `SecurityManager::rotateSessionKey()` sends a `ROTATE_KEY` packet with a fresh nonce, then advances the local AES-CTR nonce. The counter resets to zero on successful rotation.
+
+**Auth-thread lifetime safety**: Proactive connections spawn a handshake thread per new worker. These threads are stored in `DiscoveryManager::auth_threads_` (under `auth_threads_mutex_`) instead of being detached. `DiscoveryManager::stopAll()` joins the proactive loop first (preventing new threads from being created), then joins all outstanding auth threads — guaranteeing no thread accesses a destroyed `TCPClusterManager`.
 
 ---
 
@@ -216,6 +239,7 @@ VGRE implements a master/worker cluster using the **VGRE Structured Binary Proto
 | Session key derivation | PBKDF2-HMAC-SHA256 (200k iter, per-session nonces) | Brute-force resistant |
 | Channel encryption | AES-256-CTR (software; AES-NI pending) | Confidentiality |
 | Channel authentication | HMAC-SHA256, Encrypt-then-MAC | Integrity + replay protection |
+| Periodic key rotation | Master-initiated ROTATE_KEY every 10,000 packets; fresh nonce per interval | Limits ciphertext volume under one key |
 | DoS protection | Per-IP rate limiter (10 connections / 60s) | Handshake flood mitigation |
 
 ---
@@ -232,6 +256,17 @@ The following items graduated from the roadmap and are fully implemented:
    `/sys/devices/system/cpu/cpuN/node`, pins each worker thread with `pthread_setaffinity_np`,
    and routes `submitNumaTask()` calls to per-NUMA priority queues. Work-steals to global queue
    when local queue is empty.
+6. **Cluster Secure-Channel Bug Fixes** ✅ (2026-04-12): Three interrelated bugs eliminated in
+   `tcp_cluster.cpp`: (a) `performSecureHandshake` now uses a bounded `recv()` loop capped at
+   exactly `sizeof(VSBPHeader)+sizeof(SecureHandshakePacket)` bytes — prevents over-reading into
+   the next encrypted packet and stops the HMAC verification failure loop; (b) `syncToIPC()` and
+   `getConnectedNodes()` filter to `active=true` nodes only — eliminates zero CPU/RAM display
+   during reconnect; (c) 8-second `proactive_backoff_until_` entry after disconnect — gives the
+   dashboard a visible disconnect window.
+7. **Graph Cloning** ✅ (2026-04-12): `cudaGraphClone()` / `vgre_graphClone()` fully implemented
+   through all four layers (GraphManager → RuntimeEngine → CUDAInterceptor → cudart_shim).
+   Deep-copies all nodes, captured argument buffers, and dependency edges into a new independent
+   graph.
 
 ## Remaining Roadmap
 

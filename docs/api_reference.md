@@ -108,6 +108,8 @@ int vgre_stream_destroy(uint64_t stream_id);
 ### CUDA Graphs
 ```c
 int vgre_graphCreate(uint64_t *out_graph);
+int vgre_graphClone(uint64_t src_graph, uint64_t *out_clone);
+    // Deep-copies src_graph into a new independent graph (all nodes + deps).
 int vgre_graphDestroy(uint64_t graph);
 int vgre_graphInstantiate(uint64_t graph, uint64_t *out_exec);
 int vgre_graphExecDestroy(uint64_t exec);
@@ -133,10 +135,6 @@ int vgre_graphUpdateKernelNode(uint64_t graph, uint64_t node_id,
                                 void **args, const uint8_t *arg_types, int num_args);
 int vgre_graphUpdateMemcpyNode(uint64_t graph, uint64_t node_id,
                                 void *dst, void *src, size_t count, int kind);
-
-int vgre_graphInstantiate(uint64_t graph, uint64_t *out_exec);
-int vgre_graphExecDestroy(uint64_t exec);
-int vgre_graphLaunch(uint64_t exec, uint64_t stream);
 ```
 
 ## 2.5 CUDA Runtime API Shim (`libvgre_cudart.so`)
@@ -166,7 +164,7 @@ VGRE provides a comprehensive binary-compatible layer for application intercepti
 ### Advanced Interop
 - `cudaDeviceCanAccessPeer`, `cudaDeviceEnablePeerAccess`, `cudaDeviceDisablePeerAccess`
 - `cudaMemcpyPeer`, `cudaMemcpyPeerAsync`
-- **CUDA Graphs**: `cudaGraphCreate`, `cudaStreamBeginCapture`, `cudaStreamEndCapture`, `cudaGraphInstantiate`, `cudaGraphLaunch`
+- **CUDA Graphs**: `cudaGraphCreate`, `cudaGraphClone`, `cudaStreamBeginCapture`, `cudaStreamEndCapture`, `cudaGraphInstantiate`, `cudaGraphLaunch`, `cudaGraphDestroy`, `cudaGraphExecDestroy`
 
 ---
 
@@ -247,7 +245,7 @@ const char* vgre_get_version(void);
 
 ---
 
-## 3. Dashboard Telemetry API
+## 4. Dashboard Telemetry API (polling schema)
 
 The VGRE Dashboard uses an isolate-based background thread to poll the C API every 500 ms. The following telemetry fields are presented:
 
