@@ -392,8 +392,8 @@ VGREResult ResourceLedger::load() {
 // ── Singleton ──────────────────────────────────────────────────────────────
 
 ResourceLedger &ResourceLedger::instance() {
-  static ResourceLedger inst;
-  return inst;
+  static ResourceLedger* inst = new ResourceLedger();
+  return *inst;
 }
 
 } // namespace advanced

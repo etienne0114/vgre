@@ -66,26 +66,46 @@ int main(int argc, char** argv) {
     vgre::advanced::TCPClusterManager& cluster = vgre::advanced::TCPClusterManager::instance();
     
     vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Initializing VGRE Remote Worker on port " + std::to_string(port));
-    
+    std::cout << "[Worker] Startup phase 1/2: Initializing networking..." << std::endl;
+    std::cout.flush();
+
     // Initialize as Worker (is_master = false)
-    if (cluster.initialize(false, master_ip, port) != vgre::VGREResult::SUCCESS) {
-        vgre::Logger::instance().log(vgre::LogLevel::ERR, "Worker", "Failed to initialize TCP Cluster worker.");
+    vgre::VGREResult initRes = cluster.initialize(false, master_ip, port);
+    if (initRes != vgre::VGREResult::SUCCESS) {
+        vgre::Logger::instance().log(vgre::LogLevel::ERR, "Worker", "Failed to initialize TCP Cluster worker: " + std::to_string(static_cast<int>(initRes)));
+        std::cerr << "[Worker] FATAL: Initialization failed. Check if port " << port << " is available." << std::endl;
         return 1;
     }
 
-    vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Worker node is active and waiting for master connection (UDP Discovery + Standing by on port " + std::to_string(port) + ")...");
+    vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Worker node is active and scanning for master (UDP Discovery)...");
+    std::cout << "[Worker] Startup phase 2/2: Entering discovery loop. scanning local subnet..." << std::endl;
+    std::cout.flush();
     
+    int reconnectCounter = 0;
     while (!g_stop_requested.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         
-        // Safety check: if cluster was disabled externally, stop.
         if (!cluster.isEnabled()) {
-            vgre::Logger::instance().log(vgre::LogLevel::WARN, "Worker", "Cluster disabled; shutting down.");
-            break;
+            if (master_ip == "auto") {
+                // If in standby mode, don't exit! Try to restart the cluster manager.
+                vgre::Logger::instance().log(vgre::LogLevel::WARN, "Worker", "Cluster engine went offline unexpectedly; attempting to re-enable (attempt #" + std::to_string(++reconnectCounter) + ")...");
+                std::cout << "[Worker] Cluster engine offline. Retrying..." << std::endl;
+                std::cout.flush();
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                cluster.initialize(false, master_ip, port);
+            } else {
+                // In direct mode, we exit upon failure as per previous design.
+                vgre::Logger::instance().log(vgre::LogLevel::WARN, "Worker", "Direct connection lost; shutting down.");
+                break;
+            }
+        } else {
+            reconnectCounter = 0; // reset on success
         }
     }
 
     vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Shutting down worker...");
+    std::cout << "[Worker] Shutdown signal received. Cleaning up..." << std::endl;
+    std::cout.flush();
     cluster.shutdown();
 
     return 0;

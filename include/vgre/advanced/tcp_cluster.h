@@ -199,8 +199,8 @@ struct CollectiveOpPacket {
 class TCPClusterManager {
 public:
   static TCPClusterManager &instance() {
-    static TCPClusterManager inst;
-    return inst;
+    static TCPClusterManager* inst = new TCPClusterManager();
+    return *inst;
   }
 
   // Initialize as Master (Server) or Client (Worker) Node
