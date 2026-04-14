@@ -750,8 +750,8 @@ float VectorEngine::vectorDot(const vgre_bf16* a, const vgre_bf16* b, size_t n) 
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 VectorEngine& VectorEngine::instance() {
-    static VectorEngine engine;
-    return engine;
+    static VectorEngine* engine = new VectorEngine();
+    return *engine;
 }
 
 } // namespace runtime

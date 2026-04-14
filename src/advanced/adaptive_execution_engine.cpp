@@ -77,9 +77,12 @@ namespace advanced {
 
 namespace {
 int pickExplorationThreadCount(int maxCores) {
-  thread_local std::mt19937 rng(
-      static_cast<unsigned int>(
-          std::chrono::steady_clock::now().time_since_epoch().count()));
+  static thread_local std::mt19937* rng_ptr = nullptr;
+  if (!rng_ptr) {
+    rng_ptr = new std::mt19937(static_cast<unsigned int>(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+  }
+  auto& rng = *rng_ptr;
   std::uniform_int_distribution<int> exploreRoll(0, 9);
   if (exploreRoll(rng) != 0) {
     return -1;
@@ -126,16 +129,8 @@ AdaptiveExecutionEngine::AdaptiveExecutionEngine()
       }
   }
 
-  // Force ground-truth calibration on startup to provide authoritative performance data.
-  // Stored as a member thread (not detached) so the destructor can join it and
-  // prevent a segfault when the singleton is destroyed mid-benchmark.
-  benchmarkThread_ = std::thread([this]() {
-      this->runBenchmark();
-  });
-
   VGRE_LOG_INFO("AdaptiveExecutionEngine",
                 "Initialized with " + std::to_string(maxCores_) + " max cores. "
-                "Background Ground-Truth calibration started. "
                 "movingAvgAlpha=" + std::to_string(movingAvgAlpha_));
 }
 
@@ -444,6 +439,15 @@ void AdaptiveExecutionEngine::updateHardwareMetrics(int cores, double clockGHz,
   VGRE_LOG_INFO("AdaptiveExecutionEngine",
                 "Hardware metrics sensed: Peak=" + std::to_string(maxGflops_) +
                 " GFLOPS | Bandwidth=" + std::to_string(maxMemoryBandwidth_) + " GB/s");
+
+  // Defer benchmark start until metrics are updated to ensure we don't block
+  // the DLL initialization process if this is called early.
+  if (!benchmarkThread_.joinable() && !calibrated_.load()) {
+      benchmarkThread_ = std::thread([this]() {
+          this->runBenchmark();
+      });
+      VGRE_LOG_INFO("AdaptiveExecutionEngine", "Background Ground-Truth calibration started safely.");
+  }
 }
 
 void AdaptiveExecutionEngine::runBenchmark() {
@@ -800,8 +804,8 @@ double AdaptiveExecutionEngine::getMaxMemoryBandwidth() const {
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 AdaptiveExecutionEngine &AdaptiveExecutionEngine::instance() {
-  static AdaptiveExecutionEngine engine;
-  return engine;
+  static AdaptiveExecutionEngine* inst = new AdaptiveExecutionEngine();
+  return *inst;
 }
 
 } // namespace advanced

@@ -26,8 +26,15 @@ namespace compiler {
 // Prevents repeated llvm::json::parse() (~12s per 378MB JSON) when different
 // test instances parse the same kernel within the same binary run.
 namespace {
-static std::recursive_mutex s_processCacheMutex;
-static std::unordered_map<std::string, EnhancedKernelIR> s_enhancedIRCache;
+static std::recursive_mutex& getProcessCacheMutex() {
+    static std::recursive_mutex* m = new std::recursive_mutex();
+    return *m;
+}
+
+static std::unordered_map<std::string, EnhancedKernelIR>& getEnhancedIRCache() {
+    static std::unordered_map<std::string, EnhancedKernelIR>* cache = new std::unordered_map<std::string, EnhancedKernelIR>();
+    return *cache;
+}
 
 // Return the vgre disk cache directory
 static std::string getVgreCacheDir() {
@@ -1084,9 +1091,9 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
 
     // 1. Process-level static cache (instant, within-binary sharing)
     {
-        std::lock_guard<std::recursive_mutex> lock(s_processCacheMutex);
-        auto it = s_enhancedIRCache.find(cacheKey);
-        if (it != s_enhancedIRCache.end()) {
+        std::lock_guard<std::recursive_mutex> lock(getProcessCacheMutex());
+        auto it = getEnhancedIRCache().find(cacheKey);
+        if (it != getEnhancedIRCache().end()) {
             VGRE_LOG_DEBUG("ClangKernelParser", "EnhancedIR process-cache HIT for " + name);
             outIR = it->second;
             return VGREResult::SUCCESS;
@@ -1099,8 +1106,8 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
         auto it = enhancedCache_.find(cacheKey);
         if (it != enhancedCache_.end()) {
             outIR = it->second;
-            std::lock_guard<std::recursive_mutex> slock(s_processCacheMutex);
-            s_enhancedIRCache[cacheKey] = outIR;
+            std::lock_guard<std::recursive_mutex> slock(getProcessCacheMutex());
+            getEnhancedIRCache()[cacheKey] = outIR;
             return VGREResult::SUCCESS;
         }
     }
@@ -1115,8 +1122,8 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
             enhancedCache_[cacheKey] = outIR;
         }
         {
-            std::lock_guard<std::recursive_mutex> lock(s_processCacheMutex);
-            s_enhancedIRCache[cacheKey] = outIR;
+            std::lock_guard<std::recursive_mutex> lock(getProcessCacheMutex());
+            getEnhancedIRCache()[cacheKey] = outIR;
         }
         return VGREResult::SUCCESS;
     }
@@ -1246,8 +1253,8 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
         enhancedCache_[cacheKey] = outIR;
     }
     {
-        std::lock_guard<std::recursive_mutex> lock(s_processCacheMutex);
-        s_enhancedIRCache[cacheKey] = outIR;
+        std::lock_guard<std::recursive_mutex> lock(getProcessCacheMutex());
+        getEnhancedIRCache()[cacheKey] = outIR;
     }
     saveEnhancedIR(enhHash, outIR);
 

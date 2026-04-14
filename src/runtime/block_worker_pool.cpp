@@ -36,8 +36,8 @@ BlockWorkerPool::~BlockWorkerPool() {
 }
 
 BlockWorkerPool& BlockWorkerPool::instance() {
-    static BlockWorkerPool inst;
-    return inst;
+    static BlockWorkerPool* inst = new BlockWorkerPool();
+    return *inst;
 }
 
 void BlockWorkerPool::initialize(size_t numThreads) {

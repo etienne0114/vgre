@@ -1205,8 +1205,8 @@ std::string HardwareTokenManager::decryptToken(const std::string& ciphertext) {
 // ============================================================================
 
 HardwareTokenManager& HardwareTokenManager::instance() {
-    static HardwareTokenManager manager;
-    return manager;
+    static HardwareTokenManager* inst = new HardwareTokenManager();
+    return *inst;
 }
 
 } // namespace advanced

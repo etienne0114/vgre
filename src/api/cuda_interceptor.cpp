@@ -1389,8 +1389,8 @@ int CUDAInterceptor::convertMemcpyKind(cudaMemcpyKind_t kind) {
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 CUDAInterceptor &CUDAInterceptor::instance() {
-  static CUDAInterceptor interceptor;
-  return interceptor;
+  static CUDAInterceptor* inst = new CUDAInterceptor();
+  return *inst;
 }
 
 // ── Texture/Surface Memory API ──────────────────────────────────────────

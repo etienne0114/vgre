@@ -8,9 +8,32 @@ namespace vgre {
 namespace runtime {
 
 IGPUOpenCLExecutor &IGPUOpenCLExecutor::instance() {
-  static IGPUOpenCLExecutor instance;
-  return instance;
+  static IGPUOpenCLExecutor* instance_ptr = new IGPUOpenCLExecutor();
+  return *instance_ptr;
 }
+
+namespace {
+const std::regex& getReExternC() {
+  static const std::regex* re = new std::regex(R"(extern\s+"C"\s+)");
+  return *re;
+}
+const std::regex& getRePtrAttrib() {
+  static const std::regex* re = new std::regex(R"((\b(float|int|double|void|uint32_t|uint64_t|int32_t|int64_t|uchar|char|short|ushort|long|ulong)\s*\*))");
+  return *re;
+}
+const std::regex& getReBlockIdxX() { static const std::regex* re = new std::regex(R"(blockIdx\.x)"); return *re; }
+const std::regex& getReBlockIdxY() { static const std::regex* re = new std::regex(R"(blockIdx\.y)"); return *re; }
+const std::regex& getReBlockIdxZ() { static const std::regex* re = new std::regex(R"(blockIdx\.z)"); return *re; }
+const std::regex& getReThreadIdxX() { static const std::regex* re = new std::regex(R"(threadIdx\.x)"); return *re; }
+const std::regex& getReThreadIdxY() { static const std::regex* re = new std::regex(R"(threadIdx\.y)"); return *re; }
+const std::regex& getReThreadIdxZ() { static const std::regex* re = new std::regex(R"(threadIdx\.z)"); return *re; }
+const std::regex& getReBlockDimX() { static const std::regex* re = new std::regex(R"(blockDim\.x)"); return *re; }
+const std::regex& getReBlockDimY() { static const std::regex* re = new std::regex(R"(blockDim\.y)"); return *re; }
+const std::regex& getReBlockDimZ() { static const std::regex* re = new std::regex(R"(blockDim\.z)"); return *re; }
+const std::regex& getReGridDimX() { static const std::regex* re = new std::regex(R"(gridDim\.x)"); return *re; }
+const std::regex& getReGridDimY() { static const std::regex* re = new std::regex(R"(gridDim\.y)"); return *re; }
+const std::regex& getReGridDimZ() { static const std::regex* re = new std::regex(R"(gridDim\.z)"); return *re; }
+} // namespace
 
 IGPUOpenCLExecutor::IGPUOpenCLExecutor() {}
 IGPUOpenCLExecutor::~IGPUOpenCLExecutor() {
@@ -120,7 +143,7 @@ VGREResult IGPUOpenCLExecutor::transpileKernel(
   std::string s = cudaSource;
 
   // Remove extern "C"
-  s = std::regex_replace(s, std::regex(R"(extern\s+"C"\s+)"), "");
+  s = std::regex_replace(s, getReExternC(), "");
 
   // Construct rigorous OpenCL Hardware Lowering Shim
   std::string openclShim = R"(
@@ -179,25 +202,24 @@ inline float __attribute__((overloadable)) atomicAdd(volatile __global float* p,
 )";
 
   // Enforce OpenCL __global address space on kernel signature pointers
-  s = std::regex_replace(s, std::regex(R"((\b(float|int|double|void|uint32_t|uint64_t|int32_t|int64_t|uchar|char|short|ushort|long|ulong)\s*\*))"),
-                         "__global $1");
+  s = std::regex_replace(s, getRePtrAttrib(), "__global $1");
 
   // Thread semantic hardware coordinate replacement
-  s = std::regex_replace(s, std::regex(R"(blockIdx\.x)"), "get_group_id(0)");
-  s = std::regex_replace(s, std::regex(R"(blockIdx\.y)"), "get_group_id(1)");
-  s = std::regex_replace(s, std::regex(R"(blockIdx\.z)"), "get_group_id(2)");
+  s = std::regex_replace(s, getReBlockIdxX(), "get_group_id(0)");
+  s = std::regex_replace(s, getReBlockIdxY(), "get_group_id(1)");
+  s = std::regex_replace(s, getReBlockIdxZ(), "get_group_id(2)");
 
-  s = std::regex_replace(s, std::regex(R"(threadIdx\.x)"), "get_local_id(0)");
-  s = std::regex_replace(s, std::regex(R"(threadIdx\.y)"), "get_local_id(1)");
-  s = std::regex_replace(s, std::regex(R"(threadIdx\.z)"), "get_local_id(2)");
+  s = std::regex_replace(s, getReThreadIdxX(), "get_local_id(0)");
+  s = std::regex_replace(s, getReThreadIdxY(), "get_local_id(1)");
+  s = std::regex_replace(s, getReThreadIdxZ(), "get_local_id(2)");
 
-  s = std::regex_replace(s, std::regex(R"(blockDim\.x)"), "get_local_size(0)");
-  s = std::regex_replace(s, std::regex(R"(blockDim\.y)"), "get_local_size(1)");
-  s = std::regex_replace(s, std::regex(R"(blockDim\.z)"), "get_local_size(2)");
+  s = std::regex_replace(s, getReBlockDimX(), "get_local_size(0)");
+  s = std::regex_replace(s, getReBlockDimY(), "get_local_size(1)");
+  s = std::regex_replace(s, getReBlockDimZ(), "get_local_size(2)");
 
-  s = std::regex_replace(s, std::regex(R"(gridDim\.x)"), "get_num_groups(0)");
-  s = std::regex_replace(s, std::regex(R"(gridDim\.y)"), "get_num_groups(1)");
-  s = std::regex_replace(s, std::regex(R"(gridDim\.z)"), "get_num_groups(2)");
+  s = std::regex_replace(s, getReGridDimX(), "get_num_groups(0)");
+  s = std::regex_replace(s, getReGridDimY(), "get_num_groups(1)");
+  s = std::regex_replace(s, getReGridDimZ(), "get_num_groups(2)");
   
   // No longer need the atomicAdd_f hack if we use 'overloadable'
   outOpenCLSource = openclShim + "\n" + s;

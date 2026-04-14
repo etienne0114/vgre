@@ -511,8 +511,8 @@ uint64_t Scheduler::getPendingTasks() const { return pending_.load(); }
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 Scheduler &Scheduler::instance() {
-  static Scheduler sched;
-  return sched;
+  static Scheduler* inst = new Scheduler();
+  return *inst;
 }
 
 } // namespace core

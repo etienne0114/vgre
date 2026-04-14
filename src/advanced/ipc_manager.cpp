@@ -40,8 +40,8 @@ static bool processIsAlive(int32_t pid) {
 } // namespace
 
 IPCManager &IPCManager::instance() {
-  static IPCManager manager;
-  return manager;
+  static IPCManager* inst = new IPCManager();
+  return *inst;
 }
 
 IPCManager::IPCManager() = default;
