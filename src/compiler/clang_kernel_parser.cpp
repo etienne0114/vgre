@@ -34,6 +34,49 @@ static std::string getVgreCacheDir() {
     return vgre::common::getCacheRoot() + "/cache";
 }
 
+// Strip template arguments from a function/class name for flexible matching.
+// "myKernel<float, 4>" → "myKernel"
+static std::string stripTemplateArgs(const std::string& s) {
+    auto pos = s.find('<');
+    return pos == std::string::npos ? s : s.substr(0, pos);
+}
+
+// Normalize whitespace within template argument lists so that
+// "myKernel<float ,4>" and "myKernel<float, 4>" compare equal.
+// Removes spaces immediately adjacent to '<', '>', and ','.
+static std::string normalizeTemplateName(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == ' ' || c == '\t') {
+            if (!out.empty()) {
+                char prev = out.back();
+                if (prev == '<' || prev == '>' || prev == ',') continue;
+            }
+            if (i + 1 < s.size()) {
+                char next = s[i + 1];
+                if (next == '<' || next == '>' || next == ',') continue;
+            }
+        }
+        out += c;
+    }
+    return out;
+}
+
+// Match a candidate name against a target, ignoring template arguments on
+// either side and normalizing whitespace within template argument lists.
+static bool kernelNameMatches(const std::string& candidate, const std::string& target) {
+    if (target.empty()) return true;       // empty target → match anything
+    if (candidate == target) return true;
+    std::string normCand = normalizeTemplateName(candidate);
+    std::string normTgt  = normalizeTemplateName(target);
+    if (normCand == normTgt) return true;
+    return stripTemplateArgs(normCand) == stripTemplateArgs(normTgt) ||
+           stripTemplateArgs(normCand) == normTgt ||
+           normCand == stripTemplateArgs(normTgt);
+}
+
 // Compute disk path for a cached EnhancedKernelIR
 static std::string enhancedCachePath(const std::string& hash) {
     std::string dir = getVgreCacheDir() + "/" + hash.substr(0, 2);
@@ -365,65 +408,69 @@ VGREResult ClangKernelParser::parse(const std::string& name,
     if (!inner) return VGREResult::ERR_INVALID_KERNEL;
 
     bool found = false;
+    // Helper: check whether a FunctionDecl node has the SectionAttr "vgre_global"
+    auto hasSectionAttr = [](const llvm::json::Object* funcObj) -> bool {
+        const auto* inner = funcObj->getArray("inner");
+        if (!inner) return false;
+        for (const auto& child : *inner) {
+            const auto* childObj = child.getAsObject();
+            if (childObj && childObj->getString("kind").value_or("") == "SectionAttr" &&
+                childObj->getString("section_name").value_or("") == "vgre_global") {
+                return true;
+            }
+        }
+        return false;
+    };
+
     std::function<const llvm::json::Object*(const llvm::json::Array*, const std::string&)> findKernel;
     findKernel = [&](const llvm::json::Array* innerArray, const std::string& targetName) -> const llvm::json::Object* {
         if (!innerArray) return nullptr;
-        
+
         for (const auto& node : *innerArray) {
             const auto* obj = node.getAsObject();
             if (!obj) continue;
-            
+
             std::string kind = obj->getString("kind").value_or("").str();
-            
+
             if (kind == "FunctionDecl") {
                 std::string funcName = obj->getString("name").value_or("").str();
-                if (targetName.empty() || funcName == targetName) {
-                    // Check for SectionAttr "vgre_global"
-                    const auto* funcInner = obj->getArray("inner");
-                    if (funcInner) {
-                        for (const auto& child : *funcInner) {
-                            const auto* childObj = child.getAsObject();
-                            if (childObj && childObj->getString("kind").value_or("") == "SectionAttr") {
-                                if (childObj->getString("section_name").value_or("") == "vgre_global") {
-                                    return obj;
-                                }
-                            }
-                        }
-                    }
+                if (kernelNameMatches(funcName, targetName) && hasSectionAttr(obj)) {
+                    return obj;
                 }
             } else if (kind == "FunctionTemplateDecl") {
-                // Handle template functions - look for nested FunctionDecl
-                std::string funcName = obj->getString("name").value_or("").str();
-                if (targetName.empty() || funcName == targetName) {
-                    const auto* templateInner = obj->getArray("inner");
-                    if (templateInner) {
-                        for (const auto& templateChild : *templateInner) {
-                            const auto* templateChildObj = templateChild.getAsObject();
-                            if (templateChildObj && templateChildObj->getString("kind").value_or("") == "FunctionDecl") {
-                                // Check if the nested function has SectionAttr
-                                const auto* nestedFuncInner = templateChildObj->getArray("inner");
-                                if (nestedFuncInner) {
-                                    for (const auto& attr : *nestedFuncInner) {
-                                        const auto* attrObj = attr.getAsObject();
-                                        if (attrObj && attrObj->getString("kind").value_or("") == "SectionAttr") {
-                                            if (attrObj->getString("section_name").value_or("") == "vgre_global") {
-                                                return templateChildObj;
-                                            }
-                                        }
-                                    }
-                                }
-                                // For templates, __global__ might be on the template itself
-                                if (!targetName.empty() && funcName == targetName) {
-                                    return templateChildObj;
+                // Primary template: contains TemplateTypeParmDecl + FunctionDecl children.
+                std::string tplName = obj->getString("name").value_or("").str();
+                if (kernelNameMatches(tplName, targetName)) {
+                    const auto* tplInner = obj->getArray("inner");
+                    if (tplInner) {
+                        for (const auto& tplChild : *tplInner) {
+                            const auto* tplChildObj = tplChild.getAsObject();
+                            if (!tplChildObj) continue;
+                            std::string ck = tplChildObj->getString("kind").value_or("").str();
+                            if (ck == "FunctionDecl") {
+                                if (hasSectionAttr(tplChildObj) || !targetName.empty()) {
+                                    return tplChildObj;
                                 }
                             }
                         }
                     }
                 }
+            } else if (kind == "FunctionTemplateSpecializationDecl" || kind == "FunctionDecl") {
+                // Explicit template specializations emitted as FunctionDecl with a
+                // templateSpecializationArgs field, or a dedicated specialization node.
+                std::string funcName = obj->getString("name").value_or("").str();
+                if (kernelNameMatches(funcName, targetName) && hasSectionAttr(obj)) {
+                    return obj;
+                }
+            } else if (kind == "ClassTemplateDecl" || kind == "ClassTemplateSpecializationDecl" ||
+                       kind == "CXXRecordDecl") {
+                // Classes/structs may contain __global__ static member functions.
+                const auto* nested = findKernel(obj->getArray("inner"), targetName);
+                if (nested) return nested;
             } else if (kind == "LinkageSpecDecl" || kind == "NamespaceDecl") {
-                // Recurse into linkage or namespace
-                const auto* nestedObj = findKernel(obj->getArray("inner"), targetName);
-                if (nestedObj) return nestedObj;
+                // Recurse into extern "C" blocks and namespaces.
+                const auto* nested = findKernel(obj->getArray("inner"), targetName);
+                if (nested) return nested;
             }
         }
         return nullptr;
@@ -1119,9 +1166,35 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
             std::string kind = obj->getString("kind").value_or("").str();
             if (kind == "FunctionDecl") {
                 std::string funcName = obj->getString("name").value_or("").str();
-                if (funcName == name) {
+                if (kernelNameMatches(funcName, name)) {
                     return obj;
                 }
+            } else if (kind == "FunctionTemplateDecl") {
+                // Primary template: name matches → return the nested FunctionDecl
+                std::string tplName = obj->getString("name").value_or("").str();
+                if (kernelNameMatches(tplName, name)) {
+                    const auto* tplInner = obj->getArray("inner");
+                    if (tplInner) {
+                        for (const auto& tplChild : *tplInner) {
+                            const auto* tplChildObj = tplChild.getAsObject();
+                            if (tplChildObj &&
+                                tplChildObj->getString("kind").value_or("") == "FunctionDecl") {
+                                return tplChildObj;
+                            }
+                        }
+                    }
+                }
+            } else if (kind == "FunctionTemplateSpecializationDecl") {
+                std::string funcName = obj->getString("name").value_or("").str();
+                if (kernelNameMatches(funcName, name)) {
+                    return obj;
+                }
+            } else if (kind == "ClassTemplateDecl" ||
+                       kind == "ClassTemplateSpecializationDecl" ||
+                       kind == "CXXRecordDecl") {
+                // Search for __global__ static member functions inside classes.
+                const auto* nested = findKernel(obj->getArray("inner"));
+                if (nested) return nested;
             } else if (kind == "LinkageSpecDecl" || kind == "NamespaceDecl") {
                 const auto* nested = findKernel(obj->getArray("inner"));
                 if (nested) return nested;

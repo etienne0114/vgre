@@ -646,6 +646,10 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
 #if defined(_WIN32)
   DWORD protect = (flags == 2) ? PAGE_READWRITE : PAGE_NOACCESS;
   void *ptr = VirtualAlloc(addr, alignedSize, MEM_COMMIT | MEM_RESERVE, protect);
+#elif defined(__APPLE__)
+  int prot = (flags == 2) ? (PROT_READ | PROT_WRITE) : PROT_NONE;
+  // Use MAP_FIXED to force the specific address provided by the Master
+  void *ptr = mmap(addr, alignedSize, prot, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
 #else
   int prot = (flags == 2) ? (PROT_READ | PROT_WRITE) : PROT_NONE;
   // Use MAP_FIXED to force the specific address provided by the Master

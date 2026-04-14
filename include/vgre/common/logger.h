@@ -114,6 +114,16 @@ private:
   std::deque<std::string> logBuffer_;
 };
 
+// ── Compile-time path basename (strips directory prefix) ──────────────────
+namespace detail {
+constexpr const char* log_basename(const char* path) noexcept {
+  const char* last = path;
+  for (const char* p = path; *p; ++p)
+    if (*p == '/' || *p == '\\') last = p + 1;
+  return last;
+}
+} // namespace detail
+
 // ── Convenience macros ─────────────────────────────────────────────────────
 #define VGRE_LOG_DEBUG(comp, msg)                                              \
   ::vgre::Logger::instance().log(::vgre::LogLevel::DEBUG, comp, msg)
@@ -121,8 +131,12 @@ private:
   ::vgre::Logger::instance().log(::vgre::LogLevel::INFO, comp, msg)
 #define VGRE_LOG_WARN(comp, msg)                                               \
   ::vgre::Logger::instance().log(::vgre::LogLevel::WARN, comp, msg)
+// ERROR level appends [filename:line] so failures are immediately locatable.
 #define VGRE_LOG_ERROR(comp, msg)                                              \
-  ::vgre::Logger::instance().log(::vgre::LogLevel::ERR, comp, msg)
+  ::vgre::Logger::instance().log(::vgre::LogLevel::ERR, comp,                 \
+      std::string(msg) + " [" +                                                \
+      ::vgre::detail::log_basename(__FILE__) + ":" +                           \
+      std::to_string(__LINE__) + "]")
 
 } // namespace vgre
 

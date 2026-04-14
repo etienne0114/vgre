@@ -4,7 +4,9 @@
 #include "vgre/common/error_codes.h"
 
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace vgre {
@@ -45,6 +47,14 @@ struct NodeCapability {
   int worker_idx = -1;
   std::string address;
   bool is_local = false;
+  // Measured or estimated inter-node network bandwidth in Gb/s.
+  // Used to penalise high-latency / low-bandwidth remote nodes when
+  // partitioning data-heavy workloads.  Defaults to 10.0 Gb/s (typical
+  // 10GbE); local nodes use FLT_MAX so they are never penalised.
+  double network_bandwidth_gbps = 10.0;
+  // Prediction accuracy factor [0.1, 1.0]: scales measured_capacity down when
+  // prior execution was slower than predicted.  Updated via recordActualExecution().
+  double accuracy_factor = 1.0;
 };
 
 // ── Workload Partitioner ──────────────────────────────────────────────────
@@ -80,8 +90,28 @@ public:
    */
   bool validatePlan(const PartitionPlan &plan) const;
 
+  /**
+   * @brief Records actual vs. predicted execution time for a node.
+   *
+   * Updates the per-node accuracy factor used to scale measured_capacity in
+   * subsequent createPartitionPlan() calls.  Call after each partitioned kernel
+   * completes with the wall-time returned by the dispatcher.
+   *
+   * @param address   Node address (must match NodeCapability::address).
+   * @param predicted_ms  Expected latency used in the partition plan.
+   * @param actual_ms     Measured wall-time of actual execution.
+   */
+  void recordActualExecution(const std::string &address,
+                             double predicted_ms, double actual_ms);
+
   // Singleton
   static WorkloadPartitioner &instance();
+
+private:
+  // Per-node accuracy factors, updated by recordActualExecution().
+  // Protected by accuracyMutex_; read under lock in createPartitionPlan().
+  std::unordered_map<std::string, double> accuracyFactors_;
+  mutable std::mutex accuracyMutex_;
 };
 
 } // namespace advanced

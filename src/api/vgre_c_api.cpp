@@ -498,6 +498,20 @@ int vgre_graphCreate(uint64_t *out_graph) {
   return VGRE_SUCCESS;
 }
 
+int vgre_graphClone(uint64_t src_graph, uint64_t *out_clone) {
+  if (!out_clone)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  vgre::GraphId clone = 0;
+  auto r = vgre::core::RuntimeEngine::instance().graphClone(
+      static_cast<vgre::GraphId>(src_graph), clone);
+  if (r != vgre::VGREResult::SUCCESS)
+    return to_status(r);
+  *out_clone = clone;
+  return VGRE_SUCCESS;
+}
+
 int vgre_graphDestroy(uint64_t graph) {
   if (int s = require_initialized(); s != VGRE_SUCCESS)
     return s;
@@ -588,6 +602,37 @@ int vgre_graphAddMemcpyNodeEx(uint64_t graph, void *dst, void *src,
   auto r = vgre::core::RuntimeEngine::instance().graphAddMemcpyNode(
       static_cast<vgre::GraphId>(graph), dst, src, count, kind, depList,
       nodeId);
+  if (r != vgre::VGREResult::SUCCESS)
+    return to_status(r);
+  *out_node_id = nodeId;
+  return VGRE_SUCCESS;
+}
+
+// Add a conditional node (IF or WHILE) to a graph.
+// cond_type: 0 = IF (body executes once if condFn != 0),
+//            1 = WHILE (body loops while condFn != 0, up to max_iterations).
+// body_graph: GraphId of the subgraph to execute as the body.
+// max_iterations: safety cap for WHILE loops (0 → default 65536).
+int vgre_graphAddConditionalNodeEx(uint64_t graph, int (*cond_fn)(void *),
+                                    void *cond_ctx, uint64_t body_graph,
+                                    int cond_type, unsigned int max_iterations,
+                                    const uint64_t *deps, int num_deps,
+                                    uint64_t *out_node_id) {
+  if (!cond_fn || !out_node_id || num_deps < 0)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (num_deps > 0 && !deps)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  std::vector<uint64_t> depList(deps, deps + num_deps);
+  vgre::core::GraphCondType ct =
+      (cond_type == 1) ? vgre::core::GraphCondType::WHILE
+                       : vgre::core::GraphCondType::IF;
+  unsigned int iters = (max_iterations == 0) ? 65536 : max_iterations;
+  uint64_t nodeId = 0;
+  auto r = vgre::core::RuntimeEngine::instance().graphAddConditionalNode(
+      static_cast<vgre::GraphId>(graph), cond_fn, cond_ctx,
+      static_cast<vgre::GraphId>(body_graph), ct, iters, depList, nodeId);
   if (r != vgre::VGREResult::SUCCESS)
     return to_status(r);
   *out_node_id = nodeId;

@@ -27,6 +27,18 @@ public:
                      const dim3 &gridOffset = dim3(0, 0, 0),
                      bool usesSyncthreads = false);
 
+  // Execute a cooperative kernel — all blocks run concurrently in separate
+  // threads so that grid-wide barriers (vgre_jit_syncgrid) work correctly.
+  // Blocks are capped at maxThreads_ to avoid thread explosion; any excess
+  // blocks execute sequentially after the concurrent batch completes (no
+  // grid-barrier guarantee for the excess portion — same constraint as CUDA,
+  // which requires gridDim <= SM count for cooperative launch).
+  VGREResult executeCooperative(CompiledKernelFn fn, const dim3 &gridDim,
+                                const dim3 &blockDim, void **args,
+                                size_t sharedMemSize = 0,
+                                uint64_t flopsPerBlock = 0,
+                                uint64_t bytesPerBlock = 0);
+
   // Setters
   void setMaxThreads(int n);
   int getMaxThreads() const;

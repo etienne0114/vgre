@@ -29,13 +29,79 @@ VGREResult ShmManager::open(const std::string& name, size_t size, bool create) {
     close();
 
 #if defined(_WIN32)
-    (void)name;
-    (void)size;
-    (void)create;
-    VGRE_LOG_WARN("ShmManager",
-                  "Shared memory manager is not implemented on Windows yet");
-    return VGREResult::ERR_NOT_SUPPORTED;
+    // Windows implementation using CreateFileMapping/MapViewOfFile
+    
+    // Ensure name is valid for Windows (no leading slash)
+    std::string mappingName = name;
+    if (!mappingName.empty() && mappingName[0] == '/') {
+        mappingName = mappingName.substr(1);
+    }
+    if (mappingName.empty()) {
+        VGRE_LOG_ERROR("ShmManager", "Invalid shared memory name (empty)");
+        return VGREResult::ERR_INVALID_VALUE;
+    }
+    
+    // Prefix with "Local\\" for local session scope
+    std::string fullName = "Local\\vgre_shm_" + mappingName;
+    
+    DWORD dwCreationDisposition = create ? CREATE_ALWAYS : OPEN_EXISTING;
+    DWORD flProtect = PAGE_READWRITE;
+    DWORD dwDesiredAccess = FILE_MAP_ALL_ACCESS;
+    
+    // Create or open file mapping
+    HANDLE hMapFile = CreateFileMappingA(
+        INVALID_HANDLE_VALUE,    // Use paging file
+        NULL,                    // Default security
+        flProtect,               // Read/write access
+        0,                       // High-order DWORD of size
+        static_cast<DWORD>(size), // Low-order DWORD of size
+        fullName.c_str()         // Name of mapping object
+    );
+    
+    if (hMapFile == NULL) {
+        DWORD err = GetLastError();
+        if (!create && err == ERROR_FILE_NOT_FOUND) {
+            VGRE_LOG_ERROR("ShmManager", "Shared memory segment not found: " + fullName);
+            return VGREResult::ERR_NOT_FOUND;
+        }
+        VGRE_LOG_ERROR("ShmManager", "CreateFileMapping failed for " + fullName + 
+                       " (error: " + std::to_string(err) + ")");
+        return VGREResult::ERR_IO;
+    }
+    
+    // Check if we opened an existing mapping when we wanted to create
+    if (create && GetLastError() == ERROR_ALREADY_EXISTS) {
+        VGRE_LOG_WARN("ShmManager", "Shared memory segment already exists: " + fullName);
+    }
+    
+    // Map view of file
+    void* pBuf = MapViewOfFile(
+        hMapFile,           // Handle to map object
+        dwDesiredAccess,    // Read/write permission
+        0,                  // High-order DWORD of offset
+        0,                  // Low-order DWORD of offset
+        size                // Number of bytes to map
+    );
+    
+    if (pBuf == NULL) {
+        DWORD err = GetLastError();
+        VGRE_LOG_ERROR("ShmManager", "MapViewOfFile failed (error: " + std::to_string(err) + ")");
+        CloseHandle(hMapFile);
+        return VGREResult::ERR_IO;
+    }
+    
+    // Store handles
+    fd_ = reinterpret_cast<int>(hMapFile); // Store HANDLE as int (platform-specific)
+    basePtr_ = pBuf;
+    name_ = fullName;
+    size_ = size;
+    
+    VGRE_LOG_DEBUG("ShmManager", "Opened Windows shared memory segment " + fullName + 
+                   " (" + std::to_string(size) + " bytes)");
+    return VGREResult::SUCCESS;
+    
 #else
+    // Linux/macOS implementation using POSIX shared memory
     int flags = O_RDWR;
     if (create) {
         flags |= O_CREAT;
@@ -80,8 +146,15 @@ VGREResult ShmManager::open(const std::string& name, size_t size, bool create) {
 
 void ShmManager::close() {
 #if defined(_WIN32)
-    basePtr_ = nullptr;
-    fd_ = -1;
+    if (basePtr_) {
+        UnmapViewOfFile(basePtr_);
+        basePtr_ = nullptr;
+    }
+    if (fd_ != -1) {
+        HANDLE hMapFile = reinterpret_cast<HANDLE>(fd_);
+        CloseHandle(hMapFile);
+        fd_ = -1;
+    }
     name_.clear();
     size_ = 0;
 #else
@@ -100,6 +173,9 @@ void ShmManager::close() {
 
 void ShmManager::unlink(const std::string& name) {
 #if defined(_WIN32)
+    // On Windows, shared memory is automatically cleaned up when all handles are closed
+    // No explicit unlink needed, but we log for consistency
+    VGRE_LOG_DEBUG("ShmManager", "Windows shared memory cleanup (automatic): " + name);
     (void)name;
 #else
     std::string shmName = name;

@@ -4,6 +4,7 @@
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -13,7 +14,13 @@
 namespace vgre {
 namespace core {
 
-enum class GraphNodeType { KERNEL, MEMCPY };
+enum class GraphNodeType { KERNEL, MEMCPY, CONDITIONAL };
+
+// Condition type for conditional nodes (matches cudaGraphCondType)
+enum class GraphCondType : uint8_t {
+    IF    = 0,  // Body subgraph executes once if condition returns non-zero
+    WHILE = 1,  // Body subgraph executes repeatedly while condition returns non-zero
+};
 
 struct GraphNode {
   GraphNodeType type;
@@ -33,6 +40,14 @@ struct GraphNode {
   void *src = nullptr;
   size_t count = 0;
   int kind = VGRE_MEMCPY_HOST_TO_DEVICE;
+
+  // Conditional node data
+  // condFn(condCtx) returns non-zero to execute / continue body, zero to skip/stop.
+  int (*condFn)(void *) = nullptr;
+  void *condCtx = nullptr;
+  GraphId bodyGraphId = 0;     // subgraph to execute when condition is true
+  GraphCondType condType = GraphCondType::IF;
+  unsigned int maxIterations = 65536;  // safety limit for WHILE loops
 };
 
 class Graph {
@@ -42,10 +57,22 @@ public:
   std::vector<GraphNode> nodes;
 };
 
+// Per-execution profiling data stored in GraphExec and updated by launch().
+struct GraphExecProfile {
+  double   last_exec_ms  = 0.0;  // wall time of the most recent launch
+  double   total_exec_ms = 0.0;  // cumulative wall time across all launches
+  uint64_t launch_count  = 0;    // number of times this exec was launched
+
+  double avg_exec_ms() const {
+    return launch_count > 0 ? total_exec_ms / static_cast<double>(launch_count) : 0.0;
+  }
+};
+
 class GraphExec {
 public:
   GraphExecId id;
   std::shared_ptr<Graph> sourceGraph;
+  GraphExecProfile profile;
 };
 
 class GraphManager {
@@ -81,6 +108,25 @@ public:
                                            const std::vector<uint64_t> &deps,
                                            uint64_t &outNodeId);
 
+  vgre::VGREResult addConditionalNode(GraphId id, int (*condFn)(void *),
+                                      void *condCtx, GraphId bodyGraphId,
+                                      GraphCondType condType,
+                                      unsigned int maxIterations = 65536);
+  vgre::VGREResult addConditionalNodeWithDeps(GraphId id, int (*condFn)(void *),
+                                              void *condCtx, GraphId bodyGraphId,
+                                              GraphCondType condType,
+                                              unsigned int maxIterations,
+                                              const std::vector<uint64_t> &deps);
+  vgre::VGREResult addConditionalNodeWithDepsOut(GraphId id, int (*condFn)(void *),
+                                                 void *condCtx, GraphId bodyGraphId,
+                                                 GraphCondType condType,
+                                                 unsigned int maxIterations,
+                                                 const std::vector<uint64_t> &deps,
+                                                 uint64_t &outNodeId);
+
+  // Read-only access to graph nodes; used by RuntimeEngine to compile body subgraphs.
+  vgre::VGREResult getGraphNodes(GraphId id, std::vector<GraphNode> &outNodes) const;
+
   vgre::VGREResult addDependency(GraphId id, uint64_t nodeId,
                                  uint64_t dependsOn);
   vgre::VGREResult updateKernelNodeArgs(GraphId id, uint64_t nodeId,
@@ -88,6 +134,31 @@ public:
                                         const std::vector<ArgType> &argTypes);
   vgre::VGREResult updateMemcpyNode(GraphId id, uint64_t nodeId, void *dst,
                                     void *src, size_t count, int kind);
+
+  vgre::VGREResult cloneGraph(GraphId srcId, GraphId &outCloneId);
+
+  // Serialize a graph to a JSON string.  Only the topology (node types, kernel
+  // names, grid/block dims, deps) is persisted — raw pointer args and live
+  // memory regions are intentionally excluded because they are process-specific.
+  // Returns SUCCESS and populates outJson, or ERR_INVALID_VALUE if id not found.
+  vgre::VGREResult serializeGraph(GraphId id, std::string &outJson) const;
+
+  // Deserialize a previously-serialized graph JSON into a new GraphId.
+  // Kernel source code for KERNEL nodes must be re-registered separately before
+  // the graph can be launched (the JSON stores kernelName but not IR/source).
+  // Returns SUCCESS and populates outId, or ERR_INVALID_VALUE on parse error.
+  vgre::VGREResult deserializeGraph(const std::string &json, GraphId &outId);
+
+  // Validate graph structure: checks deps, dimensions, and pointer sanity.
+  // Can be called any time after nodes are added — does NOT require instantiation.
+  vgre::VGREResult validateGraph(GraphId id) const;
+
+  // Retrieve profiling data collected by launch().
+  // Populates lastExecMs, avgExecMs, launchCount from the stored GraphExecProfile.
+  vgre::VGREResult getExecProfile(GraphExecId id,
+                                  double &lastExecMs,
+                                  double &avgExecMs,
+                                  uint64_t &launchCount) const;
 
   vgre::VGREResult instantiate(GraphId id, GraphExecId &outExecId);
   vgre::VGREResult updateExec(GraphExecId execId, GraphId newGraphId);

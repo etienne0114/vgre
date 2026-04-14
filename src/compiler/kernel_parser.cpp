@@ -516,94 +516,114 @@ VGREResult KernelParser::parse(const std::string& name,
         VGRE_LOG_WARN("KernelParser",
                       "ClangKernelParser failed, using token-based heuristic analysis");
 
-        uint64_t bodyOps = 0;    // ops outside any loop
-        uint64_t bodyMem = 0;
-        uint64_t loopOps = 0;    // ops accumulated inside current loop scan
-        uint64_t loopMem = 0;
-        uint64_t loopMultiplier = 1;  // product of detected trip counts
-        bool insideLoopHeader = false;
-        int  loopHeaderDepth  = 0;
-        uint64_t pendingTripCount = 0; // integer literal found in `< N`
-
-        for (size_t k = 0; k < tokens.size(); ++k) {
-            const auto& tok = tokens[k];
-
-            // ── Detect `for (` or `while (` — enter loop header scan ──────
-            if (tok.type == TokenType::KEYWORD &&
-                (tok.value == "for" || tok.value == "while" || tok.value == "do")) {
-                insideLoopHeader = true;
-                loopHeaderDepth  = 0;
-                pendingTripCount = 0;
-                continue;
-            }
-
-            // ── Inside loop header: find `< N` to extract trip count ──────
-            if (insideLoopHeader) {
-                if (tok.type == TokenType::LPAREN) { ++loopHeaderDepth; }
-                else if (tok.type == TokenType::RPAREN) {
-                    if (--loopHeaderDepth <= 0) {
-                        // End of loop header — apply trip count
-                        uint64_t tc = (pendingTripCount > 1 && pendingTripCount <= 1<<20)
-                                      ? pendingTripCount : 32; // default: warp-sized
-                        loopMultiplier *= tc;
-                        insideLoopHeader = false;
-                    }
-                } else if (tok.type == TokenType::OPERATOR && tok.value == "<" &&
-                           k + 1 < tokens.size() &&
-                           tokens[k+1].type == TokenType::LITERAL_INT) {
-                    // `< literal` — this is the loop bound
-                    try { pendingTripCount = std::stoull(tokens[k+1].value); }
-                    catch (...) {}
-                }
-                continue;  // don't count loop-header tokens as body ops
-            }
-
-            // ── Body: count operations ────────────────────────────────────
-            if (tok.type == TokenType::KEYWORD && tok.value == "if") {
-                bodyOps += 2;  // branch + comparison
-            }
-            if (tok.type == TokenType::OPERATOR) {
-                if (tok.value == "+" || tok.value == "-" || tok.value == "*" ||
-                    tok.value == "/" || tok.value == "&" || tok.value == "|" ||
-                    tok.value == "^" || tok.value == "!" ||
-                    tok.value == "<" || tok.value == ">") {
-                    bodyOps += 1;
-                }
-            }
-            if (tok.type == TokenType::LBRACKET) { bodyMem += 1; }
-            if (tok.type == TokenType::IDENTIFIER && k + 1 < tokens.size() &&
-                tokens[k+1].type == TokenType::LPAREN) {
-                const auto& fname = tok.value;
-                if (fname.find("sin")  != std::string::npos ||
-                    fname.find("cos")  != std::string::npos ||
-                    fname.find("exp")  != std::string::npos ||
-                    fname.find("log")  != std::string::npos ||
-                    fname.find("tan")  != std::string::npos ||
-                    fname.find("pow")  != std::string::npos) {
-                    bodyOps += 10;  // transcendental — expensive
-                } else if (fname.find("sqrt") != std::string::npos ||
-                           fname.find("fma")  != std::string::npos) {
-                    bodyOps += 4;   // sqrt/fma — moderately expensive
-                } else {
-                    bodyOps += 2;   // generic call
-                }
-            }
+        // Check fallback cache — avoids recomputing identical sources on every launch.
+        const std::string cacheKey = outIR.name + "|" + source;
+        auto cacheIt = fallbackCache_.find(cacheKey);
+        bool fallbackCacheHit = (cacheIt != fallbackCache_.end());
+        if (fallbackCacheHit) {
+            outIR.estimatedInstructionCount  = cacheIt->second.estimatedInstructionCount;
+            outIR.estimatedMemoryAccessCount = cacheIt->second.estimatedMemoryAccessCount;
+            VGRE_LOG_DEBUG("KernelParser",
+                           "Fallback cache hit for kernel '" + outIR.name + "'");
         }
-        (void)loopOps; (void)loopMem; // currently merged into body
 
-        uint64_t estOps = (loopMultiplier > 1) ? bodyOps * loopMultiplier : bodyOps;
-        uint64_t estMem = (loopMultiplier > 1) ? bodyMem * loopMultiplier : bodyMem;
+        if (!fallbackCacheHit) {
+            uint64_t bodyOps = 0;    // ops outside any loop
+            uint64_t bodyMem = 0;
+            uint64_t loopOps = 0;    // ops accumulated inside current loop scan
+            uint64_t loopMem = 0;
+            uint64_t loopMultiplier = 1;  // product of detected trip counts
+            bool insideLoopHeader = false;
+            int  loopHeaderDepth  = 0;
+            uint64_t pendingTripCount = 0; // integer literal found in `< N`
 
-        if (estOps == 0) estOps = 20;  // minimum for any functional kernel
-        if (estMem == 0) estMem = 4;
+            for (size_t k = 0; k < tokens.size(); ++k) {
+                const auto& tok = tokens[k];
 
-        outIR.estimatedInstructionCount  = estOps;
-        outIR.estimatedMemoryAccessCount = estMem;
+                // ── Detect `for (` or `while (` — enter loop header scan ──────
+                if (tok.type == TokenType::KEYWORD &&
+                    (tok.value == "for" || tok.value == "while" || tok.value == "do")) {
+                    insideLoopHeader = true;
+                    loopHeaderDepth  = 0;
+                    pendingTripCount = 0;
+                    continue;
+                }
 
-        VGRE_LOG_INFO("KernelParser",
-                      "Token heuristic: " + std::to_string(estOps) + " instr, " +
-                      std::to_string(estMem) + " mem (loop×" +
-                      std::to_string(loopMultiplier) + ")");
+                // ── Inside loop header: find `< N` to extract trip count ──────
+                if (insideLoopHeader) {
+                    if (tok.type == TokenType::LPAREN) { ++loopHeaderDepth; }
+                    else if (tok.type == TokenType::RPAREN) {
+                        if (--loopHeaderDepth <= 0) {
+                            // End of loop header — apply trip count
+                            uint64_t tc = (pendingTripCount > 1 && pendingTripCount <= 1<<20)
+                                          ? pendingTripCount : 32; // default: warp-sized
+                            loopMultiplier *= tc;
+                            insideLoopHeader = false;
+                        }
+                    } else if (tok.type == TokenType::OPERATOR && tok.value == "<" &&
+                               k + 1 < tokens.size() &&
+                               tokens[k+1].type == TokenType::LITERAL_INT) {
+                        // `< literal` — this is the loop bound
+                        try { pendingTripCount = std::stoull(tokens[k+1].value); }
+                        catch (...) {}
+                    }
+                    continue;  // don't count loop-header tokens as body ops
+                }
+
+                // ── Body: count operations ────────────────────────────────────
+                if (tok.type == TokenType::KEYWORD && tok.value == "if") {
+                    bodyOps += 2;  // branch + comparison
+                }
+                if (tok.type == TokenType::OPERATOR) {
+                    if (tok.value == "+" || tok.value == "-" || tok.value == "*" ||
+                        tok.value == "/" || tok.value == "&" || tok.value == "|" ||
+                        tok.value == "^" || tok.value == "!" ||
+                        tok.value == "<" || tok.value == ">") {
+                        bodyOps += 1;
+                    }
+                }
+                if (tok.type == TokenType::LBRACKET) { bodyMem += 1; }
+                if (tok.type == TokenType::IDENTIFIER && k + 1 < tokens.size() &&
+                    tokens[k+1].type == TokenType::LPAREN) {
+                    const auto& fname = tok.value;
+                    if (fname.find("sin")  != std::string::npos ||
+                        fname.find("cos")  != std::string::npos ||
+                        fname.find("exp")  != std::string::npos ||
+                        fname.find("log")  != std::string::npos ||
+                        fname.find("tan")  != std::string::npos ||
+                        fname.find("pow")  != std::string::npos) {
+                        bodyOps += 10;  // transcendental — expensive
+                    } else if (fname.find("sqrt") != std::string::npos ||
+                               fname.find("fma")  != std::string::npos) {
+                        bodyOps += 4;   // sqrt/fma — moderately expensive
+                    } else {
+                        bodyOps += 2;   // generic call
+                    }
+                }
+            }
+            (void)loopOps; (void)loopMem; // currently merged into body
+
+            uint64_t estOps = (loopMultiplier > 1) ? bodyOps * loopMultiplier : bodyOps;
+            uint64_t estMem = (loopMultiplier > 1) ? bodyMem * loopMultiplier : bodyMem;
+
+            if (estOps == 0) estOps = 20;  // minimum for any functional kernel
+            if (estMem == 0) estMem = 4;
+
+            outIR.estimatedInstructionCount  = estOps;
+            outIR.estimatedMemoryAccessCount = estMem;
+
+            VGRE_LOG_INFO("KernelParser",
+                          "Token heuristic: " + std::to_string(estOps) + " instr, " +
+                          std::to_string(estMem) + " mem (loop×" +
+                          std::to_string(loopMultiplier) + ")");
+
+            // Store in fallback cache so repeated launches of the same kernel
+            // don't re-run the heuristic analysis.
+            KernelIR cacheEntry;
+            cacheEntry.estimatedInstructionCount  = estOps;
+            cacheEntry.estimatedMemoryAccessCount = estMem;
+            fallbackCache_[cacheKey] = std::move(cacheEntry);
+        }
     }
 
     auto builtins = findBuiltinVars(body);

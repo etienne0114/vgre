@@ -74,6 +74,17 @@ public:
     void   vectorDiv(const double* a, const double* b, double* c, size_t n);
     void   vectorSqrt(const double* a, double* c, size_t n);
 
+    // ── Element-wise unary / binary reduction ops ─────────────────────────
+    // Element-wise min / max
+    void vectorMin(const float* a, const float* b, float* out, size_t n);
+    void vectorMax(const float* a, const float* b, float* out, size_t n);
+    // Rectified Linear Unit: out[i] = max(a[i], 0)
+    void vectorReLU(const float* a, float* out, size_t n);
+    // Absolute value: out[i] = |a[i]|
+    void vectorAbs(const float* a, float* out, size_t n);
+    // Clamp: out[i] = min(max(a[i], lo), hi)
+    void vectorClamp(const float* a, float lo, float hi, float* out, size_t n);
+
     // ── Memory operations ──────────────────────────────────────────────────
     void vectorFill(float* dst, float value, size_t n);
     void vectorCopy(const float* src, float* dst, size_t n);

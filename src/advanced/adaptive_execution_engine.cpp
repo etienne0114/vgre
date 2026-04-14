@@ -108,6 +108,24 @@ AdaptiveExecutionEngine::AdaptiveExecutionEngine()
       lastFlops_(0),
       lastBytes_(0),
       lastSampleTime_(std::chrono::steady_clock::now()) {
+
+  // Allow the moving-average alpha to be tuned at runtime via env var.
+  // VGRE_ADAPTIVE_ALPHA=0.1  → smoother (less reactive to spikes)
+  // VGRE_ADAPTIVE_ALPHA=0.8  → more reactive (follows real-time load)
+  const char* alphaEnv = std::getenv("VGRE_ADAPTIVE_ALPHA");
+  if (alphaEnv) {
+      double v = std::atof(alphaEnv);
+      if (v >= 0.01 && v <= 0.99) {
+          movingAvgAlpha_ = v;
+          VGRE_LOG_INFO("AdaptiveExecutionEngine",
+                        "VGRE_ADAPTIVE_ALPHA set to " + std::to_string(v));
+      } else {
+          VGRE_LOG_WARN("AdaptiveExecutionEngine",
+                        "VGRE_ADAPTIVE_ALPHA=" + std::string(alphaEnv) +
+                        " out of range [0.01, 0.99]; using default 0.3");
+      }
+  }
+
   // Force ground-truth calibration on startup to provide authoritative performance data.
   // Stored as a member thread (not detached) so the destructor can join it and
   // prevent a segfault when the singleton is destroyed mid-benchmark.
@@ -117,7 +135,8 @@ AdaptiveExecutionEngine::AdaptiveExecutionEngine()
 
   VGRE_LOG_INFO("AdaptiveExecutionEngine",
                 "Initialized with " + std::to_string(maxCores_) + " max cores. "
-                "Background Ground-Truth calibration started.");
+                "Background Ground-Truth calibration started. "
+                "movingAvgAlpha=" + std::to_string(movingAvgAlpha_));
 }
 
 AdaptiveExecutionEngine::~AdaptiveExecutionEngine() {
@@ -140,10 +159,34 @@ void AdaptiveExecutionEngine::recordExecution(const std::string &kernelName,
 
   auto &profile = profiles_[kernelName];
   profile.kernelName = kernelName;
+
+  // Capture predicted value before update for error feedback.
+  double oldAvgMs = profile.avgExecutionMs;
+
   profile.executionCount++;
   profile.avgExecutionMs =
       (profile.avgExecutionMs * (profile.executionCount - 1) + executionMs) /
       profile.executionCount;
+
+  // Update prediction-error EWMA (only after at least one prior sample).
+  if (profile.executionCount > 1) {
+    double relError =
+        std::abs(executionMs - oldAvgMs) / std::max(executionMs, 1e-6);
+    constexpr double kErrAlpha = 0.1; // slow EWMA for error signal
+    ewma_prediction_error_ =
+        ewma_prediction_error_ * (1.0 - kErrAlpha) + relError * kErrAlpha;
+
+    // Auto-tune movingAvgAlpha_ based on error (disabled after manual override).
+    if (!manual_alpha_set_) {
+      if (ewma_prediction_error_ > 0.30) {
+        // High error: react faster (raise alpha toward 0.95)
+        movingAvgAlpha_ = std::min(movingAvgAlpha_ * 1.05, 0.95);
+      } else if (ewma_prediction_error_ < 0.05) {
+        // Low error: smooth more (lower alpha toward 0.05)
+        movingAvgAlpha_ = std::max(movingAvgAlpha_ * 0.95, 0.05);
+      }
+    }
+  }
 
   if (executionMs < profile.bestExecutionMs) {
     profile.bestExecutionMs = executionMs;
@@ -184,11 +227,10 @@ void AdaptiveExecutionEngine::recordExecution(const std::string &kernelName,
                 (executionMs / 1000.0)
           : 0.0;
 
-  // Update moving average throughputs (alpha = 0.3)
-  const double alpha = 0.3;
-  totalGflops_ = (totalGflops_ * (1.0 - alpha)) + (currentGflops * alpha);
+  // Update moving average throughputs with configurable alpha.
+  totalGflops_ = (totalGflops_ * (1.0 - movingAvgAlpha_)) + (currentGflops * movingAvgAlpha_);
   totalBandwidth_ =
-      (totalBandwidth_ * (1.0 - alpha)) + (currentBandwidth * alpha);
+      (totalBandwidth_ * (1.0 - movingAvgAlpha_)) + (currentBandwidth * movingAvgAlpha_);
 
   totalLatencyMs_ += executionMs;
   totalExecutions_++;
@@ -221,9 +263,11 @@ void AdaptiveExecutionEngine::updateInstantaneousMetrics() {
   instantGflops_ = (static_cast<double>(deltaFlops) / 1e9) / dt_sec;
   instantBandwidth_ = (static_cast<double>(deltaBytes) / (1024.0 * 1024.0 * 1024.0)) / dt_sec;
   
-  // Apply a very light smoothing to avoid extreme jitter on the UI gauges
-  totalGflops_ = (totalGflops_ * 0.2) + (instantGflops_ * 0.8);
-  totalBandwidth_ = (totalBandwidth_ * 0.2) + (instantBandwidth_ * 0.8);
+  // Apply smoothing to avoid extreme jitter on the UI gauges (uses configured alpha).
+  // For instantaneous display we use (1 - alpha) as the stability weight so
+  // a high alpha (reactive) also makes the gauge more responsive.
+  totalGflops_ = (totalGflops_ * (1.0 - movingAvgAlpha_)) + (instantGflops_ * movingAvgAlpha_);
+  totalBandwidth_ = (totalBandwidth_ * (1.0 - movingAvgAlpha_)) + (instantBandwidth_ * movingAvgAlpha_);
   
   lastFlops_ = currentFlops;
   lastBytes_ = currentBytes;
@@ -238,6 +282,30 @@ double AdaptiveExecutionEngine::getInstantaneousGFLOPS() const {
 double AdaptiveExecutionEngine::getInstantaneousBandwidth() const {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   return instantBandwidth_;
+}
+
+void AdaptiveExecutionEngine::setMovingAverageAlpha(double alpha) {
+  if (alpha < 0.01 || alpha > 0.99) {
+      VGRE_LOG_WARN("AdaptiveExecutionEngine",
+                    "setMovingAverageAlpha(" + std::to_string(alpha) +
+                    ") out of range [0.01, 0.99]; ignoring.");
+      return;
+  }
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  movingAvgAlpha_   = alpha;
+  manual_alpha_set_ = true; // disable auto-tuning; user override takes precedence
+  VGRE_LOG_INFO("AdaptiveExecutionEngine",
+                "movingAvgAlpha updated to " + std::to_string(alpha));
+}
+
+double AdaptiveExecutionEngine::getMovingAverageAlpha() const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return movingAvgAlpha_;
+}
+
+double AdaptiveExecutionEngine::getPredictionErrorEWMA() const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return ewma_prediction_error_;
 }
 
 // ── Analyze profile and update optimal parameters ──────────────────────────

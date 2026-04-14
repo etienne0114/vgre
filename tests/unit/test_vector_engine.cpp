@@ -138,6 +138,82 @@ void test_fill_copy() {
   std::cout << "[PASS] Fill and copy" << std::endl;
 }
 
+void test_vector_min() {
+  VectorEngine engine;
+  const int N = 256;
+  std::vector<float> a(N), b(N), out(N);
+  for (int i = 0; i < N; ++i) {
+    a[i] = static_cast<float>(i);
+    b[i] = static_cast<float>(N - 1 - i);
+  }
+  engine.vectorMin(a.data(), b.data(), out.data(), N);
+  for (int i = 0; i < N; ++i) {
+    float expected = a[i] < b[i] ? a[i] : b[i];
+    assert(std::fabs(out[i] - expected) < EPSILON);
+  }
+  std::cout << "[PASS] Float vectorMin" << std::endl;
+}
+
+void test_vector_max() {
+  VectorEngine engine;
+  const int N = 256;
+  std::vector<float> a(N), b(N), out(N);
+  for (int i = 0; i < N; ++i) {
+    a[i] = static_cast<float>(i);
+    b[i] = static_cast<float>(N - 1 - i);
+  }
+  engine.vectorMax(a.data(), b.data(), out.data(), N);
+  for (int i = 0; i < N; ++i) {
+    float expected = a[i] > b[i] ? a[i] : b[i];
+    assert(std::fabs(out[i] - expected) < EPSILON);
+  }
+  std::cout << "[PASS] Float vectorMax" << std::endl;
+}
+
+void test_vector_relu() {
+  VectorEngine engine;
+  const int N = 100;
+  std::vector<float> a(N), out(N);
+  for (int i = 0; i < N; ++i) {
+    a[i] = static_cast<float>(i - 50);  // -50..49
+  }
+  engine.vectorReLU(a.data(), out.data(), N);
+  for (int i = 0; i < N; ++i) {
+    float expected = a[i] > 0.0f ? a[i] : 0.0f;
+    assert(std::fabs(out[i] - expected) < EPSILON);
+  }
+  std::cout << "[PASS] Float vectorReLU" << std::endl;
+}
+
+void test_vector_abs() {
+  VectorEngine engine;
+  const int N = 100;
+  std::vector<float> a(N), out(N);
+  for (int i = 0; i < N; ++i) {
+    a[i] = static_cast<float>(i - 50);  // -50..49
+  }
+  engine.vectorAbs(a.data(), out.data(), N);
+  for (int i = 0; i < N; ++i) {
+    assert(std::fabs(out[i] - std::fabs(a[i])) < EPSILON);
+  }
+  std::cout << "[PASS] Float vectorAbs" << std::endl;
+}
+
+void test_vector_clamp() {
+  VectorEngine engine;
+  const int N = 100;
+  std::vector<float> a(N), out(N);
+  for (int i = 0; i < N; ++i) {
+    a[i] = static_cast<float>(i);  // 0..99
+  }
+  engine.vectorClamp(a.data(), 10.0f, 80.0f, out.data(), N);
+  for (int i = 0; i < N; ++i) {
+    float expected = a[i] < 10.0f ? 10.0f : (a[i] > 80.0f ? 80.0f : a[i]);
+    assert(std::fabs(out[i] - expected) < EPSILON);
+  }
+  std::cout << "[PASS] Float vectorClamp" << std::endl;
+}
+
 int main() {
   std::cout << "=== VGRE Vector Engine Unit Tests ===" << std::endl;
 
@@ -149,6 +225,11 @@ int main() {
   test_float_sum();
   test_double_add();
   test_fill_copy();
+  test_vector_min();
+  test_vector_max();
+  test_vector_relu();
+  test_vector_abs();
+  test_vector_clamp();
 
   std::cout << "\nAll vector engine tests passed!" << std::endl;
   return 0;

@@ -250,30 +250,51 @@ float TextureManager::tex2D(TextureId id, float x, float y) const {
     return static_cast<float>(value);
   }
 
-  if (tex.desc.filterMode == TextureFilterMode::LINEAR) {
-    // Bilinear interpolation
-    float fx = sampleX - 0.5f; // Shift to texel center
-    float fy = sampleY - 0.5f;
+  // Bilinear helper: bilinear sample at (bx, by) in texel space.
+  auto bilinearSample = [&](float bx, float by) -> double {
+    float fx = bx - 0.5f;
+    float fy = by - 0.5f;
     int x0 = static_cast<int>(std::floor(fx));
     int y0 = static_cast<int>(std::floor(fy));
-    int x1 = x0 + 1;
-    int y1 = y0 + 1;
     float fracX = fx - static_cast<float>(x0);
     float fracY = fy - static_cast<float>(y0);
-
-    // Apply address modes
-    auto sample = [&](int sx, int sy) -> double {
-      return sampleTexel(tex, sx, sy, 0);
-    };
-
-    double v00 = sample(x0, y0);
-    double v10 = sample(x1, y0);
-    double v01 = sample(x0, y1);
-    double v11 = sample(x1, y1);
-
+    double v00 = sampleTexel(tex, x0,     y0,     0);
+    double v10 = sampleTexel(tex, x0 + 1, y0,     0);
+    double v01 = sampleTexel(tex, x0,     y0 + 1, 0);
+    double v11 = sampleTexel(tex, x0 + 1, y0 + 1, 0);
     double top = v00 * (1.0 - fracX) + v10 * fracX;
     double bot = v01 * (1.0 - fracX) + v11 * fracX;
-    return static_cast<float>(top * (1.0 - fracY) + bot * fracY);
+    return top * (1.0 - fracY) + bot * fracY;
+  };
+
+  if (tex.desc.filterMode == TextureFilterMode::LINEAR) {
+    return static_cast<float>(bilinearSample(sampleX, sampleY));
+  }
+
+  if (tex.desc.filterMode == TextureFilterMode::ANISOTROPIC ||
+      (tex.desc.filterMode == TextureFilterMode::LINEAR &&
+       tex.desc.maxAnisotropy > 1)) {
+    // Anisotropic filtering via multi-sample line averaging.
+    // Without per-pixel derivative information, we approximate by gathering
+    // maxAnisotropy bilinear samples along both U and V axes and averaging them.
+    // This reduces aliasing along surfaces viewed at a glancing angle.
+    unsigned int N = std::max(1u, std::min(tex.desc.maxAnisotropy, 16u));
+    if (N == 1) return static_cast<float>(bilinearSample(sampleX, sampleY));
+
+    // Sample N points along X and N along Y, centred on (sampleX, sampleY).
+    // Step is sub-texel: spacing = 1/(N) texels.
+    double stepX = 1.0 / static_cast<double>(N);
+    double stepY = 1.0 / static_cast<double>(N);
+
+    double accumX = 0.0, accumY = 0.0;
+    double startX = sampleX - 0.5 * stepX * static_cast<double>(N - 1);
+    double startY = sampleY - 0.5 * stepY * static_cast<double>(N - 1);
+    for (unsigned int i = 0; i < N; ++i) {
+      accumX += bilinearSample(static_cast<float>(startX + stepX * i), sampleY);
+      accumY += bilinearSample(sampleX, static_cast<float>(startY + stepY * i));
+    }
+    // Blend X-pass and Y-pass evenly.
+    return static_cast<float>((accumX + accumY) / (2.0 * N));
   }
 
   // Bicubic (Catmull-Rom) interpolation - 16 samples (4x4 neighborhood)
@@ -301,6 +322,113 @@ float TextureManager::tex2D(TextureId id, float x, float y) const {
   }
 
   return static_cast<float>(result);
+}
+
+// ── 2D texture fetch at explicit LOD (trilinear across mip levels) ──────────
+float TextureManager::tex2DLod(TextureId id, float x, float y, float lod) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+  auto texIt = textures_.find(id);
+  if (texIt == textures_.end()) return 0.0f;
+  const auto &tex = texIt->second;
+
+  auto arrIt = ownedArrays_.find(id);
+  auto offIt = mipmapLevelOffsets_.find(id);
+
+  // Not a mipmapped texture — bilinear sample from base level (no unlock needed,
+  // mutex_ is recursive).
+  if (arrIt == ownedArrays_.end() || offIt == mipmapLevelOffsets_.end() ||
+      tex.mips <= 1) {
+    // Delegate to the regular tex2D logic inline (avoids re-locking the recursive mutex).
+    int w = static_cast<int>(tex.width);
+    int h = static_cast<int>(tex.height);
+    float sx = tex.desc.normalizedCoords ? x * static_cast<float>(w) : x;
+    float sy = tex.desc.normalizedCoords ? y * static_cast<float>(h) : y;
+    float fx = sx - 0.5f, fy = sy - 0.5f;
+    int x0 = static_cast<int>(std::floor(fx));
+    int y0 = static_cast<int>(std::floor(fy));
+    float fracX = fx - static_cast<float>(x0);
+    float fracY = fy - static_cast<float>(y0);
+    double v00 = sampleTexel(tex, x0,     y0,     0);
+    double v10 = sampleTexel(tex, x0 + 1, y0,     0);
+    double v01 = sampleTexel(tex, x0,     y0 + 1, 0);
+    double v11 = sampleTexel(tex, x0 + 1, y0 + 1, 0);
+    double top = v00 * (1.0 - fracX) + v10 * fracX;
+    double bot = v01 * (1.0 - fracX) + v11 * fracX;
+    return static_cast<float>(top * (1.0 - fracY) + bot * fracY);
+  }
+
+  // Clamp LOD to valid mip range.
+  float clampedLod = std::max(0.0f, std::min(lod, static_cast<float>(tex.mips - 1)));
+  int   level0     = static_cast<int>(std::floor(clampedLod));
+  int   level1     = std::min(level0 + 1, static_cast<int>(tex.mips - 1));
+  float blend      = clampedLod - static_cast<float>(level0);
+
+  const std::vector<uint8_t> &arr  = arrIt->second;
+  const std::vector<size_t>  &offs = offIt->second;
+
+  // Bilinear sample from a specific mip level.
+  // Pixel coordinates (px, py) are in texel space of the BASE texture; they
+  // are divided by 2^level to land in the correct level's texel space.
+  auto sampleLevel = [&](int lvl, float bx, float by) -> double {
+    size_t lw  = std::max<size_t>(1, tex.width  >> lvl);
+    size_t lh  = std::max<size_t>(1, tex.height >> lvl);
+    float  fx  = bx - 0.5f;
+    float  fy  = by - 0.5f;
+    int    x0l = static_cast<int>(std::floor(fx));
+    int    y0l = static_cast<int>(std::floor(fy));
+    float  frX = fx - static_cast<float>(x0l);
+    float  frY = fy - static_cast<float>(y0l);
+
+    const float *data =
+        reinterpret_cast<const float *>(arr.data() + offs[static_cast<size_t>(lvl)]);
+
+    auto readPx = [&](int px, int py) -> double {
+      px = applyAddressMode(px, static_cast<int>(lw), tex.desc.addressMode);
+      py = applyAddressMode(py, static_cast<int>(lh), tex.desc.addressMode);
+      if (px < 0 || py < 0 ||
+          static_cast<size_t>(px) >= lw || static_cast<size_t>(py) >= lh)
+        return static_cast<double>(tex.desc.borderColor);
+      return static_cast<double>(
+          data[static_cast<size_t>(py) * lw + static_cast<size_t>(px)]);
+    };
+
+    double v00 = readPx(x0l,     y0l);
+    double v10 = readPx(x0l + 1, y0l);
+    double v01 = readPx(x0l,     y0l + 1);
+    double v11 = readPx(x0l + 1, y0l + 1);
+    double top = v00 * (1.0 - frX) + v10 * frX;
+    double bot = v01 * (1.0 - frX) + v11 * frX;
+    return top * (1.0 - frY) + bot * frY;
+  };
+
+  // Convert input (x,y) to texel coordinates for level0.
+  // Normalized: multiply by level-0 dimensions.
+  // Non-normalized: coords are in base-level texel space; scale by 1/2^level.
+  float scale0 = static_cast<float>(1u << level0); // 2^level0
+  float sx0 = tex.desc.normalizedCoords
+                   ? x * static_cast<float>(std::max<size_t>(1, tex.width  >> level0))
+                   : x / scale0;
+  float sy0 = tex.desc.normalizedCoords
+                   ? y * static_cast<float>(std::max<size_t>(1, tex.height >> level0))
+                   : y / scale0;
+
+  double s0 = sampleLevel(level0, sx0, sy0);
+
+  if (blend < 1e-5f || level0 == level1)
+    return static_cast<float>(s0);
+
+  // Sample from the next finer mip level and blend (trilinear).
+  float scale1 = static_cast<float>(1u << level1);
+  float sx1 = tex.desc.normalizedCoords
+                   ? x * static_cast<float>(std::max<size_t>(1, tex.width  >> level1))
+                   : x / scale1;
+  float sy1 = tex.desc.normalizedCoords
+                   ? y * static_cast<float>(std::max<size_t>(1, tex.height >> level1))
+                   : y / scale1;
+
+  double s1 = sampleLevel(level1, sx1, sy1);
+  return static_cast<float>(s0 * (1.0 - blend) + s1 * blend);
 }
 
 float TextureManager::tex1D(TextureId id, float x) const {
@@ -716,6 +844,150 @@ const void *TextureManager::getCudaArrayData(TextureId id) const {
   auto it = ownedArrays_.find(id);
   if (it == ownedArrays_.end()) return nullptr;
   return it->second.data();
+}
+
+// ── Mipmapped array pipeline ──────────────────────────────────────────────
+
+VGREResult TextureManager::createMipmappedArray(TextureId &outId,
+                                                 size_t width, size_t height,
+                                                 size_t elementSize,
+                                                 unsigned int mipLevels,
+                                                 const TextureDescriptor &desc) {
+    if (width == 0 || elementSize == 0)
+        return VGREResult::ERR_INVALID_VALUE;
+
+    size_t h = (height == 0) ? 1 : height;
+
+    // Auto-determine level count if not specified
+    if (mipLevels == 0) {
+        size_t maxDim = std::max(width, h);
+        mipLevels = 1;
+        while ((maxDim >> mipLevels) > 0) ++mipLevels;
+    }
+
+    // Compute total storage and per-level offsets
+    std::vector<size_t> offsets;
+    offsets.reserve(mipLevels);
+    size_t totalBytes = 0;
+    size_t lw = width, lh = h;
+    for (unsigned int m = 0; m < mipLevels; ++m) {
+        offsets.push_back(totalBytes);
+        totalBytes += lw * lh * elementSize;
+        lw = std::max<size_t>(1, lw >> 1);
+        lh = std::max<size_t>(1, lh >> 1);
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+    TextureObject tex;
+    tex.id = nextTextureId_++;
+    tex.offsetInBytes = 0;
+    tex.width = width;
+    tex.height = h;
+    tex.depth = 1;
+    tex.elementSize = elementSize;
+    tex.mips = mipLevels;
+    tex.desc = desc;
+
+    ownedArrays_[tex.id] = std::vector<uint8_t>(totalBytes, 0);
+    tex.data = ownedArrays_[tex.id].data();
+    mipmapLevelOffsets_[tex.id] = std::move(offsets);
+
+    textures_[tex.id] = tex;
+    outId = tex.id;
+
+    VGRE_LOG_INFO("TextureManager",
+                  "Created mipmapped array " + std::to_string(tex.id) +
+                  " (" + std::to_string(width) + "x" + std::to_string(h) +
+                  ", " + std::to_string(mipLevels) + " levels, " +
+                  std::to_string(totalBytes) + " bytes)");
+
+    return VGREResult::SUCCESS;
+}
+
+// Box-filter 2×2 downscale of float32 data.
+// src is (sw × sh) floats; dst is (dw × dh) floats where dw = sw/2, dh = sh/2.
+static void boxFilter2D(const float *src, size_t sw, size_t sh,
+                        float *dst, size_t dw, size_t dh) {
+    for (size_t y = 0; y < dh; ++y) {
+        for (size_t x = 0; x < dw; ++x) {
+            size_t sx = x * 2, sy = y * 2;
+            // Gather 2×2 neighbourhood (clamp at edges)
+            float s00 = src[sy * sw + sx];
+            float s10 = (sx + 1 < sw) ? src[sy * sw + sx + 1] : s00;
+            float s01 = (sy + 1 < sh) ? src[(sy + 1) * sw + sx] : s00;
+            float s11 = (sx + 1 < sw && sy + 1 < sh)
+                            ? src[(sy + 1) * sw + sx + 1]
+                            : s00;
+            dst[y * dw + x] = (s00 + s10 + s01 + s11) * 0.25f;
+        }
+    }
+}
+
+VGREResult TextureManager::generateMipmaps(TextureId id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+    auto texIt = textures_.find(id);
+    auto arrIt = ownedArrays_.find(id);
+    auto offIt = mipmapLevelOffsets_.find(id);
+
+    if (texIt == textures_.end() || arrIt == ownedArrays_.end() ||
+        offIt == mipmapLevelOffsets_.end()) {
+        VGRE_LOG_ERROR("TextureManager",
+                       "generateMipmaps: id " + std::to_string(id) +
+                       " is not a mipmapped array");
+        return VGREResult::ERR_INVALID_VALUE;
+    }
+
+    const TextureObject &tex = texIt->second;
+    if (tex.elementSize != sizeof(float)) {
+        VGRE_LOG_WARN("TextureManager",
+                      "generateMipmaps: only float32 textures supported; "
+                      "element size = " + std::to_string(tex.elementSize));
+        return VGREResult::ERR_NOT_SUPPORTED;
+    }
+
+    uint8_t *base = arrIt->second.data();
+    const std::vector<size_t> &offs = offIt->second;
+    unsigned int levels = tex.mips;
+
+    size_t lw = tex.width, lh = tex.height;
+    for (unsigned int m = 1; m < levels; ++m) {
+        size_t dw = std::max<size_t>(1, lw >> 1);
+        size_t dh = std::max<size_t>(1, lh >> 1);
+
+        const float *src = reinterpret_cast<const float *>(base + offs[m - 1]);
+        float *dst = reinterpret_cast<float *>(base + offs[m]);
+        boxFilter2D(src, lw, lh, dst, dw, dh);
+
+        lw = dw;
+        lh = dh;
+    }
+
+    VGRE_LOG_INFO("TextureManager",
+                  "Generated " + std::to_string(levels - 1) +
+                  " mip levels for texture " + std::to_string(id));
+    return VGREResult::SUCCESS;
+}
+
+void *TextureManager::getMipmapLevelData(TextureId id, unsigned int level) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto arrIt = ownedArrays_.find(id);
+    auto offIt = mipmapLevelOffsets_.find(id);
+    if (arrIt == ownedArrays_.end() || offIt == mipmapLevelOffsets_.end())
+        return nullptr;
+    if (level >= offIt->second.size()) return nullptr;
+    return arrIt->second.data() + offIt->second[level];
+}
+
+const void *TextureManager::getMipmapLevelData(TextureId id, unsigned int level) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto arrIt = ownedArrays_.find(id);
+    auto offIt = mipmapLevelOffsets_.find(id);
+    if (arrIt == ownedArrays_.end() || offIt == mipmapLevelOffsets_.end())
+        return nullptr;
+    if (level >= offIt->second.size()) return nullptr;
+    return arrIt->second.data() + offIt->second[level];
 }
 
 } // namespace core

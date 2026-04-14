@@ -3,6 +3,7 @@
 
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
+#include "vgre/core/graph_manager.h"
 
 #include <memory>
 #include <mutex>
@@ -102,6 +103,27 @@ public:
                                      const dim3 &blockDim, void **args,
                                      size_t sharedMem = 0, StreamId stream = 0,
                                      const dim3 &gridOffset = dim3(0, 0, 0));
+  VGREResult launchCooperativeKernel(const std::string &name,
+                                     const std::string &source,
+                                     const dim3 &gridDim, const dim3 &blockDim,
+                                     void **args, size_t sharedMem = 0,
+                                     StreamId stream = 0);
+
+  // Multi-device cooperative launch — all devices execute concurrently with
+  // independent per-device grid-wide barriers (this_grid().sync() works within
+  // each device). A start-gate ensures all devices begin at the same instant,
+  // mirroring hardware behaviour where all GPUs dispatch simultaneously.
+  struct CoopMultiLaunchParams {
+    std::string name;          ///< Kernel symbol name
+    std::string source;        ///< CUDA C++ source for JIT compilation
+    dim3        gridDim;       ///< Grid dimensions for this device
+    dim3        blockDim;      ///< Block dimensions for this device
+    void      **args    = nullptr; ///< Kernel arguments
+    size_t      sharedMem = 0;    ///< Dynamic shared memory in bytes
+    StreamId    stream    = 0;    ///< Target stream (0 = default)
+  };
+  VGREResult launchCooperativeKernelMultiDevice(
+      const std::vector<CoopMultiLaunchParams> &launchList);
 
   // Native Graph Dispatch
   VGREResult dispatchGraphNodes(const std::vector<GraphNode>& nodes, StreamId stream);
@@ -129,6 +151,7 @@ public:
 
   // CUDA Graphs API
   VGREResult graphCreate(GraphId &outGraph);
+  VGREResult graphClone(GraphId srcGraph, GraphId &outCloneGraph);
   VGREResult streamBeginCapture(StreamId stream);
   VGREResult streamEndCapture(StreamId stream, GraphId &outGraph);
   VGREResult graphInstantiate(GraphId graph, GraphExecId &outExec);
@@ -146,6 +169,12 @@ public:
                                 size_t count, int kind,
                                 const std::vector<uint64_t> &deps,
                                 uint64_t &outNodeId);
+  VGREResult graphAddConditionalNode(GraphId graph, int (*condFn)(void *),
+                                     void *condCtx, GraphId bodyGraph,
+                                     GraphCondType condType,
+                                     unsigned int maxIterations,
+                                     const std::vector<uint64_t> &deps,
+                                     uint64_t &outNodeId);
   VGREResult graphAddDependency(GraphId graph, uint64_t nodeId,
                                 uint64_t dependsOn);
   VGREResult graphUpdateKernelNode(GraphId graph, uint64_t nodeId, void **args,
