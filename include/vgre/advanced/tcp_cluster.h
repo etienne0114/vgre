@@ -1,5 +1,10 @@
 #pragma once
 
+// sockets.h must come first on Windows: it includes <winsock2.h> which
+// must precede <windows.h>, and also defines ERROR_* macros via winerror.h.
+// Keeping it first prevents those macros from stomping on our error_codes.h
+// enum values when other headers include both in the wrong order.
+#include "vgre/common/sockets.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
@@ -9,7 +14,6 @@
 #include <cstdint>
 #include <mutex>
 #include <condition_variable>
-#include "vgre/common/sockets.h"
 #include <string>
 #include <thread>
 #include <vector>

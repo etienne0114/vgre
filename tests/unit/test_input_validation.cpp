@@ -38,10 +38,10 @@ bool test_allocation_size_validation() {
     VGRE_TEST_ASSERT(InputValidator::validateAllocationSize(1024 * 1024 * 1024) == VGREResult::SUCCESS, "1GB should be valid");
     
     // Invalid: zero
-    VGRE_TEST_ASSERT(InputValidator::validateAllocationSize(0) == VGREResult::ERROR_INVALID_VALUE, "Zero should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateAllocationSize(0) == VGREResult::ERR_INVALID_VALUE, "Zero should be invalid");
     
     // Invalid: too large
-    VGRE_TEST_ASSERT(InputValidator::validateAllocationSize(InputValidator::MAX_ALLOCATION_SIZE + 1) == VGREResult::ERROR_INVALID_VALUE, "Too large should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateAllocationSize(InputValidator::MAX_ALLOCATION_SIZE + 1) == VGREResult::ERR_INVALID_VALUE, "Too large should be invalid");
     
     std::cout << "  ✓ Allocation size validation passed" << std::endl;
     return true;
@@ -57,16 +57,16 @@ bool test_memcpy_params_validation() {
     VGRE_TEST_ASSERT(InputValidator::validateMemcpyParams(dst, src, 1024) == VGREResult::SUCCESS, "Valid params should succeed");
     
     // Invalid: NULL destination
-    VGRE_TEST_ASSERT(InputValidator::validateMemcpyParams(nullptr, src, 1024) == VGREResult::ERROR_INVALID_VALUE, "NULL dst should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateMemcpyParams(nullptr, src, 1024) == VGREResult::ERR_INVALID_VALUE, "NULL dst should be invalid");
     
     // Invalid: NULL source
-    VGRE_TEST_ASSERT(InputValidator::validateMemcpyParams(dst, nullptr, 1024) == VGREResult::ERROR_INVALID_VALUE, "NULL src should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateMemcpyParams(dst, nullptr, 1024) == VGREResult::ERR_INVALID_VALUE, "NULL src should be invalid");
     
     // Invalid: zero count
-    VGRE_TEST_ASSERT(InputValidator::validateMemcpyParams(dst, src, 0) == VGREResult::ERROR_INVALID_VALUE, "Zero count should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateMemcpyParams(dst, src, 0) == VGREResult::ERR_INVALID_VALUE, "Zero count should be invalid");
     
     // Invalid: overlapping regions
-    VGRE_TEST_ASSERT(InputValidator::validateMemcpyParams(dst, dst + 512, 1024) == VGREResult::ERROR_INVALID_VALUE, "Overlapping regions should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateMemcpyParams(dst, dst + 512, 1024) == VGREResult::ERR_INVALID_VALUE, "Overlapping regions should be invalid");
     
     std::cout << "  ✓ Memcpy parameters validation passed" << std::endl;
     return true;
@@ -80,10 +80,10 @@ bool test_packet_size_validation() {
     VGRE_TEST_ASSERT(InputValidator::validatePacketSize(1024 * 1024) == VGREResult::SUCCESS, "1MB packet should be valid");
     
     // Invalid: zero
-    VGRE_TEST_ASSERT(InputValidator::validatePacketSize(0) == VGREResult::ERROR_INVALID_VALUE, "Zero should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validatePacketSize(0) == VGREResult::ERR_INVALID_VALUE, "Zero should be invalid");
     
     // Invalid: too large
-    VGRE_TEST_ASSERT(InputValidator::validatePacketSize(InputValidator::MAX_PACKET_SIZE + 1) == VGREResult::ERROR_INVALID_VALUE, "Too large should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validatePacketSize(InputValidator::MAX_PACKET_SIZE + 1) == VGREResult::ERR_INVALID_VALUE, "Too large should be invalid");
     
     std::cout << "  ✓ Packet size validation passed" << std::endl;
     return true;
@@ -97,7 +97,7 @@ bool test_string_length_validation() {
     VGRE_TEST_ASSERT(InputValidator::validateStringLength(short_str) == VGREResult::SUCCESS, "Valid string should succeed");
     
     // Invalid: NULL
-    VGRE_TEST_ASSERT(InputValidator::validateStringLength(nullptr) == VGREResult::ERROR_INVALID_VALUE, "NULL should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateStringLength(nullptr) == VGREResult::ERR_INVALID_VALUE, "NULL should be invalid");
     
     std::cout << "  ✓ String length validation passed" << std::endl;
     return true;
@@ -112,12 +112,12 @@ bool test_grid_dim_validation() {
     VGRE_TEST_ASSERT(InputValidator::validateGridDim(65535, 65535, 65535) == VGREResult::SUCCESS, "Max dims should be valid");
     
     // Invalid: zero
-    VGRE_TEST_ASSERT(InputValidator::validateGridDim(0, 1, 1) == VGREResult::ERROR_INVALID_VALUE, "Zero x should be invalid");
-    VGRE_TEST_ASSERT(InputValidator::validateGridDim(1, 0, 1) == VGREResult::ERROR_INVALID_VALUE, "Zero y should be invalid");
-    VGRE_TEST_ASSERT(InputValidator::validateGridDim(1, 1, 0) == VGREResult::ERROR_INVALID_VALUE, "Zero z should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateGridDim(0, 1, 1) == VGREResult::ERR_INVALID_VALUE, "Zero x should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateGridDim(1, 0, 1) == VGREResult::ERR_INVALID_VALUE, "Zero y should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateGridDim(1, 1, 0) == VGREResult::ERR_INVALID_VALUE, "Zero z should be invalid");
     
     // Invalid: too large
-    VGRE_TEST_ASSERT(InputValidator::validateGridDim(65536, 1, 1) == VGREResult::ERROR_INVALID_VALUE, "Too large should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateGridDim(65536, 1, 1) == VGREResult::ERR_INVALID_VALUE, "Too large should be invalid");
     
     std::cout << "  ✓ Grid dimension validation passed" << std::endl;
     return true;
@@ -132,13 +132,13 @@ bool test_block_dim_validation() {
     VGRE_TEST_ASSERT(InputValidator::validateBlockDim(32, 32, 1) == VGREResult::SUCCESS, "32x32x1 should be valid");
     
     // Invalid: zero
-    VGRE_TEST_ASSERT(InputValidator::validateBlockDim(0, 1, 1) == VGREResult::ERROR_INVALID_VALUE, "Zero should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateBlockDim(0, 1, 1) == VGREResult::ERR_INVALID_VALUE, "Zero should be invalid");
     
     // Invalid: too large
-    VGRE_TEST_ASSERT(InputValidator::validateBlockDim(2048, 1, 1) == VGREResult::ERROR_INVALID_VALUE, "Too large should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateBlockDim(2048, 1, 1) == VGREResult::ERR_INVALID_VALUE, "Too large should be invalid");
     
     // Invalid: total threads too large
-    VGRE_TEST_ASSERT(InputValidator::validateBlockDim(1024, 1024, 1) == VGREResult::ERROR_INVALID_VALUE, "Too many threads should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateBlockDim(1024, 1024, 1) == VGREResult::ERR_INVALID_VALUE, "Too many threads should be invalid");
     
     std::cout << "  ✓ Block dimension validation passed" << std::endl;
     return true;
@@ -176,11 +176,11 @@ bool test_memory_offset_validation() {
     VGRE_TEST_ASSERT(InputValidator::validateMemoryOffset(1024, 512, 512) == VGREResult::SUCCESS, "Valid offset at end should succeed");
     
     // Invalid: offset + count > base
-    VGRE_TEST_ASSERT(InputValidator::validateMemoryOffset(1024, 512, 1024) == VGREResult::ERROR_INVALID_VALUE, "Out of bounds should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateMemoryOffset(1024, 512, 1024) == VGREResult::ERR_INVALID_VALUE, "Out of bounds should be invalid");
     
     // Invalid: overflow
     size_t max = std::numeric_limits<size_t>::max();
-    VGRE_TEST_ASSERT(InputValidator::validateMemoryOffset(max, max, 1) == VGREResult::ERROR_INVALID_VALUE, "Overflow should be invalid");
+    VGRE_TEST_ASSERT(InputValidator::validateMemoryOffset(max, max, 1) == VGREResult::ERR_INVALID_VALUE, "Overflow should be invalid");
     
     std::cout << "  ✓ Memory offset validation passed" << std::endl;
     return true;
@@ -225,9 +225,9 @@ bool test_packet_type_validation() {
                      "Valid packet type 10 (max) should pass");
     
     // Invalid packet types
-    VGRE_TEST_ASSERT(InputValidator::validatePacketType(11, 10) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validatePacketType(11, 10) == VGREResult::ERR_INVALID_VALUE,
                      "Invalid packet type 11 should fail");
-    VGRE_TEST_ASSERT(InputValidator::validatePacketType(100, 10) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validatePacketType(100, 10) == VGREResult::ERR_INVALID_VALUE,
                      "Invalid packet type 100 should fail");
     
     std::cout << "✓ Packet type validation passed" << std::endl;
@@ -246,9 +246,9 @@ bool test_sequence_number_validation() {
                      "Sequence number at window edge should pass");
     
     // Invalid sequence numbers (outside window)
-    VGRE_TEST_ASSERT(InputValidator::validateSequenceNumber(111, 100, 10) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateSequenceNumber(111, 100, 10) == VGREResult::ERR_INVALID_VALUE,
                      "Sequence number outside window should fail");
-    VGRE_TEST_ASSERT(InputValidator::validateSequenceNumber(200, 100, 10) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateSequenceNumber(200, 100, 10) == VGREResult::ERR_INVALID_VALUE,
                      "Sequence number far outside window should fail");
     
     // Test wraparound
@@ -271,7 +271,7 @@ bool test_crc32_checksum() {
     // Verify checksum validation
     VGRE_TEST_ASSERT(InputValidator::validatePacketChecksum(test_data, strlen(test_data), crc) == VGREResult::SUCCESS,
                      "Valid checksum should pass");
-    VGRE_TEST_ASSERT(InputValidator::validatePacketChecksum(test_data, strlen(test_data), crc + 1) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validatePacketChecksum(test_data, strlen(test_data), crc + 1) == VGREResult::ERR_INVALID_VALUE,
                      "Invalid checksum should fail");
     
     // Test empty data
@@ -294,9 +294,9 @@ bool test_texture_coords_validation() {
                      "Normalized coords at max should pass");
     
     // Invalid normalized coordinates
-    VGRE_TEST_ASSERT(InputValidator::validateTextureCoords(2.0f, 0.5f, 0.5f, 256, 256, 1, true) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateTextureCoords(2.0f, 0.5f, 0.5f, 256, 256, 1, true) == VGREResult::ERR_INVALID_VALUE,
                      "Normalized coords > 1.5 should fail");
-    VGRE_TEST_ASSERT(InputValidator::validateTextureCoords(-1.0f, 0.5f, 0.5f, 256, 256, 1, true) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateTextureCoords(-1.0f, 0.5f, 0.5f, 256, 256, 1, true) == VGREResult::ERR_INVALID_VALUE,
                      "Normalized coords < -0.5 should fail");
     
     // Valid non-normalized coordinates
@@ -306,13 +306,13 @@ bool test_texture_coords_validation() {
                      "Non-normalized coords at origin should pass");
     
     // Invalid non-normalized coordinates
-    VGRE_TEST_ASSERT(InputValidator::validateTextureCoords(300.0f, 128.0f, 0.0f, 256, 256, 1, false) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateTextureCoords(300.0f, 128.0f, 0.0f, 256, 256, 1, false) == VGREResult::ERR_INVALID_VALUE,
                      "Non-normalized coords out of bounds should fail");
     
     // Test NaN and infinity
-    VGRE_TEST_ASSERT(InputValidator::validateTextureCoords(NAN, 0.5f, 0.5f, 256, 256, 1, true) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateTextureCoords(NAN, 0.5f, 0.5f, 256, 256, 1, true) == VGREResult::ERR_INVALID_VALUE,
                      "NaN coords should fail");
-    VGRE_TEST_ASSERT(InputValidator::validateTextureCoords(INFINITY, 0.5f, 0.5f, 256, 256, 1, true) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateTextureCoords(INFINITY, 0.5f, 0.5f, 256, 256, 1, true) == VGREResult::ERR_INVALID_VALUE,
                      "Infinity coords should fail");
     
     std::cout << "✓ Texture coordinates validation passed" << std::endl;
@@ -331,9 +331,9 @@ bool test_mipmap_level_validation() {
                      "Mipmap level 10 (max) should pass");
     
     // Invalid mipmap levels
-    VGRE_TEST_ASSERT(InputValidator::validateMipmapLevel(11, 10) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateMipmapLevel(11, 10) == VGREResult::ERR_INVALID_VALUE,
                      "Mipmap level 11 should fail");
-    VGRE_TEST_ASSERT(InputValidator::validateMipmapLevel(100, 10) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateMipmapLevel(100, 10) == VGREResult::ERR_INVALID_VALUE,
                      "Mipmap level 100 should fail");
     
     std::cout << "✓ Mipmap level validation passed" << std::endl;
@@ -352,11 +352,11 @@ bool test_surface_bounds_validation() {
                      "Surface coords at max should pass");
     
     // Invalid surface coordinates
-    VGRE_TEST_ASSERT(InputValidator::validateSurfaceBounds(256, 128, 256, 256) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateSurfaceBounds(256, 128, 256, 256) == VGREResult::ERR_INVALID_VALUE,
                      "Surface X out of bounds should fail");
-    VGRE_TEST_ASSERT(InputValidator::validateSurfaceBounds(128, 256, 256, 256) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateSurfaceBounds(128, 256, 256, 256) == VGREResult::ERR_INVALID_VALUE,
                      "Surface Y out of bounds should fail");
-    VGRE_TEST_ASSERT(InputValidator::validateSurfaceBounds(300, 300, 256, 256) == VGREResult::ERROR_INVALID_VALUE,
+    VGRE_TEST_ASSERT(InputValidator::validateSurfaceBounds(300, 300, 256, 256) == VGREResult::ERR_INVALID_VALUE,
                      "Surface coords far out of bounds should fail");
     
     std::cout << "✓ Surface bounds validation passed" << std::endl;

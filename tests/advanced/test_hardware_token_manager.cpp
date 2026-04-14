@@ -86,7 +86,7 @@ bool test_delete_token() {
     // Try to retrieve deleted token
     std::string retrieved;
     result = mgr.getToken(service, retrieved);
-    VGRE_TEST_ASSERT(result == VGREResult::ERROR_AUTH_FAILED, "Retrieval should fail");
+    VGRE_TEST_ASSERT(result == VGREResult::ERR_AUTH_FAILED, "Retrieval should fail");
     std::cout << "  ✓ Retrieval correctly fails" << std::endl;
     return true;
 }
