@@ -16,6 +16,9 @@
 #include <keyutils.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#if defined(VGRE_HAS_LIBSECRET)
+#include <libsecret/secret.h>
+#endif
 #elif defined(__APPLE__)
 #include <Security/Security.h>
 #elif defined(_WIN32)
@@ -332,25 +335,137 @@ VGREResult HardwareTokenManager::deleteLinuxKeyring(const std::string& service) 
     return VGREResult::SUCCESS;
 }
 
+// ============================================================================
+// libsecret (GNOME Keyring) Implementation
+// ============================================================================
+
+#if defined(VGRE_HAS_LIBSECRET)
+
+// Schema that identifies VGRE tokens by service name.
+// SECRET_SCHEMA_NONE means no flags (schema is just for lookup, not enforcement).
+static const SecretSchema VGRE_SECRET_SCHEMA = {
+    "io.vgre.Token",
+    SECRET_SCHEMA_NONE,
+    {
+        { "service", SECRET_SCHEMA_ATTRIBUTE_STRING },
+        { nullptr, static_cast<SecretSchemaAttributeType>(0) }  // sentinel
+    },
+    // reserved fields
+    0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr
+};
+
 VGREResult HardwareTokenManager::initLinuxLibsecret() {
-    // libsecret requires D-Bus and GNOME Keyring daemon
-    // For now, return not supported (would require linking libsecret)
-    return VGREResult::ERR_NOT_SUPPORTED;
+    // Probe the secret service — this opens a D-Bus connection to GNOME Keyring
+    // (or any other libsecret-compatible provider).
+    GError* error = nullptr;
+    SecretService* svc = secret_service_get_sync(
+        SECRET_SERVICE_NONE, nullptr, &error);
+    if (error || !svc) {
+        if (error) {
+            VGRE_LOG_DEBUG("HardwareTokenManager",
+                "libsecret unavailable: " + std::string(error->message));
+            g_error_free(error);
+        }
+        return VGREResult::ERR_NOT_SUPPORTED;
+    }
+    g_object_unref(svc);
+    VGRE_LOG_INFO("HardwareTokenManager",
+        "libsecret service reachable (GNOME Keyring / KWallet)");
+    return VGREResult::SUCCESS;
 }
 
+VGREResult HardwareTokenManager::storeLinuxLibsecret(
+        const std::string& service, const std::string& token) {
+    GError* error = nullptr;
+    std::string label = "VGRE Token: " + service;
+
+    gboolean ok = secret_password_store_sync(
+        &VGRE_SECRET_SCHEMA,
+        SECRET_COLLECTION_DEFAULT,  // store in the default keyring
+        label.c_str(),              // human-readable label
+        token.c_str(),              // secret value
+        nullptr,                    // GCancellable
+        &error,
+        "service", service.c_str(),
+        nullptr);                   // attribute sentinel
+
+    if (!ok || error) {
+        if (error) {
+            VGRE_LOG_ERROR("HardwareTokenManager",
+                "libsecret store failed: " + std::string(error->message));
+            g_error_free(error);
+        }
+        return VGREResult::ERROR_IO;
+    }
+    return VGREResult::SUCCESS;
+}
+
+VGREResult HardwareTokenManager::getLinuxLibsecret(
+        const std::string& service, std::string& outToken) {
+    GError* error = nullptr;
+
+    gchar* password = secret_password_lookup_sync(
+        &VGRE_SECRET_SCHEMA,
+        nullptr,  // GCancellable
+        &error,
+        "service", service.c_str(),
+        nullptr); // attribute sentinel
+
+    if (error) {
+        VGRE_LOG_ERROR("HardwareTokenManager",
+            "libsecret lookup failed: " + std::string(error->message));
+        g_error_free(error);
+        return VGREResult::ERROR_IO;
+    }
+    if (!password) {
+        return VGREResult::ERROR_AUTH_FAILED;
+    }
+    outToken = std::string(password);
+    secret_password_free(password);
+    return VGREResult::SUCCESS;
+}
+
+VGREResult HardwareTokenManager::deleteLinuxLibsecret(const std::string& service) {
+    GError* error = nullptr;
+
+    gboolean cleared = secret_password_clear_sync(
+        &VGRE_SECRET_SCHEMA,
+        nullptr,  // GCancellable
+        &error,
+        "service", service.c_str(),
+        nullptr); // attribute sentinel
+
+    if (error) {
+        VGRE_LOG_ERROR("HardwareTokenManager",
+            "libsecret delete failed: " + std::string(error->message));
+        g_error_free(error);
+        return VGREResult::ERROR_IO;
+    }
+    // cleared=FALSE just means no matching item was found — not an error
+    (void)cleared;
+    return VGREResult::SUCCESS;
+}
+
+#else  // !VGRE_HAS_LIBSECRET
+
+VGREResult HardwareTokenManager::initLinuxLibsecret() {
+    VGRE_LOG_DEBUG("HardwareTokenManager",
+        "libsecret support not compiled in (build without VGRE_HAS_LIBSECRET)");
+    return VGREResult::ERR_NOT_SUPPORTED;
+}
 VGREResult HardwareTokenManager::storeLinuxLibsecret(const std::string&, const std::string&) {
     return VGREResult::ERR_NOT_SUPPORTED;
 }
-
 VGREResult HardwareTokenManager::getLinuxLibsecret(const std::string&, std::string&) {
     return VGREResult::ERR_NOT_SUPPORTED;
 }
-
 VGREResult HardwareTokenManager::deleteLinuxLibsecret(const std::string&) {
     return VGREResult::ERR_NOT_SUPPORTED;
 }
 
-#else
+#endif  // VGRE_HAS_LIBSECRET
+
+#else  // !__linux__
 
 // Platform-specific implementations
 VGREResult HardwareTokenManager::initLinuxKeyring() { return VGREResult::ERR_NOT_SUPPORTED; }
