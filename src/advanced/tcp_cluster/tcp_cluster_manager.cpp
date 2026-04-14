@@ -80,39 +80,36 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   port_ = port;
   auth_token_ = 0;
 
-  // Phase 10: Authoritative Token Retrieval
-  // Priority 1: Environment variable (overridable for tests/CI)
+  // Token Retrieval: Priority 1 = explicit env var (authenticated mode),
+  //                  Priority 2 = fixed cluster-wide default (encrypted but unauthenticated).
+  //
+  // WHY NOT hardware token manager for cross-machine clusters:
+  // The Linux keyring, macOS Keychain and Windows CredMan are per-machine stores.
+  // If each node generates a random token and stores it locally, master and worker
+  // end up with DIFFERENT tokens → different PBKDF2-derived session keys → every
+  // HMAC check fails immediately after the handshake completes.
+  //
+  // The correct model for a cluster PSK is either:
+  //   a) Administrator sets VGRE_TCP_AUTH_TOKEN to the same value on every node
+  //      (authenticated encryption — only nodes with the right token can join)
+  //   b) No token is configured → use a fixed well-known default so all nodes
+  //      agree on the same key derivation input (encrypted but unauthenticated —
+  //      any VGRE node on the LAN can join; fine for trusted private networks)
   const char* env_token = std::getenv("VGRE_TCP_AUTH_TOKEN");
-  if (env_token) {
+  if (env_token && env_token[0] != '\0') {
       auth_token_str_ = env_token;
       VGRE_LOG_INFO("TCPCluster",
-          "Auth Token retrieved from environment variable VGRE_TCP_AUTH_TOKEN");
+          "Auth Token retrieved from VGRE_TCP_AUTH_TOKEN — authenticated encryption enabled");
   } else {
-      // Priority 2: Hardware-backed secure storage (production)
-      auto& tokenMgr = HardwareTokenManager::instance();
-      if (tokenMgr.initialize() != VGREResult::SUCCESS) {
-          VGRE_LOG_ERROR("TCPCluster", "Failed to initialize hardware token manager");
-          enabled_ = false;
-          return VGREResult::ERR_NOT_INITIALIZED;
-      }
-
-      VGREResult tr = tokenMgr.getToken("vgre_tcp_cluster", auth_token_str_);
-      if (tr != VGREResult::SUCCESS) {
-          // Generate and store new token if none exists
-          auth_token_str_ = HardwareTokenManager::generateToken(32);
-          VGREResult sr = tokenMgr.storeToken("vgre_tcp_cluster", auth_token_str_);
-          if (sr != VGREResult::SUCCESS) {
-              VGRE_LOG_ERROR("TCPCluster", "Failed to store authentication token");
-              enabled_ = false;
-              return VGREResult::ERR_IO;
-          }
-          VGRE_LOG_INFO("TCPCluster",
-              "Generated and stored new authentication token using " +
-              tokenMgr.getBackendName());
-      } else {
-          VGRE_LOG_INFO("TCPCluster",
-              "Retrieved authentication token from " + tokenMgr.getBackendName());
-      }
+      // No pre-shared key configured.  Use a fixed cluster-wide string so every
+      // VGRE node without an explicit token derives the SAME session key from
+      // the exchanged nonces.  Traffic is still AES-256-CTR encrypted; only
+      // node authentication is skipped (any VGRE node can join).
+      auth_token_str_ = "VGRE_CLUSTER_DEFAULT_NOAUTH_v1";
+      VGRE_LOG_WARN("TCPCluster",
+          "VGRE_TCP_AUTH_TOKEN not set — using encrypted-but-unauthenticated mode. "
+          "Set the same VGRE_TCP_AUTH_TOKEN on all cluster nodes to enable "
+          "authenticated encryption (prevents unauthorised nodes from joining).");
   }
 
   if (!auth_token_str_.empty()) {
