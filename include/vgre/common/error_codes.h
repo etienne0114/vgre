@@ -28,27 +28,12 @@ enum class VGREResult : int {
     ERR_BUSY                = 17,
     ERR_NOT_FOUND           = 18,
     ERR_UNKNOWN             = 99,
-
-    // Backward-compatible aliases for older code paths still using ERROR_* names.
-    ERROR_NOT_INITIALIZED   = ERR_NOT_INITIALIZED,
-    ERROR_INVALID_DEVICE    = ERR_INVALID_DEVICE,
-    ERROR_OUT_OF_MEMORY     = ERR_OUT_OF_MEMORY,
-    ERROR_INVALID_VALUE     = ERR_INVALID_VALUE,
-    ERROR_INVALID_KERNEL    = ERR_INVALID_KERNEL,
-    ERROR_LAUNCH_FAILURE    = ERR_LAUNCH_FAILURE,
-    ERROR_COMPILATION       = ERR_COMPILATION,
-    ERROR_NOT_SUPPORTED     = ERR_NOT_SUPPORTED,
-    ERROR_STREAM            = ERR_STREAM,
-    ERROR_TIMEOUT           = ERR_TIMEOUT,
-    ERROR_ALREADY_EXISTS    = ERR_ALREADY_EXISTS,
-    ERROR_IO                = ERR_IO,
-    ERROR_COMPRESSION       = ERR_COMPRESSION,
-    ERROR_NETWORK           = ERR_NETWORK,
-    ERROR_AUTH_FAILED       = ERR_AUTH_FAILED,
-    ERROR_CRYPTO            = ERR_CRYPTO,
-    ERROR_BUSY              = ERR_BUSY,
-    ERROR_NOT_FOUND         = ERR_NOT_FOUND,
-    ERROR_UNKNOWN           = ERR_UNKNOWN
+    // NOTE: No ERROR_* aliases are defined here.
+    // On Windows, <winerror.h> (pulled in via <winsock2.h>) defines many
+    // ERROR_* names as preprocessor macros (e.g. ERROR_TIMEOUT = 1460).
+    // Defining enum values with those same names would cause the macro to
+    // expand inside the enum body, breaking the parse on MSVC.
+    // All code should use the ERR_* spelling instead.
 };
 
 // ── Human-readable error string ────────────────────────────────────────────

@@ -67,7 +67,7 @@ static void test_pool_create_destroy() {
 
   // Destroying again should fail
   r = mm.destroyPool(pool);
-  ASSERT_EQ(r, VGREResult::ERROR_INVALID_VALUE,
+  ASSERT_EQ(r, VGREResult::ERR_INVALID_VALUE,
             "double-destroy should fail");
   PASS();
 }
@@ -195,17 +195,17 @@ static void test_pool_invalid_handle() {
   // Allocate from non-existent pool
   MemoryHandle h = nullptr;
   auto r = mm.allocateFromPool(99999, 256, h);
-  ASSERT_EQ(r, VGREResult::ERROR_INVALID_VALUE,
+  ASSERT_EQ(r, VGREResult::ERR_INVALID_VALUE,
             "alloc from invalid pool should fail");
 
   // Free to non-existent pool
   r = mm.freeToPool(99999, h);
-  ASSERT_EQ(r, VGREResult::ERROR_INVALID_VALUE,
+  ASSERT_EQ(r, VGREResult::ERR_INVALID_VALUE,
             "free to invalid pool should fail");
 
   // Destroy non-existent pool
   r = mm.destroyPool(99999);
-  ASSERT_EQ(r, VGREResult::ERROR_INVALID_VALUE,
+  ASSERT_EQ(r, VGREResult::ERR_INVALID_VALUE,
             "destroy invalid pool should fail");
   PASS();
 }

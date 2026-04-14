@@ -40,7 +40,7 @@ void test_context() {
   assert(dev.hasContext());
 
   // Double create should return ALREADY_EXISTS
-  assert(dev.createContext() == VGREResult::ERROR_ALREADY_EXISTS);
+  assert(dev.createContext() == VGREResult::ERR_ALREADY_EXISTS);
 
   assert(dev.destroyContext() == VGREResult::SUCCESS);
   assert(!dev.hasContext());
@@ -65,7 +65,7 @@ void test_streams() {
   assert(dev.destroyStream(s2) == VGREResult::SUCCESS);
 
   // Destroy non-existent stream
-  assert(dev.destroyStream(999) == VGREResult::ERROR_INVALID_VALUE);
+  assert(dev.destroyStream(999) == VGREResult::ERR_INVALID_VALUE);
 
   dev.destroyContext();
   std::cout << "[PASS] Stream management" << std::endl;

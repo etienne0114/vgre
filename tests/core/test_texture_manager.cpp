@@ -240,11 +240,11 @@ bool testSurfaceOperations() {
   // Test bounds checking
   float dummy;
   result = mgr.surf2Dread(id, dummy, -1, 0);
-  TEST_ASSERT(result == VGREResult::ERROR_INVALID_VALUE,
+  TEST_ASSERT(result == VGREResult::ERR_INVALID_VALUE,
               "Surface should reject negative coordinates");
 
   result = mgr.surf2Dread(id, dummy, 100, 0);
-  TEST_ASSERT(result == VGREResult::ERROR_INVALID_VALUE,
+  TEST_ASSERT(result == VGREResult::ERR_INVALID_VALUE,
               "Surface should reject out-of-bounds coordinates");
 
   mgr.destroySurface(id);

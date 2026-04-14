@@ -115,7 +115,7 @@ void test_oom() {
   // Attempt to allocate more than pool
   VGREResult r = mm.allocate(2048, h);
   (void)r;
-  assert(r == VGREResult::ERROR_OUT_OF_MEMORY);
+  assert(r == VGREResult::ERR_OUT_OF_MEMORY);
   assert(h == nullptr);
 
   std::cout << "[PASS] OOM detection" << std::endl;
