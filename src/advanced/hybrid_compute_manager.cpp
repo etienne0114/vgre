@@ -32,9 +32,20 @@
 namespace vgre {
 namespace advanced {
 
-HybridComputeManager::HybridComputeManager() { detectResources(); }
+HybridComputeManager::HybridComputeManager() {
+  detectResources();
 
-HybridComputeManager::~HybridComputeManager() = default;
+  // Auto-start rebalancing if the interval env var is set.
+  const char *envMs = std::getenv("VGRE_HYBRID_REBALANCE_INTERVAL_MS");
+  if (envMs) {
+    int ms = std::atoi(envMs);
+    if (ms > 0) {
+      startRebalancing(static_cast<unsigned int>(ms));
+    }
+  }
+}
+
+HybridComputeManager::~HybridComputeManager() { stopRebalancing(); }
 
 // ── Detect all resources ───────────────────────────────────────────────────
 VGREResult HybridComputeManager::detectResources() {
@@ -171,11 +182,19 @@ HybridComputeManager::selectBackend(size_t workloadSize,
   for (const auto &node : resources_.remoteNodes) {
     if (node.available) {
       double remoteGflops = node.lastTelemetry.gflops > 0 ? node.lastTelemetry.gflops : 0.1;
-      double remoteLatency = node.lastTelemetry.avg_kernel_latency_ms > 0 ? node.lastTelemetry.avg_kernel_latency_ms : 50.0;
-      
+
+      // Use EWMA-smoothed latency when available; fall back to raw telemetry.
+      double remoteLatency = 50.0;
+      auto histIt = nodeLoadHistory_.find(node.address);
+      if (histIt != nodeLoadHistory_.end() && histIt->second.samples > 0) {
+        remoteLatency = histIt->second.ewma_exec_ms;
+      } else if (node.lastTelemetry.avg_kernel_latency_ms > 0) {
+        remoteLatency = node.lastTelemetry.avg_kernel_latency_ms;
+      }
+
       // Authoritative Remote Time: Network Latency + Execution Time
       double remoteTime = remoteLatency + (static_cast<double>(workloadSize) / remoteGflops);
-      
+
       if (remoteTime < minTime) {
         minTime = remoteTime;
         bestBackend = ComputeBackend::REMOTE_NODE;
@@ -283,6 +302,21 @@ VGREResult HybridComputeManager::updateRemoteNodeTelemetry(const std::string &ad
   for (auto &node : resources_.remoteNodes) {
     if (node.address == address) {
       node.lastTelemetry = telemetry;
+
+      // Maintain EWMA of avg_kernel_latency_ms for smoothed cost estimation.
+      constexpr double kLoadAlpha = 0.2;
+      auto &hist = nodeLoadHistory_[address];
+      double rawMs = telemetry.avg_kernel_latency_ms > 0.0
+                         ? telemetry.avg_kernel_latency_ms
+                         : 50.0; // conservative fallback
+      if (hist.samples == 0) {
+        hist.ewma_exec_ms = rawMs; // seed with first sample
+      } else {
+        hist.ewma_exec_ms =
+            hist.ewma_exec_ms * (1.0 - kLoadAlpha) + rawMs * kLoadAlpha;
+      }
+      hist.samples++;
+
       return VGREResult::SUCCESS;
     }
   }
@@ -624,6 +658,105 @@ VGREResult HybridComputeManager::distributePartitionedKernel(
   // Collect results from all partitions
   uint32_t totalPartitions = static_cast<uint32_t>(activeWorkers + 1); // +1 for local
   return cluster.collectPartitionResults(kernelId, totalPartitions, 30000);
+}
+
+// ── Dynamic rebalancing ────────────────────────────────────────────────────
+
+void HybridComputeManager::startRebalancing(unsigned int intervalMs) {
+  if (rebalanceThread_.joinable()) return; // already running
+  if (intervalMs == 0) intervalMs = 5000;
+  stopRebalance_.store(false);
+  rebalanceThread_ = std::thread(&HybridComputeManager::rebalanceLoop, this,
+                                 intervalMs);
+  VGRE_LOG_INFO("HybridComputeManager",
+                "Dynamic rebalancing started (interval=" +
+                    std::to_string(intervalMs) + " ms)");
+}
+
+void HybridComputeManager::stopRebalancing() {
+  stopRebalance_.store(true);
+  if (rebalanceThread_.joinable()) {
+    rebalanceThread_.join();
+    VGRE_LOG_INFO("HybridComputeManager", "Dynamic rebalancing stopped");
+  }
+}
+
+bool HybridComputeManager::isRebalancing() const {
+  return rebalanceThread_.joinable() && !stopRebalance_.load();
+}
+
+void HybridComputeManager::rebalanceLoop(unsigned int intervalMs) {
+  while (!stopRebalance_.load()) {
+    // Sleep in 100 ms increments so we can respond to stop quickly.
+    for (unsigned int elapsed = 0;
+         elapsed < intervalMs && !stopRebalance_.load();
+         elapsed += 100) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!stopRebalance_.load()) {
+      doRebalance();
+    }
+  }
+}
+
+void HybridComputeManager::doRebalance() {
+  // Pull live cluster telemetry from TCPClusterManager (if active as master).
+  auto &cluster = TCPClusterManager::instance();
+  if (!cluster.isEnabled() || !cluster.isMaster()) return;
+
+  std::vector<TCPClusterManager::ClusterNodeInfo> clusterNodes;
+  cluster.getConnectedNodes(clusterNodes);
+
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  // Mark all nodes unavailable; re-mark those still reported by the cluster.
+  for (auto &rn : resources_.remoteNodes) {
+    rn.available = false;
+  }
+
+  size_t totalUnits = static_cast<size_t>(resources_.cpuCores);
+  for (const auto &cn : clusterNodes) {
+    if (!cn.active) continue;
+
+    // Match cluster node to a registered RemoteNode by address.
+    bool matched = false;
+    for (auto &rn : resources_.remoteNodes) {
+      if (rn.address == cn.ip_address) {
+        rn.available = true;
+        rn.cpuCores = cn.cpu_cores;
+        rn.cpuMemoryBytes = static_cast<size_t>(cn.cpu_memory);
+        rn.hasIntegratedGPU = cn.has_igpu;
+        rn.lastTelemetry = cn.last_telemetry;
+        if (cn.last_telemetry.avg_kernel_latency_ms > 0.0)
+          rn.latencyMs = cn.last_telemetry.avg_kernel_latency_ms;
+        totalUnits += static_cast<size_t>(cn.cpu_cores);
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      // Node connected to cluster but not in our registry — auto-register it.
+      RemoteNode rn;
+      rn.address = cn.ip_address;
+      rn.port = cn.port;
+      rn.cpuCores = cn.cpu_cores;
+      rn.cpuMemoryBytes = static_cast<size_t>(cn.cpu_memory);
+      rn.hasIntegratedGPU = cn.has_igpu;
+      rn.lastTelemetry = cn.last_telemetry;
+      rn.available = true;
+      if (cn.last_telemetry.avg_kernel_latency_ms > 0.0)
+        rn.latencyMs = cn.last_telemetry.avg_kernel_latency_ms;
+      resources_.remoteNodes.push_back(rn);
+      totalUnits += static_cast<size_t>(cn.cpu_cores);
+    }
+  }
+
+  resources_.totalComputeUnits = totalUnits;
+
+  VGRE_LOG_INFO(
+      "HybridComputeManager",
+      "Rebalance: " + std::to_string(clusterNodes.size()) +
+          " cluster nodes, totalComputeUnits=" + std::to_string(totalUnits));
 }
 
 // ── Singleton ──────────────────────────────────────────────────────────────

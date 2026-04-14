@@ -5,12 +5,23 @@
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
 
+#include <atomic>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 #include <mutex>
 
 namespace vgre {
 namespace advanced {
+
+// ── Per-node EWMA load history ────────────────────────────────────────────
+// Maintained by HybridComputeManager to smooth noisy telemetry before
+// using kernel latency in selectBackend() cost comparisons.
+struct NodeLoadHistory {
+    double ewma_exec_ms = 0.0;  // EWMA of avg_kernel_latency_ms from telemetry
+    uint64_t samples    = 0;    // number of telemetry updates incorporated
+};
 
 // ── Compute backend types ──────────────────────────────────────────────────
 enum class ComputeBackend : uint8_t {
@@ -93,15 +104,31 @@ public:
         KernelId kernelId, const dim3 &gridDim, const dim3 &blockDim,
         void **args, int numArgs, size_t sharedMem = 0);
 
+    // Background dynamic rebalancing.
+    // Periodically re-polls remote node telemetry from the TCP cluster and
+    // updates node weights so selectBackend() uses fresh performance data.
+    // intervalMs: poll period in ms (0 → default 5000 ms).
+    void startRebalancing(unsigned int intervalMs = 5000);
+    void stopRebalancing();
+    bool isRebalancing() const;
+
     // Singleton
     static HybridComputeManager& instance();
 
 private:
     void detectCPU();
     void detectIntegratedGPU();
+    void rebalanceLoop(unsigned int intervalMs);
+    void doRebalance();
 
     ComputeResources resources_;
     mutable std::mutex mutex_;
+
+    // EWMA load history keyed by node address; updated in updateRemoteNodeTelemetry().
+    std::unordered_map<std::string, NodeLoadHistory> nodeLoadHistory_;
+
+    std::thread rebalanceThread_;
+    std::atomic<bool> stopRebalance_{false};
 };
 
 } // namespace advanced

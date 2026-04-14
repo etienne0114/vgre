@@ -175,6 +175,7 @@ VGRE_EXPORT int vgre_stream_destroy(uint64_t stream_id);
 /* ── CUDA Graphs (DAG) ──────────────────────────────────────────────────────
  */
 VGRE_EXPORT int vgre_graphCreate(uint64_t *out_graph);
+VGRE_EXPORT int vgre_graphClone(uint64_t src_graph, uint64_t *out_clone);
 VGRE_EXPORT int vgre_graphDestroy(uint64_t graph);
 VGRE_EXPORT int vgre_graphInstantiate(uint64_t graph, uint64_t *out_exec);
 VGRE_EXPORT int vgre_graphExecDestroy(uint64_t exec);
@@ -191,6 +192,15 @@ VGRE_EXPORT int vgre_graphAddMemcpyNodeEx(uint64_t graph, void *dst, void *src,
                               size_t count, int kind,
                               const uint64_t *deps, int num_deps,
                               uint64_t *out_node_id);
+
+/* Add a conditional (IF/WHILE) node.  cond_type: 0=IF, 1=WHILE.
+ * max_iterations: WHILE loop safety cap (0 → default 65536). */
+VGRE_EXPORT int vgre_graphAddConditionalNodeEx(uint64_t graph,
+                                    int (*cond_fn)(void *), void *cond_ctx,
+                                    uint64_t body_graph, int cond_type,
+                                    unsigned int max_iterations,
+                                    const uint64_t *deps, int num_deps,
+                                    uint64_t *out_node_id);
 
 VGRE_EXPORT int vgre_graphAddDependency(uint64_t graph, uint64_t node_id,
                             uint64_t depends_on);

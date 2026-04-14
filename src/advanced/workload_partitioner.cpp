@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 namespace vgre {
 namespace advanced {
@@ -20,7 +21,8 @@ static void partitionRecursive(
         slice.node_address = nodes[0].address;
         slice.worker_idx = nodes[0].worker_idx;
         slice.cpu_cores = nodes[0].cpu_cores;
-        slice.measured_capacity = (double(nodes[0].cpu_cores) * nodes[0].measured_gflops) / (nodes[0].avg_latency_ms + 0.1);
+        slice.measured_capacity = (double(nodes[0].cpu_cores) * nodes[0].measured_gflops) / (nodes[0].avg_latency_ms + 0.1) *
+            std::min(1.0, nodes[0].network_bandwidth_gbps / 10.0);
         slice.partition_id = static_cast<uint32_t>(outPlan.slices.size());
         
         for (int i = 0; i < 3; ++i) {
@@ -58,14 +60,17 @@ static void partitionRecursive(
 
     // Sort nodes to ensure deterministic splitting based on capacity
     std::sort(nodes.begin(), nodes.end(), [](const vgre::advanced::NodeCapability& a, const vgre::advanced::NodeCapability& b) {
-        double capA = (double(a.cpu_cores) * a.measured_gflops) / (a.avg_latency_ms + 0.1);
-        double capB = (double(b.cpu_cores) * b.measured_gflops) / (b.avg_latency_ms + 0.1);
+        double capA = (double(a.cpu_cores) * a.measured_gflops) / (a.avg_latency_ms + 0.1) *
+                         std::min(1.0, a.network_bandwidth_gbps / 10.0);
+        double capB = (double(b.cpu_cores) * b.measured_gflops) / (b.avg_latency_ms + 0.1) *
+                         std::min(1.0, b.network_bandwidth_gbps / 10.0);
         return capA > capB;
     });
 
     double totalCap = 0;
     for (const auto& n : nodes) {
-        totalCap += (double(n.cpu_cores) * n.measured_gflops) / (n.avg_latency_ms + 0.1);
+        totalCap += (double(n.cpu_cores) * n.measured_gflops) / (n.avg_latency_ms + 0.1) *
+                    std::min(1.0, n.network_bandwidth_gbps / 10.0);
     }
 
     // Partition nodes into two groups
@@ -73,7 +78,8 @@ static void partitionRecursive(
     double currentCap = 0;
     size_t splitIdx = 0;
     for (size_t i = 0; i < nodes.size() - 1; ++i) {
-        currentCap += (double(nodes[i].cpu_cores) * nodes[i].measured_gflops) / (nodes[i].avg_latency_ms + 0.1);
+        currentCap += (double(nodes[i].cpu_cores) * nodes[i].measured_gflops) / (nodes[i].avg_latency_ms + 0.1) *
+                          std::min(1.0, nodes[i].network_bandwidth_gbps / 10.0);
         groupA.push_back(nodes[i]);
         if (currentCap >= totalCap / 2.0) {
             splitIdx = i + 1;
@@ -108,10 +114,19 @@ VGREResult WorkloadPartitioner::createPartitionPlan(
     return VGREResult::ERR_INVALID_VALUE;
   }
 
-  // Filter to available nodes with valid capability
+  // Filter to available nodes with valid capability, and apply accuracy factors.
   std::vector<vgre::advanced::NodeCapability> validNodes;
-  for (const auto &node : nodes) {
-    if (node.cpu_cores > 0) {
+  {
+    std::lock_guard<std::mutex> lock(accuracyMutex_);
+    for (auto node : nodes) {
+      if (node.cpu_cores <= 0) continue;
+      auto it = accuracyFactors_.find(node.address);
+      if (it != accuracyFactors_.end()) {
+        node.accuracy_factor = it->second;
+        // Scale GFLOPS by accuracy factor so slower-than-predicted nodes
+        // receive proportionally fewer blocks.
+        node.measured_gflops *= node.accuracy_factor;
+      }
       validNodes.push_back(node);
     }
   }
@@ -180,6 +195,25 @@ bool WorkloadPartitioner::validatePlan(const PartitionPlan &plan) const {
   }
 
   return true;
+}
+
+void WorkloadPartitioner::recordActualExecution(const std::string &address,
+                                               double predicted_ms,
+                                               double actual_ms) {
+  if (predicted_ms <= 0.0 || actual_ms <= 0.0) return;
+
+  // Accuracy ratio: 1.0 = perfect prediction; <1.0 = node was slower than expected.
+  double ratio = std::min(predicted_ms / actual_ms, 1.0);
+
+  std::lock_guard<std::mutex> lock(accuracyMutex_);
+  auto &factor = accuracyFactors_[address];
+  if (factor == 0.0) factor = 1.0; // seed on first call
+
+  // EWMA with alpha=0.25: react to sustained drift without chasing noise.
+  constexpr double kAlpha = 0.25;
+  factor = factor * (1.0 - kAlpha) + ratio * kAlpha;
+  // Clamp to [0.1, 1.0] — never assign a node more than its stated capacity.
+  factor = std::max(0.1, std::min(factor, 1.0));
 }
 
 WorkloadPartitioner &WorkloadPartitioner::instance() {

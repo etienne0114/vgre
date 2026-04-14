@@ -91,6 +91,9 @@ protected:
 
     // Built-in variable set
     static const std::unordered_map<std::string, std::string> builtinVars_;
+
+    // Cache for token-based fallback results (keyed by kernel source SHA)
+    std::unordered_map<std::string, KernelIR> fallbackCache_;
 };
 
 } // namespace compiler

@@ -18,7 +18,7 @@ namespace core {
 // ── Texture addressing and filter modes ────────────────────────────────────
 enum class TextureAddressMode : uint8_t { CLAMP, WRAP, MIRROR, BORDER };
 
-enum class TextureFilterMode : uint8_t { POINT, LINEAR, CUBIC };
+enum class TextureFilterMode : uint8_t { POINT, LINEAR, CUBIC, ANISOTROPIC };
 
 // ── Texture element types ──────────────────────────────────────────────────
 enum class TextureElementType : uint8_t {
@@ -39,6 +39,9 @@ struct TextureDescriptor {
   TextureElementType elementType = TextureElementType::FLOAT32;
   bool normalizedCoords = false;
   float borderColor = 0.0f;
+  // Anisotropic filtering: 1 = disabled; 2–16 = max anisotropy ratio.
+  // Effective when filterMode == ANISOTROPIC (or LINEAR with maxAnisotropy > 1).
+  unsigned int maxAnisotropy = 1;
 };
 
 // ── Resource view descriptor ───────────────────────────────────────────────
@@ -119,6 +122,13 @@ public:
   // 2D floating-point fetch with optional interpolation (like tex2D)
   float tex2D(TextureId id, float x, float y) const;
 
+  // 2D fetch at an explicit LOD (mip level) with trilinear blending.
+  // lod=0.0 samples the base level; lod=1.0 samples level 1; fractional
+  // values blend between adjacent levels (trilinear filtering).
+  // Falls back to bilinear on level 0 when the texture is not mipmapped.
+  // Only float32 mip data is supported (matches generateMipmaps()).
+  float tex2DLod(TextureId id, float x, float y, float lod) const;
+
   // 3D floating-point fetch with optional trilinear interpolation (like tex3D)
   float tex3D(TextureId id, float x, float y, float z) const;
 
@@ -151,6 +161,26 @@ public:
   void *getCudaArrayData(TextureId id);
   const void *getCudaArrayData(TextureId id) const;
 
+  // ── Mipmapped array (cudaMipmappedArray) ────────────────────────────────
+  // Allocates a full mip chain for a 2D float32 texture.
+  // mipLevels == 0 means auto-generate: floor(log2(max(width, height))) + 1.
+  // Level 0 is the full-resolution base; each subsequent level is halved.
+  // The mip chain is stored contiguously in ownedArrays_; level offsets are
+  // stored in mipmapLevelOffsets_ for fast access.
+  // Sampling via tex2D() uses mip level 0 (CUDA default when no LOD is given).
+  // Use tex2DLod() to sample a specific mip level with trilinear blending.
+  VGREResult createMipmappedArray(TextureId &outId, size_t width, size_t height,
+                                  size_t elementSize, unsigned int mipLevels,
+                                  const TextureDescriptor &desc);
+
+  // Generate mip levels from level 0 data (box filter, power-of-2 downscale).
+  // Must be called after filling level 0 via getCudaArrayData() + memcpy.
+  VGREResult generateMipmaps(TextureId id);
+
+  // Returns a pointer to the start of a specific mip level's data.
+  void *getMipmapLevelData(TextureId id, unsigned int level);
+  const void *getMipmapLevelData(TextureId id, unsigned int level) const;
+
   // ── Singleton ────────────────────────────────────────────────────────────
   static TextureManager &instance();
 
@@ -160,8 +190,10 @@ private:
 
   std::unordered_map<TextureId, TextureObject> textures_;
   std::unordered_map<SurfaceId, SurfaceObject> surfaces_;
-  // Backing memory owned by cudaArray lifecycle (freed on destroyCudaArray)
+  // Backing memory owned by cudaArray / mipmapped-array lifecycle
   std::unordered_map<TextureId, std::vector<uint8_t>> ownedArrays_;
+  // Per-texture mip-level byte offsets within ownedArrays_ (index 0 = base).
+  std::unordered_map<TextureId, std::vector<size_t>> mipmapLevelOffsets_;
   mutable std::recursive_mutex mutex_;
   TextureId nextTextureId_ = 1;
   SurfaceId nextSurfaceId_ = 1;

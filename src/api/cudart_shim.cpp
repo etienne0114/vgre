@@ -10,6 +10,7 @@
 #include "vgre/common/logger.h"
 #include "vgre/common/elf_reader.h"
 #include "vgre/core/memory_manager.h"
+#include "vgre/core/runtime_engine.h"
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -818,6 +819,10 @@ cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
   return vgre::api::CUDAInterceptor::instance().graphLaunch(graphExec, stream);
 }
 
+cudaError_t cudaGraphClone(cudaGraph_t *pGraphClone, cudaGraph_t originalGraph) {
+  return vgre::api::CUDAInterceptor::instance().graphClone(pGraphClone, originalGraph);
+}
+
 cudaError_t cudaGraphDestroy(cudaGraph_t graph) {
   return vgre::api::CUDAInterceptor::instance().graphDestroy(graph);
 }
@@ -846,15 +851,112 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
       hGraphExec, hGraph, hErrorNode_out, reinterpret_cast<vgre::api::CUDAInterceptor::cudaGraphExecUpdateResult*>(updateResult_out));
 }
 
+// VGRE extension: conditional graph node (IF/WHILE semantics).
+// condFn(condCtx) returns non-zero to execute the body.
+// flags: 0 = IF (body executes once), 1 = WHILE (body loops while condFn != 0).
+// maxIterations: safety cap for WHILE loops (default 65536 when 0 is passed).
+cudaError_t cudaGraphAddConditionalNode(cudaGraphNode_t *pGraphNode,
+                                        cudaGraph_t graph,
+                                        const cudaGraphNode_t *pDependencies,
+                                        size_t numDependencies,
+                                        int (*condFn)(void *),
+                                        void *condCtx,
+                                        cudaGraph_t bodyGraph,
+                                        unsigned int flags,
+                                        unsigned int maxIterations) {
+  if (!pGraphNode) return cudaError_t(1); // cudaErrorInvalidValue
+  auto &engine = vgre::core::RuntimeEngine::instance();
+  if (!engine.isInitialized()) return cudaError_t(3); // cudaErrorNotInitialized
+
+  std::vector<uint64_t> deps(pDependencies, pDependencies + numDependencies);
+  vgre::core::GraphCondType condType =
+      (flags == 1) ? vgre::core::GraphCondType::WHILE
+                   : vgre::core::GraphCondType::IF;
+  unsigned int iters = (maxIterations == 0) ? 65536 : maxIterations;
+  uint64_t outNodeId = 0;
+  auto r = engine.graphAddConditionalNode(
+      static_cast<vgre::GraphId>(graph), condFn, condCtx,
+      static_cast<vgre::GraphId>(bodyGraph), condType, iters, deps, outNodeId);
+  if (r != vgre::VGREResult::SUCCESS) return cudaError_t(1);
+  *pGraphNode = outNodeId;
+  return cudaError_t(0); // cudaSuccess
+}
+
 // ── Cooperative Launch ────────────────────────────────────────────────────
 
 cudaError_t cudaLaunchCooperativeKernel(const void *hostFun, dim3 gridDim,
                                         dim3 blockDim, void **args,
                                         size_t sharedMem,
                                         cudaStream_t stream) {
-  // Cooperative launch uses the same path as regular launch in VGRE,
-  // since grid-wide synchronization is handled via serialized block phases.
-  return cudaLaunchKernel(hostFun, gridDim, blockDim, args, sharedMem, stream);
+  if (!hostFun || gridDim.x == 0 || blockDim.x == 0)
+    return cudaErrorInvalidValue;
+
+  std::string kernelName =
+      CUDAModuleRegistry::instance().lookupKernelName(hostFun);
+  std::string kernelSource =
+      CUDAModuleRegistry::instance().lookupKernelSource(hostFun);
+  if (kernelName.empty() || kernelSource.empty())
+    return cudaErrorInvalidDeviceFunction;
+
+  vgre::dim3 vgreGrid(gridDim.x, gridDim.y, gridDim.z);
+  vgre::dim3 vgreBlock(blockDim.x, blockDim.y, blockDim.z);
+
+  // Route through the cooperative execution path so that
+  // this_grid().sync() / vgre_jit_syncgrid() works correctly.
+  return vgre::api::CUDAInterceptor::instance().launchCooperativeKernel(
+      kernelName, kernelSource, vgreGrid, vgreBlock, args, sharedMem, stream);
+}
+
+struct cudaLaunchParams {
+  const void *func;
+  dim3 gridDim;
+  dim3 blockDim;
+  void **args;
+  size_t sharedMem;
+  cudaStream_t stream;
+};
+
+cudaError_t cudaLaunchCooperativeKernelMultiDevice(
+    cudaLaunchParams *launchParamsList, unsigned int numDevices,
+    unsigned int flags) {
+  // flags interpretation (matches CUDA docs):
+  //   cudaCooperativeLaunchMultiDeviceNoPreSync  (0x01) — we always start fresh,
+  //   cudaCooperativeLaunchMultiDeviceNoPostSync (0x02) — caller syncs manually.
+  // Both are no-ops in VGRE's CPU model; the ready-gate in Phase 2 of
+  // launchCooperativeKernelMultiDevice already ensures simultaneous start.
+  (void)flags;
+
+  if (!launchParamsList || numDevices == 0) return cudaErrorInvalidValue;
+
+  // Phase 1 — resolve kernel names from the module registry before handing
+  // off to RuntimeEngine (registry lookup is not thread-safe, so done here
+  // on the calling thread before device threads are spawned).
+  std::vector<vgre::core::RuntimeEngine::CoopMultiLaunchParams> params;
+  params.reserve(numDevices);
+
+  for (unsigned i = 0; i < numDevices; ++i) {
+    const auto &p = launchParamsList[i];
+    if (!p.func || p.gridDim.x == 0 || p.blockDim.x == 0)
+      return cudaErrorInvalidValue;
+
+    std::string name = CUDAModuleRegistry::instance().lookupKernelName(p.func);
+    std::string src  = CUDAModuleRegistry::instance().lookupKernelSource(p.func);
+    if (name.empty() || src.empty()) return cudaErrorInvalidDeviceFunction;
+
+    params.push_back({
+        name, src,
+        vgre::dim3(p.gridDim.x, p.gridDim.y, p.gridDim.z),
+        vgre::dim3(p.blockDim.x, p.blockDim.y, p.blockDim.z),
+        p.args,
+        p.sharedMem,
+        // cudaStream_t is opaque; cast to uint64_t for VGRE's StreamId.
+        static_cast<vgre::StreamId>(reinterpret_cast<uintptr_t>(p.stream))
+    });
+  }
+
+  auto r = vgre::core::RuntimeEngine::instance()
+               .launchCooperativeKernelMultiDevice(params);
+  return (r == vgre::VGREResult::SUCCESS) ? cudaSuccess : cudaErrorLaunchFailure;
 }
 
 cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks,
@@ -870,6 +972,70 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks,
   if (hwThreads == 0) hwThreads = 4;
   *numBlocks = std::max(1, hwThreads / blockSize);
   return cudaSuccess;
+}
+
+// ── Mipmapped Array API ────────────────────────────────────────────────────
+// cudaMipmappedArray_t is an opaque handle; we use TextureId cast to void*.
+
+#include "vgre/core/texture_manager.h"
+
+struct cudaChannelFormatDesc {
+  int x, y, z, w;
+  int f; // kind: 0=signed int, 1=unsigned int, 2=float
+};
+
+cudaError_t cudaMallocMipmappedArray(void **mipmappedArrayPtr,
+                                     const cudaChannelFormatDesc *desc,
+                                     size_t width, size_t height,
+                                     unsigned int numLevels,
+                                     unsigned int flags) {
+  (void)flags;
+  if (!mipmappedArrayPtr || !desc || width == 0)
+    return cudaErrorInvalidValue;
+
+  // Determine element size from channel descriptor (x+y+z+w bits → bytes)
+  size_t bits = static_cast<size_t>(desc->x + desc->y + desc->z + desc->w);
+  size_t elementSize = (bits == 0) ? 4 : (bits + 7) / 8;
+
+  vgre::core::TextureDescriptor td;
+  td.filterMode = vgre::core::TextureFilterMode::LINEAR;
+  td.addressMode = vgre::core::TextureAddressMode::CLAMP;
+
+  vgre::core::TextureId id = 0;
+  auto r = vgre::core::TextureManager::instance().createMipmappedArray(
+      id, width, height, elementSize, numLevels, td);
+  if (r != vgre::VGREResult::SUCCESS) return cudaErrorMemoryAllocation;
+
+  *mipmappedArrayPtr = reinterpret_cast<void *>(static_cast<uintptr_t>(id));
+  return cudaSuccess;
+}
+
+cudaError_t cudaFreeMipmappedArray(void *mipmappedArray) {
+  auto id = static_cast<vgre::core::TextureId>(
+      reinterpret_cast<uintptr_t>(mipmappedArray));
+  vgre::core::TextureManager::instance().destroyCudaArray(id);
+  return cudaSuccess;
+}
+
+// Returns a pointer to a specific mip level (as a cudaArray_t = void*).
+cudaError_t cudaGetMipmappedArrayLevel(void **levelArrayPtr,
+                                       void *mipmappedArray,
+                                       unsigned int level) {
+  if (!levelArrayPtr || !mipmappedArray) return cudaErrorInvalidValue;
+  auto id = static_cast<vgre::core::TextureId>(
+      reinterpret_cast<uintptr_t>(mipmappedArray));
+  void *ptr = vgre::core::TextureManager::instance().getMipmapLevelData(id, level);
+  if (!ptr) return cudaErrorInvalidValue;
+  *levelArrayPtr = ptr;
+  return cudaSuccess;
+}
+
+// Generate mip levels from the base (level 0) data using box filtering.
+cudaError_t cudaGenerateMipmaps(void *mipmappedArray) {
+  auto id = static_cast<vgre::core::TextureId>(
+      reinterpret_cast<uintptr_t>(mipmappedArray));
+  auto r = vgre::core::TextureManager::instance().generateMipmaps(id);
+  return (r == vgre::VGREResult::SUCCESS) ? cudaSuccess : cudaErrorInvalidValue;
 }
 
 } // extern "C"

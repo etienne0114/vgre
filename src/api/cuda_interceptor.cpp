@@ -819,6 +819,25 @@ cudaError_t CUDAInterceptor::launchKernel(const std::string &name,
   return g_lastError;
 }
 
+cudaError_t CUDAInterceptor::launchCooperativeKernel(const std::string &name,
+                                                      const std::string &source,
+                                                      dim3 gridDim,
+                                                      dim3 blockDim,
+                                                      void **args,
+                                                      size_t sharedMem,
+                                                      cudaStream_t stream) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
+
+  auto r = core::RuntimeEngine::instance().launchCooperativeKernel(
+      name, source, gridDim, blockDim, args, sharedMem, stream);
+  g_lastError = convertResult(r);
+  return g_lastError;
+}
+
 // ── Module Management (Driver API style) ───────────────────────────────────
 cudaError_t CUDAInterceptor::moduleLoad(CUmodule *module, const char *fname) {
   if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
@@ -1148,6 +1167,20 @@ cudaError_t CUDAInterceptor::graphCreate(cudaGraph_t *graph, unsigned int flags)
   (void)flags;
   auto r = core::RuntimeEngine::instance().graphCreate(*graph);
   return convertResult(r);
+}
+
+cudaError_t CUDAInterceptor::graphClone(cudaGraph_t *pGraphClone,
+                                        cudaGraph_t originalGraph) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
+  if (!pGraphClone)
+    return cudaErrorInvalidValue;
+  auto r = core::RuntimeEngine::instance().graphClone(originalGraph, *pGraphClone);
+  g_lastError = convertResult(r);
+  return g_lastError;
 }
 
 cudaError_t CUDAInterceptor::streamBeginCapture(cudaStream_t stream) {

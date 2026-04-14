@@ -4,17 +4,35 @@
 #include "vgre/runtime/gpu_thread_context.h"
 #include "vgre/runtime/block_worker_pool.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
-#include <atomic>
+// ── Grid-wide barrier state ────────────────────────────────────────────────
+// Each cooperative kernel launch allocates one GridBarrierState on the stack.
+// Blocks set t_grid_barrier_state before execution; vgre_jit_syncgrid() uses
+// it to do a sense-reversing barrier across all concurrently-running blocks.
+struct GridBarrierState {
+    std::atomic<uint32_t> arrived{0};
+    uint32_t totalBlocks = 0;
+    std::atomic<uint32_t> generation{0};  // sense bit — advances on each barrier pass
+    std::mutex mu;
+    std::condition_variable cv;
+};
 
+// Per-thread pointer to the current launch's grid barrier.
+// Set by executeCooperative() before dispatching each block thread.
+static VGRE_THREAD_LOCAL GridBarrierState* t_grid_barrier_state = nullptr;
 
 extern "C" {
+
 VGRE_PUBLIC_API int vgre_jit_get_thread_id() {
     static std::atomic<int> s_next_id{0};
     static thread_local int s_my_id = -1;
@@ -22,8 +40,37 @@ VGRE_PUBLIC_API int vgre_jit_get_thread_id() {
         s_my_id = (s_next_id++) % 1024;
     }
     return s_my_id;
-} 
 }
+
+// Grid-wide barrier for cooperative kernels (maps to cooperative_groups::this_grid().sync()).
+// All blocks of the current cooperative launch must call this simultaneously.
+// If not in a cooperative launch (t_grid_barrier_state == nullptr), this is a no-op.
+VGRE_PUBLIC_API void vgre_jit_syncgrid() {
+    GridBarrierState* b = t_grid_barrier_state;
+    if (!b || b->totalBlocks <= 1) return;
+
+    // Capture the current generation so we know which phase we're waiting for.
+    uint32_t gen = b->generation.load(std::memory_order_acquire);
+
+    // Increment arrived counter; the last block to arrive resets and wakes the rest.
+    uint32_t prev = b->arrived.fetch_add(1, std::memory_order_acq_rel);
+    if (prev + 1 == b->totalBlocks) {
+        // We are the last block — reset counter and advance generation to wake waiters.
+        b->arrived.store(0, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lk(b->mu);
+            b->generation.fetch_add(1, std::memory_order_release);
+        }
+        b->cv.notify_all();
+    } else {
+        std::unique_lock<std::mutex> lk(b->mu);
+        b->cv.wait(lk, [b, gen] {
+            return b->generation.load(std::memory_order_acquire) != gen;
+        });
+    }
+}
+
+} // extern "C"
 
 #include "vgre/advanced/adaptive_execution_engine.h"
 
@@ -249,6 +296,86 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
                                             " blocks processed");
 
   return vgre::VGREResult::SUCCESS;
+}
+
+// ── Cooperative kernel execution ──────────────────────────────────────────
+// Launches each block in its own std::thread so vgre_jit_syncgrid() works.
+VGREResult CPUParallelExecutor::executeCooperative(CompiledKernelFn fn,
+                                                    const dim3 &gridDim,
+                                                    const dim3 &blockDim,
+                                                    void **args,
+                                                    size_t sharedMemSize,
+                                                    uint64_t flopsPerBlock,
+                                                    uint64_t bytesPerBlock) {
+    totalLaunches_++;
+    uint32_t totalBlocks = gridDim.total();
+
+    VGRE_LOG_INFO("CPUParallelExecutor",
+                  "Cooperative execution: " + std::to_string(totalBlocks) +
+                  " blocks (maxConcurrent=" + std::to_string(maxThreads_) + ")");
+
+    // Helper reused from execute()
+    auto effectiveFlops = [&](uint64_t staticEstimate, uint64_t /*measured*/) -> uint64_t {
+        return staticEstimate;
+    };
+
+    // Concurrent batch: at most maxThreads_ blocks run simultaneously so
+    // grid barriers work.  Any remainder runs serially after the batch.
+    const uint32_t batchSize = static_cast<uint32_t>(
+        std::max(1, std::min(maxThreads_, static_cast<int>(totalBlocks))));
+
+    // Process all blocks in batches of batchSize.
+    for (uint32_t base = 0; base < totalBlocks; base += batchSize) {
+        uint32_t thisBatch = std::min(batchSize, totalBlocks - base);
+
+        GridBarrierState barrier;
+        barrier.totalBlocks = thisBatch;
+
+        std::vector<std::thread> workers;
+        workers.reserve(thisBatch);
+
+        for (uint32_t bi = 0; bi < thisBatch; ++bi) {
+            uint32_t linear = base + bi;
+            uint32_t gx = linear % gridDim.x;
+            uint32_t gy = (linear / gridDim.x) % gridDim.y;
+            uint32_t gz = linear / (gridDim.x * gridDim.y);
+
+            workers.emplace_back([&, gx, gy, gz, flopsPerBlock, bytesPerBlock]() {
+                // Point this thread's TLS at the shared barrier for this batch.
+                t_grid_barrier_state = &barrier;
+
+                SharedMemory smem(sharedMemSize);
+                dim3 blockIdx(gx, gy, gz);
+                dim3 tIdx(0, 0, 0);
+                vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
+                vgre::runtime::GPUThreadContext::clearBlockBarrier();
+
+                (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(), smem.size());
+
+                vgre::runtime::GPUThreadContext::clearWarpMask();
+                vgre::runtime::GPUThreadContext::clearBlockBarrier();
+                t_grid_barrier_state = nullptr;
+
+                // Record metrics
+                if (flopsPerBlock > 0)
+                    vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(
+                        effectiveFlops(flopsPerBlock, 0));
+                if (bytesPerBlock > 0)
+                    vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(
+                        bytesPerBlock);
+            });
+        }
+
+        for (auto &t : workers) t.join();
+    }
+
+    totalBlocks_ += totalBlocks;
+
+    VGRE_LOG_DEBUG("CPUParallelExecutor",
+                   "Cooperative execution completed — " +
+                   std::to_string(totalBlocks) + " blocks processed");
+
+    return vgre::VGREResult::SUCCESS;
 }
 
 // ── Setters / Getters ──────────────────────────────────────────────────────

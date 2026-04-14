@@ -104,6 +104,19 @@ public:
   // into FLOP estimates. Conservative default 0.5 until calibrated.
   double getFlopPerInstruction() const { return flopPerInstruction_.load(); }
 
+  // Moving-average smoothing factor for GFLOPS/bandwidth telemetry.
+  // Default 0.3, overridable via VGRE_ADAPTIVE_ALPHA env var or this setter.
+  // Valid range [0.01, 0.99].  Higher = more reactive; lower = more stable.
+  void setMovingAverageAlpha(double alpha);
+  double getMovingAverageAlpha() const;
+
+  // Prediction-error feedback.
+  // Returns the current EWMA of relative prediction error (0–1 range).
+  // Auto-tuning raises alpha when error is high (fast-adapt) and lowers it
+  // when error is consistently low (smooth/stable).  Manual calls to
+  // setMovingAverageAlpha() disable auto-tuning to respect user override.
+  double getPredictionErrorEWMA() const;
+
   // Singleton
   static AdaptiveExecutionEngine &instance();
 
@@ -136,6 +149,17 @@ private:
   // Calibrated FLOPs-per-retired-instruction for this CPU/SIMD configuration.
   // Default 0.5 (conservative scalar): updated by runBenchmark() via perf_event.
   std::atomic<double> flopPerInstruction_{0.5};
+
+  // Moving-average smoothing alpha — loaded from VGRE_ADAPTIVE_ALPHA at startup.
+  // Protected by mutex_ for the getter/setter; read under lock in hot paths.
+  double movingAvgAlpha_ = 0.3;
+
+  // Prediction-error EWMA (0–1): exponentially-weighted mean of per-execution
+  // relative error |actual - predicted| / max(actual, 1e-6).
+  // Auto-tuning adjusts movingAvgAlpha_ based on this; disabled once the user
+  // calls setMovingAverageAlpha() (manual_alpha_set_ = true).
+  double ewma_prediction_error_ = 0.0;
+  bool   manual_alpha_set_      = false;
 
   // Background benchmark thread — stored so the destructor can join it and
   // prevent a segfault when the singleton is destroyed while the thread is still

@@ -140,6 +140,11 @@ public:
   cudaError_t launchKernel(const std::string &name, const std::string &source,
                            dim3 gridDim, dim3 blockDim, void **args,
                            size_t sharedMem = 0, cudaStream_t stream = 0);
+  cudaError_t launchCooperativeKernel(const std::string &name,
+                                      const std::string &source,
+                                      dim3 gridDim, dim3 blockDim,
+                                      void **args, size_t sharedMem = 0,
+                                      cudaStream_t stream = 0);
 
   // ── Module Management (Driver API style) ───────────────────────────────
   cudaError_t moduleLoad(CUmodule *module, const char *fname);
@@ -302,6 +307,7 @@ public:
                               size_t hOffset, size_t count, cudaMemcpyKind_t kind);
 
   cudaError_t graphCreate(cudaGraph_t *graph, unsigned int flags);
+  cudaError_t graphClone(cudaGraph_t *pGraphClone, cudaGraph_t originalGraph);
   cudaError_t streamBeginCapture(cudaStream_t stream);
   cudaError_t streamEndCapture(cudaStream_t stream, cudaGraph_t *graph);
   cudaError_t graphInstantiate(cudaGraphExec_t *exec, cudaGraph_t graph);

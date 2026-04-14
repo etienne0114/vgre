@@ -40,18 +40,57 @@ template <typename T> inline T atomicCAS(T *addr, T comp, T val) {
 }
 
 extern "C" void vgre_jit_block_barrier_sync();
+extern "C" void vgre_jit_syncgrid();
 
 // Block barrier: synchronizes threads in a block using the host environment
 inline void __syncthreads() { vgre_jit_block_barrier_sync(); }
+
+// ── Cooperative Groups Emulation ───────────────────────────────────────────
+// Provides cooperative_groups::this_grid().sync() → vgre_jit_syncgrid()
+namespace cooperative_groups {
+
+class grid_group {
+public:
+    inline void sync() const { vgre_jit_syncgrid(); }
+    inline unsigned int size() const {
+        auto* gd = vgre_jit_get_gridDim();
+        auto* bd = vgre_jit_get_blockDim();
+        return gd->x * gd->y * gd->z * bd->x * bd->y * bd->z;
+    }
+    inline unsigned int thread_rank() const {
+        auto* ti = vgre_jit_get_threadIdx();
+        auto* bi = vgre_jit_get_blockIdx();
+        auto* bd = vgre_jit_get_blockDim();
+        auto* gd = vgre_jit_get_gridDim();
+        unsigned int blockThreads = bd->x * bd->y * bd->z;
+        unsigned int blockLinear = bi->z * gd->x * gd->y + bi->y * gd->x + bi->x;
+        unsigned int threadLinear = ti->z * bd->x * bd->y + ti->y * bd->x + ti->x;
+        return blockLinear * blockThreads + threadLinear;
+    }
+};
+
+inline grid_group this_grid() { return grid_group{}; }
+
+} // namespace cooperative_groups
 
 // CUDA-like math functions for the CPU
 inline float __fdividef(float a, float b) { return a / b; }
 inline float __fadd_rn(float a, float b) { return a + b; }
 inline float __fmul_rn(float a, float b) { return a * b; }
 
-#define __global__ __attribute__((section("vgre_global")))
-#define __device__ __attribute__((section("vgre_device")))
-#define __host__
+#if defined(_MSC_VER)
+// MSVC does not support GCC/Clang __attribute__((section(...))).
+// These decorators are used only for static-analysis tagging; the JIT
+// parser identifies kernel functions by name convention, so the section
+// attribute is not needed at runtime on Windows.
+#  define __global__
+#  define __device__
+#  define __host__
+#else
+#  define __global__ __attribute__((section("vgre_global")))
+#  define __device__ __attribute__((section("vgre_device")))
+#  define __host__
+#endif
 
 // For JIT translation, we map __shared__ to a pointer into our block buffer.
 // This requires the parser to replace declarations, but for dynamic shared memory (extern),
