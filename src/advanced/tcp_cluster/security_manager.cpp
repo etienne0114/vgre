@@ -175,6 +175,23 @@ SessionInfo SecurityManager::getSecurityInfo() const {
   return total;
 }
 
+// ── Key Verification Helper ────────────────────────────────────────────────
+// Computes HMAC-SHA256(token, label || nonce) into out[kSHA256DigestLen].
+// Used in both directions of the handshake to prove token possession without
+// revealing the token itself.  The label prevents cross-use of the MAC.
+static void computeKeyVerification(const std::string &token,
+                                   const char *label,
+                                   const uint8_t nonce[crypto::kNonceLen],
+                                   uint8_t out[crypto::kSHA256DigestLen]) {
+    size_t labelLen = std::strlen(label);
+    std::vector<uint8_t> data(labelLen + crypto::kNonceLen);
+    std::memcpy(data.data(), label, labelLen);
+    std::memcpy(data.data() + labelLen, nonce, crypto::kNonceLen);
+    crypto::hmac_sha256(
+        reinterpret_cast<const uint8_t*>(token.data()), token.size(),
+        data.data(), data.size(), out);
+}
+
 VGREResult SecurityManager::performServerHandshake(
     std::shared_ptr<TCPClusterManager::ClientConnection> clientPtr) {
   if (!clientPtr) return VGREResult::ERR_INVALID_VALUE;
@@ -187,11 +204,13 @@ VGREResult SecurityManager::performServerHandshake(
     return VGREResult::ERR_AUTH_FAILED;
   }
 
-  // 1. Generate master nonce
+  // 1. Generate master nonce + key_verification = HMAC(token, label || masterNonce)
+  //    key_verification proves to the worker that we hold the same token without
+  //    transmitting the token itself.  The worker verifies it before sending its ACK.
   SecureHandshakePacket shpkt{};
   SecureChannel::generateNonce(shpkt.nonce);
-  // key_verification will be filled after we derive the key from the client's nonce
-  std::memset(shpkt.key_verification, 0, sizeof(shpkt.key_verification));
+  computeKeyVerification(parent_->auth_token_str_, "VGRE_KEYVER_MASTER_v1",
+                         shpkt.nonce, shpkt.key_verification);
 
   if (parent_->send_packet_direct(client.socket_fd, PacketType::SECURE_HANDSHAKE, &shpkt, sizeof(SecureHandshakePacket), client.secureChannel.get()) != VGREResult::SUCCESS) {
     VGRE_LOG_ERROR("TCPCluster", "Security handshake: failed to send master nonce");
@@ -285,6 +304,25 @@ VGREResult SecurityManager::performServerHandshake(
 
   std::memcpy(&clientHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
 
+  // 3b. Verify worker's key_verification = HMAC(token, label || workerNonce)
+  //     If this fails, the tokens are mismatched — fail fast with a clear error.
+  {
+      uint8_t expectedKV[crypto::kSHA256DigestLen];
+      computeKeyVerification(parent_->auth_token_str_, "VGRE_KEYVER_WORKER_v1",
+                             clientHs.nonce, expectedKV);
+      if (!crypto::secure_compare(clientHs.key_verification, expectedKV,
+                                  crypto::kSHA256DigestLen)) {
+          VGRE_LOG_ERROR("TCPCluster",
+              "Master: Handshake key-verification FAILED for " + client.ip_address +
+              " — token mismatch.  Ensure VGRE_TCP_AUTH_TOKEN is set to the same "
+              "value on both master and worker (or unset on both for default mode).");
+          vgre::common::vgre_close_socket(client.socket_fd);
+          client.socket_fd = vgre::common::VGRE_INVALID_SOCKET;
+          client.active = false;
+          return VGREResult::ERR_AUTH_FAILED;
+      }
+  }
+
   // 4. Derive session key and create secure channel
   client.secureChannel = std::make_unique<SecureChannel>();
   VGREResult r = client.secureChannel->initializeFromSecret(
@@ -346,11 +384,16 @@ VGREResult SecurityManager::performClientHandshake() {
     return VGREResult::ERR_AUTH_FAILED;
   }
 
-  // Receive SECURE_HANDSHAKE from master using a bounded exact-length read.
-  // Uses PEEK_TIMEOUT_MS as initial wait (already confirmed data is pending
-  // above), then HANDSHAKE_TIMEOUT_SECONDS for subsequent recv iterations.
+  // Receive SECURE_HANDSHAKE from master using a BOUNDED exact-length read:
+  // at most (expected - rx.size()) bytes per recv() call.  This prevents
+  // over-reading the socket and accidentally consuming bytes that belong to
+  // the first data packet the master may pipeline immediately after sending
+  // the handshake (e.g. KERNEL_REGISTRATION after connecting).  Over-read
+  // bytes would end up as encrypted data in the plaintext staging buffer
+  // causing VSBP magic-number violations.
   std::vector<uint8_t> rx;
   const size_t expected = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
+  rx.reserve(expected);
   auto deadline = std::chrono::steady_clock::now() +
       std::chrono::seconds(HANDSHAKE_TIMEOUT_SECONDS);
   while (rx.size() < expected) {
@@ -371,13 +414,20 @@ VGREResult SecurityManager::performClientHandshake() {
       VGRE_LOG_ERROR("TCPCluster", "Worker: Security handshake poll failed");
       return VGREResult::ERR_IO;
     }
-    int n = parent_->recv_packet(parent_->client_fd_, rx, nullptr);
-    if (n < 0) {
-      VGRE_LOG_ERROR("TCPCluster", "Worker: Security handshake recv failed");
-      return VGREResult::ERR_IO;
-    }
-    if (n == 0) {
+    // Bounded recv: read at most what we still need, never past the packet.
+    uint8_t buf[256];
+    size_t toRead = std::min(sizeof(buf), expected - rx.size());
+    int n = recv(parent_->client_fd_, reinterpret_cast<char*>(buf),
+                 static_cast<int>(toRead), 0);
+    if (n > 0) {
+      rx.insert(rx.end(), buf, buf + n);
+    } else if (n == 0) {
       VGRE_LOG_ERROR("TCPCluster", "Worker: Master closed connection during security handshake");
+      return VGREResult::ERR_IO;
+    } else {
+      if (vgre::common::vgre_is_would_block(vgre::common::vgre_get_last_socket_error()))
+        continue;
+      VGRE_LOG_ERROR("TCPCluster", "Worker: Security handshake recv failed");
       return VGREResult::ERR_IO;
     }
   }
@@ -406,15 +456,36 @@ VGREResult SecurityManager::performClientHandshake() {
   SecureHandshakePacket masterHs{};
   std::memcpy(&masterHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
 
-  // Preserve bytes beyond handshake packet for normal staging processing.
+  // NOTE: bounded recv guarantees rx.size() == expected exactly, so no extra
+  // bytes can be present here.  The "preserve bytes" block is retained as a
+  // safety net but will never trigger under normal conditions.
+  if (rx.size() > expected) {
+    std::lock_guard<std::mutex> lock(parent_->staging_mutex_);
+    parent_->active_staging_->insert(parent_->active_staging_->end(),
+                             rx.begin() + expected, rx.end());
+    parent_->staging_ready_ = true;
+    parent_->staging_cv_.notify_one();
+  }
+
+  // 1b. Verify master's key_verification = HMAC(token, label || masterNonce)
+  //     A mismatch means the tokens differ — fail now with a clear diagnostic
+  //     rather than letting the handshake "succeed" and then seeing HMAC
+  //     failures on every subsequent data packet.
   {
-    if (rx.size() > expected) {
-      std::lock_guard<std::mutex> lock(parent_->staging_mutex_);
-      parent_->active_staging_->insert(parent_->active_staging_->end(),
-                               rx.begin() + expected, rx.end());
-      parent_->staging_ready_ = true;
-      parent_->staging_cv_.notify_one();
-    }
+      uint8_t expectedKV[crypto::kSHA256DigestLen];
+      computeKeyVerification(parent_->auth_token_str_, "VGRE_KEYVER_MASTER_v1",
+                             masterHs.nonce, expectedKV);
+      if (!crypto::secure_compare(masterHs.key_verification, expectedKV,
+                                  crypto::kSHA256DigestLen)) {
+          VGRE_LOG_ERROR("TCPCluster",
+              "Worker: Handshake key-verification FAILED — token mismatch with master. "
+              "Ensure VGRE_TCP_AUTH_TOKEN is set to the same value on both master "
+              "and worker (or unset on both to use the default encrypted mode). "
+              "Closing connection.");
+          vgre::common::vgre_close_socket(parent_->client_fd_);
+          parent_->client_fd_ = vgre::common::VGRE_INVALID_SOCKET;
+          return VGREResult::ERR_AUTH_FAILED;
+      }
   }
 
   parent_->is_authenticating_ = true;
@@ -423,10 +494,13 @@ VGREResult SecurityManager::performClientHandshake() {
           std::chrono::steady_clock::now().time_since_epoch()).count());
   VGRE_LOG_INFO("TCPCluster", "Worker: Security handshake started (VGRE Built-in VPN Connecting...)");
 
-  // 2. Generate client nonce
+  // 2. Generate worker nonce + key_verification = HMAC(token, label || workerNonce)
+  //    The master will verify this to confirm we hold the same token.
   SecureHandshakePacket ack{};
   SecureChannel::generateNonce(ack.nonce);
-  
+  computeKeyVerification(parent_->auth_token_str_, "VGRE_KEYVER_WORKER_v1",
+                         ack.nonce, ack.key_verification);
+
   if (parent_->send_packet_direct(parent_->client_fd_, PacketType::SECURE_HANDSHAKE_ACK, &ack, sizeof(SecureHandshakePacket), parent_->client_secure_channel_.get()) != VGREResult::SUCCESS) {
     VGRE_LOG_ERROR("TCPCluster", "Client security handshake: failed to send ACK");
     parent_->is_authenticating_ = false;

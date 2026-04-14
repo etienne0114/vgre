@@ -811,7 +811,10 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
   if (!crypto::secure_compare(hdr.hmac_tag, expectedMAC,
                               crypto::kSHA256DigestLen)) {
     VGRE_LOG_ERROR("SecureChannel",
-                   "HMAC verification failed — packet integrity compromised");
+        "HMAC verification failed — session key mismatch between master and worker. "
+        "Most likely cause: VGRE_TCP_AUTH_TOKEN is set on one node but not the "
+        "other, or is set to different values.  Either set the same token on all "
+        "nodes, or unset it on all nodes to use the default encrypted mode.");
     return VGREResult::ERR_AUTH_FAILED;
   }
 
