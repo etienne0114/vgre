@@ -1,6 +1,7 @@
 #include "vgre/runtime/vector_engine.h"
 #include "vgre/common/logger.h"
 
+#include <cstdint>
 #include <cstring>
 #include <cmath>
 #include <chrono>
@@ -79,21 +80,27 @@ void VectorEngine::vectorAdd(const float* a, const float* b,
     size_t i = 0;
 
     #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
     #pragma omp parallel for if (n > 2048)
-    for (i = 0; i < (n & ~15UL); i += 16) {
-        __m512 va = _mm512_loadu_ps(&a[i]);
-        __m512 vb = _mm512_loadu_ps(&b[i]);
-        _mm512_storeu_ps(&c[i], _mm512_add_ps(va, vb));
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        __m512 va = _mm512_loadu_ps(&a[ii]);
+        __m512 vb = _mm512_loadu_ps(&b[ii]);
+        _mm512_storeu_ps(&c[ii], _mm512_add_ps(va, vb));
     }
-    i = n & ~15UL;
+    i = static_cast<size_t>(nAligned);
+    }
     #elif defined(VGRE_HAS_AVX2)
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
     #pragma omp parallel for if (n > 1024)
-    for (i = 0; i < (n & ~7UL); i += 8) {
-        __m256 va = _mm256_loadu_ps(&a[i]);
-        __m256 vb = _mm256_loadu_ps(&b[i]);
-        _mm256_storeu_ps(&c[i], _mm256_add_ps(va, vb));
+    for (int64_t ii = 0; ii < nAligned; ii += 8) {
+        __m256 va = _mm256_loadu_ps(&a[ii]);
+        __m256 vb = _mm256_loadu_ps(&b[ii]);
+        _mm256_storeu_ps(&c[ii], _mm256_add_ps(va, vb));
     }
-    i = n & ~7UL;
+    i = static_cast<size_t>(nAligned);
+    }
     #elif defined(VGRE_HAS_SSE4)
     for (; i + 4 <= n; i += 4) {
         __m128 va = _mm_loadu_ps(&a[i]);
@@ -113,21 +120,27 @@ void VectorEngine::vectorMul(const float* a, const float* b,
     size_t i = 0;
 
     #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
     #pragma omp parallel for if (n > 2048)
-    for (i = 0; i < (n & ~15UL); i += 16) {
-        __m512 va = _mm512_loadu_ps(&a[i]);
-        __m512 vb = _mm512_loadu_ps(&b[i]);
-        _mm512_storeu_ps(&c[i], _mm512_mul_ps(va, vb));
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        __m512 va = _mm512_loadu_ps(&a[ii]);
+        __m512 vb = _mm512_loadu_ps(&b[ii]);
+        _mm512_storeu_ps(&c[ii], _mm512_mul_ps(va, vb));
     }
-    i = n & ~15UL;
+    i = static_cast<size_t>(nAligned);
+    }
     #elif defined(VGRE_HAS_AVX2)
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
     #pragma omp parallel for if (n > 1024)
-    for (i = 0; i < (n & ~7UL); i += 8) {
-        __m256 va = _mm256_loadu_ps(&a[i]);
-        __m256 vb = _mm256_loadu_ps(&b[i]);
-        _mm256_storeu_ps(&c[i], _mm256_mul_ps(va, vb));
+    for (int64_t ii = 0; ii < nAligned; ii += 8) {
+        __m256 va = _mm256_loadu_ps(&a[ii]);
+        __m256 vb = _mm256_loadu_ps(&b[ii]);
+        _mm256_storeu_ps(&c[ii], _mm256_mul_ps(va, vb));
     }
-    i = n & ~7UL;
+    i = static_cast<size_t>(nAligned);
+    }
     #elif defined(VGRE_HAS_SSE4)
     for (; i + 4 <= n; i += 4) {
         __m128 va = _mm_loadu_ps(&a[i]);
@@ -147,23 +160,29 @@ void VectorEngine::vectorFMA(const float* a, const float* b,
     size_t i = 0;
 
     #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
     #pragma omp parallel for if (n > 2048)
-    for (i = 0; i < (n & ~15UL); i += 16) {
-        __m512 va  = _mm512_loadu_ps(&a[i]);
-        __m512 vb  = _mm512_loadu_ps(&b[i]);
-        __m512 vc  = _mm512_loadu_ps(&c[i]);
-        _mm512_storeu_ps(&out[i], _mm512_fmadd_ps(va, vb, vc));
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        __m512 va  = _mm512_loadu_ps(&a[ii]);
+        __m512 vb  = _mm512_loadu_ps(&b[ii]);
+        __m512 vc  = _mm512_loadu_ps(&c[ii]);
+        _mm512_storeu_ps(&out[ii], _mm512_fmadd_ps(va, vb, vc));
     }
-    i = n & ~15UL;
+    i = static_cast<size_t>(nAligned);
+    }
     #elif defined(VGRE_HAS_AVX2)
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
     #pragma omp parallel for if (n > 1024)
-    for (i = 0; i < (n & ~7UL); i += 8) {
-        __m256 va = _mm256_loadu_ps(&a[i]);
-        __m256 vb = _mm256_loadu_ps(&b[i]);
-        __m256 vc = _mm256_loadu_ps(&c[i]);
-        _mm256_storeu_ps(&out[i], _mm256_fmadd_ps(va, vb, vc));
+    for (int64_t ii = 0; ii < nAligned; ii += 8) {
+        __m256 va = _mm256_loadu_ps(&a[ii]);
+        __m256 vb = _mm256_loadu_ps(&b[ii]);
+        __m256 vc = _mm256_loadu_ps(&c[ii]);
+        _mm256_storeu_ps(&out[ii], _mm256_fmadd_ps(va, vb, vc));
     }
-    i = n & ~7UL;
+    i = static_cast<size_t>(nAligned);
+    }
     #endif
 
     for (; i < n; ++i) {
@@ -184,11 +203,13 @@ double VectorEngine::benchmarkFMA(size_t n, int iterations) {
     auto start = std::chrono::steady_clock::now();
 
     #ifdef VGRE_HAS_AVX2
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
     #pragma omp parallel
     {
         for (int iter = 0; iter < iterations; ++iter) {
             #pragma omp for
-            for (size_t i = 0; i < (n & ~7); i += 8) {
+            for (int64_t i = 0; i < nAligned; i += 8) {
                 __m256 va = _mm256_loadu_ps(&pa[i]);
                 __m256 vb = _mm256_loadu_ps(&pb[i]);
                 __m256 vc = _mm256_loadu_ps(&pc[i]);
@@ -199,6 +220,7 @@ double VectorEngine::benchmarkFMA(size_t n, int iterations) {
                 _mm256_storeu_ps(&pout[i], vc);
             }
         }
+    }
     }
     #else
     for (int iter = 0; iter < iterations; ++iter) {
@@ -231,11 +253,13 @@ double VectorEngine::benchmarkBF16(size_t n, int iterations) {
     auto start = std::chrono::steady_clock::now();
 
     #ifdef VGRE_HAS_AVX2
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
     #pragma omp parallel
     {
         for (int iter = 0; iter < iterations; ++iter) {
             #pragma omp for
-            for (size_t i = 0; i < (n & ~7); i += 8) {
+            for (int64_t i = 0; i < nAligned; i += 8) {
                 __m128i raw_a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&pa[i]));
                 __m128i raw_b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&pb[i]));
                 
@@ -253,6 +277,7 @@ double VectorEngine::benchmarkBF16(size_t n, int iterations) {
                 }
             }
         }
+    }
     }
     #else
     for (int iter = 0; iter < iterations; ++iter) {
@@ -281,13 +306,16 @@ void VectorEngine::vectorScale(const float* a, float scalar,
     size_t i = 0;
 
     #ifdef VGRE_HAS_AVX2
+    {
     __m256 vs = _mm256_set1_ps(scalar);
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
     #pragma omp parallel for if (n > 1024)
-    for (i = 0; i < (n & ~7); i += 8) {
-        __m256 va = _mm256_loadu_ps(&a[i]);
-        _mm256_storeu_ps(&out[i], _mm256_mul_ps(va, vs));
+    for (int64_t ii = 0; ii < nAligned; ii += 8) {
+        __m256 va = _mm256_loadu_ps(&a[ii]);
+        _mm256_storeu_ps(&out[ii], _mm256_mul_ps(va, vs));
     }
-    i = n & ~7;
+    i = static_cast<size_t>(nAligned);
+    }
     #elif defined(VGRE_HAS_SSE4)
     __m128 vs = _mm_set1_ps(scalar);
     for (; i + 4 <= n; i += 4) {
@@ -308,11 +336,13 @@ float VectorEngine::vectorDot(const float* a, const float* b, size_t n) {
 
     #ifdef VGRE_HAS_AVX2
     __m256 vsum = _mm256_setzero_ps();
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
     #pragma omp parallel num_threads(6) // Use a subset of threads for dot to avoid overhead
     {
         __m256 local_vsum = _mm256_setzero_ps();
         #pragma omp for
-        for (size_t j = 0; j < (n & ~7); j += 8) {
+        for (int64_t j = 0; j < nAligned; j += 8) {
             __m256 va = _mm256_loadu_ps(&a[j]);
             __m256 vb = _mm256_loadu_ps(&b[j]);
             local_vsum = _mm256_fmadd_ps(va, vb, local_vsum);
@@ -322,7 +352,8 @@ float VectorEngine::vectorDot(const float* a, const float* b, size_t n) {
             vsum = _mm256_add_ps(vsum, local_vsum);
         }
     }
-    i = n & ~7;
+    i = static_cast<size_t>(nAligned);
+    }
     // Horizontal sum of 8 floats
     __m128 hi  = _mm256_extractf128_ps(vsum, 1);
     __m128 lo  = _mm256_castps256_ps128(vsum);
@@ -415,13 +446,16 @@ void VectorEngine::vectorAdd(const double* a, const double* b,
     size_t i = 0;
 
     #ifdef VGRE_HAS_AVX2
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~3ULL);
     #pragma omp parallel for if (n > 1024)
-    for (i = 0; i < (n & ~3); i += 4) {
-        __m256d va = _mm256_loadu_pd(&a[i]);
-        __m256d vb = _mm256_loadu_pd(&b[i]);
-        _mm256_storeu_pd(&c[i], _mm256_add_pd(va, vb));
+    for (int64_t ii = 0; ii < nAligned; ii += 4) {
+        __m256d va = _mm256_loadu_pd(&a[ii]);
+        __m256d vb = _mm256_loadu_pd(&b[ii]);
+        _mm256_storeu_pd(&c[ii], _mm256_add_pd(va, vb));
     }
-    i = n & ~3;
+    i = static_cast<size_t>(nAligned);
+    }
     #endif
 
     for (; i < n; ++i) {
@@ -435,13 +469,16 @@ void VectorEngine::vectorMul(const double* a, const double* b,
     size_t i = 0;
 
     #ifdef VGRE_HAS_AVX2
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~3ULL);
     #pragma omp parallel for if (n > 1024)
-    for (i = 0; i < (n & ~3); i += 4) {
-        __m256d va = _mm256_loadu_pd(&a[i]);
-        __m256d vb = _mm256_loadu_pd(&b[i]);
-        _mm256_storeu_pd(&c[i], _mm256_mul_pd(va, vb));
+    for (int64_t ii = 0; ii < nAligned; ii += 4) {
+        __m256d va = _mm256_loadu_pd(&a[ii]);
+        __m256d vb = _mm256_loadu_pd(&b[ii]);
+        _mm256_storeu_pd(&c[ii], _mm256_mul_pd(va, vb));
     }
-    i = n & ~3;
+    i = static_cast<size_t>(nAligned);
+    }
     #endif
 
     for (; i < n; ++i) {
@@ -663,11 +700,13 @@ float VectorEngine::vectorDot(const vgre_bf16* a, const vgre_bf16* b, size_t n) 
 
     #ifdef VGRE_HAS_AVX2
     __m256 vsum = _mm256_setzero_ps();
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
     #pragma omp parallel num_threads(6)
     {
         __m256 local_vsum = _mm256_setzero_ps();
         #pragma omp for
-        for (size_t j = 0; j < (n & ~7); j += 8) {
+        for (int64_t j = 0; j < nAligned; j += 8) {
             // Load 8 BF16s
             __m128i raw_a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&a[j]));
             __m128i raw_b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&b[j]));
@@ -691,7 +730,8 @@ float VectorEngine::vectorDot(const vgre_bf16* a, const vgre_bf16* b, size_t n) 
             vsum = _mm256_add_ps(vsum, local_vsum);
         }
     }
-    i = n & ~7;
+    i = static_cast<size_t>(nAligned);
+    }
     // Horizontal sum of 8 floats
     __m128 hi  = _mm256_extractf128_ps(vsum, 1);
     __m128 lo  = _mm256_castps256_ps128(vsum);
