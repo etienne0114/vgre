@@ -6,8 +6,14 @@
 #include <chrono>
 #include <cassert>
 #include <cstdlib>
-#include <sys/wait.h>
-#include <unistd.h>
+
+#ifdef _WIN32
+#include <process.h>
+inline int setenv(const char *name, const char *value, int overwrite) {
+    if (!overwrite && getenv(name)) return 0;
+    return _putenv_s(name, value);
+}
+#endif
 
 using namespace vgre;
 using namespace vgre::advanced;

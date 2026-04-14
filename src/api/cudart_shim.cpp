@@ -21,7 +21,6 @@
 #include <vector>
 
 // To avoid name conflicts, we define exactly the symbols frameworks need.
-extern "C" {
 
 using namespace vgre::api;
 
@@ -395,6 +394,8 @@ extern "C" const char *vgre_get_module_source(void *handle) {
 }
 
 // ── Initialization & Error Handling ────────────────────────────────────────
+
+extern "C" {
 
 cudaError_t cudaGetLastError(void) {
   return vgre::api::CUDAInterceptor::instance().getLastError();
@@ -950,7 +951,7 @@ cudaError_t cudaLaunchCooperativeKernelMultiDevice(
         p.args,
         p.sharedMem,
         // cudaStream_t is opaque; cast to uint64_t for VGRE's StreamId.
-        static_cast<vgre::StreamId>(reinterpret_cast<uintptr_t>(p.stream))
+        static_cast<vgre::StreamId>(static_cast<uintptr_t>(p.stream))
     });
   }
 
