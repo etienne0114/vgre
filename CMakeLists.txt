@@ -21,18 +21,88 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic -O2)
     # SIMD — enable at the highest level the host supports
     include(CheckCXXCompilerFlag)
-    check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
+    # Detect host CPU ISA capabilities via /proc/cpuinfo (Linux) so that
+    # we only enable instruction-set extensions the build machine can execute.
+    # This prevents SIGILL when the compiler supports a flag but the CPU doesn't.
+    set(HOST_HAS_AVX512F FALSE)
+    set(HOST_HAS_AVX2    FALSE)
+    set(HOST_HAS_SSE4    FALSE)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "/proc/cpuinfo")
+        execute_process(
+            COMMAND grep -c "avx512f" /proc/cpuinfo
+            OUTPUT_VARIABLE _CPUINFO_AVX512F OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        execute_process(
+            COMMAND grep -c " avx2 " /proc/cpuinfo
+            OUTPUT_VARIABLE _CPUINFO_AVX2 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        execute_process(
+            COMMAND grep -c " sse4_1 " /proc/cpuinfo
+            OUTPUT_VARIABLE _CPUINFO_SSE4 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(_CPUINFO_AVX512F GREATER "0")
+            set(HOST_HAS_AVX512F TRUE)
+        endif()
+        if(_CPUINFO_AVX2 GREATER "0")
+            set(HOST_HAS_AVX2 TRUE)
+        endif()
+        if(_CPUINFO_SSE4 GREATER "0")
+            set(HOST_HAS_SSE4 TRUE)
+        endif()
+    else()
+        # Non-Linux: conservatively assume SSE4 / AVX2; disable AVX-512 by default.
+        set(HOST_HAS_AVX2 TRUE)
+        set(HOST_HAS_SSE4 TRUE)
+    endif()
+    message(STATUS "Host CPU ISA: AVX-512F=${HOST_HAS_AVX512F}  AVX2=${HOST_HAS_AVX2}  SSE4=${HOST_HAS_SSE4}")
+
+    check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512F)
+    check_cxx_compiler_flag("-mavx2"   COMPILER_SUPPORTS_AVX2)
     check_cxx_compiler_flag("-msse4.1" COMPILER_SUPPORTS_SSE4)
-    if(COMPILER_SUPPORTS_AVX2)
+
+    if(COMPILER_SUPPORTS_AVX512F AND HOST_HAS_AVX512F)
+        add_compile_options(-mavx512f -mavx2 -mfma)
+        add_compile_definitions(VGRE_HAS_AVX512 VGRE_HAS_AVX2)
+    elseif(COMPILER_SUPPORTS_AVX2 AND HOST_HAS_AVX2)
         add_compile_options(-mavx2 -mfma)
         add_compile_definitions(VGRE_HAS_AVX2)
-    elseif(COMPILER_SUPPORTS_SSE4)
+    elseif(COMPILER_SUPPORTS_SSE4 AND HOST_HAS_SSE4)
         add_compile_options(-msse4.1)
         add_compile_definitions(VGRE_HAS_SSE4)
     endif()
+elseif(MSVC)
+    # MSVC: warnings, optimisation, C++ exceptions, and UTF-8 source encoding.
+    add_compile_options(/W3 /O2 /EHsc /utf-8)
+    # MSVC auto-detects SSE2/AVX; expose what the host supports.
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("/arch:AVX512" MSVC_SUPPORTS_AVX512)
+    check_cxx_compiler_flag("/arch:AVX2"   MSVC_SUPPORTS_AVX2)
+    check_cxx_compiler_flag("/arch:AVX"    MSVC_SUPPORTS_AVX)
+    if(MSVC_SUPPORTS_AVX512)
+        add_compile_options(/arch:AVX512)
+        add_compile_definitions(VGRE_HAS_AVX512 VGRE_HAS_AVX2)
+    elseif(MSVC_SUPPORTS_AVX2)
+        add_compile_options(/arch:AVX2)
+        add_compile_definitions(VGRE_HAS_AVX2)
+    elseif(MSVC_SUPPORTS_AVX)
+        add_compile_options(/arch:AVX)
+    endif()
+    message(STATUS "MSVC SIMD: AVX512=${MSVC_SUPPORTS_AVX512}  AVX2=${MSVC_SUPPORTS_AVX2}  AVX=${MSVC_SUPPORTS_AVX}")
 endif()
 
 # ── Dependencies ────────────────────────────────────────────────────────────
+# macOS: Apple Clang ships without OpenMP; hint CMake to Homebrew's libomp.
+if(APPLE)
+    execute_process(
+        COMMAND brew --prefix libomp
+        OUTPUT_VARIABLE HOMEBREW_LIBOMP_PREFIX OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(HOMEBREW_LIBOMP_PREFIX)
+        set(OpenMP_CXX_FLAGS         "-Xpreprocessor -fopenmp -I${HOMEBREW_LIBOMP_PREFIX}/include")
+        set(OpenMP_CXX_LIB_NAMES     "omp")
+        set(OpenMP_omp_LIBRARY       "${HOMEBREW_LIBOMP_PREFIX}/lib/libomp.dylib")
+        message(STATUS "macOS: using Homebrew libomp at ${HOMEBREW_LIBOMP_PREFIX}")
+    else()
+        message(WARNING "macOS: Homebrew libomp not found — install with: brew install libomp")
+    endif()
+endif()
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 if(UNIX AND NOT APPLE)
     # find_library caches NOTFOUND on first miss and never retries; use NO_DEFAULT_PATH
@@ -163,11 +233,11 @@ if(UNIX AND NOT APPLE)
         pkg_check_modules(TSS2_ESYS tss2-esys)
         pkg_check_modules(TSS2_MU tss2-mu)
         pkg_check_modules(TSS2_TCTILDR tss2-tctildr)
-        
+
         if(TSS2_ESYS_FOUND AND TSS2_MU_FOUND AND TSS2_TCTILDR_FOUND)
             add_compile_definitions(VGRE_HAS_TPM2)
             target_include_directories(vgre PUBLIC ${TSS2_ESYS_INCLUDE_DIRS})
-            target_link_libraries(vgre PUBLIC 
+            target_link_libraries(vgre PUBLIC
                 ${TSS2_ESYS_LIBRARIES}
                 ${TSS2_MU_LIBRARIES}
                 ${TSS2_TCTILDR_LIBRARIES}
@@ -178,6 +248,18 @@ if(UNIX AND NOT APPLE)
             message(STATUS "  tss2-tctildr: ${TSS2_TCTILDR_VERSION}")
         else()
             message(STATUS "TPM 2.0 libraries not found - TPM support disabled")
+        endif()
+
+        # libsecret (GNOME Keyring / KWallet) — Priority 2 token backend on Linux
+        pkg_check_modules(LIBSECRET libsecret-1)
+        if(LIBSECRET_FOUND)
+            add_compile_definitions(VGRE_HAS_LIBSECRET)
+            target_include_directories(vgre PUBLIC ${LIBSECRET_INCLUDE_DIRS})
+            target_link_libraries(vgre PUBLIC ${LIBSECRET_LIBRARIES})
+            message(STATUS "Found libsecret ${LIBSECRET_VERSION}: ${LIBSECRET_LIBRARIES}")
+            message(STATUS "  libsecret enabled — GNOME Keyring / KWallet backend active")
+        else()
+            message(STATUS "libsecret not found - GNOME Keyring backend disabled")
         endif()
     endif()
     
