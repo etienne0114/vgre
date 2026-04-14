@@ -20,18 +20,10 @@
 #include <string>
 #include <thread>
 
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#elif defined(__APPLE__)
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/sysctl.h>
-#else
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+// sockets.h above already pulls in all platform socket headers.
+// Only include headers not provided by sockets.h:
+#if defined(__APPLE__)
+#include <sys/sysctl.h>   // sysctlbyname("hw.memsize") for macOS RAM detection
 #endif
 
 namespace vgre {
