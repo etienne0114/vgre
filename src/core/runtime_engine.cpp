@@ -19,9 +19,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <fstream>
-#include <functional>
 #include <set>
 #include <thread>
 
@@ -565,6 +565,7 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
   size_t staticSharedMem = 0;
   uint64_t estimatedInstructionCount = 0;
   uint64_t staticFlopCount = 0;
+  bool flopCountVerified = false;
   bool usesSyncthreads = false;
   MemoryManager* rawMm = memoryManager_.get();
 
@@ -577,6 +578,7 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       staticSharedMem = irIt->second.sharedMemSize;
       estimatedInstructionCount = irIt->second.estimatedInstructionCount;
       staticFlopCount = irIt->second.staticFlopCount;
+      flopCountVerified = irIt->second.flopCountVerified;
       usesSyncthreads = irIt->second.usesSyncthreads;
     }
 
@@ -609,6 +611,7 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
                                             safeArgs, argValues, sharedMem,
                                             argTypes, staticSharedMem, kName, gridOffset,
                                             estimatedInstructionCount, staticFlopCount,
+                                            flopCountVerified,
                                             rawMm, usesSyncthreads]() mutable {
     auto start = std::chrono::steady_clock::now();
     size_t totalSharedMem = sharedMem + staticSharedMem;
@@ -640,12 +643,28 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
     // estimatedInstructionCount counts ALL instructions (loads, branches, casts)
     // which is NOT a FLOP count — never use it raw as a FLOP proxy.
     if (staticFlopCount > 0) {
-      // Real per-thread FLOP count from compiled LLVM IR × threads per block
+      // Authoritative: LLVM IR static analysis — exact FP op count × threads.
       flopsPerBlock = blockDim.total() * staticFlopCount;
+    } else if (flopCountVerified) {
+      // LLVM IR ran and confirmed zero FP operations (e.g. memset/memcpy
+      // kernel).  Report the absolute minimum so downstream throughput
+      // calculations don't divide by zero; do NOT apply the 30% heuristic.
+      VGRE_LOG_DEBUG("RuntimeEngine",
+                     "Kernel '" + kName +
+                     "' contains no FP operations (verified by LLVM IR); "
+                     "reporting minimum FLOP baseline.");
+      flopsPerBlock = blockDim.total(); // 1 FLOP per thread minimum
     } else if (estimatedInstructionCount > 0) {
-      // Fallback: conservatively assume ~30% of instructions are FP operations
+      // LLVM IR analysis unavailable (kernel loaded from precompiled module or
+      // JIT compilation failed).  Conservatively assume ~20% of instructions
+      // are FP ops — a better-calibrated midpoint for mixed CPU kernels than
+      // the old 30% that over-counted pure memory-bound workloads.
+      VGRE_LOG_DEBUG("RuntimeEngine",
+                     "FLOP count unverified for kernel '" + kName +
+                     "'; using 20% instruction heuristic (" +
+                     std::to_string(estimatedInstructionCount) + " instructions)");
       flopsPerBlock = blockDim.total() *
-                      std::max(uint64_t(1), estimatedInstructionCount * 3 / 10);
+                      std::max(uint64_t(1), estimatedInstructionCount / 5);
     } else {
       flopsPerBlock = blockDim.total(); // absolute minimum baseline
     }
@@ -708,12 +727,195 @@ VGREResult RuntimeEngine::launchKernel(const std::string &name,
   return launchKernel(id, gridDim, blockDim, args, sharedMem, stream, gridOffset);
 }
 
+VGREResult RuntimeEngine::launchCooperativeKernel(const std::string &name,
+                                                   const std::string &source,
+                                                   const dim3 &gridDim,
+                                                   const dim3 &blockDim,
+                                                   void **args,
+                                                   size_t sharedMem,
+                                                   StreamId stream) {
+  KernelId id;
+  auto r = registerKernel(name, source, id);
+  if (r != VGREResult::SUCCESS)
+    return r;
+  return launchCooperativeKernel(id, gridDim, blockDim, args, sharedMem, stream);
+}
+
+// ── Multi-Device Cooperative Kernel Launch ────────────────────────────────
+// Each virtual device runs executeCooperative() in its own std::thread so all
+// devices proceed concurrently.  A shared atomic ready-counter acts as a
+// start-gate: every device thread increments it and spin-waits until every
+// other device is also at the gate, then all burst through simultaneously.
+//
+// This mirrors real hardware: NV's cudaLaunchCooperativeKernelMultiDevice
+// issues all GPU launches before any SM receives a wave of threadblocks.
+//
+// Per-device grid-wide barriers (this_grid().sync() / vgre_jit_syncgrid)
+// work correctly because each device thread has its own stack-allocated
+// GridBarrierState and its own set of block-execution threads.
+VGREResult RuntimeEngine::launchCooperativeKernelMultiDevice(
+    const std::vector<CoopMultiLaunchParams> &launchList) {
+
+  if (launchList.empty()) return VGREResult::SUCCESS;
+
+  const size_t N = launchList.size();
+  VGRE_LOG_INFO("RuntimeEngine",
+                "Multi-device cooperative launch: " + std::to_string(N) +
+                    " devices");
+
+  // ── Phase 1: Compile every kernel and prepare arguments ──────────────────
+  // All JIT work is serialised under the engine mutex before any execution
+  // starts, so Phase 2 never blocks waiting for compilation.
+
+  struct ReadyLaunch {
+    CompiledKernelFn fn;
+    dim3  gridDim;
+    dim3  blockDim;
+    std::shared_ptr<std::vector<std::vector<uint8_t>>> argValues;
+    std::shared_ptr<std::vector<void *>>               safeArgs;
+    size_t   sharedMem;
+    StreamId stream;
+    uint64_t flopsPerBlock;
+    uint64_t bytesPerBlock;
+  };
+  std::vector<ReadyLaunch> ready(N);
+
+  for (size_t i = 0; i < N; ++i) {
+    const auto &p = launchList[i];
+    if (p.gridDim.x == 0 || p.blockDim.x == 0)
+      return VGREResult::ERR_INVALID_VALUE;
+
+    // Register kernel — JIT-compiles if not already cached.
+    KernelId id;
+    {
+      auto r = registerKernel(p.name, p.source, id);
+      if (r != VGREResult::SUCCESS) return r;
+    }
+
+    // Resolve compiled function and deep-copy arguments under the mutex.
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!initialized_) return VGREResult::ERR_NOT_INITIALIZED;
+
+    auto irIt = kernelIRCache_.find(id);
+    if (irIt == kernelIRCache_.end()) return VGREResult::ERR_INVALID_KERNEL;
+
+    // Drain async JIT future if present.
+    auto cacheIt = kernelCache_.find(id);
+    if (cacheIt == kernelCache_.end()) {
+      auto pendIt = pendingKernels_.find(id);
+      if (pendIt == pendingKernels_.end()) return VGREResult::ERR_INVALID_KERNEL;
+      JITResult jres = pendIt->second.get();
+      if (!jres.fn) {
+        VGRE_LOG_ERROR("RuntimeEngine",
+                       "JIT failed for multi-device launch of kernel: " + p.name);
+        return VGREResult::ERR_COMPILATION;
+      }
+      irIt->second.sharedMemSize             = jres.sharedMemSize;
+      irIt->second.argSizes                  = jres.argSizes;
+      irIt->second.estimatedInstructionCount = jres.estimatedInstructionCount;
+      irIt->second.staticFlopCount           = jres.staticFlopCount;
+      kernelCache_[id] = jres.fn;
+      pendingKernels_.erase(id);
+      cacheIt = kernelCache_.find(id);
+    }
+
+    ready[i].fn        = cacheIt->second;
+    ready[i].gridDim   = p.gridDim;
+    ready[i].blockDim  = p.blockDim;
+    ready[i].sharedMem = p.sharedMem;
+    ready[i].stream    = p.stream;
+
+    // Flop estimate for telemetry — mirrors the logic in launchKernel.
+    {
+      const auto &ir = irIt->second;
+      if (ir.staticFlopCount > 0) {
+        ready[i].flopsPerBlock = ready[i].blockDim.total() * ir.staticFlopCount;
+      } else if (!ir.flopCountVerified && ir.estimatedInstructionCount > 0) {
+        ready[i].flopsPerBlock = ready[i].blockDim.total() *
+            std::max(uint64_t(1), ir.estimatedInstructionCount / 5);
+      } else {
+        ready[i].flopsPerBlock = ready[i].blockDim.total(); // minimum baseline
+      }
+    }
+    ready[i].bytesPerBlock = 0;
+
+    // Deep-copy kernel arguments so each device thread owns its own copies.
+    const size_t numArgs = irIt->second.argTypes.size();
+    ready[i].argValues =
+        std::make_shared<std::vector<std::vector<uint8_t>>>(numArgs);
+    ready[i].safeArgs = std::make_shared<std::vector<void *>>(numArgs);
+
+    for (size_t j = 0; j < numArgs; ++j) {
+      size_t argSize = 0;
+      if (j < irIt->second.argSizes.size() && irIt->second.argSizes[j] > 0) {
+        argSize = irIt->second.argSizes[j];
+      } else {
+        switch (irIt->second.argTypes[j]) {
+          case ArgType::POINTER:
+          case ArgType::INT64:
+          case ArgType::UINT64:
+          case ArgType::FLOAT64: argSize = 8; break;
+          case ArgType::INT32:
+          case ArgType::UINT32:
+          case ArgType::FLOAT32: argSize = 4; break;
+          case ArgType::STRUCT:
+            VGRE_LOG_ERROR("RuntimeEngine",
+                           "STRUCT arg " + std::to_string(j) +
+                               " has unknown size in multi-device launch of " +
+                               p.name);
+            return VGREResult::ERR_INVALID_VALUE;
+          default: argSize = 8; break;
+        }
+      }
+      (*ready[i].argValues)[j].resize(argSize);
+      if (p.args && p.args[j])
+        ::memcpy((*ready[i].argValues)[j].data(), p.args[j], argSize);
+      else
+        ::memset((*ready[i].argValues)[j].data(), 0, argSize);
+      (*ready[i].safeArgs)[j] = (*ready[i].argValues)[j].data();
+    }
+  }
+
+  // ── Phase 2: Concurrent execution ────────────────────────────────────────
+  // One std::thread per device; all threads spin on readyCount until every
+  // device has passed Phase 1, then burst into executeCooperative together.
+  std::atomic<int>         readyCount{0};
+  std::vector<VGREResult>  results(N, VGREResult::SUCCESS);
+  std::vector<std::thread> threads;
+  threads.reserve(N);
+
+  for (size_t i = 0; i < N; ++i) {
+    threads.emplace_back(
+        [this, &ready, &readyCount, &results, N, i]() {
+          // Start-gate: wait until every device thread has reached this point.
+          readyCount.fetch_add(1, std::memory_order_release);
+          while (readyCount.load(std::memory_order_acquire) <
+                 static_cast<int>(N))
+            std::this_thread::yield();
+
+          auto &rl = ready[i];
+          results[i] = executor_->executeCooperative(
+              rl.fn, rl.gridDim, rl.blockDim, rl.safeArgs->data(),
+              rl.sharedMem, rl.flopsPerBlock, rl.bytesPerBlock);
+        });
+  }
+
+  for (auto &t : threads) t.join();
+
+  for (const auto &res : results)
+    if (res != VGREResult::SUCCESS) return res;
+  return VGREResult::SUCCESS;
+}
+
 // ── Cooperative Kernel Launch ──────────────────────────────────────────────
-// Grid-wide barrier semantics: On a CPU, this is implemented by executing
-// all blocks in a single serialized phase (each block runs to completion
-// before the next). This naturally provides grid-wide synchronization since
-// all blocks share the same address space. For true cooperative semantics,
-// the entire grid is dispatched as a single unit.
+// Grid-wide barrier semantics: Cooperative kernels require grid-wide synchronization
+// where all blocks can synchronize with each other. This is implemented by:
+// 1. Launching all blocks concurrently (not sequentially)
+// 2. Providing a grid-wide barrier mechanism accessible to all blocks
+// 3. Ensuring all blocks complete before returning
+//
+// Implementation: We use a shared atomic counter and condition variable to implement
+// a grid-wide barrier that all blocks can synchronize on.
 
 VGREResult RuntimeEngine::launchCooperativeKernel(KernelId id,
                                                    const dim3 &gridDim,
@@ -722,14 +924,152 @@ VGREResult RuntimeEngine::launchCooperativeKernel(KernelId id,
                                                    size_t sharedMem,
                                                    StreamId stream,
                                                    const dim3 &gridOffset) {
+  if (gridDim.x == 0 || blockDim.x == 0)
+    return VGREResult::ERR_INVALID_VALUE;
+  if ((gridDim.y == 0 && gridDim.z != 0) ||
+      (blockDim.y == 0 && blockDim.z != 0)) {
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+
   VGRE_LOG_INFO("RuntimeEngine",
                 "Cooperative kernel launch (grid=" +
                 std::to_string(gridDim.total()) + " blocks, blockDim=" +
                 std::to_string(blockDim.total()) + " threads)");
 
-  // True 3D Grid Offset support: ensures that partitioned workloads
-  // correctly identify their local block indices within the global problem space.
-  return launchKernel(id, gridDim, blockDim, args, sharedMem, stream, gridOffset);
+  CompiledKernelFn fn;
+  std::shared_ptr<std::vector<std::vector<uint8_t>>> argValues;
+  std::shared_ptr<std::vector<void *>> safeArgs;
+
+  // Critical section: lookup kernel and prepare arguments (same as regular launch)
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!initialized_)
+      return VGREResult::ERR_NOT_INITIALIZED;
+
+    auto irIt = kernelIRCache_.find(id);
+    if (irIt == kernelIRCache_.end()) {
+      return VGREResult::ERR_INVALID_KERNEL;
+    }
+
+    // Check for active capture (cooperative kernels can be captured)
+    auto captureIt = captureState_.find(stream);
+    if (captureIt != captureState_.end()) {
+      VGRE_LOG_DEBUG("RuntimeEngine", "Capturing cooperative kernel launch " +
+                                            std::to_string(id) + " on stream " +
+                                            std::to_string(stream));
+      
+      std::vector<uint64_t> deps;
+      auto lastNodeIt = lastCapturedNodeId_.find(stream);
+      if (lastNodeIt != lastCapturedNodeId_.end() && lastNodeIt->second != 0) {
+          deps.push_back(lastNodeIt->second);
+      }
+
+      uint64_t newNodeId = 0;
+      auto res = graphManager_->addKernelNodeWithDepsOut(captureIt->second, id,
+                                          irIt->second.name, gridDim, blockDim,
+                                          args, irIt->second.argTypes, deps, newNodeId);
+      
+      if (res == VGREResult::SUCCESS) {
+          lastCapturedNodeId_[stream] = newNodeId;
+      }
+      return res;
+    }
+
+    // Resolve compiled function
+    auto cacheIt = kernelCache_.find(id);
+    if (cacheIt != kernelCache_.end()) {
+        fn = cacheIt->second;
+    } else {
+        auto pendIt = pendingKernels_.find(id);
+        if (pendIt != pendingKernels_.end()) {
+            VGRE_LOG_INFO("RuntimeEngine", "Resolving asynchronous JIT future for cooperative kernel: " + irIt->second.name);
+            vgre::JITResult jres = pendIt->second.get();
+            fn = jres.fn;
+            if (!fn) {
+                VGRE_LOG_ERROR("RuntimeEngine", "Asynchronous JIT failed for cooperative kernel: " + irIt->second.name);
+                return VGREResult::ERR_COMPILATION;
+            }
+            irIt->second.sharedMemSize = jres.sharedMemSize;
+            irIt->second.argSizes = jres.argSizes;
+            irIt->second.estimatedInstructionCount = jres.estimatedInstructionCount;
+            irIt->second.staticFlopCount = jres.staticFlopCount;
+            
+            kernelCache_[id] = fn;
+            pendingKernels_.erase(id);
+        } else {
+            return VGREResult::ERR_INVALID_KERNEL;
+        }
+    }
+
+    // Deep copy arguments
+    size_t numArgs = irIt->second.argTypes.size();
+    argValues = std::make_shared<std::vector<std::vector<uint8_t>>>(numArgs);
+    safeArgs = std::make_shared<std::vector<void *>>(numArgs);
+
+    for (size_t i = 0; i < numArgs; ++i) {
+      size_t argSize = 0;
+      if (i < irIt->second.argSizes.size() && irIt->second.argSizes[i] > 0) {
+        argSize = irIt->second.argSizes[i];
+      } else {
+        switch (irIt->second.argTypes[i]) {
+          case ArgType::POINTER:
+          case ArgType::INT64:
+          case ArgType::UINT64:
+          case ArgType::FLOAT64:
+            argSize = 8;
+            break;
+          case ArgType::INT32:
+          case ArgType::UINT32:
+          case ArgType::FLOAT32:
+            argSize = 4;
+            break;
+          case ArgType::STRUCT:
+            VGRE_LOG_ERROR("RuntimeEngine", "Missing size for structural argument at index " + std::to_string(i));
+            return VGREResult::ERR_INVALID_VALUE;
+          default:
+            argSize = 8;
+            break;
+        }
+      }
+      
+      (*argValues)[i].resize(argSize);
+      if (args && args[i]) {
+        ::memcpy((*argValues)[i].data(), args[i], argSize);
+      } else {
+        ::memset((*argValues)[i].data(), 0, argSize);
+      }
+      (*safeArgs)[i] = (*argValues)[i].data();
+    }
+  }
+
+  // Cooperative execution: all blocks run in separate threads with a shared
+  // grid-wide barrier so this_grid().sync() works correctly.
+  VGRE_LOG_INFO("RuntimeEngine",
+                "Cooperative kernel launch: dispatching via executeCooperative "
+                "(grid-wide barriers enabled via vgre_jit_syncgrid)");
+
+  uint64_t flopsPerBlock = 0;
+  uint64_t bytesPerBlock = 0;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto irIt = kernelIRCache_.find(id);
+    if (irIt != kernelIRCache_.end()) {
+        const auto &ir = irIt->second;
+        if (ir.staticFlopCount > 0) {
+            flopsPerBlock = blockDim.total() * ir.staticFlopCount;
+        } else if (!ir.flopCountVerified && ir.estimatedInstructionCount > 0) {
+            // Heuristic only when LLVM IR analysis was unavailable.
+            flopsPerBlock = blockDim.total() *
+                std::max(uint64_t(1), ir.estimatedInstructionCount / 5);
+        } else {
+            flopsPerBlock = blockDim.total(); // minimum baseline
+        }
+    }
+  }
+
+  return executor_->executeCooperative(fn, gridDim, blockDim,
+                                       safeArgs->data(), sharedMem,
+                                       flopsPerBlock, bytesPerBlock);
 }
 
 // ── Native Graph Dispatch ──────────────────────────────────────────────────
@@ -745,166 +1085,269 @@ struct OwnedFusedLaunchArgs {
 };
 
 struct NativeGraphOperation {
-  GraphNodeType type;
+  GraphNodeType type = GraphNodeType::KERNEL;
   // Kernel data
   OwnedFusedLaunchArgs kernelArgs;
   dim3 gridDim;
   dim3 blockDim;
   bool usesSyncthreads = false;
   // Memcpy data
-  void *dst;
-  void *src;
-  size_t count;
-  int kind;
+  void *dst = nullptr;
+  void *src = nullptr;
+  size_t count = 0;
+  int kind = 0;
+  // Conditional node data (CONDITIONAL type only)
+  int (*condFn)(void *) = nullptr;
+  void *condCtx = nullptr;
+  GraphCondType condType = GraphCondType::IF;
+  unsigned int maxIterations = 65536;
+  // Pre-compiled body ops; called inline to avoid deadlock with the stream scheduler.
+  std::function<void(runtime::CPUParallelExecutor *, MemoryManager *)> bodyExec;
 };
 
-VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode>& nodes, StreamId stream) {
-  if (nodes.empty()) return VGREResult::SUCCESS;
+// ── Graph dispatch helpers ─────────────────────────────────────────────────
 
-  // Pre-resolve all nodes into a natively executable directed sequence
-  auto compiledOps = std::make_shared<std::vector<NativeGraphOperation>>();
-  compiledOps->reserve(nodes.size());
-
-  // Build dependency graph for topological ordering
-  std::unordered_map<uint64_t, size_t> nodeIndex;
-  nodeIndex.reserve(nodes.size());
+// Topological sort for a flat node vector.  Returns false if a cycle is found
+// or a dependency references a non-existent node.
+static bool topoSortNodes(const std::vector<GraphNode> &nodes,
+                          std::vector<size_t> &outOrder) {
+  std::unordered_map<uint64_t, size_t> idx;
+  idx.reserve(nodes.size());
   for (size_t i = 0; i < nodes.size(); ++i) {
-    if (nodes[i].nodeId == 0) {
-      return VGREResult::ERR_INVALID_VALUE;
-    }
-    nodeIndex[nodes[i].nodeId] = i;
+    if (nodes[i].nodeId == 0) return false;
+    idx[nodes[i].nodeId] = i;
   }
-
-  std::vector<int> indegree(nodes.size(), 0);
+  std::vector<int> indeg(nodes.size(), 0);
   std::vector<std::vector<size_t>> adj(nodes.size());
   for (size_t i = 0; i < nodes.size(); ++i) {
-    for (auto depId : nodes[i].deps) {
-      auto it = nodeIndex.find(depId);
-      if (it == nodeIndex.end()) {
-        return VGREResult::ERR_INVALID_VALUE;
-      }
-      size_t depIdx = it->second;
-      adj[depIdx].push_back(i);
-      indegree[i]++;
+    for (auto dep : nodes[i].deps) {
+      auto it = idx.find(dep);
+      if (it == idx.end()) return false;
+      adj[it->second].push_back(i);
+      indeg[i]++;
     }
   }
+  std::queue<size_t> q;
+  for (size_t i = 0; i < indeg.size(); ++i)
+    if (indeg[i] == 0) q.push(i);
+  outOrder.reserve(nodes.size());
+  while (!q.empty()) {
+    size_t cur = q.front(); q.pop();
+    outOrder.push_back(cur);
+    for (size_t nxt : adj[cur])
+      if (--indeg[nxt] == 0) q.push(nxt);
+  }
+  return outOrder.size() == nodes.size();
+}
 
-  std::queue<size_t> ready;
-  for (size_t i = 0; i < indegree.size(); ++i) {
-    if (indegree[i] == 0)
-      ready.push(i);
-  }
-  std::vector<size_t> topoOrder;
-  topoOrder.reserve(nodes.size());
-  while (!ready.empty()) {
-    size_t cur = ready.front();
-    ready.pop();
-    topoOrder.push_back(cur);
-    for (size_t nxt : adj[cur]) {
-      if (--indegree[nxt] == 0) {
-        ready.push(nxt);
+// Execute pre-compiled ops inline (no scheduler submission) so CONDITIONAL
+// body graphs run synchronously inside the parent stream task.
+static void executeOpsInline(const std::vector<NativeGraphOperation> &ops,
+                              runtime::CPUParallelExecutor *exec,
+                              MemoryManager *mm) {
+  for (size_t i = 0; i < ops.size(); ++i) {
+    const auto &op = ops[i];
+    VGRE_LOG_INFO("RuntimeEngine",
+                  "Worker thread executing op " + std::to_string(i) +
+                      " type=" + std::to_string(static_cast<int>(op.type)));
+    if (op.type == GraphNodeType::KERNEL) {
+      auto start = std::chrono::steady_clock::now();
+      VGRE_LOG_INFO("RuntimeEngine",
+                    "Dispatching kernel '" + op.kernelArgs.name + "'");
+      uint32_t blocksTotal = op.gridDim.total();
+      uint64_t flopsPerBlock = blocksTotal > 0 ? op.kernelArgs.flops / blocksTotal : 0;
+      uint64_t bytesPerBlock = blocksTotal > 0 ? op.kernelArgs.memBytes / blocksTotal : 0;
+      exec->execute(op.kernelArgs.fn, op.gridDim, op.blockDim,
+                    const_cast<void **>(op.kernelArgs.argPtrs.data()),
+                    op.kernelArgs.sharedMemBytes,
+                    flopsPerBlock, bytesPerBlock, dim3(0, 0, 0),
+                    op.usesSyncthreads);
+      auto end = std::chrono::steady_clock::now();
+      double ms =
+          std::chrono::duration<double, std::milli>(end - start).count();
+      vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
+          op.kernelArgs.name, op.blockDim.total(), 8, ms,
+          op.kernelArgs.memBytes, op.kernelArgs.flops);
+    } else if (op.type == GraphNodeType::MEMCPY) {
+      if (op.kind == VGRE_MEMCPY_HOST_TO_DEVICE)
+        mm->copyHostToDevice(op.dst, op.src, op.count);
+      else if (op.kind == VGRE_MEMCPY_DEVICE_TO_HOST)
+        mm->copyDeviceToHost(op.dst, op.src, op.count);
+      else if (op.kind == VGRE_MEMCPY_DEVICE_TO_DEVICE)
+        mm->copyDeviceToDevice(op.dst, op.src, op.count);
+    } else if (op.type == GraphNodeType::CONDITIONAL) {
+      if (!op.condFn) continue;
+      if (op.condType == GraphCondType::IF) {
+        if (op.condFn(op.condCtx) != 0 && op.bodyExec)
+          op.bodyExec(exec, mm);
+      } else { // WHILE
+        unsigned int iter = 0;
+        while (iter < op.maxIterations && op.condFn(op.condCtx) != 0) {
+          if (op.bodyExec) op.bodyExec(exec, mm);
+          ++iter;
+        }
+        if (iter >= op.maxIterations) {
+          VGRE_LOG_WARN("RuntimeEngine",
+                        "WHILE conditional node reached maxIterations limit (" +
+                            std::to_string(op.maxIterations) + ")");
+        }
       }
     }
   }
-  if (topoOrder.size() != nodes.size()) {
+}
+
+// Recursively prefetch body graph nodes for all CONDITIONAL nodes in a graph.
+// Acquires only GraphManager's mutex — NOT RuntimeEngine's mutex — so this is
+// safe to call before the main compilation lock is acquired, avoiding ABBA deadlock.
+static void prefetchBodyGraphs(
+    const std::vector<GraphNode> &nodes, GraphManager &gm,
+    std::unordered_map<GraphId, std::vector<GraphNode>> &cache) {
+  for (const auto &node : nodes) {
+    if (node.type == GraphNodeType::CONDITIONAL && node.bodyGraphId != 0 &&
+        cache.find(node.bodyGraphId) == cache.end()) {
+      std::vector<GraphNode> body;
+      if (gm.getGraphNodes(node.bodyGraphId, body) == VGREResult::SUCCESS) {
+        cache[node.bodyGraphId] = body; // store before recursing (cycle guard)
+        prefetchBodyGraphs(body, gm, cache);
+      }
+    }
+  }
+}
+
+VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode> &nodes,
+                                             StreamId stream) {
+  if (nodes.empty()) return VGREResult::SUCCESS;
+
+  // ── Step 1: topo-sort outer nodes (no locks needed) ─────────────────────
+  std::vector<size_t> topoOrder;
+  if (!topoSortNodes(nodes, topoOrder)) {
     VGRE_LOG_ERROR("RuntimeEngine",
-                   "Graph dispatch failed: dependency cycle detected. "
-                   "Verify graphAddDependency or node deps.");
+                   "Graph dispatch failed: dependency cycle or invalid dep.");
     return VGREResult::ERR_INVALID_VALUE;
   }
+
+  // Build a topo-sorted node vector for convenience.
+  std::vector<GraphNode> sortedNodes;
+  sortedNodes.reserve(topoOrder.size());
+  for (size_t idx : topoOrder) sortedNodes.push_back(nodes[idx]);
+
+  // ── Step 2: prefetch body graphs (acquires only GM mutex, NOT RE mutex) ──
+  std::unordered_map<GraphId, std::vector<GraphNode>> bodyCache;
+  if (graphManager_) {
+    prefetchBodyGraphs(sortedNodes, *graphManager_, bodyCache);
+  }
+
+  // ── Step 3: compile under RE lock ────────────────────────────────────────
+  // Uses a recursive std::function so nested CONDITIONAL body subgraphs are
+  // compiled eagerly and stored in op.bodyExec for inline execution later.
+  using CompileFn = std::function<VGREResult(const std::vector<GraphNode> &,
+                                             std::vector<NativeGraphOperation> &)>;
+
+  auto compiledOps = std::make_shared<std::vector<NativeGraphOperation>>();
+  compiledOps->reserve(sortedNodes.size());
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return VGREResult::ERR_NOT_INITIALIZED;
 
-    for (size_t orderIdx = 0; orderIdx < topoOrder.size(); ++orderIdx) {
-      const auto &node = nodes[topoOrder[orderIdx]];
-      NativeGraphOperation op;
-      op.type = node.type;
+    CompileFn compileNodes;
+    compileNodes = [&](const std::vector<GraphNode> &input,
+                       std::vector<NativeGraphOperation> &outOps) -> VGREResult {
+      for (size_t ni = 0; ni < input.size(); ++ni) {
+        const auto &node = input[ni];
+        NativeGraphOperation op;
+        op.type = node.type;
 
-      if (node.type == GraphNodeType::KERNEL) {
-        KernelId actualId = node.kernelId;
-        if (actualId == 0) {
+        if (node.type == GraphNodeType::KERNEL) {
+          KernelId actualId = node.kernelId;
+          if (actualId == 0) {
             auto nameIt = kernelNames_.find(node.kernelName);
-            if (nameIt != kernelNames_.end()) {
-                actualId = nameIt->second;
-            }
-        }
+            if (nameIt != kernelNames_.end()) actualId = nameIt->second;
+          }
 
-        auto it = kernelCache_.find(actualId);
-        if (it == kernelCache_.end()) {
+          auto it = kernelCache_.find(actualId);
+          if (it == kernelCache_.end()) {
             auto pendingIt = pendingKernels_.find(actualId);
             if (pendingIt != pendingKernels_.end()) {
-                VGRE_LOG_INFO("RuntimeEngine", "Graph dispatch waiting for JIT of kernel: " + node.kernelName + " (ID " + std::to_string(actualId) + ")");
-                vgre::JITResult jres = pendingIt->second.get(); // Synchronize on future
-                CompiledKernelFn fn = jres.fn;
-                if (!fn) {
-                    VGRE_LOG_ERROR("RuntimeEngine", "JIT returned NULL for kernel: " + node.kernelName);
-                } else {
-                    auto& irCacheEntry = kernelIRCache_[actualId];
-                    irCacheEntry.sharedMemSize = jres.sharedMemSize;
-                    irCacheEntry.argSizes = jres.argSizes;
-                    irCacheEntry.estimatedInstructionCount = jres.estimatedInstructionCount;
-                    irCacheEntry.staticFlopCount = jres.staticFlopCount;
-                }
-                kernelCache_[actualId] = fn;
-                pendingKernels_.erase(pendingIt);
-                it = kernelCache_.find(actualId);
-            } else {
-                VGRE_LOG_ERROR("RuntimeEngine", "Graph dispatch failed: Kernel " + node.kernelName + " (ID " + std::to_string(actualId) + ") not found in cache or pending list.");
-                return VGREResult::ERR_INVALID_KERNEL;
-            }
-        }
-
-        auto irIt = kernelIRCache_.find(actualId);
-        std::string kName = (irIt != kernelIRCache_.end()) ? irIt->second.name : "unknown";
-
-        op.gridDim = node.gridDim;
-        op.blockDim = node.blockDim;
-        op.kernelArgs.fn = it->second;
-        if (!op.kernelArgs.fn) {
-            VGRE_LOG_ERROR("RuntimeEngine", "Assigned EMPTY function to op for kernel: " + node.kernelName);
-        }
-        op.kernelArgs.name = kName;
-        op.kernelArgs.argValues.resize(node.capturedArgs.size());
-        op.kernelArgs.argPtrs.resize(node.capturedArgs.size(), nullptr);
-
-        size_t totalThreads = node.gridDim.total() * node.blockDim.total();
-        size_t memBytes = 0;
-        if (irIt != kernelIRCache_.end()) {
-          for (size_t i = 0; i < irIt->second.argTypes.size() &&
-                              i < node.capturedArgs.size();
-               ++i) {
-            if (irIt->second.argTypes[i] == ArgType::POINTER) {
-              uint64_t raw = 0;
-              std::memcpy(&raw, node.capturedArgs[i].data(), sizeof(uint64_t));
-              void *ptr = reinterpret_cast<void *>(raw);
-              if (memoryManager_ && memoryManager_->isValidHandle(ptr)) {
-                memBytes += memoryManager_->getAllocationSize(ptr);
+              VGRE_LOG_INFO("RuntimeEngine",
+                            "Graph dispatch waiting for JIT of kernel: " +
+                                node.kernelName + " (ID " +
+                                std::to_string(actualId) + ")");
+              vgre::JITResult jres = pendingIt->second.get();
+              CompiledKernelFn fn = jres.fn;
+              if (!fn) {
+                VGRE_LOG_ERROR("RuntimeEngine",
+                               "JIT returned NULL for kernel: " + node.kernelName);
+              } else {
+                auto &irEntry = kernelIRCache_[actualId];
+                irEntry.sharedMemSize = jres.sharedMemSize;
+                irEntry.argSizes = jres.argSizes;
+                irEntry.estimatedInstructionCount = jres.estimatedInstructionCount;
+                irEntry.staticFlopCount = jres.staticFlopCount;
               }
-            } else if (irIt->second.argTypes[i] == ArgType::STRUCT) {
-              if (i < irIt->second.argSizes.size()) {
-                memBytes += irIt->second.argSizes[i] * totalThreads;
+              kernelCache_[actualId] = fn;
+              pendingKernels_.erase(pendingIt);
+              it = kernelCache_.find(actualId);
+            } else {
+              VGRE_LOG_ERROR("RuntimeEngine",
+                             "Graph dispatch failed: Kernel " + node.kernelName +
+                                 " (ID " + std::to_string(actualId) +
+                                 ") not found in cache or pending list.");
+              return VGREResult::ERR_INVALID_KERNEL;
+            }
+          }
+
+          auto irIt = kernelIRCache_.find(actualId);
+          std::string kName =
+              (irIt != kernelIRCache_.end()) ? irIt->second.name : "unknown";
+
+          op.gridDim = node.gridDim;
+          op.blockDim = node.blockDim;
+          op.kernelArgs.fn = it->second;
+          if (!op.kernelArgs.fn)
+            VGRE_LOG_ERROR("RuntimeEngine",
+                           "Assigned EMPTY function to op for kernel: " +
+                               node.kernelName);
+          op.kernelArgs.name = kName;
+          op.kernelArgs.argValues.resize(node.capturedArgs.size());
+          op.kernelArgs.argPtrs.resize(node.capturedArgs.size(), nullptr);
+
+          size_t totalThreads = node.gridDim.total() * node.blockDim.total();
+          size_t memBytes = 0;
+          if (irIt != kernelIRCache_.end()) {
+            for (size_t ai = 0; ai < irIt->second.argTypes.size() &&
+                                 ai < node.capturedArgs.size(); ++ai) {
+              if (irIt->second.argTypes[ai] == ArgType::POINTER) {
+                uint64_t raw = 0;
+                std::memcpy(&raw, node.capturedArgs[ai].data(), sizeof(uint64_t));
+                void *ptr = reinterpret_cast<void *>(raw);
+                if (memoryManager_ && memoryManager_->isValidHandle(ptr))
+                  memBytes += memoryManager_->getAllocationSize(ptr);
+              } else if (irIt->second.argTypes[ai] == ArgType::STRUCT) {
+                if (ai < irIt->second.argSizes.size())
+                  memBytes += irIt->second.argSizes[ai] * totalThreads;
               }
             }
           }
-        }
-        op.kernelArgs.memBytes = memBytes;
-        
-        uint64_t instCount = (irIt != kernelIRCache_.end()) ? irIt->second.estimatedInstructionCount : 1;
-        op.kernelArgs.flops = totalThreads * instCount;
-        op.kernelArgs.sharedMemBytes =
-            (irIt != kernelIRCache_.end()) ? irIt->second.sharedMemSize : 0;
-        op.usesSyncthreads =
-            (irIt != kernelIRCache_.end()) ? irIt->second.usesSyncthreads : false;
+          op.kernelArgs.memBytes = memBytes;
+          op.kernelArgs.flops =
+              totalThreads *
+              ((irIt != kernelIRCache_.end())
+                   ? irIt->second.estimatedInstructionCount
+                   : 1);
+          op.kernelArgs.sharedMemBytes =
+              (irIt != kernelIRCache_.end()) ? irIt->second.sharedMemSize : 0;
+          op.usesSyncthreads =
+              (irIt != kernelIRCache_.end()) ? irIt->second.usesSyncthreads : false;
 
-        for (size_t i = 0; i < node.capturedArgs.size(); ++i) {
-          size_t copySize = node.capturedArgs[i].size();
-          if (irIt != kernelIRCache_.end() && i < irIt->second.argTypes.size()) {
-            if (i < irIt->second.argSizes.size() && irIt->second.argSizes[i] > 0) {
-              copySize = irIt->second.argSizes[i];
-            } else {
-              switch (irIt->second.argTypes[i]) {
+          for (size_t ai = 0; ai < node.capturedArgs.size(); ++ai) {
+            size_t copySize = node.capturedArgs[ai].size();
+            if (irIt != kernelIRCache_.end() && ai < irIt->second.argTypes.size()) {
+              if (ai < irIt->second.argSizes.size() &&
+                  irIt->second.argSizes[ai] > 0) {
+                copySize = irIt->second.argSizes[ai];
+              } else {
+                switch (irIt->second.argTypes[ai]) {
                 case ArgType::INT32:
                 case ArgType::UINT32:
                 case ArgType::FLOAT32:
@@ -913,42 +1356,90 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode>& nodes
                 default:
                   copySize = 8;
                   break;
+                }
               }
             }
+            op.kernelArgs.argValues[ai].resize(copySize);
+            if (copySize > 0 && !node.capturedArgs[ai].empty()) {
+              ::memcpy(op.kernelArgs.argValues[ai].data(),
+                       node.capturedArgs[ai].data(),
+                       std::min(copySize, node.capturedArgs[ai].size()));
+            } else {
+              ::memset(op.kernelArgs.argValues[ai].data(), 0, copySize);
+            }
+            op.kernelArgs.argPtrs[ai] = op.kernelArgs.argValues[ai].data();
           }
-          
-          op.kernelArgs.argValues[i].resize(copySize);
-          if (copySize > 0 && !node.capturedArgs[i].empty()) {
-            ::memcpy(op.kernelArgs.argValues[i].data(), node.capturedArgs[i].data(),
-                     std::min(copySize, node.capturedArgs[i].size()));
-          } else {
-            ::memset(op.kernelArgs.argValues[i].data(), 0, copySize);
+
+        } else if (node.type == GraphNodeType::MEMCPY) {
+          op.dst = node.dst;
+          op.src = node.src;
+          op.count = node.count;
+          op.kind = node.kind;
+
+        } else if (node.type == GraphNodeType::CONDITIONAL) {
+          op.condFn = node.condFn;
+          op.condCtx = node.condCtx;
+          op.condType = node.condType;
+          op.maxIterations = node.maxIterations;
+
+          // Pre-compile body subgraph (nodes already prefetched before the lock).
+          if (node.bodyGraphId != 0) {
+            auto cacheIt = bodyCache.find(node.bodyGraphId);
+            if (cacheIt != bodyCache.end() && !cacheIt->second.empty()) {
+              std::vector<size_t> bodyOrder;
+              if (!topoSortNodes(cacheIt->second, bodyOrder)) {
+                VGRE_LOG_ERROR("RuntimeEngine",
+                               "Conditional body graph " +
+                                   std::to_string(node.bodyGraphId) +
+                                   " has a dependency cycle.");
+                return VGREResult::ERR_INVALID_VALUE;
+              }
+              std::vector<GraphNode> sortedBody;
+              sortedBody.reserve(bodyOrder.size());
+              for (size_t bi : bodyOrder)
+                sortedBody.push_back(cacheIt->second[bi]);
+
+              auto bodyOpsPtr =
+                  std::make_shared<std::vector<NativeGraphOperation>>();
+              bodyOpsPtr->reserve(sortedBody.size());
+              auto bres = compileNodes(sortedBody, *bodyOpsPtr);
+              if (bres != VGREResult::SUCCESS) return bres;
+
+              // Capture by value so the stream task lambda owns the body.
+              op.bodyExec = [bodyOpsPtr](runtime::CPUParallelExecutor *e,
+                                         MemoryManager *m) {
+                executeOpsInline(*bodyOpsPtr, e, m);
+              };
+            }
           }
-          op.kernelArgs.argPtrs[i] = op.kernelArgs.argValues[i].data();
         }
-      } else if (node.type == GraphNodeType::MEMCPY) {
-        op.dst = node.dst;
-        op.src = node.src;
-        op.count = node.count;
-        op.kind = node.kind;
-      }
-      
-      compiledOps->push_back(std::move(op));
-      
-      auto& finalOp = compiledOps->back();
-      if (finalOp.type == GraphNodeType::KERNEL) {
-        if (!finalOp.kernelArgs.fn) {
-            VGRE_LOG_ERROR("RuntimeEngine", "Function became EMPTY after push_back for kernel: " + node.kernelName);
-        }
-        for (size_t i = 0; i < finalOp.kernelArgs.argValues.size(); ++i) {
-          finalOp.kernelArgs.argPtrs[i] = finalOp.kernelArgs.argValues[i].data();
+
+        outOps.push_back(std::move(op));
+
+        // Re-fix argPtrs after push_back (vector may relocate).
+        auto &finalOp = outOps.back();
+        if (finalOp.type == GraphNodeType::KERNEL) {
+          if (!finalOp.kernelArgs.fn)
+            VGRE_LOG_ERROR("RuntimeEngine",
+                           "Function became EMPTY after push_back for kernel: " +
+                               node.kernelName);
+          for (size_t ai = 0; ai < finalOp.kernelArgs.argValues.size(); ++ai)
+            finalOp.kernelArgs.argPtrs[ai] =
+                finalOp.kernelArgs.argValues[ai].data();
         }
       }
-    }
+      return VGREResult::SUCCESS;
+    };
+
+    auto res = compileNodes(sortedNodes, *compiledOps);
+    if (res != VGREResult::SUCCESS) return res;
   }
 
-  VGRE_LOG_INFO("RuntimeEngine", "Submitting Native Parallel Graph DAG of size " + 
-                std::to_string(nodes.size()) + " on stream " + std::to_string(stream));
+  // ── Step 4: submit stream task ────────────────────────────────────────────
+  VGRE_LOG_INFO("RuntimeEngine",
+                "Submitting Native Parallel Graph DAG of size " +
+                    std::to_string(nodes.size()) + " on stream " +
+                    std::to_string(stream));
 
   auto exec = executor_.get();
   auto mm = memoryManager_.get();
@@ -962,52 +1453,12 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode>& nodes
   }
 
   // Execute the compiled DAG in topological order within a single stream task.
-  // The nodes have already been topo-sorted above, so we iterate sequentially.
-  // This avoids the deadlock that occurs when a stream task blocks a worker
-  // thread while waiting for concurrent sub-tasks that also need worker threads.
-  scheduler_->submitStreamTask(stream, [exec, mm, compiledOps]() {
-    for (size_t i = 0; i < compiledOps->size(); ++i) {
-      auto& op = (*compiledOps)[i];
-      VGRE_LOG_INFO("RuntimeEngine", "Worker thread executing op " + std::to_string(i) + " type=" + std::to_string((int)op.type));
-      if (op.type == GraphNodeType::KERNEL) {
-        auto start = std::chrono::steady_clock::now();
-        VGRE_LOG_INFO("RuntimeEngine", "Dispatching kernel '" + op.kernelArgs.name + "'");
+  // Sequential iteration avoids scheduler deadlock; body subgraphs run inline.
+  scheduler_->submitStreamTask(
+      stream,
+      [exec, mm, compiledOps]() { executeOpsInline(*compiledOps, exec, mm); },
+      streamPriority);
 
-        uint32_t blocksTotal = op.gridDim.total();
-        uint64_t flopsPerBlock = 0;
-        uint64_t bytesPerBlock = 0;
-        if (blocksTotal > 0) {
-          flopsPerBlock = op.kernelArgs.flops / blocksTotal;
-          bytesPerBlock = op.kernelArgs.memBytes / blocksTotal;
-        }
-
-        exec->execute(op.kernelArgs.fn,
-                      op.gridDim,
-                      op.blockDim,
-                      op.kernelArgs.argPtrs.data(),
-                      op.kernelArgs.sharedMemBytes,
-                      flopsPerBlock,
-                      bytesPerBlock,
-                      dim3(0, 0, 0),
-                      op.usesSyncthreads);
-        auto end = std::chrono::steady_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(end - start).count();
-        vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
-            op.kernelArgs.name, op.blockDim.total(), 8, ms, op.kernelArgs.memBytes, op.kernelArgs.flops);
-      } else if (op.type == GraphNodeType::MEMCPY) {
-        if (op.kind == VGRE_MEMCPY_HOST_TO_DEVICE) {
-          mm->copyHostToDevice(op.dst, op.src, op.count);
-        } else if (op.kind == VGRE_MEMCPY_DEVICE_TO_HOST) {
-          mm->copyDeviceToHost(op.dst, op.src, op.count);
-        } else if (op.kind == VGRE_MEMCPY_DEVICE_TO_DEVICE) {
-          mm->copyDeviceToDevice(op.dst, op.src, op.count);
-        }
-      }
-    }
-  },
-  streamPriority);
-
-  // Async dispatch return. Wait/synchronize will propagate via main engine APIs.
   return VGREResult::SUCCESS;
 }
 
@@ -1138,6 +1589,13 @@ VGREResult RuntimeEngine::graphCreate(GraphId &outGraph) {
   return graphManager_->createGraph(outGraph);
 }
 
+VGREResult RuntimeEngine::graphClone(GraphId srcGraph, GraphId &outCloneGraph) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!initialized_ || !graphManager_)
+    return VGREResult::ERR_NOT_INITIALIZED;
+  return graphManager_->cloneGraph(srcGraph, outCloneGraph);
+}
+
 VGREResult RuntimeEngine::streamBeginCapture(StreamId stream) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)
@@ -1264,6 +1722,18 @@ VGREResult RuntimeEngine::graphAddMemcpyNode(
     return VGREResult::ERR_NOT_INITIALIZED;
   return graphManager_->addMemcpyNodeWithDepsOut(graph, dst, src, count, kind,
                                                  deps, outNodeId);
+}
+
+VGREResult RuntimeEngine::graphAddConditionalNode(
+    GraphId graph, int (*condFn)(void *), void *condCtx, GraphId bodyGraph,
+    GraphCondType condType, unsigned int maxIterations,
+    const std::vector<uint64_t> &deps, uint64_t &outNodeId) {
+  // Release RuntimeEngine lock before calling graphManager to avoid ABBA
+  // deadlock (GraphManager::addKernelNodeWithDepsOut holds GM lock → RE lock).
+  if (!initialized_ || !graphManager_)
+    return VGREResult::ERR_NOT_INITIALIZED;
+  return graphManager_->addConditionalNodeWithDepsOut(
+      graph, condFn, condCtx, bodyGraph, condType, maxIterations, deps, outNodeId);
 }
 
 VGREResult RuntimeEngine::graphAddDependency(GraphId graph, uint64_t nodeId,

@@ -86,6 +86,12 @@ struct KernelIR {
   uint64_t estimatedInstructionCount = 0;
   uint64_t estimatedMemoryAccessCount = 0;
   uint64_t staticFlopCount = 0;
+  // True when staticFlopCount was produced by the authoritative LLVM IR
+  // analysis (analyzeStaticFlops).  False means it is either zero because
+  // the analysis never ran (compilation failed / precompiled module) OR was
+  // set by the heuristic syntax parser.  Used to distinguish "kernel has
+  // genuinely zero FP ops" from "we don't know the FLOP count".
+  bool flopCountVerified = false;
   std::vector<KernelId> fusedFrom; // IDs of kernels this was fused from
 };
 

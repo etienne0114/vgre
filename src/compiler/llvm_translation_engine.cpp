@@ -1,6 +1,7 @@
 #include "vgre/compiler/llvm_translation_engine.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/platform.h"
+#include "vgre/common/retry.h"
 #include "vgre/common/system_utils.h"
 
 #include <cstdio>
@@ -55,6 +56,7 @@ extern "C" {
   void vgre_jit_report_flops(uint64_t);
   void vgre_jit_report_memory(uint64_t);
   void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
+  void vgre_jit_syncgrid();
 
   // Texture and surface builtins (implemented in texture_builtins.cpp)
   float vgre_tex1D_f32(uint64_t tex, float x);
@@ -192,6 +194,10 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
     };
     Symbols[Mangle("vgre_jit_block_dispatch")] = {
         llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_block_dispatch)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_syncgrid")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_syncgrid)),
         llvm::JITSymbolFlags::Exported
     };
 
@@ -449,7 +455,11 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
     }
     // Atomic write to disk cache: write to a temp file then rename.
     // This prevents partial/corrupt cache files if the process is killed mid-write.
+#if defined(_WIN32)
+    std::string tmpPath = cachePath + ".tmp." + std::to_string(::GetCurrentProcessId());
+#else
     std::string tmpPath = cachePath + ".tmp." + std::to_string(::getpid());
+#endif
     {
       std::ofstream ofs(tmpPath);
       ofs << irCode;
@@ -470,13 +480,17 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
       auto module = llvm::parseIR(*buffer, err, *llvmState_->context.getContext());
       if (module) {
           uint64_t instCount = 0;
-          ir.staticFlopCount = analyzeStaticFlops(*module, &instCount);
+          ir.staticFlopCount    = analyzeStaticFlops(*module, &instCount);
+          ir.flopCountVerified  = true;  // LLVM IR analysis ran — value is authoritative
           if (instCount > 0) {
               ir.estimatedInstructionCount = instCount;
           }
-          VGRE_LOG_INFO("LLVMTranslationEngine", "Static IR Analysis for '" + ir.name + "': " + 
-                        std::to_string(ir.staticFlopCount) + " FLOPs, " + 
-                        std::to_string(ir.estimatedInstructionCount) + " instructions.");
+          VGRE_LOG_INFO("LLVMTranslationEngine",
+                        "Static IR Analysis for '" + ir.name + "': " +
+                        std::to_string(ir.staticFlopCount) + " FLOPs, " +
+                        std::to_string(ir.estimatedInstructionCount) +
+                        " instructions (verified=" +
+                        std::string(ir.flopCountVerified ? "true" : "false") + ").");
       }
   }
 
@@ -554,6 +568,7 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   oss << "  void vgre_jit_report_flops(unsigned long long);\n";
   oss << "  void vgre_jit_report_memory(unsigned long long);\n";
   oss << "  void vgre_jit_block_dispatch(int, void(*)(int, void*), void*);\n";
+  oss << "  void vgre_jit_syncgrid();\n";
   oss << "}\n\n";
   // Note: texture/surface builtins (vgre_tex1D_f32, vgre_tex2D_f32, etc.) are
   // already declared via the #include "vgre/compiler/cpu_cuda_env.h" above.
@@ -719,9 +734,18 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
     return VGREResult::ERR_IO;
   }
 
-  {
+  // Write JIT source with retry — /tmp writes can transiently fail under
+  // disk pressure (ENOSPC, ENOMEM, write() EINTR) on loaded systems.
+  VGREResult writeResult = vgre::withRetry([&]() -> VGREResult {
     std::ofstream ofs(tmpCpp);
+    if (!ofs) return VGREResult::ERR_IO;
     ofs << cppSource;
+    return ofs.good() ? VGREResult::SUCCESS : VGREResult::ERR_IO;
+  }, 3, 50);
+  if (writeResult != VGREResult::SUCCESS) {
+    VGRE_LOG_ERROR("LLVMTranslationEngine",
+        "Failed to write JIT source file after 3 attempts: " + tmpCpp);
+    return VGREResult::ERR_IO;
   }
 
   // Use platform-aware include path
@@ -882,16 +906,38 @@ LLVMTranslationEngine::compileJIT(const std::string &irCode,
       });
 }
 
-uint64_t LLVMTranslationEngine::analyzeStaticFlops(const llvm::Module &module, uint64_t *outInstCount) {
+// Weights follow the GPU roofline convention:
+//   1  — basic FP arithmetic (add, sub, mul, div, rem, neg, cmp, abs, min, max,
+//          floor, ceil, round, trunc, rint, nearbyint, copysign)
+//   2  — fused multiply-add (one instruction, two arithmetic ops)
+//   4  — hardware-accelerated transcendentals (sqrt, rsqrt)
+//   8  — complex transcendentals (sin, cos, exp, exp2, log, log2, log10, powi)
+//  16  — most expensive transcendental (pow = exp(y·log(x)))
+//
+// Vector instructions are multiplied by their lane count.
+// Pseudo-instructions (phi, alloca, unreachable) are excluded from the
+// instruction count so that estimatedInstructionCount reflects real work.
+uint64_t LLVMTranslationEngine::analyzeStaticFlops(const llvm::Module &module,
+                                                    uint64_t *outInstCount) {
     uint64_t flops = 0;
     uint64_t insts = 0;
+
     for (const auto &F : module) {
         if (F.isDeclaration()) continue;
         for (const auto &BB : F) {
-            insts += BB.size();
             for (const auto &I : BB) {
+                // Skip non-executable pseudo-instructions so that
+                // estimatedInstructionCount reflects real code density.
+                if (llvm::isa<llvm::PHINode>(I) ||
+                    llvm::isa<llvm::UnreachableInst>(I) ||
+                    llvm::isa<llvm::AllocaInst>(I)) {
+                    continue;
+                }
+                ++insts;
+
                 uint64_t instFlops = 0;
                 switch (I.getOpcode()) {
+                    // ── Basic floating-point arithmetic ─────────────────
                     case llvm::Instruction::FAdd:
                     case llvm::Instruction::FSub:
                     case llvm::Instruction::FMul:
@@ -899,18 +945,78 @@ uint64_t LLVMTranslationEngine::analyzeStaticFlops(const llvm::Module &module, u
                     case llvm::Instruction::FRem:
                         instFlops = 1;
                         break;
+
+                    // ── FP negation (LLVM 10+ unary instruction) ────────
+#if LLVM_VERSION_MAJOR >= 10
+                    case llvm::Instruction::FNeg:
+                        instFlops = 1;
+                        break;
+#endif
+
+                    // ── FP comparison — uses the FPU, counts as 1 FLOP ─
+                    case llvm::Instruction::FCmp:
+                        instFlops = 1;
+                        break;
+
+                    // ── Intrinsic calls ─────────────────────────────────
                     case llvm::Instruction::Call: {
                         const auto *call = llvm::cast<llvm::CallInst>(&I);
                         const auto *callee = call->getCalledFunction();
                         if (callee && callee->isIntrinsic()) {
-                            auto id = callee->getIntrinsicID();
-                            if (id == llvm::Intrinsic::fma || id == llvm::Intrinsic::fmuladd) {
-                                instFlops = 2;
-                            } else if (id == llvm::Intrinsic::sqrt || id == llvm::Intrinsic::sin || 
-                                       id == llvm::Intrinsic::cos || id == llvm::Intrinsic::exp || 
-                                       id == llvm::Intrinsic::log || id == llvm::Intrinsic::pow) {
-                                // Transcendental operations count as multiple FLOPs (standard authoritative weight)
-                                instFlops = 8;
+                            switch (callee->getIntrinsicID()) {
+                                // Fused multiply-add: 2 FLOPs
+                                case llvm::Intrinsic::fma:
+                                case llvm::Intrinsic::fmuladd:
+                                    instFlops = 2;
+                                    break;
+
+                                // Hardware-accelerated: 4 FLOPs
+                                // (single HW instruction, lower throughput than add/mul)
+                                case llvm::Intrinsic::sqrt:
+#if defined(LLVM_INTRINSIC_RSQRT)
+                                // rsqrt is vendor-specific; include if present
+                                // (llvm::Intrinsic::experimental_constrained_fptrunc covers it on some targets)
+#endif
+                                    instFlops = 4;
+                                    break;
+
+                                // Cheap FP operations: abs, sign, min/max, rounding — 1 FLOP
+                                case llvm::Intrinsic::fabs:
+                                case llvm::Intrinsic::copysign:
+                                case llvm::Intrinsic::minnum:
+                                case llvm::Intrinsic::maxnum:
+                                case llvm::Intrinsic::minimum:
+                                case llvm::Intrinsic::maximum:
+                                case llvm::Intrinsic::floor:
+                                case llvm::Intrinsic::ceil:
+                                case llvm::Intrinsic::round:
+                                case llvm::Intrinsic::roundeven:
+                                case llvm::Intrinsic::trunc:
+                                case llvm::Intrinsic::rint:
+                                case llvm::Intrinsic::nearbyint:
+                                    instFlops = 1;
+                                    break;
+
+                                // Complex transcendentals: 8 FLOPs
+                                // (polynomial approximations of ~8 arithmetic ops)
+                                case llvm::Intrinsic::sin:
+                                case llvm::Intrinsic::cos:
+                                case llvm::Intrinsic::exp:
+                                case llvm::Intrinsic::exp2:
+                                case llvm::Intrinsic::log:
+                                case llvm::Intrinsic::log2:
+                                case llvm::Intrinsic::log10:
+                                case llvm::Intrinsic::powi:
+                                    instFlops = 8;
+                                    break;
+
+                                // Most expensive: pow = exp(y·log(x)): 16 FLOPs
+                                case llvm::Intrinsic::pow:
+                                    instFlops = 16;
+                                    break;
+
+                                default:
+                                    break;
                             }
                         }
                         break;
@@ -918,25 +1024,30 @@ uint64_t LLVMTranslationEngine::analyzeStaticFlops(const llvm::Module &module, u
                     default:
                         break;
                 }
-                
-                // If it's a vector instruction, multiply by vector width
+
+                // Scale by vector lane count.
+                // Check the result type first; fall back to operand types for
+                // instructions whose result is scalar (e.g., fcmp <4xi1>).
                 if (instFlops > 0) {
-                    if (auto *vTy = llvm::dyn_cast<llvm::FixedVectorType>(I.getType())) {
-                        instFlops *= vTy->getNumElements();
+                    uint64_t vecWidth = 1;
+                    if (const auto *vTy =
+                            llvm::dyn_cast<llvm::FixedVectorType>(I.getType())) {
+                        vecWidth = vTy->getNumElements();
                     } else {
-                        // Check operands for vector types (e.g., store/call might not have vector return type)
-                        for (unsigned i = 0; i < I.getNumOperands(); ++i) {
-                             if (auto *ovTy = llvm::dyn_cast<llvm::FixedVectorType>(I.getOperand(i)->getType())) {
-                                 instFlops *= ovTy->getNumElements();
-                                 break;
-                             }
+                        for (unsigned op = 0; op < I.getNumOperands(); ++op) {
+                            if (const auto *ovTy = llvm::dyn_cast<llvm::FixedVectorType>(
+                                    I.getOperand(op)->getType())) {
+                                vecWidth = ovTy->getNumElements();
+                                break;
+                            }
                         }
                     }
-                    flops += instFlops;
+                    flops += instFlops * vecWidth;
                 }
             }
         }
     }
+
     if (outInstCount) *outInstCount = insts;
     return flops;
 }
