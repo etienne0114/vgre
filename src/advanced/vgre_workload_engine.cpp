@@ -11,8 +11,8 @@
 namespace vgre {
 namespace advanced {
 
-WorkloadEngine &WorkloadEngine::instance() {
-  static WorkloadEngine* inst = new WorkloadEngine();
+VGREWorkloadEngine &VGREWorkloadEngine::instance() {
+  static VGREWorkloadEngine* inst = new VGREWorkloadEngine();
   return *inst;
 }
 

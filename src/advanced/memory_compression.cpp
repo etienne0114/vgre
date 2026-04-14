@@ -201,8 +201,8 @@ void MemoryCompression::resetStats() {
 }
 
 MemoryCompression &MemoryCompression::instance() {
-  static MemoryCompression mc;
-  return mc;
+  static MemoryCompression* mc = new MemoryCompression();
+  return *mc;
 }
 
 } // namespace advanced

@@ -23,6 +23,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
 #else
 #include <netdb.h>
 #include <sys/socket.h>
@@ -101,6 +103,12 @@ void HybridComputeManager::detectCPU() {
   memInfo.dwLength = sizeof(MEMORYSTATUSEX);
   if (GlobalMemoryStatusEx(&memInfo)) {
     resources_.cpuMemoryBytes = static_cast<size_t>(memInfo.ullTotalPhys);
+  }
+#elif defined(__APPLE__)
+  uint64_t mem = 0;
+  size_t len = sizeof(mem);
+  if (sysctlbyname("hw.memsize", &mem, &len, nullptr, 0) == 0) {
+    resources_.cpuMemoryBytes = static_cast<size_t>(mem);
   }
 #else
   // Read total memory from /proc/meminfo on Linux
@@ -761,8 +769,8 @@ void HybridComputeManager::doRebalance() {
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 HybridComputeManager &HybridComputeManager::instance() {
-  static HybridComputeManager mgr;
-  return mgr;
+  static HybridComputeManager* mgr = new HybridComputeManager();
+  return *mgr;
 }
 
 } // namespace advanced
