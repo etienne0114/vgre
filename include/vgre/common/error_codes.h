@@ -26,6 +26,7 @@ enum class VGREResult : int {
     ERR_AUTH_FAILED         = 15,
     ERR_CRYPTO              = 16,
     ERR_BUSY                = 17,
+    ERR_NOT_FOUND           = 18,
     ERR_UNKNOWN             = 99,
 
     // Backward-compatible aliases for older code paths still using ERROR_* names.
@@ -46,6 +47,7 @@ enum class VGREResult : int {
     ERROR_AUTH_FAILED       = ERR_AUTH_FAILED,
     ERROR_CRYPTO            = ERR_CRYPTO,
     ERROR_BUSY              = ERR_BUSY,
+    ERROR_NOT_FOUND         = ERR_NOT_FOUND,
     ERROR_UNKNOWN           = ERR_UNKNOWN
 };
 
@@ -70,6 +72,7 @@ inline const char* resultToString(VGREResult r) {
         case VGREResult::ERR_AUTH_FAILED:     return "Authentication failed";
         case VGREResult::ERR_CRYPTO:          return "Cryptographic error";
         case VGREResult::ERR_BUSY:            return "Device or resource busy";
+        case VGREResult::ERR_NOT_FOUND:       return "Not found";
         case VGREResult::ERR_UNKNOWN:         return "Unknown error";
         default:                                return "Unrecognized error code";
     }

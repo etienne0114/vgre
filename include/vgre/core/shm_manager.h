@@ -48,7 +48,7 @@ public:
 private:
     std::string name_;
     size_t size_ = 0;
-    int fd_ = -1;
+    intptr_t fd_ = -1;
     void* basePtr_ = nullptr;
 };
 

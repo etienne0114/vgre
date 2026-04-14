@@ -91,7 +91,7 @@ VGREResult ShmManager::open(const std::string& name, size_t size, bool create) {
     }
     
     // Store handles
-    fd_ = reinterpret_cast<int>(hMapFile); // Store HANDLE as int (platform-specific)
+    fd_ = reinterpret_cast<intptr_t>(hMapFile); // Store HANDLE as intptr_t (platform-specific)
     basePtr_ = pBuf;
     name_ = fullName;
     size_ = size;
