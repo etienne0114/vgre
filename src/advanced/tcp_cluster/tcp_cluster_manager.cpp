@@ -203,17 +203,36 @@ VGREResult TCPClusterManager::initialize(bool is_master,
           }
       }
 
-      // Pre-start the persistent communication threads so they are ready
-      // regardless of whether the master connection comes via inbound
-      // (serverLoop) or outbound (udpDiscoveryLoop) path. Both paths just
-      // set client_fd_; clientLoop() watches for it in Phase 0.
+      // Pre-start the persistent communication threads.
+      // clientLoop() watches client_fd_ in Phase 0; serverLoop() sets
+      // client_fd_ when the master proactively connects.
       data_processor_thread_ = std::thread(
           &TCPClusterManager::processClientStagingBuffer, this);
       client_loop_thread_ = std::thread(
           &TCPClusterManager::clientLoop, this);
 
-      // Start discovery manager threads
-      discovery_manager_->startWorkerDiscovery();
+      // ── Discovery: worker ANNOUNCES itself only; master connects to worker ──
+      //
+      // DESIGN: In standby mode the master always initiates the TCP connection
+      // (via proactiveConnectionLoop).  The worker does NOT also connect outbound
+      // (startWorkerDiscovery / udpDiscoveryLoop is intentionally NOT called here).
+      //
+      // WHY: udpDiscoveryLoop competes with serverLoop to set client_fd_.  When
+      // both run simultaneously — master's proactive TCP connect + worker's outbound
+      // connect both succeed in the same ~10ms window — whoever sets client_fd_
+      // second drops the OTHER side's socket.  This creates a race where:
+      //   • Worker outbound wins → master's proactive fd is closed by worker's
+      //     serverLoop ("already have connection") → master recv fails with
+      //     "peer closed connection" in < 10ms on the proactive handshake.
+      //   • Master inbound wins (from worker) → master's serverLoop accepts it,
+      //     starts performServerHandshake, but worker is reading on its outbound
+      //     fd (not this one) → no SECURE_HANDSHAKE reader → "peer closed".
+      //
+      // SOLUTION: Worker only announces presence via UDP (workerAnnouncerLoop).
+      // Master's udpMasterDiscoveryLoop hears the announcement → adds to
+      // proactive_worker_addresses_ → proactiveConnectionLoop connects.
+      // Worker's serverLoop accepts it, sets client_fd_, clientLoop handshakes.
+      // Single connection path, no race.
       discovery_manager_->startWorkerAnnouncer();
     } else {
       client_fd_ = socket(AF_INET, SOCK_STREAM, 0);
@@ -321,6 +340,20 @@ void TCPClusterManager::shutdown() {
   }
   if (cluster_thread_.joinable()) {
     cluster_thread_.join();
+  }
+
+  // Join all inbound handshake threads spawned by serverLoop.
+  // Must happen AFTER cluster_thread_.join() to guarantee that serverLoop has
+  // finished creating threads before we drain the vector.
+  {
+    std::vector<std::thread> to_join;
+    {
+      std::lock_guard<std::mutex> lk(server_auth_mutex_);
+      to_join.swap(server_auth_threads_);
+    }
+    for (auto &t : to_join) {
+      if (t.joinable()) t.join();
+    }
   }
 
   // Clear SHM nodes on shutdown to prevent stale data in dashboard

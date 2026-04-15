@@ -148,12 +148,12 @@ void DiscoveryManager::udpAnnouncerLoop() {
   broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
   broadcast_addr.sin_port = htons(7778);
 
-  std::string security_str = (parent_->security_enabled_ ? ":SECURE" : ":PLAIN");
-  std::string ping_msg = "VGRE_DISCOVERY_PING:" + std::to_string(parent_->port_) + security_str;
-
   VGRE_LOG_INFO("TCPCluster", "Master: UDP Announcer active (broadcasting master presence)...");
 
   while (parent_->enabled_ && parent_->is_master_) {
+    // Recompute each iteration so security-mode toggles are reflected immediately.
+    std::string security_str = (parent_->security_enabled_ ? ":SECURE" : ":PLAIN");
+    std::string ping_msg = "VGRE_DISCOVERY_PING:" + std::to_string(parent_->port_) + security_str;
     sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
     std::this_thread::sleep_for(std::chrono::seconds(2));
   }
@@ -212,7 +212,8 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
         int worker_port = 7777;
         size_t colon = msg.find(':');
         if (colon != std::string::npos) {
-            worker_port = std::stoi(msg.substr(colon + 1));
+            try { worker_port = std::stoi(msg.substr(colon + 1)); }
+            catch (...) { worker_port = 7777; }
         }
 
         std::string worker_addr = std::string(ip) + ":" + std::to_string(worker_port);
