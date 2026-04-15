@@ -316,10 +316,19 @@ VGREResult SecurityManager::performServerHandshake(
                              clientHs.nonce, expectedKV);
       if (!crypto::secure_compare(clientHs.key_verification, expectedKV,
                                   crypto::kSHA256DigestLen)) {
+          // Hash both tokens for debugging (security)
+          uint64_t master_hash = 0xcbf29ce484222325ULL;
+          for (char c : parent_->auth_token_str_) {
+              master_hash ^= static_cast<uint64_t>(c);
+              master_hash *= 0x100000001b3ULL;
+          }
+          std::string master_token_hash = std::to_string(master_hash);
+          
           VGRE_LOG_ERROR("TCPCluster",
               "Master: Handshake key-verification FAILED for " + client.ip_address +
-              " — token mismatch.  Ensure VGRE_TCP_AUTH_TOKEN is set to the same "
-              "value on both master and worker (or unset on both for default mode).");
+              " — token mismatch. Master token hash: " + master_token_hash.substr(0, 8) + "... "
+              "Ensure VGRE_TCP_AUTH_TOKEN is set to the same value on both master "
+              "and worker (or unset on both for default mode). Closing connection.");
           vgre::common::vgre_close_socket(client.socket_fd);
           client.socket_fd = vgre::common::VGRE_INVALID_SOCKET;
           client.active = false;
@@ -481,8 +490,17 @@ VGREResult SecurityManager::performClientHandshake() {
                              masterHs.nonce, expectedKV);
       if (!crypto::secure_compare(masterHs.key_verification, expectedKV,
                                   crypto::kSHA256DigestLen)) {
+          // Hash the worker token for debugging (security)
+          uint64_t worker_hash = 0xcbf29ce484222325ULL;
+          for (char c : parent_->auth_token_str_) {
+              worker_hash ^= static_cast<uint64_t>(c);
+              worker_hash *= 0x100000001b3ULL;
+          }
+          std::string worker_token_hash = std::to_string(worker_hash);
+          
           VGRE_LOG_ERROR("TCPCluster",
               "Worker: Handshake key-verification FAILED — token mismatch with master. "
+              "Worker token hash: " + worker_token_hash.substr(0, 8) + "... "
               "Ensure VGRE_TCP_AUTH_TOKEN is set to the same value on both master "
               "and worker (or unset on both to use the default encrypted mode). "
               "Closing connection.");
