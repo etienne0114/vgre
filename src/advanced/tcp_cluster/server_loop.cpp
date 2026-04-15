@@ -238,7 +238,7 @@ void TCPClusterManager::serverLoop() {
                         std::chrono::steady_clock::now().time_since_epoch()).count());
                 clientRef->active = true; // Mark as active so it appears in UI (as authenticating)
 
-                std::thread([this, clientRef]() {
+                std::thread t([this, clientRef]() {
                     VGREResult sr = this->performSecureHandshake(clientRef);
                     clientRef->is_authenticating = false;
 
@@ -246,6 +246,7 @@ void TCPClusterManager::serverLoop() {
                         VGRE_LOG_ERROR("TCPCluster", "Master: Security handshake failed for " + clientRef->ip_address);
                         clientRef->active = false;
                         vgre_close_socket(clientRef->socket_fd);
+                        clientRef->socket_fd = vgre::common::VGRE_INVALID_SOCKET;
                         {
                             std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
                             clients_.erase(std::remove(clients_.begin(), clients_.end(), clientRef),
@@ -260,7 +261,11 @@ void TCPClusterManager::serverLoop() {
                     // Always push the updated state to the IPC shared-memory segment
                     // so the dashboard reflects the outcome immediately.
                     this->syncToIPC();
-                }).detach();
+                });
+                {
+                    std::lock_guard<std::mutex> lk(server_auth_mutex_);
+                    server_auth_threads_.push_back(std::move(t));
+                }
             } else {
                 clients_.back()->active = true;
                 clients_.back()->security_established = true;

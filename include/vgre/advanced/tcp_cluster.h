@@ -466,6 +466,13 @@ private:
   std::map<std::string, int> proactive_fail_counts_;
   std::map<std::string, std::chrono::steady_clock::time_point> proactive_backoff_until_;
 
+  // Inbound handshake threads spawned by serverLoop (one per accepted connection
+  // when security is enabled).  Stored here rather than detached so shutdown()
+  // can join them after cluster_thread_ exits, preventing UB from threads that
+  // access 'this' after TCPClusterManager is destroyed.
+  std::vector<std::thread> server_auth_threads_;
+  std::mutex server_auth_mutex_;
+
   // Master State
   vgre_socket_t server_fd_ = (vgre_socket_t)-1;
   std::vector<std::shared_ptr<ClientConnection>> clients_;

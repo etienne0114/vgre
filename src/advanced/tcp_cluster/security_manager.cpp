@@ -257,7 +257,11 @@ VGREResult SecurityManager::performServerHandshake(
       VGRE_LOG_ERROR("TCPCluster",
           "Master: Security handshake recv failed for " + client.ip_address +
           " (fd=" + std::to_string(client.socket_fd) + "): "
-          "peer closed connection");
+          "peer closed connection — worker rejected the handshake. "
+          "Most likely cause: VGRE_TCP_AUTH_TOKEN is set on one node but not the "
+          "other, or is set to different values. "
+          "Ensure the same token is set on all nodes, or unset it on all nodes "
+          "to use the default encrypted-but-unauthenticated mode.");
       return VGREResult::ERR_IO;
     } else {
       int saved_errno = errno;
