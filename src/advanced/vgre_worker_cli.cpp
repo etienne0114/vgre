@@ -55,7 +55,15 @@ int main(int argc, char** argv) {
     vgre::Logger::instance().setLevel(vgre::LogLevel::INFO);
     
     if (!auth_token.empty()) {
-        vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Using provided auth token.");
+        // Hash the token for logging (security) - use stable FNV-1a hash
+        uint64_t hash = 0xcbf29ce484222325ULL;
+        for (char c : auth_token) {
+            hash ^= static_cast<uint64_t>(c);
+            hash *= 0x100000001b3ULL;
+        }
+        std::string token_hash = std::to_string(hash);
+        vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", 
+            "Using provided auth token (hash: " + token_hash.substr(0, 8) + "...)");
 #if defined(_WIN32)
         _putenv_s("VGRE_TCP_AUTH_TOKEN", auth_token.c_str());
 #else

@@ -47,6 +47,10 @@ add_executable(test_multi_device integration/test_multi_device.cpp)
 target_link_libraries(test_multi_device PRIVATE vgre)
 add_test(NAME MultiDeviceIntegration COMMAND test_multi_device)
 
+add_executable(test_multi_device_cooperative_comprehensive integration/test_multi_device_cooperative_comprehensive.cpp)
+target_link_libraries(test_multi_device_cooperative_comprehensive PRIVATE vgre)
+add_test(NAME MultiDeviceCooperativeComprehensive COMMAND test_multi_device_cooperative_comprehensive)
+
 add_executable(test_stream_concurrency integration/test_stream_concurrency.cpp)
 target_link_libraries(test_stream_concurrency PRIVATE vgre)
 add_test(NAME test_stream_concurrency COMMAND test_stream_concurrency)

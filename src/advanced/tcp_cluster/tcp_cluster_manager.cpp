@@ -98,8 +98,16 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   const char* env_token = std::getenv("VGRE_TCP_AUTH_TOKEN");
   if (env_token && env_token[0] != '\0') {
       auth_token_str_ = env_token;
+      // Hash the token for logging (security) - use stable FNV-1a hash
+      uint64_t hash = 0xcbf29ce484222325ULL;
+      for (char c : auth_token_str_) {
+          hash ^= static_cast<uint64_t>(c);
+          hash *= 0x100000001b3ULL;
+      }
+      std::string token_hash = std::to_string(hash);
       VGRE_LOG_INFO("TCPCluster",
-          "Auth Token retrieved from VGRE_TCP_AUTH_TOKEN — authenticated encryption enabled");
+          "Auth Token retrieved from VGRE_TCP_AUTH_TOKEN — authenticated encryption enabled "
+          "(token hash: " + token_hash.substr(0, 8) + "...)");
   } else {
       // No pre-shared key configured.  Use a fixed cluster-wide string so every
       // VGRE node without an explicit token derives the SAME session key from
