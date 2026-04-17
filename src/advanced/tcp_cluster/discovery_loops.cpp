@@ -171,6 +171,28 @@ void DiscoveryManager::proactiveConnectionLoop() {
             addrSnapshot = parent_->proactive_worker_addresses_;
         }
 
+        // D4: Prune stale entries from proactive_backoff_until_ to prevent
+        // unbounded growth over long-running master sessions.
+        {
+            auto now = std::chrono::steady_clock::now();
+            std::lock_guard<std::mutex> bk(parent_->proactive_backoff_mutex_);
+            for (auto it = parent_->proactive_backoff_until_.begin();
+                 it != parent_->proactive_backoff_until_.end(); ) {
+                bool addressKnown = false;
+                for (const auto& a : addrSnapshot) {
+                    std::string checkIp = a;
+                    size_t c = a.find(':');
+                    if (c != std::string::npos) checkIp = a.substr(0, c);
+                    if (checkIp == it->first) { addressKnown = true; break; }
+                }
+                if (!addressKnown && now >= it->second) {
+                    it = parent_->proactive_backoff_until_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
         for (const auto& addr : addrSnapshot) {
             if (!parent_->enabled_ || stop_proactive_) break;
 

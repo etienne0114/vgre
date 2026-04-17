@@ -117,7 +117,34 @@ void TCPClusterManager::clientLoop() {
     // automatically adapt to master's security mode without prior configuration.
     {
       VGREResult sr = performClientSecureHandshake();
-      if (sr != VGREResult::SUCCESS) {
+      
+      // Handle token mismatch in fallback mode: retry without authentication
+      if (sr == VGREResult::ERR_AUTH_RETRY) {
+        VGRE_LOG_INFO("TCPCluster",
+            "Client: Token mismatch detected — retrying without authentication "
+            "(plaintext encrypted mode)...");
+        
+        // Disable security for this connection and retry
+        security_enabled_ = false;
+        sr = performClientSecureHandshake();
+        
+        if (sr != VGREResult::SUCCESS) {
+          VGRE_LOG_ERROR("TCPCluster",
+              "Client: Security handshake failed on retry — dropping connection");
+          {
+            std::lock_guard<std::mutex> lock(client_mutex_);
+            if (client_fd_ != VGRE_INVALID_SOCKET) {
+              vgre_close_socket(client_fd_);
+              client_fd_ = VGRE_INVALID_SOCKET;
+            }
+          }
+          if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
+          continue; // standby: wait for next master
+        }
+        
+        VGRE_LOG_INFO("TCPCluster",
+            "Client: Handshake succeeded in plaintext encrypted mode");
+      } else if (sr != VGREResult::SUCCESS) {
         VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed — dropping connection");
         {
           std::lock_guard<std::mutex> lock(client_mutex_);

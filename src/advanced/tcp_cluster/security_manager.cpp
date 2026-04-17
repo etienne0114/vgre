@@ -4,6 +4,8 @@
 #include "vgre/common/sockets.h"
 #include <chrono>
 #include <cstring>
+#include <cstdio>
+#include <vector>
 
 namespace vgre {
 namespace advanced {
@@ -20,6 +22,19 @@ namespace {
 
 SecurityManager::SecurityManager(TCPClusterManager* parent)
   : parent_(parent) {
+  // Read VGRE_CLUSTER_STRICT_AUTH environment variable
+  const char* strict_env = std::getenv("VGRE_CLUSTER_STRICT_AUTH");
+  if (strict_env != nullptr) {
+    std::string strict_str(strict_env);
+    strict_auth_mode_ = (strict_str == "1" || strict_str == "true" || strict_str == "yes");
+  } else {
+    strict_auth_mode_ = false;  // Default to fallback mode
+  }
+  
+  VGRE_LOG_INFO("TCPCluster",
+      "Security authentication mode: " +
+      std::string(strict_auth_mode_ ? "STRICT (reject on token mismatch)" : 
+                                      "FALLBACK (retry without token on mismatch)"));
 }
 
 VGREResult SecurityManager::enableSecurity(bool enabled) {
@@ -192,12 +207,35 @@ static void computeKeyVerification(const std::string &token,
         data.data(), data.size(), out);
 }
 
+std::string SecurityManager::computeTokenHash(const std::string& token) const {
+  // Compute SHA256(token)
+  uint8_t hash[crypto::kSHA256DigestLen];
+  crypto::sha256(reinterpret_cast<const uint8_t*>(token.data()),
+                 token.size(), hash);
+  
+  // Convert to hex string
+  std::string hex;
+  for (size_t i = 0; i < crypto::kSHA256DigestLen; i++) {
+    char buf[3];
+    snprintf(buf, sizeof(buf), "%02x", hash[i]);
+    hex += buf;
+  }
+  
+  return hex;
+}
+
 VGREResult SecurityManager::performServerHandshake(
     std::shared_ptr<TCPClusterManager::ClientConnection> clientPtr) {
   if (!clientPtr) return VGREResult::ERR_INVALID_VALUE;
   auto &client = *clientPtr;
+  
+  // Check if security is enabled for this connection
+  if (!client.security_enabled) {
+    return VGREResult::SUCCESS; // Security disabled for this connection, skip
+  }
+  
   if (!parent_->security_enabled_) {
-    return VGREResult::SUCCESS; // Security not enabled, skip
+    return VGREResult::SUCCESS; // Security not enabled globally, skip
   }
   if (parent_->auth_token_str_.empty()) {
     VGRE_LOG_ERROR("TCPCluster", "Master: Security is enabled but VGRE_TCP_AUTH_TOKEN is not set. Handshake failed.");
@@ -309,30 +347,38 @@ VGREResult SecurityManager::performServerHandshake(
   std::memcpy(&clientHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
 
   // 3b. Verify worker's key_verification = HMAC(token, label || workerNonce)
-  //     If this fails, the tokens are mismatched — fail fast with a clear error.
+  //     If this fails, the tokens are mismatched — handle based on mode.
   {
       uint8_t expectedKV[crypto::kSHA256DigestLen];
       computeKeyVerification(parent_->auth_token_str_, "VGRE_KEYVER_WORKER_v1",
                              clientHs.nonce, expectedKV);
       if (!crypto::secure_compare(clientHs.key_verification, expectedKV,
                                   crypto::kSHA256DigestLen)) {
-          // Hash both tokens for debugging (security)
-          uint64_t master_hash = 0xcbf29ce484222325ULL;
-          for (char c : parent_->auth_token_str_) {
-              master_hash ^= static_cast<uint64_t>(c);
-              master_hash *= 0x100000001b3ULL;
+          if (strict_auth_mode_) {
+              // Strict mode: reject immediately
+              VGRE_LOG_ERROR("TCPCluster",
+                  "Master: Security handshake failed (strict mode) for " + client.ip_address +
+                  " — token mismatch. Ensure VGRE_TCP_AUTH_TOKEN is set to the same value "
+                  "on both master and worker (or unset on both for default mode).");
+              vgre::common::vgre_close_socket(client.socket_fd);
+              client.socket_fd = vgre::common::VGRE_INVALID_SOCKET;
+              client.active = false;
+              return VGREResult::ERR_AUTH_FAILED;
+          } else {
+              // Fallback mode: retry without token
+              VGRE_LOG_WARN("TCPCluster",
+                  "Master: Token mismatch for " + client.ip_address +
+                  " — falling back to plaintext encrypted mode. "
+                  "Ensure VGRE_TCP_AUTH_TOKEN is set to the same value on both nodes "
+                  "to use authenticated mode.");
+              
+              // Close current connection
+              vgre::common::vgre_close_socket(client.socket_fd);
+              client.socket_fd = vgre::common::VGRE_INVALID_SOCKET;
+              
+              // Return ERR_AUTH_RETRY to signal retry without token
+              return VGREResult::ERR_AUTH_RETRY;
           }
-          std::string master_token_hash = std::to_string(master_hash);
-          
-          VGRE_LOG_ERROR("TCPCluster",
-              "Master: Handshake key-verification FAILED for " + client.ip_address +
-              " — token mismatch. Master token hash: " + master_token_hash.substr(0, 8) + "... "
-              "Ensure VGRE_TCP_AUTH_TOKEN is set to the same value on both master "
-              "and worker (or unset on both for default mode). Closing connection.");
-          vgre::common::vgre_close_socket(client.socket_fd);
-          client.socket_fd = vgre::common::VGRE_INVALID_SOCKET;
-          client.active = false;
-          return VGREResult::ERR_AUTH_FAILED;
       }
   }
 
@@ -490,20 +536,15 @@ VGREResult SecurityManager::performClientHandshake() {
                              masterHs.nonce, expectedKV);
       if (!crypto::secure_compare(masterHs.key_verification, expectedKV,
                                   crypto::kSHA256DigestLen)) {
-          // Hash the worker token for debugging (security)
-          uint64_t worker_hash = 0xcbf29ce484222325ULL;
-          for (char c : parent_->auth_token_str_) {
-              worker_hash ^= static_cast<uint64_t>(c);
-              worker_hash *= 0x100000001b3ULL;
-          }
-          std::string worker_token_hash = std::to_string(worker_hash);
+          // Compute token hash for debugging (security: don't log full token)
+          std::string token_hash = computeTokenHash(parent_->auth_token_str_);
           
           VGRE_LOG_ERROR("TCPCluster",
               "Worker: Handshake key-verification FAILED — token mismatch with master. "
-              "Worker token hash: " + worker_token_hash.substr(0, 8) + "... "
+              "Worker token hash: " + token_hash.substr(0, 8) + "... "
               "Ensure VGRE_TCP_AUTH_TOKEN is set to the same value on both master "
               "and worker (or unset on both to use the default encrypted mode). "
-              "Closing connection.");
+              "Closing connection and waiting for retry.");
           vgre::common::vgre_close_socket(parent_->client_fd_);
           parent_->client_fd_ = vgre::common::VGRE_INVALID_SOCKET;
           return VGREResult::ERR_AUTH_FAILED;

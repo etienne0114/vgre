@@ -40,8 +40,12 @@ static bool processIsAlive(int32_t pid) {
 } // namespace
 
 IPCManager &IPCManager::instance() {
-  static IPCManager* inst = new IPCManager();
-  return *inst;
+  // D5: Meyers singleton — destructor is called at static-storage teardown,
+  // so IPCManager::shutdown() runs on process exit and SHM/handles are released.
+  // The previous `new IPCManager()` leaked the object and prevented ASAN/valgrind
+  // from reporting clean exits.
+  static IPCManager inst;
+  return inst;
 }
 
 IPCManager::IPCManager() = default;

@@ -102,6 +102,16 @@ private:
   // Used to access: clients_, client_fd_, client_secure_channel_,
   // send_packet_direct, recv_packet, waitForData, and other shared state
   TCPClusterManager* parent_;
+  
+  // Hybrid authentication mode control
+  bool strict_auth_mode_ = false;  // Read from VGRE_CLUSTER_STRICT_AUTH
+  
+  /**
+   * @brief Compute SHA256 hash of token for debugging
+   * @param token The authentication token
+   * @return Hex string representation of SHA256(token)
+   */
+  std::string computeTokenHash(const std::string& token) const;
 };
 
 } // namespace advanced

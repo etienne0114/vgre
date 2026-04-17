@@ -342,10 +342,23 @@ VGREResult SecureChannel::initializeFromSecret(
   std::memcpy(salt, masterNonce, crypto::kNonceLen);
   std::memcpy(salt + crypto::kNonceLen, clientNonce, crypto::kNonceLen);
 
+  // PBKDF2 iteration count: default 600k (NIST SP 800-132 2025 recommendation).
+  // Operators can override via VGRE_PBKDF2_ITERATIONS for performance tuning.
+  uint32_t pbkdf2Iters = static_cast<uint32_t>(crypto::kPBKDF2Iterations);
+  const char* iterEnv = std::getenv("VGRE_PBKDF2_ITERATIONS");
+  if (iterEnv && iterEnv[0] != '\0') {
+    try {
+      long val = std::stol(iterEnv);
+      if (val >= 10000 && val <= 10000000) {
+        pbkdf2Iters = static_cast<uint32_t>(val);
+      }
+    } catch (...) {}
+  }
+
   // Derive session key via PBKDF2
   crypto::pbkdf2_sha256(
       reinterpret_cast<const uint8_t *>(authToken.data()), authToken.size(),
-      salt, sizeof(salt), crypto::kPBKDF2Iterations, sessionKey_,
+      salt, sizeof(salt), pbkdf2Iters, sessionKey_,
       crypto::kHMACKeyLen);
 
   // Compute key fingerprint (SHA-256 of session key)
@@ -358,7 +371,9 @@ VGREResult SecureChannel::initializeFromSecret(
           .count());
 
   sendSequence_ = 0;
-  expectedRecvSequence_ = 0;
+  replayBitmap_[0] = replayBitmap_[1] = replayBitmap_[2] = replayBitmap_[3] = 0;
+  highestSeenSeq_ = 0;
+  replayWindowSeeded_ = false;
   packetsSent_ = 0;
   packetsReceived_ = 0;
   bytesSent_ = 0;
@@ -719,11 +734,13 @@ int SecureChannel::recvAll(vgre_socket_t fd, void *buf, size_t len,
 // ── Send Secure ──────────────────────────────────────────────────────────
 VGREResult SecureChannel::sendSecure(vgre_socket_t fd, const void *data,
                                       size_t len) {
+  // A2: initialized_ check is inside the mutex to prevent a torn-write race
+  // where another thread calls initialize() concurrently.
+  std::lock_guard<std::mutex> lock(mutex_);
+
   if (!initialized_) {
     return VGREResult::ERR_NOT_INITIALIZED;
   }
-
-  std::lock_guard<std::mutex> lock(mutex_);
 
   uint64_t seq = sendSequence_++;
 
@@ -741,17 +758,17 @@ VGREResult SecureChannel::sendSecure(vgre_socket_t fd, const void *data,
   // Compute HMAC over header fields + encrypted payload
   computePacketHMAC(hdr, encrypted.data(), len, hdr.hmac_tag);
 
-  // Send header + encrypted payload
-  if (!sendAll(fd, &hdr, sizeof(SecurePacketHeader))) {
-    VGRE_LOG_ERROR("SecureChannel", "Failed to send secure header");
-    return VGREResult::ERR_IO;
-  }
-
+  // A3: Coalesce header + payload into a single sendAll() call.
+  // Two separate sends risk a partial-write scenario where the header lands
+  // but the payload doesn't, leaving the receiver blocked in recvAll() forever.
+  std::vector<uint8_t> wire(sizeof(SecurePacketHeader) + len);
+  std::memcpy(wire.data(), &hdr, sizeof(SecurePacketHeader));
   if (len > 0) {
-    if (!sendAll(fd, encrypted.data(), len)) {
-      VGRE_LOG_ERROR("SecureChannel", "Failed to send secure payload");
-      return VGREResult::ERR_IO;
-    }
+    std::memcpy(wire.data() + sizeof(SecurePacketHeader), encrypted.data(), len);
+  }
+  if (!sendAll(fd, wire.data(), wire.size())) {
+    VGRE_LOG_ERROR("SecureChannel", "Failed to send secure packet");
+    return VGREResult::ERR_IO;
   }
 
   packetsSent_++;
@@ -765,6 +782,19 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
                                       std::vector<uint8_t> &outData) {
   if (!initialized_) {
     return VGREResult::ERR_NOT_INITIALIZED;
+  }
+
+  // A6: Session lifetime limit — force re-handshake after 1 hour.
+  // A compromised session key expires automatically.
+  if (sessionStartMs_ > 0) {
+    uint64_t nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    if (nowMs - sessionStartMs_ > 3600000ULL) {
+      VGRE_LOG_WARN("SecureChannel",
+          "Session expired (>1 hour) — re-handshake required");
+      return VGREResult::ERR_AUTH_FAILED;
+    }
   }
 
   // Read header
@@ -818,22 +848,66 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
     return VGREResult::ERR_AUTH_FAILED;
   }
 
-  // Replay detection: sequence must be >= expected
-  // We allow out-of-order by a window of 64 packets for network jitter
-  if (hdr.sequence_number < expectedRecvSequence_ &&
-      (expectedRecvSequence_ - hdr.sequence_number) > 64) {
-    VGRE_LOG_ERROR("SecureChannel",
-                   "Replay detected: seq=" +
-                       std::to_string(hdr.sequence_number) +
-                       " expected>=" +
-                       std::to_string(expectedRecvSequence_));
-    return VGREResult::ERR_AUTH_FAILED;
-  }
+  // A1: Sliding 256-bit bitmap replay detection (RFC 4303 §3.4.3).
+  // Replaces the old broken 64-packet linear window which allowed replays
+  // of any old packet once the receiver's expected sequence advanced past 64.
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
 
-  // Update expected sequence
-  if (hdr.sequence_number >= expectedRecvSequence_) {
-    expectedRecvSequence_ = hdr.sequence_number + 1;
-  }
+    uint64_t seq = hdr.sequence_number;
+
+    if (!replayWindowSeeded_) {
+      // First packet ever — bootstrap the window.
+      highestSeenSeq_ = seq;
+      replayBitmap_[0] = 1ULL; // bit 0 = offset 0 from highestSeenSeq_
+      replayBitmap_[1] = replayBitmap_[2] = replayBitmap_[3] = 0;
+      replayWindowSeeded_ = true;
+    } else if (seq > highestSeenSeq_) {
+      uint64_t advance = seq - highestSeenSeq_;
+
+      if (advance >= 256) {
+        replayBitmap_[0] = replayBitmap_[1] = replayBitmap_[2] = replayBitmap_[3] = 0;
+      } else {
+        // Left-shift the 256-bit bitmap by 'advance' bits.
+        // Bit i represents offset i from highestSeenSeq_; advancing by n means
+        // old offset i becomes new offset i+n (bits move toward MSB).
+        uint64_t ws = advance / 64;
+        uint64_t bs = advance % 64;
+        uint64_t tmp[4] = {0, 0, 0, 0};
+        for (int i = 0; i < 4; i++) {
+          int src = i - static_cast<int>(ws);
+          if (src >= 0 && src < 4) {
+            tmp[i] = replayBitmap_[src] << bs;
+          }
+          int src_lo = src - 1;
+          if (bs > 0 && src_lo >= 0 && src_lo < 4) {
+            tmp[i] |= replayBitmap_[src_lo] >> (64 - bs);
+          }
+        }
+        std::memcpy(replayBitmap_, tmp, sizeof(replayBitmap_));
+      }
+
+      highestSeenSeq_ = seq;
+      replayBitmap_[0] |= 1ULL; // mark offset 0 = this packet
+    } else {
+      // seq <= highestSeenSeq_ — check the window
+      uint64_t offset = highestSeenSeq_ - seq;
+      if (offset >= 256) {
+        VGRE_LOG_ERROR("SecureChannel",
+                       "Replay detected: seq=" + std::to_string(seq) +
+                       " is " + std::to_string(offset) + " packets behind window");
+        return VGREResult::ERR_AUTH_FAILED;
+      }
+      uint64_t word = offset / 64;
+      uint64_t bit  = offset % 64;
+      if (replayBitmap_[word] & (1ULL << bit)) {
+        VGRE_LOG_ERROR("SecureChannel",
+                       "Duplicate/replay packet: seq=" + std::to_string(seq));
+        return VGREResult::ERR_AUTH_FAILED;
+      }
+      replayBitmap_[word] |= (1ULL << bit);
+    }
+  } // end replay-detection mutex scope
 
   // Decrypt payload
   outData.resize(hdr.payload_length);

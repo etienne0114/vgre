@@ -281,6 +281,7 @@ public:
     int port = 0;
     std::unique_ptr<SecureChannel> secureChannel;
     std::atomic<bool> security_established{false};
+    bool security_enabled = true;  // Hybrid auth: can be disabled for fallback mode
     uint32_t packets_sent = 0; // Phase 10: for rotation trigger
     
     // Phase 12: TSS2 (Traffic-Shaping-Sync 2.0)

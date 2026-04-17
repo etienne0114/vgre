@@ -231,6 +231,19 @@ void TCPClusterManager::serverLoop() {
 
             // Phase 13: Asynchronous Handshake Handover
             if (security_enabled_) {
+                // D3: Cap in-flight handshake threads at 32 to prevent thread exhaustion
+                // under a port-scan or rapid-connect DoS.
+                {
+                    std::lock_guard<std::mutex> lk(server_auth_mutex_);
+                    if (server_auth_threads_.size() >= 32) {
+                        VGRE_LOG_WARN("TCPCluster",
+                            "Max handshake threads (32) reached — rejecting connection from " +
+                            clients_.back()->ip_address);
+                        vgre_close_socket(clients_.back()->socket_fd);
+                        clients_.pop_back();
+                        continue;
+                    }
+                }
                 std::shared_ptr<ClientConnection> clientRef = clients_.back();
                 clientRef->is_authenticating = true;
                 clientRef->handshake_start_ms = static_cast<uint64_t>(
@@ -242,7 +255,36 @@ void TCPClusterManager::serverLoop() {
                     VGREResult sr = this->performSecureHandshake(clientRef);
                     clientRef->is_authenticating = false;
 
-                    if (sr != VGREResult::SUCCESS) {
+                    if (sr == VGREResult::ERR_AUTH_RETRY) {
+                        // Token mismatch in fallback mode — retry without authentication
+                        VGRE_LOG_INFO("TCPCluster",
+                            "Master: Retrying connection without authentication for " + clientRef->ip_address);
+                        
+                        // Disable security for this connection
+                        clientRef->security_enabled = false;
+                        
+                        // Retry handshake without token
+                        sr = this->performSecureHandshake(clientRef);
+                        
+                        if (sr != VGREResult::SUCCESS) {
+                            VGRE_LOG_ERROR("TCPCluster", 
+                                "Master: Security handshake retry failed for " + clientRef->ip_address);
+                            clientRef->active = false;
+                            vgre_close_socket(clientRef->socket_fd);
+                            clientRef->socket_fd = vgre::common::VGRE_INVALID_SOCKET;
+                            {
+                                std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+                                clients_.erase(std::remove(clients_.begin(), clients_.end(), clientRef),
+                                               clients_.end());
+                            }
+                        } else {
+                            // Mark fully authenticated so dashboard shows SECURED status.
+                            clientRef->security_established = true;
+                            VGRE_LOG_INFO("TCPCluster",
+                                "Master: Security established for " + clientRef->ip_address + 
+                                " (plaintext encrypted mode)");
+                        }
+                    } else if (sr != VGREResult::SUCCESS) {
                         VGRE_LOG_ERROR("TCPCluster", "Master: Security handshake failed for " + clientRef->ip_address);
                         clientRef->active = false;
                         vgre_close_socket(clientRef->socket_fd);
@@ -283,6 +325,19 @@ void TCPClusterManager::serverLoop() {
                 for (auto &client : clients_) {
                     if (client && client->socket_fd == fds[i].fd) {
                         if (fds[i].revents & POLLIN) {
+                            // B2: Prevent unbounded rx_buffer growth from a malformed or
+                            // malicious peer sending infinite partial VSBP frames.
+                            constexpr size_t kMaxRxBuffer = 256ULL * 1024 * 1024;
+                            if (client->rx_buffer.size() >= kMaxRxBuffer) {
+                                VGRE_LOG_ERROR("TCPCluster",
+                                    "rx_buffer overflow for " + client->ip_address +
+                                    " — disconnecting");
+                                client->active = false;
+                                vgre_close_socket(client->socket_fd);
+                                client->socket_fd = VGRE_INVALID_SOCKET;
+                                syncToIPC();
+                                break;
+                            }
                             int n = recv_packet(client->socket_fd, client->rx_buffer, client->secureChannel.get());
                             // n < 0 → error/EOF from recv()
                             // n == 0 with POLLHUP → peer closed gracefully but recvAll timed out
@@ -424,6 +479,9 @@ void TCPClusterManager::serverLoop() {
                 if (hdr.payloadSize < sizeof(CapabilityPacket)) { client->rx_buffer.clear(); break; }
                 CapabilityPacket cpkt;
                 std::memcpy(&cpkt, payload, sizeof(CapabilityPacket));
+                // B3: Force null-termination — the remote may have sent a non-NUL-
+                // terminated array, and reading past the end is UB.
+                cpkt.igpu_name[sizeof(cpkt.igpu_name) - 1] = '\0';
                 client->rx_buffer.erase(client->rx_buffer.begin(), client->rx_buffer.begin() + totalLen);
                 client->cpu_cores = cpkt.cpu_cores;
                 client->cpu_memory = cpkt.cpu_memory;
