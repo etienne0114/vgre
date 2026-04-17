@@ -7,6 +7,7 @@
 
 #include "vgre/advanced/tcp_cluster/internal/dispatch_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/workload_partitioner.h"
 #include "vgre/advanced/hybrid_compute_manager.h"
 #include "vgre/core/runtime_engine.h"
@@ -124,8 +125,14 @@ void DispatchManager::broadcastKernelRegistration(
 }
 
 void DispatchManager::handleRemoteCommand(const RemoteCommandPacket& pkt) {
-  // Early authentication validation - check auth BEFORE any processing
-  if (parent_->auth_token_ == 0 || pkt.auth_token != parent_->auth_token_) {
+  // Early authentication validation — B5: use constant-time compare to prevent
+  // timing side-channel enumeration of the auth token hash.
+  bool tokenOk = (parent_->auth_token_ != 0) &&
+      vgre::advanced::crypto::secure_compare(
+          reinterpret_cast<const uint8_t*>(&pkt.auth_token),
+          reinterpret_cast<const uint8_t*>(&parent_->auth_token_),
+          sizeof(parent_->auth_token_));
+  if (!tokenOk) {
     VGRE_LOG_ERROR("TCPCluster",
                    "Rejected remote command due to missing/invalid auth token");
     parent_->pending_args_.clear(); // Clear any pending arguments on auth failure
@@ -418,6 +425,9 @@ VGREResult DispatchManager::collectPartitionResults(
       std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
 
   std::unique_lock<std::mutex> lock(parent_->partition_mutex_);
+  // C2: Clear results from any previous dispatch before waiting for new ones.
+  // Stale partial results from a failed run would mix with new results.
+  partition_results_.clear();
   while (partition_results_.size() < total_partitions) {
     if (parent_->partition_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
       VGRE_LOG_ERROR("TCPCluster",
@@ -459,6 +469,8 @@ VGREResult DispatchManager::waitForRemoteResult(uint64_t kernel_id, int timeout_
     }
     
     VGREResult r = remote_kernel_results_[kernel_id];
+    // C1: Erase after reading so re-launched kernels don't get the stale result.
+    remote_kernel_results_.erase(kernel_id);
     return r;
 }
 

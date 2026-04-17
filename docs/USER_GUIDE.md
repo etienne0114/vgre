@@ -324,9 +324,83 @@ $env:VGRE_TCP_AUTH_TOKEN="my-secret-key"
   - **macOS**: Keychain + TPM 2.0
 - AES-256-CTR encryption for all cluster communication
 - Automatic security synchronization across mixed platforms
+- Hybrid authentication mode for flexible token management
 
 > [!TIP]
 > **Security Synchronization**: If you toggle the "Secure cluster channel" in the dashboard, any discovered workers will automatically detect the change and restart their handshake to establish an encrypted tunnel, regardless of their platform.
+
+### 4.4 Hybrid Authentication Mode (VGRE_CLUSTER_STRICT_AUTH)
+
+VGRE supports two authentication modes for handling token mismatches between master and worker nodes:
+
+**Fallback Mode (Default):**
+- **Behavior**: When a token mismatch is detected, the connection automatically falls back to plaintext encrypted mode (AES-256-CTR encryption without HMAC authentication)
+- **Use Case**: Development environments, testing, or when token synchronization is difficult
+- **Configuration**: Leave `VGRE_CLUSTER_STRICT_AUTH` unset or set to `0`
+- **Example**:
+  ```bash
+  # Master with token
+  export VGRE_TCP_AUTH_TOKEN="secret1"
+  
+  # Worker with different token (or no token)
+  export VGRE_TCP_AUTH_TOKEN="secret2"
+  
+  # Connection succeeds with plaintext encrypted mode
+  ./my_cuda_app
+  ```
+
+**Strict Mode:**
+- **Behavior**: When a token mismatch is detected, the connection is rejected immediately
+- **Use Case**: Production environments requiring strict authentication
+- **Configuration**: Set `VGRE_CLUSTER_STRICT_AUTH=1`
+- **Example**:
+  ```bash
+  # Master
+  export VGRE_TCP_AUTH_TOKEN="secret1"
+  export VGRE_CLUSTER_STRICT_AUTH=1
+  
+  # Worker with different token
+  export VGRE_TCP_AUTH_TOKEN="secret2"
+  export VGRE_CLUSTER_STRICT_AUTH=1
+  
+  # Connection fails with authentication error
+  ./my_cuda_app
+  ```
+
+**Troubleshooting Token Mismatches:**
+
+If you see error messages like "token mismatch" or "key-verification FAILED":
+
+1. **Check token values on both nodes:**
+   ```bash
+   # On master
+   echo $VGRE_TCP_AUTH_TOKEN
+   
+   # On worker
+   echo $VGRE_TCP_AUTH_TOKEN
+   ```
+
+2. **Ensure tokens match exactly:**
+   - Tokens are case-sensitive
+   - Whitespace matters
+   - Both nodes must use the same token
+
+3. **Or unset tokens on both nodes for default encrypted mode:**
+   ```bash
+   unset VGRE_TCP_AUTH_TOKEN
+   ```
+
+4. **Use fallback mode for development:**
+   ```bash
+   # Leave VGRE_CLUSTER_STRICT_AUTH unset (default)
+   # Mismatched tokens will automatically fall back to plaintext encrypted mode
+   ```
+
+**Security Implications:**
+- **Fallback mode**: Still uses AES-256-CTR encryption, but without HMAC authentication
+- **Strict mode**: Requires matching tokens for any connection
+- **No token set**: Uses default encryption without authentication (same as fallback mode)
+- **Plaintext encrypted mode**: Provides confidentiality but not authentication
 
 ---
 

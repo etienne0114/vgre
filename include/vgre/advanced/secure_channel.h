@@ -24,7 +24,7 @@ namespace crypto {
 constexpr size_t kSHA256DigestLen = 32;
 constexpr size_t kHMACKeyLen = 32;
 constexpr size_t kNonceLen = 16;
-constexpr size_t kPBKDF2Iterations = 200000;  // NIST SP 800-132 (2024) minimum for PBKDF2-SHA256
+constexpr size_t kPBKDF2Iterations = 600000;  // NIST SP 800-132 (2025) recommendation for PBKDF2-SHA256
 
 struct SHA256Context {
   uint32_t state[8];
@@ -161,7 +161,13 @@ private:
 
   // Sequence counters (monotonic, for replay protection)
   std::atomic<uint64_t> sendSequence_{0};
-  uint64_t expectedRecvSequence_ = 0;
+
+  // Sliding 256-bit bitmap replay window (RFC 4303-style).
+  // Bit i set → packet at (highestSeenSeq_ - i) has been received.
+  // Bit 0 = highestSeenSeq_ itself; bit 255 = oldest in window.
+  uint64_t replayBitmap_[4]{};
+  uint64_t highestSeenSeq_{0};
+  bool replayWindowSeeded_{false}; // false until first valid packet received
 
   // Statistics
   std::atomic<uint64_t> packetsSent_{0};

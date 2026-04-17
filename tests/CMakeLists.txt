@@ -226,6 +226,16 @@ add_executable(test_tcp_cluster_comprehensive_preservation advanced/test_tcp_clu
 target_link_libraries(test_tcp_cluster_comprehensive_preservation PRIVATE vgre)
 add_test(NAME TCPClusterComprehensivePreservation COMMAND test_tcp_cluster_comprehensive_preservation)
 
+add_executable(test_tcp_cluster_hybrid_auth advanced/test_tcp_cluster_hybrid_auth.cpp)
+target_link_libraries(test_tcp_cluster_hybrid_auth PRIVATE vgre)
+add_test(NAME TCPClusterHybridAuth COMMAND test_tcp_cluster_hybrid_auth)
+
+# D2: Wire up the security hybrid integration test (was on disk but not in CTest)
+add_executable(test_tcp_cluster_security_hybrid integration/test_tcp_cluster_security_hybrid.cpp)
+target_link_libraries(test_tcp_cluster_security_hybrid PRIVATE vgre)
+add_test(NAME TCPClusterSecurityHybrid COMMAND test_tcp_cluster_security_hybrid)
+set_tests_properties(TCPClusterSecurityHybrid PROPERTIES TIMEOUT 60)
+
 add_executable(test_texture_manager core/test_texture_manager.cpp)
 target_link_libraries(test_texture_manager PRIVATE vgre)
 add_test(NAME TextureManager COMMAND test_texture_manager)

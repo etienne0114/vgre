@@ -48,35 +48,40 @@ VGREResult CollectiveOpsManager::allReduce(void* ptr, size_t count, int datatype
 
 VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int datatype) {
   size_t element_size = getTypeSizeFromDatatype(datatype);
+
+  // C3: Overflow check — count * element_size can wrap if count is huge.
+  if (element_size > 0 && count > (SIZE_MAX / element_size)) {
+    VGRE_LOG_ERROR("TCPCluster", "masterAllReduce: count overflow (count=" +
+                   std::to_string(count) + ", element_size=" +
+                   std::to_string(element_size) + ")");
+    return VGREResult::ERR_INVALID_VALUE;
+  }
   size_t total_bytes = count * element_size;
-  
+
   std::unique_lock<std::mutex> lock(parent_->reduction_mutex_);
-  
+
   // Initialize reduction state
   parent_->is_reducing_ = true;
   parent_->reduction_count_ = 0;
   parent_->reduction_datatype_ = datatype;
   parent_->reduction_element_count_ = count;
   parent_->reduction_sequence_++;
-  
+
   // Allocate buffer and copy master's local data
   parent_->active_reduction_buffer_.resize(total_bytes);
   std::memcpy(parent_->active_reduction_buffer_.data(), ptr, total_bytes);
-  
-  // Get number of active workers
-  size_t num_workers = 0;
-  {
-    std::lock_guard<std::recursive_mutex> clients_lock(parent_->clients_mutex_);
-    for (const auto& c : parent_->clients_) {
-      if (c && c->active) {
-        num_workers++;
-      }
+
+  // Wait for all workers to send their data (with 30-second timeout).
+  // C4: Count active workers live inside the predicate — if a worker
+  // disconnects mid-reduction, the stale pre-captured count would deadlock.
+  bool success = parent_->reduction_cv_.wait_for(lock, std::chrono::seconds(30), [this]() {
+    size_t live_workers = 0;
+    {
+      std::lock_guard<std::recursive_mutex> cl(parent_->clients_mutex_);
+      for (const auto& c : parent_->clients_)
+        if (c && c->active) live_workers++;
     }
-  }
-  
-  // Wait for all workers to send their data (with 30-second timeout)
-  bool success = parent_->reduction_cv_.wait_for(lock, std::chrono::seconds(30), [this, num_workers]() {
-    return parent_->reduction_count_ >= static_cast<int>(num_workers) || !parent_->isEnabled();
+    return parent_->reduction_count_ >= static_cast<int>(live_workers) || !parent_->isEnabled();
   });
   
   if (!success || !parent_->isEnabled()) {

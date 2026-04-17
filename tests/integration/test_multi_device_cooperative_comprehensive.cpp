@@ -68,8 +68,8 @@ extern "C" __global__ void cooperative_test_kernel(int* data, int* barrier_count
     // Grid-wide barrier - all blocks must reach this point
     cooperative_groups::this_grid().sync();
     
-    // Phase 2: Increment barrier count atomically (only after all threads have written)
-    if (tid == 0) {
+    // Phase 2: Each block's first thread increments barrier count (one per block)
+    if (threadIdx.x == 0) {
         atomicAdd(barrier_count, 1);
     }
     
@@ -196,13 +196,17 @@ void testMultiDeviceCooperativeLaunch() {
     result = engine.registerKernel("multi_device_kernel", MULTI_DEVICE_KERNEL_SOURCE, kernelId);
     ASSERT_EQ(result, VGREResult::SUCCESS);
     
-    // Prepare launch parameters for each device
+    // Prepare launch parameters for each device.
+    // device_ids must outlive launchCooperativeKernelMultiDevice — &i would be
+    // stale (== NUM_DEVICES) by the time the arg deep-copy runs.
+    std::vector<int> device_ids(NUM_DEVICES);
     std::vector<RuntimeEngine::CoopMultiLaunchParams> launchParams;
     std::vector<std::vector<void*>> argsList(NUM_DEVICES);
-    
+
     for (int i = 0; i < NUM_DEVICES; i++) {
-        argsList[i] = {&device_data[i], &i, &sync_counter};
-        
+        device_ids[i] = i;
+        argsList[i] = {&device_data[i], &device_ids[i], &sync_counter};
+
         RuntimeEngine::CoopMultiLaunchParams params;
         params.name = "multi_device_kernel";
         params.source = MULTI_DEVICE_KERNEL_SOURCE;
@@ -211,7 +215,7 @@ void testMultiDeviceCooperativeLaunch() {
         params.args = argsList[i].data();
         params.sharedMem = 0;
         params.stream = 0;
-        
+
         launchParams.push_back(params);
     }
     
@@ -327,13 +331,17 @@ void testLargeMultiDeviceLaunch() {
     auto result = engine.registerKernel("compute_kernel", COMPUTE_KERNEL, kernelId);
     ASSERT_EQ(result, VGREResult::SUCCESS);
     
-    // Prepare launch parameters
+    // Prepare launch parameters.
+    // device_ids must outlive launchCooperativeKernelMultiDevice — &i would be
+    // stale (== NUM_DEVICES) by the time the arg deep-copy runs.
+    std::vector<int> device_ids(NUM_DEVICES);
     std::vector<RuntimeEngine::CoopMultiLaunchParams> launchParams;
     std::vector<std::vector<void*>> argsList(NUM_DEVICES);
-    
+
     for (int i = 0; i < NUM_DEVICES; i++) {
-        argsList[i] = {&results[i], &i};
-        
+        device_ids[i] = i;
+        argsList[i] = {&results[i], &device_ids[i]};
+
         RuntimeEngine::CoopMultiLaunchParams params;
         params.name = "compute_kernel";
         params.source = COMPUTE_KERNEL;
@@ -342,7 +350,7 @@ void testLargeMultiDeviceLaunch() {
         params.args = argsList[i].data();
         params.sharedMem = 0;
         params.stream = 0;
-        
+
         launchParams.push_back(params);
     }
     

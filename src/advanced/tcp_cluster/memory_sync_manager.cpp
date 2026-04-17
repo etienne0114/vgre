@@ -44,11 +44,8 @@ MemorySyncManager::MemorySyncManager(TCPClusterManager* parent)
 
 VGREResult MemorySyncManager::streamArgumentsToWorker(void** args, int num_args, uint64_t kernel_id, 
                                                       std::shared_ptr<TCPClusterManager::ClientConnection> client) {
-  if (!args || num_args <= 0 || !client) {
-    return VGREResult::SUCCESS; // No arguments to stream
-  }
-  
-  // Get argument types from RuntimeEngine
+  if (!client) return VGREResult::ERR_INVALID_VALUE;
+  if (!args || num_args <= 0) return VGREResult::SUCCESS;
   std::vector<ArgType> argTypes;
   if (core::RuntimeEngine::instance().getKernelArgTypes(kernel_id, argTypes) != VGREResult::SUCCESS) {
     return VGREResult::ERR_INVALID_KERNEL;
@@ -282,24 +279,22 @@ VGREResult MemorySyncManager::sendDeltaSyncWithRetry(void* ptr, uint64_t handle,
 VGREResult MemorySyncManager::sendDeltaSyncSHM(void* ptr, uint64_t handle,
                                                const std::vector<std::pair<size_t, size_t>>& dirtyRanges,
                                                std::shared_ptr<TCPClusterManager::ClientConnection> client) {
-  // Calculate total size of dirty ranges
+  size_t allocSize = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
+  for (const auto& range : dirtyRanges) {
+    if (range.first > allocSize || range.second > allocSize - range.first)
+      return VGREResult::ERR_INVALID_VALUE;
+  }
   uint64_t totalSize = 0;
   for (const auto& range : dirtyRanges) {
     totalSize += range.second;
   }
-  
-  // Check SHM space availability
+
   uint64_t baseOffset = client->shm_offset;
   if (baseOffset + totalSize > client->shmManager->getSize()) {
-    // Not enough SHM space, fall back to full sync
     size_t size = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
     return sendFullSync(ptr, handle, size, client);
   }
-  
-  // Update SHM offset
   client->shm_offset += totalSize;
-  
-  // Send DataShmDirtyPacket
   DataShmDirtyPacket dspkt{};
   dspkt.target_ptr = handle;
   dspkt.num_ranges = static_cast<uint32_t>(dirtyRanges.size());
@@ -308,8 +303,6 @@ VGREResult MemorySyncManager::sendDeltaSyncSHM(void* ptr, uint64_t handle,
   if (parent_->send_packet(client->socket_fd, PacketType::DATA_SHM_DIRTY, &dspkt, sizeof(DataShmDirtyPacket), client->secureChannel.get()) != VGREResult::SUCCESS) {
     return VGREResult::ERR_IO;
   }
-  
-  // Send each dirty range
   uint64_t currentOffset = baseOffset;
   for (const auto& range : dirtyRanges) {
     DirtyRangePacket rpkt{range.first, range.second};

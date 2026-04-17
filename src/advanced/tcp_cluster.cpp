@@ -233,6 +233,16 @@ VGREResult TCPClusterManager::send_packet(vgre_socket_t fd, PacketType type, con
       for (auto &client : clients_) {
           if (client && client->socket_fd == fd) {
               std::lock_guard<std::mutex> tx_lock(client->tx_mutex);
+              // B1: TSS2 queue depth cap — prevent unbounded memory growth when
+              // a worker is slow or stalled.
+              constexpr size_t kMaxQueueDepth = 1024;
+              if (client->high_priority_tx.size() + client->low_priority_tx.size() >= kMaxQueueDepth) {
+                  VGRE_LOG_WARN("TCPCluster", "TX queue full for " + client->ip_address +
+                      " (" + std::to_string(client->high_priority_tx.size() + client->low_priority_tx.size()) +
+                      " packets) — dropping");
+                  foundMasterClient = true; // Don't fall through to direct send
+                  return VGREResult::ERR_BUSY;
+              }
               ClientConnection::OutgoingPacket pkt;
               pkt.data = std::move(staging);
               pkt.priority = priority;
@@ -360,11 +370,14 @@ VGREResult TCPClusterManager::broadcastPacket(PacketType type, const void *paylo
   std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
   VGREResult result = VGREResult::SUCCESS;
   for (auto &client : clients_) {
-    if (client && client->active) {
-      VGREResult send_result = send_packet(client->socket_fd, type, payload, payloadLen, client->secureChannel.get());
-      if (send_result != VGREResult::SUCCESS) {
-        result = send_result;  // Return last error encountered
-      }
+    // B4: Only broadcast to fully-authenticated nodes when security is enabled.
+    // Nodes that have TCP-connected but not yet completed the HMAC handshake
+    // must not receive broadcast data before their identity is confirmed.
+    if (!client || !client->active) continue;
+    if (security_enabled_ && !client->security_established) continue;
+    VGREResult send_result = send_packet(client->socket_fd, type, payload, payloadLen, client->secureChannel.get());
+    if (send_result != VGREResult::SUCCESS) {
+      result = send_result;
     }
   }
   return result;
