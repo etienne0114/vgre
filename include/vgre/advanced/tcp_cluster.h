@@ -277,6 +277,7 @@ public:
     uint64_t cpu_memory = 0;
     bool has_igpu = false;
     char igpu_name[64] = {};
+    bool capability_received = false; // true after CAPABILITY packet received from worker
     std::string ip_address;
     int port = 0;
     std::unique_ptr<SecureChannel> secureChannel;
