@@ -487,11 +487,12 @@ void TCPClusterManager::serverLoop() {
                 client->cpu_memory = cpkt.cpu_memory;
                 client->has_igpu = cpkt.has_igpu;
                 std::snprintf(client->igpu_name, sizeof(client->igpu_name), "%s", cpkt.igpu_name);
+                // Gate: node is now visible in the dashboard with real hardware info.
+                // syncToIPC() filters on this flag — without it nodes show cpu_cores=0.
+                client->capability_received = true;
                 HybridComputeManager::instance().updateRemoteNodeCapability(
                     client->ip_address, cpkt.cpu_cores, cpkt.cpu_memory,
                     cpkt.has_igpu, cpkt.igpu_name);
-                // Push real hardware info to IPC immediately so the dashboard
-                // shows actual CPU cores and RAM instead of the initial 0 values.
                 syncToIPC();
               } else if (type == PacketType::PARTITION_RESULT) {
                 if (hdr.payloadSize < sizeof(PartitionResultPacket)) { client->rx_buffer.clear(); break; }

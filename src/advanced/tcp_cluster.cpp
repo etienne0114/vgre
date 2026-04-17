@@ -449,8 +449,11 @@ void TCPClusterManager::getConnectedNodes(std::vector<TCPClusterManager::Cluster
   std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
   outNodes.clear();
   for (const auto &c : clients_) {
-    // Only report fully active nodes — not dead or still-handshaking ones.
+    // Only report nodes that are alive and have delivered real hardware info via
+    // CAPABILITY. Nodes still handshaking or reconnecting show cpu_cores=0 until
+    // CAPABILITY arrives — exclude them to keep dashboard data accurate.
     if (!c || !c->active) continue;
+    if (!c->capability_received && !c->is_local) continue;
     TCPClusterManager::ClusterNodeInfo info;
     info.ip_address = c->ip_address;
     info.port = c->port;
@@ -537,12 +540,14 @@ void TCPClusterManager::syncToIPC() {
       std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
 
       for (const auto& c : clients_) {
-          // Skip dead or still-handshaking nodes — only push fully active nodes
-          // to avoid showing zeros for nodes that haven't delivered CAPABILITY yet.
-          // Keeping dead entries in clients_ (with active=false) is intentional:
-          // launchRemoteKernel() uses index-based access, so removing entries
-          // would shift indices and corrupt outstanding worker_id values.
+          // Only nodes that are alive AND have delivered a CAPABILITY packet are
+          // shown in the dashboard. Nodes in the handshake phase or that reconnected
+          // before CAPABILITY arrives would otherwise show cpu_cores=0 / memory=0.
+          // Local (SHM) nodes bypass CAPABILITY and are always safe to display.
+          // Dead entries stay in clients_ so launchRemoteKernel() index arithmetic
+          // stays valid.
           if (!c || !c->active) continue;
+          if (!c->capability_received && !c->is_local) continue;
 
           vgre_cluster_node_t node{};
           std::strncpy(node.address, c->ip_address.c_str(), sizeof(node.address) - 1);
