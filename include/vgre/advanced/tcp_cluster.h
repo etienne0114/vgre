@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <shared_mutex>
 #include <condition_variable>
 #include <string>
 #include <thread>
@@ -23,6 +24,16 @@
 #include <unordered_set>
 #include <chrono>
 #include <memory>
+
+// VSBP is a binary protocol with no byte-swapping — it assumes little-endian
+// hosts on both ends.  This holds for every supported platform (x86-64, ARM64).
+// If you port to a big-endian system, add htons/htonl/htobe wrappers to every
+// VSBPHeader and packet-struct field before removing this assertion.
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__)
+static_assert(__BYTE_ORDER__ != __ORDER_BIG_ENDIAN__,
+              "VSBP protocol assumes little-endian host; "
+              "add byte-swap wrappers before enabling big-endian support.");
+#endif
 
 namespace vgre {
 namespace advanced {
@@ -68,6 +79,8 @@ enum class PacketType : uint32_t {
   RAW_DATA = 24,              // Generic unstructured payload
   COLLECTIVE_OP = 25,         // Phase 14: Collective Ops (all_reduce, etc.)
   COLLECTIVE_COMPLETE = 26,   // Phase 14: Master signal that reduction is ready
+  BANDWIDTH_PROBE = 27,       // Master→Worker: 64 KB payload + 8-byte timestamp header
+  BANDWIDTH_ACK = 28,         // Worker→Master: echo timestamp + worker send time
 };
 
 struct VSBPHeader {
@@ -167,6 +180,15 @@ struct SecureHandshakePacket {
   uint8_t key_verification[crypto::kSHA256DigestLen];
 };
 
+// Bandwidth probe: master sends 64 KB payload + 8-byte timestamp prefix.
+// Worker echoes back BandwidthAckPacket so master can measure round-trip.
+#pragma pack(push, 1)
+struct BandwidthAckPacket {
+  uint64_t probe_sent_ms;  // echoed timestamp from the master's BANDWIDTH_PROBE
+  uint64_t ack_sent_ms;    // worker's wall-clock ms when it sent this ACK
+};
+#pragma pack(pop)
+
 struct PartitionDispatchPacket {
   uint64_t auth_token;
   uint64_t kernel_id;
@@ -204,6 +226,11 @@ struct CollectiveOpPacket {
 class TCPClusterManager {
 public:
   static TCPClusterManager &instance() {
+    // Intentional heap allocation (not Meyers singleton): the destructor must NOT
+    // run during static-storage teardown because the logger, IPC manager, and
+    // runtime engine may already be destroyed. The process owns this object for
+    // its full lifetime; the OS reclaims memory at exit. Suppressed by LSAN/ASAN
+    // via the __lsan_disable / noleak annotations in the API layer.
     static TCPClusterManager* inst = new TCPClusterManager();
     return *inst;
   }
@@ -305,6 +332,34 @@ public:
     // Updated by the proactive connection loop after a micro-benchmark probe.
     // Default 10.0 (typical 10GbE); local connections use a large sentinel.
     double network_bandwidth_gbps = 10.0;
+
+    // Bandwidth probe state: set when master sends BANDWIDTH_PROBE after
+    // CAPABILITY, cleared when BANDWIDTH_ACK arrives and bandwidth is computed.
+    std::chrono::steady_clock::time_point bandwidth_probe_start{};
+    bool bandwidth_probe_in_flight = false;
+    // Wall-clock time of the most recent bandwidth probe (for periodic re-probing).
+    std::chrono::steady_clock::time_point last_bandwidth_probe_time{};
+
+    // Measured one-way network latency in ms (half the BANDWIDTH_ACK RTT).
+    // Default 1.0 ms (typical LAN); feeds the workload partitioner.
+    double network_latency_ms = 1.0;
+
+    // A5: HMAC circuit-breaker — counts consecutive ERR_AUTH_FAILED returns
+    // from recvSecure(). After 5, the connection is closed and the address
+    // enters a 60-second proactive backoff (possible key-mismatch or attack).
+    int hmac_failure_count{0};
+
+    // MITM-downgrade guard: when VGRE_ALLOW_AUTH_FALLBACK is set and a token
+    // mismatch is detected, the retry handshake uses this token instead of
+    // disabling security.  Keeps the channel encrypted even in fallback mode.
+    // Empty = use parent_->auth_token_str_ (normal path).
+    std::string effective_auth_token;
+
+    // Per-connection packet rate limiter (token bucket, 1-second window).
+    // Configurable via VGRE_CLUSTER_MAX_PACKETS_PER_SEC (default 10000).
+    // Protects against packet-flood DoS from a connected but authenticated peer.
+    uint64_t rate_window_start_ms{0}; // wall-clock start of current 1s window
+    uint32_t rate_window_count{0};    // packets seen in current window
   };
 
   struct ClusterNodeInfo {
@@ -352,11 +407,28 @@ private:
   // Using vgre::common types
   using vgre_pollfd = vgre::common::vgre_pollfd;
   // ── Connection rate limiter ─────────────────────────────────────────────
-  // Prevents handshake-flood DoS: limits new connections per source IP to
+  // Prevents handshake-flood DoS: limits new TCP connections per source IP to
   // kMaxPerWindow within a rolling kWindowSeconds window.
+  // Both limits are configurable via environment variables:
+  //   VGRE_CLUSTER_MAX_CONN_PER_WINDOW  (default 10)
+  //   VGRE_CLUSTER_CONN_WINDOW_SEC      (default 60)
   struct ConnectionRateLimiter {
-    static constexpr int kMaxPerWindow = 10;
-    static constexpr int kWindowSeconds = 60;
+    static int getMaxPerWindow() {
+      static const int v = []() -> int {
+        const char* e = std::getenv("VGRE_CLUSTER_MAX_CONN_PER_WINDOW");
+        if (e) { int v = std::atoi(e); if (v > 0 && v <= 10000) return v; }
+        return 10;
+      }();
+      return v;
+    }
+    static int getWindowSeconds() {
+      static const int v = []() -> int {
+        const char* e = std::getenv("VGRE_CLUSTER_CONN_WINDOW_SEC");
+        if (e) { int v = std::atoi(e); if (v > 0 && v <= 3600) return v; }
+        return 60;
+      }();
+      return v;
+    }
 
     std::mutex mtx;
     std::unordered_map<std::string,
@@ -366,13 +438,13 @@ private:
       std::lock_guard<std::mutex> lk(mtx);
       auto now = std::chrono::steady_clock::now();
       auto &q = attempts[ip];
-      // Prune entries outside the window
+      const int window = getWindowSeconds();
       while (!q.empty() &&
              std::chrono::duration_cast<std::chrono::seconds>(now - q.front()).count()
-                 >= kWindowSeconds) {
+                 >= window) {
         q.pop_front();
       }
-      return static_cast<int>(q.size()) < kMaxPerWindow;
+      return static_cast<int>(q.size()) < getMaxPerWindow();
     }
 
     void record(const std::string &ip) {
@@ -428,6 +500,11 @@ private:
   std::atomic<bool> enabled_{false};
   std::atomic<bool> security_enabled_{false};
   uint64_t auth_token_ = 0;
+  // auth_token_str_ is written once in initialize() before worker threads are
+  // launched.  All subsequent accesses are reads from those threads; the mutex
+  // below makes re-initialization safe and prevents future data races if the
+  // field is ever written again after threads start.
+  mutable std::shared_mutex auth_token_mutex_;
   std::string auth_token_str_; // raw token string for PBKDF2
   
   // Worker-side state for incoming data
@@ -482,6 +559,12 @@ private:
 
   // Client State
   vgre_socket_t client_fd_ = (vgre_socket_t)-1;
+  // Atomic flag that mirrors (client_fd_ != INVALID). Polling loops in
+  // udpDiscoveryLoop read this without acquiring client_mutex_ to avoid
+  // holding a mutex across blocking recvfrom() calls. All writes still go
+  // through client_mutex_; this flag is always set/cleared in the same
+  // critical section that assigns/clears client_fd_.
+  std::atomic<bool> has_master_fd_{false};
   vgre_telemetry_t client_telemetry_buffer_{};
   std::unique_ptr<SecureChannel> client_secure_channel_;
   bool client_security_established_ = false;

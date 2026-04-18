@@ -30,6 +30,8 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <string>
 #include <thread>
 
 // All platform socket headers are provided by vgre/common/sockets.h above.
@@ -80,55 +82,102 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   port_ = port;
   auth_token_ = 0;
 
-  // Token Retrieval: Priority 1 = explicit env var (authenticated mode),
-  //                  Priority 2 = fixed cluster-wide default (encrypted but unauthenticated).
+  // Token Retrieval (priority order):
+  //   Priority 1: VGRE_TCP_AUTH_TOKEN_FILE — path to a file containing the token
+  //               (preferred in production: secrets managers write to a tmpfs file)
+  //   Priority 2: VGRE_TCP_AUTH_TOKEN — inline value in environment variable
+  //   Priority 3: fixed cluster-wide default (encrypted but unauthenticated)
   //
   // WHY NOT hardware token manager for cross-machine clusters:
-  // The Linux keyring, macOS Keychain and Windows CredMan are per-machine stores.
-  // If each node generates a random token and stores it locally, master and worker
-  // end up with DIFFERENT tokens → different PBKDF2-derived session keys → every
-  // HMAC check fails immediately after the handshake completes.
-  //
-  // The correct model for a cluster PSK is either:
-  //   a) Administrator sets VGRE_TCP_AUTH_TOKEN to the same value on every node
-  //      (authenticated encryption — only nodes with the right token can join)
-  //   b) No token is configured → use a fixed well-known default so all nodes
-  //      agree on the same key derivation input (encrypted but unauthenticated —
-  //      any VGRE node on the LAN can join; fine for trusted private networks)
-  const char* env_token = std::getenv("VGRE_TCP_AUTH_TOKEN");
-  if (env_token && env_token[0] != '\0') {
-      auth_token_str_ = env_token;
-      // Hash the token for logging (security) - use stable FNV-1a hash
-      uint64_t hash = 0xcbf29ce484222325ULL;
-      for (char c : auth_token_str_) {
-          hash ^= static_cast<uint64_t>(c);
-          hash *= 0x100000001b3ULL;
+  // Per-machine keystores (Linux keyring, macOS Keychain, Windows CredMan) generate
+  // DIFFERENT tokens on each node → PBKDF2-derived session keys diverge → every
+  // HMAC check fails immediately.  Cluster authentication requires a shared PSK.
+  std::string loaded_token;
+
+  // Priority 1: file-based token (safer — never appears in process env listing)
+  const char* token_file = std::getenv("VGRE_TCP_AUTH_TOKEN_FILE");
+  if (token_file && token_file[0] != '\0') {
+    std::ifstream tf(token_file);
+    if (tf.is_open()) {
+      std::getline(tf, loaded_token);
+      // Strip trailing CR/LF if the file was written on Windows
+      while (!loaded_token.empty() &&
+             (loaded_token.back() == '\n' || loaded_token.back() == '\r'))
+        loaded_token.pop_back();
+      if (!loaded_token.empty()) {
+        VGRE_LOG_INFO("TCPCluster",
+            "Auth Token loaded from file '" + std::string(token_file) +
+            "' — authenticated encryption enabled");
+      } else {
+        VGRE_LOG_WARN("TCPCluster",
+            "VGRE_TCP_AUTH_TOKEN_FILE '" + std::string(token_file) +
+            "' is empty — falling through to VGRE_TCP_AUTH_TOKEN");
       }
-      std::string token_hash = std::to_string(hash);
-      VGRE_LOG_INFO("TCPCluster",
-          "Auth Token retrieved from VGRE_TCP_AUTH_TOKEN — authenticated encryption enabled "
-          "(token hash: " + token_hash.substr(0, 8) + "...)");
-  } else {
-      // No pre-shared key configured.  Use a fixed cluster-wide string so every
-      // VGRE node without an explicit token derives the SAME session key from
-      // the exchanged nonces.  Traffic is still AES-256-CTR encrypted; only
-      // node authentication is skipped (any VGRE node can join).
-      auth_token_str_ = "VGRE_CLUSTER_DEFAULT_NOAUTH_v1";
-      VGRE_LOG_WARN("TCPCluster",
-          "VGRE_TCP_AUTH_TOKEN not set — using encrypted-but-unauthenticated mode. "
-          "Set the same VGRE_TCP_AUTH_TOKEN on all cluster nodes to enable "
-          "authenticated encryption (prevents unauthorised nodes from joining).");
+    } else {
+      VGRE_LOG_ERROR("TCPCluster",
+          "VGRE_TCP_AUTH_TOKEN_FILE '" + std::string(token_file) +
+          "' could not be opened — falling through to VGRE_TCP_AUTH_TOKEN");
+    }
   }
 
-  if (!auth_token_str_.empty()) {
-      // Use stable FNV-1a hash instead of std::hash (which is not stable across processes)
-      uint64_t hash = 0xcbf29ce484222325ULL;
-      for (char c : auth_token_str_) {
-          hash ^= static_cast<uint64_t>(c);
-          hash *= 0x100000001b3ULL;
-      }
-      auth_token_ = hash;
-      VGRE_LOG_INFO("TCPCluster", "Auth Token specialized (stable hash generated).");
+  // Priority 2: inline env var
+  if (loaded_token.empty()) {
+    const char* env_token = std::getenv("VGRE_TCP_AUTH_TOKEN");
+    if (env_token && env_token[0] != '\0') {
+      loaded_token = env_token;
+    }
+  }
+
+  constexpr size_t kMinTokenLen = 16; // minimum 16 characters for security
+  if (!loaded_token.empty()) {
+    if (loaded_token.size() < kMinTokenLen) {
+      VGRE_LOG_WARN("TCPCluster",
+          "VGRE_TCP_AUTH_TOKEN is only " + std::to_string(loaded_token.size()) +
+          " characters — minimum recommended length is " +
+          std::to_string(kMinTokenLen) +
+          " characters for adequate security. Accepted but consider strengthening.");
+    }
+    std::string token_for_log;
+    {
+      std::unique_lock<std::shared_mutex> wlock(auth_token_mutex_);
+      auth_token_str_ = std::move(loaded_token);
+      token_for_log = auth_token_str_;
+    }
+    // Hash the token for logging — never log the raw token
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    for (char c : token_for_log) {
+      hash ^= static_cast<uint64_t>(c);
+      hash *= 0x100000001b3ULL;
+    }
+    VGRE_LOG_INFO("TCPCluster",
+        "Auth Token active — authenticated encryption enabled "
+        "(token hash: " + std::to_string(hash).substr(0, 8) + "...)");
+  } else {
+    // Priority 3: no token configured — use a fixed well-known default so
+    // every VGRE node derives the SAME session key.  Traffic is AES-256-CTR
+    // encrypted; only node authentication is skipped.
+    {
+      std::unique_lock<std::shared_mutex> wlock(auth_token_mutex_);
+      auth_token_str_ = "VGRE_CLUSTER_DEFAULT_NOAUTH_v1";
+    }
+    VGRE_LOG_WARN("TCPCluster",
+        "No auth token configured (VGRE_TCP_AUTH_TOKEN / VGRE_TCP_AUTH_TOKEN_FILE) "
+        "— encrypted-but-unauthenticated mode. "
+        "Set the same token on all cluster nodes to prevent unauthorised access.");
+  }
+
+  {
+    std::shared_lock<std::shared_mutex> rlock(auth_token_mutex_);
+    if (!auth_token_str_.empty()) {
+        // Use stable FNV-1a hash instead of std::hash (which is not stable across processes)
+        uint64_t hash = 0xcbf29ce484222325ULL;
+        for (char c : auth_token_str_) {
+            hash ^= static_cast<uint64_t>(c);
+            hash *= 0x100000001b3ULL;
+        }
+        auth_token_ = hash;
+        VGRE_LOG_INFO("TCPCluster", "Auth Token specialized (stable hash generated).");
+    }
   }
 
   if (is_master_) {
