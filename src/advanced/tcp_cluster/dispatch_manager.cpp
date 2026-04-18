@@ -15,13 +15,63 @@
 #include "vgre/common/logger.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <vector>
+
+namespace {
+
+// Configurable via VGRE_CLUSTER_MAX_IN_FLIGHT (default 16).
+const uint32_t kMaxInFlight = []() -> uint32_t {
+    const char* env = std::getenv("VGRE_CLUSTER_MAX_IN_FLIGHT");
+    if (env) {
+        try {
+            long v = std::stol(env);
+            if (v > 0 && v <= 1024) return static_cast<uint32_t>(v);
+        } catch (...) {}
+    }
+    return 16;
+}();
+
+// Configurable via VGRE_CLUSTER_SHM_RESULT_OFFSET (bytes, default 128 MB).
+// Defines the start of the pull-back result region inside the SHM segment.
+// Must be >= the size of argument/data written into the first part of SHM.
+const size_t kResultRegionStart = []() -> size_t {
+    const char* env = std::getenv("VGRE_CLUSTER_SHM_RESULT_OFFSET");
+    if (env) {
+        try {
+            long long v = std::stoll(env);
+            if (v >= 1024 * 1024) return static_cast<size_t>(v);
+        } catch (...) {}
+    }
+    return 128ULL * 1024 * 1024;
+}();
+
+// One-shot memcpy throughput benchmark used to estimate local SHM bandwidth.
+// Runs 10 × 1 MB copies and converts to Gbps. Result is cached in a static
+// so it runs only once per process rather than before every dispatch call.
+double measureLocalShmBandwidthGbps() {
+    constexpr size_t kBenchBytes = 1024 * 1024; // 1 MB
+    std::vector<uint8_t> src(kBenchBytes, 0xAB);
+    std::vector<uint8_t> dst(kBenchBytes, 0);
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 10; ++i) std::memcpy(dst.data(), src.data(), kBenchBytes);
+    double elapsed_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    if (elapsed_s <= 0.0) return 100.0; // unreachable, but safe fallback
+    double bw_gbps = (10.0 * kBenchBytes * 8.0) / (elapsed_s * 1e9);
+    // Clamp to [1, 1000] Gbps — covers LPDDR5 to HBM3 range.
+    return std::max(1.0, std::min(1000.0, bw_gbps));
+}
+
+} // anonymous namespace
 
 namespace vgre {
 namespace advanced {
 
 DispatchManager::DispatchManager(TCPClusterManager* parent)
-    : parent_(parent) {
+    : parent_(parent),
+      result_shm_offset_(kResultRegionStart) {
   if (!parent_) {
     throw std::invalid_argument("DispatchManager: parent cannot be null");
   }
@@ -54,9 +104,7 @@ VGREResult DispatchManager::launchRemoteKernel(
     return VGREResult::ERR_INVALID_VALUE;
   }
 
-  // Phase 12: TSS2 Congestion Window
-  const uint32_t MAX_IN_FLIGHT = 16;
-  if (parent_->clients_[worker_idx]->in_flight_kernels >= MAX_IN_FLIGHT) {
+  if (parent_->clients_[worker_idx]->in_flight_kernels >= kMaxInFlight) {
       VGRE_LOG_WARN("TCPCluster", "Congestion: Max in-flight kernels reached for " + 
                     parent_->clients_[worker_idx]->ip_address);
       return VGREResult::ERR_BUSY;
@@ -110,16 +158,29 @@ void DispatchManager::broadcastKernelRegistration(
 
   for (auto& client : parent_->clients_) {
     if (client && client->active) {
-      parent_->send_packet(
+      VGREResult r1 = parent_->send_packet(
           client->socket_fd,
           PacketType::REGISTER_KERNEL,
           &kpkt, sizeof(KernelRegisterPacket),
           client->secureChannel.get());
-      parent_->send_packet(
+      if (r1 != VGREResult::SUCCESS) {
+        VGRE_LOG_ERROR("TCPCluster",
+            "broadcastKernelRegistration: REGISTER_KERNEL send failed for " +
+            client->ip_address + " — worker will silently miss kernel " +
+            std::to_string(kernel_id) + " and fail on dispatch");
+        continue; // skip RAW_DATA; no point sending source without the header
+      }
+      VGREResult r2 = parent_->send_packet(
           client->socket_fd,
           PacketType::RAW_DATA,
           source.c_str(), source.length(),
           client->secureChannel.get());
+      if (r2 != VGREResult::SUCCESS) {
+        VGRE_LOG_ERROR("TCPCluster",
+            "broadcastKernelRegistration: RAW_DATA (kernel source) send failed for " +
+            client->ip_address + " — worker has header but no source for kernel " +
+            std::to_string(kernel_id));
+      }
     }
   }
 }
@@ -192,11 +253,24 @@ void DispatchManager::handleRemoteCommand(const RemoteCommandPacket& pkt) {
   // Wait for local execution to complete before syncing back memory
   vgre::core::RuntimeEngine::instance().streamSynchronize(0);
 
-  // Memory Coherence (Pull Back) - sync modified pointers back to master
+  // Memory Coherence (Pull Back) - sync modified pointers back to master.
+  // Reset the SHM result cursor to kResultRegionStart at the beginning of each
+  // kernel's pull-back phase. This prevents wrap-around from overwriting earlier
+  // results from the SAME kernel that the master has not yet read:
+  //   - handleRemoteCommand is called serially (one at a time from the staging
+  //     buffer loop), so the master has already consumed all results from the
+  //     PREVIOUS kernel before this kernel is dispatched.
+  //   - Within a single kernel, results accumulate sequentially and are never
+  //     overwritten — if the region is full, remaining results fall back to TCP.
+  {
+    std::lock_guard<std::mutex> shm_lock(shm_result_mutex_);
+    result_shm_offset_ = kResultRegionStart;
+  }
+
   for (int i = 0; i < numArgs; ++i) {
       auto it = parent_->pending_args_.find(i);
       if (it == parent_->pending_args_.end()) continue;
-      
+
       TCPClusterManager::PendingArg& arg = it->second;
       if (arg.type == (uint8_t)ArgType::POINTER) {
           void* ptr = reinterpret_cast<void*>(arg.value);
@@ -205,30 +279,43 @@ void DispatchManager::handleRemoteCommand(const RemoteCommandPacket& pkt) {
                             .getAllocationSize(ptr);
           if (size > 0) {
               if (parent_->client_shm_enabled_ && parent_->client_shm_manager_) {
-                  // SHM Optimization for worker -> master (Pull Back).
-                  // result_shm_offset_ is a per-DispatchManager member (not static)
-                  // so it resets when the DispatchManager is reconstructed on reconnect.
-                  if (result_shm_offset_ + size > parent_->client_shm_manager_->getSize()) {
-                      // Wrap back to start of result region when exhausted.
-                      result_shm_offset_ = 128ULL * 1024 * 1024;
+                  // SHM pull-back path. Advance cursor; if it would exceed the SHM
+                  // region, fall back to TCP for this result.
+                  const size_t shmSize = parent_->client_shm_manager_->getSize();
+                  bool usedShm = false;
+                  if (shmSize > kResultRegionStart && size <= shmSize - kResultRegionStart) {
+                      // Try to allocate from the result region. allocated=true means
+                      // we got a valid slot; offset is set only in that case.
+                      bool allocated = false;
+                      uint64_t offset = 0;
+                      {
+                          std::lock_guard<std::mutex> shm_lock(shm_result_mutex_);
+                          if (result_shm_offset_ + size <= shmSize) {
+                              offset = result_shm_offset_;
+                              result_shm_offset_ += size;
+                              allocated = true;
+                          }
+                          // else: region exhausted — fall back to TCP (allocated stays false).
+                          // Do NOT wrap: would overwrite earlier results for this kernel.
+                      }
+                      if (allocated) {
+                          std::memcpy(
+                              static_cast<uint8_t*>(parent_->client_shm_manager_->getBasePtr()) + offset,
+                              ptr, size);
+                          DataShmPacket dspkt{};
+                          dspkt.target_ptr = arg.value;
+                          dspkt.shm_offset = offset;
+                          dspkt.size = size;
+                          parent_->send_packet(
+                              parent_->client_fd_,
+                              PacketType::DATA_SHM,
+                              &dspkt, sizeof(DataShmPacket),
+                              parent_->client_secure_channel_.get());
+                          usedShm = true;
+                      }
                   }
-                  uint64_t offset = result_shm_offset_;
-                  result_shm_offset_ += size;
-                  if (offset + size <= parent_->client_shm_manager_->getSize()) {
-                      std::memcpy(
-                          static_cast<uint8_t*>(parent_->client_shm_manager_->getBasePtr()) + offset,
-                          ptr, size);
-                      DataShmPacket dspkt{};
-                      dspkt.target_ptr = arg.value;
-                      dspkt.shm_offset = offset;
-                      dspkt.size = size;
-                      parent_->send_packet(
-                          parent_->client_fd_,
-                          PacketType::DATA_SHM,
-                          &dspkt, sizeof(DataShmPacket),
-                          parent_->client_secure_channel_.get());
-                  } else {
-                      // Fallback to TCP
+                  if (!usedShm) {
+                      // Fallback to TCP (result too large, SHM exhausted, or size check failed)
                       DataHeaderPacket dptr_pkt{};
                       dptr_pkt.target_ptr = arg.value;
                       dptr_pkt.size = size;
@@ -301,7 +388,9 @@ VGREResult DispatchManager::launchPartitionedKernel(
   local.measured_gflops = resources.gflops;
   local.avg_latency_ms = resources.avgLatency;
   local.is_local = true;
-  local.network_bandwidth_gbps = 1e6; // sentinel: local, no bandwidth bottleneck
+  // Measure actual memory copy bandwidth for the local node (cached after first call).
+  static const double kLocalBwGbps = measureLocalShmBandwidthGbps();
+  local.network_bandwidth_gbps = kLocalBwGbps;
   nodes.push_back(local);
 
   // Remote workers
@@ -316,7 +405,7 @@ VGREResult DispatchManager::launchPartitionedKernel(
       cap.worker_idx = static_cast<int>(i);
       cap.cpu_cores = parent_->clients_[i]->cpu_cores;
       cap.measured_gflops = parent_->clients_[i]->last_telemetry.gflops;
-      cap.avg_latency_ms = parent_->clients_[i]->last_telemetry.avg_kernel_latency_ms;
+      cap.avg_latency_ms = parent_->clients_[i]->network_latency_ms;
       cap.is_local = false;
       cap.network_bandwidth_gbps = parent_->clients_[i]->network_bandwidth_gbps;
       nodes.push_back(cap);
@@ -373,20 +462,36 @@ VGREResult DispatchManager::launchPartitionedKernel(
         continue;
       }
       
-      // Phase 12: TSS2 Congestion Window
-      const uint32_t MAX_IN_FLIGHT = 16;
-      if (parent_->clients_[slice.worker_idx]->in_flight_kernels >= MAX_IN_FLIGHT) {
-          VGRE_LOG_WARN("TCPCluster", "Congestion: Partition dispatch skipped for worker " + 
-                        std::to_string(slice.worker_idx));
-          continue; 
+      if (parent_->clients_[slice.worker_idx]->in_flight_kernels >= kMaxInFlight) {
+          VGRE_LOG_WARN("TCPCluster", "Congestion: Partition dispatch skipped for worker " +
+                        std::to_string(slice.worker_idx) +
+                        " — inserting ERR_BUSY so collectPartitionResults() does not deadlock");
+          std::lock_guard<std::mutex> lock(parent_->partition_mutex_);
+          PartitionResult pr;
+          pr.partition_id      = slice.partition_id;
+          pr.kernel_id         = kernel_id;
+          pr.result            = VGREResult::ERR_BUSY;
+          pr.execution_time_ms = 0.0;
+          partition_results_.push_back(pr);
+          parent_->partition_cv_.notify_all();
+          continue;
       }
 
       // Stream arguments first
       VGREResult argResult = parent_->streamArgumentsToWorker(
           args, num_args, kernel_id, parent_->clients_[slice.worker_idx]);
       if (argResult != VGREResult::SUCCESS) {
-          VGRE_LOG_ERROR("TCPCluster", "Failed to stream arguments for partition " + 
-                         std::to_string(slice.partition_id));
+          VGRE_LOG_ERROR("TCPCluster", "Failed to stream arguments for partition " +
+                         std::to_string(slice.partition_id) +
+                         " — inserting ERR_INVALID_VALUE so collectPartitionResults() does not deadlock");
+          std::lock_guard<std::mutex> lock(parent_->partition_mutex_);
+          PartitionResult pr;
+          pr.partition_id      = slice.partition_id;
+          pr.kernel_id         = kernel_id;
+          pr.result            = VGREResult::ERR_INVALID_VALUE;
+          pr.execution_time_ms = 0.0;
+          partition_results_.push_back(pr);
+          parent_->partition_cv_.notify_all();
           continue;
       }
 
@@ -403,11 +508,26 @@ VGREResult DispatchManager::launchPartitionedKernel(
       pdpkt.partition_id = slice.partition_id;
       pdpkt.total_partitions = plan.total_partitions;
 
-      parent_->send_packet(
+      VGREResult dispatch_res = parent_->send_packet(
           parent_->clients_[slice.worker_idx]->socket_fd,
           PacketType::PARTITION_DISPATCH,
           &pdpkt, sizeof(PartitionDispatchPacket),
           parent_->clients_[slice.worker_idx]->secureChannel.get());
+      if (dispatch_res != VGREResult::SUCCESS) {
+          VGRE_LOG_ERROR("TCPCluster",
+              "Partition " + std::to_string(slice.partition_id) +
+              " send failed for worker " + std::to_string(slice.worker_idx) +
+              " — inserting synthetic failure so collectPartitionResults() does not deadlock");
+          std::lock_guard<std::mutex> lock(parent_->partition_mutex_);
+          PartitionResult pr;
+          pr.partition_id = slice.partition_id;
+          pr.kernel_id    = kernel_id;
+          pr.result       = VGREResult::ERR_IO;
+          pr.execution_time_ms = 0.0;
+          partition_results_.push_back(pr);
+          parent_->partition_cv_.notify_all();
+          continue;
+      }
       parent_->clients_[slice.worker_idx]->in_flight_kernels++;
     }
   }
@@ -424,10 +544,10 @@ VGREResult DispatchManager::collectPartitionResults(
   auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
 
+  // Results are cleared in dispatchPartitionedKernel() immediately before the
+  // partition packets are sent — that is the only safe clear point.  A clear
+  // here would race with results that arrived between dispatch and this call.
   std::unique_lock<std::mutex> lock(parent_->partition_mutex_);
-  // C2: Clear results from any previous dispatch before waiting for new ones.
-  // Stale partial results from a failed run would mix with new results.
-  partition_results_.clear();
   while (partition_results_.size() < total_partitions) {
     if (parent_->partition_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
       VGRE_LOG_ERROR("TCPCluster",
@@ -462,13 +582,13 @@ VGREResult DispatchManager::waitForRemoteResult(uint64_t kernel_id, int timeout_
     
     while (remote_kernel_results_.find(kernel_id) == remote_kernel_results_.end()) {
         if (parent_->remote_results_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
-            VGRE_LOG_ERROR("TCPCluster", "Wait for remote result (kernel=" + 
+            VGRE_LOG_ERROR("TCPCluster", "Wait for remote result (kernel=" +
                            std::to_string(kernel_id) + ") timed out");
             return VGREResult::ERR_TIMEOUT;
         }
     }
-    
-    VGREResult r = remote_kernel_results_[kernel_id];
+
+    VGREResult r = remote_kernel_results_[kernel_id].first;
     // C1: Erase after reading so re-launched kernels don't get the stale result.
     remote_kernel_results_.erase(kernel_id);
     return r;
@@ -478,7 +598,23 @@ VGREResult DispatchManager::waitForRemoteResult(uint64_t kernel_id, int timeout_
 
 void DispatchManager::storeRemoteResult(uint64_t kernel_id, VGREResult result) {
   std::lock_guard<std::mutex> lock(parent_->remote_results_mutex_);
-  remote_kernel_results_[kernel_id] = result;
+
+  // Purge results that were stored more than 60 s ago and never claimed.
+  // This prevents unbounded map growth when callers abandon (e.g. timed out
+  // waitForRemoteResult but the worker replied late).
+  auto now = std::chrono::steady_clock::now();
+  for (auto it = remote_kernel_results_.begin(); it != remote_kernel_results_.end(); ) {
+    if (now - it->second.second > std::chrono::seconds(60)) {
+      VGRE_LOG_WARN("TCPCluster",
+          "Purging stale remote result for kernel=" + std::to_string(it->first) +
+          " (unclaimed for >60s)");
+      it = remote_kernel_results_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  remote_kernel_results_[kernel_id] = {result, now};
   parent_->remote_results_cv_.notify_all();
 }
 
