@@ -1,4 +1,5 @@
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/advanced/secure_channel.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/error_codes.h"
 #include <iostream>
@@ -55,15 +56,19 @@ int main(int argc, char** argv) {
     vgre::Logger::instance().setLevel(vgre::LogLevel::INFO);
     
     if (!auth_token.empty()) {
-        // Hash the token for logging (security) - use stable FNV-1a hash
-        uint64_t hash = 0xcbf29ce484222325ULL;
-        for (char c : auth_token) {
-            hash ^= static_cast<uint64_t>(c);
-            hash *= 0x100000001b3ULL;
+        // Hash the token for logging — SHA256, same algorithm as the C++ engine
+        // startup log and handshake failure messages so all output is consistent.
+        uint8_t digest[vgre::advanced::crypto::kSHA256DigestLen];
+        vgre::advanced::crypto::sha256(
+            reinterpret_cast<const uint8_t*>(auth_token.data()),
+            auth_token.size(), digest);
+        std::string token_hash_hex;
+        for (size_t k = 0; k < vgre::advanced::crypto::kSHA256DigestLen; ++k) {
+            char buf[3]; snprintf(buf, sizeof(buf), "%02x", digest[k]);
+            token_hash_hex += buf;
         }
-        std::string token_hash = std::to_string(hash);
-        vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", 
-            "Using provided auth token (hash: " + token_hash.substr(0, 8) + "...)");
+        vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker",
+            "Using provided auth token (SHA256: " + token_hash_hex.substr(0, 16) + "...)");
 #if defined(_WIN32)
         _putenv_s("VGRE_TCP_AUTH_TOKEN", auth_token.c_str());
 #else

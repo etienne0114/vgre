@@ -94,6 +94,15 @@ if (Test-Path $TokenFile) {
 
     if ($keepExisting) {
         Write-Host "[OK] Keeping existing token." -ForegroundColor Green
+
+        # Sanitize the existing file in case it was edited manually and has
+        # trailing CRLF / spaces that would cause a fingerprint mismatch.
+        $raw   = [System.IO.File]::ReadAllText($TokenFile, [System.Text.Encoding]::UTF8)
+        $clean = $raw.Trim()
+        if ($clean -ne $raw) {
+            [System.IO.File]::WriteAllText($TokenFile, $clean)
+            Write-Host "[OK] Token file sanitized (removed extra whitespace)." -ForegroundColor Green
+        }
     }
 }
 
@@ -108,7 +117,7 @@ if (-not $keepExisting) {
     if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
 
     if ($choice -eq "2") {
-
+        Write-Host "(Paste the token from another node — any surrounding whitespace is stripped automatically)" -ForegroundColor DarkGray
         $secureToken = Read-Host "Enter token" -AsSecureString
 
         $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
@@ -119,10 +128,16 @@ if (-not $keepExisting) {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
         }
 
+        # Strip ALL surrounding whitespace (CRLF, spaces, tabs) that may be
+        # included when pasting from terminal output or a text editor.
+        $token = $token.Trim()
+
         if ($token.Length -lt 8) {
             Write-Host "[ERROR] Token must be at least 8 characters." -ForegroundColor Red
             exit 1
         }
+
+        Write-Host "[OK] Token accepted ($($token.Length) chars)." -ForegroundColor Green
 
     } else {
         $bytes = New-Object byte[] 32
@@ -132,7 +147,9 @@ if (-not $keepExisting) {
         Write-Host "Generated token: $token" -ForegroundColor Green
     }
 
-    # Save token (no newline)
+    # Write WITHOUT trailing newline. C++ std::getline reads up to \n/EOF and
+    # strips trailing \r\n — so writing a bare string ensures both sides hash
+    # the identical bytes.
     [System.IO.File]::WriteAllText($TokenFile, $token)
 
     $newFingerprint = Get-TokenFingerprint -File $TokenFile
