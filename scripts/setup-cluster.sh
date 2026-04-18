@@ -22,6 +22,25 @@ TOKEN_FILE="$VGRE_DIR/token"
 INSTALL_DIR="$HOME/.local/share/VGRE"
 BIN_DIR="$HOME/.local/bin"
 
+# ── --show-fingerprint mode ───────────────────────────────────────────────────
+if [[ "${1:-}" == "--show-fingerprint" ]]; then
+    if [[ ! -f "$TOKEN_FILE" ]]; then
+        echo "❌ No token found at $TOKEN_FILE — run setup-cluster.sh first."
+        exit 1
+    fi
+    CURRENT_TOKEN=$(cat "$TOKEN_FILE")
+    if command -v sha256sum >/dev/null 2>&1; then
+        FP=$(printf '%s' "$CURRENT_TOKEN" | sha256sum | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        FP=$(printf '%s' "$CURRENT_TOKEN" | shasum -a 256 | awk '{print $1}')
+    else
+        echo "❌ sha256sum / shasum not found." ; exit 1
+    fi
+    echo "Token SHA256: $FP"
+    echo "Run this command on master AND worker — both must show identical output."
+    exit 0
+fi
+
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║       VGRE Cluster Setup                 ║"
@@ -72,6 +91,34 @@ if [[ ! -f "$TOKEN_FILE" ]]; then
     printf '%s' "$TOKEN" > "$TOKEN_FILE"
     chmod 600 "$TOKEN_FILE"
     echo "✅ Token saved to $TOKEN_FILE"
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────┐"
+    echo "│  ⚠️  IMPORTANT — copy this token to EVERY worker machine!   │"
+    echo "│                                                             │"
+    echo "│  Token:  $TOKEN  │"
+    echo "│                                                             │"
+    echo "│  Copy command (run on THIS machine):                        │"
+    echo "│    scp $TOKEN_FILE user@WORKER_IP:$TOKEN_FILE"
+    echo "│                                                             │"
+    echo "│  All nodes MUST have the identical token file or the        │"
+    echo "│  handshake will fail. Run setup-cluster.sh on the worker    │"
+    echo "│  and choose option 2 (paste) if scp is not available.       │"
+    echo "└─────────────────────────────────────────────────────────────┘"
+fi
+
+# Compute and show SHA256 fingerprint so users can verify both nodes match
+CURRENT_TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null || true)
+if [[ -n "$CURRENT_TOKEN" ]]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+        TOKEN_FP=$(printf '%s' "$CURRENT_TOKEN" | sha256sum | awk '{print $1}' | head -c 16)
+    elif command -v shasum >/dev/null 2>&1; then
+        TOKEN_FP=$(printf '%s' "$CURRENT_TOKEN" | shasum -a 256 | awk '{print $1}' | head -c 16)
+    else
+        TOKEN_FP="(sha256sum not available)"
+    fi
+    echo "Token SHA256 fingerprint (first 16 chars): $TOKEN_FP..."
+    echo "  Run this on every worker to confirm token matches:"
+    echo "    bash scripts/setup-cluster.sh --show-fingerprint"
 fi
 
 # ── Step 2: Shell Profile ─────────────────────────────────────────────────────
