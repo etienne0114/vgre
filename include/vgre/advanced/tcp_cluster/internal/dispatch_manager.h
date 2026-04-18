@@ -4,9 +4,11 @@
 #include <vgre/common/types.h>
 #include <vgre/common/error_codes.h>
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <map>
+#include <utility>
 #include <vector>
 #include <mutex>
 #include <condition_variable>
@@ -135,13 +137,21 @@ private:
   // Parent reference for accessing TCPClusterManager state
   TCPClusterManager* parent_;
   
-  // Result tracking for remote kernel launches (uses parent's mutexes/CVs)
-  std::map<uint64_t, VGREResult> remote_kernel_results_;
+  // Result tracking for remote kernel launches (uses parent's mutexes/CVs).
+  // Value = {result, time stored}; entries are erased on read (C1) and on
+  // stale-result cleanup (entries older than 60 s that were never claimed).
+  std::map<uint64_t, std::pair<VGREResult, std::chrono::steady_clock::time_point>>
+      remote_kernel_results_;
 
-  // SHM result-write cursor (worker side). Starts at 128 MB, advances per
-  // result pullback, wraps when the SHM region is exhausted.  Non-static so
-  // it resets when DispatchManager is reconstructed on reconnect.
-  uint64_t result_shm_offset_ = 128ULL * 1024 * 1024;
+  // Mutex protecting result_shm_offset_. The check-advance-wrap sequence must
+  // be atomic: if future refactoring adds concurrency this prevents torn reads.
+  std::mutex shm_result_mutex_;
+
+  // SHM result-write cursor (worker side). Starts at kResultRegionStart (default
+  // 128 MB, configurable via VGRE_CLUSTER_SHM_RESULT_OFFSET), advances per result
+  // pullback, wraps when the SHM region is exhausted. Non-static so it resets when
+  // DispatchManager is reconstructed on reconnect.
+  uint64_t result_shm_offset_{0}; // initialised to kResultRegionStart in cpp
 
   // Result tracking for partitioned kernel launches (uses parent's mutexes/CVs)
   struct PartitionResult {
