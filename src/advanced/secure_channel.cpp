@@ -780,8 +780,16 @@ VGREResult SecureChannel::sendSecure(vgre_socket_t fd, const void *data,
 // ── Receive Secure ───────────────────────────────────────────────────────
 VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
                                       std::vector<uint8_t> &outData) {
+  // A5: Every exit path records its result in last_recv_result_ so callers
+  // can distinguish HMAC auth failures from I/O errors for the circuit-breaker.
+  auto finish = [this](VGREResult r) -> VGREResult {
+    std::lock_guard<std::mutex> lk(mutex_);
+    last_recv_result_ = r;
+    return r;
+  };
+
   if (!initialized_) {
-    return VGREResult::ERR_NOT_INITIALIZED;
+    return finish(VGREResult::ERR_NOT_INITIALIZED);
   }
 
   // A6: Session lifetime limit — force re-handshake after 1 hour.
@@ -793,7 +801,7 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
     if (nowMs - sessionStartMs_ > 3600000ULL) {
       VGRE_LOG_WARN("SecureChannel",
           "Session expired (>1 hour) — re-handshake required");
-      return VGREResult::ERR_AUTH_FAILED;
+      return finish(VGREResult::ERR_AUTH_FAILED);
     }
   }
 
@@ -801,24 +809,22 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
   SecurePacketHeader hdr{};
   int headerResult = recvAll(fd, &hdr, sizeof(SecurePacketHeader));
   if (headerResult < 0) {
-    if (headerResult == -2) {
-      return VGREResult::ERR_TIMEOUT;
-    }
-    return VGREResult::ERR_IO;
+    return finish(headerResult == -2 ? VGREResult::ERR_TIMEOUT
+                                     : VGREResult::ERR_IO);
   }
 
   // Validate magic
   if (hdr.magic != 0x56475345U || hdr.version != 1) {
     VGRE_LOG_ERROR("SecureChannel",
                    "Invalid secure packet magic or version");
-    return VGREResult::ERR_CRYPTO;
+    return finish(VGREResult::ERR_CRYPTO);
   }
 
   // Validate payload size (max 64 MB to prevent OOM)
   if (hdr.payload_length > 64 * 1024 * 1024) {
     VGRE_LOG_ERROR("SecureChannel", "Payload too large: " +
                                         std::to_string(hdr.payload_length));
-    return VGREResult::ERR_INVALID_VALUE;
+    return finish(VGREResult::ERR_INVALID_VALUE);
   }
 
   // Read encrypted payload
@@ -826,8 +832,8 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
   if (hdr.payload_length > 0) {
     int payloadResult = recvAll(fd, encrypted.data(), hdr.payload_length);
     if (payloadResult < 0) {
-      return (payloadResult == -2) ? VGREResult::ERR_TIMEOUT
-                                   : VGREResult::ERR_IO;
+      return finish(payloadResult == -2 ? VGREResult::ERR_TIMEOUT
+                                        : VGREResult::ERR_IO);
     }
   }
 
@@ -845,7 +851,7 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
         "Most likely cause: VGRE_TCP_AUTH_TOKEN is set on one node but not the "
         "other, or is set to different values.  Either set the same token on all "
         "nodes, or unset it on all nodes to use the default encrypted mode.");
-    return VGREResult::ERR_AUTH_FAILED;
+    return finish(VGREResult::ERR_AUTH_FAILED);
   }
 
   // A1: Sliding 256-bit bitmap replay detection (RFC 4303 §3.4.3).
@@ -869,8 +875,6 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
         replayBitmap_[0] = replayBitmap_[1] = replayBitmap_[2] = replayBitmap_[3] = 0;
       } else {
         // Left-shift the 256-bit bitmap by 'advance' bits.
-        // Bit i represents offset i from highestSeenSeq_; advancing by n means
-        // old offset i becomes new offset i+n (bits move toward MSB).
         uint64_t ws = advance / 64;
         uint64_t bs = advance % 64;
         uint64_t tmp[4] = {0, 0, 0, 0};
@@ -896,14 +900,14 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
         VGRE_LOG_ERROR("SecureChannel",
                        "Replay detected: seq=" + std::to_string(seq) +
                        " is " + std::to_string(offset) + " packets behind window");
-        return VGREResult::ERR_AUTH_FAILED;
+        return finish(VGREResult::ERR_AUTH_FAILED);
       }
       uint64_t word = offset / 64;
       uint64_t bit  = offset % 64;
       if (replayBitmap_[word] & (1ULL << bit)) {
         VGRE_LOG_ERROR("SecureChannel",
                        "Duplicate/replay packet: seq=" + std::to_string(seq));
-        return VGREResult::ERR_AUTH_FAILED;
+        return finish(VGREResult::ERR_AUTH_FAILED);
       }
       replayBitmap_[word] |= (1ULL << bit);
     }
@@ -920,7 +924,7 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
   packetsReceived_++;
   bytesReceived_ += hdr.payload_length;
 
-  return VGREResult::SUCCESS;
+  return finish(VGREResult::SUCCESS);
 }
 
 } // namespace advanced
