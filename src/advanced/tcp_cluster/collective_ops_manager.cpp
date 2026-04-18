@@ -7,9 +7,11 @@
 
 // SIMD intrinsics headers
 #if defined(__AVX2__)
-#include <immintrin.h>  // AVX2
+#include <immintrin.h>  // AVX2 + SSE2
 #elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
 #include <emmintrin.h>  // SSE2
+#elif defined(__ARM_NEON__) || defined(__aarch64__)
+#include <arm_neon.h>   // ARM NEON (AArch32 / AArch64)
 #endif
 
 namespace vgre {
@@ -89,14 +91,23 @@ VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int da
     return VGREResult::ERR_TIMEOUT;
   }
   
-  // Broadcast final result to all workers
+  // Broadcast final result + COLLECTIVE_COMPLETE to all workers.
+  // The RAW_DATA carries the reduced data; COLLECTIVE_COMPLETE is the signal
+  // that wakes workerAllReduce() so it can safely read the buffer.
   {
     std::lock_guard<std::recursive_mutex> clients_lock(parent_->clients_mutex_);
     for (const auto& c : parent_->clients_) {
-      if (c && c->active) {
-        parent_->send_packet(c->socket_fd, PacketType::RAW_DATA, 
-                   parent_->active_reduction_buffer_.data(), total_bytes, 
+      // Only send reduction results to fully authenticated peers — mirrors
+      // broadcastPacket() which also guards on security_established.
+      // An unauthenticated peer receiving RAW_DATA would get valid reduction
+      // results without proving its identity, bypassing the security handshake.
+      if (c && c->active &&
+          (!parent_->security_enabled_ || c->security_established)) {
+        parent_->send_packet(c->socket_fd, PacketType::RAW_DATA,
+                   parent_->active_reduction_buffer_.data(), total_bytes,
                    c->secureChannel.get());
+        parent_->send_packet(c->socket_fd, PacketType::COLLECTIVE_COMPLETE,
+                   nullptr, 0, c->secureChannel.get());
       }
     }
   }
@@ -132,8 +143,12 @@ VGREResult CollectiveOpsManager::workerAllReduce(void* ptr, size_t count, int da
   parent_->send_packet(parent_->client_fd_, PacketType::RAW_DATA, ptr, total_bytes, 
              parent_->client_secure_channel_.get());
   
-  // Wait for result from master (with 30-second timeout)
+  // Wait for result from master (with 30-second timeout).
+  // Clear any stale data from a previous reduction BEFORE waiting — if a prior
+  // call timed out after copying, the predicate would immediately return true
+  // on the next call because the buffer still has leftover bytes.
   std::unique_lock<std::mutex> lock(parent_->reduction_mutex_);
+  parent_->active_reduction_buffer_.clear(); // discard stale data from prior call
   bool success = parent_->reduction_cv_.wait_for(lock, std::chrono::seconds(30), [this]() {
     return !parent_->active_reduction_buffer_.empty() || !parent_->isEnabled();
   });
@@ -141,7 +156,21 @@ VGREResult CollectiveOpsManager::workerAllReduce(void* ptr, size_t count, int da
   if (!success || !parent_->isEnabled() || parent_->active_reduction_buffer_.empty()) {
     return VGREResult::ERR_TIMEOUT;
   }
-  
+
+  // Guard against a master that sends a result buffer smaller than expected —
+  // e.g. due to a datatype mismatch between master and worker, or a partial
+  // network write. Without this check, memcpy reads past the buffer end.
+  if (parent_->active_reduction_buffer_.size() < total_bytes) {
+    VGRE_LOG_ERROR("TCPCluster",
+        "workerAllReduce: received buffer (" +
+        std::to_string(parent_->active_reduction_buffer_.size()) +
+        " bytes) is smaller than expected (" +
+        std::to_string(total_bytes) +
+        " bytes) — possible datatype mismatch, discarding result");
+    parent_->active_reduction_buffer_.clear();
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+
   // Copy result back to ptr
   std::memcpy(ptr, parent_->active_reduction_buffer_.data(), total_bytes);
   parent_->active_reduction_buffer_.clear();
@@ -285,18 +314,32 @@ void CollectiveOpsManager::sumReduce(T* dst, const T* src, size_t count) {
     for (; i < count; ++i) {
       dst[i] += src[i];
     }
-  } else if constexpr (std::is_same_v<T, int64_t>) {
+  } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
+    // int64_t and uint64_t: same bit-width add (wrapping is identical)
     size_t i = 0;
     const size_t simd_width = 4;
     const size_t simd_end = (count / simd_width) * simd_width;
-    
+
     for (; i < simd_end; i += simd_width) {
       __m256i dst_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i));
       __m256i src_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
       __m256i result = _mm256_add_epi64(dst_vec, src_vec);
       _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), result);
     }
-    
+    for (; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  } else if constexpr (std::is_same_v<T, uint32_t>) {
+    // uint32_t: same bit-width as int32_t for addition
+    size_t i = 0;
+    const size_t simd_width = 8;
+    const size_t simd_end = (count / simd_width) * simd_width;
+    for (; i < simd_end; i += simd_width) {
+      __m256i dst_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i));
+      __m256i src_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+      __m256i result = _mm256_add_epi32(dst_vec, src_vec);
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), result);
+    }
     for (; i < count; ++i) {
       dst[i] += src[i];
     }
@@ -305,7 +348,7 @@ void CollectiveOpsManager::sumReduce(T* dst, const T* src, size_t count) {
       dst[i] += src[i];
     }
   }
-  
+
 #elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
   // SSE2 path: process 4 floats, 2 doubles, 4 int32_t, or 2 int64_t per iteration
   if constexpr (std::is_same_v<T, float>) {
@@ -353,18 +396,29 @@ void CollectiveOpsManager::sumReduce(T* dst, const T* src, size_t count) {
     for (; i < count; ++i) {
       dst[i] += src[i];
     }
-  } else if constexpr (std::is_same_v<T, int64_t>) {
+  } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
     size_t i = 0;
     const size_t simd_width = 2;
     const size_t simd_end = (count / simd_width) * simd_width;
-    
     for (; i < simd_end; i += simd_width) {
       __m128i dst_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dst + i));
       __m128i src_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
       __m128i result = _mm_add_epi64(dst_vec, src_vec);
       _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), result);
     }
-    
+    for (; i < count; ++i) {
+      dst[i] += src[i];
+    }
+  } else if constexpr (std::is_same_v<T, uint32_t>) {
+    size_t i = 0;
+    const size_t simd_width = 4;
+    const size_t simd_end = (count / simd_width) * simd_width;
+    for (; i < simd_end; i += simd_width) {
+      __m128i dst_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dst + i));
+      __m128i src_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+      __m128i result = _mm_add_epi32(dst_vec, src_vec);
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), result);
+    }
     for (; i < count; ++i) {
       dst[i] += src[i];
     }
@@ -373,20 +427,65 @@ void CollectiveOpsManager::sumReduce(T* dst, const T* src, size_t count) {
       dst[i] += src[i];
     }
   }
-  
+
+#elif defined(__ARM_NEON__) || defined(__aarch64__)
+  // ARM NEON path: 128-bit registers — 4×float, 2×double, 4×int32, 2×int64,
+  //                4×uint32, 2×uint64 per iteration.
+  if constexpr (std::is_same_v<T, float>) {
+    size_t i = 0;
+    const size_t simd_end = (count / 4) * 4;
+    for (; i < simd_end; i += 4) {
+      float32x4_t d = vld1q_f32(dst + i);
+      float32x4_t s = vld1q_f32(src + i);
+      vst1q_f32(dst + i, vaddq_f32(d, s));
+    }
+    for (; i < count; ++i) dst[i] += src[i];
+  } else if constexpr (std::is_same_v<T, double>) {
+    size_t i = 0;
+    const size_t simd_end = (count / 2) * 2;
+    for (; i < simd_end; i += 2) {
+      float64x2_t d = vld1q_f64(dst + i);
+      float64x2_t s = vld1q_f64(src + i);
+      vst1q_f64(dst + i, vaddq_f64(d, s));
+    }
+    for (; i < count; ++i) dst[i] += src[i];
+  } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
+    size_t i = 0;
+    const size_t simd_end = (count / 4) * 4;
+    for (; i < simd_end; i += 4) {
+      int32x4_t d = vld1q_s32(reinterpret_cast<const int32_t*>(dst + i));
+      int32x4_t s = vld1q_s32(reinterpret_cast<const int32_t*>(src + i));
+      vst1q_s32(reinterpret_cast<int32_t*>(dst + i), vaddq_s32(d, s));
+    }
+    for (; i < count; ++i) dst[i] += src[i];
+  } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
+    size_t i = 0;
+    const size_t simd_end = (count / 2) * 2;
+    for (; i < simd_end; i += 2) {
+      int64x2_t d = vld1q_s64(reinterpret_cast<const int64_t*>(dst + i));
+      int64x2_t s = vld1q_s64(reinterpret_cast<const int64_t*>(src + i));
+      vst1q_s64(reinterpret_cast<int64_t*>(dst + i), vaddq_s64(d, s));
+    }
+    for (; i < count; ++i) dst[i] += src[i];
+  } else {
+    for (size_t i = 0; i < count; ++i) dst[i] += src[i];
+  }
+
 #else
-  // Scalar fallback for systems without SIMD support
+  // Scalar fallback for architectures without SIMD support
   for (size_t i = 0; i < count; ++i) {
     dst[i] += src[i];
   }
 #endif
 }
 
-// Explicit template instantiations
+// Explicit template instantiations — signed, unsigned, and floating-point types
 template void CollectiveOpsManager::sumReduce<float>(float*, const float*, size_t);
 template void CollectiveOpsManager::sumReduce<double>(double*, const double*, size_t);
 template void CollectiveOpsManager::sumReduce<int32_t>(int32_t*, const int32_t*, size_t);
 template void CollectiveOpsManager::sumReduce<int64_t>(int64_t*, const int64_t*, size_t);
+template void CollectiveOpsManager::sumReduce<uint32_t>(uint32_t*, const uint32_t*, size_t);
+template void CollectiveOpsManager::sumReduce<uint64_t>(uint64_t*, const uint64_t*, size_t);
 
 } // namespace advanced
 } // namespace vgre
