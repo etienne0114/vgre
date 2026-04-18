@@ -120,9 +120,10 @@ void TCPClusterManager::clientLoop() {
       
       // Handle token mismatch in fallback mode: retry without authentication
       if (sr == VGREResult::ERR_AUTH_RETRY) {
-        VGRE_LOG_INFO("TCPCluster",
-            "Client: Token mismatch detected — retrying without authentication "
-            "(plaintext encrypted mode)...");
+        VGRE_LOG_WARN("TCPCluster",
+            "SECURITY WARNING: Auth-token mismatch with master — falling back to "
+            "unauthenticated mode. Set the same VGRE_TCP_AUTH_TOKEN on all nodes "
+            "to enforce authentication.");
         
         // Disable security for this connection and retry
         security_enabled_ = false;
@@ -136,14 +137,15 @@ void TCPClusterManager::clientLoop() {
             if (client_fd_ != VGRE_INVALID_SOCKET) {
               vgre_close_socket(client_fd_);
               client_fd_ = VGRE_INVALID_SOCKET;
+              has_master_fd_.store(false, std::memory_order_release);
             }
           }
           if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
           continue; // standby: wait for next master
         }
-        
-        VGRE_LOG_INFO("TCPCluster",
-            "Client: Handshake succeeded in plaintext encrypted mode");
+
+        VGRE_LOG_WARN("TCPCluster",
+            "Client: Handshake succeeded in unauthenticated-encrypted mode");
       } else if (sr != VGREResult::SUCCESS) {
         VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed — dropping connection");
         {
@@ -151,6 +153,7 @@ void TCPClusterManager::clientLoop() {
           if (client_fd_ != VGRE_INVALID_SOCKET) {
             vgre_close_socket(client_fd_);
             client_fd_ = VGRE_INVALID_SOCKET;
+            has_master_fd_.store(false, std::memory_order_release);
           }
         }
         if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
@@ -277,6 +280,12 @@ void TCPClusterManager::clientLoop() {
             staging_ready_ = true;
             staging_cv_.notify_one();
           } else if (n < 0) {
+            // A5: HMAC circuit-breaker on the worker side
+            if (client_secure_channel_ &&
+                client_secure_channel_->getLastRecvResult() == VGREResult::ERR_AUTH_FAILED) {
+              VGRE_LOG_ERROR("TCPCluster",
+                  "Worker: HMAC auth failure from master — possible key-mismatch or replay attack");
+            }
             VGRE_LOG_INFO("TCPCluster", "Worker: Master disconnected (recv returned error)");
             disconnected = true; break;
           }
@@ -301,6 +310,8 @@ void TCPClusterManager::clientLoop() {
       if (client_fd_ != VGRE_INVALID_SOCKET) {
         vgre_close_socket(client_fd_);
         client_fd_ = VGRE_INVALID_SOCKET;
+        // Clear the atomic flag so udpDiscoveryLoop's polling sees the reset.
+        has_master_fd_.store(false, std::memory_order_release);
       }
     }
     // Clear per-connection state so the next master gets a clean handshake.
@@ -495,6 +506,27 @@ void TCPClusterManager::processClientStagingBuffer() {
                 client_shm_manager_ = std::make_unique<core::ShmManager>();
                 if (client_shm_manager_->open(sipkt.shm_name, sipkt.shm_size, false) == VGREResult::SUCCESS)
                     client_shm_enabled_ = true;
+            } else if (type == PacketType::BANDWIDTH_PROBE) {
+                // Echo the 8-byte probe timestamp back so master can compute RTT.
+                // Discard the rest of the payload (zero-filled bandwidth padding).
+                uint64_t probe_sent_ms = 0;
+                if (header.payloadSize >= sizeof(uint64_t))
+                    std::memcpy(&probe_sent_ms,
+                                client_rx_buffer_.data() + sizeof(VSBPHeader),
+                                sizeof(uint64_t));
+                client_rx_buffer_.erase(client_rx_buffer_.begin(),
+                    client_rx_buffer_.begin() + sizeof(VSBPHeader) + header.payloadSize);
+                BandwidthAckPacket ack{};
+                ack.probe_sent_ms = probe_sent_ms;
+                ack.ack_sent_ms = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+                {
+                    std::lock_guard<std::mutex> lk(client_mutex_);
+                    if (client_fd_ != VGRE_INVALID_SOCKET)
+                        send_packet(client_fd_, PacketType::BANDWIDTH_ACK,
+                                    &ack, sizeof(ack), client_secure_channel_.get());
+                }
             } else if (type == PacketType::RAW_DATA || type == PacketType::DATA_BODY) {
                 // Handle RAW_DATA for collective operations
                 if (is_master_ && is_reducing_ && pending_collective_count_ > 0) {
@@ -556,6 +588,18 @@ void TCPClusterManager::processClientStagingBuffer() {
                     pending_collective_datatype_ = op_packet.datatype;
                     pending_collective_count_ = op_packet.count;
                 }
+            } else if (type == PacketType::COLLECTIVE_COMPLETE) {
+                // Master → worker: the all-reduce result RAW_DATA packet that
+                // immediately preceded this packet is now ready. Wake any
+                // workerAllReduce() call that is waiting on reduction_cv_.
+                client_rx_buffer_.erase(client_rx_buffer_.begin(),
+                    client_rx_buffer_.begin() + sizeof(VSBPHeader) + header.payloadSize);
+                {
+                    std::lock_guard<std::mutex> lock(reduction_mutex_);
+                    reduction_cv_.notify_all();
+                }
+                VGRE_LOG_DEBUG("TCPCluster",
+                    "Worker: COLLECTIVE_COMPLETE received — reduction result acknowledged");
             } else if (type == PacketType::COOP_BARRIER_SYNC) {
                 client_rx_buffer_.erase(client_rx_buffer_.begin(),
                     client_rx_buffer_.begin() + sizeof(VSBPHeader));
