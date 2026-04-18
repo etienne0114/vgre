@@ -189,8 +189,12 @@ void TCPClusterManager::serverLoop() {
                 flush_tx_queues(client);
                 // Periodic re-probe: send a new BANDWIDTH_PROBE every kBandwidthReprobeIntervalSec
                 // if the previous one has completed (not in-flight) and the client is remote.
+                // Gate on security_established: sending the probe before the handshake
+                // completes causes the 1MB zero-filled payload to corrupt the handshake
+                // byte stream on the worker side (see CAPABILITY handler below).
                 if (!client->is_local && !client->bandwidth_probe_in_flight &&
                         client->capability_received &&
+                        client->security_established &&
                         std::chrono::duration_cast<std::chrono::seconds>(
                             now - client->last_bandwidth_probe_time).count()
                             >= kBandwidthReprobeIntervalSec) {
@@ -683,11 +687,22 @@ void TCPClusterManager::serverLoop() {
                     cpkt.has_igpu, cpkt.igpu_name);
                 syncToIPC();
 
-                // Launch bandwidth probe: send a 64 KB BANDWIDTH_PROBE immediately
+                // Launch bandwidth probe: send a BANDWIDTH_PROBE immediately
                 // after CAPABILITY so the worker can reply with BANDWIDTH_ACK.
                 // The round-trip time is used to estimate effective network bandwidth
                 // which feeds the workload partitioner (analysis §1.1).
-                if (!client->bandwidth_probe_in_flight && !client->is_local) {
+                //
+                // IMPORTANT: Only send the probe after security is established.
+                // Sending it before the handshake completes causes the probe's
+                // 1MB zero-filled payload to arrive at the worker while
+                // performClientHandshake() is still in its bounded-recv peek
+                // window. The peek reads 88 bytes of the probe payload (not the
+                // SECURE_HANDSHAKE), stashes them in staging, and the remaining
+                // ~1MB of zeros floods processClientStagingBuffer as invalid
+                // VSBP frames (magic=0x0). Gate on security_established to
+                // ensure the handshake has fully completed before sending.
+                if (!client->bandwidth_probe_in_flight && !client->is_local &&
+                        client->security_established) {
                     uint64_t now_ms = static_cast<uint64_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::system_clock::now().time_since_epoch()).count());
