@@ -8,6 +8,7 @@
 
 #include "vgre/advanced/tcp_cluster/internal/dispatch_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/advanced/secure_channel.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/common/logger.h"
@@ -21,8 +22,12 @@ namespace vgre {
 namespace advanced {
 
 void DispatchManager::handlePartitionDispatch(const PartitionDispatchPacket& pkt) {
-  // Auth check BEFORE any processing
-  if (parent_->auth_token_ == 0 || pkt.auth_token != parent_->auth_token_) {
+  // Auth check BEFORE any processing (B5: constant-time compare to prevent timing side-channel)
+  if (parent_->auth_token_ == 0 ||
+      !crypto::secure_compare(
+          reinterpret_cast<const uint8_t*>(&pkt.auth_token),
+          reinterpret_cast<const uint8_t*>(&parent_->auth_token_),
+          sizeof(parent_->auth_token_))) {
     VGRE_LOG_ERROR("TCPCluster", "Rejected partition dispatch: invalid auth token");
     parent_->pending_args_.clear();
     return;
@@ -48,7 +53,21 @@ void DispatchManager::handlePartitionDispatch(const PartitionDispatchPacket& pkt
   for (int i = 0; i < numArgs; ++i) {
     auto it = parent_->pending_args_.find(i);
     if (it == parent_->pending_args_.end()) {
-      VGRE_LOG_ERROR("TCPCluster", "Partition execute: missing arg " + std::to_string(i));
+      VGRE_LOG_ERROR("TCPCluster",
+          "Partition execute: missing arg " + std::to_string(i) +
+          " for partition " + std::to_string(pkt.partition_id) +
+          " kernel " + std::to_string(pkt.kernel_id) +
+          " — sending ERR_INVALID_VALUE to master to prevent deadlock");
+      // Send error result so master doesn't deadlock waiting for a response
+      // that would otherwise never arrive.
+      PartitionResultPacket errpkt{};
+      errpkt.kernel_id     = pkt.kernel_id;
+      errpkt.partition_id  = pkt.partition_id;
+      errpkt.result        = VGREResult::ERR_INVALID_VALUE;
+      errpkt.execution_time_ms = 0.0;
+      parent_->send_packet(parent_->client_fd_, PacketType::PARTITION_RESULT,
+                           &errpkt, sizeof(errpkt),
+                           parent_->client_secure_channel_.get());
       parent_->pending_args_.clear();
       return;
     }
