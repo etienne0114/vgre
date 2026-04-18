@@ -51,13 +51,27 @@ mkdir -p "$VGRE_DIR"
 chmod 700 "$VGRE_DIR"
 
 # ── Step 1: Auth Token ────────────────────────────────────────────────────────
+OLD_FINGERPRINT=""
 if [[ -f "$TOKEN_FILE" ]]; then
-    PREVIEW=$(cat "$TOKEN_FILE" | head -c 8)
-    echo "Existing token found: ${PREVIEW}... (truncated)"
+    _OLD=$(cat "$TOKEN_FILE")
+    if command -v sha256sum >/dev/null 2>&1; then
+        OLD_FINGERPRINT=$(printf '%s' "$_OLD" | sha256sum | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        OLD_FINGERPRINT=$(printf '%s' "$_OLD" | shasum -a 256 | awk '{print $1}')
+    fi
+    echo "Existing token found."
+    echo "  Current fingerprint (SHA256): ${OLD_FINGERPRINT:0:16}..."
+    echo ""
+    echo "⚠️  Replacing this token will DISCONNECT all workers using it."
+    echo "   They will need the new token file before they can reconnect."
+    echo ""
     printf "Keep existing token? [Y/n]: "
     read -r KEEP
     if [[ "$KEEP" == "n" || "$KEEP" == "N" ]]; then
         rm -f "$TOKEN_FILE"
+        OLD_FINGERPRINT=""   # cleared so we show the replace warning below
+    else
+        echo "✅ Keeping existing token."
     fi
 fi
 
@@ -90,35 +104,48 @@ if [[ ! -f "$TOKEN_FILE" ]]; then
 
     printf '%s' "$TOKEN" > "$TOKEN_FILE"
     chmod 600 "$TOKEN_FILE"
+
+    # Compute new fingerprint immediately after writing — this is the single source of truth
+    if command -v sha256sum >/dev/null 2>&1; then
+        NEW_FINGERPRINT=$(printf '%s' "$(cat "$TOKEN_FILE")" | sha256sum | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        NEW_FINGERPRINT=$(printf '%s' "$(cat "$TOKEN_FILE")" | shasum -a 256 | awk '{print $1}')
+    else
+        NEW_FINGERPRINT="(sha256sum not available)"
+    fi
+
     echo "✅ Token saved to $TOKEN_FILE"
+    echo "   SHA256 fingerprint: ${NEW_FINGERPRINT:0:16}..."
     echo ""
-    echo "┌─────────────────────────────────────────────────────────────┐"
-    echo "│  ⚠️  IMPORTANT — copy this token to EVERY worker machine!   │"
-    echo "│                                                             │"
+    echo "┌──────────────────────────────────────────────────────────────────┐"
+    echo "│  ⚠️  COPY THIS TOKEN FILE TO EVERY WORKER MACHINE               │"
+    echo "├──────────────────────────────────────────────────────────────────┤"
     echo "│  Token:  $TOKEN  │"
-    echo "│                                                             │"
-    echo "│  Copy command (run on THIS machine):                        │"
+    echo "│  SHA256: ${NEW_FINGERPRINT:0:32}...  │"
+    echo "├──────────────────────────────────────────────────────────────────┤"
+    echo "│  Copy command (run on THIS machine):                             │"
     echo "│    scp $TOKEN_FILE user@WORKER_IP:$TOKEN_FILE"
-    echo "│                                                             │"
-    echo "│  All nodes MUST have the identical token file or the        │"
-    echo "│  handshake will fail. Run setup-cluster.sh on the worker    │"
-    echo "│  and choose option 2 (paste) if scp is not available.       │"
-    echo "└─────────────────────────────────────────────────────────────┘"
+    echo "│                                                                  │"
+    echo "│  Verify both machines match (run on each):                       │"
+    echo "│    bash scripts/setup-cluster.sh --show-fingerprint              │"
+    echo "│    Both machines MUST show: ${NEW_FINGERPRINT:0:16}...              │"
+    echo "└──────────────────────────────────────────────────────────────────┘"
 fi
 
-# Compute and show SHA256 fingerprint so users can verify both nodes match
-CURRENT_TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null || true)
-if [[ -n "$CURRENT_TOKEN" ]]; then
+# Always show the current fingerprint at the end (single authoritative number)
+if [[ -f "$TOKEN_FILE" ]]; then
+    _CUR=$(cat "$TOKEN_FILE")
     if command -v sha256sum >/dev/null 2>&1; then
-        TOKEN_FP=$(printf '%s' "$CURRENT_TOKEN" | sha256sum | awk '{print $1}' | head -c 16)
+        _CUR_FP=$(printf '%s' "$_CUR" | sha256sum | awk '{print $1}')
     elif command -v shasum >/dev/null 2>&1; then
-        TOKEN_FP=$(printf '%s' "$CURRENT_TOKEN" | shasum -a 256 | awk '{print $1}' | head -c 16)
+        _CUR_FP=$(printf '%s' "$_CUR" | shasum -a 256 | awk '{print $1}')
     else
-        TOKEN_FP="(sha256sum not available)"
+        _CUR_FP="(sha256sum not available)"
     fi
-    echo "Token SHA256 fingerprint (first 16 chars): $TOKEN_FP..."
-    echo "  Run this on every worker to confirm token matches:"
-    echo "    bash scripts/setup-cluster.sh --show-fingerprint"
+    echo ""
+    echo "Active token fingerprint (SHA256): ${_CUR_FP:0:16}..."
+    echo "  → All cluster nodes must match this fingerprint."
+    echo "  → Check any node at any time:  bash scripts/setup-cluster.sh --show-fingerprint"
 fi
 
 # ── Step 2: Shell Profile ─────────────────────────────────────────────────────
