@@ -10,17 +10,35 @@ INSTALL_DIR="$HOME/.local/share/VGRE"
 BIN_DIR="$HOME/.local/bin"
 VGRE_ENABLE_NATIVE_SIMD_FLAG="${VGRE_ENABLE_NATIVE_SIMD:-0}"
 
-# Phase 10: Dynamic Auth Token Handling
-# If VGRE_TCP_AUTH_TOKEN is not in env, we do NOT default to a hardcoded string.
-# This ensures truth in the security model.
-if [[ -z "$VGRE_TCP_AUTH_TOKEN" ]]; then
-    echo "⚠️  VGRE_TCP_AUTH_TOKEN is not set."
-    echo "   Dashboard will fallback to Hardware Secure Storage (TPM) or allow manual input."
-else
-    echo "🔐 VGRE_TCP_AUTH_TOKEN provided in environment; secure cluster mode active."
-    # Sync to local cache for dashboard dev fallback
+# ── Auth Token Auto-load ──────────────────────────────────────────────────────
+# Priority order:
+#   1. VGRE_TCP_AUTH_TOKEN_FILE env var (explicit file path)
+#   2. ~/.vgre/token              (written by setup-cluster.sh — zero config after setup)
+#   3. VGRE_TCP_AUTH_TOKEN env var (raw token — visible in process list, avoid in production)
+#   4. None — dashboard falls back to hardware secure storage (TPM/Keyring)
+#
+# For full cluster env var reference, see docs/USER_GUIDE.md section 4.5.
+DEFAULT_TOKEN_FILE="$HOME/.vgre/token"
+if [[ -z "$VGRE_TCP_AUTH_TOKEN_FILE" && -f "$DEFAULT_TOKEN_FILE" ]]; then
+    export VGRE_TCP_AUTH_TOKEN_FILE="$DEFAULT_TOKEN_FILE"
+    echo "🔑 Auto-loaded token from $DEFAULT_TOKEN_FILE"
+fi
+
+if [[ -n "$VGRE_TCP_AUTH_TOKEN_FILE" ]]; then
+    TOKEN_FILE="$VGRE_TCP_AUTH_TOKEN_FILE"
+    echo "🔐 Secure cluster mode active (token file: $TOKEN_FILE)"
+elif [[ -n "$VGRE_TCP_AUTH_TOKEN" ]]; then
+    echo "🔐 VGRE_TCP_AUTH_TOKEN set; writing to ~/.vgre/token for the launch wrapper..."
     mkdir -p "$HOME/.vgre"
-    echo "$VGRE_TCP_AUTH_TOKEN" > "$HOME/.vgre/token"
+    TOKEN_FILE="$HOME/.vgre/token"
+    printf '%s' "$VGRE_TCP_AUTH_TOKEN" > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+    export VGRE_TCP_AUTH_TOKEN_FILE="$TOKEN_FILE"
+else
+    TOKEN_FILE=""
+    echo "⚠️  No auth token configured."
+    echo "   Run  bash scripts/setup-cluster.sh  to set one up (recommended)."
+    echo "   Cluster will use hardware secure storage (TPM/Keyring) or allow manual input."
 fi
 
 FLUTTER_CACHE_PATH="${FLUTTER_CACHE_PATH:-$HOME/.cache/flutter}"
@@ -121,9 +139,13 @@ else
     echo '[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"' >> "$LAUNCH_SCRIPT"
     echo '' >> "$LAUNCH_SCRIPT"
     
-    if [[ -n "$VGRE_TCP_AUTH_TOKEN" ]]; then
-        echo "# Injecting known install-time auth token for guaranteed Dashboard visibility" >> "$LAUNCH_SCRIPT"
-        echo "export VGRE_TCP_AUTH_TOKEN=\"$VGRE_TCP_AUTH_TOKEN\"" >> "$LAUNCH_SCRIPT"
+    # Use token file instead of raw token to keep the secret out of the process list.
+    if [[ -n "$VGRE_TCP_AUTH_TOKEN_FILE" ]]; then
+        echo "# Token file path set at install time" >> "$LAUNCH_SCRIPT"
+        echo "export VGRE_TCP_AUTH_TOKEN_FILE=\"$VGRE_TCP_AUTH_TOKEN_FILE\"" >> "$LAUNCH_SCRIPT"
+    elif [[ -f "${TOKEN_FILE:-$HOME/.vgre/token}" ]]; then
+        echo "# Read auth token from file (written during sync)" >> "$LAUNCH_SCRIPT"
+        echo "export VGRE_TCP_AUTH_TOKEN_FILE=\"${TOKEN_FILE:-$HOME/.vgre/token}\"" >> "$LAUNCH_SCRIPT"
     fi
     
     echo "export LD_LIBRARY_PATH=\"\$LD_LIBRARY_PATH:$INSTALL_DIR/lib\"" >> "$LAUNCH_SCRIPT"
@@ -157,8 +179,26 @@ EOF
     chmod +x "$INSTALL_DIR/vgre-worker"
     ln -sf "$INSTALL_DIR/vgre-launch.sh" "$BIN_DIR/vgre-dashboard"
     ln -sf "$INSTALL_DIR/vgre-worker" "$BIN_DIR/vgre-worker"
+    # Install vgre-start for easy cluster management
+    if [[ -f "$SCRIPT_DIR/vgre-start.sh" ]]; then
+        chmod +x "$SCRIPT_DIR/vgre-start.sh"
+        ln -sf "$SCRIPT_DIR/vgre-start.sh" "$BIN_DIR/vgre-start"
+    fi
 fi
 
+echo ""
 echo "✅ VGRE Sync Complete!"
 echo "📍 Installed to: $INSTALL_DIR"
-echo "🚀 You can now launch 'VGRE Dashboard' from your application menu or run 'vgre-dashboard' in your terminal."
+echo ""
+if [[ -f "$HOME/.vgre/token" ]]; then
+    echo "🔐 Cluster auth token: ready  ($HOME/.vgre/token)"
+    echo ""
+    echo "   Start master:  vgre-start --master"
+    echo "   Start worker:  vgre-start --worker"
+    echo "   Local test:    vgre-start --test"
+else
+    echo "⚙️  Cluster not yet configured. Run the setup to enable secure clustering:"
+    echo "   bash scripts/setup-cluster.sh"
+fi
+echo ""
+echo "🚀 Launch dashboard: vgre-dashboard  (or from your application menu)"
