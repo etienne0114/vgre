@@ -71,6 +71,21 @@ if (-not (Test-Path $dashboardExe)) { $dashboardExe = Join-Path $InstallDir "vgr
 # Add install lib dir to DLL search path for this session
 $env:PATH = "$InstallDir\lib;$InstallDir;$env:PATH"
 
+# Show SHA256 fingerprint so users can verify master and worker tokens match.
+# Hash the token text (no trailing newline) — same as C++ SHA256(auth_token_str_).
+if (Test-Path $TokenFile) {
+    try {
+        $tokenText = [System.IO.File]::ReadAllText($TokenFile).TrimEnd("`r","`n")
+        $tokenBytes = [System.Text.Encoding]::UTF8.GetBytes($tokenText)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $hashBytes = $sha.ComputeHash($tokenBytes)
+        $fp = ($hashBytes | ForEach-Object { $_.ToString("x2") }) -join ""
+        Write-Host "Token fingerprint (SHA256): $($fp.Substring(0,16))..." -ForegroundColor Cyan
+        Write-Host "  (master and worker MUST show the same fingerprint)" -ForegroundColor Cyan
+        Write-Host ""
+    } catch {}
+}
+
 # -- Worker args ---------------------------------------------------------------
 $workerArgs = @("--port", $port)
 if ($threads) { $workerArgs += @("--threads", $threads) }

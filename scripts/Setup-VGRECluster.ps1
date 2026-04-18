@@ -65,6 +65,21 @@ if (-not $keepExisting) {
 
     [System.IO.File]::WriteAllText($TokenFile, $token)
     Write-Host "[OK] Token saved to $TokenFile" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "┌─────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+    Write-Host "│  ⚠️  IMPORTANT — copy this token to EVERY worker machine!   │" -ForegroundColor Yellow
+    Write-Host "│                                                             │" -ForegroundColor Yellow
+    Write-Host "│  Token: $token" -ForegroundColor Yellow
+    Write-Host "│                                                             │" -ForegroundColor Yellow
+    Write-Host "│  Copy the token file to each worker at the same path:      │" -ForegroundColor Yellow
+    Write-Host "│    scp $TokenFile user@WORKER_IP:$TokenFile" -ForegroundColor Yellow
+    Write-Host "│  (or copy manually via USB / shared drive)                 │" -ForegroundColor Yellow
+    Write-Host "│                                                             │" -ForegroundColor Yellow
+    Write-Host "│  All nodes MUST have the identical token or the handshake  │" -ForegroundColor Yellow
+    Write-Host "│  will fail. To verify, run on each machine:                │" -ForegroundColor Yellow
+    Write-Host "│    Get-FileHash $TokenFile -Algorithm SHA256" -ForegroundColor Yellow
+    Write-Host "│  Both machines must show the identical SHA256 hash.        │" -ForegroundColor Yellow
+    Write-Host "└─────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
 }
 
 # -- Step 2: Persist to User Environment --------------------------------------

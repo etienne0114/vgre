@@ -60,6 +60,26 @@ else
     exit 1
 fi
 
+# Show SHA256 fingerprint of the active token so users can verify master/worker match
+_ACTIVE_TOKEN=""
+if [[ -f "$TOKEN_FILE" ]]; then
+    _ACTIVE_TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null || true)
+elif [[ -n "$VGRE_TCP_AUTH_TOKEN" ]]; then
+    _ACTIVE_TOKEN="$VGRE_TCP_AUTH_TOKEN"
+fi
+if [[ -n "$_ACTIVE_TOKEN" ]]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+        _FP=$(printf '%s' "$_ACTIVE_TOKEN" | sha256sum | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        _FP=$(printf '%s' "$_ACTIVE_TOKEN" | shasum -a 256 | awk '{print $1}')
+    else
+        _FP="(sha256sum unavailable)"
+    fi
+    echo "🔑 Token fingerprint (SHA256): ${_FP:0:16}..."
+    echo "   (master and worker MUST show the same fingerprint)"
+    echo ""
+fi
+
 # ── Library Path ──────────────────────────────────────────────────────────────
 export LD_LIBRARY_PATH="$INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}"
 

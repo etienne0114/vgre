@@ -143,15 +143,13 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       auth_token_str_ = std::move(loaded_token);
       token_for_log = auth_token_str_;
     }
-    // Hash the token for logging — never log the raw token
-    uint64_t hash = 0xcbf29ce484222325ULL;
-    for (char c : token_for_log) {
-      hash ^= static_cast<uint64_t>(c);
-      hash *= 0x100000001b3ULL;
-    }
+    // Hash the token for logging — never log the raw token.
+    // Use SHA256 (same algorithm as computeTokenHash / handshake diagnostics)
+    // so the displayed hash is identical on startup and in any auth-failure message.
+    std::string token_hash_hex = security_manager_->computeTokenHash(token_for_log);
     VGRE_LOG_INFO("TCPCluster",
         "Auth Token active — authenticated encryption enabled "
-        "(token hash: " + std::to_string(hash).substr(0, 8) + "...)");
+        "(token SHA256: " + token_hash_hex.substr(0, 16) + "...)");
   } else {
     // Priority 3: no token configured — use a fixed well-known default so
     // every VGRE node derives the SAME session key.  Traffic is AES-256-CTR
