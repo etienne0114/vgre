@@ -3,6 +3,7 @@
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/common/logger.h"
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <chrono>
@@ -12,9 +13,24 @@ namespace vgre {
 namespace advanced {
 
 namespace {
-  constexpr int MAX_DELTA_SYNC_RETRIES = 3;
-  constexpr int INITIAL_RETRY_BACKOFF_MS = 100;
-  constexpr int MAX_RETRY_BACKOFF_MS = 5000;
+  // Configurable via VGRE_CLUSTER_MAX_DELTA_SYNC_RETRIES (default 3).
+  const int MAX_DELTA_SYNC_RETRIES = []() -> int {
+      const char* env = std::getenv("VGRE_CLUSTER_MAX_DELTA_SYNC_RETRIES");
+      if (env) { try { int v = std::stoi(env); if (v > 0 && v <= 100) return v; } catch (...) {} }
+      return 3;
+  }();
+  // Configurable via VGRE_CLUSTER_RETRY_BACKOFF_INITIAL_MS (default 100 ms).
+  const int INITIAL_RETRY_BACKOFF_MS = []() -> int {
+      const char* env = std::getenv("VGRE_CLUSTER_RETRY_BACKOFF_INITIAL_MS");
+      if (env) { try { int v = std::stoi(env); if (v > 0) return v; } catch (...) {} }
+      return 100;
+  }();
+  // Configurable via VGRE_CLUSTER_RETRY_BACKOFF_MAX_MS (default 5000 ms).
+  const int MAX_RETRY_BACKOFF_MS = []() -> int {
+      const char* env = std::getenv("VGRE_CLUSTER_RETRY_BACKOFF_MAX_MS");
+      if (env) { try { int v = std::stoi(env); if (v > 0) return v; } catch (...) {} }
+      return 5000;
+  }();
   
   class ExponentialBackoff {
   public:
@@ -51,9 +67,21 @@ VGREResult MemorySyncManager::streamArgumentsToWorker(void** args, int num_args,
     return VGREResult::ERR_INVALID_KERNEL;
   }
   
+  // All arguments must have registered type info. A silent UINT64 fallback
+  // would produce the wrong marshal layout and silently corrupt data on
+  // the worker. Reject up-front if type info is incomplete.
+  if (static_cast<int>(argTypes.size()) < num_args) {
+    VGRE_LOG_ERROR("TCPCluster",
+        "streamArgumentsToWorker: kernel " + std::to_string(kernel_id) +
+        " has " + std::to_string(argTypes.size()) + " registered arg types "
+        "but " + std::to_string(num_args) + " args were supplied — "
+        "register all argument types before launching remotely.");
+    return VGREResult::ERR_INVALID_KERNEL;
+  }
+
   // Stream each argument
   for (int i = 0; i < num_args; ++i) {
-    ArgType type = (i < static_cast<int>(argTypes.size())) ? argTypes[i] : ArgType::UINT64;
+    ArgType type = argTypes[i];
     
     VGREResult result = VGREResult::SUCCESS;
     if (type == ArgType::STRUCT) {
@@ -194,10 +222,20 @@ VGREResult MemorySyncManager::initializeShmForClient(std::shared_ptr<TCPClusterM
   
   // Create SHM manager
   client->shmManager = std::make_unique<vgre::core::ShmManager>();
-  
+
   // Generate unique SHM name based on socket FD
   std::string shmName = "vgre_shm_" + std::to_string(client->socket_fd);
-  size_t shmSize = 256 * 1024 * 1024; // 256MB default
+  // Configurable via VGRE_CLUSTER_SHM_SIZE (bytes, default 256 MB).
+  // Mirrors the server_loop.cpp constant so both sides negotiate the same size.
+  static const size_t kShmSize = []() -> size_t {
+    const char* env = std::getenv("VGRE_CLUSTER_SHM_SIZE");
+    if (env) {
+      try { long long v = std::stoll(env); if (v > 0) return static_cast<size_t>(v); }
+      catch (...) {}
+    }
+    return 256ULL * 1024 * 1024;
+  }();
+  size_t shmSize = kShmSize;
   
   // Open/create shared memory segment
   VGREResult result = client->shmManager->open(shmName, shmSize, true);
@@ -279,6 +317,9 @@ VGREResult MemorySyncManager::sendDeltaSyncWithRetry(void* ptr, uint64_t handle,
 VGREResult MemorySyncManager::sendDeltaSyncSHM(void* ptr, uint64_t handle,
                                                const std::vector<std::pair<size_t, size_t>>& dirtyRanges,
                                                std::shared_ptr<TCPClusterManager::ClientConnection> client) {
+  if (!client->shmManager || !client->shmManager->getBasePtr()) {
+    return sendDeltaSyncTCP(ptr, handle, dirtyRanges, client);
+  }
   size_t allocSize = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
   for (const auto& range : dirtyRanges) {
     if (range.first > allocSize || range.second > allocSize - range.first)
@@ -358,6 +399,9 @@ VGREResult MemorySyncManager::sendFullSync(void* ptr, uint64_t handle, size_t si
 
 VGREResult MemorySyncManager::sendFullSyncSHM(void* ptr, uint64_t handle, size_t size,
                                               std::shared_ptr<TCPClusterManager::ClientConnection> client) {
+  if (!client->shmManager || !client->shmManager->getBasePtr()) {
+    return sendFullSyncTCP(ptr, handle, size, client);
+  }
   // Check SHM space availability
   uint64_t offset = client->shm_offset;
   if (offset + size > client->shmManager->getSize()) {
