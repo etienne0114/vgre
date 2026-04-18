@@ -119,9 +119,33 @@ else
     # Linux deployment
     BUNDLE_DIR="$PROJECT_ROOT/vgre_dashboard/build/linux/x64/release/bundle"
     cp -r "$BUNDLE_DIR"/* "$INSTALL_DIR/"
-    cp build/libvgre.so "$INSTALL_DIR/lib/"
-    cp build/libvgre_cudart.so "$INSTALL_DIR/lib/"
-    cp build/src/advanced/vgre-worker "$INSTALL_DIR/" || cp build/bin/vgre-worker "$INSTALL_DIR/" || cp build/vgre-worker "$INSTALL_DIR/"
+
+    # Copy shared libraries — handle both bare .so symlinks and versioned .so.x.y.z files.
+    # Use cp -P to preserve symlinks so the loader finds both libvgre.so and libvgre.so.0.
+    cp -P build/libvgre.so* "$INSTALL_DIR/lib/"
+    cp -P build/libvgre_cudart.so* "$INSTALL_DIR/lib/"
+
+    # Deploy vgre-worker.
+    # The binary lives at build/src/advanced/vgre-worker (CMake output path).
+    # If the destination is busy (worker process still running), stop it first,
+    # then copy to a temp file and atomically rename to avoid ETXTBSY.
+    WORKER_SRC="$PROJECT_ROOT/build/src/advanced/vgre-worker"
+    WORKER_DST="$INSTALL_DIR/vgre-worker"
+    if [[ ! -f "$WORKER_SRC" ]]; then
+        echo "⚠️  vgre-worker binary not found at $WORKER_SRC — skipping worker deploy"
+    else
+        # Stop any running worker so the destination file is not busy.
+        if pgrep -x vgre-worker >/dev/null 2>&1; then
+            echo "🛑 Stopping running vgre-worker before deploy..."
+            pkill -x vgre-worker || true
+            sleep 1
+        fi
+        # Copy to a temp file then rename — atomic on Linux, avoids ETXTBSY
+        # even if a stale process still holds the old inode open.
+        cp "$WORKER_SRC" "${WORKER_DST}.new"
+        mv -f "${WORKER_DST}.new" "$WORKER_DST"
+        echo "✅ vgre-worker deployed to $WORKER_DST"
+    fi
     
     # Copy essential JIT headers
     mkdir -p "$INSTALL_DIR/include"
