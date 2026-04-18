@@ -18,6 +18,7 @@
 #include "vgre/common/sockets.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -36,6 +37,87 @@ using vgre::common::vgre_close_socket;
 using vgre::common::vgre_ioctl_nonblock;
 using vgre::common::vgre_is_would_block;
 using vgre::common::vgre_get_last_socket_error;
+
+namespace {
+
+// Bandwidth probe payload size (1 MB default; configurable via VGRE_CLUSTER_PROBE_BYTES).
+// Larger probes give more accurate bandwidth estimates on fast networks.
+const size_t kProbePayloadBytes = []() -> size_t {
+    const char* env = std::getenv("VGRE_CLUSTER_PROBE_BYTES");
+    if (env) {
+        try {
+            long long v = std::stoll(env);
+            if (v >= 4096 && v <= 64 * 1024 * 1024) return static_cast<size_t>(v);
+        } catch (...) {}
+    }
+    return 1024ULL * 1024; // 1 MB
+}();
+
+// Configurable via VGRE_CLUSTER_MAX_HANDSHAKE_THREADS (default 32).
+const size_t kMaxHandshakeThreads = []() -> size_t {
+    const char* env = std::getenv("VGRE_CLUSTER_MAX_HANDSHAKE_THREADS");
+    if (env) {
+        try {
+            long v = std::stol(env);
+            if (v > 0 && v <= 512) return static_cast<size_t>(v);
+        } catch (...) {}
+    }
+    return 32;
+}();
+
+// Configurable via VGRE_CLUSTER_KEY_ROTATION_THRESHOLD (default 10000 packets).
+const uint32_t kKeyRotationThreshold = []() -> uint32_t {
+    const char* env = std::getenv("VGRE_CLUSTER_KEY_ROTATION_THRESHOLD");
+    if (env) {
+        try {
+            long v = std::stol(env);
+            if (v > 0) return static_cast<uint32_t>(v);
+        } catch (...) {}
+    }
+    return 10000;
+}();
+
+// Configurable via VGRE_CLUSTER_MAX_RX_BUFFER (bytes, default 256 MB).
+const size_t kMaxRxBuffer = []() -> size_t {
+    const char* env = std::getenv("VGRE_CLUSTER_MAX_RX_BUFFER");
+    if (env) {
+        try {
+            long long v = std::stoll(env);
+            if (v >= 1024 * 1024) return static_cast<size_t>(v);
+        } catch (...) {}
+    }
+    return 256ULL * 1024 * 1024;
+}();
+
+// Re-probe bandwidth interval — configurable via VGRE_CLUSTER_BANDWIDTH_REPROBE_SEC
+// (default 300 s / 5 minutes).  Lower values give more up-to-date measurements
+// but increase probing overhead; values below 30 s are rejected.
+const int kBandwidthReprobeIntervalSec = []() -> int {
+    const char* env = std::getenv("VGRE_CLUSTER_BANDWIDTH_REPROBE_SEC");
+    if (env) {
+        try {
+            int v = std::stoi(env);
+            if (v >= 30 && v <= 86400) return v;
+        } catch (...) {}
+    }
+    return 300;
+}();
+
+// Per-connection packet rate limit (token bucket, 1-second window).
+// Configurable via VGRE_CLUSTER_MAX_PACKETS_PER_SEC (default 10000).
+// Protects against packet-flood DoS from a connected peer.
+const uint32_t kMaxPacketsPerSec = []() -> uint32_t {
+    const char* env = std::getenv("VGRE_CLUSTER_MAX_PACKETS_PER_SEC");
+    if (env) {
+        try {
+            long v = std::stol(env);
+            if (v > 0 && v <= 1000000) return static_cast<uint32_t>(v);
+        } catch (...) {}
+    }
+    return 10000;
+}();
+
+} // anonymous namespace
 
 void TCPClusterManager::serverLoop() {
   VGRE_LOG_DEBUG("TCPCluster", "Master Server Loop starting...");
@@ -98,10 +180,34 @@ void TCPClusterManager::serverLoop() {
     // Phase 12: TSS2 Unconditional Priority Flush — must run even on poll timeout so
     // that packets enqueued by application threads (broadcastKernelRegistration,
     // launchRemoteKernel, etc.) are transmitted without waiting for incoming data.
+    // Also trigger periodic bandwidth re-probing for non-local workers.
     {
         std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+        auto now = std::chrono::steady_clock::now();
         for (auto &client : clients_) {
-            if (client && client->active) flush_tx_queues(client);
+            if (client && client->active) {
+                flush_tx_queues(client);
+                // Periodic re-probe: send a new BANDWIDTH_PROBE every kBandwidthReprobeIntervalSec
+                // if the previous one has completed (not in-flight) and the client is remote.
+                if (!client->is_local && !client->bandwidth_probe_in_flight &&
+                        client->capability_received &&
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            now - client->last_bandwidth_probe_time).count()
+                            >= kBandwidthReprobeIntervalSec) {
+                    uint64_t ts_ms = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count());
+                    std::vector<uint8_t> probe_buf(sizeof(uint64_t) + kProbePayloadBytes, 0);
+                    std::memcpy(probe_buf.data(), &ts_ms, sizeof(uint64_t));
+                    client->bandwidth_probe_start = now;
+                    client->bandwidth_probe_in_flight = true;
+                    send_packet(client->socket_fd, PacketType::BANDWIDTH_PROBE,
+                                probe_buf.data(), probe_buf.size(),
+                                client->secureChannel.get());
+                    VGRE_LOG_DEBUG("TCPCluster",
+                        "Re-probing bandwidth for " + client->ip_address);
+                }
+            }
         }
     }
 
@@ -110,11 +216,10 @@ void TCPClusterManager::serverLoop() {
     // packet to the worker and advances its own nonce.  packets_sent is
     // reset to 0 after rotation so the threshold fires once per interval.
     if (security_enabled_) {
-        constexpr uint32_t KEY_ROTATION_THRESHOLD = 10000;
         std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
         for (auto &client : clients_) {
             if (client && client->active && client->security_established &&
-                    client->packets_sent >= KEY_ROTATION_THRESHOLD) {
+                    client->packets_sent >= kKeyRotationThreshold) {
                 VGREResult rr = security_manager_->rotateSessionKey(client);
                 if (rr == VGREResult::SUCCESS) {
                     client->packets_sent = 0; // reset counter for next interval
@@ -182,6 +287,7 @@ void TCPClusterManager::serverLoop() {
                         continue;
                     }
                     client_fd_ = new_socket;
+                    has_master_fd_.store(true, std::memory_order_release);
                 }
                 VGRE_LOG_INFO("TCPCluster",
                     "Worker: Accepted inbound connection from Master at " +
@@ -201,9 +307,10 @@ void TCPClusterManager::serverLoop() {
             // entry for this worker IP, drop the inbound duplicate to ensure
             // exactly ONE session key exists per peer.
             const std::string inbound_ip(ipstr);
-            if (!connection_manager_->addClientIfNotDuplicate(inbound_ip, new_socket, address)) {
-                goto server_loop_next_iter; // skip past rate-limit else block
-            }
+            const bool should_process =
+                connection_manager_->addClientIfNotDuplicate(inbound_ip, new_socket, address);
+
+            if (should_process) {
 
             VGRE_LOG_INFO("TCPCluster", "Master: Accepted new remote node from " +
                 std::string(ipstr) + ":" + std::to_string(ntohs(address.sin_port)));
@@ -216,7 +323,15 @@ void TCPClusterManager::serverLoop() {
                 // Create unique SHM segment for this client
                 clients_.back()->shmManager = std::make_unique<vgre::core::ShmManager>();
                 std::string shmName = "vgre_shm_" + std::to_string(new_socket);
-                size_t shmSize = 256 * 1024 * 1024; // 256MB default
+                // Configurable via VGRE_CLUSTER_SHM_SIZE (bytes, default 256 MB).
+                static const size_t shmSize = []() -> size_t {
+                    const char* env = std::getenv("VGRE_CLUSTER_SHM_SIZE");
+                    if (env) {
+                        try { long long v = std::stoll(env); if (v > 0) return static_cast<size_t>(v); }
+                        catch (...) {}
+                    }
+                    return 256ULL * 1024 * 1024;
+                }();
 
                 if (clients_.back()->shmManager->open(shmName, shmSize, true) == VGREResult::SUCCESS) {
                     ShmInitPacket sipkt{};
@@ -235,9 +350,10 @@ void TCPClusterManager::serverLoop() {
                 // under a port-scan or rapid-connect DoS.
                 {
                     std::lock_guard<std::mutex> lk(server_auth_mutex_);
-                    if (server_auth_threads_.size() >= 32) {
+                    if (server_auth_threads_.size() >= kMaxHandshakeThreads) {
                         VGRE_LOG_WARN("TCPCluster",
-                            "Max handshake threads (32) reached — rejecting connection from " +
+                            "Max handshake threads (" + std::to_string(kMaxHandshakeThreads) +
+                            ") reached — rejecting connection from " +
                             clients_.back()->ip_address);
                         vgre_close_socket(clients_.back()->socket_fd);
                         clients_.pop_back();
@@ -256,19 +372,23 @@ void TCPClusterManager::serverLoop() {
                     clientRef->is_authenticating = false;
 
                     if (sr == VGREResult::ERR_AUTH_RETRY) {
-                        // Token mismatch in fallback mode — retry without authentication
-                        VGRE_LOG_INFO("TCPCluster",
-                            "Master: Retrying connection without authentication for " + clientRef->ip_address);
-                        
-                        // Disable security for this connection
-                        clientRef->security_enabled = false;
-                        
-                        // Retry handshake without token
+                        // ERR_AUTH_RETRY means the worker presented a token that did not
+                        // match ours.  Use the well-known default token for the retry so
+                        // the channel stays encrypted — only node identity is downgraded.
+                        // This prevents an MITM from forcing a completely plaintext
+                        // connection by corrupting key_verification bytes.
+                        VGRE_LOG_WARN("TCPCluster",
+                            "SECURITY WARNING: Auth-token mismatch for " + clientRef->ip_address +
+                            " — retrying with default token (MITM-resistant fallback). "
+                            "Set the same VGRE_TCP_AUTH_TOKEN on all nodes to enforce authentication.");
+
+                        clientRef->effective_auth_token = "VGRE_CLUSTER_DEFAULT_NOAUTH_v1";
                         sr = this->performSecureHandshake(clientRef);
-                        
+
                         if (sr != VGREResult::SUCCESS) {
-                            VGRE_LOG_ERROR("TCPCluster", 
-                                "Master: Security handshake retry failed for " + clientRef->ip_address);
+                            VGRE_LOG_ERROR("TCPCluster",
+                                "Master: Unauthenticated handshake retry failed for " +
+                                clientRef->ip_address + " — dropping connection");
                             clientRef->active = false;
                             vgre_close_socket(clientRef->socket_fd);
                             clientRef->socket_fd = vgre::common::VGRE_INVALID_SOCKET;
@@ -278,11 +398,11 @@ void TCPClusterManager::serverLoop() {
                                                clients_.end());
                             }
                         } else {
-                            // Mark fully authenticated so dashboard shows SECURED status.
                             clientRef->security_established = true;
-                            VGRE_LOG_INFO("TCPCluster",
-                                "Master: Security established for " + clientRef->ip_address + 
-                                " (plaintext encrypted mode)");
+                            VGRE_LOG_WARN("TCPCluster",
+                                "Master: Connection from " + clientRef->ip_address +
+                                " accepted in unauthenticated-encrypted mode "
+                                "(no token verification — peer identity not confirmed)");
                         }
                     } else if (sr != VGREResult::SUCCESS) {
                         VGRE_LOG_ERROR("TCPCluster", "Master: Security handshake failed for " + clientRef->ip_address);
@@ -312,6 +432,7 @@ void TCPClusterManager::serverLoop() {
                 clients_.back()->active = true;
                 clients_.back()->security_established = true;
             }
+            } // end if (should_process)
             } // end rate-limit else
         }
     }
@@ -327,7 +448,6 @@ void TCPClusterManager::serverLoop() {
                         if (fds[i].revents & POLLIN) {
                             // B2: Prevent unbounded rx_buffer growth from a malformed or
                             // malicious peer sending infinite partial VSBP frames.
-                            constexpr size_t kMaxRxBuffer = 256ULL * 1024 * 1024;
                             if (client->rx_buffer.size() >= kMaxRxBuffer) {
                                 VGRE_LOG_ERROR("TCPCluster",
                                     "rx_buffer overflow for " + client->ip_address +
@@ -342,7 +462,41 @@ void TCPClusterManager::serverLoop() {
                             // n < 0 → error/EOF from recv()
                             // n == 0 with POLLHUP → peer closed gracefully but recvAll timed out
                             bool hangup = (fds[i].revents & (POLLHUP | POLLERR)) != 0;
-                            if (n < 0 || (n == 0 && hangup)) {
+                            if (n < 0) {
+                                // A5: HMAC circuit-breaker — distinguish auth failure from I/O loss
+                                if (client->secureChannel &&
+                                    client->secureChannel->getLastRecvResult() == VGREResult::ERR_AUTH_FAILED) {
+                                    client->hmac_failure_count++;
+                                    if (client->hmac_failure_count >= 5) {
+                                        VGRE_LOG_ERROR("TCPCluster",
+                                            "Master: HMAC circuit-breaker triggered for " +
+                                            client->ip_address + " after 5 consecutive auth failures"
+                                            " — closing connection, 60s backoff");
+                                        client->active = false;
+                                        vgre_close_socket(client->socket_fd);
+                                        client->socket_fd = VGRE_INVALID_SOCKET;
+                                        syncToIPC();
+                                        std::lock_guard<std::mutex> bk(proactive_backoff_mutex_);
+                                        proactive_backoff_until_[client->ip_address] =
+                                            std::chrono::steady_clock::now() + std::chrono::seconds(60);
+                                        break;
+                                    }
+                                    // Transient HMAC failure — don't disconnect yet
+                                } else {
+                                    // Normal I/O disconnect
+                                    client->hmac_failure_count = 0;
+                                    VGRE_LOG_INFO("TCPCluster", "Master: Worker " +
+                                        client->ip_address + " disconnected.");
+                                    client->active = false;
+                                    vgre_close_socket(client->socket_fd);
+                                    client->socket_fd = VGRE_INVALID_SOCKET;
+                                    syncToIPC();
+                                    std::lock_guard<std::mutex> bk(proactive_backoff_mutex_);
+                                    proactive_backoff_until_[client->ip_address] =
+                                        std::chrono::steady_clock::now() + std::chrono::seconds(8);
+                                }
+                            } else if (n == 0 && hangup) {
+                                client->hmac_failure_count = 0;
                                 VGRE_LOG_INFO("TCPCluster", "Master: Worker " +
                                     client->ip_address + " disconnected.");
                                 client->active = false;
@@ -356,6 +510,9 @@ void TCPClusterManager::serverLoop() {
                                     proactive_backoff_until_[client->ip_address] =
                                         std::chrono::steady_clock::now() + std::chrono::seconds(8);
                                 }
+                            } else if (n > 0) {
+                                // Successful receive — reset HMAC failure streak
+                                client->hmac_failure_count = 0;
                             }
                         } else {
                             VGRE_LOG_WARN("TCPCluster", "Master: Client socket error or hup from " +
@@ -397,6 +554,37 @@ void TCPClusterManager::serverLoop() {
 
               VSBPHeader hdr;
               std::memcpy(&hdr, client->rx_buffer.data(), sizeof(VSBPHeader));
+
+              // Per-connection packet rate limiter (token bucket, 1-second window).
+              // Rejects packets from peers that exceed kMaxPacketsPerSec to prevent
+              // packet-flood DoS while allowing legitimate bursting within the window.
+              {
+                uint64_t now_ms = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+                if (now_ms - client->rate_window_start_ms >= 1000) {
+                    client->rate_window_start_ms = now_ms;
+                    client->rate_window_count = 0;
+                }
+                client->rate_window_count++;
+                if (client->rate_window_count > kMaxPacketsPerSec) {
+                    VGRE_LOG_WARN("TCPCluster",
+                        "Rate limit exceeded for " + client->ip_address +
+                        " (" + std::to_string(client->rate_window_count) +
+                        " pkts/s, limit " + std::to_string(kMaxPacketsPerSec) +
+                        ") — dropping packet");
+                    // Consume the packet from the buffer. Guard against untrusted
+                    // payloadSize causing an integer overflow in totalLen.
+                    if (hdr.payloadSize <= client->rx_buffer.size() - sizeof(VSBPHeader)) {
+                        size_t totalLenRl = sizeof(VSBPHeader) + static_cast<size_t>(hdr.payloadSize);
+                        client->rx_buffer.erase(client->rx_buffer.begin(),
+                                                client->rx_buffer.begin() + totalLenRl);
+                    } else {
+                        client->rx_buffer.clear(); // incomplete packet — flush and re-sync
+                    }
+                    break;
+                }
+              }
 
               if (hdr.magic != VSBP_MAGIC || hdr.version != VSBP_VERSION) {
                 // Preserve buffer contents for diagnostics before clearing
@@ -494,6 +682,51 @@ void TCPClusterManager::serverLoop() {
                     client->ip_address, cpkt.cpu_cores, cpkt.cpu_memory,
                     cpkt.has_igpu, cpkt.igpu_name);
                 syncToIPC();
+
+                // Launch bandwidth probe: send a 64 KB BANDWIDTH_PROBE immediately
+                // after CAPABILITY so the worker can reply with BANDWIDTH_ACK.
+                // The round-trip time is used to estimate effective network bandwidth
+                // which feeds the workload partitioner (analysis §1.1).
+                if (!client->bandwidth_probe_in_flight && !client->is_local) {
+                    uint64_t now_ms = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count());
+                    // Build probe buffer: [8-byte timestamp][kProbePayloadBytes zeros]
+                    std::vector<uint8_t> probe_buf(sizeof(uint64_t) + kProbePayloadBytes, 0);
+                    std::memcpy(probe_buf.data(), &now_ms, sizeof(uint64_t));
+                    client->bandwidth_probe_start = std::chrono::steady_clock::now();
+                    client->bandwidth_probe_in_flight = true;
+                    send_packet(client->socket_fd, PacketType::BANDWIDTH_PROBE,
+                                probe_buf.data(), probe_buf.size(),
+                                client->secureChannel.get());
+                }
+              } else if (type == PacketType::BANDWIDTH_ACK) {
+                if (hdr.payloadSize < sizeof(BandwidthAckPacket)) { client->rx_buffer.clear(); break; }
+                BandwidthAckPacket ack;
+                std::memcpy(&ack, payload, sizeof(BandwidthAckPacket));
+                client->rx_buffer.erase(client->rx_buffer.begin(), client->rx_buffer.begin() + totalLen);
+                if (client->bandwidth_probe_in_flight) {
+                    auto elapsed = std::chrono::steady_clock::now() - client->bandwidth_probe_start;
+                    double rtt_s = std::chrono::duration<double>(elapsed).count();
+                    // Bandwidth = (probe_size_bytes × 8 bits) / (rtt_s × 1e9) Gbps.
+                    // RTT is used as a conservative lower-bound; latency = RTT/2.
+                    if (rtt_s > 0.0) {
+                        const double kProbeBytes = static_cast<double>(kProbePayloadBytes);
+                        double bw_gbps = (kProbeBytes * 8.0) / (rtt_s * 1e9);
+                        bw_gbps = std::max(0.001, std::min(100.0, bw_gbps));
+                        client->network_bandwidth_gbps = bw_gbps;
+                        // One-way latency estimate = RTT / 2
+                        client->network_latency_ms = (rtt_s * 1000.0) / 2.0;
+                        VGRE_LOG_INFO("TCPCluster",
+                            "Bandwidth probe to " + client->ip_address +
+                            ": RTT=" + std::to_string(static_cast<int>(rtt_s * 1000)) +
+                            "ms, latency=" + std::to_string(client->network_latency_ms) +
+                            "ms, estimated bandwidth=" +
+                            std::to_string(bw_gbps) + " Gbps");
+                    }
+                    client->last_bandwidth_probe_time = std::chrono::steady_clock::now();
+                    client->bandwidth_probe_in_flight = false;
+                }
               } else if (type == PacketType::PARTITION_RESULT) {
                 if (hdr.payloadSize < sizeof(PartitionResultPacket)) { client->rx_buffer.clear(); break; }
                 PartitionResultPacket prpkt;
@@ -516,6 +749,12 @@ void TCPClusterManager::serverLoop() {
                 std::memcpy(&rpkt, payload, sizeof(SecureHandshakePacket));
                 client->rx_buffer.erase(client->rx_buffer.begin(), client->rx_buffer.begin() + totalLen);
                 if (client->secureChannel) client->secureChannel->rotateKey(rpkt.nonce);
+              } else if (type == PacketType::COLLECTIVE_COMPLETE) {
+                // Worker → master ACK for collective result receipt. No master-side
+                // state change needed; just consume the packet.
+                client->rx_buffer.erase(client->rx_buffer.begin(), client->rx_buffer.begin() + totalLen);
+                VGRE_LOG_DEBUG("TCPCluster",
+                    "Master: COLLECTIVE_COMPLETE from " + client->ip_address);
               } else if (type == PacketType::COOP_BARRIER_SYNC) {
                 client->rx_buffer.erase(client->rx_buffer.begin(), client->rx_buffer.begin() + totalLen);
                 {
@@ -594,7 +833,6 @@ void TCPClusterManager::serverLoop() {
           }
         }
     }
-    server_loop_next_iter: ; // jumped to by the duplicate-connection guard above
   }
   VGRE_LOG_DEBUG("TCPCluster", "Master Server Loop exiting.");
 }
