@@ -138,6 +138,14 @@ public:
   // Check if the channel is initialized
   bool isInitialized() const { return initialized_.load(); }
 
+  // A5: Return the VGREResult of the most recent recvSecure() call.
+  // Callers query this to distinguish HMAC auth failures (ERR_AUTH_FAILED)
+  // from socket I/O errors (ERR_IO) for the HMAC circuit-breaker.
+  VGREResult getLastRecvResult() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_recv_result_;
+  }
+
   // Get the key fingerprint (hex-encoded SHA256 of session key)
   std::string getKeyFingerprint() const;
 
@@ -177,6 +185,11 @@ private:
 
   // Session start time
   uint64_t sessionStartMs_ = 0;
+
+  // A5: Most recent result from recvSecure(); updated under mutex_ before
+  // returning. Callers check this to distinguish ERR_AUTH_FAILED (HMAC
+  // mismatch → circuit-breaker) from ERR_IO (connection lost → normal retry).
+  VGREResult last_recv_result_{VGREResult::SUCCESS};
 
   std::atomic<bool> initialized_{false};
   mutable std::mutex mutex_;
