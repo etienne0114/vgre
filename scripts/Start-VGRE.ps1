@@ -1,4 +1,4 @@
-# VGRE Start - launch a master or worker node with one command (Windows).
+# VGRE Start — launch a master or worker node with one command (Windows).
 #
 # Prerequisites: run .\scripts\Setup-VGRECluster.ps1 once on each machine first.
 #
@@ -8,13 +8,7 @@
 #   .\scripts\Start-VGRE.ps1 --worker --master-ip 10.0.0.5   Start worker, connect to specific master
 #   .\scripts\Start-VGRE.ps1 --worker --port 7778             Start worker on a non-default port
 #   .\scripts\Start-VGRE.ps1 --test                           Quick local test: master + worker together
-
-$master   = $false
-$worker   = $false
-$test     = $false
-$masterIp = ""
-$port     = "7777"
-$threads  = ""
+#   .\scripts\Start-VGRE.ps1 --help                           Show this help
 
 $ErrorActionPreference = "Stop"
 
@@ -22,17 +16,32 @@ $InstallDir = Join-Path $env:LOCALAPPDATA "VGRE"
 $TokenFile  = if ($env:VGRE_TCP_AUTH_TOKEN_FILE) { $env:VGRE_TCP_AUTH_TOKEN_FILE }
               else { Join-Path $env:USERPROFILE ".vgre\token" }
 
-# -- Determine mode ------------------------------------------------------------
-$mode = ""
-if ($master -or $args -contains "--master") { $mode = "master" }
-elseif ($worker -or $args -contains "--worker") { $mode = "worker" }
-elseif ($test -or $args -contains "--test")   { $mode = "test" }
+# -- Parse arguments ----------------------------------------------------------
+$mode     = ""
+$masterIp = ""
+$port     = "7777"
+$threads  = ""
 
-# Map double-dash arguments from $args if passed
 for ($i = 0; $i -lt $args.Length; $i++) {
-    if ($args[$i] -eq "--master-ip" -and ($i + 1) -lt $args.Length) { $masterIp = $args[$i+1] }
-    if ($args[$i] -eq "--port" -and ($i + 1) -lt $args.Length)      { $port = $args[$i+1] }
-    if ($args[$i] -eq "--threads" -and ($i + 1) -lt $args.Length)   { $threads = $args[$i+1] }
+    switch ($args[$i]) {
+        "--master"    { $mode = "master" }
+        "--worker"    { $mode = "worker" }
+        "--test"      { $mode = "test"   }
+        "--help"      { $mode = "help"   }
+        "-h"          { $mode = "help"   }
+        "--master-ip" { if (($i + 1) -lt $args.Length) { $masterIp = $args[++$i] } }
+        "--port"      { if (($i + 1) -lt $args.Length) { $port     = $args[++$i] } }
+        "--threads"   { if (($i + 1) -lt $args.Length) { $threads  = $args[++$i] } }
+        default {
+            Write-Host "Unknown option: $($args[$i])  (run .\scripts\Start-VGRE.ps1 --help)" -ForegroundColor Red
+            exit 1
+        }
+    }
+}
+
+if ($mode -eq "help") {
+    Get-Content $MyInvocation.MyCommand.Path | Where-Object { $_ -match "^#" } | ForEach-Object { $_ -replace "^# ?", "" }
+    exit 0
 }
 
 if (-not $mode) {
@@ -44,7 +53,7 @@ if (-not $mode) {
     exit 1
 }
 
-# -- Load Auth Token -----------------------------------------------------------
+# -- Load Auth Token ----------------------------------------------------------
 if (Test-Path $TokenFile) {
     $env:VGRE_TCP_AUTH_TOKEN_FILE = $TokenFile
 } elseif (-not $env:VGRE_TCP_AUTH_TOKEN) {
@@ -56,8 +65,32 @@ if (Test-Path $TokenFile) {
     exit 1
 }
 
-# -- Locate binaries -----------------------------------------------------------
-$workerExe    = Join-Path $InstallDir "vgre-worker.cmd"
+# -- Show SHA256 fingerprint --------------------------------------------------
+# Hash the token text (no trailing newline) — identical to C++ SHA256(auth_token_str_).
+# Do NOT use Get-FileHash: it hashes raw file bytes and will differ if the file has
+# a BOM or trailing newline added by a text editor.
+$_tokenText = ""
+if (Test-Path $TokenFile) {
+    $_tokenText = [System.IO.File]::ReadAllText($TokenFile).TrimEnd("`r", "`n")
+} elseif ($env:VGRE_TCP_AUTH_TOKEN) {
+    $_tokenText = $env:VGRE_TCP_AUTH_TOKEN
+}
+if ($_tokenText) {
+    try {
+        $_bytes = [System.Text.Encoding]::UTF8.GetBytes($_tokenText)
+        $_sha   = [System.Security.Cryptography.SHA256]::Create()
+        $_hash  = $_sha.ComputeHash($_bytes)
+        $_fp    = ($_hash | ForEach-Object { $_.ToString("x2") }) -join ""
+        Write-Host "Token fingerprint (SHA256): $($_fp.Substring(0,16))..." -ForegroundColor Cyan
+        Write-Host "  (master and worker MUST show the same fingerprint)" -ForegroundColor Cyan
+        Write-Host ""
+    } catch {
+        Write-Host "[WARN] Could not compute token fingerprint: $_" -ForegroundColor Yellow
+    }
+}
+
+# -- Locate binaries ----------------------------------------------------------
+$workerExe = Join-Path $InstallDir "vgre-worker.cmd"
 if (-not (Test-Path $workerExe)) { $workerExe = Join-Path $InstallDir "vgre-worker.exe" }
 if (-not (Test-Path $workerExe)) {
     Write-Host "[ERROR] vgre-worker not found in $InstallDir" -ForegroundColor Red
@@ -71,26 +104,11 @@ if (-not (Test-Path $dashboardExe)) { $dashboardExe = Join-Path $InstallDir "vgr
 # Add install lib dir to DLL search path for this session
 $env:PATH = "$InstallDir\lib;$InstallDir;$env:PATH"
 
-# Show SHA256 fingerprint so users can verify master and worker tokens match.
-# Hash the token text (no trailing newline) — same as C++ SHA256(auth_token_str_).
-if (Test-Path $TokenFile) {
-    try {
-        $tokenText = [System.IO.File]::ReadAllText($TokenFile).TrimEnd("`r","`n")
-        $tokenBytes = [System.Text.Encoding]::UTF8.GetBytes($tokenText)
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        $hashBytes = $sha.ComputeHash($tokenBytes)
-        $fp = ($hashBytes | ForEach-Object { $_.ToString("x2") }) -join ""
-        Write-Host "Token fingerprint (SHA256): $($fp.Substring(0,16))..." -ForegroundColor Cyan
-        Write-Host "  (master and worker MUST show the same fingerprint)" -ForegroundColor Cyan
-        Write-Host ""
-    } catch {}
-}
-
-# -- Worker args ---------------------------------------------------------------
+# -- Worker args --------------------------------------------------------------
 $workerArgs = @("--port", $port)
 if ($threads) { $workerArgs += @("--threads", $threads) }
 
-# -- Start ---------------------------------------------------------------------
+# -- Start --------------------------------------------------------------------
 switch ($mode) {
 
     "master" {
@@ -106,7 +124,7 @@ switch ($mode) {
     "worker" {
         if ($masterIp) {
             $env:VGRE_CLUSTER_NODES = "${masterIp}:${port}"
-            Write-Host "Starting VGRE Worker → master at ${masterIp}:${port}"
+            Write-Host "Starting VGRE Worker -> master at ${masterIp}:${port}"
         } else {
             Write-Host "Starting VGRE Worker (auto-discovering master on local subnet)..."
         }
@@ -119,15 +137,15 @@ switch ($mode) {
     "test" {
         Write-Host "Starting local self-test (master + worker on same machine)..."
         Write-Host "  Token: $TokenFile"
-        Write-Host "  Press Ctrl+C to stop."
+        Write-Host "  Press Enter to stop."
         Write-Host ""
-        # Start worker in a new window so both are visible
+        # Start worker in a separate window so both processes are visible
         $workerProc = Start-Process -FilePath $workerExe -ArgumentList $workerArgs -PassThru
         Start-Sleep -Seconds 1
         Write-Host "Worker started (PID $($workerProc.Id)). Launching master dashboard..."
         $env:VGRE_PORT = $port
         $dashProc = Start-Process -FilePath $dashboardExe -PassThru
-        Write-Host "Dashboard started (PID $($dashProc.Id))."
+        Write-Host "Dashboard started (PID $($dashProc.Id))." -ForegroundColor Green
         Write-Host "Press Enter to stop the test..." -ForegroundColor Yellow
         Read-Host | Out-Null
         Stop-Process -Id $workerProc.Id -ErrorAction SilentlyContinue
