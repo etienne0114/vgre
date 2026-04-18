@@ -211,20 +211,20 @@ if not exist "%INSTALL_DIR%\vgre.dll" (
     echo ERROR: vgre.dll not found in %INSTALL_DIR%
     exit /b 1
 ) else (
-    echo ✓ vgre.dll deployed
+    echo [OK] vgre.dll deployed
 )
 
 if not exist "%INSTALL_DIR%\vgre_cudart.dll" (
     echo ERROR: vgre_cudart.dll not found in %INSTALL_DIR%
     exit /b 1
 ) else (
-    echo ✓ vgre_cudart.dll deployed
+    echo [OK] vgre_cudart.dll deployed
 )
 
 if not exist "%INSTALL_DIR%\lib\vgre.dll" (
-    echo WARNING: vgre.dll not found in lib subdirectory (may cause issues)
+    echo WARNING: vgre.dll not found in lib subdirectory ^(may cause issues^)
 ) else (
-    echo ✓ vgre.dll deployed to lib/
+    echo [OK] vgre.dll deployed to lib/
 )
 
 echo.
@@ -234,7 +234,7 @@ if exist "%TOOLS_ROOT%\llvm\bin\libomp.dll" (
     copy /Y "%TOOLS_ROOT%\llvm\bin\libomp.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
     copy /Y "%TOOLS_ROOT%\llvm\bin\libomp.dll" "%INSTALL_DIR%\" >nul 2>&1
 ) else (
-    echo WARNING: OpenMP runtime (libomp.dll) not found. Runtime errors may occur.
+    echo WARNING: OpenMP runtime ^(libomp.dll^) not found. Runtime errors may occur.
 )
 
 if exist "%TOOLS_ROOT%\llvm\bin\*.dll" (
@@ -250,7 +250,7 @@ if errorlevel 1 (
     echo ERROR: Failed to copy vgre-worker.exe
     exit /b 1
 ) else (
-    echo ✓ vgre-worker.exe deployed
+    echo [OK] vgre-worker.exe deployed
 )
 
 echo.
@@ -269,7 +269,7 @@ if not exist "%INSTALL_DIR%\vgre-worker.exe" (
     echo ERROR: vgre-worker.exe not found after deployment
     exit /b 1
 ) else (
-    echo ✓ vgre-worker.exe verified
+    echo [OK] vgre-worker.exe verified
 )
 set "PATH=%INSTALL_DIR%\lib;%INSTALL_DIR%;%TOOLS_ROOT%\llvm\bin;%PATH%"
 "%INSTALL_DIR%\vgre-worker.exe" --help >nul 2>&1
@@ -278,7 +278,7 @@ if errorlevel 1 (
     echo ERROR: see docs/TROUBLESHOOTING_WINDOWS.md
     exit /b 1
 ) else (
-    echo ✓ vgre-worker startup self-check passed
+    echo [OK] vgre-worker startup self-check passed
 )
 
 xcopy /E /Y /I "%PROJECT_ROOT%\include\vgre" "%INSTALL_DIR%\include\vgre" >nul
@@ -289,6 +289,7 @@ if errorlevel 1 (
 
 echo.
 echo === Creating Launcher ===
+rem Create Launcher script
 set "LAUNCHER_PATH=%INSTALL_DIR%\Launch-VGRE-Dashboard.cmd"
 (
     echo @echo off
@@ -296,18 +297,18 @@ set "LAUNCHER_PATH=%INSTALL_DIR%\Launch-VGRE-Dashboard.cmd"
     echo set "APP_DIR=%%~dp0"
     echo set "TOOLS_ROOT=%%LOCALAPPDATA%%\VGRE\BuildTools"
     echo.
-    echo rem ── Critical PATH Setup for DLL Dependencies ──
+    echo rem -- Critical PATH Setup for DLL Dependencies --
     echo rem Ensure LLVM, OpenMP, and VGRE libs are found first
     echo set "PATH=%%APP_DIR%%lib;%%APP_DIR%%;%%TOOLS_ROOT%%\llvm\bin;%%TOOLS_ROOT%%\llvm\lib;%%PATH%%"
     echo.
-    echo rem ── Set environment for hardware token storage
-    echo if defined VGRE_TCP_AUTH_TOKEN (
+    echo rem -- Set environment for hardware token storage
+    echo if defined VGRE_TCP_AUTH_TOKEN ^(
     echo     set "VGRE_TCP_AUTH_TOKEN=%%VGRE_TCP_AUTH_TOKEN%%"
-    echo )
+    echo ^)
     echo.
     echo cd /d "%%APP_DIR%%"
     echo.
-    echo rem ── Add current directory to DLL search path (Windows-specific)
+    echo rem -- Add current directory to DLL search path ^(Windows-specific^)
     echo set "VGRE_LIB_PATH=%%APP_DIR%%vgre.dll"
     echo.
     echo start "" "%%APP_DIR%%vgre_dashboard.exe"
@@ -332,10 +333,10 @@ echo === Updating System Path ===
 for /f "usebackq" %%I in (`powershell -NoProfile -Command "$dir='%INSTALL_DIR%'; $path=[Environment]::GetEnvironmentVariable('Path','User'); if($path -notlike '*'+$dir+'*'){ [Environment]::SetEnvironmentVariable('Path', $path+';'+$dir, 'User'); Write-Output 'CHANGED' } else { Write-Output 'EXISTS' }"`) do set "PATH_STATUS=%%I"
 
 if "%PATH_STATUS%"=="CHANGED" (
-    echo ✅ Added %INSTALL_DIR% to your User PATH.
-    echo ℹ️  Please RESTART your terminal for the changes to take effect.
+    echo [OK] Added %INSTALL_DIR% to your User PATH.
+    echo [INFO] Please RESTART your terminal for the changes to take effect.
 ) else (
-    echo ✅ %INSTALL_DIR% is already in your PATH.
+    echo [OK] %INSTALL_DIR% is already in your PATH.
 )
 
 echo.

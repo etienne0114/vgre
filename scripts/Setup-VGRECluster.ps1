@@ -1,4 +1,4 @@
-# VGRE Cluster Setup for Windows — run once on every machine that joins the cluster.
+# VGRE Cluster Setup for Windows - run once on every machine that joins the cluster.
 #
 # What this does:
 #   1. Creates or reuses an auth token shared by all nodes (master + workers).
@@ -21,16 +21,16 @@ $TokenFile = Join-Path $VgreDir "token"
 $InstallDir = Join-Path $env:LOCALAPPDATA "VGRE"
 
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║       VGRE Cluster Setup                 ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host "|       VGRE Cluster Setup                 |" -ForegroundColor Cyan
+Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
 if (-not (Test-Path $VgreDir)) {
     New-Item -ItemType Directory -Path $VgreDir -Force | Out-Null
 }
 
-# ── Step 1: Auth Token ────────────────────────────────────────────────────────
+# -- Step 1: Auth Token --------------------------------------------------------
 $keepExisting = $false
 if (Test-Path $TokenFile) {
     $preview = (Get-Content $TokenFile -Raw).Substring(0, [Math]::Min(8, (Get-Content $TokenFile -Raw).Length))
@@ -52,7 +52,7 @@ if (-not $keepExisting) {
         $token = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
             [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken))
         if ($token.Length -lt 8) {
-            Write-Host "❌ Token must be at least 8 characters. Aborting." -ForegroundColor Red
+            Write-Host "[ERROR] Token must be at least 8 characters. Aborting." -ForegroundColor Red
             exit 1
         }
     } else {
@@ -64,47 +64,47 @@ if (-not $keepExisting) {
     }
 
     [System.IO.File]::WriteAllText($TokenFile, $token)
-    Write-Host "✅ Token saved to $TokenFile" -ForegroundColor Green
+    Write-Host "[OK] Token saved to $TokenFile" -ForegroundColor Green
 }
 
-# ── Step 2: Persist to User Environment ──────────────────────────────────────
+# -- Step 2: Persist to User Environment --------------------------------------
 $current = [System.Environment]::GetEnvironmentVariable("VGRE_TCP_AUTH_TOKEN_FILE", "User")
 if ($current -ne $TokenFile) {
     [System.Environment]::SetEnvironmentVariable("VGRE_TCP_AUTH_TOKEN_FILE", $TokenFile, "User")
-    Write-Host "✅ VGRE_TCP_AUTH_TOKEN_FILE set in User environment" -ForegroundColor Green
+    Write-Host "[OK] VGRE_TCP_AUTH_TOKEN_FILE set in User environment" -ForegroundColor Green
 } else {
-    Write-Host "✅ VGRE_TCP_AUTH_TOKEN_FILE already configured" -ForegroundColor Green
+    Write-Host "[OK] VGRE_TCP_AUTH_TOKEN_FILE already configured" -ForegroundColor Green
 }
 $env:VGRE_TCP_AUTH_TOKEN_FILE = $TokenFile
 
-# ── Step 3: Ensure Install Dir in PATH ───────────────────────────────────────
+# -- Step 3: Ensure Install Dir in PATH ---------------------------------------
 if (Test-Path $InstallDir) {
     $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
     if ($userPath -notlike "*$InstallDir*") {
         [System.Environment]::SetEnvironmentVariable("Path", "$InstallDir;$userPath", "User")
-        Write-Host "✅ Added $InstallDir to User PATH" -ForegroundColor Green
+        Write-Host "[OK] Added $InstallDir to User PATH" -ForegroundColor Green
     }
 }
 
-# ── Done ──────────────────────────────────────────────────────────────────────
+# -- Done ----------------------------------------------------------------------
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║   Setup complete! Here is how to use your cluster:           ║" -ForegroundColor Cyan
-Write-Host "╠══════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
-Write-Host "║                                                              ║"
-Write-Host "║  MASTER node (machine running your CUDA app):                ║"
-Write-Host "║    .\scripts\Start-VGRE.ps1 --master                        ║"
-Write-Host "║                                                              ║"
-Write-Host "║  WORKER node (same subnet — auto-discovered):                ║"
-Write-Host "║    .\scripts\Start-VGRE.ps1 --worker                        ║"
-Write-Host "║                                                              ║"
-Write-Host "║  WORKER node (different subnet):                             ║"
-Write-Host "║    .\scripts\Start-VGRE.ps1 --worker --master-ip <IP>       ║"
-Write-Host "║                                                              ║"
-Write-Host "║  Copy the token file to each worker at the same path:        ║"
-Write-Host "║    scp $TokenFile user@worker:$TokenFile" -ForegroundColor Yellow
-Write-Host "║    (or copy manually via USB / shared drive)                 ║"
-Write-Host "║                                                              ║"
-Write-Host "║  NOTE: Open a NEW terminal for env changes to take effect.   ║"
-Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "==============================================================" -ForegroundColor Cyan
+Write-Host "|   Setup complete! Here is how to use your cluster:         |" -ForegroundColor Cyan
+Write-Host "==============================================================" -ForegroundColor Cyan
+Write-Host "|                                                            |"
+Write-Host "|  MASTER node (machine running your CUDA app):              |"
+Write-Host "|    .\scripts\Start-VGRE.ps1 --master                       |"
+Write-Host "|                                                            |"
+Write-Host "|  WORKER node (same subnet - auto-discovered):              |"
+Write-Host "|    .\scripts\Start-VGRE.ps1 --worker                       |"
+Write-Host "|                                                            |"
+Write-Host "|  WORKER node (different subnet):                           |"
+Write-Host "|    .\scripts\Start-VGRE.ps1 --worker --master-ip <IP>      |"
+Write-Host "|                                                            |"
+Write-Host "|  Copy the token file to each worker at the same path:      |"
+Write-Host "|    scp $TokenFile user@worker:$TokenFile" -ForegroundColor Yellow
+Write-Host "|    (or copy manually via USB / shared drive)               |"
+Write-Host "|                                                            |"
+Write-Host "|  NOTE: Open a NEW terminal for env changes to take effect. |"
+Write-Host "==============================================================" -ForegroundColor Cyan
 Write-Host ""

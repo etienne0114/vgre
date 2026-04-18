@@ -1,4 +1,4 @@
-# VGRE Start — launch a master or worker node with one command (Windows).
+# VGRE Start - launch a master or worker node with one command (Windows).
 #
 # Prerequisites: run .\scripts\Setup-VGRECluster.ps1 once on each machine first.
 #
@@ -9,14 +9,12 @@
 #   .\scripts\Start-VGRE.ps1 --worker --port 7778             Start worker on a non-default port
 #   .\scripts\Start-VGRE.ps1 --test                           Quick local test: master + worker together
 
-param(
-    [switch]$master,
-    [switch]$worker,
-    [switch]$test,
-    [string]$masterIp  = "",
-    [string]$port      = "7777",
-    [string]$threads   = ""
-)
+$master   = $false
+$worker   = $false
+$test     = $false
+$masterIp = ""
+$port     = "7777"
+$threads  = ""
 
 $ErrorActionPreference = "Stop"
 
@@ -24,11 +22,18 @@ $InstallDir = Join-Path $env:LOCALAPPDATA "VGRE"
 $TokenFile  = if ($env:VGRE_TCP_AUTH_TOKEN_FILE) { $env:VGRE_TCP_AUTH_TOKEN_FILE }
               else { Join-Path $env:USERPROFILE ".vgre\token" }
 
-# ── Determine mode ────────────────────────────────────────────────────────────
+# -- Determine mode ------------------------------------------------------------
 $mode = ""
-if ($master) { $mode = "master" }
-elseif ($worker) { $mode = "worker" }
-elseif ($test)   { $mode = "test" }
+if ($master -or $args -contains "--master") { $mode = "master" }
+elseif ($worker -or $args -contains "--worker") { $mode = "worker" }
+elseif ($test -or $args -contains "--test")   { $mode = "test" }
+
+# Map double-dash arguments from $args if passed
+for ($i = 0; $i -lt $args.Length; $i++) {
+    if ($args[$i] -eq "--master-ip" -and ($i + 1) -lt $args.Length) { $masterIp = $args[$i+1] }
+    if ($args[$i] -eq "--port" -and ($i + 1) -lt $args.Length)      { $port = $args[$i+1] }
+    if ($args[$i] -eq "--threads" -and ($i + 1) -lt $args.Length)   { $threads = $args[$i+1] }
+}
 
 if (-not $mode) {
     Write-Host "Usage:" -ForegroundColor Yellow
@@ -39,23 +44,23 @@ if (-not $mode) {
     exit 1
 }
 
-# ── Load Auth Token ───────────────────────────────────────────────────────────
+# -- Load Auth Token -----------------------------------------------------------
 if (Test-Path $TokenFile) {
     $env:VGRE_TCP_AUTH_TOKEN_FILE = $TokenFile
 } elseif (-not $env:VGRE_TCP_AUTH_TOKEN) {
     Write-Host ""
-    Write-Host "❌ No auth token found." -ForegroundColor Red
+    Write-Host "[ERROR] No auth token found." -ForegroundColor Red
     Write-Host "   Run:  .\scripts\Setup-VGRECluster.ps1" -ForegroundColor Yellow
     Write-Host "   Or:   `$env:VGRE_TCP_AUTH_TOKEN = 'your-token'" -ForegroundColor Yellow
     Write-Host ""
     exit 1
 }
 
-# ── Locate binaries ───────────────────────────────────────────────────────────
+# -- Locate binaries -----------------------------------------------------------
 $workerExe    = Join-Path $InstallDir "vgre-worker.cmd"
 if (-not (Test-Path $workerExe)) { $workerExe = Join-Path $InstallDir "vgre-worker.exe" }
 if (-not (Test-Path $workerExe)) {
-    Write-Host "❌ vgre-worker not found in $InstallDir" -ForegroundColor Red
+    Write-Host "[ERROR] vgre-worker not found in $InstallDir" -ForegroundColor Red
     Write-Host "   Run .\scripts\vgre_sync.bat to build and install first." -ForegroundColor Yellow
     exit 1
 }
@@ -66,11 +71,11 @@ if (-not (Test-Path $dashboardExe)) { $dashboardExe = Join-Path $InstallDir "vgr
 # Add install lib dir to DLL search path for this session
 $env:PATH = "$InstallDir\lib;$InstallDir;$env:PATH"
 
-# ── Worker args ───────────────────────────────────────────────────────────────
+# -- Worker args ---------------------------------------------------------------
 $workerArgs = @("--port", $port)
 if ($threads) { $workerArgs += @("--threads", $threads) }
 
-# ── Start ─────────────────────────────────────────────────────────────────────
+# -- Start ---------------------------------------------------------------------
 switch ($mode) {
 
     "master" {
