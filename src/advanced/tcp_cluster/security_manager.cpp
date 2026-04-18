@@ -10,38 +10,75 @@
 namespace vgre {
 namespace advanced {
 
-// Constants for security operations
+// Runtime-configurable security constants (override via environment variables).
+// Defaults match prior hard-coded values; operators can tune without recompile.
 namespace {
-  constexpr int HANDSHAKE_TIMEOUT_SECONDS = 5;
-  constexpr uint64_t HANDSHAKE_STUCK_TIMEOUT_MS = 10000; // 10 seconds
-  // Short peek window used by the worker to auto-detect whether the master
-  // is in secure mode. 500 ms is enough for the master to send
-  // SECURE_HANDSHAKE after the TCP connect returns, even on a loaded system.
-  constexpr int PEEK_TIMEOUT_MS = 500;
+  int getHandshakeTimeoutSeconds() {
+    const char* e = std::getenv("VGRE_CLUSTER_HANDSHAKE_TIMEOUT_SEC");
+    if (e) { int v = std::atoi(e); if (v > 0) return v; }
+    return 5;
+  }
+  uint64_t getHandshakeStuckTimeoutMs() {
+    const char* e = std::getenv("VGRE_CLUSTER_HANDSHAKE_STUCK_MS");
+    if (e) { long v = std::atol(e); if (v > 0) return static_cast<uint64_t>(v); }
+    return 10000;
+  }
+  // Peek window: worker waits this long for master's SECURE_HANDSHAKE packet.
+  // Must be >= HANDSHAKE_TIMEOUT_SECONDS*1000 so the worker never times out
+  // before the master's handshake thread is scheduled.
+  int getPeekTimeoutMs() {
+    const char* e = std::getenv("VGRE_CLUSTER_PEEK_TIMEOUT_MS");
+    if (e) { int v = std::atoi(e); if (v > 0) return v; }
+    return getHandshakeTimeoutSeconds() * 1000;
+  }
+  const int HANDSHAKE_TIMEOUT_SECONDS     = getHandshakeTimeoutSeconds();
+  const uint64_t HANDSHAKE_STUCK_TIMEOUT_MS = getHandshakeStuckTimeoutMs();
+  const int PEEK_TIMEOUT_MS               = getPeekTimeoutMs();
 }
 
 SecurityManager::SecurityManager(TCPClusterManager* parent)
   : parent_(parent) {
-  // Read VGRE_CLUSTER_STRICT_AUTH environment variable
-  const char* strict_env = std::getenv("VGRE_CLUSTER_STRICT_AUTH");
-  if (strict_env != nullptr) {
-    std::string strict_str(strict_env);
-    strict_auth_mode_ = (strict_str == "1" || strict_str == "true" || strict_str == "yes");
-  } else {
-    strict_auth_mode_ = false;  // Default to fallback mode
+  // Default: STRICT mode (reject on token mismatch).
+  // Set VGRE_ALLOW_AUTH_FALLBACK=1 to allow unauthenticated retry — useful
+  // only during development; never set in production.
+  strict_auth_mode_ = true;
+  const char* fallback_env = std::getenv("VGRE_ALLOW_AUTH_FALLBACK");
+  if (fallback_env != nullptr) {
+    std::string fb(fallback_env);
+    if (fb == "1" || fb == "true" || fb == "yes") {
+      strict_auth_mode_ = false;
+      VGRE_LOG_WARN("TCPCluster",
+          "SECURITY WARNING: VGRE_ALLOW_AUTH_FALLBACK is set — "
+          "connections without a valid token will be retried in plaintext mode. "
+          "Do NOT use in production.");
+    }
   }
-  
+
   VGRE_LOG_INFO("TCPCluster",
       "Security authentication mode: " +
-      std::string(strict_auth_mode_ ? "STRICT (reject on token mismatch)" : 
+      std::string(strict_auth_mode_ ? "STRICT (reject on token mismatch)" :
                                       "FALLBACK (retry without token on mismatch)"));
 }
 
 VGREResult SecurityManager::enableSecurity(bool enabled) {
-  if (enabled && parent_->auth_token_str_.empty()) {
+  std::string token_snap;
+  {
+    std::shared_lock<std::shared_mutex> rlock(parent_->auth_token_mutex_);
+    token_snap = parent_->auth_token_str_;
+  }
+  if (enabled && token_snap.empty()) {
     VGRE_LOG_ERROR("TCPCluster",
                    "Cannot enable security: VGRE_TCP_AUTH_TOKEN not set");
     return VGREResult::ERR_INVALID_VALUE;
+  }
+  constexpr size_t kMinTokenLen = 16;
+  if (enabled &&
+      token_snap != "VGRE_CLUSTER_DEFAULT_NOAUTH_v1" &&
+      token_snap.size() < kMinTokenLen) {
+    VGRE_LOG_WARN("TCPCluster",
+        "Auth token is shorter than " + std::to_string(kMinTokenLen) +
+        " characters — short tokens are significantly weaker against "
+        "offline dictionary attacks. Use a token of at least 16 random characters.");
   }
   parent_->security_enabled_ = enabled;
   VGRE_LOG_INFO("TCPCluster",
@@ -228,16 +265,29 @@ VGREResult SecurityManager::performServerHandshake(
     std::shared_ptr<TCPClusterManager::ClientConnection> clientPtr) {
   if (!clientPtr) return VGREResult::ERR_INVALID_VALUE;
   auto &client = *clientPtr;
-  
+
   // Check if security is enabled for this connection
   if (!client.security_enabled) {
     return VGREResult::SUCCESS; // Security disabled for this connection, skip
   }
-  
+
   if (!parent_->security_enabled_) {
     return VGREResult::SUCCESS; // Security not enabled globally, skip
   }
-  if (parent_->auth_token_str_.empty()) {
+
+  // Snapshot the token to use for this handshake.  effective_auth_token is set
+  // in the ERR_AUTH_RETRY fallback path (server_loop.cpp) so that the retry
+  // uses the well-known default instead of disabling encryption entirely — this
+  // prevents an MITM-forced downgrade from authenticated to plaintext mode.
+  std::string token;
+  if (!client.effective_auth_token.empty()) {
+    token = client.effective_auth_token;
+  } else {
+    std::shared_lock<std::shared_mutex> rlock(parent_->auth_token_mutex_);
+    token = parent_->auth_token_str_;
+  }
+
+  if (token.empty()) {
     VGRE_LOG_ERROR("TCPCluster", "Master: Security is enabled but VGRE_TCP_AUTH_TOKEN is not set. Handshake failed.");
     return VGREResult::ERR_AUTH_FAILED;
   }
@@ -247,7 +297,7 @@ VGREResult SecurityManager::performServerHandshake(
   //    transmitting the token itself.  The worker verifies it before sending its ACK.
   SecureHandshakePacket shpkt{};
   SecureChannel::generateNonce(shpkt.nonce);
-  computeKeyVerification(parent_->auth_token_str_, "VGRE_KEYVER_MASTER_v1",
+  computeKeyVerification(token, "VGRE_KEYVER_MASTER_v1",
                          shpkt.nonce, shpkt.key_verification);
 
   if (parent_->send_packet_direct(client.socket_fd, PacketType::SECURE_HANDSHAKE, &shpkt, sizeof(SecureHandshakePacket), client.secureChannel.get()) != VGREResult::SUCCESS) {
@@ -350,12 +400,14 @@ VGREResult SecurityManager::performServerHandshake(
   //     If this fails, the tokens are mismatched — handle based on mode.
   {
       uint8_t expectedKV[crypto::kSHA256DigestLen];
-      computeKeyVerification(parent_->auth_token_str_, "VGRE_KEYVER_WORKER_v1",
+      computeKeyVerification(token, "VGRE_KEYVER_WORKER_v1",
                              clientHs.nonce, expectedKV);
       if (!crypto::secure_compare(clientHs.key_verification, expectedKV,
                                   crypto::kSHA256DigestLen)) {
-          if (strict_auth_mode_) {
-              // Strict mode: reject immediately
+          if (strict_auth_mode_ || !client.effective_auth_token.empty()) {
+              // Strict mode, or this is already the fallback retry (effective_auth_token set):
+              // reject immediately.  In the retry case, rejecting here prevents an infinite
+              // retry loop if the default token also mismatches.
               VGRE_LOG_ERROR("TCPCluster",
                   "Master: Security handshake failed (strict mode) for " + client.ip_address +
                   " — token mismatch. Ensure VGRE_TCP_AUTH_TOKEN is set to the same value "
@@ -365,18 +417,17 @@ VGREResult SecurityManager::performServerHandshake(
               client.active = false;
               return VGREResult::ERR_AUTH_FAILED;
           } else {
-              // Fallback mode: retry without token
+              // Fallback mode (first attempt): signal the server loop to retry with the
+              // well-known default token.  The channel stays encrypted — only the token
+              // changes to the unauthenticated default.  This prevents an MITM from
+              // forcing a completely plaintext connection by corrupting key_verification.
               VGRE_LOG_WARN("TCPCluster",
                   "Master: Token mismatch for " + client.ip_address +
-                  " — falling back to plaintext encrypted mode. "
+                  " — falling back to default-token encrypted mode (MITM-resistant). "
                   "Ensure VGRE_TCP_AUTH_TOKEN is set to the same value on both nodes "
                   "to use authenticated mode.");
-              
-              // Close current connection
               vgre::common::vgre_close_socket(client.socket_fd);
               client.socket_fd = vgre::common::VGRE_INVALID_SOCKET;
-              
-              // Return ERR_AUTH_RETRY to signal retry without token
               return VGREResult::ERR_AUTH_RETRY;
           }
       }
@@ -385,7 +436,7 @@ VGREResult SecurityManager::performServerHandshake(
   // 4. Derive session key and create secure channel
   client.secureChannel = std::make_unique<SecureChannel>();
   VGREResult r = client.secureChannel->initializeFromSecret(
-      parent_->auth_token_str_, shpkt.nonce, clientHs.nonce);
+      token, shpkt.nonce, clientHs.nonce);
   if (r != VGREResult::SUCCESS) {
     VGRE_LOG_ERROR("TCPCluster", "Security handshake: key derivation failed");
     return r;
@@ -433,7 +484,15 @@ VGREResult SecurityManager::performClientHandshake() {
     parent_->security_enabled_ = true;
   }
 
-  if (parent_->auth_token_str_.empty()) {
+  // Snapshot the auth token under the shared lock once; use the local copy
+  // for all subsequent handshake operations to avoid races with re-initialization.
+  std::string token;
+  {
+    std::shared_lock<std::shared_mutex> rlock(parent_->auth_token_mutex_);
+    token = parent_->auth_token_str_;
+  }
+
+  if (token.empty()) {
     VGRE_LOG_ERROR("TCPCluster",
         "Worker: Security handshake failed - VGRE_TCP_AUTH_TOKEN is not set. "
         "Master requires security but worker has no auth token. "
@@ -532,12 +591,12 @@ VGREResult SecurityManager::performClientHandshake() {
   //     failures on every subsequent data packet.
   {
       uint8_t expectedKV[crypto::kSHA256DigestLen];
-      computeKeyVerification(parent_->auth_token_str_, "VGRE_KEYVER_MASTER_v1",
+      computeKeyVerification(token, "VGRE_KEYVER_MASTER_v1",
                              masterHs.nonce, expectedKV);
       if (!crypto::secure_compare(masterHs.key_verification, expectedKV,
                                   crypto::kSHA256DigestLen)) {
           // Compute token hash for debugging (security: don't log full token)
-          std::string token_hash = computeTokenHash(parent_->auth_token_str_);
+          std::string token_hash = computeTokenHash(token);
           
           VGRE_LOG_ERROR("TCPCluster",
               "Worker: Handshake key-verification FAILED — token mismatch with master. "
@@ -561,7 +620,7 @@ VGREResult SecurityManager::performClientHandshake() {
   //    The master will verify this to confirm we hold the same token.
   SecureHandshakePacket ack{};
   SecureChannel::generateNonce(ack.nonce);
-  computeKeyVerification(parent_->auth_token_str_, "VGRE_KEYVER_WORKER_v1",
+  computeKeyVerification(token, "VGRE_KEYVER_WORKER_v1",
                          ack.nonce, ack.key_verification);
 
   if (parent_->send_packet_direct(parent_->client_fd_, PacketType::SECURE_HANDSHAKE_ACK, &ack, sizeof(SecureHandshakePacket), parent_->client_secure_channel_.get()) != VGREResult::SUCCESS) {
@@ -573,7 +632,7 @@ VGREResult SecurityManager::performClientHandshake() {
   // 4. Derive session key
   parent_->client_secure_channel_ = std::make_unique<SecureChannel>();
   VGREResult r = parent_->client_secure_channel_->initializeFromSecret(
-      parent_->auth_token_str_, masterHs.nonce, ack.nonce);
+      token, masterHs.nonce, ack.nonce);
   if (r != VGREResult::SUCCESS) {
     VGRE_LOG_ERROR("TCPCluster", "Client security handshake: key derivation failed");
     parent_->is_authenticating_ = false;
