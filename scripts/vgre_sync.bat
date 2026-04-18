@@ -43,6 +43,23 @@ if /I "%VGRE_ENABLE_NATIVE_SIMD%"=="1" set "VGRE_ENABLE_NATIVE_SIMD_FLAG=ON"
 if /I "%VGRE_ENABLE_NATIVE_SIMD%"=="ON" set "VGRE_ENABLE_NATIVE_SIMD_FLAG=ON"
 echo SIMD tuning: %VGRE_ENABLE_NATIVE_SIMD_FLAG% (set VGRE_ENABLE_NATIVE_SIMD=1 to opt-in)
 
+echo.
+echo === Auto-loading Cluster Auth Token ===
+rem Priority: VGRE_TCP_AUTH_TOKEN_FILE env var > %USERPROFILE%\.vgre\token > VGRE_TCP_AUTH_TOKEN
+set "DEFAULT_TOKEN_FILE=%USERPROFILE%\.vgre\token"
+if not defined VGRE_TCP_AUTH_TOKEN_FILE if exist "!DEFAULT_TOKEN_FILE!" (
+    set "VGRE_TCP_AUTH_TOKEN_FILE=!DEFAULT_TOKEN_FILE!"
+    echo Auto-loaded token from !DEFAULT_TOKEN_FILE!
+)
+if defined VGRE_TCP_AUTH_TOKEN_FILE (
+    echo Cluster auth token: ready  ^(!VGRE_TCP_AUTH_TOKEN_FILE!^)
+) else if defined VGRE_TCP_AUTH_TOKEN (
+    echo VGRE_TCP_AUTH_TOKEN set; will embed in launcher.
+) else (
+    echo WARNING: No auth token configured. Run Setup-VGRECluster.ps1 to set one up.
+    echo          Cluster will use hardware secure storage ^(TPM/CredMan^) or allow manual input.
+)
+
 echo Cleaning up stale VGRE processes...
 taskkill /F /IM vgre-worker.exe /IM vgre_dashboard.exe /T 2>NUL
 rem Ignore errorlevel as processes might not be running
@@ -326,7 +343,18 @@ echo VGRE Sync Complete.
 echo Installed to: %INSTALL_DIR%
 echo Desktop shortcut: %SHORTCUT_PATH%
 echo.
-echo 🚀 You can now run 'vgre-worker' from any NEW terminal.
+if exist "!DEFAULT_TOKEN_FILE!" (
+    echo Cluster auth token: ready
+    echo.
+    echo   Start master:   powershell -File scripts\Start-VGRE.ps1 --master
+    echo   Start worker:   powershell -File scripts\Start-VGRE.ps1 --worker
+    echo   Local test:     powershell -File scripts\Start-VGRE.ps1 --test
+) else (
+    echo Cluster not yet configured. Run setup to enable secure clustering:
+    echo   powershell -File scripts\Setup-VGRECluster.ps1
+)
+echo.
+echo You can now run 'vgre-worker' from any NEW terminal.
 pause
 exit /b 0
 
