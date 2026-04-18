@@ -243,141 +243,206 @@ Start-Process "VGRE Dashboard"
 VGRE lets you aggregate multiple network-connected CPUs into a single Virtual GPU cluster. This works across mixed platforms (Linux, Windows, macOS).
 
 > [!IMPORTANT]
-> **You do NOT need to manually `export` or set env vars in every terminal session.**
-> Run the one-time setup script below and VGRE will load your auth token automatically on every login — no copy-pasting tokens, no environment variables to remember.
+> Run the scripts **in the exact order shown below**. Each step must finish successfully before moving to the next. You only run steps 1–3 once per machine; after that you only need step 4 every time you want to use the cluster.
 
 ---
 
-### 4.0 Quick Start (Recommended — 3 steps total)
+### 4.0 Script Execution Order
 
-#### Step 1 — Build & install (once per machine)
+```
+Every machine (master + every worker):
+  STEP 1 → Build & install     (vgre_sync.sh / vgre_sync.bat)
+  STEP 2 → Set up cluster token (setup-cluster.sh / Setup-VGRECluster.ps1)
 
-**Linux/macOS:**
+Master machine only:
+  STEP 3 → Copy token to workers
+
+Then to run the cluster:
+  STEP 4a → Start master        (vgre-start --master / Start-VGRE.ps1 --master)
+  STEP 4b → Start each worker   (vgre-start --worker / Start-VGRE.ps1 --worker)
+```
+
+---
+
+### Step 1 — Build and Install (run once per machine)
+
+This compiles the VGRE engine, worker binary, and dashboard, then installs them to your local profile.
+
+**Linux / macOS:**
 ```bash
 bash scripts/vgre_sync.sh
 ```
-**Windows:**
+
+**Windows (run from Developer PowerShell or a terminal with VS build tools in PATH):**
 ```
 scripts\vgre_sync.bat
 ```
 
-#### Step 2 — Set up the cluster token (once per machine)
+Expected output: ends with `✅ VGRE Sync Complete!` (Linux/macOS) or `VGRE Sync Complete.` (Windows).  
+If the build fails, fix the reported error before continuing.
 
-**Linux/macOS:**
+---
+
+### Step 2 — Set Up the Cluster Token (run once per machine)
+
+Every machine in the cluster — master and every worker — must run this step. The script generates a secure 64-character random token, saves it to a local file, and wires it into your shell/environment automatically so you never have to type it again.
+
+**Linux / macOS:**
 ```bash
 bash scripts/setup-cluster.sh
 ```
-This generates a secure random token, saves it to `~/.vgre/token`, and adds `VGRE_TCP_AUTH_TOKEN_FILE` to your shell profile so it loads automatically on every new terminal — **you never need to type the token again**.
 
 **Windows (PowerShell):**
 ```powershell
 .\scripts\Setup-VGRECluster.ps1
 ```
-Same effect: saves token to `%USERPROFILE%\.vgre\token` and persists the env var to your User environment.
 
-> **Copy the token file to every worker machine at the same path:**
-> ```bash
-> # Linux/macOS
-> scp ~/.vgre/token  user@worker-machine:~/.vgre/token
->
-> # Windows — copy %USERPROFILE%\.vgre\token to the worker manually
-> ```
-> All nodes must share the same token to connect.
+The script will:
+1. Ask whether to generate a new token or paste one from another node
+2. Save the token to `~/.vgre/token` (Linux/macOS) or `%USERPROFILE%\.vgre\token` (Windows)
+3. Add `VGRE_TCP_AUTH_TOKEN_FILE` to your shell profile / User environment — permanent, loads on every new terminal
+4. Display a **SHA256 fingerprint** (first 16 characters) — write this down
 
-#### Step 3 — Start master and workers
+> [!WARNING]
+> **Do not run the setup script more than once** unless you intend to replace the token. Each run generates a new random token. If you regenerate on the master, all workers become disconnected until they get the new token file.
+
+To check the current token fingerprint on any node at any time without regenerating:
+
+```bash
+# Linux/macOS
+bash scripts/setup-cluster.sh --show-fingerprint
+```
+```powershell
+# Windows
+.\scripts\Setup-VGRECluster.ps1 -ShowFingerprint
+```
+
+---
+
+### Step 3 — Copy the Token to Every Worker (run on master only)
+
+The master and all workers **must have the identical token file**. Only the master generates the token in Step 2; all workers receive a copy of it.
+
+**Linux/macOS — copy from master to each worker over SSH:**
+```bash
+# Replace user@WORKER_IP with actual credentials for each worker machine
+scp ~/.vgre/token  user@WORKER_IP:~/.vgre/token
+```
+
+**Windows — copy from master to worker (PowerShell with SSH):**
+```powershell
+scp "$env:USERPROFILE\.vgre\token"  user@WORKER_IP:"~/.vgre/token"
+```
+
+**If SSH is not available** (USB, shared drive, etc.):
+1. On the master: run `bash scripts/setup-cluster.sh --show-fingerprint` and note the full SHA256
+2. On the worker: run `bash scripts/setup-cluster.sh` (Linux) or `.\scripts\Setup-VGRECluster.ps1` (Windows), choose option **2 (Enter your own token)**, and paste the token printed by the master's setup script
+
+**After copying, verify the fingerprints match on both machines:**
+```bash
+# Run on BOTH master and worker — output must be identical
+bash scripts/setup-cluster.sh --show-fingerprint          # Linux/macOS
+.\scripts\Setup-VGRECluster.ps1 -ShowFingerprint          # Windows
+```
+
+If the fingerprints differ, the handshake will fail. Re-copy the token file and verify again before proceeding.
+
+---
+
+### Step 4a — Start the Master
+
+Run this on the machine that will run your CUDA application. The master is embedded in the VGRE Dashboard.
 
 **Linux/macOS:**
 ```bash
-# On the machine running your CUDA app (master):
 vgre-start --master
-
-# On each compute node (worker) — same subnet, auto-discovered:
-vgre-start --worker
-
-# Worker on a different subnet:
-vgre-start --worker --master-ip 192.168.1.50
-
-# Advanced: non-default port or thread count:
-vgre-start --worker --port 7778 --threads 16
-
-# Quick local self-test (master + worker on same machine):
-vgre-start --test
 ```
 
 **Windows (PowerShell):**
 ```powershell
-# Master:
 .\scripts\Start-VGRE.ps1 --master
+```
 
-# Worker (same subnet):
+The script will print the token fingerprint before launching. The dashboard opens and begins listening for worker connections on port 7777. Keep this terminal / process running.
+
+---
+
+### Step 4b — Start Each Worker
+
+Run this on every compute node that will contribute CPU resources. Start the master (Step 4a) before starting workers.
+
+**Linux/macOS — same subnet (auto-discovery):**
+```bash
+vgre-start --worker
+```
+
+**Linux/macOS — different subnet (specify master IP):**
+```bash
+vgre-start --worker --master-ip 192.168.1.50
+```
+
+**Windows — same subnet:**
+```powershell
 .\scripts\Start-VGRE.ps1 --worker
+```
 
-# Worker (different subnet):
+**Windows — different subnet:**
+```powershell
 .\scripts\Start-VGRE.ps1 --worker --master-ip 192.168.1.50
+```
 
-# Advanced:
-.\scripts\Start-VGRE.ps1 --worker --port 7778 --threads 16
+The worker prints its token fingerprint, then enters a scanning/discovery loop. Once connected, the master dashboard shows the worker's CPU and RAM stats.
 
-# Quick local self-test:
+**Optional flags (all platforms):**
+```bash
+# Custom port (must match master port)
+vgre-start --worker --port 7778
+
+# Limit thread count
+vgre-start --worker --threads 8
+
+# Windows equivalents:
+.\scripts\Start-VGRE.ps1 --worker --port 7778 --threads 8
+```
+
+---
+
+### Quick Local Test (same machine — no worker needed)
+
+To verify your installation without a second machine:
+
+**Linux/macOS:**
+```bash
+vgre-start --test
+```
+
+**Windows:**
+```powershell
 .\scripts\Start-VGRE.ps1 --test
 ```
 
-Workers automatically:
-- Listen on port **7777** (configurable with `--port`)
-- Broadcast availability to master nodes on the local subnet (auto-discovery)
-- Use AES-256 encrypted channels — no extra config needed
-- Auto-detect CPU cores and thread count
+This starts both master and worker on the same machine and shuts them down cleanly when you press Enter / Ctrl+C.
+
+---
+
+### 4.1 Full Script Reference
+
+| Order | Script | Platform | When to run |
+|-------|--------|----------|-------------|
+| 1 | `scripts/vgre_sync.sh` | Linux/macOS | Once per machine — build & install |
+| 1 | `scripts\vgre_sync.bat` | Windows | Once per machine — build & install |
+| 2 | `scripts/setup-cluster.sh` | Linux/macOS | Once per machine — generate/configure token |
+| 2 | `.\scripts\Setup-VGRECluster.ps1` | Windows | Once per machine — generate/configure token |
+| 3 | `scp ~/.vgre/token user@WORKER:~/.vgre/token` | Linux/macOS | Once — copy token from master to each worker |
+| 4a | `vgre-start --master` | Linux/macOS | Every session — start the master dashboard |
+| 4a | `.\scripts\Start-VGRE.ps1 --master` | Windows | Every session — start the master dashboard |
+| 4b | `vgre-start --worker` | Linux/macOS | Every session — start a worker node |
+| 4b | `.\scripts\Start-VGRE.ps1 --worker` | Windows | Every session — start a worker node |
 
 > [!NOTE]
 > AES-256 HMAC-authenticated encryption is always active when a token is configured. There is no separate `VGRE_CLUSTER_SECURE` variable — security is on by default.
 
 ---
-
-### 4.1 Manual Setup (Alternative — when you cannot use the setup script)
-
-**If you prefer to set the token manually** (e.g. in a CI pipeline or container), you can still do so — but you must run the export command in **every new terminal session** where you start a worker or master.
-
-**Linux/macOS — worker:**
-```bash
-export VGRE_TCP_AUTH_TOKEN="my-secret-key"
-vgre-worker                          # default port 7777, auto thread count
-vgre-worker --port 7777 --threads 16 # explicit options
-```
-
-**Linux/macOS — master (runs your CUDA app):**
-```bash
-export VGRE_TCP_AUTH_TOKEN="my-secret-key"
-./my_cuda_app
-```
-
-**Windows — worker:**
-```powershell
-$env:VGRE_TCP_AUTH_TOKEN = "my-secret-key"
-vgre-worker.exe
-vgre-worker.exe --port 7777 --threads 16
-```
-
-**Windows — master:**
-```powershell
-$env:VGRE_TCP_AUTH_TOKEN = "my-secret-key"
-.\my_cuda_app.exe
-```
-
-> [!WARNING]
-> The `export` / `$env:` approach only lasts for the current terminal session. Close the terminal and the token is gone — you must set it again. Use the setup script to avoid this.
-
-**Manual Cross-Subnet (different subnets):**
-```bash
-# Linux/macOS
-export VGRE_TCP_AUTH_TOKEN="my-secret-key"
-export VGRE_CLUSTER_NODES="192.168.1.50:7777,10.0.0.100:7777"
-./my_cuda_app
-
-# Windows
-$env:VGRE_TCP_AUTH_TOKEN = "my-secret-key"
-$env:VGRE_CLUSTER_NODES  = "192.168.1.50:7777,10.0.0.100:7777"
-.\my_cuda_app.exe
-```
 
 ### 4.2 How Auto-Discovery Works
 
@@ -393,20 +458,15 @@ The master broadcasts its presence over UDP on the local subnet every 2 seconds.
                          Shared memory + kernel dispatch
 ```
 
-For **cross-subnet clusters** where UDP broadcast does not reach, use `--master-ip` (with `vgre-start`) or `VGRE_CLUSTER_NODES` (manual setup) to specify the master address directly.
+For **cross-subnet clusters** where UDP broadcast does not reach, use `--master-ip` to specify the master address directly.
 
 ### 4.3 Cross-Platform Cluster Support
 
 **Mixed Platform Clusters:**
 - ✅ Linux Master + Windows Workers
-- ✅ Windows Master + Linux Workers  
+- ✅ Windows Master + Linux Workers
 - ✅ macOS Master + Linux/Windows Workers
 - ✅ Any combination of platforms
-
-**Platform-Specific Optimizations:**
-- **Linux**: NUMA-aware scheduling and memory binding
-- **Windows**: Windows-specific networking optimizations
-- **macOS**: Unified memory model optimizations for Apple Silicon
 
 **Security Features:**
 - Hardware-backed token storage on all platforms:
@@ -414,116 +474,119 @@ For **cross-subnet clusters** where UDP broadcast does not reach, use `--master-
   - **Windows**: Credential Manager + TPM 2.0
   - **macOS**: Keychain + TPM 2.0
 - AES-256-CTR encryption for all cluster communication
-- Automatic security synchronization across mixed platforms
-- Hybrid authentication mode for flexible token management
-
-> [!TIP]
-> **Security Synchronization**: If you toggle the "Secure cluster channel" in the dashboard, any discovered workers will automatically detect the change and restart their handshake to establish an encrypted tunnel, regardless of their platform.
+- HMAC-SHA256 handshake authentication
 
 ### 4.4 Hybrid Authentication Mode (VGRE_CLUSTER_STRICT_AUTH)
 
 VGRE supports two authentication modes for handling token mismatches between master and worker nodes:
 
 **Fallback Mode (Default):**
-- **Behavior**: When a token mismatch is detected, the connection retries using a shared default key. The channel remains AES-256 encrypted at all times — no plaintext connection is ever used.
-- **Use Case**: Development environments, testing, or when token synchronization is difficult
-- **Configuration**: Leave `VGRE_CLUSTER_STRICT_AUTH` unset or set to `0`
-- **Example**:
-  ```bash
-  # Master with token
-  export VGRE_TCP_AUTH_TOKEN="secret1"
-  
-  # Worker with different token (or no token)
-  export VGRE_TCP_AUTH_TOKEN="secret2"
-  
-  # Connection succeeds using fallback default key (still encrypted)
-  ./my_cuda_app
-  ```
+- When a token mismatch is detected, the connection retries using a shared default key. The channel remains AES-256 encrypted at all times — no plaintext connection is ever used.
+- Leave `VGRE_CLUSTER_STRICT_AUTH` unset or set to `0`.
 
 **Strict Mode:**
-- **Behavior**: When a token mismatch is detected, the connection is rejected immediately
-- **Use Case**: Production environments requiring strict authentication
-- **Configuration**: Set `VGRE_CLUSTER_STRICT_AUTH=1`
-- **Example**:
-  ```bash
-  # Master
-  export VGRE_TCP_AUTH_TOKEN="secret1"
-  export VGRE_CLUSTER_STRICT_AUTH=1
-  
-  # Worker with different token
-  export VGRE_TCP_AUTH_TOKEN="secret2"
-  export VGRE_CLUSTER_STRICT_AUTH=1
-  
-  # Connection fails with authentication error
-  ./my_cuda_app
-  ```
-
-**Troubleshooting Token Mismatches:**
-
-If you see error messages like "token mismatch" or "key-verification FAILED":
-
-1. **Check the token on each node:**
-   ```bash
-   # Linux/macOS — show the saved token
-   cat ~/.vgre/token
-
-   # Windows PowerShell
-   Get-Content "$env:USERPROFILE\.vgre\token"
-   ```
-   The output must be **identical** on master and every worker. Tokens are case-sensitive with no extra whitespace.
-
-2. **Re-copy the token from master to worker:**
-   ```bash
-   # Linux/macOS
-   scp ~/.vgre/token  user@worker-machine:~/.vgre/token
-
-   # Windows — copy %USERPROFILE%\.vgre\token to the same path on the worker
-   ```
-   Then restart the worker: `vgre-start --worker`
-
-3. **Re-run setup to regenerate a fresh token (all nodes):**
-   ```bash
-   bash scripts/setup-cluster.sh   # Linux/macOS
-   # or
-   .\scripts\Setup-VGRECluster.ps1  # Windows
-   ```
-
-4. **Fallback mode for development (mixed tokens are OK):**
-   By default (`VGRE_CLUSTER_STRICT_AUTH` unset), a token mismatch falls back to a shared default key — the connection still succeeds using AES-256 encryption. Only set `VGRE_CLUSTER_STRICT_AUTH=1` when you need hard rejection.
-
-**Security Implications:**
-- **Fallback mode**: Uses AES-256-CTR encryption with a shared default key on mismatch — provides confidentiality but not per-cluster authentication
-- **Strict mode**: Requires matching tokens for any connection — use in production
-- **No token set**: Uses default shared key (encrypted, no authentication)
+- When a token mismatch is detected, the connection is rejected immediately.
+- Set `VGRE_CLUSTER_STRICT_AUTH=1` on all nodes for production.
 
 ---
 
-### 4.5 Complete Environment Variable Reference
+### 4.5 Troubleshooting Token Mismatches
+
+The most common cluster problem is mismatched tokens (different token on master vs worker). Use the fingerprint to diagnose — **do not compare the raw token strings**; compare the SHA256 fingerprint which is shorter and harder to misread.
+
+**Step 1 — Check the fingerprint on each node:**
+
+```bash
+# Linux/macOS (run on master, then on each worker)
+bash scripts/setup-cluster.sh --show-fingerprint
+```
+```powershell
+# Windows (run on master, then on each worker)
+.\scripts\Setup-VGRECluster.ps1 -ShowFingerprint
+```
+
+All nodes must print **identical** SHA256 output. If any differ:
+
+**Step 2 — Re-copy the master's token to the worker:**
+```bash
+# Linux/macOS
+scp ~/.vgre/token  user@WORKER_IP:~/.vgre/token
+
+# Windows
+scp "$env:USERPROFILE\.vgre\token"  user@WORKER_IP:"~/.vgre/token"
+```
+
+**Step 3 — If you pasted the token manually** (e.g., via Notepad), re-run setup option 2 on the worker and paste carefully. The token must be exactly 64 hex characters, no spaces, no newline. The setup script strips stray whitespace automatically.
+
+**Step 4 — Verify again**, then restart the worker:
+```bash
+bash scripts/setup-cluster.sh --show-fingerprint   # must match master
+vgre-start --worker
+```
+
+**Step 5 — Worker exits immediately on Windows:**
+1. Run `.\scripts\vgre_sync.bat` to ensure all DLLs are installed
+2. Check that `%LOCALAPPDATA%\VGRE\lib\libvgre.dll` exists
+3. Allow `vgre-worker.exe` through Windows Firewall
+4. Run with full diagnostic output:
+   ```powershell
+   & "$env:LOCALAPPDATA\VGRE\vgre-worker.exe" --port 7777
+   ```
+
+---
+
+### 4.6 Manual Token Setup (Advanced — CI/containers)
+
+If you cannot use the setup script (e.g., Docker container, CI pipeline), set the token inline. This token is only active for the current terminal session.
+
+**Linux/macOS:**
+```bash
+export VGRE_TCP_AUTH_TOKEN="my-secret-key"
+vgre-worker --port 7777
+```
+
+**Windows:**
+```powershell
+$env:VGRE_TCP_AUTH_TOKEN = "my-secret-key"
+.\scripts\Start-VGRE.ps1 --worker
+```
+
+> [!WARNING]
+> The inline token is visible in the process list (`ps aux` / Task Manager) and is lost when the terminal closes. Use the setup script for persistent, secure storage.
+
+**Cross-subnet with manual token:**
+```bash
+# Linux/macOS
+export VGRE_TCP_AUTH_TOKEN="my-secret-key"
+export VGRE_CLUSTER_NODES="192.168.1.50:7777"
+./my_cuda_app
+```
+
+---
+
+### 4.7 Complete Environment Variable Reference
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VGRE_TCP_AUTH_TOKEN` | — | Cluster auth token value (visible in process list) |
-| `VGRE_TCP_AUTH_TOKEN_FILE` | — | Path to file containing auth token (recommended) |
+| `VGRE_TCP_AUTH_TOKEN` | — | Cluster auth token value (visible in process list — prefer the file) |
+| `VGRE_TCP_AUTH_TOKEN_FILE` | — | Path to file containing auth token (set automatically by setup script) |
 | `VGRE_CLUSTER_NODES` | — | Manual node list: `192.168.1.50:7777,10.0.0.100:7777` |
-| `VGRE_CLUSTER_STRICT_AUTH` | `0` | Set to `1` to reject mismatched-token connections |
-| `VGRE_ALLOW_AUTH_FALLBACK` | `0` | Set to `1` to allow fallback to default key on mismatch |
-| `VGRE_CLUSTER_UDP_ANNOUNCE_PORT` | `7778` | UDP port master broadcasts presence on (workers listen) |
-| `VGRE_CLUSTER_UDP_WORKER_PORT` | `7779` | UDP port workers broadcast presence on (master listens) |
-| `VGRE_CLUSTER_MASTER_IP` | — | Comma-separated IP allowlist; workers reject broadcasts from unlisted masters |
-| `VGRE_CLUSTER_BANDWIDTH_REPROBE_SEC` | `300` | Bandwidth re-probe interval in seconds (range: 30–86400) |
+| `VGRE_CLUSTER_STRICT_AUTH` | `0` | Set to `1` to reject mismatched-token connections (production) |
+| `VGRE_ALLOW_AUTH_FALLBACK` | `0` | Set to `1` to allow fallback to default key on mismatch (development) |
+| `VGRE_CLUSTER_UDP_ANNOUNCE_PORT` | `7778` | UDP port master broadcasts presence on |
+| `VGRE_CLUSTER_UDP_WORKER_PORT` | `7779` | UDP port workers broadcast presence on |
+| `VGRE_CLUSTER_MASTER_IP` | — | Comma-separated IP allowlist for worker security |
+| `VGRE_CLUSTER_BANDWIDTH_REPROBE_SEC` | `300` | Bandwidth re-probe interval in seconds |
 | `VGRE_PBKDF2_ITERATIONS` | `600000` | PBKDF2 iteration count for session key derivation |
 | `VGRE_LOG_LEVEL` | `INFO` | Log verbosity: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `VGRE_CACHE_DIR` | `~/.vgre/cache` | JIT kernel compilation cache directory |
 | `VGRE_DEVICE_COUNT` | auto | Override auto-detected virtual device count |
 | `VGRE_ENABLE_NUMA` | `0` | Set to `1` to enable NUMA-aware scheduling (Linux only) |
-| `VGRE_WORKER_THREADS` | auto | Override worker thread count (0 = auto-detect from CPU cores) |
+| `VGRE_WORKER_THREADS` | auto | Override worker thread count (0 = auto-detect) |
 | `VGRE_SIMD_LEVEL` | auto | Force SIMD level: `SSE4`, `AVX`, `AVX2`, `AVX512`, `native` |
-| `VGRE_ADAPTIVE_ALPHA` | `0.3` | Exponential moving-average alpha for adaptive engine (0.0–1.0) |
+| `VGRE_ADAPTIVE_ALPHA` | `0.3` | Exponential moving-average alpha for adaptive engine |
 | `VGRE_HYBRID_REBALANCE_INTERVAL_MS` | — | Auto-start hybrid rebalancing loop with this interval in ms |
 | `VGRE_ENABLE_NATIVE_SIMD` | `0` | Set to `1` during build to enable `-march=native` SIMD tuning |
-
-> [!TIP]
-> On Linux/macOS, source `scripts/vgre_env.ps1` (PowerShell) or set the above variables in your `.bashrc` / `.zshrc`. On Windows, run `. .\scripts\vgre_env.ps1` in PowerShell before launching the dashboard or worker.
 
 ---
 
@@ -635,9 +698,12 @@ export VGRE_NUMA_POLICY=interleave  # local, interleave, preferred
 
 | Issue | Potential Cause | Solution |
 |-------|----------------|----------|
-| Workers not discovered | Different subnets | Use manual `VGRE_CLUSTER_NODES` configuration |
-| Authentication failures | Token mismatch | Ensure all nodes use same `VGRE_TCP_AUTH_TOKEN` |
-| Mixed platform issues | Platform incompatibility | All platforms are compatible; check network connectivity |
+| Workers not discovered | Different subnets | Use `--master-ip` flag or `VGRE_CLUSTER_NODES` |
+| Authentication failures / handshake error | Token mismatch | Run `setup-cluster.sh --show-fingerprint` on each node — fingerprints must match |
+| Worker exits immediately on Windows | Missing DLLs | Run `vgre_sync.bat` to reinstall; allow `vgre-worker.exe` through Firewall |
+| Different fingerprint after copy-paste | Extra whitespace in token file | Re-run `Setup-VGRECluster.ps1` option 2 — script strips whitespace automatically |
+| Worker shows CPU/RAM as 0 after connect | Reconnected before handshake finished | Wait 2–3 seconds after connect; values update automatically |
+| Mixed platform issues | Network/firewall | All platforms are protocol-compatible; check port 7777 is open |
 
 ### 6.6 Performance Optimization
 
