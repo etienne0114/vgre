@@ -12,11 +12,13 @@
 #include "vgre/common/sockets.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
 #include <mutex>
 #include <algorithm>
+#include <sstream>
 
 namespace vgre {
 namespace advanced {
@@ -30,6 +32,34 @@ using vgre::common::vgre_pollfd;
 using vgre::common::vgre_poll;
 using vgre::common::vgre_is_would_block;
 using vgre::common::vgre_get_last_socket_error;
+
+namespace {
+  // S2: UDP announce port — must match the master's VGRE_CLUSTER_UDP_ANNOUNCE_PORT
+  int getUdpAnnouncePort() {
+    const char* e = std::getenv("VGRE_CLUSTER_UDP_ANNOUNCE_PORT");
+    if (e) { int v = std::atoi(e); if (v > 1024 && v < 65536) return v; }
+    return 7778;
+  }
+  const int kUdpAnnouncePort = getUdpAnnouncePort();
+
+  // S1: Master IP allowlist — comma-separated list of allowed master IPs.
+  // Empty = accept any discovered master (default, suitable for trusted networks).
+  // Set VGRE_CLUSTER_MASTER_IP=192.168.1.10,192.168.1.11 to restrict.
+  std::vector<std::string> getMasterIpAllowlist() {
+    std::vector<std::string> list;
+    const char* e = std::getenv("VGRE_CLUSTER_MASTER_IP");
+    if (!e || e[0] == '\0') return list;
+    std::istringstream ss(e);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+      while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+      while (!tok.empty() && tok.back()  == ' ') tok.pop_back();
+      if (!tok.empty()) list.push_back(std::move(tok));
+    }
+    return list;
+  }
+  const std::vector<std::string> kMasterIpAllowlist = getMasterIpAllowlist();
+} // anonymous namespace
 
 // ── UDP Discovery Loop (Worker scans for master broadcasts) ───────────────
 void DiscoveryManager::udpDiscoveryLoop() {
@@ -59,7 +89,7 @@ void DiscoveryManager::udpDiscoveryLoop() {
     struct sockaddr_in listen_addr{};
     listen_addr.sin_family = AF_INET;
     listen_addr.sin_addr.s_addr = INADDR_ANY;
-    listen_addr.sin_port = htons(7778);
+    listen_addr.sin_port = htons(static_cast<uint16_t>(kUdpAnnouncePort));
 
     if (bind(udp_fd, (struct sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
       VGRE_LOG_WARN("TCPCluster", "UDP discovery bind failed, retrying in 3s...");
@@ -75,7 +105,7 @@ void DiscoveryManager::udpDiscoveryLoop() {
     struct sockaddr_in sender_addr{};
     socklen_t sender_len = sizeof(sender_addr);
 
-    while (parent_->enabled_ && parent_->client_fd_ == VGRE_INVALID_SOCKET) {
+    while (parent_->enabled_ && !parent_->has_master_fd_.load(std::memory_order_acquire)) {
       int n = recvfrom(udp_fd, buffer, sizeof(buffer) - 1, 0,
                        (struct sockaddr*)&sender_addr, &sender_len);
       if (n > 0) {
@@ -84,6 +114,22 @@ void DiscoveryManager::udpDiscoveryLoop() {
         if (msg.find("VGRE_DISCOVERY_PING") == 0) {
           char ip[INET_ADDRSTRLEN];
           inet_ntop(AF_INET, &(sender_addr.sin_addr), ip, INET_ADDRSTRLEN);
+
+          // S1: IP allowlist check — reject masters not on the allowlist.
+          // Empty allowlist = accept any (default, trusted-network mode).
+          if (!kMasterIpAllowlist.empty()) {
+            bool allowed = false;
+            for (const auto& allowed_ip : kMasterIpAllowlist) {
+              if (allowed_ip == std::string(ip)) { allowed = true; break; }
+            }
+            if (!allowed) {
+              VGRE_LOG_WARN("TCPCluster",
+                  "UDP discovery: ignoring master broadcast from " +
+                  std::string(ip) + " — not in VGRE_CLUSTER_MASTER_IP allowlist");
+              continue;
+            }
+          }
+
           parent_->host_ = ip;
 
           int connect_port = parent_->port_;
@@ -130,6 +176,7 @@ void DiscoveryManager::udpDiscoveryLoop() {
                       break;
                   }
                   parent_->client_fd_ = sock;
+                  parent_->has_master_fd_.store(true, std::memory_order_release);
               }
               VGRE_LOG_INFO("TCPCluster",
                   "Connected to Remote Master Node at " + parent_->host_);
@@ -144,7 +191,7 @@ void DiscoveryManager::udpDiscoveryLoop() {
     vgre_close_socket(udp_fd);
     if (!parent_->enabled_) break;
 
-    if (parent_->client_fd_ != VGRE_INVALID_SOCKET) {
+    if (parent_->has_master_fd_.load(std::memory_order_acquire)) {
         while (parent_->enabled_) {
             {
                 std::lock_guard<std::mutex> lk(parent_->client_mutex_);
