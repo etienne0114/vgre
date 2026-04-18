@@ -68,6 +68,27 @@ private:
   vgre_socket_t fd_;
 };
 
+// ── UDP Port Configuration ────────────────────────────────────────────────
+// Both ports are configurable via env vars so operators can avoid conflicts
+// with other services on the same subnet.  Both master and workers must use
+// the same values; changing one requires changing the other.
+namespace {
+  // Port the master broadcasts on (workers listen here)
+  int getUdpAnnouncePort() {
+    const char* e = std::getenv("VGRE_CLUSTER_UDP_ANNOUNCE_PORT");
+    if (e) { int v = std::atoi(e); if (v > 1024 && v < 65536) return v; }
+    return 7778;
+  }
+  // Port workers broadcast on (master listens here)
+  int getUdpWorkerPort() {
+    const char* e = std::getenv("VGRE_CLUSTER_UDP_WORKER_PORT");
+    if (e) { int v = std::atoi(e); if (v > 1024 && v < 65536) return v; }
+    return 7779;
+  }
+  const int kUdpAnnouncePort = getUdpAnnouncePort();
+  const int kUdpWorkerPort   = getUdpWorkerPort();
+} // anonymous namespace
+
 // ── Constructor/Destructor ────────────────────────────────────────────────
 
 DiscoveryManager::DiscoveryManager(TCPClusterManager* parent)
@@ -146,7 +167,7 @@ void DiscoveryManager::udpAnnouncerLoop() {
   struct sockaddr_in broadcast_addr{};
   broadcast_addr.sin_family = AF_INET;
   broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-  broadcast_addr.sin_port = htons(7778);
+  broadcast_addr.sin_port = htons(static_cast<uint16_t>(kUdpAnnouncePort));
 
   VGRE_LOG_INFO("TCPCluster", "Master: UDP Announcer active (broadcasting master presence)...");
 
@@ -176,7 +197,7 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
   struct sockaddr_in listen_addr{};
   listen_addr.sin_family = AF_INET;
   listen_addr.sin_addr.s_addr = INADDR_ANY;
-  listen_addr.sin_port = htons(7779); // Dedicated port for worker announcements
+  listen_addr.sin_port = htons(static_cast<uint16_t>(kUdpWorkerPort)); // Dedicated port for worker announcements
 
   if (bind(udp_guard.get(), (struct sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
     VGRE_LOG_WARN("TCPCluster", "Master: UDP Worker Discovery bind failed");
@@ -252,7 +273,7 @@ void DiscoveryManager::udpWorkerAnnouncerLoop() {
   struct sockaddr_in broadcast_addr{};
   broadcast_addr.sin_family = AF_INET;
   broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-  broadcast_addr.sin_port = htons(7779); // Master scans this port
+  broadcast_addr.sin_port = htons(static_cast<uint16_t>(kUdpWorkerPort)); // Master scans this port
 
   std::string ping_msg = "VGRE_WORKER_PING:" + std::to_string(parent_->port_);
   
