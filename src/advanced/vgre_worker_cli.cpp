@@ -52,6 +52,9 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
+#if !defined(_WIN32)
+    std::signal(SIGPIPE, SIG_IGN); // suppress SIGPIPE on broken pipes (Linux + macOS)
+#endif
 
     vgre::Logger::instance().setLevel(vgre::LogLevel::INFO);
     

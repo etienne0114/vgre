@@ -32,6 +32,7 @@ using vgre::common::vgre_pollfd;
 using vgre::common::vgre_poll;
 using vgre::common::vgre_is_would_block;
 using vgre::common::vgre_get_last_socket_error;
+using vgre::common::vgre_set_nosigpipe;
 
 namespace {
   // S2: UDP announce port — must match the master's VGRE_CLUSTER_UDP_ANNOUNCE_PORT
@@ -75,6 +76,7 @@ void DiscoveryManager::udpDiscoveryLoop() {
         std::this_thread::sleep_for(std::chrono::seconds(2));
         continue;
     }
+    vgre_set_nosigpipe(udp_fd); // suppress SIGPIPE on macOS
 
     {
       int opt = 1;

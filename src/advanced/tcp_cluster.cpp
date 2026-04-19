@@ -194,8 +194,6 @@ std::string TCPClusterManager::hexDump(const uint8_t* data, size_t max_bytes) {
 }
 
 VGREResult TCPClusterManager::send_packet(vgre_socket_t fd, PacketType type, const void *payload, size_t payloadLen, vgre::advanced::SecureChannel *sc) {
-  (void)sc;
-
   // Validate socket
   if (fd == VGRE_INVALID_SOCKET) {
     return VGREResult::ERR_INVALID_VALUE;
@@ -279,20 +277,48 @@ VGREResult TCPClusterManager::send_packet(vgre_socket_t fd, PacketType type, con
       return VGREResult::SUCCESS;
   }
 
-  return VGREResult::ERR_IO;
+  // Direct send fallback (for non-queued scenarios like handshake packets)
+  // This handles cases where the socket is valid but not yet in the client list
+  if (sc && sc->isInitialized()) {
+      VGREResult result = sc->sendSecure(fd, staging.data(), staging.size());
+      if (result == VGREResult::SUCCESS) {
+          global_packets_sent_++;
+          global_bytes_sent_ += staging.size();
+      }
+      return result;
+  } else {
+      // Fallback to direct send without encryption
+      bool success = send_all(fd, staging.data(), staging.size());
+      if (success) {
+          global_packets_sent_++;
+          global_bytes_sent_ += staging.size();
+          return VGREResult::SUCCESS;
+      }
+      return VGREResult::ERR_IO;
+  }
 }
 
 VGREResult TCPClusterManager::send_packet_direct(vgre_socket_t fd, PacketType type, const void *payload, size_t payloadLen, vgre::advanced::SecureChannel *sc) {
-  // Delegate to PacketHandler
-  VGREResult result = packet_handler_->sendPacketDirect(fd, type, payload, payloadLen, sc);
-  
-  // Update global statistics (PacketHandler updates its own stats)
-  if (result == VGREResult::SUCCESS) {
-    global_packets_sent_++;
-    global_bytes_sent_ += (sizeof(VSBPHeader) + payloadLen);
+  // Validate socket
+  if (fd == VGRE_INVALID_SOCKET) {
+    return VGREResult::ERR_INVALID_VALUE;
   }
-  
-  return result;
+
+  // Use unified packet construction
+  std::vector<uint8_t> staging = constructPacket(type, payload, payloadLen);
+
+  // Update statistics
+  global_packets_sent_++;
+  global_bytes_sent_ += staging.size();
+
+  // Send directly (bypass queue)
+  if (sc && sc->isInitialized()) {
+    return sc->sendSecure(fd, staging.data(), staging.size());
+  } else {
+    // Fallback to direct send without encryption
+    bool success = send_all(fd, staging.data(), staging.size());
+    return success ? VGREResult::SUCCESS : VGREResult::ERR_IO;
+  }
 }
 
 int TCPClusterManager::recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBuffer, vgre::advanced::SecureChannel *sc) {
