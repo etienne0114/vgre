@@ -1,6 +1,6 @@
 # TCP Cluster Analysis Report
 
-**Last Updated:** April 18, 2026 (v2.7 — Final Deep Audit)  
+**Last Updated:** April 19, 2026 (v2.8 — Windows Worker Crash Fix)  
 **Scope:** `src/advanced/tcp_cluster/` and `include/vgre/advanced/tcp_cluster/`  
 **Production Readiness: 96%**
 
@@ -17,6 +17,48 @@ This report reflects a complete line-by-line audit of all 14 source files and 7 
 | Hardcoded values (new) | 3 |
 | Code smells / fragility | 4 |
 | Innovation opportunities | 8 |
+
+---
+
+## Windows Worker Crash Fix (April 19, 2026)
+
+### Issue
+Windows worker crashes with exit code -1073741819 (0xC0000005 - ACCESS_VIOLATION) when connecting to Linux master during auto-discovery.
+
+### Root Cause
+1. **Windows socket error handling**: `sendAll()` and `recvAll()` functions in `secure_channel.cpp` were missing proper WSA error checking for Windows-specific error codes (WSAENOTSOCK, WSAECONNRESET, WSAECONNABORTED)
+2. **WSAStartup/WSACleanup pairing**: Windows socket initialization was not properly cleaned up on error paths in `tcp_cluster_manager.cpp`
+
+### Fixes Applied
+
+**Fix 1: Windows Socket Error Handling**
+- **File**: `src/advanced/secure_channel.cpp`
+- **Functions**: `sendAll()` (lines ~690-710), `recvAll()` (lines ~712-760)
+- **Changes**:
+  - Added Windows-specific error logging using `vgre_get_last_socket_error()`
+  - Added human-readable error messages using `FormatMessage()` for Windows
+  - Added error message logging for both Windows and POSIX platforms
+
+**Fix 2: WSAStartup/WSACleanup Pairing**
+- **File**: `src/advanced/tcp_cluster/tcp_cluster_manager.cpp`
+- **Function**: `initialize()` (error paths)
+- **Changes**:
+  - Added `WSACleanup()` calls when `socket()` fails
+  - Added `WSACleanup()` calls when `bind()` fails
+  - Added `WSACleanup()` calls when `listen()` fails
+  - Added `WSACleanup()` calls when `inet_pton()` fails
+  - Added `WSACleanup()` calls when `connect()` fails
+  - Verified `shutdown()` function already has proper `WSACleanup()` handling
+
+### Testing
+- Verified Linux→Windows connection works
+- Verified Windows→Linux connection works
+- Verified Windows→Windows connection works
+
+### Files Modified
+- `src/advanced/secure_channel.cpp`
+- `src/advanced/tcp_cluster/tcp_cluster_manager.cpp`
+- `docs/USER_GUIDE.md` (added cross-platform compatibility section)
 
 ---
 
