@@ -56,7 +56,7 @@ target_link_libraries(vgre-worker PRIVATE
     ${llvm_libs}
 )
 if(WIN32)
-    target_link_libraries(vgre-worker PRIVATE Advapi32 ws2_32)
+    target_link_libraries(vgre-worker PRIVATE Advapi32 ws2_32 bcrypt)
 elseif(APPLE)
     target_link_libraries(vgre-worker PRIVATE "-framework Security")
 elseif(UNIX)

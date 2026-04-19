@@ -13,7 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
-#include <shared_mutex>
+#include <shared_mutex>  // kept for std::shared_lock until full migration
 #include <condition_variable>
 #include <string>
 #include <thread>
@@ -504,7 +504,7 @@ private:
   // launched.  All subsequent accesses are reads from those threads; the mutex
   // below makes re-initialization safe and prevents future data races if the
   // field is ever written again after threads start.
-  mutable std::shared_mutex auth_token_mutex_;
+  mutable std::recursive_mutex auth_token_mutex_;
   std::string auth_token_str_; // raw token string for PBKDF2
   
   // Worker-side state for incoming data

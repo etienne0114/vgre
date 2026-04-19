@@ -279,8 +279,9 @@ elseif(APPLE)
         message(STATUS "Found Security framework: ${SECURITY_FRAMEWORK}")
     endif()
 elseif(WIN32)
-    # Windows: Credential Manager (part of Advapi32) + Networking (ws2_32)
-    target_link_libraries(vgre PUBLIC Advapi32 ws2_32)
+    # Windows: Credential Manager (Advapi32) + Networking (ws2_32) + RNG (bcrypt)
+    # bcrypt.lib must be explicit for MinGW — #pragma comment(lib,...) is ignored by GCC.
+    target_link_libraries(vgre PUBLIC Advapi32 ws2_32 bcrypt)
 endif()
 
 target_link_libraries(vgre PUBLIC
