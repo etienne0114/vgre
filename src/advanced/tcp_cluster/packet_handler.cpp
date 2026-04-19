@@ -118,6 +118,7 @@ VGREResult PacketHandler::sendPacketDirect(vgre_socket_t fd, PacketType type,
   if (sc && sc->isInitialized()) {
     return sc->sendSecure(fd, staging.data(), staging.size());
   } else {
+    // Fallback to direct send without encryption
     bool success = send_all(fd, staging.data(), staging.size());
     return success ? VGREResult::SUCCESS : VGREResult::ERR_IO;
   }

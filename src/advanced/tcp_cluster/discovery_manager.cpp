@@ -26,6 +26,7 @@ using vgre::common::vgre_pollfd;
 using vgre::common::vgre_poll;
 using vgre::common::vgre_is_would_block;
 using vgre::common::vgre_get_last_socket_error;
+using vgre::common::vgre_set_nosigpipe;
 
 // RAII Socket Guard from tcp_cluster.cpp
 class SocketGuard {
@@ -156,13 +157,10 @@ void DiscoveryManager::stopAll() {
 void DiscoveryManager::udpAnnouncerLoop() {
   SocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
   if (udp_guard.get() == VGRE_INVALID_SOCKET) return;
-  
+  vgre_set_nosigpipe(udp_guard.get()); // suppress SIGPIPE on macOS
+
   int opt = 1;
-#if defined(_WIN32)
-  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
-#else
   vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
-#endif
 
   struct sockaddr_in broadcast_addr{};
   broadcast_addr.sin_family = AF_INET;
@@ -186,13 +184,10 @@ void DiscoveryManager::udpAnnouncerLoop() {
 void DiscoveryManager::udpMasterDiscoveryLoop() {
   SocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
   if (udp_guard.get() == VGRE_INVALID_SOCKET) return;
+  vgre_set_nosigpipe(udp_guard.get()); // suppress SIGPIPE on macOS
 
   int opt = 1;
-#if defined(_WIN32)
-  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-#else
   vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#endif
 
   struct sockaddr_in listen_addr{};
   listen_addr.sin_family = AF_INET;
@@ -262,13 +257,10 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
 void DiscoveryManager::udpWorkerAnnouncerLoop() {
   SocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
   if (udp_guard.get() == VGRE_INVALID_SOCKET) return;
+  vgre_set_nosigpipe(udp_guard.get()); // suppress SIGPIPE on macOS
 
   int opt = 1;
-#if defined(_WIN32)
-  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
-#else
   vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
-#endif
 
   struct sockaddr_in broadcast_addr{};
   broadcast_addr.sin_family = AF_INET;

@@ -46,6 +46,7 @@ VGREResult ConnectionManager::acceptConnection(vgre_socket_t server_fd) {
   std::string ip_address(ipstr);
   
   // Configure socket
+  vgre::common::vgre_set_nosigpipe(new_socket); // suppress SIGPIPE on macOS
   vgre::common::vgre_ioctl_nonblock(new_socket);
   vgre::common::vgre_set_tcp_keepalive(new_socket, 5, 2, 3);
   
@@ -72,6 +73,7 @@ VGREResult ConnectionManager::connectToMaster(const std::string& host, int port)
     VGRE_LOG_ERROR("ConnectionManager", "Failed to create client socket");
     return VGREResult::ERR_IO;
   }
+  vgre::common::vgre_set_nosigpipe(client_fd); // suppress SIGPIPE on macOS
   
   struct sockaddr_in serv_addr;
   serv_addr.sin_family = AF_INET;
