@@ -36,7 +36,11 @@ target_link_libraries(vgre_advanced PUBLIC
 )
 
 if(APPLE)
-    target_link_libraries(vgre_advanced PUBLIC "-framework IOKit")
+    target_link_libraries(vgre_advanced PUBLIC
+        "-framework IOKit"
+        "-framework Security"
+        "-framework CoreFoundation"
+    )
 endif()
 
 # ── Standalone Worker CLI ────────────────────────────────────────────────────
