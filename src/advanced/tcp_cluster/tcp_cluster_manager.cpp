@@ -64,16 +64,22 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   if (enabled_ && is_master_ == is_master)
     return VGREResult::SUCCESS;
 
-  if (enabled_) {
-    shutdown();
-  }
+  // Always call shutdown() to join any threads from a prior session.
+  // If a worker thread set enabled_=false itself (e.g. clientLoop on disconnect),
+  // the old guard `if (enabled_) { shutdown(); }` would skip the join, leaving
+  // joinable std::thread objects. Assigning new threads over joinable ones calls
+  // std::terminate(). shutdown() is idempotent: thread joins are .joinable()-guarded.
+  shutdown();
 
 #if defined(_WIN32)
-  WSADATA wsaData;
-  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-    VGRE_LOG_ERROR("TCPCluster", "WSAStartup failed");
-    enabled_ = false;
-    return VGREResult::ERR_IO;
+  if (!wsa_started_) {
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+      VGRE_LOG_ERROR("TCPCluster", "WSAStartup failed");
+      enabled_ = false;
+      return VGREResult::ERR_IO;
+    }
+    wsa_started_ = true;
   }
 #endif
 
@@ -188,6 +194,12 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd_ == VGRE_INVALID_SOCKET) {
       VGRE_LOG_ERROR("TCPCluster", "Failed to create socket");
+#if defined(_WIN32)
+      if (wsa_started_) {
+        WSACleanup();
+        wsa_started_ = false;
+      }
+#endif
       enabled_ = false;
       return VGREResult::ERR_IO;
     }
@@ -209,6 +221,12 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       VGRE_LOG_ERROR("TCPCluster", "Bind failed on port " + std::to_string(port_));
       vgre_close_socket(server_fd_);
       server_fd_ = VGRE_INVALID_SOCKET;
+#if defined(_WIN32)
+      if (wsa_started_) {
+        WSACleanup();
+        wsa_started_ = false;
+      }
+#endif
       enabled_ = false;
       return VGREResult::ERR_IO;
     }
@@ -217,6 +235,12 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       VGRE_LOG_ERROR("TCPCluster", "Listen failed");
       vgre_close_socket(server_fd_);
       server_fd_ = VGRE_INVALID_SOCKET;
+#if defined(_WIN32)
+      if (wsa_started_) {
+        WSACleanup();
+        wsa_started_ = false;
+      }
+#endif
       enabled_ = false;
       return VGREResult::ERR_IO;
     }
@@ -298,6 +322,12 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       client_fd_ = socket(AF_INET, SOCK_STREAM, 0);
       if (client_fd_ == VGRE_INVALID_SOCKET) {
         VGRE_LOG_ERROR("TCPCluster", "Failed to create client socket");
+#if defined(_WIN32)
+        if (wsa_started_) {
+          WSACleanup();
+          wsa_started_ = false;
+        }
+#endif
         enabled_ = false;
         return VGREResult::ERR_IO;
       }
@@ -311,6 +341,12 @@ VGREResult TCPClusterManager::initialize(bool is_master,
                        "Invalid address or not supported: " + host_);
         vgre_close_socket(client_fd_);
         client_fd_ = VGRE_INVALID_SOCKET;
+#if defined(_WIN32)
+        if (wsa_started_) {
+          WSACleanup();
+          wsa_started_ = false;
+        }
+#endif
         enabled_ = false;
         return VGREResult::ERR_IO;
       }
@@ -324,6 +360,12 @@ VGREResult TCPClusterManager::initialize(bool is_master,
         // WSAStartup succeeded above, so we must call WSACleanup here.
         // Setting enabled_=false before returning ensures shutdown() sees
         // wasEnabled==false and skips its own WSACleanup call.
+#if defined(_WIN32)
+        if (wsa_started_) {
+          WSACleanup();
+          wsa_started_ = false;
+        }
+#endif
 #if defined(_WIN32)
         WSACleanup();
 #endif
@@ -420,17 +462,22 @@ void TCPClusterManager::shutdown() {
     vgre::advanced::IPCManager::instance().updateClusterNodes({});
   }
 
+#if defined(_WIN32)
+  // Always pair WSACleanup with WSAStartup using wsa_started_ rather than
+  // wasEnabled — the latter is false when a thread self-cleared enabled_, which
+  // would leave WSA initialized across re-init cycles and leak the refcount.
+  if (wsa_started_) {
+    WSACleanup();
+    wsa_started_ = false;
+  }
+#endif
+
   if (!wasEnabled) return; // No further cleanup needed for second caller
 
   if (is_master_) {
     std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
     clients_.clear();
   }
-
-#if defined(_WIN32)
-  // WSAStartup was called in initialize(); pair it with WSACleanup() here.
-  WSACleanup();
-#endif
 }
 
 } // namespace advanced

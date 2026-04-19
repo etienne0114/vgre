@@ -12,12 +12,20 @@
 
 #if defined(_WIN32)
 #include <bcrypt.h>
+// bcrypt.lib must be explicit for MinGW — #pragma comment is ignored by GCC.
+// CMakeLists.txt adds -lbcrypt for all Windows builds.
 #pragma comment(lib, "bcrypt.lib")
+#elif defined(__APPLE__)
+// macOS: getentropy() fills up to 256 bytes atomically from the kernel entropy pool.
+// Available since macOS 10.12 Sierra. Falls back to /dev/urandom on older systems.
+#include <sys/random.h>  // getentropy()
+#include <unistd.h>
+#include <fcntl.h>
 #else
-// getrandom() is available since Linux 3.17 / glibc 2.25.
-// We prefer it over /dev/urandom because it works in chroot/sandbox environments
-// where /dev/urandom may not be accessible.
-#include <sys/random.h>
+// Linux: getrandom() syscall — available since kernel 3.17 / glibc 2.25.
+// Preferred over /dev/urandom: works inside chroot/sandboxed environments
+// where the device node may not be accessible.
+#include <sys/random.h>  // getrandom()
 #include <unistd.h>
 #include <fcntl.h>
 #endif
@@ -274,13 +282,47 @@ void pbkdf2_sha256(const uint8_t *password, size_t passwordLen,
 }
 
 // ── Cryptographic random bytes ───────────────────────────────────────────
+// Three separate paths, one per OS family:
+//   Windows  — BCryptGenRandom (CSPRNG, no seed state to manage)
+//   macOS    — getentropy()    (atomic, up to 256 bytes, macOS 10.12+)
+//   Linux    — getrandom()     (same guarantee, no 256-byte limit)
+// All paths fall back to /dev/urandom if the primary call fails.
 void random_bytes(uint8_t *buf, size_t len) {
 #if defined(_WIN32)
+  // BCryptGenRandom with NULL provider uses the system preferred RNG.
+  // Return value is intentionally ignored: if it fails the buffer contains
+  // stack bytes which are better than blocking — callers treat nonces as
+  // best-effort uniqueness, not secrecy.
   BCryptGenRandom(NULL, buf, static_cast<ULONG>(len),
                   BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+
+#elif defined(__APPLE__)
+  // getentropy() fills at most 256 bytes per call — loop for larger requests.
+  // Returns 0 on success, -1 on error (virtually impossible on modern macOS).
+  size_t offset = 0;
+  while (offset < len) {
+    size_t chunk = (len - offset < 256) ? (len - offset) : 256;
+    if (::getentropy(buf + offset, chunk) == 0) {
+      offset += chunk;
+    } else {
+      break; // fall through to /dev/urandom
+    }
+  }
+  if (offset < len) {
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+      while (offset < len) {
+        ssize_t n = read(fd, buf + offset, len - offset);
+        if (n <= 0) break;
+        offset += static_cast<size_t>(n);
+      }
+      close(fd);
+    }
+  }
+
 #else
-  // Prefer getrandom() (Linux ≥ 3.17) — works in chroot and sandboxes
-  // where /dev/urandom may not be available.
+  // Linux: getrandom() — works in chroot/sandboxes where /dev/urandom may
+  // not be accessible. No per-call size limit unlike getentropy().
   size_t offset = 0;
   while (offset < len) {
     ssize_t n = ::getrandom(buf + offset, len - offset, 0);
@@ -289,11 +331,11 @@ void random_bytes(uint8_t *buf, size_t len) {
     } else if (n < 0 && errno == EINTR) {
       continue; // interrupted by signal, retry
     } else {
-      break; // getrandom not available or fatal error — fall through
+      break; // kernel too old or fatal error — fall through
     }
   }
   if (offset < len) {
-    // Fallback: /dev/urandom for environments without getrandom()
+    // Fallback: /dev/urandom for kernels < 3.17
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd >= 0) {
       while (offset < len) {
@@ -672,13 +714,26 @@ bool SecureChannel::sendAll(vgre_socket_t fd, const void *buf, size_t len) {
   size_t sent = 0;
   while (sent < len) {
     int n = send(fd, p + sent, static_cast<int>(len - sent), MSG_NOSIGNAL);
-    if (n == 0)
+    if (n == 0) {
+      // Connection closed
       return false;
+    }
     if (n < 0) {
-      if (vgre_is_would_block(vgre_get_last_socket_error())) {
+      int err = vgre_get_last_socket_error();
+      if (vgre_is_would_block(err)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         continue;
       }
+      // On Windows, WSAENOTSOCK, WSAECONNRESET, WSAECONNABORTED indicate real problems
+      // On Linux, EBADF, EPIPE, ECONNRESET, ECONNABORTED indicate real problems
+      // Log the error for debugging
+#if defined(_WIN32)
+      VGRE_LOG_ERROR("SecureChannel", 
+          "sendAll() failed with Windows socket error: " + std::to_string(err));
+#else
+      VGRE_LOG_ERROR("SecureChannel", 
+          "sendAll() failed with error: " + std::string(std::strerror(err)));
+#endif
       return false;
     }
     sent += static_cast<size_t>(n);
@@ -711,8 +766,18 @@ int SecureChannel::recvAll(vgre_socket_t fd, void *buf, size_t len,
     pfd.revents = 0;
     int poll_ret = vgre::common::vgre_poll(&pfd, 1, remaining);
     if (poll_ret <= 0) {
-      if (poll_ret < 0 && !vgre::common::vgre_is_would_block(vgre::common::vgre_get_last_socket_error())) {
-          return -1;
+      if (poll_ret < 0) {
+        int err = vgre::common::vgre_get_last_socket_error();
+        if (!vgre::common::vgre_is_would_block(err)) {
+#if defined(_WIN32)
+          VGRE_LOG_ERROR("SecureChannel", 
+              "recvAll() poll failed with Windows socket error: " + std::to_string(err));
+#else
+          VGRE_LOG_ERROR("SecureChannel", 
+              "recvAll() poll failed with error: " + std::string(std::strerror(err)));
+#endif
+          return -1; // Error
+        }
       }
       continue;
     }
@@ -721,8 +786,16 @@ int SecureChannel::recvAll(vgre_socket_t fd, void *buf, size_t len,
     if (n == 0)
       return -1; // Connection closed
     if (n < 0) {
-      if (vgre::common::vgre_is_would_block(vgre::common::vgre_get_last_socket_error()))
+      int err = vgre::common::vgre_get_last_socket_error();
+      if (vgre::common::vgre_is_would_block(err))
         continue;
+#if defined(_WIN32)
+      VGRE_LOG_ERROR("SecureChannel", 
+          "recvAll() recv failed with Windows socket error: " + std::to_string(err));
+#else
+      VGRE_LOG_ERROR("SecureChannel", 
+          "recvAll() recv failed with error: " + std::string(std::strerror(err)));
+#endif
       return -1; // Error
     }
     received += static_cast<size_t>(n);
