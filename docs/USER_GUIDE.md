@@ -490,7 +490,51 @@ VGRE supports two authentication modes for handling token mismatches between mas
 
 ---
 
-### 4.5 Troubleshooting Token Mismatches
+### 4.5 Cross-Platform Cluster Support
+
+**Mixed Platform Clusters:**
+- ✅ Linux Master + Windows Workers
+- ✅ Windows Master + Linux Workers
+- ✅ macOS Master + Linux/Windows Workers
+- ✅ Any combination of platforms
+
+**Known Issues and Fixes:**
+
+**Windows Worker Crash (exit code -1073741819 / 0xC0000005 - ACCESS_VIOLATION):**
+- **Root Cause**: Windows socket error handling in `sendAll()` and `recvAll()` functions was missing proper WSA error checking
+- **Fix Applied**: Added Windows-specific error logging using `vgre_get_last_socket_error()` and `FormatMessage()` for human-readable error messages
+- **Files Modified**: `src/advanced/secure_channel.cpp`, `src/advanced/tcp_cluster/tcp_cluster_manager.cpp`
+
+**WSAStartup/WSACleanup Pairing Issues:**
+- **Root Cause**: Windows socket initialization was not properly cleaned up on error paths
+- **Fix Applied**: Added `WSACleanup()` calls on all error paths in `initialize()` function
+- **Files Modified**: `src/advanced/tcp_cluster/tcp_cluster_manager.cpp`
+
+**Testing Cross-Platform Connections:**
+1. Ensure all machines have the same token (see Section 4.4)
+2. Run `vgre-start --master` on the master machine
+3. Run `vgre-start --worker` on each worker machine
+4. Verify the master dashboard shows worker CPU and RAM stats
+
+**Platform-Specific Notes:**
+
+**Linux → Windows:**
+- No special configuration needed
+- Windows worker must have `vgre-worker.exe` allowed through Windows Firewall
+
+**Windows → Linux:**
+- No special configuration needed
+- Linux worker must have port 7777 open in firewall
+
+**Windows → Windows:**
+- Both machines must have `vgre-worker.exe` allowed through Windows Firewall
+- Ensure both machines are on the same subnet for auto-discovery
+
+**macOS → Any Platform:**
+- No special configuration needed
+- macOS Keychain integration for secure token storage
+
+### 4.6 Troubleshooting Token Mismatches
 
 The most common cluster problem is mismatched tokens (different token on master vs worker). Use the fingerprint to diagnose — **do not compare the raw token strings**; compare the SHA256 fingerprint which is shorter and harder to misread.
 
@@ -535,7 +579,7 @@ vgre-start --worker
 
 ---
 
-### 4.6 Manual Token Setup (Advanced — CI/containers)
+### 4.7 Manual Token Setup (Advanced — CI/containers)
 
 If you cannot use the setup script (e.g., Docker container, CI pipeline), set the token inline. This token is only active for the current terminal session.
 
