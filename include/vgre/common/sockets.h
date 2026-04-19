@@ -40,6 +40,10 @@ typedef int vgre_socket_t;
 constexpr vgre_socket_t VGRE_INVALID_SOCKET = -1;
 constexpr int VGRE_SOCKET_ERROR = -1;
 
+// MSG_NOSIGNAL suppresses SIGPIPE on broken-pipe send() — Linux only.
+// macOS uses the SO_NOSIGPIPE socket option instead (see vgre_set_nosigpipe).
+// Define as 0 so call-sites compile; the SIGPIPE suppression comes from
+// vgre_set_nosigpipe() applied once at socket creation time on macOS.
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
@@ -115,8 +119,15 @@ inline int vgre_set_tcp_keepalive(vgre_socket_t s, int idleS, int intvlS, int cn
   int opt = 1;
   int res = setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
   if (res < 0) return res;
+#if defined(__APPLE__)
+  // macOS: TCP_KEEPALIVE sets the idle time before keepalives begin.
+  // TCP_KEEPINTVL and TCP_KEEPCNT are also available on macOS.
+  setsockopt(s, IPPROTO_TCP, TCP_KEEPALIVE, &idleS, sizeof(idleS));
+#else
+  // Linux: TCP_KEEPIDLE is the equivalent of macOS TCP_KEEPALIVE.
 #ifdef TCP_KEEPIDLE
   setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idleS, sizeof(idleS));
+#endif
 #endif
 #ifdef TCP_KEEPINTVL
   setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvlS, sizeof(intvlS));
@@ -124,6 +135,20 @@ inline int vgre_set_tcp_keepalive(vgre_socket_t s, int idleS, int intvlS, int cn
 #ifdef TCP_KEEPCNT
   setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
 #endif
+  return 0;
+#endif
+}
+
+// ── SO_NOSIGPIPE (macOS only) ─────────────────────────────────────────────
+// On macOS, MSG_NOSIGNAL is not a valid flag for send(). The equivalent
+// protection against SIGPIPE is SO_NOSIGPIPE, set once at socket creation.
+// This is a no-op on Linux (where MSG_NOSIGNAL works) and Windows (no SIGPIPE).
+inline int vgre_set_nosigpipe(vgre_socket_t s) {
+#if defined(__APPLE__)
+  int opt = 1;
+  return setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+#else
+  (void)s;
   return 0;
 #endif
 }

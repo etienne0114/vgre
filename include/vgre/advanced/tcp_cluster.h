@@ -526,6 +526,9 @@ private:
   uint64_t pending_collective_count_ = 0;
 
   bool is_master_ = false;
+#if defined(_WIN32)
+  bool wsa_started_ = false; // tracks WSAStartup calls so WSACleanup is always paired
+#endif
   int port_ = 7777;
   std::string host_;
 
