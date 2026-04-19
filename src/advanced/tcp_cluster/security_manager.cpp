@@ -63,7 +63,7 @@ SecurityManager::SecurityManager(TCPClusterManager* parent)
 VGREResult SecurityManager::enableSecurity(bool enabled) {
   std::string token_snap;
   {
-    std::shared_lock<std::shared_mutex> rlock(parent_->auth_token_mutex_);
+    std::lock_guard<std::recursive_mutex> rlock(parent_->auth_token_mutex_);
     token_snap = parent_->auth_token_str_;
   }
   if (enabled && token_snap.empty()) {
@@ -283,7 +283,7 @@ VGREResult SecurityManager::performServerHandshake(
   if (!client.effective_auth_token.empty()) {
     token = client.effective_auth_token;
   } else {
-    std::shared_lock<std::shared_mutex> rlock(parent_->auth_token_mutex_);
+    std::lock_guard<std::recursive_mutex> rlock(parent_->auth_token_mutex_);
     token = parent_->auth_token_str_;
   }
 
@@ -488,7 +488,7 @@ VGREResult SecurityManager::performClientHandshake() {
   // for all subsequent handshake operations to avoid races with re-initialization.
   std::string token;
   {
-    std::shared_lock<std::shared_mutex> rlock(parent_->auth_token_mutex_);
+    std::lock_guard<std::recursive_mutex> rlock(parent_->auth_token_mutex_);
     token = parent_->auth_token_str_;
   }
 

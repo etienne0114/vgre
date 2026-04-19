@@ -139,7 +139,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     }
     std::string token_for_log;
     {
-      std::unique_lock<std::shared_mutex> wlock(auth_token_mutex_);
+      std::lock_guard<std::recursive_mutex> wlock(auth_token_mutex_);
       auth_token_str_ = std::move(loaded_token);
       token_for_log = auth_token_str_;
     }
@@ -155,7 +155,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     // every VGRE node derives the SAME session key.  Traffic is AES-256-CTR
     // encrypted; only node authentication is skipped.
     {
-      std::unique_lock<std::shared_mutex> wlock(auth_token_mutex_);
+      std::lock_guard<std::recursive_mutex> wlock(auth_token_mutex_);
       auth_token_str_ = "VGRE_CLUSTER_DEFAULT_NOAUTH_v1";
     }
     VGRE_LOG_WARN("TCPCluster",
@@ -165,7 +165,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   }
 
   {
-    std::shared_lock<std::shared_mutex> rlock(auth_token_mutex_);
+    std::lock_guard<std::recursive_mutex> rlock(auth_token_mutex_);
     if (!auth_token_str_.empty()) {
         // Use stable FNV-1a hash instead of std::hash (which is not stable across processes)
         uint64_t hash = 0xcbf29ce484222325ULL;
@@ -177,6 +177,11 @@ VGREResult TCPClusterManager::initialize(bool is_master,
         VGRE_LOG_INFO("TCPCluster", "Auth Token specialized (stable hash generated).");
     }
   }
+
+  // Set enabled_ BEFORE spawning threads so every thread body sees true on entry.
+  // All error paths below that fail before the first thread spawn explicitly set
+  // enabled_ = false before returning, so this ordering is safe.
+  enabled_ = true;
 
   if (is_master_) {
     // Master Node (Server)
@@ -334,7 +339,6 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     }
   }
 
-  enabled_ = true;
   return VGREResult::SUCCESS;
 }
 
