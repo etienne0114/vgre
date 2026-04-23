@@ -141,8 +141,16 @@ void MemoryManager::teardownSignalHandler() {
 #if defined(_WIN32)
 LONG
     CALLBACK MemoryManager::vectoredHandler(PEXCEPTION_POINTERS exceptionInfo) {
+  // Guard against null/corrupt exception context (stack overflow, heap
+  // corruption) before touching any fields of the exception record.
+  if (!exceptionInfo || !exceptionInfo->ExceptionRecord)
+    return EXCEPTION_CONTINUE_SEARCH;
   if (exceptionInfo->ExceptionRecord->ExceptionCode ==
       EXCEPTION_ACCESS_VIOLATION) {
+    // EXCEPTION_ACCESS_VIOLATION always has NumberParameters >= 2:
+    // [0] = access type (0=read, 1=write, 8=DEP), [1] = faulting address.
+    if (exceptionInfo->ExceptionRecord->NumberParameters < 2)
+      return EXCEPTION_CONTINUE_SEARCH;
     void *addr = reinterpret_cast<void *>(
         exceptionInfo->ExceptionRecord->ExceptionInformation[1]);
 

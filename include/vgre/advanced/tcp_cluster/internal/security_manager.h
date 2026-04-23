@@ -75,15 +75,29 @@ public:
   
   /**
    * @brief Perform security handshake (worker side)
-   * 
+   *
    * This method performs the client-side security handshake with the master.
    * It uses auto-negotiation: peeks for a SECURE_HANDSHAKE packet with a short
    * timeout (200ms). If detected, completes the handshake. If not, proceeds
    * with plaintext connection.
-   * 
+   *
    * @return VGREResult::SUCCESS on success, error code otherwise
    */
   VGREResult performClientHandshake();
+
+  /**
+   * @brief Perform security handshake (peer client side — for mesh connections).
+   *
+   * Used when THIS node accepted an inbound TCP connection from a mesh peer
+   * that is acting as the HMAC server (challenger).  Reads SECURE_HANDSHAKE,
+   * verifies the peer's key_verification, sends SECURE_HANDSHAKE_ACK, and
+   * derives the session key into peer->secureChannel.
+   *
+   * @param peer Shared pointer to the ClientConnection for this mesh peer
+   * @return VGREResult::SUCCESS on success, error code otherwise
+   */
+  VGREResult performPeerClientHandshake(
+      std::shared_ptr<TCPClusterManager::ClientConnection> peer);
   
   /**
    * @brief Rotate session key for a client connection

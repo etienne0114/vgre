@@ -58,31 +58,7 @@ using vgre::common::vgre_ioctl_nonblock;
 using vgre::common::vgre_close_socket;
 using vgre::common::vgre_is_would_block;
 using vgre::common::vgre_get_last_socket_error;
-
-namespace {
-// Helper function for sending all bytes
-static bool send_all(vgre_socket_t sock, const void *buf, size_t len, const std::atomic<bool>* enabled = nullptr) {
-  const char *p = static_cast<const char *>(buf);
-  size_t sent = 0;
-  auto start = std::chrono::steady_clock::now();
-  while (sent < len) {
-    if (enabled && !enabled->load()) return false;
-    if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() > 5) {
-        return false;
-    }
-    int n = send(sock, p + sent, static_cast<int>(len - sent), MSG_NOSIGNAL);
-    if (n <= 0) {
-      if (n < 0 && vgre_is_would_block(vgre_get_last_socket_error())) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        continue;
-      }
-      return false;
-    }
-    sent += n;
-  }
-  return true;
-}
-} // namespace
+using vgre::common::vgre_send_all;
 
 // ── Unified Packet Construction ──────────────────────────────────────────
 std::vector<uint8_t> TCPClusterManager::constructPacket(PacketType type, const void* payload, size_t payloadLen) {
@@ -288,7 +264,7 @@ VGREResult TCPClusterManager::send_packet(vgre_socket_t fd, PacketType type, con
       return result;
   } else {
       // Fallback to direct send without encryption
-      bool success = send_all(fd, staging.data(), staging.size());
+      bool success = vgre_send_all(fd, staging.data(), staging.size());
       if (success) {
           global_packets_sent_++;
           global_bytes_sent_ += staging.size();
@@ -316,7 +292,7 @@ VGREResult TCPClusterManager::send_packet_direct(vgre_socket_t fd, PacketType ty
     return sc->sendSecure(fd, staging.data(), staging.size());
   } else {
     // Fallback to direct send without encryption
-    bool success = send_all(fd, staging.data(), staging.size());
+    bool success = vgre_send_all(fd, staging.data(), staging.size());
     return success ? VGREResult::SUCCESS : VGREResult::ERR_IO;
   }
 }
@@ -353,7 +329,7 @@ void TCPClusterManager::flush_tx_queues(std::shared_ptr<ClientConnection> client
         if (client.secureChannel && client.secureChannel->isInitialized()) {
             success = (client.secureChannel->sendSecure(client.socket_fd, pkt.data.data(), pkt.data.size()) == VGREResult::SUCCESS);
         } else {
-            success = send_all(client.socket_fd, pkt.data.data(), pkt.data.size());
+            success = vgre_send_all(client.socket_fd, pkt.data.data(), pkt.data.size());
         }
         
         if (success) {
@@ -373,7 +349,7 @@ void TCPClusterManager::flush_tx_queues(std::shared_ptr<ClientConnection> client
         if (client.secureChannel && client.secureChannel->isInitialized()) {
             success = (client.secureChannel->sendSecure(client.socket_fd, qItem.data.data(), qItem.data.size()) == VGREResult::SUCCESS);
         } else {
-            success = send_all(client.socket_fd, qItem.data.data(), qItem.data.size(), &enabled_);
+            success = vgre_send_all(client.socket_fd, qItem.data.data(), qItem.data.size(), &enabled_);
         }
         
         // Trace disabled in production — uncomment for debugging only:
@@ -520,6 +496,10 @@ VGREResult TCPClusterManager::performClientSecureHandshake() {
   return security_manager_->performClientHandshake();
 }
 
+VGREResult TCPClusterManager::performPeerClientHandshake(std::shared_ptr<ClientConnection> peer) {
+  return security_manager_->performPeerClientHandshake(peer);
+}
+
 // ── Phase 5: Partitioned Kernel Dispatch ──────────────────────────────────
 
 VGREResult TCPClusterManager::launchPartitionedKernel(
@@ -559,9 +539,65 @@ void TCPClusterManager::parseProactiveNodes() {
         end = nodes.find(',', start);
     }
     proactive_worker_addresses_.push_back(nodes.substr(start));
-    
+
     for (auto& addr : proactive_worker_addresses_) {
         VGRE_LOG_INFO("TCPCluster", "Master: Registered proactive connection target: " + addr);
+    }
+}
+
+void TCPClusterManager::parseMeshPeers() {
+    const char* env = std::getenv("VGRE_MESH_PEERS");
+    if (!env || env[0] == '\0') return;
+
+    mesh_peer_ips_.clear();
+    std::string peers_str(env);
+    size_t start = 0;
+    while (start <= peers_str.size()) {
+        size_t comma = peers_str.find(',', start);
+        std::string peer = peers_str.substr(start,
+            comma == std::string::npos ? std::string::npos : comma - start);
+        start = (comma == std::string::npos ? peers_str.size() + 1 : comma + 1);
+
+        // Strip whitespace
+        while (!peer.empty() && peer.front() == ' ') peer.erase(peer.begin());
+        while (!peer.empty() && peer.back()  == ' ') peer.pop_back();
+        if (peer.empty()) continue;
+
+        // Extract IP and port (format: ip:port)
+        size_t colon = peer.rfind(':');
+        if (colon == std::string::npos) {
+            VGRE_LOG_WARN("TCPCluster", "VGRE_MESH_PEERS: skipping malformed entry '" + peer +
+                          "' (expected ip:port)");
+            continue;
+        }
+        std::string peer_ip = peer.substr(0, colon);
+        int peer_port = port_; // default
+        try { peer_port = std::stoi(peer.substr(colon + 1)); }
+        catch (...) { VGRE_LOG_WARN("TCPCluster",
+            "VGRE_MESH_PEERS: bad port in '" + peer + "'"); }
+
+        // Record as a mesh peer (used by serverLoop to select client handshake role).
+        mesh_peer_ips_.insert(peer_ip);
+
+        // Tiebreaker: only the node with the LOWER port initiates the TCP connection.
+        // When ports are equal, use lexicographic IP comparison.
+        // This guarantees exactly ONE outbound connection per pair — the other node
+        // accepts via serverLoop and uses the peer-client handshake role.
+        bool we_initiate = (port_ < peer_port) ||
+                           (port_ == peer_port && host_ < peer_ip);
+        if (we_initiate) {
+            proactive_worker_addresses_.push_back(peer);
+            VGRE_LOG_INFO("TCPCluster",
+                "Mesh: will connect to peer " + peer + " (we have lower port/IP)");
+        } else {
+            VGRE_LOG_INFO("TCPCluster",
+                "Mesh: waiting for peer " + peer + " to connect (they have lower port/IP)");
+        }
+    }
+
+    if (!mesh_peer_ips_.empty()) {
+        VGRE_LOG_INFO("TCPCluster",
+            "Mesh mode active — " + std::to_string(mesh_peer_ips_.size()) + " peer(s) configured");
     }
 }
 

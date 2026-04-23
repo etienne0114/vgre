@@ -37,6 +37,7 @@ using vgre::common::vgre_close_socket;
 using vgre::common::vgre_ioctl_nonblock;
 using vgre::common::vgre_is_would_block;
 using vgre::common::vgre_get_last_socket_error;
+using vgre::common::vgre_set_nosigpipe;
 
 namespace {
 
@@ -257,6 +258,7 @@ void TCPClusterManager::serverLoop() {
             } else {
             rateLimiter_.record(std::string(ipstr));
 
+            vgre_set_nosigpipe(new_socket); // suppress SIGPIPE on macOS
             vgre_ioctl_nonblock(new_socket);
             // Enable TCP keepalive via the cross-platform helper (works on both
             // Linux and Windows via SIO_KEEPALIVE_VALS). Dead connections are
@@ -371,8 +373,14 @@ void TCPClusterManager::serverLoop() {
                         std::chrono::steady_clock::now().time_since_epoch()).count());
                 clientRef->active = true; // Mark as active so it appears in UI (as authenticating)
 
-                std::thread t([this, clientRef]() {
-                    VGREResult sr = this->performSecureHandshake(clientRef);
+                // Mesh peers act as HMAC server (challenger) when they connect to us.
+                // We use the client role (responder) for inbound connections from mesh peers.
+                const bool isMeshPeer = (mesh_peer_ips_.count(clientRef->ip_address) > 0);
+
+                std::thread t([this, clientRef, isMeshPeer]() {
+                    VGREResult sr = isMeshPeer
+                        ? this->performPeerClientHandshake(clientRef)
+                        : this->performSecureHandshake(clientRef);
                     clientRef->is_authenticating = false;
 
                     if (sr == VGREResult::ERR_AUTH_RETRY) {
@@ -660,12 +668,23 @@ void TCPClusterManager::serverLoop() {
                 std::memcpy(&dspkt, payload, sizeof(DataShmPacket));
                 client->rx_buffer.erase(client->rx_buffer.begin(), client->rx_buffer.begin() + totalLen);
                 if (client->is_local && client->shmManager) {
-                  void* ptr = core::RuntimeEngine::instance().getMemoryManager()
-                                  .getPointer(reinterpret_cast<void*>(dspkt.target_ptr));
-                  if (ptr)
-                    std::memcpy(ptr,
-                        static_cast<uint8_t*>(client->shmManager->getBasePtr()) + dspkt.shm_offset,
-                        dspkt.size);
+                  void* shm_base = client->shmManager->getBasePtr();
+                  size_t shm_sz  = client->shmManager->getSize();
+                  if (!shm_base) {
+                    VGRE_LOG_ERROR("TCPCluster", "DATA_SHM: SHM base pointer is null for " + client->ip_address);
+                  } else if (dspkt.shm_offset > shm_sz || dspkt.size > shm_sz - dspkt.shm_offset) {
+                    VGRE_LOG_ERROR("TCPCluster", "DATA_SHM: out-of-bounds SHM read for " + client->ip_address +
+                        " (offset=" + std::to_string(dspkt.shm_offset) +
+                        " size=" + std::to_string(dspkt.size) +
+                        " shm_sz=" + std::to_string(shm_sz) + ") — skipping");
+                  } else {
+                    void* ptr = core::RuntimeEngine::instance().getMemoryManager()
+                                    .getPointer(reinterpret_cast<void*>(dspkt.target_ptr));
+                    if (ptr)
+                      std::memcpy(ptr,
+                          static_cast<uint8_t*>(shm_base) + dspkt.shm_offset,
+                          dspkt.size);
+                  }
                 }
               } else if (type == PacketType::CAPABILITY) {
                 if (hdr.payloadSize < sizeof(CapabilityPacket)) { client->rx_buffer.clear(); break; }
@@ -805,12 +824,23 @@ void TCPClusterManager::serverLoop() {
               client->rx_buffer.erase(client->rx_buffer.begin(),
                   client->rx_buffer.begin() + sizeof(VSBPHeader) + sizeof(DirtyRangePacket));
               if (client->is_local && client->shmManager) {
-                void* ptr = core::RuntimeEngine::instance().getMemoryManager()
-                                .getPointer(reinterpret_cast<void*>(client->pending_target_ptr));
-                if (ptr)
-                  std::memcpy(static_cast<uint8_t*>(ptr) + rpkt.offset,
-                      static_cast<uint8_t*>(client->shmManager->getBasePtr()) + client->pending_shm_offset,
-                      rpkt.size);
+                void* shm_base = client->shmManager->getBasePtr();
+                size_t shm_sz  = client->shmManager->getSize();
+                if (!shm_base) {
+                  VGRE_LOG_ERROR("TCPCluster", "RANGES_SHM: SHM base pointer is null for " + client->ip_address);
+                } else if (client->pending_shm_offset > shm_sz || rpkt.size > shm_sz - client->pending_shm_offset) {
+                  VGRE_LOG_ERROR("TCPCluster", "RANGES_SHM: out-of-bounds SHM read for " + client->ip_address +
+                      " (offset=" + std::to_string(client->pending_shm_offset) +
+                      " size=" + std::to_string(rpkt.size) +
+                      " shm_sz=" + std::to_string(shm_sz) + ") — skipping");
+                } else {
+                  void* ptr = core::RuntimeEngine::instance().getMemoryManager()
+                                  .getPointer(reinterpret_cast<void*>(client->pending_target_ptr));
+                  if (ptr)
+                    std::memcpy(static_cast<uint8_t*>(ptr) + rpkt.offset,
+                        static_cast<uint8_t*>(shm_base) + client->pending_shm_offset,
+                        rpkt.size);
+                }
                 client->pending_shm_offset += rpkt.size;
               }
               if (--client->pending_num_ranges == 0) client->receive_state = ReceiveState::IDLE;

@@ -7,6 +7,7 @@
  */
 
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/tcp_cluster/internal/collective_ops_manager.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/memory_manager.h"
@@ -36,51 +37,7 @@ using vgre::common::vgre_poll;
 using vgre::common::vgre_close_socket;
 using vgre::common::vgre_is_would_block;
 using vgre::common::vgre_get_last_socket_error;
-
-namespace {
-
-// Sends all bytes with timeout; used by clientLoop's TSS2 priority flush.
-static bool send_all(vgre_socket_t sock, const void *buf, size_t len,
-                     const std::atomic<bool>* enabled = nullptr) {
-  const char *p = static_cast<const char *>(buf);
-  size_t sent = 0;
-  auto start = std::chrono::steady_clock::now();
-  while (sent < len) {
-    if (enabled && !enabled->load()) return false;
-    if (std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count() > 5) {
-      return false;
-    }
-    int n = send(sock, p + sent, static_cast<int>(len - sent), MSG_NOSIGNAL);
-    if (n <= 0) {
-      if (n < 0 && vgre_is_would_block(vgre_get_last_socket_error())) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        continue;
-      }
-      return false;
-    }
-    sent += n;
-  }
-  return true;
-}
-
-// Returns byte size for a numeric ArgType datatype (used in allReduce dispatch).
-static size_t getTypeSizeFromDatatype(int datatype) {
-  switch (datatype) {
-    case static_cast<int>(ArgType::INT32):
-    case static_cast<int>(ArgType::UINT32):
-    case static_cast<int>(ArgType::FLOAT32):
-      return 4;
-    case static_cast<int>(ArgType::INT64):
-    case static_cast<int>(ArgType::UINT64):
-    case static_cast<int>(ArgType::FLOAT64):
-      return 8;
-    default:
-      return 8;
-  }
-}
-
-} // anonymous namespace
+using vgre::common::vgre_send_all;
 
 // ── clientLoop ────────────────────────────────────────────────────────────────
 //
@@ -235,7 +192,7 @@ void TCPClusterManager::clientLoop() {
             success = (client_secure_channel_->sendSecure(cur_fd, pkt.data.data(),
                            pkt.data.size()) == VGREResult::SUCCESS);
           } else {
-            success = send_all(cur_fd, pkt.data.data(), pkt.data.size(), &enabled_);
+            success = vgre_send_all(cur_fd, pkt.data.data(), pkt.data.size(), &enabled_);
           }
           if (success) { client_high_priority_tx_.pop_back(); }
           else { std::this_thread::sleep_for(std::chrono::milliseconds(10)); break; }
@@ -248,7 +205,7 @@ void TCPClusterManager::clientLoop() {
             success = (client_secure_channel_->sendSecure(cur_fd, pkt.data.data(),
                            pkt.data.size()) == VGREResult::SUCCESS);
           } else {
-            success = send_all(cur_fd, pkt.data.data(), pkt.data.size(), &enabled_);
+            success = vgre_send_all(cur_fd, pkt.data.data(), pkt.data.size(), &enabled_);
           }
           if (success) { client_low_priority_tx_.pop_front(); }
           else { std::this_thread::sleep_for(std::chrono::milliseconds(10)); break; }
@@ -444,17 +401,28 @@ void TCPClusterManager::processClientStagingBuffer() {
                 client_rx_buffer_.erase(client_rx_buffer_.begin(),
                     client_rx_buffer_.begin() + sizeof(VSBPHeader) + sizeof(DataShmPacket));
                 if (client_shm_enabled_ && client_shm_manager_) {
-                    void* handle = reinterpret_cast<void*>(dspkt.target_ptr);
-                    auto& mm = core::RuntimeEngine::instance().getMemoryManager();
-                    if (!mm.isValidHandle(handle)) {
-                        void* actual_ptr = nullptr;
-                        mm.allocateManagedAt(handle, dspkt.size, actual_ptr);
-                    }
-                    void* local_ptr = mm.getPointer(handle);
-                    if (local_ptr) {
-                        std::memcpy(local_ptr,
-                            static_cast<uint8_t*>(client_shm_manager_->getBasePtr()) + dspkt.shm_offset,
-                            dspkt.size);
+                    void* shm_base = client_shm_manager_->getBasePtr();
+                    size_t shm_sz  = client_shm_manager_->getSize();
+                    if (!shm_base) {
+                        VGRE_LOG_ERROR("TCPCluster", "DATA_SHM: SHM base pointer is null — disabling SHM transport");
+                        client_shm_enabled_ = false;
+                    } else if (dspkt.shm_offset > shm_sz || dspkt.size > shm_sz - dspkt.shm_offset) {
+                        VGRE_LOG_ERROR("TCPCluster", "DATA_SHM: out-of-bounds SHM read (offset=" +
+                            std::to_string(dspkt.shm_offset) + " size=" + std::to_string(dspkt.size) +
+                            " shm_sz=" + std::to_string(shm_sz) + ") — skipping");
+                    } else {
+                        void* handle = reinterpret_cast<void*>(dspkt.target_ptr);
+                        auto& mm = core::RuntimeEngine::instance().getMemoryManager();
+                        if (!mm.isValidHandle(handle)) {
+                            void* actual_ptr = nullptr;
+                            mm.allocateManagedAt(handle, dspkt.size, actual_ptr);
+                        }
+                        void* local_ptr = mm.getPointer(handle);
+                        if (local_ptr) {
+                            std::memcpy(local_ptr,
+                                static_cast<uint8_t*>(shm_base) + dspkt.shm_offset,
+                                dspkt.size);
+                        }
                     }
                 }
             } else if (type == PacketType::STRUCT_DATA) {
@@ -470,7 +438,12 @@ void TCPClusterManager::processClientStagingBuffer() {
                 std::memcpy(&kpkt, client_rx_buffer_.data() + sizeof(VSBPHeader), sizeof(KernelRegisterPacket));
                 client_rx_buffer_.erase(client_rx_buffer_.begin(),
                     client_rx_buffer_.begin() + sizeof(VSBPHeader) + sizeof(KernelRegisterPacket));
-                if (auth_token_ != 0 && kpkt.auth_token != auth_token_) {
+                // B5: constant-time compare prevents timing side-channel token enumeration
+                if (auth_token_ != 0 &&
+                    !crypto::secure_compare(
+                        reinterpret_cast<const uint8_t*>(&kpkt.auth_token),
+                        reinterpret_cast<const uint8_t*>(&auth_token_),
+                        sizeof(auth_token_))) {
                     VGRE_LOG_ERROR("TCPCluster", "Auth Token Mismatch during kernel registration");
                     client_rx_buffer_.erase(client_rx_buffer_.begin(),
                         client_rx_buffer_.begin() + kpkt.source_len);
@@ -531,7 +504,7 @@ void TCPClusterManager::processClientStagingBuffer() {
                 // Handle RAW_DATA for collective operations
                 if (is_master_ && is_reducing_ && pending_collective_count_ > 0) {
                     // Master receiving worker data for reduction
-                    size_t element_size = getTypeSizeFromDatatype(
+                    size_t element_size = ::vgre::vgre_get_type_size(
                         static_cast<int>(pending_collective_datatype_));
                     size_t expected_bytes = pending_collective_count_ * element_size;
 

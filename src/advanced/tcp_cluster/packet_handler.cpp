@@ -14,37 +14,7 @@ using vgre::common::vgre_socket_t;
 using vgre::common::VGRE_INVALID_SOCKET;
 using vgre::common::vgre_get_last_socket_error;
 using vgre::common::vgre_is_would_block;
-
-namespace {
-
-// Helper function for blocking send with timeout
-static bool send_all(vgre_socket_t sock, const void* buf, size_t len) {
-  const char* p = static_cast<const char*>(buf);
-  size_t sent = 0;
-  constexpr int SEND_TIMEOUT_SECONDS = 5;
-  auto start = std::chrono::steady_clock::now();
-  
-  while (sent < len) {
-    // Check for timeout on blocking sends
-    if (std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now() - start).count() > SEND_TIMEOUT_SECONDS) {
-      return false;
-    }
-
-    int n = send(sock, p + sent, static_cast<int>(len - sent), MSG_NOSIGNAL);
-    if (n <= 0) {
-      if (n < 0 && vgre_is_would_block(vgre_get_last_socket_error())) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        continue;
-      }
-      return false;
-    }
-    sent += n;
-  }
-  return true;
-}
-
-} // anonymous namespace
+using vgre::common::vgre_send_all;
 
 PacketHandler::PacketHandler() {}
 
@@ -119,7 +89,7 @@ VGREResult PacketHandler::sendPacketDirect(vgre_socket_t fd, PacketType type,
     return sc->sendSecure(fd, staging.data(), staging.size());
   } else {
     // Fallback to direct send without encryption
-    bool success = send_all(fd, staging.data(), staging.size());
+    bool success = vgre_send_all(fd, staging.data(), staging.size());
     return success ? VGREResult::SUCCESS : VGREResult::ERR_IO;
   }
 }

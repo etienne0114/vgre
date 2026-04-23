@@ -43,6 +43,22 @@ enum class ArgType : uint8_t {
   STRUCT
 };
 
+// Returns byte size of a scalar ArgType; POINTER/STRUCT/unknown → 8 (safe default).
+inline size_t vgre_get_type_size(int datatype) {
+  switch (static_cast<ArgType>(datatype)) {
+    case ArgType::INT32:
+    case ArgType::UINT32:
+    case ArgType::FLOAT32:
+      return 4;
+    case ArgType::INT64:
+    case ArgType::UINT64:
+    case ArgType::FLOAT64:
+      return 8;
+    default:
+      return 8;
+  }
+}
+
 struct KernelArg {
   ArgType type = ArgType::POINTER;
   void *data = nullptr;
