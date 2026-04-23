@@ -1,9 +1,9 @@
 # Implementation Action Plan
 
-**Date**: 2026-03-25 (updated 2026-04-14)  
+**Date**: 2026-03-25 (updated 2026-04-22)  
 **Based On**: Deep Codebase Analysis Report  
 **Goal**: Fix all missing implementations, heuristics, and poor logic  
-**Timeline**: 8-11 weeks (**16/16 tasks complete as of 2026-04-14**)
+**Timeline**: 8-11 weeks (**16/16 tasks complete as of 2026-04-21; cross-platform hardening complete 2026-04-22**)
 
 ---
 
@@ -36,7 +36,7 @@
 - ✅ Grid-wide barriers work correctly (`vgre_jit_syncgrid()`)
 - ✅ Cooperative groups API functional (`this_grid().sync()` in `cpu_cuda_env.h`)
 - ✅ `cudaLaunchCooperativeKernel` routes through cooperative execution path
-- ✅ All 54 tests pass
+- ✅ All 64 tests pass
 
 ---
 
@@ -467,7 +467,7 @@
 
 **Total Remaining**: 0 tasks
 
-**Current test suite**: 61/61 passing (+7 Phase 5 module unit tests)
+**Current test suite**: 64/64 passing (+7 Phase 5 module unit tests + 3 additional integration tests)
 
 ---
 
@@ -541,7 +541,21 @@ This action plan provides a systematic approach to fixing all identified issues 
 
 ---
 
-**Document Version**: 1.7  
-**Last Updated**: 2026-04-14  
-**Status**: 16/16 TASKS COMPLETE — 61/61 TESTS PASSING — ALL PLATFORMS SUPPORTED
+**Document Version**: 1.9  
+**Last Updated**: 2026-04-22  
+**Status**: 16/16 TASKS COMPLETE — 64/64 TESTS PASSING — ALL PLATFORMS SUPPORTED — **PRODUCTION READY**
+
+---
+
+## ADDENDUM: Cross-Platform Hardening (2026-04-22)
+
+Post-release security and cross-platform fixes applied after all 16 tasks were complete:
+
+- ✅ `SO_NOSIGPIPE` added to ALL TCP socket creation paths — `server_loop.cpp` (after `accept()`), `discovery_loops.cpp` (UDP→TCP worker connect + proactive master→worker connect), `connection_manager.cpp` (`acceptConnection()` + `connectToMaster()`)
+- ✅ Process-level `SIGPIPE` suppression (`signal(SIGPIPE, SIG_IGN)`) in `vgre_worker_cli.cpp`
+- ✅ `-framework Security` + `-framework CoreFoundation` added to `src/advanced/CMakeLists.txt` for macOS (`hardware_token_manager.cpp` Keychain APIs)
+- ✅ `using vgre::common::vgre_set_nosigpipe` declarations added to `discovery_manager.cpp`, `discovery_loops.cpp`, `server_loop.cpp`
+- ✅ B5 timing side-channel: `kpkt.auth_token != auth_token_` integer compare in `client_loop.cpp` `processClientStagingBuffer()` replaced with `crypto::secure_compare()` (constant-time 8-byte comparison)
+
+All 64/64 tests continue to pass after these changes.
 

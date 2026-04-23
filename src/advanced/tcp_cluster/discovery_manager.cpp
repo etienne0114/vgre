@@ -9,6 +9,8 @@
 #include "vgre/common/logger.h"
 #include "vgre/common/system_utils.h"
 #include "vgre/common/sockets.h"
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <thread>
@@ -27,47 +29,40 @@ using vgre::common::vgre_poll;
 using vgre::common::vgre_is_would_block;
 using vgre::common::vgre_get_last_socket_error;
 using vgre::common::vgre_set_nosigpipe;
+using vgre::common::VgreSocketGuard;
 
-// RAII Socket Guard from tcp_cluster.cpp
-class SocketGuard {
-public:
-  explicit SocketGuard(vgre_socket_t fd = VGRE_INVALID_SOCKET) : fd_(fd) {}
-  
-  ~SocketGuard() {
-    if (fd_ != VGRE_INVALID_SOCKET) {
-      vgre_close_socket(fd_);
-    }
+// ── UDP HMAC Helpers ──────────────────────────────────────────────────────
+namespace {
+
+// Compute HMAC-SHA256(key, msg) and return 64 lowercase hex chars.
+static std::string udpHmacHex(const std::string& key, const std::string& msg) {
+  uint8_t mac[crypto::kSHA256DigestLen];
+  crypto::hmac_sha256(
+      reinterpret_cast<const uint8_t*>(key.data()), key.size(),
+      reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), mac);
+  char hex[crypto::kSHA256DigestLen * 2 + 1];
+  for (size_t i = 0; i < crypto::kSHA256DigestLen; ++i)
+    snprintf(hex + i * 2, 3, "%02x", static_cast<unsigned>(mac[i]));
+  hex[crypto::kSHA256DigestLen * 2] = '\0';
+  return std::string(hex, crypto::kSHA256DigestLen * 2);
+}
+
+// Verify a 64-char hex HMAC tag against the expected HMAC of msg using key.
+static bool udpVerifyHmac(const std::string& key, const std::string& msg, const std::string& hexTag) {
+  if (hexTag.size() != crypto::kSHA256DigestLen * 2) return false;
+  uint8_t expected[crypto::kSHA256DigestLen];
+  crypto::hmac_sha256(
+      reinterpret_cast<const uint8_t*>(key.data()), key.size(),
+      reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), expected);
+  uint8_t received[crypto::kSHA256DigestLen];
+  for (size_t i = 0; i < crypto::kSHA256DigestLen; ++i) {
+    char bs[3] = { hexTag[i * 2], hexTag[i * 2 + 1], '\0' };
+    received[i] = static_cast<uint8_t>(std::strtoul(bs, nullptr, 16));
   }
-  
-  SocketGuard(const SocketGuard&) = delete;
-  SocketGuard& operator=(const SocketGuard&) = delete;
-  
-  SocketGuard(SocketGuard&& other) noexcept : fd_(other.fd_) {
-    other.fd_ = VGRE_INVALID_SOCKET;
-  }
-  
-  SocketGuard& operator=(SocketGuard&& other) noexcept {
-    if (this != &other) {
-      if (fd_ != VGRE_INVALID_SOCKET) {
-        vgre_close_socket(fd_);
-      }
-      fd_ = other.fd_;
-      other.fd_ = VGRE_INVALID_SOCKET;
-    }
-    return *this;
-  }
-  
-  vgre_socket_t get() const { return fd_; }
-  
-  vgre_socket_t release() {
-    vgre_socket_t temp = fd_;
-    fd_ = VGRE_INVALID_SOCKET;
-    return temp;
-  }
-  
-private:
-  vgre_socket_t fd_;
-};
+  return crypto::secure_compare(expected, received, crypto::kSHA256DigestLen);
+}
+
+} // anonymous namespace (HMAC helpers)
 
 // ── UDP Port Configuration ────────────────────────────────────────────────
 // Both ports are configurable via env vars so operators can avoid conflicts
@@ -155,7 +150,7 @@ void DiscoveryManager::stopAll() {
 // ── UDP Announcer Loop (Master broadcasts presence) ───────────────────────
 
 void DiscoveryManager::udpAnnouncerLoop() {
-  SocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
+  VgreSocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
   if (udp_guard.get() == VGRE_INVALID_SOCKET) return;
   vgre_set_nosigpipe(udp_guard.get()); // suppress SIGPIPE on macOS
 
@@ -173,16 +168,21 @@ void DiscoveryManager::udpAnnouncerLoop() {
     // Recompute each iteration so security-mode toggles are reflected immediately.
     std::string security_str = (parent_->security_enabled_ ? ":SECURE" : ":PLAIN");
     std::string ping_msg = "VGRE_DISCOVERY_PING:" + std::to_string(parent_->port_) + security_str;
+    // Append HMAC-SHA256 tag so workers can verify master identity.
+    // Skipped when no auth token is configured (open/trusted-network mode).
+    std::string token;
+    { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
+    if (!token.empty()) ping_msg += ':' + udpHmacHex(token, ping_msg);
     sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
     std::this_thread::sleep_for(std::chrono::seconds(2));
   }
-  // Socket automatically closed by SocketGuard destructor
+  // Socket automatically closed by VgreSocketGuard destructor
 }
 
 // ── UDP Master Discovery Loop (Master scans for worker broadcasts) ────────
 
 void DiscoveryManager::udpMasterDiscoveryLoop() {
-  SocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
+  VgreSocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
   if (udp_guard.get() == VGRE_INVALID_SOCKET) return;
   vgre_set_nosigpipe(udp_guard.get()); // suppress SIGPIPE on macOS
 
@@ -212,7 +212,7 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
 
   VGRE_LOG_INFO("TCPCluster", "Master: Active Worker Discovery enabled (scanning for remote nodes)...");
 
-  char buffer[128];
+  char buffer[256];
   struct sockaddr_in sender_addr{};
   socklen_t sender_len = sizeof(sender_addr);
 
@@ -224,12 +224,39 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
       if (msg.find("VGRE_WORKER_PING") == 0) {
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(sender_addr.sin_addr), ip, INET_ADDRSTRLEN);
-        
+
+        // Format: VGRE_WORKER_PING:port[:hmac64hex]
         int worker_port = 7777;
-        size_t colon = msg.find(':');
-        if (colon != std::string::npos) {
-            try { worker_port = std::stoi(msg.substr(colon + 1)); }
-            catch (...) { worker_port = 7777; }
+        std::string hmac_field;
+        size_t colon1 = msg.find(':');
+        if (colon1 != std::string::npos) {
+            size_t colon2 = msg.find(':', colon1 + 1);
+            if (colon2 != std::string::npos) {
+                try { worker_port = std::stoi(msg.substr(colon1 + 1, colon2 - colon1 - 1)); }
+                catch (...) { worker_port = 7777; }
+                hmac_field = msg.substr(colon2 + 1);
+            } else {
+                try { worker_port = std::stoi(msg.substr(colon1 + 1)); }
+                catch (...) { worker_port = 7777; }
+            }
+        }
+
+        // Verify HMAC if an auth token is configured.
+        std::string token;
+        { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
+        if (!token.empty()) {
+            if (hmac_field.empty()) {
+                VGRE_LOG_WARN("TCPCluster",
+                    "UDP worker ping from " + std::string(ip) + " has no HMAC — ignoring (auth required)");
+                continue;
+            }
+            // Reconstruct the prefix (the part that was signed)
+            std::string prefix = "VGRE_WORKER_PING:" + std::to_string(worker_port);
+            if (!udpVerifyHmac(token, prefix, hmac_field)) {
+                VGRE_LOG_WARN("TCPCluster",
+                    "UDP worker ping from " + std::string(ip) + " failed HMAC — ignoring");
+                continue;
+            }
         }
 
         std::string worker_addr = std::string(ip) + ":" + std::to_string(worker_port);
@@ -249,13 +276,13 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
       }
     }
   }
-  // Socket automatically closed by SocketGuard destructor
+  // Socket automatically closed by VgreSocketGuard destructor
 }
 
 // ── UDP Worker Announcer Loop (Worker broadcasts presence) ────────────────
 
 void DiscoveryManager::udpWorkerAnnouncerLoop() {
-  SocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
+  VgreSocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
   if (udp_guard.get() == VGRE_INVALID_SOCKET) return;
   vgre_set_nosigpipe(udp_guard.get()); // suppress SIGPIPE on macOS
 
@@ -267,11 +294,14 @@ void DiscoveryManager::udpWorkerAnnouncerLoop() {
   broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
   broadcast_addr.sin_port = htons(static_cast<uint16_t>(kUdpWorkerPort)); // Master scans this port
 
-  std::string ping_msg = "VGRE_WORKER_PING:" + std::to_string(parent_->port_);
-  
   VGRE_LOG_INFO("TCPCluster", "Worker: Proactive Announcer active (seeking master)...");
 
   while (parent_->enabled_ && !parent_->is_master_) {
+    // Recompute each iteration in case the auth token changes after start.
+    std::string ping_msg = "VGRE_WORKER_PING:" + std::to_string(parent_->port_);
+    std::string token;
+    { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
+    if (!token.empty()) ping_msg += ':' + udpHmacHex(token, ping_msg);
     sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0,
            (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
     // Sleep in 200ms increments so shutdown() can join within 200ms.
@@ -279,7 +309,7 @@ void DiscoveryManager::udpWorkerAnnouncerLoop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
   }
-  // Socket automatically closed by SocketGuard destructor
+  // Socket automatically closed by VgreSocketGuard destructor
 }
 
 // udpDiscoveryLoop and proactiveConnectionLoop are defined in discovery_loops.cpp.

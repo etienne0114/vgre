@@ -20,6 +20,7 @@
 #include <vector>
 #include <deque>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <chrono>
@@ -489,6 +490,7 @@ private:
   void processClientStagingBuffer(); // Client data processor
   void flush_tx_queues(std::shared_ptr<ClientConnection> client);
   void parseProactiveNodes();
+  void parseMeshPeers();
 
   // Phase 5: Security handshake
   // ── Phase 13: IPC Visibility Support ──────────────────────────────────
@@ -496,6 +498,8 @@ private:
 
   VGREResult performSecureHandshake(std::shared_ptr<ClientConnection> client);
   VGREResult performClientSecureHandshake();
+  // Mesh: client-role handshake for inbound connections from mesh peers.
+  VGREResult performPeerClientHandshake(std::shared_ptr<ClientConnection> peer);
 
   std::atomic<bool> enabled_{false};
   std::atomic<bool> security_enabled_{false};
@@ -537,6 +541,9 @@ private:
   std::thread client_loop_thread_;   // standby worker: clientLoop when master dials in
   std::thread data_processor_thread_;
   std::vector<std::string> proactive_worker_addresses_;
+  // Mesh topology: set of peer IPs that are mesh peers (any-to-any).
+  // Inbound connections from these IPs use the HMAC-client handshake role.
+  std::set<std::string> mesh_peer_ips_;
 
   // Proactive-connection handshake backoff (per remote IP).
   // After consecutive handshake failures the proactive loop backs off

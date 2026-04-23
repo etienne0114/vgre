@@ -645,6 +645,118 @@ VGREResult SecurityManager::performClientHandshake() {
   return VGREResult::SUCCESS;
 }
 
+VGREResult SecurityManager::performPeerClientHandshake(
+    std::shared_ptr<TCPClusterManager::ClientConnection> peer) {
+  // Mesh peer client-role handshake: this node accepted a TCP connection from
+  // a mesh peer that is acting as the HMAC server (challenger).
+  // Protocol mirror of performClientHandshake() but operates on peer->socket_fd
+  // and stores the session key in peer->secureChannel.
+  vgre_socket_t fd = peer->socket_fd;
+  if (fd == vgre::common::VGRE_INVALID_SOCKET) return VGREResult::ERR_IO;
+
+  std::string token;
+  {
+    std::lock_guard<std::recursive_mutex> rlock(parent_->auth_token_mutex_);
+    token = parent_->auth_token_str_;
+  }
+  if (token.empty()) {
+    VGRE_LOG_ERROR("TCPCluster",
+        "Mesh peer handshake: no auth token configured for " + peer->ip_address);
+    return VGREResult::ERR_AUTH_FAILED;
+  }
+
+  // Read SECURE_HANDSHAKE from the peer (who sent the challenge).
+  std::vector<uint8_t> rx;
+  const size_t expected = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
+  rx.reserve(expected);
+  auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::seconds(HANDSHAKE_TIMEOUT_SECONDS);
+  while (rx.size() < expected) {
+    auto now = std::chrono::steady_clock::now();
+    if (now > deadline) {
+      VGRE_LOG_ERROR("TCPCluster",
+          "Mesh peer handshake: timed out waiting for SECURE_HANDSHAKE from " +
+          peer->ip_address);
+      return VGREResult::ERR_TIMEOUT;
+    }
+    int rem_ms = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+    VGREResult wr = parent_->waitForData(fd, rem_ms);
+    if (wr == VGREResult::ERR_TIMEOUT) continue;
+    if (wr != VGREResult::SUCCESS) return VGREResult::ERR_IO;
+
+    uint8_t buf[256];
+    size_t toRead = std::min(sizeof(buf), expected - rx.size());
+    int n = recv(fd, reinterpret_cast<char*>(buf), static_cast<int>(toRead), 0);
+    if (n > 0) rx.insert(rx.end(), buf, buf + n);
+    else if (n == 0) {
+      VGRE_LOG_ERROR("TCPCluster",
+          "Mesh peer handshake: peer " + peer->ip_address + " closed connection");
+      return VGREResult::ERR_IO;
+    } else {
+      if (vgre::common::vgre_is_would_block(vgre::common::vgre_get_last_socket_error()))
+        continue;
+      return VGREResult::ERR_IO;
+    }
+  }
+
+  VSBPHeader* phdr = reinterpret_cast<VSBPHeader*>(rx.data());
+  if (phdr->magic != VSBP_MAGIC ||
+      phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
+    VGRE_LOG_ERROR("TCPCluster",
+        "Mesh peer handshake: unexpected packet type " +
+        std::to_string(phdr->type) + " from " + peer->ip_address);
+    return VGREResult::ERR_AUTH_FAILED;
+  }
+
+  SecureHandshakePacket peerHs{};
+  std::memcpy(&peerHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
+
+  // Verify peer's key_verification = HMAC(token, "VGRE_KEYVER_MASTER_v1" || peerNonce).
+  {
+    uint8_t expectedKV[crypto::kSHA256DigestLen];
+    computeKeyVerification(token, "VGRE_KEYVER_MASTER_v1", peerHs.nonce, expectedKV);
+    if (!crypto::secure_compare(peerHs.key_verification, expectedKV,
+                                crypto::kSHA256DigestLen)) {
+      VGRE_LOG_ERROR("TCPCluster",
+          "Mesh peer handshake: key-verification failed for " + peer->ip_address +
+          " — token mismatch. Ensure VGRE_TCP_AUTH_TOKEN is identical on all mesh nodes.");
+      vgre::common::vgre_close_socket(peer->socket_fd);
+      peer->socket_fd = vgre::common::VGRE_INVALID_SOCKET;
+      peer->active = false;
+      return VGREResult::ERR_AUTH_FAILED;
+    }
+  }
+
+  // Generate our nonce + key_verification and send SECURE_HANDSHAKE_ACK.
+  SecureHandshakePacket ack{};
+  SecureChannel::generateNonce(ack.nonce);
+  computeKeyVerification(token, "VGRE_KEYVER_WORKER_v1", ack.nonce, ack.key_verification);
+
+  if (parent_->send_packet_direct(fd, PacketType::SECURE_HANDSHAKE_ACK, &ack,
+                                  sizeof(SecureHandshakePacket), nullptr) !=
+      VGREResult::SUCCESS) {
+    VGRE_LOG_ERROR("TCPCluster",
+        "Mesh peer handshake: failed to send ACK to " + peer->ip_address);
+    return VGREResult::ERR_IO;
+  }
+
+  // Derive session key: same inputs as server side → symmetric key.
+  peer->secureChannel = std::make_unique<SecureChannel>();
+  VGREResult r = peer->secureChannel->initializeFromSecret(
+      token, peerHs.nonce, ack.nonce);
+  if (r != VGREResult::SUCCESS) {
+    VGRE_LOG_ERROR("TCPCluster",
+        "Mesh peer handshake: key derivation failed for " + peer->ip_address);
+    return r;
+  }
+
+  peer->security_established = true;
+  VGRE_LOG_INFO("TCPCluster",
+      "Mesh peer: security established (client role) with " + peer->ip_address);
+  return VGREResult::SUCCESS;
+}
+
 VGREResult SecurityManager::rotateSessionKey(
     std::shared_ptr<TCPClusterManager::ClientConnection> client) {
   if (!client || !client->secureChannel) {

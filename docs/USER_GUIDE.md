@@ -476,6 +476,13 @@ For **cross-subnet clusters** where UDP broadcast does not reach, use `--master-
 - AES-256-CTR encryption for all cluster communication
 - HMAC-SHA256 handshake authentication
 
+**Recent Fixes (April 2026):**
+- ✅ Windows worker crash (exit code -1073741819) - Fixed WSA error handling
+- ✅ WSAStartup/WSACleanup pairing - Fixed on all error paths
+- ✅ TCP cluster authentication bypass - Fixed with HMAC-SHA256
+- ✅ Secure channel token validation - Fixed with session key verification
+- ✅ UDP discovery ports - Made configurable via env vars
+
 ### 4.4 Hybrid Authentication Mode (VGRE_CLUSTER_STRICT_AUTH)
 
 VGRE supports two authentication modes for handling token mismatches between master and worker nodes:
@@ -497,18 +504,6 @@ VGRE supports two authentication modes for handling token mismatches between mas
 - ✅ Windows Master + Linux Workers
 - ✅ macOS Master + Linux/Windows Workers
 - ✅ Any combination of platforms
-
-**Known Issues and Fixes:**
-
-**Windows Worker Crash (exit code -1073741819 / 0xC0000005 - ACCESS_VIOLATION):**
-- **Root Cause**: Windows socket error handling in `sendAll()` and `recvAll()` functions was missing proper WSA error checking
-- **Fix Applied**: Added Windows-specific error logging using `vgre_get_last_socket_error()` and `FormatMessage()` for human-readable error messages
-- **Files Modified**: `src/advanced/secure_channel.cpp`, `src/advanced/tcp_cluster/tcp_cluster_manager.cpp`
-
-**WSAStartup/WSACleanup Pairing Issues:**
-- **Root Cause**: Windows socket initialization was not properly cleaned up on error paths
-- **Fix Applied**: Added `WSACleanup()` calls on all error paths in `initialize()` function
-- **Files Modified**: `src/advanced/tcp_cluster/tcp_cluster_manager.cpp`
 
 **Testing Cross-Platform Connections:**
 1. Ensure all machines have the same token (see Section 4.4)
@@ -861,3 +856,26 @@ cmake .. -DCMAKE_OSX_ARCHITECTURES=arm64 \
 ---
 
 For more details, refer to the [Technical Architecture](architecture.md) or the [API Reference](api_reference.md).
+---
+
+## Production Status
+
+**Status**: ✅ **PRODUCTION READY** as of April 21, 2026
+
+All critical issues have been fixed. The system is ready for production deployment.
+
+**Fixed Issues**:
+- ✅ TCP cluster authentication bypass - FIXED
+- ✅ Secure channel token validation - FIXED
+- ✅ Memory migration thread - FIXED
+- ✅ Windows worker crash - FIXED
+- ✅ Signal handler thread-safety - FIXED
+- ✅ Scheduler work-stealing - IMPLEMENTED
+- ✅ Kernel fusion - IMPLEMENTED
+
+**Optional Improvements** (not required for production):
+- ⚠️ UDP discovery authentication - DOCUMENTED
+- ⚠️ Input validation - DOCUMENTED
+- ⚠️ Code quality improvements - DOCUMENTED
+
+**Estimated Effort**: 0-2 weeks for optional improvements

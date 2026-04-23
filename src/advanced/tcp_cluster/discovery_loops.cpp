@@ -12,7 +12,9 @@
 #include "vgre/common/sockets.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -60,6 +62,22 @@ namespace {
     return list;
   }
   const std::vector<std::string> kMasterIpAllowlist = getMasterIpAllowlist();
+
+  // Verify 64-char hex HMAC tag against HMAC(key, msg).
+  static bool udpVerifyHmac(const std::string& key, const std::string& msg, const std::string& hexTag) {
+    if (hexTag.size() != crypto::kSHA256DigestLen * 2) return false;
+    uint8_t expected[crypto::kSHA256DigestLen];
+    crypto::hmac_sha256(
+        reinterpret_cast<const uint8_t*>(key.data()), key.size(),
+        reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), expected);
+    uint8_t received[crypto::kSHA256DigestLen];
+    for (size_t i = 0; i < crypto::kSHA256DigestLen; ++i) {
+      char bs[3] = { hexTag[i * 2], hexTag[i * 2 + 1], '\0' };
+      received[i] = static_cast<uint8_t>(std::strtoul(bs, nullptr, 16));
+    }
+    return crypto::secure_compare(expected, received, crypto::kSHA256DigestLen);
+  }
+
 } // anonymous namespace
 
 // ── UDP Discovery Loop (Worker scans for master broadcasts) ───────────────
@@ -103,7 +121,7 @@ void DiscoveryManager::udpDiscoveryLoop() {
     ::vgre::common::vgre_set_recv_timeout(udp_fd, 1000);
     VGRE_LOG_INFO("TCPCluster", "Scanning local subnet for Master node broadcasts...");
 
-    char buffer[64];
+    char buffer[256];
     struct sockaddr_in sender_addr{};
     socklen_t sender_len = sizeof(sender_addr);
 
@@ -132,27 +150,54 @@ void DiscoveryManager::udpDiscoveryLoop() {
             }
           }
 
-          parent_->host_ = ip;
-
+          // Parse: VGRE_DISCOVERY_PING:port:SECURE_OR_PLAIN[:hmac64hex]
           int connect_port = parent_->port_;
-          size_t first_colon = msg.find(':');
-          if (first_colon != std::string::npos) {
-              size_t second_colon = msg.find(':', first_colon + 1);
-              if (second_colon != std::string::npos) {
-                  try { connect_port = std::stoi(
-                      msg.substr(first_colon + 1, second_colon - first_colon - 1)); }
+          std::string sec_status;
+          std::string hmac_field;
+          size_t c1 = msg.find(':');
+          if (c1 != std::string::npos) {
+              size_t c2 = msg.find(':', c1 + 1);
+              if (c2 != std::string::npos) {
+                  try { connect_port = std::stoi(msg.substr(c1 + 1, c2 - c1 - 1)); }
                   catch (...) {}
-                  std::string sec_status = msg.substr(second_colon + 1);
-                  if (sec_status == "SECURE" && !parent_->security_enabled_) {
-                      VGRE_LOG_INFO("TCPCluster",
-                          "Worker: Master requires security, auto-enabling encryption...");
-                      parent_->security_enabled_ = true;
+                  size_t c3 = msg.find(':', c2 + 1);
+                  if (c3 != std::string::npos) {
+                      sec_status = msg.substr(c2 + 1, c3 - c2 - 1);
+                      hmac_field = msg.substr(c3 + 1);
+                  } else {
+                      sec_status = msg.substr(c2 + 1);
                   }
               } else {
-                  try { connect_port = std::stoi(msg.substr(first_colon + 1)); }
+                  try { connect_port = std::stoi(msg.substr(c1 + 1)); }
                   catch (...) {}
               }
           }
+
+          // Verify HMAC when an auth token is configured.
+          std::string token;
+          { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
+          if (!token.empty()) {
+              if (hmac_field.empty()) {
+                  VGRE_LOG_WARN("TCPCluster",
+                      "UDP master ping from " + std::string(ip) + " has no HMAC — ignoring (auth required)");
+                  continue;
+              }
+              // The signed prefix is everything before the final colon+hmac.
+              std::string prefix = msg.substr(0, msg.size() - hmac_field.size() - 1);
+              if (!udpVerifyHmac(token, prefix, hmac_field)) {
+                  VGRE_LOG_WARN("TCPCluster",
+                      "UDP master ping from " + std::string(ip) + " failed HMAC — ignoring");
+                  continue;
+              }
+          }
+
+          if (sec_status == "SECURE" && !parent_->security_enabled_) {
+              VGRE_LOG_INFO("TCPCluster",
+                  "Worker: Master requires security, auto-enabling encryption...");
+              parent_->security_enabled_ = true;
+          }
+
+          parent_->host_ = ip;
 
           VGRE_LOG_INFO("TCPCluster",
               "Discovered Master node at " + parent_->host_ + ":" +
@@ -160,6 +205,7 @@ void DiscoveryManager::udpDiscoveryLoop() {
 
           vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, 0);
           if (sock == VGRE_INVALID_SOCKET) continue;
+          vgre_set_nosigpipe(sock); // suppress SIGPIPE on macOS
 
           struct sockaddr_in serv_addr{};
           serv_addr.sin_family = AF_INET;
@@ -281,6 +327,7 @@ void DiscoveryManager::proactiveConnectionLoop() {
 
             vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, 0);
             if (sock == VGRE_INVALID_SOCKET) continue;
+            vgre_set_nosigpipe(sock); // suppress SIGPIPE on macOS
 
             struct sockaddr_in serv_addr;
             serv_addr.sin_family = AF_INET;

@@ -1,5 +1,7 @@
 # VGRE Architecture (v0.1.2)
 
+**See**: [Deep Codebase Analysis Report](DEEP_CODEBASE_ANALYSIS.md) for comprehensive line-by-line analysis
+
 ## System Overview
 
 VGRE (Virtual GPU Runtime Engine) is a strictly authoritative, zero-simulation GPU execution system. Unlike traditional emulators that "fake" GPU responses, VGRE executes CUDA and OpenCL kernels as native CPU code, leveraging LLVM JIT, OpenMP parallelism, and advanced SIMD (AVX2/AVX-512). Key features include:
@@ -267,6 +269,13 @@ The following items graduated from the roadmap and are fully implemented:
    through all four layers (GraphManager → RuntimeEngine → CUDAInterceptor → cudart_shim).
    Deep-copies all nodes, captured argument buffers, and dependency edges into a new independent
    graph.
+8. **TCP Cluster Authentication Bypass** ✅ (2026-04-21): Handshake validation complete with HMAC-SHA256 authentication.
+9. **Secure Channel Token Validation** ✅ (2026-04-21): Token validation complete with session key verification.
+10. **Memory Migration Thread** ✅ (2026-04-21): Thread properly started in constructor and stopped in destructor.
+11. **Windows Worker Crash Fixes** ✅ (2026-04-21): WSA error handling added; WSAStartup/WSACleanup pairing fixed.
+12. **Signal Handler Thread-Safety** ✅ (2026-04-21): Thread-local device tracking implemented.
+13. **Scheduler Work-Stealing** ✅ (2026-04-21): NUMA-aware work-stealing complete.
+14. **Kernel Fusion** ✅ (2026-04-21): IR-level kernel fusion complete.
 
 ## Remaining Roadmap
 

@@ -19,23 +19,6 @@ namespace advanced {
 
 using vgre::common::VGRE_INVALID_SOCKET;
 
-namespace {
-// Helper function to get type size from datatype
-size_t getTypeSizeFromDatatype(int datatype) {
-  switch (datatype) {
-    case static_cast<int>(ArgType::INT32):
-    case static_cast<int>(ArgType::UINT32):
-    case static_cast<int>(ArgType::FLOAT32):
-      return 4;
-    case static_cast<int>(ArgType::INT64):
-    case static_cast<int>(ArgType::UINT64):
-    case static_cast<int>(ArgType::FLOAT64):
-      return 8;
-    default:
-      return 8; // Default to 8 bytes
-  }
-}
-} // anonymous namespace
 
 CollectiveOpsManager::CollectiveOpsManager(TCPClusterManager* parent)
     : parent_(parent) {}
@@ -49,7 +32,7 @@ VGREResult CollectiveOpsManager::allReduce(void* ptr, size_t count, int datatype
 }
 
 VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int datatype) {
-  size_t element_size = getTypeSizeFromDatatype(datatype);
+  size_t element_size = ::vgre::vgre_get_type_size(datatype);
 
   // C3: Overflow check — count * element_size can wrap if count is huge.
   if (element_size > 0 && count > (SIZE_MAX / element_size)) {
@@ -123,7 +106,7 @@ VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int da
 }
 
 VGREResult CollectiveOpsManager::workerAllReduce(void* ptr, size_t count, int datatype) {
-  size_t element_size = getTypeSizeFromDatatype(datatype);
+  size_t element_size = ::vgre::vgre_get_type_size(datatype);
   size_t total_bytes = count * element_size;
   
   // Create collective operation packet

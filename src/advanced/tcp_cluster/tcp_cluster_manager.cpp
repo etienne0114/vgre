@@ -259,6 +259,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     // workers (added dynamically by udpMasterDiscoveryLoop) are also picked up.
     // The loop idles safely when the address list is empty.
     parseProactiveNodes();
+    parseMeshPeers(); // adds mesh peers to proactive_worker_addresses_ where we initiate
     discovery_manager_->startProactiveConnections();
   } else {
     // Client Node (Worker)
@@ -318,6 +319,12 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       // Worker's serverLoop accepts it, sets client_fd_, clientLoop handshakes.
       // Single connection path, no race.
       discovery_manager_->startWorkerAnnouncer();
+
+      // Mesh mode: even a worker node can have mesh peers it should connect to.
+      parseMeshPeers();
+      if (!mesh_peer_ips_.empty()) {
+        discovery_manager_->startProactiveConnections();
+      }
     } else {
       client_fd_ = socket(AF_INET, SOCK_STREAM, 0);
       if (client_fd_ == VGRE_INVALID_SOCKET) {
@@ -357,17 +364,14 @@ VGREResult TCPClusterManager::initialize(bool is_master,
         vgre_close_socket(client_fd_);
         client_fd_ = VGRE_INVALID_SOCKET;
         enabled_ = false;
-        // WSAStartup succeeded above, so we must call WSACleanup here.
-        // Setting enabled_=false before returning ensures shutdown() sees
-        // wasEnabled==false and skips its own WSACleanup call.
+        // Pair WSACleanup with WSAStartup exactly once via wsa_started_ guard.
+        // shutdown() checks wsa_started_ too, but enabled_=false above means
+        // wasEnabled will be false there — so cleanup must happen here.
 #if defined(_WIN32)
         if (wsa_started_) {
           WSACleanup();
           wsa_started_ = false;
         }
-#endif
-#if defined(_WIN32)
-        WSACleanup();
 #endif
         return VGREResult::ERR_IO;
       }

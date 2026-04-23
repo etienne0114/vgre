@@ -169,7 +169,7 @@ void test_module_file_sizes() {
     ModuleCheck modules[] = {
         {"src/advanced/tcp_cluster/connection_manager.cpp", "ConnectionManager", 500},
         {"src/advanced/tcp_cluster/packet_handler.cpp", "PacketHandler", 500},
-        {"src/advanced/tcp_cluster/security_manager.cpp", "SecurityManager", 700}, // Complex: handshake + key-verification + HMAC
+        {"src/advanced/tcp_cluster/security_manager.cpp", "SecurityManager", 850}, // Complex: handshake + key-verification + HMAC + mesh peer handshake
         {"src/advanced/tcp_cluster/discovery_manager.cpp", "DiscoveryManager", 700}, // Complex: 5 discovery loops
         {"src/advanced/tcp_cluster/dispatch_manager.cpp", "DispatchManager", 700}, // Complex: kernel dispatch + partitioning
         {"src/advanced/tcp_cluster/memory_sync_manager.cpp", "MemorySyncManager", 600}, // Configurable retry env-vars add ~20 lines

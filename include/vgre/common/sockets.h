@@ -20,6 +20,9 @@
 #include <errno.h>
 #endif
 
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <vector>
 
 namespace vgre {
@@ -191,6 +194,53 @@ inline int vgre_poll(vgre_pollfd *fds, size_t count, int timeoutMs) {
   }
   return res;
 #endif
+}
+
+// ── RAII Socket Guard ─────────────────────────────────────────────────────
+struct VgreSocketGuard {
+  explicit VgreSocketGuard(vgre_socket_t fd = VGRE_INVALID_SOCKET) : fd_(fd) {}
+  ~VgreSocketGuard() { if (fd_ != VGRE_INVALID_SOCKET) vgre_close_socket(fd_); }
+  VgreSocketGuard(const VgreSocketGuard&) = delete;
+  VgreSocketGuard& operator=(const VgreSocketGuard&) = delete;
+  VgreSocketGuard(VgreSocketGuard&& o) noexcept : fd_(o.fd_) { o.fd_ = VGRE_INVALID_SOCKET; }
+  VgreSocketGuard& operator=(VgreSocketGuard&& o) noexcept {
+    if (this != &o) {
+      if (fd_ != VGRE_INVALID_SOCKET) vgre_close_socket(fd_);
+      fd_ = o.fd_;
+      o.fd_ = VGRE_INVALID_SOCKET;
+    }
+    return *this;
+  }
+  vgre_socket_t get() const { return fd_; }
+  vgre_socket_t release() { vgre_socket_t t = fd_; fd_ = VGRE_INVALID_SOCKET; return t; }
+private:
+  vgre_socket_t fd_;
+};
+
+// ── Blocking send with optional shutdown-flag ─────────────────────────────
+// Sends all `len` bytes; returns false on timeout (5s), error, or if
+// `enabled` is non-null and cleared (shutdown signal).
+inline bool vgre_send_all(vgre_socket_t sock, const void* buf, size_t len,
+                          const std::atomic<bool>* enabled = nullptr) {
+  const char* p = static_cast<const char*>(buf);
+  size_t sent = 0;
+  auto start = std::chrono::steady_clock::now();
+  while (sent < len) {
+    if (enabled && !enabled->load()) return false;
+    if (std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start).count() > 5)
+      return false;
+    int n = send(sock, p + sent, static_cast<int>(len - sent), MSG_NOSIGNAL);
+    if (n <= 0) {
+      if (n < 0 && vgre_is_would_block(vgre_get_last_socket_error())) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        continue;
+      }
+      return false;
+    }
+    sent += static_cast<size_t>(n);
+  }
+  return true;
 }
 
 } // namespace common
