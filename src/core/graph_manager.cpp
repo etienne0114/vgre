@@ -112,6 +112,15 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
     }
     }
 
+    // Reject implausibly large sizes — a corrupted KernelIR argSizes entry
+    // could cause a massive heap allocation or an out-of-bounds read.
+    static constexpr size_t kMaxArgSize = 64 * 1024; // 64 KB per argument
+    if (size > kMaxArgSize) {
+      VGRE_LOG_ERROR("GraphManager",
+          "Arg " + std::to_string(i) + " claims size=" + std::to_string(size) +
+          " — exceeds maximum; rejecting");
+      return vgre::VGREResult::ERR_INVALID_VALUE;
+    }
     std::vector<uint8_t> buf(size, 0);
     if (size > 0 && args && args[i]) {
       std::memcpy(buf.data(), args[i], size);
