@@ -1,10 +1,11 @@
 # VGRE Project Status Report
 
-**Last Updated**: 2026-04-22  
-**Status**: ✅ PRODUCTION READY  
+**Last Updated**: 2026-04-30  
+**Status**: ✅ PRODUCTION READY (Phase 1)  
 **Test Status**: 64/64 TESTS PASSING  
-**Cross-Platform Status**: ✅ COMPLETE (Linux, Windows, macOS)  
-**Analysis**: See [Deep Codebase Analysis Report](DEEP_CODEBASE_ANALYSIS.md) and [TCP Cluster Analysis](TCP_CLUSTER_ANALYSIS.md)
+**Cross-Platform Status**: ✅ COMPLETE (Linux, Windows, macOS)
+
+> **See also**: [how_it_work.md](how_it_work.md) for engine internals | [IMPLEMENTATION_ACTION_PLAN.md](IMPLEMENTATION_ACTION_PLAN.md) for Phase 2 Roadmap | [CROSS_PLATFORM_STATUS.md](CROSS_PLATFORM_STATUS.md) for platform details
 
 ---
 
@@ -88,29 +89,9 @@ Virtual GPU Runtime (VGRE) is a CUDA emulation runtime that allows CUDA applicat
 
 ## CROSS-PLATFORM SUPPORT ✅
 
-All three platforms fully supported; platform-specific paths isolated in `vgre/common/sockets.h`.
+All three platforms (Linux, Windows, macOS) are 100% complete. Platform-specific paths are isolated behind 12 helper functions in `vgre/common/sockets.h`.
 
-### ✅ Linux (100% Complete)
-- NUMA awareness (thread pinning, memory binding via `mbind()`)
-- Real PCI topology from `/sys/bus/pci/devices/`
-- Hardware token storage: Linux Keyring (keyutils) + libsecret (GNOME)
-- Performance monitoring via `perf_event` API
-- Entropy: `getrandom()` (kernel 3.17+)
-
-### ✅ Windows (100% Complete)
-- Windows Credential Manager token storage
-- Vectored Exception Handler for UVM page faults
-- WinSock2 (`WSAStartup`/`WSACleanup` with pairing guard)
-- BCryptGenRandom for CSPRNG (explicit `-lbcrypt` in CMake — pragma ignored by MinGW)
-- `recursive_mutex` instead of `shared_mutex` (MinGW compatibility)
-
-### ✅ macOS (100% Complete)
-- macOS Keychain (Security + CoreFoundation frameworks)
-- `SO_NOSIGPIPE` on every socket creation (`vgre_set_nosigpipe()`)
-- `SIG_IGN` for SIGPIPE at process entry (`vgre_worker_cli.cpp`)
-- `TCP_KEEPALIVE` (macOS name for keepalive idle time; Linux uses `TCP_KEEPIDLE`)
-- `getentropy()` for CSPRNG (looped for >256-byte requests)
-- IOKit temperature monitoring
+For the full component-by-component cross-platform breakdown, see [CROSS_PLATFORM_STATUS.md](CROSS_PLATFORM_STATUS.md).
 
 ---
 
@@ -129,7 +110,16 @@ All three platforms fully supported; platform-specific paths isolated in `vgre/c
 
 ## COMPLETE FIX HISTORY
 
-### 2026-04-22 — Cross-Platform + Security Hardening (Current Session)
+### 2026-04-30 — Phase 2 Architectural Refactoring (Current Session)
+
+**Monolithic Class Decomposition**:
+- ✅ **Hardware Token Manager**: Split `hardware_token_manager.cpp` into platform-specific implementations (`token_manager_linux.cpp`, `token_manager_macos.cpp`, `token_manager_win32.cpp`, `token_manager_tpm2.cpp`, `token_manager_fallback.cpp`).
+- ✅ **Memory Manager**: Split the 1,600+ line `memory_manager.cpp` into targeted components (`pool_allocator.cpp`, `uvm_migration.cpp`, `bandwidth_model.cpp`) and a clean facade class, resolving long-term maintainability bottlenecks.
+- ✅ **Build System Modernization**: Updated CMakeLists to successfully link all split objects with external dependents (`libvgre.so` and `libvgre_cudart.so`), resolving missing symbols (`CUDAInterceptor`, `vgre_jit_report_flops`).
+
+---
+
+### 2026-04-22 — Cross-Platform + Security Hardening
 
 **macOS socket safety** — `vgre_set_nosigpipe()` was missing on several TCP socket creation paths, causing SIGPIPE to terminate the process on broken connections:
 - ✅ `server_loop.cpp`: added after `accept()` (all accepted sockets)
@@ -212,8 +202,11 @@ VGRE is **PRODUCTION READY** as of April 23, 2026.
 - Authenticated UDP discovery (HMAC-SHA256)
 - Clean codebase: no duplicate helper functions
 
+For engine internals, see [how_it_work.md](how_it_work.md).  
+For the next phase of missing features (Warp intrinsics, DL shims, GPU passthrough), see [IMPLEMENTATION_ACTION_PLAN.md](IMPLEMENTATION_ACTION_PLAN.md).
+
 ---
 
-**Report Date**: 2026-04-23  
+**Report Date**: 2026-04-23 (updated 2026-04-30)  
 **Verification Method**: Direct source code inspection + build verification + test suite  
 **Confidence**: HIGH (all claims backed by code evidence and passing tests)

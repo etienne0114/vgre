@@ -53,4 +53,12 @@ compile_commands.json
 build_local/
 build_jit/
 
+.mcp.json
+AGENT.md
+CLAUDE.md
+.windsurfrules
+.jetro/
+.github/
+.cursor/
+.agents/
 
