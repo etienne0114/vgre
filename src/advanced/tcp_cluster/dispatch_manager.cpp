@@ -483,12 +483,13 @@ VGREResult DispatchManager::launchPartitionedKernel(
       if (argResult != VGREResult::SUCCESS) {
           VGRE_LOG_ERROR("TCPCluster", "Failed to stream arguments for partition " +
                          std::to_string(slice.partition_id) +
-                         " — inserting ERR_INVALID_VALUE so collectPartitionResults() does not deadlock");
+                         " (error=" + std::to_string(static_cast<int>(argResult)) +
+                         ") — recording real error so collectPartitionResults() reports it");
           std::lock_guard<std::mutex> lock(parent_->partition_mutex_);
           PartitionResult pr;
           pr.partition_id      = slice.partition_id;
           pr.kernel_id         = kernel_id;
-          pr.result            = VGREResult::ERR_INVALID_VALUE;
+          pr.result            = argResult;  // preserve real error, not generic ERR_INVALID_VALUE
           pr.execution_time_ms = 0.0;
           partition_results_.push_back(pr);
           parent_->partition_cv_.notify_all();
