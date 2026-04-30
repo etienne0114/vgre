@@ -281,10 +281,16 @@ target_link_libraries(test_memory_sync_manager PRIVATE vgre)
 add_test(NAME MemorySyncManager COMMAND test_memory_sync_manager)
 
 # ── Global Test Configuration ──────────────────────────────────────────────
-# Disable background hardware benchmarks and optional IPC services during 
-# tests to ensure deterministic performance and prevent CPU resource 
+# Disable background hardware benchmarks and optional IPC services during
+# tests to ensure deterministic performance and prevent CPU resource
 # contention/leakage.
+#
+# LD_LIBRARY_PATH: Force tests to use the freshly-built libvgre.so from the
+# build tree. On Linux, RUNPATH is searched after the ldconfig cache, so a
+# stale system-installed libvgre (e.g. /usr/local/lib/libvgre.so.0) would
+# otherwise be loaded instead of the current build — causing ABI mismatches
+# and hard-to-diagnose SEGFAULTs.
 get_directory_property(vgre_full_test_list TESTS)
-set_tests_properties(${vgre_full_test_list} PROPERTIES 
-    ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF"
+set_tests_properties(${vgre_full_test_list} PROPERTIES
+    ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
 )
