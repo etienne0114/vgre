@@ -3,8 +3,11 @@
 #include "vgre/common/platform.h"
 #include "vgre/runtime/gpu_thread_context.h"
 #include "vgre/runtime/block_worker_pool.h"
+#include "vgre/core/memory_manager.h"
+#include "vgre/core/runtime_engine.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
@@ -14,6 +17,16 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+
+// Signal-safe bandwidth recorder: no-ops if the RuntimeEngine singleton isn't
+// initialized yet (e.g. during AdaptiveExecutionEngine calibration at startup).
+static inline void tryRecordBandwidth(size_t bytes, double ms) noexcept {
+    if (bytes == 0 || ms <= 0.0) return;
+    try {
+        if (vgre::core::RuntimeEngine::instance().isInitialized())
+            vgre::core::MemoryManager::instance().recordMemoryBandwidth(bytes, ms);
+    } catch (...) {}
+}
 
 // ── Grid-wide barrier state ────────────────────────────────────────────────
 // Each cooperative kernel launch allocates one GridBarrierState on the stack.
@@ -164,8 +177,11 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
 #if defined(__linux__)
     if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
+    auto bw_t0 = std::chrono::steady_clock::now();
     (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(),
        smem.size());
+    double blockMs1 = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - bw_t0).count();
 #if defined(__linux__)
     uint64_t instr1 = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
 #else
@@ -175,7 +191,10 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
     // Record metrics
     uint64_t fb1 = effectiveFlops(flopsPerBlock, instr1);
     if (fb1 > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(fb1);
-    if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
+    if (bytesPerBlock > 0) {
+      vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
+      tryRecordBandwidth(bytesPerBlock, blockMs1);
+    }
   } else if (usesSyncthreads) {
     // Kernels with __syncthreads() MUST process blocks serially.
     // Concurrent block dispatch creates competing barriers: if N OMP threads each
@@ -183,18 +202,27 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
     // barriers before all tasks are dequeued — causing permanent deadlock when
     // pool workers starve. Serial execution guarantees only one block's M tasks
     // are in-flight at a time, so exactly M workers arrive at each barrier.
+    // Pre-allocate shared memory once outside the loop; reset per block.
+    // Avoids malloc/free overhead on every block (especially for large smem).
+    SharedMemory serialSmem(sharedMemSize);
     for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
       for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
         for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
           dim3 blockIdx(gx + gridOffset.x, gy + gridOffset.y, gz + gridOffset.z);
-          SharedMemory smem(sharedMemSize);
+          serialSmem.reset();
           GPUThreadContext::setWarpMask(0xFFFFFFFF);
           GPUThreadContext::clearBlockBarrier();
           dim3 tIdx(0, 0, 0);
+          // Prefetch first kernel argument into L2 to reduce cold-start latency
+          // for the next block (serial path: CPU pipeline can hide the miss).
+          if (args && args[0]) __builtin_prefetch(args[0], 0, 1);
 #if defined(__linux__)
           if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
-          (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(), smem.size());
+          auto bw_ts0 = std::chrono::steady_clock::now();
+          (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, serialSmem.raw(), serialSmem.size());
+          double blockMsS = std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - bw_ts0).count();
 #if defined(__linux__)
           uint64_t instrS = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
 #else
@@ -202,7 +230,10 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
 #endif
           uint64_t fbS = effectiveFlops(flopsPerBlock, instrS);
           if (fbS > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(fbS);
-          if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
+          if (bytesPerBlock > 0) {
+            vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
+            tryRecordBandwidth(bytesPerBlock, blockMsS);
+          }
           GPUThreadContext::clearWarpMask();
           GPUThreadContext::clearBlockBarrier();
         }
@@ -228,7 +259,7 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
 
       // True 3D Grid Unrolling using OpenMP collapse
       // This ensures proper 3D mapping and thread data locality instead of artificial linearization
-#pragma omp for collapse(3) schedule(dynamic)
+#pragma omp for collapse(3) schedule(guided, 1)
       for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
         for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
           for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
@@ -240,8 +271,11 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
 #if defined(__linux__)
             if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
+            auto bw_tomp0 = std::chrono::steady_clock::now();
             (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, threadSmem.raw(),
                threadSmem.size());
+            double blockMsOMP = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - bw_tomp0).count();
 #if defined(__linux__)
             uint64_t instrOMP = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
 #else
@@ -250,7 +284,10 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
             // Record metrics per block completion
             uint64_t fbOMP = effectiveFlops(flopsPerBlock, instrOMP);
             if (fbOMP > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(fbOMP);
-            if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
+            if (bytesPerBlock > 0) {
+              vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
+              tryRecordBandwidth(bytesPerBlock, blockMsOMP);
+            }
 
             vgre::runtime::GPUThreadContext::clearWarpMask();
             vgre::runtime::GPUThreadContext::clearBlockBarrier();
@@ -354,7 +391,10 @@ VGREResult CPUParallelExecutor::executeCooperative(CompiledKernelFn fn,
                 vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
                 vgre::runtime::GPUThreadContext::clearBlockBarrier();
 
+                auto bw_tcoop0 = std::chrono::steady_clock::now();
                 (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(), smem.size());
+                double blockMsCoop = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - bw_tcoop0).count();
 
                 vgre::runtime::GPUThreadContext::clearWarpMask();
                 vgre::runtime::GPUThreadContext::clearBlockBarrier();
@@ -364,9 +404,11 @@ VGREResult CPUParallelExecutor::executeCooperative(CompiledKernelFn fn,
                 if (flopsPerBlock > 0)
                     vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(
                         effectiveFlops(flopsPerBlock, 0));
-                if (bytesPerBlock > 0)
+                if (bytesPerBlock > 0) {
                     vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(
                         bytesPerBlock);
+                    tryRecordBandwidth(bytesPerBlock, blockMsCoop);
+                }
             });
         }
 
