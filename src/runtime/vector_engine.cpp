@@ -193,7 +193,11 @@ void VectorEngine::vectorFMA(const float* a, const float* b,
 // ── High-Performance GFLOPS Benchmark ────────────────────────────────────────
 double VectorEngine::benchmarkFMA(size_t n, int iterations) {
     if (n == 0 || iterations == 0) return 0.0;
-    
+    // Guard against callers passing huge n that would exhaust memory (OOM DoS).
+    // 4 vectors × n × 4 bytes; cap at 128 MB total (32M floats per vector).
+    static constexpr size_t kMaxBenchN = 32 * 1024 * 1024ULL;
+    if (n > kMaxBenchN) n = kMaxBenchN;
+
     std::vector<float> a(n, 1.1f), b(n, 2.2f), c(n, 3.3f), out(n, 0.0f);
     float* pa = a.data();
     float* pb = b.data();
@@ -338,7 +342,7 @@ float VectorEngine::vectorDot(const float* a, const float* b, size_t n) {
     __m256 vsum = _mm256_setzero_ps();
     {
     int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
-    #pragma omp parallel num_threads(6) // Use a subset of threads for dot to avoid overhead
+    #pragma omp parallel  // thread count set globally by CPUParallelExecutor
     {
         __m256 local_vsum = _mm256_setzero_ps();
         #pragma omp for
@@ -702,7 +706,7 @@ float VectorEngine::vectorDot(const vgre_bf16* a, const vgre_bf16* b, size_t n) 
     __m256 vsum = _mm256_setzero_ps();
     {
     int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
-    #pragma omp parallel num_threads(6)
+    #pragma omp parallel
     {
         __m256 local_vsum = _mm256_setzero_ps();
         #pragma omp for
