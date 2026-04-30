@@ -599,7 +599,7 @@ void TCPClusterManager::serverLoop() {
               }
 
               if (hdr.magic != VSBP_MAGIC || hdr.version != VSBP_VERSION) {
-                // Preserve buffer contents for diagnostics before clearing
+                // Protocol violation — close connection to prevent desync cascade.
                 size_t dump_size = std::min(client->rx_buffer.size(), size_t(64));
                 std::string hex = hexDump(client->rx_buffer.data(), dump_size);
                 VGRE_LOG_ERROR("TCPCluster",
@@ -608,8 +608,19 @@ void TCPClusterManager::serverLoop() {
                     ", version=" + std::to_string(hdr.version) +
                     ", buffer_size=" + std::to_string(client->rx_buffer.size()) + ")" +
                     "\nFirst " + std::to_string(dump_size) + " bytes (hex):\n" + hex +
-                    "\n— clearing buffer");
-                client->rx_buffer.clear();
+                    "\n— disconnecting client");
+                client->active = false;  // close instead of just clearing — prevents frame-desync
+                break;
+              }
+
+              // Guard against integer overflow: payloadSize is uint32_t so adding
+              // sizeof(VSBPHeader) can overflow size_t on 32-bit platforms; cap it.
+              static constexpr uint32_t kMaxPayload = 256u * 1024u * 1024u; // 256 MB
+              if (hdr.payloadSize > kMaxPayload) {
+                VGRE_LOG_ERROR("TCPCluster",
+                    "Master: oversized payload (" + std::to_string(hdr.payloadSize) +
+                    " bytes) from " + client->ip_address + " — disconnecting");
+                client->active = false;
                 break;
               }
 

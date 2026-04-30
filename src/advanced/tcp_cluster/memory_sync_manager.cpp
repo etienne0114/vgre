@@ -223,8 +223,11 @@ VGREResult MemorySyncManager::initializeShmForClient(std::shared_ptr<TCPClusterM
   // Create SHM manager
   client->shmManager = std::make_unique<vgre::core::ShmManager>();
 
-  // Generate unique SHM name based on socket FD
-  std::string shmName = "vgre_shm_" + std::to_string(client->socket_fd);
+  // Generate unique SHM name using a process-wide counter + socket FD to avoid
+  // collisions when the OS recycles socket descriptors across connections.
+  static std::atomic<uint64_t> s_shmCounter{0};
+  std::string shmName = "vgre_shm_" + std::to_string(++s_shmCounter) +
+                        "_" + std::to_string(client->socket_fd);
   // Configurable via VGRE_CLUSTER_SHM_SIZE (bytes, default 256 MB).
   // Mirrors the server_loop.cpp constant so both sides negotiate the same size.
   static const size_t kShmSize = []() -> size_t {
@@ -322,7 +325,8 @@ VGREResult MemorySyncManager::sendDeltaSyncSHM(void* ptr, uint64_t handle,
   }
   size_t allocSize = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
   for (const auto& range : dirtyRanges) {
-    if (range.first > allocSize || range.second > allocSize - range.first)
+    // Use >= so that range.first == allocSize (past-the-end start) is also rejected.
+    if (range.first >= allocSize || range.second > allocSize - range.first)
       return VGREResult::ERR_INVALID_VALUE;
   }
   uint64_t totalSize = 0;

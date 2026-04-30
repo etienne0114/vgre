@@ -59,13 +59,16 @@ VGREResult PacketHandler::sendPacket(vgre_socket_t fd, PacketType type,
     return VGREResult::ERR_INVALID_VALUE;
   }
   
-  // Validate and construct packet — actual transmission is handled by
-  // TCPClusterManager::send_packet() which enqueues into the TSS2 priority
-  // queues.  Do NOT count stats here; stats are updated in sendPacketDirect()
-  // when bytes actually leave the socket.
-  (void)constructPacket(type, payload, payloadLen);
+  std::vector<uint8_t> staging = constructPacket(type, payload, payloadLen);
 
-  return VGREResult::SUCCESS;
+  packets_sent_.fetch_add(1, std::memory_order_relaxed);
+  bytes_sent_.fetch_add(staging.size(), std::memory_order_relaxed);
+
+  if (sc && sc->isInitialized()) {
+    return sc->sendSecure(fd, staging.data(), staging.size());
+  }
+  bool ok = vgre_send_all(fd, staging.data(), staging.size());
+  return ok ? VGREResult::SUCCESS : VGREResult::ERR_IO;
 }
 
 // ── Packet Sending (Direct) ──────────────────────────────────────────────
