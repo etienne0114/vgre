@@ -200,6 +200,26 @@ public:
   const std::unordered_map<MemoryHandle, Allocation>& getAllocations() const { return allocations_; }
   const std::unordered_map<PoolHandle, MemoryPool>& getPools() const { return pools_; }
 
+  // GPU Memory Bandwidth Model
+  // Records bytes accessed and execution time for one kernel block dispatch.
+  // Used to compute effective bandwidth and compare against GPU peak bandwidth.
+  void recordMemoryBandwidth(size_t bytes, double execMs);
+
+  struct MemoryBandwidthStats {
+    double effective_bandwidth_gbps{0};  // Measured CPU-side bandwidth (bytes / time)
+    double gpu_peak_bandwidth_gbps{0};   // Reference GPU peak (default: A100 HBM3 = 2000 GB/s)
+    double gpu_speedup_factor{0};        // Estimated speedup for bandwidth-bound workloads
+    double coalescing_efficiency{1.0};   // Access pattern efficiency vs ideal (1.0 = stride-1)
+    bool is_bandwidth_bound{false};      // True when effective_bw < 10% of CPU peak
+    uint64_t total_kernels_sampled{0};   // Number of kernel dispatches contributing to the stats
+  };
+
+  // Returns accumulated bandwidth statistics since last reset (or process start).
+  MemoryBandwidthStats getMemoryBandwidthStats() const;
+
+  // Reset bandwidth counters (call between benchmark phases to isolate measurements).
+  void resetMemoryBandwidthStats();
+
   // Singleton convenience
   static MemoryManager &instance();
 
@@ -248,6 +268,15 @@ private:
   std::atomic<double> h2dBandwidth_{25.0};
   std::atomic<double> d2hBandwidth_{25.0};
   std::atomic<double> d2dBandwidth_{50.0};
+
+  // GPU Memory Bandwidth Model — tracks kernel memory throughput vs GPU reference
+  mutable std::mutex bwMutex_;
+  double bwTotalBytes_{0};        // cumulative bytes accessed across all tracked dispatches
+  double bwTotalMs_{0};           // cumulative execution time for those dispatches
+  uint64_t bwKernelCount_{0};     // number of kernel dispatches sampled
+  // GPU reference peak bandwidth in GB/s (A100 SXM5 HBM3 = 2000 GB/s).
+  // Overridable at runtime via VGRE_GPU_PEAK_BANDWIDTH_GBPS environment variable.
+  double gpuPeakBandwidthGbps_{2000.0};
 
   // UVM metrics
   mutable std::atomic<float> pageFaultRate_{0.0f};
