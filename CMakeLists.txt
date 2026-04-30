@@ -56,6 +56,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512F)
         check_cxx_compiler_flag("-mavx2"   COMPILER_SUPPORTS_AVX2)
         check_cxx_compiler_flag("-msse4.1" COMPILER_SUPPORTS_SSE4)
+        check_cxx_compiler_flag("-maes"    COMPILER_SUPPORTS_AES)
 
         if(COMPILER_SUPPORTS_AVX512F AND HOST_HAS_AVX512F)
             add_compile_options(-mavx512f -mavx2 -mfma)
@@ -66,6 +67,15 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         elseif(COMPILER_SUPPORTS_SSE4 AND HOST_HAS_SSE4)
             add_compile_options(-msse4.1)
             add_compile_definitions(VGRE_HAS_SSE4)
+        endif()
+        # AES-NI: enable hardware AES acceleration when available (AES-NI is present
+        # on all x86 CPUs since Intel Westmere 2010 / AMD Bulldozer 2011).
+        if(COMPILER_SUPPORTS_AES)
+            add_compile_options(-maes)
+            add_compile_definitions(VGRE_HAS_AES_NI)
+            message(STATUS "AES-NI: enabled (-maes)")
+        else()
+            message(STATUS "AES-NI: not supported by compiler — using software AES-256")
         endif()
     else()
         message(STATUS "SIMD tuning disabled for portability (VGRE_ENABLE_NATIVE_SIMD=OFF)")
@@ -307,9 +317,14 @@ set_target_properties(vgre PROPERTIES
 # ── CUDART Shim (LD_PRELOAD wrapper) ────────────────────────────────────────
 add_library(vgre_cudart SHARED
     src/api/cudart_shim.cpp
+    src/api/cudart_shim_stream.cpp
     src/api/cuda_driver_shim.cpp
     src/api/cuda_interceptor.cpp
+    src/api/cuda_interceptor_memory.cpp
+    src/api/cuda_interceptor_graphs.cpp
     src/api/vgre_c_api.cpp
+    src/api/vgre_c_api_graphs.cpp
+    src/api/vgre_c_api_telemetry.cpp
 )
 if(WIN32)
     set_target_properties(vgre_cudart PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)

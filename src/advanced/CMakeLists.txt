@@ -19,10 +19,16 @@ add_library(vgre_advanced OBJECT
     tcp_cluster/dispatch_impl.cpp
     tcp_cluster/server_loop.cpp
     tcp_cluster/client_loop.cpp
+    secure_channel_crypto.cpp
     secure_channel.cpp
     workload_partitioner.cpp
     resource_ledger.cpp
-    hardware_token_manager.cpp
+    token/hardware_token_manager.cpp
+    token/token_manager_linux.cpp
+    token/token_manager_macos.cpp
+    token/token_manager_win32.cpp
+    token/token_manager_tpm2.cpp
+    token/token_manager_fallback.cpp
 )
 
 target_include_directories(vgre_advanced PUBLIC
