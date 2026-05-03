@@ -419,6 +419,28 @@ const KernelIR *RuntimeEngine::getKernelIR(KernelId id) const {
   return nullptr;
 }
 
+const KernelIR *RuntimeEngine::getKernelIRByFn(CompiledKernelFn fn) const {
+  if (!fn) return nullptr;
+  // CompiledKernelFn is a shared_ptr<std::function<...>>.
+  // The reverse map stores the raw shared_ptr pointer as the key.
+  KernelId id = lookupKernelIdByFn(static_cast<void *>(fn.get()));
+  return (id != 0) ? getKernelIR(id) : nullptr;
+}
+
+KernelId RuntimeEngine::lookupKernelIdByName(const char* name) const {
+  if (!name) return 0;
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = kernelNames_.find(std::string(name));
+  return (it != kernelNames_.end()) ? it->second : KernelId{0};
+}
+
+KernelId RuntimeEngine::lookupKernelIdByFn(void* fnPtr) const {
+  if (!fnPtr) return 0;
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = kernelFnAddrMap_.find(fnPtr);
+  return (it != kernelFnAddrMap_.end()) ? it->second : KernelId{0};
+}
+
 VGREResult RuntimeEngine::unloadModule(ModuleHandle module) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_)
@@ -777,8 +799,8 @@ VirtualGPUDevice &RuntimeEngine::getDevice(DeviceId id) {
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 RuntimeEngine &RuntimeEngine::instance() {
-  static RuntimeEngine* inst = new RuntimeEngine();
-  return *inst;
+  static RuntimeEngine inst;
+  return inst;
 }
 
 } // namespace core

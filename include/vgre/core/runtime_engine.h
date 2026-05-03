@@ -76,6 +76,12 @@ public:
 
   VGREResult getKernelArgTypes(KernelId id, std::vector<ArgType> &outTypes);
   const KernelIR *getKernelIR(KernelId id) const;
+  // Look up KernelIR by compiled function pointer (used for iGPU fallback).
+  const KernelIR *getKernelIRByFn(CompiledKernelFn fn) const;
+  // CDP: look up a kernel by name (returns 0 if not found).
+  KernelId lookupKernelIdByName(const char* name) const;
+  // CDP: look up by compiled function address (scans kernelFnAddrMap_).
+  KernelId lookupKernelIdByFn(void* fnPtr) const;
 
   /**
    * @brief Dynamically fuses multiple kernels into a single JIT unit.
@@ -214,6 +220,7 @@ private:
   // Kernel caches
   std::unordered_map<KernelId, CompiledKernelFn> kernelCache_;
   std::unordered_map<KernelId, KernelIR> kernelIRCache_;
+  std::unordered_map<void*, KernelId> kernelFnAddrMap_; // reverse map for CDP
   std::unordered_map<KernelId, JITFuture> pendingKernels_;
   std::unordered_map<std::string, KernelId> kernelNames_;
   KernelId nextKernelId_ = 1;

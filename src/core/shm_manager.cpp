@@ -90,8 +90,11 @@ VGREResult ShmManager::open(const std::string& name, size_t size, bool create) {
         return VGREResult::ERR_IO;
     }
     
-    // Store handles
-    fd_ = reinterpret_cast<intptr_t>(hMapFile); // Store HANDLE as intptr_t (platform-specific)
+    // Store HANDLE safely: cast through uintptr_t to avoid sign-extension on
+    // platforms where intptr_t is signed 64-bit but HANDLE is an opaque void*.
+    // Using uintptr_t→intptr_t is implementation-defined but portable on all
+    // MSVC/GCC/Clang targets where sizeof(HANDLE)==sizeof(intptr_t).
+    fd_ = static_cast<intptr_t>(reinterpret_cast<uintptr_t>(hMapFile));
     basePtr_ = pBuf;
     name_ = fullName;
     size_ = size;
@@ -150,9 +153,12 @@ void ShmManager::close() {
         UnmapViewOfFile(basePtr_);
         basePtr_ = nullptr;
     }
-    if (fd_ != -1) {
-        HANDLE hMapFile = reinterpret_cast<HANDLE>(fd_);
-        CloseHandle(hMapFile);
+    {
+        // Recover the HANDLE through the same uintptr_t round-trip used in open().
+        HANDLE hMapFile = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(fd_));
+        if (hMapFile != nullptr && hMapFile != INVALID_HANDLE_VALUE) {
+            CloseHandle(hMapFile);
+        }
         fd_ = -1;
     }
     name_.clear();

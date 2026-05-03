@@ -123,14 +123,29 @@ VGREResult TextureManager::createTextureView(TextureId &outId,
     case TextureElementType::UINT8: elementSize = 1; break;
   }
 
-  // Calculate layer offset if the base has multiple layers
+  // Calculate layer offset: each layer occupies width×height×depth×elementSize bytes.
   size_t layerStride = base.width * base.height * base.depth * base.elementSize;
   size_t layerOffset = viewDesc.firstLayer * layerStride;
+
+  // Calculate mipmap level byte offset.
+  // Mip level k has dimensions max(1, W>>k) × max(1, H>>k) × max(1, D>>k).
+  // Sum the sizes of levels [0, firstMipmapLevel) to get the byte offset into
+  // the layer's mip chain.
+  size_t mipOffset = 0;
+  {
+    size_t mw = base.width, mh = base.height, md = base.depth;
+    for (uint32_t m = 0; m < viewDesc.firstMipmapLevel; ++m) {
+      mipOffset += mw * mh * md * base.elementSize;
+      if (mw > 1) mw >>= 1;
+      if (mh > 1) mh >>= 1;
+      if (md > 1) md >>= 1;
+    }
+  }
 
   TextureObject view;
   view.id = nextTextureId_++;
   view.data = base.data;
-  view.offsetInBytes = base.offsetInBytes + viewDesc.offsetInBytes + layerOffset;
+  view.offsetInBytes = base.offsetInBytes + viewDesc.offsetInBytes + layerOffset + mipOffset;
   view.width = (viewDesc.width == 0) ? base.width : viewDesc.width;
   view.height = (viewDesc.height == 0) ? base.height : viewDesc.height;
   view.depth = (viewDesc.depth == 0) ? base.depth : viewDesc.depth;

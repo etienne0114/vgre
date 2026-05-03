@@ -252,16 +252,27 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
                      "reporting minimum FLOP baseline.");
       flopsPerBlock = blockDim.total(); // 1 FLOP per thread minimum
     } else if (estimatedInstructionCount > 0) {
-      // LLVM IR analysis unavailable (kernel loaded from precompiled module or
-      // JIT compilation failed).  Conservatively assume ~20% of instructions
-      // are FP ops — a better-calibrated midpoint for mixed CPU kernels than
-      // the old 30% that over-counted pure memory-bound workloads.
+      // LLVM IR analysis unavailable (precompiled module / JIT failed).
+      // Use the AdaptiveExecutionEngine's calibrated flopPerInstruction ratio
+      // which is measured from actual hardware via perf_event benchmarks.
+      // Falls back to the static memory-access count fraction when calibration
+      // has not yet run (startup).
+      double fpi = advanced::AdaptiveExecutionEngine::instance().getFlopPerInstruction();
+      uint64_t flopEst;
+      if (fpi > 0.0) {
+        flopEst = std::max(uint64_t(1),
+            static_cast<uint64_t>(static_cast<double>(estimatedInstructionCount) * fpi));
+      } else {
+        // flopPerInstruction not yet calibrated: use 1 FP op per 4 instructions.
+        // This is conservative but prevents telemetry inflation for non-compute kernels.
+        flopEst = std::max(uint64_t(1), estimatedInstructionCount / 4);
+      }
       VGRE_LOG_DEBUG("RuntimeEngine",
-                     "FLOP count unverified for kernel '" + kName +
-                     "'; using 20% instruction heuristic (" +
-                     std::to_string(estimatedInstructionCount) + " instructions)");
-      flopsPerBlock = blockDim.total() *
-                      std::max(uint64_t(1), estimatedInstructionCount / 5);
+                     "FLOP count calibrated for kernel '" + kName +
+                     "': " + std::to_string(flopEst) + " FLOPs/thread from " +
+                     std::to_string(estimatedInstructionCount) + " instructions" +
+                     (fpi > 0.0 ? " (ratio=" + std::to_string(fpi) + ")" : " (fallback)"));
+      flopsPerBlock = blockDim.total() * flopEst;
     } else {
       flopsPerBlock = blockDim.total(); // absolute minimum baseline
     }
@@ -428,8 +439,11 @@ VGREResult RuntimeEngine::launchCooperativeKernelMultiDevice(
       if (ir.staticFlopCount > 0) {
         ready[i].flopsPerBlock = ready[i].blockDim.total() * ir.staticFlopCount;
       } else if (!ir.flopCountVerified && ir.estimatedInstructionCount > 0) {
-        ready[i].flopsPerBlock = ready[i].blockDim.total() *
-            std::max(uint64_t(1), ir.estimatedInstructionCount / 5);
+        double fpi = advanced::AdaptiveExecutionEngine::instance().getFlopPerInstruction();
+        uint64_t flopEst = (fpi > 0.0)
+            ? std::max(uint64_t(1), static_cast<uint64_t>(ir.estimatedInstructionCount * fpi))
+            : std::max(uint64_t(1), ir.estimatedInstructionCount / 4);
+        ready[i].flopsPerBlock = ready[i].blockDim.total() * flopEst;
       } else {
         ready[i].flopsPerBlock = ready[i].blockDim.total(); // minimum baseline
       }
@@ -655,9 +669,11 @@ VGREResult RuntimeEngine::launchCooperativeKernel(KernelId id,
         if (ir.staticFlopCount > 0) {
             flopsPerBlock = blockDim.total() * ir.staticFlopCount;
         } else if (!ir.flopCountVerified && ir.estimatedInstructionCount > 0) {
-            // Heuristic only when LLVM IR analysis was unavailable.
-            flopsPerBlock = blockDim.total() *
-                std::max(uint64_t(1), ir.estimatedInstructionCount / 5);
+            double fpi = advanced::AdaptiveExecutionEngine::instance().getFlopPerInstruction();
+            uint64_t flopEst = (fpi > 0.0)
+                ? std::max(uint64_t(1), static_cast<uint64_t>(ir.estimatedInstructionCount * fpi))
+                : std::max(uint64_t(1), ir.estimatedInstructionCount / 4);
+            flopsPerBlock = blockDim.total() * flopEst;
         } else {
             flopsPerBlock = blockDim.total(); // minimum baseline
         }
