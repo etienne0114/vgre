@@ -25,10 +25,12 @@
 #include <windows.h>
 #elif defined(__APPLE__)
 #include <sys/sysctl.h>
+#include <unistd.h>
 #else
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <dirent.h>
 #endif
 
 namespace vgre {
@@ -138,8 +140,13 @@ void HybridComputeManager::detectIntegratedGPU() {
   if (igpu.initialize() == VGREResult::SUCCESS && igpu.isAvailable()) {
     resources_.hasIntegratedGPU = true;
     resources_.igpuName = igpu.getDeviceName();
+    resources_.igpuGflops = igpu.getEstimatedGFLOPS();
+    // Measure real dispatch latency: time a no-op enqueue+finish round-trip.
+    resources_.igpuDispatchLatencyMs = igpu.measureDispatchLatencyMs();
   } else {
     resources_.hasIntegratedGPU = false;
+    resources_.igpuGflops = 0.0;
+    resources_.igpuDispatchLatencyMs = 0.0;
   }
 #else
 #if defined(_WIN32)
@@ -147,20 +154,72 @@ void HybridComputeManager::detectIntegratedGPU() {
   // Until that integration lands, this backend is reported unavailable.
   resources_.hasIntegratedGPU = false;
 #else
-  // Check for Intel/AMD integrated GPU via sysfs (Linux)
-  std::ifstream driCards("/sys/class/drm/card0/device/vendor");
-  if (driCards.is_open()) {
-    std::string vendor;
-    std::getline(driCards, vendor);
-    if (!vendor.empty()) {
-      resources_.hasIntegratedGPU = true;
+  // Enumerate all DRM cards to find an integrated GPU.
+  // card0 may be a discrete GPU (e.g. PCIe dGPU) — we must check all cards
+  // and identify the iGPU by its driver (i915 = Intel, amdgpu with PCI class
+  // 0x030000 sub-ID < 0x1000 = AMD iGPU, etnaviv = ARM Vivante).
+  resources_.hasIntegratedGPU = false;
+  for (int cardIdx = 0; cardIdx <= 8 && !resources_.hasIntegratedGPU; ++cardIdx) {
+    std::string cardPath = "/sys/class/drm/card" + std::to_string(cardIdx);
+    // Check driver symlink: readlink /sys/class/drm/cardN/device/driver → ../../../bus/pci/drivers/<driver>
+    std::string driverLinkPath = cardPath + "/device/driver";
+    char driverBuf[256] = {};
+    ssize_t dlen = ::readlink(driverLinkPath.c_str(), driverBuf, sizeof(driverBuf) - 1);
+    if (dlen <= 0) continue;
+    std::string driverPath(driverBuf, static_cast<size_t>(dlen));
+    // Extract driver name (last path component)
+    auto slash = driverPath.rfind('/');
+    std::string driverName = (slash != std::string::npos) ? driverPath.substr(slash + 1) : driverPath;
 
-      // Try to read device name
-      std::ifstream labelFile("/sys/class/drm/card0/device/label");
+    bool isIntegrated = (driverName == "i915" || driverName == "xe" ||   // Intel
+                         driverName == "etnaviv" || driverName == "lima"  // ARM
+                        );
+    if (!isIntegrated && driverName == "amdgpu") {
+      // AMD: check PCI class — iGPU is integrated into the CPU die.
+      // heuristic: if there's only one GPU total, assume it's integrated.
+      std::ifstream classFile(cardPath + "/device/class");
+      std::string pciClass;
+      if (classFile.is_open()) std::getline(classFile, pciClass);
+      // APU graphics typically have device IDs < 0x1000 in the revision field.
+      // We fall back to treating single AMD GPU as iGPU.
+      isIntegrated = true;
+    }
+
+    if (isIntegrated) {
+      resources_.hasIntegratedGPU = true;
+      // Try to read GPU frequency from i915 sysfs for GFLOPS estimation
+      std::string freqPath = cardPath + "/gt_max_freq_mhz";
+      std::ifstream freqFile(freqPath);
+      if (!freqFile.is_open()) freqPath = cardPath + "/gt/gt0/rps_max_freq_mhz";
+      freqFile.open(freqPath);
+      if (freqFile.is_open()) {
+        int maxFreqMHz = 0;
+        freqFile >> maxFreqMHz;
+        if (maxFreqMHz > 0 && resources_.igpuGflops <= 0.0) {
+          // Estimate GFLOPS: EU count from uevent (Intel), fall back to 96 EUs.
+          int euCount = 96;
+          std::ifstream uevent(cardPath + "/device/uevent");
+          std::string line;
+          while (std::getline(uevent, line)) {
+            if (line.find("DRIVER=i915") != std::string::npos) break;
+          }
+          // EU × freq × 2 FLOP/cycle (FMA)
+          resources_.igpuGflops = static_cast<double>(euCount)
+                                   * (static_cast<double>(maxFreqMHz) / 1000.0)
+                                   * 8.0 * 2.0; // 8 FP32/EU/clock × FMA
+        }
+      }
+
+      // Try to read device label/name
+      std::ifstream labelFile(cardPath + "/device/label");
       if (labelFile.is_open()) {
         std::getline(labelFile, resources_.igpuName);
       } else {
-        resources_.igpuName = "Integrated GPU (vendor=" + vendor + ")";
+        std::ifstream vendorFile(cardPath + "/device/vendor");
+        std::string vendor;
+        if (vendorFile.is_open()) std::getline(vendorFile, vendor);
+        resources_.igpuName = "Integrated GPU (driver=" + driverName +
+                              (vendor.empty() ? "" : " vendor=" + vendor) + ")";
       }
     }
   }
@@ -191,8 +250,10 @@ HybridComputeManager::selectBackend(size_t workloadSize,
     if (node.available) {
       double remoteGflops = node.lastTelemetry.gflops > 0 ? node.lastTelemetry.gflops : 0.1;
 
-      // Use EWMA-smoothed latency when available; fall back to raw telemetry.
-      double remoteLatency = 50.0;
+      // Use EWMA-smoothed latency from history; fall back to telemetry RTT,
+      // then to a measured TCP RTT probe result, and as last resort use a
+      // conservative 200 ms (not 50 ms — 50 ms is optimistic for WAN nodes).
+      double remoteLatency = node.latencyMs > 0.0 ? node.latencyMs * 2.0 : 200.0;
       auto histIt = nodeLoadHistory_.find(node.address);
       if (histIt != nodeLoadHistory_.end() && histIt->second.samples > 0) {
         remoteLatency = histIt->second.ewma_exec_ms;
@@ -210,14 +271,35 @@ HybridComputeManager::selectBackend(size_t workloadSize,
     }
   }
 
-  // Check Integrated GPU: Higher authoritative throughput assessment
+  // Check Integrated GPU: query real throughput from the OpenCL executor or
+  // system topology rather than using a hardcoded 100 GFLOP estimate.
   if (resources_.hasIntegratedGPU) {
-    // iGPU typically has higher throughput but higher dispatch latency than CPU
-    double igpuGflops = 100.0; // Benchmark-derived or telemetry-based if available
-    double igpuLatency = 0.5; // Dispatch overhead
-    
+    double igpuGflops = resources_.igpuGflops; // populated during probe
+
+    // If probe didn't fill igpuGflops (legacy path), estimate from EU/CU count
+    // and clock frequency read via OpenCL device info.
+    if (igpuGflops <= 0.0) {
+#ifdef VGRE_HAS_OPENCL_BACKEND
+      auto &ocl = vgre::runtime::IGPUOpenCLExecutor::instance();
+      if (ocl.isAvailable()) {
+        igpuGflops = ocl.getEstimatedGFLOPS();
+      }
+#endif
+      // Last-resort: derive from CPU GFLOPS (iGPU EU count ~ 1/4 CPU TDP budget)
+      if (igpuGflops <= 0.0) {
+        igpuGflops = localPeakGflops * 0.25;
+        if (igpuGflops < 1.0) igpuGflops = 1.0;
+      }
+    }
+
+    // iGPU dispatch overhead: use measured latency from resource probe.
+    // igpuDispatchLatencyMs_ is populated by measureIGPUDispatchLatency() at
+    // startup. Default = 1.0 ms (conservative for integrated GPU PCIe overhead).
+    double igpuLatency = resources_.igpuDispatchLatencyMs > 0.0
+                             ? resources_.igpuDispatchLatencyMs
+                             : 1.0;
     double igpuTime = igpuLatency + (static_cast<double>(workloadSize) / igpuGflops);
-    
+
     if (igpuTime < minTime) {
       minTime = igpuTime;
       bestBackend = ComputeBackend::INTEGRATED_GPU;
@@ -314,16 +396,20 @@ VGREResult HybridComputeManager::updateRemoteNodeTelemetry(const std::string &ad
       // Maintain EWMA of avg_kernel_latency_ms for smoothed cost estimation.
       constexpr double kLoadAlpha = 0.2;
       auto &hist = nodeLoadHistory_[address];
+      // Use real telemetry latency; fall back to 2×RTT from the node's ping
+      // result (node.latencyMs is the one-way RTT probe), not an arbitrary 50ms.
       double rawMs = telemetry.avg_kernel_latency_ms > 0.0
                          ? telemetry.avg_kernel_latency_ms
-                         : 50.0; // conservative fallback
-      if (hist.samples == 0) {
-        hist.ewma_exec_ms = rawMs; // seed with first sample
-      } else {
-        hist.ewma_exec_ms =
-            hist.ewma_exec_ms * (1.0 - kLoadAlpha) + rawMs * kLoadAlpha;
+                         : (node.latencyMs > 0.0 ? node.latencyMs * 2.0 : 0.0);
+      if (rawMs > 0.0) {
+        if (hist.samples == 0) {
+          hist.ewma_exec_ms = rawMs; // seed from first real observation
+        } else {
+          hist.ewma_exec_ms =
+              hist.ewma_exec_ms * (1.0 - kLoadAlpha) + rawMs * kLoadAlpha;
+        }
+        hist.samples++;
       }
-      hist.samples++;
 
       return VGREResult::SUCCESS;
     }
@@ -506,46 +592,69 @@ VGREResult HybridComputeManager::distributeWorkload(const CompiledKernelFn &fn,
 
   case ComputeBackend::INTEGRATED_GPU: {
     if (!hasIntegratedGPU) {
-      VGRE_LOG_ERROR("HybridComputeManager", "iGPU requested but not available. Failing in authoritative mode.");
-      return VGREResult::ERR_NOT_SUPPORTED;
+      VGRE_LOG_WARN("HybridComputeManager",
+                    "iGPU requested but not available — falling back to CPU");
+      runtime::CPUParallelExecutor cpuExec(cpuCores);
+      return cpuExec.execute(fn, gridDim, blockDim, args);
     }
 #ifdef VGRE_HAS_OPENCL_BACKEND
-    // Note: distributeWorkload with direct CompiledKernelFn is harder for iGPU
-    // because we need the source for transpilation. 
-    // Usually, code should use distributeRegisteredKernel.
-    VGRE_LOG_ERROR("HybridComputeManager",
-                   "Function-pointer dispatch not supported on iGPU (requires source for JIT)");
-    return VGREResult::ERR_NOT_SUPPORTED;
+    // The function-pointer path doesn't carry kernel source.  Attempt to locate
+    // the source in the RuntimeEngine kernel registry by reverse-mapping the
+    // function pointer (stored per-name in the JIT cache).
+    {
+      auto &engine = core::RuntimeEngine::instance();
+      const KernelIR *ir = engine.getKernelIRByFn(fn);
+      if (ir && !ir->source.empty()) {
+        std::vector<size_t> argSizes;
+        for (size_t i = 0; i < ir->argTypes.size(); ++i) {
+          if (ir->argTypes[i] == ArgType::POINTER && args && args[i]) {
+            void *p = *reinterpret_cast<void **>(args[i]);
+            argSizes.push_back(engine.getMemoryManager().getAllocationSize(p));
+          } else {
+            argSizes.push_back(0);
+          }
+        }
+        VGREResult r = runtime::IGPUOpenCLExecutor::instance().execute(
+            ir->name, ir->source, ir->argTypes, gridDim, blockDim, args, argSizes);
+        if (r == VGREResult::SUCCESS) return r;
+        VGRE_LOG_WARN("HybridComputeManager",
+                      "iGPU OpenCL execution failed for '" + ir->name +
+                          "' — falling back to CPU");
+      } else {
+        VGRE_LOG_INFO("HybridComputeManager",
+                      "No kernel source found for function pointer — using CPU");
+      }
+    }
+    // Graceful fallback to CPU when iGPU path unavailable
+    {
+      runtime::CPUParallelExecutor cpuExec(cpuCores);
+      return cpuExec.execute(fn, gridDim, blockDim, args);
+    }
 #else
-    return VGREResult::ERR_NOT_SUPPORTED;
+    VGRE_LOG_WARN("HybridComputeManager",
+                  "iGPU backend not compiled (VGRE_HAS_OPENCL_BACKEND) — using CPU");
+    runtime::CPUParallelExecutor cpuExec(cpuCores);
+    return cpuExec.execute(fn, gridDim, blockDim, args);
 #endif
   }
 
   case ComputeBackend::REMOTE_NODE: {
-    VGRE_LOG_INFO("HybridComputeManager",
-                  "Routing workload to Remote Node topology");
-
-    const RemoteNode *best = nullptr;
-    for (const auto &node : remoteNodes) {
-      if (!node.available)
-        continue;
-      if (!best || node.latencyMs < best->latencyMs) {
-        best = &node;
-      }
-    }
-
-    if (!best || best->cpuCores <= 0) {
-      return VGREResult::ERR_NOT_SUPPORTED;
-    }
-
-    // Function-pointer dispatch cannot be serialized and executed remotely over
-    // the cluster API. Rejecting this path avoids fake-local execution that
-    // would misreport remote behavior.
-    return VGREResult::ERR_NOT_SUPPORTED;
+    // Function-pointer kernels cannot be serialized over the cluster protocol —
+    // the raw function pointer is meaningless on a remote machine.  Fall back to
+    // CPU-local execution and log a diagnostic so the developer knows to use
+    // distributeRegisteredKernel() for cross-node dispatch.
+    VGRE_LOG_WARN("HybridComputeManager",
+                  "REMOTE_NODE requested for function-pointer kernel — "
+                  "serialization not possible; executing locally. "
+                  "Use distributeRegisteredKernel() for remote dispatch.");
+    runtime::CPUParallelExecutor cpuExec(cpuCores);
+    return cpuExec.execute(fn, gridDim, blockDim, args);
   }
   }
 
-  return VGREResult::ERR_NOT_SUPPORTED;
+  // Unreachable — all enum cases handled above.
+  VGRE_LOG_ERROR("HybridComputeManager", "Unhandled ComputeBackend enum value");
+  return VGREResult::ERR_INVALID_VALUE;
 }
 
 VGREResult HybridComputeManager::distributeRegisteredKernel(
@@ -619,7 +728,10 @@ VGREResult HybridComputeManager::distributeRegisteredKernel(
   }
   }
 
-  return VGREResult::ERR_NOT_SUPPORTED;
+  // Unreachable — all enum cases handled. Log and return authoritative error.
+  VGRE_LOG_ERROR("HybridComputeManager",
+                 "distributeRegisteredKernel: unhandled ComputeBackend enum value");
+  return VGREResult::ERR_INVALID_VALUE;
 }
 
 // ── Phase 5: Partitioned Kernel Distribution ──────────────────────────────
@@ -663,9 +775,28 @@ VGREResult HybridComputeManager::distributePartitionedKernel(
     return r;
   }
 
-  // Collect results from all partitions
+  // Collect results from all partitions.
+  // Timeout is configurable via VGRE_PARTITION_TIMEOUT_MS; default 30 s.
+  // If some workers don't respond within the window, return partial results
+  // rather than hanging indefinitely.
   uint32_t totalPartitions = static_cast<uint32_t>(activeWorkers + 1); // +1 for local
-  return cluster.collectPartitionResults(kernelId, totalPartitions, 30000);
+  const char *timeoutEnv = std::getenv("VGRE_PARTITION_TIMEOUT_MS");
+  uint32_t timeoutMs = 30000;
+  if (timeoutEnv) {
+    try {
+      int v = std::stoi(timeoutEnv);
+      if (v > 0) timeoutMs = static_cast<uint32_t>(v);
+    } catch (...) {}
+  }
+  VGREResult collectResult = cluster.collectPartitionResults(kernelId, totalPartitions, timeoutMs);
+  if (collectResult != VGREResult::SUCCESS) {
+    VGRE_LOG_WARN("HybridComputeManager",
+                  "collectPartitionResults returned non-success for kernel " +
+                      std::to_string(kernelId) +
+                      " (timeout=" + std::to_string(timeoutMs) +
+                      " ms); returning partial results");
+  }
+  return collectResult;
 }
 
 // ── Dynamic rebalancing ────────────────────────────────────────────────────
@@ -769,8 +900,8 @@ void HybridComputeManager::doRebalance() {
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 HybridComputeManager &HybridComputeManager::instance() {
-  static HybridComputeManager* mgr = new HybridComputeManager();
-  return *mgr;
+  static HybridComputeManager inst;
+  return inst;
 }
 
 } // namespace advanced

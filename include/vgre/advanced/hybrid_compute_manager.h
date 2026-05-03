@@ -50,6 +50,8 @@ struct ComputeResources {
     size_t cpuMemoryBytes   = 0;
     bool   hasIntegratedGPU = false;
     std::string igpuName;
+    double igpuGflops            = 0.0;  // populated from OpenCL device query on probe
+    double igpuDispatchLatencyMs = 0.0;  // measured OpenCL dispatch round-trip (ms)
     std::vector<RemoteNode> remoteNodes;
     size_t totalComputeUnits = 0; // aggregate across all backends
     double gflops           = 100.0; // Phase 10: Authoritative local compute power
