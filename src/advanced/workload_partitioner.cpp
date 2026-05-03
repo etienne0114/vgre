@@ -120,6 +120,7 @@ VGREResult WorkloadPartitioner::createPartitionPlan(
     std::lock_guard<std::mutex> lock(accuracyMutex_);
     for (auto node : nodes) {
       if (node.cpu_cores <= 0) continue;
+      if (node.measured_gflops <= 0.0) continue; // skip uncalibrated nodes
       auto it = accuracyFactors_.find(node.address);
       if (it != accuracyFactors_.end()) {
         node.accuracy_factor = it->second;
@@ -207,18 +208,22 @@ void WorkloadPartitioner::recordActualExecution(const std::string &address,
 
   std::lock_guard<std::mutex> lock(accuracyMutex_);
   auto &factor = accuracyFactors_[address];
-  if (factor == 0.0) factor = 1.0; // seed on first call
-
   // EWMA with alpha=0.25: react to sustained drift without chasing noise.
   constexpr double kAlpha = 0.25;
-  factor = factor * (1.0 - kAlpha) + ratio * kAlpha;
+  if (factor == 0.0) {
+    // First real measurement: seed directly from the observed ratio so the
+    // EWMA starts at an evidence-based value rather than an arbitrary constant.
+    factor = ratio;
+  } else {
+    factor = factor * (1.0 - kAlpha) + ratio * kAlpha;
+  }
   // Clamp to [0.1, 1.0] — never assign a node more than its stated capacity.
   factor = std::max(0.1, std::min(factor, 1.0));
 }
 
 WorkloadPartitioner &WorkloadPartitioner::instance() {
-  static WorkloadPartitioner* inst = new WorkloadPartitioner();
-  return *inst;
+  static WorkloadPartitioner inst;
+  return inst;
 }
 
 } // namespace advanced

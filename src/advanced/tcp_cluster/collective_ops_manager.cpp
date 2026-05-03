@@ -2,8 +2,16 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
+#if defined(__linux__)
+#include <sys/sysinfo.h>
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#endif
 
 // SIMD intrinsics headers
 #if defined(__AVX2__)
@@ -43,6 +51,31 @@ VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int da
   }
   size_t total_bytes = count * element_size;
 
+  // Cap allocation to at most 75% of available system RAM to prevent OOM.
+  {
+    size_t availableBytes = SIZE_MAX;
+#if defined(__linux__)
+    struct sysinfo si{};
+    if (sysinfo(&si) == 0) availableBytes = static_cast<size_t>(si.freeram) * si.mem_unit;
+#elif defined(__APPLE__)
+    int64_t physMem = 0;
+    size_t sz = sizeof(physMem);
+    sysctlbyname("hw.memsize", &physMem, &sz, nullptr, 0);
+    if (physMem > 0) availableBytes = static_cast<size_t>(physMem * 3 / 4);
+#elif defined(_WIN32)
+    MEMORYSTATUSEX ms{}; ms.dwLength = sizeof(ms);
+    if (GlobalMemoryStatusEx(&ms)) availableBytes = static_cast<size_t>(ms.ullAvailPhys);
+#endif
+    size_t cap = availableBytes * 3 / 4; // 75% of free RAM
+    if (total_bytes > cap) {
+      VGRE_LOG_ERROR("TCPCluster",
+                     "masterAllReduce: buffer (" + std::to_string(total_bytes) +
+                     " bytes) exceeds 75% of available RAM (" +
+                     std::to_string(cap) + " bytes)");
+      return VGREResult::ERR_OUT_OF_MEMORY;
+    }
+  }
+
   std::unique_lock<std::mutex> lock(parent_->reduction_mutex_);
 
   // Initialize reduction state
@@ -56,10 +89,36 @@ VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int da
   parent_->active_reduction_buffer_.resize(total_bytes);
   std::memcpy(parent_->active_reduction_buffer_.data(), ptr, total_bytes);
 
-  // Wait for all workers to send their data (with 30-second timeout).
+  // Configurable reduction timeout: VGRE_REDUCTION_TIMEOUT_MS (default 30 s).
+  // Dynamic estimate: 2 × avg_kernel_latency + network overhead per active worker.
+  int reductionTimeoutMs = 30000;
+  {
+    const char *envT = std::getenv("VGRE_REDUCTION_TIMEOUT_MS");
+    if (envT) {
+      int v = std::atoi(envT);
+      if (v > 0) reductionTimeoutMs = v;
+    } else {
+      // Estimate: count live workers, use their telemetry to compute timeout.
+      double maxWorkerLatencyMs = 0.0;
+      {
+        std::lock_guard<std::recursive_mutex> cl(parent_->clients_mutex_);
+        for (const auto &c : parent_->clients_) {
+          if (c && c->active && c->last_telemetry.avg_kernel_latency_ms > 0)
+            maxWorkerLatencyMs = std::max(maxWorkerLatencyMs,
+                                         c->last_telemetry.avg_kernel_latency_ms);
+        }
+      }
+      if (maxWorkerLatencyMs > 0.0) {
+        // 2× max observed latency + 5 s network buffer
+        reductionTimeoutMs = static_cast<int>(maxWorkerLatencyMs * 2.0) + 5000;
+        reductionTimeoutMs = std::max(reductionTimeoutMs, 10000); // at least 10 s
+      }
+    }
+  }
   // C4: Count active workers live inside the predicate — if a worker
   // disconnects mid-reduction, the stale pre-captured count would deadlock.
-  bool success = parent_->reduction_cv_.wait_for(lock, std::chrono::seconds(30), [this]() {
+  bool success = parent_->reduction_cv_.wait_for(
+      lock, std::chrono::milliseconds(reductionTimeoutMs), [this]() {
     size_t live_workers = 0;
     {
       std::lock_guard<std::recursive_mutex> cl(parent_->clients_mutex_);

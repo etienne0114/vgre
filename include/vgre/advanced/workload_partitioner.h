@@ -41,7 +41,9 @@ struct PartitionPlan {
 
 // ── Node capability descriptor (simplified from RemoteNode) ───────────────
 struct NodeCapability {
-  double measured_gflops = 100.0;
+  // measured_gflops: must be set by caller from telemetry or core-proportional
+  // estimate before passing to createPartitionPlan().  0.0 = unset (filtered out).
+  double measured_gflops = 0.0;
   double avg_latency_ms = 1.0;
   int cpu_cores = 0;
   int worker_idx = -1;

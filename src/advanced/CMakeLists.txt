@@ -21,6 +21,7 @@ add_library(vgre_advanced OBJECT
     tcp_cluster/client_loop.cpp
     secure_channel_crypto.cpp
     secure_channel.cpp
+    gpu_passthrough.cpp
     workload_partitioner.cpp
     resource_ledger.cpp
     token/hardware_token_manager.cpp

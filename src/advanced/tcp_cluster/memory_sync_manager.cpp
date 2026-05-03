@@ -482,29 +482,62 @@ VGREResult MemorySyncManager::sendScalarArg(void* arg, int arg_index, ArgType ty
 
 VGREResult MemorySyncManager::sendPointerArg(void* arg, int arg_index,
                                              std::shared_ptr<TCPClusterManager::ClientConnection> client) {
-  // Dereference pointer to get actual address
+  if (!arg) {
+    // Null arg slot — send a null pointer handle so the worker allocates nothing.
+    ArgScalarPacket apkt{};
+    apkt.arg_index = static_cast<uint32_t>(arg_index);
+    apkt.arg_type  = static_cast<uint8_t>(ArgType::POINTER);
+    apkt.value     = 0;
+    parent_->send_packet(client->socket_fd, PacketType::ARG_POINTER, &apkt,
+                         sizeof(ArgScalarPacket), client->secureChannel.get());
+    return VGREResult::SUCCESS;
+  }
+
+  // Dereference to get the actual host pointer stored at this argument slot.
   void* ptr = *static_cast<void**>(arg);
   uint64_t handle = reinterpret_cast<uint64_t>(ptr);
-  
-  // Sync memory if it's a valid managed pointer
-  size_t size = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
-  if (size > 0 && ptr) {
-    VGREResult syncResult = syncPointerToWorker(ptr, handle, client);
-    if (syncResult != VGREResult::SUCCESS) {
-      return syncResult;
-    }
+
+  if (!ptr) {
+    // Explicitly-null pointer: send handle=0 so worker passes null to kernel.
+    ArgScalarPacket apkt{};
+    apkt.arg_index = static_cast<uint32_t>(arg_index);
+    apkt.arg_type  = static_cast<uint8_t>(ArgType::POINTER);
+    apkt.value     = 0;
+    parent_->send_packet(client->socket_fd, PacketType::ARG_POINTER, &apkt,
+                         sizeof(ArgScalarPacket), client->secureChannel.get());
+    return VGREResult::SUCCESS;
   }
-  
-  // Send ArgScalarPacket with pointer handle
+
+  // Get allocation size.  If the pointer is not managed by VGRE (e.g., a
+  // user-space static buffer), size will be 0 — log a warning so users can
+  // register the memory correctly, but still send the handle so the remote
+  // side can at least attempt the launch.
+  auto& mm = core::RuntimeEngine::instance().getMemoryManager();
+  size_t size = mm.getAllocationSize(ptr);
+  if (size == 0) {
+    VGRE_LOG_WARN("TCPCluster",
+        "sendPointerArg[" + std::to_string(arg_index) + "]: pointer " +
+        std::to_string(handle) + " has size=0 — not a VGRE-managed allocation. "
+        "Use vgre_malloc/cudaMalloc to ensure the buffer is tracked.");
+    // Still send the pointer handle without data — worker will try to use whatever
+    // local allocation it has at this address (unlikely to work, but we must not
+    // silently discard the arg as that corrupts the argument count protocol).
+  } else {
+    VGREResult syncResult = syncPointerToWorker(ptr, handle, client);
+    if (syncResult != VGREResult::SUCCESS) return syncResult;
+  }
+
+  // Send ARG_POINTER packet with the handle so the worker maps the data.
   ArgScalarPacket apkt{};
   apkt.arg_index = static_cast<uint32_t>(arg_index);
-  apkt.arg_type = static_cast<uint8_t>(ArgType::POINTER);
-  apkt.value = handle;
-  
-  if (parent_->send_packet(client->socket_fd, PacketType::ARG_POINTER, &apkt, sizeof(ArgScalarPacket), client->secureChannel.get()) != VGREResult::SUCCESS) {
+  apkt.arg_type  = static_cast<uint8_t>(ArgType::POINTER);
+  apkt.value     = handle;
+
+  if (parent_->send_packet(client->socket_fd, PacketType::ARG_POINTER, &apkt,
+                           sizeof(ArgScalarPacket), client->secureChannel.get())
+      != VGREResult::SUCCESS) {
     return VGREResult::ERR_IO;
   }
-  
   return VGREResult::SUCCESS;
 }
 

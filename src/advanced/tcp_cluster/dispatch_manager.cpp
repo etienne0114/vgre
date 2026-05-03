@@ -10,6 +10,8 @@
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/workload_partitioner.h"
 #include "vgre/advanced/hybrid_compute_manager.h"
+#include "vgre/advanced/adaptive_execution_engine.h"
+#include "vgre/advanced/gpu_passthrough.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/common/logger.h"
@@ -17,6 +19,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -104,37 +107,78 @@ VGREResult DispatchManager::launchRemoteKernel(
     return VGREResult::ERR_INVALID_VALUE;
   }
 
-  if (parent_->clients_[worker_idx]->in_flight_kernels >= kMaxInFlight) {
-      VGRE_LOG_WARN("TCPCluster", "Congestion: Max in-flight kernels reached for " + 
-                    parent_->clients_[worker_idx]->ip_address);
+  // Congestion control: retry up to 3× with exponential backoff + jitter
+  // before reporting ERR_BUSY.  Covers transient TCP queue overflow and
+  // in-flight kernel slot exhaustion on busy workers.
+  constexpr int kMaxRetries = 3;
+  constexpr int kBaseBackoffMs = 10;
+
+  for (int attempt = 0; attempt <= kMaxRetries; ++attempt) {
+    if (parent_->clients_[worker_idx]->in_flight_kernels < kMaxInFlight) break;
+    if (attempt == kMaxRetries) {
+      VGRE_LOG_WARN("TCPCluster",
+                    "Congestion: in-flight saturated for " +
+                        parent_->clients_[worker_idx]->ip_address +
+                        " after " + std::to_string(kMaxRetries) + " retries");
       return VGREResult::ERR_BUSY;
+    }
+    // Exponential backoff: 10ms, 20ms, 40ms — plus per-attempt jitter.
+    int backoffMs = kBaseBackoffMs * (1 << attempt);
+    VGRE_LOG_DEBUG("TCPCluster",
+                   "Backoff " + std::to_string(backoffMs) + " ms (attempt " +
+                       std::to_string(attempt + 1) + "/" +
+                       std::to_string(kMaxRetries) + ")");
+    std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
   }
 
   // 1. Stream all arguments FIRST
-  VGREResult argResult = parent_->streamArgumentsToWorker(
-      args, num_args, kernel_id, parent_->clients_[worker_idx]);
-  if (argResult != VGREResult::SUCCESS) {
+  VGREResult argResult = VGREResult::ERR_IO;
+  for (int attempt = 0; attempt <= kMaxRetries; ++attempt) {
+    argResult = parent_->streamArgumentsToWorker(
+        args, num_args, kernel_id, parent_->clients_[worker_idx]);
+    if (argResult == VGREResult::SUCCESS) break;
+    if (attempt == kMaxRetries || argResult == VGREResult::ERR_INVALID_VALUE) {
+      VGRE_LOG_ERROR("TCPCluster",
+                     "streamArgumentsToWorker failed after " +
+                         std::to_string(attempt + 1) + " attempt(s): " +
+                         std::to_string(static_cast<int>(argResult)));
       return argResult;
+    }
+    int backoffMs = kBaseBackoffMs * (1 << attempt);
+    VGRE_LOG_DEBUG("TCPCluster",
+                   "streamArguments retry " + std::to_string(attempt + 1) +
+                       " in " + std::to_string(backoffMs) + " ms");
+    std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
   }
 
-  // 2. Send LAUNCH_KERNEL header LAST (this triggers execution on worker side)
+  // 2. Send LAUNCH_KERNEL header LAST (triggers execution on worker side).
   RemoteCommandPacket pkt{};
   pkt.auth_token = parent_->auth_token_;
   pkt.kernel_id = kernel_id;
   std::memcpy(pkt.grid_dim, grid_dim, sizeof(pkt.grid_dim));
   std::memcpy(pkt.block_dim, block_dim, sizeof(pkt.block_dim));
   pkt.shared_mem = shared_mem;
-  pkt.num_args = num_args; 
+  pkt.num_args = num_args;
 
-  if (parent_->send_packet(
-          parent_->clients_[worker_idx]->socket_fd,
-          PacketType::LAUNCH_KERNEL,
-          &pkt, sizeof(RemoteCommandPacket),
-          parent_->clients_[worker_idx]->secureChannel.get()) != VGREResult::SUCCESS) {
-    return VGREResult::ERR_IO;
+  VGREResult sendResult = VGREResult::ERR_IO;
+  for (int attempt = 0; attempt <= kMaxRetries; ++attempt) {
+    sendResult = parent_->send_packet(
+        parent_->clients_[worker_idx]->socket_fd,
+        PacketType::LAUNCH_KERNEL,
+        &pkt, sizeof(RemoteCommandPacket),
+        parent_->clients_[worker_idx]->secureChannel.get());
+    if (sendResult == VGREResult::SUCCESS) break;
+    if (attempt == kMaxRetries) {
+      VGRE_LOG_ERROR("TCPCluster",
+                     "LAUNCH_KERNEL send failed after " +
+                         std::to_string(kMaxRetries + 1) + " attempts");
+      return VGREResult::ERR_IO;
+    }
+    int backoffMs = kBaseBackoffMs * (1 << attempt);
+    std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
   }
-  parent_->clients_[worker_idx]->in_flight_kernels++;
 
+  parent_->clients_[worker_idx]->in_flight_kernels++;
   VGRE_LOG_INFO("TCPCluster",
                 "Dispatched remote kernel launch (" + std::to_string(num_args) +
                     " args) to worker " + std::to_string(worker_idx));
@@ -241,31 +285,86 @@ void DispatchManager::handleRemoteCommand(const RemoteCommandPacket& pkt) {
   dim3 gd(pkt.grid_dim[0], pkt.grid_dim[1], pkt.grid_dim[2]);
   dim3 bd(pkt.block_dim[0], pkt.block_dim[1], pkt.block_dim[2]);
 
-  auto r = vgre::core::RuntimeEngine::instance().launchKernel(
-      pkt.kernel_id, gd, bd, local_args.data(), pkt.shared_mem, 0);
-  
-  if (r != VGREResult::SUCCESS) {
-    VGRE_LOG_ERROR("TCPCluster",
-                   "Remote kernel execution failed with code " +
-                       std::to_string(static_cast<int>(r)));
+  VGREResult r = VGREResult::ERR_LAUNCH_FAILURE;
+  bool usedGPU = false;
+
+  // ── GPU Passthrough: full H2D → kernel → D2H round-trip ──────────────────
+  // launchOnGPU allocates per-argument GPU memory, uploads input data (H2D),
+  // launches the kernel with device pointers, synchronizes, then downloads
+  // results back to the worker's host memory (D2H).  After it returns, host
+  // memory is up-to-date and the pull-back path below sends real GPU results.
+  auto& gpu = vgre::advanced::GPUPassthrough::instance();
+  if (gpu.isAvailable()) {
+    const auto* ir = vgre::core::RuntimeEngine::instance().getKernelIR(pkt.kernel_id);
+    if (ir && !ir->source.empty()) {
+      // Build per-argument size table: GPU passthrough needs allocation sizes
+      // for H2D/D2H without calling MemoryManager twice per pointer.
+      std::vector<size_t> argSizesForGPU(static_cast<size_t>(numArgs), 0);
+      for (int i = 0; i < numArgs; ++i) {
+        auto it = parent_->pending_args_.find(i);
+        if (it == parent_->pending_args_.end()) continue;
+        if (static_cast<ArgType>(it->second.type) == ArgType::POINTER) {
+          void* ptr = reinterpret_cast<void*>(it->second.value);
+          if (ptr) {
+            argSizesForGPU[static_cast<size_t>(i)] =
+                vgre::core::RuntimeEngine::instance()
+                    .getMemoryManager().getAllocationSize(ptr);
+          }
+          if (argSizesForGPU[static_cast<size_t>(i)] == 0 &&
+              static_cast<size_t>(i) < ir->argSizes.size()) {
+            argSizesForGPU[static_cast<size_t>(i)] = ir->argSizes[static_cast<size_t>(i)];
+          }
+        }
+      }
+
+      r = gpu.launchOnGPU(ir->source, ir->name, gd, bd,
+                          local_args.data(), numArgs, pkt.shared_mem,
+                          ir->argTypes, argSizesForGPU);
+      if (r == VGREResult::SUCCESS) {
+        usedGPU = true;
+        VGRE_LOG_INFO("TCPCluster",
+            "GPU passthrough: kernel='" + ir->name + "' grid=(" +
+            std::to_string(gd.x) + "×" + std::to_string(gd.y) + "×" +
+            std::to_string(gd.z) + ")");
+      } else {
+        VGRE_LOG_WARN("TCPCluster",
+            "GPU passthrough failed (code=" + std::to_string(static_cast<int>(r)) +
+            "), falling back to CPU");
+      }
+    }
   }
 
-  // Wait for local execution to complete before syncing back memory
-  vgre::core::RuntimeEngine::instance().streamSynchronize(0);
+  // ── CPU fallback (primary path when no GPU is present) ───────────────────
+  if (r != VGREResult::SUCCESS) {
+    r = vgre::core::RuntimeEngine::instance().launchKernel(
+        pkt.kernel_id, gd, bd, local_args.data(), pkt.shared_mem, 0);
+  }
 
-  // Memory Coherence (Pull Back) - sync modified pointers back to master.
-  // Reset the SHM result cursor to kResultRegionStart at the beginning of each
-  // kernel's pull-back phase. This prevents wrap-around from overwriting earlier
-  // results from the SAME kernel that the master has not yet read:
-  //   - handleRemoteCommand is called serially (one at a time from the staging
-  //     buffer loop), so the master has already consumed all results from the
-  //     PREVIOUS kernel before this kernel is dispatched.
-  //   - Within a single kernel, results accumulate sequentially and are never
-  //     overwritten — if the region is full, remaining results fall back to TCP.
+  if (r != VGREResult::SUCCESS) {
+    VGRE_LOG_ERROR("TCPCluster",
+                   "Remote kernel execution failed (code=" +
+                       std::to_string(static_cast<int>(r)) + ")");
+  }
+
+  // For CPU path: ensure all enqueued work is complete before pull-back.
+  // For GPU path: launchOnGPU already called cuCtxSynchronize internally,
+  // but streamSynchronize ensures any CPU-side bookkeeping is also flushed.
+  if (!usedGPU) {
+    vgre::core::RuntimeEngine::instance().streamSynchronize(0);
+  }
+
+  // ── Memory Pull-Back Preparation ─────────────────────────────────────────
+  // At this point, regardless of whether the kernel ran on GPU or CPU, the
+  // host-side pointer buffers contain the correct post-execution data:
+  //   - GPU path: launchOnGPU performed D2H copies for all POINTER args
+  //   - CPU path: kernel wrote directly to host memory
+  // Reset the SHM result cursor once, protected by the pull-back mutex to
+  // prevent cursor corruption if two kernels somehow complete concurrently.
   {
     std::lock_guard<std::mutex> shm_lock(shm_result_mutex_);
     result_shm_offset_ = kResultRegionStart;
   }
+  (void)usedGPU; // informational only; path converges here
 
   for (int i = 0; i < numArgs; ++i) {
       auto it = parent_->pending_args_.find(i);
@@ -380,12 +479,16 @@ VGREResult DispatchManager::launchPartitionedKernel(
   std::vector<NodeCapability> nodes;
   auto resources = HybridComputeManager::instance().getResources();
 
-  // Local node
+  // Local node: use the AdaptiveExecutionEngine's calibrated peak GFLOPS which
+  // is measured from real hardware, not the ComputeResources 100.0 default.
   NodeCapability local;
   local.address = "local";
   local.worker_idx = -1;
   local.cpu_cores = resources.cpuCores;
-  local.measured_gflops = resources.gflops;
+  {
+    double aeGflops = AdaptiveExecutionEngine::instance().getMaxGFLOPS();
+    local.measured_gflops = (aeGflops > 0.0) ? aeGflops : resources.gflops;
+  }
   local.avg_latency_ms = resources.avgLatency;
   local.is_local = true;
   // Measure actual memory copy bandwidth for the local node (cached after first call).
@@ -404,7 +507,19 @@ VGREResult DispatchManager::launchPartitionedKernel(
       cap.address = parent_->clients_[i]->ip_address;
       cap.worker_idx = static_cast<int>(i);
       cap.cpu_cores = parent_->clients_[i]->cpu_cores;
-      cap.measured_gflops = parent_->clients_[i]->last_telemetry.gflops;
+      // Use real telemetry GFLOPS when available. Fall back to a proportional
+      // estimate based on the worker's CPU core count relative to the local node
+      // rather than the hardcoded 100 GFLOPS default — a 4-core worker should not
+      // receive the same allocation as a 64-core worker before telemetry arrives.
+      if (parent_->clients_[i]->last_telemetry.gflops > 0.0) {
+        cap.measured_gflops = parent_->clients_[i]->last_telemetry.gflops;
+      } else {
+        // Proportional estimate: cores × (local_gflops / local_cores).
+        double localGflops = resources.gflops > 0.0 ? resources.gflops : 100.0;
+        int    localCores  = resources.cpuCores > 0 ? resources.cpuCores : 1;
+        double glopsPerCore = localGflops / static_cast<double>(localCores);
+        cap.measured_gflops = glopsPerCore * static_cast<double>(cap.cpu_cores);
+      }
       cap.avg_latency_ms = parent_->clients_[i]->network_latency_ms;
       cap.is_local = false;
       cap.network_bandwidth_gbps = parent_->clients_[i]->network_bandwidth_gbps;
