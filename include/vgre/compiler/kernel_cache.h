@@ -3,6 +3,7 @@
 
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
+#include <list>
 #include <string>
 #include <mutex>
 #include <unordered_map>
@@ -87,8 +88,13 @@ private:
     std::string cacheDir_;
     mutable std::recursive_mutex mutex_;
     
-    // In-memory cache for hot entries
-    std::unordered_map<std::string, std::string> memoryCache_;
+    // In-memory LRU cache: lruOrder_ tracks access order (MRU at front).
+    // memoryCache_ maps hash → (value, iterator into lruOrder_) for O(1) access.
+    using LruList = std::list<std::string>;                      // keys in MRU order
+    using LruMap  = std::unordered_map<std::string,
+                        std::pair<std::string, LruList::iterator>>;
+    LruList lruOrder_;
+    LruMap  memoryCache_;
     static constexpr size_t MAX_MEMORY_CACHE_SIZE = 100;
     
     // Statistics
