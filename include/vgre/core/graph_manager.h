@@ -34,6 +34,7 @@ struct GraphNode {
   dim3 blockDim = {1, 1, 1};
   std::vector<std::vector<uint8_t>> capturedArgs;  // deep-copied arg data
   std::vector<void *> capturedWritePtrs;            // pointer args (potential write targets)
+  std::vector<void *> capturedReadPtrs;             // pointer args (potential read sources)
 
   // Memcpy data
   void *dst = nullptr;
