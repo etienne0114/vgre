@@ -1,6 +1,6 @@
 # How VGRE Works
 
-**Version**: 0.1.2 — Last updated: 2026-04-30
+**Version**: 0.3.0 — Last updated: 2026-05-03
 
 ---
 
@@ -110,6 +110,8 @@ The **Kernel Parser** reads the GPU code (written in CUDA C) and extracts:
 - What arguments the function takes (pointers, integers, floats)
 - Whether it uses shared memory (fast scratchpad memory within a block)
 - Whether it uses `__syncthreads()` (barrier synchronization between threads)
+- Whether it uses warp-level shuffles (`__shfl_sync`) — forces parallel block execution
+- Whether it contains inline PTX assembly (`asm(...)`) — triggers PTX→C++ translation
 
 ### Step 3 — Compiling to CPU Code (JIT)
 
@@ -329,6 +331,131 @@ flowchart LR
 ```
 
 VGRE supports: graph creation, node dependencies, cloning, serialization/deserialization (JSON), stream capture, conditional nodes (IF/WHILE), and graph updates.
+
+---
+
+## Advanced CUDA Features (Phase 2)
+
+### Warp-Level Intrinsics (`__shfl_sync`, `__ballot_sync`)
+
+Modern AI kernels use warp shuffles for fast reductions without shared memory. VGRE implements these via a **per-block warp exchange buffer** (64-bit slots, one per lane):
+
+| CUDA Intrinsic | What It Does | VGRE Implementation |
+|---|---|---|
+| `__shfl_sync` | Masked lane exchange | Write to warp buffer (mask-gated) → barrier → read src lane |
+| `__shfl_down_sync` | Shift down by delta; clamped at segment end | srcLane = lane+delta; returns own value past segment boundary |
+| `__shfl_up_sync` | Shift up by delta; clamped at segment base | srcLane = lane-delta; returns own value below segment base |
+| `__shfl_xor_sync` | Butterfly swap for reductions | srcLane = lane XOR laneMask; mask-gated write |
+| `__ballot_sync` | Bitmask of predicates within mask | Each masked lane contributes bit; non-masked bits zeroed |
+| `__activemask()` | Get active lane mask | Returns 0xFFFFFFFF (all lanes active on CPU) |
+| `__popc`, `__clz`, `__ffs` | Bit counting | Maps to GCC/Clang `__builtin_popcount`/`__builtin_clz`/`__builtin_ffs` |
+
+Kernels using warp shuffles are **always run in parallel block mode** (each CUDA thread on its own OS thread) — this is enforced even for single-thread blocks so the warp buffer can be simultaneously populated by all lanes.
+
+### FP16 (`__half`) and BFloat16
+
+Both 16-bit float formats are supported with full operator sets:
+
+| Type | Precision | Use Case | VGRE File |
+|---|---|---|---|
+| `__half` | FP16 (5-bit exp, 10-bit mantissa) | Standard AI inference | `cpu_cuda_fp16.h` |
+| `__nv_bfloat16` | BF16 (8-bit exp, 7-bit mantissa) | Training (wider range) | `cpu_cuda_env.h` |
+
+Operations: `__hadd`, `__hmul`, `__hfma`, `__hsub`, `__hdiv`, `__hexp`, `__hsqrt`, `__float2half`, `__half2float`, comparisons, `__half2` vector type.
+
+### Tensor Core Emulation (WMMA)
+
+The `nvcuda::wmma` namespace enables matrix multiply-accumulate (MMA) operations used by LLaMA, BERT, and other large models. VGRE implements the full tile API using scalar FP32 math:
+
+```cpp
+// Standard WMMA usage — works identically in VGRE
+nvcuda::wmma::fragment<matrix_a, 16, 16, 16, __half, row_major> a;
+nvcuda::wmma::fragment<matrix_b, 16, 16, 16, __half, col_major> b;
+nvcuda::wmma::fragment<accumulator, 16, 16, 16, float> c;
+nvcuda::wmma::fill_fragment(c, 0.0f);
+nvcuda::wmma::load_matrix_sync(a, ptr_a, 16);
+nvcuda::wmma::load_matrix_sync(b, ptr_b, 16);
+nvcuda::wmma::mma_sync(c, a, b, c);
+nvcuda::wmma::store_matrix_sync(ptr_c, c, 16, mem_row_major);
+```
+
+### CUDA Dynamic Parallelism (CDP)
+
+Kernels can spawn child kernels using `cudaGetParameterBuffer` and `cudaLaunchDevice`. Child kernels are enqueued into a `CDPExecutor` queue and drained after the parent block completes — preserving CUDA's depth-first execution order.
+
+### cuBLAS and cuDNN Shims
+
+VGRE intercepts `libcublas.so` and `libcudnn.so` calls and routes them to CPU implementations:
+
+**cuBLAS**: `cublasSgemm`, `cublasDgemm`, `cublasSaxpy`, `cublasSdot`, `cublasSgemv`, and more. Uses OpenBLAS when available, falls back to a built-in reference implementation.
+
+**cuDNN**: `cudnnConvolutionForward` (1×1 GEMM with stride support + direct 2D; Winograd selected when applicable), `cudnnPoolingForward` (MaxPool, AvgPool with padding modes), `cudnnActivationForward` (ReLU/sigmoid/tanh/ELU/swish/clipped-ReLU), `cudnnSoftmaxForward` (INSTANCE and CHANNEL modes with numerically-stable log-sum-exp), `cudnnBatchNormalizationForwardInference`, plus all descriptor APIs.
+
+### CUDA IPC (Multi-Process Memory Sharing)
+
+PyTorch DDP and other multi-process frameworks use `cudaIpcGetMemHandle` to share GPU buffers between processes. VGRE implements this via POSIX shared memory:
+
+```
+Process A: cudaIpcGetMemHandle(&handle, devPtr)  → creates /vgre_ipc_XXX segment
+Process B: cudaIpcOpenMemHandle(&ptr, handle, 0) → maps the same segment
+Both:      read/write ptr as normal memory
+Process B: cudaIpcCloseMemHandle(ptr)            → unmaps segment
+```
+
+### Inline PTX Assembly Translation
+
+Kernels that use `asm("ptx instructions" : constraints)` are automatically translated before JIT compilation. 100+ PTX opcodes are mapped to equivalent C++:
+
+| PTX Category | Examples | C++ Equivalent |
+|---|---|---|
+| Integer arithmetic | `add.s32`, `mul.lo.u64`, `mad.lo.u32` | `d = a + b;`, `d = (u64)(a*b);` |
+| FP32/FP64 arithmetic | `fma.rn.f32`, `add.f64`, `div.rn.f64` | `d = a*b+c;`, `d = a+b;` |
+| Memory loads | `ld.global.f32`, `ld.global.v4.f32`, `ld.shared.f32` | `d = *(float*)p;`, 4-wide vectorized |
+| Memory stores | `st.global.v2.f32`, `st.shared.u32` | `vp[0]=a; vp[1]=b;` |
+| Atomic operations | `atom.global.add.f32`, `atom.global.cas.b32` | `__atomic_fetch_add(...)` |
+| Warp voting | `vote.sync.ballot.b32`, `activemask.b32` | `__ballot_sync(...)` |
+| Warp shuffles | `shfl.sync.idx.b32`, `shfl.sync.down.b32` | `__shfl_sync(...)` |
+| Predicates | `setp.lt.f32`, `selp.f32`, `@%p bra` | `p = a < b;`, `d = p ? a : b;` |
+| Conversions | `cvt.rn.f32.f16`, `cvt.sat.u8.f32` | `d = (float)a;`, saturating cast |
+| FP intrinsics | `ex2.approx.f32`, `sin.approx.f32` | `__builtin_exp2f(a)` |
+| Barriers | `membar.gl`, `membar.sys` | `__atomic_thread_fence(__ATOMIC_SEQ_CST)` |
+
+Unmapped instructions are emitted as `/* PTX: opcode operands */` comments — compilation succeeds and the unsupported operation becomes a no-op.
+
+### GPU Passthrough for Cluster Workers
+
+When a VGRE cluster worker has a physical NVIDIA GPU, it will automatically use it instead of the CPU JIT path:
+
+```
+Master                          Network (TCP+AES)              Worker GPU Node
+──────                          ──────────────────             ───────────────
+cudaMalloc(ptr, N)              
+launchRemoteKernel()
+  └── streamArgumentsToWorker()
+        └── sendPointerArg()
+              ├── DATA_HEADER(size, handle) ──────────────→  pending_target_ptr = handle
+              ├── DATA_BODY(N bytes) ──────────────────────→  memcpy to host_ptr
+              └── ARG_POINTER(arg_index, handle) ──────────→  pending_args[i].value = handle
+  LAUNCH_KERNEL(grid,block,…) ─────────────────────────────→  handleRemoteCommand()
+
+                                                               GPUPassthrough::launchOnGPU()
+                                                                 ├── cuMemAlloc(devPtr, N)
+                                                                 ├── cuMemcpyHtoD(devPtr, host_ptr, N)  [H2D]
+                                                                 ├── cuLaunchKernel(fn, devPtr, …)
+                                                                 ├── cuCtxSynchronize()
+                                                                 └── cuMemcpyDtoH(host_ptr, devPtr, N)  [D2H]
+                                                                     cuMemFree(devPtr)
+                                                               host_ptr now has GPU results
+
+                                                               pull-back:
+                              ←─── DATA_HEADER(size, handle) ─┤
+                              ←─── DATA_BODY(N GPU result bytes)
+                              ←─── RESPONSE(kernel_id, SUCCESS)
+memcpy to local ptr
+(GPU results in master memory)
+```
+
+This enables heterogeneous clusters: CPU-only machines and GPU machines can work together in the same VGRE cluster.
 
 ---
 
@@ -564,28 +691,20 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    subgraph "Today (CPU-to-CPU Cluster)"
-        M1["Your Machine\n(Master, CPU only)"] -->|"Sends kernel\nvia TCP"| W1["Friend's Machine\n(Worker)"]
-        W1 -->|"JIT compiles\nto CPU code"| CPU1["Runs on CPU\n(GPU is ignored ❌)"]
-        CPU1 -->|"Results"| M1
+    subgraph "Now — Heterogeneous Cluster"
+        M["Master\n(CPU only)"] -->|"LAUNCH_KERNEL\nvia TCP+AES"| W1["Worker A\n(CPU only)"]
+        M -->|"LAUNCH_KERNEL\nvia TCP+AES"| W2["Worker B\n(has GPU)"]
+        W1 -->|"JIT → OpenMP\nCPU execution"| CPU1["CPU Cores ✅"]
+        W2 -->|"GPUPassthrough:\nlibcuda + NVRTC"| GPU1["NVIDIA GPU ✅"]
+        CPU1 -->|"Results"| M
+        GPU1 -->|"Results"| M
     end
 
-    style M1 fill:#3498db,color:#fff
+    style M fill:#3498db,color:#fff
     style W1 fill:#f39c12,color:#fff
-    style CPU1 fill:#e74c3c,color:#fff
-```
-
-```mermaid
-flowchart LR
-    subgraph "Future Goal (CPU-to-GPU Cluster)"
-        M2["Your Machine\n(Master, CPU only)"] -->|"Sends kernel\nvia TCP"| W2["Friend's Machine\n(Worker + GPU)"]
-        W2 -->|"Detects NVIDIA GPU\nUses real CUDA"| GPU2["Runs on GPU ✅"]
-        GPU2 -->|"Results"| M2
-    end
-
-    style M2 fill:#3498db,color:#fff
     style W2 fill:#27ae60,color:#fff
-    style GPU2 fill:#2ecc71,color:#fff
+    style CPU1 fill:#e67e22,color:#fff
+    style GPU1 fill:#2ecc71,color:#fff
 ```
 
 ### What the Cluster CAN Do Today
@@ -597,13 +716,15 @@ flowchart LR
 | Multiple office PCs combined | ✅ Yes | Pool idle machines into a compute cluster |
 | Encrypted communication | ✅ Yes | All traffic is AES-256 encrypted + HMAC authenticated |
 
-### What the Cluster CANNOT Do Yet
+### What the Cluster CAN Do (Updated — Phase 2)
 
-| Scenario | Supported | Why Not |
+| Scenario | Supported | How |
 |---|---|---|
-| CPU machine → Friend's GPU | ❌ Not yet | Worker always JIT-compiles to CPU, ignores physical GPU |
-| Remote GPU rendering | ❌ Not yet | Would need real CUDA runtime on the worker side |
-| GPU-to-GPU across network | ❌ Not yet | No GPU passthrough implemented |
+| CPU machine → CPU machine(s) | ✅ Yes | JIT → OpenMP execution |
+| CPU machine → Friend's GPU machine | ✅ Yes | Full H2D→launch→D2H round-trip via libcuda.so + NVRTC |
+| Heterogeneous cluster (mixed CPU+GPU nodes) | ✅ Yes | Each worker selects GPU or CPU automatically |
+| GPU-to-GPU across network | ✅ Yes | TCP carries data between hosts; each side runs on its own GPU |
+| Null/untracked pointer safety | ✅ Yes | Explicit null-pointer handling and size-0 warning in sendPointerArg |
 
 ### SHM Clarification
 
@@ -615,16 +736,15 @@ flowchart LR
 | Master and Worker on **different machines** | ❌ SHM not used — data transferred via TCP (encrypted) |
 | Cross-network GPU access | ❌ SHM cannot do this — it's local-only |
 
-### Future: GPU Passthrough Worker (Roadmap)
+### GPU Passthrough Worker (Implemented — Phase 2)
 
-To enable the "use a friend's GPU" scenario, the VGRE worker would need:
+When a worker node has a physical NVIDIA GPU, VGRE automatically detects and uses it:
 
-1. **GPU Detection** — Check if the worker machine has a real NVIDIA GPU (`nvidia-smi`)
-2. **Real CUDA Runtime Loading** — Dynamically load `libcuda.so` / `nvcuda.dll` 
-3. **GPU Execution Path** — When a kernel arrives, send it to the real GPU instead of JIT-compiling to CPU
-4. **Memory Transfer** — Copy input data to GPU memory, run kernel, copy results back, send to master via TCP
-
-This is a significant feature that is **not yet implemented** but is architecturally possible within the existing cluster framework.
+1. **GPU Detection** — `dlopen("libcuda.so.1")` + `cuInit` + `cuDeviceGetCount`
+2. **Real CUDA Runtime Loading** — All driver API calls go through dynamically loaded function pointers
+3. **Runtime Compilation** — Kernel source compiled to PTX via `libnvrtc.so` (NVRTC)
+4. **GPU Execution** — `cuModuleLoadData` + `cuLaunchKernel` + `cuCtxSynchronize`
+5. **CPU Fallback** — If GPU initialization or compilation fails, falls through to the normal CPU JIT path seamlessly
 
 ---
 
