@@ -11,6 +11,11 @@
 #include <sched.h>
 #elif defined(_WIN32)
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
+#include <pthread.h>
+#include <mach/thread_policy.h>
+#include <mach/thread_act.h>
 #endif
 
 namespace vgre {
@@ -140,8 +145,95 @@ void Scheduler::buildNumaTopology() {
                      std::to_string(nodeId));
     }
   }
+#elif defined(_WIN32)
+  // Windows: enumerate NUMA nodes via GetNumaHighestNodeNumber and
+  // GetNumaNodeProcessorMaskEx, then set thread affinity with SetThreadAffinityMask.
+  ULONG highestNode = 0;
+  if (!GetNumaHighestNodeNumber(&highestNode) || highestNode == 0) {
+    VGRE_LOG_DEBUG("Scheduler", "Windows NUMA: single node or detection failed");
+    return;
+  }
+
+  struct WinNodeInfo {
+    ULONG nodeId;
+    ULONGLONG mask; // processor mask for this node
+  };
+  std::vector<WinNodeInfo> nodes;
+  for (ULONG n = 0; n <= highestNode; ++n) {
+    ULONGLONG mask = 0;
+    if (GetNumaNodeProcessorMask(static_cast<UCHAR>(n), &mask) && mask != 0)
+      nodes.push_back({n, mask});
+  }
+  if (nodes.empty()) {
+    VGRE_LOG_DEBUG("Scheduler", "Windows NUMA: no usable nodes found");
+    return;
+  }
+
+  VGRE_LOG_INFO("Scheduler",
+                "NUMA topology (Windows): " + std::to_string(nodes.size()) + " node(s)");
+
+  int numNodes = static_cast<int>(nodes.size());
+  for (int i = 0; i < numThreads_ && i < static_cast<int>(workers_.size()); ++i) {
+    int ni = i % numNodes;
+    workerNumaNodes_[i] = static_cast<int>(nodes[ni].nodeId);
+    HANDLE h = static_cast<HANDLE>(workers_[i].native_handle());
+    if (SetThreadAffinityMask(h, static_cast<DWORD_PTR>(nodes[ni].mask)) == 0) {
+      VGRE_LOG_WARN("Scheduler",
+                    "SetThreadAffinityMask failed for worker " + std::to_string(i));
+    } else {
+      VGRE_LOG_DEBUG("Scheduler", "Worker " + std::to_string(i) +
+                                      " pinned to NUMA node " +
+                                      std::to_string(nodes[ni].nodeId));
+    }
+  }
+
+#elif defined(__APPLE__)
+  // macOS: no NUMA topology API; use physical vs efficiency cores via sysctl.
+  // Detect P-core and E-core counts (Apple Silicon) and round-robin threads
+  // across them.  Falls back gracefully to a single logical group on Intel.
+  int physCpus = 0, perfCores = 0, effCores = 0;
+  size_t sz = sizeof(int);
+  sysctlbyname("hw.physicalcpu_max", &physCpus, &sz, nullptr, 0);
+  sz = sizeof(int);
+  sysctlbyname("hw.perflevel0.physicalcpu", &perfCores, &sz, nullptr, 0);
+  sz = sizeof(int);
+  sysctlbyname("hw.perflevel1.physicalcpu", &effCores, &sz, nullptr, 0);
+
+  if (physCpus <= 0) {
+    VGRE_LOG_DEBUG("Scheduler", "macOS NUMA: sysctl hw.physicalcpu_max unavailable");
+    return;
+  }
+
+  VGRE_LOG_INFO("Scheduler",
+                "macOS CPU topology: physicalcpu=" + std::to_string(physCpus) +
+                    " perf=" + std::to_string(perfCores) +
+                    " eff=" + std::to_string(effCores));
+
+  // macOS does not expose fine-grained affinity pinning via public API.
+  // Assign notional NUMA-node IDs: node 0 = P-cores, node 1 = E-cores.
+  // Actual affinity tagging uses thread_policy_set with THREAD_AFFINITY_POLICY.
+  int numGroups = (perfCores > 0 && effCores > 0) ? 2 : 1;
+  for (int i = 0; i < numThreads_ && i < static_cast<int>(workers_.size()); ++i) {
+    int groupIdx = i % numGroups;
+    workerNumaNodes_[i] = groupIdx;
+
+    thread_affinity_policy_data_t policy = {groupIdx + 1}; // tag ≥ 1
+    thread_port_t mach_thread = pthread_mach_thread_np(workers_[i].native_handle());
+    kern_return_t kr = thread_policy_set(mach_thread, THREAD_AFFINITY_POLICY,
+                                         (thread_policy_t)&policy,
+                                         THREAD_AFFINITY_POLICY_COUNT);
+    if (kr != KERN_SUCCESS) {
+      VGRE_LOG_DEBUG("Scheduler",
+                     "macOS thread_policy_set failed for worker " + std::to_string(i) +
+                         " (kr=" + std::to_string(kr) + ") — affinity hints only");
+    } else {
+      VGRE_LOG_DEBUG("Scheduler", "Worker " + std::to_string(i) +
+                                      " assigned affinity group " +
+                                      std::to_string(groupIdx));
+    }
+  }
+
 #else
-  // Non-Linux: no NUMA pinning; workerNumaNodes_ stays -1 for all workers.
   VGRE_LOG_DEBUG("Scheduler", "NUMA thread pinning not supported on this platform");
 #endif
 }
@@ -511,8 +603,8 @@ uint64_t Scheduler::getPendingTasks() const { return pending_.load(); }
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 Scheduler &Scheduler::instance() {
-  static Scheduler* inst = new Scheduler();
-  return *inst;
+  static Scheduler inst;
+  return inst;
 }
 
 } // namespace core

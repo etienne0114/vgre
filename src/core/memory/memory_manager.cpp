@@ -56,10 +56,15 @@ MemoryManager::MemoryManager(size_t poolSize) : poolSize_(poolSize) {
                                      std::to_string(poolSize / (1024 * 1024)) +
                                      " MB");
   setupSignalHandler();
-  calibrateBandwidth();
 
-  // Initialize empty active tree
+  // Initialize empty active tree before calibration and migration thread so
+  // the SIGSEGV handler never sees a null tree pointer.
   activeTree_.store(new RegionTreeContainer{MemoryIntervalTree<ManagedRegion>(), 0}, std::memory_order_release);
+
+  // Bandwidth calibration: run synchronously so we do not carry a dangling
+  // background thread across the full object lifetime.  The 64 MB × 50-iter
+  // benchmark takes ~300 ms on a cold cache — acceptable during initialization.
+  calibrateBandwidth();
 
   // Start background UVM page-migration thread.
   startMigrationThread();

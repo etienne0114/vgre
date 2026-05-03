@@ -258,11 +258,27 @@ void VirtualGPUDevice::detectHardware() {
   props_.pciDeviceId = static_cast<int>(id_) + 1;
   props_.pciDomainId = 0;
 #elif defined(__APPLE__)
-  props_.clockRate = 3200000; // M-series is generally high frequency
+  {
+    // Try P-core max frequency (Apple Silicon: perflevel0, Intel: cpufrequency_max)
+    uint64_t freqHz = 0;
+    size_t freqSz = sizeof(freqHz);
+    if (sysctlbyname("hw.perflevel0.cpufrequency_max", &freqHz, &freqSz, nullptr, 0) == 0
+        && freqHz > 0) {
+      props_.clockRate = static_cast<int>(freqHz / 1000); // Hz → kHz
+    } else {
+      freqSz = sizeof(freqHz);
+      if (sysctlbyname("hw.cpufrequency_max", &freqHz, &freqSz, nullptr, 0) == 0
+          && freqHz > 0) {
+        props_.clockRate = static_cast<int>(freqHz / 1000);
+      } else {
+        props_.clockRate = 3200000; // conservative fallback for M-series
+      }
+    }
+  }
   // Synthetic PCI for macOS
   props_.pciBusId = 1;
   props_.pciDeviceId = static_cast<int>(id_) + 1;
-  props_.pciDomainId = 1; 
+  props_.pciDomainId = 1;
 #else
   props_.clockRate = 2500000;
   props_.pciBusId = 0;
