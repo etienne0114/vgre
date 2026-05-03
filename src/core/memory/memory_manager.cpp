@@ -95,7 +95,12 @@ MemoryManager::~MemoryManager() {
   allocations_.clear();
   usedMemory_ = 0;
 
-  // Cleanup RCU trees
+  // Cleanup RCU trees — spin-wait until all in-flight signal handlers have
+  // finished reading the tree (activeHandlers_ == 0), then free everything.
+  // Busy-spin is safe here: we're in the destructor, destruction is already
+  // tearing down, and signal handlers are expected to be microsecond-scale.
+  while (activeHandlers_.load(std::memory_order_acquire) != 0)
+    ; // busy-wait for RCU grace period
   RegionTreeContainer* active = activeTree_.load(std::memory_order_relaxed);
   if (active) {
     delete active;
@@ -197,6 +202,11 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
     goto fallback;
 
   {
+    // RCU grace-period: announce that we are in the signal handler and
+    // accessing the active tree.  The destructor spin-waits until this
+    // counter reaches 0 before freeing retired trees, preventing UAF.
+    mgr->activeHandlers_.fetch_add(1, std::memory_order_acquire);
+
     uintptr_t target = reinterpret_cast<uintptr_t>(addr);
     RegionTreeContainer* container = mgr->activeTree_.load(std::memory_order_acquire);
     if (container && container->count > 0) {
@@ -250,10 +260,14 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
 #endif
           
           mgr->faultCount_.fetch_add(1, std::memory_order_relaxed);
+          mgr->activeHandlers_.fetch_sub(1, std::memory_order_release);
           return;
         }
       }
     }
+    // Tree lookup missed (not a managed region) — release the RCU counter
+    // before falling through to the previous signal handler.
+    mgr->activeHandlers_.fetch_sub(1, std::memory_order_release);
   }
 
 fallback:

@@ -12,6 +12,11 @@ namespace core {
 GraphManager::GraphManager() = default;
 GraphManager::~GraphManager() = default;
 
+// Thread-local capture-stream context: set by the RuntimeEngine before calling
+// addKernelNodeWithDepsOut so the stream ID is stored in the GraphNode without
+// requiring an API change to every addKernelNode overload.
+thread_local StreamId g_capture_stream_id = 0;
+
 vgre::VGREResult GraphManager::createGraph(GraphId &outId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto graph = std::make_shared<Graph>();
@@ -78,6 +83,7 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
   node.nodeId = it->second->nextNodeId++;
   node.deps = deps;
   node.kernelId = kernelId;
+  node.streamId = g_capture_stream_id;  // set by RuntimeEngine before this call
   VGRE_LOG_INFO("GraphManager", "Adding kernel node: " + name + " (ID " + std::to_string(kernelId) + ") to graph " + std::to_string(id));
   node.kernelName = name;
   node.gridDim = grid;

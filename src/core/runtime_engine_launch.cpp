@@ -67,9 +67,11 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       }
 
       uint64_t newNodeId = 0;
+      g_capture_stream_id = stream;  // propagate stream into GraphNode::streamId
       auto res = graphManager_->addKernelNodeWithDepsOut(captureIt->second, id,
                                           irIt->second.name, gridDim, blockDim,
                                           args, irIt->second.argTypes, deps, newNodeId);
+      g_capture_stream_id = 0;
 
       if (res == VGREResult::SUCCESS) {
           lastCapturedNodeId_[stream] = newNodeId;
@@ -576,9 +578,11 @@ VGREResult RuntimeEngine::launchCooperativeKernel(KernelId id,
       }
 
       uint64_t newNodeId = 0;
+      g_capture_stream_id = stream;  // propagate stream into GraphNode::streamId
       auto res = graphManager_->addKernelNodeWithDepsOut(captureIt->second, id,
                                           irIt->second.name, gridDim, blockDim,
                                           args, irIt->second.argTypes, deps, newNodeId);
+      g_capture_stream_id = 0;
 
       if (res == VGREResult::SUCCESS) {
           lastCapturedNodeId_[stream] = newNodeId;
