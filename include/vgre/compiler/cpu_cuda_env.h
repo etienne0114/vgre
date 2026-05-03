@@ -5,6 +5,9 @@
 #include <cstdint>
 
 #include "vgre/common/types.h"
+#include "cpu_cuda_fp16.h"
+#include "cpu_cuda_warp.h"
+#include "wmma_emulation.h"
 
 namespace vgre_cuda {
     using vgre::dim3;
@@ -14,13 +17,22 @@ extern "C" {
   int vgre_jit_get_thread_id();
   void vgre_jit_set_block_barrier(void*);
   void vgre_jit_clear_block_barrier();
-  
+
   // Dynamic TLS-based built-ins for stable parallel JIT linkage
   vgre::dim3* vgre_jit_get_threadIdx();
   vgre::dim3* vgre_jit_get_blockIdx();
   vgre::dim3* vgre_jit_get_blockDim();
   vgre::dim3* vgre_jit_get_gridDim();
   void** vgre_jit_get_sharedMem();
+  void** vgre_jit_get_warp_buffer();  // per-block warp exchange buffer
+
+  // CUDA Dynamic Parallelism (CDP) — device-side child kernel launch
+  void* vgre_cdp_get_param_buffer(size_t bytes);
+  void  vgre_cdp_launch_device(void* fn, void* paramBuf,
+                                unsigned gx, unsigned gy, unsigned gz,
+                                unsigned bx, unsigned by, unsigned bz,
+                                size_t sharedMem, unsigned long long streamId);
+  void  vgre_cdp_drain();
 }
 
 #define threadIdx (*vgre_jit_get_threadIdx())
@@ -158,8 +170,26 @@ struct __nv_bfloat16 {
 
 inline __nv_bfloat16 __float2bfloat16(float f) { return __nv_bfloat16(f); }
 inline float __bfloat162float(__nv_bfloat16 h) { return static_cast<float>(h); }
-inline __nv_bfloat16 __hmul(__nv_bfloat16 a, __nv_bfloat16 b) { return __nv_bfloat16(float(a) * float(b)); }
-inline __nv_bfloat16 __hadd(__nv_bfloat16 a, __nv_bfloat16 b) { return __nv_bfloat16(float(a) + float(b)); }
+inline __nv_bfloat16 __hmul_bf(__nv_bfloat16 a, __nv_bfloat16 b) { return __nv_bfloat16(float(a)*float(b)); }
+inline __nv_bfloat16 __hadd_bf(__nv_bfloat16 a, __nv_bfloat16 b) { return __nv_bfloat16(float(a)+float(b)); }
+
+// ── Dynamic Parallelism (device-side) ────────────────────────────────────────
+// Kernels compiled with VGRE can call cudaLaunchDevice to spawn child kernels.
+// The child is enqueued via CDPExecutor and runs after the current block.
+inline void* cudaGetParameterBuffer(size_t /*alignment*/, size_t size) {
+    return vgre_cdp_get_param_buffer(size);
+}
+
+template<typename Fn>
+inline void cudaLaunchDevice(Fn* fn, void* paramBuf,
+    vgre_cuda::dim3 gd, vgre_cuda::dim3 bd,
+    unsigned sharedMem, unsigned long long stream)
+{
+    vgre_cdp_launch_device((void*)fn, paramBuf,
+        gd.x, gd.y, gd.z,
+        bd.x, bd.y, bd.z,
+        sharedMem, stream);
+}
 
 } // namespace vgre_cuda
 

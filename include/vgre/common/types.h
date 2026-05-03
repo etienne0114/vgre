@@ -98,6 +98,8 @@ struct KernelIR {
   std::vector<size_t> argSizes; // Explicit sizes for structs/templates
   bool usesSharedMem = false;
   bool usesSyncthreads = false;
+  bool usesWarpShuffle = false;   // __shfl_sync / __ballot_sync detected
+  bool usesDynamicParallelism = false; // cudaLaunchDevice from device side
   size_t sharedMemSize = 0;
   uint64_t estimatedInstructionCount = 0;
   uint64_t estimatedMemoryAccessCount = 0;

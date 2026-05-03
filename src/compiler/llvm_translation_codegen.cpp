@@ -1,4 +1,5 @@
 #include "vgre/compiler/llvm_translation_engine.h"
+#include "vgre/compiler/ptx_translator.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/platform.h"
 #include "vgre/common/retry.h"
@@ -270,7 +271,9 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
                         "All arrays will alias the same base pointer.");
     }
   }
-  oss << kernelSource << "\n\n";
+  // Translate inline PTX assembly to equivalent C++ before compilation.
+  std::string translatedSource = PTXTranslator::translate(kernelSource);
+  oss << translatedSource << "\n\n";
 
   // Helper: block-threading toggle (using cached host-side configuration)
   oss << "static inline bool vgre_block_threads_enabled() {\n";
@@ -303,8 +306,10 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
       << "    uint32_t gdx = pGridDim->x, gdy = pGridDim->y, gdz = pGridDim->z;\n\n";
 
   // Thread-local kernel launcher
-  oss << "  auto vgre_call_kernel = [=](uint32_t tx, uint32_t ty, uint32_t tz) {\n";
+  oss << "  alignas(64) uint64_t vgre_warp_buf[32] = {};\n";
+  oss << "  auto vgre_call_kernel = [=, &vgre_warp_buf](uint32_t tx, uint32_t ty, uint32_t tz) {\n";
   oss << "    *vgre_jit_get_sharedMem() = smem;\n";
+  oss << "    *vgre_jit_get_warp_buffer() = (void*)vgre_warp_buf;\n";
   oss << "    *vgre_jit_get_threadIdx() = vgre_cuda::dim3(tx, ty, tz);\n";
   oss << "    *vgre_jit_get_blockIdx() = vgre_cuda::dim3(bx, by, bz);\n";
   oss << "    *vgre_jit_get_blockDim() = vgre_cuda::dim3(bdx, bdy, bdz);\n";
@@ -352,17 +357,25 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
 
   // Optional per-block threading for __syncthreads correctness (capped)
   oss << "  uint32_t totalThreads = bdx * bdy * bdz;\n";
+  bool forceParallel = ir.usesSyncthreads || ir.usesWarpShuffle;
   oss << "  const bool vgre_force_block_threads = "
-      << (ir.usesSyncthreads ? "true" : "false") << ";\n";
-  oss << "  bool useThreads = (vgre_block_threads_enabled() || vgre_force_block_threads) &&\n";
-  oss << "                   totalThreads > 1;\n";
+      << (forceParallel ? "true" : "false") << ";\n";
+  // Shuffle/syncthreads kernels MUST use threaded dispatch even for single-thread
+  // blocks: in the serial loop, all lanes run on the same OS thread sequentially,
+  // so the warp buffer can never be simultaneously populated — shuffles read stale
+  // data.  Threaded dispatch gives each lane its own OS thread, enabling correct
+  // barrier semantics at the cost of minor overhead for single-thread blocks.
+  oss << "  bool useThreads = vgre_force_block_threads\n";
+  oss << "                 || (vgre_block_threads_enabled() && totalThreads > 1);\n";
   oss << "  if (useThreads) {\n";
   oss << "    struct JobContext {\n";
   oss << "      uint32_t bdx, bdy, bdz;\n";
   oss << "      decltype(vgre_call_kernel)* launcher;\n";
-  oss << "    } ctx = {bdx, bdy, bdz, &vgre_call_kernel};\n";
+  oss << "      void* warpBuf;\n";
+  oss << "    } ctx = {bdx, bdy, bdz, &vgre_call_kernel, (void*)vgre_warp_buf};\n";
   oss << "    auto block_job = [](int tid, void* arg_ptr) {\n";
   oss << "        auto* pCtx = (JobContext*)arg_ptr;\n";
+  oss << "        *vgre_jit_get_warp_buffer() = pCtx->warpBuf;\n";
   oss << "        uint32_t tx = tid % pCtx->bdx;\n";
   oss << "        uint32_t ty = (tid / pCtx->bdx) % pCtx->bdy;\n";
   oss << "        uint32_t tz = tid / (pCtx->bdx * pCtx->bdy);\n";
