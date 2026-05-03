@@ -129,12 +129,30 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
     }
     node.capturedArgs.push_back(buf);
 
-    // Track all pointer args as potential write targets for fusion hazard analysis.
+    // Track pointer args for fusion hazard analysis.
+    // All POINTER args are conservatively treated as both read and write targets.
+    // STRUCT args may embed nested pointers — scan the first sizeof(void*) bytes
+    // of each 8-byte-aligned slot to detect embedded pointer fields.
     if (argTypes[i] == ArgType::POINTER && buf.size() >= sizeof(void *)) {
       void *p = nullptr;
       std::memcpy(&p, buf.data(), sizeof(void *));
       if (p != nullptr) {
         node.capturedWritePtrs.push_back(p);
+        node.capturedReadPtrs.push_back(p);
+      }
+    } else if (argTypes[i] == ArgType::STRUCT && buf.size() >= sizeof(void *)) {
+      // Scan struct fields for embedded pointers (nested struct pointer detection).
+      // Walk 8-byte-aligned slots; any value in the VM address range is treated
+      // as a potential pointer read source (conservative — can't determine direction).
+      static constexpr uintptr_t kPtrLo = 0x1000ULL;
+      static constexpr uintptr_t kPtrHi = 0x0000'7FFF'FFFF'FFFFull; // user space
+      for (size_t off = 0; off + sizeof(void *) <= buf.size(); off += sizeof(void *)) {
+        void *candidate = nullptr;
+        std::memcpy(&candidate, buf.data() + off, sizeof(void *));
+        uintptr_t addr = reinterpret_cast<uintptr_t>(candidate);
+        if (addr >= kPtrLo && addr <= kPtrHi) {
+          node.capturedReadPtrs.push_back(candidate);
+        }
       }
     }
   }

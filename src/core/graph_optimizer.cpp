@@ -74,21 +74,50 @@ bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
     //    fusing them would create a WAW (write-after-write) race condition.
     //    `capturedWritePtrs` holds all pointer-type args (conservative: any pointer
     //    could be a write target).  Block fusion when A and B share a write target.
-    if (!a.capturedWritePtrs.empty() && !b.capturedWritePtrs.empty()) {
-        std::unordered_set<void*> writesA(a.capturedWritePtrs.begin(),
-                                          a.capturedWritePtrs.end());
-        for (void* p : b.capturedWritePtrs) {
-            if (p != nullptr && writesA.count(p)) {
-                VGRE_LOG_INFO("GraphOptimizer",
-                    "Fusion blocked: output-output hazard — nodes " +
-                    std::to_string(a.nodeId) + " and " + std::to_string(b.nodeId) +
-                    " share write target " + std::to_string(reinterpret_cast<uintptr_t>(p)));
-                return false;
-            }
+    // Build index sets for pointer hazard analysis.
+    std::unordered_set<void*> writesA(a.capturedWritePtrs.begin(),
+                                      a.capturedWritePtrs.end());
+    std::unordered_set<void*> writesB(b.capturedWritePtrs.begin(),
+                                      b.capturedWritePtrs.end());
+    std::unordered_set<void*> readsA(a.capturedReadPtrs.begin(),
+                                     a.capturedReadPtrs.end());
+    std::unordered_set<void*> readsB(b.capturedReadPtrs.begin(),
+                                     b.capturedReadPtrs.end());
+
+    // WAW hazard: both kernels write the same buffer — fusing creates a race.
+    for (void* p : writesB) {
+        if (p != nullptr && writesA.count(p)) {
+            VGRE_LOG_INFO("GraphOptimizer",
+                "Fusion blocked: WAW hazard — nodes " +
+                std::to_string(a.nodeId) + " and " + std::to_string(b.nodeId) +
+                " share write target " + std::to_string(reinterpret_cast<uintptr_t>(p)));
+            return false;
         }
-        // Producer-consumer path: if writesA ∩ readPtrs(B) ≠ ∅, fusion is beneficial
-        // (the intermediate buffer is eliminated).  This is already permitted by the
-        // single-successor chain check in the caller.  No extra action needed here.
+    }
+
+    // WAR hazard: A reads a buffer that B writes — fusing risks B overwriting
+    // the value before A's fused thread reads it (within the fused kernel body).
+    for (void* p : writesB) {
+        if (p != nullptr && readsA.count(p)) {
+            VGRE_LOG_INFO("GraphOptimizer",
+                "Fusion blocked: WAR hazard — node " + std::to_string(b.nodeId) +
+                " writes a buffer read by node " + std::to_string(a.nodeId) +
+                " at " + std::to_string(reinterpret_cast<uintptr_t>(p)));
+            return false;
+        }
+    }
+
+    // Producer-consumer (RAW): A writes X, B reads X — fusion is BENEFICIAL
+    // (the intermediate buffer is eliminated).  Log and allow.
+    for (void* p : writesA) {
+        if (p != nullptr && readsB.count(p)) {
+            VGRE_LOG_DEBUG("GraphOptimizer",
+                "RAW producer-consumer link detected: node " + std::to_string(a.nodeId) +
+                " → node " + std::to_string(b.nodeId) +
+                " via ptr " + std::to_string(reinterpret_cast<uintptr_t>(p)) +
+                " — fusion eliminates intermediate buffer");
+            break; // at least one RAW edge: fusion is known-beneficial
+        }
     }
 
     // 3. Shared memory check (authoritative hardware limit).
