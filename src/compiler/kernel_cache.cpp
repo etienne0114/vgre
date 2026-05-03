@@ -18,8 +18,8 @@ namespace vgre {
 namespace compiler {
 
 KernelCache &KernelCache::instance() {
-  static KernelCache* instance = new KernelCache();
-  return *instance;
+  static KernelCache inst;
+  return inst;
 }
 
 VGREResult KernelCache::initialize(const std::string& cacheDir) {
@@ -84,10 +84,12 @@ bool KernelCache::getAST(const std::string& sourceHash, std::string& outAst) {
     
     VGRE_LOG_DEBUG("KernelCache", "Looking up cache for hash: " + sourceHash.substr(0, 16) + "...");
     
-    // Check memory cache first (fastest)
+    // Check memory cache first (fastest) — promote to MRU on hit.
     auto it = memoryCache_.find(sourceHash);
     if (it != memoryCache_.end()) {
-        outAst = it->second;
+        outAst = it->second.first;
+        // Move to front of LRU list (most recently used).
+        lruOrder_.splice(lruOrder_.begin(), lruOrder_, it->second.second);
         stats_.hits++;
         stats_.memoryHits++;
         VGRE_LOG_INFO("KernelCache", "✓ Memory cache HIT for hash: " + sourceHash.substr(0, 8) + "...");
@@ -117,10 +119,15 @@ bool KernelCache::getAST(const std::string& sourceHash, std::string& outAst) {
         return false;
     }
     
-    // Add to memory cache for future hits
-    if (memoryCache_.size() < MAX_MEMORY_CACHE_SIZE) {
-        memoryCache_[sourceHash] = outAst;
+    // Promote to memory LRU cache (evict LRU entry if full).
+    if (memoryCache_.size() >= MAX_MEMORY_CACHE_SIZE) {
+        // Evict the least-recently-used entry (back of list).
+        const std::string& lruKey = lruOrder_.back();
+        memoryCache_.erase(lruKey);
+        lruOrder_.pop_back();
     }
+    lruOrder_.push_front(sourceHash);
+    memoryCache_[sourceHash] = {outAst, lruOrder_.begin()};
     
     stats_.hits++;
     stats_.diskReads++;
@@ -133,14 +140,20 @@ void KernelCache::putAST(const std::string& sourceHash, const std::string& ast) 
     
     VGRE_LOG_DEBUG("KernelCache", "Storing AST for hash: " + sourceHash.substr(0, 16) + "... (size: " + std::to_string(ast.size()) + " bytes)");
     
-    // Add to memory cache
-    if (memoryCache_.size() < MAX_MEMORY_CACHE_SIZE) {
-        memoryCache_[sourceHash] = ast;
+    // Add to LRU memory cache; evict least-recently-used entry if full.
+    auto existing = memoryCache_.find(sourceHash);
+    if (existing != memoryCache_.end()) {
+        // Update in place and move to MRU.
+        existing->second.first = ast;
+        lruOrder_.splice(lruOrder_.begin(), lruOrder_, existing->second.second);
     } else {
-        // Evict oldest entry (simple FIFO)
-        auto it = memoryCache_.begin();
-        memoryCache_.erase(it);
-        memoryCache_[sourceHash] = ast;
+        if (memoryCache_.size() >= MAX_MEMORY_CACHE_SIZE) {
+            const std::string& lruKey = lruOrder_.back();
+            memoryCache_.erase(lruKey);
+            lruOrder_.pop_back();
+        }
+        lruOrder_.push_front(sourceHash);
+        memoryCache_[sourceHash] = {ast, lruOrder_.begin()};
     }
     
     // Write to disk cache
@@ -165,7 +178,8 @@ void KernelCache::clear() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     
     memoryCache_.clear();
-    
+    lruOrder_.clear();
+
     // Clear disk cache
     try {
         std::filesystem::remove_all(cacheDir_);

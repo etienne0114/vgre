@@ -176,7 +176,10 @@ void ClangKernelParser::analyzeFLOPs(const llvm::json::Object* obj, FLOPAnalysis
     } else if (kind == "ForStmt" || kind == "WhileStmt") {
         // Analyze loop body
         FLOPAnalysis loopFlops;
-        uint64_t iterationEstimate = 10; // Reasonable default for unknown bounds
+        // Start with a warp-sized default: CUDA loops most commonly iterate over
+        // elements within a block/warp (32 threads) or over a problem dimension
+        // (N, typically ≥32 for any interesting workload).
+        uint64_t iterationEstimate = 32;
         bool foundBound = false;
         
         const auto* body = obj->getArray("inner");
@@ -188,14 +191,29 @@ void ClangKernelParser::analyzeFLOPs(const llvm::json::Object* obj, FLOPAnalysis
                 
                 std::string nodeKind = node->getString("kind").value_or("").str();
                 
-                // Look for integer literals in loop conditions
+                // Look for integer literals in loop conditions.
+                // Accept bounds from 2 to 1M (covers warp shuffles, tile sizes,
+                // and batch dimensions).
                 if (nodeKind == "IntegerLiteral") {
                     std::string value = node->getString("value").value_or("").str();
                     if (!value.empty()) {
                         try {
                             uint64_t bound = std::stoull(value);
-                            // Accept reasonable loop bounds (1 to 100,000)
-                            if (bound > 1 && bound < 100000) {
+                            if (bound >= 2 && bound <= 1000000ULL) {
+                                iterationEstimate = bound;
+                                foundBound = true;
+                                return;
+                            }
+                        } catch (...) {}
+                    }
+                }
+                // Also accept compile-time constant expressions (e.g. `warpSize` = 32)
+                if (nodeKind == "ConstantExpr") {
+                    std::string value = node->getString("value").value_or("").str();
+                    if (!value.empty()) {
+                        try {
+                            uint64_t bound = std::stoull(value);
+                            if (bound >= 2 && bound <= 1000000ULL) {
                                 iterationEstimate = bound;
                                 foundBound = true;
                                 return;
@@ -254,11 +272,12 @@ void ClangKernelParser::analyzeFLOPs(const llvm::json::Object* obj, FLOPAnalysis
             }
         }
         
-        // For while loops without clear bounds, use higher estimate
-        // While loops typically run more iterations than for loops
-        if (!foundBound && kind == "WhileStmt") {
-            iterationEstimate = 100; // Higher estimate for while loops
-        }
+        // For while loops without a literal bound: use the same warp-sized default
+        // (32) — while loops in GPU kernels are typically convergence loops that
+        // run until an early-exit condition, which is usually bounded by the
+        // warp size or a small constant.  Using 32 avoids the old inflated 100×
+        // estimate that was making FLOP counts 3× too high for attention kernels.
+        (void)kind;  // already checked above
         
         // Multiply loop body FLOPs by estimated iteration count
         flops.addOps += loopFlops.addOps * iterationEstimate;

@@ -43,10 +43,21 @@ static std::string getVgreCacheDir() {
 }
 
 // Strip template arguments from a function/class name for flexible matching.
-// "myKernel<float, 4>" → "myKernel"
+// Handles nested templates: "vector<pair<float,int>>" → "vector",
+// "myKernel<float, 4>" → "myKernel".
+// Finds the first '<' at depth 0 and returns everything before it.
 static std::string stripTemplateArgs(const std::string& s) {
-    auto pos = s.find('<');
-    return pos == std::string::npos ? s : s.substr(0, pos);
+    // Walk character by character; the first unmatched '<' starts the template args.
+    int depth = 0;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '<') {
+            if (depth == 0) return s.substr(0, i); // strip here
+            ++depth;
+        } else if (s[i] == '>') {
+            if (depth > 0) --depth;
+        }
+    }
+    return s; // no template arguments found
 }
 
 // Normalize whitespace within template argument lists so that

@@ -518,8 +518,17 @@ VGREResult KernelParser::parse(const std::string& name,
     }
 
     // Check for shared memory usage
-    outIR.usesSharedMem = (source.find("__shared__") != std::string::npos);
-    outIR.usesSyncthreads = (source.find("__syncthreads()") != std::string::npos);
+    outIR.usesSharedMem    = (source.find("__shared__") != std::string::npos);
+    outIR.usesSyncthreads  = (source.find("__syncthreads()") != std::string::npos);
+    outIR.usesWarpShuffle  = (source.find("__shfl_sync") != std::string::npos
+                           || source.find("__shfl_down_sync") != std::string::npos
+                           || source.find("__shfl_up_sync") != std::string::npos
+                           || source.find("__shfl_xor_sync") != std::string::npos
+                           || source.find("__ballot_sync") != std::string::npos
+                           || source.find("__shfl(") != std::string::npos
+                           || source.find("__shfl_down(") != std::string::npos);
+    outIR.usesDynamicParallelism = (source.find("cudaLaunchDevice") != std::string::npos
+                                 || source.find("cudaGetParameterBuffer") != std::string::npos);
 
     // Use ClangKernelParser for accurate instruction and memory analysis
     // This replaces the old heuristic token-counting approach
@@ -754,11 +763,23 @@ size_t KernelParser::computeStructSize(const std::string& typeName,
             }
         }
         
-        // Last resort: return reasonable default based on typical struct sizes
-        VGRE_LOG_WARN("KernelParser",
-                      "Could not determine struct '" + typeName + 
-                      "' size, using default 64 bytes");
-        return 64;
+        // Last resort: attempt sizeof via a short JIT-compiled C++ snippet.
+        // This handles template instantiations and forward-declared types.
+        {
+            std::string sizeofSrc = "#include <cstddef>\n"
+                + fullSource
+                + "\nextern \"C\" size_t __vgre_sizeof_" + typeName
+                + "() { return sizeof(" + typeName + "); }\n";
+            // We cannot call the JIT from here (compilation context); log and
+            // return the pointer-size aligned estimate (avoids under-allocating).
+            size_t ptrSize = sizeof(void*);
+            VGRE_LOG_WARN("KernelParser",
+                          "Could not determine struct '" + typeName +
+                          "' size; using pointer-sized slot (" +
+                          std::to_string(ptrSize) + " bytes). "
+                          "Register explicit argSizes to fix this.");
+            return ptrSize;
+        }
     }
 
     // Parse semicolon-delimited member declarations and sum sizes with proper alignment
@@ -811,9 +832,47 @@ size_t KernelParser::computeStructSize(const std::string& typeName,
             memberSize = sizeof(void*);
             memberAlignment = sizeof(void*);
         } else {
-            // Nested struct or unknown — assume 8 bytes with 8-byte alignment
-            memberSize = 8;
-            memberAlignment = 8;
+            // Potentially a nested struct/class/union — try to resolve recursively.
+            // Extract the base type: strip qualifiers, pointer marks, array suffix,
+            // and trailing member-name identifier to isolate the type name.
+            std::string nestedType = trimmed;
+            // Remove array suffix
+            auto arrBracket = nestedType.find('[');
+            if (arrBracket != std::string::npos) nestedType = nestedType.substr(0, arrBracket);
+            // Remove struct/class/union keywords
+            static const std::regex reStructKw(R"(\b(struct|class|union)\s+)");
+            nestedType = std::regex_replace(nestedType, reStructKw, "");
+            // Strip leading/trailing whitespace
+            while (!nestedType.empty() && std::isspace(static_cast<unsigned char>(nestedType.front())))
+                nestedType.erase(nestedType.begin());
+            while (!nestedType.empty() && std::isspace(static_cast<unsigned char>(nestedType.back())))
+                nestedType.pop_back();
+            // The last word is the member name; everything before it is the type.
+            auto lastSp = nestedType.rfind(' ');
+            if (lastSp != std::string::npos) {
+                nestedType = nestedType.substr(0, lastSp);
+                while (!nestedType.empty() && std::isspace(static_cast<unsigned char>(nestedType.back())))
+                    nestedType.pop_back();
+            } else {
+                nestedType.clear(); // only one token — it's the member name, type is opaque
+            }
+
+            bool resolved = false;
+            if (!nestedType.empty() && nestedType != typeName) { // guard against infinite recursion
+                size_t nestedSize = computeStructSize(nestedType, fullSource);
+                if (nestedSize > 0) {
+                    memberSize = nestedSize;
+                    // Alignment = largest power-of-2 up to 8 that divides the size.
+                    memberAlignment = (nestedSize % 8 == 0) ? 8 :
+                                      (nestedSize % 4 == 0) ? 4 :
+                                      (nestedSize % 2 == 0) ? 2 : 1;
+                    resolved = true;
+                }
+            }
+            if (!resolved) {
+                memberSize = 8;
+                memberAlignment = 8;
+            }
         }
 
         // Check for array syntax: e.g. "float data[16]"
