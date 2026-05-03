@@ -816,8 +816,8 @@ int CUDAInterceptor::convertMemcpyKind(cudaMemcpyKind_t kind) {
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 CUDAInterceptor &CUDAInterceptor::instance() {
-  static CUDAInterceptor* inst = new CUDAInterceptor();
-  return *inst;
+  static CUDAInterceptor inst;
+  return inst;
 }
 
 } // namespace api

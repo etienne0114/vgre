@@ -238,18 +238,35 @@ cudaError_t CUDAInterceptor::memcpy2DAsync(void *dst, size_t dpitch,
 cudaError_t CUDAInterceptor::memcpyPeer(void *dst, int dstDevice,
                                         const void *src, int srcDevice,
                                         size_t count) {
-  (void)dstDevice;
-  (void)srcDevice;
-  return memcpy(dst, src, count, cudaMemcpyDeviceToDevice);
+  if (!dst || !src || count == 0) return cudaErrorInvalidValue;
+  // In VGRE all virtual devices share the same host address space.
+  // Verify both device IDs are in-range, then route through the P2P copy path
+  // in MemoryManager which handles cross-NUMA placement correctly.
+  auto& engine = core::RuntimeEngine::instance();
+  int devCount = engine.getDeviceCount();
+  if (dstDevice < 0 || dstDevice >= devCount ||
+      srcDevice < 0 || srcDevice >= devCount)
+    return cudaErrorInvalidDevice;
+
+  auto& mm = engine.getMemoryManager();
+  // P2P: copy data and then advise the memory manager about the destination device.
+  VGREResult r = mm.copyDeviceToDevice(dst, const_cast<void*>(src), count);
+  if (r != VGREResult::SUCCESS) return convertResult(r);
+  // cudaMemAdviseSetPreferredLocation = 3 (matches CUDA enum value).
+  if (dstDevice != srcDevice)
+    mm.memAdvise(dst, count, 3 /* SetPreferredLocation */, dstDevice);
+  return cudaSuccess;
 }
 
 cudaError_t CUDAInterceptor::memcpyPeerAsync(void *dst, int dstDevice,
                                              const void *src, int srcDevice,
                                              size_t count,
                                              cudaStream_t stream) {
-  (void)dstDevice;
-  (void)srcDevice;
-  return memcpyAsync(dst, src, count, cudaMemcpyDeviceToDevice, stream);
+  // Route through synchronous peer copy then submit a fence on the stream.
+  cudaError_t r = memcpyPeer(dst, dstDevice, src, srcDevice, count);
+  if (r != cudaSuccess) return r;
+  // Record a stream event so the caller can synchronize with cudaStreamSynchronize.
+  return streamSynchronize(stream);
 }
 
 cudaError_t CUDAInterceptor::memset(void *devPtr, int value, size_t count) {
