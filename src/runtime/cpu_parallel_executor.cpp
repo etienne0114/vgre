@@ -85,6 +85,10 @@ VGRE_PUBLIC_API void vgre_jit_syncgrid() {
 
 } // extern "C"
 
+// CDP drain — called after each block to execute child kernels enqueued via
+// cudaLaunchDevice.  Declared here to avoid a circular include dependency.
+extern "C" void vgre_cdp_drain();
+
 #include "vgre/advanced/adaptive_execution_engine.h"
 
 #if defined(__linux__)
@@ -159,7 +163,17 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
 #if defined(__linux__)
     if (measuredInstr > 0) {
         double ratio = vgre::advanced::AdaptiveExecutionEngine::instance().getFlopPerInstruction();
-        uint64_t hwFlops = static_cast<uint64_t>(measuredInstr * ratio);
+        // Validate: ratio must be positive and within a physically meaningful range.
+        // Modern CPUs: 0.1 FLOP/instruction (scalar loads) to 32 FLOP/instruction
+        // (AVX-512 FMA with 16 FP32 elements × 2 FLOP each).  Clamp to [0.05, 64.0]
+        // to guard against miscalibration (e.g. perf_event returning bogus counts).
+        if (ratio < 0.05 || ratio > 64.0) {
+            VGRE_LOG_WARN("CPUParallelExecutor",
+                          "flopPerInstruction=" + std::to_string(ratio) +
+                          " out of range [0.05, 64.0]; using static estimate");
+            return staticEstimate;
+        }
+        uint64_t hwFlops = static_cast<uint64_t>(static_cast<double>(measuredInstr) * ratio);
         return (hwFlops > 0) ? hwFlops : staticEstimate;
     }
 #else
@@ -180,6 +194,7 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
     auto bw_t0 = std::chrono::steady_clock::now();
     (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(),
        smem.size());
+    vgre_cdp_drain();  // execute any child kernels spawned via CDP
     double blockMs1 = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - bw_t0).count();
 #if defined(__linux__)

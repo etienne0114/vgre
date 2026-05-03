@@ -36,6 +36,14 @@ public:
                      const dim3 &blockDim, void **args,
                      const std::vector<size_t> &argSizes);
 
+  // Returns estimated peak GFLOPS based on OpenCL device compute units and
+  // max clock frequency.  Returns 0.0 if device info is unavailable.
+  double getEstimatedGFLOPS() const;
+
+  // Measures round-trip dispatch latency: enqueue a barrier, call clFinish(),
+  // and return the wall-clock time in milliseconds.  Returns 0.0 on failure.
+  double measureDispatchLatencyMs();
+
   // Provide the Singleton instance
   static IGPUOpenCLExecutor &instance();
 

@@ -2,14 +2,16 @@
 #include "vgre/common/logger.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
+#include <algorithm>
+#include <chrono>
 #include <regex>
 #include "vgre/advanced/adaptive_execution_engine.h"
 namespace vgre {
 namespace runtime {
 
 IGPUOpenCLExecutor &IGPUOpenCLExecutor::instance() {
-  static IGPUOpenCLExecutor* instance_ptr = new IGPUOpenCLExecutor();
-  return *instance_ptr;
+  static IGPUOpenCLExecutor inst;
+  return inst;
 }
 
 namespace {
@@ -160,6 +162,52 @@ VGREResult IGPUOpenCLExecutor::initialize() {
 bool IGPUOpenCLExecutor::isAvailable() const { return initialized_; }
 std::string IGPUOpenCLExecutor::getDeviceName() const { return deviceName_; }
 
+double IGPUOpenCLExecutor::getEstimatedGFLOPS() const {
+  if (!initialized_ || !device_) return 0.0;
+
+  cl_uint computeUnits = 0;
+  cl_uint clockMHz = 0;
+  clGetDeviceInfo(device_, CL_DEVICE_MAX_COMPUTE_UNITS,
+                  sizeof(computeUnits), &computeUnits, nullptr);
+  clGetDeviceInfo(device_, CL_DEVICE_MAX_CLOCK_FREQUENCY,
+                  sizeof(clockMHz), &clockMHz, nullptr);
+
+  if (computeUnits == 0 || clockMHz == 0) return 0.0;
+
+  // iGPU SIMD width: 8 FP32 ops/clock/EU (conservative; Intel xe is 16).
+  // Multiply: CUs × clockGHz × ops/clock × 2 (FMA = 2 FLOP) / 1e9 → GFLOPS.
+  const double opsPerCuPerClock = 8.0;
+  double gflops = static_cast<double>(computeUnits)
+                * (static_cast<double>(clockMHz) / 1000.0)
+                * opsPerCuPerClock
+                * 2.0; // FMA
+  return gflops;
+}
+
+double IGPUOpenCLExecutor::measureDispatchLatencyMs() {
+  if (!initialized_ || !queue_) return 0.0;
+
+  // Warmup: one barrier to prime the command queue.
+  clEnqueueBarrierWithWaitList(queue_, 0, nullptr, nullptr);
+  clFinish(queue_);
+
+  // Measure 5 barrier + clFinish round-trips and return the median.
+  double samples[5] = {};
+  for (int i = 0; i < 5; ++i) {
+    auto t0 = std::chrono::steady_clock::now();
+    clEnqueueBarrierWithWaitList(queue_, 0, nullptr, nullptr);
+    clFinish(queue_);
+    samples[i] = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+  }
+  // Median of 5 samples (sort in-place)
+  std::sort(samples, samples + 5);
+  double latencyMs = samples[2]; // median
+  VGRE_LOG_INFO("IGPUOpenCLExecutor",
+                "Dispatch latency measured: " + std::to_string(latencyMs) + " ms");
+  return latencyMs;
+}
+
 VGREResult IGPUOpenCLExecutor::transpileKernel(
     const std::string &kernelName, const std::string &cudaSource,
     const std::vector<ArgType> & /*argTypes*/, std::string &outOpenCLSource) {
@@ -202,11 +250,58 @@ inline float __attribute__((overloadable)) atomicAdd(volatile __global float* p,
 #define __shfl_up_sync(m, v, d) intel_sub_group_shuffle_up(v, v, d)
 #define __shfl_xor_sync(m, v, l) intel_sub_group_shuffle_xor(v, l)
 #else
-// No identity fallback here: fail on use to avoid silent wrong results.
-#define __shfl_sync(m, v, r) VGRE_SHFL_UNSUPPORTED__requires_subgroup_extension(v)
-#define __shfl_down_sync(m, v, d) VGRE_SHFL_UNSUPPORTED__requires_subgroup_extension(v)
-#define __shfl_up_sync(m, v, d) VGRE_SHFL_UNSUPPORTED__requires_subgroup_extension(v)
-#define __shfl_xor_sync(m, v, l) VGRE_SHFL_UNSUPPORTED__requires_subgroup_extension(v)
+// Software warp-shuffle fallback using __local memory.
+// Handles three cases correctly:
+//   wg_size < 32 : clamps src_lane to wg_size-1 to avoid uninitialized reads
+//   wg_size == 32: standard 32-lane warp
+//   wg_size > 32 : uses a 4-warp×32-lane 2D buffer to prevent inter-warp clobber
+//
+// The warp_id is floor(lid / 32); within-warp lane is lid & 31.
+// Barriers use CLK_LOCAL_MEM_FENCE (intra-work-group synchronization only).
+#define _VGRE_SHFL_DECL \
+    __local int _vgre_shfl_buf[4][32]; \
+    int _warp_id = (int)get_local_id(0) >> 5; \
+    int _warp_lid = (int)get_local_id(0) & 31; \
+    int _wgs = (int)get_local_size(0); \
+    int _warp_width = (_wgs < 32) ? _wgs : 32;
+
+#define __shfl_sync(mask, val, src_lane) ({ \
+    _VGRE_SHFL_DECL \
+    _vgre_shfl_buf[_warp_id & 3][_warp_lid] = (int)(val); \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    int _eff_src = (int)(src_lane) & (_warp_width - 1); \
+    int _r = _vgre_shfl_buf[_warp_id & 3][_eff_src]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    (__typeof__(val))_r; })
+
+#define __shfl_down_sync(mask, val, delta) ({ \
+    _VGRE_SHFL_DECL \
+    _vgre_shfl_buf[_warp_id & 3][_warp_lid] = (int)(val); \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    int _src = _warp_lid + (int)(delta); \
+    int _r = (_src < _warp_width) ? _vgre_shfl_buf[_warp_id & 3][_src] \
+                                  : _vgre_shfl_buf[_warp_id & 3][_warp_lid]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    (__typeof__(val))_r; })
+
+#define __shfl_up_sync(mask, val, delta) ({ \
+    _VGRE_SHFL_DECL \
+    _vgre_shfl_buf[_warp_id & 3][_warp_lid] = (int)(val); \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    int _src = _warp_lid - (int)(delta); \
+    int _r = (_src >= 0) ? _vgre_shfl_buf[_warp_id & 3][_src] \
+                         : _vgre_shfl_buf[_warp_id & 3][_warp_lid]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    (__typeof__(val))_r; })
+
+#define __shfl_xor_sync(mask, val, lane_mask) ({ \
+    _VGRE_SHFL_DECL \
+    _vgre_shfl_buf[_warp_id & 3][_warp_lid] = (int)(val); \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    int _src = (_warp_lid ^ ((lane_mask) & 31)) & (_warp_width - 1); \
+    int _r = _vgre_shfl_buf[_warp_id & 3][_src]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    (__typeof__(val))_r; })
 #endif
 
 // Warp Vote Primitives
@@ -441,7 +536,7 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
       double durationNs = static_cast<double>(timeEnd - timeStart);
       double durationMs = durationNs / 1e6;
       uint64_t totalThreads = (gridDim.x * gridDim.y * gridDim.z) *
-                              (blockDim.x * blockDim.y * blockDim.z);
+                              (blockDim.x * blockDim.y * blockDim.z);
       uint64_t estimatedBytes = 0;
       for (size_t sz : bufferSizes) {
         estimatedBytes += sz;
