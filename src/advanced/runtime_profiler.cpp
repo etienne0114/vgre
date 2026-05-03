@@ -469,8 +469,8 @@ void RuntimeProfiler::clear() {
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 RuntimeProfiler& RuntimeProfiler::instance() {
-    static RuntimeProfiler* inst = new RuntimeProfiler();
-    return *inst;
+    static RuntimeProfiler inst;
+    return inst;
 }
 
 } // namespace advanced

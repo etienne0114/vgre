@@ -34,8 +34,41 @@ VGREResult HardwareTokenManager::initialize() {
         return VGREResult::SUCCESS;
     }
 
-    // Try backends in order of security preference
-    
+    // Backend priority order is configurable via VGRE_TOKEN_BACKEND env var.
+    // Valid values: "keyring", "libsecret", "keychain", "credman", "tpm", "file".
+    // Default: platform-native backend first, TPM second, encrypted file last.
+    const char *preferredBackend = std::getenv("VGRE_TOKEN_BACKEND");
+
+    // Helper lambda: attempt a backend by name string.
+    auto tryNamed = [&](const char *name) -> bool {
+        if (!name) return false;
+#if defined(__linux__)
+        if (std::string(name) == "keyring"   && initLinuxKeyring()    == VGREResult::SUCCESS) { backend_ = BackendType::LINUX_KEYRING;   initialized_ = true; VGRE_LOG_INFO("HardwareTokenManager", "Initialized with Linux Keyring (env override)");   return true; }
+        if (std::string(name) == "libsecret" && initLinuxLibsecret()  == VGREResult::SUCCESS) { backend_ = BackendType::LINUX_LIBSECRET; initialized_ = true; VGRE_LOG_INFO("HardwareTokenManager", "Initialized with libsecret (env override)");        return true; }
+#endif
+#if defined(__APPLE__)
+        if (std::string(name) == "keychain"  && initMacOSKeychain()   == VGREResult::SUCCESS) { backend_ = BackendType::MACOS_KEYCHAIN;  initialized_ = true; VGRE_LOG_INFO("HardwareTokenManager", "Initialized with macOS Keychain (env override)");   return true; }
+#endif
+#if defined(_WIN32)
+        if (std::string(name) == "credman"   && initWindowsCredMan()  == VGREResult::SUCCESS) { backend_ = BackendType::WINDOWS_CREDMAN; initialized_ = true; VGRE_LOG_INFO("HardwareTokenManager", "Initialized with Windows CredMan (env override)");  return true; }
+#endif
+        if (std::string(name) == "tpm"       && initTPM()             == VGREResult::SUCCESS) { backend_ = BackendType::TPM_2_0;         initialized_ = true; VGRE_LOG_INFO("HardwareTokenManager", "Initialized with TPM 2.0 (env override)");           return true; }
+        if (std::string(name) == "file"      && initFallbackEncrypted() == VGREResult::SUCCESS) { backend_ = BackendType::FALLBACK_ENCRYPTED; initialized_ = true; VGRE_LOG_WARN("HardwareTokenManager", "Initialized with encrypted file (env override)"); return true; }
+        return false;
+    };
+
+    // If a preferred backend is specified, try it first.
+    if (preferredBackend) {
+        VGRE_LOG_INFO("HardwareTokenManager",
+                      "VGRE_TOKEN_BACKEND override: trying '" +
+                          std::string(preferredBackend) + "' first");
+        if (tryNamed(preferredBackend)) return VGREResult::SUCCESS;
+        VGRE_LOG_WARN("HardwareTokenManager",
+                      "Preferred backend '" + std::string(preferredBackend) +
+                          "' unavailable; falling back to default order");
+    }
+
+    // Default priority: platform-native → TPM → encrypted file.
 #if defined(__linux__)
     if (initLinuxKeyring() == VGREResult::SUCCESS) {
         backend_ = BackendType::LINUX_KEYRING;
@@ -43,14 +76,14 @@ VGREResult HardwareTokenManager::initialize() {
         VGRE_LOG_INFO("HardwareTokenManager", "Initialized with Linux Keyring backend");
         return VGREResult::SUCCESS;
     }
-    
+
     if (initLinuxLibsecret() == VGREResult::SUCCESS) {
         backend_ = BackendType::LINUX_LIBSECRET;
         initialized_ = true;
         VGRE_LOG_INFO("HardwareTokenManager", "Initialized with libsecret backend");
         return VGREResult::SUCCESS;
     }
-    
+
 #elif defined(__APPLE__)
     if (initMacOSKeychain() == VGREResult::SUCCESS) {
         backend_ = BackendType::MACOS_KEYCHAIN;
@@ -58,7 +91,7 @@ VGREResult HardwareTokenManager::initialize() {
         VGRE_LOG_INFO("HardwareTokenManager", "Initialized with macOS Keychain backend");
         return VGREResult::SUCCESS;
     }
-    
+
 #elif defined(_WIN32)
     if (initWindowsCredMan() == VGREResult::SUCCESS) {
         backend_ = BackendType::WINDOWS_CREDMAN;
@@ -211,8 +244,8 @@ VGREResult HardwareTokenManager::rotateToken(const std::string& service, std::st
 }
 
 HardwareTokenManager& HardwareTokenManager::instance() {
-    static HardwareTokenManager* inst = new HardwareTokenManager();
-    return *inst;
+    static HardwareTokenManager inst;
+    return inst;
 }
 
 } // namespace advanced
