@@ -44,23 +44,57 @@ struct cublasContext {
     int           deviceId = 0;
 };
 
-// ── Reference GEMM (used when CBLAS unavailable) ─────────────────────────────
+// ── Cache-blocked reference GEMM ─────────────────────────────────────────────
 // C = alpha*op(A)*op(B) + beta*C  (row-major)
+// Tile size chosen to fit two 64×64 float tiles (~32 KiB) within a typical
+// 32–64 KiB L1 D-cache.  Falls back to a scalar loop for small matrices.
+static constexpr int kTile = 64;
+
 static void refSgemm(bool tA, bool tB,
     int M, int N, int K,
     float alpha, const float* A, int lda,
                  const float* B, int ldb,
     float beta,        float* C, int ldc)
 {
-    for (int m = 0; m < M; ++m)
-    for (int n = 0; n < N; ++n) {
-        float acc = 0.f;
-        for (int k = 0; k < K; ++k) {
-            float a = tA ? A[k*lda+m] : A[m*lda+k];
-            float b = tB ? B[n*ldb+k] : B[k*ldb+n];
-            acc += a * b;
+    // Scalar path for tiny matrices (avoid tile-loop overhead)
+    if (M * N * K < 4096) {
+        for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n) {
+            float acc = 0.f;
+            for (int k = 0; k < K; ++k) {
+                float a = tA ? A[k*lda+m] : A[m*lda+k];
+                float b = tB ? B[n*ldb+k] : B[k*ldb+n];
+                acc += a * b;
+            }
+            C[m*ldc+n] = alpha*acc + beta*C[m*ldc+n];
         }
-        C[m*ldc+n] = alpha*acc + beta*C[m*ldc+n];
+        return;
+    }
+
+    // Apply beta to C once before accumulation
+    if (beta != 1.0f) {
+        for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n)
+            C[m*ldc+n] = (beta == 0.0f) ? 0.0f : beta * C[m*ldc+n];
+    }
+
+    // Tiled multiply: accumulate alpha*op(A)*op(B) into C in kTile×kTile blocks
+    for (int m0 = 0; m0 < M; m0 += kTile)
+    for (int n0 = 0; n0 < N; n0 += kTile)
+    for (int k0 = 0; k0 < K; k0 += kTile) {
+        int mEnd = std::min(m0 + kTile, M);
+        int nEnd = std::min(n0 + kTile, N);
+        int kEnd = std::min(k0 + kTile, K);
+        for (int m = m0; m < mEnd; ++m)
+        for (int n = n0; n < nEnd; ++n) {
+            float acc = 0.f;
+            for (int k = k0; k < kEnd; ++k) {
+                float a = tA ? A[k*lda+m] : A[m*lda+k];
+                float b = tB ? B[n*ldb+k] : B[k*ldb+n];
+                acc += a * b;
+            }
+            C[m*ldc+n] += alpha * acc;
+        }
     }
 }
 
@@ -70,15 +104,42 @@ static void refDgemm(bool tA, bool tB,
                   const double* B, int ldb,
     double beta,        double* C, int ldc)
 {
-    for (int m = 0; m < M; ++m)
-    for (int n = 0; n < N; ++n) {
-        double acc = 0.0;
-        for (int k = 0; k < K; ++k) {
-            double a = tA ? A[k*lda+m] : A[m*lda+k];
-            double b = tB ? B[n*ldb+k] : B[k*ldb+n];
-            acc += a * b;
+    if (M * N * K < 4096) {
+        for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n) {
+            double acc = 0.0;
+            for (int k = 0; k < K; ++k) {
+                double a = tA ? A[k*lda+m] : A[m*lda+k];
+                double b = tB ? B[n*ldb+k] : B[k*ldb+n];
+                acc += a * b;
+            }
+            C[m*ldc+n] = alpha*acc + beta*C[m*ldc+n];
         }
-        C[m*ldc+n] = alpha*acc + beta*C[m*ldc+n];
+        return;
+    }
+
+    if (beta != 1.0) {
+        for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n)
+            C[m*ldc+n] = (beta == 0.0) ? 0.0 : beta * C[m*ldc+n];
+    }
+
+    for (int m0 = 0; m0 < M; m0 += kTile)
+    for (int n0 = 0; n0 < N; n0 += kTile)
+    for (int k0 = 0; k0 < K; k0 += kTile) {
+        int mEnd = std::min(m0 + kTile, M);
+        int nEnd = std::min(n0 + kTile, N);
+        int kEnd = std::min(k0 + kTile, K);
+        for (int m = m0; m < mEnd; ++m)
+        for (int n = n0; n < nEnd; ++n) {
+            double acc = 0.0;
+            for (int k = k0; k < kEnd; ++k) {
+                double a = tA ? A[k*lda+m] : A[m*lda+k];
+                double b = tB ? B[n*ldb+k] : B[k*ldb+n];
+                acc += a * b;
+            }
+            C[m*ldc+n] += alpha * acc;
+        }
     }
 }
 
@@ -291,7 +352,189 @@ cublasStatus_t cublasGetMathMode(cublasHandle_t handle, int* mode) {
     return CUBLAS_STATUS_SUCCESS;
 }
 
-// Legacy v1 aliases
+// ── Batched SGEMM ─────────────────────────────────────────────────────────────
+// cublasSgemmBatched: array-of-pointers form.
+// Aarray[i], Barray[i], Carray[i] are independent matrices for batch item i.
+cublasStatus_t cublasSgemmBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const float* alpha,
+    const float* const Aarray[], int lda,
+    const float* const Barray[], int ldb,
+    const float* beta,
+    float* const Carray[], int ldc,
+    int batchCount)
+{
+    if (!handle || !Aarray || !Barray || !Carray || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    bool tA = (transa != CUBLAS_OP_N);
+    bool tB = (transb != CUBLAS_OP_N);
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b] || !Barray[b] || !Carray[b]) continue;
+#if HAVE_CBLAS
+        CBLAS_TRANSPOSE cA = tA ? CblasTrans : CblasNoTrans;
+        CBLAS_TRANSPOSE cB = tB ? CblasTrans : CblasNoTrans;
+        cblas_sgemm(CblasRowMajor, cB, cA, n, m, k,
+                    *alpha, Barray[b], ldb, Aarray[b], lda, *beta, Carray[b], ldc);
+#else
+        refSgemm(tB, tA, n, m, k, *alpha, Barray[b], ldb, Aarray[b], lda, *beta, Carray[b], ldc);
+#endif
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// cublasSgemmStridedBatched: stride-based contiguous-storage form.
+// Matrix i starts at A + i*strideA, B + i*strideB, C + i*strideC.
+cublasStatus_t cublasSgemmStridedBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const float* alpha,
+    const float* A, int lda, long long int strideA,
+    const float* B, int ldb, long long int strideB,
+    const float* beta,
+    float* C, int ldc, long long int strideC,
+    int batchCount)
+{
+    if (!handle || !A || !B || !C || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    bool tA = (transa != CUBLAS_OP_N);
+    bool tB = (transb != CUBLAS_OP_N);
+    for (int b = 0; b < batchCount; ++b) {
+        const float* Ab = A + b * strideA;
+        const float* Bb = B + b * strideB;
+        float*       Cb = C + b * strideC;
+#if HAVE_CBLAS
+        CBLAS_TRANSPOSE cA = tA ? CblasTrans : CblasNoTrans;
+        CBLAS_TRANSPOSE cB = tB ? CblasTrans : CblasNoTrans;
+        cblas_sgemm(CblasRowMajor, cB, cA, n, m, k,
+                    *alpha, Bb, ldb, Ab, lda, *beta, Cb, ldc);
+#else
+        refSgemm(tB, tA, n, m, k, *alpha, Bb, ldb, Ab, lda, *beta, Cb, ldc);
+#endif
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── Batched DGEMM ─────────────────────────────────────────────────────────────
+cublasStatus_t cublasDgemmBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const double* alpha,
+    const double* const Aarray[], int lda,
+    const double* const Barray[], int ldb,
+    const double* beta,
+    double* const Carray[], int ldc,
+    int batchCount)
+{
+    if (!handle || !Aarray || !Barray || !Carray || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    bool tA = (transa != CUBLAS_OP_N);
+    bool tB = (transb != CUBLAS_OP_N);
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b] || !Barray[b] || !Carray[b]) continue;
+#if HAVE_CBLAS
+        CBLAS_TRANSPOSE cA = tA ? CblasTrans : CblasNoTrans;
+        CBLAS_TRANSPOSE cB = tB ? CblasTrans : CblasNoTrans;
+        cblas_dgemm(CblasRowMajor, cB, cA, n, m, k,
+                    *alpha, Barray[b], ldb, Aarray[b], lda, *beta, Carray[b], ldc);
+#else
+        refDgemm(tB, tA, n, m, k, *alpha, Barray[b], ldb, Aarray[b], lda, *beta, Carray[b], ldc);
+#endif
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDgemmStridedBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const double* alpha,
+    const double* A, int lda, long long int strideA,
+    const double* B, int ldb, long long int strideB,
+    const double* beta,
+    double* C, int ldc, long long int strideC,
+    int batchCount)
+{
+    if (!handle || !A || !B || !C || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    bool tA = (transa != CUBLAS_OP_N);
+    bool tB = (transb != CUBLAS_OP_N);
+    for (int b = 0; b < batchCount; ++b) {
+        const double* Ab = A + b * strideA;
+        const double* Bb = B + b * strideB;
+        double*       Cb = C + b * strideC;
+#if HAVE_CBLAS
+        CBLAS_TRANSPOSE cA = tA ? CblasTrans : CblasNoTrans;
+        CBLAS_TRANSPOSE cB = tB ? CblasTrans : CblasNoTrans;
+        cblas_dgemm(CblasRowMajor, cB, cA, n, m, k,
+                    *alpha, Bb, ldb, Ab, lda, *beta, Cb, ldc);
+#else
+        refDgemm(tB, tA, n, m, k, *alpha, Bb, ldb, Ab, lda, *beta, Cb, ldc);
+#endif
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── HGEMM (FP16) — route through FP32 with cast ──────────────────────────────
+// cuBLAS uses __half (16-bit); we widen to float, compute, then narrow back.
+cublasStatus_t cublasHgemm(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const void* alpha,  // __half*
+    const void* A, int lda,
+    const void* B, int ldb,
+    const void* beta,   // __half*
+    void*       C, int ldc)
+{
+    if (!handle || !A || !B || !C || !alpha || !beta)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    // Interpret __half as uint16_t; convert via IEEE-754 bit-pattern
+    auto half_to_float = [](uint16_t h) -> float {
+        uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                        (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
+                         (static_cast<uint32_t>((h >> 10) & 0x1f) + (127 - 15)) << 23) |
+                        (static_cast<uint32_t>(h & 0x3ff) << 13);
+        float f; std::memcpy(&f, &bits, 4); return f;
+    };
+    auto float_to_half = [](float f) -> uint16_t {
+        uint32_t bits; std::memcpy(&bits, &f, 4);
+        uint16_t sign = (bits >> 16) & 0x8000;
+        int exp = ((bits >> 23) & 0xff) - 127 + 15;
+        uint16_t mant = (bits >> 13) & 0x3ff;
+        if (exp <= 0) return sign;
+        if (exp >= 31) return sign | 0x7c00;
+        return sign | (static_cast<uint16_t>(exp) << 10) | mant;
+    };
+
+    uint16_t ah, bh;
+    std::memcpy(&ah, alpha, 2); std::memcpy(&bh, beta, 2);
+    float fa = half_to_float(ah), fb = half_to_float(bh);
+
+    const size_t szA = (transa == CUBLAS_OP_N ? m * lda : k * lda);
+    const size_t szB = (transb == CUBLAS_OP_N ? k * ldb : n * ldb);
+    const size_t szC = static_cast<size_t>(m) * ldc;
+
+    std::vector<float> fA(szA), fB(szB), fC(szC);
+    const uint16_t* pA = static_cast<const uint16_t*>(A);
+    const uint16_t* pB = static_cast<const uint16_t*>(B);
+    uint16_t*       pC = static_cast<uint16_t*>(C);
+
+    for (size_t i = 0; i < szA; ++i) fA[i] = half_to_float(pA[i]);
+    for (size_t i = 0; i < szB; ++i) fB[i] = half_to_float(pB[i]);
+    for (size_t i = 0; i < szC; ++i) fC[i] = half_to_float(pC[i]);
+
+    bool tA = (transa != CUBLAS_OP_N), tB = (transb != CUBLAS_OP_N);
+    refSgemm(tB, tA, n, m, k, fa, fB.data(), ldb, fA.data(), lda, fb, fC.data(), ldc);
+
+    for (size_t i = 0; i < szC; ++i) pC[i] = float_to_half(fC[i]);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── Legacy v1 aliases ─────────────────────────────────────────────────────────
 cublasStatus_t cublasCreate(cublasHandle_t* h)  { return cublasCreate_v2(h); }
 cublasStatus_t cublasDestroy(cublasHandle_t h)  { return cublasDestroy_v2(h); }
 cublasStatus_t cublasSgemm(cublasHandle_t h, cublasOperation_t ta, cublasOperation_t tb,
