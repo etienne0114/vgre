@@ -28,13 +28,16 @@ static constexpr cudnnStatus_t CUDNN_STATUS_NOT_SUPPORTED  = 9;
 
 // ── Activation modes ─────────────────────────────────────────────────────────
 enum cudnnActivationMode_t {
-    CUDNN_ACTIVATION_SIGMOID = 0,
-    CUDNN_ACTIVATION_RELU    = 1,
-    CUDNN_ACTIVATION_TANH    = 2,
+    CUDNN_ACTIVATION_SIGMOID      = 0,
+    CUDNN_ACTIVATION_RELU         = 1,
+    CUDNN_ACTIVATION_TANH         = 2,
     CUDNN_ACTIVATION_CLIPPED_RELU = 3,
-    CUDNN_ACTIVATION_ELU     = 4,
-    CUDNN_ACTIVATION_IDENTITY = 5,
-    CUDNN_ACTIVATION_SWISH    = 6
+    CUDNN_ACTIVATION_ELU          = 4,
+    CUDNN_ACTIVATION_IDENTITY     = 5,
+    CUDNN_ACTIVATION_SWISH        = 6,
+    CUDNN_ACTIVATION_GELU         = 7,  // Gaussian Error Linear Unit
+    CUDNN_ACTIVATION_SELU         = 8,  // Scaled ELU
+    CUDNN_ACTIVATION_MISH         = 9   // Mish: x * tanh(softplus(x))
 };
 
 enum cudnnPoolingMode_t {
@@ -91,12 +94,33 @@ struct HandleCtx {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static inline float applyActivation(float x, const ActDesc& act) {
     switch (act.mode) {
-    case CUDNN_ACTIVATION_RELU:    return x > 0.f ? x : 0.f;
-    case CUDNN_ACTIVATION_SIGMOID: return 1.f / (1.f + expf(-x));
-    case CUDNN_ACTIVATION_TANH:    return tanhf(x);
+    case CUDNN_ACTIVATION_RELU:         return x > 0.f ? x : 0.f;
+    case CUDNN_ACTIVATION_SIGMOID:      return 1.f / (1.f + expf(-x));
+    case CUDNN_ACTIVATION_TANH:         return tanhf(x);
     case CUDNN_ACTIVATION_CLIPPED_RELU: return std::min(std::max(x, 0.f), (float)act.coeff);
-    case CUDNN_ACTIVATION_ELU:     return x > 0.f ? x : (float)(act.coeff * (expf(x) - 1.f));
-    case CUDNN_ACTIVATION_SWISH:   return x / (1.f + expf(-x));
+    case CUDNN_ACTIVATION_ELU:          return x > 0.f ? x : (float)(act.coeff * (expf(x) - 1.f));
+    case CUDNN_ACTIVATION_SWISH:        return x / (1.f + expf(-x));
+    // GELU: 0.5*x*(1 + tanh(sqrt(2/π)*(x + 0.044715*x³)))
+    // This is the "tanh" approximation used by PyTorch and TensorFlow.
+    case CUDNN_ACTIVATION_GELU: {
+        static constexpr float kSqrt2OverPi = 0.7978845608f;  // sqrt(2/π)
+        static constexpr float kCoeff       = 0.044715f;
+        float inner = kSqrt2OverPi * (x + kCoeff * x * x * x);
+        return 0.5f * x * (1.f + tanhf(inner));
+    }
+    // SELU: scale * (x if x>0 else alpha*(exp(x)-1))
+    // Standard SELU constants: alpha=1.6732632..., scale=1.0507009...
+    case CUDNN_ACTIVATION_SELU: {
+        static constexpr float kAlpha = 1.6732632423543772f;
+        static constexpr float kScale = 1.0507009873554805f;
+        return kScale * (x > 0.f ? x : kAlpha * (expf(x) - 1.f));
+    }
+    // Mish: x * tanh(softplus(x))  where softplus(x) = ln(1 + e^x)
+    // Numerically stable: for x > 20 softplus(x) ≈ x, tanh → 1
+    case CUDNN_ACTIVATION_MISH: {
+        float sp = (x > 20.f) ? x : logf(1.f + expf(x));
+        return x * tanhf(sp);
+    }
     default: return x;
     }
 }
