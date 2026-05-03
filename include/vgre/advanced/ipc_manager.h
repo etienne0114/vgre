@@ -1,6 +1,7 @@
 #ifndef VGRE_IPC_MANAGER_H
 #define VGRE_IPC_MANAGER_H
 #include "vgre/api/vgre_c_api.h"
+#include <atomic>
 #include <mutex>
 #include <vector>
 
@@ -51,6 +52,7 @@ private:
 
   bool enabled_ = false;
   bool isMaster_ = false;
+  std::atomic<bool> upgrading_{false};
 #if defined(_WIN32)
   void *shm_fd_ = nullptr; // HANDLE on Windows
 #else

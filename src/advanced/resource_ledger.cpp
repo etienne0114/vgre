@@ -6,6 +6,7 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 
 #if defined(_WIN32)
 #include <shlobj.h>
@@ -119,40 +120,32 @@ VGREResult ResourceLedger::getBalance(const std::string &nodeAddress,
 std::vector<NodeBalance> ResourceLedger::getAllBalances() const {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-  // Aggregate per-node
-  std::vector<std::string> uniqueAddresses;
+  // Single-pass O(n) aggregation via hash map — replaces the previous O(n²)
+  // double-loop (unique-address scan × entries per address).
+  std::unordered_map<std::string, NodeBalance> balMap;
+  balMap.reserve(entries_.size());
+
   for (const auto &entry : entries_) {
-    if (std::find(uniqueAddresses.begin(), uniqueAddresses.end(),
-                  entry.node_address) == uniqueAddresses.end()) {
-      uniqueAddresses.push_back(entry.node_address);
+    auto &bal = balMap[entry.node_address];
+    if (bal.address.empty()) bal.address = entry.node_address;
+
+    if (entry.direction == CreditDirection::CREDIT) {
+      bal.total_credits += entry.compute_unit_seconds;
+    } else {
+      bal.total_debits += entry.compute_unit_seconds;
+    }
+    bal.transaction_count++;
+    if (entry.timestamp > bal.last_activity) {
+      bal.last_activity = entry.timestamp;
     }
   }
 
   std::vector<NodeBalance> result;
-  result.reserve(uniqueAddresses.size());
-
-  for (const auto &addr : uniqueAddresses) {
-    NodeBalance bal;
-    bal.address = addr;
-
-    for (const auto &entry : entries_) {
-      if (entry.node_address == addr) {
-        if (entry.direction == CreditDirection::CREDIT) {
-          bal.total_credits += entry.compute_unit_seconds;
-        } else {
-          bal.total_debits += entry.compute_unit_seconds;
-        }
-        bal.transaction_count++;
-        if (entry.timestamp > bal.last_activity) {
-          bal.last_activity = entry.timestamp;
-        }
-      }
-    }
-
-    bal.balance = bal.total_credits - bal.total_debits;
-    result.push_back(bal);
+  result.reserve(balMap.size());
+  for (auto &kv : balMap) {
+    kv.second.balance = kv.second.total_credits - kv.second.total_debits;
+    result.push_back(std::move(kv.second));
   }
-
   return result;
 }
 
@@ -392,8 +385,8 @@ VGREResult ResourceLedger::load() {
 // ── Singleton ──────────────────────────────────────────────────────────────
 
 ResourceLedger &ResourceLedger::instance() {
-  static ResourceLedger* inst = new ResourceLedger();
-  return *inst;
+  static ResourceLedger inst;
+  return inst;
 }
 
 } // namespace advanced

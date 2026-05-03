@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <thread>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -62,6 +63,14 @@ bool IPCManager::initialize(bool isMaster) {
     }
   };
 
+  // Spin-wait if another thread is mid-upgrade (client→master teardown/reinit).
+  // Releases the lock while waiting so the upgrading thread can re-acquire it.
+  while (upgrading_.load(std::memory_order_acquire)) {
+    lock.unlock();
+    std::this_thread::yield();
+    lock.lock();
+  }
+
   // If we're already enabled as master, or enabled as client and only client is
   // requested, skip.
   if (enabled_ && (isMaster_ || !isMaster))
@@ -70,9 +79,18 @@ bool IPCManager::initialize(bool isMaster) {
   // If we are upgrading from client to master, we must shutdown first.
   if (enabled_ && isMaster && !isMaster_) {
     VGRE_LOG_DEBUG("IPCManager", "Upgrading from Client to Master mode");
-    
-    // Reset TCP cluster if it was active as a client
+
+    // Mark upgrade in progress so concurrent callers spin-wait rather than
+    // entering initialize() with a partially-torn-down state_.
+    upgrading_.store(true, std::memory_order_release);
+
+    // Release the mutex before calling TCPCluster::shutdown().
+    // TCPCluster::shutdown() joins worker threads that may call back into
+    // IPCManager (e.g. updateTelemetry). Holding mutex_ while waiting for
+    // those threads to exit would deadlock on this recursive_mutex.
+    lock.unlock();
     TCPClusterManager::instance().shutdown();
+    lock.lock();
 
     if (state_ && local_slot_ != -1) {
       state_->slots[local_slot_].active = false;
@@ -92,6 +110,7 @@ bool IPCManager::initialize(bool isMaster) {
 #endif
     enabled_ = false;
     state_ = nullptr;
+    // upgrading_ cleared after the new SHM is fully initialized below.
   }
 
   isMaster_ = isMaster;
@@ -257,6 +276,7 @@ bool IPCManager::initialize(bool isMaster) {
   state_->active_count = activeCount;
 
   enabled_ = true;
+  upgrading_.store(false, std::memory_order_release); // upgrade complete; clear the barrier
   VGRE_LOG_INFO("IPCManager",
                 "Process registered in slot " + std::to_string(local_slot_));
   const bool startAsMaster = isMaster_;

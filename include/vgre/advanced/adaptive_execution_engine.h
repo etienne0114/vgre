@@ -160,6 +160,7 @@ private:
   // calls setMovingAverageAlpha() (manual_alpha_set_ = true).
   double ewma_prediction_error_ = 0.0;
   bool   manual_alpha_set_      = false;
+  int    alpha_kernel_count_    = 0;  // rate-limiter: update alpha at most every 100 kernels
 
   // Background benchmark thread — stored so the destructor can join it and
   // prevent a segfault when the singleton is destroyed while the thread is still
