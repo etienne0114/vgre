@@ -1,5 +1,6 @@
 add_library(vgre_runtime OBJECT
     cpu_parallel_executor.cpp
+    cdp_executor.cpp
     vector_engine.cpp
     gpu_thread_context.cpp
     block_worker_pool.cpp

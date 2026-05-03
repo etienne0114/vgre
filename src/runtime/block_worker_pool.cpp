@@ -36,8 +36,8 @@ BlockWorkerPool::~BlockWorkerPool() {
 }
 
 BlockWorkerPool& BlockWorkerPool::instance() {
-    static BlockWorkerPool* inst = new BlockWorkerPool();
-    return *inst;
+    static BlockWorkerPool inst;
+    return inst;
 }
 
 void BlockWorkerPool::initialize(size_t numThreads) {
@@ -60,20 +60,26 @@ void BlockWorkerPool::initialize(size_t numThreads) {
     for (size_t i = 0; i < numThreads; ++i) {
         workers_.emplace_back(&BlockWorkerPool::workerLoop, this);
 
-        // Phase 12: Safe Affinity Propagation.
-        // Instead of blind pinning, we read the current process/parent affinity
-        // mask and propagate it to the workers. This ensures we respect
-        // external constraints (ctest, cgroups) while still breaking the
-        // unfortunate inheritance from a pinned Scheduler thread.
+        // Depinning from pinned Scheduler parent thread.
+        // Use sched_getaffinity(0) — process-level mask — so workers are not
+        // confined to the single CPU that the Scheduler thread is pinned to.
+        // This allows the OS to distribute BlockWorkerPool threads across all
+        // CPUs permitted for the process (cgroup/taskset constraints respected).
 #if defined(__linux__)
         cpu_set_t cpuset;
-        if (pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) == 0) {
-            pthread_setaffinity_np(workers_.back().native_handle(), sizeof(cpu_set_t), &cpuset);
-        } else {
-            // Fallback: Bind to all accessible cores if getaffinity fails
-            CPU_ZERO(&cpuset);
-            for (int k = 0; k < CPU_SETSIZE; k++) CPU_SET(k, &cpuset);
-            pthread_setaffinity_np(workers_.back().native_handle(), sizeof(cpu_set_t), &cpuset);
+        CPU_ZERO(&cpuset);
+        if (sched_getaffinity(0 /*process*/, sizeof(cpu_set_t), &cpuset) != 0) {
+            // sched_getaffinity failed: allow all CPUs as last resort
+            for (int k = 0; k < CPU_SETSIZE; ++k) CPU_SET(k, &cpuset);
+        }
+        pthread_setaffinity_np(workers_.back().native_handle(), sizeof(cpu_set_t), &cpuset);
+#elif defined(_WIN32)
+        // On Windows, inherit the process affinity mask so workers are not
+        // locked to the NUMA node of the spawning thread.
+        DWORD_PTR procMask = 0, sysMask = 0;
+        if (GetProcessAffinityMask(GetCurrentProcess(), &procMask, &sysMask) && procMask) {
+            SetThreadAffinityMask(
+                static_cast<HANDLE>(workers_.back().native_handle()), procMask);
         }
 #endif
     }
