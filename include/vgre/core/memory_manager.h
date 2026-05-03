@@ -261,7 +261,13 @@ private:
     size_t count;
   };
   std::atomic<RegionTreeContainer*> activeTree_{nullptr};
-  std::vector<RegionTreeContainer*> retiredTrees_; // For cleanup in destructor
+  std::vector<RegionTreeContainer*> retiredTrees_; // Cleanup deferred until activeHandlers_ == 0
+
+  // RCU grace-period counter: incremented on signal-handler entry, decremented
+  // on exit.  The destructor spin-waits until this reaches 0 before freeing
+  // retired trees, preventing use-after-free when a SIGSEGV fires between the
+  // tree swap and the subsequent delete of the old pointer.
+  mutable std::atomic<int> activeHandlers_{0};
   std::list<ManagedRegion> masterRegions_; // Master list with STABLE ADDRESSES protected by mutex_
 
   // Delta-Sync: Dirty Page Management

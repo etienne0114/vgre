@@ -27,6 +27,11 @@ struct GraphNode {
   uint64_t nodeId = 0;
   std::vector<uint64_t> deps;
 
+  // Stream this node was captured on.  Fusion is only permitted between nodes
+  // captured on the same stream (different streams imply independent ordering
+  // that a fused kernel would inadvertently serialise).  0 = default stream.
+  StreamId streamId = 0;
+
   // Kernel data
   KernelId kernelId = 0;
   std::string kernelName;
@@ -75,6 +80,10 @@ public:
   std::shared_ptr<Graph> sourceGraph;
   GraphExecProfile profile;
 };
+
+// Set by RuntimeEngine before calling addKernelNodeWithDepsOut so the capturing
+// stream ID propagates into GraphNode::streamId without changing every overload.
+extern thread_local StreamId g_capture_stream_id;
 
 class GraphManager {
 public:

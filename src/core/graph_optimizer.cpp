@@ -58,6 +58,19 @@ VGREResult GraphOptimizer::optimize(Graph& graph) {
 }
 
 bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
+    // 0. Stream-boundary check: only fuse nodes captured on the same stream.
+    //    Nodes from different streams execute independently and may run
+    //    concurrently; fusing them into one kernel would introduce an implicit
+    //    serialisation that the original CUDA program did not intend.
+    //    StreamId 0 (default stream) is treated as its own stream.
+    if (a.streamId != b.streamId) {
+        VGRE_LOG_DEBUG("GraphOptimizer",
+            "Fusion blocked: stream-boundary — node " + std::to_string(a.nodeId) +
+            " (stream " + std::to_string(a.streamId) + ") vs node " +
+            std::to_string(b.nodeId) + " (stream " + std::to_string(b.streamId) + ")");
+        return false;
+    }
+
     // 1. Dimensions must match exactly for point-wise fusion.
     if (a.gridDim.x != b.gridDim.x || a.gridDim.y != b.gridDim.y || a.gridDim.z != b.gridDim.z) return false;
     if (a.blockDim.x != b.blockDim.x || a.blockDim.y != b.blockDim.y || a.blockDim.z != b.blockDim.z) return false;
