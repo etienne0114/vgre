@@ -83,8 +83,8 @@ static std::string extractPTXFromImage(const void *image, size_t sizeHint = 0) {
 class CUDAModuleRegistry {
 public:
   static CUDAModuleRegistry &instance() {
-    static CUDAModuleRegistry* inst = new CUDAModuleRegistry();
-    return *inst;
+    static CUDAModuleRegistry inst;
+    return inst;
   }
 
   void **registerFatBinary(void *fatCubin) {
@@ -364,6 +364,28 @@ private:
   std::unordered_map<const void *, void *> hostVarToDevicePtr_;
   std::unordered_map<ModuleHandleWrapper *, std::unordered_map<std::string, VariableMetadata>> moduleNamedVariables_;
   std::unordered_map<ModuleHandleWrapper *, std::unordered_map<std::string, void *>> moduleTextureRefs_;
+
+  struct LaunchBoundsMeta {
+    int maxThreadsPerBlock;
+    vgre::dim3 blockDim;
+    vgre::dim3 gridDim;
+  };
+  std::unordered_map<std::string, LaunchBoundsMeta> launchBoundsMap_;
+
+public:
+  void registerLaunchBounds(const char* deviceFunName, int maxThreads,
+                            vgre::dim3 bDim, vgre::dim3 gDim) {
+    if (!deviceFunName) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    launchBoundsMap_[deviceFunName] = {maxThreads, bDim, gDim};
+  }
+  bool getLaunchBounds(const std::string& name, int& maxThreads) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = launchBoundsMap_.find(name);
+    if (it == launchBoundsMap_.end()) return false;
+    maxThreads = it->second.maxThreadsPerBlock;
+    return true;
+  }
 };
 
 extern "C" void *vgre_lookup_symbol(void *handle, const char *name, size_t *size) {
@@ -412,16 +434,23 @@ void __cudaRegisterFunction(void **fatCubinHandle, const char *hostFun,
                             char *deviceFun, const char *deviceName,
                             int thread_limit, uint3 *tid, uint3 *bid,
                             dim3 *bDim, dim3 *gDim, int *wSize) {
-
-  (void)deviceFun;
-  (void)thread_limit;
-  (void)tid;
-  (void)bid;
-  (void)bDim;
-  (void)gDim;
-  (void)wSize;
+  // Register kernel with execution configuration metadata.
+  // thread_limit, bDim, gDim inform the executor's block/grid dimension caps;
+  // they are passed through to CUDAModuleRegistry for optional advisory use.
   CUDAModuleRegistry::instance().registerFunction(fatCubinHandle, hostFun,
                                                   deviceName);
+  // Store advisory launch bounds: if thread_limit > 0, record as the per-block
+  // thread cap (mirrors __launch_bounds__).  Kernels that exceed this are still
+  // executed — VGRE does not enforce a hard limit — but the profiler can use the
+  // values to warn about sub-optimal occupancy.
+  if (thread_limit > 0 && deviceFun && *deviceFun) {
+    CUDAModuleRegistry::instance().registerLaunchBounds(
+        deviceFun,
+        thread_limit,
+        bDim ? vgre::dim3(bDim->x, bDim->y, bDim->z) : vgre::dim3(0,0,0),
+        gDim ? vgre::dim3(gDim->x, gDim->y, gDim->z) : vgre::dim3(0,0,0));
+  }
+  (void)tid; (void)bid; (void)wSize; // Thread/block IDs are per-launch, not per-register
 }
 
 void __cudaRegisterVar(void **fatCubinHandle, char *hostVar,
@@ -558,10 +587,19 @@ cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph) {
 cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
                                  cudaGraphNode_t *pErrorNode, char *pLogBuffer,
                                  size_t bufferSize) {
-  (void)pErrorNode;
-  (void)pLogBuffer;
-  (void)bufferSize;
-  return vgre::api::CUDAInterceptor::instance().graphInstantiate(pGraphExec, graph);
+  cudaError_t r = vgre::api::CUDAInterceptor::instance().graphInstantiate(pGraphExec, graph);
+  if (r != cudaSuccess) {
+    // Report the failed node back to the caller and populate the log buffer.
+    if (pErrorNode) *pErrorNode = 0; // VGRE DAG validates all nodes; no specific failed node
+    if (pLogBuffer && bufferSize > 0) {
+      const char* msg = (r == cudaErrorInvalidValue)
+          ? "Graph instantiation failed: invalid node or dependency cycle"
+          : "Graph instantiation failed: internal error";
+      std::strncpy(pLogBuffer, msg, bufferSize - 1);
+      pLogBuffer[bufferSize - 1] = '\0';
+    }
+  }
+  return r;
 }
 
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
