@@ -5,6 +5,7 @@ add_library(vgre_api OBJECT
     cuda_ipc_memory.cpp
     cublas_shim.cpp
     cudnn_shim.cpp
+    nccl_shim.cpp
     opencl_adapter.cpp
     vgre_c_api.cpp
     vgre_c_api_graphs.cpp
