@@ -632,9 +632,12 @@ void aes256_ctr(const uint8_t key[32], const uint8_t nonce[12],
                 const uint8_t *input, uint8_t *output, size_t len) {
 #if defined(__AES__) && (defined(__x86_64__) || defined(_M_X64) || \
                          defined(__i386__)  || defined(_M_IX86))
-    // Hardware AES-NI path: ~8-12× faster than software on modern x86 CPUs.
-    aes256_ctr_hw(key, nonce, initialCounter, input, output, len);
-    return;
+    // Runtime CPU feature check prevents SIGILL when binary is built with
+    // -maes on a system that then runs on a CPU without AES-NI support.
+    if (__builtin_cpu_supports("aes")) {
+        aes256_ctr_hw(key, nonce, initialCounter, input, output, len);
+        return;
+    }
 #endif
     // Software fallback (portable — all platforms, all ISAs)
     uint32_t rk[60];
