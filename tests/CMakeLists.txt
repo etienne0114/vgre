@@ -26,6 +26,11 @@ add_executable(test_vector_engine unit/test_vector_engine.cpp)
 target_link_libraries(test_vector_engine PRIVATE vgre)
 add_test(NAME VectorEngine COMMAND test_vector_engine)
 
+# cuDNN activation backward numerical gradient tests
+add_executable(test_cudnn_activation_backward unit/test_cudnn_activation_backward.cpp)
+target_link_libraries(test_cudnn_activation_backward PRIVATE vgre)
+add_test(NAME CUDNNActivationBackward COMMAND test_cudnn_activation_backward)
+
 # ── Integration tests ──────────────────────────────────────────────────────
 add_executable(test_vector_addition integration/test_vector_addition.cpp)
 target_link_libraries(test_vector_addition PRIVATE vgre)

@@ -61,6 +61,23 @@ MemoryManager::MemoryManager(size_t poolSize) : poolSize_(poolSize) {
   // the SIGSEGV handler never sees a null tree pointer.
   activeTree_.store(new RegionTreeContainer{MemoryIntervalTree<ManagedRegion>(), 0}, std::memory_order_release);
 
+  // Allocate pending-fault ring buffer (size configurable via env)
+  const char* env = std::getenv("VGRE_UVM_MAX_PENDING_FAULTS");
+  if (env) {
+    try {
+      size_t v = std::stoul(env);
+      if (v >= 64) pendingFaultCapacity_ = v;
+    } catch (...) {
+      // ignore parse errors, keep default
+    }
+  }
+  pendingRing_ = new PendingFault[pendingFaultCapacity_];
+  pendingHead_.store(0);
+  pendingTail_.store(0);
+  pendingDropped_.store(0);
+  pendingDrainerStop_.store(false);
+  startPendingDrainer();
+
   // Bandwidth calibration: run synchronously so we do not carry a dangling
   // background thread across the full object lifetime.  The 64 MB × 50-iter
   // benchmark takes ~300 ms on a cold cache — acceptable during initialization.
@@ -71,7 +88,9 @@ MemoryManager::MemoryManager(size_t poolSize) : poolSize_(poolSize) {
 }
 
 MemoryManager::~MemoryManager() {
+  // Stop background threads first
   stopMigrationThread();
+  stopPendingDrainer();
   teardownSignalHandler();
   g_memoryManagerId.store(nullptr, std::memory_order_release);
   
@@ -95,12 +114,34 @@ MemoryManager::~MemoryManager() {
   allocations_.clear();
   usedMemory_ = 0;
 
-  // Cleanup RCU trees — spin-wait until all in-flight signal handlers have
+  // Cleanup RCU trees — wait until all in-flight signal handlers have
   // finished reading the tree (activeHandlers_ == 0), then free everything.
-  // Busy-spin is safe here: we're in the destructor, destruction is already
-  // tearing down, and signal handlers are expected to be microsecond-scale.
-  while (activeHandlers_.load(std::memory_order_acquire) != 0)
-    ; // busy-wait for RCU grace period
+  // Avoid tight busy-waiting in destructor: use exponential backoff with
+  // a bounded timeout to prevent long shutdown stalls under pathological
+  // fault loads.  Signal handlers cannot call non-async-signal-safe APIs
+  // (e.g., condition_variable::notify), so this is a best-effort wait.
+  {
+    using namespace std::chrono;
+    auto start = steady_clock::now();
+    auto deadline = start + seconds(5); // total wait budget
+    size_t spin = 0;
+    while (activeHandlers_.load(std::memory_order_acquire) != 0) {
+      if (steady_clock::now() >= deadline) {
+        VGRE_LOG_ERROR("MemoryManager", "RCU grace period timed out after 5s; proceeding with cleanup");
+        break;
+      }
+      if (spin < 16) {
+        // short yields to let signal handlers run
+        std::this_thread::yield();
+      } else {
+        // exponential backoff capped at 100 ms
+        int sleepMs = std::min(100, 1 << (int)std::min(spin - 16, (size_t)6));
+        std::this_thread::sleep_for(milliseconds(sleepMs));
+      }
+      ++spin;
+    }
+  }
+
   RegionTreeContainer* active = activeTree_.load(std::memory_order_relaxed);
   if (active) {
     delete active;
@@ -182,6 +223,9 @@ LONG
             region.isResidentOnHost.store(true, std::memory_order_relaxed);
             
             if (exceptionInfo->ExceptionRecord->ExceptionInformation[0] == 1) {
+                // Enqueue for background processing to avoid heavy work in VEH
+                mgr->enqueuePendingFault(reinterpret_cast<uintptr_t>(addr));
+                // Also mark dirty immediately (signal-safe write into preallocated buffer)
                 region.markDirty(addr);
             }
             
@@ -247,15 +291,18 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
               }
           }
           
-          // Mark dirty if it's a write fault
+          // Mark dirty if it's a write fault — enqueue and also mark immediately
 #if defined(__x86_64__) && !defined(_WIN32)
           ucontext_t *uc = (ucontext_t *)unused;
           // Bit 1 of error code is Write/Read (1=Write)
           if (uc->uc_mcontext.gregs[REG_ERR] & 0x2) {
+              mgr->enqueuePendingFault(reinterpret_cast<uintptr_t>(addr));
+              // Immediate marking still performed — signal-safe write
               region.markDirty(addr);
           }
 #else
-          // Fallback: mark dirty on any fault for non-x86 or if we can't detect
+          // Fallback: enqueue for background drainer
+          mgr->enqueuePendingFault(reinterpret_cast<uintptr_t>(addr));
           region.markDirty(addr);
 #endif
           

@@ -434,6 +434,85 @@ cudnnStatus_t cudnnActivationForward(cudnnHandle_t, cudnnActivationDescriptor_t 
     return CUDNN_STATUS_SUCCESS;
 }
 
+// Activation backward (compute dx = alpha * dy * f'(x) + beta * dx)
+static inline float applyActivationDerivative(float x, float y, const ActDesc& act) {
+    switch (act.mode) {
+    case CUDNN_ACTIVATION_RELU:         return x > 0.f ? 1.f : 0.f;
+    case CUDNN_ACTIVATION_SIGMOID: {
+        // y = sigmoid(x) if forward used sigmoid; derivative = y*(1-y)
+        float s = y; return s * (1.f - s);
+    }
+    case CUDNN_ACTIVATION_TANH: {
+        // y = tanh(x)
+        float t = y; return 1.f - t * t;
+    }
+    case CUDNN_ACTIVATION_CLIPPED_RELU: return (x > 0.f && x < (float)act.coeff) ? 1.f : 0.f;
+    case CUDNN_ACTIVATION_ELU: {
+        // ELU: x>0 -> x ; x<=0 -> coeff*(exp(x)-1). Derivative: x>0 -> 1; else coeff*exp(x)
+        return x > 0.f ? 1.f : (float)(act.coeff * expf(x));
+    }
+    case CUDNN_ACTIVATION_SWISH: {
+        // swish = x * sigmoid(x)
+        float sig = 1.f / (1.f + expf(-x));
+        return sig + x * sig * (1.f - sig);
+    }
+    case CUDNN_ACTIVATION_GELU: {
+        // tanh-approx GELU derivative
+        static constexpr float kSqrt2OverPi = 0.7978845608f;
+        static constexpr float kCoeff       = 0.044715f;
+        float x3 = x * x * x;
+        float inner = kSqrt2OverPi * (x + kCoeff * x3);
+        float tanh_i = tanhf(inner);
+        float sech2 = 1.f - tanh_i * tanh_i; // sech^2(inner)
+        float inner_prime = kSqrt2OverPi * (1.f + 3.f * kCoeff * x * x);
+        // derivative: 0.5*(1 + tanh(inner)) + 0.5*x * sech^2(inner) * inner_prime
+        return 0.5f * (1.f + tanh_i) + 0.5f * x * sech2 * inner_prime;
+    }
+    case CUDNN_ACTIVATION_SELU: {
+        static constexpr float kAlpha = 1.6732632423543772f;
+        static constexpr float kScale = 1.0507009873554805f;
+        return kScale * (x > 0.f ? 1.f : kAlpha * expf(x));
+    }
+    case CUDNN_ACTIVATION_MISH: {
+        // mish = x * tanh(softplus(x)); softplus' = sigmoid(x)
+        float sp = (x > 20.f) ? x : logf(1.f + expf(x));
+        float tsp = tanhf(sp);
+        float sig = 1.f / (1.f + expf(-x));
+        float sech2 = 1.f - tsp * tsp;
+        return tsp + x * sech2 * sig;
+    }
+    default: return 1.f; // identity
+    }
+}
+
+cudnnStatus_t cudnnActivationBackward(cudnnHandle_t, cudnnActivationDescriptor_t actDesc,
+    const void* alpha, cudnnTensorDescriptor_t yDesc, const void* y,
+    cudnnTensorDescriptor_t dyDesc, const void* dy,
+    cudnnTensorDescriptor_t xDesc, const void* x,
+    const void* beta, cudnnTensorDescriptor_t dxDesc, void* dx)
+{
+    if (!xDesc || !yDesc || !dyDesc || !dxDesc || !x || !y || !dy || !dx || !alpha || !beta)
+        return CUDNN_STATUS_INVALID_VALUE;
+
+    auto* tx=(TensorDesc*)xDesc; auto* ty=(TensorDesc*)yDesc; auto* tdy=(TensorDesc*)dyDesc; auto* tdx=(TensorDesc*)dxDesc;
+    auto* act=(ActDesc*)actDesc;
+    int Nx = tx->n*tx->c*tx->h*tx->w;
+    int Ny = ty->n*ty->c*ty->h*ty->w;
+    int Nd = tdy->n*tdy->c*tdy->h*tdy->w;
+    int Ndx = tdx->n*tdx->c*tdx->h*tdx->w;
+    if (Nx != Ny || Nx != Nd || Nx != Ndx) return CUDNN_STATUS_INVALID_VALUE;
+
+    float a = *(const float*)alpha, b = *(const float*)beta;
+    const float* xf = (const float*)x; const float* yf = (const float*)y;
+    const float* dyf = (const float*)dy; float* dxf = (float*)dx;
+
+    for (int i = 0; i < Nx; ++i) {
+        float deriv = applyActivationDerivative(xf[i], yf[i], *act);
+        dxf[i] = a * dyf[i] * deriv + b * dxf[i];
+    }
+    return CUDNN_STATUS_SUCCESS;
+}
+
 // ── Softmax ───────────────────────────────────────────────────────────────────
 // algo: 0=FAST (per-instance, C dimension), 1=ACCURATE (log-sum-exp stable)
 // mode: 0=INSTANCE, 1=CHANNEL

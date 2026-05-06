@@ -348,9 +348,10 @@ cudaError_t CUDAInterceptor::deviceGetStreamPriorityRange(
   if (!leastPriority || !greatestPriority)
     return cudaErrorInvalidValue;
 
-  // VGRE currently treats all priorities equally.
-  *leastPriority = 0;
-  *greatestPriority = 0;
+  // VGRE supports a small priority range; higher values are more urgent.
+  // Use a conservative default range that most callers expect (-2..2).
+  *leastPriority = -2;
+  *greatestPriority = 2;
   return cudaSuccess;
 }
 

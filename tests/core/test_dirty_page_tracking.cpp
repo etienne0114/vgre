@@ -72,9 +72,50 @@ void test_dirty_page_tracking() {
     std::cout << "[Test] Dirty Page Tracking Verification PASSED!" << std::endl;
 }
 
+void test_many_managed_regions() {
+    std::cout << "[Test] Allocating and freeing many managed regions..." << std::endl;
+    size_t poolSize = 1024 * 1024 * 128; // 128MB
+    MemoryManager mgr(poolSize);
+    const int N = 64;
+    std::vector<MemoryHandle> handles;
+    handles.reserve(N);
+
+    // Allocate N small managed regions and touch them to trigger faults
+    for (int i = 0; i < N; ++i) {
+        MemoryHandle h = nullptr;
+        VGREResult r = mgr.allocateManaged(16 * 1024, h, 0, 0);
+        if (r != VGREResult::SUCCESS) {
+            throw std::runtime_error("allocateManaged failed");
+        }
+        handles.push_back(h);
+        uint8_t* p = static_cast<uint8_t*>(h);
+        // Touch first and last byte of the region to generate page faults
+        p[0] = static_cast<uint8_t>(i);
+        p[16*1024 - 1] = static_cast<uint8_t>(i);
+    }
+
+    // Verify dirty pages reported for at least some regions
+    int dirtyCount = 0;
+    for (auto h : handles) {
+        std::vector<std::pair<size_t,size_t>> dr;
+        mgr.getDirtyPages(h, dr);
+        if (!dr.empty()) ++dirtyCount;
+    }
+    if (dirtyCount == 0) throw std::runtime_error("No dirty pages detected across allocations");
+
+    // Clear and free
+    for (auto h : handles) {
+        mgr.clearDirtyPages(h);
+        mgr.free(h);
+    }
+
+    std::cout << "[Pass] Many region allocate/free cycle succeeded." << std::endl;
+}
+
 int main() {
     try {
         test_dirty_page_tracking();
+        test_many_managed_regions();
     } catch (const std::exception& e) {
         std::cerr << "[Fail] Test threw exception: " << e.what() << std::endl;
         return 1;

@@ -1,0 +1,8 @@
+# Python requirements for VGRE PyTorch gradient verification
+# NOTE: Installing `torch` may require selecting a wheel that matches your CUDA version.
+# For automated installs on machines with CUDA 11.8, use:
+#   pip install --extra-index-url https://download.pytorch.org/whl/cu118 torch
+
+torch
+numpy
+pytest
