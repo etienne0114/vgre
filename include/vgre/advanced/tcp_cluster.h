@@ -170,10 +170,19 @@ struct ResponsePacket {
 };
 
 struct CapabilityPacket {
+  // CPU
   int cpu_cores;
-  uint64_t cpu_memory;
+  uint64_t cpu_memory;           // bytes of RAM
+  // iGPU (OpenCL / integrated)
   bool has_igpu;
   char igpu_name[64];
+  // Discrete NVIDIA GPU (via GPUPassthrough dlopen probe)
+  int  gpu_count;                // 0 = CPU-only worker
+  char gpu_name[128];            // primary GPU name
+  uint64_t gpu_memory_bytes;     // primary GPU VRAM in bytes (0 = unknown)
+  int  gpu_compute_major;        // CUDA compute capability major
+  int  gpu_compute_minor;        // CUDA compute capability minor
+  int  gpu_sm_count;             // streaming multiprocessor count
 };
 
 struct SecureHandshakePacket {

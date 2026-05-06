@@ -32,6 +32,11 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <wbemidl.h>
+#include <comdef.h>
+#pragma comment(lib, "wbemuuid.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 #endif
 
 // ── PerfSampler implementation (Linux only) ────────────────────────────────
@@ -402,60 +407,15 @@ void AdaptiveExecutionEngine::analyzeProfile(KernelProfile &profile) {
     }
   }
 
-  // Refine: if the best recorded is significantly better, switch to it
   profile.optimalThreads = bestThreads;
 
-  // Vector width: runtime benchmark — try each SIMD width supported by hardware
-  // and pick the one with highest GFLOPS/element throughput.
-  // benchmarkFMA(N, iters) returns GFLOPS; we normalise by N to get per-element.
-  // Candidate widths are filtered by detected SIMD capability.
-  {
-    auto& ve = runtime::VectorEngine::instance();
-    constexpr size_t kBenchN = 256 * 1024;  // 256K elements — fast, representative
-    constexpr int kIters = 3;               // warmup + 2 measured, pick best
-
-    // Candidate widths in ascending order; wider entries require SIMD support
-    static const int kWidths[] = {1, 4, 8, 16};
-    static const char* kWidthReqs[] = {"scalar", "SSE4", "AVX2", "AVX-512"};
-    int bestWidth = 1;
-    double bestThroughput = 0.0;
-
-    // Use the SIMD feature flags already detected by VectorEngine/compiler
-    // (benchmarkFMA internally uses the highest available SIMD path).
-    // We approximate per-width throughput by running benchmarkFMA with
-    // N scaled by the lane count, letting auto-vectorisation use the width.
-    for (int i = 0; i < 4; ++i) {
-      int w = kWidths[i];
-      // Skip widths that require SIMD the CPU doesn't have
-#ifndef VGRE_HAS_AVX512F
-      if (w == 16) continue;
-#endif
-#ifndef VGRE_HAS_AVX2
-      if (w == 8) continue;
-#endif
-#ifndef VGRE_HAS_SSE4
-      if (w == 4) continue;
-#endif
-      double throughput = 0.0;
-      for (int it = 0; it < kIters; ++it) {
-        double g = ve.benchmarkFMA(kBenchN, 10);  // 10 inner iterations, fast
-        // GFLOPS / N = GFLOPS per element (width agnostic since FMA is the bottleneck)
-        throughput = std::max(throughput, g);
-      }
-      VGRE_LOG_DEBUG("AdaptiveExecutionEngine",
-                     "  vector width=" + std::to_string(w) +
-                     " (" + kWidthReqs[i] + ")" +
-                     " throughput=" + std::to_string(throughput) + " GFLOPS");
-      if (throughput > bestThroughput) {
-        bestThroughput = throughput;
-        bestWidth = w;
-      }
-    }
-    profile.optimalVectorWidth = bestWidth;
-    VGRE_LOG_INFO("AdaptiveExecutionEngine",
-                  "Runtime vector width selected: " + std::to_string(bestWidth) +
-                  " (throughput=" + std::to_string(bestThroughput) + " GFLOPS)");
-  }
+  // Vector width: use the process-wide calibrated value from runBenchmark().
+  // Do NOT run benchmarkFMA here — analyzeProfile is called from the hot path
+  // (recordExecution → analyzeProfile on every kernel execution after the 5th).
+  // Running a 256K-element FMA benchmark under the recursive mutex would add
+  // ~1–5 ms latency to every recorded kernel, defeating the purpose of profiling.
+  // The global optimum is calibrated once at startup and applies to all kernels.
+  profile.optimalVectorWidth = globalOptimalVectorWidth_.load(std::memory_order_relaxed);
 }
 
 // ── Get optimal parameters ─────────────────────────────────────────────────
@@ -668,6 +628,38 @@ void AdaptiveExecutionEngine::runBenchmark() {
 #endif // __linux__
 
     if (shuttingDown_.load()) return;
+
+    // Stage 4: Calibrate optimal SIMD vector width once.
+    // Run benchmarkFMA at each supported SIMD width and store the winner as the
+    // process-wide globalOptimalVectorWidth_ used by analyzeProfile().
+    {
+        constexpr size_t kBenchN = 256 * 1024;
+        static const int kWidths[] = {1, 4, 8, 16};
+        int bestWidth = 1;
+        double bestThroughput = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            if (shuttingDown_.load()) break;
+            int w = kWidths[i];
+#if !defined(VGRE_HAS_AVX512) && !defined(VGRE_HAS_AVX512F)
+            if (w == 16) continue;
+#endif
+#ifndef VGRE_HAS_AVX2
+            if (w == 8)  continue;
+#endif
+#ifndef VGRE_HAS_SSE4
+            if (w == 4)  continue;
+#endif
+            double throughput = 0.0;
+            for (int it = 0; it < 3 && !shuttingDown_.load(); ++it)
+                throughput = std::max(throughput, ve.benchmarkFMA(kBenchN, 10));
+            if (throughput > bestThroughput) { bestThroughput = throughput; bestWidth = w; }
+        }
+        globalOptimalVectorWidth_.store(bestWidth, std::memory_order_relaxed);
+        VGRE_LOG_INFO("AdaptiveExecutionEngine",
+                      "Vector width calibrated: " + std::to_string(bestWidth) +
+                      " lanes (" + std::to_string(bestThroughput) + " GFLOPS)");
+    }
+
     VGRE_LOG_INFO("AdaptiveExecutionEngine",
                   "Ground Truth Calibrated: Peak=" + std::to_string(gflops) +
                   " GFLOPS | Measured Bandwidth=" + std::to_string(bandwidthGBps) + " GB/s");
@@ -769,163 +761,222 @@ double AdaptiveExecutionEngine::getAvgLatencyMs() const {
 
 float AdaptiveExecutionEngine::getDeviceTemperature() const {
 #if defined(__linux__)
-  // Read maximum reported thermal zone temperature as host device temperature.
+  // ── Linux: thermal_zone (primary) + hwmon (secondary) ────────────────────
+  // Many modern CPUs (AMD Zen via k10temp, Intel via coretemp) expose their
+  // real temperature only through hwmon, not thermal_zone. Check both.
   float maxTempC = 0.0f;
-  DIR *dir = opendir("/sys/class/thermal");
-  if (dir) {
-    struct dirent *entry = nullptr;
-    while ((entry = readdir(dir)) != nullptr) {
-      if (std::strncmp(entry->d_name, "thermal_zone", 12) != 0) {
-        continue;
-      }
-      std::ifstream thermalFile(std::string("/sys/class/thermal/") +
-                                entry->d_name + "/temp");
-      if (!thermalFile.is_open()) {
-        continue;
-      }
-      int milliC = 0;
-      if (thermalFile >> milliC) {
-        float tempC = static_cast<float>(milliC) / 1000.0f;
-        if (tempC > maxTempC) {
-          maxTempC = tempC;
+
+  // Pass 1: /sys/class/thermal/thermal_zoneN/temp (millidegrees Celsius)
+  {
+    DIR *dir = opendir("/sys/class/thermal");
+    if (dir) {
+      struct dirent *entry = nullptr;
+      while ((entry = readdir(dir)) != nullptr) {
+        if (std::strncmp(entry->d_name, "thermal_zone", 12) != 0) continue;
+        std::ifstream f(std::string("/sys/class/thermal/") + entry->d_name + "/temp");
+        int milliC = 0;
+        if (f.is_open() && (f >> milliC)) {
+          float t = static_cast<float>(milliC) / 1000.0f;
+          if (t > maxTempC && t < 150.0f) maxTempC = t;
         }
       }
+      closedir(dir);
     }
-    closedir(dir);
   }
-  if (maxTempC > 0.0f) {
-    return maxTempC;
+
+  // Pass 2: /sys/class/hwmon/hwmonN/tempM_input (millidegrees Celsius)
+  // Prioritise sensors named "k10temp" (AMD) or "coretemp" (Intel).
+  {
+    DIR *dir = opendir("/sys/class/hwmon");
+    if (dir) {
+      struct dirent *entry = nullptr;
+      while ((entry = readdir(dir)) != nullptr) {
+        if (std::strncmp(entry->d_name, "hwmon", 5) != 0) continue;
+        std::string base = std::string("/sys/class/hwmon/") + entry->d_name;
+
+        // Check sensor name — only accept CPU thermal sensors
+        std::ifstream nameFile(base + "/name");
+        std::string sensorName;
+        bool isCpuSensor = true; // default: accept all if name file absent
+        if (nameFile.is_open()) {
+          std::getline(nameFile, sensorName);
+          // Reject obviously-non-CPU sensors (NVMe, ACPI-fan, etc.)
+          if (sensorName.find("nvme") != std::string::npos ||
+              sensorName.find("drivetemp") != std::string::npos) {
+            isCpuSensor = false;
+          }
+        }
+        if (!isCpuSensor) continue;
+
+        // Read tempM_input files (M=1..16)
+        for (int m = 1; m <= 16; ++m) {
+          std::ifstream tf(base + "/temp" + std::to_string(m) + "_input");
+          int milliC = 0;
+          if (tf.is_open() && (tf >> milliC)) {
+            float t = static_cast<float>(milliC) / 1000.0f;
+            if (t > maxTempC && t < 150.0f) maxTempC = t;
+          } else {
+            break; // No more tempM_input files in this hwmon device
+          }
+        }
+      }
+      closedir(dir);
+    }
   }
+
+  if (maxTempC > 0.0f) return maxTempC;
 
 #elif defined(__APPLE__)
-  // macOS: Read CPU proximity temperature via IOKit SMC (key "TC0P").
-  // Falls back to a load-correlated heuristic if SMC is unavailable.
+  // ── macOS: IOKit SMC — multiple candidate keys ────────────────────────────
+  // Try in priority order:
+  //   TC0P  CPU package proximity (Intel, all gens)
+  //   TC0F  CPU die temperature   (Intel Haswell+)
+  //   Tp09  P-core temperature    (Apple Silicon M-series)
+  //   Tp0P  P-core proximity      (Apple Silicon M-series)
   {
-    // SMC command selectors (not in public headers; values from Apple SMC driver).
-    enum : uint32_t {
-      kSMCHandleYPCEvent = 2,
-      kSMCReadKey        = 5,
-    };
-
+    enum : uint32_t { kSMCHandleYPCEvent = 2, kSMCReadKey = 5 };
 #pragma pack(push, 1)
-    struct SMCKeyInfoData {
-      uint32_t dataSize;
-      uint32_t dataType;
-      uint8_t  dataAttributes;
-    };
+    struct SMCKeyInfoData { uint32_t dataSize; uint32_t dataType; uint8_t dataAttributes; };
     struct SMCKeyData {
-      uint32_t       key;
-      uint8_t        vers[6];
-      uint8_t        pLimitData[16];
-      SMCKeyInfoData keyInfo;
-      uint8_t        result;
-      uint8_t        status;
-      uint8_t        data8;
-      uint32_t       data32;
-      uint8_t        bytes[32];
+      uint32_t key; uint8_t vers[6]; uint8_t pLimitData[16];
+      SMCKeyInfoData keyInfo; uint8_t result; uint8_t status;
+      uint8_t data8; uint32_t data32; uint8_t bytes[32];
     };
 #pragma pack(pop)
+
+    // SMC key list in descending priority: most informative first.
+    // Each entry: 4-character key code packed as uint32_t big-endian.
+    static const uint32_t kKeys[] = {
+      // Intel: CPU package / die
+      ('T'<<24)|('C'<<16)|('0'<<8)|'P',  // TC0P — CPU Package Proximity
+      ('T'<<24)|('C'<<16)|('0'<<8)|'F',  // TC0F — CPU Die
+      // Apple Silicon: P-core, E-core
+      ('T'<<24)|('p'<<16)|('0'<<8)|'9',  // Tp09 — P-core
+      ('T'<<24)|('p'<<16)|('0'<<8)|'P',  // Tp0P — P-core proximity
+      ('T'<<24)|('p'<<16)|('1'<<8)|'9',  // Tp19 — E-core
+    };
 
     io_service_t service = IOServiceGetMatchingService(
         kIOMasterPortDefault, IOServiceMatching("AppleSMC"));
     if (service != IO_OBJECT_NULL) {
-      io_connect_t  conn = IO_OBJECT_NULL;
-      kern_return_t kr   = IOServiceOpen(service, mach_task_self(), 0, &conn);
+      io_connect_t conn = IO_OBJECT_NULL;
+      kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0, &conn);
       IOObjectRelease(service);
       if (kr == kIOReturnSuccess) {
-        SMCKeyData inputStruct  = {};
-        SMCKeyData outputStruct = {};
-        // "TC0P" = CPU package proximity temperature (SP78 fixed-point format).
-        inputStruct.key =
-            (static_cast<uint32_t>('T') << 24) |
-            (static_cast<uint32_t>('C') << 16) |
-            (static_cast<uint32_t>('0') <<  8) |
-            (static_cast<uint32_t>('P'));
-        inputStruct.keyInfo.dataSize = 4;
-        inputStruct.data8 = static_cast<uint8_t>(kSMCReadKey);
-
-        size_t outSize = sizeof(outputStruct);
-        kr = IOConnectCallStructMethod(conn, kSMCHandleYPCEvent,
-                                       &inputStruct,  sizeof(inputStruct),
-                                       &outputStruct, &outSize);
-        IOServiceClose(conn);
-
-        if (kr == kIOReturnSuccess && outputStruct.keyInfo.dataSize > 0) {
-          // SP78: signed fixed-point Q7.8 — divide by 256 to get Celsius.
-          int16_t raw = static_cast<int16_t>(
-              (static_cast<uint16_t>(outputStruct.bytes[0]) << 8) |
-               static_cast<uint16_t>(outputStruct.bytes[1]));
-          float tempC = static_cast<float>(raw) / 256.0f;
-          if (tempC > 0.0f && tempC < 150.0f) {
-            return tempC;
+        for (uint32_t key : kKeys) {
+          SMCKeyData in = {}, out = {};
+          in.key = key;
+          in.keyInfo.dataSize = 4;
+          in.data8 = static_cast<uint8_t>(kSMCReadKey);
+          size_t outSize = sizeof(out);
+          kr = IOConnectCallStructMethod(conn, kSMCHandleYPCEvent,
+                                         &in, sizeof(in), &out, &outSize);
+          if (kr == kIOReturnSuccess && out.keyInfo.dataSize > 0) {
+            // SP78 fixed-point Q7.8: 8-bit integer + 8-bit fraction
+            int16_t raw = static_cast<int16_t>(
+                (static_cast<uint16_t>(out.bytes[0]) << 8) |
+                 static_cast<uint16_t>(out.bytes[1]));
+            float t = static_cast<float>(raw) / 256.0f;
+            if (t > 0.0f && t < 150.0f) { IOServiceClose(conn); return t; }
           }
         }
+        IOServiceClose(conn);
       }
     }
   }
-  // macOS SMC unavailable — try alternative thermal file path.
-  // Some machines expose temperature via `osx-cpu-temp` or PowerMetrics.
-  // We do a non-blocking read of /tmp/.vgre_cpu_temp if it exists
-  // (populated by an optional background helper), then fall back to 0.
+  // Fallback: optional helper writes temperature to /tmp/.vgre_cpu_temp
   {
-    std::ifstream fallback("/tmp/.vgre_cpu_temp");
-    if (fallback.is_open()) {
-      float t = 0.f;
-      if (fallback >> t && t > 0.f && t < 150.f) return t;
-    }
+    std::ifstream f("/tmp/.vgre_cpu_temp");
+    float t = 0.0f;
+    if (f.is_open() && (f >> t) && t > 0.0f && t < 150.0f) return t;
   }
-  // Return 0: caller must not display this as a valid temperature.
   return 0.0f;
 
 #elif defined(_WIN32)
-  // Windows: Read CPU temperature from MSAcpi_ThermalZoneTemperature via WMI.
-  // We use a lightweight registry probe first (faster than COM/WMI for most
-  // systems), then fall back to NtQuerySystemInformation (thermal power).
+  // ── Windows: WMI MSAcpi_ThermalZoneTemperature via background thread ──────
+  // COM must not be re-initialized on a thread that already belongs to an
+  // apartment. We use a dedicated process-lifetime background thread that owns
+  // its own MTA apartment, queries WMI every 5 seconds, and stores the result
+  // in an atomic. The main thread just reads the cached value.
   {
-    // Probe ACPI thermal zone via sysfs-equivalent registry keys.
-    // HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e97d...}\0000\Temperature
-    // Not universally available; fall through silently if absent.
-    HKEY hKey = nullptr;
-    const char* kThermalPath =
-        "SYSTEM\\CurrentControlSet\\Control\\Class\\"
-        "{4d36e97d-e325-11ce-bfc1-08002be10318}\\0000";
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, kThermalPath, 0,
-                      KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS) {
-      DWORD val = 0, sz = sizeof(val);
-      if (RegQueryValueExA(hKey, "Temperature", nullptr, nullptr,
-                           (LPBYTE)&val, &sz) == ERROR_SUCCESS && val > 2732) {
-        RegCloseKey(hKey);
-        // Value is in tenths of Kelvin.
-        return static_cast<float>(val) / 10.0f - 273.15f;
-      }
-      RegCloseKey(hKey);
-    }
+    static std::atomic<float>    s_cachedTemp{0.0f};
+    static std::atomic<bool>     s_threadRunning{false};
+    static std::once_flag        s_startOnce;
 
-    // Fallback: derive from GetSystemTimes CPU load.
-    // This is a correlation, not a measurement — only used when no sensor present.
-    FILETIME idleTime1{}, kernelTime1{}, userTime1{};
-    FILETIME idleTime2{}, kernelTime2{}, userTime2{};
-    if (GetSystemTimes(&idleTime1, &kernelTime1, &userTime1)) {
-      ::Sleep(25);  // Short window — keep latency under 30ms
-      if (GetSystemTimes(&idleTime2, &kernelTime2, &userTime2)) {
-        auto toU64 = [](const FILETIME &ft) -> uint64_t {
-          return (static_cast<uint64_t>(ft.dwHighDateTime) << 32) |
-                  static_cast<uint64_t>(ft.dwLowDateTime);
-        };
-        uint64_t idle   = toU64(idleTime2)   - toU64(idleTime1);
-        uint64_t kernel = toU64(kernelTime2) - toU64(kernelTime1);
-        uint64_t user   = toU64(userTime2)   - toU64(userTime1);
-        uint64_t total  = kernel + user;
-        if (total > 0) {
-          // Sensor absent: return 0 so callers can distinguish "no sensor" from
-          // a real reading.  The dashboard shows "N/A" when value is 0.
-          (void)idle; (void)total;
+    std::call_once(s_startOnce, []() {
+      // Detached process-lifetime thread — intentionally not joined.
+      std::thread([]() {
+        s_threadRunning.store(true, std::memory_order_relaxed);
+
+        // WMI query requires COM. Initialize an MTA apartment for this thread.
+        HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (FAILED(hrCo) && hrCo != S_FALSE && hrCo != RPC_E_CHANGED_MODE) {
+          return; // COM unavailable — leave s_cachedTemp at 0.0f
         }
-      }
-    }
+        // CoInitializeSecurity: best-effort (may already be set process-wide).
+        CoInitializeSecurity(nullptr, -1, nullptr, nullptr,
+                             RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+                             RPC_C_IMP_LEVEL_IMPERSONATE,
+                             nullptr, EOAC_NONE, nullptr);
+
+        while (s_threadRunning.load(std::memory_order_relaxed)) {
+          float maxTemp = 0.0f;
+
+          IWbemLocator* pLoc = nullptr;
+          HRESULT hr = CoCreateInstance(__uuidof(WbemLocator), nullptr,
+                                         CLSCTX_INPROC_SERVER, __uuidof(IWbemLocator),
+                                         reinterpret_cast<void**>(&pLoc));
+          if (SUCCEEDED(hr) && pLoc) {
+            IWbemServices* pSvc = nullptr;
+            hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\WMI"), nullptr, nullptr,
+                                      nullptr, WBEM_FLAG_CONNECT_USE_MAX_WAIT,
+                                      nullptr, nullptr, &pSvc);
+            pLoc->Release();
+            if (SUCCEEDED(hr) && pSvc) {
+              CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr,
+                                RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
+                                nullptr, EOAC_NONE);
+
+              IEnumWbemClassObject* pEnum = nullptr;
+              hr = pSvc->ExecQuery(
+                  _bstr_t(L"WQL"),
+                  _bstr_t(L"SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"),
+                  WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                  nullptr, &pEnum);
+              if (SUCCEEDED(hr) && pEnum) {
+                IWbemClassObject* pObj = nullptr;
+                ULONG uRet = 0;
+                while (pEnum->Next(5000 /*ms*/, 1, &pObj, &uRet) == S_OK && uRet == 1) {
+                  VARIANT vt;
+                  VariantInit(&vt);
+                  if (SUCCEEDED(pObj->Get(L"CurrentTemperature", 0, &vt, nullptr, nullptr))) {
+                    if (vt.vt == VT_I4 && vt.lVal > 2732) {
+                      // Value is in tenths of Kelvin
+                      float t = static_cast<float>(vt.lVal) / 10.0f - 273.15f;
+                      if (t > maxTemp && t < 150.0f) maxTemp = t;
+                    }
+                  }
+                  VariantClear(&vt);
+                  pObj->Release();
+                }
+                pEnum->Release();
+              }
+              pSvc->Release();
+            }
+          }
+
+          s_cachedTemp.store(maxTemp, std::memory_order_relaxed);
+          // Sleep 5 seconds between polls — temperature doesn't change faster.
+          std::this_thread::sleep_for(std::chrono::seconds(5));
+        }
+
+        CoUninitialize();
+      }).detach();
+    });
+
+    return s_cachedTemp.load(std::memory_order_relaxed);
   }
-  return 0.0f;  // No real sensor available — caller displays "N/A"
-#endif
+#endif // _WIN32
 
   // Temperature sensor unavailable on this platform or environment.
   return 0.0f;

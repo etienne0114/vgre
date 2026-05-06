@@ -11,6 +11,11 @@ namespace vgre {
 // Network bandwidth and latency profiler
 class NetworkProfiler {
  public:
+  // Maximum samples retained in the rolling window.
+  // Older measurements are overwritten (FIFO ring buffer) to prevent
+  // unbounded memory growth in long-running cluster sessions.
+  static constexpr size_t kMaxSamples = 1000;
+
   struct BandwidthMeasurement {
     double bandwidth_gbps;        // Gigabytes per second
     double latency_ms;            // Milliseconds (one-way RTT/2)
@@ -21,25 +26,34 @@ class NetworkProfiler {
     double stddev_bandwidth;
   };
 
-  NetworkProfiler() : num_measurements_(0), total_bytes_(0) {}
+  NetworkProfiler() : num_measurements_(0), total_bytes_(0),
+                      bw_head_(0), lat_head_(0) {}
 
-  // Record a bandwidth measurement
-  // @param bytes_transferred: Number of bytes sent/received
-  // @param elapsed_ms: Time elapsed in milliseconds
+  // Record a bandwidth measurement.
+  // When the ring buffer is full the oldest entry is overwritten.
   void record_bandwidth(uint64_t bytes_transferred, double elapsed_ms) {
     if (elapsed_ms > 0) {
-      double bandwidth_gbps = (bytes_transferred / (1024.0 * 1024.0 * 1024.0)) / 
-                             (elapsed_ms / 1000.0);
-      bandwidths_.push_back(bandwidth_gbps);
-      num_measurements_++;
+      double bw = (bytes_transferred / (1024.0 * 1024.0 * 1024.0)) /
+                  (elapsed_ms / 1000.0);
+      if (bandwidths_.size() < kMaxSamples) {
+        bandwidths_.push_back(bw);
+      } else {
+        bandwidths_[bw_head_ % kMaxSamples] = bw;
+        ++bw_head_;
+      }
+      ++num_measurements_;
       total_bytes_ += bytes_transferred;
     }
   }
 
-  // Record latency measurement (ping-pong round-trip)
-  // @param rtt_ms: Round-trip time in milliseconds
+  // Record latency measurement (ping-pong round-trip).
   void record_latency(double rtt_ms) {
-    latencies_.push_back(rtt_ms);
+    if (latencies_.size() < kMaxSamples) {
+      latencies_.push_back(rtt_ms);
+    } else {
+      latencies_[lat_head_ % kMaxSamples] = rtt_ms;
+      ++lat_head_;
+    }
   }
 
   // Compute aggregated statistics
@@ -105,16 +119,20 @@ class NetworkProfiler {
     latencies_.clear();
     num_measurements_ = 0;
     total_bytes_ = 0;
+    bw_head_  = 0;
+    lat_head_ = 0;
   }
 
   uint64_t get_total_bytes() const { return total_bytes_; }
   uint32_t get_num_measurements() const { return num_measurements_; }
 
  private:
-  std::vector<double> bandwidths_;   // GB/s
-  std::vector<double> latencies_;    // ms
-  uint32_t num_measurements_;
+  std::vector<double> bandwidths_;   // GB/s — capped at kMaxSamples (ring)
+  std::vector<double> latencies_;    // ms   — capped at kMaxSamples (ring)
+  uint32_t num_measurements_;        // total ever recorded (monotonic)
   uint64_t total_bytes_;
+  size_t   bw_head_{0};              // next write index (modulo kMaxSamples)
+  size_t   lat_head_{0};
 };
 
 // TCP bandwidth probe (used by TCPCluster at connection time)

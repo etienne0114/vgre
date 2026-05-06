@@ -701,17 +701,28 @@ void TCPClusterManager::serverLoop() {
                 if (hdr.payloadSize < sizeof(CapabilityPacket)) { client->rx_buffer.clear(); break; }
                 CapabilityPacket cpkt;
                 std::memcpy(&cpkt, payload, sizeof(CapabilityPacket));
-                // B3: Force null-termination — the remote may have sent a non-NUL-
-                // terminated array, and reading past the end is UB.
+                // B3: Force null-termination on all string fields.
                 cpkt.igpu_name[sizeof(cpkt.igpu_name) - 1] = '\0';
+                cpkt.gpu_name[sizeof(cpkt.gpu_name) - 1]   = '\0';
                 client->rx_buffer.erase(client->rx_buffer.begin(), client->rx_buffer.begin() + totalLen);
-                client->cpu_cores = cpkt.cpu_cores;
+                client->cpu_cores  = cpkt.cpu_cores;
                 client->cpu_memory = cpkt.cpu_memory;
-                client->has_igpu = cpkt.has_igpu;
+                client->has_igpu   = cpkt.has_igpu;
                 std::snprintf(client->igpu_name, sizeof(client->igpu_name), "%s", cpkt.igpu_name);
                 // Gate: node is now visible in the dashboard with real hardware info.
-                // syncToIPC() filters on this flag — without it nodes show cpu_cores=0.
                 client->capability_received = true;
+
+                // Log GPU capability if the worker reported a discrete GPU.
+                if (cpkt.gpu_count > 0) {
+                  VGRE_LOG_INFO("TCPCluster",
+                      "Worker " + client->ip_address + " has " +
+                      std::to_string(cpkt.gpu_count) + " GPU(s): " +
+                      cpkt.gpu_name + " (" +
+                      std::to_string(cpkt.gpu_memory_bytes / (1024*1024)) + " MB, " +
+                      "SM " + std::to_string(cpkt.gpu_compute_major) + "." +
+                      std::to_string(cpkt.gpu_compute_minor) + ")");
+                }
+
                 HybridComputeManager::instance().updateRemoteNodeCapability(
                     client->ip_address, cpkt.cpu_cores, cpkt.cpu_memory,
                     cpkt.has_igpu, cpkt.igpu_name);
