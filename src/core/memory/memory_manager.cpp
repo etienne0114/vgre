@@ -13,6 +13,7 @@
 #include <cstring>
 #include <thread>
 #include <mutex>
+#include <algorithm>
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -43,6 +44,7 @@ static PVOID g_vehHandler = nullptr;
 static struct sigaction old_sa {};
 #endif
 static std::atomic<bool> g_handlerInstalled{false};
+static std::atomic<int> g_instanceCount{0};
 static std::atomic<MemoryManager *> g_memoryManagerId{nullptr};
 
 // Thread-local active device ID — set by CPUParallelExecutor before dispatching
@@ -51,11 +53,13 @@ static std::atomic<MemoryManager *> g_memoryManagerId{nullptr};
 thread_local int t_currentDevice = 0;
 
 MemoryManager::MemoryManager(size_t poolSize) : poolSize_(poolSize) {
-  g_memoryManagerId.store(this, std::memory_order_release);
   VGRE_LOG_INFO("MemoryManager", "Initialized with pool size " +
                                      std::to_string(poolSize / (1024 * 1024)) +
                                      " MB");
-  setupSignalHandler();
+  if (g_instanceCount.fetch_add(1) == 0) {
+    setupSignalHandler();
+  }
+  g_memoryManagerId.store(this, std::memory_order_release);
 
   // Initialize empty active tree before calibration and migration thread so
   // the SIGSEGV handler never sees a null tree pointer.
@@ -75,7 +79,6 @@ MemoryManager::MemoryManager(size_t poolSize) : poolSize_(poolSize) {
   pendingHead_.store(0);
   pendingTail_.store(0);
   pendingDropped_.store(0);
-  pendingDrainerStop_.store(false);
   startPendingDrainer();
 
   // Bandwidth calibration: run synchronously so we do not carry a dangling
@@ -91,8 +94,14 @@ MemoryManager::~MemoryManager() {
   // Stop background threads first
   stopMigrationThread();
   stopPendingDrainer();
-  teardownSignalHandler();
-  g_memoryManagerId.store(nullptr, std::memory_order_release);
+  
+  if (g_instanceCount.fetch_sub(1) == 1) {
+    teardownSignalHandler();
+  }
+  
+  if (g_memoryManagerId.load() == this) {
+    g_memoryManagerId.store(nullptr, std::memory_order_release);
+  }
   
   for (auto const &[handle, alloc] : allocations_) {
     if (alloc.ptr && alloc.isManaged) {
@@ -149,6 +158,9 @@ MemoryManager::~MemoryManager() {
   for (auto* tree : retiredTrees_) {
     delete tree;
   }
+  
+  delete[] pendingRing_;
+  pendingRing_ = nullptr;
   
   VGRE_LOG_DEBUG("MemoryManager", "Destroyed — all allocations freed");
 }
@@ -211,10 +223,10 @@ LONG
 
     {
       uintptr_t target = reinterpret_cast<uintptr_t>(addr);
-      RegionTreeContainer* container = mgr->activeTree_.load(std::memory_order_acquire);
-      if (container && container->count > 0) {
-        ManagedRegion* regionPtr = container->tree.findOverlap(target);
-        if (regionPtr) {
+      
+      // O(1) lookup via radix page table (no tree traversal, fully signal-safe)
+      ManagedRegion* regionPtr = mgr->pageTable_.lookup(target);
+      if (regionPtr) {
           ManagedRegion &region = *regionPtr;
           DWORD oldProtect;
           // Precise Delta-Sync: Protect only the faulting page
@@ -240,22 +252,24 @@ LONG
 }
 #else
 void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
-  void *addr = si->si_addr;
-  MemoryManager *mgr = g_memoryManagerId.load(std::memory_order_acquire);
+  if (si->si_code != SEGV_ACCERR) goto fallback;
+
+  void *addr;
+  MemoryManager *mgr;
+
+  addr = si->si_addr;
+  mgr = g_memoryManagerId.load(std::memory_order_acquire);
   if (!mgr)
     goto fallback;
 
   {
-    // RCU grace-period: announce that we are in the signal handler and
-    // accessing the active tree.  The destructor spin-waits until this
-    // counter reaches 0 before freeing retired trees, preventing UAF.
     mgr->activeHandlers_.fetch_add(1, std::memory_order_acquire);
 
     uintptr_t target = reinterpret_cast<uintptr_t>(addr);
-    RegionTreeContainer* container = mgr->activeTree_.load(std::memory_order_acquire);
-    if (container && container->count > 0) {
-      ManagedRegion* regionPtr = container->tree.findOverlap(target);
-      if (regionPtr) {
+    
+    // O(1) lookup via radix page table (no tree traversal, fully signal-safe)
+    ManagedRegion* regionPtr = mgr->pageTable_.lookup(target);
+    if (regionPtr) {
         ManagedRegion &region = *regionPtr;
         int prot = PROT_READ | PROT_WRITE;
         // Precise Delta-Sync: Protect only the faulting page
@@ -311,7 +325,6 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
           return;
         }
       }
-    }
     // Tree lookup missed (not a managed region) — release the RCU counter
     // before falling through to the previous signal handler.
     mgr->activeHandlers_.fetch_sub(1, std::memory_order_release);
@@ -368,9 +381,18 @@ bool MemoryManager::registerManagedRegion(void *ptr, size_t size) {
                              reinterpret_cast<uintptr_t>(r.ptr) + r.size, &r);
   }
   
+  // Insert into radix page table for O(1) lookup
+  pageTable_.insert(reinterpret_cast<uintptr_t>(region.ptr), region.size, &masterRegions_.back());
+  
   RegionTreeContainer* oldContainer = activeTree_.exchange(newContainer, std::memory_order_acq_rel);
   if (oldContainer) {
     retiredTrees_.push_back(oldContainer);
+  }
+  if (activeHandlers_.load(std::memory_order_acquire) == 0 && !retiredTrees_.empty()) {
+    for (auto* tree : retiredTrees_) {
+      delete tree;
+    }
+    retiredTrees_.clear();
   }
   
   return true;
@@ -388,6 +410,9 @@ void MemoryManager::unregisterManagedRegion(void *ptr) {
   delete[] it->dirtyPages;
   it->dirtyPages = nullptr; // Prevent double delete just in case
   
+  // Remove from radix page table
+  pageTable_.remove(reinterpret_cast<uintptr_t>(it->ptr), it->size);
+
   masterRegions_.erase(it);
   
   // Create new active tree
@@ -401,6 +426,12 @@ void MemoryManager::unregisterManagedRegion(void *ptr) {
   RegionTreeContainer* oldContainer = activeTree_.exchange(newContainer, std::memory_order_acq_rel);
   if (oldContainer) {
     retiredTrees_.push_back(oldContainer);
+  }
+  if (activeHandlers_.load(std::memory_order_acquire) == 0 && !retiredTrees_.empty()) {
+    for (auto* tree : retiredTrees_) {
+      delete tree;
+    }
+    retiredTrees_.clear();
   }
 }
 
@@ -498,41 +529,62 @@ size_t MemoryManager::getFreeMemory() const {
 }
 
 bool MemoryManager::isValidHandle(MemoryHandle handle) const {
+  if (!handle) return false;
   std::unique_lock<std::recursive_mutex> lock(mutex_);
-  for (auto const& [base, alloc] : allocations_) {
-      uint8_t* b = static_cast<uint8_t*>(base);
-      uint8_t* t = static_cast<uint8_t*>(handle);
-      if (t >= b && t < b + alloc.size) return true;
+  uint8_t* target = static_cast<uint8_t*>(handle);
+  auto rit = allocRange_.upper_bound(target);
+  if (rit != allocRange_.begin()) {
+    --rit;
+    if (target >= rit->first && target < rit->first + rit->second) return true;
   }
   return false;
 }
 
 size_t MemoryManager::getAllocationSize(MemoryHandle handle) const {
+  if (!handle) return 0;
   std::unique_lock<std::recursive_mutex> lock(mutex_);
-  for (auto const& [base, alloc] : allocations_) {
-      uint8_t* b = static_cast<uint8_t*>(base);
-      uint8_t* t = static_cast<uint8_t*>(handle);
-      if (t >= b && t < b + alloc.size) return alloc.size;
+  uint8_t* target = static_cast<uint8_t*>(handle);
+  auto rit = allocRange_.upper_bound(target);
+  if (rit != allocRange_.begin()) {
+    --rit;
+    if (target >= rit->first && target < rit->first + rit->second) return rit->second;
+  }
+  return 0;
+}
+
+size_t MemoryManager::getAllocationSizeFromPointer(void *ptr) const {
+  if (!ptr) return 0;
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  uint8_t* target = static_cast<uint8_t*>(ptr);
+  // O(log n) lookup via the sorted allocRange_ map
+  auto rit = allocRange_.upper_bound(target);
+  if (rit != allocRange_.begin()) {
+    --rit;
+    uint8_t* base = rit->first;
+    size_t   sz   = rit->second;
+    if (target >= base && target < base + sz) {
+      return sz;
+    }
   }
   return 0;
 }
 
 void *MemoryManager::getPointer(MemoryHandle handle) const {
+  if (!handle) return nullptr;
   std::unique_lock<std::recursive_mutex> lock(mutex_);
-  auto it = allocations_.end();
-  size_t offset = 0;
-  for (auto probe = allocations_.begin(); probe != allocations_.end(); ++probe) {
-      uint8_t* b = static_cast<uint8_t*>(probe->first);
-      uint8_t* t = static_cast<uint8_t*>(handle);
-      if (t >= b && t < b + probe->second.size) {
-          it = probe;
-          offset = t - b;
-          break;
-      }
-  }
+  uint8_t* target = static_cast<uint8_t*>(handle);
 
-  if (it == allocations_.end())
-    return nullptr;
+  // O(log n) lookup via sorted allocRange_ map
+  auto rit = allocRange_.upper_bound(target);
+  if (rit == allocRange_.begin()) return nullptr;
+  --rit;
+  uint8_t* base = rit->first;
+  size_t   sz   = rit->second;
+  if (target < base || target >= base + sz) return nullptr;
+
+  size_t offset = static_cast<size_t>(target - base);
+  auto it = allocations_.find(static_cast<MemoryHandle>(static_cast<void*>(base)));
+  if (it == allocations_.end()) return nullptr;
 
   if (it->second.isManaged) {
 #if defined(_WIN32)
@@ -666,8 +718,13 @@ void MemoryManager::calibrateBandwidth() {
 VGREResult MemoryManager::getDirtyPages(MemoryHandle handle, std::vector<std::pair<size_t, size_t>>& outDirtyRanges) const {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
   
-  auto it = std::find_if(masterRegions_.begin(), masterRegions_.end(),
-                         [handle](const ManagedRegion& r) { return r.ptr == handle; });
+  auto it = masterRegions_.end();
+  for (auto curr = masterRegions_.begin(); curr != masterRegions_.end(); ++curr) {
+    if (curr->ptr == handle) {
+      it = curr;
+      break;
+    }
+  }
   
   if (it == masterRegions_.end()) return VGREResult::ERR_INVALID_VALUE;
   
@@ -684,13 +741,13 @@ VGREResult MemoryManager::getDirtyPages(MemoryHandle handle, std::vector<std::pa
       }
     } else {
       if (inRange) {
-        outDirtyRanges.push_back({startIdx * 4096, i * 4096});
+        outDirtyRanges.push_back(std::make_pair(startIdx * 4096, i * 4096));
         inRange = false;
       }
     }
   }
   if (inRange) {
-    outDirtyRanges.push_back({startIdx * 4096, it->pageCount * 4096});
+    outDirtyRanges.push_back(std::make_pair(startIdx * 4096, it->pageCount * 4096));
   }
   
   return VGREResult::SUCCESS;
@@ -699,8 +756,13 @@ VGREResult MemoryManager::getDirtyPages(MemoryHandle handle, std::vector<std::pa
 VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
   
-  auto it = std::find_if(masterRegions_.begin(), masterRegions_.end(),
-                         [handle](const ManagedRegion& r) { return r.ptr == handle; });
+  auto it = masterRegions_.end();
+  for (auto curr = masterRegions_.begin(); curr != masterRegions_.end(); ++curr) {
+    if (curr->ptr == handle) {
+      it = curr;
+      break;
+    }
+  }
   
   if (it == masterRegions_.end()) return VGREResult::ERR_INVALID_VALUE;
   

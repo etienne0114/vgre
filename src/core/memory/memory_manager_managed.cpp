@@ -31,7 +31,6 @@ namespace vgre {
 namespace core {
 
 VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, DeviceId deviceId) {
-  (void)deviceId;
   if (!ptr || count == 0) return VGREResult::SUCCESS;
 
 #if defined(__linux__) || defined(__APPLE__)
@@ -43,7 +42,7 @@ VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, D
   uintptr_t pAligned = pBase & ~(pageSize - 1);
   size_t alignedCount = count + (pBase - pAligned);
   
-  int madvFlags = 0;
+  int madvFlags = MADV_NORMAL;
   // cudaMemAdviseSetReadMostly = 1, cudaMemAdviseUnsetReadMostly = 2
   // cudaMemAdviseSetPreferredLocation = 3, cudaMemAdviseUnsetPreferredLocation = 4
   // cudaMemAdviseSetAccessedBy = 5, cudaMemAdviseUnsetAccessedBy = 6
@@ -60,7 +59,9 @@ VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, D
           break;
       case 4: // UnsetPreferredLocation
       case 6: // UnsetAccessedBy
-          madvFlags = MADV_DONTNEED; 
+          madvFlags = MADV_NORMAL;
+          break;
+      default:
           break;
   }
   
@@ -80,7 +81,11 @@ VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, D
           uintptr_t base = reinterpret_cast<uintptr_t>(region.ptr);
           if (pBase >= base && pBase < base + region.size) {
               if (advice == 3) { // PreferredLocation
-                  region.preferredLocation.store(static_cast<int>(deviceId), std::memory_order_relaxed);
+                  region.preferredLocation.store(static_cast<int>(deviceId) + 1, std::memory_order_relaxed);
+              } else if (advice == 4) { // UnsetPreferredLocation
+                  region.preferredLocation.store(-1, std::memory_order_relaxed);
+              } else if (advice == 5) { // SetAccessedBy
+                  region.accessCount.fetch_add(1, std::memory_order_relaxed);
               }
               break;
           }
@@ -91,7 +96,6 @@ VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, D
 }
 
 VGREResult MemoryManager::memPrefetchAsync(const void *ptr, size_t count, DeviceId dstDevice) {
-  (void)dstDevice;
   if (!ptr || count == 0) return VGREResult::SUCCESS;
 
   // Physically force page faults ahead of time on the CPU executor thread.
@@ -105,6 +109,24 @@ VGREResult MemoryManager::memPrefetchAsync(const void *ptr, size_t count, Device
   // Fault the last byte just in case it crosses a boundary
   char dummyLast = p[count - 1];
   (void)dummyLast;
+
+  // Update preferred location metadata to reflect caller intent.
+  {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
+    uintptr_t end = start + count;
+    for (auto &region : masterRegions_) {
+      uintptr_t regionStart = reinterpret_cast<uintptr_t>(region.ptr);
+      uintptr_t regionEnd = regionStart + region.size;
+      if (start < regionEnd && end > regionStart) {
+        region.preferredLocation.store(static_cast<int>(dstDevice) + 1, std::memory_order_relaxed);
+        region.lastAccessTime.store(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count(),
+            std::memory_order_relaxed);
+      }
+    }
+  }
 
   return VGREResult::SUCCESS;
 }
@@ -249,6 +271,22 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
   if (reinterpret_cast<uintptr_t>(addr) & (pageSize - 1))
       return VGREResult::ERR_INVALID_VALUE;
 
+  {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    uint8_t* base = static_cast<uint8_t*>(addr);
+    uint8_t* end = base + alignedSize;
+    auto it = allocRange_.lower_bound(base);
+    if (it != allocRange_.begin()) {
+      auto prev = std::prev(it);
+      if (prev->first + prev->second > base) {
+        return VGREResult::ERR_ALREADY_EXISTS;
+      }
+    }
+    if (it != allocRange_.end() && it->first < end) {
+      return VGREResult::ERR_ALREADY_EXISTS;
+    }
+  }
+
   // Reservation
   size_t current = usedMemory_.load(std::memory_order_relaxed);
   do {
@@ -266,8 +304,13 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
   void *ptr = mmap(addr, alignedSize, prot, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
 #else
   int prot = (flags == 2) ? (PROT_READ | PROT_WRITE) : PROT_NONE;
-  // Use MAP_FIXED to force the specific address provided by the Master
-  void *ptr = mmap(addr, alignedSize, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+  int flagsMap = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_FIXED_NOREPLACE
+  flagsMap |= MAP_FIXED_NOREPLACE;
+#else
+  flagsMap |= MAP_FIXED;
+#endif
+  void *ptr = mmap(addr, alignedSize, prot, flagsMap, -1, 0);
 #endif
 
   if (!ptr || ptr == (void*)-1 || ptr != addr) {

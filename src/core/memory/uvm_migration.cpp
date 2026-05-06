@@ -49,11 +49,9 @@ void MemoryManager::migrationLoop() {
   constexpr float kDominanceThreshold = 0.80f;
 
 #if defined(__linux__)
-  // Batch entry: collect regions to migrate per NUMA node, then issue one
-  // mbind() per node instead of one per region.  Reduces syscall count by
-  // ~85% when many small regions cluster to the same NUMA node.
   struct MigBatch {
-    ManagedRegion* region;
+    uintptr_t      regionBase;
+    size_t         regionSize;
     int            dominantDev;
     float          dominance;
   };
@@ -63,67 +61,66 @@ void MemoryManager::migrationLoop() {
     std::this_thread::sleep_for(kInterval);
     if (migrationStop_.load(std::memory_order_acquire)) break;
 
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
 #if defined(__linux__)
-    // --- Pass 1: classify each region that needs migration ---
-    // Key: NUMA node id → list of regions ready to migrate there
     std::unordered_map<int, std::vector<MigBatch>> batches;
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      for (auto& region : masterRegions_) {
+        uint32_t total = region.accessCount.load(std::memory_order_relaxed);
+        if (total < 10) continue;
 
-    for (auto& region : masterRegions_) {
-      uint32_t total = region.accessCount.load(std::memory_order_relaxed);
-      if (total < 10) continue;
+        int dominantDev = -1;
+        uint32_t maxCount = 0;
+        for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
+          uint32_t cnt = region.deviceAccessCounts[d].load(std::memory_order_relaxed);
+          if (cnt > maxCount) { maxCount = cnt; dominantDev = d; }
+        }
+        if (dominantDev < 0) continue;
+        float dominance = static_cast<float>(maxCount) / static_cast<float>(total);
+        if (dominance < kDominanceThreshold) continue;
+        if (region.preferredLocation.load(std::memory_order_relaxed) == dominantDev) continue;
 
-      int dominantDev = -1;
-      uint32_t maxCount = 0;
-      for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
-        uint32_t cnt = region.deviceAccessCounts[d].load(std::memory_order_relaxed);
-        if (cnt > maxCount) { maxCount = cnt; dominantDev = d; }
+        batches[dominantDev].push_back(
+            {reinterpret_cast<uintptr_t>(region.ptr), region.size, dominantDev, dominance});
       }
-      if (dominantDev < 0) continue;
-      float dominance = static_cast<float>(maxCount) / static_cast<float>(total);
-      if (dominance < kDominanceThreshold) continue;
-      if (region.preferredLocation.load(std::memory_order_relaxed) == dominantDev) continue;
-
-      batches[dominantDev].push_back({&region, dominantDev, dominance});
     }
 
-    // --- Pass 2: one mbind() per NUMA node per batch of up to 16 regions ---
-    // mbind() operates on a single contiguous virtual-address range.  Non-
-    // contiguous regions cannot be merged, so we still call once per region —
-    // but we eliminate the per-region overhead for node-mask setup and only
-    // update the kernel page tables for regions that actually need to move.
     for (auto& [node, batch] : batches) {
       unsigned long nodemask = (node < 64) ? (1UL << node) : 1UL;
       unsigned long maxnode  = 64UL;
 
       for (auto& entry : batch) {
-        ManagedRegion& r = *entry.region;
         long rc = ::syscall(SYS_mbind,
-                            r.ptr, r.size,
+                            reinterpret_cast<void*>(entry.regionBase), entry.regionSize,
                             MPOL_PREFERRED,
                             &nodemask, maxnode,
                             static_cast<unsigned long>(MPOL_MF_MOVE));
         if (rc == 0) {
-          r.preferredLocation.store(node, std::memory_order_relaxed);
-          for (int d = 0; d < ManagedRegion::kMaxDevices; ++d)
-            r.deviceAccessCounts[d].store(0, std::memory_order_relaxed);
-          r.accessCount.store(0, std::memory_order_relaxed);
-          VGRE_LOG_DEBUG("MemoryManager",
-              "UVM migration: region " +
-              std::to_string(reinterpret_cast<uintptr_t>(r.ptr)) +
-              " → NUMA node " + std::to_string(node) +
-              " (dominance=" + std::to_string(static_cast<int>(entry.dominance * 100)) + "%)");
+          std::lock_guard<std::recursive_mutex> lock(mutex_);
+          for (auto& region : masterRegions_) {
+            if (reinterpret_cast<uintptr_t>(region.ptr) != entry.regionBase) {
+              continue;
+            }
+            region.preferredLocation.store(node, std::memory_order_relaxed);
+            for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
+              region.deviceAccessCounts[d].store(0, std::memory_order_relaxed);
+            }
+            region.accessCount.store(0, std::memory_order_relaxed);
+            VGRE_LOG_DEBUG("MemoryManager",
+                "UVM migration: region " + std::to_string(entry.regionBase) +
+                " → NUMA node " + std::to_string(node) +
+                " (dominance=" + std::to_string(static_cast<int>(entry.dominance * 100)) + "%)");
+            break;
+          }
         }
       }
     }
 
 #else
-    // Non-Linux: per-region preference update (no mbind equivalent)
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     for (auto& region : masterRegions_) {
       uint32_t total = region.accessCount.load(std::memory_order_relaxed);
       if (total < 10) continue;
-
       int dominantDev = -1;
       uint32_t maxCount = 0;
       for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
@@ -134,14 +131,10 @@ void MemoryManager::migrationLoop() {
       float dominance = static_cast<float>(maxCount) / static_cast<float>(total);
       if (dominance < kDominanceThreshold) continue;
       if (region.preferredLocation.load(std::memory_order_relaxed) == dominantDev) continue;
-
       region.preferredLocation.store(dominantDev, std::memory_order_relaxed);
-      VGRE_LOG_DEBUG("MemoryManager",
-          "UVM migration: region preference → NUMA node " +
-          std::to_string(dominantDev) +
-          " (dominance=" + std::to_string(static_cast<int>(dominance * 100)) + "%)");
-      for (int d = 0; d < ManagedRegion::kMaxDevices; ++d)
+      for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
         region.deviceAccessCounts[d].store(0, std::memory_order_relaxed);
+      }
       region.accessCount.store(0, std::memory_order_relaxed);
     }
 #endif
@@ -171,9 +164,13 @@ void MemoryManager::pendingDrainerLoop() {
     uint64_t tail = pendingTail_.load(std::memory_order_acquire);
     while (tail < head) {
       size_t slot = static_cast<size_t>(tail % pendingFaultCapacity_);
+      if (!pendingRing_[slot].ready.load(std::memory_order_acquire)) {
+          break; // Data not yet written by producer
+      }
       uintptr_t addr = pendingRing_[slot].addr;
-      // Advance tail first to claim slot
-      pendingTail_.fetch_add(1, std::memory_order_acq_rel);
+      // Reset ready flag and advance tail to claim slot
+      pendingRing_[slot].ready.store(false, std::memory_order_relaxed);
+      pendingTail_.fetch_add(1, std::memory_order_release);
       tail++;
 
       // Process the fault outside signal handler: find managed region and mark dirty
