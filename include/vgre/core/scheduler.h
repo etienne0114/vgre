@@ -29,6 +29,72 @@ struct WorkItem {
   }
 };
 
+// ── Chase-Lev Work-Stealing Deque ──────────────────────────────────────────
+template <typename T>
+class ChaseLevDeque {
+public:
+  explicit ChaseLevDeque(size_t capacity = 1024) : capacity_(capacity), mask_(capacity - 1) {
+    buffer_ = new std::atomic<T>[capacity_];
+    top_.store(0, std::memory_order_relaxed);
+    bottom_.store(0, std::memory_order_relaxed);
+  }
+
+  ~ChaseLevDeque() { delete[] buffer_; }
+
+  bool push(T item) {
+    int64_t b = bottom_.load(std::memory_order_relaxed);
+    int64_t t = top_.load(std::memory_order_acquire);
+    if (b - t >= static_cast<int64_t>(capacity_) - 1) {
+      return false;
+    }
+    buffer_[b & mask_].store(std::move(item), std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    bottom_.store(b + 1, std::memory_order_relaxed);
+    return true;
+  }
+
+  bool pop(T& item) {
+    int64_t b = bottom_.load(std::memory_order_relaxed) - 1;
+    bottom_.store(b, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    int64_t t = top_.load(std::memory_order_relaxed);
+    if (t <= b) {
+      item = buffer_[b & mask_].load(std::memory_order_relaxed);
+      if (t != b) return true;
+      // Last item, compete with stealers
+      if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+        bottom_.store(b + 1, std::memory_order_relaxed);
+        return false; // Lost race
+      }
+      bottom_.store(b + 1, std::memory_order_relaxed);
+      return true;
+    }
+    bottom_.store(b + 1, std::memory_order_relaxed);
+    return false; // Empty
+  }
+
+  bool steal(T& item) {
+    int64_t t = top_.load(std::memory_order_acquire);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    int64_t b = bottom_.load(std::memory_order_acquire);
+    if (t < b) {
+      item = buffer_[t & mask_].load(std::memory_order_relaxed);
+      if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+        return false; // Lost race
+      }
+      return true;
+    }
+    return false; // Empty
+  }
+
+private:
+  size_t capacity_;
+  size_t mask_;
+  std::atomic<T>* buffer_;
+  alignas(64) std::atomic<int64_t> top_;
+  alignas(64) std::atomic<int64_t> bottom_;
+};
+
 struct StreamTaskNode {
   std::function<void()> task;
   std::promise<VGREResult> promise;
@@ -102,9 +168,11 @@ public:
 private:
   void buildNumaTopology();          // Discover NUMA nodes; pin worker threads
   void workerLoop(int workerIdx);    // Worker body: NUMA-local queue first, then steal
-  void tryProcessStream(StreamId stream);
+  struct StreamQueue;
+  void tryProcessStream(std::shared_ptr<StreamQueue> sq, StreamId stream);
 
   std::vector<std::thread> workers_;
+  std::vector<std::unique_ptr<ChaseLevDeque<WorkItem*>>> workerDeques_;
   std::priority_queue<WorkItem> queue_; // Global ready queue (work-stealing fallback)
 
   // Per-NUMA dispatch queues: tasks submitted via submitNumaTask() land here.
@@ -117,6 +185,7 @@ private:
     int streamPriority = 0;
     std::queue<std::shared_ptr<StreamTaskNode>> pendingTasks;
     bool isProcessing = false;
+    std::mutex streamMutex;
   };
   std::unordered_map<StreamId, std::shared_ptr<StreamQueue>> streamQueues_;
 
