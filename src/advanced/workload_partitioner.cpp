@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <numeric>
 
 namespace vgre {
 namespace advanced {
@@ -16,13 +17,18 @@ static void partitionRecursive(
     
     if (nodes.empty()) return;
 
+    auto nodeCap = [](const vgre::advanced::NodeCapability& n) -> double {
+        return (double(n.cpu_cores) * n.measured_gflops)
+               / std::max(n.avg_latency_ms, 0.001)
+               * std::min(1.0, n.network_bandwidth_gbps / 10.0);
+    };
+
     if (nodes.size() == 1) {
         vgre::advanced::PartitionSlice slice;
         slice.node_address = nodes[0].address;
         slice.worker_idx = nodes[0].worker_idx;
         slice.cpu_cores = nodes[0].cpu_cores;
-        slice.measured_capacity = (double(nodes[0].cpu_cores) * nodes[0].measured_gflops) / (nodes[0].avg_latency_ms + 0.1) *
-            std::min(1.0, nodes[0].network_bandwidth_gbps / 10.0);
+        slice.measured_capacity = nodeCap(nodes[0]);
         slice.partition_id = static_cast<uint32_t>(outPlan.slices.size());
         
         for (int i = 0; i < 3; ++i) {
@@ -58,28 +64,34 @@ static void partitionRecursive(
         return;
     }
 
+    // Pre-compute capacity once per node to avoid redundant work in sort and accumulation.
+    std::vector<double> caps(nodes.size());
+    for (size_t i = 0; i < nodes.size(); ++i) caps[i] = nodeCap(nodes[i]);
+
     // Sort nodes to ensure deterministic splitting based on capacity
-    std::sort(nodes.begin(), nodes.end(), [](const vgre::advanced::NodeCapability& a, const vgre::advanced::NodeCapability& b) {
-        double capA = (double(a.cpu_cores) * a.measured_gflops) / (a.avg_latency_ms + 0.1) *
-                         std::min(1.0, a.network_bandwidth_gbps / 10.0);
-        double capB = (double(b.cpu_cores) * b.measured_gflops) / (b.avg_latency_ms + 0.1) *
-                         std::min(1.0, b.network_bandwidth_gbps / 10.0);
-        return capA > capB;
-    });
+    std::vector<size_t> idx(nodes.size());
+    std::iota(idx.begin(), idx.end(), 0);
+    std::sort(idx.begin(), idx.end(), [&caps](size_t a, size_t b){ return caps[a] > caps[b]; });
+    {
+        std::vector<vgre::advanced::NodeCapability> sortedNodes(nodes.size());
+        std::vector<double> sortedCaps(nodes.size());
+        for (size_t i = 0; i < idx.size(); ++i) {
+            sortedNodes[i] = nodes[idx[i]];
+            sortedCaps[i]  = caps[idx[i]];
+        }
+        nodes = std::move(sortedNodes);
+        caps  = std::move(sortedCaps);
+    }
 
     double totalCap = 0;
-    for (const auto& n : nodes) {
-        totalCap += (double(n.cpu_cores) * n.measured_gflops) / (n.avg_latency_ms + 0.1) *
-                    std::min(1.0, n.network_bandwidth_gbps / 10.0);
-    }
+    for (double c : caps) totalCap += c;
 
     // Partition nodes into two groups
     std::vector<vgre::advanced::NodeCapability> groupA, groupB;
     double currentCap = 0;
     size_t splitIdx = 0;
     for (size_t i = 0; i < nodes.size() - 1; ++i) {
-        currentCap += (double(nodes[i].cpu_cores) * nodes[i].measured_gflops) / (nodes[i].avg_latency_ms + 0.1) *
-                          std::min(1.0, nodes[i].network_bandwidth_gbps / 10.0);
+        currentCap += caps[i];
         groupA.push_back(nodes[i]);
         if (currentCap >= totalCap / 2.0) {
             splitIdx = i + 1;

@@ -4,6 +4,8 @@
 #include <functional>
 #include <memory>
 #include <cstring>
+#include <string>
+#include <map>
 
 namespace vgre {
 
@@ -61,7 +63,7 @@ class GradientCheckpointManager {
   void register_layer(uint32_t layer_id,
                      const std::string& layer_name,
                      uint32_t activation_size_bytes) {
-    LayerInfo info{layer_id, layer_name, activation_size_bytes, false};
+    LayerInfo info{layer_id, layer_name, activation_size_bytes};
     layers_[layer_id] = info;
   }
 
@@ -166,7 +168,6 @@ class GradientCheckpointManager {
     uint32_t layer_id;
     std::string layer_name;
     uint32_t activation_size_bytes;
-    bool should_checkpoint;
   };
 
   CheckpointStrategy strategy_;
@@ -177,7 +178,6 @@ class GradientCheckpointManager {
   uint64_t total_forward_recomputes_;
   uint64_t total_activation_checkpoints_;
 
-  std::map<uint32_t, LayerInfo> layers_;
 };
 
 // Example usage pattern for a transformer block:

@@ -206,7 +206,27 @@ double VectorEngine::benchmarkFMA(size_t n, int iterations) {
 
     auto start = std::chrono::steady_clock::now();
 
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel
+    {
+        for (int iter = 0; iter < iterations; ++iter) {
+            #pragma omp for
+            for (int64_t i = 0; i < nAligned; i += 16) {
+                __m512 va = _mm512_loadu_ps(&pa[i]);
+                __m512 vb = _mm512_loadu_ps(&pb[i]);
+                __m512 vc = _mm512_loadu_ps(&pc[i]);
+                // 32 FMAs per load to stay entirely in registers
+                for (int k = 0; k < 32; ++k) {
+                    vc = _mm512_fmadd_ps(va, vb, vc);
+                }
+                _mm512_storeu_ps(&pout[i], vc);
+            }
+        }
+    }
+    }
+    #elif defined(VGRE_HAS_AVX2)
     {
     int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
     #pragma omp parallel
@@ -237,8 +257,10 @@ double VectorEngine::benchmarkFMA(size_t n, int iterations) {
     auto end = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(end - start).count();
     
-    // Each inner loop iteration does 32 FMAs per 8 elements (if AVX2)
-    #ifdef VGRE_HAS_AVX2
+    // Each inner loop iteration does 32 FMAs per element block
+    #ifdef VGRE_HAS_AVX512
+    double totalFlops = static_cast<double>(n & ~15) * 32.0 * 2.0 * iterations;
+    #elif defined(VGRE_HAS_AVX2)
     double totalFlops = static_cast<double>(n & ~7) * 32.0 * 2.0 * iterations;
     #else
     double totalFlops = static_cast<double>(n) * 2.0 * iterations;
@@ -256,7 +278,34 @@ double VectorEngine::benchmarkBF16(size_t n, int iterations) {
 
     auto start = std::chrono::steady_clock::now();
 
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel
+    {
+        for (int iter = 0; iter < iterations; ++iter) {
+            #pragma omp for
+            for (int64_t i = 0; i < nAligned; i += 16) {
+                __m256i raw_a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&pa[i]));
+                __m256i raw_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&pb[i]));
+                
+                __m512i i_a = _mm512_cvtepu16_epi32(raw_a);
+                __m512i i_b = _mm512_cvtepu16_epi32(raw_b);
+                i_a = _mm512_slli_epi32(i_a, 16);
+                i_b = _mm512_slli_epi32(i_b, 16);
+                
+                __m512 va = _mm512_castsi512_ps(i_a);
+                __m512 vb = _mm512_castsi512_ps(i_b);
+                
+                __m512 vsum = _mm512_setzero_ps();
+                for (int k = 0; k < 32; ++k) {
+                    vsum = _mm512_fmadd_ps(va, vb, vsum);
+                }
+            }
+        }
+    }
+    }
+    #elif defined(VGRE_HAS_AVX2)
     {
     int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
     #pragma omp parallel
@@ -295,7 +344,9 @@ double VectorEngine::benchmarkBF16(size_t n, int iterations) {
     auto end = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(end - start).count();
     
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    double totalFlops = static_cast<double>(n & ~15) * 32.0 * 2.0 * iterations;
+    #elif defined(VGRE_HAS_AVX2)
     double totalFlops = static_cast<double>(n & ~7) * 32.0 * 2.0 * iterations;
     #else
     double totalFlops = static_cast<double>(n) * 2.0 * iterations;
@@ -309,7 +360,18 @@ void VectorEngine::vectorScale(const float* a, float scalar,
                                 float* out, size_t n) {
     size_t i = 0;
 
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    __m512 vs = _mm512_set1_ps(scalar);
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel for if (n > 2048)
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        __m512 va = _mm512_loadu_ps(&a[ii]);
+        _mm512_storeu_ps(&out[ii], _mm512_mul_ps(va, vs));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     {
     __m256 vs = _mm256_set1_ps(scalar);
     int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
@@ -338,11 +400,34 @@ float VectorEngine::vectorDot(const float* a, const float* b, size_t n) {
     float sum = 0.0f;
     size_t i = 0;
 
-    #ifdef VGRE_HAS_AVX2
-    __m256 vsum = _mm256_setzero_ps();
+    #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel reduction(+:sum)
+    {
+        __m512 local_vsum = _mm512_setzero_ps();
+        #pragma omp for
+        for (int64_t j = 0; j < nAligned; j += 16) {
+            __m512 va = _mm512_loadu_ps(&a[j]);
+            __m512 vb = _mm512_loadu_ps(&b[j]);
+            local_vsum = _mm512_fmadd_ps(va, vb, local_vsum);
+        }
+        __m256 hi256 = _mm512_extractf32x8_ps(local_vsum, 1);
+        __m256 lo256 = _mm512_castps512_ps256(local_vsum);
+        __m256 s256  = _mm256_add_ps(lo256, hi256);
+        __m128 hi = _mm256_extractf128_ps(s256, 1);
+        __m128 lo = _mm256_castps256_ps128(s256);
+        __m128 s  = _mm_add_ps(lo, hi);
+        s = _mm_hadd_ps(s, s);
+        s = _mm_hadd_ps(s, s);
+        sum += _mm_cvtss_f32(s);
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     {
     int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
-    #pragma omp parallel  // thread count set globally by CPUParallelExecutor
+    #pragma omp parallel reduction(+:sum)
     {
         __m256 local_vsum = _mm256_setzero_ps();
         #pragma omp for
@@ -351,20 +436,15 @@ float VectorEngine::vectorDot(const float* a, const float* b, size_t n) {
             __m256 vb = _mm256_loadu_ps(&b[j]);
             local_vsum = _mm256_fmadd_ps(va, vb, local_vsum);
         }
-        #pragma omp critical
-        {
-            vsum = _mm256_add_ps(vsum, local_vsum);
-        }
+        __m128 hi  = _mm256_extractf128_ps(local_vsum, 1);
+        __m128 lo  = _mm256_castps256_ps128(local_vsum);
+        __m128 s   = _mm_add_ps(lo, hi);
+        s = _mm_hadd_ps(s, s);
+        s = _mm_hadd_ps(s, s);
+        sum += _mm_cvtss_f32(s);
     }
     i = static_cast<size_t>(nAligned);
     }
-    // Horizontal sum of 8 floats
-    __m128 hi  = _mm256_extractf128_ps(vsum, 1);
-    __m128 lo  = _mm256_castps256_ps128(vsum);
-    __m128 s   = _mm_add_ps(lo, hi);
-    s = _mm_hadd_ps(s, s);
-    s = _mm_hadd_ps(s, s);
-    sum = _mm_cvtss_f32(s);
     #endif
 
     for (; i < n; ++i) {
@@ -379,7 +459,33 @@ float VectorEngine::vectorSum(const float* a, size_t n) {
     float sum = 0.0f;
     size_t i = 0;
 
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    __m512 vsum0_512 = _mm512_setzero_ps();
+    __m512 vsum1_512 = _mm512_setzero_ps();
+    __m512 vsum2_512 = _mm512_setzero_ps();
+    __m512 vsum3_512 = _mm512_setzero_ps();
+    for (; i + 64 <= n; i += 64) {
+        vsum0_512 = _mm512_add_ps(vsum0_512, _mm512_loadu_ps(&a[i]));
+        vsum1_512 = _mm512_add_ps(vsum1_512, _mm512_loadu_ps(&a[i + 16]));
+        vsum2_512 = _mm512_add_ps(vsum2_512, _mm512_loadu_ps(&a[i + 32]));
+        vsum3_512 = _mm512_add_ps(vsum3_512, _mm512_loadu_ps(&a[i + 48]));
+    }
+    vsum0_512 = _mm512_add_ps(vsum0_512, vsum2_512);
+    vsum1_512 = _mm512_add_ps(vsum1_512, vsum3_512);
+    for (; i + 16 <= n; i += 16) {
+        vsum0_512 = _mm512_add_ps(vsum0_512, _mm512_loadu_ps(&a[i]));
+    }
+    vsum0_512 = _mm512_add_ps(vsum0_512, vsum1_512);
+    __m256 hi256 = _mm512_extractf32x8_ps(vsum0_512, 1);
+    __m256 lo256 = _mm512_castps512_ps256(vsum0_512);
+    __m256 s256  = _mm256_add_ps(lo256, hi256);
+    __m128 hi = _mm256_extractf128_ps(s256, 1);
+    __m128 lo = _mm256_castps256_ps128(s256);
+    __m128 s  = _mm_add_ps(lo, hi);
+    s = _mm_hadd_ps(s, s);
+    s = _mm_hadd_ps(s, s);
+    sum = _mm_cvtss_f32(s);
+    #elif defined(VGRE_HAS_AVX2)
     // Four independent accumulators hide the 4-cycle FP-add latency, giving
     // ~4× throughput on modern Intel/AMD microarchitectures.
     __m256 vsum0 = _mm256_setzero_ps();
@@ -418,7 +524,18 @@ float VectorEngine::vectorSum(const float* a, size_t n) {
 void VectorEngine::vectorDiv(const float* a, const float* b,
                                float* c, size_t n) {
     size_t i = 0;
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel for if (n > 2048)
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        __m512 va = _mm512_loadu_ps(&a[ii]);
+        __m512 vb = _mm512_loadu_ps(&b[ii]);
+        _mm512_storeu_ps(&c[ii], _mm512_div_ps(va, vb));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     for (; i + 8 <= n; i += 8) {
         __m256 va = _mm256_loadu_ps(&a[i]);
         __m256 vb = _mm256_loadu_ps(&b[i]);
@@ -433,7 +550,17 @@ void VectorEngine::vectorDiv(const float* a, const float* b,
 // ── Float vector square root ────────────────────────────────────────────────
 void VectorEngine::vectorSqrt(const float* a, float* c, size_t n) {
     size_t i = 0;
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel for if (n > 2048)
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        __m512 va = _mm512_loadu_ps(&a[ii]);
+        _mm512_storeu_ps(&c[ii], _mm512_sqrt_ps(va));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     for (; i + 8 <= n; i += 8) {
         __m256 va = _mm256_loadu_ps(&a[i]);
         _mm256_storeu_ps(&c[i], _mm256_sqrt_ps(va));
@@ -449,7 +576,18 @@ void VectorEngine::vectorAdd(const double* a, const double* b,
                               double* c, size_t n) {
     size_t i = 0;
 
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
+    #pragma omp parallel for if (n > 1024)
+    for (int64_t ii = 0; ii < nAligned; ii += 8) {
+        __m512d va = _mm512_loadu_pd(&a[ii]);
+        __m512d vb = _mm512_loadu_pd(&b[ii]);
+        _mm512_storeu_pd(&c[ii], _mm512_add_pd(va, vb));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     {
     int64_t nAligned = static_cast<int64_t>(n & ~3ULL);
     #pragma omp parallel for if (n > 1024)
@@ -472,7 +610,18 @@ void VectorEngine::vectorMul(const double* a, const double* b,
                               double* c, size_t n) {
     size_t i = 0;
 
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
+    #pragma omp parallel for if (n > 1024)
+    for (int64_t ii = 0; ii < nAligned; ii += 8) {
+        __m512d va = _mm512_loadu_pd(&a[ii]);
+        __m512d vb = _mm512_loadu_pd(&b[ii]);
+        _mm512_storeu_pd(&c[ii], _mm512_mul_pd(va, vb));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     {
     int64_t nAligned = static_cast<int64_t>(n & ~3ULL);
     #pragma omp parallel for if (n > 1024)
@@ -495,7 +644,18 @@ void VectorEngine::vectorScale(const double* a, double scalar,
                                 double* out, size_t n) {
     size_t i = 0;
 
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    __m512d vs = _mm512_set1_pd(scalar);
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
+    #pragma omp parallel for if (n > 1024)
+    for (int64_t ii = 0; ii < nAligned; ii += 8) {
+        __m512d va = _mm512_loadu_pd(&a[ii]);
+        _mm512_storeu_pd(&out[ii], _mm512_mul_pd(va, vs));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     __m256d vs = _mm256_set1_pd(scalar);
     for (; i + 4 <= n; i += 4) {
         __m256d va = _mm256_loadu_pd(&a[i]);
@@ -513,7 +673,36 @@ double VectorEngine::vectorDot(const double* a, const double* b, size_t n) {
     double sum = 0.0;
     size_t i = 0;
 
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    __m512d vsum = _mm512_setzero_pd();
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
+    #pragma omp parallel
+    {
+        __m512d local_vsum = _mm512_setzero_pd();
+        #pragma omp for
+        for (int64_t j = 0; j < nAligned; j += 8) {
+            __m512d va = _mm512_loadu_pd(&a[j]);
+            __m512d vb = _mm512_loadu_pd(&b[j]);
+            local_vsum = _mm512_fmadd_pd(va, vb, local_vsum);
+        }
+        #pragma omp critical
+        {
+            vsum = _mm512_add_pd(vsum, local_vsum);
+        }
+    }
+    i = static_cast<size_t>(nAligned);
+    // Horizontal sum of 8 doubles
+    __m256d hi256 = _mm512_extractf64x4_pd(vsum, 1);
+    __m256d lo256 = _mm512_castpd512_pd256(vsum);
+    __m256d s256 = _mm256_add_pd(lo256, hi256);
+    __m128d hi = _mm256_extractf128_pd(s256, 1);
+    __m128d lo = _mm256_castpd256_pd128(s256);
+    __m128d s = _mm_add_pd(lo, hi);
+    s = _mm_hadd_pd(s, s);
+    sum = _mm_cvtsd_f64(s);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     __m256d vsum = _mm256_setzero_pd();
     for (; i + 4 <= n; i += 4) {
         __m256d va = _mm256_loadu_pd(&a[i]);
@@ -539,7 +728,18 @@ double VectorEngine::vectorDot(const double* a, const double* b, size_t n) {
 void VectorEngine::vectorDiv(const double* a, const double* b,
                                double* c, size_t n) {
     size_t i = 0;
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
+    #pragma omp parallel for if (n > 1024)
+    for (int64_t ii = 0; ii < nAligned; ii += 8) {
+        __m512d va = _mm512_loadu_pd(&a[ii]);
+        __m512d vb = _mm512_loadu_pd(&b[ii]);
+        _mm512_storeu_pd(&c[ii], _mm512_div_pd(va, vb));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     for (; i + 4 <= n; i += 4) {
         __m256d va = _mm256_loadu_pd(&a[i]);
         __m256d vb = _mm256_loadu_pd(&b[i]);
@@ -554,7 +754,17 @@ void VectorEngine::vectorDiv(const double* a, const double* b,
 // ── Double vector square root ───────────────────────────────────────────────
 void VectorEngine::vectorSqrt(const double* a, double* c, size_t n) {
     size_t i = 0;
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
+    #pragma omp parallel for if (n > 1024)
+    for (int64_t ii = 0; ii < nAligned; ii += 8) {
+        __m512d va = _mm512_loadu_pd(&a[ii]);
+        _mm512_storeu_pd(&c[ii], _mm512_sqrt_pd(va));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     for (; i + 4 <= n; i += 4) {
         __m256d va = _mm256_loadu_pd(&a[i]);
         _mm256_storeu_pd(&c[i], _mm256_sqrt_pd(va));
@@ -569,7 +779,18 @@ void VectorEngine::vectorSqrt(const double* a, double* c, size_t n) {
 void VectorEngine::vectorMin(const float* a, const float* b,
                               float* out, size_t n) {
     size_t i = 0;
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel for if (n > 2048)
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        __m512 va = _mm512_loadu_ps(&a[ii]);
+        __m512 vb = _mm512_loadu_ps(&b[ii]);
+        _mm512_storeu_ps(&out[ii], _mm512_min_ps(va, vb));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     for (; i + 8 <= n; i += 8) {
         __m256 va = _mm256_loadu_ps(&a[i]);
         __m256 vb = _mm256_loadu_ps(&b[i]);
@@ -591,7 +812,18 @@ void VectorEngine::vectorMin(const float* a, const float* b,
 void VectorEngine::vectorMax(const float* a, const float* b,
                               float* out, size_t n) {
     size_t i = 0;
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel for if (n > 2048)
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        __m512 va = _mm512_loadu_ps(&a[ii]);
+        __m512 vb = _mm512_loadu_ps(&b[ii]);
+        _mm512_storeu_ps(&out[ii], _mm512_max_ps(va, vb));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     for (; i + 8 <= n; i += 8) {
         __m256 va = _mm256_loadu_ps(&a[i]);
         __m256 vb = _mm256_loadu_ps(&b[i]);
@@ -612,7 +844,18 @@ void VectorEngine::vectorMax(const float* a, const float* b,
 // ── ReLU: out[i] = max(a[i], 0) ───────────────────────────────────────────
 void VectorEngine::vectorReLU(const float* a, float* out, size_t n) {
     size_t i = 0;
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    __m512 vzero = _mm512_setzero_ps();
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel for if (n > 2048)
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        __m512 va = _mm512_loadu_ps(&a[ii]);
+        _mm512_storeu_ps(&out[ii], _mm512_max_ps(va, vzero));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     __m256 vzero = _mm256_setzero_ps();
     for (; i + 8 <= n; i += 8) {
         __m256 va = _mm256_loadu_ps(&a[i]);
@@ -634,7 +877,19 @@ void VectorEngine::vectorReLU(const float* a, float* out, size_t n) {
 // Implemented by clearing the sign bit with an AND-NOT of the sign mask.
 void VectorEngine::vectorAbs(const float* a, float* out, size_t n) {
     size_t i = 0;
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    __m512 sign_mask = _mm512_set1_ps(-0.0f);
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel for if (n > 2048)
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        __m512 va = _mm512_loadu_ps(&a[ii]);
+        // mm512 has no andnot_ps, we must use cast to __m512i or generic andnot
+        _mm512_storeu_ps(&out[ii], _mm512_andnot_ps(sign_mask, va));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     // sign_mask = 0x80000000 in every lane; ~sign_mask = 0x7FFFFFFF
     __m256 sign_mask = _mm256_set1_ps(-0.0f);
     for (; i + 8 <= n; i += 8) {
@@ -657,7 +912,19 @@ void VectorEngine::vectorAbs(const float* a, float* out, size_t n) {
 void VectorEngine::vectorClamp(const float* a, float lo, float hi,
                                 float* out, size_t n) {
     size_t i = 0;
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    __m512 vlo = _mm512_set1_ps(lo);
+    __m512 vhi = _mm512_set1_ps(hi);
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel for if (n > 2048)
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        __m512 va = _mm512_loadu_ps(&a[ii]);
+        _mm512_storeu_ps(&out[ii], _mm512_min_ps(_mm512_max_ps(va, vlo), vhi));
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     __m256 vlo = _mm256_set1_ps(lo);
     __m256 vhi = _mm256_set1_ps(hi);
     for (; i + 8 <= n; i += 8) {
@@ -681,7 +948,17 @@ void VectorEngine::vectorClamp(const float* a, float lo, float hi,
 void VectorEngine::vectorFill(float* dst, float value, size_t n) {
     size_t i = 0;
 
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    {
+    __m512 vval = _mm512_set1_ps(value);
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel for if (n > 2048)
+    for (int64_t ii = 0; ii < nAligned; ii += 16) {
+        _mm512_storeu_ps(&dst[ii], vval);
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    #elif defined(VGRE_HAS_AVX2)
     __m256 vval = _mm256_set1_ps(value);
     for (; i + 8 <= n; i += 8) {
         _mm256_storeu_ps(&dst[i], vval);
@@ -702,7 +979,46 @@ float VectorEngine::vectorDot(const vgre_bf16* a, const vgre_bf16* b, size_t n) 
     float sum = 0.0f;
     size_t i = 0;
 
-    #ifdef VGRE_HAS_AVX2
+    #ifdef VGRE_HAS_AVX512
+    __m512 vsum_512 = _mm512_setzero_ps();
+    {
+    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
+    #pragma omp parallel
+    {
+        __m512 local_vsum = _mm512_setzero_ps();
+        #pragma omp for
+        for (int64_t j = 0; j < nAligned; j += 16) {
+            // Load 16 BF16s (256 bits)
+            __m256i raw = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&a[j]));
+            __m256i raw_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&b[j]));
+
+            // Convert to FP32 by shifting left 16 bits
+            __m512i i_a = _mm512_cvtepu16_epi32(raw);
+            __m512i i_b = _mm512_cvtepu16_epi32(raw_b);
+            i_a = _mm512_slli_epi32(i_a, 16);
+            i_b = _mm512_slli_epi32(i_b, 16);
+
+            __m512 va = _mm512_castsi512_ps(i_a);
+            __m512 vb = _mm512_castsi512_ps(i_b);
+            local_vsum = _mm512_fmadd_ps(va, vb, local_vsum);
+        }
+        #pragma omp critical
+        {
+            vsum_512 = _mm512_add_ps(vsum_512, local_vsum);
+        }
+    }
+    i = static_cast<size_t>(nAligned);
+    }
+    __m256 hi256 = _mm512_extractf32x8_ps(vsum_512, 1);
+    __m256 lo256 = _mm512_castps512_ps256(vsum_512);
+    __m256 s256  = _mm256_add_ps(lo256, hi256);
+    __m128 hi = _mm256_extractf128_ps(s256, 1);
+    __m128 lo = _mm256_castps256_ps128(s256);
+    __m128 s  = _mm_add_ps(lo, hi);
+    s = _mm_hadd_ps(s, s);
+    s = _mm_hadd_ps(s, s);
+    sum = _mm_cvtss_f32(s);
+    #elif defined(VGRE_HAS_AVX2)
     __m256 vsum = _mm256_setzero_ps();
     {
     int64_t nAligned = static_cast<int64_t>(n & ~7ULL);

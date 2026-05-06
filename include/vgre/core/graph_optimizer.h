@@ -18,6 +18,7 @@ struct GraphNode;
 class GraphOptimizer {
 public:
     static VGREResult optimize(Graph& graph);
+    static VGREResult sortTopologically(Graph& graph);
 
 private:
     static bool areFusible(const GraphNode& a, const GraphNode& b);
