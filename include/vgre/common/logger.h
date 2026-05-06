@@ -7,6 +7,7 @@
 #include <ctime>
 #include <deque>
 #include <atomic>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -25,62 +26,83 @@ enum class LogLevel : uint8_t {
   NONE = 4
 };
 
-// ── Thread-safe singleton logger ───────────────────────────────────────────
+// ── Thread-safe singleton logger with ring buffer + optional file sink ─────
 class Logger {
 public:
   static Logger &instance() {
-    static Logger* inst = new Logger();
-    static bool envChecked = false;
-    if (!envChecked) {
-      envChecked = true;
+    static Logger* inst = []() {
+      auto* l = new Logger();
       const char* envVal = std::getenv("VGRE_LOG_LEVEL");
       if (envVal) {
         std::string s(envVal);
-        if (s == "DEBUG") inst->setLevel(LogLevel::DEBUG);
-        else if (s == "INFO") inst->setLevel(LogLevel::INFO);
-        else if (s == "WARN") inst->setLevel(LogLevel::WARN);
-        else if (s == "ERROR") inst->setLevel(LogLevel::ERR);
-        else if (s == "NONE") inst->setLevel(LogLevel::NONE);
+        if      (s == "DEBUG") l->setLevel(LogLevel::DEBUG);
+        else if (s == "INFO")  l->setLevel(LogLevel::INFO);
+        else if (s == "WARN")  l->setLevel(LogLevel::WARN);
+        else if (s == "ERROR") l->setLevel(LogLevel::ERR);
+        else if (s == "NONE")  l->setLevel(LogLevel::NONE);
       }
-    }
+      const char* logFile = std::getenv("VGRE_LOG_FILE");
+      if (logFile && logFile[0]) {
+        l->openFile(logFile);
+      }
+      return l;
+    }();
     return *inst;
   }
 
   void setLevel(LogLevel level) { minLevel_.store(level, std::memory_order_relaxed); }
   LogLevel getLevel() const { return minLevel_.load(std::memory_order_relaxed); }
 
+  // Open a log file sink (appends; thread-safe after first call).
+  void openFile(const char* path) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (fileOut_.is_open()) fileOut_.close();
+    fileOut_.open(path, std::ios::app);
+  }
+
   void log(LogLevel level, const std::string &component,
            const std::string &message) {
-    if (level < minLevel_.load(std::memory_order_relaxed))
-      return;
+    if (level < minLevel_.load(std::memory_order_relaxed)) return;
 
+    // Build the formatted line once under lock to keep timestamp consistent.
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-    auto now = std::chrono::system_clock::now();
-    auto timeT = std::chrono::system_clock::to_time_t(now);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                  now.time_since_epoch()) %
-              1000;
+    // Wall-clock timestamp in microseconds
+    auto now   = std::chrono::system_clock::now();
+    auto now_t = std::chrono::system_clock::to_time_t(now);
+    auto us    = std::chrono::duration_cast<std::chrono::microseconds>(
+                     now.time_since_epoch()) % 1000000;
 
-    std::tm tm{};
+    std::ostringstream line;
+    {
+      std::tm tm_info{};
 #if defined(_WIN32)
-    localtime_s(&tm, &timeT);
+      localtime_s(&tm_info, &now_t);
 #else
-    localtime_r(&timeT, &tm);
+      localtime_r(&now_t, &tm_info);
 #endif
+      line << std::put_time(&tm_info, "%Y-%m-%d %H:%M:%S")
+           << '.' << std::setfill('0') << std::setw(6) << us.count()
+           << " [" << levelTag(level) << "] "
+           << '[' << component << "] "
+           << message;
+    }
 
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%H:%M:%S") << '.' << std::setfill('0')
-        << std::setw(3) << ms.count() << " [" << levelTag(level) << "] "
-        << "[" << component << "] " << message;
+    const std::string& s = line.str();
 
-    std::string fullMsg = oss.str();
-    std::cerr << fullMsg << '\n';
+    // Ring buffer: keep last 4096 log lines in memory for vgre_get_logs()
+    logBuffer_.push_back(s);
+    if (logBuffer_.size() > kMaxBuffered) logBuffer_.pop_front();
 
-    // Buffer for GUI
-    logBuffer_.push_back(fullMsg);
-    if (logBuffer_.size() > 100) {
-      logBuffer_.pop_front();
+    // Stderr sink (always active unless level == NONE)
+    if (level >= LogLevel::INFO) {
+      std::cerr << s << '\n';
+    }
+
+    // File sink (if configured)
+    if (fileOut_.is_open()) {
+      fileOut_ << s << '\n';
+      fileOut_.flush();
     }
   }
 
@@ -94,24 +116,22 @@ private:
   Logger(const Logger &) = delete;
   Logger &operator=(const Logger &) = delete;
 
-  static const char *levelTag(LogLevel l) {
+  static const char *levelTag(LogLevel l) noexcept {
     switch (l) {
-    case LogLevel::DEBUG:
-      return "DEBUG";
-    case LogLevel::INFO:
-      return "INFO ";
-    case LogLevel::WARN:
-      return "WARN ";
-    case LogLevel::ERR:
-      return "ERROR";
-    default:
-      return "?????";
+    case LogLevel::DEBUG: return "DEBUG";
+    case LogLevel::INFO:  return "INFO ";
+    case LogLevel::WARN:  return "WARN ";
+    case LogLevel::ERR:   return "ERROR";
+    default:              return "?????";
     }
   }
+
+  static constexpr size_t kMaxBuffered = 4096;
 
   std::atomic<LogLevel> minLevel_{LogLevel::INFO};
   mutable std::recursive_mutex mutex_;
   std::deque<std::string> logBuffer_;
+  std::ofstream fileOut_;
 };
 
 // ── Compile-time path basename (strips directory prefix) ──────────────────

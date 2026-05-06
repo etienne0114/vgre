@@ -328,12 +328,13 @@ int vgre_get_memory_info_json(char **out_json) {
   first = true;
   for (const auto& [id, pool] : mm.getPools()) {
     if (!first) ss << ",";
+    uint64_t activeCount = (pool.allocCount >= pool.freeCount) ? (pool.allocCount - pool.freeCount) : 0;
     ss << "{\"id\":" << id << ","
        << "\"blockSize\":" << pool.blockSize << ","
        << "\"total\":" << pool.totalAllocated << ","
        << "\"peak\":" << pool.peakAllocated << ","
-       << "\"active\":" << pool.activeList.size() << ","
-       << "\"free\":" << pool.freeList.size() << "}";
+       << "\"active\":" << activeCount << ","
+       << "\"free\":" << pool.freeCount << "}";
     first = false;
   }
   ss << "]}";
