@@ -299,6 +299,36 @@ private:
   // Adaptive UVM page-migration background thread
   std::thread         migrationThread_;
   std::atomic<bool>   migrationStop_{false};
+
+  // Pending-fault ring buffer (signal-safe enqueue in segfault/VEH handler)
+  // Background drainer thread processes pending faults outside signal context.
+  size_t pendingFaultCapacity_{4096};
+  struct PendingFault { uintptr_t addr; };
+  PendingFault* pendingRing_{nullptr};
+  std::atomic<uint64_t> pendingHead_{0}; // next write index (monotonic)
+  std::atomic<uint64_t> pendingTail_{0}; // next read index (monotonic)
+  std::atomic<uint64_t> pendingDropped_{0};
+  std::thread pendingDrainerThread_;
+  std::atomic<bool> pendingDrainerStop_{false};
+
+  // Signal-safe enqueue (called from segfaultHandler / vectoredHandler)
+  inline void enqueuePendingFault(uintptr_t addr) {
+    if (!pendingRing_) return; // defensive
+    uint64_t head = pendingHead_.fetch_add(1, std::memory_order_acq_rel);
+    uint64_t tail = pendingTail_.load(std::memory_order_acquire);
+    if (head - tail >= pendingFaultCapacity_) {
+      // Buffer full — drop this fault (increment drop counter)
+      pendingDropped_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    size_t slot = static_cast<size_t>(head % pendingFaultCapacity_);
+    pendingRing_[slot].addr = addr;
+  }
+
+  // Start/stop drainer
+  void startPendingDrainer();
+  void stopPendingDrainer();
+  void pendingDrainerLoop();
 };
 
 } // namespace core

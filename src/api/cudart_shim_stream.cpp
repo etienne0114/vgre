@@ -19,6 +19,8 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include "vgre/advanced/runtime_profiler.h"
+#include <cstdlib>
 
 
 #include "vgre/common/elf_reader.h"
@@ -238,6 +240,27 @@ cudaError_t cudaDeviceGetStreamPriorityRange(int *leastPriority,
                                              int *greatestPriority) {
   return vgre::api::CUDAInterceptor::instance().deviceGetStreamPriorityRange(
       leastPriority, greatestPriority);
+}
+
+// Profiler control APIs (cudaProfilerStart / cudaProfilerStop)
+extern "C" cudaError_t cudaProfilerStart(void) {
+  auto &prof = vgre::advanced::RuntimeProfiler::instance();
+  prof.setEnabled(true);
+  VGRE_LOG_INFO("CUDART", "cudaProfilerStart(): runtime profiler enabled");
+  return cudaSuccess;
+}
+
+extern "C" cudaError_t cudaProfilerStop(void) {
+  auto &prof = vgre::advanced::RuntimeProfiler::instance();
+  prof.setEnabled(false);
+  VGRE_LOG_INFO("CUDART", "cudaProfilerStop(): runtime profiler disabled");
+  // Optional: dump to file if environment variable set
+  const char* dumpPath = std::getenv("VGRE_PROFILER_DUMP");
+  if (dumpPath && dumpPath[0]) {
+    prof.exportToFile(std::string(dumpPath));
+    VGRE_LOG_INFO("CUDART", std::string("Profiler dumped to: ") + dumpPath);
+  }
+  return cudaSuccess;
 }
 
 // ── Event Management ───────────────────────────────────────────────────────

@@ -679,7 +679,7 @@ flowchart TB
 | **Maya** | OpenGL ❌ | Arnold CPU ✅ | **Cannot support viewport.** Use Arnold CPU mode. |
 | **DaVinci Resolve** | OpenGL + CUDA ❌ | GPU-accelerated ❌ | **Not compatible.** Requires real GPU. |
 
-> **In simple terms**: VGRE is a **compute engine**, not a **graphics engine**. It excels at running math-heavy CUDA programs (AI, simulations, data science) on CPUs — but it cannot display 3D graphics or accelerate rendering viewports.
+> **In simple terms**: VGRE is a **compute engine**, not a **graphics engine**. It excels at running math-heavy CUDA programs.ograms (AI, simulations, data science) on CPUs — but it cannot display 3D graphics or accelerate rendering viewports.
 
 ---
 

@@ -148,5 +148,52 @@ void MemoryManager::migrationLoop() {
   }
 }
 
+// --- Pending-fault drainer implementation ---------------------------------
+void MemoryManager::startPendingDrainer() {
+  pendingDrainerStop_.store(false, std::memory_order_release);
+  pendingDrainerThread_ = std::thread([this]() { this->pendingDrainerLoop(); });
+  VGRE_LOG_DEBUG("MemoryManager", "Pending-fault drainer thread started (capacity=" + std::to_string(pendingFaultCapacity_) + ")");
+}
+
+void MemoryManager::stopPendingDrainer() {
+  pendingDrainerStop_.store(true, std::memory_order_release);
+  if (pendingDrainerThread_.joinable()) {
+    pendingDrainerThread_.join();
+    VGRE_LOG_DEBUG("MemoryManager", "Pending-fault drainer thread stopped");
+  }
+}
+
+void MemoryManager::pendingDrainerLoop() {
+  using namespace std::chrono_literals;
+  while (!pendingDrainerStop_.load(std::memory_order_acquire)) {
+    // Drain loop: process all available pending faults
+    uint64_t head = pendingHead_.load(std::memory_order_acquire);
+    uint64_t tail = pendingTail_.load(std::memory_order_acquire);
+    while (tail < head) {
+      size_t slot = static_cast<size_t>(tail % pendingFaultCapacity_);
+      uintptr_t addr = pendingRing_[slot].addr;
+      // Advance tail first to claim slot
+      pendingTail_.fetch_add(1, std::memory_order_acq_rel);
+      tail++;
+
+      // Process the fault outside signal handler: find managed region and mark dirty
+      // Use lock since we're calling non-async-safe APIs
+      std::unique_lock<std::recursive_mutex> lock(mutex_);
+      RegionTreeContainer* container = activeTree_.load(std::memory_order_acquire);
+      if (container && container->count > 0) {
+        ManagedRegion* r = container->tree.findOverlap(addr);
+        if (r) {
+          // Safe to call markDirty (writes into pre-allocated buffer)
+          r->markDirty(reinterpret_cast<void*>(addr));
+          VGRE_LOG_DEBUG("MemoryManager", "Pending drainer marked dirty for addr " + std::to_string(addr));
+        }
+      }
+      // release lock and continue
+    }
+    // Sleep briefly to avoid busy-looping when idle
+    std::this_thread::sleep_for(1ms);
+  }
+}
+
 } // namespace core
 } // namespace vgre
