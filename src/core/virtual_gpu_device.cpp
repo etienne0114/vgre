@@ -20,6 +20,10 @@
 #include <unistd.h>
 #endif
 
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+#include <cpuid.h>
+#endif
+
 namespace vgre {
 namespace core {
 
@@ -63,36 +67,47 @@ static int getCPUCoreCount() {
 
 #if defined(__linux__)
 static int readCPUMaxFrequencyKHz() {
-  std::ifstream freqFile(
-      "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
-  if (freqFile.is_open()) {
+  // Pass 1: cpufreq driver — exact hardware maximum (preferred).
+  // Try all CPU cores in case cpu0 is offline.
+  for (int c = 0; c < 16; ++c) {
+    std::string path = "/sys/devices/system/cpu/cpu" + std::to_string(c)
+                       + "/cpufreq/cpuinfo_max_freq";
+    std::ifstream f(path);
     uint64_t kHz = 0;
-    if (freqFile >> kHz && kHz > 0) {
+    if (f.is_open() && (f >> kHz) && kHz > 0)
       return static_cast<int>(kHz);
-    }
   }
 
-  std::ifstream cpuinfo("/proc/cpuinfo");
-  std::string line;
-  while (std::getline(cpuinfo, line)) {
-    if (line.find("cpu MHz") == std::string::npos) {
-      continue;
+  // Pass 2: /proc/cpuinfo "cpu MHz" — current reported frequency.
+  // Scan all entries; take the maximum across cores.
+  {
+    std::ifstream cpuinfo("/proc/cpuinfo");
+    std::string line;
+    int maxKHz = 0;
+    while (std::getline(cpuinfo, line)) {
+      if (line.find("cpu MHz") == std::string::npos) continue;
+      auto pos = line.find(':');
+      if (pos == std::string::npos) continue;
+      try {
+        double mhz = std::stod(line.substr(pos + 1));
+        int kHz = static_cast<int>(mhz * 1000.0);
+        if (kHz > maxKHz) maxKHz = kHz;
+      } catch (...) {}
     }
-    auto pos = line.find(':');
-    if (pos == std::string::npos) {
-      continue;
-    }
-    try {
-      double mhz = std::stod(line.substr(pos + 1));
-      if (mhz > 0.0) {
-        return static_cast<int>(mhz * 1000.0);
-      }
-    } catch (...) {
-      // Continue searching next lines.
-    }
+    if (maxKHz > 0) return maxKHz;
   }
 
-  return 0;
+#if defined(__x86_64__)
+  // Pass 3: CPUID leaf 0x16 — Processor Frequency Information (Intel Skylake+).
+  // EAX[15:0] = processor base frequency in MHz.
+  unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+  __cpuid_count(0x16, 0, eax, ebx, ecx, edx);
+  int baseMHz = static_cast<int>(eax & 0xFFFF);
+  if (baseMHz > 100 && baseMHz < 10000)
+    return baseMHz * 1000; // MHz → kHz
+#endif
+
+  return 0; // Hardware query failed; caller must use a default.
 }
 #endif
 
@@ -247,11 +262,34 @@ void VirtualGPUDevice::detectHardware() {
     if (pCallNtPowerInformation && pCallNtPowerInformation(ProcessorInformation, NULL, 0, &dpi[0], sizeof(PROCESSOR_POWER_INFORMATION) * (ULONG)dpi.size()) == 0) {
       props_.clockRate = static_cast<int>(dpi[0].MaxMhz * 1000);
     } else {
-      props_.clockRate = 2600000;
+      // Fallback: read nominal CPU MHz from registry (always present on Windows).
+      HKEY hKey = nullptr;
+      if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+              "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+              0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS) {
+        DWORD mhz = 0, sz = sizeof(DWORD);
+        if (RegQueryValueExA(hKey, "~MHz", nullptr, nullptr, (LPBYTE)&mhz, &sz) == ERROR_SUCCESS && mhz > 0)
+          props_.clockRate = static_cast<int>(mhz * 1000);
+        else
+          props_.clockRate = 2600000;
+        RegCloseKey(hKey);
+      } else {
+        props_.clockRate = 2600000;
+      }
     }
     FreeLibrary(hPowrProf);
   } else {
+    // powrprof.dll unavailable — read from registry directly.
+    HKEY hKey = nullptr;
     props_.clockRate = 2200000;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+            "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+            0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS) {
+      DWORD mhz = 0, sz = sizeof(DWORD);
+      if (RegQueryValueExA(hKey, "~MHz", nullptr, nullptr, (LPBYTE)&mhz, &sz) == ERROR_SUCCESS && mhz > 0)
+        props_.clockRate = static_cast<int>(mhz * 1000);
+      RegCloseKey(hKey);
+    }
   }
   // Synthetic PCI for Windows
   props_.pciBusId = 0;
@@ -271,7 +309,17 @@ void VirtualGPUDevice::detectHardware() {
           && freqHz > 0) {
         props_.clockRate = static_cast<int>(freqHz / 1000);
       } else {
-        props_.clockRate = 3200000; // conservative fallback for M-series
+        // Last resort: hw.tbfrequency × hw.cpusubtype is not correct for CPU freq.
+        // Use CPUID leaf 0x16 on Intel, or accept 3.2 GHz for Apple Silicon
+        // where hw.perflevel0.cpufrequency_max should always have succeeded above.
+#if defined(__x86_64__)
+        unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+        __cpuid_count(0x16, 0, eax, ebx, ecx, edx);
+        int baseMHz = static_cast<int>(eax & 0xFFFF);
+        props_.clockRate = (baseMHz > 100 && baseMHz < 10000) ? baseMHz * 1000 : 3200000;
+#else
+        props_.clockRate = 3200000; // Apple Silicon: perflevel0 query above should succeed
+#endif
       }
     }
   }
