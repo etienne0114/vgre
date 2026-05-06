@@ -1,7 +1,7 @@
 # VGRE Architecture & Design
 
-**Version**: 1.0.0  
-**Last Updated**: 2026-05-06
+**Version**: 1.1.0
+**Last Updated**: 2026-05-07
 
 ---
 
@@ -133,25 +133,33 @@ Executable Function Pointer
 **Purpose**: Manage GPU-like memory allocation and Unified Virtual Memory (UVM).
 
 **Memory Types**:
-- **Regular Memory** (`cudaMalloc`): Simple host allocation
-- **Managed Memory** (`cudaMallocManaged`): UVM with page-fault handling
-- **Async Pools** (`cudaMallocAsync`): Stream-ordered allocation
+- **Regular Memory** (`cudaMalloc`): Host allocation tracked in sorted `allocRange_` map
+- **Managed Memory** (`cudaMallocManaged`): UVM with page-fault handling via `mmap(PROT_NONE)` + signal
+- **Async Pools** (`cudaMallocAsync`): Stream-ordered allocation with CUDA pool semantics
+
+**Handle Lookup (O(log n))**:
+`isValidHandle`, `getAllocationSize`, and `getPointer` all use binary search on the sorted `allocRange_` map — not a linear scan. This ensures sub-microsecond lookups even with millions of live allocations.
 
 **UVM Implementation**:
 ```
 1. App calls cudaMallocManaged(ptr, size)
-2. VGRE allocates memory and marks as NO_ACCESS
-3. App accesses memory → Page Fault (SIGSEGV on Linux, VEH on Windows)
-4. Signal handler intercepts → marks page as READ+WRITE
-5. App continues normally (transparent to application)
-6. VGRE tracks dirty pages for cluster synchronization
+2. VGRE allocates via mmap(PROT_NONE) — marks region inaccessible
+3. App accesses memory → Page Fault (SIGSEGV on Linux/macOS, VEH on Windows)
+4. Signal/VEH handler: O(1) RadixPageTable lookup → mprotect(READ+WRITE) → record in dirty bitmap
+5. App continues normally (transparent)
+6. Migration thread (every 500 ms or VGRE_UVM_MIGRATION_MS): batch migrates dirty pages to NUMA node 0
 ```
 
-**Key Features**:
-- NUMA-aware allocation (≥2MB bound to NUMA node 0)
-- Bandwidth calibration (cached process-wide)
-- Dirty page tracking for distributed execution
-- Memory pool pre-allocation for `__syncthreads` kernels
+**Pool Allocator**:
+- Two-path design: slab free-list for requests ≤ `blockSize`; direct allocation (tracked in `oversizedAllocs`) for larger requests — matches CUDA stream-ordered pool semantics
+- Slabs ≥ 2 MB are NUMA-bound via `mbind(MPOL_PREFERRED, node=0)` on Linux
+- `freeToPool` validates pointer provenance (rejects foreign pointers)
+- `destroyPool` returns `ERR_BUSY` if outstanding allocations exist
+- `liveSlabAllocs` and `slabRanges` track slab membership for O(1) provenance checks
+
+**RadixPageTable**:
+- O(1) signal-safe page fault lookup (two-level radix tree: 512 L1 entries × 512 L2 entries)
+- Destructor properly frees all L2 tables and L1 array (no leak on teardown)
 
 ### 5. Scheduler (`src/core/scheduler.cpp`)
 
@@ -182,6 +190,10 @@ for each stream {
 }
 ```
 
+**Performance Notes**:
+- Zero heap allocation per task dequeue: `WorkItem` is moved off the `std::priority_queue` via `const_cast + move + pop` — no `new WorkItem(...)` on the hot path
+- `pending_` decrement uses `fetch_sub(1, std::memory_order_acq_rel)` for correct visibility across threads
+
 ### 6. CPU Parallel Executor (`src/runtime/cpu_parallel_executor.cpp`)
 
 **Purpose**: Execute kernels on CPU cores using OpenMP parallelization.
@@ -192,39 +204,77 @@ for each stream {
 | Grid (thousands of blocks) | OpenMP parallel loop |
 | Block (group of threads) | SIMD vectorization |
 | Thread (single worker) | OS thread |
-| Shared Memory | Pre-allocated buffer |
+| Shared Memory | Pre-allocated buffer (outside block loop) |
 
 **Execution Model**:
 ```cpp
+// Per-thread local accumulator (cache-line aligned) — no per-block atomics
+struct alignas(64) LocalAccum { uint64_t flops; uint64_t bytes; };
+std::vector<LocalAccum> tls(omp_get_max_threads(), {0, 0});
+
+auto t0 = std::chrono::steady_clock::now();  // one timer pair for entire grid
 #pragma omp parallel for schedule(guided)
 for (int block_idx = 0; block_idx < grid_size; block_idx++) {
-    // Each OpenMP thread executes one block
     execute_block(block_idx);
+    tls[omp_get_thread_num()].flops += block_flops;
 }
+auto t1 = std::chrono::steady_clock::now();
+
+// Single fetch_add after parallel region
+uint64_t totalFlops = 0;
+for (auto& la : tls) totalFlops += la.flops;
+aee.recordRealFlops(totalFlops);
 ```
+
+**Performance Notes**:
+- `schedule(guided)` (no explicit chunk size) lets OpenMP pick decreasing chunk sizes — better load balance with less atomic overhead than `schedule(guided,1)`
+- Per-block `chrono::now()` eliminated — a single start/end pair brackets the entire OMP region
+- Cache-line-padded `LocalAccum` per OMP thread eliminates false sharing on the accumulator
 
 **Synchronization**:
 - `__syncthreads()`: Sense-reversing barrier in BlockWorkerPool
 - `this_grid().sync()`: GridBarrierState with atomic counter
 - `cudaStreamSynchronize()`: Drain per-stream task queue
+- Cooperative launch start-gate: `condition_variable` (all threads wait until all are ready before executing)
 
-### 7. Adaptive Execution Engine (`src/advanced/adaptive_execution_engine.cpp`)
+### 7. Block Worker Pool (`src/runtime/block_worker_pool.cpp`)
+
+**Purpose**: Pre-warmed thread pool for block-level execution — eliminates per-launch OS thread-create overhead.
+
+**Design**:
+- Pool is initialized at startup with `N = hardware_concurrency()` threads waiting on a work queue
+- `dispatch(fn)` pushes a task without creating any OS thread — tasks run on pre-warmed workers
+- `__syncthreads()` is implemented as a sense-reversing barrier shared among all workers in the same block group
+- Cooperative kernel launch: uses a `condition_variable` start-gate so all block-worker threads reach the entry point before any begins executing (matches CUDA cooperative grid semantics)
+
+**Why it matters**:
+Creating 5–50 `std::thread` objects per cooperative kernel batch costs 5–50 µs in OS overhead per launch. The pool reduces this to near zero for all subsequent launches.
+
+### 8. Adaptive Execution Engine (`src/advanced/adaptive_execution_engine.cpp`)
 
 **Purpose**: Auto-tune thread count and performance predictions.
 
 **Calibration Process**:
-1. Run micro-benchmarks on startup
-2. Measure peak GFLOPS and memory bandwidth
-3. Store results in process-wide cache
+1. Run micro-benchmarks once at startup in `runBenchmark()` — stores result in `globalOptimalVectorWidth_` atomic
+2. Measure peak GFLOPS and memory bandwidth (64 MB × 50 iterations memcpy)
+3. Store results in process-wide cache — subsequent constructions skip the 300 ms benchmark
 4. Use for telemetry and performance predictions
+
+**Thread Count Selection**:
+UCB1 multi-armed bandit explores all power-of-two thread counts systematically, replacing the prior random 10% exploration. Converges to the optimal count for each kernel's compute/memory ratio.
 
 **Performance Metrics**:
 - Kernel execution time (wall-clock)
 - Memory bandwidth (GB/s)
-- GFLOPS (floating-point operations per second)
+- GFLOPS (via `perf_event_open` for real instruction counting on Linux)
 - Coalescing efficiency
 
-### 8. TCP Cluster Manager (`src/advanced/tcp_cluster.cpp`)
+**Temperature Monitoring** (real on all platforms):
+- Linux: `/sys/class/thermal/` thermal zones + `/sys/class/hwmon/` (k10temp, coretemp)
+- macOS: IOKit SMC keys `TC0P` → `TC0F` → `Tp09` / `Tp0P` / `Tp19`
+- Windows: WMI `MSAcpi_ThermalZoneTemperature` via COM background thread, 5-second TTL cache
+
+### 9. TCP Cluster Manager (`src/advanced/tcp_cluster.cpp`)
 
 **Purpose**: Distribute kernel execution across multiple machines.
 
@@ -247,13 +297,25 @@ launchRemoteKernel()
 **Security**:
 - HMAC-SHA256 authentication handshake
 - AES-256-CTR encryption for all traffic
-- 256-bit replay bitmap prevents reuse
+- 2048-bit sliding replay bitmap (RFC 4303) prevents reuse across high-bandwidth bursts
+- Session key zeroized via `vgre_secure_zero` at destruction and rotation
+- `sendAll` uses `poll(POLLOUT)` — no busy-wait
 - Hardware-backed token storage (keyring/Keychain/CredMan/TPM)
+
+**CapabilityPacket** (exchanged at connection time):
+- `gpu_count`, `gpu_name[128]`, `gpu_memory_bytes`, `gpu_compute_major/minor`, `gpu_sm_count`
+- Populated from `GPUPassthrough::instance()` probe
 
 **Discovery**:
 - UDP broadcast on local subnet (every 2 seconds)
 - Manual node list via `VGRE_CLUSTER_NODES` env var
 - Mesh topology support via `VGRE_MESH_PEERS`
+- IPv6 dual-stack: all TCP paths via `getaddrinfo(AF_UNSPEC)` with IPv4 fallback
+
+**Workload Partitioning** (3D recursive bisection):
+- Capacity computed once per node (not per comparison) via pre-built `caps[]` vector
+- Minimum latency floor `std::max(latency_ms, 0.001)` prevents divide-by-near-zero artifacts
+- Accuracy factor EWMA (α = 0.25) adjusts future slice sizes based on observed vs predicted execution time
 
 ---
 
@@ -411,12 +473,27 @@ if (size >= 2 * 1024 * 1024) {
 
 **Benefit**: Eliminates per-block malloc/free overhead for `__syncthreads` kernels.
 
-### 5. OpenMP Schedule Guided
-**Idea**: Use `schedule(guided)` instead of `schedule(dynamic)` for work distribution.
+### 5. OpenMP Schedule and Per-Thread Accumulators
+**Idea**: Use `schedule(guided)` (no explicit chunk size) and per-thread `alignas(64) LocalAccum` instead of per-block atomics.
 
-**Benefit**: Reduces atomic overhead on work-distribution queue.
+**Details**:
+- Removes `fetch_add` from the OMP inner loop — replaces with thread-local counters, single `fetch_add` after the parallel region
+- `schedule(guided,1)` caused excessive work-stealing atomics; removing the chunk hint lets OpenMP choose decreasing sizes automatically
+- Cache-line padding on `LocalAccum` prevents false sharing between OMP threads on adjacent cache lines
 
-### 6. AES-NI Hardware Acceleration
+**Benefit**: Eliminates N × bus-lock overhead for large grids; measurable speedup for kernels with many short-running blocks.
+
+### 6. Cooperative Kernel via BlockWorkerPool
+**Idea**: Replace `std::vector<std::thread>` per batch with `BlockWorkerPool::dispatch`.
+
+**Benefit**: Zero OS thread-create latency (5–50 µs eliminated per cooperative launch).
+
+### 7. Scheduler Zero-Alloc Dequeue
+**Idea**: Move `WorkItem` off `std::priority_queue` via `const_cast + move + pop` instead of `new WorkItem(...)`.
+
+**Benefit**: Eliminates one heap allocation and one heap deallocation per scheduled task on the hot scheduling path.
+
+### 8. AES-NI Hardware Acceleration
 **Idea**: Use `_mm_aesenc_si128` intrinsics for 4-block parallel AES-256-CTR.
 
 **Benefit**: 8–12× faster encryption than software fallback.
@@ -427,24 +504,27 @@ if (size >= 2 * 1024 * 1024) {
 
 ### Linux
 - **UVM**: SIGSEGV signal handler
-- **NUMA**: `mbind()` for memory placement
+- **NUMA**: `mbind(MPOL_PREFERRED, node=0)` for slabs ≥ 2 MB
 - **Token Storage**: Linux Keyring (primary), libsecret (secondary), TPM 2.0 (tertiary)
-- **Networking**: Standard POSIX sockets
-- **Temperature**: `/sys/class/thermal/` sysfs interface
+- **Networking**: Dual-stack IPv6/IPv4 via `getaddrinfo(AF_UNSPEC)`, standard POSIX sockets
+- **Temperature**: `/sys/class/thermal/` thermal zones **and** `/sys/class/hwmon/` (AMD Zen k10temp, Intel coretemp)
+- **CPU Frequency**: `cpufreq/scaling_max_freq` (all CPUs) → `/proc/cpuinfo` → CPUID leaf 0x16
 
 ### Windows
 - **UVM**: Vectored Exception Handler (VEH) for `EXCEPTION_ACCESS_VIOLATION`
 - **NUMA**: N/A (not exposed to user-mode)
 - **Token Storage**: Windows Credential Manager (primary), TPM 2.0 (secondary)
-- **Networking**: WinSock2 API
-- **Temperature**: `CallNtPowerInformation()` (heuristic)
+- **Networking**: WinSock2 API with dual-stack IPv6 support
+- **Temperature**: WMI `MSAcpi_ThermalZoneTemperature` via COM background thread, 5-second TTL cache
+- **CPU Frequency**: `~MHz` registry key → CPUID leaf 0x16 → `GetSystemInfo`-derived default
 
 ### macOS
 - **UVM**: SIGSEGV signal handler
 - **NUMA**: N/A (not exposed)
 - **Token Storage**: Keychain (primary), TPM 2.0 (secondary)
-- **Networking**: POSIX sockets with `SO_NOSIGPIPE` for broken pipe handling
-- **Temperature**: IOKit framework (heuristic)
+- **Networking**: POSIX sockets with `SO_NOSIGPIPE`; dual-stack IPv6 via `getaddrinfo(AF_UNSPEC)`
+- **Temperature**: IOKit SMC — `TC0P` → `TC0F` (Intel die) → `Tp09` / `Tp0P` / `Tp19` (Apple Silicon)
+- **CPU Frequency**: `sysctl hw.cpufrequency_max` → CPUID leaf 0x16 (Intel) → 3.2 GHz constant (Apple Silicon)
 
 ---
 
@@ -459,7 +539,9 @@ if (size >= 2 * 1024 * 1024) {
 - **Algorithm**: AES-256-CTR (NIST-approved)
 - **Hardware Acceleration**: AES-NI intrinsics when available
 - **Key Rotation**: Every 10,000 packets
-- **Replay Protection**: 256-bit sequence bitmap
+- **Key Zeroization**: `vgre_secure_zero` (uses `SecureZeroMemory`/`explicit_bzero`/`memset_s`/volatile-loop) on `sessionKey_`, `keyFingerprint_`, and `replayBitmap_` at destruction and key rotation — prevents compiler dead-store elimination
+- **Replay Protection**: 2048-bit sliding window bitmap (RFC 4303), `kReplayWindowBits = 2048`, `kReplayWordCount = 32`; handles high-bandwidth reordering without false replay rejection
+- **Send Path**: `sendAll` uses `poll(POLLOUT)` with 30-second deadline on `EAGAIN`/`EWOULDBLOCK` — no busy-wait sleep
 
 ### Token Storage
 - **Linux**: Kernel keyring (most secure), GNOME Keyring, TPM 2.0, encrypted file fallback
@@ -528,5 +610,5 @@ VGRE_MESH_PEERS=ip:port,...           # Mesh topology
 
 ---
 
-**Version**: 1.0.0  
-**Last Updated**: 2026-05-06
+**Version**: 1.1.0
+**Last Updated**: 2026-05-07
