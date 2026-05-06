@@ -34,9 +34,30 @@ template <typename T>
 class MemoryIntervalTree {
 public:
     MemoryIntervalTree() : root_(nullptr) {}
+    ~MemoryIntervalTree() { clear(); }
 
     void insert(uintptr_t low, uintptr_t high, T* data) {
-        root_ = insert(std::move(root_), low, high, data);
+        if (!root_) {
+            root_ = std::make_unique<IntervalNode<T>>(low, high, data);
+            return;
+        }
+        IntervalNode<T>* curr = root_.get();
+        while (true) {
+            if (high > curr->max) curr->max = high;
+            if (low < curr->low) {
+                if (!curr->left) {
+                    curr->left = std::make_unique<IntervalNode<T>>(low, high, data);
+                    break;
+                }
+                curr = curr->left.get();
+            } else {
+                if (!curr->right) {
+                    curr->right = std::make_unique<IntervalNode<T>>(low, high, data);
+                    break;
+                }
+                curr = curr->right.get();
+            }
+        }
     }
 
     T* findOverlap(uintptr_t point) const {
@@ -45,7 +66,6 @@ public:
             if (point >= node->low && point < node->high) {
                 return node->data;
             }
-            
             if (node->left && node->left->max >= point) {
                 node = node->left.get();
             } else {
@@ -55,32 +75,20 @@ public:
         return nullptr;
     }
 
-
     void clear() {
-        root_.reset();
+        if (!root_) return;
+        std::vector<std::unique_ptr<IntervalNode<T>>> nodes;
+        nodes.push_back(std::move(root_));
+        while (!nodes.empty()) {
+            std::unique_ptr<IntervalNode<T>> curr = std::move(nodes.back());
+            nodes.pop_back();
+            if (curr->left) nodes.push_back(std::move(curr->left));
+            if (curr->right) nodes.push_back(std::move(curr->right));
+        }
     }
 
 private:
     std::unique_ptr<IntervalNode<T>> root_;
-
-    std::unique_ptr<IntervalNode<T>> insert(std::unique_ptr<IntervalNode<T>> node, 
-                                           uintptr_t low, uintptr_t high, T* data) {
-        if (!node) {
-            return std::make_unique<IntervalNode<T>>(low, high, data);
-        }
-
-        if (low < node->low) {
-            node->left = insert(std::move(node->left), low, high, data);
-        } else {
-            node->right = insert(std::move(node->right), low, high, data);
-        }
-
-        if (node->max < high) {
-            node->max = high;
-        }
-
-        return node;
-    }
 
 };
 

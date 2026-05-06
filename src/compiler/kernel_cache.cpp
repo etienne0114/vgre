@@ -179,6 +179,8 @@ void KernelCache::clear() {
     
     memoryCache_.clear();
     lruOrder_.clear();
+    memoryIRCache_.clear();
+    lruIROrder_.clear();
 
     // Clear disk cache
     try {
@@ -202,6 +204,19 @@ bool KernelCache::getKernelIR(const std::string& sourceHash, const std::string& 
     
     // IR cache is specific to kernel name as well as source hash
     std::string irHash = sourceHash + "_" + name;
+    
+    // Check memory cache first
+    auto memIt = memoryIRCache_.find(irHash);
+    if (memIt != memoryIRCache_.end()) {
+        outIr = memIt->second.first;
+        // Move to front of LRU list
+        lruIROrder_.splice(lruIROrder_.begin(), lruIROrder_, memIt->second.second);
+        stats_.hits++;
+        stats_.memoryHits++;
+        VGRE_LOG_INFO("KernelCache", "✓ Memory cache HIT for IR: " + name);
+        return true;
+    }
+    
     std::string cachePath = getCacheFilePath(irHash, ".ir.json");
     
     std::ifstream file(cachePath);
@@ -255,12 +270,38 @@ bool KernelCache::getKernelIR(const std::string& sourceHash, const std::string& 
     outIr.staticFlopCount = static_cast<uint64_t>(obj->getInteger("staticFlopCount").value_or(0));
     VGRE_LOG_DEBUG("KernelCache", "Deserialized metrics");
 
+    // Promote to memory LRU cache
+    if (memoryIRCache_.size() >= MAX_MEMORY_CACHE_SIZE) {
+        const std::string& lruKey = lruIROrder_.back();
+        memoryIRCache_.erase(lruKey);
+        lruIROrder_.pop_back();
+    }
+    lruIROrder_.push_front(irHash);
+    memoryIRCache_[irHash] = {outIr, lruIROrder_.begin()};
+
     VGRE_LOG_INFO("KernelCache", "✓ IR cache HIT for " + name + " (hash: " + sourceHash.substr(0,8) + ")");
     return true;
 }
 
 void KernelCache::putKernelIR(const std::string& sourceHash, const std::string& name, const KernelIR& ir) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    
+    std::string irHash = sourceHash + "_" + name;
+    
+    // Add to LRU memory cache
+    auto existing = memoryIRCache_.find(irHash);
+    if (existing != memoryIRCache_.end()) {
+        existing->second.first = ir;
+        lruIROrder_.splice(lruIROrder_.begin(), lruIROrder_, existing->second.second);
+    } else {
+        if (memoryIRCache_.size() >= MAX_MEMORY_CACHE_SIZE) {
+            const std::string& lruKey = lruIROrder_.back();
+            memoryIRCache_.erase(lruKey);
+            lruIROrder_.pop_back();
+        }
+        lruIROrder_.push_front(irHash);
+        memoryIRCache_[irHash] = {ir, lruIROrder_.begin()};
+    }
     
     llvm::json::Object obj;
     obj["name"] = ir.name;
@@ -286,7 +327,6 @@ void KernelCache::putKernelIR(const std::string& sourceHash, const std::string& 
     obj["estimatedMemoryAccessCount"] = static_cast<int64_t>(ir.estimatedMemoryAccessCount);
     obj["staticFlopCount"] = static_cast<int64_t>(ir.staticFlopCount);
     
-    std::string irHash = sourceHash + "_" + name;
     std::string cachePath = getCacheFilePath(irHash, ".ir.json");
     
     std::ofstream file(cachePath);

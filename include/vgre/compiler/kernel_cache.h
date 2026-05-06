@@ -95,6 +95,12 @@ private:
                         std::pair<std::string, LruList::iterator>>;
     LruList lruOrder_;
     LruMap  memoryCache_;
+
+    using LruIRList = std::list<std::string>;
+    using LruIRMap = std::unordered_map<std::string, std::pair<KernelIR, LruIRList::iterator>>;
+    LruIRList lruIROrder_;
+    LruIRMap memoryIRCache_;
+    
     static constexpr size_t MAX_MEMORY_CACHE_SIZE = 100;
     
     // Statistics

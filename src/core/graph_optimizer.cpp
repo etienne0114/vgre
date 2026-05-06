@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
+#include <queue>
+#include <map>
 
 namespace vgre {
 namespace core {
@@ -53,9 +55,60 @@ VGREResult GraphOptimizer::optimize(Graph& graph) {
 
     if (fusionCount > 0) {
         VGRE_LOG_INFO("GraphOptimizer", "Optimization complete. Fused " + std::to_string(fusionCount) + " kernel pairs.");
+        // Re-sort graph to maintain topological order after node replacements
+        return sortTopologically(graph);
     }
     return VGREResult::SUCCESS;
 }
+
+VGREResult GraphOptimizer::sortTopologically(Graph& graph) {
+    if (graph.nodes.empty()) return VGREResult::SUCCESS;
+
+    std::unordered_map<uint64_t, size_t> inDegree;
+    std::unordered_map<uint64_t, std::vector<uint64_t>> adj;
+    std::unordered_map<uint64_t, const GraphNode*> nodeMap;
+
+    for (const auto& node : graph.nodes) {
+        nodeMap[node.nodeId] = &node;
+        if (inDegree.find(node.nodeId) == inDegree.end()) {
+            inDegree[node.nodeId] = 0;
+        }
+        for (uint64_t dep : node.deps) {
+            adj[dep].push_back(node.nodeId);
+            inDegree[node.nodeId]++;
+        }
+    }
+
+    std::queue<uint64_t> q;
+    for (auto const& [id, degree] : inDegree) {
+        if (degree == 0) {
+            q.push(id);
+        }
+    }
+
+    std::vector<GraphNode> sortedNodes;
+    while (!q.empty()) {
+        uint64_t u = q.front();
+        q.pop();
+
+        sortedNodes.push_back(*nodeMap[u]);
+
+        for (uint64_t v : adj[u]) {
+            if (--inDegree[v] == 0) {
+                q.push(v);
+            }
+        }
+    }
+
+    if (sortedNodes.size() != graph.nodes.size()) {
+        VGRE_LOG_ERROR("GraphOptimizer", "Topological sort failed: Cycle detected in graph " + std::to_string(graph.id));
+        return VGREResult::ERR_INVALID_VALUE;
+    }
+
+    graph.nodes = std::move(sortedNodes);
+    return VGREResult::SUCCESS;
+}
+
 
 bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
     // 0. Stream-boundary check: only fuse nodes captured on the same stream.
