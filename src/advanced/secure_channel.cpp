@@ -43,12 +43,34 @@ using vgre::common::vgre_poll;
 
 SecureChannel::SecureChannel() = default;
 
+// Portable cryptographic zeroization — prevents dead-store elimination by
+// the optimizer. Each platform has an OS-provided function for this:
+//   Windows:       SecureZeroMemory (kernel32, always available)
+//   Linux (glibc): explicit_bzero   (glibc ≥ 2.25 / kernel ≥ 3.17)
+//   macOS:         memset_s         (C11, available since macOS 10.9)
+// Falls back to a volatile write loop which every major compiler preserves.
+static void vgre_secure_zero(void* p, size_t n) noexcept {
+#if defined(_WIN32)
+    SecureZeroMemory(p, n);
+#elif defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25))
+    explicit_bzero(p, n);
+#elif defined(__APPLE__)
+    memset_s(p, n, 0, n);
+#else
+    // Volatile pointer loop — reliable on all conforming C++ implementations.
+    volatile uint8_t* vp = static_cast<volatile uint8_t*>(p);
+    for (size_t i = 0; i < n; ++i) vp[i] = 0;
+    // Memory fence to ensure writes are not reordered past this point.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+#endif
+}
+
 SecureChannel::~SecureChannel() {
   // Zeroize ALL sensitive fields so key material doesn't linger on the heap
   // or in swap after the channel is torn down.
-  std::memset(sessionKey_, 0, sizeof(sessionKey_));
-  std::memset(keyFingerprint_, 0, sizeof(keyFingerprint_));
-  std::memset(replayBitmap_, 0, sizeof(replayBitmap_));
+  vgre_secure_zero(sessionKey_,    sizeof(sessionKey_));
+  vgre_secure_zero(keyFingerprint_, sizeof(keyFingerprint_));
+  vgre_secure_zero(replayBitmap_,  sizeof(replayBitmap_));
   sendSequence_.store(0, std::memory_order_relaxed);
   highestSeenSeq_ = 0;
   replayWindowSeeded_ = false;
@@ -98,7 +120,7 @@ VGREResult SecureChannel::initializeFromSecret(
           .count());
 
   sendSequence_ = 0;
-  replayBitmap_[0] = replayBitmap_[1] = replayBitmap_[2] = replayBitmap_[3] = 0;
+  std::memset(replayBitmap_, 0, sizeof(replayBitmap_));
   highestSeenSeq_ = 0;
   replayWindowSeeded_ = false;
   packetsSent_ = 0;
@@ -140,11 +162,12 @@ VGREResult SecureChannel::rotateKey(const uint8_t nextNonce[crypto::kNonceLen]) 
 
   // Update session key and fingerprint
   std::memcpy(sessionKey_, newKey, crypto::kHMACKeyLen);
+  vgre_secure_zero(newKey, sizeof(newKey)); // erase transient key from stack
   crypto::sha256(sessionKey_, crypto::kHMACKeyLen, keyFingerprint_);
 
-  VGRE_LOG_INFO("SecureChannel", "Session key rotated — New fingerprint: " + 
+  VGRE_LOG_INFO("SecureChannel", "Session key rotated — New fingerprint: " +
                 getKeyFingerprint().substr(0, 16) + "...");
-  
+
   return VGREResult::SUCCESS;
 }
 
@@ -238,16 +261,23 @@ void SecureChannel::computePacketHMAC(const SecurePacketHeader &hdr,
 bool SecureChannel::sendAll(vgre_socket_t fd, const void *buf, size_t len) {
   const char *p = static_cast<const char *>(buf);
   size_t sent = 0;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (sent < len) {
     int n = send(fd, p + sent, static_cast<int>(len - sent), MSG_NOSIGNAL);
     if (n == 0) {
-      // Connection closed
-      return false;
+      return false; // Connection closed
     }
     if (n < 0) {
       int err = vgre_get_last_socket_error();
       if (vgre_is_would_block(err)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // Block until the socket is writable again — avoids busy-spinning.
+        // Use the remaining budget (capped at 100ms per poll call) so we don't
+        // hang forever if the remote stops draining its receive buffer.
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        vgre_pollfd pfd{fd, POLLOUT, 0};
+        int remaining = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count());
+        vgre_poll(&pfd, 1, std::min(remaining, 100));
         continue;
       }
       // On Windows, WSAENOTSOCK, WSAECONNRESET, WSAECONNABORTED indicate real problems
@@ -464,29 +494,29 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
     uint64_t seq = hdr.sequence_number;
 
     if (!replayWindowSeeded_) {
-      // First packet ever — bootstrap the window.
+      // First packet ever — bootstrap the 2048-bit window.
       highestSeenSeq_ = seq;
+      std::memset(replayBitmap_, 0, sizeof(replayBitmap_));
       replayBitmap_[0] = 1ULL; // bit 0 = offset 0 from highestSeenSeq_
-      replayBitmap_[1] = replayBitmap_[2] = replayBitmap_[3] = 0;
       replayWindowSeeded_ = true;
     } else if (seq > highestSeenSeq_) {
       uint64_t advance = seq - highestSeenSeq_;
 
-      if (advance >= 256) {
-        replayBitmap_[0] = replayBitmap_[1] = replayBitmap_[2] = replayBitmap_[3] = 0;
+      if (advance >= kReplayWindowBits) {
+        // The new packet is far ahead — entire window is stale, reset it.
+        std::memset(replayBitmap_, 0, sizeof(replayBitmap_));
       } else {
-        // Left-shift the 256-bit bitmap by 'advance' bits.
-        uint64_t ws = advance / 64;
-        uint64_t bs = advance % 64;
-        uint64_t tmp[4] = {0, 0, 0, 0};
-        for (int i = 0; i < 4; i++) {
-          int src = i - static_cast<int>(ws);
-          if (src >= 0 && src < 4) {
-            tmp[i] = replayBitmap_[src] << bs;
-          }
-          int src_lo = src - 1;
-          if (bs > 0 && src_lo >= 0 && src_lo < 4) {
-            tmp[i] |= replayBitmap_[src_lo] >> (64 - bs);
+        // Left-shift the 2048-bit bitmap by 'advance' bits.
+        // Words are in little-endian order: replayBitmap_[0] is the most-recent word.
+        uint64_t ws = advance / 64;                   // whole-word shift
+        uint64_t bs = advance % 64;                   // bit shift within word
+        uint64_t tmp[kReplayWordCount] = {};
+        for (size_t i = 0; i < kReplayWordCount; i++) {
+          size_t src = (ws <= i) ? i - ws : kReplayWordCount; // source word index
+          if (src < kReplayWordCount) {
+            tmp[i] = (bs == 0) ? replayBitmap_[src] : (replayBitmap_[src] << bs);
+            if (bs > 0 && src > 0)
+              tmp[i] |= replayBitmap_[src - 1] >> (64 - bs);
           }
         }
         std::memcpy(replayBitmap_, tmp, sizeof(replayBitmap_));
@@ -495,9 +525,9 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
       highestSeenSeq_ = seq;
       replayBitmap_[0] |= 1ULL; // mark offset 0 = this packet
     } else {
-      // seq <= highestSeenSeq_ — check the window
+      // seq <= highestSeenSeq_ — check the 2048-bit window
       uint64_t offset = highestSeenSeq_ - seq;
-      if (offset >= 256) {
+      if (offset >= kReplayWindowBits) {
         VGRE_LOG_ERROR("SecureChannel",
                        "Replay detected: seq=" + std::to_string(seq) +
                        " is " + std::to_string(offset) + " packets behind window");
