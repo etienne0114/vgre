@@ -8,6 +8,7 @@
 
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/secure_channel.h"
+#include "vgre/advanced/gpu_passthrough.h"
 #include "vgre/advanced/tcp_cluster/internal/collective_ops_manager.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/memory_manager.h"
@@ -146,16 +147,45 @@ void TCPClusterManager::clientLoop() {
         }
       }
 #endif
+      // iGPU / emulated GPU (OpenCL or VGRE RuntimeEngine)
       auto &engine = core::RuntimeEngine::instance();
       if (engine.isInitialized() && engine.getDeviceCount() > 0) {
         cpkt.has_igpu = true;
         DeviceProperties props;
         engine.getDeviceProperties(0, props);
-        std::strncpy(cpkt.igpu_name, props.name, 63);
+        std::strncpy(cpkt.igpu_name, props.name, sizeof(cpkt.igpu_name) - 1);
       } else {
         cpkt.has_igpu = false;
-        std::strncpy(cpkt.igpu_name, "None (CPU Hybrid)", 63);
+        std::strncpy(cpkt.igpu_name, "None (CPU-only)", sizeof(cpkt.igpu_name) - 1);
       }
+
+      // Discrete NVIDIA GPU via GPUPassthrough (dlopen libcuda / nvcuda)
+      auto &gp = vgre::advanced::GPUPassthrough::instance();
+      if (gp.initialize() && gp.isAvailable()) {
+        const auto& gpuDevs = gp.getDevices();
+        cpkt.gpu_count = static_cast<int>(gpuDevs.size());
+        if (!gpuDevs.empty()) {
+          const auto& primary = gpuDevs[0];
+          std::strncpy(cpkt.gpu_name, primary.name, sizeof(cpkt.gpu_name) - 1);
+          cpkt.gpu_memory_bytes  = primary.totalMemBytes;
+          cpkt.gpu_compute_major = primary.computeMajor;
+          cpkt.gpu_compute_minor = primary.computeMinor;
+          cpkt.gpu_sm_count      = primary.multiProcessorCount;
+          VGRE_LOG_INFO("TCPCluster",
+                        "GPU capability: " + std::string(primary.name) +
+                        " (" + std::to_string(primary.totalMemBytes / (1024*1024)) + " MB" +
+                        ", SM " + std::to_string(primary.computeMajor) + "." +
+                        std::to_string(primary.computeMinor) + ")");
+        }
+      } else {
+        cpkt.gpu_count = 0;
+        std::strncpy(cpkt.gpu_name, "None", sizeof(cpkt.gpu_name) - 1);
+        cpkt.gpu_memory_bytes  = 0;
+        cpkt.gpu_compute_major = 0;
+        cpkt.gpu_compute_minor = 0;
+        cpkt.gpu_sm_count      = 0;
+      }
+
       send_packet(client_fd_, PacketType::CAPABILITY, &cpkt, sizeof(CapabilityPacket),
                   client_secure_channel_.get());
     }

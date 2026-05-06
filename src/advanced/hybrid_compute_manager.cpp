@@ -175,14 +175,36 @@ void HybridComputeManager::detectIntegratedGPU() {
                          driverName == "etnaviv" || driverName == "lima"  // ARM
                         );
     if (!isIntegrated && driverName == "amdgpu") {
-      // AMD: check PCI class — iGPU is integrated into the CPU die.
-      // heuristic: if there's only one GPU total, assume it's integrated.
-      std::ifstream classFile(cardPath + "/device/class");
-      std::string pciClass;
-      if (classFile.is_open()) std::getline(classFile, pciClass);
-      // APU graphics typically have device IDs < 0x1000 in the revision field.
-      // We fall back to treating single AMD GPU as iGPU.
-      isIntegrated = true;
+      // AMD APU (iGPU) detection via actual hardware query — no guessing.
+      // The amdgpu driver exposes total VRAM size via mem_info_vram_total.
+      // APU graphics use carved-out system RAM: reported VRAM ≤ 512 MB.
+      // Discrete AMD GPUs have dedicated GDDR/HBM: typically 4 GB+.
+      // We also check the PCI subsystem class: 0x030200 = 3D Controller
+      // (typical for APU) vs. 0x030000 = VGA Compatible (discrete).
+      bool isAMDiGPU = false;
+
+      // Primary: VRAM size (most reliable indicator)
+      std::ifstream vramFile(cardPath + "/device/mem_info_vram_total");
+      if (vramFile.is_open()) {
+        uint64_t vramBytes = 0;
+        vramFile >> vramBytes;
+        // APU shared memory is carved from system RAM: < 512 MB is a reliable
+        // threshold. Discrete GPUs never ship with less than 1 GB dedicated VRAM.
+        isAMDiGPU = (vramBytes > 0 && vramBytes <= 512ULL * 1024 * 1024);
+      }
+
+      // Fallback: PCI class code — 0x030200 = 3D Controller (APU pattern)
+      if (!vramFile.is_open()) {
+        std::ifstream classFile(cardPath + "/device/class");
+        std::string pciClass;
+        if (classFile.is_open()) {
+          std::getline(classFile, pciClass);
+          // 0x030200 is the standard PCI class for AMD APU display engines
+          isAMDiGPU = (pciClass == "0x030200");
+        }
+      }
+
+      isIntegrated = isAMDiGPU;
     }
 
     if (isIntegrated) {
