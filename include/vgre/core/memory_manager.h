@@ -4,6 +4,7 @@
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
 #include "vgre/core/interval_tree.h"
+#include "vgre/core/page_table.h"
 
 #include <atomic>
 #include <signal.h>
@@ -13,6 +14,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstring>
 #include <vector>
 
@@ -41,20 +43,29 @@ struct Allocation {
 // ── Memory pool handle ─────────────────────────────────────────────────────
 using PoolHandle = uint64_t;
 
-struct PoolBlock {
+// Slab chunk for backing memory
+struct PoolSlab {
   void *ptr = nullptr;
   size_t size = 0;
+  PoolSlab *next = nullptr;
 };
 
 struct MemoryPool {
   PoolHandle id = 0;
   size_t blockSize = 0;            // Minimum allocation granularity
-  std::list<PoolBlock> freeList;   // Available blocks for reuse
-  std::list<PoolBlock> activeList; // Currently allocated blocks
+  void *freeListHead = nullptr;    // Intrusive free list head
+  PoolSlab *slabList = nullptr;    // List of backing slabs
   size_t totalAllocated = 0;
   size_t peakAllocated = 0;
   size_t allocCount = 0;
   size_t freeCount = 0;
+  // Tracks oversized allocations (size > blockSize) that bypass the slab.
+  // Maps raw pointer → allocation size so freeToPool can release them correctly.
+  std::unordered_map<void*, size_t> oversizedAllocs;
+  // Tracks active slab-backed allocations for pointer provenance validation.
+  std::unordered_set<void*> liveSlabAllocs;
+  // Tracks slab address ranges for quick membership checks.
+  std::vector<std::pair<uint8_t*, uint8_t*>> slabRanges;
 };
 
 // ── Dynamic UVM region tracking for signal-safe lookup ─────────────────────
@@ -263,6 +274,11 @@ private:
   std::atomic<RegionTreeContainer*> activeTree_{nullptr};
   std::vector<RegionTreeContainer*> retiredTrees_; // Cleanup deferred until activeHandlers_ == 0
 
+  // O(1) radix page table for signal-safe fault lookup.
+  // Updated alongside the RCU interval tree; provides constant-time address
+  // resolution in the SIGSEGV/VEH handler without tree traversal.
+  RadixPageTable pageTable_;
+
   // RCU grace-period counter: incremented on signal-handler entry, decremented
   // on exit.  The destructor spin-waits until this reaches 0 before freeing
   // retired trees, preventing use-after-free when a SIGSEGV fires between the
@@ -303,7 +319,10 @@ private:
   // Pending-fault ring buffer (signal-safe enqueue in segfault/VEH handler)
   // Background drainer thread processes pending faults outside signal context.
   size_t pendingFaultCapacity_{4096};
-  struct PendingFault { uintptr_t addr; };
+  struct PendingFault { 
+    uintptr_t addr; 
+    std::atomic<bool> ready{false};
+  };
   PendingFault* pendingRing_{nullptr};
   std::atomic<uint64_t> pendingHead_{0}; // next write index (monotonic)
   std::atomic<uint64_t> pendingTail_{0}; // next read index (monotonic)
@@ -313,16 +332,20 @@ private:
 
   // Signal-safe enqueue (called from segfaultHandler / vectoredHandler)
   inline void enqueuePendingFault(uintptr_t addr) {
-    if (!pendingRing_) return; // defensive
-    uint64_t head = pendingHead_.fetch_add(1, std::memory_order_acq_rel);
-    uint64_t tail = pendingTail_.load(std::memory_order_acquire);
-    if (head - tail >= pendingFaultCapacity_) {
-      // Buffer full — drop this fault (increment drop counter)
-      pendingDropped_.fetch_add(1, std::memory_order_relaxed);
-      return;
-    }
+    if (!pendingRing_) return;
+    uint64_t head;
+    do {
+      head = pendingHead_.load(std::memory_order_relaxed);
+      uint64_t tail = pendingTail_.load(std::memory_order_acquire);
+      if (head - tail >= pendingFaultCapacity_) {
+        pendingDropped_.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+    } while (!pendingHead_.compare_exchange_weak(head, head + 1, std::memory_order_relaxed));
+
     size_t slot = static_cast<size_t>(head % pendingFaultCapacity_);
     pendingRing_[slot].addr = addr;
+    pendingRing_[slot].ready.store(true, std::memory_order_release);
   }
 
   // Start/stop drainer

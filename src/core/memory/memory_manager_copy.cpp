@@ -13,9 +13,40 @@
 
 #include <cstring>
 #include <chrono>
+#include <immintrin.h>
 
 namespace vgre {
 namespace core {
+
+/**
+ * @brief Non-temporal streaming memcpy for large buffers.
+ * Bypasses the cache for writes to prevent cache pollution on large data transfers.
+ */
+#if defined(__x86_64__)
+__attribute__((target("avx")))
+#endif
+static void streamingMemcpy(void* dst, const void* src, size_t bytes) {
+    uint8_t* d = static_cast<uint8_t*>(dst);
+    const uint8_t* s = static_cast<const uint8_t*>(src);
+
+    // Threshold for streaming stores (1MB). Must be 32-byte aligned for AVX.
+    if (bytes >= 1024 * 1024 && 
+        (reinterpret_cast<uintptr_t>(d) & 31) == 0 && 
+        (reinterpret_cast<uintptr_t>(s) & 31) == 0) {
+        
+        size_t i = 0;
+        for (; i + 32 <= bytes; i += 32) {
+            __m256i val = _mm256_load_si256(reinterpret_cast<const __m256i*>(s + i));
+            _mm256_stream_si256(reinterpret_cast<__m256i*>(d + i), val);
+        }
+        if (i < bytes) {
+            std::memcpy(d + i, s + i, bytes - i);
+        }
+        _mm_sfence(); // Memory fence to ensure non-temporal stores are visible
+    } else {
+        std::memcpy(dst, src, bytes);
+    }
+}
 
 std::unordered_map<MemoryHandle, Allocation>::iterator
 MemoryManager::findAllocationForPtr(void* ptr, size_t& outOffset) {
@@ -89,12 +120,12 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
       auto dr = compEngine.decompress(compBuffer.data(), compBuffer.size(),
                                       dstPtr, bytes, actualSize);
       if (dr != VGREResult::SUCCESS || actualSize != bytes)
-        std::memcpy(dstPtr, src, bytes);
+        streamingMemcpy(dstPtr, src, bytes);
     } else {
-      std::memcpy(dstPtr, src, bytes);
+      streamingMemcpy(dstPtr, src, bytes);
     }
   } else {
-    std::memcpy(dstPtr, src, bytes);
+    streamingMemcpy(dstPtr, src, bytes);
   }
 
   auto end = std::chrono::steady_clock::now();
@@ -154,12 +185,12 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
       auto dr = compEngine.decompress(compBuffer.data(), compBuffer.size(),
                                       dst, bytes, actualSize);
       if (dr != VGREResult::SUCCESS || actualSize != bytes)
-        std::memcpy(dst, srcPtr, bytes);
+        streamingMemcpy(dst, srcPtr, bytes);
     } else {
-      std::memcpy(dst, srcPtr, bytes);
+      streamingMemcpy(dst, srcPtr, bytes);
     }
   } else {
-    std::memcpy(dst, srcPtr, bytes);
+    streamingMemcpy(dst, srcPtr, bytes);
   }
 
   auto end = std::chrono::steady_clock::now();
@@ -231,7 +262,7 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
 
   auto start = std::chrono::steady_clock::now();
 
-  std::memcpy(dstPtr, srcPtr, bytes);
+  streamingMemcpy(dstPtr, srcPtr, bytes);
   auto end = std::chrono::steady_clock::now();
 
   double ms = std::chrono::duration<double, std::milli>(end - start).count();
