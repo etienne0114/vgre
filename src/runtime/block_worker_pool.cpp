@@ -99,32 +99,41 @@ void BlockWorkerPool::initialize(size_t numThreads) {
 
 
 void BlockWorkerPool::dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg) {
+    if (threadCount <= 0 || task == nullptr) {
+        VGRE_LOG_WARN("BlockWorkerPool", "dispatch() ignored invalid input");
+        return;
+    }
+
     if (!initialized_) {
         initialize();
     }
 
     auto signal = std::make_shared<BlockSignal>(threadCount);
 
-    {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        for (int i = 0; i < threadCount; ++i) {
-            taskQueue_.push({task, i, arg, signal->barrier.get(), [signal]() {
-                // Decrement and notify dispatcher when last task completes.
-                // Lock ensures no lost-wakeup race between decrement and cv.wait().
-                std::lock_guard<std::mutex> lk(signal->completeMutex);
-                if (signal->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                    signal->completeCv.notify_one();
-                }
-            }});
+    for (int i = 0; i < threadCount; ++i) {
+        Task t = {task, i, arg, signal->barrier.get(), [signal]() {
+            // Decrement and notify dispatcher when last task completes.
+            // Lock ensures no lost-wakeup race between decrement and cv.wait().
+            std::lock_guard<std::mutex> lk(signal->completeMutex);
+            if (signal->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                signal->completeCv.notify_one();
+            }
+        }};
+        while (!taskQueue_.push(t)) {
+            std::this_thread::yield();
         }
     }
+    
+    // Memory fence + lock to prevent lost wakeups on the condition variable
+    { std::lock_guard<std::mutex> lk(queueMutex_); }
     queueCv_.notify_all();
 
     // Hybrid wait: short spin for fast-completing kernels, then yield to condvar.
     // This frees CPU cores for pool workers when multiple blocks dispatch concurrently,
     // preventing starvation-induced barrier deadlocks.
+    const uint32_t spinBudget = (threadCount <= 64) ? 1000u : 300u;
     uint32_t spin = 0;
-    while (spin < 500 && signal->remaining.load(std::memory_order_acquire) > 0) {
+    while (spin < spinBudget && signal->remaining.load(std::memory_order_acquire) > 0) {
 #if defined(_WIN32)
         YieldProcessor();
 #else
@@ -166,30 +175,39 @@ void BlockWorkerPool::workerLoop() {
 
     while (true) {
         Task task;
-        {
+        if (taskQueue_.pop(task)) {
+            // Propagate barrier to thread local storage
+            vgre_jit_set_block_barrier(task.barrier);
+            try {
+                // Execute the task
+                task.func(task.tid, task.arg);
+            } catch (...) {
+                VGRE_LOG_ERROR("BlockWorkerPool", "Unhandled exception in block worker task");
+            }
+
+            // Cleanup barrier TLS and mark completion even on failure.
+            vgre_jit_clear_block_barrier();
+            if (task.onDone) task.onDone();
+        } else {
+            if (stop_) break;
+            
+            // Short spin for fast arrivals
+            const uint32_t idleSpinBudget = workers_.size() <= 8 ? 1200u : 400u;
+            uint32_t spin = 0;
+            while (spin < idleSpinBudget && taskQueue_.empty() && !stop_) {
+#if defined(_WIN32)
+                YieldProcessor();
+#else
+                __builtin_ia32_pause();
+#endif
+                ++spin;
+            }
+            
+            if (!taskQueue_.empty() || stop_) continue;
+
+            // Sleep if queue is genuinely empty
             std::unique_lock<std::mutex> lock(queueMutex_);
             queueCv_.wait(lock, [this] { return stop_ || !taskQueue_.empty(); });
-            
-            if (stop_ && taskQueue_.empty()) break;
-            
-            if (taskQueue_.empty()) continue; // Spurious wakeup guard
-
-            task = std::move(taskQueue_.front());
-            taskQueue_.pop();
-        }
-        
-        // Propagate barrier to thread local storage
-        vgre_jit_set_block_barrier(task.barrier);
-        
-        // Execute the task
-        task.func(task.tid, task.arg);
-        
-        // Cleanup barrier TLS
-        vgre_jit_clear_block_barrier();
-        
-        // Mark as done via callback
-        if (task.onDone) {
-            task.onDone();
         }
     }
 }

@@ -105,6 +105,19 @@ static PerfSampler& getPerfSampler() {
 namespace vgre {
 namespace runtime {
 
+// Lazy Shared Memory pool to avoid per-launch allocations
+static VGRE_THREAD_LOCAL std::unique_ptr<SharedMemory> t_shared_mem = nullptr;
+
+static SharedMemory* getThreadSharedMem(size_t size) {
+    if (!t_shared_mem) {
+        t_shared_mem = std::make_unique<SharedMemory>(size);
+    } else {
+        t_shared_mem->ensureCapacity(size);
+    }
+    return t_shared_mem.get();
+}
+
+
 CPUParallelExecutor::CPUParallelExecutor(int maxThreads)
     : maxThreads_(maxThreads) {
   if (maxThreads_ <= 0) {
@@ -138,224 +151,208 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
                                         uint64_t bytesPerBlock,
                                         const dim3 &gridOffset,
                                         bool usesSyncthreads) {
-
-  
-  VGRE_LOG_DEBUG("CPUParallelExecutor", "Launching kernel fn=" + std::to_string((uintptr_t)fn.get()));
-
   totalLaunches_++;
-  uint32_t totalBlocks = gridDim.total();
+  const uint32_t totalBlocks = gridDim.total();
+  const int totalBlocksI = static_cast<int>(totalBlocks);
 
-  VGRE_LOG_DEBUG(
-      "CPUParallelExecutor",
-      "Executing " + std::to_string(totalBlocks) + " blocks (" +
-          std::to_string(gridDim.x) + "x" + std::to_string(gridDim.y) + "x" +
-          std::to_string(gridDim.z) + ")" +
-          (sharedMemSize > 0 ? " sharedMem=" + std::to_string(sharedMemSize)
-                             : ""));
+  // Hoist the FLOP/instruction ratio lookup — called once, not per block.
+  // This avoids a virtual dispatch + atomic load inside the hot loop.
+#if defined(__linux__)
+  double flopRatio = vgre::advanced::AdaptiveExecutionEngine::instance().getFlopPerInstruction();
+  if (flopRatio < 0.05 || flopRatio > 64.0) flopRatio = 0.5; // clamp to sane default
+#endif
 
-  // Linearize the 3D grid into a 1D loop for OpenMP parallelism
-  int totalBlocksI = static_cast<int>(totalBlocks);
-
-  // Helper: compute effective FLOPs for one block, preferring hardware measurement.
-  // If perf_event is available, the measured instruction count is converted using
-  // the calibrated flopPerInstruction ratio; otherwise the static estimate is used.
-  auto effectiveFlops = [&](uint64_t staticEstimate, uint64_t measuredInstr) -> uint64_t {
+  // Effective FLOPs helper — prefers perf_event instruction count on Linux.
+  auto effectiveFlops = [&](uint64_t staticEst, uint64_t measuredInstr) -> uint64_t {
 #if defined(__linux__)
     if (measuredInstr > 0) {
-        double ratio = vgre::advanced::AdaptiveExecutionEngine::instance().getFlopPerInstruction();
-        // Validate: ratio must be positive and within a physically meaningful range.
-        // Modern CPUs: 0.1 FLOP/instruction (scalar loads) to 32 FLOP/instruction
-        // (AVX-512 FMA with 16 FP32 elements × 2 FLOP each).  Clamp to [0.05, 64.0]
-        // to guard against miscalibration (e.g. perf_event returning bogus counts).
-        if (ratio < 0.05 || ratio > 64.0) {
-            VGRE_LOG_WARN("CPUParallelExecutor",
-                          "flopPerInstruction=" + std::to_string(ratio) +
-                          " out of range [0.05, 64.0]; using static estimate");
-            return staticEstimate;
-        }
-        uint64_t hwFlops = static_cast<uint64_t>(static_cast<double>(measuredInstr) * ratio);
-        return (hwFlops > 0) ? hwFlops : staticEstimate;
+      uint64_t hw = static_cast<uint64_t>(static_cast<double>(measuredInstr) * flopRatio);
+      return hw > 0 ? hw : staticEst;
     }
 #else
     (void)measuredInstr;
 #endif
-    return staticEstimate;
+    return staticEst;
   };
 
-  // Optimization: Skip parallel overhead for very small grids
+  // ── Single-block fast path ────────────────────────────────────────────────
   if (totalBlocksI == 1) {
     dim3 blockIdx(gridOffset.x, gridOffset.y, gridOffset.z);
-    // Allocate per-block shared memory
-    SharedMemory smem(sharedMemSize);
-    dim3 tIdx(0,0,0);
+    SharedMemory* smem = getThreadSharedMem(sharedMemSize);
+    dim3 tIdx(0, 0, 0);
+    if (args) { for (int i = 0; i < 4 && args[i]; ++i) VGRE_PREFETCH(args[i]); }
 #if defined(__linux__)
     if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
-    auto bw_t0 = std::chrono::steady_clock::now();
-    (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(),
-       smem.size());
-    vgre_cdp_drain();  // execute any child kernels spawned via CDP
-    double blockMs1 = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - bw_t0).count();
+    auto t0 = std::chrono::steady_clock::now();
+    (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem->raw(), smem->size());
+    vgre_cdp_drain();
+    double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
 #if defined(__linux__)
-    uint64_t instr1 = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
+    uint64_t instr = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
 #else
-    uint64_t instr1 = 0;
+    uint64_t instr = 0;
 #endif
+    uint64_t fb = effectiveFlops(flopsPerBlock, instr);
+    auto& aee = vgre::advanced::AdaptiveExecutionEngine::instance();
+    if (fb > 0)          aee.recordRealFlops(fb);
+    if (bytesPerBlock > 0) { aee.recordRealMemoryAccess(bytesPerBlock); tryRecordBandwidth(bytesPerBlock, ms); }
 
-    // Record metrics
-    uint64_t fb1 = effectiveFlops(flopsPerBlock, instr1);
-    if (fb1 > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(fb1);
-    if (bytesPerBlock > 0) {
-      vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
-      tryRecordBandwidth(bytesPerBlock, blockMs1);
-    }
+  // ── Syncthreads path: serial block execution ─────────────────────────────
   } else if (usesSyncthreads) {
-    // Kernels with __syncthreads() MUST process blocks serially.
-    // Concurrent block dispatch creates competing barriers: if N OMP threads each
-    // dispatch M tasks simultaneously, all N*M workers may hit their respective
-    // barriers before all tasks are dequeued — causing permanent deadlock when
-    // pool workers starve. Serial execution guarantees only one block's M tasks
-    // are in-flight at a time, so exactly M workers arrive at each barrier.
-    // Pre-allocate shared memory once outside the loop; reset per block.
-    // Avoids malloc/free overhead on every block (especially for large smem).
-    SharedMemory serialSmem(sharedMemSize);
+    // Serial execution prevents barrier deadlock — only one block's threads are
+    // in-flight at a time so BlockWorkerPool is never starved.
+    uint64_t totalFlops = 0, totalBytes = 0;
+    SharedMemory* smem = getThreadSharedMem(sharedMemSize);
+    auto t0 = std::chrono::steady_clock::now();
     for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
       for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
         for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
           dim3 blockIdx(gx + gridOffset.x, gy + gridOffset.y, gz + gridOffset.z);
-          serialSmem.reset();
+          smem->reset();
           GPUThreadContext::setWarpMask(0xFFFFFFFF);
           GPUThreadContext::clearBlockBarrier();
           dim3 tIdx(0, 0, 0);
-          // Prefetch first kernel argument into L2 to reduce cold-start latency
-          // for the next block (serial path: CPU pipeline can hide the miss).
-          if (args && args[0]) __builtin_prefetch(args[0], 0, 1);
+          if (args) { for (int i = 0; i < 4 && args[i]; ++i) VGRE_PREFETCH(args[i]); }
 #if defined(__linux__)
           if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
-          auto bw_ts0 = std::chrono::steady_clock::now();
-          (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, serialSmem.raw(), serialSmem.size());
-          double blockMsS = std::chrono::duration<double, std::milli>(
-              std::chrono::steady_clock::now() - bw_ts0).count();
+          (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem->raw(), smem->size());
 #if defined(__linux__)
           uint64_t instrS = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
 #else
           uint64_t instrS = 0;
 #endif
-          uint64_t fbS = effectiveFlops(flopsPerBlock, instrS);
-          if (fbS > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(fbS);
-          if (bytesPerBlock > 0) {
-            vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
-            tryRecordBandwidth(bytesPerBlock, blockMsS);
-          }
+          totalFlops += effectiveFlops(flopsPerBlock, instrS);
+          totalBytes += bytesPerBlock;
           GPUThreadContext::clearWarpMask();
           GPUThreadContext::clearBlockBarrier();
         }
       }
     }
+    // Single batch update to avoid N×atomicAdd bus-lock overhead
+    double gridMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    auto& aee = vgre::advanced::AdaptiveExecutionEngine::instance();
+    if (totalFlops > 0)  aee.recordRealFlops(totalFlops);
+    if (totalBytes > 0) { aee.recordRealMemoryAccess(totalBytes); tryRecordBandwidth(totalBytes, gridMs); }
+
+  // ── Parallel path: OpenMP across all blocks ───────────────────────────────
   } else {
 #ifdef _OPENMP
     int omp_threads = maxThreads_;
-    uint32_t tCount = blockDim.total();
-    if (tCount > 1) {
-        int maxConcurrentBlocks = std::max(1, 1024 / (int)tCount);
-        omp_threads = std::min(omp_threads, maxConcurrentBlocks);
-    }
-    // Additional Safeguard: Don't exceed total blocks
-    omp_threads = std::min(omp_threads, (int)totalBlocksI);
-
-    VGRE_LOG_DEBUG("CPUParallelExecutor", "Starting OpenMP execution: totalBlocks=" + std::to_string(totalBlocksI) + " threads=" + std::to_string(omp_threads));
-#pragma omp parallel num_threads(omp_threads) if (totalBlocksI > 1)
-
     {
-      // Thread-local shared memory buffer, allocated once per OpenMP thread
-      SharedMemory threadSmem(sharedMemSize);
+      uint32_t tCount = blockDim.total();
+      if (tCount > 1)
+        omp_threads = std::min(omp_threads, std::max(1, 1024 / (int)tCount));
+      omp_threads = std::min(omp_threads, totalBlocksI);
+    }
 
-      // True 3D Grid Unrolling using OpenMP collapse
-      // This ensures proper 3D mapping and thread data locality instead of artificial linearization
-#pragma omp for collapse(3) schedule(guided, 1)
+    // Per-thread accumulators: avoid N×atomicAdd bus-lock on every block.
+    // Each OMP thread accumulates locally; we do one batch fetch_add after.
+    // Align to 64 bytes to prevent false sharing across cache lines.
+    struct alignas(64) LocalAccum { uint64_t flops; uint64_t bytes; };
+    std::vector<LocalAccum> tls(static_cast<size_t>(omp_threads), {0, 0});
+
+    auto gridStart = std::chrono::steady_clock::now();
+
+#pragma omp parallel num_threads(omp_threads) if (totalBlocksI > 1)
+    {
+      SharedMemory* threadSmem = getThreadSharedMem(sharedMemSize);
+      int tid = omp_get_thread_num();
+      LocalAccum& local = tls[static_cast<size_t>(tid)];
+
+      // schedule(guided) — OpenMP picks decreasing chunk sizes, balancing
+      // load without the per-chunk atomics that schedule(guided,1) causes.
+#pragma omp for collapse(3) schedule(guided)
       for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
         for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
           for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
             dim3 blockIdx(gx + gridOffset.x, gy + gridOffset.y, gz + gridOffset.z);
-            threadSmem.reset();
+            threadSmem->reset();
             vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
             vgre::runtime::GPUThreadContext::clearBlockBarrier();
-            dim3 tIdx(0,0,0);
+            dim3 tIdx(0, 0, 0);
+            if (args) { for (int i = 0; i < 4 && args[i]; ++i) VGRE_PREFETCH(args[i]); }
 #if defined(__linux__)
             if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
-            auto bw_tomp0 = std::chrono::steady_clock::now();
-            (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, threadSmem.raw(),
-               threadSmem.size());
-            double blockMsOMP = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - bw_tomp0).count();
+            (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim,
+                  threadSmem->raw(), threadSmem->size());
 #if defined(__linux__)
             uint64_t instrOMP = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
 #else
             uint64_t instrOMP = 0;
 #endif
-            // Record metrics per block completion
-            uint64_t fbOMP = effectiveFlops(flopsPerBlock, instrOMP);
-            if (fbOMP > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(fbOMP);
-            if (bytesPerBlock > 0) {
-              vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
-              tryRecordBandwidth(bytesPerBlock, blockMsOMP);
-            }
-
+            local.flops += effectiveFlops(flopsPerBlock, instrOMP);
+            local.bytes += bytesPerBlock;
             vgre::runtime::GPUThreadContext::clearWarpMask();
             vgre::runtime::GPUThreadContext::clearBlockBarrier();
           }
         }
       }
-    }
+    } // end omp parallel
+
+    // Aggregate thread-local counters with a single atomic update each.
+    double gridMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - gridStart).count();
+    uint64_t totalFlops = 0, totalBytes = 0;
+    for (auto& la : tls) { totalFlops += la.flops; totalBytes += la.bytes; }
+    auto& aee = vgre::advanced::AdaptiveExecutionEngine::instance();
+    if (totalFlops > 0) aee.recordRealFlops(totalFlops);
+    if (totalBytes > 0) { aee.recordRealMemoryAccess(totalBytes); tryRecordBandwidth(totalBytes, gridMs); }
+
 #else
+    // ── No-OpenMP scalar fallback ─────────────────────────────────────────
+    uint64_t totalFlops = 0, totalBytes = 0;
+    auto t0 = std::chrono::steady_clock::now();
     for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
       for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
         for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
           dim3 blockIdx(gx + gridOffset.x, gy + gridOffset.y, gz + gridOffset.z);
-          SharedMemory smem(sharedMemSize);
-
-          uint32_t activeMask = 0xFFFFFFFF;
-          vgre::runtime::GPUThreadContext::setWarpMask(activeMask);
+          SharedMemory* smem = getThreadSharedMem(sharedMemSize);
+          vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
           vgre::runtime::GPUThreadContext::clearBlockBarrier();
-
-          dim3 tIdx(0,0,0);
+          smem->reset();
+          dim3 tIdx(0, 0, 0);
+          if (args) { for (int i = 0; i < 4 && args[i]; ++i) VGRE_PREFETCH(args[i]); }
 #if defined(__linux__)
-          if (t_perfSampler.valid()) t_perfSampler.start();
+          if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
-          (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(),
-             smem.size());
+          (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem->raw(), smem->size());
 #if defined(__linux__)
-          uint64_t instrNOMP = t_perfSampler.valid() ? t_perfSampler.stop() : 0;
+          uint64_t instrNO = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
 #else
-          uint64_t instrNOMP = 0;
+          uint64_t instrNO = 0;
 #endif
-          // Record metrics per block completion
-          uint64_t fbNOMP = effectiveFlops(flopsPerBlock, instrNOMP);
-          if (fbNOMP > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(fbNOMP);
-          if (bytesPerBlock > 0) vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(bytesPerBlock);
-
+          totalFlops += effectiveFlops(flopsPerBlock, instrNO);
+          totalBytes += bytesPerBlock;
           vgre::runtime::GPUThreadContext::clearWarpMask();
           vgre::runtime::GPUThreadContext::clearBlockBarrier();
         }
       }
     }
+    double gridMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    auto& aee = vgre::advanced::AdaptiveExecutionEngine::instance();
+    if (totalFlops > 0) aee.recordRealFlops(totalFlops);
+    if (totalBytes > 0) { aee.recordRealMemoryAccess(totalBytes); tryRecordBandwidth(totalBytes, gridMs); }
 #endif
   }
 
   totalBlocks_ += totalBlocks;
-
-  VGRE_LOG_DEBUG("CPUParallelExecutor", "Kernel execution completed — " +
-                                            std::to_string(totalBlocks) +
-                                            " blocks processed");
-
   return vgre::VGREResult::SUCCESS;
 }
 
 // ── Cooperative kernel execution ──────────────────────────────────────────
-// Launches each block in its own std::thread so vgre_jit_syncgrid() works.
+// Uses BlockWorkerPool (pre-warmed threads) instead of spawning raw std::threads
+// per batch.  This eliminates ~5–50 μs of OS thread-create overhead per batch,
+// which matters for small grids typical in cooperative launches.
+//
+// Each block gets its own worker thread from the pool; the GridBarrierState
+// senses-reversing barrier lets vgre_jit_syncgrid() work correctly across all
+// concurrently-running blocks in the batch.
 VGREResult CPUParallelExecutor::executeCooperative(CompiledKernelFn fn,
                                                     const dim3 &gridDim,
                                                     const dim3 &blockDim,
@@ -364,78 +361,104 @@ VGREResult CPUParallelExecutor::executeCooperative(CompiledKernelFn fn,
                                                     uint64_t flopsPerBlock,
                                                     uint64_t bytesPerBlock) {
     totalLaunches_++;
-    uint32_t totalBlocks = gridDim.total();
+    const uint32_t totalBlocks = gridDim.total();
 
-    VGRE_LOG_INFO("CPUParallelExecutor",
-                  "Cooperative execution: " + std::to_string(totalBlocks) +
-                  " blocks (maxConcurrent=" + std::to_string(maxThreads_) + ")");
-
-    // Helper reused from execute()
-    auto effectiveFlops = [&](uint64_t staticEstimate, uint64_t /*measured*/) -> uint64_t {
-        return staticEstimate;
-    };
-
-    // Concurrent batch: at most maxThreads_ blocks run simultaneously so
-    // grid barriers work.  Any remainder runs serially after the batch.
+    // Cap concurrent blocks to maxThreads_ so grid barriers are always satisfied.
     const uint32_t batchSize = static_cast<uint32_t>(
         std::max(1, std::min(maxThreads_, static_cast<int>(totalBlocks))));
 
-    // Process all blocks in batches of batchSize.
+    auto& pool = vgre::runtime::BlockWorkerPool::instance();
+    pool.initialize(); // no-op if already initialized
+
+    // Shared context passed into each pool task via void* arg.
+    // Heap-allocated per batch so the pool dispatcher can access it safely.
+    struct BatchCtx {
+        const CompiledKernelFn* fn;
+        const dim3* gridDim;
+        const dim3* blockDim;
+        void**      args;
+        size_t      sharedMemSize;
+        uint64_t    flopsPerBlock;
+        uint64_t    bytesPerBlock;
+        uint32_t    gridX;     // used to compute blockIdx from linear index
+        uint32_t    gridXY;    // gridDim.x * gridDim.y
+        uint32_t    base;      // first linear block index in this batch
+        GridBarrierState* barrier;
+        // Per-task FLOP/BW accumulators — indexed by tid (0..batchSize-1).
+        // Aligned to avoid false sharing.
+        struct alignas(64) Slot { uint64_t flops; uint64_t bytes; double ms; };
+        Slot* slots;
+    };
+
+    uint64_t totalFlops = 0, totalBytes = 0;
+    auto gridStart = std::chrono::steady_clock::now();
+
     for (uint32_t base = 0; base < totalBlocks; base += batchSize) {
         uint32_t thisBatch = std::min(batchSize, totalBlocks - base);
 
         GridBarrierState barrier;
         barrier.totalBlocks = thisBatch;
 
-        std::vector<std::thread> workers;
-        workers.reserve(thisBatch);
+        std::vector<BatchCtx::Slot> slots(thisBatch, BatchCtx::Slot{0, 0, 0.0});
 
-        for (uint32_t bi = 0; bi < thisBatch; ++bi) {
-            uint32_t linear = base + bi;
-            uint32_t gx = linear % gridDim.x;
-            uint32_t gy = (linear / gridDim.x) % gridDim.y;
-            uint32_t gz = linear / (gridDim.x * gridDim.y);
+        BatchCtx ctx{
+            &fn, &gridDim, &blockDim, args, sharedMemSize,
+            flopsPerBlock, bytesPerBlock,
+            gridDim.x, gridDim.x * gridDim.y, base, &barrier, slots.data()
+        };
 
-            workers.emplace_back([&, gx, gy, gz, flopsPerBlock, bytesPerBlock]() {
-                // Point this thread's TLS at the shared barrier for this batch.
-                t_grid_barrier_state = &barrier;
+        // Pool dispatch: one task per block in this batch.
+        pool.dispatch(static_cast<int>(thisBatch),
+            [](int tid, void* arg) {
+                BatchCtx* c = static_cast<BatchCtx*>(arg);
+                uint32_t linear = c->base + static_cast<uint32_t>(tid);
+                uint32_t gx = linear % c->gridX;
+                uint32_t gy = (linear / c->gridX) % (*c->gridDim).y;
+                uint32_t gz = linear / c->gridXY;
 
-                SharedMemory smem(sharedMemSize);
+                // Wire this thread's TLS grid-barrier to the batch barrier.
+                t_grid_barrier_state = c->barrier;
+
+                SharedMemory* smem = getThreadSharedMem(c->sharedMemSize);
                 dim3 blockIdx(gx, gy, gz);
                 dim3 tIdx(0, 0, 0);
                 vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
                 vgre::runtime::GPUThreadContext::clearBlockBarrier();
+                smem->reset();
 
-                auto bw_tcoop0 = std::chrono::steady_clock::now();
-                (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem.raw(), smem.size());
-                double blockMsCoop = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - bw_tcoop0).count();
+                auto t0 = std::chrono::steady_clock::now();
+                (**c->fn)(c->args, &blockIdx, &tIdx, c->blockDim,
+                          c->gridDim, smem->raw(), smem->size());
+                double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
 
                 vgre::runtime::GPUThreadContext::clearWarpMask();
                 vgre::runtime::GPUThreadContext::clearBlockBarrier();
                 t_grid_barrier_state = nullptr;
 
-                // Record metrics
-                if (flopsPerBlock > 0)
-                    vgre::advanced::AdaptiveExecutionEngine::instance().recordRealFlops(
-                        effectiveFlops(flopsPerBlock, 0));
-                if (bytesPerBlock > 0) {
-                    vgre::advanced::AdaptiveExecutionEngine::instance().recordRealMemoryAccess(
-                        bytesPerBlock);
-                    tryRecordBandwidth(bytesPerBlock, blockMsCoop);
-                }
-            });
-        }
+                // Accumulate per-task — no shared state, no atomic needed.
+                c->slots[tid].flops = c->flopsPerBlock;
+                c->slots[tid].bytes = c->bytesPerBlock;
+                c->slots[tid].ms    = ms;
+            },
+            &ctx
+        );
 
-        for (auto &t : workers) t.join();
+        // Aggregate slot results into batch totals.
+        for (uint32_t i = 0; i < thisBatch; ++i) {
+            totalFlops += slots[i].flops;
+            totalBytes += slots[i].bytes;
+        }
     }
 
+    // Single-shot telemetry update for the entire grid.
+    double gridMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - gridStart).count();
+    auto& aee = vgre::advanced::AdaptiveExecutionEngine::instance();
+    if (totalFlops > 0) aee.recordRealFlops(totalFlops);
+    if (totalBytes > 0) { aee.recordRealMemoryAccess(totalBytes); tryRecordBandwidth(totalBytes, gridMs); }
+
     totalBlocks_ += totalBlocks;
-
-    VGRE_LOG_DEBUG("CPUParallelExecutor",
-                   "Cooperative execution completed — " +
-                   std::to_string(totalBlocks) + " blocks processed");
-
     return vgre::VGREResult::SUCCESS;
 }
 

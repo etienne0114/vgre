@@ -21,6 +21,44 @@
 namespace vgre {
 namespace core {
 
+thread_local int t_workerIdx = -1;
+namespace {
+
+bool enqueueWithWorkerFallback(int workerIdx,
+                               WorkItem&& item,
+                               std::vector<std::unique_ptr<ChaseLevDeque<WorkItem*>>>& workerDeques,
+                               std::priority_queue<WorkItem>& globalQueue,
+                               std::mutex& queueMutex) {
+  if (workerIdx >= 0 && workerIdx < static_cast<int>(workerDeques.size())) {
+    WorkItem* localItem = new WorkItem(std::move(item));
+    if (workerDeques[workerIdx]->push(localItem)) {
+      return true;
+    }
+    WorkItem movedBack = std::move(*localItem);
+    delete localItem;
+    std::lock_guard<std::mutex> lock(queueMutex);
+    globalQueue.push(std::move(movedBack));
+    return true;
+  }
+  std::lock_guard<std::mutex> lock(queueMutex);
+  globalQueue.push(std::move(item));
+  return true;
+}
+
+bool hasNumaNode(const std::vector<int>& workerNumaNodes, int numaNode) {
+  if (numaNode < 0) {
+    return false;
+  }
+  for (int node : workerNumaNodes) {
+    if (node == numaNode) {
+      return true;
+    }
+  }
+  return false;
+}
+
+} // namespace
+
 // ── Constructor ────────────────────────────────────────────────────────────
 Scheduler::Scheduler(int numThreads) : numThreads_(numThreads) {
   if (numThreads_ <= 0) {
@@ -30,6 +68,11 @@ Scheduler::Scheduler(int numThreads) : numThreads_(numThreads) {
   }
 
   workerNumaNodes_.resize(numThreads_, -1);
+  workerDeques_.resize(numThreads_);
+  for (int i = 0; i < numThreads_; ++i) {
+    workerDeques_[i] = std::make_unique<ChaseLevDeque<WorkItem*>>();
+  }
+
   for (int i = 0; i < numThreads_; ++i) {
     workers_.emplace_back([this, i]() {
       this->workerLoop(i);
@@ -240,14 +283,44 @@ void Scheduler::buildNumaTopology() {
 
 // ── Worker loop ────────────────────────────────────────────────────────────
 void Scheduler::workerLoop(int workerIdx) {
-  // My NUMA node, or -1 if topology is unavailable.
+  t_workerIdx = workerIdx;
   int myNode = (workerIdx >= 0 && workerIdx < static_cast<int>(workerNumaNodes_.size()))
                ? workerNumaNodes_[workerIdx]
                : -1;
 
   while (true) {
+    // item holds the next work unit by value — no heap allocation needed for the
+    // global-queue path.  Items from the Chase-Lev deques are heap-allocated by
+    // the submitters; we move from them and then delete the pointer immediately.
     WorkItem item;
+    bool gotItem = false;
+
+    // 1. Pop from own deque (lock-free, O(1))
     {
+      WorkItem* p = nullptr;
+      if (workerDeques_[workerIdx]->pop(p) && p) {
+        item = std::move(*p);
+        delete p;
+        gotItem = true;
+      }
+    }
+
+    // 2. Work-stealing from other deques (lock-free)
+    if (!gotItem) {
+      for (int i = 1; i < numThreads_; ++i) {
+        WorkItem* p = nullptr;
+        int targetIdx = (workerIdx + i) % numThreads_;
+        if (workerDeques_[targetIdx]->steal(p) && p) {
+          item = std::move(*p);
+          delete p;
+          gotItem = true;
+          break;
+        }
+      }
+    }
+
+    // 3. Fallback: wait on global / NUMA-local priority queue
+    if (!gotItem) {
       std::unique_lock<std::mutex> lock(mutex_);
       cv_.wait(lock, [this, myNode] {
         if (shutdown_) return true;
@@ -259,33 +332,35 @@ void Scheduler::workerLoop(int workerIdx) {
         return false;
       });
 
-      // Check all queues empty for shutdown
       bool allEmpty = queue_.empty();
       if (allEmpty && myNode >= 0) {
         auto it = numaQueues_.find(myNode);
         if (it != numaQueues_.end() && !it->second.empty()) allEmpty = false;
       }
-      if (shutdown_ && allEmpty)
-        return;
+      if (shutdown_ && allEmpty) return;
 
-      // NUMA-local queue takes priority over the global work-stealing queue.
+      // Move item off the priority queue — no heap allocation.
+      // priority_queue::top() returns const ref; const_cast + move is safe here
+      // because we call pop() immediately after, so the element is logically gone.
       if (myNode >= 0) {
         auto it = numaQueues_.find(myNode);
         if (it != numaQueues_.end() && !it->second.empty()) {
-          item = it->second.top();
+          item = std::move(const_cast<WorkItem&>(it->second.top()));
           it->second.pop();
+          gotItem = true;
         } else if (!queue_.empty()) {
-          item = queue_.top();
+          item = std::move(const_cast<WorkItem&>(queue_.top()));
           queue_.pop();
-        } else {
-          continue;  // Spurious wakeup
+          gotItem = true;
         }
-      } else {
-        if (queue_.empty()) continue;
-        item = queue_.top();
+      } else if (!queue_.empty()) {
+        item = std::move(const_cast<WorkItem&>(queue_.top()));
         queue_.pop();
+        gotItem = true;
       }
     }
+
+    if (!gotItem) continue;
 
     // Execute the generic task for this work-item (outside mutex!)
     try {
@@ -321,10 +396,8 @@ void Scheduler::workerLoop(int workerIdx) {
       VGRE_LOG_ERROR("Scheduler", "Unhandled exception in scheduled task");
     }
 
-    if (pending_.load() > 0) {
-      pending_--;
-    }
-    completed_++;
+    pending_.fetch_sub(1, std::memory_order_acq_rel);
+    completed_.fetch_add(1, std::memory_order_relaxed);
     cv_.notify_all(); // Wake waitStream/waitAll
   }
 }
@@ -348,26 +421,29 @@ Scheduler::submitStreamTask(StreamId stream, std::function<void()> taskFn,
   node->task = std::move(taskFn);
   auto future = node->promise.get_future();
 
+  std::shared_ptr<StreamQueue> sq;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutdown_.load()) {
       node->promise.set_value(VGREResult::ERR_NOT_INITIALIZED);
       return future;
     }
-    auto &sq = streamQueues_[stream];
+    sq = streamQueues_[stream];
     if (!sq) {
       sq = std::make_shared<StreamQueue>();
-      sq->streamPriority = priority;
-    } else {
-      sq->streamPriority = priority;
+      streamQueues_[stream] = sq;
     }
+  }
 
+  {
+    std::lock_guard<std::mutex> sqLock(sq->streamMutex);
+    sq->streamPriority = priority;
     sq->pendingTasks.push(node);
     pending_++; // Increment immediately to prevent waitAll() returning early
     if (!sq->isProcessing) {
       sq->isProcessing = true;
       VGRE_LOG_DEBUG("Scheduler", "Started processing stream " + std::to_string(stream));
-      tryProcessStream(stream);
+      tryProcessStream(sq, stream);
     }
   }
 
@@ -375,26 +451,21 @@ Scheduler::submitStreamTask(StreamId stream, std::function<void()> taskFn,
   return future;
 }
 
-void Scheduler::tryProcessStream(StreamId stream) {
-  // Note: Called with global mutex_ already locked.
-  auto it = streamQueues_.find(stream);
-  if (it == streamQueues_.end())
-    return;
-
-  auto &sq = *it->second;
-  if (sq.pendingTasks.empty()) {
-    sq.isProcessing = false;
+void Scheduler::tryProcessStream(std::shared_ptr<StreamQueue> sq, StreamId stream) {
+  // Note: Called with sq->streamMutex already locked.
+  if (sq->pendingTasks.empty()) {
+    sq->isProcessing = false;
     cv_.notify_all();
     return;
   }
 
-  auto node = sq.pendingTasks.front();
+  auto node = sq->pendingTasks.front();
   VGRE_LOG_DEBUG("Scheduler", "Dequeueing task from stream " + std::to_string(stream));
 
   WorkItem item;
   item.streamId = stream;
-  item.priority = sq.streamPriority;
-  item.execute = [node, stream, this]() {
+  item.priority = sq->streamPriority;
+  item.execute = [node, stream, sq, this]() {
     // Execute the actual kernel/task work
     try {
       if (node->task) {
@@ -411,26 +482,26 @@ void Scheduler::tryProcessStream(StreamId stream) {
       }
     }
 
-    // Chain next task: lock mutex, pop completed, schedule next
+    // Chain next task: lock sq mutex, pop completed, schedule next
     {
-      std::lock_guard<std::mutex> lock(this->mutex_);
-      auto it = this->streamQueues_.find(stream);
-      if (it == this->streamQueues_.end() || !it->second) {
-        return;
-      }
-      auto &sq2 = *it->second;
-      if (sq2.pendingTasks.empty()) {
-        sq2.isProcessing = false;
+      std::lock_guard<std::mutex> sqLock(sq->streamMutex);
+      if (sq->pendingTasks.empty()) {
+        sq->isProcessing = false;
         this->cv_.notify_all();
         return;
       }
-      sq2.pendingTasks.pop();
-      sq2.isProcessing = false;
-      this->tryProcessStream(stream);
+      sq->pendingTasks.pop();
+      sq->isProcessing = false;
+      if (!sq->pendingTasks.empty()) {
+        sq->isProcessing = true;
+        this->tryProcessStream(sq, stream);
+      } else {
+        this->cv_.notify_all();
+      }
     }
   };
 
-  queue_.push(std::move(item));
+  enqueueWithWorkerFallback(t_workerIdx, std::move(item), workerDeques_, queue_, mutex_);
   cv_.notify_all();
 }
 
@@ -465,11 +536,8 @@ Scheduler::submitConcurrentTask(std::function<void()> taskFn, int priority) {
     }
   };
 
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    queue_.push(std::move(item));
-    pending_++;
-  }
+  enqueueWithWorkerFallback(t_workerIdx, std::move(item), workerDeques_, queue_, mutex_);
+  pending_++;
   cv_.notify_all();
 
   return future;
@@ -494,6 +562,14 @@ Scheduler::submitNumaTask(StreamId stream, std::function<void()> taskFn,
   node->task = std::move(taskFn);
   auto future = node->promise.get_future();
 
+  bool numaNodeValid = hasNumaNode(workerNumaNodes_, numaNode);
+  if (numaNode >= 0 && !numaNodeValid) {
+    VGRE_LOG_WARN("Scheduler",
+                  "Invalid NUMA node " + std::to_string(numaNode) +
+                  " for submitNumaTask; falling back to global queue");
+    numaNode = -1;
+  }
+
   WorkItem item;
   item.streamId          = stream;
   item.priority          = priority;
@@ -507,15 +583,17 @@ Scheduler::submitNumaTask(StreamId stream, std::function<void()> taskFn,
     }
   };
 
-  {
+  if (t_workerIdx != -1 && t_workerIdx < numThreads_) {
+    enqueueWithWorkerFallback(t_workerIdx, std::move(item), workerDeques_, queue_, mutex_);
+  } else {
     std::lock_guard<std::mutex> lock(mutex_);
     if (numaNode >= 0) {
       numaQueues_[numaNode].push(std::move(item));
     } else {
       queue_.push(std::move(item));
     }
-    pending_++;
   }
+  pending_++;
   cv_.notify_all();
 
   return future;
@@ -586,6 +664,11 @@ void Scheduler::setThreadCount(int n) {
   shutdown_ = false;
   numThreads_ = n;
   workerNumaNodes_.assign(numThreads_, -1);
+  workerDeques_.clear();
+  workerDeques_.resize(numThreads_);
+  for (int i = 0; i < numThreads_; ++i) {
+    workerDeques_[i] = std::make_unique<ChaseLevDeque<WorkItem*>>();
+  }
   for (int i = 0; i < numThreads_; ++i) {
     workers_.emplace_back([this, i]() {
       this->workerLoop(i);

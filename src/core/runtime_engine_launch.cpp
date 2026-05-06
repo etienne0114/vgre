@@ -490,21 +490,32 @@ VGREResult RuntimeEngine::launchCooperativeKernelMultiDevice(
   }
 
   // ── Phase 2: Concurrent execution ────────────────────────────────────────
-  // One std::thread per device; all threads spin on readyCount until every
-  // device has passed Phase 1, then burst into executeCooperative together.
+  // One std::thread per device. All threads wait on a condition_variable start-
+  // gate so every device begins executeCooperative simultaneously. Using a cv
+  // avoids the yield()-spin that wastes CPU between thread creation and launch.
   std::atomic<int>         readyCount{0};
+  std::mutex               startMutex;
+  std::condition_variable  startCv;
   std::vector<VGREResult>  results(N, VGREResult::SUCCESS);
   std::vector<std::thread> threads;
   threads.reserve(N);
 
   for (size_t i = 0; i < N; ++i) {
     threads.emplace_back(
-        [this, &ready, &readyCount, &results, N, i]() {
-          // Start-gate: wait until every device thread has reached this point.
-          readyCount.fetch_add(1, std::memory_order_release);
-          while (readyCount.load(std::memory_order_acquire) <
-                 static_cast<int>(N))
-            std::this_thread::yield();
+        [this, &ready, &readyCount, &startMutex, &startCv, &results, N, i]() {
+          // Announce this thread is ready.
+          {
+            std::unique_lock<std::mutex> lk(startMutex);
+            readyCount.fetch_add(1, std::memory_order_release);
+          }
+          startCv.notify_all();
+          // Block until ALL device threads have reached the gate.
+          {
+            std::unique_lock<std::mutex> lk(startMutex);
+            startCv.wait(lk, [&readyCount, N] {
+              return readyCount.load(std::memory_order_acquire) >= static_cast<int>(N);
+            });
+          }
 
           auto &rl = ready[i];
           results[i] = executor_->executeCooperative(
