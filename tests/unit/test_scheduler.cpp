@@ -134,6 +134,31 @@ void test_statistics() {
             << ", pending=" << sched.getPendingTasks() << std::endl;
 }
 
+void test_resize_thread_pool() {
+  Scheduler sched(2);
+  sched.setThreadCount(6);
+  assert(sched.getThreadCount() == 6);
+
+  std::atomic<int> done{0};
+  auto f = sched.submitConcurrentTask([&done]() { done.fetch_add(1); });
+  assert(f.get() == VGREResult::SUCCESS);
+  sched.waitAll();
+  assert(done.load() == 1);
+
+  std::cout << "[PASS] Resize thread pool" << std::endl;
+}
+
+void test_invalid_numa_fallback() {
+  Scheduler sched(4);
+  std::atomic<int> ran{0};
+  auto f = sched.submitNumaTask(7, [&ran]() { ran.fetch_add(1); }, 9999, 1);
+  assert(f.get() == VGREResult::SUCCESS);
+  sched.waitAll();
+  assert(ran.load() == 1);
+
+  std::cout << "[PASS] Invalid NUMA node fallback" << std::endl;
+}
+
 int main() {
   std::cout << "=== VGRE Scheduler Unit Tests ===" << std::endl;
 
@@ -143,6 +168,8 @@ int main() {
   test_wait_stream();
   test_thread_count();
   test_statistics();
+  test_resize_thread_pool();
+  test_invalid_numa_fallback();
 
   std::cout << "\nAll scheduler tests passed!" << std::endl;
   return 0;
