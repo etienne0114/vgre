@@ -170,10 +170,14 @@ private:
   // Sequence counters (monotonic, for replay protection)
   std::atomic<uint64_t> sendSequence_{0};
 
-  // Sliding 256-bit bitmap replay window (RFC 4303-style).
+  // Sliding 2048-bit bitmap replay window (RFC 4303-style).
+  // Extended from 256 bits to accommodate high-bandwidth links where packets
+  // may be reordered by more than 256 positions without being replays.
   // Bit i set → packet at (highestSeenSeq_ - i) has been received.
-  // Bit 0 = highestSeenSeq_ itself; bit 255 = oldest in window.
-  uint64_t replayBitmap_[4]{};
+  // Bit 0 = highestSeenSeq_ itself; bit 2047 = oldest in window.
+  static constexpr size_t kReplayWindowBits = 2048;
+  static constexpr size_t kReplayWordCount  = kReplayWindowBits / 64; // 32
+  uint64_t replayBitmap_[kReplayWordCount]{};
   uint64_t highestSeenSeq_{0};
   bool replayWindowSeeded_{false}; // false until first valid packet received
 
