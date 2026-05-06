@@ -249,6 +249,37 @@ add_executable(test_memory_pool unit/test_memory_pool.cpp)
 target_link_libraries(test_memory_pool PRIVATE vgre)
 add_test(NAME MemoryPool COMMAND test_memory_pool)
 
+add_executable(test_memory_scheduler_benchmarks unit/test_memory_scheduler_benchmarks.cpp)
+target_link_libraries(test_memory_scheduler_benchmarks PRIVATE vgre)
+add_test(NAME MemorySchedulerBenchmarks COMMAND test_memory_scheduler_benchmarks)
+set_tests_properties(MemorySchedulerBenchmarks PROPERTIES TIMEOUT 180)
+
+add_executable(test_scheduler_benchmark unit/test_scheduler_benchmark.cpp)
+target_sources(test_scheduler_benchmark PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/core/scheduler.cpp
+)
+target_link_libraries(test_scheduler_benchmark PRIVATE
+    OpenMP::OpenMP_CXX
+    Threads::Threads
+)
+add_test(NAME SchedulerBenchmark COMMAND test_scheduler_benchmark)
+set_tests_properties(SchedulerBenchmark PROPERTIES TIMEOUT 120)
+
+add_executable(test_vector_engine_benchmark unit/test_vector_engine_benchmark.cpp)
+target_sources(test_vector_engine_benchmark PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/runtime/vector_engine.cpp
+)
+target_link_libraries(test_vector_engine_benchmark PRIVATE
+    OpenMP::OpenMP_CXX
+)
+add_test(NAME VectorEngineBenchmark COMMAND test_vector_engine_benchmark)
+set_tests_properties(VectorEngineBenchmark PROPERTIES TIMEOUT 120)
+
+add_executable(test_memory_manager_benchmark unit/test_memory_manager_benchmark.cpp)
+target_link_libraries(test_memory_manager_benchmark PRIVATE vgre)
+add_test(NAME MemoryManagerBenchmark COMMAND test_memory_manager_benchmark)
+set_tests_properties(MemoryManagerBenchmark PROPERTIES TIMEOUT 180)
+
 # ── TCP Cluster Module Unit Tests (Phase 5, Tasks 33.4–39.4) ──────────────
 add_executable(test_packet_handler
     advanced/tcp_cluster/test_packet_handler.cpp)

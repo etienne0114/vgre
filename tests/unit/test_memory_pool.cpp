@@ -271,6 +271,47 @@ static void test_pool_stats() {
   PASS();
 }
 
+static void test_pool_invalid_free_pointer() {
+  TEST("Pool rejects invalid free pointer");
+  auto &mm = RuntimeEngine::instance().getMemoryManager();
+
+  PoolHandle pool = 0;
+  auto r = mm.createPool(pool, 256);
+  ASSERT_EQ(r, VGREResult::SUCCESS, "createPool should succeed");
+
+  uint8_t local[64] = {0};
+  r = mm.freeToPool(pool, local);
+  ASSERT_EQ(r, VGREResult::ERR_INVALID_VALUE,
+            "freeToPool should reject pointer outside pool");
+
+  r = mm.destroyPool(pool);
+  ASSERT_EQ(r, VGREResult::SUCCESS, "destroyPool should succeed");
+  PASS();
+}
+
+static void test_pool_destroy_busy_with_live_allocs() {
+  TEST("Pool destroy busy when allocations alive");
+  auto &mm = RuntimeEngine::instance().getMemoryManager();
+
+  PoolHandle pool = 0;
+  auto r = mm.createPool(pool, 256);
+  ASSERT_EQ(r, VGREResult::SUCCESS, "createPool should succeed");
+
+  MemoryHandle h = nullptr;
+  r = mm.allocateFromPool(pool, 256, h);
+  ASSERT_EQ(r, VGREResult::SUCCESS, "alloc should succeed");
+
+  r = mm.destroyPool(pool);
+  ASSERT_EQ(r, VGREResult::ERR_BUSY,
+            "destroyPool should fail when live allocations exist");
+
+  r = mm.freeToPool(pool, h);
+  ASSERT_EQ(r, VGREResult::SUCCESS, "free should succeed");
+  r = mm.destroyPool(pool);
+  ASSERT_EQ(r, VGREResult::SUCCESS, "destroyPool should succeed after free");
+  PASS();
+}
+
 int main() {
   printf("=== VGRE Memory Pool Test Suite ===\n\n");
 
@@ -288,6 +329,8 @@ int main() {
   test_pool_invalid_handle();
   test_pool_block_size();
   test_pool_stats();
+  test_pool_invalid_free_pointer();
+  test_pool_destroy_busy_with_live_allocs();
 
   printf("\n=== Results: %d/%d passed ===\n", tests_passed,
          tests_passed + tests_failed);
