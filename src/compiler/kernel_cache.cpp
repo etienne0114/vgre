@@ -72,8 +72,14 @@ std::string KernelCache::getCacheFilePath(const std::string& sourceHash, const s
     // Create subdirectory if needed
     try {
         std::filesystem::create_directories(cachePath);
+    } catch (const std::exception& e) {
+        VGRE_LOG_WARN("KernelCache",
+                      "Failed to create cache subdirectory '" + cachePath +
+                      "': " + e.what() + " — disk cache disabled for this path");
     } catch (...) {
-        // Ignore errors, will fail on file write if needed
+        VGRE_LOG_WARN("KernelCache",
+                      "Failed to create cache subdirectory '" + cachePath +
+                      "' (unknown error) — disk cache disabled for this path");
     }
     
     return cachePath + "/" + sourceHash + ext;

@@ -1,5 +1,9 @@
 #include "vgre/advanced/runtime_profiler.h"
+#include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/common/logger.h"
+#include "vgre/core/memory_manager.h"
+#include "vgre/core/runtime_engine.h"
+#include "vgre/core/virtual_gpu_device.h"
 
 #include <fstream>
 #include <sstream>
@@ -294,6 +298,28 @@ std::string RuntimeProfiler::toOTLPJSON() const {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(6);
 
+    // Collect hw.gpu.* metrics for resource attributes from runtime state.
+    uint64_t memLimit = 4ULL * 1024 * 1024 * 1024;
+    if (vgre::core::RuntimeEngine::instance().isInitialized()) {
+      memLimit =
+          vgre::core::RuntimeEngine::instance().getDevice().getProperties().totalGlobalMem;
+    }
+    uint64_t memUsage = static_cast<uint64_t>(
+        vgre::core::MemoryManager::instance().getUsedMemory());
+    double memUtil =
+        (memLimit > 0) ? std::min(1.0, static_cast<double>(memUsage) / memLimit) : 0.0;
+
+    auto &ae = vgre::advanced::AdaptiveExecutionEngine::instance();
+    ae.updateInstantaneousMetrics();
+    double peakGflops = ae.getMaxGFLOPS();
+    double instGflops = ae.getInstantaneousGFLOPS();
+    double gpuUtil = (peakGflops > 0.0)
+                         ? std::clamp(instGflops / peakGflops, 0.0, 1.0)
+                         : memUtil;
+    float tempC = ae.getDeviceTemperature();
+    const char *status =
+        (tempC > 0.0f && tempC >= 85.0f) ? "degraded" : "ok";
+
     oss << "{\n"
         << "  \"resourceSpans\": [\n"
         << "    {\n"
@@ -302,9 +328,30 @@ std::string RuntimeProfiler::toOTLPJSON() const {
         << "          { \"key\": \"service.name\","
            " \"value\": { \"stringValue\": \"vgre\" } },\n"
         << "          { \"key\": \"service.version\","
-           " \"value\": { \"stringValue\": \"0.1.2\" } },\n"
+           " \"value\": { \"stringValue\": \"1.1.0\" } },\n"
         << "          { \"key\": \"telemetry.sdk.name\","
-           " \"value\": { \"stringValue\": \"vgre-runtime-profiler\" } }\n"
+           " \"value\": { \"stringValue\": \"vgre-runtime-profiler\" } },\n"
+        // OTel Hardware Semantic Conventions (hw.gpu.*)
+        << "          { \"key\": \"hw.id\","
+           " \"value\": { \"stringValue\": \"vgre-0\" } },\n"
+        << "          { \"key\": \"hw.type\","
+           " \"value\": { \"stringValue\": \"gpu\" } },\n"
+        << "          { \"key\": \"hw.model.name\","
+           " \"value\": { \"stringValue\": \"VGRE Virtual GPU\" } },\n"
+        << "          { \"key\": \"driver.version\","
+           " \"value\": { \"stringValue\": \"1.1.0\" } },\n"
+        << "          { \"key\": \"hw.gpu.memory.limit\","
+           " \"value\": { \"intValue\": \"" << memLimit << "\" } },\n"
+        << "          { \"key\": \"hw.gpu.memory.usage\","
+           " \"value\": { \"intValue\": \"" << memUsage << "\" } },\n"
+        << "          { \"key\": \"hw.gpu.memory.utilization\","
+           " \"value\": { \"doubleValue\": " << memUtil << " } },\n"
+        << "          { \"key\": \"hw.gpu.utilization\","
+           " \"value\": { \"doubleValue\": " << gpuUtil << " } },\n"
+        << "          { \"key\": \"hw.gpu.errors\","
+           " \"value\": { \"intValue\": \"0\" } },\n"
+        << "          { \"key\": \"hw.status\","
+           " \"value\": { \"stringValue\": \"" << status << "\" } }\n"
         << "        ]\n"
         << "      },\n"
         << "      \"scopeSpans\": [\n"

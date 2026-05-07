@@ -15,6 +15,7 @@ namespace core {
 struct Stream {
   StreamId id = 0;
   int priority = 0;
+  unsigned int flags = 0;
   StreamState state = StreamState::IDLE;
 };
 
@@ -43,11 +44,15 @@ public:
   bool hasContext() const;
 
   // Streams
-  VGREResult createStream(StreamId &outId, int priority = 0);
+  VGREResult createStream(StreamId &outId, int priority = 0,
+                          unsigned int flags = 0);
   VGREResult destroyStream(StreamId id);
   VGREResult synchronizeStream(StreamId id);
   VGREResult synchronizeDevice();
   VGREResult getStreamPriority(StreamId id, int &outPriority) const;
+  VGREResult setStreamPriority(StreamId id, int priority);
+  VGREResult getStreamFlags(StreamId id, unsigned int &outFlags) const;
+  VGREResult getStreamDevice(StreamId id, int &outDevice) const;
 
   void detectHardware();
 
