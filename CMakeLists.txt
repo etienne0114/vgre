@@ -68,6 +68,31 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             add_compile_options(-msse4.1)
             add_compile_definitions(VGRE_HAS_SSE4)
         endif()
+
+        # Intel AMX (Sapphire Rapids / Granite Rapids / Zen 5 with AMX extension)
+        # Requires: amx_tile + amx_bf16 in /proc/cpuinfo flags
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "/proc/cpuinfo")
+            execute_process(
+                COMMAND grep -c " amx_tile " /proc/cpuinfo
+                OUTPUT_VARIABLE _CPUINFO_AMX_TILE OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+            execute_process(
+                COMMAND grep -c " amx_bf16 " /proc/cpuinfo
+                OUTPUT_VARIABLE _CPUINFO_AMX_BF16 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        else()
+            set(_CPUINFO_AMX_TILE "0")
+            set(_CPUINFO_AMX_BF16 "0")
+        endif()
+        check_cxx_compiler_flag("-mamx-tile"  COMPILER_SUPPORTS_AMX_TILE)
+        check_cxx_compiler_flag("-mamx-bf16"  COMPILER_SUPPORTS_AMX_BF16)
+        if(COMPILER_SUPPORTS_AMX_TILE AND COMPILER_SUPPORTS_AMX_BF16
+           AND _CPUINFO_AMX_TILE GREATER "0" AND _CPUINFO_AMX_BF16 GREATER "0")
+            add_compile_options(-mamx-tile -mamx-bf16)
+            add_compile_definitions(VGRE_HAS_AMX)
+            message(STATUS "Intel AMX: enabled (-mamx-tile -mamx-bf16)")
+        else()
+            message(STATUS "Intel AMX: not available (requires Sapphire Rapids CPU + compiler support)")
+        endif()
+
         # AES-NI: enable hardware AES acceleration when available (AES-NI is present
         # on all x86 CPUs since Intel Westmere 2010 / AMD Bulldozer 2011).
         if(COMPILER_SUPPORTS_AES)
@@ -204,6 +229,86 @@ if(VGRE_USE_OPENCL_BACKEND)
     endif()
 endif()
 
+# ── RDMA / RoCE optional transport ──────────────────────────────────────────
+# Enable with: cmake -DVGRE_ENABLE_RDMA=ON
+# Requires: libibverbs-dev (apt install libibverbs-dev rdma-core)
+option(VGRE_ENABLE_RDMA "Enable RDMA/RoCE zero-copy cluster transport (requires libibverbs)" OFF)
+if(VGRE_ENABLE_RDMA)
+    find_library(IBVERBS_LIB NAMES ibverbs)
+    find_path(IBVERBS_INCLUDE NAMES infiniband/verbs.h)
+    if(IBVERBS_LIB AND IBVERBS_INCLUDE)
+        message(STATUS "RDMA: found libibverbs at ${IBVERBS_LIB}")
+        add_compile_definitions(VGRE_HAS_RDMA)
+        set(VGRE_RDMA_LIBS ${IBVERBS_LIB})
+        include_directories(${IBVERBS_INCLUDE})
+    else()
+        message(FATAL_ERROR
+            "VGRE_ENABLE_RDMA=ON but libibverbs not found.\n"
+            "Install with: sudo apt install libibverbs-dev rdma-core\n"
+            "or disable RDMA: cmake -DVGRE_ENABLE_RDMA=OFF")
+    endif()
+else()
+    message(STATUS "RDMA: disabled (use -DVGRE_ENABLE_RDMA=ON to enable)")
+    set(VGRE_RDMA_LIBS "")
+endif()
+
+# ── Optional: gRPC / Protobuf cluster transport ───────────────────────────────
+# Enable with: cmake -DVGRE_ENABLE_GRPC=ON
+# Requires: libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
+#   (apt install libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc)
+# When enabled: vgre_advanced gains a gRPC service that exposes KernelLaunch,
+# MemAlloc, and MemSync RPCs — allowing distributed ML frameworks (Ray Serve,
+# Horovod, DeepSpeed) to offload to a VGRE worker over a gRPC channel.
+option(VGRE_ENABLE_GRPC "Enable gRPC/Protobuf cluster transport (requires libgrpc++)" OFF)
+if(VGRE_ENABLE_GRPC)
+    find_package(Protobuf QUIET)
+    find_library(GRPC_LIB    NAMES grpc++)
+    find_library(GRPCPP_LIB  NAMES grpc++_reflection)
+    find_program(PROTOC      NAMES protoc)
+    find_program(GRPC_CPP_PLUGIN NAMES grpc_cpp_plugin)
+    if(Protobuf_FOUND AND GRPC_LIB AND PROTOC AND GRPC_CPP_PLUGIN)
+        message(STATUS "gRPC: found grpc++ at ${GRPC_LIB}")
+        add_compile_definitions(VGRE_HAS_GRPC)
+        set(VGRE_GRPC_LIBS ${GRPC_LIB})
+        if(GRPCPP_LIB)
+            list(APPEND VGRE_GRPC_LIBS ${GRPCPP_LIB})
+        endif()
+        list(APPEND VGRE_GRPC_LIBS protobuf::libprotobuf)
+        include_directories(${Protobuf_INCLUDE_DIRS})
+        # Generate protobuf + gRPC stubs from vgre_cluster.proto
+        set(VGRE_PROTO_DIR  ${PROJECT_SOURCE_DIR}/proto)
+        set(VGRE_PROTO_GEN  ${CMAKE_CURRENT_BINARY_DIR}/proto_gen)
+        file(MAKE_DIRECTORY ${VGRE_PROTO_GEN})
+        set(VGRE_PROTO_SRC  ${VGRE_PROTO_DIR}/vgre_cluster.proto)
+        set(VGRE_PROTO_CC   ${VGRE_PROTO_GEN}/vgre_cluster.pb.cc)
+        set(VGRE_PROTO_H    ${VGRE_PROTO_GEN}/vgre_cluster.pb.h)
+        set(VGRE_GRPC_CC    ${VGRE_PROTO_GEN}/vgre_cluster.grpc.pb.cc)
+        set(VGRE_GRPC_H     ${VGRE_PROTO_GEN}/vgre_cluster.grpc.pb.h)
+        add_custom_command(
+            OUTPUT ${VGRE_PROTO_CC} ${VGRE_PROTO_H} ${VGRE_GRPC_CC} ${VGRE_GRPC_H}
+            COMMAND ${PROTOC}
+                --proto_path=${VGRE_PROTO_DIR}
+                --cpp_out=${VGRE_PROTO_GEN}
+                --grpc_out=${VGRE_PROTO_GEN}
+                --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN}
+                ${VGRE_PROTO_SRC}
+            DEPENDS ${VGRE_PROTO_SRC}
+            COMMENT "Generating gRPC stubs from vgre_cluster.proto"
+        )
+        set(VGRE_GRPC_GENERATED ${VGRE_PROTO_CC} ${VGRE_GRPC_CC})
+        include_directories(${VGRE_PROTO_GEN})
+    else()
+        message(FATAL_ERROR
+            "VGRE_ENABLE_GRPC=ON but grpc++/protobuf not found.\n"
+            "Install: sudo apt install libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc\n"
+            "or disable: cmake -DVGRE_ENABLE_GRPC=OFF")
+    endif()
+else()
+    message(STATUS "gRPC transport: disabled (use -DVGRE_ENABLE_GRPC=ON to enable)")
+    set(VGRE_GRPC_LIBS "")
+    set(VGRE_GRPC_GENERATED "")
+endif()
+
 # ── Global include directory ────────────────────────────────────────────────
 include_directories(${PROJECT_SOURCE_DIR}/include)
 
@@ -319,9 +424,12 @@ add_library(vgre_cudart SHARED
     src/api/cudart_shim.cpp
     src/api/cudart_shim_stream.cpp
     src/api/cuda_driver_shim.cpp
+    src/api/cuda_virtual_memory.cpp
+    src/api/cuda_external_semaphore.cpp
     src/api/cuda_interceptor.cpp
     src/api/cuda_interceptor_memory.cpp
     src/api/cuda_interceptor_graphs.cpp
+    src/api/nvtx_shim.cpp
     src/api/vgre_c_api.cpp
     src/api/vgre_c_api_graphs.cpp
     src/api/vgre_c_api_telemetry.cpp

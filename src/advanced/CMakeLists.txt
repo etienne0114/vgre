@@ -30,6 +30,10 @@ add_library(vgre_advanced OBJECT
     token/token_manager_win32.cpp
     token/token_manager_tpm2.cpp
     token/token_manager_fallback.cpp
+    rdma_transport.cpp
+    mps_control.cpp
+    grpc_transport.cpp
+    ${VGRE_GRPC_GENERATED}
 )
 
 target_include_directories(vgre_advanced PUBLIC
@@ -41,6 +45,17 @@ target_link_libraries(vgre_advanced PUBLIC
     OpenMP::OpenMP_CXX
     Threads::Threads
 )
+
+# Link libibverbs when RDMA is enabled
+if(VGRE_ENABLE_RDMA AND VGRE_RDMA_LIBS)
+    target_link_libraries(vgre_advanced PUBLIC ${VGRE_RDMA_LIBS})
+endif()
+
+# Link gRPC/Protobuf when gRPC transport is enabled
+if(VGRE_ENABLE_GRPC AND VGRE_GRPC_LIBS)
+    target_link_libraries(vgre_advanced PUBLIC ${VGRE_GRPC_LIBS})
+    target_include_directories(vgre_advanced PRIVATE ${VGRE_PROTO_GEN})
+endif()
 
 if(APPLE)
     target_link_libraries(vgre_advanced PUBLIC
