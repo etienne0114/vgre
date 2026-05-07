@@ -252,6 +252,32 @@ VGRE_EXPORT int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count);
  */
 VGRE_EXPORT int vgre_set_background_compute(int enabled);
 
+/* ── GPU Cache Statistics ────────────────────────────────────────────────────
+ * Software-modeled L1/L2 GPU cache hit/miss counters.
+ * Accumulated across all blocks since the last vgre_reset_cache_stats() call.
+ */
+typedef struct {
+    uint64_t l2_hits;
+    uint64_t l2_misses;
+    uint64_t l2_evictions;
+    double   l2_hit_rate;   /* hits / (hits + misses), in [0.0, 1.0] */
+    uint64_t l1_config_kb;  /* configured L1 size (VGRE_L1_CACHE_KB) */
+    uint64_t l2_config_mb;  /* configured L2 size (VGRE_L2_CACHE_MB) */
+} vgre_cache_stats_t;
+
+/**
+ * @brief Returns accumulated GPU cache model statistics (L2 counters).
+ * @param stats Pointer to vgre_cache_stats_t struct to fill.
+ * @return 0 on success.
+ */
+VGRE_EXPORT int vgre_get_cache_stats(vgre_cache_stats_t *stats);
+
+/**
+ * @brief Resets all GPU cache model counters and invalidates L2 cache state.
+ * @return 0 on success.
+ */
+VGRE_EXPORT int vgre_reset_cache_stats(void);
+
 /**
  * @brief Sets the IPC service mode.
  * @param is_master If 1, initializes as the master session (Dashboard).

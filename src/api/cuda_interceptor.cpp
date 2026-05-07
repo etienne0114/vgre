@@ -229,7 +229,7 @@ cudaError_t CUDAInterceptor::streamCreate(cudaStream_t *stream) {
     return cudaErrorInvalidValue;
 
   StreamId id;
-  auto r = core::RuntimeEngine::instance().getDevice().createStream(id);
+  auto r = core::RuntimeEngine::instance().getDevice().createStream(id, 0, 0);
   if (r != VGREResult::SUCCESS) {
     g_lastError = convertResult(r);
     return g_lastError;
@@ -240,14 +240,6 @@ cudaError_t CUDAInterceptor::streamCreate(cudaStream_t *stream) {
 
 cudaError_t CUDAInterceptor::streamCreateWithFlags(cudaStream_t *stream,
                                                    unsigned int flags) {
-  (void)flags;
-  return streamCreate(stream);
-}
-
-cudaError_t CUDAInterceptor::streamCreateWithPriority(cudaStream_t *stream,
-                                                      unsigned int flags,
-                                                      int priority) {
-  (void)flags;
   if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
     if (err != cudaSuccess)
@@ -257,8 +249,29 @@ cudaError_t CUDAInterceptor::streamCreateWithPriority(cudaStream_t *stream,
     return cudaErrorInvalidValue;
 
   StreamId id;
-  auto r = core::RuntimeEngine::instance().getDevice().createStream(id,
-                                                                    priority);
+  auto r = core::RuntimeEngine::instance().getDevice().createStream(id, 0, flags);
+  if (r != VGREResult::SUCCESS) {
+    g_lastError = convertResult(r);
+    return g_lastError;
+  }
+  *stream = id;
+  return cudaSuccess;
+}
+
+cudaError_t CUDAInterceptor::streamCreateWithPriority(cudaStream_t *stream,
+                                                      unsigned int flags,
+                                                      int priority) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
+  if (!stream)
+    return cudaErrorInvalidValue;
+
+  StreamId id;
+  auto r = core::RuntimeEngine::instance().getDevice().createStream(
+      id, priority, flags);
   if (r != VGREResult::SUCCESS) {
     g_lastError = convertResult(r);
     return g_lastError;

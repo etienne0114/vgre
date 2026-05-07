@@ -81,12 +81,37 @@ cudaError_t CUDAInterceptor::graphClone(cudaGraph_t *pGraphClone,
 cudaError_t CUDAInterceptor::streamBeginCapture(cudaStream_t stream) {
   if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();
-    if (err != cudaSuccess)
-      return err;
+    if (err != cudaSuccess) return err;
   }
   auto r = core::RuntimeEngine::instance().streamBeginCapture(stream);
-  cudaError_t err = convertResult(r);
-  return err;
+  return convertResult(r);
+}
+
+cudaError_t CUDAInterceptor::streamBeginCaptureToGraph(cudaStream_t stream,
+                                                        cudaGraph_t graph,
+                                                        const std::vector<uint64_t> &dependencies,
+                                                        unsigned int /*mode*/) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess) return err;
+  }
+  // Capture directly into the caller-provided graph and seed the dependency
+  // frontier so the first captured node observes the requested incoming edges.
+  auto r = core::RuntimeEngine::instance().streamBeginCaptureToGraph(
+      stream, graph, dependencies);
+  return convertResult(r);
+}
+
+int CUDAInterceptor::getStreamPriority(cudaStream_t stream) const {
+  int priority = 0;
+  core::RuntimeEngine::instance().getDevice().getStreamPriority(stream, priority);
+  return priority;
+}
+
+unsigned int CUDAInterceptor::getStreamFlags(cudaStream_t stream) const {
+  unsigned int flags = 0;
+  (void)core::RuntimeEngine::instance().getDevice().getStreamFlags(stream, flags);
+  return flags;
 }
 
 cudaError_t CUDAInterceptor::streamEndCapture(cudaStream_t stream,
