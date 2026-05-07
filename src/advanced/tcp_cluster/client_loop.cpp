@@ -9,6 +9,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/gpu_passthrough.h"
+#include "vgre/advanced/rdma_transport.h"
 #include "vgre/advanced/tcp_cluster/internal/collective_ops_manager.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/memory_manager.h"
@@ -189,6 +190,31 @@ void TCPClusterManager::clientLoop() {
       send_packet(client_fd_, PacketType::CAPABILITY, &cpkt, sizeof(CapabilityPacket),
                   client_secure_channel_.get());
     }
+
+    // ── Phase 2b: RDMA negotiation (optional, falls back to TCP) ─────────────
+    // Attempt to upgrade bulk DATA_BODY transfers to zero-copy RDMA.
+    // If RDMA hardware is absent or negotiation fails, all traffic stays on TCP.
+    std::unique_ptr<RDMAContext>    rdmaCtx;
+    std::unique_ptr<RDMAConnection> rdmaConn;
+    {
+        RDMAContext* raw = RDMAContext::tryCreate();
+        if (raw && client_secure_channel_ && client_secure_channel_->isInitialized()) {
+            rdmaCtx.reset(raw);
+            rdmaConn = std::make_unique<RDMAConnection>();
+            if (!rdmaConn->connect(*client_secure_channel_, *rdmaCtx)) {
+                VGRE_LOG_INFO("TCPCluster",
+                    "Worker: RDMA negotiation failed — using TCP for bulk transfers");
+                rdmaConn.reset();
+                rdmaCtx.reset();
+            } else {
+                VGRE_LOG_INFO("TCPCluster",
+                    "Worker: RDMA transport active for bulk DATA_BODY transfers");
+            }
+        } else {
+            if (raw) delete raw;
+        }
+    }
+    // rdmaConn is used below for DATA_BODY sends > 64 KB when non-null.
 
     // ── Phase 3: Per-connection communication loop ─────────────────────────
     bool disconnected = false;

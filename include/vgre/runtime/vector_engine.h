@@ -12,14 +12,20 @@ namespace runtime {
 
 // ── CPU SIMD feature flags ─────────────────────────────────────────────────
 struct SIMDCapabilities {
-    bool hasSSE2  = false;
-    bool hasSSE4  = false;
-    bool hasAVX   = false;
-    bool hasAVX2  = false;
-    bool hasAVX512= false;
-    bool hasFMA   = false;
-    bool hasVNNI  = false;
-    bool hasAMX   = false;
+    bool hasSSE2    = false;
+    bool hasSSE4    = false;
+    bool hasAVX     = false;
+    bool hasAVX2    = false;
+    bool hasAVX512  = false;
+    bool hasFMA     = false;
+    bool hasVNNI    = false;
+    // AMX sub-features (Intel Sapphire Rapids / Granite Rapids)
+    bool hasAMXTile = false;   // CPUID 7.0 EDX[24] — AMX-TILE base support
+    bool hasAMXBF16 = false;   // CPUID 7.0 EDX[22] — AMX-BF16 dot-product
+    // True only when CPUID bits set AND OS has granted XTILEDATA via arch_prctl
+    bool amxEnabled = false;
+    // Legacy alias kept for existing callers
+    bool hasAMX     = false;   // set to (amxEnabled) after init
 };
 
 // ── BFloat16 Support ───────────────────────────────────────────────────────
