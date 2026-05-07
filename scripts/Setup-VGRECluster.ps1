@@ -179,17 +179,35 @@ if ($current -ne $TokenFile) {
 
 $env:VGRE_TCP_AUTH_TOKEN_FILE = $TokenFile
 
-# -- Step 3: PATH handling ----------------------------------------------------
-if (Test-Path $InstallDir) {
-
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-
-    if (-not ($userPath -split ";" | Where-Object { $_ -eq $InstallDir })) {
-        $newPath = "$InstallDir;$userPath"
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-
-        Write-Host "[OK] Added VGRE to PATH." -ForegroundColor Green
+# -- Step 3: Install vgre-token into PATH -------------------------------------
+$ScriptDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
+$TokenScriptDir = Join-Path $InstallDir "scripts"
+if (-not (Test-Path $TokenScriptDir)) {
+    New-Item -ItemType Directory -Path $TokenScriptDir -Force | Out-Null
+}
+foreach ($f in @("vgre-token.ps1","vgre-token.bat")) {
+    $src = Join-Path $ScriptDir $f
+    if (Test-Path $src) {
+        Copy-Item -Path $src -Destination (Join-Path $TokenScriptDir $f) -Force
     }
+}
+Write-Host "[OK] vgre-token installed to $TokenScriptDir" -ForegroundColor Green
+
+# -- Step 4: PATH handling ----------------------------------------------------
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User") ?? ""
+$dirs = $userPath -split ";" | Where-Object { $_ -ne "" }
+$changed = $false
+foreach ($dir in @($InstallDir, $TokenScriptDir)) {
+    if (-not ($dirs -contains $dir)) {
+        $dirs += $dir
+        $changed = $true
+    }
+}
+if ($changed) {
+    [Environment]::SetEnvironmentVariable("Path", ($dirs -join ";"), "User")
+    Write-Host "[OK] Added VGRE to PATH." -ForegroundColor Green
+} else {
+    Write-Host "[OK] VGRE already in PATH." -ForegroundColor Green
 }
 
 # -- Final fingerprint --------------------------------------------------------
@@ -204,14 +222,21 @@ if ($activeFp) {
 # -- Done ---------------------------------------------------------------------
 Write-Host ""
 Write-Host "==================== DONE ====================" -ForegroundColor Cyan
+Write-Host "TOKEN MANAGEMENT (run from any terminal):" -ForegroundColor White
+Write-Host "  vgre-token generate          create / rotate token"
+Write-Host "  vgre-token fingerprint       show SHA-256 for comparison"
+Write-Host "  vgre-token set <TOKEN>       paste token from master"
+Write-Host "  vgre-token copy              show copy command for workers"
+Write-Host "  vgre-token verify            check master/worker match"
+Write-Host ""
 Write-Host "MASTER:"
-Write-Host "  .\scripts\Start-VGRE.ps1 --master"
+Write-Host "  vgre-start --master   (or  .\scripts\Start-VGRE.ps1 --master)"
 Write-Host ""
 Write-Host "WORKER:"
-Write-Host "  .\scripts\Start-VGRE.ps1 --worker"
+Write-Host "  vgre-start --worker   (or  .\scripts\Start-VGRE.ps1 --worker)"
 Write-Host ""
 Write-Host "DIFFERENT SUBNET:"
-Write-Host "  .\scripts\Start-VGRE.ps1 --worker --master-ip <IP>"
+Write-Host "  vgre-start --worker --master-ip <IP>"
 Write-Host ""
-Write-Host "IMPORTANT: Restart terminal after setup."
+Write-Host "IMPORTANT: Open a NEW terminal for PATH changes to take effect."
 Write-Host "==============================================" -ForegroundColor Cyan

@@ -1,869 +1,725 @@
 # VGRE User Guide
 
-Welcome to the Virtual GPU Runtime Engine (VGRE). This guide will help you set up and use VGRE to run CUDA-accelerated applications on non-NVIDIA hardware across Windows, Linux, and macOS.
+**Version 1.2.0** — Virtual GPU Runtime Engine
+
+VGRE lets you run unmodified CUDA applications on any x86-64 or ARM64 CPU by intercepting the CUDA runtime at load time. No GPU required. Includes a real-time Flutter dashboard, distributed cluster support, and a full token management CLI.
 
 ---
 
-## 1. Getting Started
+## Table of Contents
 
-### 1.1 System Requirements
-
-**All Platforms:**
-- **Compiler**: LLVM/Clang 16+ (required for kernel compilation)
-- **Build System**: CMake 3.16+
-- **Memory**: 4GB+ RAM recommended
-- **CPU**: x86_64 or ARM64 (Apple Silicon supported)
-
-**Platform-Specific Requirements:**
-
-**Linux (Ubuntu 22.04+, Fedora 38+, or equivalent):**
-- `build-essential` or equivalent development tools
-- `libssl-dev` (for secure networking)
-- `libtpm2-tss-dev` (optional, for hardware token storage)
-- `libsecret-1-dev` (optional, for GNOME Keyring integration)
-- `keyutils` (optional, for Linux kernel keyring)
-
-**Windows (Windows 10/11):**
-- Visual Studio 2022 Build Tools or Community Edition with C++ support
-- Windows SDK 10.0.19041.0 or later
-- PowerShell 5.1+ or PowerShell Core 7+
-
-**macOS (macOS 11.0+):**
-- Xcode Command Line Tools (`xcode-select --install`)
-- Homebrew (recommended for dependencies)
-- `brew install libomp` (for OpenMP support)
-
-### 1.2 Installation
-
-#### Quick Installation (All Platforms)
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/vgre-org/vgre-runtime.git
-   cd vgre-runtime
-   ```
-
-#### Linux Installation
-
-2. **Install dependencies:**
-   ```bash
-   # Ubuntu/Debian
-   sudo apt update
-   sudo apt install build-essential cmake llvm-18 clang-18 libssl-dev libtpm2-tss-dev libsecret-1-dev keyutils
-
-   # Fedora/RHEL
-   sudo dnf install gcc-c++ cmake llvm clang openssl-devel tpm2-tss-devel libsecret-devel keyutils
-   ```
-
-3. **Build and install:**
-   ```bash
-   mkdir build && cd build
-   cmake .. -DCMAKE_BUILD_TYPE=Release
-   cmake --build . --parallel $(nproc)
-   sudo cmake --install .
-   ```
-   This installs libraries to `/usr/local/lib/vgre/` and headers to `/usr/local/include/vgre/`.
-
-#### macOS Installation
-
-2. **Install dependencies:**
-   ```bash
-   # Install Homebrew if not already installed
-   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-   
-   # Install dependencies
-   brew install cmake llvm libomp
-   ```
-
-3. **Build and install:**
-   ```bash
-   mkdir build && cd build
-   cmake .. -DCMAKE_BUILD_TYPE=Release
-   cmake --build . --parallel $(sysctl -n hw.ncpu)
-   sudo cmake --install .
-   ```
-   This installs libraries to `/usr/local/lib/vgre/` and headers to `/usr/local/include/vgre/`.
-
-#### Windows Installation
-
-2. **Install build tools:**
-   - Download and install [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
-   - Or install Visual Studio 2022 Community with "Desktop development with C++" workload
-   - Install [CMake](https://cmake.org/download/) and add to PATH
-   - Install [LLVM](https://github.com/llvm/llvm-project/releases) and add to PATH
-
-3. **Build the project:**
-   ```powershell
-   # Open "Developer PowerShell for VS 2022" or run vcvars64.bat first
-   mkdir build
-   cd build
-   cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
-   cmake --build . --config Release --parallel
-   ```
-
-4. **Install (optional):**
-   ```powershell
-   # Run as Administrator
-   cmake --install . --config Release
-   ```
-   This installs to `C:\Program Files\VGRE\` by default.
+1. [Quick Start](#1-quick-start)
+2. [System Requirements](#2-system-requirements)
+3. [Installation](#3-installation)
+4. [Running CUDA Applications](#4-running-cuda-applications)
+5. [Environment Variables Reference](#5-environment-variables-reference)
+6. [Token Management (`vgre-token`)](#6-token-management-vgre-token)
+7. [Cluster Setup (`vgre-start`)](#7-cluster-setup-vgre-start)
+8. [Dashboard](#8-dashboard)
+9. [Advanced Features](#9-advanced-features)
+10. [Troubleshooting](#10-troubleshooting)
 
 ---
 
-## 2. Using VGRE with Applications
+## 1. Quick Start
 
-VGRE supports two primary modes of operation: **Native Integration** and **Framework Interception**.
-
-### 2.1 Framework Interception (PyTorch, TensorFlow, etc.)
-
-#### Linux/macOS
-To run an existing CUDA application (like a Python script using PyTorch) on VGRE, use `LD_PRELOAD` to redirect CUDA calls:
+### Linux / macOS — one command
 
 ```bash
-export LD_PRELOAD=/usr/local/lib/vgre/libvgre_cudart.so
-export VGRE_LOG_LEVEL=INFO
-python my_pytorch_script.py
+git clone https://github.com/vgre-org/vgre-runtime.git
+cd vgre-runtime
+bash install_local.sh
 ```
 
-#### Windows
-On Windows, use DLL replacement or PATH manipulation:
+`install_local.sh` automatically:
+- Detects and installs missing dependencies (cmake, LLVM, OpenMP, Flutter, …)
+- Builds the native engine and Flutter dashboard
+- Writes `~/.vgre/env` with all environment variables
+- Adds `source ~/.vgre/env` to your shell profile (bashrc / zshrc / profile)
+- Creates the auth token at `~/.vgre/token`
+- Links `vgre-dashboard`, `vgre-start`, and `vgre-token` into `~/.local/bin`
+
+After install, open a **new terminal** and run:
+
+```bash
+vgre-dashboard          # launch the real-time monitor
+vgre-start --test       # local master + worker self-test
+```
+
+### Windows — one command
 
 ```powershell
-# Method 1: Copy VGRE DLLs to application directory
-copy "C:\Program Files\VGRE\bin\vgre_cudart.dll" ".\cudart64_110.dll"
-copy "C:\Program Files\VGRE\bin\vgre.dll" ".\"
+git clone https://github.com/vgre-org/vgre-runtime.git
+cd vgre-runtime
+.\scripts\vgre_sync.bat
+```
 
-# Method 2: Add VGRE to PATH (system-wide)
-$env:PATH = "C:\Program Files\VGRE\bin;$env:PATH"
+`vgre_sync.bat` automatically:
+- Detects and installs cmake / LLVM / Visual Studio Build Tools / Flutter via **winget** (falls back to **chocolatey**)
+- Builds native engine and dashboard
+- Creates a Desktop shortcut and launcher
+- Installs `vgre-token.bat` into `%LOCALAPPDATA%\VGRE\scripts` and adds it to PATH
+
+Open a **new terminal** and run:
+
+```powershell
+vgre-token generate     # create auth token
+vgre-dashboard          # launch dashboard (or double-click Desktop shortcut)
+```
+
+---
+
+## 2. System Requirements
+
+### All Platforms
+
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
+| OS | Linux 5.4 / Win 10 / macOS 11 | Ubuntu 22.04 / Win 11 / macOS 14 |
+| CPU | x86-64, 2 cores | x86-64 with AVX-512 or ARM64, 8+ cores |
+| RAM | 4 GB | 16 GB+ |
+| CMake | 3.18 | 3.25+ |
+| LLVM / Clang | 16 | 18 |
+| C++ standard | C++17 | C++20 |
+| Flutter SDK | 3.16 | 3.24+ |
+
+### Optional — unlocks additional features
+
+| Package | Feature unlocked |
+|---------|-----------------|
+| `libomp-dev` | Multi-threaded kernel execution (required for OpenMP) |
+| `libssl-dev` | Secure cluster transport (TLS) |
+| `libtpm2-tss-dev` | Hardware TPM token storage (Linux) |
+| `libibverbs-dev` | RDMA/RoCE zero-copy transport (`-DVGRE_ENABLE_RDMA=ON`) |
+| `libgrpc++-dev` | gRPC cluster transport (`-DVGRE_ENABLE_GRPC=ON`) |
+| Intel AMX CPU | AMX tile acceleration (auto-detected at build time) |
+
+---
+
+## 3. Installation
+
+### 3.1 Linux — step by step
+
+```bash
+# Install build tools (Ubuntu/Debian)
+sudo apt-get update
+sudo apt-get install -y \
+    cmake build-essential git curl \
+    llvm-18 clang-18 libclang-dev \
+    libomp-dev libssl-dev
+
+# Install Flutter (choose one)
+sudo snap install flutter --classic          # Ubuntu with snapd
+# OR: brew install --cask flutter           # via Homebrew
+# OR: install_local.sh auto-installs it
+
+# Build + install
+bash install_local.sh
+```
+
+Verify the install:
+
+```bash
+source ~/.vgre/env        # load env in current shell (new terminals load it automatically)
+vgre-dashboard --version  # prints: VGRE x.y.z
+vgre-token fingerprint    # prints: SHA-256 of your token
+```
+
+### 3.2 macOS — step by step
+
+```bash
+# Install Homebrew if needed
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Install dependencies
+brew install cmake llvm libomp openssl git
+brew install --cask flutter
+
+# Build + install
+bash install_local.sh
+```
+
+> **Apple Silicon (M1/M2/M3):** VGRE builds natively for ARM64. AMX instructions
+> on Apple Silicon use a different interface and are not yet supported; the AVX-512
+> path is disabled. Performance comes from OpenMP parallelism.
+
+### 3.3 Windows — step by step
+
+1. Open **PowerShell** (no admin needed for user-scope install):
+
+```powershell
+# Auto-installs all dependencies via winget:
+.\scripts\vgre_sync.bat
+```
+
+2. If winget is not available, install dependencies manually first:
+   - [CMake](https://cmake.org/download/) — tick "Add to PATH"
+   - [LLVM 18](https://github.com/llvm/llvm-project/releases/tag/llvmorg-18.1.8)
+   - [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) with "Desktop development with C++"
+   - [Flutter SDK](https://flutter.dev/docs/get-started/install/windows)
+
+3. Then re-run `vgre_sync.bat`.
+
+### 3.4 Build options (cmake flags)
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `-DCMAKE_BUILD_TYPE=Release` | Release | Optimized build |
+| `-DVGRE_ENABLE_NATIVE_SIMD=ON` | OFF | Enable `-march=native` (max SIMD, not portable) |
+| `-DVGRE_ENABLE_RDMA=ON` | OFF | Enable RDMA/RoCE transport (requires `libibverbs-dev`) |
+| `-DVGRE_ENABLE_GRPC=ON` | OFF | Enable gRPC cluster transport (requires `libgrpc++-dev`) |
+
+```bash
+# Example: Release + RDMA
+cmake -S . -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DVGRE_ENABLE_RDMA=ON
+cmake --build build -j$(nproc)
+```
+
+### 3.5 Dev-mode install (no copy to system)
+
+```bash
+bash install_local.sh --dev   # runs from repo, wraps flutter run -d linux
+bash install_local.sh --check # only verify deps, no build
+```
+
+---
+
+## 4. Running CUDA Applications
+
+### 4.1 Intercept mode (LD_PRELOAD)
+
+Redirect an existing CUDA application to VGRE without recompiling it:
+
+```bash
+# Linux
+export LD_PRELOAD="$HOME/.local/share/VGRE/lib/libvgre_cudart.so"
+python my_pytorch_script.py
+
+# macOS
+export DYLD_INSERT_LIBRARIES="$HOME/.local/share/VGRE/lib/libvgre_cudart.dylib"
 python my_pytorch_script.py
 ```
 
-### 2.2 Native Python Integration
-For custom scripts, use the `vgre` Python package (all platforms):
+> **Windows:** Copy `%LOCALAPPDATA%\VGRE\vgre_cudart.dll` into the application
+> directory and rename it `cudart64_120.dll` (match your CUDA version suffix).
+
+### 4.2 Python bindings
 
 ```python
 import vgre
 import numpy as np
 
-# Initialize the VGRE Runtime
 rt = vgre.Runtime()
 rt.init(enable_profiling=True)
 
+# Allocate GPU memory
+a = rt.alloc(1024 * np.float32().itemsize)
+b = rt.alloc(1024 * np.float32().itemsize)
+
+# Upload data
+data = np.ones(1024, dtype=np.float32)
+rt.memcpy_h2d(a, data)
+
 # Launch a kernel
-kernel = vgre.Kernel("vector_add", my_source_code)
-rt.launch(kernel, grid=(1024, 1, 1), block=(256, 1, 1), args=[a_ptr, b_ptr, c_ptr])
-
+kernel = vgre.Kernel("vector_scale", """
+    __global__ void vector_scale(float* a, float scale, int n) {
+        int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i < n) a[i] *= scale;
+    }
+""")
+rt.launch(kernel, grid=(4, 1, 1), block=(256, 1, 1), args=[a, 2.0, 1024])
 rt.synchronize()
+
+result = rt.memcpy_d2h(a, 1024 * 4)
+print(np.frombuffer(result, dtype=np.float32)[:8])
 ```
 
-### 2.3 Environment Variables (All Platforms)
+### 4.3 Using the C API
 
-**Common Configuration:**
-```bash
-# Linux/macOS
-export VGRE_LOG_LEVEL=INFO              # DEBUG, INFO, WARN, ERROR
-export VGRE_CACHE_DIR=~/.vgre/cache     # Kernel compilation cache
-export VGRE_DEVICE_COUNT=4              # Override auto-detected device count
+```c
+#include <vgre/api/vgre_c_api.h>
 
-# Windows (PowerShell)
-$env:VGRE_LOG_LEVEL="INFO"
-$env:VGRE_CACHE_DIR="$env:USERPROFILE\.vgre\cache"
-$env:VGRE_DEVICE_COUNT="4"
-```
+int main(void) {
+    vgre_init();
 
-**Performance Tuning:**
-```bash
-# Linux/macOS
-export VGRE_ENABLE_NUMA=1               # Enable NUMA awareness (Linux only)
-export VGRE_WORKER_THREADS=16           # Override worker thread count
-export VGRE_SIMD_LEVEL=AVX2             # Force SIMD level (SSE4, AVX, AVX2, AVX512)
+    void* ptr = NULL;
+    vgre_malloc(&ptr, 1024 * sizeof(float));
 
-# Windows (PowerShell)
-$env:VGRE_WORKER_THREADS="16"
-$env:VGRE_SIMD_LEVEL="AVX2"
-```
+    // ... launch kernels ...
 
----
-
-## 3. VGRE Dashboard & Monitoring
-
-VGRE includes a real-time monitor to visualize compute and memory utilization across all platforms.
-
-### 3.1 Dashboard Installation
-
-**Prerequisites:**
-- Flutter SDK 3.0+ ([installation guide](https://flutter.dev/docs/get-started/install))
-
-**Build Dashboard:**
-```bash
-# All platforms - run from project root
-cd vgre_dashboard
-flutter build [platform]
-```
-
-Where `[platform]` is:
-- `linux` for Linux
-- `windows` for Windows  
-- `macos` for macOS
-
-### 3.2 Launch Dashboard
-
-**Linux:**
-```bash
-./vgre_dashboard/build/linux/x64/release/bundle/vgre_dashboard
-# Or if installed system-wide:
-vgre-dashboard
-```
-
-**macOS:**
-```bash
-open ./vgre_dashboard/build/macos/Build/Products/Release/vgre_dashboard.app
-# Or if installed:
-open -a "VGRE Dashboard"
-```
-
-**Windows:**
-```powershell
-.\vgre_dashboard\build\windows\x64\runner\Release\vgre_dashboard.exe
-# Or if installed:
-Start-Process "VGRE Dashboard"
-```
-
-### 3.3 Dashboard Features
-- **GFLOPS Meter**: Real-time compute performance across all devices
-- **UVM Residency Map**: Visualizes page migrations in managed memory
-- **3D Topology**: View your virtual device cluster in a 3D orbital space
-- **Cross-Platform**: Native look and feel on each operating system
-- **Auto-Discovery**: Automatically connects to active VGRE sessions via IPC
-
----
-
-## 4. Distributed Cluster Setup
-
-VGRE lets you aggregate multiple network-connected CPUs into a single Virtual GPU cluster. This works across mixed platforms (Linux, Windows, macOS).
-
-> [!IMPORTANT]
-> Run the scripts **in the exact order shown below**. Each step must finish successfully before moving to the next. You only run steps 1–3 once per machine; after that you only need step 4 every time you want to use the cluster.
-
----
-
-### 4.0 Script Execution Order
-
-```
-Every machine (master + every worker):
-  STEP 1 → Build & install     (vgre_sync.sh / vgre_sync.bat)
-  STEP 2 → Set up cluster token (setup-cluster.sh / Setup-VGRECluster.ps1)
-
-Master machine only:
-  STEP 3 → Copy token to workers
-
-Then to run the cluster:
-  STEP 4a → Start master        (vgre-start --master / Start-VGRE.ps1 --master)
-  STEP 4b → Start each worker   (vgre-start --worker / Start-VGRE.ps1 --worker)
-```
-
----
-
-### Step 1 — Build and Install (run once per machine)
-
-This compiles the VGRE engine, worker binary, and dashboard, then installs them to your local profile.
-
-**Linux / macOS:**
-```bash
-bash scripts/vgre_sync.sh
-```
-
-**Windows (run from Developer PowerShell or a terminal with VS build tools in PATH):**
-```
-scripts\vgre_sync.bat
-```
-
-Expected output: ends with `✅ VGRE Sync Complete!` (Linux/macOS) or `VGRE Sync Complete.` (Windows).  
-If the build fails, fix the reported error before continuing.
-
----
-
-### Step 2 — Set Up the Cluster Token (run once per machine)
-
-Every machine in the cluster — master and every worker — must run this step. The script generates a secure 64-character random token, saves it to a local file, and wires it into your shell/environment automatically so you never have to type it again.
-
-**Linux / macOS:**
-```bash
-bash scripts/setup-cluster.sh
-```
-
-**Windows (PowerShell):**
-```powershell
-.\scripts\Setup-VGRECluster.ps1
-```
-
-The script will:
-1. Ask whether to generate a new token or paste one from another node
-2. Save the token to `~/.vgre/token` (Linux/macOS) or `%USERPROFILE%\.vgre\token` (Windows)
-3. Add `VGRE_TCP_AUTH_TOKEN_FILE` to your shell profile / User environment — permanent, loads on every new terminal
-4. Display a **SHA256 fingerprint** (first 16 characters) — write this down
-
-> [!WARNING]
-> **Do not run the setup script more than once** unless you intend to replace the token. Each run generates a new random token. If you regenerate on the master, all workers become disconnected until they get the new token file.
-
-To check the current token fingerprint on any node at any time without regenerating:
-
-```bash
-# Linux/macOS
-bash scripts/setup-cluster.sh --show-fingerprint
-```
-```powershell
-# Windows
-.\scripts\Setup-VGRECluster.ps1 -ShowFingerprint
-```
-
----
-
-### Step 3 — Copy the Token to Every Worker (run on master only)
-
-The master and all workers **must have the identical token file**. Only the master generates the token in Step 2; all workers receive a copy of it.
-
-**Linux/macOS — copy from master to each worker over SSH:**
-```bash
-# Replace user@WORKER_IP with actual credentials for each worker machine
-scp ~/.vgre/token  user@WORKER_IP:~/.vgre/token
-```
-
-**Windows — copy from master to worker (PowerShell with SSH):**
-```powershell
-scp "$env:USERPROFILE\.vgre\token"  user@WORKER_IP:"~/.vgre/token"
-```
-
-**If SSH is not available** (USB, shared drive, etc.):
-1. On the master: run `bash scripts/setup-cluster.sh --show-fingerprint` and note the full SHA256
-2. On the worker: run `bash scripts/setup-cluster.sh` (Linux) or `.\scripts\Setup-VGRECluster.ps1` (Windows), choose option **2 (Enter your own token)**, and paste the token printed by the master's setup script
-
-**After copying, verify the fingerprints match on both machines:**
-```bash
-# Run on BOTH master and worker — output must be identical
-bash scripts/setup-cluster.sh --show-fingerprint          # Linux/macOS
-.\scripts\Setup-VGRECluster.ps1 -ShowFingerprint          # Windows
-```
-
-If the fingerprints differ, the handshake will fail. Re-copy the token file and verify again before proceeding.
-
----
-
-### Step 4a — Start the Master
-
-Run this on the machine that will run your CUDA application. The master is embedded in the VGRE Dashboard.
-
-**Linux/macOS:**
-```bash
-vgre-start --master
-```
-
-**Windows (PowerShell):**
-```powershell
-.\scripts\Start-VGRE.ps1 --master
-```
-
-The script will print the token fingerprint before launching. The dashboard opens and begins listening for worker connections on port 7777. Keep this terminal / process running.
-
----
-
-### Step 4b — Start Each Worker
-
-Run this on every compute node that will contribute CPU resources. Start the master (Step 4a) before starting workers.
-
-**Linux/macOS — same subnet (auto-discovery):**
-```bash
-vgre-start --worker
-```
-
-**Linux/macOS — different subnet (specify master IP):**
-```bash
-vgre-start --worker --master-ip 192.168.1.50
-```
-
-**Windows — same subnet:**
-```powershell
-.\scripts\Start-VGRE.ps1 --worker
-```
-
-**Windows — different subnet:**
-```powershell
-.\scripts\Start-VGRE.ps1 --worker --master-ip 192.168.1.50
-```
-
-The worker prints its token fingerprint, then enters a scanning/discovery loop. Once connected, the master dashboard shows the worker's CPU and RAM stats.
-
-**Optional flags (all platforms):**
-```bash
-# Custom port (must match master port)
-vgre-start --worker --port 7778
-
-# Limit thread count
-vgre-start --worker --threads 8
-
-# Windows equivalents:
-.\scripts\Start-VGRE.ps1 --worker --port 7778 --threads 8
-```
-
----
-
-### Quick Local Test (same machine — no worker needed)
-
-To verify your installation without a second machine:
-
-**Linux/macOS:**
-```bash
-vgre-start --test
-```
-
-**Windows:**
-```powershell
-.\scripts\Start-VGRE.ps1 --test
-```
-
-This starts both master and worker on the same machine and shuts them down cleanly when you press Enter / Ctrl+C.
-
----
-
-### 4.1 Full Script Reference
-
-| Order | Script | Platform | When to run |
-|-------|--------|----------|-------------|
-| 1 | `scripts/vgre_sync.sh` | Linux/macOS | Once per machine — build & install |
-| 1 | `scripts\vgre_sync.bat` | Windows | Once per machine — build & install |
-| 2 | `scripts/setup-cluster.sh` | Linux/macOS | Once per machine — generate/configure token |
-| 2 | `.\scripts\Setup-VGRECluster.ps1` | Windows | Once per machine — generate/configure token |
-| 3 | `scp ~/.vgre/token user@WORKER:~/.vgre/token` | Linux/macOS | Once — copy token from master to each worker |
-| 4a | `vgre-start --master` | Linux/macOS | Every session — start the master dashboard |
-| 4a | `.\scripts\Start-VGRE.ps1 --master` | Windows | Every session — start the master dashboard |
-| 4b | `vgre-start --worker` | Linux/macOS | Every session — start a worker node |
-| 4b | `.\scripts\Start-VGRE.ps1 --worker` | Windows | Every session — start a worker node |
-
-> [!NOTE]
-> AES-256 HMAC-authenticated encryption is always active when a token is configured. There is no separate `VGRE_CLUSTER_SECURE` variable — security is on by default.
-
----
-
-### 4.2 How Auto-Discovery Works
-
-The master broadcasts its presence over UDP on the local subnet every 2 seconds. Workers listen and connect automatically — **no manual IP configuration required** on the same subnet.
-
-```
-[Master machine]          UDP broadcast (port 7778)
-  vgre-start --master  ─────────────────────────────►  [Worker machine]
-                        ◄─────────────────────────────  vgre-start --worker
-                         TCP connection (port 7777)
-                           HMAC handshake + AES-256
-                         ◄─────────────────────────────
-                         Shared memory + kernel dispatch
-```
-
-For **cross-subnet clusters** where UDP broadcast does not reach, use `--master-ip` to specify the master address directly.
-
-### 4.3 Cross-Platform Cluster Support
-
-**Mixed Platform Clusters:**
-- ✅ Linux Master + Windows Workers
-- ✅ Windows Master + Linux Workers
-- ✅ macOS Master + Linux/Windows Workers
-- ✅ Any combination of platforms
-
-**Security Features:**
-- Hardware-backed token storage on all platforms:
-  - **Linux**: Kernel keyring + GNOME Keyring + TPM 2.0
-  - **Windows**: Credential Manager + TPM 2.0
-  - **macOS**: Keychain + TPM 2.0
-- AES-256-CTR encryption for all cluster communication
-- HMAC-SHA256 handshake authentication
-
-**Recent Fixes (April 2026):**
-- ✅ Windows worker crash (exit code -1073741819) - Fixed WSA error handling
-- ✅ WSAStartup/WSACleanup pairing - Fixed on all error paths
-- ✅ TCP cluster authentication bypass - Fixed with HMAC-SHA256
-- ✅ Secure channel token validation - Fixed with session key verification
-- ✅ UDP discovery ports - Made configurable via env vars
-
-### 4.4 Hybrid Authentication Mode (VGRE_CLUSTER_STRICT_AUTH)
-
-VGRE supports two authentication modes for handling token mismatches between master and worker nodes:
-
-**Fallback Mode (Default):**
-- When a token mismatch is detected, the connection retries using a shared default key. The channel remains AES-256 encrypted at all times — no plaintext connection is ever used.
-- Leave `VGRE_CLUSTER_STRICT_AUTH` unset or set to `0`.
-
-**Strict Mode:**
-- When a token mismatch is detected, the connection is rejected immediately.
-- Set `VGRE_CLUSTER_STRICT_AUTH=1` on all nodes for production.
-
----
-
-### 4.5 Cross-Platform Cluster Support
-
-**Mixed Platform Clusters:**
-- ✅ Linux Master + Windows Workers
-- ✅ Windows Master + Linux Workers
-- ✅ macOS Master + Linux/Windows Workers
-- ✅ Any combination of platforms
-
-**Testing Cross-Platform Connections:**
-1. Ensure all machines have the same token (see Section 4.4)
-2. Run `vgre-start --master` on the master machine
-3. Run `vgre-start --worker` on each worker machine
-4. Verify the master dashboard shows worker CPU and RAM stats
-
-**Platform-Specific Notes:**
-
-**Linux → Windows:**
-- No special configuration needed
-- Windows worker must have `vgre-worker.exe` allowed through Windows Firewall
-
-**Windows → Linux:**
-- No special configuration needed
-- Linux worker must have port 7777 open in firewall
-
-**Windows → Windows:**
-- Both machines must have `vgre-worker.exe` allowed through Windows Firewall
-- Ensure both machines are on the same subnet for auto-discovery
-
-**macOS → Any Platform:**
-- No special configuration needed
-- macOS Keychain integration for secure token storage
-
-### 4.6 Troubleshooting Token Mismatches
-
-The most common cluster problem is mismatched tokens (different token on master vs worker). Use the fingerprint to diagnose — **do not compare the raw token strings**; compare the SHA256 fingerprint which is shorter and harder to misread.
-
-**Step 1 — Check the fingerprint on each node:**
-
-```bash
-# Linux/macOS (run on master, then on each worker)
-bash scripts/setup-cluster.sh --show-fingerprint
-```
-```powershell
-# Windows (run on master, then on each worker)
-.\scripts\Setup-VGRECluster.ps1 -ShowFingerprint
-```
-
-All nodes must print **identical** SHA256 output. If any differ:
-
-**Step 2 — Re-copy the master's token to the worker:**
-```bash
-# Linux/macOS
-scp ~/.vgre/token  user@WORKER_IP:~/.vgre/token
-
-# Windows
-scp "$env:USERPROFILE\.vgre\token"  user@WORKER_IP:"~/.vgre/token"
-```
-
-**Step 3 — If you pasted the token manually** (e.g., via Notepad), re-run setup option 2 on the worker and paste carefully. The token must be exactly 64 hex characters, no spaces, no newline. The setup script strips stray whitespace automatically.
-
-**Step 4 — Verify again**, then restart the worker:
-```bash
-bash scripts/setup-cluster.sh --show-fingerprint   # must match master
-vgre-start --worker
-```
-
-**Step 5 — Worker exits immediately on Windows:**
-1. Run `.\scripts\vgre_sync.bat` to ensure all DLLs are installed
-2. Check that `%LOCALAPPDATA%\VGRE\lib\libvgre.dll` exists
-3. Allow `vgre-worker.exe` through Windows Firewall
-4. Run with full diagnostic output:
-   ```powershell
-   & "$env:LOCALAPPDATA\VGRE\vgre-worker.exe" --port 7777
-   ```
-
----
-
-### 4.7 Manual Token Setup (Advanced — CI/containers)
-
-If you cannot use the setup script (e.g., Docker container, CI pipeline), set the token inline. This token is only active for the current terminal session.
-
-**Linux/macOS:**
-```bash
-export VGRE_TCP_AUTH_TOKEN="my-secret-key"
-vgre-worker --port 7777
-```
-
-**Windows:**
-```powershell
-$env:VGRE_TCP_AUTH_TOKEN = "my-secret-key"
-.\scripts\Start-VGRE.ps1 --worker
-```
-
-> [!WARNING]
-> The inline token is visible in the process list (`ps aux` / Task Manager) and is lost when the terminal closes. Use the setup script for persistent, secure storage.
-
-**Cross-subnet with manual token:**
-```bash
-# Linux/macOS
-export VGRE_TCP_AUTH_TOKEN="my-secret-key"
-export VGRE_CLUSTER_NODES="192.168.1.50:7777"
-./my_cuda_app
-```
-
----
-
-### 4.7 Complete Environment Variable Reference
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `VGRE_TCP_AUTH_TOKEN` | — | Cluster auth token value (visible in process list — prefer the file) |
-| `VGRE_TCP_AUTH_TOKEN_FILE` | — | Path to file containing auth token (set automatically by setup script) |
-| `VGRE_CLUSTER_NODES` | — | Manual node list: `192.168.1.50:7777,10.0.0.100:7777` |
-| `VGRE_CLUSTER_STRICT_AUTH` | `0` | Set to `1` to reject mismatched-token connections (production) |
-| `VGRE_ALLOW_AUTH_FALLBACK` | `0` | Set to `1` to allow fallback to default key on mismatch (development) |
-| `VGRE_CLUSTER_UDP_ANNOUNCE_PORT` | `7778` | UDP port master broadcasts presence on |
-| `VGRE_CLUSTER_UDP_WORKER_PORT` | `7779` | UDP port workers broadcast presence on |
-| `VGRE_CLUSTER_MASTER_IP` | — | Comma-separated IP allowlist for worker security |
-| `VGRE_CLUSTER_BANDWIDTH_REPROBE_SEC` | `300` | Bandwidth re-probe interval in seconds |
-| `VGRE_PBKDF2_ITERATIONS` | `600000` | PBKDF2 iteration count for session key derivation |
-| `VGRE_LOG_LEVEL` | `INFO` | Log verbosity: `DEBUG`, `INFO`, `WARN`, `ERROR` |
-| `VGRE_CACHE_DIR` | `~/.vgre/cache` | JIT kernel compilation cache directory |
-| `VGRE_DEVICE_COUNT` | auto | Override auto-detected virtual device count |
-| `VGRE_ENABLE_NUMA` | `0` | Set to `1` to enable NUMA-aware scheduling (Linux only) |
-| `VGRE_WORKER_THREADS` | auto | Override worker thread count (0 = auto-detect) |
-| `VGRE_SIMD_LEVEL` | auto | Force SIMD level: `SSE4`, `AVX`, `AVX2`, `AVX512`, `native` |
-| `VGRE_ADAPTIVE_ALPHA` | `0.3` | Exponential moving-average alpha for adaptive engine |
-| `VGRE_HYBRID_REBALANCE_INTERVAL_MS` | — | Auto-start hybrid rebalancing loop with this interval in ms |
-| `VGRE_ENABLE_NATIVE_SIMD` | `0` | Set to `1` during build to enable `-march=native` SIMD tuning |
-
----
-
-## 5. Platform-Specific Features
-
-### 5.1 Linux-Specific Features
-
-**NUMA Awareness:**
-```bash
-export VGRE_ENABLE_NUMA=1
-export VGRE_NUMA_POLICY=interleave  # local, interleave, preferred
-```
-
-**Hardware Token Storage Priority:**
-1. Linux Keyring (kernel keyutils) - Highest security
-2. GNOME Keyring/KWallet (libsecret) - Desktop integration
-3. TPM 2.0 - Hardware security module
-4. Encrypted file fallback - Cross-platform compatibility
-
-**Performance Monitoring:**
-- Real instruction counting via `perf_event` API
-- CPU temperature monitoring from `/sys/class/thermal/`
-- NUMA topology detection and optimization
-
-### 5.2 Windows-Specific Features
-
-**Hardware Token Storage:**
-- Windows Credential Manager integration
-- TPM 2.0 support for enterprise environments
-- Encrypted file fallback for compatibility
-
-**Networking:**
-- WinSock2 optimizations for cluster communication
-- Windows-specific socket options and error handling
-- Vectored Exception Handler for UVM page faults
-
-**Build Integration:**
-- Visual Studio project generation
-- MSBuild integration
-- Windows SDK compatibility
-
-### 5.3 macOS-Specific Features
-
-**Apple Silicon Optimization:**
-- Native ARM64 support with NEON SIMD
-- Unified memory model optimizations
-- Metal Performance Shaders integration (future)
-
-**Hardware Token Storage:**
-- macOS Keychain integration via Security framework
-- Touch ID/Face ID authentication support (future)
-- TPM 2.0 support on Intel Macs
-
-**System Integration:**
-- IOKit temperature monitoring
-- macOS-specific CPU detection via sysctl
-- App Bundle support for dashboard
-
-### 5.4 Cross-Platform Features
-
-**Available on All Platforms:**
-- LLVM JIT kernel compilation
-- OpenMP parallelization
-- TCP cluster networking with AES-256 encryption
-- Unified Virtual Memory (UVM) with page fault handling
-- CUDA Graphs support
-- Texture and surface memory operations
-- Event synchronization
-- Stream management
-
----
-
-## 6. Troubleshooting
-
-### 6.1 Common Issues (All Platforms)
-
-| Issue | Potential Cause | Solution |
-|-------|----------------|----------|
-| `cudaErrorNoDevice` | VGRE Driver not found | Ensure library path is configured correctly |
-| `cudaErrorInvalidValue` | Pointer out of bounds | Check kernel arguments; VGRE performs strict bounds checking |
-| Low Performance | JIT Cache miss | First run is slower due to compilation; subsequent runs use cache |
-| Dashboard not updating | IPC Socket error | Check IPC socket permissions and connection limits |
-
-### 6.2 Linux-Specific Issues
-
-| Issue | Potential Cause | Solution |
-|-------|----------------|----------|
-| `libvgre_cudart.so: not found` | Library path not set | `export LD_LIBRARY_PATH=/usr/local/lib/vgre:$LD_LIBRARY_PATH` |
-| NUMA warnings | NUMA not available | Normal on single-socket systems; can be ignored |
-| Permission denied on keyring | User keyring not initialized | `keyctl new_session` or use fallback storage |
-
-### 6.3 Windows-Specific Issues
-
-| Issue | Potential Cause | Solution |
-|-------|----------------|----------|
-| `vgre.dll not found` | DLL not in PATH | Add `C:\Program Files\VGRE\bin` to PATH or copy to app directory |
-| Build fails with MSVC | Wrong Visual Studio version | Use Visual Studio 2022 with C++ workload |
-| Worker connection fails | Windows Firewall | Allow `vgre-worker.exe` through Windows Firewall |
-
-### 6.4 macOS-Specific Issues
-
-| Issue | Potential Cause | Solution |
-|-------|----------------|----------|
-| `dylib not loaded` | Library not signed | `codesign -s - /usr/local/lib/vgre/libvgre.dylib` |
-| OpenMP not found | Homebrew libomp missing | `brew install libomp` |
-| Keychain access denied | App not authorized | Grant keychain access in System Preferences |
-
-### 6.5 Cluster-Specific Issues
-
-| Issue | Potential Cause | Solution |
-|-------|----------------|----------|
-| Workers not discovered | Different subnets | Use `--master-ip` flag or `VGRE_CLUSTER_NODES` |
-| Authentication failures / handshake error | Token mismatch | Run `setup-cluster.sh --show-fingerprint` on each node — fingerprints must match |
-| Worker exits immediately on Windows | Missing DLLs | Run `vgre_sync.bat` to reinstall; allow `vgre-worker.exe` through Firewall |
-| Different fingerprint after copy-paste | Extra whitespace in token file | Re-run `Setup-VGRECluster.ps1` option 2 — script strips whitespace automatically |
-| Worker shows CPU/RAM as 0 after connect | Reconnected before handshake finished | Wait 2–3 seconds after connect; values update automatically |
-| Mixed platform issues | Network/firewall | All platforms are protocol-compatible; check port 7777 is open |
-
-### 6.6 Performance Optimization
-
-**Linux:**
-```bash
-# Enable all optimizations
-export VGRE_ENABLE_NUMA=1
-export VGRE_SIMD_LEVEL=native
-export VGRE_WORKER_THREADS=$(nproc)
-```
-
-**Windows:**
-```powershell
-# Enable all optimizations
-$env:VGRE_SIMD_LEVEL="native"
-$env:VGRE_WORKER_THREADS=[Environment]::ProcessorCount
-```
-
-**macOS:**
-```bash
-# Enable all optimizations
-export VGRE_SIMD_LEVEL=native
-export VGRE_WORKER_THREADS=$(sysctl -n hw.ncpu)
-```
-
----
-
-## 7. Advanced Configuration
-
-### 7.1 Build Options
-
-**Cross-Platform CMake Options:**
-```bash
-# Enable native SIMD optimizations (build machine specific)
-cmake .. -DVGRE_ENABLE_NATIVE_SIMD=ON
-
-# Disable OpenCL backend (Windows default)
-cmake .. -DVGRE_USE_OPENCL_BACKEND=OFF
-
-# Enable debug build with full logging
-cmake .. -DCMAKE_BUILD_TYPE=Debug
-
-# Custom installation prefix
-cmake .. -DCMAKE_INSTALL_PREFIX=/opt/vgre
-```
-
-**Platform-Specific Build Options:**
-
-**Linux:**
-```bash
-# Enable all optional features
-cmake .. -DCMAKE_BUILD_TYPE=Release \
-         -DVGRE_ENABLE_NATIVE_SIMD=ON \
-         -DVGRE_USE_OPENCL_BACKEND=ON
-
-# Minimal build (no optional dependencies)
-cmake .. -DCMAKE_BUILD_TYPE=Release \
-         -DVGRE_USE_OPENCL_BACKEND=OFF
-```
-
-**Windows:**
-```powershell
-# Full feature build
-cmake .. -G "Visual Studio 17 2022" -A x64 `
-         -DCMAKE_BUILD_TYPE=Release `
-         -DVGRE_ENABLE_NATIVE_SIMD=ON
-
-# Static runtime linking
-cmake .. -G "Visual Studio 17 2022" -A x64 `
-         -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
-```
-
-**macOS:**
-```bash
-# Universal binary (Intel + Apple Silicon)
-cmake .. -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
-         -DCMAKE_BUILD_TYPE=Release
-
-# Apple Silicon only
-cmake .. -DCMAKE_OSX_ARCHITECTURES=arm64 \
-         -DCMAKE_BUILD_TYPE=Release
-```
-
-### 7.2 Runtime Configuration Files
-
-**Linux/macOS:** `~/.vgre/config.json`
-**Windows:** `%USERPROFILE%\.vgre\config.json`
-
-```json
-{
-  "runtime": {
-    "log_level": "INFO",
-    "cache_dir": "~/.vgre/cache",
-    "max_devices": 8,
-    "enable_profiling": true
-  },
-  "cluster": {
-    "auto_discovery": true,
-    "port": 7777,
-    "secure_by_default": true,
-    "timeout_ms": 5000
-  },
-  "performance": {
-    "numa_enabled": true,
-    "simd_level": "auto",
-    "worker_threads": 0
-  }
+    vgre_free(ptr);
+    vgre_shutdown();
 }
 ```
 
 ---
 
-For more details, refer to the [Technical Architecture](architecture.md) or the [API Reference](api_reference.md).
+## 5. Environment Variables Reference
+
+All variables are written to `~/.vgre/env` by `install_local.sh` and loaded automatically.  
+On Windows they are set in User scope by `Setup-VGRECluster.ps1` / `vgre_sync.bat`.
+
+### Core
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VGRE_LIB_PATH` | auto-detected | Absolute path to `libvgre.so` / `vgre.dll` |
+| `LD_LIBRARY_PATH` | extended | Directory containing VGRE shared libraries |
+| `VGRE_LOG_LEVEL` | `INFO` | Verbosity: `DEBUG` \| `INFO` \| `WARN` \| `ERROR` |
+| `VGRE_INSTALL_DIR` | `~/.local/share/VGRE` | Installation directory |
+
+### Cluster / networking
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VGRE_PORT` | `7777` | TCP port for master and worker nodes |
+| `VGRE_CLUSTER_NODES` | _(empty)_ | `IP:PORT` of master to connect to (worker only) |
+| `VGRE_TCP_AUTH_TOKEN_FILE` | `~/.vgre/token` | Path to the shared cluster auth token file |
+| `VGRE_TCP_AUTH_TOKEN` | _(empty)_ | Raw token string (less secure; avoid in production) |
+
+### GPU cache model
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VGRE_L1_CACHE_KB` | `32` | Per-block L1 cache size in KB (16 \| 32 \| 64 \| 128) |
+| `VGRE_L2_CACHE_MB` | `6` | Per-device L2 cache size in MB (2 \| 6 \| 20 \| 40) |
+
+### Optional features
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VGRE_MPS_PIPE` | _(empty)_ | Unix socket path to enable CUDA MPS daemon (e.g. `/tmp/vgre_mps.sock`) |
+| `VGRE_RDMA_DEVICE` | _(empty)_ | RDMA device name (e.g. `mlx5_0`). Requires `-DVGRE_ENABLE_RDMA=ON` build |
+| `VGRE_GRPC_PORT` | _(empty)_ | Port for gRPC cluster transport. Requires `-DVGRE_ENABLE_GRPC=ON` build |
+
+### Performance tuning
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VGRE_ENABLE_NUMA` | `0` | Enable NUMA-aware thread scheduling (Linux) |
+| `VGRE_WORKER_THREADS` | auto (nproc) | Override worker thread count |
+| `VGRE_SIMD_LEVEL` | auto-detected | Force SIMD level: `SSE4` \| `AVX` \| `AVX2` \| `AVX512` |
+
 ---
+
+## 6. Token Management (`vgre-token`)
+
+`vgre-token` is a standalone CLI that works from **any directory** after install. It manages the shared auth token that secures cluster communication between master and worker nodes.
+
+### Commands
+
+```
+vgre-token generate       — generate a new secure 256-bit token
+vgre-token show           — print the stored token value
+vgre-token fingerprint    — print the SHA-256 fingerprint
+vgre-token set <TOKEN>    — store a token pasted from another machine
+vgre-token verify         — check that the env-var matches the stored file
+vgre-token copy           — print the scp / robocopy command for workers
+vgre-token revoke         — delete the stored token (with confirmation)
+```
+
+### Typical workflow
+
+```bash
+# ── On the MASTER machine ─────────────────────────────────────────────────
+vgre-token generate
+# Output:
+#   ✓ Token saved to ~/.vgre/token
+#   Token fingerprint (SHA-256):
+#     a3f9bcd2... (64 chars)
+
+# Share the token with workers (choose one):
+vgre-token copy               # prints the scp command
+# OR manually:
+scp ~/.vgre/token worker@192.168.1.50:~/.vgre/token
+
+# ── On every WORKER machine ───────────────────────────────────────────────
+# Option A: scp the file (see above)
+# Option B: paste the token value
+vgre-token set a3f9bcd2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# ── Verify both machines match ────────────────────────────────────────────
+# Run on BOTH master and worker — output must be identical:
+vgre-token fingerprint
+```
+
+### Token storage
+
+| Platform | Token file | Env var set in |
+|----------|-----------|----------------|
+| Linux/macOS | `~/.vgre/token` (chmod 600) | `~/.vgre/env` → shell profile |
+| Windows | `%USERPROFILE%\.vgre\token` | User-scope env (no restart needed) |
+
+---
+
+## 7. Cluster Setup (`vgre-start`)
+
+`vgre-start` launches master or worker nodes. It automatically sources `~/.vgre/env` before starting, so no manual environment setup is needed.
+
+### Commands
+
+```bash
+vgre-start --master                        # start master node (launches dashboard)
+vgre-start --worker                        # start worker (auto-discovers master on LAN)
+vgre-start --worker --master-ip 10.0.1.5  # connect to specific master IP
+vgre-start --worker --port 7778           # use custom port
+vgre-start --test                          # local self-test (master + worker, same machine)
+```
+
+### Complete cluster setup (4 steps)
+
+**Step 1 — Install on every machine**
+
+```bash
+bash install_local.sh   # Linux/macOS
+vgre_sync.bat           # Windows
+```
+
+**Step 2 — Generate token on master**
+
+```bash
+vgre-token generate
+```
+
+**Step 3 — Copy token to workers**
+
+```bash
+# Method A: scp
+vgre-token copy         # shows the exact command
+scp ~/.vgre/token worker@192.168.1.50:~/.vgre/token
+
+# Method B: paste
+vgre-token show         # copy the token value
+# On worker:
+vgre-token set <paste-token-here>
+```
+
+**Step 4 — Start**
+
+```bash
+# On master:
+vgre-start --master
+
+# On each worker:
+vgre-start --worker
+# or, for a different subnet:
+vgre-start --worker --master-ip 192.168.1.10
+```
+
+### Verify the cluster is working
+
+```bash
+# On any node — fingerprints must match:
+vgre-token fingerprint
+```
+
+The dashboard automatically shows discovered cluster nodes in the **Cluster Topology** tab.
+
+### Cross-platform cluster
+
+| Master | Worker | Supported |
+|--------|--------|-----------|
+| Linux | Linux | ✓ Full |
+| Linux | macOS | ✓ Full |
+| Linux | Windows | ✓ Full |
+| macOS | Windows | ✓ Full |
+| Windows | Linux | ✓ Full |
+
+---
+
+## 8. Dashboard
+
+The Flutter dashboard provides real-time visibility into the VGRE runtime.
+
+### Launch
+
+```bash
+vgre-dashboard          # Linux/macOS
+# Windows: double-click "VGRE Dashboard" Desktop shortcut
+```
+
+### Dashboard tabs
+
+| Tab | What it shows |
+|-----|---------------|
+| **Overview** | Compute utilization gauge, memory bandwidth, temperature, **L2 cache hit rate** (live from `vgre_get_cache_stats`) |
+| **Kernel Explorer** | Top-N kernels by total time, per-kernel invocation history, PTX / IR source viewer |
+| **Cluster Topology** | All connected nodes, latency heat-map, per-node credits/debits |
+| **Hardware Tuning** | SIMD capabilities (SSE4 / AVX2 / AVX-512 / AMX), thread count controls, background compute toggle |
+| **Memory Analysis** | UVM page map, pool allocator stats, active allocation list |
+| **Settings** | Log level, profiler on/off, service mode, auth token display |
+
+### Auto-connect to backend
+
+The dashboard reads `~/.vgre/env` at startup and calls `setenv()` in the native
+process so the C++ backend receives `VGRE_TCP_AUTH_TOKEN_FILE`, `VGRE_PORT`, and
+all cache/RDMA variables without any manual configuration.
+
+Library resolution order:
+1. `VGRE_LIB_PATH` env var
+2. `<bundle>/lib/libvgre.so` (installed bundle)
+3. `~/.local/share/VGRE/lib/libvgre.so`
+4. `build/libvgre.so` (repo build, developer mode)
+
+---
+
+## 9. Advanced Features
+
+### 9.1 GPU L1/L2 cache model
+
+VGRE emulates a software-managed GPU cache hierarchy (Ampere Ampere-class defaults):
+
+- **L1**: 32 KB per block, 4-way set-associative, 128-byte lines, per-block (not shared)
+- **L2**: 6 MB per device, 8-way set-associative, per-device singleton, mutex-protected
+
+Size is configurable at runtime:
+
+```bash
+export VGRE_L1_CACHE_KB=64    # 16 | 32 | 64 | 128
+export VGRE_L2_CACHE_MB=20    # 2 | 6 | 20 | 40
+```
+
+Cache statistics are exposed via the C API and displayed live in the dashboard:
+
+```c
+vgre_cache_stats_t cs;
+vgre_get_cache_stats(&cs);
+printf("L2 hit rate: %.1f%%  hits=%llu  misses=%llu\n",
+       cs.l2_hit_rate * 100.0, cs.l2_hits, cs.l2_misses);
+```
+
+### 9.2 AMX + AVX-512 WMMA acceleration
+
+VGRE auto-detects Intel AMX (Sapphire Rapids+) and AVX-512 at startup:
+
+- **AMX path**: used for 16×16×16 BF16 matrix tiles (`mma_sync` + `wgmma`)
+- **AVX-512 path**: used for N=16 tiles on any AVX-512 CPU (16× speedup vs scalar)
+- **Scalar fallback**: always available
+
+Check what's active:
+
+```bash
+VGRE_LOG_LEVEL=DEBUG vgre-dashboard 2>&1 | grep -E "AMX|AVX-512|SIMD"
+```
+
+### 9.3 Hopper PTX emulation
+
+VGRE translates Hopper-generation PTX instructions to CPU code:
+
+| PTX instruction | CPU emulation |
+|----------------|---------------|
+| `wgmma.mma_async.*` | Full M×N×K GEMM via `vgre_wgmma_*` (AVX-512 vectorized when N=256) |
+| `cp.async.bulk.tensor.*` | Synchronous `memcpy` (no async staging needed on CPU) |
+| `wgmma.fence` / `wgmma.wait_group` | `__atomic_thread_fence(SEQ_CST)` |
+| `mma.sync.aligned.m16n8k16` | `vgre_mma_m16n8k16_f32_f16` scalar tile GEMM |
+
+### 9.4 CUDA MPS (Multi-Process Sharing)
+
+Enable VGRE MPS to let multiple processes share one VGRE context (mirrors NVIDIA MPS):
+
+```bash
+# Start MPS daemon (in background):
+export VGRE_MPS_PIPE=/tmp/vgre_mps.sock
+
+# Each client process automatically connects when VGRE_MPS_PIPE is set.
+# The daemon serializes kernel launches from all clients.
+```
+
+### 9.5 RDMA / RoCE transport
+
+Build with RDMA support and VGRE uses zero-copy transfers for large payloads (>64 KB):
+
+```bash
+cmake -S . -B build -DVGRE_ENABLE_RDMA=ON
+# Requires: sudo apt-get install libibverbs-dev rdma-core
+
+# Enable soft-RoCE loopback for testing (no physical RDMA NIC needed):
+sudo rdma link add rxe0 type rxe netdev eth0
+export VGRE_RDMA_DEVICE=rxe0
+```
+
+### 9.6 gRPC cluster transport
+
+Expose a gRPC endpoint for Ray Serve / Horovod / DeepSpeed integration:
+
+```bash
+cmake -S . -B build -DVGRE_ENABLE_GRPC=ON
+# Requires: sudo apt-get install libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
+
+export VGRE_GRPC_PORT=50051
+vgre-start --master   # starts gRPC service alongside cluster TCP
+```
+
+Clients connect via standard gRPC:
+
+```python
+import grpc
+# Generated stubs from proto/vgre_cluster.proto
+channel = grpc.insecure_channel("master-ip:50051")
+stub = vgre_cluster_pb2_grpc.VGREClusterStub(channel)
+resp = stub.AllocMemory(MemAllocRequest(size_bytes=1024*1024))
+```
+
+---
+
+## 10. Troubleshooting
+
+### 10.1 Dashboard fails to load ("Failed to load native library")
+
+```
+Possible causes:
+1. libvgre.so not found
+2. LD_LIBRARY_PATH not set
+3. Library missing dependencies (LLVM, OpenMP)
+```
+
+**Fix:**
+
+```bash
+# Reload environment
+source ~/.vgre/env
+
+# Check the library exists
+ls -la ~/.local/share/VGRE/lib/libvgre.so
+
+# Check its dependencies
+ldd ~/.local/share/VGRE/lib/libvgre.so | grep "not found"
+
+# If libomp.so is missing:
+sudo apt-get install libomp-dev
+```
+
+### 10.2 Cluster worker cannot connect to master
+
+```bash
+# Verify both machines use the same token
+vgre-token fingerprint      # run on BOTH — must be identical
+
+# Test network reachability
+nc -zv MASTER_IP 7777        # Linux/macOS
+Test-NetConnection MASTER_IP -Port 7777  # Windows PowerShell
+
+# Check firewall (Linux)
+sudo ufw allow 7777/tcp
+
+# Check firewall (Windows PowerShell — run as admin)
+New-NetFirewallRule -DisplayName "VGRE" -Direction Inbound -Protocol TCP -LocalPort 7777 -Action Allow
+```
+
+### 10.3 Mismatched token fingerprints
+
+```bash
+# Re-copy the token from master to worker
+vgre-token copy          # on master — prints scp command
+scp ~/.vgre/token worker@WORKER_IP:~/.vgre/token
+
+# Verify after copy
+vgre-token fingerprint   # must match on both machines
+```
+
+### 10.4 CMake cannot find LLVM
+
+```bash
+# Linux: install and export
+sudo apt-get install llvm-18 llvm-18-dev clang-18
+export LLVM_DIR=$(llvm-config-18 --cmakedir)
+
+# macOS
+brew install llvm
+export LLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm
+
+# Windows
+winget install LLVM.LLVM
+set LLVM_DIR=C:\Program Files\LLVM\lib\cmake\llvm
+```
+
+### 10.5 Flutter build fails
+
+```bash
+# Update Flutter and clear caches
+flutter upgrade
+flutter clean
+cd vgre_dashboard && flutter pub get
+
+# Linux: ensure correct linker is available
+sudo apt-get install clang lld
+
+# macOS: install Xcode command-line tools
+xcode-select --install
+```
+
+### 10.6 Low compute performance
+
+```bash
+# Check SIMD level being used
+VGRE_LOG_LEVEL=DEBUG ./build/examples/matrix_multiply 2>&1 | grep "SIMD\|AVX\|AMX"
+
+# Force maximum SIMD
+export VGRE_SIMD_LEVEL=AVX512
+
+# Enable native CPU tuning (rebuild required)
+cmake -S . -B build -DVGRE_ENABLE_NATIVE_SIMD=ON
+cmake --build build -j$(nproc)
+```
+
+### 10.7 Windows: error 0xC000001D / 1114 (DLL load failure)
+
+This means a DLL dependency is missing or the wrong architecture is loaded.
+
+```powershell
+# Show missing dependencies
+dumpbin /dependents %LOCALAPPDATA%\VGRE\vgre.dll
+
+# Ensure all runtime DLLs are in place
+Get-ChildItem "$env:LOCALAPPDATA\VGRE\lib" -Filter "*.dll" | Select-Object Name
+
+# Re-run the sync script
+.\scripts\vgre_sync.bat
+```
+
+### 10.8 OpenMP not working (all kernels run on 1 thread)
+
+```bash
+# Check OpenMP is linked
+ldd ~/.local/share/VGRE/lib/libvgre.so | grep omp
+
+# Install missing library
+sudo apt-get install libomp-dev         # Ubuntu/Debian
+sudo dnf install libomp-devel           # Fedora
+brew install libomp                     # macOS
+
+# Rebuild
+cmake --build build -j$(nproc)
+```
 
 ---
 
 ## Production Status
 
-**Status**: ✅ **PRODUCTION READY** as of May 6, 2026
-
-All critical issues have been fixed. The system is ready for production deployment.
-
-**See docs/PROJECT_STATUS.md for canonical project status and test results.**
+| Feature | Status |
+|---------|--------|
+| CUDA runtime intercept (cudart) | ✅ Production |
+| LLVM JIT kernel compilation | ✅ Production |
+| cuBLAS INT8 / FP32 / FP64 | ✅ Production |
+| cuDNN convolution (INT8, FP32) | ✅ Production |
+| NCCL AllReduce (ring + barrier-tree) | ✅ Production |
+| CUDA Graphs (IF / WHILE / SWITCH) | ✅ Production |
+| Virtual memory (cuMemCreate / cuMemMap) | ✅ Production |
+| External semaphores (eventfd / Win32) | ✅ Production |
+| UVM managed memory | ✅ Production |
+| NVTX profiling markers | ✅ Production |
+| AVX-512 WMMA acceleration | ✅ Production |
+| Intel AMX tile acceleration | ✅ Production (Sapphire Rapids+) |
+| Hopper PTX (wgmma, TMA, cp.async.bulk) | ✅ Production |
+| GPU L1/L2 cache model | ✅ Production |
+| TCP cluster + TLS | ✅ Production |
+| RDMA / RoCE transport | ✅ Optional (`-DVGRE_ENABLE_RDMA=ON`) |
+| gRPC cluster transport | ✅ Optional (`-DVGRE_ENABLE_GRPC=ON`) |
+| CUDA MPS multi-process | ✅ Production (Unix socket) |
+| cuMemMulticast | ✅ Production |
+| Flutter real-time dashboard | ✅ Production |
+| `vgre-token` CLI | ✅ Production (Linux/macOS/Windows) |
+| `vgre-start` cluster launcher | ✅ Production (Linux/macOS/Windows) |
+| OTel hw.gpu.* telemetry export | ✅ Production |
