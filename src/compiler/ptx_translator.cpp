@@ -11,6 +11,17 @@ namespace compiler {
 
 namespace {
 
+// vgre_lop3_b32: 3-operand logic via 8-bit LUT.
+// Bit i of result = bit ((a[i]<<2)|(b[i]<<1)|c[i]) of lut.
+static inline unsigned vgre_lop3_b32(unsigned a, unsigned b, unsigned c, unsigned char lut) {
+    unsigned r = 0;
+    for (int i = 31; i >= 0; --i) {
+        int idx = (((a >> i) & 1) << 2) | (((b >> i) & 1) << 1) | ((c >> i) & 1);
+        r |= ((unsigned)((lut >> idx) & 1)) << i;
+    }
+    return r;
+}
+
 // Trim whitespace
 static std::string trim(const std::string& s) {
     size_t b = s.find_first_not_of(" \t\r\n");
@@ -76,6 +87,152 @@ static const TranslateMap& getMap() {
         {"div.s32",  [](auto& o){ return o[0]+" = "+o[1]+" / "+o[2]+";"; }},
         {"rem.s32",  [](auto& o){ return o[0]+" = "+o[1]+" % "+o[2]+";"; }},
         {"neg.s32",  [](auto& o){ return o[0]+" = -("+o[1]+");"; }},
+        // ── Carry-flag arithmetic (multi-word wide integer) ────────────────────
+        // _cc models the CC.CF carry-flag register as a thread-local int.
+        // Simplified: we propagate carry as part of the expression.
+        {"add.cc.u32", [](auto& o){
+            return "{ unsigned _s="+(o[1])+"+"+(o[2])+"; _cc=(_s<(unsigned)"+(o[1])+"); "+(o[0])+"=_s; }";
+        }},
+        {"add.cc.s32", [](auto& o){
+            return "{ unsigned _s=(unsigned)"+(o[1])+"+(unsigned)"+(o[2])+"; _cc=(_s<(unsigned)"+(o[1])+"); "+(o[0])+"=(int)_s; }";
+        }},
+        {"addc.u32",   [](auto& o){
+            return "{ unsigned _s="+(o[1])+"+"+(o[2])+"+(unsigned)_cc; "+(o[0])+"=_s; }";
+        }},
+        {"addc.cc.u32",[](auto& o){
+            return "{ unsigned _t=(unsigned)"+(o[1])+"+(unsigned)"+(o[2])+"; unsigned _tc=_t+(unsigned)_cc; "
+                   "_cc=(_tc<_t)||(_t<(unsigned)"+(o[1])+"); "+(o[0])+"=_tc; }";
+        }},
+        {"sub.cc.u32", [](auto& o){
+            return "{ unsigned _s=(unsigned)"+(o[1])+"-(unsigned)"+(o[2])+"; _cc=((unsigned)"+(o[1])+"<(unsigned)"+(o[2])+"); "+(o[0])+"=_s; }";
+        }},
+        {"sub.cc.s32", [](auto& o){
+            return "{ unsigned _s=(unsigned)"+(o[1])+"-(unsigned)"+(o[2])+"; _cc=((unsigned)"+(o[1])+"<(unsigned)"+(o[2])+"); "+(o[0])+"=(int)_s; }";
+        }},
+        {"subc.u32",   [](auto& o){
+            return "{ unsigned _b=(unsigned)"+(o[2])+"+(unsigned)_cc; "+(o[0])+"=(unsigned)"+(o[1])+"-_b; }";
+        }},
+        {"subc.cc.u32",[](auto& o){
+            return "{ unsigned _b=(unsigned)"+(o[2])+"+(unsigned)_cc; _cc=((unsigned)"+(o[1])+"<_b); "+(o[0])+"=(unsigned)"+(o[1])+"-_b; }";
+        }},
+        {"mad.hi.cc.u32",[](auto& o){
+            return "{ unsigned long long _p=(unsigned long long)(unsigned)"+(o[1])+"*(unsigned long long)(unsigned)"+(o[2])+"; "
+                   "unsigned _hi=(unsigned)(_p>>32); unsigned _acc=_hi+(unsigned)"+(o[3])+"; "
+                   "_cc=(_acc<_hi); "+(o[0])+"=_acc; }";
+        }},
+        // ── 3-operand logic (lop3) ─────────────────────────────────────────────
+        {"lop3.b32",   [](auto& o){
+            return o[0]+" = vgre_lop3_b32((unsigned)"+o[1]+",(unsigned)"+o[2]+",(unsigned)"+o[3]+","
+                   "(unsigned char)("+o[4]+"));";
+        }},
+        // ── Ampere mma.sync.aligned (m16n8k16 / m16n8k8 / m8n8k4) ─────────────
+        // These are the low-level Ampere matrix multiply instructions used by
+        // FlashAttention, CUTLASS 3.x, and Triton-generated PTX.
+        // Emulated via the existing AVX-512 WMMA path from wmma_emulation.h.
+        // Operand notation: D (out), A, B, C (in) — all fragmented across a warp.
+        // In VGRE's serial CPU model, we treat each fragment as a complete tile.
+        {"mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32", [](auto& o){
+            // d[0..3], a[0..7](f16 packed), b[0..3](f16 packed), c[0..3]
+            return "vgre_mma_m16n8k16_f32_f16("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
+                   +o[4]+","+o[5]+","+o[6]+","+o[7]+","
+                   +o[8]+","+o[9]+","
+                   +o[10]+","+o[11]+","+o[12]+","+o[13]+");";
+        }},
+        {"mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32", [](auto& o){
+            return "vgre_mma_m16n8k8_tf32("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
+                   +o[4]+","+o[5]+","
+                   +o[6]+","+o[7]+","+o[8]+","+o[9]+");";
+        }},
+        {"mma.sync.aligned.m8n8k4.row.col.f64", [](auto& o){
+            return "vgre_mma_m8n8k4_f64("+o[0]+","+o[1]+","+o[2]+","+o[3]+");";
+        }},
+        // BF16 variants (used by Hopper/Ampere BF16 GEMMs)
+        {"mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32", [](auto& o){
+            return "vgre_mma_m16n8k16_f32_bf16("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
+                   +o[4]+","+o[5]+","+o[6]+","+o[7]+","
+                   +o[8]+","+o[9]+","
+                   +o[10]+","+o[11]+","+o[12]+","+o[13]+");";
+        }},
+        // INT8 mma (INT8×INT8 → INT32 accumulate)
+        {"mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32", [](auto& o){
+            return "vgre_mma_m16n8k32_s8("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
+                   +o[4]+","+o[5]+","
+                   +o[6]+","
+                   +o[7]+","+o[8]+","+o[9]+","+o[10]+");";
+        }},
+        // Warp-group MMA (Hopper) — full emulation via vgre_wgmma_* helpers.
+        // operand layout: o[0]=descA, o[1]=descB, o[2]=d_ptr (FP32 accumulator)
+        // The accumulator pointer is the output of wgmma; callers pass
+        // reinterpret_cast<uint64_t>(d_array) as o[2].
+        {"wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_wgmma_m64n256k16_bf16_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        {"wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_wgmma_m64n128k16_bf16_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        {"wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_wgmma_m64n64k16_bf16_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        {"wgmma.mma_async.sync.aligned.m64n256k16.f32.f16.f16", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_wgmma_m64n256k16_f16_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        {"wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_wgmma_m64n128k16_f16_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        {"wgmma.mma_async.sync.aligned.m64n256k8.f32.tf32.tf32", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_wgmma_m64n256k8_tf32_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        // TMA bulk async copy: cp.async.bulk copies from global→shared in one call.
+        // CPU serial emulation: synchronous memcpy (no async staging needed).
+        {"cp.async.bulk.tensor.1d.global.shared::cta.bulk_group", [](auto& o){
+            return "vgre_cp_async_bulk((void*)(uintptr_t)("+o[0]+"),"
+                   "(const void*)(uintptr_t)("+o[1]+"),"+(o.size()>2?o[2]:std::string("0"))+");";
+        }},
+        {"cp.async.bulk.tensor.2d.global.shared::cta.bulk_group", [](auto& o){
+            return "vgre_cp_async_bulk((void*)(uintptr_t)("+o[0]+"),"
+                   "(const void*)(uintptr_t)("+o[1]+"),"+(o.size()>2?o[2]:std::string("0"))+");";
+        }},
+        {"cp.async.bulk.tensor.1d.shared::cta.global", [](auto& o){
+            return "vgre_cp_async_bulk((void*)(uintptr_t)("+o[0]+"),"
+                   "(const void*)(uintptr_t)("+o[1]+"),"+(o.size()>2?o[2]:std::string("0"))+");";
+        }},
+        // TMA fence/commit — no-ops in serial CPU model (no async pipeline)
+        {"cp.async.bulk.commit_group",  [](auto&){ return "/* cp.async.bulk.commit_group */"; }},
+        {"cp.async.bulk.wait_group",    [](auto&){ return "/* cp.async.bulk.wait_group */"; }},
+        {"cp.async.bulk.wait_group.read",[](auto&){ return "/* cp.async.bulk.wait_group.read */"; }},
+        // wgmma fence — serializes wgmma pipeline
+        {"wgmma.fence.sync.aligned",    [](auto&){ return "__atomic_thread_fence(__ATOMIC_SEQ_CST);"; }},
+        {"wgmma.commit_group.sync.aligned",[](auto&){ return "/* wgmma.commit_group */"; }},
+        {"wgmma.wait_group.sync.aligned", [](auto&){
+            return "__atomic_thread_fence(__ATOMIC_SEQ_CST);";
+        }},
+        // ── Warp reductions (redux.sync, bar.red) ─────────────────────────────
+        // In serial CPU model, reduction is already complete per-thread.
+        {"redux.sync.add.s32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
+        {"redux.sync.add.u32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
+        {"redux.sync.min.s32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
+        {"redux.sync.max.s32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
+        {"bar.red.popc.u32", [](auto& o){
+            return o[0]+" = __syncthreads_count("+o[2]+");";
+        }},
+        {"bar.red.and.pred",  [](auto& o){
+            return o[0]+" = __syncthreads_and("+o[2]+");";
+        }},
+        {"bar.red.or.pred",   [](auto& o){
+            return o[0]+" = __syncthreads_or("+o[2]+");";
+        }},
         {"abs.s32",  [](auto& o){ return o[0]+" = __builtin_abs("+o[1]+");"; }},
         {"min.s32",  [](auto& o){ return o[0]+" = ("+o[1]+"<"+o[2]+"?"+o[1]+":"+o[2]+");"; }},
         {"max.s32",  [](auto& o){ return o[0]+" = ("+o[1]+">"+o[2]+"?"+o[1]+":"+o[2]+");"; }},
@@ -357,7 +514,16 @@ std::string PTXTranslator::translateBlock(
     const std::string& /*constraints*/,
     const std::string& /*clobbers*/)
 {
+    // Declare CC register as a local variable if any carry instructions are present.
+    bool needsCC = ptxBody.find("add.cc") != std::string::npos ||
+                   ptxBody.find("sub.cc") != std::string::npos ||
+                   ptxBody.find("addc")   != std::string::npos ||
+                   ptxBody.find("subc")   != std::string::npos ||
+                   ptxBody.find("mad.hi.cc") != std::string::npos;
+
     std::ostringstream out;
+    if (needsCC) out << "  int _cc = 0; /* PTX carry-flag register */\n";
+
     std::istringstream lines(ptxBody);
     std::string line;
     while (std::getline(lines, line)) {
