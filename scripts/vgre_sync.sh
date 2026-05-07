@@ -2,13 +2,189 @@
 set -e
 
 # VGRE Sync & Install Script (Linux/macOS)
-# This script builds the VGRE engine and dashboard and installs it to the local user profile.
+# Verifies all required dependencies, installs missing ones automatically,
+# builds the native engine + Flutter dashboard, and installs to the user profile.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DIR="$HOME/.local/share/VGRE"
 BIN_DIR="$HOME/.local/bin"
 VGRE_ENABLE_NATIVE_SIMD_FLAG="${VGRE_ENABLE_NATIVE_SIMD:-0}"
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+
+# ── Dependency verification + auto-install ────────────────────────────────────
+_pkg_install() {
+    local PKGS=("$@")
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "  [apt] Installing: ${PKGS[*]}"
+        sudo apt-get update -qq && sudo apt-get install -y "${PKGS[@]}"
+    elif command -v dnf >/dev/null 2>&1; then
+        echo "  [dnf] Installing: ${PKGS[*]}"
+        sudo dnf install -y "${PKGS[@]}"
+    elif command -v pacman >/dev/null 2>&1; then
+        echo "  [pacman] Installing: ${PKGS[*]}"
+        sudo pacman -Sy --noconfirm "${PKGS[@]}"
+    elif command -v zypper >/dev/null 2>&1; then
+        echo "  [zypper] Installing: ${PKGS[*]}"
+        sudo zypper install -y "${PKGS[@]}"
+    elif command -v brew >/dev/null 2>&1; then
+        echo "  [brew] Installing: ${PKGS[*]}"
+        brew install "${PKGS[@]}"
+    else
+        echo "ERROR: No package manager found. Install manually: ${PKGS[*]}" >&2
+        exit 1
+    fi
+}
+
+_check_and_install_deps() {
+    echo ""
+    echo "=== Verifying Dependencies ==="
+    local MISSING_APT=()
+    local MISSING_DNF=()
+    local MISSING_BREW=()
+    local NEED_INSTALL=0
+
+    # cmake
+    if ! command -v cmake >/dev/null 2>&1; then
+        echo "  [MISSING] cmake"
+        MISSING_APT+=(cmake); MISSING_DNF+=(cmake); MISSING_BREW+=(cmake)
+        NEED_INSTALL=1
+    else
+        echo "  [OK] cmake $(cmake --version | head -1 | awk '{print $3}')"
+    fi
+
+    # C++ compiler
+    if ! command -v g++ >/dev/null 2>&1 && ! command -v clang++ >/dev/null 2>&1; then
+        echo "  [MISSING] C++ compiler (g++ or clang++)"
+        MISSING_APT+=(build-essential g++); MISSING_DNF+=("gcc-c++"); MISSING_BREW+=(gcc)
+        NEED_INSTALL=1
+    else
+        echo "  [OK] C++ compiler present"
+    fi
+
+    # make
+    if ! command -v make >/dev/null 2>&1 && ! command -v ninja >/dev/null 2>&1; then
+        echo "  [MISSING] make / ninja"
+        MISSING_APT+=(make); MISSING_DNF+=(make); MISSING_BREW+=(make)
+        NEED_INSTALL=1
+    else
+        echo "  [OK] Build driver present"
+    fi
+
+    # LLVM dev libraries
+    local LLVM_FOUND=0
+    for cfg in llvm-config llvm-config-18 llvm-config-17 llvm-config-16; do
+        command -v "$cfg" >/dev/null 2>&1 && LLVM_FOUND=1 && \
+            echo "  [OK] LLVM $($cfg --version) ($cfg)" && break
+    done
+    if [[ $LLVM_FOUND -eq 0 ]]; then
+        echo "  [MISSING] LLVM dev libraries"
+        MISSING_APT+=(llvm-dev clang libclang-dev); MISSING_DNF+=(llvm-devel clang-devel)
+        MISSING_BREW+=(llvm)
+        NEED_INSTALL=1
+    fi
+
+    # OpenMP
+    local OMP_FOUND=0
+    for lib in /usr/lib/x86_64-linux-gnu/libomp.so \
+               /usr/lib/aarch64-linux-gnu/libomp.so \
+               /usr/local/lib/libomp.dylib; do
+        [[ -f "$lib" ]] && OMP_FOUND=1 && break
+    done
+    command -v dpkg >/dev/null 2>&1 && dpkg -l libomp-dev >/dev/null 2>&1 && OMP_FOUND=1
+    if [[ $OMP_FOUND -eq 0 ]]; then
+        echo "  [MISSING] OpenMP (libomp-dev)"
+        MISSING_APT+=(libomp-dev); MISSING_DNF+=(libomp-devel); MISSING_BREW+=(libomp)
+        NEED_INSTALL=1
+    else
+        echo "  [OK] OpenMP present"
+    fi
+
+    # openssl
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "  [MISSING] openssl"
+        MISSING_APT+=(libssl-dev openssl); MISSING_DNF+=(openssl-devel openssl)
+        MISSING_BREW+=(openssl)
+        NEED_INSTALL=1
+    else
+        echo "  [OK] openssl $(openssl version | awk '{print $2}')"
+    fi
+
+    # curl
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "  [MISSING] curl"
+        MISSING_APT+=(curl); MISSING_DNF+=(curl); MISSING_BREW+=(curl)
+        NEED_INSTALL=1
+    else
+        echo "  [OK] curl present"
+    fi
+
+    # Auto-install if anything missing
+    if [[ $NEED_INSTALL -eq 1 ]]; then
+        echo ""
+        echo "  Installing missing packages..."
+        if [[ "$OS" == "Linux" ]]; then
+            if command -v apt-get >/dev/null 2>&1; then
+                _pkg_install "${MISSING_APT[@]}"
+            elif command -v dnf >/dev/null 2>&1; then
+                _pkg_install "${MISSING_DNF[@]}"
+            elif command -v pacman >/dev/null 2>&1; then
+                _pkg_install base-devel cmake llvm clang openssl libomp git curl
+            fi
+        elif [[ "$OS" == "Darwin" ]]; then
+            if ! command -v brew >/dev/null 2>&1; then
+                echo "  Installing Homebrew..."
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            fi
+            _pkg_install "${MISSING_BREW[@]}"
+        fi
+    fi
+
+    # Flutter — special install path
+    if ! command -v flutter >/dev/null 2>&1; then
+        echo "  [MISSING] Flutter"
+        if [[ "$OS" == "Linux" ]] && command -v snap >/dev/null 2>&1; then
+            echo "  Installing Flutter via snap..."
+            sudo snap install flutter --classic
+        elif [[ "$OS" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+            echo "  Installing Flutter via Homebrew..."
+            brew install --cask flutter
+        else
+            local FLUTTER_VERSION="3.24.5"
+            local FLUTTER_ARCH="x64"
+            [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]] && FLUTTER_ARCH="arm64"
+            local FLUTTER_URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
+            echo "  Downloading Flutter ${FLUTTER_VERSION}..."
+            mkdir -p "$HOME/.local"
+            curl -fsSL "$FLUTTER_URL" | tar -xJ -C "$HOME/.local"
+            ln -sf "$HOME/.local/flutter/bin/flutter" "$BIN_DIR/flutter" 2>/dev/null || true
+            export PATH="$HOME/.local/flutter/bin:$PATH"
+        fi
+    fi
+    if command -v flutter >/dev/null 2>&1; then
+        echo "  [OK] Flutter $(flutter --version 2>/dev/null | head -1 | awk '{print $2}')"
+    else
+        echo "  [WARN] Flutter unavailable — dashboard build will be skipped"
+    fi
+
+    # Final hard check
+    local HARD_FAIL=0
+    for CMD in cmake git; do
+        command -v "$CMD" >/dev/null 2>&1 || { echo "  [FAIL] $CMD still missing"; HARD_FAIL=1; }
+    done
+    command -v g++ >/dev/null 2>&1 || command -v clang++ >/dev/null 2>&1 || \
+        { echo "  [FAIL] C++ compiler still missing"; HARD_FAIL=1; }
+    if [[ $HARD_FAIL -eq 1 ]]; then
+        echo ""
+        echo "ERROR: Critical dependencies missing. Install them manually and re-run." >&2
+        exit 1
+    fi
+    echo "=== All dependencies satisfied ==="
+    echo ""
+}
+
+_check_and_install_deps
 
 # ── Auth Token Auto-load ──────────────────────────────────────────────────────
 # Priority order:
@@ -37,7 +213,8 @@ elif [[ -n "$VGRE_TCP_AUTH_TOKEN" ]]; then
 else
     TOKEN_FILE=""
     echo "⚠️  No auth token configured."
-    echo "   Run  bash scripts/setup-cluster.sh  to set one up (recommended)."
+    echo "   Run  vgre-token generate  after install to create one (recommended)."
+    echo "   Or:  bash install_local.sh  to build and generate the token in one step."
     echo "   Cluster will use hardware secure storage (TPM/Keyring) or allow manual input."
 fi
 
@@ -207,6 +384,11 @@ EOF
     if [[ -f "$SCRIPT_DIR/vgre-start.sh" ]]; then
         chmod +x "$SCRIPT_DIR/vgre-start.sh"
         ln -sf "$SCRIPT_DIR/vgre-start.sh" "$BIN_DIR/vgre-start"
+    fi
+    # Install vgre-token token manager (works from any directory)
+    if [[ -f "$SCRIPT_DIR/vgre-token.sh" ]]; then
+        chmod +x "$SCRIPT_DIR/vgre-token.sh"
+        ln -sf "$SCRIPT_DIR/vgre-token.sh" "$BIN_DIR/vgre-token"
     fi
 fi
 

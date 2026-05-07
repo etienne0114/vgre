@@ -60,45 +60,170 @@ if defined VGRE_TCP_AUTH_TOKEN_FILE (
     echo          Cluster will use hardware secure storage ^(TPM/CredMan^) or allow manual input.
 )
 
-echo Cleaning up stale VGRE processes...
-taskkill /F /IM vgre-worker.exe /IM vgre_dashboard.exe /T 2>NUL
-rem Ignore errorlevel as processes might not be running
+echo.
+echo === Verifying Dependencies ===
 
-echo Checking CMake...
+rem ── Helper: detect winget (Windows Package Manager) ──────────────────────
+set "HAS_WINGET=0"
+winget --version >nul 2>&1 && set "HAS_WINGET=1"
+
+rem ── Helper: detect chocolatey ─────────────────────────────────────────────
+set "HAS_CHOCO=0"
+choco --version >nul 2>&1 && set "HAS_CHOCO=1"
+
+rem ── Check and auto-install CMake ──────────────────────────────────────────
 if exist "%CMAKE_EXE%" (
-    rem found explicit executable path
-) else (
-    where %CMAKE_EXE% >nul 2>&1
-    if errorlevel 1 (
-        echo ERROR: CMake is required. Run .\Install-BuildTools.ps1 first.
-        exit /b 1
+    echo [OK] cmake (explicit path: %CMAKE_EXE%)
+    goto :cmake_ok
+)
+where cmake >nul 2>&1
+if not errorlevel 1 (
+    echo [OK] cmake found on PATH
+    goto :cmake_ok
+)
+echo [MISSING] cmake - attempting auto-install...
+if "%HAS_WINGET%"=="1" (
+    winget install --id Kitware.CMake --silent --accept-package-agreements --accept-source-agreements
+    if not errorlevel 1 (
+        set "PATH=C:\Program Files\CMake\bin;!PATH!"
+        echo [OK] cmake installed via winget
+        goto :cmake_ok
     )
 )
-echo Checking Flutter...
-if exist "%FLUTTER_CMD%" (
-    rem found explicit executable path
-) else (
-    where %FLUTTER_CMD% >nul 2>&1
-    if errorlevel 1 (
-        echo ERROR: Flutter is required to build the dashboard.
-        exit /b 1
+if "%HAS_CHOCO%"=="1" (
+    choco install cmake --confirm --install-arguments="ADD_CMAKE_TO_PATH=System"
+    if not errorlevel 1 (
+        echo [OK] cmake installed via chocolatey
+        goto :cmake_ok
     )
 )
+echo [ERROR] cmake not found and auto-install failed.
+echo         Install manually: https://cmake.org/download/
+echo         Or run: winget install Kitware.CMake
+exit /b 1
+:cmake_ok
 
+rem ── Check and auto-install LLVM ──────────────────────────────────────────
 echo Resolving LLVM_DIR...
 if "!LLVM_DIR!"=="" (
     for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('LLVM_DIR','User')"`) do set "LLVM_DIR=%%I"
 )
-
 if "!LLVM_DIR!"=="" (
     set "LLVM_DIR=%LOCALAPPDATA%\VGRE\BuildTools\llvm\lib\cmake\llvm"
 )
-
-if "!LLVM_DIR!"=="" (
-    echo ERROR: LLVM_DIR is not set.
-    echo Fix: run .\Install-BuildTools.ps1 and open a fresh terminal.
+if not exist "!LLVM_DIR!\LLVMConfig.cmake" (
+    echo [MISSING] LLVM dev libraries - attempting auto-install...
+    if "%HAS_WINGET%"=="1" (
+        winget install --id LLVM.LLVM --version 18.1.8 --silent ^
+            --accept-package-agreements --accept-source-agreements
+        if not errorlevel 1 (
+            set "LLVM_DIR=C:\Program Files\LLVM\lib\cmake\llvm"
+            echo [OK] LLVM installed via winget
+            goto :llvm_ok
+        )
+    )
+    if "%HAS_CHOCO%"=="1" (
+        choco install llvm --confirm
+        if not errorlevel 1 (
+            set "LLVM_DIR=C:\Program Files\LLVM\lib\cmake\llvm"
+            echo [OK] LLVM installed via chocolatey
+            goto :llvm_ok
+        )
+    )
+    rem Fall back to Install-BuildTools.ps1 in the repo
+    if exist "%SCRIPT_DIR%Install-BuildTools.ps1" (
+        echo [INFO] Running Install-BuildTools.ps1 to download LLVM...
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Install-BuildTools.ps1" -LLVM
+        if not errorlevel 1 (
+            set "LLVM_DIR=%LOCALAPPDATA%\VGRE\BuildTools\llvm\lib\cmake\llvm"
+            goto :llvm_ok
+        )
+    )
+    echo [ERROR] LLVM not found and auto-install failed.
+    echo         Run:  powershell -File scripts\Install-BuildTools.ps1
+    echo         Or:   winget install LLVM.LLVM
     exit /b 1
 )
+:llvm_ok
+echo [OK] LLVM at !LLVM_DIR!
+
+rem ── Check Visual Studio Build Tools ──────────────────────────────────────
+if defined VCVARS64 (
+    echo [OK] Visual Studio Build Tools at !VCVARS64!
+) else (
+    echo [MISSING] Visual Studio 2022 Build Tools - attempting auto-install...
+    if "%HAS_WINGET%"=="1" (
+        winget install --id Microsoft.VisualStudio.2022.BuildTools --silent ^
+            --override "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools ^
+            --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 ^
+            --add Microsoft.VisualStudio.Component.Windows11SDK.22621 ^
+            --includeRecommended" ^
+            --accept-package-agreements --accept-source-agreements
+        if not errorlevel 1 (
+            echo [OK] Build Tools installed - scanning for vcvars64.bat...
+            for %%D in (
+                "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
+                "C:\Program Files\Microsoft Visual Studio\2022\BuildTools"
+                "C:\Program Files\Microsoft Visual Studio\2022\Community"
+            ) do (
+                if not defined VCVARS64 if exist "%%~D\VC\Auxiliary\Build\vcvars64.bat" (
+                    set "VCVARS64=%%~D\VC\Auxiliary\Build\vcvars64.bat"
+                )
+            )
+        )
+    )
+    if not defined VCVARS64 (
+        echo [WARN] Visual Studio Build Tools not found after install attempt.
+        echo        CMake may fail to find the toolchain.
+        echo        Install manually: https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022
+    )
+)
+
+rem ── Check and auto-install Flutter ─────────────────────────────────────────
+if exist "%FLUTTER_CMD%" (
+    echo [OK] Flutter (explicit path: %FLUTTER_CMD%)
+    goto :flutter_ok
+)
+where flutter >nul 2>&1
+if not errorlevel 1 (
+    echo [OK] Flutter found on PATH
+    goto :flutter_ok
+)
+echo [MISSING] Flutter - attempting auto-install...
+if "%HAS_WINGET%"=="1" (
+    winget install --id Google.FlutterSDK --silent ^
+        --accept-package-agreements --accept-source-agreements
+    if not errorlevel 1 (
+        rem Refresh PATH to pick up flutter
+        for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$env:Path"`) do set "PATH=%%I"
+        where flutter >nul 2>&1
+        if not errorlevel 1 (
+            echo [OK] Flutter installed via winget
+            goto :flutter_ok
+        )
+    )
+)
+if "%HAS_CHOCO%"=="1" (
+    choco install flutter --confirm
+    if not errorlevel 1 (
+        echo [OK] Flutter installed via chocolatey
+        goto :flutter_ok
+    )
+)
+echo [WARN] Flutter not found and auto-install failed.
+echo        Dashboard build will be SKIPPED.
+echo        Install manually: https://flutter.dev/docs/get-started/install/windows
+echo        Or: winget install Google.FlutterSDK
+set "SKIP_DASHBOARD=1"
+:flutter_ok
+
+echo.
+echo === Dependency check complete ===
+
+echo.
+echo Cleaning up stale VGRE processes...
+taskkill /F /IM vgre-worker.exe /IM vgre_dashboard.exe /T 2>NUL
+rem Ignore errorlevel as processes might not be running
 
 echo Checking LLVM configuration...
 if not exist "!LLVM_DIR!\LLVMConfig.cmake" (
@@ -160,14 +285,20 @@ popd
 
 echo.
 echo === Building VGRE Dashboard ===
+if "%SKIP_DASHBOARD%"=="1" (
+    echo [SKIP] Flutter not available - dashboard build skipped.
+    goto :dashboard_skip
+)
 pushd "%DASHBOARD_DIR%" || exit /b 1
 powershell -NoProfile -Command "& '%FLUTTER_CMD%' build windows --release"
 if errorlevel 1 (
     popd
-    echo ERROR: Flutter build failed.
-    exit /b 1
+    echo WARNING: Flutter build failed. Continuing without dashboard.
+    set "SKIP_DASHBOARD=1"
+    goto :dashboard_skip
 )
 popd
+:dashboard_skip
 
 echo.
 echo === Deploying ===
@@ -339,23 +470,48 @@ if "%PATH_STATUS%"=="CHANGED" (
     echo [OK] %INSTALL_DIR% is already in your PATH.
 )
 
+rem ── Install vgre-token CLI into PATH ──────────────────────────────────────
+set "TOKEN_SCRIPT_DIR=%INSTALL_DIR%\scripts"
+if not exist "%TOKEN_SCRIPT_DIR%" mkdir "%TOKEN_SCRIPT_DIR%"
+copy /Y "%SCRIPT_DIR%vgre-token.ps1" "%TOKEN_SCRIPT_DIR%\vgre-token.ps1" >nul 2>&1
+copy /Y "%SCRIPT_DIR%vgre-token.bat" "%TOKEN_SCRIPT_DIR%\vgre-token.bat" >nul 2>&1
+echo [OK] vgre-token installed to %TOKEN_SCRIPT_DIR%
+
+rem Add scripts dir to user PATH if not already present
+for /f "usebackq" %%I in (`powershell -NoProfile -Command ^
+    "$dir='%TOKEN_SCRIPT_DIR%';$p=[Environment]::GetEnvironmentVariable('Path','User');" ^
+    "if($p -notlike '*'+$dir+'*'){[Environment]::SetEnvironmentVariable('Path',$p+';'+$dir,'User');'ADDED'}else{'EXISTS'}"`) do set "SCRIPTS_PATH_STATUS=%%I"
+if "!SCRIPTS_PATH_STATUS!"=="ADDED" echo [OK] Added %TOKEN_SCRIPT_DIR% to user PATH.
+
 echo.
-echo VGRE Sync Complete.
-echo Installed to: %INSTALL_DIR%
-echo Desktop shortcut: %SHORTCUT_PATH%
+echo ============================================================
+echo  VGRE Sync Complete
+echo ============================================================
+echo  Installed to:  %INSTALL_DIR%
+if not "%SHORTCUT_PATH%"=="" echo  Desktop shortcut: %SHORTCUT_PATH%
 echo.
 if exist "!DEFAULT_TOKEN_FILE!" (
-    echo Cluster auth token: ready
-    echo.
-    echo   Start master:   powershell -File scripts\Start-VGRE.ps1 --master
-    echo   Start worker:   powershell -File scripts\Start-VGRE.ps1 --worker
-    echo   Local test:     powershell -File scripts\Start-VGRE.ps1 --test
+    echo  Auth token:  READY ^(run  vgre-token fingerprint  to verify^)
 ) else (
-    echo Cluster not yet configured. Run setup to enable secure clustering:
-    echo   powershell -File scripts\Setup-VGRECluster.ps1
+    echo  Auth token:  NOT configured
+    echo  Run from any NEW terminal:  vgre-token generate
 )
 echo.
-echo You can now run 'vgre-worker' from any NEW terminal.
+echo  TOKEN MANAGEMENT ^(run from any terminal after restart^):
+echo    vgre-token generate          create / rotate auth token
+echo    vgre-token fingerprint       show SHA-256 for comparison
+echo    vgre-token set ^<TOKEN^>       paste token from master node
+echo    vgre-token copy              show copy command for workers
+echo    vgre-token verify            check master/worker match
+echo.
+echo  START COMMANDS:
+echo    vgre-start --master          launch master + dashboard
+echo    vgre-start --worker          launch worker node
+echo    vgre-start --test            local self-test
+echo    ^(also: powershell -File scripts\Start-VGRE.ps1 --master^)
+echo.
+echo  Open a NEW terminal for PATH changes to take effect.
+echo ============================================================
 pause
 exit /b 0
 
