@@ -235,5 +235,188 @@ VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
   return VGREResult::SUCCESS;
 }
 
+// ── Pool statistics & trim ─────────────────────────────────────────────────────
+
+uint64_t MemoryManager::getPoolUsedBytes(PoolHandle handle) const {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  auto it = pools_.find(handle);
+  if (it == pools_.end()) return 0;
+  const auto& pool = it->second;
+  size_t active = (pool.allocCount >= pool.freeCount)
+                ? (pool.allocCount - pool.freeCount) : 0;
+  uint64_t slabBytes = active * pool.blockSize;
+  uint64_t oversized = 0;
+  for (auto& [ptr, sz] : pool.oversizedAllocs) oversized += sz;
+  return slabBytes + oversized;
+}
+
+uint64_t MemoryManager::getPoolPeakBytes(PoolHandle handle) const {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  auto it = pools_.find(handle);
+  if (it == pools_.end()) return 0;
+  return static_cast<uint64_t>(it->second.peakAllocated);
+}
+
+VGREResult MemoryManager::trimPool(PoolHandle handle, size_t minBytes) {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  auto it = pools_.find(handle);
+  if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
+  auto& pool = it->second;
+
+  // Collect current free-list block pointers (before any slab is freed).
+  std::vector<void*> freeBlocks;
+  {
+    void* cur = pool.freeListHead;
+    while (cur) {
+      freeBlocks.push_back(cur);
+      cur = *reinterpret_cast<void**>(cur);
+    }
+  }
+
+  // Current reserved bytes in slab backing.
+  size_t reservedSlabBytes = 0;
+  for (PoolSlab* s = pool.slabList; s; s = s->next) reservedSlabBytes += s->size;
+
+  // Keep enough reserved bytes for active slab allocations and caller target.
+  size_t usedSlabBytes = pool.liveSlabAllocs.size() * pool.blockSize;
+  size_t keepTarget = std::max(minBytes, usedSlabBytes);
+  if (reservedSlabBytes <= keepTarget) return VGREResult::SUCCESS;
+
+  auto inRange = [](void* p, uint8_t* begin, uint8_t* end) {
+    auto* b = static_cast<uint8_t*>(p);
+    return b >= begin && b < end;
+  };
+
+  // Identify fully-free slabs we can release while preserving keepTarget.
+  struct ReleasableSlab {
+    PoolSlab* slab;
+    uint8_t* begin;
+    uint8_t* end;
+  };
+  std::vector<ReleasableSlab> toRelease;
+
+  for (PoolSlab* slab = pool.slabList; slab; slab = slab->next) {
+    uint8_t* begin = static_cast<uint8_t*>(slab->ptr);
+    uint8_t* end = begin + slab->size;
+    size_t totalBlocks = (pool.blockSize > 0) ? (slab->size / pool.blockSize) : 0;
+    size_t freeInSlab = 0;
+    for (void* block : freeBlocks) {
+      if (inRange(block, begin, end)) ++freeInSlab;
+    }
+    if (totalBlocks == 0 || freeInSlab != totalBlocks) continue; // slab still partially/fully in use
+    if (reservedSlabBytes - slab->size < keepTarget) continue;    // cannot release below target
+    reservedSlabBytes -= slab->size;
+    toRelease.push_back({slab, begin, end});
+  }
+
+  if (toRelease.empty()) return VGREResult::SUCCESS;
+
+  // Build a predicate for fast "is this block inside a released slab?" checks.
+  auto shouldDropFreeBlock = [&](void* p) {
+    for (const auto& r : toRelease) {
+      if (inRange(p, r.begin, r.end)) return true;
+    }
+    return false;
+  };
+
+  // Rebuild free list using only blocks from slabs we keep.
+  std::vector<void*> keptBlocks;
+  keptBlocks.reserve(freeBlocks.size());
+  for (void* block : freeBlocks) {
+    if (!shouldDropFreeBlock(block)) keptBlocks.push_back(block);
+  }
+  pool.freeListHead = keptBlocks.empty() ? nullptr : keptBlocks.front();
+  for (size_t i = 0; i < keptBlocks.size(); ++i) {
+    void** node = reinterpret_cast<void**>(keptBlocks[i]);
+    *node = (i + 1 < keptBlocks.size()) ? keptBlocks[i + 1] : nullptr;
+  }
+
+  // Unlink and free selected slabs.
+  for (const auto& r : toRelease) {
+    PoolSlab** pp = &pool.slabList;
+    while (*pp && *pp != r.slab) pp = &((*pp)->next);
+    if (*pp == r.slab) {
+      *pp = r.slab->next;
+    }
+    auto rangeIt = std::find_if(pool.slabRanges.begin(), pool.slabRanges.end(),
+                                [&](const auto& range) {
+                                  return range.first == r.begin && range.second == r.end;
+                                });
+    if (rangeIt != pool.slabRanges.end()) pool.slabRanges.erase(rangeIt);
+    if (r.slab->ptr) {
+      poolAlignedFree(r.slab->ptr);
+      usedMemory_.fetch_sub(r.slab->size, std::memory_order_relaxed);
+    }
+    delete r.slab;
+  }
+
+  VGRE_LOG_DEBUG("MemoryManager",
+                 "trimPool " + std::to_string(handle) + ": released " +
+                 std::to_string(toRelease.size()) + " fully-free slab(s)");
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::setPoolReleaseThreshold(PoolHandle handle, uint64_t threshold) {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  auto it = pools_.find(handle);
+  if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
+  it->second.releaseThreshold = threshold;
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::getPoolReleaseThreshold(PoolHandle handle,
+                                                  uint64_t &threshold) const {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  auto it = pools_.find(handle);
+  if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
+  threshold = it->second.releaseThreshold;
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::setPoolReuseFlags(PoolHandle handle,
+                                            bool followEventDeps,
+                                            bool opportunistic,
+                                            bool internalDeps) {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  auto it = pools_.find(handle);
+  if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
+  it->second.reuseFollowEventDependencies = followEventDeps;
+  it->second.reuseAllowOpportunistic = opportunistic;
+  it->second.reuseAllowInternalDependencies = internalDeps;
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::getPoolReuseFlags(PoolHandle handle,
+                                            bool &followEventDeps,
+                                            bool &opportunistic,
+                                            bool &internalDeps) const {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  auto it = pools_.find(handle);
+  if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
+  followEventDeps = it->second.reuseFollowEventDependencies;
+  opportunistic = it->second.reuseAllowOpportunistic;
+  internalDeps = it->second.reuseAllowInternalDependencies;
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::setPoolAccess(PoolHandle handle, int device,
+                                        unsigned int flags) {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  auto it = pools_.find(handle);
+  if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
+  it->second.accessFlagsByDevice[device] = flags;
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemoryManager::getPoolAccess(PoolHandle handle, int device,
+                                        unsigned int &flags) const {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  auto it = pools_.find(handle);
+  if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
+  auto fit = it->second.accessFlagsByDevice.find(device);
+  flags = (fit != it->second.accessFlagsByDevice.end()) ? fit->second : 0x3u;
+  return VGREResult::SUCCESS;
+}
+
 } // namespace core
 } // namespace vgre

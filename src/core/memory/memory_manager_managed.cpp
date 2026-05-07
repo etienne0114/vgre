@@ -84,8 +84,21 @@ VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, D
                   region.preferredLocation.store(static_cast<int>(deviceId) + 1, std::memory_order_relaxed);
               } else if (advice == 4) { // UnsetPreferredLocation
                   region.preferredLocation.store(-1, std::memory_order_relaxed);
+              } else if (advice == 1) { // SetReadMostly
+                  region.isReadMostly.store(true, std::memory_order_relaxed);
+              } else if (advice == 2) { // UnsetReadMostly
+                  region.isReadMostly.store(false, std::memory_order_relaxed);
               } else if (advice == 5) { // SetAccessedBy
                   region.accessCount.fetch_add(1, std::memory_order_relaxed);
+                  if (deviceId >= 0 && deviceId < ManagedRegion::kMaxDevices) {
+                      uint32_t bit = 1u << static_cast<uint32_t>(deviceId);
+                      region.accessedByMask.fetch_or(bit, std::memory_order_relaxed);
+                  }
+              } else if (advice == 6) { // UnsetAccessedBy
+                  if (deviceId >= 0 && deviceId < ManagedRegion::kMaxDevices) {
+                      uint32_t bit = 1u << static_cast<uint32_t>(deviceId);
+                      region.accessedByMask.fetch_and(~bit, std::memory_order_relaxed);
+                  }
               }
               break;
           }
@@ -120,6 +133,7 @@ VGREResult MemoryManager::memPrefetchAsync(const void *ptr, size_t count, Device
       uintptr_t regionEnd = regionStart + region.size;
       if (start < regionEnd && end > regionStart) {
         region.preferredLocation.store(static_cast<int>(dstDevice) + 1, std::memory_order_relaxed);
+        region.lastPrefetchDev.store(static_cast<int>(dstDevice), std::memory_order_relaxed);
         region.lastAccessTime.store(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count(),
@@ -359,10 +373,56 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
 }
 
 
-// ── O(log n) allocation range lookup ────────────────────────────────────────
-// Uses allocRange_ (a std::map sorted by base pointer) to find the allocation
-// that contains `ptr` in O(log n) instead of scanning all allocations_ entries.
-// Must be called with mutex_ held.
+// ── UVM range attribute queries ───────────────────────────────────────────────
+
+int MemoryManager::getPreferredLocation(void *ptr) const {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  for (const auto& region : masterRegions_) {
+    if (region.ptr == ptr ||
+        (static_cast<uint8_t*>(ptr) >= static_cast<uint8_t*>(region.ptr) &&
+         static_cast<uint8_t*>(ptr) < static_cast<uint8_t*>(region.ptr) + region.size)) {
+      int pref = region.preferredLocation.load(std::memory_order_relaxed);
+      return (pref > 0) ? (pref - 1) : -1;
+    }
+  }
+  return -1; // Not a managed region → CPU (cudaCpuDeviceId)
+}
+
+bool MemoryManager::isReadMostly(void *ptr) const {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  for (const auto& region : masterRegions_) {
+    if (region.ptr == ptr ||
+        (static_cast<uint8_t*>(ptr) >= static_cast<uint8_t*>(region.ptr) &&
+         static_cast<uint8_t*>(ptr) < static_cast<uint8_t*>(region.ptr) + region.size)) {
+      return region.isReadMostly.load(std::memory_order_relaxed);
+    }
+  }
+  return false;
+}
+
+int MemoryManager::getLastPrefetchLocation(void *ptr) const {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  for (const auto &region : masterRegions_) {
+    if (region.ptr == ptr ||
+        (static_cast<uint8_t *>(ptr) >= static_cast<uint8_t *>(region.ptr) &&
+         static_cast<uint8_t *>(ptr) < static_cast<uint8_t *>(region.ptr) + region.size)) {
+      return region.lastPrefetchDev.load(std::memory_order_relaxed);
+    }
+  }
+  return -1;
+}
+
+uint32_t MemoryManager::getAccessedByMask(void *ptr) const {
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  for (const auto &region : masterRegions_) {
+    if (region.ptr == ptr ||
+        (static_cast<uint8_t *>(ptr) >= static_cast<uint8_t *>(region.ptr) &&
+         static_cast<uint8_t *>(ptr) < static_cast<uint8_t *>(region.ptr) + region.size)) {
+      return region.accessedByMask.load(std::memory_order_relaxed);
+    }
+  }
+  return 0;
+}
 
 } // namespace core
 } // namespace vgre

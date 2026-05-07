@@ -18,8 +18,9 @@ enum class GraphNodeType { KERNEL, MEMCPY, CONDITIONAL };
 
 // Condition type for conditional nodes (matches cudaGraphCondType)
 enum class GraphCondType : uint8_t {
-    IF    = 0,  // Body subgraph executes once if condition returns non-zero
-    WHILE = 1,  // Body subgraph executes repeatedly while condition returns non-zero
+    IF     = 0,  // Body executes once if condition returns non-zero
+    WHILE  = 1,  // Body executes repeatedly while condition returns non-zero
+    SWITCH = 2,  // Condition returns int [0..N); selects one of N child subgraphs
 };
 
 struct GraphNode {
@@ -92,6 +93,7 @@ public:
 
   vgre::VGREResult createGraph(GraphId &outId);
   vgre::VGREResult destroyGraph(GraphId id);
+  bool graphExists(GraphId id) const;
 
   vgre::VGREResult addKernelNode(GraphId id, KernelId kernelId,
                                  const std::string &name, const dim3 &grid,
