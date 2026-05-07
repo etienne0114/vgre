@@ -227,6 +227,42 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
                                 ),
                               ),
                               const SizedBox(width: 20),
+                              // L2 Cache Hit Rate gauge — fed from vgre_get_cache_stats
+                              Expanded(
+                                flex: 2,
+                                child: GlassCard(
+                                  child: GlowGauge(
+                                    value: data.cacheStats.l2HitPercent,
+                                    max: 100.0,
+                                    label: "L2 Cache Hit Rate",
+                                    unit: "%",
+                                    color: const Color(0xFF00E5FF),
+                                    info: [
+                                      {
+                                        'key': 'L1',
+                                        'value':
+                                            '${data.cacheStats.l1ConfigKb} KB',
+                                      },
+                                      {
+                                        'key': 'L2',
+                                        'value':
+                                            '${data.cacheStats.l2ConfigMb} MB',
+                                      },
+                                      {
+                                        'key': 'Hits',
+                                        'value': _fmtCount(
+                                            data.cacheStats.l2Hits),
+                                      },
+                                      {
+                                        'key': 'Misses',
+                                        'value': _fmtCount(
+                                            data.cacheStats.l2Misses),
+                                      },
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 20),
                             ],
                             Expanded(
                               flex: 3,
@@ -281,6 +317,14 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
         },
       ),
     );
+  }
+
+  /// Format a large integer count as a compact string (e.g. 1200000 → "1.2M").
+  String _fmtCount(int n) {
+    if (n >= 1000000000) return '${(n / 1e9).toStringAsFixed(1)}B';
+    if (n >= 1000000)    return '${(n / 1e6).toStringAsFixed(1)}M';
+    if (n >= 1000)       return '${(n / 1e3).toStringAsFixed(1)}K';
+    return '$n';
   }
 
   Widget _buildHeader(BuildContext context, TelemetryActive state) {

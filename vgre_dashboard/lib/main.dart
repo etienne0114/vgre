@@ -33,11 +33,15 @@ class _VgreBootstrapAppState extends State<VgreBootstrapApp> {
 
   Future<void> _bootstrap() async {
     try {
+      // Load ~/.vgre/env first so all runtime vars are available before the
+      // bridge opens the shared library (LD_LIBRARY_PATH must be set first).
+      _loadVgreEnvFile();
+
       final String libPath = _resolveLibPath();
       final VgreBridge bridge = VgreBridge(libPath);
       final SqliteService sqlite = SqliteService();
 
-      _syncPersistentToken(bridge);
+      _syncRuntimeEnvVars(bridge);
 
       if (!mounted) return;
       setState(() {
@@ -55,73 +59,129 @@ class _VgreBootstrapAppState extends State<VgreBootstrapApp> {
     }
   }
 
+  /// Parse ~/.vgre/env (shell-style KEY="VALUE" lines) and push every variable
+  /// into the Dart process environment via bridge.setEnvironmentVariable so
+  /// that the native library picks them up through getenv().
+  void _loadVgreEnvFile() {
+    try {
+      final home = Platform.environment['HOME'] ??
+          Platform.environment['USERPROFILE'] ?? '';
+      if (home.isEmpty) return;
+      final envFile = File('$home/.vgre/env');
+      if (!envFile.existsSync()) return;
+
+      for (final raw in envFile.readAsLinesSync()) {
+        final line = raw.trim();
+        // Skip comments and blank lines
+        if (line.isEmpty || line.startsWith('#')) continue;
+        // Strip leading "export "
+        final stripped = line.startsWith('export ') ? line.substring(7) : line;
+        final eq = stripped.indexOf('=');
+        if (eq < 1) continue;
+        final key = stripped.substring(0, eq).trim();
+        var val = stripped.substring(eq + 1).trim();
+        // Strip surrounding quotes
+        if ((val.startsWith('"') && val.endsWith('"')) ||
+            (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.substring(1, val.length - 1);
+        }
+        // Expand simple ${VAR:-default} or $VAR references
+        val = val.replaceAllMapped(
+          RegExp(r'\$\{([^}:]+)(?::-([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)'),
+          (m) {
+            final varName = m[1] ?? m[3] ?? '';
+            final fallback = m[2] ?? '';
+            return Platform.environment[varName] ?? fallback;
+          },
+        );
+        if (key.isNotEmpty) {
+          // Store in a local map; we'll push to native after the bridge is open.
+          _pendingEnv[key] = val;
+        }
+      }
+    } catch (e) {
+      debugPrint('VGRE env file load failed: $e');
+    }
+  }
+
+  final Map<String, String> _pendingEnv = {};
+
   String _resolveLibPath() {
     final String libName = Platform.isWindows
         ? 'vgre.dll'
         : (Platform.isMacOS ? 'libvgre.dylib' : 'libvgre.so');
 
+    // 1. Explicit override from env file or environment
+    final envPath = _pendingEnv['VGRE_LIB_PATH'] ??
+        Platform.environment['VGRE_LIB_PATH'];
+    if (envPath != null && File(envPath).existsSync()) return envPath;
+
     final String executablePath = Platform.resolvedExecutable;
     final String executableDir = executablePath.substring(
-      0,
-      executablePath.lastIndexOf(Platform.pathSeparator),
-    );
-    final String bundlePath =
-        '$executableDir${Platform.pathSeparator}lib${Platform.pathSeparator}$libName';
+      0, executablePath.lastIndexOf(Platform.pathSeparator));
 
-    if (File(bundlePath).existsSync()) {
-      return bundlePath;
+    // 2. Next to the binary's lib/ subdirectory (installed bundle)
+    final bundlePath = '$executableDir${Platform.pathSeparator}lib'
+        '${Platform.pathSeparator}$libName';
+    if (File(bundlePath).existsSync()) return bundlePath;
+
+    // 3. Next to the binary itself
+    final localPath = '$executableDir${Platform.pathSeparator}$libName';
+    if (File(localPath).existsSync()) return localPath;
+
+    // 4. Installed under ~/.local/share/VGRE/lib
+    final home = Platform.environment['HOME'] ?? '';
+    if (home.isNotEmpty) {
+      final installedPath = '$home/.local/share/VGRE/lib/$libName';
+      if (File(installedPath).existsSync()) return installedPath;
     }
 
-    final String localPath =
-        '$executableDir${Platform.pathSeparator}$libName';
-    if (File(localPath).existsSync()) {
-      return localPath;
+    // 5. Repo build directory (developer mode)
+    for (final rel in ['../build/$libName', 'build/$libName']) {
+      if (File(rel).existsSync()) return rel;
     }
 
-    // Windows: Check %LOCALAPPDATA%\VGRE for installed version
+    // 6. Windows %LOCALAPPDATA%\VGRE
     if (Platform.isWindows) {
-      final String localAppData = Platform.environment['LOCALAPPDATA'] ?? '';
-      if (localAppData.isNotEmpty) {
-        final String vgreInstallPath = '$localAppData\\VGRE\\lib\\$libName';
-        if (File(vgreInstallPath).existsSync()) {
-          return vgreInstallPath;
-        }
-        final String vgreInstallRootPath = '$localAppData\\VGRE\\$libName';
-        if (File(vgreInstallRootPath).existsSync()) {
-          return vgreInstallRootPath;
+      final appData = Platform.environment['LOCALAPPDATA'] ?? '';
+      if (appData.isNotEmpty) {
+        for (final p in [
+          '$appData\\VGRE\\lib\\$libName',
+          '$appData\\VGRE\\$libName',
+        ]) {
+          if (File(p).existsSync()) return p;
         }
       }
     }
 
-    return Platform.environment['VGRE_LIB_PATH'] ??
-        (File('../build/$libName').existsSync() ? '../build/$libName' : libName);
+    return libName; // last resort: dynamic linker search path
   }
 
-  void _syncPersistentToken(VgreBridge bridge) {
-    if (Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN')) {
-      return;
-    }
+  /// Push all env vars from ~/.vgre/env and the auth token into the native
+  /// process via setenv() so the C++ runtime reads them through getenv().
+  void _syncRuntimeEnvVars(VgreBridge bridge) {
+    // Push everything parsed from ~/.vgre/env
+    _pendingEnv.forEach((key, value) {
+      bridge.setEnvironmentVariable(key, value);
+    });
 
-    try {
-      final String home =
-          Platform.environment['HOME'] ??
-          Platform.environment['USERPROFILE'] ??
-          '';
-      if (home.isEmpty) {
-        return;
+    // Auth token: file takes precedence over env so cluster workers always
+    // use the correct token even if a stale VGRE_TCP_AUTH_TOKEN is set.
+    if (!Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN') &&
+        !_pendingEnv.containsKey('VGRE_TCP_AUTH_TOKEN')) {
+      try {
+        final home = Platform.environment['HOME'] ??
+            Platform.environment['USERPROFILE'] ?? '';
+        final tokenFile = File('$home/.vgre/token');
+        if (tokenFile.existsSync()) {
+          final token = tokenFile.readAsStringSync().trim();
+          if (token.isNotEmpty) {
+            bridge.setEnvironmentVariable('VGRE_TCP_AUTH_TOKEN', token);
+          }
+        }
+      } catch (e) {
+        debugPrint('Token sync failed: $e');
       }
-
-      final tokenFile = File('$home/.vgre/token');
-      if (!tokenFile.existsSync()) {
-        return;
-      }
-
-      final token = tokenFile.readAsStringSync().trim();
-      if (token.isNotEmpty) {
-        bridge.setEnvironmentVariable('VGRE_TCP_AUTH_TOKEN', token);
-      }
-    } catch (e) {
-      debugPrint('Token sync failed: $e');
     }
   }
 

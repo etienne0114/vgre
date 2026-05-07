@@ -680,8 +680,21 @@ Telemetry _doPollSync(
     int deviceCount = 1;
     try {
       final count = bridge.getDeviceCount();
-      if (count > 0) {
-        deviceCount = count;
+      if (count > 0) deviceCount = count;
+    } catch (_) {}
+
+    CacheStats cacheStats = const CacheStats();
+    try {
+      final cs = bridge.getCacheStats();
+      if (cs != null) {
+        cacheStats = CacheStats(
+          l2Hits:      cs['l2Hits']      as int,
+          l2Misses:    cs['l2Misses']    as int,
+          l2Evictions: cs['l2Evictions'] as int,
+          l2HitRate:   cs['l2HitRate']   as double,
+          l1ConfigKb:  cs['l1ConfigKb']  as int,
+          l2ConfigMb:  cs['l2ConfigMb']  as int,
+        );
       }
     } catch (_) {}
 
@@ -726,6 +739,7 @@ Telemetry _doPollSync(
       clusterSecuritySupported: securitySupported,
       deviceCount: deviceCount,
       lastSelectedKernelStats: lastSelectedKernelStats,
+      cacheStats: cacheStats,
     );
   } finally {
     calloc.free(ptr);

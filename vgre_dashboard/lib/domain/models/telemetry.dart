@@ -4,6 +4,31 @@ enum MetricQuality {
   measured,
 }
 
+class CacheStats extends Equatable {
+  final int l2Hits;
+  final int l2Misses;
+  final int l2Evictions;
+  final double l2HitRate;
+  final int l1ConfigKb;
+  final int l2ConfigMb;
+
+  const CacheStats({
+    this.l2Hits = 0,
+    this.l2Misses = 0,
+    this.l2Evictions = 0,
+    this.l2HitRate = 0.0,
+    this.l1ConfigKb = 32,
+    this.l2ConfigMb = 6,
+  });
+
+  int get l2Total => l2Hits + l2Misses;
+  double get l2HitPercent => l2HitRate * 100.0;
+
+  @override
+  List<Object?> get props =>
+      [l2Hits, l2Misses, l2Evictions, l2HitRate, l1ConfigKb, l2ConfigMb];
+}
+
 extension MetricQualityLabel on MetricQuality {
   String get label {
     switch (this) {
@@ -229,6 +254,7 @@ class Telemetry extends Equatable {
   final List<MemoryAllocation> allocations;
   final List<MemoryPool> memoryPools;
   final int deviceCount;
+  final CacheStats cacheStats;
 
   const Telemetry({
     required this.timestamp,
@@ -275,6 +301,7 @@ class Telemetry extends Equatable {
     this.allocations = const [],
     this.memoryPools = const [],
     this.deviceCount = 1,
+    this.cacheStats = const CacheStats(),
   });
 
   double get memoryUsagePercent =>
@@ -325,6 +352,7 @@ class Telemetry extends Equatable {
     List<MemoryAllocation>? allocations,
     List<MemoryPool>? memoryPools,
     int? deviceCount,
+    CacheStats? cacheStats,
   }) {
     return Telemetry(
       timestamp: timestamp ?? this.timestamp,
@@ -371,6 +399,7 @@ class Telemetry extends Equatable {
       allocations: allocations ?? this.allocations,
       memoryPools: memoryPools ?? this.memoryPools,
       deviceCount: deviceCount ?? this.deviceCount,
+      cacheStats: cacheStats ?? this.cacheStats,
     );
   }
 
@@ -420,6 +449,7 @@ class Telemetry extends Equatable {
         allocations,
         memoryPools,
         deviceCount,
+        cacheStats,
       ];
 }
 
