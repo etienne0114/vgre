@@ -12,6 +12,7 @@
 #include "vgre/advanced/hybrid_compute_manager.h"
 #include "vgre/advanced/resource_ledger.h"
 #include "vgre/advanced/ipc_manager.h"
+#include "vgre/advanced/rdma_transport.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/common/logger.h"
@@ -727,6 +728,32 @@ void TCPClusterManager::serverLoop() {
                     client->ip_address, cpkt.cpu_cores, cpkt.cpu_memory,
                     cpkt.has_igpu, cpkt.igpu_name);
                 syncToIPC();
+
+                // ── Optional RDMA upgrade after CAPABILITY ─────────────────
+                // Try to establish an RDMA QP with this worker so that bulk
+                // DATA_BODY packets (> 64 KB) can use zero-copy RDMA WRITE
+                // instead of TCP copy.  Falls back silently if RDMA unavailable.
+                if (!client->rdma_connected) {
+                    if (!client->rdma_ctx) {
+                        client->rdma_ctx.reset(RDMAContext::tryCreate());
+                    }
+                    if (client->rdma_ctx && client->secureChannel &&
+                        client->secureChannel->isInitialized()) {
+                        client->rdma_conn = std::make_unique<RDMAConnection>();
+                        if (client->rdma_conn->connect(*client->secureChannel,
+                                                       *client->rdma_ctx)) {
+                            client->rdma_connected = true;
+                            VGRE_LOG_INFO("TCPCluster",
+                                "Master: RDMA transport active for " + client->ip_address);
+                        } else {
+                            client->rdma_conn.reset();
+                            client->rdma_ctx.reset();
+                            VGRE_LOG_INFO("TCPCluster",
+                                "Master: RDMA not available for " + client->ip_address +
+                                " — using TCP");
+                        }
+                    }
+                }
 
                 // Launch bandwidth probe: send a BANDWIDTH_PROBE immediately
                 // after CAPABILITY so the worker can reply with BANDWIDTH_ACK.

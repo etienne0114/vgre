@@ -11,6 +11,18 @@
 #include <cpuid.h>
 #endif
 
+#if defined(__linux__) && defined(__x86_64__)
+#include <sys/syscall.h>
+#include <unistd.h>
+// arch_prctl numbers for AMX tile-data state enablement
+#ifndef ARCH_REQ_XCOMP_PERM
+#define ARCH_REQ_XCOMP_PERM  0x1023
+#endif
+#ifndef XFEATURE_XTILEDATA
+#define XFEATURE_XTILEDATA   18
+#endif
+#endif
+
 // SIMD intrinsics — guarded by compile-time checks
 #if defined(VGRE_HAS_AVX512) || defined(VGRE_HAS_AVX2)
 #include <immintrin.h>
@@ -43,11 +55,56 @@ void VectorEngine::detectCapabilities() {
     }
 
     if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
-        caps_.hasAVX2   = (ebx >> 5) & 1;
-        caps_.hasAVX512 = (ebx >> 16) & 1;
-        caps_.hasVNNI   = (ecx >> 11) & 1;
-        caps_.hasAMX    = (edx >> 24) & 1;
+        caps_.hasAVX2    = (ebx >> 5)  & 1;
+        caps_.hasAVX512  = (ebx >> 16) & 1;
+        caps_.hasVNNI    = (ecx >> 11) & 1;
+        caps_.hasAMXBF16 = (edx >> 22) & 1;  // AMX-BF16: leaf 7.0 EDX[22]
+        caps_.hasAMXTile = (edx >> 24) & 1;  // AMX-TILE: leaf 7.0 EDX[24]
     }
+
+    // AMX requires both CPUID bits AND OS permission.
+    // Verify via XGETBV that the OS has enabled XTILECFG (bit 17) and
+    // XTILEDATA (bit 18) in XCR0, then request XTILEDATA via arch_prctl.
+    if (caps_.hasAMXTile && caps_.hasAMXBF16) {
+#if defined(__linux__)
+        // XGETBV: read XCR0 to confirm OS-granted tile state
+        uint64_t xcr0 = 0;
+        __asm__ volatile(
+            "xgetbv"
+            : "=A"(xcr0)   // EAX:EDX → xcr0 (64-bit)
+            : "c"(0)        // XCR index 0
+        );
+        bool osTileConfigOk = (xcr0 >> 17) & 1; // XTILECFG
+        bool osTileDataOk   = (xcr0 >> 18) & 1; // XTILEDATA
+
+        if (!osTileDataOk) {
+            // Ask the OS to enable XTILEDATA for this thread (and its children).
+            // Without this, the first AMX instruction raises SIGILL.
+            int rc = static_cast<int>(syscall(SYS_arch_prctl,
+                                               ARCH_REQ_XCOMP_PERM,
+                                               XFEATURE_XTILEDATA));
+            if (rc == 0) {
+                // Re-read XCR0 after enablement
+                __asm__ volatile("xgetbv" : "=A"(xcr0) : "c"(0));
+                osTileConfigOk = (xcr0 >> 17) & 1;
+                osTileDataOk   = (xcr0 >> 18) & 1;
+            }
+        }
+
+        caps_.amxEnabled = osTileConfigOk && osTileDataOk;
+        if (caps_.amxEnabled) {
+            VGRE_LOG_INFO("VectorEngine", "Intel AMX tile state enabled via arch_prctl");
+        } else {
+            VGRE_LOG_WARN("VectorEngine",
+                "AMX CPUID bits set but OS tile state unavailable — AMX path disabled");
+        }
+#else
+        // Windows / macOS: AMX not yet supported by the OS (as of 2026)
+        caps_.amxEnabled = false;
+#endif
+    }
+
+    caps_.hasAMX = caps_.amxEnabled;  // legacy alias
     #else
     // Non-x86: no SIMD detection
     caps_ = {};
@@ -61,15 +118,15 @@ const SIMDCapabilities& VectorEngine::getCapabilities() const {
 std::string VectorEngine::getCapabilityString() const {
     std::ostringstream oss;
     oss << "SIMD: ";
-    if (caps_.hasAMX)    oss << "AMX ";
+    if (caps_.amxEnabled)  oss << "AMX-BF16(active) ";
+    else if (caps_.hasAMXTile) oss << "AMX(hw-only/disabled) ";
     if (caps_.hasVNNI)   oss << "VNNI ";
-    if (caps_.hasAVX512) oss << "AVX-512 ";
+    if (caps_.hasAVX512) oss << "AVX-512F ";
     if (caps_.hasAVX2)   oss << "AVX2 ";
     if (caps_.hasAVX)    oss << "AVX ";
     if (caps_.hasFMA)    oss << "FMA ";
     if (caps_.hasSSE4)   oss << "SSE4.1 ";
     if (caps_.hasSSE2)   oss << "SSE2 ";
-    if (caps_.hasAMX)    oss << "(Accelerated AI) ";
     if (!caps_.hasSSE2 && !caps_.hasAVX) oss << "none (scalar only)";
     return oss.str();
 }
@@ -197,6 +254,12 @@ double VectorEngine::benchmarkFMA(size_t n, int iterations) {
     // 4 vectors × n × 4 bytes; cap at 128 MB total (32M floats per vector).
     static constexpr size_t kMaxBenchN = 32 * 1024 * 1024ULL;
     if (n > kMaxBenchN) n = kMaxBenchN;
+    // Cap iterations to prevent double overflow in the FLOP counter below.
+    // Max representable: (32M × 32 × 2 × kMaxIter) must stay < DBL_MAX (~1.8e308).
+    // At n=32M, 32×2=64 FLOPs/elem → max safe iterations = floor(1.8e308 / (32M × 64)) ≈ 8e292.
+    // Practical cap at 1M iterations to keep benchmark runtime sane.
+    static constexpr int kMaxIterations = 1'000'000;
+    if (iterations > kMaxIterations) iterations = kMaxIterations;
 
     std::vector<float> a(n, 1.1f), b(n, 2.2f), c(n, 3.3f), out(n, 0.0f);
     float* pa = a.data();
@@ -271,7 +334,11 @@ double VectorEngine::benchmarkFMA(size_t n, int iterations) {
 
 double VectorEngine::benchmarkBF16(size_t n, int iterations) {
     if (n == 0 || iterations == 0) return 0.0;
-    
+    static constexpr size_t kMaxBenchN    = 32 * 1024 * 1024ULL;
+    static constexpr int    kMaxIterations = 1'000'000;
+    if (n > kMaxBenchN)          n = kMaxBenchN;
+    if (iterations > kMaxIterations) iterations = kMaxIterations;
+
     std::vector<vgre_bf16> a(n, fp32_to_bf16(1.1f)), b(n, fp32_to_bf16(2.2f));
     vgre_bf16* pa = a.data();
     vgre_bf16* pb = b.data();

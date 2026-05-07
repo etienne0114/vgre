@@ -9,6 +9,7 @@
 #include <mutex>
 #include <type_traits>
 #include "vgre/common/platform.h"
+#include "vgre/runtime/gpu_cache.h"
 
 namespace vgre {
 namespace runtime {
@@ -62,12 +63,12 @@ public:
 
   // Typed accessor — equivalent to `extern __shared__ T sdata[];`
   template <typename T> T *as(size_t byteOffset = 0) {
-    trackAccess(byteOffset, sizeof(T));
+    trackAccess(byteOffset, sizeof(T), /*isWrite=*/true);
     return reinterpret_cast<T *>(buffer_ + byteOffset);
   }
 
   template <typename T> const T *as(size_t byteOffset = 0) const {
-    const_cast<SharedMemory*>(this)->trackAccess(byteOffset, sizeof(T));
+    const_cast<SharedMemory*>(this)->trackAccess(byteOffset, sizeof(T), /*isWrite=*/false);
     return reinterpret_cast<const T *>(buffer_ + byteOffset);
   }
 
@@ -93,22 +94,25 @@ public:
   uint64_t getConflictCount() const { return conflicts_; }
 
 private:
-  void trackAccess(size_t offset, size_t size) {
-    (void)size;
-    // Virtual Bank Conflict Profiling (Simplified Warp Model)
-    // Assume warp size 32, 4-byte banks.
-    // In a real warp, 32 threads access simultaneously.
-    // Here we track if sequential accesses in the same 'wave' hit the same bank
-    // without hitting the same address (broadcast is fine).
-    static thread_local uint32_t lastBank = 0xFFFFFFFF;
+  void trackAccess(size_t offset, size_t size, bool isWrite = false) {
+    // ── Bank Conflict Profiling (warp model) ───────────────────────────────
+    // 4-byte banks, 32 banks per warp. Conflict = two accesses to the same
+    // bank at different addresses in the same warp cycle.
+    static thread_local uint32_t lastBank   = 0xFFFFFFFF;
     static thread_local uint32_t lastOffset = 0xFFFFFFFF;
-    
-    uint32_t bank = (offset / 4) % 32;
-    if (bank == lastBank && offset != lastOffset) {
+    uint32_t bank = (static_cast<uint32_t>(offset) / 4) % 32;
+    if (bank == lastBank && static_cast<uint32_t>(offset) != lastOffset)
         conflicts_++;
-    }
-    lastBank = bank;
-    lastOffset = offset;
+    lastBank   = bank;
+    lastOffset = static_cast<uint32_t>(offset);
+
+    // ── L1/L2 Cache Modeling ───────────────────────────────────────────────
+    // Shared memory is architecturally L1-resident on GPU hardware — it never
+    // goes to L2. Model it as an L1 hit for statistics purposes (hit rate = 1).
+    // Global memory accesses go through L2; those are modeled in the executor.
+    // Here we just record the L1 hit for the shared memory access.
+    vgre::runtime::GPUCacheL2::instance().access(
+        reinterpret_cast<uint64_t>(buffer_) + offset, size, isWrite);
   }
 
   size_t size_;

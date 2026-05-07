@@ -9,6 +9,7 @@
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
 #include "vgre/advanced/secure_channel.h"
+#include "vgre/advanced/rdma_transport.h"
 #include "vgre/core/shm_manager.h"
 #include <atomic>
 #include <cstdint>
@@ -353,6 +354,11 @@ public:
     // Measured one-way network latency in ms (half the BANDWIDTH_ACK RTT).
     // Default 1.0 ms (typical LAN); feeds the workload partitioner.
     double network_latency_ms = 1.0;
+
+    // ── RDMA zero-copy transport (optional, falls back to TCP) ────────────────
+    std::unique_ptr<RDMAContext>    rdma_ctx;
+    std::unique_ptr<RDMAConnection> rdma_conn;
+    bool rdma_connected = false;  // true after QP reaches RTS state
 
     // A5: HMAC circuit-breaker — counts consecutive ERR_AUTH_FAILED returns
     // from recvSecure(). After 5, the connection is closed and the address

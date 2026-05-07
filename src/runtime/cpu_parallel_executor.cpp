@@ -3,6 +3,7 @@
 #include "vgre/common/platform.h"
 #include "vgre/runtime/gpu_thread_context.h"
 #include "vgre/runtime/block_worker_pool.h"
+#include "vgre/runtime/gpu_cache.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
 
@@ -107,6 +108,17 @@ namespace runtime {
 
 // Lazy Shared Memory pool to avoid per-launch allocations
 static VGRE_THREAD_LOCAL std::unique_ptr<SharedMemory> t_shared_mem = nullptr;
+
+// Per-OMP-thread L1 cache — recreated if the L1 size env var changes between
+// kernel launches (rare but safe: invalid() resets stats and sets).
+static VGRE_THREAD_LOCAL std::unique_ptr<vgre::runtime::GPUCacheL1> t_l1_cache = nullptr;
+
+static vgre::runtime::GPUCacheL1* getThreadL1Cache() {
+    if (!t_l1_cache)
+        t_l1_cache = std::make_unique<vgre::runtime::GPUCacheL1>(
+            vgre::runtime::gpuL1CacheSizeKB());
+    return t_l1_cache.get();
+}
 
 static SharedMemory* getThreadSharedMem(size_t size) {
     if (!t_shared_mem) {
