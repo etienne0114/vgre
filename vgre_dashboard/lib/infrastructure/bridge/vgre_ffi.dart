@@ -140,6 +140,26 @@ final class VgreCreditInfo extends Struct {
   external int transactionCount;
 }
 
+// Mirrors vgre_cache_stats_t from include/vgre/api/vgre_c_api.h
+final class VgreCacheStats extends Struct {
+  @Uint64()
+  external int l2Hits;
+  @Uint64()
+  external int l2Misses;
+  @Uint64()
+  external int l2Evictions;
+  @Double()
+  external double l2HitRate;
+  @Uint32()
+  external int l1ConfigKb;
+  @Uint32()
+  external int l2ConfigMb;
+}
+
+typedef GetCacheStatsFunc = Int32 Function(Pointer<VgreCacheStats>);
+typedef GetCacheStats = int Function(Pointer<VgreCacheStats>);
+typedef ResetCacheStatsFunc = Int32 Function();
+typedef ResetCacheStats = int Function();
 
 typedef InitFunc = Int32 Function();
 typedef Init = int Function();
@@ -233,7 +253,9 @@ class VgreBridge {
   late final GetCreditsAll _getCreditsAll;
   late final CreditsReset _creditsReset;
   late final GetDeviceCount _getDeviceCount;
-  
+  GetCacheStats? _getCacheStats;
+  ResetCacheStats? _resetCacheStats;
+
   int Function(Pointer<Utf8>, Pointer<Utf8>, int)? _setenv;
 
 
@@ -319,6 +341,18 @@ class VgreBridge {
     _getDeviceCount = _lib.lookupFunction<GetDeviceCountFunc, GetDeviceCount>(
       'vgre_get_device_count',
     );
+    // Cache stats — optional; older builds without the symbol still work.
+    try {
+      _getCacheStats = _lib.lookupFunction<GetCacheStatsFunc, GetCacheStats>(
+        'vgre_get_cache_stats',
+      );
+      _resetCacheStats = _lib.lookupFunction<ResetCacheStatsFunc, ResetCacheStats>(
+        'vgre_reset_cache_stats',
+      );
+    } catch (_) {
+      _getCacheStats = null;
+      _resetCacheStats = null;
+    }
   }
 
 
@@ -588,6 +622,30 @@ class VgreBridge {
   }
 
   int creditsReset() => _creditsReset();
+
+  /// Returns L1/L2 cache statistics from the native runtime.
+  /// Returns null if the symbol is not available in the loaded library.
+  Map<String, dynamic>? getCacheStats() {
+    if (_getCacheStats == null) return null;
+    final ptr = calloc<VgreCacheStats>();
+    try {
+      final res = _getCacheStats!(ptr);
+      if (res != 0) return null;
+      final s = ptr.ref;
+      return {
+        'l2Hits': s.l2Hits,
+        'l2Misses': s.l2Misses,
+        'l2Evictions': s.l2Evictions,
+        'l2HitRate': s.l2HitRate,
+        'l1ConfigKb': s.l1ConfigKb,
+        'l2ConfigMb': s.l2ConfigMb,
+      };
+    } finally {
+      calloc.free(ptr);
+    }
+  }
+
+  void resetCacheStats() => _resetCacheStats?.call();
 
   String? getKernelHistoryJson(String kernelName) {
     final namePtr = kernelName.toNativeUtf8();
