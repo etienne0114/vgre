@@ -1,7 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # VGRE Start — launch a master or worker node with one command.
 #
-# Prerequisites: run scripts/setup-cluster.sh once on each machine first.
+# Prerequisites: run install_local.sh once (generates ~/.vgre/env automatically).
 #
 # Usage:
 #   vgre-start --master                          Start master (runs the dashboard)
@@ -11,6 +11,22 @@
 #   vgre-start --test                           Quick local test: master + worker on same machine
 
 set -e
+
+# ── Auto-source environment file (set by install_local.sh) ───────────────────
+# This makes all VGRE env vars available without the user having to run
+# "source ~/.vgre/env" or "export ..." manually.
+VGRE_ENV_FILE="${VGRE_ENV_FILE:-$HOME/.vgre/env}"
+if [[ -f "$VGRE_ENV_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$VGRE_ENV_FILE"
+fi
+
+# Also add the installed lib directory to LD_LIBRARY_PATH so the worker
+# binary can find libvgre*.so without manual configuration.
+_VGRE_LIB_DIR="${VGRE_INSTALL_DIR:-$HOME/.local/share/VGRE}/lib"
+if [[ -d "$_VGRE_LIB_DIR" ]]; then
+    export LD_LIBRARY_PATH="$_VGRE_LIB_DIR:${LD_LIBRARY_PATH:-}"
+fi
 
 INSTALL_DIR="${VGRE_INSTALL_DIR:-$HOME/.local/share/VGRE}"
 TOKEN_FILE="${VGRE_TCP_AUTH_TOKEN_FILE:-$HOME/.vgre/token}"
