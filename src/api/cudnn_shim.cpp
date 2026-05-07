@@ -51,7 +51,14 @@ enum cudnnDataType_t {
     CUDNN_DATA_FLOAT  = 0,
     CUDNN_DATA_DOUBLE = 1,
     CUDNN_DATA_HALF   = 2,
-    CUDNN_DATA_INT8   = 3
+    CUDNN_DATA_INT8   = 3,
+    CUDNN_DATA_INT32  = 4,
+    CUDNN_DATA_INT8x4 = 5,
+    CUDNN_DATA_UINT8  = 6,
+    CUDNN_DATA_UINT8x4= 7,
+    CUDNN_DATA_INT8x32= 8,
+    CUDNN_DATA_BFLOAT16= 9,
+    CUDNN_DATA_INT64  = 10
 };
 
 enum cudnnTensorFormat_t {
@@ -63,6 +70,19 @@ enum cudnnNanPropagation_t {
     CUDNN_NOT_PROPAGATE_NAN = 0,
     CUDNN_PROPAGATE_NAN = 1
 };
+
+// ── INT8 quantization helpers ─────────────────────────────────────────────────
+// Scale factor stored in alpha/beta when dataType == CUDNN_DATA_INT8.
+// VGRE uses symmetric per-tensor quantization: x_float = x_int8 * scale.
+static inline float vgre_dequant_i8(int8_t v, float scale) {
+    return static_cast<float>(v) * scale;
+}
+static inline int8_t vgre_quant_f32_to_i8(float v, float inv_scale) {
+    float q = v * inv_scale;
+    if (q >  127.f) q =  127.f;
+    if (q < -128.f) q = -128.f;
+    return static_cast<int8_t>(std::round(q));
+}
 
 // ── Descriptor structs ────────────────────────────────────────────────────────
 struct TensorDesc {
@@ -354,12 +374,37 @@ cudnnStatus_t cudnnConvolutionForward(
     auto* yt=(TensorDesc*)yDesc;
     float a = *(const float*)alpha, b = *(const float*)beta;
 
+    // ── INT8 path: dequantize inputs to FP32, run conv, requantize output ──────
+    bool isInt8 = (xt->dtype == CUDNN_DATA_INT8 || xt->dtype == CUDNN_DATA_INT8x4);
+    int xElem = xt->n * xt->c * xt->h * xt->w;
+    int wElem = ft->k * ft->c * ft->r * ft->s;
+    std::vector<float> xFloat, wFloat;
+    const float* xPtr = (const float*)x;
+    const float* wPtr = (const float*)w;
+    if (isInt8) {
+        // alpha carries the input scale; beta carries the weight scale.
+        // If scale is unreasonably small, use 1/128 as a safe default.
+        float xScale = (a > 1e-8f) ? a : (1.f / 128.f);
+        float wScale = (b > 1e-8f) ? b : (1.f / 128.f);
+        xFloat.resize(xElem);
+        wFloat.resize(wElem);
+        const int8_t* xi = (const int8_t*)x;
+        const int8_t* wi = (const int8_t*)w;
+        for (int i = 0; i < xElem; ++i) xFloat[i] = vgre_dequant_i8(xi[i], xScale);
+        for (int i = 0; i < wElem; ++i) wFloat[i] = vgre_dequant_i8(wi[i], wScale);
+        xPtr = xFloat.data();
+        wPtr = wFloat.data();
+        a = 1.f; b = 0.f; // alpha/beta absorbed into dequant scales
+    }
+
     int ySize = yt->n * yt->c * yt->h * yt->w;
     float* yf = (float*)y;
-    if (b != 0.0f) {
-        for (int i = 0; i < ySize; ++i) yf[i] *= b;
-    } else {
-        std::memset(yf, 0, ySize * sizeof(float));
+    if (!isInt8) {
+        if (b != 0.0f) {
+            for (int i = 0; i < ySize; ++i) yf[i] *= b;
+        } else {
+            std::memset(yf, 0, ySize * sizeof(float));
+        }
     }
 
     std::vector<float> tmp(ySize, 0.f);
@@ -373,8 +418,8 @@ cudnnStatus_t cudnnConvolutionForward(
         //   oh = (h + 2*pad_h - str_h*(r-1) - 1) / str_h + 1  (for r=1 → (h + 2*pad_h) / str_h)
         //   ow = same for w
         // Use the output dims from the pre-computed yt descriptor.
-        const float* xf = (const float*)x;
-        const float* wf = (const float*)w;
+        const float* xf = xPtr;
+        const float* wf = wPtr;
         for (int n = 0; n < xt->n; ++n)
         for (int k = 0; k < ft->k; ++k)
         for (int oh = 0; oh < yt->h; ++oh)
@@ -393,15 +438,21 @@ cudnnStatus_t cudnnConvolutionForward(
             tmp[((n * yt->c + k) * yt->h + oh) * yt->w + ow] = acc;
         }
     } else {
-        // Direct conv — handles all filter sizes, strides, dilations correctly.
-        // Winograd is selected by the algorithm hint but executed via direct conv
-        // (same numerical result; the hint is informational for workspace sizing).
         cpuConv2d(xt->n, xt->c, xt->h, xt->w,
                   ft->k, ft->r, ft->s,
                   cv->pad_h, cv->pad_w, cv->str_h, cv->str_w, cv->dil_h, cv->dil_w,
-                  (const float*)x, (const float*)w, tmp.data());
+                  xPtr, wPtr, tmp.data());
     }
-    for (int i = 0; i < ySize; ++i) yf[i] += a * tmp[i];
+    if (isInt8) {
+        // Requantize FP32 result back to INT8 using output scale = a.
+        float outScale = (a > 1e-8f) ? a : (1.f / 128.f);
+        float invOutScale = 1.f / outScale;
+        int8_t* yi = (int8_t*)y;
+        for (int i = 0; i < ySize; ++i)
+            yi[i] = vgre_quant_f32_to_i8(tmp[i], invOutScale);
+    } else {
+        for (int i = 0; i < ySize; ++i) yf[i] += a * tmp[i];
+    }
     return CUDNN_STATUS_SUCCESS;
 }
 

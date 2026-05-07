@@ -4,6 +4,7 @@
 
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
+#include "vgre/runtime/gpu_cache.h"
 #include "vgre/advanced/ipc_manager.h"
 #include "vgre/advanced/resource_ledger.h"
 #include "vgre/advanced/runtime_profiler.h"
@@ -718,4 +719,31 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
   }
 
   return VGRE_SUCCESS;
+}
+
+// ── GPU Cache Statistics ───────────────────────────────────────────────────────
+
+int vgre_get_cache_stats(vgre_cache_stats_t *stats) {
+    if (!stats) return VGRE_ERROR_INVALID_VALUE;
+
+    auto s = vgre::runtime::GPUCacheL2::instance().stats();
+    stats->l2_hits       = s.hits;
+    stats->l2_misses     = s.misses;
+    stats->l2_evictions  = s.evictions;
+    stats->l2_hit_rate   = s.hitRate();
+    stats->l1_config_kb  = vgre::runtime::gpuL1CacheSizeKB();
+    stats->l2_config_mb  = []() -> uint64_t {
+        const char* v = std::getenv("VGRE_L2_CACHE_MB");
+        if (v) {
+            uint64_t mb = static_cast<uint64_t>(std::strtoul(v, nullptr, 10));
+            if (mb >= 2 && mb <= 40) return mb;
+        }
+        return vgre::runtime::kL2DefaultMB;
+    }();
+    return VGRE_SUCCESS;
+}
+
+int vgre_reset_cache_stats(void) {
+    vgre::runtime::GPUCacheL2::instance().flush();
+    return VGRE_SUCCESS;
 }

@@ -30,6 +30,8 @@ static constexpr cublasStatus_t CUBLAS_STATUS_NOT_INITIALIZED = 1;
 static constexpr cublasStatus_t CUBLAS_STATUS_ALLOC_FAILED    = 3;
 static constexpr cublasStatus_t CUBLAS_STATUS_INVALID_VALUE   = 7;
 static constexpr cublasStatus_t CUBLAS_STATUS_EXECUTION_FAILED= 13;
+static constexpr cublasStatus_t CUBLAS_STATUS_NOT_SUPPORTED   = 15;
+static constexpr cublasStatus_t CUBLAS_STATUS_INTERNAL_ERROR  = 14;
 
 static constexpr cublasOperation_t CUBLAS_OP_N = 0;  // no transpose
 static constexpr cublasOperation_t CUBLAS_OP_T = 1;  // transpose
@@ -541,6 +543,117 @@ cublasStatus_t cublasSgemm(cublasHandle_t h, cublasOperation_t ta, cublasOperati
     int m,int n,int k, const float* a, const float* A, int lda,
     const float* B, int ldb, const float* b, float* C, int ldc) {
     return cublasSgemm_v2(h,ta,tb,m,n,k,a,A,lda,B,ldb,b,C,ldc);
+}
+
+// ── cublasGemmEx (mixed-precision GEMM including INT8) ────────────────────────
+// cudaDataType values (mirror cuda_fp16.h / cuda_runtime_api.h)
+enum vgre_cudaDataType {
+  CUDA_R_16F = 2, CUDA_C_16F = 6, CUDA_R_16BF = 14, CUDA_C_16BF = 15,
+  CUDA_R_32F = 0, CUDA_C_32F = 4, CUDA_R_64F  = 1,  CUDA_C_64F  = 5,
+  CUDA_R_8I  = 3, CUDA_C_8I  = 7, CUDA_R_8U   = 8,  CUDA_C_8U   = 9,
+  CUDA_R_32I = 10, CUDA_C_32I = 11,
+};
+
+// INT8 → float dequantize
+static inline float _i8_to_f32(const void* ptr, int idx) {
+  return static_cast<float>(static_cast<const int8_t*>(ptr)[idx]);
+}
+
+cublasStatus_t cublasGemmEx(cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const void *alpha,
+    const void *A, int Atype, int lda,
+    const void *B, int Btype, int ldb,
+    const void *beta,
+    void *C, int Ctype, int ldc,
+    int computeType, int algo)
+{
+    (void)algo; (void)computeType;
+    if (!handle || !A || !B || !C || !alpha || !beta)
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+    // For INT8 inputs: dequantize to float, run refSgemm, convert output.
+    if (Atype == (int)CUDA_R_8I || Btype == (int)CUDA_R_8I) {
+        float alphaF = *(const float*)alpha;
+        float betaF  = *(const float*)beta;
+        // Dequantize A
+        std::vector<float> Af(m * k), Bf(k * n);
+        for (int i = 0; i < m * k; ++i) Af[i] = _i8_to_f32(A, i);
+        for (int i = 0; i < k * n; ++i) Bf[i] = _i8_to_f32(B, i);
+        if (Ctype == (int)CUDA_R_32I) {
+            // INT8 x INT8 → INT32: compute in float, round to int32
+            std::vector<float> Cf(m * n, 0.f);
+            refSgemm(transa, transb, m, n, k, 1.f, Af.data(), lda, Bf.data(), ldb, 0.f, Cf.data(), ldc);
+            int32_t* Ci = static_cast<int32_t*>(C);
+            for (int i = 0; i < m * n; ++i)
+                Ci[i] = static_cast<int32_t>(std::round(alphaF * Cf[i] + betaF * Ci[i]));
+        } else {
+            // INT8 → float output
+            float* Cf = static_cast<float*>(C);
+            refSgemm(transa, transb, m, n, k, alphaF, Af.data(), lda, Bf.data(), ldb, betaF, Cf, ldc);
+        }
+        return CUBLAS_STATUS_SUCCESS;
+    }
+
+    // FP32 passthrough
+    if (Atype == (int)CUDA_R_32F && Btype == (int)CUDA_R_32F && Ctype == (int)CUDA_R_32F) {
+        return cublasSgemm_v2(handle, transa, transb, m, n, k,
+            (const float*)alpha, (const float*)A, lda,
+            (const float*)B, ldb, (const float*)beta, (float*)C, ldc);
+    }
+
+    // FP64 passthrough
+    if (Atype == (int)CUDA_R_64F && Btype == (int)CUDA_R_64F && Ctype == (int)CUDA_R_64F) {
+        return cublasDgemm_v2(handle, transa, transb, m, n, k,
+            (const double*)alpha, (const double*)A, lda,
+            (const double*)B, ldb, (const double*)beta, (double*)C, ldc);
+    }
+
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+// cublasGemmBatchedEx: loop over batch, dispatch to cublasGemmEx per item
+cublasStatus_t cublasGemmBatchedEx(cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const void *alpha,
+    const void **Aarray, int Atype, int lda,
+    const void **Barray, int Btype, int ldb,
+    const void *beta,
+    void **Carray, int Ctype, int ldc,
+    int batchCount, int computeType, int algo)
+{
+    for (int b = 0; b < batchCount; ++b) {
+        cublasStatus_t r = cublasGemmEx(handle, transa, transb, m, n, k,
+            alpha, Aarray[b], Atype, lda,
+            Barray[b], Btype, ldb, beta,
+            Carray[b], Ctype, ldc, computeType, algo);
+        if (r != CUBLAS_STATUS_SUCCESS) return r;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// TF32 compute mode — treat as FP32 (TF32 precision reduction not emulated)
+cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const void *alpha,
+    const void *A, int Atype, int lda, long long strideA,
+    const void *B, int Btype, int ldb, long long strideB,
+    const void *beta,
+    void *C, int Ctype, int ldc, long long strideC,
+    int batchCount, int computeType, int algo)
+{
+    for (int b = 0; b < batchCount; ++b) {
+        const void* Ab = static_cast<const char*>(A) + b * strideA * (Atype == (int)CUDA_R_8I ? 1 : 4);
+        const void* Bb = static_cast<const char*>(B) + b * strideB * (Btype == (int)CUDA_R_8I ? 1 : 4);
+        void*       Cb = static_cast<char*>(C)       + b * strideC * (Ctype == (int)CUDA_R_32I ? 4 : 4);
+        cublasStatus_t r = cublasGemmEx(handle, transa, transb, m, n, k,
+            alpha, Ab, Atype, lda, Bb, Btype, ldb, beta, Cb, Ctype, ldc, computeType, algo);
+        if (r != CUBLAS_STATUS_SUCCESS) return r;
+    }
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 } // extern "C"

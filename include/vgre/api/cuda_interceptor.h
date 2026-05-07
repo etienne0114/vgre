@@ -21,7 +21,11 @@ constexpr cudaError_t cudaErrorInvalidValue = 1;
 constexpr cudaError_t cudaErrorLaunchFailure = 4;
 constexpr cudaError_t cudaErrorNotReady = 34;
 constexpr cudaError_t cudaErrorInvalidDeviceFunction = 8;
-constexpr cudaError_t cudaErrorFileNotFound = 301;
+constexpr cudaError_t cudaErrorFileNotFound    = 301;
+constexpr cudaError_t cudaErrorNotSupported    = 801;
+constexpr cudaError_t cudaErrorInvalidPtx      = 218;
+constexpr cudaError_t cudaErrorStubLibrary     = 34;
+constexpr cudaError_t cudaErrorDevicesUnavailable = 46;
 
 // ── CUDA Driver API Types ──────────────────────────────────────────────────
 using CUmodule = ModuleHandle;
@@ -309,7 +313,14 @@ public:
   cudaError_t graphCreate(cudaGraph_t *graph, unsigned int flags);
   cudaError_t graphClone(cudaGraph_t *pGraphClone, cudaGraph_t originalGraph);
   cudaError_t streamBeginCapture(cudaStream_t stream);
+  cudaError_t streamBeginCaptureToGraph(cudaStream_t stream,
+                                         cudaGraph_t graph,
+                                         const std::vector<uint64_t> &dependencies,
+                                         unsigned int mode);
   cudaError_t streamEndCapture(cudaStream_t stream, cudaGraph_t *graph);
+  // Stream attribute queries
+  int          getStreamPriority(cudaStream_t stream) const;
+  unsigned int getStreamFlags(cudaStream_t stream) const;
   cudaError_t graphInstantiate(cudaGraphExec_t *exec, cudaGraph_t graph);
   cudaError_t graphLaunch(cudaGraphExec_t exec, cudaStream_t stream);
   cudaError_t graphDestroy(cudaGraph_t graph);

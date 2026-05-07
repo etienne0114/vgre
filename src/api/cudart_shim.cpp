@@ -15,6 +15,7 @@
 #include <cstring>
 #include <mutex>
 #include <regex>
+#include <algorithm>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -562,6 +563,214 @@ cudaError_t cudaMemPoolDestroy(cudaMemPool_t pool) {
   return (r == vgre::VGREResult::SUCCESS) ? cudaSuccess : cudaErrorInvalidValue;
 }
 
+// ── Memory pool allocation and attribute APIs (CUDA 11.2+) ────────────────────
+// cudaMallocFromPoolAsync: stream-ordered allocation from a named pool.
+cudaError_t cudaMallocFromPoolAsync(void **devPtr, size_t size,
+                                     cudaMemPool_t pool, cudaStream_t stream) {
+  (void)stream; // stream ordering respected by MemoryManager task queue
+  if (!devPtr || size == 0) return cudaErrorInvalidValue;
+  auto r = vgre::core::MemoryManager::instance().allocateFromPool(pool, size, *devPtr);
+  return (r == vgre::VGREResult::SUCCESS) ? cudaSuccess : cudaErrorMemoryAllocation;
+}
+
+// Pool attribute enums (mirror CUDA headers — defined locally to avoid real CUDA headers)
+enum cudaMemPoolAttr {
+  cudaMemPoolAttrReleaseThreshold        = 0x1,
+  cudaMemPoolAttrReservedMemCurrent      = 0x2,
+  cudaMemPoolAttrReservedMemHigh         = 0x3,
+  cudaMemPoolAttrUsedMemCurrent          = 0x4,
+  cudaMemPoolAttrUsedMemHigh             = 0x5,
+  cudaMemPoolReuseFollowEventDependencies= 0x6,
+  cudaMemPoolReuseAllowOpportunistic     = 0x7,
+  cudaMemPoolReuseAllowInternalDependencies = 0x8,
+};
+
+cudaError_t cudaMemPoolSetAttribute(cudaMemPool_t pool, cudaMemPoolAttr attr, void *value) {
+  if (!value) return cudaErrorInvalidValue;
+  auto &mm = vgre::core::MemoryManager::instance();
+  switch (attr) {
+    case cudaMemPoolAttrReleaseThreshold: {
+      auto threshold = *static_cast<uint64_t *>(value);
+      auto r = mm.setPoolReleaseThreshold(pool, threshold);
+      return (r == vgre::VGREResult::SUCCESS) ? cudaSuccess : cudaErrorInvalidValue;
+    }
+    case cudaMemPoolReuseFollowEventDependencies:
+    case cudaMemPoolReuseAllowOpportunistic:
+    case cudaMemPoolReuseAllowInternalDependencies: {
+      bool follow = true, opp = true, internal = true;
+      (void)mm.getPoolReuseFlags(pool, follow, opp, internal);
+      int v = *static_cast<int *>(value);
+      if (attr == cudaMemPoolReuseFollowEventDependencies) follow = (v != 0);
+      if (attr == cudaMemPoolReuseAllowOpportunistic) opp = (v != 0);
+      if (attr == cudaMemPoolReuseAllowInternalDependencies) internal = (v != 0);
+      auto r = mm.setPoolReuseFlags(pool, follow, opp, internal);
+      return (r == vgre::VGREResult::SUCCESS) ? cudaSuccess : cudaErrorInvalidValue;
+    }
+    default:
+      return cudaErrorInvalidValue;
+  }
+}
+
+cudaError_t cudaMemPoolGetAttribute(cudaMemPool_t pool, cudaMemPoolAttr attr, void *value) {
+  if (!value) return cudaErrorInvalidValue;
+  auto& mm = vgre::core::MemoryManager::instance();
+  switch (attr) {
+    case cudaMemPoolAttrUsedMemCurrent:
+    case cudaMemPoolAttrReservedMemCurrent:
+      *static_cast<uint64_t*>(value) = mm.getPoolUsedBytes(pool);
+      break;
+    case cudaMemPoolAttrUsedMemHigh:
+    case cudaMemPoolAttrReservedMemHigh:
+      *static_cast<uint64_t*>(value) = mm.getPoolPeakBytes(pool);
+      break;
+    case cudaMemPoolAttrReleaseThreshold: {
+      uint64_t threshold = ~uint64_t{0};
+      auto r = mm.getPoolReleaseThreshold(pool, threshold);
+      if (r != vgre::VGREResult::SUCCESS) return cudaErrorInvalidValue;
+      *static_cast<uint64_t*>(value) = threshold;
+      break;
+    }
+    case cudaMemPoolReuseFollowEventDependencies:
+    case cudaMemPoolReuseAllowOpportunistic:
+    case cudaMemPoolReuseAllowInternalDependencies: {
+      bool follow = true, opp = true, internal = true;
+      auto r = mm.getPoolReuseFlags(pool, follow, opp, internal);
+      if (r != vgre::VGREResult::SUCCESS) return cudaErrorInvalidValue;
+      int out = 0;
+      if (attr == cudaMemPoolReuseFollowEventDependencies) out = follow ? 1 : 0;
+      if (attr == cudaMemPoolReuseAllowOpportunistic) out = opp ? 1 : 0;
+      if (attr == cudaMemPoolReuseAllowInternalDependencies) out = internal ? 1 : 0;
+      *static_cast<int*>(value) = out;
+      break;
+    }
+    default:
+      return cudaErrorInvalidValue;
+  }
+  return cudaSuccess;
+}
+
+cudaError_t cudaMemPoolTrimTo(cudaMemPool_t pool, size_t minBytesToKeep) {
+  // Release unused slab blocks back to OS while keeping at least minBytesToKeep.
+  auto &mm = vgre::core::MemoryManager::instance();
+  uint64_t threshold = 0;
+  if (mm.getPoolReleaseThreshold(pool, threshold) == vgre::VGREResult::SUCCESS) {
+    minBytesToKeep = std::max<size_t>(minBytesToKeep, static_cast<size_t>(threshold));
+  }
+  auto r = mm.trimPool(pool, minBytesToKeep);
+  return (r == vgre::VGREResult::SUCCESS) ? cudaSuccess : cudaErrorInvalidValue;
+}
+
+struct cudaMemLocation {
+  int type;
+  int id;
+};
+
+struct cudaMemAccessDesc {
+  cudaMemLocation location;
+  unsigned int flags;
+};
+
+cudaError_t cudaMemPoolSetAccess(cudaMemPool_t pool,
+                                  const void* descList, size_t count) {
+  if (!descList && count > 0) return cudaErrorInvalidValue;
+  auto &mm = vgre::core::MemoryManager::instance();
+  auto *descs = static_cast<const cudaMemAccessDesc *>(descList);
+  for (size_t i = 0; i < count; ++i) {
+    auto r = mm.setPoolAccess(pool, descs[i].location.id, descs[i].flags);
+    if (r != vgre::VGREResult::SUCCESS) return cudaErrorInvalidValue;
+  }
+  return cudaSuccess;
+}
+
+cudaError_t cudaMemPoolGetAccess(unsigned int *flags,
+                                  cudaMemPool_t pool, const void* location) {
+  if (!flags || !location) return cudaErrorInvalidValue;
+  auto &mm = vgre::core::MemoryManager::instance();
+  const auto *loc = static_cast<const cudaMemLocation *>(location);
+  unsigned int out = 0;
+  auto r = mm.getPoolAccess(pool, loc->id, out);
+  if (r != vgre::VGREResult::SUCCESS) return cudaErrorInvalidValue;
+  *flags = out;
+  return cudaSuccess;
+}
+
+struct vgreMemPoolShareableHandle {
+  uint64_t magic;
+  uint64_t pool;
+};
+
+struct vgreMemPoolPointerExportData {
+  uint64_t magic;
+  uint64_t pool;
+  uintptr_t ptr;
+};
+
+static constexpr uint64_t kPoolShareMagic = 0x56475245504F4F4Cull; // "VGREPOOL"
+static constexpr uint64_t kPoolPtrMagic   = 0x5647524550505452ull; // "VGREP PTR"
+
+cudaError_t cudaMemPoolExportToShareableHandle(void* handle, cudaMemPool_t pool,
+                                                unsigned int /*handleType*/, unsigned int /*flags*/) {
+  if (!handle) return cudaErrorInvalidValue;
+  // Validate pool exists.
+  unsigned int tmp = 0;
+  auto &mm = vgre::core::MemoryManager::instance();
+  if (mm.getPoolAccess(pool, 0, tmp) != vgre::VGREResult::SUCCESS) {
+    return cudaErrorInvalidValue;
+  }
+  auto *h = static_cast<vgreMemPoolShareableHandle *>(handle);
+  h->magic = kPoolShareMagic;
+  h->pool = pool;
+  return cudaSuccess;
+}
+cudaError_t cudaMemPoolImportFromShareableHandle(cudaMemPool_t* pool, void* handle,
+                                                  unsigned int /*handleType*/, unsigned int /*flags*/) {
+  if (!pool || !handle) return cudaErrorInvalidValue;
+  auto *h = static_cast<vgreMemPoolShareableHandle *>(handle);
+  if (h->magic != kPoolShareMagic) return cudaErrorInvalidValue;
+  unsigned int tmp = 0;
+  auto &mm = vgre::core::MemoryManager::instance();
+  if (mm.getPoolAccess(h->pool, 0, tmp) != vgre::VGREResult::SUCCESS) {
+    return cudaErrorInvalidValue;
+  }
+  *pool = h->pool;
+  return cudaSuccess;
+}
+cudaError_t cudaMemPoolExportPointer(void* exportData, void* ptr) {
+  if (!exportData || !ptr) return cudaErrorInvalidValue;
+  auto &mm = vgre::core::MemoryManager::instance();
+  if (!mm.isValidHandle(ptr)) return cudaErrorInvalidValue;
+
+  cudaMemPool_t ownerPool = 0;
+  const auto &pools = mm.getPools();
+  for (const auto &entry : pools) {
+    const auto &pool = entry.second;
+    if (pool.liveSlabAllocs.find(ptr) != pool.liveSlabAllocs.end() ||
+        pool.oversizedAllocs.find(ptr) != pool.oversizedAllocs.end()) {
+      ownerPool = entry.first;
+      break;
+    }
+  }
+  if (ownerPool == 0) return cudaErrorInvalidValue;
+
+  auto *out = static_cast<vgreMemPoolPointerExportData *>(exportData);
+  out->magic = kPoolPtrMagic;
+  out->pool = ownerPool;
+  out->ptr = reinterpret_cast<uintptr_t>(ptr);
+  return cudaSuccess;
+}
+cudaError_t cudaMemPoolImportPointer(void** ptr, cudaMemPool_t pool,
+                                      void* exportData) {
+  if (!ptr || !exportData) return cudaErrorInvalidValue;
+  auto *in = static_cast<vgreMemPoolPointerExportData *>(exportData);
+  if (in->magic != kPoolPtrMagic || in->pool != pool) return cudaErrorInvalidValue;
+
+  auto *candidate = reinterpret_cast<void *>(in->ptr);
+  auto &mm = vgre::core::MemoryManager::instance();
+  if (!mm.isValidHandle(candidate)) return cudaErrorInvalidValue;
+  *ptr = candidate;
+  return cudaSuccess;
+}
+
 // ── CUDA Graphs API ────────────────────────────────────────────────────────
 
 using cudaGraph_t = uint64_t;
@@ -570,6 +779,69 @@ using cudaGraphNode_t = uint64_t;
 
 using cudaGraphExecUpdateResult = vgre::api::CUDAInterceptor::cudaGraphExecUpdateResult;
 using cudaMemcpy3DParms = vgre::api::CUDAInterceptor::cudaMemcpy3DParms;
+
+// External semaphore APIs (implemented in cuda_external_semaphore.cpp)
+using cudaExternalSemaphore_t = uint64_t;
+struct cudaExternalSemaphoreSignalParams {
+  struct { uint64_t value; } fence;
+  unsigned int reserved[16];
+  unsigned int flags;
+};
+struct cudaExternalSemaphoreWaitParams {
+  struct { uint64_t value; } fence;
+  unsigned int reserved[16];
+  unsigned int flags;
+};
+extern "C" int cudaSignalExternalSemaphoresAsync(
+    const cudaExternalSemaphore_t *extSems,
+    const cudaExternalSemaphoreSignalParams *params,
+    unsigned int count, void *stream);
+extern "C" int cudaWaitExternalSemaphoresAsync(
+    const cudaExternalSemaphore_t *extSems,
+    const cudaExternalSemaphoreWaitParams *params,
+    unsigned int count, void *stream);
+
+struct cudaExternalSemaphoreSignalNodeParams {
+  const cudaExternalSemaphore_t *extSemArray;
+  const cudaExternalSemaphoreSignalParams *paramsArray;
+  unsigned int numExtSems;
+};
+struct cudaExternalSemaphoreWaitNodeParams {
+  const cudaExternalSemaphore_t *extSemArray;
+  const cudaExternalSemaphoreWaitParams *paramsArray;
+  unsigned int numExtSems;
+};
+
+namespace {
+struct GraphExtSemNodeState {
+  bool isWait = false;
+  std::vector<cudaExternalSemaphore_t> sems;
+  std::vector<cudaExternalSemaphoreSignalParams> signalParams;
+  std::vector<cudaExternalSemaphoreWaitParams> waitParams;
+};
+
+std::mutex g_graphExtSemMu;
+std::unordered_map<cudaGraphNode_t, std::shared_ptr<GraphExtSemNodeState>>
+    g_graphExtSemNodes;
+
+static int vgre_ext_sem_graph_callback(void *ctx) {
+  auto *state = static_cast<GraphExtSemNodeState *>(ctx);
+  if (!state || state->sems.empty()) return 0;
+  if (state->isWait) {
+    (void)cudaWaitExternalSemaphoresAsync(state->sems.data(),
+                                          state->waitParams.data(),
+                                          static_cast<unsigned int>(state->sems.size()),
+                                          nullptr);
+  } else {
+    (void)cudaSignalExternalSemaphoresAsync(state->sems.data(),
+                                            state->signalParams.data(),
+                                            static_cast<unsigned int>(state->sems.size()),
+                                            nullptr);
+  }
+  return 0;
+}
+
+} // namespace
 
 cudaError_t cudaGraphCreate(cudaGraph_t *graph, unsigned int flags) {
   return vgre::api::CUDAInterceptor::instance().graphCreate(graph, flags);
@@ -656,9 +928,9 @@ cudaError_t cudaGraphAddConditionalNode(cudaGraphNode_t *pGraphNode,
   if (!engine.isInitialized()) return cudaError_t(3); // cudaErrorNotInitialized
 
   std::vector<uint64_t> deps(pDependencies, pDependencies + numDependencies);
-  vgre::core::GraphCondType condType =
-      (flags == 1) ? vgre::core::GraphCondType::WHILE
-                   : vgre::core::GraphCondType::IF;
+  vgre::core::GraphCondType condType = vgre::core::GraphCondType::IF;
+  if (flags == 1) condType = vgre::core::GraphCondType::WHILE;
+  if (flags == 2) condType = vgre::core::GraphCondType::SWITCH;
   unsigned int iters = (maxIterations == 0) ? 65536 : maxIterations;
   uint64_t outNodeId = 0;
   auto r = engine.graphAddConditionalNode(
@@ -667,6 +939,114 @@ cudaError_t cudaGraphAddConditionalNode(cudaGraphNode_t *pGraphNode,
   if (r != vgre::VGREResult::SUCCESS) return cudaError_t(1);
   *pGraphNode = outNodeId;
   return cudaError_t(0); // cudaSuccess
+}
+
+cudaError_t cudaGraphAddExternalSemaphoreSignalNode(
+    cudaGraphNode_t *pGraphNode, cudaGraph_t graph,
+    const cudaGraphNode_t *pDependencies, size_t numDependencies,
+    const cudaExternalSemaphoreSignalNodeParams *nodeParams) {
+  if (!pGraphNode || !nodeParams || nodeParams->numExtSems == 0 ||
+      !nodeParams->extSemArray || !nodeParams->paramsArray) {
+    return cudaErrorInvalidValue;
+  }
+  auto state = std::make_shared<GraphExtSemNodeState>();
+  state->isWait = false;
+  state->sems.assign(nodeParams->extSemArray,
+                     nodeParams->extSemArray + nodeParams->numExtSems);
+  state->signalParams.assign(nodeParams->paramsArray,
+                             nodeParams->paramsArray + nodeParams->numExtSems);
+
+  std::vector<uint64_t> deps;
+  if (pDependencies && numDependencies > 0) {
+    deps.assign(pDependencies, pDependencies + numDependencies);
+  }
+  uint64_t nodeId = 0;
+  auto r = vgre::core::RuntimeEngine::instance().graphAddConditionalNode(
+      static_cast<vgre::GraphId>(graph), vgre_ext_sem_graph_callback,
+      static_cast<void *>(state.get()), 0,
+      vgre::core::GraphCondType::IF, 1, deps, nodeId);
+  if (r != vgre::VGREResult::SUCCESS) return cudaErrorInvalidValue;
+
+  {
+    std::lock_guard<std::mutex> lk(g_graphExtSemMu);
+    g_graphExtSemNodes[nodeId] = std::move(state);
+  }
+  *pGraphNode = nodeId;
+  return cudaSuccess;
+}
+
+cudaError_t cudaGraphAddExternalSemaphoreWaitNode(
+    cudaGraphNode_t *pGraphNode, cudaGraph_t graph,
+    const cudaGraphNode_t *pDependencies, size_t numDependencies,
+    const cudaExternalSemaphoreWaitNodeParams *nodeParams) {
+  if (!pGraphNode || !nodeParams || nodeParams->numExtSems == 0 ||
+      !nodeParams->extSemArray || !nodeParams->paramsArray) {
+    return cudaErrorInvalidValue;
+  }
+  auto state = std::make_shared<GraphExtSemNodeState>();
+  state->isWait = true;
+  state->sems.assign(nodeParams->extSemArray,
+                     nodeParams->extSemArray + nodeParams->numExtSems);
+  state->waitParams.assign(nodeParams->paramsArray,
+                           nodeParams->paramsArray + nodeParams->numExtSems);
+
+  std::vector<uint64_t> deps;
+  if (pDependencies && numDependencies > 0) {
+    deps.assign(pDependencies, pDependencies + numDependencies);
+  }
+  uint64_t nodeId = 0;
+  auto r = vgre::core::RuntimeEngine::instance().graphAddConditionalNode(
+      static_cast<vgre::GraphId>(graph), vgre_ext_sem_graph_callback,
+      static_cast<void *>(state.get()), 0,
+      vgre::core::GraphCondType::IF, 1, deps, nodeId);
+  if (r != vgre::VGREResult::SUCCESS) return cudaErrorInvalidValue;
+
+  {
+    std::lock_guard<std::mutex> lk(g_graphExtSemMu);
+    g_graphExtSemNodes[nodeId] = std::move(state);
+  }
+  *pGraphNode = nodeId;
+  return cudaSuccess;
+}
+
+cudaError_t cudaGraphExecExternalSemaphoreSignalNodeSetParams(
+    cudaGraphExec_t /*graphExec*/, cudaGraphNode_t node,
+    const cudaExternalSemaphoreSignalNodeParams *nodeParams) {
+  if (!nodeParams || nodeParams->numExtSems == 0 || !nodeParams->extSemArray ||
+      !nodeParams->paramsArray) {
+    return cudaErrorInvalidValue;
+  }
+  std::lock_guard<std::mutex> lk(g_graphExtSemMu);
+  auto it = g_graphExtSemNodes.find(node);
+  if (it == g_graphExtSemNodes.end()) return cudaErrorInvalidValue;
+  auto &state = *it->second;
+  state.isWait = false;
+  state.sems.assign(nodeParams->extSemArray,
+                    nodeParams->extSemArray + nodeParams->numExtSems);
+  state.signalParams.assign(nodeParams->paramsArray,
+                            nodeParams->paramsArray + nodeParams->numExtSems);
+  state.waitParams.clear();
+  return cudaSuccess;
+}
+
+cudaError_t cudaGraphExecExternalSemaphoreWaitNodeSetParams(
+    cudaGraphExec_t /*graphExec*/, cudaGraphNode_t node,
+    const cudaExternalSemaphoreWaitNodeParams *nodeParams) {
+  if (!nodeParams || nodeParams->numExtSems == 0 || !nodeParams->extSemArray ||
+      !nodeParams->paramsArray) {
+    return cudaErrorInvalidValue;
+  }
+  std::lock_guard<std::mutex> lk(g_graphExtSemMu);
+  auto it = g_graphExtSemNodes.find(node);
+  if (it == g_graphExtSemNodes.end()) return cudaErrorInvalidValue;
+  auto &state = *it->second;
+  state.isWait = true;
+  state.sems.assign(nodeParams->extSemArray,
+                    nodeParams->extSemArray + nodeParams->numExtSems);
+  state.waitParams.assign(nodeParams->paramsArray,
+                          nodeParams->paramsArray + nodeParams->numExtSems);
+  state.signalParams.clear();
+  return cudaSuccess;
 }
 
 // ── Cooperative Launch ────────────────────────────────────────────────────
@@ -750,15 +1130,64 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks,
                                                           const void *func,
                                                           int blockSize,
                                                           size_t dynamicSMemSize) {
-  (void)func;
-  (void)dynamicSMemSize;
   if (!numBlocks || blockSize <= 0) return cudaErrorInvalidValue;
 
-  // For CPU execution: max concurrent blocks = hardware threads / blockSize
-  int hwThreads = static_cast<int>(std::thread::hardware_concurrency());
-  if (hwThreads == 0) hwThreads = 4;
-  *numBlocks = std::max(1, hwThreads / blockSize);
+  // ── Real occupancy formula (Ampere SM model) ──────────────────────────────
+  // Hardware limits (modelled on NVIDIA A100 / emulated device properties):
+  constexpr int kMaxWarpsPerSM     = 64;   // A100: 64 warps/SM
+  constexpr int kMaxBlocksPerSM    = 32;   // A100: 32 blocks/SM
+  constexpr int kMaxThreadsPerSM   = 2048; // A100: 2048 threads/SM
+  constexpr int kMaxRegsPerSM      = 65536;
+  constexpr int kMaxSharedMemPerSM = 102400; // 100 KB
+
+  int warpsPerBlock = (blockSize + 31) / 32;
+
+  // Limit 1: warp capacity
+  int limitWarps = kMaxWarpsPerSM / std::max(1, warpsPerBlock);
+
+  // Limit 2: thread capacity
+  int limitThreads = kMaxThreadsPerSM / blockSize;
+
+  // Limit 3: register pressure — read from KernelIR via RuntimeEngine
+  int registersPerThread = 32; // conservative default (16–255 typical range)
+  {
+    // Try to get the registered thread limit from the function metadata.
+    // launchBoundsMap_ maps device-function name → {maxThreads, bDim, gDim}.
+    // We don't have the name here, so use the default.
+    (void)func; // func is a host-side wrapper pointer; not directly queryable
+  }
+  int regsPerBlock = warpsPerBlock * 32 * registersPerThread;
+  int limitRegs = (regsPerBlock > 0) ? (kMaxRegsPerSM / regsPerBlock) : kMaxBlocksPerSM;
+
+  // Limit 4: shared memory — dynamic (caller-provided); static unavailable here
+  size_t staticSMem = 0;
+  size_t totalSMem = staticSMem + dynamicSMemSize;
+  int limitSMem = (totalSMem > 0)
+      ? static_cast<int>(kMaxSharedMemPerSM / totalSMem)
+      : kMaxBlocksPerSM;
+
+  // Limit 5: hard SM block cap
+  int active = std::min({limitWarps, limitThreads, limitRegs, limitSMem, kMaxBlocksPerSM});
+  *numBlocks = std::max(1, active);
+
+  VGRE_LOG_DEBUG("Occupancy",
+      "blockSize=" + std::to_string(blockSize) +
+      " warps=" + std::to_string(warpsPerBlock) +
+      " regs/thread=" + std::to_string(registersPerThread) +
+      " smem=" + std::to_string(totalSMem) +
+      " → activeBlocks=" + std::to_string(*numBlocks) +
+      " (limitW=" + std::to_string(limitWarps) +
+      " limitT=" + std::to_string(limitThreads) +
+      " limitR=" + std::to_string(limitRegs) +
+      " limitS=" + std::to_string(limitSMem) + ")");
   return cudaSuccess;
+}
+
+cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+    int *numBlocks, const void *func, int blockSize,
+    size_t dynamicSMemSize, unsigned int /*flags*/) {
+  return cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      numBlocks, func, blockSize, dynamicSMemSize);
 }
 
 // ── Mipmapped Array API ────────────────────────────────────────────────────
