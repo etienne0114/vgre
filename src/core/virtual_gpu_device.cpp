@@ -424,7 +424,8 @@ bool VirtualGPUDevice::hasContext() const {
 }
 
 // ── Streams ────────────────────────────────────────────────────────────────
-VGREResult VirtualGPUDevice::createStream(StreamId &outId, int priority) {
+VGREResult VirtualGPUDevice::createStream(StreamId &outId, int priority,
+                                          unsigned int flags) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!contextActive_) {
     return VGREResult::ERR_NOT_INITIALIZED;
@@ -433,6 +434,7 @@ VGREResult VirtualGPUDevice::createStream(StreamId &outId, int priority) {
   Stream s;
   s.id = id;
   s.priority = priority;
+  s.flags = flags;
   s.state = StreamState::IDLE;
   streams_[id] = s;
   outId = id;
@@ -523,6 +525,56 @@ VGREResult VirtualGPUDevice::getStreamPriority(StreamId id,
     return VGREResult::ERR_INVALID_VALUE;
   }
   outPriority = it->second.priority;
+  return VGREResult::SUCCESS;
+}
+
+VGREResult VirtualGPUDevice::setStreamPriority(StreamId id, int priority) {
+  if (id == 0) return VGREResult::SUCCESS;
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!contextActive_) {
+    return VGREResult::ERR_NOT_INITIALIZED;
+  }
+  auto it = streams_.find(id);
+  if (it == streams_.end()) {
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+  it->second.priority = priority;
+  return VGREResult::SUCCESS;
+}
+
+VGREResult VirtualGPUDevice::getStreamFlags(StreamId id,
+                                            unsigned int &outFlags) const {
+  if (id == 0) {
+    outFlags = 0;
+    return VGREResult::SUCCESS;
+  }
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!contextActive_) {
+    return VGREResult::ERR_NOT_INITIALIZED;
+  }
+  auto it = streams_.find(id);
+  if (it == streams_.end()) {
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+  outFlags = it->second.flags;
+  return VGREResult::SUCCESS;
+}
+
+VGREResult VirtualGPUDevice::getStreamDevice(StreamId id, int &outDevice) const {
+  if (id == 0) {
+    outDevice = static_cast<int>(id_);
+    return VGREResult::SUCCESS;
+  }
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!contextActive_) {
+    return VGREResult::ERR_NOT_INITIALIZED;
+  }
+  auto it = streams_.find(id);
+  if (it == streams_.end()) {
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+  (void)it;
+  outDevice = static_cast<int>(id_);
   return VGREResult::SUCCESS;
 }
 
