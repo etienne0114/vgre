@@ -46,7 +46,9 @@ struct NativeGraphOperation {
   GraphCondType condType = GraphCondType::IF;
   unsigned int maxIterations = 65536;
   // Pre-compiled body ops; called inline to avoid deadlock with the stream scheduler.
+  // For SWITCH: bodyExecs[i] = subgraph for branch i; bodyExec = default (branch 0).
   std::function<void(runtime::CPUParallelExecutor *, MemoryManager *)> bodyExec;
+  std::vector<std::function<void(runtime::CPUParallelExecutor *, MemoryManager *)>> bodyExecs;
 };
 
 // ── Graph dispatch helpers ─────────────────────────────────────────────────
@@ -124,7 +126,7 @@ static void executeOpsInline(const std::vector<NativeGraphOperation> &ops,
       if (op.condType == GraphCondType::IF) {
         if (op.condFn(op.condCtx) != 0 && op.bodyExec)
           op.bodyExec(exec, mm);
-      } else { // WHILE
+      } else if (op.condType == GraphCondType::WHILE) {
         unsigned int iter = 0;
         while (iter < op.maxIterations && op.condFn(op.condCtx) != 0) {
           if (op.bodyExec) op.bodyExec(exec, mm);
@@ -134,6 +136,17 @@ static void executeOpsInline(const std::vector<NativeGraphOperation> &ops,
           VGRE_LOG_WARN("RuntimeEngine",
                         "WHILE conditional node reached maxIterations limit (" +
                             std::to_string(op.maxIterations) + ")");
+        }
+      } else { // SWITCH — integer condition selects one of N child subgraphs
+        int branch = op.condFn(op.condCtx);
+        int nBranches = static_cast<int>(op.bodyExecs.size());
+        // child[0] = default; child[1..N] = branches 0..N-1
+        if (nBranches > 0) {
+          int target = (branch >= 0 && branch < nBranches - 1) ? branch + 1 : 0;
+          if (op.bodyExecs[target]) op.bodyExecs[target](exec, mm);
+        } else if (op.bodyExec) {
+          // Fallback: single body exec (behaves like IF with integer condition)
+          if (branch != 0) op.bodyExec(exec, mm);
         }
       }
     }

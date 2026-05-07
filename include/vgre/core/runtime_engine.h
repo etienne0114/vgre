@@ -159,6 +159,8 @@ public:
   VGREResult graphCreate(GraphId &outGraph);
   VGREResult graphClone(GraphId srcGraph, GraphId &outCloneGraph);
   VGREResult streamBeginCapture(StreamId stream);
+  VGREResult streamBeginCaptureToGraph(StreamId stream, uint64_t graphHandle,
+                                       const std::vector<uint64_t> &dependencies = {});
   VGREResult streamEndCapture(StreamId stream, GraphId &outGraph);
   VGREResult graphInstantiate(GraphId graph, GraphExecId &outExec);
   VGREResult graphUpdateExec(GraphExecId exec, GraphId graph);
@@ -216,6 +218,9 @@ private:
   // Capture state: streamId -> graphId
   std::unordered_map<StreamId, GraphId> captureState_;
   std::unordered_map<StreamId, uint64_t> lastCapturedNodeId_;
+  // Initial dependency frontier used by cudaStreamBeginCaptureToGraph.
+  // Consumed by the first captured node on the stream, then cleared.
+  std::unordered_map<StreamId, std::vector<uint64_t>> captureSeedDeps_;
 
   // Kernel caches
   std::unordered_map<KernelId, CompiledKernelFn> kernelCache_;

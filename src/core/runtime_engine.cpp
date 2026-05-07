@@ -599,9 +599,39 @@ VGREResult RuntimeEngine::streamBeginCapture(StreamId stream) {
     return r;
 
   captureState_[stream] = graph;
-  lastCapturedNodeId_[stream] = 0; // Initialize for implicit deps
+  lastCapturedNodeId_[stream] = 0;
+  captureSeedDeps_.erase(stream);
   VGRE_LOG_INFO("RuntimeEngine",
                 "Started capture on stream " + std::to_string(stream));
+  return VGREResult::SUCCESS;
+}
+
+VGREResult RuntimeEngine::streamBeginCaptureToGraph(
+    StreamId stream, uint64_t graphHandle,
+    const std::vector<uint64_t> &dependencies) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!initialized_ || !graphManager_)
+    return VGREResult::ERR_NOT_INITIALIZED;
+  if (captureState_.count(stream))
+    return VGREResult::ERR_INVALID_VALUE;
+
+  GraphId graph = static_cast<GraphId>(graphHandle);
+  if (!graphManager_->graphExists(graph)) {
+    // Provided graph handle is unknown; fall back to creating a new one
+    VGRE_LOG_WARN("RuntimeEngine",
+                  "streamBeginCaptureToGraph: graph " + std::to_string(graph) +
+                  " not found — allocating new graph");
+    auto r = graphManager_->createGraph(graph);
+    if (r != VGREResult::SUCCESS) return r;
+  }
+
+  captureState_[stream] = graph;
+  lastCapturedNodeId_[stream] = 0;
+  captureSeedDeps_[stream] = dependencies;
+  VGRE_LOG_INFO("RuntimeEngine",
+                "Started capture-to-graph on stream " + std::to_string(stream) +
+                " into graph " + std::to_string(graph) +
+                " (seed deps=" + std::to_string(dependencies.size()) + ")");
   return VGREResult::SUCCESS;
 }
 
@@ -616,6 +646,7 @@ VGREResult RuntimeEngine::streamEndCapture(StreamId stream, GraphId &outGraph) {
   outGraph = it->second;
   captureState_.erase(it);
   lastCapturedNodeId_.erase(stream);
+  captureSeedDeps_.erase(stream);
   VGRE_LOG_INFO("RuntimeEngine", "Ended capture on stream " +
                                      std::to_string(stream) + " -> Graph " +
                                      std::to_string(outGraph));
@@ -637,8 +668,25 @@ VGREResult RuntimeEngine::recordMemcpyToGraph(StreamId stream, void *dst, const 
     return VGREResult::ERR_INVALID_VALUE;
 
   VGRE_LOG_DEBUG("RuntimeEngine", "Capturing memcpy on stream " + std::to_string(stream));
-  // We must cast away constness for the graph manager (which copies data anyway)
-  return graphManager_->addMemcpyNode(it->second, dst, const_cast<void*>(src), count, kind);
+  std::vector<uint64_t> deps;
+  auto seedIt = captureSeedDeps_.find(stream);
+  if (seedIt != captureSeedDeps_.end() && !seedIt->second.empty()) {
+    deps = seedIt->second;
+    seedIt->second.clear();
+  } else {
+    auto lastNodeIt = lastCapturedNodeId_.find(stream);
+    if (lastNodeIt != lastCapturedNodeId_.end() && lastNodeIt->second != 0) {
+      deps.push_back(lastNodeIt->second);
+    }
+  }
+
+  uint64_t nodeId = 0;
+  auto r = graphManager_->addMemcpyNodeWithDepsOut(
+      it->second, dst, const_cast<void*>(src), count, kind, deps, nodeId);
+  if (r == VGREResult::SUCCESS) {
+    lastCapturedNodeId_[stream] = nodeId;
+  }
+  return r;
 }
 
 VGREResult RuntimeEngine::graphInstantiate(GraphId graph,

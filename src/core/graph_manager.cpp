@@ -26,6 +26,11 @@ vgre::VGREResult GraphManager::createGraph(GraphId &outId) {
   return vgre::VGREResult::SUCCESS;
 }
 
+bool GraphManager::graphExists(GraphId id) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return graphs_.count(id) > 0;
+}
+
 vgre::VGREResult GraphManager::destroyGraph(GraphId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   graphs_.erase(id);
@@ -254,7 +259,8 @@ vgre::VGREResult GraphManager::addConditionalNodeWithDepsOut(
   VGRE_LOG_INFO("GraphManager",
                 "Added CONDITIONAL node " + std::to_string(outNodeId) +
                     " (type=" +
-                    (condType == GraphCondType::IF ? "IF" : "WHILE") +
+                    (condType == GraphCondType::IF ? "IF" :
+                     (condType == GraphCondType::WHILE ? "WHILE" : "SWITCH")) +
                     ", bodyGraph=" + std::to_string(bodyGraphId) + ")");
   return vgre::VGREResult::SUCCESS;
 }
@@ -812,7 +818,9 @@ vgre::VGREResult GraphManager::deserializeGraph(const std::string &json, GraphId
                         uint64_t v = 0; parseInt(json, p, v); node.kind = static_cast<int>(v);
                     } else if (nk == "condType") {
                         uint64_t v = 0; parseInt(json, p, v);
-                        node.condType = (v == 1) ? GraphCondType::WHILE : GraphCondType::IF;
+                        if (v == 1) node.condType = GraphCondType::WHILE;
+                        else if (v == 2) node.condType = GraphCondType::SWITCH;
+                        else node.condType = GraphCondType::IF;
                     } else if (nk == "bodyGraphId") {
                         uint64_t v = 0; parseInt(json, p, v); node.bodyGraphId = static_cast<GraphId>(v);
                     } else if (nk == "maxIterations") {

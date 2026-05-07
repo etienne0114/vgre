@@ -61,9 +61,15 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
 
       // Zero-Simulation Enhancement: Track last node ID for implicit stream dependencies
       std::vector<uint64_t> deps;
-      auto lastNodeIt = lastCapturedNodeId_.find(stream);
-      if (lastNodeIt != lastCapturedNodeId_.end() && lastNodeIt->second != 0) {
+      auto seedIt = captureSeedDeps_.find(stream);
+      if (seedIt != captureSeedDeps_.end() && !seedIt->second.empty()) {
+        deps = seedIt->second;
+        seedIt->second.clear(); // consume frontier on first captured node
+      } else {
+        auto lastNodeIt = lastCapturedNodeId_.find(stream);
+        if (lastNodeIt != lastCapturedNodeId_.end() && lastNodeIt->second != 0) {
           deps.push_back(lastNodeIt->second);
+        }
       }
 
       uint64_t newNodeId = 0;
@@ -583,9 +589,15 @@ VGREResult RuntimeEngine::launchCooperativeKernel(KernelId id,
                                             std::to_string(stream));
 
       std::vector<uint64_t> deps;
-      auto lastNodeIt = lastCapturedNodeId_.find(stream);
-      if (lastNodeIt != lastCapturedNodeId_.end() && lastNodeIt->second != 0) {
+      auto seedIt = captureSeedDeps_.find(stream);
+      if (seedIt != captureSeedDeps_.end() && !seedIt->second.empty()) {
+        deps = seedIt->second;
+        seedIt->second.clear();
+      } else {
+        auto lastNodeIt = lastCapturedNodeId_.find(stream);
+        if (lastNodeIt != lastCapturedNodeId_.end() && lastNodeIt->second != 0) {
           deps.push_back(lastNodeIt->second);
+        }
       }
 
       uint64_t newNodeId = 0;

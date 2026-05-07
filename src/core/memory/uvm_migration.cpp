@@ -86,6 +86,11 @@ void MemoryManager::migrationLoop() {
     }
 
     for (auto& [node, batch] : batches) {
+      if (node >= 64) {
+        VGRE_LOG_WARN("MemoryManager",
+                      "UVM migration: NUMA node " + std::to_string(node) +
+                      " exceeds mbind nodemask capacity (max 63); migrating to node 0 instead");
+      }
       unsigned long nodemask = (node < 64) ? (1UL << node) : 1UL;
       unsigned long maxnode  = 64UL;
 

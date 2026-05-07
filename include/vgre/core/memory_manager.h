@@ -66,6 +66,13 @@ struct MemoryPool {
   std::unordered_set<void*> liveSlabAllocs;
   // Tracks slab address ranges for quick membership checks.
   std::vector<std::pair<uint8_t*, uint8_t*>> slabRanges;
+  // cudaMemPool attributes
+  uint64_t releaseThreshold = ~uint64_t{0};
+  bool reuseFollowEventDependencies = true;
+  bool reuseAllowOpportunistic = true;
+  bool reuseAllowInternalDependencies = true;
+  // location device -> access flags (cudaMemAccessFlags*)
+  std::unordered_map<int, unsigned int> accessFlagsByDevice;
 };
 
 // ── Dynamic UVM region tracking for signal-safe lookup ─────────────────────
@@ -81,8 +88,11 @@ struct ManagedRegion {
   // Authoritative UVM Usage Tracking
   mutable std::atomic<long long> lastAccessTime{0};
   mutable std::atomic<uint32_t> accessCount{0};
-  mutable std::atomic<int> preferredLocation{-1}; // -1 = None, 0 = Host, >0 = DeviceID
-  mutable std::atomic<uint32_t> conflictCount{0}; // Host-side faults against device preference
+  mutable std::atomic<int>  preferredLocation{-1}; // -1 = None, 0 = Host, >0 = DeviceID
+  mutable std::atomic<bool> isReadMostly{false};   // set by cudaMemAdvise SetReadMostly
+  mutable std::atomic<int>  lastPrefetchDev{-1};   // device of last cudaMemPrefetchAsync
+  mutable std::atomic<uint32_t> accessedByMask{0}; // bit i => cudaMemAdviseSetAccessedBy(i)
+  mutable std::atomic<uint32_t> conflictCount{0};  // Host-side faults against device preference
 
   // Per-device NUMA access counters (updated from SIGSEGV handler via signal-safe atomics).
   // Migration background thread uses these to decide whether to mbind() pages to a
@@ -96,6 +106,9 @@ struct ManagedRegion {
     lastAccessTime.store(other.lastAccessTime.load(std::memory_order_relaxed));
     accessCount.store(other.accessCount.load(std::memory_order_relaxed));
     preferredLocation.store(other.preferredLocation.load(std::memory_order_relaxed));
+    isReadMostly.store(other.isReadMostly.load(std::memory_order_relaxed));
+    lastPrefetchDev.store(other.lastPrefetchDev.load(std::memory_order_relaxed));
+    accessedByMask.store(other.accessedByMask.load(std::memory_order_relaxed));
     conflictCount.store(other.conflictCount.load(std::memory_order_relaxed));
     for (int i = 0; i < kMaxDevices; ++i)
       deviceAccessCounts[i].store(other.deviceAccessCounts[i].load(std::memory_order_relaxed));
@@ -110,6 +123,9 @@ struct ManagedRegion {
       lastAccessTime.store(other.lastAccessTime.load(std::memory_order_relaxed));
       accessCount.store(other.accessCount.load(std::memory_order_relaxed));
       preferredLocation.store(other.preferredLocation.load(std::memory_order_relaxed));
+      isReadMostly.store(other.isReadMostly.load(std::memory_order_relaxed));
+      lastPrefetchDev.store(other.lastPrefetchDev.load(std::memory_order_relaxed));
+      accessedByMask.store(other.accessedByMask.load(std::memory_order_relaxed));
       conflictCount.store(other.conflictCount.load(std::memory_order_relaxed));
       for (int i = 0; i < kMaxDevices; ++i)
         deviceAccessCounts[i].store(other.deviceAccessCounts[i].load(std::memory_order_relaxed));
@@ -168,6 +184,11 @@ public:
 
   // UVM Migration Hints
   VGREResult memAdvise(const void *ptr, size_t count, int advice, DeviceId deviceId);
+  // UVM range attribute queries (for cudaMemRangeGetAttribute)
+  int  getPreferredLocation(void *ptr) const;   // -1 = CPU, >=0 = deviceId
+  bool isReadMostly(void *ptr) const;
+  int  getLastPrefetchLocation(void *ptr) const; // -1 = unknown/cpu, >=0 deviceId
+  uint32_t getAccessedByMask(void *ptr) const;   // bitmask from cudaMemAdviseSetAccessedBy
   VGREResult memPrefetchAsync(const void *ptr, size_t count, DeviceId dstDevice);
 
   // Transfers
@@ -203,6 +224,23 @@ public:
   VGREResult destroyPool(PoolHandle handle);
   VGREResult allocateFromPool(PoolHandle poolHandle, size_t size, MemoryHandle &outHandle);
   VGREResult freeToPool(PoolHandle poolHandle, MemoryHandle handle);
+  // Pool statistics for cudaMemPoolGetAttribute
+  uint64_t getPoolUsedBytes(PoolHandle handle) const;
+  uint64_t getPoolPeakBytes(PoolHandle handle) const;
+  // Release unused slabs while keeping at least minBytes (for cudaMemPoolTrimTo)
+  VGREResult trimPool(PoolHandle handle, size_t minBytes);
+  VGREResult setPoolReleaseThreshold(PoolHandle handle, uint64_t threshold);
+  VGREResult getPoolReleaseThreshold(PoolHandle handle, uint64_t &threshold) const;
+  VGREResult setPoolReuseFlags(PoolHandle handle,
+                               bool followEventDeps,
+                               bool opportunistic,
+                               bool internalDeps);
+  VGREResult getPoolReuseFlags(PoolHandle handle,
+                               bool &followEventDeps,
+                               bool &opportunistic,
+                               bool &internalDeps) const;
+  VGREResult setPoolAccess(PoolHandle handle, int device, unsigned int flags);
+  VGREResult getPoolAccess(PoolHandle handle, int device, unsigned int &flags) const;
 
   // Delta-Sync: Dirty Page Management
   VGREResult getDirtyPages(MemoryHandle handle, std::vector<std::pair<size_t, size_t>>& outDirtyRanges) const;
