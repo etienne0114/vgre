@@ -61,9 +61,10 @@ void test_cubin_loading() {
   
   // Section 1: .shstrtab
   size_t shstr_off = 1024;
-  const char* shstr_names = "\0.shstrtab\0.nv_ptx\0.symtab\0.strtab\0";
-  std::memcpy(buffer.data() + shstr_off, shstr_names, 40);
-  sh[1].name = 1; sh[1].type = 3; sh[1].offset = shstr_off; sh[1].size = 40;
+  static const char shstr_names[] = "\0.shstrtab\0.nv_ptx\0.symtab\0.strtab\0";
+  constexpr size_t shstr_size = sizeof(shstr_names);
+  std::memcpy(buffer.data() + shstr_off, shstr_names, shstr_size);
+  sh[1].name = 1; sh[1].type = 3; sh[1].offset = shstr_off; sh[1].size = shstr_size;
 
   // Section 2: .nv_ptx
   size_t ptx_off = 2048;
