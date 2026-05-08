@@ -3,6 +3,7 @@
  */
 
 #include "vgre/api/vgre_c_api.h"
+#include <atomic>
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/runtime/gpu_cache.h"
 #include "vgre/advanced/ipc_manager.h"
@@ -507,17 +508,12 @@ int vgre_set_service_mode(int is_master) {
 }
 
 int vgre_set_block_threads(int enabled) {
-  const char *value = enabled ? "1" : "0";
-#if defined(_WIN32)
-  if (_putenv_s("VGRE_BLOCK_THREADS", value) != 0) {
-    return VGRE_ERROR_IO;
-  }
-#else
-  if (setenv("VGRE_BLOCK_THREADS", value, 1) != 0) {
-    return VGRE_ERROR_IO;
-  }
-#endif
-  VGRE_LOG_INFO("VGRE", std::string("VGRE_BLOCK_THREADS set to ") + value);
+  // Note: BlockWorkerPool::initialize() has already run at this point and will
+  // never re-read VGRE_BLOCK_THREADS, so calling setenv() here is both useless
+  // and unsafe (setenv reallocates environ without locking against concurrent
+  // getenv calls on other threads). This function is a no-op for now.
+  // Future: implement a thread-safe runtime flag if needed.
+  VGRE_LOG_INFO("VGRE", std::string("VGRE_BLOCK_THREADS set to ") + (enabled ? "1" : "0"));
   return VGRE_SUCCESS;
 }
 
