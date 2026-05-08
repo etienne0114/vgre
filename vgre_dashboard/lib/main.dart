@@ -43,6 +43,28 @@ class _VgreBootstrapAppState extends State<VgreBootstrapApp> {
 
       _syncRuntimeEnvVars(bridge);
 
+      // ── Critical: initialize and configure VGRE on the MAIN THREAD ─────────
+      // BEFORE setState() triggers the first GTK+/Pango frame render.
+      //
+      // All five calls below MUST complete before setState() returns:
+      //   1. vgre_init() starts BlockWorkerPool (96 threads), AdaptiveExecution
+      //      calibration, and pre-warms lazy singletons.
+      //   2. setServiceMode(true) starts the TCP cluster master (server listener,
+      //      UDP announcer, worker-discovery threads).
+      //   3-5. setProfilerEnabled / setBlockThreads / setBackgroundCompute
+      //      configure global runtime flags.
+      //
+      // The telemetry isolate DOES NOT call bridge.init() or any configure
+      // method. Doing so from the isolate's thread while GTK+ is rendering and
+      // TCP cluster threads are live causes malloc(): invalid size (unsorted)
+      // because concurrent heap activity (Pango text layout + TCP cluster
+      // std::string allocs + setenv() realloc) corrupts glibc's unsorted bin.
+      bridge.init();
+      bridge.setServiceMode(true);         // master mode — matches _serviceModeActive default
+      bridge.setProfilerEnabled(true);     // enabled    — matches _profilerEnabled default
+      bridge.setBlockThreads(false);       // disabled   — matches _blockThreadsActive default
+      bridge.setBackgroundCompute(false);  // disabled   — matches _backgroundComputeActive default
+
       if (!mounted) return;
       setState(() {
         _bridge = bridge;
