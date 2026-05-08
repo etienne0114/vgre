@@ -192,11 +192,10 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
     dim3 blockIdx(gridOffset.x, gridOffset.y, gridOffset.z);
     SharedMemory* smem = getThreadSharedMem(sharedMemSize);
     dim3 tIdx(0, 0, 0);
-    if (args) { for (int i = 0; i < 4 && args[i]; ++i) VGRE_PREFETCH(args[i]); }
+    auto t0 = std::chrono::steady_clock::now();
 #if defined(__linux__)
     if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
-    auto t0 = std::chrono::steady_clock::now();
     (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem->raw(), smem->size());
     vgre_cdp_drain();
     double ms = std::chrono::duration<double, std::milli>(
@@ -226,7 +225,6 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
           GPUThreadContext::setWarpMask(0xFFFFFFFF);
           GPUThreadContext::clearBlockBarrier();
           dim3 tIdx(0, 0, 0);
-          if (args) { for (int i = 0; i < 4 && args[i]; ++i) VGRE_PREFETCH(args[i]); }
 #if defined(__linux__)
           if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
@@ -286,7 +284,6 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
             vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
             vgre::runtime::GPUThreadContext::clearBlockBarrier();
             dim3 tIdx(0, 0, 0);
-            if (args) { for (int i = 0; i < 4 && args[i]; ++i) VGRE_PREFETCH(args[i]); }
 #if defined(__linux__)
             if (getPerfSampler().valid()) getPerfSampler().start();
 #endif
@@ -328,7 +325,6 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
           vgre::runtime::GPUThreadContext::clearBlockBarrier();
           smem->reset();
           dim3 tIdx(0, 0, 0);
-          if (args) { for (int i = 0; i < 4 && args[i]; ++i) VGRE_PREFETCH(args[i]); }
 #if defined(__linux__)
           if (getPerfSampler().valid()) getPerfSampler().start();
 #endif

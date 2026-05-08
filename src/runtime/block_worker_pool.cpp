@@ -2,8 +2,10 @@
 #include "vgre/runtime/gpu_thread_context.h"
 #include "vgre/common/logger.h"
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <string>
+#include <thread>
 
 #if defined(__linux__)
 #include <unistd.h>
@@ -45,14 +47,28 @@ void BlockWorkerPool::initialize(size_t numThreads) {
     if (initialized_) return;
 
     if (numThreads == 0) {
-        // Authoritative Concurrency: A single CUDA block can have up to 1024 threads.
-        // To avoid deadlocks where Block A threads occupy all workers but need 
-        // threads from Block B to complete a barrier (or simply to allow two
-        // active blocks to coexist), we must provide sufficient headspace.
-        // 2048 ensures at least 2 full blocks can execute side-by-side.
-        if (numThreads == 0) {
-            const char* pSize = std::getenv("VGRE_BLOCK_POOL_SIZE");
-            numThreads = pSize ? std::stoul(pSize) : 2048;
+        // If VGRE_BLOCK_THREADS=0 the runtime uses sequential (single-thread)
+        // block execution; a small pool is sufficient for background tasks.
+        const char* blockThreadsEnv = std::getenv("VGRE_BLOCK_THREADS");
+        bool sequentialMode = blockThreadsEnv && std::atoi(blockThreadsEnv) == 0;
+
+        const char* pSize = std::getenv("VGRE_BLOCK_POOL_SIZE");
+        if (pSize) {
+            numThreads = std::stoul(pSize);
+        } else if (sequentialMode) {
+            // Sequential mode: a small pool handles housekeeping only.
+            numThreads = 64;
+        } else {
+            // Parallel mode: scale to hardware without over-provisioning.
+            // Excessive threads (e.g. 32× core count = 384 on 12-core) cause
+            // startup heap pressure from 384 pthread stacks and descriptors,
+            // which under concurrent GTK+/Dart allocations can corrupt
+            // glibc's unsorted bin. 8× core count balances throughput with
+            // startup stability (96 threads on 12-core; at most 512).
+            unsigned int cpuCount = std::thread::hardware_concurrency();
+            if (cpuCount == 0) cpuCount = 4;
+            // At least 64, at most 512, scaled to 8× core count
+            numThreads = std::max(64u, std::min(512u, cpuCount * 8u));
         }
         VGRE_LOG_INFO("BlockWorkerPool", "Initializing with " + std::to_string(numThreads) + " threads");
     }
