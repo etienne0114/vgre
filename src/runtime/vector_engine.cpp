@@ -345,6 +345,17 @@ double VectorEngine::benchmarkBF16(size_t n, int iterations) {
 
     auto start = std::chrono::steady_clock::now();
 
+    // Macro: escape a SIMD register via an asm barrier so the compiler cannot
+    // dead-code-eliminate the FMA chain.  This is a zero-instruction hint —
+    // no actual load/store is emitted, no buffer write, no aliasing issue.
+    // Works on GCC and Clang with -O2/-O3.  MSVC does not need this because
+    // it does not perform aggressive dead-code elimination on SIMD intrinsics.
+#if defined(__GNUC__) || defined(__clang__)
+#define VGRE_ESCAPE_XMM(v128) __asm__ volatile("" : "+x"(v128))
+#else
+#define VGRE_ESCAPE_XMM(v128) (void)(v128)
+#endif
+
     #ifdef VGRE_HAS_AVX512
     {
     int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
@@ -355,19 +366,18 @@ double VectorEngine::benchmarkBF16(size_t n, int iterations) {
             for (int64_t i = 0; i < nAligned; i += 16) {
                 __m256i raw_a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&pa[i]));
                 __m256i raw_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&pb[i]));
-                
                 __m512i i_a = _mm512_cvtepu16_epi32(raw_a);
                 __m512i i_b = _mm512_cvtepu16_epi32(raw_b);
                 i_a = _mm512_slli_epi32(i_a, 16);
                 i_b = _mm512_slli_epi32(i_b, 16);
-                
                 __m512 va = _mm512_castsi512_ps(i_a);
                 __m512 vb = _mm512_castsi512_ps(i_b);
-                
                 __m512 vsum = _mm512_setzero_ps();
-                for (int k = 0; k < 32; ++k) {
+                for (int k = 0; k < 32; ++k)
                     vsum = _mm512_fmadd_ps(va, vb, vsum);
-                }
+                // Escape the accumulator register — no memory write, no overflow
+                __m128 v128 = _mm512_castps512_ps128(vsum);
+                VGRE_ESCAPE_XMM(v128);
             }
         }
     }
@@ -382,35 +392,43 @@ double VectorEngine::benchmarkBF16(size_t n, int iterations) {
             for (int64_t i = 0; i < nAligned; i += 8) {
                 __m128i raw_a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&pa[i]));
                 __m128i raw_b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&pb[i]));
-                
                 __m256i i_a = _mm256_cvtepu16_epi32(raw_a);
                 __m256i i_b = _mm256_cvtepu16_epi32(raw_b);
                 i_a = _mm256_slli_epi32(i_a, 16);
                 i_b = _mm256_slli_epi32(i_b, 16);
-                
                 __m256 va = _mm256_castsi256_ps(i_a);
                 __m256 vb = _mm256_castsi256_ps(i_b);
-                
                 __m256 vsum = _mm256_setzero_ps();
-                for (int k = 0; k < 32; ++k) {
+                for (int k = 0; k < 32; ++k)
                     vsum = _mm256_fmadd_ps(va, vb, vsum);
-                }
+                // Escape the accumulator register — no memory write, no overflow
+                __m128 v128 = _mm256_castps256_ps128(vsum);
+                VGRE_ESCAPE_XMM(v128);
             }
         }
     }
     }
     #else
+    {
+    volatile float sink = 0.0f;
     for (int iter = 0; iter < iterations; ++iter) {
         float sum = 0.0f;
-        for (size_t i = 0; i < n; ++i) {
+        for (size_t i = 0; i < n; ++i)
             sum += bf16_to_fp32(pa[i]) * bf16_to_fp32(pb[i]);
-        }
+        sink = sum;
+    }
+    (void)sink;
     }
     #endif
 
+#undef VGRE_ESCAPE_XMM
+
     auto end = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(end - start).count();
-    
+    // Minimum floor: guard against sub-resolution timer readings that would
+    // produce physically impossible GFLOPS values and mislead calibration.
+    if (seconds < 1e-4) seconds = 1e-4;
+
     #ifdef VGRE_HAS_AVX512
     double totalFlops = static_cast<double>(n & ~15) * 32.0 * 2.0 * iterations;
     #elif defined(VGRE_HAS_AVX2)
@@ -418,7 +436,7 @@ double VectorEngine::benchmarkBF16(size_t n, int iterations) {
     #else
     double totalFlops = static_cast<double>(n) * 2.0 * iterations;
     #endif
-    
+
     return totalFlops / (seconds * 1e9);
 }
 

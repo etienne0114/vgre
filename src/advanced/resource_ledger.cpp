@@ -296,42 +296,62 @@ VGREResult ResourceLedger::fromJSON(const std::string &json) {
       }
     }
 
+    // Helper: safely parse a numeric value after the first ':' following key.
+    // Returns true and sets out on success.  Never throws.
+    auto parseDouble = [&](const char* key, double& out) -> bool {
+      size_t kp = obj.find(key);
+      if (kp == std::string::npos) return false;
+      size_t cp = obj.find(':', kp);
+      if (cp == std::string::npos || cp + 1 >= obj.size()) return false;
+      try {
+        size_t consumed = 0;
+        double v = std::stod(obj.substr(cp + 1), &consumed);
+        if (consumed == 0) return false;
+        out = v;
+        return true;
+      } catch (const std::exception&) { return false; }
+    };
+    auto parseULL = [&](const char* key, uint64_t& out) -> bool {
+      size_t kp = obj.find(key);
+      if (kp == std::string::npos) return false;
+      size_t cp = obj.find(':', kp);
+      if (cp == std::string::npos || cp + 1 >= obj.size()) return false;
+      try {
+        size_t consumed = 0;
+        uint64_t v = std::stoull(obj.substr(cp + 1), &consumed);
+        if (consumed == 0) return false;
+        out = v;
+        return true;
+      } catch (const std::exception&) { return false; }
+    };
+    auto parseInt = [&](const char* key, int& out) -> bool {
+      size_t kp = obj.find(key);
+      if (kp == std::string::npos) return false;
+      size_t cp = obj.find(':', kp);
+      if (cp == std::string::npos || cp + 1 >= obj.size()) return false;
+      try {
+        size_t consumed = 0;
+        int v = std::stoi(obj.substr(cp + 1), &consumed);
+        if (consumed == 0) return false;
+        out = v;
+        return true;
+      } catch (const std::exception&) { return false; }
+    };
+
     // Parse cus
-    size_t cusPos = obj.find("\"cus\"");
-    if (cusPos != std::string::npos) {
-      size_t colonPos = obj.find(':', cusPos);
-      if (colonPos != std::string::npos) {
-        entry.compute_unit_seconds = std::stod(obj.substr(colonPos + 1));
-      }
-    }
+    parseDouble("\"cus\"", entry.compute_unit_seconds);
 
     // Parse timestamp
-    size_t tsPos = obj.find("\"timestamp\"");
-    if (tsPos != std::string::npos) {
-      size_t colonPos = obj.find(':', tsPos);
-      if (colonPos != std::string::npos) {
-        entry.timestamp = std::stoull(obj.substr(colonPos + 1));
-      }
-    }
+    parseULL("\"timestamp\"", entry.timestamp);
 
     // Parse kernel_id
-    size_t kidPos = obj.find("\"kernel_id\"");
-    if (kidPos != std::string::npos) {
-      size_t colonPos = obj.find(':', kidPos);
-      if (colonPos != std::string::npos) {
-        entry.kernel_id = std::stoull(obj.substr(colonPos + 1));
-      }
-    }
+    parseULL("\"kernel_id\"", entry.kernel_id);
 
     // Parse direction
-    size_t dirPos = obj.find("\"direction\"");
-    if (dirPos != std::string::npos) {
-      size_t colonPos = obj.find(':', dirPos);
-      if (colonPos != std::string::npos) {
-        int dir = std::stoi(obj.substr(colonPos + 1));
-        entry.direction =
-            (dir == 1) ? CreditDirection::CREDIT : CreditDirection::DEBIT;
-      }
+    {
+      int dir = 0;
+      if (parseInt("\"direction\"", dir))
+        entry.direction = (dir == 1) ? CreditDirection::CREDIT : CreditDirection::DEBIT;
     }
 
     if (!entry.node_address.empty()) {
