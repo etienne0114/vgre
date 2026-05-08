@@ -252,6 +252,16 @@ fi
 
 cmake .. -DCMAKE_BUILD_TYPE=Release -DVGRE_ENABLE_NATIVE_SIMD="$VGRE_ENABLE_NATIVE_SIMD_FLAG"
 make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) vgre vgre_cudart vgre-worker
+
+# Verify the built library is a Release build (no ASAN symbols).
+# An ASan build is 2-3x larger and will abort on the first heap error it detects.
+_LIB_SIZE=$(stat -c%s libvgre.so 2>/dev/null || stat -f%z libvgre.so 2>/dev/null || echo 0)
+if ldd libvgre.so 2>/dev/null | grep -q "libasan"; then
+    echo "❌ ERROR: libvgre.so is an ASAN build — re-run cmake with -DCMAKE_BUILD_TYPE=Release"
+    echo "   Run: cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j\$(nproc) vgre"
+    exit 1
+fi
+echo "✅ libvgre.so verified: Release build, ${_LIB_SIZE} bytes"
 cd ..
 
 # 2. Build Flutter Dashboard
@@ -297,10 +307,13 @@ else
     BUNDLE_DIR="$PROJECT_ROOT/vgre_dashboard/build/linux/x64/release/bundle"
     cp -r "$BUNDLE_DIR"/* "$INSTALL_DIR/"
 
-    # Copy shared libraries — handle both bare .so symlinks and versioned .so.x.y.z files.
+    # Always install the freshly-built Release libraries AFTER copying the Flutter
+    # bundle. Flutter's bundle build does not include libvgre.so; installing it
+    # here ensures the dashboard always loads the correct non-debug, non-ASAN build.
     # Use cp -P to preserve symlinks so the loader finds both libvgre.so and libvgre.so.0.
     cp -P build/libvgre.so* "$INSTALL_DIR/lib/"
     cp -P build/libvgre_cudart.so* "$INSTALL_DIR/lib/"
+    echo "✅ libvgre.so $(md5sum build/libvgre.so | awk '{print $1}') installed to $INSTALL_DIR/lib/"
 
     # Deploy vgre-worker.
     # The binary lives at build/src/advanced/vgre-worker (CMake output path).
@@ -336,8 +349,8 @@ else
     LAUNCH_SCRIPT="$INSTALL_DIR/vgre-launch.sh"
     echo '#!/bin/bash' > "$LAUNCH_SCRIPT"
     echo '# Source user profiles to inherit env vars if possible' >> "$LAUNCH_SCRIPT"
-    echo '[ -f "$HOME/.profile" ] && source "$HOME/.profile"' >> "$LAUNCH_SCRIPT"
-    echo '[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"' >> "$LAUNCH_SCRIPT"
+    echo '[ -f "$HOME/.profile" ] && source "$HOME/.profile" 2>/dev/null' >> "$LAUNCH_SCRIPT"
+    echo '[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc" 2>/dev/null' >> "$LAUNCH_SCRIPT"
     echo '' >> "$LAUNCH_SCRIPT"
     
     # Use token file instead of raw token to keep the secret out of the process list.
@@ -349,9 +362,15 @@ else
         echo "export VGRE_TCP_AUTH_TOKEN_FILE=\"${TOKEN_FILE:-$HOME/.vgre/token}\"" >> "$LAUNCH_SCRIPT"
     fi
     
-    echo "export LD_LIBRARY_PATH=\"\$LD_LIBRARY_PATH:$INSTALL_DIR/lib\"" >> "$LAUNCH_SCRIPT"
+    # Set LD_LIBRARY_PATH with proper precedence (new path first)
+    echo "export LD_LIBRARY_PATH=\"$INSTALL_DIR/lib:\$LD_LIBRARY_PATH\"" >> "$LAUNCH_SCRIPT"
+    echo "export VGRE_CACHE_DIR=\"\$HOME/.vgre/cache\"" >> "$LAUNCH_SCRIPT"
+    echo "mkdir -p \"\$VGRE_CACHE_DIR\"" >> "$LAUNCH_SCRIPT"
     echo "cd \"$INSTALL_DIR\"" >> "$LAUNCH_SCRIPT"
-    echo 'exec ./vgre_dashboard "$@"' >> "$LAUNCH_SCRIPT"
+    echo '# Ensure dashboard stays running even if parent shell exits' >> "$LAUNCH_SCRIPT"
+    echo 'nohup ./vgre_dashboard "$@" > /tmp/vgre_dashboard.log 2>&1 &' >> "$LAUNCH_SCRIPT"
+    echo 'DASHBOARD_PID=$!' >> "$LAUNCH_SCRIPT"
+    echo 'wait $DASHBOARD_PID' >> "$LAUNCH_SCRIPT"
     
     chmod +x "$LAUNCH_SCRIPT"
     
