@@ -360,6 +360,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
             backgroundComputeActive: _backgroundComputeActive,
             profilerEnabled: _profilerEnabled,
             blockThreadsActive: _blockThreadsActive,
+            serviceModeActive: _serviceModeActive,
           ),
           history: newHistory,
           deviceName: _deviceName,
@@ -383,15 +384,12 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
 
     _pollReceivePort!.listen((message) {
       if (message is SendPort) {
+        // Do NOT send a 'configure' message here. _bootstrap() already called
+        // bridge.init() + all configure methods on the main thread before
+        // setState(). Sending another configure round from the isolate ~490ms
+        // later hits the heap after GTK+ has been rendering and causes
+        // malloc(): invalid size (unsorted) corruption.
         _pollSendPort = message;
-        // Apply initial config
-        _pollSendPort!.send({
-          'type': 'configure',
-          'backgroundCompute': _backgroundComputeActive,
-          'serviceMode': _serviceModeActive,
-          'blockThreads': _blockThreadsActive,
-          'profilerEnabled': _profilerEnabled,
-        });
       } else if (message is Map<String, dynamic>) {
         if (message['type'] == 'telemetry') {
           final t = message['data'] as Telemetry;
@@ -457,10 +455,16 @@ void _vgreIsolateEntryPoint(Map<String, dynamic> args) {
   late final VgreBridge bridge;
   try {
     bridge = VgreBridge(libPath);
-    final initResult = bridge.init();
+    // DO NOT call bridge.init() here. _bootstrap() in main.dart already
+    // called vgre_init() on the main thread before setState(). Calling it
+    // again from this isolate thread while GTK+ is rendering and TCP cluster
+    // threads are running causes a malloc(): invalid size (unsorted) crash:
+    // vgre_init() acquires RuntimeEngine::recursive_mutex while the concurrent
+    // heap activity from background threads corrupts glibc's unsorted bin.
+    // The C++ runtime is already fully initialized — skip redundant init.
     mainSendPort.send({
       'type': 'log',
-      'message': 'VGRE init result: $initResult',
+      'message': 'VGRE bridge ready (runtime pre-initialized)',
     });
   } catch (e) {
     mainSendPort.send({
@@ -473,31 +477,14 @@ void _vgreIsolateEntryPoint(Map<String, dynamic> args) {
 
   bool securitySupported = false;
 
-  // --- Auth Token Propagation (env-var → C++ process environment) ---
-  if (!Platform.environment.containsKey('VGRE_TCP_AUTH_TOKEN')) {
-    try {
-      final home =
-          Platform.environment['HOME'] ??
-          Platform.environment['USERPROFILE'] ??
-          '/home/${Platform.environment['USER']}';
-      final tokenFile = File('$home/.vgre/token');
-      if (tokenFile.existsSync()) {
-        final token = tokenFile.readAsStringSync().trim();
-        if (token.isNotEmpty) {
-          bridge.setEnvironmentVariable('VGRE_TCP_AUTH_TOKEN', token);
-          mainSendPort.send({
-            'type': 'log',
-            'message': 'Loaded auth token from file: $home/.vgre/token',
-          });
-        }
-      }
-    } catch (e) {
-      mainSendPort.send({
-        'type': 'log',
-        'message': 'Failed to load auth token file: $e',
-      });
-    }
-  }
+  // NOTE: Auth token propagation is intentionally omitted here.
+  // _bootstrap() in main.dart calls _syncRuntimeEnvVars() → setenv() BEFORE
+  // bridge.init() and setServiceMode(), so the token is already in the
+  // process environment before any TCP cluster threads start.
+  //
+  // Calling setenv() here races with concurrent getenv() calls from live
+  // TCP cluster threads (glibc setenv may realloc environ, getenv reads it
+  // without a lock) → heap metadata corruption → malloc(): invalid size.
 
   // Fetch real device name and version string once at start
   String deviceName = "Unknown Device";
