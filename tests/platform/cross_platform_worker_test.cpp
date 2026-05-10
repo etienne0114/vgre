@@ -6,6 +6,8 @@
 #include <iostream>
 #include <cstring>
 
+using namespace vgre::common;
+
 namespace vgre {
 namespace test {
 
@@ -27,15 +29,15 @@ class CrossPlatformWorkerTest : public ::testing::Test {
 
 // Test: Socket creation and closure (platform-agnostic)
 TEST_F(CrossPlatformWorkerTest, SocketCreationClosure) {
-  int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  ASSERT_NE(sock, INVALID_SOCKET);
-  ASSERT_EQ(vgre_close_socket(sock), 0);
+  vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  ASSERT_NE(sock, VGRE_INVALID_SOCKET);
+  vgre_close_socket(sock);
 }
 
 // Test: Socket option setting (platform-agnostic)
 TEST_F(CrossPlatformWorkerTest, SocketOptions) {
-  int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  ASSERT_NE(sock, INVALID_SOCKET);
+  vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  ASSERT_NE(sock, VGRE_INVALID_SOCKET);
 
   int nodelay = 1;
   ASSERT_EQ(vgre_setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, 
@@ -50,11 +52,11 @@ TEST_F(CrossPlatformWorkerTest, SocketOptions) {
 
 // Test: Non-blocking socket mode
 TEST_F(CrossPlatformWorkerTest, NonBlockingMode) {
-  int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  ASSERT_NE(sock, INVALID_SOCKET);
+  vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  ASSERT_NE(sock, VGRE_INVALID_SOCKET);
 
   // Set non-blocking
-  ASSERT_EQ(vgre_ioctl_nonblock(sock, 1), 0);
+  ASSERT_EQ(vgre_ioctl_nonblock(sock), 0);
 
   // Attempt connection should not block
   struct sockaddr_in addr{};
@@ -84,8 +86,8 @@ class PlatformSpecificTests : public ::testing::Test {};
 #ifdef _WIN32
 TEST_F(PlatformSpecificTests, WindowsSocketInitialization) {
   // On Windows, WSAStartup should have been called
-  int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  ASSERT_NE(sock, INVALID_SOCKET);
+  vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  ASSERT_NE(sock, VGRE_INVALID_SOCKET);
   vgre_close_socket(sock);
 }
 #endif
@@ -93,8 +95,8 @@ TEST_F(PlatformSpecificTests, WindowsSocketInitialization) {
 #ifdef __APPLE__
 TEST_F(PlatformSpecificTests, macOSSpecificFeatures) {
   // macOS-specific test for SO_NOSIGPIPE
-  int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  ASSERT_NE(sock, INVALID_SOCKET);
+  vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  ASSERT_NE(sock, VGRE_INVALID_SOCKET);
   // SO_NOSIGPIPE should prevent SIGPIPE on broken connections
   vgre_close_socket(sock);
 }
@@ -103,8 +105,8 @@ TEST_F(PlatformSpecificTests, macOSSpecificFeatures) {
 #ifdef __linux__
 TEST_F(PlatformSpecificTests, LinuxSpecificFeatures) {
   // Linux-specific test for socket capabilities
-  int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  ASSERT_NE(sock, INVALID_SOCKET);
+  vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  ASSERT_NE(sock, VGRE_INVALID_SOCKET);
   vgre_close_socket(sock);
 }
 #endif
