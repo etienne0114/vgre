@@ -88,6 +88,22 @@ public:
     return inst;
   }
 
+  ~CUDAModuleRegistry() {
+    // Do not acquire mutex in destructor to avoid deadlock during static destruction
+    // At this point, no other threads should be accessing the registry
+    // The test calls vgre_unregister_module_data explicitly to clean up resources
+    // Any remaining device memory will be reclaimed by the OS
+    modules_.clear();
+    moduleVariables_.clear();
+    moduleSources_.clear();
+    hostToName_.clear();
+    hostToSource_.clear();
+    hostVarToDevicePtr_.clear();
+    moduleNamedVariables_.clear();
+    moduleTextureRefs_.clear();
+    launchBoundsMap_.clear();
+  }
+
   void **registerFatBinary(void *fatCubin) {
     if (!fatCubin) {
       return nullptr;
@@ -820,9 +836,18 @@ struct GraphExtSemNodeState {
   std::vector<cudaExternalSemaphoreWaitParams> waitParams;
 };
 
-std::mutex g_graphExtSemMu;
-std::unordered_map<cudaGraphNode_t, std::shared_ptr<GraphExtSemNodeState>>
-    g_graphExtSemNodes;
+// Use function-local static initialization to prevent blocking during library load
+// This ensures the mutex and map are only initialized when first used
+std::mutex& getGraphExtSemMutex() {
+  static std::mutex mu;
+  return mu;
+}
+
+std::unordered_map<cudaGraphNode_t, std::shared_ptr<GraphExtSemNodeState>>&
+getGraphExtSemNodes() {
+  static std::unordered_map<cudaGraphNode_t, std::shared_ptr<GraphExtSemNodeState>> nodes;
+  return nodes;
+}
 
 static int vgre_ext_sem_graph_callback(void *ctx) {
   auto *state = static_cast<GraphExtSemNodeState *>(ctx);
@@ -968,8 +993,8 @@ cudaError_t cudaGraphAddExternalSemaphoreSignalNode(
   if (r != vgre::VGREResult::SUCCESS) return cudaErrorInvalidValue;
 
   {
-    std::lock_guard<std::mutex> lk(g_graphExtSemMu);
-    g_graphExtSemNodes[nodeId] = std::move(state);
+    std::lock_guard<std::mutex> lk(getGraphExtSemMutex());
+    getGraphExtSemNodes()[nodeId] = std::move(state);
   }
   *pGraphNode = nodeId;
   return cudaSuccess;
@@ -1002,8 +1027,8 @@ cudaError_t cudaGraphAddExternalSemaphoreWaitNode(
   if (r != vgre::VGREResult::SUCCESS) return cudaErrorInvalidValue;
 
   {
-    std::lock_guard<std::mutex> lk(g_graphExtSemMu);
-    g_graphExtSemNodes[nodeId] = std::move(state);
+    std::lock_guard<std::mutex> lk(getGraphExtSemMutex());
+    getGraphExtSemNodes()[nodeId] = std::move(state);
   }
   *pGraphNode = nodeId;
   return cudaSuccess;
@@ -1016,9 +1041,9 @@ cudaError_t cudaGraphExecExternalSemaphoreSignalNodeSetParams(
       !nodeParams->paramsArray) {
     return cudaErrorInvalidValue;
   }
-  std::lock_guard<std::mutex> lk(g_graphExtSemMu);
-  auto it = g_graphExtSemNodes.find(node);
-  if (it == g_graphExtSemNodes.end()) return cudaErrorInvalidValue;
+  std::lock_guard<std::mutex> lk(getGraphExtSemMutex());
+  auto it = getGraphExtSemNodes().find(node);
+  if (it == getGraphExtSemNodes().end()) return cudaErrorInvalidValue;
   auto &state = *it->second;
   state.isWait = false;
   state.sems.assign(nodeParams->extSemArray,
@@ -1036,9 +1061,9 @@ cudaError_t cudaGraphExecExternalSemaphoreWaitNodeSetParams(
       !nodeParams->paramsArray) {
     return cudaErrorInvalidValue;
   }
-  std::lock_guard<std::mutex> lk(g_graphExtSemMu);
-  auto it = g_graphExtSemNodes.find(node);
-  if (it == g_graphExtSemNodes.end()) return cudaErrorInvalidValue;
+  std::lock_guard<std::mutex> lk(getGraphExtSemMutex());
+  auto it = getGraphExtSemNodes().find(node);
+  if (it == getGraphExtSemNodes().end()) return cudaErrorInvalidValue;
   auto &state = *it->second;
   state.isWait = true;
   state.sems.assign(nodeParams->extSemArray,

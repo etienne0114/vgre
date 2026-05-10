@@ -46,7 +46,11 @@ void BlockWorkerPool::initialize(size_t numThreads) {
     std::lock_guard<std::mutex> lock(queueMutex_);
     if (initialized_) return;
 
-    if (numThreads == 0) {
+    if (numThreads > 0) {
+        numThreads_ = numThreads;
+    }
+
+    if (numThreads_ == 0) {
         // If VGRE_BLOCK_THREADS=0 the runtime uses sequential (single-thread)
         // block execution; a small pool is sufficient for background tasks.
         const char* blockThreadsEnv = std::getenv("VGRE_BLOCK_THREADS");
@@ -54,26 +58,26 @@ void BlockWorkerPool::initialize(size_t numThreads) {
 
         const char* pSize = std::getenv("VGRE_BLOCK_POOL_SIZE");
         if (pSize) {
-            numThreads = std::stoul(pSize);
+            numThreads_ = std::stoul(pSize);
         } else if (sequentialMode) {
             // Sequential mode: a small pool handles housekeeping only.
-            numThreads = 64;
+            numThreads_ = 64;
         } else {
             // Parallel mode: scale to hardware without over-provisioning.
+            // Ensure we can handle at least 1024 threads (max CUDA block size).
             // Excessive threads (e.g. 32× core count = 384 on 12-core) cause
             // startup heap pressure from 384 pthread stacks and descriptors,
             // which under concurrent GTK+/Dart allocations can corrupt
-            // glibc's unsorted bin. 8× core count balances throughput with
-            // startup stability (96 threads on 12-core; at most 512).
+            // glibc's unsorted bin. Balance throughput with startup stability.
             unsigned int cpuCount = std::thread::hardware_concurrency();
             if (cpuCount == 0) cpuCount = 4;
-            // At least 64, at most 512, scaled to 8× core count
-            numThreads = std::max(64u, std::min(512u, cpuCount * 8u));
+            // At least 1024 (max CUDA block size), at most 2048, scaled to 8× core count
+            numThreads_ = std::max(1024u, std::min(2048u, cpuCount * 8u));
         }
-        VGRE_LOG_INFO("BlockWorkerPool", "Initializing with " + std::to_string(numThreads) + " threads");
+        VGRE_LOG_INFO("BlockWorkerPool", "Initializing with " + std::to_string(numThreads_) + " threads");
     }
 
-    for (size_t i = 0; i < numThreads; ++i) {
+    for (size_t i = 0; i < numThreads_; ++i) {
         workers_.emplace_back(&BlockWorkerPool::workerLoop, this);
 
         // Depinning from pinned Scheduler parent thread.
@@ -106,15 +110,15 @@ void BlockWorkerPool::initialize(size_t numThreads) {
     // the first dispatch() call could fire notify_all() before any thread is waiting.
     // The condition variable's predicate (taskQueue_ not empty) makes this race
     // safe — but blocking here ensures workers are hot-cached and ready.
-    const int target = static_cast<int>(numThreads);
+    const int target = static_cast<int>(numThreads_);
     while (readyCount_.load(std::memory_order_acquire) < target) {
         std::this_thread::yield();
     }
-    VGRE_LOG_INFO("BlockWorkerPool", "All " + std::to_string(numThreads) + " workers ready");
+    VGRE_LOG_INFO("BlockWorkerPool", "All " + std::to_string(numThreads_) + " workers ready");
 }
 
 
-void BlockWorkerPool::dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg) {
+void BlockWorkerPool::dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg, void* sharedMem) {
     if (threadCount <= 0 || task == nullptr) {
         VGRE_LOG_WARN("BlockWorkerPool", "dispatch() ignored invalid input");
         return;
@@ -127,19 +131,23 @@ void BlockWorkerPool::dispatch(int threadCount, void (*task)(int tid, void* arg)
     auto signal = std::make_shared<BlockSignal>(threadCount);
 
     for (int i = 0; i < threadCount; ++i) {
-        Task t = {task, i, arg, signal->barrier.get(), [signal]() {
-            // Decrement and notify dispatcher when last task completes.
-            // Lock ensures no lost-wakeup race between decrement and cv.wait().
+        Task t;
+        t.func = task;
+        t.tid = i;
+        t.arg = arg;
+        t.barrier = signal->barrier.get();
+        t.sharedMem = sharedMem;
+        t.onDone = [signal]() {
             std::lock_guard<std::mutex> lk(signal->completeMutex);
             if (signal->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
                 signal->completeCv.notify_one();
             }
-        }};
-        while (!taskQueue_.push(t)) {
-            std::this_thread::yield();
-        }
+        };
+        taskQueue_.push(t);
     }
-    
+
+    signal->barrier->arrive_and_wait();
+
     // Memory fence + lock to prevent lost wakeups on the condition variable
     { std::lock_guard<std::mutex> lk(queueMutex_); }
     queueCv_.notify_all();

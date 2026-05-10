@@ -243,6 +243,7 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   oss << "  void vgre_jit_report_memory(unsigned long long);\n";
   oss << "  void vgre_jit_block_dispatch(int, void(*)(int, void*), void*);\n";
   oss << "  void vgre_jit_syncgrid();\n";
+  oss << "  bool vgre_jit_in_threaded_context();\n";
   oss << "}\n\n";
   // Note: texture/surface builtins (vgre_tex1D_f32, vgre_tex2D_f32, etc.) are
   // already declared via the #include "vgre/compiler/cpu_cuda_env.h" above.
@@ -308,6 +309,7 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   // Thread-local kernel launcher
   oss << "  alignas(64) uint64_t vgre_warp_buf[32] = {};\n";
   oss << "  auto vgre_call_kernel = [=, &vgre_warp_buf](uint32_t tx, uint32_t ty, uint32_t tz) {\n";
+  // Set shared memory pointer (thread-local, but BlockWorkerPool will override for multi-threaded blocks)
   oss << "    *vgre_jit_get_sharedMem() = smem;\n";
   oss << "    *vgre_jit_get_warp_buffer() = (void*)vgre_warp_buf;\n";
   oss << "    *vgre_jit_get_threadIdx() = vgre_cuda::dim3(tx, ty, tz);\n";
@@ -366,7 +368,8 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   // data.  Threaded dispatch gives each lane its own OS thread, enabling correct
   // barrier semantics at the cost of minor overhead for single-thread blocks.
   oss << "  bool useThreads = vgre_force_block_threads\n";
-  oss << "                 || (vgre_block_threads_enabled() && totalThreads > 1);\n";
+  oss << "                 && !vgre_jit_in_threaded_context()\n";
+  oss << "                 && (vgre_block_threads_enabled() || totalThreads > 1);\n";
   oss << "  if (useThreads) {\n";
   oss << "    struct JobContext {\n";
   oss << "      uint32_t bdx, bdy, bdz;\n";

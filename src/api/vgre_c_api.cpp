@@ -112,36 +112,18 @@ static int require_initialized() {
 
 // ── Initialization ─────────────────────────────────────────────────────────
 
+static std::mutex g_init_mutex;
+static bool g_initialized = false;
+
 int vgre_init(void) {
-#if defined(__linux__)
-  // Limit glibc malloc arena count to 4× logical CPUs (or 16, whichever is
-  // smaller). The default on 64-bit Linux is MALLOC_ARENA_MAX=128, which
-  // allows the allocator to create up to 128 separate per-thread arenas.
-  // With 384+ BlockWorkerPool threads + TCP cluster threads + GTK+ rendering,
-  // excessive arena proliferation can fragment the heap and expose timing-
-  // dependent corruption under concurrent first-use scenarios.
-  // Capped at 16 to keep parallelism sufficient for the thread pool.
-  {
-    unsigned int cpuCount = (unsigned int)std::thread::hardware_concurrency();
-    if (cpuCount == 0) cpuCount = 4;
-    int arenaMax = (int)std::min(cpuCount * 4u, 16u);
-    mallopt(M_ARENA_MAX, arenaMax);
+  std::lock_guard<std::mutex> lock(g_init_mutex);
+  if (g_initialized) {
+    return VGRE_SUCCESS;
   }
-#endif
 
   auto result = vgre::core::RuntimeEngine::instance().initialize();
   if (result == vgre::VGREResult::SUCCESS) {
-    // Pre-warm every lazily-constructed singleton while the heap is quiet
-    // (immediately after init, before any concurrent telemetry poll or
-    // dashboard configure sequence). Without this, first-access construction
-    // races with background calibration threads and TCP cluster thread
-    // creation, which can corrupt glibc's unsorted free list.
-    vgre::advanced::ResourceLedger::instance();
-    vgre::advanced::RuntimeProfiler::instance();
-    vgre::advanced::WorkloadEngine::instance();
-    // GPUCacheL2 allocates ~816 KB for the set array — construct it now so
-    // the vgre_get_cache_stats call in the first poll doesn't race.
-    vgre::runtime::GPUCacheL2::instance();
+    g_initialized = true;
   }
   return to_status(result);
 }

@@ -501,13 +501,17 @@ std::string PTXTranslator::translateInstruction(
     const auto& m = getMap();
     auto it = m.find(instr);
     if (it == m.end()) {
-        VGRE_LOG_WARN("PTXTranslator",
-            "Unrecognized PTX instruction '" + instr + "' — emitting stub comment");
-        return "/* PTX_UNIMPLEMENTED: " + instr + " " + operands + " */";
+        VGRE_LOG_ERROR("PTXTranslator",
+            "Unrecognized PTX instruction '" + instr + "' — not supported for production");
+        throw std::runtime_error("PTX instruction not supported: " + instr);
     }
     auto ops = splitOperands(operands);
     try { return it->second(ops); }
-    catch (...) { return "/* PTX operand error: " + instr + " */"; }
+    catch (...) {
+        VGRE_LOG_ERROR("PTXTranslator",
+            "PTX operand error for instruction '" + instr + "'");
+        throw std::runtime_error("PTX operand error: " + instr);
+    }
 }
 
 std::string PTXTranslator::translateBlock(

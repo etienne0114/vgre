@@ -228,20 +228,29 @@ struct NcclGroupState {
 };
 
 // ── Global registry: uniqueId → NcclGroupState ───────────────────────────────
-static std::mutex g_registry_mu;
-static std::unordered_map<std::string, std::shared_ptr<NcclGroupState>> g_registry;
+// Use function-local static initialization to prevent blocking during library load
+// This ensures the mutex and map are only initialized when first used
+std::mutex& getNCCLRegistryMutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+std::unordered_map<std::string, std::shared_ptr<NcclGroupState>>& getNCCLRegistry() {
+    static std::unordered_map<std::string, std::shared_ptr<NcclGroupState>> registry;
+    return registry;
+}
 
 static std::string id_key(const ncclUniqueId& id) {
     return std::string(id.internal, NCCL_UNIQUE_ID_BYTES);
 }
 
 static std::shared_ptr<NcclGroupState> find_or_create(const ncclUniqueId& id, int nranks) {
-    std::lock_guard<std::mutex> lg(g_registry_mu);
+    std::lock_guard<std::mutex> lg(getNCCLRegistryMutex());
     auto key = id_key(id);
-    auto it = g_registry.find(key);
-    if (it != g_registry.end()) return it->second;
+    auto it = getNCCLRegistry().find(key);
+    if (it != getNCCLRegistry().end()) return it->second;
     auto state = std::make_shared<NcclGroupState>(nranks);
-    g_registry[key] = state;
+    getNCCLRegistry()[key] = state;
     return state;
 }
 
@@ -343,12 +352,11 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
     auto* c = static_cast<ncclComm*>(comm);
     // If last rank destroys, purge the shared state
     {
-        std::lock_guard<std::mutex> lg(g_registry_mu);
+        std::lock_guard<std::mutex> lg(getNCCLRegistryMutex());
         auto key = id_key(c->unique_id);
-        auto it = g_registry.find(key);
-        if (it != g_registry.end() && it->second.use_count() <= 2) {
-            // Only this handle + the registry hold the state
-            g_registry.erase(it);
+        auto it = getNCCLRegistry().find(key);
+        if (it != getNCCLRegistry().end() && it->second.use_count() <= 2) {
+            getNCCLRegistry().erase(it);
         }
     }
     delete c;
