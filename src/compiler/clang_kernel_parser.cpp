@@ -576,7 +576,7 @@ VGREResult ClangKernelParser::parse(const std::string& name,
         }
         outIR.usesSharedMem = (source.find("__shared__") != std::string::npos || 
                                source.find("sharedMem") != std::string::npos);
-        outIR.usesSyncthreads = (source.find("__syncthreads()") != std::string::npos);
+        outIR.usesSyncthreads = (source.find("__syncthreads") != std::string::npos);
 
         // Authoritative Instruction Estimation (AST-based)
         outIR.estimatedInstructionCount = countInstructionsRecursively(kernelObj);

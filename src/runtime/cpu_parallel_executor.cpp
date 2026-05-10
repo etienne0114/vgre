@@ -210,44 +210,6 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
     if (fb > 0)          aee.recordRealFlops(fb);
     if (bytesPerBlock > 0) { aee.recordRealMemoryAccess(bytesPerBlock); tryRecordBandwidth(bytesPerBlock, ms); }
 
-  // ── Syncthreads path: serial block execution ─────────────────────────────
-  } else if (usesSyncthreads) {
-    // Serial execution prevents barrier deadlock — only one block's threads are
-    // in-flight at a time so BlockWorkerPool is never starved.
-    uint64_t totalFlops = 0, totalBytes = 0;
-    SharedMemory* smem = getThreadSharedMem(sharedMemSize);
-    auto t0 = std::chrono::steady_clock::now();
-    for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
-      for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
-        for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {
-          dim3 blockIdx(gx + gridOffset.x, gy + gridOffset.y, gz + gridOffset.z);
-          smem->reset();
-          GPUThreadContext::setWarpMask(0xFFFFFFFF);
-          GPUThreadContext::clearBlockBarrier();
-          dim3 tIdx(0, 0, 0);
-#if defined(__linux__)
-          if (getPerfSampler().valid()) getPerfSampler().start();
-#endif
-          (*fn)(args, &blockIdx, &tIdx, &blockDim, &gridDim, smem->raw(), smem->size());
-#if defined(__linux__)
-          uint64_t instrS = getPerfSampler().valid() ? getPerfSampler().stop() : 0;
-#else
-          uint64_t instrS = 0;
-#endif
-          totalFlops += effectiveFlops(flopsPerBlock, instrS);
-          totalBytes += bytesPerBlock;
-          GPUThreadContext::clearWarpMask();
-          GPUThreadContext::clearBlockBarrier();
-        }
-      }
-    }
-    // Single batch update to avoid N×atomicAdd bus-lock overhead
-    double gridMs = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - t0).count();
-    auto& aee = vgre::advanced::AdaptiveExecutionEngine::instance();
-    if (totalFlops > 0)  aee.recordRealFlops(totalFlops);
-    if (totalBytes > 0) { aee.recordRealMemoryAccess(totalBytes); tryRecordBandwidth(totalBytes, gridMs); }
-
   // ── Parallel path: OpenMP across all blocks ───────────────────────────────
   } else {
 #ifdef _OPENMP

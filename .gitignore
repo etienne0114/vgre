@@ -61,4 +61,41 @@ CLAUDE.md
 .github/
 .cursor/
 .agents/
+.env
 
+# In-source CMake build artifacts (from running cmake in source tree)
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+
+# Compiled test binaries (ELF executables with no extension in tests/ and root)
+tests/test_*
+test_configuration_manager
+test_cudart_shim
+
+# Compiled example binaries
+examples/graph_struct_test
+examples/matrix_multiply
+examples/vector_addition
+
+# Versioned shared library symlinks and build outputs at root
+*.so.[0-9]*
+libvgre*.so*
+libvgre*.a
+
+# Static libraries produced in source tree
+src/**/*.a
+
+# Compiled worker binaries in source tree
+src/**/vgre-worker
+
+# Runtime trace output files
+vgre_trace.json
+tests/vgre_trace.json
+
+# Root-level scratch/temp test stubs (auto-generated during debugging)
+test_configuration_manager.cpp
+
+# AI-generated task notes (not project documentation)
+TASK_*.md

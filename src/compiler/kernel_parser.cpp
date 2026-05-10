@@ -519,7 +519,7 @@ VGREResult KernelParser::parse(const std::string& name,
 
     // Check for shared memory usage
     outIR.usesSharedMem    = (source.find("__shared__") != std::string::npos);
-    outIR.usesSyncthreads  = (source.find("__syncthreads()") != std::string::npos);
+    outIR.usesSyncthreads  = (source.find("__syncthreads") != std::string::npos);
     outIR.usesWarpShuffle  = (source.find("__shfl_sync") != std::string::npos
                            || source.find("__shfl_down_sync") != std::string::npos
                            || source.find("__shfl_up_sync") != std::string::npos
