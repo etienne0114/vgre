@@ -35,18 +35,21 @@ class VGREClusterServiceImpl final
     std::unordered_map<uint64_t, void*>    allocMap_;
 
     uint64_t doAlloc(uint64_t bytes) {
-        void* p = malloc(static_cast<size_t>(bytes));
-        if (!p) return 0;
-        uint64_t h = nextPtr_.fetch_add(bytes, std::memory_order_relaxed);
+        vgre::core::MemoryHandle h = nullptr;
+        if (vgre::core::MemoryManager::instance().allocate(bytes, h) != vgre::core::VGREResult::SUCCESS) {
+            return 0;
+        }
+        uint64_t handle = nextPtr_.fetch_add(bytes, std::memory_order_relaxed);
         std::lock_guard<std::mutex> lk(allocMu_);
-        allocMap_[h] = p;
-        return h;
+        allocMap_[handle] = h;
+        return handle;
     }
     bool doFree(uint64_t h) {
         std::lock_guard<std::mutex> lk(allocMu_);
         auto it = allocMap_.find(h);
         if (it == allocMap_.end()) return false;
-        free(it->second); allocMap_.erase(it); return true;
+        vgre::core::MemoryManager::instance().free(it->second);
+        allocMap_.erase(it); return true;
     }
     void* doResolve(uint64_t h) {
         std::lock_guard<std::mutex> lk(allocMu_);
@@ -61,15 +64,44 @@ public:
         vgre::cluster::KernelLaunchResponse*       resp) override
     {
         VGRE_LOG_DEBUG("gRPC", "LaunchKernel: " + req->kernel_name());
-        // RuntimeEngine kernel lookup and launch
+        
+        // Reconstruct arguments from args_blob
+        std::vector<void*> args;
+        std::vector<std::vector<uint8_t>> argDataBuffers;
+        
+        if (req->args_blob().size() > 0) {
+            // Assume the blob is a sequence of [uint32 size][data]
+            // We need a more robust way if we have complex ArgTypes, 
+            // but for simple remote launch this works.
+            const uint8_t* p = reinterpret_cast<const uint8_t*>(req->args_blob().data());
+            size_t remaining = req->args_blob().size();
+            while (remaining >= 4) {
+                uint32_t sz = *reinterpret_cast<const uint32_t*>(p);
+                p += 4; remaining -= 4;
+                if (remaining < sz) break;
+                
+                std::vector<uint8_t> buf(sz);
+                memcpy(buf.data(), p, sz);
+                p += sz; remaining -= sz;
+                
+                argDataBuffers.push_back(std::move(buf));
+                args.push_back(argDataBuffers.back().data());
+            }
+        }
+
         auto& engine = vgre::core::RuntimeEngine::instance();
         auto t0 = std::chrono::steady_clock::now();
-        auto rc = engine.launchKernel(req->kernel_name(),
+        
+        // Use the name-based launch; passing empty source as it should already be registered.
+        auto rc = engine.launchKernel(req->kernel_name(), "",
             {req->grid_x(),  req->grid_y(),  req->grid_z()},
             {req->block_x(), req->block_y(), req->block_z()},
-            req->shared_mem(), 0 /* default stream */);
+            args.empty() ? nullptr : args.data(),
+            req->shared_mem(), req->stream_id());
+
         auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t0).count();
+            
         resp->set_status(rc == vgre::core::VGREResult::SUCCESS ? 0 : 1);
         resp->set_elapsed_us(static_cast<uint64_t>(elapsed));
         return grpc::Status::OK;
@@ -160,12 +192,17 @@ public:
         vgre::cluster::TelemetryResponse* resp) override
     {
         auto& mm = vgre::core::MemoryManager::instance();
+        auto& ae = vgre::advanced::AdaptiveExecutionEngine::instance();
+        
         uint64_t used  = mm.getUsedMemory();
         uint64_t total = mm.getTotalMemory();
-        resp->set_gpu_utilization(0.0f);
+        
+        resp->set_gpu_utilization(static_cast<float>(ae.getInstantaneousGFLOPS() / std::max(ae.getMaxGFLOPS(), 1.0)));
         resp->set_mem_utilization(total > 0 ? static_cast<float>(used) / total : 0.0f);
         resp->set_mem_used_bytes(used);
-        resp->set_temperature_c(0.0f);
+        resp->set_temperature_c(ae.getDeviceTemperature());
+        resp->set_kernels_launched(ae.getActiveKernelCount()); // approximating
+        
         return grpc::Status::OK;
     }
 };

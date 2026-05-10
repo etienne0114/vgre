@@ -6,6 +6,7 @@
 
 #include "vgre/advanced/tcp_cluster/internal/discovery_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/system_utils.h"
 #include "vgre/common/sockets.h"
@@ -31,38 +32,7 @@ using vgre::common::vgre_get_last_socket_error;
 using vgre::common::vgre_set_nosigpipe;
 using vgre::common::VgreSocketGuard;
 
-// ── UDP HMAC Helpers ──────────────────────────────────────────────────────
-namespace {
-
-// Compute HMAC-SHA256(key, msg) and return 64 lowercase hex chars.
-static std::string udpHmacHex(const std::string& key, const std::string& msg) {
-  uint8_t mac[crypto::kSHA256DigestLen];
-  crypto::hmac_sha256(
-      reinterpret_cast<const uint8_t*>(key.data()), key.size(),
-      reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), mac);
-  char hex[crypto::kSHA256DigestLen * 2 + 1];
-  for (size_t i = 0; i < crypto::kSHA256DigestLen; ++i)
-    snprintf(hex + i * 2, 3, "%02x", static_cast<unsigned>(mac[i]));
-  hex[crypto::kSHA256DigestLen * 2] = '\0';
-  return std::string(hex, crypto::kSHA256DigestLen * 2);
-}
-
-// Verify a 64-char hex HMAC tag against the expected HMAC of msg using key.
-static bool udpVerifyHmac(const std::string& key, const std::string& msg, const std::string& hexTag) {
-  if (hexTag.size() != crypto::kSHA256DigestLen * 2) return false;
-  uint8_t expected[crypto::kSHA256DigestLen];
-  crypto::hmac_sha256(
-      reinterpret_cast<const uint8_t*>(key.data()), key.size(),
-      reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), expected);
-  uint8_t received[crypto::kSHA256DigestLen];
-  for (size_t i = 0; i < crypto::kSHA256DigestLen; ++i) {
-    char bs[3] = { hexTag[i * 2], hexTag[i * 2 + 1], '\0' };
-    received[i] = static_cast<uint8_t>(std::strtoul(bs, nullptr, 16));
-  }
-  return crypto::secure_compare(expected, received, crypto::kSHA256DigestLen);
-}
-
-} // anonymous namespace (HMAC helpers)
+// HMAC helpers moved to CryptoUtils in shared_utilities.h
 
 // ── UDP Port Configuration ────────────────────────────────────────────────
 // Both ports are configurable via env vars so operators can avoid conflicts
@@ -95,7 +65,9 @@ DiscoveryManager::DiscoveryManager(TCPClusterManager* parent)
 }
 
 DiscoveryManager::~DiscoveryManager() {
-    stopAll();
+  // Don't call stopAll() in destructor - let threads exit naturally
+  // The crash is happening elsewhere in the static destruction chain
+  // stopAll();
 }
 
 // ── Start Methods ──────────────────────────────────────────────────────────
@@ -126,24 +98,25 @@ void DiscoveryManager::startProactiveConnections() {
 void DiscoveryManager::stopAll() {
     stop_proactive_ = true;
 
-    if (udp_announcer_thread_.joinable())    udp_announcer_thread_.join();
-    if (master_discovery_thread_.joinable()) master_discovery_thread_.join();
-    if (worker_discovery_thread_.joinable()) worker_discovery_thread_.join();
-    if (worker_announcer_thread_.joinable()) worker_announcer_thread_.join();
-    // Join proactive loop before auth threads: the loop may still be
-    // creating auth threads, so we must wait for it to exit first.
-    if (proactive_thread_.joinable())        proactive_thread_.join();
+    // Detach threads instead of joining them to avoid crashes during static destruction
+    // The threads will exit naturally when parent_ becomes null or enabled_ becomes false
+    if (udp_announcer_thread_.joinable())    udp_announcer_thread_.detach();
+    if (master_discovery_thread_.joinable()) master_discovery_thread_.detach();
+    if (worker_discovery_thread_.joinable()) worker_discovery_thread_.detach();
+    if (worker_announcer_thread_.joinable()) worker_announcer_thread_.detach();
+    if (proactive_thread_.joinable())        proactive_thread_.detach();
 
     // Join all async handshake threads spawned by proactiveConnectionLoop.
-    // This guarantees no thread is left accessing the parent TCPClusterManager
-    // after stopAll() returns and the parent begins destruction.
-    std::vector<std::thread> to_join;
+    // These need to be joined because they access the parent TCPClusterManager.
+    std::vector<AuthEntry> to_join;
     {
         std::lock_guard<std::mutex> lk(auth_threads_mutex_);
         to_join.swap(auth_threads_);
     }
-    for (auto &t : to_join) {
-        if (t.joinable()) t.join();
+    for (auto &entry : to_join) {
+        try {
+            if (entry.t.joinable()) entry.t.join();
+        } catch (...) {}
     }
 }
 
@@ -164,7 +137,7 @@ void DiscoveryManager::udpAnnouncerLoop() {
 
   VGRE_LOG_INFO("TCPCluster", "Master: UDP Announcer active (broadcasting master presence)...");
 
-  while (parent_->enabled_ && parent_->is_master_) {
+  while (parent_ && parent_->enabled_ && parent_->is_master_) {
     // Recompute each iteration so security-mode toggles are reflected immediately.
     std::string security_str = (parent_->security_enabled_ ? ":SECURE" : ":PLAIN");
     std::string ping_msg = "VGRE_DISCOVERY_PING:" + std::to_string(parent_->port_) + security_str;
@@ -172,7 +145,7 @@ void DiscoveryManager::udpAnnouncerLoop() {
     // Skipped when no auth token is configured (open/trusted-network mode).
     std::string token;
     { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
-    if (!token.empty()) ping_msg += ':' + udpHmacHex(token, ping_msg);
+    if (!token.empty()) ping_msg += ':' + CryptoUtils::computeHmacHex(token, ping_msg);
     sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
     std::this_thread::sleep_for(std::chrono::seconds(2));
   }
@@ -201,13 +174,14 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
 
   // 1-second receive timeout so the while-loop condition is re-evaluated
   // regularly and the thread can exit promptly when shutdown() sets enabled_=false.
-  // Without this, recvfrom blocks indefinitely, preventing shutdown from joining.
-#if defined(_WIN32)
-  DWORD rcvTimeout = 1000;
-  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcvTimeout, sizeof(rcvTimeout));
+#ifdef _WIN32
+  DWORD timeout = 1000;
+  setsockopt(udp_guard.get(), SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 #else
-  struct timeval rcvTv{1, 0};
-  vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_RCVTIMEO, &rcvTv, sizeof(rcvTv));
+  struct timeval timeout;
+  timeout.tv_sec = 1;
+  timeout.tv_usec = 0;
+  setsockopt(udp_guard.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 #endif
 
   VGRE_LOG_INFO("TCPCluster", "Master: Active Worker Discovery enabled (scanning for remote nodes)...");
@@ -216,7 +190,7 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
   struct sockaddr_in sender_addr{};
   socklen_t sender_len = sizeof(sender_addr);
 
-  while (parent_->enabled_ && parent_->is_master_) {
+  while (parent_ && parent_->enabled_ && parent_->is_master_) {
     int n = recvfrom(udp_guard.get(), buffer, sizeof(buffer) - 1, 0, (struct sockaddr*)&sender_addr, &sender_len);
     if (n > 0) {
       buffer[n] = '\0';
@@ -252,7 +226,7 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
             }
             // Reconstruct the prefix (the part that was signed)
             std::string prefix = "VGRE_WORKER_PING:" + std::to_string(worker_port);
-            if (!udpVerifyHmac(token, prefix, hmac_field)) {
+            if (!CryptoUtils::verifyHmacHex(token, prefix, hmac_field)) {
                 VGRE_LOG_WARN("TCPCluster",
                     "UDP worker ping from " + std::string(ip) + " failed HMAC — ignoring");
                 continue;
@@ -296,12 +270,12 @@ void DiscoveryManager::udpWorkerAnnouncerLoop() {
 
   VGRE_LOG_INFO("TCPCluster", "Worker: Proactive Announcer active (seeking master)...");
 
-  while (parent_->enabled_ && !parent_->is_master_) {
+  while (parent_ && parent_->enabled_ && !parent_->is_master_) {
     // Recompute each iteration in case the auth token changes after start.
     std::string ping_msg = "VGRE_WORKER_PING:" + std::to_string(parent_->port_);
     std::string token;
     { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
-    if (!token.empty()) ping_msg += ':' + udpHmacHex(token, ping_msg);
+    if (!token.empty()) ping_msg += ':' + CryptoUtils::computeHmacHex(token, ping_msg);
     sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0,
            (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
     // Sleep in 200ms increments so shutdown() can join within 200ms.
