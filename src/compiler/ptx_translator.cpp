@@ -1,4 +1,5 @@
 #include "vgre/compiler/ptx_translator.h"
+#include "vgre/compiler/wmma_emulation.h"
 #include "vgre/common/logger.h"
 #include <regex>
 #include <sstream>
