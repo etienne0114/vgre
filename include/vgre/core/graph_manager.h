@@ -62,6 +62,8 @@ public:
   GraphId id;
   uint64_t nextNodeId = 1;
   std::vector<GraphNode> nodes;
+  // Index map for O(1) node lookup by nodeId instead of O(n) linear search
+  std::unordered_map<uint64_t, size_t> nodeIndex;
 };
 
 // Per-execution profiling data stored in GraphExec and updated by launch().

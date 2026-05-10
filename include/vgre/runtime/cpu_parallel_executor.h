@@ -39,6 +39,15 @@ public:
                                 uint64_t flopsPerBlock = 0,
                                 uint64_t bytesPerBlock = 0);
 
+  // Execute a syncthreads kernel — each block runs with multiple threads
+  // that can synchronize using __syncthreads() barriers within the block.
+  VGREResult executeSyncthreads(CompiledKernelFn fn, const dim3 &gridDim,
+                               const dim3 &blockDim, void **args,
+                               size_t sharedMemSize = 0,
+                               uint64_t flopsPerBlock = 0,
+                               uint64_t bytesPerBlock = 0,
+                               const dim3 &gridOffset = dim3(0, 0, 0));
+
   // Setters
   void setMaxThreads(int n);
   int getMaxThreads() const;

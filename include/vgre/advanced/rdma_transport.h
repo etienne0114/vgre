@@ -8,22 +8,25 @@
 // callers must fall back to the existing TCP path.
 //
 // Architecture:
-//   RDMAContext  — one per process: owns ibv_context, protection domain, CQ
-//   RDMARegion   — one per registered buffer: ibv_mr* + rkey for remote access
-//   RDMAConnection — one per peer: Queue Pair (QP) in RTS state after connect()
+//   RDMAContext    — one per process: owns ibv_context, protection domain, CQ
+//   RDMARegion     — one per registered buffer: ibv_mr* + rkey for remote access
+//   RDMAConnection — one per peer: QP in RTS state + pre-registered bounce buffer
 //
-// Usage:
-//   auto* ctx = RDMAContext::tryCreate();
-//   if (!ctx) { /* use TCP */ }
-//   auto* mr = ctx->registerMemory(buf, size);
-//   RDMAConnection conn;
-//   conn.connect(existingSecureChannel, *ctx);  // exchange QP info via TCP
-//   conn.rdmaWrite(mr, remoteMr.addr, remoteMr.rkey, size);
-//   conn.pollCompletion();
-//   ctx->deregisterMemory(mr);
+// Bounce buffer design:
+//   Each RDMAConnection allocates a large pre-pinned bounce buffer during
+//   connect().  The local buffer receives data written by the remote peer.
+//   The remote peer's bounce buffer rkey/addr are exchanged during the QP
+//   handshake so each side can RDMA-WRITE directly into the other's buffer.
+//
+// Usage (master → worker data transfer):
+//   conn.connect(secureChannel, *ctx);       // QP handshake + bounce buffer exchange
+//   conn.rdmaWriteToRemote(ctx, ptr, size);  // write into worker's bounce buffer
+//   send_packet(fd, DATA_HEADER_RDMA, ...);  // TCP notification: data ready at bounce[0]
+//   // Worker side: on DATA_HEADER_RDMA, memcpy from conn.bounceBuf() to allocation
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #ifdef VGRE_HAS_RDMA
@@ -98,23 +101,33 @@ public:
     RDMAConnection()  = default;
     ~RDMAConnection();
 
-    // Exchange QP info with a peer via the existing authenticated TCP channel,
-    // then transition the local QP: RESET → INIT → RTR → RTS.
-    // Returns false if RDMA negotiation fails (peer has no RDMA, or hardware
-    // mismatch); caller should continue with TCP for this peer.
+    // Exchange QP info and bounce buffer rkey/addr with a peer via the existing
+    // authenticated TCP channel, then transition: RESET → INIT → RTR → RTS.
+    // Allocates a pre-pinned bounce buffer (size controlled by VGRE_RDMA_BOUNCE_SIZE,
+    // default 256 MB) and includes its rkey/addr in the QP info exchange so the
+    // remote peer can RDMA-WRITE directly into it.
+    // Returns false on any failure; caller should continue with TCP.
     bool connect(SecureChannel& ctrl, RDMAContext& ctx);
 
-    // Post an RDMA WRITE of src_mr->addr[0..size) to the remote peer's buffer.
-    // Non-blocking: posts the WR to the send queue and returns immediately.
-    // Call pollCompletion() to wait for the NIC to confirm delivery.
+    // Write src[0..size) into the remote peer's bounce buffer using RDMA WRITE.
+    // Registers src temporarily, posts the WR, spin-polls until complete, then
+    // deregisters. Thread-safe: serialized internally by writeMtx_.
+    // Returns false if RDMA is unavailable, size exceeds the remote bounce capacity,
+    // or the NIC reports an error; callers must fall back to TCP.
+    bool rdmaWriteToRemote(RDMAContext& ctx, const void* src, size_t size);
+
+    // Post an RDMA WRITE of src_mr->addr[0..size) to an explicit remote address.
+    // Low-level primitive used by rdmaWriteToRemote; callers prefer that function.
     bool rdmaWrite(const RDMARegion* src, uint64_t remoteAddr,
                    uint32_t rkey, size_t size);
 
     // Spin-poll the completion queue for up to timeoutMs milliseconds.
-    // Returns the number of bytes transferred (size from the WR), or 0 on timeout/error.
+    // Returns bytes transferred (size of the last posted WR), or 0 on error/timeout.
     size_t pollCompletion(int timeoutMs = 5000);
 
-    bool isConnected() const { return connected_; }
+    bool   isConnected()    const { return connected_;   }
+    void*  bounceBuf()      const { return bouncePtr_;   }
+    size_t bounceCapacity() const { return bounceSize_;  }
 
 private:
 #ifdef VGRE_HAS_RDMA
@@ -126,6 +139,24 @@ private:
     ibv_qp*  qp_  = nullptr;
     ibv_cq*  cq_  = nullptr;    // borrowed from RDMAContext
     uint32_t psn_ = 0;
+
+    // Bounce buffer: pre-registered MR that the remote peer RDMA-WRITEs into.
+    // Allocated and registered in connect(); freed in ~RDMAConnection.
+    RDMAContext* ctxPtr_     = nullptr;  // borrowed reference for deregistration
+    void*        bouncePtr_  = nullptr;
+    size_t       bounceSize_ = 0;
+    RDMARegion*  bounceMR_   = nullptr;
+
+    // Remote peer's bounce buffer info (received during QP info exchange).
+    uint64_t     remoteAddr_ = 0;
+    uint32_t     remoteRkey_ = 0;
+
+    // Serialize RDMA writes to the remote bounce buffer — prevents two
+    // concurrent rdmaWriteToRemote() calls from corrupting each other.
+    std::mutex   writeMtx_;
+#else
+    void*  bouncePtr_  = nullptr;
+    size_t bounceSize_ = 0;
 #endif
     bool     connected_  = false;
     size_t   lastWRSize_ = 0;   // size of the last posted WR (for pollCompletion)

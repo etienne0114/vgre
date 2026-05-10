@@ -119,10 +119,14 @@ private:
     std::atomic<bool> stop_proactive_{false};
 
     // Async handshake threads spawned by proactiveConnectionLoop.
-    // Tracked here so stopAll() can join them before returning, preventing
-    // the threads from accessing a destroyed TCPClusterManager via parent_.
+    // Each entry carries a done-flag the thread sets on completion so
+    // proactiveConnectionLoop can reap finished threads without sleeping.
+    struct AuthEntry {
+      std::thread t;
+      std::shared_ptr<std::atomic<bool>> done;
+    };
     std::mutex auth_threads_mutex_;
-    std::vector<std::thread> auth_threads_;
+    std::vector<AuthEntry> auth_threads_;
 
     // Thread loop methods (moved from TCPClusterManager)
     void udpAnnouncerLoop();

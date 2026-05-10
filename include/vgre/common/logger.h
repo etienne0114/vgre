@@ -128,7 +128,7 @@ private:
 
   static constexpr size_t kMaxBuffered = 4096;
 
-  std::atomic<LogLevel> minLevel_{LogLevel::INFO};
+  std::atomic<LogLevel> minLevel_{LogLevel::NONE};
   mutable std::recursive_mutex mutex_;
   std::deque<std::string> logBuffer_;
   std::ofstream fileOut_;

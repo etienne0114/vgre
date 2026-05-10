@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <cstring>
 
 namespace vgre {
 namespace runtime {
@@ -34,16 +35,19 @@ struct SIMDCapabilities {
 typedef uint16_t vgre_bf16;
 
 inline float bf16_to_fp32(vgre_bf16 h) {
-    uint32_t f = static_cast<uint32_t>(h) << 16;
-    return *reinterpret_cast<float*>(&f);
+    uint32_t u = static_cast<uint32_t>(h) << 16;
+    float f = 0.0f;
+    std::memcpy(&f, &u, sizeof(f));
+    return f;
 }
 
 inline vgre_bf16 fp32_to_bf16(float f) {
-    uint32_t i = *reinterpret_cast<uint32_t*>(&f);
+    uint32_t u = 0;
+    std::memcpy(&u, &f, sizeof(u));
     // Round-to-nearest-even tie-break
-    uint32_t lsb = (i >> 16) & 1;
+    uint32_t lsb = (u >> 16) & 1;
     uint32_t bias = 0x7FFF + lsb;
-    return static_cast<vgre_bf16>((i + bias) >> 16);
+    return static_cast<vgre_bf16>((u + bias) >> 16);
 }
 
 // ── Vector Engine ──────────────────────────────────────────────────────────
