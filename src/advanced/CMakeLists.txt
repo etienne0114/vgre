@@ -6,19 +6,49 @@ add_library(vgre_advanced OBJECT
     runtime_profiler.cpp
     vgre_workload_engine.cpp
     ipc_manager.cpp
-    tcp_cluster.cpp
     tcp_cluster/tcp_cluster_manager.cpp
+    tcp_cluster/tcp_cluster_init.cpp
+    tcp_cluster/tcp_cluster_shutdown.cpp
+    tcp_cluster/tcp_cluster_state.cpp
+    tcp_cluster/tcp_cluster_telemetry.cpp
+    tcp_cluster/tcp_cluster_restart.cpp
+    tcp_cluster/tcp_cluster_metrics.cpp
+    tcp_cluster/tcp_cluster_transport.cpp
+    tcp_cluster/configuration_manager_core.cpp
+    tcp_cluster/configuration_manager_file_io.cpp
+    tcp_cluster/configuration_manager_backup.cpp
+    tcp_cluster/configuration_manager_monitoring.cpp
+    tcp_cluster/configuration_manager_validation.cpp
+    tcp_cluster/configuration_manager_documentation.cpp
     tcp_cluster/connection_manager.cpp
     tcp_cluster/discovery_manager.cpp
-    tcp_cluster/discovery_loops.cpp
+    tcp_cluster/discovery_loops_udp.cpp
+    tcp_cluster/discovery_loops_proactive.cpp
     tcp_cluster/packet_handler.cpp
     tcp_cluster/security_manager.cpp
     tcp_cluster/memory_sync_manager.cpp
     tcp_cluster/collective_ops_manager.cpp
-    tcp_cluster/dispatch_manager.cpp
+    tcp_cluster/dispatch_manager_core.cpp
+    tcp_cluster/dispatch_manager_remote.cpp
+    tcp_cluster/dispatch_manager_partitioned.cpp
     tcp_cluster/dispatch_impl.cpp
-    tcp_cluster/server_loop.cpp
+    tcp_cluster/server_loop_core.cpp
+    tcp_cluster/server_loop_auth_mgmt.cpp
+    tcp_cluster/server_loop_connection_handling.cpp
+    tcp_cluster/server_loop_data_handling.cpp
+    tcp_cluster/server_packet_dispatch.cpp
     tcp_cluster/client_loop.cpp
+    tcp_cluster/client_packet_dispatch.cpp
+    tcp_cluster/windows_socket_manager_lifecycle.cpp
+    tcp_cluster/windows_socket_manager_errors.cpp
+    tcp_cluster/windows_socket_manager_recovery.cpp
+    tcp_cluster/interfaces.cpp
+    tcp_cluster/shared_utilities_base.cpp
+    tcp_cluster/shared_utilities_network_crypto.cpp
+    tcp_cluster/shared_utilities_packets.cpp
+    tcp_cluster/diagnostic_logger.cpp
+    tcp_cluster/mesh_topology_impl.cpp
+    tcp_cluster/tcp_cluster_validation.cpp
     secure_channel_crypto.cpp
     secure_channel.cpp
     gpu_passthrough.cpp

@@ -51,7 +51,19 @@ IPCManager &IPCManager::instance() {
 
 IPCManager::IPCManager() = default;
 
-IPCManager::~IPCManager() { shutdown(); }
+IPCManager::~IPCManager() {
+  // Skip shutdown during static destruction to prevent deadlock
+  // In test environments, the destruction order of singletons can cause hangs
+  // The OS will reclaim resources when the process exits
+  if (!enabled_) return;
+  
+  // Try shutdown with timeout
+  auto future = std::async(std::launch::async, [this]() { shutdown(); });
+  if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+    // Timeout - skip shutdown to prevent hang
+    VGRE_LOG_WARN("IPCManager", "Shutdown timeout during destruction - skipping");
+  }
+}
 
 bool IPCManager::initialize(bool isMaster) {
   std::unique_lock<std::recursive_mutex> lock(mutex_);

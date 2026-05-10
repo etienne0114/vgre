@@ -1,0 +1,81 @@
+/**
+ * Windows Socket Manager - Recovery and Diagnostics
+ * 
+ * Provides mechanisms for Winsock recovery and failure diagnostics.
+ */
+
+#include "vgre/advanced/tcp_cluster/internal/windows_socket_manager.h"
+#include "vgre/common/logger.h"
+#include <thread>
+#include <chrono>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
+namespace vgre {
+namespace advanced {
+
+#ifdef _WIN32
+
+VGREResult WindowsSocketManager::attemptRecovery(int max_retries) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (initialized_) { WSACleanup(); initialized_ = false; }
+    ref_count_ = 0;
+
+    for (int attempt = 1; attempt <= max_retries; ++attempt) {
+        if (attempt > 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100 * (1 << (attempt - 2))));
+        }
+        int result = WSAStartup(MAKEWORD(2, 2), &wsa_data_);
+        if (result == 0) {
+            initialized_ = true;
+            ref_count_ = 1;
+            return VGREResult::SUCCESS;
+        }
+    }
+    return VGREResult::ERR_IO;
+}
+
+std::string WindowsSocketManager::getWSAStartupDiagnostics(int error_code) {
+    switch (error_code) {
+        case WSASYSNOTREADY: return "Network subsystem not ready";
+        case WSAVERNOTSUPPORTED: return "Winsock version not supported";
+        case WSAEINPROGRESS: return "Blocking Winsock operation in progress";
+        case WSAEPROCLIM: return "Process limit reached";
+        default: return "Unknown WSAStartup error " + std::to_string(error_code);
+    }
+}
+
+bool WindowsSocketManager::needsReinitialization() {
+    if (!initialized_.load()) return true;
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return true;
+    closesocket(s);
+    return false;
+}
+
+VGREResult WindowsSocketManager::forceReinitialize() {
+    return attemptRecovery(5);
+}
+
+VGREResult WindowsSocketManager::validateWinsockFunctionality() {
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return VGREResult::ERR_PLATFORM_SPECIFIC;
+    closesocket(s);
+    return VGREResult::SUCCESS;
+}
+
+#else
+
+VGREResult WindowsSocketManager::attemptRecovery(int max_retries) { return VGREResult::SUCCESS; }
+std::string WindowsSocketManager::getWSAStartupDiagnostics(int error_code) { return "N/A"; }
+bool WindowsSocketManager::needsReinitialization() { return false; }
+VGREResult WindowsSocketManager::forceReinitialize() { return VGREResult::SUCCESS; }
+VGREResult WindowsSocketManager::validateWinsockFunctionality() { return VGREResult::SUCCESS; }
+
+#endif
+
+} // namespace advanced
+} // namespace vgre

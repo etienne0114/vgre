@@ -10,6 +10,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
+#include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include <algorithm>
 #include <cstring>
 
@@ -26,85 +27,6 @@ ConnectionManager::ConnectionManager(TCPClusterManager* parent)
   if (!parent_) {
     VGRE_LOG_ERROR("ConnectionManager", "Parent TCPClusterManager is null");
   }
-}
-
-VGREResult ConnectionManager::acceptConnection(vgre_socket_t server_fd) {
-  if (server_fd == VGRE_INVALID_SOCKET) {
-    return VGREResult::ERR_INVALID_VALUE;
-  }
-  
-  struct sockaddr_in address;
-  socklen_t addrlen = sizeof(address);
-  vgre_socket_t new_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
-  
-  if (new_socket == VGRE_INVALID_SOCKET) {
-    return VGREResult::ERR_IO;
-  }
-  
-  char ipstr[INET_ADDRSTRLEN];
-  inet_ntop(AF_INET, &(address.sin_addr), ipstr, sizeof(ipstr));
-  std::string ip_address(ipstr);
-  
-  // Configure socket
-  vgre::common::vgre_set_nosigpipe(new_socket); // suppress SIGPIPE on macOS
-  vgre::common::vgre_ioctl_nonblock(new_socket);
-  vgre::common::vgre_set_tcp_keepalive(new_socket, 5, 2, 3);
-  
-  // Add client if not duplicate
-  if (!addClientIfNotDuplicate(ip_address, new_socket, address)) {
-    // Duplicate detected, socket already closed by addClientIfNotDuplicate
-    return VGREResult::ERR_ALREADY_EXISTS;
-  }
-  
-  VGRE_LOG_INFO("ConnectionManager", 
-      "Accepted new connection from " + ip_address + ":" + 
-      std::to_string(ntohs(address.sin_port)));
-  
-  return VGREResult::SUCCESS;
-}
-
-VGREResult ConnectionManager::connectToMaster(const std::string& host, int port) {
-  if (host.empty() || port <= 0) {
-    return VGREResult::ERR_INVALID_VALUE;
-  }
-  
-  vgre_socket_t client_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (client_fd == VGRE_INVALID_SOCKET) {
-    VGRE_LOG_ERROR("ConnectionManager", "Failed to create client socket");
-    return VGREResult::ERR_IO;
-  }
-  vgre::common::vgre_set_nosigpipe(client_fd); // suppress SIGPIPE on macOS
-  
-  struct sockaddr_in serv_addr;
-  serv_addr.sin_family = AF_INET;
-  serv_addr.sin_port = htons(port);
-  
-  if (inet_pton(AF_INET, host.c_str(), &serv_addr.sin_addr) <= 0) {
-    VGRE_LOG_ERROR("ConnectionManager", 
-        "Invalid address or not supported: " + host);
-    vgre::common::vgre_close_socket(client_fd);
-    return VGREResult::ERR_INVALID_VALUE;
-  }
-  
-  if (connect(client_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
-    VGRE_LOG_DEBUG("ConnectionManager", 
-        "Connection failed to " + host + ":" + std::to_string(port));
-    vgre::common::vgre_close_socket(client_fd);
-    return VGREResult::ERR_IO;
-  }
-  
-  // Set non-blocking
-  vgre::common::vgre_ioctl_nonblock(client_fd);
-
-  // Store the connected fd in the parent so clientLoop() can use it.
-  {
-    std::lock_guard<std::mutex> lock(parent_->client_mutex_);
-    parent_->client_fd_ = client_fd;
-  }
-
-  VGRE_LOG_INFO("ConnectionManager",
-      "Connected to master node at " + host + ":" + std::to_string(port));
-  return VGREResult::SUCCESS;
 }
 
 void ConnectionManager::closeConnection(

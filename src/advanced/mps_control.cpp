@@ -11,6 +11,9 @@
 
 #include "vgre/advanced/mps_control.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/types.h"
+#include "vgre/core/memory_manager.h"
+#include "vgre/core/runtime_engine.h"
 
 #include <atomic>
 #include <cstring>
@@ -41,11 +44,13 @@ static std::atomic<uint64_t>   g_nextPtr{0x10000000ULL}; // fake device base
 static std::unordered_map<uint64_t, void*> g_allocMap;
 
 static uint64_t mpsAlloc(uint64_t bytes) {
-    void* p = malloc(static_cast<size_t>(bytes));
-    if (!p) return 0;
-    uint64_t handle = g_nextPtr.fetch_add(bytes, std::memory_order_relaxed);
+    vgre::MemoryHandle h = nullptr;
+    if (vgre::core::MemoryManager::instance().allocate(bytes, h) != vgre::VGREResult::SUCCESS) {
+        return 0;
+    }
+    uint64_t handle = reinterpret_cast<uint64_t>(h);
     std::lock_guard<std::mutex> lk(g_allocMu);
-    g_allocMap[handle] = p;
+    g_allocMap[handle] = h;
     return handle;
 }
 
@@ -53,7 +58,7 @@ static bool mpsFree(uint64_t handle) {
     std::lock_guard<std::mutex> lk(g_allocMu);
     auto it = g_allocMap.find(handle);
     if (it == g_allocMap.end()) return false;
-    free(it->second);
+    vgre::core::MemoryManager::instance().free(it->second);
     g_allocMap.erase(it);
     return true;
 }
@@ -247,23 +252,49 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
 
         case MPSMsgType::LAUNCH_KERNEL: {
             MPSLaunchReq req{};
-            readAll(fd, &req, sizeof(req));
-            uint32_t nameLen = hdr.payloadLen - sizeof(MPSLaunchReq);
-            std::string kernelName(nameLen, '\0');
-            if (nameLen > 0)
-                readAll(fd, kernelName.data(), nameLen);
-            // RuntimeEngine kernel launch would go here; for now log and acknowledge.
-            VGRE_LOG_DEBUG("MPS",
-                "Kernel launch: " + kernelName +
-                " grid=(" + std::to_string(req.gridX)  + "," +
-                             std::to_string(req.gridY)  + "," +
-                             std::to_string(req.gridZ)  + ")" +
-                " block=(" + std::to_string(req.blockX) + "," +
-                              std::to_string(req.blockY) + "," +
-                              std::to_string(req.blockZ) + ")");
-            MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::LAUNCH_RESP),
-                          sizeof(MPSLaunchResp) };
-            MPSLaunchResp rsp{ 0 };
+            if (!readAll(fd, &req, sizeof(req))) break;
+
+            // Read kernel name (it's the first part of the payload after req)
+            // We need to know the name length. Let's assume the name is null-terminated 
+            // and followed by arguments, or we use a fixed length.
+            // Actually, let's look at how we send it in MPSClient.
+            
+            // For now, let's parse the rest of the payload.
+            uint32_t remainingPayload = hdr.payloadLen - sizeof(MPSLaunchReq);
+            std::vector<uint8_t> payload(remainingPayload);
+            if (remainingPayload > 0 && !readAll(fd, payload.data(), remainingPayload)) break;
+
+            const char* kernelName = reinterpret_cast<const char*>(payload.data());
+            size_t nameLen = strlen(kernelName) + 1;
+            
+            // Reconstruct arguments
+            std::vector<void*> args;
+            std::vector<std::vector<uint8_t>> argDataBuffers;
+            
+            uint8_t* pArgs = payload.data() + nameLen;
+            for (uint32_t i = 0; i < req.numArgs; ++i) {
+                uint8_t type = *pArgs++;
+                uint32_t size = *reinterpret_cast<uint32_t*>(pArgs); pArgs += 4;
+                
+                std::vector<uint8_t> argBuf(size);
+                memcpy(argBuf.data(), pArgs, size);
+                pArgs += size;
+                
+                argDataBuffers.push_back(std::move(argBuf));
+                args.push_back(argDataBuffers.back().data());
+            }
+
+            auto& engine = vgre::core::RuntimeEngine::instance();
+            vgre::VGREResult rc = engine.launchKernel(kernelName, "",
+                {req.gridX, req.gridY, req.gridZ},
+                {req.blockX, req.blockY, req.blockZ},
+                args.empty() ? nullptr : args.data(),
+                req.sharedMemBytes);
+
+            VGRE_LOG_DEBUG("MPS", "Launched kernel '" + std::string(kernelName) + "' via MPS. Result=" + std::to_string(static_cast<int>(rc)));
+
+            MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::LAUNCH_RESP), sizeof(MPSLaunchResp) };
+            MPSLaunchResp rsp{ rc == vgre::VGREResult::SUCCESS ? 0u : 1u };
             writeAll(fd, &rh, sizeof(rh));
             writeAll(fd, &rsp, sizeof(rsp));
             break;
@@ -433,15 +464,35 @@ bool MPSClient::memcpyD2H(void* hostDst, uint64_t devPtr, uint64_t bytes) {
 bool MPSClient::launchKernel(const char* name,
                               uint32_t gx, uint32_t gy, uint32_t gz,
                               uint32_t bx, uint32_t by, uint32_t bz,
-                              uint64_t sharedMem) {
+                              uint64_t sharedMem,
+                              void** args, int numArgs) {
     if (fd_ < 0) return false;
-    MPSLaunchReq req{ gx, gy, gz, bx, by, bz, sharedMem };
-    uint32_t nameLen = static_cast<uint32_t>(std::strlen(name));
-    MPSHeader h{ static_cast<uint32_t>(MPSMsgType::LAUNCH_KERNEL),
-                 static_cast<uint32_t>(sizeof(req) + nameLen) };
+    
+    // 1. Prepare argument payload
+    // In CUDA, we don't have sizes, but VGRE's launchKernel (the one called on server)
+    // takes void** and uses KernelIR. 
+    // For the wire protocol, we'll assume 8-byte arguments (standard for pointers/scalars).
+    std::vector<uint8_t> argPayload;
+    for (int i = 0; i < numArgs; ++i) {
+        argPayload.push_back(0); // type (ArgType::POINTER/STRUCT default)
+        uint32_t sz = 8;
+        uint8_t* psz = reinterpret_cast<uint8_t*>(&sz);
+        argPayload.insert(argPayload.end(), psz, psz + 4);
+        uint8_t* pval = reinterpret_cast<uint8_t*>(args[i]);
+        argPayload.insert(argPayload.end(), pval, pval + 8);
+    }
+
+    MPSLaunchReq req{ gx, gy, gz, bx, by, bz, sharedMem, static_cast<uint32_t>(numArgs) };
+    uint32_t nameLen = static_cast<uint32_t>(std::strlen(name)) + 1; // include null-terminator
+    
+    uint32_t totalPayloadLen = sizeof(req) + nameLen + static_cast<uint32_t>(argPayload.size());
+    MPSHeader h{ static_cast<uint32_t>(MPSMsgType::LAUNCH_KERNEL), totalPayloadLen };
+    
     if (!writeAll(fd_, &h, sizeof(h))) return false;
     if (!writeAll(fd_, &req, sizeof(req))) return false;
-    if (nameLen > 0 && !writeAll(fd_, name, nameLen)) return false;
+    if (!writeAll(fd_, name, nameLen)) return false;
+    if (!argPayload.empty() && !writeAll(fd_, argPayload.data(), argPayload.size())) return false;
+    
     MPSHeader rh{};
     MPSLaunchResp rsp{};
     return recvHeader(rh) && recvBytes(&rsp, sizeof(rsp)) && rsp.status == 0;

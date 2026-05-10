@@ -5,10 +5,28 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
-#include <ctime>
+#include <random>
 
 #ifdef VGRE_HAS_RDMA
 #include <infiniband/verbs.h>
+#include <sys/mman.h>   // mmap, munmap
+
+namespace {
+// Bounce buffer size: controls the maximum single RDMA transfer size.
+// Configurable via VGRE_RDMA_BOUNCE_SIZE (bytes). Default 256 MB.
+size_t getRdmaBounceBufSize() {
+    const char* env = std::getenv("VGRE_RDMA_BOUNCE_SIZE");
+    if (env) {
+        try {
+            long long v = std::stoll(env);
+            // Minimum 4 MB, maximum 4 GB (practical NIC limit)
+            if (v >= 4 * 1024 * 1024LL && v <= 4LL * 1024 * 1024 * 1024LL)
+                return static_cast<size_t>(v);
+        } catch (...) {}
+    }
+    return 256ULL * 1024 * 1024;  // 256 MB
+}
+} // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: serialize / deserialize RDMAQPInfo over the SecureChannel
@@ -137,6 +155,8 @@ void RDMAContext::deregisterMemory(RDMARegion* region) {
 
 RDMAConnection::~RDMAConnection() {
     if (qp_) { ibv_destroy_qp(qp_); qp_ = nullptr; }
+    if (bounceMR_ && ctxPtr_) { ctxPtr_->deregisterMemory(bounceMR_); bounceMR_ = nullptr; }
+    if (bouncePtr_) { munmap(bouncePtr_, bounceSize_); bouncePtr_ = nullptr; bounceSize_ = 0; }
 }
 
 bool RDMAConnection::createQP(RDMAContext& ctx) {
@@ -156,9 +176,9 @@ bool RDMAConnection::createQP(RDMAContext& ctx) {
         VGRE_LOG_ERROR("RDMATransport", "ibv_create_qp failed");
         return false;
     }
-    // Generate random PSN
-    std::srand(static_cast<unsigned>(std::time(nullptr)));
-    psn_ = static_cast<uint32_t>(std::rand()) & 0xFFFFFF;
+    // Cryptographically-seeded PSN — std::random_device uses /dev/urandom on Linux
+    std::random_device rd;
+    psn_ = rd() & 0xFFFFFF;
     return true;
 }
 
@@ -236,7 +256,30 @@ bool RDMAConnection::connect(SecureChannel& ctrl, RDMAContext& ctx) {
     if (!createQP(ctx))      return false;
     if (!transitionToInit()) return false;
 
-    // Query local port info for LID and GID
+    // ── Allocate and register bounce buffer ──────────────────────────────────
+    // The bounce buffer is a large pre-pinned anonymous memory region that the
+    // remote peer RDMA-WRITEs directly into. Its rkey and virtual address are
+    // included in the QP info exchange so the remote knows where to write.
+    const size_t bsz = getRdmaBounceBufSize();
+    void* bptr = mmap(nullptr, bsz, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (bptr == MAP_FAILED) {
+        VGRE_LOG_ERROR("RDMATransport",
+                       "mmap failed for " + std::to_string(bsz) + "-byte bounce buffer");
+        return false;
+    }
+    RDMARegion* bmr = ctx.registerMemory(bptr, bsz);
+    if (!bmr) {
+        munmap(bptr, bsz);
+        VGRE_LOG_ERROR("RDMATransport", "ibv_reg_mr failed for bounce buffer");
+        return false;
+    }
+    bouncePtr_  = bptr;
+    bounceSize_ = bsz;
+    bounceMR_   = bmr;
+    ctxPtr_     = &ctx;
+
+    // ── Query local port info for LID and GID ────────────────────────────────
     ibv_port_attr portAttr{};
     if (ibv_query_port(ctx.ctx(), 1, &portAttr) != 0) {
         VGRE_LOG_ERROR("RDMATransport", "ibv_query_port failed");
@@ -244,13 +287,16 @@ bool RDMAConnection::connect(SecureChannel& ctrl, RDMAContext& ctx) {
     }
 
     RDMAQPInfo local{};
-    local.lid = portAttr.lid;
-    local.qpn = qp_->qp_num;
-    local.psn = psn_;
+    local.lid        = portAttr.lid;
+    local.qpn        = qp_->qp_num;
+    local.psn        = psn_;
+    local.rkey       = bounceMR_->rkey;
+    local.remoteAddr = reinterpret_cast<uint64_t>(bouncePtr_);
     queryGID(ctx.ctx(), 1, local.gid);
 
-    // Exchange QP info over the existing authenticated TCP/SecureChannel.
-    // Both sides send first, then receive, to avoid deadlock.
+    // Exchange QP info (including bounce buffer rkey/addr) over the existing
+    // authenticated TCP/SecureChannel. Both sides send first, then receive,
+    // to avoid a deadlock when both peers call connect() simultaneously.
     if (!sendQPInfo(ctrl, local)) {
         VGRE_LOG_ERROR("RDMATransport", "Failed to send local QP info");
         return false;
@@ -262,13 +308,18 @@ bool RDMAConnection::connect(SecureChannel& ctrl, RDMAContext& ctx) {
         return false;
     }
 
+    // Store the remote peer's bounce buffer so rdmaWriteToRemote can write into it.
+    remoteAddr_ = remote.remoteAddr;
+    remoteRkey_ = remote.rkey;
+
     if (!transitionToRTR(remote)) return false;
     if (!transitionToRTS())       return false;
 
     connected_ = true;
     VGRE_LOG_INFO("RDMATransport",
                   "QP connected: local qpn=" + std::to_string(local.qpn) +
-                  " remote qpn=" + std::to_string(remote.qpn));
+                  " remote qpn=" + std::to_string(remote.qpn) +
+                  " bounce=" + std::to_string(bsz / (1024*1024)) + " MB");
     return true;
 }
 
@@ -330,12 +381,58 @@ size_t RDMAConnection::pollCompletion(int timeoutMs) {
     return 0;
 }
 
+bool RDMAConnection::rdmaWriteToRemote(RDMAContext& ctx, const void* src, size_t size) {
+    if (!connected_ || remoteAddr_ == 0 || remoteRkey_ == 0 || !src || size == 0)
+        return false;
+
+    if (size > bounceSize_) {
+        VGRE_LOG_WARN("RDMATransport",
+                      "rdmaWriteToRemote: size " + std::to_string(size) +
+                      " exceeds remote bounce capacity " + std::to_string(bounceSize_) +
+                      " — falling back to TCP");
+        return false;
+    }
+
+    // One RDMA write at a time — prevents concurrent calls from overlapping
+    // writes into the same remote bounce buffer region.
+    std::lock_guard<std::mutex> lk(writeMtx_);
+
+    // Register the source buffer for this transfer.
+    // ibv_reg_mr pins the pages and gives the NIC DMA access; ibv_dereg_mr
+    // unpins them. This is intentionally per-call for correctness — caching
+    // MRs across calls would require tracking buffer lifetimes.
+    RDMARegion* srcMR = ctx.registerMemory(const_cast<void*>(src), size);
+    if (!srcMR) {
+        VGRE_LOG_ERROR("RDMATransport",
+                       "rdmaWriteToRemote: ibv_reg_mr failed for " +
+                       std::to_string(size) + " bytes");
+        return false;
+    }
+
+    // Post RDMA WRITE WR: write srcMR → remote bounce buffer at base address.
+    bool ok = rdmaWrite(srcMR, remoteAddr_, remoteRkey_, size);
+    if (ok) {
+        size_t transferred = pollCompletion(5000);
+        ok = (transferred == size);
+        if (!ok) {
+            VGRE_LOG_ERROR("RDMATransport",
+                           "rdmaWriteToRemote: completion poll returned " +
+                           std::to_string(transferred) + " expected " +
+                           std::to_string(size));
+        }
+    }
+
+    ctx.deregisterMemory(srcMR);
+    return ok;
+}
+
 } // namespace advanced
 } // namespace vgre
 
 #else // !VGRE_HAS_RDMA ─────────────────────────────────────────────────────────
-// Stub implementations when RDMA is not compiled in.
-// RDMAContext::tryCreate() always returns nullptr; all other methods are no-ops.
+// Fallback implementations when RDMA support is not compiled in.
+// RDMAContext::tryCreate() returns nullptr; all operations are no-ops that
+// return false/nullptr so callers transparently fall back to TCP.
 
 namespace vgre {
 namespace advanced {
@@ -352,9 +449,10 @@ RDMARegion* RDMAContext::registerMemory(void*, size_t)   { return nullptr; }
 void        RDMAContext::deregisterMemory(RDMARegion* r)  { delete r; }
 
 RDMAConnection::~RDMAConnection() {}
-bool   RDMAConnection::connect(SecureChannel&, RDMAContext&) { return false; }
-bool   RDMAConnection::rdmaWrite(const RDMARegion*, uint64_t, uint32_t, size_t) { return false; }
-size_t RDMAConnection::pollCompletion(int) { return 0; }
+bool   RDMAConnection::connect(SecureChannel&, RDMAContext&)                      { return false; }
+bool   RDMAConnection::rdmaWrite(const RDMARegion*, uint64_t, uint32_t, size_t)   { return false; }
+bool   RDMAConnection::rdmaWriteToRemote(RDMAContext&, const void*, size_t)       { return false; }
+size_t RDMAConnection::pollCompletion(int)                                        { return 0; }
 
 } // namespace advanced
 } // namespace vgre

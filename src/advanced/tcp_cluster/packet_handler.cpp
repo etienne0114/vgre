@@ -3,6 +3,7 @@
 #include "vgre/common/logger.h"
 #include "vgre/common/input_validation.h"
 #include "vgre/common/sockets.h"
+#include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include <cstring>
 #include <algorithm>
 
@@ -20,21 +21,8 @@ PacketHandler::PacketHandler() {}
 
 // ── Unified Packet Construction ──────────────────────────────────────────
 std::vector<uint8_t> PacketHandler::constructPacket(PacketType type, const void* payload, size_t payloadLen) {
-  size_t totalLen = sizeof(VSBPHeader) + payloadLen;
-  std::vector<uint8_t> packet(totalLen);
-  
-  VSBPHeader* header = reinterpret_cast<VSBPHeader*>(packet.data());
-  header->magic = VSBP_MAGIC;
-  header->version = VSBP_VERSION;
-  header->type = static_cast<uint16_t>(type);
-  header->sequence = sequence_counter_.fetch_add(1, std::memory_order_relaxed);
-  header->payloadSize = payloadLen;
-  
-  if (payload && payloadLen > 0) {
-    std::memcpy(packet.data() + sizeof(VSBPHeader), payload, payloadLen);
-  }
-  
-  return packet;
+  uint32_t seq = sequence_counter_.fetch_add(1, std::memory_order_relaxed);
+  return PacketUtils::constructVSBPPacket(type, payload, payloadLen, seq);
 }
 
 // ── Packet Sending (Queued) ──────────────────────────────────────────────
@@ -135,15 +123,13 @@ int PacketHandler::recvPacket(vgre_socket_t fd, std::vector<uint8_t>& outBuffer,
 bool PacketHandler::parseVSBPHeader(const uint8_t* data, size_t dataSize, 
                                     VSBPHeader& header) {
   // Validate input
-  if (!data || dataSize < sizeof(VSBPHeader)) {
-    return false;
-  }
+  if (!data || dataSize < sizeof(VSBPHeader)) return false;
 
   // Copy header
   std::memcpy(&header, data, sizeof(VSBPHeader));
 
-  // Validate magic and version
-  if (header.magic != VSBP_MAGIC || header.version != VSBP_VERSION) {
+  // Use shared validation logic
+  if (!PacketUtils::validateVSBPHeader(header)) {
     VGRE_LOG_ERROR("PacketHandler", 
                    "VSBP protocol violation: invalid magic (0x" + 
                    std::to_string(header.magic) + ") or version (" + 
