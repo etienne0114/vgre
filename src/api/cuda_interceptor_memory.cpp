@@ -181,13 +181,14 @@ cudaError_t CUDAInterceptor::memcpyAsync(void *dst, const void *src,
     }
   },
       priority);
-  if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-    auto r = fut.get();
-    cudaError_t err = convertResult(r);
+  if (fut.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+    VGRE_LOG_WARN("CUDAInterceptor", "memcpyAsync task timeout - executing synchronously");
+    auto err = this->memcpy(dst, src, count, kind);
     return err;
   }
-
-  return cudaSuccess;
+  auto r = fut.get();
+  cudaError_t err = convertResult(r);
+  return err;
 }
 
 cudaError_t CUDAInterceptor::memcpy2D(void *dst, size_t dpitch,

@@ -62,6 +62,7 @@ extern "C" {
   void vgre_jit_report_memory(uint64_t);
   void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
   void vgre_jit_syncgrid();
+  bool vgre_jit_in_threaded_context();
 
   // CDP (Dynamic Parallelism) — implemented in cdp_executor.cpp
   void* vgre_cdp_get_param_buffer(size_t bytes);
@@ -93,6 +94,7 @@ extern "C" {
   VGRE_PUBLIC_API vgre::dim3* vgre_jit_get_gridDim() { return (vgre::dim3*)&t_gridDim; }
   VGRE_PUBLIC_API void** vgre_jit_get_sharedMem() { return &t_sharedMem; }
   VGRE_PUBLIC_API void** vgre_jit_get_warp_buffer() { return &t_warpBuffer; }
+  VGRE_PUBLIC_API void vgre_jit_set_shared_mem(void* smem) { t_sharedMem = smem; }
 }
 
 namespace vgre {
@@ -192,6 +194,10 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
     };
     Symbols[Mangle("vgre_jit_block_barrier_sync")] = {
         llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_block_barrier_sync)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_in_threaded_context")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_in_threaded_context)),
         llvm::JITSymbolFlags::Exported
     };
     Symbols[Mangle("vgre_jit_report_flops")] = {

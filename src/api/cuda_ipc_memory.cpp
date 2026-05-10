@@ -51,9 +51,22 @@ struct OpenedRegion {
     size_t size     = 0;
 };
 
-static std::mutex            g_ipcMutex;
-static std::atomic<uint64_t> g_ipcCounter{1};
-static std::unordered_map<void*, OpenedRegion> g_opened; // key = returned devPtr
+// Use function-local static initialization to prevent blocking during library load
+// This ensures the mutex and map are only initialized when first used
+std::mutex& getIPCMutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+std::atomic<uint64_t>& getIPCCounter() {
+    static std::atomic<uint64_t> counter{1};
+    return counter;
+}
+
+std::unordered_map<void*, OpenedRegion>& getOpenedRegions() {
+    static std::unordered_map<void*, OpenedRegion> opened;
+    return opened;
+}
 } // namespace
 
 // ── C API ─────────────────────────────────────────────────────────────────────
@@ -74,7 +87,7 @@ int cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle, void* devPtr) {
 
     // Create or reuse a POSIX SHM segment named after the address.
     // Name pattern: /vgre_ipc_<pid>_<counter>
-    uint64_t cnt = g_ipcCounter.fetch_add(1, std::memory_order_relaxed);
+    uint64_t cnt = getIPCCounter().fetch_add(1, std::memory_order_relaxed);
     char shmName[kShmNameMax];
     std::snprintf(shmName, sizeof(shmName), "/vgre_ipc_%llu",
                   (unsigned long long)cnt);
@@ -91,8 +104,8 @@ int cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle, void* devPtr) {
 
     // Store the opened region so we can sync back on close.
     {
-        std::lock_guard<std::mutex> lk(g_ipcMutex);
-        g_opened[devPtr] = {shm, shm->getBasePtr(), size};
+        std::lock_guard<std::mutex> lk(getIPCMutex());
+        getOpenedRegions()[devPtr] = {shm, shm->getBasePtr(), size};
     }
 
     // Write handle
@@ -131,8 +144,8 @@ int cudaIpcOpenMemHandle(void** devPtr, cudaIpcMemHandle_t handle, unsigned int 
 
     void* ptr = shm->getBasePtr();
     {
-        std::lock_guard<std::mutex> lk(g_ipcMutex);
-        g_opened[ptr] = {shm, ptr, static_cast<size_t>(h.size)};
+        std::lock_guard<std::mutex> lk(getIPCMutex());
+        getOpenedRegions()[ptr] = {shm, ptr, static_cast<size_t>(h.size)};
     }
     *devPtr = ptr;
 
@@ -143,11 +156,11 @@ int cudaIpcOpenMemHandle(void** devPtr, cudaIpcMemHandle_t handle, unsigned int 
 
 // cudaIpcCloseMemHandle: unmap an imported handle.
 int cudaIpcCloseMemHandle(void* devPtr) {
-    std::lock_guard<std::mutex> lk(g_ipcMutex);
-    auto it = g_opened.find(devPtr);
-    if (it == g_opened.end()) return 1;
+    std::lock_guard<std::mutex> lk(getIPCMutex());
+    auto it = getOpenedRegions().find(devPtr);
+    if (it == getOpenedRegions().end()) return 1;
     // ShmManager destructor closes the mapping when shared_ptr refcount drops.
-    g_opened.erase(it);
+    getOpenedRegions().erase(it);
     VGRE_LOG_DEBUG("cudaIPC", "IPC handle closed");
     return 0;
 }
@@ -169,14 +182,22 @@ static_assert(sizeof(EventIPCHandle) == 64, "event IPC handle must be 64 bytes")
 
 struct EventIPCHandle_st { char reserved[64]; };
 
-static std::atomic<uint64_t> g_eventIpcCounter{1};
-// Map exported eventId → ShmManager holding a 4-byte flag (1=signalled, 0=not)
-static std::unordered_map<uint64_t, std::shared_ptr<vgre::core::ShmManager>> g_eventShm;
+// Use function-local static initialization to prevent blocking during library load
+// This ensures the counter and map are only initialized when first used
+std::atomic<uint64_t>& getEventIPCCounter() {
+    static std::atomic<uint64_t> counter{1};
+    return counter;
+}
+
+std::unordered_map<uint64_t, std::shared_ptr<vgre::core::ShmManager>>& getEventShm() {
+    static std::unordered_map<uint64_t, std::shared_ptr<vgre::core::ShmManager>> eventShm;
+    return eventShm;
+}
 
 int cudaIpcGetEventHandle(EventIPCHandle_st* handle, void* event) {
     if (!handle || !event) return 1;
 
-    uint64_t eid = g_eventIpcCounter.fetch_add(1, std::memory_order_relaxed);
+    uint64_t eid = getEventIPCCounter().fetch_add(1, std::memory_order_relaxed);
     char shmName[32];
     std::snprintf(shmName, sizeof(shmName), "/vgre_ev_%llu", (unsigned long long)eid);
 
@@ -191,8 +212,8 @@ int cudaIpcGetEventHandle(EventIPCHandle_st* handle, void* event) {
     std::memcpy(shm->getBasePtr(), &state, 4);
 
     {
-        std::lock_guard<std::mutex> lk(g_ipcMutex);
-        g_eventShm[eid] = shm;
+        std::lock_guard<std::mutex> lk(getIPCMutex());
+        getEventShm()[eid] = shm;
     }
 
     EventIPCHandle h{};
@@ -218,8 +239,8 @@ int cudaIpcOpenEventHandle(void** event, EventIPCHandle_st handle) {
     // read/write the 4-byte flag directly (VGRE event semantic).
     *event = shm->getBasePtr();
     {
-        std::lock_guard<std::mutex> lk(g_ipcMutex);
-        g_eventShm[h.eventId] = shm; // keep alive
+        std::lock_guard<std::mutex> lk(getIPCMutex());
+        getEventShm()[h.eventId] = shm; // keep alive
     }
     return 0;
 }

@@ -78,12 +78,37 @@ struct MCObject {
     uint64_t              memHandle{0}; // bound physAlloc handle (set on first bind)
 };
 
-static std::mutex            g_mu;
-static std::atomic<uint64_t> g_nextHandle{1};
-static std::unordered_map<uint64_t, PhysAlloc>    g_physAllocs;
-static std::unordered_map<uint64_t, VAReservation> g_vaReservations;
-static std::unordered_map<uintptr_t, uint64_t>    g_mappings; // VA → handle
-static std::unordered_map<uint64_t, MCObject>     g_mcObjects;
+// Use function-local static initialization to prevent blocking during library load
+// This ensures the mutex and maps are only initialized when first used
+std::mutex& getVMMutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+std::atomic<uint64_t>& getNextVMHandle() {
+    static std::atomic<uint64_t> nextHandle{1};
+    return nextHandle;
+}
+
+std::unordered_map<uint64_t, PhysAlloc>& getPhysAllocs() {
+    static std::unordered_map<uint64_t, PhysAlloc> physAllocs;
+    return physAllocs;
+}
+
+std::unordered_map<uint64_t, VAReservation>& getVAReservations() {
+    static std::unordered_map<uint64_t, VAReservation> vaReservations;
+    return vaReservations;
+}
+
+std::unordered_map<uintptr_t, uint64_t>& getMappings() {
+    static std::unordered_map<uintptr_t, uint64_t> mappings;
+    return mappings;
+}
+
+std::unordered_map<uint64_t, MCObject>& getMCObjects() {
+    static std::unordered_map<uint64_t, MCObject> mcObjects;
+    return mcObjects;
+}
 
 static size_t pageSize() {
 #if defined(_WIN32)
@@ -123,9 +148,9 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle* handle,
     void* ptr = nullptr; return CUDA_ERROR_NOT_SUPPORTED;
 #endif
 
-    uint64_t h = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lk(g_mu);
-    g_physAllocs[h] = {ptr, size, false};
+    uint64_t h = getNextVMHandle().fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    getPhysAllocs()[h] = {ptr, size, false};
     *handle = h;
     VGRE_LOG_DEBUG("VirtualMemory",
         "cuMemCreate: handle=" + std::to_string(h) +
@@ -135,16 +160,16 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle* handle,
 }
 
 CUresult cuMemRelease(CUmemGenericAllocationHandle handle) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    auto it = g_physAllocs.find(handle);
-    if (it == g_physAllocs.end()) return CUDA_ERROR_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    auto it = getPhysAllocs().find(handle);
+    if (it == getPhysAllocs().end()) return CUDA_ERROR_INVALID_VALUE;
     auto& pa = it->second;
 #if defined(__linux__) || defined(__APPLE__)
     munmap(pa.ptr, pa.size);
 #elif defined(_WIN32)
     VirtualFree(pa.ptr, 0, MEM_RELEASE);
 #endif
-    g_physAllocs.erase(it);
+    getPhysAllocs().erase(it);
     VGRE_LOG_DEBUG("VirtualMemory", "cuMemRelease: handle=" + std::to_string(handle));
     return CUDA_SUCCESS;
 }
@@ -167,9 +192,9 @@ CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size,
     return CUDA_ERROR_NOT_SUPPORTED;
 #endif
 
-    uint64_t h = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lk(g_mu);
-    g_vaReservations[h] = {p, size};
+    uint64_t h = getNextVMHandle().fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    getVAReservations()[h] = {p, size};
     *ptr = reinterpret_cast<CUdeviceptr>(p);
     VGRE_LOG_DEBUG("VirtualMemory",
         "cuMemAddressReserve: va=" + std::to_string(*ptr) +
@@ -179,17 +204,17 @@ CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size,
 
 CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size) {
     (void)size;
-    std::lock_guard<std::mutex> lk(g_mu);
+    std::lock_guard<std::mutex> lk(getVMMutex());
     void* p = reinterpret_cast<void*>(static_cast<uintptr_t>(ptr));
     // Remove any reservation that starts at this address
-    for (auto it = g_vaReservations.begin(); it != g_vaReservations.end(); ++it) {
+    for (auto it = getVAReservations().begin(); it != getVAReservations().end(); ++it) {
         if (it->second.ptr == p) {
 #if defined(__linux__) || defined(__APPLE__)
             munmap(p, it->second.size);
 #elif defined(_WIN32)
             VirtualFree(p, 0, MEM_RELEASE);
 #endif
-            g_vaReservations.erase(it);
+            getVAReservations().erase(it);
             return CUDA_SUCCESS;
         }
     }
@@ -198,9 +223,9 @@ CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size) {
 
 CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t /*offset*/,
                   CUmemGenericAllocationHandle handle, uint64_t /*flags*/) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    auto it = g_physAllocs.find(handle);
-    if (it == g_physAllocs.end()) return CUDA_ERROR_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    auto it = getPhysAllocs().find(handle);
+    if (it == getPhysAllocs().end()) return CUDA_ERROR_INVALID_VALUE;
 
     void* va = reinterpret_cast<void*>(static_cast<uintptr_t>(ptr));
     // Grant read+write access to the VA range
@@ -212,7 +237,7 @@ CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t /*offset*/,
     VirtualProtect(va, size, PAGE_READWRITE, &old);
 #endif
     it->second.mapped = true;
-    g_mappings[static_cast<uintptr_t>(ptr)] = handle;
+    getMappings()[static_cast<uintptr_t>(ptr)] = handle;
     VGRE_LOG_DEBUG("VirtualMemory",
         "cuMemMap: va=" + std::to_string(ptr) +
         " size=" + std::to_string(size) +
@@ -228,8 +253,8 @@ CUresult cuMemUnmap(CUdeviceptr ptr, size_t size) {
     DWORD old;
     VirtualProtect(va, size, PAGE_NOACCESS, &old);
 #endif
-    std::lock_guard<std::mutex> lk(g_mu);
-    g_mappings.erase(static_cast<uintptr_t>(ptr));
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    getMappings().erase(static_cast<uintptr_t>(ptr));
     VGRE_LOG_DEBUG("VirtualMemory",
         "cuMemUnmap: va=" + std::to_string(ptr));
     return CUDA_SUCCESS;
@@ -257,8 +282,8 @@ CUresult cuMemGetAllocationGranularity(size_t* granularity,
 CUresult cuMemGetAllocationPropertiesFromHandle(CUmemAllocationProp_t* prop,
                                                  CUmemGenericAllocationHandle handle) {
     if (!prop) return CUDA_ERROR_INVALID_VALUE;
-    std::lock_guard<std::mutex> lk(g_mu);
-    if (g_physAllocs.count(handle) == 0) return CUDA_ERROR_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    if (getPhysAllocs().count(handle) == 0) return CUDA_ERROR_INVALID_VALUE;
     prop->location_type = 1; // device
     prop->device        = 0;
     return CUDA_SUCCESS;
@@ -269,8 +294,8 @@ CUresult cuMemExportToShareableHandle(void* shareableHandle,
                                        CUmemGenericAllocationHandle handle,
                                        int /*handleType*/, uint64_t /*flags*/) {
     if (!shareableHandle) return CUDA_ERROR_INVALID_VALUE;
-    std::lock_guard<std::mutex> lk(g_mu);
-    if (g_physAllocs.find(handle) == g_physAllocs.end()) {
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    if (getPhysAllocs().find(handle) == getPhysAllocs().end()) {
         return CUDA_ERROR_INVALID_VALUE;
     }
     auto *out = static_cast<ShareableMemHandle *>(shareableHandle);
@@ -284,8 +309,8 @@ CUresult cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* handle,
     if (!handle || !shareableHandle) return CUDA_ERROR_INVALID_VALUE;
     auto *in = static_cast<ShareableMemHandle *>(shareableHandle);
     if (in->magic != kShareableMemMagic) return CUDA_ERROR_INVALID_VALUE;
-    std::lock_guard<std::mutex> lk(g_mu);
-    if (g_physAllocs.find(in->allocHandle) == g_physAllocs.end()) {
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    if (getPhysAllocs().find(in->allocHandle) == getPhysAllocs().end()) {
         return CUDA_ERROR_INVALID_VALUE;
     }
     *handle = in->allocHandle;
@@ -301,18 +326,18 @@ CUresult cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* handle,
 
 CUresult cuMulticastCreate(uint64_t* mcHandle, const void* /*prop*/) {
     if (!mcHandle) return CUDA_ERROR_INVALID_VALUE;
-    uint64_t h = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lk(g_mu);
-    g_mcObjects[h] = MCObject{};
+    uint64_t h = getNextVMHandle().fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    getMCObjects()[h] = MCObject{};
     *mcHandle = h;
     VGRE_LOG_DEBUG("VirtualMemory", "cuMulticastCreate: handle=" + std::to_string(h));
     return CUDA_SUCCESS;
 }
 
 CUresult cuMulticastAddDevice(uint64_t mcHandle, int device) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    auto it = g_mcObjects.find(mcHandle);
-    if (it == g_mcObjects.end()) return CUDA_ERROR_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    auto it = getMCObjects().find(mcHandle);
+    if (it == getMCObjects().end()) return CUDA_ERROR_INVALID_VALUE;
     it->second.devices.push_back(device);
     VGRE_LOG_DEBUG("VirtualMemory",
         "cuMulticastAddDevice: mc=" + std::to_string(mcHandle) +
@@ -323,11 +348,11 @@ CUresult cuMulticastAddDevice(uint64_t mcHandle, int device) {
 CUresult cuMulticastBindMem(uint64_t mcHandle, size_t mcOffset,
                               uint64_t memHandle, size_t offset,
                               size_t size, uint64_t /*flags*/) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    auto mcIt = g_mcObjects.find(mcHandle);
-    if (mcIt == g_mcObjects.end()) return CUDA_ERROR_INVALID_VALUE;
-    auto physIt = g_physAllocs.find(memHandle);
-    if (physIt == g_physAllocs.end()) return CUDA_ERROR_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    auto mcIt = getMCObjects().find(mcHandle);
+    if (mcIt == getMCObjects().end()) return CUDA_ERROR_INVALID_VALUE;
+    auto physIt = getPhysAllocs().find(memHandle);
+    if (physIt == getPhysAllocs().end()) return CUDA_ERROR_INVALID_VALUE;
 
     // Record the physical backing on the multicast object (first binding wins).
     if (mcIt->second.memHandle == 0)
@@ -343,7 +368,7 @@ CUresult cuMulticastBindMem(uint64_t mcHandle, size_t mcOffset,
     VirtualProtect(va, size, PAGE_READWRITE, &old);
 #endif
     physIt->second.mapped = true;
-    g_mappings[reinterpret_cast<uintptr_t>(va)] = memHandle;
+    getMappings()[reinterpret_cast<uintptr_t>(va)] = memHandle;
     VGRE_LOG_DEBUG("VirtualMemory",
         "cuMulticastBindMem: mc=" + std::to_string(mcHandle) +
         " mem=" + std::to_string(memHandle) +
@@ -360,11 +385,11 @@ CUresult cuMulticastGetGranularity(size_t* granularity, const void* /*prop*/, in
 
 // Unbind a previously bound physical allocation from a multicast object.
 CUresult cuMulticastUnbind(uint64_t mcHandle, int /*device*/, size_t /*mcOffset*/, size_t /*size*/) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    if (g_mcObjects.find(mcHandle) == g_mcObjects.end())
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    if (getMCObjects().find(mcHandle) == getMCObjects().end())
         return CUDA_ERROR_INVALID_VALUE;
     // Physical memory remains allocated; just disassociate from multicast set.
-    g_mcObjects[mcHandle].memHandle = 0;
+    getMCObjects()[mcHandle].memHandle = 0;
     return CUDA_SUCCESS;
 }
 

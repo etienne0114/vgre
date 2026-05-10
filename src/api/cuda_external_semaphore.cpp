@@ -47,9 +47,22 @@ struct ExtSem {
     std::atomic<uint64_t> timelineValue{0}; // for timeline types
 };
 
-static std::mutex g_mu;
-static std::atomic<uint64_t> g_nextHandle{1};
-static std::unordered_map<uint64_t, ExtSem*> g_sems;
+// Use function-local static initialization to prevent blocking during library load
+// This ensures the mutex and maps are only initialized when first used
+std::mutex& getExtSemMutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+std::atomic<uint64_t>& getNextExtSemHandle() {
+    static std::atomic<uint64_t> nextHandle{1};
+    return nextHandle;
+}
+
+std::unordered_map<uint64_t, ExtSem*>& getExtSems() {
+    static std::unordered_map<uint64_t, ExtSem*> sems;
+    return sems;
+}
 
 } // namespace
 
@@ -127,10 +140,10 @@ vgre_err_t cudaImportExternalSemaphore(
     }
 #endif
 
-    uint64_t h = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    uint64_t h = getNextExtSemHandle().fetch_add(1, std::memory_order_relaxed);
     {
-        std::lock_guard<std::mutex> lk(g_mu);
-        g_sems[h] = s;
+        std::lock_guard<std::mutex> lk(getExtSemMutex());
+        getExtSems()[h] = s;
     }
     *extSem = h;
     VGRE_LOG_DEBUG("ExtSem",
@@ -140,9 +153,9 @@ vgre_err_t cudaImportExternalSemaphore(
 }
 
 vgre_err_t cudaDestroyExternalSemaphore(cudaExternalSemaphore_t extSem) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    auto it = g_sems.find(extSem);
-    if (it == g_sems.end()) return kInvalidVal;
+    std::lock_guard<std::mutex> lk(getExtSemMutex());
+    auto it = getExtSems().find(extSem);
+    if (it == getExtSems().end()) return kInvalidVal;
     auto* s = it->second;
 #if defined(__linux__)
     if (s->efd >= 0) close(s->efd);
@@ -150,7 +163,7 @@ vgre_err_t cudaDestroyExternalSemaphore(cudaExternalSemaphore_t extSem) {
     if (s->hEvent) CloseHandle(s->hEvent);
 #endif
     delete s;
-    g_sems.erase(it);
+    getExtSems().erase(it);
     return kOK;
 }
 
@@ -162,10 +175,10 @@ vgre_err_t cudaSignalExternalSemaphoresAsync(
     void* /*stream*/)
 {
     if (!extSems) return kInvalidVal;
-    std::lock_guard<std::mutex> lk(g_mu);
+    std::lock_guard<std::mutex> lk(getExtSemMutex());
     for (unsigned i = 0; i < numExtSems; ++i) {
-        auto it = g_sems.find(extSems[i]);
-        if (it == g_sems.end()) continue;
+        auto it = getExtSems().find(extSems[i]);
+        if (it == getExtSems().end()) continue;
         auto* s = it->second;
 #if defined(__linux__)
         if (s->efd >= 0) {
@@ -192,9 +205,9 @@ vgre_err_t cudaWaitExternalSemaphoresAsync(
     for (unsigned i = 0; i < numExtSems; ++i) {
         ExtSem* s = nullptr;
         {
-            std::lock_guard<std::mutex> lk(g_mu);
-            auto it = g_sems.find(extSems[i]);
-            if (it == g_sems.end()) continue;
+            std::lock_guard<std::mutex> lk(getExtSemMutex());
+            auto it = getExtSems().find(extSems[i]);
+            if (it == getExtSems().end()) continue;
             s = it->second;
         }
         if (!s) continue;

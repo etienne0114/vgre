@@ -28,13 +28,13 @@ namespace compiler {
 // test instances parse the same kernel within the same binary run.
 namespace {
 static std::recursive_mutex& getProcessCacheMutex() {
-    static std::recursive_mutex* m = new std::recursive_mutex();
-    return *m;
+    static std::recursive_mutex m;
+    return m;
 }
 
 static std::unordered_map<std::string, EnhancedKernelIR>& getEnhancedIRCache() {
-    static std::unordered_map<std::string, EnhancedKernelIR>* cache = new std::unordered_map<std::string, EnhancedKernelIR>();
-    return *cache;
+    static std::unordered_map<std::string, EnhancedKernelIR> cache;
+    return cache;
 }
 
 // Return the vgre disk cache directory

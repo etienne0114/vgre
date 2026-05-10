@@ -18,20 +18,37 @@
 
 namespace {
 
-// Monotonic range ID counter.
-static std::atomic<uint64_t> g_rangeIdCounter{1};
+// Use function-local static initialization to prevent blocking during library load
+// This ensures the counter and maps are only initialized when first used
+std::atomic<uint64_t>& getRangeIdCounter() {
+    static std::atomic<uint64_t> counter{1};
+    return counter;
+}
 
 // Per-thread push/pop stack (maps nesting depth → ProfileEvent start time).
 static thread_local std::stack<std::pair<std::string, std::chrono::steady_clock::time_point>> t_rangeStack;
 
 // Domain registry: domain handle → name string.
-static std::mutex g_domainMu;
-static std::unordered_map<nvtxDomainHandle_t, std::string> g_domains;
+std::mutex& getDomainMutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+std::unordered_map<nvtxDomainHandle_t, std::string>& getDomains() {
+    static std::unordered_map<nvtxDomainHandle_t, std::string> domains;
+    return domains;
+}
 
 // Active range registry: rangeId → (name, start_time).
-static std::mutex g_rangeMu;
-static std::unordered_map<uint64_t,
-    std::pair<std::string, std::chrono::steady_clock::time_point>> g_activeRanges;
+std::mutex& getRangeMutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+std::unordered_map<uint64_t, std::pair<std::string, std::chrono::steady_clock::time_point>>& getActiveRanges() {
+    static std::unordered_map<uint64_t, std::pair<std::string, std::chrono::steady_clock::time_point>> activeRanges;
+    return activeRanges;
+}
 
 // Extract a human-readable label from an event attribute struct.
 static std::string extractLabel(const nvtxEventAttributes_t* attr) {
@@ -86,10 +103,10 @@ void nvtxMarkEx(const nvtxEventAttributes_t* eventAttrib) {
 
 nvtxRangeId_t nvtxRangeStartA(const char* message) {
     std::string label = message ? message : "(nvtx)";
-    uint64_t id = g_rangeIdCounter.fetch_add(1, std::memory_order_relaxed);
+    uint64_t id = getRangeIdCounter().fetch_add(1, std::memory_order_relaxed);
     {
-        std::lock_guard<std::mutex> lk(g_rangeMu);
-        g_activeRanges[id] = {label, std::chrono::steady_clock::now()};
+        std::lock_guard<std::mutex> lk(getRangeMutex());
+        getActiveRanges()[id] = {label, std::chrono::steady_clock::now()};
     }
     recordRangeStart(label);
     return static_cast<nvtxRangeId_t>(id);
@@ -103,14 +120,14 @@ void nvtxRangeEnd(nvtxRangeId_t id) {
     std::string label;
     double durationMs = 0.0;
     {
-        std::lock_guard<std::mutex> lk(g_rangeMu);
-        auto it = g_activeRanges.find(static_cast<uint64_t>(id));
-        if (it != g_activeRanges.end()) {
+        std::lock_guard<std::mutex> lk(getRangeMutex());
+        auto it = getActiveRanges().find(static_cast<uint64_t>(id));
+        if (it != getActiveRanges().end()) {
             label      = it->second.first;
             auto end   = std::chrono::steady_clock::now();
             durationMs = std::chrono::duration<double, std::milli>(
                              end - it->second.second).count();
-            g_activeRanges.erase(it);
+            getActiveRanges().erase(it);
         }
     }
     if (!label.empty())
@@ -145,8 +162,8 @@ int nvtxRangePop(void) {
 nvtxDomainHandle_t nvtxDomainCreateA(const char* name) {
     // Allocate a small heap object to use as a unique opaque handle.
     auto* handle = new char[1];
-    std::lock_guard<std::mutex> lk(g_domainMu);
-    g_domains[handle] = name ? name : "";
+    std::lock_guard<std::mutex> lk(getDomainMutex());
+    getDomains()[handle] = name ? name : "";
     VGRE_LOG_DEBUG("NVTX", "Domain created: " + std::string(name ? name : ""));
     return static_cast<nvtxDomainHandle_t>(handle);
 }
@@ -162,8 +179,8 @@ nvtxDomainHandle_t nvtxDomainCreate(const char* name) {
 
 void nvtxDomainDestroy(nvtxDomainHandle_t domain) {
     if (!domain) return;
-    std::lock_guard<std::mutex> lk(g_domainMu);
-    g_domains.erase(domain);
+    std::lock_guard<std::mutex> lk(getDomainMutex());
+    getDomains().erase(domain);
     delete[] static_cast<char*>(domain);
 }
 
