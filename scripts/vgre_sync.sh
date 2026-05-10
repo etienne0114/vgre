@@ -120,6 +120,23 @@ _check_and_install_deps() {
         echo "  [OK] curl present"
     fi
 
+    # jemalloc — required at runtime to avoid glibc malloc arena assertions
+    # when Flutter (libc++) and VGRE (libstdc++) threads share the same heap.
+    local JEMALLOC_FOUND=0
+    for lib in /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+               /usr/lib64/libjemalloc.so.2 \
+               /usr/lib/libjemalloc.so.2 \
+               /usr/local/lib/libjemalloc.so.2 \
+               /opt/homebrew/lib/libjemalloc.2.dylib \
+               /usr/local/lib/libjemalloc.2.dylib; do
+        [[ -f "$lib" ]] && JEMALLOC_FOUND=1 && echo "  [OK] jemalloc ($lib)" && break
+    done
+    if [[ $JEMALLOC_FOUND -eq 0 ]]; then
+        echo "  [MISSING] jemalloc (required for dashboard runtime stability)"
+        MISSING_APT+=(libjemalloc2); MISSING_DNF+=(jemalloc); MISSING_BREW+=(jemalloc)
+        NEED_INSTALL=1
+    fi
+
     # Auto-install if anything missing
     if [[ $NEED_INSTALL -eq 1 ]]; then
         echo ""
@@ -367,6 +384,28 @@ else
     echo "export VGRE_CACHE_DIR=\"\$HOME/.vgre/cache\"" >> "$LAUNCH_SCRIPT"
     echo "mkdir -p \"\$VGRE_CACHE_DIR\"" >> "$LAUNCH_SCRIPT"
     echo "cd \"$INSTALL_DIR\"" >> "$LAUNCH_SCRIPT"
+    echo '' >> "$LAUNCH_SCRIPT"
+    echo '# ── Memory allocator: use jemalloc to avoid glibc malloc arena' >> "$LAUNCH_SCRIPT"
+    echo '#    contention between Flutter (libc++) and VGRE (libstdc++) threads.' >> "$LAUNCH_SCRIPT"
+    echo '#    glibc malloc triggers internal assertions when many threads from' >> "$LAUNCH_SCRIPT"
+    echo '#    both runtimes allocate concurrently against shared per-thread arenas.' >> "$LAUNCH_SCRIPT"
+    echo '#    jemalloc resolves this with its own arena management strategy.' >> "$LAUNCH_SCRIPT"
+    echo 'JEMALLOC_LIB=""' >> "$LAUNCH_SCRIPT"
+    echo 'for candidate in \' >> "$LAUNCH_SCRIPT"
+    echo '    /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \' >> "$LAUNCH_SCRIPT"
+    echo '    /usr/lib64/libjemalloc.so.2 \' >> "$LAUNCH_SCRIPT"
+    echo '    /usr/lib/libjemalloc.so.2 \' >> "$LAUNCH_SCRIPT"
+    echo '    /usr/local/lib/libjemalloc.so.2; do' >> "$LAUNCH_SCRIPT"
+    echo '    if [ -f "$candidate" ]; then JEMALLOC_LIB="$candidate"; break; fi' >> "$LAUNCH_SCRIPT"
+    echo 'done' >> "$LAUNCH_SCRIPT"
+    echo 'if [ -n "$JEMALLOC_LIB" ]; then' >> "$LAUNCH_SCRIPT"
+    echo '    export LD_PRELOAD="$JEMALLOC_LIB${LD_PRELOAD:+:$LD_PRELOAD}"' >> "$LAUNCH_SCRIPT"
+    echo 'else' >> "$LAUNCH_SCRIPT"
+    echo '    echo "[VGRE] Warning: jemalloc not found; falling back to glibc malloc." >&2' >> "$LAUNCH_SCRIPT"
+    echo '    echo "[VGRE] Install with: sudo apt-get install libjemalloc2  (Debian/Ubuntu)" >&2' >> "$LAUNCH_SCRIPT"
+    echo '    echo "[VGRE] Install with: sudo dnf install jemalloc          (Fedora/RHEL)" >&2' >> "$LAUNCH_SCRIPT"
+    echo 'fi' >> "$LAUNCH_SCRIPT"
+    echo '' >> "$LAUNCH_SCRIPT"
     echo '# Ensure dashboard stays running even if parent shell exits' >> "$LAUNCH_SCRIPT"
     echo 'nohup ./vgre_dashboard "$@" > /tmp/vgre_dashboard.log 2>&1 &' >> "$LAUNCH_SCRIPT"
     echo 'DASHBOARD_PID=$!' >> "$LAUNCH_SCRIPT"

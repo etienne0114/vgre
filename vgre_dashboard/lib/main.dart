@@ -59,11 +59,15 @@ class _VgreBootstrapAppState extends State<VgreBootstrapApp> {
       // TCP cluster threads are live causes malloc(): invalid size (unsorted)
       // because concurrent heap activity (Pango text layout + TCP cluster
       // std::string allocs + setenv() realloc) corrupts glibc's unsorted bin.
+      // Initialize and configure VGRE on the MAIN THREAD before setState().
+      // Heap corruption on glibc malloc when Flutter (libc++) and VGRE
+      // (libstdc++) threads contend on per-thread arenas is resolved by
+      // preloading jemalloc in the launcher script.
       bridge.init();
-      bridge.setServiceMode(true);         // master mode — matches _serviceModeActive default
-      bridge.setProfilerEnabled(true);     // enabled    — matches _profilerEnabled default
-      bridge.setBlockThreads(false);       // disabled   — matches _blockThreadsActive default
-      bridge.setBackgroundCompute(false);  // disabled   — matches _backgroundComputeActive default
+      bridge.setProfilerEnabled(true);
+      bridge.setBlockThreads(false);
+      bridge.setBackgroundCompute(false);
+      bridge.setServiceMode(true);
 
       if (!mounted) return;
       setState(() {
@@ -246,7 +250,7 @@ class VgreDashboardApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return BlocProvider(
       create: (context) =>
-          TelemetryBloc(bridge: bridge, sqlite: sqlite, libPath: libPath)..add(const StartPolling()),
+          TelemetryBloc(bridge: bridge, sqlite: sqlite)..add(const StartPolling()),
       child: MaterialApp(
         title: 'VGRE Dashboard',
         debugShowCheckedModeBanner: false,

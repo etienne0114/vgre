@@ -427,6 +427,230 @@ The dashboard automatically shows discovered cluster nodes in the **Cluster Topo
 | macOS | Windows | ✓ Full |
 | Windows | Linux | ✓ Full |
 
+### Cross-Platform Cluster Setup Guide
+
+VGRE supports heterogeneous clusters mixing Windows, Linux, and macOS nodes. This section provides detailed setup instructions and troubleshooting for cross-platform deployments.
+
+#### Prerequisites for Cross-Platform Clusters
+
+1. **Network Connectivity**: All nodes must be on the same network or have direct IP connectivity
+2. **Firewall Configuration**: 
+   - TCP port 7777 (default cluster port) must be open between all nodes
+   - UDP port 7778 (default discovery port) must be open for auto-discovery
+3. **Time Synchronization**: Ensure all nodes have synchronized clocks (NTP recommended)
+4. **Same Auth Token**: All nodes must use the same `VGRE_TCP_AUTH_TOKEN`
+
+#### Step-by-Step Cross-Platform Setup
+
+**Step 1: Install VGRE on all platforms**
+
+```bash
+# Linux/macOS
+bash install_local.sh
+
+# Windows (PowerShell as Administrator)
+.\scripts\vgre_sync.bat
+```
+
+**Step 2: Configure firewall rules**
+
+```bash
+# Linux (Ubuntu/Debian)
+sudo ufw allow 7777/tcp
+sudo ufw allow 7778/udp
+
+# Linux (CentOS/RHEL)
+sudo firewall-cmd --permanent --add-port=7777/tcp
+sudo firewall-cmd --permanent --add-port=7778/udp
+sudo firewall-cmd --reload
+
+# macOS
+# System Preferences > Security & Privacy > Firewall > Options
+# Allow incoming connections for VGRE applications
+
+# Windows (PowerShell as Administrator)
+New-NetFirewallRule -DisplayName "VGRE TCP Cluster" -Direction Inbound -Protocol TCP -LocalPort 7777 -Action Allow
+New-NetFirewallRule -DisplayName "VGRE UDP Discovery" -Direction Inbound -Protocol UDP -LocalPort 7778 -Action Allow
+```
+
+**Step 3: Generate and distribute auth token**
+
+```bash
+# On master node (any platform):
+vgre-token generate
+
+# Copy token to all worker nodes:
+vgre-token show    # Copy the displayed token
+
+# On each worker node:
+vgre-token set <paste-token-here>
+
+# Verify all nodes have matching tokens:
+vgre-token fingerprint
+```
+
+**Step 4: Start cluster services**
+
+```bash
+# On master node:
+vgre-start --master
+
+# On worker nodes (auto-discovery):
+vgre-start --worker
+
+# On worker nodes (manual IP if auto-discovery fails):
+vgre-start --worker --master-ip <master-ip-address>
+```
+
+#### Cross-Platform Environment Variables
+
+Set these environment variables for optimal cross-platform compatibility:
+
+```bash
+# Recommended for all platforms
+export VGRE_TCP_AUTH_TOKEN="your-shared-token-here"
+export VGRE_CLUSTER_PORT=7777
+export VGRE_CLUSTER_UDP_ANNOUNCE_PORT=7778
+
+# Windows-specific (PowerShell)
+$env:VGRE_TCP_AUTH_TOKEN="your-shared-token-here"
+$env:VGRE_CLUSTER_PORT=7777
+$env:VGRE_CLUSTER_UDP_ANNOUNCE_PORT=7778
+
+# Optional: Restrict master discovery to specific IPs
+export VGRE_CLUSTER_MASTER_IP="192.168.1.10,192.168.1.11"
+
+# Optional: Increase timeouts for slower networks
+export VGRE_CLUSTER_HANDSHAKE_TIMEOUT_SEC=10
+export VGRE_CLUSTER_PEEK_TIMEOUT_MS=15000
+```
+
+#### Troubleshooting Cross-Platform Issues
+
+**Problem: Windows worker crashes with exit code -1073741819 (0xC0000005)**
+
+This indicates a memory access violation during cross-platform connection.
+
+*Solution:*
+1. Ensure both master and worker have the same auth token:
+   ```bash
+   vgre-token fingerprint  # Run on both nodes, compare output
+   ```
+
+2. Check Windows Defender/antivirus isn't blocking VGRE:
+   ```powershell
+   # Add VGRE to Windows Defender exclusions
+   Add-MpPreference -ExclusionPath "C:\Users\%USERNAME%\.vgre"
+   Add-MpPreference -ExclusionProcess "vgre-start.exe"
+   ```
+
+3. Verify network connectivity:
+   ```bash
+   # From worker, test TCP connection to master
+   telnet <master-ip> 7777
+   
+   # Test UDP discovery
+   nc -u <master-ip> 7778
+   ```
+
+4. Enable debug logging:
+   ```bash
+   export VGRE_LOG_LEVEL=DEBUG
+   vgre-start --worker --master-ip <master-ip>
+   ```
+
+**Problem: UDP auto-discovery not working across platforms**
+
+*Solution:*
+1. Check firewall rules allow UDP port 7778
+2. Verify nodes are on same subnet or configure manual IP:
+   ```bash
+   vgre-start --worker --master-ip <master-ip>
+   ```
+3. Check for network segmentation/VLANs blocking broadcast packets
+
+**Problem: Security handshake fails between platforms**
+
+*Solution:*
+1. Verify identical auth tokens:
+   ```bash
+   vgre-token show  # Compare exact token values
+   ```
+2. Check system clocks are synchronized (±30 seconds)
+3. Disable strict auth mode temporarily for testing:
+   ```bash
+   export VGRE_ALLOW_AUTH_FALLBACK=1
+   vgre-start --worker
+   ```
+
+**Problem: Connection established but worker shows as inactive**
+
+*Solution:*
+1. Check platform-specific socket buffer sizes:
+   ```bash
+   # Linux: Increase socket buffers
+   echo 'net.core.rmem_max = 16777216' | sudo tee -a /etc/sysctl.conf
+   echo 'net.core.wmem_max = 16777216' | sudo tee -a /etc/sysctl.conf
+   sudo sysctl -p
+   ```
+
+2. Verify CPU architecture compatibility:
+   ```bash
+   # Check SIMD instruction support matches
+   vgre-dashboard  # View Hardware Tuning tab
+   ```
+
+**Problem: Performance degradation in cross-platform clusters**
+
+*Solution:*
+1. Enable platform-specific optimizations:
+   ```bash
+   # Linux/macOS: Enable native SIMD
+   export VGRE_ENABLE_NATIVE_SIMD=ON
+   
+   # Windows: Use Windows-optimized threading
+   set VGRE_WINDOWS_THREAD_POOL=1
+   ```
+
+2. Adjust cluster topology for network latency:
+   ```bash
+   # Prefer local workers for latency-sensitive kernels
+   export VGRE_PREFER_LOCAL_WORKERS=1
+   ```
+
+#### Platform-Specific Notes
+
+**Windows Nodes:**
+- Run PowerShell as Administrator for initial setup
+- Windows Defender may quarantine VGRE binaries - add exclusions
+- Use `vgre-token.bat` instead of `vgre-token` command
+- WSL2 nodes are supported but require additional network configuration
+
+**macOS Nodes:**
+- Allow VGRE through macOS Firewall in System Preferences
+- Grant network permissions when prompted
+- Apple Silicon (M1/M2) nodes provide excellent performance as workers
+
+**Linux Nodes:**
+- Most stable as master nodes
+- Support all VGRE features including RDMA and gRPC transports
+- Recommended for high-performance computing clusters
+
+#### Monitoring Cross-Platform Clusters
+
+Use the dashboard to monitor cross-platform cluster health:
+
+1. **Cluster Topology Tab**: Shows all connected nodes with platform indicators
+2. **Overview Tab**: Displays aggregate performance across all platforms  
+3. **Hardware Tuning Tab**: Compare SIMD capabilities across different architectures
+
+```bash
+# Launch dashboard from any node
+vgre-dashboard
+```
+
+The dashboard automatically detects platform differences and provides platform-specific optimization recommendations.
+
 ---
 
 ## 8. Dashboard
