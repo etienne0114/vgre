@@ -7,6 +7,10 @@ add_library(vgre_core OBJECT
     memory/uvm_migration.cpp
     memory/bandwidth_model.cpp
     scheduler.cpp
+    scheduler_numa.cpp
+    scheduler_worker.cpp
+    scheduler_tasks.cpp
+    scheduler_control.cpp
     event.cpp
     runtime_engine.cpp
     runtime_engine_launch.cpp

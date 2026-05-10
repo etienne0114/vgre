@@ -70,7 +70,7 @@ VGREResult RuntimeEngine::initialize() {
   int deviceCount = 1;
   const char *envCount = std::getenv("VGRE_DEVICE_COUNT");
   if (envCount) {
-    deviceCount = std::atoi(envCount);
+      deviceCount = std::atoi(envCount);
   } else {
 #if defined(__linux__)
     // Count NUMA nodes via sysfs
@@ -144,10 +144,6 @@ VGREResult RuntimeEngine::initialize() {
       devices_[0]->getProperties().totalGlobalMem);
 
   initialized_ = true;
-
-  // Initialize persistent BlockWorkerPool for authoritative block-level concurrency
-  runtime::BlockWorkerPool::instance().initialize();
-
 
   // Phase 10: Controllable Background Tasks (Zero-Simulation Hardening)
   // Register with global IPC service as a client by default, unless disabled.

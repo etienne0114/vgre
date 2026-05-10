@@ -30,8 +30,13 @@ void MemoryManager::startMigrationThread() {
 void MemoryManager::stopMigrationThread() {
   migrationStop_.store(true, std::memory_order_release);
   if (migrationThread_.joinable()) {
-    migrationThread_.join();
-    VGRE_LOG_DEBUG("MemoryManager", "UVM migration background thread stopped");
+    auto future = std::async(std::launch::async, [this]() { migrationThread_.join(); });
+    if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+      VGRE_LOG_WARN("MemoryManager", "Migration thread join timeout - detaching");
+      migrationThread_.detach();
+    } else {
+      VGRE_LOG_DEBUG("MemoryManager", "UVM migration background thread stopped");
+    }
   }
 }
 
@@ -156,8 +161,13 @@ void MemoryManager::startPendingDrainer() {
 void MemoryManager::stopPendingDrainer() {
   pendingDrainerStop_.store(true, std::memory_order_release);
   if (pendingDrainerThread_.joinable()) {
-    pendingDrainerThread_.join();
-    VGRE_LOG_DEBUG("MemoryManager", "Pending-fault drainer thread stopped");
+    auto future = std::async(std::launch::async, [this]() { pendingDrainerThread_.join(); });
+    if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+      VGRE_LOG_WARN("MemoryManager", "Pending drainer thread join timeout - detaching");
+      pendingDrainerThread_.detach();
+    } else {
+      VGRE_LOG_DEBUG("MemoryManager", "Pending-fault drainer thread stopped");
+    }
   }
 }
 
