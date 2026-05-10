@@ -101,11 +101,11 @@ public:
      * @param threadCount Number of threads requested for the block.
      * @param task The function to execute.
      * @param arg Argument for the task.
-     * @param barrier Block barrier for synchronization.
+     * @param sharedMem Shared memory pointer for the block (optional, for syncthreads kernels).
      * 
      * This function blocks until ALL threads have completed.
      */
-    void dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
+    void dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg, void* sharedMem = nullptr);
     void shutdown();
     size_t getCapacity() const;
 
@@ -118,6 +118,7 @@ private:
         int tid;
         void* arg;
         void* barrier;
+        void* sharedMem;
         std::function<void()> onDone;
     };
 
@@ -129,6 +130,7 @@ private:
     std::condition_variable queueCv_;
     std::atomic<bool> stop_{false};
     bool initialized_{false};
+    size_t numThreads_{0};
     // Pre-warm latch: workers increment once they've entered their wait loop.
     // initialize() spins until all threads check in, eliminating ~5ms cold-start
     // latency on the first dispatch() call.

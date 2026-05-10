@@ -120,6 +120,12 @@ public:
    */
   std::string computeTokenHash(const std::string& token) const;
 
+  /**
+   * @brief Get authentication mode description for diagnostic logging
+   * @return String describing current authentication mode and troubleshooting context
+   */
+  std::string getAuthModeDescription() const;
+
 private:
   // Parent cluster manager (non-owning pointer)
   // Used to access: clients_, client_fd_, client_secure_channel_,

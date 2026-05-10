@@ -1,5 +1,4 @@
 #pragma once
-
 // sockets.h must come first on Windows: it includes <winsock2.h> which
 // must precede <windows.h>, and also defines ERROR_* macros via winerror.h.
 // Keeping it first prevents those macros from stomping on our error_codes.h
@@ -8,13 +7,14 @@
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
+#include "vgre/common/logger.h"
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/rdma_transport.h"
 #include "vgre/core/shm_manager.h"
 #include <atomic>
 #include <cstdint>
 #include <mutex>
-#include <shared_mutex>  // kept for std::shared_lock until full migration
+#include <shared_mutex>  
 #include <condition_variable>
 #include <string>
 #include <thread>
@@ -26,6 +26,26 @@
 #include <unordered_set>
 #include <chrono>
 #include <memory>
+#include "vgre/advanced/tcp_cluster/internal/diagnostic_logger.h"
+#include "vgre/advanced/tcp_cluster_validation.h"
+#include "vgre/advanced/tcp_cluster_protocol.h"
+
+// Forward declarations for dependency injection interfaces
+namespace vgre {
+namespace advanced {
+
+  class ISocketFactory;
+  class IMemoryManager;
+  class ISecureChannelFactory;
+  struct ClientConnection;
+  class ConnectionManager;
+  class DiscoveryManager;
+  class PacketHandler;
+  class SecurityManager;
+  class MemorySyncManager;
+  class CollectiveOpsManager;
+  class DispatchManager;
+  class WindowsSocketManager;
 
 // VSBP is a binary protocol with no byte-swapping — it assumes little-endian
 // hosts on both ends.  This holds for every supported platform (x86-64, ARM64).
@@ -37,253 +57,71 @@ static_assert(__BYTE_ORDER__ != __ORDER_BIG_ENDIAN__,
               "add byte-swap wrappers before enabling big-endian support.");
 #endif
 
-namespace vgre {
-namespace advanced {
-
-// Forward declarations for modular architecture
-class ConnectionManager;
-class DiscoveryManager;
-class PacketHandler;
-class SecurityManager;
-class MemorySyncManager;
-class CollectiveOpsManager;
-class DispatchManager;
-
-// ── VGRE Structured Binary Protocol (VSBP) v0.1.2 ─────────────────────────
-constexpr uint32_t VSBP_MAGIC = 0x56475245; // 'VGRE'
-constexpr uint16_t VSBP_VERSION = 0x0102;   // v0.1.2
-
-enum class PacketType : uint32_t {
-  TELEMETRY = 1,
-  LAUNCH_KERNEL = 2,
-  RESPONSE = 3,
-  DATA_HEADER = 4,   // size and target pointer
-  DATA_BODY = 5,      // raw bytes
-  STRUCT_DATA = 6,    // size and arg index
-  ARG_SCALAR = 7,     // scalar arg (8 bytes)
-  ARG_POINTER = 8,    // pointer arg (handle)
-  CAPABILITY = 9,     // per-node hardware info
-  REGISTER_KERNEL = 10,
-  // Phase 5: Global Compute Network
-  SECURE_HANDSHAKE = 11,      // nonce exchange for key derivation
-  SECURE_HANDSHAKE_ACK = 12,  // handshake acknowledgment
-  PARTITION_DISPATCH = 13,    // sub-grid dispatch for partitioned kernel
-  PARTITION_RESULT = 14,      // result from a partition execution
-  CREDIT_REPORT = 15,         // compute-unit-seconds billing report
-  ROTATE_KEY = 16,            // Phase 10: dynamic session key rotation
-  SHM_INIT = 17,              // Phase 11: negotiate SHM segment
-  DATA_SHM = 18,              // Phase 11: data in SHM
-  DATA_HEADER_DIRTY = 19,     // Phase 11: dirty ranges header (TCP)
-  DATA_SHM_DIRTY = 20,        // Phase 11: dirty ranges header (SHM)
-  DIRTY_RANGE = 21,           // Phase 11: offset/size range packet
-  COOP_BARRIER_SYNC = 22,     // Phase 13: Decentralized Grid Barrier
-  COOP_BARRIER_RESUME = 23,   // Phase 13: Master resume signal
-  RAW_DATA = 24,              // Generic unstructured payload
-  COLLECTIVE_OP = 25,         // Phase 14: Collective Ops (all_reduce, etc.)
-  COLLECTIVE_COMPLETE = 26,   // Phase 14: Master signal that reduction is ready
-  BANDWIDTH_PROBE = 27,       // Master→Worker: 64 KB payload + 8-byte timestamp header
-  BANDWIDTH_ACK = 28,         // Worker→Master: echo timestamp + worker send time
-};
-
-struct VSBPHeader {
-  uint32_t magic;      // Explicit 32-bit magic
-  uint16_t version;    // Platform-independent versioning
-  uint16_t type;       // PacketType as uint16
-  uint32_t sequence;   // Message sequencing
-  uint64_t payloadSize; // 64-bit size for massive transfers
-};
-
-enum class ReceiveState : uint8_t {
-  IDLE = 0,
-  EXPECTING_RANGES_TCP = 1,
-  EXPECTING_RANGES_SHM = 2,
-  EXPECTING_BODY = 3,
-  EXPECTING_KERNEL_SOURCE = 4,
-  EXPECTING_STRUCT_BODY = 5
-};
-
-struct ShmInitPacket {
-  char shm_name[64];
-  uint64_t shm_size;
-};
-
-struct DataShmPacket {
-  uint64_t target_ptr;
-  uint64_t shm_offset;
-  uint64_t size;
-};
-
-struct DataHeaderDirtyPacket {
-  uint64_t target_ptr;
-  uint32_t num_ranges;
-};
-
-struct DataShmDirtyPacket {
-  uint64_t target_ptr;
-  uint32_t num_ranges;
-  uint64_t shm_offset;
-};
-
-struct DirtyRangePacket {
-  uint64_t offset;
-  uint64_t size;
-};
-
-struct KernelRegisterPacket {
-  uint64_t auth_token;
-  uint64_t kernel_id;
-  char name[64];
-  uint32_t source_len;
-};
-
-struct TelemetryPacket {
-  vgre_telemetry_t telemetry;
-};
-
-struct RemoteCommandPacket {
-  uint64_t auth_token;
-  uint64_t kernel_id;
-  uint32_t grid_dim[3];
-  uint32_t block_dim[3];
-  size_t shared_mem;
-  int num_args;
-};
-
-struct ArgScalarPacket {
-  uint32_t arg_index;
-  uint8_t arg_type;
-  uint64_t value;
-};
-
-struct StructDataPacket {
-  uint32_t arg_index;
-  uint32_t size;
-};
-
-struct DataHeaderPacket {
-  uint64_t target_ptr;
-  uint64_t size;
-};
-
-struct ResponsePacket {
-  uint64_t kernel_id;
-  VGREResult result;
-};
-
-struct CapabilityPacket {
-  // CPU
-  int cpu_cores;
-  uint64_t cpu_memory;           // bytes of RAM
-  // iGPU (OpenCL / integrated)
-  bool has_igpu;
-  char igpu_name[64];
-  // Discrete NVIDIA GPU (via GPUPassthrough dlopen probe)
-  int  gpu_count;                // 0 = CPU-only worker
-  char gpu_name[128];            // primary GPU name
-  uint64_t gpu_memory_bytes;     // primary GPU VRAM in bytes (0 = unknown)
-  int  gpu_compute_major;        // CUDA compute capability major
-  int  gpu_compute_minor;        // CUDA compute capability minor
-  int  gpu_sm_count;             // streaming multiprocessor count
-};
-
-struct SecureHandshakePacket {
-  uint8_t nonce[crypto::kNonceLen];
-  uint8_t key_verification[crypto::kSHA256DigestLen];
-};
-
-// Bandwidth probe: master sends 64 KB payload + 8-byte timestamp prefix.
-// Worker echoes back BandwidthAckPacket so master can measure round-trip.
-#pragma pack(push, 1)
-struct BandwidthAckPacket {
-  uint64_t probe_sent_ms;  // echoed timestamp from the master's BANDWIDTH_PROBE
-  uint64_t ack_sent_ms;    // worker's wall-clock ms when it sent this ACK
-};
-#pragma pack(pop)
-
-struct PartitionDispatchPacket {
-  uint64_t auth_token;
-  uint64_t kernel_id;
-  uint32_t full_grid_dim[3];
-  uint32_t partition_grid_dim[3];
-  uint32_t block_dim[3];
-  uint32_t grid_start[3];
-  uint64_t shared_mem;
-  int num_args;
-  uint32_t partition_id;
-  uint32_t total_partitions;
-};
-
-struct PartitionResultPacket {
-  uint64_t kernel_id;
-  uint32_t partition_id;
-  VGREResult result;
-  double execution_time_ms;
-};
-
-struct CreditReportPacket {
-  double compute_seconds;
-  int cpu_cores;
-  uint64_t kernel_id;
-  uint64_t timestamp;
-};
-
-struct CollectiveOpPacket {
-  uint32_t op_type;    // 0 = all_reduce
-  uint32_t datatype;   // VGRE_ARG_...
-  uint64_t count;
-  uint64_t sequence;   // sync ID
-};
-
 class TCPClusterManager {
 public:
-  static TCPClusterManager &instance() {
-    // Intentional heap allocation (not Meyers singleton): the destructor must NOT
-    // run during static-storage teardown because the logger, IPC manager, and
-    // runtime engine may already be destroyed. The process owns this object for
-    // its full lifetime; the OS reclaims memory at exit. Suppressed by LSAN/ASAN
-    // via the __lsan_disable / noleak annotations in the API layer.
-    static TCPClusterManager* inst = new TCPClusterManager();
-    return *inst;
-  }
-
-  // Initialize as Master (Server) or Client (Worker) Node
+  static TCPClusterManager &instance();
   VGREResult initialize(bool is_master, const std::string &host = "127.0.0.1",
                         int port = 7777);
   void shutdown();
-
-  // Telemetry Aggregation
+  static VGREResult validateMemoryAlignment();
+  VGREResult initializeMeshTopology() {
+    return MeshTopologyManager::initializeMeshTopology(this);
+  }
+  VGREResult addMeshPeer(const std::string& ip_address, int port = 7777);
+  struct MeshTopologyStatus {
+    detail::PlatformType local_platform;
+    std::string local_platform_name;
+    size_t total_peers;
+    size_t active_peers;
+    size_t cross_platform_peers;
+    bool mesh_enabled;
+  };
+  MeshTopologyStatus getMeshTopologyStatus() const;
   void broadcastLocalTelemetry(const vgre_telemetry_t &telemetry);
   void aggregateRemoteTelemetry(vgre_telemetry_t &outCombined);
-
-  // Remote Execution
   VGREResult launchRemoteKernel(int worker_idx, uint64_t kernel_id,
                                 const uint32_t grid_dim[3],
                                 const uint32_t block_dim[3], void **args,
                                 int num_args, size_t shared_mem);
-
   /**
    * @brief Broadcasts a kernel registration to all workers.
    */
   void broadcastKernelRegistration(uint64_t kernel_id, const std::string &name,
                                  const std::string &source);
-
   int getFirstActiveWorker() const;
-
-  // Phase 5: Secure Packet I/O
-  // VSBP v0.1.2: Raw packet dispatch with automatic header construction
   VGREResult send_packet(vgre_socket_t fd, PacketType type, const void* payload, size_t payloadLen, SecureChannel* sc = nullptr);
   VGREResult send_packet_direct(vgre_socket_t fd, PacketType type, const void* payload, size_t payloadLen, SecureChannel* sc = nullptr);
   int recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBuffer, SecureChannel *sc = nullptr);
   void reportComputeFromWorker(double seconds, int cores, uint64_t kernel_id);
   VGREResult broadcastPacket(PacketType type, const void* payload, size_t payloadLen);
-
-
-  // ── Phase 5: Security ────────────────────────────────────────────────
+  /**
+   * Generate comprehensive operational report with metrics and health status
+   */
+  void generateOperationalReport();
+  /**
+   * Export metrics for external monitoring systems
+   */
+  void exportMetricsForMonitoring();
+  /**
+   * Perform graceful restart with coordination
+   * @param preserve_connections Whether to preserve existing connections during restart
+   * @return VGREResult indicating restart success
+   */
+  VGREResult performGracefulRestart(bool preserve_connections = false);
+  /**
+   * Check if the cluster is ready for restart
+   * @return True if restart can be performed safely
+   */
+  bool isReadyForRestart() const;
+  /**
+   * Coordinate restart with peer nodes in mesh topology
+   * @param restart_delay_ms Delay before restart to allow coordination
+   * @return VGREResult indicating coordination success
+   */
+  VGREResult coordinateRestartWithPeers(uint32_t restart_delay_ms = 5000);
   VGREResult enableSecurity(bool enabled);
   bool isSecurityEnabled() const { return security_enabled_.load(); }
   SessionInfo getSecurityInfo() const;
-
-  // ── Phase 5: Partitioned Dispatch ────────────────────────────────────
   VGREResult launchPartitionedKernel(uint64_t kernel_id,
                                      const uint32_t grid_dim[3],
                                      const uint32_t block_dim[3],
@@ -292,15 +130,13 @@ public:
   VGREResult collectPartitionResults(uint64_t kernel_id,
                                      uint32_t total_partitions,
                                      int timeout_ms = 30000);
-  
-  // Distributed Collective Operations
   VGREResult allReduce(void* ptr, size_t count, int datatype);
-  
+  VGREResult barrier();
   struct ClientConnection {
     vgre_socket_t socket_fd;
     vgre_telemetry_t last_telemetry;
     std::atomic<bool> active{false};
-    std::atomic<bool> is_authenticating{false}; // Phase 13: Background handshake guard
+std::atomic<bool> is_authenticating{false}; 
     uint64_t handshake_start_ms{0};
     std::vector<uint8_t> rx_buffer;
     bool expecting_type = true;
@@ -315,69 +151,51 @@ public:
     uint64_t cpu_memory = 0;
     bool has_igpu = false;
     char igpu_name[64] = {};
-    bool capability_received = false; // true after CAPABILITY packet received from worker
+bool capability_received = false; 
     std::string ip_address;
     int port = 0;
-    std::unique_ptr<SecureChannel> secureChannel;
+    std::unique_ptr<SecureChannel> secure_channel;
     std::atomic<bool> security_established{false};
-    bool security_enabled = true;  // Hybrid auth: can be disabled for fallback mode
-    uint32_t packets_sent = 0; // Phase 10: for rotation trigger
-    
-    // Phase 12: TSS2 (Traffic-Shaping-Sync 2.0)
+bool security_enabled = true;  
+uint32_t packets_sent = 0; 
+    detail::PlatformType remote_platform = detail::PlatformType::UNKNOWN;
+bool is_mesh_peer = false;        
+bool can_be_master = true;        
+bool can_be_worker = true;        
+std::string platform_version;     
+uint32_t protocol_capabilities = 0; 
+bool supports_rdma = false;       
+bool supports_shm = false;        
+bool supports_security = true;    
+bool supports_collective_ops = false; 
+std::set<std::string> reachable_peers; 
+double connection_quality = 1.0;  
+uint64_t last_heartbeat_ms = 0;   
     struct OutgoingPacket {
       std::vector<uint8_t> data;
-      uint32_t priority; // 0 = high, 1 = low
+uint32_t priority; 
     };
     mutable std::mutex tx_mutex;
     std::deque<OutgoingPacket> high_priority_tx;
     std::deque<OutgoingPacket> low_priority_tx;
     std::atomic<uint32_t> in_flight_kernels{0};
-    
-    // Phase 11: SHM Support
     bool is_local = false;
-    std::unique_ptr<vgre::core::ShmManager> shmManager;
+    std::unique_ptr<vgre::core::ShmManager> shm_manager;
     uint64_t shm_offset = 0;
     std::unordered_set<void*> synced_handles;
-
-    // Measured inter-node bandwidth in Gb/s.
-    // Updated by the proactive connection loop after a micro-benchmark probe.
-    // Default 10.0 (typical 10GbE); local connections use a large sentinel.
     double network_bandwidth_gbps = 10.0;
-
-    // Bandwidth probe state: set when master sends BANDWIDTH_PROBE after
-    // CAPABILITY, cleared when BANDWIDTH_ACK arrives and bandwidth is computed.
     std::chrono::steady_clock::time_point bandwidth_probe_start{};
     bool bandwidth_probe_in_flight = false;
-    // Wall-clock time of the most recent bandwidth probe (for periodic re-probing).
     std::chrono::steady_clock::time_point last_bandwidth_probe_time{};
-
-    // Measured one-way network latency in ms (half the BANDWIDTH_ACK RTT).
-    // Default 1.0 ms (typical LAN); feeds the workload partitioner.
     double network_latency_ms = 1.0;
-
-    // ── RDMA zero-copy transport (optional, falls back to TCP) ────────────────
     std::unique_ptr<RDMAContext>    rdma_ctx;
     std::unique_ptr<RDMAConnection> rdma_conn;
-    bool rdma_connected = false;  // true after QP reaches RTS state
-
-    // A5: HMAC circuit-breaker — counts consecutive ERR_AUTH_FAILED returns
-    // from recvSecure(). After 5, the connection is closed and the address
-    // enters a 60-second proactive backoff (possible key-mismatch or attack).
+bool rdma_connected = false;  
     int hmac_failure_count{0};
-
-    // MITM-downgrade guard: when VGRE_ALLOW_AUTH_FALLBACK is set and a token
-    // mismatch is detected, the retry handshake uses this token instead of
-    // disabling security.  Keeps the channel encrypted even in fallback mode.
-    // Empty = use parent_->auth_token_str_ (normal path).
     std::string effective_auth_token;
-
-    // Per-connection packet rate limiter (token bucket, 1-second window).
-    // Configurable via VGRE_CLUSTER_MAX_PACKETS_PER_SEC (default 10000).
-    // Protects against packet-flood DoS from a connected but authenticated peer.
-    uint64_t rate_window_start_ms{0}; // wall-clock start of current 1s window
-    uint32_t rate_window_count{0};    // packets seen in current window
+uint64_t rate_window_start_ms{0}; 
+uint32_t rate_window_count{0};    
   };
-
   struct ClusterNodeInfo {
     std::string ip_address;
     int port;
@@ -389,29 +207,30 @@ public:
     char igpu_name[64];
     bool security_established;
     bool is_authenticating;
+    int worker_idx;
   };
-
   void getConnectedNodes(std::vector<ClusterNodeInfo> &outNodes) const;
-
-  // Phase 10: Wait for a specific kernel result from the cluster
+  void getAggregatedTelemetry(vgre_telemetry_t &outCombined) const;
   VGREResult waitForRemoteResult(uint64_t kernel_id, int timeout_ms = 30000);
-
   bool isEnabled() const { return enabled_.load(); }
   bool isMaster() const { return is_master_; }
   bool isWorker() const { return !is_master_; }
-
   TCPClusterManager();
   ~TCPClusterManager();
-
+  TCPClusterManager(
+    std::unique_ptr<ISocketFactory> socket_factory,
+    std::unique_ptr<IMemoryManager> memory_manager,
+    std::unique_ptr<ISecureChannelFactory> security_factory
+  );
 private:
-  // Friend classes for modular architecture
   friend class ConnectionManager;
   friend class DiscoveryManager;
   friend class SecurityManager;
   friend class CollectiveOpsManager;
   friend class DispatchManager;
-  
-  // Modular architecture components
+  std::unique_ptr<ISocketFactory> socket_factory_;
+  std::unique_ptr<IMemoryManager> memory_manager_;
+  std::unique_ptr<ISecureChannelFactory> security_factory_;
   std::unique_ptr<ConnectionManager> connection_manager_;
   std::unique_ptr<DiscoveryManager> discovery_manager_;
   std::unique_ptr<PacketHandler> packet_handler_;
@@ -419,15 +238,8 @@ private:
   std::unique_ptr<MemorySyncManager> memory_sync_manager_;
   std::unique_ptr<CollectiveOpsManager> collective_ops_manager_;
   std::unique_ptr<DispatchManager> dispatch_manager_;
-  
-  // Using vgre::common types
+  std::unique_ptr<WindowsSocketManager> windows_socket_manager_;
   using vgre_pollfd = vgre::common::vgre_pollfd;
-  // ── Connection rate limiter ─────────────────────────────────────────────
-  // Prevents handshake-flood DoS: limits new TCP connections per source IP to
-  // kMaxPerWindow within a rolling kWindowSeconds window.
-  // Both limits are configurable via environment variables:
-  //   VGRE_CLUSTER_MAX_CONN_PER_WINDOW  (default 10)
-  //   VGRE_CLUSTER_CONN_WINDOW_SEC      (default 60)
   struct ConnectionRateLimiter {
     static int getMaxPerWindow() {
       static const int v = []() -> int {
@@ -445,11 +257,9 @@ private:
       }();
       return v;
     }
-
     std::mutex mtx;
     std::unordered_map<std::string,
         std::deque<std::chrono::steady_clock::time_point>> attempts;
-
     bool isAllowed(const std::string &ip) {
       std::lock_guard<std::mutex> lk(mtx);
       auto now = std::chrono::steady_clock::now();
@@ -462,24 +272,23 @@ private:
       }
       return static_cast<int>(q.size()) < getMaxPerWindow();
     }
-
     void record(const std::string &ip) {
       std::lock_guard<std::mutex> lk(mtx);
       attempts[ip].push_back(std::chrono::steady_clock::now());
     }
   };
   ConnectionRateLimiter rateLimiter_;
-
-  // Socket logic
   void serverLoop();
+  void cleanupServerAuthThreads();
+  void performServerMaintenance();
+  void handleNewInboundConnection();
+  void handleClientDataEvents(std::vector<vgre_pollfd>& fds);
+  void processServerPackets(std::shared_ptr<ClientConnection> client);
   void clientLoop();
   void handleRemoteCommand(const RemoteCommandPacket &pkt);
   void handlePartitionDispatch(const PartitionDispatchPacket &pkt);
-  
-  // Packet construction helper
   std::vector<uint8_t> constructPacket(PacketType type, const void* payload, size_t payloadLen);
-  
-  // Delta-sync helpers
+  std::vector<uint8_t> constructMeshPacket(PacketType type, const void* payload, size_t payloadLen, detail::PlatformType source_platform);
   VGREResult syncPointerToWorker(void* ptr, uint64_t handle, std::shared_ptr<ClientConnection> client);
   VGREResult sendDeltaSync(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client);
   VGREResult sendDeltaSyncWithRetry(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client);
@@ -488,45 +297,27 @@ private:
   VGREResult sendFullSync(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client);
   VGREResult sendFullSyncSHM(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client);
   VGREResult sendFullSyncTCP(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client);
-  
-  // Argument serialization helpers
   VGREResult streamArgumentsToWorker(void** args, int num_args, uint64_t kernel_id, std::shared_ptr<ClientConnection> client);
   VGREResult sendStructArg(void* arg, int arg_index, uint64_t kernel_id, std::shared_ptr<ClientConnection> client);
   VGREResult sendPointerArg(void* arg, int arg_index, std::shared_ptr<ClientConnection> client);
   VGREResult sendScalarArg(void* arg, int arg_index, ArgType type, std::shared_ptr<ClientConnection> client);
-  
-  // Blocking I/O helper
   VGREResult waitForData(vgre_socket_t fd, int timeout_ms);
-  
-  // Diagnostic helper
   std::string hexDump(const uint8_t* data, size_t max_bytes);
-  
-  // UDP auto-discovery loops are implemented inside DiscoveryManager.
-  void processClientStagingBuffer(); // Client data processor
+void processClientStagingBuffer();
   void flush_tx_queues(std::shared_ptr<ClientConnection> client);
   void parseProactiveNodes();
+public:
   void parseMeshPeers();
-
-  // Phase 5: Security handshake
-  // ── Phase 13: IPC Visibility Support ──────────────────────────────────
+private:
   void syncToIPC();
-
   VGREResult performSecureHandshake(std::shared_ptr<ClientConnection> client);
   VGREResult performClientSecureHandshake();
-  // Mesh: client-role handshake for inbound connections from mesh peers.
   VGREResult performPeerClientHandshake(std::shared_ptr<ClientConnection> peer);
-
   std::atomic<bool> enabled_{false};
   std::atomic<bool> security_enabled_{false};
   uint64_t auth_token_ = 0;
-  // auth_token_str_ is written once in initialize() before worker threads are
-  // launched.  All subsequent accesses are reads from those threads; the mutex
-  // below makes re-initialization safe and prevents future data races if the
-  // field is ever written again after threads start.
   mutable std::recursive_mutex auth_token_mutex_;
-  std::string auth_token_str_; // raw token string for PBKDF2
-  
-  // Worker-side state for incoming data
+std::string auth_token_str_; 
   uint64_t pending_target_ptr_ = 0;
   uint32_t pending_data_size_ = 0;
   uint32_t pending_num_ranges_ = 0;
@@ -538,57 +329,45 @@ private:
   uint32_t pending_struct_arg_index_ = 0;
   uint32_t pending_struct_arg_size_ = 0;
   ReceiveState receive_state_ = ReceiveState::IDLE;
-  
-  // Collective operation state (master-side)
   uint32_t pending_collective_op_type_ = 0;
   uint32_t pending_collective_datatype_ = 0;
   uint64_t pending_collective_count_ = 0;
-
   bool is_master_ = false;
-#if defined(_WIN32)
-  bool wsa_started_ = false; // tracks WSAStartup calls so WSACleanup is always paired
-#endif
   int port_ = 7777;
   std::string host_;
-
-  // Threading
   std::thread cluster_thread_;
-  std::thread client_loop_thread_;   // standby worker: clientLoop when master dials in
+std::thread client_loop_thread_;   
   std::thread data_processor_thread_;
+std::thread monitoring_thread_;    
   std::vector<std::string> proactive_worker_addresses_;
-  // Mesh topology: set of peer IPs that are mesh peers (any-to-any).
-  // Inbound connections from these IPs use the HMAC-client handshake role.
   std::set<std::string> mesh_peer_ips_;
-
-  // Proactive-connection handshake backoff (per remote IP).
-  // After consecutive handshake failures the proactive loop backs off
-  // exponentially (5 s → 20 s → 60 s → … up to 300 s) to avoid log spam
-  // and unnecessary network churn against workers that don't yet support
-  // Phase 5 security.  Cleared whenever enableSecurity() is called so the
-  // new security state takes effect with a fresh start.
+  bool mesh_topology_enabled_ = false;
+  detail::PlatformType local_platform_;
+  std::string local_platform_name_;
+  mutable std::mutex mesh_topology_mutex_;
+  struct MeshPeerInfo {
+    std::string ip_address;
+    int port;
+    detail::PlatformType platform;
+    bool is_active;
+    bool can_be_master;
+    bool can_be_worker;
+    std::chrono::steady_clock::time_point last_seen;
+  };
+  std::map<std::string, MeshPeerInfo> mesh_peers_;
   mutable std::mutex proactive_backoff_mutex_;
   std::map<std::string, int> proactive_fail_counts_;
   std::map<std::string, std::chrono::steady_clock::time_point> proactive_backoff_until_;
-
-  // Inbound handshake threads spawned by serverLoop (one per accepted connection
-  // when security is enabled).  Stored here rather than detached so shutdown()
-  // can join them after cluster_thread_ exits, preventing UB from threads that
-  // access 'this' after TCPClusterManager is destroyed.
-  std::vector<std::thread> server_auth_threads_;
+  struct AuthEntry {
+    std::thread t;
+    std::shared_ptr<std::atomic<bool>> done;
+  };
+  std::vector<AuthEntry> server_auth_threads_;
   std::mutex server_auth_mutex_;
-
-  // Master State
   vgre_socket_t server_fd_ = (vgre_socket_t)-1;
   std::vector<std::shared_ptr<ClientConnection>> clients_;
   mutable std::recursive_mutex clients_mutex_;
-
-  // Client State
   vgre_socket_t client_fd_ = (vgre_socket_t)-1;
-  // Atomic flag that mirrors (client_fd_ != INVALID). Polling loops in
-  // udpDiscoveryLoop read this without acquiring client_mutex_ to avoid
-  // holding a mutex across blocking recvfrom() calls. All writes still go
-  // through client_mutex_; this flag is always set/cleared in the same
-  // critical section that assigns/clears client_fd_.
   std::atomic<bool> has_master_fd_{false};
   vgre_telemetry_t client_telemetry_buffer_{};
   std::unique_ptr<SecureChannel> client_secure_channel_;
@@ -600,12 +379,11 @@ private:
   std::mutex client_tx_mutex_;
   std::deque<ClientConnection::OutgoingPacket> client_high_priority_tx_;
   std::deque<ClientConnection::OutgoingPacket> client_low_priority_tx_;
-  
-  // Phase 11: Client-side SHM
   std::unique_ptr<vgre::core::ShmManager> client_shm_manager_;
   bool client_shm_enabled_ = false;
-
-  // Double-buffered async data receiving
+  std::unique_ptr<RDMAContext>    client_rdma_ctx_;
+  std::unique_ptr<RDMAConnection> client_rdma_conn_;
+  bool client_rdma_connected_ = false;
   std::vector<uint8_t> client_rx_staging_A_;
   std::vector<uint8_t> client_rx_staging_B_;
   std::vector<uint8_t>* active_staging_ = &client_rx_staging_A_;
@@ -613,23 +391,16 @@ private:
   std::mutex staging_mutex_;
   std::condition_variable staging_cv_;
   std::atomic<bool> staging_ready_{false};
-
-  // Worker side: storage for incoming arguments
   struct PendingArg {
     uint8_t type;
     uint64_t value;
     std::vector<uint8_t> data;
   };
   std::map<uint32_t, PendingArg> pending_args_;
-
-  // Dispatch result tracking (managed by DispatchManager but kept here for shutdown)
   std::mutex remote_results_mutex_;
   std::condition_variable remote_results_cv_;
   std::mutex partition_mutex_;
   std::condition_variable partition_cv_;
-
-  // Distributed Collective Primitives (moved to CollectiveOpsManager, kept here for backward compat)
-  // Note: These are now managed by collective_ops_manager_ but kept as references for friend access
   std::mutex reduction_mutex_;
   std::condition_variable reduction_cv_;
   std::atomic<int> reduction_count_{0};
@@ -638,20 +409,14 @@ private:
   uint32_t reduction_datatype_{0};
   size_t reduction_element_count_{0};
   uint64_t reduction_sequence_{0};
-  
-  // Phase 12: Global Traffic Telemetry
   mutable std::atomic<uint64_t> global_packets_sent_{0};
   mutable std::atomic<uint64_t> global_bytes_sent_{0};
   mutable std::atomic<uint64_t> global_packets_received_{0};
   mutable std::atomic<uint64_t> global_bytes_received_{0};
-
-  // Cooperative Barrier (Zero-Simulation)
   std::mutex barrier_mutex_;
   uint32_t barrier_count_ = 0;
   std::condition_variable barrier_cv_;
 };
-
-} // namespace advanced
-} // namespace vgre
-
+} 
+} 
 // End of file extension for proactive connections

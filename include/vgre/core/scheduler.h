@@ -12,6 +12,7 @@
 #include <queue>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace vgre {
@@ -171,6 +172,14 @@ private:
   struct StreamQueue;
   void tryProcessStream(std::shared_ptr<StreamQueue> sq, StreamId stream);
 
+  // Helper functions shared across split implementation files
+  static bool enqueueWithWorkerFallback(int workerIdx,
+                                       WorkItem&& item,
+                                       std::vector<std::unique_ptr<ChaseLevDeque<WorkItem*>>>& workerDeques,
+                                       std::priority_queue<WorkItem>& globalQueue,
+                                       std::mutex& queueMutex);
+  bool hasNumaNode(int numaNode) const;
+
   std::vector<std::thread> workers_;
   std::vector<std::unique_ptr<ChaseLevDeque<WorkItem*>>> workerDeques_;
   std::priority_queue<WorkItem> queue_; // Global ready queue (work-stealing fallback)
@@ -179,6 +188,8 @@ private:
   std::unordered_map<int, std::priority_queue<WorkItem>> numaQueues_;
   // NUMA node assigned to each worker thread (index == worker index in workers_).
   std::vector<int> workerNumaNodes_;
+  // Set of NUMA nodes for O(1) membership testing (kept in sync with workerNumaNodes_)
+  std::unordered_set<int> workerNumaNodeSet_;
 
   // Per-stream serialization: StreamId -> Queue of task nodes
   struct StreamQueue {

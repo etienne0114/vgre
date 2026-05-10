@@ -144,6 +144,20 @@ inline int vgre_set_tcp_keepalive(vgre_socket_t s, int idleS, int intvlS, int cn
 #endif
 }
 
+// ── TCP_NODELAY ────────────────────────────────────────────────────────────
+// Disable Nagle's algorithm so small control packets (scalar args, handshake
+// frames, partition results) are sent immediately rather than coalesced for up
+// to 200 ms. Critical for kernel dispatch latency on cluster connections.
+inline int vgre_set_tcp_nodelay(vgre_socket_t s) {
+  int opt = 1;
+#ifdef _WIN32
+  return setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
+                    reinterpret_cast<const char*>(&opt), sizeof(opt));
+#else
+  return setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+#endif
+}
+
 // ── SO_NOSIGPIPE (macOS only) ─────────────────────────────────────────────
 // On macOS, MSG_NOSIGNAL is not a valid flag for send(). The equivalent
 // protection against SIGPIPE is SO_NOSIGPIPE, set once at socket creation.

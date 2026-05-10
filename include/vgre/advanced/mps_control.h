@@ -82,6 +82,7 @@ struct MPSLaunchReq {
     uint32_t gridX, gridY, gridZ;
     uint32_t blockX, blockY, blockZ;
     uint64_t sharedMemBytes;
+    uint32_t numArgs;
 };
 
 struct MPSLaunchResp {
@@ -140,7 +141,8 @@ public:
     bool     launchKernel(const char* name,
                           uint32_t gx, uint32_t gy, uint32_t gz,
                           uint32_t bx, uint32_t by, uint32_t bz,
-                          uint64_t sharedMem);
+                          uint64_t sharedMem,
+                          void** args, int numArgs);
     bool     sync();
     void     disconnect();
 
