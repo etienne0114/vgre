@@ -48,6 +48,10 @@ vgre::VGREResult GraphManager::cloneGraph(GraphId srcId, GraphId &outCloneId) {
   clone->id = nextGraphId_++;
   clone->nextNodeId = it->second->nextNodeId;
   clone->nodes = it->second->nodes;
+  // Rebuild node index map for the cloned graph
+  for (size_t i = 0; i < clone->nodes.size(); ++i) {
+    clone->nodeIndex[clone->nodes[i].nodeId] = i;
+  }
   graphs_[clone->id] = clone;
   outCloneId = clone->id;
   VGRE_LOG_INFO("GraphManager", "Cloned graph " + std::to_string(srcId) +
@@ -170,6 +174,8 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
 
   outNodeId = node.nodeId;
   it->second->nodes.push_back(std::move(node));
+  // Update node index map for O(1) lookup
+  it->second->nodeIndex[outNodeId] = it->second->nodes.size() - 1;
   return vgre::VGREResult::SUCCESS;
 }
 
@@ -210,6 +216,8 @@ vgre::VGREResult GraphManager::addMemcpyNodeWithDepsOut(
 
   outNodeId = node.nodeId;
   it->second->nodes.push_back(std::move(node));
+  // Update node index map for O(1) lookup
+  it->second->nodeIndex[outNodeId] = it->second->nodes.size() - 1;
   return vgre::VGREResult::SUCCESS;
 }
 
@@ -256,6 +264,8 @@ vgre::VGREResult GraphManager::addConditionalNodeWithDepsOut(
 
   outNodeId = node.nodeId;
   it->second->nodes.push_back(std::move(node));
+  // Update node index map for O(1) lookup
+  it->second->nodeIndex[outNodeId] = it->second->nodes.size() - 1;
   VGRE_LOG_INFO("GraphManager",
                 "Added CONDITIONAL node " + std::to_string(outNodeId) +
                     " (type=" +
@@ -282,18 +292,13 @@ vgre::VGREResult GraphManager::addDependency(GraphId id, uint64_t nodeId,
   if (it == graphs_.end())
     return vgre::VGREResult::ERR_INVALID_VALUE;
 
-  GraphNode *node = nullptr;
-  bool depFound = false;
-  for (auto &n : it->second->nodes) {
-    if (n.nodeId == nodeId) {
-      node = &n;
-    }
-    if (n.nodeId == dependsOn) {
-      depFound = true;
-    }
-  }
-  if (!node || !depFound)
+  // Use nodeIndex map for O(1) lookup instead of O(n) linear search
+  auto nodeIt = it->second->nodeIndex.find(nodeId);
+  auto depIt = it->second->nodeIndex.find(dependsOn);
+  if (nodeIt == it->second->nodeIndex.end() || depIt == it->second->nodeIndex.end())
     return vgre::VGREResult::ERR_INVALID_VALUE;
+
+  GraphNode *node = &it->second->nodes[nodeIt->second];
 
   for (auto d : node->deps) {
     if (d == dependsOn) {
@@ -312,14 +317,13 @@ vgre::VGREResult GraphManager::updateKernelNodeArgs(
   if (it == graphs_.end())
     return vgre::VGREResult::ERR_INVALID_VALUE;
 
-  GraphNode *node = nullptr;
-  for (auto &n : it->second->nodes) {
-    if (n.nodeId == nodeId) {
-      node = &n;
-      break;
-    }
-  }
-  if (!node || node->type != GraphNodeType::KERNEL)
+  // Use nodeIndex map for O(1) lookup instead of O(n) linear search
+  auto nodeIt = it->second->nodeIndex.find(nodeId);
+  if (nodeIt == it->second->nodeIndex.end())
+    return vgre::VGREResult::ERR_INVALID_VALUE;
+
+  GraphNode *node = &it->second->nodes[nodeIt->second];
+  if (node->type != GraphNodeType::KERNEL)
     return vgre::VGREResult::ERR_INVALID_VALUE;
 
   node->capturedArgs.clear();
@@ -370,14 +374,13 @@ vgre::VGREResult GraphManager::updateMemcpyNode(GraphId id, uint64_t nodeId,
   if (it == graphs_.end())
     return vgre::VGREResult::ERR_INVALID_VALUE;
 
-  GraphNode *node = nullptr;
-  for (auto &n : it->second->nodes) {
-    if (n.nodeId == nodeId) {
-      node = &n;
-      break;
-    }
-  }
-  if (!node || node->type != GraphNodeType::MEMCPY)
+  // Use nodeIndex map for O(1) lookup instead of O(n) linear search
+  auto nodeIt = it->second->nodeIndex.find(nodeId);
+  if (nodeIt == it->second->nodeIndex.end())
+    return vgre::VGREResult::ERR_INVALID_VALUE;
+
+  GraphNode *node = &it->second->nodes[nodeIt->second];
+  if (node->type != GraphNodeType::MEMCPY)
     return vgre::VGREResult::ERR_INVALID_VALUE;
   if (!dst || !src || count == 0)
     return vgre::VGREResult::ERR_INVALID_VALUE;
