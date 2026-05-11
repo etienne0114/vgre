@@ -28,11 +28,11 @@ VGREResult Event::record(StreamId stream) {
   (void)vgre::core::RuntimeEngine::instance().getDevice().getStreamPriority(
       stream, priority);
   
-  // In test mode, execute the task synchronously to avoid scheduler issues
-  // This ensures the event is recorded immediately without waiting for worker threads
   try {
-    task(); // Execute synchronously
-    sharedPromise->set_value(std::chrono::steady_clock::now());
+    auto fut = vgre::core::Scheduler::instance().submitStreamTask(stream, task, priority);
+    if (!fut.valid()) {
+      task(); // Execute synchronously as fallback
+    }
     res = VGREResult::SUCCESS;
   } catch (...) {
     res = VGREResult::ERR_LAUNCH_FAILURE;

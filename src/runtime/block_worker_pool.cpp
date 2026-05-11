@@ -146,8 +146,6 @@ void BlockWorkerPool::dispatch(int threadCount, void (*task)(int tid, void* arg)
         taskQueue_.push(t);
     }
 
-    signal->barrier->arrive_and_wait();
-
     // Memory fence + lock to prevent lost wakeups on the condition variable
     { std::lock_guard<std::mutex> lk(queueMutex_); }
     queueCv_.notify_all();
