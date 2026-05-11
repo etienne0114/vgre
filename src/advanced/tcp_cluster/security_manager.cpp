@@ -48,13 +48,9 @@ static void computeKeyVerification(const std::string& token, const char* label, 
 }
 
 SecurityManager::SecurityManager(TCPClusterManager* parent) : parent_(parent) {
+  // Production policy: strict authentication only. No runtime fallback modes.
   strict_auth_mode_ = true;
-  const char* fallback = std::getenv("VGRE_ALLOW_AUTH_FALLBACK");
-  if (fallback && (std::string(fallback) == "1" || std::string(fallback) == "true")) {
-    strict_auth_mode_ = false;
-    VGRE_LOG_WARN("TCPCluster", "SECURITY WARNING: Auth fallback enabled - NOT for production");
-  }
-  VGRE_LOG_INFO("TCPCluster", "SecurityManager initialized - Mode: " + std::string(strict_auth_mode_ ? "STRICT" : "FALLBACK"));
+  VGRE_LOG_INFO("TCPCluster", "SecurityManager initialized - Mode: STRICT");
 }
 
 VGREResult SecurityManager::enableSecurity(bool enabled) {
@@ -76,18 +72,14 @@ VGREResult SecurityManager::enableSecurity(bool enabled) {
       { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
     }
   }
-  // If still empty, auto-generate a random token
-  if (token.empty() && enabled) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<uint64_t> dist(0, UINT64_MAX);
-    std::ostringstream oss;
-    oss << "auto_generated_" << std::hex << std::setfill('0') << std::setw(16) << dist(gen);
-    token = oss.str();
+  // Production policy: auto-generate a secure token if none is configured.
+  // This guarantees clusters are secure out-of-the-box without requiring
+  // manual token setup.
+  if (enabled && token.empty()) {
+    token = CryptoUtils::generateSecureToken(32);
     { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
-    VGRE_LOG_WARN("TCPCluster", "Auto-generated auth token (not recommended for production): " + token.substr(0, 16) + "...");
+    VGRE_LOG_INFO("TCPCluster", "Auto-generated secure auth token (length=" + std::to_string(token.size()) + ")");
   }
-  if (enabled && token.empty()) { VGRE_LOG_ERROR("TCPCluster", "Cannot enable security: VGRE_TCP_AUTH_TOKEN not set"); return VGREResult::ERR_INVALID_VALUE; }
   if (enabled && token != "VGRE_CLUSTER_DEFAULT_NOAUTH_v1" && token.size() < 16) { VGRE_LOG_WARN("TCPCluster", "Auth token too short - use 16+ characters for production"); }
   parent_->security_enabled_ = enabled;
   VGRE_LOG_INFO("TCPCluster", std::string("Security ") + (enabled ? "enabled" : "disabled"));
@@ -211,9 +203,11 @@ VGREResult SecurityManager::performServerHandshake(std::shared_ptr<TCPClusterMan
   // Verify key
   uint8_t expectedKV[crypto::kSHA256DigestLen]; computeKeyVerification(token, "VGRE_KEYVER_WORKER_v1", clientHs.nonce, expectedKV);
   if (!crypto::secure_compare(clientHs.key_verification, expectedKV, crypto::kSHA256DigestLen)) {
-    if (strict_auth_mode_ || !client.effective_auth_token.empty()) {
-      vgre::common::vgre_close_socket(client.socket_fd); client.socket_fd = vgre::common::VGRE_INVALID_SOCKET; client.active = false; return VGREResult::ERR_AUTH_FAILED;
-    } else { vgre::common::vgre_close_socket(client.socket_fd); client.socket_fd = vgre::common::VGRE_INVALID_SOCKET; return VGREResult::ERR_AUTH_RETRY; }
+    // Production policy: always fail closed on auth mismatch.
+    vgre::common::vgre_close_socket(client.socket_fd);
+    client.socket_fd = vgre::common::VGRE_INVALID_SOCKET;
+    client.active = false;
+    return VGREResult::ERR_AUTH_FAILED;
   }
   
   // Create secure channel
@@ -263,7 +257,13 @@ VGREResult SecurityManager::performClientHandshake() {
   
   if (rx.size() < sizeof(VSBPHeader)) return VGREResult::ERR_IO;
   VSBPHeader* phdr = reinterpret_cast<VSBPHeader*>(rx.data());
-  if (phdr->magic != VSBP_MAGIC || phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) { parent_->security_enabled_ = false; return VGREResult::SUCCESS; }
+  if (phdr->magic != VSBP_MAGIC ||
+      phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
+    // Production policy: do not silently downgrade to plaintext. If security
+    // is enabled and we didn't receive the expected handshake, treat it as a
+    // protocol/order violation.
+    return VGREResult::ERR_AUTH_FAILED;
+  }
   
   SecureHandshakePacket masterHs{}; if (rx.size() < expected) return VGREResult::ERR_IO;
   std::memcpy(&masterHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));

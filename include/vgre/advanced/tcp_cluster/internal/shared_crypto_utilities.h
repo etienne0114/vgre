@@ -11,6 +11,7 @@ public:
     static std::string computeHmacHex(const std::string& key, const std::string& msg);
     static bool verifyHmacHex(const std::string& key, const std::string& msg, const std::string& hexTag);
     static std::string computeTokenFingerprint(const std::string& token);
+    static std::string generateSecureToken(size_t length);
 };
 
 class TimeUtils {
@@ -19,6 +20,7 @@ public:
     static uint64_t getCurrentTimestampMs();
     static double getElapsedTimeMs(uint64_t start_ms);
     static double calculateElapsedMs(std::chrono::steady_clock::time_point start);
+    static std::string formatDuration(int ms);
 };
 
 } // namespace advanced
