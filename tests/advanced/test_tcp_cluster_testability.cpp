@@ -32,7 +32,7 @@
 #include "vgre/advanced/tcp_cluster/internal/interfaces.h"
 
 // Try to include mock implementations (will fail on unfixed code)  
-#include "tests/advanced/tcp_cluster/mocks.h"
+#include "tcp_cluster/mocks.h"
 
 #include <iostream>
 #include <cassert>
@@ -61,6 +61,10 @@ void test_interface_abstractions_exist() {
     static_assert(std::is_abstract_v<IMemoryManager>,
         "IMemoryManager interface should exist and be abstract");
     
+    // Test that IKernelManager interface exists and is abstract
+    static_assert(std::is_abstract_v<IKernelManager>,
+        "IKernelManager interface should exist and be abstract");
+    
     // Test that ISecureChannelFactory interface exists and is abstract
     static_assert(std::is_abstract_v<ISecureChannelFactory>,
         "ISecureChannelFactory interface should exist and be abstract");
@@ -80,6 +84,7 @@ void test_dependency_injection_supported() {
     // Create real implementations for testing
     auto socket_factory = std::make_unique<RealSocketFactory>();
     auto memory_manager = std::make_unique<RealMemoryManager>();
+    auto kernel_manager = std::make_unique<RealKernelManager>();
     auto security_factory = std::make_unique<RealSecureChannelFactory>();
     
     // Test that TCPClusterManager constructor accepts injected dependencies
@@ -88,6 +93,7 @@ void test_dependency_injection_supported() {
     TCPClusterManager manager(
         std::move(socket_factory),
         std::move(memory_manager),
+        std::move(kernel_manager),
         std::move(security_factory)
     );
     
@@ -136,11 +142,13 @@ void test_parallel_instances_supported() {
         try {
             auto socket1 = std::make_unique<RealSocketFactory>();
             auto memory1 = std::make_unique<RealMemoryManager>();
+            auto kernel1 = std::make_unique<RealKernelManager>();
             auto security1 = std::make_unique<RealSecureChannelFactory>();
             
             TCPClusterManager manager1(
                 std::move(socket1),
                 std::move(memory1),
+                std::move(kernel1),
                 std::move(security1)
             );
             instance1_created = true;
@@ -153,11 +161,13 @@ void test_parallel_instances_supported() {
         try {
             auto socket2 = std::make_unique<RealSocketFactory>();
             auto memory2 = std::make_unique<RealMemoryManager>();
+            auto kernel2 = std::make_unique<RealKernelManager>();
             auto security2 = std::make_unique<RealSecureChannelFactory>();
             
             TCPClusterManager manager2(
                 std::move(socket2),
                 std::move(memory2),
+                std::move(kernel2),
                 std::move(security2)
             );
             instance2_created = true;
@@ -188,21 +198,25 @@ void test_no_global_state_interference() {
     // Create two instances with different configurations
     auto socket1 = std::make_unique<RealSocketFactory>();
     auto memory1 = std::make_unique<RealMemoryManager>();
+    auto kernel1 = std::make_unique<RealKernelManager>();
     auto security1 = std::make_unique<RealSecureChannelFactory>();
     
     auto socket2 = std::make_unique<RealSocketFactory>();
     auto memory2 = std::make_unique<RealMemoryManager>();
+    auto kernel2 = std::make_unique<RealKernelManager>();
     auto security2 = std::make_unique<RealSecureChannelFactory>();
     
     TCPClusterManager manager1(
         std::move(socket1),
         std::move(memory1),
+        std::move(kernel1),
         std::move(security1)
     );
     
     TCPClusterManager manager2(
         std::move(socket2),
         std::move(memory2),
+        std::move(kernel2),
         std::move(security2)
     );
     

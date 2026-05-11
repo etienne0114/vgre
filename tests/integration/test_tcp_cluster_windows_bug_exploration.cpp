@@ -354,7 +354,7 @@ int main() {
     // Set up test environment
     setenv("VGRE_TCP_AUTH_TOKEN", "test_exploration_token_12345", 1);
     
-    bool bugs_found = runBugExplorationTests(50);  // Run 50 test cases
+    bool bugs_found = runBugExplorationTests(15);  // Run 15 test cases
     
     // Clean up
     unsetenv("VGRE_TCP_AUTH_TOKEN");

@@ -1,8 +1,10 @@
 /**
  * VGRE TCP Cluster Security - Hybrid Authentication Mode Integration Tests
  *
- * Tests for the hybrid authentication mode that supports both strict and
- * fallback modes for handling token mismatches between master and worker nodes.
+ * Production authentication mode tests.
+ *
+ * Production policy: security auto-generates a secure token if none is
+ * configured, guaranteeing clusters are secure out-of-the-box.
  */
 
 #include <cstdlib>
@@ -58,7 +60,7 @@ static bool test_env_parsing() {
     return true;
 }
 
-// Test 2: ERR_AUTH_RETRY error code is defined and has a non-empty string
+// Test 2: ERR_AUTH_RETRY error code exists (deprecated) and has a string
 static bool test_auth_retry_error_code() {
     std::cout << "[TEST 2] ERR_AUTH_RETRY error code...\n";
 
@@ -72,13 +74,13 @@ static bool test_auth_retry_error_code() {
     CHECK(fs != nullptr);
     CHECK(std::strlen(fs) > 0);
 
-    std::cout << "[PASS] ERR_AUTH_RETRY = \"" << str << "\"\n";
+    std::cout << "[PASS] ERR_AUTH_RETRY (deprecated) = \"" << str << "\"\n";
     return true;
 }
 
-// Test 3: Default (unset) is fallback mode — security enables without crash
-static bool test_default_fallback_mode() {
-    std::cout << "[TEST 3] Default fallback mode...\n";
+// Test 3: Enabling security without a token auto-generates one
+static bool test_enable_security_auto_generates_token() {
+    std::cout << "[TEST 3] enableSecurity(true) auto-generates token...\n";
 
     unsetenv("VGRE_CLUSTER_STRICT_AUTH");
     unsetenv("VGRE_TCP_AUTH_TOKEN");
@@ -91,7 +93,7 @@ static bool test_default_fallback_mode() {
     CHECK(mgr.isSecurityEnabled());
     mgr.shutdown();
 
-    std::cout << "[PASS] Default fallback mode\n";
+    std::cout << "[PASS] enableSecurity auto-generates token\n";
     return true;
 }
 
@@ -154,7 +156,7 @@ int main() {
     bool ok = true;
     ok &= test_env_parsing();
     ok &= test_auth_retry_error_code();
-    ok &= test_default_fallback_mode();
+    ok &= test_enable_security_auto_generates_token();
     ok &= test_strict_mode_opt_in();
     ok &= test_security_info_cipher();
     ok &= test_logging();

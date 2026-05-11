@@ -3,6 +3,13 @@
 #include "../common/test_utils.h"
 #include <iostream>
 
+#ifdef _WIN32
+inline int setenv(const char *name, const char *value, int overwrite) {
+    if (!overwrite && getenv(name)) return 0;
+    return _putenv_s(name, value);
+}
+#endif
+
 using namespace vgre;
 using namespace vgre::advanced;
 using namespace vgre::test;
@@ -201,6 +208,13 @@ bool test_tcp_cluster_integration() {
 }
 
 int main() {
+    // Deterministic CI/runtime behavior: Linux keyring/libsecret may be
+    // unavailable in headless test environments. Force encrypted-file backend
+    // for this integration suite so we validate token manager semantics
+    // independently of desktop keyring availability.
+    setenv("VGRE_TOKEN_BACKEND", "file", 1);
+    setenv("VGRE_TOKEN_FALLBACK_PATH", "./.vgre_test/tokens.enc", 1);
+
     TestRunner runner("Hardware Token Manager Test Suite");
     
     runner.runTest(test_initialization, "Initialization");
