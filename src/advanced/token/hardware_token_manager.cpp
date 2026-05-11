@@ -126,7 +126,8 @@ VGREResult HardwareTokenManager::storeToken(const std::string& service, const st
         return VGREResult::ERR_NOT_INITIALIZED;
     }
 
-    switch (backend_) {
+    auto storeOn = [&](BackendType b) -> VGREResult {
+        switch (b) {
 #if defined(__linux__)
         case BackendType::LINUX_KEYRING:
             return storeLinuxKeyring(service, token);
@@ -145,7 +146,43 @@ VGREResult HardwareTokenManager::storeToken(const std::string& service, const st
             return storeFallbackEncrypted(service, token);
         default:
             return VGREResult::ERR_NOT_SUPPORTED;
+        }
+    };
+
+    VGREResult r = storeOn(backend_);
+    if (r == VGREResult::SUCCESS) {
+        return r;
     }
+
+    // Operational failover: if the selected backend initializes but cannot
+    // perform store operations in this runtime (common in CI/sandboxed
+    // keyring sessions), downgrade to the next secure backend automatically.
+#if defined(__linux__)
+    const BackendType fallbackOrder[] = {
+        BackendType::LINUX_LIBSECRET,
+        BackendType::TPM_2_0,
+        BackendType::FALLBACK_ENCRYPTED
+    };
+    for (BackendType candidate : fallbackOrder) {
+        if (candidate == backend_) continue;
+        VGREResult initRes = VGREResult::ERR_NOT_SUPPORTED;
+        switch (candidate) {
+            case BackendType::LINUX_LIBSECRET: initRes = initLinuxLibsecret(); break;
+            case BackendType::TPM_2_0: initRes = initTPM(); break;
+            case BackendType::FALLBACK_ENCRYPTED: initRes = initFallbackEncrypted(); break;
+            default: break;
+        }
+        if (initRes != VGREResult::SUCCESS) continue;
+        VGREResult tryStore = storeOn(candidate);
+        if (tryStore == VGREResult::SUCCESS) {
+            backend_ = candidate;
+            VGRE_LOG_WARN("HardwareTokenManager", "Store failover to backend: " + getBackendName());
+            return VGREResult::SUCCESS;
+        }
+    }
+#endif
+
+    return r;
 }
 
 VGREResult HardwareTokenManager::getToken(const std::string& service, std::string& outToken) {
@@ -155,7 +192,8 @@ VGREResult HardwareTokenManager::getToken(const std::string& service, std::strin
         return VGREResult::ERR_NOT_INITIALIZED;
     }
 
-    switch (backend_) {
+    auto getOn = [&](BackendType b) -> VGREResult {
+        switch (b) {
 #if defined(__linux__)
         case BackendType::LINUX_KEYRING:
             return getLinuxKeyring(service, outToken);
@@ -174,7 +212,40 @@ VGREResult HardwareTokenManager::getToken(const std::string& service, std::strin
             return getFallbackEncrypted(service, outToken);
         default:
             return VGREResult::ERR_NOT_SUPPORTED;
+        }
+    };
+
+    VGREResult r = getOn(backend_);
+    if (r == VGREResult::SUCCESS || r == VGREResult::ERR_AUTH_FAILED) {
+        return r;
     }
+
+#if defined(__linux__)
+    const BackendType fallbackOrder[] = {
+        BackendType::LINUX_LIBSECRET,
+        BackendType::TPM_2_0,
+        BackendType::FALLBACK_ENCRYPTED
+    };
+    for (BackendType candidate : fallbackOrder) {
+        if (candidate == backend_) continue;
+        VGREResult initRes = VGREResult::ERR_NOT_SUPPORTED;
+        switch (candidate) {
+            case BackendType::LINUX_LIBSECRET: initRes = initLinuxLibsecret(); break;
+            case BackendType::TPM_2_0: initRes = initTPM(); break;
+            case BackendType::FALLBACK_ENCRYPTED: initRes = initFallbackEncrypted(); break;
+            default: break;
+        }
+        if (initRes != VGREResult::SUCCESS) continue;
+        VGREResult tryGet = getOn(candidate);
+        if (tryGet == VGREResult::SUCCESS || tryGet == VGREResult::ERR_AUTH_FAILED) {
+            backend_ = candidate;
+            VGRE_LOG_WARN("HardwareTokenManager", "Get failover to backend: " + getBackendName());
+            return tryGet;
+        }
+    }
+#endif
+
+    return r;
 }
 
 VGREResult HardwareTokenManager::deleteToken(const std::string& service) {
@@ -184,7 +255,8 @@ VGREResult HardwareTokenManager::deleteToken(const std::string& service) {
         return VGREResult::ERR_NOT_INITIALIZED;
     }
 
-    switch (backend_) {
+    auto delOn = [&](BackendType b) -> VGREResult {
+        switch (b) {
 #if defined(__linux__)
         case BackendType::LINUX_KEYRING:
             return deleteLinuxKeyring(service);
@@ -203,7 +275,40 @@ VGREResult HardwareTokenManager::deleteToken(const std::string& service) {
             return deleteFallbackEncrypted(service);
         default:
             return VGREResult::ERR_NOT_SUPPORTED;
+        }
+    };
+
+    VGREResult r = delOn(backend_);
+    if (r == VGREResult::SUCCESS || r == VGREResult::ERR_AUTH_FAILED) {
+        return r;
     }
+
+#if defined(__linux__)
+    const BackendType fallbackOrder[] = {
+        BackendType::LINUX_LIBSECRET,
+        BackendType::TPM_2_0,
+        BackendType::FALLBACK_ENCRYPTED
+    };
+    for (BackendType candidate : fallbackOrder) {
+        if (candidate == backend_) continue;
+        VGREResult initRes = VGREResult::ERR_NOT_SUPPORTED;
+        switch (candidate) {
+            case BackendType::LINUX_LIBSECRET: initRes = initLinuxLibsecret(); break;
+            case BackendType::TPM_2_0: initRes = initTPM(); break;
+            case BackendType::FALLBACK_ENCRYPTED: initRes = initFallbackEncrypted(); break;
+            default: break;
+        }
+        if (initRes != VGREResult::SUCCESS) continue;
+        VGREResult tryDel = delOn(candidate);
+        if (tryDel == VGREResult::SUCCESS || tryDel == VGREResult::ERR_AUTH_FAILED) {
+            backend_ = candidate;
+            VGRE_LOG_WARN("HardwareTokenManager", "Delete failover to backend: " + getBackendName());
+            return tryDel;
+        }
+    }
+#endif
+
+    return r;
 }
 
 bool HardwareTokenManager::hasToken(const std::string& service) {
