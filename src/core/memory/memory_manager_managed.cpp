@@ -114,8 +114,16 @@ VGREResult MemoryManager::memPrefetchAsync(const void *ptr, size_t count, Device
   // Physically force page faults ahead of time on the CPU executor thread.
   // This physically migrates pages into the active resident set before bulk kernel execution.
   volatile const char *p = static_cast<volatile const char *>(ptr);
-  const size_t PAGE_SIZE = 4096;
-  for (size_t i = 0; i < count; i += PAGE_SIZE) {
+  size_t pageSize = 4096;
+#if defined(_WIN32)
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  pageSize = static_cast<size_t>(si.dwPageSize);
+#else
+  long ps = sysconf(_SC_PAGESIZE);
+  if (ps > 0) pageSize = static_cast<size_t>(ps);
+#endif
+  for (size_t i = 0; i < count; i += pageSize) {
     char dummy = p[i];
     (void)dummy;
   }
@@ -246,7 +254,7 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
     allocRange_[static_cast<uint8_t*>(ptr)] = alignedSize;
 
     // Register in lock-free managed regions array for signal-safe lookup.
-    if (!registerManagedRegion(ptr, alignedSize)) {
+    if (!registerManagedRegion(ptr, alignedSize, (flags == 2))) {
       allocRange_.erase(static_cast<uint8_t*>(ptr));
       allocations_.erase(ptr);
 #if defined(_WIN32)
@@ -350,7 +358,7 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
     allocRange_[static_cast<uint8_t*>(ptr)] = alignedSize;
 
     // Register in lock-free managed regions array for signal-safe lookup.
-    if (!registerManagedRegion(ptr, alignedSize)) {
+    if (!registerManagedRegion(ptr, alignedSize, (flags == 2))) {
       allocRange_.erase(static_cast<uint8_t*>(ptr));
       allocations_.erase(ptr);
 #if defined(_WIN32)

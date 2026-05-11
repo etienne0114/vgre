@@ -230,8 +230,10 @@ LONG
           ManagedRegion &region = *regionPtr;
           DWORD oldProtect;
           // Precise Delta-Sync: Protect only the faulting page
-          void* pageAddr = reinterpret_cast<void*>(target & ~(4096 - 1));
-          if (VirtualProtect(pageAddr, 4096, PAGE_READWRITE, &oldProtect)) {
+          size_t pageSize = region.pageSize;
+          uintptr_t pageMask = ~(static_cast<uintptr_t>(pageSize) - 1);
+          void* pageAddr = reinterpret_cast<void*>(target & pageMask);
+          if (VirtualProtect(pageAddr, static_cast<SIZE_T>(pageSize), PAGE_READWRITE, &oldProtect)) {
             region.isResidentOnHost.store(true, std::memory_order_relaxed);
             
             if (exceptionInfo->ExceptionRecord->ExceptionInformation[0] == 1) {
@@ -273,8 +275,10 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
         ManagedRegion &region = *regionPtr;
         int prot = PROT_READ | PROT_WRITE;
         // Precise Delta-Sync: Protect only the faulting page
-        void* pageAddr = reinterpret_cast<void*>(target & ~(4096 - 1));
-        if (mprotect(pageAddr, 4096, prot) == 0) {
+        size_t pageSize = region.pageSize;
+        uintptr_t pageMask = ~(static_cast<uintptr_t>(pageSize) - 1);
+        void* pageAddr = reinterpret_cast<void*>(target & pageMask);
+        if (mprotect(pageAddr, pageSize, prot) == 0) {
           region.isResidentOnHost.store(true, std::memory_order_relaxed);
           
           // Phase 11: Authoritative UVM LRU Tracking
@@ -358,16 +362,27 @@ fallback:
 }
 #endif
 
-bool MemoryManager::registerManagedRegion(void *ptr, size_t size) {
+bool MemoryManager::registerManagedRegion(void *ptr, size_t size, bool hostAccessible) {
   // Note: lock must be held by caller (allocateManaged / allocateManagedAt)
   
   ManagedRegion region;
   region.ptr = ptr;
   region.size = size;
-  region.isResidentOnHost.store(false);
+  region.isResidentOnHost.store(hostAccessible);
+  region.hostAccessible.store(hostAccessible);
   
   // Initialize dirty page tracking
-  region.pageCount = (size + 4095) / 4096;
+  size_t pageSize = 4096;
+#if defined(_WIN32)
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  pageSize = static_cast<size_t>(si.dwPageSize);
+#else
+  long ps = sysconf(_SC_PAGESIZE);
+  if (ps > 0) pageSize = static_cast<size_t>(ps);
+#endif
+  region.pageSize = pageSize;
+  region.pageCount = (size + pageSize - 1) / pageSize;
   region.dirtyPages = new uint8_t[region.pageCount];
   std::memset(region.dirtyPages, 0, region.pageCount);
   
@@ -741,21 +756,35 @@ VGREResult MemoryManager::getDirtyPages(MemoryHandle handle, std::vector<std::pa
       }
     } else {
       if (inRange) {
-        outDirtyRanges.push_back(std::make_pair(startIdx * 4096, i * 4096));
+        outDirtyRanges.push_back(std::make_pair(startIdx * it->pageSize, i * it->pageSize));
         inRange = false;
       }
     }
   }
   if (inRange) {
-    outDirtyRanges.push_back(std::make_pair(startIdx * 4096, it->pageCount * 4096));
+    outDirtyRanges.push_back(std::make_pair(startIdx * it->pageSize, it->pageCount * it->pageSize));
   }
   
   return VGREResult::SUCCESS;
 }
 
 VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
+  // Pending-fault drainer can still hold queued write-fault addresses that
+  // occurred just before clearDirtyPages() was called. If we clear the bitmap
+  // immediately, those stale queued faults can re-dirty old pages and produce
+  // non-deterministic dirty ranges. Wait briefly for the queue to drain first.
+  {
+    using namespace std::chrono_literals;
+    const auto deadline = std::chrono::steady_clock::now() + 50ms;
+    while (pendingTail_.load(std::memory_order_acquire) <
+               pendingHead_.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(1ms);
+    }
+  }
+
   std::unique_lock<std::recursive_mutex> lock(mutex_);
-  
+
   auto it = masterRegions_.end();
   for (auto curr = masterRegions_.begin(); curr != masterRegions_.end(); ++curr) {
     if (curr->ptr == handle) {
@@ -763,13 +792,17 @@ VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
       break;
     }
   }
-  
+
   if (it == masterRegions_.end()) return VGREResult::ERR_INVALID_VALUE;
-  
+
   if (it->dirtyPages) {
     std::memset(it->dirtyPages, 0, it->pageCount);
-    
-    // Reset permissions to PROT_READ to catch the next write
+  }
+
+  // Re-protect to PROT_READ to catch the next write, but ONLY for regions
+  // that were originally allocated with PROT_NONE (flags != 2). Host-accessible
+  // regions (flags == 2) stay writable for application-level managed memory.
+  if (!it->hostAccessible.load(std::memory_order_relaxed)) {
 #if defined(_WIN32)
     DWORD oldProtect;
     VirtualProtect(it->ptr, it->size, PAGE_READONLY, &oldProtect);
@@ -777,7 +810,7 @@ VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
     mprotect(it->ptr, it->size, PROT_READ);
 #endif
   }
-  
+
   return VGREResult::SUCCESS;
 }
 

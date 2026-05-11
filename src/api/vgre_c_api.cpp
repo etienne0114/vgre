@@ -223,7 +223,9 @@ int vgre_malloc_managed(void **ptr, size_t size) {
     return s;
 
   vgre::MemoryHandle handle;
-  auto r = vgre::core::RuntimeEngine::instance().mallocManaged(size, handle);
+  // flags=2 (cudaMemAttachHost semantic) maps memory R/W immediately so
+  // application code can write without triggering the SIGSEGV handler.
+  auto r = vgre::core::RuntimeEngine::instance().mallocManaged(size, handle, 2);
   if (r != vgre::VGREResult::SUCCESS)
     return to_status(r);
 
@@ -320,7 +322,7 @@ int vgre_register_kernel(const char *name, const char *source,
   if (int s = require_initialized(); s != VGRE_SUCCESS)
     return s;
 
-  vgre::KernelId kid;
+  vgre::KernelId kid = 0;
   auto r = vgre::core::RuntimeEngine::instance().registerKernel(
       std::string(name), std::string(source), kid);
   if (r != vgre::VGREResult::SUCCESS)
