@@ -84,6 +84,7 @@ struct ManagedRegion {
   // Delta-Sync: Dirty page tracking
   size_t pageCount = 0;
   uint8_t* dirtyPages = nullptr; // Shared array (1 = dirty, 0 = clean)
+  size_t pageSize = 4096; // Initialized by MemoryManager::registerManagedRegion to the system page size
 
   // Authoritative UVM Usage Tracking
   mutable std::atomic<long long> lastAccessTime{0};
@@ -93,6 +94,7 @@ struct ManagedRegion {
   mutable std::atomic<int>  lastPrefetchDev{-1};   // device of last cudaMemPrefetchAsync
   mutable std::atomic<uint32_t> accessedByMask{0}; // bit i => cudaMemAdviseSetAccessedBy(i)
   mutable std::atomic<uint32_t> conflictCount{0};  // Host-side faults against device preference
+  mutable std::atomic<bool> hostAccessible{false}; // true if mapped R/W (flags==2), skip re-protection in clearDirtyPages
 
   // Per-device NUMA access counters (updated from SIGSEGV handler via signal-safe atomics).
   // Migration background thread uses these to decide whether to mbind() pages to a
@@ -101,7 +103,7 @@ struct ManagedRegion {
   mutable std::atomic<uint32_t> deviceAccessCounts[kMaxDevices];  // index = device id
 
   ManagedRegion() = default;
-  ManagedRegion(const ManagedRegion &other) : ptr(other.ptr), size(other.size), pageCount(other.pageCount), dirtyPages(other.dirtyPages) {
+  ManagedRegion(const ManagedRegion &other) : ptr(other.ptr), size(other.size), pageCount(other.pageCount), dirtyPages(other.dirtyPages), pageSize(other.pageSize) {
     isResidentOnHost.store(other.isResidentOnHost.load(std::memory_order_relaxed));
     lastAccessTime.store(other.lastAccessTime.load(std::memory_order_relaxed));
     accessCount.store(other.accessCount.load(std::memory_order_relaxed));
@@ -110,6 +112,7 @@ struct ManagedRegion {
     lastPrefetchDev.store(other.lastPrefetchDev.load(std::memory_order_relaxed));
     accessedByMask.store(other.accessedByMask.load(std::memory_order_relaxed));
     conflictCount.store(other.conflictCount.load(std::memory_order_relaxed));
+    hostAccessible.store(other.hostAccessible.load(std::memory_order_relaxed));
     for (int i = 0; i < kMaxDevices; ++i)
       deviceAccessCounts[i].store(other.deviceAccessCounts[i].load(std::memory_order_relaxed));
   }
@@ -119,6 +122,7 @@ struct ManagedRegion {
       size = other.size;
       pageCount = other.pageCount;
       dirtyPages = other.dirtyPages;
+      pageSize = other.pageSize;
       isResidentOnHost.store(other.isResidentOnHost.load(std::memory_order_relaxed));
       lastAccessTime.store(other.lastAccessTime.load(std::memory_order_relaxed));
       accessCount.store(other.accessCount.load(std::memory_order_relaxed));
@@ -127,6 +131,7 @@ struct ManagedRegion {
       lastPrefetchDev.store(other.lastPrefetchDev.load(std::memory_order_relaxed));
       accessedByMask.store(other.accessedByMask.load(std::memory_order_relaxed));
       conflictCount.store(other.conflictCount.load(std::memory_order_relaxed));
+      hostAccessible.store(other.hostAccessible.load(std::memory_order_relaxed));
       for (int i = 0; i < kMaxDevices; ++i)
         deviceAccessCounts[i].store(other.deviceAccessCounts[i].load(std::memory_order_relaxed));
     }
@@ -141,7 +146,7 @@ struct ManagedRegion {
   void markDirty(void* faultAddr) const {
       if (!dirtyPages || pageCount == 0 || !ptr) return;
       uintptr_t offset = reinterpret_cast<uintptr_t>(faultAddr) - reinterpret_cast<uintptr_t>(ptr);
-      size_t pageIdx = offset / 4096;
+      size_t pageIdx = offset / pageSize;
       if (pageIdx < pageCount) {
           dirtyPages[pageIdx] = 1;
       }
@@ -283,7 +288,7 @@ private:
   void *alignedAlloc(size_t size, size_t alignment);
   void alignedFree(void *ptr);
 
-  bool registerManagedRegion(void *ptr, size_t size);
+  bool registerManagedRegion(void *ptr, size_t size, bool hostAccessible = false);
   void unregisterManagedRegion(void *ptr);
 
   void calibrateBandwidth();
