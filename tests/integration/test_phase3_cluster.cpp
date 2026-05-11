@@ -24,28 +24,35 @@ std::atomic<bool> g_worker_stop{false};
 // Verifies 12-argument kernel dispatch with UVM coherence across isolated cluster nodes.
 
 void master_node() {
+    // Wait for sockets from previous crashed runs to clear
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
     VGRE_LOG_INFO("Master", "Starting Master Node...");
-    setenv("VGRE_TCP_AUTH_TOKEN", "test_secret", 1);
     
     auto &cluster = vgre::advanced::TCPClusterManager::instance();
-    // In this test, we now use the singleton for master for simplicity in API calls,
-    // but the worker WILL use its own instance.
-    cluster.initialize(true, "127.0.0.1", 7790);
+    cluster.enableSecurity(true);
+    VGREResult init_res = cluster.initialize(true, "127.0.0.1", 17893);
+    VGRE_LOG_INFO("Master", "Cluster initialized");
+    if (init_res != VGREResult::SUCCESS) {
+        std::cerr << "Master FAIL: Cluster initialize failed" << std::endl;
+        return;
+    }
     
-    // Wait for worker
     int worker_id = -1;
     for (int i = 0; i < 100; ++i) {
         worker_id = cluster.getFirstActiveWorker();
         if (worker_id >= 0) break;
+        std::cout << "Master: Still waiting for worker (attempt " << i << ")..." << std::endl << std::flush;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     
     if (worker_id < 0) {
-        std::cerr << "Master FAIL: No worker connected" << std::endl;
+        std::cerr << "Master FAIL: No worker connected" << std::endl << std::flush;
         return;
     }
+    std::cout << "Master: Worker connected (ID: " << worker_id << ")" << std::endl << std::flush;
 
-    // Register a complex kernel
+    VGRE_LOG_INFO("Master", "Registering kernel...");
     const std::string kernel_src = R"(
         extern "C" __global__ void test_many_args(
             int* data, int a, int b, int c, int d, int e, int f, int g, int h, int i, int j, int* out) {
@@ -58,6 +65,7 @@ void master_node() {
     
     uint64_t kid = 0;
     vgre_register_kernel("test_many_args", kernel_src.c_str(), &kid);
+    VGRE_LOG_INFO("Master", "Kernel registered, ID: " + std::to_string(kid));
 
     void* dev_data = nullptr;
     void* dev_out = nullptr;
@@ -100,14 +108,14 @@ void master_node() {
 
 void worker_node() {
     VGRE_LOG_INFO("Worker", "Starting Worker Node...");
-    setenv("VGRE_TCP_AUTH_TOKEN", "test_secret", 1);
     
     // Give master time to start
     std::this_thread::sleep_for(std::chrono::seconds(2));
     
     vgre::advanced::TCPClusterManager worker_cluster;
-    VGREResult res = worker_cluster.initialize(false, "127.0.0.1", 7790);
-    if (res != VGREResult::SUCCESS) {
+    worker_cluster.enableSecurity(true);
+    VGREResult init_res = worker_cluster.initialize(false, "127.0.0.1", 17893);
+    if (init_res != VGREResult::SUCCESS) {
         std::cerr << "Worker FAIL: init failed" << std::endl;
         return;
     }
@@ -122,25 +130,23 @@ void worker_node() {
 
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
-    // Phase 10: Architectural Hardening - Disable background singleton tasks
-    // This prevents the global singleton from starting a client scan or benchmark
-    // which would interfere with our manual master/worker setup in the same process.
-    setenv("VGRE_IPC_MODE", "OFF", 1);
-    setenv("VGRE_BENCHMARK", "OFF", 1);
+    // Phase 10: Standardize on snake_case and avoid simulation placeholders.
+    // Ensure unique UDP ports for this test to avoid discovery conflicts.
+    setenv("VGRE_CLUSTER_UDP_ANNOUNCE_PORT", "17798", 1);
+    setenv("VGRE_CLUSTER_UDP_WORKER_PORT", "17799", 1);
+    setenv("VGRE_CLUSTER_DISCOVERY", "OFF", 1);
+    setenv("VGRE_TCP_AUTH_TOKEN", "test_secret_long_token_for_production", 1);
+    
+    setenv("VGRE_CLUSTER_DISCOVERY", "OFF", 1);
     
     vgre_init();
-
-    std::thread master_thread(master_node);
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-    std::thread worker_thread(worker_node);
-
-    master_thread.join();
     
-    // Signal worker to exit and wait for it
-    g_worker_stop = true;
-    if (worker_thread.joinable()) {
-        worker_thread.join();
-    }
+    std::thread master_thread(master_node);
+    std::thread worker_thread(worker_node);
+    
+    if (master_thread.joinable()) master_thread.join();
+    g_worker_stop.store(true);
+    if (worker_thread.joinable()) worker_thread.join();
     
     vgre_shutdown();
     return 0;
