@@ -117,7 +117,7 @@ ClusterConfiguration ConfigurationManager::getClusterConfiguration() {
     config.connection_retry_attempts = getEnvVar<int>("VGRE_CLUSTER_CONNECTION_RETRY_ATTEMPTS", config.connection_retry_attempts);
     config.connection_retry_delay_ms = getEnvVar<int>("VGRE_CLUSTER_CONNECTION_RETRY_DELAY_MS", config.connection_retry_delay_ms);
 
-    config.allow_auth_fallback = getEnvVar<bool>("VGRE_ALLOW_AUTH_FALLBACK", config.allow_auth_fallback);
+    // Production: auth fallback is not supported.
     config.auth_token = getEnvVar<std::string>("VGRE_TCP_AUTH_TOKEN", config.auth_token);
     config.auth_token_file = getEnvVar<std::string>("VGRE_TCP_AUTH_TOKEN_FILE", config.auth_token_file);
     config.require_encryption = getEnvVar<bool>("VGRE_REQUIRE_ENCRYPTION", config.require_encryption);
@@ -230,7 +230,7 @@ void ConfigurationManager::applyProfileDefaults(ClusterConfiguration& config, Co
         case ConfigurationProfile::STAGING:
             config.handshake_timeout_sec = 8; config.max_queue_depth = 1536;
             config.max_packets_per_sec = 25000; config.connection_retry_attempts = 4;
-            config.connection_retry_delay_ms = 1500; config.allow_auth_fallback = true;
+            config.connection_retry_delay_ms = 1500; config.allow_auth_fallback = false;
             config.require_encryption = false; config.enable_metrics_export = true;
             config.metrics_export_interval_sec = 60; config.log_level = "DEBUG";
             config.strict_validation = false; config.validate_network_connectivity = true;
@@ -240,7 +240,7 @@ void ConfigurationManager::applyProfileDefaults(ClusterConfiguration& config, Co
         case ConfigurationProfile::DEVELOPMENT:
             config.handshake_timeout_sec = 5; config.max_queue_depth = 1024;
             config.max_packets_per_sec = 10000; config.connection_retry_attempts = 3;
-            config.connection_retry_delay_ms = 1000; config.allow_auth_fallback = true;
+            config.connection_retry_delay_ms = 1000; config.allow_auth_fallback = false;
             config.require_encryption = false; config.enable_metrics_export = false;
             config.metrics_export_interval_sec = 120; config.log_level = "DEBUG";
             config.strict_validation = false; config.validate_network_connectivity = false;

@@ -89,7 +89,7 @@ std::string ConfigurationManager::configurationToEnv(const ClusterConfiguration&
     e << "export VGRE_CLUSTER_MAX_PACKETS_PER_SEC=" << c.max_packets_per_sec << "\n";
     e << "export VGRE_CLUSTER_CONNECTION_RETRY_ATTEMPTS=" << c.connection_retry_attempts << "\n";
     e << "export VGRE_CLUSTER_CONNECTION_RETRY_DELAY_MS=" << c.connection_retry_delay_ms << "\n";
-    e << "export VGRE_ALLOW_AUTH_FALLBACK=" << (c.allow_auth_fallback ? "1" : "0") << "\n";
+    // Production: auth fallback is not supported.
     if (!c.auth_token.empty())
         e << "export VGRE_TCP_AUTH_TOKEN=\"" << c.auth_token << "\"\n";
     if (!c.auth_token_file.empty())

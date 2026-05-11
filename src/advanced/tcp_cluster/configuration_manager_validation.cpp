@@ -154,9 +154,9 @@ ConfigurationValidationResult ConfigurationManager::validateConfiguration(const 
         result.suggestions.push_back("Set VGRE_TCP_AUTH_TOKEN or VGRE_TCP_AUTH_TOKEN_FILE");
     }
     
-    if (!config.allow_auth_fallback && config.auth_token.empty() && config.auth_token_file.empty()) {
-        result.warnings.push_back("Auth fallback disabled but no auth token specified - connections may fail");
-        result.suggestions.push_back("Set VGRE_TCP_AUTH_TOKEN or enable fallback with VGRE_ALLOW_AUTH_FALLBACK=1");
+    if (config.allow_auth_fallback && config.auth_token.empty() && config.auth_token_file.empty()) {
+        result.warnings.push_back("Auth fallback requested but is not supported in production builds");
+        result.suggestions.push_back("Set VGRE_TCP_AUTH_TOKEN or VGRE_TCP_AUTH_TOKEN_FILE");
     }
     
     // Performance warnings

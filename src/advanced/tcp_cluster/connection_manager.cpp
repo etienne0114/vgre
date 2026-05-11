@@ -7,12 +7,15 @@
  */
 
 #include "vgre/advanced/tcp_cluster/internal/connection_manager.h"
+#include "vgre/advanced/tcp_cluster/internal/memory_sync_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
+#include "vgre/core/shm_manager.h"
 #include <algorithm>
 #include <cstring>
+#include <atomic>
 
 // All platform socket headers are provided by vgre/common/sockets.h above.
 
@@ -148,6 +151,59 @@ void ConnectionManager::purgeDeadClients() {
         "Purged " + std::to_string(before - parent_->clients_.size()) +
         " dead client(s); remaining=" + std::to_string(parent_->clients_.size()));
   }
+}
+
+// ── MemorySyncManager SHM Initialization ─────────────────────────────────────
+
+VGREResult MemorySyncManager::initializeShmForClient(
+    std::shared_ptr<TCPClusterManager::ClientConnection> client) {
+  if (!client || !client->is_local) {
+    return client ? VGREResult::SUCCESS : VGREResult::ERR_INVALID_VALUE;
+  }
+
+  // Already initialized
+  if (client->shm_manager && client->shm_manager->getBasePtr()) {
+    return VGREResult::SUCCESS;
+  }
+
+  client->shm_manager = std::make_unique<vgre::core::ShmManager>();
+  
+  static std::atomic<uint64_t> s_shmCounter{0};
+  std::string shmName = "vgre_shm_" + std::to_string(++s_shmCounter) + "_" + std::to_string(client->socket_fd);
+  
+  const char *env = std::getenv("VGRE_CLUSTER_SHM_SIZE");
+  size_t shmSize = 256ULL * 1024 * 1024; // 256MB default
+  if (env) { 
+    try { 
+      shmSize = static_cast<size_t>(std::stoll(env)); 
+    } catch (...) {} 
+  }
+
+  VGRE_LOG_INFO("TCPCluster", "Initializing SHM for local client " + client->ip_address + 
+                              ": " + shmName + " (" + std::to_string(shmSize / (1024*1024)) + " MB)");
+
+  VGREResult r = client->shm_manager->open(shmName, shmSize, true);
+  if (r != VGREResult::SUCCESS) {
+    VGRE_LOG_WARN("TCPCluster", "Failed to create SHM " + shmName + ". Falling back to TCP fast-path.");
+    client->shm_manager.reset();
+    return r;
+  }
+  
+  client->shm_offset = 0;
+  
+  ShmInitPacket sipkt{};
+  std::strncpy(sipkt.shm_name, shmName.c_str(), sizeof(sipkt.shm_name) - 1);
+  sipkt.shm_name[sizeof(sipkt.shm_name) - 1] = '\0';
+  sipkt.shm_size = shmSize;
+  
+  if (parent_->send_packet(client->socket_fd, PacketType::SHM_INIT, &sipkt, 
+                           sizeof(ShmInitPacket), client->secure_channel.get()) != VGREResult::SUCCESS) {
+    VGRE_LOG_ERROR("TCPCluster", "Failed to send SHM_INIT packet to " + client->ip_address);
+    client->shm_manager.reset();
+    return VGREResult::ERR_IO;
+  }
+  
+  return VGREResult::SUCCESS;
 }
 
 } // namespace advanced

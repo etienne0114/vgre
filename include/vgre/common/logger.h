@@ -95,7 +95,7 @@ public:
     if (logBuffer_.size() > kMaxBuffered) logBuffer_.pop_front();
 
     // Stderr sink (always active unless level == NONE)
-    if (level >= LogLevel::INFO) {
+    if (level >= LogLevel::DEBUG) {
       std::cerr << s << '\n';
     }
 

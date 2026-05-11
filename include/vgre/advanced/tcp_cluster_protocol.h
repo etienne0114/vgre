@@ -45,6 +45,7 @@ enum class PacketType : uint32_t {
   BANDWIDTH_PROBE = 27,       // Master→Worker: 64 KB payload + 8-byte timestamp header
   BANDWIDTH_ACK = 28,         // Worker→Master: echo timestamp + worker send time
   DATA_HEADER_RDMA = 29,      // RDMA zero-copy notification: data written to bounce buffer
+  SECURE_READY = 30,          // Master→Worker: post-handshake readiness barrier (encrypted)
 };
 
 #pragma pack(push, 1)

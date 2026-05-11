@@ -1,11 +1,15 @@
 #include "vgre/advanced/tcp_cluster/internal/packet_handler.h"
+#include "vgre/advanced/tcp_cluster/internal/memory_sync_manager.h"
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/input_validation.h"
 #include "vgre/common/sockets.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
+#include "vgre/core/runtime_engine.h"
+#include "vgre/core/memory_manager.h"
 #include <cstring>
 #include <algorithm>
+#include <vector>
 
 namespace vgre {
 namespace advanced {
@@ -149,5 +153,129 @@ bool PacketHandler::parseVSBPHeader(const uint8_t* data, size_t dataSize,
   return true;
 }
 
+// ── MemorySyncManager Argument Marshalling ──────────────────────────────────
+
+VGREResult MemorySyncManager::streamArgumentsToWorker(
+    void **args, int num_args, uint64_t kernel_id,
+    std::shared_ptr<TCPClusterManager::ClientConnection> client) {
+  if (!client) {
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+  if (!args || num_args <= 0) {
+    return VGREResult::SUCCESS;
+  }
+
+  std::vector<ArgType> argTypes;
+  if (core::RuntimeEngine::instance().getKernelArgTypes(kernel_id, argTypes) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_INVALID_KERNEL;
+  }
+
+  // Ensure type info is complete
+  if (static_cast<int>(argTypes.size()) < num_args) {
+    VGRE_LOG_ERROR("TCPCluster", "streamArgumentsToWorker: kernel " + std::to_string(kernel_id) +
+                                     " has " + std::to_string(argTypes.size()) +
+                                     " registered arg types but " + std::to_string(num_args) +
+                                     " args were supplied.");
+    return VGREResult::ERR_INVALID_KERNEL;
+  }
+
+  for (int i = 0; i < num_args; ++i) {
+    VGREResult r = VGREResult::SUCCESS;
+    if (argTypes[i] == ArgType::STRUCT) {
+      r = sendStructArg(args[i], i, kernel_id, client);
+    } else if (argTypes[i] == ArgType::POINTER) {
+      r = sendPointerArg(args[i], i, client);
+    } else {
+      r = sendScalarArg(args[i], i, argTypes[i], client);
+    }
+
+    if (r != VGREResult::SUCCESS) {
+      return r;
+    }
+  }
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemorySyncManager::sendScalarArg(
+    void *arg, int arg_index, ArgType type,
+    std::shared_ptr<TCPClusterManager::ClientConnection> client) {
+  size_t arg_size = 8;
+  if (type == ArgType::INT32 || type == ArgType::UINT32 || type == ArgType::FLOAT32) {
+    arg_size = 4;
+  }
+
+  ArgScalarPacket apkt{};
+  apkt.arg_index = static_cast<uint32_t>(arg_index);
+  apkt.arg_type = static_cast<uint8_t>(type);
+  std::memset(&apkt.value, 0, 8);
+  std::memcpy(&apkt.value, arg, arg_size);
+
+  if (parent_->send_packet(client->socket_fd, PacketType::ARG_SCALAR, &apkt, 
+                           sizeof(ArgScalarPacket), client->secure_channel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemorySyncManager::sendPointerArg(
+    void *arg, int arg_index,
+    std::shared_ptr<TCPClusterManager::ClientConnection> client) {
+  uint64_t handle = 0;
+
+  if (arg) {
+    void *ptr = *static_cast<void **>(arg);
+    handle = reinterpret_cast<uint64_t>(ptr);
+
+    if (ptr) {
+      size_t size = core::RuntimeEngine::instance().getMemoryManager().getAllocationSize(ptr);
+      if (size == 0) {
+        VGRE_LOG_WARN("TCPCluster", "sendPointerArg[" + std::to_string(arg_index) + "]: pointer " +
+                                        std::to_string(handle) + " has size=0 — not a VGRE-managed allocation. "
+                                        "Use vgre_malloc/cudaMalloc to ensure the buffer is tracked.");
+      } else {
+        VGREResult syncResult = syncPointerToWorker(ptr, handle, client);
+        if (syncResult != VGREResult::SUCCESS) {
+          return syncResult;
+        }
+      }
+    }
+  }
+
+  ArgScalarPacket apkt{};
+  apkt.arg_index = static_cast<uint32_t>(arg_index);
+  apkt.arg_type = static_cast<uint8_t>(ArgType::POINTER);
+  apkt.value = handle;
+
+  if (parent_->send_packet(client->socket_fd, PacketType::ARG_POINTER, &apkt, 
+                           sizeof(ArgScalarPacket), client->secure_channel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  return VGREResult::SUCCESS;
+}
+
+VGREResult MemorySyncManager::sendStructArg(
+    void *arg, int arg_index, uint64_t kernel_id,
+    std::shared_ptr<TCPClusterManager::ClientConnection> client) {
+  const auto *ir = core::RuntimeEngine::instance().getKernelIR(kernel_id);
+  if (!ir || arg_index >= static_cast<int>(ir->argSizes.size())) {
+    return VGREResult::ERR_INVALID_VALUE;
+  }
+
+  size_t size = ir->argSizes[arg_index];
+  StructDataPacket spkt{};
+  spkt.arg_index = static_cast<uint32_t>(arg_index);
+  spkt.size = static_cast<uint32_t>(size);
+
+  if (parent_->send_packet(client->socket_fd, PacketType::STRUCT_DATA, &spkt, 
+                           sizeof(StructDataPacket), client->secure_channel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+
+  if (parent_->send_packet(client->socket_fd, PacketType::DATA_BODY, arg, size, 
+                           client->secure_channel.get()) != VGREResult::SUCCESS) {
+    return VGREResult::ERR_IO;
+  }
+  return VGREResult::SUCCESS;
+}
 } // namespace advanced
 } // namespace vgre

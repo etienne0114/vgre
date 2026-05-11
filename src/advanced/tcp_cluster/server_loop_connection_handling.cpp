@@ -113,19 +113,9 @@ void TCPClusterManager::handleNewInboundConnection() {
         auto& client = clients_.back();
         if (inbound_ip == "127.0.0.1" || inbound_ip == "::1") {
             client->is_local = true;
-            client->shm_manager = std::make_unique<vgre::core::ShmManager>();
-            std::string shmName = "vgre_shm_" + std::to_string(new_socket);
-            static const size_t shmSize = []() -> size_t {
-                const char* env = std::getenv("VGRE_CLUSTER_SHM_SIZE");
-                if (env) { try { long long v = std::stoll(env); if (v > 0) return static_cast<size_t>(v); } catch (...) {} }
-                return 256ULL * 1024 * 1024;
-            }();
-            if (client->shm_manager->open(shmName, shmSize, true) == VGREResult::SUCCESS) {
-                ShmInitPacket sipkt{};
-                std::strncpy(sipkt.shm_name, shmName.c_str(), sizeof(sipkt.shm_name) - 1);
-                sipkt.shm_size = shmSize;
-                send_packet(new_socket, PacketType::SHM_INIT, &sipkt, sizeof(ShmInitPacket));
-            }
+            // NOTE: SHM negotiation is performed after security establishment.
+            // Sending SHM_INIT before the secure channel is ready can race the
+            // handshake and cause protocol framing desync.
         }
 
         if (!is_master_) {
@@ -142,20 +132,43 @@ void TCPClusterManager::handleNewInboundConnection() {
                 return;
             }
             client->is_authenticating = true;
-            client->active = true;
+            // Do not mark the client as active until it has completed the
+            // security handshake. This prevents the master from dispatching
+            // control traffic (REGISTER_KERNEL, etc.) before the worker is
+            // ready, which can desync framing during the handshake window.
+            client->active = false;
             bool isMeshPeer = (mesh_peer_ips_.count(client->ip_address) > 0);
             auto doneFlag = std::make_shared<std::atomic<bool>>(false);
             std::thread t([this, client, isMeshPeer, doneFlag]() {
-                VGREResult sr = isMeshPeer ? performPeerClientHandshake(client) : performSecureHandshake(client);
-                client->is_authenticating = false;
-                if (sr == VGREResult::SUCCESS) { client->security_established = true; }
-                else {
-                    std::lock_guard<std::recursive_mutex> llock(clients_mutex_);
-                    client->active = false; vgre::common::vgre_close_socket(client->socket_fd);
-                    client->socket_fd = vgre::common::VGRE_INVALID_SOCKET;
-                    clients_.erase(std::remove(clients_.begin(), clients_.end(), client), clients_.end());
+                try {
+                    VGREResult sr = isMeshPeer ? performPeerClientHandshake(client) : performSecureHandshake(client);
+                    client->is_authenticating = false;
+                    if (sr == VGREResult::SUCCESS) { 
+                        client->security_established = true; 
+                        client->active = true;
+                        VGRE_LOG_INFO("TCPCluster", "Handshake success for " + client->ip_address);
+                        // Deterministic post-handshake barrier: tell the worker
+                        // the master has finished installing the secure channel
+                        // and is ready for the worker to begin encrypted traffic.
+                        //
+                        // IMPORTANT: This packet is sent as plaintext VSBP. The
+                        // worker may not have finished installing its secure
+                        // channel immediately after sending the handshake ACK.
+                        (void)send_packet_direct(client->socket_fd, PacketType::SECURE_READY,
+                                                 nullptr, 0, nullptr);
+                    } else {
+                        std::lock_guard<std::recursive_mutex> llock(clients_mutex_);
+                        client->active = false; vgre::common::vgre_close_socket(client->socket_fd);
+                        client->socket_fd = vgre::common::VGRE_INVALID_SOCKET;
+                        clients_.erase(std::remove(clients_.begin(), clients_.end(), client), clients_.end());
+                        VGRE_LOG_ERROR("TCPCluster", "Handshake failed for " + client->ip_address);
+                    }
+                    syncToIPC();
+                } catch (const std::exception& e) {
+                    VGRE_LOG_ERROR("TCPCluster", std::string("Handshake thread exception: ") + e.what());
+                } catch (...) {
+                    VGRE_LOG_ERROR("TCPCluster", "Handshake thread unknown exception");
                 }
-                syncToIPC();
                 doneFlag->store(true, std::memory_order_release);
             });
             server_auth_threads_.push_back({std::move(t), doneFlag});

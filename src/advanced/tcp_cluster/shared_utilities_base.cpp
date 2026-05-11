@@ -48,6 +48,12 @@ double TimeUtils::calculateElapsedMs(std::chrono::steady_clock::time_point start
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
+std::string TimeUtils::formatDuration(int ms) {
+    if (ms < 1000) return std::to_string(ms) + " ms";
+    if (ms < 60000) return std::to_string(ms / 1000.0) + " s";
+    return std::to_string(ms / 60000.0) + " min";
+}
+
 PlatformInfo PlatformDetection::getCurrentPlatform() {
     PlatformInfo info;
 #ifdef _WIN32
