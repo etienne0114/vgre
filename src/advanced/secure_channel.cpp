@@ -4,8 +4,8 @@
 
 #include <algorithm>
 #include <chrono>
-#include <fstream>
 #include <cstring>
+#include <fstream>
 #include <thread>
 
 #include "vgre/common/sockets.h"
@@ -16,28 +16,29 @@
 // CMakeLists.txt adds -lbcrypt for all Windows builds.
 #pragma comment(lib, "bcrypt.lib")
 #elif defined(__APPLE__)
-// macOS: getentropy() fills up to 256 bytes atomically from the kernel entropy pool.
-// Available since macOS 10.12 Sierra. Falls back to /dev/urandom on older systems.
-#include <sys/random.h>  // getentropy()
-#include <unistd.h>
+// macOS: getentropy() fills up to 256 bytes atomically from the kernel entropy
+// pool. Available since macOS 10.12 Sierra. Falls back to /dev/urandom on older
+// systems.
 #include <fcntl.h>
+#include <sys/random.h> // getentropy()
+#include <unistd.h>
 #else
 // Linux: getrandom() syscall — available since kernel 3.17 / glibc 2.25.
 // Preferred over /dev/urandom: works inside chroot/sandboxed environments
 // where the device node may not be accessible.
-#include <sys/random.h>  // getrandom()
-#include <unistd.h>
 #include <fcntl.h>
+#include <sys/random.h> // getrandom()
+#include <unistd.h>
 #endif
 
 namespace vgre {
 namespace advanced {
 
-using vgre::common::vgre_setsockopt;
 using vgre::common::vgre_get_last_socket_error;
 using vgre::common::vgre_is_would_block;
-using vgre::common::vgre_pollfd;
 using vgre::common::vgre_poll;
+using vgre::common::vgre_pollfd;
+using vgre::common::vgre_setsockopt;
 
 // ── SecureChannel Implementation ──────────────────────────────────────────
 
@@ -49,28 +50,30 @@ SecureChannel::SecureChannel() = default;
 //   Linux (glibc): explicit_bzero   (glibc ≥ 2.25 / kernel ≥ 3.17)
 //   macOS:         memset_s         (C11, available since macOS 10.9)
 // Falls back to a volatile write loop which every major compiler preserves.
-static void vgre_secure_zero(void* p, size_t n) noexcept {
+static void vgre_secure_zero(void *p, size_t n) noexcept {
 #if defined(_WIN32)
-    SecureZeroMemory(p, n);
-#elif defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25))
-    explicit_bzero(p, n);
+  SecureZeroMemory(p, n);
+#elif defined(__GLIBC__) &&                                                    \
+    (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25))
+  explicit_bzero(p, n);
 #elif defined(__APPLE__)
-    memset_s(p, n, 0, n);
+  memset_s(p, n, 0, n);
 #else
-    // Volatile pointer loop — reliable on all conforming C++ implementations.
-    volatile uint8_t* vp = static_cast<volatile uint8_t*>(p);
-    for (size_t i = 0; i < n; ++i) vp[i] = 0;
-    // Memory fence to ensure writes are not reordered past this point.
-    std::atomic_thread_fence(std::memory_order_seq_cst);
+  // Volatile pointer loop — reliable on all conforming C++ implementations.
+  volatile uint8_t *vp = static_cast<volatile uint8_t *>(p);
+  for (size_t i = 0; i < n; ++i)
+    vp[i] = 0;
+  // Memory fence to ensure writes are not reordered past this point.
+  std::atomic_thread_fence(std::memory_order_seq_cst);
 #endif
 }
 
 SecureChannel::~SecureChannel() {
   // Zeroize ALL sensitive fields so key material doesn't linger on the heap
   // or in swap after the channel is torn down.
-  vgre_secure_zero(sessionKey_,    sizeof(sessionKey_));
+  vgre_secure_zero(sessionKey_, sizeof(sessionKey_));
   vgre_secure_zero(keyFingerprint_, sizeof(keyFingerprint_));
-  vgre_secure_zero(replayBitmap_,  sizeof(replayBitmap_));
+  vgre_secure_zero(replayBitmap_, sizeof(replayBitmap_));
   sendSequence_.store(0, std::memory_order_relaxed);
   highestSeenSeq_ = 0;
   replayWindowSeeded_ = false;
@@ -78,8 +81,7 @@ SecureChannel::~SecureChannel() {
 }
 
 VGREResult SecureChannel::initializeFromSecret(
-    const std::string &authToken,
-    const uint8_t masterNonce[crypto::kNonceLen],
+    const std::string &authToken, const uint8_t masterNonce[crypto::kNonceLen],
     const uint8_t clientNonce[crypto::kNonceLen]) {
   if (authToken.empty()) {
     VGRE_LOG_ERROR("SecureChannel", "Cannot initialize: empty auth token");
@@ -94,21 +96,21 @@ VGREResult SecureChannel::initializeFromSecret(
   // PBKDF2 iteration count: default 600k (NIST SP 800-132 2025 recommendation).
   // Operators can override via VGRE_PBKDF2_ITERATIONS for performance tuning.
   uint32_t pbkdf2Iters = static_cast<uint32_t>(crypto::kPBKDF2Iterations);
-  const char* iterEnv = std::getenv("VGRE_PBKDF2_ITERATIONS");
+  const char *iterEnv = std::getenv("VGRE_PBKDF2_ITERATIONS");
   if (iterEnv && iterEnv[0] != '\0') {
     try {
       long val = std::stol(iterEnv);
       if (val >= 10000 && val <= 10000000) {
         pbkdf2Iters = static_cast<uint32_t>(val);
       }
-    } catch (...) {}
+    } catch (...) {
+    }
   }
 
   // Derive session key via PBKDF2
-  crypto::pbkdf2_sha256(
-      reinterpret_cast<const uint8_t *>(authToken.data()), authToken.size(),
-      salt, sizeof(salt), pbkdf2Iters, sessionKey_,
-      crypto::kHMACKeyLen);
+  crypto::pbkdf2_sha256(reinterpret_cast<const uint8_t *>(authToken.data()),
+                        authToken.size(), salt, sizeof(salt), pbkdf2Iters,
+                        sessionKey_, crypto::kHMACKeyLen);
 
   // Compute key fingerprint (SHA-256 of session key)
   crypto::sha256(sessionKey_, crypto::kHMACKeyLen, keyFingerprint_);
@@ -130,35 +132,39 @@ VGREResult SecureChannel::initializeFromSecret(
 
   initialized_ = true;
 
-  VGRE_LOG_INFO("SecureChannel",
-                "Initialized — Key fingerprint: " + getKeyFingerprint().substr(0, 16) + "...");
+  VGRE_LOG_INFO("SecureChannel", "Initialized — Key fingerprint: " +
+                                     getKeyFingerprint().substr(0, 16) + "...");
   return VGREResult::SUCCESS;
 }
 
-VGREResult SecureChannel::initializeFromHardware(const uint8_t masterNonce[crypto::kNonceLen],
-                                               const uint8_t clientNonce[crypto::kNonceLen]) {
-    std::string token;
-    VGREResult res = HardwareTokenManager::instance().getAuthToken(token);
-    if (res != VGREResult::SUCCESS) {
-        return res;
-    }
-    return initializeFromSecret(token, masterNonce, clientNonce);
+VGREResult SecureChannel::initializeFromHardware(
+    const uint8_t masterNonce[crypto::kNonceLen],
+    const uint8_t clientNonce[crypto::kNonceLen]) {
+  std::string token;
+  VGREResult res = HardwareTokenManager::instance().getAuthToken(token);
+  if (res != VGREResult::SUCCESS) {
+    return res;
+  }
+  return initializeFromSecret(token, masterNonce, clientNonce);
 }
 
-VGREResult SecureChannel::rotateKey(const uint8_t nextNonce[crypto::kNonceLen]) {
-  if (!initialized_) return VGREResult::ERR_NOT_INITIALIZED;
+VGREResult
+SecureChannel::rotateKey(const uint8_t nextNonce[crypto::kNonceLen]) {
+  if (!initialized_)
+    return VGREResult::ERR_NOT_INITIALIZED;
 
   std::lock_guard<std::mutex> lock(mutex_);
 
   // Derive NewKey = HMAC(OldKey, "VGRE_ROTATE_v1" || nextNonce)
-  const char* saltLabel = "VGRE_ROTATE_v1";
+  const char *saltLabel = "VGRE_ROTATE_v1";
   std::vector<uint8_t> data;
   data.reserve(std::strlen(saltLabel) + crypto::kNonceLen);
   data.insert(data.end(), saltLabel, saltLabel + std::strlen(saltLabel));
   data.insert(data.end(), nextNonce, nextNonce + crypto::kNonceLen);
 
   uint8_t newKey[crypto::kHMACKeyLen];
-  crypto::hmac_sha256(sessionKey_, crypto::kHMACKeyLen, data.data(), data.size(), newKey);
+  crypto::hmac_sha256(sessionKey_, crypto::kHMACKeyLen, data.data(),
+                      data.size(), newKey);
 
   // Update session key and fingerprint
   std::memcpy(sessionKey_, newKey, crypto::kHMACKeyLen);
@@ -166,7 +172,7 @@ VGREResult SecureChannel::rotateKey(const uint8_t nextNonce[crypto::kNonceLen]) 
   crypto::sha256(sessionKey_, crypto::kHMACKeyLen, keyFingerprint_);
 
   VGRE_LOG_INFO("SecureChannel", "Session key rotated — New fingerprint: " +
-                getKeyFingerprint().substr(0, 16) + "...");
+                                     getKeyFingerprint().substr(0, 16) + "...");
 
   return VGREResult::SUCCESS;
 }
@@ -206,39 +212,36 @@ SessionInfo SecureChannel::getSessionInfo() const {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
-    info.session_seconds =
-        static_cast<double>(now - sessionStartMs_) / 1000.0;
+    info.session_seconds = static_cast<double>(now - sessionStartMs_) / 1000.0;
   }
 
   return info;
 }
 
-
 // ── AES-256-CTR channel cipher ───────────────────────────────────────────
 // Per-session nonce = sha256(sessionKey_ || "aes_nonce_v1")[0..11].
 // Per-packet counter = sequenceNum (monotonically increasing → no reuse).
-void SecureChannel::aesCtr(const uint8_t *input, uint8_t *output,
-                            size_t len, uint64_t sequenceNum) {
-    // Derive per-session CTR nonce from the session key (deterministic, 12 bytes)
-    static const uint8_t kNonceSuffix[] = "aes_nonce_v1";
-    uint8_t nonceInput[crypto::kHMACKeyLen + 12];
-    std::memcpy(nonceInput, sessionKey_, crypto::kHMACKeyLen);
-    std::memcpy(nonceInput + crypto::kHMACKeyLen, kNonceSuffix, 12);
+void SecureChannel::aesCtr(const uint8_t *input, uint8_t *output, size_t len,
+                           uint64_t sequenceNum) {
+  // Derive per-session CTR nonce from the session key (deterministic, 12 bytes)
+  static const uint8_t kNonceSuffix[] = "aes_nonce_v1";
+  uint8_t nonceInput[crypto::kHMACKeyLen + 12];
+  std::memcpy(nonceInput, sessionKey_, crypto::kHMACKeyLen);
+  std::memcpy(nonceInput + crypto::kHMACKeyLen, kNonceSuffix, 12);
 
-    uint8_t nonce[crypto::kSHA256DigestLen];
-    crypto::sha256(nonceInput, sizeof(nonceInput), nonce);
-    std::memset(nonceInput, 0, sizeof(nonceInput));
+  uint8_t nonce[crypto::kSHA256DigestLen];
+  crypto::sha256(nonceInput, sizeof(nonceInput), nonce);
+  std::memset(nonceInput, 0, sizeof(nonceInput));
 
-    // Use first 12 bytes of the hash as the CTR nonce; sequenceNum as counter
-    crypto::aes256_ctr(sessionKey_, nonce, sequenceNum, input, output, len);
-    std::memset(nonce, 0, sizeof(nonce));
+  // Use first 12 bytes of the hash as the CTR nonce; sequenceNum as counter
+  crypto::aes256_ctr(sessionKey_, nonce, sequenceNum, input, output, len);
+  std::memset(nonce, 0, sizeof(nonce));
 }
 
 // ── Compute packet HMAC ──────────────────────────────────────────────────
 void SecureChannel::computePacketHMAC(const SecurePacketHeader &hdr,
-                                       const uint8_t *payload,
-                                       size_t payloadLen,
-                                       uint8_t mac[crypto::kSHA256DigestLen]) {
+                                      const uint8_t *payload, size_t payloadLen,
+                                      uint8_t mac[crypto::kSHA256DigestLen]) {
   // HMAC covers: version + sequence_number + payload_length + payload
   std::vector<uint8_t> data;
   data.reserve(1 + 8 + 4 + payloadLen);
@@ -273,22 +276,26 @@ bool SecureChannel::sendAll(vgre_socket_t fd, const void *buf, size_t len) {
         // Block until the socket is writable again — avoids busy-spinning.
         // Use the remaining budget (capped at 100ms per poll call) so we don't
         // hang forever if the remote stops draining its receive buffer.
-        if (std::chrono::steady_clock::now() >= deadline) return false;
+        if (std::chrono::steady_clock::now() >= deadline)
+          return false;
         vgre_pollfd pfd{fd, POLLOUT, 0};
-        int remaining = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline - std::chrono::steady_clock::now()).count());
+        int remaining = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now())
+                .count());
         vgre_poll(&pfd, 1, std::min(remaining, 100));
         continue;
       }
-      // On Windows, WSAENOTSOCK, WSAECONNRESET, WSAECONNABORTED indicate real problems
-      // On Linux, EBADF, EPIPE, ECONNRESET, ECONNABORTED indicate real problems
-      // Log the error for debugging
+      // On Windows, WSAENOTSOCK, WSAECONNRESET, WSAECONNABORTED indicate real
+      // problems On Linux, EBADF, EPIPE, ECONNRESET, ECONNABORTED indicate real
+      // problems Log the error for debugging
 #if defined(_WIN32)
-      VGRE_LOG_ERROR("SecureChannel", 
-          "sendAll() failed with Windows socket error: " + std::to_string(err));
+      VGRE_LOG_ERROR("SecureChannel",
+                     "sendAll() failed with Windows socket error: " +
+                         std::to_string(err));
 #else
-      VGRE_LOG_ERROR("SecureChannel", 
-          "sendAll() failed with error: " + std::string(std::strerror(err)));
+      VGRE_LOG_ERROR("SecureChannel", "sendAll() failed with error: " +
+                                          std::string(std::strerror(err)));
 #endif
       return false;
     }
@@ -298,11 +305,11 @@ bool SecureChannel::sendAll(vgre_socket_t fd, const void *buf, size_t len) {
 }
 
 int SecureChannel::recvAll(vgre_socket_t fd, void *buf, size_t len,
-                            int timeoutMs) {
+                           int timeoutMs) {
   char *p = static_cast<char *>(buf);
   size_t received = 0;
-  auto deadline = std::chrono::steady_clock::now() +
-                  std::chrono::milliseconds(timeoutMs);
+  auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
 
   while (received < len) {
     if (std::chrono::steady_clock::now() > deadline) {
@@ -326,11 +333,12 @@ int SecureChannel::recvAll(vgre_socket_t fd, void *buf, size_t len,
         int err = vgre::common::vgre_get_last_socket_error();
         if (!vgre::common::vgre_is_would_block(err)) {
 #if defined(_WIN32)
-          VGRE_LOG_ERROR("SecureChannel", 
-              "recvAll() poll failed with Windows socket error: " + std::to_string(err));
+          VGRE_LOG_ERROR("SecureChannel",
+                         "recvAll() poll failed with Windows socket error: " +
+                             std::to_string(err));
 #else
-          VGRE_LOG_ERROR("SecureChannel", 
-              "recvAll() poll failed with error: " + std::string(std::strerror(err)));
+          VGRE_LOG_ERROR("SecureChannel", "recvAll() poll failed with error: " +
+                                              std::string(std::strerror(err)));
 #endif
           return -1; // Error
         }
@@ -346,11 +354,12 @@ int SecureChannel::recvAll(vgre_socket_t fd, void *buf, size_t len,
       if (vgre::common::vgre_is_would_block(err))
         continue;
 #if defined(_WIN32)
-      VGRE_LOG_ERROR("SecureChannel", 
-          "recvAll() recv failed with Windows socket error: " + std::to_string(err));
+      VGRE_LOG_ERROR("SecureChannel",
+                     "recvAll() recv failed with Windows socket error: " +
+                         std::to_string(err));
 #else
-      VGRE_LOG_ERROR("SecureChannel", 
-          "recvAll() recv failed with error: " + std::string(std::strerror(err)));
+      VGRE_LOG_ERROR("SecureChannel", "recvAll() recv failed with error: " +
+                                          std::string(std::strerror(err)));
 #endif
       return -1; // Error
     }
@@ -362,7 +371,7 @@ int SecureChannel::recvAll(vgre_socket_t fd, void *buf, size_t len,
 
 // ── Send Secure ──────────────────────────────────────────────────────────
 VGREResult SecureChannel::sendSecure(vgre_socket_t fd, const void *data,
-                                      size_t len) {
+                                     size_t len) {
   // A2: initialized_ check is inside the mutex to prevent a torn-write race
   // where another thread calls initialize() concurrently.
   std::lock_guard<std::mutex> lock(mutex_);
@@ -393,7 +402,8 @@ VGREResult SecureChannel::sendSecure(vgre_socket_t fd, const void *data,
   std::vector<uint8_t> wire(sizeof(SecurePacketHeader) + len);
   std::memcpy(wire.data(), &hdr, sizeof(SecurePacketHeader));
   if (len > 0) {
-    std::memcpy(wire.data() + sizeof(SecurePacketHeader), encrypted.data(), len);
+    std::memcpy(wire.data() + sizeof(SecurePacketHeader), encrypted.data(),
+                len);
   }
   if (!sendAll(fd, wire.data(), wire.size())) {
     VGRE_LOG_ERROR("SecureChannel", "Failed to send secure packet");
@@ -408,7 +418,7 @@ VGREResult SecureChannel::sendSecure(vgre_socket_t fd, const void *data,
 
 // ── Receive Secure ───────────────────────────────────────────────────────
 VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
-                                      std::vector<uint8_t> &outData) {
+                                     std::vector<uint8_t> &outData) {
   // A5: Every exit path records its result in last_recv_result_ so callers
   // can distinguish HMAC auth failures from I/O errors for the circuit-breaker.
   auto finish = [this](VGREResult r) -> VGREResult {
@@ -427,10 +437,11 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
   if (sessionStartMs_ > 0) {
     uint64_t nowMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
     if (nowMs - sessionStartMs_ > 3600000ULL) {
-      VGRE_LOG_WARN("SecureChannel",
-          "Session expired (>1 hour) — invalidating channel, re-handshake required");
+      VGRE_LOG_WARN("SecureChannel", "Session expired (>1 hour) — invalidating "
+                                     "channel, re-handshake required");
       initialized_.store(false, std::memory_order_release);
       return finish(VGREResult::ERR_AUTH_FAILED);
     }
@@ -446,15 +457,14 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
 
   // Validate magic
   if (hdr.magic != 0x56475345U || hdr.version != 1) {
-    VGRE_LOG_ERROR("SecureChannel",
-                   "Invalid secure packet magic or version");
+    VGRE_LOG_ERROR("SecureChannel", "Invalid secure packet magic or version");
     return finish(VGREResult::ERR_CRYPTO);
   }
 
   // Validate payload size (max 64 MB to prevent OOM)
   if (hdr.payload_length > 64 * 1024 * 1024) {
-    VGRE_LOG_ERROR("SecureChannel", "Payload too large: " +
-                                        std::to_string(hdr.payload_length));
+    VGRE_LOG_ERROR("SecureChannel",
+                   "Payload too large: " + std::to_string(hdr.payload_length));
     return finish(VGREResult::ERR_INVALID_VALUE);
   }
 
@@ -477,10 +487,13 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
 
   if (!crypto::secure_compare(hdr.hmac_tag, expectedMAC,
                               crypto::kSHA256DigestLen)) {
-    VGRE_LOG_ERROR("SecureChannel",
-        "HMAC verification failed — session key mismatch between master and worker. "
+    VGRE_LOG_ERROR(
+        "SecureChannel",
+        "HMAC verification failed — session key mismatch between master and "
+        "worker. "
         "Most likely cause: VGRE_TCP_AUTH_TOKEN is set on one node but not the "
-        "other, or is set to different values.  Either set the same token on all "
+        "other, or is set to different values.  Either set the same token on "
+        "all "
         "nodes, or unset it on all nodes to use the default encrypted mode.");
     return finish(VGREResult::ERR_AUTH_FAILED);
   }
@@ -507,14 +520,17 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
         std::memset(replayBitmap_, 0, sizeof(replayBitmap_));
       } else {
         // Left-shift the 2048-bit bitmap by 'advance' bits.
-        // Words are in little-endian order: replayBitmap_[0] is the most-recent word.
-        uint64_t ws = advance / 64;                   // whole-word shift
-        uint64_t bs = advance % 64;                   // bit shift within word
+        // Words are in little-endian order: replayBitmap_[0] is the most-recent
+        // word.
+        uint64_t ws = advance / 64; // whole-word shift
+        uint64_t bs = advance % 64; // bit shift within word
         uint64_t tmp[kReplayWordCount] = {};
         for (size_t i = 0; i < kReplayWordCount; i++) {
-          size_t src = (ws <= i) ? i - ws : kReplayWordCount; // source word index
+          size_t src =
+              (ws <= i) ? i - ws : kReplayWordCount; // source word index
           if (src < kReplayWordCount) {
-            tmp[i] = (bs == 0) ? replayBitmap_[src] : (replayBitmap_[src] << bs);
+            tmp[i] =
+                (bs == 0) ? replayBitmap_[src] : (replayBitmap_[src] << bs);
             if (bs > 0 && src > 0)
               tmp[i] |= replayBitmap_[src - 1] >> (64 - bs);
           }
@@ -529,12 +545,12 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
       uint64_t offset = highestSeenSeq_ - seq;
       if (offset >= kReplayWindowBits) {
         VGRE_LOG_ERROR("SecureChannel",
-                       "Replay detected: seq=" + std::to_string(seq) +
-                       " is " + std::to_string(offset) + " packets behind window");
+                       "Replay detected: seq=" + std::to_string(seq) + " is " +
+                           std::to_string(offset) + " packets behind window");
         return finish(VGREResult::ERR_AUTH_FAILED);
       }
       uint64_t word = offset / 64;
-      uint64_t bit  = offset % 64;
+      uint64_t bit = offset % 64;
       if (replayBitmap_[word] & (1ULL << bit)) {
         VGRE_LOG_ERROR("SecureChannel",
                        "Duplicate/replay packet: seq=" + std::to_string(seq));
@@ -549,7 +565,7 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
   if (hdr.payload_length > 0) {
     std::lock_guard<std::mutex> lock(mutex_);
     aesCtr(encrypted.data(), outData.data(), hdr.payload_length,
-              hdr.sequence_number);
+           hdr.sequence_number);
   }
 
   packetsReceived_++;

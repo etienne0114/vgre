@@ -2,6 +2,7 @@
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/advanced/runtime_profiler.h"
 #include "vgre/advanced/ipc_manager.h"
+#include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
 #include "vgre/compiler/kernel_parser.h"
 #include "vgre/compiler/llvm_translation_engine.h"
@@ -179,6 +180,7 @@ VGREResult RuntimeEngine::shutdown() {
   }
 
   vgre::advanced::IPCManager::instance().shutdown();
+  vgre::advanced::TCPClusterManager::instance().shutdown();
 
   scheduler_ = nullptr;
   executor_.reset();
@@ -261,7 +263,14 @@ VGREResult RuntimeEngine::registerKernel(const std::string &name,
   }
 
   // Translate to executable
-  KernelId id = nextKernelId_++;
+  // If the caller provided a non-zero kernel id, treat it as authoritative.
+  // This is required for production TCPCluster: the master assigns kernel IDs
+  // and workers must preserve them to keep dispatch and result tracking
+  // consistent across processes.
+  KernelId id = (outId != 0) ? outId : nextKernelId_++;
+  if (outId != 0 && id >= nextKernelId_) {
+    nextKernelId_ = id + 1;
+  }
   kernelIRCache_[id] = ir;
 
   // v0.1.2 Extraordinary Sophistication: Asynchronous JIT Pipelining
