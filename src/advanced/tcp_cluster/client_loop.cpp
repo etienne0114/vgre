@@ -10,6 +10,7 @@
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/gpu_passthrough.h"
 #include "vgre/advanced/rdma_transport.h"
+#include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
@@ -73,38 +74,11 @@ void TCPClusterManager::clientLoop() {
     // the worker's own security_enabled_ flag is set. This lets the worker
     // automatically adapt to master's security mode without prior configuration.
     {
+      VGRE_LOG_INFO("TCPCluster", "Worker: Starting security handshake...");
       VGREResult sr = performClientSecureHandshake();
-      
-      // Handle token mismatch in fallback mode: retry without authentication
-      if (sr == VGREResult::ERR_AUTH_RETRY) {
-        VGRE_LOG_WARN("TCPCluster",
-            "SECURITY WARNING: Auth-token mismatch with master — falling back to "
-            "unauthenticated mode. Set the same VGRE_TCP_AUTH_TOKEN on all nodes "
-            "to enforce authentication.");
-        
-        // Disable security for this connection and retry
-        security_enabled_ = false;
-        sr = performClientSecureHandshake();
-        
-        if (sr != VGREResult::SUCCESS) {
-          VGRE_LOG_ERROR("TCPCluster",
-              "Client: Security handshake failed on retry — dropping connection");
-          {
-            std::lock_guard<std::mutex> lock(client_mutex_);
-            if (client_fd_ != VGRE_INVALID_SOCKET) {
-              vgre_close_socket(client_fd_);
-              client_fd_ = VGRE_INVALID_SOCKET;
-              has_master_fd_.store(false, std::memory_order_release);
-            }
-          }
-          if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
-          continue; // standby: wait for next master
-        }
 
-        VGRE_LOG_WARN("TCPCluster",
-            "Client: Handshake succeeded in unauthenticated-encrypted mode");
-      } else if (sr != VGREResult::SUCCESS) {
-        VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed — dropping connection");
+      if (sr != VGREResult::SUCCESS) {
+        VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed with result: " + std::to_string(static_cast<int>(sr)) + " — dropping connection");
         {
           std::lock_guard<std::mutex> lock(client_mutex_);
           if (client_fd_ != VGRE_INVALID_SOCKET) {
@@ -115,11 +89,118 @@ void TCPClusterManager::clientLoop() {
         }
         if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
         continue; // standby: wait for next master
+      } else {
+        VGRE_LOG_INFO("TCPCluster", "Worker: Security handshake completed successfully");
       }
     }
 
     // ── Send Capability (once per new connection) ────────────────
     {
+      // Deterministic post-handshake barrier: wait for SECURE_READY from master
+      // before sending any encrypted control packets (CAPABILITY, telemetry, etc.).
+      // This replaces timing-based sleeps and prevents protocol/encryption desync.
+      if (client_secure_channel_ && client_secure_channel_->isInitialized()) {
+        VGREResult wr = waitForData(client_fd_, 5000);
+        if (wr != VGREResult::SUCCESS) {
+          VGRE_LOG_ERROR("TCPCluster",
+                         "Worker: timed out waiting for SECURE_READY from master");
+          {
+            std::lock_guard<std::mutex> lock(client_mutex_);
+            if (client_fd_ != VGRE_INVALID_SOCKET) {
+              vgre_close_socket(client_fd_);
+              client_fd_ = VGRE_INVALID_SOCKET;
+              has_master_fd_.store(false, std::memory_order_release);
+            }
+          }
+          if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
+          continue;
+        }
+
+        // SECURE_READY is sent as plaintext VSBP to avoid races where the worker
+        // hasn't installed its secure channel yet.
+        //
+        // IMPORTANT: read exactly one VSBP frame (header + payload). Do NOT use
+        // recv_packet() here, because a single recv() can also consume bytes of
+        // subsequent encrypted packets and desync the SecureChannel stream.
+        auto recv_exact = [&](std::vector<uint8_t> &buf, size_t want) -> bool {
+          buf.resize(want);
+          size_t off = 0;
+          while (off < want && enabled_) {
+            int n = recv(client_fd_, reinterpret_cast<char *>(buf.data() + off),
+                         static_cast<int>(want - off), 0);
+            if (n > 0) {
+              off += static_cast<size_t>(n);
+              continue;
+            }
+            if (n == 0) {
+              return false;
+            }
+            if (vgre_is_would_block(vgre_get_last_socket_error())) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+              continue;
+            }
+            return false;
+          }
+          return off == want;
+        };
+
+        std::vector<uint8_t> hdrBuf;
+        if (!recv_exact(hdrBuf, sizeof(VSBPHeader))) {
+          VGRE_LOG_ERROR("TCPCluster",
+                         "Worker: failed to read SECURE_READY header from master");
+          {
+            std::lock_guard<std::mutex> lock(client_mutex_);
+            if (client_fd_ != VGRE_INVALID_SOCKET) {
+              vgre_close_socket(client_fd_);
+              client_fd_ = VGRE_INVALID_SOCKET;
+              has_master_fd_.store(false, std::memory_order_release);
+            }
+          }
+          if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
+          continue;
+        }
+
+        VSBPHeader hdr{};
+        std::memcpy(&hdr, hdrBuf.data(), sizeof(VSBPHeader));
+        if (!PacketUtils::validateVSBPHeader(hdr) ||
+            static_cast<PacketType>(hdr.type) != PacketType::SECURE_READY) {
+          VGRE_LOG_ERROR(
+              "TCPCluster",
+              "Worker: expected SECURE_READY after handshake, got " +
+                  PacketUtils::packetTypeToString(
+                      static_cast<PacketType>(hdr.type)) +
+                  " — dropping connection");
+          {
+            std::lock_guard<std::mutex> lock(client_mutex_);
+            if (client_fd_ != VGRE_INVALID_SOCKET) {
+              vgre_close_socket(client_fd_);
+              client_fd_ = VGRE_INVALID_SOCKET;
+              has_master_fd_.store(false, std::memory_order_release);
+            }
+          }
+          if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
+          continue;
+        }
+
+        if (hdr.payloadSize > 0) {
+          std::vector<uint8_t> payloadBuf;
+          if (!recv_exact(payloadBuf, static_cast<size_t>(hdr.payloadSize))) {
+            VGRE_LOG_ERROR("TCPCluster",
+                           "Worker: failed to read SECURE_READY payload");
+            {
+              std::lock_guard<std::mutex> lock(client_mutex_);
+              if (client_fd_ != VGRE_INVALID_SOCKET) {
+                vgre_close_socket(client_fd_);
+                client_fd_ = VGRE_INVALID_SOCKET;
+                has_master_fd_.store(false, std::memory_order_release);
+              }
+            }
+            if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
+            continue;
+          }
+        }
+      }
+      
       CapabilityPacket cpkt{};
       cpkt.cpu_cores = std::thread::hardware_concurrency();
 #if defined(_WIN32)
@@ -185,8 +266,10 @@ void TCPClusterManager::clientLoop() {
         cpkt.gpu_sm_count      = 0;
       }
 
+      VGRE_LOG_INFO("TCPCluster", "Worker: Sending capability packet...");
       send_packet(client_fd_, PacketType::CAPABILITY, &cpkt, sizeof(CapabilityPacket),
                   client_secure_channel_.get());
+      VGRE_LOG_INFO("TCPCluster", "Worker: Capability packet sent successfully");
     }
 
     // ── RDMA negotiation (optional, falls back to TCP) ─────────────
@@ -292,9 +375,9 @@ void TCPClusterManager::clientLoop() {
           disconnected = true; break;
         }
         if (pfd.revents & POLLIN) {
+          std::lock_guard<std::mutex> lock(staging_mutex_);
           int n = recv_packet(cur_fd, client_rx_buffer_, client_secure_channel_.get());
           if (n > 0) {
-            std::lock_guard<std::mutex> lock(staging_mutex_);
             active_staging_->insert(active_staging_->end(),
                                     client_rx_buffer_.begin(), client_rx_buffer_.end());
             client_rx_buffer_.clear();
@@ -367,10 +450,46 @@ void TCPClusterManager::clientLoop() {
     }
 
     // Standby workers loop back and wait for the next master connection.
-    // Non-standby workers (dialled out) set enabled_=false so udpDiscoveryLoop
-    // can handle reconnection.
+    // Non-standby workers (dialled out) should attempt to reconnect instead of exiting.
     if (server_fd_ == VGRE_INVALID_SOCKET) {
-      VGRE_LOG_ERROR("TCPCluster", "Client command channel disconnected");
+      VGRE_LOG_INFO("TCPCluster", "Client command channel disconnected - attempting reconnection...");
+      
+      // Attempt to reconnect to the master
+      std::string host;
+      int port;
+      {
+        std::lock_guard<std::mutex> lk(client_mutex_);
+        host = host_;
+        port = port_;
+      }
+      
+      if (!host.empty() && host != "0.0.0.0") {
+        // Wait a bit before reconnecting to avoid tight loop
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        
+        vgre::common::vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock != vgre::common::VGRE_INVALID_SOCKET) {
+          struct sockaddr_in serv_addr{};
+          serv_addr.sin_family = AF_INET;
+          serv_addr.sin_port = htons(static_cast<uint16_t>(port));
+          if (inet_pton(AF_INET, host.c_str(), &serv_addr.sin_addr) > 0) {
+            if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) >= 0) {
+              std::lock_guard<std::mutex> lk(client_mutex_);
+              client_fd_ = sock;
+              has_master_fd_.store(true, std::memory_order_release);
+              VGRE_LOG_INFO("TCPCluster", "Worker reconnected to master at " + host + ":" + std::to_string(port));
+              continue; // Continue the outer loop to retry connection
+            } else {
+              vgre::common::vgre_close_socket(sock);
+            }
+          } else {
+            vgre::common::vgre_close_socket(sock);
+          }
+        }
+      }
+      
+      // If reconnection failed, exit
+      VGRE_LOG_ERROR("TCPCluster", "Failed to reconnect to master - worker exiting");
       enabled_ = false;
       return;
     }
