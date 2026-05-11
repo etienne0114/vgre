@@ -34,6 +34,15 @@ VGREResult HardwareTokenManager::storeLinuxKeyring(const std::string& service, c
     }
     
     std::string key_desc = "vgre:" + service;
+
+    // Replace existing key atomically from caller perspective.
+    // add_key("user", ...) fails when a key with the same description exists
+    // in this keyring on many kernels, which caused store/update tests to fail.
+    key_serial_t existing = keyctl_search(keyring, "user", key_desc.c_str(), 0);
+    if (existing >= 0) {
+        (void)keyctl_revoke(existing);
+    }
+
     key_serial_t key = add_key("user", key_desc.c_str(), token.c_str(), token.size(), keyring);
     
     if (key < 0) {

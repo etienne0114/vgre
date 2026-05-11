@@ -23,17 +23,37 @@ namespace vgre {
 namespace advanced {
 
 VGREResult HardwareTokenManager::initFallbackEncrypted() {
+    const char* overridePath = getenv("VGRE_TOKEN_FALLBACK_PATH");
+    if (overridePath && overridePath[0] != '\0') {
+        fallback_path_ = overridePath;
+    } else {
 #if defined(_WIN32)
-    fallback_path_ = std::string(getenv("APPDATA")) + "\\vgre\\tokens.enc";
+        const char* appdata = getenv("APPDATA");
+        if (appdata && appdata[0] != '\0') {
+            fallback_path_ = std::string(appdata) + "\\vgre\\tokens.enc";
+        } else {
+            fallback_path_ = ".\\vgre\\tokens.enc";
+        }
 #else
-    fallback_path_ = std::string(getenv("HOME")) + "/.vgre/tokens.enc";
+        const char* home = getenv("HOME");
+        if (home && home[0] != '\0') {
+            fallback_path_ = std::string(home) + "/.vgre/tokens.enc";
+        } else {
+            // CI/sandbox fallback when HOME is unset.
+            fallback_path_ = ".vgre/tokens.enc";
+        }
 #endif
+    }
     
     std::string dir = fallback_path_.substr(0, fallback_path_.find_last_of("/\\"));
 #if defined(_WIN32)
-    CreateDirectoryA(dir.c_str(), NULL);
+    if (!dir.empty()) {
+        CreateDirectoryA(dir.c_str(), NULL);
+    }
 #else
-    mkdir(dir.c_str(), 0700);
+    if (!dir.empty()) {
+        mkdir(dir.c_str(), 0700);
+    }
 #endif
     
     return VGREResult::SUCCESS;
