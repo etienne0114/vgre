@@ -31,20 +31,22 @@ void TCPClusterManager::shutdown() {
     client_fd_ = vgre::common::VGRE_INVALID_SOCKET;
   }
 
-  if (discovery_manager_) discovery_manager_->stopAll();
+  if (discovery_manager_) {
+    fprintf(stderr, "DEBUG [TCPCluster] Calling discovery_manager_->stopAll()\n");
+    discovery_manager_->stopAll();
+  } else {
+    fprintf(stderr, "DEBUG [TCPCluster] discovery_manager_ is NULL\n");
+  }
 
+  fprintf(stderr, "DEBUG [TCPCluster] Notifying CVs...\n");
   staging_cv_.notify_all();
   remote_results_cv_.notify_all();
   barrier_cv_.notify_all();
 
-  // Add timeout to thread joins to prevent blocking during shutdown
   auto join_with_timeout = [](std::thread& t, const char* name) {
     if (t.joinable()) {
-      auto future = std::async(std::launch::async, [&t]() { t.join(); });
-      if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
-        VGRE_LOG_WARN("TCPCluster", std::string("Thread join timeout - ") + name);
-        t.detach();
-      }
+      fprintf(stderr, "DEBUG [TCPCluster] Joining %s\n", name);
+      t.join();
     }
   };
   join_with_timeout(data_processor_thread_, "data_processor_thread_");
@@ -54,12 +56,9 @@ void TCPClusterManager::shutdown() {
 
   {
     std::lock_guard<std::mutex> lk(server_auth_mutex_);
-    for (auto &e : server_auth_threads_) if (e.t.joinable()) {
-      auto future = std::async(std::launch::async, [&e]() { e.t.join(); });
-      if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
-        VGRE_LOG_WARN("TCPCluster", "Auth thread join timeout - detaching");
-        e.t.detach();
-      } else {
+    for (auto &e : server_auth_threads_) {
+      if (e.t.joinable()) {
+        fprintf(stderr, "DEBUG [TCPCluster] Joining server auth thread\n");
         e.t.join();
       }
     }

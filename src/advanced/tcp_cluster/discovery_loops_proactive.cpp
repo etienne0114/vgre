@@ -50,7 +50,9 @@ void DiscoveryManager::proactiveConnectionLoop() {
                 parent_->syncToIPC();
             } else vgre::common::vgre_close_socket(sock);
         }
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+        for (int i = 0; i < 50 && parent_->enabled_ && !stop_proactive_; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
 }
 

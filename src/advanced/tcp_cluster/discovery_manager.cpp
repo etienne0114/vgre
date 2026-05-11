@@ -38,22 +38,17 @@ using vgre::common::VgreSocketGuard;
 // Both ports are configurable via env vars so operators can avoid conflicts
 // with other services on the same subnet.  Both master and workers must use
 // the same values; changing one requires changing the other.
-namespace {
-  // Port the master broadcasts on (workers listen here)
-  int getUdpAnnouncePort() {
+int DiscoveryManager::getUdpAnnouncePort() {
     const char* e = std::getenv("VGRE_CLUSTER_UDP_ANNOUNCE_PORT");
     if (e) { int v = std::atoi(e); if (v > 1024 && v < 65536) return v; }
     return 7778;
-  }
-  // Port workers broadcast on (master listens here)
-  int getUdpWorkerPort() {
+}
+
+int DiscoveryManager::getUdpWorkerPort() {
     const char* e = std::getenv("VGRE_CLUSTER_UDP_WORKER_PORT");
     if (e) { int v = std::atoi(e); if (v > 1024 && v < 65536) return v; }
     return 7779;
-  }
-  const int kUdpAnnouncePort = getUdpAnnouncePort();
-  const int kUdpWorkerPort   = getUdpWorkerPort();
-} // anonymous namespace
+}
 
 // ── Constructor/Destructor ────────────────────────────────────────────────
 
@@ -73,18 +68,38 @@ DiscoveryManager::~DiscoveryManager() {
 // ── Start Methods ──────────────────────────────────────────────────────────
 
 void DiscoveryManager::startMasterAnnouncer() {
+    const char* disc = std::getenv("VGRE_CLUSTER_DISCOVERY");
+    if (disc && std::string(disc) == "OFF") {
+        VGRE_LOG_INFO("TCPCluster", "Discovery: Master announcer disabled via VGRE_CLUSTER_DISCOVERY=OFF");
+        return;
+    }
     udp_announcer_thread_ = std::thread(&DiscoveryManager::udpAnnouncerLoop, this);
 }
 
 void DiscoveryManager::startMasterWorkerDiscovery() {
+    const char* disc = std::getenv("VGRE_CLUSTER_DISCOVERY");
+    if (disc && std::string(disc) == "OFF") {
+        VGRE_LOG_INFO("TCPCluster", "Discovery: Master worker discovery disabled via VGRE_CLUSTER_DISCOVERY=OFF");
+        return;
+    }
     master_discovery_thread_ = std::thread(&DiscoveryManager::udpMasterDiscoveryLoop, this);
 }
 
 void DiscoveryManager::startWorkerDiscovery() {
+    const char* disc = std::getenv("VGRE_CLUSTER_DISCOVERY");
+    if (disc && std::string(disc) == "OFF") {
+        VGRE_LOG_INFO("TCPCluster", "Discovery: Worker discovery disabled via VGRE_CLUSTER_DISCOVERY=OFF");
+        return;
+    }
     worker_discovery_thread_ = std::thread(&DiscoveryManager::udpDiscoveryLoop, this);
 }
 
 void DiscoveryManager::startWorkerAnnouncer() {
+    const char* disc = std::getenv("VGRE_CLUSTER_DISCOVERY");
+    if (disc && std::string(disc) == "OFF") {
+        VGRE_LOG_INFO("TCPCluster", "Discovery: Worker announcer disabled via VGRE_CLUSTER_DISCOVERY=OFF");
+        return;
+    }
     worker_announcer_thread_ = std::thread(&DiscoveryManager::udpWorkerAnnouncerLoop, this);
 }
 
@@ -96,28 +111,43 @@ void DiscoveryManager::startProactiveConnections() {
 // ── Stop All Threads ───────────────────────────────────────────────────────
 
 void DiscoveryManager::stopAll() {
+    fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager::stopAll starting...\n");
     stop_proactive_ = true;
 
-    // Detach threads instead of joining them to avoid crashes during static destruction
-    // The threads will exit naturally when parent_ becomes null or enabled_ becomes false
-    if (udp_announcer_thread_.joinable())    udp_announcer_thread_.detach();
-    if (master_discovery_thread_.joinable()) master_discovery_thread_.detach();
-    if (worker_discovery_thread_.joinable()) worker_discovery_thread_.detach();
-    if (worker_announcer_thread_.joinable()) worker_announcer_thread_.detach();
-    if (proactive_thread_.joinable())        proactive_thread_.detach();
+    if (udp_announcer_thread_.joinable()) {
+        fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining udp_announcer_thread_\n");
+        udp_announcer_thread_.join();
+    }
+    if (master_discovery_thread_.joinable()) {
+        fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining master_discovery_thread_\n");
+        master_discovery_thread_.join();
+    }
+    if (worker_discovery_thread_.joinable()) {
+        fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining worker_discovery_thread_\n");
+        worker_discovery_thread_.join();
+    }
+    if (worker_announcer_thread_.joinable()) {
+        fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining worker_announcer_thread_\n");
+        worker_announcer_thread_.join();
+    }
+    if (proactive_thread_.joinable()) {
+        fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining proactive_thread_\n");
+        proactive_thread_.join();
+    }
 
     // Join all async handshake threads spawned by proactiveConnectionLoop.
-    // These need to be joined because they access the parent TCPClusterManager.
     std::vector<AuthEntry> to_join;
     {
         std::lock_guard<std::mutex> lk(auth_threads_mutex_);
         to_join.swap(auth_threads_);
     }
     for (auto &entry : to_join) {
-        try {
-            if (entry.t.joinable()) entry.t.join();
-        } catch (...) {}
+        if (entry.t.joinable()) {
+            fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining proactive auth thread\n");
+            entry.t.join();
+        }
     }
+    fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager::stopAll finished.\n");
 }
 
 // ── UDP Announcer Loop (Master broadcasts presence) ───────────────────────
@@ -133,7 +163,7 @@ void DiscoveryManager::udpAnnouncerLoop() {
   struct sockaddr_in broadcast_addr{};
   broadcast_addr.sin_family = AF_INET;
   broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-  broadcast_addr.sin_port = htons(static_cast<uint16_t>(kUdpAnnouncePort));
+  broadcast_addr.sin_port = htons(static_cast<uint16_t>(DiscoveryManager::getUdpAnnouncePort()));
 
   VGRE_LOG_INFO("TCPCluster", "Master: UDP Announcer active (broadcasting master presence)...");
 
@@ -165,7 +195,7 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
   struct sockaddr_in listen_addr{};
   listen_addr.sin_family = AF_INET;
   listen_addr.sin_addr.s_addr = INADDR_ANY;
-  listen_addr.sin_port = htons(static_cast<uint16_t>(kUdpWorkerPort)); // Dedicated port for worker announcements
+  listen_addr.sin_port = htons(static_cast<uint16_t>(DiscoveryManager::getUdpWorkerPort())); // Dedicated port for worker announcements
 
   if (bind(udp_guard.get(), (struct sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
     VGRE_LOG_WARN("TCPCluster", "Master: UDP Worker Discovery bind failed");
@@ -266,7 +296,7 @@ void DiscoveryManager::udpWorkerAnnouncerLoop() {
   struct sockaddr_in broadcast_addr{};
   broadcast_addr.sin_family = AF_INET;
   broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-  broadcast_addr.sin_port = htons(static_cast<uint16_t>(kUdpWorkerPort)); // Master scans this port
+  broadcast_addr.sin_port = htons(static_cast<uint16_t>(DiscoveryManager::getUdpWorkerPort())); // Master scans this port
 
   VGRE_LOG_INFO("TCPCluster", "Worker: Proactive Announcer active (seeking master)...");
 

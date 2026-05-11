@@ -59,7 +59,7 @@ inline const char* resultToString(VGREResult r) {
         case VGREResult::ERR_CRYPTO:          return "Cryptographic error";
         case VGREResult::ERR_BUSY:            return "Device or resource busy";
         case VGREResult::ERR_NOT_FOUND:       return "Not found";
-        case VGREResult::ERR_AUTH_RETRY:      return "Authentication retry (fallback mode)";
+        case VGREResult::ERR_AUTH_RETRY:      return "Authentication retry (deprecated)";
         case VGREResult::ERR_UNKNOWN:         return "Unknown error";
         default:                                return "Unrecognized error code";
     }

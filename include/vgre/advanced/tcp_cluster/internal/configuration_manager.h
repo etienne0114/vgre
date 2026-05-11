@@ -170,6 +170,7 @@ private:
     static bool readFileContent(const std::string& file_path, std::string& content);
     static bool writeFileContent(const std::string& file_path, const std::string& content);
 
+public:
     // Template for env var loading
     template<typename T> static T getEnvVar(const char* name, T default_value);
     

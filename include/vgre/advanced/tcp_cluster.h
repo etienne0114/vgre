@@ -3,49 +3,50 @@
 // must precede <windows.h>, and also defines ERROR_* macros via winerror.h.
 // Keeping it first prevents those macros from stomping on our error_codes.h
 // enum values when other headers include both in the wrong order.
-#include "vgre/common/sockets.h"
+#include "vgre/advanced/rdma_transport.h"
+#include "vgre/advanced/secure_channel.h"
+#include "vgre/advanced/tcp_cluster/internal/diagnostic_logger.h"
+#include "vgre/advanced/tcp_cluster_protocol.h"
+#include "vgre/advanced/tcp_cluster_validation.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
-#include "vgre/common/types.h"
 #include "vgre/common/logger.h"
-#include "vgre/advanced/secure_channel.h"
-#include "vgre/advanced/rdma_transport.h"
+#include "vgre/common/sockets.h"
+#include "vgre/common/types.h"
 #include "vgre/core/shm_manager.h"
 #include <atomic>
-#include <cstdint>
-#include <mutex>
-#include <shared_mutex>  
+#include <chrono>
 #include <condition_variable>
-#include <string>
-#include <thread>
-#include <vector>
+#include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <set>
+#include <shared_mutex>
+#include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
-#include <chrono>
-#include <memory>
-#include "vgre/advanced/tcp_cluster/internal/diagnostic_logger.h"
-#include "vgre/advanced/tcp_cluster_validation.h"
-#include "vgre/advanced/tcp_cluster_protocol.h"
+#include <vector>
 
 // Forward declarations for dependency injection interfaces
 namespace vgre {
 namespace advanced {
 
-  class ISocketFactory;
-  class IMemoryManager;
-  class ISecureChannelFactory;
-  struct ClientConnection;
-  class ConnectionManager;
-  class DiscoveryManager;
-  class PacketHandler;
-  class SecurityManager;
-  class MemorySyncManager;
-  class CollectiveOpsManager;
-  class DispatchManager;
-  class WindowsSocketManager;
+class ISocketFactory;
+class IMemoryManager;
+class IKernelManager;
+class ISecureChannelFactory;
+struct ClientConnection;
+class ConnectionManager;
+class DiscoveryManager;
+class PacketHandler;
+class SecurityManager;
+class MemorySyncManager;
+class CollectiveOpsManager;
+class DispatchManager;
+class WindowsSocketManager;
 
 // VSBP is a binary protocol with no byte-swapping — it assumes little-endian
 // hosts on both ends.  This holds for every supported platform (x86-64, ARM64).
@@ -67,7 +68,7 @@ public:
   VGREResult initializeMeshTopology() {
     return MeshTopologyManager::initializeMeshTopology(this);
   }
-  VGREResult addMeshPeer(const std::string& ip_address, int port = 7777);
+  VGREResult addMeshPeer(const std::string &ip_address, int port = 7777);
   struct MeshTopologyStatus {
     detail::PlatformType local_platform;
     std::string local_platform_name;
@@ -87,13 +88,18 @@ public:
    * @brief Broadcasts a kernel registration to all workers.
    */
   void broadcastKernelRegistration(uint64_t kernel_id, const std::string &name,
-                                 const std::string &source);
+                                   const std::string &source);
   int getFirstActiveWorker() const;
-  VGREResult send_packet(vgre_socket_t fd, PacketType type, const void* payload, size_t payloadLen, SecureChannel* sc = nullptr);
-  VGREResult send_packet_direct(vgre_socket_t fd, PacketType type, const void* payload, size_t payloadLen, SecureChannel* sc = nullptr);
-  int recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBuffer, SecureChannel *sc = nullptr);
+  VGREResult send_packet(vgre_socket_t fd, PacketType type, const void *payload,
+                         size_t payloadLen, SecureChannel *sc = nullptr);
+  VGREResult send_packet_direct(vgre_socket_t fd, PacketType type,
+                                const void *payload, size_t payloadLen,
+                                SecureChannel *sc = nullptr);
+  int recv_packet(vgre_socket_t fd, std::vector<uint8_t> &outBuffer,
+                  SecureChannel *sc = nullptr);
   void reportComputeFromWorker(double seconds, int cores, uint64_t kernel_id);
-  VGREResult broadcastPacket(PacketType type, const void* payload, size_t payloadLen);
+  VGREResult broadcastPacket(PacketType type, const void *payload,
+                             size_t payloadLen);
   /**
    * Generate comprehensive operational report with metrics and health status
    */
@@ -104,7 +110,8 @@ public:
   void exportMetricsForMonitoring();
   /**
    * Perform graceful restart with coordination
-   * @param preserve_connections Whether to preserve existing connections during restart
+   * @param preserve_connections Whether to preserve existing connections during
+   * restart
    * @return VGREResult indicating restart success
    */
   VGREResult performGracefulRestart(bool preserve_connections = false);
@@ -124,19 +131,18 @@ public:
   SessionInfo getSecurityInfo() const;
   VGREResult launchPartitionedKernel(uint64_t kernel_id,
                                      const uint32_t grid_dim[3],
-                                     const uint32_t block_dim[3],
-                                     void **args, int num_args,
-                                     size_t shared_mem);
+                                     const uint32_t block_dim[3], void **args,
+                                     int num_args, size_t shared_mem);
   VGREResult collectPartitionResults(uint64_t kernel_id,
                                      uint32_t total_partitions,
                                      int timeout_ms = 30000);
-  VGREResult allReduce(void* ptr, size_t count, int datatype);
+  VGREResult allReduce(void *ptr, size_t count, int datatype);
   VGREResult barrier();
   struct ClientConnection {
     vgre_socket_t socket_fd;
     vgre_telemetry_t last_telemetry;
     std::atomic<bool> active{false};
-std::atomic<bool> is_authenticating{false}; 
+    std::atomic<bool> is_authenticating{false};
     uint64_t handshake_start_ms{0};
     std::vector<uint8_t> rx_buffer;
     bool expecting_type = true;
@@ -151,29 +157,29 @@ std::atomic<bool> is_authenticating{false};
     uint64_t cpu_memory = 0;
     bool has_igpu = false;
     char igpu_name[64] = {};
-bool capability_received = false; 
+    bool capability_received = false;
     std::string ip_address;
     int port = 0;
     std::unique_ptr<SecureChannel> secure_channel;
     std::atomic<bool> security_established{false};
-bool security_enabled = true;  
-uint32_t packets_sent = 0; 
+    bool security_enabled = true;
+    uint32_t packets_sent = 0;
     detail::PlatformType remote_platform = detail::PlatformType::UNKNOWN;
-bool is_mesh_peer = false;        
-bool can_be_master = true;        
-bool can_be_worker = true;        
-std::string platform_version;     
-uint32_t protocol_capabilities = 0; 
-bool supports_rdma = false;       
-bool supports_shm = false;        
-bool supports_security = true;    
-bool supports_collective_ops = false; 
-std::set<std::string> reachable_peers; 
-double connection_quality = 1.0;  
-uint64_t last_heartbeat_ms = 0;   
+    bool is_mesh_peer = false;
+    bool can_be_master = true;
+    bool can_be_worker = true;
+    std::string platform_version;
+    uint32_t protocol_capabilities = 0;
+    bool supports_rdma = false;
+    bool supports_shm = false;
+    bool supports_security = true;
+    bool supports_collective_ops = false;
+    std::set<std::string> reachable_peers;
+    double connection_quality = 1.0;
+    uint64_t last_heartbeat_ms = 0;
     struct OutgoingPacket {
       std::vector<uint8_t> data;
-uint32_t priority; 
+      uint32_t priority;
     };
     mutable std::mutex tx_mutex;
     std::deque<OutgoingPacket> high_priority_tx;
@@ -182,19 +188,19 @@ uint32_t priority;
     bool is_local = false;
     std::unique_ptr<vgre::core::ShmManager> shm_manager;
     uint64_t shm_offset = 0;
-    std::unordered_set<void*> synced_handles;
+    std::unordered_set<void *> synced_handles;
     double network_bandwidth_gbps = 10.0;
     std::chrono::steady_clock::time_point bandwidth_probe_start{};
     bool bandwidth_probe_in_flight = false;
     std::chrono::steady_clock::time_point last_bandwidth_probe_time{};
     double network_latency_ms = 1.0;
-    std::unique_ptr<RDMAContext>    rdma_ctx;
+    std::unique_ptr<RDMAContext> rdma_ctx;
     std::unique_ptr<RDMAConnection> rdma_conn;
-bool rdma_connected = false;  
+    bool rdma_connected = false;
     int hmac_failure_count{0};
     std::string effective_auth_token;
-uint64_t rate_window_start_ms{0}; 
-uint32_t rate_window_count{0};    
+    uint64_t rate_window_start_ms{0};
+    uint32_t rate_window_count{0};
   };
   struct ClusterNodeInfo {
     std::string ip_address;
@@ -217,11 +223,11 @@ uint32_t rate_window_count{0};
   bool isWorker() const { return !is_master_; }
   TCPClusterManager();
   ~TCPClusterManager();
-  TCPClusterManager(
-    std::unique_ptr<ISocketFactory> socket_factory,
-    std::unique_ptr<IMemoryManager> memory_manager,
-    std::unique_ptr<ISecureChannelFactory> security_factory
-  );
+  TCPClusterManager(std::unique_ptr<ISocketFactory> socket_factory,
+                    std::unique_ptr<IMemoryManager> memory_manager,
+                    std::unique_ptr<IKernelManager> kernel_manager,
+                    std::unique_ptr<ISecureChannelFactory> security_factory);
+
 private:
   friend class ConnectionManager;
   friend class DiscoveryManager;
@@ -230,6 +236,7 @@ private:
   friend class DispatchManager;
   std::unique_ptr<ISocketFactory> socket_factory_;
   std::unique_ptr<IMemoryManager> memory_manager_;
+  std::unique_ptr<IKernelManager> kernel_manager_;
   std::unique_ptr<ISecureChannelFactory> security_factory_;
   std::unique_ptr<ConnectionManager> connection_manager_;
   std::unique_ptr<DiscoveryManager> discovery_manager_;
@@ -243,31 +250,40 @@ private:
   struct ConnectionRateLimiter {
     static int getMaxPerWindow() {
       static const int v = []() -> int {
-        const char* e = std::getenv("VGRE_CLUSTER_MAX_CONN_PER_WINDOW");
-        if (e) { int v = std::atoi(e); if (v > 0 && v <= 10000) return v; }
+        const char *e = std::getenv("VGRE_CLUSTER_MAX_CONN_PER_WINDOW");
+        if (e) {
+          int v = std::atoi(e);
+          if (v > 0 && v <= 10000)
+            return v;
+        }
         return 10;
       }();
       return v;
     }
     static int getWindowSeconds() {
       static const int v = []() -> int {
-        const char* e = std::getenv("VGRE_CLUSTER_CONN_WINDOW_SEC");
-        if (e) { int v = std::atoi(e); if (v > 0 && v <= 3600) return v; }
+        const char *e = std::getenv("VGRE_CLUSTER_CONN_WINDOW_SEC");
+        if (e) {
+          int v = std::atoi(e);
+          if (v > 0 && v <= 3600)
+            return v;
+        }
         return 60;
       }();
       return v;
     }
     std::mutex mtx;
     std::unordered_map<std::string,
-        std::deque<std::chrono::steady_clock::time_point>> attempts;
+                       std::deque<std::chrono::steady_clock::time_point>>
+        attempts;
     bool isAllowed(const std::string &ip) {
       std::lock_guard<std::mutex> lk(mtx);
       auto now = std::chrono::steady_clock::now();
       auto &q = attempts[ip];
       const int window = getWindowSeconds();
       while (!q.empty() &&
-             std::chrono::duration_cast<std::chrono::seconds>(now - q.front()).count()
-                 >= window) {
+             std::chrono::duration_cast<std::chrono::seconds>(now - q.front())
+                     .count() >= window) {
         q.pop_front();
       }
       return static_cast<int>(q.size()) < getMaxPerWindow();
@@ -282,32 +298,58 @@ private:
   void cleanupServerAuthThreads();
   void performServerMaintenance();
   void handleNewInboundConnection();
-  void handleClientDataEvents(std::vector<vgre_pollfd>& fds);
+  void handleClientDataEvents(std::vector<vgre_pollfd> &fds);
   void processServerPackets(std::shared_ptr<ClientConnection> client);
   void clientLoop();
   void handleRemoteCommand(const RemoteCommandPacket &pkt);
   void handlePartitionDispatch(const PartitionDispatchPacket &pkt);
-  std::vector<uint8_t> constructPacket(PacketType type, const void* payload, size_t payloadLen);
-  std::vector<uint8_t> constructMeshPacket(PacketType type, const void* payload, size_t payloadLen, detail::PlatformType source_platform);
-  VGREResult syncPointerToWorker(void* ptr, uint64_t handle, std::shared_ptr<ClientConnection> client);
-  VGREResult sendDeltaSync(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client);
-  VGREResult sendDeltaSyncWithRetry(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client);
-  VGREResult sendDeltaSyncSHM(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client);
-  VGREResult sendDeltaSyncTCP(void* ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>>& dirtyRanges, std::shared_ptr<ClientConnection> client);
-  VGREResult sendFullSync(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client);
-  VGREResult sendFullSyncSHM(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client);
-  VGREResult sendFullSyncTCP(void* ptr, uint64_t handle, size_t size, std::shared_ptr<ClientConnection> client);
-  VGREResult streamArgumentsToWorker(void** args, int num_args, uint64_t kernel_id, std::shared_ptr<ClientConnection> client);
-  VGREResult sendStructArg(void* arg, int arg_index, uint64_t kernel_id, std::shared_ptr<ClientConnection> client);
-  VGREResult sendPointerArg(void* arg, int arg_index, std::shared_ptr<ClientConnection> client);
-  VGREResult sendScalarArg(void* arg, int arg_index, ArgType type, std::shared_ptr<ClientConnection> client);
+  std::vector<uint8_t> constructPacket(PacketType type, const void *payload,
+                                       size_t payloadLen);
+  std::vector<uint8_t>
+  constructMeshPacket(PacketType type, const void *payload, size_t payloadLen,
+                      detail::PlatformType source_platform);
+  VGREResult syncPointerToWorker(void *ptr, uint64_t handle,
+                                 std::shared_ptr<ClientConnection> client);
+  VGREResult
+  sendDeltaSync(void *ptr, uint64_t handle,
+                const std::vector<std::pair<size_t, size_t>> &dirtyRanges,
+                std::shared_ptr<ClientConnection> client);
+  VGREResult sendDeltaSyncWithRetry(
+      void *ptr, uint64_t handle,
+      const std::vector<std::pair<size_t, size_t>> &dirtyRanges,
+      std::shared_ptr<ClientConnection> client);
+  VGREResult
+  sendDeltaSyncSHM(void *ptr, uint64_t handle,
+                   const std::vector<std::pair<size_t, size_t>> &dirtyRanges,
+                   std::shared_ptr<ClientConnection> client);
+  VGREResult
+  sendDeltaSyncTCP(void *ptr, uint64_t handle,
+                   const std::vector<std::pair<size_t, size_t>> &dirtyRanges,
+                   std::shared_ptr<ClientConnection> client);
+  VGREResult sendFullSync(void *ptr, uint64_t handle, size_t size,
+                          std::shared_ptr<ClientConnection> client);
+  VGREResult sendFullSyncSHM(void *ptr, uint64_t handle, size_t size,
+                             std::shared_ptr<ClientConnection> client);
+  VGREResult sendFullSyncTCP(void *ptr, uint64_t handle, size_t size,
+                             std::shared_ptr<ClientConnection> client);
+  VGREResult streamArgumentsToWorker(void **args, int num_args,
+                                     uint64_t kernel_id,
+                                     std::shared_ptr<ClientConnection> client);
+  VGREResult sendStructArg(void *arg, int arg_index, uint64_t kernel_id,
+                           std::shared_ptr<ClientConnection> client);
+  VGREResult sendPointerArg(void *arg, int arg_index,
+                            std::shared_ptr<ClientConnection> client);
+  VGREResult sendScalarArg(void *arg, int arg_index, ArgType type,
+                           std::shared_ptr<ClientConnection> client);
   VGREResult waitForData(vgre_socket_t fd, int timeout_ms);
-  std::string hexDump(const uint8_t* data, size_t max_bytes);
-void processClientStagingBuffer();
+  std::string hexDump(const uint8_t *data, size_t max_bytes);
+  void processClientStagingBuffer();
   void flush_tx_queues(std::shared_ptr<ClientConnection> client);
   void parseProactiveNodes();
+
 public:
   void parseMeshPeers();
+
 private:
   void syncToIPC();
   VGREResult performSecureHandshake(std::shared_ptr<ClientConnection> client);
@@ -317,7 +359,7 @@ private:
   std::atomic<bool> security_enabled_{false};
   uint64_t auth_token_ = 0;
   mutable std::recursive_mutex auth_token_mutex_;
-std::string auth_token_str_; 
+  std::string auth_token_str_;
   uint64_t pending_target_ptr_ = 0;
   uint32_t pending_data_size_ = 0;
   uint32_t pending_num_ranges_ = 0;
@@ -336,9 +378,9 @@ std::string auth_token_str_;
   int port_ = 7777;
   std::string host_;
   std::thread cluster_thread_;
-std::thread client_loop_thread_;   
+  std::thread client_loop_thread_;
   std::thread data_processor_thread_;
-std::thread monitoring_thread_;    
+  std::thread monitoring_thread_;
   std::vector<std::string> proactive_worker_addresses_;
   std::set<std::string> mesh_peer_ips_;
   bool mesh_topology_enabled_ = false;
@@ -357,7 +399,8 @@ std::thread monitoring_thread_;
   std::map<std::string, MeshPeerInfo> mesh_peers_;
   mutable std::mutex proactive_backoff_mutex_;
   std::map<std::string, int> proactive_fail_counts_;
-  std::map<std::string, std::chrono::steady_clock::time_point> proactive_backoff_until_;
+  std::map<std::string, std::chrono::steady_clock::time_point>
+      proactive_backoff_until_;
   struct AuthEntry {
     std::thread t;
     std::shared_ptr<std::atomic<bool>> done;
@@ -381,13 +424,13 @@ std::thread monitoring_thread_;
   std::deque<ClientConnection::OutgoingPacket> client_low_priority_tx_;
   std::unique_ptr<vgre::core::ShmManager> client_shm_manager_;
   bool client_shm_enabled_ = false;
-  std::unique_ptr<RDMAContext>    client_rdma_ctx_;
+  std::unique_ptr<RDMAContext> client_rdma_ctx_;
   std::unique_ptr<RDMAConnection> client_rdma_conn_;
   bool client_rdma_connected_ = false;
   std::vector<uint8_t> client_rx_staging_A_;
   std::vector<uint8_t> client_rx_staging_B_;
-  std::vector<uint8_t>* active_staging_ = &client_rx_staging_A_;
-  std::vector<uint8_t>* processing_staging_ = &client_rx_staging_B_;
+  std::vector<uint8_t> *active_staging_ = &client_rx_staging_A_;
+  std::vector<uint8_t> *processing_staging_ = &client_rx_staging_B_;
   std::mutex staging_mutex_;
   std::condition_variable staging_cv_;
   std::atomic<bool> staging_ready_{false};
@@ -417,6 +460,6 @@ std::thread monitoring_thread_;
   uint32_t barrier_count_ = 0;
   std::condition_variable barrier_cv_;
 };
-} 
-} 
+} // namespace advanced
+} // namespace vgre
 // End of file extension for proactive connections

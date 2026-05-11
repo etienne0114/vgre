@@ -102,6 +102,9 @@ public:
      */
     void stopAll();
 
+    static int getUdpAnnouncePort();
+    static int getUdpWorkerPort();
+
 private:
     // Parent cluster manager (non-owning pointer)
     // Used to access: enabled_, is_master_, port_, security_enabled_,
