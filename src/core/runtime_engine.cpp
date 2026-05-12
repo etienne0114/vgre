@@ -35,11 +35,11 @@ namespace core {
 // ── Constructor / Destructor ───────────────────────────────────────────────
 RuntimeEngine::RuntimeEngine() = default;
 RuntimeEngine::~RuntimeEngine() {
-  if (isInitialized()) {
-    // Phase 10: Automatic Chrome Trace Export on shutdown
-    advanced::RuntimeProfiler::instance().exportToFile("vgre_trace.json");
-    shutdown();
-  }
+  // Do NOT call shutdown() from the destructor.  During static-storage
+  // teardown the destruction order of Meyers singletons is undefined;
+  // calling IPCManager / TCPClusterManager / Scheduler methods here can
+  // deadlock or access already-destroyed objects.  All explicit cleanup must
+  // go through vgre_shutdown() which is called before static destruction.
 }
 
 // ── Initialization ─────────────────────────────────────────────────────────
@@ -162,6 +162,9 @@ VGREResult RuntimeEngine::initialize() {
 }
 
 VGREResult RuntimeEngine::shutdown() {
+  // Export profiler trace before tearing down subsystems.
+  advanced::RuntimeProfiler::instance().exportToFile("vgre_trace.json");
+
   // First, drain all pending scheduler work BEFORE acquiring our mutex.
   // This prevents deadlocks where worker threads (completing tasks)
   // need RuntimeEngine::mutex_ while we're holding it during shutdown.
@@ -192,6 +195,7 @@ VGREResult RuntimeEngine::shutdown() {
 
   kernelCache_.clear();
   kernelIRCache_.clear();
+  kernelFnAddrMap_.clear();
   captureState_.clear();
   nextKernelId_ = 1;
   currentDeviceId_ = 0;
@@ -323,6 +327,7 @@ VGREResult RuntimeEngine::getKernelFromModule(ModuleHandle module,
 
   outId = nextKernelId_++;
   kernelCache_[outId] = fn;
+  kernelFnAddrMap_[fn.get()] = outId;
 
   // Create metadata IR entry for binary module function.
   // We cannot parse the source from a pre-compiled binary, but we
