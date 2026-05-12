@@ -39,9 +39,14 @@ namespace mps {
 // MEMCPY and FREE know where to write/free.
 namespace {
 
-static std::mutex              g_allocMu;
-static std::atomic<uint64_t>   g_nextPtr{0x10000000ULL}; // fake device base
-static std::unordered_map<uint64_t, void*> g_allocMap;
+static std::mutex& getAllocMutex() {
+    static std::mutex m;
+    return m;
+}
+static std::unordered_map<uint64_t, void*>& getAllocMap() {
+    static std::unordered_map<uint64_t, void*> m;
+    return m;
+}
 
 static uint64_t mpsAlloc(uint64_t bytes) {
     vgre::MemoryHandle h = nullptr;
@@ -49,24 +54,24 @@ static uint64_t mpsAlloc(uint64_t bytes) {
         return 0;
     }
     uint64_t handle = reinterpret_cast<uint64_t>(h);
-    std::lock_guard<std::mutex> lk(g_allocMu);
-    g_allocMap[handle] = h;
+    std::lock_guard<std::mutex> lk(getAllocMutex());
+    getAllocMap()[handle] = h;
     return handle;
 }
 
 static bool mpsFree(uint64_t handle) {
-    std::lock_guard<std::mutex> lk(g_allocMu);
-    auto it = g_allocMap.find(handle);
-    if (it == g_allocMap.end()) return false;
+    std::lock_guard<std::mutex> lk(getAllocMutex());
+    auto it = getAllocMap().find(handle);
+    if (it == getAllocMap().end()) return false;
     vgre::core::MemoryManager::instance().free(it->second);
-    g_allocMap.erase(it);
+    getAllocMap().erase(it);
     return true;
 }
 
 static void* mpsResolve(uint64_t handle) {
-    std::lock_guard<std::mutex> lk(g_allocMu);
-    auto it = g_allocMap.find(handle);
-    return it != g_allocMap.end() ? it->second : nullptr;
+    std::lock_guard<std::mutex> lk(getAllocMutex());
+    auto it = getAllocMap().find(handle);
+    return it != getAllocMap().end() ? it->second : nullptr;
 }
 
 // Helper: write exactly len bytes to fd; returns false on error.
@@ -333,28 +338,34 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
 //  MPSClient
 // ─────────────────────────────────────────────────────────────────────────────
 
-static MPSClient* g_mpsClient = nullptr;
-static std::mutex  g_mpsClientMu;
+static MPSClient*& getMpsClient() {
+    static MPSClient* client = nullptr;
+    return client;
+}
+static std::mutex& getMpsClientMutex() {
+    static std::mutex m;
+    return m;
+}
 
 MPSClient* MPSClient::instance() {
-    std::lock_guard<std::mutex> lk(g_mpsClientMu);
-    if (g_mpsClient) return g_mpsClient;
+    std::lock_guard<std::mutex> lk(getMpsClientMutex());
+    if (getMpsClient()) return getMpsClient();
     const char* pipe = std::getenv("VGRE_MPS_PIPE");
     if (!pipe) return nullptr;
-    g_mpsClient = new MPSClient();
-    if (!g_mpsClient->connect(pipe)) {
-        delete g_mpsClient; g_mpsClient = nullptr;
+    getMpsClient() = new MPSClient();
+    if (!getMpsClient()->connect(pipe)) {
+        delete getMpsClient(); getMpsClient() = nullptr;
         VGRE_LOG_WARN("MPS", "Could not connect to MPS daemon at " + std::string(pipe));
     }
-    return g_mpsClient;
+    return getMpsClient();
 }
 
 void MPSClient::shutdown() {
-    std::lock_guard<std::mutex> lk(g_mpsClientMu);
-    if (g_mpsClient) {
-        g_mpsClient->disconnect();
-        delete g_mpsClient;
-        g_mpsClient = nullptr;
+    std::lock_guard<std::mutex> lk(getMpsClientMutex());
+    if (getMpsClient()) {
+        getMpsClient()->disconnect();
+        delete getMpsClient();
+        getMpsClient() = nullptr;
     }
 }
 

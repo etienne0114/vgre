@@ -13,11 +13,14 @@
 #include <windows.h>
 #endif
 
-static std::atomic<bool> g_stop_requested(false);
+static std::atomic<bool>& getStopRequested() {
+    static std::atomic<bool> v{false};
+    return v;
+}
 
 void signal_handler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) {
-        g_stop_requested.store(true);
+        getStopRequested().store(true);
     }
 }
 
@@ -98,7 +101,7 @@ int main(int argc, char** argv) {
     std::cout.flush();
     
     int reconnectCounter = 0;
-    while (!g_stop_requested.load()) {
+    while (!getStopRequested().load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         
         if (!cluster.isEnabled()) {
