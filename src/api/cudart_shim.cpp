@@ -1158,14 +1158,18 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks,
                                                           size_t dynamicSMemSize) {
   if (!numBlocks || blockSize <= 0) return cudaErrorInvalidValue;
 
-  // ── Real occupancy formula (Ampere SM model) ──────────────────────────────
-  constexpr int kMaxWarpsPerSM     = 64;
-  constexpr int kMaxBlocksPerSM    = 32;
-  constexpr int kMaxThreadsPerSM   = 2048;
-  constexpr int kMaxRegsPerSM      = 65536;
-  constexpr int kMaxSharedMemPerSM = 102400; // 100 KB
+  // ── Query current device SM limits (architecture-aware) ─────────────────────
+  vgre::DeviceProperties dp{};
+  vgre::core::RuntimeEngine::instance().getDeviceProperties(
+      vgre::core::RuntimeEngine::instance().getDeviceId(), dp);
 
-  int warpsPerBlock = (blockSize + 31) / 32;
+  const int kMaxWarpsPerSM     = dp.maxWarpsPerSM;
+  const int kMaxBlocksPerSM    = dp.maxBlocksPerSM;
+  const int kMaxThreadsPerSM   = dp.maxThreadsPerSM;
+  const int kMaxRegsPerSM      = dp.maxRegsPerSM;
+  const int kMaxSharedMemPerSM = dp.maxSharedMemPerSM;
+
+  int warpsPerBlock = (blockSize + dp.warpSize - 1) / dp.warpSize;
 
   // Limit 1: warp capacity
   int limitWarps = kMaxWarpsPerSM / std::max(1, warpsPerBlock);
@@ -1206,7 +1210,7 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks,
   }
 
   // Limit 3: register pressure
-  int regsPerBlock = warpsPerBlock * 32 * registersPerThread;
+  int regsPerBlock = warpsPerBlock * dp.warpSize * registersPerThread;
   int limitRegs = (regsPerBlock > 0) ? (kMaxRegsPerSM / regsPerBlock) : kMaxBlocksPerSM;
 
   // Limit 4: shared memory
@@ -1228,7 +1232,8 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks,
       " (limitW=" + std::to_string(limitWarps) +
       " limitT=" + std::to_string(limitThreads) +
       " limitR=" + std::to_string(limitRegs) +
-      " limitS=" + std::to_string(limitSMem) + ")");
+      " limitS=" + std::to_string(limitSMem) +
+      " arch=" + std::to_string(dp.major) + "." + std::to_string(dp.minor) + ")");
   return cudaSuccess;
 }
 
