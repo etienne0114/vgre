@@ -27,6 +27,7 @@
  */
 
 #include "vgre/common/error_codes.h"
+#include "vgre/common/sockets.h"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -108,8 +109,8 @@ private:
     bool rawSend(const void* data, size_t len);
     bool rawRecv(void* buf, size_t len, int timeoutMs);
 
-    // Socket handle (-1 if disconnected)
-    int sockfd_ = -1;
+    // Socket handle (VGRE_INVALID_SOCKET if disconnected)
+    vgre::common::vgre_socket_t sockfd_ = vgre::common::VGRE_INVALID_SOCKET;
 
     // TLS context (opaque pointer — OpenSSL types hidden in .cpp)
     struct TlsState;
@@ -154,7 +155,7 @@ public:
 private:
     WebsocketTransportServer(int port);
 
-    int listenfd_ = -1;
+    vgre::common::vgre_socket_t listenfd_ = vgre::common::VGRE_INVALID_SOCKET;
     int port_ = 0;
     bool running_ = false;
 };
