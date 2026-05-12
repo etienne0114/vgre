@@ -139,6 +139,7 @@ public:
   cudaError_t eventCreate(cudaEvent_t *event);
   cudaError_t eventCreateWithFlags(cudaEvent_t *event, unsigned int flags);
   cudaError_t eventRecord(cudaEvent_t event, cudaStream_t stream);
+  cudaError_t eventQuery(cudaEvent_t event);
   cudaError_t eventSynchronize(cudaEvent_t event);
   cudaError_t eventElapsedTime(float *ms, cudaEvent_t start, cudaEvent_t end);
   cudaError_t eventDestroy(cudaEvent_t event);

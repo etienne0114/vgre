@@ -390,6 +390,10 @@ cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
   return vgre::api::CUDAInterceptor::instance().eventRecord(event, stream);
 }
 
+cudaError_t cudaEventQuery(cudaEvent_t event) {
+  return vgre::api::CUDAInterceptor::instance().eventQuery(event);
+}
+
 cudaError_t cudaEventSynchronize(cudaEvent_t event) {
   return vgre::api::CUDAInterceptor::instance().eventSynchronize(event);
 }
