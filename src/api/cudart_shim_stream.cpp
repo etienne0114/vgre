@@ -243,6 +243,13 @@ cudaError_t cudaMemcpy2DAsync(void *dst, size_t dpitch, const void *src,
       dst, dpitch, src, spitch, width, height, kind, stream);
 }
 
+cudaError_t cudaMemcpyBatchAsync(void **dstPtr, const void **srcPtr,
+                                 size_t *size, size_t count,
+                                 cudaMemcpyKind_t kind, cudaStream_t stream) {
+  return vgre::api::CUDAInterceptor::instance().memcpyBatchAsync(
+      dstPtr, srcPtr, size, count, kind, stream);
+}
+
 cudaError_t cudaMemAdvise(const void *devPtr, size_t count, unsigned int advice, int device) {
   return vgre::api::CUDAInterceptor::instance().memAdvise(devPtr, count, static_cast<int>(advice), device);
 }
