@@ -351,6 +351,36 @@ cudaError_t CUDAInterceptor::streamWaitEvent(cudaStream_t stream,
   return cudaSuccess;
 }
 
+cudaError_t CUDAInterceptor::streamAddCallback(
+    cudaStream_t stream,
+    void (*callback)(cudaStream_t, cudaError_t, void *),
+    void *userData, unsigned int flags) {
+  (void)flags;
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
+  if (!callback)
+    return cudaErrorInvalidValue;
+
+  int priority = 0;
+  (void)core::RuntimeEngine::instance().getDevice().getStreamPriority(stream,
+                                                                       priority);
+
+  // Enqueue a task that executes the callback after all prior stream work.
+  // By the time this task runs, all previous tasks in the stream have
+  // completed, so the status is cudaSuccess.
+  (void)core::Scheduler::instance().submitStreamTask(
+      stream,
+      [stream, callback, userData]() {
+        callback(stream, cudaSuccess, userData);
+      },
+      priority);
+
+  return cudaSuccess;
+}
+
 cudaError_t CUDAInterceptor::deviceGetStreamPriorityRange(
     int *leastPriority, int *greatestPriority) {
   if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {

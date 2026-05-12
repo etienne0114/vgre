@@ -202,6 +202,10 @@ add_executable(test_event_query api/test_event_query.cpp)
 target_link_libraries(test_event_query PRIVATE vgre_cudart)
 add_test(NAME EventQuery COMMAND test_event_query)
 
+add_executable(test_stream_add_callback api/test_stream_add_callback.cpp)
+target_link_libraries(test_stream_add_callback PRIVATE vgre_cudart)
+add_test(NAME StreamAddCallback COMMAND test_stream_add_callback)
+
 add_executable(test_tpm_auth unit/test_tpm_auth.cpp)
 target_link_libraries(test_tpm_auth PRIVATE vgre)
 add_test(NAME TPMAuth COMMAND test_tpm_auth)
