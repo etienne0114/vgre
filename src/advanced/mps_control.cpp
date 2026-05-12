@@ -23,12 +23,15 @@
 #include <unordered_map>
 #include <vector>
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #endif
 
 namespace vgre {
@@ -76,25 +79,52 @@ static void* mpsResolve(uint64_t handle) {
 }
 
 // Helper: write exactly len bytes to fd; returns false on error.
-static bool writeAll(int fd, const void* buf, size_t len) {
+// Uses platform-safe writes (no SIGPIPE on Unix, no partial writes on Windows).
+static bool writeAll(mps_handle_t fd, const void* buf, size_t len) {
+#if !defined(_WIN32)
+    // Suppress SIGPIPE for this process on first write.  Safe to call multiple times.
+    static bool sigpipe_ignored = []() {
+        struct sigaction sa{};
+        sa.sa_handler = SIG_IGN;
+        sigaction(SIGPIPE, &sa, nullptr);
+        return true;
+    }();
+    (void)sigpipe_ignored;
+#endif
     const uint8_t* p = reinterpret_cast<const uint8_t*>(buf);
     size_t sent = 0;
     while (sent < len) {
+#if defined(_WIN32)
+        DWORD written = 0;
+        BOOL ok = WriteFile(reinterpret_cast<HANDLE>(fd), p + sent,
+                            static_cast<DWORD>(len - sent), &written, nullptr);
+        if (!ok || written == 0) return false;
+        sent += static_cast<size_t>(written);
+#else
         ssize_t n = write(fd, p + sent, len - sent);
         if (n <= 0) return false;
         sent += static_cast<size_t>(n);
+#endif
     }
     return true;
 }
 
 // Helper: read exactly len bytes from fd; returns false on error/EOF.
-static bool readAll(int fd, void* buf, size_t len) {
+static bool readAll(mps_handle_t fd, void* buf, size_t len) {
     uint8_t* p = reinterpret_cast<uint8_t*>(buf);
     size_t got = 0;
     while (got < len) {
+#if defined(_WIN32)
+        DWORD rd = 0;
+        BOOL ok = ReadFile(reinterpret_cast<HANDLE>(fd), p + got,
+                           static_cast<DWORD>(len - got), &rd, nullptr);
+        if (!ok || rd == 0) return false;
+        got += static_cast<size_t>(rd);
+#else
         ssize_t n = read(fd, p + got, len - got);
         if (n <= 0) return false;
         got += static_cast<size_t>(n);
+#endif
     }
     return true;
 }
@@ -113,7 +143,33 @@ MPSServer::~MPSServer() {
 }
 
 bool MPSServer::start() {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(_WIN32)
+    // Windows: use named pipe instead of Unix domain socket.
+    std::string pipeName = "\\\\.\\pipe\\" + socketPath_;
+    // Normalize: if socketPath_ already starts with \\.\pipe\, use as-is.
+    if (socketPath_.find("\\\\.\\pipe\\") == 0) pipeName = socketPath_;
+    else if (socketPath_.find("/tmp/") == 0) pipeName = "\\\\.\\pipe\\vgre_mps";
+
+    listenFd_ = CreateNamedPipeA(
+        pipeName.c_str(),
+        PIPE_ACCESS_DUPLEX,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+        maxClients_,
+        65536, 65536,
+        0, nullptr);
+    if (listenFd_ == INVALID_HANDLE_VALUE) {
+        VGRE_LOG_ERROR("MPS", "CreateNamedPipe failed: " + std::to_string(GetLastError()));
+        listenFd_ = MPS_INVALID_HANDLE;
+        return false;
+    }
+    socketPath_ = pipeName; // store resolved pipe name
+
+    running_.store(true);
+    auto* t = new std::thread([this]{ acceptLoop(); });
+    acceptThread_ = t;
+    VGRE_LOG_INFO("MPS", "MPS daemon listening on named pipe " + pipeName);
+    return true;
+#elif defined(__linux__) || defined(__APPLE__)
     listenFd_ = socket(AF_UNIX, SOCK_STREAM, 0);
     if (listenFd_ < 0) {
         VGRE_LOG_ERROR("MPS", "socket() failed: " + std::string(strerror(errno)));
@@ -138,23 +194,34 @@ bool MPSServer::start() {
         return false;
     }
 
-    running_ = true;
+    running_.store(true);
     // Store accept loop thread as void* to avoid including <thread> in the header.
     auto* t = new std::thread([this]{ acceptLoop(); });
     acceptThread_ = t;
     VGRE_LOG_INFO("MPS", "MPS daemon listening on " + socketPath_);
     return true;
 #else
-    VGRE_LOG_WARN("MPS", "MPS server requires POSIX sockets (Linux/macOS)");
+    VGRE_LOG_WARN("MPS", "MPS server not supported on this platform");
     return false;
 #endif
 }
 
 void MPSServer::stop() {
-    if (!running_) return;
-    running_ = false;
-#if defined(__linux__) || defined(__APPLE__)
-    if (listenFd_ >= 0) { close(listenFd_); listenFd_ = -1; }
+    if (!running_.load()) return;
+    running_.store(false);
+#if defined(_WIN32)
+    if (listenFd_ != MPS_INVALID_HANDLE) {
+        CloseHandle(listenFd_);
+        listenFd_ = MPS_INVALID_HANDLE;
+    }
+    if (acceptThread_) {
+        auto* t = reinterpret_cast<std::thread*>(acceptThread_);
+        if (t->joinable()) t->join();
+        delete t;
+        acceptThread_ = nullptr;
+    }
+#elif defined(__linux__) || defined(__APPLE__)
+    if (listenFd_ != MPS_INVALID_HANDLE) { close(listenFd_); listenFd_ = MPS_INVALID_HANDLE; }
     if (acceptThread_) {
         auto* t = reinterpret_cast<std::thread*>(acceptThread_);
         if (t->joinable()) t->join();
@@ -167,17 +234,57 @@ void MPSServer::stop() {
 }
 
 void MPSServer::acceptLoop() {
-#if defined(__linux__) || defined(__APPLE__)
     static std::atomic<uint32_t> slotCounter{0};
-    while (running_) {
-        struct pollfd pfd{ listenFd_, POLLIN, 0 };
+#if defined(_WIN32)
+    while (running_.load()) {
+        HANDLE hPipe = reinterpret_cast<HANDLE>(listenFd_);
+        BOOL connected = ConnectNamedPipe(hPipe, nullptr);
+        if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
+            if (!running_.load()) break;
+            Sleep(50);
+            continue;
+        }
+        if (!running_.load()) {
+            DisconnectNamedPipe(hPipe);
+            break;
+        }
+        // On Windows the "listen fd" IS the client pipe after ConnectNamedPipe.
+        // For multi-client we need to create a new pipe each time. Simplified:
+        // we create a fresh pipe for the next client and hand off the current one.
+        uint32_t slot = slotCounter.fetch_add(1, std::memory_order_relaxed);
+        VGRE_LOG_INFO("MPS", "Client connected: slot=" + std::to_string(slot));
+        int clientFd = listenFd_;
+        // Create next pipe for the following client.
+        std::string pipeName = socketPath_;
+        listenFd_ = CreateNamedPipeA(
+            pipeName.c_str(), PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            maxClients_, 65536, 65536, 0, nullptr);
+        if (listenFd_ == INVALID_HANDLE_VALUE) {
+            VGRE_LOG_ERROR("MPS", "CreateNamedPipe for next client failed");
+            listenFd_ = MPS_INVALID_HANDLE;
+            running_.store(false);
+            break;
+        }
+        std::thread([this, clientFd, slot]{ handleClient(clientFd, slot); }).detach();
+    }
+#elif defined(__linux__) || defined(__APPLE__)
+    while (running_.load()) {
+        struct pollfd pfd{ static_cast<int>(listenFd_), POLLIN, 0 };
         int r = poll(&pfd, 1, 200); // 200 ms timeout so we can check running_
         if (r <= 0) continue;
         if (!(pfd.revents & POLLIN)) continue;
 
         int clientFd = accept(listenFd_, nullptr, nullptr);
         if (clientFd < 0) continue;
-        if (!running_) { close(clientFd); break; }
+        if (!running_.load()) {
+#if defined(_WIN32)
+            // nothing to close — the fd was already handed off
+#else
+            close(clientFd);
+#endif
+            break;
+        }
 
         uint32_t slot = slotCounter.fetch_add(1, std::memory_order_relaxed);
         VGRE_LOG_INFO("MPS", "Client connected: slot=" + std::to_string(slot));
@@ -186,8 +293,7 @@ void MPSServer::acceptLoop() {
 #endif
 }
 
-void MPSServer::handleClient(int fd, uint32_t slotId) {
-#if defined(__linux__) || defined(__APPLE__)
+void MPSServer::handleClient(mps_handle_t fd, uint32_t slotId) {
     // Send CONNECT_ACK
     {
         MPSHeader hdr{ static_cast<uint32_t>(MPSMsgType::CONNECT_ACK),
@@ -197,7 +303,7 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
         writeAll(fd, &ack, sizeof(ack));
     }
 
-    while (running_) {
+    while (running_.load()) {
         MPSHeader hdr{};
         if (!readAll(fd, &hdr, sizeof(hdr))) break;
 
@@ -205,7 +311,7 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
 
         case MPSMsgType::MALLOC: {
             MPSMallocReq req{};
-            readAll(fd, &req, sizeof(req));
+            if (!readAll(fd, &req, sizeof(req))) break;
             uint64_t handle = mpsAlloc(req.size);
             MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::MALLOC_RESP),
                           sizeof(MPSMallocResp) };
@@ -217,7 +323,7 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
 
         case MPSMsgType::FREE: {
             MPSFreeReq req{};
-            readAll(fd, &req, sizeof(req));
+            if (!readAll(fd, &req, sizeof(req))) break;
             bool ok = mpsFree(req.devPtr);
             MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::FREE_RESP),
                           sizeof(MPSFreeResp) };
@@ -229,9 +335,9 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
 
         case MPSMsgType::MEMCPY_H2D: {
             MPSMemcpyReq req{};
-            readAll(fd, &req, sizeof(req));
+            if (!readAll(fd, &req, sizeof(req))) break;
             std::vector<uint8_t> buf(static_cast<size_t>(req.bytes));
-            readAll(fd, buf.data(), static_cast<uint32_t>(req.bytes));
+            if (!readAll(fd, buf.data(), static_cast<uint32_t>(req.bytes))) break;
             void* dst = mpsResolve(req.devPtr);
             if (dst) std::memcpy(dst, buf.data(), req.bytes);
             MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::MEMCPY_RESP), 4 };
@@ -243,7 +349,7 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
 
         case MPSMsgType::MEMCPY_D2H: {
             MPSMemcpyReq req{};
-            readAll(fd, &req, sizeof(req));
+            if (!readAll(fd, &req, sizeof(req))) break;
             void* src = mpsResolve(req.devPtr);
             uint32_t payloadLen = src ? static_cast<uint32_t>(req.bytes) : 0;
             MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::MEMCPY_RESP),
@@ -258,36 +364,57 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
 
         case MPSMsgType::LAUNCH_KERNEL: {
             MPSLaunchReq req{};
+            if (hdr.payloadLen < sizeof(req)) {
+                VGRE_LOG_ERROR("MPS", "LAUNCH_KERNEL payload too small");
+                break;
+            }
             if (!readAll(fd, &req, sizeof(req))) break;
 
-            // Read kernel name (it's the first part of the payload after req)
-            // We need to know the name length. Let's assume the name is null-terminated 
-            // and followed by arguments, or we use a fixed length.
-            // Actually, let's look at how we send it in MPSClient.
-            
-            // For now, let's parse the rest of the payload.
             uint32_t remainingPayload = hdr.payloadLen - sizeof(MPSLaunchReq);
             std::vector<uint8_t> payload(remainingPayload);
             if (remainingPayload > 0 && !readAll(fd, payload.data(), remainingPayload)) break;
 
-            const char* kernelName = reinterpret_cast<const char*>(payload.data());
-            size_t nameLen = strlen(kernelName) + 1;
-            
-            // Reconstruct arguments
+            // Find null-terminated kernel name within payload bounds.
+            const char* kernelName = nullptr;
+            size_t nameLen = 0;
+            if (remainingPayload > 0) {
+                kernelName = reinterpret_cast<const char*>(payload.data());
+                const char* end = reinterpret_cast<const char*>(
+                    memchr(payload.data(), '\0', remainingPayload));
+                if (!end) {
+                    VGRE_LOG_ERROR("MPS", "LAUNCH_KERNEL: kernel name not null-terminated");
+                    break;
+                }
+                nameLen = static_cast<size_t>(end - kernelName) + 1;
+            } else {
+                VGRE_LOG_ERROR("MPS", "LAUNCH_KERNEL: missing kernel name");
+                break;
+            }
+
+            // Parse arguments with bounds checking.
             std::vector<void*> args;
             std::vector<std::vector<uint8_t>> argDataBuffers;
-            
             uint8_t* pArgs = payload.data() + nameLen;
-            for (uint32_t i = 0; i < req.numArgs; ++i) {
+            size_t bytesLeft = remainingPayload - nameLen;
+            bool parseOk = true;
+            for (uint32_t i = 0; i < req.numArgs && parseOk; ++i) {
+                if (bytesLeft < 5) { parseOk = false; break; }
                 uint8_t type = *pArgs++;
-                uint32_t size = *reinterpret_cast<uint32_t*>(pArgs); pArgs += 4;
-                
+                (void)type; // type reserved for future use
+                --bytesLeft;
+                if (bytesLeft < 4) { parseOk = false; break; }
+                uint32_t size = *reinterpret_cast<uint32_t*>(pArgs);
+                pArgs += 4; bytesLeft -= 4;
+                if (bytesLeft < size) { parseOk = false; break; }
                 std::vector<uint8_t> argBuf(size);
-                memcpy(argBuf.data(), pArgs, size);
-                pArgs += size;
-                
+                std::memcpy(argBuf.data(), pArgs, size);
+                pArgs += size; bytesLeft -= size;
                 argDataBuffers.push_back(std::move(argBuf));
                 args.push_back(argDataBuffers.back().data());
+            }
+            if (!parseOk) {
+                VGRE_LOG_ERROR("MPS", "LAUNCH_KERNEL: argument parse error (malformed payload)");
+                break;
             }
 
             auto& engine = vgre::core::RuntimeEngine::instance();
@@ -297,7 +424,8 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
                 args.empty() ? nullptr : args.data(),
                 req.sharedMemBytes);
 
-            VGRE_LOG_DEBUG("MPS", "Launched kernel '" + std::string(kernelName) + "' via MPS. Result=" + std::to_string(static_cast<int>(rc)));
+            VGRE_LOG_DEBUG("MPS", "Launched kernel '" + std::string(kernelName) +
+                           "' via MPS. Result=" + std::to_string(static_cast<int>(rc)));
 
             MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::LAUNCH_RESP), sizeof(MPSLaunchResp) };
             MPSLaunchResp rsp{ rc == vgre::VGREResult::SUCCESS ? 0u : 1u };
@@ -307,7 +435,6 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
         }
 
         case MPSMsgType::SYNC: {
-            // All in-flight kernels complete synchronously in VGRE's CPU model.
             MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::SYNC_RESP),
                           sizeof(MPSSyncResp) };
             MPSSyncResp rsp{ 0 };
@@ -318,12 +445,15 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
 
         case MPSMsgType::DISCONNECT:
             VGRE_LOG_INFO("MPS", "Client disconnected: slot=" + std::to_string(slotId));
+#if defined(_WIN32)
+            CloseHandle(fd);
+#else
             close(fd);
+#endif
             return;
 
         default:
             VGRE_LOG_WARN("MPS", "Unknown MPS msg type: " + std::to_string(hdr.type));
-            // Drain unknown payload
             if (hdr.payloadLen > 0) {
                 std::vector<uint8_t> tmp(hdr.payloadLen);
                 readAll(fd, tmp.data(), hdr.payloadLen);
@@ -331,6 +461,9 @@ void MPSServer::handleClient(int fd, uint32_t slotId) {
             break;
         }
     }
+#if defined(_WIN32)
+    CloseHandle(fd);
+#else
     close(fd);
 #endif
 }
@@ -371,7 +504,36 @@ void MPSClient::shutdown() {
 }
 
 bool MPSClient::connect(const std::string& socketPath) {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(_WIN32)
+    std::string pipeName = socketPath;
+    if (socketPath.find("\\\\.\\pipe\\") != 0) {
+        pipeName = "\\\\.\\pipe\\vgre_mps";
+    }
+    mps_handle_t hPipe = CreateFileA(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                     0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hPipe == INVALID_HANDLE_VALUE) {
+        VGRE_LOG_WARN("MPS", "Could not open named pipe: " + pipeName);
+        return false;
+    }
+    fd_ = hPipe;
+
+    // Send CONNECT header (no payload)
+    MPSHeader ch{ static_cast<uint32_t>(MPSMsgType::CONNECT), 0 };
+    if (!writeAll(fd_, &ch, sizeof(ch))) {
+        CloseHandle(hPipe); fd_ = MPS_INVALID_HANDLE; return false;
+    }
+
+    MPSHeader rh{};
+    MPSConnectAck ack{};
+    if (!readAll(fd_, &rh, sizeof(rh)) ||
+        rh.type != static_cast<uint32_t>(MPSMsgType::CONNECT_ACK) ||
+        !readAll(fd_, &ack, sizeof(ack))) {
+        CloseHandle(hPipe); fd_ = MPS_INVALID_HANDLE; return false;
+    }
+    slotId_ = ack.slotId;
+    VGRE_LOG_INFO("MPS", "Connected to MPS daemon, slot=" + std::to_string(slotId_));
+    return true;
+#elif defined(__linux__) || defined(__APPLE__)
     fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd_ < 0) return false;
 
@@ -380,13 +542,13 @@ bool MPSClient::connect(const std::string& socketPath) {
     std::strncpy(addr.sun_path, socketPath.c_str(), sizeof(addr.sun_path) - 1);
 
     if (::connect(fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-        close(fd_); fd_ = -1;
+        close(fd_); fd_ = MPS_INVALID_HANDLE;
         return false;
     }
 
     // Send CONNECT header (no payload)
     MPSHeader ch{ static_cast<uint32_t>(MPSMsgType::CONNECT), 0 };
-    if (!writeAll(fd_, &ch, sizeof(ch))) { close(fd_); fd_ = -1; return false; }
+    if (!writeAll(fd_, &ch, sizeof(ch))) { close(fd_); fd_ = MPS_INVALID_HANDLE; return false; }
 
     // Receive CONNECT_ACK
     MPSHeader rh{};
@@ -394,7 +556,7 @@ bool MPSClient::connect(const std::string& socketPath) {
     if (!readAll(fd_, &rh, sizeof(rh)) ||
         rh.type != static_cast<uint32_t>(MPSMsgType::CONNECT_ACK) ||
         !readAll(fd_, &ack, sizeof(ack))) {
-        close(fd_); fd_ = -1; return false;
+        close(fd_); fd_ = MPS_INVALID_HANDLE; return false;
     }
     slotId_ = ack.slotId;
     VGRE_LOG_INFO("MPS", "Connected to MPS daemon, slot=" + std::to_string(slotId_));
@@ -405,13 +567,15 @@ bool MPSClient::connect(const std::string& socketPath) {
 }
 
 void MPSClient::disconnect() {
-#if defined(__linux__) || defined(__APPLE__)
-    if (fd_ < 0) return;
+    if (fd_ == MPS_INVALID_HANDLE) return;
     MPSHeader h{ static_cast<uint32_t>(MPSMsgType::DISCONNECT), 0 };
     writeAll(fd_, &h, sizeof(h));
+#if defined(_WIN32)
+    CloseHandle(fd_);
+#else
     close(fd_);
-    fd_ = -1;
 #endif
+    fd_ = MPS_INVALID_HANDLE;
 }
 
 bool MPSClient::sendMsg(MPSMsgType type, const void* payload, uint32_t len) {
@@ -428,7 +592,7 @@ bool MPSClient::recvBytes(void* buf, uint32_t len) {
 }
 
 uint64_t MPSClient::malloc(uint64_t bytes) {
-    if (fd_ < 0) return 0;
+    if (fd_ == -1) return 0;
     MPSMallocReq req{ bytes };
     if (!sendMsg(MPSMsgType::MALLOC, &req, sizeof(req))) return 0;
     MPSHeader rh{};
@@ -438,7 +602,7 @@ uint64_t MPSClient::malloc(uint64_t bytes) {
 }
 
 bool MPSClient::free(uint64_t devPtr) {
-    if (fd_ < 0) return false;
+    if (fd_ == -1) return false;
     MPSFreeReq req{ devPtr };
     if (!sendMsg(MPSMsgType::FREE, &req, sizeof(req))) return false;
     MPSHeader rh{};
@@ -447,7 +611,7 @@ bool MPSClient::free(uint64_t devPtr) {
 }
 
 bool MPSClient::memcpyH2D(uint64_t devPtr, const void* hostSrc, uint64_t bytes) {
-    if (fd_ < 0) return false;
+    if (fd_ == -1) return false;
     MPSMemcpyReq req{ devPtr, bytes };
     MPSHeader h{ static_cast<uint32_t>(MPSMsgType::MEMCPY_H2D),
                  static_cast<uint32_t>(sizeof(req) + bytes) };
@@ -460,7 +624,7 @@ bool MPSClient::memcpyH2D(uint64_t devPtr, const void* hostSrc, uint64_t bytes) 
 }
 
 bool MPSClient::memcpyD2H(void* hostDst, uint64_t devPtr, uint64_t bytes) {
-    if (fd_ < 0) return false;
+    if (fd_ == -1) return false;
     MPSMemcpyReq req{ devPtr, bytes };
     if (!sendMsg(MPSMsgType::MEMCPY_D2H, &req, sizeof(req))) return false;
     MPSHeader rh{};
@@ -478,7 +642,7 @@ bool MPSClient::launchKernel(const char* name,
                               uint32_t bx, uint32_t by, uint32_t bz,
                               uint64_t sharedMem,
                               void** args, int numArgs) {
-    if (fd_ < 0) return false;
+    if (fd_ == -1) return false;
     
     // 1. Prepare argument payload
     // In CUDA, we don't have sizes, but VGRE's launchKernel (the one called on server)
@@ -511,7 +675,7 @@ bool MPSClient::launchKernel(const char* name,
 }
 
 bool MPSClient::sync() {
-    if (fd_ < 0) return false;
+    if (fd_ == -1) return false;
     MPSHeader h{ static_cast<uint32_t>(MPSMsgType::SYNC), 0 };
     if (!writeAll(fd_, &h, sizeof(h))) return false;
     MPSHeader rh{};
