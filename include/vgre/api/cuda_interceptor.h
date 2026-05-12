@@ -100,6 +100,9 @@ public:
   cudaError_t memcpy2DAsync(void *dst, size_t dpitch, const void *src,
                             size_t spitch, size_t width, size_t height,
                             cudaMemcpyKind_t kind, cudaStream_t stream);
+  cudaError_t memcpyBatchAsync(void **dstPtr, const void **srcPtr,
+                               size_t *size, size_t count,
+                               cudaMemcpyKind_t kind, cudaStream_t stream);
   cudaError_t memcpyPeer(void *dst, int dstDevice, const void *src,
                          int srcDevice, size_t count);
   cudaError_t memcpyPeerAsync(void *dst, int dstDevice, const void *src,

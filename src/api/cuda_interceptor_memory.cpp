@@ -236,6 +236,35 @@ cudaError_t CUDAInterceptor::memcpy2DAsync(void *dst, size_t dpitch,
   return cudaSuccess;
 }
 
+cudaError_t CUDAInterceptor::memcpyBatchAsync(void **dstPtr, const void **srcPtr,
+                                               size_t *size, size_t count,
+                                               cudaMemcpyKind_t kind,
+                                               cudaStream_t stream) {
+  if (!dstPtr || !srcPtr || !size || count == 0)
+    return cudaErrorInvalidValue;
+
+  int priority = 0;
+  (void)core::RuntimeEngine::instance().getDevice().getStreamPriority(stream,
+                                                                      priority);
+  auto fut = core::Scheduler::instance().submitStreamTask(
+      stream,
+      [=]() {
+        for (size_t i = 0; i < count; ++i) {
+          auto err = this->memcpy(dstPtr[i], srcPtr[i], size[i], kind);
+          if (err != cudaSuccess) {
+            throw std::runtime_error("batch memcpy entry " + std::to_string(i) + " failed");
+          }
+        }
+      },
+      priority);
+  if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    auto r = fut.get();
+    cudaError_t err = convertResult(r);
+    return err;
+  }
+  return cudaSuccess;
+}
+
 cudaError_t CUDAInterceptor::memcpyPeer(void *dst, int dstDevice,
                                         const void *src, int srcDevice,
                                         size_t count) {
