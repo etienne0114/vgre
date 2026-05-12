@@ -12,9 +12,9 @@
 The audit revealed two major findings:
 
 1. **Critical stability issues were fixed** — static destruction deadlock eliminated, occupancy heuristic replaced with real logic.
-2. **The `missingFeatures.md` document (2026-05-07) is severely outdated** — the vast majority of items marked "missing" were already implemented in the codebase.
+2. **The previous audit (2026-05-12 morning) dangerously overstated implementation completeness** — it claimed "only 2 genuinely missing features" and "the vast majority were already implemented." A deeper line-by-line source-code audit revealed this was false. Large surface areas remain genuinely missing.
 
-Only **2 genuinely missing runtime features** remain: `cudaMemcpy3DBatchAsync` (batch 3D memcpy) and the Kubernetes/SLURM deployment plugin. Everything else from Phases 7–10 is implemented.
+**Reality check**: ~94 CUDA Runtime functions are implemented out of ~214 (~45%). ~46 CUDA Driver functions out of ~300+ (~15%). cuBLAS ~13%, cuDNN ~24%, NCCL ~55%. Five entire libraries (cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt) have no shims. See `missingFeatures.md` for the exhaustive list.
 
 ---
 
@@ -153,4 +153,6 @@ The crash is caused by `setenv()` from Dart/Flutter calling into glibc while C++
 
 ---
 
-**Conclusion**: All critical stability issues, stubs, and heuristics identified in this audit have been resolved. The codebase is production-ready for PyTorch/TensorFlow CPU-based CUDA emulation workloads. Only the K8s/SLURM deployment plugin remains unimplemented — it is a deployment integration concern, not a runtime API gap.
+**Conclusion**: All critical stability issues, stubs, and heuristics identified in this audit have been resolved. The codebase is **stable and test-passing** (84/84) but **not yet production-ready for general PyTorch/TensorFlow/JAX workloads** due to significant API coverage gaps (~45% CUDA Runtime, ~15% CUDA Driver, ~13% cuBLAS, ~24% cuDNN). See `missingFeatures.md` for the exhaustive gap list and `PRODUCTION_READINESS_REPORT.md` for the corrected assessment.
+
+**Note on documentation**: The previous audit's false conclusion that "only 2 features remain missing" was caused by incomplete source-code verification. This demonstrates why `missingFeatures.md` must be updated with line-by-line `grep` verification before any PR claims to close a gap.

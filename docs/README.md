@@ -9,6 +9,8 @@ Welcome to the VGRE (Virtual GPU Runtime Engine) documentation. This guide will 
 ### For Users
 - **[USER_GUIDE.md](USER_GUIDE.md)** - Installation, setup, and usage instructions for all platforms
 - **[PROJECT_STATUS.md](PROJECT_STATUS.md)** - Current project status, test results, and capabilities
+- **[missingFeatures.md](missingFeatures.md)** - Exhaustive list of implemented vs missing features
+- **[implementationPlan.md](implementationPlan.md)** - Phased roadmap for implementing all missing features
 
 ### For Developers
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design, components, and internal architecture
@@ -110,16 +112,18 @@ Welcome to the VGRE (Virtual GPU Runtime Engine) documentation. This guide will 
 
 ## Key Features
 
-✅ **Full CUDA Runtime API** (~100 functions)  
+✅ **Partial CUDA Runtime API** (~94 of ~214 functions) — memory, streams, events, kernel launch, basic graphs  
 ✅ **OpenCL 1.2 Compatibility**  
 ✅ **JIT Kernel Compilation** with persistent caching  
 ✅ **Unified Virtual Memory (UVM)** with page-fault handling  
-✅ **CUDA Graphs** with dynamic updates  
+✅ **Partial CUDA Graphs** — capture, instantiation, replay; memcpy/conditional/external-semaphore nodes. Kernel/memset/host/child nodes missing from shim.  
 ✅ **Distributed Cluster Networking** with AES-256 encryption  
 ✅ **Cross-Platform** (Linux, Windows, macOS)  
 ✅ **Hardware-Backed Token Storage** (keyring, Keychain, CredMan, TPM)  
-✅ **NCCL Collective Operations** for distributed training  
-✅ **cuBLAS & cuDNN Shims** for linear algebra and deep learning  
+✅ **NCCL Collective Operations** (~55% coverage) — AllReduce, Broadcast, AllGather, ReduceScatter  
+✅ **cuBLAS & cuDNN Shims** (partial) — cuBLAS ~13% (Gemm/Gemv/Axpy/Dot/Nrm2/Scal), cuDNN ~24% (forward-only conv/pool/activation/softmax/BN inference)  
+
+**See `missingFeatures.md` for the exhaustive list of implemented vs missing APIs.**  
 
 ---
 
@@ -241,5 +245,5 @@ VGRE is licensed under the MIT License. See LICENSE file for details.
 ---
 
 **Version**: 1.0.0  
-**Last Updated**: 2026-05-06  
-**Status**: Production Ready ✅
+**Last Updated**: 2026-05-12  
+**Status**: Development / CI-Ready (see `missingFeatures.md` for API coverage gaps)

@@ -2,16 +2,18 @@
 
 **Date**: 2026-05-12  
 **Version**: 1.1.0  
-**Status**: PRODUCTION READY  
+**Status**: Development / CI-Ready (not general-production-ready; see `missingFeatures.md` for gaps)  
 **Tests**: 84/84 passing (100%)
 
 ---
 
 ## 1. Executive Summary
 
-VGRE (Virtual GPU Runtime Engine) has undergone a comprehensive production-readiness audit and fix session. All critical stability issues have been resolved, existing stubs and heuristics have been replaced with real business logic, and a thorough audit of the "missing features" roadmap revealed that **the vast majority of documented missing features are already implemented** in the codebase.
+VGRE (Virtual GPU Runtime Engine) has undergone a comprehensive production-readiness audit and fix session. All critical stability issues have been resolved and existing stubs/heuristics have been replaced with real business logic. However, a deeper line-by-line source-code audit revealed that **large API coverage gaps remain** that were not caught in the initial audit.
 
-The project is ready for deployment with PyTorch, TensorFlow, and distributed ML workloads on CPU hardware.
+**Current reality**: ~45% CUDA Runtime API, ~15% CUDA Driver API, ~13% cuBLAS, ~24% cuDNN, ~55% NCCL. Five entire libraries (cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt) have no shims. See `missingFeatures.md` for the exhaustive gap list.
+
+The project is **stable and test-passing** but **not yet ready for arbitrary PyTorch/TensorFlow/JAX workloads** without encountering missing-symbol or not-implemented errors.
 
 ---
 
@@ -49,9 +51,9 @@ The reverse mapping from compiled kernel function pointer to `KernelId` was **de
 
 ## 4. Missing Features — Audit Result
 
-A comprehensive scan of Phases 7–10 from the 2026-05-07 roadmap found that **the vast majority of items were already implemented**:
+**A deeper line-by-line source-code audit (2026-05-12) revealed that the previous audit dangerously overstated completeness.** While the 20 items listed above are indeed implemented, large surface areas remain genuinely missing.
 
-### Already Implemented (20 of 22 items)
+### Verified Implemented (20+ items)
 
 - **NVTX v3 shim** — full implementation with domains, ranges, markers, push/pop
 - **Memory Pool API** — `cudaMallocFromPoolAsync`, attributes, trim, access control
@@ -65,20 +67,31 @@ A comprehensive scan of Phases 7–10 from the 2026-05-07 roadmap found that **t
 - **Graph SWITCH Conditional Node** — `GraphCondType::SWITCH`
 - **OpenTelemetry GPU SemConv** — `hw.gpu.memory.limit/usage/utilization`, `hw.gpu.utilization`, `hw.gpu.errors`
 - **Ampere `mma.sync`** — 5 variants (f16, tf32, bf16, s8, f64)
-- **`cudaMemcpyBatchAsync`** — newly implemented in this session
+- **`cudaMemcpyBatchAsync`** / **`cudaMemcpy3DBatchAsync`** — batch async memcpy APIs
 - **NCCL Ring All-Reduce** — ring algorithm for >1 MB tensors
 - **Graph External Semaphore Nodes** — signal/wait nodes in CUDA graphs
 - **PTX `bar.red.popc/and/or`** — mapped to `__syncthreads_count/and/or`
 - **Hopper `wgmma`** — 6 variants (m64n256k16, m64n128k16, m64n64k16 for bf16/f16/tf32)
 - **Hopper TMA** — `cp.async.bulk.tensor` 1D/2D, `cp.async.bulk.commit/wait_group`
 - **`cuMemMulticast`** — `cuMulticastCreate`, `cuMulticastAddDevice`, `cuMulticastBindMem`
+- **FP16 / BFloat16 / WMMA** — `__half`, `__nv_bfloat16`, `nvcuda::wmma` fragments in `cpu_cuda_fp16.h` and `wmma_emulation.h`
+- **Cooperative Groups (partial)** — `grid_group` with `sync()` in `cpu_cuda_env.h`
+- **Device-side CDP (partial)** — `cudaLaunchDevice`, `cudaGetParameterBuffer`
 
-### Genuinely Remaining (2 items)
+### Genuinely Remaining — Critical Gaps
 
-| # | Feature | Impact | Path Forward |
-|---|---|---|---|
-| 1 | `cudaMemcpy3DBatchAsync` | **ALREADY IMPLEMENTED** | 3D batch memcpy with pitch/depth at `cudart_shim_stream.cpp:638` |
-| 2 | K8s/SLURM Device Plugin | Low — deployment integration, not runtime | Only needed if running VGRE in a container scheduler with GPU resource claims |
+See `missingFeatures.md` for the exhaustive list. Key highlights:
+
+| Category | Coverage | Critical Missing |
+|---|---|---|
+| CUDA Runtime API | ~45% (94/~214) | `cudaStreamWaitEvent`, `cudaEventQuery`, `cudaMemcpyToSymbol`, `cudaFuncGetAttributes`, `cudaGraphAddKernelNode`, `cudaStreamIsCapturing`, `cudaLaunchHostFunc`, `cudaMemset2D/3D`, `cudaPointerGetAttributes`, texture/surface object APIs |
+| CUDA Driver API | ~15% (46/~300+) | `cuEventQuery`, `cuStreamAddCallback`, `cuMemAllocManaged`, `cuMemcpy2D/3D`, `cuLaunchCooperativeKernel`, graph APIs, occupancy queries |
+| CUDA Graphs | ~30% | Kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free nodes missing from CUDART shim |
+| cuBLAS | ~13% (27/~200+) | All Level-2 except `Gemv`, all Level-3 except `Gemm`, `Trsm`, `Trsv`, `Syrk`, pointer modes |
+| cuDNN | ~24% (36/~150+) | All backward passes, BN training, dropout, RNN/LSTM/GRU, attention, `OpTensor`, `ReduceTensor` |
+| NCCL | ~55% | `ncclSend`/`Recv`, `ncclAllToAll`, `ncclGather`/`Scatter` |
+| PTX ISA | ~30% | Texture/surface instructions, shared atomics, `cvt` variants, `rcp.rn`, `sqrt.rn`, `match.sync`, `grid.sync` |
+| Entire Libraries | 0% | **cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt** — no shims exist |
 
 ---
 
@@ -106,8 +119,17 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 
 ## 7. Conclusion
 
-VGRE is **production-ready** for CPU-based CUDA emulation. All critical stability issues have been resolved, all stubs and heuristics have been replaced with real logic, and the feature gap against PyTorch/TensorFlow requirements is zero for runtime APIs. Only the K8s/SLURM deployment plugin remains unimplemented — it is a deployment integration concern, not a runtime gap.
+VGRE is **stable and test-passing** (84/84 tests) but **not yet production-ready for general PyTorch/TensorFlow workloads** due to significant API coverage gaps:
 
-The primary risk going forward is documentation staleness — the 2026-05-07 `missingFeatures.md` caused significant confusion by listing already-implemented features as missing. A process change to update this document before feature PRs are merged will prevent this in the future.
+- **CUDA Runtime**: ~45% coverage (~94 of ~214 functions). Critical missing: `cudaStreamWaitEvent`, `cudaEventQuery`, `cudaMemcpyToSymbol`, `cudaFuncGetAttributes`, `cudaGraphAddKernelNode`, `cudaStreamIsCapturing`, `cudaLaunchHostFunc`, `cudaMemset2D/3D`, `cudaPointerGetAttributes`.
+- **CUDA Driver**: ~15% coverage. Most 2D/3D copies, callbacks, graph APIs, and occupancy queries missing.
+- **cuBLAS**: ~13% coverage. Only `Gemm`, `Gemv`, `Axpy`, `Dot`, `Nrm2`, `Scal` present. `Trsm`, `Trsv`, `Syrk`, `Ger`, and all pointer-mode APIs missing.
+- **cuDNN**: ~24% coverage. Forward-only conv, pooling, activation, softmax, BN inference. All backward passes, training, dropout, RNN, attention missing.
+- **NCCL**: ~55% coverage. Missing `Send`/`Recv`, `AllToAll`, `Gather`, `Scatter`.
+- **Entire libraries missing**: cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt — no shims exist.
 
-**Signed off for production deployment.**
+**What works today**: Memory allocation, stream/event management, kernel launch, basic cuBLAS GEMM, basic cuDNN forward inference, NCCL AllReduce/Broadcast/AllGather/ReduceScatter, NVTX, PTX core arithmetic + warp shuffle + Ampere/Hopper MMA, JIT compilation with cache, cooperative kernel launch, UVM with page faults, cluster networking.
+
+**What blocks production frameworks**: The missing CUDA Runtime APIs above will cause symbol-not-found or not-implemented errors when PyTorch/TF/JAX try to use them. The missing graph kernel nodes and stream callbacks break CUDA Graphs workflows. The missing backward passes break training.
+
+**Signed off for development, CI/CD, and inference-only testing. Not signed off for general production training.**

@@ -2,7 +2,7 @@
 
 **A CUDA emulation runtime** that allows CUDA applications to run on CPU without a physical GPU.
 
-> **PROJECT STATUS**: PRODUCTION-READY (Phase 1 Complete) — ✅ All tests passing, all critical issues fixed. Now tracking **Phase 2** (see Implementation Plan).
+> **PROJECT STATUS**: Development / CI-Ready — ✅ All tests passing, all critical stability issues fixed. **Large API coverage gaps remain** (~45% CUDA Runtime, ~15% CUDA Driver, ~13% cuBLAS, ~24% cuDNN). See `docs/missingFeatures.md` for the exhaustive gap list.
 
 ## What is VGRE?
 
@@ -24,31 +24,35 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 
 ## Current Status
 
-**Overall Completion**: 95-100% ✅  
-**Production Readiness**: 95-100% for CPU-based CUDA emulation workloads  
-**Test Status**: ✅ 65/65 tests passing (100%)  
+**Core Stability**: ✅ All tests passing, zero critical issues  
+**CUDA Runtime API Coverage**: ~45% (~94 of ~214 functions)  
+**CUDA Driver API Coverage**: ~15% (~46 of ~300+ functions)  
+**cuBLAS Coverage**: ~13% (~27 of ~200+ functions)  
+**cuDNN Coverage**: ~24% (~36 of ~150+ functions)  
+**NCCL Coverage**: ~55%  
+**PTX ISA Coverage**: ~30% (~120 opcodes)  
 **Critical Issues**: 0  
-**Cross-Platform**: ✅ 100% (Linux, Windows, macOS)
+**Cross-Platform**: Linux, Windows, macOS all functional
 
 ### Platform Support ✅
-- ✅ **Linux**: Full support (all features + NUMA + Linux Keyring)
-- ✅ **Windows**: Full support (all features + Credential Manager + shared memory)
-- ✅ **macOS**: Full support (all features + Keychain)
+- ✅ **Linux**: Full support (all core features + NUMA + Linux Keyring)
+- ✅ **Windows**: Full support (all core features + Credential Manager + shared memory)
+- ✅ **macOS**: Full support (all core features + Keychain)
 
 See [Cross-Platform Status](docs/CROSS_PLATFORM_STATUS.md) for detailed platform analysis.
 
 ### What Works ✅
-- Full CUDA Runtime API (~100 functions: memory, streams, events, device, textures)
+- **Partial** CUDA Runtime API (~94 functions: memory alloc/free, stream create/destroy/query/sync, events, device queries, peer access, kernel launch, basic graph APIs). **~120+ functions missing** — see `docs/missingFeatures.md`.
 - OpenCL 1.2 compatibility layer
 - JIT kernel compilation with persistent disk + memory cache (0ms on cache hit)
-- 1D/2D/3D texture and surface sampling with multiple filter/addressing modes
+- Texture / Surface **C++ emulation** (`tex1D`/`tex2D`/`tex3D` templates in `cpu_cuda_env.h`). **Missing**: CUDART texture-object APIs, PTX `tex`/`suld`/`sust` instructions.
 - UVM managed memory (`cudaMallocManaged`) with OS-level page fault handling
-- CUDA Graphs (graph capture, instantiation, replay, dynamic update)
-- **Stream-ordered memory pools** (`cudaMallocAsync` / `cudaFreeAsync`) ✅ FULLY IMPLEMENTED
-- **Graph node updates** (`updateKernelNodeArgs`, `updateMemcpyNode`, `updateExec`) ✅ FULLY IMPLEMENTED
-- **Windows shared memory** (CreateFileMapping/MapViewOfFile) ✅ FULLY IMPLEMENTED
+- **Partial** CUDA Graphs: capture, instantiation, replay; memcpy/conditional/external-semaphore node updates work. **Missing from CUDART shim**: kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free nodes.
+- **Stream-ordered memory pools** (`cudaMallocAsync` / `cudaFreeAsync`) ✅ IMPLEMENTED
+- **Graph node updates** (memcpy/external-semaphore nodes) ✅ IMPLEMENTED. **Missing**: kernel, memset, host, child-graph node updates.
+- **Windows shared memory** (CreateFileMapping/MapViewOfFile) ✅ IMPLEMENTED
 - Cooperative kernel launch (functional for most use cases)
-- CUDA Driver API (cuInit, cuCtxCreate, cuMemAlloc, cuModuleLoad, cuLaunchKernel)
+- **Partial** CUDA Driver API (~46 functions: context, device, memory, module, stream, texture objects). **~250+ missing**.
 - P2P peer device access and transfers
 - Kernel fusion (consecutive compatible kernels fused into single JIT compilation)
 - TCP cluster networking: multi-node partitioned kernel dispatch, telemetry aggregation
@@ -61,8 +65,8 @@ See [Cross-Platform Status](docs/CROSS_PLATFORM_STATUS.md) for detailed platform
 ### Recent Improvements (2026-05-06) 🎉
 - ✅ **Eliminated Heuristic Fallbacks** — Kernel parser now requires Clang for accurate instruction analysis; no unreliable fallback heuristics
 - ✅ **Real Hardware Queries** — All system metrics use actual hardware interfaces (IOKit on macOS, registry on Windows, sysfs on Linux)
-- ✅ **Production-Ready Code** — Removed all mocks, stubs, and placeholder simulations from production code
-- ✅ **100% Test Coverage** — All 65 tests passing with real implementations
+- ✅ **Stability Fixes** — Static destruction deadlock eliminated; occupancy calculation uses real PTX register parsing instead of hardcoded values
+- ✅ **All Tests Passing** — All 65 tests passing with real implementations
 
 ### Previous Improvements (2026-04-30) 🎉
 - ✅ **AES-NI hardware acceleration** — 4-block parallel AES-256-CTR pipeline via `_mm_aesenc_si128`; ~8–12× faster than software for cluster encryption (auto-detected at build time via `-maes`)
@@ -93,6 +97,12 @@ See [Cross-Platform Status](docs/CROSS_PLATFORM_STATUS.md) for detailed platform
 
 ### Known Limitations ⚠️
 - 10–50× slower than real GPU for compute-bound kernels (CPU execution; AVX-512 auto-vectorisation + 12-core OpenMP + NUMA binding reduce the gap for vectorizable / memory-bound workloads; `getMemoryBandwidthStats()` quantifies the gap for your specific workload)
+- **CUDA Runtime API**: ~45% coverage (~94/~214 functions). Missing: `cudaStreamWaitEvent`, `cudaEventQuery`, `cudaMemcpyToSymbol`, `cudaFuncGetAttributes`, `cudaGraphAddKernelNode`, `cudaStreamIsCapturing`, `cudaLaunchHostFunc`, `cudaMemset2D/3D`, texture/surface object APIs, array APIs. See `docs/missingFeatures.md`.
+- **CUDA Driver API**: ~15% coverage. Missing: `cuEventQuery`, `cuStreamAddCallback`, `cuMemAllocManaged`, `cuMemcpy2D/3D`, cooperative launch, graph APIs, occupancy queries.
+- **cuBLAS**: ~13% coverage. Only `Gemm`, `Gemv`, `Axpy`, `Dot`, `Nrm2`, `Scal`. Missing: `Trsm`, `Trsv`, `Syrk`, `Ger`, pointer modes, most Level-2/Level-3.
+- **cuDNN**: ~24% coverage. Forward-only conv/pool/activation/softmax/BN inference. Missing: all backward passes, BN training, dropout, RNN/LSTM/GRU, attention, `OpTensor`, `ReduceTensor`.
+- **NCCL**: ~55% coverage. Missing: `Send`/`Recv`, `AllToAll`, `Gather`, `Scatter`.
+- **Entirely missing libraries**: cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt — no shims exist.
 - ✅ AES-256-CTR cipher: hardware-accelerated via AES-NI intrinsics (4-block parallel pipeline, ~8–12× vs software fallback)
 - Temperature sensing: fully implemented on Linux; heuristic on Windows/macOS
 - Fuzzing suite and CI/CD macOS/Windows runners: not yet configured
@@ -236,7 +246,8 @@ virtual-gpu-runtime/
 For complete technical details:
 - [How It Works](docs/how_it_work.md) - ⭐ System design, engine internals, and cluster features
 - [Project Status](docs/PROJECT_STATUS.md) - Current component completion status
-- [Implementation Plan](docs/IMPLEMENTATION_ACTION_PLAN.md) - Phase 2 Roadmap (Warp intrinsics, DL shims, GPU passthrough)
+- [Missing Features](docs/missingFeatures.md) - Exhaustive list of implemented vs missing CUDA/cuBLAS/cuDNN/NCCL/PTX APIs
+- [Implementation Plan](docs/implementationPlan.md) - Phased roadmap for all missing features with file organization
 - [Cross-Platform Status](docs/CROSS_PLATFORM_STATUS.md) - OS-specific implementation details
 - [Developer Guide](docs/developer_guide.md) - Development guide
 - [API Reference](docs/api_reference.md) - API documentation

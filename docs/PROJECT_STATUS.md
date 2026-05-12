@@ -1,29 +1,30 @@
 # VGRE Project Status (Canonical)
 
-**Last Updated**: 2026-05-12 (Phase 8 — Future Work implementation + cross-platform hardening)
-**Status**: PRODUCTION READY
+**Last Updated**: 2026-05-12 (Phase 8 — Deep audit + documentation correction)
+**Status**: Development / CI-Ready (not general-production-ready; see `missingFeatures.md` for gaps)
 **Test Results**: 86/86 tests passing (100%)
 
 ---
 
 ## Executive Summary
 
-VGRE (Virtual GPU Runtime Engine) is a production-ready CUDA emulation runtime that executes GPU applications on CPU hardware. The project has completed six phases of implementation and hardening with all critical issues resolved. There are zero stubs, zero heuristics, and zero simulation fallbacks remaining in the codebase — every value comes from hardware measurement or real computation.
+VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The project has completed six phases of implementation and hardening with all critical stability issues resolved. Core memory, stream, event, and kernel launch paths are solid, but large API surface areas remain unimplemented or only partially stubbed.
 
 **Key Metrics:**
 - **Test Coverage**: 86/86 tests passing (100%), total run time ~20–28 seconds
 - **Platform Support**: Linux, macOS, Windows — all fully functional
 - **Performance**: 10–50× slower than real GPU for compute-bound workloads; 5–15× for memory-bound workloads
 - **Critical Issues**: 0 (static destruction deadlock fixed; occupancy heuristic replaced with real logic)
-- **Production Readiness**: 100% for CPU-based CUDA emulation workloads
+- **CUDA Runtime API Coverage**: ~45% (~94 of ~214 functions implemented)
+- **Production Readiness**: Development / CI-ready. Not yet general-production-ready for arbitrary PyTorch/TensorFlow/JAX workloads due to missing CUDA Runtime, cuBLAS, cuDNN, and NCCL APIs. See `missingFeatures.md` for the exhaustive gap list.
 
 ---
 
 ## What Works
 
 ### Core CUDA Runtime API
-- Full CUDA Runtime API (~100 functions): memory, streams, events, device, textures
-- CUDA Driver API (`cuInit`, `cuCtxCreate`, `cuMemAlloc`, `cuModuleLoad`, `cuLaunchKernel`)
+- **Partial** CUDA Runtime API (~94 functions): memory allocation/free, stream create/destroy/query/sync, events, device queries, peer access, kernel launch, basic graph APIs. **~120+ functions missing** — see `missingFeatures.md`.
+- CUDA Driver API (`cuInit`, `cuCtxCreate`, `cuMemAlloc`, `cuModuleLoad`, `cuLaunchKernel`) — ~46 functions, ~250+ missing
 - OpenCL 1.2 compatibility layer
 - P2P peer device access and transfers
 
@@ -40,24 +41,25 @@ VGRE (Virtual GPU Runtime Engine) is a production-ready CUDA emulation runtime t
 - JIT kernel compilation via LLVM-18 ORC with persistent disk + memory LRU cache (0 ms on cache hit)
 - Kernel fusion (consecutive compatible kernels merged into single JIT)
 - Cooperative kernel launch (start-gate via `condition_variable`, dispatched through pre-warmed `BlockWorkerPool`)
-- CUDA Graphs (capture, instantiation, replay, dynamic update, node updates)
+- **Partial** CUDA Graphs: capture, instantiation, replay, and memcpy/conditional/external-semaphore node updates work. **Missing from CUDART shim**: kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free node types. See `missingFeatures.md` Tier 1.3.
 - Stream management with priority scheduling
 - Event synchronization and timing
 
 ### Advanced Features
 - **Unified Virtual Memory (UVM)**: Managed memory with OS-level page fault handling (SIGSEGV on Linux, VEH on Windows)
-- **Texture & Surface Operations**: 1D/2D/3D texture sampling with multiple filter/addressing modes
+- **Texture & Surface (C++ emulation)**: `tex1D`/`tex2D`/`tex3D`/`tex1Dfetch` and `surf2Dread`/`surf2Dwrite` templates exist in `cpu_cuda_env.h`. **Missing**: CUDART texture/surface object APIs (`cudaCreateTextureObject`, etc.), PTX `tex`/`suld`/`sust` instructions, driver-level `cuTexRefSetAddress2D`/filter/mipmap controls.
 - **Warp-Level Intrinsics**: `__shfl_sync`, `__ballot_sync`, `__activemask`
-- **FP16 & BFloat16**: Full 16-bit float support with operator sets
-- **Tensor Core Emulation (WMMA)**: Matrix multiply-accumulate operations
-- **CUDA Dynamic Parallelism (CDP)**: Child kernel spawning with real per-arg blob splitting via `KernelIR::argSizes`
-- **Inline PTX Assembly**: 100+ PTX opcodes translated to C++; unrecognized opcodes emit `VGRE_LOG_WARN` (no silent fallback)
+- **FP16 & BFloat16**: `__half` with full operator set in `cpu_cuda_fp16.h`; `__nv_bfloat16` in `cpu_cuda_env.h`; WMMA `nvcuda::wmma` fragments with `__half` in `wmma_emulation.h`. **Missing from PTX translator**: `ld.global.v2/v4.f16`, `st.global.v2/v4.f16`.
+- **Tensor Core Emulation (WMMA)**: Matrix multiply-accumulate operations via scalar FP32 fallback
+- **CUDA Dynamic Parallelism (CDP)**: `cudaLaunchDevice`/`cudaGetParameterBuffer` present. **Missing**: `cudaDeviceSynchronize`, `cudaGetParameterBufferV2`, `cudaLaunchDeviceV2`.
+- **Inline PTX Assembly**: ~120 PTX opcodes translated to C++; unrecognized opcodes throw (no silent fallback)
 - **CUDA IPC**: Multi-process memory sharing via real POSIX shared memory for event handles
 
 ### Library Shims
-- **cuBLAS**: `cublasSgemm`, `cublasDgemm`, `cublasSaxpy`, `cublasSdot`, `cublasSgemv`, batched GEMM (array-of-pointers and strided forms), `cublasGemmEx` with INT8/FP16/BF16/TF32; handle carries stream, mathMode, deviceId
-- **cuDNN**: Convolution (1×1 GEMM + direct 2D + Winograd), pooling, activation functions (ReLU, sigmoid, tanh, ELU, GELU, SELU, Mish), softmax (INSTANCE and CHANNEL modes), batch normalization; INT8 dequantize→FP32 compute→requantize path; handle carries stream, deviceId
-- **NCCL**: `ncclAllReduce` (ring algorithm for >1 MB, barrier for small), `ncclBroadcast`, `ncclReduceScatter`, `ncclAllGather`, `ncclGroupStart/End`
+- **cuBLAS** (~13% coverage, ~27/~200+ functions): `cublasSgemm`, `cublasDgemm`, `cublasSaxpy`, `cublasSdot`, `cublasSgemv`, batched GEMM (array-of-pointers and strided forms), `cublasGemmEx` with INT8/FP16/BF16/TF32. **Missing**: `Trsm`, `Trsv`, `Syrk`, `Ger`, all pointer-mode APIs, most Level-2/Level-3 functions.
+- **cuDNN** (~24% coverage, ~36/~150+ functions): Forward-only conv, pooling, activation (ReLU, sigmoid, tanh, ELU, GELU, SELU, Mish), softmax, batch normalization inference. **Missing**: all backward passes, BN training, dropout, RNN/LSTM/GRU, attention, `OpTensor`, `ReduceTensor`.
+- **NCCL** (~55% coverage): `ncclAllReduce` (ring for >1 MB), `ncclBroadcast`, `ncclReduceScatter`, `ncclAllGather`, `ncclGroupStart/End`. **Missing**: `ncclSend`/`Recv`, `ncclAllToAll`, `ncclGather`/`Scatter`.
+- **Entirely Missing Libraries**: **cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt** — no shims exist in the codebase.
 
 ### Cluster Networking
 - TCP cluster networking with multi-node partitioned 3D kernel dispatch (recursive bisection)
@@ -116,6 +118,14 @@ VGRE (Virtual GPU Runtime Engine) is a production-ready CUDA emulation runtime t
 - DDP training 50–100× slower without NCCL optimization (NCCL shim now available)
 
 ### API Coverage
+- **CUDA Runtime API**: ~45% coverage (~94/~214 functions). Critical missing: `cudaStreamWaitEvent`, `cudaEventQuery`, `cudaMemcpyToSymbol`, `cudaFuncGetAttributes`, `cudaGraphAddKernelNode`, `cudaStreamIsCapturing`, `cudaLaunchHostFunc`, `cudaMemset2D/3D`, `cudaPointerGetAttributes`, texture/surface object APIs, array APIs. See `missingFeatures.md` for exhaustive list.
+- **CUDA Driver API**: ~15% coverage. Missing: `cuEventQuery`, `cuStreamAddCallback`, `cuMemAllocManaged`, `cuMemcpy2D/3D`, cooperative launch, graph APIs, occupancy queries.
+- **CUDA Graphs**: ~30% coverage. Internal `GraphManager` has kernel/memcpy/conditional nodes; CUDART shim only exposes memcpy/conditional/external-semaphore. Missing: kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free nodes.
+- **cuBLAS**: ~13% coverage. Missing all Level-2 except `Gemv`, all Level-3 except `Gemm`, `Trsm`, `Trsv`, `Syrk`, `Ger`, pointer modes.
+- **cuDNN**: ~24% coverage. Missing all backward passes, BN training, dropout, RNN/LSTM/GRU, attention, `OpTensor`, `ReduceTensor`.
+- **NCCL**: ~55% coverage. Missing `Send`/`Recv`, `AllToAll`, `Gather`, `Scatter`.
+- **Entirely missing libraries**: cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt — no shims exist.
+- **PTX ISA**: ~30% coverage. Missing texture/surface instructions, shared atomics, many `cvt` variants, `rcp.rn`, `sqrt.rn`, `match.sync`, `grid.sync`.
 - No OpenCL 2.0+ features (SVM, pipes, subgroups)
 - Fuzzing suite and CI/CD macOS/Windows runners: not yet configured
 
@@ -271,18 +281,26 @@ sudo cmake --install build
 
 ---
 
-## Future Work (Optional)
+## Future Work
 
-### Genuinely Remaining Code Features
-- ~~Flash Attention integration~~ — DONE (`src/compiler/kernel_fusion_engine.cpp` — online softmax with tiling, pattern detection, fused kernel registration)
-- ~~Fused transformer kernels~~ — DONE (`src/compiler/kernel_fusion_engine.cpp` — QKV projection + attention + LayerNorm + MLP + GELU)
-- ~~WebSocket transport for WAN clusters~~ — DONE (`src/advanced/websocket_transport.cpp` — RFC 6455 client/server with TLS, real BSD sockets)
+### Recently Completed (Phase 8)
+- Flash Attention integration — `src/compiler/kernel_fusion_engine.cpp`
+- Fused transformer kernels — `src/compiler/kernel_fusion_engine.cpp`
+- WebSocket transport for WAN clusters — `src/advanced/websocket_transport.cpp`
+- Zero-copy shared memory for local clusters — `src/advanced/tcp_cluster/`
+- MPS multi-process arbitration daemon — `src/advanced/mps_control.cpp`
 
-### Already Implemented
-- ~~Zero-copy shared memory for local clusters~~ — DONE (`src/advanced/tcp_cluster/` — SHM_INIT, DATA_SHM, DATA_SHM_DIRTY packets with `ShmManager`)
-- ~~Full MPS multi-process arbitration daemon~~ — DONE (`src/advanced/mps_control.cpp` — Unix domain socket server+client with wire protocol)
+### Genuinely Remaining Code Features (see `missingFeatures.md` for exhaustive list)
+- **CUDA Runtime**: `cudaStreamWaitEvent`, `cudaEventQuery`, `cudaMemcpyToSymbol`, `cudaFuncGetAttributes`, `cudaGraphAddKernelNode`, `cudaStreamIsCapturing`, `cudaLaunchHostFunc`, `cudaMemset2D/3D`, `cudaPointerGetAttributes`, texture/surface object APIs, array APIs
+- **CUDA Driver**: `cuEventQuery`, `cuStreamAddCallback`, `cuMemAllocManaged`, `cuMemcpy2D/3D`, cooperative launch, graph APIs, occupancy queries
+- **CUDA Graphs**: kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free node types in CUDART shim
+- **cuBLAS**: `Trsm`, `Trsv`, `Syrk`, `Ger`, all pointer-mode APIs, most Level-2/Level-3
+- **cuDNN**: all backward passes, BN training, dropout, RNN/LSTM/GRU, attention, `OpTensor`, `ReduceTensor`
+- **NCCL**: `Send`/`Recv`, `AllToAll`, `Gather`, `Scatter`
+- **PTX ISA**: texture/surface instructions, shared atomics, `cvt` variants, `rcp.rn`, `sqrt.rn`, `match.sync`, `grid.sync`
+- **Entirely missing libraries**: cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt
 
-### Deployment / Infrastructure (not runtime API gaps)
+### Deployment / Infrastructure
 - Kubernetes operator for cluster orchestration
 - CI/CD fuzzing suite and macOS/Windows runners
 
@@ -295,9 +313,11 @@ sudo cmake --install build
 - `docs/api_reference.md` — public C API documentation
 - `docs/how_it_work.md` — conceptual overview and glossary
 - `docs/USER_GUIDE.md` — setup, configuration, and usage guide
+- `docs/missingFeatures.md` — exhaustive list of implemented vs missing features
+- `docs/implementationPlan.md` — phased implementation roadmap for all missing features
 
 ---
 
 **Version**: 1.1.0
 **Last Updated**: 2026-05-12
-**Status**: Production Ready
+**Status**: Development / CI-Ready (see `missingFeatures.md` for gaps)

@@ -17,9 +17,9 @@ VGRE (Virtual GPU Runtime Engine) is a CUDA emulation runtime that intercepts GP
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ API Interception Layer (LD_PRELOAD / DLL Injection)             │
-│ - CUDA Runtime API (~100 functions)                             │
+│ - CUDA Runtime API (~94 of ~214 functions, ~45% coverage)       │
 │ - OpenCL 1.2 Adapter                                            │
-│ - cuBLAS, cuDNN, NCCL Shims                                     │
+│ - cuBLAS (~13%), cuDNN (~24%), NCCL (~55%) Shims               │
 └────────────────────────┬────────────────────────────────────────┘
                          │
                          ▼
