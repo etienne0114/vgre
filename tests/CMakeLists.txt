@@ -190,6 +190,14 @@ add_executable(test_memory_concurrency unit/test_memory_concurrency.cpp)
 target_link_libraries(test_memory_concurrency PRIVATE vgre)
 add_test(NAME MemoryConcurrency COMMAND test_memory_concurrency)
 
+add_executable(test_events api/test_events.cpp)
+target_link_libraries(test_events PRIVATE vgre_cudart)
+add_test(NAME Events COMMAND test_events)
+
+add_executable(test_stream_wait_event api/test_stream_wait_event.cpp)
+target_link_libraries(test_stream_wait_event PRIVATE vgre_cudart)
+add_test(NAME StreamWaitEvent COMMAND test_stream_wait_event)
+
 add_executable(test_tpm_auth unit/test_tpm_auth.cpp)
 target_link_libraries(test_tpm_auth PRIVATE vgre)
 add_test(NAME TPMAuth COMMAND test_tpm_auth)
