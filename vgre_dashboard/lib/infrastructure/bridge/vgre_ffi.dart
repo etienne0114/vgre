@@ -228,6 +228,8 @@ typedef CreditsReset = int Function();
 typedef GetDeviceCountFunc = Int32 Function(Pointer<Int32>);
 typedef GetDeviceCount = int Function(Pointer<Int32>);
 
+typedef SetConfigFunc = Int32 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef SetConfig = int Function(Pointer<Utf8>, Pointer<Utf8>);
 
 // ── VGRE FFI Bridge ────────────────────────────────────────────────────────
 class VgreBridge {
@@ -256,7 +258,7 @@ class VgreBridge {
   GetCacheStats? _getCacheStats;
   ResetCacheStats? _resetCacheStats;
 
-  int Function(Pointer<Utf8>, Pointer<Utf8>, int)? _setenv;
+  late final SetConfig _setConfig;
 
 
   VgreBridge(String libPath) {
@@ -275,16 +277,7 @@ class VgreBridge {
       rethrow;
     }
 
-    if (!Platform.isWindows) {
-      try {
-        final process = DynamicLibrary.process();
-        _setenv = process.lookupFunction<
-            Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32),
-            int Function(Pointer<Utf8>, Pointer<Utf8>, int)>('setenv');
-      } catch (_) {
-        _setenv = null;
-      }
-    }
+    _setConfig = _lib.lookupFunction<SetConfigFunc, SetConfig>('vgre_set_config');
 
     _init = _lib.lookupFunction<InitFunc, Init>('vgre_init');
     _shutdown = _lib.lookupFunction<ShutdownFunc, Shutdown>('vgre_shutdown');
@@ -356,34 +349,13 @@ class VgreBridge {
   }
 
 
+  /// Thread-safe configuration store that replaces setenv/getenv race.
+  /// Writes key/value into VGRE's internal config map (vgre_set_config).
   void setEnvironmentVariable(String name, String value) {
-    if (Platform.isWindows) {
-      try {
-        final namePtr = name.toNativeUtf16();
-        final valuePtr = value.toNativeUtf16();
-        final kernel32 = DynamicLibrary.open('kernel32.dll');
-        final setEnvironmentVariable = kernel32.lookupFunction<
-            Int32 Function(Pointer<Utf16>, Pointer<Utf16>),
-            int Function(Pointer<Utf16>, Pointer<Utf16>)>(
-          'SetEnvironmentVariableW',
-        );
-        setEnvironmentVariable(namePtr, valuePtr);
-        calloc.free(namePtr);
-        calloc.free(valuePtr);
-      } catch (_) {
-        // Keep startup resilient even if env propagation is unavailable.
-      }
-      return;
-    }
-
-    if (_setenv == null) {
-      return;
-    }
-
     final namePtr = name.toNativeUtf8();
     final valuePtr = value.toNativeUtf8();
     try {
-      _setenv!(namePtr, valuePtr, 1);
+      _setConfig(namePtr, valuePtr);
     } finally {
       calloc.free(namePtr);
       calloc.free(valuePtr);

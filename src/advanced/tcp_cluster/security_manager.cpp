@@ -2,6 +2,7 @@
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include "vgre/advanced/hardware_token_manager.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
 #include <chrono>
@@ -56,9 +57,9 @@ SecurityManager::SecurityManager(TCPClusterManager* parent) : parent_(parent) {
 VGREResult SecurityManager::enableSecurity(bool enabled) {
   std::string token;
   { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
-  // If auth_token_str_ is not set, try reading from environment variable
+  // If auth_token_str_ is not set, try reading from config store (avoids setenv/getenv race)
   if (token.empty()) {
-    const char* env_token = std::getenv("VGRE_TCP_AUTH_TOKEN");
+    const char* env_token = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
     if (env_token && env_token[0] != '\0') {
       token = env_token;
       { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }

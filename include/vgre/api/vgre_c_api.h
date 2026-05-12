@@ -119,6 +119,11 @@ typedef struct {
 } vgre_telemetry_t;
 #pragma pack(pop)
 
+/* ── Configuration (thread-safe, replaces setenv/getenv race) ─────────────
+ */
+VGRE_EXPORT int vgre_set_config(const char *key, const char *value);
+VGRE_EXPORT const char *vgre_get_config(const char *key);
+
 /* ── Initialization ─────────────────────────────────────────────────────────
  */
 VGRE_EXPORT int vgre_init(void);

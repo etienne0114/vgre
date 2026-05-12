@@ -2,6 +2,8 @@
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/error_codes.h"
+#include "vgre/api/vgre_c_api.h"
+#include "vgre/common/platform.h"
 #include <iostream>
 #include <string>
 #include <csignal>
@@ -75,11 +77,8 @@ int main(int argc, char** argv) {
         }
         vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker",
             "Using provided auth token (SHA256: " + token_hash_hex.substr(0, 16) + "...)");
-#if defined(_WIN32)
-        _putenv_s("VGRE_TCP_AUTH_TOKEN", auth_token.c_str());
-#else
-        setenv("VGRE_TCP_AUTH_TOKEN", auth_token.c_str(), 1);
-#endif
+        // Use thread-safe config store instead of setenv to avoid glibc heap corruption race
+        vgre_set_config("VGRE_TCP_AUTH_TOKEN", auth_token.c_str());
     }
 
     vgre::advanced::TCPClusterManager& cluster = vgre::advanced::TCPClusterManager::instance();

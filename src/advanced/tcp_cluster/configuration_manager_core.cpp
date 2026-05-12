@@ -1,6 +1,7 @@
 // Configuration Manager Core — static state, env parsing, profiles, change tracking.
 
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include <algorithm>
 #include <cstring>
@@ -21,64 +22,63 @@ std::thread ConfigurationManager::monitoring_thread_;
 
 template<>
 int ConfigurationManager::getEnvVar<int>(const char* name, int default_value) {
-    const char* env_val = std::getenv(name);
+    const char* env_val = vgre_get_config(name);
     if (!env_val || env_val[0] == '\0') return default_value;
     try {
         return std::stoi(env_val);
     } catch (const std::exception&) {
         VGRE_LOG_WARN("ConfigurationManager",
             "Invalid integer for " + std::string(name) + ": " + env_val +
-            ", using default: " + std::to_string(default_value));
+            ", using default " + std::to_string(default_value));
         return default_value;
     }
 }
 
 template<>
 size_t ConfigurationManager::getEnvVar<size_t>(const char* name, size_t default_value) {
-    const char* env_val = std::getenv(name);
+    const char* env_val = vgre_get_config(name);
     if (!env_val || env_val[0] == '\0') return default_value;
     try {
         return static_cast<size_t>(std::stoull(env_val));
     } catch (const std::exception&) {
         VGRE_LOG_WARN("ConfigurationManager",
             "Invalid size_t for " + std::string(name) + ": " + env_val +
-            ", using default: " + std::to_string(default_value));
+            ", using default " + std::to_string(default_value));
         return default_value;
     }
 }
 
 template<>
 double ConfigurationManager::getEnvVar<double>(const char* name, double default_value) {
-    const char* env_val = std::getenv(name);
+    const char* env_val = vgre_get_config(name);
     if (!env_val || env_val[0] == '\0') return default_value;
     try {
         return std::stod(env_val);
     } catch (const std::exception&) {
         VGRE_LOG_WARN("ConfigurationManager",
             "Invalid double for " + std::string(name) + ": " + env_val +
-            ", using default: " + std::to_string(default_value));
+            ", using default " + std::to_string(default_value));
         return default_value;
     }
 }
 
 template<>
 bool ConfigurationManager::getEnvVar<bool>(const char* name, bool default_value) {
-    const char* env_val = std::getenv(name);
+    const char* env_val = vgre_get_config(name);
     if (!env_val || env_val[0] == '\0') return default_value;
     std::string val_str(env_val);
     std::transform(val_str.begin(), val_str.end(), val_str.begin(), ::tolower);
-    if (val_str == "1" || val_str == "true" || val_str == "yes" || val_str == "on") return true;
-    if (val_str == "0" || val_str == "false" || val_str == "no" || val_str == "off") return false;
-    VGRE_LOG_WARN("ConfigurationManager",
-        "Invalid boolean for " + std::string(name) + ": " + env_val +
-        ", using default: " + (default_value ? "true" : "false"));
+    if (val_str == "1" || val_str == "true" || val_str == "yes" || val_str == "on")
+        return true;
+    if (val_str == "0" || val_str == "false" || val_str == "no" || val_str == "off")
+        return false;
     return default_value;
 }
 
 template<>
 std::string ConfigurationManager::getEnvVar<std::string>(const char* name,
                                                          std::string default_value) {
-    const char* env_val = std::getenv(name);
+    const char* env_val = vgre_get_config(name);
     if (!env_val || env_val[0] == '\0') return default_value;
     return std::string(env_val);
 }

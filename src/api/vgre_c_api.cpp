@@ -110,6 +110,53 @@ static int require_initialized() {
   return VGRE_SUCCESS;
 }
 
+// ── Configuration Store (thread-safe, replaces setenv/getenv race) ───────────
+
+namespace {
+
+std::mutex& getConfigMutex() {
+    static std::mutex m;
+    return m;
+}
+
+// Per-key storage that guarantees lifetime across FFI boundaries.
+// We store a copy of the string so Dart does not need to keep the
+// native pointer alive after the call returns.
+std::unordered_map<std::string, std::string>& getConfigMap() {
+    static std::unordered_map<std::string, std::string> m;
+    return m;
+}
+
+} // namespace
+
+extern "C" {
+
+int vgre_set_config(const char *key, const char *value) {
+  if (!key || !key[0]) return VGRE_ERROR_INVALID_VALUE;
+  std::lock_guard<std::mutex> lk(getConfigMutex());
+  if (value && value[0]) {
+    getConfigMap()[key] = value;
+  } else {
+    getConfigMap().erase(key);
+  }
+  return VGRE_SUCCESS;
+}
+
+const char *vgre_get_config(const char *key) {
+  if (!key || !key[0]) return nullptr;
+  {
+    std::lock_guard<std::mutex> lk(getConfigMutex());
+    auto it = getConfigMap().find(key);
+    if (it != getConfigMap().end()) {
+      return it->second.c_str();
+    }
+  }
+  // Fall back to process environment (safe because we never call setenv).
+  return std::getenv(key);
+}
+
+} // extern "C"
+
 // ── Initialization ─────────────────────────────────────────────────────────
 
 int vgre_init(void) {
