@@ -243,6 +243,7 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode> &nodes
                 irEntry.staticFlopCount = jres.staticFlopCount;
               }
               kernelCache_[actualId] = fn;
+              kernelFnAddrMap_[fn.get()] = actualId;
               pendingKernels_.erase(pendingIt);
               it = kernelCache_.find(actualId);
             } else {

@@ -106,6 +106,7 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
             irIt->second.staticFlopCount = jres.staticFlopCount;
 
             kernelCache_[id] = fn;
+            kernelFnAddrMap_[fn.get()] = id;
             pendingKernels_.erase(id);
         } else {
             return VGREResult::ERR_INVALID_KERNEL;
@@ -431,6 +432,7 @@ VGREResult RuntimeEngine::launchCooperativeKernelMultiDevice(
       irIt->second.estimatedInstructionCount = jres.estimatedInstructionCount;
       irIt->second.staticFlopCount           = jres.staticFlopCount;
       kernelCache_[id] = jres.fn;
+      kernelFnAddrMap_[jres.fn.get()] = id;
       pendingKernels_.erase(id);
       cacheIt = kernelCache_.find(id);
     }
@@ -633,6 +635,7 @@ VGREResult RuntimeEngine::launchCooperativeKernel(KernelId id,
             irIt->second.staticFlopCount = jres.staticFlopCount;
 
             kernelCache_[id] = fn;
+            kernelFnAddrMap_[fn.get()] = id;
             pendingKernels_.erase(id);
         } else {
             return VGREResult::ERR_INVALID_KERNEL;
