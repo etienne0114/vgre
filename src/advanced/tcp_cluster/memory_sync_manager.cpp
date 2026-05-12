@@ -2,6 +2,7 @@
 #include "vgre/advanced/rdma_transport.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/tcp_cluster/internal/interfaces.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
@@ -14,7 +15,7 @@ namespace {
 // ── Configuration Constants ──────────────────────────────────────────────────
 
 const size_t kRdmaThreshold = []() {
-  const char* env = std::getenv("VGRE_RDMA_THRESHOLD_BYTES");
+  const char* env = vgre_get_config("VGRE_RDMA_THRESHOLD_BYTES");
   if (env) {
     try {
       return static_cast<size_t>(std::stoll(env));
@@ -24,7 +25,7 @@ const size_t kRdmaThreshold = []() {
 }();
 
 const int MAX_DELTA_SYNC_RETRIES = []() {
-  const char* env = std::getenv("VGRE_CLUSTER_MAX_DELTA_SYNC_RETRIES");
+  const char* env = vgre_get_config("VGRE_CLUSTER_MAX_DELTA_SYNC_RETRIES");
   if (env) {
     try {
       int v = std::stoi(env);
@@ -35,7 +36,7 @@ const int MAX_DELTA_SYNC_RETRIES = []() {
 }();
 
 const int INITIAL_RETRY_BACKOFF_MS = []() {
-  const char* env = std::getenv("VGRE_CLUSTER_RETRY_BACKOFF_INITIAL_MS");
+  const char* env = vgre_get_config("VGRE_CLUSTER_RETRY_BACKOFF_INITIAL_MS");
   if (env) {
     try {
       int v = std::stoi(env);
@@ -46,7 +47,7 @@ const int INITIAL_RETRY_BACKOFF_MS = []() {
 }();
 
 const int MAX_RETRY_BACKOFF_MS = []() {
-  const char* env = std::getenv("VGRE_CLUSTER_RETRY_BACKOFF_MAX_MS");
+  const char* env = vgre_get_config("VGRE_CLUSTER_RETRY_BACKOFF_MAX_MS");
   if (env) {
     try {
       int v = std::stoi(env);

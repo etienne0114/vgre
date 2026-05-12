@@ -1,5 +1,6 @@
 #include "vgre/advanced/rdma_transport.h"
 #include "vgre/advanced/secure_channel.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 
 #include <chrono>
@@ -15,7 +16,7 @@ namespace {
 // Bounce buffer size: controls the maximum single RDMA transfer size.
 // Configurable via VGRE_RDMA_BOUNCE_SIZE (bytes). Default 256 MB.
 size_t getRdmaBounceBufSize() {
-    const char* env = std::getenv("VGRE_RDMA_BOUNCE_SIZE");
+    const char* env = vgre_get_config("VGRE_RDMA_BOUNCE_SIZE");
     if (env) {
         try {
             long long v = std::stoll(env);

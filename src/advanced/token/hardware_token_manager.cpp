@@ -1,4 +1,5 @@
 #include "vgre/advanced/hardware_token_manager.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 
 #include <random>
@@ -37,7 +38,7 @@ VGREResult HardwareTokenManager::initialize() {
     // Backend priority order is configurable via VGRE_TOKEN_BACKEND env var.
     // Valid values: "keyring", "libsecret", "keychain", "credman", "tpm", "file".
     // Default: platform-native backend first, TPM second, encrypted file last.
-    const char *preferredBackend = std::getenv("VGRE_TOKEN_BACKEND");
+    const char *preferredBackend = vgre_get_config("VGRE_TOKEN_BACKEND");
 
     // Helper lambda: attempt a backend by name string.
     auto tryNamed = [&](const char *name) -> bool {

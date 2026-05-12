@@ -1,5 +1,6 @@
 #include "vgre/advanced/tcp_cluster/internal/collective_ops_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
 #include <cstdlib>
@@ -76,7 +77,7 @@ VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int da
   // Configurable reduction timeout: VGRE_REDUCTION_TIMEOUT_MS (default 30 s).
   int reductionTimeoutMs = 30000;
   {
-    const char *envT = std::getenv("VGRE_REDUCTION_TIMEOUT_MS");
+    const char *envT = vgre_get_config("VGRE_REDUCTION_TIMEOUT_MS");
     if (envT) { int v = std::atoi(envT); if (v > 0) reductionTimeoutMs = v; }
     else {
       // Estimate: count live workers, use their telemetry to compute timeout.

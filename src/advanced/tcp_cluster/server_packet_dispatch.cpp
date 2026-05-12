@@ -5,6 +5,7 @@
 #include "vgre/advanced/tcp_cluster/internal/interfaces.h"
 #include "vgre/advanced/tcp_cluster/internal/dispatch_manager.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
@@ -14,7 +15,7 @@ namespace advanced {
 
 namespace {
 const size_t kProbePayloadBytes = []() -> size_t {
-  const char *env = std::getenv("VGRE_CLUSTER_PROBE_BYTES");
+  const char *env = vgre_get_config("VGRE_CLUSTER_PROBE_BYTES");
   if (env) {
     try {
       long long v = std::stoll(env);
@@ -26,7 +27,7 @@ const size_t kProbePayloadBytes = []() -> size_t {
   return 1024ULL * 1024;
 }();
 const size_t kMaxPacketsPerSec = []() -> size_t {
-  const char *env = std::getenv("VGRE_CLUSTER_MAX_PACKETS_PER_SEC");
+  const char *env = vgre_get_config("VGRE_CLUSTER_MAX_PACKETS_PER_SEC");
   if (env) {
     try {
       long long v = std::stoll(env);
@@ -312,7 +313,7 @@ void TCPClusterManager::processServerPackets(
           client->shm_manager = std::make_unique<vgre::core::ShmManager>();
           std::string shmName = "vgre_shm_" + std::to_string(client->socket_fd);
           static const size_t shmSize = []() -> size_t {
-            const char *env = std::getenv("VGRE_CLUSTER_SHM_SIZE");
+            const char *env = vgre_get_config("VGRE_CLUSTER_SHM_SIZE");
             if (env) {
               try {
                 long long v = std::stoll(env);

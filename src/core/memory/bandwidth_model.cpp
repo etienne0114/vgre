@@ -1,5 +1,5 @@
 #include "vgre/core/memory_manager.h"
-#include <cstdlib>
+#include "vgre/api/vgre_c_api.h"
 #include <algorithm>
 
 namespace vgre {
@@ -15,7 +15,7 @@ void MemoryManager::recordMemoryBandwidth(size_t bytes, double execMs) {
 
 MemoryManager::MemoryBandwidthStats MemoryManager::getMemoryBandwidthStats() const {
     static const double kGpuPeak = []() -> double {
-        const char* env = std::getenv("VGRE_GPU_PEAK_BANDWIDTH_GBPS");
+        const char* env = vgre_get_config("VGRE_GPU_PEAK_BANDWIDTH_GBPS");
         if (env) {
             try {
                 double v = std::stod(env);

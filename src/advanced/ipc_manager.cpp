@@ -1,5 +1,6 @@
 #include "vgre/advanced/ipc_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include <cerrno>
 #include <cstring>
@@ -158,7 +159,7 @@ bool IPCManager::initialize(bool isMaster) {
 
   // Phase 10: Dynamic SHM name for test isolation
   std::string fullShmName = VGRE_SHM_NAME;
-  const char* shmSuffix = std::getenv("VGRE_SHM_SUFFIX");
+  const char* shmSuffix = vgre_get_config("VGRE_SHM_SUFFIX");
   if (shmSuffix) {
       fullShmName += "_" + std::string(shmSuffix);
   }
@@ -342,7 +343,7 @@ void IPCManager::shutdown() {
 
   if (isMaster_) {
     std::string fullShmName = VGRE_SHM_NAME;
-    const char* shmSuffix = std::getenv("VGRE_SHM_SUFFIX");
+    const char* shmSuffix = vgre_get_config("VGRE_SHM_SUFFIX");
     if (shmSuffix) {
         fullShmName += "_" + std::string(shmSuffix);
     }

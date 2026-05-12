@@ -7,6 +7,7 @@
 #include "vgre/advanced/tcp_cluster/internal/discovery_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/system_utils.h"
 #include "vgre/common/sockets.h"
@@ -39,13 +40,13 @@ using vgre::common::VgreSocketGuard;
 // with other services on the same subnet.  Both master and workers must use
 // the same values; changing one requires changing the other.
 int DiscoveryManager::getUdpAnnouncePort() {
-    const char* e = std::getenv("VGRE_CLUSTER_UDP_ANNOUNCE_PORT");
+    const char* e = vgre_get_config("VGRE_CLUSTER_UDP_ANNOUNCE_PORT");
     if (e) { int v = std::atoi(e); if (v > 1024 && v < 65536) return v; }
     return 7778;
 }
 
 int DiscoveryManager::getUdpWorkerPort() {
-    const char* e = std::getenv("VGRE_CLUSTER_UDP_WORKER_PORT");
+    const char* e = vgre_get_config("VGRE_CLUSTER_UDP_WORKER_PORT");
     if (e) { int v = std::atoi(e); if (v > 1024 && v < 65536) return v; }
     return 7779;
 }
@@ -68,7 +69,7 @@ DiscoveryManager::~DiscoveryManager() {
 // ── Start Methods ──────────────────────────────────────────────────────────
 
 void DiscoveryManager::startMasterAnnouncer() {
-    const char* disc = std::getenv("VGRE_CLUSTER_DISCOVERY");
+    const char* disc = vgre_get_config("VGRE_CLUSTER_DISCOVERY");
     if (disc && std::string(disc) == "OFF") {
         VGRE_LOG_INFO("TCPCluster", "Discovery: Master announcer disabled via VGRE_CLUSTER_DISCOVERY=OFF");
         return;
@@ -77,7 +78,7 @@ void DiscoveryManager::startMasterAnnouncer() {
 }
 
 void DiscoveryManager::startMasterWorkerDiscovery() {
-    const char* disc = std::getenv("VGRE_CLUSTER_DISCOVERY");
+    const char* disc = vgre_get_config("VGRE_CLUSTER_DISCOVERY");
     if (disc && std::string(disc) == "OFF") {
         VGRE_LOG_INFO("TCPCluster", "Discovery: Master worker discovery disabled via VGRE_CLUSTER_DISCOVERY=OFF");
         return;
@@ -86,7 +87,7 @@ void DiscoveryManager::startMasterWorkerDiscovery() {
 }
 
 void DiscoveryManager::startWorkerDiscovery() {
-    const char* disc = std::getenv("VGRE_CLUSTER_DISCOVERY");
+    const char* disc = vgre_get_config("VGRE_CLUSTER_DISCOVERY");
     if (disc && std::string(disc) == "OFF") {
         VGRE_LOG_INFO("TCPCluster", "Discovery: Worker discovery disabled via VGRE_CLUSTER_DISCOVERY=OFF");
         return;
@@ -95,7 +96,7 @@ void DiscoveryManager::startWorkerDiscovery() {
 }
 
 void DiscoveryManager::startWorkerAnnouncer() {
-    const char* disc = std::getenv("VGRE_CLUSTER_DISCOVERY");
+    const char* disc = vgre_get_config("VGRE_CLUSTER_DISCOVERY");
     if (disc && std::string(disc) == "OFF") {
         VGRE_LOG_INFO("TCPCluster", "Discovery: Worker announcer disabled via VGRE_CLUSTER_DISCOVERY=OFF");
         return;

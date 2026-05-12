@@ -1,4 +1,5 @@
 #include "vgre/core/memory_manager.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 
 #include <chrono>
@@ -42,7 +43,7 @@ void MemoryManager::stopMigrationThread() {
 
 void MemoryManager::migrationLoop() {
   static const auto kInterval = []() -> std::chrono::milliseconds {
-    const char* env = std::getenv("VGRE_UVM_MIGRATION_MS");
+    const char* env = vgre_get_config("VGRE_UVM_MIGRATION_MS");
     if (env) {
       try {
         long v = std::stol(env);

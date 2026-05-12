@@ -1,4 +1,5 @@
 #include "vgre/advanced/resource_ledger.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 
 #include <algorithm>
@@ -173,7 +174,7 @@ std::string ResourceLedger::computeLedgerPath() const {
   }
   return "vgre_ledger.json";
 #else
-  const char *home = std::getenv("HOME");
+  const char *home = vgre_get_config("HOME");
   if (!home) {
     struct passwd *pw = getpwuid(getuid());
     if (pw)

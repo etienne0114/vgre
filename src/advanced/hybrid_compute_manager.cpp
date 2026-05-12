@@ -40,7 +40,7 @@ HybridComputeManager::HybridComputeManager() {
   detectResources();
 
   // Auto-start rebalancing if the interval env var is set.
-  const char *envMs = std::getenv("VGRE_HYBRID_REBALANCE_INTERVAL_MS");
+  const char *envMs = vgre_get_config("VGRE_HYBRID_REBALANCE_INTERVAL_MS");
   if (envMs) {
     int ms = std::atoi(envMs);
     if (ms > 0) {
@@ -802,7 +802,7 @@ VGREResult HybridComputeManager::distributePartitionedKernel(
   // If some workers don't respond within the window, return partial results
   // rather than hanging indefinitely.
   uint32_t totalPartitions = static_cast<uint32_t>(activeWorkers + 1); // +1 for local
-  const char *timeoutEnv = std::getenv("VGRE_PARTITION_TIMEOUT_MS");
+  const char *timeoutEnv = vgre_get_config("VGRE_PARTITION_TIMEOUT_MS");
   uint32_t timeoutMs = 30000;
   if (timeoutEnv) {
     try {

@@ -5,6 +5,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/tcp_cluster/internal/connection_manager.h"
 #include "vgre/advanced/tcp_cluster/internal/security_manager.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/core/shm_manager.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
@@ -23,22 +24,22 @@ namespace advanced {
 
 namespace {
 const size_t kProbePayloadBytes = []() -> size_t {
-    const char* env = std::getenv("VGRE_CLUSTER_PROBE_BYTES");
+    const char* env = vgre_get_config("VGRE_CLUSTER_PROBE_BYTES");
     if (env) { try { long long v = std::stoll(env); if (v >= 4096 && v <= 64 * 1024 * 1024) return static_cast<size_t>(v); } catch (...) {} }
     return 1024ULL * 1024;
 }();
 const int kBandwidthReprobeIntervalSec = []() -> int {
-    const char* env = std::getenv("VGRE_CLUSTER_BANDWIDTH_REPROBE_SEC");
+    const char* env = vgre_get_config("VGRE_CLUSTER_BANDWIDTH_REPROBE_SEC");
     if (env) { try { int v = std::stoi(env); if (v >= 30 && v <= 86400) return v; } catch (...) {} }
     return 300;
 }();
 const size_t kMaxHandshakeThreads = []() -> size_t {
-    const char* env = std::getenv("VGRE_CLUSTER_MAX_HANDSHAKE_THREADS");
+    const char* env = vgre_get_config("VGRE_CLUSTER_MAX_HANDSHAKE_THREADS");
     if (env) { try { long v = std::stol(env); if (v > 0 && v <= 512) return static_cast<size_t>(v); } catch (...) {} }
     return 32;
 }();
 const uint32_t kKeyRotationThreshold = []() -> uint32_t {
-    const char* env = std::getenv("VGRE_CLUSTER_KEY_ROTATION_THRESHOLD");
+    const char* env = vgre_get_config("VGRE_CLUSTER_KEY_ROTATION_THRESHOLD");
     if (env) { try { long v = std::stol(env); if (v > 0) return static_cast<uint32_t>(v); } catch (...) {} }
     return 10000;
 }();

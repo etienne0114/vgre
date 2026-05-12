@@ -1,5 +1,6 @@
 #include "vgre/advanced/hardware_token_manager.h"
 #include "vgre/advanced/secure_channel.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 
 #include <fstream>
@@ -23,19 +24,19 @@ namespace vgre {
 namespace advanced {
 
 VGREResult HardwareTokenManager::initFallbackEncrypted() {
-    const char* overridePath = getenv("VGRE_TOKEN_FALLBACK_PATH");
+    const char* overridePath = vgre_get_config("VGRE_TOKEN_FALLBACK_PATH");
     if (overridePath && overridePath[0] != '\0') {
         fallback_path_ = overridePath;
     } else {
 #if defined(_WIN32)
-        const char* appdata = getenv("APPDATA");
+        const char* appdata = vgre_get_config("APPDATA");
         if (appdata && appdata[0] != '\0') {
             fallback_path_ = std::string(appdata) + "\\vgre\\tokens.enc";
         } else {
             fallback_path_ = ".\\vgre\\tokens.enc";
         }
 #else
-        const char* home = getenv("HOME");
+        const char* home = vgre_get_config("HOME");
         if (home && home[0] != '\0') {
             fallback_path_ = std::string(home) + "/.vgre/tokens.enc";
         } else {
@@ -220,7 +221,7 @@ std::array<uint8_t, 32> HardwareTokenManager::getMachineKey() {
     char hostname[256] = {};
     gethostname(hostname, sizeof(hostname));
     identity += hostname;
-    const char* user = getenv("USER");
+    const char* user = vgre_get_config("USER");
     if (user) identity += user;
 #endif
 

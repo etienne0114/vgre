@@ -3,6 +3,7 @@
  */
 
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
 #include <chrono>
@@ -13,7 +14,7 @@ namespace advanced {
 
 namespace {
 const size_t kMaxRxBuffer = []() -> size_t {
-  const char *env = std::getenv("VGRE_CLUSTER_MAX_RX_BUFFER");
+  const char *env = vgre_get_config("VGRE_CLUSTER_MAX_RX_BUFFER");
   if (env) {
     try {
       long long v = std::stoll(env);
