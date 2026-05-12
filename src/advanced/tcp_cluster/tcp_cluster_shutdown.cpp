@@ -44,9 +44,12 @@ void TCPClusterManager::shutdown() {
   barrier_cv_.notify_all();
 
   auto join_with_timeout = [](std::thread& t, const char* name) {
-    if (t.joinable()) {
-      fprintf(stderr, "DEBUG [TCPCluster] Joining %s\n", name);
-      t.join();
+    if (!t.joinable()) return;
+    fprintf(stderr, "DEBUG [TCPCluster] Joining %s\n", name);
+    auto future = std::async(std::launch::async, [&t]() { t.join(); });
+    if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+      fprintf(stderr, "WARN [TCPCluster] %s join timed out — detaching\n", name);
+      t.detach();
     }
   };
   join_with_timeout(data_processor_thread_, "data_processor_thread_");
@@ -59,7 +62,11 @@ void TCPClusterManager::shutdown() {
     for (auto &e : server_auth_threads_) {
       if (e.t.joinable()) {
         fprintf(stderr, "DEBUG [TCPCluster] Joining server auth thread\n");
-        e.t.join();
+        auto future = std::async(std::launch::async, [&e]() { e.t.join(); });
+        if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+          fprintf(stderr, "WARN [TCPCluster] Server auth thread join timed out — detaching\n");
+          e.t.detach();
+        }
       }
     }
     server_auth_threads_.clear();
