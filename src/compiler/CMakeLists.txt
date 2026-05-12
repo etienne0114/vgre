@@ -7,6 +7,7 @@ add_library(vgre_compiler STATIC
     llvm_translation_engine.cpp
     llvm_translation_codegen.cpp
     texture_builtins.cpp
+    kernel_fusion_engine.cpp
 )
 
 target_include_directories(vgre_compiler PUBLIC

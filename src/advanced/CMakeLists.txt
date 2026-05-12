@@ -63,6 +63,7 @@ add_library(vgre_advanced OBJECT
     rdma_transport.cpp
     mps_control.cpp
     grpc_transport.cpp
+    websocket_transport.cpp
     ${VGRE_GRPC_GENERATED}
 )
 
