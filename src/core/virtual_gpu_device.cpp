@@ -375,6 +375,30 @@ void VirtualGPUDevice::detectHardware() {
   props_.maxThreadsPerBlock = 1024;
   props_.isP2PCapable = 1;
 
+  // Set SM-level capacity limits based on architecture
+  if (props_.major >= 8) {
+    // Ampere (SM 8.x) — A100, A10, RTX 3090
+    props_.maxWarpsPerSM = 64;
+    props_.maxBlocksPerSM = 32;
+    props_.maxThreadsPerSM = 2048;
+    props_.maxRegsPerSM = 65536;
+    props_.maxSharedMemPerSM = 102400; // 100 KB (64 KB base + 32 KB opt-in + 8 KB reserved)
+  } else if (props_.major == 7) {
+    // Turing (SM 7.x) — RTX 2080, T4
+    props_.maxWarpsPerSM = 48;
+    props_.maxBlocksPerSM = 16;
+    props_.maxThreadsPerSM = 2048;
+    props_.maxRegsPerSM = 65536;
+    props_.maxSharedMemPerSM = 65536; // 64 KB
+  } else {
+    // Pascal (SM 6.x) and older
+    props_.maxWarpsPerSM = 32;
+    props_.maxBlocksPerSM = 16;
+    props_.maxThreadsPerSM = 2048;
+    props_.maxRegsPerSM = 65536;
+    props_.maxSharedMemPerSM = 49152; // 48 KB
+  }
+
   VGRE_LOG_INFO("VirtualGPUDevice",
                 "Detected: " + std::string(props_.name) + " | Sm=" +
                     std::to_string(props_.major) + "." + std::to_string(props_.minor) +

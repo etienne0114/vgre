@@ -81,6 +81,13 @@ struct DeviceProperties {
   size_t totalConstMem = 64 * 1024;
   int computeCapability = 86;
 
+  // SM-level capacity limits (architecture-specific; used by occupancy calculator)
+  int maxWarpsPerSM = 64;       // 64 on Ampere, 48 on Turing, 32 on Pascal
+  int maxBlocksPerSM = 32;      // 32 on Ampere, 16 on Turing/Pascal
+  int maxThreadsPerSM = 2048;   // 2048 on Ampere/Turing, 2048 on Pascal
+  int maxRegsPerSM = 65536;     // 65536 on Ampere, 65536 on Turing, 65536 on Pascal
+  int maxSharedMemPerSM = 102400; // 100 KB on Ampere (64+32 via opt-in), 64 KB on Turing
+
   // Topology for P2P refinement
   int pciBusId = 0;
   int pciDeviceId = 0;
