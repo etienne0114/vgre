@@ -112,18 +112,17 @@ static int require_initialized() {
 
 // ── Initialization ─────────────────────────────────────────────────────────
 
-static std::mutex g_init_mutex;
-static bool g_initialized = false;
-
 int vgre_init(void) {
-  std::lock_guard<std::mutex> lock(g_init_mutex);
-  if (g_initialized) {
+  static std::mutex init_mutex;
+  static bool initialized = false;
+  std::lock_guard<std::mutex> lock(init_mutex);
+  if (initialized) {
     return VGRE_SUCCESS;
   }
 
   auto result = vgre::core::RuntimeEngine::instance().initialize();
   if (result == vgre::VGREResult::SUCCESS) {
-    g_initialized = true;
+    initialized = true;
   }
   return to_status(result);
 }

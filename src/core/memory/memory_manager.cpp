@@ -39,13 +39,13 @@ namespace vgre {
 namespace core {
 
 #if defined(_WIN32)
-static PVOID g_vehHandler = nullptr;
+static PVOID& getVehHandler() { static PVOID h = nullptr; return h; }
 #else
-static struct sigaction old_sa {};
+static struct sigaction& getOldSigaction() { static struct sigaction sa{}; return sa; }
 #endif
-static std::atomic<bool> g_handlerInstalled{false};
-static std::atomic<int> g_instanceCount{0};
-static std::atomic<MemoryManager *> g_memoryManagerId{nullptr};
+static std::atomic<bool>& getHandlerInstalled() { static std::atomic<bool> v{false}; return v; }
+static std::atomic<int>& getInstanceCount() { static std::atomic<int> v{0}; return v; }
+static std::atomic<MemoryManager *>& getMemoryManagerId() { static std::atomic<MemoryManager *> v{nullptr}; return v; }
 
 // Thread-local active device ID — set by CPUParallelExecutor before dispatching
 // kernel blocks, read by the SIGSEGV handler to attribute page faults to a device.
@@ -56,10 +56,10 @@ MemoryManager::MemoryManager(size_t poolSize) : poolSize_(poolSize) {
   VGRE_LOG_INFO("MemoryManager", "Initialized with pool size " +
                                      std::to_string(poolSize / (1024 * 1024)) +
                                      " MB");
-  if (g_instanceCount.fetch_add(1) == 0) {
+  if (getInstanceCount().fetch_add(1) == 0) {
     setupSignalHandler();
   }
-  g_memoryManagerId.store(this, std::memory_order_release);
+  getMemoryManagerId().store(this, std::memory_order_release);
 
   // Initialize empty active tree before calibration and migration thread so
   // the SIGSEGV handler never sees a null tree pointer.
@@ -95,12 +95,12 @@ MemoryManager::~MemoryManager() {
   stopMigrationThread();
   stopPendingDrainer();
   
-  if (g_instanceCount.fetch_sub(1) == 1) {
+  if (getInstanceCount().fetch_sub(1) == 1) {
     teardownSignalHandler();
   }
   
-  if (g_memoryManagerId.load() == this) {
-    g_memoryManagerId.store(nullptr, std::memory_order_release);
+  if (getMemoryManagerId().load() == this) {
+    getMemoryManagerId().store(nullptr, std::memory_order_release);
   }
   
   for (auto const &[handle, alloc] : allocations_) {
@@ -167,36 +167,36 @@ MemoryManager::~MemoryManager() {
 
 void MemoryManager::setupSignalHandler() {
 #if defined(_WIN32)
-  g_vehHandler = AddVectoredExceptionHandler(1, MemoryManager::vectoredHandler);
-  if (!g_vehHandler) {
+  getVehHandler() = AddVectoredExceptionHandler(1, MemoryManager::vectoredHandler);
+  if (!getVehHandler()) {
     VGRE_LOG_ERROR("MemoryManager", "Failed to setup VEH handler for UVM");
   } else {
-    g_handlerInstalled.store(true, std::memory_order_release);
+    getHandlerInstalled().store(true, std::memory_order_release);
   }
 #else
   struct sigaction sa;
   sa.sa_flags = SA_SIGINFO;
   sigemptyset(&sa.sa_mask);
   sa.sa_sigaction = MemoryManager::segfaultHandler;
-  if (sigaction(SIGSEGV, &sa, &old_sa) == -1) {
+  if (sigaction(SIGSEGV, &sa, &getOldSigaction()) == -1) {
     VGRE_LOG_ERROR("MemoryManager", "Failed to setup SIGSEGV handler for UVM");
   } else {
-    g_handlerInstalled.store(true, std::memory_order_release);
+    getHandlerInstalled().store(true, std::memory_order_release);
   }
 #endif
 }
 
 void MemoryManager::teardownSignalHandler() {
 #if defined(_WIN32)
-  if (g_handlerInstalled.load(std::memory_order_acquire) && g_vehHandler) {
-    RemoveVectoredExceptionHandler(g_vehHandler);
-    g_vehHandler = nullptr;
-    g_handlerInstalled.store(false, std::memory_order_release);
+  if (getHandlerInstalled().load(std::memory_order_acquire) && getVehHandler()) {
+    RemoveVectoredExceptionHandler(getVehHandler());
+    getVehHandler() = nullptr;
+    getHandlerInstalled().store(false, std::memory_order_release);
   }
 #else
-  if (g_handlerInstalled.load(std::memory_order_acquire)) {
-    sigaction(SIGSEGV, &old_sa, nullptr);
-    g_handlerInstalled.store(false, std::memory_order_release);
+  if (getHandlerInstalled().load(std::memory_order_acquire)) {
+    sigaction(SIGSEGV, &getOldSigaction(), nullptr);
+    getHandlerInstalled().store(false, std::memory_order_release);
   }
 #endif
 }
@@ -217,7 +217,7 @@ LONG
     void *addr = reinterpret_cast<void *>(
         exceptionInfo->ExceptionRecord->ExceptionInformation[1]);
 
-    MemoryManager *mgr = g_memoryManagerId.load(std::memory_order_acquire);
+    MemoryManager *mgr = getMemoryManagerId().load(std::memory_order_acquire);
     if (!mgr)
       return EXCEPTION_CONTINUE_SEARCH;
 
@@ -260,7 +260,7 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
   MemoryManager *mgr;
 
   addr = si->si_addr;
-  mgr = g_memoryManagerId.load(std::memory_order_acquire);
+  mgr = getMemoryManagerId().load(std::memory_order_acquire);
   if (!mgr)
     goto fallback;
 
@@ -335,6 +335,7 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
   }
 
 fallback:
+  auto& old_sa = getOldSigaction();
   if (old_sa.sa_flags & SA_SIGINFO) {
     if (old_sa.sa_sigaction &&
         reinterpret_cast<void *>(old_sa.sa_sigaction) !=
