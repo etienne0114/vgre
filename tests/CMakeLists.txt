@@ -399,6 +399,17 @@ add_executable(test_udp_discovery_buffer_safety
 target_link_libraries(test_udp_discovery_buffer_safety PRIVATE vgre)
 add_test(NAME UDPDiscoveryBufferSafety COMMAND test_udp_discovery_buffer_safety)
 
+# ── Python end-to-end test (CUDA-on-CPU via C API) ─────────────────────────
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+    add_test(NAME PythonCAPIVectorAdd
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test_cuda_on_cpu.py)
+    set_tests_properties(PythonCAPIVectorAdd PROPERTIES
+        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+        LABELS "python;e2e"
+    )
+endif()
+
 # ── Global Test Configuration ──────────────────────────────────────────────
 # Disable background hardware benchmarks and optional IPC services during
 # tests to ensure deterministic performance and prevent CPU resource
