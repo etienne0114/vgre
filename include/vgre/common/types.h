@@ -101,6 +101,8 @@ struct KernelIR {
   bool usesWarpShuffle = false;   // __shfl_sync / __ballot_sync detected
   bool usesDynamicParallelism = false; // cudaLaunchDevice from device side
   size_t sharedMemSize = 0;
+  size_t staticSMemSize = 0;
+  int registersPerThread = 32; // default; parsed from PTX or LLVM IR
   uint64_t estimatedInstructionCount = 0;
   uint64_t estimatedMemoryAccessCount = 0;
   uint64_t staticFlopCount = 0;

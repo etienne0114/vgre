@@ -97,6 +97,13 @@ protected:
     std::unordered_map<std::string, KernelIR> fallbackCache_;
 };
 
+// ── PTX register count parser ────────────────────────────────────────────────
+// Scans a PTX module for `.reg` declarations within a named `.entry` kernel
+// and returns the total number of registers allocated.  Returns 0 if the
+// kernel cannot be found or the PTX is empty, allowing the caller to fall
+// back to a conservative default.
+int parsePTXRegisterCount(const std::string& ptx, const std::string& kernelName);
+
 } // namespace compiler
 } // namespace vgre
 

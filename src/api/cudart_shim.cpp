@@ -11,6 +11,7 @@
 #include "vgre/common/elf_reader.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
+#include "vgre/compiler/kernel_parser.h"
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -1158,10 +1159,9 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks,
   if (!numBlocks || blockSize <= 0) return cudaErrorInvalidValue;
 
   // ── Real occupancy formula (Ampere SM model) ──────────────────────────────
-  // Hardware limits (modelled on NVIDIA A100 / emulated device properties):
-  constexpr int kMaxWarpsPerSM     = 64;   // A100: 64 warps/SM
-  constexpr int kMaxBlocksPerSM    = 32;   // A100: 32 blocks/SM
-  constexpr int kMaxThreadsPerSM   = 2048; // A100: 2048 threads/SM
+  constexpr int kMaxWarpsPerSM     = 64;
+  constexpr int kMaxBlocksPerSM    = 32;
+  constexpr int kMaxThreadsPerSM   = 2048;
   constexpr int kMaxRegsPerSM      = 65536;
   constexpr int kMaxSharedMemPerSM = 102400; // 100 KB
 
@@ -1173,19 +1173,43 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks,
   // Limit 2: thread capacity
   int limitThreads = kMaxThreadsPerSM / blockSize;
 
-  // Limit 3: register pressure — read from KernelIR via RuntimeEngine
-  int registersPerThread = 32; // conservative default (16–255 typical range)
-  {
-    // Try to get the registered thread limit from the function metadata.
-    // launchBoundsMap_ maps device-function name → {maxThreads, bDim, gDim}.
-    // We don't have the name here, so use the default.
-    (void)func; // func is a host-side wrapper pointer; not directly queryable
+  // ── Look up kernel metadata via RuntimeEngine ──────────────────────────────
+  int registersPerThread = 32; // conservative default
+  size_t staticSMem      = 0;
+
+  if (func) {
+    // Path: host stub pointer → device name → KernelId → KernelIR
+    std::string kName = CUDAModuleRegistry::instance().lookupKernelName(func);
+    if (!kName.empty()) {
+      vgre::KernelId kid =
+          vgre::core::RuntimeEngine::instance().lookupKernelIdByName(kName.c_str());
+      if (kid != 0) {
+        const vgre::KernelIR* ir =
+            vgre::core::RuntimeEngine::instance().getKernelIR(kid);
+        if (ir) {
+          staticSMem = ir->sharedMemSize;
+          if (ir->registersPerThread > 0 && ir->registersPerThread != 32) {
+            registersPerThread = ir->registersPerThread;
+          } else {
+            // Try to parse registers from PTX on demand
+            std::string ptx = CUDAModuleRegistry::instance().lookupKernelSource(func);
+            int parsedRegs = vgre::compiler::parsePTXRegisterCount(ptx, kName);
+            if (parsedRegs > 0) {
+              registersPerThread = parsedRegs;
+              // Cache the parsed value back into KernelIR for future calls
+              const_cast<vgre::KernelIR*>(ir)->registersPerThread = parsedRegs;
+            }
+          }
+        }
+      }
+    }
   }
+
+  // Limit 3: register pressure
   int regsPerBlock = warpsPerBlock * 32 * registersPerThread;
   int limitRegs = (regsPerBlock > 0) ? (kMaxRegsPerSM / regsPerBlock) : kMaxBlocksPerSM;
 
-  // Limit 4: shared memory — dynamic (caller-provided); static unavailable here
-  size_t staticSMem = 0;
+  // Limit 4: shared memory
   size_t totalSMem = staticSMem + dynamicSMemSize;
   int limitSMem = (totalSMem > 0)
       ? static_cast<int>(kMaxSharedMemPerSM / totalSMem)

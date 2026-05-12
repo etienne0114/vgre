@@ -813,5 +813,93 @@ size_t KernelParser::computeStructSize(const std::string& typeName,
     return totalSize;
 }
 
+// ── PTX register count parser ────────────────────────────────────────────────
+int parsePTXRegisterCount(const std::string& ptx, const std::string& kernelName) {
+    if (ptx.empty() || kernelName.empty()) return 0;
+
+    // Locate the .entry directive for this kernel.
+    std::string entryPat = ".entry " + kernelName;
+    size_t entryPos = ptx.find(entryPat);
+    if (entryPos == std::string::npos) return 0;
+
+    // Advance past the entry signature line (ends at first '\n' or '{').
+    size_t bodyStart = ptx.find_first_of("{\n", entryPos + entryPat.size());
+    if (bodyStart == std::string::npos) return 0;
+    if (ptx[bodyStart] == '{') ++bodyStart; // skip opening brace
+
+    // Find the matching closing brace.  PTX uses braces for function bodies.
+    size_t bodyEnd = bodyStart;
+    int braceDepth = 1;
+    while (bodyEnd < ptx.size() && braceDepth > 0) {
+        char c = ptx[bodyEnd];
+        if (c == '{') ++braceDepth;
+        else if (c == '}') --braceDepth;
+        ++bodyEnd;
+    }
+    if (braceDepth != 0) return 0; // unmatched braces
+
+    int totalRegs = 0;
+    size_t pos = bodyStart;
+    while (pos < bodyEnd) {
+        // Find next .reg declaration
+        size_t regPos = ptx.find(".reg ", pos);
+        if (regPos == std::string::npos || regPos >= bodyEnd) break;
+
+        // Advance past ".reg " to the register names
+        regPos += 5;
+        // Skip the type qualifier (e.g., .f32, .u32, .pred)
+        while (regPos < bodyEnd && ptx[regPos] == '.') {
+            while (regPos < bodyEnd && ptx[regPos] != ' ' && ptx[regPos] != '\t')
+                ++regPos;
+            while (regPos < bodyEnd && (ptx[regPos] == ' ' || ptx[regPos] == '\t'))
+                ++regPos;
+        }
+
+        // Now regPos points at the first register name
+        size_t eol = ptx.find_first_of(";\n", regPos);
+        if (eol == std::string::npos || eol > bodyEnd) eol = bodyEnd;
+        std::string decl = ptx.substr(regPos, eol - regPos);
+
+        // Split by commas and count registers
+        size_t d = 0;
+        while (d < decl.size()) {
+            while (d < decl.size() && (decl[d] == ' ' || decl[d] == '\t')) ++d;
+            if (d >= decl.size()) break;
+
+            // Find register name end
+            size_t nameEnd = d;
+            while (nameEnd < decl.size() && decl[nameEnd] != '<' && decl[nameEnd] != ',' &&
+                   decl[nameEnd] != ' ' && decl[nameEnd] != '\t')
+                ++nameEnd;
+
+            // Check for <count>
+            if (nameEnd < decl.size() && decl[nameEnd] == '<') {
+                size_t closePos = decl.find('>', nameEnd + 1);
+                if (closePos != std::string::npos) {
+                    std::string countStr = decl.substr(nameEnd + 1, closePos - nameEnd - 1);
+                    try {
+                        totalRegs += std::stoi(countStr);
+                    } catch (...) {
+                        totalRegs += 1;
+                    }
+                } else {
+                    totalRegs += 1;
+                }
+            } else {
+                totalRegs += 1;
+            }
+
+            // Skip to next comma or end
+            d = nameEnd;
+            while (d < decl.size() && decl[d] != ',') ++d;
+            if (d < decl.size() && decl[d] == ',') ++d;
+        }
+
+        pos = eol + 1;
+    }
+
+    return totalRegs;
+}
+
 } // namespace compiler
 } // namespace vgre
