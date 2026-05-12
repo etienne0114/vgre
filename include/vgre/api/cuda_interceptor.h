@@ -132,6 +132,9 @@ public:
   cudaError_t streamQuery(cudaStream_t stream);
   cudaError_t streamWaitEvent(cudaStream_t stream, cudaEvent_t event,
                               unsigned int flags);
+  cudaError_t streamAddCallback(cudaStream_t stream,
+                                void (*callback)(cudaStream_t, cudaError_t, void *),
+                                void *userData, unsigned int flags);
   cudaError_t deviceGetStreamPriorityRange(int *leastPriority,
                                            int *greatestPriority);
 

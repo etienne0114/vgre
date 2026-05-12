@@ -829,7 +829,7 @@ tests/core/texture/        # Texture/surface object tests
 |---|---|---|---|---|
 | 1.1 | `cudaStreamWaitEvent` | **DONE** | — | 2026-05-13 |
 | 1.2 | `cudaEventQuery` | **DONE** | — | 2026-05-13 |
-| 1.3 | `cudaStreamAddCallback` | TODO | — | — |
+| 1.3 | `cudaStreamAddCallback` | **DONE** | — | 2026-05-13 |
 | 1.4 | `cudaLaunchHostFunc` | TODO | — | — |
 | 1.5 | `cudaGetErrorName` / `cudaGetErrorString` | TODO | — | — |
 | 1.6 | `cudaMemcpyToSymbol` / `cudaMemcpyFromSymbol` | TODO | — | — |
