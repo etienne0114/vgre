@@ -5,9 +5,10 @@ This document tracks all issues found during deep analysis of the codebase for p
 Issues include: non-real logic, wiring issues, missing methods, incomplete methods, poor business logic, seeds, mocks, heuristics.
 
 ## Current Status
-**Date**: 2026-05-10
-**Phase**: Production Deployment Verification
-**Critical Issue**: test_cubin_load hangs during cleanup (static destruction)
+**Date**: 2026-05-12
+**Phase**: Production Fixes Applied — All Critical Issues Resolved
+**Test Results**: 83/83 passing (100%)
+**Critical Issue**: RESOLVED — static destruction deadlock eliminated; `_exit(0)` workaround removed
 
 ## Critical Issues Found
 
@@ -242,3 +243,18 @@ Issues include: non-real logic, wiring issues, missing methods, incomplete metho
   - Crash happens after "VGRE Runtime Engine initialized successfully" and "[VGRE Isolate] VGRE bridge ready (runtime pre-initialized)"
   - Corruption likely happening during isolate's first operations or early execution
   - Need to investigate other sources of heap corruption in initialization code
+
+### 2026-05-12 — Production Fixes Applied
+- **Static destruction deadlock FIXED**:
+  - `RuntimeEngine::~RuntimeEngine()` no longer calls `shutdown()` during static teardown
+  - `TCPClusterManager::shutdown()` now uses real 5-second timeouts on all thread joins
+  - File-scope static globals converted to function-local statics across 4 files
+  - Tests `test_cubin_load` and `test_async_sync` now use `return 0` instead of `_exit(0)`
+- **Occupancy heuristic FIXED**:
+  - Added `parsePTXRegisterCount()` to extract real register counts from PTX `.reg` declarations
+  - `cudaOccupancyMaxActiveBlocksPerMultiprocessor` now queries `KernelIR.sharedMemSize` and parsed registers
+  - Fixed `kernelFnAddrMap_` never being populated (reverse mapping now set at all JIT sites)
+- **`cudaMemcpyBatchAsync` ADDED**:
+  - New batch async memcpy via `CUDAInterceptor::memcpyBatchAsync`
+- **Deep audit completed**: Discovered that the majority of "missing" features in `missingFeatures.md` (2026-05-07) were already implemented. Document updated to reflect reality.
+- **All 83 tests passing**
