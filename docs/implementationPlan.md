@@ -827,7 +827,7 @@ tests/core/texture/        # Texture/surface object tests
 
 | # | Feature | Status | PR | Date |
 |---|---|---|---|---|
-| 1.1 | `cudaStreamWaitEvent` | TODO | — | — |
+| 1.1 | `cudaStreamWaitEvent` | **DONE** | — | 2026-05-13 |
 | 1.2 | `cudaEventQuery` | TODO | — | — |
 | 1.3 | `cudaStreamAddCallback` | TODO | — | — |
 | 1.4 | `cudaLaunchHostFunc` | TODO | — | — |

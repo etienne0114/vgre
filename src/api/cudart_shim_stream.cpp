@@ -342,6 +342,12 @@ cudaError_t cudaStreamQuery(cudaStream_t stream) {
   return vgre::api::CUDAInterceptor::instance().streamQuery(stream);
 }
 
+cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event,
+                                 unsigned int flags) {
+  return vgre::api::CUDAInterceptor::instance().streamWaitEvent(stream, event,
+                                                                flags);
+}
+
 cudaError_t cudaDeviceGetStreamPriorityRange(int *leastPriority,
                                              int *greatestPriority) {
   return vgre::api::CUDAInterceptor::instance().deviceGetStreamPriorityRange(
