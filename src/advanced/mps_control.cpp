@@ -10,6 +10,7 @@
 //         Activated when VGRE_MPS_PIPE env-var is set.
 
 #include "vgre/advanced/mps_control.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/types.h"
 #include "vgre/core/memory_manager.h"
@@ -350,7 +351,7 @@ static std::mutex& getMpsClientMutex() {
 MPSClient* MPSClient::instance() {
     std::lock_guard<std::mutex> lk(getMpsClientMutex());
     if (getMpsClient()) return getMpsClient();
-    const char* pipe = std::getenv("VGRE_MPS_PIPE");
+    const char* pipe = vgre_get_config("VGRE_MPS_PIPE");
     if (!pipe) return nullptr;
     getMpsClient() = new MPSClient();
     if (!getMpsClient()->connect(pipe)) {
