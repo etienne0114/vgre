@@ -2,7 +2,7 @@
 
 **Last Updated**: 2026-05-12 (Phase 7 production fixes)
 **Status**: PRODUCTION READY
-**Test Results**: 83/83 tests passing (100%)
+**Test Results**: 84/84 tests passing (100%)
 
 ---
 
@@ -11,7 +11,7 @@
 VGRE (Virtual GPU Runtime Engine) is a production-ready CUDA emulation runtime that executes GPU applications on CPU hardware. The project has completed six phases of implementation and hardening with all critical issues resolved. There are zero stubs, zero heuristics, and zero simulation fallbacks remaining in the codebase — every value comes from hardware measurement or real computation.
 
 **Key Metrics:**
-- **Test Coverage**: 83/83 tests passing (100%), total run time ~20–28 seconds
+- **Test Coverage**: 84/84 tests passing (100%), total run time ~20–28 seconds
 - **Platform Support**: Linux, macOS, Windows — all fully functional
 - **Performance**: 10–50× slower than real GPU for compute-bound workloads; 5–15× for memory-bound workloads
 - **Critical Issues**: 0 (static destruction deadlock fixed; occupancy heuristic replaced with real logic)
@@ -197,12 +197,13 @@ All previously documented security issues are now resolved:
 
 ## Test Coverage
 
-**Total**: 83/83 passing (100%) — run time ~20–28 s
+**Total**: 84/84 passing (100%) — run time ~20–28 s
 
 **Test Categories:**
 - **Unit Tests** (20+): memory manager, pool allocator, scheduler, vector engine, texture manager
 - **Integration Tests** (30+): vector addition, UVM, CUDA graphs, multi-device, TCP cluster
 - **Advanced Tests** (15+): TCP cluster security, hardware token manager, compression, workload partition
+- **End-to-End Tests** (1): Python C-API vector-add (`test_cuda_on_cpu.py`) — exercises full CUDA-on-CPU pipeline via ctypes
 
 **Run Tests:**
 ```bash

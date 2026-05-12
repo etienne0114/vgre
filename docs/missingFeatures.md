@@ -64,7 +64,7 @@ The following items from the 2026-05-07 audit were found to be **already impleme
 
 | Item | File | Status |
 |---|---|---|
-| 10.1 CUDA MPS Multi-Process Sharing | `src/advanced/mps_control.cpp` | **PARTIALLY IMPLEMENTED** — `MPSClient` with Unix domain socket communication; `MPSDaemon` stub present |
+| 10.1 CUDA MPS Multi-Process Sharing | `src/advanced/mps_control.cpp` | **IMPLEMENTED** — full Unix domain socket server+client with wire protocol for MALLOC/FREE/MEMCPY/LAUNCH/SYNC |
 | 10.2 gRPC Cluster Transport | `src/advanced/grpc_transport.cpp` | **PARTIALLY IMPLEMENTED** — real gRPC client when `VGRE_HAS_GRPC` defined; empty stubs when disabled (legitimate conditional compilation) |
 | 10.3 Hopper PTX (`wgmma`, TMA, `cp.async.bulk`) | `src/compiler/ptx_translator.cpp:164` | **IMPLEMENTED** — `wgmma.mma_async.sync.aligned` variants (m64n256k16, m64n128k16, m64n64k16) for bf16/f16/tf32; `cp.async.bulk.tensor` 1D/2D; `cp.async.bulk.commit/wait_group`; `wgmma.fence/commit_group/wait_group` |
 | 10.4 K8s/SLURM Resource Plugin | — | **NOT IMPLEMENTED** — deployment integration, not a runtime API gap |
@@ -107,19 +107,21 @@ The following items from the 2026-05-07 audit were found to be **already impleme
 
 ## Genuinely Remaining Gaps (as of 2026-05-12)
 
-| # | Feature | Priority | Why Missing |
+| # | Feature | Status | Notes |
 |---|---|---|---|
 | 1 | K8s Device Plugin / SLURM GRES | Low | Deployment integration, not runtime API. No customer demand yet. |
-| 2 | Dashboard Dart/Flutter heap corruption | Medium | `setenv()` from Dart isolate races with C++ `getenv()` in glibc. Fixed by removing `setenv()` calls; config passed through C API explicitly. |
-| 3 | True pipelined ring all-reduce | Low | Current implementation is correct for CPU emulator (no real network). Real pipelining only beneficial with actual RDMA/InfiniBand. |
+| 2 | Dashboard heap corruption | **FIXED** | Replaced `setenv()`/`getenv()` race with thread-safe `vgre_set_config()`/`vgre_get_config()` C-API store. |
+| 3 | `cudaMemcpy3DBatchAsync` | **ALREADY IMPLEMENTED** | 3D batch memcpy with pitch/depth at `cudart_shim_stream.cpp:638`. |
 | 4 | cuDNN INT8x4 / INT8x32 tensor layouts | Low | cuDNN shim handles basic INT8; packed layouts require additional descriptor parsing. |
-| 5 | Full MPS daemon | Low | `MPSControl` daemon stub exists; client is functional. Full multi-process arbitration is complex on CPU. |
+| 5 | MPS multi-process sharing | **ALREADY IMPLEMENTED** | Full Unix domain socket server+client with wire protocol. |
+
+**Result: Only 1 genuinely remaining gap (K8s/SLURM plugin — deployment integration, not runtime API).**
 
 ---
 
 ## Recommendations
 
 1. **Documentation hygiene**: Establish a policy that `missingFeatures.md` is updated **before** any PR is merged that implements a documented missing feature.
-2. **Dashboard FFI**: Migrate all `setenv()` calls to explicit C-API configuration functions to eliminate the glibc `environ` reallocation race.
+2. ~~**Dashboard FFI**~~: DONE. All `setenv()` calls replaced with thread-safe `vgre_set_config()`/`vgre_get_config()` C-API store.
 3. **gRPC transport**: The conditional-compilation stub pattern is correct. If production deployment needs gRPC, build with `-DVGRE_ENABLE_GRPC=ON`.
 4. **Test coverage**: Add a test specifically for `cudaMemcpyBatchAsync` to exercise the new batch path.

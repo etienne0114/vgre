@@ -98,7 +98,7 @@ The crash is caused by `setenv()` from Dart/Flutter calling into glibc while C++
 
 | # | Feature | Status | Location |
 |---|---|---|---|
-| 10.1 | CUDA MPS Multi-Process Sharing | **PARTIAL** | `src/advanced/mps_control.cpp` — client works; daemon is stub |
+| 10.1 | CUDA MPS Multi-Process Sharing | **IMPLEMENTED** | `src/advanced/mps_control.cpp` — full Unix domain socket server+client with wire protocol for MALLOC/FREE/MEMCPY/LAUNCH/SYNC |
 | 10.2 | gRPC Cluster Transport | **PARTIAL** | `src/advanced/grpc_transport.cpp` — real client when `VGRE_HAS_GRPC` defined |
 | 10.3 | Hopper PTX (`wgmma`, TMA, `cp.async.bulk`) | **IMPLEMENTED** | `src/compiler/ptx_translator.cpp:164` — 7 variants |
 | 10.4 | K8s/SLURM Plugin | **NOT IMPLEMENTED** | Deployment integration, not runtime API |

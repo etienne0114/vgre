@@ -90,7 +90,7 @@ cmake --build build -j$(nproc)
 ctest --test-dir build -j$(nproc) --output-on-failure
 ```
 
-**Result**: 100% tests passed, 0 tests failed out of 83.
+**Result**: 100% tests passed, 0 tests failed out of 84 (includes Python C-API end-to-end test).
 
 ---
 
