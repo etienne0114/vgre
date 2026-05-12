@@ -11,6 +11,7 @@
 
 #include "vgre/advanced/tcp_cluster/internal/interfaces.h"
 #include "vgre/advanced/secure_channel.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
 #include "vgre/core/memory_manager.h"
@@ -484,8 +485,8 @@ VGREResult RealSecureChannelFactory::validateConfiguration() {
   // Verify the auth token meets the minimum length requirement.
   // Using the same check as SecurityManager::enableSecurity to stay consistent.
   constexpr size_t kMinTokenLen = 16;
-  const char *token_env = std::getenv("VGRE_TCP_AUTH_TOKEN");
-  const char *token_file = std::getenv("VGRE_TCP_AUTH_TOKEN_FILE");
+  const char *token_env = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
+  const char *token_file = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
   bool hasToken = (token_env && token_env[0] != '\0') ||
                   (token_file && token_file[0] != '\0');
 
