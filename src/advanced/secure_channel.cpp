@@ -1,5 +1,6 @@
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/hardware_token_manager.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 
 #include <algorithm>
@@ -96,7 +97,7 @@ VGREResult SecureChannel::initializeFromSecret(
   // PBKDF2 iteration count: default 600k (NIST SP 800-132 2025 recommendation).
   // Operators can override via VGRE_PBKDF2_ITERATIONS for performance tuning.
   uint32_t pbkdf2Iters = static_cast<uint32_t>(crypto::kPBKDF2Iterations);
-  const char *iterEnv = std::getenv("VGRE_PBKDF2_ITERATIONS");
+  const char *iterEnv = vgre_get_config("VGRE_PBKDF2_ITERATIONS");
   if (iterEnv && iterEnv[0] != '\0') {
     try {
       long val = std::stol(iterEnv);

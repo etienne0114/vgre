@@ -4,6 +4,7 @@
 
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/ipc_manager.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include <cstring>
 #include <cstdlib>
@@ -31,7 +32,7 @@ void TCPClusterManager::syncToIPC() {
 }
 
 void TCPClusterManager::parseProactiveNodes() {
-    const char* env = std::getenv("VGRE_CLUSTER_NODES");
+    const char* env = vgre_get_config("VGRE_CLUSTER_NODES");
     if (!env || env[0] == '\0') return;
     proactive_worker_addresses_.clear();
     std::string nodes(env);
@@ -48,7 +49,7 @@ void TCPClusterManager::parseProactiveNodes() {
 }
 
 void TCPClusterManager::parseMeshPeers() {
-    const char* env = std::getenv("VGRE_MESH_PEERS");
+    const char* env = vgre_get_config("VGRE_MESH_PEERS");
     if (!env || env[0] == '\0') return;
     mesh_peer_ips_.clear();
     std::string peers_str(env);

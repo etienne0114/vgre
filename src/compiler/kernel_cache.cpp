@@ -1,5 +1,7 @@
 #include "vgre/compiler/kernel_cache.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/platform.h"
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -37,7 +39,7 @@ VGREResult KernelCache::initialize(const std::string& cacheDir) {
             cacheDir_ = "C:\\vgre_cache";
         }
 #else
-        const char* home = getenv("HOME");
+        const char* home = vgre_get_config("HOME");
         if (!home) {
             struct passwd* pw = getpwuid(getuid());
             if (pw) {

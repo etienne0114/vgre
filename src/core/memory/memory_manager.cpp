@@ -1,6 +1,7 @@
 #include "vgre/core/memory_manager.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/advanced/memory_compression.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/virtual_gpu_device.h"
@@ -66,7 +67,7 @@ MemoryManager::MemoryManager(size_t poolSize) : poolSize_(poolSize) {
   activeTree_.store(new RegionTreeContainer{MemoryIntervalTree<ManagedRegion>(), 0}, std::memory_order_release);
 
   // Allocate pending-fault ring buffer (size configurable via env)
-  const char* env = std::getenv("VGRE_UVM_MAX_PENDING_FAULTS");
+  const char* env = vgre_get_config("VGRE_UVM_MAX_PENDING_FAULTS");
   if (env) {
     try {
       size_t v = std::stoul(env);

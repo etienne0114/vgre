@@ -6,6 +6,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/workload_partitioner.h"
 #include "vgre/advanced/hybrid_compute_manager.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/common/logger.h"
 #include <cstring>
@@ -21,7 +22,7 @@ VGREResult DispatchManager::launchPartitionedKernel(uint64_t kernel_id, const ui
   auto resources = HybridComputeManager::instance().getResources();
 
   NodeCapability local{resources.gflops, resources.avgLatency, resources.cpuCores, -1, "local", true, 100.0};
-  const char* localBandwidthEnv = std::getenv("VGRE_LOCAL_NODE_BANDWIDTH_GBPS");
+  const char* localBandwidthEnv = vgre_get_config("VGRE_LOCAL_NODE_BANDWIDTH_GBPS");
   if (localBandwidthEnv) { try { local.network_bandwidth_gbps = std::stod(localBandwidthEnv); } catch (...) {} }
   nodes.push_back(local);
 

@@ -26,7 +26,7 @@ namespace {
     std::unordered_map<std::string, uint64_t> last_violation_time;
   };
   SecurityMetrics g_metrics;
-  const int HANDSHAKE_TIMEOUT_SEC = []() { const char* e = std::getenv("VGRE_CLUSTER_HANDSHAKE_TIMEOUT_SEC"); return (e && std::atoi(e) > 0) ? std::atoi(e) : 5; }();
+  const int HANDSHAKE_TIMEOUT_SEC = []() { const char* e = vgre_get_config("VGRE_CLUSTER_HANDSHAKE_TIMEOUT_SEC"); return (e && std::atoi(e) > 0) ? std::atoi(e) : 5; }();
   void logSecurityEvent(const std::string& event, const std::string& ip, const std::string& details) { VGRE_LOG_INFO("TCPCluster.Security", "[" + event + "] " + ip + ": " + details); }
   bool recordViolation(const std::string& ip, const std::string& type) {
     std::lock_guard<std::mutex> lock(g_metrics.violation_mutex);

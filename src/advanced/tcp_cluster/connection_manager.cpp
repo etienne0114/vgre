@@ -9,6 +9,7 @@
 #include "vgre/advanced/tcp_cluster/internal/connection_manager.h"
 #include "vgre/advanced/tcp_cluster/internal/memory_sync_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
@@ -171,7 +172,7 @@ VGREResult MemorySyncManager::initializeShmForClient(
   static std::atomic<uint64_t> s_shmCounter{0};
   std::string shmName = "vgre_shm_" + std::to_string(++s_shmCounter) + "_" + std::to_string(client->socket_fd);
   
-  const char *env = std::getenv("VGRE_CLUSTER_SHM_SIZE");
+  const char *env = vgre_get_config("VGRE_CLUSTER_SHM_SIZE");
   size_t shmSize = 256ULL * 1024 * 1024; // 256MB default
   if (env) { 
     try { 

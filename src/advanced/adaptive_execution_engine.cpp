@@ -1,4 +1,5 @@
 #include "vgre/advanced/adaptive_execution_engine.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
 #include "vgre/runtime/vector_engine.h"
@@ -188,7 +189,7 @@ AdaptiveExecutionEngine::AdaptiveExecutionEngine()
   // Allow the moving-average alpha to be tuned at runtime via env var.
   // VGRE_ADAPTIVE_ALPHA=0.1  → smoother (less reactive to spikes)
   // VGRE_ADAPTIVE_ALPHA=0.8  → more reactive (follows real-time load)
-  const char* alphaEnv = std::getenv("VGRE_ADAPTIVE_ALPHA");
+  const char* alphaEnv = vgre_get_config("VGRE_ADAPTIVE_ALPHA");
   if (alphaEnv) {
       double v = std::atof(alphaEnv);
       if (v >= 0.01 && v <= 0.99) {

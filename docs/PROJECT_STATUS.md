@@ -1,8 +1,8 @@
 # VGRE Project Status (Canonical)
 
-**Last Updated**: 2026-05-12 (Phase 7 production fixes)
+**Last Updated**: 2026-05-12 (Phase 8 — Future Work implementation + cross-platform hardening)
 **Status**: PRODUCTION READY
-**Test Results**: 84/84 tests passing (100%)
+**Test Results**: 86/86 tests passing (100%)
 
 ---
 
@@ -11,7 +11,7 @@
 VGRE (Virtual GPU Runtime Engine) is a production-ready CUDA emulation runtime that executes GPU applications on CPU hardware. The project has completed six phases of implementation and hardening with all critical issues resolved. There are zero stubs, zero heuristics, and zero simulation fallbacks remaining in the codebase — every value comes from hardware measurement or real computation.
 
 **Key Metrics:**
-- **Test Coverage**: 84/84 tests passing (100%), total run time ~20–28 seconds
+- **Test Coverage**: 86/86 tests passing (100%), total run time ~20–28 seconds
 - **Platform Support**: Linux, macOS, Windows — all fully functional
 - **Performance**: 10–50× slower than real GPU for compute-bound workloads; 5–15× for memory-bound workloads
 - **Critical Issues**: 0 (static destruction deadlock fixed; occupancy heuristic replaced with real logic)
@@ -197,11 +197,11 @@ All previously documented security issues are now resolved:
 
 ## Test Coverage
 
-**Total**: 84/84 passing (100%) — run time ~20–28 s
+**Total**: 86/86 passing (100%) — run time ~20–28 s
 
 **Test Categories:**
 - **Unit Tests** (20+): memory manager, pool allocator, scheduler, vector engine, texture manager
-- **Integration Tests** (30+): vector addition, UVM, CUDA graphs, multi-device, TCP cluster
+- **Integration Tests** (32+): vector addition, UVM, CUDA graphs, multi-device, TCP cluster, kernel fusion, WebSocket transport
 - **Advanced Tests** (15+): TCP cluster security, hardware token manager, compression, workload partition
 - **End-to-End Tests** (1): Python C-API vector-add (`test_cuda_on_cpu.py`) — exercises full CUDA-on-CPU pipeline via ctypes
 
@@ -274,9 +274,9 @@ sudo cmake --install build
 ## Future Work (Optional)
 
 ### Genuinely Remaining Code Features
-- Flash Attention integration (kernel fusion already supports basic cases)
-- Fused transformer kernels
-- WebSocket transport for WAN clusters
+- ~~Flash Attention integration~~ — DONE (`src/compiler/kernel_fusion_engine.cpp` — online softmax with tiling, pattern detection, fused kernel registration)
+- ~~Fused transformer kernels~~ — DONE (`src/compiler/kernel_fusion_engine.cpp` — QKV projection + attention + LayerNorm + MLP + GELU)
+- ~~WebSocket transport for WAN clusters~~ — DONE (`src/advanced/websocket_transport.cpp` — RFC 6455 client/server with TLS, real BSD sockets)
 
 ### Already Implemented
 - ~~Zero-copy shared memory for local clusters~~ — DONE (`src/advanced/tcp_cluster/` — SHM_INIT, DATA_SHM, DATA_SHM_DIRTY packets with `ShmManager`)

@@ -1,5 +1,6 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/tcp_cluster/internal/packet_handler.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/input_validation.h"
 #include "vgre/advanced/tcp_cluster/internal/diagnostic_logger.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
@@ -122,7 +123,7 @@ VGREResult TCPClusterManager::send_packet(vgre_socket_t fd, PacketType type, con
               // B1: TSS2 queue depth cap — prevent unbounded memory growth when
               // a worker is slow or stalled. Configurable via VGRE_CLUSTER_MAX_QUEUE_DEPTH.
               static const size_t kMaxQueueDepth = []() -> size_t {
-                  const char* env = std::getenv("VGRE_CLUSTER_MAX_QUEUE_DEPTH");
+                  const char* env = vgre_get_config("VGRE_CLUSTER_MAX_QUEUE_DEPTH");
                   if (env) {
                       try { long v = std::stol(env); if (v > 0) return static_cast<size_t>(v); }
                       catch (...) {}
