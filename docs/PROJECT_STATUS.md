@@ -273,12 +273,17 @@ sudo cmake --install build
 
 ## Future Work (Optional)
 
+### Genuinely Remaining Code Features
 - Flash Attention integration (kernel fusion already supports basic cases)
 - Fused transformer kernels
-- Kubernetes operator for cluster orchestration
 - WebSocket transport for WAN clusters
-- Zero-copy shared memory for local clusters
-- Full MPS multi-process arbitration daemon
+
+### Already Implemented
+- ~~Zero-copy shared memory for local clusters~~ — DONE (`src/advanced/tcp_cluster/` — SHM_INIT, DATA_SHM, DATA_SHM_DIRTY packets with `ShmManager`)
+- ~~Full MPS multi-process arbitration daemon~~ — DONE (`src/advanced/mps_control.cpp` — Unix domain socket server+client with wire protocol)
+
+### Deployment / Infrastructure (not runtime API gaps)
+- Kubernetes operator for cluster orchestration
 - CI/CD fuzzing suite and macOS/Windows runners
 
 ---

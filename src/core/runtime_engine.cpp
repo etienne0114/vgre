@@ -1,5 +1,6 @@
 #include "vgre/core/runtime_engine.h"
 #include "vgre/api/vgre_c_api.h"
+#include "vgre/compiler/kernel_fusion_engine.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/advanced/runtime_profiler.h"
 #include "vgre/advanced/ipc_manager.h"
@@ -265,6 +266,29 @@ VGREResult RuntimeEngine::registerKernel(const std::string &name,
   if (r != VGREResult::SUCCESS) {
     VGRE_LOG_ERROR("RuntimeEngine", "Failed to parse kernel: " + name);
     return r;
+  }
+
+  // Kernel Fusion Engine: detect and register fused variants
+  auto& fusion = compiler::KernelFusionEngine::instance();
+  auto meta = fusion.tryFuse(ir);
+  if (meta.pattern != compiler::FusionPattern::NONE) {
+    VGRE_LOG_INFO("RuntimeEngine",
+                  "Fusion pattern detected for '" + name + "': " +
+                  std::to_string(static_cast<int>(meta.pattern)));
+    auto fusedSrc = fusion.generateFusedSource(meta, ir);
+    if (!fusedSrc.empty()) {
+      KernelIR fusedIr;
+      auto fr = parser_->parse(meta.fusedKernelName, fusedSrc, fusedIr);
+      if (fr == VGREResult::SUCCESS) {
+        KernelId fusedId = nextKernelId_++;
+        kernelIRCache_[fusedId] = fusedIr;
+        pendingKernels_[fusedId] = translator_->prepare(kernelIRCache_[fusedId]);
+        kernelNames_[meta.fusedKernelName] = fusedId;
+        VGRE_LOG_INFO("RuntimeEngine",
+                      "Fused kernel '" + meta.fusedKernelName +
+                      "' registered with ID " + std::to_string(fusedId));
+      }
+    }
   }
 
   // Translate to executable

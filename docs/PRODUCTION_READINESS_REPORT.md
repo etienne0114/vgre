@@ -3,7 +3,7 @@
 **Date**: 2026-05-12  
 **Version**: 1.1.0  
 **Status**: PRODUCTION READY  
-**Tests**: 83/83 passing (100%)
+**Tests**: 84/84 passing (100%)
 
 ---
 
@@ -27,7 +27,7 @@ A critical test hang was caused by `RuntimeEngine::~RuntimeEngine()` calling `sh
 - All file-scope static globals converted to function-local Meyers singletons across 4 source files
 - Tests `test_cubin_load` and `test_async_sync` cleaned of `_exit(0)` workaround; now use `return 0`
 
-**Verification**: All 83 tests pass, including the previously-hanging integration tests.
+**Verification**: All 84 tests pass, including the previously-hanging integration tests and Python C-API end-to-end test.
 
 ---
 
