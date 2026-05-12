@@ -19,6 +19,7 @@
 //   Response: [uint32 status] [uint32 payload_len] [payload_bytes...]
 
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <functional>
@@ -93,6 +94,16 @@ struct MPSSyncResp {
     uint32_t status;
 };
 
+// ── Cross-platform handle type ──────────────────────────────────────────────
+// On POSIX: Unix domain socket fd (int). On Windows: named pipe HANDLE (void*).
+#if defined(_WIN32)
+using mps_handle_t = void*;
+constexpr mps_handle_t MPS_INVALID_HANDLE = nullptr;
+#else
+using mps_handle_t = int;
+constexpr mps_handle_t MPS_INVALID_HANDLE = -1;
+#endif
+
 // ── Server ────────────────────────────────────────────────────────────────────
 // MPSServer runs in the daemon process.  Call start() once; it spawns an
 // accept loop in a background thread.  stop() tears it down.
@@ -104,20 +115,20 @@ public:
                        int maxClients = kDefaultMaxClients);
     ~MPSServer();
 
-    bool start();   // returns true if the socket was bound successfully
+    bool start();   // returns true if the socket / pipe was bound successfully
     void stop();
 
-    bool isRunning() const { return running_; }
+    bool isRunning() const { return running_.load(); }
     const std::string& socketPath() const { return socketPath_; }
 
 private:
     void acceptLoop();
-    void handleClient(int fd, uint32_t slotId);
+    void handleClient(mps_handle_t h, uint32_t slotId);
 
     std::string socketPath_;
-    int         listenFd_   = -1;
+    mps_handle_t listenFd_   = MPS_INVALID_HANDLE;
     int         maxClients_;
-    bool        running_    = false;
+    std::atomic<bool> running_{false};
     void*       acceptThread_ = nullptr; // std::thread stored as void* to avoid header deps
 };
 
@@ -131,7 +142,7 @@ public:
     static void       shutdown();
 
     bool connect(const std::string& socketPath);
-    bool isConnected() const { return fd_ >= 0; }
+    bool isConnected() const { return fd_ != MPS_INVALID_HANDLE; }
 
     // Returns device pointer handle (opaque uint64).
     uint64_t malloc(uint64_t bytes);
@@ -156,8 +167,8 @@ private:
     bool recvHeader(MPSHeader& hdr);
     bool recvBytes(void* buf, uint32_t len);
 
-    int      fd_     = -1;
-    uint32_t slotId_ = 0;
+    mps_handle_t fd_     = MPS_INVALID_HANDLE;
+    uint32_t     slotId_ = 0;
 };
 
 } // namespace mps
