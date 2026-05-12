@@ -399,6 +399,18 @@ add_executable(test_udp_discovery_buffer_safety
 target_link_libraries(test_udp_discovery_buffer_safety PRIVATE vgre)
 add_test(NAME UDPDiscoveryBufferSafety COMMAND test_udp_discovery_buffer_safety)
 
+# ── Kernel Fusion Integration Test ─────────────────────────────────────────
+add_executable(test_kernel_fusion integration/test_kernel_fusion.cpp)
+target_link_libraries(test_kernel_fusion PRIVATE vgre)
+add_test(NAME KernelFusionIntegration COMMAND test_kernel_fusion)
+set_tests_properties(KernelFusionIntegration PROPERTIES TIMEOUT 30)
+
+# ── WebSocket Transport Integration Test ───────────────────────────────────
+add_executable(test_websocket_transport integration/test_websocket_transport.cpp)
+target_link_libraries(test_websocket_transport PRIVATE vgre)
+add_test(NAME WebSocketTransportIntegration COMMAND test_websocket_transport)
+set_tests_properties(WebSocketTransportIntegration PROPERTIES TIMEOUT 10)
+
 # ── Python end-to-end test (CUDA-on-CPU via C API) ─────────────────────────
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
