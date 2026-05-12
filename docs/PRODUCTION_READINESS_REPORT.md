@@ -77,7 +77,7 @@ A comprehensive scan of Phases 7–10 from the 2026-05-07 roadmap found that **t
 
 | # | Feature | Impact | Path Forward |
 |---|---|---|---|
-| 1 | `cudaMemcpy3DBatchAsync` | Low — 3D batch memcpy is niche | Can be added by extending `memcpyBatchAsync` with pitch/height parameters |
+| 1 | `cudaMemcpy3DBatchAsync` | **ALREADY IMPLEMENTED** | 3D batch memcpy with pitch/depth at `cudart_shim_stream.cpp:638` |
 | 2 | K8s/SLURM Device Plugin | Low — deployment integration, not runtime | Only needed if running VGRE in a container scheduler with GPU resource claims |
 
 ---
@@ -99,14 +99,14 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 1. **Build with Release mode** for production: `-DCMAKE_BUILD_TYPE=Release`
 2. **For cluster deployments**, build with gRPC: `-DVGRE_ENABLE_GRPC=ON`
 3. **For RDMA-capable networks**, enable: `-DVGRE_ENABLE_RDMA=ON`
-4. **Dashboard/Flutter interop**: Migrate all `setenv()` calls to explicit C-API configuration to eliminate glibc heap corruption race
+4. ~~**Dashboard/Flutter interop**~~: DONE. All `setenv()` calls replaced with thread-safe `vgre_set_config()`/`vgre_get_config()` C-API store.
 5. **Documentation**: Establish a pre-merge checklist requiring `missingFeatures.md` updates when implementing documented gaps
 
 ---
 
 ## 7. Conclusion
 
-VGRE is **production-ready** for CPU-based CUDA emulation. The critical stability issues have been resolved, the occupancy calculation uses real kernel metadata, and the feature gap against PyTorch/TensorFlow requirements is minimal (2 niche items remaining).
+VGRE is **production-ready** for CPU-based CUDA emulation. All critical stability issues have been resolved, all stubs and heuristics have been replaced with real logic, and the feature gap against PyTorch/TensorFlow requirements is zero for runtime APIs. Only the K8s/SLURM deployment plugin remains unimplemented — it is a deployment integration concern, not a runtime gap.
 
 The primary risk going forward is documentation staleness — the 2026-05-07 `missingFeatures.md` caused significant confusion by listing already-implemented features as missing. A process change to update this document before feature PRs are merged will prevent this in the future.
 
