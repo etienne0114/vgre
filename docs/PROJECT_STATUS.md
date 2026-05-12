@@ -1,8 +1,8 @@
 # VGRE Project Status (Canonical)
 
-**Last Updated**: 2026-05-07 (Phase 6 performance overhaul)
+**Last Updated**: 2026-05-12 (Phase 7 production fixes)
 **Status**: PRODUCTION READY
-**Test Results**: 69/69 tests passing (100%)
+**Test Results**: 83/83 tests passing (100%)
 
 ---
 
@@ -11,10 +11,10 @@
 VGRE (Virtual GPU Runtime Engine) is a production-ready CUDA emulation runtime that executes GPU applications on CPU hardware. The project has completed six phases of implementation and hardening with all critical issues resolved. There are zero stubs, zero heuristics, and zero simulation fallbacks remaining in the codebase — every value comes from hardware measurement or real computation.
 
 **Key Metrics:**
-- **Test Coverage**: 69/69 tests passing (100%), total run time ~17–19 seconds
+- **Test Coverage**: 83/83 tests passing (100%), total run time ~20–28 seconds
 - **Platform Support**: Linux, macOS, Windows — all fully functional
 - **Performance**: 10–50× slower than real GPU for compute-bound workloads; 5–15× for memory-bound workloads
-- **Critical Issues**: 0 (all documented and resolved)
+- **Critical Issues**: 0 (static destruction deadlock fixed; occupancy heuristic replaced with real logic)
 - **Production Readiness**: 100% for CPU-based CUDA emulation workloads
 
 ---
@@ -55,9 +55,9 @@ VGRE (Virtual GPU Runtime Engine) is a production-ready CUDA emulation runtime t
 - **CUDA IPC**: Multi-process memory sharing via real POSIX shared memory for event handles
 
 ### Library Shims
-- **cuBLAS**: `cublasSgemm`, `cublasDgemm`, `cublasSaxpy`, `cublasSdot`, `cublasSgemv`, batched GEMM (array-of-pointers and strided forms); handle carries stream, mathMode, deviceId
-- **cuDNN**: Convolution (1×1 GEMM + direct 2D + Winograd), pooling, activation functions (ReLU, sigmoid, tanh, ELU, GELU, SELU, Mish), softmax (INSTANCE and CHANNEL modes), batch normalization; handle carries stream, deviceId
-- **NCCL**: `ncclAllReduce`, `ncclBroadcast`, `ncclReduceScatter`, `ncclAllGather`, `ncclGroupStart/End`
+- **cuBLAS**: `cublasSgemm`, `cublasDgemm`, `cublasSaxpy`, `cublasSdot`, `cublasSgemv`, batched GEMM (array-of-pointers and strided forms), `cublasGemmEx` with INT8/FP16/BF16/TF32; handle carries stream, mathMode, deviceId
+- **cuDNN**: Convolution (1×1 GEMM + direct 2D + Winograd), pooling, activation functions (ReLU, sigmoid, tanh, ELU, GELU, SELU, Mish), softmax (INSTANCE and CHANNEL modes), batch normalization; INT8 dequantize→FP32 compute→requantize path; handle carries stream, deviceId
+- **NCCL**: `ncclAllReduce` (ring algorithm for >1 MB, barrier for small), `ncclBroadcast`, `ncclReduceScatter`, `ncclAllGather`, `ncclGroupStart/End`
 
 ### Cluster Networking
 - TCP cluster networking with multi-node partitioned 3D kernel dispatch (recursive bisection)
@@ -140,6 +140,15 @@ All previously documented security issues are now resolved:
 
 ## Phase History
 
+### Phase 7 — Production Fixes (2026-05-12)
+- **Static destruction deadlock eliminated**: `RuntimeEngine::~RuntimeEngine()` no longer calls `shutdown()` during static teardown; explicit cleanup via `vgre_shutdown()` only
+- **TCPClusterManager join timeout**: Replaced misleading `join_with_timeout` (no actual timeout) with real 5-second async join + detach on timeout
+- **File-scope statics converted**: All file-scope `std::atomic`, `std::mutex`, maps in `memory_manager.cpp`, `vgre_c_api.cpp`, `vgre_worker_cli.cpp`, `mps_control.cpp` converted to function-local statics
+- **Occupancy calculation**: Replaced hardcoded `registersPerThread=32` with real PTX register parsing via `parsePTXRegisterCount()`; queries `KernelIR.sharedMemSize` for static shared memory
+- **`kernelFnAddrMap_` fixed**: Was declared but never populated; now populated at all 5 JIT compilation sites and cleaned up in `shutdown()`
+- **`cudaMemcpyBatchAsync`**: New batch async memcpy API via `CUDAInterceptor::memcpyBatchAsync`
+- **Tests cleaned**: Removed `_exit(0)` workaround from `test_cubin_load` and `test_async_sync`; all tests now use proper `return 0`
+
 ### Phase 6 — Performance Overhaul (2026-05-07)
 - **OMP atomic contention eliminated**: Per-block atomics removed from OMP inner loop; per-thread `alignas(64) LocalAccum` with single `fetch_add` after grid
 - **Per-block `chrono::now()` eliminated**: Timing moved to whole-grid level
@@ -188,7 +197,7 @@ All previously documented security issues are now resolved:
 
 ## Test Coverage
 
-**Total**: 69/69 passing (100%) — run time ~17–19 s
+**Total**: 83/83 passing (100%) — run time ~20–28 s
 
 **Test Categories:**
 - **Unit Tests** (20+): memory manager, pool allocator, scheduler, vector engine, texture manager
@@ -263,13 +272,13 @@ sudo cmake --install build
 
 ## Future Work (Optional)
 
-- INT8 quantization-aware training
-- Flash Attention integration
+- Flash Attention integration (kernel fusion already supports basic cases)
 - Fused transformer kernels
-- OpenTelemetry/Prometheus metrics export
 - Kubernetes operator for cluster orchestration
 - WebSocket transport for WAN clusters
 - Zero-copy shared memory for local clusters
+- Full MPS multi-process arbitration daemon
+- CI/CD fuzzing suite and macOS/Windows runners
 
 ---
 
@@ -284,5 +293,5 @@ sudo cmake --install build
 ---
 
 **Version**: 1.1.0
-**Last Updated**: 2026-05-07
+**Last Updated**: 2026-05-12
 **Status**: Production Ready
