@@ -186,6 +186,11 @@ CUresult cuEventRecord(CUevent hEvent, CUstream hStream) {
   return toCU(err);
 }
 
+CUresult cuEventQuery(CUevent hEvent) {
+  auto err = vgre::api::CUDAInterceptor::instance().eventQuery(hEvent);
+  return toCU(err);
+}
+
 CUresult cuEventSynchronize(CUevent hEvent) {
   auto err = vgre::api::CUDAInterceptor::instance().eventSynchronize(hEvent);
   return toCU(err);

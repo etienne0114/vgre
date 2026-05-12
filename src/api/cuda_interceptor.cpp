@@ -402,6 +402,18 @@ cudaError_t CUDAInterceptor::eventRecord(cudaEvent_t event,
   return convertResult(r);
 }
 
+cudaError_t CUDAInterceptor::eventQuery(cudaEvent_t event) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
+  if (!event)
+    return cudaErrorInvalidValue;
+
+  return event->isQueryReady() ? cudaSuccess : cudaErrorNotReady;
+}
+
 cudaError_t CUDAInterceptor::eventSynchronize(cudaEvent_t event) {
   if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
     auto err = init();

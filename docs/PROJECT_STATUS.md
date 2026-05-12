@@ -15,7 +15,7 @@ VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The pro
 - **Platform Support**: Linux, macOS, Windows — all fully functional
 - **Performance**: 10–50× slower than real GPU for compute-bound workloads; 5–15× for memory-bound workloads
 - **Critical Issues**: 0 (static destruction deadlock fixed; occupancy heuristic replaced with real logic)
-- **CUDA Runtime API Coverage**: ~45% (~95 of ~214 functions implemented)
+- **CUDA Runtime API Coverage**: ~45% (~96 of ~214 functions implemented)
 - **Production Readiness**: Development / CI-ready. Not yet general-production-ready for arbitrary PyTorch/TensorFlow/JAX workloads due to missing CUDA Runtime, cuBLAS, cuDNN, and NCCL APIs. See `missingFeatures.md` for the exhaustive gap list.
 
 ---
@@ -23,7 +23,7 @@ VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The pro
 ## What Works
 
 ### Core CUDA Runtime API
-- **Partial** CUDA Runtime API (~95 functions): memory allocation/free, stream create/destroy/query/sync/wait-event, events, device queries, peer access, kernel launch, basic graph APIs. **~119+ functions missing** — see `missingFeatures.md`.
+- **Partial** CUDA Runtime API (~96 functions): memory allocation/free, stream create/destroy/query/sync/wait-event, events (create/record/query/sync/destroy), device queries, peer access, kernel launch, basic graph APIs. **~118+ functions missing** — see `missingFeatures.md`.
 - CUDA Driver API (`cuInit`, `cuCtxCreate`, `cuMemAlloc`, `cuModuleLoad`, `cuLaunchKernel`) — ~46 functions, ~250+ missing
 - OpenCL 1.2 compatibility layer
 - P2P peer device access and transfers
@@ -118,8 +118,8 @@ VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The pro
 - DDP training 50–100× slower without NCCL optimization (NCCL shim now available)
 
 ### API Coverage
-- **CUDA Runtime API**: ~45% coverage (~95/~214 functions). Critical missing: `cudaEventQuery`, `cudaMemcpyToSymbol`, `cudaFuncGetAttributes`, `cudaGraphAddKernelNode`, `cudaStreamIsCapturing`, `cudaLaunchHostFunc`, `cudaMemset2D/3D`, `cudaPointerGetAttributes`, texture/surface object APIs, array APIs. See `missingFeatures.md` for exhaustive list.
-- **CUDA Driver API**: ~15% coverage. Missing: `cuEventQuery`, `cuStreamAddCallback`, `cuMemAllocManaged`, `cuMemcpy2D/3D`, cooperative launch, graph APIs, occupancy queries.
+- **CUDA Runtime API**: ~45% coverage (~96/~214 functions). Critical missing: `cudaMemcpyToSymbol`, `cudaFuncGetAttributes`, `cudaGraphAddKernelNode`, `cudaStreamIsCapturing`, `cudaLaunchHostFunc`, `cudaMemset2D/3D`, `cudaPointerGetAttributes`, texture/surface object APIs, array APIs. See `missingFeatures.md` for exhaustive list.
+- **CUDA Driver API**: ~15% coverage. Missing: `cuStreamAddCallback`, `cuMemAllocManaged`, `cuMemcpy2D/3D`, cooperative launch, graph APIs, occupancy queries.
 - **CUDA Graphs**: ~30% coverage. Internal `GraphManager` has kernel/memcpy/conditional nodes; CUDART shim only exposes memcpy/conditional/external-semaphore. Missing: kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free nodes.
 - **cuBLAS**: ~13% coverage. Missing all Level-2 except `Gemv`, all Level-3 except `Gemm`, `Trsm`, `Trsv`, `Syrk`, `Ger`, pointer modes.
 - **cuDNN**: ~24% coverage. Missing all backward passes, BN training, dropout, RNN/LSTM/GRU, attention, `OpTensor`, `ReduceTensor`.
@@ -291,7 +291,7 @@ sudo cmake --install build
 - MPS multi-process arbitration daemon — `src/advanced/mps_control.cpp`
 
 ### Genuinely Remaining Code Features (see `missingFeatures.md` for exhaustive list)
-- **CUDA Runtime**: `cudaEventQuery`, `cudaMemcpyToSymbol`, `cudaFuncGetAttributes`, `cudaGraphAddKernelNode`, `cudaStreamIsCapturing`, `cudaLaunchHostFunc`, `cudaMemset2D/3D`, `cudaPointerGetAttributes`, texture/surface object APIs, array APIs
+- **CUDA Runtime**: `cudaMemcpyToSymbol`, `cudaFuncGetAttributes`, `cudaGraphAddKernelNode`, `cudaStreamIsCapturing`, `cudaLaunchHostFunc`, `cudaMemset2D/3D`, `cudaPointerGetAttributes`, texture/surface object APIs, array APIs
 - **CUDA Driver**: `cuEventQuery`, `cuStreamAddCallback`, `cuMemAllocManaged`, `cuMemcpy2D/3D`, cooperative launch, graph APIs, occupancy queries
 - **CUDA Graphs**: kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free node types in CUDART shim
 - **cuBLAS**: `Trsm`, `Trsv`, `Syrk`, `Ger`, all pointer-mode APIs, most Level-2/Level-3
