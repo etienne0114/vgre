@@ -729,7 +729,7 @@ int vgre_get_cache_stats(vgre_cache_stats_t *stats) {
     stats->l2_hit_rate   = s.hitRate();
     stats->l1_config_kb  = vgre::runtime::gpuL1CacheSizeKB();
     stats->l2_config_mb  = []() -> uint64_t {
-        const char* v = std::getenv("VGRE_L2_CACHE_MB");
+        const char* v = vgre_get_config("VGRE_L2_CACHE_MB");
         if (v) {
             uint64_t mb = static_cast<uint64_t>(std::strtoul(v, nullptr, 10));
             if (mb >= 2 && mb <= 40) return mb;

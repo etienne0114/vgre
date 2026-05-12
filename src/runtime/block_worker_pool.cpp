@@ -1,5 +1,6 @@
 #include "vgre/runtime/block_worker_pool.h"
 #include "vgre/runtime/gpu_thread_context.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include <algorithm>
 #include <cstdlib>
@@ -53,10 +54,10 @@ void BlockWorkerPool::initialize(size_t numThreads) {
     if (numThreads_ == 0) {
         // If VGRE_BLOCK_THREADS=0 the runtime uses sequential (single-thread)
         // block execution; a small pool is sufficient for background tasks.
-        const char* blockThreadsEnv = std::getenv("VGRE_BLOCK_THREADS");
+        const char* blockThreadsEnv = vgre_get_config("VGRE_BLOCK_THREADS");
         bool sequentialMode = blockThreadsEnv && std::atoi(blockThreadsEnv) == 0;
 
-        const char* pSize = std::getenv("VGRE_BLOCK_POOL_SIZE");
+        const char* pSize = vgre_get_config("VGRE_BLOCK_POOL_SIZE");
         if (pSize) {
             numThreads_ = std::stoul(pSize);
         } else if (sequentialMode) {

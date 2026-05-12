@@ -7,6 +7,7 @@
  */
 
 #include "vgre/api/cuda_interceptor.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/elf_reader.h"
 #include "vgre/core/memory_manager.h"
@@ -360,7 +361,7 @@ extern "C" cudaError_t cudaProfilerStop(void) {
   prof.setEnabled(false);
   VGRE_LOG_INFO("CUDART", "cudaProfilerStop(): runtime profiler disabled");
   // Optional: dump to file if environment variable set
-  const char* dumpPath = std::getenv("VGRE_PROFILER_DUMP");
+  const char* dumpPath = vgre_get_config("VGRE_PROFILER_DUMP");
   if (dumpPath && dumpPath[0]) {
     prof.exportToFile(std::string(dumpPath));
     VGRE_LOG_INFO("CUDART", std::string("Profiler dumped to: ") + dumpPath);

@@ -1,4 +1,5 @@
 #include "vgre/compiler/llvm_translation_engine.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/platform.h"
 #include "vgre/common/retry.h"
@@ -121,7 +122,7 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
   // for simple kernels and is only worth it for large, long-running kernels.
   // Values: 0=None, 1=Less, 2=Default, 3=Aggressive.
   llvm::CodeGenOptLevel cgOptLevel = llvm::CodeGenOptLevel::Default;
-  const char *envOpt = std::getenv("VGRE_JIT_OPT_LEVEL");
+  const char *envOpt = vgre_get_config("VGRE_JIT_OPT_LEVEL");
   if (envOpt) {
       int lvl = std::atoi(envOpt);
       switch (lvl) {
@@ -284,7 +285,7 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
                   "Real LLVM JIT Engine with Clang pipeline initialized.");
     
     // Cache configuration flags once at startup to avoid thread-unsafe getenv() calls in the hot path.
-    const char* vStatic = std::getenv("VGRE_BLOCK_THREADS");
+    const char* vStatic = vgre_get_config("VGRE_BLOCK_THREADS");
     if (vStatic && (std::strcmp(vStatic, "1") == 0 || std::strcmp(vStatic, "true") == 0 ||
               std::strcmp(vStatic, "TRUE") == 0 || std::strcmp(vStatic, "yes") == 0 ||
               std::strcmp(vStatic, "YES") == 0)) {
@@ -381,7 +382,7 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
   // medium kernels use -O2; complex/warp/shared-memory kernels get -O3.
   // This reduces JIT latency for short kernels by up to 40% at the cost of
   // slightly lower throughput (outweighed by faster dispatch for small work).
-  const char *envOpt = std::getenv("VGRE_JIT_OPT_LEVEL");
+  const char *envOpt = vgre_get_config("VGRE_JIT_OPT_LEVEL");
   if (!envOpt && !loadedFromCache) {
     uint64_t estInstr = ir.estimatedInstructionCount;
     bool needsHighOpt = ir.usesWarpShuffle || ir.usesSharedMem ||
