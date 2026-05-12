@@ -9,6 +9,7 @@
 
 #include "vgre/advanced/websocket_transport.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/sockets.h"
 #include "vgre/common/platform.h"
 
 #include <cstring>
@@ -21,7 +22,6 @@
 #include <ws2tcpip.h>
 #else
 #include <unistd.h>
-#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -37,44 +37,45 @@
 namespace vgre {
 namespace advanced {
 
+using vgre::common::vgre_socket_t;
+using vgre::common::VGRE_INVALID_SOCKET;
+using vgre::common::vgre_close_socket;
+using vgre::common::vgre_ioctl_nonblock;
+using vgre::common::vgre_get_last_socket_error;
+using vgre::common::vgre_is_would_block;
+using vgre::common::vgre_set_nosigpipe;
+
 // ── Platform helpers ─────────────────────────────────────────────────────
-static bool setNonBlocking(int fd) {
-#if defined(_WIN32)
-    u_long mode = 1;
-    return ioctlsocket(fd, FIONBIO, &mode) == 0;
-#else
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) return false;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
-#endif
-}
-
-static bool waitForRead(int fd, int timeoutMs) {
+static bool waitForRead(vgre_socket_t fd, int timeoutMs) {
     fd_set fds;
     FD_ZERO(&fds);
+#if defined(_WIN32)
     FD_SET(fd, &fds);
+    int nfds = 0; // Windows ignores nfds in select()
+#else
+    FD_SET(fd, &fds);
+    int nfds = static_cast<int>(fd) + 1;
+#endif
     struct timeval tv;
     tv.tv_sec = timeoutMs / 1000;
     tv.tv_usec = (timeoutMs % 1000) * 1000;
-    return select(fd + 1, &fds, nullptr, nullptr, &tv) > 0;
+    return select(nfds, &fds, nullptr, nullptr, &tv) > 0;
 }
 
-static bool waitForWrite(int fd, int timeoutMs) {
+static bool waitForWrite(vgre_socket_t fd, int timeoutMs) {
     fd_set fds;
     FD_ZERO(&fds);
+#if defined(_WIN32)
     FD_SET(fd, &fds);
+    int nfds = 0;
+#else
+    FD_SET(fd, &fds);
+    int nfds = static_cast<int>(fd) + 1;
+#endif
     struct timeval tv;
     tv.tv_sec = timeoutMs / 1000;
     tv.tv_usec = (timeoutMs % 1000) * 1000;
-    return select(fd + 1, nullptr, &fds, nullptr, &tv) > 0;
-}
-
-static void closeSocket(int fd) {
-#if defined(_WIN32)
-    closesocket(fd);
-#else
-    close(fd);
-#endif
+    return select(nfds, nullptr, &fds, nullptr, &tv) > 0;
 }
 
 // ── Base64 (for Sec-WebSocket-Key) ─────────────────────────────────────────
@@ -236,21 +237,18 @@ bool WebsocketTransportClient::tcpConnect(int timeoutMs) {
         return false;
     }
 
-    int fd = -1;
+    vgre_socket_t fd = VGRE_INVALID_SOCKET;
     for (addrinfo* rp = res; rp; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd < 0) continue;
-        setNonBlocking(fd);
+        if (fd == VGRE_INVALID_SOCKET) continue;
+        vgre_ioctl_nonblock(fd);
+        vgre_set_nosigpipe(fd);
         if (::connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
             freeaddrinfo(res);
             sockfd_ = fd;
             return true;
         }
-#if defined(_WIN32)
-        if (WSAGetLastError() == WSAEWOULDBLOCK) {
-#else
-        if (errno == EINPROGRESS) {
-#endif
+        if (vgre_is_would_block(vgre_get_last_socket_error())) {
             if (waitForWrite(fd, timeoutMs)) {
                 int err = 0;
                 socklen_t len = sizeof(err);
@@ -262,7 +260,7 @@ bool WebsocketTransportClient::tcpConnect(int timeoutMs) {
                 }
             }
         }
-        closeSocket(fd);
+        vgre_close_socket(fd);
     }
     freeaddrinfo(res);
     VGRE_LOG_ERROR("WebSocket", "Failed to connect to " + host_ + ":" + std::to_string(port_));
@@ -387,7 +385,7 @@ VGREResult WebsocketTransportClient::connect(int timeoutMs) {
 }
 
 void WebsocketTransportClient::disconnect() {
-    if (sockfd_ >= 0) {
+    if (sockfd_ != VGRE_INVALID_SOCKET) {
         if (connected_) {
             uint8_t closeFrame[2] = {0x88, 0x00}; // FIN + CLOSE
             rawSend(closeFrame, 2);
@@ -403,15 +401,15 @@ void WebsocketTransportClient::disconnect() {
             tls_->ctx = nullptr;
         }
 #endif
-        closeSocket(sockfd_);
-        sockfd_ = -1;
+        vgre_close_socket(sockfd_);
+        sockfd_ = VGRE_INVALID_SOCKET;
     }
     connected_ = false;
     recvBuffer_.clear();
 }
 
 bool WebsocketTransportClient::isConnected() const {
-    return connected_ && sockfd_ >= 0;
+    return connected_ && sockfd_ != VGRE_INVALID_SOCKET;
 }
 
 // ── Build frame (RFC 6455 client masking) ──────────────────────────────────
@@ -563,24 +561,25 @@ std::unique_ptr<WebsocketTransportServer> WebsocketTransportServer::create(int p
 
 VGREResult WebsocketTransportServer::start(int backlog) {
     listenfd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenfd_ < 0) return VGREResult::ERR_IO;
+    if (listenfd_ == VGRE_INVALID_SOCKET) return VGREResult::ERR_IO;
 
     int reuse = 1;
     setsockopt(listenfd_, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<char*>(&reuse), sizeof(reuse));
+    vgre_set_nosigpipe(listenfd_);
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(static_cast<uint16_t>(port_));
     if (bind(listenfd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        closeSocket(listenfd_);
-        listenfd_ = -1;
+        vgre_close_socket(listenfd_);
+        listenfd_ = VGRE_INVALID_SOCKET;
         return VGREResult::ERR_IO;
     }
 
     if (listen(listenfd_, backlog) < 0) {
-        closeSocket(listenfd_);
-        listenfd_ = -1;
+        vgre_close_socket(listenfd_);
+        listenfd_ = VGRE_INVALID_SOCKET;
         return VGREResult::ERR_IO;
     }
 
@@ -598,14 +597,14 @@ VGREResult WebsocketTransportServer::start(int backlog) {
 
 std::unique_ptr<WebsocketTransportClient>
 WebsocketTransportServer::accept(int timeoutMs) {
-    if (!running_ || listenfd_ < 0) return nullptr;
+    if (!running_ || listenfd_ == VGRE_INVALID_SOCKET) return nullptr;
 
     if (!waitForRead(listenfd_, timeoutMs)) return nullptr;
 
     sockaddr_in clientAddr{};
     socklen_t clientLen = sizeof(clientAddr);
-    int clientFd = ::accept(listenfd_, reinterpret_cast<sockaddr*>(&clientAddr), &clientLen);
-    if (clientFd < 0) return nullptr;
+    vgre_socket_t clientFd = ::accept(listenfd_, reinterpret_cast<sockaddr*>(&clientAddr), &clientLen);
+    if (clientFd == VGRE_INVALID_SOCKET) return nullptr;
 
     auto client = std::unique_ptr<WebsocketTransportClient>(new WebsocketTransportClient);
     client->sockfd_ = clientFd;
@@ -645,9 +644,9 @@ WebsocketTransportServer::accept(int timeoutMs) {
 
 void WebsocketTransportServer::stop() {
     running_ = false;
-    if (listenfd_ >= 0) {
-        closeSocket(listenfd_);
-        listenfd_ = -1;
+    if (listenfd_ != VGRE_INVALID_SOCKET) {
+        vgre_close_socket(listenfd_);
+        listenfd_ = VGRE_INVALID_SOCKET;
     }
 }
 
