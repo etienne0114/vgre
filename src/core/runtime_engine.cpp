@@ -1,4 +1,5 @@
 #include "vgre/core/runtime_engine.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/advanced/runtime_profiler.h"
 #include "vgre/advanced/ipc_manager.h"
@@ -69,7 +70,7 @@ VGREResult RuntimeEngine::initialize() {
   // Create virtual devices based on hardware resources or Environment Override.
   // We aim for 1 virtual device per NUMA node to model real-world memory topology.
   int deviceCount = 1;
-  const char *envCount = std::getenv("VGRE_DEVICE_COUNT");
+  const char *envCount = vgre_get_config("VGRE_DEVICE_COUNT");
   if (envCount) {
       deviceCount = std::atoi(envCount);
   } else {
@@ -148,7 +149,7 @@ VGREResult RuntimeEngine::initialize() {
 
   // Phase 10: Controllable Background Tasks (Zero-Simulation Hardening)
   // Register with global IPC service as a client by default, unless disabled.
-  const char* ipc_mode = std::getenv("VGRE_IPC_MODE");
+  const char* ipc_mode = vgre_get_config("VGRE_IPC_MODE");
   if (!ipc_mode || std::string(ipc_mode) != "OFF") {
       vgre::advanced::IPCManager::instance().initialize(false);
   } else {
