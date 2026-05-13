@@ -872,7 +872,7 @@ tests/core/texture/        # Texture/surface object tests
 | 3.6 | `cudnnSoftmaxBackward` | **DONE** | — | 2026-05-14 |
 | 3.7 | `cudnnPoolingBackward` | **DONE** | — | 2026-05-14 |
 | 3.8 | `cudnnDropoutForward/Backward` | **DONE** | — | 2026-05-14 |
-| 3.9 | `cudnnRNNForward/Backward` | TODO | — | — |
+| 3.9 | `cudnnRNNForward/Backward` | **DONE** | — | 2026-05-14 |
 | 3.10 | `cudnnMultiHeadAttnForward/Backward` | TODO | — | — |
 | 3.11 | `cudnnCTCLoss` | TODO | — | — |
 | 3.12 | `cudnnOpTensor` | **DONE** | — | 2026-05-14 |
