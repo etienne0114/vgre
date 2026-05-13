@@ -214,6 +214,10 @@ cudaError_t cudaMalloc(void **devPtr, size_t size) {
   return vgre::api::CUDAInterceptor::instance().malloc(devPtr, size);
 }
 
+cudaError_t cudaMallocManaged(void **devPtr, size_t size, unsigned int flags) {
+  return vgre::api::CUDAInterceptor::instance().mallocManaged(devPtr, size, flags);
+}
+
 cudaError_t cudaFree(void *devPtr) {
   return vgre::api::CUDAInterceptor::instance().free(devPtr);
 }
@@ -294,6 +298,14 @@ cudaError_t cudaFreeArray(void *array) {
       static_cast<vgre::api::cudaArray_t>(
           reinterpret_cast<uintptr_t>(array));
   return vgre::api::CUDAInterceptor::instance().freeArray(arrId);
+}
+
+cudaError_t cudaPointerGetAttributes(
+    struct cudaPointerAttributes *attributes, const void *ptr) {
+  return vgre::api::CUDAInterceptor::instance().pointerGetAttributes(
+      reinterpret_cast<vgre::api::CUDAInterceptor::cudaPointerAttributes *>(
+          attributes),
+      ptr);
 }
 
 cudaError_t cudaMemset(void *devPtr, int value, size_t count) {

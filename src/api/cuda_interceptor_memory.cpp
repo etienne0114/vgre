@@ -688,6 +688,46 @@ cudaError_t CUDAInterceptor::freeArray(cudaArray_t array) {
   return err;
 }
 
+cudaError_t CUDAInterceptor::pointerGetAttributes(
+    cudaPointerAttributes *attributes, const void *ptr) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess) return err;
+  }
+  if (!attributes)
+    return cudaErrorInvalidValue;
+
+  auto &mm = core::RuntimeEngine::instance().getMemoryManager();
+  size_t size = 0;
+  bool isManaged = false;
+  vgre::DeviceId device = 0;
+  unsigned int attachmentFlags = 0;
+  if (mm.getPointerAttributes(const_cast<void *>(ptr), size, isManaged,
+                              device, attachmentFlags)) {
+    // Tracked allocation
+    if (isManaged) {
+      attributes->memoryType = 3; // cudaMemoryTypeManaged
+      attributes->isManaged = 1;
+    } else {
+      attributes->memoryType = 2; // cudaMemoryTypeDevice
+      attributes->isManaged = 0;
+    }
+    attributes->device = static_cast<int>(device);
+    attributes->devicePointer = const_cast<void *>(ptr);
+    attributes->hostPointer = const_cast<void *>(ptr);
+    return cudaSuccess;
+  }
+
+  // Not a tracked VGRE allocation. In modern CUDA (>=11) behaviour,
+  // unregistered host pointers are reported as cudaMemoryTypeHost.
+  attributes->memoryType = 1; // cudaMemoryTypeHost
+  attributes->device = -1;
+  attributes->devicePointer = nullptr;
+  attributes->hostPointer = const_cast<void *>(ptr);
+  attributes->isManaged = 0;
+  return cudaSuccess;
+}
+
 cudaError_t CUDAInterceptor::memcpyToArray(cudaArray_t dst, size_t wOffset,
                                             size_t hOffset, const void *src,
                                             size_t count,

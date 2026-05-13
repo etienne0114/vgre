@@ -586,6 +586,32 @@ size_t MemoryManager::getAllocationSizeFromPointer(void *ptr) const {
   return 0;
 }
 
+bool MemoryManager::getPointerAttributes(void *ptr, size_t &outSize,
+                                          bool &outIsManaged,
+                                          DeviceId &outDevice,
+                                          unsigned int &outAttachmentFlags) const {
+  if (!ptr) return false;
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  uint8_t *target = static_cast<uint8_t *>(ptr);
+
+  // O(log n) lookup via sorted allocRange_ map
+  auto rit = allocRange_.upper_bound(target);
+  if (rit == allocRange_.begin()) return false;
+  --rit;
+  uint8_t *base = rit->first;
+  size_t   sz   = rit->second;
+  if (target < base || target >= base + sz) return false;
+
+  auto it = allocations_.find(static_cast<MemoryHandle>(static_cast<void *>(base)));
+  if (it == allocations_.end()) return false;
+
+  outSize = it->second.size;
+  outIsManaged = it->second.isManaged;
+  outDevice = it->second.deviceId;
+  outAttachmentFlags = it->second.attachmentFlags;
+  return true;
+}
+
 void *MemoryManager::getPointer(MemoryHandle handle) const {
   if (!handle) return nullptr;
   std::unique_lock<std::recursive_mutex> lock(mutex_);

@@ -379,6 +379,18 @@ public:
                             const cudaChannelFormatDesc *desc,
                             cudaExtent extent, unsigned int flags);
   cudaError_t freeArray(cudaArray_t array);
+
+  // ── Pointer Attributes ─────────────────────────────────────────────────
+  struct cudaPointerAttributes {
+    int memoryType;      // 1=cudaMemoryTypeHost, 2=cudaMemoryTypeDevice,
+                         // 3=cudaMemoryTypeManaged
+    int device;
+    void *devicePointer;
+    void *hostPointer;
+    int isManaged;
+  };
+  cudaError_t pointerGetAttributes(cudaPointerAttributes *attributes,
+                                    const void *ptr);
   cudaError_t memcpyToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
                             const void *src, size_t count, cudaMemcpyKind_t kind);
   cudaError_t memcpyFromArray(void *dst, cudaArray_t src, size_t wOffset,
