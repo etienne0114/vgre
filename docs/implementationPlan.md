@@ -869,7 +869,7 @@ tests/core/texture/        # Texture/surface object tests
 | 3.3 | `cudnnBatchNormalizationForwardTraining` | **DONE** | — | 2026-05-13 |
 | 3.4 | `cudnnBatchNormalizationBackward` | **DONE** | — | 2026-05-13 |
 | 3.5 | `cudnnActivationBackward` | **DONE** | — | 2026-05-13 |
-| 3.6 | `cudnnSoftmaxBackward` | TODO | — | — |
+| 3.6 | `cudnnSoftmaxBackward` | **DONE** | — | 2026-05-14 |
 | 3.7 | `cudnnPoolingBackward` | TODO | — | — |
 | 3.8 | `cudnnDropoutForward/Backward` | TODO | — | — |
 | 3.9 | `cudnnRNNForward/Backward` | TODO | — | — |
