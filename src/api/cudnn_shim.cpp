@@ -1725,4 +1725,327 @@ cudnnStatus_t cudnnTransformTensor(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// ── RNN (vanilla tanh) ───────────────────────────────────────────────────────
+enum cudnnRNNInputMode_t {
+    CUDNN_LINEAR_INPUT = 0,
+    CUDNN_SKIP_INPUT = 1
+};
+enum cudnnDirectionMode_t {
+    CUDNN_UNIDIRECTIONAL = 0,
+    CUDNN_BIDIRECTIONAL = 1
+};
+enum cudnnRNNMode_t {
+    CUDNN_RNN_RELU = 0,
+    CUDNN_RNN_TANH = 1,
+    CUDNN_LSTM = 2,
+    CUDNN_GRU = 3
+};
+
+struct RNNDesc {
+    int hiddenSize;
+    int numLayers;
+    cudnnRNNMode_t mode;
+    cudnnDropoutDescriptor_t dropoutDesc;
+    int inputSize;
+};
+
+cudnnStatus_t cudnnCreateRNNDescriptor(cudnnRNNDescriptor_t* desc) {
+    if (!desc) return CUDNN_STATUS_INVALID_VALUE;
+    *desc = new RNNDesc{};
+    return CUDNN_STATUS_SUCCESS;
+}
+cudnnStatus_t cudnnDestroyRNNDescriptor(cudnnRNNDescriptor_t desc) {
+    delete (RNNDesc*)desc;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnSetRNNDescriptor(
+    cudnnRNNDescriptor_t desc,
+    int hiddenSize,
+    int numLayers,
+    cudnnDropoutDescriptor_t dropoutDesc,
+    cudnnRNNInputMode_t /*inputMode*/,
+    cudnnDirectionMode_t /*direction*/,
+    cudnnRNNMode_t mode,
+    cudnnDataType_t /*dataType*/)
+{
+    if (!desc) return CUDNN_STATUS_INVALID_VALUE;
+    auto* d = (RNNDesc*)desc;
+    d->hiddenSize = hiddenSize;
+    d->numLayers = numLayers;
+    d->mode = mode;
+    d->dropoutDesc = dropoutDesc;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// Stub: RNN uses flattened weight buffer; workspace size is 0 for our scalar ref
+cudnnStatus_t cudnnGetRNNWorkspaceSize(
+    cudnnHandle_t,
+    cudnnRNNDescriptor_t,
+    int /*seqLength*/,
+    cudnnTensorDescriptor_t* /*xDesc*/,
+    size_t* sizeInBytes)
+{
+    if (!sizeInBytes) return CUDNN_STATUS_INVALID_VALUE;
+    *sizeInBytes = 0;
+    return CUDNN_STATUS_SUCCESS;
+}
+cudnnStatus_t cudnnGetRNNTrainingReserveSize(
+    cudnnHandle_t,
+    cudnnRNNDescriptor_t,
+    int /*seqLength*/,
+    cudnnTensorDescriptor_t* /*xDesc*/,
+    size_t* sizeInBytes)
+{
+    if (!sizeInBytes) return CUDNN_STATUS_INVALID_VALUE;
+    *sizeInBytes = 0;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// Simple vanilla RNN forward: h_t = tanh(W_ih * x_t + W_hh * h_{t-1} + b)
+cudnnStatus_t cudnnRNNForwardInference(
+    cudnnHandle_t,
+    cudnnRNNDescriptor_t rnnDesc,
+    int seqLength,
+    cudnnTensorDescriptor_t* xDesc,
+    const void* x,
+    cudnnTensorDescriptor_t hxDesc, const void* hx,
+    cudnnTensorDescriptor_t /*cxDesc*/, const void* /*cx*/,
+    cudnnFilterDescriptor_t /*wDesc*/, const void* w,
+    cudnnTensorDescriptor_t* yDesc,
+    void* y,
+    cudnnTensorDescriptor_t /*hyDesc*/, void* /*hy*/,
+    cudnnTensorDescriptor_t /*cyDesc*/, void* /*cy*/,
+    void* /*workspace*/, size_t /*workSpaceSizeInBytes*/)
+{
+    if (!rnnDesc || !xDesc || !x || !yDesc || !y || !w) return CUDNN_STATUS_INVALID_VALUE;
+
+    auto* rd = (RNNDesc*)rnnDesc;
+    auto* xt0 = (TensorDesc*)xDesc[0];
+    auto* yt0 = (TensorDesc*)yDesc[0];
+    int batch = xt0->n;
+    int inputSize = xt0->c * xt0->h * xt0->w; // treat C*H*W as input features
+    int hiddenSize = rd->hiddenSize;
+
+    const float* wf = (const float*)w;
+    const float* hxf = (const float*)hx;
+    const float* xf = (const float*)x;
+    float* yf = (float*)y;
+
+    // Weight layout: [W_ih (hiddenSize*inputSize), W_hh (hiddenSize*hiddenSize), b (hiddenSize)]
+    int wihSize = hiddenSize * inputSize;
+    int whhSize = hiddenSize * hiddenSize;
+    const float* W_ih = wf;
+    const float* W_hh = wf + wihSize;
+    const float* b = wf + wihSize + whhSize;
+
+    std::vector<float> hPrev(batch * hiddenSize, 0.f);
+    if (hxf) {
+        for (int i = 0; i < batch * hiddenSize; ++i) hPrev[i] = hxf[i];
+    }
+
+    for (int t = 0; t < seqLength; ++t) {
+        const float* x_t = xf + t * batch * inputSize;
+        float* y_t = yf + t * batch * hiddenSize;
+        for (int n = 0; n < batch; ++n) {
+            for (int j = 0; j < hiddenSize; ++j) {
+                float sum = b[j];
+                // W_ih * x_t
+                for (int k = 0; k < inputSize; ++k)
+                    sum += W_ih[j * inputSize + k] * x_t[n * inputSize + k];
+                // W_hh * h_{t-1}
+                for (int k = 0; k < hiddenSize; ++k)
+                    sum += W_hh[j * hiddenSize + k] * hPrev[n * hiddenSize + k];
+                y_t[n * hiddenSize + j] = tanhf(sum);
+            }
+        }
+        // Update hPrev for next timestep
+        for (int i = 0; i < batch * hiddenSize; ++i) hPrev[i] = y_t[i];
+    }
+
+    (void)hxDesc;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnRNNForwardTraining(
+    cudnnHandle_t handle,
+    cudnnRNNDescriptor_t rnnDesc,
+    int seqLength,
+    cudnnTensorDescriptor_t* xDesc,
+    const void* x,
+    cudnnTensorDescriptor_t hxDesc, const void* hx,
+    cudnnTensorDescriptor_t cxDesc, const void* cx,
+    cudnnFilterDescriptor_t wDesc, const void* w,
+    cudnnTensorDescriptor_t* yDesc,
+    void* y,
+    cudnnTensorDescriptor_t hyDesc, void* hy,
+    cudnnTensorDescriptor_t cyDesc, void* cy,
+    void* workspace, size_t workSpaceSizeInBytes,
+    void* reserveSpace, size_t reserveSpaceSizeInBytes)
+{
+    // For our scalar reference, training == inference (no dropout applied in forward)
+    (void)reserveSpace; (void)reserveSpaceSizeInBytes;
+    return cudnnRNNForwardInference(handle, rnnDesc, seqLength, xDesc, x,
+        hxDesc, hx, cxDesc, cx, wDesc, w, yDesc, y,
+        hyDesc, hy, cyDesc, cy, workspace, workSpaceSizeInBytes);
+}
+
+// Backward data: BPTT for vanilla RNN
+cudnnStatus_t cudnnRNNBackwardData(
+    cudnnHandle_t,
+    cudnnRNNDescriptor_t rnnDesc,
+    int seqLength,
+    cudnnTensorDescriptor_t* yDesc, const void* y,
+    cudnnTensorDescriptor_t* dyDesc, const void* dy,
+    cudnnTensorDescriptor_t /*dhyDesc*/, const void* /*dhy*/,
+    cudnnTensorDescriptor_t /*dcyDesc*/, const void* /*dcy*/,
+    cudnnFilterDescriptor_t /*wDesc*/, const void* w,
+    cudnnTensorDescriptor_t hxDesc, const void* hx,
+    cudnnTensorDescriptor_t /*cxDesc*/, const void* /*cx*/,
+    cudnnTensorDescriptor_t* dxDesc, void* dx,
+    cudnnTensorDescriptor_t /*dhxDesc*/, void* /*dhx*/,
+    cudnnTensorDescriptor_t /*dcxDesc*/, void* /*dcx*/,
+    void* /*workspace*/, size_t /*workSpaceSizeInBytes*/,
+    void* /*reserveSpace*/, size_t /*reserveSpaceSizeInBytes*/)
+{
+    if (!rnnDesc || !yDesc || !dy || !dxDesc || !dx || !w) return CUDNN_STATUS_INVALID_VALUE;
+
+    auto* rd = (RNNDesc*)rnnDesc;
+    auto* yt0 = (TensorDesc*)yDesc[0];
+    auto* xt0 = (TensorDesc*)dxDesc[0];
+    int batch = yt0->n;
+    int hiddenSize = rd->hiddenSize;
+    int inputSize = xt0->c * xt0->h * xt0->w;
+
+    const float* wf = (const float*)w;
+    const float* yf = (const float*)y;
+    const float* dyf = (const float*)dy;
+    const float* hxf = (const float*)hx;
+    float* dxf = (float*)dx;
+
+    int wihSize = hiddenSize * inputSize;
+    int whhSize = hiddenSize * hiddenSize;
+    const float* W_ih = wf;
+    const float* W_hh = wf + wihSize;
+
+    // Compute all h_t (re-run forward to get intermediates)
+    std::vector<std::vector<float>> h(seqLength + 1, std::vector<float>(batch * hiddenSize, 0.f));
+    if (hxf) {
+        for (int i = 0; i < batch * hiddenSize; ++i) h[0][i] = hxf[i];
+    }
+
+    for (int t = 0; t < seqLength; ++t) {
+        const float* x_t = nullptr;
+        // We don't have x here, reconstruct from y (approximate for tanh RNN)
+        // For the reference, we use the stored y values
+        for (int n = 0; n < batch; ++n)
+            for (int j = 0; j < hiddenSize; ++j)
+                h[t+1][n*hiddenSize+j] = yf[t*batch*hiddenSize + n*hiddenSize + j];
+    }
+
+    std::vector<float> dh(batch * hiddenSize, 0.f);
+    for (int t = seqLength - 1; t >= 0; --t) {
+        const float* dy_t = dyf + t * batch * hiddenSize;
+        float* dx_t = dxf + t * batch * inputSize;
+
+        for (int n = 0; n < batch; ++n) {
+            for (int j = 0; j < hiddenSize; ++j) {
+                int idx = n * hiddenSize + j;
+                // dh += dy_t (chain rule through output)
+                dh[idx] += dy_t[idx];
+                // Backprop through tanh: dh *= (1 - h^2)
+                float hval = h[t+1][idx];
+                float grad = dh[idx] * (1.0f - hval * hval);
+                dh[idx] = grad;
+
+                // dx += W_ih^T * dh
+                for (int k = 0; k < inputSize; ++k)
+                    dx_t[n * inputSize + k] += W_ih[j * inputSize + k] * grad;
+            }
+        }
+
+        // dh_next = W_hh^T * dh
+        std::vector<float> dhNext(batch * hiddenSize, 0.f);
+        for (int n = 0; n < batch; ++n) {
+            for (int j = 0; j < hiddenSize; ++j) {
+                float grad = dh[n * hiddenSize + j];
+                for (int k = 0; k < hiddenSize; ++k)
+                    dhNext[n * hiddenSize + k] += W_hh[j * hiddenSize + k] * grad;
+            }
+        }
+        dh = std::move(dhNext);
+    }
+
+    (void)hxDesc;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnRNNBackwardWeights(
+    cudnnHandle_t,
+    cudnnRNNDescriptor_t rnnDesc,
+    int seqLength,
+    cudnnTensorDescriptor_t* xDesc, const void* x,
+    cudnnTensorDescriptor_t hxDesc, const void* hx,
+    cudnnTensorDescriptor_t* yDesc, const void* y,
+    void* /*workspace*/, size_t /*workSpaceSizeInBytes*/,
+    cudnnFilterDescriptor_t /*dwDesc*/, void* dw,
+    void* /*reserveSpace*/, size_t /*reserveSpaceSizeInBytes*/)
+{
+    if (!rnnDesc || !xDesc || !x || !y || !dw) return CUDNN_STATUS_INVALID_VALUE;
+
+    auto* rd = (RNNDesc*)rnnDesc;
+    auto* xt0 = (TensorDesc*)xDesc[0];
+    auto* yt0 = (TensorDesc*)yDesc[0];
+    int batch = xt0->n;
+    int inputSize = xt0->c * xt0->h * xt0->w;
+    int hiddenSize = rd->hiddenSize;
+
+    const float* xf = (const float*)x;
+    const float* yf = (const float*)y;
+    const float* hxf = (const float*)hx;
+    float* dwf = (float*)dw;
+
+    // Zero gradients
+    int wihSize = hiddenSize * inputSize;
+    int whhSize = hiddenSize * hiddenSize;
+    int totalWeights = wihSize + whhSize + hiddenSize;
+    for (int i = 0; i < totalWeights; ++i) dwf[i] = 0.f;
+
+    float* dW_ih = dwf;
+    float* dW_hh = dwf + wihSize;
+    float* db = dwf + wihSize + whhSize;
+
+    // Reconstruct h_prev from hx and y
+    std::vector<float> hPrev(batch * hiddenSize, 0.f);
+    if (hxf) {
+        for (int i = 0; i < batch * hiddenSize; ++i) hPrev[i] = hxf[i];
+    }
+
+    for (int t = 0; t < seqLength; ++t) {
+        const float* x_t = xf + t * batch * inputSize;
+        const float* y_t = yf + t * batch * hiddenSize;
+
+        for (int n = 0; n < batch; ++n) {
+            for (int j = 0; j < hiddenSize; ++j) {
+                float hval = y_t[n * hiddenSize + j];
+                float grad = 1.0f - hval * hval;  // derivative of tanh
+
+                // db
+                db[j] += grad;
+                // dW_ih
+                for (int k = 0; k < inputSize; ++k)
+                    dW_ih[j * inputSize + k] += grad * x_t[n * inputSize + k];
+                // dW_hh
+                for (int k = 0; k < hiddenSize; ++k)
+                    dW_hh[j * hiddenSize + k] += grad * hPrev[n * hiddenSize + k];
+            }
+        }
+
+        for (int i = 0; i < batch * hiddenSize; ++i) hPrev[i] = y_t[i];
+    }
+
+    (void)hxDesc;
+    return CUDNN_STATUS_SUCCESS;
+}
+
 } // extern "C"
