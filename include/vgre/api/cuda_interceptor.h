@@ -113,6 +113,33 @@ using cudaGraphExec_t = GraphExecId;
 // ── CUDA event handle ─────────────────────────────────────────────────────
 using cudaEvent_t = vgre::core::Event *;
 
+// ── CUDA channel format & array types (used by both interceptor and shims) ──
+struct cudaChannelFormatDesc {
+  int x, y, z, w;
+  int f; // 0=float, 1=signed, 2=unsigned
+};
+
+struct cudaPitchedPtr {
+  void   *ptr;
+  size_t  pitch;
+  size_t  xsize;
+  size_t  ysize;
+};
+struct cudaPos { size_t x, y, z; };
+struct cudaExtent { size_t width, height, depth; };
+using cudaArray_t = uint64_t;
+
+struct cudaMemcpy3DParms {
+  cudaArray_t            srcArray;
+  struct cudaPos         srcPos;
+  struct cudaPitchedPtr  srcPtr;
+  cudaArray_t            dstArray;
+  struct cudaPos         dstPos;
+  struct cudaPitchedPtr  dstPtr;
+  struct cudaExtent      extent;
+  cudaMemcpyKind_t       kind;
+};
+
 // ── CUDA Runtime API Interceptor ──────────────────────────────────────────
 class CUDAInterceptor {
 public:
@@ -242,11 +269,6 @@ public:
   using cudaTextureObject_t = uint64_t;
   using cudaSurfaceObject_t = uint64_t;
 
-  struct cudaChannelFormatDesc {
-    int x, y, z, w;
-    int f; // 0=float, 1=signed, 2=unsigned
-  };
-
   enum CUresourceViewFormat {
     CU_RES_VIEW_FORMAT_NONE = 0x00,
     CU_RES_VIEW_FORMAT_UINT_8X1 = 0x01,
@@ -350,31 +372,12 @@ public:
       cudaGraphExecUpdateErrorAttributesChanged = 8
   };
 
-  struct cudaPitchedPtr {
-      void   *ptr;
-      size_t  pitch;
-      size_t  xsize;
-      size_t  ysize;
-  };
-  struct cudaPos { size_t x, y, z; };
-  struct cudaExtent { size_t width, height, depth; };
-  // cudaArray handle backed by TextureManager::TextureId
-  using cudaArray_t = uint64_t;
-
-  struct cudaMemcpy3DParms {
-      cudaArray_t            srcArray;  // TextureManager-backed array handle
-      struct cudaPos         srcPos;
-      struct cudaPitchedPtr  srcPtr;
-      cudaArray_t            dstArray;  // TextureManager-backed array handle
-      struct cudaPos         dstPos;
-      struct cudaPitchedPtr  dstPtr;
-      struct cudaExtent      extent;
-      cudaMemcpyKind_t       kind;
-  };
-
   // ── cudaArray Lifecycle (backed by TextureManager) ──────────────────────
   cudaError_t mallocArray(cudaArray_t *array, const cudaChannelFormatDesc *desc,
                           size_t width, size_t height, unsigned int flags);
+  cudaError_t malloc3DArray(cudaArray_t *array,
+                            const cudaChannelFormatDesc *desc,
+                            cudaExtent extent, unsigned int flags);
   cudaError_t freeArray(cudaArray_t array);
   cudaError_t memcpyToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
                             const void *src, size_t count, cudaMemcpyKind_t kind);

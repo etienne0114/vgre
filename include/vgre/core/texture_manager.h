@@ -156,6 +156,9 @@ public:
   // Allocates a managed memory block and wraps it as a texture for sampling.
   VGREResult createCudaArray(TextureId &outId, size_t width, size_t height,
                              size_t elementSize, const TextureDescriptor &desc);
+  VGREResult createCudaArray3D(TextureId &outId, size_t width, size_t height,
+                               size_t depth, size_t elementSize,
+                               const TextureDescriptor &desc);
   VGREResult destroyCudaArray(TextureId id);
   // Returns raw pointer to the cudaArray's owned backing memory for memcpy.
   void *getCudaArrayData(TextureId id);

@@ -218,6 +218,10 @@ add_executable(test_memcpy_symbol api/test_memcpy_symbol.cpp)
 target_link_libraries(test_memcpy_symbol PRIVATE vgre_cudart)
 add_test(NAME MemcpySymbol COMMAND test_memcpy_symbol)
 
+add_executable(test_malloc_array api/test_malloc_array.cpp)
+target_link_libraries(test_malloc_array PRIVATE vgre_cudart)
+add_test(NAME MallocArray COMMAND test_malloc_array)
+
 add_executable(test_tpm_auth unit/test_tpm_auth.cpp)
 target_link_libraries(test_tpm_auth PRIVATE vgre)
 add_test(NAME TPMAuth COMMAND test_tpm_auth)

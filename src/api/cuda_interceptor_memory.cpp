@@ -469,6 +469,41 @@ cudaError_t CUDAInterceptor::mallocArray(cudaArray_t *array, const cudaChannelFo
   return cudaSuccess;
 }
 
+cudaError_t CUDAInterceptor::malloc3DArray(cudaArray_t *array,
+                                             const cudaChannelFormatDesc *desc,
+                                             cudaExtent extent,
+                                             unsigned int flags) {
+  (void)flags;
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess) return err;
+  }
+  if (!array || !desc || extent.width == 0 || extent.height == 0 ||
+      extent.depth == 0)
+    return cudaErrorInvalidValue;
+
+  vgre::core::TextureDescriptor tdesc;
+  tdesc.elementType = mapChannelDesc(*desc);
+  size_t elementSize = (desc->x + desc->y + desc->z + desc->w) / 8;
+  if (elementSize == 0) {
+    VGRE_LOG_ERROR("CUDAInterceptor",
+                   "malloc3DArray: Invalid channel descriptor (zero bits).");
+    return cudaErrorInvalidValue;
+  }
+
+  vgre::core::TextureId arrID;
+  auto r = core::TextureManager::instance().createCudaArray3D(
+      arrID, extent.width, extent.height, extent.depth, elementSize, tdesc);
+
+  if (r != VGREResult::SUCCESS) {
+    cudaError_t err = convertResult(r);
+    return err;
+  }
+
+  *array = arrID;
+  return cudaSuccess;
+}
+
 // ── Texture/Surface Memory API ──────────────────────────────────────────
 vgre::core::TextureElementType CUDAInterceptor::mapViewFormat(CUresourceViewFormat format) {
     switch (format) {
