@@ -266,6 +266,10 @@ add_executable(test_cudnn_pooling_backward api/test_cudnn_pooling_backward.cpp)
 target_link_libraries(test_cudnn_pooling_backward PRIVATE vgre)
 add_test(NAME CudnnPoolingBackward COMMAND test_cudnn_pooling_backward)
 
+add_executable(test_cudnn_dropout api/test_cudnn_dropout.cpp)
+target_link_libraries(test_cudnn_dropout PRIVATE vgre)
+add_test(NAME CudnnDropout COMMAND test_cudnn_dropout)
+
 add_executable(test_memset2d_graph_kernelnode api/test_memset2d_graph_kernelnode.cpp)
 target_link_libraries(test_memset2d_graph_kernelnode PRIVATE vgre_cudart)
 add_test(NAME Memset2DGraphKernelNode COMMAND test_memset2d_graph_kernelnode)

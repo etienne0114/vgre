@@ -10,6 +10,7 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
+#include <random>
 
 // ── cuDNN type stubs (no cudnn.h needed) ─────────────────────────────────────
 typedef int    cudnnStatus_t;
@@ -19,6 +20,7 @@ typedef void*  cudnnFilterDescriptor_t;
 typedef void*  cudnnConvolutionDescriptor_t;
 typedef void*  cudnnPoolingDescriptor_t;
 typedef void*  cudnnActivationDescriptor_t;
+typedef void*  cudnnDropoutDescriptor_t;
 typedef void*  cudnnOpTensorDescriptor_t;
 
 static constexpr cudnnStatus_t CUDNN_STATUS_SUCCESS       = 0;
@@ -104,6 +106,12 @@ struct PoolDesc {
 struct ActDesc {
     cudnnActivationMode_t mode;
     double coeff;
+};
+struct DropoutDesc {
+    float dropout;
+    unsigned long long seed;
+    void* states = nullptr;
+    size_t statesSize = 0;
 };
 struct HandleCtx {
     void* stream   = nullptr;  // bound CUDA stream (for async ordering)
@@ -1360,6 +1368,115 @@ cudnnStatus_t cudnnBatchNormalizationBackward(
         }
     }
 
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── Dropout ──────────────────────────────────────────────────────────────────
+cudnnStatus_t cudnnCreateDropoutDescriptor(cudnnDropoutDescriptor_t* desc) {
+    if (!desc) return CUDNN_STATUS_INVALID_VALUE;
+    *desc = new DropoutDesc{};
+    return CUDNN_STATUS_SUCCESS;
+}
+cudnnStatus_t cudnnDestroyDropoutDescriptor(cudnnDropoutDescriptor_t desc) {
+    auto* d = (DropoutDesc*)desc;
+    if (d && d->states) { std::free(d->states); }
+    delete d;
+    return CUDNN_STATUS_SUCCESS;
+}
+cudnnStatus_t cudnnSetDropoutDescriptor(
+    cudnnDropoutDescriptor_t desc,
+    cudnnHandle_t,
+    float dropout,
+    void* states,
+    size_t stateSizeInBytes,
+    unsigned long long seed)
+{
+    if (!desc) return CUDNN_STATUS_INVALID_VALUE;
+    auto* d = (DropoutDesc*)desc;
+    d->dropout = dropout;
+    d->seed = seed;
+    d->states = states;
+    d->statesSize = stateSizeInBytes;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetDropoutReserveSpaceSize(
+    cudnnTensorDescriptor_t xDesc,
+    size_t* sizeInBytes)
+{
+    if (!xDesc || !sizeInBytes) return CUDNN_STATUS_INVALID_VALUE;
+    auto* t = (TensorDesc*)xDesc;
+    *sizeInBytes = t->n * t->c * t->h * t->w * sizeof(uint8_t);
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnDropoutForward(
+    cudnnHandle_t,
+    cudnnDropoutDescriptor_t desc,
+    cudnnTensorDescriptor_t xDesc,
+    const void* x,
+    cudnnTensorDescriptor_t yDesc,
+    void* y,
+    void* reserveSpace,
+    size_t reserveSpaceSizeInBytes)
+{
+    if (!desc || !xDesc || !yDesc || !x || !y || !reserveSpace)
+        return CUDNN_STATUS_INVALID_VALUE;
+
+    auto* d = (DropoutDesc*)desc;
+    auto* t = (TensorDesc*)xDesc;
+    int N = t->n * t->c * t->h * t->w;
+    size_t expectedSize = N * sizeof(uint8_t);
+    if (reserveSpaceSizeInBytes < expectedSize) return CUDNN_STATUS_INVALID_VALUE;
+
+    float scale = 1.0f / (1.0f - d->dropout);
+    const float* xf = (const float*)x;
+    float* yf = (float*)y;
+    uint8_t* mask = (uint8_t*)reserveSpace;
+
+    std::mt19937_64 rng(d->seed);
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    for (int i = 0; i < N; ++i) {
+        float r = dist(rng);
+        if (r < d->dropout) {
+            mask[i] = 0;
+            yf[i] = 0.0f;
+        } else {
+            mask[i] = 1;
+            yf[i] = xf[i] * scale;
+        }
+    }
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnDropoutBackward(
+    cudnnHandle_t,
+    cudnnDropoutDescriptor_t desc,
+    cudnnTensorDescriptor_t dyDesc,
+    const void* dy,
+    cudnnTensorDescriptor_t dxDesc,
+    void* dx,
+    void* reserveSpace,
+    size_t reserveSpaceSizeInBytes)
+{
+    if (!desc || !dyDesc || !dxDesc || !dy || !dx || !reserveSpace)
+        return CUDNN_STATUS_INVALID_VALUE;
+
+    auto* d = (DropoutDesc*)desc;
+    auto* td = (TensorDesc*)dyDesc;
+    int N = td->n * td->c * td->h * td->w;
+    size_t expectedSize = N * sizeof(uint8_t);
+    if (reserveSpaceSizeInBytes < expectedSize) return CUDNN_STATUS_INVALID_VALUE;
+
+    float scale = 1.0f / (1.0f - d->dropout);
+    const float* dyf = (const float*)dy;
+    float* dxf = (float*)dx;
+    const uint8_t* mask = (const uint8_t*)reserveSpace;
+
+    for (int i = 0; i < N; ++i) {
+        dxf[i] = mask[i] ? (dyf[i] * scale) : 0.0f;
+    }
     return CUDNN_STATUS_SUCCESS;
 }
 
