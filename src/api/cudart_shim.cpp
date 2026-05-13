@@ -1356,3 +1356,15 @@ cudaError_t cudaGenerateMipmaps(void *mipmappedArray) {
 }
 
 } // extern "C"
+
+// ── Cross-file kernel registry helpers ────────────────────────────────────────
+// Exported as plain C++ symbols (not extern "C") so other .cpp files in the
+// same shared library can call them without name-mangling issues.
+
+std::string vgre_lookup_kernel_name(const void *hostFn) {
+  return CUDAModuleRegistry::instance().lookupKernelName(hostFn);
+}
+
+std::string vgre_lookup_kernel_source(const void *hostFn) {
+  return CUDAModuleRegistry::instance().lookupKernelSource(hostFn);
+}

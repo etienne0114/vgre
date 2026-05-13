@@ -226,6 +226,10 @@ add_executable(test_pointer_attributes api/test_pointer_attributes.cpp)
 target_link_libraries(test_pointer_attributes PRIVATE vgre_cudart)
 add_test(NAME PointerAttributes COMMAND test_pointer_attributes)
 
+add_executable(test_memset2d_graph_kernelnode api/test_memset2d_graph_kernelnode.cpp)
+target_link_libraries(test_memset2d_graph_kernelnode PRIVATE vgre_cudart)
+add_test(NAME Memset2DGraphKernelNode COMMAND test_memset2d_graph_kernelnode)
+
 add_executable(test_tpm_auth unit/test_tpm_auth.cpp)
 target_link_libraries(test_tpm_auth PRIVATE vgre)
 add_test(NAME TPMAuth COMMAND test_tpm_auth)
@@ -448,14 +452,26 @@ add_test(NAME WebSocketTransportIntegration COMMAND test_websocket_transport)
 set_tests_properties(WebSocketTransportIntegration PROPERTIES TIMEOUT 10)
 
 # ── Python end-to-end test (CUDA-on-CPU via C API) ─────────────────────────
-find_package(Python3 COMPONENTS Interpreter)
-if(Python3_FOUND)
+# Use the project .venv interpreter so numpy and other dependencies are available.
+set(VGRE_VENV_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
+if(EXISTS "${VGRE_VENV_PYTHON}")
     add_test(NAME PythonCAPIVectorAdd
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test_cuda_on_cpu.py)
+        COMMAND "${VGRE_VENV_PYTHON}" ${CMAKE_SOURCE_DIR}/test_cuda_on_cpu.py)
     set_tests_properties(PythonCAPIVectorAdd PROPERTIES
         ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
         LABELS "python;e2e"
     )
+else()
+    # Fallback: use the system Python3 found by CMake.
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        add_test(NAME PythonCAPIVectorAdd
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test_cuda_on_cpu.py)
+        set_tests_properties(PythonCAPIVectorAdd PROPERTIES
+            ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+            LABELS "python;e2e"
+        )
+    endif()
 endif()
 
 # ── Global Test Configuration ──────────────────────────────────────────────

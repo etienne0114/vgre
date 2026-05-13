@@ -2,9 +2,11 @@
 #include "vgre/common/logger.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/graph_optimizer.h"
+#include <algorithm>
 #include <cstring>
 #include <queue>
 #include <sstream>
+#include <unordered_set>
 
 namespace vgre {
 namespace core {
@@ -54,6 +56,15 @@ vgre::VGREResult GraphManager::cloneGraph(GraphId srcId, GraphId &outCloneId) {
   }
   graphs_[clone->id] = clone;
   outCloneId = clone->id;
+
+  // Record node ID mapping for cudaGraphNodeFindInClone.
+  // In a structural clone the node IDs are identical (same nodeId values).
+  auto &nodeMap = cloneNodeMap_[srcId];
+  nodeMap.clear();
+  for (const auto &node : clone->nodes)
+    nodeMap[node.nodeId] = node.nodeId;
+  cloneOriginMap_[clone->id] = srcId;
+
   VGRE_LOG_INFO("GraphManager", "Cloned graph " + std::to_string(srcId) +
                 " -> " + std::to_string(outCloneId) +
                 " (" + std::to_string(clone->nodes.size()) + " nodes)");
@@ -453,9 +464,18 @@ vgre::VGREResult GraphManager::instantiate(GraphId id, GraphExecId &outExecId) {
     return vgre::VGREResult::ERR_INVALID_VALUE;
   }
 
+  // Deep-clone the template graph into a working copy owned by GraphExec.
+  // This ensures that exec-time mutations (execKernelNodeSetParams, etc.)
+  // do not pollute the template graph that may be re-instantiated later.
+  auto workingCopy = std::make_shared<Graph>();
+  workingCopy->id = it->second->id;
+  workingCopy->nextNodeId = it->second->nextNodeId;
+  workingCopy->nodes = it->second->nodes;       // value-copy (deep for vectors)
+  workingCopy->nodeIndex = it->second->nodeIndex;
+
   auto exec = std::make_shared<GraphExec>();
   exec->id = nextExecId_++;
-  exec->sourceGraph = it->second;
+  exec->sourceGraph = workingCopy;
 
   VGRE_LOG_INFO(
       "GraphManager",
@@ -614,9 +634,34 @@ vgre::VGREResult GraphManager::launch(GraphExecId execId, StreamId stream) {
                                      std::to_string(execId) + " on stream " +
                                      std::to_string(stream));
 
+  // Filter disabled nodes; rebuild dep list to exclude any edges leading to
+  // disabled nodes so the topology remains consistent for the dispatcher.
+  std::vector<GraphNode> activeNodes;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::unordered_set<uint64_t> disabledIds;
+    for (const auto &kv : exec->nodeEnabled)
+      if (!kv.second) disabledIds.insert(kv.first);
+
+    if (disabledIds.empty()) {
+      activeNodes = exec->sourceGraph->nodes;
+    } else {
+      activeNodes.reserve(exec->sourceGraph->nodes.size());
+      for (const auto &node : exec->sourceGraph->nodes) {
+        if (disabledIds.count(node.nodeId)) continue;
+        GraphNode n = node;
+        auto &deps = n.deps;
+        deps.erase(std::remove_if(deps.begin(), deps.end(),
+                                  [&](uint64_t d){ return disabledIds.count(d) > 0; }),
+                   deps.end());
+        activeNodes.push_back(std::move(n));
+      }
+    }
+  }
+
   // Timed dispatch — updates GraphExecProfile for this executable.
   auto t0 = std::chrono::steady_clock::now();
-  VGREResult r = engine.dispatchGraphNodes(exec->sourceGraph->nodes, stream);
+  VGREResult r = engine.dispatchGraphNodes(activeNodes, stream);
   auto t1 = std::chrono::steady_clock::now();
 
   double elapsedMs = std::chrono::duration<double, std::milli>(t1 - t0).count();

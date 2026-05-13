@@ -693,6 +693,70 @@ bool RuntimeEngine::isStreamCapturing(StreamId stream) const {
   return captureState_.count(stream) > 0;
 }
 
+bool RuntimeEngine::getStreamCaptureInfo(StreamId stream,
+                                          GraphId &outGraphId) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = captureState_.find(stream);
+  if (it == captureState_.end()) {
+    outGraphId = 0;
+    return false;
+  }
+  outGraphId = it->second;
+  return true;
+}
+
+bool RuntimeEngine::getStreamCaptureInfoV2(StreamId stream,
+                                            GraphId &outGraphId,
+                                            std::vector<uint64_t> &outDeps) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = captureState_.find(stream);
+  if (it == captureState_.end()) {
+    outGraphId = 0;
+    outDeps.clear();
+    return false;
+  }
+  outGraphId = it->second;
+
+  // Current capture dependency frontier = lastCapturedNodeId_ for this stream.
+  outDeps.clear();
+  auto nodeIt = lastCapturedNodeId_.find(stream);
+  if (nodeIt != lastCapturedNodeId_.end() && nodeIt->second != 0)
+    outDeps.push_back(nodeIt->second);
+
+  auto seedIt = captureSeedDeps_.find(stream);
+  if (seedIt != captureSeedDeps_.end())
+    for (auto d : seedIt->second)
+      outDeps.push_back(d);
+
+  return true;
+}
+
+VGREResult RuntimeEngine::streamUpdateCaptureDependencies(
+    StreamId stream, const std::vector<uint64_t> &deps, bool replace) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (captureState_.find(stream) == captureState_.end())
+    return VGREResult::ERR_INVALID_VALUE;
+
+  if (replace) {
+    captureSeedDeps_[stream] = deps;
+    lastCapturedNodeId_.erase(stream);
+  } else {
+    auto &existing = captureSeedDeps_[stream];
+    for (auto d : deps) existing.push_back(d);
+  }
+  return VGREResult::SUCCESS;
+}
+
+VGREResult RuntimeEngine::streamCopyAttributes(StreamId dst, StreamId src) {
+  // VGRE stream attributes (priority, flags) are stored in the CUDART shim's
+  // g_streamMeta table which is not accessible here.  The RuntimeEngine has
+  // no additional per-stream state beyond capture, so this is a no-op from
+  // the engine's perspective.  The CUDART shim layer handles the metadata copy.
+  (void)dst; (void)src;
+  if (!initialized_) return VGREResult::ERR_NOT_INITIALIZED;
+  return VGREResult::SUCCESS;
+}
+
 VGREResult RuntimeEngine::recordMemcpyToGraph(StreamId stream, void *dst, const void *src, size_t count, int kind) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!initialized_ || !graphManager_)

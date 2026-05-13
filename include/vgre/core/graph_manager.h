@@ -4,7 +4,9 @@
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
+#include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -14,7 +16,19 @@
 namespace vgre {
 namespace core {
 
-enum class GraphNodeType { KERNEL, MEMCPY, CONDITIONAL };
+enum class GraphNodeType {
+    KERNEL,
+    MEMCPY,
+    CONDITIONAL,
+    MEMSET,       // cudaGraphAddMemsetNode
+    HOST,         // cudaGraphAddHostNode
+    CHILD,        // cudaGraphAddChildGraphNode
+    EMPTY,        // cudaGraphAddEmptyNode
+    EVENT_RECORD, // cudaGraphAddEventRecordNode
+    EVENT_WAIT,   // cudaGraphAddEventWaitNode
+    MEMALLOC,     // cudaGraphAddMemAllocNode
+    MEMFREE,      // cudaGraphAddMemFreeNode
+};
 
 // Condition type for conditional nodes (matches cudaGraphCondType)
 enum class GraphCondType : uint8_t {
@@ -55,6 +69,30 @@ struct GraphNode {
   GraphId bodyGraphId = 0;     // subgraph to execute when condition is true
   GraphCondType condType = GraphCondType::IF;
   unsigned int maxIterations = 65536;  // safety limit for WHILE loops
+
+  // MEMSET node data (pitched 2D/3D fill)
+  // dst is reused from the memcpy field above.
+  int memsetValue = 0;     // fill byte value (cast to unsigned char)
+  size_t memsetPitch = 0;  // row stride in bytes (>= memsetWidth)
+  size_t memsetWidth = 0;  // bytes to write per row
+  size_t memsetHeight = 0; // number of rows
+  size_t memsetDepth = 1;  // number of depth slices (1 = 2D, >1 = 3D)
+
+  // HOST node data
+  void (*hostFn)(void *) = nullptr;
+  void *hostUserData = nullptr;
+
+  // CHILD node data: child graph to run inline (reuses bodyGraphId)
+
+  // EVENT_RECORD / EVENT_WAIT node data
+  void *eventHandle = nullptr;  // cudaEvent_t (Event *)
+
+  // MEMALLOC node data
+  size_t memAllocSize = 0;
+  void  *memAllocPtr  = nullptr;  // pre-allocated backing pointer (set at node-add time)
+  void **memAllocOutPtr = nullptr; // where CUDA caller stores the pointer (runtime output)
+
+  // MEMFREE node data: pointer to free (stored in dst above)
 };
 
 class Graph {
@@ -82,6 +120,10 @@ public:
   GraphExecId id;
   std::shared_ptr<Graph> sourceGraph;
   GraphExecProfile profile;
+  unsigned int flags = 0;
+  // Per-node enabled/disabled state: nodeId -> enabled (true = runs, false = skipped).
+  // Nodes not in this map are enabled by default.
+  std::unordered_map<uint64_t, bool> nodeEnabled;
 };
 
 // Set by RuntimeEngine before calling addKernelNodeWithDepsOut so the capturing
@@ -138,16 +180,155 @@ public:
                                                  const std::vector<uint64_t> &deps,
                                                  uint64_t &outNodeId);
 
-  // Read-only access to graph nodes; used by RuntimeEngine to compile body subgraphs.
-  vgre::VGREResult getGraphNodes(GraphId id, std::vector<GraphNode> &outNodes) const;
+  // ── New node types (P1.11-1.16) ─────────────────────────────────────────
+  vgre::VGREResult addMemsetNode(GraphId id, void *dst, int value, size_t pitch,
+                                 size_t width, size_t height, size_t depth,
+                                 const std::vector<uint64_t> &deps,
+                                 uint64_t &outNodeId);
 
+  vgre::VGREResult addHostNode(GraphId id, void (*fn)(void *), void *userData,
+                               const std::vector<uint64_t> &deps,
+                               uint64_t &outNodeId);
+
+  vgre::VGREResult addChildGraphNode(GraphId id, GraphId childGraphId,
+                                     const std::vector<uint64_t> &deps,
+                                     uint64_t &outNodeId);
+
+  vgre::VGREResult addEmptyNode(GraphId id, const std::vector<uint64_t> &deps,
+                                uint64_t &outNodeId);
+
+  vgre::VGREResult addEventRecordNode(GraphId id, void *event,
+                                      const std::vector<uint64_t> &deps,
+                                      uint64_t &outNodeId);
+
+  vgre::VGREResult addEventWaitNode(GraphId id, void *event,
+                                    const std::vector<uint64_t> &deps,
+                                    uint64_t &outNodeId);
+
+  vgre::VGREResult addMemAllocNode(GraphId id, size_t bytesize,
+                                   void **outDevPtr,
+                                   const std::vector<uint64_t> &deps,
+                                   uint64_t &outNodeId);
+
+  vgre::VGREResult addMemFreeNode(GraphId id, void *devPtr,
+                                  const std::vector<uint64_t> &deps,
+                                  uint64_t &outNodeId);
+
+  // ── Read-only graph introspection ────────────────────────────────────────
+  vgre::VGREResult getGraphNodes(GraphId id, std::vector<GraphNode> &outNodes) const;
+  vgre::VGREResult getGraphNodeCount(GraphId id, size_t &outCount) const;
+
+  // Returns all root nodes (nodes with no incoming deps within this graph).
+  vgre::VGREResult getGraphRootNodes(GraphId id,
+                                     std::vector<uint64_t> &outNodeIds) const;
+
+  // Returns all edges as (from, to) pairs.
+  vgre::VGREResult getGraphEdges(GraphId id,
+                                 std::vector<uint64_t> &fromNodes,
+                                 std::vector<uint64_t> &toNodes,
+                                 size_t &outCount) const;
+
+  vgre::VGREResult getNodeType(GraphId id, uint64_t nodeId,
+                               GraphNodeType &outType) const;
+
+  vgre::VGREResult getNodeDependencies(GraphId id, uint64_t nodeId,
+                                       std::vector<uint64_t> &outDeps,
+                                       size_t &outCount) const;
+
+  vgre::VGREResult getNodeDependentNodes(GraphId id, uint64_t nodeId,
+                                         std::vector<uint64_t> &outDependents,
+                                         size_t &outCount) const;
+
+  // Find the corresponding node in a cloned graph.
+  vgre::VGREResult findNodeInClone(GraphId originalGraph, uint64_t originalNodeId,
+                                   GraphId clonedGraph,
+                                   uint64_t &outClonedNodeId) const;
+
+  // Serialize to DOT format for debugging (cudaGraphDebugDotPrint).
+  vgre::VGREResult debugDotPrint(GraphId id, const char *path,
+                                 unsigned int flags) const;
+
+  // ── Node parameter introspection ─────────────────────────────────────────
+  vgre::VGREResult getKernelNodeParams(GraphId id, uint64_t nodeId,
+                                       KernelId &outKernelId,
+                                       std::string &outName,
+                                       dim3 &outGrid, dim3 &outBlock,
+                                       std::vector<std::vector<uint8_t>> &outArgs) const;
+
+  vgre::VGREResult getMemcpyNodeParams(GraphId id, uint64_t nodeId,
+                                       void *&outDst, void *&outSrc,
+                                       size_t &outCount, int &outKind) const;
+
+  vgre::VGREResult getMemsetNodeParams(GraphId id, uint64_t nodeId,
+                                       void *&outDst, int &outValue,
+                                       size_t &outPitch, size_t &outWidth,
+                                       size_t &outHeight, size_t &outDepth) const;
+
+  vgre::VGREResult getHostNodeParams(GraphId id, uint64_t nodeId,
+                                     void (**outFn)(void *),
+                                     void *&outUserData) const;
+
+  // ── Exec-time node mutation ───────────────────────────────────────────────
+  vgre::VGREResult execKernelNodeSetParams(GraphExecId execId,
+                                           uint64_t nodeId,
+                                           void **args,
+                                           const std::vector<ArgType> &argTypes);
+
+  vgre::VGREResult execMemcpyNodeSetParams(GraphExecId execId, uint64_t nodeId,
+                                           void *dst, void *src,
+                                           size_t count, int kind);
+
+  vgre::VGREResult execMemsetNodeSetParams(GraphExecId execId, uint64_t nodeId,
+                                           void *dst, int value,
+                                           size_t pitch, size_t width,
+                                           size_t height, size_t depth);
+
+  vgre::VGREResult execHostNodeSetParams(GraphExecId execId, uint64_t nodeId,
+                                         void (*fn)(void *), void *userData);
+
+  vgre::VGREResult execChildGraphNodeSetParams(GraphExecId execId,
+                                               uint64_t nodeId,
+                                               GraphId newChildGraph);
+
+  vgre::VGREResult execEventRecordNodeSetEvent(GraphExecId execId,
+                                               uint64_t nodeId, void *event);
+
+  vgre::VGREResult execEventWaitNodeSetEvent(GraphExecId execId,
+                                             uint64_t nodeId, void *event);
+
+  vgre::VGREResult nodeSetEnabled(GraphExecId execId, uint64_t nodeId,
+                                  bool enabled);
+  vgre::VGREResult nodeGetEnabled(GraphExecId execId, uint64_t nodeId,
+                                  bool &outEnabled) const;
+
+  vgre::VGREResult getExecFlags(GraphExecId execId,
+                                unsigned int &outFlags) const;
+  vgre::VGREResult setExecFlags(GraphExecId execId, unsigned int flags);
+
+  // ── Dependency editing ────────────────────────────────────────────────────
   vgre::VGREResult addDependency(GraphId id, uint64_t nodeId,
                                  uint64_t dependsOn);
+  vgre::VGREResult removeDependency(GraphId id, uint64_t nodeId,
+                                    uint64_t dependsOn);
+  vgre::VGREResult addDependencies(GraphId id,
+                                   const uint64_t *fromNodes,
+                                   const uint64_t *toNodes,
+                                   size_t numDeps);
+  vgre::VGREResult removeDependencies(GraphId id,
+                                      const uint64_t *fromNodes,
+                                      const uint64_t *toNodes,
+                                      size_t numDeps);
+
   vgre::VGREResult updateKernelNodeArgs(GraphId id, uint64_t nodeId,
                                         void **args,
                                         const std::vector<ArgType> &argTypes);
   vgre::VGREResult updateMemcpyNode(GraphId id, uint64_t nodeId, void *dst,
                                     void *src, size_t count, int kind);
+  vgre::VGREResult updateMemsetNodeInGraph(GraphId id, uint64_t nodeId,
+                                           void *dst, int value, size_t pitch,
+                                           size_t width, size_t height, size_t depth);
+  vgre::VGREResult updateHostNodeInGraph(GraphId id, uint64_t nodeId,
+                                         void (*fn)(void *), void *userData);
 
   vgre::VGREResult cloneGraph(GraphId srcId, GraphId &outCloneId);
 
@@ -179,12 +360,31 @@ public:
   vgre::VGREResult destroyGraphExec(GraphExecId id);
   vgre::VGREResult launch(GraphExecId execId, StreamId stream);
 
+  // Return the exec's mutable working copy of a graph node by node ID,
+  // or nullptr if the node does not exist in the exec's source graph.
+  GraphNode *findExecNode(GraphExecId execId, uint64_t nodeId);
+
+  // Query the type of a node inside an exec's working graph.
+  VGREResult getExecNodeType(GraphExecId execId, uint64_t nodeId,
+                             GraphNodeType &outType) const;
+
 private:
   std::unordered_map<GraphId, std::shared_ptr<Graph>> graphs_;
   std::unordered_map<GraphExecId, std::shared_ptr<GraphExec>> executables_;
   GraphId nextGraphId_ = 1;
   GraphExecId nextExecId_ = 1;
   mutable std::recursive_mutex mutex_;
+
+  // ── Clone-tracking for cudaGraphNodeFindInClone ─────────────────────────
+  // Maps (originalGraphId, originalNodeId) -> (clonedGraphId, clonedNodeId).
+  // Populated by cloneGraph().
+  std::unordered_map<GraphId, std::unordered_map<uint64_t, uint64_t>> cloneNodeMap_;
+  // Maps cloned graph ID -> original graph ID (for reverse lookup).
+  std::unordered_map<GraphId, GraphId> cloneOriginMap_;
+
+  // ── MemAlloc backing store ───────────────────────────────────────────────
+  // Tracks pointers allocated by MEMALLOC nodes so MEMFREE can release them.
+  std::unordered_map<void *, size_t> memAllocRegistry_;
 };
 
 } // namespace core

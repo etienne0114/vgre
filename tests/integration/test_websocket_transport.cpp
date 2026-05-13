@@ -18,6 +18,7 @@
 #include <chrono>
 
 using namespace vgre::advanced;
+using namespace vgre;
 
 // ── Test 1: Server start + client connect + handshake ────────────────────
 static void testClientServerHandshake() {

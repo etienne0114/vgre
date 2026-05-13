@@ -1,6 +1,7 @@
 #include "vgre/core/runtime_engine.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/common/logger.h"
+#include "vgre/core/event.h"
 #include "vgre/core/graph_manager.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/scheduler.h"
@@ -49,6 +50,20 @@ struct NativeGraphOperation {
   // For SWITCH: bodyExecs[i] = subgraph for branch i; bodyExec = default (branch 0).
   std::function<void(runtime::CPUParallelExecutor *, MemoryManager *)> bodyExec;
   std::vector<std::function<void(runtime::CPUParallelExecutor *, MemoryManager *)>> bodyExecs;
+
+  // MEMSET node
+  int   memsetValue  = 0;
+  size_t memsetPitch  = 0;
+  size_t memsetWidth  = 0;
+  size_t memsetHeight = 0;
+  size_t memsetDepth  = 1;
+
+  // HOST node
+  void (*hostFn)(void *) = nullptr;
+  void *hostUserData     = nullptr;
+
+  // EVENT_RECORD / EVENT_WAIT
+  void *eventHandle = nullptr;
 };
 
 // ── Graph dispatch helpers ─────────────────────────────────────────────────
@@ -149,6 +164,53 @@ static void executeOpsInline(const std::vector<NativeGraphOperation> &ops,
           if (branch != 0) op.bodyExec(exec, mm);
         }
       }
+
+    } else if (op.type == GraphNodeType::MEMSET) {
+      // 2D / 3D pitched fill: for each depth slice, iterate over rows.
+      if (!op.dst || op.memsetWidth == 0 || op.memsetHeight == 0) continue;
+      auto *base = static_cast<uint8_t *>(op.dst);
+      size_t depth = (op.memsetDepth == 0) ? 1 : op.memsetDepth;
+      for (size_t d = 0; d < depth; ++d) {
+        for (size_t h = 0; h < op.memsetHeight; ++h) {
+          // Slice offset: d * (pitch * height); row offset: h * pitch.
+          size_t sliceOff = d * op.memsetPitch * op.memsetHeight;
+          std::memset(base + sliceOff + h * op.memsetPitch,
+                      op.memsetValue, op.memsetWidth);
+        }
+      }
+
+    } else if (op.type == GraphNodeType::HOST) {
+      if (op.hostFn) op.hostFn(op.hostUserData);
+
+    } else if (op.type == GraphNodeType::CHILD) {
+      // Child graph body was pre-compiled into op.bodyExec.
+      if (op.bodyExec) op.bodyExec(exec, mm);
+
+    } else if (op.type == GraphNodeType::EMPTY) {
+      // No-op dependency placeholder — nothing to do.
+
+    } else if (op.type == GraphNodeType::EVENT_RECORD) {
+      // Mark the event as recorded (timestamp = now).
+      if (op.eventHandle) {
+        auto *ev = static_cast<vgre::core::Event *>(op.eventHandle);
+        ev->record(0 /*streamId*/);
+      }
+
+    } else if (op.type == GraphNodeType::EVENT_WAIT) {
+      // Synchronously wait for the event to be recorded.
+      if (op.eventHandle) {
+        auto *ev = static_cast<vgre::core::Event *>(op.eventHandle);
+        ev->synchronize();
+      }
+
+    } else if (op.type == GraphNodeType::MEMALLOC) {
+      // Memory was pre-allocated at node-add time; no work to do here.
+      // (The output pointer was written into *memAllocOutPtr at add time.)
+
+    } else if (op.type == GraphNodeType::MEMFREE) {
+      // Release the backing allocation that was pre-allocated.
+      if (op.dst && mm)
+        mm->free(op.dst);
     }
   }
 }
@@ -160,7 +222,10 @@ static void prefetchBodyGraphs(
     const std::vector<GraphNode> &nodes, GraphManager &gm,
     std::unordered_map<GraphId, std::vector<GraphNode>> &cache) {
   for (const auto &node : nodes) {
-    if (node.type == GraphNodeType::CONDITIONAL && node.bodyGraphId != 0 &&
+    // CONDITIONAL and CHILD both reference a sub-graph via bodyGraphId.
+    bool needsFetch = (node.type == GraphNodeType::CONDITIONAL ||
+                       node.type == GraphNodeType::CHILD);
+    if (needsFetch && node.bodyGraphId != 0 &&
         cache.find(node.bodyGraphId) == cache.end()) {
       std::vector<GraphNode> body;
       if (gm.getGraphNodes(node.bodyGraphId, body) == VGREResult::SUCCESS) {
@@ -370,6 +435,58 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode> &nodes
               };
             }
           }
+
+        } else if (node.type == GraphNodeType::MEMSET) {
+          op.dst          = node.dst;
+          op.memsetValue  = node.memsetValue;
+          op.memsetPitch  = node.memsetPitch;
+          op.memsetWidth  = node.memsetWidth;
+          op.memsetHeight = node.memsetHeight;
+          op.memsetDepth  = node.memsetDepth;
+
+        } else if (node.type == GraphNodeType::HOST) {
+          op.hostFn       = node.hostFn;
+          op.hostUserData = node.hostUserData;
+
+        } else if (node.type == GraphNodeType::CHILD) {
+          // Pre-compile child graph nodes.
+          if (node.bodyGraphId != 0) {
+            auto cacheIt = bodyCache.find(node.bodyGraphId);
+            if (cacheIt != bodyCache.end() && !cacheIt->second.empty()) {
+              std::vector<size_t> childOrder;
+              if (topoSortNodes(cacheIt->second, childOrder)) {
+                std::vector<GraphNode> sortedChild;
+                sortedChild.reserve(childOrder.size());
+                for (size_t ci : childOrder)
+                  sortedChild.push_back(cacheIt->second[ci]);
+
+                auto childOpsPtr =
+                    std::make_shared<std::vector<NativeGraphOperation>>();
+                childOpsPtr->reserve(sortedChild.size());
+                auto cres = compileNodes(sortedChild, *childOpsPtr);
+                if (cres == VGREResult::SUCCESS) {
+                  op.bodyExec = [childOpsPtr](runtime::CPUParallelExecutor *e,
+                                              MemoryManager *m) {
+                    executeOpsInline(*childOpsPtr, e, m);
+                  };
+                }
+              }
+            }
+          }
+
+        } else if (node.type == GraphNodeType::EMPTY) {
+          // No data to compile.
+
+        } else if (node.type == GraphNodeType::EVENT_RECORD ||
+                   node.type == GraphNodeType::EVENT_WAIT) {
+          op.eventHandle = node.eventHandle;
+
+        } else if (node.type == GraphNodeType::MEMALLOC) {
+          // Pre-allocated; no compile-time work beyond marking the type.
+          op.dst = node.memAllocPtr;
+
+        } else if (node.type == GraphNodeType::MEMFREE) {
+          op.dst = node.dst;  // pointer to free
         }
 
         outOps.push_back(std::move(op));

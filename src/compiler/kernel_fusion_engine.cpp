@@ -95,14 +95,49 @@ FusionPattern KernelFusionEngine::detectLayerNormFused(const KernelIR& ir) {
 
 FusionPattern KernelFusionEngine::detectGemmGeluFused(const KernelIR& ir) {
     const std::string& src = ir.source;
+
+    // GEMM: explicit name, or matrix-multiply body with A[] and B[] arrays
+    // accumulating into a sum variable (covers both direct `* A[` and
+    // `A[...] * B[...]` orderings).
     bool hasGemm = src.find("matmul") != std::string::npos ||
-                   src.find("gemm") != std::string::npos ||
-                   src.find("* A[") != std::string::npos;
+                   src.find("gemm")   != std::string::npos ||
+                   src.find("* A[")   != std::string::npos ||
+                   (src.find("A[") != std::string::npos &&
+                    src.find("B[") != std::string::npos &&
+                    src.find("sum") != std::string::npos);
+
     bool hasBias = src.find("bias") != std::string::npos ||
-                    src.find("+ b[") != std::string::npos;
+                   src.find("+ b[")  != std::string::npos;
+
+    // GELU: detect all common implementation styles.
+    //
+    // (a) Inline tanh form: "0.5f * x * (1.0f + tanh..."
+    // (b) Intermediate-variable form (e.g. store tanh in `t` then use
+    //     `0.5f * sum * (1.0f + t)`): match on the characteristic GELU
+    //     mathematical constants regardless of variable names.
+    //     • 0.044715  — cubic coefficient in the polynomial approximation
+    //     • 0.7978845608 / 0.797885 — sqrt(2/π), the scale factor
+    // (c) ERF-based GELU: uses erf(x / sqrt(2))
+    // (d) Explicit "gelu" token (function call or comment)
+    // (e) Output half-weight pattern common to all GELU variants:
+    //     `0.5f * <var> * (1.0f + <expr>)` captured as two disjoint finds.
+
+    bool hasTanh = src.find("tanhf(") != std::string::npos ||
+                   src.find("tanh(")  != std::string::npos;
+
+    bool hasGeluConst = src.find("0.044715")    != std::string::npos ||
+                        src.find("0.7978845608") != std::string::npos ||
+                        src.find("0.797885")     != std::string::npos;
+
+    // The two fragments must both appear (in any variable-name form).
+    bool hasGeluOutputShape = src.find("0.5f * ") != std::string::npos &&
+                              src.find("(1.0f + ") != std::string::npos;
+
     bool hasGelu = src.find("gelu") != std::string::npos ||
                    src.find("0.5f * x * (1.0f + tanh") != std::string::npos ||
-                   src.find("erf") != std::string::npos;
+                   src.find("erf") != std::string::npos ||
+                   (hasTanh && hasGeluConst) ||
+                   hasGeluOutputShape;
 
     if (hasGemm && hasBias && hasGelu)
         return FusionPattern::GEMM_GELU_FUSED;

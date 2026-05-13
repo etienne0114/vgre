@@ -183,15 +183,138 @@ public:
                                      unsigned int maxIterations,
                                      const std::vector<uint64_t> &deps,
                                      uint64_t &outNodeId);
+
+  // ── New node types (P1.11-1.16) ─────────────────────────────────────────
+  VGREResult graphAddMemsetNode(GraphId graph, void *dst, int value,
+                                size_t pitch, size_t width, size_t height,
+                                size_t depth,
+                                const std::vector<uint64_t> &deps,
+                                uint64_t &outNodeId);
+  VGREResult graphAddHostNode(GraphId graph, void (*fn)(void *),
+                              void *userData,
+                              const std::vector<uint64_t> &deps,
+                              uint64_t &outNodeId);
+  VGREResult graphAddChildGraphNode(GraphId graph, GraphId childGraph,
+                                    const std::vector<uint64_t> &deps,
+                                    uint64_t &outNodeId);
+  VGREResult graphAddEmptyNode(GraphId graph,
+                               const std::vector<uint64_t> &deps,
+                               uint64_t &outNodeId);
+  VGREResult graphAddEventRecordNode(GraphId graph, void *event,
+                                     const std::vector<uint64_t> &deps,
+                                     uint64_t &outNodeId);
+  VGREResult graphAddEventWaitNode(GraphId graph, void *event,
+                                   const std::vector<uint64_t> &deps,
+                                   uint64_t &outNodeId);
+  VGREResult graphAddMemAllocNode(GraphId graph, size_t bytesize,
+                                  void **outDevPtr,
+                                  const std::vector<uint64_t> &deps,
+                                  uint64_t &outNodeId);
+  VGREResult graphAddMemFreeNode(GraphId graph, void *devPtr,
+                                 const std::vector<uint64_t> &deps,
+                                 uint64_t &outNodeId);
+
+  // ── Graph introspection (P1.17) ──────────────────────────────────────────
+  VGREResult graphGetNodes(GraphId graph,
+                           std::vector<GraphNode> &outNodes) const;
+  VGREResult graphGetRootNodes(GraphId graph,
+                               std::vector<uint64_t> &outRoots) const;
+  VGREResult graphGetEdges(GraphId graph,
+                           std::vector<uint64_t> &fromNodes,
+                           std::vector<uint64_t> &toNodes,
+                           size_t &outCount) const;
+  VGREResult graphNodeGetType(GraphId graph, uint64_t nodeId,
+                              GraphNodeType &outType) const;
+  VGREResult graphNodeGetDependencies(GraphId graph, uint64_t nodeId,
+                                      std::vector<uint64_t> &outDeps,
+                                      size_t &outCount) const;
+  VGREResult graphNodeGetDependentNodes(GraphId graph, uint64_t nodeId,
+                                        std::vector<uint64_t> &outDependents,
+                                        size_t &outCount) const;
+  VGREResult graphKernelNodeGetParams(GraphId graph, uint64_t nodeId,
+                                      KernelId &outKid, std::string &outName,
+                                      dim3 &outGrid, dim3 &outBlock,
+                                      std::vector<std::vector<uint8_t>> &outArgs) const;
+  VGREResult graphMemcpyNodeGetParams(GraphId graph, uint64_t nodeId,
+                                      void *&outDst, void *&outSrc,
+                                      size_t &outCount, int &outKind) const;
+  VGREResult graphMemsetNodeGetParams(GraphId graph, uint64_t nodeId,
+                                      void *&outDst, int &outValue,
+                                      size_t &outPitch, size_t &outWidth,
+                                      size_t &outHeight, size_t &outDepth) const;
+  VGREResult graphHostNodeGetParams(GraphId graph, uint64_t nodeId,
+                                    void (**outFn)(void *),
+                                    void *&outUserData) const;
+
+  // ── Exec mutation (P1.18) ────────────────────────────────────────────────
+  VGREResult graphKernelNodeSetParams(GraphId graph, uint64_t nodeId,
+                                      void **args,
+                                      const std::vector<ArgType> &argTypes);
+  VGREResult graphMemsetNodeSetParams(GraphId graph, uint64_t nodeId,
+                                      void *dst, int value,
+                                      size_t pitch, size_t width,
+                                      size_t height, size_t depth);
+  VGREResult graphHostNodeSetParams(GraphId graph, uint64_t nodeId,
+                                    void (*fn)(void *), void *userData);
+  VGREResult graphExecKernelNodeSetParams(GraphExecId execId, uint64_t nodeId,
+                                          void **args,
+                                          const std::vector<ArgType> &argTypes);
+  VGREResult graphExecMemcpyNodeSetParams(GraphExecId execId, uint64_t nodeId,
+                                          void *dst, void *src,
+                                          size_t count, int kind);
+  VGREResult graphExecMemsetNodeSetParams(GraphExecId execId, uint64_t nodeId,
+                                          void *dst, int value,
+                                          size_t pitch, size_t width,
+                                          size_t height, size_t depth);
+  VGREResult graphExecHostNodeSetParams(GraphExecId execId, uint64_t nodeId,
+                                        void (*fn)(void *), void *userData);
+  VGREResult graphExecChildGraphNodeSetParams(GraphExecId execId,
+                                              uint64_t nodeId,
+                                              GraphId newChildGraph);
+  VGREResult graphExecEventRecordNodeSetEvent(GraphExecId execId,
+                                              uint64_t nodeId, void *event);
+  VGREResult graphExecEventWaitNodeSetEvent(GraphExecId execId,
+                                            uint64_t nodeId, void *event);
+  VGREResult graphNodeSetEnabled(GraphExecId execId, uint64_t nodeId,
+                                 bool enabled);
+  VGREResult graphNodeGetEnabled(GraphExecId execId, uint64_t nodeId,
+                                 bool &outEnabled) const;
+  VGREResult graphExecGetFlags(GraphExecId execId, unsigned int &outFlags) const;
+  VGREResult graphExecSetFlags(GraphExecId execId, unsigned int flags);
+  VGREResult graphExecGetNodeType(GraphExecId execId, uint64_t nodeId,
+                                  GraphNodeType &outType) const;
+
+  // ── Dependency editing (P1.22) ───────────────────────────────────────────
   VGREResult graphAddDependency(GraphId graph, uint64_t nodeId,
                                 uint64_t dependsOn);
+  VGREResult graphAddDependencies(GraphId graph,
+                                  const uint64_t *fromNodes,
+                                  const uint64_t *toNodes, size_t numDeps);
+  VGREResult graphRemoveDependencies(GraphId graph,
+                                     const uint64_t *fromNodes,
+                                     const uint64_t *toNodes, size_t numDeps);
+  VGREResult graphNodeFindInClone(GraphId originalGraph,
+                                  uint64_t originalNodeId,
+                                  GraphId clonedGraph,
+                                  uint64_t &outClonedNodeId) const;
+  VGREResult graphDebugDotPrint(GraphId graph, const char *path,
+                                unsigned int flags) const;
+
   VGREResult graphUpdateKernelNode(GraphId graph, uint64_t nodeId, void **args,
                                    const std::vector<ArgType> &argTypes);
   VGREResult graphUpdateMemcpyNode(GraphId graph, uint64_t nodeId, void *dst,
                                    void *src, size_t count, int kind);
-  
-  // Internal Graph Recording
+
+  // ── Stream capture introspection (P1.19) ─────────────────────────────────
   bool isStreamCapturing(StreamId stream) const;
+  bool getStreamCaptureInfo(StreamId stream, GraphId &outGraphId) const;
+  bool getStreamCaptureInfoV2(StreamId stream, GraphId &outGraphId,
+                              std::vector<uint64_t> &outDeps) const;
+  VGREResult streamUpdateCaptureDependencies(StreamId stream,
+                                             const std::vector<uint64_t> &deps,
+                                             bool replace);
+  VGREResult streamCopyAttributes(StreamId dst, StreamId src);
+
   VGREResult recordMemcpyToGraph(StreamId stream, void *dst, const void *src, size_t count, int kind);
 
   // Access sub-systems
