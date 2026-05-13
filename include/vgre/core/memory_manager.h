@@ -210,6 +210,13 @@ public:
   size_t getAllocationSize(MemoryHandle handle) const;
   size_t getAllocationSizeFromPointer(void *ptr) const;
 
+  // ── Pointer introspection (for cudaPointerGetAttributes) ─────────────────
+  // Returns true if ptr (or an offset within a tracked allocation) is known.
+  // On success fills: size, isManaged, deviceId, attachmentFlags.
+  bool getPointerAttributes(void *ptr, size_t &outSize, bool &outIsManaged,
+                            DeviceId &outDevice,
+                            unsigned int &outAttachmentFlags) const;
+
   // UVM Residency for Dashboard
   void getPageResidency(uint8_t outMap[1024]) const;
   int getResidentPageCount() const;

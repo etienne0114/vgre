@@ -834,7 +834,7 @@ tests/core/texture/        # Texture/surface object tests
 | 1.5 | `cudaGetErrorName` / `cudaGetErrorString` | **DONE** | — | 2026-05-13 |
 | 1.6 | `cudaMemcpyToSymbol` / `cudaMemcpyFromSymbol` | **DONE** | — | 2026-05-13 |
 | 1.7 | `cudaMallocArray` / `cudaMalloc3DArray` | **DONE** | — | 2026-05-13 |
-| 1.8 | `cudaPointerGetAttributes` | TODO | — | — |
+| 1.8 | `cudaPointerGetAttributes` | **DONE** | — | 2026-05-13 |
 | 1.9 | `cudaMemset2D/3D` | TODO | — | — |
 | 1.10 | `cudaGraphAddKernelNode` | TODO | — | — |
 | 1.11 | `cudaGraphAddMemsetNode` | TODO | — | — |

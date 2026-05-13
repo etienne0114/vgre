@@ -222,6 +222,10 @@ add_executable(test_malloc_array api/test_malloc_array.cpp)
 target_link_libraries(test_malloc_array PRIVATE vgre_cudart)
 add_test(NAME MallocArray COMMAND test_malloc_array)
 
+add_executable(test_pointer_attributes api/test_pointer_attributes.cpp)
+target_link_libraries(test_pointer_attributes PRIVATE vgre_cudart)
+add_test(NAME PointerAttributes COMMAND test_pointer_attributes)
+
 add_executable(test_tpm_auth unit/test_tpm_auth.cpp)
 target_link_libraries(test_tpm_auth PRIVATE vgre)
 add_test(NAME TPMAuth COMMAND test_tpm_auth)
