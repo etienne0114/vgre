@@ -144,7 +144,7 @@ const char *cudaGetErrorString(cudaError_t error) {
 }
 
 const char *cudaGetErrorName(cudaError_t error) {
-  return vgre::api::CUDAInterceptor::instance().getErrorString(error);
+  return vgre::api::CUDAInterceptor::instance().getErrorName(error);
 }
 
 // ── Device Management ──────────────────────────────────────────────────────
