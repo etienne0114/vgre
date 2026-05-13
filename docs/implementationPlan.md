@@ -875,9 +875,9 @@ tests/core/texture/        # Texture/surface object tests
 | 3.9 | `cudnnRNNForward/Backward` | TODO | — | — |
 | 3.10 | `cudnnMultiHeadAttnForward/Backward` | TODO | — | — |
 | 3.11 | `cudnnCTCLoss` | TODO | — | — |
-| 3.12 | `cudnnOpTensor` | TODO | — | — |
-| 3.13 | `cudnnReduceTensor` | TODO | — | — |
-| 3.14 | `cudnnTransformTensor` | TODO | — | — |
+| 3.12 | `cudnnOpTensor` | **DONE** | — | 2026-05-14 |
+| 3.13 | `cudnnReduceTensor` | **DONE** | — | 2026-05-14 |
+| 3.14 | `cudnnTransformTensor` | **DONE** | — | 2026-05-14 |
 | 3.15 | cuDNN Backend API (v8+) | TODO | — | — |
 
 ### Phase 4 — Missing Libraries
