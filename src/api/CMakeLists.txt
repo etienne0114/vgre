@@ -6,7 +6,16 @@ add_library(vgre_api OBJECT
     cuda_virtual_memory.cpp
     cuda_external_semaphore.cpp
     cublas_shim.cpp
-    cudnn_shim.cpp
+    cudnn/cudnn_core.cpp
+    cudnn/cudnn_convolution.cpp
+    cudnn/cudnn_activation.cpp
+    cudnn/cudnn_softmax.cpp
+    cudnn/cudnn_pooling.cpp
+    cudnn/cudnn_batchnorm.cpp
+    cudnn/cudnn_dropout.cpp
+    cudnn/cudnn_tensor_ops.cpp
+    cudnn/cudnn_rnn.cpp
+    cudnn/cudnn_attention.cpp
     nccl_shim.cpp
     nvtx_shim.cpp
     opencl_adapter.cpp
