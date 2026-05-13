@@ -40,10 +40,14 @@ static constexpr cublasOperation_t CUBLAS_OP_C = 2;  // conjugate transpose
 // Real context: carries stream binding and math mode so all operations on a
 // handle run consistently.  stream==nullptr means use the default/null stream.
 enum cublasMath_t { CUBLAS_DEFAULT_MATH = 0, CUBLAS_TENSOR_OP_MATH = 1, CUBLAS_PEDANTIC_MATH = 2 };
+enum cublasPointerMode_t { CUBLAS_POINTER_MODE_HOST = 0, CUBLAS_POINTER_MODE_DEVICE = 1 };
+enum cublasAtomicsMode_t { CUBLAS_ATOMICS_NOT_ALLOWED = 0, CUBLAS_ATOMICS_ALLOWED = 1 };
 struct cublasContext {
-    void*         stream   = nullptr;
-    cublasMath_t  mathMode = CUBLAS_DEFAULT_MATH;
-    int           deviceId = 0;
+    void*              stream      = nullptr;
+    cublasMath_t       mathMode    = CUBLAS_DEFAULT_MATH;
+    cublasPointerMode_t pointerMode = CUBLAS_POINTER_MODE_HOST;
+    cublasAtomicsMode_t atomicsMode = CUBLAS_ATOMICS_ALLOWED;
+    int                deviceId    = 0;
 };
 
 // ── Cache-blocked reference GEMM ─────────────────────────────────────────────
@@ -802,6 +806,30 @@ cublasStatus_t cublasSetMathMode(cublasHandle_t handle, int mode) {
 cublasStatus_t cublasGetMathMode(cublasHandle_t handle, int* mode) {
     if (!handle || !mode) return CUBLAS_STATUS_INVALID_VALUE;
     *mode = static_cast<int>(static_cast<cublasContext*>(handle)->mathMode);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── Pointer mode APIs (P2.2) ──────────────────────────────────────────────
+cublasStatus_t cublasSetPointerMode(cublasHandle_t handle, int mode) {
+    if (!handle) return CUBLAS_STATUS_NOT_INITIALIZED;
+    static_cast<cublasContext*>(handle)->pointerMode = static_cast<cublasPointerMode_t>(mode);
+    return CUBLAS_STATUS_SUCCESS;
+}
+cublasStatus_t cublasGetPointerMode(cublasHandle_t handle, int* mode) {
+    if (!handle || !mode) return CUBLAS_STATUS_INVALID_VALUE;
+    *mode = static_cast<int>(static_cast<cublasContext*>(handle)->pointerMode);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── Atomics mode APIs (P2.2) ────────────────────────────────────────────────
+cublasStatus_t cublasSetAtomicsMode(cublasHandle_t handle, int mode) {
+    if (!handle) return CUBLAS_STATUS_NOT_INITIALIZED;
+    static_cast<cublasContext*>(handle)->atomicsMode = static_cast<cublasAtomicsMode_t>(mode);
+    return CUBLAS_STATUS_SUCCESS;
+}
+cublasStatus_t cublasGetAtomicsMode(cublasHandle_t handle, int* mode) {
+    if (!handle || !mode) return CUBLAS_STATUS_INVALID_VALUE;
+    *mode = static_cast<int>(static_cast<cublasContext*>(handle)->atomicsMode);
     return CUBLAS_STATUS_SUCCESS;
 }
 
