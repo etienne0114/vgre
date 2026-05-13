@@ -23,6 +23,7 @@ constexpr cudaError_t cudaErrorLaunchOutOfResources = 7;
 constexpr cudaError_t cudaErrorInvalidDeviceFunction = 8;
 constexpr cudaError_t cudaErrorInvalidDevice = 10;
 constexpr cudaError_t cudaErrorInvalidMemcpyDirection = 11;
+constexpr cudaError_t cudaErrorInvalidSymbol = 13;
 constexpr cudaError_t cudaErrorInvalidFilterSetting = 26;
 constexpr cudaError_t cudaErrorInvalidNormSetting = 27;
 constexpr cudaError_t cudaErrorCudartUnloading = 29;
@@ -158,6 +159,16 @@ public:
   cudaError_t memcpyPeerAsync(void *dst, int dstDevice, const void *src,
                               int srcDevice, size_t count,
                               cudaStream_t stream);
+  cudaError_t memcpyToSymbol(const void *symbol, const void *src, size_t count,
+                             size_t offset, cudaMemcpyKind_t kind);
+  cudaError_t memcpyToSymbolAsync(const void *symbol, const void *src,
+                                  size_t count, size_t offset,
+                                  cudaMemcpyKind_t kind, cudaStream_t stream);
+  cudaError_t memcpyFromSymbol(void *dst, const void *symbol, size_t count,
+                               size_t offset, cudaMemcpyKind_t kind);
+  cudaError_t memcpyFromSymbolAsync(void *dst, const void *symbol,
+                                    size_t count, size_t offset,
+                                    cudaMemcpyKind_t kind, cudaStream_t stream);
   cudaError_t memset(void *devPtr, int value, size_t count);
   cudaError_t memsetAsync(void *devPtr, int value, size_t count,
                           cudaStream_t stream);

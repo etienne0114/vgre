@@ -214,6 +214,10 @@ add_executable(test_error_name_string api/test_error_name_string.cpp)
 target_link_libraries(test_error_name_string PRIVATE vgre_cudart)
 add_test(NAME ErrorNameString COMMAND test_error_name_string)
 
+add_executable(test_memcpy_symbol api/test_memcpy_symbol.cpp)
+target_link_libraries(test_memcpy_symbol PRIVATE vgre_cudart)
+add_test(NAME MemcpySymbol COMMAND test_memcpy_symbol)
+
 add_executable(test_tpm_auth unit/test_tpm_auth.cpp)
 target_link_libraries(test_tpm_auth PRIVATE vgre)
 add_test(NAME TPMAuth COMMAND test_tpm_auth)

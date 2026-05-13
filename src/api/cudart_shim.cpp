@@ -500,6 +500,58 @@ cudaError_t cudaGetSymbolAddress(void **devPtr, const void *symbol) {
   return cudaSuccess;
 }
 
+cudaError_t cudaMemcpyToSymbol(const void *symbol, const void *src, size_t count,
+                               size_t offset, cudaMemcpyKind_t kind) {
+  if (!symbol || !src || count == 0) {
+    return cudaErrorInvalidValue;
+  }
+  void *devPtr = CUDAModuleRegistry::instance().lookupVariable(symbol);
+  if (!devPtr)
+    return cudaErrorInvalidSymbol;
+  return vgre::api::CUDAInterceptor::instance().memcpy(
+      static_cast<char *>(devPtr) + offset, src, count, kind);
+}
+
+cudaError_t cudaMemcpyToSymbolAsync(const void *symbol, const void *src,
+                                    size_t count, size_t offset,
+                                    cudaMemcpyKind_t kind,
+                                    cudaStream_t stream) {
+  if (!symbol || !src || count == 0) {
+    return cudaErrorInvalidValue;
+  }
+  void *devPtr = CUDAModuleRegistry::instance().lookupVariable(symbol);
+  if (!devPtr)
+    return cudaErrorInvalidSymbol;
+  return vgre::api::CUDAInterceptor::instance().memcpyAsync(
+      static_cast<char *>(devPtr) + offset, src, count, kind, stream);
+}
+
+cudaError_t cudaMemcpyFromSymbol(void *dst, const void *symbol, size_t count,
+                                  size_t offset, cudaMemcpyKind_t kind) {
+  if (!dst || !symbol || count == 0) {
+    return cudaErrorInvalidValue;
+  }
+  void *devPtr = CUDAModuleRegistry::instance().lookupVariable(symbol);
+  if (!devPtr)
+    return cudaErrorInvalidSymbol;
+  return vgre::api::CUDAInterceptor::instance().memcpy(
+      dst, static_cast<char *>(devPtr) + offset, count, kind);
+}
+
+cudaError_t cudaMemcpyFromSymbolAsync(void *dst, const void *symbol,
+                                      size_t count, size_t offset,
+                                      cudaMemcpyKind_t kind,
+                                      cudaStream_t stream) {
+  if (!dst || !symbol || count == 0) {
+    return cudaErrorInvalidValue;
+  }
+  void *devPtr = CUDAModuleRegistry::instance().lookupVariable(symbol);
+  if (!devPtr)
+    return cudaErrorInvalidSymbol;
+  return vgre::api::CUDAInterceptor::instance().memcpyAsync(
+      dst, static_cast<char *>(devPtr) + offset, count, kind, stream);
+}
+
 cudaError_t cudaLaunchKernel(const void *hostFun, dim3 gridDim, dim3 blockDim,
                              void **args, size_t sharedMem,
                              cudaStream_t stream) {
