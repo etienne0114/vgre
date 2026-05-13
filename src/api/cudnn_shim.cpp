@@ -1103,4 +1103,117 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
     return CUDNN_STATUS_SUCCESS;
 }
 
+cudnnStatus_t cudnnBatchNormalizationBackward(
+    cudnnHandle_t,
+    cudnnBatchNormMode_t mode,
+    const void* alphaDataDiff, const void* betaDataDiff,
+    const void* alphaParamDiff, const void* betaParamDiff,
+    cudnnTensorDescriptor_t xDesc, const void* x,
+    cudnnTensorDescriptor_t dyDesc, const void* dy,
+    cudnnTensorDescriptor_t dxDesc, void* dx,
+    cudnnTensorDescriptor_t /*dBnScaleBiasDesc*/,
+    const void* bnScale,
+    void* dBnScaleResult, void* dBnBiasResult,
+    double /*epsilon*/,
+    const void* savedMean, const void* savedInvVariance)
+{
+    if (!xDesc || !dyDesc || !dxDesc || !x || !dy || !dx || !bnScale ||
+        !savedMean || !savedInvVariance)
+        return CUDNN_STATUS_INVALID_VALUE;
+
+    auto* t=(TensorDesc*)xDesc;
+    int N=t->n, C=t->c, HW=t->h*t->w;
+    float aD=*(const float*)alphaDataDiff, bD=*(const float*)betaDataDiff;
+    float aP=*(const float*)alphaParamDiff, bP=*(const float*)betaParamDiff;
+    const float* xf=(const float*)x;
+    const float* dyf=(const float*)dy;
+    float* dxf=(float*)dx;
+    const float* sc=(const float*)bnScale;
+    const float* sm=(const float*)savedMean;
+    const float* siv=(const float*)savedInvVariance;
+    float* dSc=(float*)dBnScaleResult;
+    float* dBi=(float*)dBnBiasResult;
+
+    int count = N * HW;
+
+    if (mode == CUDNN_BATCHNORM_SPATIAL) {
+        std::vector<float> mean_dy(C, 0.f), mean_dy_xhat(C, 0.f);
+        for (int c=0; c<C; ++c) {
+            double sum_dy = 0, sum_dy_xhat = 0;
+            for (int n=0; n<N; ++n)
+            for (int hw=0; hw<HW; ++hw) {
+                int idx = (n*C + c)*HW + hw;
+                float xhat = (xf[idx] - sm[c]) * siv[c];
+                sum_dy += dyf[idx];
+                sum_dy_xhat += dyf[idx] * xhat;
+            }
+            mean_dy[c] = static_cast<float>(sum_dy / count);
+            mean_dy_xhat[c] = static_cast<float>(sum_dy_xhat / count);
+        }
+
+        // dx = scale * invVar * (dy - mean_dy - xhat * mean_dy_xhat)
+        for (int n=0; n<N; ++n)
+        for (int c=0; c<C; ++c)
+        for (int hw=0; hw<HW; ++hw) {
+            int idx = (n*C + c)*HW + hw;
+            float xhat = (xf[idx] - sm[c]) * siv[c];
+            float val = dyf[idx] - mean_dy[c] - xhat * mean_dy_xhat[c];
+            dxf[idx] = aD * (sc[c] * siv[c] * val) + bD * dxf[idx];
+        }
+
+        // dScale = sum(dy * xhat), dBias = sum(dy)
+        for (int c=0; c<C; ++c) {
+            double dscale = 0, dbias = 0;
+            for (int n=0; n<N; ++n)
+            for (int hw=0; hw<HW; ++hw) {
+                int idx = (n*C + c)*HW + hw;
+                float xhat = (xf[idx] - sm[c]) * siv[c];
+                dscale += dyf[idx] * xhat;
+                dbias  += dyf[idx];
+            }
+            dSc[c] = aP * static_cast<float>(dscale) + bP * dSc[c];
+            dBi[c] = aP * static_cast<float>(dbias)  + bP * dBi[c];
+        }
+    } else {
+        // PER_ACTIVATION: statistics per (c,hw) across N
+        std::vector<float> mean_dy(C*HW, 0.f), mean_dy_xhat(C*HW, 0.f);
+        for (int i=0; i<C*HW; ++i) {
+            double sum_dy = 0, sum_dy_xhat = 0;
+            for (int n=0; n<N; ++n) {
+                int idx = n*C*HW + i;
+                float xhat = (xf[idx] - sm[i]) * siv[i];
+                sum_dy += dyf[idx];
+                sum_dy_xhat += dyf[idx] * xhat;
+            }
+            mean_dy[i] = static_cast<float>(sum_dy / N);
+            mean_dy_xhat[i] = static_cast<float>(sum_dy_xhat / N);
+        }
+
+        for (int n=0; n<N; ++n)
+        for (int i=0; i<C*HW; ++i) {
+            int idx = n*C*HW + i;
+            float xhat = (xf[idx] - sm[i]) * siv[i];
+            float val = dyf[idx] - mean_dy[i] - xhat * mean_dy_xhat[i];
+            int c = i / HW;
+            dxf[idx] = aD * (sc[c] * siv[i] * val) + bD * dxf[idx];
+        }
+
+        for (int c=0; c<C; ++c) {
+            double dscale = 0, dbias = 0;
+            for (int n=0; n<N; ++n)
+            for (int hw=0; hw<HW; ++hw) {
+                int idx = (n*C + c)*HW + hw;
+                int i = c*HW + hw;
+                float xhat = (xf[idx] - sm[i]) * siv[i];
+                dscale += dyf[idx] * xhat;
+                dbias  += dyf[idx];
+            }
+            dSc[c] = aP * static_cast<float>(dscale) + bP * dSc[c];
+            dBi[c] = aP * static_cast<float>(dbias)  + bP * dBi[c];
+        }
+    }
+
+    return CUDNN_STATUS_SUCCESS;
+}
+
 } // extern "C"
