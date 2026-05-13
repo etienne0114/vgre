@@ -278,6 +278,10 @@ add_executable(test_cudnn_rnn api/test_cudnn_rnn.cpp)
 target_link_libraries(test_cudnn_rnn PRIVATE vgre)
 add_test(NAME CudnnRNN COMMAND test_cudnn_rnn)
 
+add_executable(test_cudnn_attention api/test_cudnn_attention.cpp)
+target_link_libraries(test_cudnn_attention PRIVATE vgre)
+add_test(NAME CudnnAttention COMMAND test_cudnn_attention)
+
 add_executable(test_memset2d_graph_kernelnode api/test_memset2d_graph_kernelnode.cpp)
 target_link_libraries(test_memset2d_graph_kernelnode PRIVATE vgre_cudart)
 add_test(NAME Memset2DGraphKernelNode COMMAND test_memset2d_graph_kernelnode)
