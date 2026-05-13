@@ -865,7 +865,7 @@ tests/core/texture/        # Texture/surface object tests
 | # | Feature | Status | PR | Date |
 |---|---|---|---|---|
 | 3.1 | `cudnnConvolutionBackwardData` | **DONE** | — | 2026-05-13 |
-| 3.2 | `cudnnConvolutionBackwardFilter` | TODO | — | — |
+| 3.2 | `cudnnConvolutionBackwardFilter` | **DONE** | — | 2026-05-13 |
 | 3.3 | `cudnnBatchNormalizationForwardTraining` | TODO | — | — |
 | 3.4 | `cudnnBatchNormalizationBackward` | TODO | — | — |
 | 3.5 | `cudnnActivationBackward` | **DONE** | — | 2026-05-13 |

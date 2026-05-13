@@ -246,6 +246,10 @@ add_executable(test_cudnn_backward_data api/test_cudnn_backward_data.cpp)
 target_link_libraries(test_cudnn_backward_data PRIVATE vgre)
 add_test(NAME CudnnBackwardData COMMAND test_cudnn_backward_data)
 
+add_executable(test_cudnn_backward_filter api/test_cudnn_backward_filter.cpp)
+target_link_libraries(test_cudnn_backward_filter PRIVATE vgre)
+add_test(NAME CudnnBackwardFilter COMMAND test_cudnn_backward_filter)
+
 add_executable(test_memset2d_graph_kernelnode api/test_memset2d_graph_kernelnode.cpp)
 target_link_libraries(test_memset2d_graph_kernelnode PRIVATE vgre_cudart)
 add_test(NAME Memset2DGraphKernelNode COMMAND test_memset2d_graph_kernelnode)
