@@ -57,7 +57,7 @@ VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The pro
 
 ### Library Shims
 - **cuBLAS** (~25% coverage, ~61/~200+ functions): `cublasSgemm`, `cublasDgemm`, `cublasSaxpy`, `cublasSdot`, `cublasSgemv`, Level-1 complete, Level-2 (`Strsv/Dtrsv/Sger/Dger/Ssymv/Dsymv/Sgbmv/Dgbmv/Ssyr/Dsyr/Ssyr2/Dsyr2/Strmv/Dtrmv`), Level-3 (`Strsm/Dtrsm/Ssyrk/Dsyrk/Ssyr2k/Dsyr2k/Strmm/Dtrmm/Ssymm/Dsymm`), `cublasSetPointerMode/GetPointerMode/SetAtomicsMode/GetAtomicsMode`, batched GEMM, `cublasGemmEx`. **Missing**: complex Hermitian variants (`Chemm`/`Cherk`/`Cher2k`), batched Level-3, `cublasLoggerConfigure`.
-- **cuDNN** (~41% coverage, ~61/~150+ functions): Forward: conv, pooling, activation (ReLU, sigmoid, tanh, ELU, GELU, SELU, Mish), softmax, BN inference/training, dropout, RNN. Backward: activation, conv backward-data/backward-filter, BN backward, softmax backward, pooling backward, dropout, RNN. Utility: OpTensor, ReduceTensor, TransformTensor. **Missing**: attention, CTC loss.
+- **cuDNN** (~43% coverage, ~65/~150+ functions): Forward: conv, pooling, activation (ReLU, sigmoid, tanh, ELU, GELU, SELU, Mish), softmax, BN inference/training, dropout, RNN, attention. Backward: activation, conv backward-data/backward-filter, BN backward, softmax backward, pooling backward, dropout, RNN, attention. Utility: OpTensor, ReduceTensor, TransformTensor. **Missing**: CTC loss.
 - **NCCL** (~55% coverage): `ncclAllReduce` (ring for >1 MB), `ncclBroadcast`, `ncclReduceScatter`, `ncclAllGather`, `ncclGroupStart/End`. **Missing**: `ncclSend`/`Recv`, `ncclAllToAll`, `ncclGather`/`Scatter`.
 - **Entirely Missing Libraries**: **cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt** — no shims exist in the codebase.
 
@@ -122,7 +122,7 @@ VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The pro
 - **CUDA Driver API**: ~15% coverage. Missing: `cuMemAllocManaged`, `cuMemcpy2D/3D`, cooperative launch, graph APIs, occupancy queries.
 - **CUDA Graphs**: ~30% coverage. Internal `GraphManager` has kernel/memcpy/conditional nodes; CUDART shim only exposes memcpy/conditional/external-semaphore. Missing: kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free nodes.
 - **cuBLAS**: ~25% coverage. Level-1, Level-2, and core Level-3 complete (`Trsm`, `Syrk`, `Syr2k`, `Trmm`, `Symm`). Pointer/atomics mode APIs present. Missing: complex Hermitian variants, batched Level-3, `cublasLoggerConfigure`.
-- **cuDNN**: ~41% coverage. Forward complete (including BN training, dropout, RNN). Backward: activation, conv backward-data/backward-filter, BN backward, softmax backward, pooling backward, dropout, RNN. Utility: OpTensor, ReduceTensor, TransformTensor. Missing: attention, CTC loss.
+- **cuDNN**: ~43% coverage. Forward complete (including BN training, dropout, RNN, attention). Backward: activation, conv backward-data/backward-filter, BN backward, softmax backward, pooling backward, dropout, RNN, attention. Utility: OpTensor, ReduceTensor, TransformTensor. Missing: CTC loss.
 - **NCCL**: ~55% coverage. Missing `Send`/`Recv`, `AllToAll`, `Gather`, `Scatter`.
 - **Entirely missing libraries**: cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt — no shims exist.
 - **PTX ISA**: ~30% coverage. Missing texture/surface instructions, shared atomics, many `cvt` variants, `rcp.rn`, `sqrt.rn`, `match.sync`, `grid.sync`.
@@ -295,7 +295,7 @@ sudo cmake --install build
 - **CUDA Driver**: `cuMemAllocManaged`, `cuMemcpy2D/3D`, cooperative launch, graph APIs, occupancy queries.
 - **CUDA Graphs**: kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free node types in CUDART shim
 - **cuBLAS**: complex Hermitian variants (`Chemm`/`Cherk`/`Cher2k`), batched Level-3, `cublasLoggerConfigure`. Level-1, Level-2, and core Level-3 now complete.
-- **cuDNN**: attention, CTC loss. All core forward/backward passes, RNN, and utility ops (OpTensor, ReduceTensor, TransformTensor) now complete.
+- **cuDNN**: CTC loss. All core forward/backward passes, RNN, attention, and utility ops (OpTensor, ReduceTensor, TransformTensor) now complete.
 - **NCCL**: `Send`/`Recv`, `AllToAll`, `Gather`, `Scatter`
 - **PTX ISA**: texture/surface instructions, shared atomics, `cvt` variants, `rcp.rn`, `sqrt.rn`, `match.sync`, `grid.sync`
 - **Entirely missing libraries**: cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt
