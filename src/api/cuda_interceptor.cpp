@@ -834,18 +834,257 @@ const char *CUDAInterceptor::getErrorString(cudaError_t error) {
     return "invalid argument";
   case cudaErrorMemoryAllocation:
     return "out of memory";
-  case cudaErrorLaunchFailure:
-    return "launch failure";
+  case cudaErrorNotInitialized:
+    return "initialization error";
+  case cudaErrorCudartUnloading:
+    return "driver shutting down";
+  case cudaErrorProfilerDisabled:
+    return "profiler disabled";
+  case cudaErrorInvalidMemcpyDirection:
+    return "invalid memcpy direction";
+  case cudaErrorInvalidFilterSetting:
+    return "invalid filter setting";
+  case cudaErrorInvalidNormSetting:
+    return "invalid norm setting";
+  case cudaErrorInvalidResourceHandle:
+    return "invalid resource handle";
+  case cudaErrorInsufficientDriver:
+    return "CUDA driver version is insufficient for CUDA runtime version";
+  case cudaErrorSetOnActiveProcess:
+    return "cannot set while device is active in this process";
+  case cudaErrorInvalidSurfaceUsage:
+    return "invalid surface usage";
+  case cudaErrorLaunchTimeout:
+    return "the launch timed out and was terminated";
+  case cudaErrorLaunchOutOfResources:
+    return "too many resources requested for launch";
   case cudaErrorInvalidDeviceFunction:
     return "invalid device function";
+  case cudaErrorInvalidKernelImage:
+    return "invalid kernel image";
+  case cudaErrorInvalidPtx:
+    return "invalid ptx";
+  case cudaErrorInvalidGraphicsContext:
+    return "invalid OpenGL or DirectX context";
+  case cudaErrorStartupFailure:
+    return "startup failure";
+  case cudaErrorInvalidPc:
+    return "program counter";
+  case cudaErrorLaunchFailure:
+    return "launch failure";
+  case cudaErrorFileNotFound:
+    return "file not found";
+  case cudaErrorSharedObjectSymbolNotFound:
+    return "shared object symbol not found";
+  case cudaErrorSharedObjectInitFailed:
+    return "shared object initialization failed";
+  case cudaErrorOperatingSystem:
+    return "OS call failed or operation not supported on this OS";
   case cudaErrorInvalidDevice:
     return "invalid device ordinal";
   case cudaErrorNotReady:
     return "device not ready";
-  case cudaErrorFileNotFound:
-    return "file not found";
+  case cudaErrorIllegalAddress:
+    return "an illegal memory access was encountered";
+  case cudaErrorLaunchIncompatibleTexturing:
+    return "incompatible texturing mode";
+  case cudaErrorPeerAccessAlreadyEnabled:
+    return "peer access already enabled";
+  case cudaErrorPeerAccessNotEnabled:
+    return "peer access not enabled";
+  case cudaErrorContextIsDestroyed:
+    return "context is destroyed";
+  case cudaErrorAssert:
+    return "device-side assert triggered";
+  case cudaErrorTooManyPeers:
+    return "too many peers";
+  case cudaErrorHostMemoryAlreadyRegistered:
+    return "host memory already registered";
+  case cudaErrorHostMemoryNotRegistered:
+    return "host memory not registered";
+  case cudaErrorHardwareStackError:
+    return "hardware stack error";
+  case cudaErrorIllegalInstruction:
+    return "an illegal instruction was encountered";
+  case cudaErrorMisalignedAddress:
+    return "misaligned address";
+  case cudaErrorInvalidAddressSpace:
+    return "invalid address space";
+  case cudaErrorCooperativeLaunchTooLarge:
+    return "cooperative launch too large";
+  case cudaErrorNotPermitted:
+    return "operation not permitted";
+  case cudaErrorNotSupported:
+    return "operation not supported";
+  case cudaErrorStreamCaptureUnsupported:
+    return "operation not permitted when stream is capturing";
+  case cudaErrorStreamCaptureInvalidated:
+    return "operation failed due to a previous error during capture";
+  case cudaErrorStreamCaptureMerge:
+    return "operation would result in a merge of separate capture sequences";
+  case cudaErrorStreamCaptureUnmatched:
+    return "capture was not ended with a matching cudaStreamEndCapture";
+  case cudaErrorStreamCaptureUnjoined:
+    return "thread tried to end capture outside of begin-end range";
+  case cudaErrorStreamCaptureIsolation:
+    return "operation would violate isolation rules";
+  case cudaErrorStreamCaptureImplicit:
+    return "cudaStreamLegacy cannot be used for implicit synchronization";
+  case cudaErrorCapturedEvent:
+    return "operation not permitted on a captured event";
+  case cudaErrorStreamCaptureWrongThread:
+    return "operation not permitted on a stream capture object in current thread";
+  case cudaErrorGraphExecUpdateFailure:
+    return "the graph update was not performed because it included changes";
+  case cudaErrorUnknown:
+    return "unknown error";
+  case cudaErrorMemoryValueTooLarge:
+    return "memory value too large";
+  case cudaErrorStubLibrary:
+    return "CUDA runtime is a stub library";
+  case cudaErrorJitCompilerNotFound:
+    return "jit compiler not found";
+  case cudaErrorUnsupportedPtxVersion:
+    return "unsupported PTX version";
+  case cudaErrorJitCompilationDisabled:
+    return "jit compilation disabled";
+  case cudaErrorUnsupportedExecAffinity:
+    return "unsupported execution affinity";
+  case cudaErrorInvalidSource:
+    return "invalid source";
   default:
     return "unknown error";
+  }
+}
+
+const char *CUDAInterceptor::getErrorName(cudaError_t error) {
+  switch (error) {
+  case cudaSuccess:
+    return "cudaSuccess";
+  case cudaErrorInvalidValue:
+    return "cudaErrorInvalidValue";
+  case cudaErrorMemoryAllocation:
+    return "cudaErrorMemoryAllocation";
+  case cudaErrorNotInitialized:
+    return "cudaErrorInitializationError";
+  case cudaErrorCudartUnloading:
+    return "cudaErrorCudartUnloading";
+  case cudaErrorProfilerDisabled:
+    return "cudaErrorProfilerDisabled";
+  case cudaErrorInvalidMemcpyDirection:
+    return "cudaErrorInvalidMemcpyDirection";
+  case cudaErrorInvalidFilterSetting:
+    return "cudaErrorInvalidFilterSetting";
+  case cudaErrorInvalidNormSetting:
+    return "cudaErrorInvalidNormSetting";
+  case cudaErrorInvalidResourceHandle:
+    return "cudaErrorInvalidResourceHandle";
+  case cudaErrorInsufficientDriver:
+    return "cudaErrorInsufficientDriver";
+  case cudaErrorSetOnActiveProcess:
+    return "cudaErrorSetOnActiveProcess";
+  case cudaErrorInvalidSurfaceUsage:
+    return "cudaErrorInvalidSurfaceUsage";
+  case cudaErrorLaunchTimeout:
+    return "cudaErrorLaunchTimeout";
+  case cudaErrorLaunchOutOfResources:
+    return "cudaErrorLaunchOutOfResources";
+  case cudaErrorInvalidDeviceFunction:
+    return "cudaErrorInvalidDeviceFunction";
+  case cudaErrorInvalidKernelImage:
+    return "cudaErrorInvalidKernelImage";
+  case cudaErrorInvalidPtx:
+    return "cudaErrorInvalidPtx";
+  case cudaErrorInvalidGraphicsContext:
+    return "cudaErrorInvalidGraphicsContext";
+  case cudaErrorStartupFailure:
+    return "cudaErrorStartupFailure";
+  case cudaErrorInvalidPc:
+    return "cudaErrorInvalidPc";
+  case cudaErrorLaunchFailure:
+    return "cudaErrorLaunchFailure";
+  case cudaErrorFileNotFound:
+    return "cudaErrorFileNotFound";
+  case cudaErrorSharedObjectSymbolNotFound:
+    return "cudaErrorSharedObjectSymbolNotFound";
+  case cudaErrorSharedObjectInitFailed:
+    return "cudaErrorSharedObjectInitFailed";
+  case cudaErrorOperatingSystem:
+    return "cudaErrorOperatingSystem";
+  case cudaErrorInvalidDevice:
+    return "cudaErrorInvalidDevice";
+  case cudaErrorNotReady:
+    return "cudaErrorNotReady";
+  case cudaErrorIllegalAddress:
+    return "cudaErrorIllegalAddress";
+  case cudaErrorLaunchIncompatibleTexturing:
+    return "cudaErrorLaunchIncompatibleTexturing";
+  case cudaErrorPeerAccessAlreadyEnabled:
+    return "cudaErrorPeerAccessAlreadyEnabled";
+  case cudaErrorPeerAccessNotEnabled:
+    return "cudaErrorPeerAccessNotEnabled";
+  case cudaErrorContextIsDestroyed:
+    return "cudaErrorContextIsDestroyed";
+  case cudaErrorAssert:
+    return "cudaErrorAssert";
+  case cudaErrorTooManyPeers:
+    return "cudaErrorTooManyPeers";
+  case cudaErrorHostMemoryAlreadyRegistered:
+    return "cudaErrorHostMemoryAlreadyRegistered";
+  case cudaErrorHostMemoryNotRegistered:
+    return "cudaErrorHostMemoryNotRegistered";
+  case cudaErrorHardwareStackError:
+    return "cudaErrorHardwareStackError";
+  case cudaErrorIllegalInstruction:
+    return "cudaErrorIllegalInstruction";
+  case cudaErrorMisalignedAddress:
+    return "cudaErrorMisalignedAddress";
+  case cudaErrorInvalidAddressSpace:
+    return "cudaErrorInvalidAddressSpace";
+  case cudaErrorCooperativeLaunchTooLarge:
+    return "cudaErrorCooperativeLaunchTooLarge";
+  case cudaErrorNotPermitted:
+    return "cudaErrorNotPermitted";
+  case cudaErrorNotSupported:
+    return "cudaErrorNotSupported";
+  case cudaErrorStreamCaptureUnsupported:
+    return "cudaErrorStreamCaptureUnsupported";
+  case cudaErrorStreamCaptureInvalidated:
+    return "cudaErrorStreamCaptureInvalidated";
+  case cudaErrorStreamCaptureMerge:
+    return "cudaErrorStreamCaptureMerge";
+  case cudaErrorStreamCaptureUnmatched:
+    return "cudaErrorStreamCaptureUnmatched";
+  case cudaErrorStreamCaptureUnjoined:
+    return "cudaErrorStreamCaptureUnjoined";
+  case cudaErrorStreamCaptureIsolation:
+    return "cudaErrorStreamCaptureIsolation";
+  case cudaErrorStreamCaptureImplicit:
+    return "cudaErrorStreamCaptureImplicit";
+  case cudaErrorCapturedEvent:
+    return "cudaErrorCapturedEvent";
+  case cudaErrorStreamCaptureWrongThread:
+    return "cudaErrorStreamCaptureWrongThread";
+  case cudaErrorGraphExecUpdateFailure:
+    return "cudaErrorGraphExecUpdateFailure";
+  case cudaErrorUnknown:
+    return "cudaErrorUnknown";
+  case cudaErrorMemoryValueTooLarge:
+    return "cudaErrorMemoryValueTooLarge";
+  case cudaErrorStubLibrary:
+    return "cudaErrorStubLibrary";
+  case cudaErrorJitCompilerNotFound:
+    return "cudaErrorJitCompilerNotFound";
+  case cudaErrorUnsupportedPtxVersion:
+    return "cudaErrorUnsupportedPtxVersion";
+  case cudaErrorJitCompilationDisabled:
+    return "cudaErrorJitCompilationDisabled";
+  case cudaErrorUnsupportedExecAffinity:
+    return "cudaErrorUnsupportedExecAffinity";
+  case cudaErrorInvalidSource:
+    return "cudaErrorInvalidSource";
+  default:
+    return "cudaErrorUnknown";
   }
 }
 

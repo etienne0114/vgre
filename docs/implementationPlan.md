@@ -831,7 +831,7 @@ tests/core/texture/        # Texture/surface object tests
 | 1.2 | `cudaEventQuery` | **DONE** | — | 2026-05-13 |
 | 1.3 | `cudaStreamAddCallback` | **DONE** | — | 2026-05-13 |
 | 1.4 | `cudaLaunchHostFunc` | **DONE** | — | 2026-05-13 |
-| 1.5 | `cudaGetErrorName` / `cudaGetErrorString` | TODO | — | — |
+| 1.5 | `cudaGetErrorName` / `cudaGetErrorString` | **DONE** | — | 2026-05-13 |
 | 1.6 | `cudaMemcpyToSymbol` / `cudaMemcpyFromSymbol` | TODO | — | — |
 | 1.7 | `cudaMallocArray` / `cudaMalloc3DArray` | TODO | — | — |
 | 1.8 | `cudaPointerGetAttributes` | TODO | — | — |

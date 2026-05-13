@@ -14,18 +14,68 @@ namespace api {
 // ── CUDA-compatible error type ─────────────────────────────────────────────
 using cudaError_t = int;
 constexpr cudaError_t cudaSuccess = 0;
-constexpr cudaError_t cudaErrorInvalidDevice = 10;
-constexpr cudaError_t cudaErrorNotInitialized = 3;
-constexpr cudaError_t cudaErrorMemoryAllocation = 2;
 constexpr cudaError_t cudaErrorInvalidValue = 1;
+constexpr cudaError_t cudaErrorMemoryAllocation = 2;
+constexpr cudaError_t cudaErrorNotInitialized = 3;
 constexpr cudaError_t cudaErrorLaunchFailure = 4;
-constexpr cudaError_t cudaErrorNotReady = 34;
+constexpr cudaError_t cudaErrorProfilerDisabled = 5;
+constexpr cudaError_t cudaErrorLaunchOutOfResources = 7;
 constexpr cudaError_t cudaErrorInvalidDeviceFunction = 8;
-constexpr cudaError_t cudaErrorFileNotFound    = 301;
-constexpr cudaError_t cudaErrorNotSupported    = 801;
-constexpr cudaError_t cudaErrorInvalidPtx      = 218;
-constexpr cudaError_t cudaErrorStubLibrary     = 34;
+constexpr cudaError_t cudaErrorInvalidDevice = 10;
+constexpr cudaError_t cudaErrorInvalidMemcpyDirection = 11;
+constexpr cudaError_t cudaErrorInvalidFilterSetting = 26;
+constexpr cudaError_t cudaErrorInvalidNormSetting = 27;
+constexpr cudaError_t cudaErrorCudartUnloading = 29;
+constexpr cudaError_t cudaErrorInvalidResourceHandle = 33;
+constexpr cudaError_t cudaErrorNotReady = 34;
+constexpr cudaError_t cudaErrorInsufficientDriver = 35;
+constexpr cudaError_t cudaErrorSetOnActiveProcess = 36;
+constexpr cudaError_t cudaErrorInvalidSurfaceUsage = 37;
+constexpr cudaError_t cudaErrorStubLibrary = 38;
 constexpr cudaError_t cudaErrorDevicesUnavailable = 46;
+constexpr cudaError_t cudaErrorLaunchTimeout = 48;
+constexpr cudaError_t cudaErrorInvalidKernelImage = 47;
+constexpr cudaError_t cudaErrorInvalidPc = 77;
+constexpr cudaError_t cudaErrorStartupFailure = 127;
+constexpr cudaError_t cudaErrorInvalidPtx = 218;
+constexpr cudaError_t cudaErrorInvalidGraphicsContext = 219;
+constexpr cudaError_t cudaErrorFileNotFound = 301;
+constexpr cudaError_t cudaErrorSharedObjectSymbolNotFound = 302;
+constexpr cudaError_t cudaErrorSharedObjectInitFailed = 303;
+constexpr cudaError_t cudaErrorOperatingSystem = 304;
+constexpr cudaError_t cudaErrorIllegalAddress = 700;
+constexpr cudaError_t cudaErrorLaunchIncompatibleTexturing = 703;
+constexpr cudaError_t cudaErrorPeerAccessAlreadyEnabled = 704;
+constexpr cudaError_t cudaErrorPeerAccessNotEnabled = 705;
+constexpr cudaError_t cudaErrorContextIsDestroyed = 709;
+constexpr cudaError_t cudaErrorAssert = 710;
+constexpr cudaError_t cudaErrorTooManyPeers = 711;
+constexpr cudaError_t cudaErrorHostMemoryAlreadyRegistered = 712;
+constexpr cudaError_t cudaErrorHostMemoryNotRegistered = 713;
+constexpr cudaError_t cudaErrorHardwareStackError = 714;
+constexpr cudaError_t cudaErrorIllegalInstruction = 715;
+constexpr cudaError_t cudaErrorMisalignedAddress = 716;
+constexpr cudaError_t cudaErrorInvalidAddressSpace = 717;
+constexpr cudaError_t cudaErrorCooperativeLaunchTooLarge = 720;
+constexpr cudaError_t cudaErrorNotPermitted = 800;
+constexpr cudaError_t cudaErrorNotSupported = 801;
+constexpr cudaError_t cudaErrorMemoryValueTooLarge = 812;
+constexpr cudaError_t cudaErrorJitCompilerNotFound = 813;
+constexpr cudaError_t cudaErrorUnsupportedPtxVersion = 814;
+constexpr cudaError_t cudaErrorJitCompilationDisabled = 815;
+constexpr cudaError_t cudaErrorUnsupportedExecAffinity = 816;
+constexpr cudaError_t cudaErrorInvalidSource = 817;
+constexpr cudaError_t cudaErrorStreamCaptureUnsupported = 900;
+constexpr cudaError_t cudaErrorStreamCaptureInvalidated = 901;
+constexpr cudaError_t cudaErrorStreamCaptureMerge = 902;
+constexpr cudaError_t cudaErrorStreamCaptureUnmatched = 903;
+constexpr cudaError_t cudaErrorStreamCaptureUnjoined = 904;
+constexpr cudaError_t cudaErrorStreamCaptureIsolation = 905;
+constexpr cudaError_t cudaErrorStreamCaptureImplicit = 906;
+constexpr cudaError_t cudaErrorCapturedEvent = 907;
+constexpr cudaError_t cudaErrorStreamCaptureWrongThread = 908;
+constexpr cudaError_t cudaErrorGraphExecUpdateFailure = 910;
+constexpr cudaError_t cudaErrorUnknown = 999;
 
 // ── CUDA Driver API Types ──────────────────────────────────────────────────
 using CUmodule = ModuleHandle;
@@ -173,6 +223,7 @@ public:
 
   // ── Error Handling ─────────────────────────────────────────────────────
   const char *getErrorString(cudaError_t error);
+  const char *getErrorName(cudaError_t error);
   cudaError_t getLastError();        // Returns and clears last error
   cudaError_t peekLastError() const; // Returns last error without clearing
 

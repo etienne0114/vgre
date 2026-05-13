@@ -30,7 +30,7 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 
 | Category | Estimated Coverage | Reality Check |
 |---|---|---|
-| CUDA Runtime API | ~46% | 98 functions implemented; ~116+ missing including `cudaMemcpyToSymbol`, `cudaFuncGetAttributes`, texture/surface objects, array APIs, graph kernel nodes, stream capture introspection |
+| CUDA Runtime API | ~46% | 98 functions implemented; ~116+ missing including `cudaMemcpyToSymbol`, `cudaFuncGetAttributes`, texture/surface objects, array APIs, graph kernel nodes, stream capture introspection. Error introspection (`cudaGetErrorName`/`cudaGetErrorString`) now complete with 50+ mapped codes. |
 | CUDA Driver API | ~15% | 46 functions implemented; 250+ missing including `cuEventQuery`, `cuStreamAddCallback`, `cuMemAllocManaged`, `cuMemHostRegister`, 2D/3D copies, grid-level sync, context limits, cooperative launch, graph APIs |
 | CUDA Graphs | ~30% | Internal `GraphManager` has KERNEL, MEMCPY, CONDITIONAL nodes. CUDART shim only exposes MEMCPY, CONDITIONAL, EXTERNAL-SEMAPHORE nodes. KERNEL, MEMSET, HOST, CHILD, EMPTY, EVENT, MEM-ALLOC/FREE nodes missing from shim. |
 | PTX ISA Coverage | ~30% | Core arithmetic + warp shuffle + basic atomics + Ampere/Hopper MMA are present. Missing: texture/surface loads, 3D+ TMA, `tcgen05`, shared atomics, FP16 vector loads, `match.sync`, `grid.sync`, `prmt`, `rcp.rn`, `sqrt.rn`, most `cvt` variants. |
@@ -53,7 +53,7 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 | 1.1.2 | `cudaEventQuery` | ✅ **IMPLEMENTED** 2026-05-13 — uses `Event::isQueryReady()`; returns `cudaSuccess` if recorded, `cudaErrorNotReady` otherwise. Test: `tests/api/test_event_query.cpp`. | `grep -rn "^cudaError_t cudaEventQuery" src/api/cudart_shim_stream.cpp` → match |
 | 1.1.3 | `cudaStreamAddCallback` | ✅ **IMPLEMENTED** 2026-05-13 — enqueues a lambda via `Scheduler::submitStreamTask()` that invokes the user callback with `cudaSuccess` after all prior stream work completes. Test: `tests/api/test_stream_add_callback.cpp`. | `grep -rn "^cudaError_t cudaStreamAddCallback" src/api/cudart_shim_stream.cpp` → match |
 | 1.1.4 | `cudaLaunchHostFunc` | ✅ **IMPLEMENTED** 2026-05-13 — enqueues a lambda via `Scheduler::submitStreamTask()` that invokes the user host function after all prior stream work completes. Test: `tests/api/test_launch_host_func.cpp`. | `grep -rn "^cudaError_t cudaLaunchHostFunc" src/api/cudart_shim_stream.cpp` → match |
-| 1.1.5 | `cudaGetErrorName` / `cudaGetErrorString` | Medium — error introspection required for robust error handling. | Absent |
+| 1.1.5 | `cudaGetErrorName` / `cudaGetErrorString` | ✅ **IMPLEMENTED** 2026-05-13 — comprehensive switch-based mapping for 50+ error codes; `getErrorName` returns symbolic names, `getErrorString` returns descriptive messages. Added full `cudaError_t` constant definitions to header. Test: `tests/api/test_error_name_string.cpp`. | `grep -rn "^const char \*cudaGetErrorName\|^const char \*cudaGetErrorString" src/api/cudart_shim_stream.cpp` → match |
 
 ### 1.2 CUDA Runtime API — Memory & Symbols
 

@@ -23,7 +23,7 @@ VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The pro
 ## What Works
 
 ### Core CUDA Runtime API
-- **Partial** CUDA Runtime API (~98 functions): memory allocation/free, stream create/destroy/query/sync/wait-event/add-callback, host-function launch, events (create/record/query/sync/destroy), device queries, peer access, kernel launch, basic graph APIs. **~116+ functions missing** — see `missingFeatures.md`.
+- **Partial** CUDA Runtime API (~98 functions): memory allocation/free, stream create/destroy/query/sync/wait-event/add-callback, host-function launch, events (create/record/query/sync/destroy), error introspection (getErrorName/getErrorString with 50+ mapped codes), device queries, peer access, kernel launch, basic graph APIs. **~116+ functions missing** — see `missingFeatures.md`.
 - CUDA Driver API (`cuInit`, `cuCtxCreate`, `cuMemAlloc`, `cuModuleLoad`, `cuLaunchKernel`) — ~46 functions, ~250+ missing
 - OpenCL 1.2 compatibility layer
 - P2P peer device access and transfers
