@@ -975,4 +975,132 @@ cudnnStatus_t cudnnBatchNormalizationForwardInference(
     return CUDNN_STATUS_SUCCESS;
 }
 
+enum cudnnBatchNormMode_t {
+    CUDNN_BATCHNORM_PER_ACTIVATION = 0,
+    CUDNN_BATCHNORM_SPATIAL        = 1
+};
+
+cudnnStatus_t cudnnBatchNormalizationForwardTraining(
+    cudnnHandle_t,
+    cudnnBatchNormMode_t mode,
+    const void* alpha, const void* beta,
+    cudnnTensorDescriptor_t xDesc, const void* x,
+    cudnnTensorDescriptor_t yDesc, void* y,
+    cudnnTensorDescriptor_t /*bnScaleBiasMeanVarDesc*/,
+    const void* scale, const void* bias,
+    double exponentialAverageFactor,
+    void* resultRunningMean, void* resultRunningVariance,
+    double epsilon,
+    void* resultSaveMean, void* resultSaveInvVariance)
+{
+    if (!xDesc || !yDesc || !x || !y || !alpha || !beta || !scale || !bias)
+        return CUDNN_STATUS_INVALID_VALUE;
+
+    auto* t=(TensorDesc*)xDesc;
+    int N=t->n, C=t->c, HW=t->h*t->w;
+    float a=*(const float*)alpha, b=*(const float*)beta;
+    const float* xf=(const float*)x; float* yf=(float*)y;
+    const float* sc=(const float*)scale; const float* bi=(const float*)bias;
+
+    // Compute per-channel mean and variance
+    std::vector<float> mean(C, 0.f), var(C, 0.f);
+    int count = N * HW;
+
+    if (mode == CUDNN_BATCHNORM_SPATIAL) {
+        for (int c=0; c<C; ++c) {
+            double sum = 0.0;
+            for (int n=0; n<N; ++n)
+            for (int hw=0; hw<HW; ++hw)
+                sum += xf[(n*C + c)*HW + hw];
+            mean[c] = static_cast<float>(sum / count);
+        }
+        for (int c=0; c<C; ++c) {
+            double sumSq = 0.0;
+            for (int n=0; n<N; ++n)
+            for (int hw=0; hw<HW; ++hw) {
+                float d = xf[(n*C + c)*HW + hw] - mean[c];
+                sumSq += d * d;
+            }
+            var[c] = static_cast<float>(sumSq / count);
+        }
+    } else {
+        // PER_ACTIVATION: compute mean/var for every (c,h,w) position across N
+        for (int c=0; c<C; ++c)
+        for (int hw=0; hw<HW; ++hw) {
+            double sum = 0.0;
+            for (int n=0; n<N; ++n)
+                sum += xf[(n*C + c)*HW + hw];
+            mean[c*HW + hw] = static_cast<float>(sum / N);
+        }
+        for (int c=0; c<C; ++c)
+        for (int hw=0; hw<HW; ++hw) {
+            double sumSq = 0.0;
+            for (int n=0; n<N; ++n) {
+                float d = xf[(n*C + c)*HW + hw] - mean[c*HW + hw];
+                sumSq += d * d;
+            }
+            var[c*HW + hw] = static_cast<float>(sumSq / N);
+        }
+    }
+
+    // Normalize and apply scale/shift
+    if (mode == CUDNN_BATCHNORM_SPATIAL) {
+        for (int n=0; n<N; ++n)
+        for (int c=0; c<C; ++c) {
+            float invVar = 1.f / sqrtf(var[c] + (float)epsilon);
+            for (int hw=0; hw<HW; ++hw) {
+                int idx = (n*C + c)*HW + hw;
+                float xhat = (xf[idx] - mean[c]) * invVar;
+                yf[idx] = a * (sc[c]*xhat + bi[c]) + b*yf[idx];
+            }
+        }
+    } else {
+        for (int n=0; n<N; ++n)
+        for (int c=0; c<C; ++c)
+        for (int hw=0; hw<HW; ++hw) {
+            int idx = (n*C + c)*HW + hw;
+            float invVar = 1.f / sqrtf(var[c*HW + hw] + (float)epsilon);
+            float xhat = (xf[idx] - mean[c*HW + hw]) * invVar;
+            yf[idx] = a * (sc[c]*xhat + bi[c]) + b*yf[idx];
+        }
+    }
+
+    // Save mean / invVariance for backward pass
+    if (resultSaveMean && resultSaveInvVariance) {
+        float* sm = (float*)resultSaveMean;
+        float* siv = (float*)resultSaveInvVariance;
+        if (mode == CUDNN_BATCHNORM_SPATIAL) {
+            for (int c=0; c<C; ++c) {
+                sm[c] = mean[c];
+                siv[c] = 1.f / sqrtf(var[c] + (float)epsilon);
+            }
+        } else {
+            for (int i=0; i<C*HW; ++i) {
+                sm[i] = mean[i];
+                siv[i] = 1.f / sqrtf(var[i] + (float)epsilon);
+            }
+        }
+    }
+
+    // Update running statistics
+    if (resultRunningMean && resultRunningVariance) {
+        float* rm = (float*)resultRunningMean;
+        float* rv = (float*)resultRunningVariance;
+        float factor = static_cast<float>(exponentialAverageFactor);
+        if (mode == CUDNN_BATCHNORM_SPATIAL) {
+            for (int c=0; c<C; ++c) {
+                rm[c] = (1.f - factor) * rm[c] + factor * mean[c];
+                rv[c] = (1.f - factor) * rv[c] + factor * var[c];
+            }
+        } else {
+            for (int i=0; i<C*HW; ++i) {
+                rm[i] = (1.f - factor) * rm[i] + factor * mean[i];
+                rv[i] = (1.f - factor) * rv[i] + factor * var[i];
+            }
+        }
+    }
+
+    return CUDNN_STATUS_SUCCESS;
+}
+
 } // extern "C"
