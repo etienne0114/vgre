@@ -865,6 +865,60 @@ cudnnStatus_t cudnnSoftmaxForward(cudnnHandle_t,
     return CUDNN_STATUS_SUCCESS;
 }
 
+cudnnStatus_t cudnnSoftmaxBackward(cudnnHandle_t,
+    int algo, int mode,
+    const void* alpha,
+    cudnnTensorDescriptor_t yDesc, const void* y,
+    cudnnTensorDescriptor_t dyDesc, const void* dy,
+    const void* beta,
+    cudnnTensorDescriptor_t dxDesc, void* dx)
+{
+    if (!yDesc || !dyDesc || !dxDesc || !y || !dy || !dx || !alpha || !beta)
+        return CUDNN_STATUS_INVALID_VALUE;
+
+    auto* ty=(TensorDesc*)yDesc; auto* tdy=(TensorDesc*)dyDesc; auto* tdx=(TensorDesc*)dxDesc;
+    int Ny = ty->n*ty->c*ty->h*ty->w;
+    int Nd = tdy->n*tdy->c*tdy->h*tdy->w;
+    int Ndx = tdx->n*tdx->c*tdx->h*tdx->w;
+    if (Ny != Nd || Ny != Ndx) return CUDNN_STATUS_INVALID_VALUE;
+
+    int N=ty->n, C=ty->c, HW=ty->h*ty->w;
+    float a=*(const float*)alpha, b=*(const float*)beta;
+    const float* yf=(const float*)y;
+    const float* dyf=(const float*)dy;
+    float* dxf=(float*)dx;
+
+    // Softmax backward: dx_i = y_i * (dy_i - sum_j(dy_j * y_j))
+    if (mode == 0) {
+        int VEC = C * HW;
+        for (int n=0; n<N; ++n) {
+            float sum_dy_y = 0.f;
+            for (int i=0; i<VEC; ++i)
+                sum_dy_y += dyf[n*VEC+i] * yf[n*VEC+i];
+            for (int i=0; i<VEC; ++i) {
+                float v = yf[n*VEC+i] * (dyf[n*VEC+i] - sum_dy_y);
+                dxf[n*VEC+i] = a*v + b*dxf[n*VEC+i];
+            }
+        }
+    } else {
+        for (int n=0; n<N; ++n)
+        for (int hw=0; hw<HW; ++hw) {
+            float sum_dy_y = 0.f;
+            for (int c=0; c<C; ++c) {
+                int idx = n*C*HW + c*HW + hw;
+                sum_dy_y += dyf[idx] * yf[idx];
+            }
+            for (int c=0; c<C; ++c) {
+                int idx = n*C*HW + c*HW + hw;
+                float v = yf[idx] * (dyf[idx] - sum_dy_y);
+                dxf[idx] = a*v + b*dxf[idx];
+            }
+        }
+    }
+    (void)algo;
+    return CUDNN_STATUS_SUCCESS;
+}
+
 // ── Pooling descriptors ───────────────────────────────────────────────────────
 cudnnStatus_t cudnnCreatePoolingDescriptor(cudnnPoolingDescriptor_t* d) {
     *d = new PoolDesc{}; return CUDNN_STATUS_SUCCESS;
