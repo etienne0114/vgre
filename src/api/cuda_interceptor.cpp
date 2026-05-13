@@ -842,6 +842,8 @@ const char *CUDAInterceptor::getErrorString(cudaError_t error) {
     return "profiler disabled";
   case cudaErrorInvalidMemcpyDirection:
     return "invalid memcpy direction";
+  case cudaErrorInvalidSymbol:
+    return "invalid device symbol";
   case cudaErrorInvalidFilterSetting:
     return "invalid filter setting";
   case cudaErrorInvalidNormSetting:
@@ -973,6 +975,8 @@ const char *CUDAInterceptor::getErrorName(cudaError_t error) {
     return "cudaErrorProfilerDisabled";
   case cudaErrorInvalidMemcpyDirection:
     return "cudaErrorInvalidMemcpyDirection";
+  case cudaErrorInvalidSymbol:
+    return "cudaErrorInvalidSymbol";
   case cudaErrorInvalidFilterSetting:
     return "cudaErrorInvalidFilterSetting";
   case cudaErrorInvalidNormSetting:
