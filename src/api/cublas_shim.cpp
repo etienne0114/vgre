@@ -1342,6 +1342,668 @@ cublasStatus_t cublasDtrmv_v2(cublasHandle_t handle, cublasFillMode_t uplo,
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// ── Level-3 BLAS (P2.4) ─────────────────────────────────────────────────────
+
+// ── Reference helpers for Level-3 BLAS ────────────────────────────────────
+
+static void refStrsm(bool left, bool upper, bool trans, bool unit,
+    int m, int n, float alpha, const float* A, int lda, float* B, int ldb)
+{
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < m; ++i)
+            B[i*ldb+j] *= alpha;
+    if (left) {
+        if (!trans) {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        float t = B[i*ldb+j];
+                        for (int k = i+1; k < m; ++k) t -= A[i*lda+k] * B[k*ldb+j];
+                        if (!unit) t /= A[i*lda+i];
+                        B[i*ldb+j] = t;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        float t = B[i*ldb+j];
+                        for (int k = 0; k < i; ++k) t -= A[i*lda+k] * B[k*ldb+j];
+                        if (!unit) t /= A[i*lda+i];
+                        B[i*ldb+j] = t;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        float t = B[i*ldb+j];
+                        for (int k = 0; k < i; ++k) t -= A[k*lda+i] * B[k*ldb+j];
+                        if (!unit) t /= A[i*lda+i];
+                        B[i*ldb+j] = t;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        float t = B[i*ldb+j];
+                        for (int k = i+1; k < m; ++k) t -= A[k*lda+i] * B[k*ldb+j];
+                        if (!unit) t /= A[i*lda+i];
+                        B[i*ldb+j] = t;
+                    }
+            }
+        }
+    } else {
+        if (!trans) {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        float t = B[i*ldb+j];
+                        for (int k = 0; k < j; ++k) t -= B[i*ldb+k] * A[k*lda+j];
+                        if (!unit) t /= A[j*lda+j];
+                        B[i*ldb+j] = t;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        float t = B[i*ldb+j];
+                        for (int k = j+1; k < n; ++k) t -= B[i*ldb+k] * A[k*lda+j];
+                        if (!unit) t /= A[j*lda+j];
+                        B[i*ldb+j] = t;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        float t = B[i*ldb+j];
+                        for (int k = j+1; k < n; ++k) t -= B[i*ldb+k] * A[j*lda+k];
+                        if (!unit) t /= A[j*lda+j];
+                        B[i*ldb+j] = t;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        float t = B[i*ldb+j];
+                        for (int k = 0; k < j; ++k) t -= B[i*ldb+k] * A[j*lda+k];
+                        if (!unit) t /= A[j*lda+j];
+                        B[i*ldb+j] = t;
+                    }
+            }
+        }
+    }
+}
+
+static void refDtrsm(bool left, bool upper, bool trans, bool unit,
+    int m, int n, double alpha, const double* A, int lda, double* B, int ldb)
+{
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < m; ++i)
+            B[i*ldb+j] *= alpha;
+    if (left) {
+        if (!trans) {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        double t = B[i*ldb+j];
+                        for (int k = i+1; k < m; ++k) t -= A[i*lda+k] * B[k*ldb+j];
+                        if (!unit) t /= A[i*lda+i];
+                        B[i*ldb+j] = t;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        double t = B[i*ldb+j];
+                        for (int k = 0; k < i; ++k) t -= A[i*lda+k] * B[k*ldb+j];
+                        if (!unit) t /= A[i*lda+i];
+                        B[i*ldb+j] = t;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        double t = B[i*ldb+j];
+                        for (int k = 0; k < i; ++k) t -= A[k*lda+i] * B[k*ldb+j];
+                        if (!unit) t /= A[i*lda+i];
+                        B[i*ldb+j] = t;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        double t = B[i*ldb+j];
+                        for (int k = i+1; k < m; ++k) t -= A[k*lda+i] * B[k*ldb+j];
+                        if (!unit) t /= A[i*lda+i];
+                        B[i*ldb+j] = t;
+                    }
+            }
+        }
+    } else {
+        if (!trans) {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        double t = B[i*ldb+j];
+                        for (int k = 0; k < j; ++k) t -= B[i*ldb+k] * A[k*lda+j];
+                        if (!unit) t /= A[j*lda+j];
+                        B[i*ldb+j] = t;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        double t = B[i*ldb+j];
+                        for (int k = j+1; k < n; ++k) t -= B[i*ldb+k] * A[k*lda+j];
+                        if (!unit) t /= A[j*lda+j];
+                        B[i*ldb+j] = t;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        double t = B[i*ldb+j];
+                        for (int k = j+1; k < n; ++k) t -= B[i*ldb+k] * A[j*lda+k];
+                        if (!unit) t /= A[j*lda+j];
+                        B[i*ldb+j] = t;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        double t = B[i*ldb+j];
+                        for (int k = 0; k < j; ++k) t -= B[i*ldb+k] * A[j*lda+k];
+                        if (!unit) t /= A[j*lda+j];
+                        B[i*ldb+j] = t;
+                    }
+            }
+        }
+    }
+}
+
+static float symA(const float* A, int lda, int i, int k, bool upper) {
+    return upper ? ((k >= i) ? A[i*lda+k] : A[k*lda+i])
+                 : ((k <= i) ? A[i*lda+k] : A[k*lda+i]);
+}
+static double symA(const double* A, int lda, int i, int k, bool upper) {
+    return upper ? ((k >= i) ? A[i*lda+k] : A[k*lda+i])
+                 : ((k <= i) ? A[i*lda+k] : A[k*lda+i]);
+}
+
+static void refSsymm(bool left, bool upper, int m, int n,
+    float alpha, const float* A, int lda, const float* B, int ldb,
+    float beta, float* C, int ldc)
+{
+    for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j)
+            C[i*ldc+j] = beta * C[i*ldc+j];
+    if (left) {
+        for (int i = 0; i < m; ++i)
+            for (int j = 0; j < n; ++j) {
+                float acc = 0;
+                for (int k = 0; k < m; ++k) acc += symA(A, lda, i, k, upper) * B[k*ldb+j];
+                C[i*ldc+j] += alpha * acc;
+            }
+    } else {
+        for (int i = 0; i < m; ++i)
+            for (int j = 0; j < n; ++j) {
+                float acc = 0;
+                for (int k = 0; k < n; ++k) acc += symA(A, lda, j, k, upper) * B[i*ldb+k];
+                C[i*ldc+j] += alpha * acc;
+            }
+    }
+}
+
+static void refDsymm(bool left, bool upper, int m, int n,
+    double alpha, const double* A, int lda, const double* B, int ldb,
+    double beta, double* C, int ldc)
+{
+    for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j)
+            C[i*ldc+j] = beta * C[i*ldc+j];
+    if (left) {
+        for (int i = 0; i < m; ++i)
+            for (int j = 0; j < n; ++j) {
+                double acc = 0;
+                for (int k = 0; k < m; ++k) acc += symA(A, lda, i, k, upper) * B[k*ldb+j];
+                C[i*ldc+j] += alpha * acc;
+            }
+    } else {
+        for (int i = 0; i < m; ++i)
+            for (int j = 0; j < n; ++j) {
+                double acc = 0;
+                for (int k = 0; k < n; ++k) acc += symA(A, lda, j, k, upper) * B[i*ldb+k];
+                C[i*ldc+j] += alpha * acc;
+            }
+    }
+}
+
+// ── TRSM ───────────────────────────────────────────────────────────────────
+cublasStatus_t cublasStrsm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag,
+    int m, int n, const float* alpha,
+    const float* A, int lda, float* B, int ldb)
+{
+    if (!handle || !alpha || !A || !B) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_strsm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag),
+                m, n, *alpha, A, lda, B, ldb);
+#else
+    refStrsm(left, upper, t, unit, m, n, *alpha, A, lda, B, ldb);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrsm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag,
+    int m, int n, const double* alpha,
+    const double* A, int lda, double* B, int ldb)
+{
+    if (!handle || !alpha || !A || !B) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_dtrsm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag),
+                m, n, *alpha, A, lda, B, ldb);
+#else
+    refDtrsm(left, upper, t, unit, m, n, *alpha, A, lda, B, ldb);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── SYRK ───────────────────────────────────────────────────────────────────
+cublasStatus_t cublasSsyrk_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    cublasOperation_t trans, int n, int k,
+    const float* alpha, const float* A, int lda,
+    const float* beta, float* C, int ldc)
+{
+    if (!handle || !alpha || !A || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+#if HAVE_CBLAS
+    cblas_ssyrk(CblasRowMajor, cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                n, k, *alpha, A, lda, *beta, C, ldc);
+#else
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            C[i*ldc+j] *= *beta;
+    if (!t) {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                float acc = 0;
+                for (int l = 0; l < k; ++l) acc += A[i*lda+l] * A[j*lda+l];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    } else {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                float acc = 0;
+                for (int l = 0; l < k; ++l) acc += A[l*lda+i] * A[l*lda+j];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsyrk_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    cublasOperation_t trans, int n, int k,
+    const double* alpha, const double* A, int lda,
+    const double* beta, double* C, int ldc)
+{
+    if (!handle || !alpha || !A || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+#if HAVE_CBLAS
+    cblas_dsyrk(CblasRowMajor, cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                n, k, *alpha, A, lda, *beta, C, ldc);
+#else
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            C[i*ldc+j] *= *beta;
+    if (!t) {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                double acc = 0;
+                for (int l = 0; l < k; ++l) acc += A[i*lda+l] * A[j*lda+l];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    } else {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                double acc = 0;
+                for (int l = 0; l < k; ++l) acc += A[l*lda+i] * A[l*lda+j];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── SYR2K ──────────────────────────────────────────────────────────────────
+cublasStatus_t cublasSsyr2k_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    cublasOperation_t trans, int n, int k,
+    const float* alpha, const float* A, int lda,
+    const float* B, int ldb, const float* beta,
+    float* C, int ldc)
+{
+    if (!handle || !alpha || !A || !B || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+#if HAVE_CBLAS
+    cblas_ssyr2k(CblasRowMajor, cublasToCblasUplo(uplo),
+                 (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                 n, k, *alpha, A, lda, B, ldb, *beta, C, ldc);
+#else
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            C[i*ldc+j] *= *beta;
+    if (!t) {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                float acc = 0;
+                for (int l = 0; l < k; ++l)
+                    acc += A[i*lda+l] * B[j*ldb+l] + B[i*ldb+l] * A[j*lda+l];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    } else {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                float acc = 0;
+                for (int l = 0; l < k; ++l)
+                    acc += A[l*lda+i] * B[l*ldb+j] + B[l*ldb+i] * A[l*lda+j];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsyr2k_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    cublasOperation_t trans, int n, int k,
+    const double* alpha, const double* A, int lda,
+    const double* B, int ldb, const double* beta,
+    double* C, int ldc)
+{
+    if (!handle || !alpha || !A || !B || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+#if HAVE_CBLAS
+    cblas_dsyr2k(CblasRowMajor, cublasToCblasUplo(uplo),
+                 (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                 n, k, *alpha, A, lda, B, ldb, *beta, C, ldc);
+#else
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            C[i*ldc+j] *= *beta;
+    if (!t) {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                double acc = 0;
+                for (int l = 0; l < k; ++l)
+                    acc += A[i*lda+l] * B[j*ldb+l] + B[i*ldb+l] * A[j*lda+l];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    } else {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                double acc = 0;
+                for (int l = 0; l < k; ++l)
+                    acc += A[l*lda+i] * B[l*ldb+j] + B[l*ldb+i] * A[l*lda+j];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── TRMM ───────────────────────────────────────────────────────────────────
+cublasStatus_t cublasStrmm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag,
+    int m, int n, const float* alpha,
+    const float* A, int lda, float* B, int ldb)
+{
+    if (!handle || !alpha || !A || !B) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_strmm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag),
+                m, n, *alpha, A, lda, B, ldb);
+#else
+    std::vector<float> B0(m*n);
+    for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j)
+            B0[i*n+j] = B[i*ldb+j];
+    if (left) {
+        if (!t) {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        float t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = i+1; k < m; ++k) t_ += A[i*lda+k] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        float t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = 0; k < i; ++k) t_ += A[i*lda+k] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        float t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = 0; k < i; ++k) t_ += A[k*lda+i] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        float t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = i+1; k < m; ++k) t_ += A[k*lda+i] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        }
+    } else {
+        if (!t) {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        float t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = 0; k < j; ++k) t_ += B0[i*n+k] * A[k*lda+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        float t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = j+1; k < n; ++k) t_ += B0[i*n+k] * A[k*lda+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        float t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = j+1; k < n; ++k) t_ += B0[i*n+k] * A[j*lda+k];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        float t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = 0; k < j; ++k) t_ += B0[i*n+k] * A[j*lda+k];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrmm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag,
+    int m, int n, const double* alpha,
+    const double* A, int lda, double* B, int ldb)
+{
+    if (!handle || !alpha || !A || !B) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_dtrmm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag),
+                m, n, *alpha, A, lda, B, ldb);
+#else
+    std::vector<double> B0(m*n);
+    for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j)
+            B0[i*n+j] = B[i*ldb+j];
+    if (left) {
+        if (!t) {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        double t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = i+1; k < m; ++k) t_ += A[i*lda+k] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        double t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = 0; k < i; ++k) t_ += A[i*lda+k] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        double t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = 0; k < i; ++k) t_ += A[k*lda+i] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        double t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = i+1; k < m; ++k) t_ += A[k*lda+i] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        }
+    } else {
+        if (!t) {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        double t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = 0; k < j; ++k) t_ += B0[i*n+k] * A[k*lda+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        double t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = j+1; k < n; ++k) t_ += B0[i*n+k] * A[k*lda+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        double t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = j+1; k < n; ++k) t_ += B0[i*n+k] * A[j*lda+k];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        double t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = 0; k < j; ++k) t_ += B0[i*n+k] * A[j*lda+k];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── SYMM ───────────────────────────────────────────────────────────────────
+cublasStatus_t cublasSsymm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    int m, int n, const float* alpha,
+    const float* A, int lda, const float* B, int ldb,
+    const float* beta, float* C, int ldc)
+{
+    if (!handle || !alpha || !A || !B || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+#if HAVE_CBLAS
+    cblas_ssymm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                m, n, *alpha, A, lda, B, ldb, *beta, C, ldc);
+#else
+    refSsymm(left, upper, m, n, *alpha, A, lda, B, ldb, *beta, C, ldc);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsymm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    int m, int n, const double* alpha,
+    const double* A, int lda, const double* B, int ldb,
+    const double* beta, double* C, int ldc)
+{
+    if (!handle || !alpha || !A || !B || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+#if HAVE_CBLAS
+    cblas_dsymm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                m, n, *alpha, A, lda, B, ldb, *beta, C, ldc);
+#else
+    refDsymm(left, upper, m, n, *alpha, A, lda, B, ldb, *beta, C, ldc);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 // ── Batched SGEMM ─────────────────────────────────────────────────────────────
 // cublasSgemmBatched: array-of-pointers form.
 // Aarray[i], Barray[i], Carray[i] are independent matrices for batch item i.
