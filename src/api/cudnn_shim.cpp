@@ -583,6 +583,133 @@ cudnnStatus_t cudnnConvolutionBackwardData(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// ── Backward-filter convolution: computes dw from x and dy ─────────────────────
+// dw[k,c,r,s] += sum_{n,oh,ow} dy[n,k,oh,ow] * x[n,c,ih,iw]
+//   where ih = oh*str_h + r*dil_h - pad_h, iw = ow*str_w + s*dil_w - pad_w
+static void cpuConv2dBackwardFilter(
+    int N, int C, int H, int W,
+    int K, int R, int S,
+    int pad_h, int pad_w, int str_h, int str_w, int dil_h, int dil_w,
+    const float* x, const float* dy, float* dw)
+{
+    int outH = (H + 2*pad_h - dil_h*(R-1) - 1)/str_h + 1;
+    int outW = (W + 2*pad_w - dil_w*(S-1) - 1)/str_w + 1;
+    for (int n = 0; n < N; ++n)
+    for (int k = 0; k < K; ++k)
+    for (int c = 0; c < C; ++c)
+    for (int r = 0; r < R; ++r)
+    for (int s = 0; s < S; ++s) {
+        float acc = 0.f;
+        for (int oh = 0; oh < outH; ++oh)
+        for (int ow = 0; ow < outW; ++ow) {
+            int ih = oh*str_h + r*dil_h - pad_h;
+            int iw = ow*str_w + s*dil_w - pad_w;
+            if (ih < 0 || iw < 0 || ih >= H || iw >= W) continue;
+            acc += x[nchw(N,C,H,W,n,c,ih,iw)] * dy[nchw(N,K,outH,outW,n,k,oh,ow)];
+        }
+        dw[((k*C + c)*R + r)*S + s] += acc;
+    }
+}
+
+enum cudnnConvolutionBwdFilterAlgo_t {
+    CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0 = 0,
+    CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1 = 1,
+    CUDNN_CONVOLUTION_BWD_FILTER_ALGO_FFT = 2,
+    CUDNN_CONVOLUTION_BWD_FILTER_ALGO_3 = 3,
+    CUDNN_CONVOLUTION_BWD_FILTER_ALGO_WINOGRAD = 4
+};
+
+struct cudnnConvolutionBwdFilterAlgoPerf_t {
+    cudnnConvolutionBwdFilterAlgo_t algo;
+    cudnnStatus_t status;
+    float time;
+    size_t memory;
+    int mathType;
+    int reserved[3];
+};
+
+cudnnStatus_t cudnnGetConvolutionBackwardFilterWorkspaceSize(
+    cudnnHandle_t,
+    cudnnTensorDescriptor_t, cudnnTensorDescriptor_t,
+    cudnnConvolutionDescriptor_t, cudnnFilterDescriptor_t,
+    cudnnConvolutionBwdFilterAlgo_t, size_t* size)
+{
+    if (size) *size = 0;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnFindConvolutionBackwardFilterAlgorithm(
+    cudnnHandle_t handle,
+    cudnnTensorDescriptor_t xDesc,
+    cudnnTensorDescriptor_t dyDesc,
+    cudnnConvolutionDescriptor_t convDesc,
+    cudnnFilterDescriptor_t dwDesc,
+    int requestedCount, int* returnedCount,
+    cudnnConvolutionBwdFilterAlgoPerf_t* results)
+{
+    if (!returnedCount || !results) return CUDNN_STATUS_INVALID_VALUE;
+    *returnedCount = 1;
+    results[0] = {CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0, CUDNN_STATUS_SUCCESS, 0.0f, 0, 0, {0,0,0}};
+    (void)handle; (void)xDesc; (void)dyDesc; (void)convDesc; (void)dwDesc; (void)requestedCount;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnConvolutionBackwardFilter(
+    cudnnHandle_t,
+    const void* alpha,
+    cudnnTensorDescriptor_t xDesc, const void* x,
+    cudnnTensorDescriptor_t dyDesc, const void* dy,
+    cudnnConvolutionDescriptor_t convDesc,
+    cudnnConvolutionBwdFilterAlgo_t /*algo*/,
+    void* /*workspace*/, size_t /*wsSize*/,
+    const void* beta,
+    cudnnFilterDescriptor_t dwDesc, void* dw)
+{
+    if (!xDesc || !dyDesc || !convDesc || !dwDesc || !x || !dy || !dw || !alpha || !beta)
+        return CUDNN_STATUS_INVALID_VALUE;
+
+    auto* xt=(TensorDesc*)xDesc; auto* dyt=(TensorDesc*)dyDesc;
+    auto* cv=(ConvDesc*)convDesc; auto* dwt=(FilterDesc*)dwDesc;
+    float a = *(const float*)alpha, b = *(const float*)beta;
+
+    int dwSize = dwt->k * dwt->c * dwt->r * dwt->s;
+    float* dwf = (float*)dw;
+    if (b != 0.0f) {
+        for (int i = 0; i < dwSize; ++i) dwf[i] *= b;
+    } else {
+        std::memset(dwf, 0, dwSize * sizeof(float));
+    }
+
+    std::vector<float> tmp(dwSize, 0.f);
+
+    // 1×1 GEMM fast path
+    if (dwt->r == 1 && dwt->s == 1 && cv->str_h == 1 && cv->str_w == 1
+        && cv->pad_h == 0 && cv->pad_w == 0 && cv->dil_h == 1 && cv->dil_w == 1) {
+        const float* xf = (const float*)x;
+        const float* dyf = (const float*)dy;
+        for (int k = 0; k < dwt->k; ++k)
+        for (int c = 0; c < dwt->c; ++c) {
+            float acc = 0.f;
+            for (int n = 0; n < xt->n; ++n)
+            for (int h = 0; h < xt->h; ++h)
+            for (int w_ = 0; w_ < xt->w; ++w_) {
+                acc += xf[((n*xt->c + c)*xt->h + h)*xt->w + w_]
+                     * dyf[((n*dyt->c + k)*dyt->h + h)*dyt->w + w_];
+            }
+            tmp[(k*dwt->c + c)*dwt->r*dwt->s] = acc;
+        }
+    } else {
+        cpuConv2dBackwardFilter(xt->n, xt->c, xt->h, xt->w,
+                                dwt->k, dwt->r, dwt->s,
+                                cv->pad_h, cv->pad_w, cv->str_h, cv->str_w,
+                                cv->dil_h, cv->dil_w,
+                                (const float*)x, (const float*)dy, tmp.data());
+    }
+
+    for (int i = 0; i < dwSize; ++i) dwf[i] += a * tmp[i];
+    return CUDNN_STATUS_SUCCESS;
+}
+
 // ── Activation ────────────────────────────────────────────────────────────────
 cudnnStatus_t cudnnCreateActivationDescriptor(cudnnActivationDescriptor_t* d) {
     *d = new ActDesc{}; return CUDNN_STATUS_SUCCESS;
