@@ -864,11 +864,11 @@ tests/core/texture/        # Texture/surface object tests
 
 | # | Feature | Status | PR | Date |
 |---|---|---|---|---|
-| 3.1 | `cudnnConvolutionBackwardData` | TODO | — | — |
+| 3.1 | `cudnnConvolutionBackwardData` | **DONE** | — | 2026-05-13 |
 | 3.2 | `cudnnConvolutionBackwardFilter` | TODO | — | — |
 | 3.3 | `cudnnBatchNormalizationForwardTraining` | TODO | — | — |
 | 3.4 | `cudnnBatchNormalizationBackward` | TODO | — | — |
-| 3.5 | `cudnnActivationBackward` | TODO | — | — |
+| 3.5 | `cudnnActivationBackward` | **DONE** | — | 2026-05-13 |
 | 3.6 | `cudnnSoftmaxBackward` | TODO | — | — |
 | 3.7 | `cudnnPoolingBackward` | TODO | — | — |
 | 3.8 | `cudnnDropoutForward/Backward` | TODO | — | — |

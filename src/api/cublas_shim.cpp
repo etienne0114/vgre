@@ -1516,11 +1516,11 @@ static void refDtrsm(bool left, bool upper, bool trans, bool unit,
     }
 }
 
-static float symA(const float* A, int lda, int i, int k, bool upper) {
+static inline float symAf(const float* A, int lda, int i, int k, bool upper) {
     return upper ? ((k >= i) ? A[i*lda+k] : A[k*lda+i])
                  : ((k <= i) ? A[i*lda+k] : A[k*lda+i]);
 }
-static double symA(const double* A, int lda, int i, int k, bool upper) {
+static inline double symAd(const double* A, int lda, int i, int k, bool upper) {
     return upper ? ((k >= i) ? A[i*lda+k] : A[k*lda+i])
                  : ((k <= i) ? A[i*lda+k] : A[k*lda+i]);
 }
@@ -1536,14 +1536,14 @@ static void refSsymm(bool left, bool upper, int m, int n,
         for (int i = 0; i < m; ++i)
             for (int j = 0; j < n; ++j) {
                 float acc = 0;
-                for (int k = 0; k < m; ++k) acc += symA(A, lda, i, k, upper) * B[k*ldb+j];
+                for (int k = 0; k < m; ++k) acc += symAf(A, lda, i, k, upper) * B[k*ldb+j];
                 C[i*ldc+j] += alpha * acc;
             }
     } else {
         for (int i = 0; i < m; ++i)
             for (int j = 0; j < n; ++j) {
                 float acc = 0;
-                for (int k = 0; k < n; ++k) acc += symA(A, lda, j, k, upper) * B[i*ldb+k];
+                for (int k = 0; k < n; ++k) acc += symAf(A, lda, j, k, upper) * B[i*ldb+k];
                 C[i*ldc+j] += alpha * acc;
             }
     }
@@ -1560,14 +1560,14 @@ static void refDsymm(bool left, bool upper, int m, int n,
         for (int i = 0; i < m; ++i)
             for (int j = 0; j < n; ++j) {
                 double acc = 0;
-                for (int k = 0; k < m; ++k) acc += symA(A, lda, i, k, upper) * B[k*ldb+j];
+                for (int k = 0; k < m; ++k) acc += symAd(A, lda, i, k, upper) * B[k*ldb+j];
                 C[i*ldc+j] += alpha * acc;
             }
     } else {
         for (int i = 0; i < m; ++i)
             for (int j = 0; j < n; ++j) {
                 double acc = 0;
-                for (int k = 0; k < n; ++k) acc += symA(A, lda, j, k, upper) * B[i*ldb+k];
+                for (int k = 0; k < n; ++k) acc += symAd(A, lda, j, k, upper) * B[i*ldb+k];
                 C[i*ldc+j] += alpha * acc;
             }
     }
