@@ -855,7 +855,7 @@ tests/core/texture/        # Texture/surface object tests
 
 | # | Feature | Status | PR | Date |
 |---|---|---|---|---|
-| 2.1 | Level-1 completion (`copy`, `swap`, `rot`, `asum`, `amax`, etc.) | TODO | — | — |
+| 2.1 | Level-1 completion (`copy`, `swap`, `rot`, `asum`, `amax`, etc.) | **DONE** | — | 2026-05-13 |
 | 2.2 | Pointer mode / atomics mode APIs | TODO | — | — |
 | 2.3 | Level-2 BLAS (`Trsv`, `Trsm`, `Ger`, `Symv`, `Gbmv`, `Syr`, etc.) | TODO | — | — |
 | 2.4 | Level-3 BLAS (`Trsm`, `Syrk`, `Syr2k`, `Trmm`, `Symm`, `Chemm`, etc.) | TODO | — | — |
