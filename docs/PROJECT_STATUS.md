@@ -56,7 +56,7 @@ VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The pro
 - **CUDA IPC**: Multi-process memory sharing via real POSIX shared memory for event handles
 
 ### Library Shims
-- **cuBLAS** (~16% coverage, ~39/~200+ functions): `cublasSgemm`, `cublasDgemm`, `cublasSaxpy`, `cublasSdot`, `cublasSgemv`, `cublasScopy/Dcopy/Sswap/Dswap/Sasum/Dasum/Isamax/Idamax/Isamin/Idamin/Srot/Drot/Srotg/Drotg/Srotm/Drotm/Srotmg/Drotmg`, `cublasSetPointerMode/GetPointerMode/SetAtomicsMode/GetAtomicsMode`, batched GEMM, `cublasGemmEx`. **Missing**: all Level-2 except `Gemv`, all Level-3 except `Gemm`, `Trsm`, `Trsv`, `Syrk`, `Ger`, `cublasLoggerConfigure`.
+- **cuBLAS** (~21% coverage, ~51/~200+ functions): `cublasSgemm`, `cublasDgemm`, `cublasSaxpy`, `cublasSdot`, `cublasSgemv`, Level-1 complete (`Scopy/Dcopy/Sswap/Dswap/Sasum/Dasum/Isamax/Idamax/Isamin/Idamin/Srot/Drot/Srotg/Drotg/Srotm/Drotm/Srotmg/Drotmg`), Level-2 (`Strsv/Dtrsv/Sger/Dger/Ssymv/Dsymv/Sgbmv/Dgbmv/Ssyr/Dsyr/Ssyr2/Dsyr2/Strmv/Dtrmv`), `cublasSetPointerMode/GetPointerMode/SetAtomicsMode/GetAtomicsMode`, batched GEMM, `cublasGemmEx`. **Missing**: all Level-3 except `Gemm`, `Trsm`, `Syrk`, `Syr2k`, `Trmm`, `Symm`, `cublasLoggerConfigure`.
 - **cuDNN** (~24% coverage, ~36/~150+ functions): Forward-only conv, pooling, activation (ReLU, sigmoid, tanh, ELU, GELU, SELU, Mish), softmax, batch normalization inference. **Missing**: all backward passes, BN training, dropout, RNN/LSTM/GRU, attention, `OpTensor`, `ReduceTensor`.
 - **NCCL** (~55% coverage): `ncclAllReduce` (ring for >1 MB), `ncclBroadcast`, `ncclReduceScatter`, `ncclAllGather`, `ncclGroupStart/End`. **Missing**: `ncclSend`/`Recv`, `ncclAllToAll`, `ncclGather`/`Scatter`.
 - **Entirely Missing Libraries**: **cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt** — no shims exist in the codebase.
@@ -121,7 +121,7 @@ VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The pro
 - **CUDA Runtime API**: ~47% coverage (~101/~214 functions). Critical missing: `cudaFuncGetAttributes`, `cudaGraphAddKernelNode`, `cudaStreamIsCapturing`, `cudaMemset2D/3D`, texture/surface object APIs, array transfer APIs (ToArray/FromArray). See `missingFeatures.md` for exhaustive list.
 - **CUDA Driver API**: ~15% coverage. Missing: `cuMemAllocManaged`, `cuMemcpy2D/3D`, cooperative launch, graph APIs, occupancy queries.
 - **CUDA Graphs**: ~30% coverage. Internal `GraphManager` has kernel/memcpy/conditional nodes; CUDART shim only exposes memcpy/conditional/external-semaphore. Missing: kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free nodes.
-- **cuBLAS**: ~16% coverage. Level-1 complete (`copy`, `swap`, `scal`, `asum`, `amax`, `amin`, `rot`, `rotg`, `rotm`, `rotmg`). Pointer/atomics mode APIs present. Missing all Level-2 except `Gemv`, all Level-3 except `Gemm`, `Trsm`, `Trsv`, `Syrk`, `Ger`, `cublasLoggerConfigure`.
+- **cuBLAS**: ~21% coverage. Level-1 and Level-2 complete (`Trsv`, `Ger`, `Symv`, `Gbmv`, `Syr`, `Syr2`, `Trmv`). Pointer/atomics mode APIs present. Missing all Level-3 except `Gemm`, `Trsm`, `Syrk`, `Syr2k`, `Trmm`, `Symm`, `cublasLoggerConfigure`.
 - **cuDNN**: ~24% coverage. Missing all backward passes, BN training, dropout, RNN/LSTM/GRU, attention, `OpTensor`, `ReduceTensor`.
 - **NCCL**: ~55% coverage. Missing `Send`/`Recv`, `AllToAll`, `Gather`, `Scatter`.
 - **Entirely missing libraries**: cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt — no shims exist.
@@ -294,7 +294,7 @@ sudo cmake --install build
 - **CUDA Runtime**: `cudaFuncGetAttributes`, `cudaGraphAddKernelNode`, `cudaStreamIsCapturing`, `cudaMemset2D/3D`, texture/surface object APIs, array transfer APIs
 - **CUDA Driver**: `cuMemAllocManaged`, `cuMemcpy2D/3D`, cooperative launch, graph APIs, occupancy queries.
 - **CUDA Graphs**: kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free node types in CUDART shim
-- **cuBLAS**: `Trsm`, `Trsv`, `Syrk`, `Ger`, most Level-2/Level-3, `cublasLoggerConfigure`. Level-1, pointer mode, and atomics mode now complete.
+- **cuBLAS**: `Trsm`, `Syrk`, `Syr2k`, `Trmm`, `Symm`, most Level-3, `cublasLoggerConfigure`. Level-1, Level-2, pointer mode, and atomics mode now complete.
 - **cuDNN**: all backward passes, BN training, dropout, RNN/LSTM/GRU, attention, `OpTensor`, `ReduceTensor`
 - **NCCL**: `Send`/`Recv`, `AllToAll`, `Gather`, `Scatter`
 - **PTX ISA**: texture/surface instructions, shared atomics, `cvt` variants, `rcp.rn`, `sqrt.rn`, `match.sync`, `grid.sync`

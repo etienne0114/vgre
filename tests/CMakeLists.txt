@@ -234,6 +234,10 @@ add_executable(test_cublas_pointer_atomics_mode api/test_cublas_pointer_atomics_
 target_link_libraries(test_cublas_pointer_atomics_mode PRIVATE vgre)
 add_test(NAME CublasPointerAtomicsMode COMMAND test_cublas_pointer_atomics_mode)
 
+add_executable(test_cublas_level2 api/test_cublas_level2.cpp)
+target_link_libraries(test_cublas_level2 PRIVATE vgre)
+add_test(NAME CublasLevel2 COMMAND test_cublas_level2)
+
 add_executable(test_memset2d_graph_kernelnode api/test_memset2d_graph_kernelnode.cpp)
 target_link_libraries(test_memset2d_graph_kernelnode PRIVATE vgre_cudart)
 add_test(NAME Memset2DGraphKernelNode COMMAND test_memset2d_graph_kernelnode)

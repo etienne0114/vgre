@@ -23,6 +23,7 @@ typedef void*    cublasHandle_t;
 typedef int      cublasStatus_t;
 typedef int      cublasOperation_t;
 typedef int      cublasFillMode_t;
+typedef int      cublasDiagType_t;
 typedef int      cublasSideMode_t;
 
 static constexpr cublasStatus_t CUBLAS_STATUS_SUCCESS         = 0;
@@ -37,6 +38,13 @@ static constexpr cublasOperation_t CUBLAS_OP_N = 0;  // no transpose
 static constexpr cublasOperation_t CUBLAS_OP_T = 1;  // transpose
 static constexpr cublasOperation_t CUBLAS_OP_C = 2;  // conjugate transpose
 
+static constexpr cublasFillMode_t CUBLAS_FILL_MODE_LOWER = 0;
+static constexpr cublasFillMode_t CUBLAS_FILL_MODE_UPPER = 1;
+static constexpr cublasDiagType_t CUBLAS_DIAG_NON_UNIT = 0;
+static constexpr cublasDiagType_t CUBLAS_DIAG_UNIT = 1;
+static constexpr cublasSideMode_t CUBLAS_SIDE_LEFT = 0;
+static constexpr cublasSideMode_t CUBLAS_SIDE_RIGHT = 1;
+
 // Real context: carries stream binding and math mode so all operations on a
 // handle run consistently.  stream==nullptr means use the default/null stream.
 enum cublasMath_t { CUBLAS_DEFAULT_MATH = 0, CUBLAS_TENSOR_OP_MATH = 1, CUBLAS_PEDANTIC_MATH = 2 };
@@ -49,6 +57,18 @@ struct cublasContext {
     cublasAtomicsMode_t atomicsMode = CUBLAS_ATOMICS_ALLOWED;
     int                deviceId    = 0;
 };
+
+#if HAVE_CBLAS
+static CBLAS_UPLO cublasToCblasUplo(cublasFillMode_t uplo) {
+    return (uplo == CUBLAS_FILL_MODE_UPPER) ? CblasUpper : CblasLower;
+}
+static CBLAS_DIAG cublasToCblasDiag(cublasDiagType_t diag) {
+    return (diag == CUBLAS_DIAG_NON_UNIT) ? CblasNonUnit : CblasUnit;
+}
+static CBLAS_SIDE cublasToCblasSide(cublasSideMode_t side) {
+    return (side == CUBLAS_SIDE_LEFT) ? CblasLeft : CblasRight;
+}
+#endif
 
 // ── Cache-blocked reference GEMM ─────────────────────────────────────────────
 // C = alpha*op(A)*op(B) + beta*C  (row-major)
@@ -145,6 +165,156 @@ static void refDgemm(bool tA, bool tB,
                 acc += a * b;
             }
             C[m*ldc+n] += alpha * acc;
+        }
+    }
+}
+
+// ── Reference helpers for Level-2 BLAS ─────────────────────────────────────
+
+static void refStrsv(bool upper, bool trans, bool unit,
+    int n, const float* A, int lda, float* x, int incx)
+{
+    if (trans) {
+        if (upper) {
+            for (int i = 0; i < n; ++i) {
+                float t = x[i*incx];
+                for (int j = 0; j < i; ++j) t -= A[j*lda+i] * x[j*incx];
+                if (!unit) t /= A[i*lda+i];
+                x[i*incx] = t;
+            }
+        } else {
+            for (int i = n-1; i >= 0; --i) {
+                float t = x[i*incx];
+                for (int j = i+1; j < n; ++j) t -= A[j*lda+i] * x[j*incx];
+                if (!unit) t /= A[i*lda+i];
+                x[i*incx] = t;
+            }
+        }
+    } else {
+        if (upper) {
+            for (int i = n-1; i >= 0; --i) {
+                float t = x[i*incx];
+                for (int j = i+1; j < n; ++j) t -= A[i*lda+j] * x[j*incx];
+                if (!unit) t /= A[i*lda+i];
+                x[i*incx] = t;
+            }
+        } else {
+            for (int i = 0; i < n; ++i) {
+                float t = x[i*incx];
+                for (int j = 0; j < i; ++j) t -= A[i*lda+j] * x[j*incx];
+                if (!unit) t /= A[i*lda+i];
+                x[i*incx] = t;
+            }
+        }
+    }
+}
+
+static void refDtrsv(bool upper, bool trans, bool unit,
+    int n, const double* A, int lda, double* x, int incx)
+{
+    if (trans) {
+        if (upper) {
+            for (int i = 0; i < n; ++i) {
+                double t = x[i*incx];
+                for (int j = 0; j < i; ++j) t -= A[j*lda+i] * x[j*incx];
+                if (!unit) t /= A[i*lda+i];
+                x[i*incx] = t;
+            }
+        } else {
+            for (int i = n-1; i >= 0; --i) {
+                double t = x[i*incx];
+                for (int j = i+1; j < n; ++j) t -= A[j*lda+i] * x[j*incx];
+                if (!unit) t /= A[i*lda+i];
+                x[i*incx] = t;
+            }
+        }
+    } else {
+        if (upper) {
+            for (int i = n-1; i >= 0; --i) {
+                double t = x[i*incx];
+                for (int j = i+1; j < n; ++j) t -= A[i*lda+j] * x[j*incx];
+                if (!unit) t /= A[i*lda+i];
+                x[i*incx] = t;
+            }
+        } else {
+            for (int i = 0; i < n; ++i) {
+                double t = x[i*incx];
+                for (int j = 0; j < i; ++j) t -= A[i*lda+j] * x[j*incx];
+                if (!unit) t /= A[i*lda+i];
+                x[i*incx] = t;
+            }
+        }
+    }
+}
+
+static void refStrmv(bool upper, bool trans, bool unit,
+    int n, const float* A, int lda, float* x, int incx)
+{
+    std::vector<float> tmp(n);
+    for (int i = 0; i < n; ++i) tmp[i] = x[i*incx];
+    if (trans) {
+        if (upper) {
+            for (int i = 0; i < n; ++i) {
+                float t = unit ? tmp[i] : A[i*lda+i] * tmp[i];
+                for (int j = 0; j < i; ++j) t += A[j*lda+i] * tmp[j];
+                x[i*incx] = t;
+            }
+        } else {
+            for (int i = n-1; i >= 0; --i) {
+                float t = unit ? tmp[i] : A[i*lda+i] * tmp[i];
+                for (int j = i+1; j < n; ++j) t += A[j*lda+i] * tmp[j];
+                x[i*incx] = t;
+            }
+        }
+    } else {
+        if (upper) {
+            for (int i = n-1; i >= 0; --i) {
+                float t = unit ? tmp[i] : A[i*lda+i] * tmp[i];
+                for (int j = i+1; j < n; ++j) t += A[i*lda+j] * tmp[j];
+                x[i*incx] = t;
+            }
+        } else {
+            for (int i = 0; i < n; ++i) {
+                float t = unit ? tmp[i] : A[i*lda+i] * tmp[i];
+                for (int j = 0; j < i; ++j) t += A[i*lda+j] * tmp[j];
+                x[i*incx] = t;
+            }
+        }
+    }
+}
+
+static void refDtrmv(bool upper, bool trans, bool unit,
+    int n, const double* A, int lda, double* x, int incx)
+{
+    std::vector<double> tmp(n);
+    for (int i = 0; i < n; ++i) tmp[i] = x[i*incx];
+    if (trans) {
+        if (upper) {
+            for (int i = 0; i < n; ++i) {
+                double t = unit ? tmp[i] : A[i*lda+i] * tmp[i];
+                for (int j = 0; j < i; ++j) t += A[j*lda+i] * tmp[j];
+                x[i*incx] = t;
+            }
+        } else {
+            for (int i = n-1; i >= 0; --i) {
+                double t = unit ? tmp[i] : A[i*lda+i] * tmp[i];
+                for (int j = i+1; j < n; ++j) t += A[j*lda+i] * tmp[j];
+                x[i*incx] = t;
+            }
+        }
+    } else {
+        if (upper) {
+            for (int i = n-1; i >= 0; --i) {
+                double t = unit ? tmp[i] : A[i*lda+i] * tmp[i];
+                for (int j = i+1; j < n; ++j) t += A[i*lda+j] * tmp[j];
+                x[i*incx] = t;
+            }
+        } else {
+            for (int i = 0; i < n; ++i) {
+                double t = unit ? tmp[i] : A[i*lda+i] * tmp[i];
+                for (int j = 0; j < i; ++j) t += A[i*lda+j] * tmp[j];
+                x[i*incx] = t;
+            }
         }
     }
 }
@@ -830,6 +1000,345 @@ cublasStatus_t cublasSetAtomicsMode(cublasHandle_t handle, int mode) {
 cublasStatus_t cublasGetAtomicsMode(cublasHandle_t handle, int* mode) {
     if (!handle || !mode) return CUBLAS_STATUS_INVALID_VALUE;
     *mode = static_cast<int>(static_cast<cublasContext*>(handle)->atomicsMode);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── Level-2 BLAS (P2.3) ─────────────────────────────────────────────────────
+
+// ── TRSV ─────────────────────────────────────────────────────────────────────
+cublasStatus_t cublasStrsv_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag, int n,
+    const float* A, int lda, float* x, int incx)
+{
+    if (!handle || !A || !x) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_strsv(CblasRowMajor, cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag), n, A, lda, x, incx);
+#else
+    refStrsv(upper, t, unit, n, A, lda, x, incx);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrsv_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag, int n,
+    const double* A, int lda, double* x, int incx)
+{
+    if (!handle || !A || !x) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_dtrsv(CblasRowMajor, cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag), n, A, lda, x, incx);
+#else
+    refDtrsv(upper, t, unit, n, A, lda, x, incx);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── GER ──────────────────────────────────────────────────────────────────────
+cublasStatus_t cublasSger_v2(cublasHandle_t handle, int m, int n,
+    const float* alpha, const float* x, int incx,
+    const float* y, int incy, float* A, int lda)
+{
+    if (!handle || !alpha || !x || !y || !A) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    cblas_sger(CblasRowMajor, m, n, *alpha, x, incx, y, incy, A, lda);
+#else
+    for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j)
+            A[i*lda+j] += (*alpha) * x[i*incx] * y[j*incy];
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDger_v2(cublasHandle_t handle, int m, int n,
+    const double* alpha, const double* x, int incx,
+    const double* y, int incy, double* A, int lda)
+{
+    if (!handle || !alpha || !x || !y || !A) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    cblas_dger(CblasRowMajor, m, n, *alpha, x, incx, y, incy, A, lda);
+#else
+    for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j)
+            A[i*lda+j] += (*alpha) * x[i*incx] * y[j*incy];
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── SYMV ───────────────────────────────────────────────────────────────────
+cublasStatus_t cublasSsymv_v2(cublasHandle_t handle, cublasFillMode_t uplo, int n,
+    const float* alpha, const float* A, int lda,
+    const float* x, int incx, const float* beta,
+    float* y, int incy)
+{
+    if (!handle || !alpha || !A || !x || !beta || !y) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    cblas_ssymv(CblasRowMajor, cublasToCblasUplo(uplo), n,
+                  *alpha, A, lda, x, incx, *beta, y, incy);
+#else
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int i = 0; i < n; ++i) {
+        float t = 0;
+        if (upper) {
+            for (int j = 0; j <= i; ++j) t += A[j*lda+i] * x[j*incx];
+            for (int j = i+1; j < n; ++j) t += A[i*lda+j] * x[j*incx];
+        } else {
+            for (int j = 0; j < i; ++j) t += A[i*lda+j] * x[j*incx];
+            for (int j = i; j < n; ++j) t += A[j*lda+i] * x[j*incx];
+        }
+        y[i*incy] = (*beta) * y[i*incy] + (*alpha) * t;
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsymv_v2(cublasHandle_t handle, cublasFillMode_t uplo, int n,
+    const double* alpha, const double* A, int lda,
+    const double* x, int incx, const double* beta,
+    double* y, int incy)
+{
+    if (!handle || !alpha || !A || !x || !beta || !y) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    cblas_dsymv(CblasRowMajor, cublasToCblasUplo(uplo), n,
+                  *alpha, A, lda, x, incx, *beta, y, incy);
+#else
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int i = 0; i < n; ++i) {
+        double t = 0;
+        if (upper) {
+            for (int j = 0; j <= i; ++j) t += A[j*lda+i] * x[j*incx];
+            for (int j = i+1; j < n; ++j) t += A[i*lda+j] * x[j*incx];
+        } else {
+            for (int j = 0; j < i; ++j) t += A[i*lda+j] * x[j*incx];
+            for (int j = i; j < n; ++j) t += A[j*lda+i] * x[j*incx];
+        }
+        y[i*incy] = (*beta) * y[i*incy] + (*alpha) * t;
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── GBMV ───────────────────────────────────────────────────────────────────
+cublasStatus_t cublasSgbmv_v2(cublasHandle_t handle, cublasOperation_t trans,
+    int m, int n, int kl, int ku,
+    const float* alpha, const float* A, int lda,
+    const float* x, int incx, const float* beta,
+    float* y, int incy)
+{
+    if (!handle || !alpha || !A || !x || !beta || !y) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    cblas_sgbmv(CblasRowMajor,
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                m, n, kl, ku, *alpha, A, lda, x, incx, *beta, y, incy);
+#else
+    bool t = (trans != CUBLAS_OP_N);
+    if (!t) {
+        for (int i = 0; i < m; ++i) {
+            float sum = 0;
+            int j0 = std::max(0, i - kl);
+            int j1 = std::min(n - 1, i + ku);
+            for (int j = j0; j <= j1; ++j) {
+                int k = ku + i - j;
+                sum += A[k*lda + j] * x[j*incx];
+            }
+            y[i*incy] = (*beta) * y[i*incy] + (*alpha) * sum;
+        }
+    } else {
+        for (int j = 0; j < n; ++j) {
+            float sum = 0;
+            int i0 = std::max(0, j - ku);
+            int i1 = std::min(m - 1, j + kl);
+            for (int i = i0; i <= i1; ++i) {
+                int k = ku + i - j;
+                sum += A[k*lda + j] * x[i*incx];
+            }
+            y[j*incy] = (*beta) * y[j*incy] + (*alpha) * sum;
+        }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDgbmv_v2(cublasHandle_t handle, cublasOperation_t trans,
+    int m, int n, int kl, int ku,
+    const double* alpha, const double* A, int lda,
+    const double* x, int incx, const double* beta,
+    double* y, int incy)
+{
+    if (!handle || !alpha || !A || !x || !beta || !y) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    cblas_dgbmv(CblasRowMajor,
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                m, n, kl, ku, *alpha, A, lda, x, incx, *beta, y, incy);
+#else
+    bool t = (trans != CUBLAS_OP_N);
+    if (!t) {
+        for (int i = 0; i < m; ++i) {
+            double sum = 0;
+            int j0 = std::max(0, i - kl);
+            int j1 = std::min(n - 1, i + ku);
+            for (int j = j0; j <= j1; ++j) {
+                int k = ku + i - j;
+                sum += A[k*lda + j] * x[j*incx];
+            }
+            y[i*incy] = (*beta) * y[i*incy] + (*alpha) * sum;
+        }
+    } else {
+        for (int j = 0; j < n; ++j) {
+            double sum = 0;
+            int i0 = std::max(0, j - ku);
+            int i1 = std::min(m - 1, j + kl);
+            for (int i = i0; i <= i1; ++i) {
+                int k = ku + i - j;
+                sum += A[k*lda + j] * x[i*incx];
+            }
+            y[j*incy] = (*beta) * y[j*incy] + (*alpha) * sum;
+        }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── SYR ──────────────────────────────────────────────────────────────────────
+cublasStatus_t cublasSsyr_v2(cublasHandle_t handle, cublasFillMode_t uplo, int n,
+    const float* alpha, const float* x, int incx, float* A, int lda)
+{
+    if (!handle || !alpha || !x || !A) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    cblas_ssyr(CblasRowMajor, cublasToCblasUplo(uplo), n,
+               *alpha, x, incx, A, lda);
+#else
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int j = 0; j < n; ++j) {
+        float temp = (*alpha) * x[j*incx];
+        if (upper) {
+            for (int i = 0; i <= j; ++i)
+                A[i*lda+j] += x[i*incx] * temp;
+        } else {
+            for (int i = j; i < n; ++i)
+                A[i*lda+j] += x[i*incx] * temp;
+        }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsyr_v2(cublasHandle_t handle, cublasFillMode_t uplo, int n,
+    const double* alpha, const double* x, int incx, double* A, int lda)
+{
+    if (!handle || !alpha || !x || !A) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    cblas_dsyr(CblasRowMajor, cublasToCblasUplo(uplo), n,
+               *alpha, x, incx, A, lda);
+#else
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int j = 0; j < n; ++j) {
+        double temp = (*alpha) * x[j*incx];
+        if (upper) {
+            for (int i = 0; i <= j; ++i)
+                A[i*lda+j] += x[i*incx] * temp;
+        } else {
+            for (int i = j; i < n; ++i)
+                A[i*lda+j] += x[i*incx] * temp;
+        }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── SYR2 ─────────────────────────────────────────────────────────────────────
+cublasStatus_t cublasSsyr2_v2(cublasHandle_t handle, cublasFillMode_t uplo, int n,
+    const float* alpha, const float* x, int incx,
+    const float* y, int incy, float* A, int lda)
+{
+    if (!handle || !alpha || !x || !y || !A) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    cblas_ssyr2(CblasRowMajor, cublasToCblasUplo(uplo), n,
+                *alpha, x, incx, y, incy, A, lda);
+#else
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int j = 0; j < n; ++j) {
+        float temp1 = (*alpha) * x[j*incx];
+        float temp2 = (*alpha) * y[j*incx];
+        if (upper) {
+            for (int i = 0; i <= j; ++i)
+                A[i*lda+j] += x[i*incx] * temp2 + y[i*incx] * temp1;
+        } else {
+            for (int i = j; i < n; ++i)
+                A[i*lda+j] += x[i*incx] * temp2 + y[i*incx] * temp1;
+        }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsyr2_v2(cublasHandle_t handle, cublasFillMode_t uplo, int n,
+    const double* alpha, const double* x, int incx,
+    const double* y, int incy, double* A, int lda)
+{
+    if (!handle || !alpha || !x || !y || !A) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    cblas_dsyr2(CblasRowMajor, cublasToCblasUplo(uplo), n,
+                *alpha, x, incx, y, incy, A, lda);
+#else
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int j = 0; j < n; ++j) {
+        double temp1 = (*alpha) * x[j*incx];
+        double temp2 = (*alpha) * y[j*incx];
+        if (upper) {
+            for (int i = 0; i <= j; ++i)
+                A[i*lda+j] += x[i*incx] * temp2 + y[i*incx] * temp1;
+        } else {
+            for (int i = j; i < n; ++i)
+                A[i*lda+j] += x[i*incx] * temp2 + y[i*incx] * temp1;
+        }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── TRMV ─────────────────────────────────────────────────────────────────────
+cublasStatus_t cublasStrmv_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag, int n,
+    const float* A, int lda, float* x, int incx)
+{
+    if (!handle || !A || !x) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_strmv(CblasRowMajor, cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag), n, A, lda, x, incx);
+#else
+    refStrmv(upper, t, unit, n, A, lda, x, incx);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrmv_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag, int n,
+    const double* A, int lda, double* x, int incx)
+{
+    if (!handle || !A || !x) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_dtrmv(CblasRowMajor, cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag), n, A, lda, x, incx);
+#else
+    refDtrmv(upper, t, unit, n, A, lda, x, incx);
+#endif
     return CUBLAS_STATUS_SUCCESS;
 }
 
