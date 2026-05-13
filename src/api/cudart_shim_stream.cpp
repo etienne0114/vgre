@@ -265,6 +265,37 @@ cudaError_t cudaMemcpyPeerAsync(void *dst, int dstDevice, const void *src,
       dst, dstDevice, src, srcDevice, count, stream);
 }
 
+cudaError_t cudaMallocArray(void **array,
+                              const struct cudaChannelFormatDesc *desc,
+                              size_t width, size_t height) {
+  if (!array)
+    return cudaErrorInvalidValue;
+  vgre::api::cudaArray_t arrId = 0;
+  cudaError_t err = vgre::api::CUDAInterceptor::instance().mallocArray(
+      &arrId, desc, width, height, 0);
+  *array = reinterpret_cast<void *>(static_cast<uintptr_t>(arrId));
+  return err;
+}
+
+cudaError_t cudaMalloc3DArray(void **array,
+                                const struct cudaChannelFormatDesc *desc,
+                                struct cudaExtent extent) {
+  if (!array)
+    return cudaErrorInvalidValue;
+  vgre::api::cudaArray_t arrId = 0;
+  cudaError_t err = vgre::api::CUDAInterceptor::instance().malloc3DArray(
+      &arrId, desc, extent, 0);
+  *array = reinterpret_cast<void *>(static_cast<uintptr_t>(arrId));
+  return err;
+}
+
+cudaError_t cudaFreeArray(void *array) {
+  vgre::api::cudaArray_t arrId =
+      static_cast<vgre::api::cudaArray_t>(
+          reinterpret_cast<uintptr_t>(array));
+  return vgre::api::CUDAInterceptor::instance().freeArray(arrId);
+}
+
 cudaError_t cudaMemset(void *devPtr, int value, size_t count) {
   return vgre::api::CUDAInterceptor::instance().memset(devPtr, value, count);
 }

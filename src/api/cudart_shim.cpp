@@ -847,7 +847,7 @@ using cudaGraphExec_t = uint64_t;
 using cudaGraphNode_t = uint64_t;
 
 using cudaGraphExecUpdateResult = vgre::api::CUDAInterceptor::cudaGraphExecUpdateResult;
-using cudaMemcpy3DParms = vgre::api::CUDAInterceptor::cudaMemcpy3DParms;
+using cudaMemcpy3DParms = vgre::api::cudaMemcpy3DParms;
 
 // External semaphore APIs (implemented in cuda_external_semaphore.cpp)
 using cudaExternalSemaphore_t = uint64_t;
@@ -1300,11 +1300,6 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
 // cudaMipmappedArray_t is an opaque handle; we use TextureId cast to void*.
 
 #include "vgre/core/texture_manager.h"
-
-struct cudaChannelFormatDesc {
-  int x, y, z, w;
-  int f; // kind: 0=signed int, 1=unsigned int, 2=float
-};
 
 cudaError_t cudaMallocMipmappedArray(void **mipmappedArrayPtr,
                                      const cudaChannelFormatDesc *desc,

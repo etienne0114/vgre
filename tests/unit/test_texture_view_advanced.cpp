@@ -12,8 +12,8 @@ void test_advanced_view_from_array() {
     interceptor.init();
 
     // 1. Create a cudaArray (UINT32, 4x1)
-    CUDAInterceptor::cudaChannelFormatDesc channelDesc = {32, 0, 0, 0, 2}; // 32-bit unsigned
-    CUDAInterceptor::cudaArray_t array;
+    cudaChannelFormatDesc channelDesc = {32, 0, 0, 0, 2}; // 32-bit unsigned
+    cudaArray_t array;
     auto err = interceptor.mallocArray(&array, &channelDesc, 4, 1, 0);
     assert(err == cudaSuccess);
 
