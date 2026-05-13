@@ -356,6 +356,12 @@ cudaError_t cudaStreamAddCallback(cudaStream_t stream,
       stream, callback, userData, flags);
 }
 
+cudaError_t cudaLaunchHostFunc(cudaStream_t stream,
+                                void (*fn)(void *), void *userData) {
+  return vgre::api::CUDAInterceptor::instance().launchHostFunc(
+      stream, fn, userData);
+}
+
 cudaError_t cudaDeviceGetStreamPriorityRange(int *leastPriority,
                                              int *greatestPriority) {
   return vgre::api::CUDAInterceptor::instance().deviceGetStreamPriorityRange(

@@ -381,6 +381,30 @@ cudaError_t CUDAInterceptor::streamAddCallback(
   return cudaSuccess;
 }
 
+cudaError_t CUDAInterceptor::launchHostFunc(cudaStream_t stream,
+                                            void (*fn)(void *),
+                                            void *userData) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {
+    auto err = init();
+    if (err != cudaSuccess)
+      return err;
+  }
+  if (!fn)
+    return cudaErrorInvalidValue;
+
+  int priority = 0;
+  (void)core::RuntimeEngine::instance().getDevice().getStreamPriority(stream,
+                                                                       priority);
+
+  // Enqueue a host-function task that runs after all prior stream work.
+  (void)core::Scheduler::instance().submitStreamTask(
+      stream,
+      [fn, userData]() { fn(userData); },
+      priority);
+
+  return cudaSuccess;
+}
+
 cudaError_t CUDAInterceptor::deviceGetStreamPriorityRange(
     int *leastPriority, int *greatestPriority) {
   if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) {

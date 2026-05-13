@@ -206,6 +206,10 @@ add_executable(test_stream_add_callback api/test_stream_add_callback.cpp)
 target_link_libraries(test_stream_add_callback PRIVATE vgre_cudart)
 add_test(NAME StreamAddCallback COMMAND test_stream_add_callback)
 
+add_executable(test_launch_host_func api/test_launch_host_func.cpp)
+target_link_libraries(test_launch_host_func PRIVATE vgre_cudart)
+add_test(NAME LaunchHostFunc COMMAND test_launch_host_func)
+
 add_executable(test_tpm_auth unit/test_tpm_auth.cpp)
 target_link_libraries(test_tpm_auth PRIVATE vgre)
 add_test(NAME TPMAuth COMMAND test_tpm_auth)
