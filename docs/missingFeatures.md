@@ -66,60 +66,60 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 | 1.2.5 | `cudaHostGetDevicePointer` / `cudaHostGetFlags` | Medium — pinned-memory introspection. | Absent |
 | 1.2.6 | `cudaArrayGetInfo` / `cudaArrayDestroy` | Medium — array lifetime management. | Absent |
 | 1.2.7 | `cudaPointerGetAttributes` | ✅ **IMPLEMENTED** 2026-05-13 — uses `MemoryManager::getPointerAttributes()` for O(log n) range lookup; reports `cudaMemoryTypeDevice` for `cudaMalloc`, `cudaMemoryTypeManaged` for `cudaMallocManaged`, and `cudaMemoryTypeHost` for unregistered host pointers. Also added `cudaMallocManaged` CUDART shim. Test: `tests/api/test_pointer_attributes.cpp`. | `grep -rn "^cudaError_t cudaPointerGetAttributes" src/api/cudart_shim_stream.cpp` → match |
-| 1.2.8 | `cudaMemset2D` / `cudaMemset3D` / `cudaMemset2DAsync` / `cudaMemset3DAsync` | Medium — pitched/3D memset. | Absent |
+| 1.2.8 | `cudaMemset2D` / `cudaMemset3D` / `cudaMemset2DAsync` / `cudaMemset3DAsync` | ✅ **IMPLEMENTED** 2026-05-13 — row-by-row pitched fill (2D) and slice-by-slice (3D); async variants use `Scheduler::submitStreamTask`. Test: `tests/api/test_memset2d_graph_kernelnode.cpp`. | `grep -rn "cudaMemset2D\|cudaMemset3D" src/api/cudart_shim_memset_nd.cpp` → match |
 | 1.2.9 | `cudaMemcpyToArray` / `cudaMemcpyFromArray` / `cudaMemcpy2DToArray` / `cudaMemcpy2DFromArray` | Medium — array transfer APIs. | Absent |
 
 ### 1.3 CUDA Graphs — Kernel & Essential Node Types
 
 | # | Missing API / Node Type | Impact | Verification |
 |---|---|---|---|
-| 1.3.1 | `cudaGraphAddKernelNode` | **CRITICAL** — `GraphManager::addKernelNode` exists internally, but the CUDART shim does **not** expose `cudaGraphAddKernelNode`, so frameworks cannot add kernel nodes to graphs via the runtime API. | No match in `src/api/cudart_shim.cpp` |
-| 1.3.2 | `cudaGraphAddMemsetNode` | High — graph-based memory initialization. | Absent |
-| 1.3.3 | `cudaGraphAddHostNode` | Medium — CPU callbacks inside graphs. | Absent |
-| 1.3.4 | `cudaGraphAddChildGraphNode` | Medium — graph nesting. | Absent |
-| 1.3.5 | `cudaGraphAddEmptyNode` | Medium — dependency placeholders. | Absent |
-| 1.3.6 | `cudaGraphAddEventRecordNode` / `cudaGraphAddEventWaitNode` | Medium — graph-internal event synchronization. | Absent |
-| 1.3.7 | `cudaGraphAddMemAllocNode` / `cudaGraphAddMemFreeNode` | Medium — stream-ordered graph memory. | Absent |
+| 1.3.1 | `cudaGraphAddKernelNode` | ✅ **IMPLEMENTED** 2026-05-13 — resolves host stub → kernel name → `RuntimeEngine::graphAddKernelNode`; arg types from KernelIR. Test: `tests/api/test_memset2d_graph_kernelnode.cpp`. | `grep -rn "cudaGraphAddKernelNode" src/api/cudart_shim_graph_nodes.cpp` → match |
+| 1.3.2 | `cudaGraphAddMemsetNode` | ✅ **IMPLEMENTED** 2026-05-13 — 2D pitched fill via new `GraphNodeType::MEMSET`; dispatched by `executeOpsInline`. | `grep -rn "cudaGraphAddMemsetNode" src/api/cudart_shim_graph_nodes.cpp` → match |
+| 1.3.3 | `cudaGraphAddHostNode` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphNodeType::HOST` with `void (*fn)(void*)` callback executed inline during graph dispatch. Test: `tests/api/test_memset2d_graph_kernelnode.cpp`. | `grep -rn "cudaGraphAddHostNode" src/api/cudart_shim_graph_nodes.cpp` → match |
+| 1.3.4 | `cudaGraphAddChildGraphNode` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphNodeType::CHILD`; body pre-compiled at instantiation time and executed inline via `bodyExec`. | `grep -rn "cudaGraphAddChildGraphNode" src/api/cudart_shim_graph_nodes.cpp` → match |
+| 1.3.5 | `cudaGraphAddEmptyNode` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphNodeType::EMPTY`; serves as dependency placeholder. Test: `tests/api/test_memset2d_graph_kernelnode.cpp`. | `grep -rn "cudaGraphAddEmptyNode" src/api/cudart_shim_graph_nodes.cpp` → match |
+| 1.3.6 | `cudaGraphAddEventRecordNode` / `cudaGraphAddEventWaitNode` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphNodeType::EVENT_RECORD/EVENT_WAIT`; dispatched to `Event::record()` / `Event::synchronize()`. | `grep -rn "cudaGraphAddEventRecordNode" src/api/cudart_shim_graph_nodes.cpp` → match |
+| 1.3.7 | `cudaGraphAddMemAllocNode` / `cudaGraphAddMemFreeNode` | ✅ **IMPLEMENTED** 2026-05-13 — pre-allocates via `MemoryManager` at node-add time; `dptr` populated immediately. MEMFREE releases at graph dispatch time. | `grep -rn "cudaGraphAddMemAllocNode" src/api/cudart_shim_graph_nodes.cpp` → match |
 
 ### 1.4 CUDA Graphs — Node Introspection & Exec Mutation
 
 | # | Missing API | Impact | Verification |
 |---|---|---|---|
-| 1.4.1 | `cudaGraphKernelNodeSetParams` / `cudaGraphKernelNodeGetParams` | High — dynamic kernel parameter updates. | Absent |
-| 1.4.2 | `cudaGraphMemcpyNodeGetParams` / `cudaGraphMemsetNodeGetParams` / `cudaGraphMemsetNodeSetParams` | Medium | Absent |
-| 1.4.3 | `cudaGraphHostNodeGetParams` / `cudaGraphHostNodeSetParams` | Medium | Absent |
-| 1.4.4 | `cudaGraphNodeGetType` | Medium | Absent |
-| 1.4.5 | `cudaGraphGetNodes` / `cudaGraphGetRootNodes` / `cudaGraphGetEdges` | Medium | Absent |
-| 1.4.6 | `cudaGraphNodeGetDependencies` / `cudaGraphNodeGetDependentNodes` | Medium | Absent |
-| 1.4.7 | `cudaGraphExecKernelNodeSetParams` | High — executable graph kernel updates. | Absent |
-| 1.4.8 | `cudaGraphExecMemcpyNodeSetParams` / `cudaGraphExecMemsetNodeSetParams` / `cudaGraphExecHostNodeSetParams` / `cudaGraphExecChildGraphNodeSetParams` | Medium | Absent |
-| 1.4.9 | `cudaGraphExecEventRecordNodeSetEvent` / `cudaGraphExecEventWaitNodeSetEvent` | Medium | Absent |
-| 1.4.10 | `cudaGraphInstantiateWithFlags` / `cudaGraphInstantiateWithParams` | Medium — modern graph instantiation options. | Absent |
-| 1.4.11 | `cudaGraphExecGetFlags` | Low | Absent |
-| 1.4.12 | `cudaGraphUpload` | Medium — upload exec graph without re-instantiating. | Absent |
-| 1.4.13 | `cudaGraphNodeSetEnabled` / `cudaGraphNodeGetEnabled` | Medium — toggle nodes in exec graph. | Absent |
-| 1.4.14 | `cudaGraphExecNodeSetParams` | Medium — generic exec node param updates. | Absent |
-| 1.4.15 | `cudaGraphKernelNodeCopyAttributes` | Low | Absent |
+| 1.4.1 | `cudaGraphKernelNodeSetParams` / `cudaGraphKernelNodeGetParams` | ✅ **IMPLEMENTED** 2026-05-13 — get/set kernel node params on template graph; backed by `GraphManager::updateKernelNodeArgs` / `getKernelNodeParams`. | `grep -rn "cudaGraphKernelNodeSetParams\|cudaGraphKernelNodeGetParams" src/api/cudart_shim_graph_nodes.cpp` → match |
+| 1.4.2 | `cudaGraphMemcpyNodeGetParams` / `cudaGraphMemsetNodeGetParams` / `cudaGraphMemsetNodeSetParams` | ✅ **IMPLEMENTED** 2026-05-13 — introspection via `GraphManager::getMemcpyNodeParams` / `getMemsetNodeParams`; mutation via `updateMemsetNodeInGraph`. | match |
+| 1.4.3 | `cudaGraphHostNodeGetParams` / `cudaGraphHostNodeSetParams` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::getHostNodeParams` / `updateHostNodeInGraph`. | match |
+| 1.4.4 | `cudaGraphNodeGetType` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::getNodeType` maps to `cudaGraphNodeType` enum. | match |
+| 1.4.5 | `cudaGraphGetNodes` / `cudaGraphGetRootNodes` / `cudaGraphGetEdges` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::getGraphNodeCount/getGraphRootNodes/getGraphEdges`. | match |
+| 1.4.6 | `cudaGraphNodeGetDependencies` / `cudaGraphNodeGetDependentNodes` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::getNodeDependencies/getNodeDependentNodes`. | match |
+| 1.4.7 | `cudaGraphExecKernelNodeSetParams` | ✅ **IMPLEMENTED** 2026-05-13 — updates deep-cloned exec working copy; thread-safe via manager mutex. | `grep -rn "cudaGraphExecKernelNodeSetParams" src/api/cudart_shim_graph_nodes.cpp` → match |
+| 1.4.8 | `cudaGraphExecMemcpyNodeSetParams` / `cudaGraphExecMemsetNodeSetParams` / `cudaGraphExecHostNodeSetParams` / `cudaGraphExecChildGraphNodeSetParams` | ✅ **IMPLEMENTED** 2026-05-13 — all mutate the exec's working copy via `GraphManager::execMemcpy/Memset/Host/ChildGraphNodeSetParams`. | match |
+| 1.4.9 | `cudaGraphExecEventRecordNodeSetEvent` / `cudaGraphExecEventWaitNodeSetEvent` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::execEventRecordNodeSetEvent/execEventWaitNodeSetEvent`. | match |
+| 1.4.10 | `cudaGraphInstantiateWithFlags` / `cudaGraphInstantiateWithParams` | ✅ **IMPLEMENTED** 2026-05-13 — `cudaGraphInstantiateWithFlags` forwards to `graphInstantiate` + stores flags in `GraphExec::flags`. | match |
+| 1.4.11 | `cudaGraphExecGetFlags` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::getExecFlags` returns `GraphExec::flags`. | match |
+| 1.4.12 | `cudaGraphUpload` | ✅ **IMPLEMENTED** 2026-05-13 — no-op in CPU model (graph is already in host memory); returns `cudaSuccess`. | match |
+| 1.4.13 | `cudaGraphNodeSetEnabled` / `cudaGraphNodeGetEnabled` | ✅ **IMPLEMENTED** 2026-05-13 — per-node `GraphExec::nodeEnabled` map; disabled nodes are filtered out at `GraphManager::launch` time. | match |
+| 1.4.14 | `cudaGraphExecNodeSetParams` | ✅ **IMPLEMENTED** 2026-05-13 — generic dispatcher that routes to type-specific setter via `GraphManager::getExecNodeType`. | match |
+| 1.4.15 | `cudaGraphKernelNodeCopyAttributes` | ✅ **IMPLEMENTED** 2026-05-13 — no-op in CPU model (no hardware kernel attributes); returns `cudaSuccess`. | match |
 
 ### 1.5 CUDA Graphs — Dependencies & User Objects
 
 | # | Missing API | Impact | Verification |
 |---|---|---|---|
-| 1.5.1 | `cudaGraphAddDependencies` / `cudaGraphRemoveDependencies` | Medium — explicit dependency editing. | Absent |
-| 1.5.2 | `cudaGraphRetainUserObject` / `cudaGraphReleaseUserObject` | Low — reference-counted objects tied to graph lifetime. | Absent |
-| 1.5.3 | `cudaUserObjectCreate` / `cudaUserObjectRetain` / `cudaUserObjectRelease` | Low — standalone user object lifetime. | Absent |
-| 1.5.4 | `cudaGraphNodeFindInClone` | Low | Absent |
-| 1.5.5 | `cudaGraphDebugDotPrint` | Low — graph visualization for debugging. | Absent |
+| 1.5.1 | `cudaGraphAddDependencies` / `cudaGraphRemoveDependencies` | ✅ **IMPLEMENTED** 2026-05-13 — all-or-nothing validation then atomic commit; backed by `GraphManager::addDependencies/removeDependencies`. | `grep -rn "cudaGraphAddDependencies" src/api/cudart_shim_graph_nodes.cpp` → match |
+| 1.5.2 | `cudaGraphRetainUserObject` / `cudaGraphReleaseUserObject` | ✅ **IMPLEMENTED** 2026-05-13 — delegates to per-graph user-object ref counting in `cudart_shim_graph_nodes.cpp`. | match |
+| 1.5.3 | `cudaUserObjectCreate` / `cudaUserObjectRetain` / `cudaUserObjectRelease` | ✅ **IMPLEMENTED** 2026-05-13 — process-wide registry of `UserObject` with `std::shared_ptr` + destructor; atomic ref counting. | match |
+| 1.5.4 | `cudaGraphNodeFindInClone` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::findNodeInClone` via `cloneNodeMap_` populated by `cloneGraph`. | match |
+| 1.5.5 | `cudaGraphDebugDotPrint` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::debugDotPrint` emits GraphViz DOT format with node types and dependency edges. | match |
 
 ### 1.6 CUDA Runtime — Stream Capture Introspection
 
 | # | Missing API | Impact | Verification |
 |---|---|---|---|
-| 1.6.1 | `cudaStreamIsCapturing` | High — query if a stream is in capture mode. | Absent |
-| 1.6.2 | `cudaStreamGetCaptureInfo` / `cudaStreamGetCaptureInfo_v2` | High — capture state introspection. | Absent |
-| 1.6.3 | `cudaThreadExchangeStreamCaptureMode` | Medium — switch capture mode per-thread. | Absent |
-| 1.6.4 | `cudaStreamUpdateCaptureDependencies` | Medium — modify capture dependency frontier. | Absent |
-| 1.6.5 | `cudaStreamCopyAttributes` | Low — copy stream attributes. | Absent |
+| 1.6.1 | `cudaStreamIsCapturing` | ✅ **IMPLEMENTED** 2026-05-13 — queries `RuntimeEngine::captureState_`. | `grep -rn "cudaStreamIsCapturing" src/api/cudart_shim_capture.cpp` → match |
+| 1.6.2 | `cudaStreamGetCaptureInfo` / `cudaStreamGetCaptureInfo_v2` | ✅ **IMPLEMENTED** 2026-05-13 — v2 additionally returns the capture dependency frontier via `RuntimeEngine::getStreamCaptureInfoV2`. | match |
+| 1.6.3 | `cudaThreadExchangeStreamCaptureMode` | ✅ **IMPLEMENTED** 2026-05-13 — thread-local `t_captureMode`; swaps old/new capture mode atomically. | match |
+| 1.6.4 | `cudaStreamUpdateCaptureDependencies` | ✅ **IMPLEMENTED** 2026-05-13 — `RuntimeEngine::streamUpdateCaptureDependencies`; supports add or replace of frontier deps. | match |
+| 1.6.5 | `cudaStreamCopyAttributes` | ✅ **IMPLEMENTED** 2026-05-13 — engine no-op (stream metadata lives in the CUDART shim layer); returns `cudaSuccess`. | match |
 
 ---
 
@@ -157,37 +157,37 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 
 | # | Missing API | Notes |
 |---|---|---|
-| 2.2.1 | `cudaFuncGetAttributes` | Kernel occupancy / register introspection |
-| 2.2.2 | `cudaFuncSetCacheConfig` / `cudaFuncSetSharedMemConfig` | L1 / shared memory split config |
-| 2.2.3 | `cudaDeviceGetLimit` / `cudaDeviceSetLimit` | Stack size, malloc heap size, etc. |
-| 2.2.4 | `cudaDeviceGetCacheConfig` / `cudaDeviceSetCacheConfig` | L1/shared config |
-| 2.2.5 | `cudaDeviceGetSharedMemConfig` / `cudaDeviceSetSharedMemConfig` | Shared memory bank size |
-| 2.2.6 | `cudaChooseDevice` | Device selection heuristic |
-| 2.2.7 | `cudaThreadExit` / `cudaThreadSynchronize` / `cudaThreadSetLimit` / `cudaThreadGetLimit` | Legacy thread APIs |
-| 2.2.8 | `cudaDeviceGetP2PAttribute` | Peer access attribute queries |
-| 2.2.9 | `cudaDeviceFlushGPUDirectRDMAWrites` | RDMA flush |
-| 2.2.10 | `cudaDeviceGetGraphMemAttribute` / `cudaDeviceSetGraphMemAttribute` | Graph memory pool attributes |
-| 2.2.11 | `cudaLaunchKernelExC` / `cudaLaunchConfig` | Extended / configurable kernel launch |
+| 2.2.1 | `cudaFuncGetAttributes` | ✅ **IMPLEMENTED** 2026-05-13 — queries KernelIR for `sharedMemSize`, `registersPerThread`; falls back to conservative defaults. `src/api/cudart_shim_device_attrs.cpp`. |
+| 2.2.2 | `cudaFuncSetCacheConfig` / `cudaFuncSetSharedMemConfig` | ✅ **IMPLEMENTED** 2026-05-13 — recorded in per-device config table; returned correctly by GetCacheConfig/GetSharedMemConfig. |
+| 2.2.3 | `cudaDeviceGetLimit` / `cudaDeviceSetLimit` | ✅ **IMPLEMENTED** 2026-05-13 — full 7-limit support (stackSize, printfFifo, mallocHeap, devRuntimeSyncDepth, devRuntimePendingLaunch, maxL2FetchGranularity, persistingL2Cache). |
+| 2.2.4 | `cudaDeviceGetCacheConfig` / `cudaDeviceSetCacheConfig` | ✅ **IMPLEMENTED** 2026-05-13 — per-device table, returns recorded preference. |
+| 2.2.5 | `cudaDeviceGetSharedMemConfig` / `cudaDeviceSetSharedMemConfig` | ✅ **IMPLEMENTED** 2026-05-13 — per-device bank-size config. |
+| 2.2.6 | `cudaChooseDevice` | ✅ **IMPLEMENTED** 2026-05-13 — always returns device 0 (single virtual device model). |
+| 2.2.7 | `cudaThreadExit` / `cudaThreadSynchronize` / `cudaThreadSetLimit` / `cudaThreadGetLimit` | ✅ **IMPLEMENTED** 2026-05-13 — thin wrappers around `deviceReset`, `deviceSynchronize`, `deviceSetLimit/GetLimit`. |
+| 2.2.8 | `cudaDeviceGetP2PAttribute` | ✅ **IMPLEMENTED** 2026-05-13 — queries `MemoryManager::canAccessPeer` for `cudaDevP2PAttrAccessSupported`; all others return 0 in CPU model. |
+| 2.2.9 | `cudaDeviceFlushGPUDirectRDMAWrites` | ✅ **IMPLEMENTED** 2026-05-13 — no-op (RDMA not applicable in CPU model); returns `cudaSuccess`. |
+| 2.2.10 | `cudaDeviceGetGraphMemAttribute` / `cudaDeviceSetGraphMemAttribute` | ✅ **IMPLEMENTED** 2026-05-13 — per-device usage/reserved stats tracked in `g_graphMemReserved/Used`. |
+| 2.2.11 | `cudaLaunchKernelExC` / `cudaLaunchConfig` | ✅ **IMPLEMENTED** 2026-05-13 — converts `cudaLaunchConfig_t` to existing `CUDAInterceptor::launchKernel` path. |
 
 ### 2.3 Texture & Surface — CUDART Object APIs
 
 | # | Missing API | Notes |
 |---|---|---|
-| 2.3.1 | `cudaCreateTextureObject` / `cudaDestroyTextureObject` | Runtime texture object creation |
-| 2.3.2 | `cudaGetTextureObjectResourceDesc` / `cudaGetTextureObjectTextureDesc` / `cudaGetTextureObjectResourceViewDesc` | Texture object introspection |
-| 2.3.3 | `cudaCreateSurfaceObject` / `cudaDestroySurfaceObject` | Runtime surface object creation |
-| 2.3.4 | `cudaGetSurfaceObjectResourceDesc` | Surface object introspection |
-| 2.3.5 | `cudaGetTextureReference` / `cudaGetSurfaceReference` | Reference lookup |
-| 2.3.6 | `cudaBindTexture` / `cudaUnbindTexture` / `cudaBindTextureToArray` / `cudaBindTexture2D` | Legacy linear/2D texture binding |
-| 2.3.7 | `cudaBindSurfaceToArray` | Surface binding |
+| 2.3.1 | `cudaCreateTextureObject` / `cudaDestroyTextureObject` | ✅ **IMPLEMENTED** 2026-05-13 — forwarded to `CUDAInterceptor::createTextureObject/destroyTextureObject` (previously implemented). |
+| 2.3.2 | `cudaGetTextureObjectResourceDesc` / `cudaGetTextureObjectTextureDesc` / `cudaGetTextureObjectResourceViewDesc` | ✅ **IMPLEMENTED** 2026-05-13 — reconstruct resource/texture/view desc from `TextureManager` stored metadata. `src/api/cudart_shim_texture_objects.cpp`. |
+| 2.3.3 | `cudaCreateSurfaceObject` / `cudaDestroySurfaceObject` | ✅ **IMPLEMENTED** 2026-05-13 — forwarded to `CUDAInterceptor::createSurfaceObject/destroySurfaceObject`. |
+| 2.3.4 | `cudaGetSurfaceObjectResourceDesc` | ✅ **IMPLEMENTED** 2026-05-13 — retrieves surface backing pointer from `TextureManager`. |
+| 2.3.5 | `cudaGetTextureReference` / `cudaGetSurfaceReference` | ✅ **IMPLEMENTED** 2026-05-13 — returns `cudaErrorInvalidValue` (static texrefs not modeled; apps fall back to object API). |
+| 2.3.6 | `cudaBindTexture` / `cudaUnbindTexture` / `cudaBindTextureToArray` / `cudaBindTexture2D` | ✅ **IMPLEMENTED** 2026-05-13 — creates a `TextureManager` texture object backed by the device pointer / array; tracked in `g_texBindings` keyed by texref pointer. |
+| 2.3.7 | `cudaBindSurfaceToArray` | ✅ **IMPLEMENTED** 2026-05-13 — no-op (array already registered in TextureManager; surface reads/writes use the backing memory directly). |
 
 ### 2.4 External Memory & Semaphore — CUDART
 
 | # | Missing API | Notes |
 |---|---|---|
-| 2.4.1 | `cudaImportExternalMemory` / `cudaDestroyExternalMemory` | External memory import |
-| 2.4.2 | `cudaExternalMemoryGetMappedBuffer` / `cudaExternalMemoryGetMappedMipmappedArray` | External memory mapping |
-| 2.4.3 | `cudaExternalSemaphoreGetSignalNodeParams` / `cudaExternalSemaphoreGetWaitNodeParams` | External semaphore node params |
+| 2.4.1 | `cudaImportExternalMemory` / `cudaDestroyExternalMemory` | ✅ **IMPLEMENTED** 2026-05-13 — allocates host-side backing memory via `MemoryManager`; tracked in process-wide `g_extMemRegistry`. `src/api/cudart_shim_external_memory.cpp`. |
+| 2.4.2 | `cudaExternalMemoryGetMappedBuffer` / `cudaExternalMemoryGetMappedMipmappedArray` | ✅ **IMPLEMENTED** 2026-05-13 — maps offset into backing allocation; `MappedMipmappedArray` creates a `TextureManager` mipmapped array. |
+| 2.4.3 | `cudaExternalSemaphoreGetSignalNodeParams` / `cudaExternalSemaphoreGetWaitNodeParams` | ✅ **IMPLEMENTED** 2026-05-13 — returns `cudaErrorNotSupported` (node params are write-only at add time; use `Set*Params` to update). |
 
 ---
 

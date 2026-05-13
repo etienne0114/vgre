@@ -443,6 +443,7 @@ target_sources(vgre_cudart PRIVATE
     $<TARGET_OBJECTS:vgre_compiler>
     $<TARGET_OBJECTS:vgre_runtime>
     $<TARGET_OBJECTS:vgre_advanced>
+    $<TARGET_OBJECTS:vgre_cudart_shims>
 )
 target_compile_definitions(vgre_cudart PRIVATE VGRE_CUDA_INTERCEPTOR_NO_EXPORTS)
 target_link_libraries(vgre_cudart PRIVATE

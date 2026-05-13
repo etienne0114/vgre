@@ -835,21 +835,21 @@ tests/core/texture/        # Texture/surface object tests
 | 1.6 | `cudaMemcpyToSymbol` / `cudaMemcpyFromSymbol` | **DONE** | — | 2026-05-13 |
 | 1.7 | `cudaMallocArray` / `cudaMalloc3DArray` | **DONE** | — | 2026-05-13 |
 | 1.8 | `cudaPointerGetAttributes` | **DONE** | — | 2026-05-13 |
-| 1.9 | `cudaMemset2D/3D` | TODO | — | — |
-| 1.10 | `cudaGraphAddKernelNode` | TODO | — | — |
-| 1.11 | `cudaGraphAddMemsetNode` | TODO | — | — |
-| 1.12 | `cudaGraphAddHostNode` | TODO | — | — |
-| 1.13 | `cudaGraphAddChildGraphNode` | TODO | — | — |
-| 1.14 | `cudaGraphAddEmptyNode` | TODO | — | — |
-| 1.15 | `cudaGraphAddEventRecordNode` / `EventWaitNode` | TODO | — | — |
-| 1.16 | `cudaGraphAddMemAllocNode` / `MemFreeNode` | TODO | — | — |
-| 1.17 | Graph introspection APIs (`GetNodes`, `GetEdges`, etc.) | TODO | — | — |
-| 1.18 | Graph exec mutation APIs | TODO | — | — |
-| 1.19 | Stream capture introspection | TODO | — | — |
-| 1.20 | CUDART texture/surface object APIs | TODO | — | — |
-| 1.21 | CUDA Runtime device/function attributes | TODO | — | — |
-| 1.22 | CUDA Graph dependencies & user objects | TODO | — | — |
-| 1.23 | CUDART external memory/semaphore APIs | TODO | — | — |
+| 1.9 | `cudaMemset2D/3D/2DAsync/3DAsync` | **DONE** | — | 2026-05-13 |
+| 1.10 | `cudaGraphAddKernelNode` | **DONE** | — | 2026-05-13 |
+| 1.11 | `cudaGraphAddMemsetNode` | **DONE** | — | 2026-05-13 |
+| 1.12 | `cudaGraphAddHostNode` | **DONE** | — | 2026-05-13 |
+| 1.13 | `cudaGraphAddChildGraphNode` | **DONE** | — | 2026-05-13 |
+| 1.14 | `cudaGraphAddEmptyNode` | **DONE** | — | 2026-05-13 |
+| 1.15 | `cudaGraphAddEventRecordNode` / `EventWaitNode` | **DONE** | — | 2026-05-13 |
+| 1.16 | `cudaGraphAddMemAllocNode` / `MemFreeNode` | **DONE** | — | 2026-05-13 |
+| 1.17 | Graph introspection APIs (`GetNodes`, `GetEdges`, `NodeGetType`, `NodeGetDependencies`, etc.) | **DONE** | — | 2026-05-13 |
+| 1.18 | Graph exec mutation APIs (`ExecKernelNodeSetParams`, `ExecMemcpyNodeSetParams`, `NodeSetEnabled`, etc.) | **DONE** | — | 2026-05-13 |
+| 1.19 | Stream capture introspection (`IsCapturing`, `GetCaptureInfo_v2`, `ThreadExchangeStreamCaptureMode`, `UpdateCaptureDependencies`, `CopyAttributes`) | **DONE** | — | 2026-05-13 |
+| 1.20 | CUDART texture/surface object APIs (`GetTextureObjectResourceDesc`, legacy `BindTexture*`, `BindSurfaceToArray`) | **DONE** | — | 2026-05-13 |
+| 1.21 | CUDA Runtime device/function attributes (`FuncGetAttributes`, device limits, cache/smem config, `ChooseDevice`, `LaunchKernelExC`) | **DONE** | — | 2026-05-13 |
+| 1.22 | CUDA Graph dependencies & user objects (`AddDependencies/RemoveDependencies`, `UserObjectCreate/Retain/Release`, `GraphRetainUserObject`, `NodeFindInClone`, `DebugDotPrint`) | **DONE** | — | 2026-05-13 |
+| 1.23 | CUDART external memory/semaphore APIs (`ImportExternalMemory`, `DestroyExternalMemory`, `GetMappedBuffer`, `GetMappedMipmappedArray`) | **DONE** | — | 2026-05-13 |
 
 ### Phase 2 — cuBLAS
 
