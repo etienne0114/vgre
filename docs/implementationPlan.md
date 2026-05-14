@@ -924,6 +924,7 @@ tests/core/texture/        # Texture/surface object tests
 | 4.12 | cuRAND Poisson distribution (`curandGeneratePoisson`) | **DONE** | — | 2026-05-14 |
 | 4.13 | cuRAND seed generation (`curandGenerateSeeds`) | **DONE** | — | 2026-05-14 |
 | 4.14 | cuRAND Sobol direction vectors (`curandGetDirectionVectors32/64`, `curandGetScrambleConstants32/64`) | **DONE** | — | 2026-05-14 |
+| 4.15 | cuRAND Sobol quasi-random generation (`SOBOL32/64`, `SCRAMBLED_SOBOL32/64`) | **DONE** | — | 2026-05-14 |
 
 ### Phase 5 — CUDA Driver API
 
