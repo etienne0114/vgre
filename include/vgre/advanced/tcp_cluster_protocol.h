@@ -313,9 +313,24 @@ struct CreditReportPacket {
 
 // Note: CreditReportPacket contains platform-dependent int and double sizes, validated at runtime
 
+// Reduction operations for collective ops (encoded in upper 16 bits of op_type)
+enum class ReductionOp : uint16_t {
+    Sum  = 0,
+    Prod = 1,
+    Max  = 2,
+    Min  = 3,
+    Avg  = 4
+};
+
+inline uint32_t encodeCollectiveOpType(uint16_t collectiveType, ReductionOp redOp) {
+    return (static_cast<uint32_t>(static_cast<uint16_t>(redOp)) << 16) | collectiveType;
+}
+inline uint16_t decodeCollectiveType(uint32_t opType) { return static_cast<uint16_t>(opType & 0xFFFF); }
+inline ReductionOp decodeReductionOp(uint32_t opType) { return static_cast<ReductionOp>((opType >> 16) & 0xFFFF); }
+
 #pragma pack(push, 1)
 struct CollectiveOpPacket {
-  uint32_t op_type;    // 0 = all_reduce
+  uint32_t op_type;    // lower 16 bits = collective type (0 = all_reduce), upper 16 bits = ReductionOp
   uint32_t datatype;   // VGRE_ARG_...
   uint64_t count;
   uint64_t sequence;   // sync ID

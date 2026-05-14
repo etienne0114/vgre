@@ -296,9 +296,15 @@ sudo cmake --install build
 - **CUDA Graphs**: kernel, memset, host, child-graph, empty, event-record/wait, mem-alloc/free node types in CUDART shim
 - **cuBLAS**: complex Hermitian variants (`Chemm`/`Cherk`/`Cher2k`), batched Level-3, `cublasLoggerConfigure`. Level-1, Level-2, and core Level-3 now complete.
 - **cuDNN**: CTC loss. All core forward/backward passes, RNN, attention, and utility ops (OpTensor, ReduceTensor, TransformTensor) now complete.
-- **NCCL**: `Send`/`Recv`, `AllToAll`, `Gather`, `Scatter`
+- **NCCL**: `Send`/`Recv`, `AllToAll`, `Gather`, `Scatter` — **IMPLEMENTED** 2026-05-14. Multi-node `ncclAllReduce` routes through TCPClusterManager when cluster is active.
 - **PTX ISA**: texture/surface instructions, shared atomics, `cvt` variants, `rcp.rn`, `sqrt.rn`, `match.sync`, `grid.sync`
 - **Entirely missing libraries**: cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt
+
+### Recently Completed — Multi-Node TCPCluster & Optimizations (2026-05-14)
+- **NCCL-TCPCluster bridge**: `ncclAllReduce` delegates to `TCPClusterManager::allReduce()` when multi-node is active (master with workers or connected worker).
+- **Extended TCPCluster collectives**: `CollectiveOpsManager` now supports `Sum`, `Prod`, `Max`, `Min`, `Avg` (was Sum-only). `ReductionOp` encoded in `CollectiveOpPacket.op_type` upper 16 bits.
+- **SIMD-optimized `applyReduce`**: AVX2/SSE2/NEON fast paths for `Sum`; scalar fallbacks for `Prod`, `Max`, `Min`.
+- **Files**: `src/api/nccl_shim.cpp`, `src/advanced/tcp_cluster/collective_ops_manager.cpp`, `src/advanced/tcp_cluster/client_packet_dispatch.cpp`, `include/vgre/advanced/tcp_cluster_protocol.h`, `include/vgre/advanced/tcp_cluster.h`
 
 ### Deployment / Infrastructure
 - Kubernetes operator for cluster orchestration

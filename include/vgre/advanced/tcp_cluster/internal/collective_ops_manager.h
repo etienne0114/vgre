@@ -2,6 +2,7 @@
 #define VGRE_ADVANCED_TCP_CLUSTER_COLLECTIVE_OPS_MANAGER_H
 
 #include "vgre/common/error_codes.h"
+#include "vgre/advanced/tcp_cluster_protocol.h"
 #include <cstdint>
 #include <cstddef>
 #include <vector>
@@ -30,17 +31,18 @@ public:
   ~CollectiveOpsManager() = default;
 
   // Collective operations
-  VGREResult allReduce(void* ptr, size_t count, int datatype);
+  VGREResult allReduce(void* ptr, size_t count, int datatype,
+                       ReductionOp op = ReductionOp::Sum);
   VGREResult barrier();
 
-  // SIMD-optimized reduction
+  // SIMD-optimized reduction (supports Sum, Prod, Max, Min)
   template<typename T>
-  void sumReduce(T* dst, const T* src, size_t count);
+  void applyReduce(T* dst, const T* src, size_t count, ReductionOp op);
 
 private:
   // Master/worker paths for allReduce
-  VGREResult masterAllReduce(void* ptr, size_t count, int datatype);
-  VGREResult workerAllReduce(void* ptr, size_t count, int datatype);
+  VGREResult masterAllReduce(void* ptr, size_t count, int datatype, ReductionOp op);
+  VGREResult workerAllReduce(void* ptr, size_t count, int datatype, ReductionOp op);
 
   TCPClusterManager* parent_;
 };

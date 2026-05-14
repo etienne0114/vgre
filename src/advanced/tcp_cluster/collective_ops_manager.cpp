@@ -32,15 +32,17 @@ using vgre::common::VGRE_INVALID_SOCKET;
 CollectiveOpsManager::CollectiveOpsManager(TCPClusterManager* parent)
     : parent_(parent) {}
 
-VGREResult CollectiveOpsManager::allReduce(void* ptr, size_t count, int datatype) {
+VGREResult CollectiveOpsManager::allReduce(void* ptr, size_t count, int datatype,
+                                              ReductionOp op) {
   if (parent_->isMaster()) {
-    return masterAllReduce(ptr, count, datatype);
+    return masterAllReduce(ptr, count, datatype, op);
   } else {
-    return workerAllReduce(ptr, count, datatype);
+    return workerAllReduce(ptr, count, datatype, op);
   }
 }
 
-VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int datatype) {
+VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int datatype,
+                                                  ReductionOp op) {
   size_t element_size = ::vgre::vgre_get_type_size(datatype);
   // C3: Overflow check — count * element_size can wrap if count is huge.
   if (element_size > 0 && count > (SIZE_MAX / element_size)) {
@@ -71,6 +73,7 @@ VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int da
   // Initialize reduction state
   parent_->is_reducing_ = true; parent_->reduction_count_ = 0; parent_->reduction_datatype_ = datatype;
   parent_->reduction_element_count_ = count; parent_->reduction_sequence_++;
+  parent_->pending_collective_op_type_ = static_cast<uint32_t>(op);
   // Allocate buffer and copy master's local data
   parent_->active_reduction_buffer_.resize(total_bytes); std::memcpy(parent_->active_reduction_buffer_.data(), ptr, total_bytes);
 
@@ -122,11 +125,15 @@ VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int da
   return VGREResult::SUCCESS;
 }
 
-VGREResult CollectiveOpsManager::workerAllReduce(void* ptr, size_t count, int datatype) {
+VGREResult CollectiveOpsManager::workerAllReduce(void* ptr, size_t count, int datatype,
+                                                    ReductionOp op) {
   size_t element_size = ::vgre::vgre_get_type_size(datatype); size_t total_bytes = count * element_size;
-  
-  // Create collective operation packet
-  CollectiveOpPacket op_packet; op_packet.op_type = 0; op_packet.datatype = datatype; op_packet.count = count; op_packet.sequence = parent_->reduction_sequence_++;
+
+  // Create collective operation packet with encoded reduction op
+  CollectiveOpPacket op_packet;
+  op_packet.op_type = encodeCollectiveOpType(0 /* allReduce */, op);
+  op_packet.datatype = datatype; op_packet.count = count;
+  op_packet.sequence = parent_->reduction_sequence_++;
   
   // Send collective op packet followed by raw data
   if (parent_->client_fd_ == VGRE_INVALID_SOCKET) { return VGREResult::ERR_NOT_INITIALIZED; }
@@ -212,111 +219,118 @@ VGREResult CollectiveOpsManager::barrier() {
   }
 }
 
-// Template specializations for sumReduce
+// applyReduce — supports Sum (SIMD-optimized), Prod, Max, Min.
 template<typename T>
-void CollectiveOpsManager::sumReduce(T* dst, const T* src, size_t count) {
-  // SIMD-optimized sum reduction with AVX2/SSE2 support
+void CollectiveOpsManager::applyReduce(T* dst, const T* src, size_t count, ReductionOp op) {
+  if (op == ReductionOp::Sum) {
+    // SIMD-optimized sum reduction
 #if defined(__AVX2__)
-  if constexpr (std::is_same_v<T, float>) {
-    size_t i = 0; const size_t simd_width = 8; const size_t simd_end = (count / simd_width) * simd_width;
-    for (; i < simd_end; i += simd_width) {
-      __m256 dst_vec = _mm256_loadu_ps(dst + i); __m256 src_vec = _mm256_loadu_ps(src + i);
-      _mm256_storeu_ps(dst + i, _mm256_add_ps(dst_vec, src_vec));
-    }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else if constexpr (std::is_same_v<T, double>) {
-    size_t i = 0; const size_t simd_width = 4; const size_t simd_end = (count / simd_width) * simd_width;
-    for (; i < simd_end; i += simd_width) {
-      __m256d dst_vec = _mm256_loadu_pd(dst + i); __m256d src_vec = _mm256_loadu_pd(src + i);
-      _mm256_storeu_pd(dst + i, _mm256_add_pd(dst_vec, src_vec));
-    }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
-    size_t i = 0; const size_t simd_width = 8; const size_t simd_end = (count / simd_width) * simd_width;
-    for (; i < simd_end; i += simd_width) {
-      __m256i dst_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i));
-      __m256i src_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
-      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), _mm256_add_epi32(dst_vec, src_vec));
-    }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
-    size_t i = 0; const size_t simd_width = 4; const size_t simd_end = (count / simd_width) * simd_width;
-    for (; i < simd_end; i += simd_width) {
-      __m256i dst_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i));
-      __m256i src_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
-      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), _mm256_add_epi64(dst_vec, src_vec));
-    }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else { for (size_t i = 0; i < count; ++i) dst[i] += src[i]; }
+    if constexpr (std::is_same_v<T, float>) {
+      size_t i = 0; const size_t simd_width = 8; const size_t simd_end = (count / simd_width) * simd_width;
+      for (; i < simd_end; i += simd_width) {
+        __m256 dst_vec = _mm256_loadu_ps(dst + i); __m256 src_vec = _mm256_loadu_ps(src + i);
+        _mm256_storeu_ps(dst + i, _mm256_add_ps(dst_vec, src_vec));
+      }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else if constexpr (std::is_same_v<T, double>) {
+      size_t i = 0; const size_t simd_width = 4; const size_t simd_end = (count / simd_width) * simd_width;
+      for (; i < simd_end; i += simd_width) {
+        __m256d dst_vec = _mm256_loadu_pd(dst + i); __m256d src_vec = _mm256_loadu_pd(src + i);
+        _mm256_storeu_pd(dst + i, _mm256_add_pd(dst_vec, src_vec));
+      }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
+      size_t i = 0; const size_t simd_width = 8; const size_t simd_end = (count / simd_width) * simd_width;
+      for (; i < simd_end; i += simd_width) {
+        __m256i dst_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i));
+        __m256i src_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), _mm256_add_epi32(dst_vec, src_vec));
+      }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
+      size_t i = 0; const size_t simd_width = 4; const size_t simd_end = (count / simd_width) * simd_width;
+      for (; i < simd_end; i += simd_width) {
+        __m256i dst_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i));
+        __m256i src_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), _mm256_add_epi64(dst_vec, src_vec));
+      }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else { for (size_t i = 0; i < count; ++i) dst[i] += src[i]; }
 #elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
-  if constexpr (std::is_same_v<T, float>) {
-    size_t i = 0; const size_t simd_width = 4; const size_t simd_end = (count / simd_width) * simd_width;
-    for (; i < simd_end; i += simd_width) {
-      __m128 dst_vec = _mm_loadu_ps(dst + i); __m128 src_vec = _mm_loadu_ps(src + i);
-      _mm_storeu_ps(dst + i, _mm_add_ps(dst_vec, src_vec));
-    }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else if constexpr (std::is_same_v<T, double>) {
-    size_t i = 0; const size_t simd_width = 2; const size_t simd_end = (count / simd_width) * simd_width;
-    for (; i < simd_end; i += simd_width) {
-      __m128d dst_vec = _mm_loadu_pd(dst + i); __m128d src_vec = _mm_loadu_pd(src + i);
-      _mm_storeu_pd(dst + i, _mm_add_pd(dst_vec, src_vec));
-    }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
-    size_t i = 0; const size_t simd_width = 4; const size_t simd_end = (count / simd_width) * simd_width;
-    for (; i < simd_end; i += simd_width) {
-      __m128i dst_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dst + i));
-      __m128i src_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
-      _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), _mm_add_epi32(dst_vec, src_vec));
-    }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
-    size_t i = 0; const size_t simd_width = 2; const size_t simd_end = (count / simd_width) * simd_width;
-    for (; i < simd_end; i += simd_width) {
-      __m128i dst_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dst + i));
-      __m128i src_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
-      _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), _mm_add_epi64(dst_vec, src_vec));
-    }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else { for (size_t i = 0; i < count; ++i) dst[i] += src[i]; }
+    if constexpr (std::is_same_v<T, float>) {
+      size_t i = 0; const size_t simd_width = 4; const size_t simd_end = (count / simd_width) * simd_width;
+      for (; i < simd_end; i += simd_width) {
+        __m128 dst_vec = _mm_loadu_ps(dst + i); __m128 src_vec = _mm_loadu_ps(src + i);
+        _mm_storeu_ps(dst + i, _mm_add_ps(dst_vec, src_vec));
+      }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else if constexpr (std::is_same_v<T, double>) {
+      size_t i = 0; const size_t simd_width = 2; const size_t simd_end = (count / simd_width) * simd_width;
+      for (; i < simd_end; i += simd_width) {
+        __m128d dst_vec = _mm_loadu_pd(dst + i); __m128d src_vec = _mm_loadu_pd(src + i);
+        _mm_storeu_pd(dst + i, _mm_add_pd(dst_vec, src_vec));
+      }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
+      size_t i = 0; const size_t simd_width = 4; const size_t simd_end = (count / simd_width) * simd_width;
+      for (; i < simd_end; i += simd_width) {
+        __m128i dst_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dst + i));
+        __m128i src_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), _mm_add_epi32(dst_vec, src_vec));
+      }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
+      size_t i = 0; const size_t simd_width = 2; const size_t simd_end = (count / simd_width) * simd_width;
+      for (; i < simd_end; i += simd_width) {
+        __m128i dst_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dst + i));
+        __m128i src_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), _mm_add_epi64(dst_vec, src_vec));
+      }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else { for (size_t i = 0; i < count; ++i) dst[i] += src[i]; }
 #elif defined(__ARM_NEON__) || defined(__aarch64__)
-  if constexpr (std::is_same_v<T, float>) {
-    size_t i = 0; const size_t simd_end = (count / 4) * 4;
-    for (; i < simd_end; i += 4) { float32x4_t d = vld1q_f32(dst + i); float32x4_t s = vld1q_f32(src + i); vst1q_f32(dst + i, vaddq_f32(d, s)); }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else if constexpr (std::is_same_v<T, double>) {
-    size_t i = 0; const size_t simd_end = (count / 2) * 2;
-    for (; i < simd_end; i += 2) { float64x2_t d = vld1q_f64(dst + i); float64x2_t s = vld1q_f64(src + i); vst1q_f64(dst + i, vaddq_f64(d, s)); }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
-    size_t i = 0; const size_t simd_end = (count / 4) * 4;
-    for (; i < simd_end; i += 4) {
-      int32x4_t d = vld1q_s32(reinterpret_cast<const int32_t*>(dst + i)); int32x4_t s = vld1q_s32(reinterpret_cast<const int32_t*>(src + i));
-      vst1q_s32(reinterpret_cast<int32_t*>(dst + i), vaddq_s32(d, s));
-    }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
-    size_t i = 0; const size_t simd_end = (count / 2) * 2;
-    for (; i < simd_end; i += 2) {
-      int64x2_t d = vld1q_s64(reinterpret_cast<const int64_t*>(dst + i)); int64x2_t s = vld1q_s64(reinterpret_cast<const int64_t*>(src + i));
-      vst1q_s64(reinterpret_cast<int64_t*>(dst + i), vaddq_s64(d, s));
-    }
-    for (; i < count; ++i) dst[i] += src[i];
-  } else { for (size_t i = 0; i < count; ++i) dst[i] += src[i]; }
+    if constexpr (std::is_same_v<T, float>) {
+      size_t i = 0; const size_t simd_end = (count / 4) * 4;
+      for (; i < simd_end; i += 4) { float32x4_t d = vld1q_f32(dst + i); float32x4_t s = vld1q_f32(src + i); vst1q_f32(dst + i, vaddq_f32(d, s)); }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else if constexpr (std::is_same_v<T, double>) {
+      size_t i = 0; const size_t simd_end = (count / 2) * 2;
+      for (; i < simd_end; i += 2) { float64x2_t d = vld1q_f64(dst + i); float64x2_t s = vld1q_f64(src + i); vst1q_f64(dst + i, vaddq_f64(d, s)); }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
+      size_t i = 0; const size_t simd_end = (count / 4) * 4;
+      for (; i < simd_end; i += 4) {
+        int32x4_t d = vld1q_s32(reinterpret_cast<const int32_t*>(dst + i)); int32x4_t s = vld1q_s32(reinterpret_cast<const int32_t*>(src + i));
+        vst1q_s32(reinterpret_cast<int32_t*>(dst + i), vaddq_s32(d, s));
+      }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
+      size_t i = 0; const size_t simd_end = (count / 2) * 2;
+      for (; i < simd_end; i += 2) {
+        int64x2_t d = vld1q_s64(reinterpret_cast<const int64_t*>(dst + i)); int64x2_t s = vld1q_s64(reinterpret_cast<const int64_t*>(src + i));
+        vst1q_s64(reinterpret_cast<int64_t*>(dst + i), vaddq_s64(d, s));
+      }
+      for (; i < count; ++i) dst[i] += src[i];
+    } else { for (size_t i = 0; i < count; ++i) dst[i] += src[i]; }
 #else
-  // Scalar fallback for architectures without SIMD support
-  for (size_t i = 0; i < count; ++i) dst[i] += src[i];
+    for (size_t i = 0; i < count; ++i) dst[i] += src[i];
 #endif
+  } else if (op == ReductionOp::Prod) {
+    for (size_t i = 0; i < count; ++i) dst[i] *= src[i];
+  } else if (op == ReductionOp::Max) {
+    for (size_t i = 0; i < count; ++i) if (src[i] > dst[i]) dst[i] = src[i];
+  } else if (op == ReductionOp::Min) {
+    for (size_t i = 0; i < count; ++i) if (src[i] < dst[i]) dst[i] = src[i];
+  }
 }
 
-// Explicit template instantiations — signed, unsigned, and floating-point types
-template void CollectiveOpsManager::sumReduce<float>(float*, const float*, size_t);
-template void CollectiveOpsManager::sumReduce<double>(double*, const double*, size_t);
-template void CollectiveOpsManager::sumReduce<int32_t>(int32_t*, const int32_t*, size_t);
-template void CollectiveOpsManager::sumReduce<int64_t>(int64_t*, const int64_t*, size_t);
-template void CollectiveOpsManager::sumReduce<uint32_t>(uint32_t*, const uint32_t*, size_t);
-template void CollectiveOpsManager::sumReduce<uint64_t>(uint64_t*, const uint64_t*, size_t);
+// Explicit template instantiations
+template void CollectiveOpsManager::applyReduce<float>(float*, const float*, size_t, ReductionOp);
+template void CollectiveOpsManager::applyReduce<double>(double*, const double*, size_t, ReductionOp);
+template void CollectiveOpsManager::applyReduce<int32_t>(int32_t*, const int32_t*, size_t, ReductionOp);
+template void CollectiveOpsManager::applyReduce<int64_t>(int64_t*, const int64_t*, size_t, ReductionOp);
+template void CollectiveOpsManager::applyReduce<uint32_t>(uint32_t*, const uint32_t*, size_t, ReductionOp);
+template void CollectiveOpsManager::applyReduce<uint64_t>(uint64_t*, const uint64_t*, size_t, ReductionOp);
 
 } // namespace advanced
 } // namespace vgre

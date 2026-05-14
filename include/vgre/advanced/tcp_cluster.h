@@ -136,7 +136,8 @@ public:
   VGREResult collectPartitionResults(uint64_t kernel_id,
                                      uint32_t total_partitions,
                                      int timeout_ms = 30000);
-  VGREResult allReduce(void *ptr, size_t count, int datatype);
+  VGREResult allReduce(void *ptr, size_t count, int datatype,
+                       ReductionOp op = ReductionOp::Sum);
   VGREResult barrier();
   struct ClientConnection {
     vgre_socket_t socket_fd;
