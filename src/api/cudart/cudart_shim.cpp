@@ -921,6 +921,37 @@ static int vgre_ext_sem_graph_callback(void *ctx) {
 
 } // namespace
 
+// ── Exposed helpers for cudart_shim_external_memory.cpp ─────────────────────
+extern "C" cudaError_t vgreGraphExtSemGetSignalNodeParams(
+        cudaGraphNode_t node,
+        cudaExternalSemaphoreSignalNodeParams *params_out) {
+    std::lock_guard<std::mutex> lk(getGraphExtSemMutex());
+    auto it = getGraphExtSemNodes().find(node);
+    if (it == getGraphExtSemNodes().end()) return cudaErrorInvalidValue;
+    auto *state = it->second.get();
+    if (state->isWait) return cudaErrorInvalidValue;
+    if (!params_out) return cudaErrorInvalidValue;
+    params_out->extSemArray = state->sems.data();
+    params_out->paramsArray = state->signalParams.data();
+    params_out->numExtSems = static_cast<unsigned int>(state->sems.size());
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t vgreGraphExtSemGetWaitNodeParams(
+        cudaGraphNode_t node,
+        cudaExternalSemaphoreWaitNodeParams *params_out) {
+    std::lock_guard<std::mutex> lk(getGraphExtSemMutex());
+    auto it = getGraphExtSemNodes().find(node);
+    if (it == getGraphExtSemNodes().end()) return cudaErrorInvalidValue;
+    auto *state = it->second.get();
+    if (!state->isWait) return cudaErrorInvalidValue;
+    if (!params_out) return cudaErrorInvalidValue;
+    params_out->extSemArray = state->sems.data();
+    params_out->paramsArray = state->waitParams.data();
+    params_out->numExtSems = static_cast<unsigned int>(state->sems.size());
+    return cudaSuccess;
+}
+
 cudaError_t cudaGraphCreate(cudaGraph_t *graph, unsigned int flags) {
   return vgre::api::CUDAInterceptor::instance().graphCreate(graph, flags);
 }

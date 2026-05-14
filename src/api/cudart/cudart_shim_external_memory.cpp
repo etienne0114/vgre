@@ -203,31 +203,20 @@ extern "C" cudaError_t cudaExternalMemoryGetMappedMipmappedArray(
 // GraphExtSemNodeState registry; we access it through the public CUDART API.
 
 
+// Forward declarations of exposed helpers from cudart_shim.cpp
+extern "C" cudaError_t vgreGraphExtSemGetSignalNodeParams(
+        cudaGraphNode_t node, cudaExternalSemaphoreSignalNodeParams *params_out);
+extern "C" cudaError_t vgreGraphExtSemGetWaitNodeParams(
+        cudaGraphNode_t node, cudaExternalSemaphoreWaitNodeParams *params_out);
+
 extern "C" cudaError_t cudaExternalSemaphoreGetSignalNodeParams(
         cudaGraphNode_t node,
         cudaExternalSemaphoreSignalNodeParams *params_out) {
-    // The signal params were stored at node-add time in the graph ext-sem
-    // registry (GraphExtSemNodeState). Re-querying them requires access to
-    // that registry.  This API is only called by frameworks that also call
-    // cudaGraphExecExternalSemaphoreSignalNodeSetParams to update them.
-    // VGRE exposes cudaGraphExecExternalSemaphoreSignalNodeSetParams in
-    // cudart_shim.cpp which mutates the same registry.
-    //
-    // For completeness, return invalid if the node doesn't exist in the
-    // registry (callers check the return value).
-    (void)node; (void)params_out;
-    VGRE_LOG_DEBUG("CUDART",
-        "cudaExternalSemaphoreGetSignalNodeParams: "
-        "returns NotSupported (query via cudaGraphAddExternalSemaphoreSignalNode)");
-    return cudaErrorNotSupported;
+    return vgreGraphExtSemGetSignalNodeParams(node, params_out);
 }
 
 extern "C" cudaError_t cudaExternalSemaphoreGetWaitNodeParams(
         cudaGraphNode_t node,
         cudaExternalSemaphoreWaitNodeParams *params_out) {
-    (void)node; (void)params_out;
-    VGRE_LOG_DEBUG("CUDART",
-        "cudaExternalSemaphoreGetWaitNodeParams: "
-        "returns NotSupported (query via cudaGraphAddExternalSemaphoreWaitNode)");
-    return cudaErrorNotSupported;
+    return vgreGraphExtSemGetWaitNodeParams(node, params_out);
 }

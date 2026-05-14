@@ -234,6 +234,18 @@ cudaError_t cudaGraphUpload(cudaGraphExec_t graphExec, cudaStream_t stream) {
     return cudaSuccess;
 }
 
+// ── Missing node param structs (defined here for generic dispatcher) ─────────
+struct cudaEventRecordNodeParams { cudaEvent_t event; };
+struct cudaEventWaitNodeParams  { cudaEvent_t event; };
+
+// Forward declarations for external semaphore node params (defined in cudart_shim.cpp)
+struct cudaExternalSemaphoreSignalNodeParams;
+struct cudaExternalSemaphoreWaitNodeParams;
+extern "C" cudaError_t vgreGraphExtSemGetSignalNodeParams(
+        uint64_t node, cudaExternalSemaphoreSignalNodeParams *params_out);
+extern "C" cudaError_t vgreGraphExtSemGetWaitNodeParams(
+        uint64_t node, cudaExternalSemaphoreWaitNodeParams *params_out);
+
 // ── cudaGraphExecNodeSetParams (generic dispatcher) ───────────────────────────
 
 cudaError_t cudaGraphExecNodeSetParams(
@@ -264,6 +276,20 @@ cudaError_t cudaGraphExecNodeSetParams(
         return cudaGraphExecHostNodeSetParams(
             graphExec, node,
             static_cast<const cudaHostNodeParams *>(pNodeParams));
+    case vgre::core::GraphNodeType::CHILD:
+        return cudaGraphExecChildGraphNodeSetParams(
+            graphExec, node,
+            *static_cast<const cudaGraph_t *>(pNodeParams));
+    case vgre::core::GraphNodeType::EVENT_RECORD: {
+        auto *pr = static_cast<const cudaEventRecordNodeParams *>(pNodeParams);
+        return cudaGraphExecEventRecordNodeSetEvent(graphExec, node, pr->event);
+    }
+    case vgre::core::GraphNodeType::EVENT_WAIT: {
+        auto *pw = static_cast<const cudaEventWaitNodeParams *>(pNodeParams);
+        return cudaGraphExecEventWaitNodeSetEvent(graphExec, node, pw->event);
+    }
+    case vgre::core::GraphNodeType::EMPTY:
+        return cudaSuccess;
     default:
         return cudaErrorNotSupported;
     }
