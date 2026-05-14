@@ -877,6 +877,8 @@ tests/core/texture/        # Texture/surface object tests
 | 2.2 | Pointer mode / atomics mode APIs | **DONE** | — | 2026-05-13 |
 | 2.3 | Level-2 BLAS (`Trsv`, `Trsm`, `Ger`, `Symv`, `Gbmv`, `Syr`, etc.) | **DONE** | — | 2026-05-13 |
 | 2.4 | Level-3 BLAS (`Trsm`, `Syrk`, `Syr2k`, `Trmm`, `Symm`, `Chemm`, etc.) | **DONE** | — | 2026-05-13 |
+| 2.4a | `cublasGemmEx` FP16 / BF16 mixed-precision paths | **DONE** | — | 2026-05-14 |
+| 2.4b | `cublasLtMatmul` FP16 / BF16 paths | **DONE** | — | 2026-05-14 |
 | 2.5 | Complex Hermitian variants (`Cherk`, `Cher2k`) | **DONE** | — | 2026-05-14 |
 | 2.6 | `cublasLoggerConfigure` / logging callbacks | **DONE** | — | 2026-05-14 |
 
@@ -897,6 +899,7 @@ tests/core/texture/        # Texture/surface object tests
 | 3.11 | `cudnnCTCLoss` | **DONE** | — | 2026-05-14 |
 | 3.12 | `cudnnOpTensor` | **DONE** | — | 2026-05-14 |
 | 3.13 | `cudnnReduceTensor` | **DONE** | — | 2026-05-14 |
+| 3.13a | `cudnnReduceTensor` multi-dimensional non-scalar reductions | **DONE** | — | 2026-05-14 |
 | 3.14 | `cudnnTransformTensor` | **DONE** | — | 2026-05-14 |
 | 3.15 | cuDNN Backend API (v8+) | **DONE** (minimal stub) | — | 2026-05-14 |
 | 3.16 | `cudnnLRNCrossChannelForward/Backward` | **DONE** | — | 2026-05-14 |
@@ -914,6 +917,7 @@ tests/core/texture/        # Texture/surface object tests
 | 4.6 | cuSOLVER dense functional (LAPACK delegation) | **DONE** | — | 2026-05-14 |
 | 4.7 | cuSPARSE stub shim | **DONE** | — | 2026-05-14 |
 | 4.8 | cuSPARSE SpMV/SpMM functional | **DONE** | — | 2026-05-14 |
+| 4.8a | cuSPARSE complex SpMV/SpMM (`CUDA_C_32F`, `CUDA_C_64F`) | **DONE** | — | 2026-05-14 |
 | 4.9 | cuBLASLt stub shim | **DONE** | — | 2026-05-14 |
 | 4.10 | cuBLASLt matmul + epilogue functional | **DONE** | — | 2026-05-14 |
 | 4.11 | cuFFT advanced planning (`cufftEstimate*`, `cufftMakePlanMany`, `cufftGetSize*`) | **DONE** | — | 2026-05-14 |
@@ -935,6 +939,7 @@ tests/core/texture/        # Texture/surface object tests
 | 5.8 | `cuGraph*` family | **DONE** | — | 2026-05-14 |
 | 5.9 | `cuExternalMemory*` / `cuExternalSemaphore*` | **DONE** | — | 2026-05-14 |
 | 5.10 | Driver texture reference gaps (`cuTexRefSetAddress2D`, filter, mipmap, border, `cuSurfRefSetFormat`) | **DONE** | — | 2026-05-14 |
+| 5.10a | Driver texture `CU_AD_FORMAT_HALF` (FP16) support | **DONE** | — | 2026-05-14 |
 | 5.11 | `cuMemcpy3DAsync` — async 3D copy path | **DONE** | — | 2026-05-14 |
 | 5.12 | Driver surface references (`cuModuleGetSurfRef`, `cuSurfRefSetArray`, `cuSurfRefGetArray`) | **DONE** | — | 2026-05-14 |
 | 5.13 | CUDA Virtual Memory on Linux (`cuMemCreate`, `cuMemAddressReserve`, `cuMemMap`, `cuMemSetAccess`) | **DONE** | — | 2026-05-14 |
