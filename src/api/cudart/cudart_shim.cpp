@@ -988,6 +988,15 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
       hGraphExec, hGraph, hErrorNode_out, reinterpret_cast<vgre::api::CUDAInterceptor::cudaGraphExecUpdateResult*>(updateResult_out));
 }
 
+// Phase 10: cudaGraphExecUpdate_v2 — targeted update of specific nodes only.
+cudaError_t cudaGraphExecUpdate_v2(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
+                                   const cudaGraphNode_t *updateNodeList, size_t updateNodeListSize,
+                                   cudaGraphNode_t *hErrorNode_out, cudaGraphExecUpdateResult *updateResult_out) {
+  return vgre::api::CUDAInterceptor::instance().graphExecUpdateV2(
+      hGraphExec, hGraph, updateNodeList, updateNodeListSize, hErrorNode_out,
+      reinterpret_cast<vgre::api::CUDAInterceptor::cudaGraphExecUpdateResult*>(updateResult_out));
+}
+
 // VGRE extension: conditional graph node (IF/WHILE semantics).
 // condFn(condCtx) returns non-zero to execute the body.
 // flags: 0 = IF (body executes once), 1 = WHILE (body loops while condFn != 0).

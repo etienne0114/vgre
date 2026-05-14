@@ -803,6 +803,14 @@ VGREResult RuntimeEngine::graphUpdateExec(GraphExecId exec, GraphId graph) {
   return graphManager_->updateExec(exec, graph);
 }
 
+VGREResult RuntimeEngine::graphUpdateExecV2(GraphExecId exec, GraphId graph,
+                                            const std::vector<uint64_t>& nodeIds) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!initialized_ || !graphManager_)
+    return VGREResult::ERR_NOT_INITIALIZED;
+  return graphManager_->updateExecV2(exec, graph, nodeIds);
+}
+
 VGREResult RuntimeEngine::graphLaunch(GraphExecId exec, StreamId stream) {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);

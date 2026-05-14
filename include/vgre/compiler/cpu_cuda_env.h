@@ -28,10 +28,15 @@ extern "C" {
 
   // CUDA Dynamic Parallelism (CDP) — device-side child kernel launch
   void* vgre_cdp_get_param_buffer(size_t bytes);
+  void* vgre_cdp_get_param_buffer_v2(size_t alignment, size_t bytes);
   void  vgre_cdp_launch_device(void* fn, void* paramBuf,
                                 unsigned gx, unsigned gy, unsigned gz,
                                 unsigned bx, unsigned by, unsigned bz,
                                 size_t sharedMem, unsigned long long streamId);
+  struct vgre_cdp_launch_config;
+  void  vgre_cdp_launch_device_v2(void* fn, void* paramBuf,
+                                   const vgre_cdp_launch_config* config);
+  void  vgre_cdp_device_synchronize();
   void  vgre_cdp_drain();
 }
 
@@ -159,6 +164,10 @@ inline void* cudaGetParameterBuffer(size_t /*alignment*/, size_t size) {
     return vgre_cdp_get_param_buffer(size);
 }
 
+inline void* cudaGetParameterBufferV2(size_t alignment, size_t size) {
+    return vgre_cdp_get_param_buffer_v2(alignment, size);
+}
+
 template<typename Fn>
 inline void cudaLaunchDevice(Fn* fn, void* paramBuf,
     vgre_cuda::dim3 gd, vgre_cuda::dim3 bd,
@@ -168,6 +177,28 @@ inline void cudaLaunchDevice(Fn* fn, void* paramBuf,
         gd.x, gd.y, gd.z,
         bd.x, bd.y, bd.z,
         sharedMem, stream);
+}
+
+// V2 launch config (mirrors cudaLaunchConfig)
+struct vgre_cuda_launch_config {
+    vgre_cuda::dim3 gridDim;
+    vgre_cuda::dim3 blockDim;
+    size_t dynamicSmemBytes;
+    unsigned long long stream;
+    int cooperative;
+};
+
+template<typename Fn>
+inline void cudaLaunchDeviceV2(Fn* fn, void* paramBuf,
+                               const vgre_cuda_launch_config* config)
+{
+    if (!config) return;
+    vgre_cdp_launch_device_v2((void*)fn, paramBuf,
+        reinterpret_cast<const vgre_cdp_launch_config*>(config));
+}
+
+inline void cudaDeviceSynchronize() {
+    vgre_cdp_device_synchronize();
 }
 
 } // namespace vgre_cuda

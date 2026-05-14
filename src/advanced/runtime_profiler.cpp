@@ -149,6 +149,20 @@ void RuntimeProfiler::updateStats(const std::string& name,
         s.avgGflops = (s.avgGflops * (s.invocations - 1) +
                        event.gflops) / s.invocations;
     }
+
+    // Phase 10: instruction sampler aggregation
+    uint64_t instTotal = event.instructions.total();
+    if (instTotal > 0) {
+        s.totalInstructions += instTotal;
+        s.avgInstructionsPerInvocation = s.totalInstructions / s.invocations;
+        auto& mix = s.instructionMix;
+        mix.loadCount    += event.instructions.loadCount;
+        mix.storeCount   += event.instructions.storeCount;
+        mix.aluCount     += event.instructions.aluCount;
+        mix.barrierCount += event.instructions.barrierCount;
+        mix.branchCount  += event.instructions.branchCount;
+        mix.otherCount   += event.instructions.otherCount;
+    }
 }
 
 // ── Get stats ──────────────────────────────────────────────────────────────
@@ -220,6 +234,7 @@ std::string RuntimeProfiler::toChromeTraceJSON() const {
             << "\"args\": { "
             << "\"gflops\": " << ev.gflops << ", "
             << "\"throughput_gbps\": " << ev.throughputGBps << ", "
+            << "\"instructions\": " << ev.instructions.total() << ", "
             << "\"grid\": [" << ev.gridDim.x << "," << ev.gridDim.y << "," << ev.gridDim.z << "], "
             << "\"block\": [" << ev.blockDim.x << "," << ev.blockDim.y << "," << ev.blockDim.z << "] "
             << "} }";
@@ -252,6 +267,17 @@ std::string RuntimeProfiler::toJSON() const {
         oss << "      \"max_time_ms\": " << s.maxTimeMs << ",\n";
         oss << "      \"avg_throughput_gbps\": " << s.avgThroughputGBps << ",\n";
         oss << "      \"avg_gflops\": " << s.avgGflops << ",\n";
+        oss << "      \"total_instructions\": " << s.totalInstructions << ",\n";
+        oss << "      \"avg_instructions\": " << s.avgInstructionsPerInvocation << ",\n";
+        const auto& mix = s.instructionMix;
+        oss << "      \"instruction_mix\": {\n";
+        oss << "        \"load\": " << mix.loadCount << ",\n";
+        oss << "        \"store\": " << mix.storeCount << ",\n";
+        oss << "        \"alu\": " << mix.aluCount << ",\n";
+        oss << "        \"barrier\": " << mix.barrierCount << ",\n";
+        oss << "        \"branch\": " << mix.branchCount << ",\n";
+        oss << "        \"other\": " << mix.otherCount << "\n";
+        oss << "      },\n";
         oss << "      \"source_code\": \"" << escapeJsonString(s.sourceCode) << "\",\n";
         oss << "      \"ir_code\": \"" << escapeJsonString(s.irCode) << "\"\n";
         oss << "    }";
@@ -506,12 +532,52 @@ VGREResult RuntimeProfiler::exportOTLPToHTTP(const std::string& endpoint) const 
     return result;
 }
 
+// ── Instruction sampler (CUPTI-equivalent) ───────────────────────────────
+void RuntimeProfiler::recordInstructionSample(const std::string& kernelName,
+                                               const InstructionSample& sample) {
+    if (!enabled_.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto& mix = instructionMixes_[kernelName];
+    mix.loadCount    += sample.loadCount;
+    mix.storeCount   += sample.storeCount;
+    mix.aluCount     += sample.aluCount;
+    mix.barrierCount += sample.barrierCount;
+    mix.branchCount  += sample.branchCount;
+    mix.otherCount   += sample.otherCount;
+}
+
+void RuntimeProfiler::estimateInstructions(const std::string& kernelName,
+                                            const dim3& gridDim,
+                                            const dim3& blockDim,
+                                            uint64_t instructionsPerThread) {
+    if (!enabled_.load(std::memory_order_relaxed)) return;
+    uint64_t totalThreads = static_cast<uint64_t>(gridDim.x) * gridDim.y * gridDim.z *
+                            static_cast<uint64_t>(blockDim.x) * blockDim.y * blockDim.z;
+    InstructionSample sample;
+    // Rough heuristic: ~40% ALU, 30% load, 15% store, 10% branch, 5% barrier
+    sample.aluCount     = static_cast<uint64_t>(instructionsPerThread * totalThreads * 0.40);
+    sample.loadCount    = static_cast<uint64_t>(instructionsPerThread * totalThreads * 0.30);
+    sample.storeCount   = static_cast<uint64_t>(instructionsPerThread * totalThreads * 0.15);
+    sample.branchCount  = static_cast<uint64_t>(instructionsPerThread * totalThreads * 0.10);
+    sample.barrierCount = static_cast<uint64_t>(instructionsPerThread * totalThreads * 0.05);
+    recordInstructionSample(kernelName, sample);
+}
+
+InstructionSample RuntimeProfiler::getInstructionMix(
+    const std::string& kernelName) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto it = instructionMixes_.find(kernelName);
+    if (it != instructionMixes_.end()) return it->second;
+    return InstructionSample{};
+}
+
 // ── Clear ──────────────────────────────────────────────────────────────────
 void RuntimeProfiler::clear() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     events_.clear();
     stats_.clear();
     timers_.clear();
+    instructionMixes_.clear();
 }
 
 // ── Singleton ──────────────────────────────────────────────────────────────

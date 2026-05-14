@@ -311,6 +311,11 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       ev.blockDim = blockDim;
       ev.threadsUsed = static_cast<int>(blockDim.total());
       ev.timestamp = end;
+      // Phase 10: instruction sampler — populate from JIT static analysis
+      if (estimatedInstructionCount > 0) {
+          profiler.estimateInstructions(kName, gridDim, blockDim, estimatedInstructionCount);
+          ev.instructions = profiler.getInstructionMix(kName);
+      }
       profiler.recordEvent(ev);
     }
 

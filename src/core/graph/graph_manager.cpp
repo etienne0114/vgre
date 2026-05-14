@@ -524,6 +524,49 @@ vgre::VGREResult GraphManager::updateExec(GraphExecId execId, GraphId newGraphId
   return vgre::VGREResult::SUCCESS;
 }
 
+vgre::VGREResult GraphManager::updateExecV2(GraphExecId execId, GraphId newGraphId,
+                                             const std::vector<uint64_t>& nodeIds) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto execIt = executables_.find(execId);
+  if (execIt == executables_.end()) return vgre::VGREResult::ERR_INVALID_VALUE;
+
+  auto graphIt = graphs_.find(newGraphId);
+  if (graphIt == graphs_.end()) return vgre::VGREResult::ERR_INVALID_VALUE;
+
+  auto& oldGraph = execIt->second->sourceGraph;
+  auto& newGraph = graphIt->second;
+  if (!oldGraph || !newGraph) return vgre::VGREResult::ERR_INVALID_VALUE;
+
+  for (uint64_t nodeId : nodeIds) {
+    auto oldNit = oldGraph->nodeIndex.find(nodeId);
+    auto newNit = newGraph->nodeIndex.find(nodeId);
+    if (oldNit == oldGraph->nodeIndex.end() || newNit == newGraph->nodeIndex.end()) {
+        VGRE_LOG_WARN("GraphManager", "updateExecV2: nodeId " + std::to_string(nodeId) +
+                      " not found in old or new graph.");
+        return vgre::VGREResult::ERR_INVALID_VALUE;
+    }
+    auto& oldNode = oldGraph->nodes[oldNit->second];
+    auto& newNode = newGraph->nodes[newNit->second];
+    if (oldNode.type != newNode.type) {
+        VGRE_LOG_WARN("GraphManager", "updateExecV2: node type mismatch for nodeId " +
+                      std::to_string(nodeId));
+        return vgre::VGREResult::ERR_INVALID_VALUE;
+    }
+    if (oldNode.deps.size() != newNode.deps.size()) {
+        VGRE_LOG_WARN("GraphManager", "updateExecV2: dependency count mismatch for nodeId " +
+                      std::to_string(nodeId));
+        return vgre::VGREResult::ERR_INVALID_VALUE;
+    }
+    // Copy mutable fields depending on node type
+    oldNode = newNode;
+  }
+
+  VGRE_LOG_INFO("GraphManager",
+      "updateExecV2: updated " + std::to_string(nodeIds.size()) + " nodes in exec " +
+      std::to_string(execId));
+  return vgre::VGREResult::SUCCESS;
+}
+
 vgre::VGREResult GraphManager::destroyGraphExec(GraphExecId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   executables_.erase(id);
