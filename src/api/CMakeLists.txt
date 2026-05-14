@@ -9,6 +9,7 @@ add_library(vgre_api OBJECT
     cublas/cublas_level1.cpp
     cublas/cublas_level2.cpp
     cublas/cublas_level3.cpp
+    cublas/cublas_hermitian.cpp
     cudnn/cudnn_core.cpp
     cudnn/cudnn_convolution.cpp
     cudnn/cudnn_activation.cpp
