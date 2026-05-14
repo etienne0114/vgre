@@ -941,6 +941,8 @@ tests/core/texture/        # Texture/surface object tests
 | 5.9 | `cuExternalMemory*` / `cuExternalSemaphore*` | **DONE** | — | 2026-05-14 |
 | 5.10 | Driver texture reference gaps (`cuTexRefSetAddress2D`, filter, mipmap, border, `cuSurfRefSetFormat`) | **DONE** | — | 2026-05-14 |
 | 5.10a | Driver texture `CU_AD_FORMAT_HALF` (FP16) support | **DONE** | — | 2026-05-14 |
+| 5.10b | Driver texture `cuTexRefSetAddress2D` proper 2D binding (width/height from descriptor, element size from format+channels) | **DONE** | — | 2026-05-14 |
+| 5.10c | Driver texture per-dimension address modes (`cuTexRefSetAddressMode`) | **DONE** | — | 2026-05-14 |
 | 5.11 | `cuMemcpy3DAsync` — async 3D copy path | **DONE** | — | 2026-05-14 |
 | 5.12 | Driver surface references (`cuModuleGetSurfRef`, `cuSurfRefSetArray`, `cuSurfRefGetArray`) | **DONE** | — | 2026-05-14 |
 | 5.13 | CUDA Virtual Memory on Linux (`cuMemCreate`, `cuMemAddressReserve`, `cuMemMap`, `cuMemSetAccess`) | **DONE** | — | 2026-05-14 |
