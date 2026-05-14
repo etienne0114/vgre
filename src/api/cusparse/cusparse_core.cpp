@@ -12,6 +12,27 @@
 #include <unordered_map>
 #include <vector>
 
+// ── Minimal complex types for cuSPARSE ───────────────────────────────────────
+struct cuComplex { float x, y; };
+struct cuDoubleComplex { double x, y; };
+
+static inline cuComplex make_cuComplex(float x, float y) { return {x, y}; }
+static inline cuDoubleComplex make_cuDoubleComplex(double x, double y) { return {x, y}; }
+
+static inline cuComplex operator+(cuComplex a, cuComplex b) { return {a.x + b.x, a.y + b.y}; }
+static inline cuComplex operator*(cuComplex a, cuComplex b) { return {a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x}; }
+static inline cuComplex operator*(cuComplex a, float s) { return {a.x * s, a.y * s}; }
+static inline cuComplex& operator+=(cuComplex& a, cuComplex b) { a.x += b.x; a.y += b.y; return a; }
+static inline cuComplex& operator*=(cuComplex& a, cuComplex b) { float rx = a.x * b.x - a.y * b.y; a.y = a.x * b.y + a.y * b.x; a.x = rx; return a; }
+static inline bool operator!=(cuComplex a, cuComplex b) { return a.x != b.x || a.y != b.y; }
+
+static inline cuDoubleComplex operator+(cuDoubleComplex a, cuDoubleComplex b) { return {a.x + b.x, a.y + b.y}; }
+static inline cuDoubleComplex operator*(cuDoubleComplex a, cuDoubleComplex b) { return {a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x}; }
+static inline cuDoubleComplex operator*(cuDoubleComplex a, double s) { return {a.x * s, a.y * s}; }
+static inline cuDoubleComplex& operator+=(cuDoubleComplex& a, cuDoubleComplex b) { a.x += b.x; a.y += b.y; return a; }
+static inline cuDoubleComplex& operator*=(cuDoubleComplex& a, cuDoubleComplex b) { double rx = a.x * b.x - a.y * b.y; a.y = a.x * b.y + a.y * b.x; a.x = rx; return a; }
+static inline bool operator!=(cuDoubleComplex a, cuDoubleComplex b) { return a.x != b.x || a.y != b.y; }
+
 namespace {
 
 // Global handle registry
@@ -83,7 +104,7 @@ void csr_spmv(cusparseOperation_t op, const T *alpha, const CsrMat &A,
     int64_t n = trans ? A.rows : A.cols;
 
     for (int64_t i = 0; i < m; ++i) {
-        T sum = 0;
+        T sum = T{};
         int64_t rowStart = getIdx(A.rowOffsets, A.rowOffsetType, i) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
         int64_t rowEnd   = getIdx(A.rowOffsets, A.rowOffsetType, i + 1) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
         for (int64_t idx = rowStart; idx < rowEnd; ++idx) {
@@ -113,7 +134,7 @@ void csr_spmm(cusparseOperation_t opA, cusparseOperation_t opB,
     int64_t n = transB ? B.rows : B.cols;
 
     // Zero C
-    for (int64_t i = 0; i < m * n; ++i) static_cast<T*>(C.values)[i] = 0;
+    for (int64_t i = 0; i < m * n; ++i) static_cast<T*>(C.values)[i] = T{};
 
     for (int64_t i = 0; i < m; ++i) {
         int64_t rowStart = getIdx(A.rowOffsets, A.rowOffsetType, i) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
@@ -130,7 +151,8 @@ void csr_spmm(cusparseOperation_t opA, cusparseOperation_t opB,
     }
 
     // Add beta * C_old
-    if (*beta != T(0)) {
+    T zero = T{};
+    if (*beta != zero) {
         for (int64_t i = 0; i < m * n; ++i)
             static_cast<T*>(C.values)[i] += (*beta) * static_cast<T*>(C.values)[i];
     }
@@ -261,6 +283,18 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t /*handle*/, cusparseOperation_t o
                  static_cast<const double*>(xIt->second.values),
                  static_cast<const double*>(beta),
                  static_cast<double*>(yIt->second.values));
+    } else if (computeType == CUDA_C_32F) {
+        csr_spmv(opA,
+                 static_cast<const cuComplex*>(alpha), matIt->second,
+                 static_cast<const cuComplex*>(xIt->second.values),
+                 static_cast<const cuComplex*>(beta),
+                 static_cast<cuComplex*>(yIt->second.values));
+    } else if (computeType == CUDA_C_64F) {
+        csr_spmv(opA,
+                 static_cast<const cuDoubleComplex*>(alpha), matIt->second,
+                 static_cast<const cuDoubleComplex*>(xIt->second.values),
+                 static_cast<const cuDoubleComplex*>(beta),
+                 static_cast<cuDoubleComplex*>(yIt->second.values));
     } else {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
     }
@@ -289,6 +323,14 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t /*handle*/, cusparseOperation_t o
         csr_spmm(opA, opB,
                  static_cast<const double*>(alpha), aIt->second, bIt->second,
                  static_cast<const double*>(beta), cIt->second);
+    } else if (computeType == CUDA_C_32F) {
+        csr_spmm(opA, opB,
+                 static_cast<const cuComplex*>(alpha), aIt->second, bIt->second,
+                 static_cast<const cuComplex*>(beta), cIt->second);
+    } else if (computeType == CUDA_C_64F) {
+        csr_spmm(opA, opB,
+                 static_cast<const cuDoubleComplex*>(alpha), aIt->second, bIt->second,
+                 static_cast<const cuDoubleComplex*>(beta), cIt->second);
     } else {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
     }

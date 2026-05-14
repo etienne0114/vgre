@@ -77,6 +77,7 @@ static constexpr int CU_AD_FORMAT_SIGNED_INT8    = 0x08;
 static constexpr int CU_AD_FORMAT_SIGNED_INT16   = 0x09;
 static constexpr int CU_AD_FORMAT_SIGNED_INT32   = 0x0a;
 static constexpr int CU_AD_FORMAT_FLOAT          = 0x20;
+static constexpr int CU_AD_FORMAT_HALF           = 0x10;
 
 // ── Graph node parameter structs (driver API) ────────────────────────────────
 

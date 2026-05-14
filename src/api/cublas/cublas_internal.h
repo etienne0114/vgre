@@ -100,98 +100,17 @@ static CBLAS_SIDE cublasToCblasSide(cublasSideMode_t side) {
 // 32–64 KiB L1 D-cache.  Falls back to a scalar loop for small matrices.
 static constexpr int kTile = 64;
 
-static void refSgemm(bool tA, bool tB,
+extern void refSgemm(bool tA, bool tB,
     int M, int N, int K,
     float alpha, const float* A, int lda,
                  const float* B, int ldb,
-    float beta,        float* C, int ldc)
-{
-    // Scalar path for tiny matrices (avoid tile-loop overhead)
-    if (M * N * K < 4096) {
-        for (int m = 0; m < M; ++m)
-        for (int n = 0; n < N; ++n) {
-            float acc = 0.f;
-            for (int k = 0; k < K; ++k) {
-                float a = tA ? A[k*lda+m] : A[m*lda+k];
-                float b = tB ? B[n*ldb+k] : B[k*ldb+n];
-                acc += a * b;
-            }
-            C[m*ldc+n] = alpha*acc + beta*C[m*ldc+n];
-        }
-        return;
-    }
+    float beta,        float* C, int ldc);
 
-    // Apply beta to C once before accumulation
-    if (beta != 1.0f) {
-        for (int m = 0; m < M; ++m)
-        for (int n = 0; n < N; ++n)
-            C[m*ldc+n] = (beta == 0.0f) ? 0.0f : beta * C[m*ldc+n];
-    }
-
-    // Tiled multiply: accumulate alpha*op(A)*op(B) into C in kTile×kTile blocks
-    for (int m0 = 0; m0 < M; m0 += kTile)
-    for (int n0 = 0; n0 < N; n0 += kTile)
-    for (int k0 = 0; k0 < K; k0 += kTile) {
-        int mEnd = std::min(m0 + kTile, M);
-        int nEnd = std::min(n0 + kTile, N);
-        int kEnd = std::min(k0 + kTile, K);
-        for (int m = m0; m < mEnd; ++m)
-        for (int n = n0; n < nEnd; ++n) {
-            float acc = 0.f;
-            for (int k = k0; k < kEnd; ++k) {
-                float a = tA ? A[k*lda+m] : A[m*lda+k];
-                float b = tB ? B[n*ldb+k] : B[k*ldb+n];
-                acc += a * b;
-            }
-            C[m*ldc+n] += alpha * acc;
-        }
-    }
-}
-
-static void refDgemm(bool tA, bool tB,
+extern void refDgemm(bool tA, bool tB,
     int M, int N, int K,
     double alpha, const double* A, int lda,
                   const double* B, int ldb,
-    double beta,        double* C, int ldc)
-{
-    if (M * N * K < 4096) {
-        for (int m = 0; m < M; ++m)
-        for (int n = 0; n < N; ++n) {
-            double acc = 0.0;
-            for (int k = 0; k < K; ++k) {
-                double a = tA ? A[k*lda+m] : A[m*lda+k];
-                double b = tB ? B[n*ldb+k] : B[k*ldb+n];
-                acc += a * b;
-            }
-            C[m*ldc+n] = alpha*acc + beta*C[m*ldc+n];
-        }
-        return;
-    }
-
-    if (beta != 1.0) {
-        for (int m = 0; m < M; ++m)
-        for (int n = 0; n < N; ++n)
-            C[m*ldc+n] = (beta == 0.0) ? 0.0 : beta * C[m*ldc+n];
-    }
-
-    for (int m0 = 0; m0 < M; m0 += kTile)
-    for (int n0 = 0; n0 < N; n0 += kTile)
-    for (int k0 = 0; k0 < K; k0 += kTile) {
-        int mEnd = std::min(m0 + kTile, M);
-        int nEnd = std::min(n0 + kTile, N);
-        int kEnd = std::min(k0 + kTile, K);
-        for (int m = m0; m < mEnd; ++m)
-        for (int n = n0; n < nEnd; ++n) {
-            double acc = 0.0;
-            for (int k = k0; k < kEnd; ++k) {
-                double a = tA ? A[k*lda+m] : A[m*lda+k];
-                double b = tB ? B[n*ldb+k] : B[k*ldb+n];
-                acc += a * b;
-            }
-            C[m*ldc+n] += alpha * acc;
-        }
-    }
-}
+    double beta,        double* C, int ldc);
 
 // ── Reference helpers for Level-2 BLAS ─────────────────────────────────────
 

@@ -2,6 +2,95 @@
 
 #include "cublas_internal.h"
 
+// ── Cache-blocked reference GEMM (external linkage) ──────────────────────────
+void refSgemm(bool tA, bool tB,
+    int M, int N, int K,
+    float alpha, const float* A, int lda,
+                 const float* B, int ldb,
+    float beta,        float* C, int ldc)
+{
+    constexpr int kTile = 64;
+    if (M * N * K < 4096) {
+        for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n) {
+            float acc = 0.f;
+            for (int k = 0; k < K; ++k) {
+                float a = tA ? A[k*lda+m] : A[m*lda+k];
+                float b = tB ? B[n*ldb+k] : B[k*ldb+n];
+                acc += a * b;
+            }
+            C[m*ldc+n] = alpha*acc + beta*C[m*ldc+n];
+        }
+        return;
+    }
+    if (beta != 1.0f) {
+        for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n)
+            C[m*ldc+n] = (beta == 0.0f) ? 0.0f : beta * C[m*ldc+n];
+    }
+    for (int m0 = 0; m0 < M; m0 += kTile)
+    for (int n0 = 0; n0 < N; n0 += kTile)
+    for (int k0 = 0; k0 < K; k0 += kTile) {
+        int mEnd = std::min(m0 + kTile, M);
+        int nEnd = std::min(n0 + kTile, N);
+        int kEnd = std::min(k0 + kTile, K);
+        for (int m = m0; m < mEnd; ++m)
+        for (int n = n0; n < nEnd; ++n) {
+            float acc = 0.f;
+            for (int k = k0; k < kEnd; ++k) {
+                float a = tA ? A[k*lda+m] : A[m*lda+k];
+                float b = tB ? B[n*ldb+k] : B[k*ldb+n];
+                acc += a * b;
+            }
+            C[m*ldc+n] += alpha * acc;
+        }
+    }
+}
+
+void refDgemm(bool tA, bool tB,
+    int M, int N, int K,
+    double alpha, const double* A, int lda,
+                  const double* B, int ldb,
+    double beta,        double* C, int ldc)
+{
+    constexpr int kTile = 64;
+    if (M * N * K < 4096) {
+        for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n) {
+            double acc = 0.0;
+            for (int k = 0; k < K; ++k) {
+                double a = tA ? A[k*lda+m] : A[m*lda+k];
+                double b = tB ? B[n*ldb+k] : B[k*ldb+n];
+                acc += a * b;
+            }
+            C[m*ldc+n] = alpha*acc + beta*C[m*ldc+n];
+        }
+        return;
+    }
+    if (beta != 1.0) {
+        for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n)
+            C[m*ldc+n] = (beta == 0.0) ? 0.0 : beta * C[m*ldc+n];
+    }
+    for (int m0 = 0; m0 < M; m0 += kTile)
+    for (int n0 = 0; n0 < N; n0 += kTile)
+    for (int k0 = 0; k0 < K; k0 += kTile) {
+        int mEnd = std::min(m0 + kTile, M);
+        int nEnd = std::min(n0 + kTile, N);
+        int kEnd = std::min(k0 + kTile, K);
+        for (int m = m0; m < mEnd; ++m)
+        for (int n = n0; n < nEnd; ++n) {
+            double acc = 0.0;
+            for (int k = k0; k < kEnd; ++k) {
+                double a = tA ? A[k*lda+m] : A[m*lda+k];
+                double b = tB ? B[n*ldb+k] : B[k*ldb+n];
+                acc += a * b;
+            }
+            C[m*ldc+n] += alpha * acc;
+        }
+    }
+}
+
 extern "C" {
 
 // ── SGEMM ────────────────────────────────────────────────────────────────────
@@ -662,6 +751,67 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         return cublasDgemm_v2(handle, transa, transb, m, n, k,
             (const double*)alpha, (const double*)A, lda,
             (const double*)B, ldb, (const double*)beta, (double*)C, ldc);
+    }
+
+    // FP16: dequantize to float, compute, quantize back
+    if (Atype == (int)CUDA_R_16F || Btype == (int)CUDA_R_16F || Ctype == (int)CUDA_R_16F) {
+        float alphaF = *(const float*)alpha;
+        float betaF  = *(const float*)beta;
+        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
+        auto h2f = [](uint16_t h) -> float {
+            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
+                 (static_cast<uint32_t>((h >> 10) & 0x1f) + (127 - 15)) << 23) |
+                (static_cast<uint32_t>(h & 0x3ff) << 13);
+            float f; std::memcpy(&f, &bits, 4); return f;
+        };
+        auto f2h = [](float f) -> uint16_t {
+            uint32_t bits; std::memcpy(&bits, &f, 4);
+            uint16_t sign = (bits >> 16) & 0x8000;
+            int exp = ((bits >> 23) & 0xff) - 127 + 15;
+            if (exp <= 0) return sign;
+            if (exp >= 31) return sign | 0x7c00;
+            return sign | (exp << 10) | ((bits >> 13) & 0x3ff);
+        };
+        const uint16_t* pA = static_cast<const uint16_t*>(A);
+        const uint16_t* pB = static_cast<const uint16_t*>(B);
+        uint16_t*       pC = static_cast<uint16_t*>(C);
+        for (int i = 0; i < m * k; ++i) Af[i] = h2f(pA[i]);
+        for (int i = 0; i < k * n; ++i) Bf[i] = h2f(pB[i]);
+        for (int i = 0; i < m * n; ++i) Cf[i] = h2f(pC[i]);
+        refSgemm(transa, transb, m, n, k, alphaF, Af.data(), lda, Bf.data(), ldb, betaF, Cf.data(), ldc);
+        for (int i = 0; i < m * n; ++i) pC[i] = f2h(Cf[i]);
+        return CUBLAS_STATUS_SUCCESS;
+    }
+
+    // BF16: widen to float, compute, narrow back
+    if (Atype == (int)CUDA_R_16BF || Btype == (int)CUDA_R_16BF || Ctype == (int)CUDA_R_16BF) {
+        float alphaF = *(const float*)alpha;
+        float betaF  = *(const float*)beta;
+        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
+        auto bf2f = [](uint16_t h) -> float {
+            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                (static_cast<uint32_t>((h >> 7) & 0xff) + (127 - 127)) << 23 |
+                (static_cast<uint32_t>(h & 0x7f) << 16);
+            float f; std::memcpy(&f, &bits, 4); return f;
+        };
+        auto f2bf = [](float f) -> uint16_t {
+            uint32_t bits; std::memcpy(&bits, &f, 4);
+            uint16_t sign = (bits >> 16) & 0x8000;
+            int exp = ((bits >> 23) & 0xff) - 127 + 127;
+            if (exp <= 0) return sign;
+            if (exp >= 255) return sign | 0x7f80;
+            return sign | (exp << 7) | ((bits >> 16) & 0x7f);
+        };
+        const uint16_t* pA = static_cast<const uint16_t*>(A);
+        const uint16_t* pB = static_cast<const uint16_t*>(B);
+        uint16_t*       pC = static_cast<uint16_t*>(C);
+        for (int i = 0; i < m * k; ++i) Af[i] = bf2f(pA[i]);
+        for (int i = 0; i < k * n; ++i) Bf[i] = bf2f(pB[i]);
+        for (int i = 0; i < m * n; ++i) Cf[i] = bf2f(pC[i]);
+        refSgemm(transa, transb, m, n, k, alphaF, Af.data(), lda, Bf.data(), ldb, betaF, Cf.data(), ldc);
+        for (int i = 0; i < m * n; ++i) pC[i] = f2bf(Cf[i]);
+        return CUBLAS_STATUS_SUCCESS;
     }
 
     return CUBLAS_STATUS_NOT_SUPPORTED;

@@ -15,11 +15,8 @@
 #include <mutex>
 #include <unordered_map>
 
-// Forward declaration to cublas GEMM (same shared library).
-// cublas_internal.h defines: typedef void* cublasHandle_t; typedef int cublasStatus_t;
-// We use the exact same ABI-compatible forward declarations without including the header.
+// Forward declarations to cublas GEMM (same shared library).
 extern "C" {
-typedef void* cublasHandle_t;
 extern int cublasSgemm(void* handle, int transa, int transb,
                        int m, int n, int k,
                        const float *alpha,
@@ -35,6 +32,10 @@ extern int cublasDgemm(void* handle, int transa, int transb,
                        const double *beta,
                        double *C, int ldc);
 } // extern "C"
+
+extern void refSgemm(bool tA, bool tB, int M, int N, int K,
+                     float alpha, const float* A, int lda,
+                     const float* B, int ldb, float beta, float* C, int ldc);
 
 namespace {
 
@@ -339,6 +340,65 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
                                        static_cast<const double*>(beta),
                                        static_cast<double*>(C), static_cast<int>(lc.ld)));
         if (s != CUBLAS_STATUS_SUCCESS) return s;
+    } else if (la.type == CUDA_R_16F && lb.type == CUDA_R_16F && lc.type == CUDA_R_16F) {
+        // FP16 via float widening
+        float alphaF = *(const float*)alpha;
+        float betaF  = *(const float*)beta;
+        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
+        auto h2f = [](uint16_t h) -> float {
+            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
+                 (static_cast<uint32_t>((h >> 10) & 0x1f) + (127 - 15)) << 23) |
+                (static_cast<uint32_t>(h & 0x3ff) << 13);
+            float f; std::memcpy(&f, &bits, 4); return f;
+        };
+        auto f2h = [](float f) -> uint16_t {
+            uint32_t bits; std::memcpy(&bits, &f, 4);
+            uint16_t sign = (bits >> 16) & 0x8000;
+            int exp = ((bits >> 23) & 0xff) - 127 + 15;
+            if (exp <= 0) return sign;
+            if (exp >= 31) return sign | 0x7c00;
+            return sign | (exp << 10) | ((bits >> 13) & 0x3ff);
+        };
+        const uint16_t* pA = static_cast<const uint16_t*>(A);
+        const uint16_t* pB = static_cast<const uint16_t*>(B);
+        uint16_t*       pC = static_cast<uint16_t*>(C);
+        for (int i = 0; i < m * k; ++i) Af[i] = h2f(pA[i]);
+        for (int i = 0; i < k * n; ++i) Bf[i] = h2f(pB[i]);
+        for (int i = 0; i < m * n; ++i) Cf[i] = h2f(pC[i]);
+        bool tA = d.transA, tB = d.transB;
+        refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
+                 Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+        for (size_t i = 0; i < m * n; ++i) pC[i] = f2h(Cf[i]);
+    } else if (la.type == CUDA_R_16BF && lb.type == CUDA_R_16BF && lc.type == CUDA_R_16BF) {
+        // BF16 via float widening
+        float alphaF = *(const float*)alpha;
+        float betaF  = *(const float*)beta;
+        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
+        auto bf2f = [](uint16_t h) -> float {
+            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                (static_cast<uint32_t>((h >> 7) & 0xff) + (127 - 127)) << 23 |
+                (static_cast<uint32_t>(h & 0x7f) << 16);
+            float f; std::memcpy(&f, &bits, 4); return f;
+        };
+        auto f2bf = [](float f) -> uint16_t {
+            uint32_t bits; std::memcpy(&bits, &f, 4);
+            uint16_t sign = (bits >> 16) & 0x8000;
+            int exp = ((bits >> 23) & 0xff) - 127 + 127;
+            if (exp <= 0) return sign;
+            if (exp >= 255) return sign | 0x7f80;
+            return sign | (exp << 7) | ((bits >> 16) & 0x7f);
+        };
+        const uint16_t* pA = static_cast<const uint16_t*>(A);
+        const uint16_t* pB = static_cast<const uint16_t*>(B);
+        uint16_t*       pC = static_cast<uint16_t*>(C);
+        for (int i = 0; i < m * k; ++i) Af[i] = bf2f(pA[i]);
+        for (int i = 0; i < k * n; ++i) Bf[i] = bf2f(pB[i]);
+        for (int i = 0; i < m * n; ++i) Cf[i] = bf2f(pC[i]);
+        bool tA = d.transA, tB = d.transB;
+        refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
+                 Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+        for (size_t i = 0; i < m * n; ++i) pC[i] = f2bf(Cf[i]);
     } else {
         return CUBLAS_STATUS_NOT_SUPPORTED;
     }
@@ -350,8 +410,10 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
             size_t count = lc.rows * lc.cols;
             if (lc.type == CUDA_R_32F)
                 std::memcpy(D, C, count * sizeof(float));
-            else
+            else if (lc.type == CUDA_R_64F)
                 std::memcpy(D, C, count * sizeof(double));
+            else if (lc.type == CUDA_R_16F || lc.type == CUDA_R_16BF)
+                std::memcpy(D, C, count * sizeof(uint16_t));
         }
     }
 
