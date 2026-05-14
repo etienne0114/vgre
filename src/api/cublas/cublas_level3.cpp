@@ -814,6 +814,52 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         return CUBLAS_STATUS_SUCCESS;
     }
 
+    // Complex float (CUDA_C_32F)
+    if (Atype == (int)CUDA_C_32F && Btype == (int)CUDA_C_32F && Ctype == (int)CUDA_C_32F) {
+        cuComplex a = *(const cuComplex*)alpha;
+        cuComplex b = *(const cuComplex*)beta;
+        const cuComplex* Af = static_cast<const cuComplex*>(A);
+        const cuComplex* Bf = static_cast<const cuComplex*>(B);
+        cuComplex* Cf = static_cast<cuComplex*>(C);
+        bool tA = (transa != CUBLAS_OP_N);
+        bool tB = (transb != CUBLAS_OP_N);
+        for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j) {
+            cuComplex sum = make_cuComplex(0.f, 0.f);
+            for (int p = 0; p < k; ++p) {
+                cuComplex av = tA ? cuConjf(Af[p + i * lda]) : Af[i + p * lda];
+                cuComplex bv = tB ? cuConjf(Bf[j + p * ldb]) : Bf[p + j * ldb];
+                sum = cuCaddf(sum, cuCmulf(av, bv));
+            }
+            int cIdx = i + j * ldc;
+            Cf[cIdx] = cuCaddf(cuCmulf(a, sum), cuCmulf(b, Cf[cIdx]));
+        }
+        return CUBLAS_STATUS_SUCCESS;
+    }
+
+    // Complex double (CUDA_C_64F)
+    if (Atype == (int)CUDA_C_64F && Btype == (int)CUDA_C_64F && Ctype == (int)CUDA_C_64F) {
+        cuDoubleComplex a = *(const cuDoubleComplex*)alpha;
+        cuDoubleComplex b = *(const cuDoubleComplex*)beta;
+        const cuDoubleComplex* Af = static_cast<const cuDoubleComplex*>(A);
+        const cuDoubleComplex* Bf = static_cast<const cuDoubleComplex*>(B);
+        cuDoubleComplex* Cf = static_cast<cuDoubleComplex*>(C);
+        bool tA = (transa != CUBLAS_OP_N);
+        bool tB = (transb != CUBLAS_OP_N);
+        for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j) {
+            cuDoubleComplex sum = make_cuDoubleComplex(0.0, 0.0);
+            for (int p = 0; p < k; ++p) {
+                cuDoubleComplex av = tA ? cuConj(Af[p + i * lda]) : Af[i + p * lda];
+                cuDoubleComplex bv = tB ? cuConj(Bf[j + p * ldb]) : Bf[p + j * ldb];
+                sum = cuCadd(sum, cuCmul(av, bv));
+            }
+            int cIdx = i + j * ldc;
+            Cf[cIdx] = cuCadd(cuCmul(sum, a), cuCmul(Cf[cIdx], b));
+        }
+        return CUBLAS_STATUS_SUCCESS;
+    }
+
     return CUBLAS_STATUS_NOT_SUPPORTED;
 }
 
