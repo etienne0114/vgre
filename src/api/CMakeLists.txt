@@ -19,6 +19,8 @@ add_library(vgre_api OBJECT
     cudnn/cudnn_tensor_ops.cpp
     cudnn/cudnn_rnn.cpp
     cudnn/cudnn_attention.cpp
+    cudnn/cudnn_ctc_loss.cpp
+    cudnn/cudnn_backend_api.cpp
     nccl_shim.cpp
     nvtx_shim.cpp
     opencl_adapter.cpp
