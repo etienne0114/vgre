@@ -57,33 +57,12 @@ extern "C" void vgre_jit_syncgrid();
 // Block barrier: synchronizes threads in a block using the host environment
 inline void __syncthreads() { vgre_jit_block_barrier_sync(); }
 
-// ── Cooperative Groups Emulation ───────────────────────────────────────────
-// Provides cooperative_groups::this_grid().sync() → vgre_jit_syncgrid()
-namespace cooperative_groups {
-
-class grid_group {
-public:
-    inline void sync() const { vgre_jit_syncgrid(); }
-    inline unsigned int size() const {
-        auto* gd = vgre_jit_get_gridDim();
-        auto* bd = vgre_jit_get_blockDim();
-        return gd->x * gd->y * gd->z * bd->x * bd->y * bd->z;
-    }
-    inline unsigned int thread_rank() const {
-        auto* ti = vgre_jit_get_threadIdx();
-        auto* bi = vgre_jit_get_blockIdx();
-        auto* bd = vgre_jit_get_blockDim();
-        auto* gd = vgre_jit_get_gridDim();
-        unsigned int blockThreads = bd->x * bd->y * bd->z;
-        unsigned int blockLinear = bi->z * gd->x * gd->y + bi->y * gd->x + bi->x;
-        unsigned int threadLinear = ti->z * bd->x * bd->y + ti->y * bd->x + ti->x;
-        return blockLinear * blockThreads + threadLinear;
-    }
-};
-
-inline grid_group this_grid() { return grid_group{}; }
-
-} // namespace cooperative_groups
+// ── Cooperative Groups & CUB Fallback ───────────────────────────────────────
+// Full cooperative groups API (thread_block, thread_block_tile, coalesced_group,
+// grid_group, multi_grid_group) plus CUB primitives (WarpReduce, BlockReduce,
+// WarpScan, BlockScan) for kernel portability.
+#include "cuda_device_libs/cooperative_groups.h"
+#include "cuda_device_libs/cub_fallback.h"
 
 // CUDA-like math functions for the CPU
 inline float __fdividef(float a, float b) { return a / b; }

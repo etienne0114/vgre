@@ -569,16 +569,27 @@ src/api/cublasLt/cublasLt_matmul.cpp              (200–300 lines)
 
 ### 3.8 Phase 8 — Cooperative Groups & Device-Side Libraries
 
-**Missing**: `thread_block`, `coalesced_group`, `reduce()`, `partition()`, `shfl()`, `thread_block_tile`, `multi_grid`
+**Status**: **DONE**
+
+**Implemented**:
+- **Cooperative Groups**: `thread_block`, `coalesced_group`, `thread_block_tile<4/8/16/32>`, `grid_group`, `multi_grid_group`
+- **Member functions**: `sync()`, `size()`, `thread_rank()`, `group_index()`, `thread_index()`, `shfl()`, `shfl_up()`, `shfl_down()`, `shfl_xor()`
+- **Algorithms**: `reduce()`, `reduce_sum()`, `reduce_min()`, `reduce_max()`, `partition()`, `match_any()`, `match_all()`
+- **CUB Fallback**: `cub::WarpReduce` (Sum, Min, Max), `cub::BlockReduce`, `cub::WarpScan` (InclusiveSum, ExclusiveSum), `cub::BlockScan`, `cub::CachingDeviceAllocator`
 
 **New files**:
-```
-include/vgre/compiler/cuda_device_libs/cooperative_groups.h    (300–400 lines)
-include/vgre/compiler/cuda_device_libs/cub_fallback.h            (200–300 lines)
-```
+- `include/vgre/compiler/cuda_device_libs/cooperative_groups.h` — full cooperative groups API
+- `include/vgre/compiler/cuda_device_libs/cub_fallback.h` — CUB-compatible warp/block reduce & scan
 
-**Modify**:
-- `include/vgre/compiler/cpu_cuda_env.h` — add `thread_block` and `thread_block_tile` classes.
+**Modified**:
+- `include/vgre/compiler/cpu_cuda_env.h` — replaced inline `grid_group` with `#include` of new headers
+
+**Key design decisions**:
+- `thread_block_tile` is parameterized on tile size (4, 8, 16, 32) and delegates to existing `__shfl_*_sync` builtins.
+- `reduce()` uses butterfly shuffle (`shfl_xor`) which is correct for power-of-two group sizes.
+- `BlockReduce` / `BlockScan` use two-level decomposition: warp-level reduce/scan, then single-warp reduction/scan of per-warp partials with `__syncthreads` barrier between phases.
+- CUB classes are header-only templates that compile to the same warp-shuffle primitives used by PTX translation.
+- `match_any` / `match_all` return full mask in serial CPU model (all threads match).
 
 ---
 
@@ -942,12 +953,12 @@ tests/core/texture/        # Texture/surface object tests
 
 | # | Feature | Status | PR | Date |
 |---|---|---|---|---|
-| 8.1 | `thread_block` cooperative group | TODO | — | — |
-| 8.2 | `coalesced_group` | TODO | — | — |
-| 8.3 | `reduce()` / `partition()` / `shfl()` | TODO | — | — |
-| 8.4 | `thread_block_tile` | TODO | — | — |
-| 8.5 | `multi_grid` | TODO | — | — |
-| 8.6 | CUB / Thrust fallback headers | TODO | — | — |
+| 8.1 | `thread_block` cooperative group | **DONE** | — | 2026-05-14 |
+| 8.2 | `coalesced_group` | **DONE** | — | 2026-05-14 |
+| 8.3 | `reduce()` / `partition()` / `shfl()` | **DONE** | — | 2026-05-14 |
+| 8.4 | `thread_block_tile` | **DONE** | — | 2026-05-14 |
+| 8.5 | `multi_grid` | **DONE** | — | 2026-05-14 |
+| 8.6 | CUB / Thrust fallback headers | **DONE** | — | 2026-05-14 |
 
 ### Phase 9 — Deployment
 
