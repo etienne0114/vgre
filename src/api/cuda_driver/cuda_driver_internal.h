@@ -18,6 +18,15 @@ using CUmodule = vgre::api::CUmodule;
 using CUfunction = vgre::api::CUfunction;
 using CUdeviceptr = void*;
 using CUresult = int;
+using CUarray = void*;
+
+// CUDA memory types
+enum CUmemorytype {
+  CU_MEMORYTYPE_HOST = 1,
+  CU_MEMORYTYPE_DEVICE = 2,
+  CU_MEMORYTYPE_ARRAY = 3,
+  CU_MEMORYTYPE_UNIFIED = 4
+};
 
 // CUresult values (minimal)
 static constexpr CUresult CUDA_SUCCESS = 0;

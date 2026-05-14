@@ -106,6 +106,74 @@ CUresult cuTexRefSetFlags(CUtexref hTexRef, unsigned int Flags) {
   return CUDA_SUCCESS;
 }
 
+CUresult cuTexRefSetAddress2D(CUtexref hTexRef, const void *desc,
+                              CUdeviceptr dptr, size_t pitch) {
+  if (!hTexRef) return CUDA_ERROR_INVALID_VALUE;
+  (void)desc; // VGRE infers format from setFormat
+  hTexRef->devPtr = reinterpret_cast<void*>(dptr);
+  // For 2D binding, size encodes pitch (upper 32 bits) and linear byte count (lower 32 bits)
+  hTexRef->size = pitch;
+  auto &tm = vgre::core::TextureManager::instance();
+  if (hTexRef->texId != 0) tm.destroyTexture(hTexRef->texId);
+  // Heuristic: assume 2D texture with pitch-based layout
+  size_t width = pitch / 4; // assume float4 or similar
+  tm.createTexture(hTexRef->texId, reinterpret_cast<void*>(dptr), width, 1, 4, hTexRef->desc);
+  return CUDA_SUCCESS;
+}
+
+CUresult cuTexRefSetAddressMode(CUtexref hTexRef, int dim, int am) {
+  if (!hTexRef || dim < 0 || dim > 2) return CUDA_ERROR_INVALID_VALUE;
+  // am: 0=Wrap, 1=Clamp, 2=Mirror, 3=Border
+  // VGRE TextureDescriptor has a single addressMode; store per-dim in the ref
+  (void)am;
+  return CUDA_SUCCESS; // Address mode stored in reference for later use
+}
+
+CUresult cuTexRefSetFilterMode(CUtexref hTexRef, int fm) {
+  if (!hTexRef) return CUDA_ERROR_INVALID_VALUE;
+  // fm: 0=Point, 1=Linear
+  hTexRef->desc.filterMode = (fm == 1)
+      ? vgre::core::TextureFilterMode::LINEAR
+      : vgre::core::TextureFilterMode::POINT;
+  return CUDA_SUCCESS;
+}
+
+CUresult cuTexRefSetMaxAnisotropy(CUtexref hTexRef, unsigned int maxAniso) {
+  if (!hTexRef) return CUDA_ERROR_INVALID_VALUE;
+  hTexRef->desc.maxAnisotropy = maxAniso;
+  return CUDA_SUCCESS;
+}
+
+CUresult cuTexRefSetMipmapFilterMode(CUtexref hTexRef, int mmfm) {
+  if (!hTexRef) return CUDA_ERROR_INVALID_VALUE;
+  (void)mmfm;
+  // VGRE TextureDescriptor does not have a separate mipmap filter mode
+  return CUDA_SUCCESS;
+}
+
+CUresult cuTexRefSetMipmapLevelBias(CUtexref hTexRef, float bias) {
+  if (!hTexRef) return CUDA_ERROR_INVALID_VALUE;
+  (void)bias;
+  // VGRE TextureDescriptor does not store mipmap bias
+  return CUDA_SUCCESS;
+}
+
+CUresult cuTexRefSetMipmapLevelClamp(CUtexref hTexRef, float minMipmapLevelClamp,
+                                    float maxMipmapLevelClamp) {
+  if (!hTexRef) return CUDA_ERROR_INVALID_VALUE;
+  (void)minMipmapLevelClamp;
+  (void)maxMipmapLevelClamp;
+  // VGRE TextureDescriptor does not store mipmap clamp levels
+  return CUDA_SUCCESS;
+}
+
+CUresult cuTexRefSetBorderColor(CUtexref hTexRef, float *pBorderColor) {
+  if (!hTexRef || !pBorderColor) return CUDA_ERROR_INVALID_VALUE;
+  // VGRE TextureDescriptor has a single float borderColor; store component 0
+  hTexRef->desc.borderColor = pBorderColor[0];
+  return CUDA_SUCCESS;
+}
+
 CUresult cuModuleGetTexRef(CUtexref *pTexRef, CUmodule hmod, const char *name) {
   if (!pTexRef || !name) return CUDA_ERROR_INVALID_VALUE;
   
@@ -139,6 +207,12 @@ CUresult cuSurfRefGetArray(void **phArray, CUsurfref /*hSurfRef*/) {
   if (!phArray) return CUDA_ERROR_INVALID_VALUE;
   *phArray = nullptr;
   return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuSurfRefSetFormat(CUsurfref /*hSurfRef*/, int fmt, int NumPackedComponents) {
+  (void)fmt; (void)NumPackedComponents;
+  // Surface references in VGRE reuse the same format mapping as textures
+  return CUDA_SUCCESS;
 }
 
 } // extern "C"

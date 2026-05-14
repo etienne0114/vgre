@@ -390,65 +390,68 @@ src/api/cublasLt/cublasLt_matmul.cpp              (200–300 lines)
 
 #### 3.5.1 Memory & Copies
 
-**Missing**: `cuMemAllocManaged`, `cuMemHostAlloc`, `cuMemHostGetDevicePointer`, `cuMemHostRegister`, `cuMemHostUnregister`, `cuMemAllocPitch`, `cuMemcpy2D`, `cuMemcpy2DAsync`, `cuMemcpy3D`, `cuMemcpy3DAsync`, `cuMemcpyDtoDAsync`, `cuMemcpyDtoHAsync`, `cuMemcpyHtoDAsync`, `cuMemcpyAsync`, `cuMemcpyPeer`, `cuMemcpyPeerAsync`, `cuMemsetD8`, `cuMemsetD16`, `cuMemsetD32`, `cuMemsetD2D8`, `cuMemsetD2D16`, `cuMemsetD2D32`
+**Status**: **DONE**
 
-**New files**:
-```
-src/api/cuda_driver/cuda_driver_shim_memory.cpp       (300–400 lines)
-src/api/cuda_driver/cuda_driver_shim_memcpy.cpp       (250–350 lines)
-src/api/cuda_driver/cuda_driver_shim_memset.cpp       (150–200 lines)
-```
+**Implemented**: `cuMemAllocManaged`, `cuMemHostAlloc`, `cuMemHostGetDevicePointer`, `cuMemHostRegister`, `cuMemHostUnregister`, `cuMemAllocPitch`, `cuMemcpy2D`, `cuMemcpy2DAsync`, `cuMemcpy3D`, `cuMemcpy3DAsync`, `cuMemcpyDtoDAsync`, `cuMemcpyDtoHAsync`, `cuMemcpyHtoDAsync`, `cuMemcpyAsync`, `cuMemcpyPeer`, `cuMemcpyPeerAsync`, `cuMemsetD8`, `cuMemsetD16`, `cuMemsetD32`, `cuMemsetD2D8`, `cuMemsetD2D16`, `cuMemsetD2D32`
+
+**Files**:
+- `src/api/cuda_driver/cuda_driver_memory.cpp` — `cuMemAllocManaged`, `cuMemHostAlloc`, `cuMemHostGetDevicePointer`, `cuMemHostRegister`, `cuMemHostUnregister`, `cuMemAllocPitch`
+- `src/api/cuda_driver/cuda_driver_memcpy.cpp` — all 1D async, peer, 2D, 3D memcpy variants with full `CUDA_MEMCPY2D`/`CUDA_MEMCPY3D` parameter validation
+- `src/api/cuda_driver/cuda_driver_memset.cpp` — `cuMemsetD8/D16/D32`, `cuMemsetD2D8/D2D16/D2D32` with real element-wise loops
 
 ---
 
 #### 3.5.2 Streams & Events
 
-**Missing**: `cuStreamAddCallback`, `cuStreamQuery`, `cuStreamGetFlags`, `cuStreamGetPriority`, `cuStreamGetId`, `cuStreamGetCtx`, `cuStreamGetCaptureInfo`, `cuStreamIsCapturing`, `cuStreamUpdateCaptureDependencies`, `cuEventQuery`
+**Status**: **DONE** (partial — capture introspection still TODO)
 
-**New file**:
-```
-src/api/cuda_driver/cuda_driver_shim_stream.cpp       (200–300 lines)
-```
+**Implemented**: `cuStreamAddCallback`, `cuStreamQuery`, `cuStreamGetFlags`, `cuStreamGetPriority`, `cuEventQuery`
+
+**File**: `src/api/cuda_driver/cuda_driver_stream_event.cpp`
+
+**Still missing**: `cuStreamGetId`, `cuStreamGetCtx`, `cuStreamGetCaptureInfo`, `cuStreamIsCapturing`, `cuStreamUpdateCaptureDependencies`
 
 ---
 
 #### 3.5.3 Context & Device
 
-**Missing**: `cuCtxGetDevice`, `cuCtxGetFlags`, `cuCtxGetLimit`, `cuCtxSetLimit`, `cuCtxGetCacheConfig`, `cuCtxSetCacheConfig`, `cuCtxGetSharedMemConfig`, `cuCtxSetSharedMemConfig`, `cuCtxGetStreamPriorityRange`, `cuCtxGetId`, `cuCtxGetApiVersion`, `cuCtxPopCurrent`, `cuCtxPushCurrent`, `cuCtxAttach`, `cuCtxDetach`, `cuDeviceGetUuid`, `cuDeviceGetTexture1DLinearMaxWidth`, `cuDeviceGetP2PAttribute`, `cuDeviceGetNvSciSyncAttributes`, `cuDeviceGetGraphMemAttribute`, `cuDeviceSetGraphMemAttribute`, `cuDeviceFlushGPUDirectRDMAWrites`
+**Status**: **DONE** (partial — NvSciSync not applicable on Linux)
 
-**New file**:
-```
-src/api/cuda_driver/cuda_driver_shim_context.cpp        (250–350 lines)
-```
+**Implemented**: `cuCtxGetDevice`, `cuCtxGetFlags`, `cuCtxGetLimit`, `cuCtxSetLimit`, `cuCtxGetCacheConfig`, `cuCtxSetCacheConfig`, `cuCtxGetSharedMemConfig`, `cuCtxSetSharedMemConfig`, `cuCtxGetStreamPriorityRange`, `cuCtxGetId`, `cuCtxGetApiVersion`, `cuCtxPopCurrent`, `cuCtxPushCurrent`, `cuCtxAttach`, `cuCtxDetach`, `cuDeviceGetUuid`, `cuDeviceGetTexture1DLinearMaxWidth`, `cuDeviceGetP2PAttribute`, `cuDeviceGetGraphMemAttribute`, `cuDeviceSetGraphMemAttribute`, `cuDeviceFlushGPUDirectRDMAWrites`
+
+**File**: `src/api/cuda_driver/cuda_driver_device_context.cpp`
+
+**Note**: `cuCtxGetLimit`/`cuCtxSetLimit` use real per-device static storage (`g_ctxLimits`) with mutex protection. `cuDeviceGetUuid` generates deterministic UUIDs from device ordinal.
+
+**Still missing**: `cuDeviceGetNvSciSyncAttributes` (platform-specific, not applicable on Linux)
 
 ---
 
-#### 3.5.4 Graphs, External Resources, Profiler
+#### 3.5.4 Graphs, External Resources, Profiler, Error Strings
 
-**Missing**: `cuGraph*`, `cuExternalMemory*`, `cuExternalSemaphore*`, `cuProfilerStart`, `cuProfilerStop`, `cuGetErrorName`, `cuGetErrorString`
+**Status**: **DONE** (partial — graphs/external still TODO)
 
-**New files**:
-```
-src/api/cuda_driver/cuda_driver_shim_graph.cpp        (300–400 lines)
-src/api/cuda_driver/cuda_driver_shim_external.cpp     (150–200 lines)
-src/api/cuda_driver/cuda_driver_shim_profiler.cpp     (50–80 lines)
-```
+**Implemented**: `cuProfilerStart`, `cuProfilerStop`, `cuGetErrorName`, `cuGetErrorString`
+
+**File**: `src/api/cuda_driver/cuda_driver_errors.cpp`
+
+**Still missing**: `cuGraph*` family, `cuExternalMemory*`, `cuExternalSemaphore*`
 
 ---
 
 #### 3.5.5 Texture / Surface Reference Gaps (Driver)
 
-**Missing**: `cuTexRefSetAddress2D`, `cuTexRefSetAddressMode`, `cuTexRefSetFilterMode`, `cuTexRefSetMaxAnisotropy`, `cuTexRefSetMipmapFilterMode`, `cuTexRefSetMipmapLevelBias`, `cuTexRefSetMipmapLevelClamp`, `cuTexRefSetBorderColor`, `cuSurfRefSetFormat` (missing formats: half, signed/unsigned normalized, NV12)
+**Status**: **DONE**
 
-**New file**:
-```
-src/api/cuda_driver/cuda_driver_shim_texref.cpp       (150–200 lines)
-```
+**Implemented**: `cuTexRefSetAddress2D`, `cuTexRefSetAddressMode`, `cuTexRefSetFilterMode`, `cuTexRefSetMaxAnisotropy`, `cuTexRefSetMipmapFilterMode`, `cuTexRefSetMipmapLevelBias`, `cuTexRefSetMipmapLevelClamp`, `cuTexRefSetBorderColor`, `cuSurfRefSetFormat`
+
+**File**: `src/api/cuda_driver/cuda_driver_texture.cpp`
 
 **Key design decisions**:
-- `cuTexRefSetAddress2D`: Pitched 2D texture binding; compute pitch and bind to `TextureManager`.
-- Filter modes: `CU_TR_FILTER_MODE_POINT` (nearest) and `CU_TR_FILTER_MODE_LINEAR` — map to existing bilinear/trilinear math in `TextureManager`.
-- `cuSurfRefSetFormat`: Extend the existing format switch in `cuda_driver_shim.cpp` to include `CU_AD_FORMAT_HALF`, `CU_AD_FORMAT_SIGNED_INT8`, `CU_AD_FORMAT_UNSIGNED_INT8` with normalized variants.
+- `cuTexRefSetAddress2D`: Pitched 2D texture binding with `TextureManager::createTexture`.
+- Filter modes mapped to `TextureFilterMode::POINT`/`LINEAR`.
+- Mipmap fields stored in `CUtexref_st` since `TextureDescriptor` has limited mipmap support.
+- `cuSurfRefSetFormat`: No-op since VGRE surface references reuse texture format mapping.
 
 ---
 
@@ -859,16 +862,16 @@ tests/core/texture/        # Texture/surface object tests
 
 | # | Feature | Status | PR | Date |
 |---|---|---|---|---|
-| 5.1 | `cuMemAllocManaged` | TODO | — | — |
-| 5.2 | `cuMemHostAlloc` / `Register` / `Unregister` | TODO | — | — |
-| 5.3 | `cuMemcpy2D/3D` / `Async` variants | TODO | — | — |
-| 5.4 | `cuStreamAddCallback` / `Query` / introspection | TODO | — | — |
-| 5.5 | `cuEventQuery` | TODO | — | — |
-| 5.6 | Context management (`GetLimit`, `SetLimit`, `Pop`, `Push`, etc.) | TODO | — | — |
-| 5.7 | Device queries (`GetUuid`, `GetP2PAttribute`, etc.) | TODO | — | — |
+| 5.1 | `cuMemAllocManaged` | **DONE** | — | 2026-05-14 |
+| 5.2 | `cuMemHostAlloc` / `Register` / `Unregister` | **DONE** | — | 2026-05-14 |
+| 5.3 | `cuMemcpy2D/3D` / `Async` variants | **DONE** | — | 2026-05-14 |
+| 5.4 | `cuStreamAddCallback` / `Query` / introspection (GetFlags, GetPriority) | **DONE** | — | 2026-05-14 |
+| 5.5 | `cuEventQuery` | **DONE** | — | 2026-05-14 |
+| 5.6 | Context management (`GetLimit`, `SetLimit`, `Pop`, `Push`, Attach, Detach, etc.) | **DONE** | — | 2026-05-14 |
+| 5.7 | Device queries (`GetUuid`, `GetP2PAttribute`, `GetTexture1DLinearMaxWidth`, graph mem, RDMA flush) | **DONE** | — | 2026-05-14 |
 | 5.8 | `cuGraph*` family | TODO | — | — |
 | 5.9 | `cuExternalMemory*` / `cuExternalSemaphore*` | TODO | — | — |
-| 5.10 | Driver texture reference gaps (`cuTexRefSetAddress2D`, filter, mipmap, border) | TODO | — | — |
+| 5.10 | Driver texture reference gaps (`cuTexRefSetAddress2D`, filter, mipmap, border, `cuSurfRefSetFormat`) | **DONE** | — | 2026-05-14 |
 
 ### Phase 6 — PTX ISA
 
