@@ -566,6 +566,27 @@ if(VGRE_BUILD_DASHBOARD)
         message(WARNING "flutter executable not found. Dashboard will not be built automatically.")
     endif()
 endif()
+# ── SLURM GRES Plugin (optional) ────────────────────────────────────────────
+option(VGRE_BUILD_SLURM_GRES "Build SLURM GRES plugin" ON)
+if(VGRE_BUILD_SLURM_GRES)
+    find_path(SLURM_INCLUDE_DIR slurm/slurm.h PATHS /usr/include /usr/local/include)
+    if(SLURM_INCLUDE_DIR)
+        add_library(vgre_slurm_gres SHARED
+            src/deployment/slurm_gres/slurm_gres_vgpu.cpp
+        )
+        target_include_directories(vgre_slurm_gres PRIVATE
+            ${PROJECT_SOURCE_DIR}/src/deployment/slurm_gres
+        )
+        set_target_properties(vgre_slurm_gres PROPERTIES
+            VERSION ${PROJECT_VERSION}
+            SOVERSION 0
+        )
+        message(STATUS "Building SLURM GRES plugin")
+    else()
+        message(STATUS "SLURM headers not found — skipping SLURM GRES plugin")
+    endif()
+endif()
+
 # ── Install rules ───────────────────────────────────────────────────────────
 install(TARGETS vgre vgre_cudart vgre-worker
         LIBRARY DESTINATION lib

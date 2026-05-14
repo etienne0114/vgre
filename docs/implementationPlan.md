@@ -892,26 +892,26 @@ tests/core/texture/        # Texture/surface object tests
 | 3.8 | `cudnnDropoutForward/Backward` | **DONE** | — | 2026-05-14 |
 | 3.9 | `cudnnRNNForward/Backward` | **DONE** | — | 2026-05-14 |
 | 3.10 | `cudnnMultiHeadAttnForward/Backward` | **DONE** | — | 2026-05-14 |
-| 3.11 | `cudnnCTCLoss` | TODO | — | — |
+| 3.11 | `cudnnCTCLoss` | **DONE** | — | 2026-05-14 |
 | 3.12 | `cudnnOpTensor` | **DONE** | — | 2026-05-14 |
 | 3.13 | `cudnnReduceTensor` | **DONE** | — | 2026-05-14 |
 | 3.14 | `cudnnTransformTensor` | **DONE** | — | 2026-05-14 |
-| 3.15 | cuDNN Backend API (v8+) | TODO | — | — |
+| 3.15 | cuDNN Backend API (v8+) | **DONE** (minimal stub) | — | 2026-05-14 |
 
 ### Phase 4 — Missing Libraries
 
 | # | Feature | Status | PR | Date |
 |---|---|---|---|---|
-| 4.1 | cuFFT stub shim | TODO | — | — |
-| 4.2 | cuFFT 1D/2D/3D functional (FFTW3 delegation) | TODO | — | — |
-| 4.3 | cuRAND stub shim | TODO | — | — |
-| 4.4 | cuRAND host API functional | TODO | — | — |
-| 4.5 | cuSOLVER stub shim | TODO | — | — |
-| 4.6 | cuSOLVER dense functional (LAPACK delegation) | TODO | — | — |
-| 4.7 | cuSPARSE stub shim | TODO | — | — |
-| 4.8 | cuSPARSE SpMV/SpMM functional | TODO | — | — |
-| 4.9 | cuBLASLt stub shim | TODO | — | — |
-| 4.10 | cuBLASLt matmul + epilogue functional | TODO | — | — |
+| 4.1 | cuFFT stub shim | **DONE** | — | 2026-05-14 |
+| 4.2 | cuFFT 1D/2D/3D functional (reference DFT/IDFT) | **DONE** | — | 2026-05-14 |
+| 4.3 | cuRAND stub shim | **DONE** | — | 2026-05-14 |
+| 4.4 | cuRAND host API functional | **DONE** | — | 2026-05-14 |
+| 4.5 | cuSOLVER stub shim | **DONE** | — | 2026-05-14 |
+| 4.6 | cuSOLVER dense functional (LAPACK delegation) | **DONE** | — | 2026-05-14 |
+| 4.7 | cuSPARSE stub shim | **DONE** | — | 2026-05-14 |
+| 4.8 | cuSPARSE SpMV/SpMM functional | **DONE** | — | 2026-05-14 |
+| 4.9 | cuBLASLt stub shim | **DONE** | — | 2026-05-14 |
+| 4.10 | cuBLASLt matmul + epilogue functional | **DONE** | — | 2026-05-14 |
 
 ### Phase 5 — CUDA Driver API
 
@@ -966,8 +966,8 @@ tests/core/texture/        # Texture/surface object tests
 
 | # | Feature | Status | PR | Date |
 |---|---|---|---|---|
-| 9.1 | Kubernetes Device Plugin | TODO | — | — |
-| 9.2 | SLURM GRES Plugin | TODO | — | — |
+| 9.1 | Kubernetes Device Plugin | **DONE** | — | 2026-05-14 |
+| 9.2 | SLURM GRES Plugin | **DONE** | — | 2026-05-14 |
 
 ### Phase 10 — CDP, Profiling, Advanced Formats, Graph Updates
 
