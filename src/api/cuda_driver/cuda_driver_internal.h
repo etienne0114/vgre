@@ -94,6 +94,15 @@ struct CUDA_ARRAY_DESCRIPTOR {
     unsigned int NumChannels;
 };
 
+// ── External memory mipmapped array descriptor ──────────────────────────────
+struct CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC {
+    unsigned long long offset;
+    CUDA_ARRAY_DESCRIPTOR arrayDesc;
+    unsigned int numLevels;
+    unsigned int flags;
+    unsigned int reserved[16];
+};
+
 // ── Graph node parameter structs (driver API) ────────────────────────────────
 
 struct CUDA_KERNEL_NODE_PARAMS {
