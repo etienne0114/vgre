@@ -73,13 +73,28 @@ CUresult cuTexRefSetAddress(size_t *ByteOffset, CUtexref hTexRef, CUdeviceptr dp
   if (ByteOffset) *ByteOffset = 0;
   hTexRef->devPtr = dptr;
   hTexRef->size = bytes;
-  
-  // Create or update texture in TextureManager
+
   auto &tm = vgre::core::TextureManager::instance();
   if (hTexRef->texId != 0) tm.destroyTexture(hTexRef->texId);
-  
-  // Assume 1D fetch (default for setAddress)
-  tm.createTexture(hTexRef->texId, dptr, bytes / 4, 1, 4, hTexRef->desc);
+
+  // Compute element size from current element type and channel count
+  size_t bytesPerChannel = 4;
+  switch (hTexRef->desc.elementType) {
+    case vgre::core::TextureElementType::UINT8:
+    case vgre::core::TextureElementType::INT8:   bytesPerChannel = 1; break;
+    case vgre::core::TextureElementType::FP16:
+    case vgre::core::TextureElementType::UINT16:
+    case vgre::core::TextureElementType::INT16:  bytesPerChannel = 2; break;
+    case vgre::core::TextureElementType::FLOAT32:
+    case vgre::core::TextureElementType::UINT32:
+    case vgre::core::TextureElementType::INT32:  bytesPerChannel = 4; break;
+    case vgre::core::TextureElementType::FLOAT64: bytesPerChannel = 8; break;
+  }
+  size_t elemSize = bytesPerChannel * hTexRef->numChannels;
+
+  // 1D texture: width = byte count / element size
+  size_t width = (elemSize > 0) ? (bytes / elemSize) : bytes;
+  tm.createTexture(hTexRef->texId, dptr, width, 1, elemSize, hTexRef->desc);
   return CUDA_SUCCESS;
 }
 
@@ -98,7 +113,8 @@ CUresult cuTexRefSetFormat(CUtexref hTexRef, int fmt, int NumPackedComponents) {
     default:
         return CUDA_ERROR_NOT_SUPPORTED;
   }
-  (void)NumPackedComponents; // VGRE currently supports 1-4 components via elementSize
+  if (NumPackedComponents >= 1 && NumPackedComponents <= 4)
+    hTexRef->numChannels = static_cast<unsigned int>(NumPackedComponents);
   return CUDA_SUCCESS;
 }
 
@@ -108,27 +124,68 @@ CUresult cuTexRefSetFlags(CUtexref hTexRef, unsigned int Flags) {
   return CUDA_SUCCESS;
 }
 
+static size_t elementSizeFromFormat(int fmt, unsigned int numChannels) {
+    size_t bytesPerChannel = 4;
+    switch (fmt) {
+    case CU_AD_FORMAT_UNSIGNED_INT8:  bytesPerChannel = 1; break;
+    case CU_AD_FORMAT_SIGNED_INT8:   bytesPerChannel = 1; break;
+    case CU_AD_FORMAT_HALF:          bytesPerChannel = 2; break;
+    case CU_AD_FORMAT_UNSIGNED_INT16: bytesPerChannel = 2; break;
+    case CU_AD_FORMAT_SIGNED_INT16:  bytesPerChannel = 2; break;
+    case CU_AD_FORMAT_FLOAT:         bytesPerChannel = 4; break;
+    case CU_AD_FORMAT_UNSIGNED_INT32: bytesPerChannel = 4; break;
+    case CU_AD_FORMAT_SIGNED_INT32:  bytesPerChannel = 4; break;
+    }
+    return bytesPerChannel * numChannels;
+}
+
 CUresult cuTexRefSetAddress2D(CUtexref hTexRef, const void *desc,
                               CUdeviceptr dptr, size_t pitch) {
   if (!hTexRef) return CUDA_ERROR_INVALID_VALUE;
-  (void)desc; // VGRE infers format from setFormat
+  if (!desc) return CUDA_ERROR_INVALID_VALUE;
+
+  const auto *ad = static_cast<const CUDA_ARRAY_DESCRIPTOR*>(desc);
   hTexRef->devPtr = reinterpret_cast<void*>(dptr);
-  // For 2D binding, size encodes pitch (upper 32 bits) and linear byte count (lower 32 bits)
   hTexRef->size = pitch;
+
+  // Map format to element type
+  switch (ad->Format) {
+    case CU_AD_FORMAT_UNSIGNED_INT8:  hTexRef->desc.elementType = vgre::core::TextureElementType::UINT8; break;
+    case CU_AD_FORMAT_UNSIGNED_INT16: hTexRef->desc.elementType = vgre::core::TextureElementType::UINT16; break;
+    case CU_AD_FORMAT_UNSIGNED_INT32: hTexRef->desc.elementType = vgre::core::TextureElementType::UINT32; break;
+    case CU_AD_FORMAT_SIGNED_INT8:    hTexRef->desc.elementType = vgre::core::TextureElementType::INT8; break;
+    case CU_AD_FORMAT_SIGNED_INT16:   hTexRef->desc.elementType = vgre::core::TextureElementType::INT16; break;
+    case CU_AD_FORMAT_SIGNED_INT32:   hTexRef->desc.elementType = vgre::core::TextureElementType::INT32; break;
+    case CU_AD_FORMAT_FLOAT:          hTexRef->desc.elementType = vgre::core::TextureElementType::FLOAT32; break;
+    case CU_AD_FORMAT_HALF:           hTexRef->desc.elementType = vgre::core::TextureElementType::FP16; break;
+    default:
+        return CUDA_ERROR_NOT_SUPPORTED;
+  }
+
   auto &tm = vgre::core::TextureManager::instance();
   if (hTexRef->texId != 0) tm.destroyTexture(hTexRef->texId);
-  // Heuristic: assume 2D texture with pitch-based layout
-  size_t width = pitch / 4; // assume float4 or similar
-  tm.createTexture(hTexRef->texId, reinterpret_cast<void*>(dptr), width, 1, 4, hTexRef->desc);
+
+  size_t elemSize = elementSizeFromFormat(ad->Format, ad->NumChannels);
+  size_t width = ad->Width;
+  size_t height = ad->Height;
+  if (height == 0) height = 1;
+  tm.createTexture(hTexRef->texId, reinterpret_cast<void*>(dptr), width, height, elemSize, hTexRef->desc);
   return CUDA_SUCCESS;
 }
 
 CUresult cuTexRefSetAddressMode(CUtexref hTexRef, int dim, int am) {
   if (!hTexRef || dim < 0 || dim > 2) return CUDA_ERROR_INVALID_VALUE;
   // am: 0=Wrap, 1=Clamp, 2=Mirror, 3=Border
-  // VGRE TextureDescriptor has a single addressMode; store per-dim in the ref
-  (void)am;
-  return CUDA_SUCCESS; // Address mode stored in reference for later use
+  switch (am) {
+    case 0: hTexRef->addressMode[dim] = vgre::core::TextureAddressMode::WRAP; break;
+    case 1: hTexRef->addressMode[dim] = vgre::core::TextureAddressMode::CLAMP; break;
+    case 2: hTexRef->addressMode[dim] = vgre::core::TextureAddressMode::MIRROR; break;
+    case 3: hTexRef->addressMode[dim] = vgre::core::TextureAddressMode::BORDER; break;
+    default: return CUDA_ERROR_INVALID_VALUE;
+  }
+  // Also update the primary descriptor's addressMode for 1D textures
+  if (dim == 0) hTexRef->desc.addressMode = hTexRef->addressMode[0];
+  return CUDA_SUCCESS;
 }
 
 CUresult cuTexRefSetFilterMode(CUtexref hTexRef, int fm) {
