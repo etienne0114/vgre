@@ -418,8 +418,8 @@ std::vector<std::string> splitOperands(const std::string& s) {
     std::string cur;
     int depth = 0;
     for (char c : s) {
-        if (c == '[' || c == '(') ++depth;
-        else if (c == ']' || c == ')') --depth;
+        if (c == '[' || c == '(' || c == '{') ++depth;
+        else if (c == ']' || c == ')' || c == '}') --depth;
         if (c == ',' && depth == 0) { r.push_back(trim(cur)); cur.clear(); }
         else cur += c;
     }
