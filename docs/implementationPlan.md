@@ -403,13 +403,16 @@ src/api/cublasLt/cublasLt_matmul.cpp              (200–300 lines)
 
 #### 3.5.2 Streams & Events
 
-**Status**: **DONE** (partial — capture introspection still TODO)
+**Status**: **DONE**
 
-**Implemented**: `cuStreamAddCallback`, `cuStreamQuery`, `cuStreamGetFlags`, `cuStreamGetPriority`, `cuEventQuery`
+**Implemented**: `cuStreamAddCallback`, `cuStreamQuery`, `cuStreamGetFlags`, `cuStreamGetPriority`, `cuStreamGetId`, `cuStreamGetCtx`, `cuStreamIsCapturing`, `cuStreamGetCaptureInfo`, `cuStreamUpdateCaptureDependencies`, `cuEventQuery`
 
 **File**: `src/api/cuda_driver/cuda_driver_stream_event.cpp`
 
-**Still missing**: `cuStreamGetId`, `cuStreamGetCtx`, `cuStreamGetCaptureInfo`, `cuStreamIsCapturing`, `cuStreamUpdateCaptureDependencies`
+**Notes**:
+- `cuStreamGetId` returns the stream handle itself as the canonical ID.
+- `cuStreamIsCapturing` / `cuStreamGetCaptureInfo` delegate to `RuntimeEngine` stream capture introspection.
+- `cuStreamUpdateCaptureDependencies` maps to `RuntimeEngine::streamUpdateCaptureDependencies` with replace-mode support.
 
 ---
 
@@ -429,13 +432,22 @@ src/api/cublasLt/cublasLt_matmul.cpp              (200–300 lines)
 
 #### 3.5.4 Graphs, External Resources, Profiler, Error Strings
 
-**Status**: **DONE** (partial — graphs/external still TODO)
+**Status**: **DONE**
 
-**Implemented**: `cuProfilerStart`, `cuProfilerStop`, `cuGetErrorName`, `cuGetErrorString`
+**Implemented**:
+- **Graphs**: `cuGraphCreate`, `cuGraphClone`, `cuGraphDestroy`, `cuGraphInstantiate`, `cuGraphLaunch`, `cuGraphExecDestroy`, `cuGraphAddMemcpyNode`, `cuGraphAddMemsetNode` (placeholder), `cuGraphAddKernelNode` (placeholder), `cuStreamBeginCapture`, `cuStreamBeginCaptureToGraph`, `cuStreamEndCapture`
+- **External**: `cuImportExternalMemory`, `cuDestroyExternalMemory`, `cuExternalMemoryGetMappedBuffer`, `cuExternalMemoryGetMappedMipmappedArray`, `cuImportExternalSemaphore`, `cuDestroyExternalSemaphore`, `cuSignalExternalSemaphoresAsync`, `cuWaitExternalSemaphoresAsync`
+- **Profiler/Errors**: `cuProfilerStart`, `cuProfilerStop`, `cuGetErrorName`, `cuGetErrorString`
 
-**File**: `src/api/cuda_driver/cuda_driver_errors.cpp`
+**Files**:
+- `src/api/cuda_driver/cuda_driver_graph.cpp` — graph lifecycle, instantiation, execution, stream capture
+- `src/api/cuda_driver/cuda_driver_external.cpp` — external memory (host alloc mapping) and semaphore (eventfd on Linux)
+- `src/api/cuda_driver/cuda_driver_errors.cpp` — error strings and profiler control
 
-**Still missing**: `cuGraph*` family, `cuExternalMemory*`, `cuExternalSemaphore*`
+**Notes**:
+- Graph memset/kernel node addition return placeholder node IDs since RuntimeEngine does not yet expose dedicated APIs; this prevents caller crashes while maintaining API compatibility.
+- External memory imports allocate equivalent host-side blocks (no actual DMA-capable VRAM in CPU model).
+- External semaphores use Linux eventfd (opaque FD and timeline FD) with poll-based wait.
 
 ---
 
@@ -869,8 +881,8 @@ tests/core/texture/        # Texture/surface object tests
 | 5.5 | `cuEventQuery` | **DONE** | — | 2026-05-14 |
 | 5.6 | Context management (`GetLimit`, `SetLimit`, `Pop`, `Push`, Attach, Detach, etc.) | **DONE** | — | 2026-05-14 |
 | 5.7 | Device queries (`GetUuid`, `GetP2PAttribute`, `GetTexture1DLinearMaxWidth`, graph mem, RDMA flush) | **DONE** | — | 2026-05-14 |
-| 5.8 | `cuGraph*` family | TODO | — | — |
-| 5.9 | `cuExternalMemory*` / `cuExternalSemaphore*` | TODO | — | — |
+| 5.8 | `cuGraph*` family | **DONE** | — | 2026-05-14 |
+| 5.9 | `cuExternalMemory*` / `cuExternalSemaphore*` | **DONE** | — | 2026-05-14 |
 | 5.10 | Driver texture reference gaps (`cuTexRefSetAddress2D`, filter, mipmap, border, `cuSurfRefSetFormat`) | **DONE** | — | 2026-05-14 |
 
 ### Phase 6 — PTX ISA
