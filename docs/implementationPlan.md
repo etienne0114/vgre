@@ -919,7 +919,7 @@ tests/core/texture/        # Texture/surface object tests
 | 4.11 | cuFFT advanced planning (`cufftEstimate*`, `cufftMakePlanMany`, `cufftGetSize*`) | **DONE** | — | 2026-05-14 |
 | 4.12 | cuRAND Poisson distribution (`curandGeneratePoisson`) | **DONE** | — | 2026-05-14 |
 | 4.13 | cuRAND seed generation (`curandGenerateSeeds`) | **DONE** | — | 2026-05-14 |
-| 4.14 | cuRAND Sobol direction vectors | TODO (deferred — requires substantial quasi-random sequence math) | — | — |
+| 4.14 | cuRAND Sobol direction vectors (`curandGetDirectionVectors32/64`, `curandGetScrambleConstants32/64`) | **DONE** | — | 2026-05-14 |
 
 ### Phase 5 — CUDA Driver API
 

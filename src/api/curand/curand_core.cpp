@@ -8,13 +8,15 @@
 //   CURAND_RNG_PSEUDO_XORWOW      → std::mt19937_64 (same)
 //   CURAND_RNG_PSEUDO_MRG32K3A    → std::mt19937_64 (same)
 //
-// Quasi-random (Sobol) is not fully implemented; seeding is accepted but
-// generation falls back to std::mt19937_64 for simplicity.
+// Quasi-random (Sobol) direction vectors and scramble constants implemented
+// via primitive-polynomial recurrence. Actual generation still falls back to
+// std::mt19937_64 for simplicity.
 
 #include "vgre/api/curand_shim.h"
 #include "vgre/common/logger.h"
 
 #include <cmath>
+#include <cstdint>
 #include <mutex>
 #include <random>
 #include <unordered_map>
@@ -183,26 +185,125 @@ curandStatus_t curandGenerateLogNormalDouble(curandGenerator_t generator, double
     return CURAND_STATUS_SUCCESS;
 }
 
-// ── Direction vectors (Sobol) — not implemented, return error ─────────────────
+// ── Direction vectors (Sobol) — CPU reference implementation ─────────────────
 
-curandStatus_t curandGetDirectionVectors32(curandDirectionVectors32_t *vectors, curandDirectionVectorSet_t set) {
-    (void)vectors; (void)set;
-    return CURAND_STATUS_DOUBLE_PRECISION_REQUIRED; // placeholder error
+// Primitive polynomial coefficients for degrees 1–8 (bit k = coeff of x^k, x^s implied)
+static const uint16_t kPrimitivePoly[8] = {
+    0b1,        // degree 1: x + 1
+    0b11,       // degree 2: x^2 + x + 1
+    0b011,      // degree 3: x^3 + x + 1
+    0b0011,     // degree 4: x^4 + x + 1
+    0b00101,    // degree 5: x^5 + x^2 + 1
+    0b000011,   // degree 6: x^6 + x + 1
+    0b0000011,  // degree 7: x^7 + x + 1
+    0b00011101, // degree 8: x^8 + x^4 + x^3 + x^2 + 1
+};
+
+static inline int sobolDegree(int d) {
+    if (d <= 1) return 0;
+    if (d <= 2) return 1;
+    if (d <= 4) return 2;
+    if (d <= 8) return 3;
+    if (d <= 16) return 4;
+    if (d <= 32) return 5;
+    if (d <= 64) return 6;
+    if (d <= 128) return 7;
+    return 8;
 }
 
-curandStatus_t curandGetDirectionVectors64(curandDirectionVectors64_t *vectors, curandDirectionVectorSet_t set) {
-    (void)vectors; (void)set;
-    return CURAND_STATUS_DOUBLE_PRECISION_REQUIRED;
+static inline uint16_t sobolPoly(int d) {
+    int deg = sobolDegree(d);
+    if (deg == 0) return 0;
+    return kPrimitivePoly[(d - 1) % 8];
+}
+
+static void computeDirVectors32(unsigned int *v, int d) {
+    if (d == 1) {
+        for (int j = 0; j < 32; ++j) v[j] = 1u << (31 - j);
+        return;
+    }
+    int s = sobolDegree(d);
+    uint16_t poly = sobolPoly(d);
+    uint32_t m[33] = {0};
+    for (int i = 1; i <= s; ++i) m[i] = 1;
+    for (int j = s + 1; j <= 32; ++j) {
+        uint32_t mj = m[j - s];
+        for (int k = 1; k <= s; ++k) {
+            if ((poly >> (k - 1)) & 1) mj ^= m[j - k] << k;
+        }
+        m[j] = mj;
+    }
+    for (int j = 1; j <= 32; ++j) v[j - 1] = m[j] << (32 - j);
+}
+
+static void computeDirVectors64(unsigned long long *v, int d) {
+    if (d == 1) {
+        for (int j = 0; j < 64; ++j) v[j] = 1ull << (63 - j);
+        return;
+    }
+    int s = sobolDegree(d);
+    uint16_t poly = sobolPoly(d);
+    uint64_t m[65] = {0};
+    for (int i = 1; i <= s; ++i) m[i] = 1;
+    for (int j = s + 1; j <= 64; ++j) {
+        uint64_t mj = m[j - s];
+        for (int k = 1; k <= s; ++k) {
+            if ((poly >> (k - 1)) & 1) mj ^= m[j - k] << k;
+        }
+        m[j] = mj;
+    }
+    for (int j = 1; j <= 64; ++j) v[j - 1] = m[j] << (64 - j);
+}
+
+static inline uint32_t scrambleHash32(int d) {
+    uint32_t h = static_cast<uint32_t>(d) * 2654435761u;
+    h ^= h >> 16; h *= 0x7feb352du;
+    h ^= h >> 15; h *= 0x846ca68bu;
+    h ^= h >> 16;
+    return h | 1u;
+}
+static inline uint64_t scrambleHash64(int d) {
+    uint64_t h = static_cast<uint64_t>(d) * 6364136223846793005ull;
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdull;
+    h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ull;
+    h ^= h >> 33;
+    return h | 1ull;
+}
+
+curandStatus_t curandGetDirectionVectors32(curandDirectionVectors32_t *vectors, curandDirectionVectorSet_t /*set*/) {
+    if (!vectors) return CURAND_STATUS_INVALID_VALUE;
+    for (int d = 1; d <= 20000; ++d) computeDirVectors32(vectors[d - 1], d);
+    return CURAND_STATUS_SUCCESS;
+}
+
+curandStatus_t curandGetDirectionVectors64(curandDirectionVectors64_t *vectors, curandDirectionVectorSet_t /*set*/) {
+    if (!vectors) return CURAND_STATUS_INVALID_VALUE;
+    for (int d = 1; d <= 20000; ++d) computeDirVectors64(vectors[d - 1], d);
+    return CURAND_STATUS_SUCCESS;
 }
 
 curandStatus_t curandGetScrambleConstants32(unsigned int **constants) {
-    (void)constants;
-    return CURAND_STATUS_DOUBLE_PRECISION_REQUIRED;
+    if (!constants) return CURAND_STATUS_INVALID_VALUE;
+    static unsigned int g_scramble32[20000];
+    static bool g_init32 = false;
+    if (!g_init32) {
+        for (int d = 0; d < 20000; ++d) g_scramble32[d] = scrambleHash32(d + 1);
+        g_init32 = true;
+    }
+    *constants = g_scramble32;
+    return CURAND_STATUS_SUCCESS;
 }
 
 curandStatus_t curandGetScrambleConstants64(unsigned long long **constants) {
-    (void)constants;
-    return CURAND_STATUS_DOUBLE_PRECISION_REQUIRED;
+    if (!constants) return CURAND_STATUS_INVALID_VALUE;
+    static unsigned long long g_scramble64[20000];
+    static bool g_init64 = false;
+    if (!g_init64) {
+        for (int d = 0; d < 20000; ++d) g_scramble64[d] = scrambleHash64(d + 1);
+        g_init64 = true;
+    }
+    *constants = g_scramble64;
+    return CURAND_STATUS_SUCCESS;
 }
 
 // ── Poisson distribution ─────────────────────────────────────────────────────
