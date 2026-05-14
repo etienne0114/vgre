@@ -99,6 +99,7 @@ public:
     moduleSources_.clear();
     hostToName_.clear();
     hostToSource_.clear();
+    nameToHost_.clear();
     hostVarToDevicePtr_.clear();
     moduleNamedVariables_.clear();
     moduleTextureRefs_.clear();
@@ -178,7 +179,11 @@ public:
       }
       
       for (const auto &funcPtr : modules_[handle]) {
-        hostToName_.erase(funcPtr);
+        auto nit = hostToName_.find(funcPtr);
+        if (nit != hostToName_.end()) {
+          nameToHost_.erase(nit->second);
+          hostToName_.erase(nit);
+        }
         hostToSource_.erase(funcPtr);
       }
       auto mvIt = moduleVariables_.find(handle);
@@ -226,6 +231,7 @@ public:
         deviceName ? deviceName
                    : ("vgre_auto_kernel_" + std::to_string(nextFunctionId_++));
     hostToName_[hostFun] = name;
+    nameToHost_[name] = hostFun;
 
     if (handlePtr) {
       auto *handle = reinterpret_cast<ModuleHandleWrapper *>(handlePtr);
@@ -251,6 +257,14 @@ public:
     if (it != hostToSource_.end() && !it->second.empty())
       return it->second;
     return "";
+  }
+
+  const void *lookupHostFunction(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = nameToHost_.find(name);
+    if (it != nameToHost_.end())
+      return it->second;
+    return nullptr;
   }
 
   void registerVariable(void **handlePtr, const void *hostVar, size_t size) {
@@ -379,6 +393,7 @@ private:
   std::unordered_map<ModuleHandleWrapper *, std::string> moduleSources_;
   std::unordered_map<const void *, std::string> hostToName_;
   std::unordered_map<const void *, std::string> hostToSource_;
+  std::unordered_map<std::string, const void *> nameToHost_;
   std::unordered_map<const void *, void *> hostVarToDevicePtr_;
   std::unordered_map<ModuleHandleWrapper *, std::unordered_map<std::string, VariableMetadata>> moduleNamedVariables_;
   std::unordered_map<ModuleHandleWrapper *, std::unordered_map<std::string, void *>> moduleTextureRefs_;
@@ -405,6 +420,10 @@ public:
     return true;
   }
 };
+
+extern "C" const void *vgre_lookup_host_function_by_name(const char *name) {
+  return CUDAModuleRegistry::instance().lookupHostFunction(name ? name : "");
+}
 
 extern "C" void *vgre_lookup_symbol(void *handle, const char *name, size_t *size) {
   return CUDAModuleRegistry::instance().lookupVariableByName(handle, name, size);
