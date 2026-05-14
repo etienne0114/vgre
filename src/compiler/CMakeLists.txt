@@ -2,7 +2,8 @@ add_library(vgre_compiler STATIC
     kernel_parser.cpp
     clang_kernel_parser.cpp
     clang_kernel_analysis.cpp
-    ptx_translator.cpp
+    ptx/ptx_translator.cpp
+    ptx/ptx_translator_map.cpp
     kernel_cache.cpp
     llvm_translation_engine.cpp
     llvm_translation_codegen.cpp
