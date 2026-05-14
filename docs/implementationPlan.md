@@ -862,7 +862,10 @@ tests/core/texture/        # Texture/surface object tests
 | 1.15 | `cudaGraphAddEventRecordNode` / `EventWaitNode` | **DONE** | — | 2026-05-13 |
 | 1.16 | `cudaGraphAddMemAllocNode` / `MemFreeNode` | **DONE** | — | 2026-05-13 |
 | 1.17 | Graph introspection APIs (`GetNodes`, `GetEdges`, `NodeGetType`, `NodeGetDependencies`, etc.) | **DONE** | — | 2026-05-13 |
+| 1.17a | Graph introspection `cudaGraphKernelNodeGetParams` func pointer reconstruction via reverse registry | **DONE** | — | 2026-05-14 |
 | 1.18 | Graph exec mutation APIs (`ExecKernelNodeSetParams`, `ExecMemcpyNodeSetParams`, `NodeSetEnabled`, etc.) | **DONE** | — | 2026-05-13 |
+| 1.18a | Graph exec generic dispatcher `cudaGraphExecNodeSetParams` for child/event/empty nodes | **DONE** | — | 2026-05-14 |
+| 1.18b | External semaphore graph node param queries (`cudaExternalSemaphoreGetSignalNodeParams`, `GetWaitNodeParams`) | **DONE** | — | 2026-05-14 |
 | 1.19 | Stream capture introspection (`IsCapturing`, `GetCaptureInfo_v2`, `ThreadExchangeStreamCaptureMode`, `UpdateCaptureDependencies`, `CopyAttributes`) | **DONE** | — | 2026-05-13 |
 | 1.20 | CUDART texture/surface object APIs (`GetTextureObjectResourceDesc`, legacy `BindTexture*`, `BindSurfaceToArray`) | **DONE** | — | 2026-05-13 |
 | 1.21 | CUDA Runtime device/function attributes (`FuncGetAttributes`, device limits, cache/smem config, `ChooseDevice`, `LaunchKernelExC`) | **DONE** | — | 2026-05-13 |
@@ -877,8 +880,9 @@ tests/core/texture/        # Texture/surface object tests
 | 2.2 | Pointer mode / atomics mode APIs | **DONE** | — | 2026-05-13 |
 | 2.3 | Level-2 BLAS (`Trsv`, `Trsm`, `Ger`, `Symv`, `Gbmv`, `Syr`, etc.) | **DONE** | — | 2026-05-13 |
 | 2.4 | Level-3 BLAS (`Trsm`, `Syrk`, `Syr2k`, `Trmm`, `Symm`, `Chemm`, etc.) | **DONE** | — | 2026-05-13 |
-| 2.4a | `cublasGemmEx` FP16 / BF16 mixed-precision paths | **DONE** | — | 2026-05-14 |
-| 2.4b | `cublasLtMatmul` FP16 / BF16 paths | **DONE** | — | 2026-05-14 |
+| 2.4a | `cublasGemmEx` FP16 / BF16 / INT8 mixed-precision paths | **DONE** | — | 2026-05-14 |
+| 2.4b | `cublasGemmEx` complex type paths (`CUDA_C_32F`, `CUDA_C_64F`) | **DONE** | — | 2026-05-14 |
+| 2.4c | `cublasLtMatmul` FP16 / BF16 paths | **DONE** | — | 2026-05-14 |
 | 2.5 | Complex Hermitian variants (`Cherk`, `Cher2k`) | **DONE** | — | 2026-05-14 |
 | 2.6 | `cublasLoggerConfigure` / logging callbacks | **DONE** | — | 2026-05-14 |
 
