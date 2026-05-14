@@ -431,6 +431,8 @@ add_library(vgre_cudart SHARED
     src/api/cuda_driver/cuda_driver_module.cpp
     src/api/cuda_driver/cuda_driver_texture.cpp
     src/api/cuda_driver/cuda_driver_errors.cpp
+    src/api/cuda_driver/cuda_driver_graph.cpp
+    src/api/cuda_driver/cuda_driver_external.cpp
     src/api/cuda_virtual_memory.cpp
     src/api/cuda_external_semaphore.cpp
     src/api/cuda_interceptor.cpp
