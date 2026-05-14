@@ -297,8 +297,9 @@ void TCPClusterManager::handlePartitionDispatch(
 // Missing Method Implementations
 // ══════════════════════════════════════════════════════════════════════════════
 
-VGREResult TCPClusterManager::allReduce(void *ptr, size_t count, int datatype) {
-  return collective_ops_manager_->allReduce(ptr, count, datatype);
+VGREResult TCPClusterManager::allReduce(void *ptr, size_t count, int datatype,
+                                         ReductionOp op) {
+  return collective_ops_manager_->allReduce(ptr, count, datatype, op);
 }
 
 VGREResult TCPClusterManager::barrier() {

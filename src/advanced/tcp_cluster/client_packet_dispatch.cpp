@@ -310,36 +310,37 @@ void TCPClusterManager::processClientStagingBuffer() {
 
             if (header.payloadSize == expected_bytes) {
               std::lock_guard<std::mutex> lock(reduction_mutex_);
+              ReductionOp redOp = decodeReductionOp(pending_collective_op_type_);
               if (pending_collective_datatype_ ==
                   static_cast<uint32_t>(ArgType::FLOAT32)) {
-                collective_ops_manager_->sumReduce(
+                collective_ops_manager_->applyReduce(
                     reinterpret_cast<float *>(active_reduction_buffer_.data()),
                     reinterpret_cast<const float *>(client_rx_buffer_.data() +
                                                     sizeof(VSBPHeader)),
-                    pending_collective_count_);
+                    pending_collective_count_, redOp);
               } else if (pending_collective_datatype_ ==
                          static_cast<uint32_t>(ArgType::FLOAT64)) {
-                collective_ops_manager_->sumReduce(
+                collective_ops_manager_->applyReduce(
                     reinterpret_cast<double *>(active_reduction_buffer_.data()),
                     reinterpret_cast<const double *>(client_rx_buffer_.data() +
                                                      sizeof(VSBPHeader)),
-                    pending_collective_count_);
+                    pending_collective_count_, redOp);
               } else if (pending_collective_datatype_ ==
                          static_cast<uint32_t>(ArgType::INT32)) {
-                collective_ops_manager_->sumReduce(
+                collective_ops_manager_->applyReduce(
                     reinterpret_cast<int32_t *>(
                         active_reduction_buffer_.data()),
                     reinterpret_cast<const int32_t *>(client_rx_buffer_.data() +
                                                       sizeof(VSBPHeader)),
-                    pending_collective_count_);
+                    pending_collective_count_, redOp);
               } else if (pending_collective_datatype_ ==
                          static_cast<uint32_t>(ArgType::INT64)) {
-                collective_ops_manager_->sumReduce(
+                collective_ops_manager_->applyReduce(
                     reinterpret_cast<int64_t *>(
                         active_reduction_buffer_.data()),
                     reinterpret_cast<const int64_t *>(client_rx_buffer_.data() +
                                                       sizeof(VSBPHeader)),
-                    pending_collective_count_);
+                    pending_collective_count_, redOp);
               }
               reduction_count_++;
               reduction_cv_.notify_all();

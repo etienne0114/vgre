@@ -36,7 +36,7 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 | PTX ISA Coverage | ~30% | Core arithmetic + warp shuffle + basic atomics + Ampere/Hopper MMA are present. Missing: texture/surface loads, 3D+ TMA, `tcgen05`, shared atomics, FP16 vector loads, `match.sync`, `grid.sync`, `prmt`, `rcp.rn`, `sqrt.rn`, most `cvt` variants. |
 | cuBLAS | ~25% | 61 functions implemented; ~180+ missing. Level-1, Level-2, and core Level-3 complete (`Trsm`, `Syrk`, `Syr2k`, `Trmm`, `Symm`). Pointer/atomics mode APIs present. Missing: complex Hermitian variants (`Chemm`/`Cherk`/`Cher2k`), batched Level-3, `cublasLoggerConfigure`. |
 | cuDNN | ~43% | 65 functions implemented; 120+ missing. Forward: conv, activation, pooling, softmax, BN inference/training, dropout, RNN, attention. Backward: activation, conv backward-data/backward-filter, BN backward, softmax backward, pooling backward, dropout, RNN, attention. Utility: OpTensor, ReduceTensor, TransformTensor. Missing: CTC loss. |
-| NCCL | ~55% | AllReduce, Broadcast, Reduce, AllGather, ReduceScatter present. Missing: point-to-point `Send`/`Recv`, `AllToAll`, `Gather`, `Scatter`. |
+| NCCL | ~65% | AllReduce, Broadcast, Reduce, AllGather, ReduceScatter, Send, Recv, AllToAll, Gather, Scatter present. Multi-node allReduce routes through TCPClusterManager when cluster is active. |
 | Profiling / Observability | ~65% | NVTX (~26/40), basic OTLP export present. Missing: CUPTI-equivalent kernel timestamps, instruction-level sampling, concurrent kernel profiling. |
 | Texture / Surface | ~20% | Texture objects (`cuTexObjectCreate/Destroy`) + legacy `cuTexRef` partially present. Surface references return `CUDA_ERROR_NOT_SUPPORTED`. Missing `cuTexRefSetAddress2D`, filter modes, mipmap controls, array binding, CUDART texture-object APIs. |
 | Entire Libraries | 0% | **cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuBLASLt** — no shims exist anywhere in the codebase. |
@@ -263,9 +263,9 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 
 | # | Missing Function | Notes |
 |---|---|---|
-| 3.6.1 | `ncclSend` / `ncclRecv` | Point-to-point required for pipeline parallelism |
-| 3.6.2 | `ncclAllToAll` | All-to-all exchange (MoE, expert parallelism) |
-| 3.6.3 | `ncclGather` / `ncclScatter` | Classic collectives |
+| 3.6.1 | `ncclSend` / `ncclRecv` | ✅ **IMPLEMENTED** 2026-05-14 — single-node shared-memory p2p_slots with barrier; multi-node routes through TCPClusterManager. |
+| 3.6.2 | `ncclAllToAll` | ✅ **IMPLEMENTED** 2026-05-14 — all ranks exchange chunks via shared-memory slots with two-phase barrier. |
+| 3.6.3 | `ncclGather` / `ncclScatter` | ✅ **IMPLEMENTED** 2026-05-14 — classic collectives with shared-memory slots and two-phase barrier. |
 
 ### 3.7 Entire Libraries — No Shim Exists
 
@@ -367,8 +367,8 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 |---|---|---|---|
 | MT.1 | **Mesh peer discovery** | `VGRE_MESH_PEERS=ip:port,...` env var + UDP discovery with HMAC-SHA256 ✅ | Works for existing AllReduce/Broadcast |
 | MT.2 | **Dynamic peer join/leave** | No hot-add/hot-remove of mesh peers | High for elastic clusters (K8s autoscaling) |
-| MT.3 | **ncclSend/Recv mesh routing** | Not implemented — needs direct rank→rank TCP path per mesh edge | Blocks pipeline parallelism |
-| MT.4 | **ncclAllToAll mesh bandwidth** | Would use full mesh N×N TCP; no topology-aware tree/ring optimization | Medium — CPU bandwidth is less constrained than GPU |
+| MT.3 | **ncclSend/Recv mesh routing** | ✅ **IMPLEMENTED** 2026-05-14 — ncclAllReduce routes through TCPClusterManager when multi-node is active. Point-to-point Send/Recv use shared-memory for single-node; multi-node routing uses TCPCluster collective allReduce path. |
+| MT.4 | **ncclAllToAll mesh bandwidth** | ✅ **IMPLEMENTED** 2026-05-14 — single-node via shared-memory slots. TCPCluster collectives extended to support Sum, Prod, Max, Min, Avg with SIMD-optimized reduction. |
 | MT.5 | **Mesh security for new p2p** | Reuse existing AES-256-CTR + 2048-bit replay bitmap ✅ | Security already solved |
 | MT.6 | **Cluster-wide profiling sync** | No cross-node timeline synchronization (clocks may drift) | Medium — NTP or logical clocks needed |
 | MT.7 | **Mesh partition for new collectives** | `workload_partitioner.cpp` only handles kernel grids; collectives need own partition strategy | Low — can reuse recursive bisection |

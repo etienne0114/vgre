@@ -10,6 +10,8 @@
 
 #include "nccl.h"
 #include "vgre/common/logger.h"
+#include "vgre/advanced/tcp_cluster.h"
+#include "vgre/common/types.h"
 
 #include <algorithm>
 #include <atomic>
@@ -44,6 +46,47 @@
 #endif
 
 namespace {
+
+// ── TCPCluster multi-node delegation helpers ──────────────────────────────────
+// Map NCCL datatype to VGRE ArgType for TCPCluster collective ops.
+static int nccl_datatype_to_argtype(ncclDataType_t dt) {
+    switch (dt) {
+    case ncclFloat32:  return static_cast<int>(vgre::ArgType::FLOAT32);
+    case ncclFloat64:  return static_cast<int>(vgre::ArgType::FLOAT64);
+    case ncclInt32:    return static_cast<int>(vgre::ArgType::INT32);
+    case ncclInt64:    return static_cast<int>(vgre::ArgType::INT64);
+    case ncclUint32:   return static_cast<int>(vgre::ArgType::UINT32);
+    case ncclUint64:   return static_cast<int>(vgre::ArgType::UINT64);
+    default:           return static_cast<int>(vgre::ArgType::FLOAT32);
+    }
+}
+
+// Map NCCL reduction op to TCPCluster ReductionOp.
+static vgre::advanced::ReductionOp nccl_op_to_tcpcluster(ncclRedOp_t op) {
+    switch (op) {
+    case ncclSum:  return vgre::advanced::ReductionOp::Sum;
+    case ncclProd: return vgre::advanced::ReductionOp::Prod;
+    case ncclMax:  return vgre::advanced::ReductionOp::Max;
+    case ncclMin:  return vgre::advanced::ReductionOp::Min;
+    case ncclAvg:  return vgre::advanced::ReductionOp::Avg;
+    default:       return vgre::advanced::ReductionOp::Sum;
+    }
+}
+
+// Returns true if this process should route NCCL collectives through
+// TCPClusterManager rather than shared-memory p2p_slots.
+static bool tcpcluster_should_delegate() {
+    auto& tcm = vgre::advanced::TCPClusterManager::instance();
+    if (!tcm.isEnabled()) return false;
+    // Master: delegate only if there are active remote workers.
+    if (tcm.isMaster()) {
+        std::vector<vgre::advanced::TCPClusterManager::ClusterNodeInfo> nodes;
+        tcm.getConnectedNodes(nodes);
+        return !nodes.empty();
+    }
+    // Worker: delegate if connected to a master.
+    return tcm.isWorker();
+}
 
 // ── Element sizes ─────────────────────────────────────────────────────────────
 static size_t nccl_elem_size(ncclDataType_t dt) {
@@ -395,6 +438,24 @@ ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
                             ncclComm_t comm, void* /*stream*/) {
     if (!comm || !sendbuff || !recvbuff) return ncclInvalidArgument;
     auto* c = static_cast<ncclComm*>(comm);
+
+    // Multi-node: if TCPCluster is active with remote peers, route through it
+    // for true distributed allReduce (Sum, Prod, Max, Min, Avg).
+    if (tcpcluster_should_delegate()) {
+        auto& tcm = vgre::advanced::TCPClusterManager::instance();
+        // Copy input to output buffer (TCPCluster allReduce operates in-place)
+        size_t bytes = count * nccl_elem_size(datatype);
+        std::memcpy(recvbuff, sendbuff, bytes);
+        int argtype = nccl_datatype_to_argtype(datatype);
+        vgre::advanced::ReductionOp redOp = nccl_op_to_tcpcluster(op);
+        vgre::VGREResult r = tcm.allReduce(recvbuff, count, argtype, redOp);
+        // TCPCluster allReduce doesn't divide by nranks for Avg; do it here.
+        if (r == vgre::VGREResult::SUCCESS && op == ncclAvg) {
+            auto* c = static_cast<ncclComm*>(comm);
+            scale_avg(recvbuff, count, datatype, c->state->nranks);
+        }
+        return (r == vgre::VGREResult::SUCCESS) ? ncclSuccess : ncclSystemError;
+    }
 
     // Algorithm selection: ring for large tensors (bandwidth-optimal),
     // barrier tree (existing) for small tensors (latency-optimal).
