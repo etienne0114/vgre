@@ -551,16 +551,19 @@ src/api/cublasLt/cublasLt_matmul.cpp              (200–300 lines)
 
 ### 3.7 Phase 7 — NCCL Point-to-Point & Advanced Collectives
 
-**Missing**: `ncclSend`, `ncclRecv`, `ncclAllToAll`, `ncclGather`, `ncclScatter`
+**Status**: **DONE** (single-node; multi-node TCPCluster integration is future work)
 
-**New files**:
-```
-src/api/nccl/nccl_shim_p2p.cpp                      (200–300 lines)
-src/api/nccl/nccl_shim_alltoall.cpp               (150–200 lines)
-src/api/nccl/nccl_shim_gather_scatter.cpp         (150–200 lines)
-```
+**Implemented**: `ncclSend`, `ncclRecv`, `ncclAllToAll`, `ncclGather`, `ncclScatter`
 
-**Key design decision**: Point-to-point reuses the existing `TCPClusterManager` transport. `ncclSend`/`ncclRecv` are thin wrappers over `sendAll`/`recvAll` with rank addressing.
+**File**: `src/api/nccl_shim.cpp` (added to existing shim)
+
+**Key design decisions**:
+- Single-node shared-memory: all operations use the existing `NcclGroupState` two-phase barrier with `p2p_slots` for point-to-point buffer exchange.
+- `ncclSend` writes into the destination rank's slot; `ncclRecv` reads from its own slot after barrier.
+- `ncclAllToAll` deposits `count`-sized chunks for every peer, then copies the aggregated slot into `recvbuff`.
+- `ncclGather` uses the existing `sendbufs` array; root concatenates all chunks into `recvbuff`.
+- `ncclScatter` uses `root_sendbuf`; each rank copies its slice after barrier.
+- Multi-node TCPCluster routing is noted as future work (Phase 7 extended) — requires `TCPClusterManager::sendToRank` / `recvFromRank` APIs.
 
 ---
 
@@ -931,9 +934,9 @@ tests/core/texture/        # Texture/surface object tests
 
 | # | Feature | Status | PR | Date |
 |---|---|---|---|---|
-| 7.1 | `ncclSend` / `ncclRecv` | TODO | — | — |
-| 7.2 | `ncclAllToAll` | TODO | — | — |
-| 7.3 | `ncclGather` / `ncclScatter` | TODO | — | — |
+| 7.1 | `ncclSend` / `ncclRecv` | **DONE** | — | 2026-05-14 |
+| 7.2 | `ncclAllToAll` | **DONE** | — | 2026-05-14 |
+| 7.3 | `ncclGather` / `ncclScatter` | **DONE** | — | 2026-05-14 |
 
 ### Phase 8 — Cooperative Groups & Device Libraries
 
