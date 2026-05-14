@@ -91,6 +91,70 @@ const TranslateMap& getConversionMap() {
         {"grid.sync", [](auto&){ return "vgre_jit_syncgrid();"; }},
         {"griddepcontrol.launch_dependents", [](auto&){ return "/* griddepcontrol.launch_dependents */"; }},
         {"griddepcontrol.wait", [](auto&){ return "/* griddepcontrol.wait */"; }},
+        // ── TMA 3D / 4D / 5D bulk copy ─────────────────────────────────────
+        {"cp.async.bulk.tensor.3d.global.shared::cta.bulk_group", [](auto& o){
+            return "vgre_tma_load_3d((void*)(uintptr_t)("+o[0]+"),(const VgreTMADescriptor*)(uintptr_t)("+o[1]+
+                   "),"+(o.size()>2?o[2]:std::string("0"))+","+(o.size()>3?o[3]:std::string("0"))+
+                   ","+(o.size()>4?o[4]:std::string("0"))+","+(o.size()>5?o[5]:std::string("1"))+
+                   ","+(o.size()>6?o[6]:std::string("1"))+","+(o.size()>7?o[7]:std::string("1"))+");";
+        }},
+        {"cp.async.bulk.tensor.4d.global.shared::cta.bulk_group", [](auto& o){
+            return "vgre_tma_load_4d((void*)(uintptr_t)("+o[0]+"),(const VgreTMADescriptor*)(uintptr_t)("+o[1]+
+                   "),"+(o.size()>2?o[2]:std::string("0"))+","+(o.size()>3?o[3]:std::string("0"))+
+                   ","+(o.size()>4?o[4]:std::string("0"))+","+(o.size()>5?o[5]:std::string("0"))+
+                   ","+(o.size()>6?o[6]:std::string("1"))+","+(o.size()>7?o[7]:std::string("1"))+
+                   ","+(o.size()>8?o[8]:std::string("1"))+","+(o.size()>9?o[9]:std::string("1"))+");";
+        }},
+        {"cp.async.bulk.tensor.5d.global.shared::cta.bulk_group", [](auto& o){
+            return "vgre_tma_load_5d((void*)(uintptr_t)("+o[0]+"),(const VgreTMADescriptor*)(uintptr_t)("+o[1]+
+                   "),"+(o.size()>2?o[2]:std::string("0"))+","+(o.size()>3?o[3]:std::string("0"))+
+                   ","+(o.size()>4?o[4]:std::string("0"))+","+(o.size()>5?o[5]:std::string("0"))+
+                   ","+(o.size()>6?o[6]:std::string("0"))+","+(o.size()>7?o[7]:std::string("1"))+
+                   ","+(o.size()>8?o[8]:std::string("1"))+","+(o.size()>9?o[9]:std::string("1"))+
+                   ","+(o.size()>10?o[10]:std::string("1"))+","+(o.size()>11?o[11]:std::string("1"))+");";
+        }},
+        // ── cp.reduce.async (shared → global atomic reduction) ─────────────
+        {"cp.reduce.async.add.f32", [](auto& o){
+            return "vgre_cp_reduce_async_add_f32((float*)("+o[0]+"),(const float*)("+o[1]+
+                   "),"+(o.size()>2?o[2]:std::string("1"))+");";
+        }},
+        {"cp.reduce.async.add.f64", [](auto& o){
+            return "vgre_cp_reduce_async_add_f64((double*)("+o[0]+"),(const double*)("+o[1]+
+                   "),"+(o.size()>2?o[2]:std::string("1"))+");";
+        }},
+        {"cp.reduce.async.min.f32", [](auto& o){
+            return "vgre_cp_reduce_async_min_f32((float*)("+o[0]+"),(const float*)("+o[1]+
+                   "),"+(o.size()>2?o[2]:std::string("1"))+");";
+        }},
+        {"cp.reduce.async.max.f32", [](auto& o){
+            return "vgre_cp_reduce_async_max_f32((float*)("+o[0]+"),(const float*)("+o[1]+
+                   "),"+(o.size()>2?o[2]:std::string("1"))+");";
+        }},
+        // ── tcgen05.mma (Blackwell SM100) ──────────────────────────────────
+        {"tcgen05.mma.cta_group::1.m64n256k16.f32.bf16.bf16", [](auto& o){
+            return "vgre_tcgen05_m64n256k16_bf16_f32((float*)(uintptr_t)("+o[0]+
+                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
+        }},
+        {"tcgen05.mma.cta_group::1.m64n128k16.f32.bf16.bf16", [](auto& o){
+            return "vgre_tcgen05_m64n128k16_bf16_f32((float*)(uintptr_t)("+o[0]+
+                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
+        }},
+        {"tcgen05.mma.cta_group::1.m64n256k16.f32.f16.f16", [](auto& o){
+            return "vgre_tcgen05_m64n256k16_f16_f32((float*)(uintptr_t)("+o[0]+
+                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
+        }},
+        {"tcgen05.mma.cta_group::1.m64n128k16.f32.f16.f16", [](auto& o){
+            return "vgre_tcgen05_m64n128k16_f16_f32((float*)(uintptr_t)("+o[0]+
+                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
+        }},
+        {"tcgen05.mma.cta_group::1.m64n256k8.f32.tf32.tf32", [](auto& o){
+            return "vgre_tcgen05_m64n256k8_tf32_f32((float*)(uintptr_t)("+o[0]+
+                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
+        }},
+        {"tcgen05.mma.cta_group::1.m128n256k16.f32.bf16.bf16", [](auto& o){
+            return "vgre_tcgen05_m128n256k16_bf16_f32((float*)(uintptr_t)("+o[0]+
+                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
+        }},
     };
     return kMap;
 }

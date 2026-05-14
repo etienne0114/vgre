@@ -535,17 +535,19 @@ src/api/cublasLt/cublasLt_matmul.cpp              (200–300 lines)
 
 #### 3.6.4 Hopper / Blackwell Extensions
 
-**Status**: **DONE** (partial)
+**Status**: **DONE**
 
-**Implemented**: `match.sync`, `elect.sync`, `grid.sync`, `griddepcontrol` — see 3.6.3 above.
+**Implemented**:
+- `cp.async.bulk.tensor.3d/4d/5d.global.shared::cta.bulk_group` → `vgre_tma_load_3d/4d/5d` helpers
+- `cp.reduce.async.add.f32/f64`, `cp.reduce.async.min.f32`, `cp.reduce.async.max.f32` → `vgre_cp_reduce_async_*` atomic helpers
+- `tcgen05.mma.cta_group::1.m64n256k16.f32.bf16.bf16`, `m64n128k16`, `m64n256k16.f32.f16.f16`, `m64n128k16.f16`, `m64n256k8.tf32`, `m128n256k16.bf16` → `vgre_tcgen05_*` helpers (delegate to existing wgmma GEMM math)
+- `match.sync`, `elect.sync`, `grid.sync`, `griddepcontrol` — see 3.6.3 above.
 
 **Already present**: `cp.async.bulk.tensor.1d/2d` and `wgmma.mma_async` variants are in `ptx_translator_map.cpp`.
 
-**Still missing**:
-- `cp.async.bulk.tensor.3d/4d/5d` (TMA multi-dimensional)
-- `tcgen05.*` (Blackwell SM100 tensor-core instructions)
-- `cp.reduce.async` (async reduction to global memory)
-- Additional `wgmma.mma_async` shapes not yet covered
+**Files modified**:
+- `src/compiler/ptx/ptx_conversion.cpp` — added PTX mappings for TMA 3D/4D/5D, cp.reduce.async, tcgen05
+- `include/vgre/compiler/wmma_emulation.h` — added `vgre_tma_load_3d/4d/5d`, `vgre_cp_reduce_async_*`, `vgre_tcgen05_*` helpers
 
 ---
 
@@ -938,8 +940,8 @@ tests/core/texture/        # Texture/surface object tests
 | 6.6 | FP16 vector loads (`ld.global.v2/v4.f16`) | **DONE** | — | 2026-05-14 |
 | 6.7 | `match.sync` / `elect.sync` | **DONE** | — | 2026-05-14 |
 | 6.8 | `grid.sync` / `griddepcontrol` | **DONE** | — | 2026-05-14 |
-| 6.9 | TMA 3D/4D/5D (`cp.async.bulk.tensor`) | TODO | — | — |
-| 6.10 | `tcgen05.*` (Blackwell) | TODO | — | — |
+| 6.9 | TMA 3D/4D/5D (`cp.async.bulk.tensor`) | **DONE** | — | 2026-05-14 |
+| 6.10 | `tcgen05.*` (Blackwell) | **DONE** | — | 2026-05-14 |
 
 ### Phase 7 — NCCL
 

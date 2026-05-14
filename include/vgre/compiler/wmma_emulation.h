@@ -612,4 +612,169 @@ inline void vgre_tma_store_2d(const VgreTMADescriptor* desc, const void* src,
                     tileW * desc->elemBytes);
 }
 
+// ── TMA 3D / 4D / 5D tile copy (CPU serial emulation) ────────────────────────
+// PTX cp.async.bulk.tensor.3d/4d/5d copy a hyper-rectangular tile from global
+// to shared memory.  In the CPU model we compute the linear offset via strides.
+inline void vgre_tma_load_3d(void* dst, const VgreTMADescriptor* desc,
+                             uint32_t x, uint32_t y, uint32_t z,
+                             uint32_t tw, uint32_t th, uint32_t td)
+{
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(desc->baseAddr);
+    uint8_t* out = reinterpret_cast<uint8_t*>(dst);
+    const size_t e = desc->elemBytes;
+    for (uint32_t d = 0; d < td; ++d)
+        for (uint32_t row = 0; row < th; ++row) {
+            size_t dst_off = (d * th + row) * tw * e;
+            size_t src_off = ((z + d) * desc->stride[1] + (y + row) * desc->stride[0] + x) * e;
+            std::memcpy(out + dst_off, base + src_off, tw * e);
+        }
+}
+
+inline void vgre_tma_load_4d(void* dst, const VgreTMADescriptor* desc,
+                             uint32_t x, uint32_t y, uint32_t z, uint32_t w,
+                             uint32_t tw, uint32_t th, uint32_t td, uint32_t tq)
+{
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(desc->baseAddr);
+    uint8_t* out = reinterpret_cast<uint8_t*>(dst);
+    const size_t e = desc->elemBytes;
+    for (uint32_t q = 0; q < tq; ++q)
+        for (uint32_t d = 0; d < td; ++d)
+            for (uint32_t row = 0; row < th; ++row) {
+                size_t dst_off = ((q * td + d) * th + row) * tw * e;
+                size_t src_off = ((w + q) * desc->stride[2] + (z + d) * desc->stride[1]
+                                  + (y + row) * desc->stride[0] + x) * e;
+                std::memcpy(out + dst_off, base + src_off, tw * e);
+            }
+}
+
+inline void vgre_tma_load_5d(void* dst, const VgreTMADescriptor* desc,
+                             uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t v,
+                             uint32_t tw, uint32_t th, uint32_t td, uint32_t tq, uint32_t tp)
+{
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(desc->baseAddr);
+    uint8_t* out = reinterpret_cast<uint8_t*>(dst);
+    const size_t e = desc->elemBytes;
+    for (uint32_t p = 0; p < tp; ++p)
+        for (uint32_t q = 0; q < tq; ++q)
+            for (uint32_t d = 0; d < td; ++d)
+                for (uint32_t row = 0; row < th; ++row) {
+                    size_t dst_off = ((((p * tq + q) * td + d) * th + row) * tw) * e;
+                    size_t src_off = (((v + p) * desc->stride[3] + (w + q) * desc->stride[2]
+                                       + (z + d) * desc->stride[1]
+                                       + (y + row) * desc->stride[0] + x)) * e;
+                    std::memcpy(out + dst_off, base + src_off, tw * e);
+                }
+}
+
+// ── cp.reduce.async (CPU serial emulation) ───────────────────────────────────
+// Performs an atomic reduction from shared-memory `src` into global `dst`.
+// Supported reductions: add, min, max.  Others fall back to add.
+inline void vgre_cp_reduce_async_add_f32(float* dst, const float* src, unsigned count)
+{
+    for (unsigned i = 0; i < count; ++i) {
+        unsigned expected = __atomic_load_n(
+            reinterpret_cast<unsigned*>(&dst[i]), __ATOMIC_SEQ_CST);
+        unsigned desired;
+        do {
+            float f = src[i] + *reinterpret_cast<const float*>(&expected);
+            desired = *reinterpret_cast<const unsigned*>(&f);
+        } while (!__atomic_compare_exchange_n(
+            reinterpret_cast<unsigned*>(&dst[i]), &expected, desired,
+            false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+    }
+}
+inline void vgre_cp_reduce_async_add_f64(double* dst, const double* src, unsigned count)
+{
+    for (unsigned i = 0; i < count; ++i) {
+        unsigned long long expected = __atomic_load_n(
+            reinterpret_cast<unsigned long long*>(&dst[i]), __ATOMIC_SEQ_CST);
+        unsigned long long desired;
+        do {
+            double f = src[i] + *reinterpret_cast<const double*>(&expected);
+            desired = *reinterpret_cast<const unsigned long long*>(&f);
+        } while (!__atomic_compare_exchange_n(
+            reinterpret_cast<unsigned long long*>(&dst[i]), &expected, desired,
+            false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+    }
+}
+inline void vgre_cp_reduce_async_min_f32(float* dst, const float* src, unsigned count)
+{
+    for (unsigned i = 0; i < count; ++i) {
+        unsigned expected = __atomic_load_n(
+            reinterpret_cast<unsigned*>(&dst[i]), __ATOMIC_SEQ_CST);
+        unsigned desired;
+        do {
+            float f = (src[i] < *reinterpret_cast<const float*>(&expected))
+                      ? src[i] : *reinterpret_cast<const float*>(&expected);
+            desired = *reinterpret_cast<const unsigned*>(&f);
+        } while (!__atomic_compare_exchange_n(
+            reinterpret_cast<unsigned*>(&dst[i]), &expected, desired,
+            false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+    }
+}
+inline void vgre_cp_reduce_async_max_f32(float* dst, const float* src, unsigned count)
+{
+    for (unsigned i = 0; i < count; ++i) {
+        unsigned expected = __atomic_load_n(
+            reinterpret_cast<unsigned*>(&dst[i]), __ATOMIC_SEQ_CST);
+        unsigned desired;
+        do {
+            float f = (src[i] > *reinterpret_cast<const float*>(&expected))
+                      ? src[i] : *reinterpret_cast<const float*>(&expected);
+            desired = *reinterpret_cast<const unsigned*>(&f);
+        } while (!__atomic_compare_exchange_n(
+            reinterpret_cast<unsigned*>(&dst[i]), &expected, desired,
+            false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+    }
+}
+
+// ── tcgen05.mma (Blackwell SM100) CPU emulation ─────────────────────────────
+// tcgen05 is NVIDIA's 5th-gen tensor core (Blackwell).  The instruction set
+// is similar to Hopper wgmma but with wider tiles and FP8 support.
+// We emulate the most common shapes by re-using the wgmma GEMM helpers.
+
+// tcgen05 mma 64×256×16 BF16→FP32 (matches wgmma_m64n256k16_bf16_f32)
+inline void vgre_tcgen05_m64n256k16_bf16_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    vgre_wgmma_m64n256k16_bf16_f32(d, descA, descB);
+}
+
+// tcgen05 mma 64×128×16 BF16→FP32
+inline void vgre_tcgen05_m64n128k16_bf16_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    vgre_wgmma_m64n128k16_bf16_f32(d, descA, descB);
+}
+
+// tcgen05 mma 64×256×16 FP16→FP32
+inline void vgre_tcgen05_m64n256k16_f16_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    vgre_wgmma_m64n256k16_f16_f32(d, descA, descB);
+}
+
+// tcgen05 mma 64×128×16 FP16→FP32
+inline void vgre_tcgen05_m64n128k16_f16_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    vgre_wgmma_m64n128k16_f16_f32(d, descA, descB);
+}
+
+// tcgen05 mma 64×256×8 TF32→FP32
+inline void vgre_tcgen05_m64n256k8_tf32_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    vgre_wgmma_m64n256k8_tf32_f32(d, descA, descB);
+}
+
+// tcgen05 mma 128×256×16 BF16→FP32 (larger CTA group shape)
+// Emulated by two 64×256 tiles along the M dimension.
+inline void vgre_tcgen05_m128n256k16_bf16_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    const uint16_t* A = detail::wgmma_desc_ptr_bf16(descA);
+    const uint16_t* B = detail::wgmma_desc_ptr_bf16(descB);
+    // Tile 0 (rows 0..63)
+    vgre_wgmma_m64n256k16_bf16_f32(d, descA, descB);
+    // Tile 1 (rows 64..127) — A pointer offset by 64×K elements
+    const uint16_t* A1 = A + 64 * 16;
+    uint64_t descA1 = reinterpret_cast<uint64_t>(A1);
+    vgre_wgmma_m64n256k16_bf16_f32(d + 64 * 256, descA1, descB);
+}
+
 #endif // VGRE_COMPILER_WMMA_EMULATION_H
