@@ -64,6 +64,13 @@ struct CUtexref_st {
   void *devPtr = nullptr;
   size_t size = 0;
   vgre::core::TextureId texId = 0;
+  unsigned int numChannels = 1;
+  // Per-dimension address modes (dim 0, 1, 2). Default CLAMP.
+  vgre::core::TextureAddressMode addressMode[3] = {
+    vgre::core::TextureAddressMode::CLAMP,
+    vgre::core::TextureAddressMode::CLAMP,
+    vgre::core::TextureAddressMode::CLAMP
+  };
 };
 
 using CUtexref = CUtexref_st*;
@@ -78,6 +85,14 @@ static constexpr int CU_AD_FORMAT_SIGNED_INT16   = 0x09;
 static constexpr int CU_AD_FORMAT_SIGNED_INT32   = 0x0a;
 static constexpr int CU_AD_FORMAT_FLOAT          = 0x20;
 static constexpr int CU_AD_FORMAT_HALF           = 0x10;
+
+// CUDA array descriptor (used by cuTexRefSetAddress2D)
+struct CUDA_ARRAY_DESCRIPTOR {
+    size_t Width;
+    size_t Height;
+    int Format;
+    unsigned int NumChannels;
+};
 
 // ── Graph node parameter structs (driver API) ────────────────────────────────
 
