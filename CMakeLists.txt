@@ -423,7 +423,11 @@ set_target_properties(vgre PROPERTIES
 add_library(vgre_cudart SHARED
     src/api/cudart/cudart_shim.cpp
     src/api/cudart/cudart_shim_stream.cpp
-    src/api/cuda_driver_shim.cpp
+    src/api/cuda_driver/cuda_driver_device_context.cpp
+    src/api/cuda_driver/cuda_driver_memory.cpp
+    src/api/cuda_driver/cuda_driver_stream_event.cpp
+    src/api/cuda_driver/cuda_driver_module.cpp
+    src/api/cuda_driver/cuda_driver_texture.cpp
     src/api/cuda_virtual_memory.cpp
     src/api/cuda_external_semaphore.cpp
     src/api/cuda_interceptor.cpp
