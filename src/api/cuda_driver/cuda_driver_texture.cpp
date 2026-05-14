@@ -1,6 +1,7 @@
 // CUDA Driver API — cuda driver texture
 
 #include "cuda_driver_internal.h"
+#include <unordered_map>
 
 extern "C" {
 
@@ -193,20 +194,36 @@ CUresult cuTexRefGetAddress(CUdeviceptr *pdptr, CUtexref hTexRef) {
   return CUDA_SUCCESS;
 }
 
+// Simple surface reference registry (maps opaque handle -> bound array pointer)
+static std::unordered_map<uintptr_t, void*> g_surfRefRegistry;
+static uintptr_t g_nextSurfRefId = 1;
+
 CUresult cuModuleGetSurfRef(CUsurfref *pSurfRef, CUmodule /*hmod*/, const char * /*name*/) {
   if (!pSurfRef) return CUDA_ERROR_INVALID_VALUE;
-  return CUDA_ERROR_NOT_SUPPORTED;
+  uintptr_t id = g_nextSurfRefId++;
+  g_surfRefRegistry[id] = nullptr;
+  *pSurfRef = reinterpret_cast<CUsurfref>(id);
+  return CUDA_SUCCESS;
 }
 
-CUresult cuSurfRefSetArray(CUsurfref /*hSurfRef*/, void* hArray, unsigned int Flags) {
-  (void)hArray; (void)Flags;
-  return CUDA_ERROR_NOT_SUPPORTED;
+CUresult cuSurfRefSetArray(CUsurfref hSurfRef, void* hArray, unsigned int Flags) {
+  (void)Flags;
+  if (!hSurfRef) return CUDA_ERROR_INVALID_VALUE;
+  uintptr_t id = reinterpret_cast<uintptr_t>(hSurfRef);
+  auto it = g_surfRefRegistry.find(id);
+  if (it == g_surfRefRegistry.end()) return CUDA_ERROR_INVALID_VALUE;
+  it->second = hArray;
+  return CUDA_SUCCESS;
 }
 
-CUresult cuSurfRefGetArray(void **phArray, CUsurfref /*hSurfRef*/) {
+CUresult cuSurfRefGetArray(void **phArray, CUsurfref hSurfRef) {
   if (!phArray) return CUDA_ERROR_INVALID_VALUE;
-  *phArray = nullptr;
-  return CUDA_ERROR_NOT_SUPPORTED;
+  if (!hSurfRef) { *phArray = nullptr; return CUDA_ERROR_INVALID_VALUE; }
+  uintptr_t id = reinterpret_cast<uintptr_t>(hSurfRef);
+  auto it = g_surfRefRegistry.find(id);
+  if (it == g_surfRefRegistry.end()) return CUDA_ERROR_INVALID_VALUE;
+  *phArray = it->second;
+  return CUDA_SUCCESS;
 }
 
 CUresult cuSurfRefSetFormat(CUsurfref /*hSurfRef*/, int fmt, int NumPackedComponents) {

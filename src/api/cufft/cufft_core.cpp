@@ -313,4 +313,76 @@ cufftResult_t cufftSetWorkArea(cufftHandle /*plan*/, void * /*workArea*/) {
     return CUFFT_SUCCESS;
 }
 
+// ── Advanced planning / size estimation ──────────────────────────────────────
+// In CPU reference mode there is no GPU scratch memory; workspace size is 0.
+
+cufftResult_t cufftEstimate1d(int nx, cufftType_t type, int batch, size_t *workSize) {
+    if (nx <= 0 || batch <= 0 || !workSize) return CUFFT_INVALID_VALUE;
+    *workSize = 0;
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftEstimate2d(int nx, int ny, cufftType_t type, size_t *workSize) {
+    if (nx <= 0 || ny <= 0 || !workSize) return CUFFT_INVALID_VALUE;
+    *workSize = 0;
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftEstimate3d(int nx, int ny, int nz, cufftType_t type, size_t *workSize) {
+    if (nx <= 0 || ny <= 0 || nz <= 0 || !workSize) return CUFFT_INVALID_VALUE;
+    *workSize = 0;
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftGetSize1d(cufftHandle plan, int nx, cufftType_t type, int batch, size_t *workSize) {
+    (void)plan; (void)nx; (void)type; (void)batch;
+    if (!workSize) return CUFFT_INVALID_VALUE;
+    *workSize = 0;
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftGetSize2d(cufftHandle plan, int nx, int ny, cufftType_t type, size_t *workSize) {
+    (void)plan; (void)nx; (void)ny; (void)type;
+    if (!workSize) return CUFFT_INVALID_VALUE;
+    *workSize = 0;
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftGetSize3d(cufftHandle plan, int nx, int ny, int nz, cufftType_t type, size_t *workSize) {
+    (void)plan; (void)nx; (void)ny; (void)nz; (void)type;
+    if (!workSize) return CUFFT_INVALID_VALUE;
+    *workSize = 0;
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftGetSizeMany(cufftHandle plan, int rank, int *n, int *inembed,
+                              int istride, int idist, int *onembed, int ostride,
+                              int odist, cufftType_t type, int batch, size_t *workSize) {
+    (void)plan; (void)rank; (void)n; (void)inembed; (void)istride; (void)idist;
+    (void)onembed; (void)ostride; (void)odist; (void)type; (void)batch;
+    if (!workSize) return CUFFT_INVALID_VALUE;
+    *workSize = 0;
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftMakePlanMany(cufftHandle plan, int rank, int *n, int *inembed,
+                               int istride, int idist, int *onembed, int ostride,
+                               int odist, cufftType_t type, int batch, size_t *workSize) {
+    (void)inembed; (void)istride; (void)idist;
+    (void)onembed; (void)ostride; (void)odist;
+    if (!n || rank <= 0 || batch <= 0 || !workSize) return CUFFT_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_planMutex);
+    auto it = g_plans.find(plan);
+    if (it == g_plans.end()) return CUFFT_INVALID_PLAN;
+    CufftPlan &p = it->second;
+    p.rank = rank;
+    p.batch = batch;
+    p.type = type;
+    p.nx = n[0];
+    if (rank >= 2) p.ny = n[1];
+    if (rank >= 3) p.nz = n[2];
+    *workSize = 0;
+    return CUFFT_SUCCESS;
+}
+
 } // extern "C"
