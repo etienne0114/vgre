@@ -24,6 +24,34 @@ CUresult cuStreamWaitEvent(CUstream hStream, CUevent hEvent, unsigned int flags)
   return toCU(err);
 }
 
+CUresult cuStreamQuery(CUstream hStream) {
+  auto err = vgre::api::CUDAInterceptor::instance().streamQuery(hStream);
+  return toCU(err);
+}
+
+CUresult cuStreamAddCallback(CUstream hStream,
+                               void (*callback)(CUstream, CUresult, void *),
+                               void *userData, unsigned int flags) {
+  (void)flags;
+  auto err = vgre::api::CUDAInterceptor::instance().streamAddCallback(
+      hStream,
+      reinterpret_cast<void (*)(vgre::api::cudaStream_t, vgre::api::cudaError_t, void*)>(callback),
+      userData, flags);
+  return toCU(err);
+}
+
+CUresult cuStreamGetFlags(CUstream hStream, unsigned int *flags) {
+  if (!flags) return CUDA_ERROR_INVALID_VALUE;
+  *flags = vgre::api::CUDAInterceptor::instance().getStreamFlags(hStream);
+  return CUDA_SUCCESS;
+}
+
+CUresult cuStreamGetPriority(CUstream hStream, int *priority) {
+  if (!priority) return CUDA_ERROR_INVALID_VALUE;
+  *priority = vgre::api::CUDAInterceptor::instance().getStreamPriority(hStream);
+  return CUDA_SUCCESS;
+}
+
 CUresult cuEventCreate(CUevent *phEvent, unsigned int flags) {
   (void)flags;
   auto err = vgre::api::CUDAInterceptor::instance().eventCreate(phEvent);
