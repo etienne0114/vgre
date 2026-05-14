@@ -76,67 +76,43 @@ src/compiler/cuda_device_libs/  # FP16, BF16, cooperative_groups headers
 
 #### 3.1.1 Stream Synchronization & Queries
 
-**Missing**: `cudaStreamWaitEvent`, `cudaEventQuery`, `cudaStreamAddCallback`, `cudaLaunchHostFunc`, `cudaGetErrorName`, `cudaGetErrorString`
+**Status**: **DONE** — all functions implemented in `src/api/cudart/cudart_shim_stream.cpp` and `src/api/cudart/cudart_shim.cpp`.
 
-**New files**:
-```
-src/api/cudart/cudart_shim_stream_sync.cpp      (300–400 lines)
-src/api/cudart/cudart_shim_event_query.cpp     (150–200 lines)
-src/api/cudart/cudart_shim_callbacks.cpp       (200–250 lines)
-src/api/cudart/cudart_shim_error_strings.cpp   (100–150 lines)  # static table
-```
+**Implemented**: `cudaStreamWaitEvent`, `cudaEventQuery`, `cudaStreamAddCallback`, `cudaLaunchHostFunc`, `cudaGetErrorName`, `cudaGetErrorString`
 
-**Rationale**: `cudart_shim.cpp` is already 1,300+ lines. Splitting by concern prevents bloat.
-
-**Key design decisions**:
-- `cudaStreamWaitEvent`: Reuse existing `CUDAInterceptor::streamWaitEvent` internal path; add CUDART shim wrapper.
-- `cudaEventQuery`: Non-blocking status check on `EventManager`; do not reuse `cudaEventSynchronize` path.
-- `cudaStreamAddCallback`: Legacy — enqueue a `std::function<void()>` into the stream task queue.
-- `cudaLaunchHostFunc`: Modern replacement — same mechanism as callbacks but with `cudaHostFn_t` signature.
+**Files**:
+- `src/api/cudart/cudart_shim_stream.cpp` — stream sync, event query, callbacks, host func
+- `src/api/cudart/cudart_shim.cpp` — error strings table
 
 ---
 
 #### 3.1.2 Memory & Symbols
 
-**Missing**: `cudaMemcpyToSymbol`, `cudaMemcpyToSymbolAsync`, `cudaMemcpyFromSymbol`, `cudaMemcpyFromSymbolAsync`, `cudaMallocArray`, `cudaMalloc3DArray`, `cudaMalloc3D`, `cudaMemcpy3DAsync`, `cudaHostGetDevicePointer`, `cudaHostGetFlags`, `cudaArrayGetInfo`, `cudaArrayDestroy`, `cudaPointerGetAttributes`, `cudaMemset2D`, `cudaMemset3D`, `cudaMemset2DAsync`, `cudaMemset3DAsync`
+**Status**: **DONE** — all functions implemented in `src/api/cudart/cudart_shim.cpp` and `src/api/cudart/cudart_shim_memset_nd.cpp`.
 
-**New files**:
-```
-src/api/cudart/cudart_shim_symbols.cpp         (250–300 lines)
-src/api/cudart/cudart_shim_arrays.cpp          (300–400 lines)
-src/api/cudart/cudart_shim_memset_nd.cpp       (200–250 lines)
-src/api/cudart/cudart_shim_pointer_attrs.cpp   (100–150 lines)
-```
+**Implemented**: `cudaMemcpyToSymbol`, `cudaMemcpyToSymbolAsync`, `cudaMemcpyFromSymbol`, `cudaMemcpyFromSymbolAsync`, `cudaMallocArray`, `cudaMalloc3DArray`, `cudaMalloc3D`, `cudaMemcpy3DAsync`, `cudaHostGetDevicePointer`, `cudaHostGetFlags`, `cudaArrayGetInfo`, `cudaArrayDestroy`, `cudaPointerGetAttributes`, `cudaMemset2D`, `cudaMemset3D`, `cudaMemset2DAsync`, `cudaMemset3DAsync`
+
+**Files**:
+- `src/api/cudart/cudart_shim.cpp` — symbols, arrays, pointer attributes
+- `src/api/cudart/cudart_shim_memset_nd.cpp` — 2D/3D memset variants
 
 **Modify**:
 - `src/core/memory/memory_manager.cpp` — add `symbolLookup_` map for `__device__` constant symbols.
-
-**Key design decisions**:
-- Symbols: Store `__constant__` variables in a `std::unordered_map<std::string, DeviceAllocation>` inside `MemoryManager`. `cudaMemcpyToSymbol` does a keyed lookup + memcpy.
-- Arrays: Wrap `cudaArray_t` as a `struct ArrayDesc { void* data; cudaChannelFormatDesc desc; size_t width, height, depth; }`.
-- `cudaPointerGetAttributes`: Query `MemoryManager::getPointerType()` — already has host/device/managed classification.
 
 ---
 
 #### 3.1.3 CUDA Graphs — Kernel & Essential Node Types
 
-**Missing**: `cudaGraphAddKernelNode`, `cudaGraphAddMemsetNode`, `cudaGraphAddHostNode`, `cudaGraphAddChildGraphNode`, `cudaGraphAddEmptyNode`, `cudaGraphAddEventRecordNode`, `cudaGraphAddEventWaitNode`, `cudaGraphAddMemAllocNode`, `cudaGraphAddMemFreeNode`
+**Status**: **DONE** — all node types implemented in `src/core/graph/graph_manager_extended_nodes.cpp` and `src/api/cudart/cudart_shim_graph_nodes.cpp`.
 
-**New files**:
-```
-src/core/graph/graph_manager_kernel_nodes.cpp      (300–400 lines)
-src/core/graph/graph_manager_memset_nodes.cpp      (150–200 lines)
-src/core/graph/graph_manager_host_nodes.cpp        (100–150 lines)
-src/core/graph/graph_manager_child_nodes.cpp       (100–150 lines)
-src/core/graph/graph_manager_event_nodes.cpp       (100–150 lines)
-src/core/graph/graph_manager_memalloc_nodes.cpp    (150–200 lines)
-```
+**Implemented**: `cudaGraphAddKernelNode`, `cudaGraphAddMemsetNode`, `cudaGraphAddHostNode`, `cudaGraphAddChildGraphNode`, `cudaGraphAddEmptyNode`, `cudaGraphAddEventRecordNode`, `cudaGraphAddEventWaitNode`, `cudaGraphAddMemAllocNode`, `cudaGraphAddMemFreeNode`
+
+**Files**:
+- `src/core/graph/graph_manager_extended_nodes.cpp` — kernel, memset, host, child, event, memalloc nodes
+- `src/api/cudart/cudart_shim_graph_nodes.cpp` — CUDART shim wrappers for all node types
 
 **Modify**:
-- `src/api/cudart/cudart_shim_graphs.cpp` — add shim wrappers for all new node types.
 - `include/vgre/core/graph_manager.h` — declare new node-type add/update methods.
-
-**Rationale**: `graph_manager.cpp` is 35,000 bytes (~1,000 lines). Splitting by node type keeps each file under 400 lines.
 
 **Key design decisions**:
 - Kernel node: `GraphManager::addKernelNode` already exists internally; expose it via CUDART shim.
@@ -148,52 +124,49 @@ src/core/graph/graph_manager_memalloc_nodes.cpp    (150–200 lines)
 
 #### 3.1.4 Graph Node Introspection & Exec Mutation
 
-**Missing**: `cudaGraphKernelNodeSetParams`, `cudaGraphKernelNodeGetParams`, `cudaGraphMemcpyNodeGetParams`, `cudaGraphMemsetNodeGetParams`, `cudaGraphMemsetNodeSetParams`, `cudaGraphHostNodeGetParams`, `cudaGraphHostNodeSetParams`, `cudaGraphNodeGetType`, `cudaGraphGetNodes`, `cudaGraphGetRootNodes`, `cudaGraphGetEdges`, `cudaGraphNodeGetDependencies`, `cudaGraphNodeGetDependentNodes`, `cudaGraphExecKernelNodeSetParams`, `cudaGraphExecMemcpyNodeSetParams`, `cudaGraphExecMemsetNodeSetParams`, `cudaGraphExecHostNodeSetParams`, `cudaGraphExecChildGraphNodeSetParams`, `cudaGraphExecEventRecordNodeSetEvent`, `cudaGraphExecEventWaitNodeSetEvent`, `cudaGraphInstantiateWithFlags`, `cudaGraphInstantiateWithParams`, `cudaGraphExecGetFlags`, `cudaGraphUpload`, `cudaGraphNodeSetEnabled`, `cudaGraphNodeGetEnabled`, `cudaGraphExecNodeSetParams`, `cudaGraphKernelNodeCopyAttributes`
+**Status**: **DONE** — introspection and exec mutation implemented in `src/core/graph/graph_manager_introspection.cpp` and `src/core/graph/graph_manager_exec_update.cpp`.
 
-**New files**:
-```
-src/core/graph/graph_manager_introspection.cpp      (300–400 lines)
-src/core/graph/graph_manager_exec_update.cpp        (250–350 lines)
-src/core/graph/graph_manager_upload.cpp           (100–150 lines)
-```
+**Implemented**: `cudaGraphKernelNodeSetParams`, `cudaGraphKernelNodeGetParams`, `cudaGraphMemcpyNodeGetParams`, `cudaGraphMemsetNodeGetParams`, `cudaGraphMemsetNodeSetParams`, `cudaGraphHostNodeGetParams`, `cudaGraphHostNodeSetParams`, `cudaGraphNodeGetType`, `cudaGraphGetNodes`, `cudaGraphGetRootNodes`, `cudaGraphGetEdges`, `cudaGraphNodeGetDependencies`, `cudaGraphNodeGetDependentNodes`, `cudaGraphExecKernelNodeSetParams`, `cudaGraphExecMemcpyNodeSetParams`, `cudaGraphExecMemsetNodeSetParams`, `cudaGraphExecHostNodeSetParams`, `cudaGraphExecChildGraphNodeSetParams`, `cudaGraphExecEventRecordNodeSetEvent`, `cudaGraphExecEventWaitNodeSetEvent`, `cudaGraphInstantiateWithFlags`, `cudaGraphInstantiateWithParams`, `cudaGraphExecGetFlags`, `cudaGraphUpload`, `cudaGraphNodeSetEnabled`, `cudaGraphNodeGetEnabled`, `cudaGraphExecNodeSetParams`, `cudaGraphKernelNodeCopyAttributes`
+
+**Files**:
+- `src/core/graph/graph_manager_introspection.cpp` — get nodes, edges, dependencies, params
+- `src/core/graph/graph_manager_exec_update.cpp` — exec mutation, instantiate with flags/params
+- `src/api/cudart/cudart_shim_graph_exec.cpp` — CUDART shim wrappers for exec APIs
+
+**Still missing**:
+- `cudaGraphExecUpdate_v2` with per-node error reporting → Phase 10.4
 
 ---
 
 #### 3.1.5 Stream Capture Introspection
 
-**Missing**: `cudaStreamIsCapturing`, `cudaStreamGetCaptureInfo`, `cudaStreamGetCaptureInfo_v2`, `cudaThreadExchangeStreamCaptureMode`, `cudaStreamUpdateCaptureDependencies`, `cudaStreamCopyAttributes`
+**Status**: **DONE** — implemented in `src/api/cudart/cudart_shim_capture.cpp`.
 
-**New file**:
-```
-src/api/cudart/cudart_shim_capture.cpp              (200–250 lines)
-```
+**Implemented**: `cudaStreamIsCapturing`, `cudaStreamGetCaptureInfo`, `cudaStreamGetCaptureInfo_v2`, `cudaThreadExchangeStreamCaptureMode`, `cudaStreamUpdateCaptureDependencies`, `cudaStreamCopyAttributes`
+
+**File**: `src/api/cudart/cudart_shim_capture.cpp`
 
 ---
 
 #### 3.1.6 Texture & Surface — CUDART Object APIs
 
-**Missing**: `cudaCreateTextureObject`, `cudaDestroyTextureObject`, `cudaGetTextureObjectResourceDesc`, `cudaGetTextureObjectTextureDesc`, `cudaGetTextureObjectResourceViewDesc`, `cudaCreateSurfaceObject`, `cudaDestroySurfaceObject`, `cudaGetSurfaceObjectResourceDesc`, `cudaGetTextureReference`, `cudaGetSurfaceReference`, `cudaBindTexture`, `cudaUnbindTexture`, `cudaBindTextureToArray`, `cudaBindTexture2D`, `cudaBindSurfaceToArray`
+**Status**: **DONE** — implemented in `src/api/cudart/cudart_shim_texture_objects.cpp`.
 
-**New files**:
-```
-src/core/texture/texture_object_manager.cpp       (250–350 lines)
-src/core/texture/surface_object_manager.cpp         (150–200 lines)
-src/api/cudart/cudart_shim_texture_objects.cpp      (200–250 lines)
-src/api/cudart/cudart_shim_texture_legacy.cpp       (150–200 lines)  # bind/unbind
-```
+**Implemented**: `cudaCreateTextureObject`, `cudaDestroyTextureObject`, `cudaGetTextureObjectResourceDesc`, `cudaGetTextureObjectTextureDesc`, `cudaGetTextureObjectResourceViewDesc`, `cudaCreateSurfaceObject`, `cudaDestroySurfaceObject`, `cudaGetSurfaceObjectResourceDesc`, `cudaGetTextureReference`, `cudaGetSurfaceReference`, `cudaBindTexture`, `cudaUnbindTexture`, `cudaBindTextureToArray`, `cudaBindTexture2D`, `cudaBindSurfaceToArray`
 
-**Rationale**: `texture_manager.cpp` is already 39,000 bytes. Object APIs should live in their own files, not the existing legacy texture reference path.
+**Files**:
+- `src/api/cudart/cudart_shim_texture_objects.cpp` — CUDART texture/surface object APIs
+- `src/core/texture_manager.cpp` — existing texture manager (still monolithic, future split candidate)
 
 ---
 
 #### 3.1.7 CUDA Runtime — Device & Function Attributes
 
-**Missing**: `cudaFuncGetAttributes`, `cudaFuncSetCacheConfig`, `cudaFuncSetSharedMemConfig`, `cudaDeviceGetLimit`, `cudaDeviceSetLimit`, `cudaDeviceGetCacheConfig`, `cudaDeviceSetCacheConfig`, `cudaDeviceGetSharedMemConfig`, `cudaDeviceSetSharedMemConfig`, `cudaChooseDevice`, `cudaThreadExit`, `cudaThreadSynchronize`, `cudaThreadSetLimit`, `cudaThreadGetLimit`, `cudaDeviceGetP2PAttribute`, `cudaDeviceFlushGPUDirectRDMAWrites`, `cudaDeviceGetGraphMemAttribute`, `cudaDeviceSetGraphMemAttribute`, `cudaLaunchKernelExC`, `cudaLaunchConfig`
+**Status**: **DONE** — implemented in `src/api/cudart/cudart_shim_device_attrs.cpp`.
 
-**New file**:
-```
-src/api/cudart/cudart_shim_device_attrs.cpp         (200–300 lines)
-```
+**Implemented**: `cudaFuncGetAttributes`, `cudaFuncSetCacheConfig`, `cudaFuncSetSharedMemConfig`, `cudaDeviceGetLimit`, `cudaDeviceSetLimit`, `cudaDeviceGetCacheConfig`, `cudaDeviceSetCacheConfig`, `cudaDeviceGetSharedMemConfig`, `cudaDeviceSetSharedMemConfig`, `cudaChooseDevice`, `cudaThreadExit`, `cudaThreadSynchronize`, `cudaThreadSetLimit`, `cudaThreadGetLimit`, `cudaDeviceGetP2PAttribute`, `cudaDeviceFlushGPUDirectRDMAWrites`, `cudaDeviceGetGraphMemAttribute`, `cudaDeviceSetGraphMemAttribute`, `cudaLaunchKernelExC`, `cudaLaunchConfig`
+
+**File**: `src/api/cudart/cudart_shim_device_attrs.cpp`
 
 **Key design decisions**:
 - `cudaFuncGetAttributes`: Query `KernelIR` for register count, shared memory, and block-size limits; populate `cudaFuncAttributes`.
@@ -205,13 +178,13 @@ src/api/cudart/cudart_shim_device_attrs.cpp         (200–300 lines)
 
 #### 3.1.8 CUDA Graphs — Dependencies & User Objects
 
-**Missing**: `cudaGraphAddDependencies`, `cudaGraphRemoveDependencies`, `cudaGraphRetainUserObject`, `cudaGraphReleaseUserObject`, `cudaUserObjectCreate`, `cudaUserObjectRetain`, `cudaUserObjectRelease`, `cudaGraphNodeFindInClone`, `cudaGraphDebugDotPrint`
+**Status**: **DONE** — implemented in `src/core/graph/graph_manager_dependencies.cpp` and `src/api/cudart/cudart_shim_graph_user_objects.cpp`.
 
-**New files**:
-```
-src/core/graph/graph_manager_dependencies.cpp       (100–150 lines)
-src/core/graph/graph_manager_user_objects.cpp     (100–150 lines)
-```
+**Implemented**: `cudaGraphAddDependencies`, `cudaGraphRemoveDependencies`, `cudaGraphRetainUserObject`, `cudaGraphReleaseUserObject`, `cudaUserObjectCreate`, `cudaUserObjectRetain`, `cudaUserObjectRelease`, `cudaGraphNodeFindInClone`, `cudaGraphDebugDotPrint`
+
+**Files**:
+- `src/core/graph/graph_manager_dependencies.cpp` — dependency add/remove
+- `src/api/cudart/cudart_shim_graph_user_objects.cpp` — user object CUDART shim wrappers
 
 **Key design decisions**:
 - Dependencies: `GraphManager` already tracks adjacency lists; `AddDependencies` inserts edges, `RemoveDependencies` deletes them with cycle check.
@@ -221,12 +194,11 @@ src/core/graph/graph_manager_user_objects.cpp     (100–150 lines)
 
 #### 3.1.9 External Memory & Semaphore — CUDART
 
-**Missing**: `cudaImportExternalMemory`, `cudaDestroyExternalMemory`, `cudaExternalMemoryGetMappedBuffer`, `cudaExternalMemoryGetMappedMipmappedArray`, `cudaExternalSemaphoreGetSignalNodeParams`, `cudaExternalSemaphoreGetWaitNodeParams`
+**Status**: **DONE** — implemented in `src/api/cudart/cudart_shim_external_memory.cpp`.
 
-**New file**:
-```
-src/api/cudart/cudart_shim_external_memory.cpp      (150–200 lines)
-```
+**Implemented**: `cudaImportExternalMemory`, `cudaDestroyExternalMemory`, `cudaExternalMemoryGetMappedBuffer`, `cudaExternalMemoryGetMappedMipmappedArray`, `cudaExternalSemaphoreGetSignalNodeParams`, `cudaExternalSemaphoreGetWaitNodeParams`
+
+**File**: `src/api/cudart/cudart_shim_external_memory.cpp`
 
 **Key design decisions**:
 - These are the CUDART counterparts to driver `cuExternalMemory*` / `cuExternalSemaphore*` APIs. Reuse the existing external-semaphore infrastructure in `src/api/cuda_external_semaphore.cpp`.
@@ -238,42 +210,35 @@ src/api/cudart/cudart_shim_external_memory.cpp      (150–200 lines)
 
 **Goal**: Enable PyTorch `torch.linalg.solve`, `torch.mm` with non-GEMM paths.
 
+**Status**: **DONE** — all Level-1/2/3 BLAS, pointer mode, atomics mode implemented in `src/api/cublas/`.
+
 #### 3.2.1 Level-1 BLAS Completion
 
-**Missing**: `cublasScopy`, `cublasDcopy`, `cublasSswap`, `cublasDswap`, `cublasSrot`, `cublasDrot`, `cublasSrotm`, `cublasSrotmg`, `cublasSrotg`, `cublasSasum`, `cublasDasum`, `cublasIsamax`, `cublasIdamax`, `cublasDnrm2`, `cublasDscal`, `cublasGetPointerMode`, `cublasSetPointerMode`, `cublasGetAtomicsMode`, `cublasSetAtomicsMode`, `cublasLoggerConfigure`
+**Implemented**: `cublasScopy`, `cublasDcopy`, `cublasSswap`, `cublasDswap`, `cublasSrot`, `cublasDrot`, `cublasSrotm`, `cublasSrotmg`, `cublasSrotg`, `cublasSasum`, `cublasDasum`, `cublasIsamax`, `cublasIdamax`, `cublasDnrm2`, `cublasDscal`, `cublasGetPointerMode`, `cublasSetPointerMode`, `cublasGetAtomicsMode`, `cublasSetAtomicsMode`
 
-**New files**:
-```
-src/api/cublas/cublas_shim_level1.cpp               (300–400 lines)
-src/api/cublas/cublas_shim_pointer_mode.cpp         (50–80 lines)
-src/api/cublas/cublas_shim_atomics.cpp              (50–80 lines)
-```
+**Files**:
+- `src/api/cublas/cublas_level1.cpp` — all Level-1 routines
+- `src/api/cublas/cublas_core.cpp` — pointer mode, atomics mode APIs
 
 ---
 
 #### 3.2.2 Level-2 BLAS
 
-**Missing**: `cublasStrsv`, `cublasDtrsv`, `cublasStrsm`, `cublasDtrsm`, `cublasSger`, `cublasDger`, `cublasSsymv`, `cublasDsymv`, `cublasSgbmv`, `cublasDgbmv`, `cublasSsyr`, `cublasDsyr`, `cublasSsyr2`, `cublasDsyr2`, plus packed/banded/triangular variants
+**Implemented**: `cublasStrsv`, `cublasDtrsv`, `cublasSger`, `cublasDger`, `cublasSsymv`, `cublasDsymv`, `cublasSgbmv`, `cublasDgbmv`, `cublasSsyr`, `cublasDsyr`, `cublasSsyr2`, `cublasDsyr2`, plus `cublasStrmv`/`cublasDtrmv`
 
-**New files**:
-```
-src/api/cublas/cublas_shim_level2.cpp               (400–500 lines)
-src/api/cublas/cublas_level2_backend.cpp            (300–400 lines)  # OpenBLAS delegation
-```
+**File**: `src/api/cublas/cublas_level2.cpp`
 
-**Key design decision**: Delegate to OpenBLAS for all Level-2/Level-3 routines. VGRE's cuBLAS shim already uses OpenBLAS for GEMM; extend the same pattern.
+**Key design decision**: Reference CBLAS when available, otherwise clean scalar reference loops.
 
 ---
 
 #### 3.2.3 Level-3 BLAS
 
-**Missing**: `cublasStrsm`, `cublasDtrsm`, `cublasSsyrk`, `cublasDsyrk`, `cublasSsyr2k`, `cublasDsyr2k`, `cublasStrmm`, `cublasDtrmm`, `cublasSsymm`, `cublasDsymm`, `cublasChemm`, `cublasCherk`, `cublasCher2k`, plus batched variants
+**Implemented**: `cublasSgemm`/`cublasDgemm`, `cublasStrsm`/`cublasDtrsm`, `cublasSsyrk`/`cublasDsyrk`, `cublasSsyr2k`/`cublasDsyr2k`, `cublasStrmm`/`cublasDtrmm`, `cublasSsymm`/`cublasDsymm`, `cublasHgemm`, `cublasGemmEx`, `cublasGemmBatchedEx`, `cublasGemmStridedBatchedEx`, batched SGEMM/DGEMM, strided batched variants
 
-**New files**:
-```
-src/api/cublas/cublas_shim_level3.cpp               (400–500 lines)
-src/api/cublas/cublas_level3_backend.cpp            (300–400 lines)  # OpenBLAS delegation
-```
+**File**: `src/api/cublas/cublas_level3.cpp`
+
+**Key design decision**: Reference CBLAS/OpenBLAS when available; custom reference kernels for TRSM, SYRK, SYR2K, TRMM, SYMM. HGEMM routes through FP32 with half↔float conversion. GEMMEx handles INT8→FP32 dequantization.
 
 ---
 
@@ -283,12 +248,11 @@ src/api/cublas/cublas_level3_backend.cpp            (300–400 lines)  # OpenBLA
 
 #### 3.3.1 Convolution Backward
 
-**Missing**: `cudnnConvolutionBackwardData`, `cudnnConvolutionBackwardFilter`, `cudnnConvolutionBackwardBias`
+**Status**: **DONE** — implemented in `src/api/cudnn/cudnn_convolution.cpp`.
 
-**New file**:
-```
-src/api/cudnn/cudnn_convolution_backward.cpp        (400–500 lines)
-```
+**Implemented**: `cudnnConvolutionBackwardData`, `cudnnConvolutionBackwardFilter`, `cudnnConvolutionBackwardBias`
+
+**File**: `src/api/cudnn/cudnn_convolution.cpp`
 
 **Key design decision**: Backward data = transposed convolution (im2col + GEMM with flipped filters). Backward filter = im2col + GEMM with input activations and output gradients.
 
@@ -296,39 +260,35 @@ src/api/cudnn/cudnn_convolution_backward.cpp        (400–500 lines)
 
 #### 3.3.2 Batch Normalization Training
 
-**Missing**: `cudnnBatchNormalizationForwardTraining`, `cudnnBatchNormalizationBackward`
+**Status**: **DONE** — implemented in `src/api/cudnn/cudnn_batchnorm.cpp`.
 
-**New file**:
-```
-src/api/cudnn/cudnn_batchnorm_training.cpp          (200–300 lines)
-```
+**Implemented**: `cudnnBatchNormalizationForwardTraining`, `cudnnBatchNormalizationBackward`
+
+**File**: `src/api/cudnn/cudnn_batchnorm.cpp`
 
 ---
 
 #### 3.3.3 Other Backward Passes
 
-**Missing**: `cudnnActivationBackward`, `cudnnSoftmaxBackward`, `cudnnPoolingBackward`
+**Status**: **DONE** — implemented in their respective feature files.
 
-**New file**:
-```
-src/api/cudnn/cudnn_backward_generic.cpp            (250–350 lines)
-```
+**Implemented**: `cudnnActivationBackward` (`cudnn_activation.cpp`), `cudnnSoftmaxBackward` (`cudnn_softmax.cpp`), `cudnnPoolingBackward` (`cudnn_pooling.cpp`)
 
 ---
 
 #### 3.3.4 Advanced Layers
 
-**Missing**: `cudnnDropoutForward/Backward`, `cudnnRNNForward/Backward`, `cudnnMultiHeadAttnForward/Backward`, `cudnnCTCLoss`, `cudnnDivisiveNormalizationForward/Backward`, `cudnnLRNCrossChannelForward/Backward`, `cudnnTransformTensor`, `cudnnAddTensor`, `cudnnOpTensor`, `cudnnReduceTensor`
+**Status**: Mostly **DONE** — dropout, RNN, attention, tensor ops implemented. CTC loss and LRN still missing.
 
-**New files**:
-```
-src/api/cudnn/cudnn_dropout.cpp                     (150–200 lines)
-src/api/cudnn/cudnn_rnn.cpp                         (300–400 lines)  # LSTM/GRU cell math
-src/api/cudnn/cudnn_attention.cpp                   (200–300 lines)  # multi-head attention
-src/api/cudnn/cudnn_ctc_loss.cpp                    (100–150 lines)
-src/api/cudnn/cudnn_op_tensor.cpp                   (150–200 lines)
-src/api/cudnn/cudnn_reduce_tensor.cpp             (150–200 lines)
-```
+**Implemented**: `cudnnDropoutForward/Backward` (`cudnn_dropout.cpp`), `cudnnRNNForward/Backward` (`cudnn_rnn.cpp`), `cudnnMultiHeadAttnForward/Backward` (`cudnn_attention.cpp`), `cudnnTransformTensor`, `cudnnOpTensor`, `cudnnReduceTensor` (`cudnn_tensor_ops.cpp`)
+
+**Still missing**: `cudnnCTCLoss`, `cudnnDivisiveNormalizationForward/Backward`, `cudnnLRNCrossChannelForward/Backward`
+
+**Files**:
+- `src/api/cudnn/cudnn_dropout.cpp`
+- `src/api/cudnn/cudnn_rnn.cpp`
+- `src/api/cudnn/cudnn_attention.cpp`
+- `src/api/cudnn/cudnn_tensor_ops.cpp`
 
 ---
 
@@ -498,13 +458,13 @@ src/api/cuda_driver/cuda_driver_shim_texref.cpp       (150–200 lines)
 
 #### 3.6.1 Texture / Surface Instructions
 
+**Status**: Not yet split from main PTX translator.
+
 **Missing PTX**: `tex`, `tld4`, `txq`, `suld`, `sust`
 
-**New files**:
-```
-src/compiler/ptx/ptx_texture_ops.cpp                (300–400 lines)
-src/compiler/ptx/ptx_surface_ops.cpp                (200–250 lines)
-```
+**Planned files** (when PTX map exceeds 500 lines):
+- `src/compiler/ptx/ptx_texture_ops.cpp`
+- `src/compiler/ptx/ptx_surface_ops.cpp`
 
 **Key design decision**: These map to the existing `vgre_tex1D_f32` / `vgre_surf2Dwrite_f32` C++ builtins in `cpu_cuda_env.h`. The PTX translator should emit calls to those functions rather than inline math.
 
