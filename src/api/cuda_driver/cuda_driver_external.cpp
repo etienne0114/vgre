@@ -105,11 +105,53 @@ CUresult cuExternalMemoryGetMappedBuffer(void **devPtr, CUexternalMemory extMem,
 CUresult cuExternalMemoryGetMappedMipmappedArray(void **mipmapOut,
                                                  CUexternalMemory extMem,
                                                  const void *mipmapDesc) {
-  (void)extMem; (void)mipmapDesc;
-  if (!mipmapOut) return CUDA_ERROR_INVALID_VALUE;
-  // VGRE CPU model does not support mipmapped arrays from external memory
-  *mipmapOut = nullptr;
-  return CUDA_ERROR_NOT_SUPPORTED;
+  if (!mipmapOut || !mipmapDesc) return CUDA_ERROR_INVALID_VALUE;
+
+  auto *mipmapArrayDesc =
+      static_cast<const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC*>(mipmapDesc);
+
+  auto it = g_cuExtMemRegistry.find(extMem);
+  if (it == g_cuExtMemRegistry.end()) return CUDA_ERROR_INVALID_VALUE;
+
+  // Map CU_AD_FORMAT to TextureElementType
+  vgre::core::TextureElementType texType = vgre::core::TextureElementType::FLOAT32;
+  switch (mipmapArrayDesc->arrayDesc.Format) {
+    case CU_AD_FORMAT_UNSIGNED_INT8:
+    case CU_AD_FORMAT_SIGNED_INT8:     texType = vgre::core::TextureElementType::UINT8; break;
+    case CU_AD_FORMAT_UNSIGNED_INT16:
+    case CU_AD_FORMAT_SIGNED_INT16:    texType = vgre::core::TextureElementType::UINT16; break;
+    case CU_AD_FORMAT_HALF:            texType = vgre::core::TextureElementType::FP16; break;
+    case CU_AD_FORMAT_FLOAT:           texType = vgre::core::TextureElementType::FLOAT32; break;
+    default:                           return CUDA_ERROR_NOT_SUPPORTED;
+  }
+
+  size_t elemSize = 4;
+  switch (mipmapArrayDesc->arrayDesc.Format) {
+    case CU_AD_FORMAT_UNSIGNED_INT8:
+    case CU_AD_FORMAT_SIGNED_INT8:     elemSize = 1; break;
+    case CU_AD_FORMAT_UNSIGNED_INT16:
+    case CU_AD_FORMAT_SIGNED_INT16:
+    case CU_AD_FORMAT_HALF:            elemSize = 2; break;
+    case CU_AD_FORMAT_FLOAT:           elemSize = 4; break;
+    default:                           elemSize = 4; break;
+  }
+  elemSize *= mipmapArrayDesc->arrayDesc.NumChannels;
+
+  size_t width  = mipmapArrayDesc->arrayDesc.Width;
+  size_t height = mipmapArrayDesc->arrayDesc.Height ? mipmapArrayDesc->arrayDesc.Height : 1;
+
+  vgre::core::TextureDescriptor td{};
+  td.elementType = texType;
+  td.filterMode  = vgre::core::TextureFilterMode::LINEAR;
+  td.addressMode = vgre::core::TextureAddressMode::WRAP;
+
+  vgre::core::TextureId tid = 0;
+  auto r = vgre::core::TextureManager::instance().createMipmappedArray(
+      tid, width, height, elemSize, mipmapArrayDesc->numLevels, td);
+  if (r != vgre::VGREResult::SUCCESS) return CUDA_ERROR_INVALID_VALUE;
+
+  *mipmapOut = reinterpret_cast<void *>(static_cast<uintptr_t>(tid));
+  return CUDA_SUCCESS;
 }
 
 // ── External Semaphore ───────────────────────────────────────────────────────
