@@ -4,6 +4,9 @@ add_library(vgre_compiler STATIC
     clang_kernel_analysis.cpp
     ptx/ptx_translator.cpp
     ptx/ptx_translator_map.cpp
+    ptx/ptx_texture_ops.cpp
+    ptx/ptx_shared_atomics.cpp
+    ptx/ptx_conversion.cpp
     kernel_cache.cpp
     llvm_translation_engine.cpp
     llvm_translation_codegen.cpp

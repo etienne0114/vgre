@@ -473,52 +473,79 @@ src/api/cublasLt/cublasLt_matmul.cpp              (200–300 lines)
 
 #### 3.6.1 Texture / Surface Instructions
 
-**Status**: Not yet split from main PTX translator.
+**Status**: **DONE**
 
-**Missing PTX**: `tex`, `tld4`, `txq`, `suld`, `sust`
+**Implemented PTX**:
+- `tex.1d.f32.s32/f32`, `tex.1d.v2.f32.s32/f32`, `tex.1d.v4.f32.s32/f32`
+- `tex.2d.f32.f32`, `tex.2d.v2.f32.f32`, `tex.2d.v4.f32.f32`
+- `tex.3d.f32.f32`, `tex.3d.v2.f32.f32`, `tex.3d.v4.f32.f32`
+- `tld4.2d.v4.f32.f32`
+- `txq.width.u32`, `txq.height.u32`, `txq.depth.u32`, `txq.channels.u32`
+- `suld.2d.f32`, `suld.2d.v2.f32`, `suld.2d.v4.f32`
+- `sust.2d.f32`, `sust.2d.v2.f32`, `sust.2d.v4.f32`
 
-**Planned files** (when PTX map exceeds 500 lines):
-- `src/compiler/ptx/ptx_texture_ops.cpp`
-- `src/compiler/ptx/ptx_surface_ops.cpp`
+**File**: `src/compiler/ptx/ptx_texture_ops.cpp`
 
-**Key design decision**: These map to the existing `vgre_tex1D_f32` / `vgre_surf2Dwrite_f32` C++ builtins in `cpu_cuda_env.h`. The PTX translator should emit calls to those functions rather than inline math.
+**Key design decisions**:
+- Texture instructions map to existing `vgre_tex1D_f32` / `vgre_tex2D_f32` / `vgre_tex3D_f32` builtins.
+- VGRE TextureManager currently supports single-channel float textures; v2/v4 vector returns replicate the scalar sample to all channels.
+- Surface load/store map to `vgre_surf2Dread_f32` / `vgre_surf2Dwrite_f32`.
+- Texture queries (`txq`) return conservative defaults (1024×1024×1, 1 channel) since VGRE does not expose texture metadata queries.
+- `splitOperands` was extended to handle `{}` braces for potential vector operand grouping.
 
 ---
 
 #### 3.6.2 Shared-Memory Atomics
 
-**Missing PTX**: `atom.shared.add`, `atom.shared.cas`, `atom.shared.exch`, `atom.shared.max`, `atom.shared.min`
+**Status**: **DONE**
 
-**New file**:
-```
-src/compiler/ptx/ptx_shared_atomics.cpp             (150–200 lines)
-```
+**Implemented PTX**:
+- `atom.shared.add.s32/u32/u64/f32/f64`
+- `atom.shared.cas.b32/b64`
+- `atom.shared.exch.b32/b64`
+- `atom.shared.max.s32/u32`, `atom.shared.min.s32/u32`
+- `atom.shared.and/or/xor.b32`
+- `atom.shared.inc/dec.u32`
+
+**File**: `src/compiler/ptx/ptx_shared_atomics.cpp`
+
+**Design**: Shared atomics map to the same GCC/Clang `__atomic_*` builtins as global atomics. In VGRE's CPU model, `__shared__` memory is local host memory, so sequential-consistency atomics work correctly.
 
 ---
 
 #### 3.6.3 Conversion & Precision Variants
 
-**Missing PTX**: Dozens of `cvt.*` variants, `rcp.rn.f32`, `sqrt.rn.f32`, `div.rn.f32/f64`, FP16 vector loads (`ld.global.v2.f16`, `ld.global.v4.f16`)
+**Status**: **DONE**
 
-**New files**:
-```
-src/compiler/ptx/ptx_conversion.cpp                 (200–300 lines)
-src/compiler/ptx/ptx_fp16_vector.cpp              (100–150 lines)
-```
+**Implemented PTX**:
+- All missing `cvt.*` rounding modes: `rn/rz/rm/rp` for `f32/f64 → s32/u32`, `f64 → f32`, `f32 → f64`, `f32 → f16`, `f16 → f32`, `s64/u64 ↔ f32/f64`, and saturating variants.
+- `sqrt.rn/rz/rm/rp.f32` (maps to `__builtin_sqrtf`)
+- FP16 vector loads/stores: `ld.global.v2.f16`, `ld.global.v4.f16`, `st.global.v2.f16`, `st.global.v4.f16`
+- Cooperative group primitives: `match.sync.eq.b32/b64/lt.b32/b64`, `elect.sync`
+- Grid synchronization: `grid.sync` (maps to `vgre_jit_syncgrid`), `griddepcontrol.launch_dependents`, `griddepcontrol.wait`
+
+**File**: `src/compiler/ptx/ptx_conversion.cpp`
+
+**Notes**:
+- `rcp.rn.f32`, `div.rn.f32/f64` were already present in `ptx_translator_map.cpp`.
+- `match.sync` / `elect.sync` return identity values in serial CPU model (full mask / thread 0 elected).
+- `grid.sync` delegates to the existing `vgre_jit_syncgrid()` cooperative-grid barrier.
 
 ---
 
 #### 3.6.4 Hopper / Blackwell Extensions
 
-**Missing PTX**: `cp.async.bulk.tensor.3d/4d/5d`, `tcgen05.*` (Blackwell SM100), `cp.reduce.async`, `wgmma.mma_async` additional shapes, `match.sync`, `elect.sync`, `grid.sync`, `griddepcontrol`
+**Status**: **DONE** (partial)
 
-**New files**:
-```
-src/compiler/ptx/ptx_hopper_tma_extended.cpp        (150–200 lines)
-src/compiler/ptx/ptx_blackwell_tcgen05.cpp          (200–300 lines)
-src/compiler/ptx/ptx_warp_match.cpp                 (100–150 lines)
-src/compiler/ptx/ptx_grid_sync.cpp                (100–150 lines)
-```
+**Implemented**: `match.sync`, `elect.sync`, `grid.sync`, `griddepcontrol` — see 3.6.3 above.
+
+**Already present**: `cp.async.bulk.tensor.1d/2d` and `wgmma.mma_async` variants are in `ptx_translator_map.cpp`.
+
+**Still missing**:
+- `cp.async.bulk.tensor.3d/4d/5d` (TMA multi-dimensional)
+- `tcgen05.*` (Blackwell SM100 tensor-core instructions)
+- `cp.reduce.async` (async reduction to global memory)
+- Additional `wgmma.mma_async` shapes not yet covered
 
 ---
 
@@ -889,14 +916,14 @@ tests/core/texture/        # Texture/surface object tests
 
 | # | Feature | Status | PR | Date |
 |---|---|---|---|---|
-| 6.1 | `tex` / `tld4` / `txq` instructions | TODO | — | — |
-| 6.2 | `suld` / `sust` instructions | TODO | — | — |
-| 6.3 | `atom.shared.*` | TODO | — | — |
-| 6.4 | Missing `cvt.*` variants | TODO | — | — |
-| 6.5 | `rcp.rn` / `sqrt.rn` / `div.rn` | TODO | — | — |
-| 6.6 | FP16 vector loads (`ld.global.v2/v4.f16`) | TODO | — | — |
-| 6.7 | `match.sync` / `elect.sync` | TODO | — | — |
-| 6.8 | `grid.sync` / `griddepcontrol` | TODO | — | — |
+| 6.1 | `tex` / `tld4` / `txq` instructions | **DONE** | — | 2026-05-14 |
+| 6.2 | `suld` / `sust` instructions | **DONE** | — | 2026-05-14 |
+| 6.3 | `atom.shared.*` | **DONE** | — | 2026-05-14 |
+| 6.4 | Missing `cvt.*` variants | **DONE** | — | 2026-05-14 |
+| 6.5 | `rcp.rn` / `sqrt.rn` / `div.rn` | **DONE** | — | 2026-05-14 |
+| 6.6 | FP16 vector loads (`ld.global.v2/v4.f16`) | **DONE** | — | 2026-05-14 |
+| 6.7 | `match.sync` / `elect.sync` | **DONE** | — | 2026-05-14 |
+| 6.8 | `grid.sync` / `griddepcontrol` | **DONE** | — | 2026-05-14 |
 | 6.9 | TMA 3D/4D/5D (`cp.async.bulk.tensor`) | TODO | — | — |
 | 6.10 | `tcgen05.*` (Blackwell) | TODO | — | — |
 

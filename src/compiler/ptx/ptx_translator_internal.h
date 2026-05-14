@@ -78,8 +78,11 @@ using TranslateMap = std::unordered_map<std::string,
 } // anonymous namespace
 
 
-// Translation map and helpers (defined in ptx_translator_map.cpp).
-const TranslateMap& getMap();
+// Translation maps (defined in respective .cpp files).
+const TranslateMap& getMap();              // core arithmetic, memory, control flow
+const TranslateMap& getTextureMap();       // tex, tld4, txq, suld, sust
+const TranslateMap& getSharedAtomicMap();  // atom.shared.*
+const TranslateMap& getConversionMap();    // cvt.*, sqrt.rn.f32, match.sync, elect.sync, grid.sync
 std::vector<std::string> splitOperands(const std::string& s);
 } // namespace compiler
 } // namespace vgre

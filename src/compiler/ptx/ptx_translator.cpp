@@ -8,20 +8,23 @@ namespace compiler {
 std::string PTXTranslator::translateInstruction(
     const std::string& instr, const std::string& operands)
 {
-    const auto& m = getMap();
-    auto it = m.find(instr);
-    if (it == m.end()) {
-        VGRE_LOG_ERROR("PTXTranslator",
-            "Unrecognized PTX instruction '" + instr + "' — not supported for production");
-        throw std::runtime_error("PTX instruction not supported: " + instr);
+    const TranslateMap* maps[] = { &getMap(), &getTextureMap(),
+                                   &getSharedAtomicMap(), &getConversionMap() };
+    for (const auto* m : maps) {
+        auto it = m->find(instr);
+        if (it != m->end()) {
+            auto ops = splitOperands(operands);
+            try { return it->second(ops); }
+            catch (...) {
+                VGRE_LOG_ERROR("PTXTranslator",
+                    "PTX operand error for instruction '" + instr + "'");
+                throw std::runtime_error("PTX operand error: " + instr);
+            }
+        }
     }
-    auto ops = splitOperands(operands);
-    try { return it->second(ops); }
-    catch (...) {
-        VGRE_LOG_ERROR("PTXTranslator",
-            "PTX operand error for instruction '" + instr + "'");
-        throw std::runtime_error("PTX operand error: " + instr);
-    }
+    VGRE_LOG_ERROR("PTXTranslator",
+        "Unrecognized PTX instruction '" + instr + "' — not supported for production");
+    throw std::runtime_error("PTX instruction not supported: " + instr);
 }
 
 std::string PTXTranslator::translateBlock(
