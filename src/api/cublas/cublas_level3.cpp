@@ -717,5 +717,11 @@ cublasStatus_t cublasSgemm(cublasHandle_t h, cublasOperation_t ta, cublasOperati
     return cublasSgemm_v2(h,ta,tb,m,n,k,a,A,lda,B,ldb,b,C,ldc);
 }
 
+cublasStatus_t cublasDgemm(cublasHandle_t h, cublasOperation_t ta, cublasOperation_t tb,
+    int m,int n,int k, const double* a, const double* A, int lda,
+    const double* B, int ldb, const double* b, double* C, int ldc) {
+    return cublasDgemm_v2(h,ta,tb,m,n,k,a,A,lda,B,ldb,b,C,ldc);
+}
+
 } // extern "C"
 

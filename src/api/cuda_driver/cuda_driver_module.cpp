@@ -94,4 +94,45 @@ CUresult cuLaunchKernel(CUfunction f,
   return (r == vgre::VGREResult::SUCCESS) ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
 }
 
+CUresult cuLaunchCooperativeKernel(CUfunction f,
+                                   unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ,
+                                   unsigned int blockDimX, unsigned int blockDimY, unsigned int blockDimZ,
+                                   unsigned int sharedMemBytes, CUstream hStream,
+                                   void **kernelParams) {
+  // In CPU emulation cooperative launch behaves identically to regular launch
+  // because all blocks are already scheduled by the runtime engine.
+  return cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ,
+                        blockDimX, blockDimY, blockDimZ,
+                        sharedMemBytes, hStream, kernelParams, nullptr);
+}
+
+CUresult cuLaunchCooperativeKernelMultiDevice(
+    void *launchParamsList, unsigned int numDevices, unsigned int flags) {
+  (void)flags;
+  if (!launchParamsList || numDevices == 0) return CUDA_ERROR_INVALID_VALUE;
+  // VGRE is single-device emulation; launch only on device 0.
+  // The launchParamsList is an array of CUDA_LAUNCH_PARAMS structs.
+  // For CPU emulation we ignore the multi-device aspect and launch sequentially.
+  struct CudaLaunchParams {
+    void *func;
+    unsigned int gridDimX, gridDimY, gridDimZ;
+    unsigned int blockDimX, blockDimY, blockDimZ;
+    unsigned int sharedMemBytes;
+    void *hStream;
+    void **kernelParams;
+  };
+  auto *params = static_cast<CudaLaunchParams*>(launchParamsList);
+  for (unsigned int i = 0; i < numDevices; ++i) {
+    CUresult r = cuLaunchCooperativeKernel(
+        reinterpret_cast<CUfunction>(params[i].func),
+        params[i].gridDimX, params[i].gridDimY, params[i].gridDimZ,
+        params[i].blockDimX, params[i].blockDimY, params[i].blockDimZ,
+        params[i].sharedMemBytes,
+        reinterpret_cast<CUstream>(params[i].hStream),
+        params[i].kernelParams);
+    if (r != CUDA_SUCCESS) return r;
+  }
+  return CUDA_SUCCESS;
+}
+
 } // extern "C"
