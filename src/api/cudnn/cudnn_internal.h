@@ -25,6 +25,7 @@ typedef void*  cudnnRNNDescriptor_t;
 typedef void*  cudnnOpTensorDescriptor_t;
 typedef void*  cudnnReduceTensorDescriptor_t;
 typedef void*  cudnnMultiHeadAttnDescriptor_t;
+typedef void*  cudnnLRNDescriptor_t;
 
 static constexpr cudnnStatus_t CUDNN_STATUS_SUCCESS       = 0;
 static constexpr cudnnStatus_t CUDNN_STATUS_NOT_INITIALIZED = 1;
@@ -118,6 +119,17 @@ struct HandleCtx {
     void* stream   = nullptr;
     int   deviceId = 0;
     bool  deterministicAlgorithms = false;
+};
+
+// ── LRN descriptor ───────────────────────────────────────────────────────────
+enum cudnnLRNMode_t {
+    CUDNN_LRN_CROSS_CHANNEL_DIM1 = 0
+};
+struct LRNDesc {
+    unsigned lrnN;
+    double   lrnAlpha;
+    double   lrnBeta;
+    double   lrnK;
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

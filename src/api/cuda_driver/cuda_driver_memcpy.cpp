@@ -204,11 +204,9 @@ CUresult cuMemcpy3D(const CUDA_MEMCPY3D *pCopy) {
   return CUDA_SUCCESS;
 }
 
-CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D *pCopy, CUstream hStream) {
-  (void)pCopy; (void)hStream;
-  // Async 3D copies are non-trivial for CPU emulation; defer to synchronous path
-  // since CPU memcpy is already host-synchronous in VGRE's model.
-  return CUDA_ERROR_NOT_SUPPORTED;
+CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D *pCopy, CUstream /*hStream*/) {
+  // CPU emulation is host-synchronous; delegate to the synchronous path.
+  return cuMemcpy3D(pCopy);
 }
 
 } // extern "C"

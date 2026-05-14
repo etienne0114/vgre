@@ -205,4 +205,26 @@ curandStatus_t curandGetScrambleConstants64(unsigned long long **constants) {
     return CURAND_STATUS_DOUBLE_PRECISION_REQUIRED;
 }
 
+// ── Poisson distribution ─────────────────────────────────────────────────────
+
+curandStatus_t curandGeneratePoisson(curandGenerator_t generator, unsigned int *outputPtr, size_t n, double lambda) {
+    if (!outputPtr || n == 0) return CURAND_STATUS_SUCCESS;
+    auto *st = lookup(generator);
+    if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::poisson_distribution<unsigned int> dist(lambda);
+    for (size_t i = 0; i < n; ++i) outputPtr[i] = dist(st->engine);
+    return CURAND_STATUS_SUCCESS;
+}
+
+// ── Seed generation (re-seed from entropy) ───────────────────────────────────
+
+curandStatus_t curandGenerateSeeds(curandGenerator_t generator) {
+    auto *st = lookup(generator);
+    if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::random_device rd;
+    st->seed = (static_cast<unsigned long long>(rd()) << 32) | rd();
+    st->engine.seed(st->seed);
+    return CURAND_STATUS_SUCCESS;
+}
+
 } // extern "C"

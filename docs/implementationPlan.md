@@ -877,6 +877,8 @@ tests/core/texture/        # Texture/surface object tests
 | 2.2 | Pointer mode / atomics mode APIs | **DONE** | — | 2026-05-13 |
 | 2.3 | Level-2 BLAS (`Trsv`, `Trsm`, `Ger`, `Symv`, `Gbmv`, `Syr`, etc.) | **DONE** | — | 2026-05-13 |
 | 2.4 | Level-3 BLAS (`Trsm`, `Syrk`, `Syr2k`, `Trmm`, `Symm`, `Chemm`, etc.) | **DONE** | — | 2026-05-13 |
+| 2.5 | Complex Hermitian variants (`Cherk`, `Cher2k`) | TODO (deferred — requires complex type infrastructure) | — | — |
+| 2.6 | `cublasLoggerConfigure` / logging callbacks | **DONE** | — | 2026-05-14 |
 
 ### Phase 3 — cuDNN
 
@@ -897,6 +899,8 @@ tests/core/texture/        # Texture/surface object tests
 | 3.13 | `cudnnReduceTensor` | **DONE** | — | 2026-05-14 |
 | 3.14 | `cudnnTransformTensor` | **DONE** | — | 2026-05-14 |
 | 3.15 | cuDNN Backend API (v8+) | **DONE** (minimal stub) | — | 2026-05-14 |
+| 3.16 | `cudnnLRNCrossChannelForward/Backward` | **DONE** | — | 2026-05-14 |
+| 3.17 | `cudnnDivisiveNormalizationForward/Backward` | **DONE** | — | 2026-05-14 |
 
 ### Phase 4 — Missing Libraries
 
@@ -912,6 +916,10 @@ tests/core/texture/        # Texture/surface object tests
 | 4.8 | cuSPARSE SpMV/SpMM functional | **DONE** | — | 2026-05-14 |
 | 4.9 | cuBLASLt stub shim | **DONE** | — | 2026-05-14 |
 | 4.10 | cuBLASLt matmul + epilogue functional | **DONE** | — | 2026-05-14 |
+| 4.11 | cuFFT advanced planning (`cufftEstimate*`, `cufftMakePlanMany`, `cufftGetSize*`) | **DONE** | — | 2026-05-14 |
+| 4.12 | cuRAND Poisson distribution (`curandGeneratePoisson`) | **DONE** | — | 2026-05-14 |
+| 4.13 | cuRAND seed generation (`curandGenerateSeeds`) | **DONE** | — | 2026-05-14 |
+| 4.14 | cuRAND Sobol direction vectors | TODO | — | — |
 
 ### Phase 5 — CUDA Driver API
 
@@ -927,6 +935,9 @@ tests/core/texture/        # Texture/surface object tests
 | 5.8 | `cuGraph*` family | **DONE** | — | 2026-05-14 |
 | 5.9 | `cuExternalMemory*` / `cuExternalSemaphore*` | **DONE** | — | 2026-05-14 |
 | 5.10 | Driver texture reference gaps (`cuTexRefSetAddress2D`, filter, mipmap, border, `cuSurfRefSetFormat`) | **DONE** | — | 2026-05-14 |
+| 5.11 | `cuMemcpy3DAsync` — async 3D copy path | **DONE** | — | 2026-05-14 |
+| 5.12 | Driver surface references (`cuModuleGetSurfRef`, `cuSurfRefSetArray`, `cuSurfRefGetArray`) | **DONE** | — | 2026-05-14 |
+| 5.13 | CUDA Virtual Memory on Linux (`cuMemCreate`, `cuMemAddressReserve`, `cuMemMap`, `cuMemSetAccess`) | TODO | — | — |
 
 ### Phase 6 — PTX ISA
 
@@ -1003,6 +1014,21 @@ tests/core/texture/        # Texture/surface object tests
 | 10.2 | Profiling / CUPTI-equivalent (kernel timeline, instruction sampler) | **DONE** | — | 2026-05-14 |
 | 10.3 | cuDNN INT8x4 / INT8x32 packed layouts | **DONE** | — | 2026-05-14 |
 | 10.4 | `cudaGraphExecUpdate_v2` | **DONE** | — | 2026-05-14 |
+
+### Phase 11 — Additional Gaps (Deep Audit)
+
+| # | Feature | Status | PR | Date |
+|---|---|---|---|---|
+| 11.1 | cuDNN LRN (`cudnnLRNCrossChannelForward/Backward`) | **DONE** | — | 2026-05-14 |
+| 11.2 | cuDNN Divisive Normalization | **DONE** | — | 2026-05-14 |
+| 11.3 | cuBLAS Hermitian complex (`Cherk`, `Cher2k`) | TODO | — | — |
+| 11.4 | cuBLAS logging (`cublasLoggerConfigure`) | **DONE** | — | 2026-05-14 |
+| 11.5 | cuFFT advanced planning APIs | **DONE** | — | 2026-05-14 |
+| 11.6 | cuRAND Poisson distribution | **DONE** | — | 2026-05-14 |
+| 11.7 | cuRAND seed generation | **DONE** | — | 2026-05-14 |
+| 11.8 | CUDA Driver async 3D memcpy | **DONE** | — | 2026-05-14 |
+| 11.9 | CUDA Driver surface references (full) | **DONE** | — | 2026-05-14 |
+| 11.10 | CUDA Virtual Memory on Linux | TODO | — | — |
 
 ---
 

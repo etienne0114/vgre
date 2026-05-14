@@ -723,5 +723,29 @@ cublasStatus_t cublasDgemm(cublasHandle_t h, cublasOperation_t ta, cublasOperati
     return cublasDgemm_v2(h,ta,tb,m,n,k,a,A,lda,B,ldb,b,C,ldc);
 }
 
+// ── Logging callbacks ────────────────────────────────────────────────────────
+
+typedef void (*cublasLogCallback)(const char *msg);
+
+static cublasLogCallback g_cublasLogCallback = nullptr;
+
+cublasStatus_t cublasLoggerConfigure(int logIsOn, int logStderr, int logFileSize,
+                                     const char *logFile) {
+    (void)logIsOn; (void)logStderr; (void)logFileSize; (void)logFile;
+    // VGRE CPU reference: no-op; logging is not critical for correctness.
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasSetLoggerCallback(cublasLogCallback callback) {
+    g_cublasLogCallback = callback;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasGetLoggerCallback(cublasLogCallback *callback) {
+    if (!callback) return CUBLAS_STATUS_INVALID_VALUE;
+    *callback = g_cublasLogCallback;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 } // extern "C"
 
