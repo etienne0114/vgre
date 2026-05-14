@@ -78,4 +78,28 @@ static constexpr int CU_AD_FORMAT_SIGNED_INT16   = 0x09;
 static constexpr int CU_AD_FORMAT_SIGNED_INT32   = 0x0a;
 static constexpr int CU_AD_FORMAT_FLOAT          = 0x20;
 
+// ── Graph node parameter structs (driver API) ────────────────────────────────
+
+struct CUDA_KERNEL_NODE_PARAMS {
+    CUfunction func;
+    unsigned int gridDimX;
+    unsigned int gridDimY;
+    unsigned int gridDimZ;
+    unsigned int blockDimX;
+    unsigned int blockDimY;
+    unsigned int blockDimZ;
+    unsigned int sharedMemBytes;
+    void **kernelParams;
+    void **extra;
+};
+
+struct CUDA_MEMSET_NODE_PARAMS {
+    CUdeviceptr dst;
+    size_t pitch;
+    unsigned int value;
+    unsigned int elementSize;
+    size_t width;
+    size_t height;
+};
+
 } // extern "C"

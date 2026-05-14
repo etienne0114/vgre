@@ -429,6 +429,7 @@ add_library(vgre_cudart SHARED
     src/api/cuda_driver/cuda_driver_memset.cpp
     src/api/cuda_driver/cuda_driver_stream_event.cpp
     src/api/cuda_driver/cuda_driver_module.cpp
+    src/api/cuda_driver/cuda_driver_occupancy.cpp
     src/api/cuda_driver/cuda_driver_texture.cpp
     src/api/cuda_driver/cuda_driver_errors.cpp
     src/api/cuda_driver/cuda_driver_graph.cpp
@@ -438,6 +439,16 @@ add_library(vgre_cudart SHARED
     src/api/cuda_interceptor.cpp
     src/api/cuda_interceptor_memory.cpp
     src/api/cuda_interceptor_graphs.cpp
+    src/api/cublas/cublas_core.cpp
+    src/api/cublas/cublas_level1.cpp
+    src/api/cublas/cublas_level2.cpp
+    src/api/cublas/cublas_level3.cpp
+    src/api/nccl_shim.cpp
+    src/api/curand/curand_core.cpp
+    src/api/cufft/cufft_core.cpp
+    src/api/cusparse/cusparse_core.cpp
+    src/api/cusolver/cusolver_core.cpp
+    src/api/cublaslt/cublaslt_core.cpp
     src/api/nvtx_shim.cpp
     src/api/vgre_c_api.cpp
     src/api/vgre_c_api_graphs.cpp
@@ -473,6 +484,13 @@ elseif(UNIX)
     if(KEYUTILS_LIB)
         target_link_libraries(vgre_cudart PRIVATE ${KEYUTILS_LIB})
     endif()
+    # LAPACK / BLAS for cuSOLVER shim
+    # On Ubuntu/Debian these live in /usr/lib/x86_64-linux-gnu/{lapack,blas}/
+    # Use full paths because target_link_directories doesn't always propagate.
+    target_link_libraries(vgre_cudart PRIVATE
+        /usr/lib/x86_64-linux-gnu/lapack/liblapack.so.3
+        /usr/lib/x86_64-linux-gnu/blas/libblas.so.3)
+    message(STATUS "Linking cuSOLVER shim against system LAPACK/BLAS")
 endif()
 if(VGRE_USE_OPENCL_BACKEND)
     target_link_libraries(vgre_cudart PRIVATE OpenCL::OpenCL)
