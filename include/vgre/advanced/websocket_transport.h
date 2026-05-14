@@ -78,6 +78,11 @@ public:
     // Send WebSocket PING, expect PONG within timeout.
     bool ping(int timeoutMs = 5000);
 
+    // Non-blocking poll for control frames (PING/PONG/CLOSE).
+    // Handles PING auto-response. Returns true if a control frame was processed.
+    // timeoutMs=0 means check once without blocking.
+    bool poll(int timeoutMs = 0);
+
     // URI accessors
     const std::string& host() const { return host_; }
     int                port() const { return port_; }

@@ -243,6 +243,7 @@ bool WebsocketTransportClient::tcpConnect(int timeoutMs) {
         if (fd == VGRE_INVALID_SOCKET) continue;
         vgre_ioctl_nonblock(fd);
         vgre_set_nosigpipe(fd);
+        vgre::common::vgre_set_tcp_nodelay(fd);
         if (::connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
             freeaddrinfo(res);
             sockfd_ = fd;
@@ -547,6 +548,34 @@ bool WebsocketTransportClient::ping(int timeoutMs) {
     return false;
 }
 
+// ── Poll (non-blocking control-frame handler) ──────────────────────────────
+bool WebsocketTransportClient::poll(int timeoutMs) {
+    if (!isConnected()) return false;
+
+    // Check if socket has data without blocking (timeoutMs may be 0).
+    if (!waitForRead(sockfd_, timeoutMs)) return false;
+
+    // Try to read one frame with a very short timeout.
+    auto frame = readFrame(1);
+    if (!frame) return false;
+
+    bool handled = false;
+    if (frame->opcode == WSOpcode::PING) {
+        auto pong = buildFrame(WSOpcode::PONG, frame->payload.data(), frame->payload.size());
+        rawSend(pong.data(), pong.size());
+        handled = true;
+    } else if (frame->opcode == WSOpcode::PONG) {
+        handled = true; // consume silently
+    } else if (frame->opcode == WSOpcode::CLOSE) {
+        disconnect();
+        handled = true;
+    } else {
+        // Data or continuation frame — stash in recv buffer so recv() can use it
+        recvBuffer_.insert(recvBuffer_.end(), frame->payload.begin(), frame->payload.end());
+    }
+    return handled;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // ── Server implementation ────────────────────────────────────────────────────
 // ═════════════════════════════════════════════════════════════════════════════
@@ -605,6 +634,9 @@ WebsocketTransportServer::accept(int timeoutMs) {
     socklen_t clientLen = sizeof(clientAddr);
     vgre_socket_t clientFd = ::accept(listenfd_, reinterpret_cast<sockaddr*>(&clientAddr), &clientLen);
     if (clientFd == VGRE_INVALID_SOCKET) return nullptr;
+
+    vgre::common::vgre_set_tcp_nodelay(clientFd);
+    vgre::common::vgre_set_nosigpipe(clientFd);
 
     auto client = std::unique_ptr<WebsocketTransportClient>(new WebsocketTransportClient);
     client->sockfd_ = clientFd;

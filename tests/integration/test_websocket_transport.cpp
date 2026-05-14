@@ -139,8 +139,10 @@ static void testPingPong() {
     });
 
     auto accepted = server->accept(10000);
-    // Wait for client ping and let auto-pong handler respond
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Server polls for the client's PING and auto-responds with PONG
+    bool polled = accepted->poll(2000);
+    assert(polled);
+    assert(accepted->isConnected());
     accepted->disconnect();
     server->stop();
     clientThread.join();
