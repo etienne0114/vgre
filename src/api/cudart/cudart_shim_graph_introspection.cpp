@@ -15,6 +15,9 @@
 
 #include "cudart_graph_internal.h"
 
+// Exposed from cudart_shim.cpp
+extern "C" const void *vgre_lookup_host_function_by_name(const char *name);
+
 extern "C" {
 
 // ── Graph topology queries ────────────────────────────────────────────────────
@@ -138,8 +141,8 @@ cudaError_t cudaGraphKernelNodeGetParams(
         static_cast<vgre::GraphId>(graph), node, kid, name, grid, block, args);
     if (r != vgre::VGREResult::SUCCESS) return cudaErrorInvalidValue;
 
-    // func cannot be reconstructed from KernelId (host-stub address is not stored).
-    pNodeParams->func           = nullptr;
+    // Reconstruct func pointer from kernel name via reverse registry mapping.
+    pNodeParams->func           = const_cast<void*>(vgre_lookup_host_function_by_name(name.c_str()));
     pNodeParams->gridDim.x      = grid.x;
     pNodeParams->gridDim.y      = grid.y;
     pNodeParams->gridDim.z      = grid.z;
