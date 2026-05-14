@@ -36,6 +36,32 @@ static constexpr cublasOperation_t CUBLAS_OP_N = 0;  // no transpose
 static constexpr cublasOperation_t CUBLAS_OP_T = 1;  // transpose
 static constexpr cublasOperation_t CUBLAS_OP_C = 2;  // conjugate transpose
 
+// ── cuComplex types (minimal for Hermitian BLAS) ────────────────────────────
+struct cuComplex { float x, y; };
+struct cuDoubleComplex { double x, y; };
+
+static inline cuComplex make_cuComplex(float x, float y) { return {x, y}; }
+static inline cuDoubleComplex make_cuDoubleComplex(double x, double y) { return {x, y}; }
+
+static inline cuComplex cuConjf(cuComplex a) { return {a.x, -a.y}; }
+static inline cuDoubleComplex cuConj(cuDoubleComplex a) { return {a.x, -a.y}; }
+
+static inline float cuCrealf(cuComplex a) { return a.x; }
+static inline float cuCimagf(cuComplex a) { return a.y; }
+static inline double cuCreal(cuDoubleComplex a) { return a.x; }
+static inline double cuCimag(cuDoubleComplex a) { return a.y; }
+
+static inline cuComplex cuCaddf(cuComplex a, cuComplex b) { return {a.x + b.x, a.y + b.y}; }
+static inline cuComplex cuCmulf(cuComplex a, cuComplex b) {
+    return {a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x};
+}
+static inline cuDoubleComplex cuCadd(cuDoubleComplex a, cuDoubleComplex b) { return {a.x + b.x, a.y + b.y}; }
+static inline cuDoubleComplex cuCmul(cuDoubleComplex a, cuDoubleComplex b) {
+    return {a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x};
+}
+static inline cuComplex cuCmulf_real(cuComplex a, float s) { return {a.x * s, a.y * s}; }
+static inline cuDoubleComplex cuCmul_real(cuDoubleComplex a, double s) { return {a.x * s, a.y * s}; }
+
 static constexpr cublasFillMode_t CUBLAS_FILL_MODE_LOWER = 0;
 static constexpr cublasFillMode_t CUBLAS_FILL_MODE_UPPER = 1;
 static constexpr cublasDiagType_t CUBLAS_DIAG_NON_UNIT = 0;
