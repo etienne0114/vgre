@@ -94,6 +94,7 @@ CUresult cuTexRefSetFormat(CUtexref hTexRef, int fmt, int NumPackedComponents) {
     case CU_AD_FORMAT_SIGNED_INT16:   hTexRef->desc.elementType = vgre::core::TextureElementType::INT16; break;
     case CU_AD_FORMAT_SIGNED_INT32:   hTexRef->desc.elementType = vgre::core::TextureElementType::INT32; break;
     case CU_AD_FORMAT_FLOAT:          hTexRef->desc.elementType = vgre::core::TextureElementType::FLOAT32; break;
+    case CU_AD_FORMAT_HALF:           hTexRef->desc.elementType = vgre::core::TextureElementType::FP16; break;
     default:
         return CUDA_ERROR_NOT_SUPPORTED;
   }

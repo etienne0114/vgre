@@ -78,66 +78,144 @@ cudnnStatus_t cudnnReduceTensor(
     auto* rd = (ReduceTensorDesc*)reduceDesc;
     auto* at = (TensorDesc*)aDesc;
     auto* ct = (TensorDesc*)cDesc;
-    int aTotal = at->n * at->c * at->h * at->w;
-    int cTotal = ct->n * ct->c * ct->h * ct->w;
-    if (cTotal != 1) return CUDNN_STATUS_NOT_SUPPORTED;
 
     float a = *(const float*)alpha;
     float b = *(const float*)beta;
     const float* Af = (const float*)A;
     float* Cf = (float*)C;
 
-    float result = 0.f;
-    switch (rd->op) {
-    case CUDNN_REDUCE_TENSOR_ADD: {
-        double sum = 0;
-        for (int i = 0; i < aTotal; ++i) sum += Af[i];
-        result = static_cast<float>(sum);
-        break;
-    }
-    case CUDNN_REDUCE_TENSOR_MUL: {
-        double prod = 1;
-        for (int i = 0; i < aTotal; ++i) prod *= Af[i];
-        result = static_cast<float>(prod);
-        break;
-    }
-    case CUDNN_REDUCE_TENSOR_MIN: {
-        result = Af[0];
-        for (int i = 1; i < aTotal; ++i) result = std::min(result, Af[i]);
-        break;
-    }
-    case CUDNN_REDUCE_TENSOR_MAX: {
-        result = Af[0];
-        for (int i = 1; i < aTotal; ++i) result = std::max(result, Af[i]);
-        break;
-    }
-    case CUDNN_REDUCE_TENSOR_AMAX: {
-        result = std::abs(Af[0]);
-        for (int i = 1; i < aTotal; ++i) result = std::max(result, std::abs(Af[i]));
-        break;
-    }
-    case CUDNN_REDUCE_TENSOR_AVG: {
-        double sum = 0;
-        for (int i = 0; i < aTotal; ++i) sum += Af[i];
-        result = static_cast<float>(sum / aTotal);
-        break;
-    }
-    case CUDNN_REDUCE_TENSOR_NORM1: {
-        double sum = 0;
-        for (int i = 0; i < aTotal; ++i) sum += std::abs(Af[i]);
-        result = static_cast<float>(sum);
-        break;
-    }
-    case CUDNN_REDUCE_TENSOR_NORM2: {
-        double sum = 0;
-        for (int i = 0; i < aTotal; ++i) sum += Af[i] * Af[i];
-        result = static_cast<float>(std::sqrt(sum));
-        break;
-    }
-    default: result = 0.f;
+    // Determine which dimensions are reduced (output dim == 1, input dim > 1)
+    bool reduceN = (ct->n == 1 && at->n > 1);
+    bool reduceC = (ct->c == 1 && at->c > 1);
+    bool reduceH = (ct->h == 1 && at->h > 1);
+    bool reduceW = (ct->w == 1 && at->w > 1);
+
+    // Per-output-element reduction
+    for (int on = 0; on < ct->n; ++on)
+    for (int oc = 0; oc < ct->c; ++oc)
+    for (int oh = 0; oh < ct->h; ++oh)
+    for (int ow = 0; ow < ct->w; ++ow) {
+        float result = 0.f;
+        int count = 0;
+
+        // Determine input ranges for this output element
+        int nStart = reduceN ? 0 : on;
+        int nEnd   = reduceN ? at->n : on + 1;
+        int cStart = reduceC ? 0 : oc;
+        int cEnd   = reduceC ? at->c : oc + 1;
+        int hStart = reduceH ? 0 : oh;
+        int hEnd   = reduceH ? at->h : oh + 1;
+        int wStart = reduceW ? 0 : ow;
+        int wEnd   = reduceW ? at->w : ow + 1;
+
+        switch (rd->op) {
+        case CUDNN_REDUCE_TENSOR_ADD: {
+            double sum = 0;
+            for (int n = nStart; n < nEnd; ++n)
+            for (int c = cStart; c < cEnd; ++c)
+            for (int h = hStart; h < hEnd; ++h)
+            for (int w = wStart; w < wEnd; ++w) {
+                sum += Af[((n * at->c + c) * at->h + h) * at->w + w];
+                ++count;
+            }
+            result = static_cast<float>(sum);
+            break;
+        }
+        case CUDNN_REDUCE_TENSOR_MUL: {
+            double prod = 1;
+            for (int n = nStart; n < nEnd; ++n)
+            for (int c = cStart; c < cEnd; ++c)
+            for (int h = hStart; h < hEnd; ++h)
+            for (int w = wStart; w < wEnd; ++w) {
+                prod *= Af[((n * at->c + c) * at->h + h) * at->w + w];
+                ++count;
+            }
+            result = static_cast<float>(prod);
+            break;
+        }
+        case CUDNN_REDUCE_TENSOR_MIN: {
+            bool first = true;
+            for (int n = nStart; n < nEnd; ++n)
+            for (int c = cStart; c < cEnd; ++c)
+            for (int h = hStart; h < hEnd; ++h)
+            for (int w = wStart; w < wEnd; ++w) {
+                float v = Af[((n * at->c + c) * at->h + h) * at->w + w];
+                if (first) { result = v; first = false; }
+                else result = std::min(result, v);
+                ++count;
+            }
+            break;
+        }
+        case CUDNN_REDUCE_TENSOR_MAX: {
+            bool first = true;
+            for (int n = nStart; n < nEnd; ++n)
+            for (int c = cStart; c < cEnd; ++c)
+            for (int h = hStart; h < hEnd; ++h)
+            for (int w = wStart; w < wEnd; ++w) {
+                float v = Af[((n * at->c + c) * at->h + h) * at->w + w];
+                if (first) { result = v; first = false; }
+                else result = std::max(result, v);
+                ++count;
+            }
+            break;
+        }
+        case CUDNN_REDUCE_TENSOR_AMAX: {
+            bool first = true;
+            for (int n = nStart; n < nEnd; ++n)
+            for (int c = cStart; c < cEnd; ++c)
+            for (int h = hStart; h < hEnd; ++h)
+            for (int w = wStart; w < wEnd; ++w) {
+                float v = std::abs(Af[((n * at->c + c) * at->h + h) * at->w + w]);
+                if (first) { result = v; first = false; }
+                else result = std::max(result, v);
+                ++count;
+            }
+            break;
+        }
+        case CUDNN_REDUCE_TENSOR_AVG: {
+            double sum = 0;
+            for (int n = nStart; n < nEnd; ++n)
+            for (int c = cStart; c < cEnd; ++c)
+            for (int h = hStart; h < hEnd; ++h)
+            for (int w = wStart; w < wEnd; ++w) {
+                sum += Af[((n * at->c + c) * at->h + h) * at->w + w];
+                ++count;
+            }
+            result = static_cast<float>(sum / count);
+            break;
+        }
+        case CUDNN_REDUCE_TENSOR_NORM1: {
+            double sum = 0;
+            for (int n = nStart; n < nEnd; ++n)
+            for (int c = cStart; c < cEnd; ++c)
+            for (int h = hStart; h < hEnd; ++h)
+            for (int w = wStart; w < wEnd; ++w) {
+                sum += std::abs(Af[((n * at->c + c) * at->h + h) * at->w + w]);
+                ++count;
+            }
+            result = static_cast<float>(sum);
+            break;
+        }
+        case CUDNN_REDUCE_TENSOR_NORM2: {
+            double sum = 0;
+            for (int n = nStart; n < nEnd; ++n)
+            for (int c = cStart; c < cEnd; ++c)
+            for (int h = hStart; h < hEnd; ++h)
+            for (int w = wStart; w < wEnd; ++w) {
+                float v = Af[((n * at->c + c) * at->h + h) * at->w + w];
+                sum += v * v;
+                ++count;
+            }
+            result = static_cast<float>(std::sqrt(sum));
+            break;
+        }
+        default: result = 0.f;
+        }
+
+        int cIdx = ((on * ct->c + oc) * ct->h + oh) * ct->w + ow;
+        Cf[cIdx] = a * result + b * Cf[cIdx];
     }
 
-    Cf[0] = a * result + b * Cf[0];
     return CUDNN_STATUS_SUCCESS;
 }
 

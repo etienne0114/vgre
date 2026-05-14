@@ -24,6 +24,7 @@ enum class TextureFilterMode : uint8_t { POINT, LINEAR, CUBIC, ANISOTROPIC };
 enum class TextureElementType : uint8_t {
   FLOAT32,
   FLOAT64,
+  FP16,
   INT8,
   INT16,
   INT32,
