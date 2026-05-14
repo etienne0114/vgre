@@ -5,7 +5,10 @@ add_library(vgre_api OBJECT
     cuda_ipc_memory.cpp
     cuda_virtual_memory.cpp
     cuda_external_semaphore.cpp
-    cublas_shim.cpp
+    cublas/cublas_core.cpp
+    cublas/cublas_level1.cpp
+    cublas/cublas_level2.cpp
+    cublas/cublas_level3.cpp
     cudnn/cudnn_core.cpp
     cudnn/cudnn_convolution.cpp
     cudnn/cudnn_activation.cpp
@@ -28,15 +31,15 @@ add_library(vgre_api OBJECT
 # be linked into vgre_cudart.so only (they reference CUDAModuleRegistry which
 # lives in cudart_shim.cpp, part of vgre_cudart, not libvgre.so).
 add_library(vgre_cudart_shims OBJECT
-    cudart_shim_memset_nd.cpp
-    cudart_shim_graph_nodes.cpp
-    cudart_shim_graph_introspection.cpp
-    cudart_shim_graph_exec.cpp
-    cudart_shim_graph_user_objects.cpp
-    cudart_shim_capture.cpp
-    cudart_shim_texture_objects.cpp
-    cudart_shim_device_attrs.cpp
-    cudart_shim_external_memory.cpp
+    cudart/cudart_shim_memset_nd.cpp
+    cudart/cudart_shim_graph_nodes.cpp
+    cudart/cudart_shim_graph_introspection.cpp
+    cudart/cudart_shim_graph_exec.cpp
+    cudart/cudart_shim_graph_user_objects.cpp
+    cudart/cudart_shim_capture.cpp
+    cudart/cudart_shim_texture_objects.cpp
+    cudart/cudart_shim_device_attrs.cpp
+    cudart/cudart_shim_external_memory.cpp
 )
 target_include_directories(vgre_cudart_shims PUBLIC
     ${PROJECT_SOURCE_DIR}/include

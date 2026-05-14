@@ -1,0 +1,721 @@
+// cuBLAS level3 API functions
+
+#include "cublas_internal.h"
+
+extern "C" {
+
+// ── SGEMM ────────────────────────────────────────────────────────────────────
+cublasStatus_t cublasSgemm_v2(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const float* alpha,
+    const float* A, int lda,
+    const float* B, int ldb,
+    const float* beta,
+    float* C, int ldc)
+{
+    if (!handle || !A || !B || !C || !alpha || !beta)
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+#if HAVE_CBLAS
+    CBLAS_TRANSPOSE tA = (transa == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
+    CBLAS_TRANSPOSE tB = (transb == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
+    // cuBLAS is column-major; swap A↔B and m↔n for row-major cblas call
+    cblas_sgemm(CblasRowMajor, tB, tA, n, m, k,
+                *alpha, B, ldb, A, lda, *beta, C, ldc);
+#else
+    // Column-major trick: cuBLAS (col-major) C[m×n] = op(A)*op(B) becomes
+    // row-major C[n×m] = op(B)*op(A) — swap A↔B and m↔n, keep transpose flags.
+    // Note: do NOT negate flags — just swap them along with the matrix swap.
+    bool tA = (transa != CUBLAS_OP_N);
+    bool tB = (transb != CUBLAS_OP_N);
+    refSgemm(tB, tA, n, m, k, *alpha, B, ldb, A, lda, *beta, C, ldc);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── DGEMM ────────────────────────────────────────────────────────────────────
+cublasStatus_t cublasDgemm_v2(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const double* alpha,
+    const double* A, int lda,
+    const double* B, int ldb,
+    const double* beta,
+    double* C, int ldc)
+{
+    if (!handle || !A || !B || !C || !alpha || !beta)
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+#if HAVE_CBLAS
+    CBLAS_TRANSPOSE tA = (transa == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
+    CBLAS_TRANSPOSE tB = (transb == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
+    cblas_dgemm(CblasRowMajor, tB, tA, n, m, k,
+                *alpha, B, ldb, A, lda, *beta, C, ldc);
+#else
+    bool tA = (transa != CUBLAS_OP_N);
+    bool tB = (transb != CUBLAS_OP_N);
+    refDgemm(tB, tA, n, m, k, *alpha, B, ldb, A, lda, *beta, C, ldc);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── TRSM ───────────────────────────────────────────────────────────────────
+cublasStatus_t cublasStrsm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag,
+    int m, int n, const float* alpha,
+    const float* A, int lda, float* B, int ldb)
+{
+    if (!handle || !alpha || !A || !B) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_strsm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag),
+                m, n, *alpha, A, lda, B, ldb);
+#else
+    refStrsm(left, upper, t, unit, m, n, *alpha, A, lda, B, ldb);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrsm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag,
+    int m, int n, const double* alpha,
+    const double* A, int lda, double* B, int ldb)
+{
+    if (!handle || !alpha || !A || !B) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_dtrsm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag),
+                m, n, *alpha, A, lda, B, ldb);
+#else
+    refDtrsm(left, upper, t, unit, m, n, *alpha, A, lda, B, ldb);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── SYRK ───────────────────────────────────────────────────────────────────
+cublasStatus_t cublasSsyrk_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    cublasOperation_t trans, int n, int k,
+    const float* alpha, const float* A, int lda,
+    const float* beta, float* C, int ldc)
+{
+    if (!handle || !alpha || !A || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+#if HAVE_CBLAS
+    cblas_ssyrk(CblasRowMajor, cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                n, k, *alpha, A, lda, *beta, C, ldc);
+#else
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            C[i*ldc+j] *= *beta;
+    if (!t) {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                float acc = 0;
+                for (int l = 0; l < k; ++l) acc += A[i*lda+l] * A[j*lda+l];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    } else {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                float acc = 0;
+                for (int l = 0; l < k; ++l) acc += A[l*lda+i] * A[l*lda+j];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsyrk_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    cublasOperation_t trans, int n, int k,
+    const double* alpha, const double* A, int lda,
+    const double* beta, double* C, int ldc)
+{
+    if (!handle || !alpha || !A || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+#if HAVE_CBLAS
+    cblas_dsyrk(CblasRowMajor, cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                n, k, *alpha, A, lda, *beta, C, ldc);
+#else
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            C[i*ldc+j] *= *beta;
+    if (!t) {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                double acc = 0;
+                for (int l = 0; l < k; ++l) acc += A[i*lda+l] * A[j*lda+l];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    } else {
+        for (int i = 0; i < n; ++i)
+            for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
+                double acc = 0;
+                for (int l = 0; l < k; ++l) acc += A[l*lda+i] * A[l*lda+j];
+                C[i*ldc+j] += (*alpha) * acc;
+            }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── TRMM ───────────────────────────────────────────────────────────────────
+cublasStatus_t cublasStrmm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag,
+    int m, int n, const float* alpha,
+    const float* A, int lda, float* B, int ldb)
+{
+    if (!handle || !alpha || !A || !B) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_strmm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag),
+                m, n, *alpha, A, lda, B, ldb);
+#else
+    std::vector<float> B0(m*n);
+    for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j)
+            B0[i*n+j] = B[i*ldb+j];
+    if (left) {
+        if (!t) {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        float t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = i+1; k < m; ++k) t_ += A[i*lda+k] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        float t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = 0; k < i; ++k) t_ += A[i*lda+k] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        float t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = 0; k < i; ++k) t_ += A[k*lda+i] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        float t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = i+1; k < m; ++k) t_ += A[k*lda+i] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        }
+    } else {
+        if (!t) {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        float t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = 0; k < j; ++k) t_ += B0[i*n+k] * A[k*lda+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        float t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = j+1; k < n; ++k) t_ += B0[i*n+k] * A[k*lda+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        float t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = j+1; k < n; ++k) t_ += B0[i*n+k] * A[j*lda+k];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        float t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = 0; k < j; ++k) t_ += B0[i*n+k] * A[j*lda+k];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrmm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag,
+    int m, int n, const double* alpha,
+    const double* A, int lda, double* B, int ldb)
+{
+    if (!handle || !alpha || !A || !B) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool t = (trans != CUBLAS_OP_N);
+    bool unit = (diag == CUBLAS_DIAG_UNIT);
+#if HAVE_CBLAS
+    cblas_dtrmm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
+                cublasToCblasDiag(diag),
+                m, n, *alpha, A, lda, B, ldb);
+#else
+    std::vector<double> B0(m*n);
+    for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j)
+            B0[i*n+j] = B[i*ldb+j];
+    if (left) {
+        if (!t) {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        double t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = i+1; k < m; ++k) t_ += A[i*lda+k] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        double t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = 0; k < i; ++k) t_ += A[i*lda+k] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int j = 0; j < n; ++j)
+                    for (int i = 0; i < m; ++i) {
+                        double t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = 0; k < i; ++k) t_ += A[k*lda+i] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int j = 0; j < n; ++j)
+                    for (int i = m-1; i >= 0; --i) {
+                        double t_ = unit ? B0[i*n+j] : A[i*lda+i] * B0[i*n+j];
+                        for (int k = i+1; k < m; ++k) t_ += A[k*lda+i] * B0[k*n+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        }
+    } else {
+        if (!t) {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        double t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = 0; k < j; ++k) t_ += B0[i*n+k] * A[k*lda+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        double t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = j+1; k < n; ++k) t_ += B0[i*n+k] * A[k*lda+j];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        } else {
+            if (upper) {
+                for (int i = 0; i < m; ++i)
+                    for (int j = n-1; j >= 0; --j) {
+                        double t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = j+1; k < n; ++k) t_ += B0[i*n+k] * A[j*lda+k];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            } else {
+                for (int i = 0; i < m; ++i)
+                    for (int j = 0; j < n; ++j) {
+                        double t_ = unit ? B0[i*n+j] : A[j*lda+j] * B0[i*n+j];
+                        for (int k = 0; k < j; ++k) t_ += B0[i*n+k] * A[j*lda+k];
+                        B[i*ldb+j] = (*alpha) * t_;
+                    }
+            }
+        }
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── SYMM ───────────────────────────────────────────────────────────────────
+cublasStatus_t cublasSsymm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    int m, int n, const float* alpha,
+    const float* A, int lda, const float* B, int ldb,
+    const float* beta, float* C, int ldc)
+{
+    if (!handle || !alpha || !A || !B || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+#if HAVE_CBLAS
+    cblas_ssymm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                m, n, *alpha, A, lda, B, ldb, *beta, C, ldc);
+#else
+    refSsymm(left, upper, m, n, *alpha, A, lda, B, ldb, *beta, C, ldc);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsymm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    int m, int n, const double* alpha,
+    const double* A, int lda, const double* B, int ldb,
+    const double* beta, double* C, int ldc)
+{
+    if (!handle || !alpha || !A || !B || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+#if HAVE_CBLAS
+    cblas_dsymm(CblasRowMajor,
+                left ? CblasLeft : CblasRight,
+                cublasToCblasUplo(uplo),
+                m, n, *alpha, A, lda, B, ldb, *beta, C, ldc);
+#else
+    refDsymm(left, upper, m, n, *alpha, A, lda, B, ldb, *beta, C, ldc);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── Batched SGEMM ─────────────────────────────────────────────────────────────
+// cublasSgemmBatched: array-of-pointers form.
+// Aarray[i], Barray[i], Carray[i] are independent matrices for batch item i.
+cublasStatus_t cublasSgemmBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const float* alpha,
+    const float* const Aarray[], int lda,
+    const float* const Barray[], int ldb,
+    const float* beta,
+    float* const Carray[], int ldc,
+    int batchCount)
+{
+    if (!handle || !Aarray || !Barray || !Carray || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    bool tA = (transa != CUBLAS_OP_N);
+    bool tB = (transb != CUBLAS_OP_N);
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b] || !Barray[b] || !Carray[b]) continue;
+#if HAVE_CBLAS
+        CBLAS_TRANSPOSE cA = tA ? CblasTrans : CblasNoTrans;
+        CBLAS_TRANSPOSE cB = tB ? CblasTrans : CblasNoTrans;
+        cblas_sgemm(CblasRowMajor, cB, cA, n, m, k,
+                    *alpha, Barray[b], ldb, Aarray[b], lda, *beta, Carray[b], ldc);
+#else
+        refSgemm(tB, tA, n, m, k, *alpha, Barray[b], ldb, Aarray[b], lda, *beta, Carray[b], ldc);
+#endif
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// cublasSgemmStridedBatched: stride-based contiguous-storage form.
+// Matrix i starts at A + i*strideA, B + i*strideB, C + i*strideC.
+cublasStatus_t cublasSgemmStridedBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const float* alpha,
+    const float* A, int lda, long long int strideA,
+    const float* B, int ldb, long long int strideB,
+    const float* beta,
+    float* C, int ldc, long long int strideC,
+    int batchCount)
+{
+    if (!handle || !A || !B || !C || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    bool tA = (transa != CUBLAS_OP_N);
+    bool tB = (transb != CUBLAS_OP_N);
+    for (int b = 0; b < batchCount; ++b) {
+        const float* Ab = A + b * strideA;
+        const float* Bb = B + b * strideB;
+        float*       Cb = C + b * strideC;
+#if HAVE_CBLAS
+        CBLAS_TRANSPOSE cA = tA ? CblasTrans : CblasNoTrans;
+        CBLAS_TRANSPOSE cB = tB ? CblasTrans : CblasNoTrans;
+        cblas_sgemm(CblasRowMajor, cB, cA, n, m, k,
+                    *alpha, Bb, ldb, Ab, lda, *beta, Cb, ldc);
+#else
+        refSgemm(tB, tA, n, m, k, *alpha, Bb, ldb, Ab, lda, *beta, Cb, ldc);
+#endif
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── Batched DGEMM ─────────────────────────────────────────────────────────────
+cublasStatus_t cublasDgemmBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const double* alpha,
+    const double* const Aarray[], int lda,
+    const double* const Barray[], int ldb,
+    const double* beta,
+    double* const Carray[], int ldc,
+    int batchCount)
+{
+    if (!handle || !Aarray || !Barray || !Carray || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    bool tA = (transa != CUBLAS_OP_N);
+    bool tB = (transb != CUBLAS_OP_N);
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b] || !Barray[b] || !Carray[b]) continue;
+#if HAVE_CBLAS
+        CBLAS_TRANSPOSE cA = tA ? CblasTrans : CblasNoTrans;
+        CBLAS_TRANSPOSE cB = tB ? CblasTrans : CblasNoTrans;
+        cblas_dgemm(CblasRowMajor, cB, cA, n, m, k,
+                    *alpha, Barray[b], ldb, Aarray[b], lda, *beta, Carray[b], ldc);
+#else
+        refDgemm(tB, tA, n, m, k, *alpha, Barray[b], ldb, Aarray[b], lda, *beta, Carray[b], ldc);
+#endif
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDgemmStridedBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const double* alpha,
+    const double* A, int lda, long long int strideA,
+    const double* B, int ldb, long long int strideB,
+    const double* beta,
+    double* C, int ldc, long long int strideC,
+    int batchCount)
+{
+    if (!handle || !A || !B || !C || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    bool tA = (transa != CUBLAS_OP_N);
+    bool tB = (transb != CUBLAS_OP_N);
+    for (int b = 0; b < batchCount; ++b) {
+        const double* Ab = A + b * strideA;
+        const double* Bb = B + b * strideB;
+        double*       Cb = C + b * strideC;
+#if HAVE_CBLAS
+        CBLAS_TRANSPOSE cA = tA ? CblasTrans : CblasNoTrans;
+        CBLAS_TRANSPOSE cB = tB ? CblasTrans : CblasNoTrans;
+        cblas_dgemm(CblasRowMajor, cB, cA, n, m, k,
+                    *alpha, Bb, ldb, Ab, lda, *beta, Cb, ldc);
+#else
+        refDgemm(tB, tA, n, m, k, *alpha, Bb, ldb, Ab, lda, *beta, Cb, ldc);
+#endif
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── HGEMM (FP16) — route through FP32 with cast ──────────────────────────────
+// cuBLAS uses __half (16-bit); we widen to float, compute, then narrow back.
+cublasStatus_t cublasHgemm(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const void* alpha,  // __half*
+    const void* A, int lda,
+    const void* B, int ldb,
+    const void* beta,   // __half*
+    void*       C, int ldc)
+{
+    if (!handle || !A || !B || !C || !alpha || !beta)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    // Interpret __half as uint16_t; convert via IEEE-754 bit-pattern
+    auto half_to_float = [](uint16_t h) -> float {
+        uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                        (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
+                         (static_cast<uint32_t>((h >> 10) & 0x1f) + (127 - 15)) << 23) |
+                        (static_cast<uint32_t>(h & 0x3ff) << 13);
+        float f; std::memcpy(&f, &bits, 4); return f;
+    };
+    auto float_to_half = [](float f) -> uint16_t {
+        uint32_t bits; std::memcpy(&bits, &f, 4);
+        uint16_t sign = (bits >> 16) & 0x8000;
+        int exp = ((bits >> 23) & 0xff) - 127 + 15;
+        uint16_t mant = (bits >> 13) & 0x3ff;
+        if (exp <= 0) return sign;
+        if (exp >= 31) return sign | 0x7c00;
+        return sign | (static_cast<uint16_t>(exp) << 10) | mant;
+    };
+
+    uint16_t ah, bh;
+    std::memcpy(&ah, alpha, 2); std::memcpy(&bh, beta, 2);
+    float fa = half_to_float(ah), fb = half_to_float(bh);
+
+    const size_t szA = (transa == CUBLAS_OP_N ? m * lda : k * lda);
+    const size_t szB = (transb == CUBLAS_OP_N ? k * ldb : n * ldb);
+    const size_t szC = static_cast<size_t>(m) * ldc;
+
+    std::vector<float> fA(szA), fB(szB), fC(szC);
+    const uint16_t* pA = static_cast<const uint16_t*>(A);
+    const uint16_t* pB = static_cast<const uint16_t*>(B);
+    uint16_t*       pC = static_cast<uint16_t*>(C);
+
+    for (size_t i = 0; i < szA; ++i) fA[i] = half_to_float(pA[i]);
+    for (size_t i = 0; i < szB; ++i) fB[i] = half_to_float(pB[i]);
+    for (size_t i = 0; i < szC; ++i) fC[i] = half_to_float(pC[i]);
+
+    bool tA = (transa != CUBLAS_OP_N), tB = (transb != CUBLAS_OP_N);
+    refSgemm(tB, tA, n, m, k, fa, fB.data(), ldb, fA.data(), lda, fb, fC.data(), ldc);
+
+    for (size_t i = 0; i < szC; ++i) pC[i] = float_to_half(fC[i]);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+
+// ── cublasGemmEx (mixed-precision GEMM including INT8) ────────────────────────
+// cudaDataType values (mirror cuda_fp16.h / cuda_runtime_api.h)
+enum vgre_cudaDataType {
+  CUDA_R_16F = 2, CUDA_C_16F = 6, CUDA_R_16BF = 14, CUDA_C_16BF = 15,
+  CUDA_R_32F = 0, CUDA_C_32F = 4, CUDA_R_64F  = 1,  CUDA_C_64F  = 5,
+  CUDA_R_8I  = 3, CUDA_C_8I  = 7, CUDA_R_8U   = 8,  CUDA_C_8U   = 9,
+  CUDA_R_32I = 10, CUDA_C_32I = 11,
+};
+
+// INT8 → float dequantize
+static inline float _i8_to_f32(const void* ptr, int idx) {
+  return static_cast<float>(static_cast<const int8_t*>(ptr)[idx]);
+}
+
+cublasStatus_t cublasGemmEx(cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const void *alpha,
+    const void *A, int Atype, int lda,
+    const void *B, int Btype, int ldb,
+    const void *beta,
+    void *C, int Ctype, int ldc,
+    int computeType, int algo)
+{
+    (void)algo; (void)computeType;
+    if (!handle || !A || !B || !C || !alpha || !beta)
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+    // For INT8 inputs: dequantize to float, run refSgemm, convert output.
+    if (Atype == (int)CUDA_R_8I || Btype == (int)CUDA_R_8I) {
+        float alphaF = *(const float*)alpha;
+        float betaF  = *(const float*)beta;
+        // Dequantize A
+        std::vector<float> Af(m * k), Bf(k * n);
+        for (int i = 0; i < m * k; ++i) Af[i] = _i8_to_f32(A, i);
+        for (int i = 0; i < k * n; ++i) Bf[i] = _i8_to_f32(B, i);
+        if (Ctype == (int)CUDA_R_32I) {
+            // INT8 x INT8 → INT32: compute in float, round to int32
+            std::vector<float> Cf(m * n, 0.f);
+            refSgemm(transa, transb, m, n, k, 1.f, Af.data(), lda, Bf.data(), ldb, 0.f, Cf.data(), ldc);
+            int32_t* Ci = static_cast<int32_t*>(C);
+            for (int i = 0; i < m * n; ++i)
+                Ci[i] = static_cast<int32_t>(std::round(alphaF * Cf[i] + betaF * Ci[i]));
+        } else {
+            // INT8 → float output
+            float* Cf = static_cast<float*>(C);
+            refSgemm(transa, transb, m, n, k, alphaF, Af.data(), lda, Bf.data(), ldb, betaF, Cf, ldc);
+        }
+        return CUBLAS_STATUS_SUCCESS;
+    }
+
+    // FP32 passthrough
+    if (Atype == (int)CUDA_R_32F && Btype == (int)CUDA_R_32F && Ctype == (int)CUDA_R_32F) {
+        return cublasSgemm_v2(handle, transa, transb, m, n, k,
+            (const float*)alpha, (const float*)A, lda,
+            (const float*)B, ldb, (const float*)beta, (float*)C, ldc);
+    }
+
+    // FP64 passthrough
+    if (Atype == (int)CUDA_R_64F && Btype == (int)CUDA_R_64F && Ctype == (int)CUDA_R_64F) {
+        return cublasDgemm_v2(handle, transa, transb, m, n, k,
+            (const double*)alpha, (const double*)A, lda,
+            (const double*)B, ldb, (const double*)beta, (double*)C, ldc);
+    }
+
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+// cublasGemmBatchedEx: loop over batch, dispatch to cublasGemmEx per item
+cublasStatus_t cublasGemmBatchedEx(cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const void *alpha,
+    const void **Aarray, int Atype, int lda,
+    const void **Barray, int Btype, int ldb,
+    const void *beta,
+    void **Carray, int Ctype, int ldc,
+    int batchCount, int computeType, int algo)
+{
+    for (int b = 0; b < batchCount; ++b) {
+        cublasStatus_t r = cublasGemmEx(handle, transa, transb, m, n, k,
+            alpha, Aarray[b], Atype, lda,
+            Barray[b], Btype, ldb, beta,
+            Carray[b], Ctype, ldc, computeType, algo);
+        if (r != CUBLAS_STATUS_SUCCESS) return r;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// TF32 compute mode — treat as FP32 (TF32 precision reduction not emulated)
+cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const void *alpha,
+    const void *A, int Atype, int lda, long long strideA,
+    const void *B, int Btype, int ldb, long long strideB,
+    const void *beta,
+    void *C, int Ctype, int ldc, long long strideC,
+    int batchCount, int computeType, int algo)
+{
+    for (int b = 0; b < batchCount; ++b) {
+        const void* Ab = static_cast<const char*>(A) + b * strideA * (Atype == (int)CUDA_R_8I ? 1 : 4);
+        const void* Bb = static_cast<const char*>(B) + b * strideB * (Btype == (int)CUDA_R_8I ? 1 : 4);
+        void*       Cb = static_cast<char*>(C)       + b * strideC * (Ctype == (int)CUDA_R_32I ? 4 : 4);
+        cublasStatus_t r = cublasGemmEx(handle, transa, transb, m, n, k,
+            alpha, Ab, Atype, lda, Bb, Btype, ldb, beta, Cb, Ctype, ldc, computeType, algo);
+        if (r != CUBLAS_STATUS_SUCCESS) return r;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── Legacy v1 alias ──────────────────────────────────────────────────────────
+cublasStatus_t cublasSgemm(cublasHandle_t h, cublasOperation_t ta, cublasOperation_t tb,
+    int m,int n,int k, const float* a, const float* A, int lda,
+    const float* B, int ldb, const float* b, float* C, int ldc) {
+    return cublasSgemm_v2(h,ta,tb,m,n,k,a,A,lda,B,ldb,b,C,ldc);
+}
+
+} // extern "C"
+

@@ -421,8 +421,8 @@ set_target_properties(vgre PROPERTIES
 
 # ── CUDART Shim (LD_PRELOAD wrapper) ────────────────────────────────────────
 add_library(vgre_cudart SHARED
-    src/api/cudart_shim.cpp
-    src/api/cudart_shim_stream.cpp
+    src/api/cudart/cudart_shim.cpp
+    src/api/cudart/cudart_shim_stream.cpp
     src/api/cuda_driver_shim.cpp
     src/api/cuda_virtual_memory.cpp
     src/api/cuda_external_semaphore.cpp

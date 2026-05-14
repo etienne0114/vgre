@@ -687,12 +687,12 @@ src/core/graph/graph_manager_exec_update_v2.cpp     (100–150 lines)
 
 | Current File | Lines | Split Into |
 |---|---|---|
-| `src/api/cudart_shim.cpp` | ~1,300 | `cudart_shim_stream_sync.cpp`, `cudart_shim_symbols.cpp`, `cudart_shim_arrays.cpp`, `cudart_shim_texture_objects.cpp`, `cudart_shim_graphs.cpp`, `cudart_shim_capture.cpp`, `cudart_shim_device_attrs.cpp`, `cudart_shim_external_memory.cpp` |
+| `src/api/cudart_shim.cpp` | ~1,300 | **DONE** — all CUDART shim files grouped under `src/api/cudart/` (`cudart_shim.cpp`, `cudart_shim_stream.cpp`, `cudart_shim_memset_nd.cpp`, `cudart_shim_graph_nodes.cpp`, `cudart_shim_graph_introspection.cpp`, `cudart_shim_graph_exec.cpp`, `cudart_shim_graph_user_objects.cpp`, `cudart_shim_capture.cpp`, `cudart_shim_texture_objects.cpp`, `cudart_shim_device_attrs.cpp`, `cudart_shim_external_memory.cpp`, `cudart_graph_internal.h`) |
 | `src/api/cuda_driver_shim.cpp` | ~450 | `cuda_driver_shim_memory.cpp`, `cuda_driver_shim_memcpy.cpp`, `cuda_driver_shim_stream.cpp`, `cuda_driver_shim_context.cpp`, `cuda_driver_shim_texref.cpp` |
-| `src/api/cublas_shim.cpp` | ~620 | `cublas_shim_level1.cpp`, `cublas_shim_level2.cpp`, `cublas_shim_level3.cpp`, `cublas_level2_backend.cpp`, `cublas_level3_backend.cpp` |
-| `src/api/cudnn_shim.cpp` | ~2,337 | `cudnn/cudnn_internal.h` (shared types, enums, structs, helpers), `cudnn/cudnn_core.cpp` (handle + all descriptors), `cudnn/cudnn_convolution.cpp` (forward + backward data/filter), `cudnn/cudnn_activation.cpp`, `cudnn/cudnn_softmax.cpp`, `cudnn/cudnn_pooling.cpp`, `cudnn/cudnn_batchnorm.cpp` (inference/training/backward), `cudnn/cudnn_dropout.cpp`, `cudnn/cudnn_tensor_ops.cpp` (OpTensor, ReduceTensor, TransformTensor), `cudnn/cudnn_rnn.cpp`, `cudnn/cudnn_attention.cpp` |
-| `src/core/graph_manager.cpp` | ~1,000 | `graph_manager_kernel_nodes.cpp`, `graph_manager_memset_nodes.cpp`, `graph_manager_host_nodes.cpp`, `graph_manager_introspection.cpp`, `graph_manager_exec_update.cpp`, `graph_manager_dependencies.cpp`, `graph_manager_user_objects.cpp` |
-| `src/compiler/ptx_translator.cpp` | ~510 | `ptx_texture_ops.cpp`, `ptx_surface_ops.cpp`, `ptx_shared_atomics.cpp`, `ptx_conversion.cpp`, `ptx_hopper_tma_extended.cpp` |
+| `src/api/cublas_shim.cpp` | ~2,309 | **DONE** — `cublas/cublas_internal.h` (shared types, enums, CBLAS helpers, reference GEMM), `cublas/cublas_core.cpp` (handle + stream/mode utilities + legacy v1 aliases), `cublas/cublas_level1.cpp`, `cublas/cublas_level2.cpp`, `cublas/cublas_level3.cpp` |
+| `src/api/cudnn_shim.cpp` | ~2,337 | **DONE** — `cudnn/cudnn_internal.h` (shared types, enums, structs, helpers), `cudnn/cudnn_core.cpp` (handle + all descriptors), `cudnn/cudnn_convolution.cpp` (forward + backward data/filter), `cudnn/cudnn_activation.cpp`, `cudnn/cudnn_softmax.cpp`, `cudnn/cudnn_pooling.cpp`, `cudnn/cudnn_batchnorm.cpp` (inference/training/backward), `cudnn/cudnn_dropout.cpp`, `cudnn/cudnn_tensor_ops.cpp` (OpTensor, ReduceTensor, TransformTensor), `cudnn/cudnn_rnn.cpp`, `cudnn/cudnn_attention.cpp` |
+| `src/core/graph_manager.cpp` | ~933 | **DONE** — `graph/graph_manager.cpp` (core), `graph/graph_manager_extended_nodes.cpp`, `graph/graph_manager_introspection.cpp`, `graph/graph_manager_exec_update.cpp`, `graph/graph_manager_dependencies.cpp` |
+| `src/compiler/ptx_translator.cpp` | ~607 | **DONE** — `ptx/ptx_translator_internal.h` (shared types, helpers), `ptx/ptx_translator_map.cpp` (opcode translation map), `ptx/ptx_translator.cpp` (translateInstruction/translateBlock/translate entry points) |
 
 ---
 
