@@ -238,6 +238,27 @@ cudaError_t CUDAInterceptor::graphExecUpdate(cudaGraphExec_t hGraphExec, cudaGra
   return convertResult(r);
 }
 
+cudaError_t CUDAInterceptor::graphExecUpdateV2(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
+                                              const cudaGraphNode_t *updateNodeList, size_t updateNodeListSize,
+                                              cudaGraphNode_t *hErrorNode_out, cudaGraphExecUpdateResult *updateResult_out) {
+  if (!initialized_ || !core::RuntimeEngine::instance().isInitialized()) return cudaErrorNotInitialized;
+
+  std::vector<uint64_t> nodeIds;
+  if (updateNodeList && updateNodeListSize > 0) {
+      nodeIds.reserve(updateNodeListSize);
+      for (size_t i = 0; i < updateNodeListSize; ++i)
+          nodeIds.push_back(updateNodeList[i]);
+  }
+  auto r = core::RuntimeEngine::instance().graphUpdateExecV2(hGraphExec, hGraph, nodeIds);
+  if (r == VGREResult::SUCCESS && updateResult_out) {
+      *updateResult_out = cudaGraphExecUpdateSuccess;
+  } else if (updateResult_out) {
+      *updateResult_out = cudaGraphExecUpdateError;
+      if (hErrorNode_out) *hErrorNode_out = 0;
+  }
+  return convertResult(r);
+}
+
 } // namespace api
 } // namespace vgre
 

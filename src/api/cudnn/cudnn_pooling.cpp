@@ -18,11 +18,24 @@ cudnnStatus_t cudnnPoolingForward(
     float a=*(const float*)alpha, b=*(const float*)beta;
     const float* xf=(const float*)x; float* yf=(float*)y;
 
+    bool isInt8 = (xt->dtype == CUDNN_DATA_INT8 || xt->dtype == CUDNN_DATA_INT8x4 ||
+                   xt->dtype == CUDNN_DATA_INT8x32);
+    int xElem = xt->n * xt->c * xt->h * xt->w;
+    std::vector<float> xFloat;
+    if (isInt8) {
+        float scale = (a > 1e-8f) ? a : (1.f / 128.f);
+        xFloat.resize(xElem);
+        const int8_t* xi = (const int8_t*)x;
+        for (int i = 0; i < xElem; ++i) xFloat[i] = vgre_dequant_i8(xi[i], scale);
+        xf = xFloat.data();
+    }
+
     int outH=(xt->h+2*p->pad_h-p->win_h)/p->str_h+1;
     int outW=(xt->w+2*p->pad_w-p->win_w)/p->str_w+1;
     bool isMax=(p->mode==CUDNN_POOLING_MAX||p->mode==CUDNN_POOLING_MAX_DETERMINISTIC);
     bool excludePad=(p->mode==CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING);
 
+    std::vector<float> tmp(xt->n * xt->c * outH * outW, 0.f);
     for(int n=0; n<xt->n; ++n)
     for(int c=0; c<xt->c; ++c)
     for(int oh=0; oh<outH; ++oh)
@@ -41,7 +54,19 @@ cudnnStatus_t cudnnPoolingForward(
         if(!isMax && cnt>0) acc/=static_cast<float>(cnt);
         else if(!isMax && cnt==0) acc=0.f;
         int oi=((n*xt->c+c)*outH+oh)*outW+ow;
-        yf[oi]=a*acc+b*yf[oi];
+        tmp[oi] = acc;
+    }
+
+    int yElem = xt->n * xt->c * outH * outW;
+    if (isInt8) {
+        float outScale = (a > 1e-8f) ? a : (1.f / 128.f);
+        float invOutScale = 1.f / outScale;
+        int8_t* yi = (int8_t*)y;
+        for (int i = 0; i < yElem; ++i)
+            yi[i] = vgre_quant_f32_to_i8(tmp[i], invOutScale);
+    } else {
+        for (int i = 0; i < yElem; ++i)
+            yf[i] = a * tmp[i] + b * yf[i];
     }
     return CUDNN_STATUS_SUCCESS;
 }
@@ -67,6 +92,24 @@ cudnnStatus_t cudnnPoolingBackward(
     const float* dyf=(const float*)dy;
     float* dxf=(float*)dx;
 
+    bool isInt8 = (xt->dtype == CUDNN_DATA_INT8 || xt->dtype == CUDNN_DATA_INT8x4 ||
+                   xt->dtype == CUDNN_DATA_INT8x32);
+    int xElem = xt->n * xt->c * xt->h * xt->w;
+    int yElem = yt->n * yt->c * yt->h * yt->w;
+    std::vector<float> xFloat, dyFloat;
+    if (isInt8) {
+        float scale = (a > 1e-8f) ? a : (1.f / 128.f);
+        xFloat.resize(xElem);
+        dyFloat.resize(yElem);
+        const int8_t* xi = (const int8_t*)x;
+        const int8_t* dyi = (const int8_t*)dy;
+        for (int i = 0; i < xElem; ++i) xFloat[i] = vgre_dequant_i8(xi[i], scale);
+        for (int i = 0; i < yElem; ++i) dyFloat[i] = vgre_dequant_i8(dyi[i], scale);
+        xf = xFloat.data();
+        dyf = dyFloat.data();
+        dxf = nullptr; // accumulate into tmp, quantize at end
+    }
+
     int outH=(xt->h+2*p->pad_h-p->win_h)/p->str_h+1;
     int outW=(xt->w+2*p->pad_w-p->win_w)/p->str_w+1;
     bool isMax=(p->mode==CUDNN_POOLING_MAX||p->mode==CUDNN_POOLING_MAX_DETERMINISTIC);
@@ -80,10 +123,14 @@ cudnnStatus_t cudnnPoolingBackward(
         return CUDNN_STATUS_INVALID_VALUE;
 
     int xSize = xt->n * xt->c * xt->h * xt->w;
-    if (b != 0.0f) {
-        for (int i=0; i<xSize; ++i) dxf[i] = b * dxf[i];
-    } else {
-        std::memset(dxf, 0, xSize*sizeof(float));
+    std::vector<float> dxFloat(xSize, 0.f);
+    float* dxPtr = isInt8 ? dxFloat.data() : dxf;
+    if (!isInt8) {
+        if (b != 0.0f) {
+            for (int i=0; i<xSize; ++i) dxf[i] = b * dxf[i];
+        } else {
+            std::memset(dxf, 0, xSize*sizeof(float));
+        }
     }
 
     std::vector<float> tmp(xSize, 0.f);
@@ -133,7 +180,14 @@ cudnnStatus_t cudnnPoolingBackward(
         }
     }
 
-    for (int i=0; i<xSize; ++i) dxf[i] += tmp[i];
+    for (int i=0; i<xSize; ++i) dxPtr[i] += tmp[i];
+    if (isInt8) {
+        float outScale = (a > 1e-8f) ? a : (1.f / 128.f);
+        float invOutScale = 1.f / outScale;
+        int8_t* dxi = (int8_t*)dx;
+        for (int i = 0; i < xSize; ++i)
+            dxi[i] = vgre_quant_f32_to_i8(dxPtr[i], invOutScale);
+    }
     return CUDNN_STATUS_SUCCESS;
 }
 

@@ -422,6 +422,10 @@ public:
 
   cudaError_t graphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
                               cudaGraphNode_t *hErrorNode_out, cudaGraphExecUpdateResult *updateResult_out);
+  // Phase 10: cudaGraphExecUpdate_v2 — targeted update with node list.
+  cudaError_t graphExecUpdateV2(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
+                                const cudaGraphNode_t *updateNodeList, size_t updateNodeListSize,
+                                cudaGraphNode_t *hErrorNode_out, cudaGraphExecUpdateResult *updateResult_out);
 
   // Singleton
   static CUDAInterceptor &instance();

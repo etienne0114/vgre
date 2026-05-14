@@ -77,7 +77,8 @@ cudnnStatus_t cudnnConvolutionForward(
     auto* yt=(TensorDesc*)yDesc;
     float a = *(const float*)alpha, b = *(const float*)beta;
 
-    bool isInt8 = (xt->dtype == CUDNN_DATA_INT8 || xt->dtype == CUDNN_DATA_INT8x4);
+    bool isInt8 = (xt->dtype == CUDNN_DATA_INT8 || xt->dtype == CUDNN_DATA_INT8x4 ||
+                   xt->dtype == CUDNN_DATA_INT8x32);
     int xElem = xt->n * xt->c * xt->h * xt->w;
     int wElem = ft->k * ft->c * ft->r * ft->s;
     std::vector<float> xFloat, wFloat;

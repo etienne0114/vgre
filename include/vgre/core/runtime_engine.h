@@ -164,6 +164,9 @@ public:
   VGREResult streamEndCapture(StreamId stream, GraphId &outGraph);
   VGREResult graphInstantiate(GraphId graph, GraphExecId &outExec);
   VGREResult graphUpdateExec(GraphExecId exec, GraphId graph);
+  // Phase 10: cudaGraphExecUpdate_v2 — targeted update of specific nodes only.
+  VGREResult graphUpdateExecV2(GraphExecId exec, GraphId graph,
+                              const std::vector<uint64_t> &nodeIds);
   VGREResult graphLaunch(GraphExecId exec, StreamId stream);
   VGREResult graphDestroy(GraphId graph);
   VGREResult graphExecDestroy(GraphExecId exec);

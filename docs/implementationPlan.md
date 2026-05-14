@@ -971,12 +971,38 @@ tests/core/texture/        # Texture/surface object tests
 
 ### Phase 10 — CDP, Profiling, Advanced Formats, Graph Updates
 
+**Status**: **DONE**
+
+**10.1 CDP full API**
+- Added `cudaGetParameterBufferV2(size_t alignment, size_t size)` → `vgre_cdp_get_param_buffer_v2` with `std::aligned_alloc` fallback for large alignments.
+- Added `cudaLaunchDeviceV2(void* fn, void* paramBuf, const cudaLaunchConfig* config)` → `vgre_cdp_launch_device_v2` that unpacks config and delegates to v1.
+- Added device-side `cudaDeviceSynchronize()` → `vgre_cdp_device_synchronize()` which recursively drains child kernels via `CDPExecutor::deviceSynchronize()` until queue is empty.
+- Files: `include/vgre/runtime/cdp_executor.h`, `src/runtime/cdp_executor.cpp`, `include/vgre/compiler/cpu_cuda_env.h`
+
+**10.2 Profiling / CUPTI-equivalent**
+- Added `InstructionSample` struct tracking load/store/ALU/barrier/branch/other counts.
+- Added `InstructionSample instructions` to `ProfileEvent`; aggregated into `KernelStats.totalInstructions`, `avgInstructionsPerInvocation`, and `instructionMix`.
+- Added `RuntimeProfiler::recordInstructionSample()`, `estimateInstructions()`, `getInstructionMix()`.
+- Execution engine hooks JIT `estimatedInstructionCount` to populate instruction data at kernel launch.
+- Chrome trace JSON and profiler JSON exports now include `instructions` and `instruction_mix` fields.
+- Files: `include/vgre/advanced/runtime_profiler.h`, `src/advanced/runtime_profiler.cpp`, `src/core/runtime_engine_launch.cpp`
+
+**10.3 cuDNN INT8x4 / INT8x32 packed layouts**
+- Extended `cudnnConvolutionForward` to handle `CUDNN_DATA_INT8x32` (dequantize→FP32 compute→requantize).
+- Added INT8 paths to `cudnnPoolingForward/Backward` and `cudnnActivationForward/Backward` for `INT8/INT8x4/INT8x32`.
+- Files: `src/api/cudnn/cudnn_convolution.cpp`, `src/api/cudnn/cudnn_pooling.cpp`, `src/api/cudnn/cudnn_activation.cpp`
+
+**10.4 `cudaGraphExecUpdate_v2`**
+- Added `GraphManager::updateExecV2(execId, graphId, nodeIds)` which verifies and copies only the specified nodes.
+- Added `RuntimeEngine::graphUpdateExecV2()`, `CUDAInterceptor::graphExecUpdateV2()`, and `cudaGraphExecUpdate_v2()` cudart shim.
+- Files: `include/vgre/core/graph_manager.h`, `src/core/graph/graph_manager.cpp`, `include/vgre/core/runtime_engine.h`, `src/core/runtime_engine.cpp`, `include/vgre/api/cuda_interceptor.h`, `src/api/cuda_interceptor_graphs.cpp`, `src/api/cudart/cudart_shim.cpp`
+
 | # | Feature | Status | PR | Date |
 |---|---|---|---|---|
-| 10.1 | CDP full API (`cudaDeviceSynchronize`, `GetParameterBufferV2`, `LaunchDeviceV2`) | TODO | — | — |
-| 10.2 | Profiling / CUPTI-equivalent (kernel timeline, instruction sampler) | TODO | — | — |
-| 10.3 | cuDNN INT8x4 / INT8x32 packed layouts | TODO | — | — |
-| 10.4 | `cudaGraphExecUpdate_v2` | TODO | — | — |
+| 10.1 | CDP full API (`cudaDeviceSynchronize`, `GetParameterBufferV2`, `LaunchDeviceV2`) | **DONE** | — | 2026-05-14 |
+| 10.2 | Profiling / CUPTI-equivalent (kernel timeline, instruction sampler) | **DONE** | — | 2026-05-14 |
+| 10.3 | cuDNN INT8x4 / INT8x32 packed layouts | **DONE** | — | 2026-05-14 |
+| 10.4 | `cudaGraphExecUpdate_v2` | **DONE** | — | 2026-05-14 |
 
 ---
 

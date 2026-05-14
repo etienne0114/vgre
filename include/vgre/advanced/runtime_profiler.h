@@ -14,6 +14,20 @@
 namespace vgre {
 namespace advanced {
 
+// ── Instruction mix sample ───────────────────────────────────────────────
+struct InstructionSample {
+    uint64_t loadCount   = 0;
+    uint64_t storeCount  = 0;
+    uint64_t aluCount    = 0;
+    uint64_t barrierCount= 0;
+    uint64_t branchCount = 0;
+    uint64_t otherCount  = 0;
+
+    uint64_t total() const {
+        return loadCount + storeCount + aluCount + barrierCount + branchCount + otherCount;
+    }
+};
+
 // ── Profiling event ────────────────────────────────────────────────────────
 struct ProfileEvent {
     std::string kernelName;
@@ -25,6 +39,7 @@ struct ProfileEvent {
     dim3        gridDim;
     dim3        blockDim;
     int         threadsUsed     = 0;
+    InstructionSample instructions;  // Phase 10: instruction sampler (CUPTI-equivalent)
     std::chrono::steady_clock::time_point timestamp;
     uint64_t    timestamp_ms    = 0;
 };
@@ -41,6 +56,9 @@ struct KernelStats {
     double      maxTimeMs        = 0.0;
     double      avgThroughputGBps= 0.0;
     double      avgGflops        = 0.0;
+    uint64_t    totalInstructions= 0;
+    uint64_t    avgInstructionsPerInvocation = 0;
+    InstructionSample instructionMix; // aggregated across all invocations
 };
 
 // ── Runtime Profiler ───────────────────────────────────────────────────────
@@ -99,6 +117,21 @@ public:
      */
     VGREResult  exportOTLPToHTTP(const std::string& endpoint) const;
 
+    // ── Instruction sampler (CUPTI-equivalent) ─────────────────────────────
+    // Record an instruction-count sample for a kernel.  Called by the
+    // execution engine or JIT instrumentation to track per-kernel instruction mix.
+    void recordInstructionSample(const std::string& kernelName,
+                                  const InstructionSample& sample);
+
+    // Estimate instructions for a kernel launch based on grid/block size
+    // and a per-thread instruction count derived from static analysis.
+    void estimateInstructions(const std::string& kernelName,
+                              const dim3& gridDim, const dim3& blockDim,
+                              uint64_t instructionsPerThread);
+
+    // Get the aggregated instruction mix for a kernel.
+    InstructionSample getInstructionMix(const std::string& kernelName) const;
+
     // Reset
     void clear();
 
@@ -113,6 +146,8 @@ private:
     std::unordered_map<std::string, KernelStats>  stats_;
     std::unordered_map<std::string,
         std::chrono::steady_clock::time_point>    timers_;
+    // Phase 10: per-kernel accumulated instruction mix (CUPTI-equivalent)
+    std::unordered_map<std::string, InstructionSample> instructionMixes_;
     mutable std::recursive_mutex                  mutex_;
 };
 

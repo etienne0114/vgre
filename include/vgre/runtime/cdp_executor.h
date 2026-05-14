@@ -40,8 +40,15 @@ public:
     // Allocate a parameter buffer for device-side argument staging.
     void* allocParamBuffer(size_t bytes);
 
+    // V2: allocate with explicit alignment (rounded up to next power of two ≥ alignof(void*)).
+    void* allocParamBufferV2(size_t alignment, size_t bytes);
+
     // Free a parameter buffer (called after enqueue).
     void freeParamBuffer(void* ptr);
+
+    // Device-side cudaDeviceSynchronize: drain all pending child kernels
+    // recursively until the queue is empty.
+    void deviceSynchronize();
 
 private:
     CDPExecutor() = default;

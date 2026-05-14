@@ -66,6 +66,35 @@ void* CDPExecutor::allocParamBuffer(size_t bytes) {
     return p;
 }
 
+void* CDPExecutor::allocParamBufferV2(size_t alignment, size_t bytes) {
+    size_t minAlign = alignof(void*);
+    if (alignment < minAlign) alignment = minAlign;
+    // Round up to next power of two if not already
+    size_t pow2 = 1;
+    while (pow2 < alignment) pow2 <<= 1;
+    alignment = pow2;
+    void* p = nullptr;
+    if (alignment <= alignof(max_align_t)) {
+        p = std::aligned_alloc(alignment, bytes);
+    } else {
+        // Fallback: over-allocate and align manually
+        size_t extra = alignment - 1;
+        void* raw = std::malloc(bytes + extra + sizeof(void*));
+        if (raw) {
+            uintptr_t addr = reinterpret_cast<uintptr_t>(raw) + sizeof(void*);
+            addr = (addr + extra) & ~static_cast<uintptr_t>(extra);
+            p = reinterpret_cast<void*>(addr);
+            // Store raw pointer just before aligned address for free()
+            reinterpret_cast<void**>(p)[-1] = raw;
+        }
+    }
+    if (p) {
+        std::lock_guard<std::mutex> lk(mutex_);
+        paramBuffers_.push_back(p);
+    }
+    return p;
+}
+
 void CDPExecutor::freeParamBuffer(void* ptr) {
     if (!ptr) return;
     {
@@ -74,6 +103,15 @@ void CDPExecutor::freeParamBuffer(void* ptr) {
         if (it != paramBuffers_.end()) paramBuffers_.erase(it);
     }
     std::free(ptr);
+}
+
+void CDPExecutor::deviceSynchronize() {
+    // Recursively drain child kernels until no more are pending.
+    // Each drain may itself generate new child kernels (nested CDP).
+    while (hasPending()) {
+        VGREResult r = drainChildKernels();
+        if (r != VGREResult::SUCCESS) break;
+    }
 }
 
 } // namespace runtime
@@ -137,6 +175,36 @@ void vgre_cdp_launch_device(void* kernelFn, void* paramBuf,
 // Called by cpu_parallel_executor after each block to drain child kernels.
 void vgre_cdp_drain() {
     vgre::runtime::CDPExecutor::instance().drainChildKernels();
+}
+
+// cudaGetParameterBufferV2: aligned staging buffer for child kernel args.
+void* vgre_cdp_get_param_buffer_v2(size_t alignment, size_t bytes) {
+    return vgre::runtime::CDPExecutor::instance().allocParamBufferV2(alignment, bytes);
+}
+
+// VGRE LaunchConfig mirrors cudaLaunchConfig (dim3 grid/block, smem, stream, cooperative).
+struct vgre_cdp_launch_config {
+    uint32_t gridX, gridY, gridZ;
+    uint32_t blockX, blockY, blockZ;
+    size_t   dynamicSmemBytes;
+    uint64_t stream;
+    int      cooperative;
+};
+
+// cudaLaunchDeviceV2: enqueue a child kernel from a packed config.
+void vgre_cdp_launch_device_v2(void* kernelFn, void* paramBuf,
+                                 const vgre_cdp_launch_config* config) {
+    if (!config) return;
+    vgre_cdp_launch_device(kernelFn, paramBuf,
+                           config->gridX, config->gridY, config->gridZ,
+                           config->blockX, config->blockY, config->blockZ,
+                           config->dynamicSmemBytes,
+                           config->stream);
+}
+
+// cudaDeviceSynchronize from device side: blocks until all pending child kernels complete.
+void vgre_cdp_device_synchronize() {
+    vgre::runtime::CDPExecutor::instance().deviceSynchronize();
 }
 
 } // extern "C"
