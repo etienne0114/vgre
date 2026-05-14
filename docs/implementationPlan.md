@@ -901,7 +901,7 @@ tests/core/texture/        # Texture/surface object tests
 | 3.13 | `cudnnReduceTensor` | **DONE** | — | 2026-05-14 |
 | 3.13a | `cudnnReduceTensor` multi-dimensional non-scalar reductions | **DONE** | — | 2026-05-14 |
 | 3.14 | `cudnnTransformTensor` | **DONE** | — | 2026-05-14 |
-| 3.15 | cuDNN Backend API (v8+) | **DONE** (minimal stub) | — | 2026-05-14 |
+| 3.15 | cuDNN Backend API (v8+) | **DONE** (minimal stub — deliberate; full descriptor-graph wiring is out of scope) | — | 2026-05-14 |
 | 3.16 | `cudnnLRNCrossChannelForward/Backward` | **DONE** | — | 2026-05-14 |
 | 3.17 | `cudnnDivisiveNormalizationForward/Backward` | **DONE** | — | 2026-05-14 |
 
