@@ -309,4 +309,41 @@ cudnnStatus_t cudnnConvolutionBackwardFilter(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// ── cudnnConvolutionBackwardBias ───────────────────────────────────────────────
+// Gradient of the bias: db[k] = sum over (n, h, w) of dy[n, k, h, w]
+
+cudnnStatus_t cudnnConvolutionBackwardBias(
+    cudnnHandle_t /*handle*/,
+    const void* alpha,
+    cudnnTensorDescriptor_t dyDesc, const void* dy,
+    const void* beta,
+    cudnnTensorDescriptor_t dbDesc, void* db)
+{
+    if (!dyDesc || !dbDesc || !dy || !db || !alpha || !beta)
+        return CUDNN_STATUS_BAD_PARAM;
+
+    auto* dyt = (TensorDesc*)dyDesc;
+    auto* dbt = (TensorDesc*)dbDesc;
+    if (!dyt || !dbt) return CUDNN_STATUS_BAD_PARAM;
+
+    int n = dyt->n, k = dyt->c, h = dyt->h, w = dyt->w;
+    float a = *(const float*)alpha;
+    float b = *(const float*)beta;
+
+    float* dbf = (float*)db;
+    const float* dyf = (const float*)dy;
+
+    // db[k] = beta*db[k] + alpha * sum_{n,h,w} dy[n,k,h,w]
+    for (int ck = 0; ck < dbt->c; ++ck)
+        dbf[ck] = b * dbf[ck];
+
+    for (int ni = 0; ni < n; ++ni)
+        for (int ck = 0; ck < k; ++ck)
+            for (int hi = 0; hi < h; ++hi)
+                for (int wi = 0; wi < w; ++wi)
+                    dbf[ck] += a * dyf[((ni*k + ck)*h + hi)*w + wi];
+
+    return CUDNN_STATUS_SUCCESS;
+}
+
 } // extern "C"

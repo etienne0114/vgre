@@ -1112,4 +1112,75 @@ tests/core/texture/        # Texture/surface object tests
 
 ---
 
+### Phase 13 — Remaining Gaps (2026-05-15 full-codebase audit)
+
+**Status**: **DONE** — 2026-05-15
+
+#### 13.1 CUDA Runtime — Array & 3D Memory APIs
+
+**New file**: `src/api/cudart/cudart_shim_array_memcpy.cpp`
+
+**Implemented**:
+- `cudaMalloc3D` — pitched 3D device allocation (pitch rounded to 512-byte boundary via `MemoryManager::malloc`)
+- `cudaMemcpy3D` / `cudaMemcpy3DAsync` — structured 3D copy supporting array↔pitched and pitched↔pitched transfers
+- `cudaHostGetDevicePointer` — returns host pointer itself (CPU model: shared address space)
+- `cudaHostGetFlags` — reads per-registration flags from `g_hostFlags` table (populated by extended `cudaHostRegister`)
+- `cudaArrayGetInfo` — queries `TextureManager::getCudaArrayInfo` for width/height/depth/element format
+- `cudaMemcpyToArray` / `cudaMemcpyFromArray` — thin wrappers over `CUDAInterceptor::memcpyToArray/FromArray`
+- `cudaMemcpy2DToArray` / `cudaMemcpy2DFromArray` — pitched 2D copy into/from `TextureManager`-backed arrays
+- All async variants (`...Async`) — synchronous in CPU model
+
+**Supporting changes**:
+- `src/core/texture_manager.cpp` — added `TextureManager::getCudaArrayInfo()` method
+- `include/vgre/core/texture_manager.h` — added `ArrayInfo` struct and `getCudaArrayInfo()` declaration
+- `src/api/cudart/cudart_shim_stream.cpp` — extended `cudaHostRegister`/`cudaHostUnregister` to record/erase flags in shared `g_hostFlags` table
+
+#### 13.2 cuBLAS — Packed, Banded, and Complex Level-2 / Batched Level-3
+
+**File**: `src/api/cublas/cublas_level2.cpp` (extended)
+
+**Implemented packed/banded Level-2**:
+- `cublasStbsv_v2` / `cublasDtbsv_v2` — triangular banded solve (upper/lower, transpose, unit)
+- `cublasStpsv_v2` / `cublasDtpsv_v2` — triangular packed solve (packed column-major storage)
+- `cublasSspmv_v2` / `cublasDspmv_v2` — symmetric packed matrix-vector multiply
+- `cublasSsbmv_v2` / `cublasDsbmv_v2` — symmetric banded matrix-vector multiply
+- `cublasSspr_v2` / `cublasDspr_v2` — symmetric packed rank-1 update
+- `cublasSspr2_v2` / `cublasDspr2_v2` — symmetric packed rank-2 update
+- `cublasStbmv_v2` / `cublasDtbmv_v2` — triangular banded matrix-vector multiply
+- `cublasStpmv_v2` / `cublasDtpmv_v2` — triangular packed matrix-vector multiply
+
+**File**: `src/api/cublas/cublas_hermitian.cpp` (extended)
+
+**Implemented**:
+- `cublasChemm_v2` / `cublasZhemm_v2` — Hermitian matrix multiply (side=LEFT/RIGHT, upper/lower triangle)
+
+**File**: `src/api/cublas/cublas_level3.cpp` (extended)
+
+**Implemented batched Level-3**:
+- `cublasStrsmBatched` / `cublasDtrsmBatched` — batched triangular solve
+- `cublasSsyrkBatched` / `cublasDsyrkBatched` — batched symmetric rank-k update
+- `cublasSsyr2kBatched` / `cublasDsyr2kBatched` — batched symmetric rank-2k update
+- `cublasStrmmBatched` / `cublasDtrmmBatched` — batched triangular matrix multiply
+- `cublasSsymmBatched` / `cublasDsymmBatched` — batched symmetric matrix multiply
+
+#### 13.3 cuDNN — Remaining Gaps
+
+**File**: `src/api/cudnn/cudnn_convolution.cpp` (extended)
+
+**Implemented**:
+- `cudnnConvolutionBackwardBias` — db[k] = beta*db[k] + alpha * Σ_{n,h,w} dy[n,k,h,w]
+
+**File**: `src/api/cudnn/cudnn_tensor_ops.cpp` (extended)
+
+**Implemented**:
+- `cudnnAddTensor` — y = alpha*A + beta*y with full NCHW broadcast (standard bias-add pattern)
+
+| # | Feature | Status | Date |
+|---|---|---|---|
+| 13.1 | CUDA Runtime array/3D APIs (cudaMalloc3D, Memcpy3D, HostGetDevicePointer, ArrayGetInfo, Memcpy*Array) | **DONE** | 2026-05-15 |
+| 13.2 | cuBLAS packed/banded Level-2 (8 routines) + cublasChemm + batched Level-3 (10 batched routines) | **DONE** | 2026-05-15 |
+| 13.3 | cudnnConvolutionBackwardBias + cudnnAddTensor | **DONE** | 2026-05-15 |
+
+---
+
 **End of Document**

@@ -894,6 +894,21 @@ void *TextureManager::getCudaArrayData(TextureId id) {
   return it->second.data();
 }
 
+bool TextureManager::getCudaArrayInfo(TextureId id, ArrayInfo &out) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto arrIt = ownedArrays_.find(id);
+  if (arrIt == ownedArrays_.end()) return false;
+  auto texIt = textures_.find(id);
+  if (texIt == textures_.end()) return false;
+  const TextureObject &tex = texIt->second;
+  out.width       = tex.width;
+  out.height      = (tex.height > 0) ? tex.height : 1;
+  out.depth       = (tex.depth  > 0) ? tex.depth  : 1;
+  out.elementSize = tex.elementSize;
+  out.elementType = tex.desc.elementType;
+  return true;
+}
+
 const void *TextureManager::getCudaArrayData(TextureId id) const {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = ownedArrays_.find(id);

@@ -165,6 +165,17 @@ public:
   void *getCudaArrayData(TextureId id);
   const void *getCudaArrayData(TextureId id) const;
 
+  // ── cudaArrayGetInfo support ─────────────────────────────────────────────
+  struct ArrayInfo {
+    size_t width       = 0;
+    size_t height      = 0;
+    size_t depth       = 0;
+    size_t elementSize = 0;
+    TextureElementType elementType = TextureElementType::FLOAT32;
+  };
+  // Returns false if id is not a valid cudaArray.
+  bool getCudaArrayInfo(TextureId id, ArrayInfo &out) const;
+
   // ── Mipmapped array (cudaMipmappedArray) ────────────────────────────────
   // Allocates a full mip chain for a 2D float32 texture.
   // mipLevels == 0 means auto-generate: floor(log2(max(width, height))) + 1.
