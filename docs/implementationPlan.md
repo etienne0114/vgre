@@ -883,6 +883,8 @@ tests/core/texture/        # Texture/surface object tests
 | 2.4a | `cublasGemmEx` FP16 / BF16 / INT8 mixed-precision paths | **DONE** | — | 2026-05-14 |
 | 2.4b | `cublasGemmEx` complex type paths (`CUDA_C_32F`, `CUDA_C_64F`) | **DONE** | — | 2026-05-14 |
 | 2.4c | `cublasLtMatmul` FP16 / BF16 paths | **DONE** | — | 2026-05-14 |
+| 2.4d | `cublasLtMatmul` INT8 matmul via float widening | **DONE** | — | 2026-05-14 |
+| 2.4e | `cublasLtMatmulPreference*` / `cublasLtMatmulAlgoGetHeuristic` type definitions and declarations | **DONE** | — | 2026-05-15 |
 | 2.5 | Complex Hermitian variants (`Cherk`, `Cher2k`) | **DONE** | — | 2026-05-14 |
 | 2.6 | `cublasLoggerConfigure` / logging callbacks | **DONE** | — | 2026-05-14 |
 
@@ -905,7 +907,7 @@ tests/core/texture/        # Texture/surface object tests
 | 3.13 | `cudnnReduceTensor` | **DONE** | — | 2026-05-14 |
 | 3.13a | `cudnnReduceTensor` multi-dimensional non-scalar reductions | **DONE** | — | 2026-05-14 |
 | 3.14 | `cudnnTransformTensor` | **DONE** | — | 2026-05-14 |
-| 3.15 | cuDNN Backend API (v8+) | **DONE** — `cudnnBackendExecute` wired for conv forward/backward-data/backward-filter, activation forward/backward, pooling forward/backward, softmax, reduction | — | 2026-05-14 |
+| 3.15 | cuDNN Backend API (v8+) | **DONE** — `cudnnBackendExecute` wired for conv forward/backward-data/backward-filter, activation forward/backward, pooling forward/backward, softmax, reduction, matmul, BN finalize, NORM forward/backward, RNN. `cudnnBackendCreateReexecutable` returns SUCCESS (fallback). | — | 2026-05-15 |
 | 3.16 | `cudnnLRNCrossChannelForward/Backward` | **DONE** | — | 2026-05-14 |
 | 3.17 | `cudnnDivisiveNormalizationForward/Backward` | **DONE** | — | 2026-05-14 |
 
@@ -922,6 +924,7 @@ tests/core/texture/        # Texture/surface object tests
 | 4.7 | cuSPARSE stub shim | **DONE** | — | 2026-05-14 |
 | 4.8 | cuSPARSE SpMV/SpMM functional | **DONE** | — | 2026-05-14 |
 | 4.8a | cuSPARSE complex SpMV/SpMM (`CUDA_C_32F`, `CUDA_C_64F`) | **DONE** | — | 2026-05-14 |
+| 4.8b | cuSPARSE FP16 / INT8 SpMV/SpMM via float widening (`CUDA_R_16F`, `CUDA_R_8I`) | **DONE** | — | 2026-05-15 |
 | 4.9 | cuBLASLt stub shim | **DONE** | — | 2026-05-14 |
 | 4.10 | cuBLASLt matmul + epilogue functional | **DONE** | — | 2026-05-14 |
 | 4.11 | cuFFT advanced planning (`cufftEstimate*`, `cufftMakePlanMany`, `cufftGetSize*`) | **DONE** | — | 2026-05-14 |
@@ -947,6 +950,8 @@ tests/core/texture/        # Texture/surface object tests
 | 5.10a | Driver texture `CU_AD_FORMAT_HALF` (FP16) support | **DONE** | — | 2026-05-14 |
 | 5.10b | Driver texture `cuTexRefSetAddress2D` proper 2D binding (width/height from descriptor, element size from format+channels) | **DONE** | — | 2026-05-14 |
 | 5.10c | Driver texture per-dimension address modes (`cuTexRefSetAddressMode`) | **DONE** | — | 2026-05-14 |
+| 5.10d | Driver texture packed X1/X2/X4 format variants (`CU_AD_FORMAT_UNORM_INT8X1/2/4`, etc.) | **DONE** | — | 2026-05-15 |
+| 5.10e | Driver external memory mipmapped array SIGNED_INT8/INT16 format bug fix (was mapped to UINT) | **DONE** | — | 2026-05-15 |
 | 5.11 | `cuMemcpy3DAsync` — async 3D copy path | **DONE** | — | 2026-05-14 |
 | 5.12 | Driver surface references (`cuModuleGetSurfRef`, `cuSurfRefSetArray`, `cuSurfRefGetArray`) | **DONE** | — | 2026-05-14 |
 | 5.13 | CUDA Virtual Memory on Linux (`cuMemCreate`, `cuMemAddressReserve`, `cuMemMap`, `cuMemSetAccess`) | **DONE** | — | 2026-05-14 |

@@ -114,6 +114,19 @@ CUresult cuTexRefSetFormat(CUtexref hTexRef, int fmt, int NumPackedComponents) {
     case CU_AD_FORMAT_UNORM_INT16:   hTexRef->desc.elementType = vgre::core::TextureElementType::UINT16; break;
     case CU_AD_FORMAT_SNORM_INT8:     hTexRef->desc.elementType = vgre::core::TextureElementType::INT8; break;
     case CU_AD_FORMAT_SNORM_INT16:   hTexRef->desc.elementType = vgre::core::TextureElementType::INT16; break;
+    // Packed X1/X2/X4 variants map to the same element types
+    case CU_AD_FORMAT_UNORM_INT8X1:
+    case CU_AD_FORMAT_UNORM_INT8X2:
+    case CU_AD_FORMAT_UNORM_INT8X4:   hTexRef->desc.elementType = vgre::core::TextureElementType::UINT8; break;
+    case CU_AD_FORMAT_UNORM_INT16X1:
+    case CU_AD_FORMAT_UNORM_INT16X2:
+    case CU_AD_FORMAT_UNORM_INT16X4:  hTexRef->desc.elementType = vgre::core::TextureElementType::UINT16; break;
+    case CU_AD_FORMAT_SNORM_INT8X1:
+    case CU_AD_FORMAT_SNORM_INT8X2:
+    case CU_AD_FORMAT_SNORM_INT8X4:   hTexRef->desc.elementType = vgre::core::TextureElementType::INT8; break;
+    case CU_AD_FORMAT_SNORM_INT16X1:
+    case CU_AD_FORMAT_SNORM_INT16X2:
+    case CU_AD_FORMAT_SNORM_INT16X4:  hTexRef->desc.elementType = vgre::core::TextureElementType::INT16; break;
     default:
         return CUDA_ERROR_NOT_SUPPORTED;
   }
@@ -157,6 +170,19 @@ static size_t elementSizeFromFormat(int fmt, unsigned int numChannels) {
     case CU_AD_FORMAT_UNORM_INT16:    bytesPerChannel = 2; break;
     case CU_AD_FORMAT_SNORM_INT8:     bytesPerChannel = 1; break;
     case CU_AD_FORMAT_SNORM_INT16:    bytesPerChannel = 2; break;
+    // Packed X1/X2/X4 variants use same bytes-per-channel
+    case CU_AD_FORMAT_UNORM_INT8X1:
+    case CU_AD_FORMAT_UNORM_INT8X2:
+    case CU_AD_FORMAT_UNORM_INT8X4:   bytesPerChannel = 1; break;
+    case CU_AD_FORMAT_UNORM_INT16X1:
+    case CU_AD_FORMAT_UNORM_INT16X2:
+    case CU_AD_FORMAT_UNORM_INT16X4:  bytesPerChannel = 2; break;
+    case CU_AD_FORMAT_SNORM_INT8X1:
+    case CU_AD_FORMAT_SNORM_INT8X2:
+    case CU_AD_FORMAT_SNORM_INT8X4:   bytesPerChannel = 1; break;
+    case CU_AD_FORMAT_SNORM_INT16X1:
+    case CU_AD_FORMAT_SNORM_INT16X2:
+    case CU_AD_FORMAT_SNORM_INT16X4:  bytesPerChannel = 2; break;
     }
     return bytesPerChannel * numChannels;
 }
@@ -184,6 +210,19 @@ CUresult cuTexRefSetAddress2D(CUtexref hTexRef, const void *desc,
     case CU_AD_FORMAT_UNORM_INT16:   hTexRef->desc.elementType = vgre::core::TextureElementType::UINT16; break;
     case CU_AD_FORMAT_SNORM_INT8:     hTexRef->desc.elementType = vgre::core::TextureElementType::INT8; break;
     case CU_AD_FORMAT_SNORM_INT16:   hTexRef->desc.elementType = vgre::core::TextureElementType::INT16; break;
+    // Packed X1/X2/X4 variants map to the same element types
+    case CU_AD_FORMAT_UNORM_INT8X1:
+    case CU_AD_FORMAT_UNORM_INT8X2:
+    case CU_AD_FORMAT_UNORM_INT8X4:   hTexRef->desc.elementType = vgre::core::TextureElementType::UINT8; break;
+    case CU_AD_FORMAT_UNORM_INT16X1:
+    case CU_AD_FORMAT_UNORM_INT16X2:
+    case CU_AD_FORMAT_UNORM_INT16X4:  hTexRef->desc.elementType = vgre::core::TextureElementType::UINT16; break;
+    case CU_AD_FORMAT_SNORM_INT8X1:
+    case CU_AD_FORMAT_SNORM_INT8X2:
+    case CU_AD_FORMAT_SNORM_INT8X4:   hTexRef->desc.elementType = vgre::core::TextureElementType::INT8; break;
+    case CU_AD_FORMAT_SNORM_INT16X1:
+    case CU_AD_FORMAT_SNORM_INT16X2:
+    case CU_AD_FORMAT_SNORM_INT16X4:  hTexRef->desc.elementType = vgre::core::TextureElementType::INT16; break;
     default:
         return CUDA_ERROR_NOT_SUPPORTED;
   }

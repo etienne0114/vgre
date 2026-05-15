@@ -506,4 +506,117 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// ── MatmulPreference (used by PyTorch's SDPA/cublasLt paths) ─────────────────
+// cublasLtMatmulPreference encodes workspace limits and algorithm restrictions.
+// In VGRE's CPU model there are no GPU algorithms; we accept and ignore
+// all preference attributes, returning a single "best" algorithm that delegates
+// to the existing cublasLtMatmul path.
+
+struct MatmulPref {
+    size_t maxWorkspaceBytes = 0;
+};
+
+std::unordered_map<uintptr_t, MatmulPref> g_prefs;
+std::mutex g_prefMutex;
+
+cublasStatus_t cublasLtMatmulPreferenceCreate(cublasLtMatmulPreference_t *pref) {
+    if (!pref) return CUBLAS_STATUS_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_prefMutex);
+    uintptr_t id = static_cast<uintptr_t>(g_prefs.size() + 0xBE000000ULL);
+    g_prefs[id] = {};
+    *pref = reinterpret_cast<cublasLtMatmulPreference_t>(id);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasLtMatmulPreferenceDestroy(cublasLtMatmulPreference_t pref) {
+    std::lock_guard<std::mutex> lk(g_prefMutex);
+    g_prefs.erase(reinterpret_cast<uintptr_t>(pref));
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasLtMatmulPreferenceSetAttribute(cublasLtMatmulPreference_t pref,
+                                                    cublasLtMatmulPreferenceAttributes_t attr,
+                                                    const void *buf, size_t sizeInBytes) {
+    if (!pref || !buf) return CUBLAS_STATUS_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_prefMutex);
+    auto it = g_prefs.find(reinterpret_cast<uintptr_t>(pref));
+    if (it == g_prefs.end()) return CUBLAS_STATUS_INVALID_VALUE;
+    // CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES = 0
+    if (attr == 0 && sizeInBytes >= sizeof(size_t))
+        it->second.maxWorkspaceBytes = *static_cast<const size_t *>(buf);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasLtMatmulPreferenceGetAttribute(cublasLtMatmulPreference_t pref,
+                                                    cublasLtMatmulPreferenceAttributes_t attr,
+                                                    void *buf, size_t sizeInBytes,
+                                                    size_t *sizeWritten) {
+    if (!pref || !buf) return CUBLAS_STATUS_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_prefMutex);
+    auto it = g_prefs.find(reinterpret_cast<uintptr_t>(pref));
+    if (it == g_prefs.end()) return CUBLAS_STATUS_INVALID_VALUE;
+    if (attr == 0 && sizeInBytes >= sizeof(size_t)) {
+        *static_cast<size_t *>(buf) = it->second.maxWorkspaceBytes;
+        if (sizeWritten) *sizeWritten = sizeof(size_t);
+    } else {
+        if (sizeWritten) *sizeWritten = 0;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── MatmulAlgoGetHeuristics ───────────────────────────────────────────────────
+// Returns a list of algorithm candidates for the given problem/preference.
+// In VGRE, there is exactly one "algorithm": the existing cublasLtMatmul path.
+
+cublasStatus_t cublasLtMatmulAlgoGetHeuristics(cublasLtHandle_t /*handle*/,
+                                               cublasLtMatmulDesc_t /*matmulDesc*/,
+                                               cublasLtMatrixLayout_t /*Adesc*/,
+                                               cublasLtMatrixLayout_t /*Bdesc*/,
+                                               cublasLtMatrixLayout_t /*Cdesc*/,
+                                               cublasLtMatrixLayout_t /*Ddesc*/,
+                                               cublasLtMatmulPreference_t /*pref*/,
+                                               int requestedAlgoCount,
+                                               cublasLtMatmulHeuristicResult_t *heuristicResultsArray,
+                                               int *returnAlgoCount) {
+    if (!heuristicResultsArray || !returnAlgoCount || requestedAlgoCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    // Return exactly one algorithm: the VGRE default path.
+    heuristicResultsArray[0].algo          = 0;
+    heuristicResultsArray[0].workspaceSize = 0;
+    heuristicResultsArray[0].state         = CUBLAS_STATUS_SUCCESS;
+    heuristicResultsArray[0].wavesCount    = 1.0f;
+    *returnAlgoCount = 1;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── Version / property queries ────────────────────────────────────────────────
+
+cublasStatus_t cublasLtGetVersion(size_t *version) {
+    // Report same version as cublas
+    if (version) *version = 12004; // 12.x.y
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasLtGetCudartVersion(size_t *version) {
+    if (version) *version = 12040;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+const char *cublasLtGetStatusName(cublasStatus_t status) {
+    switch (status) {
+    case CUBLAS_STATUS_SUCCESS:          return "CUBLAS_STATUS_SUCCESS";
+    case CUBLAS_STATUS_NOT_INITIALIZED:  return "CUBLAS_STATUS_NOT_INITIALIZED";
+    case CUBLAS_STATUS_ALLOC_FAILED:     return "CUBLAS_STATUS_ALLOC_FAILED";
+    case CUBLAS_STATUS_INVALID_VALUE:    return "CUBLAS_STATUS_INVALID_VALUE";
+    case CUBLAS_STATUS_EXECUTION_FAILED: return "CUBLAS_STATUS_EXECUTION_FAILED";
+    case CUBLAS_STATUS_NOT_SUPPORTED:    return "CUBLAS_STATUS_NOT_SUPPORTED";
+    case CUBLAS_STATUS_INTERNAL_ERROR:   return "CUBLAS_STATUS_INTERNAL_ERROR";
+    default:                             return "CUBLAS_STATUS_UNKNOWN";
+    }
+}
+
+const char *cublasLtGetStatusString(cublasStatus_t status) {
+    return cublasLtGetStatusName(status);
+}
+
 } // extern "C"

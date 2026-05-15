@@ -5,6 +5,7 @@
 
 #include "vgre/api/cusparse_shim.h"
 #include "vgre/common/logger.h"
+#include "vgre/compiler/cpu_cuda_fp16.h"
 
 #include <cstdint>
 #include <cstring>
@@ -298,6 +299,28 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t /*handle*/, cusparseOperation_t o
                  static_cast<const cuDoubleComplex*>(xIt->second.values),
                  static_cast<const cuDoubleComplex*>(beta),
                  static_cast<cuDoubleComplex*>(yIt->second.values));
+    } else if (computeType == CUDA_R_16F) {
+        // FP16 via float widening
+        float alphaF = vgre_cuda::__half2float(*(const vgre_cuda::__half*)alpha);
+        float betaF  = vgre_cuda::__half2float(*(const vgre_cuda::__half*)beta);
+        const vgre_cuda::__half* xH = static_cast<const vgre_cuda::__half*>(xIt->second.values);
+        vgre_cuda::__half* yH = static_cast<vgre_cuda::__half*>(yIt->second.values);
+        std::vector<float> xf(xIt->second.size), yf(yIt->second.size);
+        for (int64_t i = 0; i < xIt->second.size; ++i) xf[i] = vgre_cuda::__half2float(xH[i]);
+        for (int64_t i = 0; i < yIt->second.size; ++i) yf[i] = vgre_cuda::__half2float(yH[i]);
+        csr_spmv(opA, &alphaF, matIt->second, xf.data(), &betaF, yf.data());
+        for (int64_t i = 0; i < yIt->second.size; ++i) yH[i] = vgre_cuda::__float2half(yf[i]);
+    } else if (computeType == CUDA_R_8I) {
+        // INT8 via float widening; output is int32
+        float alphaF = static_cast<float>(*static_cast<const int32_t*>(alpha));
+        float betaF  = static_cast<float>(*static_cast<const int32_t*>(beta));
+        const int8_t* xI = static_cast<const int8_t*>(xIt->second.values);
+        int32_t* yI = static_cast<int32_t*>(yIt->second.values);
+        std::vector<float> xf(xIt->second.size), yf(yIt->second.size);
+        for (int64_t i = 0; i < xIt->second.size; ++i) xf[i] = static_cast<float>(xI[i]);
+        for (int64_t i = 0; i < yIt->second.size; ++i) yf[i] = static_cast<float>(yI[i]);
+        csr_spmv(opA, &alphaF, matIt->second, xf.data(), &betaF, yf.data());
+        for (int64_t i = 0; i < yIt->second.size; ++i) yI[i] = static_cast<int32_t>(yf[i]);
     } else {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
     }
@@ -334,6 +357,63 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t /*handle*/, cusparseOperation_t o
         csr_spmm(opA, opB,
                  static_cast<const cuDoubleComplex*>(alpha), aIt->second, bIt->second,
                  static_cast<const cuDoubleComplex*>(beta), cIt->second);
+    } else if (computeType == CUDA_R_16F) {
+        // FP16 via float widening
+        float alphaF = vgre_cuda::__half2float(*(const vgre_cuda::__half*)alpha);
+        float betaF  = vgre_cuda::__half2float(*(const vgre_cuda::__half*)beta);
+        // Convert sparse A values to float
+        CsrMat Af = aIt->second;
+        int64_t aNnz = Af.nnz;
+        std::vector<float> aValsF(aNnz);
+        const vgre_cuda::__half* aH = static_cast<const vgre_cuda::__half*>(Af.values);
+        for (int64_t i = 0; i < aNnz; ++i) aValsF[i] = vgre_cuda::__half2float(aH[i]);
+        Af.values = aValsF.data();
+        Af.valueType = CUDA_R_32F;
+        // Convert dense B to float
+        DnMat Bf = bIt->second;
+        int64_t bCount = Bf.rows * Bf.cols;
+        std::vector<float> bValsF(bCount);
+        const vgre_cuda::__half* bH = static_cast<const vgre_cuda::__half*>(Bf.values);
+        for (int64_t i = 0; i < bCount; ++i) bValsF[i] = vgre_cuda::__half2float(bH[i]);
+        Bf.values = bValsF.data();
+        Bf.valueType = CUDA_R_32F;
+        // Convert dense C to float
+        DnMat Cf = cIt->second;
+        int64_t cCount = Cf.rows * Cf.cols;
+        std::vector<float> cValsF(cCount);
+        vgre_cuda::__half* cH = static_cast<vgre_cuda::__half*>(Cf.values);
+        for (int64_t i = 0; i < cCount; ++i) cValsF[i] = vgre_cuda::__half2float(cH[i]);
+        Cf.values = cValsF.data();
+        Cf.valueType = CUDA_R_32F;
+        csr_spmm(opA, opB, &alphaF, Af, Bf, &betaF, Cf);
+        for (int64_t i = 0; i < cCount; ++i) cH[i] = vgre_cuda::__float2half(cValsF[i]);
+    } else if (computeType == CUDA_R_8I) {
+        // INT8 via float widening; output C is int32
+        float alphaF = static_cast<float>(*static_cast<const int32_t*>(alpha));
+        float betaF  = static_cast<float>(*static_cast<const int32_t*>(beta));
+        CsrMat Af = aIt->second;
+        int64_t aNnz = Af.nnz;
+        std::vector<float> aValsF(aNnz);
+        const int8_t* aI = static_cast<const int8_t*>(Af.values);
+        for (int64_t i = 0; i < aNnz; ++i) aValsF[i] = static_cast<float>(aI[i]);
+        Af.values = aValsF.data();
+        Af.valueType = CUDA_R_32F;
+        DnMat Bf = bIt->second;
+        int64_t bCount = Bf.rows * Bf.cols;
+        std::vector<float> bValsF(bCount);
+        const int8_t* bI = static_cast<const int8_t*>(Bf.values);
+        for (int64_t i = 0; i < bCount; ++i) bValsF[i] = static_cast<float>(bI[i]);
+        Bf.values = bValsF.data();
+        Bf.valueType = CUDA_R_32F;
+        DnMat Cf = cIt->second;
+        int64_t cCount = Cf.rows * Cf.cols;
+        std::vector<float> cValsF(cCount);
+        int32_t* cI = static_cast<int32_t*>(Cf.values);
+        for (int64_t i = 0; i < cCount; ++i) cValsF[i] = static_cast<float>(cI[i]);
+        Cf.values = cValsF.data();
+        Cf.valueType = CUDA_R_32F;
+        csr_spmm(opA, opB, &alphaF, Af, Bf, &betaF, Cf);
+        for (int64_t i = 0; i < cCount; ++i) cI[i] = static_cast<int32_t>(cValsF[i]);
     } else {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
     }

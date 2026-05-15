@@ -34,10 +34,14 @@ typedef enum {
 } cusparseIndexType_t;
 
 typedef enum {
-    CUDA_R_32F = 0,  // float
-    CUDA_R_64F = 1,  // double
-    CUDA_C_32F = 4,  // complex float
-    CUDA_C_64F = 5   // complex double
+    CUDA_R_32F  = 0,  // float
+    CUDA_R_64F  = 1,  // double
+    CUDA_R_16F  = 2,  // half
+    CUDA_R_8I   = 3,  // int8
+    CUDA_C_32F  = 4,  // complex float
+    CUDA_C_64F  = 5,  // complex double
+    CUDA_R_16BF = 14, // bfloat16
+    CUDA_R_32I  = 10  // int32
 } cudaDataType_t;
 
 // ── Sparse matrix format ─────────────────────────────────────────────────────

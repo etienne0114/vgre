@@ -93,6 +93,19 @@ static constexpr int CU_AD_FORMAT_UNORM_INT8     = 0x04;
 static constexpr int CU_AD_FORMAT_UNORM_INT16    = 0x05;
 static constexpr int CU_AD_FORMAT_SNORM_INT8     = 0x0b;
 static constexpr int CU_AD_FORMAT_SNORM_INT16    = 0x0c;
+// Packed X1/X2/X4 variants
+static constexpr int CU_AD_FORMAT_UNORM_INT8X1  = 0x0d;
+static constexpr int CU_AD_FORMAT_UNORM_INT8X2  = 0x0e;
+static constexpr int CU_AD_FORMAT_UNORM_INT8X4  = 0x0f;
+static constexpr int CU_AD_FORMAT_UNORM_INT16X1 = 0x11;
+static constexpr int CU_AD_FORMAT_UNORM_INT16X2 = 0x12;
+static constexpr int CU_AD_FORMAT_UNORM_INT16X4 = 0x13;
+static constexpr int CU_AD_FORMAT_SNORM_INT8X1  = 0x14;
+static constexpr int CU_AD_FORMAT_SNORM_INT8X2  = 0x15;
+static constexpr int CU_AD_FORMAT_SNORM_INT8X4  = 0x16;
+static constexpr int CU_AD_FORMAT_SNORM_INT16X1 = 0x17;
+static constexpr int CU_AD_FORMAT_SNORM_INT16X2 = 0x18;
+static constexpr int CU_AD_FORMAT_SNORM_INT16X4 = 0x19;
 
 // CUDA array descriptor (used by cuTexRefSetAddress2D)
 struct CUDA_ARRAY_DESCRIPTOR {
