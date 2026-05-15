@@ -47,6 +47,9 @@ void TCPClusterManager::handleClientDataEvents(std::vector<vgre_pollfd> &fds) {
         }
         int n = recv_packet(client->socket_fd, client->rx_buffer,
                             client->secure_channel.get());
+        if (n > 0) {
+            client->last_activity_time = std::chrono::steady_clock::now();
+        }
         if (n < 0) {
           client->active = false;
           vgre::common::vgre_close_socket(client->socket_fd);

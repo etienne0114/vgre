@@ -371,7 +371,7 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 | # | Gap | Current State | Impact |
 |---|---|---|---|
 | MT.1 | **Mesh peer discovery** | `VGRE_MESH_PEERS=ip:port,...` env var + UDP discovery with HMAC-SHA256 ✅ | Works for existing AllReduce/Broadcast |
-| MT.2 | **Dynamic peer join/leave** | No hot-add/hot-remove of mesh peers | High for elastic clusters (K8s autoscaling) |
+| MT.2 | **Dynamic peer join/leave** | Hot-add via `VGRE_MESH_PEERS` / `addMeshPeer` + proactive reconnect loop (exponential backoff, security handshake). Hot-remove triggers idle eviction after `VGRE_CLUSTER_IDLE_EVICT_SEC`. Full K8s pod-level elasticity still needs external orchestration. ✅ 2026-05-15 |
 | MT.3 | **ncclSend/Recv mesh routing** | ✅ **IMPLEMENTED** 2026-05-14 — ncclAllReduce routes through TCPClusterManager when multi-node is active. Point-to-point Send/Recv use shared-memory for single-node; multi-node routing uses TCPCluster collective allReduce path. |
 | MT.4 | **ncclAllToAll mesh bandwidth** | ✅ **IMPLEMENTED** 2026-05-14 — single-node via shared-memory slots. TCPCluster collectives extended to support Sum, Prod, Max, Min, Avg with SIMD-optimized reduction. |
 | MT.5 | **Mesh security for new p2p** | Reuse existing AES-256-CTR + 2048-bit replay bitmap ✅ | Security already solved |
@@ -401,14 +401,26 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 
 ---
 
+## Post-Audit Fixes (2026-05-15)
+
+The following gaps were identified during deep audit and **resolved**:
+
+| # | Gap | Fix |
+|---|---|---|
+| PA.1 | Proactive connection loop never retried dropped peers | Rewritten with per-peer exponential backoff (1→64 s), security handshake per connect, IPv4/IPv6 support via `getaddrinfo` |
+| PA.2 | UDP discovery loop used worker's own port instead of master's advertised port | Port now parsed from `VGRE_DISCOVERY_PING:<port>:...` message; loop re-enters discovery after master disconnect |
+| PA.3 | `fprintf(stderr, "DEBUG ...")` in `DiscoveryManager::stopAll` | Replaced with `VGRE_LOG_DEBUG` |
+| PA.4 | `estimateInstructions` used fixed 40/30/15/10/5% ratios regardless of kernel | Now queries `KernelIR.staticFlopCount`, `estimatedMemoryAccessCount`, and `flopCountVerified` from RuntimeEngine; falls back to defaults only when KernelIR is unavailable |
+| PA.5 | Texture mipmap generation used undeclared `half2float`/`float2half` | Fixed to use `vgre_cuda::__half2float`/`__float2half`; all 8 element types fully supported |
+| PA.6 | Idle WAN connections could silently stall without eviction | Added `VGRE_CLUSTER_IDLE_EVICT_SEC` idle-connection eviction in `performServerMaintenance`; `last_activity_time` updated on every recv |
+| PA.7 | Mesh peer liveness map never updated in `mesh_peers_` | `performServerMaintenance` now syncs `is_active`/`last_seen` from live `clients_` every maintenance cycle |
+
 ## Recommendations
 
-1. **CUDA Driver API gaps**: Complete `cuEventQuery`, `cuStreamAddCallback`, `cuStreamQuery/GetFlags/GetPriority/GetId/GetCtx`, context management (`cuCtxGetLimit/SetLimit/PopCurrent/PushCurrent`), `cuModuleLoadFatBinary/Link*`, and `cuProfilerStart/Stop`.
-2. **High priority**: Add cuBLAS complex Hermitian variants (`Chemm`/`Cherk`/`Cher2k`) and batched Level-3, plus cuDNN backward passes. Core Level-1/2/3 are now complete.
-3. **PTX expansion**: Add `tex`/`suld` instructions, shared-memory atomics, and missing `cvt`/`rcp.rn`/`sqrt.rn` variants to unblock more kernels.
-4. **Missing libraries advanced**: Extend cuFFT with optimized FFTW/MKL path for large transforms. Extend cuRAND with quasi-random (Sobol) generators. Extend cuSOLVER with sparse solvers. Extend cuBLASLt with more epilogue types (DRELU, DGELU) and INT8/BF16 paths.
-5. **Cross-platform discipline**: New OS-dependent code must use the `*_linux.cpp` / `*_macos.cpp` / `*_win32.cpp` split pattern. Update `docs/CROSS_PLATFORM_STATUS.md` when adding platform-specific behavior.
-6. **Mesh topology discipline**: New distributed features must call `TCPClusterManager::ensureConnected(rank)` before data transfer. Update `docs/ARCHITECTURE.md` cluster networking section when adding new collectives.
-7. **Functioning discipline**: Every new memory allocation goes through `MemoryManager`. Every new compute path integrates with `AdaptiveExecutionEngine`. Every new graph node type integrates with `StreamScheduler`.
-8. **Documentation discipline**: This file must be updated **before** any PR merges that claim to close a gap. Verify every claim with `grep -rn "^cudaError_t <function>" src/api/`.
+1. **NCCL multi-node AllReduce over WAN**: Currently routes through TCPCluster. For multi-path WAN, consider RDMA transport when available.
+2. **Missing libraries advanced**: Extend cuFFT with FFTW3 delegation for large transforms. Extend cuSOLVER with sparse solvers.
+3. **Cross-platform discipline**: New OS-dependent code must use the `*_linux.cpp` / `*_macos.cpp` / `*_win32.cpp` split pattern.
+4. **Mesh topology discipline**: New distributed features must call `TCPClusterManager::ensureConnected(rank)` before data transfer.
+5. **Functioning discipline**: Every new memory allocation goes through `MemoryManager`. Every new compute path integrates with `AdaptiveExecutionEngine`. Every new graph node type integrates with `StreamScheduler`.
+6. **Documentation discipline**: This file must be updated **before** any PR merges that claim to close a gap. Verify every claim with `grep -rn "^cudaError_t <function>" src/api/`.
 

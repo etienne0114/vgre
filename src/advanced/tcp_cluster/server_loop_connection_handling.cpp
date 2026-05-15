@@ -43,34 +43,92 @@ const uint32_t kKeyRotationThreshold = []() -> uint32_t {
     if (env) { try { long v = std::stol(env); if (v > 0) return static_cast<uint32_t>(v); } catch (...) {} }
     return 10000;
 }();
+// Idle-connection eviction: drop clients that have not sent any data within
+// this many seconds.  WAN connections can go silent for a long time; default
+// is 300 s (5 min).  Set 0 to disable.
+const int kIdleEvictSec = []() -> int {
+    const char* env = vgre_get_config("VGRE_CLUSTER_IDLE_EVICT_SEC");
+    if (env) { try { int v = std::stoi(env); if (v >= 0) return v; } catch (...) {} }
+    return 300;
+}();
 }
 
 void TCPClusterManager::performServerMaintenance() {
     auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
-    
+
     for (auto &client : clients_) {
         if (!client || !client->active) continue;
-        
+
         flush_tx_queues(client);
 
+        // ── Bandwidth probe ───────────────────────────────────────────────────
         if (!client->is_local && !client->bandwidth_probe_in_flight &&
                 client->capability_received && client->security_established &&
-                std::chrono::duration_cast<std::chrono::seconds>(now - client->last_bandwidth_probe_time).count() >= kBandwidthReprobeIntervalSec) {
-            
-            uint64_t ts_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    now - client->last_bandwidth_probe_time).count() >= kBandwidthReprobeIntervalSec) {
+
+            uint64_t ts_ms = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
             std::vector<uint8_t> probe_buf(sizeof(uint64_t) + kProbePayloadBytes, 0);
             std::memcpy(probe_buf.data(), &ts_ms, sizeof(uint64_t));
-            
+
             client->bandwidth_probe_start = now;
             client->bandwidth_probe_in_flight = true;
-            send_packet(client->socket_fd, PacketType::BANDWIDTH_PROBE, probe_buf.data(), probe_buf.size(), client->secure_channel.get());
+            send_packet(client->socket_fd, PacketType::BANDWIDTH_PROBE,
+                        probe_buf.data(), probe_buf.size(),
+                        client->secure_channel.get());
         }
 
-        if (security_enabled_ && client->security_established && client->packets_sent >= kKeyRotationThreshold) {
-            if (security_manager_->rotateSessionKey(client) == VGREResult::SUCCESS) {
+        // ── Session key rotation ──────────────────────────────────────────────
+        if (security_enabled_ && client->security_established &&
+                client->packets_sent >= kKeyRotationThreshold) {
+            if (security_manager_->rotateSessionKey(client) == VGREResult::SUCCESS)
                 client->packets_sent = 0;
+        }
+
+        // ── Idle-connection eviction (heartbeat enforcement) ──────────────────
+        // Close connections that have been fully established but have not sent
+        // any data for kIdleEvictSec.  The OS TCP keep-alive will also close
+        // truly dead sockets, but idle eviction catches logical stalls (e.g. a
+        // peer that is alive but has stopped communicating).
+        // We skip clients that are still in the handshake phase.
+        if (kIdleEvictSec > 0 && client->security_established &&
+                client->socket_fd != vgre::common::VGRE_INVALID_SOCKET) {
+            auto idle = std::chrono::duration_cast<std::chrono::seconds>(
+                now - client->last_activity_time).count();
+            if (idle >= kIdleEvictSec) {
+                VGRE_LOG_WARN("TCPCluster",
+                    "Evicting idle connection to " + client->ip_address +
+                    " (idle " + std::to_string(idle) + "s >= " +
+                    std::to_string(kIdleEvictSec) + "s threshold)");
+                vgre::common::vgre_close_socket(client->socket_fd);
+                client->socket_fd = vgre::common::VGRE_INVALID_SOCKET;
+                client->active = false;
+                // proactiveConnectionLoop will re-establish mesh peer connections
             }
+        }
+
+        // ── Update mesh peer liveness map ─────────────────────────────────────
+        if (client->active) {
+            std::lock_guard<std::mutex> mlk(mesh_topology_mutex_);
+            auto it = mesh_peers_.find(client->ip_address);
+            if (it != mesh_peers_.end()) {
+                it->second.is_active = true;
+                it->second.last_seen  = now;
+            }
+        }
+    }
+
+    // ── Mark disconnected mesh peers as inactive ──────────────────────────────
+    {
+        std::lock_guard<std::mutex> mlk(mesh_topology_mutex_);
+        for (auto& [ip, info] : mesh_peers_) {
+            bool live = false;
+            for (const auto& c : clients_)
+                if (c && c->active && c->ip_address == ip) { live = true; break; }
+            info.is_active = live;
         }
     }
 }

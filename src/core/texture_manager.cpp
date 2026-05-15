@@ -1,5 +1,6 @@
 #include "vgre/core/texture_manager.h"
 #include "vgre/common/logger.h"
+#include "vgre/compiler/cpu_cuda_fp16.h"
 
 #include <algorithm>
 #include <cmath>
@@ -978,6 +979,100 @@ static void boxFilter2D(const float *src, size_t sw, size_t sh,
     }
 }
 
+static size_t baseTypeSize(TextureElementType t) {
+    switch (t) {
+        case TextureElementType::UINT8:
+        case TextureElementType::INT8:     return 1;
+        case TextureElementType::UINT16:
+        case TextureElementType::INT16:
+        case TextureElementType::FP16:      return 2;
+        case TextureElementType::UINT32:
+        case TextureElementType::INT32:
+        case TextureElementType::FLOAT32:   return 4;
+        default:                           return 0;
+    }
+}
+
+static void channelToFloat(const uint8_t* src, size_t srcStride, size_t count,
+                           TextureElementType type, float* dst) {
+    switch (type) {
+        case TextureElementType::FLOAT32:
+            for (size_t i = 0; i < count; ++i)
+                dst[i] = reinterpret_cast<const float*>(src + i * srcStride)[0];
+            break;
+        case TextureElementType::FP16:
+            for (size_t i = 0; i < count; ++i)
+                dst[i] = vgre_cuda::__half2float(reinterpret_cast<const vgre_cuda::__half*>(src + i * srcStride)[0]);
+            break;
+        case TextureElementType::INT8:
+            for (size_t i = 0; i < count; ++i)
+                dst[i] = static_cast<float>(reinterpret_cast<const int8_t*>(src + i * srcStride)[0]);
+            break;
+        case TextureElementType::INT16:
+            for (size_t i = 0; i < count; ++i)
+                dst[i] = static_cast<float>(reinterpret_cast<const int16_t*>(src + i * srcStride)[0]);
+            break;
+        case TextureElementType::INT32:
+            for (size_t i = 0; i < count; ++i)
+                dst[i] = static_cast<float>(reinterpret_cast<const int32_t*>(src + i * srcStride)[0]);
+            break;
+        case TextureElementType::UINT8:
+            for (size_t i = 0; i < count; ++i)
+                dst[i] = static_cast<float>(reinterpret_cast<const uint8_t*>(src + i * srcStride)[0]);
+            break;
+        case TextureElementType::UINT16:
+            for (size_t i = 0; i < count; ++i)
+                dst[i] = static_cast<float>(reinterpret_cast<const uint16_t*>(src + i * srcStride)[0]);
+            break;
+        case TextureElementType::UINT32:
+            for (size_t i = 0; i < count; ++i)
+                dst[i] = static_cast<float>(reinterpret_cast<const uint32_t*>(src + i * srcStride)[0]);
+            break;
+        default:
+            break;
+    }
+}
+
+static void floatToChannel(const float* src, uint8_t* dst, size_t dstStride,
+                           size_t count, TextureElementType type) {
+    switch (type) {
+        case TextureElementType::FLOAT32:
+            for (size_t i = 0; i < count; ++i)
+                reinterpret_cast<float*>(dst + i * dstStride)[0] = src[i];
+            break;
+        case TextureElementType::FP16:
+            for (size_t i = 0; i < count; ++i)
+                reinterpret_cast<vgre_cuda::__half*>(dst + i * dstStride)[0] = vgre_cuda::__float2half(src[i]);
+            break;
+        case TextureElementType::INT8:
+            for (size_t i = 0; i < count; ++i)
+                reinterpret_cast<int8_t*>(dst + i * dstStride)[0] = static_cast<int8_t>(src[i]);
+            break;
+        case TextureElementType::INT16:
+            for (size_t i = 0; i < count; ++i)
+                reinterpret_cast<int16_t*>(dst + i * dstStride)[0] = static_cast<int16_t>(src[i]);
+            break;
+        case TextureElementType::INT32:
+            for (size_t i = 0; i < count; ++i)
+                reinterpret_cast<int32_t*>(dst + i * dstStride)[0] = static_cast<int32_t>(src[i]);
+            break;
+        case TextureElementType::UINT8:
+            for (size_t i = 0; i < count; ++i)
+                reinterpret_cast<uint8_t*>(dst + i * dstStride)[0] = static_cast<uint8_t>(src[i]);
+            break;
+        case TextureElementType::UINT16:
+            for (size_t i = 0; i < count; ++i)
+                reinterpret_cast<uint16_t*>(dst + i * dstStride)[0] = static_cast<uint16_t>(src[i]);
+            break;
+        case TextureElementType::UINT32:
+            for (size_t i = 0; i < count; ++i)
+                reinterpret_cast<uint32_t*>(dst + i * dstStride)[0] = static_cast<uint32_t>(src[i]);
+            break;
+        default:
+            break;
+    }
+}
+
 VGREResult TextureManager::generateMipmaps(TextureId id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -994,25 +1089,36 @@ VGREResult TextureManager::generateMipmaps(TextureId id) {
     }
 
     const TextureObject &tex = texIt->second;
-    if (tex.elementSize != sizeof(float)) {
+    size_t bSize = baseTypeSize(tex.desc.elementType);
+    if (bSize == 0 || tex.elementSize % bSize != 0) {
         VGRE_LOG_WARN("TextureManager",
-                      "generateMipmaps: only float32 textures supported; "
-                      "element size = " + std::to_string(tex.elementSize));
+                      "generateMipmaps: unsupported element size/type combo");
         return VGREResult::ERR_NOT_SUPPORTED;
     }
 
     uint8_t *base = arrIt->second.data();
     const std::vector<size_t> &offs = offIt->second;
     unsigned int levels = tex.mips;
+    size_t channelCount = tex.elementSize / bSize;
 
     size_t lw = tex.width, lh = tex.height;
     for (unsigned int m = 1; m < levels; ++m) {
         size_t dw = std::max<size_t>(1, lw >> 1);
         size_t dh = std::max<size_t>(1, lh >> 1);
 
-        const float *src = reinterpret_cast<const float *>(base + offs[m - 1]);
-        float *dst = reinterpret_cast<float *>(base + offs[m]);
-        boxFilter2D(src, lw, lh, dst, dw, dh);
+        uint8_t *srcBase = base + offs[m - 1];
+        uint8_t *dstBase = base + offs[m];
+        size_t srcPixels = lw * lh;
+        size_t dstPixels = dw * dh;
+
+        std::vector<float> srcF(srcPixels), dstF(dstPixels);
+        for (size_t ch = 0; ch < channelCount; ++ch) {
+            channelToFloat(srcBase + ch * bSize, tex.elementSize, srcPixels,
+                           tex.desc.elementType, srcF.data());
+            boxFilter2D(srcF.data(), lw, lh, dstF.data(), dw, dh);
+            floatToChannel(dstF.data(), dstBase + ch * bSize, tex.elementSize,
+                           dstPixels, tex.desc.elementType);
+        }
 
         lw = dw;
         lh = dh;
