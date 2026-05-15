@@ -763,8 +763,8 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
             (const double*)B, ldb, (const double*)beta, (double*)C, ldc);
     }
 
-    // FP16: dequantize to float, compute, quantize back
-    if (Atype == (int)CUDA_R_16F || Btype == (int)CUDA_R_16F || Ctype == (int)CUDA_R_16F) {
+    // FP16 I/O: dequantize to float, compute, quantize back (all FP16)
+    if (Atype == (int)CUDA_R_16F && Btype == (int)CUDA_R_16F && Ctype == (int)CUDA_R_16F) {
         float alphaF = *(const float*)alpha;
         float betaF  = *(const float*)beta;
         std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
@@ -794,8 +794,35 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         return CUBLAS_STATUS_SUCCESS;
     }
 
-    // BF16: widen to float, compute, narrow back
-    if (Atype == (int)CUDA_R_16BF || Btype == (int)CUDA_R_16BF || Ctype == (int)CUDA_R_16BF) {
+    // Mixed-precision: FP16 inputs → FP32 accumulate/output
+    if ((Atype == (int)CUDA_R_16F && Btype == (int)CUDA_R_16F && Ctype == (int)CUDA_R_32F) ||
+        (Atype == (int)CUDA_R_16F && Btype == (int)CUDA_R_32F && Ctype == (int)CUDA_R_32F) ||
+        (Atype == (int)CUDA_R_32F && Btype == (int)CUDA_R_16F && Ctype == (int)CUDA_R_32F)) {
+        float alphaF = *(const float*)alpha;
+        float betaF  = *(const float*)beta;
+        std::vector<float> Af(m * k), Bf(k * n);
+        auto h2f = [](uint16_t h) -> float {
+            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
+                 (static_cast<uint32_t>((h >> 10) & 0x1f) + (127 - 15)) << 23) |
+                (static_cast<uint32_t>(h & 0x3ff) << 13);
+            float f; std::memcpy(&f, &bits, 4); return f;
+        };
+        for (int i = 0; i < m * k; ++i) {
+            if (Atype == (int)CUDA_R_16F) Af[i] = h2f(static_cast<const uint16_t*>(A)[i]);
+            else Af[i] = static_cast<const float*>(A)[i];
+        }
+        for (int i = 0; i < k * n; ++i) {
+            if (Btype == (int)CUDA_R_16F) Bf[i] = h2f(static_cast<const uint16_t*>(B)[i]);
+            else Bf[i] = static_cast<const float*>(B)[i];
+        }
+        float* Cf = static_cast<float*>(C);
+        refSgemm(transa, transb, m, n, k, alphaF, Af.data(), lda, Bf.data(), ldb, betaF, Cf, ldc);
+        return CUBLAS_STATUS_SUCCESS;
+    }
+
+    // BF16 I/O: widen to float, compute, narrow back (all BF16)
+    if (Atype == (int)CUDA_R_16BF && Btype == (int)CUDA_R_16BF && Ctype == (int)CUDA_R_16BF) {
         float alphaF = *(const float*)alpha;
         float betaF  = *(const float*)beta;
         std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
@@ -821,6 +848,32 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         for (int i = 0; i < m * n; ++i) Cf[i] = bf2f(pC[i]);
         refSgemm(transa, transb, m, n, k, alphaF, Af.data(), lda, Bf.data(), ldb, betaF, Cf.data(), ldc);
         for (int i = 0; i < m * n; ++i) pC[i] = f2bf(Cf[i]);
+        return CUBLAS_STATUS_SUCCESS;
+    }
+
+    // Mixed-precision: BF16 inputs → FP32 accumulate/output
+    if ((Atype == (int)CUDA_R_16BF && Btype == (int)CUDA_R_16BF && Ctype == (int)CUDA_R_32F) ||
+        (Atype == (int)CUDA_R_16BF && Btype == (int)CUDA_R_32F && Ctype == (int)CUDA_R_32F) ||
+        (Atype == (int)CUDA_R_32F && Btype == (int)CUDA_R_16BF && Ctype == (int)CUDA_R_32F)) {
+        float alphaF = *(const float*)alpha;
+        float betaF  = *(const float*)beta;
+        std::vector<float> Af(m * k), Bf(k * n);
+        auto bf2f = [](uint16_t h) -> float {
+            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                (static_cast<uint32_t>((h >> 7) & 0xff) + (127 - 127)) << 23 |
+                (static_cast<uint32_t>(h & 0x7f) << 16);
+            float f; std::memcpy(&f, &bits, 4); return f;
+        };
+        for (int i = 0; i < m * k; ++i) {
+            if (Atype == (int)CUDA_R_16BF) Af[i] = bf2f(static_cast<const uint16_t*>(A)[i]);
+            else Af[i] = static_cast<const float*>(A)[i];
+        }
+        for (int i = 0; i < k * n; ++i) {
+            if (Btype == (int)CUDA_R_16BF) Bf[i] = bf2f(static_cast<const uint16_t*>(B)[i]);
+            else Bf[i] = static_cast<const float*>(B)[i];
+        }
+        float* Cf = static_cast<float*>(C);
+        refSgemm(transa, transb, m, n, k, alphaF, Af.data(), lda, Bf.data(), ldb, betaF, Cf, ldc);
         return CUBLAS_STATUS_SUCCESS;
     }
 

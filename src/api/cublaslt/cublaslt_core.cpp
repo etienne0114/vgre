@@ -424,6 +424,61 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
                      Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
             for (size_t i = 0; i < m * n; ++i) pC[i] = static_cast<int32_t>(Cf[i]);
         }
+    } else if ((la.type == CUDA_R_16F && lb.type == CUDA_R_16F && lc.type == CUDA_R_32F) ||
+               (la.type == CUDA_R_16F && lb.type == CUDA_R_32F && lc.type == CUDA_R_32F) ||
+               (la.type == CUDA_R_32F && lb.type == CUDA_R_16F && lc.type == CUDA_R_32F)) {
+        // Mixed-precision: FP16 inputs → FP32 accumulate/output
+        float alphaF = *(const float*)alpha;
+        float betaF  = *(const float*)beta;
+        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
+        auto h2f = [](uint16_t h) -> float {
+            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
+                 (static_cast<uint32_t>((h >> 10) & 0x1f) + (127 - 15)) << 23) |
+                (static_cast<uint32_t>(h & 0x3ff) << 13);
+            float f; std::memcpy(&f, &bits, 4); return f;
+        };
+        float* pC = static_cast<float*>(C);
+        for (int i = 0; i < m * n; ++i) Cf[i] = pC[i];
+        for (int i = 0; i < m * k; ++i) {
+            if (la.type == CUDA_R_16F) Af[i] = h2f(static_cast<const uint16_t*>(A)[i]);
+            else Af[i] = static_cast<const float*>(A)[i];
+        }
+        for (int i = 0; i < k * n; ++i) {
+            if (lb.type == CUDA_R_16F) Bf[i] = h2f(static_cast<const uint16_t*>(B)[i]);
+            else Bf[i] = static_cast<const float*>(B)[i];
+        }
+        bool tA = d.transA, tB = d.transB;
+        refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
+                 Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+        for (int i = 0; i < m * n; ++i) pC[i] = Cf[i];
+    } else if ((la.type == CUDA_R_16BF && lb.type == CUDA_R_16BF && lc.type == CUDA_R_32F) ||
+               (la.type == CUDA_R_16BF && lb.type == CUDA_R_32F && lc.type == CUDA_R_32F) ||
+               (la.type == CUDA_R_32F && lb.type == CUDA_R_16BF && lc.type == CUDA_R_32F)) {
+        // Mixed-precision: BF16 inputs → FP32 accumulate/output
+        float alphaF = *(const float*)alpha;
+        float betaF  = *(const float*)beta;
+        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
+        auto bf2f = [](uint16_t h) -> float {
+            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                (static_cast<uint32_t>((h >> 7) & 0xff) + (127 - 127)) << 23 |
+                (static_cast<uint32_t>(h & 0x7f) << 16);
+            float f; std::memcpy(&f, &bits, 4); return f;
+        };
+        float* pC = static_cast<float*>(C);
+        for (int i = 0; i < m * n; ++i) Cf[i] = pC[i];
+        for (int i = 0; i < m * k; ++i) {
+            if (la.type == CUDA_R_16BF) Af[i] = bf2f(static_cast<const uint16_t*>(A)[i]);
+            else Af[i] = static_cast<const float*>(A)[i];
+        }
+        for (int i = 0; i < k * n; ++i) {
+            if (lb.type == CUDA_R_16BF) Bf[i] = bf2f(static_cast<const uint16_t*>(B)[i]);
+            else Bf[i] = static_cast<const float*>(B)[i];
+        }
+        bool tA = d.transA, tB = d.transB;
+        refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
+                 Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+        for (int i = 0; i < m * n; ++i) pC[i] = Cf[i];
     } else {
         return CUBLAS_STATUS_NOT_SUPPORTED;
     }
