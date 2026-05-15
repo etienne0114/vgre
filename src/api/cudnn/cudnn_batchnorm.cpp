@@ -2,6 +2,8 @@
 
 #include "cudnn_internal.h"
 
+#include "vgre/common/openmp_helper.h"
+
 extern "C" {
 
 cudnnStatus_t cudnnBatchNormalizationForwardInference(
@@ -19,6 +21,9 @@ cudnnStatus_t cudnnBatchNormalizationForwardInference(
     const float* xf=(const float*)x; float* yf=(float*)y;
     const float* sc=(const float*)scale; const float* bi=(const float*)bias;
     const float* mu=(const float*)mean; const float* va=(const float*)var;
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (N * C * HW > 1024)
+    #endif
     for (int n=0; n<N; ++n)
     for (int c=0; c<C; ++c)
     for (int hw=0; hw<HW; ++hw) {
@@ -56,6 +61,9 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
     int count = N * HW;
 
     if (mode == CUDNN_BATCHNORM_SPATIAL) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (C > 4)
+        #endif
         for (int c=0; c<C; ++c) {
             double sum = 0.0;
             for (int n=0; n<N; ++n)
@@ -63,6 +71,9 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
                 sum += xf[(n*C + c)*HW + hw];
             mean[c] = static_cast<float>(sum / count);
         }
+        #ifdef _OPENMP
+        #pragma omp parallel for if (C > 4)
+        #endif
         for (int c=0; c<C; ++c) {
             double sumSq = 0.0;
             for (int n=0; n<N; ++n)
@@ -92,6 +103,9 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
     }
 
     if (mode == CUDNN_BATCHNORM_SPATIAL) {
+        #ifdef _OPENMP
+        #pragma omp parallel for collapse(2) if (N * C * HW > 1024)
+        #endif
         for (int n=0; n<N; ++n)
         for (int c=0; c<C; ++c) {
             float invVar = 1.f / sqrtf(var[c] + (float)epsilon);
@@ -102,6 +116,9 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
             }
         }
     } else {
+        #ifdef _OPENMP
+        #pragma omp parallel for collapse(2) if (N * C * HW > 1024)
+        #endif
         for (int n=0; n<N; ++n)
         for (int c=0; c<C; ++c)
         for (int hw=0; hw<HW; ++hw) {
@@ -183,6 +200,9 @@ cudnnStatus_t cudnnBatchNormalizationBackward(
 
     if (mode == CUDNN_BATCHNORM_SPATIAL) {
         std::vector<float> mean_dy(C, 0.f), mean_dy_xhat(C, 0.f);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (C > 4)
+        #endif
         for (int c=0; c<C; ++c) {
             double sum_dy = 0, sum_dy_xhat = 0;
             for (int n=0; n<N; ++n)
@@ -196,6 +216,9 @@ cudnnStatus_t cudnnBatchNormalizationBackward(
             mean_dy_xhat[c] = static_cast<float>(sum_dy_xhat / count);
         }
 
+        #ifdef _OPENMP
+        #pragma omp parallel for collapse(2) if (N * C * HW > 1024)
+        #endif
         for (int n=0; n<N; ++n)
         for (int c=0; c<C; ++c)
         for (int hw=0; hw<HW; ++hw) {
@@ -205,6 +228,9 @@ cudnnStatus_t cudnnBatchNormalizationBackward(
             dxf[idx] = aD * (sc[c] * siv[c] * val) + bD * dxf[idx];
         }
 
+        #ifdef _OPENMP
+        #pragma omp parallel for if (C > 4)
+        #endif
         for (int c=0; c<C; ++c) {
             double dscale = 0, dbias = 0;
             for (int n=0; n<N; ++n)
@@ -219,6 +245,9 @@ cudnnStatus_t cudnnBatchNormalizationBackward(
         }
     } else {
         std::vector<float> mean_dy(C*HW, 0.f), mean_dy_xhat(C*HW, 0.f);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (C * HW > 256)
+        #endif
         for (int i=0; i<C*HW; ++i) {
             double sum_dy = 0, sum_dy_xhat = 0;
             for (int n=0; n<N; ++n) {
@@ -231,6 +260,9 @@ cudnnStatus_t cudnnBatchNormalizationBackward(
             mean_dy_xhat[i] = static_cast<float>(sum_dy_xhat / N);
         }
 
+        #ifdef _OPENMP
+        #pragma omp parallel for collapse(2) if (N * C * HW > 1024)
+        #endif
         for (int n=0; n<N; ++n)
         for (int i=0; i<C*HW; ++i) {
             int idx = n*C*HW + i;
@@ -240,6 +272,9 @@ cudnnStatus_t cudnnBatchNormalizationBackward(
             dxf[idx] = aD * (sc[c] * siv[i] * val) + bD * dxf[idx];
         }
 
+        #ifdef _OPENMP
+        #pragma omp parallel for if (C > 4)
+        #endif
         for (int c=0; c<C; ++c) {
             double dscale = 0, dbias = 0;
             for (int n=0; n<N; ++n)

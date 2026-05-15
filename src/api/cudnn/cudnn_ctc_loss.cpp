@@ -6,6 +6,7 @@
 // cuDNN or use an optimized CTC library (e.g., warp-ctc).
 
 #include "cudnn_internal.h"
+#include "vgre/common/openmp_helper.h"
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -202,6 +203,9 @@ cudnnStatus_t cudnnCTCLoss(
     const float* probsF = static_cast<const float*>(probs);
 
     // Process each batch item
+    #ifdef _OPENMP
+    #pragma omp parallel for if (N > 2)
+    #endif
     for (int b = 0; b < N; ++b) {
         int L = labelLengths[b];
         int Tb = inputLengths[b];

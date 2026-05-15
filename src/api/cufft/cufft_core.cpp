@@ -7,6 +7,7 @@
 
 #include "vgre/api/cufft_shim.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/openmp_helper.h"
 
 #include <cmath>
 #include <complex>
@@ -38,6 +39,9 @@ template<typename T>
 void dft1d(const std::complex<T> *in, std::complex<T> *out, int n, int direction) {
     const T sign = (direction == CUFFT_FORWARD) ? -1.0f : 1.0f;
     const T scale = (direction == CUFFT_INVERSE) ? static_cast<T>(1.0 / n) : static_cast<T>(1.0);
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 64)
+    #endif
     for (int k = 0; k < n; ++k) {
         std::complex<T> sum(0, 0);
         for (int j = 0; j < n; ++j) {
@@ -53,6 +57,9 @@ template<typename T>
 void dft2d(const std::complex<T> *in, std::complex<T> *out, int nx, int ny, int direction) {
     std::vector<std::complex<T>> tmp(nx * ny);
     // Row-wise
+    #ifdef _OPENMP
+    #pragma omp parallel for if (ny > 4)
+    #endif
     for (int y = 0; y < ny; ++y) {
         std::vector<std::complex<T>> row_in(nx), row_out(nx);
         for (int x = 0; x < nx; ++x) row_in[x] = in[y * nx + x];
@@ -60,6 +67,9 @@ void dft2d(const std::complex<T> *in, std::complex<T> *out, int nx, int ny, int 
         for (int x = 0; x < nx; ++x) tmp[y * nx + x] = row_out[x];
     }
     // Column-wise
+    #ifdef _OPENMP
+    #pragma omp parallel for if (nx > 4)
+    #endif
     for (int x = 0; x < nx; ++x) {
         std::vector<std::complex<T>> col_in(ny), col_out(ny);
         for (int y = 0; y < ny; ++y) col_in[y] = tmp[y * nx + x];
@@ -75,6 +85,9 @@ void dft3d(const std::complex<T> *in, std::complex<T> *out, int nx, int ny, int 
     std::vector<std::complex<T>> tmp1(nx * ny * nz);
 
     // Z-slices (nx × ny) for each z
+    #ifdef _OPENMP
+    #pragma omp parallel for if (nz > 2)
+    #endif
     for (int z = 0; z < nz; ++z) {
         for (int y = 0; y < ny; ++y) {
             std::vector<std::complex<T>> row_in(nx), row_out(nx);
@@ -84,6 +97,9 @@ void dft3d(const std::complex<T> *in, std::complex<T> *out, int nx, int ny, int 
         }
     }
     // Y-columns for each z
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (nz * nx > 4)
+    #endif
     for (int z = 0; z < nz; ++z) {
         for (int x = 0; x < nx; ++x) {
             std::vector<std::complex<T>> col_in(ny), col_out(ny);
@@ -93,6 +109,9 @@ void dft3d(const std::complex<T> *in, std::complex<T> *out, int nx, int ny, int 
         }
     }
     // Z-stacks for each (x,y)
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (ny * nx > 4)
+    #endif
     for (int y = 0; y < ny; ++y) {
         for (int x = 0; x < nx; ++x) {
             std::vector<std::complex<T>> depth_in(nz), depth_out(nz);
@@ -210,6 +229,9 @@ cufftResult_t execC2C(const CufftPlan &p, void *idata, void *odata, int directio
     auto *in = static_cast<std::complex<T>*>(idata);
     auto *out = static_cast<std::complex<T>*>(odata);
     if (p.rank == 1) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (p.batch > 2)
+        #endif
         for (int b = 0; b < p.batch; ++b)
             dft1d(in + b * p.nx, out + b * p.nx, p.nx, direction);
     } else if (p.rank == 2) {
@@ -225,6 +247,9 @@ cufftResult_t execR2C(const CufftPlan &p, void *idata, void *odata) {
     auto *in = static_cast<T*>(idata);
     auto *out = static_cast<std::complex<T>*>(odata);
     if (p.rank == 1) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (p.batch > 2)
+        #endif
         for (int b = 0; b < p.batch; ++b)
             r2c1d(in + b * p.nx, out + b * p.nx, p.nx);
     } else {
@@ -243,6 +268,9 @@ cufftResult_t execC2R(const CufftPlan &p, void *idata, void *odata) {
     auto *in = static_cast<std::complex<T>*>(idata);
     auto *out = static_cast<T*>(odata);
     if (p.rank == 1) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (p.batch > 2)
+        #endif
         for (int b = 0; b < p.batch; ++b)
             c2r1d(in + b * p.nx, out + b * p.nx, p.nx);
     } else {

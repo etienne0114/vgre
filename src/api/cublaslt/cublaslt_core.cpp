@@ -80,15 +80,23 @@ struct MatmulDesc {
 std::unordered_map<uintptr_t, MatmulDesc> g_matmulDescs;
 uintptr_t g_nextMatmulDesc = 1;
 
+#include "vgre/common/openmp_helper.h"
+
 // ── Epilogue post-processing ─────────────────────────────────────────────────
 
 template<typename T>
 void applyRelu(T *data, size_t count) {
+    #ifdef _OPENMP
+    #pragma omp parallel for if (count > 1024)
+    #endif
     for (size_t i = 0; i < count; ++i) if (data[i] < T(0)) data[i] = T(0);
 }
 
 template<typename T>
 void applyGelu(T *data, size_t count) {
+    #ifdef _OPENMP
+    #pragma omp parallel for if (count > 1024)
+    #endif
     for (size_t i = 0; i < count; ++i) {
         T x = data[i];
         data[i] = T(0.5) * x * (T(1.0) + std::tanh(std::sqrt(T(2.0) / T(M_PI)) *
@@ -98,6 +106,9 @@ void applyGelu(T *data, size_t count) {
 
 template<typename T>
 void applyBias(T *data, size_t rows, size_t cols, const T *bias) {
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (rows * cols > 1024)
+    #endif
     for (size_t r = 0; r < rows; ++r) {
         for (size_t c = 0; c < cols; ++c) {
             data[r * cols + c] += bias[c];
@@ -363,12 +374,24 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         const uint16_t* pA = static_cast<const uint16_t*>(A);
         const uint16_t* pB = static_cast<const uint16_t*>(B);
         uint16_t*       pC = static_cast<uint16_t*>(C);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * k > 1024)
+        #endif
         for (int i = 0; i < m * k; ++i) Af[i] = h2f(pA[i]);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (k * n > 1024)
+        #endif
         for (int i = 0; i < k * n; ++i) Bf[i] = h2f(pB[i]);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * n > 1024)
+        #endif
         for (int i = 0; i < m * n; ++i) Cf[i] = h2f(pC[i]);
         bool tA = d.transA, tB = d.transB;
         refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
                  Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * n > 1024)
+        #endif
         for (size_t i = 0; i < m * n; ++i) pC[i] = f2h(Cf[i]);
     } else if (la.type == CUDA_R_16BF && lb.type == CUDA_R_16BF && lc.type == CUDA_R_16BF) {
         // BF16 via float widening
@@ -392,12 +415,24 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         const uint16_t* pA = static_cast<const uint16_t*>(A);
         const uint16_t* pB = static_cast<const uint16_t*>(B);
         uint16_t*       pC = static_cast<uint16_t*>(C);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * k > 1024)
+        #endif
         for (int i = 0; i < m * k; ++i) Af[i] = bf2f(pA[i]);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (k * n > 1024)
+        #endif
         for (int i = 0; i < k * n; ++i) Bf[i] = bf2f(pB[i]);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * n > 1024)
+        #endif
         for (int i = 0; i < m * n; ++i) Cf[i] = bf2f(pC[i]);
         bool tA = d.transA, tB = d.transB;
         refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
                  Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * n > 1024)
+        #endif
         for (size_t i = 0; i < m * n; ++i) pC[i] = f2bf(Cf[i]);
     } else if (la.type == CUDA_R_8I && lb.type == CUDA_R_8I &&
                (lc.type == CUDA_R_8I || lc.type == CUDA_R_32I)) {
@@ -407,21 +442,39 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
         const int8_t* pA = static_cast<const int8_t*>(A);
         const int8_t* pB = static_cast<const int8_t*>(B);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * k > 1024)
+        #endif
         for (int i = 0; i < m * k; ++i) Af[i] = static_cast<float>(pA[i]);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (k * n > 1024)
+        #endif
         for (int i = 0; i < k * n; ++i) Bf[i] = static_cast<float>(pB[i]);
         if (lc.type == CUDA_R_8I) {
             int8_t* pC = static_cast<int8_t*>(C);
+            #ifdef _OPENMP
+            #pragma omp parallel for if (m * n > 1024)
+            #endif
             for (int i = 0; i < m * n; ++i) Cf[i] = static_cast<float>(pC[i]);
             bool tA = d.transA, tB = d.transB;
             refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
                      Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+            #ifdef _OPENMP
+            #pragma omp parallel for if (m * n > 1024)
+            #endif
             for (size_t i = 0; i < m * n; ++i) pC[i] = static_cast<int8_t>(Cf[i]);
         } else {
             int32_t* pC = static_cast<int32_t*>(C);
+            #ifdef _OPENMP
+            #pragma omp parallel for if (m * n > 1024)
+            #endif
             for (int i = 0; i < m * n; ++i) Cf[i] = static_cast<float>(pC[i]);
             bool tA = d.transA, tB = d.transB;
             refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
                      Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+            #ifdef _OPENMP
+            #pragma omp parallel for if (m * n > 1024)
+            #endif
             for (size_t i = 0; i < m * n; ++i) pC[i] = static_cast<int32_t>(Cf[i]);
         }
     } else if ((la.type == CUDA_R_16F && lb.type == CUDA_R_16F && lc.type == CUDA_R_32F) ||
@@ -439,11 +492,20 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
             float f; std::memcpy(&f, &bits, 4); return f;
         };
         float* pC = static_cast<float*>(C);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * n > 1024)
+        #endif
         for (int i = 0; i < m * n; ++i) Cf[i] = pC[i];
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * k > 1024)
+        #endif
         for (int i = 0; i < m * k; ++i) {
             if (la.type == CUDA_R_16F) Af[i] = h2f(static_cast<const uint16_t*>(A)[i]);
             else Af[i] = static_cast<const float*>(A)[i];
         }
+        #ifdef _OPENMP
+        #pragma omp parallel for if (k * n > 1024)
+        #endif
         for (int i = 0; i < k * n; ++i) {
             if (lb.type == CUDA_R_16F) Bf[i] = h2f(static_cast<const uint16_t*>(B)[i]);
             else Bf[i] = static_cast<const float*>(B)[i];
@@ -451,6 +513,9 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         bool tA = d.transA, tB = d.transB;
         refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
                  Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * n > 1024)
+        #endif
         for (int i = 0; i < m * n; ++i) pC[i] = Cf[i];
     } else if ((la.type == CUDA_R_16BF && lb.type == CUDA_R_16BF && lc.type == CUDA_R_32F) ||
                (la.type == CUDA_R_16BF && lb.type == CUDA_R_32F && lc.type == CUDA_R_32F) ||
@@ -466,11 +531,20 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
             float f; std::memcpy(&f, &bits, 4); return f;
         };
         float* pC = static_cast<float*>(C);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * n > 1024)
+        #endif
         for (int i = 0; i < m * n; ++i) Cf[i] = pC[i];
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * k > 1024)
+        #endif
         for (int i = 0; i < m * k; ++i) {
             if (la.type == CUDA_R_16BF) Af[i] = bf2f(static_cast<const uint16_t*>(A)[i]);
             else Af[i] = static_cast<const float*>(A)[i];
         }
+        #ifdef _OPENMP
+        #pragma omp parallel for if (k * n > 1024)
+        #endif
         for (int i = 0; i < k * n; ++i) {
             if (lb.type == CUDA_R_16BF) Bf[i] = bf2f(static_cast<const uint16_t*>(B)[i]);
             else Bf[i] = static_cast<const float*>(B)[i];
@@ -478,6 +552,9 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         bool tA = d.transA, tB = d.transB;
         refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
                  Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m * n > 1024)
+        #endif
         for (int i = 0; i < m * n; ++i) pC[i] = Cf[i];
     } else {
         return CUBLAS_STATUS_NOT_SUPPORTED;

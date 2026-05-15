@@ -1,6 +1,7 @@
 // cuBLAS core API functions
 
 #include "cublas_internal.h"
+#include "vgre/common/openmp_helper.h"
 
 extern "C" {
 
@@ -78,6 +79,9 @@ cublasStatus_t cublasSsyr_v2(cublasHandle_t handle, cublasFillMode_t uplo, int n
                *alpha, x, incx, A, lda);
 #else
     bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 64)
+    #endif
     for (int j = 0; j < n; ++j) {
         float temp = (*alpha) * x[j*incx];
         if (upper) {
@@ -101,6 +105,9 @@ cublasStatus_t cublasDsyr_v2(cublasHandle_t handle, cublasFillMode_t uplo, int n
                *alpha, x, incx, A, lda);
 #else
     bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 64)
+    #endif
     for (int j = 0; j < n; ++j) {
         double temp = (*alpha) * x[j*incx];
         if (upper) {

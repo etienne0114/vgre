@@ -1,6 +1,7 @@
 // cuDNN OpTensor, ReduceTensor, TransformTensor
 
 #include "cudnn_internal.h"
+#include "vgre/common/openmp_helper.h"
 
 extern "C" {
 
@@ -34,6 +35,9 @@ cudnnStatus_t cudnnOpTensor(
     const float* Bf = (const float*)B;
     float* Cf = (float*)C;
 
+    #ifdef _OPENMP
+    #pragma omp parallel for if (total > 1024)
+    #endif
     for (int i = 0; i < total; ++i) {
         float val = 0.f;
         switch (od->op) {
@@ -91,6 +95,9 @@ cudnnStatus_t cudnnReduceTensor(
     bool reduceW = (ct->w == 1 && at->w > 1);
 
     // Per-output-element reduction
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) schedule(static) if (ct->n * ct->c * ct->h * ct->w > 256)
+    #endif
     for (int on = 0; on < ct->n; ++on)
     for (int oc = 0; oc < ct->c; ++oc)
     for (int oh = 0; oh < ct->h; ++oh)
@@ -240,6 +247,9 @@ cudnnStatus_t cudnnTransformTensor(
     const float* xf = (const float*)x;
     float* yf = (float*)y;
 
+    #ifdef _OPENMP
+    #pragma omp parallel for if (xTotal > 1024)
+    #endif
     for (int i = 0; i < xTotal; ++i)
         yf[i] = a * xf[i] + b * yf[i];
 

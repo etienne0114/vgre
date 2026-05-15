@@ -1,6 +1,7 @@
 // cuDNN RNN forward + backward
 
 #include "cudnn_internal.h"
+#include "vgre/common/openmp_helper.h"
 
 extern "C" {
 
@@ -70,6 +71,9 @@ cudnnStatus_t cudnnRNNForwardInference(
     for (int t = 0; t < seqLength; ++t) {
         const float* x_t = xf + t * batch * inputSize;
         float* y_t = yf + t * batch * hiddenSize;
+        #ifdef _OPENMP
+        #pragma omp parallel for if (batch > 4)
+        #endif
         for (int n = 0; n < batch; ++n) {
             for (int j = 0; j < hiddenSize; ++j) {
                 float sum = b[j];
@@ -162,6 +166,9 @@ cudnnStatus_t cudnnRNNBackwardData(
         const float* dy_t = dyf + t * batch * hiddenSize;
         float* dx_t = dxf + t * batch * inputSize;
 
+        #ifdef _OPENMP
+        #pragma omp parallel for if (batch > 4)
+        #endif
         for (int n = 0; n < batch; ++n) {
             for (int j = 0; j < hiddenSize; ++j) {
                 int idx = n * hiddenSize + j;
@@ -176,6 +183,9 @@ cudnnStatus_t cudnnRNNBackwardData(
         }
 
         std::vector<float> dhNext(batch * hiddenSize, 0.f);
+        #ifdef _OPENMP
+        #pragma omp parallel for if (batch > 4)
+        #endif
         for (int n = 0; n < batch; ++n) {
             for (int j = 0; j < hiddenSize; ++j) {
                 float grad = dh[n * hiddenSize + j];

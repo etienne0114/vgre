@@ -1,6 +1,7 @@
 // cuDNN dropout forward + backward + reserve space query
 
 #include "cudnn_internal.h"
+#include "vgre/common/openmp_helper.h"
 
 extern "C" {
 
@@ -38,11 +39,14 @@ cudnnStatus_t cudnnDropoutForward(
     float* yf = (float*)y;
     uint8_t* mask = (uint8_t*)reserveSpace;
 
-    std::mt19937_64 rng(d->seed);
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-
+    #ifdef _OPENMP
+    #pragma omp parallel for if (N > 1024)
+    #endif
     for (int i = 0; i < N; ++i) {
-        float r = dist(rng);
+        // Deterministic per-element RNG: seed + i
+        std::mt19937_64 elemRng(d->seed + static_cast<uint64_t>(i));
+        std::uniform_real_distribution<float> elemDist(0.0f, 1.0f);
+        float r = elemDist(elemRng);
         if (r < d->dropout) {
             mask[i] = 0;
             yf[i] = 0.0f;
@@ -78,6 +82,9 @@ cudnnStatus_t cudnnDropoutBackward(
     float* dxf = (float*)dx;
     const uint8_t* mask = (const uint8_t*)reserveSpace;
 
+    #ifdef _OPENMP
+    #pragma omp parallel for if (N > 1024)
+    #endif
     for (int i = 0; i < N; ++i) {
         dxf[i] = mask[i] ? (dyf[i] * scale) : 0.0f;
     }

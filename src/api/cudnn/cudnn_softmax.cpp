@@ -2,6 +2,8 @@
 
 #include "cudnn_internal.h"
 
+#include "vgre/common/openmp_helper.h"
+
 extern "C" {
 
 cudnnStatus_t cudnnSoftmaxForward(cudnnHandle_t,
@@ -18,6 +20,9 @@ cudnnStatus_t cudnnSoftmaxForward(cudnnHandle_t,
 
     if (mode == 0) {
         int VEC = C * HW;
+        #ifdef _OPENMP
+        #pragma omp parallel for if (N > 4)
+        #endif
         for (int n=0; n<N; ++n) {
             const float* row = xf + n*VEC;
             float* out = yf + n*VEC;
@@ -27,6 +32,9 @@ cudnnStatus_t cudnnSoftmaxForward(cudnnHandle_t,
             for (int i=0; i<VEC; ++i) out[i] = a*(expf(row[i]-maxv)/sum) + b*out[i];
         }
     } else {
+        #ifdef _OPENMP
+        #pragma omp parallel for collapse(2) if (N * HW > 1024)
+        #endif
         for (int n=0; n<N; ++n)
         for (int hw=0; hw<HW; ++hw) {
             float maxv = xf[n*C*HW + 0*HW + hw];
@@ -68,6 +76,9 @@ cudnnStatus_t cudnnSoftmaxBackward(cudnnHandle_t,
 
     if (mode == 0) {
         int VEC = C * HW;
+        #ifdef _OPENMP
+        #pragma omp parallel for if (N > 4)
+        #endif
         for (int n=0; n<N; ++n) {
             float sum_dy_y = 0.f;
             for (int i=0; i<VEC; ++i)
@@ -78,6 +89,9 @@ cudnnStatus_t cudnnSoftmaxBackward(cudnnHandle_t,
             }
         }
     } else {
+        #ifdef _OPENMP
+        #pragma omp parallel for collapse(2) if (N * HW > 1024)
+        #endif
         for (int n=0; n<N; ++n)
         for (int hw=0; hw<HW; ++hw) {
             float sum_dy_y = 0.f;

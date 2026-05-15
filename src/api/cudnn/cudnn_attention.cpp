@@ -1,6 +1,7 @@
 // cuDNN multi-head attention forward + backward
 
 #include "cudnn_internal.h"
+#include "vgre/common/openmp_helper.h"
 
 extern "C" {
 
@@ -39,6 +40,9 @@ cudnnStatus_t cudnnMultiHeadAttnForward(
     int total = seqLen * batchSize * D;
     std::vector<float> Q(total), K(total), V(total);
 
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (seqLen * batchSize > 4)
+    #endif
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {
         int base = (t * batchSize + b) * D;
@@ -56,6 +60,9 @@ cudnnStatus_t cudnnMultiHeadAttnForward(
         }
     }
 
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (batchSize * seqLen > 4)
+    #endif
     for (int b = 0; b < batchSize; ++b) {
         for (int tq = 0; tq < seqLen; ++tq) {
             std::vector<float> scores(seqLen);
@@ -134,6 +141,9 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardData(
     const float* Wo = wf + 3*wSize;
 
     std::vector<float> dOut(total, 0.f);
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (seqLen * batchSize > 4)
+    #endif
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {
         int base = (t * batchSize + b) * D;
@@ -144,6 +154,9 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardData(
         }
     }
 
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (seqLen * batchSize > 4)
+    #endif
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {
         int base = (t * batchSize + b) * D;
@@ -192,6 +205,9 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardWeights(
     float* dbv = dwf + 4*wSize + 2*D;
     float* dbo = dwf + 4*wSize + 3*D;
 
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (seqLen * batchSize > 4)
+    #endif
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {
         int base = (t * batchSize + b) * D;
@@ -208,6 +224,9 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardWeights(
         }
     }
 
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (seqLen * batchSize > 4)
+    #endif
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {
         int base = (t * batchSize + b) * D;

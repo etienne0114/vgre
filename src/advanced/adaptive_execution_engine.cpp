@@ -14,9 +14,7 @@
 #include <thread>
 #include <vector>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
+#include "vgre/common/openmp_helper.h"
 
 #if defined(__linux__)
 #include <dirent.h>

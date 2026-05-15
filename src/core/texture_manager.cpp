@@ -1,5 +1,6 @@
 #include "vgre/core/texture_manager.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/openmp_helper.h"
 #include "vgre/compiler/cpu_cuda_fp16.h"
 
 #include <algorithm>
@@ -979,6 +980,9 @@ VGREResult TextureManager::createMipmappedArray(TextureId &outId,
 // src is (sw × sh) floats; dst is (dw × dh) floats where dw = sw/2, dh = sh/2.
 static void boxFilter2D(const float *src, size_t sw, size_t sh,
                         float *dst, size_t dw, size_t dh) {
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (dw * dh > 1024)
+    #endif
     for (size_t y = 0; y < dh; ++y) {
         for (size_t x = 0; x < dw; ++x) {
             size_t sx = x * 2, sy = y * 2;
@@ -1012,34 +1016,58 @@ static void channelToFloat(const uint8_t* src, size_t srcStride, size_t count,
                            TextureElementType type, float* dst) {
     switch (type) {
         case TextureElementType::FLOAT32:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 dst[i] = reinterpret_cast<const float*>(src + i * srcStride)[0];
             break;
         case TextureElementType::FP16:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 dst[i] = vgre_cuda::__half2float(reinterpret_cast<const vgre_cuda::__half*>(src + i * srcStride)[0]);
             break;
         case TextureElementType::INT8:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 dst[i] = static_cast<float>(reinterpret_cast<const int8_t*>(src + i * srcStride)[0]);
             break;
         case TextureElementType::INT16:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 dst[i] = static_cast<float>(reinterpret_cast<const int16_t*>(src + i * srcStride)[0]);
             break;
         case TextureElementType::INT32:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 dst[i] = static_cast<float>(reinterpret_cast<const int32_t*>(src + i * srcStride)[0]);
             break;
         case TextureElementType::UINT8:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 dst[i] = static_cast<float>(reinterpret_cast<const uint8_t*>(src + i * srcStride)[0]);
             break;
         case TextureElementType::UINT16:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 dst[i] = static_cast<float>(reinterpret_cast<const uint16_t*>(src + i * srcStride)[0]);
             break;
         case TextureElementType::UINT32:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 dst[i] = static_cast<float>(reinterpret_cast<const uint32_t*>(src + i * srcStride)[0]);
             break;
@@ -1052,34 +1080,58 @@ static void floatToChannel(const float* src, uint8_t* dst, size_t dstStride,
                            size_t count, TextureElementType type) {
     switch (type) {
         case TextureElementType::FLOAT32:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 reinterpret_cast<float*>(dst + i * dstStride)[0] = src[i];
             break;
         case TextureElementType::FP16:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 reinterpret_cast<vgre_cuda::__half*>(dst + i * dstStride)[0] = vgre_cuda::__float2half(src[i]);
             break;
         case TextureElementType::INT8:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 reinterpret_cast<int8_t*>(dst + i * dstStride)[0] = static_cast<int8_t>(src[i]);
             break;
         case TextureElementType::INT16:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 reinterpret_cast<int16_t*>(dst + i * dstStride)[0] = static_cast<int16_t>(src[i]);
             break;
         case TextureElementType::INT32:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 reinterpret_cast<int32_t*>(dst + i * dstStride)[0] = static_cast<int32_t>(src[i]);
             break;
         case TextureElementType::UINT8:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 reinterpret_cast<uint8_t*>(dst + i * dstStride)[0] = static_cast<uint8_t>(src[i]);
             break;
         case TextureElementType::UINT16:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 reinterpret_cast<uint16_t*>(dst + i * dstStride)[0] = static_cast<uint16_t>(src[i]);
             break;
         case TextureElementType::UINT32:
+            #ifdef _OPENMP
+            #pragma omp parallel for if (count > 1024)
+            #endif
             for (size_t i = 0; i < count; ++i)
                 reinterpret_cast<uint32_t*>(dst + i * dstStride)[0] = static_cast<uint32_t>(src[i]);
             break;

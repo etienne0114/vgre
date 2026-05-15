@@ -9,6 +9,7 @@
 //   cublasZher2k — double-complex version
 
 #include "cublas_internal.h"
+#include "vgre/common/openmp_helper.h"
 
 extern "C" {
 
@@ -50,6 +51,9 @@ cublasStatus_t cublasCherk_v2(cublasHandle_t handle,
     //        C = alpha * A^H * A + beta * C   (trans == C, A is k x n)
     // Only the diagonal of C must remain real; imaginary parts on diagonal are ignored.
 
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 16)
+    #endif
     for (int j = 0; j < n; ++j) {
         for (int i = (uplo == CUBLAS_FILL_MODE_LOWER) ? j : 0;
                  i <= (uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j; ++i) {
@@ -95,6 +99,9 @@ cublasStatus_t cublasZherk_v2(cublasHandle_t handle,
     double a = *alpha;
     double b = *beta;
 
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 16)
+    #endif
     for (int j = 0; j < n; ++j) {
         for (int i = (uplo == CUBLAS_FILL_MODE_LOWER) ? j : 0;
                  i <= (uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j; ++i) {
@@ -140,6 +147,9 @@ cublasStatus_t cublasCher2k_v2(cublasHandle_t handle,
     cuComplex aConj = cuConjf(a);
     float b = *beta;
 
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 16)
+    #endif
     for (int j = 0; j < n; ++j) {
         for (int i = (uplo == CUBLAS_FILL_MODE_LOWER) ? j : 0;
                  i <= (uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j; ++i) {
@@ -193,6 +203,9 @@ cublasStatus_t cublasZher2k_v2(cublasHandle_t handle,
     cuDoubleComplex aConj = cuConj(a);
     double b = *beta;
 
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 16)
+    #endif
     for (int j = 0; j < n; ++j) {
         for (int i = (uplo == CUBLAS_FILL_MODE_LOWER) ? j : 0;
                  i <= (uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j; ++i) {
@@ -269,6 +282,9 @@ cublasStatus_t cublasChemm_v2(cublasHandle_t handle,
     int ka = left ? m : n; // size of A: (m×m) if left, (n×n) if right
 
     // C = beta * C
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #endif
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < n; ++j) {
             cuComplex &c = C[i*ldc+j];
@@ -276,6 +292,9 @@ cublasStatus_t cublasChemm_v2(cublasHandle_t handle,
         }
 
     // C += alpha * (A * B)  or  alpha * (B * A)
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #endif
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < n; ++j) {
             cuComplex acc = {0.f, 0.f};
@@ -315,11 +334,17 @@ cublasStatus_t cublasZhemm_v2(cublasHandle_t handle,
     bool left  = (side == CUBLAS_SIDE_LEFT);
     bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
     int ka = left ? m : n;
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #endif
     for (int i=0;i<m;++i)
         for (int j=0;j<n;++j) {
             cuDoubleComplex &c = C[i*ldc+j];
             c = {c.x*beta->x-c.y*beta->y, c.x*beta->y+c.y*beta->x};
         }
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #endif
     for (int i=0;i<m;++i)
         for (int j=0;j<n;++j) {
             cuDoubleComplex acc={0,0};
