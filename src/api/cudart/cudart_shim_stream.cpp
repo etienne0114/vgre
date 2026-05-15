@@ -332,13 +332,27 @@ cudaError_t cudaFreeHost(void *pHost) {
   return vgre::api::CUDAInterceptor::instance().freeHost(pHost);
 }
 
+// Per-registration flags — shared with cudaHostGetFlags in cudart_shim_array_memcpy.cpp
+std::mutex g_hostFlagsMutex;
+std::unordered_map<const void*, unsigned int> g_hostFlags;
+
 cudaError_t cudaHostRegister(void *pHost, size_t size, unsigned int flags) {
-  return vgre::api::CUDAInterceptor::instance().hostRegister(pHost, size,
-                                                             flags);
+  cudaError_t err = vgre::api::CUDAInterceptor::instance().hostRegister(
+      pHost, size, flags);
+  if (err == cudaSuccess) {
+    std::lock_guard<std::mutex> lock(g_hostFlagsMutex);
+    g_hostFlags[pHost] = flags;
+  }
+  return err;
 }
 
 cudaError_t cudaHostUnregister(void *pHost) {
-  return vgre::api::CUDAInterceptor::instance().hostUnregister(pHost);
+  cudaError_t err = vgre::api::CUDAInterceptor::instance().hostUnregister(pHost);
+  {
+    std::lock_guard<std::mutex> lock(g_hostFlagsMutex);
+    g_hostFlags.erase(pHost);
+  }
+  return err;
 }
 
 // ── Stream Management ──────────────────────────────────────────────────────

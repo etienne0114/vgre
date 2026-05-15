@@ -66,13 +66,13 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 |---|---|---|---|
 | 1.2.1 | `cudaMemcpyToSymbol` / `cudaMemcpyToSymbolAsync` / `cudaMemcpyFromSymbol` / `cudaMemcpyFromSymbolAsync` | ✅ **IMPLEMENTED** 2026-05-13 — resolves symbol via `CUDAModuleRegistry::lookupVariable()`, applies offset, delegates to existing `memcpy`/`memcpyAsync`. Returns `cudaErrorInvalidSymbol` for unregistered symbols. Test: `tests/api/test_memcpy_symbol.cpp`. | `grep -rn "^cudaError_t cudaMemcpyToSymbol" src/api/cudart_shim.cpp` → match |
 | 1.2.2 | `cudaMallocArray` / `cudaMalloc3DArray` | ✅ **IMPLEMENTED** 2026-05-13 — `mallocArray` allocates 1D/2D arrays via `TextureManager::createCudaArray`; `malloc3DArray` allocates 3D arrays via `TextureManager::createCudaArray3D`. Both own backing memory. `freeArray` destroys via `TextureManager::destroyCudaArray`. CUDART shims added with null checks. Test: `tests/api/test_malloc_array.cpp`. | `grep -rn "^cudaError_t cudaMallocArray" src/api/cudart_shim_stream.cpp` → match |
-| 1.2.3 | `cudaMalloc3D` | Medium — 3D pitched allocations. | Absent |
-| 1.2.4 | `cudaMemcpy3DAsync` | Medium — `cudaMemcpy3DBatchAsync` exists; standalone 3D async memcpy missing. | Absent |
-| 1.2.5 | `cudaHostGetDevicePointer` / `cudaHostGetFlags` | Medium — pinned-memory introspection. | Absent |
-| 1.2.6 | `cudaArrayGetInfo` / `cudaArrayDestroy` | Medium — array lifetime management. | Absent |
+| 1.2.3 | `cudaMalloc3D` | ✅ **IMPLEMENTED** 2026-05-15 — pitched 3D device allocation via `MemoryManager`; pitch aligned to 512-byte boundary. `src/api/cudart/cudart_shim_array_memcpy.cpp`. |
+| 1.2.4 | `cudaMemcpy3DAsync` | ✅ **IMPLEMENTED** 2026-05-15 — delegates to `cudaMemcpy3D` (synchronous in CPU model). Supports array-to-array, array-to-pitched, and pitched-to-array copies. |
+| 1.2.5 | `cudaHostGetDevicePointer` / `cudaHostGetFlags` | ✅ **IMPLEMENTED** 2026-05-15 — device pointer = host pointer (CPU model). Flags stored in per-registration `g_hostFlags` table; `cudaHostRegister` extended to record them. |
+| 1.2.6 | `cudaArrayGetInfo` / `cudaArrayDestroy` | ✅ **IMPLEMENTED** 2026-05-15 — `cudaArrayGetInfo` queries `TextureManager::getCudaArrayInfo` for width/height/depth/format. `cudaArrayDestroy` = `cudaFreeArray` (already existed). |
 | 1.2.7 | `cudaPointerGetAttributes` | ✅ **IMPLEMENTED** 2026-05-13 — uses `MemoryManager::getPointerAttributes()` for O(log n) range lookup; reports `cudaMemoryTypeDevice` for `cudaMalloc`, `cudaMemoryTypeManaged` for `cudaMallocManaged`, and `cudaMemoryTypeHost` for unregistered host pointers. Also added `cudaMallocManaged` CUDART shim. Test: `tests/api/test_pointer_attributes.cpp`. | `grep -rn "^cudaError_t cudaPointerGetAttributes" src/api/cudart_shim_stream.cpp` → match |
 | 1.2.8 | `cudaMemset2D` / `cudaMemset3D` / `cudaMemset2DAsync` / `cudaMemset3DAsync` | ✅ **IMPLEMENTED** 2026-05-13 — row-by-row pitched fill (2D) and slice-by-slice (3D); async variants use `Scheduler::submitStreamTask`. Test: `tests/api/test_memset2d_graph_kernelnode.cpp`. | `grep -rn "cudaMemset2D\|cudaMemset3D" src/api/cudart_shim_memset_nd.cpp` → match |
-| 1.2.9 | `cudaMemcpyToArray` / `cudaMemcpyFromArray` / `cudaMemcpy2DToArray` / `cudaMemcpy2DFromArray` | Medium — array transfer APIs. | Absent |
+| 1.2.9 | `cudaMemcpyToArray` / `cudaMemcpyFromArray` / `cudaMemcpy2DToArray` / `cudaMemcpy2DFromArray` | ✅ **IMPLEMENTED** 2026-05-15 — all four plus async variants. Array element access via `TextureManager::getCudaArrayData`. `src/api/cudart/cudart_shim_array_memcpy.cpp`. |
 
 ### 1.3 CUDA Graphs — Kernel & Essential Node Types
 
@@ -139,24 +139,24 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 | 2.1.3 | `cuMemAllocPitch` | ✅ **IMPLEMENTED** 2026-05-14 — pitched allocation via `CUDAInterceptor::memAllocPitch`. `src/api/cuda_driver/cuda_driver_memory.cpp` |
 | 2.1.4 | `cuMemcpy2D` / `cuMemcpy2DAsync` / `cuMemcpy3D` / `cuMemcpy3DAsync` | ✅ **IMPLEMENTED** 2026-05-14 — structured 2D/3D memcpy via `CUDAInterceptor::memcpy2D/3D`. `src/api/cuda_driver/cuda_driver_memcpy.cpp` |
 | 2.1.5 | `cuMemcpyDtoDAsync` / `cuMemcpyDtoHAsync` / `cuMemcpyHtoDAsync` / `cuMemcpyAsync` | ✅ **IMPLEMENTED** 2026-05-14 — async structured copies via `CUDAInterceptor`. `src/api/cuda_driver/cuda_driver_memcpy.cpp` |
-| 2.1.6 | `cuMemcpyPeer` / `cuMemcpyPeerAsync` | Peer memory copies |
+| 2.1.6 | `cuMemcpyPeer` / `cuMemcpyPeerAsync` | ✅ **IMPLEMENTED** — peer copies as direct host memcpy (single-address-space CPU model). `src/api/cuda_driver/cuda_driver_memcpy.cpp`. |
 | 2.1.7 | `cuMemsetD8` / `cuMemsetD16` / `cuMemsetD32` / `cuMemsetD2D8` / `cuMemsetD2D16` / `cuMemsetD2D32` | ✅ **IMPLEMENTED** 2026-05-14 — device memset variants via `CUDAInterceptor::memsetD*`. `src/api/cuda_driver/cuda_driver_memset.cpp` |
 | 2.1.8 | `cuLaunchCooperativeKernel` / `cuLaunchCooperativeKernelMultiDevice` | ✅ **IMPLEMENTED** 2026-05-14 — CPU-emulated cooperative launch; multi-device launches sequentially on device 0. `src/api/cuda_driver/cuda_driver_module.cpp` |
-| 2.1.9 | `cuLaunchKernelEx` | Extended kernel launch (params struct) |
-| 2.1.10 | `cuStreamAddCallback` | Driver-level stream callbacks |
-| 2.1.11 | `cuStreamQuery` / `cuStreamGetFlags` / `cuStreamGetPriority` / `cuStreamGetId` / `cuStreamGetCtx` | Stream introspection |
+| 2.1.9 | `cuLaunchKernelEx` | Extended kernel launch (params struct) — still absent |
+| 2.1.10 | `cuStreamAddCallback` | ✅ **IMPLEMENTED** — forwards to `CUDAInterceptor::streamAddCallback`. `src/api/cuda_driver/cuda_driver_stream_event.cpp`. |
+| 2.1.11 | `cuStreamQuery` / `cuStreamGetFlags` / `cuStreamGetPriority` / `cuStreamGetId` / `cuStreamGetCtx` | ✅ **IMPLEMENTED** — all five stream introspection APIs. `src/api/cuda_driver/cuda_driver_stream_event.cpp`. |
 | 2.1.12 | `cuStreamGetCaptureInfo` / `cuStreamIsCapturing` / `cuStreamUpdateCaptureDependencies` | ✅ **IMPLEMENTED** 2026-05-14 — stream capture wired to `RuntimeEngine`. `src/api/cuda_driver/cuda_driver_graph.cpp` |
-| 2.1.13 | `cuEventQuery` | Non-blocking event status |
-| 2.1.14 | `cuModuleLoadFatBinary` / `cuModuleLink*` / `cuModuleGetLoadingMode` | Module linking / fatbinary |
-| 2.1.15 | `cuTexRefSetAddress2D` / `cuTexRefSetArray` / `cuTexRefSetAddressMode` / `cuTexRefSetFilterMode` / `cuTexRefSetMaxAnisotropy` / `cuTexRefSetMipmap*` / `cuTexRefSetBorderColor` | Texture sampling controls |
-| 2.1.16 | `cuSurfRefSetFormat` | Surface reference format |
-| 2.1.17 | `cuCtxGetDevice` / `cuCtxGetFlags` / `cuCtxGetLimit` / `cuCtxSetLimit` / `cuCtxGetCacheConfig` / `cuCtxSetCacheConfig` / `cuCtxGetSharedMemConfig` / `cuCtxSetSharedMemConfig` / `cuCtxGetStreamPriorityRange` / `cuCtxGetId` / `cuCtxGetApiVersion` / `cuCtxPopCurrent` / `cuCtxPushCurrent` / `cuCtxAttach` / `cuCtxDetach` | Context management |
-| 2.1.18 | `cuDeviceGetUuid` / `cuDeviceGetTexture1DLinearMaxWidth` / `cuDeviceGetP2PAttribute` / `cuDeviceGetNvSciSyncAttributes` / `cuDeviceGetGraphMemAttribute` / `cuDeviceSetGraphMemAttribute` / `cuDeviceFlushGPUDirectRDMAWrites` | Device queries |
+| 2.1.13 | `cuEventQuery` | ✅ **IMPLEMENTED** — `src/api/cuda_driver/cuda_driver_stream_event.cpp`. |
+| 2.1.14 | `cuModuleLoadFatBinary` / `cuModuleLink*` / `cuModuleGetLoadingMode` | Module linking / fatbinary — still absent |
+| 2.1.15 | `cuTexRefSetAddress2D` / filter / mipmap / border controls | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_texture.cpp`. |
+| 2.1.16 | `cuSurfRefSetFormat` | ✅ **IMPLEMENTED** 2026-05-14 — no-op (surface format derived from texture binding). |
+| 2.1.17 | Context management (`cuCtxGetDevice`, `GetFlags`, `GetLimit`, `SetLimit`, etc.) | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_device_context.cpp`. |
+| 2.1.18 | Device queries (`cuDeviceGetUuid`, `GetP2PAttribute`, `GetTexture1DLinearMaxWidth`, etc.) | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_device_context.cpp`. |
 | 2.1.19 | `cuOccupancyMaxActiveBlocksPerMultiprocessor` / `cuOccupancyMaxPotentialBlockSize` / `cuOccupancyMaxPotentialBlockSizeWithFlags` | ✅ **IMPLEMENTED** 2026-05-14 — occupancy heuristics based on device properties. `src/api/cuda_driver/cuda_driver_occupancy.cpp` |
 | 2.1.20 | `cuGraph*` family | ✅ **PARTIALLY IMPLEMENTED** 2026-05-14 — `cuGraphCreate/Destroy/Clone`, `cuGraphAddKernelNode`, `cuGraphAddMemsetNode`, `cuGraphInstantiate/Launch`, `cuStreamBeginCapture`. `src/api/cuda_driver/cuda_driver_graph.cpp` |
-| 2.1.21 | `cuExternalMemory*` / `cuExternalSemaphore*` families | External resource interop |
-| 2.1.22 | `cuProfilerStart` / `cuProfilerStop` | Driver profiler |
-| 2.1.23 | `cuGetErrorName` / `cuGetErrorString` | Error introspection |
+| 2.1.21 | `cuExternalMemory*` / `cuExternalSemaphore*` families | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_external.cpp`. |
+| 2.1.22 | `cuProfilerStart` / `cuProfilerStop` | ✅ **IMPLEMENTED** 2026-05-14 — no-op stubs returning `CUDA_SUCCESS`. `src/api/cuda_driver/cuda_driver_errors.cpp`. |
+| 2.1.23 | `cuGetErrorName` / `cuGetErrorString` | ✅ **IMPLEMENTED** 2026-05-14 — full error-code string table. `src/api/cuda_driver/cuda_driver_errors.cpp`. |
 
 ### 2.2 CUDA Runtime — Device & Function Attributes
 
@@ -210,19 +210,19 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 | 3.1.6 | `cublasDnrm2` / `cublasDscal` | ✅ **IMPLEMENTED** 2026-05-13 — `Dnrm2`/`Dscal` added alongside existing `Snrm2`/`Sscal`. Test: `tests/api/test_cublas_level1.cpp`. | match |
 | 3.1.7 | `cublasGetPointerMode` / `cublasSetPointerMode` | ✅ **IMPLEMENTED** 2026-05-13 — stored in `cublasContext::pointerMode`; defaults to HOST. Test: `tests/api/test_cublas_pointer_atomics_mode.cpp`. | match |
 | 3.1.8 | `cublasGetAtomicsMode` / `cublasSetAtomicsMode` | ✅ **IMPLEMENTED** 2026-05-13 — stored in `cublasContext::atomicsMode`; defaults to ALLOWED. Test: `tests/api/test_cublas_pointer_atomics_mode.cpp`. | match |
-| 3.1.9 | `cublasLoggerConfigure` | Logging callback setup |
+| 3.1.9 | `cublasLoggerConfigure` | ✅ **IMPLEMENTED** 2026-05-14 — `cublasLoggerConfigure`/`cublasSetLoggerCallback`/`cublasGetLoggerCallback`. `src/api/cublas/cublas_level3.cpp`. |
 
 ### 3.2 cuBLAS — Level 2 BLAS (all missing except `Gemv`)
 
 | # | Missing Function | Notes |
 |---|---|---|
 | 3.2.1 | `cublasStrsv` / `cublasDtrsv` | ✅ **IMPLEMENTED** 2026-05-13 — triangular solve with upper/lower, transpose, unit/non-unit diag. Test: `tests/api/test_cublas_level2.cpp`. | match |
-| 3.2.2 | `cublasStrsm` / `cublasDtrsm` | Triangular solve matrix (Level-3; not yet implemented) |
+| 3.2.2 | `cublasStrsm` / `cublasDtrsm` | ✅ **IMPLEMENTED** 2026-05-13 — triangular solve matrix is in Level-3 (`cublas_level3.cpp`). |
 | 3.2.3 | `cublasSger` / `cublasDger` | ✅ **IMPLEMENTED** 2026-05-13 — rank-1 update A += alpha*x*y^T. Test: `tests/api/test_cublas_level2.cpp`. | match |
 | 3.2.4 | `cublasSsymv` / `cublasDsymv` | ✅ **IMPLEMENTED** 2026-05-13 — symmetric matrix-vector multiply. Test: `tests/api/test_cublas_level2.cpp`. | match |
 | 3.2.5 | `cublasSgbmv` / `cublasDgbmv` | ✅ **IMPLEMENTED** 2026-05-13 — banded matrix-vector multiply. Test: `tests/api/test_cublas_level2.cpp`. | match |
 | 3.2.6 | `cublasSsyr` / `cublasDsyr` / `cublasSsyr2` / `cublasDsyr2` | ✅ **IMPLEMENTED** 2026-05-13 — symmetric rank-1 and rank-2 update. Test: `tests/api/test_cublas_level2.cpp`. | match |
-| 3.2.7 | `cublasStbsv` / `cublasStpsv` / `cublasSspmv` / `cublasSsbmv` / `cublasSspr` / `cublasSspr2` / `cublasStbmv` / `cublasStpmv` | Packed / banded variants (not yet implemented) |
+| 3.2.7 | `cublasStbsv` / `cublasStpsv` / `cublasSspmv` / `cublasSsbmv` / `cublasSspr` / `cublasSspr2` / `cublasStbmv` / `cublasStpmv` | ✅ **IMPLEMENTED** 2026-05-15 — all 8 packed/banded Level-2 routines with full upper/lower/transpose/unit/non-unit support. `src/api/cublas/cublas_level2.cpp`. |
 | 3.2.8 | `cublasStrmv` / `cublasDtrmv` | ✅ **IMPLEMENTED** 2026-05-13 — triangular matrix-vector multiply. Test: `tests/api/test_cublas_level2.cpp`. | match |
 
 ### 3.3 cuBLAS — Level 3 BLAS (all missing except `Gemm`)
@@ -233,8 +233,8 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 | 3.3.2 | `cublasSsyrk` / `cublasDsyrk` / `cublasSsyr2k` / `cublasDsyr2k` | ✅ **IMPLEMENTED** 2026-05-13 — symmetric rank-k and rank-2k update. Test: `tests/api/test_cublas_level3.cpp`. | match |
 | 3.3.3 | `cublasStrmm` / `cublasDtrmm` | ✅ **IMPLEMENTED** 2026-05-13 — triangular matrix multiply (left/right, upper/lower, transpose, unit/non-unit). Test: `tests/api/test_cublas_level3.cpp`. | match |
 | 3.3.4 | `cublasSsymm` / `cublasDsymm` | ✅ **IMPLEMENTED** 2026-05-13 — symmetric matrix multiply (left/right, upper/lower). Test: `tests/api/test_cublas_level3.cpp`. | match |
-| 3.3.5 | `cublasChemm` / `cublasCherk` / `cublasCher2k` | Complex Hermitian variants (not yet implemented) |
-| 3.3.6 | `cublas*trsmBatched` / `cublas*syrkBatched` | Batched Level-3 |
+| 3.3.5 | `cublasChemm` / `cublasCherk` / `cublasCher2k` | ✅ **IMPLEMENTED** — `cublasChemm`/`cublasZhemm` added 2026-05-15. `cublasCherk`/`cublasCher2k` were done 2026-05-14. `src/api/cublas/cublas_hermitian.cpp`. |
+| 3.3.6 | `cublas*trsmBatched` / `cublas*syrkBatched` | ✅ **IMPLEMENTED** 2026-05-15 — `Strsm/Dtrsm/Ssyrk/Dsyrk/Ssyr2k/Dsyr2k/Strmm/Dtrmm/Ssymm/DsymmBatched` all implemented as scalar loops over batches. `src/api/cublas/cublas_level3.cpp`. |
 
 ### 3.4 cuDNN — Backward Passes
 
@@ -242,7 +242,7 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 |---|---|---|
 | 3.4.1 | `cudnnConvolutionBackwardData` | ✅ **IMPLEMENTED** 2026-05-13 — direct CPU reference backward-data conv with 1×1 GEMM fast path. Test: `tests/api/test_cudnn_backward_data.cpp`. | match |
 | 3.4.2 | `cudnnConvolutionBackwardFilter` | ✅ **IMPLEMENTED** 2026-05-13 — direct CPU reference backward-filter conv with 1×1 GEMM fast path. Test: `tests/api/test_cudnn_backward_filter.cpp`. | match |
-| 3.4.3 | `cudnnConvolutionBackwardBias` | Bias gradient |
+| 3.4.3 | `cudnnConvolutionBackwardBias` | ✅ **IMPLEMENTED** 2026-05-15 — db[k] = beta*db[k] + alpha * sum_{n,h,w} dy[n,k,h,w]. `src/api/cudnn/cudnn_convolution.cpp`. |
 | 3.4.4 | `cudnnBatchNormalizationForwardTraining` | ✅ **IMPLEMENTED** 2026-05-13 — per-batch mean/var, normalize, scale/shift, running stats update, save mean/invVariance. Test: `tests/api/test_cudnn_bn_forward_training.cpp`. | match |
 | 3.4.5 | `cudnnBatchNormalizationBackward` | ✅ **IMPLEMENTED** 2026-05-13 — computes dx, dScale, dBias using saved mean/invVariance. Test: `tests/api/test_cudnn_bn_backward.cpp`. | match |
 | 3.4.6 | `cudnnActivationBackward` | Already implemented! (keep) |
@@ -256,11 +256,11 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 | 3.5.1 | `cudnnDropoutForward` / `cudnnDropoutBackward` | ✅ **IMPLEMENTED** 2026-05-14 — deterministic mask via mt19937_64 with seed, stores mask in reserveSpace. Test: `tests/api/test_cudnn_dropout.cpp`. | match |
 | 3.5.2 | `cudnnRNNForward` / `cudnnRNNBackward` | ✅ **IMPLEMENTED** 2026-05-14 — vanilla tanh RNN with forward inference/training, backward data/weights, workspace/reserve queries. Test: `tests/api/test_cudnn_rnn.cpp`. | match |
 | 3.5.3 | `cudnnMultiHeadAttnForward` / `cudnnMultiHeadAttnBackward` | ✅ **IMPLEMENTED** 2026-05-14 — Q/K/V projection + scaled dot-product attention + softmax + output projection with forward/backward data/weights. Test: `tests/api/test_cudnn_attention.cpp`. | match |
-| 3.5.4 | `cudnnCTCLoss` | CTC loss for OCR/speech |
-| 3.5.5 | `cudnnDivisiveNormalizationForward` / `Backward` | LRN variants |
-| 3.5.6 | `cudnnLRNCrossChannelForward` / `Backward` | Local response normalization |
+| 3.5.4 | `cudnnCTCLoss` | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cudnn/cudnn_ctc_loss.cpp`. |
+| 3.5.5 | `cudnnDivisiveNormalizationForward` / `Backward` | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cudnn/cudnn_divisive_norm.cpp`. |
+| 3.5.6 | `cudnnLRNCrossChannelForward` / `Backward` | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cudnn/cudnn_lrn.cpp`. |
 | 3.5.7 | `cudnnTransformTensor` | ✅ **IMPLEMENTED** 2026-05-14 — elementwise y = alpha*x + beta*y. Test: `tests/api/test_cudnn_tensor_ops.cpp`. | match |
-| 3.5.8 | `cudnnAddTensor` | Broadcasted elementwise add |
+| 3.5.8 | `cudnnAddTensor` | ✅ **IMPLEMENTED** 2026-05-15 — y = alpha*A + beta*y with full N/C/H/W broadcast. `src/api/cudnn/cudnn_tensor_ops.cpp`. |
 | 3.5.9 | `cudnnOpTensor` | ✅ **IMPLEMENTED** 2026-05-14 — ADD, MUL, MIN, MAX, SQRT, NOT with alpha/beta scaling. Test: `tests/api/test_cudnn_tensor_ops.cpp`. | match |
 | 3.5.10 | `cudnnReduceTensor` | ✅ **IMPLEMENTED** 2026-05-14 — ADD, MUL, MIN, MAX, AMAX, AVG, NORM1, NORM2 to scalar. Test: `tests/api/test_cudnn_tensor_ops.cpp`. | match |
 
@@ -281,7 +281,7 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 | 3.7.3 | **cuSOLVER** | ✅ **IMPLEMENTED** 2026-05-14 — dense LAPACK shim delegating to system LAPACK: `potrf` (Cholesky), `geqrf` (QR), `gesvd` (SVD), `syevd` (eigenvalues). `src/api/cusolver/cusolver_core.cpp`. |
 | 3.7.4 | **cuSPARSE** | ✅ **IMPLEMENTED** 2026-05-14 — CSR SpMV and SpMM reference CPU implementations, handle/descriptor lifecycle, legacy `axpyi`. `src/api/cusparse/cusparse_core.cpp`. |
 | 3.7.5 | **cuBLASLt** | ✅ **IMPLEMENTED** 2026-05-14 — lightweight GEMM with fused epilogues (ReLU, GELU, Bias) via post-processing; delegates core GEMM to existing cublas. `src/api/cublaslt/cublaslt_core.cpp`. |
-| 3.7.6 | **cuDNN Backend API** | Only legacy frontend API partially implemented; `cudnnBackend*` descriptors, engines, and execution plans missing |
+| 3.7.6 | **cuDNN Backend API** | ✅ **IMPLEMENTED** (wired) 2026-05-14 — descriptor lifecycle, `Finalize`, `Execute` wired to legacy paths for conv/pooling/activation/softmax/reduction. `src/api/cudnn/cudnn_backend_api.cpp`. |
 
 ---
 

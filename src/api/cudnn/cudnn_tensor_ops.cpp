@@ -246,4 +246,49 @@ cudnnStatus_t cudnnTransformTensor(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// ── cudnnAddTensor ─────────────────────────────────────────────────────────────
+// y = alpha * A + beta * y  (A is broadcast to match y's N/H/W dimensions)
+// Typical use: bias addition where A=(1,C,1,1) and y=(N,C,H,W).
+
+cudnnStatus_t cudnnAddTensor(
+    cudnnHandle_t /*handle*/,
+    const void* alpha,
+    cudnnTensorDescriptor_t aDesc, const void* A,
+    const void* beta,
+    cudnnTensorDescriptor_t cDesc, void* C)
+{
+    if (!aDesc || !cDesc || !A || !C || !alpha || !beta)
+        return CUDNN_STATUS_BAD_PARAM;
+
+    auto* at = (TensorDesc*)aDesc;
+    auto* ct = (TensorDesc*)cDesc;
+    if (!at || !ct) return CUDNN_STATUS_BAD_PARAM;
+
+    float a = *(const float*)alpha;
+    float b = *(const float*)beta;
+    const float* Af = (const float*)A;
+    float*       Cf = (float*)C;
+
+    int cN = ct->n, cC = ct->c, cH = ct->h, cW = ct->w;
+    int aN = at->n, aC = at->c, aH = at->h, aW = at->w;
+
+    int cTotal = cN * cC * cH * cW;
+    for (int i = 0; i < cTotal; ++i) Cf[i] *= b;
+
+    for (int n = 0; n < cN; ++n)
+        for (int c = 0; c < cC; ++c)
+            for (int h = 0; h < cH; ++h)
+                for (int w = 0; w < cW; ++w) {
+                    int an = (aN > 1) ? n : 0;
+                    int ac = (aC > 1) ? c : 0;
+                    int ah = (aH > 1) ? h : 0;
+                    int aw = (aW > 1) ? w : 0;
+                    int aIdx = ((an*aC + ac)*aH + ah)*aW + aw;
+                    int cIdx = ((n *cC + c )*cH + h )*cW + w;
+                    Cf[cIdx] += a * Af[aIdx];
+                }
+
+    return CUDNN_STATUS_SUCCESS;
+}
+
 } // extern "C"

@@ -1,6 +1,8 @@
-// cuBLAS Complex Hermitian rank-k and rank-2k updates — CPU reference.
+// cuBLAS Complex Hermitian matrix operations — CPU reference.
 //
 // APIs:
+//   cublasChemm  — C = alpha * A * B + beta * C  (A Hermitian)
+//   cublasZhemm  — double-complex version
 //   cublasCherk  — C = alpha * A * A^H + beta * C  (or A^H * A)
 //   cublasZherk  — double-complex version
 //   cublasCher2k — C = alpha * A * B^H + conj(alpha) * B * A^H + beta * C
@@ -248,5 +250,99 @@ cublasStatus_t cublasZher2k(cublasHandle_t h, cublasFillMode_t u, cublasOperatio
                             cuDoubleComplex* C, int ldc) {
     return cublasZher2k_v2(h, u, t, n, k, a, A, lda, B, ldb, b, C, ldc);
 }
+
+// ── Chemm / Zhemm — Hermitian matrix multiply ────────────────────────────────
+// C = alpha * A * B + beta * C  (side=LEFT)
+// C = alpha * B * A + beta * C  (side=RIGHT)
+// A is Hermitian (only upper or lower triangle is stored).
+
+cublasStatus_t cublasChemm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    int m, int n,
+    const cuComplex *alpha, const cuComplex *A, int lda,
+    const cuComplex *B, int ldb,
+    const cuComplex *beta,  cuComplex *C, int ldc)
+{
+    if (!handle||!A||!B||!C||!alpha||!beta) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left  = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    int ka = left ? m : n; // size of A: (m×m) if left, (n×n) if right
+
+    // C = beta * C
+    for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j) {
+            cuComplex &c = C[i*ldc+j];
+            c = {c.x*beta->x - c.y*beta->y, c.x*beta->y + c.y*beta->x};
+        }
+
+    // C += alpha * (A * B)  or  alpha * (B * A)
+    for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j) {
+            cuComplex acc = {0.f, 0.f};
+            for (int p = 0; p < ka; ++p) {
+                // Fetch A[r, c] from Hermitian storage
+                int r = left ? i : p;
+                int c = left ? p : j;
+                int ar = left ? p : i;
+                int ac = left ? j : p;
+                // Hermitian element A[r,c]
+                cuComplex aval;
+                if (upper) {
+                    if (r <= c) aval = A[r*lda+c];
+                    else        aval = cuConjf(A[c*lda+r]);
+                } else {
+                    if (r >= c) aval = A[r*lda+c];
+                    else        aval = cuConjf(A[c*lda+r]);
+                }
+                (void)ar; (void)ac;
+                cuComplex bval = left ? B[p*ldb+j] : B[i*ldb+p];
+                acc = cuCaddf(acc, cuCmulf(aval, bval));
+            }
+            cuComplex contrib = cuCmulf(*alpha, acc);
+            C[i*ldc+j] = cuCaddf(C[i*ldc+j], contrib);
+        }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZhemm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    int m, int n,
+    const cuDoubleComplex *alpha, const cuDoubleComplex *A, int lda,
+    const cuDoubleComplex *B, int ldb,
+    const cuDoubleComplex *beta,  cuDoubleComplex *C, int ldc)
+{
+    if (!handle||!A||!B||!C||!alpha||!beta) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left  = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    int ka = left ? m : n;
+    for (int i=0;i<m;++i)
+        for (int j=0;j<n;++j) {
+            cuDoubleComplex &c = C[i*ldc+j];
+            c = {c.x*beta->x-c.y*beta->y, c.x*beta->y+c.y*beta->x};
+        }
+    for (int i=0;i<m;++i)
+        for (int j=0;j<n;++j) {
+            cuDoubleComplex acc={0,0};
+            for (int p=0;p<ka;++p) {
+                int r=left?i:p, c=left?p:j;
+                cuDoubleComplex aval;
+                if (upper) { if (r<=c) aval=A[r*lda+c]; else aval=cuConj(A[c*lda+r]); }
+                else        { if (r>=c) aval=A[r*lda+c]; else aval=cuConj(A[c*lda+r]); }
+                cuDoubleComplex bval = left ? B[p*ldb+j] : B[i*ldb+p];
+                acc = cuCadd(acc, cuCmul(aval, bval));
+            }
+            C[i*ldc+j] = cuCadd(C[i*ldc+j], cuCmul(*alpha, acc));
+        }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasChemm(cublasHandle_t h,cublasSideMode_t side,cublasFillMode_t uplo,
+    int m,int n,const cuComplex*alpha,const cuComplex*A,int lda,
+    const cuComplex*B,int ldb,const cuComplex*beta,cuComplex*C,int ldc)
+{ return cublasChemm_v2(h,side,uplo,m,n,alpha,A,lda,B,ldb,beta,C,ldc); }
+cublasStatus_t cublasZhemm(cublasHandle_t h,cublasSideMode_t side,cublasFillMode_t uplo,
+    int m,int n,const cuDoubleComplex*alpha,const cuDoubleComplex*A,int lda,
+    const cuDoubleComplex*B,int ldb,const cuDoubleComplex*beta,cuDoubleComplex*C,int ldc)
+{ return cublasZhemm_v2(h,side,uplo,m,n,alpha,A,lda,B,ldb,beta,C,ldc); }
 
 } // extern "C"
