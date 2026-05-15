@@ -133,6 +133,8 @@ enum cudnnBackendAttributeName_t {
     CUDNN_ATTR_OPERATION_POOLING_BWD_ALPHA = 176,
     CUDNN_ATTR_OPERATION_POOLING_BWD_BETA = 177,
     CUDNN_ATTR_OPERATION_REDUCTION_DESC = 178,
+    CUDNN_ATTR_OPERATION_MATMUL_ALPHA = 179,
+    CUDNN_ATTR_OPERATION_MATMUL_BETA = 180,
     // Graph traversal
     CUDNN_ATTR_ENGINE_OPERATION_GRAPH = 500,
     CUDNN_ATTR_OPERATIONSET_OPS = 501
@@ -361,8 +363,17 @@ cudnnStatus_t cudnnBackendPopulate(void* /*handle*/, void* /*descriptor*/) {
     return CUDNN_STATUS_SUCCESS;
 }
 
+// Minimal cublas typedefs needed for matmul dispatch
+typedef int cublasStatus_t;
+typedef void* cublasHandle_t;
+static constexpr int CUBLAS_OP_N = 0;
+static constexpr int CUDA_R_32F = 0;
+static constexpr int CUBLAS_GEMM_DEFAULT = 0;
+static constexpr int CUBLAS_STATUS_SUCCESS = 0;
+
 // ── Forward declarations of legacy cuDNN shim functions ────────────────────
 cudnnStatus_t cudnnConvolutionForward(cudnnHandle_t, const void*, cudnnTensorDescriptor_t, const void*, cudnnFilterDescriptor_t, const void*, cudnnConvolutionDescriptor_t, int, void*, size_t, const void*, cudnnTensorDescriptor_t, void*);
+cublasStatus_t cublasGemmEx(cublasHandle_t, int, int, int, int, int, const void*, const void*, int, int, const void*, int, int, const void*, void*, int, int, int, int);
 cudnnStatus_t cudnnConvolutionBackwardData(cudnnHandle_t, const void*, cudnnFilterDescriptor_t, const void*, cudnnTensorDescriptor_t, const void*, cudnnConvolutionDescriptor_t, cudnnConvolutionBwdDataAlgo_t, void*, size_t, const void*, cudnnTensorDescriptor_t, void*);
 cudnnStatus_t cudnnConvolutionBackwardFilter(cudnnHandle_t, const void*, cudnnTensorDescriptor_t, const void*, cudnnTensorDescriptor_t, const void*, cudnnConvolutionDescriptor_t, cudnnConvolutionBwdFilterAlgo_t, void*, size_t, const void*, cudnnFilterDescriptor_t, void*);
 cudnnStatus_t cudnnActivationForward(cudnnHandle_t, cudnnActivationDescriptor_t, const void*, cudnnTensorDescriptor_t, const void*, const void*, cudnnTensorDescriptor_t, void*);
@@ -574,6 +585,32 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
                                                   nullptr, 0, nullptr, 0,
                                                   &alpha, &xDesc, xPtr, &beta, &yDesc, yPtr);
             if (s != CUDNN_STATUS_SUCCESS) return s;
+            break;
+        }
+        case CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR: {
+            float alpha = getAttrFloat(opNode, CUDNN_ATTR_OPERATION_MATMUL_ALPHA, 1.0f);
+            float beta  = getAttrFloat(opNode, CUDNN_ATTR_OPERATION_MATMUL_BETA, 0.0f);
+            uintptr_t aId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_MATMUL_ADESC);
+            uintptr_t bId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_MATMUL_BDESC);
+            uintptr_t cId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_MATMUL_CDESC);
+            void* aPtr = dataPtrs[aId];
+            void* bPtr = dataPtrs[bId];
+            void* cPtr = dataPtrs[cId];
+            if (!aPtr || !bPtr || !cPtr) return CUDNN_STATUS_INVALID_VALUE;
+            TensorDesc aDesc = buildTensorDesc(aId);
+            TensorDesc bDesc = buildTensorDesc(bId);
+            TensorDesc cDesc = buildTensorDesc(cId);
+            int m = cDesc.n;
+            int n = cDesc.c;
+            int k = aDesc.c;
+            if (m == 0 || n == 0 || k == 0) return CUDNN_STATUS_INVALID_VALUE;
+            cublasStatus_t s = cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                             m, n, k, &alpha,
+                                             aPtr, CUDA_R_32F, m,
+                                             bPtr, CUDA_R_32F, k,
+                                             &beta, cPtr, CUDA_R_32F, m,
+                                             CUDA_R_32F, CUBLAS_GEMM_DEFAULT);
+            if (s != CUBLAS_STATUS_SUCCESS) return CUDNN_STATUS_INTERNAL_ERROR;
             break;
         }
         default:

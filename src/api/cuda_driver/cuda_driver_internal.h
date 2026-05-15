@@ -85,6 +85,10 @@ static constexpr int CU_AD_FORMAT_SIGNED_INT16   = 0x09;
 static constexpr int CU_AD_FORMAT_SIGNED_INT32   = 0x0a;
 static constexpr int CU_AD_FORMAT_FLOAT          = 0x20;
 static constexpr int CU_AD_FORMAT_HALF           = 0x10;
+static constexpr int CU_AD_FORMAT_UNORM_INT8     = 0x04;
+static constexpr int CU_AD_FORMAT_UNORM_INT16    = 0x05;
+static constexpr int CU_AD_FORMAT_SNORM_INT8     = 0x0b;
+static constexpr int CU_AD_FORMAT_SNORM_INT16    = 0x0c;
 
 // CUDA array descriptor (used by cuTexRefSetAddress2D)
 struct CUDA_ARRAY_DESCRIPTOR {
