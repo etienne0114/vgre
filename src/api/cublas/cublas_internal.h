@@ -1,13 +1,50 @@
 // cuBLAS internal shared types, enums, structs, and reference helpers.
 #pragma once
 
+#include "vgre/advanced/adaptive_execution_engine.h"
+#include "vgre/advanced/runtime_profiler.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/error_codes.h"
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <thread>
 #include <vector>
+
+// Thin RAII timer that records a ProfileEvent and AEE datapoint on destruction.
+// Usage: { VgreBlasTimed _t("cublas::sgemm", flops, bytes); <compute>; }
+struct VgreBlasTimed {
+    const char *name;
+    uint64_t flops;
+    size_t   bytes;
+    std::chrono::steady_clock::time_point t0{std::chrono::steady_clock::now()};
+
+    VgreBlasTimed(const char *n, uint64_t f, size_t b) : name(n), flops(f), bytes(b) {}
+    ~VgreBlasTimed() {
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+        if (ms <= 0.0) return;
+        unsigned int nthreads = std::thread::hardware_concurrency();
+        if (nthreads == 0) nthreads = 1;
+        vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
+            name, nthreads, nthreads, ms,
+            bytes, static_cast<size_t>(flops));
+        auto &prof = vgre::advanced::RuntimeProfiler::instance();
+        if (prof.isEnabled()) {
+            vgre::advanced::ProfileEvent pev;
+            pev.kernelName   = name;
+            pev.durationMs   = ms;
+            pev.memoryBytes  = bytes;
+            pev.flops        = static_cast<size_t>(flops);
+            pev.throughputGBps = (bytes > 0) ? (bytes / 1e9) / (ms / 1000.0) : 0.0;
+            pev.gflops         = (flops > 0) ? (flops / 1e9) / (ms / 1000.0) : 0.0;
+            pev.timestamp    = std::chrono::steady_clock::now();
+            prof.recordEvent(pev);
+        }
+    }
+};
 
 #if defined(VGRE_HAS_CBLAS)
 #  include <cblas.h>

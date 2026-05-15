@@ -22,6 +22,7 @@
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/texture_manager.h"
 #include "vgre/common/logger.h"
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -117,14 +118,22 @@ cudaError_t cudaMemcpy3D(const struct cudaMemcpy3DParms *p) {
 
     if (!srcPtr || !dstPtr) return cudaErrorInvalidValue;
 
-    // Copy slice-by-slice, row-by-row
-    size_t rowBytes = p->extent.width;
+    // Copy slice-by-slice, row-by-row; record bandwidth.
+    size_t rowBytes  = p->extent.width;
+    size_t totalBytes = rowBytes * p->extent.height * p->extent.depth;
+    auto t0 = std::chrono::steady_clock::now();
     for (size_t z = 0; z < p->extent.depth; ++z) {
         const uint8_t *sSlice = static_cast<const uint8_t*>(srcPtr) + z * srcPitch * p->extent.height;
         uint8_t       *dSlice = static_cast<uint8_t*>(dstPtr)       + z * dstPitch * p->extent.height;
         for (size_t y = 0; y < p->extent.height; ++y) {
             std::memcpy(dSlice + y * dstPitch, sSlice + y * srcPitch, rowBytes);
         }
+    }
+    {
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+        if (ms > 0.0 && totalBytes > 0)
+            vgre::core::MemoryManager::instance().recordMemoryBandwidth(totalBytes, ms);
     }
     return cudaSuccess;
 }
@@ -264,11 +273,17 @@ cudaError_t cudaMemcpy2DToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
     size_t dpitch = info.width * info.elementSize;
     if (dpitch == 0) dpitch = width;
 
+    auto t0 = std::chrono::steady_clock::now();
     for (size_t y = 0; y < height; ++y) {
         const uint8_t *srcRow = static_cast<const uint8_t*>(src) + y * spitch + wOffset;
         uint8_t *dstRow = static_cast<uint8_t*>(arrayData) +
                           (hOffset + y) * dpitch + wOffset;
         std::memcpy(dstRow, srcRow, width);
+    }
+    {
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+        if (ms > 0.0) vgre::core::MemoryManager::instance().recordMemoryBandwidth(width * height, ms);
     }
     return cudaSuccess;
 }
@@ -292,11 +307,17 @@ cudaError_t cudaMemcpy2DFromArray(void *dst, size_t dpitch,
     size_t spitch = info.width * info.elementSize;
     if (spitch == 0) spitch = width;
 
+    auto t0 = std::chrono::steady_clock::now();
     for (size_t y = 0; y < height; ++y) {
         const uint8_t *srcRow = static_cast<const uint8_t*>(arrayData) +
                                 (hOffset + y) * spitch + wOffset;
         uint8_t *dstRow = static_cast<uint8_t*>(dst) + y * dpitch;
         std::memcpy(dstRow, srcRow, width);
+    }
+    {
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+        if (ms > 0.0) vgre::core::MemoryManager::instance().recordMemoryBandwidth(width * height, ms);
     }
     return cudaSuccess;
 }

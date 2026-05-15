@@ -107,20 +107,23 @@ cublasStatus_t cublasSgemm_v2(
     if (!handle || !A || !B || !C || !alpha || !beta)
         return CUBLAS_STATUS_INVALID_VALUE;
 
+    {
+        uint64_t flops = 2ULL * static_cast<uint64_t>(m) * n * k;
+        size_t   bytes = sizeof(float) * (static_cast<size_t>(m)*k +
+                                          static_cast<size_t>(k)*n +
+                                          static_cast<size_t>(m)*n);
+        VgreBlasTimed _t("cublas::sgemm", flops, bytes);
 #if HAVE_CBLAS
-    CBLAS_TRANSPOSE tA = (transa == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
-    CBLAS_TRANSPOSE tB = (transb == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
-    // cuBLAS is column-major; swap A↔B and m↔n for row-major cblas call
-    cblas_sgemm(CblasRowMajor, tB, tA, n, m, k,
-                *alpha, B, ldb, A, lda, *beta, C, ldc);
+        CBLAS_TRANSPOSE tA = (transa == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
+        CBLAS_TRANSPOSE tB = (transb == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
+        cblas_sgemm(CblasRowMajor, tB, tA, n, m, k,
+                    *alpha, B, ldb, A, lda, *beta, C, ldc);
 #else
-    // Column-major trick: cuBLAS (col-major) C[m×n] = op(A)*op(B) becomes
-    // row-major C[n×m] = op(B)*op(A) — swap A↔B and m↔n, keep transpose flags.
-    // Note: do NOT negate flags — just swap them along with the matrix swap.
-    bool tA = (transa != CUBLAS_OP_N);
-    bool tB = (transb != CUBLAS_OP_N);
-    refSgemm(tB, tA, n, m, k, *alpha, B, ldb, A, lda, *beta, C, ldc);
+        bool tA = (transa != CUBLAS_OP_N);
+        bool tB = (transb != CUBLAS_OP_N);
+        refSgemm(tB, tA, n, m, k, *alpha, B, ldb, A, lda, *beta, C, ldc);
 #endif
+    }
     return CUBLAS_STATUS_SUCCESS;
 }
 
@@ -138,16 +141,23 @@ cublasStatus_t cublasDgemm_v2(
     if (!handle || !A || !B || !C || !alpha || !beta)
         return CUBLAS_STATUS_INVALID_VALUE;
 
+    {
+        uint64_t flops = 2ULL * static_cast<uint64_t>(m) * n * k;
+        size_t   bytes = sizeof(double) * (static_cast<size_t>(m)*k +
+                                           static_cast<size_t>(k)*n +
+                                           static_cast<size_t>(m)*n);
+        VgreBlasTimed _t("cublas::dgemm", flops, bytes);
 #if HAVE_CBLAS
-    CBLAS_TRANSPOSE tA = (transa == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
-    CBLAS_TRANSPOSE tB = (transb == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
-    cblas_dgemm(CblasRowMajor, tB, tA, n, m, k,
-                *alpha, B, ldb, A, lda, *beta, C, ldc);
+        CBLAS_TRANSPOSE tA = (transa == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
+        CBLAS_TRANSPOSE tB = (transb == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
+        cblas_dgemm(CblasRowMajor, tB, tA, n, m, k,
+                    *alpha, B, ldb, A, lda, *beta, C, ldc);
 #else
-    bool tA = (transa != CUBLAS_OP_N);
-    bool tB = (transb != CUBLAS_OP_N);
-    refDgemm(tB, tA, n, m, k, *alpha, B, ldb, A, lda, *beta, C, ldc);
+        bool tA = (transa != CUBLAS_OP_N);
+        bool tB = (transb != CUBLAS_OP_N);
+        refDgemm(tB, tA, n, m, k, *alpha, B, ldb, A, lda, *beta, C, ldc);
 #endif
+    }
     return CUBLAS_STATUS_SUCCESS;
 }
 

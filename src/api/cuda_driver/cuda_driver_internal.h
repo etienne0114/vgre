@@ -19,6 +19,7 @@ using CUfunction = vgre::api::CUfunction;
 using CUdeviceptr = void*;
 using CUresult = int;
 using CUarray = void*;
+using CUlinkState = void*;  // opaque handle to CUlinkStateImpl
 
 // CUDA memory types
 enum CUmemorytype {
@@ -32,7 +33,10 @@ enum CUmemorytype {
 static constexpr CUresult CUDA_SUCCESS = 0;
 static constexpr CUresult CUDA_ERROR_INVALID_VALUE = 1;
 static constexpr CUresult CUDA_ERROR_NOT_INITIALIZED = 3;
+static constexpr CUresult CUDA_ERROR_OUT_OF_MEMORY = 2;
 static constexpr CUresult CUDA_ERROR_INVALID_DEVICE = 101;
+static constexpr CUresult CUDA_ERROR_FILE_NOT_FOUND = 301;
+static constexpr CUresult CUDA_ERROR_INVALID_PTX = 218;
 static constexpr CUresult CUDA_ERROR_NOT_SUPPORTED = 801;
 static constexpr CUresult CUDA_ERROR_UNKNOWN = 999;
 

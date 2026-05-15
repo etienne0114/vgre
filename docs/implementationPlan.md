@@ -1183,4 +1183,109 @@ tests/core/texture/        # Texture/surface object tests
 
 ---
 
+### Phase 14 — Final Gap Closure (2026-05-15)
+
+**Status**: **DONE**
+
+#### 14.1 PTX — Remaining Instructions
+
+**File**: `src/compiler/ptx/ptx_translator_map.cpp` + `ptx_translator_internal.h`
+
+**Implemented**:
+- `prmt.b32` (+ mode variants `f4e`, `b4e`, `rc8`, `ecl`, `ecr`, `rc16`) — full 8-byte source permutation using `vgre_prmt_b32` helper
+- `sad.u32` / `sad.s32` — sum of absolute differences: `|a-b| + c`
+- `dsad.u32` — 4-byte SIMD SAD: sum of 4 unsigned byte-pair absolute differences
+- `mad.hi.s32` / `mad.hi.u32` — multiply-add high 32-bit half
+- `mad.lo.s64` / `mad.hi.s64` / `mad.hi.u64` — 64-bit MAD with `__int128` / `__uint128_t`
+- `mul.hi.s32` / `mul.hi.s64` — unsigned/signed 64-bit high-half multiply
+- `div.u64` / `div.s64` / `rem.u64` / `rem.s64` — 64-bit division and remainder
+- `min.s32/u32/s64` / `max.s32/u32/s64` — integer min/max variants
+- `abs.s32` / `abs.s64` — integer absolute value
+
+**Note**: `mma.sync` INT4 / binary shapes (`m8n8k128`, `m16n8k256`) remain absent — these Hopper/Ada integer precision shapes are extremely rare in practice.
+
+#### 14.2 CUDA Driver — cuLaunchKernelEx + Module Linker
+
+**File**: `src/api/cuda_driver/cuda_driver_module.cpp` + `cuda_driver_internal.h`
+
+**Implemented**:
+- `cuLaunchKernelEx` — extended launch with `CUlaunchConfig`; delegates to `cuLaunchKernel` (cluster/attribute extensions are no-ops in CPU model)
+- `cuModuleLoadFatBinary` — accepts fatbinary; extracts embedded PTX via `cuModuleLoadData`
+- `cuLinkCreate` / `cuLinkCreate_v2` — allocate link state
+- `cuLinkAddData` / `cuLinkAddData_v2` — accumulate PTX/ELF data buffers
+- `cuLinkAddFile` / `cuLinkAddFile_v2` — load PTX from file
+- `cuLinkComplete` — concatenate all buffers; returns combined PTX as `cubinOut`
+- `cuLinkDestroy` — free link state
+- `cuModuleGetLoadingMode` — returns `CU_MODULE_EAGER_LOADING`
+
+#### 14.3 Docs: Tier 4/5 Correction
+
+Corrected `missingFeatures.md` Tier 4 and Tier 5 sections — all 4.1.x / 4.2.x / 4.3.x / 5.x items that were already implemented in Phases 6/8/9/10 now show ✅ **DONE** rather than appearing as open gaps.
+
+| # | Feature | Status | Date |
+|---|---|---|---|
+| 14.1 | PTX: prmt.b32, sad/dsad, mad.hi/lo wide-integer variants | **DONE** | 2026-05-15 |
+| 14.2 | Driver: cuLaunchKernelEx, cuModuleLoadFatBinary, cuLink* family | **DONE** | 2026-05-15 |
+| 14.3 | Docs: Tier 4/5 corrected to reflect Phase 6/8/9/10 completions | **DONE** | 2026-05-15 |
+
+---
+
+### Phase 15 — Runtime Observability Integration (2026-05-15)
+
+**Status**: **DONE**
+
+#### 15.1 AEE + Profiler for cuBLAS GEMM (F.1 + F.2)
+
+**File**: `src/api/cublas/cublas_internal.h`, `src/api/cublas/cublas_level3.cpp`
+
+**Implemented**:
+- `VgreBlasTimed` RAII timer struct in `cublas_internal.h` — measures wall-clock duration, records `AdaptiveExecutionEngine::recordExecution(name, nthreads, nthreads, ms, bytes, flops)` and emits `RuntimeProfiler::recordEvent` on destruction
+- Applied to `cublasSgemm_v2`: computes `2*m*n*k` FLOPs, `sizeof(float)*(m*k+k*n+m*n)` bytes
+- Applied to `cublasDgemm_v2`: same formula with `sizeof(double)` width
+
+#### 15.2 AEE + Profiler for cuDNN Conv Forward (F.1 + F.2)
+
+**File**: `src/api/cudnn/cudnn_internal.h`, `src/api/cudnn/cudnn_convolution.cpp`
+
+**Implemented**:
+- `VgreDnnTimed` RAII timer struct in `cudnn_internal.h` — identical pattern to `VgreBlasTimed`
+- Applied to `cudnnConvolutionForward`: computes `2*N*K*C*OH*OW*R*S` FLOPs, input+weight+output byte estimate
+
+#### 15.3 Memory Bandwidth for Array Copies (F.3)
+
+**File**: `src/api/cudart/cudart_shim_array_memcpy.cpp`
+
+**Implemented**:
+- `cudaMemcpy3D` — added timing around slice-by-slice copy loop; calls `MemoryManager::recordMemoryBandwidth(totalBytes, ms)` after completion
+- `cudaMemcpy2DToArray` — timing + bandwidth recording for pitched-to-array row copy
+- `cudaMemcpy2DFromArray` — timing + bandwidth recording for array-to-pitched row copy
+
+#### 15.4 Chrome Trace for Graph Nodes (F.9)
+
+**File**: `src/core/runtime_engine_graph.cpp`
+
+**Implemented**:
+- Added `#include "vgre/advanced/runtime_profiler.h"`
+- MEMSET node: times the fill loop, emits `ProfileEvent("graph::memset", ...)` + `recordMemoryBandwidth`
+- HOST node: times the `hostFn` callback, emits `ProfileEvent("graph::host", ...)`
+- CHILD node: times the pre-compiled body exec, emits `ProfileEvent("graph::child", ...)`
+- EVENT_RECORD node: emits `ProfileEvent("graph::event_record", ...)` (zero duration marker)
+- All events respect `profiler.isEnabled()` guard — zero overhead when profiling is off
+
+#### 15.5 F.5 Doc Correction
+
+Confirmed `executeOpsInline` in `runtime_engine_graph.cpp` already handles all 11 node types (KERNEL, MEMCPY, CONDITIONAL, MEMSET, HOST, CHILD, EMPTY, EVENT_RECORD, EVENT_WAIT, MEMALLOC, MEMFREE). Updated `missingFeatures.md` F.5 entry to reflect this.
+
+| # | Feature | Status | Date |
+|---|---|---|---|
+| 15.1 | cuBLAS GEMM AEE + profiler integration | **DONE** | 2026-05-15 |
+| 15.2 | cuDNN conv_fwd AEE + profiler integration | **DONE** | 2026-05-15 |
+| 15.3 | Array memcpy bandwidth tracking | **DONE** | 2026-05-15 |
+| 15.4 | Chrome trace events for graph non-kernel nodes | **DONE** | 2026-05-15 |
+| 15.5 | F.5 (graph scheduler) confirmed complete; doc corrected | **DONE** | 2026-05-15 |
+
+**All 110/110 CTests pass.**
+
+---
+
 **End of Document**

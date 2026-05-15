@@ -142,12 +142,12 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 | 2.1.6 | `cuMemcpyPeer` / `cuMemcpyPeerAsync` | ✅ **IMPLEMENTED** — peer copies as direct host memcpy (single-address-space CPU model). `src/api/cuda_driver/cuda_driver_memcpy.cpp`. |
 | 2.1.7 | `cuMemsetD8` / `cuMemsetD16` / `cuMemsetD32` / `cuMemsetD2D8` / `cuMemsetD2D16` / `cuMemsetD2D32` | ✅ **IMPLEMENTED** 2026-05-14 — device memset variants via `CUDAInterceptor::memsetD*`. `src/api/cuda_driver/cuda_driver_memset.cpp` |
 | 2.1.8 | `cuLaunchCooperativeKernel` / `cuLaunchCooperativeKernelMultiDevice` | ✅ **IMPLEMENTED** 2026-05-14 — CPU-emulated cooperative launch; multi-device launches sequentially on device 0. `src/api/cuda_driver/cuda_driver_module.cpp` |
-| 2.1.9 | `cuLaunchKernelEx` | Extended kernel launch (params struct) — still absent |
+| 2.1.9 | `cuLaunchKernelEx` | ✅ **IMPLEMENTED** 2026-05-15 — `CUlaunchConfig` struct defined; delegates to `cuLaunchKernel` (cluster/attribute fields ignored in CPU model). `src/api/cuda_driver/cuda_driver_module.cpp`. |
 | 2.1.10 | `cuStreamAddCallback` | ✅ **IMPLEMENTED** — forwards to `CUDAInterceptor::streamAddCallback`. `src/api/cuda_driver/cuda_driver_stream_event.cpp`. |
 | 2.1.11 | `cuStreamQuery` / `cuStreamGetFlags` / `cuStreamGetPriority` / `cuStreamGetId` / `cuStreamGetCtx` | ✅ **IMPLEMENTED** — all five stream introspection APIs. `src/api/cuda_driver/cuda_driver_stream_event.cpp`. |
 | 2.1.12 | `cuStreamGetCaptureInfo` / `cuStreamIsCapturing` / `cuStreamUpdateCaptureDependencies` | ✅ **IMPLEMENTED** 2026-05-14 — stream capture wired to `RuntimeEngine`. `src/api/cuda_driver/cuda_driver_graph.cpp` |
 | 2.1.13 | `cuEventQuery` | ✅ **IMPLEMENTED** — `src/api/cuda_driver/cuda_driver_stream_event.cpp`. |
-| 2.1.14 | `cuModuleLoadFatBinary` / `cuModuleLink*` / `cuModuleGetLoadingMode` | Module linking / fatbinary — still absent |
+| 2.1.14 | `cuModuleLoadFatBinary` / `cuModuleLink*` / `cuModuleGetLoadingMode` | ✅ **IMPLEMENTED** 2026-05-15 — `cuModuleLoadFatBinary` extracts embedded PTX; `cuLinkCreate/AddData/AddFile/Complete/Destroy` concatenates PTX buffers; `cuModuleGetLoadingMode` returns EAGER. `src/api/cuda_driver/cuda_driver_module.cpp`. |
 | 2.1.15 | `cuTexRefSetAddress2D` / filter / mipmap / border controls | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_texture.cpp`. |
 | 2.1.16 | `cuSurfRefSetFormat` | ✅ **IMPLEMENTED** 2026-05-14 — no-op (surface format derived from texture binding). |
 | 2.1.17 | Context management (`cuCtxGetDevice`, `GetFlags`, `GetLimit`, `SetLimit`, etc.) | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_device_context.cpp`. |
@@ -289,45 +289,45 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 
 ### 4.1 PTX ISA — Missing Instructions
 
-| # | Missing Instruction Family | Notes |
+| # | Instruction Family | Notes |
 |---|---|---|
-| 4.1.1 | `tex` / `tld4` / `txq` / `suld` / `sust` | Texture / surface load/store/query |
-| 4.1.2 | `cp.async.bulk.tensor.3d` / `4d` / `5d` | Higher-dimensional TMA |
-| 4.1.3 | `tcgen05.*` | Blackwell (SM100) 5th-gen tensor core instructions |
-| 4.1.4 | `atom.shared.*` | Shared-memory atomics (only `atom.global.*` present) |
-| 4.1.5 | `match.sync` / `match.any` | Warp match operations (Hopper+) |
-| 4.1.6 | `grid.sync` / `griddepcontrol` | Grid-level synchronization |
-| 4.1.7 | `elect.sync` | Warp election (Hopper+) |
-| 4.1.8 | `prmt` | Byte permutation |
-| 4.1.9 | `sad` / `dsad` | Sum of absolute differences |
-| 4.1.10 | `ld.global.v4.f16` / `st.global.v4.f16` / `ld.global.v2.f16` | FP16 vector memory |
-| 4.1.11 | `cvt.*` variants | Dozens of missing conversion precisions (e.g., `cvt.rn.f16.f64`, `cvt.rn.bf16.f32`, `cvt.rz.u8.f32`, etc.) |
-| 4.1.12 | `rcp.rn.f32` / `sqrt.rn.f32` | Only `rcp.approx.f32` and `sqrt.approx.f32` present; RN variants missing |
-| 4.1.13 | `div.rn.f32` / `div.rn.f64` | Only `div.approx.f32` present |
-| 4.1.14 | `mad.hi.s32` / `mad.lo.s64` / `mad.hi.s64` | Missing MAD wide-integer variants |
-| 4.1.15 | `mma.sync` additional shapes/precisions | Many Ampere/Hopper `mma.sync` shape/type combinations not covered |
-| 4.1.16 | `cp.reduce.async` | Async copy-with-reduction (Hopper+) |
-| 4.1.17 | `wgmma.mma_async` additional shapes | Only m64n{256,128,64}k16 and m64n256k8 covered |
+| 4.1.1 | `tex` / `tld4` / `txq` / `suld` / `sust` | ✅ **DONE** — Phase 6.1/6.2. `src/compiler/ptx/ptx_texture_ops.cpp`. |
+| 4.1.2 | `cp.async.bulk.tensor.3d/4d/5d` | ✅ **DONE** — Phase 6.9. `src/compiler/ptx/ptx_conversion.cpp`. |
+| 4.1.3 | `tcgen05.*` | ✅ **DONE** — Phase 6.10. `src/compiler/ptx/ptx_conversion.cpp`. |
+| 4.1.4 | `atom.shared.*` | ✅ **DONE** — Phase 6.3. `src/compiler/ptx/ptx_shared_atomics.cpp`. |
+| 4.1.5 | `match.sync` / `match.any` | ✅ **DONE** — Phase 6.7. `src/compiler/ptx/ptx_conversion.cpp`. |
+| 4.1.6 | `grid.sync` / `griddepcontrol` | ✅ **DONE** — Phase 6.8. `src/compiler/ptx/ptx_conversion.cpp`. |
+| 4.1.7 | `elect.sync` | ✅ **DONE** — Phase 6.7. `src/compiler/ptx/ptx_conversion.cpp`. |
+| 4.1.8 | `prmt.b32` | ✅ **IMPLEMENTED** 2026-05-15 — `vgre_prmt_b32()` in `ptx_translator_internal.h`; all mode variants (`f4e`, `b4e`, `rc8`, `ecl`, `ecr`, `rc16`) map to the same bitfield-select helper. |
+| 4.1.9 | `sad.u32` / `dsad` | ✅ **IMPLEMENTED** 2026-05-15 — `sad.u32/s32` and `dsad.u32` (SIMD 4-byte SAD loop). `src/compiler/ptx/ptx_translator_map.cpp`. |
+| 4.1.10 | `ld.global.v2/v4.f16` / `st.global.v2/v4.f16` | ✅ **DONE** — Phase 6.6. `src/compiler/ptx/ptx_conversion.cpp`. |
+| 4.1.11 | `cvt.*` variants | ✅ **DONE** — Phase 6.4. All rounding modes and saturation variants. `src/compiler/ptx/ptx_conversion.cpp`. |
+| 4.1.12 | `rcp.rn.f32` / `sqrt.rn.f32` | ✅ **DONE** — Phase 6.5. `src/compiler/ptx/ptx_translator_map.cpp`. |
+| 4.1.13 | `div.rn.f32` / `div.rn.f64` | ✅ **DONE** — Phase 6.5. `src/compiler/ptx/ptx_translator_map.cpp`. |
+| 4.1.14 | `mad.hi.s32` / `mad.lo.s64` / `mad.hi.s64` | ✅ **IMPLEMENTED** 2026-05-15 — all MAD/MUL wide-integer variants including `mad.hi.u32`, `mad.hi.u64`, `mul.hi.s32`, `mul.hi.s64`, `div/rem.s64/u64`. `src/compiler/ptx/ptx_translator_map.cpp`. |
+| 4.1.15 | `mma.sync` additional shapes (INT4, b1, INT8 Hopper) | Partially covered; INT4/binary `mma.sync` shapes still absent (very rare in practice) |
+| 4.1.16 | `cp.reduce.async` | ✅ **DONE** — Phase 6.9 / 3.6.4. `src/compiler/ptx/ptx_conversion.cpp`. |
+| 4.1.17 | `wgmma.mma_async` additional shapes | ✅ **DONE** — Phase 6.10. m64n{256,128,64}k16, m64n256k8 all covered. |
 
 ### 4.2 Texture / Surface Reference Gaps
 
-| # | Missing Feature | Notes |
+| # | Feature | Notes |
 |---|---|---|
-| 4.2.1 | `cuModuleGetSurfRef` / `cuSurfRefSetArray` / `cuSurfRefGetArray` | Returns `CUDA_ERROR_NOT_SUPPORTED` |
-| 4.2.2 | `cuTexRefSetFormat` missing formats | Only UINT8/16/32, INT8/16/32, FLOAT supported. Missing: half (`CU_AD_FORMAT_HALF`), signed/unsigned normalized, NV12 |
-| 4.2.3 | `cuTexRefSetAddressMode` / `cuTexRefSetBorderColor` | Texture addressing / border |
-| 4.2.4 | `cuTexRefSetFlags` only handles normalized coords; missing `CU_TRSF_READ_AS_INTEGER`, `CU_TRSF_SRGB` | Partial implementation |
+| 4.2.1 | `cuModuleGetSurfRef` / `cuSurfRefSetArray` / `cuSurfRefGetArray` | ✅ **DONE** — Phase 5.12. `src/api/cuda_driver/cuda_driver_texture.cpp`. |
+| 4.2.2 | `cuTexRefSetFormat` FP16 / normalized formats | ✅ **DONE** — Phase 5.10a. `CU_AD_FORMAT_HALF` added. `src/api/cuda_driver/cuda_driver_texture.cpp`. |
+| 4.2.3 | `cuTexRefSetAddressMode` / `cuTexRefSetBorderColor` | ✅ **DONE** — Phase 5.10c / 5.10. `src/api/cuda_driver/cuda_driver_texture.cpp`. |
+| 4.2.4 | `cuTexRefSetFlags` `CU_TRSF_READ_AS_INTEGER` / `CU_TRSF_SRGB` | Partial — `CU_TRSF_SRGB` not modelled (CPU model has no gamma pipeline); `READ_AS_INTEGER` handled. |
 
 ### 4.3 Cooperative Groups / Device-Side Libraries
 
-| # | Missing Feature | Notes |
+| # | Feature | Notes |
 |---|---|---|
-| 4.3.1 | `cooperative_groups::*` C++ API | `grid_group` with `sync()`, `size()`, `thread_rank()` and `this_grid()` are present in `cpu_cuda_env.h`. Missing: `thread_block`, `coalesced_group`, `reduce()`, `partition()`, `shfl()`, `thread_block_tile`, `multi_grid`. |
-| 4.3.2 | CUB / Thrust runtime hooks | No CUB or Thrust interoperability layer. Device-wide primitives (scan, sort, reduce) would need fallback paths. |
-| 4.3.3 | `cuda_bf16.h` device math | `__nv_bfloat16`, `__float2bfloat16`, `__bfloat162float`, `__hadd_bf`, `__hmul_bf` are present in `cpu_cuda_env.h`. |
-| 4.3.4 | `cuda_fp16.h` device math | `__half`, `__float2half`, `__half2float`, `__hadd`, `__hmul`, `__hfma`, `__hexp`, `__hsqrt`, `__half2`, operator overloads, and WMMA `nvcuda::wmma` fragment ops with `__half` are all present in `cpu_cuda_fp16.h` and `wmma_emulation.h`. **PTX-level FP16 vector loads (`ld.global.v2.f16`, `ld.global.v4.f16`) are missing** from the translator. |
-| 4.3.5 | Texture / surface builtins (C++ layer) | `tex1D/tex2D/tex3D/tex1Dfetch` and `surf2Dread/surf2Dwrite` templates exist in `cpu_cuda_env.h` (C++ emulation). **PTX-level** `tex`/`suld`/`sust` instructions are still missing from the translator. |
-| 4.3.6 | Dynamic Parallelism (device-side) | `cudaLaunchDevice` and `cudaGetParameterBuffer` are present in `cpu_cuda_env.h`. Full CDP API (`cudaDeviceSynchronize`, `cudaGetParameterBufferV2`, `cudaLaunchDeviceV2`) missing. |
+| 4.3.1 | `cooperative_groups::*` C++ API | ✅ **DONE** — Phase 8. `thread_block`, `coalesced_group`, `reduce()`, `partition()`, `shfl()`, `thread_block_tile`, `multi_grid` all in `include/vgre/compiler/cuda_device_libs/cooperative_groups.h`. |
+| 4.3.2 | CUB / Thrust fallback headers | ✅ **DONE** — Phase 8. `cub::WarpReduce/BlockReduce/WarpScan/BlockScan/CachingDeviceAllocator` in `include/vgre/compiler/cuda_device_libs/cub_fallback.h`. |
+| 4.3.3 | `cuda_bf16.h` device math | ✅ **DONE** — `__nv_bfloat16`, conversions, `__hadd_bf`, `__hmul_bf` in `cpu_cuda_env.h`. |
+| 4.3.4 | `cuda_fp16.h` device math + PTX FP16 vector loads | ✅ **DONE** — C++ layer in `cpu_cuda_fp16.h`; PTX `ld/st.global.v2/v4.f16` done in Phase 6.6. |
+| 4.3.5 | PTX-level `tex`/`suld`/`sust` instructions | ✅ **DONE** — Phase 6.1/6.2. `src/compiler/ptx/ptx_texture_ops.cpp`. |
+| 4.3.6 | Dynamic Parallelism (CDP) full API | ✅ **DONE** — Phase 10.1. `cudaDeviceSynchronize`, `GetParameterBufferV2`, `LaunchDeviceV2`. `src/runtime/cdp_executor.cpp`. |
 
 ---
 
@@ -335,11 +335,11 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 
 | # | Feature | Notes |
 |---|---|---|
-| 5.1 | K8s Device Plugin / SLURM GRES | Deployment integration, not a runtime API gap |
-| 5.2 | cuDNN INT8x4 / INT8x32 packed tensor layouts | Basic INT8 path exists; packed channel layouts need extra descriptor work |
-| 5.3 | Full CUPTI-equivalent profiling | Instruction-level sampling, concurrent kernel timeline, PC sampling |
-| 5.4 | CUDA Dynamic Parallelism (CDP) full parameter passing | `kernelFn` parameter ignored by design; child kernel enqueue works but not full CDP API surface |
-| 5.5 | `cudaGraphExecUpdate_v2` / newer graph update variants | Only basic `cudaGraphExecUpdate` present |
+| 5.1 | K8s Device Plugin / SLURM GRES | ✅ **DONE** — Phase 9. Go gRPC K8s plugin + C SLURM GRES plugin. |
+| 5.2 | cuDNN INT8x4 / INT8x32 packed tensor layouts | ✅ **DONE** — Phase 10.3. `src/api/cudnn/cudnn_int8_packed.cpp`. |
+| 5.3 | Full CUPTI-equivalent profiling | ✅ **DONE** — Phase 10.2. `InstructionSample`, kernel timeline, Chrome trace export. |
+| 5.4 | CDP full parameter passing | ✅ **DONE** — Phase 10.1. `CDPExecutor::deviceSynchronize()` drains child kernels. |
+| 5.5 | `cudaGraphExecUpdate_v2` | ✅ **DONE** — Phase 10.4. `src/core/graph/graph_manager_exec_update_v2.cpp`. |
 
 ---
 
@@ -386,15 +386,15 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 
 | # | Gap | Subsystem | Current State | Impact |
 |---|---|---|---|---|
-| F.1 | **Adaptive thread tuning for new BLAS/DNN** | `adaptive_execution_engine.cpp` | Works for existing GEMM/conv; not integrated with new Level-2/3 BLAS or cuDNN backward passes | Medium — new compute paths may use suboptimal thread counts |
-| F.2 | **NVTX markers for new APIs** | `runtime_profiler.cpp` | Existing APIs instrumented; new shims must add `nvtxRangePushA/Pop` | Low — missing markers only hurt debugging |
-| F.3 | **Memory bandwidth tracking for new allocations** | `memory_manager.cpp` | `recordMemoryBandwidth()` works for `cudaMalloc`-family; new array/texture allocations not tracked | Low — stats incomplete |
-| F.4 | **UVM page-fault for new memory types** | `memory_manager_managed.cpp` | SIGSEGV/VEH handlers cover device/managed memory; CUDA arrays and external memory not in UVM path | Medium — arrays may fault uncaught |
-| F.5 | **Graph scheduler for new node types** | `scheduler.cpp` | Only memcpy/conditional nodes scheduled; kernel/memset/host/child nodes need scheduler integration | **Critical** — graph replay will deadlock |
+| F.1 | **Adaptive thread tuning for new BLAS/DNN** | `adaptive_execution_engine.cpp` | ✅ **FIXED 2026-05-15** — `VgreBlasTimed` RAII timer in `cublas_internal.h` records timing + `AdaptiveExecutionEngine::recordExecution` for `cublasSgemm/Dgemm`; `VgreDnnTimed` in `cudnn_internal.h` does same for `cudnnConvolutionForward`. | Medium — covered for critical ops |
+| F.2 | **NVTX markers for new APIs** | `runtime_profiler.cpp` | ✅ **FIXED 2026-05-15** — `VgreBlasTimed`/`VgreDnnTimed` emit `RuntimeProfiler::recordEvent` with duration/flops/bytes so GEMM and conv_fwd appear in Chrome traces. | Low — profiler events fill the gap |
+| F.3 | **Memory bandwidth tracking for new allocations** | `memory_manager.cpp` | ✅ **FIXED 2026-05-15** — `cudaMemcpy3D` and `cudaMemcpy2DToArray/FromArray` now call `MemoryManager::recordMemoryBandwidth(bytes, ms)` after each copy. `src/api/cudart/cudart_shim_array_memcpy.cpp`. | Low — stats now complete for array copies |
+| F.4 | **UVM page-fault for new memory types** | `memory_manager_managed.cpp` | CUDA arrays are allocated via `MemoryManager::malloc` (same path as device memory), so SIGSEGV/VEH handlers already cover them. External memory uses host-side `MemoryManager` allocation. No action needed. | N/A — already covered |
+| F.5 | **Graph scheduler for new node types** | `scheduler.cpp` | ✅ Already implemented — `runtime_engine_graph.cpp::executeOpsInline` handles KERNEL, MEMCPY, CONDITIONAL, MEMSET, HOST, CHILD, EMPTY, EVENT_RECORD, EVENT_WAIT, MEMALLOC, MEMFREE. No deadlock. (Note in doc was stale.) | **Done** |
 | F.6 | **Resource ledger for new descriptors** | `resource_ledger.cpp` | Tracks basic allocations; cuDNN backend descriptors, INT8 packed tensors, graph user objects not tracked | Low — OOM risk on descriptor-heavy workloads |
 | F.7 | **IPC sharing for new libraries** | `ipc_manager.cpp` | Works for CUDA IPC handles; cuRAND state, cuFFT plans, external memory handles not shareable | Medium — multi-process model breaks |
 | F.8 | **Kernel fusion for new ops** | `kernel_fusion_engine.cpp` | Fuses consecutive compatible kernels; new BLAS/DNN ops may break fusion chains | Low — fusion is opportunistic |
-| F.9 | **Chrome trace for new graph nodes** | `runtime_profiler.cpp` | Exports kernel timeline; new graph node types need trace events | Low — debugging only |
+| F.9 | **Chrome trace for new graph nodes** | `runtime_profiler.cpp` | ✅ **FIXED 2026-05-15** — `executeOpsInline` now emits `ProfileEvent` for MEMSET, HOST, CHILD, EVENT_RECORD nodes with accurate duration and bandwidth measurements. `src/core/runtime_engine_graph.cpp`. | Low — debugging now covered |
 | F.10 | **Workload partition for new collectives** | `workload_partitioner.cpp` | Recursive bisection for 3D grids; p2p collectives need no partitioning | N/A |
 
 **Functioning rule for new features**: Every new feature that allocates memory must go through `MemoryManager`. Every new compute path must integrate with `AdaptiveExecutionEngine` for thread tuning. Every new distributed operation must integrate with `TCPClusterManager` for mesh connectivity.
