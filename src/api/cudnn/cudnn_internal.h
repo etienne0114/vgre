@@ -29,6 +29,9 @@ typedef void*  cudnnLRNDescriptor_t;
 
 static constexpr cudnnStatus_t CUDNN_STATUS_SUCCESS       = 0;
 static constexpr cudnnStatus_t CUDNN_STATUS_NOT_INITIALIZED = 1;
+static constexpr cudnnStatus_t CUDNN_STATUS_ALLOC_FAILED  = 2;
+static constexpr cudnnStatus_t CUDNN_STATUS_BAD_PARAM      = 3;
+static constexpr cudnnStatus_t CUDNN_STATUS_INTERNAL_ERROR = 4;
 static constexpr cudnnStatus_t CUDNN_STATUS_INVALID_VALUE  = 8;
 static constexpr cudnnStatus_t CUDNN_STATUS_NOT_SUPPORTED  = 9;
 

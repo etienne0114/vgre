@@ -122,16 +122,24 @@ CUresult cuExternalMemoryGetMappedMipmappedArray(void **mipmapOut,
     case CU_AD_FORMAT_SIGNED_INT16:    texType = vgre::core::TextureElementType::UINT16; break;
     case CU_AD_FORMAT_HALF:            texType = vgre::core::TextureElementType::FP16; break;
     case CU_AD_FORMAT_FLOAT:           texType = vgre::core::TextureElementType::FLOAT32; break;
+    case CU_AD_FORMAT_UNORM_INT8:      texType = vgre::core::TextureElementType::UINT8; break;
+    case CU_AD_FORMAT_UNORM_INT16:     texType = vgre::core::TextureElementType::UINT16; break;
+    case CU_AD_FORMAT_SNORM_INT8:      texType = vgre::core::TextureElementType::INT8; break;
+    case CU_AD_FORMAT_SNORM_INT16:     texType = vgre::core::TextureElementType::INT16; break;
     default:                           return CUDA_ERROR_NOT_SUPPORTED;
   }
 
   size_t elemSize = 4;
   switch (mipmapArrayDesc->arrayDesc.Format) {
     case CU_AD_FORMAT_UNSIGNED_INT8:
-    case CU_AD_FORMAT_SIGNED_INT8:     elemSize = 1; break;
+    case CU_AD_FORMAT_SIGNED_INT8:
+    case CU_AD_FORMAT_UNORM_INT8:
+    case CU_AD_FORMAT_SNORM_INT8:      elemSize = 1; break;
     case CU_AD_FORMAT_UNSIGNED_INT16:
     case CU_AD_FORMAT_SIGNED_INT16:
-    case CU_AD_FORMAT_HALF:            elemSize = 2; break;
+    case CU_AD_FORMAT_HALF:
+    case CU_AD_FORMAT_UNORM_INT16:
+    case CU_AD_FORMAT_SNORM_INT16:     elemSize = 2; break;
     case CU_AD_FORMAT_FLOAT:           elemSize = 4; break;
     default:                           elemSize = 4; break;
   }

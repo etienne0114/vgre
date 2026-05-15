@@ -399,6 +399,31 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
                  Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
         for (size_t i = 0; i < m * n; ++i) pC[i] = f2bf(Cf[i]);
+    } else if (la.type == CUDA_R_8I && lb.type == CUDA_R_8I &&
+               (lc.type == CUDA_R_8I || lc.type == CUDA_R_32I)) {
+        // INT8 via float widening
+        float alphaF = *(const float*)alpha;
+        float betaF  = *(const float*)beta;
+        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
+        const int8_t* pA = static_cast<const int8_t*>(A);
+        const int8_t* pB = static_cast<const int8_t*>(B);
+        for (int i = 0; i < m * k; ++i) Af[i] = static_cast<float>(pA[i]);
+        for (int i = 0; i < k * n; ++i) Bf[i] = static_cast<float>(pB[i]);
+        if (lc.type == CUDA_R_8I) {
+            int8_t* pC = static_cast<int8_t*>(C);
+            for (int i = 0; i < m * n; ++i) Cf[i] = static_cast<float>(pC[i]);
+            bool tA = d.transA, tB = d.transB;
+            refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
+                     Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+            for (size_t i = 0; i < m * n; ++i) pC[i] = static_cast<int8_t>(Cf[i]);
+        } else {
+            int32_t* pC = static_cast<int32_t*>(C);
+            for (int i = 0; i < m * n; ++i) Cf[i] = static_cast<float>(pC[i]);
+            bool tA = d.transA, tB = d.transB;
+            refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
+                     Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+            for (size_t i = 0; i < m * n; ++i) pC[i] = static_cast<int32_t>(Cf[i]);
+        }
     } else {
         return CUBLAS_STATUS_NOT_SUPPORTED;
     }
