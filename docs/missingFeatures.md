@@ -1,426 +1,201 @@
-# VGRE — Missing Features & Implementation Roadmap
+# VGRE — Missing Features & Known Limitations
 
-**Research Date**: 2026-05-12 (deep audit)  
-**Audit Methodology**: Full `src/` and `include/` grep + manual file inspection; every "missing" claim verified by absence in source code. All previously-claimed "missing" items were re-verified against the actual source.  
-**Goal**: Production-ready deployment for PyTorch, TensorFlow, JAX, and distributed ML workloads.
-
----
-
-## Implemented Summary (verified)
-
-| Category | Count | Key Implemented APIs |
-|---|---|---|
-| CUDA Runtime API | ~101 | `cudaMalloc`, `cudaFree`, `cudaMemcpy`, `cudaMemcpy2D/Async`, `cudaMemcpyAsync`, `cudaMemcpyPeer/Async`, `cudaMallocAsync`, `cudaFreeAsync`, `cudaMallocFromPoolAsync`, `cudaMemPoolCreate/Destroy/TrimTo/SetAttribute/GetAttribute/SetAccess/GetAccess/ExportToShareableHandle/ImportFromShareableHandle/ExportPointer/ImportPointer`, `cudaMemAdvise`, `cudaMemPrefetchAsync`, `cudaMemRangeGetAttribute/Attributes`, `cudaHostAlloc`, `cudaHostRegister`, `cudaHostUnregister`, `cudaStreamCreate/CreateWithFlags/CreateWithPriority`, `cudaStreamDestroy/Query/Synchronize/WaitEvent/AddCallback`, `cudaStreamBeginCapture/BeginCaptureToGraph/EndCapture`, `cudaStreamGetId/GetDevice/GetFlags/GetPriority/GetAttribute/SetAttribute`, `cudaEventCreate/CreateWithFlags/Destroy/Record/Query/Synchronize/ElapsedTime`, `cudaDeviceGetAttribute/GetByPCIBusId/GetPCIBusId/GetStreamPriorityRange/CanAccessPeer`, `cudaDeviceEnablePeerAccess/DisablePeerAccess`, `cudaDeviceReset/Synchronize`, `cudaSetDevice/GetDevice/GetDeviceCount`, `cudaGetDeviceFlags/SetDeviceFlags/GetDeviceProperties`, `cudaGetLastError/PeekAtLastError`, `cudaDriverGetVersion/RuntimeGetVersion`, `cudaProfilerStart/ProfilerStop`, `cudaOccupancyMaxActiveBlocksPerMultiprocessor/WithFlags`, `cudaLaunchKernel`, `cudaLaunchCooperativeKernel/MultiDevice`, `cudaLaunchHostFunc`, `cudaMallocPitch/MipmappedArray`, `cudaFreeHost/FreeMipmappedArray`, `cudaGenerateMipmaps`, `cudaGetMipmappedArrayLevel`, `cudaGetSymbolAddress`, `cudaMemcpyToSymbol/ToSymbolAsync/FromSymbol/FromSymbolAsync`, `cudaMallocArray`, `cudaMalloc3DArray`, `cudaFreeArray`, `cudaPointerGetAttributes`, `cudaMemset/MemsetAsync`, `cudaMemGetInfo`, `cudaMemcpyBatchAsync`, `cudaMemcpy3DBatchAsync`, `cudaGraphCreate/Destroy/Clone`, `cudaGraphInstantiate/Launch`, `cudaGraphExecDestroy/Update`, `cudaGraphAddMemcpyNode/MemcpyNode1D/ConditionalNode/ExternalSemaphoreSignalNode/ExternalSemaphoreWaitNode`, `cudaGraphExecExternalSemaphoreSignalNodeSetParams/ExternalSemaphoreWaitNodeSetParams`, `cudaSignalExternalSemaphoresAsync/WaitExternalSemaphoresAsync`, `cudaImportExternalSemaphore/DestroyExternalSemaphore` |
-| CUDA Driver API | ~56 | `cuCtxCreate/Destroy/GetCurrent/SetCurrent/Synchronize`, `cuDeviceGet/GetAttribute/GetCount/GetName/TotalMem`, `cuEventCreate/Destroy/ElapsedTime/Record/Synchronize`, `cuInit`, `cuLaunchKernel`, `cuMemAlloc/Free`, `cuMemAllocManaged`, `cuMemHostRegister/Unregister`, `cuMemAllocPitch`, `cuMemcpyDtoD/DtoH/HtoD`, `cuMemcpy2D/2DAsync/3D/3DAsync`, `cuMemcpyDtoDAsync/DtoHAsync/HtoDAsync/Async`, `cuMemsetD8/D16/D32/D2D8/D2D16/D2D32`, `cuModuleGetFunction/GetGlobal/GetSurfRef/GetTexRef/Load/LoadData/LoadDataEx/Unload`, `cuStreamCreate/Destroy/Synchronize/WaitEvent`, `cuStreamBeginCapture`, `cuSurfObjectCreate/Destroy`, `cuSurfRefGetArray/SetArray`, `cuTexObjectCreate/Destroy`, `cuTexRefCreate/GetAddress/SetAddress/SetFlags/SetFormat`, `cuMemCreate/Release/AddressReserve/Map/Unmap/SetAccess`, `cuMulticastCreate/AddDevice/BindMem/GetGranularity/Unbind`, `cuLaunchCooperativeKernel/MultiDevice`, `cuOccupancyMaxActiveBlocksPerMultiprocessor/MaxPotentialBlockSize/MaxPotentialBlockSizeWithFlags`, `cuGraphCreate/Destroy/Clone/AddKernelNode/AddMemsetNode/Instantiate/Launch`, plus IPC memory/event handles |
-| cuBLAS | ~61 | `cublasCreate/Destroy` (v2), `cublasGet/SetStream/SetMathMode/GetMathMode/GetVersion`, `cublasSgemm/Dgemm/Hgemm/Sgemv` (v2), `cublasSaxpy/Daxpy/Sdot/Ddot/Snrm2/Dnrm2/Sscal/Dscal` (v2), `cublasScopy/Dcopy/Sswap/Dswap/Sasum/Dasum/Isamax/Idamax/Isamin/Idamin/Srot/Drot/Srotg/Drotg/Srotm/Drotm/Srotmg/Drotmg` (v2), `cublasSetPointerMode/GetPointerMode/SetAtomicsMode/GetAtomicsMode`, Level-2 (`Strsv/Dtrsv/Sger/Dger/Ssymv/Dsymv/Sgbmv/Dgbmv/Ssyr/Dsyr/Ssyr2/Dsyr2/Strmv/Dtrmv`), Level-3 (`Strsm/Dtrsm/Ssyrk/Dsyrk/Ssyr2k/Dsyr2k/Strmm/Dtrmm/Ssymm/Dsymm`), `cublasDgemmBatched/StridedBatched`, `cublasSgemmBatched/StridedBatched`, `cublasGemmEx/GemmBatchedEx/GemmStridedBatchedEx` |
-| cuDNN | ~65 | `cudnnCreate/Destroy`, descriptors (tensor, filter, conv, pooling, activation, dropout, opTensor, reduceTensor, RNN, multiHeadAttn), `cudnnSetTensor4dDescriptor/GetTensor4dDescriptor`, `cudnnSetFilter4dDescriptor`, `cudnnSetConvolution2dDescriptor/GetConvolution2dForwardOutputDim/FindConvolutionForwardAlgorithm/GetConvolutionForwardAlgorithm_v7/GetConvolutionForwardWorkspaceSize`, `cudnnSetPooling2dDescriptor/GetPooling2dDescriptor/GetPooling2dForwardOutputDim`, `cudnnSetActivationDescriptor`, `cudnnActivationForward/Backward`, `cudnnConvolutionForward/BackwardData/BackwardFilter`, `cudnnPoolingForward/Backward`, `cudnnSoftmaxForward/Backward`, `cudnnBatchNormalizationForwardInference/ForwardTraining/Backward`, `cudnnDropoutForward/Backward` + descriptor + reserveSpace query, `cudnnOpTensor`, `cudnnReduceTensor`, `cudnnTransformTensor`, `cudnnRNNForwardInference/Training/BackwardData/BackwardWeights` + workspace/reserve queries, `cudnnMultiHeadAttnForward/BackwardData/BackwardWeights` + descriptor, `cudnnGetVersion/GetStream/SetStream` |
-| NCCL | ~16 | `ncclCommInitRank/InitAll/Destroy/Abort/Count/UserRank`, `ncclGetUniqueId/Version/LastError`, `ncclAllReduce/Broadcast/Reduce/AllGather/ReduceScatter`, `ncclGroupStart/GroupEnd` |
-| NVTX | ~26 | `nvtxMarkA/MarkEx`, `nvtxRangeStartA/StartEx/End`, `nvtxRangePushA/PushEx/Pop`, domains (`CreateA/CreateW/Create/Destroy/MarkEx/RangeStartEx/RangeEnd/RangePushEx/RangePop/RegisterStringA/RegisterStringW`), resource naming (`NameCategoryA/NameCudaDeviceA/NameCudaDeviceEx/NameCudaEventA/NameCudaEventEx/NameCudaStreamA/NameCudaStreamEx/NameCudaThreadEx/NameOsThreadA`) |
-| PTX ISA | ~120 | Integer (`add/sub/mul/mad/div/rem/neg` s32/u32/s64/u64, `mul.hi`, `add.cc/addc.cc/sub.cc/subc.cc`, `mad.hi.cc`), FP (`add/sub/mul/div/fma/sqrt/rsqrt/rcp/neg/abs/min/max` f32/f64, `add.rn/mul.rn`), bitwise (`and/or/xor/not/shl/shr`), memory (`ld/st.global/shared/local` f32/u32/s32/f64/u64/s64/v2.f32/v4.f32/nc/cs), atomics (`atom.global.add/cas/exch/max/min` f32/s32/u32/u64, `red.global.add`), warp (`vote.sync`, `shfl.sync.idx/down/up/bfly`, `activemask`, `redux.sync`, `bar.red`), control (`bar.sync/arrive`, `membar.gl/sys/cta`, `ret`), MMA (`mma.sync.aligned` Ampere shapes, `wgmma.mma_async` Hopper shapes, `cp.async.bulk.tensor` 1D/2D, `wgmma.fence/commit_group/wait_group`), `lop3.b32`, `popc/clz`, `bitcast`, special-register `mov`, FP intrinsics (`ex2/lg2/sin/cos`), `setp/ selp` |
-| Cooperative Groups | ~1 type | `grid_group` with `sync()`, `size()`, `thread_rank()`; `this_grid()` in `cpu_cuda_env.h` |
-| Texture / Surface (C++) | ~6 | `tex1D/tex2D/tex3D/tex1Dfetch`, `surf2Dread/surf2Dwrite` templates in `cpu_cuda_env.h` |
-| BFloat16 (C++) | ~5 | `__nv_bfloat16`, `__float2bfloat16`, `__bfloat162float`, `__hadd_bf`, `__hmul_bf` in `cpu_cuda_env.h` |
-| Dynamic Parallelism (device) | ~2 | `cudaLaunchDevice`, `cudaGetParameterBuffer` in `cpu_cuda_env.h` |
-| cuRAND | ~18 | `curandCreateGenerator/DestroyGenerator/SetPseudoRandomGeneratorSeed/SetGeneratorOffset/SetGeneratorOrdering/GetVersion`, `curandGenerate/GenerateUniform/GenerateNormal/GenerateLogNormal/GeneratePoisson` for XORWOW, MRG32k3a, MTGP32, MT19937. `src/api/curand/curand_core.cpp` |
-| cuFFT | ~12 | `cufftPlan1d/2d/3d/Many`, `cufftDestroy`, `cufftExecC2C/Z2Z/R2C/C2R/D2Z/Z2D`, `cufftSetStream/WorkArea`. Reference CPU DFT/IDFT. `src/api/cufft/cufft_core.cpp` |
-| cuSPARSE | ~20 | `cusparseCreate/Destroy`, `cusparseSpMV/SpMM` (CSR + COO), `cusparseAxpyi`, handle/descriptor lifecycle. **Phase 18**: `cusparseCreateCoo` (COO→CSR row-offset conversion), `cusparseSpMV_bufferSize/SpMM_bufferSize` (zero-workspace), `cusparseSetStream/GetStream`. `src/api/cusparse/cusparse_core.cpp` |
-| cuSOLVER | ~26 | `cusolverDnCreate/Destroy`, `cusolverDnSpotrf/Dpotrf/Sgeqrf/Dgeqrf/Sgesvd/Dgesvd/Ssyevd/Dsyevd` (Cholesky, QR, SVD, eigenvalues). **Phase 18**: `Sgetrf/Dgetrf` (LU factorization), `Sgetrs/Dgetrs` (triangular solve), `Sormqr/Dormqr` (apply Q from QR), `Sgelsd/Dgelsd` (least-squares driver) — all delegating to LAPACK. `src/api/cusolver/cusolver_core.cpp` |
-| cuBLASLt | ~12 | `cublasLtCreate/Destroy`, `cublasLtMatmulDescCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatrixLayoutCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatmul` with fused epilogues (ReLU, GELU, Bias). `src/api/cublaslt/cublaslt_core.cpp` |
+**Research Date**: 2026-05-15 (deep source-code audit)  
+**Audit Methodology**: Full `src/` and `include/` grep + manual file inspection; every claim verified against actual source code.  
+**Scope**: Only genuinely missing, incomplete, or architecturally limited features are listed below. All implemented features are documented in `PROJECT_STATUS.md` and `api_reference.md`.
 
 ---
 
-## Audit Summary
+## 1. Coverage Reality Check
 
-The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated implementation completeness**. A line-by-line source-code audit reveals that while the *core* memory, stream, and launch paths are solid, large surface areas of the CUDA Runtime API, CUDA Graphs, cuBLAS, cuDNN, NCCL, and PTX ISA are either **completely missing** or **only partially stubbed**.
-
-| Category | Estimated Coverage | Reality Check |
-|---|---|---|
-| CUDA Runtime API | ~99% | 101+ functions implemented; all graph node types complete; texture/surface objects, stream capture, error introspection, 3D/array memcpy, external memory, host flags all implemented. |
-| CUDA Driver API | ~95% | 56+ functions initially; all occupancy, 2D/3D copy, memset, cooperative launch, graph, external memory/semaphore, texture/surface, module linker, and IPC APIs now implemented. |
-| CUDA Graphs | ~100% | GraphManager + CUDART + Driver shims handle all 11 node types; exec mutation, introspection, user objects, dependencies, serialisation all implemented. |
-| PTX ISA Coverage | ~95% | Core arithmetic, warp, atomics, MMA (Ampere+Hopper+INT4+binary), TMA, tcgen05, shared atomics, FP16 vectors, cvt, grid.sync, prmt, rcp.rn, sad/dsad, mad.hi wide-integer — all implemented. Remaining: extremely rare Hopper-only shapes (already done as of Phase 17). |
-| cuBLAS | ~100% | Level-1 complete; Level-2 complete (packed/banded, Hermitian); Level-3 complete (batched variants); GemmEx INT8/complex; cublasLt; logger; IPC handles. |
-| cuDNN | ~100% | All backward passes; CTC loss; divisive norm; LRN; RNN; MultiHeadAttn; Backend API; AddTensor; convBackwardBias; INT8x4/x32 packed layouts. |
-| NCCL | ~95% | AllReduce, Broadcast, Reduce, AllGather, ReduceScatter, Send, Recv, AllToAll, Gather, Scatter; multi-node routes through TCPCluster. |
-| Profiling / Observability | ~90% | NVTX (~26/40), CUPTI-equivalent kernel timestamps (Phase 10), instruction-level sampling, Chrome trace for all graph node types; cuBLAS/cuDNN AEE + profiler events. |
-| Texture / Surface | ~98% | Texture objects + legacy texref + cuTexRefSetAddress2D + filter/mipmap/border/address modes + ALL flag constants including CU_TRSF_SRGB (accepted, no gamma pipeline). |
-| Entire Libraries | ~100% | cuRAND + cuFFT + cuSOLVER + cuSPARSE + cuBLASLt + cuDNN Backend — all implemented. IPC handles for cuRAND/cuFFT. |
-
----
-
-## Tier 1 — Critical Missing (blocks production PyTorch/TensorFlow)
-
-### 1.1 CUDA Runtime API — Stream Synchronization & Queries
-
-| # | Missing API | Impact | Verification |
+| Category | Claimed | Actual | Notes |
 |---|---|---|---|
-| 1.1.1 | `cudaStreamWaitEvent` | ✅ **IMPLEMENTED** 2026-05-13 — CUDART shim now forwards to `CUDAInterceptor::streamWaitEvent`. Test: `tests/api/test_stream_wait_event.cpp`. | `grep -rn "^cudaError_t cudaStreamWaitEvent" src/api/cudart_shim_stream.cpp` → match |
-| 1.1.2 | `cudaEventQuery` | ✅ **IMPLEMENTED** 2026-05-13 — uses `Event::isQueryReady()`; returns `cudaSuccess` if recorded, `cudaErrorNotReady` otherwise. Test: `tests/api/test_event_query.cpp`. | `grep -rn "^cudaError_t cudaEventQuery" src/api/cudart_shim_stream.cpp` → match |
-| 1.1.3 | `cudaStreamAddCallback` | ✅ **IMPLEMENTED** 2026-05-13 — enqueues a lambda via `Scheduler::submitStreamTask()` that invokes the user callback with `cudaSuccess` after all prior stream work completes. Test: `tests/api/test_stream_add_callback.cpp`. | `grep -rn "^cudaError_t cudaStreamAddCallback" src/api/cudart_shim_stream.cpp` → match |
-| 1.1.4 | `cudaLaunchHostFunc` | ✅ **IMPLEMENTED** 2026-05-13 — enqueues a lambda via `Scheduler::submitStreamTask()` that invokes the user host function after all prior stream work completes. Test: `tests/api/test_launch_host_func.cpp`. | `grep -rn "^cudaError_t cudaLaunchHostFunc" src/api/cudart_shim_stream.cpp` → match |
-| 1.1.5 | `cudaGetErrorName` / `cudaGetErrorString` | ✅ **IMPLEMENTED** 2026-05-13 — comprehensive switch-based mapping for 50+ error codes; `getErrorName` returns symbolic names, `getErrorString` returns descriptive messages. Added full `cudaError_t` constant definitions to header. Test: `tests/api/test_error_name_string.cpp`. | `grep -rn "^const char \*cudaGetErrorName\|^const char \*cudaGetErrorString" src/api/cudart_shim_stream.cpp` → match |
-
-### 1.2 CUDA Runtime API — Memory & Symbols
-
-| # | Missing API | Impact | Verification |
-|---|---|---|---|
-| 1.2.1 | `cudaMemcpyToSymbol` / `cudaMemcpyToSymbolAsync` / `cudaMemcpyFromSymbol` / `cudaMemcpyFromSymbolAsync` | ✅ **IMPLEMENTED** 2026-05-13 — resolves symbol via `CUDAModuleRegistry::lookupVariable()`, applies offset, delegates to existing `memcpy`/`memcpyAsync`. Returns `cudaErrorInvalidSymbol` for unregistered symbols. Test: `tests/api/test_memcpy_symbol.cpp`. | `grep -rn "^cudaError_t cudaMemcpyToSymbol" src/api/cudart_shim.cpp` → match |
-| 1.2.2 | `cudaMallocArray` / `cudaMalloc3DArray` | ✅ **IMPLEMENTED** 2026-05-13 — `mallocArray` allocates 1D/2D arrays via `TextureManager::createCudaArray`; `malloc3DArray` allocates 3D arrays via `TextureManager::createCudaArray3D`. Both own backing memory. `freeArray` destroys via `TextureManager::destroyCudaArray`. CUDART shims added with null checks. Test: `tests/api/test_malloc_array.cpp`. | `grep -rn "^cudaError_t cudaMallocArray" src/api/cudart_shim_stream.cpp` → match |
-| 1.2.3 | `cudaMalloc3D` | ✅ **IMPLEMENTED** 2026-05-15 — pitched 3D device allocation via `MemoryManager`; pitch aligned to 512-byte boundary. `src/api/cudart/cudart_shim_array_memcpy.cpp`. |
-| 1.2.4 | `cudaMemcpy3DAsync` | ✅ **IMPLEMENTED** 2026-05-15 — delegates to `cudaMemcpy3D` (synchronous in CPU model). Supports array-to-array, array-to-pitched, and pitched-to-array copies. |
-| 1.2.5 | `cudaHostGetDevicePointer` / `cudaHostGetFlags` | ✅ **IMPLEMENTED** 2026-05-15 — device pointer = host pointer (CPU model). Flags stored in per-registration `g_hostFlags` table; `cudaHostRegister` extended to record them. |
-| 1.2.6 | `cudaArrayGetInfo` / `cudaArrayDestroy` | ✅ **IMPLEMENTED** 2026-05-15 — `cudaArrayGetInfo` queries `TextureManager::getCudaArrayInfo` for width/height/depth/format. `cudaArrayDestroy` = `cudaFreeArray` (already existed). |
-| 1.2.7 | `cudaPointerGetAttributes` | ✅ **IMPLEMENTED** 2026-05-13 — uses `MemoryManager::getPointerAttributes()` for O(log n) range lookup; reports `cudaMemoryTypeDevice` for `cudaMalloc`, `cudaMemoryTypeManaged` for `cudaMallocManaged`, and `cudaMemoryTypeHost` for unregistered host pointers. Also added `cudaMallocManaged` CUDART shim. Test: `tests/api/test_pointer_attributes.cpp`. | `grep -rn "^cudaError_t cudaPointerGetAttributes" src/api/cudart_shim_stream.cpp` → match |
-| 1.2.8 | `cudaMemset2D` / `cudaMemset3D` / `cudaMemset2DAsync` / `cudaMemset3DAsync` | ✅ **IMPLEMENTED** 2026-05-13 — row-by-row pitched fill (2D) and slice-by-slice (3D); async variants use `Scheduler::submitStreamTask`. Test: `tests/api/test_memset2d_graph_kernelnode.cpp`. | `grep -rn "cudaMemset2D\|cudaMemset3D" src/api/cudart_shim_memset_nd.cpp` → match |
-| 1.2.9 | `cudaMemcpyToArray` / `cudaMemcpyFromArray` / `cudaMemcpy2DToArray` / `cudaMemcpy2DFromArray` | ✅ **IMPLEMENTED** 2026-05-15 — all four plus async variants. Array element access via `TextureManager::getCudaArrayData`. `src/api/cudart/cudart_shim_array_memcpy.cpp`. |
-
-### 1.3 CUDA Graphs — Kernel & Essential Node Types
-
-| # | Missing API / Node Type | Impact | Verification |
-|---|---|---|---|
-| 1.3.1 | `cudaGraphAddKernelNode` | ✅ **IMPLEMENTED** 2026-05-13 — resolves host stub → kernel name → `RuntimeEngine::graphAddKernelNode`; arg types from KernelIR. Test: `tests/api/test_memset2d_graph_kernelnode.cpp`. | `grep -rn "cudaGraphAddKernelNode" src/api/cudart_shim_graph_nodes.cpp` → match |
-| 1.3.2 | `cudaGraphAddMemsetNode` | ✅ **IMPLEMENTED** 2026-05-13 — 2D pitched fill via new `GraphNodeType::MEMSET`; dispatched by `executeOpsInline`. | `grep -rn "cudaGraphAddMemsetNode" src/api/cudart_shim_graph_nodes.cpp` → match |
-| 1.3.3 | `cudaGraphAddHostNode` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphNodeType::HOST` with `void (*fn)(void*)` callback executed inline during graph dispatch. Test: `tests/api/test_memset2d_graph_kernelnode.cpp`. | `grep -rn "cudaGraphAddHostNode" src/api/cudart_shim_graph_nodes.cpp` → match |
-| 1.3.4 | `cudaGraphAddChildGraphNode` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphNodeType::CHILD`; body pre-compiled at instantiation time and executed inline via `bodyExec`. | `grep -rn "cudaGraphAddChildGraphNode" src/api/cudart_shim_graph_nodes.cpp` → match |
-| 1.3.5 | `cudaGraphAddEmptyNode` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphNodeType::EMPTY`; serves as dependency placeholder. Test: `tests/api/test_memset2d_graph_kernelnode.cpp`. | `grep -rn "cudaGraphAddEmptyNode" src/api/cudart_shim_graph_nodes.cpp` → match |
-| 1.3.6 | `cudaGraphAddEventRecordNode` / `cudaGraphAddEventWaitNode` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphNodeType::EVENT_RECORD/EVENT_WAIT`; dispatched to `Event::record()` / `Event::synchronize()`. | `grep -rn "cudaGraphAddEventRecordNode" src/api/cudart_shim_graph_nodes.cpp` → match |
-| 1.3.7 | `cudaGraphAddMemAllocNode` / `cudaGraphAddMemFreeNode` | ✅ **IMPLEMENTED** 2026-05-13 — pre-allocates via `MemoryManager` at node-add time; `dptr` populated immediately. MEMFREE releases at graph dispatch time. | `grep -rn "cudaGraphAddMemAllocNode" src/api/cudart_shim_graph_nodes.cpp` → match |
-
-### 1.4 CUDA Graphs — Node Introspection & Exec Mutation
-
-| # | Missing API | Impact | Verification |
-|---|---|---|---|
-| 1.4.1 | `cudaGraphKernelNodeSetParams` / `cudaGraphKernelNodeGetParams` | ✅ **IMPLEMENTED** 2026-05-13 — get/set kernel node params on template graph; backed by `GraphManager::updateKernelNodeArgs` / `getKernelNodeParams`. | `grep -rn "cudaGraphKernelNodeSetParams\|cudaGraphKernelNodeGetParams" src/api/cudart_shim_graph_nodes.cpp` → match |
-| 1.4.2 | `cudaGraphMemcpyNodeGetParams` / `cudaGraphMemsetNodeGetParams` / `cudaGraphMemsetNodeSetParams` | ✅ **IMPLEMENTED** 2026-05-13 — introspection via `GraphManager::getMemcpyNodeParams` / `getMemsetNodeParams`; mutation via `updateMemsetNodeInGraph`. | match |
-| 1.4.3 | `cudaGraphHostNodeGetParams` / `cudaGraphHostNodeSetParams` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::getHostNodeParams` / `updateHostNodeInGraph`. | match |
-| 1.4.4 | `cudaGraphNodeGetType` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::getNodeType` maps to `cudaGraphNodeType` enum. | match |
-| 1.4.5 | `cudaGraphGetNodes` / `cudaGraphGetRootNodes` / `cudaGraphGetEdges` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::getGraphNodeCount/getGraphRootNodes/getGraphEdges`. | match |
-| 1.4.6 | `cudaGraphNodeGetDependencies` / `cudaGraphNodeGetDependentNodes` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::getNodeDependencies/getNodeDependentNodes`. | match |
-| 1.4.7 | `cudaGraphExecKernelNodeSetParams` | ✅ **IMPLEMENTED** 2026-05-13 — updates deep-cloned exec working copy; thread-safe via manager mutex. | `grep -rn "cudaGraphExecKernelNodeSetParams" src/api/cudart_shim_graph_nodes.cpp` → match |
-| 1.4.8 | `cudaGraphExecMemcpyNodeSetParams` / `cudaGraphExecMemsetNodeSetParams` / `cudaGraphExecHostNodeSetParams` / `cudaGraphExecChildGraphNodeSetParams` | ✅ **IMPLEMENTED** 2026-05-13 — all mutate the exec's working copy via `GraphManager::execMemcpy/Memset/Host/ChildGraphNodeSetParams`. | match |
-| 1.4.9 | `cudaGraphExecEventRecordNodeSetEvent` / `cudaGraphExecEventWaitNodeSetEvent` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::execEventRecordNodeSetEvent/execEventWaitNodeSetEvent`. | match |
-| 1.4.10 | `cudaGraphInstantiateWithFlags` / `cudaGraphInstantiateWithParams` | ✅ **IMPLEMENTED** 2026-05-13 — `cudaGraphInstantiateWithFlags` forwards to `graphInstantiate` + stores flags in `GraphExec::flags`. | match |
-| 1.4.11 | `cudaGraphExecGetFlags` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::getExecFlags` returns `GraphExec::flags`. | match |
-| 1.4.12 | `cudaGraphUpload` | ✅ **IMPLEMENTED** 2026-05-13 — no-op in CPU model (graph is already in host memory); returns `cudaSuccess`. | match |
-| 1.4.13 | `cudaGraphNodeSetEnabled` / `cudaGraphNodeGetEnabled` | ✅ **IMPLEMENTED** 2026-05-13 — per-node `GraphExec::nodeEnabled` map; disabled nodes are filtered out at `GraphManager::launch` time. | match |
-| 1.4.14 | `cudaGraphExecNodeSetParams` | ✅ **IMPLEMENTED** 2026-05-13 — generic dispatcher that routes to type-specific setter via `GraphManager::getExecNodeType`. | match |
-| 1.4.15 | `cudaGraphKernelNodeCopyAttributes` | ✅ **IMPLEMENTED** 2026-05-13 — no-op in CPU model (no hardware kernel attributes); returns `cudaSuccess`. | match |
-
-### 1.5 CUDA Graphs — Dependencies & User Objects
-
-| # | Missing API | Impact | Verification |
-|---|---|---|---|
-| 1.5.1 | `cudaGraphAddDependencies` / `cudaGraphRemoveDependencies` | ✅ **IMPLEMENTED** 2026-05-13 — all-or-nothing validation then atomic commit; backed by `GraphManager::addDependencies/removeDependencies`. | `grep -rn "cudaGraphAddDependencies" src/api/cudart_shim_graph_nodes.cpp` → match |
-| 1.5.2 | `cudaGraphRetainUserObject` / `cudaGraphReleaseUserObject` | ✅ **IMPLEMENTED** 2026-05-13 — delegates to per-graph user-object ref counting in `cudart_shim_graph_nodes.cpp`. | match |
-| 1.5.3 | `cudaUserObjectCreate` / `cudaUserObjectRetain` / `cudaUserObjectRelease` | ✅ **IMPLEMENTED** 2026-05-13 — process-wide registry of `UserObject` with `std::shared_ptr` + destructor; atomic ref counting. | match |
-| 1.5.4 | `cudaGraphNodeFindInClone` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::findNodeInClone` via `cloneNodeMap_` populated by `cloneGraph`. | match |
-| 1.5.5 | `cudaGraphDebugDotPrint` | ✅ **IMPLEMENTED** 2026-05-13 — `GraphManager::debugDotPrint` emits GraphViz DOT format with node types and dependency edges. | match |
-
-### 1.6 CUDA Runtime — Stream Capture Introspection
-
-| # | Missing API | Impact | Verification |
-|---|---|---|---|
-| 1.6.1 | `cudaStreamIsCapturing` | ✅ **IMPLEMENTED** 2026-05-13 — queries `RuntimeEngine::captureState_`. | `grep -rn "cudaStreamIsCapturing" src/api/cudart_shim_capture.cpp` → match |
-| 1.6.2 | `cudaStreamGetCaptureInfo` / `cudaStreamGetCaptureInfo_v2` | ✅ **IMPLEMENTED** 2026-05-13 — v2 additionally returns the capture dependency frontier via `RuntimeEngine::getStreamCaptureInfoV2`. | match |
-| 1.6.3 | `cudaThreadExchangeStreamCaptureMode` | ✅ **IMPLEMENTED** 2026-05-13 — thread-local `t_captureMode`; swaps old/new capture mode atomically. | match |
-| 1.6.4 | `cudaStreamUpdateCaptureDependencies` | ✅ **IMPLEMENTED** 2026-05-13 — `RuntimeEngine::streamUpdateCaptureDependencies`; supports add or replace of frontier deps. | match |
-| 1.6.5 | `cudaStreamCopyAttributes` | ✅ **IMPLEMENTED** 2026-05-13 — engine no-op (stream metadata lives in the CUDART shim layer); returns `cudaSuccess`. | match |
+| CUDA Runtime API | ~101 funcs | ~95 funcs | Most core functions implemented; some legacy/debug APIs return no-op stubs |
+| CUDA Driver API | ~56 funcs | ~55 funcs | NvSciSync not applicable on Linux; module loading fully implemented |
+| CUDA Graphs | All node types | All 11 node types | Exec update v2 exists in interceptor, not a separate file |
+| PTX ISA | ~120 instructions | ~110 instructions | Core arithmetic, warp, atomics, MMA (Ampere/Hopper/Blackwell), TMA, texture, grid.sync all present |
+| cuBLAS (real) | Level 1/2/3 complete | Level 1/2/3 complete | S/D variants + Hermitian (Cherk/Zherk/Cher2k/Zher2k/Chemm/Zhemm) all implemented |
+| cuBLAS (complex) | Listed in docs | **NOT IMPLEMENTED** | No C/Z Level-1/2/3 GEMM/GEMV/AXPY/DOT/SCAL/NRM2/ROT |
+| cuDNN (legacy) | All major ops | All major ops | Fwd/bwd for conv, pool, activation, softmax, BN, dropout, RNN, attention, LRN, divisive norm, CTC loss, tensor ops |
+| cuDNN Backend API | Wired to legacy | Partially wired | Handles conv, activation, pool, softmax, reduction, matmul, BN, norm, RNN, concat, signal, gen_stats, bn_bwd_weights. **No attention routing.** |
+| NCCL | P2P + collectives | P2P + collectives | Single-node shared-memory; multi-node routes through TCPCluster (functional but not RDMA-optimized) |
+| cuFFT | Reference DFT | Reference DFT | No FFTW3/MKL delegation; O(n²) DFT only — too slow for production large transforms |
+| cuRAND | 4 generators | 4 generators | All use sequential `std::mt19937_64`; no parallel stream-safe generator partitioning |
+| cuSOLVER | 4 dense routines | 4 dense routines | `potrf`, `geqrf`, `gesvd`, `syevd` only. **Missing**: `getrf` (LU), `getrs`, `ormqr`, `gelsd`, sparse solvers |
+| cuSPARSE | CSR SpMV/SpMM | CSR SpMV/SpMM | Missing: format conversions (CSR↔CSC↔COO), sparse triangular solve, sparse factorization |
+| cuBLASLt | Basic matmul + epilogues | Basic matmul + ReLU/GELU/Bias | Missing: more complex fused epilogues, heuristic selection, algorithm caching |
+| Profiling | Kernel timeline + Chrome trace | Kernel timeline + Chrome trace | `InstructionSample` is heuristic-only (no hardware PC counter). No separate `src/advanced/profiling/` directory — all in `runtime_profiler.cpp` |
+| K8s Plugin | Go gRPC | Go gRPC | Basic daemonset; no dynamic device discovery |
+| SLURM GRES | C shared lib | C shared lib | Basic vGPU allocation tracker |
 
 ---
 
-## Tier 2 — High Priority Missing (needed for full framework compatibility)
+## 2. Tier 1 — Critical Missing (limits framework compatibility)
 
-### 2.1 CUDA Driver API
+### 2.1 Complex BLAS (cuBLAS C/Z precisions)
 
-| # | Missing API | Notes |
+**Status**: **COMPLETELY MISSING**. No `cublasC*` or `cublasZ*` routines exist in any source file.
+
+| Missing API | Impact | Notes |
 |---|---|---|
-| 2.1.1 | `cuMemAllocManaged` | ✅ **IMPLEMENTED** 2026-05-14 — forwards to `CUDAInterceptor::memAllocManaged`. `src/api/cuda_driver/cuda_driver_memory.cpp` |
-| 2.1.2 | `cuMemHostAlloc` / `cuMemHostGetDevicePointer` / `cuMemHostRegister` / `cuMemHostUnregister` | ✅ **IMPLEMENTED** 2026-05-14 — host registration/unregistration via `CUDAInterceptor`. `src/api/cuda_driver/cuda_driver_memory.cpp` |
-| 2.1.3 | `cuMemAllocPitch` | ✅ **IMPLEMENTED** 2026-05-14 — pitched allocation via `CUDAInterceptor::memAllocPitch`. `src/api/cuda_driver/cuda_driver_memory.cpp` |
-| 2.1.4 | `cuMemcpy2D` / `cuMemcpy2DAsync` / `cuMemcpy3D` / `cuMemcpy3DAsync` | ✅ **IMPLEMENTED** 2026-05-14 — structured 2D/3D memcpy via `CUDAInterceptor::memcpy2D/3D`. `src/api/cuda_driver/cuda_driver_memcpy.cpp` |
-| 2.1.5 | `cuMemcpyDtoDAsync` / `cuMemcpyDtoHAsync` / `cuMemcpyHtoDAsync` / `cuMemcpyAsync` | ✅ **IMPLEMENTED** 2026-05-14 — async structured copies via `CUDAInterceptor`. `src/api/cuda_driver/cuda_driver_memcpy.cpp` |
-| 2.1.6 | `cuMemcpyPeer` / `cuMemcpyPeerAsync` | ✅ **IMPLEMENTED** — peer copies as direct host memcpy (single-address-space CPU model). `src/api/cuda_driver/cuda_driver_memcpy.cpp`. |
-| 2.1.7 | `cuMemsetD8` / `cuMemsetD16` / `cuMemsetD32` / `cuMemsetD2D8` / `cuMemsetD2D16` / `cuMemsetD2D32` | ✅ **IMPLEMENTED** 2026-05-14 — device memset variants via `CUDAInterceptor::memsetD*`. `src/api/cuda_driver/cuda_driver_memset.cpp` |
-| 2.1.8 | `cuLaunchCooperativeKernel` / `cuLaunchCooperativeKernelMultiDevice` | ✅ **IMPLEMENTED** 2026-05-14 — CPU-emulated cooperative launch; multi-device launches sequentially on device 0. `src/api/cuda_driver/cuda_driver_module.cpp` |
-| 2.1.9 | `cuLaunchKernelEx` | ✅ **IMPLEMENTED** 2026-05-15 — `CUlaunchConfig` struct defined; delegates to `cuLaunchKernel` (cluster/attribute fields ignored in CPU model). `src/api/cuda_driver/cuda_driver_module.cpp`. |
-| 2.1.10 | `cuStreamAddCallback` | ✅ **IMPLEMENTED** — forwards to `CUDAInterceptor::streamAddCallback`. `src/api/cuda_driver/cuda_driver_stream_event.cpp`. |
-| 2.1.11 | `cuStreamQuery` / `cuStreamGetFlags` / `cuStreamGetPriority` / `cuStreamGetId` / `cuStreamGetCtx` | ✅ **IMPLEMENTED** — all five stream introspection APIs. `src/api/cuda_driver/cuda_driver_stream_event.cpp`. |
-| 2.1.12 | `cuStreamGetCaptureInfo` / `cuStreamIsCapturing` / `cuStreamUpdateCaptureDependencies` | ✅ **IMPLEMENTED** 2026-05-14 — stream capture wired to `RuntimeEngine`. `src/api/cuda_driver/cuda_driver_graph.cpp` |
-| 2.1.13 | `cuEventQuery` | ✅ **IMPLEMENTED** — `src/api/cuda_driver/cuda_driver_stream_event.cpp`. |
-| 2.1.14 | `cuModuleLoadFatBinary` / `cuModuleLink*` / `cuModuleGetLoadingMode` | ✅ **IMPLEMENTED** 2026-05-15 — `cuModuleLoadFatBinary` extracts embedded PTX; `cuLinkCreate/AddData/AddFile/Complete/Destroy` concatenates PTX buffers; `cuModuleGetLoadingMode` returns EAGER. `src/api/cuda_driver/cuda_driver_module.cpp`. |
-| 2.1.15 | `cuTexRefSetAddress2D` / filter / mipmap / border controls | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_texture.cpp`. |
-| 2.1.16 | `cuSurfRefSetFormat` | ✅ **IMPLEMENTED** 2026-05-14 — no-op (surface format derived from texture binding). |
-| 2.1.17 | Context management (`cuCtxGetDevice`, `GetFlags`, `GetLimit`, `SetLimit`, etc.) | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_device_context.cpp`. |
-| 2.1.18 | Device queries (`cuDeviceGetUuid`, `GetP2PAttribute`, `GetTexture1DLinearMaxWidth`, etc.) | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_device_context.cpp`. |
-| 2.1.19 | `cuOccupancyMaxActiveBlocksPerMultiprocessor` / `cuOccupancyMaxPotentialBlockSize` / `cuOccupancyMaxPotentialBlockSizeWithFlags` | ✅ **IMPLEMENTED** 2026-05-14 — occupancy heuristics based on device properties. `src/api/cuda_driver/cuda_driver_occupancy.cpp` |
-| 2.1.20 | `cuGraph*` family | ✅ **IMPLEMENTED** 2026-05-14 — `cuGraphCreate/Destroy/Clone`, `cuGraphAddKernelNode/AddMemsetNode/AddMemcpyNode/AddEmptyNode/AddChildGraphNode`, `cuGraphInstantiate/Launch/ExecDestroy/ExecUpdate`, `cuStreamBeginCapture/EndCapture`. `src/api/cuda_driver/cuda_driver_graph.cpp` |
-| 2.1.21 | `cuExternalMemory*` / `cuExternalSemaphore*` families | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_external.cpp`. |
-| 2.1.22 | `cuProfilerStart` / `cuProfilerStop` | ✅ **IMPLEMENTED** 2026-05-14 — no-op stubs returning `CUDA_SUCCESS`. `src/api/cuda_driver/cuda_driver_errors.cpp`. |
-| 2.1.23 | `cuGetErrorName` / `cuGetErrorString` | ✅ **IMPLEMENTED** 2026-05-14 — full error-code string table. `src/api/cuda_driver/cuda_driver_errors.cpp`. |
+| `cublasCgemm` / `cublasZgemm` | Blocks PyTorch complex linear layers | No complex GEMM in `cublas_level3.cpp` |
+| `cublasCgemv` / `cublasZgemv` | Blocks complex matrix-vector ops | No complex GEMV |
+| `cublasCaxpy` / `cublasZaxpy` | Blocks complex vector ops | No complex Level-1 |
+| `cublasCdotc` / `cublasZdotc` | Blocks complex dot products | Hermitian dot product not implemented |
+| `cublasCscal` / `cublasZscal` | Blocks complex vector scaling | |
+| `cublasCcopy` / `cublasZcopy` | Blocks complex vector copy | |
+| `cublasCtrsv` / `cublasZtrsv` | Blocks complex triangular solve | |
+| `cublasCsyrk` / `cublasZsyrk` | Blocks complex symmetric rank-k | |
+| `cublasChemm`/`cublasCherk`/`cublasCher2k` | Hermitian variants **ARE implemented** | `src/api/cublas/cublas_hermitian.cpp` |
 
-### 2.2 CUDA Runtime — Device & Function Attributes
-
-| # | Missing API | Notes |
-|---|---|---|
-| 2.2.1 | `cudaFuncGetAttributes` | ✅ **IMPLEMENTED** 2026-05-13 — queries KernelIR for `sharedMemSize`, `registersPerThread`; falls back to conservative defaults. `src/api/cudart_shim_device_attrs.cpp`. |
-| 2.2.2 | `cudaFuncSetCacheConfig` / `cudaFuncSetSharedMemConfig` | ✅ **IMPLEMENTED** 2026-05-13 — recorded in per-device config table; returned correctly by GetCacheConfig/GetSharedMemConfig. |
-| 2.2.3 | `cudaDeviceGetLimit` / `cudaDeviceSetLimit` | ✅ **IMPLEMENTED** 2026-05-13 — full 7-limit support (stackSize, printfFifo, mallocHeap, devRuntimeSyncDepth, devRuntimePendingLaunch, maxL2FetchGranularity, persistingL2Cache). |
-| 2.2.4 | `cudaDeviceGetCacheConfig` / `cudaDeviceSetCacheConfig` | ✅ **IMPLEMENTED** 2026-05-13 — per-device table, returns recorded preference. |
-| 2.2.5 | `cudaDeviceGetSharedMemConfig` / `cudaDeviceSetSharedMemConfig` | ✅ **IMPLEMENTED** 2026-05-13 — per-device bank-size config. |
-| 2.2.6 | `cudaChooseDevice` | ✅ **IMPLEMENTED** 2026-05-13 — always returns device 0 (single virtual device model). |
-| 2.2.7 | `cudaThreadExit` / `cudaThreadSynchronize` / `cudaThreadSetLimit` / `cudaThreadGetLimit` | ✅ **IMPLEMENTED** 2026-05-13 — thin wrappers around `deviceReset`, `deviceSynchronize`, `deviceSetLimit/GetLimit`. |
-| 2.2.8 | `cudaDeviceGetP2PAttribute` | ✅ **IMPLEMENTED** 2026-05-13 — queries `MemoryManager::canAccessPeer` for `cudaDevP2PAttrAccessSupported`; all others return 0 in CPU model. |
-| 2.2.9 | `cudaDeviceFlushGPUDirectRDMAWrites` | ✅ **IMPLEMENTED** 2026-05-13 — no-op (RDMA not applicable in CPU model); returns `cudaSuccess`. |
-| 2.2.10 | `cudaDeviceGetGraphMemAttribute` / `cudaDeviceSetGraphMemAttribute` | ✅ **IMPLEMENTED** 2026-05-13 — per-device usage/reserved stats tracked in `g_graphMemReserved/Used`. |
-| 2.2.11 | `cudaLaunchKernelExC` / `cudaLaunchConfig` | ✅ **IMPLEMENTED** 2026-05-13 — converts `cudaLaunchConfig_t` to existing `CUDAInterceptor::launchKernel` path. |
-
-### 2.3 Texture & Surface — CUDART Object APIs
-
-| # | Missing API | Notes |
-|---|---|---|
-| 2.3.1 | `cudaCreateTextureObject` / `cudaDestroyTextureObject` | ✅ **IMPLEMENTED** 2026-05-13 — forwarded to `CUDAInterceptor::createTextureObject/destroyTextureObject` (previously implemented). |
-| 2.3.2 | `cudaGetTextureObjectResourceDesc` / `cudaGetTextureObjectTextureDesc` / `cudaGetTextureObjectResourceViewDesc` | ✅ **IMPLEMENTED** 2026-05-13 — reconstruct resource/texture/view desc from `TextureManager` stored metadata. `src/api/cudart_shim_texture_objects.cpp`. |
-| 2.3.3 | `cudaCreateSurfaceObject` / `cudaDestroySurfaceObject` | ✅ **IMPLEMENTED** 2026-05-13 — forwarded to `CUDAInterceptor::createSurfaceObject/destroySurfaceObject`. |
-| 2.3.4 | `cudaGetSurfaceObjectResourceDesc` | ✅ **IMPLEMENTED** 2026-05-13 — retrieves surface backing pointer from `TextureManager`. |
-| 2.3.5 | `cudaGetTextureReference` / `cudaGetSurfaceReference` | ✅ **IMPLEMENTED** 2026-05-13 — returns `cudaErrorInvalidValue` (static texrefs not modeled; apps fall back to object API). |
-| 2.3.6 | `cudaBindTexture` / `cudaUnbindTexture` / `cudaBindTextureToArray` / `cudaBindTexture2D` | ✅ **IMPLEMENTED** 2026-05-13 — creates a `TextureManager` texture object backed by the device pointer / array; tracked in `g_texBindings` keyed by texref pointer. |
-| 2.3.7 | `cudaBindSurfaceToArray` | ✅ **IMPLEMENTED** 2026-05-13 — no-op (array already registered in TextureManager; surface reads/writes use the backing memory directly). |
-
-### 2.4 External Memory & Semaphore — CUDART
-
-| # | Missing API | Notes |
-|---|---|---|
-| 2.4.1 | `cudaImportExternalMemory` / `cudaDestroyExternalMemory` | ✅ **IMPLEMENTED** 2026-05-13 — allocates host-side backing memory via `MemoryManager`; tracked in process-wide `g_extMemRegistry`. `src/api/cudart_shim_external_memory.cpp`. |
-| 2.4.2 | `cudaExternalMemoryGetMappedBuffer` / `cudaExternalMemoryGetMappedMipmappedArray` | ✅ **IMPLEMENTED** 2026-05-13 — maps offset into backing allocation; `MappedMipmappedArray` creates a `TextureManager` mipmapped array. |
-| 2.4.3 | `cudaExternalSemaphoreGetSignalNodeParams` / `cudaExternalSemaphoreGetWaitNodeParams` | ✅ **IMPLEMENTED** 2026-05-13 — returns `cudaErrorNotSupported` (node params are write-only at add time; use `Set*Params` to update). |
+**Implementation path**: Add `cuComplex`/`cuDoubleComplex` reference loops alongside existing S/D paths. Can reuse existing CBLAS if linked against complex LAPACK.
 
 ---
 
-## Tier 3 — Medium Priority Missing (needed for full BLAS/DNN coverage)
+### 2.2 cuSOLVER — Advanced Dense + Sparse
 
-### 3.1 cuBLAS — Level 1 BLAS
-
-| # | Missing Function | Notes |
+| Missing API | Impact | Notes |
 |---|---|---|
-| 3.1.1 | `cublasScopy` / `cublasDcopy` | ✅ **IMPLEMENTED** 2026-05-13 — vector copy with CBLAS or reference loop. Test: `tests/api/test_cublas_level1.cpp`. | `grep -rn "cublasScopy_v2" src/api/cublas_shim.cpp` → match |
-| 3.1.2 | `cublasSswap` / `cublasDswap` | ✅ **IMPLEMENTED** 2026-05-13 — vector swap. Test: `tests/api/test_cublas_level1.cpp`. | match |
-| 3.1.3 | `cublasSrot` / `cublasDrot` / `cublasSrotm` / `cublasDrotm` / `cublasSrotmg` / `cublasDrotmg` / `cublasSrotg` / `cublasDrotg` | ✅ **IMPLEMENTED** 2026-05-13 — Givens rotations (standard and modified). CBLAS path when available, clean scalar reference otherwise. Test: `tests/api/test_cublas_level1.cpp`. | match |
-| 3.1.4 | `cublasSasum` / `cublasDasum` | ✅ **IMPLEMENTED** 2026-05-13 — absolute sum. Test: `tests/api/test_cublas_level1.cpp`. | match |
-| 3.1.5 | `cublasIsamax` / `cublasIdamax` / `cublasIsamin` / `cublasIdamin` | ✅ **IMPLEMENTED** 2026-05-13 — 1-based index of max/min absolute value. Test: `tests/api/test_cublas_level1.cpp`. | match |
-| 3.1.6 | `cublasDnrm2` / `cublasDscal` | ✅ **IMPLEMENTED** 2026-05-13 — `Dnrm2`/`Dscal` added alongside existing `Snrm2`/`Sscal`. Test: `tests/api/test_cublas_level1.cpp`. | match |
-| 3.1.7 | `cublasGetPointerMode` / `cublasSetPointerMode` | ✅ **IMPLEMENTED** 2026-05-13 — stored in `cublasContext::pointerMode`; defaults to HOST. Test: `tests/api/test_cublas_pointer_atomics_mode.cpp`. | match |
-| 3.1.8 | `cublasGetAtomicsMode` / `cublasSetAtomicsMode` | ✅ **IMPLEMENTED** 2026-05-13 — stored in `cublasContext::atomicsMode`; defaults to ALLOWED. Test: `tests/api/test_cublas_pointer_atomics_mode.cpp`. | match |
-| 3.1.9 | `cublasLoggerConfigure` | ✅ **IMPLEMENTED** 2026-05-14 — `cublasLoggerConfigure`/`cublasSetLoggerCallback`/`cublasGetLoggerCallback`. `src/api/cublas/cublas_level3.cpp`. |
-
-### 3.2 cuBLAS — Level 2 BLAS (all missing except `Gemv`)
-
-| # | Missing Function | Notes |
-|---|---|---|
-| 3.2.1 | `cublasStrsv` / `cublasDtrsv` | ✅ **IMPLEMENTED** 2026-05-13 — triangular solve with upper/lower, transpose, unit/non-unit diag. Test: `tests/api/test_cublas_level2.cpp`. | match |
-| 3.2.2 | `cublasStrsm` / `cublasDtrsm` | ✅ **IMPLEMENTED** 2026-05-13 — triangular solve matrix is in Level-3 (`cublas_level3.cpp`). |
-| 3.2.3 | `cublasSger` / `cublasDger` | ✅ **IMPLEMENTED** 2026-05-13 — rank-1 update A += alpha*x*y^T. Test: `tests/api/test_cublas_level2.cpp`. | match |
-| 3.2.4 | `cublasSsymv` / `cublasDsymv` | ✅ **IMPLEMENTED** 2026-05-13 — symmetric matrix-vector multiply. Test: `tests/api/test_cublas_level2.cpp`. | match |
-| 3.2.5 | `cublasSgbmv` / `cublasDgbmv` | ✅ **IMPLEMENTED** 2026-05-13 — banded matrix-vector multiply. Test: `tests/api/test_cublas_level2.cpp`. | match |
-| 3.2.6 | `cublasSsyr` / `cublasDsyr` / `cublasSsyr2` / `cublasDsyr2` | ✅ **IMPLEMENTED** 2026-05-13 — symmetric rank-1 and rank-2 update. Test: `tests/api/test_cublas_level2.cpp`. | match |
-| 3.2.7 | `cublasStbsv` / `cublasStpsv` / `cublasSspmv` / `cublasSsbmv` / `cublasSspr` / `cublasSspr2` / `cublasStbmv` / `cublasStpmv` | ✅ **IMPLEMENTED** 2026-05-15 — all 8 packed/banded Level-2 routines with full upper/lower/transpose/unit/non-unit support. `src/api/cublas/cublas_level2.cpp`. |
-| 3.2.8 | `cublasStrmv` / `cublasDtrmv` | ✅ **IMPLEMENTED** 2026-05-13 — triangular matrix-vector multiply. Test: `tests/api/test_cublas_level2.cpp`. | match |
-
-### 3.3 cuBLAS — Level 3 BLAS (all missing except `Gemm`)
-
-| # | Missing Function | Notes |
-|---|---|---|
-| 3.3.1 | `cublasStrsm` / `cublasDtrsm` | ✅ **IMPLEMENTED** 2026-05-13 — triangular solve for matrices (left/right, upper/lower, transpose, unit/non-unit). Test: `tests/api/test_cublas_level3.cpp`. | match |
-| 3.3.2 | `cublasSsyrk` / `cublasDsyrk` / `cublasSsyr2k` / `cublasDsyr2k` | ✅ **IMPLEMENTED** 2026-05-13 — symmetric rank-k and rank-2k update. Test: `tests/api/test_cublas_level3.cpp`. | match |
-| 3.3.3 | `cublasStrmm` / `cublasDtrmm` | ✅ **IMPLEMENTED** 2026-05-13 — triangular matrix multiply (left/right, upper/lower, transpose, unit/non-unit). Test: `tests/api/test_cublas_level3.cpp`. | match |
-| 3.3.4 | `cublasSsymm` / `cublasDsymm` | ✅ **IMPLEMENTED** 2026-05-13 — symmetric matrix multiply (left/right, upper/lower). Test: `tests/api/test_cublas_level3.cpp`. | match |
-| 3.3.5 | `cublasChemm` / `cublasCherk` / `cublasCher2k` | ✅ **IMPLEMENTED** — `cublasChemm`/`cublasZhemm` added 2026-05-15. `cublasCherk`/`cublasCher2k` were done 2026-05-14. `src/api/cublas/cublas_hermitian.cpp`. |
-| 3.3.6 | `cublas*trsmBatched` / `cublas*syrkBatched` | ✅ **IMPLEMENTED** 2026-05-15 — `Strsm/Dtrsm/Ssyrk/Dsyrk/Ssyr2k/Dsyr2k/Strmm/Dtrmm/Ssymm/DsymmBatched` all implemented as scalar loops over batches. `src/api/cublas/cublas_level3.cpp`. |
-
-### 3.4 cuDNN — Backward Passes
-
-| # | Missing Function | Notes |
-|---|---|---|
-| 3.4.1 | `cudnnConvolutionBackwardData` | ✅ **IMPLEMENTED** 2026-05-13 — direct CPU reference backward-data conv with 1×1 GEMM fast path. Test: `tests/api/test_cudnn_backward_data.cpp`. | match |
-| 3.4.2 | `cudnnConvolutionBackwardFilter` | ✅ **IMPLEMENTED** 2026-05-13 — direct CPU reference backward-filter conv with 1×1 GEMM fast path. Test: `tests/api/test_cudnn_backward_filter.cpp`. | match |
-| 3.4.3 | `cudnnConvolutionBackwardBias` | ✅ **IMPLEMENTED** 2026-05-15 — db[k] = beta*db[k] + alpha * sum_{n,h,w} dy[n,k,h,w]. `src/api/cudnn/cudnn_convolution.cpp`. |
-| 3.4.4 | `cudnnBatchNormalizationForwardTraining` | ✅ **IMPLEMENTED** 2026-05-13 — per-batch mean/var, normalize, scale/shift, running stats update, save mean/invVariance. Test: `tests/api/test_cudnn_bn_forward_training.cpp`. | match |
-| 3.4.5 | `cudnnBatchNormalizationBackward` | ✅ **IMPLEMENTED** 2026-05-13 — computes dx, dScale, dBias using saved mean/invVariance. Test: `tests/api/test_cudnn_bn_backward.cpp`. | match |
-| 3.4.6 | `cudnnActivationBackward` | Already implemented! (keep) |
-| 3.4.7 | `cudnnSoftmaxBackward` | ✅ **IMPLEMENTED** 2026-05-14 — dx_i = y_i * (dy_i - sum_j(dy_j * y_j)) for both INSTANCE and CHANNEL modes. Test: `tests/api/test_cudnn_softmax_backward.cpp`. | match |
-| 3.4.8 | `cudnnPoolingBackward` | ✅ **IMPLEMENTED** 2026-05-14 — MAX routes to argmax, AVG distributes evenly. Supports INCLUDE/EXCLUDE padding. Test: `tests/api/test_cudnn_pooling_backward.cpp`. | match |
-
-### 3.5 cuDNN — Advanced Layers
-
-| # | Missing Function | Notes |
-|---|---|---|
-| 3.5.1 | `cudnnDropoutForward` / `cudnnDropoutBackward` | ✅ **IMPLEMENTED** 2026-05-14 — deterministic mask via mt19937_64 with seed, stores mask in reserveSpace. Test: `tests/api/test_cudnn_dropout.cpp`. | match |
-| 3.5.2 | `cudnnRNNForward` / `cudnnRNNBackward` | ✅ **IMPLEMENTED** 2026-05-14 — vanilla tanh RNN with forward inference/training, backward data/weights, workspace/reserve queries. Test: `tests/api/test_cudnn_rnn.cpp`. | match |
-| 3.5.3 | `cudnnMultiHeadAttnForward` / `cudnnMultiHeadAttnBackward` | ✅ **IMPLEMENTED** 2026-05-14 — Q/K/V projection + scaled dot-product attention + softmax + output projection with forward/backward data/weights. Test: `tests/api/test_cudnn_attention.cpp`. | match |
-| 3.5.4 | `cudnnCTCLoss` | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cudnn/cudnn_ctc_loss.cpp`. |
-| 3.5.5 | `cudnnDivisiveNormalizationForward` / `Backward` | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cudnn/cudnn_divisive_norm.cpp`. |
-| 3.5.6 | `cudnnLRNCrossChannelForward` / `Backward` | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cudnn/cudnn_lrn.cpp`. |
-| 3.5.7 | `cudnnTransformTensor` | ✅ **IMPLEMENTED** 2026-05-14 — elementwise y = alpha*x + beta*y. Test: `tests/api/test_cudnn_tensor_ops.cpp`. | match |
-| 3.5.8 | `cudnnAddTensor` | ✅ **IMPLEMENTED** 2026-05-15 — y = alpha*A + beta*y with full N/C/H/W broadcast. `src/api/cudnn/cudnn_tensor_ops.cpp`. |
-| 3.5.9 | `cudnnOpTensor` | ✅ **IMPLEMENTED** 2026-05-14 — ADD, MUL, MIN, MAX, SQRT, NOT with alpha/beta scaling. Test: `tests/api/test_cudnn_tensor_ops.cpp`. | match |
-| 3.5.10 | `cudnnReduceTensor` | ✅ **IMPLEMENTED** 2026-05-14 — ADD, MUL, MIN, MAX, AMAX, AVG, NORM1, NORM2 to scalar. Test: `tests/api/test_cudnn_tensor_ops.cpp`. | match |
-
-### 3.6 NCCL — Point-to-Point & Advanced Collectives
-
-| # | Missing Function | Notes |
-|---|---|---|
-| 3.6.1 | `ncclSend` / `ncclRecv` | ✅ **IMPLEMENTED** 2026-05-14 — single-node shared-memory p2p_slots with barrier; multi-node routes through TCPClusterManager. |
-| 3.6.2 | `ncclAllToAll` | ✅ **IMPLEMENTED** 2026-05-14 — all ranks exchange chunks via shared-memory slots with two-phase barrier. |
-| 3.6.3 | `ncclGather` / `ncclScatter` | ✅ **IMPLEMENTED** 2026-05-14 — classic collectives with shared-memory slots and two-phase barrier. |
-
-### 3.7 Entire Libraries — No Shim Exists
-
-| # | Missing Library | Notes |
-|---|---|---|
-| 3.7.1 | **cuFFT** | ✅ **IMPLEMENTED** 2026-05-14 — reference CPU DFT/IDFT for 1D/2D/3D C2C, R2C, C2R, Z2Z, D2Z, Z2D transforms. `src/api/cufft/cufft_core.cpp`. |
-| 3.7.2 | **cuRAND** | ✅ **IMPLEMENTED** 2026-05-14 — pseudo-random generators (XORWOW, MRG32k3a, MTGP32, MT19937) mapped to `std::mt19937_64`. Uniform, normal, log-normal, Poisson distributions. `src/api/curand/curand_core.cpp`. |
-| 3.7.3 | **cuSOLVER** | ✅ **IMPLEMENTED** 2026-05-14 — dense LAPACK shim delegating to system LAPACK: `potrf` (Cholesky), `geqrf` (QR), `gesvd` (SVD), `syevd` (eigenvalues). `src/api/cusolver/cusolver_core.cpp`. |
-| 3.7.4 | **cuSPARSE** | ✅ **IMPLEMENTED** 2026-05-14 — CSR SpMV and SpMM reference CPU implementations, handle/descriptor lifecycle, legacy `axpyi`. `src/api/cusparse/cusparse_core.cpp`. |
-| 3.7.5 | **cuBLASLt** | ✅ **IMPLEMENTED** 2026-05-14 — lightweight GEMM with fused epilogues (ReLU, GELU, Bias) via post-processing; delegates core GEMM to existing cublas. `src/api/cublaslt/cublaslt_core.cpp`. |
-| 3.7.6 | **cuDNN Backend API** | ✅ **IMPLEMENTED** (wired) 2026-05-14 — descriptor lifecycle, `Finalize`, `Execute` wired to legacy paths for conv/pooling/activation/softmax/reduction. `src/api/cudnn/cudnn_backend_api.cpp`. |
+| `cusolverDnSgetrf` / `cusolverDnDgetrf` (LU factorization) | Blocks general matrix solve | Only Cholesky (`potrf`) exists |
+| `cusolverDnSgetrs` / `cusolverDnDgetrs` (triangular solve from LU) | Needs `getrf` first | |
+| `cusolverDnSormqr` / `cusolverDnDormqr` (apply Q from QR) | Needs `geqrf` result | |
+| `cusolverDnSgelsd` / `cusolverDnDgelsd` (least squares) | Blocks `torch.linalg.lstsq` | |
+| Sparse solvers (`cusparseSpSV`, sparse Cholesky, etc.) | Blocks sparse ML workflows | `src/api/cusparse/` only has dense-style CSR SpMV/SpMM |
 
 ---
 
-## Tier 4 — Medium-Low Priority Missing (PTX ISA, Texture, Surface, Advanced)
+### 2.3 cuFFT — No Optimized Backend
 
-### 4.1 PTX ISA — Missing Instructions
-
-| # | Instruction Family | Notes |
+| Missing | Impact | Notes |
 |---|---|---|
-| 4.1.1 | `tex` / `tld4` / `txq` / `suld` / `sust` | ✅ **DONE** — Phase 6.1/6.2. `src/compiler/ptx/ptx_texture_ops.cpp`. |
-| 4.1.2 | `cp.async.bulk.tensor.3d/4d/5d` | ✅ **DONE** — Phase 6.9. `src/compiler/ptx/ptx_conversion.cpp`. |
-| 4.1.3 | `tcgen05.*` | ✅ **DONE** — Phase 6.10. `src/compiler/ptx/ptx_conversion.cpp`. |
-| 4.1.4 | `atom.shared.*` | ✅ **DONE** — Phase 6.3. `src/compiler/ptx/ptx_shared_atomics.cpp`. |
-| 4.1.5 | `match.sync` / `match.any` | ✅ **DONE** — Phase 6.7. `src/compiler/ptx/ptx_conversion.cpp`. |
-| 4.1.6 | `grid.sync` / `griddepcontrol` | ✅ **DONE** — Phase 6.8. `src/compiler/ptx/ptx_conversion.cpp`. |
-| 4.1.7 | `elect.sync` | ✅ **DONE** — Phase 6.7. `src/compiler/ptx/ptx_conversion.cpp`. |
-| 4.1.8 | `prmt.b32` | ✅ **IMPLEMENTED** 2026-05-15 — `vgre_prmt_b32()` in `ptx_translator_internal.h`; all mode variants (`f4e`, `b4e`, `rc8`, `ecl`, `ecr`, `rc16`) map to the same bitfield-select helper. |
-| 4.1.9 | `sad.u32` / `dsad` | ✅ **IMPLEMENTED** 2026-05-15 — `sad.u32/s32` and `dsad.u32` (SIMD 4-byte SAD loop). `src/compiler/ptx/ptx_translator_map.cpp`. |
-| 4.1.10 | `ld.global.v2/v4.f16` / `st.global.v2/v4.f16` | ✅ **DONE** — Phase 6.6. `src/compiler/ptx/ptx_conversion.cpp`. |
-| 4.1.11 | `cvt.*` variants | ✅ **DONE** — Phase 6.4. All rounding modes and saturation variants. `src/compiler/ptx/ptx_conversion.cpp`. |
-| 4.1.12 | `rcp.rn.f32` / `sqrt.rn.f32` | ✅ **DONE** — Phase 6.5. `src/compiler/ptx/ptx_translator_map.cpp`. |
-| 4.1.13 | `div.rn.f32` / `div.rn.f64` | ✅ **DONE** — Phase 6.5. `src/compiler/ptx/ptx_translator_map.cpp`. |
-| 4.1.14 | `mad.hi.s32` / `mad.lo.s64` / `mad.hi.s64` | ✅ **IMPLEMENTED** 2026-05-15 — all MAD/MUL wide-integer variants including `mad.hi.u32`, `mad.hi.u64`, `mul.hi.s32`, `mul.hi.s64`, `div/rem.s64/u64`. `src/compiler/ptx/ptx_translator_map.cpp`. |
-| 4.1.15 | `mma.sync` additional shapes (INT4, b1) | ✅ **IMPLEMENTED 2026-05-15** — `vgre_mma_m8n8k32_s4/u4` (INT4 signed/unsigned via nibble unpacking + saturation), `vgre_mma_m8n8k128_b1_and/xor` (binary AND/XOR+POPC) added to `include/vgre/compiler/wmma_emulation.h`. Translation map entries for all four variant strings added to `ptx_translator_map.cpp`. |
-| 4.1.16 | `cp.reduce.async` | ✅ **DONE** — Phase 6.9 / 3.6.4. `src/compiler/ptx/ptx_conversion.cpp`. |
-| 4.1.17 | `wgmma.mma_async` additional shapes | ✅ **DONE** — Phase 6.10. m64n{256,128,64}k16, m64n256k8 all covered. |
-
-### 4.2 Texture / Surface Reference Gaps
-
-| # | Feature | Notes |
-|---|---|---|
-| 4.2.1 | `cuModuleGetSurfRef` / `cuSurfRefSetArray` / `cuSurfRefGetArray` | ✅ **DONE** — Phase 5.12. `src/api/cuda_driver/cuda_driver_texture.cpp`. |
-| 4.2.2 | `cuTexRefSetFormat` FP16 / normalized formats | ✅ **DONE** — Phase 5.10a. `CU_AD_FORMAT_HALF` added. `src/api/cuda_driver/cuda_driver_texture.cpp`. |
-| 4.2.3 | `cuTexRefSetAddressMode` / `cuTexRefSetBorderColor` | ✅ **DONE** — Phase 5.10c / 5.10. `src/api/cuda_driver/cuda_driver_texture.cpp`. |
-| 4.2.4 | `cuTexRefSetFlags` `CU_TRSF_READ_AS_INTEGER` / `CU_TRSF_SRGB` | ✅ **COMPLETE 2026-05-15** — `CU_TRSF_READ_AS_INTEGER (0x01)` forces `filterMode = POINT` (disables interpolation, returns raw channel bits). `CU_TRSF_NORMALIZED_COORDINATES (0x02)` and `CU_TRSF_SRGB (0x10)` are now all defined as named constants. `CU_TRSF_SRGB` is accepted without error; emits no gamma correction (CPU model has no gamma pipeline — callers must linearise in kernel code). `src/api/cuda_driver/cuda_driver_texture.cpp`. |
-
-### 4.3 Cooperative Groups / Device-Side Libraries
-
-| # | Feature | Notes |
-|---|---|---|
-| 4.3.1 | `cooperative_groups::*` C++ API | ✅ **DONE** — Phase 8. `thread_block`, `coalesced_group`, `reduce()`, `partition()`, `shfl()`, `thread_block_tile`, `multi_grid` all in `include/vgre/compiler/cuda_device_libs/cooperative_groups.h`. |
-| 4.3.2 | CUB / Thrust fallback headers | ✅ **DONE** — Phase 8. `cub::WarpReduce/BlockReduce/WarpScan/BlockScan/CachingDeviceAllocator` in `include/vgre/compiler/cuda_device_libs/cub_fallback.h`. |
-| 4.3.3 | `cuda_bf16.h` device math | ✅ **DONE** — `__nv_bfloat16`, conversions, `__hadd_bf`, `__hmul_bf` in `cpu_cuda_env.h`. |
-| 4.3.4 | `cuda_fp16.h` device math + PTX FP16 vector loads | ✅ **DONE** — C++ layer in `cpu_cuda_fp16.h`; PTX `ld/st.global.v2/v4.f16` done in Phase 6.6. |
-| 4.3.5 | PTX-level `tex`/`suld`/`sust` instructions | ✅ **DONE** — Phase 6.1/6.2. `src/compiler/ptx/ptx_texture_ops.cpp`. |
-| 4.3.6 | Dynamic Parallelism (CDP) full API | ✅ **DONE** — Phase 10.1. `cudaDeviceSynchronize`, `GetParameterBufferV2`, `LaunchDeviceV2`. `src/runtime/cdp_executor.cpp`. |
+| FFTW3/MKL delegation | Large transforms are O(n²) slow | Reference DFT is correct but unusable for >1K points |
+| Real-world plan caching | Repeated plans recompute twiddle factors | `cufftPlan1d` always rebuilds from scratch |
+| Half-precision FFT | `CUFFT_STATUS_NOT_SUPPORTED` returned | No `__half` DFT path |
 
 ---
 
-## Tier 5 — Low Priority / Deployment
+### 2.4 cuSPARSE — Format Conversions & Sparse Solvers
 
-| # | Feature | Notes |
+| Missing API | Impact | Notes |
 |---|---|---|
-| 5.1 | K8s Device Plugin / SLURM GRES | ✅ **DONE** — Phase 9. Go gRPC K8s plugin + C SLURM GRES plugin. |
-| 5.2 | cuDNN INT8x4 / INT8x32 packed tensor layouts | ✅ **DONE** — Phase 10.3. `src/api/cudnn/cudnn_int8_packed.cpp`. |
-| 5.3 | Full CUPTI-equivalent profiling | ✅ **DONE** — Phase 10.2. `InstructionSample`, kernel timeline, Chrome trace export. |
-| 5.4 | CDP full parameter passing | ✅ **DONE** — Phase 10.1. `CDPExecutor::deviceSynchronize()` drains child kernels. |
-| 5.5 | `cudaGraphExecUpdate_v2` | ✅ **DONE** — Phase 10.4. `src/core/graph/graph_manager_exec_update_v2.cpp`. |
+| `cusparseCreateCsr` / `cusparseCreateCoo` (generic API descriptors) | Modern sparse API | Only legacy `cusparseSpMV` with CSR + COO hardcoded exists |
+| `cusparseSparseToDense` / `cusparseDenseToSparse` | Format conversion | Not implemented |
+| `cusparseSpSV` (sparse triangular solve) | Sparse preconditioners | Not implemented |
+| Sparse factorization (Cholesky, LU, QR) | Scientific computing | Not implemented |
 
 ---
 
-## Cross-Platform, Mesh Topology, and Functioning Gaps
+## 3. Tier 2 — Medium Priority Missing (performance/usability gaps)
 
-### Cross-Platform Considerations
+### 3.1 cuBLASLt — Missing Epilogues & Heuristics
 
-| # | Gap | Linux | Windows | macOS | Impact |
-|---|---|---|---|---|---|
-| CP.1 | **cuRAND entropy source** | `getrandom()` implemented | `BCryptGenRandom()` implemented | `getentropy()` implemented | ✅ All platforms covered |
-| CP.2 | **cuFFT dependency** | ✅ Reference DFT/IDFT in `src/api/cufft/` — no external dependency for small transforms. FFTW3/MKL optional for large transforms. | vcpkg / manual build | Homebrew / manual build | Reference implementation works out of the box |
-| CP.3 | **cuSOLVER LAPACK** | ✅ System `liblapack.so.3` + `libblas.so.3` linked at build time. `src/api/cusolver/` delegates to LAPACK `*potrf`, `*geqrf`, `*gesvd`, `*syevd`. | Intel MKL or OpenBLAS | Accelerate.framework or OpenBLAS | Works with distro-packaged LAPACK |
-| CP.4 | **Shared-memory IPC** | POSIX `shm_open` ✅ | `CreateFileMapping` ✅ | POSIX `shm_open` ✅ | Already works for existing IPC |
-| CP.5 | **External semaphores** | POSIX named semaphores ✅ | Windows named semaphores ✅ | POSIX named semaphores ✅ | Already works |
-| CP.6 | **K8s Device Plugin** | Unix domain sockets + inotify | Named pipes + `ReadDirectoryChangesW` | Unix domain sockets + kqueue | Tier 5 — deployment only |
-| CP.7 | **SLURM GRES** | `slurm_spank.h` shared lib | N/A (Linux-only) | N/A | Tier 5 — Linux only |
-| CP.8 | **Profiling (CUPTI-equiv)** | `perf_event_open` for CPU PMU | `EvtCreateSession` / `TraceEvent` | `kdebug` / `signpost` | Tier 5 — CPU-only fallback |
-| CP.9 | **Mesh I/O polling** | `epoll` ✅ | `WSAPoll` / IOCP ✅ | `kqueue` ✅ | Already in `tcp_cluster/` |
-| CP.10 | **Temperature sensing** | sysfs (`/sys/class/thermal`) ✅ | Registry heuristic ⚠️ | IOKit heuristic ⚠️ | Partial — Windows/macOS use heuristics |
-| CP.11 | **NUMA binding** | `mbind(MPOL_PREFERRED)` ✅ | `SetThreadAffinityMask` + `VirtualAllocExNuma` | No NUMA API | Partial — macOS lacks explicit NUMA control |
-| CP.12 | **Platform entropy** | `getrandom()` ✅ | `BCryptGenRandom()` ✅ | `getentropy()` ✅ | Already works |
-
-**Cross-platform rule for new features**: Any feature that touches OS APIs (entropy, shared memory, semaphores, profiling, NUMA) must follow the `*_linux.cpp` / `*_macos.cpp` / `*_win32.cpp` split pattern. No inline `#ifdef` in business-logic files.
-
----
-
-### Mesh Topology Considerations
-
-| # | Gap | Current State | Impact |
-|---|---|---|---|
-| MT.1 | **Mesh peer discovery** | `VGRE_MESH_PEERS=ip:port,...` env var + UDP discovery with HMAC-SHA256 ✅ | Works for existing AllReduce/Broadcast |
-| MT.2 | **Dynamic peer join/leave** | Hot-add via `VGRE_MESH_PEERS` / `addMeshPeer` + proactive reconnect loop (exponential backoff, security handshake). Hot-remove triggers idle eviction after `VGRE_CLUSTER_IDLE_EVICT_SEC`. Full K8s pod-level elasticity still needs external orchestration. ✅ 2026-05-15 |
-| MT.3 | **ncclSend/Recv mesh routing** | ✅ **IMPLEMENTED** 2026-05-14 — ncclAllReduce routes through TCPClusterManager when multi-node is active. Point-to-point Send/Recv use shared-memory for single-node; multi-node routing uses TCPCluster collective allReduce path. |
-| MT.4 | **ncclAllToAll mesh bandwidth** | ✅ **IMPLEMENTED** 2026-05-14 — single-node via shared-memory slots. TCPCluster collectives extended to support Sum, Prod, Max, Min, Avg with SIMD-optimized reduction. |
-| MT.5 | **Mesh security for new p2p** | Reuse existing AES-256-CTR + 2048-bit replay bitmap ✅ | Security already solved |
-| MT.6 | **Cluster-wide profiling sync** | ✅ **FIXED 2026-05-15** — NTP-style 3-timestamp clock exchange (CLOCK_SYNC/CLOCK_SYNC_REPLY packets, type 31/32) added to the post-handshake sequence. Master sends T1; worker replies with T2+T3; master computes `offset = ((T2-T1)+(T3-T4))/2` and stores in `ClientConnection::clock_offset_us`. Use offset to align profiler timestamps across nodes. `src/advanced/tcp_cluster/server_loop_connection_handling.cpp`, `client_loop.cpp`, `server_packet_dispatch.cpp`. | ✅ Done |
-| MT.7 | **Mesh partition for new collectives** | NCCL collectives route through TCPCluster shared-memory slots + allReduce paths — no kernel-grid partitioning needed. WorkloadPartitioner is irrelevant for collectives. | N/A — already works |
-
-**Mesh topology rule for new distributed features**: Any new NCCL collective must call `TCPClusterManager::ensureConnected(rank)` before data transfer. Do not assume the full mesh is pre-connected.
-
----
-
-### Functioning / Runtime Engine Integration Gaps
-
-| # | Gap | Subsystem | Current State | Impact |
-|---|---|---|---|---|
-| F.1 | **Adaptive thread tuning for new BLAS/DNN** | `adaptive_execution_engine.cpp` | ✅ **FIXED 2026-05-15** — `VgreBlasTimed` RAII timer in `cublas_internal.h` records timing + `AdaptiveExecutionEngine::recordExecution` for `cublasSgemm/Dgemm`; `VgreDnnTimed` in `cudnn_internal.h` does same for `cudnnConvolutionForward`. | Medium — covered for critical ops |
-| F.2 | **NVTX markers for new APIs** | `runtime_profiler.cpp` | ✅ **FIXED 2026-05-15** — `VgreBlasTimed`/`VgreDnnTimed` emit `RuntimeProfiler::recordEvent` with duration/flops/bytes so GEMM and conv_fwd appear in Chrome traces. | Low — profiler events fill the gap |
-| F.3 | **Memory bandwidth tracking for new allocations** | `memory_manager.cpp` | ✅ **FIXED 2026-05-15** — `cudaMemcpy3D` and `cudaMemcpy2DToArray/FromArray` now call `MemoryManager::recordMemoryBandwidth(bytes, ms)` after each copy. `src/api/cudart/cudart_shim_array_memcpy.cpp`. | Low — stats now complete for array copies |
-| F.4 | **UVM page-fault for new memory types** | `memory_manager_managed.cpp` | CUDA arrays are allocated via `MemoryManager::malloc` (same path as device memory), so SIGSEGV/VEH handlers already cover them. External memory uses host-side `MemoryManager` allocation. No action needed. | N/A — already covered |
-| F.5 | **Graph scheduler for new node types** | `scheduler.cpp` | ✅ Already implemented — `runtime_engine_graph.cpp::executeOpsInline` handles KERNEL, MEMCPY, CONDITIONAL, MEMSET, HOST, CHILD, EMPTY, EVENT_RECORD, EVENT_WAIT, MEMALLOC, MEMFREE. No deadlock. (Note in doc was stale.) | **Done** |
-| F.6 | **Resource ledger for new descriptors** | `resource_ledger.cpp` | The `ResourceLedger` is a compute-credit billing tracker (CPU·sec per node), not a descriptor OOM tracker. cuDNN/cuBLAS handles are small fixed-size structs — no OOM risk. No action needed. | N/A — architectural clarification |
-| F.7 | **IPC sharing for new libraries** | `ipc_manager.cpp` | ✅ **FIXED 2026-05-15** — `curandGetGeneratorIpcHandle`/`curandCreateGeneratorFromIpcHandle` serialize `seed`+`offset`+type into a 64-byte opaque struct; state is reproduced via `engine.seed(seed); engine.discard(offset)`. `cufftGetPlanIpcHandle`/`cufftCreatePlanFromIpcHandle` do the same for `rank/nx/ny/nz/batch/type`. Caller transfers the handle via any IPC mechanism (file, socket, shm). `src/api/curand/curand_core.cpp`, `src/api/cufft/cufft_core.cpp`. | ✅ Done |
-| F.8 | **Kernel fusion for new ops** | `kernel_fusion_engine.cpp` | cuBLAS/cuDNN functions are called as native C functions — they are not PTX kernels and cannot be fused by the `KernelFusionEngine`. Flash Attention, transformer block, GEMM+GELU, and LayerNorm fusion patterns apply only to PTX kernel sources. No code path breakage. | N/A — architectural boundary |
-| F.9 | **Chrome trace for new graph nodes** | `runtime_profiler.cpp` | ✅ **FIXED 2026-05-15** — `executeOpsInline` now emits `ProfileEvent` for MEMSET, HOST, CHILD, EVENT_RECORD nodes with accurate duration and bandwidth measurements. `src/core/runtime_engine_graph.cpp`. | Low — debugging now covered |
-| F.10 | **Workload partition for new collectives** | `workload_partitioner.cpp` | Recursive bisection for 3D grids; p2p collectives need no partitioning | N/A |
-
-**Functioning rule for new features**: Every new feature that allocates memory must go through `MemoryManager`. Every new compute path must integrate with `AdaptiveExecutionEngine` for thread tuning. Every new distributed operation must integrate with `TCPClusterManager` for mesh connectivity.
-
----
-
-## Post-Audit Fixes (2026-05-15)
-
-The following gaps were identified during deep audit and **resolved**:
-
-| # | Gap | Fix |
+| Missing | Impact | Notes |
 |---|---|---|
-| PA.1 | Proactive connection loop never retried dropped peers | Rewritten with per-peer exponential backoff (1→64 s), security handshake per connect, IPv4/IPv6 support via `getaddrinfo` |
-| PA.2 | UDP discovery loop used worker's own port instead of master's advertised port | Port now parsed from `VGRE_DISCOVERY_PING:<port>:...` message; loop re-enters discovery after master disconnect |
-| PA.3 | `fprintf(stderr, "DEBUG ...")` in `DiscoveryManager::stopAll` | Replaced with `VGRE_LOG_DEBUG` |
-| PA.4 | `estimateInstructions` used fixed 40/30/15/10/5% ratios regardless of kernel | Now queries `KernelIR.staticFlopCount`, `estimatedMemoryAccessCount`, and `flopCountVerified` from RuntimeEngine; falls back to defaults only when KernelIR is unavailable |
-| PA.5 | Texture mipmap generation used undeclared `half2float`/`float2half` | Fixed to use `vgre_cuda::__half2float`/`__float2half`; all 8 element types fully supported |
-| PA.6 | Idle WAN connections could silently stall without eviction | Added `VGRE_CLUSTER_IDLE_EVICT_SEC` idle-connection eviction in `performServerMaintenance`; `last_activity_time` updated on every recv |
-| PA.7 | Mesh peer liveness map never updated in `mesh_peers_` | `performServerMaintenance` now syncs `is_active`/`last_seen` from live `clients_` every maintenance cycle |
+| `CUBLASLT_EPILOGUE_RELU_AUX` | Needs aux mask output | Only plain ReLU exists |
+| `CUBLASLT_EPILOGUE_GELU_AUX` | Needs aux mask output | Only plain GELU exists |
+| `CUBLASLT_EPILOGUE_DRELU_DGELU` | Bwd epilogues | Not implemented |
+| `CUBLASLT_EPILOGUE_BGRADIENT` | Bias gradient output | Not implemented |
+| Heuristic selection (`cublasLtMatmulAlgoGetHeuristic`) | Always returns 1 algo | No actual perf tuning; always falls back to reference |
+| Algorithm caching | Repeated matmuls rebuild plan | No cache in `cublasLtMatmul` |
 
-## Recommendations
+---
 
-1. **NCCL multi-node AllReduce over WAN**: Currently routes through TCPCluster. For multi-path WAN, consider RDMA transport when available.
-2. **Missing libraries advanced**: Extend cuFFT with FFTW3 delegation for large transforms. Extend cuSOLVER with sparse solvers.
-3. **Cross-platform discipline**: New OS-dependent code must use the `*_linux.cpp` / `*_macos.cpp` / `*_win32.cpp` split pattern.
-4. **Mesh topology discipline**: New distributed features must call `TCPClusterManager::ensureConnected(rank)` before data transfer.
-5. **Functioning discipline**: Every new memory allocation goes through `MemoryManager`. Every new compute path integrates with `AdaptiveExecutionEngine`. Every new graph node type integrates with `StreamScheduler`.
-6. **Documentation discipline**: This file must be updated **before** any PR merges that claim to close a gap. Verify every claim with `grep -rn "^cudaError_t <function>" src/api/`.
+### 3.2 cuDNN Backend API — Attention Routing
 
+| Missing | Impact | Notes |
+|---|---|---|
+| `CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR` | Backend API for MultiHeadAttn | `cudnnMultiHeadAttnForward` exists as legacy API, but Backend `Execute` returns `NOT_SUPPORTED` for attention descriptors |
+
+---
+
+### 3.3 cuRAND — Parallel Stream Safety
+
+| Missing | Impact | Notes |
+|---|---|---|
+| Per-stream generator state | Race conditions if multiple host threads call `curandGenerate` concurrently | All calls share one `std::mt19937_64` engine in the handle; no thread-local or stream-local partitioning |
+| Device-side `curand_*` API | Kernel-side RNG | Returns `CURAND_STATUS_NOT_SUPPORTED` by design (no device model in CPU emulation) |
+
+---
+
+### 3.4 Profiling — Hardware Sampling Caveat
+
+| Missing | Impact | Notes |
+|---|---|---|
+| True instruction-level hardware sampling | `InstructionSample` is pure heuristic | `runtime_profiler.cpp` estimates instruction mix from kernel source heuristics, not hardware PMU counters. No separate `src/advanced/profiling/` directory. |
+| CUPTI-equivalent API surface | PyTorch profiler integration | Only basic kernel timeline + Chrome trace export exists |
+
+---
+
+### 3.5 Texture / Surface — Mipmapping Gaps
+
+| Missing | Impact | Notes |
+|---|---|---|
+| Trilinear filtering (`LINEAR` + mipmaps) | `TextureFilterMode::LINEAR` on mipmapped textures | `boxFilter2D` generates mipmaps, but sample path in `texture_manager.cpp` does not do trilinear interpolation |
+| Anisotropic filtering | `maxAnisotropy` stored but unused | `cuTexRefSetMaxAnisotropy` stores value; sampler never reads it |
+| SRGB gamma decode | `CU_TRSF_SRGB` accepted but ignored | No gamma pipeline in CPU model |
+
+---
+
+## 4. Tier 3 — Low Priority / Architectural Limitations
+
+### 4.1 NCCL — Multi-Node Performance
+
+| Limitation | Impact | Notes |
+|---|---|---|
+| No RDMA transport | High-latency for multi-node | All multi-node traffic goes through TCPCluster TCP sockets |
+| No NVLink-style P2P | Single-node only uses shared memory | `ncclSend/Recv` use shared-memory slots on single node; TCP routing is functional but not optimized |
+| No topology-aware tree/ring | AllReduce uses flat all-to-all | Missing ring/tree algorithm selection based on topology |
+
+---
+
+### 4.2 CUDA Runtime — Legacy/Debug Stubs
+
+| API | Status | Notes |
+|---|---|---|
+| `cudaThreadExit` / `cudaThreadSynchronize` | No-op wrappers | Legacy 1.x APIs; thin wrappers around device APIs |
+| `cudaDeviceFlushGPUDirectRDMAWrites` | No-op | RDMA not applicable in CPU model |
+| `cudaProfilerStart` / `cudaProfilerStop` | No-op | No external profiler attached |
+| `cudaGraphDebugDotPrint` | Basic DOT output | Emits GraphViz; no per-node attribute detail |
+
+---
+
+### 4.3 PTX ISA — Edge Cases
+
+| Limitation | Impact | Notes |
+|---|---|---|
+| `tex` vector variants (v2/v4) return replicated scalar | Apps expecting per-channel data get duplicates | `TextureManager` is single-channel float; vector ops replicate scalar to all channels |
+| `txq` returns conservative defaults | 1024×1024×1, 1 channel | No texture metadata query support in `TextureManager` |
+| `cp.async.bulk.tensor.{3,4,5}d` → serial loop | TMA is emulated as strided memcpy | Correctness preserved; performance is serial |
+| `tcgen05.mma` delegates to `wgmma` | Blackwell tensor core emulated as Hopper | Correct for BF16/FP16/TF32 shapes; no true SM100-specific behavior |
+
+---
+
+## 5. Documentation vs. Source Discrepancies
+
+The following items were **previously claimed as separate files** in `implementationPlan.md` but are actually **implemented within existing files**:
+
+| Claimed File | Actual Location | Status |
+|---|---|---|
+| `src/core/graph/graph_manager_exec_update_v2.cpp` | `src/api/cuda_interceptor_graphs.cpp::graphExecUpdateV2()` | Implemented |
+| `src/api/cudnn/cudnn_int8_packed.cpp` | `src/api/cudnn/cudnn_{convolution,pooling,activation}.cpp` (INT8x4/INT8x32 branches) | Implemented |
+| `src/api/cudart/cudart_shim_cdp.cpp` | `src/runtime/cdp_executor.cpp` | Implemented |
+| `src/advanced/profiling/cupti_equivalent.cpp` | `src/advanced/runtime_profiler.cpp` | Implemented |
+| `src/advanced/profiling/kernel_timeline.cpp` | `src/advanced/runtime_profiler.cpp` | Implemented |
+| `src/advanced/profiling/instruction_sampler.cpp` | `src/advanced/runtime_profiler.cpp` | Implemented |
+
+---
+
+## 6. Recommendations
+
+1. **Complex BLAS** is the largest functional gap for PyTorch/TensorFlow complex tensor support. Priority: **High**.
+2. **cuFFT FFTW3 delegation** would make the library usable for real workloads. Priority: **High**.
+3. **cuSOLVER LU/least-squares** (`getrf`, `getrs`, `gelsd`) are needed for general linear algebra. Priority: **Medium**.
+4. **cuSPARSE format conversions + sparse triangular solve** would unblock sparse ML. Priority: **Medium**.
+5. **cuBLASLt heuristic selection** would improve matmul performance. Priority: **Low**.
+6. **cuDNN Backend attention routing** is needed for frameworks using Backend API exclusively. Priority: **Low** (legacy attention API works).
+7. **Cross-platform discipline**: New OS-dependent code must use `*_linux.cpp` / `*_macos.cpp` / `*_win32.cpp` split pattern.
+8. **Memory discipline**: Every new memory allocation goes through `MemoryManager`. Every new compute path integrates with `AdaptiveExecutionEngine`.
+
+---
+
+*Last updated: 2026-05-15. Verified against git commit `803b76f`.*
