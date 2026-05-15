@@ -23,8 +23,8 @@
 | Dynamic Parallelism (device) | ~2 | `cudaLaunchDevice`, `cudaGetParameterBuffer` in `cpu_cuda_env.h` |
 | cuRAND | ~18 | `curandCreateGenerator/DestroyGenerator/SetPseudoRandomGeneratorSeed/SetGeneratorOffset/SetGeneratorOrdering/GetVersion`, `curandGenerate/GenerateUniform/GenerateNormal/GenerateLogNormal/GeneratePoisson` for XORWOW, MRG32k3a, MTGP32, MT19937. `src/api/curand/curand_core.cpp` |
 | cuFFT | ~12 | `cufftPlan1d/2d/3d/Many`, `cufftDestroy`, `cufftExecC2C/Z2Z/R2C/C2R/D2Z/Z2D`, `cufftSetStream/WorkArea`. Reference CPU DFT/IDFT. `src/api/cufft/cufft_core.cpp` |
-| cuSPARSE | ~14 | `cusparseCreate/Destroy`, `cusparseSpMV/SpMM` (CSR), `cusparseAxpyi`, handle/descriptor lifecycle. `src/api/cusparse/cusparse_core.cpp` |
-| cuSOLVER | ~16 | `cusolverDnCreate/Destroy`, `cusolverDnSpotrf/Dpotrf/Sgeqrf/Dgeqrf/Sgesvd/Dgesvd/Ssyevd/Dsyevd` (Cholesky, QR, SVD, eigenvalues). Delegates to system LAPACK. `src/api/cusolver/cusolver_core.cpp` |
+| cuSPARSE | ~20 | `cusparseCreate/Destroy`, `cusparseSpMV/SpMM` (CSR + COO), `cusparseAxpyi`, handle/descriptor lifecycle. **Phase 18**: `cusparseCreateCoo` (COO→CSR row-offset conversion), `cusparseSpMV_bufferSize/SpMM_bufferSize` (zero-workspace), `cusparseSetStream/GetStream`. `src/api/cusparse/cusparse_core.cpp` |
+| cuSOLVER | ~26 | `cusolverDnCreate/Destroy`, `cusolverDnSpotrf/Dpotrf/Sgeqrf/Dgeqrf/Sgesvd/Dgesvd/Ssyevd/Dsyevd` (Cholesky, QR, SVD, eigenvalues). **Phase 18**: `Sgetrf/Dgetrf` (LU factorization), `Sgetrs/Dgetrs` (triangular solve), `Sormqr/Dormqr` (apply Q from QR), `Sgelsd/Dgelsd` (least-squares driver) — all delegating to LAPACK. `src/api/cusolver/cusolver_core.cpp` |
 | cuBLASLt | ~12 | `cublasLtCreate/Destroy`, `cublasLtMatmulDescCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatrixLayoutCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatmul` with fused epilogues (ReLU, GELU, Bias). `src/api/cublaslt/cublaslt_core.cpp` |
 
 ---

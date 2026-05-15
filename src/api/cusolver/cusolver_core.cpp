@@ -10,6 +10,8 @@
 #include "vgre/api/cusolver_shim.h"
 #include "vgre/common/logger.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -41,6 +43,185 @@ void ssyevd_(const char *jobz, const char *uplo, const int *n, float *a,
 void dsyevd_(const char *jobz, const char *uplo, const int *n, double *a,
              const int *lda, double *w, double *work, const int *lwork,
              int *iwork, const int *liwork, int *info);
+
+// LU factorisation (getrf) + triangular solve (getrs)
+void sgetrf_(const int *m, const int *n, float *a, const int *lda,
+             int *ipiv, int *info);
+void dgetrf_(const int *m, const int *n, double *a, const int *lda,
+             int *ipiv, int *info);
+void sgetrs_(const char *trans, const int *n, const int *nrhs, const float *a,
+             const int *lda, const int *ipiv, float *b, const int *ldb, int *info);
+void dgetrs_(const char *trans, const int *n, const int *nrhs, const double *a,
+             const int *lda, const int *ipiv, double *b, const int *ldb, int *info);
+
+// Apply Q from QR (ormqr)
+void sormqr_(const char *side, const char *trans, const int *m, const int *n,
+             const int *k, const float *a, const int *lda, const float *tau,
+             float *c, const int *ldc, float *work, const int *lwork, int *info);
+void dormqr_(const char *side, const char *trans, const int *m, const int *n,
+             const int *k, const double *a, const int *lda, const double *tau,
+             double *c, const int *ldc, double *work, const int *lwork, int *info);
+
+// Least-squares driver (gelsd)
+void sgelsd_(const int *m, const int *n, const int *nrhs, float *a, const int *lda,
+             float *b, const int *ldb, float *s, const float *rcond, int *rank,
+             float *work, const int *lwork, int *iwork, int *info);
+void dgelsd_(const int *m, const int *n, const int *nrhs, double *a, const int *lda,
+             double *b, const int *ldb, double *s, const double *rcond, int *rank,
+             double *work, const int *lwork, int *iwork, int *info);
+// ── LU factorisation — getrf ──────────────────────────────────────────────────
+
+cusolverStatus_t cusolverDnSgetrf_bufferSize(cusolverDnHandle_t /*h*/, int m, int n,
+                                              float * /*A*/, int /*lda*/, int *Lwork) {
+    if (Lwork) *Lwork = m * n; // conservative estimate
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnDgetrf_bufferSize(cusolverDnHandle_t /*h*/, int m, int n,
+                                              double * /*A*/, int /*lda*/, int *Lwork) {
+    if (Lwork) *Lwork = m * n;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnSgetrf(cusolverDnHandle_t /*h*/, int m, int n,
+                                   float *A, int lda, float * /*work*/,
+                                   int *devIpiv, int *devInfo) {
+    if (!A || m <= 0 || n <= 0 || lda < m) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    std::vector<int> ipiv(std::min(m, n));
+    sgetrf_(&m, &n, A, &lda, ipiv.data(), devInfo);
+    if (devIpiv) std::memcpy(devIpiv, ipiv.data(), ipiv.size() * sizeof(int));
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnDgetrf(cusolverDnHandle_t /*h*/, int m, int n,
+                                   double *A, int lda, double * /*work*/,
+                                   int *devIpiv, int *devInfo) {
+    if (!A || m <= 0 || n <= 0 || lda < m) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    std::vector<int> ipiv(std::min(m, n));
+    dgetrf_(&m, &n, A, &lda, ipiv.data(), devInfo);
+    if (devIpiv) std::memcpy(devIpiv, ipiv.data(), ipiv.size() * sizeof(int));
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Triangular solve — getrs ──────────────────────────────────────────────────
+
+cusolverStatus_t cusolverDnSgetrs(cusolverDnHandle_t /*h*/, int trans,
+                                   int n, int nrhs, const float *A, int lda,
+                                   const int *devIpiv, float *B, int ldb,
+                                   int *devInfo) {
+    if (!A || !B || !devIpiv || n <= 0 || nrhs <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    char t = (trans == 1) ? 'T' : 'N';
+    sgetrs_(&t, &n, &nrhs, A, &lda, devIpiv, B, &ldb, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnDgetrs(cusolverDnHandle_t /*h*/, int trans,
+                                   int n, int nrhs, const double *A, int lda,
+                                   const int *devIpiv, double *B, int ldb,
+                                   int *devInfo) {
+    if (!A || !B || !devIpiv || n <= 0 || nrhs <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    char t = (trans == 1) ? 'T' : 'N';
+    dgetrs_(&t, &n, &nrhs, A, &lda, devIpiv, B, &ldb, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Apply Q from QR — ormqr ───────────────────────────────────────────────────
+
+cusolverStatus_t cusolverDnSormqr_bufferSize(cusolverDnHandle_t /*h*/, int /*side*/,
+                                              int /*trans*/, int m, int n, int k,
+                                              const float * /*A*/, int /*lda*/,
+                                              const float * /*tau*/, const float * /*C*/,
+                                              int /*ldc*/, int *Lwork) {
+    if (Lwork) *Lwork = std::max(1, std::max(m, n));
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnDormqr_bufferSize(cusolverDnHandle_t /*h*/, int /*side*/,
+                                              int /*trans*/, int m, int n, int k,
+                                              const double * /*A*/, int /*lda*/,
+                                              const double * /*tau*/, const double * /*C*/,
+                                              int /*ldc*/, int *Lwork) {
+    if (Lwork) *Lwork = std::max(1, std::max(m, n));
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnSormqr(cusolverDnHandle_t /*h*/, int side, int trans,
+                                   int m, int n, int k,
+                                   const float *A, int lda, const float *tau,
+                                   float *C, int ldc, float *work, int lwork,
+                                   int *devInfo) {
+    if (!A || !tau || !C || m <= 0 || n <= 0 || k <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    char s = (side == 0) ? 'L' : 'R';
+    char t = (trans == 1) ? 'T' : 'N';
+    sormqr_(&s, &t, &m, &n, &k, A, &lda, tau, C, &ldc, work, &lwork, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnDormqr(cusolverDnHandle_t /*h*/, int side, int trans,
+                                   int m, int n, int k,
+                                   const double *A, int lda, const double *tau,
+                                   double *C, int ldc, double *work, int lwork,
+                                   int *devInfo) {
+    if (!A || !tau || !C || m <= 0 || n <= 0 || k <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    char s = (side == 0) ? 'L' : 'R';
+    char t = (trans == 1) ? 'T' : 'N';
+    dormqr_(&s, &t, &m, &n, &k, A, &lda, tau, C, &ldc, work, &lwork, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Least-squares driver — gelsd ──────────────────────────────────────────────
+
+cusolverStatus_t cusolverDnSgelsd_bufferSize(cusolverDnHandle_t /*h*/, int m, int n,
+                                              int nrhs, const float * /*A*/, int /*lda*/,
+                                              const float * /*B*/, int /*ldb*/,
+                                              const float * /*S*/, const float * /*rcond*/,
+                                              int * /*rank*/, int *Lwork) {
+    if (Lwork) *Lwork = 12 * std::min(m, n) + 2 * std::min(m, n) * std::max(m, n) +
+                         2 * std::min(m, n) * nrhs + std::max(m, n) * nrhs + 1;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnDgelsd_bufferSize(cusolverDnHandle_t /*h*/, int m, int n,
+                                              int nrhs, const double * /*A*/, int /*lda*/,
+                                              const double * /*B*/, int /*ldb*/,
+                                              const double * /*S*/, const double * /*rcond*/,
+                                              int * /*rank*/, int *Lwork) {
+    if (Lwork) *Lwork = 12 * std::min(m, n) + 2 * std::min(m, n) * std::max(m, n) +
+                         2 * std::min(m, n) * nrhs + std::max(m, n) * nrhs + 1;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnSgelsd(cusolverDnHandle_t /*h*/, int m, int n, int nrhs,
+                                   float *A, int lda, float *B, int ldb,
+                                   float *S, const float *rcond, int *rank,
+                                   float *work, int lwork, int * /*devIwork*/,
+                                   int *devInfo) {
+    if (!A || !B || m <= 0 || n <= 0 || nrhs <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    float rc = rcond ? *rcond : -1.0f;
+    int nlvl = std::max(0, static_cast<int>(std::log2(std::min(m,n) / 25.0)) + 1);
+    int liwork = 3 * std::min(m,n) * nlvl + 11 * std::min(m,n);
+    if (liwork < 1) liwork = 1;
+    std::vector<int> iwork(liwork, 0);
+    sgelsd_(&m, &n, &nrhs, A, &lda, B, &ldb, S, &rc, rank, work, &lwork, iwork.data(), devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnDgelsd(cusolverDnHandle_t /*h*/, int m, int n, int nrhs,
+                                   double *A, int lda, double *B, int ldb,
+                                   double *S, const double *rcond, int *rank,
+                                   double *work, int lwork, int * /*devIwork*/,
+                                   int *devInfo) {
+    if (!A || !B || m <= 0 || n <= 0 || nrhs <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    double rc = rcond ? *rcond : -1.0;
+    int nlvl = std::max(0, static_cast<int>(std::log2(std::min(m,n) / 25.0)) + 1);
+    int liwork = 3 * std::min(m,n) * nlvl + 11 * std::min(m,n);
+    if (liwork < 1) liwork = 1;
+    std::vector<int> iwork(liwork, 0);
+    dgelsd_(&m, &n, &nrhs, A, &lda, B, &ldb, S, &rc, rank, work, &lwork, iwork.data(), devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
 } // extern "C"
 
 namespace {
