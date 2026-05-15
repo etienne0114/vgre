@@ -19,7 +19,7 @@
 | cuDNN (legacy) | All major ops | All major ops | Fwd/bwd for conv, pool, activation, softmax, BN, dropout, RNN, attention, LRN, divisive norm, CTC loss, tensor ops |
 | cuDNN Backend API | Wired to legacy | Partially wired | Handles conv, activation, pool, softmax, reduction, matmul, BN, norm, RNN, concat, signal, gen_stats, bn_bwd_weights. **No attention routing.** |
 | NCCL | P2P + collectives | P2P + collectives | Single-node shared-memory; multi-node routes through TCPCluster (functional but not RDMA-optimized) |
-| cuFFT | Reference DFT | Reference DFT | No FFTW3/MKL delegation; O(n²) DFT only — too slow for production large transforms |
+| cuFFT | O(n log n) FFT | O(n log n) FFT | Built-in Cooley-Tukey + Bluestein. Optional FFTW3 delegation via `VGRE_HAS_FFTW3`. Plan caching via handle map. |
 | cuRAND | 4 generators | 4 generators | All use sequential `std::mt19937_64`; no parallel stream-safe generator partitioning |
 | cuSOLVER | 4 dense routines | 4 dense routines | `potrf`, `geqrf`, `gesvd`, `syevd` only. **Missing**: `getrf` (LU), `getrs`, `ormqr`, `gelsd`, sparse solvers |
 | cuSPARSE | CSR SpMV/SpMM | CSR SpMV/SpMM | Missing: format conversions (CSR↔CSC↔COO), sparse triangular solve, sparse factorization |
@@ -77,13 +77,22 @@ All 21 test cases pass. OpenMP parallelization enabled for CGEMM/ZGEMM.
 
 ---
 
-### 2.3 cuFFT — No Optimized Backend
+### 2.3 cuFFT — O(n log n) FFT Backend
 
-| Missing | Impact | Notes |
-|---|---|---|
-| FFTW3/MKL delegation | Large transforms are O(n²) slow | Reference DFT is correct but unusable for >1K points |
-| Real-world plan caching | Repeated plans recompute twiddle factors | `cufftPlan1d` always rebuilds from scratch |
-| Half-precision FFT | `CUFFT_STATUS_NOT_SUPPORTED` returned | No `__half` DFT path |
+**Status**: **IMPLEMENTED** (2026-05-15). Built-in Cooley-Tukey radix-2 + Bluestein for arbitrary sizes. Optional FFTW3 delegation.
+
+| Implemented | Notes |
+|---|---|
+| Cooley-Tukey radix-2 FFT | O(n log n) for power-of-2 sizes, OpenMP-parallelized butterfly |
+| Bluestein's algorithm | O(n log n) for arbitrary sizes (prime, non-power-of-2) |
+| FFTW3 delegation | Compile with `VGRE_HAS_FFTW3` for fftw3/fftw3f backend (auto-detected by CMake) |
+| 1D/2D/3D C2C, R2C, C2R | Float and double precision (C2C, Z2Z, R2C, C2R, D2Z, Z2D) |
+| Batched transforms | `cufftPlan1d` with batch > 1, parallelized over batches |
+| Plan handle caching | Plans stored in global map, reusable across exec calls |
+
+**Remaining**: Half-precision FFT (`__half` DFT) — returns `CUFFT_NOT_SUPPORTED`.
+
+All 11 test cases pass. 112/112 full suite pass.
 
 ---
 
@@ -218,8 +227,8 @@ The following items that were previously potential concerns have been resolved:
 
 ## 7. Recommendations
 
-1. **Complex BLAS** is the largest functional gap for PyTorch/TensorFlow complex tensor support. Priority: **High**.
-2. **cuFFT FFTW3 delegation** would make the library usable for real workloads. Priority: **High**.
+1. ~~**Complex BLAS**~~ — **DONE** (2026-05-15). C/Z Level-1/2/3 implemented.
+2. ~~**cuFFT FFTW3 delegation**~~ — **DONE** (2026-05-15). O(n log n) Cooley-Tukey + Bluestein + optional FFTW3.
 3. **cuSOLVER LU/least-squares** (`getrf`, `getrs`, `gelsd`) are needed for general linear algebra. Priority: **Medium**.
 4. **cuSPARSE format conversions + sparse triangular solve** would unblock sparse ML. Priority: **Medium**.
 5. **cuBLASLt heuristic selection** would improve matmul performance. Priority: **Low**.
