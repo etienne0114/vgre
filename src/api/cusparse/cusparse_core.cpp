@@ -86,6 +86,7 @@ std::mutex g_descrMutex;
 std::unordered_map<uintptr_t, CsrMat> g_csrMats;
 std::unordered_map<uintptr_t, DnVec> g_dnVecs;
 std::unordered_map<uintptr_t, DnMat> g_dnMats;
+std::unordered_map<uintptr_t, std::vector<int32_t>> g_cooRowOffsets; // COO→CSR row-offset storage
 uintptr_t g_nextDescr = 1;
 
 inline int64_t getIdx(const void *arr, cusparseIndexType_t t, int64_t i) {
@@ -213,7 +214,9 @@ cusparseStatus_t cusparseCreateCsr(cusparseSpMatDescr_t *spMatDescr, int64_t row
 
 cusparseStatus_t cusparseDestroySpMat(cusparseSpMatDescr_t spMatDescr) {
     std::lock_guard<std::mutex> lk(g_descrMutex);
-    g_csrMats.erase(reinterpret_cast<uintptr_t>(spMatDescr));
+    uintptr_t id = reinterpret_cast<uintptr_t>(spMatDescr);
+    g_csrMats.erase(id);
+    g_cooRowOffsets.erase(id); // clean up COO-converted row-offsets if any
     return CUSPARSE_STATUS_SUCCESS;
 }
 
@@ -358,6 +361,87 @@ cusparseStatus_t cusparseDaxpyi(cusparseHandle_t /*handle*/, int nnz, const doub
     for (int i = 0; i < nnz; ++i) {
         y[xInd[i] - base] += (*alpha) * xVal[i];
     }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── Buffer-size queries (required by cuSPARSE generic API callers) ────────────
+
+cusparseStatus_t cusparseSpMV_bufferSize(cusparseHandle_t /*handle*/,
+                                          cusparseOperation_t /*opA*/,
+                                          const void * /*alpha*/,
+                                          cusparseSpMatDescr_t /*matA*/,
+                                          cusparseDnVecDescr_t /*vecX*/,
+                                          const void * /*beta*/,
+                                          cusparseDnVecDescr_t /*vecY*/,
+                                          cudaDataType_t /*computeType*/,
+                                          size_t *bufferSize) {
+    // VGRE's SpMV is compute-synchronous; no extra workspace needed.
+    if (bufferSize) *bufferSize = 0;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpMM_bufferSize(cusparseHandle_t /*handle*/,
+                                          cusparseOperation_t /*opA*/,
+                                          cusparseOperation_t /*opB*/,
+                                          const void * /*alpha*/,
+                                          cusparseSpMatDescr_t /*matA*/,
+                                          cusparseDnMatDescr_t /*matB*/,
+                                          const void * /*beta*/,
+                                          cusparseDnMatDescr_t /*matC*/,
+                                          cudaDataType_t /*computeType*/,
+                                          size_t *bufferSize) {
+    if (bufferSize) *bufferSize = 0;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── COO sparse matrix descriptor ─────────────────────────────────────────────
+// Converts COO to CSR row-offsets on creation; reuses the COO col-index and
+// values buffers directly so no extra memory copies are required.
+
+cusparseStatus_t cusparseCreateCoo(cusparseSpMatDescr_t *spMatDescr,
+                                    int64_t rows, int64_t cols, int64_t nnz,
+                                    void *cooRowInd, void *cooColInd, void *cooValues,
+                                    cusparseIndexType_t cooIdxType,
+                                    cusparseIndexBase_t idxBase,
+                                    cudaDataType_t valueType) {
+    if (!spMatDescr || rows <= 0 || cols <= 0 || nnz < 0) return CUSPARSE_STATUS_INVALID_VALUE;
+    // Build CSR row-offsets from COO row-index array.
+    std::vector<int32_t> rowOff(static_cast<size_t>(rows + 1), 0);
+    int base = (idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+    if (cooIdxType == CUSPARSE_INDEX_64I) {
+        const int64_t *ri = static_cast<const int64_t *>(cooRowInd);
+        for (int64_t i = 0; i < nnz; ++i) rowOff[ri[i] - base + 1]++;
+    } else {
+        const int32_t *ri = static_cast<const int32_t *>(cooRowInd);
+        for (int64_t i = 0; i < nnz; ++i) rowOff[ri[i] - base + 1]++;
+    }
+    for (int64_t i = 1; i <= rows; ++i) rowOff[i] += rowOff[i-1];
+
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    uintptr_t id = g_nextDescr++;
+    CsrMat &m = g_csrMats[id];
+    m.rows       = rows;
+    m.cols       = cols;
+    m.nnz        = nnz;
+    m.colInd     = cooColInd;
+    m.values     = cooValues;
+    m.idxBase    = idxBase;
+    m.valueType  = valueType;
+    // Store the constructed row-offsets and point the descriptor at them.
+    g_cooRowOffsets[id] = std::move(rowOff);
+    m.rowOffsets = g_cooRowOffsets[id].data();
+    m.rowOffsetType = CUSPARSE_INDEX_32I;
+    *spMatDescr = reinterpret_cast<cusparseSpMatDescr_t>(id);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── Stream setter ─────────────────────────────────────────────────────────────
+
+cusparseStatus_t cusparseSetStream(cusparseHandle_t /*handle*/, void * /*stream*/) {
+    return CUSPARSE_STATUS_SUCCESS;  // CPU model: stream is a no-op
+}
+cusparseStatus_t cusparseGetStream(cusparseHandle_t /*handle*/, void **stream) {
+    if (stream) *stream = nullptr;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
