@@ -278,11 +278,9 @@ src/compiler/cuda_device_libs/  # FP16, BF16, cooperative_groups headers
 
 #### 3.3.4 Advanced Layers
 
-**Status**: Mostly **DONE** — dropout, RNN, attention, tensor ops, CTC loss implemented. LRN still missing.
+**Status**: **DONE** — dropout, RNN, attention, tensor ops, CTC loss, LRN, divisive normalization all implemented.
 
-**Implemented**: `cudnnDropoutForward/Backward` (`cudnn_dropout.cpp`), `cudnnRNNForward/Backward` (`cudnn_rnn.cpp`), `cudnnMultiHeadAttnForward/Backward` (`cudnn_attention.cpp`), `cudnnTransformTensor`, `cudnnOpTensor`, `cudnnReduceTensor` (`cudnn_tensor_ops.cpp`), `cudnnCTCLoss` (`cudnn_ctc_loss.cpp`)
-
-**Still missing**: `cudnnDivisiveNormalizationForward/Backward`, `cudnnLRNCrossChannelForward/Backward`
+**Implemented**: `cudnnDropoutForward/Backward` (`cudnn_dropout.cpp`), `cudnnRNNForward/Backward` (`cudnn_rnn.cpp`), `cudnnMultiHeadAttnForward/Backward` (`cudnn_attention.cpp`), `cudnnTransformTensor`, `cudnnOpTensor`, `cudnnReduceTensor` (`cudnn_tensor_ops.cpp`), `cudnnCTCLoss` (`cudnn_ctc_loss.cpp`), `cudnnLRNCrossChannelForward/Backward` (`cudnn_lrn.cpp`), `cudnnDivisiveNormalizationForward/Backward` (`cudnn_divisive_norm.cpp`)
 
 **Files**:
 - `src/api/cudnn/cudnn_dropout.cpp`
@@ -294,7 +292,7 @@ src/compiler/cuda_device_libs/  # FP16, BF16, cooperative_groups headers
 
 #### 3.3.5 cuDNN Backend API (v8+)
 
-**Status**: **DONE** (minimal stub) — descriptor lifecycle (`Create/Destroy/SetAttribute/GetAttribute/Finalize`), `Initialize`, `Populate` implemented. `Execute` returns `CUDNN_STATUS_NOT_SUPPORTED` until full descriptor-graph-to-legacy-path wiring is completed.
+**Status**: **DONE** — descriptor lifecycle, `Initialize`, `Populate` implemented. `Execute` wired to legacy paths for conv forward/backward-data/backward-filter, activation forward/backward, pooling forward/backward, softmax, reduction, matmul, BN finalize, norm forward/backward, RNN. `cudnnBackendCreateReexecutable` returns SUCCESS (fallback to regular execute).
 
 **New files**:
 ```

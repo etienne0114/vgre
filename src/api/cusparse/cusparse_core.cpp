@@ -261,6 +261,22 @@ cusparseStatus_t cusparseDestroyDnMat(cusparseDnMatDescr_t dnMatDescr) {
     return CUSPARSE_STATUS_SUCCESS;
 }
 
+// ── BF16 conversion helpers ──────────────────────────────────────────────────
+static inline float bf162f(uint16_t h) {
+    uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+        (static_cast<uint32_t>((h >> 7) & 0xff) + (127 - 127)) << 23 |
+        (static_cast<uint32_t>(h & 0x7f) << 16);
+    float f; std::memcpy(&f, &bits, 4); return f;
+}
+static inline uint16_t f2bf(float f) {
+    uint32_t bits; std::memcpy(&bits, &f, 4);
+    uint16_t sign = (bits >> 16) & 0x8000;
+    int exp = ((bits >> 23) & 0xff) - 127 + 127;
+    if (exp <= 0) return sign;
+    if (exp >= 255) return sign | 0x7f80;
+    return sign | (exp << 7) | ((bits >> 16) & 0x7f);
+}
+
 // ── SpMV ─────────────────────────────────────────────────────────────────────
 
 cusparseStatus_t cusparseSpMV(cusparseHandle_t /*handle*/, cusparseOperation_t opA,
@@ -310,6 +326,17 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t /*handle*/, cusparseOperation_t o
         for (int64_t i = 0; i < yIt->second.size; ++i) yf[i] = vgre_cuda::__half2float(yH[i]);
         csr_spmv(opA, &alphaF, matIt->second, xf.data(), &betaF, yf.data());
         for (int64_t i = 0; i < yIt->second.size; ++i) yH[i] = vgre_cuda::__float2half(yf[i]);
+    } else if (computeType == CUDA_R_16BF) {
+        // BF16 via float widening
+        float alphaF = bf162f(*static_cast<const uint16_t*>(alpha));
+        float betaF  = bf162f(*static_cast<const uint16_t*>(beta));
+        const uint16_t* xB = static_cast<const uint16_t*>(xIt->second.values);
+        uint16_t* yB = static_cast<uint16_t*>(yIt->second.values);
+        std::vector<float> xf(xIt->second.size), yf(yIt->second.size);
+        for (int64_t i = 0; i < xIt->second.size; ++i) xf[i] = bf162f(xB[i]);
+        for (int64_t i = 0; i < yIt->second.size; ++i) yf[i] = bf162f(yB[i]);
+        csr_spmv(opA, &alphaF, matIt->second, xf.data(), &betaF, yf.data());
+        for (int64_t i = 0; i < yIt->second.size; ++i) yB[i] = f2bf(yf[i]);
     } else if (computeType == CUDA_R_8I) {
         // INT8 via float widening; output is int32
         float alphaF = static_cast<float>(*static_cast<const int32_t*>(alpha));
@@ -387,6 +414,33 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t /*handle*/, cusparseOperation_t o
         Cf.valueType = CUDA_R_32F;
         csr_spmm(opA, opB, &alphaF, Af, Bf, &betaF, Cf);
         for (int64_t i = 0; i < cCount; ++i) cH[i] = vgre_cuda::__float2half(cValsF[i]);
+    } else if (computeType == CUDA_R_16BF) {
+        // BF16 via float widening
+        float alphaF = bf162f(*static_cast<const uint16_t*>(alpha));
+        float betaF  = bf162f(*static_cast<const uint16_t*>(beta));
+        CsrMat Af = aIt->second;
+        int64_t aNnz = Af.nnz;
+        std::vector<float> aValsF(aNnz);
+        const uint16_t* aB = static_cast<const uint16_t*>(Af.values);
+        for (int64_t i = 0; i < aNnz; ++i) aValsF[i] = bf162f(aB[i]);
+        Af.values = aValsF.data();
+        Af.valueType = CUDA_R_32F;
+        DnMat Bf = bIt->second;
+        int64_t bCount = Bf.rows * Bf.cols;
+        std::vector<float> bValsF(bCount);
+        const uint16_t* bB = static_cast<const uint16_t*>(Bf.values);
+        for (int64_t i = 0; i < bCount; ++i) bValsF[i] = bf162f(bB[i]);
+        Bf.values = bValsF.data();
+        Bf.valueType = CUDA_R_32F;
+        DnMat Cf = cIt->second;
+        int64_t cCount = Cf.rows * Cf.cols;
+        std::vector<float> cValsF(cCount);
+        uint16_t* cB = static_cast<uint16_t*>(Cf.values);
+        for (int64_t i = 0; i < cCount; ++i) cValsF[i] = bf162f(cB[i]);
+        Cf.values = cValsF.data();
+        Cf.valueType = CUDA_R_32F;
+        csr_spmm(opA, opB, &alphaF, Af, Bf, &betaF, Cf);
+        for (int64_t i = 0; i < cCount; ++i) cB[i] = f2bf(cValsF[i]);
     } else if (computeType == CUDA_R_8I) {
         // INT8 via float widening; output C is int32
         float alphaF = static_cast<float>(*static_cast<const int32_t*>(alpha));

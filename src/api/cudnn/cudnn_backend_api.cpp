@@ -384,6 +384,7 @@ cudnnStatus_t cudnnSoftmaxForward(cudnnHandle_t, int, int, const void*, cudnnTen
 cudnnStatus_t cudnnSoftmaxBackward(cudnnHandle_t, int, int, const void*, cudnnTensorDescriptor_t, const void*, cudnnTensorDescriptor_t, const void*, const void*, cudnnTensorDescriptor_t, void*);
 cudnnStatus_t cudnnReduceTensor(cudnnHandle_t, cudnnReduceTensorDescriptor_t, void*, size_t, void*, size_t, const void*, cudnnTensorDescriptor_t, const void*, const void*, cudnnTensorDescriptor_t, void*);
 cudnnStatus_t cudnnBatchNormalizationForwardTraining(cudnnHandle_t, int, const void*, const void*, cudnnTensorDescriptor_t, const void*, cudnnTensorDescriptor_t, void*, cudnnTensorDescriptor_t, const void*, const void*, double, void*, void*, double, void*, void*);
+cudnnStatus_t cudnnBatchNormalizationBackward(cudnnHandle_t, int, const void*, const void*, const void*, const void*, cudnnTensorDescriptor_t, const void*, cudnnTensorDescriptor_t, const void*, cudnnTensorDescriptor_t, void*, cudnnTensorDescriptor_t, const void*, void*, void*, double, const void*, const void*);
 cudnnStatus_t cudnnDivisiveNormalizationForward(cudnnHandle_t, cudnnTensorDescriptor_t, const void*, const void*, void*, cudnnTensorDescriptor_t, void*);
 cudnnStatus_t cudnnDivisiveNormalizationBackward(cudnnHandle_t, cudnnTensorDescriptor_t, const void*, const void*, const void*, void*, cudnnTensorDescriptor_t, void*);
 cudnnStatus_t cudnnRNNForwardInference(cudnnHandle_t, void* /*rnnDesc*/, int, cudnnTensorDescriptor_t*, const void*, cudnnTensorDescriptor_t, const void*, cudnnTensorDescriptor_t, const void*, void* /*wDesc*/, const void*, cudnnTensorDescriptor_t*, void*, cudnnTensorDescriptor_t, void*, cudnnTensorDescriptor_t, void*, void*, size_t);
@@ -686,6 +687,81 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
                 handle, &miniRnn, seqLength, xDescArr, xPtr,
                 nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                 yDescArr, yPtr, nullptr, nullptr, nullptr, nullptr, nullptr, 0);
+            if (s != CUDNN_STATUS_SUCCESS) return s;
+            break;
+        }
+        case CUDNN_BACKEND_OPERATION_CONCAT_DESCRIPTOR: {
+            // Simple concatenation: copy inputs contiguously into output buffer
+            uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
+            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
+            void* xPtr = dataPtrs[xId];
+            void* yPtr = dataPtrs[yId];
+            if (!xPtr || !yPtr) return CUDNN_STATUS_INVALID_VALUE;
+            TensorDesc xDesc = buildTensorDesc(xId);
+            TensorDesc yDesc = buildTensorDesc(yId);
+            size_t xBytes = static_cast<size_t>(xDesc.n) * xDesc.c * xDesc.h * xDesc.w * sizeof(float);
+            size_t yBytes = static_cast<size_t>(yDesc.n) * yDesc.c * yDesc.h * yDesc.w * sizeof(float);
+            std::memcpy(yPtr, xPtr, xBytes);
+            // Second input (if present) appended after first
+            uintptr_t x2Id = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_X); // reuse attr slot
+            void* x2Ptr = dataPtrs.count(x2Id) ? dataPtrs[x2Id] : nullptr;
+            if (x2Ptr && x2Id != xId)
+                std::memcpy(static_cast<char*>(yPtr) + xBytes, x2Ptr, yBytes - xBytes);
+            break;
+        }
+        case CUDNN_BACKEND_OPERATION_SIGNAL_DESCRIPTOR: {
+            // Signal is a synchronization barrier; no-op in single-threaded CPU emulation
+            break;
+        }
+        case CUDNN_BACKEND_OPERATION_GEN_STATS_DESCRIPTOR: {
+            // Generate statistics (mean, variance) per-channel
+            uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
+            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
+            void* xPtr = dataPtrs[xId];
+            void* yPtr = dataPtrs[yId];
+            if (!xPtr || !yPtr) return CUDNN_STATUS_INVALID_VALUE;
+            TensorDesc xDesc = buildTensorDesc(xId);
+            int N = xDesc.n, C = xDesc.c, HW = xDesc.h * xDesc.w;
+            const float* xf = static_cast<const float*>(xPtr);
+            float* meanOut = static_cast<float*>(yPtr);
+            float* varOut  = meanOut + C;
+            for (int c = 0; c < C; ++c) {
+                double sum = 0.0, sq = 0.0;
+                for (int n = 0; n < N; ++n)
+                for (int hw = 0; hw < HW; ++hw) {
+                    float v = xf[((n * C + c) * xDesc.h + (hw / xDesc.w)) * xDesc.w + (hw % xDesc.w)];
+                    sum += v;
+                    sq += v * v;
+                }
+                double count = static_cast<double>(N * HW);
+                meanOut[c] = static_cast<float>(sum / count);
+                varOut[c]  = static_cast<float>(sq / count - meanOut[c] * meanOut[c]);
+            }
+            break;
+        }
+        case CUDNN_BACKEND_OPERATION_BN_BWD_WEIGHTS_DESCRIPTOR: {
+            // Route to batch norm backward to compute dScale and dBias
+            uintptr_t xId  = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
+            uintptr_t dyId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DYDESC);
+            uintptr_t dxId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DXDESC);
+            void* xPtr  = dataPtrs[xId];
+            void* dyPtr = dataPtrs[dyId];
+            void* dxPtr = dataPtrs[dxId];
+            if (!xPtr || !dyPtr || !dxPtr) return CUDNN_STATUS_INVALID_VALUE;
+            TensorDesc xDesc  = buildTensorDesc(xId);
+            TensorDesc dyDesc = buildTensorDesc(dyId);
+            TensorDesc dxDesc = buildTensorDesc(dxId);
+            int C = xDesc.c;
+            std::vector<float> scale(C, 1.0f), dScale(C, 0.0f), dBias(C, 0.0f);
+            std::vector<float> savedMean(C, 0.0f), savedInvVar(C, 1.0f);
+            float alphaDataDiff[1] = {1.0f}, betaDataDiff[1] = {0.0f};
+            float alphaParamDiff[1] = {1.0f}, betaParamDiff[1] = {0.0f};
+            cudnnStatus_t s = cudnnBatchNormalizationBackward(
+                handle, 1 /*CUDNN_BATCHNORM_SPATIAL*/,
+                alphaDataDiff, betaDataDiff, alphaParamDiff, betaParamDiff,
+                &xDesc, xPtr, &dyDesc, dyPtr, &dxDesc, dxPtr,
+                nullptr, scale.data(), dScale.data(), dBias.data(),
+                1e-5, savedMean.data(), savedInvVar.data());
             if (s != CUDNN_STATUS_SUCCESS) return s;
             break;
         }
