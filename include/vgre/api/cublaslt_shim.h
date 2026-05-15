@@ -141,6 +141,50 @@ cublasStatus_t cublasLtMatmulDescGetAttribute(cublasLtMatmulDesc_t matmulDesc,
                                               void *buf, size_t sizeInBytes,
                                               size_t *sizeWritten);
 
+// ── Matmul preference (heuristic) ────────────────────────────────────────────
+struct cublasLtMatmulPreferenceStruct;
+typedef struct cublasLtMatmulPreferenceStruct *cublasLtMatmulPreference_t;
+
+typedef enum {
+    CUBLASLT_MATMUL_PREF_SEARCH_MODE = 0,
+    CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES = 1,
+    CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME = 2,
+    CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A = 3,
+    CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B = 4,
+    CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C = 5,
+    CUBLASLT_MATMUL_PREF_MAX_WAVES_COUNT = 6
+} cublasLtMatmulPreferenceAttributes_t;
+
+struct cublasLtMatmulHeuristicResult_t {
+    uint64_t algo;
+    size_t workspaceSize;
+    cublasStatus_t state;
+    float wavesCount;
+    int reserved[4];
+};
+
+cublasStatus_t cublasLtMatmulPreferenceCreate(cublasLtMatmulPreference_t *pref);
+cublasStatus_t cublasLtMatmulPreferenceDestroy(cublasLtMatmulPreference_t pref);
+cublasStatus_t cublasLtMatmulPreferenceSetAttribute(cublasLtMatmulPreference_t pref,
+                                                    cublasLtMatmulPreferenceAttributes_t attr,
+                                                    const void *buf, size_t sizeInBytes);
+cublasStatus_t cublasLtMatmulPreferenceGetAttribute(cublasLtMatmulPreference_t pref,
+                                                    cublasLtMatmulPreferenceAttributes_t attr,
+                                                    void *buf, size_t sizeInBytes,
+                                                    size_t *sizeWritten);
+
+// ── Algorithm heuristic ──────────────────────────────────────────────────────
+cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t lightHandle,
+                                              cublasLtMatmulDesc_t operationDesc,
+                                              cublasLtMatrixLayout_t Adesc,
+                                              cublasLtMatrixLayout_t Bdesc,
+                                              cublasLtMatrixLayout_t Cdesc,
+                                              cublasLtMatrixLayout_t Ddesc,
+                                              cublasLtMatmulPreference_t pref,
+                                              int requestedAlgoCount,
+                                              cublasLtMatmulHeuristicResult_t *heuristicResultsArray,
+                                              int *returnAlgoCount);
+
 // ── Matmul execution ─────────────────────────────────────────────────────────
 cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
                               cublasLtMatmulDesc_t matmulDesc,
