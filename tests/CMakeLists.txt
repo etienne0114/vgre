@@ -242,6 +242,10 @@ add_executable(test_cublas_level3 api/test_cublas_level3.cpp)
 target_link_libraries(test_cublas_level3 PRIVATE vgre)
 add_test(NAME CublasLevel3 COMMAND test_cublas_level3)
 
+add_executable(test_cublas_complex api/test_cublas_complex.cpp)
+target_link_libraries(test_cublas_complex PRIVATE vgre)
+add_test(NAME CublasComplex COMMAND test_cublas_complex)
+
 add_executable(test_cudnn_backward_data api/test_cudnn_backward_data.cpp)
 target_link_libraries(test_cudnn_backward_data PRIVATE vgre)
 add_test(NAME CudnnBackwardData COMMAND test_cudnn_backward_data)

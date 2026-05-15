@@ -121,7 +121,7 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 - `src/api/cublas/cublas_hermitian.cpp` — complex Hermitian routines
 - `src/api/cublas/cublas_core.cpp` — pointer mode, atomics mode, logger, SYR
 
-**Still missing**: All `cublasC*` and `cublasZ*` (complex precision) Level-1/2/3 routines except Hermitian ones. See `missingFeatures.md` §2.1.
+**Implemented Complex (C/Z)**: `cublasCgemm`/`cublasZgemm`, `cublasCgemv`/`cublasZgemv`, `cublasCaxpy`/`cublasZaxpy`, `cublasCdotc`/`cublasZdotc`, `cublasCdotu`/`cublasZdotu`, `cublasCscal`/`cublasZscal`/`cublasCsscal`/`cublasZdscal`, `cublasCcopy`/`cublasZcopy`, `cublasCswap`/`cublasZswap`, `cublasScnrm2`/`cublasDznrm2`, `cublasIcamax`/`cublasIzamax`, `cublasScasum`/`cublasDzasum`, `cublasCrot`/`cublasZrot`, `cublasCtrsv`/`cublasZtrsv`, `cublasCgeru`/`cublasZgeru`, `cublasCgerc`/`cublasZgerc`, `cublasCsyrk`/`cublasZsyrk`, `cublasCsyr2k`/`cublasZsyr2k`, `cublasCtrsm`/`cublasZtrsm`, `cublasCsymm`/`cublasZsymm`, `cublasCtrmm`/`cublasZtrmm`. All in `src/api/cublas/cublas_complex.cpp`. 21 tests pass.
 
 ---
 

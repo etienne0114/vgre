@@ -96,8 +96,26 @@ static inline cuDoubleComplex cuCadd(cuDoubleComplex a, cuDoubleComplex b) { ret
 static inline cuDoubleComplex cuCmul(cuDoubleComplex a, cuDoubleComplex b) {
     return {a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x};
 }
+static inline cuComplex cuCsubf(cuComplex a, cuComplex b) { return {a.x - b.x, a.y - b.y}; }
+static inline cuDoubleComplex cuCsub(cuDoubleComplex a, cuDoubleComplex b) { return {a.x - b.x, a.y - b.y}; }
+
 static inline cuComplex cuCmulf_real(cuComplex a, float s) { return {a.x * s, a.y * s}; }
 static inline cuDoubleComplex cuCmul_real(cuDoubleComplex a, double s) { return {a.x * s, a.y * s}; }
+
+static inline cuComplex cuCdivf(cuComplex a, cuComplex b) {
+    float denom = b.x * b.x + b.y * b.y;
+    return {(a.x * b.x + a.y * b.y) / denom, (a.y * b.x - a.x * b.y) / denom};
+}
+static inline cuDoubleComplex cuCdiv(cuDoubleComplex a, cuDoubleComplex b) {
+    double denom = b.x * b.x + b.y * b.y;
+    return {(a.x * b.x + a.y * b.y) / denom, (a.y * b.x - a.x * b.y) / denom};
+}
+
+static inline float cuCabsf(cuComplex a) { return std::sqrt(a.x * a.x + a.y * a.y); }
+static inline double cuCabs(cuDoubleComplex a) { return std::sqrt(a.x * a.x + a.y * a.y); }
+
+static inline cuComplex cuCnegf(cuComplex a) { return {-a.x, -a.y}; }
+static inline cuDoubleComplex cuCneg(cuDoubleComplex a) { return {-a.x, -a.y}; }
 
 static constexpr cublasFillMode_t CUBLAS_FILL_MODE_LOWER = 0;
 static constexpr cublasFillMode_t CUBLAS_FILL_MODE_UPPER = 1;
