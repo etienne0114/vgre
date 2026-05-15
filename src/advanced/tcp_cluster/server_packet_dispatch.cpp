@@ -479,6 +479,25 @@ void TCPClusterManager::processServerPackets(
           barrier_count_++;
         }
         barrier_cv_.notify_all();
+      } else if (type == PacketType::CLOCK_SYNC_REPLY) {
+        // MT.6: compute clock offset from NTP-style 3-timestamp exchange.
+        if (hdr.payloadSize >= sizeof(ClockSyncReplyPayload)) {
+          ClockSyncReplyPayload rpl;
+          std::memcpy(&rpl, payload, sizeof(rpl));
+          int64_t t4 = static_cast<int64_t>(
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::system_clock::now().time_since_epoch()).count());
+          // NTP offset formula: ((T2-T1) + (T3-T4)) / 2
+          // Positive = remote clock is ahead of local clock.
+          client->clock_offset_us =
+              ((rpl.t2_us - rpl.t1_us) + (rpl.t3_us - t4)) / 2;
+          VGRE_LOG_INFO("TCPCluster",
+              "Clock offset for " + client->ip_address + ": " +
+              std::to_string(client->clock_offset_us) + " µs (RTT=" +
+              std::to_string(t4 - rpl.t1_us) + " µs)");
+        }
+        client->rx_buffer.erase(client->rx_buffer.begin(),
+                                client->rx_buffer.begin() + totalLen);
       } else {
         // Unknown or unhandled packet type: skip entire packet
         client->rx_buffer.erase(client->rx_buffer.begin(),

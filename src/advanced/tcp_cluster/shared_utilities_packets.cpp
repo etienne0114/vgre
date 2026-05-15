@@ -94,6 +94,10 @@ std::string PacketUtils::packetTypeToString(PacketType type) {
     return "DATA_HEADER_RDMA";
   case PacketType::SECURE_READY:
     return "SECURE_READY";
+  case PacketType::CLOCK_SYNC:
+    return "CLOCK_SYNC";
+  case PacketType::CLOCK_SYNC_REPLY:
+    return "CLOCK_SYNC_REPLY";
   default:
     return "UNKNOWN(" + std::to_string(static_cast<uint32_t>(type)) + ")";
   }

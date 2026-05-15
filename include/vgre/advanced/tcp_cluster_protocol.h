@@ -46,7 +46,21 @@ enum class PacketType : uint32_t {
   BANDWIDTH_ACK = 28,         // Worker→Master: echo timestamp + worker send time
   DATA_HEADER_RDMA = 29,      // RDMA zero-copy notification: data written to bounce buffer
   SECURE_READY = 30,          // Master→Worker: post-handshake readiness barrier (encrypted)
+  CLOCK_SYNC = 31,            // MT.6: master→worker: T1 timestamp for NTP-style calibration
+  CLOCK_SYNC_REPLY = 32,      // MT.6: worker→master: T1+T2+T3 for offset computation
 };
+
+// MT.6: clock synchronization payloads (NTP-style 3-timestamp exchange)
+#pragma pack(push, 1)
+struct ClockSyncPayload {
+  int64_t t1_us; // master's send time (microseconds since epoch)
+};
+struct ClockSyncReplyPayload {
+  int64_t t1_us; // echo of master's T1
+  int64_t t2_us; // worker's receive time
+  int64_t t3_us; // worker's reply-send time
+};
+#pragma pack(pop)
 
 #pragma pack(push, 1)
 struct VSBPHeader {
