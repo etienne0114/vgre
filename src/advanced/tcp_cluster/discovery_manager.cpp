@@ -112,27 +112,27 @@ void DiscoveryManager::startProactiveConnections() {
 // ── Stop All Threads ───────────────────────────────────────────────────────
 
 void DiscoveryManager::stopAll() {
-    fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager::stopAll starting...\n");
+    VGRE_LOG_DEBUG("TCPCluster", "DiscoveryManager::stopAll starting");
     stop_proactive_ = true;
 
     if (udp_announcer_thread_.joinable()) {
-        fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining udp_announcer_thread_\n");
+        VGRE_LOG_DEBUG("TCPCluster", "DiscoveryManager: joining udp_announcer_thread");
         udp_announcer_thread_.join();
     }
     if (master_discovery_thread_.joinable()) {
-        fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining master_discovery_thread_\n");
+        VGRE_LOG_DEBUG("TCPCluster", "DiscoveryManager: joining master_discovery_thread");
         master_discovery_thread_.join();
     }
     if (worker_discovery_thread_.joinable()) {
-        fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining worker_discovery_thread_\n");
+        VGRE_LOG_DEBUG("TCPCluster", "DiscoveryManager: joining worker_discovery_thread");
         worker_discovery_thread_.join();
     }
     if (worker_announcer_thread_.joinable()) {
-        fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining worker_announcer_thread_\n");
+        VGRE_LOG_DEBUG("TCPCluster", "DiscoveryManager: joining worker_announcer_thread");
         worker_announcer_thread_.join();
     }
     if (proactive_thread_.joinable()) {
-        fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining proactive_thread_\n");
+        VGRE_LOG_DEBUG("TCPCluster", "DiscoveryManager: joining proactive_thread");
         proactive_thread_.join();
     }
 
@@ -144,11 +144,11 @@ void DiscoveryManager::stopAll() {
     }
     for (auto &entry : to_join) {
         if (entry.t.joinable()) {
-            fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager: Joining proactive auth thread\n");
+            VGRE_LOG_DEBUG("TCPCluster", "DiscoveryManager: joining proactive auth thread for " + entry.addr);
             entry.t.join();
         }
     }
-    fprintf(stderr, "DEBUG [TCPCluster] DiscoveryManager::stopAll finished.\n");
+    VGRE_LOG_DEBUG("TCPCluster", "DiscoveryManager::stopAll finished");
 }
 
 // ── UDP Announcer Loop (Master broadcasts presence) ───────────────────────

@@ -551,15 +551,59 @@ void RuntimeProfiler::estimateInstructions(const std::string& kernelName,
                                             const dim3& blockDim,
                                             uint64_t instructionsPerThread) {
     if (!enabled_.load(std::memory_order_relaxed)) return;
+
     uint64_t totalThreads = static_cast<uint64_t>(gridDim.x) * gridDim.y * gridDim.z *
                             static_cast<uint64_t>(blockDim.x) * blockDim.y * blockDim.z;
+    uint64_t totalInsns = instructionsPerThread * totalThreads;
+
+    // Try to derive proportions from compiled KernelIR analysis.
+    // RuntimeEngine::instance() provides access to staticFlopCount and
+    // estimatedMemoryAccessCount produced by the LLVM/Clang analysis pass.
+    double aluFrac = 0.40, loadFrac = 0.30, storeFrac = 0.15,
+           branchFrac = 0.10, barrierFrac = 0.05;
+
+    auto& re = vgre::core::RuntimeEngine::instance();
+    KernelId kid = re.lookupKernelIdByName(kernelName.c_str());
+    if (kid != 0) {
+        const KernelIR* ir = re.getKernelIR(kid);
+        if (ir && ir->estimatedInstructionCount > 0) {
+            double base = static_cast<double>(ir->estimatedInstructionCount);
+
+            // If LLVM analysis ran, staticFlopCount is authoritative for ALU ops.
+            if (ir->flopCountVerified && ir->staticFlopCount > 0) {
+                aluFrac = std::min(0.80, static_cast<double>(ir->staticFlopCount) / base);
+            }
+
+            // Memory access count covers both loads and stores combined.
+            if (ir->estimatedMemoryAccessCount > 0) {
+                double memFrac = std::min(0.80, static_cast<double>(ir->estimatedMemoryAccessCount) / base);
+                // Split loads:stores 2:1 (typical compute kernel profile).
+                loadFrac  = memFrac * (2.0 / 3.0);
+                storeFrac = memFrac * (1.0 / 3.0);
+            }
+
+            // Sync-heavy kernels (barrier-per-warp) have higher barrier fraction.
+            if (ir->usesSyncthreads) barrierFrac = 0.08;
+
+            // Remaining budget: branch = 1 - alu - load - store - barrier.
+            double used = aluFrac + loadFrac + storeFrac + barrierFrac;
+            branchFrac = (used < 1.0) ? (1.0 - used) * 0.5 : 0.02;
+            // Re-normalise so proportions always sum to exactly 1.
+            double total = aluFrac + loadFrac + storeFrac + branchFrac + barrierFrac;
+            if (total > 0.0) {
+                double inv = 1.0 / total;
+                aluFrac    *= inv; loadFrac  *= inv; storeFrac  *= inv;
+                branchFrac *= inv; barrierFrac *= inv;
+            }
+        }
+    }
+
     InstructionSample sample;
-    // Rough heuristic: ~40% ALU, 30% load, 15% store, 10% branch, 5% barrier
-    sample.aluCount     = static_cast<uint64_t>(instructionsPerThread * totalThreads * 0.40);
-    sample.loadCount    = static_cast<uint64_t>(instructionsPerThread * totalThreads * 0.30);
-    sample.storeCount   = static_cast<uint64_t>(instructionsPerThread * totalThreads * 0.15);
-    sample.branchCount  = static_cast<uint64_t>(instructionsPerThread * totalThreads * 0.10);
-    sample.barrierCount = static_cast<uint64_t>(instructionsPerThread * totalThreads * 0.05);
+    sample.aluCount     = static_cast<uint64_t>(totalInsns * aluFrac);
+    sample.loadCount    = static_cast<uint64_t>(totalInsns * loadFrac);
+    sample.storeCount   = static_cast<uint64_t>(totalInsns * storeFrac);
+    sample.branchCount  = static_cast<uint64_t>(totalInsns * branchFrac);
+    sample.barrierCount = static_cast<uint64_t>(totalInsns * barrierFrac);
     recordInstructionSample(kernelName, sample);
 }
 

@@ -1044,4 +1044,72 @@ tests/core/texture/        # Texture/surface object tests
 
 ---
 
+### Phase 12 — WAN & Full-Mesh Networking (post-audit fixes)
+
+**Status**: **DONE** — 2026-05-15
+
+#### 12.1 Proactive Connection Loop — WAN Reconnect + Security
+
+**Problem**: The original `discovery_loops_proactive.cpp` connected to peers exactly once and never retried on disconnect. There was no security handshake after a proactive TCP connect.
+
+**Fix** (`src/advanced/tcp_cluster/discovery_loops_proactive.cpp`):
+- Per-peer exponential backoff (1 s → 2 → 4 → … → 64 s cap), reset to 1 s on successful connect.
+- Reconnects automatically when a previously-connected mesh peer drops (detected by absence from `clients_` list).
+- Spawns an async auth thread per new connection and calls `performPeerClientHandshake` to establish the secure channel before the peer becomes active.
+- Resolves both IPv4 and IPv6 addresses (via `getaddrinfo` with `AF_UNSPEC`); IPv6 bracket notation `[::1]:port` is fully parsed.
+- Applies `vgre_set_tcp_keepalive(30, 10, 5)` so the OS detects dead WAN paths within ~80 s.
+- `AuthEntry` struct extended with `addr` field for diagnostic logging.
+
+#### 12.2 UDP Discovery Loop — Master Port Extraction + Reconnect
+
+**Problem**: `discovery_loops_udp.cpp` always connected to the master using the worker's own port instead of the port advertised in the VGRE_DISCOVERY_PING message. After master disconnect the loop exited rather than re-entering discovery.
+
+**Fix** (`src/advanced/tcp_cluster/discovery_loops_udp.cpp`):
+- Parses `VGRE_DISCOVERY_PING:<port>:<sec_mode>:<hmac>` to extract the master's advertised TCP port.
+- After master disconnect (client_fd closed), resets `has_master_fd_` and re-enters the discovery loop automatically.
+- Uses `getaddrinfo(AF_UNSPEC)` for the TCP connect so IPv4 and IPv6 masters are both reachable.
+
+#### 12.3 Master-Side Mesh Heartbeat + Idle Eviction
+
+**Problem**: The server had no mechanism to detect logically-stalled peers (alive OS but not sending).
+
+**Fix** (`src/advanced/tcp_cluster/server_loop_connection_handling.cpp`):
+- Added `kIdleEvictSec` (configurable via `VGRE_CLUSTER_IDLE_EVICT_SEC`, default 300 s).
+- `performServerMaintenance` now closes connections idle longer than the threshold; the proactive loop will reconnect mesh peers.
+- Added `last_activity_time` field to `ClientConnection`; updated by `server_loop_data_handling.cpp` on every successful `recv_packet`.
+- `mesh_peers_` `is_active` / `last_seen` updated every maintenance cycle for accurate topology reporting.
+
+#### 12.4 Debug Logging Cleanup
+
+**Fix** (`src/advanced/tcp_cluster/discovery_manager.cpp`):
+- Replaced all `fprintf(stderr, "DEBUG ...")` calls in `DiscoveryManager::stopAll` with structured `VGRE_LOG_DEBUG` calls.
+
+#### 12.5 Runtime Profiler — Real Instruction Mix
+
+**Problem**: `estimateInstructions` used fixed ratios (40% ALU, 30% load, 15% store, 10% branch, 5% barrier) regardless of the actual kernel.
+
+**Fix** (`src/advanced/runtime_profiler.cpp`):
+- Looks up the kernel's `KernelIR` via `RuntimeEngine::lookupKernelIdByName` + `getKernelIR`.
+- When `flopCountVerified` is true, uses `staticFlopCount / estimatedInstructionCount` as the ALU fraction.
+- Uses `estimatedMemoryAccessCount / estimatedInstructionCount` split 2:1 (load:store) as the memory fraction.
+- Adjusts barrier fraction upward for `usesSyncthreads` kernels.
+- Re-normalises all fractions so they sum to 1.0. Falls back to fixed ratios when no KernelIR is available.
+
+#### 12.6 Texture Manager — FP16 Mipmap Generation
+
+**Fix** (`src/core/texture_manager.cpp`):
+- Added `channelToFloat` / `floatToChannel` helpers supporting UINT8/INT8/UINT16/INT16/UINT32/INT32/FLOAT32/FP16 element types for correct mipmap box-filter generation across all formats.
+- FP16 conversion uses `vgre_cuda::__half2float` / `vgre_cuda::__float2half` (previously used undeclared identifiers).
+
+| # | Feature | Status | Date |
+|---|---|---|---|
+| 12.1 | WAN proactive reconnect with exponential backoff | **DONE** | 2026-05-15 |
+| 12.2 | UDP discovery loop master port extraction + reconnect | **DONE** | 2026-05-15 |
+| 12.3 | Master-side idle eviction + mesh peer liveness tracking | **DONE** | 2026-05-15 |
+| 12.4 | Debug fprintf → VGRE_LOG in DiscoveryManager | **DONE** | 2026-05-15 |
+| 12.5 | Runtime profiler real instruction mix from KernelIR | **DONE** | 2026-05-15 |
+| 12.6 | Texture mipmap FP16 channelToFloat/floatToChannel | **DONE** | 2026-05-15 |
+
+---
+
 **End of Document**

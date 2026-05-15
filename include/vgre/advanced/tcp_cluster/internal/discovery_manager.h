@@ -122,11 +122,11 @@ private:
     std::atomic<bool> stop_proactive_{false};
 
     // Async handshake threads spawned by proactiveConnectionLoop.
-    // Each entry carries a done-flag the thread sets on completion so
-    // proactiveConnectionLoop can reap finished threads without sleeping.
+    // Each entry carries a done-flag and the peer address for logging.
     struct AuthEntry {
       std::thread t;
       std::shared_ptr<std::atomic<bool>> done;
+      std::string addr; // "ip:port" for diagnostics
     };
     std::mutex auth_threads_mutex_;
     std::vector<AuthEntry> auth_threads_;

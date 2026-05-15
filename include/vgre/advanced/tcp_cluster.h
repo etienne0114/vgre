@@ -178,6 +178,7 @@ public:
     std::set<std::string> reachable_peers;
     double connection_quality = 1.0;
     uint64_t last_heartbeat_ms = 0;
+    std::chrono::steady_clock::time_point last_activity_time{std::chrono::steady_clock::now()};
     struct OutgoingPacket {
       std::vector<uint8_t> data;
       uint32_t priority;
