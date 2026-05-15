@@ -22,7 +22,11 @@ add_library(vgre_core OBJECT
     graph/graph_manager_introspection.cpp
     graph/graph_manager_exec_update.cpp
     graph/graph_manager_dependencies.cpp
-    texture_manager.cpp
+    texture/texture_manager_lifecycle.cpp
+    texture/texture_manager_sampling.cpp
+    texture/texture_manager_surface.cpp
+    texture/texture_manager_array.cpp
+    texture/texture_manager_mipmap.cpp
     shm_manager.cpp
 )
 
