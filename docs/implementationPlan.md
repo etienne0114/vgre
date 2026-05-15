@@ -21,19 +21,22 @@
 ### 1.2 Directory Conventions
 
 ```
-src/api/cudart/          # CUDART shim split by concern (12 files)
-src/api/cuda_driver/     # Driver API shim split by concern (9 files)
-src/api/cublas/          # cuBLAS backend split by level (5 files)
+src/api/cudart/          # CUDART shim split by concern (15 files)
+src/api/cuda_driver/     # Driver API shim split by concern (11 files)
+src/api/cublas/          # cuBLAS backend split by level (7 files)
 src/api/cudnn/           # cuDNN backend split by layer type (12 files)
-src/api/nccl_shim.cpp    # NCCL backend (single file, not yet split)
+src/api/nccl/            # NCCL backend split by concern (4 files)
 src/api/cufft/           # cuFFT shim (1 file — reference DFT/IDFT)
 src/api/curand/          # cuRAND shim (1 file)
 src/api/cusolver/        # cuSOLVER shim (1 file — LAPACK delegation)
 src/api/cusparse/        # cuSPARSE shim (1 file)
 src/api/cublasLt/        # cuBLASLt shim (1 file)
 src/compiler/ptx/        # PTX translator split by architecture / op family (4 files)
-src/core/graph/          # Graph manager split by concern (5 files)
-src/core/texture/        # Texture/surface manager (still monolithic — future split candidate)
+src/core/graph/          # Graph manager split by concern (7 files)
+src/core/texture/        # Texture/surface manager split by concern (5 files)
+src/core/memory/         # Memory manager split by concern (6 files)
+src/runtime/             # Runtime engine split (8 files incl. vector_engine float/double)
+src/advanced/            # Advanced subsystems split (20 files incl. adaptive/hybrid splits)
 src/advanced/profiling/  # NOT YET SPLIT — all profiling currently in runtime_profiler.cpp
 src/deployment/k8s_device_plugin/  # Go gRPC K8s plugin (4 files)
 src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
@@ -111,8 +114,10 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 
 **Files**:
 - `src/api/cublas/cublas_level1.cpp` — all Level-1 routines
-- `src/api/cublas/cublas_level2.cpp` — Level-2 + packed/banded routines
-- `src/api/cublas/cublas_level3.cpp` — Level-3 + batched + GemmEx
+- `src/api/cublas/cublas_level2.cpp` — Level-2 standard routines (SGEMV, TRSV, GER, SYMV, GBMV, SYR2, TRMV, SYR2K)
+- `src/api/cublas/cublas_level2_packed.cpp` — Level-2 packed/banded routines (TBSV, TPSV, SPMV, SBMV, SPR, SPR2, TBMV, TPMV)
+- `src/api/cublas/cublas_level3.cpp` — Level-3 GEMM + TRSM + SYRK + TRMM + SYMM + batched GEMM + HGEMM + GemmEx + logging
+- `src/api/cublas/cublas_level3_blas3.cpp` — Level-3 batched BLAS3 (batched TRSM, SYRK, SYR2K, TRMM, SYMM)
 - `src/api/cublas/cublas_hermitian.cpp` — complex Hermitian routines
 - `src/api/cublas/cublas_core.cpp` — pointer mode, atomics mode, logger, SYR
 
@@ -357,9 +362,9 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 
 | Directory | Purpose | Files |
 |---|---|---|
-| `src/api/cudart/` | Split monolithic CUDART shim | 12 `.cpp` files |
+| `src/api/cudart/` | Split monolithic CUDART shim | 15 `.cpp` files |
 | `src/api/cuda_driver/` | Split monolithic driver shim | 9 `.cpp` files |
-| `src/api/cublas/` | cuBLAS by BLAS level | 5 `.cpp` files |
+| `src/api/cublas/` | cuBLAS by BLAS level | 7 `.cpp` files |
 | `src/api/cudnn/` | cuDNN by layer type | 12 `.cpp` files |
 | `src/api/cufft/` | cuFFT shim | 1 `.cpp` file |
 | `src/api/curand/` | cuRAND shim | 1 `.cpp` file |
@@ -367,7 +372,7 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 | `src/api/cusparse/` | cuSPARSE shim | 1 `.cpp` file |
 | `src/api/cublasLt/` | cuBLASLt shim | 1 `.cpp` file |
 | `src/compiler/ptx/` | PTX translator by family | 4 `.cpp` files |
-| `src/core/graph/` | Graph manager by concern | 5 `.cpp` files |
+| `src/core/graph/` | Graph manager by concern | 7 `.cpp` files |
 | `src/deployment/k8s_device_plugin/` | K8s Device Plugin | 4 files (Go) |
 | `src/deployment/slurm_gres/` | SLURM GRES plugin | 2 files (C) |
 
@@ -636,4 +641,43 @@ All major O(n²) and O(n³) CPU reference compute paths across cuBLAS, cuBLASLt,
 
 ---
 
-*Last updated: 2026-05-15. Verified against git commit `803b76f`.*
+## 10. File-Splitting Refactor (2026-05-15)
+
+**Status**: **DONE** — all splits verified, 110/110 tests pass, zero compilation errors.
+
+Large monolithic source files (>800 lines) were split into smaller, logically grouped files. All methods verified present via automated function-signature comparison against git originals.
+
+### 10.1 Split Summary
+
+| Original File | Lines | Split Into | New File Count |
+|---|---|---|---|
+| `src/api/cudart/cudart_shim.cpp` | 1429 | `cudart_shim.cpp` (994) + `cudart_memory_pool.cpp` (240) + `cudart_cooperative.cpp` (201) + `cudart_mipmap.cpp` (90) | 4 |
+| `src/api/cublas/cublas_level2.cpp` | 1018 | `cublas_level2.cpp` (455) + `cublas_level2_packed.cpp` (570) | 2 |
+| `src/api/cublas/cublas_level3.cpp` | 1173 | `cublas_level3.cpp` (1025) + `cublas_level3_blas3.cpp` (154) | 2 |
+| `src/api/cuda_interceptor.cpp` | 1147 | `cuda_interceptor.cpp` (869) + `cuda_interceptor_device.cpp` (309) | 2 |
+| `src/runtime/vector_engine.cpp` | 1163 | `vector_engine.cpp` (460) + `vector_engine_float.cpp` (371) + `vector_engine_double.cpp` (412) | 3 |
+| `src/core/graph/graph_manager.cpp` | 975 | `graph_manager.cpp` (228) + `graph_manager_nodes.cpp` (519) + `graph_manager_serde.cpp` (265) | 3 |
+| `src/advanced/adaptive_execution_engine.cpp` | 1082 | `adaptive_execution_engine.cpp` (489) + `adaptive_execution_engine_record.cpp` (251) + `adaptive_execution_engine_tune.cpp` (535) | 3 |
+| `src/advanced/hybrid_compute_manager.cpp` | 930 | `hybrid_compute_manager.cpp` (342) + `hybrid_compute_manager_remote.cpp` (288) + `hybrid_compute_manager_workload.cpp` (383) | 3 |
+
+### 10.2 Cross-File Dependencies Introduced
+
+| Dependency | Solution |
+|---|---|
+| `CUDAModuleRegistry` (cudart_shim.cpp) used by `cudart_cooperative.cpp` | Cross-file helpers: `vgre_lookup_kernel_name()`, `vgre_lookup_kernel_source()` |
+| `kVgreCudaVersion` (anonymous namespace) used by `cuda_interceptor_device.cpp` | Duplicated `constexpr` in anonymous namespace |
+| `cudaMemPool_t` typedef used by `cudart_memory_pool.cpp` | Duplicated `using` declaration |
+| `pickExplorationThreadCount` (anonymous namespace) used by `adaptive_execution_engine_tune.cpp` | Duplicated anonymous namespace block |
+| Batched BLAS3 functions call non-batched L3 functions | `extern "C"` forward declarations in `cublas_level3_blas3.cpp` |
+
+### 10.3 CMakeLists.txt Files Updated
+
+- `src/core/CMakeLists.txt` — added `graph_manager_nodes.cpp`, `graph_manager_serde.cpp`
+- `src/advanced/CMakeLists.txt` — added 4 split files (adaptive + hybrid)
+- `src/runtime/CMakeLists.txt` — added `vector_engine_float.cpp`, `vector_engine_double.cpp`
+- `src/api/CMakeLists.txt` — added `cuda_interceptor_device.cpp`, `cublas_level2_packed.cpp`, `cublas_level3_blas3.cpp`, `cudart_memory_pool.cpp`, `cudart_cooperative.cpp`, `cudart_mipmap.cpp`
+- `CMakeLists.txt` (top-level) — added `cuda_interceptor_device.cpp`, `cublas_level2_packed.cpp`, `cublas_level3_blas3.cpp` to `vgre_cudart` target
+
+---
+
+*Last updated: 2026-05-15. Verified against git commit `27eb76e`.*

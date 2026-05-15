@@ -437,12 +437,15 @@ add_library(vgre_cudart SHARED
     src/api/cuda_virtual_memory.cpp
     src/api/cuda_external_semaphore.cpp
     src/api/cuda_interceptor.cpp
+    src/api/cuda_interceptor_device.cpp
     src/api/cuda_interceptor_memory.cpp
     src/api/cuda_interceptor_graphs.cpp
     src/api/cublas/cublas_core.cpp
     src/api/cublas/cublas_level1.cpp
     src/api/cublas/cublas_level2.cpp
+    src/api/cublas/cublas_level2_packed.cpp
     src/api/cublas/cublas_level3.cpp
+    src/api/cublas/cublas_level3_blas3.cpp
     src/api/nccl/nccl_core.cpp
     src/api/nccl/nccl_communicator.cpp
     src/api/nccl/nccl_collectives.cpp

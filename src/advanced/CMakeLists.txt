@@ -1,6 +1,10 @@
 add_library(vgre_advanced OBJECT
     hybrid_compute_manager.cpp
+    hybrid_compute_manager_remote.cpp
+    hybrid_compute_manager_workload.cpp
     adaptive_execution_engine.cpp
+    adaptive_execution_engine_record.cpp
+    adaptive_execution_engine_tune.cpp
     memory_compression.cpp
     vendor/lz4/lz4.c
     runtime_profiler.cpp
