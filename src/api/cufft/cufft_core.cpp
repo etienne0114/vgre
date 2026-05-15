@@ -385,4 +385,52 @@ cufftResult_t cufftMakePlanMany(cufftHandle plan, int rank, int *n, int *inembed
     return CUFFT_SUCCESS;
 }
 
+// ── IPC plan export / import (F.7) ───────────────────────────────────────────
+// vgre_cufft_ipc_handle_t is a 64-byte struct that serialises a cuFFT plan
+// so it can be reconstructed in another process without re-planning.
+
+struct vgre_cufft_ipc_handle_t {
+    int32_t rank;
+    int32_t nx, ny, nz;
+    int32_t batch;
+    int32_t type;         // cufftType_t
+    uint8_t reserved[40]; // pad to 64 bytes
+};
+static_assert(sizeof(vgre_cufft_ipc_handle_t) == 64,
+              "cuFFT IPC handle must be exactly 64 bytes");
+
+cufftResult_t cufftGetPlanIpcHandle(cufftHandle plan,
+                                     vgre_cufft_ipc_handle_t *handle) {
+    if (!handle) return CUFFT_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_planMutex);
+    auto it = g_plans.find(static_cast<uint64_t>(plan));
+    if (it == g_plans.end()) return CUFFT_INVALID_PLAN;
+    const CufftPlan &p = it->second;
+    handle->rank  = p.rank;
+    handle->nx    = p.nx;
+    handle->ny    = p.ny;
+    handle->nz    = p.nz;
+    handle->batch = p.batch;
+    handle->type  = static_cast<int32_t>(p.type);
+    std::memset(handle->reserved, 0, sizeof(handle->reserved));
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftCreatePlanFromIpcHandle(cufftHandle *plan,
+                                            const vgre_cufft_ipc_handle_t *handle) {
+    if (!plan || !handle || handle->rank < 1 || handle->rank > 3)
+        return CUFFT_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_planMutex);
+    uint64_t id = g_nextPlanId++;
+    CufftPlan &p = g_plans[id];
+    p.rank  = handle->rank;
+    p.nx    = handle->nx;
+    p.ny    = handle->ny;
+    p.nz    = handle->nz;
+    p.batch = handle->batch;
+    p.type  = static_cast<cufftType_t>(handle->type);
+    *plan = static_cast<cufftHandle>(id);
+    return CUFFT_SUCCESS;
+}
+
 } // extern "C"

@@ -179,6 +179,12 @@ public:
     double connection_quality = 1.0;
     uint64_t last_heartbeat_ms = 0;
     std::chrono::steady_clock::time_point last_activity_time{std::chrono::steady_clock::now()};
+    // MT.6: Estimated clock offset of the remote peer relative to local clock.
+    // Positive = remote is ahead by this many microseconds.
+    // Populated by performClockSync() after the security handshake.
+    int64_t clock_offset_us{0};
+    // Pending T1 for clock sync computation (set when CLOCK_SYNC is sent).
+    int64_t clock_sync_t1_us{0};
     struct OutgoingPacket {
       std::vector<uint8_t> data;
       uint32_t priority;

@@ -215,6 +215,19 @@ void TCPClusterManager::handleNewInboundConnection() {
                         // channel immediately after sending the handshake ACK.
                         (void)send_packet_direct(client->socket_fd, PacketType::SECURE_READY,
                                                  nullptr, 0, nullptr);
+                        // MT.6: clock sync — record T1, send CLOCK_SYNC
+                        {
+                          int64_t t1 = static_cast<int64_t>(
+                              std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::system_clock::now().time_since_epoch()).count());
+                          client->clock_sync_t1_us = t1;
+                          ClockSyncPayload csp{t1};
+                          (void)send_packet_direct(client->socket_fd, PacketType::CLOCK_SYNC,
+                                                   &csp, sizeof(csp), nullptr);
+                          VGRE_LOG_DEBUG("TCPCluster",
+                              "Clock sync T1=" + std::to_string(t1) + " us sent to " +
+                              client->ip_address);
+                        }
                     } else {
                         std::lock_guard<std::recursive_mutex> llock(clients_mutex_);
                         client->active = false; vgre::common::vgre_close_socket(client->socket_fd);

@@ -1288,4 +1288,60 @@ Confirmed `executeOpsInline` in `runtime_engine_graph.cpp` already handles all 1
 
 ---
 
+### Phase 16 — IPC Handle Sharing + Cluster Clock Sync (2026-05-15)
+
+**Status**: **DONE**
+
+#### 16.1 cuRAND State IPC Handles (F.7)
+
+**File**: `src/api/curand/curand_core.cpp`
+
+**Implemented**:
+- `vgre_curand_ipc_handle_t` — 64-byte opaque struct embedding `seed`, `offset`, `rng_type`, `ordering`, `quasi_dims`, `scrambled`. `static_assert` enforces exact size.
+- `curandGetGeneratorIpcHandle(generator, handle)` — serialises deterministic state into the handle
+- `curandCreateGeneratorFromIpcHandle(generator, handle)` — creates new generator via `curandCreateGenerator`, then restores state by `engine.seed(seed); engine.discard(offset)`
+- The handle is a plain byte array — caller transfers it between processes by any mechanism (POSIX shm, file, socket, etc.)
+
+#### 16.2 cuFFT Plan IPC Handles (F.7)
+
+**File**: `src/api/cufft/cufft_core.cpp`
+
+**Implemented**:
+- `vgre_cufft_ipc_handle_t` — 64-byte opaque struct with `rank`, `nx/ny/nz`, `batch`, `type`. `static_assert` enforces exact size.
+- `cufftGetPlanIpcHandle(plan, handle)` — serialises plan parameters into handle
+- `cufftCreatePlanFromIpcHandle(plan, handle)` — recreates the plan in a new plan registry slot
+
+#### 16.3 Cluster-Wide Clock Synchronization (MT.6)
+
+**Files**: `include/vgre/advanced/tcp_cluster_protocol.h`, `include/vgre/advanced/tcp_cluster.h`, `src/advanced/tcp_cluster/server_loop_connection_handling.cpp`, `src/advanced/tcp_cluster/client_loop.cpp`, `src/advanced/tcp_cluster/server_packet_dispatch.cpp`, `src/advanced/tcp_cluster/shared_utilities_packets.cpp`
+
+**Implemented**:
+- `CLOCK_SYNC = 31` and `CLOCK_SYNC_REPLY = 32` added to `PacketType` enum
+- `ClockSyncPayload{int64_t t1_us}` and `ClockSyncReplyPayload{int64_t t1_us, t2_us, t3_us}` structs added to `tcp_cluster_protocol.h`
+- `ClientConnection::clock_offset_us` (int64_t) — stores estimated clock offset in µs
+- `ClientConnection::clock_sync_t1_us` (int64_t) — stores pending T1 during async reply
+- **Master side** (post-handshake thread): after `SECURE_READY` is sent, records T1 and sends `CLOCK_SYNC(T1)` immediately
+- **Worker side** (client_loop): after receiving `SECURE_READY`, also receives `CLOCK_SYNC`, records T2, sends `CLOCK_SYNC_REPLY(T1, T2, T3)` where T3 = send time
+- **Master side** (server_packet_dispatch): on `CLOCK_SYNC_REPLY`, records T4, computes `offset_us = ((T2-T1)+(T3-T4))/2` (standard NTP formula) and stores in `client->clock_offset_us`
+- `packetTypeToString` updated to handle `CLOCK_SYNC`/`CLOCK_SYNC_REPLY`
+
+#### 16.4 Documentation
+
+- `missingFeatures.md` F.6 → N/A (billing tracker, not OOM guard)
+- `missingFeatures.md` F.7 → ✅ DONE (cuRAND + cuFFT IPC handles)
+- `missingFeatures.md` F.8 → N/A (architectural boundary — BLAS/DNN not PTX kernels)
+- `missingFeatures.md` MT.6 → ✅ DONE (3-timestamp NTP clock sync)
+- `missingFeatures.md` MT.7 → N/A (collectives use TCPCluster path, not grid partitioner)
+
+| # | Feature | Status | Date |
+|---|---|---|---|
+| 16.1 | cuRAND generator IPC handle (export/import) | **DONE** | 2026-05-15 |
+| 16.2 | cuFFT plan IPC handle (export/import) | **DONE** | 2026-05-15 |
+| 16.3 | NTP-style cluster clock sync (CLOCK_SYNC/REPLY packets) | **DONE** | 2026-05-15 |
+| 16.4 | All remaining missingFeatures.md gaps resolved or marked N/A | **DONE** | 2026-05-15 |
+
+**All 110/110 CTests pass. All missingFeatures.md gaps are now DONE or explicitly N/A.**
+
+---
+
 **End of Document**

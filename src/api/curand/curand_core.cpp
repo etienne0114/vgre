@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <random>
 #include <unordered_map>
@@ -484,6 +485,63 @@ curandStatus_t curandGenerateSeeds(curandGenerator_t generator) {
     std::random_device rd;
     st->seed = (static_cast<unsigned long long>(rd()) << 32) | rd();
     st->engine.seed(st->seed);
+    return CURAND_STATUS_SUCCESS;
+}
+
+// ── IPC handle export / import (F.7) ─────────────────────────────────────────
+// vgre_curand_ipc_handle_t is a 64-byte opaque struct that serialises all
+// deterministic state needed to reconstruct a cuRAND generator in another
+// process.  The caller is responsible for transferring the bytes between
+// processes (file, socket, shared memory, etc.).
+//
+// The mt19937_64 engine is fully reproduced by re-seeding with 'seed' and
+// calling engine.discard(offset) — no internal MT state snapshot is required.
+
+struct vgre_curand_ipc_handle_t {
+    uint64_t seed;
+    uint64_t offset;
+    uint32_t rng_type;      // curandRngType_t
+    uint32_t ordering;      // curandOrdering_t
+    uint32_t quasi_dims;
+    uint32_t scrambled;
+    uint8_t  reserved[32];  // pad to 64 bytes
+};
+static_assert(sizeof(vgre_curand_ipc_handle_t) == 64,
+              "IPC handle must be exactly 64 bytes");
+
+curandStatus_t curandGetGeneratorIpcHandle(curandGenerator_t generator,
+                                            vgre_curand_ipc_handle_t *handle) {
+    if (!handle) return CURAND_STATUS_INVALID_VALUE;
+    auto *st = lookup(generator);
+    if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::lock_guard<std::mutex> lk(g_registryMutex);
+    handle->seed       = st->seed;
+    handle->offset     = st->offset;
+    handle->rng_type   = static_cast<uint32_t>(st->type);
+    handle->ordering   = static_cast<uint32_t>(st->ordering);
+    handle->quasi_dims = st->quasiDimensions;
+    handle->scrambled  = st->scrambled ? 1u : 0u;
+    std::memset(handle->reserved, 0, sizeof(handle->reserved));
+    return CURAND_STATUS_SUCCESS;
+}
+
+curandStatus_t curandCreateGeneratorFromIpcHandle(curandGenerator_t *generator,
+                                                   const vgre_curand_ipc_handle_t *handle) {
+    if (!generator || !handle) return CURAND_STATUS_INVALID_VALUE;
+    curandStatus_t r = curandCreateGenerator(generator,
+                           static_cast<curandRngType_t>(handle->rng_type));
+    if (r != CURAND_STATUS_SUCCESS) return r;
+    auto *st = lookup(*generator);
+    if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    st->seed             = handle->seed;
+    st->offset           = handle->offset;
+    st->ordering         = static_cast<curandOrdering_t>(handle->ordering);
+    st->quasiDimensions  = handle->quasi_dims;
+    st->scrambled        = (handle->scrambled != 0);
+    // Reconstruct exact engine position: seed then fast-forward.
+    st->engine.seed(handle->seed);
+    if (handle->offset > 0) st->engine.discard(handle->offset);
+    st->seeded = true;
     return CURAND_STATUS_SUCCESS;
 }
 

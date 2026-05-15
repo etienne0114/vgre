@@ -199,8 +199,54 @@ void TCPClusterManager::clientLoop() {
             continue;
           }
         }
+
+        // MT.6: receive CLOCK_SYNC from master, reply with CLOCK_SYNC_REPLY.
+        {
+          std::vector<uint8_t> csBuf;
+          bool csOk = true;
+          // The master sends CLOCK_SYNC immediately after SECURE_READY;
+          // use a short recv_exact to read the next VSBP frame.
+          if (!recv_exact(csBuf, sizeof(VSBPHeader))) csOk = false;
+          if (csOk) {
+            VSBPHeader csHdr{};
+            std::memcpy(&csHdr, csBuf.data(), sizeof(VSBPHeader));
+            if (PacketUtils::validateVSBPHeader(csHdr) &&
+                static_cast<PacketType>(csHdr.type) == PacketType::CLOCK_SYNC &&
+                csHdr.payloadSize == sizeof(ClockSyncPayload)) {
+              std::vector<uint8_t> csPay;
+              if (recv_exact(csPay, sizeof(ClockSyncPayload))) {
+                ClockSyncPayload cs;
+                std::memcpy(&cs, csPay.data(), sizeof(cs));
+                int64_t t2 = static_cast<int64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+                int64_t t3 = static_cast<int64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+                ClockSyncReplyPayload rpl{cs.t1_us, t2, t3};
+                // Send as plaintext (same pattern as SECURE_READY exchange)
+                auto replyPkt = PacketUtils::constructVSBPPacket(
+                    PacketType::CLOCK_SYNC_REPLY, &rpl, sizeof(rpl), 0);
+                auto fd = client_fd_;
+                size_t off = 0;
+                while (off < replyPkt.size()) {
+                  int n = send(fd,
+                               reinterpret_cast<const char *>(replyPkt.data() + off),
+                               static_cast<int>(replyPkt.size() - off), 0);
+                  if (n > 0) { off += n; continue; }
+                  break;
+                }
+                VGRE_LOG_DEBUG("TCPCluster",
+                    "Clock sync reply sent: T1=" + std::to_string(cs.t1_us) +
+                    " T2=" + std::to_string(t2) + " T3=" + std::to_string(t3));
+              }
+            }
+            // If CLOCK_SYNC is absent or malformed, continue without sync —
+            // offset remains 0 (master and worker use independent clocks).
+          }
+        }
       }
-      
+
       CapabilityPacket cpkt{};
       cpkt.cpu_cores = std::thread::hardware_concurrency();
 #if defined(_WIN32)
