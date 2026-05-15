@@ -443,7 +443,10 @@ add_library(vgre_cudart SHARED
     src/api/cublas/cublas_level1.cpp
     src/api/cublas/cublas_level2.cpp
     src/api/cublas/cublas_level3.cpp
-    src/api/nccl_shim.cpp
+    src/api/nccl/nccl_core.cpp
+    src/api/nccl/nccl_communicator.cpp
+    src/api/nccl/nccl_collectives.cpp
+    src/api/nccl/nccl_p2p.cpp
     src/api/curand/curand_core.cpp
     src/api/cufft/cufft_core.cpp
     src/api/cusparse/cusparse_core.cpp
