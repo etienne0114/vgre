@@ -155,13 +155,13 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 
 #### 3.4.1 cuFFT
 
-**File**: `src/api/cufft/cufft_core.cpp` (single file, not split)
+**File**: `src/api/cufft/cufft_core.cpp` (579 lines, single file)
 
-**Implemented**: `cufftPlan1d/2d/3d/Many`, `cufftDestroy`, `cufftExecC2C/Z2Z/R2C/C2R/D2Z/Z2D`, `cufftSetStream/WorkArea`
+**Implemented**: `cufftPlan1d/2d/3d/Many`, `cufftDestroy`, `cufftExecC2C/Z2Z/R2C/C2R/D2Z/Z2D`, `cufftSetStream/WorkArea`, `cufftEstimate*`, `cufftGetSize*`, `cufftMakePlanMany`, IPC plan export/import
 
-**Implementation**: Reference CPU DFT/IDFT (O(n²)) for 1D/2D/3D transforms. Correct for correctness testing and small workloads.
+**Implementation**: O(n log n) Cooley-Tukey radix-2 FFT for power-of-2 sizes + Bluestein's algorithm for arbitrary sizes. OpenMP-parallelized butterfly stages and batch/row/column loops. Optional FFTW3 delegation (`VGRE_HAS_FFTW3`, auto-detected by CMake `pkg_check_modules`). Plans stored in global handle map for reuse.
 
-**Still missing**: FFTW3/MKL delegation for large transforms. See `missingFeatures.md` §2.3.
+**Test**: `tests/api/test_cufft.cpp` — 11 tests (pow2 roundtrip, non-pow2, single-frequency, Z2Z double, R2C+C2R, D2Z+Z2D, batched, 2D, prime-size, Parseval, plan management). All pass.
 
 ---
 

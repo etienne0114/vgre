@@ -176,7 +176,22 @@ endif()
 find_package(Threads REQUIRED)
 # find_package(PkgConfig REQUIRED)
 # pkg_check_modules(LZ4 REQUIRED liblz4)
- 
+
+# ── Optional FFTW3 (fast FFT backend for cuFFT emulation) ───────────────────
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(FFTW3 QUIET fftw3)
+    pkg_check_modules(FFTW3F QUIET fftw3f)
+endif()
+if(FFTW3_FOUND AND FFTW3F_FOUND)
+    message(STATUS "Found FFTW3 — cuFFT will delegate to FFTW3 for O(n log n) transforms")
+    add_compile_definitions(VGRE_HAS_FFTW3)
+    link_libraries(${FFTW3_LIBRARIES} ${FFTW3F_LIBRARIES})
+    include_directories(${FFTW3_INCLUDE_DIRS})
+else()
+    message(STATUS "FFTW3 not found — cuFFT uses built-in Cooley-Tukey/Bluestein FFT (O(n log n))")
+endif()
+
 # ── LLVM & Support Dependencies ─────────────────────────────────────────────
 # Manually hint paths for LibEdit/CURL if CMake's default search misses them
 find_path(CURL_INCLUDE_DIR NAMES curl/curl.h PATHS /usr/include/x86_64-linux-gnu /usr/local/include)
