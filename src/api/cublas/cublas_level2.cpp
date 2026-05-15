@@ -1,6 +1,7 @@
 // cuBLAS level2 API functions
 
 #include "cublas_internal.h"
+#include "vgre/common/openmp_helper.h"
 
 extern "C" {
 
@@ -21,6 +22,9 @@ cublasStatus_t cublasSgemv_v2(
     bool doTrans = (trans != CUBLAS_OP_N);
     int rows = doTrans ? n : m;
     int cols = doTrans ? m : n;
+    #ifdef _OPENMP
+    #pragma omp parallel for if (rows > 64)
+    #endif
     for (int r = 0; r < rows; ++r) {
         float acc = 0.f;
         for (int c = 0; c < cols; ++c)
@@ -77,6 +81,9 @@ cublasStatus_t cublasSger_v2(cublasHandle_t handle, int m, int n,
 #if HAVE_CBLAS
     cblas_sger(CblasRowMajor, m, n, *alpha, x, incx, y, incy, A, lda);
 #else
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #endif
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < n; ++j)
             A[i*lda+j] += (*alpha) * x[i*incx] * y[j*incy];
@@ -92,6 +99,9 @@ cublasStatus_t cublasDger_v2(cublasHandle_t handle, int m, int n,
 #if HAVE_CBLAS
     cblas_dger(CblasRowMajor, m, n, *alpha, x, incx, y, incy, A, lda);
 #else
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #endif
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < n; ++j)
             A[i*lda+j] += (*alpha) * x[i*incx] * y[j*incy];
@@ -111,6 +121,9 @@ cublasStatus_t cublasSsymv_v2(cublasHandle_t handle, cublasFillMode_t uplo, int 
                   *alpha, A, lda, x, incx, *beta, y, incy);
 #else
     bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 64)
+    #endif
     for (int i = 0; i < n; ++i) {
         float t = 0;
         if (upper) {
@@ -137,6 +150,9 @@ cublasStatus_t cublasDsymv_v2(cublasHandle_t handle, cublasFillMode_t uplo, int 
                   *alpha, A, lda, x, incx, *beta, y, incy);
 #else
     bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 64)
+    #endif
     for (int i = 0; i < n; ++i) {
         double t = 0;
         if (upper) {
@@ -167,6 +183,9 @@ cublasStatus_t cublasSgbmv_v2(cublasHandle_t handle, cublasOperation_t trans,
 #else
     bool t = (trans != CUBLAS_OP_N);
     if (!t) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m > 64)
+        #endif
         for (int i = 0; i < m; ++i) {
             float sum = 0;
             int j0 = std::max(0, i - kl);
@@ -178,6 +197,9 @@ cublasStatus_t cublasSgbmv_v2(cublasHandle_t handle, cublasOperation_t trans,
             y[i*incy] = (*beta) * y[i*incy] + (*alpha) * sum;
         }
     } else {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (n > 64)
+        #endif
         for (int j = 0; j < n; ++j) {
             float sum = 0;
             int i0 = std::max(0, j - ku);
@@ -207,6 +229,9 @@ cublasStatus_t cublasDgbmv_v2(cublasHandle_t handle, cublasOperation_t trans,
 #else
     bool t = (trans != CUBLAS_OP_N);
     if (!t) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (m > 64)
+        #endif
         for (int i = 0; i < m; ++i) {
             double sum = 0;
             int j0 = std::max(0, i - kl);
@@ -218,6 +243,9 @@ cublasStatus_t cublasDgbmv_v2(cublasHandle_t handle, cublasOperation_t trans,
             y[i*incy] = (*beta) * y[i*incy] + (*alpha) * sum;
         }
     } else {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (n > 64)
+        #endif
         for (int j = 0; j < n; ++j) {
             double sum = 0;
             int i0 = std::max(0, j - ku);
@@ -244,6 +272,9 @@ cublasStatus_t cublasSsyr2_v2(cublasHandle_t handle, cublasFillMode_t uplo, int 
                 *alpha, x, incx, y, incy, A, lda);
 #else
     bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 64)
+    #endif
     for (int j = 0; j < n; ++j) {
         float temp1 = (*alpha) * x[j*incx];
         float temp2 = (*alpha) * y[j*incx];
@@ -269,6 +300,9 @@ cublasStatus_t cublasDsyr2_v2(cublasHandle_t handle, cublasFillMode_t uplo, int 
                 *alpha, x, incx, y, incy, A, lda);
 #else
     bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 64)
+    #endif
     for (int j = 0; j < n; ++j) {
         double temp1 = (*alpha) * x[j*incx];
         double temp2 = (*alpha) * y[j*incx];
@@ -336,10 +370,16 @@ cublasStatus_t cublasSsyr2k_v2(cublasHandle_t handle, cublasFillMode_t uplo,
                  (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
                  n, k, *alpha, A, lda, B, ldb, *beta, C, ldc);
 #else
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (n * n > 256)
+    #endif
     for (int i = 0; i < n; ++i)
         for (int j = 0; j < n; ++j)
             C[i*ldc+j] *= *beta;
     if (!t) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (n > 64)
+        #endif
         for (int i = 0; i < n; ++i)
             for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
                 float acc = 0;
@@ -348,6 +388,9 @@ cublasStatus_t cublasSsyr2k_v2(cublasHandle_t handle, cublasFillMode_t uplo,
                 C[i*ldc+j] += (*alpha) * acc;
             }
     } else {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (n > 64)
+        #endif
         for (int i = 0; i < n; ++i)
             for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
                 float acc = 0;
@@ -374,10 +417,16 @@ cublasStatus_t cublasDsyr2k_v2(cublasHandle_t handle, cublasFillMode_t uplo,
                  (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans,
                  n, k, *alpha, A, lda, B, ldb, *beta, C, ldc);
 #else
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (n * n > 256)
+    #endif
     for (int i = 0; i < n; ++i)
         for (int j = 0; j < n; ++j)
             C[i*ldc+j] *= *beta;
     if (!t) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (n > 64)
+        #endif
         for (int i = 0; i < n; ++i)
             for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
                 double acc = 0;
@@ -386,6 +435,9 @@ cublasStatus_t cublasDsyr2k_v2(cublasHandle_t handle, cublasFillMode_t uplo,
                 C[i*ldc+j] += (*alpha) * acc;
             }
     } else {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (n > 64)
+        #endif
         for (int i = 0; i < n; ++i)
             for (int j = upper ? i : 0; j < (upper ? n : i+1); ++j) {
                 double acc = 0;

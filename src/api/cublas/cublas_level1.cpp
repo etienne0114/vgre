@@ -1,6 +1,7 @@
 // cuBLAS level1 API functions
 
 #include "cublas_internal.h"
+#include "vgre/common/openmp_helper.h"
 
 extern "C" {
 
@@ -12,6 +13,9 @@ cublasStatus_t cublasSaxpy_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     cblas_saxpy(n, *alpha, x, incx, y, incy);
 #else
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 1024)
+    #endif
     for (int i = 0; i < n; ++i) y[i*incy] += (*alpha) * x[i*incx];
 #endif
     return CUBLAS_STATUS_SUCCESS;
@@ -24,6 +28,9 @@ cublasStatus_t cublasDaxpy_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     cblas_daxpy(n, *alpha, x, incx, y, incy);
 #else
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 1024)
+    #endif
     for (int i = 0; i < n; ++i) y[i*incy] += (*alpha) * x[i*incx];
 #endif
     return CUBLAS_STATUS_SUCCESS;
@@ -38,6 +45,9 @@ cublasStatus_t cublasSdot_v2(cublasHandle_t handle, int n,
     *result = cblas_sdot(n, x, incx, y, incy);
 #else
     float s = 0.f;
+    #ifdef _OPENMP
+    #pragma omp parallel for reduction(+:s) if (n > 1024)
+    #endif
     for (int i = 0; i < n; ++i) s += x[i*incx] * y[i*incy];
     *result = s;
 #endif
@@ -52,6 +62,9 @@ cublasStatus_t cublasDdot_v2(cublasHandle_t handle, int n,
     *result = cblas_ddot(n, x, incx, y, incy);
 #else
     double s = 0.0;
+    #ifdef _OPENMP
+    #pragma omp parallel for reduction(+:s) if (n > 1024)
+    #endif
     for (int i = 0; i < n; ++i) s += x[i*incx] * y[i*incy];
     *result = s;
 #endif
@@ -67,6 +80,9 @@ cublasStatus_t cublasSnrm2_v2(cublasHandle_t handle, int n,
     *result = cblas_snrm2(n, x, incx);
 #else
     float s = 0.f;
+    #ifdef _OPENMP
+    #pragma omp parallel for reduction(+:s) if (n > 1024)
+    #endif
     for (int i = 0; i < n; ++i) s += x[i*incx] * x[i*incx];
     *result = sqrtf(s);
 #endif
@@ -81,6 +97,9 @@ cublasStatus_t cublasSscal_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     cblas_sscal(n, *alpha, x, incx);
 #else
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 1024)
+    #endif
     for (int i = 0; i < n; ++i) x[i*incx] *= *alpha;
 #endif
     return CUBLAS_STATUS_SUCCESS;
@@ -93,6 +112,9 @@ cublasStatus_t cublasDscal_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     cblas_dscal(n, *alpha, x, incx);
 #else
+    #ifdef _OPENMP
+    #pragma omp parallel for if (n > 1024)
+    #endif
     for (int i = 0; i < n; ++i) x[i*incx] *= *alpha;
 #endif
     return CUBLAS_STATUS_SUCCESS;

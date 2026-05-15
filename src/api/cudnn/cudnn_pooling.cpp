@@ -2,6 +2,8 @@
 
 #include "cudnn_internal.h"
 
+#include "vgre/common/openmp_helper.h"
+
 extern "C" {
 
 cudnnStatus_t cudnnPoolingForward(
@@ -36,6 +38,9 @@ cudnnStatus_t cudnnPoolingForward(
     bool excludePad=(p->mode==CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING);
 
     std::vector<float> tmp(xt->n * xt->c * outH * outW, 0.f);
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) schedule(static) if (xt->n * xt->c * outH * outW > 1024)
+    #endif
     for(int n=0; n<xt->n; ++n)
     for(int c=0; c<xt->c; ++c)
     for(int oh=0; oh<outH; ++oh)

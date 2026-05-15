@@ -2,6 +2,8 @@
 
 #include "cudnn_internal.h"
 
+#include "vgre/common/openmp_helper.h"
+
 extern "C" {
 
 cudnnStatus_t cudnnActivationForward(cudnnHandle_t, cudnnActivationDescriptor_t actDesc,
@@ -28,6 +30,9 @@ cudnnStatus_t cudnnActivationForward(cudnnHandle_t, cudnnActivationDescriptor_t 
     }
 
     std::vector<float> tmp(Nx, 0.f);
+    #ifdef _OPENMP
+    #pragma omp parallel for if (Nx > 1024)
+    #endif
     for (int i = 0; i < Nx; ++i)
         tmp[i] = applyActivation(xf[i], *act);
 
@@ -38,6 +43,9 @@ cudnnStatus_t cudnnActivationForward(cudnnHandle_t, cudnnActivationDescriptor_t 
         for (int i = 0; i < Nx; ++i)
             yi[i] = vgre_quant_f32_to_i8(tmp[i], invOutScale);
     } else {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (Nx > 1024)
+        #endif
         for (int i = 0; i < Nx; ++i)
             yf[i] = a * tmp[i] + b * yf[i];
     }

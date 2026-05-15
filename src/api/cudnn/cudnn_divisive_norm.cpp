@@ -9,6 +9,7 @@
 //   cudnnDivisiveNormalizationBackward
 
 #include "cudnn_internal.h"
+#include "vgre/common/openmp_helper.h"
 #include <cmath>
 #include <vector>
 
@@ -50,6 +51,9 @@ cudnnStatus_t cudnnDivisiveNormalizationForward(
     const double beta = 0.5;
     const int    pad  = 1;  // 3x3 spatial window
 
+    #ifdef _OPENMP
+    #pragma omp parallel for if (N * C > 4)
+    #endif
     for (int n = 0; n < N; ++n)
     for (int c = 0; c < C; ++c) {
         // Build local mean map
@@ -117,6 +121,9 @@ cudnnStatus_t cudnnDivisiveNormalizationBackward(
     const double beta = 0.5;
     const int    pad  = 1;
 
+    #ifdef _OPENMP
+    #pragma omp parallel for if (N * C > 4)
+    #endif
     for (int n = 0; n < N; ++n)
     for (int c = 0; c < C; ++c) {
         // Precompute D = (mu^2 + eps)^beta

@@ -15,9 +15,7 @@
 #include <thread>
 #include <vector>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
+#include "vgre/common/openmp_helper.h"
 
 // Signal-safe bandwidth recorder: no-ops if the RuntimeEngine singleton isn't
 // initialized yet (e.g. during AdaptiveExecutionEngine calibration at startup).

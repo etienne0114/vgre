@@ -7,6 +7,8 @@
 #include "vgre/common/logger.h"
 #include "vgre/compiler/cpu_cuda_fp16.h"
 
+#include "vgre/common/openmp_helper.h"
+
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -105,6 +107,9 @@ void csr_spmv(cusparseOperation_t op, const T *alpha, const CsrMat &A,
     int64_t m = trans ? A.cols : A.rows;
     int64_t n = trans ? A.rows : A.cols;
 
+    #ifdef _OPENMP
+    #pragma omp parallel for schedule(guided) if (m > 256)
+    #endif
     for (int64_t i = 0; i < m; ++i) {
         T sum = T{};
         int64_t rowStart = getIdx(A.rowOffsets, A.rowOffsetType, i) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
@@ -136,8 +141,14 @@ void csr_spmm(cusparseOperation_t opA, cusparseOperation_t opB,
     int64_t n = transB ? B.rows : B.cols;
 
     // Zero C
+    #ifdef _OPENMP
+    #pragma omp parallel for if (m * n > 1024)
+    #endif
     for (int64_t i = 0; i < m * n; ++i) static_cast<T*>(C.values)[i] = T{};
 
+    #ifdef _OPENMP
+    #pragma omp parallel for schedule(guided) if (m > 64)
+    #endif
     for (int64_t i = 0; i < m; ++i) {
         int64_t rowStart = getIdx(A.rowOffsets, A.rowOffsetType, i) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
         int64_t rowEnd   = getIdx(A.rowOffsets, A.rowOffsetType, i + 1) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);

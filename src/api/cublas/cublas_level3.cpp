@@ -2,6 +2,8 @@
 
 #include "cublas_internal.h"
 
+#include "vgre/common/openmp_helper.h"
+
 // ── Cache-blocked reference GEMM (external linkage) ──────────────────────────
 void refSgemm(bool tA, bool tB,
     int M, int N, int K,
@@ -24,10 +26,16 @@ void refSgemm(bool tA, bool tB,
         return;
     }
     if (beta != 1.0f) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (M * N > 1024)
+        #endif
         for (int m = 0; m < M; ++m)
         for (int n = 0; n < N; ++n)
             C[m*ldc+n] = (beta == 0.0f) ? 0.0f : beta * C[m*ldc+n];
     }
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) schedule(static) if (M * N * K > 4096)
+    #endif
     for (int m0 = 0; m0 < M; m0 += kTile)
     for (int n0 = 0; n0 < N; n0 += kTile)
     for (int k0 = 0; k0 < K; k0 += kTile) {
@@ -68,10 +76,16 @@ void refDgemm(bool tA, bool tB,
         return;
     }
     if (beta != 1.0) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if (M * N > 1024)
+        #endif
         for (int m = 0; m < M; ++m)
         for (int n = 0; n < N; ++n)
             C[m*ldc+n] = (beta == 0.0) ? 0.0 : beta * C[m*ldc+n];
     }
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) schedule(static) if (M * N * K > 4096)
+    #endif
     for (int m0 = 0; m0 < M; m0 += kTile)
     for (int n0 = 0; n0 < N; n0 += kTile)
     for (int k0 = 0; k0 < K; k0 += kTile) {

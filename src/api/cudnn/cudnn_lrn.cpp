@@ -12,6 +12,7 @@
 // where the sum is over j = [c - floor((N-1)/2), c + floor(N/2)] clipped to [0,C-1].
 
 #include "cudnn_internal.h"
+#include "vgre/common/openmp_helper.h"
 #include <cmath>
 #include <vector>
 
@@ -96,6 +97,9 @@ cudnnStatus_t cudnnLRNCrossChannelForward(
     const int halfWindow = static_cast<int>(lrnN) / 2;
 
     // Compute scale and output in one pass
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (N * H * W > 256)
+    #endif
     for (int n = 0; n < N; ++n)
     for (int h = 0; h < H; ++h)
     for (int w = 0; w < W; ++w) {
@@ -167,6 +171,9 @@ cudnnStatus_t cudnnLRNCrossChannelBackward(
     std::vector<double> scale(N * C * H * W);
     std::vector<double> xOverScale(N * C * H * W);
 
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (N * C * H * W > 256)
+    #endif
     for (int n = 0; n < N; ++n)
     for (int h = 0; h < H; ++h)
     for (int w = 0; w < W; ++w)
@@ -200,6 +207,9 @@ cudnnStatus_t cudnnLRNCrossChannelBackward(
     // Note: scale_j = (k + alpha/N * S_j)^beta, so (k + alpha/N * S_j) = scale_j^(1/beta)
     // For simplicity we compute the summation term directly.
 
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (N * H * W > 256)
+    #endif
     for (int n = 0; n < N; ++n)
     for (int h = 0; h < H; ++h)
     for (int w = 0; w < W; ++w) {

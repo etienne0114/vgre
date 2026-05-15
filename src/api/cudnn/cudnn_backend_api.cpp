@@ -4,6 +4,7 @@
 // For unimplemented operations, returns CUDNN_STATUS_NOT_SUPPORTED.
 
 #include "cudnn_internal.h"
+#include "vgre/common/openmp_helper.h"
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
@@ -725,6 +726,9 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             const float* xf = static_cast<const float*>(xPtr);
             float* meanOut = static_cast<float*>(yPtr);
             float* varOut  = meanOut + C;
+            #ifdef _OPENMP
+            #pragma omp parallel for if (C > 4)
+            #endif
             for (int c = 0; c < C; ++c) {
                 double sum = 0.0, sq = 0.0;
                 for (int n = 0; n < N; ++n)

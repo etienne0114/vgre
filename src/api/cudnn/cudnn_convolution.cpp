@@ -2,6 +2,8 @@
 
 #include "cudnn_internal.h"
 
+#include "vgre/common/openmp_helper.h"
+
 // Algorithm selection
 static cudnnConvolutionFwdAlgo_t selectConvFwdAlgo(
     const TensorDesc* x, const FilterDesc* f, const ConvDesc* cv)
@@ -122,6 +124,9 @@ cudnnStatus_t cudnnConvolutionForward(
         && ft->r == 1 && ft->s == 1) {
         const float* xf = xPtr;
         const float* wf = wPtr;
+        #ifdef _OPENMP
+        #pragma omp parallel for collapse(2) schedule(static) if (xt->n * ft->k * yt->h * yt->w > 1024)
+        #endif
         for (int n = 0; n < xt->n; ++n)
         for (int k = 0; k < ft->k; ++k)
         for (int oh = 0; oh < yt->h; ++oh)
@@ -213,6 +218,9 @@ cudnnStatus_t cudnnConvolutionBackwardData(
         && cv->pad_h == 0 && cv->pad_w == 0 && cv->dil_h == 1 && cv->dil_w == 1) {
         const float* dyf = (const float*)dy;
         const float* wf = (const float*)w;
+        #ifdef _OPENMP
+        #pragma omp parallel for collapse(2) schedule(static) if (dxt->n * dxt->c * dxt->h * dxt->w > 1024)
+        #endif
         for (int n = 0; n < dxt->n; ++n)
         for (int c = 0; c < dxt->c; ++c)
         for (int h = 0; h < dxt->h; ++h)
