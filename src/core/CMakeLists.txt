@@ -17,6 +17,8 @@ add_library(vgre_core OBJECT
     runtime_engine_graph.cpp
     runtime_engine_graph_extended.cpp
     graph/graph_manager.cpp
+    graph/graph_manager_nodes.cpp
+    graph/graph_manager_serde.cpp
     graph_optimizer.cpp
     graph/graph_manager_extended_nodes.cpp
     graph/graph_manager_introspection.cpp

@@ -1,5 +1,6 @@
 add_library(vgre_api OBJECT
     cuda_interceptor.cpp
+    cuda_interceptor_device.cpp
     cuda_interceptor_memory.cpp
     cuda_interceptor_graphs.cpp
     cuda_ipc_memory.cpp
@@ -8,7 +9,9 @@ add_library(vgre_api OBJECT
     cublas/cublas_core.cpp
     cublas/cublas_level1.cpp
     cublas/cublas_level2.cpp
+    cublas/cublas_level2_packed.cpp
     cublas/cublas_level3.cpp
+    cublas/cublas_level3_blas3.cpp
     cublas/cublas_hermitian.cpp
     cudnn/cudnn_core.cpp
     cudnn/cudnn_convolution.cpp
@@ -48,6 +51,9 @@ add_library(vgre_cudart_shims OBJECT
     cudart/cudart_shim_texture_objects.cpp
     cudart/cudart_shim_device_attrs.cpp
     cudart/cudart_shim_external_memory.cpp
+    cudart/cudart_memory_pool.cpp
+    cudart/cudart_cooperative.cpp
+    cudart/cudart_mipmap.cpp
 )
 target_include_directories(vgre_cudart_shims PUBLIC
     ${PROJECT_SOURCE_DIR}/include

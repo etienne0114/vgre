@@ -25,6 +25,7 @@
 | cuSPARSE | CSR SpMV/SpMM | CSR SpMV/SpMM | Missing: format conversions (CSR↔CSC↔COO), sparse triangular solve, sparse factorization |
 | cuBLASLt | Basic matmul + epilogues | Basic matmul + ReLU/GELU/Bias | Missing: more complex fused epilogues, heuristic selection, algorithm caching |
 | Profiling | Kernel timeline + Chrome trace | Kernel timeline + Chrome trace | `InstructionSample` is heuristic-only (no hardware PC counter). No separate `src/advanced/profiling/` directory — all in `runtime_profiler.cpp` |
+| File Organization | All large files split | **DONE** | 8 monolithic files (>800 lines) split into 22 smaller files. All 353 functions verified present. 110/110 tests pass |
 | K8s Plugin | Go gRPC | Go gRPC | Basic daemonset; no dynamic device discovery |
 | SLURM GRES | C shared lib | C shared lib | Basic vGPU allocation tracker |
 
@@ -185,7 +186,25 @@ The following items were **previously claimed as separate files** in `implementa
 
 ---
 
-## 6. Recommendations
+## 6. Resolved Items (2026-05-15)
+
+The following items that were previously potential concerns have been resolved:
+
+| Item | Resolution | Date |
+|---|---|---|
+| Monolithic file maintainability | 8 files (>800 lines) split into 22 smaller files with zero method loss | 2026-05-15 |
+| `cudart_shim.cpp` too large (1429 lines) | Split into 4 files: core (994), memory_pool (240), cooperative (201), mipmap (90) | 2026-05-15 |
+| `cublas_level2.cpp` too large (1018 lines) | Split into standard (455) + packed/banded (570) | 2026-05-15 |
+| `cublas_level3.cpp` too large (1173 lines) | Split into GEMM/core (1025) + batched BLAS3 (154) | 2026-05-15 |
+| `cuda_interceptor.cpp` too large (1147 lines) | Split into core (869) + device attrs (309) | 2026-05-15 |
+| `vector_engine.cpp` too large (1163 lines) | Split into core (460) + float ops (371) + double ops (412) | 2026-05-15 |
+| `graph_manager.cpp` too large (975 lines) | Split into lifecycle (228) + nodes (519) + serde (265) | 2026-05-15 |
+| `adaptive_execution_engine.cpp` too large (1082 lines) | Split into core (489) + record (251) + tune (535) | 2026-05-15 |
+| `hybrid_compute_manager.cpp` too large (930 lines) | Split into core (342) + remote (288) + workload (383) | 2026-05-15 |
+
+---
+
+## 7. Recommendations
 
 1. **Complex BLAS** is the largest functional gap for PyTorch/TensorFlow complex tensor support. Priority: **High**.
 2. **cuFFT FFTW3 delegation** would make the library usable for real workloads. Priority: **High**.
@@ -195,7 +214,8 @@ The following items were **previously claimed as separate files** in `implementa
 6. **cuDNN Backend attention routing** is needed for frameworks using Backend API exclusively. Priority: **Low** (legacy attention API works).
 7. **Cross-platform discipline**: New OS-dependent code must use `*_linux.cpp` / `*_macos.cpp` / `*_win32.cpp` split pattern.
 8. **Memory discipline**: Every new memory allocation goes through `MemoryManager`. Every new compute path integrates with `AdaptiveExecutionEngine`.
+9. **File size discipline**: No source file should exceed 800 lines for shims or 600 lines for core logic. Split by concern when approaching limits.
 
 ---
 
-*Last updated: 2026-05-15. Verified against git commit `803b76f`.*
+*Last updated: 2026-05-15. Verified against git commit `27eb76e`.*
