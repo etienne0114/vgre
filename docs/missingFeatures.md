@@ -15,7 +15,7 @@
 | CUDA Graphs | All node types | All 11 node types | Exec update v2 exists in interceptor, not a separate file |
 | PTX ISA | ~120 instructions | ~110 instructions | Core arithmetic, warp, atomics, MMA (Ampere/Hopper/Blackwell), TMA, texture, grid.sync all present |
 | cuBLAS (real) | Level 1/2/3 complete | Level 1/2/3 complete | S/D variants + Hermitian (Cherk/Zherk/Cher2k/Zher2k/Chemm/Zhemm) all implemented |
-| cuBLAS (complex) | Listed in docs | **NOT IMPLEMENTED** | No C/Z Level-1/2/3 GEMM/GEMV/AXPY/DOT/SCAL/NRM2/ROT |
+| cuBLAS (complex) | Listed in docs | **IMPLEMENTED** | C/Z Level-1/2/3: GEMM, GEMV, AXPY, DOT, SCAL, NRM2, ROT, COPY, SWAP, TRSV, GER, TRSM, SYRK, SYR2K, SYMM, TRMM all present |
 | cuDNN (legacy) | All major ops | All major ops | Fwd/bwd for conv, pool, activation, softmax, BN, dropout, RNN, attention, LRN, divisive norm, CTC loss, tensor ops |
 | cuDNN Backend API | Wired to legacy | Partially wired | Handles conv, activation, pool, softmax, reduction, matmul, BN, norm, RNN, concat, signal, gen_stats, bn_bwd_weights. **No attention routing.** |
 | NCCL | P2P + collectives | P2P + collectives | Single-node shared-memory; multi-node routes through TCPCluster (functional but not RDMA-optimized) |
@@ -35,21 +35,33 @@
 
 ### 2.1 Complex BLAS (cuBLAS C/Z precisions)
 
-**Status**: **COMPLETELY MISSING**. No `cublasC*` or `cublasZ*` routines exist in any source file.
+**Status**: **IMPLEMENTED** (2026-05-15). All core C/Z routines are in `src/api/cublas/cublas_complex.cpp`.
 
-| Missing API | Impact | Notes |
+| Implemented API | Level | Notes |
 |---|---|---|
-| `cublasCgemm` / `cublasZgemm` | Blocks PyTorch complex linear layers | No complex GEMM in `cublas_level3.cpp` |
-| `cublasCgemv` / `cublasZgemv` | Blocks complex matrix-vector ops | No complex GEMV |
-| `cublasCaxpy` / `cublasZaxpy` | Blocks complex vector ops | No complex Level-1 |
-| `cublasCdotc` / `cublasZdotc` | Blocks complex dot products | Hermitian dot product not implemented |
-| `cublasCscal` / `cublasZscal` | Blocks complex vector scaling | |
-| `cublasCcopy` / `cublasZcopy` | Blocks complex vector copy | |
-| `cublasCtrsv` / `cublasZtrsv` | Blocks complex triangular solve | |
-| `cublasCsyrk` / `cublasZsyrk` | Blocks complex symmetric rank-k | |
-| `cublasChemm`/`cublasCherk`/`cublasCher2k` | Hermitian variants **ARE implemented** | `src/api/cublas/cublas_hermitian.cpp` |
+| `cublasCgemm_v2` / `cublasZgemm_v2` | L3 | Full complex GEMM with op(A), op(B) support incl. conjugate transpose |
+| `cublasCgemv_v2` / `cublasZgemv_v2` | L2 | Complex matrix-vector multiply with N/T/C transpose |
+| `cublasCaxpy_v2` / `cublasZaxpy_v2` | L1 | Complex vector AXPY |
+| `cublasCdotc_v2` / `cublasZdotc_v2` | L1 | Conjugated dot product |
+| `cublasCdotu_v2` / `cublasZdotu_v2` | L1 | Unconjugated dot product |
+| `cublasCscal_v2` / `cublasZscal_v2` / `cublasCsscal_v2` / `cublasZdscal_v2` | L1 | Complex and real-scaled complex |
+| `cublasCcopy_v2` / `cublasZcopy_v2` | L1 | Complex vector copy |
+| `cublasCswap_v2` / `cublasZswap_v2` | L1 | Complex vector swap |
+| `cublasScnrm2_v2` / `cublasDznrm2_v2` | L1 | Complex Euclidean norm |
+| `cublasIcamax_v2` / `cublasIzamax_v2` | L1 | Index of max absolute value |
+| `cublasScasum_v2` / `cublasDzasum_v2` | L1 | Sum of absolute values |
+| `cublasCrot_v2` / `cublasZrot_v2` | L1 | Complex plane rotation |
+| `cublasCtrsv_v2` / `cublasZtrsv_v2` | L2 | Complex triangular solve |
+| `cublasCgeru_v2` / `cublasZgeru_v2` | L2 | Unconjugated rank-1 update |
+| `cublasCgerc_v2` / `cublasZgerc_v2` | L2 | Conjugated rank-1 update |
+| `cublasCsyrk_v2` / `cublasZsyrk_v2` | L3 | Complex symmetric rank-k |
+| `cublasCsyr2k_v2` / `cublasZsyr2k_v2` | L3 | Complex symmetric rank-2k |
+| `cublasCtrsm_v2` / `cublasZtrsm_v2` | L3 | Complex triangular solve (matrix) |
+| `cublasCsymm_v2` / `cublasZsymm_v2` | L3 | Complex symmetric matrix multiply |
+| `cublasCtrmm_v2` / `cublasZtrmm_v2` | L3 | Complex triangular matrix multiply |
+| `cublasChemm`/`cublasCherk`/`cublasCher2k` | L3 | Hermitian variants (pre-existing in `cublas_hermitian.cpp`) |
 
-**Implementation path**: Add `cuComplex`/`cuDoubleComplex` reference loops alongside existing S/D paths. Can reuse existing CBLAS if linked against complex LAPACK.
+All 21 test cases pass. OpenMP parallelization enabled for CGEMM/ZGEMM.
 
 ---
 
