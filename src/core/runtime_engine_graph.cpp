@@ -1,5 +1,6 @@
 #include "vgre/core/runtime_engine.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
+#include "vgre/advanced/runtime_profiler.h"
 #include "vgre/common/logger.h"
 #include "vgre/core/event.h"
 #include "vgre/core/graph_manager.h"
@@ -170,6 +171,7 @@ static void executeOpsInline(const std::vector<NativeGraphOperation> &ops,
       if (!op.dst || op.memsetWidth == 0 || op.memsetHeight == 0) continue;
       auto *base = static_cast<uint8_t *>(op.dst);
       size_t depth = (op.memsetDepth == 0) ? 1 : op.memsetDepth;
+      auto ms0 = std::chrono::steady_clock::now();
       for (size_t d = 0; d < depth; ++d) {
         for (size_t h = 0; h < op.memsetHeight; ++h) {
           // Slice offset: d * (pitch * height); row offset: h * pitch.
@@ -178,13 +180,55 @@ static void executeOpsInline(const std::vector<NativeGraphOperation> &ops,
                       op.memsetValue, op.memsetWidth);
         }
       }
+      {
+        auto ms1 = std::chrono::steady_clock::now();
+        auto &profiler = vgre::advanced::RuntimeProfiler::instance();
+        if (profiler.isEnabled()) {
+          size_t bytes = op.memsetPitch * op.memsetHeight * depth;
+          double dur = std::chrono::duration<double, std::milli>(ms1 - ms0).count();
+          vgre::advanced::ProfileEvent pev;
+          pev.kernelName = "graph::memset";
+          pev.durationMs = dur;
+          pev.memoryBytes = bytes;
+          pev.throughputGBps = (dur > 0.0) ? (bytes / 1e9) / (dur / 1000.0) : 0.0;
+          pev.timestamp = ms1;
+          profiler.recordEvent(pev);
+          mm->recordMemoryBandwidth(bytes, dur);
+        }
+      }
 
     } else if (op.type == GraphNodeType::HOST) {
+      auto ms0 = std::chrono::steady_clock::now();
       if (op.hostFn) op.hostFn(op.hostUserData);
+      {
+        auto ms1 = std::chrono::steady_clock::now();
+        auto &profiler = vgre::advanced::RuntimeProfiler::instance();
+        if (profiler.isEnabled()) {
+          double dur = std::chrono::duration<double, std::milli>(ms1 - ms0).count();
+          vgre::advanced::ProfileEvent pev;
+          pev.kernelName = "graph::host";
+          pev.durationMs = dur;
+          pev.timestamp = ms1;
+          profiler.recordEvent(pev);
+        }
+      }
 
     } else if (op.type == GraphNodeType::CHILD) {
       // Child graph body was pre-compiled into op.bodyExec.
+      auto ms0 = std::chrono::steady_clock::now();
       if (op.bodyExec) op.bodyExec(exec, mm);
+      {
+        auto ms1 = std::chrono::steady_clock::now();
+        auto &profiler = vgre::advanced::RuntimeProfiler::instance();
+        if (profiler.isEnabled()) {
+          double dur = std::chrono::duration<double, std::milli>(ms1 - ms0).count();
+          vgre::advanced::ProfileEvent pev;
+          pev.kernelName = "graph::child";
+          pev.durationMs = dur;
+          pev.timestamp = ms1;
+          profiler.recordEvent(pev);
+        }
+      }
 
     } else if (op.type == GraphNodeType::EMPTY) {
       // No-op dependency placeholder — nothing to do.
@@ -194,6 +238,14 @@ static void executeOpsInline(const std::vector<NativeGraphOperation> &ops,
       if (op.eventHandle) {
         auto *ev = static_cast<vgre::core::Event *>(op.eventHandle);
         ev->record(0 /*streamId*/);
+        auto &profiler = vgre::advanced::RuntimeProfiler::instance();
+        if (profiler.isEnabled()) {
+          vgre::advanced::ProfileEvent pev;
+          pev.kernelName = "graph::event_record";
+          pev.durationMs = 0.0;
+          pev.timestamp = std::chrono::steady_clock::now();
+          profiler.recordEvent(pev);
+        }
       }
 
     } else if (op.type == GraphNodeType::EVENT_WAIT) {

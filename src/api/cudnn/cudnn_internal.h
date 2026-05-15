@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include "vgre/advanced/adaptive_execution_engine.h"
+#include "vgre/advanced/runtime_profiler.h"
 #include "vgre/common/logger.h"
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -11,6 +14,34 @@
 #include <algorithm>
 #include <vector>
 #include <random>
+
+// Thin RAII timer for cuDNN operations — records AEE and profiler events.
+struct VgreDnnTimed {
+    const char *name;
+    size_t flops;
+    size_t bytes;
+    std::chrono::steady_clock::time_point t0{std::chrono::steady_clock::now()};
+    VgreDnnTimed(const char *n, size_t f, size_t b) : name(n), flops(f), bytes(b) {}
+    ~VgreDnnTimed() {
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+        if (ms <= 0.0) return;
+        vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
+            name, 1, 1, ms, bytes, flops);
+        auto &prof = vgre::advanced::RuntimeProfiler::instance();
+        if (prof.isEnabled()) {
+            vgre::advanced::ProfileEvent pev;
+            pev.kernelName   = name;
+            pev.durationMs   = ms;
+            pev.memoryBytes  = bytes;
+            pev.flops        = flops;
+            pev.throughputGBps = (bytes > 0) ? (bytes / 1e9) / (ms / 1000.0) : 0.0;
+            pev.gflops         = (flops > 0) ? (flops / 1e9) / (ms / 1000.0) : 0.0;
+            pev.timestamp    = std::chrono::steady_clock::now();
+            prof.recordEvent(pev);
+        }
+    }
+};
 
 // ── cuDNN type stubs (no cudnn.h needed) ─────────────────────────────────────
 typedef int    cudnnStatus_t;

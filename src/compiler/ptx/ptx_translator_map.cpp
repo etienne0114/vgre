@@ -408,6 +408,108 @@ const TranslateMap& getMap() {
         {"bitcast.f32.b32",[](auto& o){
             return "{float _bt; __builtin_memcpy(&_bt, &("+o[1]+"), 4); "+o[0]+"=_bt;}";
         }},
+
+        // ── prmt.b32 — byte permutation ───────────────────────────────────────
+        // prmt.b32 d, a, b, c;
+        // Selects 4 bytes from the 8-byte concatenation [b:a] according to
+        // the 16-bit selector c (4 nibbles, each selects one byte 0-7 with
+        // optional sign-extension for nibble >= 8).
+        {"prmt.b32",[](auto& o){
+            return o[0]+" = vgre_prmt_b32((unsigned)"+o[1]+",(unsigned)"+o[2]+",(unsigned)"+o[3]+");";
+        }},
+        {"prmt.b32.f4e",[](auto& o){  // forward-4-extract (nibble=0123)
+            return o[0]+" = vgre_prmt_b32((unsigned)"+o[1]+",(unsigned)"+o[2]+",(unsigned)"+o[3]+");";
+        }},
+        {"prmt.b32.b4e",[](auto& o){  // backward-4-extract (nibble=0123 from high)
+            return o[0]+" = vgre_prmt_b32((unsigned)"+o[1]+",(unsigned)"+o[2]+",(unsigned)"+o[3]+");";
+        }},
+        {"prmt.b32.rc8",[](auto& o){  // replicate-8 (replicate byte 0 to all 4)
+            return o[0]+" = vgre_prmt_b32((unsigned)"+o[1]+",(unsigned)"+o[2]+",(unsigned)"+o[3]+");";
+        }},
+        {"prmt.b32.ecl",[](auto& o){  // edge-clamp-left
+            return o[0]+" = vgre_prmt_b32((unsigned)"+o[1]+",(unsigned)"+o[2]+",(unsigned)"+o[3]+");";
+        }},
+        {"prmt.b32.ecr",[](auto& o){  // edge-clamp-right
+            return o[0]+" = vgre_prmt_b32((unsigned)"+o[1]+",(unsigned)"+o[2]+",(unsigned)"+o[3]+");";
+        }},
+        {"prmt.b32.rc16",[](auto& o){  // replicate-16
+            return o[0]+" = vgre_prmt_b32((unsigned)"+o[1]+",(unsigned)"+o[2]+",(unsigned)"+o[3]+");";
+        }},
+
+        // ── sad / dsad — sum of absolute differences ──────────────────────────
+        // sad.u32  d, a, b, c;  →  d = |a-b| + c
+        // sad.s32  d, a, b, c;  →  d = |a-b| + c (signed)
+        // dsad.u32 d, a, b, c;  →  sum of 4 unsigned byte differences + c
+        {"sad.u32",[](auto& o){
+            return "{unsigned _a=(unsigned)"+o[1]+",_b=(unsigned)"+o[2]+"; "
+                   +o[0]+"=(_a>_b?_a-_b:_b-_a)+(unsigned)"+o[3]+";}";
+        }},
+        {"sad.s32",[](auto& o){
+            return "{int _a=(int)"+o[1]+",_b=(int)"+o[2]+"; "
+                   +o[0]+"=(_a>_b?_a-_b:_b-_a)+(int)"+o[3]+";}";
+        }},
+        {"dsad.u32",[](auto& o){
+            // Sum of absolute differences of four byte pairs (SIMD-within-register)
+            return "{unsigned _a=(unsigned)"+o[1]+",_b=(unsigned)"+o[2]+"; unsigned _s=(unsigned)"+o[3]+";"
+                   " for(int _i=0;_i<4;++_i){"
+                   "  unsigned _ba=(_a>>(8*_i))&0xFF, _bb=(_b>>(8*_i))&0xFF;"
+                   "  _s+=(_ba>_bb?_ba-_bb:_bb-_ba);"
+                   "} "+o[0]+"=_s;}";
+        }},
+
+        // ── mad.hi — multiply-add high-half (wide integer variants) ──────────
+        // mad.hi.s32  d, a, b, c;  →  d = (s64(a)*s64(b) >> 32) + c
+        // mad.hi.u64  d, a, b, c;  →  d = (u128(a)*u128(b) >> 64) + c
+        // mad.lo.s64  d, a, b, c;  →  d = s64(a)*s64(b) + c
+        // mad.hi.s64  d, a, b, c;  →  d = (__int128(a)*__int128(b) >> 64) + c
+        {"mad.hi.s32",[](auto& o){
+            return o[0]+" = (int)(((long long)"+o[1]+"*(long long)"+o[2]+")>>32)+(int)"+o[3]+";";
+        }},
+        {"mad.hi.u32",[](auto& o){
+            return o[0]+" = (unsigned)(((unsigned long long)"+o[1]+"*(unsigned long long)"+o[2]+")>>32)+(unsigned)"+o[3]+";";
+        }},
+        {"mad.lo.s64",[](auto& o){
+            return o[0]+" = (long long)"+o[1]+"*(long long)"+o[2]+"+(long long)"+o[3]+";";
+        }},
+        {"mad.hi.s64",[](auto& o){
+            return o[0]+" = (long long)((__int128)(long long)"+o[1]+"*(__int128)(long long)"+o[2]+
+                   ">>64)+(long long)"+o[3]+";";
+        }},
+        {"mad.hi.u64",[](auto& o){
+            return o[0]+" = (unsigned long long)((__uint128_t)(unsigned long long)"+o[1]+
+                   "*(__uint128_t)(unsigned long long)"+o[2]+
+                   ">>64)+(unsigned long long)"+o[3]+";";
+        }},
+        // Wide-multiply without add (mul.hi.s32 / mul.hi.s64)
+        {"mul.hi.s32",[](auto& o){
+            return o[0]+" = (int)(((long long)"+o[1]+"*(long long)"+o[2]+")>>32);";
+        }},
+        {"mul.hi.s64",[](auto& o){
+            return o[0]+" = (long long)((__int128)(long long)"+o[1]+"*(__int128)(long long)"+o[2]+">>64);";
+        }},
+        // div/rem 64-bit variants
+        {"div.u64",[](auto& o){
+            return o[0]+" = (unsigned long long)"+o[1]+"/(unsigned long long)"+o[2]+";";
+        }},
+        {"div.s64",[](auto& o){
+            return o[0]+" = (long long)"+o[1]+"/(long long)"+o[2]+";";
+        }},
+        {"rem.u64",[](auto& o){
+            return o[0]+" = (unsigned long long)"+o[1]+"%(unsigned long long)"+o[2]+";";
+        }},
+        {"rem.s64",[](auto& o){
+            return o[0]+" = (long long)"+o[1]+"%(long long)"+o[2]+";";
+        }},
+        // Additional min/max signed variants
+        {"min.s32",[](auto& o){ return o[0]+" = ((int)"+o[1]+"<(int)"+o[2]+"?(int)"+o[1]+":(int)"+o[2]+");"; }},
+        {"max.s32",[](auto& o){ return o[0]+" = ((int)"+o[1]+">(int)"+o[2]+"?(int)"+o[1]+":(int)"+o[2]+");"; }},
+        {"min.s64",[](auto& o){ return o[0]+" = ((long long)"+o[1]+"<(long long)"+o[2]+"?(long long)"+o[1]+":(long long)"+o[2]+");"; }},
+        {"max.s64",[](auto& o){ return o[0]+" = ((long long)"+o[1]+">(long long)"+o[2]+"?(long long)"+o[1]+":(long long)"+o[2]+");"; }},
+        {"min.u32",[](auto& o){ return o[0]+" = ((unsigned)"+o[1]+"<(unsigned)"+o[2]+"?(unsigned)"+o[1]+":(unsigned)"+o[2]+");"; }},
+        {"max.u32",[](auto& o){ return o[0]+" = ((unsigned)"+o[1]+">(unsigned)"+o[2]+"?(unsigned)"+o[1]+":(unsigned)"+o[2]+");"; }},
+        // abs for integer types
+        {"abs.s32",[](auto& o){ return o[0]+" = ((int)"+o[1]+">=0?(int)"+o[1]+":-(int)"+o[1]+");"; }},
+        {"abs.s64",[](auto& o){ return o[0]+" = ((long long)"+o[1]+">=0LL?(long long)"+o[1]+":-(long long)"+o[1]+");"; }},
     };
     return kMap;
 }

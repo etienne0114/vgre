@@ -75,6 +75,13 @@ cudnnStatus_t cudnnConvolutionForward(
 
     auto* xt=(TensorDesc*)xDesc; auto* ft=(FilterDesc*)wDesc; auto* cv=(ConvDesc*)convDesc;
     auto* yt=(TensorDesc*)yDesc;
+    // Timer lives until function returns — destructor records AEE + profiler event.
+    size_t _flops = 2ULL * static_cast<size_t>(xt->n) * ft->k * xt->c *
+                    static_cast<size_t>(yt->h) * yt->w * ft->r * ft->s;
+    size_t _bytes = sizeof(float) * (static_cast<size_t>(xt->n) * xt->c * xt->h * xt->w +
+                                     static_cast<size_t>(ft->k) * ft->c * ft->r * ft->s +
+                                     static_cast<size_t>(yt->n) * yt->c * yt->h * yt->w);
+    VgreDnnTimed _convTimer("cudnn::conv_fwd", _flops, _bytes);
     float a = *(const float*)alpha, b = *(const float*)beta;
 
     bool isInt8 = (xt->dtype == CUDNN_DATA_INT8 || xt->dtype == CUDNN_DATA_INT8x4 ||

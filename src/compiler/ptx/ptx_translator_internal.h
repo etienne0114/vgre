@@ -27,6 +27,25 @@ static inline unsigned vgre_lop3_b32(unsigned a, unsigned b, unsigned c, unsigne
     return r;
 }
 
+// vgre_prmt_b32: PTX prmt.b32 — byte permutation.
+// Selects 4 output bytes from [b:a] (b in high 4, a in low 4) using 16-bit
+// selector c (4 nibbles).  Bits[2:0] = source byte index 0-7; bit[3] = sign-extend.
+static inline unsigned vgre_prmt_b32(unsigned a, unsigned b, unsigned c) {
+    unsigned char src[8];
+    for (int i = 0; i < 4; ++i) { src[i]   = (unsigned char)((a >> (8*i)) & 0xFF); }
+    for (int i = 0; i < 4; ++i) { src[4+i] = (unsigned char)((b >> (8*i)) & 0xFF); }
+    unsigned result = 0;
+    for (int i = 0; i < 4; ++i) {
+        unsigned nib  = (c >> (4*i)) & 0xF;
+        unsigned bidx = nib & 0x7;
+        bool sext     = (nib & 0x8) != 0;
+        unsigned char sel = (bidx < 8) ? src[bidx] : 0;
+        unsigned expanded = sext ? ((sel & 0x80) ? 0xFFu : 0x00u) : (unsigned)sel;
+        result |= (expanded & 0xFF) << (8*i);
+    }
+    return result;
+}
+
 // Trim whitespace
 static inline std::string trim(const std::string& s) {
     size_t b = s.find_first_not_of(" \t\r\n");
