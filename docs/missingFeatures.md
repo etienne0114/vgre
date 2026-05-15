@@ -153,7 +153,7 @@ The previous `missingFeatures.md` (dated 2026-05-12) **dangerously overstated im
 | 2.1.17 | Context management (`cuCtxGetDevice`, `GetFlags`, `GetLimit`, `SetLimit`, etc.) | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_device_context.cpp`. |
 | 2.1.18 | Device queries (`cuDeviceGetUuid`, `GetP2PAttribute`, `GetTexture1DLinearMaxWidth`, etc.) | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_device_context.cpp`. |
 | 2.1.19 | `cuOccupancyMaxActiveBlocksPerMultiprocessor` / `cuOccupancyMaxPotentialBlockSize` / `cuOccupancyMaxPotentialBlockSizeWithFlags` | ✅ **IMPLEMENTED** 2026-05-14 — occupancy heuristics based on device properties. `src/api/cuda_driver/cuda_driver_occupancy.cpp` |
-| 2.1.20 | `cuGraph*` family | ✅ **PARTIALLY IMPLEMENTED** 2026-05-14 — `cuGraphCreate/Destroy/Clone`, `cuGraphAddKernelNode`, `cuGraphAddMemsetNode`, `cuGraphInstantiate/Launch`, `cuStreamBeginCapture`. `src/api/cuda_driver/cuda_driver_graph.cpp` |
+| 2.1.20 | `cuGraph*` family | ✅ **IMPLEMENTED** 2026-05-14 — `cuGraphCreate/Destroy/Clone`, `cuGraphAddKernelNode/AddMemsetNode/AddMemcpyNode/AddEmptyNode/AddChildGraphNode`, `cuGraphInstantiate/Launch/ExecDestroy/ExecUpdate`, `cuStreamBeginCapture/EndCapture`. `src/api/cuda_driver/cuda_driver_graph.cpp` |
 | 2.1.21 | `cuExternalMemory*` / `cuExternalSemaphore*` families | ✅ **IMPLEMENTED** 2026-05-14 — `src/api/cuda_driver/cuda_driver_external.cpp`. |
 | 2.1.22 | `cuProfilerStart` / `cuProfilerStop` | ✅ **IMPLEMENTED** 2026-05-14 — no-op stubs returning `CUDA_SUCCESS`. `src/api/cuda_driver/cuda_driver_errors.cpp`. |
 | 2.1.23 | `cuGetErrorName` / `cuGetErrorString` | ✅ **IMPLEMENTED** 2026-05-14 — full error-code string table. `src/api/cuda_driver/cuda_driver_errors.cpp`. |
