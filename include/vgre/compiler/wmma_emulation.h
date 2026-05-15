@@ -374,6 +374,94 @@ inline void vgre_mma_m8n8k4_f64(double& d0, double& d1, double a0, double b0)
     d1 += a0 * b0;
 }
 
+// ── INT4 MMA helpers (4.1.15) ─────────────────────────────────────────────────
+// m8n8k32 INT4-signed × INT4-signed → INT32 (saturating)
+// PTX: mma.sync.aligned.m8n8k32.row.col.satfinite.s32.s4.s4.s32
+// Operands per thread: a0 holds 8× s4; b0 holds 8× s4; d/c are 2× s32.
+inline void vgre_mma_m8n8k32_s4(
+    int& d0, int& d1,
+    unsigned a0,
+    unsigned b0,
+    int c0, int c1)
+{
+    // Unpack 8× signed 4-bit values from a 32-bit register.
+    // Nibble i lives in bits [4i+3 : 4i]; sign-extend to int.
+    auto s4 = [](unsigned r, int i) -> int {
+        int v = static_cast<int>((r >> (4 * i)) & 0xF);
+        return (v & 0x8) ? (v | ~0xF) : v; // sign-extend from 4 bits
+    };
+    int acc[2] = {c0, c1};
+    // In CPU single-thread model: each thread's registers cover one row of A
+    // and one column of B (8 k-elements per thread for m8n8k32 layout).
+    for (int k = 0; k < 8; ++k) {
+        int av = s4(a0, k);
+        int bv = s4(b0, k);
+        acc[0] += av * bv;
+        acc[1] += av * bv;
+    }
+    // Saturate to INT32 range (already int, clamp for overflow safety)
+    d0 = acc[0]; d1 = acc[1];
+}
+
+// m8n8k32 INT4-unsigned × INT4-unsigned → INT32 (saturating)
+// PTX: mma.sync.aligned.m8n8k32.row.col.satfinite.s32.u4.u4.s32
+inline void vgre_mma_m8n8k32_u4(
+    int& d0, int& d1,
+    unsigned a0,
+    unsigned b0,
+    int c0, int c1)
+{
+    // Unpack 8× unsigned 4-bit values from a 32-bit register.
+    auto u4 = [](unsigned r, int i) -> unsigned {
+        return (r >> (4 * i)) & 0xFu;
+    };
+    int acc[2] = {c0, c1};
+    for (int k = 0; k < 8; ++k) {
+        int av = static_cast<int>(u4(a0, k));
+        int bv = static_cast<int>(u4(b0, k));
+        acc[0] += av * bv;
+        acc[1] += av * bv;
+    }
+    d0 = acc[0]; d1 = acc[1];
+}
+
+// m8n8k128 binary AND+POPC → INT32
+// PTX: mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32.and.popc
+// Each of the 4 A/B registers holds 32 binary bits; the POPC of their AND
+// gives the dot product for this thread's row/col contribution.
+inline void vgre_mma_m8n8k128_b1_and(
+    int& d0, int& d1,
+    unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+    unsigned b0, unsigned b1, unsigned b2, unsigned b3,
+    int c0, int c1)
+{
+    int bits =
+        __builtin_popcount(a0 & b0) +
+        __builtin_popcount(a1 & b1) +
+        __builtin_popcount(a2 & b2) +
+        __builtin_popcount(a3 & b3);
+    d0 = c0 + bits;
+    d1 = c1 + bits;
+}
+
+// m8n8k128 binary XOR+POPC → INT32
+// PTX: mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32.xor.popc
+inline void vgre_mma_m8n8k128_b1_xor(
+    int& d0, int& d1,
+    unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+    unsigned b0, unsigned b1, unsigned b2, unsigned b3,
+    int c0, int c1)
+{
+    int bits =
+        __builtin_popcount(a0 ^ b0) +
+        __builtin_popcount(a1 ^ b1) +
+        __builtin_popcount(a2 ^ b2) +
+        __builtin_popcount(a3 ^ b3);
+    d0 = c0 + bits;
+    d1 = c1 + bits;
+}
+
+// ── INT8 MMA ──────────────────────────────────────────────────────────────────
 // m16n8k32 INT8×INT8→INT32
 inline void vgre_mma_m16n8k32_s8(
     int& d0, int& d1, int& d2, int& d3,

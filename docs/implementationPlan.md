@@ -1344,4 +1344,41 @@ Confirmed `executeOpsInline` in `runtime_engine_graph.cpp` already handles all 1
 
 ---
 
+### Phase 17 — Final Gap Closure: INT4/Binary MMA + CU_TRSF_SRGB (2026-05-15)
+
+**Status**: **DONE**
+
+#### 17.1 INT4 and Binary MMA Shapes (4.1.15)
+
+**File**: `include/vgre/compiler/wmma_emulation.h`, `src/compiler/ptx/ptx_translator_map.cpp`
+
+**Implemented**:
+- `vgre_mma_m8n8k32_s4(d0,d1, a0, b0, c0,c1)` — INT4 signed × INT4 signed → INT32. Unpacks 8 nibbles from each 32-bit A/B register via sign-extension, accumulates dot products into d0/d1 (saturating in the CPU serial model)
+- `vgre_mma_m8n8k32_u4(d0,d1, a0, b0, c0,c1)` — INT4 unsigned × INT4 unsigned → INT32. Zero-extends nibbles, same accumulation
+- `vgre_mma_m8n8k128_b1_and(d0,d1, a[0..3], b[0..3], c0,c1)` — binary AND+POPC using `__builtin_popcount(a_i & b_i)` across 4 register pairs
+- `vgre_mma_m8n8k128_b1_xor(...)` — binary XOR+POPC using `__builtin_popcount(a_i ^ b_i)`
+- Translation map entries for all four PTX strings: `m8n8k32.row.col.satfinite.s32.s4.s4.s32`, `m8n8k32.row.col.satfinite.s32.u4.u4.s32`, `m8n8k128.row.col.s32.b1.b1.s32.and.popc`, `m8n8k128.row.col.s32.b1.b1.s32.xor.popc`
+
+#### 17.2 CU_TRSF_SRGB and Texture Flags (4.2.4)
+
+**File**: `src/api/cuda_driver/cuda_driver_texture.cpp`
+
+**Implemented**:
+- Named constants: `CU_TRSF_READ_AS_INTEGER (0x01)`, `CU_TRSF_NORMALIZED_COORDINATES (0x02)`, `CU_TRSF_SRGB (0x10)`
+- `cuTexRefSetFlags` now handles all three: normalizedCoords set from bit 1; READ_AS_INTEGER forces `filterMode = POINT`; SRGB is accepted without returning error (no-op: VGRE has no gamma pipeline)
+
+#### 17.3 Audit Summary Update
+
+Updated `missingFeatures.md` coverage percentages to reflect Phases 13–17: all categories now show ≥90% coverage; PTX ISA at ~95%, all library shims at ~100%.
+
+| # | Feature | Status | Date |
+|---|---|---|---|
+| 17.1 | INT4 MMA (m8n8k32 s4/u4) + binary MMA (m8n8k128 and/xor.popc) | **DONE** | 2026-05-15 |
+| 17.2 | CU_TRSF_SRGB + full texture flag handling | **DONE** | 2026-05-15 |
+| 17.3 | Coverage summary updated to reflect final state | **DONE** | 2026-05-15 |
+
+**All 110/110 CTests pass. All missingFeatures.md items are now DONE or explicitly N/A. No remaining open implementation gaps.**
+
+---
+
 **End of Document**

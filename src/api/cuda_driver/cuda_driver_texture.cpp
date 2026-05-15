@@ -122,9 +122,23 @@ CUresult cuTexRefSetFormat(CUtexref hTexRef, int fmt, int NumPackedComponents) {
   return CUDA_SUCCESS;
 }
 
+// CUDA texture reference flag constants
+static constexpr unsigned int CU_TRSF_READ_AS_INTEGER        = 0x01;
+static constexpr unsigned int CU_TRSF_NORMALIZED_COORDINATES = 0x02;
+static constexpr unsigned int CU_TRSF_SRGB                   = 0x10;
+// (4.2.4) CU_TRSF_SRGB applies sRGB gamma decoding on texture fetch.
+// VGRE has no GPU gamma pipeline; the flag is accepted and silently ignored —
+// callers that require accurate sRGB linearisation must do it in kernel code.
+
 CUresult cuTexRefSetFlags(CUtexref hTexRef, unsigned int Flags) {
   if (!hTexRef) return CUDA_ERROR_INVALID_VALUE;
-  hTexRef->desc.normalizedCoords = (Flags & 0x02); // CU_TRSF_NORMALIZED_COORDINATES
+  hTexRef->desc.normalizedCoords = (Flags & CU_TRSF_NORMALIZED_COORDINATES) != 0;
+  // READ_AS_INTEGER: disable interpolation — force POINT/nearest filter mode
+  // so integer channel bits are returned unmodified.
+  if (Flags & CU_TRSF_READ_AS_INTEGER)
+    hTexRef->desc.filterMode = vgre::core::TextureFilterMode::POINT;
+  // SRGB: no gamma pipeline in CPU model — accepted, no-op (see 4.2.4 in docs).
+  (void)CU_TRSF_SRGB; // suppress unused-variable warning when logging is off
   return CUDA_SUCCESS;
 }
 

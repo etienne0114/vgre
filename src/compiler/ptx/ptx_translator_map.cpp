@@ -95,6 +95,36 @@ const TranslateMap& getMap() {
                    +o[6]+","
                    +o[7]+","+o[8]+","+o[9]+","+o[10]+");";
         }},
+        // INT4 mma (s4×s4 → s32 accumulate, m8n8k32, satfinite)  — 4.1.15
+        {"mma.sync.aligned.m8n8k32.row.col.satfinite.s32.s4.s4.s32", [](auto& o){
+            // o[0..1]=d0,d1; o[2]=a0; o[3]=b0; o[4..5]=c0,c1
+            return "vgre_mma_m8n8k32_s4("+o[0]+","+o[1]+","
+                   +o[2]+","
+                   +o[3]+","
+                   +o[4]+","+o[5]+");";
+        }},
+        // INT4 mma (u4×u4 → s32 accumulate, m8n8k32, satfinite)  — 4.1.15
+        {"mma.sync.aligned.m8n8k32.row.col.satfinite.s32.u4.u4.s32", [](auto& o){
+            return "vgre_mma_m8n8k32_u4("+o[0]+","+o[1]+","
+                   +o[2]+","
+                   +o[3]+","
+                   +o[4]+","+o[5]+");";
+        }},
+        // Binary mma AND+POPC (b1×b1 → s32, m8n8k128)  — 4.1.15
+        {"mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32.and.popc", [](auto& o){
+            // o[0..1]=d; o[2..5]=a0-a3; o[6..9]=b0-b3; o[10..11]=c0,c1
+            return "vgre_mma_m8n8k128_b1_and("+o[0]+","+o[1]+","
+                   +o[2]+","+o[3]+","+o[4]+","+o[5]+","
+                   +o[6]+","+o[7]+","+o[8]+","+o[9]+","
+                   +o[10]+","+o[11]+");";
+        }},
+        // Binary mma XOR+POPC (b1×b1 → s32, m8n8k128)  — 4.1.15
+        {"mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32.xor.popc", [](auto& o){
+            return "vgre_mma_m8n8k128_b1_xor("+o[0]+","+o[1]+","
+                   +o[2]+","+o[3]+","+o[4]+","+o[5]+","
+                   +o[6]+","+o[7]+","+o[8]+","+o[9]+","
+                   +o[10]+","+o[11]+");";
+        }},
         // Warp-group MMA (Hopper) — full emulation via vgre_wgmma_* helpers.
         // operand layout: o[0]=descA, o[1]=descB, o[2]=d_ptr (FP32 accumulator)
         // The accumulator pointer is the output of wgmma; callers pass
