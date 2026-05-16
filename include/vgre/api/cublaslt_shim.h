@@ -35,16 +35,20 @@ typedef struct cublasLtMatmulDescStruct *cublasLtMatmulDesc_t;
 
 // ── Epilogue (fused post-processing) ─────────────────────────────────────────
 typedef enum {
-    CUBLASLT_EPILOGUE_DEFAULT = 0,
-    CUBLASLT_EPILOGUE_RELU = 1,
-    CUBLASLT_EPILOGUE_RELU_AUX = 2,
-    CUBLASLT_EPILOGUE_BIAS = 3,
-    CUBLASLT_EPILOGUE_RELU_BIAS = 4,
-    CUBLASLT_EPILOGUE_GELU = 5,
-    CUBLASLT_EPILOGUE_GELU_AUX = 6,
-    CUBLASLT_EPILOGUE_GELU_BIAS = 7,
-    CUBLASLT_EPILOGUE_DRELU = 8,
-    CUBLASLT_EPILOGUE_DGELU = 9
+    CUBLASLT_EPILOGUE_DEFAULT      = 0,
+    CUBLASLT_EPILOGUE_RELU         = 1,
+    CUBLASLT_EPILOGUE_RELU_AUX     = 2,
+    CUBLASLT_EPILOGUE_BIAS         = 3,
+    CUBLASLT_EPILOGUE_RELU_BIAS    = 4,
+    CUBLASLT_EPILOGUE_GELU         = 5,
+    CUBLASLT_EPILOGUE_GELU_AUX     = 6,
+    CUBLASLT_EPILOGUE_GELU_BIAS    = 7,
+    CUBLASLT_EPILOGUE_DRELU        = 8,
+    CUBLASLT_EPILOGUE_DGELU        = 9,
+    CUBLASLT_EPILOGUE_DRELU_BGRAD  = 10,
+    CUBLASLT_EPILOGUE_DGELU_BGRAD  = 11,
+    CUBLASLT_EPILOGUE_BGRADA       = 12,
+    CUBLASLT_EPILOGUE_BGRADB       = 13
 } cublasLtEpilogue_t;
 
 // ── Pointer mode ─────────────────────────────────────────────────────────────
@@ -66,12 +70,20 @@ typedef enum {
 
 // ── Matmul descriptor attribute ────────────────────────────────────────────────
 typedef enum {
-    CUBLASLT_MATMUL_DESC_EPILOGUE = 0,
-    CUBLASLT_MATMUL_DESC_POINTER_MODE = 1,
-    CUBLASLT_MATMUL_DESC_TRANSA = 2,
-    CUBLASLT_MATMUL_DESC_TRANSB = 3,
-    CUBLASLT_MATMUL_DESC_BIAS_POINTER = 4,
-    CUBLASLT_MATMUL_DESC_SCALE_TYPE = 5
+    CUBLASLT_MATMUL_DESC_EPILOGUE          = 0,
+    CUBLASLT_MATMUL_DESC_POINTER_MODE      = 1,
+    CUBLASLT_MATMUL_DESC_TRANSA            = 2,
+    CUBLASLT_MATMUL_DESC_TRANSB            = 3,
+    CUBLASLT_MATMUL_DESC_BIAS_POINTER      = 4,
+    CUBLASLT_MATMUL_DESC_SCALE_TYPE        = 5,
+    CUBLASLT_MATMUL_DESC_A_SCALE_POINTER   = 6,
+    CUBLASLT_MATMUL_DESC_B_SCALE_POINTER   = 7,
+    CUBLASLT_MATMUL_DESC_C_SCALE_POINTER   = 8,
+    CUBLASLT_MATMUL_DESC_D_SCALE_POINTER   = 9,
+    CUBLASLT_MATMUL_DESC_AMAX_D            = 10,
+    CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER = 11,
+    CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD   = 12,
+    CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE    = 13
 } cublasLtMatmulDescAttributes_t;
 
 // ── Compute type ─────────────────────────────────────────────────────────────

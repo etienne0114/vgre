@@ -173,21 +173,40 @@ cusolverStatus_t cusolverDnDormqr(cusolverDnHandle_t /*h*/, int side, int trans,
 // ── Least-squares driver — gelsd ──────────────────────────────────────────────
 
 cusolverStatus_t cusolverDnSgelsd_bufferSize(cusolverDnHandle_t /*h*/, int m, int n,
-                                              int nrhs, const float * /*A*/, int /*lda*/,
-                                              const float * /*B*/, int /*ldb*/,
+                                              int nrhs, const float * /*A*/, int lda,
+                                              const float * /*B*/, int ldb,
                                               const float * /*S*/, const float * /*rcond*/,
                                               int * /*rank*/, int *Lwork) {
-    if (Lwork) *Lwork = 12 * std::min(m, n) + 2 * std::min(m, n) * std::max(m, n) +
-                         2 * std::min(m, n) * nrhs + std::max(m, n) * nrhs + 1;
+    if (!Lwork || m <= 0 || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    // Workspace query: call LAPACK with lwork=-1
+    float work_query;
+    int iwork_query, info, query_lwork = -1, rank_tmp = 0;
+    float rcond_tmp = -1.0f;
+    int ld_a = std::max(1, m), ld_b = std::max(1, std::max(m, n));
+    std::vector<float> dummy_a(static_cast<size_t>(ld_a) * n);
+    std::vector<float> dummy_b(static_cast<size_t>(ld_b) * std::max(1, nrhs));
+    std::vector<float> dummy_s(std::min(m, n));
+    sgelsd_(&m, &n, &nrhs, dummy_a.data(), &ld_a, dummy_b.data(), &ld_b,
+            dummy_s.data(), &rcond_tmp, &rank_tmp, &work_query, &query_lwork, &iwork_query, &info);
+    *Lwork = (info == 0) ? static_cast<int>(work_query) + 1 : 12 * std::min(m, n) + 2 * std::min(m, n) * std::max(m, n) + std::max(m, n) * nrhs + 1;
     return CUSOLVER_STATUS_SUCCESS;
 }
 cusolverStatus_t cusolverDnDgelsd_bufferSize(cusolverDnHandle_t /*h*/, int m, int n,
-                                              int nrhs, const double * /*A*/, int /*lda*/,
-                                              const double * /*B*/, int /*ldb*/,
+                                              int nrhs, const double * /*A*/, int lda,
+                                              const double * /*B*/, int ldb,
                                               const double * /*S*/, const double * /*rcond*/,
                                               int * /*rank*/, int *Lwork) {
-    if (Lwork) *Lwork = 12 * std::min(m, n) + 2 * std::min(m, n) * std::max(m, n) +
-                         2 * std::min(m, n) * nrhs + std::max(m, n) * nrhs + 1;
+    if (!Lwork || m <= 0 || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    double work_query;
+    int iwork_query, info, query_lwork = -1, rank_tmp = 0;
+    double rcond_tmp = -1.0;
+    int ld_a = std::max(1, m), ld_b = std::max(1, std::max(m, n));
+    std::vector<double> dummy_a(static_cast<size_t>(ld_a) * n);
+    std::vector<double> dummy_b(static_cast<size_t>(ld_b) * std::max(1, nrhs));
+    std::vector<double> dummy_s(std::min(m, n));
+    dgelsd_(&m, &n, &nrhs, dummy_a.data(), &ld_a, dummy_b.data(), &ld_b,
+            dummy_s.data(), &rcond_tmp, &rank_tmp, &work_query, &query_lwork, &iwork_query, &info);
+    *Lwork = (info == 0) ? static_cast<int>(work_query) + 1 : 12 * std::min(m, n) + 2 * std::min(m, n) * std::max(m, n) + std::max(m, n) * nrhs + 1;
     return CUSOLVER_STATUS_SUCCESS;
 }
 
@@ -340,13 +359,25 @@ cusolverStatus_t cusolverDnDgeqrf(cusolverDnHandle_t /*handle*/, int m, int n,
 
 cusolverStatus_t cusolverDnSgesvd_bufferSize(cusolverDnHandle_t /*handle*/, int m, int n, int *Lwork) {
     if (!Lwork || m <= 0 || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
-    *Lwork = 5 * std::max(m, n);
+    float work_query; int info, query_lwork = -1;
+    std::vector<float> dummy_a(static_cast<size_t>(m) * n), dummy_s(std::min(m,n));
+    std::vector<float> dummy_u(static_cast<size_t>(m) * m), dummy_vt(static_cast<size_t>(n) * n);
+    char jobu = 'A', jobvt = 'A';
+    sgesvd_(&jobu, &jobvt, &m, &n, dummy_a.data(), &m, dummy_s.data(),
+            dummy_u.data(), &m, dummy_vt.data(), &n, &work_query, &query_lwork, &info);
+    *Lwork = (info == 0) ? static_cast<int>(work_query) + 1 : 5 * std::max(m, n);
     return CUSOLVER_STATUS_SUCCESS;
 }
 
 cusolverStatus_t cusolverDnDgesvd_bufferSize(cusolverDnHandle_t /*handle*/, int m, int n, int *Lwork) {
     if (!Lwork || m <= 0 || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
-    *Lwork = 5 * std::max(m, n);
+    double work_query; int info, query_lwork = -1;
+    std::vector<double> dummy_a(static_cast<size_t>(m) * n), dummy_s(std::min(m,n));
+    std::vector<double> dummy_u(static_cast<size_t>(m) * m), dummy_vt(static_cast<size_t>(n) * n);
+    char jobu = 'A', jobvt = 'A';
+    dgesvd_(&jobu, &jobvt, &m, &n, dummy_a.data(), &m, dummy_s.data(),
+            dummy_u.data(), &m, dummy_vt.data(), &n, &work_query, &query_lwork, &info);
+    *Lwork = (info == 0) ? static_cast<int>(work_query) + 1 : 5 * std::max(m, n);
     return CUSOLVER_STATUS_SUCCESS;
 }
 

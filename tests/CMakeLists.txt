@@ -136,7 +136,7 @@ add_test(NAME test_graph_update COMMAND test_graph_update)
 add_executable(test_phase3_cluster integration/test_phase3_cluster.cpp)
 target_link_libraries(test_phase3_cluster PRIVATE vgre)
 add_test(NAME test_phase3_cluster COMMAND test_phase3_cluster)
-set_tests_properties(test_phase3_cluster PROPERTIES TIMEOUT 60)
+set_tests_properties(test_phase3_cluster PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_tcp_cluster_port)
 
 # ── Phase 5 tests ───────────────────────────────────────────────────────────
 add_executable(test_phase5_secure_channel unit/test_phase5_secure_channel.cpp)
@@ -249,6 +249,10 @@ add_test(NAME CublasComplex COMMAND test_cublas_complex)
 add_executable(test_cufft api/test_cufft.cpp)
 target_link_libraries(test_cufft PRIVATE vgre_cudart)
 add_test(NAME CufftFFT COMMAND test_cufft)
+
+add_executable(test_cusolver api/test_cusolver.cpp)
+target_link_libraries(test_cusolver PRIVATE vgre_cudart)
+add_test(NAME CusolverLAPACK COMMAND test_cusolver)
 
 add_executable(test_cudnn_backward_data api/test_cudnn_backward_data.cpp)
 target_link_libraries(test_cudnn_backward_data PRIVATE vgre)
@@ -430,7 +434,7 @@ add_executable(test_tcp_cluster_all_operations_preservation
 target_link_libraries(test_tcp_cluster_all_operations_preservation PRIVATE vgre)
 target_include_directories(test_tcp_cluster_all_operations_preservation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME TCPClusterAllOpsPreservation COMMAND test_tcp_cluster_all_operations_preservation)
-set_tests_properties(TCPClusterAllOpsPreservation PROPERTIES TIMEOUT 60)
+set_tests_properties(TCPClusterAllOpsPreservation PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_tcp_cluster_port)
 
 add_executable(test_diagnostic_logger
     advanced/test_diagnostic_logger.cpp)
@@ -551,4 +555,32 @@ endif()
 get_directory_property(vgre_full_test_list TESTS)
 set_tests_properties(${vgre_full_test_list} PROPERTIES
     ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+)
+
+# ── Network/TCP serialization ──────────────────────────────────────────────
+# All tests that bind to TCP/UDP ports share vgre_tcp_cluster_port so CTest
+# never runs two of them at the same time, preventing port conflicts and
+# SEGFAULT/timeout under parallel -j execution.
+# Network-binding tests — serialized via RESOURCE_LOCK to prevent port conflicts.
+# Only tests that actually bind TCP/UDP sockets to localhost ports are listed.
+# Pure in-memory unit tests (PacketHandler, ConnectionManager, etc.) are excluded.
+set_tests_properties(
+    TCPClusterIntegration
+    P2PPerformanceIntegration
+    test_phase3_cluster
+    TCPClusterPreservation
+    TCPClusterSecurityPolicy
+    TCPClusterArchitecture
+    TCPClusterComprehensivePreservation
+    TCPClusterHybridAuth
+    TCPClusterSecurityHybrid
+    TCPClusterPreservationIntegration
+    TCPClusterWindowsBugExploration
+    TCPClusterTestability
+    TCPClusterPreservationTestability
+    TCPClusterAllOpsPreservation
+    CrossPlatformNetworking
+    CrossPlatformSocketCompat
+    WebSocketTransportIntegration
+    PROPERTIES RESOURCE_LOCK vgre_tcp_cluster_port
 )

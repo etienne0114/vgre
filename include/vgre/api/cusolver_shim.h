@@ -45,6 +45,60 @@ cusolverStatus_t cusolverDnDpotrf(cusolverDnHandle_t handle, char uplo,
                                   int n, double *A, int lda, double *Workspace,
                                   int Lwork, int *devInfo);
 
+// ── LU factorization (getrf) ─────────────────────────────────────────────────
+cusolverStatus_t cusolverDnSgetrf_bufferSize(cusolverDnHandle_t handle, int m, int n,
+                                              float *A, int lda, int *Lwork);
+cusolverStatus_t cusolverDnDgetrf_bufferSize(cusolverDnHandle_t handle, int m, int n,
+                                              double *A, int lda, int *Lwork);
+cusolverStatus_t cusolverDnSgetrf(cusolverDnHandle_t handle, int m, int n,
+                                   float *A, int lda, float *Workspace,
+                                   int *devIpiv, int *devInfo);
+cusolverStatus_t cusolverDnDgetrf(cusolverDnHandle_t handle, int m, int n,
+                                   double *A, int lda, double *Workspace,
+                                   int *devIpiv, int *devInfo);
+
+// ── Triangular solve from LU (getrs) ────────────────────────────────────────
+cusolverStatus_t cusolverDnSgetrs(cusolverDnHandle_t handle, int trans,
+                                   int n, int nrhs, const float *A, int lda,
+                                   const int *devIpiv, float *B, int ldb, int *devInfo);
+cusolverStatus_t cusolverDnDgetrs(cusolverDnHandle_t handle, int trans,
+                                   int n, int nrhs, const double *A, int lda,
+                                   const int *devIpiv, double *B, int ldb, int *devInfo);
+
+// ── Apply Q from QR (ormqr) ─────────────────────────────────────────────────
+cusolverStatus_t cusolverDnSormqr_bufferSize(cusolverDnHandle_t handle, int side, int trans,
+                                              int m, int n, int k, const float *A, int lda,
+                                              const float *tau, const float *C, int ldc, int *Lwork);
+cusolverStatus_t cusolverDnDormqr_bufferSize(cusolverDnHandle_t handle, int side, int trans,
+                                              int m, int n, int k, const double *A, int lda,
+                                              const double *tau, const double *C, int ldc, int *Lwork);
+cusolverStatus_t cusolverDnSormqr(cusolverDnHandle_t handle, int side, int trans,
+                                   int m, int n, int k, const float *A, int lda,
+                                   const float *tau, float *C, int ldc, float *work,
+                                   int lwork, int *devInfo);
+cusolverStatus_t cusolverDnDormqr(cusolverDnHandle_t handle, int side, int trans,
+                                   int m, int n, int k, const double *A, int lda,
+                                   const double *tau, double *C, int ldc, double *work,
+                                   int lwork, int *devInfo);
+
+// ── Least-squares driver (gelsd) ─────────────────────────────────────────────
+cusolverStatus_t cusolverDnSgelsd_bufferSize(cusolverDnHandle_t handle, int m, int n,
+                                              int nrhs, const float *A, int lda,
+                                              const float *B, int ldb, const float *S,
+                                              const float *rcond, int *rank, int *Lwork);
+cusolverStatus_t cusolverDnDgelsd_bufferSize(cusolverDnHandle_t handle, int m, int n,
+                                              int nrhs, const double *A, int lda,
+                                              const double *B, int ldb, const double *S,
+                                              const double *rcond, int *rank, int *Lwork);
+cusolverStatus_t cusolverDnSgelsd(cusolverDnHandle_t handle, int m, int n, int nrhs,
+                                   float *A, int lda, float *B, int ldb,
+                                   float *S, const float *rcond, int *rank,
+                                   float *work, int lwork, int *devIwork, int *devInfo);
+cusolverStatus_t cusolverDnDgelsd(cusolverDnHandle_t handle, int m, int n, int nrhs,
+                                   double *A, int lda, double *B, int ldb,
+                                   double *S, const double *rcond, int *rank,
+                                   double *work, int lwork, int *devIwork, int *devInfo);
+
 // ── QR factorization (geqrf) ─────────────────────────────────────────────────
 cusolverStatus_t cusolverDnSgeqrf_bufferSize(cusolverDnHandle_t handle, int m, int n,
                                              float *A, int lda, int *Lwork);

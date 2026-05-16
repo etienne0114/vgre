@@ -43,6 +43,9 @@ struct TextureDescriptor {
   // Anisotropic filtering: 1 = disabled; 2–16 = max anisotropy ratio.
   // Effective when filterMode == ANISOTROPIC (or LINEAR with maxAnisotropy > 1).
   unsigned int maxAnisotropy = 1;
+  // SRGB gamma decoding: when true, UINT8/UINT16 texels are decoded from
+  // sRGB (gamma ≈ 2.2) to linear light before filtering (CU_TRSF_SRGB).
+  bool srgbDecode = false;
 };
 
 // ── Resource view descriptor ───────────────────────────────────────────────

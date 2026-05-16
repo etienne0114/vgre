@@ -181,31 +181,36 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 
 **File**: `src/api/cusolver/cusolver_core.cpp` (single file, not split)
 
-**Implemented**: `cusolverDnCreate/Destroy`, `cusolverDnSpotrf/Dpotrf/Sgeqrf/Dgeqrf/Sgesvd/Dgesvd/Ssyevd/Dsyevd` (Cholesky, QR, SVD, eigenvalues)
+**Implemented**: `cusolverDnCreate/Destroy`, `cusolverDnSpotrf/Dpotrf/Sgeqrf/Dgeqrf/Sgesvd/Dgesvd/Ssyevd/Dsyevd` (Cholesky, QR, SVD, eigenvalues), `cusolverDnSgetrf/Dgetrf/Sgetrs/Dgetrs` (LU factorization + triangular solve), `cusolverDnSormqr/Dormqr` (apply Q from QR), `cusolverDnSgelsd/Dgelsd` (least-squares driver)
 
-**Implementation**: Delegates to system LAPACK (`spotrf_`, `dpotrf_`, `sgeqrf_`, `dgeqrf_`, `sgesvd_`, `dgesvd_`, `ssyevd_`, `dsyevd_`)
+**Implementation**: Delegates to system LAPACK with proper workspace queries.
 
-**Still missing**: `getrf` (LU), `getrs`, `ormqr`, `gelsd`, sparse solvers. See `missingFeatures.md` §2.2.
+**Still missing**: Sparse solvers. See `missingFeatures.md` §2.4.
 
 ---
 
 #### 3.4.4 cuSPARSE
 
-**File**: `src/api/cusparse/cusparse_core.cpp` (single file, not split)
+**Files**: `src/api/cusparse/cusparse_core.cpp` + `cusparse_format.cpp` + `cusparse_triangular.cpp` (split at 2026-05-16 when core reached 1017 lines)
 
-**Implemented**: `cusparseCreate/Destroy`, `cusparseSpMV/SpMM` (CSR + COO), `cusparseAxpyi`, handle/descriptor lifecycle, `cusparseCreateCoo`
+**Shared state**: `src/api/cusparse/cusparse_state.h` (internal, not public)
 
-**Still missing**: `cusparseSparseToDense`/`DenseToSparse`, `cusparseSpSV`, sparse factorization. See `missingFeatures.md` §2.4.
+**Implemented**:
+- Core: `cusparseCreate/Destroy`, `cusparseSpMV/SpMM` (CSR + COO + CSC, S/D/C/Z/FP16/BF16/INT8), `cusparseAxpyi`, buffer-size queries
+- Format: `cusparseCreateCsc`, `cusparseSparseToDense`, `cusparseDenseToSparse` (bufferSize+analysis+compress), `cusparseSpMatGetAttribute/SetAttribute`, `cusparseSpMatGetSize`, `cusparseCsrSetPointers`
+- Triangular: `cusparseSpSV` (full forward/backward/transposed substitution for lower+upper triangular CSR)
+
+**Still missing**: Sparse factorization (Cholesky, LU, QR). See `missingFeatures.md` §2.4.
 
 ---
 
 #### 3.4.5 cuBLASLt
 
-**File**: `src/api/cublaslt/cublaslt_core.cpp` (single file, not split)
+**File**: `src/api/cublaslt/cublaslt_core.cpp` (single file, 837 lines)
 
-**Implemented**: `cublasLtCreate/Destroy`, `cublasLtMatmulDescCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatrixLayoutCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatmul` with fused epilogues (ReLU, GELU, Bias)
+**Implemented**: `cublasLtCreate/Destroy`, `cublasLtMatmulDescCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatrixLayoutCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatmulPreferenceCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatmulAlgoGetHeuristic` (singular + plural), `cublasLtMatmul` with all epilogues: ReLU, GELU, Bias, ReLU+Bias, GELU+Bias, DRELU, DGELU, DRELU_BGRAD, DGELU_BGRAD, BGRADA/BGRADB. Scale pointer attributes (A/B/C/D scale, amaxD, epilogueAuxPtr, biasDataType). All data types: F32, F64, F16, BF16, INT8→INT32.
 
-**Caveat**: No heuristic selection; always falls back to reference GEMM. See `missingFeatures.md` §3.1.
+**Remaining**: Algorithm caching (plans rebuilt per-call). See `missingFeatures.md` §3.1.
 
 ---
 
@@ -538,7 +543,7 @@ tests/core/texture/         # Texture/surface object tests
 | 2.4 | `cublasGemmEx` / `GemmBatchedEx` / `GemmStridedBatchedEx` | **DONE** | 2026-05-13 |
 | 2.5 | Hermitian routines (Cherk, Zherk, Cher2k, Zher2k, Chemm, Zhemm) | **DONE** | 2026-05-14/15 |
 | 2.6 | Logger configure / callback | **DONE** | 2026-05-14 |
-| 2.7 | **Complex C/Z Level-1/2/3 GEMM/GEMV** | **MISSING** | — |
+| 2.7 | **Complex C/Z Level-1/2/3 GEMM/GEMV** | **DONE** | 2026-05-15 |
 
 ### Phase 3 — cuDNN Backward Passes + Training
 
@@ -566,9 +571,9 @@ tests/core/texture/         # Texture/surface object tests
 | 4.3 | cuSOLVER dense (potrf, geqrf, gesvd, syevd) | **DONE** | 2026-05-14 |
 | 4.4 | cuSPARSE CSR SpMV/SpMM | **DONE** | 2026-05-14 |
 | 4.5 | cuBLASLt basic matmul + ReLU/GELU/Bias | **DONE** | 2026-05-14 |
-| 4.6 | **cuFFT FFTW3 delegation** | **MISSING** | — |
-| 4.7 | **cuSOLVER LU/least-squares** | **MISSING** | — |
-| 4.8 | **cuSPARSE format conversions + sparse solve** | **MISSING** | — |
+| 4.6 | cuFFT FFTW3 delegation | **DONE** | 2026-05-15 |
+| 4.7 | cuSOLVER LU/least-squares (getrf, getrs, ormqr, gelsd) | **DONE** | 2026-05-15 |
+| 4.8 | cuSPARSE format conversions (CSC, SparseToDense, DenseToSparse) + SpSV | **DONE** | 2026-05-16 |
 
 ### Phase 5 — CUDA Driver API
 
@@ -606,7 +611,7 @@ tests/core/texture/         # Texture/surface object tests
 | 7.1 | `ncclSend` / `ncclRecv` | **DONE** | 2026-05-14 |
 | 7.2 | `ncclAllToAll` | **DONE** | 2026-05-14 |
 | 7.3 | `ncclGather` / `ncclScatter` | **DONE** | 2026-05-14 |
-| 7.4 | **Multi-node RDMA transport** | **MISSING** | — |
+| 7.4 | Multi-node RDMA transport | **MISSING** | — |
 
 ### Phase 8 — Cooperative Groups & Device Libraries
 
@@ -628,6 +633,11 @@ tests/core/texture/         # Texture/surface object tests
 |---|---|---|---|
 | 10.1 | CDP (`cudaDeviceSynchronize`, `GetParameterBufferV2`, `LaunchDeviceV2`) | **DONE** | 2026-05-14 |
 | 10.2 | Profiling (kernel timeline, Chrome trace, `InstructionSample`) | **PARTIAL** | 2026-05-14 |
+| 10.5 | cuBLASLt DRELU/DGELU/BGRAD epilogues + scale ptrs | **DONE** | 2026-05-16 |
+| 10.6 | cuDNN Backend attention routing | **DONE** | 2026-05-16 |
+| 10.7 | cuRAND thread safety (per-handle mutex) | **DONE** | 2026-05-16 |
+| 10.8 | Texture SRGB gamma decode | **DONE** | 2026-05-16 |
+| 10.9 | cuSPARSE CSC + SparseToDense + DenseToSparse + SpSV | **DONE** | 2026-05-16 |
 | 10.3 | cuDNN INT8x4 / INT8x32 packed layouts | **DONE** | 2026-05-15 |
 | 10.4 | `cudaGraphExecUpdate_v2` | **DONE** | 2026-05-15 |
 
@@ -680,4 +690,4 @@ Large monolithic source files (>800 lines) were split into smaller, logically gr
 
 ---
 
-*Last updated: 2026-05-15. Verified against git commit `27eb76e`.*
+*Last updated: 2026-05-16 (second pass). 113/113 tests passing. Sparse factorization (ILU0/IC0/SpGEMM), cuBLASLt LRU cache, RESOURCE_LOCK test serialization added.*

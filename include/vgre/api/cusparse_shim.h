@@ -126,6 +126,27 @@ cusparseStatus_t cusparseCreateDnMat(cusparseDnMatDescr_t *dnMatDescr, int64_t r
                                      cudaDataType_t valueType, cusparseOrder_t order);
 cusparseStatus_t cusparseDestroyDnMat(cusparseDnMatDescr_t dnMatDescr);
 
+// ── Buffer-size queries ───────────────────────────────────────────────────────
+cusparseStatus_t cusparseSpMV_bufferSize(cusparseHandle_t handle,
+                                          cusparseOperation_t opA,
+                                          const void *alpha,
+                                          cusparseSpMatDescr_t matA,
+                                          cusparseDnVecDescr_t vecX,
+                                          const void *beta,
+                                          cusparseDnVecDescr_t vecY,
+                                          cudaDataType_t computeType,
+                                          size_t *bufferSize);
+cusparseStatus_t cusparseSpMM_bufferSize(cusparseHandle_t handle,
+                                          cusparseOperation_t opA,
+                                          cusparseOperation_t opB,
+                                          const void *alpha,
+                                          cusparseSpMatDescr_t matA,
+                                          cusparseDnMatDescr_t matB,
+                                          const void *beta,
+                                          cusparseDnMatDescr_t matC,
+                                          cudaDataType_t computeType,
+                                          size_t *bufferSize);
+
 // ── Legacy Level-1 ────────────────────────────────────────────────────────────
 cusparseStatus_t cusparseSaxpyi(cusparseHandle_t handle, int nnz, const float *alpha,
                                 const float *xVal, const int *xInd, float *y,
@@ -133,6 +154,239 @@ cusparseStatus_t cusparseSaxpyi(cusparseHandle_t handle, int nnz, const float *a
 cusparseStatus_t cusparseDaxpyi(cusparseHandle_t handle, int nnz, const double *alpha,
                                 const double *xVal, const int *xInd, double *y,
                                 cusparseIndexBase_t idxBase);
+
+// ── COO sparse matrix descriptor ─────────────────────────────────────────────
+cusparseStatus_t cusparseCreateCoo(cusparseSpMatDescr_t *spMatDescr,
+                                    int64_t rows, int64_t cols, int64_t nnz,
+                                    void *cooRowInd, void *cooColInd, void *cooValues,
+                                    cusparseIndexType_t cooIdxType,
+                                    cusparseIndexBase_t idxBase,
+                                    cudaDataType_t valueType);
+
+// ── CSC sparse matrix descriptor ─────────────────────────────────────────────
+cusparseStatus_t cusparseCreateCsc(cusparseSpMatDescr_t *spMatDescr,
+                                    int64_t rows, int64_t cols, int64_t nnz,
+                                    void *cscColOffsets, void *cscRowInd, void *cscValues,
+                                    cusparseIndexType_t cscColOffsetsType,
+                                    cusparseIndexType_t cscRowIndType,
+                                    cusparseIndexBase_t idxBase,
+                                    cudaDataType_t valueType);
+
+// ── Stream handling ───────────────────────────────────────────────────────────
+cusparseStatus_t cusparseSetStream(cusparseHandle_t handle, void *stream);
+cusparseStatus_t cusparseGetStream(cusparseHandle_t handle, void **stream);
+
+// ── Sparse matrix attributes ──────────────────────────────────────────────────
+typedef enum {
+    CUSPARSE_SPMAT_FILL_MODE = 0,
+    CUSPARSE_SPMAT_DIAG_TYPE = 1
+} cusparseSpMatAttribute_t;
+
+cusparseStatus_t cusparseSpMatGetAttribute(cusparseSpMatDescr_t spMatDescr,
+                                            cusparseSpMatAttribute_t attribute,
+                                            void *data, size_t dataSize);
+cusparseStatus_t cusparseSpMatSetAttribute(cusparseSpMatDescr_t spMatDescr,
+                                            cusparseSpMatAttribute_t attribute,
+                                            const void *data, size_t dataSize);
+
+// ── Sparse→Dense conversion ────────────────────────────────────────────────────
+typedef enum { CUSPARSE_SPARSETODENSE_ALG_DEFAULT = 0 } cusparseSparseToDenseAlg_t;
+
+cusparseStatus_t cusparseSparseToDense_bufferSize(cusparseHandle_t handle,
+                                                   cusparseSpMatDescr_t matA,
+                                                   cusparseDnMatDescr_t matB,
+                                                   cusparseSparseToDenseAlg_t alg,
+                                                   size_t *bufferSize);
+cusparseStatus_t cusparseSparseToDense(cusparseHandle_t handle,
+                                        cusparseSpMatDescr_t matA,
+                                        cusparseDnMatDescr_t matB,
+                                        cusparseSparseToDenseAlg_t alg,
+                                        void *buffer);
+
+// ── Dense→Sparse conversion ────────────────────────────────────────────────────
+typedef enum { CUSPARSE_DENSETOSPARSE_ALG_DEFAULT = 0 } cusparseDenseToSparseAlg_t;
+
+cusparseStatus_t cusparseDenseToSparse_bufferSize(cusparseHandle_t handle,
+                                                   cusparseDnMatDescr_t matA,
+                                                   cusparseSpMatDescr_t matB,
+                                                   cusparseDenseToSparseAlg_t alg,
+                                                   size_t *bufferSize);
+cusparseStatus_t cusparseDenseToSparse_analysis(cusparseHandle_t handle,
+                                                 cusparseDnMatDescr_t matA,
+                                                 cusparseSpMatDescr_t matB,
+                                                 cusparseDenseToSparseAlg_t alg,
+                                                 void *buffer);
+cusparseStatus_t cusparseDenseToSparse_compress(cusparseHandle_t handle,
+                                                 cusparseDnMatDescr_t matA,
+                                                 cusparseSpMatDescr_t matB,
+                                                 cusparseDenseToSparseAlg_t alg,
+                                                 void *buffer);
+
+// ── Sparse triangular solve (SpSV) ────────────────────────────────────────────
+typedef enum { CUSPARSE_SPSV_ALG_DEFAULT = 0 } cusparseSpSVAlg_t;
+
+struct cusparseSpSVDescr;
+typedef struct cusparseSpSVDescr *cusparseSpSVDescr_t;
+
+cusparseStatus_t cusparseSpSV_createDescr(cusparseSpSVDescr_t *descr);
+cusparseStatus_t cusparseSpSV_destroyDescr(cusparseSpSVDescr_t descr);
+cusparseStatus_t cusparseSpSV_bufferSize(cusparseHandle_t handle,
+                                          cusparseOperation_t opA,
+                                          const void *alpha,
+                                          cusparseSpMatDescr_t matA,
+                                          cusparseDnVecDescr_t vecX,
+                                          cusparseDnVecDescr_t vecY,
+                                          cudaDataType_t computeType,
+                                          cusparseSpSVAlg_t alg,
+                                          cusparseSpSVDescr_t spsvDescr,
+                                          size_t *bufferSize);
+cusparseStatus_t cusparseSpSV_analysis(cusparseHandle_t handle,
+                                        cusparseOperation_t opA,
+                                        const void *alpha,
+                                        cusparseSpMatDescr_t matA,
+                                        cusparseDnVecDescr_t vecX,
+                                        cusparseDnVecDescr_t vecY,
+                                        cudaDataType_t computeType,
+                                        cusparseSpSVAlg_t alg,
+                                        cusparseSpSVDescr_t spsvDescr,
+                                        void *buffer);
+cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t handle,
+                                     cusparseOperation_t opA,
+                                     const void *alpha,
+                                     cusparseSpMatDescr_t matA,
+                                     cusparseDnVecDescr_t vecX,
+                                     cusparseDnVecDescr_t vecY,
+                                     cudaDataType_t computeType,
+                                     cusparseSpSVAlg_t alg,
+                                     cusparseSpSVDescr_t spsvDescr);
+
+// ── Sparse matrix size / pointer update ───────────────────────────────────────
+cusparseStatus_t cusparseSpMatGetSize(cusparseSpMatDescr_t spMatDescr,
+                                       int64_t *rows, int64_t *cols, int64_t *nnz);
+cusparseStatus_t cusparseCsrSetPointers(cusparseSpMatDescr_t spMatDescr,
+                                         void *csrRowOffsets, void *csrColInd,
+                                         void *csrValues);
+
+// ── Sparse Matrix-Matrix multiply (SpGEMM) ────────────────────────────────────
+typedef enum { CUSPARSE_SPGEMM_DEFAULT = 0 } cusparseSpGEMMAlg_t;
+
+struct cusparseSpGEMMDescr;
+typedef struct cusparseSpGEMMDescr *cusparseSpGEMMDescr_t;
+
+cusparseStatus_t cusparseSpGEMM_createDescr(cusparseSpGEMMDescr_t *descr);
+cusparseStatus_t cusparseSpGEMM_destroyDescr(cusparseSpGEMMDescr_t descr);
+cusparseStatus_t cusparseSpGEMM_workEstimation(cusparseHandle_t handle,
+                                                cusparseOperation_t opA,
+                                                cusparseOperation_t opB,
+                                                const void *alpha,
+                                                cusparseSpMatDescr_t matA,
+                                                cusparseSpMatDescr_t matB,
+                                                const void *beta,
+                                                cusparseSpMatDescr_t matC,
+                                                cudaDataType_t computeType,
+                                                cusparseSpGEMMAlg_t alg,
+                                                cusparseSpGEMMDescr_t spgemmDescr,
+                                                size_t *bufferSize1, void *externalBuffer1);
+cusparseStatus_t cusparseSpGEMM_compute(cusparseHandle_t handle,
+                                         cusparseOperation_t opA,
+                                         cusparseOperation_t opB,
+                                         const void *alpha,
+                                         cusparseSpMatDescr_t matA,
+                                         cusparseSpMatDescr_t matB,
+                                         const void *beta,
+                                         cusparseSpMatDescr_t matC,
+                                         cudaDataType_t computeType,
+                                         cusparseSpGEMMAlg_t alg,
+                                         cusparseSpGEMMDescr_t spgemmDescr,
+                                         size_t *bufferSize2, void *externalBuffer2);
+cusparseStatus_t cusparseSpGEMM_copy(cusparseHandle_t handle,
+                                      cusparseOperation_t opA,
+                                      cusparseOperation_t opB,
+                                      const void *alpha,
+                                      cusparseSpMatDescr_t matA,
+                                      cusparseSpMatDescr_t matB,
+                                      const void *beta,
+                                      cusparseSpMatDescr_t matC,
+                                      cudaDataType_t computeType,
+                                      cusparseSpGEMMAlg_t alg,
+                                      cusparseSpGEMMDescr_t spgemmDescr);
+
+// ── Incomplete factorization (ILU0 / IC0) ─────────────────────────────────────
+// ILU(0): in-place incomplete LU factorization with zero fill-in.
+// IC(0):  in-place incomplete Cholesky factorization with zero fill-in.
+// Both work on the CSR values array in-place; row structure is unchanged.
+
+struct csrilu02Info;
+typedef struct csrilu02Info *csrilu02Info_t;
+
+cusparseStatus_t cusparseCreateCsrilu02Info(csrilu02Info_t *info);
+cusparseStatus_t cusparseDestroyCsrilu02Info(csrilu02Info_t info);
+cusparseStatus_t cusparseScsrilu02_bufferSize(cusparseHandle_t handle, int m, int nnz,
+                                               const cusparseSpMatDescr_t descrA,
+                                               float *csrSortedValA, const int *csrSortedRowPtrA,
+                                               const int *csrSortedColIndA,
+                                               csrilu02Info_t info, int *pBufferSizeInBytes);
+cusparseStatus_t cusparseDcsrilu02_bufferSize(cusparseHandle_t handle, int m, int nnz,
+                                               const cusparseSpMatDescr_t descrA,
+                                               double *csrSortedValA, const int *csrSortedRowPtrA,
+                                               const int *csrSortedColIndA,
+                                               csrilu02Info_t info, int *pBufferSizeInBytes);
+cusparseStatus_t cusparseScsrilu02_analysis(cusparseHandle_t handle, int m, int nnz,
+                                             const cusparseSpMatDescr_t descrA,
+                                             const float *csrSortedValA, const int *csrSortedRowPtrA,
+                                             const int *csrSortedColIndA,
+                                             csrilu02Info_t info, int policy, void *pBuffer);
+cusparseStatus_t cusparseDcsrilu02_analysis(cusparseHandle_t handle, int m, int nnz,
+                                             const cusparseSpMatDescr_t descrA,
+                                             const double *csrSortedValA, const int *csrSortedRowPtrA,
+                                             const int *csrSortedColIndA,
+                                             csrilu02Info_t info, int policy, void *pBuffer);
+cusparseStatus_t cusparseScsrilu02(cusparseHandle_t handle, int m, int nnz,
+                                    const cusparseSpMatDescr_t descrA,
+                                    float *csrSortedValA_valM, const int *csrSortedRowPtrA,
+                                    const int *csrSortedColIndA,
+                                    csrilu02Info_t info, int policy, void *pBuffer);
+cusparseStatus_t cusparseDcsrilu02(cusparseHandle_t handle, int m, int nnz,
+                                    const cusparseSpMatDescr_t descrA,
+                                    double *csrSortedValA_valM, const int *csrSortedRowPtrA,
+                                    const int *csrSortedColIndA,
+                                    csrilu02Info_t info, int policy, void *pBuffer);
+
+struct csric02Info;
+typedef struct csric02Info *csric02Info_t;
+
+cusparseStatus_t cusparseCreateCsric02Info(csric02Info_t *info);
+cusparseStatus_t cusparseDestroyCsric02Info(csric02Info_t info);
+cusparseStatus_t cusparseScsric02_bufferSize(cusparseHandle_t handle, int m, int nnz,
+                                              const cusparseSpMatDescr_t descrA,
+                                              float *csrSortedValA, const int *csrSortedRowPtrA,
+                                              const int *csrSortedColIndA,
+                                              csric02Info_t info, int *pBufferSizeInBytes);
+cusparseStatus_t cusparseDcsric02_bufferSize(cusparseHandle_t handle, int m, int nnz,
+                                              const cusparseSpMatDescr_t descrA,
+                                              double *csrSortedValA, const int *csrSortedRowPtrA,
+                                              const int *csrSortedColIndA,
+                                              csric02Info_t info, int *pBufferSizeInBytes);
+cusparseStatus_t cusparseScsric02_analysis(cusparseHandle_t handle, int m, int nnz,
+                                            const cusparseSpMatDescr_t descrA,
+                                            const float *csrSortedValA, const int *csrSortedRowPtrA,
+                                            const int *csrSortedColIndA,
+                                            csric02Info_t info, int policy, void *pBuffer);
+cusparseStatus_t cusparseDcsric02_analysis(cusparseHandle_t handle, int m, int nnz,
+                                            const cusparseSpMatDescr_t descrA,
+                                            const double *csrSortedValA, const int *csrSortedRowPtrA,
+                                            const int *csrSortedColIndA,
+                                            csric02Info_t info, int policy, void *pBuffer);
+cusparseStatus_t cusparseScsric02(cusparseHandle_t handle, int m, int nnz,
+                                   const cusparseSpMatDescr_t descrA,
+                                   float *csrSortedValA_valM, const int *csrSortedRowPtrA,
+                                   const int *csrSortedColIndA,
+                                   csric02Info_t info, int policy, void *pBuffer);
+cusparseStatus_t cusparseDcsric02(cusparseHandle_t handle, int m, int nnz,
+                                   const cusparseSpMatDescr_t descrA,
+                                   double *csrSortedValA_valM, const int *csrSortedRowPtrA,
+                                   const int *csrSortedColIndA,
+                                   csric02Info_t info, int policy, void *pBuffer);
 
 #ifdef __cplusplus
 } // extern "C"

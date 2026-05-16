@@ -46,7 +46,8 @@ enum cudnnBackendDescriptorType_t {
     CUDNN_BACKEND_KNOB_DESCRIPTOR = 32,
     CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR = 33,
     CUDNN_BACKEND_LAYOUT_INFO_DESCRIPTOR = 34,
-    CUDNN_BACKEND_OPERATION_RNN_DESCRIPTOR = 35
+    CUDNN_BACKEND_OPERATION_RNN_DESCRIPTOR = 35,
+    CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR = 36
 };
 
 // ── Attribute IDs ────────────────────────────────────────────────────────────
@@ -138,7 +139,14 @@ enum cudnnBackendAttributeName_t {
     CUDNN_ATTR_OPERATION_MATMUL_BETA = 180,
     // Graph traversal
     CUDNN_ATTR_ENGINE_OPERATION_GRAPH = 500,
-    CUDNN_ATTR_OPERATIONSET_OPS = 501
+    CUDNN_ATTR_OPERATIONSET_OPS = 501,
+    // Attention operation attributes
+    CUDNN_ATTR_OPERATION_ATTENTION_QDESC   = 200,
+    CUDNN_ATTR_OPERATION_ATTENTION_KDESC   = 201,
+    CUDNN_ATTR_OPERATION_ATTENTION_VDESC   = 202,
+    CUDNN_ATTR_OPERATION_ATTENTION_ODESC   = 203,
+    CUDNN_ATTR_OPERATION_ATTENTION_NUMHEADS = 204,
+    CUDNN_ATTR_OPERATION_ATTENTION_SCALE   = 205
 };
 
 // ── Internal backend node ────────────────────────────────────────────────────
@@ -767,6 +775,76 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
                 nullptr, scale.data(), dScale.data(), dBias.data(),
                 1e-5, savedMean.data(), savedInvVar.data());
             if (s != CUDNN_STATUS_SUCCESS) return s;
+            break;
+        }
+        case CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR: {
+            // Scaled dot-product attention: O = softmax(Q*K^T / scale) * V
+            // Tensor layout expected: (batch, heads, seqLen, head_dim) for Q/K/V/O.
+            uintptr_t qId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ATTENTION_QDESC);
+            uintptr_t kId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ATTENTION_KDESC);
+            uintptr_t vId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ATTENTION_VDESC);
+            uintptr_t oId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ATTENTION_ODESC);
+            void *qPtr = dataPtrs[qId], *kPtr = dataPtrs[kId];
+            void *vPtr = dataPtrs[vId], *oPtr = dataPtrs[oId];
+            if (!qPtr || !kPtr || !vPtr || !oPtr) return CUDNN_STATUS_INVALID_VALUE;
+
+            TensorDesc qDesc = buildTensorDesc(qId);
+            TensorDesc kDesc = buildTensorDesc(kId);
+            TensorDesc vDesc = buildTensorDesc(vId);
+
+            // Infer dimensions: n=batch, c=heads, h=seqLen, w=head_dim
+            int batch    = qDesc.n;
+            int heads    = qDesc.c;
+            int seqQ     = qDesc.h;
+            int head_dim = qDesc.w;
+            int seqK     = kDesc.h;
+
+            float attnScale = getAttrFloat(opNode, CUDNN_ATTR_OPERATION_ATTENTION_SCALE,
+                                            1.0f / std::sqrt(static_cast<float>(head_dim)));
+
+            const float *Q = static_cast<const float*>(qPtr);
+            const float *K = static_cast<const float*>(kPtr);
+            const float *V = static_cast<const float*>(vPtr);
+            float       *O = static_cast<float*>(oPtr);
+
+            std::vector<float> attnScore(static_cast<size_t>(seqQ * seqK));
+
+            for (int b = 0; b < batch; ++b) {
+                for (int h = 0; h < heads; ++h) {
+                    int bhQ = (b * heads + h) * seqQ * head_dim;
+                    int bhK = (b * heads + h) * seqK * head_dim;
+                    int bhO = (b * heads + h) * seqQ * head_dim;
+
+                    // Compute A = Q * K^T * scale  [seqQ × seqK]
+                    for (int i = 0; i < seqQ; ++i) {
+                        for (int j = 0; j < seqK; ++j) {
+                            float dot = 0.0f;
+                            for (int d = 0; d < head_dim; ++d)
+                                dot += Q[bhQ + i * head_dim + d] * K[bhK + j * head_dim + d];
+                            attnScore[static_cast<size_t>(i * seqK + j)] = dot * attnScale;
+                        }
+                    }
+
+                    // Softmax over seqK dim for each query position
+                    for (int i = 0; i < seqQ; ++i) {
+                        float *row = attnScore.data() + i * seqK;
+                        float maxVal = *std::max_element(row, row + seqK);
+                        float sumExp = 0.0f;
+                        for (int j = 0; j < seqK; ++j) { row[j] = std::exp(row[j] - maxVal); sumExp += row[j]; }
+                        for (int j = 0; j < seqK; ++j) row[j] /= sumExp;
+                    }
+
+                    // Output = A * V  [seqQ × head_dim]
+                    for (int i = 0; i < seqQ; ++i) {
+                        for (int d = 0; d < head_dim; ++d) {
+                            float sum = 0.0f;
+                            for (int j = 0; j < seqK; ++j)
+                                sum += attnScore[static_cast<size_t>(i * seqK + j)] * V[bhK + j * head_dim + d];
+                            O[bhO + i * head_dim + d] = sum;
+                        }
+                    }
+                }
+            }
             break;
         }
         default:
