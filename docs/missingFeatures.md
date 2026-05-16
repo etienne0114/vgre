@@ -65,7 +65,7 @@ All 21 test cases pass. OpenMP parallelization enabled for CGEMM/ZGEMM.
 
 ---
 
-### 2.2 cuSOLVER — Dense (complete) + Sparse (missing)
+### 2.2 cuSOLVER — Dense + Sparse (both complete)
 
 **Dense API status** — **ALL DONE** via LAPACK delegation in `cusolver_core.cpp`:
 
