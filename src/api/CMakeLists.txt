@@ -12,6 +12,7 @@ add_library(vgre_api OBJECT
     cublas/cublas_level2_packed.cpp
     cublas/cublas_level3.cpp
     cublas/cublas_level3_blas3.cpp
+    cublas/cublas_gemm_ex.cpp
     cublas/cublas_complex.cpp
     cublas/cublas_complex_level2.cpp
     cublas/cublas_complex_level3.cpp
@@ -58,6 +59,7 @@ add_library(vgre_cudart_shims OBJECT
     cudart/cudart_memory_pool.cpp
     cudart/cudart_cooperative.cpp
     cudart/cudart_mipmap.cpp
+    cudart/cudart_shim_graph_basic.cpp
 )
 target_include_directories(vgre_cudart_shims PUBLIC
     ${PROJECT_SOURCE_DIR}/include
