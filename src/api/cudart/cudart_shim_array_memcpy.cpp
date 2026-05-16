@@ -27,6 +27,10 @@
 #include <mutex>
 #include <unordered_map>
 
+// cudaArray_const_t is a const-pointer variant of cudaArray_t used in the
+// CUDA runtime API for source arrays in copy operations.
+typedef const struct cudaArray* cudaArray_const_t;
+
 using namespace vgre::api;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -238,21 +242,23 @@ cudaError_t cudaArrayGetInfo(struct cudaChannelFormatDesc *desc,
 
 cudaError_t cudaMemcpyToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
                                const void *src, size_t count,
-                               int /*kind*/) {
+                               int kind) {
     return CUDAInterceptor::instance().memcpyToArray(
         static_cast<vgre::api::cudaArray_t>(reinterpret_cast<uintptr_t>(dst)),
-        wOffset, hOffset, src, count);
+        wOffset, hOffset, src, count,
+        static_cast<cudaMemcpyKind_t>(kind));
 }
 
 // ── cudaMemcpyFromArray ───────────────────────────────────────────────────────
 
 cudaError_t cudaMemcpyFromArray(void *dst, cudaArray_const_t src,
                                  size_t wOffset, size_t hOffset,
-                                 size_t count, int /*kind*/) {
+                                 size_t count, int kind) {
     return CUDAInterceptor::instance().memcpyFromArray(
         dst,
         static_cast<vgre::api::cudaArray_t>(reinterpret_cast<uintptr_t>(src)),
-        wOffset, hOffset, count);
+        wOffset, hOffset, count,
+        static_cast<cudaMemcpyKind_t>(kind));
 }
 
 // ── cudaMemcpy2DToArray ───────────────────────────────────────────────────────

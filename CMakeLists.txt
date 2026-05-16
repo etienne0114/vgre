@@ -470,6 +470,7 @@ add_library(vgre_cudart SHARED
     src/api/nccl/nccl_p2p.cpp
     src/api/curand/curand_core.cpp
     src/api/cufft/cufft_core.cpp
+    src/api/cufft/cufft_plan.cpp
     src/api/cusparse/cusparse_core.cpp
     src/api/cusparse/cusparse_format.cpp
     src/api/cusparse/cusparse_triangular.cpp

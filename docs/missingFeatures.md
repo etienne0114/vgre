@@ -19,12 +19,12 @@
 | cuDNN (legacy) | All major ops | All major ops | Fwd/bwd for conv, pool, activation, softmax, BN, dropout, RNN, attention, LRN, divisive norm, CTC loss, tensor ops |
 | cuDNN Backend API | Wired to legacy | **Fully wired** | Conv, pool, activation, softmax, reduction, matmul, BN, norm, RNN, concat, signal, gen_stats, bn_bwd_weights, **attention (SDPA)**. |
 | NCCL | P2P + collectives | P2P + collectives | Single-node shared-memory; ring-reduce for tensors > 1 MB; multi-node routes through TCPCluster |
-| cuFFT | O(n log n) FFT | O(n log n) FFT | Built-in Cooley-Tukey + Bluestein. Optional FFTW3 delegation via `VGRE_HAS_FFTW3`. Plan caching via handle map. |
+| cuFFT | O(n log n) FFT | O(n log n) FFT + FP16 shim | Built-in Cooley-Tukey + Bluestein. Optional FFTW3 delegation via `VGRE_HAS_FFTW3`. Plan caching, IPC, strided `PlanMany`, and half-precision C16C/R16C/C16R are implemented. |
 | cuRAND | 4 generators | 4 generators + Sobol | Per-handle `std::mutex genMutex`; concurrent calls on different handles are fully parallel. Sobol quasi-random (32/64-bit, scrambled). |
 | cuSOLVER | 8 dense routines | **All dense + sparse** | Dense: potrf, geqrf, gesvd, syevd, getrf, getrs, ormqr, gelsd via LAPACK. Sparse (cusolverSp): csrlsvlu, csrlsvchol, csrlsqvqr, csreigvsi via dense extraction. |
 | cuSPARSE | CSR SpMV/SpMM | **Full generic API** | CSR, COO, CSC; SpMV, SpMM (S/D/C/Z/FP16/BF16/INT8); SparseToDense; DenseToSparse; SpSV (S/D/FP16/BF16, lower+upper, unit+non-unit, direct+transposed); SpGEMM (S/D/FP16/BF16); ILU0; IC0 |
 | cuBLASLt | Basic matmul + epilogues | **Full epilogue set + LRU cache** | ReLU, GELU, Bias, DRELU, DGELU, DRELU_BGRAD, DGELU_BGRAD, BGRADA/BGRADB; 128-entry LRU algo cache |
-| Profiling | Kernel timeline + Chrome trace | Kernel timeline + Chrome trace | `InstructionSample` is heuristic-only (no hardware PMU counter). All in `runtime_profiler.cpp`. |
+| Profiling | Kernel timeline + Chrome trace | Kernel timeline + Chrome/OTLP trace + LLVM-IR instruction classification | No NVIDIA hardware PMU/CUPTI counters in CPU runtime; instruction mix is derived from generated LLVM IR when available and otherwise reported as unclassified. Split across `runtime_profiler.cpp` and `runtime_profiler_instruction.cpp`. |
 | File Organization | All large files split | **DONE** | 13 monolithic files split into 37 smaller files. 116 total tests. |
 | K8s Plugin | Go gRPC | Go gRPC | Basic daemonset; no dynamic device discovery |
 | SLURM GRES | C shared lib | C shared lib | Basic vGPU allocation tracker |
@@ -97,15 +97,15 @@ All 21 test cases pass. OpenMP parallelization enabled for CGEMM/ZGEMM.
 | Batched transforms | `cufftPlan1d` with batch > 1, parallelized over batches |
 | Plan handle caching | Plans stored in global map, reusable across exec calls |
 
-**Remaining**: Half-precision FFT (`__half` DFT) — returns `CUFFT_NOT_SUPPORTED`.
+**Additional support added (2026-05-16)**: Half-precision `C16C`, `R16C`, and `C16R` execution paths widen to FP32 for FFT math and narrow back to IEEE FP16 on output. `cufftPlanMany` supports strided batched 1D layouts, and planning/state code is split into `cufft_plan.cpp`.
 
-All 11 test cases pass. 112/112 full suite pass.
+All 13 cuFFT test cases pass.
 
 ---
 
 ### 2.4 cuSPARSE — Format Conversions & Sparse Solvers
 
-**Status**: **PARTIALLY IMPLEMENTED** (2026-05-16).
+**Status**: **IMPLEMENTED for the documented generic API; full-fill direct sparse factorization is an external-backend limitation** (2026-05-16).
 
 | API | Status | Notes |
 |---|---|---|
@@ -119,7 +119,7 @@ All 11 test cases pass. 112/112 full suite pass.
 | `cusparseSpGEMM` (sparse × sparse) | **DONE** (2026-05-16) | 3-phase workEstimation+compute+copy in `cusparse_factorization.cpp`; float + double + FP16 + BF16 (widen-compute-narrow) |
 | `cusparseScsrilu02` / `cusparseDcsrilu02` (ILU0) | **DONE** (2026-05-16) | In-place ILU with zero fill-in; marker-based O(nnz * avg_row) |
 | `cusparseScsric02` / `cusparseDcsric02` (IC0) | **DONE** (2026-05-16) | In-place incomplete Cholesky with zero fill-in for SPD matrices |
-| Sparse direct factorization (UMFPACK-style full fill-in) | **MISSING** | Requires external sparse LAPACK library |
+| Sparse direct factorization (UMFPACK-style full fill-in) | **EXTERNAL BACKEND LIMIT** | Requires UMFPACK/SuperLU/CHOLMOD-style sparse solver integration |
 
 ---
 
@@ -165,7 +165,7 @@ Registry changed to `unique_ptr<GeneratorState>` with `std::mutex genMutex` per 
 
 | Missing | Impact | Notes |
 |---|---|---|
-| True instruction-level hardware sampling | `InstructionSample` is partly heuristic | `runtime_profiler.cpp` uses `analyzeStaticFlops()` (authoritative LLVM IR analysis) when `ir->flopCountVerified`; falls back to source-heuristic estimates otherwise. No hardware PMU counters. |
+| NVIDIA hardware PMU/CUPTI counters | No physical GPU counter stream in CPU runtime | `runtime_profiler_instruction.cpp` classifies generated LLVM IR into load/store/ALU/branch/barrier/other buckets. If IR is absent, counts are retained as `otherCount` rather than guessed. |
 | CUPTI-equivalent API surface | PyTorch profiler integration | Only basic kernel timeline + Chrome trace export exists |
 
 ---
@@ -207,7 +207,7 @@ prohibitive, link against UMFPACK (LU) or CHOLMOD (Cholesky) and replace the ext
 
 | Limitation | Impact | Notes |
 |---|---|---|
-| No RDMA transport | High-latency for multi-node | All multi-node traffic goes through TCPCluster TCP sockets |
+| RDMA requires explicit build + hardware/software RoCE | TCP fallback remains default | RDMA/RoCE transport is implemented in `src/advanced/rdma_transport.cpp` and activated with `-DVGRE_ENABLE_RDMA=ON` plus libibverbs; otherwise TCPCluster is used. |
 | No NVLink-style P2P | Single-node only uses shared memory | `ncclSend/Recv` use shared-memory slots on single node; TCP routing is functional but not optimized |
 | No topology-aware tree/ring | AllReduce uses flat barrier for small tensors | Ring reduce-scatter + all-gather is used for tensors > 1 MB (`kRingThreshold`); flat barrier for smaller tensors (latency-optimal) |
 
@@ -244,9 +244,9 @@ The following items were **previously claimed as separate files** in `implementa
 | `src/core/graph/graph_manager_exec_update_v2.cpp` | `src/api/cuda_interceptor_graphs.cpp::graphExecUpdateV2()` | Implemented |
 | `src/api/cudnn/cudnn_int8_packed.cpp` | `src/api/cudnn/cudnn_{convolution,pooling,activation}.cpp` (INT8x4/INT8x32 branches) | Implemented |
 | `src/api/cudart/cudart_shim_cdp.cpp` | `src/runtime/cdp_executor.cpp` | Implemented |
-| `src/advanced/profiling/cupti_equivalent.cpp` | `src/advanced/runtime_profiler.cpp` | Implemented |
+| `src/advanced/profiling/cupti_equivalent.cpp` | `src/advanced/runtime_profiler.cpp` | Implemented as Chrome/OTLP trace export, not NVIDIA CUPTI |
 | `src/advanced/profiling/kernel_timeline.cpp` | `src/advanced/runtime_profiler.cpp` | Implemented |
-| `src/advanced/profiling/instruction_sampler.cpp` | `src/advanced/runtime_profiler.cpp` | Implemented |
+| `src/advanced/profiling/instruction_sampler.cpp` | `src/advanced/runtime_profiler_instruction.cpp` | Implemented via LLVM-IR classification |
 
 ---
 
@@ -283,4 +283,15 @@ The following items that were previously potential concerns have been resolved:
 
 ---
 
-*Last updated: 2026-05-16 (fourth pass). 113/114 tests passing (1 intermittent TCP cluster race). FP16/BF16 SpSV + SpGEMM, cuBLASLt split (914→478+285 lines), FLOPCounting RESOURCE_LOCK, cusolverSp doc corrections.*
+## 8. Sixth Pass — Additional Fixes (2026-05-16)
+
+| Item | Resolution |
+|------|-----------|
+| `TCPClusterPreservation` test failure | Hardcoded port 17779 conflicted with VS Code. Fixed: all test ports use `findFreePort()` |
+| `cudnn_backend_internal.h` extern/linkage mismatch | `cudnn_backend_api.cpp` now includes the header; duplicate definitions removed; globals at file scope |
+| `cudart_shim_array_memcpy.cpp` not compiled | Added to `vgre_cudart_shims`; fixed `cudaArray_const_t` typedef and missing `kind` argument |
+| Test count | **116/116 pass** |
+
+---
+
+*Last updated: 2026-05-16 (sixth pass). 116/116 tests pass. Port-conflict fix, cuDNN backend header integration, and missing array memcpy source added.*

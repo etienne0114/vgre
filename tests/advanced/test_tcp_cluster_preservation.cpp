@@ -38,6 +38,11 @@
 #include <chrono>
 #include <vector>
 #include <functional>
+#ifndef _WIN32
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 using namespace vgre::advanced;
 using namespace vgre::common;
@@ -48,7 +53,7 @@ namespace {
     void sleep_ms(int ms) {
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
     }
-    
+
     bool wait_for_condition(std::function<bool()> condition, int timeout_ms) {
         auto start = std::chrono::steady_clock::now();
         while (!condition()) {
@@ -60,6 +65,26 @@ namespace {
             sleep_ms(10);
         }
         return true;
+    }
+
+    // Allocate a free TCP port by binding to :0, reading the assigned port,
+    // then closing — the port is immediately available for the caller.
+    // Uses SO_REUSEADDR so the test can rebind quickly after release.
+    int findFreePort() {
+        int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(sock >= 0);
+        int opt = 1;
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = 0;
+        assert(::bind(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0);
+        socklen_t len = sizeof(addr);
+        getsockname(sock, (struct sockaddr*)&addr, &len);
+        int port = ntohs(addr.sin_port);
+        ::close(sock);
+        return port;
     }
 }
 
@@ -73,16 +98,13 @@ namespace {
  */
 void test_master_initialization_preserved() {
     std::cout << "[TEST] Property 2.1: Master initialization and port binding..." << std::endl;
-    
-    // Create a new instance for this test
+
     TCPClusterManager& manager = TCPClusterManager::instance();
-    
-    // Ensure clean state
     manager.shutdown();
     sleep_ms(100);
-    
-    // Initialize as master on a test port
-    VGREResult result = manager.initialize(true, "127.0.0.1", 17777);
+
+    int port = findFreePort();
+    VGREResult result = manager.initialize(true, "127.0.0.1", port);
     
     // Master initialization should succeed
     assert(result == VGREResult::SUCCESS);
@@ -110,37 +132,33 @@ void test_master_initialization_preserved() {
 void test_worker_connection_preserved() {
     std::cout << "[TEST] Property 2.2: Worker connection establishment..." << std::endl;
     
-    // Start master in a separate thread
-    std::thread master_thread([]() {
+    // Allocate a free port before spawning the master thread.
+    int master_port = findFreePort();
+
+    std::thread master_thread([master_port]() {
         TCPClusterManager& master = TCPClusterManager::instance();
         master.shutdown();
         sleep_ms(100);
-        
-        VGREResult result = master.initialize(true, "127.0.0.1", 17778);
+
+        VGREResult result = master.initialize(true, "127.0.0.1", master_port);
         assert(result == VGREResult::SUCCESS);
-        
+
         // Keep master running for 3 seconds
         sleep_ms(3000);
-        
+
         master.shutdown();
     });
-    
+
     // Give master time to start
     sleep_ms(300);
-    
-    // Create worker instance (using a different approach to avoid singleton issues)
-    // Note: In real tests, we'd use dependency injection, but for preservation tests
-    // we test the actual current implementation
-    
-    // For now, we'll test that the master is running and accepting connections
-    // by checking that we can create a socket and connect to it
+
     vgre_socket_t test_socket = socket(AF_INET, SOCK_STREAM, 0);
     assert(test_socket != VGRE_INVALID_SOCKET);
-    
+
     struct sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(17778);
+    serv_addr.sin_port = htons(master_port);
     inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
     
     int connect_result = connect(test_socket, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
@@ -170,9 +188,9 @@ void test_packet_operations_preserved() {
     TCPClusterManager& manager = TCPClusterManager::instance();
     manager.shutdown();
     sleep_ms(100);
-    
-    // Initialize as master
-    VGREResult result = manager.initialize(true, "127.0.0.1", 17779);
+
+    int port = findFreePort();
+    VGREResult result = manager.initialize(true, "127.0.0.1", port);
     assert(result == VGREResult::SUCCESS);
     
     sleep_ms(200);
@@ -214,8 +232,8 @@ void test_kernel_registration_preserved() {
     manager.shutdown();
     sleep_ms(100);
     
-    // Initialize as master
-    VGREResult result = manager.initialize(true, "127.0.0.1", 17780);
+    int port = findFreePort();
+    VGREResult result = manager.initialize(true, "127.0.0.1", port);
     assert(result == VGREResult::SUCCESS);
     
     sleep_ms(200);
@@ -254,7 +272,8 @@ void test_error_handling_preserved() {
     assert(!manager.isEnabled());
     
     // Test 2: Initialize and test invalid worker index
-    VGREResult result = manager.initialize(true, "127.0.0.1", 17781);
+    int port = findFreePort();
+    VGREResult result = manager.initialize(true, "127.0.0.1", port);
     assert(result == VGREResult::SUCCESS);
     
     sleep_ms(200);
@@ -336,7 +355,8 @@ void test_shutdown_idempotency_preserved() {
     manager.shutdown();
     sleep_ms(100);
     
-    VGREResult result = manager.initialize(true, "127.0.0.1", 17782);
+    int port = findFreePort();
+    VGREResult result = manager.initialize(true, "127.0.0.1", port);
     assert(result == VGREResult::SUCCESS);
     
     sleep_ms(200);
@@ -373,8 +393,8 @@ void test_node_info_retrieval_preserved() {
     manager.shutdown();
     sleep_ms(100);
     
-    // Initialize as master
-    VGREResult result = manager.initialize(true, "127.0.0.1", 17783);
+    int port = findFreePort();
+    VGREResult result = manager.initialize(true, "127.0.0.1", port);
     assert(result == VGREResult::SUCCESS);
     
     sleep_ms(200);

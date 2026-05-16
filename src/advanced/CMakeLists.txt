@@ -8,6 +8,7 @@ add_library(vgre_advanced OBJECT
     memory_compression.cpp
     vendor/lz4/lz4.c
     runtime_profiler.cpp
+    runtime_profiler_instruction.cpp
     vgre_workload_engine.cpp
     ipc_manager.cpp
     tcp_cluster/tcp_cluster_manager.cpp
