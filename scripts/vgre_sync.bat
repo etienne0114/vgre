@@ -304,27 +304,62 @@ echo === Building VGRE Native Engine ===
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 pushd "%BUILD_DIR%" || exit /b 1
 
-rem -- Select CMake generator: Ninja (preferred after vcvars64) or VS MSBuild --
+rem -- Locate Ninja: check PATH first, then the LLVM bin dir we installed -------
+set "NINJA_FOUND=0"
+where ninja >nul 2>&1
+if not errorlevel 1 set "NINJA_FOUND=1"
+if "!NINJA_FOUND!"=="0" (
+    if exist "%TOOLS_ROOT%\llvm\bin\ninja.exe" (
+        set "NINJA_FOUND=1"
+        set "PATH=%TOOLS_ROOT%\llvm\bin;!PATH!"
+        echo [INFO] Found ninja in LLVM build tools — added to PATH
+    )
+)
+
+rem -- Select CMake generator ---------------------------------------------------
+rem   Priority: Ninja (if found) > VS MSBuild (if VS detected) > NMake Makefiles
 set "CMAKE_GENERATOR=Ninja"
 set "CMAKE_ARCH_FLAG="
-where ninja >nul 2>&1
-if errorlevel 1 (
+set "CMAKE_COMPILER_FLAGS="
+if "!NINJA_FOUND!"=="0" (
+    rem Ninja not available — try VS MSBuild or NMake
     if "!VS_YEAR!"=="2022" ( set "CMAKE_GENERATOR=Visual Studio 17 2022" & set "CMAKE_ARCH_FLAG=-A x64" )
     if "!VS_YEAR!"=="2025" ( set "CMAKE_GENERATOR=Visual Studio 17 2022" & set "CMAKE_ARCH_FLAG=-A x64" )
     if "!VS_YEAR!"=="2019" ( set "CMAKE_GENERATOR=Visual Studio 16 2019" & set "CMAKE_ARCH_FLAG=-A x64" )
     if "!VS_YEAR!"=="2017" ( set "CMAKE_GENERATOR=Visual Studio 15 2017 Win64" )
-    if not defined VS_YEAR   set "CMAKE_GENERATOR=NMake Makefiles"
+    rem VS_YEAR empty = no VS found; fall back to NMake (needs cl.exe on PATH)
+    if "!VS_YEAR!"=="" set "CMAKE_GENERATOR=NMake Makefiles"
+)
+rem Ninja without MSVC: tell CMake to use Clang as the C/C++ compiler
+if "!CMAKE_GENERATOR!"=="Ninja" if "!VS_YEAR!"=="" (
+    set "CMAKE_COMPILER_FLAGS=-DCMAKE_C_COMPILER=clang.exe -DCMAKE_CXX_COMPILER=clang++.exe"
 )
 echo CMake generator: !CMAKE_GENERATOR!
 
-"%CMAKE_EXE%" "%PROJECT_ROOT%" -G "!CMAKE_GENERATOR!" !CMAKE_ARCH_FLAG! -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="!LLVM_DIR!" -DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=TRUE -DVGRE_ENABLE_NATIVE_SIMD=%VGRE_ENABLE_NATIVE_SIMD_FLAG%
+rem -- Wipe stale CMakeCache when the generator has changed --------------------
+rem A mismatch between the cached and requested generator is a hard CMake error.
+if exist "%BUILD_DIR%\CMakeCache.txt" (
+    set "_cached_gen="
+    for /f "usebackq tokens=2 delims==" %%G in (`findstr /B /C:"CMAKE_GENERATOR:INTERNAL=" "%BUILD_DIR%\CMakeCache.txt" 2^>nul`) do set "_cached_gen=%%G"
+    if defined _cached_gen (
+        if not "!_cached_gen!"=="!CMAKE_GENERATOR!" (
+            echo [INFO] Generator changed from "!_cached_gen!" to "!CMAKE_GENERATOR!" — cleaning stale build cache.
+            del /f /q "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
+            rd /s /q "%BUILD_DIR%\CMakeFiles" >nul 2>&1
+        )
+    )
+)
+
+"%CMAKE_EXE%" "%PROJECT_ROOT%" -G "!CMAKE_GENERATOR!" !CMAKE_ARCH_FLAG! !CMAKE_COMPILER_FLAGS! -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="!LLVM_DIR!" -DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=TRUE -DVGRE_ENABLE_NATIVE_SIMD=%VGRE_ENABLE_NATIVE_SIMD_FLAG%
 if errorlevel 1 (
     popd
     echo ERROR: CMake configure failed.
     exit /b 1
 )
 
-"%CMAKE_EXE%" --build . --config Release --target vgre vgre_cudart vgre-worker -- /m:1
+rem --parallel works for all generators (CMake 3.12+):
+rem   Ninja / NMake → maps to -j N,  VS MSBuild → maps to /m:N
+"%CMAKE_EXE%" --build . --config Release --target vgre vgre_cudart vgre-worker --parallel %NUMBER_OF_PROCESSORS%
 if errorlevel 1 (
     popd
     echo ERROR: Native build failed.
