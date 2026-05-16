@@ -439,4 +439,254 @@ cusolverStatus_t cusolverDnDsyevd(cusolverDnHandle_t /*handle*/, char jobz, char
     return CUSOLVER_STATUS_SUCCESS;
 }
 
+// ── cusolverSp — sparse solvers via CSR→dense extraction + LAPACK ─────────────
+//
+// Extracts the sparse matrix into a dense column-major array, runs the
+// corresponding LAPACK dense solver, and writes the result back.
+// Correct for moderate n (≤ ~4096); O(n²) memory, O(n³) compute.
+
+// Additional LAPACK prototypes
+void spotrs_(const char *uplo, const int *n, const int *nrhs,
+             const float *a, const int *lda, float *b, const int *ldb, int *info);
+void dpotrs_(const char *uplo, const int *n, const int *nrhs,
+             const double *a, const int *lda, double *b, const int *ldb, int *info);
+
+} // extern "C"
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+namespace {
+
+template<typename T>
+static void csr_to_dense_colmajor(int m, int n, const T *csrVal,
+                                   const int *csrRowPtr, const int *csrColInd,
+                                   std::vector<T> &dense) {
+    dense.assign(static_cast<size_t>(m) * static_cast<size_t>(n), T(0));
+    for (int r = 0; r < m; ++r)
+        for (int p = csrRowPtr[r]; p < csrRowPtr[r+1]; ++p)
+            if (csrColInd[p] >= 0 && csrColInd[p] < n)
+                dense[static_cast<size_t>(csrColInd[p]) * m + r] = csrVal[p];
+}
+
+std::mutex g_spHandleMutex;
+std::unordered_map<uintptr_t, bool> g_spHandles;
+uintptr_t g_nextSpHandle = 1;
+
+} // anonymous namespace
+
+extern "C" {
+
+// ── cusolverSp handle lifecycle ───────────────────────────────────────────────
+cusolverStatus_t cusolverSpCreate(cusolverSpHandle_t *handle) {
+    if (!handle) return CUSOLVER_STATUS_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_spHandleMutex);
+    uintptr_t h = g_nextSpHandle++;
+    g_spHandles[h] = true;
+    *handle = reinterpret_cast<cusolverSpHandle_t>(h);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverSpDestroy(cusolverSpHandle_t handle) {
+    if (!handle) return CUSOLVER_STATUS_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_spHandleMutex);
+    g_spHandles.erase(reinterpret_cast<uintptr_t>(handle));
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverSpSetStream(cusolverSpHandle_t /*h*/, void * /*stream*/) {
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Sparse LU solve (general): A*x = b ───────────────────────────────────────
+cusolverStatus_t cusolverSpScsrlsvlu(cusolverSpHandle_t /*h*/, int m, int nnz,
+                                      const cusparseMatDescr_t /*descr*/,
+                                      const float *csrVal, const int *csrRowPtr,
+                                      const int *csrColInd, const float *b,
+                                      float /*tol*/, int /*reorder*/,
+                                      float *x, int *singularity) {
+    if (!csrVal || !csrRowPtr || !csrColInd || !b || !x || m <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    std::vector<float> A; csr_to_dense_colmajor(m, m, csrVal, csrRowPtr, csrColInd, A);
+    std::vector<int> ipiv(m);
+    std::vector<float> rhs(b, b + m);
+    int info = 0;
+    sgetrf_(&m, &m, A.data(), &m, ipiv.data(), &info);
+    if (info != 0) { if (singularity) *singularity = info - 1; return CUSOLVER_STATUS_SUCCESS; }
+    char trans = 'N'; int nrhs = 1;
+    sgetrs_(&trans, &m, &nrhs, A.data(), &m, ipiv.data(), rhs.data(), &m, &info);
+    std::memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(float));
+    if (singularity) *singularity = -1;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverSpDcsrlsvlu(cusolverSpHandle_t /*h*/, int m, int nnz,
+                                      const cusparseMatDescr_t /*descr*/,
+                                      const double *csrVal, const int *csrRowPtr,
+                                      const int *csrColInd, const double *b,
+                                      double /*tol*/, int /*reorder*/,
+                                      double *x, int *singularity) {
+    if (!csrVal || !csrRowPtr || !csrColInd || !b || !x || m <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    std::vector<double> A; csr_to_dense_colmajor(m, m, csrVal, csrRowPtr, csrColInd, A);
+    std::vector<int> ipiv(m);
+    std::vector<double> rhs(b, b + m);
+    int info = 0;
+    dgetrf_(&m, &m, A.data(), &m, ipiv.data(), &info);
+    if (info != 0) { if (singularity) *singularity = info - 1; return CUSOLVER_STATUS_SUCCESS; }
+    char trans = 'N'; int nrhs = 1;
+    dgetrs_(&trans, &m, &nrhs, A.data(), &m, ipiv.data(), rhs.data(), &m, &info);
+    std::memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(double));
+    if (singularity) *singularity = -1;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Sparse Cholesky solve (SPD): A*x = b ─────────────────────────────────────
+cusolverStatus_t cusolverSpScsrlsvchol(cusolverSpHandle_t /*h*/, int m, int nnz,
+                                        const cusparseMatDescr_t /*descr*/,
+                                        const float *csrVal, const int *csrRowPtr,
+                                        const int *csrColInd, const float *b,
+                                        float /*tol*/, int /*reorder*/,
+                                        float *x, int *singularity) {
+    if (!csrVal || !csrRowPtr || !csrColInd || !b || !x || m <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    std::vector<float> A; csr_to_dense_colmajor(m, m, csrVal, csrRowPtr, csrColInd, A);
+    std::vector<float> rhs(b, b + m);
+    int info = 0; char uplo = 'L';
+    spotrf_(&uplo, &m, A.data(), &m, &info);
+    if (info != 0) { if (singularity) *singularity = info - 1; return CUSOLVER_STATUS_SUCCESS; }
+    int nrhs = 1;
+    spotrs_(&uplo, &m, &nrhs, A.data(), &m, rhs.data(), &m, &info);
+    std::memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(float));
+    if (singularity) *singularity = -1;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverSpDcsrlsvchol(cusolverSpHandle_t /*h*/, int m, int nnz,
+                                        const cusparseMatDescr_t /*descr*/,
+                                        const double *csrVal, const int *csrRowPtr,
+                                        const int *csrColInd, const double *b,
+                                        double /*tol*/, int /*reorder*/,
+                                        double *x, int *singularity) {
+    if (!csrVal || !csrRowPtr || !csrColInd || !b || !x || m <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    std::vector<double> A; csr_to_dense_colmajor(m, m, csrVal, csrRowPtr, csrColInd, A);
+    std::vector<double> rhs(b, b + m);
+    int info = 0; char uplo = 'L';
+    dpotrf_(&uplo, &m, A.data(), &m, &info);
+    if (info != 0) { if (singularity) *singularity = info - 1; return CUSOLVER_STATUS_SUCCESS; }
+    int nrhs = 1;
+    dpotrs_(&uplo, &m, &nrhs, A.data(), &m, rhs.data(), &m, &info);
+    std::memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(double));
+    if (singularity) *singularity = -1;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Sparse least-squares QR: min_x ||A*x - b||_2 ────────────────────────────
+cusolverStatus_t cusolverSpScsrlsqvqr(cusolverSpHandle_t /*h*/, int m, int n, int /*nnz*/,
+                                       const cusparseMatDescr_t /*descr*/,
+                                       const float *csrVal, const int *csrRowPtr,
+                                       const int *csrColInd, const float *b,
+                                       float tol, int *rankA, float *x,
+                                       int *p, float *min_norm) {
+    if (!csrVal || !csrRowPtr || !csrColInd || !b || !x || m <= 0 || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    std::vector<float> A; csr_to_dense_colmajor(m, n, csrVal, csrRowPtr, csrColInd, A);
+    int ldb = std::max(m, n);
+    std::vector<float> rhs(static_cast<size_t>(ldb), 0.0f);
+    std::memcpy(rhs.data(), b, static_cast<size_t>(m) * sizeof(float));
+    std::vector<float> S(std::min(m, n));
+    int rank_out = 0, info = 0, lwork = -1; float work_q; int iwork_q, one = 1;
+    sgelsd_(&m, &n, &one, A.data(), &m, rhs.data(), &ldb, S.data(), &tol,
+            &rank_out, &work_q, &lwork, &iwork_q, &info);
+    lwork = (info == 0) ? static_cast<int>(work_q) + 1 : 5 * std::max(m, n);
+    int nlvl = std::max(0, static_cast<int>(std::log2(std::min(m,n) / 25.0 + 1.0)) + 1);
+    int liwork = std::max(1, 3 * std::min(m,n) * nlvl + 11 * std::min(m,n));
+    std::vector<float> work2(lwork); std::vector<int> iwork2(liwork);
+    sgelsd_(&m, &n, &one, A.data(), &m, rhs.data(), &ldb, S.data(), &tol,
+            &rank_out, work2.data(), &lwork, iwork2.data(), &info);
+    std::memcpy(x, rhs.data(), static_cast<size_t>(n) * sizeof(float));
+    if (rankA)    *rankA = rank_out;
+    if (min_norm) { *min_norm = 0.0f; for (int i = n; i < ldb && i < m; ++i) *min_norm += rhs[i]*rhs[i]; *min_norm = std::sqrt(*min_norm); }
+    if (p) for (int i = 0; i < n; ++i) p[i] = i;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverSpDcsrlsqvqr(cusolverSpHandle_t /*h*/, int m, int n, int /*nnz*/,
+                                       const cusparseMatDescr_t /*descr*/,
+                                       const double *csrVal, const int *csrRowPtr,
+                                       const int *csrColInd, const double *b,
+                                       double tol, int *rankA, double *x,
+                                       int *p, double *min_norm) {
+    if (!csrVal || !csrRowPtr || !csrColInd || !b || !x || m <= 0 || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    std::vector<double> A; csr_to_dense_colmajor(m, n, csrVal, csrRowPtr, csrColInd, A);
+    int ldb = std::max(m, n);
+    std::vector<double> rhs(static_cast<size_t>(ldb), 0.0);
+    std::memcpy(rhs.data(), b, static_cast<size_t>(m) * sizeof(double));
+    std::vector<double> S(std::min(m, n));
+    int rank_out = 0, info = 0, lwork = -1; double work_q; int iwork_q, one = 1;
+    dgelsd_(&m, &n, &one, A.data(), &m, rhs.data(), &ldb, S.data(), &tol,
+            &rank_out, &work_q, &lwork, &iwork_q, &info);
+    lwork = (info == 0) ? static_cast<int>(work_q) + 1 : 5 * std::max(m, n);
+    int nlvl = std::max(0, static_cast<int>(std::log2(std::min(m,n) / 25.0 + 1.0)) + 1);
+    int liwork = std::max(1, 3 * std::min(m,n) * nlvl + 11 * std::min(m,n));
+    std::vector<double> work2(lwork); std::vector<int> iwork2(liwork);
+    dgelsd_(&m, &n, &one, A.data(), &m, rhs.data(), &ldb, S.data(), &tol,
+            &rank_out, work2.data(), &lwork, iwork2.data(), &info);
+    std::memcpy(x, rhs.data(), static_cast<size_t>(n) * sizeof(double));
+    if (rankA)    *rankA = rank_out;
+    if (min_norm) { *min_norm = 0.0; for (int i = n; i < ldb && i < m; ++i) *min_norm += rhs[i]*rhs[i]; *min_norm = std::sqrt(*min_norm); }
+    if (p) for (int i = 0; i < n; ++i) p[i] = i;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+} // extern "C" — close for template definition
+
+// ── Sparse eigenvalue via shift-invert power iteration (template, C++ linkage) ─
+template<typename T, typename LapackGetrf, typename LapackGetrs>
+static cusolverStatus_t eigvsi_impl(int m, int /*nnz*/,
+        const T *csrVal, const int *csrRowPtr, const int *csrColInd,
+        T mu0, const T *x0, int maxIter, T tol, T *mu, T *x,
+        LapackGetrf getrf_fn, LapackGetrs getrs_fn) {
+    std::vector<T> A0; csr_to_dense_colmajor(m, m, csrVal, csrRowPtr, csrColInd, A0);
+    // Shift: A0 -= mu0 * I
+    for (int i = 0; i < m; ++i) A0[static_cast<size_t>(i)*m + i] -= mu0;
+    std::vector<int> ipiv(m); int info = 0;
+    getrf_fn(&m, &m, A0.data(), &m, ipiv.data(), &info);
+    if (info != 0) return CUSOLVER_STATUS_SUCCESS;
+
+    std::vector<T> xCur(x0, x0 + m), xNext(m);
+    T muCur = mu0;
+    char trans = 'N'; int nrhs = 1;
+    for (int iter = 0; iter < std::max(1, maxIter); ++iter) {
+        std::vector<T> rhs(xCur);
+        getrs_fn(&trans, &m, &nrhs, A0.data(), &m, ipiv.data(), rhs.data(), &m, &info);
+        T norm = T(0);
+        for (int i = 0; i < m; ++i) norm += rhs[i] * rhs[i];
+        norm = std::sqrt(norm);
+        if (norm <= T(0)) break;
+        for (int i = 0; i < m; ++i) xNext[i] = rhs[i] / norm;
+        // Rayleigh quotient: mu = x^T A x / x^T x (using shifted factored A)
+        T muNext = mu0 + T(1) / norm;
+        if (std::fabs(muNext - muCur) < tol) { muCur = muNext; xCur = xNext; break; }
+        muCur = muNext; xCur = xNext;
+    }
+    *mu = muCur;
+    std::memcpy(x, xCur.data(), static_cast<size_t>(m) * sizeof(T));
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+extern "C" {
+
+cusolverStatus_t cusolverSpScsreigvsi(cusolverSpHandle_t /*h*/, int m, int nnz,
+                                       const cusparseMatDescr_t /*descr*/,
+                                       const float *csrVal, const int *csrRowPtr,
+                                       const int *csrColInd, float mu0, const float *x0,
+                                       int maxIter, float tol, float *mu, float *x) {
+    if (!csrVal || !csrRowPtr || !csrColInd || !x0 || !mu || !x || m <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    return eigvsi_impl<float>(m, nnz, csrVal, csrRowPtr, csrColInd, mu0, x0, maxIter, tol, mu, x,
+        [](int *m, int *n, float *a, int *lda, int *p, int *i) { sgetrf_(m, n, a, lda, p, i); },
+        [](char *t, int *n, int *r, const float *a, int *lda, const int *p, float *b, int *ldb, int *i) {
+            sgetrs_(t, n, r, a, lda, p, b, ldb, i); });
+}
+cusolverStatus_t cusolverSpDcsreigvsi(cusolverSpHandle_t /*h*/, int m, int nnz,
+                                       const cusparseMatDescr_t /*descr*/,
+                                       const double *csrVal, const int *csrRowPtr,
+                                       const int *csrColInd, double mu0, const double *x0,
+                                       int maxIter, double tol, double *mu, double *x) {
+    if (!csrVal || !csrRowPtr || !csrColInd || !x0 || !mu || !x || m <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    return eigvsi_impl<double>(m, nnz, csrVal, csrRowPtr, csrColInd, mu0, x0, maxIter, tol, mu, x,
+        [](int *m, int *n, double *a, int *lda, int *p, int *i) { dgetrf_(m, n, a, lda, p, i); },
+        [](char *t, int *n, int *r, const double *a, int *lda, const int *p, double *b, int *ldb, int *i) {
+            dgetrs_(t, n, r, a, lda, p, b, ldb, i); });
+}
+
 } // extern "C"

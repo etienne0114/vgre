@@ -65,15 +65,22 @@ All 21 test cases pass. OpenMP parallelization enabled for CGEMM/ZGEMM.
 
 ---
 
-### 2.2 cuSOLVER — Advanced Dense + Sparse
+### 2.2 cuSOLVER — Dense (complete) + Sparse (missing)
 
-| Missing API | Impact | Notes |
+**Dense API status** — **ALL DONE** via LAPACK delegation in `cusolver_core.cpp`:
+
+| API | Status | LAPACK call |
 |---|---|---|
-| `cusolverDnSgetrf` / `cusolverDnDgetrf` (LU factorization) | Blocks general matrix solve | Only Cholesky (`potrf`) exists |
-| `cusolverDnSgetrs` / `cusolverDnDgetrs` (triangular solve from LU) | Needs `getrf` first | |
-| `cusolverDnSormqr` / `cusolverDnDormqr` (apply Q from QR) | Needs `geqrf` result | |
-| `cusolverDnSgelsd` / `cusolverDnDgelsd` (least squares) | Blocks `torch.linalg.lstsq` | |
-| Sparse solvers (`cusparseSpSV`, sparse Cholesky, etc.) | Blocks sparse ML workflows | `src/api/cusparse/` only has dense-style CSR SpMV/SpMM |
+| `cusolverDnSpotrf` / `Dpotrf` (Cholesky) | **DONE** | `spotrf_` / `dpotrf_` |
+| `cusolverDnSgeqrf` / `Dgeqrf` (QR) | **DONE** | `sgeqrf_` / `dgeqrf_` |
+| `cusolverDnSgesvd` / `Dgesvd` (SVD) | **DONE** | `sgesvd_` / `dgesvd_` |
+| `cusolverDnSsyevd` / `Dsyevd` (eigenvalues) | **DONE** | `ssyevd_` / `dsyevd_` |
+| `cusolverDnSgetrf` / `Dgetrf` (LU) | **DONE** | `sgetrf_` / `dgetrf_` |
+| `cusolverDnSgetrs` / `Dgetrs` (triangular solve from LU) | **DONE** | `sgetrs_` / `dgetrs_` |
+| `cusolverDnSormqr` / `Dormqr` (apply Q from QR) | **DONE** | `sormqr_` / `dormqr_` |
+| `cusolverDnSgelsd` / `Dgelsd` (least-squares driver) | **DONE** | `sgelsd_` / `dgelsd_` with workspace query |
+
+**Sparse API** — `cusolverSp*` routines (sparse Cholesky, QR, LU for graph/physics problems) require UMFPACK or CHOLMOD linkage not available in the base build. **Missing.** See §4.5 below.
 
 ---
 
@@ -108,7 +115,7 @@ All 11 test cases pass. 112/112 full suite pass.
 | `cusparseDenseToSparse_bufferSize` / `_analysis` / `_compress` | **DONE** | Added in `cusparse_format.cpp` |
 | `cusparseSpMatGetAttribute` / `cusparseSpMatSetAttribute` | **DONE** | Fill mode, diagonal type |
 | `cusparseSpMatGetSize` / `cusparseCsrSetPointers` | **DONE** | Required by DenseToSparse workflow |
-| `cusparseSpSV_createDescr` / `_destroyDescr` / `_bufferSize` / `_analysis` / `_solve` | **DONE** | Full forward/backward/transposed triangular solve via gather+scatter in `cusparse_triangular.cpp` |
+| `cusparseSpSV_createDescr` / `_destroyDescr` / `_bufferSize` / `_analysis` / `_solve` | **DONE** | Full forward/backward/transposed triangular solve via gather+scatter in `cusparse_triangular.cpp`; supports lower+upper, unit+non-unit diagonal, non-transposed+transposed |
 | `cusparseSpGEMM` (sparse × sparse) | **DONE** (2026-05-16) | 3-phase workEstimation+compute+copy in `cusparse_factorization.cpp`; float + double |
 | `cusparseScsrilu02` / `cusparseDcsrilu02` (ILU0) | **DONE** (2026-05-16) | In-place ILU with zero fill-in; marker-based O(nnz * avg_row) |
 | `cusparseScsric02` / `cusparseDcsric02` (IC0) | **DONE** (2026-05-16) | In-place incomplete Cholesky with zero fill-in for SPD matrices |
@@ -170,6 +177,25 @@ Registry changed to `unique_ptr<GeneratorState>` with `std::mutex genMutex` per 
 | Trilinear filtering (`LINEAR` + mipmaps) | **DONE** | `tex2DLod` performs bilinear sampling at each mip level then blends linearly between adjacent levels |
 | Anisotropic filtering | **DONE** | `maxAnisotropy` used in `tex2D` — up to 16× samples averaged along U and V axes |
 | SRGB gamma decode (`CU_TRSF_SRGB`) | **DONE** (2026-05-16) | `TextureDescriptor::srgbDecode` flag; when true, UINT8/UINT16 texels decoded via IEC 61966-2-1 (`srgbToLinear`) before sampling |
+
+---
+
+## 3.6 cuSOLVER Sparse API (cusolverSp)
+
+`cusolverSp*` is a separate product from `cusolverDn`. It provides direct sparse solvers
+(Cholesky, QR, LU) for large sparse systems used in physics simulations and graph algorithms.
+
+| Missing API | Impact |
+|---|---|
+| `cusolverSpCreate` / `Destroy` | Handle lifecycle |
+| `cusolverSpScsrlsvlu` / `Dcsrlsvlu` | Sparse LU solve via CSR |
+| `cusolverSpScsrlsvchol` / `Dcsrlsvchol` | Sparse Cholesky solve |
+| `cusolverSpScsrlsqvqr` / `Dcsrlsqvqr` | Sparse least-squares QR |
+| `cusolverSpScsreigvsi` / `Dcsreigvsi` | Sparse eigenvalue (shift-invert) |
+
+**Root cause**: Requires UMFPACK (for LU) or CHOLMOD (for Cholesky) as a backend.
+These are not available in the default Linux build. Would require `find_package(UMFPACK)` and
+delegating to the UMFPACK C API.
 
 ---
 
@@ -245,12 +271,13 @@ The following items that were previously potential concerns have been resolved:
 1. ~~**Complex BLAS**~~ — **DONE** (2026-05-15). C/Z Level-1/2/3 implemented.
 2. ~~**cuFFT FFTW3 delegation**~~ — **DONE** (2026-05-15). O(n log n) Cooley-Tukey + Bluestein + optional FFTW3.
 3. ~~**cuSOLVER LU/least-squares**~~ — **DONE** (2026-05-15). getrf, getrs, ormqr, gelsd all via LAPACK delegation.
-4. **cuSPARSE format conversions + sparse triangular solve** would unblock sparse ML. Priority: **Medium**.
-5. **cuBLASLt heuristic selection** would improve matmul performance. Priority: **Low**.
-6. **cuDNN Backend attention routing** is needed for frameworks using Backend API exclusively. Priority: **Low** (legacy attention API works).
-7. **Cross-platform discipline**: New OS-dependent code must use `*_linux.cpp` / `*_macos.cpp` / `*_win32.cpp` split pattern.
-8. **Memory discipline**: Every new memory allocation goes through `MemoryManager`. Every new compute path integrates with `AdaptiveExecutionEngine`.
-9. **File size discipline**: No source file should exceed 800 lines for shims or 600 lines for core logic. Split by concern when approaching limits.
+4. ~~**cuSPARSE format conversions + sparse triangular solve**~~ — **DONE** (2026-05-16). CSC, SparseToDense, DenseToSparse, SpSV, SpGEMM, ILU0, IC0 all implemented.
+5. ~~**cuBLASLt heuristic selection**~~ — **DONE** (2026-05-16). `cublasLtMatmulAlgoGetHeuristic` with 128-entry LRU cache.
+6. ~~**cuDNN Backend attention routing**~~ — **DONE** (2026-05-16). Scaled dot-product attention via `CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR`.
+7. **cuSOLVER sparse API (cusolverSp)**: Requires UMFPACK/CHOLMOD linkage. Priority: **Medium** for physics/graph workloads.
+8. **Cross-platform discipline**: New OS-dependent code must use `*_linux.cpp` / `*_macos.cpp` / `*_win32.cpp` split pattern.
+9. **Memory discipline**: Every new memory allocation goes through `MemoryManager`. Every new compute path integrates with `AdaptiveExecutionEngine`.
+10. **File size discipline**: No source file should exceed 800 lines for shims or 600 lines for core logic. Split by concern when approaching limits.
 
 ---
 
