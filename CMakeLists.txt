@@ -1,341 +1,702 @@
-cmake_minimum_required(VERSION 3.16)
+# =============================================================================
+# VGRE — Virtual GPU Runtime Engine
+# Root CMakeLists.txt  (CMake 3.20+, fully modernised)
+# =============================================================================
+
+cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
+
 project(VGRE
-    VERSION 0.1.0
-    DESCRIPTION "Virtual GPU Runtime Engine"
-    LANGUAGES C CXX
+    VERSION     0.1.0
+    DESCRIPTION "Virtual GPU Runtime Engine — CPU-based CUDA API emulator"
+    LANGUAGES   C CXX
 )
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-option(VGRE_ENABLE_NATIVE_SIMD
-    "Enable host-specific SIMD compile flags (AVX/AVX2/AVX512). Leave OFF for portable binaries."
-    OFF)
+# Guard against in-source builds.
+if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
+    message(FATAL_ERROR
+        "In-source builds are not supported.\n"
+        "Create a build directory: cmake -B build && cmake --build build")
+endif()
 
+# ──────────────────────────────────────────────────────────────────────────────
+# §1  CMake modules & module path
+# ──────────────────────────────────────────────────────────────────────────────
+include(GNUInstallDirs)           # CMAKE_INSTALL_{LIBDIR,BINDIR,INCLUDEDIR}
+include(CMakePackageConfigHelpers)
+include(CheckCXXCompilerFlag)
+include(FeatureSummary)
+include(CMakeDependentOption)
+
+# Our cmake/ directory must come first so custom Find* modules take priority
+# over CMake's built-in ones (e.g. cmake/FindLAPACK.cmake shadows the stock one).
+list(PREPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §2  User-configurable options  (grouped at the top; mark developer flags)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Build scope ───────────────────────────────────────────────────────────────
+option(VGRE_BUILD_TESTS       "Build the VGRE CTest test suite"          ON)
+option(VGRE_BUILD_EXAMPLES    "Build the VGRE example programs"          ON)
+option(VGRE_BUILD_DASHBOARD   "Build the Flutter dashboard"              ON)
+option(VGRE_BUILD_SLURM_GRES  "Build the SLURM GRES vGPU plugin"        ON)
+
+# ── Feature toggles ───────────────────────────────────────────────────────────
+option(VGRE_ENABLE_NATIVE_SIMD
+    "Enable host-specific SIMD flags (AVX2/AVX-512). OFF = portable binaries."  OFF)
+option(VGRE_USE_LAPACK
+    "Link against LAPACK/BLAS for the cuSOLVER shim"                     ON)
+option(VGRE_USE_FFTW3
+    "Use FFTW3 as cuFFT backend; falls back to built-in Cooley-Tukey"    ON)
+option(VGRE_ENABLE_RDMA
+    "Enable RDMA/RoCE zero-copy cluster transport (requires libibverbs)" OFF)
+option(VGRE_ENABLE_GRPC
+    "Enable gRPC/Protobuf cluster transport (requires libgrpc++)"        OFF)
+
+# Default OpenCL OFF on Windows (CL/cl.h rarely present without GPU SDK)
+if(WIN32)
+    option(VGRE_USE_OPENCL_BACKEND "Enable OpenCL integrated GPU backend" OFF)
+else()
+    option(VGRE_USE_OPENCL_BACKEND "Enable OpenCL integrated GPU backend" ON)
+endif()
+
+# ── Linux-only optional security backends ─────────────────────────────────────
+if(UNIX AND NOT APPLE)
+    option(VGRE_USE_TPM2      "Enable TPM 2.0 hardware security (tss2-esys)" OFF)
+    option(VGRE_USE_LIBSECRET "Enable GNOME Keyring / KWallet (libsecret-1)" OFF)
+endif()
+
+# ── CI / quality ──────────────────────────────────────────────────────────────
+option(VGRE_WARNINGS_AS_ERRORS "Treat all compiler warnings as errors (for CI)" OFF)
+
+# Hide developer-only knobs from cmake-gui unless explicitly set
+mark_as_advanced(VGRE_WARNINGS_AS_ERRORS VGRE_USE_TPM2 VGRE_USE_LIBSECRET)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §3  C++ standard & global properties
+# ──────────────────────────────────────────────────────────────────────────────
+set(CMAKE_CXX_STANDARD          17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS        OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS   ON)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    message(STATUS "No CMAKE_BUILD_TYPE specified — defaulting to Release")
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build configuration" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+        Debug Release RelWithDebInfo MinSizeRel)
+endif()
+
+# Windows ABI / macro hygiene
 if(WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 endif()
 
-# ── Compiler flags ──────────────────────────────────────────────────────────
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-Wall -Wextra -Wpedantic -O2)
-    if(VGRE_ENABLE_NATIVE_SIMD)
-        # SIMD — enable at the highest level the host supports.
-        include(CheckCXXCompilerFlag)
-        # Detect host CPU ISA capabilities via /proc/cpuinfo (Linux) so that
-        # we only enable instruction-set extensions the build machine can execute.
-        # This prevents SIGILL when the compiler supports a flag but the CPU doesn't.
-        set(HOST_HAS_AVX512F FALSE)
-        set(HOST_HAS_AVX2    FALSE)
-        set(HOST_HAS_SSE4    FALSE)
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "/proc/cpuinfo")
-            execute_process(
-                COMMAND grep -c "avx512f" /proc/cpuinfo
-                OUTPUT_VARIABLE _CPUINFO_AVX512F OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-            execute_process(
-                COMMAND grep -c " avx2 " /proc/cpuinfo
-                OUTPUT_VARIABLE _CPUINFO_AVX2 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-            execute_process(
-                COMMAND grep -c " sse4_1 " /proc/cpuinfo
-                OUTPUT_VARIABLE _CPUINFO_SSE4 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-            if(_CPUINFO_AVX512F GREATER "0")
+# ──────────────────────────────────────────────────────────────────────────────
+# §4  Compiler warning/optimisation helper  (target-scoped, no globals)
+# ──────────────────────────────────────────────────────────────────────────────
+function(vgre_set_compiler_warnings target_name visibility)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set(_flags -Wall -Wextra -Wpedantic -O2)
+        if(VGRE_WARNINGS_AS_ERRORS)
+            list(APPEND _flags -Werror)
+        endif()
+    elseif(MSVC)
+        set(_flags /W3 /O2 /EHsc /utf-8)
+        if(VGRE_WARNINGS_AS_ERRORS)
+            list(APPEND _flags /WX)
+        endif()
+    else()
+        return()
+    endif()
+    target_compile_options(${target_name} ${visibility} ${_flags})
+endfunction()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §5  Cross-platform CPU feature & SIMD detection
+# ──────────────────────────────────────────────────────────────────────────────
+set(VGRE_CPU_FEATURES_DETECTED FALSE)
+set(HOST_HAS_AVX512F FALSE)
+set(HOST_HAS_AVX2    FALSE)
+set(HOST_HAS_SSE4    FALSE)
+set(HOST_HAS_AMX     FALSE)
+set(HOST_HAS_AES_NI  FALSE)
+set(VGRE_SIMD_COMPILE_OPTIONS "")
+set(VGRE_SIMD_COMPILE_DEFS    "")
+
+if(VGRE_ENABLE_NATIVE_SIMD)
+    # ── Tier 1: cmake_host_system_information (all platforms, CMake ≥ 3.10) ──
+    # Returns a semicolon-separated list of CPU flags using CPUID names.
+    cmake_host_system_information(RESULT _host_feats QUERY PROCESSOR_FEATURES)
+
+    if("avx512f" IN_LIST _host_feats)
+        set(HOST_HAS_AVX512F TRUE)
+    endif()
+    if("avx2" IN_LIST _host_feats)
+        set(HOST_HAS_AVX2 TRUE)
+    endif()
+    if("sse4_1" IN_LIST _host_feats)
+        set(HOST_HAS_SSE4 TRUE)
+    endif()
+    if("aes" IN_LIST _host_feats)
+        set(HOST_HAS_AES_NI TRUE)
+    endif()
+
+    # ── Tier 2: Linux /proc/cpuinfo supplement (picks up AMX + cross-check) ──
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "/proc/cpuinfo")
+        file(READ "/proc/cpuinfo" _cpuinfo)
+        if(_cpuinfo MATCHES " amx_tile " AND _cpuinfo MATCHES " amx_bf16 ")
+            set(HOST_HAS_AMX TRUE)
+        endif()
+        # Cross-check in case cmake_host_system_information returned empty
+        if(NOT HOST_HAS_AVX2   AND _cpuinfo MATCHES " avx2 ")
+            set(HOST_HAS_AVX2 TRUE)
+        endif()
+        if(NOT HOST_HAS_AVX512F AND _cpuinfo MATCHES "avx512f")
+            set(HOST_HAS_AVX512F TRUE)
+        endif()
+        if(NOT HOST_HAS_SSE4   AND _cpuinfo MATCHES " sse4_1 ")
+            set(HOST_HAS_SSE4 TRUE)
+        endif()
+        if(NOT HOST_HAS_AES_NI AND _cpuinfo MATCHES " aes ")
+            set(HOST_HAS_AES_NI TRUE)
+        endif()
+    endif()
+
+    # ── Tier 3: macOS sysctl supplement ──────────────────────────────────────
+    if(APPLE)
+        if(NOT HOST_HAS_AVX512F)
+            execute_process(COMMAND sysctl hw.optional.avx512f
+                OUTPUT_VARIABLE _s OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+            if(_s MATCHES ": 1$")
                 set(HOST_HAS_AVX512F TRUE)
             endif()
-            if(_CPUINFO_AVX2 GREATER "0")
+        endif()
+        if(NOT HOST_HAS_AVX2)
+            execute_process(COMMAND sysctl hw.optional.avx2_0
+                OUTPUT_VARIABLE _s OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+            if(_s MATCHES ": 1$")
                 set(HOST_HAS_AVX2 TRUE)
             endif()
-            if(_CPUINFO_SSE4 GREATER "0")
-                set(HOST_HAS_SSE4 TRUE)
+        endif()
+        if(NOT HOST_HAS_AES_NI)
+            execute_process(COMMAND sysctl hw.optional.aes
+                OUTPUT_VARIABLE _s OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+            if(_s MATCHES ": 1$")
+                set(HOST_HAS_AES_NI TRUE)
             endif()
         endif()
-        message(STATUS "Host CPU ISA: AVX-512F=${HOST_HAS_AVX512F}  AVX2=${HOST_HAS_AVX2}  SSE4=${HOST_HAS_SSE4}")
-
-        check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512F)
-        check_cxx_compiler_flag("-mavx2"   COMPILER_SUPPORTS_AVX2)
-        check_cxx_compiler_flag("-msse4.1" COMPILER_SUPPORTS_SSE4)
-        check_cxx_compiler_flag("-maes"    COMPILER_SUPPORTS_AES)
-
-        if(COMPILER_SUPPORTS_AVX512F AND HOST_HAS_AVX512F)
-            add_compile_options(-mavx512f -mavx2 -mfma)
-            add_compile_definitions(VGRE_HAS_AVX512 VGRE_HAS_AVX2)
-        elseif(COMPILER_SUPPORTS_AVX2 AND HOST_HAS_AVX2)
-            add_compile_options(-mavx2 -mfma)
-            add_compile_definitions(VGRE_HAS_AVX2)
-        elseif(COMPILER_SUPPORTS_SSE4 AND HOST_HAS_SSE4)
-            add_compile_options(-msse4.1)
-            add_compile_definitions(VGRE_HAS_SSE4)
-        endif()
-
-        # Intel AMX (Sapphire Rapids / Granite Rapids / Zen 5 with AMX extension)
-        # Requires: amx_tile + amx_bf16 in /proc/cpuinfo flags
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "/proc/cpuinfo")
-            execute_process(
-                COMMAND grep -c " amx_tile " /proc/cpuinfo
-                OUTPUT_VARIABLE _CPUINFO_AMX_TILE OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-            execute_process(
-                COMMAND grep -c " amx_bf16 " /proc/cpuinfo
-                OUTPUT_VARIABLE _CPUINFO_AMX_BF16 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-        else()
-            set(_CPUINFO_AMX_TILE "0")
-            set(_CPUINFO_AMX_BF16 "0")
-        endif()
-        check_cxx_compiler_flag("-mamx-tile"  COMPILER_SUPPORTS_AMX_TILE)
-        check_cxx_compiler_flag("-mamx-bf16"  COMPILER_SUPPORTS_AMX_BF16)
-        if(COMPILER_SUPPORTS_AMX_TILE AND COMPILER_SUPPORTS_AMX_BF16
-           AND _CPUINFO_AMX_TILE GREATER "0" AND _CPUINFO_AMX_BF16 GREATER "0")
-            add_compile_options(-mamx-tile -mamx-bf16)
-            add_compile_definitions(VGRE_HAS_AMX)
-            message(STATUS "Intel AMX: enabled (-mamx-tile -mamx-bf16)")
-        else()
-            message(STATUS "Intel AMX: not available (requires Sapphire Rapids CPU + compiler support)")
-        endif()
-
-        # AES-NI: enable hardware AES acceleration when available (AES-NI is present
-        # on all x86 CPUs since Intel Westmere 2010 / AMD Bulldozer 2011).
-        if(COMPILER_SUPPORTS_AES)
-            add_compile_options(-maes)
-            add_compile_definitions(VGRE_HAS_AES_NI)
-            message(STATUS "AES-NI: enabled (-maes)")
-        else()
-            message(STATUS "AES-NI: not supported by compiler — using software AES-256")
-        endif()
-    else()
-        message(STATUS "SIMD tuning disabled for portability (VGRE_ENABLE_NATIVE_SIMD=OFF)")
     endif()
-elseif(MSVC)
-    # MSVC: warnings, optimisation, C++ exceptions, and UTF-8 source encoding.
-    add_compile_options(/W3 /O2 /EHsc /utf-8)
-    if(VGRE_ENABLE_NATIVE_SIMD)
-        # Never auto-force aggressive SIMD in MSVC unless explicitly requested.
-        # Compiler support alone is insufficient and can crash at runtime on CPUs
-        # without the selected ISA (e.g. illegal instruction at process start).
-        include(CheckCXXCompilerFlag)
-        check_cxx_compiler_flag("/arch:AVX2" MSVC_SUPPORTS_AVX2)
-        check_cxx_compiler_flag("/arch:AVX"  MSVC_SUPPORTS_AVX)
-        if(MSVC_SUPPORTS_AVX2)
-            add_compile_options(/arch:AVX2)
-            add_compile_definitions(VGRE_HAS_AVX2)
-        elseif(MSVC_SUPPORTS_AVX)
-            add_compile_options(/arch:AVX)
-        endif()
-        message(STATUS "MSVC SIMD (opt-in): AVX2=${MSVC_SUPPORTS_AVX2}  AVX=${MSVC_SUPPORTS_AVX}")
-    else()
-        message(STATUS "MSVC SIMD tuning disabled for portability (VGRE_ENABLE_NATIVE_SIMD=OFF)")
+
+    # ── Tier 4: MSVC fallback — conservative, defer to flag validation ────────
+    if(MSVC AND NOT _host_feats)
+        # PROCESSOR_FEATURES may be unpopulated on some MSVC environments;
+        # assume the build machine supports what the compiler will accept.
+        set(HOST_HAS_AVX2  TRUE)
+        set(HOST_HAS_SSE4  TRUE)
+        message(STATUS
+            "SIMD: MSVC PROCESSOR_FEATURES empty — using compiler-flag validation only")
     endif()
+
+    set(VGRE_CPU_FEATURES_DETECTED TRUE)
+    message(STATUS
+        "SIMD host ISA: AVX-512F=${HOST_HAS_AVX512F}  AVX2=${HOST_HAS_AVX2}  "
+        "SSE4.1=${HOST_HAS_SSE4}  AMX=${HOST_HAS_AMX}  AES-NI=${HOST_HAS_AES_NI}")
+
+    # ── Resolve compile flags (GCC/Clang) ─────────────────────────────────────
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        check_cxx_compiler_flag("-mavx512f"  _cc_avx512)
+        check_cxx_compiler_flag("-mavx2"     _cc_avx2)
+        check_cxx_compiler_flag("-msse4.1"   _cc_sse4)
+        check_cxx_compiler_flag("-maes"      _cc_aes)
+        check_cxx_compiler_flag("-mamx-tile" _cc_amx_tile)
+        check_cxx_compiler_flag("-mamx-bf16" _cc_amx_bf16)
+
+        if(_cc_avx512 AND HOST_HAS_AVX512F)
+            list(APPEND VGRE_SIMD_COMPILE_OPTIONS -mavx512f -mavx2 -mfma)
+            list(APPEND VGRE_SIMD_COMPILE_DEFS VGRE_HAS_AVX512 VGRE_HAS_AVX2)
+            message(STATUS "SIMD: enabled AVX-512F + AVX2 + FMA")
+        elseif(_cc_avx2 AND HOST_HAS_AVX2)
+            list(APPEND VGRE_SIMD_COMPILE_OPTIONS -mavx2 -mfma)
+            list(APPEND VGRE_SIMD_COMPILE_DEFS VGRE_HAS_AVX2)
+            message(STATUS "SIMD: enabled AVX2 + FMA")
+        elseif(_cc_sse4 AND HOST_HAS_SSE4)
+            list(APPEND VGRE_SIMD_COMPILE_OPTIONS -msse4.1)
+            list(APPEND VGRE_SIMD_COMPILE_DEFS VGRE_HAS_SSE4)
+            message(STATUS "SIMD: enabled SSE4.1")
+        else()
+            message(STATUS "SIMD: no matching SIMD extension (compiler/CPU mismatch)")
+        endif()
+        if(_cc_amx_tile AND _cc_amx_bf16 AND HOST_HAS_AMX)
+            list(APPEND VGRE_SIMD_COMPILE_OPTIONS -mamx-tile -mamx-bf16)
+            list(APPEND VGRE_SIMD_COMPILE_DEFS VGRE_HAS_AMX)
+            message(STATUS "SIMD: enabled Intel AMX (tile + bf16)")
+        endif()
+        if(_cc_aes AND HOST_HAS_AES_NI)
+            list(APPEND VGRE_SIMD_COMPILE_OPTIONS -maes)
+            list(APPEND VGRE_SIMD_COMPILE_DEFS VGRE_HAS_AES_NI)
+            message(STATUS "SIMD: enabled AES-NI")
+        endif()
+
+    elseif(MSVC)
+        check_cxx_compiler_flag("/arch:AVX512" _msvc_avx512)
+        check_cxx_compiler_flag("/arch:AVX2"   _msvc_avx2)
+        check_cxx_compiler_flag("/arch:AVX"    _msvc_avx)
+
+        if(_msvc_avx512 AND HOST_HAS_AVX512F)
+            list(APPEND VGRE_SIMD_COMPILE_OPTIONS /arch:AVX512)
+            list(APPEND VGRE_SIMD_COMPILE_DEFS VGRE_HAS_AVX512 VGRE_HAS_AVX2)
+            message(STATUS "SIMD: MSVC /arch:AVX512 enabled")
+        elseif(_msvc_avx2 AND HOST_HAS_AVX2)
+            list(APPEND VGRE_SIMD_COMPILE_OPTIONS /arch:AVX2)
+            list(APPEND VGRE_SIMD_COMPILE_DEFS VGRE_HAS_AVX2)
+            message(STATUS "SIMD: MSVC /arch:AVX2 enabled")
+        elseif(_msvc_avx)
+            list(APPEND VGRE_SIMD_COMPILE_OPTIONS /arch:AVX)
+            message(STATUS "SIMD: MSVC /arch:AVX enabled")
+        endif()
+    endif()
+
+else()
+    message(STATUS "SIMD: disabled for portability (VGRE_ENABLE_NATIVE_SIMD=OFF)")
 endif()
 
-# ── Dependencies ────────────────────────────────────────────────────────────
-# macOS: Apple Clang ships without OpenMP; hint CMake to Homebrew's libomp.
+# ──────────────────────────────────────────────────────────────────────────────
+# §6  OpenMP  (consolidated, cross-platform, no global link_libraries())
+# ──────────────────────────────────────────────────────────────────────────────
+
+# macOS: hint find_package to Homebrew's libomp BEFORE it runs
 if(APPLE)
-    execute_process(
-        COMMAND brew --prefix libomp
-        OUTPUT_VARIABLE HOMEBREW_LIBOMP_PREFIX OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-    if(HOMEBREW_LIBOMP_PREFIX)
-        set(OpenMP_CXX_FLAGS         "-Xpreprocessor -fopenmp -I${HOMEBREW_LIBOMP_PREFIX}/include")
-        set(OpenMP_CXX_LIB_NAMES     "omp")
-        set(OpenMP_omp_LIBRARY       "${HOMEBREW_LIBOMP_PREFIX}/lib/libomp.dylib")
-        message(STATUS "macOS: using Homebrew libomp at ${HOMEBREW_LIBOMP_PREFIX}")
+    find_program(_brew brew)
+    if(_brew)
+        execute_process(COMMAND "${_brew}" --prefix libomp
+            OUTPUT_VARIABLE _brew_libomp OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    endif()
+    if(_brew_libomp AND EXISTS "${_brew_libomp}")
+        set(OpenMP_CXX_FLAGS     "-Xpreprocessor -fopenmp -I${_brew_libomp}/include")
+        set(OpenMP_CXX_LIB_NAMES "omp")
+        set(OpenMP_omp_LIBRARY   "${_brew_libomp}/lib/libomp.dylib")
+        message(STATUS "OpenMP: Homebrew libomp at ${_brew_libomp}")
     else()
-        message(WARNING "macOS: Homebrew libomp not found — install with: brew install libomp")
+        message(WARNING
+            "OpenMP: Homebrew libomp not found on macOS. "
+            "Install with: brew install libomp")
     endif()
 endif()
+
 find_package(OpenMP REQUIRED COMPONENTS CXX)
+
+# Linux: prefer Clang's libomp over libgomp to avoid ABI conflicts with LLVM JIT.
+set(_VGRE_LIBOMP_EXTRA "")
 if(UNIX AND NOT APPLE)
-    # find_library caches NOTFOUND on first miss and never retries; use NO_DEFAULT_PATH
-    # so cmake searches only our explicit candidate dirs, avoiding the system gomp.
-    # Also search via llvm-config to handle non-standard LLVM installs.
-    if(NOT LIBOMP_PATH)
-        execute_process(
-            COMMAND llvm-config-18 --libdir
-            OUTPUT_VARIABLE LLVM_LIBDIR OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET)
-        if(NOT LLVM_LIBDIR)
-            set(LLVM_LIBDIR "/usr/lib/llvm-18/lib")
+    if(NOT DEFINED CACHE{LIBOMP_PATH})
+        find_program(_llvm_cfg NAMES llvm-config-18 llvm-config)
+        if(_llvm_cfg)
+            execute_process(COMMAND "${_llvm_cfg}" --libdir
+                OUTPUT_VARIABLE _llvm_libdir OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
         endif()
-        find_library(LIBOMP_PATH
-            NAMES omp
-            HINTS "${LLVM_LIBDIR}"
-            PATHS /usr/lib/llvm-18/lib /usr/lib/x86_64-linux-gnu
-            NO_DEFAULT_PATH)
-        if(NOT LIBOMP_PATH)
-            # Last resort: allow system search
-            find_library(LIBOMP_PATH NAMES omp)
-        endif()
+        find_library(LIBOMP_PATH NAMES omp
+            HINTS "${_llvm_libdir}"
+            PATHS /usr/lib/llvm-18/lib /usr/lib/llvm-17/lib /usr/lib/x86_64-linux-gnu
+            DOC "Path to LLVM/Clang libomp.so")
     endif()
     if(LIBOMP_PATH)
-        message(STATUS "Found LLVM OpenMP: ${LIBOMP_PATH}")
-        link_libraries("-Wl,--no-as-needed" "${LIBOMP_PATH}" "-Wl,--as-needed")
+        message(STATUS "OpenMP: using LLVM libomp at ${LIBOMP_PATH}")
+        set(_VGRE_LIBOMP_EXTRA "${LIBOMP_PATH}")
     else()
-        message(STATUS "LLVM libomp not found — using system OpenMP (libgomp)")
+        message(STATUS "OpenMP: LLVM libomp not found — falling back to system libgomp")
     endif()
 endif()
-find_package(Threads REQUIRED)
-# find_package(PkgConfig REQUIRED)
-# pkg_check_modules(LZ4 REQUIRED liblz4)
 
-# ── Optional FFTW3 (fast FFT backend for cuFFT emulation) ───────────────────
-find_package(PkgConfig QUIET)
-if(PKG_CONFIG_FOUND)
-    pkg_check_modules(FFTW3 QUIET fftw3)
-    pkg_check_modules(FFTW3F QUIET fftw3f)
-endif()
-if(FFTW3_FOUND AND FFTW3F_FOUND)
-    message(STATUS "Found FFTW3 — cuFFT will delegate to FFTW3 for O(n log n) transforms")
-    add_compile_definitions(VGRE_HAS_FFTW3)
-    link_libraries(${FFTW3_LIBRARIES} ${FFTW3F_LIBRARIES})
-    include_directories(${FFTW3_INCLUDE_DIRS})
-else()
-    message(STATUS "FFTW3 not found — cuFFT uses built-in Cooley-Tukey/Bluestein FFT (O(n log n))")
-endif()
-
-# ── LLVM & Support Dependencies ─────────────────────────────────────────────
-# Manually hint paths for LibEdit/CURL if CMake's default search misses them
-find_path(CURL_INCLUDE_DIR NAMES curl/curl.h PATHS /usr/include/x86_64-linux-gnu /usr/local/include)
-find_path(LibEdit_INCLUDE_DIRS NAMES editline/readline.h PATHS /usr/include /usr/local/include)
- 
-find_package(LLVM REQUIRED CONFIG)
-message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
-message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-include_directories(${LLVM_INCLUDE_DIRS})
-add_definitions(${LLVM_DEFINITIONS})
-llvm_map_components_to_libnames(llvm_libs Core ExecutionEngine OrcJIT Support Target native)
-
-if(WIN32)
-    set(VGRE_LLVM_DIA_FALLBACK "C:/Program Files/Microsoft Visual Studio/2022/Community/DIA SDK/lib/amd64/diaguids.lib")
-    if(EXISTS "${VGRE_LLVM_DIA_FALLBACK}")
-        if(TARGET LLVMDebugInfoPDB)
-            set_target_properties(LLVMDebugInfoPDB PROPERTIES
-                INTERFACE_LINK_LIBRARIES
-                "${VGRE_LLVM_DIA_FALLBACK};LLVMBinaryFormat;LLVMObject;LLVMSupport;LLVMDebugInfoCodeView;LLVMDebugInfoMSF")
+# Helper: attach OpenMP to a target without global state.
+# On Linux, --no-as-needed ensures the libomp SONAME is recorded in the
+# dynamic section even when no symbols are directly referenced — needed for
+# LD_PRELOAD scenarios where the loaded library initialises OpenMP lazily.
+function(vgre_target_link_openmp target_name visibility)
+    if(TARGET OpenMP::OpenMP_CXX)
+        target_link_libraries(${target_name} ${visibility} OpenMP::OpenMP_CXX)
+    endif()
+    if(_VGRE_LIBOMP_EXTRA)
+        if(UNIX AND NOT APPLE)
+            target_link_options(${target_name} ${visibility}
+                "LINKER:--no-as-needed" "${_VGRE_LIBOMP_EXTRA}" "LINKER:--as-needed")
+        else()
+            target_link_libraries(${target_name} ${visibility} "${_VGRE_LIBOMP_EXTRA}")
         endif()
-        foreach(llvm_target IN LISTS llvm_libs)
-            if(TARGET ${llvm_target})
-                get_target_property(_vgre_iface_libs ${llvm_target} INTERFACE_LINK_LIBRARIES)
-                if(_vgre_iface_libs)
-                    set(_vgre_updated_iface_libs "${_vgre_iface_libs}")
-                    list(TRANSFORM _vgre_updated_iface_libs REPLACE
-                        "C:/Program Files \\(x86\\)/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64/diaguids\\.lib"
-                        "${VGRE_LLVM_DIA_FALLBACK}")
-                    set_target_properties(${llvm_target} PROPERTIES
-                        INTERFACE_LINK_LIBRARIES "${_vgre_updated_iface_libs}")
+    endif()
+endfunction()
+
+find_package(Threads REQUIRED)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §7  LLVM (version 18 enforced; target-scoped INTERFACE target)
+# ──────────────────────────────────────────────────────────────────────────────
+# Version specifier in CONFIG mode is unreliable with distro-packaged LLVM
+# (LLVMConfigVersion.cmake may use EXACT compatibility). Find first, then
+# assert the minimum version explicitly — same effect, better portability.
+find_package(LLVM REQUIRED CONFIG)
+if(LLVM_PACKAGE_VERSION VERSION_LESS "18")
+    message(FATAL_ERROR
+        "LLVM >= 18 is required but found ${LLVM_PACKAGE_VERSION}.\n"
+        "Install: sudo apt install llvm-18-dev  "
+        "or pass -DLLVM_DIR=/usr/lib/llvm-18/cmake")
+endif()
+message(STATUS "LLVM: version ${LLVM_PACKAGE_VERSION}  path ${LLVM_DIR}")
+
+# llvm_map_components_to_libnames returns the set of CMake IMPORTED targets
+# (e.g. LLVMCore;LLVMSupport;…) needed for these components. CMake resolves
+# them to the correct static archives or the monolithic dylib based on the
+# LLVM installation type. On Ubuntu/Debian the function returns individual
+# component names even when LLVM_LINK_LLVM_DYLIB=ON; CMake's transitive
+# dependency handling + --start-group/--end-group resolves the circular
+# archive references correctly.
+llvm_map_components_to_libnames(VGRE_LLVM_LIBS
+    Core ExecutionEngine OrcJIT Support Target native)
+message(STATUS "LLVM: component libs = ${VGRE_LLVM_LIBS}")
+# Alias: src/compiler/CMakeLists.txt and other subdirs use ${llvm_libs}
+# (the historic variable name). Keep it set so their PUBLIC link deps are intact.
+set(llvm_libs ${VGRE_LLVM_LIBS})
+
+# INTERFACE IMPORTED target so every consumer gets includes + defs + libs
+# via a single target_link_libraries() call.
+add_library(vgre_llvm_iface INTERFACE)
+target_include_directories(vgre_llvm_iface INTERFACE ${LLVM_INCLUDE_DIRS})
+target_compile_definitions(vgre_llvm_iface INTERFACE ${LLVM_DEFINITIONS})
+target_link_libraries(vgre_llvm_iface INTERFACE ${VGRE_LLVM_LIBS})
+
+# LLVM requires consistent compile definitions across ALL translation units that
+# include LLVM headers (ABI guard macros such as _GNU_SOURCE,
+# __STDC_CONSTANT_MACROS, etc.). OBJECT libraries in src/ subdirectories inherit
+# these from the directory property rather than needing explicit per-target links.
+# This is the one legitimate use of a global scope in this file.
+if(LLVM_DEFINITIONS)
+    add_compile_definitions(${LLVM_DEFINITIONS})
+endif()
+# Likewise, subdirectory OBJECT libraries need the LLVM include path
+# so their #include <llvm/...> directives resolve during compilation.
+include_directories(${LLVM_INCLUDE_DIRS})
+
+# ── Windows: DIA SDK discovery via vswhere + multi-edition/year enumeration ───
+if(WIN32)
+    set(_dia_path "")
+
+    # Strategy 1: vswhere (covers all editions atomically)
+    find_program(_vswhere vswhere
+        HINTS
+            "$ENV{ProgramFiles\(x86\)}/Microsoft Visual Studio/Installer"
+            "$ENV{ProgramFiles}/Microsoft Visual Studio/Installer")
+    if(_vswhere)
+        execute_process(
+            COMMAND "${_vswhere}" -latest -property installationPath
+            OUTPUT_VARIABLE _vs_root OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        set(_cand "${_vs_root}/DIA SDK/lib/amd64/diaguids.lib")
+        if(EXISTS "${_cand}")
+            set(_dia_path "${_cand}")
+        endif()
+    endif()
+
+    # Strategy 2: enumerate known install trees as fallback
+    if(NOT _dia_path)
+        foreach(_yr IN ITEMS 2022 2019 2017)
+            foreach(_ed IN ITEMS Community Professional Enterprise BuildTools)
+                set(_cand
+                    "$ENV{ProgramFiles}/Microsoft Visual Studio/${_yr}/${_ed}/DIA SDK/lib/amd64/diaguids.lib")
+                if(EXISTS "${_cand}")
+                    set(_dia_path "${_cand}")
+                    break()
                 endif()
+            endforeach()
+            if(_dia_path)
+                break()
             endif()
         endforeach()
     endif()
+
+    if(_dia_path)
+        message(STATUS "LLVM DIA SDK: found at ${_dia_path}")
+        # Patch any stale DIA SDK path baked into LLVM imported targets
+        foreach(_lt IN LISTS VGRE_LLVM_LIBS)
+            if(TARGET ${_lt})
+                get_target_property(_iface ${_lt} INTERFACE_LINK_LIBRARIES)
+                if(_iface)
+                    string(REGEX REPLACE "[^;]*/diaguids\\.lib" "${_dia_path}"
+                        _iface_fixed "${_iface}")
+                    set_target_properties(${_lt} PROPERTIES
+                        INTERFACE_LINK_LIBRARIES "${_iface_fixed}")
+                endif()
+            endif()
+        endforeach()
+    else()
+        message(STATUS "LLVM DIA SDK: not found — PDB symbol generation may be limited")
+    endif()
 endif()
 
-set(VGRE_USE_OPENCL_BACKEND_DEFAULT ON)
-if(WIN32)
-    set(VGRE_USE_OPENCL_BACKEND_DEFAULT OFF)
+# ──────────────────────────────────────────────────────────────────────────────
+# §8  LAPACK / BLAS  (cmake/FindLAPACK.cmake — cross-platform)
+# ──────────────────────────────────────────────────────────────────────────────
+if(VGRE_USE_LAPACK)
+    find_package(LAPACK REQUIRED)     # uses cmake/FindLAPACK.cmake (first in MODULE_PATH)
+    message(STATUS "LAPACK: ${VGRE_LAPACK_DESCRIPTION}")
+else()
+    # Provide an empty stub so target_link_libraries(... LAPACK::LAPACK) never fails.
+    if(NOT TARGET LAPACK::LAPACK)
+        add_library(LAPACK::LAPACK INTERFACE IMPORTED)
+    endif()
+    message(STATUS "LAPACK: disabled (VGRE_USE_LAPACK=OFF) — cuSOLVER unavailable")
 endif()
-option(VGRE_USE_OPENCL_BACKEND "Enable OpenCL Integrated GPU Backend" ${VGRE_USE_OPENCL_BACKEND_DEFAULT})
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §9  Optional: FFTW3
+# ──────────────────────────────────────────────────────────────────────────────
+set(_VGRE_FFTW3_FOUND FALSE)
+if(VGRE_USE_FFTW3)
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(FFTW3  QUIET IMPORTED_TARGET fftw3)
+        pkg_check_modules(FFTW3F QUIET IMPORTED_TARGET fftw3f)
+    endif()
+    if(FFTW3_FOUND AND FFTW3F_FOUND)
+        set(_VGRE_FFTW3_FOUND TRUE)
+        message(STATUS "FFTW3: found (double ${FFTW3_VERSION} / float ${FFTW3F_VERSION})")
+    else()
+        message(STATUS
+            "FFTW3: not found — cuFFT will use built-in Cooley-Tukey/Bluestein O(n log n)")
+    endif()
+else()
+    message(STATUS "FFTW3: disabled (VGRE_USE_FFTW3=OFF)")
+endif()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §10  Optional: OpenCL backend
+# ──────────────────────────────────────────────────────────────────────────────
+set(_VGRE_OPENCL_FOUND FALSE)
 if(VGRE_USE_OPENCL_BACKEND)
     find_package(OpenCL QUIET)
     if(OpenCL_FOUND)
-        message(STATUS "Found OpenCL ${OpenCL_VERSION_STRING}")
-        add_compile_definitions(VGRE_HAS_OPENCL_BACKEND)
+        set(_VGRE_OPENCL_FOUND TRUE)
+        message(STATUS "OpenCL: found ${OpenCL_VERSION_STRING}")
     else()
-        message(STATUS "OpenCL not found - continuing without the optional OpenCL backend")
-        set(VGRE_USE_OPENCL_BACKEND OFF)
+        message(STATUS "OpenCL: not found — continuing without the optional backend")
+        set(VGRE_USE_OPENCL_BACKEND OFF CACHE BOOL "" FORCE)
     endif()
 endif()
 
-# ── RDMA / RoCE optional transport ──────────────────────────────────────────
-# Enable with: cmake -DVGRE_ENABLE_RDMA=ON
-# Requires: libibverbs-dev (apt install libibverbs-dev rdma-core)
-option(VGRE_ENABLE_RDMA "Enable RDMA/RoCE zero-copy cluster transport (requires libibverbs)" OFF)
+# ──────────────────────────────────────────────────────────────────────────────
+# §11  Optional: RDMA / RoCE transport
+# ──────────────────────────────────────────────────────────────────────────────
+set(_VGRE_RDMA_FOUND FALSE)
+set(_VGRE_RDMA_LIBS  "")
 if(VGRE_ENABLE_RDMA)
-    find_library(IBVERBS_LIB NAMES ibverbs)
-    find_path(IBVERBS_INCLUDE NAMES infiniband/verbs.h)
+    find_library(IBVERBS_LIB  NAMES ibverbs  DOC "libibverbs shared library")
+    find_path(IBVERBS_INCLUDE NAMES infiniband/verbs.h DOC "libibverbs include dir")
     if(IBVERBS_LIB AND IBVERBS_INCLUDE)
-        message(STATUS "RDMA: found libibverbs at ${IBVERBS_LIB}")
-        add_compile_definitions(VGRE_HAS_RDMA)
-        set(VGRE_RDMA_LIBS ${IBVERBS_LIB})
-        include_directories(${IBVERBS_INCLUDE})
+        set(_VGRE_RDMA_FOUND TRUE)
+        set(_VGRE_RDMA_LIBS  "${IBVERBS_LIB}")
+        message(STATUS "RDMA: enabled — libibverbs at ${IBVERBS_LIB}")
     else()
         message(FATAL_ERROR
             "VGRE_ENABLE_RDMA=ON but libibverbs not found.\n"
-            "Install with: sudo apt install libibverbs-dev rdma-core\n"
-            "or disable RDMA: cmake -DVGRE_ENABLE_RDMA=OFF")
+            "  Install : sudo apt install libibverbs-dev rdma-core\n"
+            "  Disable : cmake -DVGRE_ENABLE_RDMA=OFF")
     endif()
 else()
-    message(STATUS "RDMA: disabled (use -DVGRE_ENABLE_RDMA=ON to enable)")
-    set(VGRE_RDMA_LIBS "")
+    message(STATUS "RDMA: disabled (pass -DVGRE_ENABLE_RDMA=ON to enable)")
 endif()
 
-# ── Optional: gRPC / Protobuf cluster transport ───────────────────────────────
-# Enable with: cmake -DVGRE_ENABLE_GRPC=ON
-# Requires: libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
-#   (apt install libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc)
-# When enabled: vgre_advanced gains a gRPC service that exposes KernelLaunch,
-# MemAlloc, and MemSync RPCs — allowing distributed ML frameworks (Ray Serve,
-# Horovod, DeepSpeed) to offload to a VGRE worker over a gRPC channel.
-option(VGRE_ENABLE_GRPC "Enable gRPC/Protobuf cluster transport (requires libgrpc++)" OFF)
+# ──────────────────────────────────────────────────────────────────────────────
+# §12  Optional: gRPC / Protobuf  (WARNING on failure — not FATAL_ERROR)
+# ──────────────────────────────────────────────────────────────────────────────
+set(_VGRE_GRPC_FOUND FALSE)
+set(_VGRE_GRPC_LIBS  "")
 if(VGRE_ENABLE_GRPC)
     find_package(Protobuf QUIET)
-    find_library(GRPC_LIB    NAMES grpc++)
-    find_library(GRPCPP_LIB  NAMES grpc++_reflection)
-    find_program(PROTOC      NAMES protoc)
-    find_program(GRPC_CPP_PLUGIN NAMES grpc_cpp_plugin)
-    if(Protobuf_FOUND AND GRPC_LIB AND PROTOC AND GRPC_CPP_PLUGIN)
-        message(STATUS "gRPC: found grpc++ at ${GRPC_LIB}")
-        add_compile_definitions(VGRE_HAS_GRPC)
-        set(VGRE_GRPC_LIBS ${GRPC_LIB})
-        if(GRPCPP_LIB)
-            list(APPEND VGRE_GRPC_LIBS ${GRPCPP_LIB})
+    find_library(_grpc_lib     NAMES grpc++)
+    find_library(_grpcpp_refl  NAMES grpc++_reflection)
+    find_program(_protoc       NAMES protoc)
+    find_program(_grpc_plugin  NAMES grpc_cpp_plugin)
+
+    if(Protobuf_FOUND AND _grpc_lib AND _protoc AND _grpc_plugin)
+        set(_VGRE_GRPC_FOUND TRUE)
+        set(_VGRE_GRPC_LIBS  protobuf::libprotobuf "${_grpc_lib}")
+        if(_grpcpp_refl)
+            list(APPEND _VGRE_GRPC_LIBS "${_grpcpp_refl}")
         endif()
-        list(APPEND VGRE_GRPC_LIBS protobuf::libprotobuf)
-        include_directories(${Protobuf_INCLUDE_DIRS})
-        # Generate protobuf + gRPC stubs from vgre_cluster.proto
-        set(VGRE_PROTO_DIR  ${PROJECT_SOURCE_DIR}/proto)
-        set(VGRE_PROTO_GEN  ${CMAKE_CURRENT_BINARY_DIR}/proto_gen)
-        file(MAKE_DIRECTORY ${VGRE_PROTO_GEN})
-        set(VGRE_PROTO_SRC  ${VGRE_PROTO_DIR}/vgre_cluster.proto)
-        set(VGRE_PROTO_CC   ${VGRE_PROTO_GEN}/vgre_cluster.pb.cc)
-        set(VGRE_PROTO_H    ${VGRE_PROTO_GEN}/vgre_cluster.pb.h)
-        set(VGRE_GRPC_CC    ${VGRE_PROTO_GEN}/vgre_cluster.grpc.pb.cc)
-        set(VGRE_GRPC_H     ${VGRE_PROTO_GEN}/vgre_cluster.grpc.pb.h)
+        message(STATUS "gRPC: found grpc++ at ${_grpc_lib}")
+
+        # Proto code generation
+        set(_proto_dir "${PROJECT_SOURCE_DIR}/proto")
+        set(_gen_dir   "${CMAKE_CURRENT_BINARY_DIR}/proto_gen")
+        file(MAKE_DIRECTORY "${_gen_dir}")
+
+        set(_proto_src  "${_proto_dir}/vgre_cluster.proto")
         add_custom_command(
-            OUTPUT ${VGRE_PROTO_CC} ${VGRE_PROTO_H} ${VGRE_GRPC_CC} ${VGRE_GRPC_H}
-            COMMAND ${PROTOC}
-                --proto_path=${VGRE_PROTO_DIR}
-                --cpp_out=${VGRE_PROTO_GEN}
-                --grpc_out=${VGRE_PROTO_GEN}
-                --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN}
-                ${VGRE_PROTO_SRC}
-            DEPENDS ${VGRE_PROTO_SRC}
+            OUTPUT
+                "${_gen_dir}/vgre_cluster.pb.cc"
+                "${_gen_dir}/vgre_cluster.pb.h"
+                "${_gen_dir}/vgre_cluster.grpc.pb.cc"
+                "${_gen_dir}/vgre_cluster.grpc.pb.h"
+            COMMAND "${_protoc}"
+                "--proto_path=${_proto_dir}"
+                "--cpp_out=${_gen_dir}"
+                "--grpc_out=${_gen_dir}"
+                "--plugin=protoc-gen-grpc=${_grpc_plugin}"
+                "${_proto_src}"
+            DEPENDS "${_proto_src}"
             COMMENT "Generating gRPC stubs from vgre_cluster.proto"
+            VERBATIM
         )
-        set(VGRE_GRPC_GENERATED ${VGRE_PROTO_CC} ${VGRE_GRPC_CC})
-        include_directories(${VGRE_PROTO_GEN})
+        add_library(vgre_grpc_gen OBJECT
+            "${_gen_dir}/vgre_cluster.pb.cc"
+            "${_gen_dir}/vgre_cluster.grpc.pb.cc")
+        target_include_directories(vgre_grpc_gen PUBLIC "${_gen_dir}")
+        target_link_libraries(vgre_grpc_gen PUBLIC ${_VGRE_GRPC_LIBS})
     else()
-        message(FATAL_ERROR
-            "VGRE_ENABLE_GRPC=ON but grpc++/protobuf not found.\n"
-            "Install: sudo apt install libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc\n"
-            "or disable: cmake -DVGRE_ENABLE_GRPC=OFF")
+        # Downgraded from FATAL_ERROR — gRPC is optional
+        message(WARNING
+            "VGRE_ENABLE_GRPC=ON but gRPC/Protobuf components not found. "
+            "Continuing without gRPC cluster transport.\n"
+            "  Install: sudo apt install libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc\n"
+            "  Disable: cmake -DVGRE_ENABLE_GRPC=OFF")
+        set(VGRE_ENABLE_GRPC OFF CACHE BOOL "" FORCE)
     endif()
 else()
-    message(STATUS "gRPC transport: disabled (use -DVGRE_ENABLE_GRPC=ON to enable)")
-    set(VGRE_GRPC_LIBS "")
-    set(VGRE_GRPC_GENERATED "")
+    message(STATUS "gRPC: disabled (pass -DVGRE_ENABLE_GRPC=ON to enable)")
 endif()
 
-# ── Global include directory ────────────────────────────────────────────────
-include_directories(${PROJECT_SOURCE_DIR}/include)
+# ──────────────────────────────────────────────────────────────────────────────
+# §13  Platform security / token-storage libraries  (gathered once, reused)
+# ──────────────────────────────────────────────────────────────────────────────
+set(_VGRE_SECURITY_LIBS  "")
+set(_VGRE_SECURITY_DEFS  "")
+set(_VGRE_TPM2_FOUND     FALSE)
+set(_VGRE_LIBSECRET_FOUND FALSE)
 
-# ── Sub-projects ────────────────────────────────────────────────────────────
-add_subdirectory(src/common)
-add_subdirectory(src/core)
-add_subdirectory(src/compiler)
-add_subdirectory(src/api)
-add_subdirectory(src/runtime)
-add_subdirectory(src/advanced)
+if(WIN32)
+    list(APPEND _VGRE_SECURITY_LIBS Advapi32 ws2_32 bcrypt)
 
-# ── Shared library ──────────────────────────────────────────────────────────
+elseif(APPLE)
+    find_library(_sec_fw Security)
+    if(_sec_fw)
+        list(APPEND _VGRE_SECURITY_LIBS "${_sec_fw}")
+        message(STATUS "Security: using macOS Security.framework")
+    endif()
+
+elseif(UNIX)
+    find_library(KEYUTILS_LIB keyutils DOC "libkeyutils for Linux kernel keyring")
+    if(KEYUTILS_LIB)
+        list(APPEND _VGRE_SECURITY_LIBS "${KEYUTILS_LIB}")
+        message(STATUS "Security: found keyutils at ${KEYUTILS_LIB}")
+    else()
+        message(WARNING "Security: keyutils not found — kernel keyring storage unavailable")
+    endif()
+
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        # TPM 2.0 (only when explicitly requested)
+        if(VGRE_USE_TPM2)
+            pkg_check_modules(TSS2_ESYS    QUIET IMPORTED_TARGET tss2-esys)
+            pkg_check_modules(TSS2_MU      QUIET IMPORTED_TARGET tss2-mu)
+            pkg_check_modules(TSS2_TCTILDR QUIET IMPORTED_TARGET tss2-tctildr)
+            if(TSS2_ESYS_FOUND AND TSS2_MU_FOUND AND TSS2_TCTILDR_FOUND)
+                list(APPEND _VGRE_SECURITY_LIBS
+                    PkgConfig::TSS2_ESYS PkgConfig::TSS2_MU PkgConfig::TSS2_TCTILDR)
+                list(APPEND _VGRE_SECURITY_DEFS VGRE_HAS_TPM2)
+                set(_VGRE_TPM2_FOUND TRUE)
+                message(STATUS "TPM 2.0: enabled (tss2-esys ${TSS2_ESYS_VERSION})")
+            else()
+                message(WARNING
+                    "VGRE_USE_TPM2=ON but TSS2 libraries not found. "
+                    "Install: sudo apt install libtss2-dev")
+            endif()
+        endif()
+
+        # libsecret / GNOME Keyring (only when explicitly requested)
+        if(VGRE_USE_LIBSECRET)
+            pkg_check_modules(LIBSECRET QUIET IMPORTED_TARGET libsecret-1)
+            if(LIBSECRET_FOUND)
+                list(APPEND _VGRE_SECURITY_LIBS PkgConfig::LIBSECRET)
+                list(APPEND _VGRE_SECURITY_DEFS VGRE_HAS_LIBSECRET)
+                set(_VGRE_LIBSECRET_FOUND TRUE)
+                message(STATUS "libsecret: enabled (${LIBSECRET_VERSION})")
+            else()
+                message(WARNING
+                    "VGRE_USE_LIBSECRET=ON but libsecret-1 not found. "
+                    "Install: sudo apt install libsecret-1-dev")
+            endif()
+        endif()
+    endif()
+endif()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §14  Validated add_subdirectory helper
+# ──────────────────────────────────────────────────────────────────────────────
+# Skips missing subdirectories with a clear diagnostic rather than a
+# cryptic CMake error — useful for partial checkouts and CI scenarios.
+function(vgre_add_subdirectory rel_path)
+    if(EXISTS "${PROJECT_SOURCE_DIR}/${rel_path}/CMakeLists.txt")
+        add_subdirectory("${PROJECT_SOURCE_DIR}/${rel_path}")
+    else()
+        message(WARNING
+            "vgre_add_subdirectory: skipping '${rel_path}' "
+            "(${PROJECT_SOURCE_DIR}/${rel_path}/CMakeLists.txt not found)")
+    endif()
+endfunction()
+
+vgre_add_subdirectory(src/common)
+vgre_add_subdirectory(src/core)
+vgre_add_subdirectory(src/compiler)
+vgre_add_subdirectory(src/api)
+vgre_add_subdirectory(src/runtime)
+vgre_add_subdirectory(src/advanced)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §15  Shared helper: apply common compile settings to a VGRE library target
+# ──────────────────────────────────────────────────────────────────────────────
+function(_vgre_configure_library target_name visibility)
+    vgre_set_compiler_warnings(${target_name} PRIVATE)
+    if(VGRE_SIMD_COMPILE_OPTIONS)
+        target_compile_options(${target_name} PRIVATE ${VGRE_SIMD_COMPILE_OPTIONS})
+    endif()
+    if(VGRE_SIMD_COMPILE_DEFS)
+        target_compile_definitions(${target_name} PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
+    endif()
+    vgre_target_link_openmp(${target_name} ${visibility})
+    target_link_libraries(${target_name} ${visibility} Threads::Threads)
+    # vgre_llvm_iface is an internal CMake wrapper for LLVM — always PRIVATE
+    # so it never appears in export sets (downstream users run find_package(LLVM)).
+    target_link_libraries(${target_name} PRIVATE vgre_llvm_iface)
+    if(_VGRE_SECURITY_LIBS)
+        target_link_libraries(${target_name} PRIVATE ${_VGRE_SECURITY_LIBS})
+    endif()
+    if(_VGRE_SECURITY_DEFS)
+        target_compile_definitions(${target_name} PRIVATE ${_VGRE_SECURITY_DEFS})
+    endif()
+    if(_VGRE_FFTW3_FOUND)
+        target_compile_definitions(${target_name} PRIVATE VGRE_HAS_FFTW3)
+        target_link_libraries(${target_name} PRIVATE
+            PkgConfig::FFTW3 PkgConfig::FFTW3F)
+    endif()
+    if(_VGRE_OPENCL_FOUND)
+        target_compile_definitions(${target_name} PRIVATE VGRE_HAS_OPENCL_BACKEND)
+        target_link_libraries(${target_name} PRIVATE OpenCL::OpenCL)
+    endif()
+    if(_VGRE_RDMA_FOUND)
+        target_compile_definitions(${target_name} PRIVATE VGRE_HAS_RDMA)
+        target_include_directories(${target_name} PRIVATE "${IBVERBS_INCLUDE}")
+        target_link_libraries(${target_name} PRIVATE ${_VGRE_RDMA_LIBS})
+    endif()
+    if(_VGRE_GRPC_FOUND)
+        target_compile_definitions(${target_name} PRIVATE VGRE_HAS_GRPC)
+        target_link_libraries(${target_name} PRIVATE
+            $<TARGET_OBJECTS:vgre_grpc_gen> ${_VGRE_GRPC_LIBS})
+    endif()
+endfunction()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §16  vgre  (main shared library)
+# ──────────────────────────────────────────────────────────────────────────────
 add_library(vgre SHARED
     $<TARGET_OBJECTS:vgre_common>
     $<TARGET_OBJECTS:vgre_core>
@@ -344,100 +705,32 @@ add_library(vgre SHARED
     $<TARGET_OBJECTS:vgre_runtime>
     $<TARGET_OBJECTS:vgre_advanced>
 )
-if(WIN32)
-    # Use an explicit module-definition file for reliable C API exports.
-    # WINDOWS_EXPORT_ALL_SYMBOLS does NOT export extern "C" symbols from
-    # OBJECT libraries, so we list them in a .def file instead.
-    target_sources(vgre PRIVATE ${PROJECT_SOURCE_DIR}/src/api/vgre_api.def)
-    set_target_properties(vgre PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-    # Critical: Ensure VGRE.dll has minimal static initialization (prevent DLL initialization failures)
-    set_target_properties(vgre PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-endif()
-
-# Platform-specific libraries for hardware token storage
-if(UNIX AND NOT APPLE)
-    # Linux: keyutils for kernel keyring
-    find_library(KEYUTILS_LIB keyutils)
-    if(KEYUTILS_LIB)
-        target_link_libraries(vgre PUBLIC ${KEYUTILS_LIB})
-        message(STATUS "Found keyutils: ${KEYUTILS_LIB}")
-    else()
-        message(WARNING "keyutils not found - hardware token storage will use fallback")
-    endif()
-    
-    # TPM 2.0 support
-    find_package(PkgConfig)
-    if(PKG_CONFIG_FOUND)
-        pkg_check_modules(TSS2_ESYS tss2-esys)
-        pkg_check_modules(TSS2_MU tss2-mu)
-        pkg_check_modules(TSS2_TCTILDR tss2-tctildr)
-
-        if(TSS2_ESYS_FOUND AND TSS2_MU_FOUND AND TSS2_TCTILDR_FOUND)
-            add_compile_definitions(VGRE_HAS_TPM2)
-            target_include_directories(vgre PUBLIC ${TSS2_ESYS_INCLUDE_DIRS})
-            target_link_libraries(vgre PUBLIC
-                ${TSS2_ESYS_LIBRARIES}
-                ${TSS2_MU_LIBRARIES}
-                ${TSS2_TCTILDR_LIBRARIES}
-            )
-            message(STATUS "TPM 2.0 support enabled")
-            message(STATUS "  tss2-esys: ${TSS2_ESYS_VERSION}")
-            message(STATUS "  tss2-mu: ${TSS2_MU_VERSION}")
-            message(STATUS "  tss2-tctildr: ${TSS2_TCTILDR_VERSION}")
-        else()
-            message(STATUS "TPM 2.0 libraries not found - TPM support disabled")
-        endif()
-
-        # libsecret (GNOME Keyring / KWallet) — Priority 2 token backend on Linux
-        pkg_check_modules(LIBSECRET libsecret-1)
-        if(LIBSECRET_FOUND)
-            add_compile_definitions(VGRE_HAS_LIBSECRET)
-            target_include_directories(vgre PUBLIC ${LIBSECRET_INCLUDE_DIRS})
-            target_link_libraries(vgre PUBLIC ${LIBSECRET_LIBRARIES})
-            message(STATUS "Found libsecret ${LIBSECRET_VERSION}: ${LIBSECRET_LIBRARIES}")
-            message(STATUS "  libsecret enabled — GNOME Keyring / KWallet backend active")
-        else()
-            message(STATUS "libsecret not found - GNOME Keyring backend disabled")
-        endif()
-    endif()
-    
-elseif(APPLE)
-    # macOS: Security framework for Keychain
-    find_library(SECURITY_FRAMEWORK Security)
-    if(SECURITY_FRAMEWORK)
-        target_link_libraries(vgre PUBLIC ${SECURITY_FRAMEWORK})
-        message(STATUS "Found Security framework: ${SECURITY_FRAMEWORK}")
-    endif()
-elseif(WIN32)
-    # Windows: Credential Manager (Advapi32) + Networking (ws2_32) + RNG (bcrypt)
-    # bcrypt.lib must be explicit for MinGW — #pragma comment(lib,...) is ignored by GCC.
-    target_link_libraries(vgre PUBLIC Advapi32 ws2_32 bcrypt)
-endif()
-
-target_link_libraries(vgre PUBLIC
-    OpenMP::OpenMP_CXX
-    ${OpenMP_CXX_LIBRARIES}
-    Threads::Threads
-    ${llvm_libs}
-)
-if(LIBOMP_PATH)
-    target_link_libraries(vgre PUBLIC ${LIBOMP_PATH})
-endif()
-if(UNIX AND NOT APPLE AND LIBOMP_PATH)
-    target_link_options(vgre PUBLIC "-Wl,--no-as-needed" "${LIBOMP_PATH}")
-endif()
-if(VGRE_USE_OPENCL_BACKEND)
-    target_link_libraries(vgre PUBLIC OpenCL::OpenCL)
-endif()
 set_target_properties(vgre PROPERTIES
-    VERSION ${PROJECT_VERSION}
+    VERSION   ${PROJECT_VERSION}
     SOVERSION 0
+    OUTPUT_NAME vgre
 )
+target_include_directories(vgre
+    PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+_vgre_configure_library(vgre PUBLIC)
 
-# ── CUDART Shim (LD_PRELOAD wrapper) ────────────────────────────────────────
-add_library(vgre_cudart SHARED
+if(WIN32)
+    target_sources(vgre PRIVATE "${PROJECT_SOURCE_DIR}/src/api/vgre_api.def")
+    set_target_properties(vgre PROPERTIES
+        WINDOWS_EXPORT_ALL_SYMBOLS ON
+        MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+endif()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §17  vgre_cudart  (LD_PRELOAD CUDA runtime shim)
+# ──────────────────────────────────────────────────────────────────────────────
+set(_VGRE_CUDART_SOURCES
     src/api/cudart/cudart_shim.cpp
     src/api/cudart/cudart_shim_stream.cpp
+    # cudart_shim_graph_basic.cpp is compiled via vgre_cudart_shims OBJECT lib
     src/api/cuda_driver/cuda_driver_device_context.cpp
     src/api/cuda_driver/cuda_driver_memory.cpp
     src/api/cuda_driver/cuda_driver_memcpy.cpp
@@ -484,9 +777,9 @@ add_library(vgre_cudart SHARED
     src/api/vgre_c_api_graphs.cpp
     src/api/vgre_c_api_telemetry.cpp
 )
-if(WIN32)
-    set_target_properties(vgre_cudart PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-endif()
+
+add_library(vgre_cudart SHARED ${_VGRE_CUDART_SOURCES})
+
 target_sources(vgre_cudart PRIVATE
     $<TARGET_OBJECTS:vgre_common>
     $<TARGET_OBJECTS:vgre_core>
@@ -495,130 +788,293 @@ target_sources(vgre_cudart PRIVATE
     $<TARGET_OBJECTS:vgre_advanced>
     $<TARGET_OBJECTS:vgre_cudart_shims>
 )
-target_compile_definitions(vgre_cudart PRIVATE VGRE_CUDA_INTERCEPTOR_NO_EXPORTS)
-target_link_libraries(vgre_cudart PRIVATE
-    OpenMP::OpenMP_CXX
-    ${OpenMP_CXX_LIBRARIES}
-    Threads::Threads
-    ${llvm_libs}
-)
-if(WIN32)
-    target_link_libraries(vgre_cudart PRIVATE Advapi32 ws2_32)
-elseif(APPLE)
-    find_library(SECURITY_FRAMEWORK Security)
-    if(SECURITY_FRAMEWORK)
-        target_link_libraries(vgre_cudart PRIVATE ${SECURITY_FRAMEWORK})
-    endif()
-elseif(UNIX)
-    find_library(KEYUTILS_LIB keyutils)
-    if(KEYUTILS_LIB)
-        target_link_libraries(vgre_cudart PRIVATE ${KEYUTILS_LIB})
-    endif()
-    # LAPACK / BLAS for cuSOLVER shim
-    # On Ubuntu/Debian these live in /usr/lib/x86_64-linux-gnu/{lapack,blas}/
-    # Use full paths because target_link_directories doesn't always propagate.
-    target_link_libraries(vgre_cudart PRIVATE
-        /usr/lib/x86_64-linux-gnu/lapack/liblapack.so.3
-        /usr/lib/x86_64-linux-gnu/blas/libblas.so.3)
-    message(STATUS "Linking cuSOLVER shim against system LAPACK/BLAS")
-endif()
-if(VGRE_USE_OPENCL_BACKEND)
-    target_link_libraries(vgre_cudart PRIVATE OpenCL::OpenCL)
-endif()
-target_include_directories(vgre_cudart PRIVATE ${PROJECT_SOURCE_DIR}/include)
 set_target_properties(vgre_cudart PROPERTIES
-    VERSION ${PROJECT_VERSION}
+    VERSION   ${PROJECT_VERSION}
     SOVERSION 0
+    OUTPUT_NAME vgre_cudart
 )
+target_include_directories(vgre_cudart
+    PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_compile_definitions(vgre_cudart PRIVATE VGRE_CUDA_INTERCEPTOR_NO_EXPORTS)
+_vgre_configure_library(vgre_cudart PRIVATE)
 
-# ── Tests ───────────────────────────────────────────────────────────────────
-enable_testing()
-add_subdirectory(tests)
+# cuSOLVER shim requires LAPACK; link AFTER _vgre_configure_library so the
+# LAPACK::LAPACK target (which may bring additional include dirs) is in scope.
+target_link_libraries(vgre_cudart PRIVATE LAPACK::LAPACK)
 
-# ── Examples ────────────────────────────────────────────────────────────────
-add_subdirectory(examples)
+if(WIN32)
+    set_target_properties(vgre_cudart PROPERTIES
+        WINDOWS_EXPORT_ALL_SYMBOLS ON
+        MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+endif()
 
-# ── Dashboard (Flutter) ──────────────────────────────────────────────────────
-option(VGRE_BUILD_DASHBOARD "Build the Flutter dashboard" ON)
+# ──────────────────────────────────────────────────────────────────────────────
+# §18  Test helper function  (used by tests/CMakeLists.txt)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# vgre_register_test(<test_name> <source_file> <link_target>
+#     [TIMEOUT <seconds>]
+#     [RESOURCE_LOCK <lock_name>]
+#     [FIXTURE_REQUIRES <fixture_name>]
+#     [FIXTURE_SETUP    <fixture_name>]
+#     [LABELS <label...>]
+#     [EXTRA_SOURCES <src...>]
+#     [EXTRA_INCLUDES <dir...>]
+#     [WORKING_DIRECTORY <dir>])
+#
+# Eliminates the ~300-line repetition of identical add_executable /
+# target_link_libraries / add_test / set_tests_properties blocks.
+function(vgre_register_test test_name source_file link_target)
+    cmake_parse_arguments(_T
+        ""
+        "TIMEOUT;RESOURCE_LOCK;FIXTURE_REQUIRES;FIXTURE_SETUP;WORKING_DIRECTORY"
+        "LABELS;EXTRA_SOURCES;EXTRA_INCLUDES"
+        ${ARGN}
+    )
+
+    add_executable(${test_name} "${source_file}" ${_T_EXTRA_SOURCES})
+    target_link_libraries(${test_name} PRIVATE ${link_target})
+
+    if(_T_EXTRA_INCLUDES)
+        target_include_directories(${test_name} PRIVATE ${_T_EXTRA_INCLUDES})
+    endif()
+
+    if(_T_WORKING_DIRECTORY)
+        add_test(NAME ${test_name} COMMAND ${test_name}
+            WORKING_DIRECTORY "${_T_WORKING_DIRECTORY}")
+    else()
+        add_test(NAME ${test_name} COMMAND ${test_name})
+    endif()
+
+    set(_props "")
+    if(_T_TIMEOUT)
+        list(APPEND _props TIMEOUT ${_T_TIMEOUT})
+    endif()
+    if(_T_RESOURCE_LOCK)
+        list(APPEND _props RESOURCE_LOCK ${_T_RESOURCE_LOCK})
+    endif()
+    if(_T_FIXTURE_REQUIRES)
+        list(APPEND _props FIXTURES_REQUIRED ${_T_FIXTURE_REQUIRES})
+    endif()
+    if(_T_FIXTURE_SETUP)
+        list(APPEND _props FIXTURES_SETUP ${_T_FIXTURE_SETUP})
+    endif()
+    if(_T_LABELS)
+        list(APPEND _props LABELS "${_T_LABELS}")
+    endif()
+    if(_props)
+        set_tests_properties(${test_name} PROPERTIES ${_props})
+    endif()
+endfunction()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §19  Tests & examples
+# ──────────────────────────────────────────────────────────────────────────────
+if(VGRE_BUILD_TESTS)
+    enable_testing()
+    vgre_add_subdirectory(tests)
+endif()
+
+if(VGRE_BUILD_EXAMPLES)
+    vgre_add_subdirectory(examples)
+endif()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §20  Flutter dashboard
+# ──────────────────────────────────────────────────────────────────────────────
 if(VGRE_BUILD_DASHBOARD)
-    find_program(FLUTTER_EXECUTABLE flutter)
-    if(FLUTTER_EXECUTABLE)
+    find_program(FLUTTER_EXECUTABLE flutter DOC "Flutter SDK 'flutter' binary")
+    if(NOT FLUTTER_EXECUTABLE)
+        message(WARNING
+            "VGRE_BUILD_DASHBOARD=ON but 'flutter' not found in PATH. "
+            "Dashboard build skipped. Install Flutter: https://flutter.dev/docs/get-started/install")
+    elseif(NOT EXISTS "${PROJECT_SOURCE_DIR}/vgre_dashboard/pubspec.yaml")
+        message(WARNING
+            "Flutter dashboard source not found at "
+            "'${PROJECT_SOURCE_DIR}/vgre_dashboard/pubspec.yaml'. "
+            "Dashboard build skipped.")
+    else()
         if(APPLE)
-            set(FLUTTER_PLATFORM macos)
-            set(FLUTTER_OUT_DIR ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/macos/Build/Products/Release)
-            set(LIB_PREFIX "lib")
-            set(LIB_SUFFIX ".dylib")
+            set(_flt_platform linux)   # overridden below
+            set(_flt_platform macos)
+            set(_flt_out "${PROJECT_SOURCE_DIR}/vgre_dashboard/build/macos/Build/Products/Release")
+            set(_lib_pfx "lib")
+            set(_lib_sfx ".dylib")
         elseif(WIN32)
-            set(FLUTTER_PLATFORM windows)
-            set(FLUTTER_OUT_DIR ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/windows/x64/runner/Release)
-            set(LIB_PREFIX "")
-            set(LIB_SUFFIX ".dll")
+            set(_flt_platform windows)
+            set(_flt_out "${PROJECT_SOURCE_DIR}/vgre_dashboard/build/windows/x64/runner/Release")
+            set(_lib_pfx "")
+            set(_lib_sfx ".dll")
         else()
-            set(FLUTTER_PLATFORM linux)
-            set(FLUTTER_OUT_DIR ${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/lib)
-            set(LIB_PREFIX "lib")
-            set(LIB_SUFFIX ".so")
+            set(_flt_platform linux)
+            set(_flt_out "${PROJECT_SOURCE_DIR}/vgre_dashboard/build/linux/x64/release/bundle/lib")
+            set(_lib_pfx "lib")
+            set(_lib_sfx ".so")
         endif()
 
         add_custom_target(vgre_dashboard ALL
-            COMMAND ${FLUTTER_EXECUTABLE} build ${FLUTTER_PLATFORM} --release
-            
-            # Post-build: Copy native binaries into the bundle for true portability
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${FLUTTER_OUT_DIR}
-            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgre> ${FLUTTER_OUT_DIR}/${LIB_PREFIX}vgre${LIB_SUFFIX}
-            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgre_cudart> ${FLUTTER_OUT_DIR}/${LIB_PREFIX}vgre_cudart${LIB_SUFFIX}
-            
-            # True Portability: Bundle JIT headers
-            COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/include/vgre ${FLUTTER_OUT_DIR}/../include/vgre
-            
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/vgre_dashboard
-            COMMENT "Building VGRE Flutter Dashboard & Bundling native libraries"
+            COMMAND "${FLUTTER_EXECUTABLE}" build "${_flt_platform}" --release
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_flt_out}"
+            COMMAND "${CMAKE_COMMAND}" -E copy
+                "$<TARGET_FILE:vgre>"
+                "${_flt_out}/${_lib_pfx}vgre${_lib_sfx}"
+            COMMAND "${CMAKE_COMMAND}" -E copy
+                "$<TARGET_FILE:vgre_cudart>"
+                "${_flt_out}/${_lib_pfx}vgre_cudart${_lib_sfx}"
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                "${PROJECT_SOURCE_DIR}/include/vgre"
+                "${_flt_out}/../include/vgre"
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/vgre_dashboard"
+            DEPENDS vgre vgre_cudart
+            COMMENT "Building VGRE Flutter dashboard and bundling native libraries"
             VERBATIM
         )
 
-        if(NOT WIN32 AND NOT APPLE)
-            # Desktop Integration: Linux only
+        if(UNIX AND NOT APPLE)
+            set(_desktop_dst "${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop")
             add_custom_command(TARGET vgre_dashboard POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E echo "[Desktop Entry]" > ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Name=VGRE Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Comment=Virtual GPU Runtime Engine Dashboard" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Exec=bash -ic \"$ENV{HOME}/.local/share/VGRE/vgre-launch.sh\"" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Icon=$ENV{HOME}/.local/share/VGRE/vgre_icon.png" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Terminal=false" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Type=Application" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
-                COMMAND ${CMAKE_COMMAND} -E echo "Categories=Development\\;System\\;" >> ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop
-                COMMAND ${CMAKE_COMMAND} -E remove $ENV{HOME}/.local/share/applications/vgre.desktop
-                COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/vgre-dashboard.desktop $ENV{HOME}/.local/share/applications/vgre-dashboard.desktop
+                COMMAND "${CMAKE_COMMAND}" -E echo "[Desktop Entry]"              > "${_desktop_dst}"
+                COMMAND "${CMAKE_COMMAND}" -E echo "Name=VGRE Dashboard"         >> "${_desktop_dst}"
+                COMMAND "${CMAKE_COMMAND}" -E echo
+                    "Comment=Virtual GPU Runtime Engine Dashboard"                >> "${_desktop_dst}"
+                COMMAND "${CMAKE_COMMAND}" -E echo
+                    "Exec=bash -ic \"$ENV{HOME}/.local/share/VGRE/vgre-launch.sh\"" >> "${_desktop_dst}"
+                COMMAND "${CMAKE_COMMAND}" -E echo
+                    "Icon=$ENV{HOME}/.local/share/VGRE/vgre_icon.png"            >> "${_desktop_dst}"
+                COMMAND "${CMAKE_COMMAND}" -E echo "Terminal=false"              >> "${_desktop_dst}"
+                COMMAND "${CMAKE_COMMAND}" -E echo "Type=Application"            >> "${_desktop_dst}"
+                COMMAND "${CMAKE_COMMAND}" -E echo "Categories=Development;System;" >> "${_desktop_dst}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "$ENV{HOME}/.local/share/applications"
+                COMMAND "${CMAKE_COMMAND}" -E copy
+                    "${_desktop_dst}"
+                    "$ENV{HOME}/.local/share/applications/vgre-dashboard.desktop"
+                VERBATIM
             )
         endif()
-        add_dependencies(vgre_dashboard vgre)
-    else()
-        message(WARNING "flutter executable not found. Dashboard will not be built automatically.")
-    endif()
-endif()
-# ── SLURM GRES Plugin (optional) ────────────────────────────────────────────
-option(VGRE_BUILD_SLURM_GRES "Build SLURM GRES plugin" ON)
-if(VGRE_BUILD_SLURM_GRES)
-    find_path(SLURM_INCLUDE_DIR slurm/slurm.h PATHS /usr/include /usr/local/include)
-    if(SLURM_INCLUDE_DIR)
-        add_library(vgre_slurm_gres SHARED
-            src/deployment/slurm_gres/slurm_gres_vgpu.cpp
-        )
-        target_include_directories(vgre_slurm_gres PRIVATE
-            ${PROJECT_SOURCE_DIR}/src/deployment/slurm_gres
-        )
-        set_target_properties(vgre_slurm_gres PROPERTIES
-            VERSION ${PROJECT_VERSION}
-            SOVERSION 0
-        )
-        message(STATUS "Building SLURM GRES plugin")
-    else()
-        message(STATUS "SLURM headers not found — skipping SLURM GRES plugin")
     endif()
 endif()
 
-# ── Install rules ───────────────────────────────────────────────────────────
-install(TARGETS vgre vgre_cudart vgre-worker
-        LIBRARY DESTINATION lib
-        RUNTIME DESTINATION bin)
-install(DIRECTORY include/vgre DESTINATION include)
+# ──────────────────────────────────────────────────────────────────────────────
+# §21  SLURM GRES plugin
+# ──────────────────────────────────────────────────────────────────────────────
+if(VGRE_BUILD_SLURM_GRES)
+    set(_slurm_src
+        "${PROJECT_SOURCE_DIR}/src/deployment/slurm_gres/slurm_gres_vgpu.cpp")
+    if(NOT EXISTS "${_slurm_src}")
+        message(STATUS "SLURM GRES: source not present — skipping")
+    else()
+        find_path(SLURM_INCLUDE_DIR
+            NAMES slurm/slurm.h
+            PATHS /usr/include /usr/local/include /opt/slurm/include
+            DOC "SLURM header directory")
+        if(NOT SLURM_INCLUDE_DIR)
+            message(STATUS
+                "SLURM GRES: slurm/slurm.h not found — skipping. "
+                "Install: sudo apt install libslurm-dev")
+        else()
+            add_library(vgre_slurm_gres SHARED "${_slurm_src}")
+            target_include_directories(vgre_slurm_gres PRIVATE
+                "${PROJECT_SOURCE_DIR}/src/deployment/slurm_gres"
+                "${SLURM_INCLUDE_DIR}")
+            set_target_properties(vgre_slurm_gres PROPERTIES
+                VERSION ${PROJECT_VERSION}
+                SOVERSION 0)
+            message(STATUS "SLURM GRES: plugin enabled (${SLURM_INCLUDE_DIR})")
+        endif()
+    endif()
+endif()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §22  Install rules  (GNUInstallDirs — no hardcoded lib/bin/include paths)
+# ──────────────────────────────────────────────────────────────────────────────
+# NOTE: 'vgre-worker' was referenced in the original install block but was
+# never defined as a build target. It is intentionally omitted here. Add it
+# to this block once the worker executable target is introduced.
+install(TARGETS vgre vgre_cudart
+    EXPORT   VGRETargets
+    LIBRARY  DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RUNTIME  DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    ARCHIVE  DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+)
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/include/vgre"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+)
+if(TARGET vgre_slurm_gres)
+    install(TARGETS vgre_slurm_gres
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+endif()
+
+# CMake package config so downstream projects can use find_package(VGRE)
+install(EXPORT VGRETargets
+    FILE       VGRETargets.cmake
+    NAMESPACE  VGRE::
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/VGRE"
+)
+configure_package_config_file(
+    "${PROJECT_SOURCE_DIR}/cmake/VGREConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/VGREConfig.cmake"
+    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/VGRE"
+    NO_SET_AND_CHECK_MACRO
+)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/VGREConfigVersion.cmake"
+    VERSION       ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/VGREConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/VGREConfigVersion.cmake"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/VGRE"
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# §23  Configure summary matrix
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper: print a single feature row with aligned ON/OFF indicator.
+function(_vgre_row label flag)
+    if(${flag})
+        message(STATUS "  ${label}ON")
+    else()
+        message(STATUS "  ${label}OFF")
+    endif()
+endfunction()
+
+string(REPEAT "─" 64 _SEP)
+message(STATUS "${_SEP}")
+message(STATUS "  VGRE ${PROJECT_VERSION}  ·  ${CMAKE_BUILD_TYPE}  ·  CMake ${CMAKE_VERSION}")
+message(STATUS "${_SEP}")
+message(STATUS "  Toolchain")
+message(STATUS "    CXX compiler  : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "    Install prefix: ${CMAKE_INSTALL_PREFIX}")
+message(STATUS "    Lib dir       : ${CMAKE_INSTALL_LIBDIR}")
+message(STATUS "${_SEP}")
+message(STATUS "  Feature                            Status")
+message(STATUS "  ─────────────────────────────────────────")
+_vgre_row("  Native SIMD (AVX2/512)      →   " VGRE_ENABLE_NATIVE_SIMD)
+_vgre_row("  LAPACK / BLAS               →   " VGRE_USE_LAPACK)
+_vgre_row("  FFTW3 backend               →   " _VGRE_FFTW3_FOUND)
+_vgre_row("  OpenCL backend              →   " _VGRE_OPENCL_FOUND)
+_vgre_row("  RDMA / RoCE                 →   " _VGRE_RDMA_FOUND)
+_vgre_row("  gRPC cluster transport      →   " _VGRE_GRPC_FOUND)
+if(UNIX AND NOT APPLE)
+_vgre_row("  TPM 2.0                     →   " _VGRE_TPM2_FOUND)
+_vgre_row("  libsecret (GNOME Keyring)   →   " _VGRE_LIBSECRET_FOUND)
+endif()
+_vgre_row("  Tests                       →   " VGRE_BUILD_TESTS)
+_vgre_row("  Examples                    →   " VGRE_BUILD_EXAMPLES)
+_vgre_row("  Flutter dashboard           →   " VGRE_BUILD_DASHBOARD)
+_vgre_row("  Warnings-as-errors (CI)     →   " VGRE_WARNINGS_AS_ERRORS)
+message(STATUS "  ─────────────────────────────────────────")
+message(STATUS "  LLVM version : ${LLVM_PACKAGE_VERSION}")
+if(VGRE_USE_LAPACK AND LAPACK_FOUND)
+message(STATUS "  LAPACK       : ${VGRE_LAPACK_DESCRIPTION}")
+endif()
+if(VGRE_ENABLE_NATIVE_SIMD)
+message(STATUS "  CPU ISA      : AVX512=${HOST_HAS_AVX512F}  AVX2=${HOST_HAS_AVX2}  "
+               "SSE4=${HOST_HAS_SSE4}  AMX=${HOST_HAS_AMX}  AES-NI=${HOST_HAS_AES_NI}")
+endif()
+message(STATUS "${_SEP}")
