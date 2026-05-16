@@ -89,6 +89,11 @@ _check_and_install_deps() {
     local OMP_FOUND=0
     for lib in /usr/lib/x86_64-linux-gnu/libomp.so \
                /usr/lib/aarch64-linux-gnu/libomp.so \
+               /usr/lib/libomp.so \
+               /usr/lib64/libomp.so \
+               /opt/homebrew/lib/libomp.dylib \
+               /opt/homebrew/opt/libomp/lib/libomp.dylib \
+               /usr/local/opt/libomp/lib/libomp.dylib \
                /usr/local/lib/libomp.dylib; do
         [[ -f "$lib" ]] && OMP_FOUND=1 && break
     done
@@ -124,10 +129,12 @@ _check_and_install_deps() {
     # when Flutter (libc++) and VGRE (libstdc++) threads share the same heap.
     local JEMALLOC_FOUND=0
     for lib in /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+               /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 \
                /usr/lib64/libjemalloc.so.2 \
                /usr/lib/libjemalloc.so.2 \
                /usr/local/lib/libjemalloc.so.2 \
                /opt/homebrew/lib/libjemalloc.2.dylib \
+               /opt/homebrew/opt/jemalloc/lib/libjemalloc.2.dylib \
                /usr/local/lib/libjemalloc.2.dylib; do
         [[ -f "$lib" ]] && JEMALLOC_FOUND=1 && echo "  [OK] jemalloc ($lib)" && break
     done
@@ -171,10 +178,18 @@ _check_and_install_deps() {
             local FLUTTER_VERSION="3.24.5"
             local FLUTTER_ARCH="x64"
             [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]] && FLUTTER_ARCH="arm64"
-            local FLUTTER_URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
-            echo "  Downloading Flutter ${FLUTTER_VERSION}..."
             mkdir -p "$HOME/.local"
-            curl -fsSL "$FLUTTER_URL" | tar -xJ -C "$HOME/.local"
+            if [[ "$OS" == "Darwin" ]]; then
+                local FLUTTER_URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/macos/flutter_macos_${FLUTTER_ARCH}_${FLUTTER_VERSION}-stable.zip"
+                echo "  Downloading Flutter ${FLUTTER_VERSION} (macOS ${FLUTTER_ARCH})..."
+                curl -fsSL "$FLUTTER_URL" -o "/tmp/flutter_macos_$$.zip"
+                unzip -q "/tmp/flutter_macos_$$.zip" -d "$HOME/.local"
+                rm -f "/tmp/flutter_macos_$$.zip"
+            else
+                local FLUTTER_URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
+                echo "  Downloading Flutter ${FLUTTER_VERSION} (Linux ${FLUTTER_ARCH})..."
+                curl -fsSL "$FLUTTER_URL" | tar -xJ -C "$HOME/.local"
+            fi
             ln -sf "$HOME/.local/flutter/bin/flutter" "$BIN_DIR/flutter" 2>/dev/null || true
             export PATH="$HOME/.local/flutter/bin:$PATH"
         fi
@@ -272,13 +287,23 @@ make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) vgre vgre_cudart vgre-worker
 
 # Verify the built library is a Release build (no ASAN symbols).
 # An ASan build is 2-3x larger and will abort on the first heap error it detects.
-_LIB_SIZE=$(stat -c%s libvgre.so 2>/dev/null || stat -f%z libvgre.so 2>/dev/null || echo 0)
-if ldd libvgre.so 2>/dev/null | grep -q "libasan"; then
-    echo "❌ ERROR: libvgre.so is an ASAN build — re-run cmake with -DCMAKE_BUILD_TYPE=Release"
-    echo "   Run: cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j\$(nproc) vgre"
-    exit 1
+if [[ "$OS" == "Darwin" ]]; then
+    _LIB="libvgre.dylib"
+    _LIB_SIZE=$(stat -f%z "$_LIB" 2>/dev/null || echo 0)
+    if otool -L "$_LIB" 2>/dev/null | grep -qE "libasan|libclang_rt.asan"; then
+        echo "❌ ERROR: $_LIB is an ASAN build — re-run cmake with -DCMAKE_BUILD_TYPE=Release"
+        exit 1
+    fi
+else
+    _LIB="libvgre.so"
+    _LIB_SIZE=$(stat -c%s "$_LIB" 2>/dev/null || stat -f%z "$_LIB" 2>/dev/null || echo 0)
+    if ldd "$_LIB" 2>/dev/null | grep -q "libasan"; then
+        echo "❌ ERROR: $_LIB is an ASAN build — re-run cmake with -DCMAKE_BUILD_TYPE=Release"
+        echo "   Run: cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j\$(nproc) vgre"
+        exit 1
+    fi
 fi
-echo "✅ libvgre.so verified: Release build, ${_LIB_SIZE} bytes"
+echo "✅ $_LIB verified: Release build, ${_LIB_SIZE} bytes"
 cd ..
 
 # 2. Build Flutter Dashboard
@@ -290,17 +315,22 @@ cd vgre_dashboard
 unset CC
 unset CXX
 
-# Workaround for Flutter/Dart linker resolution issue on Ubuntu with LLVM-18
+# Workaround for Flutter/Dart linker resolution issue on Ubuntu with LLVM-18.
 # Dart's AOT compiler often expects 'ld' to be in the same dir as the compiler.
 # If 'clang' is version 18, it looks in /usr/lib/llvm-18/bin where 'ld' is missing.
-# We create a local bin dir and provide 'clang'/'clang++' symlinks to 'gcc'/'g++'
-# alongside a symlinked 'ld' and 'ld.lld'. This tricks Dart into using GCC.
-mkdir -p "$PROJECT_ROOT/build/vgre_bin"
-ln -sf /usr/bin/gcc "$PROJECT_ROOT/build/vgre_bin/clang"
-ln -sf /usr/bin/g++ "$PROJECT_ROOT/build/vgre_bin/clang++"
-ln -sf /usr/bin/ld "$PROJECT_ROOT/build/vgre_bin/ld"
-ln -sf /usr/bin/ld "$PROJECT_ROOT/build/vgre_bin/ld.lld"
-export PATH="$PROJECT_ROOT/build/vgre_bin:$PATH"
+# We create a local bin dir and symlink gcc/g++/ld there so Dart finds a consistent
+# toolchain. Linux-only: macOS uses Apple Clang which does not have this issue.
+if [[ "$OS" == "Linux" ]]; then
+    mkdir -p "$PROJECT_ROOT/build/vgre_bin"
+    _GCC_BIN="$(command -v gcc 2>/dev/null || true)"
+    _GPP_BIN="$(command -v g++ 2>/dev/null || true)"
+    _LD_BIN="$(command -v ld 2>/dev/null || true)"
+    [[ -x "$_GCC_BIN" ]] && ln -sf "$_GCC_BIN" "$PROJECT_ROOT/build/vgre_bin/clang"
+    [[ -x "$_GPP_BIN" ]] && ln -sf "$_GPP_BIN" "$PROJECT_ROOT/build/vgre_bin/clang++"
+    [[ -x "$_LD_BIN" ]] && ln -sf "$_LD_BIN" "$PROJECT_ROOT/build/vgre_bin/ld"
+    [[ -x "$_LD_BIN" ]] && ln -sf "$_LD_BIN" "$PROJECT_ROOT/build/vgre_bin/ld.lld"
+    export PATH="$PROJECT_ROOT/build/vgre_bin:$PATH"
+fi
 
 flutter build $(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/macos/') --release
 cd ..
@@ -314,10 +344,45 @@ if [[ "$(uname)" == "Darwin" ]]; then
     # macOS deployment
     APP_BUNDLE="$PROJECT_ROOT/vgre_dashboard/build/macos/Build/Products/Release/vgre_dashboard.app"
     cp -r "$APP_BUNDLE" "$INSTALL_DIR/"
+
+    # Embed the native library inside the app bundle (preferred) or fall back to lib/
     cp build/libvgre.dylib "$INSTALL_DIR/vgre_dashboard.app/Contents/Frameworks/" 2>/dev/null || \
-    cp build/libvgre.dylib "$INSTALL_DIR/lib/"
-    
-    # Create a symlink in bin
+        cp build/libvgre.dylib "$INSTALL_DIR/lib/"
+    cp build/libvgre_cudart.dylib "$INSTALL_DIR/vgre_dashboard.app/Contents/Frameworks/" 2>/dev/null || \
+        cp build/libvgre_cudart.dylib "$INSTALL_DIR/lib/" 2>/dev/null || true
+
+    # Deploy vgre-worker
+    WORKER_SRC="$PROJECT_ROOT/build/src/advanced/vgre-worker"
+    if [[ -f "$WORKER_SRC" ]]; then
+        cp "$WORKER_SRC" "$INSTALL_DIR/vgre-worker"
+        chmod +x "$INSTALL_DIR/vgre-worker"
+        # Launch wrapper that injects DYLD_LIBRARY_PATH so the worker finds dylibs
+        WORKER_CMD="$INSTALL_DIR/vgre-worker.sh"
+        {
+            echo '#!/bin/bash'
+            echo "export DYLD_LIBRARY_PATH=\"$INSTALL_DIR/lib:\${DYLD_LIBRARY_PATH:-}\""
+            echo "exec \"$INSTALL_DIR/vgre-worker\" \"\$@\""
+        } > "$WORKER_CMD"
+        chmod +x "$WORKER_CMD"
+        ln -sf "$WORKER_CMD" "$BIN_DIR/vgre-worker"
+        echo "✅ vgre-worker deployed to $INSTALL_DIR"
+    else
+        echo "⚠️  vgre-worker binary not found at $WORKER_SRC — skipping"
+    fi
+
+    # Install token manager and cluster scripts into bin
+    for _script in vgre-token.sh vgre-start.sh; do
+        if [[ -f "$SCRIPT_DIR/$_script" ]]; then
+            chmod +x "$SCRIPT_DIR/$_script"
+            ln -sf "$SCRIPT_DIR/$_script" "$BIN_DIR/${_script%.sh}"
+        fi
+    done
+
+    # Copy JIT headers
+    mkdir -p "$INSTALL_DIR/include"
+    cp -r "$PROJECT_ROOT/include/vgre" "$INSTALL_DIR/include/" 2>/dev/null || true
+
+    # Dashboard launcher symlink
     ln -sf "$INSTALL_DIR/vgre_dashboard.app/Contents/MacOS/vgre_dashboard" "$BIN_DIR/vgre-dashboard"
 else
     # Linux deployment

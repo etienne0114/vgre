@@ -21,11 +21,13 @@ if [[ -f "$VGRE_ENV_FILE" ]]; then
     source "$VGRE_ENV_FILE"
 fi
 
-# Also add the installed lib directory to LD_LIBRARY_PATH so the worker
-# binary can find libvgre*.so without manual configuration.
+# Add the installed lib directory to the dynamic linker search path so the
+# worker binary can find libvgre*.so / libvgre*.dylib without manual setup.
 _VGRE_LIB_DIR="${VGRE_INSTALL_DIR:-$HOME/.local/share/VGRE}/lib"
 if [[ -d "$_VGRE_LIB_DIR" ]]; then
-    export LD_LIBRARY_PATH="$_VGRE_LIB_DIR:${LD_LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="$_VGRE_LIB_DIR:${LD_LIBRARY_PATH:-}"       # Linux
+    [[ "$(uname -s)" == "Darwin" ]] && \
+        export DYLD_LIBRARY_PATH="$_VGRE_LIB_DIR:${DYLD_LIBRARY_PATH:-}" # macOS
 fi
 
 INSTALL_DIR="${VGRE_INSTALL_DIR:-$HOME/.local/share/VGRE}"
@@ -97,7 +99,9 @@ if [[ -n "$_ACTIVE_TOKEN" ]]; then
 fi
 
 # ── Library Path ──────────────────────────────────────────────────────────────
-export LD_LIBRARY_PATH="$INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}"              # Linux
+[[ "$(uname -s)" == "Darwin" ]] && \
+    export DYLD_LIBRARY_PATH="$INSTALL_DIR/lib:${DYLD_LIBRARY_PATH:-}"      # macOS
 
 WORKER_BIN="$INSTALL_DIR/vgre-worker"
 if [[ ! -x "$WORKER_BIN" ]]; then

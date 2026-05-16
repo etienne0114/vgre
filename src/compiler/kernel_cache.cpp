@@ -69,11 +69,14 @@ VGREResult KernelCache::initialize(const std::string& cacheDir) {
 std::string KernelCache::getCacheFilePath(const std::string& sourceHash, const std::string& ext) const {
     // Use first 2 chars of hash for subdirectory (reduces files per directory)
     std::string subdir = sourceHash.substr(0, 2);
-    std::string cachePath = cacheDir_ + "/" + subdir;
-    
+    // Use std::filesystem::path for joining so Windows backslash vs POSIX slash
+    // is handled by the platform's path implementation, not string concatenation.
+    auto cachePathFs = std::filesystem::path(cacheDir_) / subdir;
+    std::string cachePath = cachePathFs.string();
+
     // Create subdirectory if needed
     try {
-        std::filesystem::create_directories(cachePath);
+        std::filesystem::create_directories(cachePathFs);
     } catch (const std::exception& e) {
         VGRE_LOG_WARN("KernelCache",
                       "Failed to create cache subdirectory '" + cachePath +
@@ -83,8 +86,8 @@ std::string KernelCache::getCacheFilePath(const std::string& sourceHash, const s
                       "Failed to create cache subdirectory '" + cachePath +
                       "' (unknown error) — disk cache disabled for this path");
     }
-    
-    return cachePath + "/" + sourceHash + ext;
+
+    return (cachePathFs / (sourceHash + ext)).string();
 }
 
 bool KernelCache::getAST(const std::string& sourceHash, std::string& outAst) {
