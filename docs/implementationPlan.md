@@ -29,7 +29,7 @@ src/api/nccl/            # NCCL backend split by concern (4 files)
 src/api/cufft/           # cuFFT shim (1 file — reference DFT/IDFT)
 src/api/curand/          # cuRAND shim (1 file)
 src/api/cusolver/        # cuSOLVER shim (1 file — LAPACK delegation)
-src/api/cusparse/        # cuSPARSE shim (1 file)
+src/api/cusparse/        # cuSPARSE shim (4 .cpp files + cusparse_state.h internal header)
 src/api/cublasLt/        # cuBLASLt shim (1 file)
 src/compiler/ptx/        # PTX translator split by architecture / op family (4 files)
 src/core/graph/          # Graph manager split by concern (7 files)
@@ -173,7 +173,7 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 
 **Implementation**: Host API uses `std::mt19937_64` seeded from `/dev/urandom` / `BCryptGenRandom` / `getentropy()`. Device API returns `CURAND_STATUS_NOT_SUPPORTED`.
 
-**Caveat**: All generator calls share one sequential engine per handle; no per-stream or thread-local partitioning. See `missingFeatures.md` §3.3.
+**Thread safety**: Per-handle `std::mutex genMutex` inside `GeneratorState`; registry uses `unique_ptr<GeneratorState>` for stable addresses. All `curandGenerate*` calls lock `genMutex` before accessing the engine — concurrent calls on different handles are fully parallel. Quasi-random Sobol direction-vector tables are guarded by a separate `g_sobolMutex`. Device-side `curand_*` returns `CURAND_STATUS_NOT_SUPPORTED` by design.
 
 ---
 
@@ -185,7 +185,8 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 
 **Implementation**: Delegates to system LAPACK with proper workspace queries.
 
-**Still missing**: Sparse solvers. See `missingFeatures.md` §2.4.
+**Dense API complete**: potrf, geqrf, gesvd, syevd, getrf, getrs, ormqr, gelsd — all via LAPACK delegation with proper `lwork=-1` workspace queries.
+**Still missing**: `cusolverSp*` sparse solver API (requires UMFPACK/CHOLMOD). See `missingFeatures.md` §3.6.
 
 ---
 
@@ -200,7 +201,8 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 - Format: `cusparseCreateCsc`, `cusparseSparseToDense`, `cusparseDenseToSparse` (bufferSize+analysis+compress), `cusparseSpMatGetAttribute/SetAttribute`, `cusparseSpMatGetSize`, `cusparseCsrSetPointers`
 - Triangular: `cusparseSpSV` (full forward/backward/transposed substitution for lower+upper triangular CSR)
 
-**Still missing**: Sparse factorization (Cholesky, LU, QR). See `missingFeatures.md` §2.4.
+**Also implemented** (2026-05-16): `cusparseSpGEMM` (3-phase, `cusparse_factorization.cpp`), `cusparseScsrilu02`/`Dcsrilu02` (ILU0), `cusparseScsric02`/`Dcsric02` (IC0). Bug-fixed 2026-05-16: SpGEMM first-pass used corrupt dual-purpose sentinel; replaced with dedicated `inUse[]` bool array.
+**Still missing**: Full-fill sparse factorization (UMFPACK-style). `cusolverSp*` separately tracked.
 
 ---
 
@@ -210,7 +212,7 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 
 **Implemented**: `cublasLtCreate/Destroy`, `cublasLtMatmulDescCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatrixLayoutCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatmulPreferenceCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatmulAlgoGetHeuristic` (singular + plural), `cublasLtMatmul` with all epilogues: ReLU, GELU, Bias, ReLU+Bias, GELU+Bias, DRELU, DGELU, DRELU_BGRAD, DGELU_BGRAD, BGRADA/BGRADB. Scale pointer attributes (A/B/C/D scale, amaxD, epilogueAuxPtr, biasDataType). All data types: F32, F64, F16, BF16, INT8→INT32.
 
-**Remaining**: Algorithm caching (plans rebuilt per-call). See `missingFeatures.md` §3.1.
+**Algorithm caching** (2026-05-16): 128-entry LRU cache keyed on (M, N, K, dtypeA, dtypeB, dtypeC, epilogue, transA, transB). `cublasLtMatmulAlgoGetHeuristic` populates cache and returns in O(1) for repeated problem shapes. Cache eviction is LRU via `std::list` + `std::unordered_map`. No remaining algorithmic gaps.
 
 ---
 
@@ -374,7 +376,7 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 | `src/api/cufft/` | cuFFT shim | 1 `.cpp` file |
 | `src/api/curand/` | cuRAND shim | 1 `.cpp` file |
 | `src/api/cusolver/` | cuSOLVER LAPACK delegation | 1 `.cpp` file |
-| `src/api/cusparse/` | cuSPARSE shim | 1 `.cpp` file |
+| `src/api/cusparse/` | cuSPARSE shim (core, format, triangular, factorization) | 4 `.cpp` files + `cusparse_state.h` |
 | `src/api/cublasLt/` | cuBLASLt shim | 1 `.cpp` file |
 | `src/compiler/ptx/` | PTX translator by family | 4 `.cpp` files |
 | `src/core/graph/` | Graph manager by concern | 7 `.cpp` files |
@@ -560,7 +562,7 @@ tests/core/texture/         # Texture/surface object tests
 | 3.9 | LRN | **DONE** | 2026-05-14 |
 | 3.10 | Tensor ops (OpTensor, ReduceTensor, TransformTensor, AddTensor) | **DONE** | 2026-05-14/15 |
 | 3.11 | INT8x4 / INT8x32 packed layouts | **DONE** | 2026-05-15 |
-| 3.12 | Backend API wired to legacy | **DONE** (partial — no attention routing) | 2026-05-14/15 |
+| 3.12 | Backend API wired to legacy + attention routing | **DONE** | 2026-05-16 |
 
 ### Phase 4 — Missing Libraries
 
@@ -574,6 +576,13 @@ tests/core/texture/         # Texture/surface object tests
 | 4.6 | cuFFT FFTW3 delegation | **DONE** | 2026-05-15 |
 | 4.7 | cuSOLVER LU/least-squares (getrf, getrs, ormqr, gelsd) | **DONE** | 2026-05-15 |
 | 4.8 | cuSPARSE format conversions (CSC, SparseToDense, DenseToSparse) + SpSV | **DONE** | 2026-05-16 |
+| 4.9 | cuSPARSE SpGEMM (3-phase sparse×sparse) + ILU0 + IC0 | **DONE** | 2026-05-16 |
+| 4.10 | cuBLASLt LRU algorithm cache (128-entry, O(1) heuristic lookup) | **DONE** | 2026-05-16 |
+| 4.11 | cuDNN Backend attention routing (SDPA via descriptor graph) | **DONE** | 2026-05-16 |
+| 4.12 | cuRAND per-handle mutex (thread-safe concurrent generation) | **DONE** | 2026-05-16 |
+| 4.13 | Texture SRGB gamma decode (`TextureDescriptor::srgbDecode` flag) | **DONE** | 2026-05-16 |
+| 4.14 | cuSolver dense API complete: getrf + getrs + ormqr + gelsd via LAPACK | **DONE** | 2026-05-16 |
+| 4.15 | cuSOLVER sparse API (cusolverSp) | **MISSING** — requires UMFPACK/CHOLMOD | — |
 
 ### Phase 5 — CUDA Driver API
 

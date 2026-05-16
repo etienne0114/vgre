@@ -254,6 +254,10 @@ add_executable(test_cusolver api/test_cusolver.cpp)
 target_link_libraries(test_cusolver PRIVATE vgre_cudart)
 add_test(NAME CusolverLAPACK COMMAND test_cusolver)
 
+add_executable(test_cusolver_sp api/test_cusolver_sp.cpp)
+target_link_libraries(test_cusolver_sp PRIVATE vgre_cudart)
+add_test(NAME CusolverSparse COMMAND test_cusolver_sp)
+
 add_executable(test_cudnn_backward_data api/test_cudnn_backward_data.cpp)
 target_link_libraries(test_cudnn_backward_data PRIVATE vgre)
 add_test(NAME CudnnBackwardData COMMAND test_cudnn_backward_data)

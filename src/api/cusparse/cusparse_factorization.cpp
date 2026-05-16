@@ -176,39 +176,47 @@ std::mutex g_spgemmMutex;
 std::unordered_map<uintptr_t, SpGEMMState> g_spgemmStates;
 uintptr_t g_nextSpGEMM = 1;
 
-// CSR × CSR → CSR product (template for float/double)
+// CSR × CSR → CSR product (template for float/double).
+//
+// Two-pass algorithm:
+//   Pass 1: count nonzero columns per output row using inUse[] boolean marker.
+//           Using a dedicated bool array (not dense[]) avoids false re-marking
+//           when an accumulated product is exactly zero.
+//   Pass 2: accumulate values using the same inUse[] approach, then sort and
+//           write to the output CSR arrays.
 template<typename T>
 void csr_spgemm(
-        int64_t m, int64_t k, int64_t n,
+        int64_t m, int64_t /*k*/, int64_t n,
         const int *arPtr, const int *acInd, const T *aVal, int aBase,
         const int *brPtr, const int *bcInd, const T *bVal, int bBase,
         std::vector<int32_t> &cRowPtr, std::vector<int32_t> &cColInd, std::vector<T> &cVal) {
 
     cRowPtr.resize(static_cast<size_t>(m + 1), 0);
-    std::vector<T> dense(static_cast<size_t>(n), T(0));
-    std::vector<int> used;
+    // inUse[c] == true means column c has been pushed to `used` for this row.
+    // Separate from dense[] so zero accumulated values don't cause re-marking.
+    std::vector<bool> inUse(static_cast<size_t>(n), false);
+    std::vector<T>    dense(static_cast<size_t>(n), T(0));
+    std::vector<int>  used;
 
-    // Two-pass: first count NNZ per row, then fill
+    // ── Pass 1: count distinct output NNZ per row ─────────────────────────────
     std::vector<int32_t> rowNnz(static_cast<size_t>(m), 0);
     for (int64_t i = 0; i < m; ++i) {
         for (int pa = arPtr[i] - aBase; pa < arPtr[i+1] - aBase; ++pa) {
             int64_t jj = acInd[pa] - aBase;
             for (int pb = brPtr[jj] - bBase; pb < brPtr[jj+1] - bBase; ++pb) {
                 int64_t cc = bcInd[pb] - bBase;
-                if (dense[static_cast<size_t>(cc)] == T(0)) {
+                if (!inUse[static_cast<size_t>(cc)]) {
+                    inUse[static_cast<size_t>(cc)] = true;
                     used.push_back(static_cast<int>(cc));
-                    dense[static_cast<size_t>(cc)] = T(1); // mark
                 }
-                // Accumulate actual value
-                dense[static_cast<size_t>(cc)] += aVal[pa] * bVal[pb] - T(1); // undo the +1 from mark
             }
         }
         rowNnz[static_cast<size_t>(i)] = static_cast<int32_t>(used.size());
-        for (int c : used) dense[static_cast<size_t>(c)] = T(0);
+        for (int c : used) inUse[static_cast<size_t>(c)] = false;
         used.clear();
     }
 
-    // Prefix sum
+    // Prefix sum → build cRowPtr
     cRowPtr[0] = 0;
     for (int64_t i = 0; i < m; ++i)
         cRowPtr[static_cast<size_t>(i+1)] = cRowPtr[static_cast<size_t>(i)] + rowNnz[static_cast<size_t>(i)];
@@ -216,24 +224,28 @@ void csr_spgemm(
     cColInd.resize(static_cast<size_t>(totalNnz));
     cVal.resize(static_cast<size_t>(totalNnz));
 
-    // Second pass: fill values
+    // ── Pass 2: accumulate values, sort, write ────────────────────────────────
     for (int64_t i = 0; i < m; ++i) {
         for (int pa = arPtr[i] - aBase; pa < arPtr[i+1] - aBase; ++pa) {
             int64_t jj = acInd[pa] - aBase;
             for (int pb = brPtr[jj] - bBase; pb < brPtr[jj+1] - bBase; ++pb) {
                 int64_t cc = bcInd[pb] - bBase;
-                if (dense[static_cast<size_t>(cc)] == T(0)) used.push_back(static_cast<int>(cc));
+                if (!inUse[static_cast<size_t>(cc)]) {
+                    inUse[static_cast<size_t>(cc)] = true;
+                    used.push_back(static_cast<int>(cc));
+                }
                 dense[static_cast<size_t>(cc)] += aVal[pa] * bVal[pb];
             }
         }
-        // Sort columns for canonical CSR
+        // Sort columns for canonical CSR output
         std::sort(used.begin(), used.end());
         int32_t base_idx = cRowPtr[static_cast<size_t>(i)];
         for (size_t idx = 0; idx < used.size(); ++idx) {
             int c = used[idx];
-            cColInd[static_cast<size_t>(base_idx + idx)] = c;
-            cVal[static_cast<size_t>(base_idx + idx)] = dense[static_cast<size_t>(c)];
-            dense[static_cast<size_t>(c)] = T(0);
+            cColInd[static_cast<size_t>(base_idx + static_cast<int32_t>(idx))] = c;
+            cVal   [static_cast<size_t>(base_idx + static_cast<int32_t>(idx))] = dense[static_cast<size_t>(c)];
+            dense [static_cast<size_t>(c)] = T(0);
+            inUse [static_cast<size_t>(c)] = false;
         }
         used.clear();
     }

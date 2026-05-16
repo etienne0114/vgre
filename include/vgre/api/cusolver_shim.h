@@ -135,6 +135,74 @@ cusolverStatus_t cusolverDnDsyevd(cusolverDnHandle_t handle, char jobz, char upl
                                   int n, double *A, int lda, double *W, double *work,
                                   int Lwork, int *devInfo);
 
+// ── cusolverSp — sparse solver handle and routines ─────────────────────────────
+// Implementation converts CSR to dense and delegates to LAPACK (getrf/getrs,
+// potrf, gelsd) — correct for small/medium systems without external sparse libs.
+// For production large-scale sparse systems, link against UMFPACK or SuperLU.
+
+struct cusolverSpContext;
+typedef struct cusolverSpContext *cusolverSpHandle_t;
+
+// CSR matrix descriptor (reuses cuSPARSE opaque type)
+struct cusparseMatDescr;
+typedef struct cusparseMatDescr *cusparseMatDescr_t;
+
+// Sparse Cholesky solve: A*x = b, A must be SPD, stored as CSR lower triangle.
+// Converts CSR→dense, runs dpotrf/dpotrs, writes solution back to x.
+cusolverStatus_t cusolverSpCreate(cusolverSpHandle_t *handle);
+cusolverStatus_t cusolverSpDestroy(cusolverSpHandle_t handle);
+cusolverStatus_t cusolverSpSetStream(cusolverSpHandle_t handle, void *stream);
+
+// Sparse triangular solve: A*x = b (LU-based, general CSR)
+cusolverStatus_t cusolverSpScsrlsvlu(cusolverSpHandle_t handle, int m, int nnz,
+                                      const cusparseMatDescr_t descrA,
+                                      const float *csrVal, const int *csrRowPtr,
+                                      const int *csrColInd, const float *b,
+                                      float tol, int reorder, float *x, int *singularity);
+cusolverStatus_t cusolverSpDcsrlsvlu(cusolverSpHandle_t handle, int m, int nnz,
+                                      const cusparseMatDescr_t descrA,
+                                      const double *csrVal, const int *csrRowPtr,
+                                      const int *csrColInd, const double *b,
+                                      double tol, int reorder, double *x, int *singularity);
+
+// Sparse Cholesky solve: A must be SPD
+cusolverStatus_t cusolverSpScsrlsvchol(cusolverSpHandle_t handle, int m, int nnz,
+                                        const cusparseMatDescr_t descrA,
+                                        const float *csrVal, const int *csrRowPtr,
+                                        const int *csrColInd, const float *b,
+                                        float tol, int reorder, float *x, int *singularity);
+cusolverStatus_t cusolverSpDcsrlsvchol(cusolverSpHandle_t handle, int m, int nnz,
+                                        const cusparseMatDescr_t descrA,
+                                        const double *csrVal, const int *csrRowPtr,
+                                        const int *csrColInd, const double *b,
+                                        double tol, int reorder, double *x, int *singularity);
+
+// Sparse least-squares QR: min_x ||A*x - b||_2
+cusolverStatus_t cusolverSpScsrlsqvqr(cusolverSpHandle_t handle, int m, int n, int nnz,
+                                       const cusparseMatDescr_t descrA,
+                                       const float *csrVal, const int *csrRowPtr,
+                                       const int *csrColInd, const float *b,
+                                       float tol, int *rankA, float *x,
+                                       int *p, float *min_norm);
+cusolverStatus_t cusolverSpDcsrlsqvqr(cusolverSpHandle_t handle, int m, int n, int nnz,
+                                       const cusparseMatDescr_t descrA,
+                                       const double *csrVal, const int *csrRowPtr,
+                                       const int *csrColInd, const double *b,
+                                       double tol, int *rankA, double *x,
+                                       int *p, double *min_norm);
+
+// Sparse eigenvalue (shift-invert Lanczos, SPD matrix)
+cusolverStatus_t cusolverSpScsreigvsi(cusolverSpHandle_t handle, int m, int nnz,
+                                       const cusparseMatDescr_t descrA,
+                                       const float *csrVal, const int *csrRowPtr,
+                                       const int *csrColInd, float mu0, const float *x0,
+                                       int maxIter, float tol, float *mu, float *x);
+cusolverStatus_t cusolverSpDcsreigvsi(cusolverSpHandle_t handle, int m, int nnz,
+                                       const cusparseMatDescr_t descrA,
+                                       const double *csrVal, const int *csrRowPtr,
+                                       const int *csrColInd, double mu0, const double *x0,
+                                       int maxIter, double tol, double *mu, double *x);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
