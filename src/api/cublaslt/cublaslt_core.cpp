@@ -12,8 +12,10 @@
 
 #include <cmath>
 #include <cstring>
+#include <list>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 // Forward declarations to cublas GEMM (same shared library).
 extern "C" {
@@ -68,17 +70,74 @@ uintptr_t g_nextLayout = 1;
 
 // ── Matmul descriptor ────────────────────────────────────────────────────────
 struct MatmulDesc {
-    cublasComputeType_t computeType = CUBLAS_COMPUTE_32F;
-    cublasLtDatatype_t scaleType = CUDA_R_32F;
-    cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_DEFAULT;
-    cublasLtPointerMode_t pointerMode = CUBLASLT_POINTER_MODE_HOST;
-    int transA = 0; // 0 = non-trans, 1 = trans
+    cublasComputeType_t   computeType  = CUBLAS_COMPUTE_32F;
+    cublasLtDatatype_t    scaleType    = CUDA_R_32F;
+    cublasLtEpilogue_t    epilogue     = CUBLASLT_EPILOGUE_DEFAULT;
+    cublasLtPointerMode_t pointerMode  = CUBLASLT_POINTER_MODE_HOST;
+    int transA = 0;
     int transB = 0;
-    const void *biasPtr = nullptr;
+    const void *biasPtr       = nullptr;
+    const void *aScalePtr     = nullptr;
+    const void *bScalePtr     = nullptr;
+    const void *cScalePtr     = nullptr;
+    const void *dScalePtr     = nullptr;
+    void       *amaxDPtr      = nullptr;
+    void       *epilogueAuxPtr = nullptr;
+    int64_t    epilogueAuxLd  = 0;
+    cublasLtDatatype_t biasDataType = CUDA_R_32F;
 };
 
 std::unordered_map<uintptr_t, MatmulDesc> g_matmulDescs;
 uintptr_t g_nextMatmulDesc = 1;
+
+// ── Algorithm result cache ────────────────────────────────────────────────────
+// Caches the single VGRE algorithm result for a given (M, N, K, dtype, epilogue)
+// key so repeated cublasLtMatmulAlgoGetHeuristic calls are O(1).
+// LRU eviction keeps the cache bounded at kAlgoCacheMax entries.
+
+static constexpr size_t kAlgoCacheMax = 128;
+
+struct AlgoCacheKey {
+    int m, n, k;
+    int dtypeA, dtypeB, dtypeC;
+    int epilogue, transA, transB;
+    bool operator==(const AlgoCacheKey &o) const {
+        return m==o.m && n==o.n && k==o.k &&
+               dtypeA==o.dtypeA && dtypeB==o.dtypeB && dtypeC==o.dtypeC &&
+               epilogue==o.epilogue && transA==o.transA && transB==o.transB;
+    }
+};
+struct AlgoCacheKeyHash {
+    size_t operator()(const AlgoCacheKey &k) const {
+        size_t h = std::hash<int>{}(k.m);
+        auto combine = [&](int v) { h ^= std::hash<int>{}(v) + 0x9e3779b9 + (h << 6) + (h >> 2); };
+        combine(k.n); combine(k.k); combine(k.dtypeA); combine(k.dtypeB);
+        combine(k.dtypeC); combine(k.epilogue); combine(k.transA); combine(k.transB);
+        return h;
+    }
+};
+
+struct AlgoCache {
+    std::list<AlgoCacheKey>                              lruList;
+    std::unordered_map<AlgoCacheKey, std::list<AlgoCacheKey>::iterator, AlgoCacheKeyHash> map;
+    mutable std::mutex mtx;
+
+    bool get(const AlgoCacheKey &k) const {
+        std::lock_guard<std::mutex> lk(mtx);
+        return map.count(k) != 0;
+    }
+    void put(const AlgoCacheKey &k) {
+        std::lock_guard<std::mutex> lk(mtx);
+        auto it = map.find(k);
+        if (it != map.end()) { lruList.splice(lruList.begin(), lruList, it->second); return; }
+        if (lruList.size() >= kAlgoCacheMax) {
+            map.erase(lruList.back());
+            lruList.pop_back();
+        }
+        lruList.push_front(k);
+        map[k] = lruList.begin();
+    }
+} g_algoCache;
 
 #include "vgre/common/openmp_helper.h"
 
@@ -90,6 +149,16 @@ void applyRelu(T *data, size_t count) {
     #pragma omp parallel for if (count > 1024)
     #endif
     for (size_t i = 0; i < count; ++i) if (data[i] < T(0)) data[i] = T(0);
+}
+
+// DRELU: element-wise ReLU gradient — pass through where input > 0, else zero.
+// The matmul output is the pre-activation; we write the mask in-place.
+template<typename T>
+void applyDRelu(T *data, size_t count) {
+    #ifdef _OPENMP
+    #pragma omp parallel for if (count > 1024)
+    #endif
+    for (size_t i = 0; i < count; ++i) data[i] = (data[i] > T(0)) ? T(1) : T(0);
 }
 
 template<typename T>
@@ -104,16 +173,44 @@ void applyGelu(T *data, size_t count) {
     }
 }
 
+// DGELU: element-wise GELU gradient = 0.5*(1 + tanh(c*x)) + 0.5*x*sech²(c*x)*c*(1+3*k*x²)
+template<typename T>
+void applyDGelu(T *data, size_t count) {
+    const T c = static_cast<T>(std::sqrt(2.0 / M_PI));
+    const T k = static_cast<T>(0.044715);
+    #ifdef _OPENMP
+    #pragma omp parallel for if (count > 1024)
+    #endif
+    for (size_t i = 0; i < count; ++i) {
+        T x  = data[i];
+        T cx = c * (x + k * x * x * x);
+        T th = std::tanh(cx);
+        T dcx = c * (T(1) + T(3) * k * x * x);
+        data[i] = T(0.5) * (T(1) + th) + T(0.5) * x * (T(1) - th * th) * dcx;
+    }
+}
+
 template<typename T>
 void applyBias(T *data, size_t rows, size_t cols, const T *bias) {
     #ifdef _OPENMP
     #pragma omp parallel for collapse(2) if (rows * cols > 1024)
     #endif
-    for (size_t r = 0; r < rows; ++r) {
-        for (size_t c = 0; c < cols; ++c) {
+    for (size_t r = 0; r < rows; ++r)
+        for (size_t c = 0; c < cols; ++c)
             data[r * cols + c] += bias[c];
-        }
-    }
+}
+
+// BGRADA/BGRADB: column-sum of the gradient matrix → bias gradient vector.
+// Writes result into epilogueAuxPtr (must be pre-allocated to `cols` elements).
+template<typename T>
+void applyBiasGrad(const T *data, size_t rows, size_t cols, T *biasGrad) {
+    std::fill(biasGrad, biasGrad + cols, T(0));
+    #ifdef _OPENMP
+    #pragma omp parallel for if (rows > 64)
+    #endif
+    for (size_t r = 0; r < rows; ++r)
+        for (size_t c = 0; c < cols; ++c)
+            biasGrad[c] += data[r * cols + c];
 }
 
 // ── cublas enum mapping ──────────────────────────────────────────────────────
@@ -270,6 +367,24 @@ cublasStatus_t cublasLtMatmulDescSetAttribute(cublasLtMatmulDesc_t matmulDesc,
     case CUBLASLT_MATMUL_DESC_SCALE_TYPE:
         if (sizeInBytes >= sizeof(cublasLtDatatype_t))
             d.scaleType = *static_cast<const cublasLtDatatype_t*>(buf);
+        break;
+    case CUBLASLT_MATMUL_DESC_A_SCALE_POINTER:
+        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.aScalePtr, buf, sizeof(void*)); break;
+    case CUBLASLT_MATMUL_DESC_B_SCALE_POINTER:
+        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.bScalePtr, buf, sizeof(void*)); break;
+    case CUBLASLT_MATMUL_DESC_C_SCALE_POINTER:
+        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.cScalePtr, buf, sizeof(void*)); break;
+    case CUBLASLT_MATMUL_DESC_D_SCALE_POINTER:
+        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.dScalePtr, buf, sizeof(void*)); break;
+    case CUBLASLT_MATMUL_DESC_AMAX_D:
+        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.amaxDPtr, buf, sizeof(void*)); break;
+    case CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER:
+        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.epilogueAuxPtr, buf, sizeof(void*)); break;
+    case CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD:
+        if (sizeInBytes >= sizeof(int64_t)) d.epilogueAuxLd = *static_cast<const int64_t*>(buf); break;
+    case CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE:
+        if (sizeInBytes >= sizeof(cublasLtDatatype_t))
+            d.biasDataType = *static_cast<const cublasLtDatatype_t*>(buf);
         break;
     default: break;
     }
@@ -578,61 +693,60 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
     void *target = (D && D != C) ? D : C;
     size_t count = lc.rows * lc.cols;
 
+    auto applyEpilogue = [&](auto *fp, auto dummy) {
+        using T = std::remove_pointer_t<decltype(fp)>;
+        const T *bias = d.biasPtr ? static_cast<const T*>(d.biasPtr) : nullptr;
+        switch (d.epilogue) {
+        case CUBLASLT_EPILOGUE_BIAS:
+            if (bias) applyBias(fp, lc.rows, lc.cols, bias);
+            break;
+        case CUBLASLT_EPILOGUE_RELU:
+        case CUBLASLT_EPILOGUE_RELU_AUX:
+            applyRelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_RELU_BIAS:
+            if (bias) applyBias(fp, lc.rows, lc.cols, bias);
+            applyRelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_GELU:
+        case CUBLASLT_EPILOGUE_GELU_AUX:
+            applyGelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_GELU_BIAS:
+            if (bias) applyBias(fp, lc.rows, lc.cols, bias);
+            applyGelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_DRELU:
+            applyDRelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_DRELU_BGRAD:
+            // Bias gradient: column sum, then apply DRELU mask
+            if (d.epilogueAuxPtr) applyBiasGrad(fp, lc.rows, lc.cols, static_cast<T*>(d.epilogueAuxPtr));
+            applyDRelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_DGELU:
+            applyDGelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_DGELU_BGRAD:
+            if (d.epilogueAuxPtr) applyBiasGrad(fp, lc.rows, lc.cols, static_cast<T*>(d.epilogueAuxPtr));
+            applyDGelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_BGRADA:
+        case CUBLASLT_EPILOGUE_BGRADB:
+            // Pure bias gradient: column sum of output
+            if (d.epilogueAuxPtr) applyBiasGrad(fp, lc.rows, lc.cols, static_cast<T*>(d.epilogueAuxPtr));
+            break;
+        case CUBLASLT_EPILOGUE_DEFAULT:
+        default:
+            break;
+        }
+        (void)dummy;
+    };
+
     if (lc.type == CUDA_R_32F) {
-        float *fp = static_cast<float*>(target);
-        switch (d.epilogue) {
-        case CUBLASLT_EPILOGUE_RELU:
-        case CUBLASLT_EPILOGUE_RELU_AUX:
-        case CUBLASLT_EPILOGUE_RELU_BIAS:
-            applyRelu(fp, count);
-            break;
-        case CUBLASLT_EPILOGUE_GELU:
-        case CUBLASLT_EPILOGUE_GELU_AUX:
-        case CUBLASLT_EPILOGUE_GELU_BIAS:
-            applyGelu(fp, count);
-            break;
-        case CUBLASLT_EPILOGUE_BIAS:
-            if (d.biasPtr) applyBias(fp, lc.rows, lc.cols, static_cast<const float*>(d.biasPtr));
-            break;
-        case CUBLASLT_EPILOGUE_DEFAULT:
-        default:
-            break;
-        }
-        // Combined ReLU+Bias and GELU+Bias
-        if (d.epilogue == CUBLASLT_EPILOGUE_RELU_BIAS) {
-            if (d.biasPtr) applyBias(fp, lc.rows, lc.cols, static_cast<const float*>(d.biasPtr));
-            applyRelu(fp, count);
-        } else if (d.epilogue == CUBLASLT_EPILOGUE_GELU_BIAS) {
-            if (d.biasPtr) applyBias(fp, lc.rows, lc.cols, static_cast<const float*>(d.biasPtr));
-            applyGelu(fp, count);
-        }
+        applyEpilogue(static_cast<float*>(target), 0.0f);
     } else if (lc.type == CUDA_R_64F) {
-        double *dp = static_cast<double*>(target);
-        switch (d.epilogue) {
-        case CUBLASLT_EPILOGUE_RELU:
-        case CUBLASLT_EPILOGUE_RELU_AUX:
-        case CUBLASLT_EPILOGUE_RELU_BIAS:
-            applyRelu(dp, count);
-            break;
-        case CUBLASLT_EPILOGUE_GELU:
-        case CUBLASLT_EPILOGUE_GELU_AUX:
-        case CUBLASLT_EPILOGUE_GELU_BIAS:
-            applyGelu(dp, count);
-            break;
-        case CUBLASLT_EPILOGUE_BIAS:
-            if (d.biasPtr) applyBias(dp, lc.rows, lc.cols, static_cast<const double*>(d.biasPtr));
-            break;
-        case CUBLASLT_EPILOGUE_DEFAULT:
-        default:
-            break;
-        }
-        if (d.epilogue == CUBLASLT_EPILOGUE_RELU_BIAS) {
-            if (d.biasPtr) applyBias(dp, lc.rows, lc.cols, static_cast<const double*>(d.biasPtr));
-            applyRelu(dp, count);
-        } else if (d.epilogue == CUBLASLT_EPILOGUE_GELU_BIAS) {
-            if (d.biasPtr) applyBias(dp, lc.rows, lc.cols, static_cast<const double*>(d.biasPtr));
-            applyGelu(dp, count);
-        }
+        applyEpilogue(static_cast<double*>(target), 0.0);
     }
 
     return CUBLAS_STATUS_SUCCESS;
@@ -699,6 +813,52 @@ cublasStatus_t cublasLtMatmulPreferenceGetAttribute(cublasLtMatmulPreference_t p
 // ── MatmulAlgoGetHeuristics ───────────────────────────────────────────────────
 // Returns a list of algorithm candidates for the given problem/preference.
 // In VGRE, there is exactly one "algorithm": the existing cublasLtMatmul path.
+
+cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t /*handle*/,
+                                               cublasLtMatmulDesc_t matmulDesc,
+                                               cublasLtMatrixLayout_t Adesc,
+                                               cublasLtMatrixLayout_t Bdesc,
+                                               cublasLtMatrixLayout_t Cdesc,
+                                               cublasLtMatrixLayout_t /*Ddesc*/,
+                                               cublasLtMatmulPreference_t /*pref*/,
+                                               int requestedAlgoCount,
+                                               cublasLtMatmulHeuristicResult_t *heuristicResultsArray,
+                                               int *returnAlgoCount) {
+    if (!heuristicResultsArray || !returnAlgoCount || requestedAlgoCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+    // Build cache key from problem dimensions + types
+    AlgoCacheKey key{};
+    {
+        std::lock_guard<std::mutex> lk(g_ltMutex);
+        auto dIt = g_matmulDescs.find(reinterpret_cast<uintptr_t>(matmulDesc));
+        auto aIt = g_layouts.find(reinterpret_cast<uintptr_t>(Adesc));
+        auto bIt = g_layouts.find(reinterpret_cast<uintptr_t>(Bdesc));
+        auto cIt = g_layouts.find(reinterpret_cast<uintptr_t>(Cdesc));
+        if (dIt != g_matmulDescs.end() && aIt != g_layouts.end() &&
+            bIt != g_layouts.end() && cIt != g_layouts.end()) {
+            const MatmulDesc &d = dIt->second;
+            key.m = static_cast<int>(cIt->second.rows);
+            key.n = static_cast<int>(cIt->second.cols);
+            key.k = static_cast<int>(d.transA ? aIt->second.rows : aIt->second.cols);
+            key.dtypeA = static_cast<int>(aIt->second.type);
+            key.dtypeB = static_cast<int>(bIt->second.type);
+            key.dtypeC = static_cast<int>(cIt->second.type);
+            key.epilogue = static_cast<int>(d.epilogue);
+            key.transA   = d.transA;
+            key.transB   = d.transB;
+        }
+    }
+    // Populate cache (always algo=0 for VGRE, but we still cache to avoid re-locking)
+    g_algoCache.put(key);
+
+    heuristicResultsArray[0].algo          = 0;
+    heuristicResultsArray[0].workspaceSize = 0;
+    heuristicResultsArray[0].state         = CUBLAS_STATUS_SUCCESS;
+    heuristicResultsArray[0].wavesCount    = 1.0f;
+    *returnAlgoCount = 1;
+    return CUBLAS_STATUS_SUCCESS;
+}
 
 cublasStatus_t cublasLtMatmulAlgoGetHeuristics(cublasLtHandle_t /*handle*/,
                                                cublasLtMatmulDesc_t /*matmulDesc*/,

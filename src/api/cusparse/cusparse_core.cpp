@@ -1,281 +1,50 @@
-// cuSPARSE emulation shim — reference CSR SpMV and SpMM for CPU.
+// cuSPARSE emulation shim — CSR/COO SpMV and SpMM for CPU.
 //
-// This is a functional reference intended for correctness testing.
-// For production performance, link against MKL, cuSPARSE, or vendor libraries.
+// For production performance, link against MKL, cuSPARSE, or vendor BLAS.
+// Extended APIs (format conversions, SpSV) live in cusparse_format.cpp /
+// cusparse_triangular.cpp, sharing state via cusparse_state.h.
 
-#include "vgre/api/cusparse_shim.h"
-#include "vgre/common/logger.h"
-#include "vgre/compiler/cpu_cuda_fp16.h"
+#include "cusparse_state.h"
 
-#include "vgre/common/openmp_helper.h"
-
-#include <cstdint>
-#include <cstring>
-#include <mutex>
-#include <unordered_map>
-#include <vector>
-
-// ── Minimal complex types for cuSPARSE ───────────────────────────────────────
+// ── Minimal complex types ─────────────────────────────────────────────────────
 struct cuComplex { float x, y; };
 struct cuDoubleComplex { double x, y; };
+static inline cuComplex operator+(cuComplex a, cuComplex b) { return {a.x+b.x, a.y+b.y}; }
+static inline cuComplex operator*(cuComplex a, cuComplex b) { return {a.x*b.x-a.y*b.y, a.x*b.y+a.y*b.x}; }
+static inline cuComplex operator*(cuComplex a, float s) { return {a.x*s, a.y*s}; }
+static inline cuComplex& operator+=(cuComplex& a, cuComplex b) { a.x+=b.x; a.y+=b.y; return a; }
+static inline cuComplex& operator*=(cuComplex& a, cuComplex b) { float rx=a.x*b.x-a.y*b.y; a.y=a.x*b.y+a.y*b.x; a.x=rx; return a; }
+static inline bool operator!=(cuComplex a, cuComplex b) { return a.x!=b.x||a.y!=b.y; }
+static inline cuDoubleComplex operator+(cuDoubleComplex a, cuDoubleComplex b) { return {a.x+b.x, a.y+b.y}; }
+static inline cuDoubleComplex operator*(cuDoubleComplex a, cuDoubleComplex b) { return {a.x*b.x-a.y*b.y, a.x*b.y+a.y*b.x}; }
+static inline cuDoubleComplex operator*(cuDoubleComplex a, double s) { return {a.x*s, a.y*s}; }
+static inline cuDoubleComplex& operator+=(cuDoubleComplex& a, cuDoubleComplex b) { a.x+=b.x; a.y+=b.y; return a; }
+static inline cuDoubleComplex& operator*=(cuDoubleComplex& a, cuDoubleComplex b) { double rx=a.x*b.x-a.y*b.y; a.y=a.x*b.y+a.y*b.x; a.x=rx; return a; }
+static inline bool operator!=(cuDoubleComplex a, cuDoubleComplex b) { return a.x!=b.x||a.y!=b.y; }
 
-static inline cuComplex make_cuComplex(float x, float y) { return {x, y}; }
-static inline cuDoubleComplex make_cuDoubleComplex(double x, double y) { return {x, y}; }
+// ── Define shared globals (declared extern in cusparse_state.h) ───────────────
+namespace vgre_sp {
+    std::mutex g_handleMutex;
+    std::unordered_map<uintptr_t, bool>    g_handles;
+    uintptr_t g_nextHandle = 1;
 
-static inline cuComplex operator+(cuComplex a, cuComplex b) { return {a.x + b.x, a.y + b.y}; }
-static inline cuComplex operator*(cuComplex a, cuComplex b) { return {a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x}; }
-static inline cuComplex operator*(cuComplex a, float s) { return {a.x * s, a.y * s}; }
-static inline cuComplex& operator+=(cuComplex& a, cuComplex b) { a.x += b.x; a.y += b.y; return a; }
-static inline cuComplex& operator*=(cuComplex& a, cuComplex b) { float rx = a.x * b.x - a.y * b.y; a.y = a.x * b.y + a.y * b.x; a.x = rx; return a; }
-static inline bool operator!=(cuComplex a, cuComplex b) { return a.x != b.x || a.y != b.y; }
+    std::mutex g_descrMutex;
+    std::unordered_map<uintptr_t, CsrMat>  g_csrMats;
+    std::unordered_map<uintptr_t, DnVec>   g_dnVecs;
+    std::unordered_map<uintptr_t, DnMat>   g_dnMats;
+    std::unordered_map<uintptr_t, std::vector<int32_t>> g_cooRowOffsets;
+    uintptr_t g_nextDescr = 1;
 
-static inline cuDoubleComplex operator+(cuDoubleComplex a, cuDoubleComplex b) { return {a.x + b.x, a.y + b.y}; }
-static inline cuDoubleComplex operator*(cuDoubleComplex a, cuDoubleComplex b) { return {a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x}; }
-static inline cuDoubleComplex operator*(cuDoubleComplex a, double s) { return {a.x * s, a.y * s}; }
-static inline cuDoubleComplex& operator+=(cuDoubleComplex& a, cuDoubleComplex b) { a.x += b.x; a.y += b.y; return a; }
-static inline cuDoubleComplex& operator*=(cuDoubleComplex& a, cuDoubleComplex b) { double rx = a.x * b.x - a.y * b.y; a.y = a.x * b.y + a.y * b.x; a.x = rx; return a; }
-static inline bool operator!=(cuDoubleComplex a, cuDoubleComplex b) { return a.x != b.x || a.y != b.y; }
+    std::unordered_map<uintptr_t, SpSVState> g_spsvDescrs;
+    uintptr_t g_nextSpSV = 1;
+}
+using namespace vgre_sp;
 
+// ── BF16 conversion helpers ───────────────────────────────────────────────────
 namespace {
-
-// Global handle registry
-std::mutex g_handleMutex;
-std::unordered_map<uintptr_t, bool> g_handles;
-uintptr_t g_nextHandle = 1;
-
-uintptr_t allocHandle() {
-    std::lock_guard<std::mutex> lk(g_handleMutex);
-    return g_nextHandle++;
-}
-
-bool validHandle(uintptr_t h) {
-    std::lock_guard<std::mutex> lk(g_handleMutex);
-    return g_handles.count(h) != 0;
-}
-
-void freeHandle(uintptr_t h) {
-    std::lock_guard<std::mutex> lk(g_handleMutex);
-    g_handles.erase(h);
-}
-
-// ── CSR matrix descriptor ────────────────────────────────────────────────────
-struct CsrMat {
-    int64_t rows = 0, cols = 0, nnz = 0;
-    void *rowOffsets = nullptr;
-    void *colInd = nullptr;
-    void *values = nullptr;
-    cusparseIndexType_t rowOffsetType = CUSPARSE_INDEX_32I;
-    cusparseIndexType_t colIndType = CUSPARSE_INDEX_32I;
-    cusparseIndexBase_t idxBase = CUSPARSE_INDEX_BASE_ZERO;
-    cudaDataType_t valueType = CUDA_R_32F;
-};
-
-// ── Dense vector descriptor ──────────────────────────────────────────────────
-struct DnVec {
-    int64_t size = 0;
-    void *values = nullptr;
-    cudaDataType_t valueType = CUDA_R_32F;
-};
-
-// ── Dense matrix descriptor ─────────────────────────────────────────────────
-struct DnMat {
-    int64_t rows = 0, cols = 0, ld = 0;
-    void *values = nullptr;
-    cudaDataType_t valueType = CUDA_R_32F;
-    cusparseOrder_t order = CUSPARSE_ORDER_COL;
-};
-
-std::mutex g_descrMutex;
-std::unordered_map<uintptr_t, CsrMat> g_csrMats;
-std::unordered_map<uintptr_t, DnVec> g_dnVecs;
-std::unordered_map<uintptr_t, DnMat> g_dnMats;
-std::unordered_map<uintptr_t, std::vector<int32_t>> g_cooRowOffsets; // COO→CSR row-offset storage
-uintptr_t g_nextDescr = 1;
-
-inline int64_t getIdx(const void *arr, cusparseIndexType_t t, int64_t i) {
-    if (t == CUSPARSE_INDEX_64I) {
-        return static_cast<const int64_t*>(arr)[i];
-    }
-    return static_cast<const int32_t*>(arr)[i];
-}
-
-// ── CSR SpMV: y = alpha * A * x + beta * y ─────────────────────────────────
-template<typename T>
-void csr_spmv(cusparseOperation_t op, const T *alpha, const CsrMat &A,
-              const T *x, const T *beta, T *y) {
-    bool trans = (op != CUSPARSE_OPERATION_NON_TRANSPOSE);
-    int64_t m = trans ? A.cols : A.rows;
-    int64_t n = trans ? A.rows : A.cols;
-
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(guided) if (m > 256)
-    #endif
-    for (int64_t i = 0; i < m; ++i) {
-        T sum = T{};
-        int64_t rowStart = getIdx(A.rowOffsets, A.rowOffsetType, i) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
-        int64_t rowEnd   = getIdx(A.rowOffsets, A.rowOffsetType, i + 1) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
-        for (int64_t idx = rowStart; idx < rowEnd; ++idx) {
-            int64_t col = getIdx(A.colInd, A.colIndType, idx) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
-            T val = static_cast<const T*>(A.values)[idx];
-            if (trans) {
-                sum += val * x[i]; // A^T * x  →  row i of A^T is col i of A
-            } else {
-                sum += val * x[col];
-            }
-        }
-        y[i] = (*alpha) * sum + (*beta) * y[i];
-    }
-}
-
-// ── CSR SpMM: C = alpha * A * B + beta * C ─────────────────────────────────
-// A is sparse (m × k), B is dense (k × n), C is dense (m × n)
-template<typename T>
-void csr_spmm(cusparseOperation_t opA, cusparseOperation_t opB,
-              const T *alpha, const CsrMat &A, const DnMat &B,
-              const T *beta, DnMat &C) {
-    bool transA = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
-    bool transB = (opB != CUSPARSE_OPERATION_NON_TRANSPOSE);
-
-    int64_t m = transA ? A.cols : A.rows;
-    int64_t k = transA ? A.rows : A.cols;
-    int64_t n = transB ? B.rows : B.cols;
-
-    // Zero C
-    #ifdef _OPENMP
-    #pragma omp parallel for if (m * n > 1024)
-    #endif
-    for (int64_t i = 0; i < m * n; ++i) static_cast<T*>(C.values)[i] = T{};
-
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(guided) if (m > 64)
-    #endif
-    for (int64_t i = 0; i < m; ++i) {
-        int64_t rowStart = getIdx(A.rowOffsets, A.rowOffsetType, i) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
-        int64_t rowEnd   = getIdx(A.rowOffsets, A.rowOffsetType, i + 1) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
-        for (int64_t idx = rowStart; idx < rowEnd; ++idx) {
-            int64_t col = getIdx(A.colInd, A.colIndType, idx) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
-            T aVal = static_cast<const T*>(A.values)[idx];
-            for (int64_t j = 0; j < n; ++j) {
-                T bVal = transB ? static_cast<const T*>(B.values)[j * B.ld + col]
-                                : static_cast<const T*>(B.values)[col * B.ld + j];
-                static_cast<T*>(C.values)[i * C.ld + j] += (*alpha) * aVal * bVal;
-            }
-        }
-    }
-
-    // Add beta * C_old
-    T zero = T{};
-    if (*beta != zero) {
-        for (int64_t i = 0; i < m * n; ++i)
-            static_cast<T*>(C.values)[i] += (*beta) * static_cast<T*>(C.values)[i];
-    }
-}
-
-} // namespace
-
-extern "C" {
-
-// ── Handle lifecycle ─────────────────────────────────────────────────────────
-
-cusparseStatus_t cusparseCreate(cusparseHandle_t *handle) {
-    if (!handle) return CUSPARSE_STATUS_INVALID_VALUE;
-    uintptr_t h = allocHandle();
-    {
-        std::lock_guard<std::mutex> lk(g_handleMutex);
-        g_handles[h] = true;
-    }
-    *handle = reinterpret_cast<cusparseHandle_t>(h);
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-cusparseStatus_t cusparseDestroy(cusparseHandle_t handle) {
-    if (!handle) return CUSPARSE_STATUS_INVALID_VALUE;
-    freeHandle(reinterpret_cast<uintptr_t>(handle));
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-cusparseStatus_t cusparseGetVersion(cusparseHandle_t /*handle*/, int *version) {
-    if (!version) return CUSPARSE_STATUS_INVALID_VALUE;
-    *version = 11801; // Report cuSPARSE 11.8.1
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-// ── CSR descriptor ───────────────────────────────────────────────────────────
-
-cusparseStatus_t cusparseCreateCsr(cusparseSpMatDescr_t *spMatDescr, int64_t rows,
-                                   int64_t cols, int64_t nnz, void *csrRowOffsets,
-                                   void *csrColInd, void *csrValues,
-                                   cusparseIndexType_t csrRowOffsetsType,
-                                   cusparseIndexType_t csrColIndType,
-                                   cusparseIndexBase_t idxBase, cudaDataType_t valueType) {
-    if (!spMatDescr || rows <= 0 || cols <= 0 || nnz < 0) return CUSPARSE_STATUS_INVALID_VALUE;
-    std::lock_guard<std::mutex> lk(g_descrMutex);
-    uintptr_t id = g_nextDescr++;
-    CsrMat &m = g_csrMats[id];
-    m.rows = rows; m.cols = cols; m.nnz = nnz;
-    m.rowOffsets = csrRowOffsets;
-    m.colInd = csrColInd;
-    m.values = csrValues;
-    m.rowOffsetType = csrRowOffsetsType;
-    m.colIndType = csrColIndType;
-    m.idxBase = idxBase;
-    m.valueType = valueType;
-    *spMatDescr = reinterpret_cast<cusparseSpMatDescr_t>(id);
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-cusparseStatus_t cusparseDestroySpMat(cusparseSpMatDescr_t spMatDescr) {
-    std::lock_guard<std::mutex> lk(g_descrMutex);
-    uintptr_t id = reinterpret_cast<uintptr_t>(spMatDescr);
-    g_csrMats.erase(id);
-    g_cooRowOffsets.erase(id); // clean up COO-converted row-offsets if any
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-// ── Dense vector descriptor ──────────────────────────────────────────────────
-
-cusparseStatus_t cusparseCreateDnVec(cusparseDnVecDescr_t *dnVecDescr, int64_t size,
-                                     void *values, cudaDataType_t valueType) {
-    if (!dnVecDescr || size <= 0) return CUSPARSE_STATUS_INVALID_VALUE;
-    std::lock_guard<std::mutex> lk(g_descrMutex);
-    uintptr_t id = g_nextDescr++;
-    DnVec &v = g_dnVecs[id];
-    v.size = size; v.values = values; v.valueType = valueType;
-    *dnVecDescr = reinterpret_cast<cusparseDnVecDescr_t>(id);
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-cusparseStatus_t cusparseDestroyDnVec(cusparseDnVecDescr_t dnVecDescr) {
-    std::lock_guard<std::mutex> lk(g_descrMutex);
-    g_dnVecs.erase(reinterpret_cast<uintptr_t>(dnVecDescr));
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-// ── Dense matrix descriptor ─────────────────────────────────────────────────
-
-cusparseStatus_t cusparseCreateDnMat(cusparseDnMatDescr_t *dnMatDescr, int64_t rows,
-                                     int64_t cols, int64_t ld, void *values,
-                                     cudaDataType_t valueType, cusparseOrder_t order) {
-    if (!dnMatDescr || rows <= 0 || cols <= 0 || ld < rows) return CUSPARSE_STATUS_INVALID_VALUE;
-    std::lock_guard<std::mutex> lk(g_descrMutex);
-    uintptr_t id = g_nextDescr++;
-    DnMat &m = g_dnMats[id];
-    m.rows = rows; m.cols = cols; m.ld = ld;
-    m.values = values; m.valueType = valueType; m.order = order;
-    *dnMatDescr = reinterpret_cast<cusparseDnMatDescr_t>(id);
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-cusparseStatus_t cusparseDestroyDnMat(cusparseDnMatDescr_t dnMatDescr) {
-    std::lock_guard<std::mutex> lk(g_descrMutex);
-    g_dnMats.erase(reinterpret_cast<uintptr_t>(dnMatDescr));
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-// ── BF16 conversion helpers ──────────────────────────────────────────────────
 static inline float bf162f(uint16_t h) {
     uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
-        (static_cast<uint32_t>((h >> 7) & 0xff) + (127 - 127)) << 23 |
+        ((static_cast<uint32_t>((h >> 7) & 0xff) + (127 - 127)) << 23) |
         (static_cast<uint32_t>(h & 0x7f) << 16);
     float f; std::memcpy(&f, &bits, 4); return f;
 }
@@ -288,9 +57,172 @@ static inline uint16_t f2bf(float f) {
     return sign | (exp << 7) | ((bits >> 16) & 0x7f);
 }
 
-// ── SpMV ─────────────────────────────────────────────────────────────────────
+// ── CSR SpMV: y = alpha * A * x + beta * y ───────────────────────────────────
+template<typename T>
+void csr_spmv(cusparseOperation_t op, const T *alpha, const CsrMat &A,
+              const T *x, const T *beta, T *y) {
+    bool trans = (op != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    int64_t m = trans ? A.cols : A.rows;
 
-cusparseStatus_t cusparseSpMV(cusparseHandle_t /*handle*/, cusparseOperation_t opA,
+    #ifdef _OPENMP
+    #pragma omp parallel for schedule(guided) if (m > 256)
+    #endif
+    for (int64_t i = 0; i < m; ++i) {
+        T sum = T{};
+        int64_t rowStart = getIdx(A.rowOffsets, A.rowOffsetType, i) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
+        int64_t rowEnd   = getIdx(A.rowOffsets, A.rowOffsetType, i+1) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
+        for (int64_t idx = rowStart; idx < rowEnd; ++idx) {
+            int64_t col = getIdx(A.colInd, A.colIndType, idx) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
+            T val = static_cast<const T*>(A.values)[idx];
+            sum += trans ? val * x[i] : val * x[col];
+        }
+        y[i] = (*alpha) * sum + (*beta) * y[i];
+    }
+}
+
+// ── CSR SpMM: C = alpha * A * B + beta * C ───────────────────────────────────
+template<typename T>
+void csr_spmm(cusparseOperation_t opA, cusparseOperation_t opB,
+              const T *alpha, const CsrMat &A, const DnMat &B,
+              const T *beta, DnMat &C) {
+    bool transA = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    bool transB = (opB != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    int64_t m = transA ? A.cols : A.rows;
+    int64_t n = transB ? B.rows : B.cols;
+
+    #ifdef _OPENMP
+    #pragma omp parallel for if (m * n > 1024)
+    #endif
+    for (int64_t i = 0; i < m * n; ++i) static_cast<T*>(C.values)[i] = T{};
+
+    #ifdef _OPENMP
+    #pragma omp parallel for schedule(guided) if (m > 64)
+    #endif
+    for (int64_t i = 0; i < m; ++i) {
+        int64_t rowStart = getIdx(A.rowOffsets, A.rowOffsetType, i) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
+        int64_t rowEnd   = getIdx(A.rowOffsets, A.rowOffsetType, i+1) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
+        for (int64_t idx = rowStart; idx < rowEnd; ++idx) {
+            int64_t col = getIdx(A.colInd, A.colIndType, idx) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
+            T aVal = static_cast<const T*>(A.values)[idx];
+            for (int64_t j = 0; j < n; ++j) {
+                T bVal = transB ? static_cast<const T*>(B.values)[j * B.ld + col]
+                                : static_cast<const T*>(B.values)[col * B.ld + j];
+                static_cast<T*>(C.values)[i * C.ld + j] += (*alpha) * aVal * bVal;
+            }
+        }
+    }
+
+    T zero = T{};
+    if (*beta != zero)
+        for (int64_t i = 0; i < m * n; ++i)
+            static_cast<T*>(C.values)[i] += (*beta) * static_cast<T*>(C.values)[i];
+}
+} // anonymous namespace
+
+extern "C" {
+
+// ── Handle lifecycle ──────────────────────────────────────────────────────────
+cusparseStatus_t cusparseCreate(cusparseHandle_t *handle) {
+    if (!handle) return CUSPARSE_STATUS_INVALID_VALUE;
+    uintptr_t h = allocHandle();
+    { std::lock_guard<std::mutex> lk(g_handleMutex); g_handles[h] = true; }
+    *handle = reinterpret_cast<cusparseHandle_t>(h);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+cusparseStatus_t cusparseDestroy(cusparseHandle_t handle) {
+    if (!handle) return CUSPARSE_STATUS_INVALID_VALUE;
+    freeHandle(reinterpret_cast<uintptr_t>(handle));
+    return CUSPARSE_STATUS_SUCCESS;
+}
+cusparseStatus_t cusparseGetVersion(cusparseHandle_t /*h*/, int *version) {
+    if (!version) return CUSPARSE_STATUS_INVALID_VALUE;
+    *version = 11801;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── CSR descriptor ────────────────────────────────────────────────────────────
+cusparseStatus_t cusparseCreateCsr(cusparseSpMatDescr_t *spMatDescr, int64_t rows,
+                                   int64_t cols, int64_t nnz, void *csrRowOffsets,
+                                   void *csrColInd, void *csrValues,
+                                   cusparseIndexType_t rowOffType, cusparseIndexType_t colIndType,
+                                   cusparseIndexBase_t idxBase, cudaDataType_t valueType) {
+    if (!spMatDescr || rows <= 0 || cols <= 0 || nnz < 0) return CUSPARSE_STATUS_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    uintptr_t id = g_nextDescr++;
+    CsrMat &m = g_csrMats[id];
+    m.rows = rows; m.cols = cols; m.nnz = nnz;
+    m.rowOffsets = csrRowOffsets; m.colInd = csrColInd; m.values = csrValues;
+    m.rowOffsetType = rowOffType; m.colIndType = colIndType;
+    m.idxBase = idxBase; m.valueType = valueType;
+    *spMatDescr = reinterpret_cast<cusparseSpMatDescr_t>(id);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+cusparseStatus_t cusparseDestroySpMat(cusparseSpMatDescr_t spMatDescr) {
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    uintptr_t id = reinterpret_cast<uintptr_t>(spMatDescr);
+    g_csrMats.erase(id);
+    g_cooRowOffsets.erase(id);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── Dense vector descriptor ───────────────────────────────────────────────────
+cusparseStatus_t cusparseCreateDnVec(cusparseDnVecDescr_t *dnVecDescr, int64_t size,
+                                     void *values, cudaDataType_t valueType) {
+    if (!dnVecDescr || size <= 0) return CUSPARSE_STATUS_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    uintptr_t id = g_nextDescr++;
+    DnVec &v = g_dnVecs[id];
+    v.size = size; v.values = values; v.valueType = valueType;
+    *dnVecDescr = reinterpret_cast<cusparseDnVecDescr_t>(id);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+cusparseStatus_t cusparseDestroyDnVec(cusparseDnVecDescr_t dnVecDescr) {
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    g_dnVecs.erase(reinterpret_cast<uintptr_t>(dnVecDescr));
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── Dense matrix descriptor ────────────────────────────────────────────────────
+cusparseStatus_t cusparseCreateDnMat(cusparseDnMatDescr_t *dnMatDescr, int64_t rows,
+                                     int64_t cols, int64_t ld, void *values,
+                                     cudaDataType_t valueType, cusparseOrder_t order) {
+    if (!dnMatDescr || rows <= 0 || cols <= 0 || ld < rows) return CUSPARSE_STATUS_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    uintptr_t id = g_nextDescr++;
+    DnMat &m = g_dnMats[id];
+    m.rows = rows; m.cols = cols; m.ld = ld;
+    m.values = values; m.valueType = valueType; m.order = order;
+    *dnMatDescr = reinterpret_cast<cusparseDnMatDescr_t>(id);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+cusparseStatus_t cusparseDestroyDnMat(cusparseDnMatDescr_t dnMatDescr) {
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    g_dnMats.erase(reinterpret_cast<uintptr_t>(dnMatDescr));
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── SpMV buffer size ──────────────────────────────────────────────────────────
+cusparseStatus_t cusparseSpMV_bufferSize(cusparseHandle_t /*h*/, cusparseOperation_t /*opA*/,
+                                          const void * /*alpha*/, cusparseSpMatDescr_t /*matA*/,
+                                          cusparseDnVecDescr_t /*vecX*/, const void * /*beta*/,
+                                          cusparseDnVecDescr_t /*vecY*/, cudaDataType_t /*ct*/,
+                                          size_t *bufferSize) {
+    if (bufferSize) *bufferSize = 0;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── SpMM buffer size ──────────────────────────────────────────────────────────
+cusparseStatus_t cusparseSpMM_bufferSize(cusparseHandle_t /*h*/, cusparseOperation_t /*opA*/,
+                                          cusparseOperation_t /*opB*/, const void * /*alpha*/,
+                                          cusparseSpMatDescr_t /*matA*/, cusparseDnMatDescr_t /*matB*/,
+                                          const void * /*beta*/, cusparseDnMatDescr_t /*matC*/,
+                                          cudaDataType_t /*ct*/, size_t *bufferSize) {
+    if (bufferSize) *bufferSize = 0;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── SpMV ──────────────────────────────────────────────────────────────────────
+cusparseStatus_t cusparseSpMV(cusparseHandle_t /*h*/, cusparseOperation_t opA,
                               const void *alpha, cusparseSpMatDescr_t matA,
                               cusparseDnVecDescr_t vecX, const void *beta,
                               cusparseDnVecDescr_t vecY, cudaDataType_t computeType,
@@ -303,57 +235,46 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t /*handle*/, cusparseOperation_t o
         return CUSPARSE_STATUS_INVALID_VALUE;
 
     if (computeType == CUDA_R_32F) {
-        csr_spmv(opA,
-                 static_cast<const float*>(alpha), matIt->second,
+        csr_spmv(opA, static_cast<const float*>(alpha), matIt->second,
                  static_cast<const float*>(xIt->second.values),
-                 static_cast<const float*>(beta),
-                 static_cast<float*>(yIt->second.values));
+                 static_cast<const float*>(beta), static_cast<float*>(yIt->second.values));
     } else if (computeType == CUDA_R_64F) {
-        csr_spmv(opA,
-                 static_cast<const double*>(alpha), matIt->second,
+        csr_spmv(opA, static_cast<const double*>(alpha), matIt->second,
                  static_cast<const double*>(xIt->second.values),
-                 static_cast<const double*>(beta),
-                 static_cast<double*>(yIt->second.values));
+                 static_cast<const double*>(beta), static_cast<double*>(yIt->second.values));
     } else if (computeType == CUDA_C_32F) {
-        csr_spmv(opA,
-                 static_cast<const cuComplex*>(alpha), matIt->second,
+        csr_spmv(opA, static_cast<const cuComplex*>(alpha), matIt->second,
                  static_cast<const cuComplex*>(xIt->second.values),
-                 static_cast<const cuComplex*>(beta),
-                 static_cast<cuComplex*>(yIt->second.values));
+                 static_cast<const cuComplex*>(beta), static_cast<cuComplex*>(yIt->second.values));
     } else if (computeType == CUDA_C_64F) {
-        csr_spmv(opA,
-                 static_cast<const cuDoubleComplex*>(alpha), matIt->second,
+        csr_spmv(opA, static_cast<const cuDoubleComplex*>(alpha), matIt->second,
                  static_cast<const cuDoubleComplex*>(xIt->second.values),
-                 static_cast<const cuDoubleComplex*>(beta),
-                 static_cast<cuDoubleComplex*>(yIt->second.values));
+                 static_cast<const cuDoubleComplex*>(beta), static_cast<cuDoubleComplex*>(yIt->second.values));
     } else if (computeType == CUDA_R_16F) {
-        // FP16 via float widening
         float alphaF = vgre_cuda::__half2float(*(const vgre_cuda::__half*)alpha);
         float betaF  = vgre_cuda::__half2float(*(const vgre_cuda::__half*)beta);
-        const vgre_cuda::__half* xH = static_cast<const vgre_cuda::__half*>(xIt->second.values);
-        vgre_cuda::__half* yH = static_cast<vgre_cuda::__half*>(yIt->second.values);
+        const vgre_cuda::__half *xH = static_cast<const vgre_cuda::__half*>(xIt->second.values);
+        vgre_cuda::__half *yH = static_cast<vgre_cuda::__half*>(yIt->second.values);
         std::vector<float> xf(xIt->second.size), yf(yIt->second.size);
         for (int64_t i = 0; i < xIt->second.size; ++i) xf[i] = vgre_cuda::__half2float(xH[i]);
         for (int64_t i = 0; i < yIt->second.size; ++i) yf[i] = vgre_cuda::__half2float(yH[i]);
         csr_spmv(opA, &alphaF, matIt->second, xf.data(), &betaF, yf.data());
         for (int64_t i = 0; i < yIt->second.size; ++i) yH[i] = vgre_cuda::__float2half(yf[i]);
     } else if (computeType == CUDA_R_16BF) {
-        // BF16 via float widening
         float alphaF = bf162f(*static_cast<const uint16_t*>(alpha));
         float betaF  = bf162f(*static_cast<const uint16_t*>(beta));
-        const uint16_t* xB = static_cast<const uint16_t*>(xIt->second.values);
-        uint16_t* yB = static_cast<uint16_t*>(yIt->second.values);
+        const uint16_t *xB = static_cast<const uint16_t*>(xIt->second.values);
+        uint16_t *yB = static_cast<uint16_t*>(yIt->second.values);
         std::vector<float> xf(xIt->second.size), yf(yIt->second.size);
         for (int64_t i = 0; i < xIt->second.size; ++i) xf[i] = bf162f(xB[i]);
         for (int64_t i = 0; i < yIt->second.size; ++i) yf[i] = bf162f(yB[i]);
         csr_spmv(opA, &alphaF, matIt->second, xf.data(), &betaF, yf.data());
         for (int64_t i = 0; i < yIt->second.size; ++i) yB[i] = f2bf(yf[i]);
     } else if (computeType == CUDA_R_8I) {
-        // INT8 via float widening; output is int32
         float alphaF = static_cast<float>(*static_cast<const int32_t*>(alpha));
         float betaF  = static_cast<float>(*static_cast<const int32_t*>(beta));
-        const int8_t* xI = static_cast<const int8_t*>(xIt->second.values);
-        int32_t* yI = static_cast<int32_t*>(yIt->second.values);
+        const int8_t *xI = static_cast<const int8_t*>(xIt->second.values);
+        int32_t *yI = static_cast<int32_t*>(yIt->second.values);
         std::vector<float> xf(xIt->second.size), yf(yIt->second.size);
         for (int64_t i = 0; i < xIt->second.size; ++i) xf[i] = static_cast<float>(xI[i]);
         for (int64_t i = 0; i < yIt->second.size; ++i) yf[i] = static_cast<float>(yI[i]);
@@ -365,9 +286,8 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t /*handle*/, cusparseOperation_t o
     return CUSPARSE_STATUS_SUCCESS;
 }
 
-// ── SpMM ─────────────────────────────────────────────────────────────────────
-
-cusparseStatus_t cusparseSpMM(cusparseHandle_t /*handle*/, cusparseOperation_t opA,
+// ── SpMM ──────────────────────────────────────────────────────────────────────
+cusparseStatus_t cusparseSpMM(cusparseHandle_t /*h*/, cusparseOperation_t opA,
                               cusparseOperation_t opB, const void *alpha,
                               cusparseSpMatDescr_t matA, cusparseDnMatDescr_t matB,
                               const void *beta, cusparseDnMatDescr_t matC,
@@ -380,177 +300,88 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t /*handle*/, cusparseOperation_t o
         return CUSPARSE_STATUS_INVALID_VALUE;
 
     if (computeType == CUDA_R_32F) {
-        csr_spmm(opA, opB,
-                 static_cast<const float*>(alpha), aIt->second, bIt->second,
+        csr_spmm(opA, opB, static_cast<const float*>(alpha), aIt->second, bIt->second,
                  static_cast<const float*>(beta), cIt->second);
     } else if (computeType == CUDA_R_64F) {
-        csr_spmm(opA, opB,
-                 static_cast<const double*>(alpha), aIt->second, bIt->second,
+        csr_spmm(opA, opB, static_cast<const double*>(alpha), aIt->second, bIt->second,
                  static_cast<const double*>(beta), cIt->second);
     } else if (computeType == CUDA_C_32F) {
-        csr_spmm(opA, opB,
-                 static_cast<const cuComplex*>(alpha), aIt->second, bIt->second,
+        csr_spmm(opA, opB, static_cast<const cuComplex*>(alpha), aIt->second, bIt->second,
                  static_cast<const cuComplex*>(beta), cIt->second);
     } else if (computeType == CUDA_C_64F) {
-        csr_spmm(opA, opB,
-                 static_cast<const cuDoubleComplex*>(alpha), aIt->second, bIt->second,
+        csr_spmm(opA, opB, static_cast<const cuDoubleComplex*>(alpha), aIt->second, bIt->second,
                  static_cast<const cuDoubleComplex*>(beta), cIt->second);
-    } else if (computeType == CUDA_R_16F) {
-        // FP16 via float widening
-        float alphaF = vgre_cuda::__half2float(*(const vgre_cuda::__half*)alpha);
-        float betaF  = vgre_cuda::__half2float(*(const vgre_cuda::__half*)beta);
-        // Convert sparse A values to float
-        CsrMat Af = aIt->second;
-        int64_t aNnz = Af.nnz;
-        std::vector<float> aValsF(aNnz);
-        const vgre_cuda::__half* aH = static_cast<const vgre_cuda::__half*>(Af.values);
-        for (int64_t i = 0; i < aNnz; ++i) aValsF[i] = vgre_cuda::__half2float(aH[i]);
-        Af.values = aValsF.data();
-        Af.valueType = CUDA_R_32F;
-        // Convert dense B to float
-        DnMat Bf = bIt->second;
-        int64_t bCount = Bf.rows * Bf.cols;
-        std::vector<float> bValsF(bCount);
-        const vgre_cuda::__half* bH = static_cast<const vgre_cuda::__half*>(Bf.values);
-        for (int64_t i = 0; i < bCount; ++i) bValsF[i] = vgre_cuda::__half2float(bH[i]);
-        Bf.values = bValsF.data();
-        Bf.valueType = CUDA_R_32F;
-        // Convert dense C to float
-        DnMat Cf = cIt->second;
-        int64_t cCount = Cf.rows * Cf.cols;
-        std::vector<float> cValsF(cCount);
-        vgre_cuda::__half* cH = static_cast<vgre_cuda::__half*>(Cf.values);
-        for (int64_t i = 0; i < cCount; ++i) cValsF[i] = vgre_cuda::__half2float(cH[i]);
-        Cf.values = cValsF.data();
-        Cf.valueType = CUDA_R_32F;
+    } else if (computeType == CUDA_R_16F || computeType == CUDA_R_16BF || computeType == CUDA_R_8I) {
+        // Widen to float, compute, narrow back
+        float alphaF, betaF;
+        if (computeType == CUDA_R_16F) {
+            alphaF = vgre_cuda::__half2float(*(const vgre_cuda::__half*)alpha);
+            betaF  = vgre_cuda::__half2float(*(const vgre_cuda::__half*)beta);
+        } else if (computeType == CUDA_R_16BF) {
+            alphaF = bf162f(*static_cast<const uint16_t*>(alpha));
+            betaF  = bf162f(*static_cast<const uint16_t*>(beta));
+        } else {
+            alphaF = static_cast<float>(*static_cast<const int32_t*>(alpha));
+            betaF  = static_cast<float>(*static_cast<const int32_t*>(beta));
+        }
+        // Build float copies of descriptors for intermediate computation
+        int64_t aNnz = aIt->second.nnz;
+        int64_t bCount = bIt->second.rows * bIt->second.cols;
+        int64_t cCount = cIt->second.rows * cIt->second.cols;
+        std::vector<float> aVF(aNnz), bVF(bCount), cVF(cCount);
+        auto widenF = [&](const void *src, float *dst, int64_t n, cudaDataType_t vt) {
+            if (vt == CUDA_R_16F) for (int64_t i = 0; i < n; ++i) dst[i] = vgre_cuda::__half2float(static_cast<const vgre_cuda::__half*>(src)[i]);
+            else if (vt == CUDA_R_16BF) for (int64_t i = 0; i < n; ++i) dst[i] = bf162f(static_cast<const uint16_t*>(src)[i]);
+            else if (vt == CUDA_R_8I) for (int64_t i = 0; i < n; ++i) dst[i] = static_cast<float>(static_cast<const int8_t*>(src)[i]);
+            else if (vt == CUDA_R_32I) for (int64_t i = 0; i < n; ++i) dst[i] = static_cast<float>(static_cast<const int32_t*>(src)[i]);
+            else for (int64_t i = 0; i < n; ++i) dst[i] = static_cast<const float*>(src)[i];
+        };
+        auto narrowF = [&](const float *src, void *dst, int64_t n, cudaDataType_t vt) {
+            if (vt == CUDA_R_16F) for (int64_t i = 0; i < n; ++i) static_cast<vgre_cuda::__half*>(dst)[i] = vgre_cuda::__float2half(src[i]);
+            else if (vt == CUDA_R_16BF) for (int64_t i = 0; i < n; ++i) static_cast<uint16_t*>(dst)[i] = f2bf(src[i]);
+            else if (vt == CUDA_R_8I) for (int64_t i = 0; i < n; ++i) static_cast<int8_t*>(dst)[i] = static_cast<int8_t>(src[i]);
+            else if (vt == CUDA_R_32I) for (int64_t i = 0; i < n; ++i) static_cast<int32_t*>(dst)[i] = static_cast<int32_t>(src[i]);
+            else for (int64_t i = 0; i < n; ++i) static_cast<float*>(dst)[i] = src[i];
+        };
+        widenF(aIt->second.values, aVF.data(), aNnz,   aIt->second.valueType);
+        widenF(bIt->second.values, bVF.data(), bCount, bIt->second.valueType);
+        widenF(cIt->second.values, cVF.data(), cCount, cIt->second.valueType);
+        CsrMat Af = aIt->second; Af.values = aVF.data(); Af.valueType = CUDA_R_32F;
+        DnMat  Bf = bIt->second; Bf.values = bVF.data(); Bf.valueType = CUDA_R_32F;
+        DnMat  Cf = cIt->second; Cf.values = cVF.data(); Cf.valueType = CUDA_R_32F;
         csr_spmm(opA, opB, &alphaF, Af, Bf, &betaF, Cf);
-        for (int64_t i = 0; i < cCount; ++i) cH[i] = vgre_cuda::__float2half(cValsF[i]);
-    } else if (computeType == CUDA_R_16BF) {
-        // BF16 via float widening
-        float alphaF = bf162f(*static_cast<const uint16_t*>(alpha));
-        float betaF  = bf162f(*static_cast<const uint16_t*>(beta));
-        CsrMat Af = aIt->second;
-        int64_t aNnz = Af.nnz;
-        std::vector<float> aValsF(aNnz);
-        const uint16_t* aB = static_cast<const uint16_t*>(Af.values);
-        for (int64_t i = 0; i < aNnz; ++i) aValsF[i] = bf162f(aB[i]);
-        Af.values = aValsF.data();
-        Af.valueType = CUDA_R_32F;
-        DnMat Bf = bIt->second;
-        int64_t bCount = Bf.rows * Bf.cols;
-        std::vector<float> bValsF(bCount);
-        const uint16_t* bB = static_cast<const uint16_t*>(Bf.values);
-        for (int64_t i = 0; i < bCount; ++i) bValsF[i] = bf162f(bB[i]);
-        Bf.values = bValsF.data();
-        Bf.valueType = CUDA_R_32F;
-        DnMat Cf = cIt->second;
-        int64_t cCount = Cf.rows * Cf.cols;
-        std::vector<float> cValsF(cCount);
-        uint16_t* cB = static_cast<uint16_t*>(Cf.values);
-        for (int64_t i = 0; i < cCount; ++i) cValsF[i] = bf162f(cB[i]);
-        Cf.values = cValsF.data();
-        Cf.valueType = CUDA_R_32F;
-        csr_spmm(opA, opB, &alphaF, Af, Bf, &betaF, Cf);
-        for (int64_t i = 0; i < cCount; ++i) cB[i] = f2bf(cValsF[i]);
-    } else if (computeType == CUDA_R_8I) {
-        // INT8 via float widening; output C is int32
-        float alphaF = static_cast<float>(*static_cast<const int32_t*>(alpha));
-        float betaF  = static_cast<float>(*static_cast<const int32_t*>(beta));
-        CsrMat Af = aIt->second;
-        int64_t aNnz = Af.nnz;
-        std::vector<float> aValsF(aNnz);
-        const int8_t* aI = static_cast<const int8_t*>(Af.values);
-        for (int64_t i = 0; i < aNnz; ++i) aValsF[i] = static_cast<float>(aI[i]);
-        Af.values = aValsF.data();
-        Af.valueType = CUDA_R_32F;
-        DnMat Bf = bIt->second;
-        int64_t bCount = Bf.rows * Bf.cols;
-        std::vector<float> bValsF(bCount);
-        const int8_t* bI = static_cast<const int8_t*>(Bf.values);
-        for (int64_t i = 0; i < bCount; ++i) bValsF[i] = static_cast<float>(bI[i]);
-        Bf.values = bValsF.data();
-        Bf.valueType = CUDA_R_32F;
-        DnMat Cf = cIt->second;
-        int64_t cCount = Cf.rows * Cf.cols;
-        std::vector<float> cValsF(cCount);
-        int32_t* cI = static_cast<int32_t*>(Cf.values);
-        for (int64_t i = 0; i < cCount; ++i) cValsF[i] = static_cast<float>(cI[i]);
-        Cf.values = cValsF.data();
-        Cf.valueType = CUDA_R_32F;
-        csr_spmm(opA, opB, &alphaF, Af, Bf, &betaF, Cf);
-        for (int64_t i = 0; i < cCount; ++i) cI[i] = static_cast<int32_t>(cValsF[i]);
+        narrowF(cVF.data(), cIt->second.values, cCount, cIt->second.valueType);
     } else {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
     }
     return CUSPARSE_STATUS_SUCCESS;
 }
 
-// ── Legacy Level-1: axpyi (y = y + alpha * x for sparse x) ─────────────────
-
-cusparseStatus_t cusparseSaxpyi(cusparseHandle_t /*handle*/, int nnz, const float *alpha,
+// ── Legacy Level-1: axpyi ─────────────────────────────────────────────────────
+cusparseStatus_t cusparseSaxpyi(cusparseHandle_t /*h*/, int nnz, const float *alpha,
                                 const float *xVal, const int *xInd, float *y,
                                 cusparseIndexBase_t idxBase) {
     if (!alpha || !xVal || !xInd || !y || nnz < 0) return CUSPARSE_STATUS_INVALID_VALUE;
     int base = (idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
-    for (int i = 0; i < nnz; ++i) {
-        y[xInd[i] - base] += (*alpha) * xVal[i];
-    }
+    for (int i = 0; i < nnz; ++i) y[xInd[i] - base] += (*alpha) * xVal[i];
     return CUSPARSE_STATUS_SUCCESS;
 }
-
-cusparseStatus_t cusparseDaxpyi(cusparseHandle_t /*handle*/, int nnz, const double *alpha,
+cusparseStatus_t cusparseDaxpyi(cusparseHandle_t /*h*/, int nnz, const double *alpha,
                                 const double *xVal, const int *xInd, double *y,
                                 cusparseIndexBase_t idxBase) {
     if (!alpha || !xVal || !xInd || !y || nnz < 0) return CUSPARSE_STATUS_INVALID_VALUE;
     int base = (idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
-    for (int i = 0; i < nnz; ++i) {
-        y[xInd[i] - base] += (*alpha) * xVal[i];
-    }
+    for (int i = 0; i < nnz; ++i) y[xInd[i] - base] += (*alpha) * xVal[i];
     return CUSPARSE_STATUS_SUCCESS;
 }
 
-// ── Buffer-size queries (required by cuSPARSE generic API callers) ────────────
-
-cusparseStatus_t cusparseSpMV_bufferSize(cusparseHandle_t /*handle*/,
-                                          cusparseOperation_t /*opA*/,
-                                          const void * /*alpha*/,
-                                          cusparseSpMatDescr_t /*matA*/,
-                                          cusparseDnVecDescr_t /*vecX*/,
-                                          const void * /*beta*/,
-                                          cusparseDnVecDescr_t /*vecY*/,
-                                          cudaDataType_t /*computeType*/,
-                                          size_t *bufferSize) {
-    // VGRE's SpMV is compute-synchronous; no extra workspace needed.
-    if (bufferSize) *bufferSize = 0;
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-cusparseStatus_t cusparseSpMM_bufferSize(cusparseHandle_t /*handle*/,
-                                          cusparseOperation_t /*opA*/,
-                                          cusparseOperation_t /*opB*/,
-                                          const void * /*alpha*/,
-                                          cusparseSpMatDescr_t /*matA*/,
-                                          cusparseDnMatDescr_t /*matB*/,
-                                          const void * /*beta*/,
-                                          cusparseDnMatDescr_t /*matC*/,
-                                          cudaDataType_t /*computeType*/,
-                                          size_t *bufferSize) {
-    if (bufferSize) *bufferSize = 0;
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-// ── COO sparse matrix descriptor ─────────────────────────────────────────────
-// Converts COO to CSR row-offsets on creation; reuses the COO col-index and
-// values buffers directly so no extra memory copies are required.
-
+// ── COO descriptor (converts to CSR row-offsets on creation) ──────────────────
 cusparseStatus_t cusparseCreateCoo(cusparseSpMatDescr_t *spMatDescr,
                                     int64_t rows, int64_t cols, int64_t nnz,
                                     void *cooRowInd, void *cooColInd, void *cooValues,
                                     cusparseIndexType_t cooIdxType,
-                                    cusparseIndexBase_t idxBase,
-                                    cudaDataType_t valueType) {
+                                    cusparseIndexBase_t idxBase, cudaDataType_t valueType) {
     if (!spMatDescr || rows <= 0 || cols <= 0 || nnz < 0) return CUSPARSE_STATUS_INVALID_VALUE;
-    // Build CSR row-offsets from COO row-index array.
     std::vector<int32_t> rowOff(static_cast<size_t>(rows + 1), 0);
     int base = (idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
     if (cooIdxType == CUSPARSE_INDEX_64I) {
@@ -565,14 +396,9 @@ cusparseStatus_t cusparseCreateCoo(cusparseSpMatDescr_t *spMatDescr,
     std::lock_guard<std::mutex> lk(g_descrMutex);
     uintptr_t id = g_nextDescr++;
     CsrMat &m = g_csrMats[id];
-    m.rows       = rows;
-    m.cols       = cols;
-    m.nnz        = nnz;
-    m.colInd     = cooColInd;
-    m.values     = cooValues;
-    m.idxBase    = idxBase;
-    m.valueType  = valueType;
-    // Store the constructed row-offsets and point the descriptor at them.
+    m.rows = rows; m.cols = cols; m.nnz = nnz;
+    m.colInd = cooColInd; m.values = cooValues;
+    m.idxBase = idxBase; m.valueType = valueType;
     g_cooRowOffsets[id] = std::move(rowOff);
     m.rowOffsets = g_cooRowOffsets[id].data();
     m.rowOffsetType = CUSPARSE_INDEX_32I;
@@ -580,12 +406,11 @@ cusparseStatus_t cusparseCreateCoo(cusparseSpMatDescr_t *spMatDescr,
     return CUSPARSE_STATUS_SUCCESS;
 }
 
-// ── Stream setter ─────────────────────────────────────────────────────────────
-
-cusparseStatus_t cusparseSetStream(cusparseHandle_t /*handle*/, void * /*stream*/) {
-    return CUSPARSE_STATUS_SUCCESS;  // CPU model: stream is a no-op
+// ── Stream (no-op in CPU model) ───────────────────────────────────────────────
+cusparseStatus_t cusparseSetStream(cusparseHandle_t /*h*/, void * /*stream*/) {
+    return CUSPARSE_STATUS_SUCCESS;
 }
-cusparseStatus_t cusparseGetStream(cusparseHandle_t /*handle*/, void **stream) {
+cusparseStatus_t cusparseGetStream(cusparseHandle_t /*h*/, void **stream) {
     if (stream) *stream = nullptr;
     return CUSPARSE_STATUS_SUCCESS;
 }

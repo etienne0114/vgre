@@ -290,30 +290,48 @@ float TextureManager::tex1D(TextureId id, float x) const {
 }
 
 // ── Surface write ──────────────────────────────────────────────────────────
+// ── SRGB gamma decode helper ──────────────────────────────────────────────────
+// Converts a normalised [0,1] sRGB value to linear light per IEC 61966-2-1.
+static double srgbToLinear(double v) {
+  if (v <= 0.04045) return v / 12.92;
+  return std::pow((v + 0.055) / 1.055, 2.4);
+}
+
 // ── Type-aware element read ───────────────────────────────────────────────────
 double TextureManager::readElementValue(const TextureObject &tex, size_t linearIndex) const {
   const uint8_t *base = static_cast<const uint8_t *>(tex.data);
   const uint8_t *elem = base + tex.offsetInBytes + linearIndex * tex.elementSize;
 
+  double raw = 0.0;
   switch (tex.desc.elementType) {
   case TextureElementType::FLOAT32:
-    return static_cast<double>(*reinterpret_cast<const float *>(elem));
+    raw = static_cast<double>(*reinterpret_cast<const float *>(elem));
+    break;
   case TextureElementType::FLOAT64:
-    return *reinterpret_cast<const double *>(elem);
+    raw = *reinterpret_cast<const double *>(elem);
+    break;
   case TextureElementType::INT8:
-    return static_cast<double>(*reinterpret_cast<const int8_t *>(elem));
+    raw = static_cast<double>(*reinterpret_cast<const int8_t *>(elem));
+    break;
   case TextureElementType::INT16:
-    return static_cast<double>(*reinterpret_cast<const int16_t *>(elem));
+    raw = static_cast<double>(*reinterpret_cast<const int16_t *>(elem));
+    break;
   case TextureElementType::INT32:
-    return static_cast<double>(*reinterpret_cast<const int32_t *>(elem));
+    raw = static_cast<double>(*reinterpret_cast<const int32_t *>(elem));
+    break;
   case TextureElementType::UINT8:
-    return static_cast<double>(*reinterpret_cast<const uint8_t *>(elem));
+    raw = static_cast<double>(*reinterpret_cast<const uint8_t *>(elem));
+    if (tex.desc.srgbDecode) raw = srgbToLinear(raw / 255.0) * 255.0;
+    break;
   case TextureElementType::UINT16:
-    return static_cast<double>(*reinterpret_cast<const uint16_t *>(elem));
+    raw = static_cast<double>(*reinterpret_cast<const uint16_t *>(elem));
+    if (tex.desc.srgbDecode) raw = srgbToLinear(raw / 65535.0) * 65535.0;
+    break;
   case TextureElementType::UINT32:
-    return static_cast<double>(*reinterpret_cast<const uint32_t *>(elem));
+    raw = static_cast<double>(*reinterpret_cast<const uint32_t *>(elem));
+    break;
   }
-  return 0.0;
+  return raw;
 }
 
 double TextureManager::readElementAsDouble(TextureId id, int linearIndex) const {

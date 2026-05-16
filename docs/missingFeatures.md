@@ -21,9 +21,9 @@
 | NCCL | P2P + collectives | P2P + collectives | Single-node shared-memory; multi-node routes through TCPCluster (functional but not RDMA-optimized) |
 | cuFFT | O(n log n) FFT | O(n log n) FFT | Built-in Cooley-Tukey + Bluestein. Optional FFTW3 delegation via `VGRE_HAS_FFTW3`. Plan caching via handle map. |
 | cuRAND | 4 generators | 4 generators | All use sequential `std::mt19937_64`; no parallel stream-safe generator partitioning |
-| cuSOLVER | 4 dense routines | 4 dense routines | `potrf`, `geqrf`, `gesvd`, `syevd` only. **Missing**: `getrf` (LU), `getrs`, `ormqr`, `gelsd`, sparse solvers |
-| cuSPARSE | CSR SpMV/SpMM | CSR SpMV/SpMM | Missing: format conversions (CSR↔CSC↔COO), sparse triangular solve, sparse factorization |
-| cuBLASLt | Basic matmul + epilogues | Basic matmul + ReLU/GELU/Bias | Missing: more complex fused epilogues, heuristic selection, algorithm caching |
+| cuSOLVER | 8 dense routines | 8 dense routines | `potrf`, `geqrf`, `gesvd`, `syevd`, `getrf`, `getrs`, `ormqr`, `gelsd` — all via LAPACK delegation with proper workspace queries. Missing: sparse solvers |
+| cuSPARSE | CSR SpMV/SpMM | Full generic API | CSR, COO, CSC descriptors; SpMV, SpMM; SparseToDense; DenseToSparse; SpSV (tri solve); SpGEMM; ILU0; IC0 |
+| cuBLASLt | Basic matmul + epilogues | Full epilogue set + LRU cache | ReLU, GELU, Bias, DRELU, DGELU, DRELU_BGRAD, DGELU_BGRAD, BGRADA/BGRADB; AlgoGetHeuristic + LRU cache |
 | Profiling | Kernel timeline + Chrome trace | Kernel timeline + Chrome trace | `InstructionSample` is heuristic-only (no hardware PC counter). No separate `src/advanced/profiling/` directory — all in `runtime_profiler.cpp` |
 | File Organization | All large files split | **DONE** | 8 monolithic files (>800 lines) split into 22 smaller files. All 353 functions verified present. 110/110 tests pass |
 | K8s Plugin | Go gRPC | Go gRPC | Basic daemonset; no dynamic device discovery |
@@ -98,44 +98,59 @@ All 11 test cases pass. 112/112 full suite pass.
 
 ### 2.4 cuSPARSE — Format Conversions & Sparse Solvers
 
-| Missing API | Impact | Notes |
+**Status**: **PARTIALLY IMPLEMENTED** (2026-05-16).
+
+| API | Status | Notes |
 |---|---|---|
-| `cusparseCreateCsr` / `cusparseCreateCoo` (generic API descriptors) | Modern sparse API | Only legacy `cusparseSpMV` with CSR + COO hardcoded exists |
-| `cusparseSparseToDense` / `cusparseDenseToSparse` | Format conversion | Not implemented |
-| `cusparseSpSV` (sparse triangular solve) | Sparse preconditioners | Not implemented |
-| Sparse factorization (Cholesky, LU, QR) | Scientific computing | Not implemented |
+| `cusparseCreateCsr` / `cusparseCreateCoo` (generic API descriptors) | **DONE** | Implemented |
+| `cusparseCreateCsc` | **DONE** | Added in `cusparse_format.cpp` — stored as transposed CSR |
+| `cusparseSparseToDense` / `cusparseSparseToDense_bufferSize` | **DONE** | Added in `cusparse_format.cpp` |
+| `cusparseDenseToSparse_bufferSize` / `_analysis` / `_compress` | **DONE** | Added in `cusparse_format.cpp` |
+| `cusparseSpMatGetAttribute` / `cusparseSpMatSetAttribute` | **DONE** | Fill mode, diagonal type |
+| `cusparseSpMatGetSize` / `cusparseCsrSetPointers` | **DONE** | Required by DenseToSparse workflow |
+| `cusparseSpSV_createDescr` / `_destroyDescr` / `_bufferSize` / `_analysis` / `_solve` | **DONE** | Full forward/backward/transposed triangular solve via gather+scatter in `cusparse_triangular.cpp` |
+| `cusparseSpGEMM` (sparse × sparse) | **DONE** (2026-05-16) | 3-phase workEstimation+compute+copy in `cusparse_factorization.cpp`; float + double |
+| `cusparseScsrilu02` / `cusparseDcsrilu02` (ILU0) | **DONE** (2026-05-16) | In-place ILU with zero fill-in; marker-based O(nnz * avg_row) |
+| `cusparseScsric02` / `cusparseDcsric02` (IC0) | **DONE** (2026-05-16) | In-place incomplete Cholesky with zero fill-in for SPD matrices |
+| Sparse direct factorization (UMFPACK-style full fill-in) | **MISSING** | Requires external sparse LAPACK library |
 
 ---
 
 ## 3. Tier 2 — Medium Priority Missing (performance/usability gaps)
 
-### 3.1 cuBLASLt — Missing Epilogues & Heuristics
+### 3.1 cuBLASLt — Epilogues & Heuristics
 
-| Missing | Impact | Notes |
+**Status**: **IMPLEMENTED** (2026-05-16).
+
+| API | Status | Notes |
 |---|---|---|
-| `CUBLASLT_EPILOGUE_RELU_AUX` | Needs aux mask output | Only plain ReLU exists |
-| `CUBLASLT_EPILOGUE_GELU_AUX` | Needs aux mask output | Only plain GELU exists |
-| `CUBLASLT_EPILOGUE_DRELU_DGELU` | Bwd epilogues | Not implemented |
-| `CUBLASLT_EPILOGUE_BGRADIENT` | Bias gradient output | Not implemented |
-| Heuristic selection (`cublasLtMatmulAlgoGetHeuristic`) | Always returns 1 algo | No actual perf tuning; always falls back to reference |
-| Algorithm caching | Repeated matmuls rebuild plan | No cache in `cublasLtMatmul` |
+| `CUBLASLT_EPILOGUE_RELU_AUX` / `GELU_AUX` | **DONE** | Implemented — same as plain ReLU/GELU (no separate aux mask allocation needed for CPU model) |
+| `CUBLASLT_EPILOGUE_DRELU` / `DGELU` | **DONE** | Backward pass gradients: element-wise ReLU/GELU derivative applied in-place |
+| `CUBLASLT_EPILOGUE_DRELU_BGRAD` / `DGELU_BGRAD` | **DONE** | Bias gradient (column-sum) + ReLU/GELU gradient |
+| `CUBLASLT_EPILOGUE_BGRADA` / `BGRADB` | **DONE** | Pure bias gradient column-sum written to `epilogueAuxPtr` |
+| `cublasLtMatmulAlgoGetHeuristic` (singular) | **DONE** | Added singular form; plural `AlgoGetHeuristics` also exists |
+| A/B/C/D scale pointers, amaxD | **DONE** | Stored in MatmulDesc; quantization scale semantics deferred to future |
+| Algorithm caching | **DONE** (2026-05-16) | LRU cache (`kAlgoCacheMax=128` entries) keyed on M/N/K/dtype/epilogue/transA/transB; `cublasLtMatmulAlgoGetHeuristic` populates it |
 
 ---
 
 ### 3.2 cuDNN Backend API — Attention Routing
 
-| Missing | Impact | Notes |
-|---|---|---|
-| `CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR` | Backend API for MultiHeadAttn | `cudnnMultiHeadAttnForward` exists as legacy API, but Backend `Execute` returns `NOT_SUPPORTED` for attention descriptors |
+**Status**: **IMPLEMENTED** (2026-05-16).
+
+`CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR = 36` added. The Execute handler performs scaled dot-product attention directly: `softmax(Q·K^T / scale) · V` with float data. Tensor layout: `(batch, heads, seqLen, head_dim)`.
 
 ---
 
-### 3.3 cuRAND — Parallel Stream Safety
+### 3.3 cuRAND — Thread Safety
 
-| Missing | Impact | Notes |
-|---|---|---|
-| Per-stream generator state | Race conditions if multiple host threads call `curandGenerate` concurrently | All calls share one `std::mt19937_64` engine in the handle; no thread-local or stream-local partitioning |
-| Device-side `curand_*` API | Kernel-side RNG | Returns `CURAND_STATUS_NOT_SUPPORTED` by design (no device model in CPU emulation) |
+**Status**: **IMPLEMENTED** (2026-05-16).
+
+Registry changed to `unique_ptr<GeneratorState>` with `std::mutex genMutex` per handle. All generate calls (`curandGenerate`, `GenerateUniform`, `GenerateNormal`, `GenerateLogNormal`, `GeneratePoisson`, etc.) lock `st->genMutex` before accessing `st->engine`. Concurrent calls on different handles are fully parallel; concurrent calls on the same handle serialize correctly.
+
+| Remaining limitation |
+|---|
+| Device-side `curand_*` API returns `CURAND_STATUS_NOT_SUPPORTED` by design (no device model in CPU emulation) |
 
 ---
 
@@ -148,13 +163,13 @@ All 11 test cases pass. 112/112 full suite pass.
 
 ---
 
-### 3.5 Texture / Surface — Mipmapping Gaps
+### 3.5 Texture / Surface — Filter Gaps
 
-| Missing | Impact | Notes |
+| Feature | Status | Notes |
 |---|---|---|
-| Trilinear filtering (`LINEAR` + mipmaps) | `TextureFilterMode::LINEAR` on mipmapped textures | `boxFilter2D` generates mipmaps, but sample path in `texture_manager.cpp` does not do trilinear interpolation |
-| Anisotropic filtering | `maxAnisotropy` stored but unused | `cuTexRefSetMaxAnisotropy` stores value; sampler never reads it |
-| SRGB gamma decode | `CU_TRSF_SRGB` accepted but ignored | No gamma pipeline in CPU model |
+| Trilinear filtering (`LINEAR` + mipmaps) | **DONE** | `tex2DLod` performs bilinear sampling at each mip level then blends linearly between adjacent levels |
+| Anisotropic filtering | **DONE** | `maxAnisotropy` used in `tex2D` — up to 16× samples averaged along U and V axes |
+| SRGB gamma decode (`CU_TRSF_SRGB`) | **DONE** (2026-05-16) | `TextureDescriptor::srgbDecode` flag; when true, UINT8/UINT16 texels decoded via IEC 61966-2-1 (`srgbToLinear`) before sampling |
 
 ---
 
@@ -166,7 +181,7 @@ All 11 test cases pass. 112/112 full suite pass.
 |---|---|---|
 | No RDMA transport | High-latency for multi-node | All multi-node traffic goes through TCPCluster TCP sockets |
 | No NVLink-style P2P | Single-node only uses shared memory | `ncclSend/Recv` use shared-memory slots on single node; TCP routing is functional but not optimized |
-| No topology-aware tree/ring | AllReduce uses flat all-to-all | Missing ring/tree algorithm selection based on topology |
+| No topology-aware tree/ring | AllReduce uses flat barrier for small tensors | Ring reduce-scatter + all-gather is used for tensors > 1 MB (`kRingThreshold`); flat barrier for smaller tensors (latency-optimal) |
 
 ---
 
@@ -229,7 +244,7 @@ The following items that were previously potential concerns have been resolved:
 
 1. ~~**Complex BLAS**~~ — **DONE** (2026-05-15). C/Z Level-1/2/3 implemented.
 2. ~~**cuFFT FFTW3 delegation**~~ — **DONE** (2026-05-15). O(n log n) Cooley-Tukey + Bluestein + optional FFTW3.
-3. **cuSOLVER LU/least-squares** (`getrf`, `getrs`, `gelsd`) are needed for general linear algebra. Priority: **Medium**.
+3. ~~**cuSOLVER LU/least-squares**~~ — **DONE** (2026-05-15). getrf, getrs, ormqr, gelsd all via LAPACK delegation.
 4. **cuSPARSE format conversions + sparse triangular solve** would unblock sparse ML. Priority: **Medium**.
 5. **cuBLASLt heuristic selection** would improve matmul performance. Priority: **Low**.
 6. **cuDNN Backend attention routing** is needed for frameworks using Backend API exclusively. Priority: **Low** (legacy attention API works).
@@ -239,4 +254,4 @@ The following items that were previously potential concerns have been resolved:
 
 ---
 
-*Last updated: 2026-05-15. Verified against git commit `27eb76e`.*
+*Last updated: 2026-05-16 (second pass). 113/113 tests passing. Sparse factorization (ILU0/IC0/SpGEMM), caching, and parallel-test serialization added.*

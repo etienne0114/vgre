@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <unordered_map>
@@ -30,16 +31,15 @@ struct GeneratorState {
     unsigned long long seed = 0;
     unsigned long long offset = 0;
     unsigned int quasiDimensions = 1;
-    bool scrambled = false; // true for SCRAMBLED_SOBOL*
-
-    // C++11 engine + distributions
+    bool scrambled = false;
     std::mt19937_64 engine;
     bool seeded = false;
+    std::mutex genMutex; // per-handle lock for concurrent generate calls
 };
 
-// Global registry: generator handle → state
+// Registry uses unique_ptr so GeneratorState's non-movable mutex is safe.
 std::mutex g_registryMutex;
-std::unordered_map<uintptr_t, GeneratorState> g_registry;
+std::unordered_map<uintptr_t, std::unique_ptr<GeneratorState>> g_registry;
 uintptr_t g_nextHandle = 1;
 
 // Shared Sobol direction-vector cache (20000 dims × 32 bits)
@@ -218,11 +218,13 @@ static inline bool isScrambled(curandRngType_t t) {
            t == CURAND_RNG_QUASI_SCRAMBLED_SOBOL64;
 }
 
+// Returns raw pointer; caller must be sure generator is not destroyed concurrently.
+// Each generate op then locks st->genMutex for per-handle thread safety.
 GeneratorState *lookup(curandGenerator_t g) {
     std::lock_guard<std::mutex> lk(g_registryMutex);
     auto it = g_registry.find(reinterpret_cast<uintptr_t>(g));
     if (it == g_registry.end()) return nullptr;
-    return &it->second;
+    return it->second.get();
 }
 
 } // namespace
@@ -232,15 +234,12 @@ extern "C" {
 curandStatus_t curandCreateGenerator(curandGenerator_t *generator, curandRngType_t rng_type) {
     if (!generator) return CURAND_STATUS_ALLOCATION_FAILED;
 
-    std::lock_guard<std::mutex> lk(g_registryMutex);
-    uintptr_t handle = g_nextHandle++;
-    GeneratorState &st = g_registry[handle];
-    st.type = rng_type;
-    st.scrambled = isScrambled(rng_type);
-    st.engine.seed(0);
-    st.seeded = true;
+    auto st = std::make_unique<GeneratorState>();
+    st->type     = rng_type;
+    st->scrambled = isScrambled(rng_type);
+    st->engine.seed(0);
+    st->seeded   = true;
 
-    // Pre-warm Sobol caches for quasi-random generators
     if (isQuasi(rng_type)) {
         if (rng_type == CURAND_RNG_QUASI_SOBOL64 || rng_type == CURAND_RNG_QUASI_SCRAMBLED_SOBOL64)
             ensureSobol64();
@@ -248,6 +247,9 @@ curandStatus_t curandCreateGenerator(curandGenerator_t *generator, curandRngType
             ensureSobol32();
     }
 
+    std::lock_guard<std::mutex> lk(g_registryMutex);
+    uintptr_t handle = g_nextHandle++;
+    g_registry[handle] = std::move(st);
     *generator = reinterpret_cast<curandGenerator_t>(handle);
     return CURAND_STATUS_SUCCESS;
 }
@@ -298,6 +300,7 @@ curandStatus_t curandGenerate(curandGenerator_t generator, unsigned int *outputP
     if (!outputPtr || num == 0) return CURAND_STATUS_SUCCESS;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::lock_guard<std::mutex> genLk(st->genMutex);
     if (isQuasi(st->type)) {
         ensureSobol32();
         unsigned int D = st->quasiDimensions;
@@ -321,6 +324,7 @@ curandStatus_t curandGenerateLongLong(curandGenerator_t generator, unsigned long
     if (!outputPtr || num == 0) return CURAND_STATUS_SUCCESS;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::lock_guard<std::mutex> genLk(st->genMutex);
     if (isQuasi(st->type)) {
         ensureSobol64();
         unsigned int D = st->quasiDimensions;
@@ -346,6 +350,7 @@ curandStatus_t curandGenerateUniform(curandGenerator_t generator, float *outputP
     if (!outputPtr || num == 0) return CURAND_STATUS_SUCCESS;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::lock_guard<std::mutex> genLk(st->genMutex);
     if (isQuasi(st->type)) {
         ensureSobol32();
         unsigned int D = st->quasiDimensions;
@@ -370,6 +375,7 @@ curandStatus_t curandGenerateUniformDouble(curandGenerator_t generator, double *
     if (!outputPtr || num == 0) return CURAND_STATUS_SUCCESS;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::lock_guard<std::mutex> genLk(st->genMutex);
     if (isQuasi(st->type)) {
         ensureSobol64();
         unsigned int D = st->quasiDimensions;
@@ -396,6 +402,7 @@ curandStatus_t curandGenerateNormal(curandGenerator_t generator, float *outputPt
     if (!outputPtr || n == 0) return CURAND_STATUS_SUCCESS;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::lock_guard<std::mutex> genLk(st->genMutex);
     std::normal_distribution<float> dist(mean, stddev);
     for (size_t i = 0; i < n; ++i) outputPtr[i] = dist(st->engine);
     return CURAND_STATUS_SUCCESS;
@@ -405,6 +412,7 @@ curandStatus_t curandGenerateNormalDouble(curandGenerator_t generator, double *o
     if (!outputPtr || n == 0) return CURAND_STATUS_SUCCESS;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::lock_guard<std::mutex> genLk(st->genMutex);
     std::normal_distribution<double> dist(mean, stddev);
     for (size_t i = 0; i < n; ++i) outputPtr[i] = dist(st->engine);
     return CURAND_STATUS_SUCCESS;
@@ -416,6 +424,7 @@ curandStatus_t curandGenerateLogNormal(curandGenerator_t generator, float *outpu
     if (!outputPtr || n == 0) return CURAND_STATUS_SUCCESS;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::lock_guard<std::mutex> genLk(st->genMutex);
     std::normal_distribution<float> dist(mean, stddev);
     for (size_t i = 0; i < n; ++i) outputPtr[i] = std::exp(dist(st->engine));
     return CURAND_STATUS_SUCCESS;
@@ -425,6 +434,7 @@ curandStatus_t curandGenerateLogNormalDouble(curandGenerator_t generator, double
     if (!outputPtr || n == 0) return CURAND_STATUS_SUCCESS;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::lock_guard<std::mutex> genLk(st->genMutex);
     std::normal_distribution<double> dist(mean, stddev);
     for (size_t i = 0; i < n; ++i) outputPtr[i] = std::exp(dist(st->engine));
     return CURAND_STATUS_SUCCESS;
@@ -472,6 +482,7 @@ curandStatus_t curandGeneratePoisson(curandGenerator_t generator, unsigned int *
     if (!outputPtr || n == 0) return CURAND_STATUS_SUCCESS;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
+    std::lock_guard<std::mutex> genLk(st->genMutex);
     std::poisson_distribution<unsigned int> dist(lambda);
     for (size_t i = 0; i < n; ++i) outputPtr[i] = dist(st->engine);
     return CURAND_STATUS_SUCCESS;
@@ -514,7 +525,7 @@ curandStatus_t curandGetGeneratorIpcHandle(curandGenerator_t generator,
     if (!handle) return CURAND_STATUS_INVALID_VALUE;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
-    std::lock_guard<std::mutex> lk(g_registryMutex);
+    std::lock_guard<std::mutex> lk(st->genMutex);
     handle->seed       = st->seed;
     handle->offset     = st->offset;
     handle->rng_type   = static_cast<uint32_t>(st->type);
@@ -533,12 +544,12 @@ curandStatus_t curandCreateGeneratorFromIpcHandle(curandGenerator_t *generator,
     if (r != CURAND_STATUS_SUCCESS) return r;
     auto *st = lookup(*generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
-    st->seed             = handle->seed;
-    st->offset           = handle->offset;
-    st->ordering         = static_cast<curandOrdering_t>(handle->ordering);
-    st->quasiDimensions  = handle->quasi_dims;
-    st->scrambled        = (handle->scrambled != 0);
-    // Reconstruct exact engine position: seed then fast-forward.
+    std::lock_guard<std::mutex> genLk(st->genMutex);
+    st->seed            = handle->seed;
+    st->offset          = handle->offset;
+    st->ordering        = static_cast<curandOrdering_t>(handle->ordering);
+    st->quasiDimensions = handle->quasi_dims;
+    st->scrambled       = (handle->scrambled != 0);
     st->engine.seed(handle->seed);
     if (handle->offset > 0) st->engine.discard(handle->offset);
     st->seeded = true;
