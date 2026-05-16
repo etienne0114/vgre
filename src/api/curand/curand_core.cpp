@@ -29,7 +29,8 @@ struct GeneratorState {
     curandRngType_t type = CURAND_RNG_PSEUDO_DEFAULT;
     curandOrdering_t ordering = CURAND_ORDERING_PSEUDO_DEFAULT;
     unsigned long long seed = 0;
-    unsigned long long offset = 0;
+    unsigned long long offset = 0;     // explicitly set by curandSetGeneratorOffset
+    unsigned long long generated = 0;  // total values drawn since seed+offset applied
     unsigned int quasiDimensions = 1;
     bool scrambled = false;
     std::mt19937_64 engine;
@@ -440,15 +441,29 @@ curandStatus_t curandGenerateLogNormalDouble(curandGenerator_t generator, double
     return CURAND_STATUS_SUCCESS;
 }
 
-curandStatus_t curandGetDirectionVectors32(curandDirectionVectors32_t *vectors, curandDirectionVectorSet_t /*set*/) {
+// Returns a pointer to the pre-computed static direction-vector table
+// (20000 entries). Caller does NOT own or free the pointer.
+curandStatus_t curandGetDirectionVectors32(curandDirectionVectors32_t **vectors,
+                                            curandDirectionVectorSet_t /*set*/) {
     if (!vectors) return CURAND_STATUS_INVALID_VALUE;
-    for (int d = 1; d <= 20000; ++d) computeDirVectors32(vectors[d - 1], d);
+    std::lock_guard<std::mutex> lk(g_sobolMutex);
+    if (!g_sobol32Ready) {
+        for (int d = 1; d <= 20000; ++d) computeDirVectors32(g_sobolDir32[d - 1], d);
+        g_sobol32Ready = true;
+    }
+    *vectors = g_sobolDir32;
     return CURAND_STATUS_SUCCESS;
 }
 
-curandStatus_t curandGetDirectionVectors64(curandDirectionVectors64_t *vectors, curandDirectionVectorSet_t /*set*/) {
+curandStatus_t curandGetDirectionVectors64(curandDirectionVectors64_t **vectors,
+                                            curandDirectionVectorSet_t /*set*/) {
     if (!vectors) return CURAND_STATUS_INVALID_VALUE;
-    for (int d = 1; d <= 20000; ++d) computeDirVectors64(vectors[d - 1], d);
+    std::lock_guard<std::mutex> lk(g_sobolMutex);
+    if (!g_sobol64Ready) {
+        for (int d = 1; d <= 20000; ++d) computeDirVectors64(g_sobolDir64[d - 1], d);
+        g_sobol64Ready = true;
+    }
+    *vectors = g_sobolDir64;
     return CURAND_STATUS_SUCCESS;
 }
 
@@ -499,29 +514,16 @@ curandStatus_t curandGenerateSeeds(curandGenerator_t generator) {
     return CURAND_STATUS_SUCCESS;
 }
 
-// ── IPC handle export / import (F.7) ─────────────────────────────────────────
-// vgre_curand_ipc_handle_t is a 64-byte opaque struct that serialises all
-// deterministic state needed to reconstruct a cuRAND generator in another
-// process.  The caller is responsible for transferring the bytes between
-// processes (file, socket, shared memory, etc.).
-//
-// The mt19937_64 engine is fully reproduced by re-seeding with 'seed' and
-// calling engine.discard(offset) — no internal MT state snapshot is required.
+// ── IPC handle export / import ───────────────────────────────────────────────
+// curandGeneratorIpcHandle_t is the public 64-byte handle (from curand_shim.h).
+// The mt19937_64 engine state is fully reproduced by re-seeding with 'seed'
+// and calling engine.discard(offset) — no internal MT snapshot is needed.
 
-struct vgre_curand_ipc_handle_t {
-    uint64_t seed;
-    uint64_t offset;
-    uint32_t rng_type;      // curandRngType_t
-    uint32_t ordering;      // curandOrdering_t
-    uint32_t quasi_dims;
-    uint32_t scrambled;
-    uint8_t  reserved[32];  // pad to 64 bytes
-};
-static_assert(sizeof(vgre_curand_ipc_handle_t) == 64,
+static_assert(sizeof(curandGeneratorIpcHandle_t) == 64,
               "IPC handle must be exactly 64 bytes");
 
 curandStatus_t curandGetGeneratorIpcHandle(curandGenerator_t generator,
-                                            vgre_curand_ipc_handle_t *handle) {
+                                            curandGeneratorIpcHandle_t *handle) {
     if (!handle) return CURAND_STATUS_INVALID_VALUE;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
@@ -537,7 +539,7 @@ curandStatus_t curandGetGeneratorIpcHandle(curandGenerator_t generator,
 }
 
 curandStatus_t curandCreateGeneratorFromIpcHandle(curandGenerator_t *generator,
-                                                   const vgre_curand_ipc_handle_t *handle) {
+                                                   const curandGeneratorIpcHandle_t *handle) {
     if (!generator || !handle) return CURAND_STATUS_INVALID_VALUE;
     curandStatus_t r = curandCreateGenerator(generator,
                            static_cast<curandRngType_t>(handle->rng_type));
@@ -553,6 +555,15 @@ curandStatus_t curandCreateGeneratorFromIpcHandle(curandGenerator_t *generator,
     st->engine.seed(handle->seed);
     if (handle->offset > 0) st->engine.discard(handle->offset);
     st->seeded = true;
+    return CURAND_STATUS_SUCCESS;
+}
+
+// ── Version query ─────────────────────────────────────────────────────────────
+// Returns the VGRE cuRAND emulation version encoded as MAJOR*100000 + MINOR*100
+// matching NVIDIA cuRAND 11.0 convention.
+curandStatus_t curandGetVersion(int *version) {
+    if (!version) return CURAND_STATUS_INVALID_VALUE;
+    *version = 1100000; // cuRAND 11.0
     return CURAND_STATUS_SUCCESS;
 }
 

@@ -107,15 +107,33 @@ cufftResult_t cufftDestroy(cufftHandle plan) {
     return CUFFT_SUCCESS;
 }
 
-cufftResult_t cufftSetStream(cufftHandle plan, void * /*stream*/) {
-    CufftPlan p;
-    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+cufftResult_t cufftSetStream(cufftHandle plan, void *stream) {
+    std::lock_guard<std::mutex> lk(g_planMutex);
+    auto it = g_plans.find(plan);
+    if (it == g_plans.end()) return CUFFT_INVALID_PLAN;
+    it->second.stream = stream;
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftGetStream(cufftHandle plan, void **stream) {
+    if (!stream) return CUFFT_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_planMutex);
+    auto it = g_plans.find(plan);
+    if (it == g_plans.end()) return CUFFT_INVALID_PLAN;
+    *stream = it->second.stream;
     return CUFFT_SUCCESS;
 }
 
 cufftResult_t cufftSetWorkArea(cufftHandle plan, void * /*workArea*/) {
     CufftPlan p;
     if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    // CPU runtime manages workspace internally — user-supplied buffer is ignored.
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftGetVersion(int *version) {
+    if (!version) return CUFFT_INVALID_VALUE;
+    *version = 11000; // cuFFT 11.0
     return CUFFT_SUCCESS;
 }
 

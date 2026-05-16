@@ -55,6 +55,9 @@ struct CufftPlan {
     int odist = 0;
     int inembed[3] = {0, 0, 0};
     int onembed[3] = {0, 0, 0};
+    // Stream association: stored for correctness; CPU runtime ignores it for
+    // execution ordering since all operations are synchronous.
+    void *stream = nullptr;
 };
 
 extern std::mutex g_planMutex;

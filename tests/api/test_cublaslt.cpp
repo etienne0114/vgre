@@ -250,6 +250,57 @@ int test_null_rejection() {
     return 0;
 }
 
+// ── 9. Version queries ────────────────────────────────────────────────────────
+int test_version_queries() {
+    size_t ver = 0, cudart_ver = 0;
+    if (cublasLtGetVersion(&ver) != CUBLAS_STATUS_SUCCESS || ver == 0)
+        FAIL("cublasLtGetVersion failed or returned 0");
+    if (cublasLtGetCudartVersion(&cudart_ver) != CUBLAS_STATUS_SUCCESS || cudart_ver == 0)
+        FAIL("cublasLtGetCudartVersion failed or returned 0");
+    PASS("version queries (cublasLtGetVersion + cublasLtGetCudartVersion)");
+    return 0;
+}
+
+// ── 10. Status string helpers ─────────────────────────────────────────────────
+int test_status_strings() {
+    const char *ok_name = cublasLtGetStatusName(CUBLAS_STATUS_SUCCESS);
+    const char *ok_str  = cublasLtGetStatusString(CUBLAS_STATUS_SUCCESS);
+    if (!ok_name || ok_name[0] == '\0') FAIL("cublasLtGetStatusName returned empty");
+    if (!ok_str  || ok_str[0]  == '\0') FAIL("cublasLtGetStatusString returned empty");
+    const char *err_name = cublasLtGetStatusName(CUBLAS_STATUS_INVALID_VALUE);
+    if (!err_name || err_name[0] == '\0') FAIL("status name for INVALID_VALUE empty");
+    PASS("status string helpers");
+    return 0;
+}
+
+// ── 11. Plural heuristics alias (cublasLtMatmulAlgoGetHeuristics) ────────────
+int test_algo_heuristics_plural() {
+    cublasLtHandle_t h = nullptr; cublasLtCreate(&h);
+    cublasLtMatmulDesc_t   desc = nullptr;
+    cublasLtMatrixLayout_t layA = nullptr, layB = nullptr, layC = nullptr;
+    cublasLtMatmulPreference_t pref = nullptr;
+
+    cublasLtMatmulDescCreate(&desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    cublasLtMatrixLayoutCreate(&layA, CUDA_R_32F, 8, 8, 8);
+    cublasLtMatrixLayoutCreate(&layB, CUDA_R_32F, 8, 8, 8);
+    cublasLtMatrixLayoutCreate(&layC, CUDA_R_32F, 8, 8, 8);
+    cublasLtMatmulPreferenceCreate(&pref);
+
+    cublasLtMatmulHeuristicResult_t result{};
+    int returned = 0;
+    auto s = cublasLtMatmulAlgoGetHeuristics(h, desc, layA, layB, layC, layC, pref,
+                                              1, &result, &returned);
+    if (s != CUBLAS_STATUS_SUCCESS || returned != 1)
+        FAIL("cublasLtMatmulAlgoGetHeuristics (plural) failed");
+
+    cublasLtMatmulPreferenceDestroy(pref);
+    cublasLtMatrixLayoutDestroy(layA); cublasLtMatrixLayoutDestroy(layB); cublasLtMatrixLayoutDestroy(layC);
+    cublasLtMatmulDescDestroy(desc);
+    cublasLtDestroy(h);
+    PASS("cublasLtMatmulAlgoGetHeuristics plural alias with LRU cache");
+    return 0;
+}
+
 // ── Driver ────────────────────────────────────────────────────────────────────
 int main() {
     std::cout << "=== cuBLASLt Shim Functional Tests ===\n";
@@ -262,6 +313,9 @@ int main() {
     rc |= test_sgemm_bias();
     rc |= test_algo_heuristic();
     rc |= test_drelu();
+    rc |= test_version_queries();
+    rc |= test_status_strings();
+    rc |= test_algo_heuristics_plural();
     if (rc == 0) std::cout << "\nAll cuBLASLt tests passed!\n";
     return rc;
 }

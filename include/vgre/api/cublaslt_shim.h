@@ -186,6 +186,7 @@ cublasStatus_t cublasLtMatmulPreferenceGetAttribute(cublasLtMatmulPreference_t p
                                                     size_t *sizeWritten);
 
 // ── Algorithm heuristic ──────────────────────────────────────────────────────
+// Singular form: fills heuristicResultsArray[0..requestedAlgoCount-1].
 cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t lightHandle,
                                               cublasLtMatmulDesc_t operationDesc,
                                               cublasLtMatrixLayout_t Adesc,
@@ -196,6 +197,18 @@ cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t lightHandle,
                                               int requestedAlgoCount,
                                               cublasLtMatmulHeuristicResult_t *heuristicResultsArray,
                                               int *returnAlgoCount);
+
+// Plural alias: identical signature, same semantics (CUDA 11.1+ API).
+cublasStatus_t cublasLtMatmulAlgoGetHeuristics(cublasLtHandle_t lightHandle,
+                                               cublasLtMatmulDesc_t operationDesc,
+                                               cublasLtMatrixLayout_t Adesc,
+                                               cublasLtMatrixLayout_t Bdesc,
+                                               cublasLtMatrixLayout_t Cdesc,
+                                               cublasLtMatrixLayout_t Ddesc,
+                                               cublasLtMatmulPreference_t pref,
+                                               int requestedAlgoCount,
+                                               cublasLtMatmulHeuristicResult_t *heuristicResultsArray,
+                                               int *returnAlgoCount);
 
 // ── Matmul execution ─────────────────────────────────────────────────────────
 cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
@@ -208,6 +221,14 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
                               void *D, cublasLtMatrixLayout_t Ddesc,
                               const void *algo, void *workspace, size_t workspaceSizeInBytes,
                               void *stream);
+
+// ── Version queries ──────────────────────────────────────────────────────────
+cublasStatus_t cublasLtGetVersion(size_t *version);
+cublasStatus_t cublasLtGetCudartVersion(size_t *version);
+
+// ── Status string helpers ─────────────────────────────────────────────────────
+const char *cublasLtGetStatusName(cublasStatus_t status);
+const char *cublasLtGetStatusString(cublasStatus_t status);
 
 #ifdef __cplusplus
 } // extern "C"

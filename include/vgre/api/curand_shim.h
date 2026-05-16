@@ -84,12 +84,37 @@ curandStatus_t curandGenerateNormal(curandGenerator_t generator, float *outputPt
 curandStatus_t curandGenerateNormalDouble(curandGenerator_t generator, double *outputPtr, size_t n, double mean, double stddev);
 curandStatus_t curandGenerateLogNormal(curandGenerator_t generator, float *outputPtr, size_t n, float mean, float stddev);
 curandStatus_t curandGenerateLogNormalDouble(curandGenerator_t generator, double *outputPtr, size_t n, double mean, double stddev);
+curandStatus_t curandGeneratePoisson(curandGenerator_t generator, unsigned int *outputPtr, size_t n, double lambda);
+curandStatus_t curandGenerateSeeds(curandGenerator_t generator);
 
 // ── Direction vectors (Sobol) ──────────────────────────────────────────────
-curandStatus_t curandGetDirectionVectors32(curandDirectionVectors32_t *vectors, curandDirectionVectorSet_t set);
-curandStatus_t curandGetDirectionVectors64(curandDirectionVectors64_t *vectors, curandDirectionVectorSet_t set);
+// Sets *vectors to an internal table of 20000 direction-vector arrays.
+// Lifetime: static; caller must not free the pointer.
+curandStatus_t curandGetDirectionVectors32(curandDirectionVectors32_t **vectors, curandDirectionVectorSet_t set);
+curandStatus_t curandGetDirectionVectors64(curandDirectionVectors64_t **vectors, curandDirectionVectorSet_t set);
 curandStatus_t curandGetScrambleConstants32(unsigned int **constants);
 curandStatus_t curandGetScrambleConstants64(unsigned long long **constants);
+
+// ── IPC generator sharing ──────────────────────────────────────────────────────
+// 64-byte opaque handle. Serialises all state needed to reconstruct a
+// generator in another process (seed, offset, type, ordering, dimensions).
+typedef struct {
+    uint64_t seed;
+    uint64_t offset;
+    uint32_t rng_type;       // curandRngType_t
+    uint32_t ordering;       // curandOrdering_t
+    uint32_t quasi_dims;
+    uint32_t scrambled;
+    uint8_t  reserved[32];
+} curandGeneratorIpcHandle_t;
+
+curandStatus_t curandGetGeneratorIpcHandle(curandGenerator_t generator,
+                                            curandGeneratorIpcHandle_t *handle);
+curandStatus_t curandCreateGeneratorFromIpcHandle(curandGenerator_t *generator,
+                                                   const curandGeneratorIpcHandle_t *handle);
+
+// ── Version query ─────────────────────────────────────────────────────────────
+curandStatus_t curandGetVersion(int *version);
 
 #ifdef __cplusplus
 } // extern "C"
