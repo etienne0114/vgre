@@ -1,26 +1,26 @@
 # VGRE Project Status (Canonical)
 
-**Last Updated**: 2026-05-15 (OpenMP optimization + deep doc audit)  
+**Last Updated**: 2026-05-16 (cuFFT FP16/PlanMany + profiler split + doc audit)  
 **Status**: Development / CI-Ready (not general-production-ready for large-scale ML training; see `missingFeatures.md` for gaps)  
-**Test Results**: 108–110/110 tests passing (≥98%), build 122/122 targets  
+**Test Results**: Focused touched tests pass: cuFFT 13/13, cuDNN tensor ops 7/7, cuDNN attention 4/4. Latest full-suite note: 113/114 with one intermittent TCP race.  
 
 ---
 
 ## Executive Summary
 
-VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The project has completed all nine implementation phases. Core memory, stream, event, kernel launch, graph, BLAS, DNN, and library shim paths are solid. Primary remaining gaps are: complex-precision BLAS, cuFFT optimized backend, cuSOLVER LU/least-squares, cuSPARSE format conversions, and some cuBLASLt heuristic features.
+VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The project has completed the documented implementation phases. Core memory, stream, event, kernel launch, graph, BLAS, DNN, FFT/RNG/solver/sparse, NCCL, profiling, and deployment paths are functional. Remaining items are mostly architectural or environment-dependent: physical GPU PMU/CUPTI counters are not available in a CPU runtime, full-fill sparse direct factorization still needs an external sparse solver backend, and RDMA/gRPC require optional build dependencies.
 
 **Key Metrics:**
-- **Test Coverage**: 108–110/110 tests passing (≥98%), total run time ~19–25 seconds
+- **Test Coverage**: focused touched tests pass; latest full-suite note 113/114 with one intermittent TCP cluster race
 - **Platform Support**: Linux (primary), macOS, Windows — all functional
 - **Performance**: 10–50× slower than real GPU for compute-bound workloads; 5–15× for memory-bound workloads. OpenMP parallelization added to all major compute paths (commit `803b76f`).
 - **Critical Issues**: 0
 - **CUDA Runtime API Coverage**: ~95% (~101+ of ~110 commonly-used functions implemented)
 - **CUDA Driver API Coverage**: ~95% (~56+ of ~60 commonly-used functions implemented)
-- **cuBLAS Coverage**: ~85% (~61+ of ~72 real/integer functions; complex C/Z GEMM/GEMV missing)
-- **cuDNN Coverage**: ~90% (~65+ of ~72 major functions; Backend API attention routing missing)
+- **cuBLAS Coverage**: Level-1/2/3 real + complex C/Z + Hermitian implemented for the documented core API
+- **cuDNN Coverage**: legacy major ops + backward/training + Backend API routing including SDPA attention
 - **PTX ISA Coverage**: ~95% (~110+ of ~115 commonly-used instructions)
-- **Production Readiness**: Development / CI-ready. Missing complex BLAS, optimized FFT, and sparse solvers limit arbitrary PyTorch/TensorFlow/JAX workloads.
+- **Production Readiness**: Development / CI-ready. CPU execution is slower than a physical GPU; optional cluster transports and sparse-direct backends determine production deployment scope.
 
 ---
 
@@ -63,22 +63,14 @@ VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. The pro
 - **CUB Fallback**: `cub::WarpReduce/BlockReduce/WarpScan/BlockScan/CachingDeviceAllocator`
 
 ### Library Shims
-- **cuBLAS** (~61+ functions): `cublasCreate/Destroy/GetVersion`, `cublasSgemm/Dgemm/Hgemm`, `cublasSaxpy/Daxpy`, `cublasSdot/Ddot`, `cublasSnrm2/Dnrm2`, `cublasSscal/Dscal`, `cublasScopy/Dcopy`, `cublasSswap/Dswap`, `cublasSasum/Dasum`, `cublasIsamax/Idamax/Isamin/Idamin`, `cublasSrot/Drot/Srotm/Drotm/Srotg/Drotg/Srotmg/Drotmg`, `cublasSetPointerMode/GetPointerMode/SetAtomicsMode/GetAtomicsMode`, `cublasLoggerConfigure/SetLoggerCallback/GetLoggerCallback`, Level-2 (`Strsv/Dtrsv/Sger/Dger/Ssymv/Dsymv/Sgbmv/Dgbmv/Ssyr/Dsyr/Ssyr2/Dsyr2/Strmv/Dtrmv/Stbsv/Stpsv/Sspmv/Ssbmv/Sspr/Sspr2/Stbmv/Stpmv`), Level-3 (`Strsm/Dtrsm/Ssyrk/Dsyrk/Ssyr2k/Dsyr2k/Strmm/Dtrmm/Ssymm/Dsymm`), batched variants, `cublasGemmEx/GemmBatchedEx/GemmStridedBatchedEx`, Hermitian (`Cherk/Zherk/Cher2k/Zher2k/Chemm/Zhemm`).
-  - **Still missing**: Complex C/Z Level-1/2/3 routines (Cgemm, Zgemm, Cgemv, Zgemv, Caxpy, Zaxpy, Cdotc, Zdotc, etc.)
-- **cuDNN** (~65+ functions): `cudnnCreate/Destroy`, all descriptors, `cudnnConvolutionForward/BackwardData/BackwardFilter/BackwardBias`, `cudnnActivationForward/Backward`, `cudnnPoolingForward/Backward`, `cudnnSoftmaxForward/Backward`, `cudnnBatchNormalizationForwardInference/ForwardTraining/Backward`, `cudnnDropoutForward/Backward`, `cudnnRNNForwardInference/Training/BackwardData/BackwardWeights`, `cudnnMultiHeadAttnForward/BackwardData/BackwardWeights`, `cudnnCTCLoss`, `cudnnLRNCrossChannelForward/Backward`, `cudnnDivisiveNormalizationForward/Backward`, `cudnnTransformTensor`, `cudnnOpTensor`, `cudnnReduceTensor`, `cudnnAddTensor`, `cudnnBackendCreateDescriptor/DestroyDescriptor/Finalize/Initialize/Execute` (wired to legacy for conv/activation/pool/softmax/reduction/matmul/BN/norm/RNN/concat/signal/gen_stats/bn_bwd_weights).
-  - **Still missing**: Backend API attention routing (`CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR`).
-- **NCCL** (~16 functions): `ncclCommInitRank/InitAll/Destroy/Abort/Count/UserRank`, `ncclGetUniqueId/Version/LastError`, `ncclAllReduce/Broadcast/Reduce/AllGather/ReduceScatter`, `ncclGroupStart/GroupEnd`, `ncclSend/Recv`, `ncclAllToAll`, `ncclGather/Scatter`.
-  - **Still missing**: Multi-node RDMA transport; topology-aware ring/tree algorithm selection.
-- **cuFFT** (~12 functions): `cufftPlan1d/2d/3d/Many`, `cufftDestroy`, `cufftExecC2C/Z2Z/R2C/C2R/D2Z/Z2D`, `cufftSetStream/WorkArea`. Reference CPU DFT/IDFT.
-  - **Still missing**: FFTW3/MKL delegation for large transforms.
-- **cuRAND** (~18 functions): `curandCreateGenerator/DestroyGenerator/SetPseudoRandomGeneratorSeed/SetGeneratorOffset/SetGeneratorOrdering/GetVersion`, `curandGenerate/GenerateUniform/GenerateNormal/GenerateLogNormal/GeneratePoisson` for XORWOW, MRG32k3a, MTGP32, MT19937.
-  - **Still missing**: Per-stream parallel generator partitioning; device-side RNG (intentionally not supported in CPU model).
-- **cuSOLVER** (~26 functions): `cusolverDnCreate/Destroy`, `cusolverDnSpotrf/Dpotrf/Sgeqrf/Dgeqrf/Sgesvd/Dgesvd/Ssyevd/Dsyevd`.
-  - **Still missing**: `getrf` (LU), `getrs`, `ormqr`, `gelsd`, sparse solvers.
-- **cuSPARSE** (~20 functions): `cusparseCreate/Destroy`, `cusparseSpMV/SpMM` (CSR + COO), `cusparseAxpyi`, `cusparseCreateCoo`.
-  - **Still missing**: Format conversions (CSR↔CSC↔COO), sparse triangular solve (`SpSV`), sparse factorization.
-- **cuBLASLt** (~12 functions): `cublasLtCreate/Destroy`, `cublasLtMatmulDescCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatrixLayoutCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatmul` with ReLU/GELU/Bias epilogues.
-  - **Still missing**: Heuristic selection, algorithm caching, advanced epilogues (DRELU, DGELU, BGRADIENT).
+- **cuBLAS**: Level-1/2/3 real S/D, complex C/Z Level-1/2/3, Hermitian C/Z, batched/strided GEMM, `GemmEx`, pointer/atomics modes, and logger callbacks are implemented.
+- **cuDNN**: Forward/backward/training paths for conv, pool, activation, softmax, BN, dropout, RNN, attention, CTC, LRN, divisive norm, tensor ops, INT8x4/INT8x32 packed layouts, and Backend API descriptor execution including SDPA attention and re-executable plan descriptors.
+- **NCCL**: Communicator lifecycle, all common collectives, P2P (`Send`/`Recv`), `AllToAll`, `Gather`, `Scatter`, single-node shared-memory fast path, TCP multi-node path, and optional RDMA/RoCE bulk transport when built with `VGRE_ENABLE_RDMA`.
+- **cuFFT**: O(n log n) Cooley-Tukey + Bluestein backend for C2C/Z2Z/R2C/C2R/D2Z/Z2D, half-precision C16C/R16C/C16R widen-compute-narrow paths, strided batched 1D `PlanMany`, size estimates, and IPC plan export/import.
+- **cuRAND**: XORWOW, MRG32k3a, MTGP32, MT19937, Sobol quasi-random generators, per-handle mutexes, and host generation APIs. Device-side RNG is intentionally not supported in the CPU runtime.
+- **cuSOLVER**: Dense potrf/geqrf/gesvd/syevd/getrf/getrs/ormqr/gelsd via LAPACK, plus cusolverSp LU/Cholesky/least-squares/eigen paths via CSR-to-dense LAPACK extraction.
+- **cuSPARSE**: Generic descriptors, CSR/COO/CSC SpMV/SpMM, SparseToDense, DenseToSparse, SpSV, SpGEMM, ILU0, IC0, FP16/BF16 widen-compute-narrow paths. Full-fill sparse direct factorization remains an external-library integration item.
+- **cuBLASLt**: Descriptor lifecycle, matrix layouts/preferences, algorithm heuristic cache, matmul for F32/F64/F16/BF16/INT8, scale pointers, amaxD, and full epilogue set including ReLU/GELU/Bias/DReLU/DGELU/BGRAD variants.
 
 ### Cluster Networking
 - TCP cluster networking with multi-node partitioned 3D kernel dispatch (recursive bisection)
@@ -141,13 +133,12 @@ ctest --output-on-failure -j$(nproc)
 
 See `docs/missingFeatures.md` for the exhaustive list. Primary blockers for arbitrary framework workloads:
 
-1. **Complex BLAS missing**: No `cublasCgemm`, `cublasZgemm`, `cublasCgemv`, etc.
-2. **cuFFT slow for large transforms**: Reference O(n²) DFT; no FFTW3/MKL delegation.
-3. **cuSOLVER limited**: Only Cholesky, QR, SVD, eigenvalues. No LU or least-squares.
-4. **cuSPARSE limited**: Only CSR SpMV/SpMM. No format conversions or sparse solvers.
-5. **cuBLASLt no heuristics**: Always falls back to reference GEMM.
-6. **NCCL no RDMA**: Multi-node uses TCP sockets, not RDMA.
+1. **CPU performance ceiling**: VGRE is still much slower than a physical GPU for large compute-bound training workloads.
+2. **Physical GPU profiler counters**: NVIDIA CUPTI/PMU counters are unavailable in CPU emulation; VGRE reports timeline/OTLP/Chrome trace and LLVM-IR instruction classification.
+3. **Sparse direct factorization with fill-in**: Full-fill sparse LU/Cholesky needs an external sparse solver backend such as UMFPACK/SuperLU/CHOLMOD.
+4. **Optional transports**: RDMA and gRPC require explicit build flags and system libraries; TCP remains the portable default.
+5. **Device-side RNG**: cuRAND device API is intentionally unsupported because VGRE has no CUDA device execution model.
 
 ---
 
-*Last updated: 2026-05-15*
+*Last updated: 2026-05-16*
