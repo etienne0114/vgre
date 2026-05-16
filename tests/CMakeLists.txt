@@ -79,6 +79,7 @@ add_test(NAME IGPUBackendIntegration COMMAND test_igpu_backend)
 add_executable(test_complex_jit integration/test_complex_jit.cpp)
 target_link_libraries(test_complex_jit PRIVATE vgre)
 add_test(NAME ComplexJITIntegration COMMAND test_complex_jit)
+set_tests_properties(ComplexJITIntegration PROPERTIES RESOURCE_LOCK vgre_llvm_jit)
 
 add_executable(test_syncthreads integration/test_syncthreads.cpp)
 target_link_libraries(test_syncthreads PRIVATE vgre)
@@ -168,12 +169,13 @@ set_tests_properties(ClangEnhanced PROPERTIES TIMEOUT 600)
 add_executable(test_kernel_parser_enhanced compiler/test_kernel_parser_enhanced.cpp)
 target_link_libraries(test_kernel_parser_enhanced PRIVATE vgre)
 add_test(NAME KernelParserEnhanced COMMAND test_kernel_parser_enhanced)
-set_tests_properties(KernelParserEnhanced PROPERTIES TIMEOUT 600)
+set_tests_properties(KernelParserEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
 
 
 add_executable(test_flop_counting compiler/test_flop_counting.cpp)
 target_link_libraries(test_flop_counting PRIVATE vgre)
 add_test(NAME FLOPCounting COMMAND test_flop_counting)
+set_tests_properties(FLOPCounting PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
 
 add_executable(test_texture_view unit/test_texture_view.cpp)
 target_link_libraries(test_texture_view PRIVATE vgre)
@@ -257,6 +259,14 @@ add_test(NAME CusolverLAPACK COMMAND test_cusolver)
 add_executable(test_cusolver_sp api/test_cusolver_sp.cpp)
 target_link_libraries(test_cusolver_sp PRIVATE vgre_cudart)
 add_test(NAME CusolverSparse COMMAND test_cusolver_sp)
+
+add_executable(test_cusparse api/test_cusparse.cpp)
+target_link_libraries(test_cusparse PRIVATE vgre_cudart)
+add_test(NAME CuSPARSEFunctional COMMAND test_cusparse)
+
+add_executable(test_cublaslt api/test_cublaslt.cpp)
+target_link_libraries(test_cublaslt PRIVATE vgre_cudart)
+add_test(NAME CuBLASLtFunctional COMMAND test_cublaslt)
 
 add_executable(test_cudnn_backward_data api/test_cudnn_backward_data.cpp)
 target_link_libraries(test_cudnn_backward_data PRIVATE vgre)

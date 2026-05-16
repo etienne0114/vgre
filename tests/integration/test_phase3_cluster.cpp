@@ -39,15 +39,18 @@ void master_node() {
     }
     
     int worker_id = -1;
-    for (int i = 0; i < 100; ++i) {
+    // Poll up to 30 seconds (150 × 200 ms) — security handshake can take
+    // several seconds under heavy parallel CI load.
+    for (int i = 0; i < 150; ++i) {
         worker_id = cluster.getFirstActiveWorker();
         if (worker_id >= 0) break;
         std::cout << "Master: Still waiting for worker (attempt " << i << ")..." << std::endl << std::flush;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-    
+
     if (worker_id < 0) {
         std::cerr << "Master FAIL: No worker connected" << std::endl << std::flush;
+        cluster.shutdown(); // must shut down before returning so threads are joined
         return;
     }
     std::cout << "Master: Worker connected (ID: " << worker_id << ")" << std::endl << std::flush;

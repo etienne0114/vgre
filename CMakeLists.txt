@@ -476,6 +476,7 @@ add_library(vgre_cudart SHARED
     src/api/cusparse/cusparse_factorization.cpp
     src/api/cusolver/cusolver_core.cpp
     src/api/cublaslt/cublaslt_core.cpp
+    src/api/cublaslt/cublaslt_matmul.cpp
     src/api/nvtx_shim.cpp
     src/api/vgre_c_api.cpp
     src/api/vgre_c_api_graphs.cpp

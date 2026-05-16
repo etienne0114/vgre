@@ -17,15 +17,15 @@
 | cuBLAS (real) | Level 1/2/3 complete | Level 1/2/3 complete | S/D variants + Hermitian (Cherk/Zherk/Cher2k/Zher2k/Chemm/Zhemm) all implemented |
 | cuBLAS (complex) | Listed in docs | **IMPLEMENTED** | C/Z Level-1/2/3: GEMM, GEMV, AXPY, DOT, SCAL, NRM2, ROT, COPY, SWAP, TRSV, GER, TRSM, SYRK, SYR2K, SYMM, TRMM all present |
 | cuDNN (legacy) | All major ops | All major ops | Fwd/bwd for conv, pool, activation, softmax, BN, dropout, RNN, attention, LRN, divisive norm, CTC loss, tensor ops |
-| cuDNN Backend API | Wired to legacy | Partially wired | Handles conv, activation, pool, softmax, reduction, matmul, BN, norm, RNN, concat, signal, gen_stats, bn_bwd_weights. **No attention routing.** |
-| NCCL | P2P + collectives | P2P + collectives | Single-node shared-memory; multi-node routes through TCPCluster (functional but not RDMA-optimized) |
+| cuDNN Backend API | Wired to legacy | **Fully wired** | Conv, pool, activation, softmax, reduction, matmul, BN, norm, RNN, concat, signal, gen_stats, bn_bwd_weights, **attention (SDPA)**. |
+| NCCL | P2P + collectives | P2P + collectives | Single-node shared-memory; ring-reduce for tensors > 1 MB; multi-node routes through TCPCluster |
 | cuFFT | O(n log n) FFT | O(n log n) FFT | Built-in Cooley-Tukey + Bluestein. Optional FFTW3 delegation via `VGRE_HAS_FFTW3`. Plan caching via handle map. |
-| cuRAND | 4 generators | 4 generators | All use sequential `std::mt19937_64`; no parallel stream-safe generator partitioning |
-| cuSOLVER | 8 dense routines | 8 dense routines | `potrf`, `geqrf`, `gesvd`, `syevd`, `getrf`, `getrs`, `ormqr`, `gelsd` — all via LAPACK delegation with proper workspace queries. Missing: sparse solvers |
-| cuSPARSE | CSR SpMV/SpMM | Full generic API | CSR, COO, CSC descriptors; SpMV, SpMM; SparseToDense; DenseToSparse; SpSV (tri solve); SpGEMM; ILU0; IC0 |
-| cuBLASLt | Basic matmul + epilogues | Full epilogue set + LRU cache | ReLU, GELU, Bias, DRELU, DGELU, DRELU_BGRAD, DGELU_BGRAD, BGRADA/BGRADB; AlgoGetHeuristic + LRU cache |
-| Profiling | Kernel timeline + Chrome trace | Kernel timeline + Chrome trace | `InstructionSample` is heuristic-only (no hardware PC counter). No separate `src/advanced/profiling/` directory — all in `runtime_profiler.cpp` |
-| File Organization | All large files split | **DONE** | 8 monolithic files (>800 lines) split into 22 smaller files. All 353 functions verified present. 110/110 tests pass |
+| cuRAND | 4 generators | 4 generators + Sobol | Per-handle `std::mutex genMutex`; concurrent calls on different handles are fully parallel. Sobol quasi-random (32/64-bit, scrambled). |
+| cuSOLVER | 8 dense routines | **All dense + sparse** | Dense: potrf, geqrf, gesvd, syevd, getrf, getrs, ormqr, gelsd via LAPACK. Sparse (cusolverSp): csrlsvlu, csrlsvchol, csrlsqvqr, csreigvsi via dense extraction. |
+| cuSPARSE | CSR SpMV/SpMM | **Full generic API** | CSR, COO, CSC; SpMV, SpMM (S/D/C/Z/FP16/BF16/INT8); SparseToDense; DenseToSparse; SpSV (S/D/FP16/BF16, lower+upper, unit+non-unit, direct+transposed); SpGEMM (S/D/FP16/BF16); ILU0; IC0 |
+| cuBLASLt | Basic matmul + epilogues | **Full epilogue set + LRU cache** | ReLU, GELU, Bias, DRELU, DGELU, DRELU_BGRAD, DGELU_BGRAD, BGRADA/BGRADB; 128-entry LRU algo cache |
+| Profiling | Kernel timeline + Chrome trace | Kernel timeline + Chrome trace | `InstructionSample` is heuristic-only (no hardware PMU counter). All in `runtime_profiler.cpp`. |
+| File Organization | All large files split | **DONE** | 13 monolithic files split into 37 smaller files. 116 total tests. |
 | K8s Plugin | Go gRPC | Go gRPC | Basic daemonset; no dynamic device discovery |
 | SLURM GRES | C shared lib | C shared lib | Basic vGPU allocation tracker |
 
@@ -80,7 +80,7 @@ All 21 test cases pass. OpenMP parallelization enabled for CGEMM/ZGEMM.
 | `cusolverDnSormqr` / `Dormqr` (apply Q from QR) | **DONE** | `sormqr_` / `dormqr_` |
 | `cusolverDnSgelsd` / `Dgelsd` (least-squares driver) | **DONE** | `sgelsd_` / `dgelsd_` with workspace query |
 
-**Sparse API** — `cusolverSp*` routines (sparse Cholesky, QR, LU for graph/physics problems) require UMFPACK or CHOLMOD linkage not available in the base build. **Missing.** See §4.5 below.
+**Sparse API** — `cusolverSp*` routines: **DONE** (2026-05-16). Implemented via CSR→dense extraction + LAPACK in `cusolver_core.cpp`. See §3.6 for the complete API table and approach.
 
 ---
 
@@ -115,8 +115,8 @@ All 11 test cases pass. 112/112 full suite pass.
 | `cusparseDenseToSparse_bufferSize` / `_analysis` / `_compress` | **DONE** | Added in `cusparse_format.cpp` |
 | `cusparseSpMatGetAttribute` / `cusparseSpMatSetAttribute` | **DONE** | Fill mode, diagonal type |
 | `cusparseSpMatGetSize` / `cusparseCsrSetPointers` | **DONE** | Required by DenseToSparse workflow |
-| `cusparseSpSV_createDescr` / `_destroyDescr` / `_bufferSize` / `_analysis` / `_solve` | **DONE** | Full forward/backward/transposed triangular solve via gather+scatter in `cusparse_triangular.cpp`; supports lower+upper, unit+non-unit diagonal, non-transposed+transposed |
-| `cusparseSpGEMM` (sparse × sparse) | **DONE** (2026-05-16) | 3-phase workEstimation+compute+copy in `cusparse_factorization.cpp`; float + double |
+| `cusparseSpSV_createDescr` / `_destroyDescr` / `_bufferSize` / `_analysis` / `_solve` | **DONE** | Full forward/backward/transposed triangular solve via gather+scatter in `cusparse_triangular.cpp`; supports lower+upper, unit+non-unit diagonal, non-transposed+transposed; FP16/BF16 widen-compute-narrow path |
+| `cusparseSpGEMM` (sparse × sparse) | **DONE** (2026-05-16) | 3-phase workEstimation+compute+copy in `cusparse_factorization.cpp`; float + double + FP16 + BF16 (widen-compute-narrow) |
 | `cusparseScsrilu02` / `cusparseDcsrilu02` (ILU0) | **DONE** (2026-05-16) | In-place ILU with zero fill-in; marker-based O(nnz * avg_row) |
 | `cusparseScsric02` / `cusparseDcsric02` (IC0) | **DONE** (2026-05-16) | In-place incomplete Cholesky with zero fill-in for SPD matrices |
 | Sparse direct factorization (UMFPACK-style full fill-in) | **MISSING** | Requires external sparse LAPACK library |
@@ -165,7 +165,7 @@ Registry changed to `unique_ptr<GeneratorState>` with `std::mutex genMutex` per 
 
 | Missing | Impact | Notes |
 |---|---|---|
-| True instruction-level hardware sampling | `InstructionSample` is pure heuristic | `runtime_profiler.cpp` estimates instruction mix from kernel source heuristics, not hardware PMU counters. No separate `src/advanced/profiling/` directory. |
+| True instruction-level hardware sampling | `InstructionSample` is partly heuristic | `runtime_profiler.cpp` uses `analyzeStaticFlops()` (authoritative LLVM IR analysis) when `ir->flopCountVerified`; falls back to source-heuristic estimates otherwise. No hardware PMU counters. |
 | CUPTI-equivalent API surface | PyTorch profiler integration | Only basic kernel timeline + Chrome trace export exists |
 
 ---
@@ -182,20 +182,22 @@ Registry changed to `unique_ptr<GeneratorState>` with `std::mutex genMutex` per 
 
 ## 3.6 cuSOLVER Sparse API (cusolverSp)
 
-`cusolverSp*` is a separate product from `cusolverDn`. It provides direct sparse solvers
-(Cholesky, QR, LU) for large sparse systems used in physics simulations and graph algorithms.
+**Status**: **IMPLEMENTED** (2026-05-16) via CSR→dense extraction + LAPACK.
 
-| Missing API | Impact |
-|---|---|
-| `cusolverSpCreate` / `Destroy` | Handle lifecycle |
-| `cusolverSpScsrlsvlu` / `Dcsrlsvlu` | Sparse LU solve via CSR |
-| `cusolverSpScsrlsvchol` / `Dcsrlsvchol` | Sparse Cholesky solve |
-| `cusolverSpScsrlsqvqr` / `Dcsrlsqvqr` | Sparse least-squares QR |
-| `cusolverSpScsreigvsi` / `Dcsreigvsi` | Sparse eigenvalue (shift-invert) |
+| API | Status | Implementation |
+|---|---|---|
+| `cusolverSpCreate` / `Destroy` / `SetStream` | **DONE** | Handle lifecycle |
+| `cusolverSpScsrlsvlu` / `Dcsrlsvlu` | **DONE** | CSR→dense + `sgetrf_`/`sgetrs_` |
+| `cusolverSpScsrlsvchol` / `Dcsrlsvchol` | **DONE** | CSR→dense + `spotrf_`/`spotrs_` |
+| `cusolverSpScsrlsqvqr` / `Dcsrlsqvqr` | **DONE** | CSR→dense + `sgelsd_` with workspace query |
+| `cusolverSpScsreigvsi` / `Dcsreigvsi` | **DONE** | Shift-invert power iteration with LU factored (A - mu0·I) |
 
-**Root cause**: Requires UMFPACK (for LU) or CHOLMOD (for Cholesky) as a backend.
-These are not available in the default Linux build. Would require `find_package(UMFPACK)` and
-delegating to the UMFPACK C API.
+**Approach**: Each routine extracts the sparse CSR matrix into a dense column-major array
+(O(n²) memory), delegates to the corresponding LAPACK routine, then writes the result back.
+Correct for moderate n (≤ ~4096). For very large sparse systems where O(n²) memory is
+prohibitive, link against UMFPACK (LU) or CHOLMOD (Cholesky) and replace the extraction path.
+
+**Tested**: `tests/api/test_cusolver_sp.cpp` — 6 tests (handle, null rejection, LU double, LU float, Cholesky, least-squares QR). All pass.
 
 ---
 
@@ -218,7 +220,7 @@ delegating to the UMFPACK C API.
 | `cudaThreadExit` / `cudaThreadSynchronize` | No-op wrappers | Legacy 1.x APIs; thin wrappers around device APIs |
 | `cudaDeviceFlushGPUDirectRDMAWrites` | No-op | RDMA not applicable in CPU model |
 | `cudaProfilerStart` / `cudaProfilerStop` | No-op | No external profiler attached |
-| `cudaGraphDebugDotPrint` | Basic DOT output | Emits GraphViz; no per-node attribute detail |
+| `cudaGraphDebugDotPrint` | Full DOT output | Emits GraphViz with per-node labels: kernel name + grid/block dims + arg count; memcpy/memset byte sizes |
 
 ---
 
@@ -274,11 +276,11 @@ The following items that were previously potential concerns have been resolved:
 4. ~~**cuSPARSE format conversions + sparse triangular solve**~~ — **DONE** (2026-05-16). CSC, SparseToDense, DenseToSparse, SpSV, SpGEMM, ILU0, IC0 all implemented.
 5. ~~**cuBLASLt heuristic selection**~~ — **DONE** (2026-05-16). `cublasLtMatmulAlgoGetHeuristic` with 128-entry LRU cache.
 6. ~~**cuDNN Backend attention routing**~~ — **DONE** (2026-05-16). Scaled dot-product attention via `CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR`.
-7. **cuSOLVER sparse API (cusolverSp)**: Requires UMFPACK/CHOLMOD linkage. Priority: **Medium** for physics/graph workloads.
+7. ~~**cuSOLVER sparse API (cusolverSp)**~~ — **DONE** (2026-05-16). `csrlsvlu`, `csrlsvchol`, `csrlsqvqr`, `csreigvsi` via CSR→dense + LAPACK. 6 tests pass.
 8. **Cross-platform discipline**: New OS-dependent code must use `*_linux.cpp` / `*_macos.cpp` / `*_win32.cpp` split pattern.
 9. **Memory discipline**: Every new memory allocation goes through `MemoryManager`. Every new compute path integrates with `AdaptiveExecutionEngine`.
 10. **File size discipline**: No source file should exceed 800 lines for shims or 600 lines for core logic. Split by concern when approaching limits.
 
 ---
 
-*Last updated: 2026-05-16 (second pass). 113/113 tests passing. Sparse factorization (ILU0/IC0/SpGEMM), caching, and parallel-test serialization added.*
+*Last updated: 2026-05-16 (fourth pass). 113/114 tests passing (1 intermittent TCP cluster race). FP16/BF16 SpSV + SpGEMM, cuBLASLt split (914→478+285 lines), FLOPCounting RESOURCE_LOCK, cusolverSp doc corrections.*
