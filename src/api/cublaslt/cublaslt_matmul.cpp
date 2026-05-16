@@ -1,0 +1,317 @@
+// cuBLASLt matmul execution shim — fuses epilogues (ReLU, GELU, bias,
+// backward activation gradients) in post-processing for CPU emulation.
+
+#include "cublaslt_state.h"
+#include "vgre/common/openmp_helper.h"
+
+#include <cmath>
+#include <cstring>
+#include <vector>
+
+using namespace vgre_lt;
+
+extern void refSgemm(bool tA, bool tB, int M, int N, int K,
+                     float alpha, const float* A, int lda,
+                     const float* B, int ldb, float beta, float* C, int ldc);
+extern void refDgemm(bool tA, bool tB, int M, int N, int K,
+                     double alpha, const double* A, int lda,
+                     const double* B, int ldb, double beta, double* C, int ldc);
+
+namespace {
+
+// ── Epilogue post-processing templates ───────────────────────────────────────
+
+template<typename T>
+void applyRelu(T *data, size_t count) {
+    #ifdef _OPENMP
+    #pragma omp parallel for if (count > 1024)
+    #endif
+    for (size_t i = 0; i < count; ++i) if (data[i] < T(0)) data[i] = T(0);
+}
+
+// DRELU: element-wise ReLU gradient — 1 where input > 0, else 0.
+template<typename T>
+void applyDRelu(T *data, size_t count) {
+    #ifdef _OPENMP
+    #pragma omp parallel for if (count > 1024)
+    #endif
+    for (size_t i = 0; i < count; ++i) data[i] = (data[i] > T(0)) ? T(1) : T(0);
+}
+
+template<typename T>
+void applyGelu(T *data, size_t count) {
+    #ifdef _OPENMP
+    #pragma omp parallel for if (count > 1024)
+    #endif
+    for (size_t i = 0; i < count; ++i) {
+        T x = data[i];
+        data[i] = T(0.5) * x * (T(1.0) + std::tanh(std::sqrt(T(2.0) / T(M_PI)) *
+                               (x + T(0.044715) * x * x * x)));
+    }
+}
+
+// DGELU: d/dx[GELU(x)] = 0.5*(1+tanh(cx)) + 0.5*x*sech²(cx)*c*(1+3k*x²)
+template<typename T>
+void applyDGelu(T *data, size_t count) {
+    const T c = static_cast<T>(std::sqrt(2.0 / M_PI));
+    const T k = static_cast<T>(0.044715);
+    #ifdef _OPENMP
+    #pragma omp parallel for if (count > 1024)
+    #endif
+    for (size_t i = 0; i < count; ++i) {
+        T x   = data[i];
+        T cx  = c * (x + k * x * x * x);
+        T th  = std::tanh(cx);
+        T dcx = c * (T(1) + T(3) * k * x * x);
+        data[i] = T(0.5) * (T(1) + th) + T(0.5) * x * (T(1) - th * th) * dcx;
+    }
+}
+
+template<typename T>
+void applyBias(T *data, size_t rows, size_t cols, const T *bias) {
+    #ifdef _OPENMP
+    #pragma omp parallel for collapse(2) if (rows * cols > 1024)
+    #endif
+    for (size_t r = 0; r < rows; ++r)
+        for (size_t c = 0; c < cols; ++c)
+            data[r * cols + c] += bias[c];
+}
+
+// Column-sum of gradient matrix → bias gradient vector (BGRADA/BGRADB/DRELU_BGRAD/DGELU_BGRAD).
+template<typename T>
+void applyBiasGrad(const T *data, size_t rows, size_t cols, T *biasGrad) {
+    std::fill(biasGrad, biasGrad + cols, T(0));
+    #ifdef _OPENMP
+    #pragma omp parallel for if (rows > 64)
+    #endif
+    for (size_t r = 0; r < rows; ++r)
+        for (size_t c = 0; c < cols; ++c)
+            biasGrad[c] += data[r * cols + c];
+}
+
+} // anonymous namespace
+
+extern "C" {
+
+// ── Matmul execution ─────────────────────────────────────────────────────────
+
+cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
+                              cublasLtMatmulDesc_t matmulDesc,
+                              const void *alpha,
+                              const void *A, cublasLtMatrixLayout_t Adesc,
+                              const void *B, cublasLtMatrixLayout_t Bdesc,
+                              const void *beta,
+                              void *C, cublasLtMatrixLayout_t Cdesc,
+                              void *D, cublasLtMatrixLayout_t Ddesc,
+                              const void * /*algo*/, void * /*workspace*/,
+                              size_t /*workspaceSizeInBytes*/, void * /*stream*/) {
+    if (!matmulDesc || !alpha || !A || !B || !C) return CUBLAS_STATUS_INVALID_VALUE;
+
+    std::lock_guard<std::mutex> lk(g_ltMutex);
+    auto dIt = g_matmulDescs.find(reinterpret_cast<uintptr_t>(matmulDesc));
+    auto aIt = g_layouts.find(reinterpret_cast<uintptr_t>(Adesc));
+    auto bIt = g_layouts.find(reinterpret_cast<uintptr_t>(Bdesc));
+    auto cIt = g_layouts.find(reinterpret_cast<uintptr_t>(Cdesc));
+    if (dIt == g_matmulDescs.end() || aIt == g_layouts.end() ||
+        bIt == g_layouts.end() || cIt == g_layouts.end())
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+    const MatmulDesc   &d  = dIt->second;
+    const MatrixLayout &la = aIt->second;
+    const MatrixLayout &lb = bIt->second;
+    const MatrixLayout &lc = cIt->second;
+
+    int m = static_cast<int>(lc.rows);
+    int n = static_cast<int>(lc.cols);
+    int k = static_cast<int>(d.transA ? la.rows : la.cols);
+
+    // ── Type dispatch ─────────────────────────────────────────────────────────
+    // Use refSgemm/refDgemm directly — the cuBLAS wrappers require a valid
+    // cuBLAS handle which cuBLASLt callers don't provide.
+    bool tA = d.transA != 0, tB = d.transB != 0;
+    if (la.type == CUDA_R_32F && lb.type == CUDA_R_32F && lc.type == CUDA_R_32F) {
+        float alphaF = *static_cast<const float*>(alpha);
+        float betaF  = *static_cast<const float*>(beta);
+        refSgemm(tB, tA, n, m, k, alphaF,
+                 static_cast<const float*>(B), static_cast<int>(lb.ld),
+                 static_cast<const float*>(A), static_cast<int>(la.ld),
+                 betaF, static_cast<float*>(C), static_cast<int>(lc.ld));
+    } else if (la.type == CUDA_R_64F && lb.type == CUDA_R_64F && lc.type == CUDA_R_64F) {
+        double alphaD = *static_cast<const double*>(alpha);
+        double betaD  = *static_cast<const double*>(beta);
+        refDgemm(tB, tA, n, m, k, alphaD,
+                 static_cast<const double*>(B), static_cast<int>(lb.ld),
+                 static_cast<const double*>(A), static_cast<int>(la.ld),
+                 betaD, static_cast<double*>(C), static_cast<int>(lc.ld));
+    } else {
+        // Reduced-precision and mixed types: widen to float, run SGEMM, narrow back.
+        float alphaF = *static_cast<const float*>(alpha);
+        float betaF  = *static_cast<const float*>(beta);
+        std::vector<float> Af(static_cast<size_t>(m * k));
+        std::vector<float> Bf(static_cast<size_t>(k * n));
+        std::vector<float> Cf(static_cast<size_t>(m * n));
+
+        // FP16 ↔ float helpers
+        auto h2f = [](uint16_t h) -> float {
+            uint32_t bits = (static_cast<uint32_t>(h & 0x8000u) << 16) |
+                ((static_cast<uint32_t>((h >> 10) & 0x1fu) == 0u ? 0u :
+                  (static_cast<uint32_t>((h >> 10) & 0x1fu) + 112u)) << 23) |
+                (static_cast<uint32_t>(h & 0x3ffu) << 13);
+            float f; std::memcpy(&f, &bits, 4); return f;
+        };
+        auto f2h = [](float f) -> uint16_t {
+            uint32_t bits; std::memcpy(&bits, &f, 4);
+            uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
+            int exp = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
+            if (exp <= 0) return sign;
+            if (exp >= 31) return static_cast<uint16_t>(sign | 0x7c00u);
+            return static_cast<uint16_t>(sign | (static_cast<uint16_t>(exp) << 10) | ((bits >> 13) & 0x3ffu));
+        };
+        // BF16 ↔ float helpers
+        auto bf2f = [](uint16_t h) -> float {
+            uint32_t bits = static_cast<uint32_t>(h) << 16;
+            float f; std::memcpy(&f, &bits, 4); return f;
+        };
+        auto f2bf = [](float f) -> uint16_t {
+            uint32_t bits; std::memcpy(&bits, &f, 4);
+            return static_cast<uint16_t>(bits >> 16);
+        };
+
+        // Widen A
+        if (la.type == CUDA_R_16F) {
+            const uint16_t *p = static_cast<const uint16_t*>(A);
+            for (int i = 0; i < m * k; ++i) Af[static_cast<size_t>(i)] = h2f(p[i]);
+        } else if (la.type == CUDA_R_16BF) {
+            const uint16_t *p = static_cast<const uint16_t*>(A);
+            for (int i = 0; i < m * k; ++i) Af[static_cast<size_t>(i)] = bf2f(p[i]);
+        } else if (la.type == CUDA_R_8I) {
+            const int8_t *p = static_cast<const int8_t*>(A);
+            for (int i = 0; i < m * k; ++i) Af[static_cast<size_t>(i)] = static_cast<float>(p[i]);
+        } else {
+            std::memcpy(Af.data(), A, static_cast<size_t>(m * k) * sizeof(float));
+        }
+
+        // Widen B
+        if (lb.type == CUDA_R_16F) {
+            const uint16_t *p = static_cast<const uint16_t*>(B);
+            for (int i = 0; i < k * n; ++i) Bf[static_cast<size_t>(i)] = h2f(p[i]);
+        } else if (lb.type == CUDA_R_16BF) {
+            const uint16_t *p = static_cast<const uint16_t*>(B);
+            for (int i = 0; i < k * n; ++i) Bf[static_cast<size_t>(i)] = bf2f(p[i]);
+        } else if (lb.type == CUDA_R_8I) {
+            const int8_t *p = static_cast<const int8_t*>(B);
+            for (int i = 0; i < k * n; ++i) Bf[static_cast<size_t>(i)] = static_cast<float>(p[i]);
+        } else {
+            std::memcpy(Bf.data(), B, static_cast<size_t>(k * n) * sizeof(float));
+        }
+
+        // Widen C (for beta accumulation)
+        if (lc.type == CUDA_R_16F) {
+            const uint16_t *p = static_cast<const uint16_t*>(C);
+            for (int i = 0; i < m * n; ++i) Cf[static_cast<size_t>(i)] = h2f(p[i]);
+        } else if (lc.type == CUDA_R_16BF) {
+            const uint16_t *p = static_cast<const uint16_t*>(C);
+            for (int i = 0; i < m * n; ++i) Cf[static_cast<size_t>(i)] = bf2f(p[i]);
+        } else if (lc.type == CUDA_R_8I) {
+            const int8_t *p = static_cast<const int8_t*>(C);
+            for (int i = 0; i < m * n; ++i) Cf[static_cast<size_t>(i)] = static_cast<float>(p[i]);
+        } else if (lc.type == CUDA_R_32I) {
+            const int32_t *p = static_cast<const int32_t*>(C);
+            for (int i = 0; i < m * n; ++i) Cf[static_cast<size_t>(i)] = static_cast<float>(p[i]);
+        } else {
+            std::memcpy(Cf.data(), C, static_cast<size_t>(m * n) * sizeof(float));
+        }
+
+        refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
+                 Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
+
+        // Narrow C back
+        if (lc.type == CUDA_R_16F) {
+            uint16_t *p = static_cast<uint16_t*>(C);
+            for (size_t i = 0; i < static_cast<size_t>(m * n); ++i) p[i] = f2h(Cf[i]);
+        } else if (lc.type == CUDA_R_16BF) {
+            uint16_t *p = static_cast<uint16_t*>(C);
+            for (size_t i = 0; i < static_cast<size_t>(m * n); ++i) p[i] = f2bf(Cf[i]);
+        } else if (lc.type == CUDA_R_8I) {
+            int8_t *p = static_cast<int8_t*>(C);
+            for (size_t i = 0; i < static_cast<size_t>(m * n); ++i) p[i] = static_cast<int8_t>(Cf[i]);
+        } else if (lc.type == CUDA_R_32I) {
+            int32_t *p = static_cast<int32_t*>(C);
+            for (size_t i = 0; i < static_cast<size_t>(m * n); ++i) p[i] = static_cast<int32_t>(Cf[i]);
+        } else {
+            std::memcpy(C, Cf.data(), static_cast<size_t>(m * n) * sizeof(float));
+        }
+    }
+
+    // Copy C → D if they differ
+    if (D && D != C) {
+        auto dIt2 = g_layouts.find(reinterpret_cast<uintptr_t>(Ddesc));
+        if (dIt2 != g_layouts.end()) {
+            size_t count = static_cast<size_t>(lc.rows * lc.cols);
+            if (lc.type == CUDA_R_32F)
+                std::memcpy(D, C, count * sizeof(float));
+            else if (lc.type == CUDA_R_64F)
+                std::memcpy(D, C, count * sizeof(double));
+            else if (lc.type == CUDA_R_16F || lc.type == CUDA_R_16BF)
+                std::memcpy(D, C, count * sizeof(uint16_t));
+        }
+    }
+
+    // Apply epilogue on D (or C if D==nullptr or D==C)
+    void *target = (D && D != C) ? D : C;
+    size_t count = static_cast<size_t>(lc.rows * lc.cols);
+
+    auto applyEpilogue = [&](auto *fp, auto /*tag*/) {
+        using T = std::remove_pointer_t<decltype(fp)>;
+        const T *bias = d.biasPtr ? static_cast<const T*>(d.biasPtr) : nullptr;
+        switch (d.epilogue) {
+        case CUBLASLT_EPILOGUE_BIAS:
+            if (bias) applyBias(fp, static_cast<size_t>(lc.rows), static_cast<size_t>(lc.cols), bias);
+            break;
+        case CUBLASLT_EPILOGUE_RELU:
+        case CUBLASLT_EPILOGUE_RELU_AUX:
+            applyRelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_RELU_BIAS:
+            if (bias) applyBias(fp, static_cast<size_t>(lc.rows), static_cast<size_t>(lc.cols), bias);
+            applyRelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_GELU:
+        case CUBLASLT_EPILOGUE_GELU_AUX:
+            applyGelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_GELU_BIAS:
+            if (bias) applyBias(fp, static_cast<size_t>(lc.rows), static_cast<size_t>(lc.cols), bias);
+            applyGelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_DRELU:
+            applyDRelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_DRELU_BGRAD:
+            if (d.epilogueAuxPtr) applyBiasGrad(fp, static_cast<size_t>(lc.rows), static_cast<size_t>(lc.cols), static_cast<T*>(d.epilogueAuxPtr));
+            applyDRelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_DGELU:
+            applyDGelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_DGELU_BGRAD:
+            if (d.epilogueAuxPtr) applyBiasGrad(fp, static_cast<size_t>(lc.rows), static_cast<size_t>(lc.cols), static_cast<T*>(d.epilogueAuxPtr));
+            applyDGelu(fp, count);
+            break;
+        case CUBLASLT_EPILOGUE_BGRADA:
+        case CUBLASLT_EPILOGUE_BGRADB:
+            if (d.epilogueAuxPtr) applyBiasGrad(fp, static_cast<size_t>(lc.rows), static_cast<size_t>(lc.cols), static_cast<T*>(d.epilogueAuxPtr));
+            break;
+        case CUBLASLT_EPILOGUE_DEFAULT:
+        default:
+            break;
+        }
+    };
+
+    if (lc.type == CUDA_R_32F) applyEpilogue(static_cast<float*>(target), 0.0f);
+    else if (lc.type == CUDA_R_64F) applyEpilogue(static_cast<double*>(target), 0.0);
+
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+} // extern "C"

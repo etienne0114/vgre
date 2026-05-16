@@ -198,8 +198,28 @@ VGREResult GraphManager::debugDotPrint(GraphId id, const char *path,
     dot << "digraph G {\n  rankdir=LR;\n";
     for (const auto &node : it->second->nodes) {
         std::string label = std::string(nodeTypeName(node.type));
-        if (node.type == GraphNodeType::KERNEL && !node.kernelName.empty())
-            label += "\\n" + node.kernelName;
+        switch (node.type) {
+        case GraphNodeType::KERNEL:
+            if (!node.kernelName.empty()) label += "\\n" + node.kernelName;
+            label += "\\ngrid(" + std::to_string(node.gridDim.x)  + "," +
+                                   std::to_string(node.gridDim.y)  + "," +
+                                   std::to_string(node.gridDim.z)  + ")";
+            label += " blk(" + std::to_string(node.blockDim.x) + "," +
+                                std::to_string(node.blockDim.y) + "," +
+                                std::to_string(node.blockDim.z) + ")";
+            if (!node.capturedArgs.empty())
+                label += "\\n" + std::to_string(node.capturedArgs.size()) + " args";
+            break;
+        case GraphNodeType::MEMCPY:
+            label += "\\n" + std::to_string(node.count) + " bytes";
+            break;
+        case GraphNodeType::MEMSET:
+            label += "\\nval=" + std::to_string(node.memsetValue) +
+                     " " + std::to_string(node.memsetWidth * node.memsetHeight) + " bytes";
+            break;
+        default:
+            break;
+        }
         dot << "  node" << node.nodeId
             << " [label=\"[" << node.nodeId << "] " << label << "\"];\n";
         for (auto dep : node.deps)

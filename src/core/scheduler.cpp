@@ -1,5 +1,7 @@
 #include "vgre/core/scheduler.h"
 #include "vgre/common/logger.h"
+#include <future>
+#include <memory>
 
 namespace vgre {
 namespace core {
@@ -67,17 +69,16 @@ Scheduler::Scheduler(int numThreads) : numThreads_(numThreads) {
 Scheduler::~Scheduler() {
   shutdown_ = true;
   cv_.notify_all();
-  // Use timeout when joining worker threads to prevent indefinite blocking
-  // In test environments, worker threads might not exit cleanly
   for (auto &w : workers_) {
-    if (w.joinable()) {
-      // Try to join with timeout
-      auto future = std::async(std::launch::async, [&w]() { w.join(); });
-      if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
-        // Timeout - detach the thread instead
-        w.detach();
-      }
-    }
+    if (!w.joinable()) continue;
+    auto p = std::make_shared<std::promise<void>>();
+    auto f = p->get_future();
+    std::thread joiner([p, innerW = std::move(w)]() mutable {
+        innerW.join();
+        p->set_value();
+    });
+    joiner.detach();
+    f.wait_for(std::chrono::seconds(5)); // non-blocking after timeout
   }
   VGRE_LOG_DEBUG("Scheduler", "Shut down — completed " +
                                   std::to_string(completed_.load()) + " tasks");

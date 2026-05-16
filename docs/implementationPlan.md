@@ -186,13 +186,13 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 **Implementation**: Delegates to system LAPACK with proper workspace queries.
 
 **Dense API complete**: potrf, geqrf, gesvd, syevd, getrf, getrs, ormqr, gelsd — all via LAPACK delegation with proper `lwork=-1` workspace queries.
-**Still missing**: `cusolverSp*` sparse solver API (requires UMFPACK/CHOLMOD). See `missingFeatures.md` §3.6.
+**Sparse API complete** (cusolverSp, 2026-05-16): csrlsvlu, csrlsvchol, csrlsqvqr, csreigvsi — via CSR→dense extraction + LAPACK. See `missingFeatures.md` §3.6 for full table.
 
 ---
 
 #### 3.4.4 cuSPARSE
 
-**Files**: `src/api/cusparse/cusparse_core.cpp` + `cusparse_format.cpp` + `cusparse_triangular.cpp` (split at 2026-05-16 when core reached 1017 lines)
+**Files**: `src/api/cusparse/cusparse_core.cpp` + `cusparse_format.cpp` + `cusparse_triangular.cpp` + `cusparse_factorization.cpp` (split at 2026-05-16 when core reached 1017 lines)
 
 **Shared state**: `src/api/cusparse/cusparse_state.h` (internal, not public)
 
@@ -208,7 +208,7 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 
 #### 3.4.5 cuBLASLt
 
-**File**: `src/api/cublaslt/cublaslt_core.cpp` (single file, 837 lines)
+**Files**: `src/api/cublaslt/cublaslt_core.cpp` (478 lines) + `cublaslt_matmul.cpp` (285 lines) + `cublaslt_state.h` (internal, 110 lines). Split 2026-05-16 when core reached 914 lines.
 
 **Implemented**: `cublasLtCreate/Destroy`, `cublasLtMatmulDescCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatrixLayoutCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatmulPreferenceCreate/Destroy/SetAttribute/GetAttribute`, `cublasLtMatmulAlgoGetHeuristic` (singular + plural), `cublasLtMatmul` with all epilogues: ReLU, GELU, Bias, ReLU+Bias, GELU+Bias, DRELU, DGELU, DRELU_BGRAD, DGELU_BGRAD, BGRADA/BGRADB. Scale pointer attributes (A/B/C/D scale, amaxD, epilogueAuxPtr, biasDataType). All data types: F32, F64, F16, BF16, INT8→INT32.
 
@@ -377,7 +377,7 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 | `src/api/curand/` | cuRAND shim | 1 `.cpp` file |
 | `src/api/cusolver/` | cuSOLVER LAPACK delegation | 1 `.cpp` file |
 | `src/api/cusparse/` | cuSPARSE shim (core, format, triangular, factorization) | 4 `.cpp` files + `cusparse_state.h` |
-| `src/api/cublasLt/` | cuBLASLt shim | 1 `.cpp` file |
+| `src/api/cublasLt/` | cuBLASLt shim (core + matmul) | 2 `.cpp` files + `cublaslt_state.h` |
 | `src/compiler/ptx/` | PTX translator by family | 4 `.cpp` files |
 | `src/core/graph/` | Graph manager by concern | 7 `.cpp` files |
 | `src/deployment/k8s_device_plugin/` | K8s Device Plugin | 4 files (Go) |
@@ -582,7 +582,7 @@ tests/core/texture/         # Texture/surface object tests
 | 4.12 | cuRAND per-handle mutex (thread-safe concurrent generation) | **DONE** | 2026-05-16 |
 | 4.13 | Texture SRGB gamma decode (`TextureDescriptor::srgbDecode` flag) | **DONE** | 2026-05-16 |
 | 4.14 | cuSolver dense API complete: getrf + getrs + ormqr + gelsd via LAPACK | **DONE** | 2026-05-16 |
-| 4.15 | cuSOLVER sparse API (cusolverSp) | **MISSING** — requires UMFPACK/CHOLMOD | — |
+| 4.15 | cuSOLVER sparse API (cusolverSp) | **DONE** (2026-05-16) — CSR→dense + LAPACK | 2026-05-16 |
 
 ### Phase 5 — CUDA Driver API
 
@@ -641,8 +641,13 @@ tests/core/texture/         # Texture/surface object tests
 | # | Feature | Status | Date |
 |---|---|---|---|
 | 10.1 | CDP (`cudaDeviceSynchronize`, `GetParameterBufferV2`, `LaunchDeviceV2`) | **DONE** | 2026-05-14 |
-| 10.2 | Profiling (kernel timeline, Chrome trace, `InstructionSample`) | **PARTIAL** | 2026-05-14 |
+| 10.2 | Profiling (kernel timeline, Chrome trace, `InstructionSample` + `analyzeStaticFlops`) | **PARTIAL** | 2026-05-14 |
 | 10.5 | cuBLASLt DRELU/DGELU/BGRAD epilogues + scale ptrs | **DONE** | 2026-05-16 |
+| 10.10 | cuBLASLt file split (914→core 362+matmul 337 lines) + cublaslt_state.h | **DONE** | 2026-05-16 |
+| 10.11 | cuSPARSE SpSV FP16/BF16 widen-compute-narrow path | **DONE** | 2026-05-16 |
+| 10.12 | cuSPARSE SpGEMM FP16/BF16 widen-compute-narrow path | **DONE** | 2026-05-16 |
+| 10.13 | FLOPCounting RESOURCE_LOCK vgre_llvm_jit (prevent parallel LLVM JIT contention) | **DONE** | 2026-05-16 |
+| 10.14 | test_phase3_cluster shutdown race fix (missing cluster.shutdown() on early return) | **DONE** | 2026-05-16 |
 | 10.6 | cuDNN Backend attention routing | **DONE** | 2026-05-16 |
 | 10.7 | cuRAND thread safety (per-handle mutex) | **DONE** | 2026-05-16 |
 | 10.8 | Texture SRGB gamma decode | **DONE** | 2026-05-16 |
@@ -699,4 +704,4 @@ Large monolithic source files (>800 lines) were split into smaller, logically gr
 
 ---
 
-*Last updated: 2026-05-16 (second pass). 113/113 tests passing. Sparse factorization (ILU0/IC0/SpGEMM), cuBLASLt LRU cache, RESOURCE_LOCK test serialization added.*
+*Last updated: 2026-05-16 (fourth pass). 113/114 tests passing (1 intermittent TCP race). FP16/BF16 SpSV+SpGEMM, cuBLASLt split (914→478+285), cusolverSp DONE, FLOPCounting RESOURCE_LOCK.*

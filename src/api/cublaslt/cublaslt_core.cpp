@@ -1,223 +1,26 @@
-// cuBLASLt emulation shim — delegates core GEMM to cublas, fuses epilogues
-// in post-processing (ReLU, GELU, bias) for CPU emulation.
-//
-// This is a functional reference covering:
-//   - cublasLtMatmul (with/without fused epilogue)
-//   - Descriptor creation / attribute setting
-//
-// For production performance with fused epilogues, use vendor cuBLASLt.
+// cuBLASLt emulation shim — descriptors, layout management, algorithm heuristics.
+// cublasLtMatmul execution lives in cublaslt_matmul.cpp.
 
-#include "vgre/api/cublaslt_shim.h"
-#include "vgre/common/logger.h"
+#include "cublaslt_state.h"
 
-#include <cmath>
-#include <cstring>
-#include <list>
-#include <mutex>
-#include <unordered_map>
-#include <vector>
+using namespace vgre_lt;
 
-// Forward declarations to cublas GEMM (same shared library).
-extern "C" {
-extern int cublasSgemm(void* handle, int transa, int transb,
-                       int m, int n, int k,
-                       const float *alpha,
-                       const float *A, int lda,
-                       const float *B, int ldb,
-                       const float *beta,
-                       float *C, int ldc);
-extern int cublasDgemm(void* handle, int transa, int transb,
-                       int m, int n, int k,
-                       const double *alpha,
-                       const double *A, int lda,
-                       const double *B, int ldb,
-                       const double *beta,
-                       double *C, int ldc);
-} // extern "C"
+// ── Define shared globals ─────────────────────────────────────────────────────
 
-extern void refSgemm(bool tA, bool tB, int M, int N, int K,
-                     float alpha, const float* A, int lda,
-                     const float* B, int ldb, float beta, float* C, int ldc);
-
-namespace {
+namespace vgre_lt {
 
 std::mutex g_ltMutex;
-std::unordered_map<uintptr_t, bool> g_handles;
-uintptr_t g_nextHandle = 1;
+std::unordered_map<uintptr_t, bool>           g_handles;
+uintptr_t                                     g_nextHandle       = 1;
+std::unordered_map<uintptr_t, MatrixLayout>   g_layouts;
+uintptr_t                                     g_nextLayout       = 1;
+std::unordered_map<uintptr_t, MatmulDesc>     g_matmulDescs;
+uintptr_t                                     g_nextMatmulDesc   = 1;
+AlgoCache                                     g_algoCache;
+std::unordered_map<uintptr_t, MatmulPref>     g_prefs;
+std::mutex                                    g_prefMutex;
 
-uintptr_t allocHandle() {
-    std::lock_guard<std::mutex> lk(g_ltMutex);
-    return g_nextHandle++;
-}
-
-void freeHandle(uintptr_t h) {
-    std::lock_guard<std::mutex> lk(g_ltMutex);
-    g_handles.erase(h);
-}
-
-// ── Layout descriptor ────────────────────────────────────────────────────────
-struct MatrixLayout {
-    cublasLtDatatype_t type = CUDA_R_32F;
-    uint64_t rows = 0, cols = 0;
-    int64_t ld = 0;
-    uint32_t batchCount = 1;
-    int64_t batchStride = 0;
-    cublasLtOrder_t order = CUBLASLT_ORDER_COL;
-};
-
-std::unordered_map<uintptr_t, MatrixLayout> g_layouts;
-uintptr_t g_nextLayout = 1;
-
-// ── Matmul descriptor ────────────────────────────────────────────────────────
-struct MatmulDesc {
-    cublasComputeType_t   computeType  = CUBLAS_COMPUTE_32F;
-    cublasLtDatatype_t    scaleType    = CUDA_R_32F;
-    cublasLtEpilogue_t    epilogue     = CUBLASLT_EPILOGUE_DEFAULT;
-    cublasLtPointerMode_t pointerMode  = CUBLASLT_POINTER_MODE_HOST;
-    int transA = 0;
-    int transB = 0;
-    const void *biasPtr       = nullptr;
-    const void *aScalePtr     = nullptr;
-    const void *bScalePtr     = nullptr;
-    const void *cScalePtr     = nullptr;
-    const void *dScalePtr     = nullptr;
-    void       *amaxDPtr      = nullptr;
-    void       *epilogueAuxPtr = nullptr;
-    int64_t    epilogueAuxLd  = 0;
-    cublasLtDatatype_t biasDataType = CUDA_R_32F;
-};
-
-std::unordered_map<uintptr_t, MatmulDesc> g_matmulDescs;
-uintptr_t g_nextMatmulDesc = 1;
-
-// ── Algorithm result cache ────────────────────────────────────────────────────
-// Caches the single VGRE algorithm result for a given (M, N, K, dtype, epilogue)
-// key so repeated cublasLtMatmulAlgoGetHeuristic calls are O(1).
-// LRU eviction keeps the cache bounded at kAlgoCacheMax entries.
-
-static constexpr size_t kAlgoCacheMax = 128;
-
-struct AlgoCacheKey {
-    int m, n, k;
-    int dtypeA, dtypeB, dtypeC;
-    int epilogue, transA, transB;
-    bool operator==(const AlgoCacheKey &o) const {
-        return m==o.m && n==o.n && k==o.k &&
-               dtypeA==o.dtypeA && dtypeB==o.dtypeB && dtypeC==o.dtypeC &&
-               epilogue==o.epilogue && transA==o.transA && transB==o.transB;
-    }
-};
-struct AlgoCacheKeyHash {
-    size_t operator()(const AlgoCacheKey &k) const {
-        size_t h = std::hash<int>{}(k.m);
-        auto combine = [&](int v) { h ^= std::hash<int>{}(v) + 0x9e3779b9 + (h << 6) + (h >> 2); };
-        combine(k.n); combine(k.k); combine(k.dtypeA); combine(k.dtypeB);
-        combine(k.dtypeC); combine(k.epilogue); combine(k.transA); combine(k.transB);
-        return h;
-    }
-};
-
-struct AlgoCache {
-    std::list<AlgoCacheKey>                              lruList;
-    std::unordered_map<AlgoCacheKey, std::list<AlgoCacheKey>::iterator, AlgoCacheKeyHash> map;
-    mutable std::mutex mtx;
-
-    bool get(const AlgoCacheKey &k) const {
-        std::lock_guard<std::mutex> lk(mtx);
-        return map.count(k) != 0;
-    }
-    void put(const AlgoCacheKey &k) {
-        std::lock_guard<std::mutex> lk(mtx);
-        auto it = map.find(k);
-        if (it != map.end()) { lruList.splice(lruList.begin(), lruList, it->second); return; }
-        if (lruList.size() >= kAlgoCacheMax) {
-            map.erase(lruList.back());
-            lruList.pop_back();
-        }
-        lruList.push_front(k);
-        map[k] = lruList.begin();
-    }
-} g_algoCache;
-
-#include "vgre/common/openmp_helper.h"
-
-// ── Epilogue post-processing ─────────────────────────────────────────────────
-
-template<typename T>
-void applyRelu(T *data, size_t count) {
-    #ifdef _OPENMP
-    #pragma omp parallel for if (count > 1024)
-    #endif
-    for (size_t i = 0; i < count; ++i) if (data[i] < T(0)) data[i] = T(0);
-}
-
-// DRELU: element-wise ReLU gradient — pass through where input > 0, else zero.
-// The matmul output is the pre-activation; we write the mask in-place.
-template<typename T>
-void applyDRelu(T *data, size_t count) {
-    #ifdef _OPENMP
-    #pragma omp parallel for if (count > 1024)
-    #endif
-    for (size_t i = 0; i < count; ++i) data[i] = (data[i] > T(0)) ? T(1) : T(0);
-}
-
-template<typename T>
-void applyGelu(T *data, size_t count) {
-    #ifdef _OPENMP
-    #pragma omp parallel for if (count > 1024)
-    #endif
-    for (size_t i = 0; i < count; ++i) {
-        T x = data[i];
-        data[i] = T(0.5) * x * (T(1.0) + std::tanh(std::sqrt(T(2.0) / T(M_PI)) *
-                               (x + T(0.044715) * x * x * x)));
-    }
-}
-
-// DGELU: element-wise GELU gradient = 0.5*(1 + tanh(c*x)) + 0.5*x*sech²(c*x)*c*(1+3*k*x²)
-template<typename T>
-void applyDGelu(T *data, size_t count) {
-    const T c = static_cast<T>(std::sqrt(2.0 / M_PI));
-    const T k = static_cast<T>(0.044715);
-    #ifdef _OPENMP
-    #pragma omp parallel for if (count > 1024)
-    #endif
-    for (size_t i = 0; i < count; ++i) {
-        T x  = data[i];
-        T cx = c * (x + k * x * x * x);
-        T th = std::tanh(cx);
-        T dcx = c * (T(1) + T(3) * k * x * x);
-        data[i] = T(0.5) * (T(1) + th) + T(0.5) * x * (T(1) - th * th) * dcx;
-    }
-}
-
-template<typename T>
-void applyBias(T *data, size_t rows, size_t cols, const T *bias) {
-    #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (rows * cols > 1024)
-    #endif
-    for (size_t r = 0; r < rows; ++r)
-        for (size_t c = 0; c < cols; ++c)
-            data[r * cols + c] += bias[c];
-}
-
-// BGRADA/BGRADB: column-sum of the gradient matrix → bias gradient vector.
-// Writes result into epilogueAuxPtr (must be pre-allocated to `cols` elements).
-template<typename T>
-void applyBiasGrad(const T *data, size_t rows, size_t cols, T *biasGrad) {
-    std::fill(biasGrad, biasGrad + cols, T(0));
-    #ifdef _OPENMP
-    #pragma omp parallel for if (rows > 64)
-    #endif
-    for (size_t r = 0; r < rows; ++r)
-        for (size_t c = 0; c < cols; ++c)
-            biasGrad[c] += data[r * cols + c];
-}
-
-// ── cublas enum mapping ──────────────────────────────────────────────────────
-// cublas gemm transpose codes: 0 = CUBLAS_OP_N, 1 = CUBLAS_OP_T
-int mapTrans(int t) { return t; }
-
-} // namespace
+} // namespace vgre_lt
 
 extern "C" {
 
@@ -303,13 +106,13 @@ cublasStatus_t cublasLtMatrixLayoutGetAttribute(cublasLtMatrixLayout_t matLayout
     const MatrixLayout &l = it->second;
     size_t sz = 0;
     switch (attr) {
-    case CUBLASLT_MATRIX_LAYOUT_TYPE:     sz = sizeof(l.type);     std::memcpy(buf, &l.type, sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_ORDER:    sz = sizeof(l.order);    std::memcpy(buf, &l.order, sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_ROWS:     sz = sizeof(l.rows);     std::memcpy(buf, &l.rows, sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_COLS:     sz = sizeof(l.cols);     std::memcpy(buf, &l.cols, sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_LD:       sz = sizeof(l.ld);       std::memcpy(buf, &l.ld, sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT: sz = sizeof(l.batchCount); std::memcpy(buf, &l.batchCount, sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET: sz = sizeof(l.batchStride); std::memcpy(buf, &l.batchStride, sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_TYPE:                sz = sizeof(l.type);        std::memcpy(buf, &l.type,        sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_ORDER:               sz = sizeof(l.order);       std::memcpy(buf, &l.order,       sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_ROWS:                sz = sizeof(l.rows);        std::memcpy(buf, &l.rows,        sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_COLS:                sz = sizeof(l.cols);        std::memcpy(buf, &l.cols,        sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_LD:                  sz = sizeof(l.ld);          std::memcpy(buf, &l.ld,          sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT:         sz = sizeof(l.batchCount);  std::memcpy(buf, &l.batchCount,  sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET:sz = sizeof(l.batchStride); std::memcpy(buf, &l.batchStride, sz); break;
     default: return CUBLAS_STATUS_INVALID_VALUE;
     }
     if (sizeWritten) *sizeWritten = sz;
@@ -402,12 +205,12 @@ cublasStatus_t cublasLtMatmulDescGetAttribute(cublasLtMatmulDesc_t matmulDesc,
     const MatmulDesc &d = it->second;
     size_t sz = 0;
     switch (attr) {
-    case CUBLASLT_MATMUL_DESC_EPILOGUE:     sz = sizeof(d.epilogue);     std::memcpy(buf, &d.epilogue, sz); break;
-    case CUBLASLT_MATMUL_DESC_POINTER_MODE: sz = sizeof(d.pointerMode);  std::memcpy(buf, &d.pointerMode, sz); break;
-    case CUBLASLT_MATMUL_DESC_TRANSA:       sz = sizeof(d.transA);       std::memcpy(buf, &d.transA, sz); break;
-    case CUBLASLT_MATMUL_DESC_TRANSB:       sz = sizeof(d.transB);       std::memcpy(buf, &d.transB, sz); break;
-    case CUBLASLT_MATMUL_DESC_BIAS_POINTER: sz = sizeof(d.biasPtr);      std::memcpy(buf, &d.biasPtr, sz); break;
-    case CUBLASLT_MATMUL_DESC_SCALE_TYPE:   sz = sizeof(d.scaleType);    std::memcpy(buf, &d.scaleType, sz); break;
+    case CUBLASLT_MATMUL_DESC_EPILOGUE:     sz = sizeof(d.epilogue);    std::memcpy(buf, &d.epilogue,    sz); break;
+    case CUBLASLT_MATMUL_DESC_POINTER_MODE: sz = sizeof(d.pointerMode); std::memcpy(buf, &d.pointerMode, sz); break;
+    case CUBLASLT_MATMUL_DESC_TRANSA:       sz = sizeof(d.transA);      std::memcpy(buf, &d.transA,      sz); break;
+    case CUBLASLT_MATMUL_DESC_TRANSB:       sz = sizeof(d.transB);      std::memcpy(buf, &d.transB,      sz); break;
+    case CUBLASLT_MATMUL_DESC_BIAS_POINTER: sz = sizeof(d.biasPtr);     std::memcpy(buf, &d.biasPtr,     sz); break;
+    case CUBLASLT_MATMUL_DESC_SCALE_TYPE:   sz = sizeof(d.scaleType);   std::memcpy(buf, &d.scaleType,   sz); break;
     default: return CUBLAS_STATUS_INVALID_VALUE;
     }
     if (sizeWritten) *sizeWritten = sz;
@@ -415,355 +218,7 @@ cublasStatus_t cublasLtMatmulDescGetAttribute(cublasLtMatmulDesc_t matmulDesc,
     return CUBLAS_STATUS_SUCCESS;
 }
 
-// ── Matmul execution ─────────────────────────────────────────────────────────
-
-cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
-                              cublasLtMatmulDesc_t matmulDesc,
-                              const void *alpha,
-                              const void *A, cublasLtMatrixLayout_t Adesc,
-                              const void *B, cublasLtMatrixLayout_t Bdesc,
-                              const void *beta,
-                              void *C, cublasLtMatrixLayout_t Cdesc,
-                              void *D, cublasLtMatrixLayout_t Ddesc,
-                              const void * /*algo*/, void * /*workspace*/,
-                              size_t /*workspaceSizeInBytes*/, void * /*stream*/) {
-    if (!matmulDesc || !alpha || !A || !B || !C) return CUBLAS_STATUS_INVALID_VALUE;
-
-    std::lock_guard<std::mutex> lk(g_ltMutex);
-    auto dIt = g_matmulDescs.find(reinterpret_cast<uintptr_t>(matmulDesc));
-    auto aIt = g_layouts.find(reinterpret_cast<uintptr_t>(Adesc));
-    auto bIt = g_layouts.find(reinterpret_cast<uintptr_t>(Bdesc));
-    auto cIt = g_layouts.find(reinterpret_cast<uintptr_t>(Cdesc));
-    if (dIt == g_matmulDescs.end() || aIt == g_layouts.end() ||
-        bIt == g_layouts.end() || cIt == g_layouts.end())
-        return CUBLAS_STATUS_INVALID_VALUE;
-
-    const MatmulDesc &d = dIt->second;
-    const MatrixLayout &la = aIt->second;
-    const MatrixLayout &lb = bIt->second;
-    const MatrixLayout &lc = cIt->second;
-
-    // Compute dimensions
-    int m = static_cast<int>(lc.rows);
-    int n = static_cast<int>(lc.cols);
-    int k = static_cast<int>(d.transA ? la.rows : la.cols);
-
-    if (la.type == CUDA_R_32F && lb.type == CUDA_R_32F && lc.type == CUDA_R_32F) {
-        cublasStatus_t s = static_cast<cublasStatus_t>(cublasSgemm(0, mapTrans(d.transA), mapTrans(d.transB),
-                                       m, n, k,
-                                       static_cast<const float*>(alpha),
-                                       static_cast<const float*>(A), static_cast<int>(la.ld),
-                                       static_cast<const float*>(B), static_cast<int>(lb.ld),
-                                       static_cast<const float*>(beta),
-                                       static_cast<float*>(C), static_cast<int>(lc.ld)));
-        if (s != CUBLAS_STATUS_SUCCESS) return s;
-    } else if (la.type == CUDA_R_64F && lb.type == CUDA_R_64F && lc.type == CUDA_R_64F) {
-        cublasStatus_t s = static_cast<cublasStatus_t>(cublasDgemm(0, mapTrans(d.transA), mapTrans(d.transB),
-                                       m, n, k,
-                                       static_cast<const double*>(alpha),
-                                       static_cast<const double*>(A), static_cast<int>(la.ld),
-                                       static_cast<const double*>(B), static_cast<int>(lb.ld),
-                                       static_cast<const double*>(beta),
-                                       static_cast<double*>(C), static_cast<int>(lc.ld)));
-        if (s != CUBLAS_STATUS_SUCCESS) return s;
-    } else if (la.type == CUDA_R_16F && lb.type == CUDA_R_16F && lc.type == CUDA_R_16F) {
-        // FP16 via float widening
-        float alphaF = *(const float*)alpha;
-        float betaF  = *(const float*)beta;
-        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
-        auto h2f = [](uint16_t h) -> float {
-            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
-                (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
-                 (static_cast<uint32_t>((h >> 10) & 0x1f) + (127 - 15)) << 23) |
-                (static_cast<uint32_t>(h & 0x3ff) << 13);
-            float f; std::memcpy(&f, &bits, 4); return f;
-        };
-        auto f2h = [](float f) -> uint16_t {
-            uint32_t bits; std::memcpy(&bits, &f, 4);
-            uint16_t sign = (bits >> 16) & 0x8000;
-            int exp = ((bits >> 23) & 0xff) - 127 + 15;
-            if (exp <= 0) return sign;
-            if (exp >= 31) return sign | 0x7c00;
-            return sign | (exp << 10) | ((bits >> 13) & 0x3ff);
-        };
-        const uint16_t* pA = static_cast<const uint16_t*>(A);
-        const uint16_t* pB = static_cast<const uint16_t*>(B);
-        uint16_t*       pC = static_cast<uint16_t*>(C);
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * k > 1024)
-        #endif
-        for (int i = 0; i < m * k; ++i) Af[i] = h2f(pA[i]);
-        #ifdef _OPENMP
-        #pragma omp parallel for if (k * n > 1024)
-        #endif
-        for (int i = 0; i < k * n; ++i) Bf[i] = h2f(pB[i]);
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * n > 1024)
-        #endif
-        for (int i = 0; i < m * n; ++i) Cf[i] = h2f(pC[i]);
-        bool tA = d.transA, tB = d.transB;
-        refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
-                 Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * n > 1024)
-        #endif
-        for (size_t i = 0; i < m * n; ++i) pC[i] = f2h(Cf[i]);
-    } else if (la.type == CUDA_R_16BF && lb.type == CUDA_R_16BF && lc.type == CUDA_R_16BF) {
-        // BF16 via float widening
-        float alphaF = *(const float*)alpha;
-        float betaF  = *(const float*)beta;
-        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
-        auto bf2f = [](uint16_t h) -> float {
-            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
-                (static_cast<uint32_t>((h >> 7) & 0xff) + (127 - 127)) << 23 |
-                (static_cast<uint32_t>(h & 0x7f) << 16);
-            float f; std::memcpy(&f, &bits, 4); return f;
-        };
-        auto f2bf = [](float f) -> uint16_t {
-            uint32_t bits; std::memcpy(&bits, &f, 4);
-            uint16_t sign = (bits >> 16) & 0x8000;
-            int exp = ((bits >> 23) & 0xff) - 127 + 127;
-            if (exp <= 0) return sign;
-            if (exp >= 255) return sign | 0x7f80;
-            return sign | (exp << 7) | ((bits >> 16) & 0x7f);
-        };
-        const uint16_t* pA = static_cast<const uint16_t*>(A);
-        const uint16_t* pB = static_cast<const uint16_t*>(B);
-        uint16_t*       pC = static_cast<uint16_t*>(C);
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * k > 1024)
-        #endif
-        for (int i = 0; i < m * k; ++i) Af[i] = bf2f(pA[i]);
-        #ifdef _OPENMP
-        #pragma omp parallel for if (k * n > 1024)
-        #endif
-        for (int i = 0; i < k * n; ++i) Bf[i] = bf2f(pB[i]);
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * n > 1024)
-        #endif
-        for (int i = 0; i < m * n; ++i) Cf[i] = bf2f(pC[i]);
-        bool tA = d.transA, tB = d.transB;
-        refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
-                 Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * n > 1024)
-        #endif
-        for (size_t i = 0; i < m * n; ++i) pC[i] = f2bf(Cf[i]);
-    } else if (la.type == CUDA_R_8I && lb.type == CUDA_R_8I &&
-               (lc.type == CUDA_R_8I || lc.type == CUDA_R_32I)) {
-        // INT8 via float widening
-        float alphaF = *(const float*)alpha;
-        float betaF  = *(const float*)beta;
-        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
-        const int8_t* pA = static_cast<const int8_t*>(A);
-        const int8_t* pB = static_cast<const int8_t*>(B);
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * k > 1024)
-        #endif
-        for (int i = 0; i < m * k; ++i) Af[i] = static_cast<float>(pA[i]);
-        #ifdef _OPENMP
-        #pragma omp parallel for if (k * n > 1024)
-        #endif
-        for (int i = 0; i < k * n; ++i) Bf[i] = static_cast<float>(pB[i]);
-        if (lc.type == CUDA_R_8I) {
-            int8_t* pC = static_cast<int8_t*>(C);
-            #ifdef _OPENMP
-            #pragma omp parallel for if (m * n > 1024)
-            #endif
-            for (int i = 0; i < m * n; ++i) Cf[i] = static_cast<float>(pC[i]);
-            bool tA = d.transA, tB = d.transB;
-            refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
-                     Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
-            #ifdef _OPENMP
-            #pragma omp parallel for if (m * n > 1024)
-            #endif
-            for (size_t i = 0; i < m * n; ++i) pC[i] = static_cast<int8_t>(Cf[i]);
-        } else {
-            int32_t* pC = static_cast<int32_t*>(C);
-            #ifdef _OPENMP
-            #pragma omp parallel for if (m * n > 1024)
-            #endif
-            for (int i = 0; i < m * n; ++i) Cf[i] = static_cast<float>(pC[i]);
-            bool tA = d.transA, tB = d.transB;
-            refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
-                     Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
-            #ifdef _OPENMP
-            #pragma omp parallel for if (m * n > 1024)
-            #endif
-            for (size_t i = 0; i < m * n; ++i) pC[i] = static_cast<int32_t>(Cf[i]);
-        }
-    } else if ((la.type == CUDA_R_16F && lb.type == CUDA_R_16F && lc.type == CUDA_R_32F) ||
-               (la.type == CUDA_R_16F && lb.type == CUDA_R_32F && lc.type == CUDA_R_32F) ||
-               (la.type == CUDA_R_32F && lb.type == CUDA_R_16F && lc.type == CUDA_R_32F)) {
-        // Mixed-precision: FP16 inputs → FP32 accumulate/output
-        float alphaF = *(const float*)alpha;
-        float betaF  = *(const float*)beta;
-        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
-        auto h2f = [](uint16_t h) -> float {
-            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
-                (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
-                 (static_cast<uint32_t>((h >> 10) & 0x1f) + (127 - 15)) << 23) |
-                (static_cast<uint32_t>(h & 0x3ff) << 13);
-            float f; std::memcpy(&f, &bits, 4); return f;
-        };
-        float* pC = static_cast<float*>(C);
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * n > 1024)
-        #endif
-        for (int i = 0; i < m * n; ++i) Cf[i] = pC[i];
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * k > 1024)
-        #endif
-        for (int i = 0; i < m * k; ++i) {
-            if (la.type == CUDA_R_16F) Af[i] = h2f(static_cast<const uint16_t*>(A)[i]);
-            else Af[i] = static_cast<const float*>(A)[i];
-        }
-        #ifdef _OPENMP
-        #pragma omp parallel for if (k * n > 1024)
-        #endif
-        for (int i = 0; i < k * n; ++i) {
-            if (lb.type == CUDA_R_16F) Bf[i] = h2f(static_cast<const uint16_t*>(B)[i]);
-            else Bf[i] = static_cast<const float*>(B)[i];
-        }
-        bool tA = d.transA, tB = d.transB;
-        refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
-                 Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * n > 1024)
-        #endif
-        for (int i = 0; i < m * n; ++i) pC[i] = Cf[i];
-    } else if ((la.type == CUDA_R_16BF && lb.type == CUDA_R_16BF && lc.type == CUDA_R_32F) ||
-               (la.type == CUDA_R_16BF && lb.type == CUDA_R_32F && lc.type == CUDA_R_32F) ||
-               (la.type == CUDA_R_32F && lb.type == CUDA_R_16BF && lc.type == CUDA_R_32F)) {
-        // Mixed-precision: BF16 inputs → FP32 accumulate/output
-        float alphaF = *(const float*)alpha;
-        float betaF  = *(const float*)beta;
-        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
-        auto bf2f = [](uint16_t h) -> float {
-            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
-                (static_cast<uint32_t>((h >> 7) & 0xff) + (127 - 127)) << 23 |
-                (static_cast<uint32_t>(h & 0x7f) << 16);
-            float f; std::memcpy(&f, &bits, 4); return f;
-        };
-        float* pC = static_cast<float*>(C);
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * n > 1024)
-        #endif
-        for (int i = 0; i < m * n; ++i) Cf[i] = pC[i];
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * k > 1024)
-        #endif
-        for (int i = 0; i < m * k; ++i) {
-            if (la.type == CUDA_R_16BF) Af[i] = bf2f(static_cast<const uint16_t*>(A)[i]);
-            else Af[i] = static_cast<const float*>(A)[i];
-        }
-        #ifdef _OPENMP
-        #pragma omp parallel for if (k * n > 1024)
-        #endif
-        for (int i = 0; i < k * n; ++i) {
-            if (lb.type == CUDA_R_16BF) Bf[i] = bf2f(static_cast<const uint16_t*>(B)[i]);
-            else Bf[i] = static_cast<const float*>(B)[i];
-        }
-        bool tA = d.transA, tB = d.transB;
-        refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
-                 Af.data(), static_cast<int>(la.ld), betaF, Cf.data(), static_cast<int>(lc.ld));
-        #ifdef _OPENMP
-        #pragma omp parallel for if (m * n > 1024)
-        #endif
-        for (int i = 0; i < m * n; ++i) pC[i] = Cf[i];
-    } else {
-        return CUBLAS_STATUS_NOT_SUPPORTED;
-    }
-
-    // Copy C → D if pointers differ
-    if (D && D != C) {
-        auto dIt2 = g_layouts.find(reinterpret_cast<uintptr_t>(Ddesc));
-        if (dIt2 != g_layouts.end()) {
-            size_t count = lc.rows * lc.cols;
-            if (lc.type == CUDA_R_32F)
-                std::memcpy(D, C, count * sizeof(float));
-            else if (lc.type == CUDA_R_64F)
-                std::memcpy(D, C, count * sizeof(double));
-            else if (lc.type == CUDA_R_16F || lc.type == CUDA_R_16BF)
-                std::memcpy(D, C, count * sizeof(uint16_t));
-        }
-    }
-
-    // Apply epilogue post-processing on D (or C if D==C)
-    void *target = (D && D != C) ? D : C;
-    size_t count = lc.rows * lc.cols;
-
-    auto applyEpilogue = [&](auto *fp, auto dummy) {
-        using T = std::remove_pointer_t<decltype(fp)>;
-        const T *bias = d.biasPtr ? static_cast<const T*>(d.biasPtr) : nullptr;
-        switch (d.epilogue) {
-        case CUBLASLT_EPILOGUE_BIAS:
-            if (bias) applyBias(fp, lc.rows, lc.cols, bias);
-            break;
-        case CUBLASLT_EPILOGUE_RELU:
-        case CUBLASLT_EPILOGUE_RELU_AUX:
-            applyRelu(fp, count);
-            break;
-        case CUBLASLT_EPILOGUE_RELU_BIAS:
-            if (bias) applyBias(fp, lc.rows, lc.cols, bias);
-            applyRelu(fp, count);
-            break;
-        case CUBLASLT_EPILOGUE_GELU:
-        case CUBLASLT_EPILOGUE_GELU_AUX:
-            applyGelu(fp, count);
-            break;
-        case CUBLASLT_EPILOGUE_GELU_BIAS:
-            if (bias) applyBias(fp, lc.rows, lc.cols, bias);
-            applyGelu(fp, count);
-            break;
-        case CUBLASLT_EPILOGUE_DRELU:
-            applyDRelu(fp, count);
-            break;
-        case CUBLASLT_EPILOGUE_DRELU_BGRAD:
-            // Bias gradient: column sum, then apply DRELU mask
-            if (d.epilogueAuxPtr) applyBiasGrad(fp, lc.rows, lc.cols, static_cast<T*>(d.epilogueAuxPtr));
-            applyDRelu(fp, count);
-            break;
-        case CUBLASLT_EPILOGUE_DGELU:
-            applyDGelu(fp, count);
-            break;
-        case CUBLASLT_EPILOGUE_DGELU_BGRAD:
-            if (d.epilogueAuxPtr) applyBiasGrad(fp, lc.rows, lc.cols, static_cast<T*>(d.epilogueAuxPtr));
-            applyDGelu(fp, count);
-            break;
-        case CUBLASLT_EPILOGUE_BGRADA:
-        case CUBLASLT_EPILOGUE_BGRADB:
-            // Pure bias gradient: column sum of output
-            if (d.epilogueAuxPtr) applyBiasGrad(fp, lc.rows, lc.cols, static_cast<T*>(d.epilogueAuxPtr));
-            break;
-        case CUBLASLT_EPILOGUE_DEFAULT:
-        default:
-            break;
-        }
-        (void)dummy;
-    };
-
-    if (lc.type == CUDA_R_32F) {
-        applyEpilogue(static_cast<float*>(target), 0.0f);
-    } else if (lc.type == CUDA_R_64F) {
-        applyEpilogue(static_cast<double*>(target), 0.0);
-    }
-
-    return CUBLAS_STATUS_SUCCESS;
-}
-
-// ── MatmulPreference (used by PyTorch's SDPA/cublasLt paths) ─────────────────
-// cublasLtMatmulPreference encodes workspace limits and algorithm restrictions.
-// In VGRE's CPU model there are no GPU algorithms; we accept and ignore
-// all preference attributes, returning a single "best" algorithm that delegates
-// to the existing cublasLtMatmul path.
-
-struct MatmulPref {
-    size_t maxWorkspaceBytes = 0;
-};
-
-std::unordered_map<uintptr_t, MatmulPref> g_prefs;
-std::mutex g_prefMutex;
+// ── MatmulPreference ─────────────────────────────────────────────────────────
 
 cublasStatus_t cublasLtMatmulPreferenceCreate(cublasLtMatmulPreference_t *pref) {
     if (!pref) return CUBLAS_STATUS_INVALID_VALUE;
@@ -787,9 +242,8 @@ cublasStatus_t cublasLtMatmulPreferenceSetAttribute(cublasLtMatmulPreference_t p
     std::lock_guard<std::mutex> lk(g_prefMutex);
     auto it = g_prefs.find(reinterpret_cast<uintptr_t>(pref));
     if (it == g_prefs.end()) return CUBLAS_STATUS_INVALID_VALUE;
-    // CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES = 0
     if (attr == 0 && sizeInBytes >= sizeof(size_t))
-        it->second.maxWorkspaceBytes = *static_cast<const size_t *>(buf);
+        it->second.maxWorkspaceBytes = *static_cast<const size_t*>(buf);
     return CUBLAS_STATUS_SUCCESS;
 }
 
@@ -802,7 +256,7 @@ cublasStatus_t cublasLtMatmulPreferenceGetAttribute(cublasLtMatmulPreference_t p
     auto it = g_prefs.find(reinterpret_cast<uintptr_t>(pref));
     if (it == g_prefs.end()) return CUBLAS_STATUS_INVALID_VALUE;
     if (attr == 0 && sizeInBytes >= sizeof(size_t)) {
-        *static_cast<size_t *>(buf) = it->second.maxWorkspaceBytes;
+        *static_cast<size_t*>(buf) = it->second.maxWorkspaceBytes;
         if (sizeWritten) *sizeWritten = sizeof(size_t);
     } else {
         if (sizeWritten) *sizeWritten = 0;
@@ -810,9 +264,7 @@ cublasStatus_t cublasLtMatmulPreferenceGetAttribute(cublasLtMatmulPreference_t p
     return CUBLAS_STATUS_SUCCESS;
 }
 
-// ── MatmulAlgoGetHeuristics ───────────────────────────────────────────────────
-// Returns a list of algorithm candidates for the given problem/preference.
-// In VGRE, there is exactly one "algorithm": the existing cublasLtMatmul path.
+// ── Algorithm heuristics ─────────────────────────────────────────────────────
 
 cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t /*handle*/,
                                                cublasLtMatmulDesc_t matmulDesc,
@@ -827,7 +279,6 @@ cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t /*handle*/,
     if (!heuristicResultsArray || !returnAlgoCount || requestedAlgoCount <= 0)
         return CUBLAS_STATUS_INVALID_VALUE;
 
-    // Build cache key from problem dimensions + types
     AlgoCacheKey key{};
     {
         std::lock_guard<std::mutex> lk(g_ltMutex);
@@ -836,20 +287,19 @@ cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t /*handle*/,
         auto bIt = g_layouts.find(reinterpret_cast<uintptr_t>(Bdesc));
         auto cIt = g_layouts.find(reinterpret_cast<uintptr_t>(Cdesc));
         if (dIt != g_matmulDescs.end() && aIt != g_layouts.end() &&
-            bIt != g_layouts.end() && cIt != g_layouts.end()) {
+            bIt != g_layouts.end()     && cIt != g_layouts.end()) {
             const MatmulDesc &d = dIt->second;
             key.m = static_cast<int>(cIt->second.rows);
             key.n = static_cast<int>(cIt->second.cols);
             key.k = static_cast<int>(d.transA ? aIt->second.rows : aIt->second.cols);
-            key.dtypeA = static_cast<int>(aIt->second.type);
-            key.dtypeB = static_cast<int>(bIt->second.type);
-            key.dtypeC = static_cast<int>(cIt->second.type);
+            key.dtypeA   = static_cast<int>(aIt->second.type);
+            key.dtypeB   = static_cast<int>(bIt->second.type);
+            key.dtypeC   = static_cast<int>(cIt->second.type);
             key.epilogue = static_cast<int>(d.epilogue);
             key.transA   = d.transA;
             key.transB   = d.transB;
         }
     }
-    // Populate cache (always algo=0 for VGRE, but we still cache to avoid re-locking)
     g_algoCache.put(key);
 
     heuristicResultsArray[0].algo          = 0;
@@ -872,7 +322,6 @@ cublasStatus_t cublasLtMatmulAlgoGetHeuristics(cublasLtHandle_t /*handle*/,
                                                int *returnAlgoCount) {
     if (!heuristicResultsArray || !returnAlgoCount || requestedAlgoCount <= 0)
         return CUBLAS_STATUS_INVALID_VALUE;
-    // Return exactly one algorithm: the VGRE default path.
     heuristicResultsArray[0].algo          = 0;
     heuristicResultsArray[0].workspaceSize = 0;
     heuristicResultsArray[0].state         = CUBLAS_STATUS_SUCCESS;
@@ -881,11 +330,10 @@ cublasStatus_t cublasLtMatmulAlgoGetHeuristics(cublasLtHandle_t /*handle*/,
     return CUBLAS_STATUS_SUCCESS;
 }
 
-// ── Version / property queries ────────────────────────────────────────────────
+// ── Version / status queries ─────────────────────────────────────────────────
 
 cublasStatus_t cublasLtGetVersion(size_t *version) {
-    // Report same version as cublas
-    if (version) *version = 12004; // 12.x.y
+    if (version) *version = 12004;
     return CUBLAS_STATUS_SUCCESS;
 }
 
