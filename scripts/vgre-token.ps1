@@ -280,10 +280,55 @@ function Cmd-Revoke {
     }
 }
 
+function Cmd-Install {
+    # Copies this script + the .bat launcher to %LOCALAPPDATA%\VGRE\scripts\,
+    # adds that directory to User PATH (persistent), and also updates the
+    # current session's PATH so 'vgre-token' is usable immediately — no restart.
+    $InstallDir = Join-Path $env:LOCALAPPDATA "VGRE\scripts"
+
+    if (-not (Test-Path $InstallDir)) {
+        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    }
+
+    # Copy this .ps1 to the install directory
+    Copy-Item -Path $PSCommandPath -Destination (Join-Path $InstallDir "vgre-token.ps1") -Force
+    Write-Host "[OK] vgre-token.ps1  →  $InstallDir" -ForegroundColor Green
+
+    # Copy the .bat launcher that lives alongside this .ps1 (repo or installed copy)
+    $batSrc = Join-Path $PSScriptRoot "vgre-token.bat"
+    if (Test-Path $batSrc) {
+        Copy-Item -Path $batSrc -Destination (Join-Path $InstallDir "vgre-token.bat") -Force
+        Write-Host "[OK] vgre-token.bat   →  $InstallDir" -ForegroundColor Green
+    }
+
+    # Persist to User PATH (new terminals + reboots)
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User") ?? ""
+    if ($userPath -notlike "*$InstallDir*") {
+        [Environment]::SetEnvironmentVariable("Path", "$userPath;$InstallDir", "User")
+        Write-Host "[OK] $InstallDir added to User PATH." -ForegroundColor Green
+    } else {
+        Write-Host "[OK] $InstallDir already in User PATH." -ForegroundColor Green
+    }
+
+    # Update the current PowerShell session immediately — no restart needed
+    if ($env:PATH -notlike "*$InstallDir*") {
+        $env:PATH = "$InstallDir;$env:PATH"
+        Write-Host "[OK] Current session PATH updated — vgre-token is usable NOW." -ForegroundColor Cyan
+    }
+
+    Write-Host ""
+    Write-Host "Done. Run in this terminal:" -ForegroundColor White
+    Write-Host "  vgre-token generate" -ForegroundColor Cyan
+    Write-Host ""
+}
+
 function Cmd-Help {
     Write-Host @"
 
 vgre-token — VGRE Auth Token Manager
+
+First-time setup (run once from the repo — no build required):
+  vgre-token install               Install vgre-token to User PATH (current + future terminals)
 
 Usage:
   vgre-token generate              Generate a new secure 64-hex token
@@ -296,8 +341,11 @@ Usage:
 
 Token file:  $TokenFile
 
-Quick start:
-  # On master — generate once:
+Quick start — fresh machine:
+  # Step 1 (once): install the CLI (from the repo root):
+  .\scripts\vgre-token.ps1 install
+
+  # Step 2: generate a token (works immediately after install, no restart):
   vgre-token generate
 
   # On every worker — paste the token from the master:
@@ -311,6 +359,7 @@ Quick start:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 switch ($Command.ToLower()) {
+    "install"     { Cmd-Install }
     "generate"    { Cmd-Generate }
     "show"        { Cmd-Show }
     "fingerprint" { Cmd-Fingerprint }

@@ -179,19 +179,27 @@ if ($current -ne $TokenFile) {
 
 $env:VGRE_TCP_AUTH_TOKEN_FILE = $TokenFile
 
-# -- Step 3: Install vgre-token into PATH -------------------------------------
-$ScriptDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
+# -- Step 3: Install CLI tools into PATH -------------------------------------
+$ScriptDir      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $TokenScriptDir = Join-Path $InstallDir "scripts"
 if (-not (Test-Path $TokenScriptDir)) {
     New-Item -ItemType Directory -Path $TokenScriptDir -Force | Out-Null
 }
-foreach ($f in @("vgre-token.ps1","vgre-token.bat")) {
+# Copy all CLI tools that exist in the repo scripts/ directory
+$cliFiles = @(
+    "vgre-token.ps1", "vgre-token.bat",
+    "Setup-VGRECluster.ps1",
+    "Start-VGRE.ps1",
+    "vgre_env.ps1",
+    "Install-VGRETools.ps1"
+)
+foreach ($f in $cliFiles) {
     $src = Join-Path $ScriptDir $f
     if (Test-Path $src) {
         Copy-Item -Path $src -Destination (Join-Path $TokenScriptDir $f) -Force
     }
 }
-Write-Host "[OK] vgre-token installed to $TokenScriptDir" -ForegroundColor Green
+Write-Host "[OK] CLI tools installed to $TokenScriptDir" -ForegroundColor Green
 
 # -- Step 4: PATH handling ----------------------------------------------------
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User") ?? ""
@@ -205,10 +213,18 @@ foreach ($dir in @($InstallDir, $TokenScriptDir)) {
 }
 if ($changed) {
     [Environment]::SetEnvironmentVariable("Path", ($dirs -join ";"), "User")
-    Write-Host "[OK] Added VGRE to PATH." -ForegroundColor Green
+    Write-Host "[OK] Added VGRE to User PATH (persists across reboots)." -ForegroundColor Green
 } else {
-    Write-Host "[OK] VGRE already in PATH." -ForegroundColor Green
+    Write-Host "[OK] VGRE already in User PATH." -ForegroundColor Green
 }
+
+# Also update the current PowerShell session — no restart needed.
+foreach ($dir in @($InstallDir, $TokenScriptDir)) {
+    if ($env:PATH -notlike "*$dir*") {
+        $env:PATH = "$dir;$env:PATH"
+    }
+}
+Write-Host "[OK] Current session PATH updated — vgre-token is available NOW." -ForegroundColor Cyan
 
 # -- Final fingerprint --------------------------------------------------------
 $activeFp = Get-TokenFingerprint -File $TokenFile
