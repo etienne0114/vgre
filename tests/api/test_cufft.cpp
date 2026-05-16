@@ -311,6 +311,60 @@ static void test_plan_many_strided_batch() {
     check("PlanMany strided batched C2C", ok);
 }
 
+// ── Test: cufftGetVersion ─────────────────────────────────────────────────────
+static void test_get_version() {
+    int version = 0;
+    bool ok = (cufftGetVersion(&version) == CUFFT_SUCCESS);
+    ok &= (version > 0);
+    ok &= (cufftGetVersion(nullptr) != CUFFT_SUCCESS);
+    check("cufftGetVersion returns positive version", ok);
+}
+
+// ── Test: cufftSetStream / cufftGetStream ─────────────────────────────────────
+static void test_stream_association() {
+    cufftHandle plan;
+    cufftPlan1d(&plan, 64, CUFFT_C2C, 1);
+
+    // Sentinel pointer as stream (non-null)
+    void *fake_stream = reinterpret_cast<void*>(static_cast<uintptr_t>(0xDEADBEEF));
+    bool ok = (cufftSetStream(plan, fake_stream) == CUFFT_SUCCESS);
+
+    void *out_stream = nullptr;
+    ok &= (cufftGetStream(plan, &out_stream) == CUFFT_SUCCESS);
+    ok &= (out_stream == fake_stream);
+
+    // Null pointer sentinel clears stream
+    ok &= (cufftSetStream(plan, nullptr) == CUFFT_SUCCESS);
+    ok &= (cufftGetStream(plan, &out_stream) == CUFFT_SUCCESS);
+    ok &= (out_stream == nullptr);
+
+    // Invalid plan
+    ok &= (cufftSetStream(9999999, fake_stream) == CUFFT_INVALID_PLAN);
+    ok &= (cufftGetStream(9999999, &out_stream) == CUFFT_INVALID_PLAN);
+    ok &= (cufftGetStream(plan, nullptr) == CUFFT_INVALID_VALUE);
+
+    cufftDestroy(plan);
+    check("cufftSetStream / cufftGetStream round-trip", ok);
+}
+
+// ── Test: stream does not break execution ────────────────────────────────────
+static void test_exec_with_stream() {
+    const int N = 32;
+    std::vector<cfloat> in(N), fwd(N), inv(N);
+    for (int i = 0; i < N; ++i) in[i] = cfloat(std::sin(0.2f * i), 0.0f);
+
+    cufftHandle plan;
+    cufftPlan1d(&plan, N, CUFFT_C2C, 1);
+    void *fake_stream = reinterpret_cast<void*>(static_cast<uintptr_t>(42));
+    cufftSetStream(plan, fake_stream);
+
+    bool ok = (cufftExecC2C(plan, in.data(), fwd.data(), CUFFT_FORWARD) == CUFFT_SUCCESS);
+    ok &= (cufftExecC2C(plan, fwd.data(), inv.data(), CUFFT_INVERSE) == CUFFT_SUCCESS);
+    ok &= approx_eq(in.data(), inv.data(), N, 1e-4f);
+    cufftDestroy(plan);
+    check("Exec with associated stream gives same result (N=32)", ok);
+}
+
 int main() {
     std::cout << "=== Test: cuFFT O(n log n) FFT ===\n";
 
@@ -327,6 +381,9 @@ int main() {
     test_plan_management();
     test_fp16_c2c_roundtrip();
     test_plan_many_strided_batch();
+    test_get_version();
+    test_stream_association();
+    test_exec_with_stream();
 
     std::cout << "\n" << g_pass << "/" << g_total << " tests passed.\n";
     return (g_pass == g_total) ? 0 : 1;

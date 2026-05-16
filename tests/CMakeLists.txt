@@ -252,6 +252,10 @@ add_executable(test_cufft api/test_cufft.cpp)
 target_link_libraries(test_cufft PRIVATE vgre_cudart)
 add_test(NAME CufftFFT COMMAND test_cufft)
 
+add_executable(test_curand api/test_curand.cpp)
+target_link_libraries(test_curand PRIVATE vgre_cudart)
+add_test(NAME CuRANDFunctional COMMAND test_curand)
+
 add_executable(test_cusolver api/test_cusolver.cpp)
 target_link_libraries(test_cusolver PRIVATE vgre_cudart)
 add_test(NAME CusolverLAPACK COMMAND test_cusolver)

@@ -79,9 +79,11 @@ cufftResult_t cufftExecR16C(cufftHandle plan, void *idata, void *odata);
 cufftResult_t cufftExecC16R(cufftHandle plan, void *idata, void *odata);
 cufftResult_t cufftExecC16C(cufftHandle plan, void *idata, void *odata, int direction);
 
-// ── Advanced ─────────────────────────────────────────────────────────────────
+// ── Stream / workspace association ───────────────────────────────────────────
 cufftResult_t cufftSetStream(cufftHandle plan, void *stream);
+cufftResult_t cufftGetStream(cufftHandle plan, void **stream);
 cufftResult_t cufftSetWorkArea(cufftHandle plan, void *workArea);
+cufftResult_t cufftGetVersion(int *version);
 cufftResult_t cufftEstimate1d(int nx, cufftType_t type, int batch, size_t *workSize);
 cufftResult_t cufftEstimate2d(int nx, int ny, cufftType_t type, size_t *workSize);
 cufftResult_t cufftEstimate3d(int nx, int ny, int nz, cufftType_t type, size_t *workSize);

@@ -310,24 +310,20 @@ cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t /*handle*/,
     return CUBLAS_STATUS_SUCCESS;
 }
 
-cublasStatus_t cublasLtMatmulAlgoGetHeuristics(cublasLtHandle_t /*handle*/,
-                                               cublasLtMatmulDesc_t /*matmulDesc*/,
-                                               cublasLtMatrixLayout_t /*Adesc*/,
-                                               cublasLtMatrixLayout_t /*Bdesc*/,
-                                               cublasLtMatrixLayout_t /*Cdesc*/,
-                                               cublasLtMatrixLayout_t /*Ddesc*/,
-                                               cublasLtMatmulPreference_t /*pref*/,
+// Plural alias — delegates to singular form so both share the LRU cache.
+cublasStatus_t cublasLtMatmulAlgoGetHeuristics(cublasLtHandle_t handle,
+                                               cublasLtMatmulDesc_t matmulDesc,
+                                               cublasLtMatrixLayout_t Adesc,
+                                               cublasLtMatrixLayout_t Bdesc,
+                                               cublasLtMatrixLayout_t Cdesc,
+                                               cublasLtMatrixLayout_t Ddesc,
+                                               cublasLtMatmulPreference_t pref,
                                                int requestedAlgoCount,
                                                cublasLtMatmulHeuristicResult_t *heuristicResultsArray,
                                                int *returnAlgoCount) {
-    if (!heuristicResultsArray || !returnAlgoCount || requestedAlgoCount <= 0)
-        return CUBLAS_STATUS_INVALID_VALUE;
-    heuristicResultsArray[0].algo          = 0;
-    heuristicResultsArray[0].workspaceSize = 0;
-    heuristicResultsArray[0].state         = CUBLAS_STATUS_SUCCESS;
-    heuristicResultsArray[0].wavesCount    = 1.0f;
-    *returnAlgoCount = 1;
-    return CUBLAS_STATUS_SUCCESS;
+    return cublasLtMatmulAlgoGetHeuristic(handle, matmulDesc, Adesc, Bdesc,
+                                          Cdesc, Ddesc, pref, requestedAlgoCount,
+                                          heuristicResultsArray, returnAlgoCount);
 }
 
 // ── Version / status queries ─────────────────────────────────────────────────
