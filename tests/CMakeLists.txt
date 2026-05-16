@@ -137,7 +137,10 @@ add_test(NAME test_graph_update COMMAND test_graph_update)
 add_executable(test_phase3_cluster integration/test_phase3_cluster.cpp)
 target_link_libraries(test_phase3_cluster PRIVATE vgre)
 add_test(NAME test_phase3_cluster COMMAND test_phase3_cluster)
-set_tests_properties(test_phase3_cluster PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_tcp_cluster_port)
+set_tests_properties(test_phase3_cluster PROPERTIES
+    TIMEOUT 600
+    RESOURCE_LOCK vgre_tcp_cluster_port
+    RUN_SERIAL TRUE)
 
 # ── Phase 5 tests ───────────────────────────────────────────────────────────
 add_executable(test_phase5_secure_channel unit/test_phase5_secure_channel.cpp)
