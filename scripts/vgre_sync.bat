@@ -13,17 +13,42 @@ set "CLANG_EXE=clang"
 set "FLUTTER_CMD=flutter"
 set "VGRE_ENABLE_NATIVE_SIMD_FLAG=OFF"
 set "VCVARS64="
-for %%D in (
-    "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
-    "C:\Program Files\Microsoft Visual Studio\2022\BuildTools"
-    "C:\Program Files\Microsoft Visual Studio\2022\Community"
-    "C:\Program Files\Microsoft Visual Studio\2022\Professional"
-    "C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
-    "C:\Program Files (x86)\Microsoft Visual Studio\2022\Community"
-    "C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional"
-    "C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise"
-) do (
-    if not defined VCVARS64 if exist "%%~D\VC\Auxiliary\Build\vcvars64.bat" set "VCVARS64=%%~D\VC\Auxiliary\Build\vcvars64.bat"
+set "VS_YEAR="
+
+rem -- vswhere.exe (ships with VS 2017+ Installer) gives the most reliable hit -
+set "_VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "!_VSWHERE!" set "_VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
+
+if exist "!_VSWHERE!" (
+    for /f "usebackq delims=" %%I in (`"!_VSWHERE!" -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find VC\Auxiliary\Build\vcvars64.bat 2^>nul`) do (
+        if not defined VCVARS64 set "VCVARS64=%%I"
+    )
+    if defined VCVARS64 (
+        for /f "usebackq delims=" %%V in (`"!_VSWHERE!" -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion 2^>nul`) do set "_VS_VER=%%V"
+        for /f "tokens=1 delims=." %%M in ("!_VS_VER!") do set "VS_MAJOR=%%M"
+        if "!VS_MAJOR!"=="15" set "VS_YEAR=2017"
+        if "!VS_MAJOR!"=="16" set "VS_YEAR=2019"
+        if "!VS_MAJOR!"=="17" set "VS_YEAR=2022"
+        if "!VS_MAJOR!"=="18" set "VS_YEAR=2025"
+    )
+)
+
+rem -- Fallback: enumerate 2022 / 2019 / 2017 in both Program Files locations --
+if not defined VCVARS64 (
+    for %%Y in (2022 2019 2017) do (
+        if not defined VCVARS64 (
+            for %%E in (BuildTools Community Professional Enterprise) do (
+                if not defined VCVARS64 if exist "C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+                    set "VCVARS64=C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
+                    set "VS_YEAR=%%Y"
+                )
+                if not defined VCVARS64 if exist "C:\Program Files (x86)\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+                    set "VCVARS64=C:\Program Files (x86)\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
+                    set "VS_YEAR=%%Y"
+                )
+            )
+        )
+    )
 )
 
 if exist "%TOOLS_ROOT%\cmake\bin\cmake.exe" (
@@ -151,7 +176,7 @@ rem ── Check Visual Studio Build Tools ────────────�
 if defined VCVARS64 (
     echo [OK] Visual Studio Build Tools at !VCVARS64!
 ) else (
-    echo [MISSING] Visual Studio 2022 Build Tools - attempting auto-install...
+    echo [MISSING] Visual Studio Build Tools (C++ workload) - attempting auto-install...
     if "%HAS_WINGET%"=="1" (
         winget install --id Microsoft.VisualStudio.2022.BuildTools --silent ^
             --override "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools ^
@@ -160,14 +185,26 @@ if defined VCVARS64 (
             --includeRecommended" ^
             --accept-package-agreements --accept-source-agreements
         if not errorlevel 1 (
-            echo [OK] Build Tools installed - scanning for vcvars64.bat...
-            for %%D in (
-                "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
-                "C:\Program Files\Microsoft Visual Studio\2022\BuildTools"
-                "C:\Program Files\Microsoft Visual Studio\2022\Community"
-            ) do (
-                if not defined VCVARS64 if exist "%%~D\VC\Auxiliary\Build\vcvars64.bat" (
-                    set "VCVARS64=%%~D\VC\Auxiliary\Build\vcvars64.bat"
+            echo [OK] Build Tools installed - re-scanning with vswhere...
+            if exist "!_VSWHERE!" (
+                for /f "usebackq delims=" %%I in (`"!_VSWHERE!" -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find VC\Auxiliary\Build\vcvars64.bat 2^>nul`) do (
+                    if not defined VCVARS64 set "VCVARS64=%%I"
+                )
+            )
+            if not defined VCVARS64 (
+                for %%Y in (2022 2019 2017) do (
+                    if not defined VCVARS64 (
+                        for %%E in (BuildTools Community Professional Enterprise) do (
+                            if not defined VCVARS64 if exist "C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+                                set "VCVARS64=C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
+                                set "VS_YEAR=%%Y"
+                            )
+                            if not defined VCVARS64 if exist "C:\Program Files (x86)\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+                                set "VCVARS64=C:\Program Files (x86)\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
+                                set "VS_YEAR=%%Y"
+                            )
+                        )
+                    )
                 )
             )
         )
@@ -175,7 +212,7 @@ if defined VCVARS64 (
     if not defined VCVARS64 (
         echo [WARN] Visual Studio Build Tools not found after install attempt.
         echo        CMake may fail to find the toolchain.
-        echo        Install manually: https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022
+        echo        Install manually: https://visualstudio.microsoft.com/visual-cpp-build-tools/
     )
 )
 
@@ -240,8 +277,7 @@ if defined VCVARS64 (
         exit /b 1
     )
 ) else (
-    echo WARNING: vcvars64.bat was not found at:
-    echo   Visual Studio 2022 Build Tools / Community / Professional / Enterprise
+    echo WARNING: vcvars64.bat was not found for any detected Visual Studio version.
     echo Continuing, but CMake may fail to find the Visual Studio toolchain.
 )
 
@@ -268,7 +304,20 @@ echo === Building VGRE Native Engine ===
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 pushd "%BUILD_DIR%" || exit /b 1
 
-"%CMAKE_EXE%" "%PROJECT_ROOT%" -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="!LLVM_DIR!" -DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=TRUE -DVGRE_ENABLE_NATIVE_SIMD=%VGRE_ENABLE_NATIVE_SIMD_FLAG%
+rem -- Select CMake generator: Ninja (preferred after vcvars64) or VS MSBuild --
+set "CMAKE_GENERATOR=Ninja"
+set "CMAKE_ARCH_FLAG="
+where ninja >nul 2>&1
+if errorlevel 1 (
+    if "!VS_YEAR!"=="2022" ( set "CMAKE_GENERATOR=Visual Studio 17 2022" & set "CMAKE_ARCH_FLAG=-A x64" )
+    if "!VS_YEAR!"=="2025" ( set "CMAKE_GENERATOR=Visual Studio 17 2022" & set "CMAKE_ARCH_FLAG=-A x64" )
+    if "!VS_YEAR!"=="2019" ( set "CMAKE_GENERATOR=Visual Studio 16 2019" & set "CMAKE_ARCH_FLAG=-A x64" )
+    if "!VS_YEAR!"=="2017" ( set "CMAKE_GENERATOR=Visual Studio 15 2017 Win64" )
+    if not defined VS_YEAR   set "CMAKE_GENERATOR=NMake Makefiles"
+)
+echo CMake generator: !CMAKE_GENERATOR!
+
+"%CMAKE_EXE%" "%PROJECT_ROOT%" -G "!CMAKE_GENERATOR!" !CMAKE_ARCH_FLAG! -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="!LLVM_DIR!" -DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=TRUE -DVGRE_ENABLE_NATIVE_SIMD=%VGRE_ENABLE_NATIVE_SIMD_FLAG%
 if errorlevel 1 (
     popd
     echo ERROR: CMake configure failed.
