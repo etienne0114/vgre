@@ -388,6 +388,45 @@ cusparseStatus_t cusparseDcsric02(cusparseHandle_t handle, int m, int nnz,
                                    const int *csrSortedColIndA,
                                    csric02Info_t info, int policy, void *pBuffer);
 
+// ── Legacy matrix descriptor (Level-2/3 routines) ────────────────────────────
+struct cusparseMatDescr;
+typedef struct cusparseMatDescr *cusparseMatDescr_t;
+
+cusparseStatus_t cusparseCreateMatDescr(cusparseMatDescr_t *descr);
+cusparseStatus_t cusparseDestroyMatDescr(cusparseMatDescr_t descr);
+cusparseStatus_t cusparseSetMatType(cusparseMatDescr_t descr, cusparseMatrixType_t type);
+cusparseStatus_t cusparseSetMatIndexBase(cusparseMatDescr_t descr, cusparseIndexBase_t base);
+cusparseStatus_t cusparseSetMatFillMode(cusparseMatDescr_t descr, cusparseFillMode_t fillMode);
+cusparseStatus_t cusparseSetMatDiagType(cusparseMatDescr_t descr, cusparseDiagType_t diagType);
+
+// ── Legacy Level-2: CSR matrix-vector multiply ────────────────────────────────
+cusparseStatus_t cusparseScsrmv(cusparseHandle_t handle, cusparseOperation_t transA,
+                                 int m, int n, int nnz, const float *alpha,
+                                 const cusparseMatDescr_t descrA,
+                                 const float *csrValA, const int *csrRowPtrA,
+                                 const int *csrColIndA, const float *x,
+                                 const float *beta, float *y);
+cusparseStatus_t cusparseDcsrmv(cusparseHandle_t handle, cusparseOperation_t transA,
+                                 int m, int n, int nnz, const double *alpha,
+                                 const cusparseMatDescr_t descrA,
+                                 const double *csrValA, const int *csrRowPtrA,
+                                 const int *csrColIndA, const double *x,
+                                 const double *beta, double *y);
+
+// ── Legacy Level-3: CSR matrix-matrix multiply ────────────────────────────────
+cusparseStatus_t cusparseScsrmm(cusparseHandle_t handle, cusparseOperation_t transA,
+                                 int m, int n, int k, int nnz, const float *alpha,
+                                 const cusparseMatDescr_t descrA,
+                                 const float *csrValA, const int *csrRowPtrA,
+                                 const int *csrColIndA, const float *B, int ldb,
+                                 const float *beta, float *C, int ldc);
+cusparseStatus_t cusparseDcsrmm(cusparseHandle_t handle, cusparseOperation_t transA,
+                                 int m, int n, int k, int nnz, const double *alpha,
+                                 const cusparseMatDescr_t descrA,
+                                 const double *csrValA, const int *csrRowPtrA,
+                                 const int *csrColIndA, const double *B, int ldb,
+                                 const double *beta, double *C, int ldc);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

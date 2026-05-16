@@ -324,6 +324,87 @@ cudnnStatus_t cudnnConvolutionBackwardFilter(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// ── cudnnConvolutionBiasActivationForward ─────────────────────────────────────
+// Fused: y = activation(alpha1 * conv(x, w) + alpha2 * z + bias)
+// z is a residual tensor (same shape as y); bias is [1,k,1,1].
+cudnnStatus_t cudnnConvolutionBiasActivationForward(
+    cudnnHandle_t /*handle*/,
+    const void* alpha1,
+    cudnnTensorDescriptor_t xDesc,  const void* x,
+    cudnnFilterDescriptor_t  wDesc,  const void* w,
+    cudnnConvolutionDescriptor_t convDesc, int algo,
+    void* workspace, size_t workspaceSize,
+    const void* alpha2,
+    cudnnTensorDescriptor_t zDesc,    const void* z,
+    cudnnTensorDescriptor_t biasDesc, const void* bias,
+    cudnnActivationDescriptor_t activationDesc,
+    cudnnTensorDescriptor_t yDesc,    void* y)
+{
+    if (!xDesc || !wDesc || !convDesc || !yDesc || !x || !w || !y || !alpha1 || !alpha2)
+        return CUDNN_STATUS_INVALID_VALUE;
+
+    auto* xt  = (TensorDesc*)xDesc;
+    auto* ft  = (FilterDesc*)wDesc;
+    auto* cv  = (ConvDesc*)convDesc;
+    auto* yt  = (TensorDesc*)yDesc;
+    auto* act = activationDesc ? (ActDesc*)activationDesc : nullptr;
+
+    // Step 1: compute conv(x, w) → tmp
+    int ySize = yt->n * yt->c * yt->h * yt->w;
+    std::vector<float> tmp(ySize, 0.f);
+
+    if ((algo == CUDNN_CONVOLUTION_FWD_ALGO_GEMM
+         || algo == CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM)
+        && ft->r == 1 && ft->s == 1)
+    {
+        const float* xf = (const float*)x;
+        const float* wf = (const float*)w;
+        #ifdef _OPENMP
+        #pragma omp parallel for collapse(2) schedule(static) if (xt->n * ft->k * yt->h * yt->w > 1024)
+        #endif
+        for (int n = 0; n < xt->n; ++n)
+        for (int k = 0; k < ft->k; ++k)
+        for (int oh = 0; oh < yt->h; ++oh)
+        for (int ow = 0; ow < yt->w; ++ow) {
+            float acc = 0.f;
+            int ih = oh * cv->str_h - cv->pad_h;
+            int iw = ow * cv->str_w - cv->pad_w;
+            if (ih >= 0 && ih < xt->h && iw >= 0 && iw < xt->w) {
+                for (int c = 0; c < xt->c; ++c)
+                    acc += xf[((n*xt->c + c)*xt->h + ih)*xt->w + iw]
+                         * wf[(k*ft->c + c)*ft->r*ft->s];
+            }
+            tmp[((n*yt->c + k)*yt->h + oh)*yt->w + ow] = acc;
+        }
+    } else {
+        cpuConv2d(xt->n, xt->c, xt->h, xt->w,
+                  ft->k, ft->r, ft->s,
+                  cv->pad_h, cv->pad_w, cv->str_h, cv->str_w, cv->dil_h, cv->dil_w,
+                  (const float*)x, (const float*)w, tmp.data());
+    }
+
+    float a1 = *(const float*)alpha1;
+    float a2 = *(const float*)alpha2;
+    float* yf = (float*)y;
+
+    // Step 2: y = a1*conv + a2*z + bias, then activation
+    const float* zf    = z    ? (const float*)z    : nullptr;
+    const float* biasf = bias ? (const float*)bias : nullptr;
+
+    for (int n = 0; n < yt->n; ++n)
+    for (int k = 0; k < yt->c; ++k)
+    for (int oh = 0; oh < yt->h; ++oh)
+    for (int ow = 0; ow < yt->w; ++ow) {
+        int idx = ((n*yt->c + k)*yt->h + oh)*yt->w + ow;
+        float val = a1 * tmp[idx];
+        if (zf)    val += a2 * zf[idx];
+        if (biasf) val += biasf[k];
+        yf[idx] = act ? applyActivation(val, *act) : val;
+    }
+    (void)workspace; (void)workspaceSize; (void)zDesc; (void)biasDesc;
+    return CUDNN_STATUS_SUCCESS;
+}
+
 // ── cudnnConvolutionBackwardBias ───────────────────────────────────────────────
 // Gradient of the bias: db[k] = sum over (n, h, w) of dy[n, k, h, w]
 
