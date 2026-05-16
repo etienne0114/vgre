@@ -729,4 +729,56 @@ Port 17779 was bound by VS Code (pid found via `ss -tlnp`), causing `bind() = EA
 
 ---
 
-*Last updated: 2026-05-16 (sixth pass). 116/116 tests pass. Port conflict fix, cuDNN backend header integration, missing array memcpy source added.*
+---
+
+## 12. Seventh Pass — Missing API Declarations + New cuRAND Test Suite (2026-05-16)
+
+**Status**: **DONE** — 117/117 tests pass.
+
+### 12.1 cuRAND — Missing Header Declarations (4 functions)
+
+`include/vgre/api/curand_shim.h` was missing declarations for 4 functions that existed in the .cpp:
+- `curandGeneratePoisson` — Poisson-distributed uint32 output
+- `curandGenerateSeeds` — re-seed generator from system entropy
+- `curandGetVersion` — returns 1100000 (cuRAND 11.0)
+- `curandGetGeneratorIpcHandle` / `curandCreateGeneratorFromIpcHandle` — IPC export/import
+
+Also fixed: `curandGetDirectionVectors32/64` changed from `*` (caller-allocates 20000 entries)
+to `**` (returns pointer to pre-computed internal static table), matching NVIDIA cuRAND API.
+`curandGeneratorIpcHandle_t` is now a public typedef in the header (was private `vgre_curand_ipc_handle_t`).
+
+### 12.2 cuFFT — Stream Association + Version Query
+
+`CufftPlan` struct lacked a `stream` field: `cufftSetStream` was a validate-only stub.
+- Added `void *stream` to `CufftPlan` in `cufft_internal.h`
+- `cufftSetStream`: now stores stream pointer in plan map
+- `cufftGetStream`: new function returning stored stream
+- `cufftGetVersion`: new function returning 11000 (cuFFT 11.0)
+- `cufft_shim.h`: both new functions declared
+
+### 12.3 cuBLASLt — Missing Declarations (5 functions)
+
+`cublaslt_shim.h` was missing declarations for 5 functions already implemented:
+- `cublasLtGetVersion`, `cublasLtGetCudartVersion`
+- `cublasLtGetStatusName`, `cublasLtGetStatusString`
+- `cublasLtMatmulAlgoGetHeuristics` (plural) — now delegates to singular form (LRU cache shared)
+
+### 12.4 CUDA Runtime — `cudaArrayDestroy`
+
+`cudaArrayDestroy` (CUDA 1.x legacy alias for `cudaFreeArray`) was absent from all source files.
+Added to `cudart_shim_stream.cpp` as a one-line wrapper around `cudaFreeArray`.
+
+### 12.5 New Test: tests/api/test_curand.cpp (15 tests)
+
+First dedicated cuRAND test suite added:
+version query, lifecycle, seeding reproducibility, uniform/normal/log-normal/uint/Poisson generation,
+GenerateSeeds, Sobol32/64 quasi-random, direction vectors, IPC handle export+import,
+normal double, offset reproducibility. All 15 pass.
+
+Also extended:
+- `test_cufft.cpp`: 3 new tests (cufftGetVersion, cufftSetStream/GetStream round-trip, exec-with-stream)
+- `test_cublaslt.cpp`: 3 new tests (version queries, status strings, plural heuristics)
+
+---
+
+*Last updated: 2026-05-16 (seventh pass). 117/117 tests pass. cuRAND/cuFFT/cuBLASLt missing APIs exposed, cudaArrayDestroy added, cuRAND full test suite added.*

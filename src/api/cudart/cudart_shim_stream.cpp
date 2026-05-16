@@ -300,6 +300,11 @@ cudaError_t cudaFreeArray(void *array) {
   return vgre::api::CUDAInterceptor::instance().freeArray(arrId);
 }
 
+// cudaArrayDestroy is the legacy CUDA 1.x alias for cudaFreeArray.
+cudaError_t cudaArrayDestroy(void *array) {
+  return cudaFreeArray(array);
+}
+
 cudaError_t cudaPointerGetAttributes(
     struct cudaPointerAttributes *attributes, const void *ptr) {
   return vgre::api::CUDAInterceptor::instance().pointerGetAttributes(

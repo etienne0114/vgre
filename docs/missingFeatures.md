@@ -294,4 +294,20 @@ The following items that were previously potential concerns have been resolved:
 
 ---
 
-*Last updated: 2026-05-16 (sixth pass). 116/116 tests pass. Port-conflict fix, cuDNN backend header integration, and missing array memcpy source added.*
+## 9. Seventh Pass — Additional Fixes (2026-05-16)
+
+| Item | Resolution |
+|------|-----------|
+| `curandGeneratePoisson`, `curandGenerateSeeds`, `curandGetVersion`, IPC functions | Added to `curand_shim.h`; `curandGetVersion` returns 1100000 |
+| `curandGetDirectionVectors32/64` signature | Changed `*` → `**` to match NVIDIA API (returns pointer to pre-computed static table) |
+| `curandGeneratorIpcHandle_t` | Now a public typedef in header (was private struct); 64-byte layout matches implementation |
+| `cufftSetStream` was a stub | Added `stream` field to `CufftPlan`; `cufftSetStream` stores it; `cufftGetStream` retrieves it |
+| `cufftGetVersion` missing | Implemented; returns 11000 (cuFFT 11.0) |
+| `cublasLtGetVersion`, `cublasLtGetCudartVersion`, `cublasLtGetStatusName/String`, `cublasLtMatmulAlgoGetHeuristics` | Declared in header; plural heuristics delegates to singular (LRU cache shared) |
+| `cudaArrayDestroy` missing | Added to `cudart_shim_stream.cpp` as alias for `cudaFreeArray` |
+| cuRAND test coverage | New `tests/api/test_curand.cpp` — 15 tests all pass |
+| Test count | **117/117 pass** |
+
+---
+
+*Last updated: 2026-05-16 (seventh pass). 117/117 tests pass. Missing API declarations exposed, cudaArrayDestroy added, cuRAND full test suite added.*
