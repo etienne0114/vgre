@@ -15,9 +15,15 @@ set "VGRE_ENABLE_NATIVE_SIMD_FLAG=OFF"
 set "VCVARS64="
 set "VS_YEAR="
 
+rem -- Cache (x86) path prefix at top level so the literal ')' in "(x86)" never
+rem    appears inside a parenthesised block — the batch parser counts parens even
+rem    inside quoted strings and misidentifies the close-paren as a block end.
+set "_PF86=%ProgramFiles(x86)%"
+set "_PF64=%ProgramFiles%"
+
 rem -- vswhere.exe (ships with VS 2017+ Installer) gives the most reliable hit -
-set "_VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-if not exist "!_VSWHERE!" set "_VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
+set "_VSWHERE=!_PF86!\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "!_VSWHERE!" set "_VSWHERE=!_PF64!\Microsoft Visual Studio\Installer\vswhere.exe"
 
 if exist "!_VSWHERE!" (
     for /f "usebackq delims=" %%I in (`"!_VSWHERE!" -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find VC\Auxiliary\Build\vcvars64.bat 2^>nul`) do (
@@ -42,8 +48,8 @@ if not defined VCVARS64 (
                     set "VCVARS64=C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
                     set "VS_YEAR=%%Y"
                 )
-                if not defined VCVARS64 if exist "C:\Program Files (x86)\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
-                    set "VCVARS64=C:\Program Files (x86)\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
+                if not defined VCVARS64 if exist "!_PF86!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+                    set "VCVARS64=!_PF86!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
                     set "VS_YEAR=%%Y"
                 )
             )
@@ -199,8 +205,8 @@ if defined VCVARS64 (
                                 set "VCVARS64=C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
                                 set "VS_YEAR=%%Y"
                             )
-                            if not defined VCVARS64 if exist "C:\Program Files (x86)\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
-                                set "VCVARS64=C:\Program Files (x86)\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
+                            if not defined VCVARS64 if exist "!_PF86!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+                                set "VCVARS64=!_PF86!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
                                 set "VS_YEAR=%%Y"
                             )
                         )
