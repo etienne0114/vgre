@@ -137,7 +137,7 @@ exit /b 1
 rem ── Check and auto-install LLVM ──────────────────────────────────────────
 echo Resolving LLVM_DIR...
 if "!LLVM_DIR!"=="" (
-    for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('LLVM_DIR','User')"`) do set "LLVM_DIR=%%I"
+    for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::GetEnvironmentVariable('LLVM_DIR','User')"`) do set "LLVM_DIR=%%I"
 )
 if "!LLVM_DIR!"=="" (
     set "LLVM_DIR=%LOCALAPPDATA%\VGRE\BuildTools\llvm\lib\cmake\llvm"
@@ -201,7 +201,7 @@ if "%HAS_WINGET%"=="1" (
         --accept-package-agreements --accept-source-agreements
     if not errorlevel 1 (
         rem Refresh PATH to pick up flutter
-        for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$env:Path"`) do set "PATH=%%I"
+        for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:Path"`) do set "PATH=%%I"
         where flutter >nul 2>&1
         if not errorlevel 1 (
             echo [OK] Flutter installed via winget
@@ -267,6 +267,33 @@ echo cmake: %CMAKE_EXE%
 echo clang: %CLANG_EXE%
 echo flutter: %FLUTTER_CMD%
 echo LLVM_DIR: !LLVM_DIR!
+
+echo.
+echo === Installing VGRE CLI Tools (vgre-token, vgre-start) ===
+rem Install CLI tools NOW — before the build — so they are available even if
+rem the native build fails.  Also updates the current session PATH immediately
+rem so the user does not need to restart their terminal.
+set "TOKEN_SCRIPT_DIR=%INSTALL_DIR%\scripts"
+if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
+if not exist "%TOKEN_SCRIPT_DIR%" mkdir "%TOKEN_SCRIPT_DIR%"
+copy /Y "%SCRIPT_DIR%vgre-token.ps1"        "%TOKEN_SCRIPT_DIR%\vgre-token.ps1"        >nul 2>&1
+copy /Y "%SCRIPT_DIR%vgre-token.bat"        "%TOKEN_SCRIPT_DIR%\vgre-token.bat"        >nul 2>&1
+copy /Y "%SCRIPT_DIR%Setup-VGRECluster.ps1" "%TOKEN_SCRIPT_DIR%\Setup-VGRECluster.ps1" >nul 2>&1
+copy /Y "%SCRIPT_DIR%Start-VGRE.ps1"        "%TOKEN_SCRIPT_DIR%\Start-VGRE.ps1"        >nul 2>&1
+copy /Y "%SCRIPT_DIR%vgre_env.ps1"          "%TOKEN_SCRIPT_DIR%\vgre_env.ps1"          >nul 2>&1
+copy /Y "%SCRIPT_DIR%Install-VGRETools.ps1" "%TOKEN_SCRIPT_DIR%\Install-VGRETools.ps1" >nul 2>&1
+echo [OK] vgre-token installed to %TOKEN_SCRIPT_DIR%
+
+rem Update User PATH (persistent across new terminals)
+for /f "usebackq" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$d='%TOKEN_SCRIPT_DIR%';$d2='%INSTALL_DIR%';$p=[Environment]::GetEnvironmentVariable('Path','User');$changed=$false;foreach($dir in @($d2,$d)){if($p -notlike '*'+$dir+'*'){$p+=';'+$dir;$changed=$true}};if($changed){[Environment]::SetEnvironmentVariable('Path',$p,'User');'CHANGED'}else{'EXISTS'}"`) do set "_CLI_PATH_STATUS=%%I"
+if "!_CLI_PATH_STATUS!"=="CHANGED" echo [OK] Added CLI tools to User PATH.
+
+rem Update current session PATH too — vgre-token works WITHOUT restarting terminal
+if "!PATH!" neq "!PATH:%TOKEN_SCRIPT_DIR%=!" goto :cli_path_ok
+set "PATH=%TOKEN_SCRIPT_DIR%;%INSTALL_DIR%;!PATH!"
+:cli_path_ok
+echo [INFO] vgre-token is available in this terminal and all new terminals.
+echo        Run: vgre-token generate
 
 echo.
 echo === Building VGRE Native Engine ===
@@ -343,7 +370,7 @@ if "%SKIP_DASHBOARD%"=="1" (
     goto :dashboard_skip
 )
 pushd "%DASHBOARD_DIR%" || exit /b 1
-powershell -NoProfile -Command "& '%FLUTTER_CMD%' build windows --release"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%FLUTTER_CMD%' build windows --release"
 if errorlevel 1 (
     popd
     echo WARNING: Flutter build failed. Continuing without dashboard.
@@ -507,14 +534,14 @@ echo === Creating Desktop Shortcut ===
 set "SHORTCUT_PATH="
 set "VGRE_EXE_PATH=%INSTALL_DIR%\vgre_dashboard.exe"
 set "VGRE_LAUNCHER_PATH=%LAUNCHER_PATH%"
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$desktop=[Environment]::GetFolderPath('Desktop'); if([string]::IsNullOrWhiteSpace($desktop) -and $env:OneDrive){$desktop=Join-Path $env:OneDrive 'Desktop'}; if([string]::IsNullOrWhiteSpace($desktop)){$desktop=Join-Path $env:USERPROFILE 'Desktop'}; $target=$env:VGRE_LAUNCHER_PATH; $icon=$env:VGRE_EXE_PATH; $workdir=$env:INSTALL_DIR; if (!(Test-Path -LiteralPath $desktop)) { New-Item -ItemType Directory -Path $desktop -Force | Out-Null }; $shortcut=Join-Path $desktop 'VGRE Dashboard.lnk'; $shell=New-Object -ComObject WScript.Shell; $s=$shell.CreateShortcut($shortcut); $s.TargetPath=$target; $s.WorkingDirectory=$workdir; $s.IconLocation=($icon + ',0'); $s.Save(); Write-Output $shortcut"`) do set "SHORTCUT_PATH=%%I"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$desktop=[Environment]::GetFolderPath('Desktop'); if([string]::IsNullOrWhiteSpace($desktop) -and $env:OneDrive){$desktop=Join-Path $env:OneDrive 'Desktop'}; if([string]::IsNullOrWhiteSpace($desktop)){$desktop=Join-Path $env:USERPROFILE 'Desktop'}; $target=$env:VGRE_LAUNCHER_PATH; $icon=$env:VGRE_EXE_PATH; $workdir=$env:INSTALL_DIR; if (!(Test-Path -LiteralPath $desktop)) { New-Item -ItemType Directory -Path $desktop -Force | Out-Null }; $shortcut=Join-Path $desktop 'VGRE Dashboard.lnk'; $shell=New-Object -ComObject WScript.Shell; $s=$shell.CreateShortcut($shortcut); $s.TargetPath=$target; $s.WorkingDirectory=$workdir; $s.IconLocation=($icon + ',0'); $s.Save(); Write-Output $shortcut"`) do set "SHORTCUT_PATH=%%I"
 if errorlevel 1 (
     echo WARNING: Failed to create desktop shortcut.
 )
 
 echo.
 echo === Updating System Path ===
-for /f "usebackq" %%I in (`powershell -NoProfile -Command "$dir='%INSTALL_DIR%'; $path=[Environment]::GetEnvironmentVariable('Path','User'); if($path -notlike '*'+$dir+'*'){ [Environment]::SetEnvironmentVariable('Path', $path+';'+$dir, 'User'); Write-Output 'CHANGED' } else { Write-Output 'EXISTS' }"`) do set "PATH_STATUS=%%I"
+for /f "usebackq" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$dir='%INSTALL_DIR%'; $path=[Environment]::GetEnvironmentVariable('Path','User'); if($path -notlike '*'+$dir+'*'){ [Environment]::SetEnvironmentVariable('Path', $path+';'+$dir, 'User'); Write-Output 'CHANGED' } else { Write-Output 'EXISTS' }"`) do set "PATH_STATUS=%%I"
 
 if "%PATH_STATUS%"=="CHANGED" (
     echo [OK] Added %INSTALL_DIR% to your User PATH.
@@ -523,18 +550,10 @@ if "%PATH_STATUS%"=="CHANGED" (
     echo [OK] %INSTALL_DIR% is already in your PATH.
 )
 
-rem ── Install vgre-token CLI into PATH ──────────────────────────────────────
-set "TOKEN_SCRIPT_DIR=%INSTALL_DIR%\scripts"
-if not exist "%TOKEN_SCRIPT_DIR%" mkdir "%TOKEN_SCRIPT_DIR%"
-copy /Y "%SCRIPT_DIR%vgre-token.ps1" "%TOKEN_SCRIPT_DIR%\vgre-token.ps1" >nul 2>&1
-copy /Y "%SCRIPT_DIR%vgre-token.bat" "%TOKEN_SCRIPT_DIR%\vgre-token.bat" >nul 2>&1
-echo [OK] vgre-token installed to %TOKEN_SCRIPT_DIR%
-
-rem Add scripts dir to user PATH if not already present
-for /f "usebackq" %%I in (`powershell -NoProfile -Command ^
-    "$dir='%TOKEN_SCRIPT_DIR%';$p=[Environment]::GetEnvironmentVariable('Path','User');" ^
-    "if($p -notlike '*'+$dir+'*'){[Environment]::SetEnvironmentVariable('Path',$p+';'+$dir,'User');'ADDED'}else{'EXISTS'}"`) do set "SCRIPTS_PATH_STATUS=%%I"
-if "!SCRIPTS_PATH_STATUS!"=="ADDED" echo [OK] Added %TOKEN_SCRIPT_DIR% to user PATH.
+rem ── Refresh CLI scripts (already installed before the build; this updates them) --
+copy /Y "%SCRIPT_DIR%vgre-token.ps1"        "%TOKEN_SCRIPT_DIR%\vgre-token.ps1"        >nul 2>&1
+copy /Y "%SCRIPT_DIR%vgre-token.bat"        "%TOKEN_SCRIPT_DIR%\vgre-token.bat"        >nul 2>&1
+copy /Y "%SCRIPT_DIR%Setup-VGRECluster.ps1" "%TOKEN_SCRIPT_DIR%\Setup-VGRECluster.ps1" >nul 2>&1
 
 echo.
 echo ============================================================
@@ -623,7 +642,7 @@ exit /b 0
 where flutter >nul 2>&1
 if not errorlevel 1 exit /b 0
 
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$roots=@('$env:USERPROFILE\Downloads\Compressed','$env:USERPROFILE\Downloads','$env:USERPROFILE','C:\src','C:\tools'); $hit=Get-ChildItem -Path $roots -Filter flutter.bat -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty DirectoryName; if($hit){$hit}"`) do set "FLUTTER_BIN=%%I"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$roots=@('$env:USERPROFILE\Downloads\Compressed','$env:USERPROFILE\Downloads','$env:USERPROFILE','C:\src','C:\tools'); $hit=Get-ChildItem -Path $roots -Filter flutter.bat -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty DirectoryName; if($hit){$hit}"`) do set "FLUTTER_BIN=%%I"
 
 if defined FLUTTER_BIN (
     set "FLUTTER_CMD=!FLUTTER_BIN!\flutter.bat"
