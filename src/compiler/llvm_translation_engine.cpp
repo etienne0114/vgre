@@ -8,7 +8,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <regex>
 #include <sstream>
@@ -302,7 +304,17 @@ LLVMTranslationEngine::~LLVMTranslationEngine() {
     shutdown_ = true;
     queueCv_.notify_all();
     if (workerThread_.joinable()) {
-        workerThread_.join();
+        // Move ownership into a detached joiner so the destructor never blocks
+        // indefinitely if a JIT compilation is in progress.  The joiner signals
+        // via a promise so we can wait up to 10 s before giving up.
+        auto p = std::make_shared<std::promise<void>>();
+        auto f = p->get_future();
+        std::thread joiner([p, inner = std::move(workerThread_)]() mutable {
+            inner.join();
+            p->set_value();
+        });
+        joiner.detach();
+        f.wait_for(std::chrono::seconds(10));
     }
 }
 

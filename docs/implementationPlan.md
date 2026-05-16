@@ -202,7 +202,7 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 - Triangular: `cusparseSpSV` (full forward/backward/transposed substitution for lower+upper triangular CSR)
 
 **Also implemented** (2026-05-16): `cusparseSpGEMM` (3-phase, `cusparse_factorization.cpp`), `cusparseScsrilu02`/`Dcsrilu02` (ILU0), `cusparseScsric02`/`Dcsric02` (IC0). Bug-fixed 2026-05-16: SpGEMM first-pass used corrupt dual-purpose sentinel; replaced with dedicated `inUse[]` bool array.
-**Still missing**: Full-fill sparse factorization (UMFPACK-style). `cusolverSp*` separately tracked.
+**Still missing**: Full-fill sparse factorization (UMFPACK-style with fill-in). Requires external library (UMFPACK/SuperLU); architectural limitation.
 
 ---
 
