@@ -15,6 +15,46 @@ using cdouble = std::complex<double>;
 
 static int g_pass = 0, g_total = 0;
 
+static uint16_t f2h(float f) {
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(bits));
+    uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
+    int exp = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
+    uint32_t mant = bits & 0x7fffffu;
+    if (exp <= 0) {
+        if (exp < -10) return sign;
+        mant = (mant | 0x800000u) >> (1 - exp);
+        return static_cast<uint16_t>(sign | ((mant + 0x1000u) >> 13));
+    }
+    if (exp >= 31) return static_cast<uint16_t>(sign | 0x7c00u);
+    return static_cast<uint16_t>(sign | (static_cast<uint16_t>(exp) << 10) |
+                                 ((mant + 0x1000u) >> 13));
+}
+
+static float h2f(uint16_t h) {
+    uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+    uint32_t exp = (h >> 10) & 0x1fu;
+    uint32_t mant = h & 0x03ffu;
+    uint32_t bits = 0;
+    if (exp == 0) {
+        if (mant == 0) {
+            bits = sign;
+        } else {
+            exp = 1;
+            while ((mant & 0x0400u) == 0) { mant <<= 1; --exp; }
+            mant &= 0x03ffu;
+            bits = sign | ((exp + 112u) << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1fu) {
+        bits = sign | 0x7f800000u | (mant << 13);
+    } else {
+        bits = sign | ((exp + 112u) << 23) | (mant << 13);
+    }
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
 static void check(const char *name, bool ok) {
     ++g_total;
     if (ok) { ++g_pass; std::cout << "PASS [" << g_total << "] " << name << "\n"; }
@@ -224,6 +264,53 @@ static void test_plan_management() {
     check("Plan management (create/destroy/reject invalid)", ok);
 }
 
+// ── Test: FP16 complex roundtrip ─────────────────────────────────────────────
+static void test_fp16_c2c_roundtrip() {
+    const int N = 32;
+    std::vector<cufftHalfComplex> in(N), fwd(N), inv(N);
+    for (int i = 0; i < N; ++i) {
+        in[i].x = f2h(std::sin(2.0f * 3.14159f * i / N));
+        in[i].y = f2h(0.25f * std::cos(2.0f * 3.14159f * i / N));
+    }
+
+    cufftHandle plan;
+    bool ok = (cufftPlan1d(&plan, N, CUFFT_C16C, 1) == CUFFT_SUCCESS);
+    ok &= (cufftExecC16C(plan, in.data(), fwd.data(), CUFFT_FORWARD) == CUFFT_SUCCESS);
+    ok &= (cufftExecC16C(plan, fwd.data(), inv.data(), CUFFT_INVERSE) == CUFFT_SUCCESS);
+    cufftDestroy(plan);
+
+    for (int i = 0; i < N && ok; ++i) {
+        ok &= std::fabs(h2f(in[i].x) - h2f(inv[i].x)) < 2e-3f;
+        ok &= std::fabs(h2f(in[i].y) - h2f(inv[i].y)) < 2e-3f;
+    }
+    check("FP16 C16C roundtrip (N=32)", ok);
+}
+
+// ── Test: PlanMany with strided batched 1D layout ───────────────────────────
+static void test_plan_many_strided_batch() {
+    const int N = 16, B = 2, stride = 2, dist = N * stride;
+    std::vector<cfloat> in(dist * B), fwd(dist * B), inv(dist * B);
+    for (int b = 0; b < B; ++b)
+        for (int i = 0; i < N; ++i)
+            in[b * dist + i * stride] = cfloat(static_cast<float>(b + 1) * std::sin(0.2f * i), 0.1f * i);
+
+    int dims[1] = {N};
+    cufftHandle plan;
+    size_t work = 0;
+    bool ok = (cufftPlanMany(&plan, 1, dims, nullptr, stride, dist, nullptr,
+                             stride, dist, CUFFT_C2C, B) == CUFFT_SUCCESS);
+    ok &= (cufftGetSizeMany(plan, 1, dims, nullptr, stride, dist, nullptr,
+                            stride, dist, CUFFT_C2C, B, &work) == CUFFT_SUCCESS);
+    ok &= (cufftExecC2C(plan, in.data(), fwd.data(), CUFFT_FORWARD) == CUFFT_SUCCESS);
+    ok &= (cufftExecC2C(plan, fwd.data(), inv.data(), CUFFT_INVERSE) == CUFFT_SUCCESS);
+    cufftDestroy(plan);
+
+    for (int b = 0; b < B && ok; ++b)
+        for (int i = 0; i < N && ok; ++i)
+            ok &= std::abs(in[b * dist + i * stride] - inv[b * dist + i * stride]) < 1e-4f;
+    check("PlanMany strided batched C2C", ok);
+}
+
 int main() {
     std::cout << "=== Test: cuFFT O(n log n) FFT ===\n";
 
@@ -238,6 +325,8 @@ int main() {
     test_c2c_prime_size();
     test_parseval();
     test_plan_management();
+    test_fp16_c2c_roundtrip();
+    test_plan_many_strided_batch();
 
     std::cout << "\n" << g_pass << "/" << g_total << " tests passed.\n";
     return (g_pass == g_total) ? 0 : 1;

@@ -3,7 +3,7 @@
 // Built-in: Cooley-Tukey radix-2 + Bluestein's algorithm for arbitrary sizes.
 // If compiled with VGRE_HAS_FFTW3, delegates to FFTW3 for maximum performance.
 
-#include "vgre/api/cufft_shim.h"
+#include "cufft_internal.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/openmp_helper.h"
 
@@ -16,22 +16,58 @@
 #include <complex>
 #include <cstdint>
 #include <cstring>
-#include <mutex>
-#include <unordered_map>
 #include <vector>
+
+using namespace vgre_cufft;
 
 namespace {
 
 constexpr double PI = 3.14159265358979323846;
 
-// ── Utility ─────────────────────────────────────────────────────────────────
-inline int nextPow2(int n) {
-    int p = 1;
-    while (p < n) p <<= 1;
-    return p;
+static inline float halfToFloat(uint16_t h) {
+    uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+    uint32_t exp = (h >> 10) & 0x1fu;
+    uint32_t mant = h & 0x03ffu;
+    uint32_t bits = 0;
+    if (exp == 0) {
+        if (mant == 0) {
+            bits = sign;
+        } else {
+            exp = 1;
+            while ((mant & 0x0400u) == 0) {
+                mant <<= 1;
+                --exp;
+            }
+            mant &= 0x03ffu;
+            bits = sign | ((exp + 112u) << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1fu) {
+        bits = sign | 0x7f800000u | (mant << 13);
+    } else {
+        bits = sign | ((exp + 112u) << 23) | (mant << 13);
+    }
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
 }
 
-inline bool isPow2(int n) { return n > 0 && (n & (n - 1)) == 0; }
+static inline uint16_t floatToHalf(float f) {
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(bits));
+    uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
+    int exp = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
+    uint32_t mant = bits & 0x7fffffu;
+    if (exp <= 0) {
+        if (exp < -10) return sign;
+        mant = (mant | 0x800000u) >> (1 - exp);
+        return static_cast<uint16_t>(sign | ((mant + 0x1000u) >> 13));
+    }
+    if (exp >= 31) {
+        return static_cast<uint16_t>(sign | 0x7c00u);
+    }
+    return static_cast<uint16_t>(sign | (static_cast<uint16_t>(exp) << 10) |
+                                 ((mant + 0x1000u) >> 13));
+}
 
 // ── Cooley-Tukey radix-2 in-place FFT (O(n log n), n must be power-of-2) ────
 template<typename T>
@@ -242,118 +278,57 @@ void fftw_fft1d(const std::complex<T> *in, std::complex<T> *out, int n, int dire
 }
 #endif // VGRE_HAS_FFTW3
 
-// ── Plan descriptor ─────────────────────────────────────────────────────────
-struct CufftPlan {
-    int rank = 0;
-    int nx = 0, ny = 0, nz = 0;
-    int batch = 1;
-    cufftType_t type = CUFFT_C2C;
-};
-
-std::mutex g_planMutex;
-std::unordered_map<uint64_t, CufftPlan> g_plans;
-uint64_t g_nextPlanId = 1;
-
-} // namespace
-
-extern "C" {
-
-// ── Plan management ──────────────────────────────────────────────────────────
-
-cufftResult_t cufftPlan1d(cufftHandle *plan, int nx, cufftType_t type, int batch) {
-    if (!plan || nx <= 0 || batch <= 0) return CUFFT_INVALID_VALUE;
-    if (type != CUFFT_C2C && type != CUFFT_R2C && type != CUFFT_C2R &&
-        type != CUFFT_Z2Z && type != CUFFT_D2Z && type != CUFFT_Z2D)
-        return CUFFT_INVALID_TYPE;
-
-    std::lock_guard<std::mutex> lk(g_planMutex);
-    uint64_t id = g_nextPlanId++;
-    CufftPlan &p = g_plans[id];
-    p.rank = 1;
-    p.nx = nx;
-    p.type = type;
-    p.batch = batch;
-    *plan = id;
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftPlan2d(cufftHandle *plan, int nx, int ny, cufftType_t type) {
-    if (!plan || nx <= 0 || ny <= 0) return CUFFT_INVALID_VALUE;
-    std::lock_guard<std::mutex> lk(g_planMutex);
-    uint64_t id = g_nextPlanId++;
-    CufftPlan &p = g_plans[id];
-    p.rank = 2;
-    p.nx = nx; p.ny = ny;
-    p.type = type;
-    *plan = id;
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftPlan3d(cufftHandle *plan, int nx, int ny, int nz, cufftType_t type) {
-    if (!plan || nx <= 0 || ny <= 0 || nz <= 0) return CUFFT_INVALID_VALUE;
-    std::lock_guard<std::mutex> lk(g_planMutex);
-    uint64_t id = g_nextPlanId++;
-    CufftPlan &p = g_plans[id];
-    p.rank = 3;
-    p.nx = nx; p.ny = ny; p.nz = nz;
-    p.type = type;
-    *plan = id;
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftPlanMany(cufftHandle *plan, int rank, int *n, int *inembed,
-                            int istride, int idist, int *onembed, int ostride,
-                            int odist, cufftType_t type, int batch) {
-    (void)inembed; (void)istride; (void)idist;
-    (void)onembed; (void)ostride; (void)odist;
-    if (!plan || !n || rank <= 0 || batch <= 0) return CUFFT_INVALID_VALUE;
-
-    std::lock_guard<std::mutex> lk(g_planMutex);
-    uint64_t pid = g_nextPlanId++;
-    CufftPlan &p = g_plans[pid];
-    p.rank = rank;
-    p.batch = batch;
-    p.type = type;
-    if (rank >= 1) p.nx = n[0];
-    if (rank >= 2) p.ny = n[1];
-    if (rank >= 3) p.nz = n[2];
-    *plan = pid;
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftDestroy(cufftHandle plan) {
-    std::lock_guard<std::mutex> lk(g_planMutex);
-    g_plans.erase(plan);
-    return CUFFT_SUCCESS;
-}
-
-} // extern "C"
-
 // ── Execution helpers (must be outside extern "C" because they are templates) ─
-
-namespace {
-
-const CufftPlan *lookupPlan(cufftHandle plan) {
-    std::lock_guard<std::mutex> lk(g_planMutex);
-    auto it = g_plans.find(plan);
-    if (it == g_plans.end()) return nullptr;
-    return &it->second;
-}
 
 template<typename T>
 cufftResult_t execC2C(const CufftPlan &p, void *idata, void *odata, int direction) {
     auto *in = static_cast<std::complex<T>*>(idata);
     auto *out = static_cast<std::complex<T>*>(odata);
+    if (!in || !out || !isValidDirection(direction)) return CUFFT_INVALID_VALUE;
     if (p.rank == 1) {
         #ifdef _OPENMP
         #pragma omp parallel for if (p.batch > 2)
         #endif
-        for (int b = 0; b < p.batch; ++b)
-            fft1d(in + b * p.nx, out + b * p.nx, p.nx, direction);
+        for (int b = 0; b < p.batch; ++b) {
+            if (!p.advanced && p.istride == 1 && p.ostride == 1 &&
+                p.idist == p.nx && p.odist == p.nx) {
+                fft1d(in + b * p.nx, out + b * p.nx, p.nx, direction);
+            } else {
+                std::vector<std::complex<T>> tmp(static_cast<size_t>(p.nx));
+                std::vector<std::complex<T>> res(static_cast<size_t>(p.nx));
+                for (int i = 0; i < p.nx; ++i) tmp[static_cast<size_t>(i)] = in[inputIndex(p, b, i)];
+                fft1d(tmp.data(), res.data(), p.nx, direction);
+                for (int i = 0; i < p.nx; ++i) out[outputIndex(p, b, i)] = res[static_cast<size_t>(i)];
+            }
+        }
     } else if (p.rank == 2) {
-        fft2d(in, out, p.nx, p.ny, direction);
+        int64_t total = logicalElementCount(p);
+        if (p.batch == 1 && !p.advanced) {
+            fft2d(in, out, p.nx, p.ny, direction);
+        } else {
+            for (int b = 0; b < p.batch; ++b) {
+                std::vector<std::complex<T>> tmp(static_cast<size_t>(total));
+                std::vector<std::complex<T>> res(static_cast<size_t>(total));
+                for (int64_t i = 0; i < total; ++i) tmp[static_cast<size_t>(i)] = in[inputIndex(p, b, i)];
+                fft2d(tmp.data(), res.data(), p.nx, p.ny, direction);
+                for (int64_t i = 0; i < total; ++i) out[outputIndex(p, b, i)] = res[static_cast<size_t>(i)];
+            }
+        }
     } else if (p.rank == 3) {
-        fft3d(in, out, p.nx, p.ny, p.nz, direction);
+        int64_t total = logicalElementCount(p);
+        if (p.batch == 1 && !p.advanced) {
+            fft3d(in, out, p.nx, p.ny, p.nz, direction);
+        } else {
+            for (int b = 0; b < p.batch; ++b) {
+                std::vector<std::complex<T>> tmp(static_cast<size_t>(total));
+                std::vector<std::complex<T>> res(static_cast<size_t>(total));
+                for (int64_t i = 0; i < total; ++i) tmp[static_cast<size_t>(i)] = in[inputIndex(p, b, i)];
+                fft3d(tmp.data(), res.data(), p.nx, p.ny, p.nz, direction);
+                for (int64_t i = 0; i < total; ++i) out[outputIndex(p, b, i)] = res[static_cast<size_t>(i)];
+            }
+        }
+    } else {
+        return CUFFT_INVALID_PLAN;
     }
     return CUFFT_SUCCESS;
 }
@@ -362,18 +337,34 @@ template<typename T>
 cufftResult_t execR2C(const CufftPlan &p, void *idata, void *odata) {
     auto *in = static_cast<T*>(idata);
     auto *out = static_cast<std::complex<T>*>(odata);
+    if (!in || !out) return CUFFT_INVALID_VALUE;
     if (p.rank == 1) {
         #ifdef _OPENMP
         #pragma omp parallel for if (p.batch > 2)
         #endif
-        for (int b = 0; b < p.batch; ++b)
-            r2c1d(in + b * p.nx, out + b * p.nx, p.nx);
+        for (int b = 0; b < p.batch; ++b) {
+            if (!p.advanced && p.istride == 1 && p.ostride == 1 &&
+                p.idist == p.nx && p.odist == p.nx) {
+                r2c1d(in + b * p.nx, out + b * p.nx, p.nx);
+            } else {
+                std::vector<T> tmp(static_cast<size_t>(p.nx));
+                std::vector<std::complex<T>> res(static_cast<size_t>(p.nx));
+                for (int i = 0; i < p.nx; ++i) tmp[static_cast<size_t>(i)] = in[inputIndex(p, b, i)];
+                r2c1d(tmp.data(), res.data(), p.nx);
+                for (int i = 0; i < p.nx; ++i) out[outputIndex(p, b, i)] = res[static_cast<size_t>(i)];
+            }
+        }
     } else {
-        int total = p.nx * std::max(1, p.ny) * std::max(1, p.nz);
-        std::vector<std::complex<T>> cin(total);
-        for (int i = 0; i < total; ++i) cin[i] = std::complex<T>(in[i], 0);
-        if (p.rank == 2) fft2d(cin.data(), out, p.nx, p.ny, CUFFT_FORWARD);
-        else fft3d(cin.data(), out, p.nx, p.ny, p.nz, CUFFT_FORWARD);
+        int64_t total = logicalElementCount(p);
+        for (int b = 0; b < p.batch; ++b) {
+            std::vector<std::complex<T>> cin(static_cast<size_t>(total));
+            std::vector<std::complex<T>> cout(static_cast<size_t>(total));
+            for (int64_t i = 0; i < total; ++i) cin[static_cast<size_t>(i)] = std::complex<T>(in[inputIndex(p, b, i)], 0);
+            if (p.rank == 2) fft2d(cin.data(), cout.data(), p.nx, p.ny, CUFFT_FORWARD);
+            else if (p.rank == 3) fft3d(cin.data(), cout.data(), p.nx, p.ny, p.nz, CUFFT_FORWARD);
+            else return CUFFT_INVALID_PLAN;
+            for (int64_t i = 0; i < total; ++i) out[outputIndex(p, b, i)] = cout[static_cast<size_t>(i)];
+        }
     }
     return CUFFT_SUCCESS;
 }
@@ -382,18 +373,107 @@ template<typename T>
 cufftResult_t execC2R(const CufftPlan &p, void *idata, void *odata) {
     auto *in = static_cast<std::complex<T>*>(idata);
     auto *out = static_cast<T*>(odata);
+    if (!in || !out) return CUFFT_INVALID_VALUE;
     if (p.rank == 1) {
         #ifdef _OPENMP
         #pragma omp parallel for if (p.batch > 2)
         #endif
-        for (int b = 0; b < p.batch; ++b)
-            c2r1d(in + b * p.nx, out + b * p.nx, p.nx);
+        for (int b = 0; b < p.batch; ++b) {
+            if (!p.advanced && p.istride == 1 && p.ostride == 1 &&
+                p.idist == p.nx && p.odist == p.nx) {
+                c2r1d(in + b * p.nx, out + b * p.nx, p.nx);
+            } else {
+                std::vector<std::complex<T>> tmp(static_cast<size_t>(p.nx));
+                std::vector<T> res(static_cast<size_t>(p.nx));
+                for (int i = 0; i < p.nx; ++i) tmp[static_cast<size_t>(i)] = in[inputIndex(p, b, i)];
+                c2r1d(tmp.data(), res.data(), p.nx);
+                for (int i = 0; i < p.nx; ++i) out[outputIndex(p, b, i)] = res[static_cast<size_t>(i)];
+            }
+        }
     } else {
-        int total = p.nx * std::max(1, p.ny) * std::max(1, p.nz);
-        std::vector<std::complex<T>> cout(total);
-        if (p.rank == 2) fft2d(in, cout.data(), p.nx, p.ny, CUFFT_INVERSE);
-        else fft3d(in, cout.data(), p.nx, p.ny, p.nz, CUFFT_INVERSE);
-        for (int i = 0; i < total; ++i) out[i] = cout[i].real();
+        int64_t total = logicalElementCount(p);
+        for (int b = 0; b < p.batch; ++b) {
+            std::vector<std::complex<T>> cin(static_cast<size_t>(total));
+            std::vector<std::complex<T>> cout(static_cast<size_t>(total));
+            for (int64_t i = 0; i < total; ++i) cin[static_cast<size_t>(i)] = in[inputIndex(p, b, i)];
+            if (p.rank == 2) fft2d(cin.data(), cout.data(), p.nx, p.ny, CUFFT_INVERSE);
+            else if (p.rank == 3) fft3d(cin.data(), cout.data(), p.nx, p.ny, p.nz, CUFFT_INVERSE);
+            else return CUFFT_INVALID_PLAN;
+            for (int64_t i = 0; i < total; ++i) out[outputIndex(p, b, i)] = cout[static_cast<size_t>(i)].real();
+        }
+    }
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t execC16C(const CufftPlan &p, void *idata, void *odata, int direction) {
+    auto *in = static_cast<cufftHalfComplex*>(idata);
+    auto *out = static_cast<cufftHalfComplex*>(odata);
+    if (!in || !out || !isValidDirection(direction)) return CUFFT_INVALID_VALUE;
+
+    int64_t total = logicalElementCount(p);
+    for (int b = 0; b < p.batch; ++b) {
+        std::vector<std::complex<float>> tmp(static_cast<size_t>(total));
+        std::vector<std::complex<float>> res(static_cast<size_t>(total));
+        for (int64_t i = 0; i < total; ++i) {
+            const cufftHalfComplex &v = in[inputIndex(p, b, i)];
+            tmp[static_cast<size_t>(i)] = {halfToFloat(v.x), halfToFloat(v.y)};
+        }
+        if (p.rank == 1) fft1d(tmp.data(), res.data(), p.nx, direction);
+        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.nx, p.ny, direction);
+        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nx, p.ny, p.nz, direction);
+        else return CUFFT_INVALID_PLAN;
+        for (int64_t i = 0; i < total; ++i) {
+            cufftHalfComplex &v = out[outputIndex(p, b, i)];
+            v.x = floatToHalf(res[static_cast<size_t>(i)].real());
+            v.y = floatToHalf(res[static_cast<size_t>(i)].imag());
+        }
+    }
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t execR16C(const CufftPlan &p, void *idata, void *odata) {
+    auto *in = static_cast<uint16_t*>(idata);
+    auto *out = static_cast<cufftHalfComplex*>(odata);
+    if (!in || !out) return CUFFT_INVALID_VALUE;
+
+    int64_t total = logicalElementCount(p);
+    for (int b = 0; b < p.batch; ++b) {
+        std::vector<std::complex<float>> tmp(static_cast<size_t>(total));
+        std::vector<std::complex<float>> res(static_cast<size_t>(total));
+        for (int64_t i = 0; i < total; ++i)
+            tmp[static_cast<size_t>(i)] = {halfToFloat(in[inputIndex(p, b, i)]), 0.0f};
+        if (p.rank == 1) fft1d(tmp.data(), res.data(), p.nx, CUFFT_FORWARD);
+        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.nx, p.ny, CUFFT_FORWARD);
+        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nx, p.ny, p.nz, CUFFT_FORWARD);
+        else return CUFFT_INVALID_PLAN;
+        for (int64_t i = 0; i < total; ++i) {
+            cufftHalfComplex &v = out[outputIndex(p, b, i)];
+            v.x = floatToHalf(res[static_cast<size_t>(i)].real());
+            v.y = floatToHalf(res[static_cast<size_t>(i)].imag());
+        }
+    }
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t execC16R(const CufftPlan &p, void *idata, void *odata) {
+    auto *in = static_cast<cufftHalfComplex*>(idata);
+    auto *out = static_cast<uint16_t*>(odata);
+    if (!in || !out) return CUFFT_INVALID_VALUE;
+
+    int64_t total = logicalElementCount(p);
+    for (int b = 0; b < p.batch; ++b) {
+        std::vector<std::complex<float>> tmp(static_cast<size_t>(total));
+        std::vector<std::complex<float>> res(static_cast<size_t>(total));
+        for (int64_t i = 0; i < total; ++i) {
+            const cufftHalfComplex &v = in[inputIndex(p, b, i)];
+            tmp[static_cast<size_t>(i)] = {halfToFloat(v.x), halfToFloat(v.y)};
+        }
+        if (p.rank == 1) fft1d(tmp.data(), res.data(), p.nx, CUFFT_INVERSE);
+        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.nx, p.ny, CUFFT_INVERSE);
+        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nx, p.ny, p.nz, CUFFT_INVERSE);
+        else return CUFFT_INVALID_PLAN;
+        for (int64_t i = 0; i < total; ++i)
+            out[outputIndex(p, b, i)] = floatToHalf(res[static_cast<size_t>(i)].real());
     }
     return CUFFT_SUCCESS;
 }
@@ -405,175 +485,66 @@ cufftResult_t execC2R(const CufftPlan &p, void *idata, void *odata) {
 extern "C" {
 
 cufftResult_t cufftExecC2C(cufftHandle plan, void *idata, void *odata, int direction) {
-    auto *p = lookupPlan(plan);
-    if (!p) return CUFFT_INVALID_PLAN;
-    if (p->type != CUFFT_C2C) return CUFFT_INVALID_TYPE;
-    return execC2C<float>(*p, idata, odata, direction);
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_C2C) return CUFFT_INVALID_TYPE;
+    return execC2C<float>(p, idata, odata, direction);
 }
 
 cufftResult_t cufftExecZ2Z(cufftHandle plan, void *idata, void *odata, int direction) {
-    auto *p = lookupPlan(plan);
-    if (!p) return CUFFT_INVALID_PLAN;
-    if (p->type != CUFFT_Z2Z) return CUFFT_INVALID_TYPE;
-    return execC2C<double>(*p, idata, odata, direction);
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_Z2Z) return CUFFT_INVALID_TYPE;
+    return execC2C<double>(p, idata, odata, direction);
 }
 
 cufftResult_t cufftExecR2C(cufftHandle plan, void *idata, void *odata) {
-    auto *p = lookupPlan(plan);
-    if (!p) return CUFFT_INVALID_PLAN;
-    if (p->type != CUFFT_R2C) return CUFFT_INVALID_TYPE;
-    return execR2C<float>(*p, idata, odata);
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_R2C) return CUFFT_INVALID_TYPE;
+    return execR2C<float>(p, idata, odata);
 }
 
 cufftResult_t cufftExecC2R(cufftHandle plan, void *idata, void *odata) {
-    auto *p = lookupPlan(plan);
-    if (!p) return CUFFT_INVALID_PLAN;
-    if (p->type != CUFFT_C2R) return CUFFT_INVALID_TYPE;
-    return execC2R<float>(*p, idata, odata);
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_C2R) return CUFFT_INVALID_TYPE;
+    return execC2R<float>(p, idata, odata);
 }
 
 cufftResult_t cufftExecD2Z(cufftHandle plan, void *idata, void *odata) {
-    auto *p = lookupPlan(plan);
-    if (!p) return CUFFT_INVALID_PLAN;
-    if (p->type != CUFFT_D2Z) return CUFFT_INVALID_TYPE;
-    return execR2C<double>(*p, idata, odata);
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_D2Z) return CUFFT_INVALID_TYPE;
+    return execR2C<double>(p, idata, odata);
 }
 
 cufftResult_t cufftExecZ2D(cufftHandle plan, void *idata, void *odata) {
-    auto *p = lookupPlan(plan);
-    if (!p) return CUFFT_INVALID_PLAN;
-    if (p->type != CUFFT_Z2D) return CUFFT_INVALID_TYPE;
-    return execC2R<double>(*p, idata, odata);
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_Z2D) return CUFFT_INVALID_TYPE;
+    return execC2R<double>(p, idata, odata);
 }
 
-// ── Advanced (no-op in CPU reference) ──────────────────────────────────────────
-
-cufftResult_t cufftSetStream(cufftHandle /*plan*/, void * /*stream*/) {
-    return CUFFT_SUCCESS;
+cufftResult_t cufftExecR16C(cufftHandle plan, void *idata, void *odata) {
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_R16C) return CUFFT_INVALID_TYPE;
+    return execR16C(p, idata, odata);
 }
 
-cufftResult_t cufftSetWorkArea(cufftHandle /*plan*/, void * /*workArea*/) {
-    return CUFFT_SUCCESS;
+cufftResult_t cufftExecC16R(cufftHandle plan, void *idata, void *odata) {
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_C16R) return CUFFT_INVALID_TYPE;
+    return execC16R(p, idata, odata);
 }
 
-// ── Advanced planning / size estimation ──────────────────────────────────────
-// In CPU reference mode there is no GPU scratch memory; workspace size is 0.
-
-cufftResult_t cufftEstimate1d(int nx, cufftType_t type, int batch, size_t *workSize) {
-    if (nx <= 0 || batch <= 0 || !workSize) return CUFFT_INVALID_VALUE;
-    *workSize = 0;
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftEstimate2d(int nx, int ny, cufftType_t type, size_t *workSize) {
-    if (nx <= 0 || ny <= 0 || !workSize) return CUFFT_INVALID_VALUE;
-    *workSize = 0;
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftEstimate3d(int nx, int ny, int nz, cufftType_t type, size_t *workSize) {
-    if (nx <= 0 || ny <= 0 || nz <= 0 || !workSize) return CUFFT_INVALID_VALUE;
-    *workSize = 0;
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftGetSize1d(cufftHandle plan, int nx, cufftType_t type, int batch, size_t *workSize) {
-    (void)plan; (void)nx; (void)type; (void)batch;
-    if (!workSize) return CUFFT_INVALID_VALUE;
-    *workSize = 0;
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftGetSize2d(cufftHandle plan, int nx, int ny, cufftType_t type, size_t *workSize) {
-    (void)plan; (void)nx; (void)ny; (void)type;
-    if (!workSize) return CUFFT_INVALID_VALUE;
-    *workSize = 0;
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftGetSize3d(cufftHandle plan, int nx, int ny, int nz, cufftType_t type, size_t *workSize) {
-    (void)plan; (void)nx; (void)ny; (void)nz; (void)type;
-    if (!workSize) return CUFFT_INVALID_VALUE;
-    *workSize = 0;
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftGetSizeMany(cufftHandle plan, int rank, int *n, int *inembed,
-                              int istride, int idist, int *onembed, int ostride,
-                              int odist, cufftType_t type, int batch, size_t *workSize) {
-    (void)plan; (void)rank; (void)n; (void)inembed; (void)istride; (void)idist;
-    (void)onembed; (void)ostride; (void)odist; (void)type; (void)batch;
-    if (!workSize) return CUFFT_INVALID_VALUE;
-    *workSize = 0;
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftMakePlanMany(cufftHandle plan, int rank, int *n, int *inembed,
-                               int istride, int idist, int *onembed, int ostride,
-                               int odist, cufftType_t type, int batch, size_t *workSize) {
-    (void)inembed; (void)istride; (void)idist;
-    (void)onembed; (void)ostride; (void)odist;
-    if (!n || rank <= 0 || batch <= 0 || !workSize) return CUFFT_INVALID_VALUE;
-    std::lock_guard<std::mutex> lk(g_planMutex);
-    auto it = g_plans.find(plan);
-    if (it == g_plans.end()) return CUFFT_INVALID_PLAN;
-    CufftPlan &p = it->second;
-    p.rank = rank;
-    p.batch = batch;
-    p.type = type;
-    p.nx = n[0];
-    if (rank >= 2) p.ny = n[1];
-    if (rank >= 3) p.nz = n[2];
-    *workSize = 0;
-    return CUFFT_SUCCESS;
-}
-
-// ── IPC plan export / import (F.7) ───────────────────────────────────────────
-// vgre_cufft_ipc_handle_t is a 64-byte struct that serialises a cuFFT plan
-// so it can be reconstructed in another process without re-planning.
-
-struct vgre_cufft_ipc_handle_t {
-    int32_t rank;
-    int32_t nx, ny, nz;
-    int32_t batch;
-    int32_t type;         // cufftType_t
-    uint8_t reserved[40]; // pad to 64 bytes
-};
-static_assert(sizeof(vgre_cufft_ipc_handle_t) == 64,
-              "cuFFT IPC handle must be exactly 64 bytes");
-
-cufftResult_t cufftGetPlanIpcHandle(cufftHandle plan,
-                                     vgre_cufft_ipc_handle_t *handle) {
-    if (!handle) return CUFFT_INVALID_VALUE;
-    std::lock_guard<std::mutex> lk(g_planMutex);
-    auto it = g_plans.find(static_cast<uint64_t>(plan));
-    if (it == g_plans.end()) return CUFFT_INVALID_PLAN;
-    const CufftPlan &p = it->second;
-    handle->rank  = p.rank;
-    handle->nx    = p.nx;
-    handle->ny    = p.ny;
-    handle->nz    = p.nz;
-    handle->batch = p.batch;
-    handle->type  = static_cast<int32_t>(p.type);
-    std::memset(handle->reserved, 0, sizeof(handle->reserved));
-    return CUFFT_SUCCESS;
-}
-
-cufftResult_t cufftCreatePlanFromIpcHandle(cufftHandle *plan,
-                                            const vgre_cufft_ipc_handle_t *handle) {
-    if (!plan || !handle || handle->rank < 1 || handle->rank > 3)
-        return CUFFT_INVALID_VALUE;
-    std::lock_guard<std::mutex> lk(g_planMutex);
-    uint64_t id = g_nextPlanId++;
-    CufftPlan &p = g_plans[id];
-    p.rank  = handle->rank;
-    p.nx    = handle->nx;
-    p.ny    = handle->ny;
-    p.nz    = handle->nz;
-    p.batch = handle->batch;
-    p.type  = static_cast<cufftType_t>(handle->type);
-    *plan = static_cast<cufftHandle>(id);
-    return CUFFT_SUCCESS;
+cufftResult_t cufftExecC16C(cufftHandle plan, void *idata, void *odata, int direction) {
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_C16C) return CUFFT_INVALID_TYPE;
+    return execC16C(p, idata, odata, direction);
 }
 
 } // extern "C"

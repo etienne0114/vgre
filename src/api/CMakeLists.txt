@@ -45,6 +45,7 @@ add_library(vgre_api OBJECT
 # be linked into vgre_cudart.so only (they reference CUDAModuleRegistry which
 # lives in cudart_shim.cpp, part of vgre_cudart, not libvgre.so).
 add_library(vgre_cudart_shims OBJECT
+    cudart/cudart_shim_array_memcpy.cpp
     cudart/cudart_shim_memset_nd.cpp
     cudart/cudart_shim_graph_nodes.cpp
     cudart/cudart_shim_graph_introspection.cpp

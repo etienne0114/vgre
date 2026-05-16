@@ -26,7 +26,7 @@ src/api/cuda_driver/     # Driver API shim split by concern (11 files)
 src/api/cublas/          # cuBLAS backend split by level (7 files)
 src/api/cudnn/           # cuDNN backend split by layer type (12 files)
 src/api/nccl/            # NCCL backend split by concern (4 files)
-src/api/cufft/           # cuFFT shim (1 file — reference DFT/IDFT)
+src/api/cufft/           # cuFFT shim split into execution + planning/state
 src/api/curand/          # cuRAND shim (1 file)
 src/api/cusolver/        # cuSOLVER shim (1 file — LAPACK delegation)
 src/api/cusparse/        # cuSPARSE shim (4 .cpp files + cusparse_state.h internal header)
@@ -37,7 +37,7 @@ src/core/texture/        # Texture/surface manager split by concern (5 files)
 src/core/memory/         # Memory manager split by concern (6 files)
 src/runtime/             # Runtime engine split (8 files incl. vector_engine float/double)
 src/advanced/            # Advanced subsystems split (20 files incl. adaptive/hybrid splits)
-src/advanced/profiling/  # NOT YET SPLIT — all profiling currently in runtime_profiler.cpp
+src/advanced/profiling/  # Not used; profiling split in src/advanced/runtime_profiler*.cpp
 src/deployment/k8s_device_plugin/  # Go gRPC K8s plugin (4 files)
 src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 ```
@@ -68,7 +68,7 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 | **P7** | NCCL p2p + advanced collectives | **DONE** (single-node; multi-node TCP functional) | Low |
 | **P8** | Cooperative groups + device-side libraries | **DONE** | Low |
 | **P9** | Deployment (K8s Device Plugin, SLURM GRES) | **DONE** | Low |
-| **P10** | CDP, profiling, advanced formats, graph updates | **PARTIAL** — CDP + graph update v2 done. Profiling consolidated in `runtime_profiler.cpp` | Low |
+| **P10** | CDP, profiling, advanced formats, graph updates | **DONE** — CDP, graph update v2, profiler timeline, OTLP/Chrome export, LLVM-IR instruction classification | Low |
 
 ---
 
@@ -155,13 +155,13 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 
 #### 3.4.1 cuFFT
 
-**File**: `src/api/cufft/cufft_core.cpp` (579 lines, single file)
+**Files**: `src/api/cufft/cufft_core.cpp` (execution kernels), `src/api/cufft/cufft_plan.cpp` (plan lifecycle, size queries, IPC), `src/api/cufft/cufft_internal.h` (internal plan state)
 
-**Implemented**: `cufftPlan1d/2d/3d/Many`, `cufftDestroy`, `cufftExecC2C/Z2Z/R2C/C2R/D2Z/Z2D`, `cufftSetStream/WorkArea`, `cufftEstimate*`, `cufftGetSize*`, `cufftMakePlanMany`, IPC plan export/import
+**Implemented**: `cufftPlan1d/2d/3d/Many`, `cufftDestroy`, `cufftExecC2C/Z2Z/R2C/C2R/D2Z/Z2D`, half-precision `cufftExecC16C/R16C/C16R`, `cufftSetStream/WorkArea`, `cufftEstimate*`, `cufftGetSize*`, `cufftMakePlanMany` with strided batched 1D layouts, IPC plan export/import
 
 **Implementation**: O(n log n) Cooley-Tukey radix-2 FFT for power-of-2 sizes + Bluestein's algorithm for arbitrary sizes. OpenMP-parallelized butterfly stages and batch/row/column loops. Optional FFTW3 delegation (`VGRE_HAS_FFTW3`, auto-detected by CMake `pkg_check_modules`). Plans stored in global handle map for reuse.
 
-**Test**: `tests/api/test_cufft.cpp` — 11 tests (pow2 roundtrip, non-pow2, single-frequency, Z2Z double, R2C+C2R, D2Z+Z2D, batched, 2D, prime-size, Parseval, plan management). All pass.
+**Test**: `tests/api/test_cufft.cpp` — 13 tests (pow2 roundtrip, non-pow2, single-frequency, Z2Z double, R2C+C2R, D2Z+Z2D, batched, 2D, prime-size, Parseval, plan management, FP16 C16C roundtrip, strided `PlanMany`). All pass.
 
 ---
 
@@ -313,7 +313,7 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 
 ### 3.10 Phase 10 — CDP, Profiling, Advanced Formats, Graph Updates
 
-**Status**: **PARTIAL**
+**Status**: **DONE**
 
 #### 3.10.1 CUDA Dynamic Parallelism (CDP)
 
@@ -329,15 +329,15 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 
 #### 3.10.2 Profiling / Observability
 
-**Status**: **PARTIAL — consolidated in `runtime_profiler.cpp`**
+**Status**: **DONE — split by concern**
 
-**Implemented**: Kernel timeline with nanosecond timestamps, Chrome trace export (`toChromeTraceJSON()`), `InstructionSample` struct with heuristic instruction mix estimation, `RuntimeProfiler::recordEvent` for NVTX-style ranges.
+**Implemented**: Kernel timeline with nanosecond timestamps, Chrome trace export (`toChromeTraceJSON()`), OTLP JSON/HTTP export, `InstructionSample` struct with deterministic LLVM-IR instruction classification when IR is available, conservative unclassified totals when IR is unavailable, `RuntimeProfiler::recordEvent` for NVTX-style ranges.
 
-**File**: `src/advanced/runtime_profiler.cpp`
+**Files**:
+- `src/advanced/runtime_profiler.cpp` — events, aggregates, JSON/Chrome/OTLP export
+- `src/advanced/runtime_profiler_instruction.cpp` — instruction sample recording and LLVM-IR classification
 
-**Note**: The claimed separate files (`cupti_equivalent.cpp`, `kernel_timeline.cpp`, `instruction_sampler.cpp`) were **never created**. All profiling functionality lives in `runtime_profiler.cpp`.
-
-**Caveat**: `InstructionSample` is purely heuristic (no hardware PMU counters). See `missingFeatures.md` §3.4.
+**Caveat**: VGRE is a CPU runtime, so it does not expose physical NVIDIA CUPTI/PMU counters. Instruction mix is derived from generated LLVM IR, not guessed from source text.
 
 ---
 
@@ -390,7 +390,7 @@ src/deployment/slurm_gres/         # C SLURM GRES plugin (2 files)
 | `src/core/graph/graph_manager_exec_update_v2.cpp` | Functionality merged into interceptor | `src/api/cuda_interceptor_graphs.cpp` |
 | `src/api/cudnn/cudnn_int8_packed.cpp` | Logic merged into existing convolution/pooling/activation files | `src/api/cudnn/cudnn_convolution.cpp`, etc. |
 | `src/api/cudart/cudart_shim_cdp.cpp` | CDP is runtime concern, not CUDART shim | `src/runtime/cdp_executor.cpp` |
-| `src/advanced/profiling/` directory | Profiling kept in single file | `src/advanced/runtime_profiler.cpp` |
+| `src/advanced/profiling/` directory | Kept under `src/advanced/` to match existing CMake layout | `runtime_profiler.cpp`, `runtime_profiler_instruction.cpp` |
 | `src/compiler/cuda_device_libs/` | Already exists as `include/vgre/compiler/cuda_device_libs/` | `include/vgre/compiler/cuda_device_libs/cooperative_groups.h`, `cub_fallback.h` |
 
 ---
@@ -430,7 +430,7 @@ option(VGRE_ENABLE_CUBLASLT "Build cuBLASLt shim" ON)
 | Feature | Linux | Windows | macOS |
 |---|---|---|---|
 | **cuRAND entropy** | `getrandom()` / `/dev/urandom` | `BCryptGenRandom()` | `getentropy()` |
-| **cuFFT** | Reference DFT (no FFTW3 linked yet) | Reference DFT | Reference DFT |
+| **cuFFT** | Built-in O(n log n), optional FFTW3 | Built-in O(n log n) | Built-in O(n log n) |
 | **cuSOLVER** | System `liblapack.so.3` | Intel MKL or OpenBLAS | Accelerate.framework / OpenBLAS |
 | **Shared memory (IPC)** | POSIX `shm_open` | `CreateFileMapping` | POSIX `shm_open` |
 | **External semaphores** | POSIX named semaphores | Windows named semaphores | POSIX named semaphores |
@@ -568,7 +568,7 @@ tests/core/texture/         # Texture/surface object tests
 
 | # | Feature | Status | Date |
 |---|---|---|---|
-| 4.1 | cuFFT reference DFT/IDFT | **DONE** | 2026-05-14 |
+| 4.1 | cuFFT O(n log n) FFT/IDFT backend | **DONE** | 2026-05-14/16 |
 | 4.2 | cuRAND pseudo-random generators | **DONE** | 2026-05-14 |
 | 4.3 | cuSOLVER dense (potrf, geqrf, gesvd, syevd) | **DONE** | 2026-05-14 |
 | 4.4 | cuSPARSE CSR SpMV/SpMM | **DONE** | 2026-05-14 |
@@ -620,7 +620,7 @@ tests/core/texture/         # Texture/surface object tests
 | 7.1 | `ncclSend` / `ncclRecv` | **DONE** | 2026-05-14 |
 | 7.2 | `ncclAllToAll` | **DONE** | 2026-05-14 |
 | 7.3 | `ncclGather` / `ncclScatter` | **DONE** | 2026-05-14 |
-| 7.4 | Multi-node RDMA transport | **MISSING** | — |
+| 7.4 | Multi-node RDMA transport | **DONE** (optional `VGRE_ENABLE_RDMA`, libibverbs/RoCE, TCP fallback) | 2026-05-16 |
 
 ### Phase 8 — Cooperative Groups & Device Libraries
 
@@ -641,7 +641,8 @@ tests/core/texture/         # Texture/surface object tests
 | # | Feature | Status | Date |
 |---|---|---|---|
 | 10.1 | CDP (`cudaDeviceSynchronize`, `GetParameterBufferV2`, `LaunchDeviceV2`) | **DONE** | 2026-05-14 |
-| 10.2 | Profiling (kernel timeline, Chrome trace, `InstructionSample` + `analyzeStaticFlops`) | **PARTIAL** | 2026-05-14 |
+| 10.2 | Profiling (kernel timeline, Chrome trace, OTLP, LLVM-IR `InstructionSample`) | **DONE** | 2026-05-16 |
+| 10.15 | cuFFT FP16 execution + strided `PlanMany` + plan/source split | **DONE** | 2026-05-16 |
 | 10.5 | cuBLASLt DRELU/DGELU/BGRAD epilogues + scale ptrs | **DONE** | 2026-05-16 |
 | 10.10 | cuBLASLt file split (914→core 362+matmul 337 lines) + cublaslt_state.h | **DONE** | 2026-05-16 |
 | 10.11 | cuSPARSE SpSV FP16/BF16 widen-compute-narrow path | **DONE** | 2026-05-16 |
@@ -699,9 +700,33 @@ Large monolithic source files (>800 lines) were split into smaller, logically gr
 - `src/core/CMakeLists.txt` — added `graph_manager_nodes.cpp`, `graph_manager_serde.cpp`
 - `src/advanced/CMakeLists.txt` — added 4 split files (adaptive + hybrid)
 - `src/runtime/CMakeLists.txt` — added `vector_engine_float.cpp`, `vector_engine_double.cpp`
-- `src/api/CMakeLists.txt` — added `cuda_interceptor_device.cpp`, `cublas_level2_packed.cpp`, `cublas_level3_blas3.cpp`, `cudart_memory_pool.cpp`, `cudart_cooperative.cpp`, `cudart_mipmap.cpp`
+- `src/api/CMakeLists.txt` — added `cuda_interceptor_device.cpp`, `cublas_level2_packed.cpp`, `cublas_level3_blas3.cpp`, `cudart_memory_pool.cpp`, `cudart_cooperative.cpp`, `cudart_mipmap.cpp`, `cudart_shim_array_memcpy.cpp`
 - `CMakeLists.txt` (top-level) — added `cuda_interceptor_device.cpp`, `cublas_level2_packed.cpp`, `cublas_level3_blas3.cpp` to `vgre_cudart` target
 
 ---
 
-*Last updated: 2026-05-16 (fourth pass). 113/114 tests passing (1 intermittent TCP race). FP16/BF16 SpSV+SpGEMM, cuBLASLt split (914→478+285), cusolverSp DONE, FLOPCounting RESOURCE_LOCK.*
+## 11. Sixth Pass Fixes (2026-05-16)
+
+**Status**: **DONE** — 116/116 tests pass.
+
+### 11.1 TCPClusterPreservation test — VS Code port conflict
+
+`tests/advanced/test_tcp_cluster_preservation.cpp` used hardcoded ports 17777–17783.
+Port 17779 was bound by VS Code (pid found via `ss -tlnp`), causing `bind() = EADDRINUSE`.
+**Fix**: Replaced all 8 hardcoded ports with `findFreePort()` (bind-to-0 OS allocation).
+
+### 11.2 cudnn_backend_api.cpp — duplicate definitions + broken extern linkage
+
+`cudnn_backend_api.cpp` re-declared `cudnnBackendDescriptorType_t`, `cudnnBackendAttributeName_t`, `BackendNode` inline, duplicating `cudnn_backend_internal.h`. Globals `g_backendNodes`/`g_nextBackendId` were in an anonymous namespace (internal linkage) but declared `extern` in the header.
+**Fix**: Changed include to `cudnn_backend_internal.h`, removed ~150 lines of duplicates, moved globals to file scope, removed `static` from the 4 functions the header declares.
+
+### 11.3 cudart_shim_array_memcpy.cpp — missing from build + 2 compile errors
+
+`src/api/cudart/cudart_shim_array_memcpy.cpp` existed but was NOT in any CMakeLists.txt. Also had:
+- `cudaArray_const_t` undefined
+- `memcpyToArray`/`memcpyFromArray` called with 5 args (missing `kind`)
+**Fix**: Added to `vgre_cudart_shims` in `src/api/CMakeLists.txt`; added typedef and the missing `kind` cast.
+
+---
+
+*Last updated: 2026-05-16 (sixth pass). 116/116 tests pass. Port conflict fix, cuDNN backend header integration, missing array memcpy source added.*

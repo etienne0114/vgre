@@ -1,187 +1,67 @@
-// cuDNN v8+ Backend API — minimal stub that routes descriptor graphs to
-// existing legacy cuDNN shim paths (conv, pool, activation, etc.).
+// cuDNN v8+ Backend API. Descriptor graphs are executed by routing each
+// operation to the existing legacy cuDNN shim paths (conv, pool, activation,
+// matmul, reductions, attention, etc.).
 //
 // For unimplemented operations, returns CUDNN_STATUS_NOT_SUPPORTED.
 
-#include "cudnn_internal.h"
+#include "cudnn_backend_internal.h"
 #include "vgre/common/openmp_helper.h"
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
 
-// ── Backend descriptor type IDs ──────────────────────────────────────────────
-enum cudnnBackendDescriptorType_t {
-    CUDNN_BACKEND_OPERATION_DESCRIPTOR = 0,
-    CUDNN_BACKEND_OPERATION_CONVOLUTION_FORWARD_DESCRIPTOR = 1,
-    CUDNN_BACKEND_OPERATION_CONVOLUTION_BACKWARD_DATA_DESCRIPTOR = 2,
-    CUDNN_BACKEND_OPERATION_CONVOLUTION_BACKWARD_FILTER_DESCRIPTOR = 3,
-    CUDNN_BACKEND_OPERATION_POOLING_FORWARD_DESCRIPTOR = 4,
-    CUDNN_BACKEND_OPERATION_POOLING_BACKWARD_DESCRIPTOR = 5,
-    CUDNN_BACKEND_OPERATION_ACTIVATION_FORWARD_DESCRIPTOR = 6,
-    CUDNN_BACKEND_OPERATION_ACTIVATION_BACKWARD_DESCRIPTOR = 7,
-    CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR = 8,
-    CUDNN_BACKEND_OPERATION_REDUCTION_DESCRIPTOR = 9,
-    CUDNN_BACKEND_OPERATION_SOFTMAX_DESCRIPTOR = 10,
-    CUDNN_BACKEND_OPERATION_BN_FINALIZE_STATISTICS_DESCRIPTOR = 11,
-    CUDNN_BACKEND_OPERATION_NORM_FORWARD_DESCRIPTOR = 12,
-    CUDNN_BACKEND_OPERATION_NORM_BACKWARD_DESCRIPTOR = 13,
-    CUDNN_BACKEND_OPERATION_RESAMPLE_DESCRIPTOR = 14,
-    CUDNN_BACKEND_OPERATION_CONCAT_DESCRIPTOR = 15,
-    CUDNN_BACKEND_OPERATION_SIGNAL_DESCRIPTOR = 16,
-    CUDNN_BACKEND_OPERATION_GEN_STATS_DESCRIPTOR = 17,
-    CUDNN_BACKEND_OPERATION_BN_BWD_WEIGHTS_DESCRIPTOR = 18,
-    CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR = 19,
-    CUDNN_BACKEND_TENSOR_DESCRIPTOR = 20,
-    CUDNN_BACKEND_CONVOLUTION_DESCRIPTOR = 21,
-    CUDNN_BACKEND_POINTWISE_DESCRIPTOR = 22,
-    CUDNN_BACKEND_GENSTATS_DESCRIPTOR = 23,
-    CUDNN_BACKEND_ENGINECFG_DESCRIPTOR = 24,
-    CUDNN_BACKEND_ENGINE_DESCRIPTOR = 25,
-    CUDNN_BACKEND_MATMUL_DESCRIPTOR = 26,
-    CUDNN_BACKEND_OPERATIONSET_DESCRIPTOR = 27,
-    CUDNN_BACKEND_HANDLE_DESCRIPTOR = 28,
-    CUDNN_BACKEND_HEURIN_DESCRIPTOR = 29,
-    CUDNN_BACKEND_ENGINHEUR_DESCRIPTOR = 30,
-    CUDNN_BACKEND_KNOB_CHOICE_DESCRIPTOR = 31,
-    CUDNN_BACKEND_KNOB_DESCRIPTOR = 32,
-    CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR = 33,
-    CUDNN_BACKEND_LAYOUT_INFO_DESCRIPTOR = 34,
-    CUDNN_BACKEND_OPERATION_RNN_DESCRIPTOR = 35,
-    CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR = 36
-};
-
-// ── Attribute IDs ────────────────────────────────────────────────────────────
-enum cudnnBackendAttributeName_t {
-    CUDNN_ATTR_POINTWISE_MODE = 0,
-    CUDNN_ATTR_POINTWISE_MATH_PREC = 1,
-    CUDNN_ATTR_POINTWISE_NAN_PROPAGATION = 2,
-    CUDNN_ATTR_CONVOLUTION_SPATIAL_DIMS = 10,
-    CUDNN_ATTR_CONVOLUTION_DILATIONS = 11,
-    CUDNN_ATTR_CONVOLUTION_FILTER_STRIDES = 12,
-    CUDNN_ATTR_CONVOLUTION_PRE_PADDINGS = 13,
-    CUDNN_ATTR_CONVOLUTION_POST_PADDINGS = 14,
-    CUDNN_ATTR_CONVOLUTION_STRIDES = 15,
-    CUDNN_ATTR_CONVOLUTION_GROUP_COUNT = 16,
-    CUDNN_ATTR_CONVOLUTION_BWD_DATA_ALGO = 17,
-    CUDNN_ATTR_CONVOLUTION_BWD_FILTER_ALGO = 18,
-    CUDNN_ATTR_CONVOLUTION_FWD_ALGO = 19,
-    CUDNN_ATTR_TENSOR_DIMENSIONS = 30,
-    CUDNN_ATTR_TENSOR_STRIDES = 31,
-    CUDNN_ATTR_TENSOR_DATA_TYPE = 32,
-    CUDNN_ATTR_TENSOR_VECTORIZED_DIM = 33,
-    CUDNN_ATTR_TENSOR_VECTOR_COUNT = 34,
-    CUDNN_ATTR_TENSOR_IS_VIRTUAL = 35,
-    CUDNN_ATTR_TENSOR_IS_BY_VALUE = 36,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_X = 40,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_W = 41,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_Y = 42,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_CONV_DESC = 43,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_DATA_DY = 44,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_DATA_W = 45,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_DATA_DX = 46,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_DATA_CONV_DESC = 47,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_FILTER_DY = 48,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_FILTER_X = 49,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_FILTER_DW = 50,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_FILTER_CONV_DESC = 51,
-    CUDNN_ATTR_OPERATION_MATMUL_ADESC = 60,
-    CUDNN_ATTR_OPERATION_MATMUL_BDESC = 61,
-    CUDNN_ATTR_OPERATION_MATMUL_CDESC = 62,
-    CUDNN_ATTR_OPERATION_MATMUL_DDESC = 63,
-    CUDNN_ATTR_OPERATION_MATMUL_MDESC = 64,
-    CUDNN_ATTR_OPERATIONPOOLING_XDESC = 70,
-    CUDNN_ATTR_OPERATIONPOOLING_YDESC = 71,
-    CUDNN_ATTR_OPERATIONPOOLING_IDXDESC = 72,
-    CUDNN_ATTR_OPERATIONPOOLING_PDESC = 73,
-    CUDNN_ATTR_OPERATIONPOOLING_BWD_DXDESC = 74,
-    CUDNN_ATTR_OPERATIONPOOLING_BWD_DYDESC = 75,
-    CUDNN_ATTR_OPERATIONPOOLING_BWD_IDXDESC = 76,
-    CUDNN_ATTR_OPERATIONPOOLING_BWD_PDESC = 77,
-    CUDNN_ATTR_OPERATION_ACTIVATION_XDESC = 80,
-    CUDNN_ATTR_OPERATION_ACTIVATION_YDESC = 81,
-    CUDNN_ATTR_OPERATION_ACTIVATION_DESC = 82,
-    CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DXDESC = 83,
-    CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DYDESC = 84,
-    CUDNN_ATTR_OPERATION_ACTIVATION_BWD_YDESC = 85,
-    CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DESC = 86,
-    CUDNN_ATTR_VARIANT_PACK_UNIQUE_IDS = 100,
-    CUDNN_ATTR_VARIANT_PACK_DATA_POINTERS = 101,
-    CUDNN_ATTR_VARIANT_PACK_INTERMEDIATES = 102,
-    CUDNN_ATTR_VARIANT_PACK_WORKSPACE = 103,
-    CUDNN_ATTR_ENGINEHEUR_MODE = 110,
-    CUDNN_ATTR_ENGINECFG_ENGINE = 120,
-    CUDNN_ATTR_ENGINECFG_KNOB_CHOICES = 121,
-    CUDNN_ATTR_ENGINECFG_INTERMEDIATE_INFO = 122,
-    CUDNN_ATTR_EXECUTION_PLAN_HANDLE = 130,
-    CUDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG = 131,
-    CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE = 132,
-    // Alpha / Beta scalars for backend operations
-    CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_ALPHA = 160,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_BETA = 161,
-    CUDNN_ATTR_OPERATION_ACTIVATION_FORWARD_ALPHA = 162,
-    CUDNN_ATTR_OPERATION_ACTIVATION_FORWARD_BETA = 163,
-    CUDNN_ATTR_OPERATION_POOLING_FORWARD_ALPHA = 164,
-    CUDNN_ATTR_OPERATION_POOLING_FORWARD_BETA = 165,
-    CUDNN_ATTR_OPERATION_SOFTMAX_ALPHA = 166,
-    CUDNN_ATTR_OPERATION_SOFTMAX_BETA = 167,
-    CUDNN_ATTR_OPERATION_REDUCTION_ALPHA = 168,
-    CUDNN_ATTR_OPERATION_REDUCTION_BETA = 169,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_DATA_ALPHA = 170,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_DATA_BETA = 171,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_FILTER_ALPHA = 172,
-    CUDNN_ATTR_OPERATION_CONVOLUTION_BWD_FILTER_BETA = 173,
-    CUDNN_ATTR_OPERATION_ACTIVATION_BWD_ALPHA = 174,
-    CUDNN_ATTR_OPERATION_ACTIVATION_BWD_BETA = 175,
-    CUDNN_ATTR_OPERATION_POOLING_BWD_ALPHA = 176,
-    CUDNN_ATTR_OPERATION_POOLING_BWD_BETA = 177,
-    CUDNN_ATTR_OPERATION_REDUCTION_DESC = 178,
-    CUDNN_ATTR_OPERATION_MATMUL_ALPHA = 179,
-    CUDNN_ATTR_OPERATION_MATMUL_BETA = 180,
-    // Graph traversal
-    CUDNN_ATTR_ENGINE_OPERATION_GRAPH = 500,
-    CUDNN_ATTR_OPERATIONSET_OPS = 501,
-    // Attention operation attributes
-    CUDNN_ATTR_OPERATION_ATTENTION_QDESC   = 200,
-    CUDNN_ATTR_OPERATION_ATTENTION_KDESC   = 201,
-    CUDNN_ATTR_OPERATION_ATTENTION_VDESC   = 202,
-    CUDNN_ATTR_OPERATION_ATTENTION_ODESC   = 203,
-    CUDNN_ATTR_OPERATION_ATTENTION_NUMHEADS = 204,
-    CUDNN_ATTR_OPERATION_ATTENTION_SCALE   = 205
-};
-
-// ── Internal backend node ────────────────────────────────────────────────────
-struct BackendNode {
-    cudnnBackendDescriptorType_t type;
-    std::unordered_map<int, std::vector<uint64_t>> attrs; // attrId -> list of values
-    bool finalized = false;
-};
-
-namespace {
+// ── Global backend state ─────────────────────────────────────────────────────
+// Definitions of the extern symbols declared in cudnn_backend_internal.h
 std::unordered_map<uintptr_t, BackendNode> g_backendNodes;
 uintptr_t g_nextBackendId = 1;
 
-static BackendNode* getNode(uintptr_t id) {
+BackendNode* getNode(uintptr_t id) {
     auto it = g_backendNodes.find(id);
     return (it != g_backendNodes.end()) ? &it->second : nullptr;
 }
 
-static const std::vector<uint64_t>* getAttrVec(const BackendNode* node, int attr) {
+const std::vector<uint64_t>* getAttrVec(const BackendNode* node, int attr) {
     if (!node) return nullptr;
     auto it = node->attrs.find(attr);
     return (it != node->attrs.end()) ? &it->second : nullptr;
 }
 
-static uintptr_t getAttrUint64(const BackendNode* node, int attr, uintptr_t def = 0) {
+uintptr_t getAttrUint64(const BackendNode* node, int attr, uintptr_t def) {
     auto* v = getAttrVec(node, attr);
     return (v && !v->empty()) ? static_cast<uintptr_t>((*v)[0]) : def;
 }
 
-static float getAttrFloat(const BackendNode* node, int attr, float def = 0.0f) {
+float getAttrFloat(const BackendNode* node, int attr, float def) {
     auto* v = getAttrVec(node, attr);
     if (!v || v->empty()) return def;
     float f = 0.0f;
     std::memcpy(&f, &(*v)[0], sizeof(float));
     return f;
+}
+
+namespace {
+
+static size_t backendAttributeElementSize(int attributeType) {
+    switch (attributeType) {
+    case 0: return sizeof(char);
+    case 1: return sizeof(float);
+    case 2: return sizeof(double);
+    case 3: return sizeof(int32_t);
+    case 4: return sizeof(int64_t);
+    case 5: return sizeof(uint64_t);
+    case 6: return sizeof(uint64_t); // descriptor handles are stored as ids
+    default: return sizeof(uint64_t);
+    }
+}
+
+static uint64_t readBackendAttributeElement(const uint8_t *base, size_t elemSize) {
+    uint64_t out = 0;
+    std::memcpy(&out, base, std::min(elemSize, sizeof(out)));
+    return out;
+}
+
+static void writeBackendAttributeElement(uint8_t *base, size_t elemSize, uint64_t value) {
+    std::memcpy(base, &value, std::min(elemSize, sizeof(value)));
 }
 
 static TensorDesc buildTensorDesc(uintptr_t nodeId) {
@@ -314,7 +194,7 @@ cudnnStatus_t cudnnBackendDestroyDescriptor(void* descriptor) {
 
 cudnnStatus_t cudnnBackendSetAttribute(void* descriptor,
                                        cudnnBackendAttributeName_t attrName,
-                                       int /*attributeType*/, // 0=char,1=float,2=double,3=int32,4=int64,5=uint64,6=descriptor
+                                       int attributeType, // 0=char,1=float,2=double,3=int32,4=int64,5=uint64,6=descriptor
                                        int64_t elementCount,
                                        const void* arrayOfElements) {
     if (!descriptor || !arrayOfElements || elementCount <= 0) return CUDNN_STATUS_INVALID_VALUE;
@@ -323,14 +203,17 @@ cudnnStatus_t cudnnBackendSetAttribute(void* descriptor,
 
     BackendNode& node = it->second;
     std::vector<uint64_t>& vec = node.attrs[static_cast<int>(attrName)];
-    vec.resize(elementCount);
-    std::memcpy(vec.data(), arrayOfElements, elementCount * sizeof(uint64_t));
+    vec.resize(static_cast<size_t>(elementCount));
+    const size_t elemSize = backendAttributeElementSize(attributeType);
+    const auto *bytes = static_cast<const uint8_t*>(arrayOfElements);
+    for (int64_t i = 0; i < elementCount; ++i)
+        vec[static_cast<size_t>(i)] = readBackendAttributeElement(bytes + static_cast<size_t>(i) * elemSize, elemSize);
     return CUDNN_STATUS_SUCCESS;
 }
 
 cudnnStatus_t cudnnBackendGetAttribute(void* descriptor,
                                        cudnnBackendAttributeName_t attrName,
-                                       int /*attributeType*/,
+                                       int attributeType,
                                        int64_t requestedElementCount,
                                        int64_t* elementCount,
                                        void* arrayOfElements) {
@@ -348,7 +231,11 @@ cudnnStatus_t cudnnBackendGetAttribute(void* descriptor,
     int64_t n = static_cast<int64_t>(attrIt->second.size());
     *elementCount = n;
     int64_t copyN = std::min(requestedElementCount, n);
-    std::memcpy(arrayOfElements, attrIt->second.data(), copyN * sizeof(uint64_t));
+    const size_t elemSize = backendAttributeElementSize(attributeType);
+    auto *bytes = static_cast<uint8_t*>(arrayOfElements);
+    for (int64_t i = 0; i < copyN; ++i)
+        writeBackendAttributeElement(bytes + static_cast<size_t>(i) * elemSize, elemSize,
+                                     attrIt->second[static_cast<size_t>(i)]);
     return (requestedElementCount >= n) ? CUDNN_STATUS_SUCCESS : CUDNN_STATUS_INVALID_VALUE;
 }
 
@@ -364,11 +251,17 @@ cudnnStatus_t cudnnBackendFinalize(void* descriptor) {
 
 // ── Initialize / Populate / Execute ──────────────────────────────────────────
 
-cudnnStatus_t cudnnBackendInitialize(void* /*descriptor*/) {
+cudnnStatus_t cudnnBackendInitialize(void* descriptor) {
+    if (!descriptor) return CUDNN_STATUS_INVALID_VALUE;
+    if (g_backendNodes.find(reinterpret_cast<uintptr_t>(descriptor)) == g_backendNodes.end())
+        return CUDNN_STATUS_INVALID_VALUE;
     return CUDNN_STATUS_SUCCESS;
 }
 
-cudnnStatus_t cudnnBackendPopulate(void* /*handle*/, void* /*descriptor*/) {
+cudnnStatus_t cudnnBackendPopulate(void* /*handle*/, void* descriptor) {
+    if (!descriptor) return CUDNN_STATUS_INVALID_VALUE;
+    if (g_backendNodes.find(reinterpret_cast<uintptr_t>(descriptor)) == g_backendNodes.end())
+        return CUDNN_STATUS_INVALID_VALUE;
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -854,11 +747,34 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
     return CUDNN_STATUS_SUCCESS;
 }
 
-// ── Engine / Plan / Heuristics stubs ─────────────────────────────────────────
+// ── Re-executable plan creation ──────────────────────────────────────────────
 
-cudnnStatus_t cudnnBackendCreateReexecutable(cudnnHandle_t /*handle*/, void* /*opGraph*/, void** /*plan*/) {
-    // Re-executable plans are an optimization hint; CPU emulation falls back to regular execute.
-    VGRE_LOG_DEBUG("cuDNN", "cudnnBackendCreateReexecutable: not implemented, returning SUCCESS (fallback to regular execute)");
+cudnnStatus_t cudnnBackendCreateReexecutable(cudnnHandle_t /*handle*/, void* opGraph, void** plan) {
+    if (!opGraph || !plan) return CUDNN_STATUS_INVALID_VALUE;
+    uintptr_t graphId = reinterpret_cast<uintptr_t>(opGraph);
+    const BackendNode *graph = getNode(graphId);
+    if (!graph) return CUDNN_STATUS_INVALID_VALUE;
+
+    uintptr_t engineId = g_nextBackendId++;
+    BackendNode &engine = g_backendNodes[engineId];
+    engine.type = CUDNN_BACKEND_ENGINE_DESCRIPTOR;
+    engine.finalized = true;
+    engine.attrs[static_cast<int>(CUDNN_ATTR_ENGINE_OPERATION_GRAPH)] = {graphId};
+
+    uintptr_t configId = g_nextBackendId++;
+    BackendNode &config = g_backendNodes[configId];
+    config.type = CUDNN_BACKEND_ENGINECFG_DESCRIPTOR;
+    config.finalized = true;
+    config.attrs[static_cast<int>(CUDNN_ATTR_ENGINECFG_ENGINE)] = {engineId};
+
+    uintptr_t planId = g_nextBackendId++;
+    BackendNode &planNode = g_backendNodes[planId];
+    planNode.type = CUDNN_BACKEND_HANDLE_DESCRIPTOR;
+    planNode.finalized = true;
+    planNode.attrs[static_cast<int>(CUDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG)] = {configId};
+    planNode.attrs[static_cast<int>(CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE)] = {0};
+
+    *plan = reinterpret_cast<void*>(planId);
     return CUDNN_STATUS_SUCCESS;
 }
 
