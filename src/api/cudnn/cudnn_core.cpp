@@ -268,4 +268,130 @@ cudnnStatus_t cudnnSetMultiHeadAttnDescriptor(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// ── Descriptor getter functions ───────────────────────────────────────────────
+// These mirror the Set functions and allow callers to query descriptor state.
+
+cudnnStatus_t cudnnGetFilter4dDescriptor(
+    cudnnFilterDescriptor_t d,
+    cudnnDataType_t *dtype, cudnnTensorFormat_t *fmt,
+    int *k, int *c, int *r, int *s)
+{
+    if (!d) return CUDNN_STATUS_INVALID_VALUE;
+    const auto* f = (const FilterDesc*)d;
+    if (dtype) *dtype = f->dtype;
+    if (fmt)   *fmt   = f->fmt;
+    if (k)     *k     = f->k;
+    if (c)     *c     = f->c;
+    if (r)     *r     = f->r;
+    if (s)     *s     = f->s;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetConvolution2dDescriptor(
+    cudnnConvolutionDescriptor_t d,
+    int *padH, int *padW, int *strH, int *strW,
+    int *dilH, int *dilW, int *mode, cudnnDataType_t *computeType)
+{
+    if (!d) return CUDNN_STATUS_INVALID_VALUE;
+    const auto* c = (const ConvDesc*)d;
+    if (padH)        *padH        = c->pad_h;
+    if (padW)        *padW        = c->pad_w;
+    if (strH)        *strH        = c->str_h;
+    if (strW)        *strW        = c->str_w;
+    if (dilH)        *dilH        = c->dil_h;
+    if (dilW)        *dilW        = c->dil_w;
+    if (mode)        *mode        = c->mode;
+    if (computeType) *computeType = CUDNN_DATA_FLOAT;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetActivationDescriptor(
+    cudnnActivationDescriptor_t d,
+    cudnnActivationMode_t *mode, cudnnNanPropagation_t *nanOpt, double *coeff)
+{
+    if (!d) return CUDNN_STATUS_INVALID_VALUE;
+    const auto* a = (const ActDesc*)d;
+    if (mode)   *mode   = a->mode;
+    if (nanOpt) *nanOpt = CUDNN_NOT_PROPAGATE_NAN;
+    if (coeff)  *coeff  = a->coeff;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetOpTensorDescriptor(
+    cudnnOpTensorDescriptor_t desc,
+    cudnnOpTensorOp_t *op, cudnnDataType_t *compType, cudnnNanPropagation_t *nanOpt)
+{
+    if (!desc) return CUDNN_STATUS_INVALID_VALUE;
+    const auto* d = (const OpTensorDesc*)desc;
+    if (op)       *op       = d->op;
+    if (compType) *compType = d->compType;
+    if (nanOpt)   *nanOpt   = d->nanOpt;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetReduceTensorDescriptor(
+    cudnnReduceTensorDescriptor_t desc,
+    cudnnReduceTensorOp_t *op, cudnnDataType_t *compType,
+    cudnnNanPropagation_t *nanOpt,
+    cudnnReduceTensorOp_t *idxCompType, cudnnDataType_t *outType)
+{
+    if (!desc) return CUDNN_STATUS_INVALID_VALUE;
+    const auto* d = (const ReduceTensorDesc*)desc;
+    if (op)          *op          = d->op;
+    if (compType)    *compType    = d->compType;
+    if (nanOpt)      *nanOpt      = d->nanOpt;
+    if (idxCompType) *idxCompType = d->op;    // mirror op for index type
+    if (outType)     *outType     = d->compType;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── Convolution group count + math type ──────────────────────────────────────
+
+cudnnStatus_t cudnnSetConvolutionGroupCount(
+    cudnnConvolutionDescriptor_t d, int groupCount)
+{
+    if (!d || groupCount < 1) return CUDNN_STATUS_INVALID_VALUE;
+    ((ConvDesc*)d)->groupCount = groupCount;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetConvolutionGroupCount(
+    cudnnConvolutionDescriptor_t d, int *groupCount)
+{
+    if (!d || !groupCount) return CUDNN_STATUS_INVALID_VALUE;
+    *groupCount = ((ConvDesc*)d)->groupCount;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnSetConvolutionMathType(
+    cudnnConvolutionDescriptor_t d, int mathType)
+{
+    if (!d) return CUDNN_STATUS_INVALID_VALUE;
+    ((ConvDesc*)d)->mathType = mathType;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetConvolutionMathType(
+    cudnnConvolutionDescriptor_t d, int *mathType)
+{
+    if (!d || !mathType) return CUDNN_STATUS_INVALID_VALUE;
+    *mathType = ((ConvDesc*)d)->mathType;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── cudnnGetDropoutDescriptor ─────────────────────────────────────────────────
+
+cudnnStatus_t cudnnGetDropoutDescriptor(
+    cudnnDropoutDescriptor_t desc,
+    cudnnHandle_t /*handle*/,
+    float *dropout, void **states, unsigned long long *seed)
+{
+    if (!desc) return CUDNN_STATUS_INVALID_VALUE;
+    const auto* d = (const DropoutDesc*)desc;
+    if (dropout) *dropout = d->dropout;
+    if (states)  *states  = d->states;
+    if (seed)    *seed    = d->seed;
+    return CUDNN_STATUS_SUCCESS;
+}
+
 } // extern "C"

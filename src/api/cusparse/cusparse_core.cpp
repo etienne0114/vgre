@@ -415,4 +415,191 @@ cusparseStatus_t cusparseGetStream(cusparseHandle_t /*h*/, void **stream) {
     return CUSPARSE_STATUS_SUCCESS;
 }
 
+// ── Legacy matrix descriptor ──────────────────────────────────────────────────
+struct cusparseMatDescr {
+    cusparseMatrixType_t  matType  = CUSPARSE_MATRIX_TYPE_GENERAL;
+    cusparseFillMode_t    fillMode = CUSPARSE_FILL_MODE_LOWER;
+    cusparseDiagType_t    diagType = CUSPARSE_DIAG_TYPE_NON_UNIT;
+    cusparseIndexBase_t   idxBase  = CUSPARSE_INDEX_BASE_ZERO;
+};
+
+cusparseStatus_t cusparseCreateMatDescr(cusparseMatDescr_t *descr) {
+    if (!descr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *descr = new cusparseMatDescr();
+    return CUSPARSE_STATUS_SUCCESS;
+}
+cusparseStatus_t cusparseDestroyMatDescr(cusparseMatDescr_t descr) {
+    delete descr;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+cusparseStatus_t cusparseSetMatType(cusparseMatDescr_t descr, cusparseMatrixType_t type) {
+    if (!descr) return CUSPARSE_STATUS_INVALID_VALUE;
+    descr->matType = type;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+cusparseStatus_t cusparseSetMatIndexBase(cusparseMatDescr_t descr, cusparseIndexBase_t base) {
+    if (!descr) return CUSPARSE_STATUS_INVALID_VALUE;
+    descr->idxBase = base;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+cusparseStatus_t cusparseSetMatFillMode(cusparseMatDescr_t descr, cusparseFillMode_t fillMode) {
+    if (!descr) return CUSPARSE_STATUS_INVALID_VALUE;
+    descr->fillMode = fillMode;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+cusparseStatus_t cusparseSetMatDiagType(cusparseMatDescr_t descr, cusparseDiagType_t diagType) {
+    if (!descr) return CUSPARSE_STATUS_INVALID_VALUE;
+    descr->diagType = diagType;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── Legacy Level-2: CSR matrix-vector multiply ────────────────────────────────
+// y = alpha * op(A) * x + beta * y
+cusparseStatus_t cusparseScsrmv(cusparseHandle_t /*handle*/, cusparseOperation_t transA,
+                                 int m, int n, int nnz, const float *alpha,
+                                 const cusparseMatDescr_t descrA,
+                                 const float *csrValA, const int *csrRowPtrA,
+                                 const int *csrColIndA, const float *x,
+                                 const float *beta, float *y) {
+    if (!alpha || !csrValA || !csrRowPtrA || !csrColIndA || !x || !beta || !y)
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    int base = (descrA && descrA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+    bool trans = (transA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    int rows = trans ? n : m;
+    int cols = trans ? m : n;
+    float b = *beta;
+    if (b == 0.f) for (int i = 0; i < rows; ++i) y[i] = 0.f;
+    else          for (int i = 0; i < rows; ++i) y[i] *= b;
+    float a = *alpha;
+    if (!trans) {
+        for (int i = 0; i < m; ++i) {
+            float acc = 0.f;
+            for (int j = csrRowPtrA[i] - base; j < csrRowPtrA[i+1] - base; ++j)
+                acc += csrValA[j] * x[csrColIndA[j] - base];
+            y[i] += a * acc;
+        }
+    } else {
+        for (int i = 0; i < m; ++i) {
+            for (int j = csrRowPtrA[i] - base; j < csrRowPtrA[i+1] - base; ++j)
+                y[csrColIndA[j] - base] += a * csrValA[j] * x[i];
+        }
+    }
+    (void)n; (void)nnz; (void)cols;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDcsrmv(cusparseHandle_t /*handle*/, cusparseOperation_t transA,
+                                 int m, int n, int nnz, const double *alpha,
+                                 const cusparseMatDescr_t descrA,
+                                 const double *csrValA, const int *csrRowPtrA,
+                                 const int *csrColIndA, const double *x,
+                                 const double *beta, double *y) {
+    if (!alpha || !csrValA || !csrRowPtrA || !csrColIndA || !x || !beta || !y)
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    int base = (descrA && descrA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+    bool trans = (transA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    int rows = trans ? n : m;
+    double b = *beta;
+    if (b == 0.0) for (int i = 0; i < rows; ++i) y[i] = 0.0;
+    else          for (int i = 0; i < rows; ++i) y[i] *= b;
+    double a = *alpha;
+    if (!trans) {
+        for (int i = 0; i < m; ++i) {
+            double acc = 0.0;
+            for (int j = csrRowPtrA[i] - base; j < csrRowPtrA[i+1] - base; ++j)
+                acc += csrValA[j] * x[csrColIndA[j] - base];
+            y[i] += a * acc;
+        }
+    } else {
+        for (int i = 0; i < m; ++i) {
+            for (int j = csrRowPtrA[i] - base; j < csrRowPtrA[i+1] - base; ++j)
+                y[csrColIndA[j] - base] += a * csrValA[j] * x[i];
+        }
+    }
+    (void)n; (void)nnz;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── Legacy Level-3: CSR matrix-matrix multiply ────────────────────────────────
+// C = alpha * op(A) * B + beta * C
+// A is m x k sparse CSR; B is k x n dense (column-major, ldb = k); C is m x n (ldc = m)
+cusparseStatus_t cusparseScsrmm(cusparseHandle_t /*handle*/, cusparseOperation_t transA,
+                                 int m, int n, int k, int nnz, const float *alpha,
+                                 const cusparseMatDescr_t descrA,
+                                 const float *csrValA, const int *csrRowPtrA,
+                                 const int *csrColIndA, const float *B, int ldb,
+                                 const float *beta, float *C, int ldc) {
+    if (!alpha || !csrValA || !csrRowPtrA || !csrColIndA || !B || !beta || !C)
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    int base = (descrA && descrA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+    bool trans = (transA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    int outRows = trans ? k : m;
+    float b = *beta, a = *alpha;
+    // scale C by beta
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < outRows; ++i)
+            C[i + j*ldc] = (b == 0.f) ? 0.f : b * C[i + j*ldc];
+    if (!trans) {
+        // C[:,j] += alpha * A * B[:,j] — A is m x k
+        for (int i = 0; i < m; ++i) {
+            for (int jj = 0; jj < n; ++jj) {
+                float acc = 0.f;
+                for (int p = csrRowPtrA[i] - base; p < csrRowPtrA[i+1] - base; ++p)
+                    acc += csrValA[p] * B[(csrColIndA[p] - base) + jj*ldb];
+                C[i + jj*ldc] += a * acc;
+            }
+        }
+    } else {
+        // C[:,j] += alpha * A^T * B[:,j] — A is m x k; A^T is k x m
+        for (int i = 0; i < m; ++i) {
+            for (int p = csrRowPtrA[i] - base; p < csrRowPtrA[i+1] - base; ++p) {
+                int col = csrColIndA[p] - base;
+                float aVal = a * csrValA[p];
+                for (int jj = 0; jj < n; ++jj)
+                    C[col + jj*ldc] += aVal * B[i + jj*ldb];
+            }
+        }
+    }
+    (void)nnz;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDcsrmm(cusparseHandle_t /*handle*/, cusparseOperation_t transA,
+                                 int m, int n, int k, int nnz, const double *alpha,
+                                 const cusparseMatDescr_t descrA,
+                                 const double *csrValA, const int *csrRowPtrA,
+                                 const int *csrColIndA, const double *B, int ldb,
+                                 const double *beta, double *C, int ldc) {
+    if (!alpha || !csrValA || !csrRowPtrA || !csrColIndA || !B || !beta || !C)
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    int base = (descrA && descrA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+    bool trans = (transA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    int outRows = trans ? k : m;
+    double b = *beta, a = *alpha;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < outRows; ++i)
+            C[i + j*ldc] = (b == 0.0) ? 0.0 : b * C[i + j*ldc];
+    if (!trans) {
+        for (int i = 0; i < m; ++i) {
+            for (int jj = 0; jj < n; ++jj) {
+                double acc = 0.0;
+                for (int p = csrRowPtrA[i] - base; p < csrRowPtrA[i+1] - base; ++p)
+                    acc += csrValA[p] * B[(csrColIndA[p] - base) + jj*ldb];
+                C[i + jj*ldc] += a * acc;
+            }
+        }
+    } else {
+        for (int i = 0; i < m; ++i) {
+            for (int p = csrRowPtrA[i] - base; p < csrRowPtrA[i+1] - base; ++p) {
+                int col = csrColIndA[p] - base;
+                double aVal = a * csrValA[p];
+                for (int jj = 0; jj < n; ++jj)
+                    C[col + jj*ldc] += aVal * B[i + jj*ldb];
+            }
+        }
+    }
+    (void)nnz; (void)k; (void)outRows;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
 } // extern "C"

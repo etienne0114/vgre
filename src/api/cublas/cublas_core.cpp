@@ -127,4 +127,66 @@ cublasStatus_t cublasDsyr_v2(cublasHandle_t handle, cublasFillMode_t uplo, int n
 cublasStatus_t cublasCreate(cublasHandle_t* h)  { return cublasCreate_v2(h); }
 cublasStatus_t cublasDestroy(cublasHandle_t h)  { return cublasDestroy_v2(h); }
 
+// Unversioned alias — some frameworks call cublasGetVersion without _v2 suffix
+cublasStatus_t cublasGetVersion(cublasHandle_t h, int* version) {
+    return cublasGetVersion_v2(h, version);
+}
+
+// ── Matrix / vector transfer helpers ─────────────────────────────────────────
+// These are data movement utilities that copy between row-major host storage
+// and column-major device storage. On CPU emulation both pointers are host
+// memory so we perform a strided copy respecting lda/ldb layout differences.
+cublasStatus_t cublasSetVector(int n, int elemSize, const void* x, int incx,
+                                void* y, int incy) {
+    if (!x || !y || elemSize <= 0 || n < 0) return CUBLAS_STATUS_INVALID_VALUE;
+    const char* src = static_cast<const char*>(x);
+    char*       dst = static_cast<char*>(y);
+    for (int i = 0; i < n; ++i)
+        std::memcpy(dst + (size_t)i * incy * elemSize,
+                    src + (size_t)i * incx * elemSize,
+                    elemSize);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasGetVector(int n, int elemSize, const void* x, int incx,
+                                void* y, int incy) {
+    return cublasSetVector(n, elemSize, x, incx, y, incy);
+}
+
+// cublasSetMatrix: copy rows*cols matrix from host (lda columns per row)
+//   to device column-major storage (ldb rows per column).
+// CUDA convention: A is row-major on host (rows x cols, lda >= cols),
+//   DevA is column-major (ldb >= rows).
+cublasStatus_t cublasSetMatrix(int rows, int cols, int elemSize,
+                                const void* A, int lda,
+                                void* devA, int ldb) {
+    if (!A || !devA || elemSize <= 0 || rows < 0 || cols < 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    const char* src = static_cast<const char*>(A);
+    char*       dst = static_cast<char*>(devA);
+    // copy column-by-column: dst col j starts at dst + j*ldb*elemSize
+    for (int j = 0; j < cols; ++j)
+        for (int i = 0; i < rows; ++i)
+            std::memcpy(dst + ((size_t)j*ldb + i)*elemSize,
+                        src + ((size_t)i*lda + j)*elemSize,
+                        elemSize);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasGetMatrix(int rows, int cols, int elemSize,
+                                const void* devA, int lda,
+                                void* B, int ldb) {
+    if (!devA || !B || elemSize <= 0 || rows < 0 || cols < 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    const char* src = static_cast<const char*>(devA);
+    char*       dst = static_cast<char*>(B);
+    // devA is column-major (lda >= rows), B is row-major (ldb >= cols)
+    for (int j = 0; j < cols; ++j)
+        for (int i = 0; i < rows; ++i)
+            std::memcpy(dst + ((size_t)i*ldb + j)*elemSize,
+                        src + ((size_t)j*lda + i)*elemSize,
+                        elemSize);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 } // extern "C"

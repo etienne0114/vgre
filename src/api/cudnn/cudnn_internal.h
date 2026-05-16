@@ -131,9 +131,13 @@ struct TensorDesc {
 struct FilterDesc {
     int k, c, r, s;
     cudnnDataType_t dtype;
+    cudnnTensorFormat_t fmt = CUDNN_TENSOR_NCHW;
 };
 struct ConvDesc {
-    int pad_h, pad_w, str_h, str_w, dil_h, dil_w;
+    int pad_h = 0, pad_w = 0, str_h = 1, str_w = 1, dil_h = 1, dil_w = 1;
+    int groupCount = 1;
+    int mathType   = 0; // 0 = CUDNN_DEFAULT_MATH
+    int mode       = 1; // 1 = CUDNN_CROSS_CORRELATION
 };
 struct PoolDesc {
     cudnnPoolingMode_t mode;
