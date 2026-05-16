@@ -182,44 +182,7 @@ rem ── Check Visual Studio Build Tools ────────────�
 if defined VCVARS64 (
     echo [OK] Visual Studio Build Tools at !VCVARS64!
 ) else (
-    echo [MISSING] Visual Studio Build Tools (C++ workload) - attempting auto-install...
-    if "%HAS_WINGET%"=="1" (
-        winget install --id Microsoft.VisualStudio.2022.BuildTools --silent ^
-            --override "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools ^
-            --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 ^
-            --add Microsoft.VisualStudio.Component.Windows11SDK.22621 ^
-            --includeRecommended" ^
-            --accept-package-agreements --accept-source-agreements
-        if not errorlevel 1 (
-            echo [OK] Build Tools installed - re-scanning with vswhere...
-            if exist "!_VSWHERE!" (
-                for /f "usebackq delims=" %%I in (`"!_VSWHERE!" -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find VC\Auxiliary\Build\vcvars64.bat 2^>nul`) do (
-                    if not defined VCVARS64 set "VCVARS64=%%I"
-                )
-            )
-            if not defined VCVARS64 (
-                for %%Y in (2022 2019 2017) do (
-                    if not defined VCVARS64 (
-                        for %%E in (BuildTools Community Professional Enterprise) do (
-                            if not defined VCVARS64 if exist "C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
-                                set "VCVARS64=C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
-                                set "VS_YEAR=%%Y"
-                            )
-                            if not defined VCVARS64 if exist "!_PF86!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
-                                set "VCVARS64=!_PF86!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
-                                set "VS_YEAR=%%Y"
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-    if not defined VCVARS64 (
-        echo [WARN] Visual Studio Build Tools not found after install attempt.
-        echo        CMake may fail to find the toolchain.
-        echo        Install manually: https://visualstudio.microsoft.com/visual-cpp-build-tools/
-    )
+    call :install_vs_buildtools
 )
 
 rem ── Check and auto-install Flutter ─────────────────────────────────────────
@@ -603,6 +566,57 @@ echo.
 echo  Open a NEW terminal for PATH changes to take effect.
 echo ============================================================
 pause
+exit /b 0
+
+rem =============================================================================
+rem  SUBROUTINE: install_vs_buildtools
+rem  Called when VCVARS64 is not defined.  Attempts winget install; on success
+rem  calls :vs_rescan to locate vcvars64.bat.  Must stay outside all blocks so
+rem  that ^ continuation and nested FOR loops work without parser ambiguity.
+rem =============================================================================
+:install_vs_buildtools
+echo [MISSING] Visual Studio Build Tools (C++ workload) - attempting auto-install...
+if not "%HAS_WINGET%"=="1" goto :vs_install_done
+rem Store the --override value in a variable so the winget call is one line.
+rem Putting ^ inside "..." inside a block causes "- was unexpected at this time."
+set "_VS_OV=--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --includeRecommended"
+winget install --id Microsoft.VisualStudio.2022.BuildTools --silent --override "!_VS_OV!" --accept-package-agreements --accept-source-agreements
+if errorlevel 1 goto :vs_install_done
+echo [OK] Build Tools installed - re-scanning with vswhere...
+call :vs_rescan
+:vs_install_done
+if not defined VCVARS64 (
+    echo [WARN] Visual Studio Build Tools not found after install attempt.
+    echo        CMake may fail to find the toolchain.
+    echo        Install manually: https://visualstudio.microsoft.com/visual-cpp-build-tools/
+)
+exit /b 0
+
+rem =============================================================================
+rem  SUBROUTINE: vs_rescan
+rem  Scans for vcvars64.bat via vswhere, then by path enumeration.
+rem =============================================================================
+:vs_rescan
+if exist "!_VSWHERE!" (
+    for /f "usebackq delims=" %%I in (`"!_VSWHERE!" -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find VC\Auxiliary\Build\vcvars64.bat 2^>nul`) do (
+        if not defined VCVARS64 set "VCVARS64=%%I"
+    )
+)
+if defined VCVARS64 exit /b 0
+for %%Y in (2022 2019 2017) do (
+    if not defined VCVARS64 (
+        for %%E in (BuildTools Community Professional Enterprise) do (
+            if not defined VCVARS64 if exist "C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+                set "VCVARS64=C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
+                set "VS_YEAR=%%Y"
+            )
+            if not defined VCVARS64 if exist "!_PF86!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+                set "VCVARS64=!_PF86!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
+                set "VS_YEAR=%%Y"
+            )
+        )
+    )
+)
 exit /b 0
 
 :find_flutter
