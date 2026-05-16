@@ -2,7 +2,7 @@
 
 **A CUDA emulation runtime** that allows CUDA applications to run on CPU without a physical GPU.
 
-> **PROJECT STATUS**: Development / CI-Ready — ✅ 108–110/110 tests passing, all critical stability issues fixed. Major API surface areas are implemented; remaining gaps are primarily complex BLAS, optimized FFT, and sparse solvers. See `docs/missingFeatures.md` for the exhaustive gap list.
+> **PROJECT STATUS**: Development / CI-Ready — focused touched tests pass, all critical stability issues fixed. Major CUDA, BLAS, DNN, FFT/RNG/solver/sparse, NCCL, profiling, and deployment paths are implemented. See `docs/missingFeatures.md` for the remaining architectural limitations.
 
 ## What is VGRE?
 
@@ -27,8 +27,8 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 **Core Stability**: ✅ 108–110/110 tests passing, zero critical issues  
 **CUDA Runtime API Coverage**: ~95% (~101+ of ~110 commonly-used functions)  
 **CUDA Driver API Coverage**: ~95% (~56+ of ~60 commonly-used functions)  
-**cuBLAS Coverage**: ~85% (~61+ of ~72 real functions; complex C/Z missing)  
-**cuDNN Coverage**: ~90% (~65+ of ~72 major functions)  
+**cuBLAS Coverage**: Level-1/2/3 real + complex C/Z + Hermitian core API implemented  
+**cuDNN Coverage**: Major legacy ops + backward/training + Backend API attention routing implemented  
 **NCCL Coverage**: ~95% (all major collectives + p2p)  
 **PTX ISA Coverage**: ~95% (~110+ of ~115 commonly-used instructions)  
 **Critical Issues**: 0  
@@ -63,14 +63,14 @@ See [Cross-Platform Status](docs/CROSS_PLATFORM_STATUS.md) for detailed platform
 - Chrome trace export (`toChromeTraceJSON`) and C API telemetry
 - Python bindings (`vgre_c_api` via ctypes), NumPy-compatible
 - Cooperative groups (`thread_block`, `thread_block_tile`, `grid_group`, `multi_grid_group`) + CUB fallback headers
-- cuBLAS: Level-1/2/3 real (S/D) routines, Hermitian (Cherk/Zherk/Cher2k/Zher2k/Chemm/Zhemm), batched GEMM, `GemmEx`, logger
-- cuDNN: conv, pool, activation, softmax, BN, dropout, RNN, attention, CTC loss, LRN, divisive norm, tensor ops (OpTensor, ReduceTensor, TransformTensor, AddTensor), Backend API wired to legacy
-- NCCL: AllReduce, Broadcast, Reduce, AllGather, ReduceScatter, Send, Recv, AllToAll, Gather, Scatter
-- cuFFT: reference DFT/IDFT for 1D/2D/3D (C2C, R2C, C2R, Z2Z, D2Z, Z2D)
-- cuRAND: XORWOW, MRG32k3a, MTGP32, MT19937 generators
-- cuSOLVER: Cholesky (`potrf`), QR (`geqrf`), SVD (`gesvd`), eigenvalues (`syevd`)
-- cuSPARSE: CSR SpMV, SpMM, COO, `axpyi`
-- cuBLASLt: basic matmul with ReLU/GELU/Bias epilogues
+- cuBLAS: Level-1/2/3 real and complex C/Z routines, Hermitian variants, batched GEMM, `GemmEx`, pointer/atomics modes, logger
+- cuDNN: conv, pool, activation, softmax, BN, dropout, RNN, attention, CTC loss, LRN, divisive norm, tensor ops, INT8 packed layouts, Backend API routing including SDPA attention
+- NCCL: AllReduce, Broadcast, Reduce, AllGather, ReduceScatter, Send, Recv, AllToAll, Gather, Scatter, TCP multi-node and optional RDMA/RoCE bulk path
+- cuFFT: O(n log n) 1D/2D/3D transforms (C2C, R2C, C2R, Z2Z, D2Z, Z2D), FP16 C16C/R16C/C16R, strided batched `PlanMany`, optional FFTW3
+- cuRAND: XORWOW, MRG32k3a, MTGP32, MT19937, Sobol generators with per-handle locking
+- cuSOLVER: Dense LAPACK-backed potrf/geqrf/gesvd/syevd/getrf/getrs/ormqr/gelsd and sparse cusolverSp CSR-to-dense LAPACK paths
+- cuSPARSE: CSR/COO/CSC SpMV/SpMM, SparseToDense, DenseToSparse, SpSV, SpGEMM, ILU0, IC0
+- cuBLASLt: matmul with heuristic cache, scale pointers, amaxD, and full epilogue set
 
 ### Recent Improvements (2026-05-15) 🎉
 - ✅ **OpenMP Parallelization** — All major O(n²) and O(n³) CPU reference compute paths across cuBLAS, cuBLASLt, cuDNN, cuFFT, cuSPARSE, and core now use conditional `#pragma omp parallel for` with workload-dependent thresholds. Shared `include/vgre/common/openmp_helper.h` header. Build 122/122 targets, 108–110/110 tests passing.
@@ -79,7 +79,7 @@ See [Cross-Platform Status](docs/CROSS_PLATFORM_STATUS.md) for detailed platform
 - ✅ **CUDA Runtime Gaps Closed** — `cudaStreamWaitEvent`, `cudaEventQuery`, `cudaStreamAddCallback`, `cudaLaunchHostFunc`, `cudaGetErrorName`/`GetErrorString`, `cudaMemcpyToSymbol`/`FromSymbol` (sync+async), `cudaMallocArray`/`cudaMalloc3DArray`/`cudaMalloc3D`, `cudaPointerGetAttributes`, `cudaMemset2D`/`3D`/`2DAsync`/`3DAsync`, all graph node types (kernel, memset, host, child, empty, event-record/wait, mem-alloc/free), graph introspection & exec mutation, stream capture introspection, texture/surface object APIs, device/function attributes, dependencies & user objects, external memory/semaphore.
 - ✅ **cuBLAS Backfill** — Level-2 (trsv, ger, symv, gbmv, syr, syr2, trmv, tbsv, tpsv, spmv, sbmv, spr, spr2, tbmv, tpmv), Level-3 (trsm, syrk, syr2k, trmm, symm, batched variants), Hermitian (Cherk, Zherk, Cher2k, Zher2k, Chemm, Zhemm), `GemmEx`, logger.
 - ✅ **cuDNN Backward + Training** — Backward data/filter/bias for conv, BN training, activation/softmax/pooling backward, dropout, RNN, multi-head attention, CTC loss, LRN, divisive normalization, tensor ops, INT8x4/x32 packed layouts.
-- ✅ **Missing Libraries** — cuFFT (reference DFT), cuRAND (mt19937_64), cuSOLVER (LAPACK delegation), cuSPARSE (CSR SpMV/SpMM), cuBLASLt (matmul + epilogues) all now functional.
+- ✅ **Library Shim Completion** — cuFFT (O(n log n) FFT + FP16), cuRAND, cuSOLVER, cuSPARSE, and cuBLASLt all now have functional implementations.
 - ✅ **CUDA Driver Expansion** — `cuMemAllocManaged`, `cuMemHostAlloc`/`Register`/`Unregister`, `cuMemAllocPitch`, all 2D/3D memcpy variants, all async memcpy variants, peer copy, all memset variants, stream callback/query/flags/priority/id/ctx/capture, context management, device queries, texture reference APIs, module fat-binary + linker, cooperative launch, occupancy heuristics, graph APIs, external memory/semaphore.
 - ✅ **PTX Expansion** — Texture (`tex`/`tld4`/`txq`/`suld`/`sust`), shared atomics, all `cvt.*` rounding modes, FP16 vector loads/stores, wide integer MAD/MUL/DIV/REM, warp primitives (`match.sync`, `elect.sync`), `grid.sync`, `griddepcontrol`, TMA 3D/4D/5D, `cp.reduce.async`, `tcgen05.mma` (Blackwell), `prmt.b32`, `sad.u32`, MMA INT4/binary.
 - ✅ **NCCL P2P** — `ncclSend`/`Recv`, `ncclAllToAll`, `ncclGather`/`Scatter`.
@@ -110,12 +110,10 @@ See [Cross-Platform Status](docs/CROSS_PLATFORM_STATUS.md) for detailed platform
 
 ### Known Limitations ⚠️
 - 10–50× slower than real GPU for compute-bound kernels (CPU execution; AVX-512 auto-vectorisation + OpenMP + NUMA binding reduce the gap)
-- **Complex BLAS missing**: No `cublasCgemm`, `cublasZgemm`, `cublasCgemv`, etc.
-- **cuFFT slow for large transforms**: Reference O(n²) DFT only; no FFTW3/MKL delegation.
-- **cuSOLVER limited**: Only Cholesky, QR, SVD, eigenvalues. No LU or least-squares.
-- **cuSPARSE limited**: Only CSR SpMV/SpMM. No format conversions or sparse solvers.
-- **cuBLASLt no heuristics**: Always falls back to reference GEMM.
-- **NCCL no RDMA**: Multi-node uses TCP sockets.
+- **Physical GPU counters unavailable**: profiling uses VGRE timeline/Chrome/OTLP and LLVM-IR instruction classification, not NVIDIA PMU/CUPTI counters.
+- **Sparse direct factorization with fill-in**: requires an external sparse solver backend; current sparse solver paths are CSR-to-dense or zero-fill incomplete factorizations.
+- **Optional transports**: RDMA and gRPC require explicit build flags and system libraries; TCP remains the default.
+- **Device-side cuRAND**: intentionally unsupported in the CPU runtime model.
 
 See `docs/missingFeatures.md` for the complete exhaustive list.
 
