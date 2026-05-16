@@ -461,6 +461,7 @@ add_library(vgre_cudart SHARED
     src/api/cublas/cublas_level2_packed.cpp
     src/api/cublas/cublas_level3.cpp
     src/api/cublas/cublas_level3_blas3.cpp
+    src/api/cublas/cublas_gemm_ex.cpp
     src/api/cublas/cublas_complex.cpp
     src/api/cublas/cublas_complex_level2.cpp
     src/api/cublas/cublas_complex_level3.cpp
