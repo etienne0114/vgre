@@ -310,4 +310,34 @@ The following items that were previously potential concerns have been resolved:
 
 ---
 
-*Last updated: 2026-05-16 (seventh pass). 117/117 tests pass. Missing API declarations exposed, cudaArrayDestroy added, cuRAND full test suite added.*
+## 10. Eighth Pass — Missing API Implementations (2026-05-16)
+
+| Item | Resolution |
+|------|-----------|
+| `cudnnGetFilter4dDescriptor`, `cudnnGetConvolution2dDescriptor`, `cudnnGetActivationDescriptor`, `cudnnGetOpTensorDescriptor`, `cudnnGetReduceTensorDescriptor` | Implemented in `cudnn_core.cpp`; read back all descriptor fields |
+| `cudnnSetConvolutionGroupCount` / `cudnnGetConvolutionGroupCount` | Implemented in `cudnn_core.cpp`; `ConvDesc.groupCount` field added |
+| `cudnnSetConvolutionMathType` / `cudnnGetConvolutionMathType` | Implemented in `cudnn_core.cpp`; `ConvDesc.mathType` field added |
+| `cudnnGetDropoutDescriptor` | Implemented in `cudnn_core.cpp`; reads dropout/states/seed |
+| `cudnnConvolutionBiasActivationForward` | Fused `y = activation(α₁·conv(x,w) + α₂·z + bias)` in `cudnn_convolution.cpp` |
+| `cusparseScsrmv` / `cusparseDcsrmv` | Legacy Level-2 CSR SpMV with transpose + index-base support |
+| `cusparseScsrmm` / `cusparseDcsrmm` | Legacy Level-3 CSR SpMM (sparse × dense → dense) |
+| `cusparseMatDescr_t` + create/destroy/set helpers | Legacy matrix descriptor in `cusparse_core.cpp` |
+| `cublasGetVersion` | Unversioned alias for `cublasGetVersion_v2` |
+| `cublasSetVector` / `cublasGetVector` | Strided element copy |
+| `cublasSetMatrix` / `cublasGetMatrix` | Row-major ↔ column-major strided layout conversion |
+| Test count | **117/117 pass** |
+
+---
+
+## 11. Ninth Pass — File Size Discipline (2026-05-16)
+
+| Item | Resolution |
+|------|-----------|
+| `cublas_level3.cpp` 1024 → 698 lines | HGEMM + GemmEx (FP16/BF16/INT8/complex) extracted to `cublas_gemm_ex.cpp` (302 lines) |
+| `cudart_shim.cpp` 993 → 671 lines | CUDA Graph create/destroy/capture/launch/clone/update + ext-semaphore nodes extracted to `cudart_shim_graph_basic.cpp` (252 lines) |
+| All other shim files | Under 800-line limit |
+| Test count | **117/117 pass** |
+
+---
+
+*Last updated: 2026-05-16 (ninth pass). 117/117 tests pass. All missing cuDNN/cuSPARSE/cuBLAS APIs implemented; file size discipline enforced.*
