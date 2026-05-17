@@ -1,9 +1,13 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/secure_channel.h"
+#include "vgre/advanced/gpu_passthrough.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/platform.h"
+#ifdef VGRE_HAS_OPENCL_BACKEND
+#include "vgre/runtime/igpu_opencl_executor.h"
+#endif
 #include <iostream>
 #include <string>
 #include <csignal>
@@ -31,13 +35,17 @@ void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]\n";
     std::cout << "Options:\n";
     std::cout << "  --port <p>          Port to listen on (default: 7777)\n";
+    std::cout << "  --threads <n>       Number of worker threads (default: auto = CPU cores)\n";
     std::cout << "  --auth-token <t>    Authentication token for secure cluster access\n";
     std::cout << "  --master <ip>       IP address of the master node (default: auto-discovery)\n";
+    std::cout << "  --no-gpu            Disable GPU dispatch (force CPU-only execution)\n";
     std::cout << "  --help              Print this help message\n";
 }
 
 int main(int argc, char** argv) {
-    int port = 7777;
+    int  port       = 7777;
+    int  threads    = 0;       // 0 = auto-detect from CPU cores
+    bool enable_gpu = true;
     std::string auth_token;
     std::string master_ip = "auto";
 
@@ -45,14 +53,24 @@ int main(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--port" && i + 1 < argc) {
             port = std::stoi(argv[++i]);
+        } else if (arg == "--threads" && i + 1 < argc) {
+            threads = std::stoi(argv[++i]);
         } else if (arg == "--auth-token" && i + 1 < argc) {
             auth_token = argv[++i];
         } else if (arg == "--master" && i + 1 < argc) {
             master_ip = argv[++i];
+        } else if (arg == "--no-gpu") {
+            enable_gpu = false;
         } else if (arg == "--help") {
             print_usage(argv[0]);
             return 0;
         }
+    }
+
+    // Apply thread count to the runtime config before init
+    if (threads > 0) {
+        vgre_set_config("VGRE_WORKER_THREADS", std::to_string(threads).c_str());
+        std::cout << "[Worker] Thread pool: " << threads << " threads\n";
     }
 
     std::signal(SIGINT, signal_handler);
@@ -83,6 +101,37 @@ int main(int argc, char** argv) {
 
     vgre::advanced::TCPClusterManager& cluster = vgre::advanced::TCPClusterManager::instance();
     
+    // ── GPU capability probe ──────────────────────────────────────────────────
+    // Probe BEFORE cluster init so the capability packet sent during handshake
+    // carries accurate GPU information. Results are logged to help operators
+    // verify which compute backends are active on this worker node.
+    if (enable_gpu) {
+        // Discrete NVIDIA GPU via libcuda / nvcuda.dll (runtime dlopen)
+        auto& gp = vgre::advanced::GPUPassthrough::instance();
+        if (gp.initialize() && gp.isAvailable()) {
+            const auto& devs = gp.getDevices();
+            std::cout << "[Worker] Discrete GPU: " << (devs.empty() ? "?" : devs[0].name)
+                      << " (" << devs.size() << " device(s) via GPU passthrough)" << std::endl;
+        } else {
+            std::cout << "[Worker] Discrete GPU: not found (libcuda not present)" << std::endl;
+        }
+#ifdef VGRE_HAS_OPENCL_BACKEND
+        // Integrated GPU via OpenCL
+        auto& igpu = vgre::runtime::IGPUOpenCLExecutor::instance();
+        if (igpu.initialize()) {
+            std::cout << "[Worker] Integrated GPU: " << igpu.getDeviceName()
+                      << " (OpenCL, " << std::fixed
+                      << igpu.getEstimatedGFLOPS() << " GFLOPS est.)" << std::endl;
+        } else {
+            std::cout << "[Worker] Integrated GPU: not available (no OpenCL device)" << std::endl;
+        }
+#else
+        std::cout << "[Worker] Integrated GPU: disabled (compiled without VGRE_HAS_OPENCL_BACKEND)" << std::endl;
+#endif
+    } else {
+        std::cout << "[Worker] GPU dispatch disabled (--no-gpu)" << std::endl;
+    }
+
     vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Initializing VGRE Remote Worker on port " + std::to_string(port));
     std::cout << "[Worker] Startup phase 1/2: Initializing networking..." << std::endl;
     std::cout.flush();
@@ -96,7 +145,7 @@ int main(int argc, char** argv) {
     }
 
     vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Worker node is active and scanning for master (UDP Discovery)...");
-    std::cout << "[Worker] Startup phase 2/2: Entering discovery loop. scanning local subnet..." << std::endl;
+    std::cout << "[Worker] Startup phase 2/2: Entering discovery loop, scanning local subnet..." << std::endl;
     std::cout.flush();
     
     int reconnectCounter = 0;

@@ -193,7 +193,15 @@ VGREResult HybridComputeManager::distributeRegisteredKernel(
       return VGREResult::ERR_NOT_INITIALIZED;
     }
 
-    int worker = cluster.getFirstActiveWorker();
+    // Prefer a worker that has GPU capability; fall back to any active worker.
+    // getGpuCapableWorker() also picks the least-loaded GPU worker, providing
+    // natural load-balancing across heterogeneous nodes.
+    int worker = cluster.getGpuCapableWorker();
+    if (worker < 0) {
+      VGRE_LOG_WARN("HybridComputeManager",
+                    "No GPU-capable worker found — routing to first available CPU worker");
+      worker = cluster.getFirstActiveWorker();
+    }
     if (worker < 0) {
       VGRE_LOG_ERROR("HybridComputeManager",
                      "Remote kernel dispatch requested but no active workers "

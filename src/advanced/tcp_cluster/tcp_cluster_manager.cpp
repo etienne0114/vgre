@@ -1,5 +1,4 @@
 /**
- * VGRE TCP Cluster Manager — Thin Coordinator
  *
  * Wires together the modular sub-systems that make up the TCP cluster:
  *   - ConnectionManager   : TCP socket lifecycle & rate limiting
@@ -15,6 +14,7 @@
  * src/advanced/tcp_cluster/.
  */
 
+#include <climits>
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/tcp_cluster/internal/collective_ops_manager.h"
@@ -235,6 +235,33 @@ int TCPClusterManager::getFirstActiveWorker() const {
     if (clients_[i] && clients_[i]->active) {
       return static_cast<int>(i);
     }
+  }
+  return -1;
+}
+
+int TCPClusterManager::getGpuCapableWorker() const {
+  if (!is_master_) return -1;
+  std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
+
+  // First pass: prefer workers that reported GPU capability (has_igpu covers
+  // both OpenCL iGPU and NVIDIA dGPU via passthrough), choosing the one with
+  // fewest in-flight kernels to balance load across GPU workers.
+  int best          = -1;
+  int bestInFlight  = INT_MAX;
+  for (size_t i = 0; i < clients_.size(); ++i) {
+    if (!clients_[i] || !clients_[i]->active) continue;
+    if (!clients_[i]->has_igpu) continue;
+    int inflight = static_cast<int>(clients_[i]->in_flight_kernels.load());
+    if (inflight < bestInFlight) {
+      best         = static_cast<int>(i);
+      bestInFlight = inflight;
+    }
+  }
+  if (best >= 0) return best;
+
+  // Fallback: any active worker (GPU-unaware dispatch is still valid)
+  for (size_t i = 0; i < clients_.size(); ++i) {
+    if (clients_[i] && clients_[i]->active) return static_cast<int>(i);
   }
   return -1;
 }
