@@ -44,8 +44,17 @@ option(VGRE_BUILD_SLURM_GRES  "Build the SLURM GRES vGPU plugin"        ON)
 # ── Feature toggles ───────────────────────────────────────────────────────────
 option(VGRE_ENABLE_NATIVE_SIMD
     "Enable host-specific SIMD flags (AVX2/AVX-512). OFF = portable binaries."  OFF)
+# Windows: LAPACK does not ship by default — require explicit opt-in once the
+# user has installed Intel oneAPI MKL or vcpkg OpenBLAS (-DVGRE_USE_LAPACK=ON).
+# Linux/macOS: default ON because liblapack-dev / Accelerate are readily available.
+if(WIN32)
+    set(_vgre_lapack_default OFF)
+else()
+    set(_vgre_lapack_default ON)
+endif()
 option(VGRE_USE_LAPACK
-    "Link against LAPACK/BLAS for the cuSOLVER shim"                     ON)
+    "Link against LAPACK/BLAS for the cuSOLVER shim (Windows: needs Intel oneAPI MKL or vcpkg openblas:x64-windows)"
+    ${_vgre_lapack_default})
 option(VGRE_USE_FFTW3
     "Use FFTW3 as cuFFT backend; falls back to built-in Cooley-Tukey"    ON)
 option(VGRE_ENABLE_RDMA
@@ -397,10 +406,12 @@ if(WIN32)
         endif()
     endif()
 
-    # Strategy 2: enumerate known install trees as fallback
+    # Strategy 2: enumerate known install trees as fallback (vswhere unavailable).
+    # Includes both year-named dirs (2022/2019/2017) and version-numbered dirs
+    # (18 = VS 2025, 17 = VS 2022) because Microsoft has used both conventions.
     if(NOT _dia_path)
-        foreach(_yr IN ITEMS 2022 2019 2017)
-            foreach(_ed IN ITEMS Community Professional Enterprise BuildTools)
+        foreach(_yr IN ITEMS 2025 2022 2019 2017 18 17 16 15)
+            foreach(_ed IN ITEMS Community Professional Enterprise BuildTools Preview)
                 set(_cand
                     "$ENV{ProgramFiles}/Microsoft Visual Studio/${_yr}/${_ed}/DIA SDK/lib/amd64/diaguids.lib")
                 if(EXISTS "${_cand}")
@@ -416,6 +427,12 @@ if(WIN32)
 
     if(_dia_path)
         message(STATUS "LLVM DIA SDK: found at ${_dia_path}")
+        # Normalise backslashes → forward slashes BEFORE using the path as a
+        # CMake regex REPLACE string.  The replacement expression is scanned for
+        # escape sequences (\1, \\, …); backslashes in a Windows path such as
+        # C:\Program Files\... produce unknowns like \P, \M, \V and CMake errors.
+        # Forward slashes are accepted by all Windows file-I/O APIs.
+        string(REPLACE "\\" "/" _dia_path "${_dia_path}")
         # Patch any stale DIA SDK path baked into LLVM imported targets
         foreach(_lt IN LISTS VGRE_LLVM_LIBS)
             if(TARGET ${_lt})
