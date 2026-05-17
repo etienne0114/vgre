@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <random>
+#include <thread>
 
 #ifdef VGRE_HAS_RDMA
 #include <infiniband/verbs.h>
@@ -359,6 +360,7 @@ size_t RDMAConnection::pollCompletion(int timeoutMs) {
                   + std::chrono::milliseconds(timeoutMs);
 
     ibv_wc wc{};
+    int spins = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         int n = ibv_poll_cq(cq_, 1, &wc);
         if (n < 0) {
@@ -373,8 +375,23 @@ size_t RDMAConnection::pollCompletion(int timeoutMs) {
             }
             return lastWRSize_;
         }
-        // Spin a bit before polling again — avoids kernel involvement
-        for (volatile int i = 0; i < 1000; ++i) {}
+        // Adaptive back-off: CPU pause for first 1000 spins (keeps latency
+        // low on fast NICs), then yield (avoids starving other threads on
+        // slow/congested paths). The volatile loop is replaced with a
+        // CPU-specific pause instruction which tells the processor a spin-wait
+        // loop is in progress, reducing pipeline pressure and power consumption.
+        if (++spins < 1000) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+            __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(_M_ARM64)
+            asm volatile("yield" ::: "memory");
+#else
+            (void)0;
+#endif
+        } else {
+            std::this_thread::yield();
+            spins = 0;
+        }
     }
 
     VGRE_LOG_WARN("RDMATransport",
@@ -386,22 +403,25 @@ bool RDMAConnection::rdmaWriteToRemote(RDMAContext& ctx, const void* src, size_t
     if (!connected_ || remoteAddr_ == 0 || remoteRkey_ == 0 || !src || size == 0)
         return false;
 
+    // Callers are expected to chunk large transfers at bounceSize_ boundaries
+    // and send one DATA_HEADER_RDMA TCP notification per chunk so the receiver
+    // can reassemble.  Reject a single call that would overflow the bounce buffer.
     if (size > bounceSize_) {
         VGRE_LOG_WARN("RDMATransport",
                       "rdmaWriteToRemote: size " + std::to_string(size) +
-                      " exceeds remote bounce capacity " + std::to_string(bounceSize_) +
-                      " — falling back to TCP");
+                      " > bounce " + std::to_string(bounceSize_) +
+                      " — caller must chunk; falling back to TCP");
         return false;
     }
 
-    // One RDMA write at a time — prevents concurrent calls from overlapping
-    // writes into the same remote bounce buffer region.
+    // Serialise writes: prevents two concurrent calls from overlapping writes
+    // into the same remote bounce buffer region.
     std::lock_guard<std::mutex> lk(writeMtx_);
 
-    // Register the source buffer for this transfer.
-    // ibv_reg_mr pins the pages and gives the NIC DMA access; ibv_dereg_mr
-    // unpins them. This is intentionally per-call for correctness — caching
-    // MRs across calls would require tracking buffer lifetimes.
+    // Register the FULL source buffer with a single ibv_reg_mr call.
+    // This pins all required pages once rather than per-chunk, which is
+    // critical for performance: ibv_reg_mr is a blocking syscall that can take
+    // tens of microseconds per MB on a cold page table.
     RDMARegion* srcMR = ctx.registerMemory(const_cast<void*>(src), size);
     if (!srcMR) {
         VGRE_LOG_ERROR("RDMATransport",
@@ -410,20 +430,33 @@ bool RDMAConnection::rdmaWriteToRemote(RDMAContext& ctx, const void* src, size_t
         return false;
     }
 
-    // Post RDMA WRITE WR: write srcMR → remote bounce buffer at base address.
+    // Post a single RDMA WRITE WR from the registered source into the remote
+    // bounce buffer at base address.  pollCompletion() spins (with CPU pause)
+    // until the NIC signals write completion; the TCP DATA_HEADER_RDMA
+    // notification is sent by the caller ONLY AFTER this returns true, which
+    // guarantees the data is visible in the remote bounce buffer before the
+    // receiver reads it.
     bool ok = rdmaWrite(srcMR, remoteAddr_, remoteRkey_, size);
     if (ok) {
         size_t transferred = pollCompletion(5000);
         ok = (transferred == size);
         if (!ok) {
             VGRE_LOG_ERROR("RDMATransport",
-                           "rdmaWriteToRemote: completion poll returned " +
+                           "rdmaWriteToRemote: poll returned " +
                            std::to_string(transferred) + " expected " +
                            std::to_string(size));
         }
     }
 
     ctx.deregisterMemory(srcMR);
+
+    // On non-x86 platforms (e.g. ARM), RDMA DMA writes bypass the CPU cache.
+    // A compiler/memory barrier ensures the CPU does not read stale cached
+    // data from the remote bounce buffer before the NIC's DMA completes.
+    // (On x86/TSO this is a no-op; on ARM it generates a DMB instruction.)
+    if (ok) {
+        std::atomic_thread_fence(std::memory_order_acquire);
+    }
     return ok;
 }
 

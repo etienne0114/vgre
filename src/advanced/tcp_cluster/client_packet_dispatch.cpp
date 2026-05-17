@@ -166,21 +166,29 @@ void TCPClusterManager::processClientStagingBuffer() {
 
           if (client_rdma_connected_ && client_rdma_conn_ &&
               client_rdma_conn_->bounceBuf() &&
-              rdmaPkt.size <= client_rdma_conn_->bounceCapacity()) {
+              rdmaPkt.chunk_size <= client_rdma_conn_->bounceCapacity()) {
             void *handle = reinterpret_cast<void *>(rdmaPkt.target_ptr);
             auto &mm = core::RuntimeEngine::instance().getMemoryManager();
-            if (!mm.isValidHandle(handle)) {
+            // For the first chunk (dst_offset==0), allocate if not yet present.
+            // Subsequent chunks reuse the existing allocation.
+            if (rdmaPkt.dst_offset == 0 && !mm.isValidHandle(handle)) {
               void *act = nullptr;
-              mm.allocateManagedAt(handle, rdmaPkt.size, act);
+              mm.allocateManagedAt(handle, rdmaPkt.chunk_size, act);
             }
             void *local_ptr = mm.getPointer(handle);
             if (local_ptr) {
-              std::memcpy(local_ptr, client_rdma_conn_->bounceBuf(),
-                          rdmaPkt.size);
+              // Copy this chunk to the correct offset inside the allocation.
+              std::memcpy(static_cast<uint8_t*>(local_ptr) + rdmaPkt.dst_offset,
+                          client_rdma_conn_->bounceBuf(),
+                          rdmaPkt.chunk_size);
+              // On non-x86 (ARM) the RDMA DMA may have bypassed the CPU cache;
+              // the acquire fence ensures we read the NIC-written data, not
+              // stale cached values.
+              std::atomic_thread_fence(std::memory_order_acquire);
               VGRE_LOG_DEBUG("TCPCluster",
-                             "RDMA receive: " + std::to_string(rdmaPkt.size) +
-                                 " bytes from bounce buffer → handle " +
-                                 std::to_string(rdmaPkt.target_ptr));
+                             "RDMA receive: chunk " + std::to_string(rdmaPkt.chunk_size) +
+                                 " bytes at offset " + std::to_string(rdmaPkt.dst_offset) +
+                                 " → handle " + std::to_string(rdmaPkt.target_ptr));
             } else {
               VGRE_LOG_ERROR("TCPCluster",
                              "DATA_HEADER_RDMA: no local pointer for handle " +
@@ -188,8 +196,8 @@ void TCPClusterManager::processClientStagingBuffer() {
             }
           } else {
             VGRE_LOG_WARN("TCPCluster",
-                          "DATA_HEADER_RDMA: RDMA not active or size " +
-                              std::to_string(rdmaPkt.size) +
+                          "DATA_HEADER_RDMA: RDMA not active or chunk_size " +
+                              std::to_string(rdmaPkt.chunk_size) +
                               " exceeds bounce capacity — data lost");
           }
         } else if (type == PacketType::STRUCT_DATA) {

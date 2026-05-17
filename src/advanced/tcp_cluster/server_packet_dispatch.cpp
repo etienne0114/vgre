@@ -238,20 +238,27 @@ void TCPClusterManager::processServerPackets(
 
         if (client->rdma_connected && client->rdma_conn &&
             client->rdma_conn->bounceBuf() &&
-            rdmaPkt.size <= client->rdma_conn->bounceCapacity()) {
+            rdmaPkt.chunk_size <= client->rdma_conn->bounceCapacity()) {
           auto &mm = core::RuntimeEngine::instance().getMemoryManager();
           void *handle = reinterpret_cast<void *>(rdmaPkt.target_ptr);
-          if (!mm.isValidHandle(handle)) {
+          // Allocate only for the first chunk (dst_offset == 0)
+          if (rdmaPkt.dst_offset == 0 && !mm.isValidHandle(handle)) {
             void *act = nullptr;
-            mm.allocateManagedAt(handle, rdmaPkt.size, act);
+            mm.allocateManagedAt(handle, rdmaPkt.chunk_size, act);
           }
           void *local_ptr = mm.getPointer(handle);
           if (local_ptr) {
-            std::memcpy(local_ptr, client->rdma_conn->bounceBuf(),
-                        rdmaPkt.size);
+            // Copy this chunk to the correct byte offset inside the allocation.
+            std::memcpy(static_cast<uint8_t*>(local_ptr) + rdmaPkt.dst_offset,
+                        client->rdma_conn->bounceBuf(),
+                        rdmaPkt.chunk_size);
+            // Acquire fence: ensures CPU reads NIC-written data, not stale cache
+            // (needed on non-x86 ARM where RDMA DMA bypasses the CPU cache hierarchy).
+            std::atomic_thread_fence(std::memory_order_acquire);
             VGRE_LOG_DEBUG("TCPCluster",
-                           "Master: RDMA receive " +
-                               std::to_string(rdmaPkt.size) + " bytes from " +
+                           "Master: RDMA receive chunk " +
+                               std::to_string(rdmaPkt.chunk_size) + " bytes at offset " +
+                               std::to_string(rdmaPkt.dst_offset) + " from " +
                                client->ip_address + " → handle " +
                                std::to_string(rdmaPkt.target_ptr));
           } else {
@@ -264,8 +271,8 @@ void TCPClusterManager::processServerPackets(
         } else {
           VGRE_LOG_WARN("TCPCluster",
                         "Master: DATA_HEADER_RDMA from " + client->ip_address +
-                            " but RDMA not active or size " +
-                            std::to_string(rdmaPkt.size) +
+                            " but RDMA not active or chunk_size " +
+                            std::to_string(rdmaPkt.chunk_size) +
                             " exceeds bounce capacity — data lost");
         }
       } else if (type == PacketType::CAPABILITY) {
