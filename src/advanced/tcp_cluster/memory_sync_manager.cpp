@@ -251,16 +251,41 @@ VGREResult MemorySyncManager::sendDeltaSyncTCP(
     
     uint8_t *data = static_cast<uint8_t *>(ptr) + r.first;
     
-    // RDMA Fast Path
+    // RDMA Fast Path — chunked for transfers larger than the bounce buffer.
+    // Each chunk is written into the remote bounce buffer at offset 0, then
+    // a DATA_HEADER_RDMA notification is sent before the next chunk overwrites
+    // the bounce buffer.  The receiver copies each chunk to the correct
+    // dst_offset inside its local allocation.
     if (client->rdma_connected && client->rdma_conn && r.second >= kRdmaThreshold) {
-      if (client->rdma_conn->rdmaWriteToRemote(*client->rdma_ctx, data, r.second)) {
-        DataHeaderRDMAPacket rh{handle, r.second};
-        if (parent_->send_packet(client->socket_fd, PacketType::DATA_HEADER_RDMA, &rh, sizeof(rh), client->secure_channel.get()) == VGREResult::SUCCESS) {
-          VGRE_LOG_DEBUG("TCPCluster", "RDMA WRITE successful for delta range (" + std::to_string(r.second) + " bytes)");
-          continue; // Skip TCP payload
+      const size_t bsz  = client->rdma_conn->bounceCapacity();
+      const uint8_t* src = static_cast<const uint8_t*>(data);
+      size_t remaining   = r.second;
+      size_t dstOff      = 0;
+      bool rdmaOk        = true;
+
+      while (remaining > 0 && rdmaOk) {
+        size_t chunk = std::min(remaining, bsz);
+
+        if (!client->rdma_conn->rdmaWriteToRemote(*client->rdma_ctx, src + dstOff, chunk)) {
+          rdmaOk = false;
+          break;
         }
-        VGRE_LOG_WARN("TCPCluster", "RDMA WRITE ok but DATA_HEADER_RDMA failed — TCP fallback");
+        DataHeaderRDMAPacket rh{};
+        rh.target_ptr = handle;
+        rh.chunk_size = static_cast<uint32_t>(chunk);
+        rh.dst_offset = static_cast<uint32_t>(dstOff);
+        if (parent_->send_packet(client->socket_fd, PacketType::DATA_HEADER_RDMA, &rh, sizeof(rh), client->secure_channel.get()) != VGREResult::SUCCESS) {
+          rdmaOk = false;
+          break;
+        }
+        dstOff    += chunk;
+        remaining -= chunk;
       }
+      if (rdmaOk) {
+        VGRE_LOG_DEBUG("TCPCluster", "RDMA WRITE successful for delta range (" + std::to_string(r.second) + " bytes)");
+        continue; // Skip TCP payload
+      }
+      VGRE_LOG_WARN("TCPCluster", "RDMA failed — TCP fallback for this delta range");
     }
     
     // TCP Fallback
@@ -302,16 +327,37 @@ VGREResult MemorySyncManager::sendFullSyncSHM(
 VGREResult MemorySyncManager::sendFullSyncTCP(
     void *ptr, uint64_t handle, size_t size, 
     std::shared_ptr<TCPClusterManager::ClientConnection> client) {
-  // RDMA Fast Path
+  // RDMA Fast Path — chunked for transfers larger than the bounce buffer.
   if (client->rdma_connected && client->rdma_conn && size >= kRdmaThreshold) {
-    if (client->rdma_conn->rdmaWriteToRemote(*client->rdma_ctx, ptr, size)) {
-      DataHeaderRDMAPacket rh{handle, size};
-      if (parent_->send_packet(client->socket_fd, PacketType::DATA_HEADER_RDMA, &rh, sizeof(rh), client->secure_channel.get()) == VGREResult::SUCCESS) {
-        VGRE_LOG_DEBUG("TCPCluster", "RDMA WRITE successful for full sync (" + std::to_string(size) + " bytes)");
-        return VGREResult::SUCCESS;
+    const size_t bsz  = client->rdma_conn->bounceCapacity();
+    const uint8_t* src = static_cast<const uint8_t*>(ptr);
+    size_t remaining   = size;
+    size_t dstOff      = 0;
+    bool rdmaOk        = true;
+
+    while (remaining > 0 && rdmaOk) {
+      size_t chunk = std::min(remaining, bsz);
+
+      if (!client->rdma_conn->rdmaWriteToRemote(*client->rdma_ctx, src + dstOff, chunk)) {
+        rdmaOk = false;
+        break;
       }
-      VGRE_LOG_WARN("TCPCluster", "RDMA WRITE ok but DATA_HEADER_RDMA failed — TCP fallback");
+      DataHeaderRDMAPacket rh{};
+      rh.target_ptr = handle;
+      rh.chunk_size = static_cast<uint32_t>(chunk);
+      rh.dst_offset = static_cast<uint32_t>(dstOff);
+      if (parent_->send_packet(client->socket_fd, PacketType::DATA_HEADER_RDMA, &rh, sizeof(rh), client->secure_channel.get()) != VGREResult::SUCCESS) {
+        rdmaOk = false;
+        break;
+      }
+      dstOff    += chunk;
+      remaining -= chunk;
     }
+    if (rdmaOk) {
+      VGRE_LOG_DEBUG("TCPCluster", "RDMA WRITE successful for full sync (" + std::to_string(size) + " bytes)");
+      return VGREResult::SUCCESS;
+    }
+    VGRE_LOG_WARN("TCPCluster", "RDMA failed mid-stream — TCP fallback for full sync");
   }
   
   // TCP Path

@@ -221,18 +221,27 @@ struct DataHeaderPacket {
 static_assert(detail::validate_struct_size<DataHeaderPacket>(16),
               "DataHeaderPacket must be exactly 16 bytes across all platforms");
 
-// Sent after an RDMA WRITE completes: notifies the receiver that `size` bytes
-// are now available at the base of its pre-registered bounce buffer and should
-// be copied to the allocation identified by `target_ptr`.
+// Sent after an RDMA WRITE completes: notifies the receiver that chunk_size
+// bytes are now available at the base of its pre-registered bounce buffer and
+// should be copied into the allocation identified by target_ptr starting at
+// byte offset dst_offset.
+//
+// Large transfers are broken into bounce-buffer-sized chunks.  For each chunk:
+//   1. Sender RDMA-WRITEs chunk data to receiver's bounce buffer [0..chunk_size)
+//   2. Sender sends this packet via TCP (ordering guarantee: data arrives first)
+//   3. Receiver copies bounce[0..chunk_size) to local_ptr[dst_offset..dst_offset+chunk_size)
+//
+// Single-chunk transfers: dst_offset = 0, chunk_size = full transfer size.
 // The receiver must NOT expect a DATA_BODY packet after this.
 #pragma pack(push, 1)
 struct DataHeaderRDMAPacket {
   uint64_t target_ptr;   // VGRE allocation handle on the receiver
-  uint64_t size;         // bytes already written into bounce buffer[0..size)
+  uint32_t chunk_size;   // bytes written into bounce buffer[0..chunk_size)
+  uint32_t dst_offset;   // byte offset into target_ptr where this chunk goes
 };
 #pragma pack(pop)
 
-// Cross-platform validation for DataHeaderRDMAPacket
+// Cross-platform validation for DataHeaderRDMAPacket (16 bytes, same as before)
 static_assert(detail::validate_struct_size<DataHeaderRDMAPacket>(16),
               "DataHeaderRDMAPacket must be exactly 16 bytes across all platforms");
 
