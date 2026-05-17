@@ -90,6 +90,11 @@ public:
   void broadcastKernelRegistration(uint64_t kernel_id, const std::string &name,
                                    const std::string &source);
   int getFirstActiveWorker() const;
+  // Returns the index of the active worker with GPU capability and fewest
+  // in-flight kernels. Falls back to the first active worker when no GPU
+  // worker is available. Use this instead of getFirstActiveWorker() when
+  // dispatching GPU-intensive kernels.
+  int getGpuCapableWorker() const;
   VGREResult send_packet(vgre_socket_t fd, PacketType type, const void *payload,
                          size_t payloadLen, SecureChannel *sc = nullptr);
   VGREResult send_packet_direct(vgre_socket_t fd, PacketType type,

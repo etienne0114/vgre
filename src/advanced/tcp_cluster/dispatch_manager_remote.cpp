@@ -8,6 +8,10 @@
 #include "vgre/advanced/tcp_cluster/internal/dispatch_manager.h"
 #include "vgre/common/logger.h"
 #include "vgre/core/runtime_engine.h"
+#include "vgre/core/memory_manager.h"
+#ifdef VGRE_HAS_OPENCL_BACKEND
+#include "vgre/runtime/igpu_opencl_executor.h"
+#endif
 #include <cstring>
 #include <thread>
 
@@ -74,8 +78,73 @@ void DispatchManager::handleRemoteCommand(const RemoteCommandPacket &pkt) {
   dim3 gd(pkt.grid_dim[0], pkt.grid_dim[1], pkt.grid_dim[2]);
   dim3 bd(pkt.block_dim[0], pkt.block_dim[1], pkt.block_dim[2]);
 
-  VGREResult r = vgre::core::RuntimeEngine::instance().launchKernel(
-      pkt.kernel_id, gd, bd, local_args.data(), pkt.shared_mem, 0);
+  // ── GPU dispatch cascade: dGPU → iGPU (OpenCL) → CPU JIT ────────────────
+  // Try the highest-throughput available backend.  Each path falls through to
+  // the next on failure so workers are always productive even without a GPU.
+  VGREResult r = VGREResult::ERR_LAUNCH_FAILURE;
+
+  // 1. Discrete NVIDIA GPU via libcuda passthrough
+  GPUPassthrough& gp = GPUPassthrough::instance();
+  if (gp.isAvailable()) {
+    auto* ir = core::RuntimeEngine::instance().getKernelIR(pkt.kernel_id);
+    if (ir) {
+      std::vector<size_t> argSizes(static_cast<size_t>(pkt.num_args), 0);
+      auto& memMgr = core::RuntimeEngine::instance().getMemoryManager();
+      for (int i = 0; i < pkt.num_args; ++i) {
+        if (i < static_cast<int>(ir->argTypes.size()) &&
+            ir->argTypes[i] == ArgType::POINTER && local_args[i]) {
+          void* p = *reinterpret_cast<void**>(local_args[i]);
+          if (p) {
+            try { argSizes[static_cast<size_t>(i)] = memMgr.getAllocationSize(p); }
+            catch (...) {}
+          }
+        }
+      }
+      r = gp.launchOnGPU(ir->source, ir->name, gd, bd,
+                         local_args.data(), pkt.num_args,
+                         pkt.shared_mem, ir->argTypes, argSizes);
+      if (r == VGREResult::SUCCESS)
+        VGRE_LOG_DEBUG("TCPCluster", "Kernel dispatched via GPU passthrough (dGPU)");
+      else
+        VGRE_LOG_DEBUG("TCPCluster", "GPU passthrough failed — trying iGPU");
+    }
+  }
+
+  // 2. Integrated GPU via OpenCL (CUDA→OpenCL transpilation)
+#ifdef VGRE_HAS_OPENCL_BACKEND
+  if (r != VGREResult::SUCCESS) {
+    auto& igpu = runtime::IGPUOpenCLExecutor::instance();
+    if (igpu.isInitialized()) {
+      auto* ir = core::RuntimeEngine::instance().getKernelIR(pkt.kernel_id);
+      if (ir) {
+        std::vector<size_t> argSizes(static_cast<size_t>(pkt.num_args), 0);
+        auto& memMgr = core::RuntimeEngine::instance().getMemoryManager();
+        for (int i = 0; i < pkt.num_args; ++i) {
+          if (i < static_cast<int>(ir->argTypes.size()) &&
+              ir->argTypes[i] == ArgType::POINTER && local_args[i]) {
+            void* p = *reinterpret_cast<void**>(local_args[i]);
+            if (p) {
+              try { argSizes[static_cast<size_t>(i)] = memMgr.getAllocationSize(p); }
+              catch (...) {}
+            }
+          }
+        }
+        r = igpu.execute(ir->name, ir->source, ir->argTypes,
+                         gd, bd, local_args.data(), argSizes);
+        if (r == VGREResult::SUCCESS)
+          VGRE_LOG_DEBUG("TCPCluster", "Kernel dispatched via OpenCL iGPU");
+        else
+          VGRE_LOG_DEBUG("TCPCluster", "OpenCL iGPU failed — falling back to CPU JIT");
+      }
+    }
+  }
+#endif
+
+  // 3. CPU JIT fallback (always available)
+  if (r != VGREResult::SUCCESS) {
+    r = vgre::core::RuntimeEngine::instance().launchKernel(
+        pkt.kernel_id, gd, bd, local_args.data(), pkt.shared_mem, 0);
+  }
 
   ResponsePacket resp{pkt.kernel_id, r};
   parent_->send_packet(parent_->client_fd_, PacketType::RESPONSE, &resp,

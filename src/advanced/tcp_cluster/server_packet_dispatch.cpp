@@ -302,6 +302,23 @@ void TCPClusterManager::processServerPackets(
         HybridComputeManager::instance().updateRemoteNodeCapability(
             client->ip_address, cpkt.cpu_cores, cpkt.cpu_memory, cpkt.has_igpu,
             cpkt.igpu_name);
+
+        // Auto-enable full-mesh when a second worker joins — without requiring
+        // VGRE_ENABLE_MESH_TOPOLOGY to be set explicitly.  Once enabled, mesh
+        // is never auto-disabled (workers can leave and re-join freely).
+        if (!mesh_topology_enabled_) {
+            int ready = 0;
+            for (const auto& c : clients_) {
+                if (c && c->active && c->capability_received) ++ready;
+            }
+            if (ready >= 2) {
+                mesh_topology_enabled_ = true;
+                VGRE_LOG_INFO("TCPCluster",
+                    "Full-mesh topology auto-enabled (" + std::to_string(ready) +
+                    " workers connected).");
+            }
+        }
+
         syncToIPC();
 
         // Local-only SHM transport: negotiate after CAPABILITY so the worker
