@@ -4,14 +4,7 @@
 #include <sstream>
 #include <cstring>
 
-#if defined(__linux__)
-#include <pthread.h>
-#include <sched.h>
-#elif defined(_WIN32)
-#include <windows.h>
-#elif defined(__APPLE__)
-#include <pthread.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace core {

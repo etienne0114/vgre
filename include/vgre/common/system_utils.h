@@ -6,11 +6,7 @@
 #include <filesystem>
 #include <cstdlib>
 
-#ifndef _WIN32
-#include <dlfcn.h>
-#else
-#include <windows.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace common {

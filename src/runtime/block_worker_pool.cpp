@@ -8,13 +8,7 @@
 #include <string>
 #include <thread>
 
-#if defined(__linux__)
-#include <unistd.h>
-#include <pthread.h>
-#include <sched.h>
-#elif defined(_WIN32)
-#include <windows.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace runtime {

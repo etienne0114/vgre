@@ -314,6 +314,8 @@ if(UNIX AND NOT APPLE)
     if(LIBOMP_PATH)
         message(STATUS "OpenMP: using LLVM libomp at ${LIBOMP_PATH}")
         set(_VGRE_LIBOMP_EXTRA "${LIBOMP_PATH}")
+        add_library(vgre_llvm_omp SHARED IMPORTED)
+        set_property(TARGET vgre_llvm_omp PROPERTY IMPORTED_LOCATION "${LIBOMP_PATH}")
     else()
         message(STATUS "OpenMP: LLVM libomp not found — falling back to system libgomp")
     endif()
@@ -324,16 +326,22 @@ endif()
 # dynamic section even when no symbols are directly referenced — needed for
 # LD_PRELOAD scenarios where the loaded library initialises OpenMP lazily.
 function(vgre_target_link_openmp target_name visibility)
-    if(TARGET OpenMP::OpenMP_CXX)
-        target_link_libraries(${target_name} ${visibility} OpenMP::OpenMP_CXX)
-    endif()
+    # Instead of linking OpenMP::OpenMP_CXX (which incorrectly injects libgomp.so),
+    # manually apply the OpenMP compile flags so Clang processes `#pragma omp`.
+    target_compile_options(${target_name} ${visibility} "-fopenmp")
+    
     if(_VGRE_LIBOMP_EXTRA)
+        # Force the linker to find libomp by passing the directory and -lomp explicitly.
+        get_filename_component(_omp_dir "${_VGRE_LIBOMP_EXTRA}" DIRECTORY)
+        target_link_directories(${target_name} ${visibility} "${_omp_dir}")
+        target_link_libraries(${target_name} ${visibility} "-lomp")
+        
         if(UNIX AND NOT APPLE)
-            target_link_options(${target_name} ${visibility}
-                "LINKER:--no-as-needed" "${_VGRE_LIBOMP_EXTRA}" "LINKER:--as-needed")
-        else()
-            target_link_libraries(${target_name} ${visibility} "${_VGRE_LIBOMP_EXTRA}")
+            target_link_options(${target_name} ${visibility} "LINKER:--no-as-needed")
         endif()
+    else()
+        # Fallback to whatever the compiler's default OpenMP linker flag is
+        target_link_libraries(${target_name} ${visibility} "-fopenmp")
     endif()
 endfunction()
 
@@ -453,15 +461,29 @@ endif()
 # ──────────────────────────────────────────────────────────────────────────────
 # §8  LAPACK / BLAS  (cmake/FindLAPACK.cmake — cross-platform)
 # ──────────────────────────────────────────────────────────────────────────────
+# Strategy:
+#   1. If VGRE_USE_LAPACK=ON (Linux/macOS default), try to find system LAPACK.
+#      If found → link it.  If NOT found → fall back to built-in stub (never fail).
+#   2. If VGRE_USE_LAPACK=OFF (Windows default) → use built-in stub immediately.
+# The built-in stub (lapack_fallback.cpp) provides portable C++ implementations
+# of all routines needed by cusolver_core.cpp: potrf, getrf, getrs, geqrf,
+# ormqr, gesvd, syevd, gelsd — fully functional on every platform.
+set(VGRE_LAPACK_FALLBACK FALSE)
 if(VGRE_USE_LAPACK)
-    find_package(LAPACK REQUIRED)     # uses cmake/FindLAPACK.cmake (first in MODULE_PATH)
-    message(STATUS "LAPACK: ${VGRE_LAPACK_DESCRIPTION}")
-else()
-    # Provide an empty stub so target_link_libraries(... LAPACK::LAPACK) never fails.
-    if(NOT TARGET LAPACK::LAPACK)
-        add_library(LAPACK::LAPACK INTERFACE IMPORTED)
+    find_package(LAPACK)     # optional — no REQUIRED, falls back gracefully
+    if(LAPACK_FOUND)
+        message(STATUS "LAPACK: ${VGRE_LAPACK_DESCRIPTION}")
+    else()
+        message(STATUS "LAPACK: requested but not found — using built-in fallback")
+        set(VGRE_LAPACK_FALLBACK TRUE)
     endif()
-    message(STATUS "LAPACK: disabled (VGRE_USE_LAPACK=OFF) — cuSOLVER unavailable")
+else()
+    message(STATUS "LAPACK: disabled (VGRE_USE_LAPACK=OFF) — using built-in fallback")
+    set(VGRE_LAPACK_FALLBACK TRUE)
+endif()
+# Always provide LAPACK::LAPACK interface target so link lines are uniform.
+if(NOT TARGET LAPACK::LAPACK)
+    add_library(LAPACK::LAPACK INTERFACE IMPORTED)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -702,13 +724,6 @@ function(vgre_add_subdirectory rel_path)
     endif()
 endfunction()
 
-vgre_add_subdirectory(src/common)
-vgre_add_subdirectory(src/core)
-vgre_add_subdirectory(src/compiler)
-vgre_add_subdirectory(src/api)
-vgre_add_subdirectory(src/runtime)
-vgre_add_subdirectory(src/advanced)
-
 # ──────────────────────────────────────────────────────────────────────────────
 # §15  Shared helper: apply common compile settings to a VGRE library target
 # ──────────────────────────────────────────────────────────────────────────────
@@ -759,6 +774,14 @@ function(_vgre_configure_library target_name visibility)
             $<TARGET_OBJECTS:vgre_grpc_gen> ${_VGRE_GRPC_LIBS})
     endif()
 endfunction()
+
+vgre_add_subdirectory(src/common)
+vgre_add_subdirectory(src/core)
+vgre_add_subdirectory(src/compiler)
+vgre_add_subdirectory(src/api)
+vgre_add_subdirectory(src/runtime)
+vgre_add_subdirectory(src/advanced)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # §16  vgre  (main shared library)
@@ -836,6 +859,7 @@ set(_VGRE_CUDART_SOURCES
     src/api/cusparse/cusparse_triangular.cpp
     src/api/cusparse/cusparse_factorization.cpp
     src/api/cusolver/cusolver_core.cpp
+    $<$<BOOL:${VGRE_LAPACK_FALLBACK}>:src/api/cusolver/lapack_fallback.cpp>
     src/api/cublaslt/cublaslt_core.cpp
     src/api/cublaslt/cublaslt_matmul.cpp
     src/api/nvtx_shim.cpp
@@ -867,9 +891,12 @@ target_include_directories(vgre_cudart
 target_compile_definitions(vgre_cudart PRIVATE VGRE_CUDA_INTERCEPTOR_NO_EXPORTS)
 _vgre_configure_library(vgre_cudart PRIVATE)
 
-# cuSOLVER shim requires LAPACK; link AFTER _vgre_configure_library so the
-# LAPACK::LAPACK target (which may bring additional include dirs) is in scope.
+# cuSOLVER shim — link system LAPACK if available, else compile built-in fallback.
+# LAPACK::LAPACK is always a valid target (interface stub when fallback is used).
 target_link_libraries(vgre_cudart PRIVATE LAPACK::LAPACK)
+if(VGRE_LAPACK_FALLBACK)
+    target_compile_definitions(vgre_cudart PRIVATE VGRE_LAPACK_FALLBACK)
+endif()
 
 if(WIN32)
     set_target_properties(vgre_cudart PROPERTIES

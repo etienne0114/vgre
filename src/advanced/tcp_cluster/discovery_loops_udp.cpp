@@ -24,14 +24,9 @@
 #include <string>
 #include <thread>
 
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <arpa/inet.h>
+#include "vgre/common/os_backend.h"
+#if !defined(_WIN32)
 #include <netdb.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <netinet/tcp.h>
 #endif
 
@@ -103,7 +98,8 @@ void DiscoveryManager::udpDiscoveryLoop() {
         // ── Create UDP socket (prefer IPv4 for broadcast compatibility) ──────
         vgre::common::vgre_socket_t udp_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (udp_fd == vgre::common::VGRE_INVALID_SOCKET) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
+            parent_->shutdown_cv_.wait_for(lock, std::chrono::seconds(2), [this]() { return !parent_->enabled_; });
             continue;
         }
 
@@ -119,8 +115,8 @@ void DiscoveryManager::udpDiscoveryLoop() {
         if (bind(udp_fd, reinterpret_cast<struct sockaddr*>(&listen_addr),
                  sizeof(listen_addr)) < 0) {
             vgre::common::vgre_close_socket(udp_fd);
-            for (int i = 0; i < 30 && parent_->enabled_; ++i)
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
+            parent_->shutdown_cv_.wait_for(lock, std::chrono::seconds(3), [this]() { return !parent_->enabled_; });
             continue;
         }
 
@@ -216,7 +212,8 @@ void DiscoveryManager::udpDiscoveryLoop() {
                     std::lock_guard<std::mutex> lk(parent_->client_mutex_);
                     if (parent_->client_fd_ == vgre::common::VGRE_INVALID_SOCKET) break;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
+                parent_->shutdown_cv_.wait_for(lock, std::chrono::milliseconds(250), [this]() { return !parent_->enabled_; });
             }
             // Master dropped — reset flag so we will scan again
             parent_->has_master_fd_.store(false, std::memory_order_release);

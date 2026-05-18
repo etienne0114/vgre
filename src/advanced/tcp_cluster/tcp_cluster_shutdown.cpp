@@ -68,6 +68,7 @@ void TCPClusterManager::shutdown() {
   // even after clientLoop set enabled_=false on a disconnect. Skipping join
   // here would leave that thread running past the object's lifetime → UB.
   if (!wasEnabled) {
+    shutdown_cv_.notify_all();
     staging_cv_.notify_all();
     remote_results_cv_.notify_all();
     barrier_cv_.notify_all();
@@ -101,6 +102,7 @@ void TCPClusterManager::shutdown() {
 
   // 3. Notify all condition variables so blocked threads wake immediately.
   fprintf(stderr, "DEBUG [TCPCluster] Notifying CVs...\n");
+  shutdown_cv_.notify_all();
   staging_cv_.notify_all();
   remote_results_cv_.notify_all();
   barrier_cv_.notify_all();

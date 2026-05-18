@@ -4,14 +4,7 @@
 #include <cstring>
 #include <cerrno>
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace core {

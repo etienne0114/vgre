@@ -77,8 +77,7 @@ target_include_directories(vgre_advanced PUBLIC
     ${PROJECT_SOURCE_DIR}/src/advanced/vendor/lz4
 )
 
-target_link_libraries(vgre_advanced PUBLIC
-    OpenMP::OpenMP_CXX
+target_link_libraries(vgre_advanced PRIVATE
     Threads::Threads
 )
 
@@ -111,12 +110,7 @@ target_sources(vgre-worker PRIVATE
     $<TARGET_OBJECTS:vgre_runtime>
     $<TARGET_OBJECTS:vgre_advanced>
 )
-target_link_libraries(vgre-worker PRIVATE
-    OpenMP::OpenMP_CXX
-    ${OpenMP_CXX_LIBRARIES}
-    Threads::Threads
-    ${llvm_libs}
-)
+_vgre_configure_library(vgre-worker PRIVATE)
 if(WIN32)
     target_link_libraries(vgre-worker PRIVATE Advapi32 ws2_32 bcrypt)
 elseif(APPLE)

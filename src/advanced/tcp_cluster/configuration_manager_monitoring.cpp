@@ -90,11 +90,12 @@ bool ConfigurationManager::startConfigurationMonitoring(int check_interval_ms) {
                         VGRE_LOG_INFO("ConfigurationManager", "Configuration hot-reloaded successfully");
                     }
                 }
-                
-                std::this_thread::sleep_for(std::chrono::milliseconds(check_interval_ms));
+                std::unique_lock<std::mutex> lock(monitoring_cv_mutex_);
+                monitoring_cv_.wait_for(lock, std::chrono::milliseconds(check_interval_ms), []() { return !monitoring_active_.load(); });
             } catch (const std::exception& e) {
                 VGRE_LOG_ERROR("ConfigurationManager", "Configuration monitoring error: " + std::string(e.what()));
-                std::this_thread::sleep_for(std::chrono::milliseconds(check_interval_ms * 2)); // Back off on error
+                std::unique_lock<std::mutex> lock(monitoring_cv_mutex_);
+                monitoring_cv_.wait_for(lock, std::chrono::milliseconds(check_interval_ms * 2), []() { return !monitoring_active_.load(); }); // Back off on error
             }
         }
         
@@ -107,6 +108,7 @@ bool ConfigurationManager::startConfigurationMonitoring(int check_interval_ms) {
 void ConfigurationManager::stopConfigurationMonitoring() {
     if (monitoring_active_.load()) {
         monitoring_active_.store(false);
+        monitoring_cv_.notify_all();
         if (monitoring_thread_.joinable()) {
             monitoring_thread_.join();
         }

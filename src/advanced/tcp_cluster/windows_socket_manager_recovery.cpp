@@ -9,10 +9,7 @@
 #include <thread>
 #include <chrono>
 
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace advanced {
@@ -26,7 +23,11 @@ VGREResult WindowsSocketManager::attemptRecovery(int max_retries) {
 
     for (int attempt = 1; attempt <= max_retries; ++attempt) {
         if (attempt > 1) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100 * (1 << (attempt - 2))));
+            int backoff_ms = 100 * (1 << (attempt - 2));
+            std::mutex wsa_retry_mutex;
+            std::condition_variable wsa_retry_cv;
+            std::unique_lock<std::mutex> lk(wsa_retry_mutex);
+            wsa_retry_cv.wait_for(lk, std::chrono::milliseconds(backoff_ms));
         }
         int result = WSAStartup(MAKEWORD(2, 2), &wsa_data_);
         if (result == 0) {

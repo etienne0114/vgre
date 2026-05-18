@@ -1,9 +1,10 @@
 #include "vgre/api/nccl_internal.h"
 #include "vgre/common/logger.h"
 
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/random.h>
+#include "vgre/common/os_backend.h"
+#if !defined(_WIN32)
+#include <sys/random.h>  // getrandom()
+#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 extern "C" {

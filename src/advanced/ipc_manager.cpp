@@ -8,13 +8,7 @@
 #include <sys/stat.h>
 #include <thread>
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <signal.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace advanced {

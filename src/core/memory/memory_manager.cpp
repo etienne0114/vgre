@@ -15,13 +15,7 @@
 #include <thread>
 #include <mutex>
 #include <algorithm>
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <signal.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#endif
+#include "vgre/common/os_backend.h"
 #if defined(__linux__)
 #include <sys/syscall.h>
 // mbind(2) policy constants — defined here to avoid a libnuma dependency.
@@ -140,14 +134,8 @@ MemoryManager::~MemoryManager() {
         VGRE_LOG_ERROR("MemoryManager", "RCU grace period timed out after 5s; proceeding with cleanup");
         break;
       }
-      if (spin < 16) {
-        // short yields to let signal handlers run
-        std::this_thread::yield();
-      } else {
-        // exponential backoff capped at 100 ms
-        int sleepMs = std::min(100, 1 << (int)std::min(spin - 16, (size_t)6));
-        std::this_thread::sleep_for(milliseconds(sleepMs));
-      }
+      // Replace sleep_for with just yield, as signal handlers finish in microseconds
+      std::this_thread::yield();
       ++spin;
     }
   }
@@ -274,21 +262,15 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
     ManagedRegion* regionPtr = mgr->pageTable_.lookup(target);
     if (regionPtr) {
         ManagedRegion &region = *regionPtr;
-        int prot = PROT_READ | PROT_WRITE;
         // Precise Delta-Sync: Protect only the faulting page
         size_t pageSize = region.pageSize;
         uintptr_t pageMask = ~(static_cast<uintptr_t>(pageSize) - 1);
         void* pageAddr = reinterpret_cast<void*>(target & pageMask);
-        if (mprotect(pageAddr, pageSize, prot) == 0) {
+        if (vgre::os::mprotect_rw(pageAddr, pageSize)) {
           region.isResidentOnHost.store(true, std::memory_order_relaxed);
           
           // Phase 11: Authoritative UVM LRU Tracking
-#if !defined(_WIN32)
-          struct timespec ts;
-          if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
-              region.lastAccessTime.store(static_cast<long long>(ts.tv_sec) * 1000000000LL + ts.tv_nsec, std::memory_order_relaxed);
-          }
-#endif
+          region.lastAccessTime.store(static_cast<long long>(vgre::os::get_monotonic_time_ns()), std::memory_order_relaxed);
           region.accessCount.fetch_add(1, std::memory_order_relaxed);
 
           // Attribute this fault to the currently active device for adaptive
@@ -630,12 +612,7 @@ void *MemoryManager::getPointer(MemoryHandle handle) const {
   if (it == allocations_.end()) return nullptr;
 
   if (it->second.isManaged) {
-#if defined(_WIN32)
-    DWORD oldProtect;
-    VirtualProtect(it->second.ptr, it->second.size, PAGE_READWRITE, &oldProtect);
-#else
-    mprotect(it->second.ptr, it->second.size, PROT_READ | PROT_WRITE);
-#endif
+    vgre::os::mprotect_rw(it->second.ptr, it->second.size);
     const_cast<Allocation &>(it->second).isResidentOnHost = true;
   }
 
@@ -803,12 +780,10 @@ VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
   // non-deterministic dirty ranges. Wait briefly for the queue to drain first.
   {
     using namespace std::chrono_literals;
-    const auto deadline = std::chrono::steady_clock::now() + 50ms;
-    while (pendingTail_.load(std::memory_order_acquire) <
-               pendingHead_.load(std::memory_order_acquire) &&
-           std::chrono::steady_clock::now() < deadline) {
-      std::this_thread::sleep_for(1ms);
-    }
+    std::unique_lock<std::mutex> allocLock(allocatorMutex_);
+    allocatorCv_.wait_for(allocLock, 50ms, [this]() {
+        return pendingTail_.load(std::memory_order_acquire) >= pendingHead_.load(std::memory_order_acquire);
+    });
   }
 
   std::unique_lock<std::recursive_mutex> lock(mutex_);
@@ -831,12 +806,7 @@ VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
   // that were originally allocated with PROT_NONE (flags != 2). Host-accessible
   // regions (flags == 2) stay writable for application-level managed memory.
   if (!it->hostAccessible.load(std::memory_order_relaxed)) {
-#if defined(_WIN32)
-    DWORD oldProtect;
-    VirtualProtect(it->ptr, it->size, PAGE_READONLY, &oldProtect);
-#else
-    mprotect(it->ptr, it->size, PROT_READ);
-#endif
+    vgre::os::mprotect_ro(it->ptr, it->size);
   }
 
   return VGREResult::SUCCESS;

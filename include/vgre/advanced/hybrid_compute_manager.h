@@ -6,6 +6,7 @@
 #include "vgre/common/error_codes.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -131,6 +132,8 @@ private:
 
     std::thread rebalanceThread_;
     std::atomic<bool> stopRebalance_{false};
+    std::mutex rebalanceMutex_;
+    std::condition_variable rebalanceCv_;
 };
 
 } // namespace advanced

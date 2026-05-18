@@ -8,16 +8,12 @@
 #include <fstream>
 #include <thread>
 
-#if defined(_WIN32)
-#include <windows.h>
-#elif defined(__APPLE__)
-#include <mach/machine.h>
+#include "vgre/common/os_backend.h"
+#if defined(__APPLE__)
+#include <mach/machine.h>   // cpu_type_t — CPU arch constants
 #include <sys/sysctl.h>
-#include <sys/types.h>
-#else
-#include <dirent.h>
-#include <sys/types.h>
-#include <unistd.h>
+#elif !defined(_WIN32)
+#include <dirent.h>         // readdir — PCI device scan
 #endif
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)

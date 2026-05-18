@@ -64,7 +64,8 @@ void TCPClusterManager::clientLoop() {
         std::lock_guard<std::mutex> lock(client_mutex_);
         if (client_fd_ != VGRE_INVALID_SOCKET) break;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      std::unique_lock<std::mutex> lock(shutdown_mutex_);
+      shutdown_cv_.wait_for(lock, std::chrono::milliseconds(100), [this]() { return !enabled_; });
     }
     if (!enabled_) return;
 
@@ -136,7 +137,8 @@ void TCPClusterManager::clientLoop() {
               return false;
             }
             if (vgre_is_would_block(vgre_get_last_socket_error())) {
-              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+              std::unique_lock<std::mutex> lock(shutdown_mutex_);
+              shutdown_cv_.wait_for(lock, std::chrono::milliseconds(1), [this]() { return !enabled_; });
               continue;
             }
             return false;
@@ -388,7 +390,11 @@ void TCPClusterManager::clientLoop() {
             success = vgre_send_all(cur_fd, pkt.data.data(), pkt.data.size(), &enabled_);
           }
           if (success) { client_high_priority_tx_.pop_back(); }
-          else { std::this_thread::sleep_for(std::chrono::milliseconds(10)); break; }
+          else { 
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            shutdown_cv_.wait_for(lock, std::chrono::milliseconds(10), [this]() { return !enabled_; });
+            break; 
+          }
         }
         while (enabled_ && !client_low_priority_tx_.empty() &&
                client_high_priority_tx_.empty()) {
@@ -401,7 +407,11 @@ void TCPClusterManager::clientLoop() {
             success = vgre_send_all(cur_fd, pkt.data.data(), pkt.data.size(), &enabled_);
           }
           if (success) { client_low_priority_tx_.pop_front(); }
-          else { std::this_thread::sleep_for(std::chrono::milliseconds(10)); break; }
+          else { 
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            shutdown_cv_.wait_for(lock, std::chrono::milliseconds(10), [this]() { return !enabled_; });
+            break; 
+          }
         }
       }
 
@@ -511,7 +521,8 @@ void TCPClusterManager::clientLoop() {
       
       if (!host.empty() && host != "0.0.0.0") {
         // Wait a bit before reconnecting to avoid tight loop
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        std::unique_lock<std::mutex> lock(shutdown_mutex_);
+        shutdown_cv_.wait_for(lock, std::chrono::milliseconds(1000), [this]() { return !enabled_; });
         
         vgre::common::vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (sock != vgre::common::VGRE_INVALID_SOCKET) {

@@ -7,7 +7,6 @@
 #include "vgre/core/page_table.h"
 
 #include <atomic>
-#include <signal.h>
 #include <cstddef>
 #include <list>
 #include <map>
@@ -18,11 +17,7 @@
 #include <cstring>
 #include <vector>
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <sys/mman.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace core {
@@ -315,6 +310,11 @@ private:
   // copies instead of the O(n) linear scan over allocations_.
   std::map<uint8_t*, size_t> allocRange_;
   mutable std::recursive_mutex mutex_;
+  
+  std::mutex memoryFreedMutex_;
+  std::condition_variable memoryFreedCv_;
+  std::mutex allocatorMutex_;
+  std::condition_variable allocatorCv_;
 
   // Signal-safe lookup structure (RCU-protected Interval Tree)
   struct RegionTreeContainer {
@@ -365,6 +365,8 @@ private:
   // Adaptive UVM page-migration background thread
   std::thread         migrationThread_;
   std::atomic<bool>   migrationStop_{false};
+  std::mutex          migrationMutex_;
+  std::condition_variable migrationCv_;
 
   // Pending-fault ring buffer (signal-safe enqueue in segfault/VEH handler)
   // Background drainer thread processes pending faults outside signal context.

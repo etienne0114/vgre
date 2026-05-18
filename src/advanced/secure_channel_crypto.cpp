@@ -10,24 +10,12 @@
 
 #include "vgre/common/sockets.h"
 
+#include "vgre/common/os_backend.h"
 #if defined(_WIN32)
-#include <bcrypt.h>
-// bcrypt.lib must be explicit for MinGW — #pragma comment is ignored by GCC.
-// CMakeLists.txt adds -lbcrypt for all Windows builds.
+#include <bcrypt.h>  // BCryptGenRandom
 #pragma comment(lib, "bcrypt.lib")
-#elif defined(__APPLE__)
-// macOS: getentropy() fills up to 256 bytes atomically from the kernel entropy pool.
-// Available since macOS 10.12 Sierra. Falls back to /dev/urandom on older systems.
-#include <sys/random.h>  // getentropy()
-#include <unistd.h>
-#include <fcntl.h>
 #else
-// Linux: getrandom() syscall — available since kernel 3.17 / glibc 2.25.
-// Preferred over /dev/urandom: works inside chroot/sandboxed environments
-// where the device node may not be accessible.
-#include <sys/random.h>  // getrandom()
-#include <unistd.h>
-#include <fcntl.h>
+#include <sys/random.h>  // getrandom() / getentropy()
 #endif
 
 namespace vgre {

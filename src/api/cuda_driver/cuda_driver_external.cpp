@@ -13,10 +13,9 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "vgre/common/os_backend.h"
 #if defined(__linux__)
-#include <sys/eventfd.h>
-#include <unistd.h>
-#include <poll.h>
+#include <sys/eventfd.h>  // eventfd() — POSIX opaque FD semaphore
 #endif
 
 extern "C" {

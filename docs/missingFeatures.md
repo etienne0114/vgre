@@ -1,435 +1,453 @@
-# VGRE — Missing Features & Known Limitations
+# VGRE — Exhaustive Missing Features & Known Limitations (Line-by-Line Audit)
 
-**Research Date**: 2026-05-15 (deep source-code audit)  
-**Audit Methodology**: Full `src/` and `include/` grep + manual file inspection; every claim verified against actual source code.  
-**Scope**: Only genuinely missing, incomplete, or architecturally limited features are listed below. All implemented features are documented in `PROJECT_STATUS.md` and `api_reference.md`.
-
----
-
-## 1. Coverage Reality Check
-
-| Category | Claimed | Actual | Notes |
-|---|---|---|---|
-| CUDA Runtime API | ~101 funcs | ~95 funcs | Most core functions implemented; some legacy/debug APIs return no-op stubs |
-| CUDA Driver API | ~56 funcs | ~55 funcs | NvSciSync not applicable on Linux; module loading fully implemented |
-| CUDA Graphs | All node types | All 11 node types | Exec update v2 exists in interceptor, not a separate file |
-| PTX ISA | ~120 instructions | ~110 instructions | Core arithmetic, warp, atomics, MMA (Ampere/Hopper/Blackwell), TMA, texture, grid.sync all present |
-| cuBLAS (real) | Level 1/2/3 complete | Level 1/2/3 complete | S/D variants + Hermitian (Cherk/Zherk/Cher2k/Zher2k/Chemm/Zhemm) all implemented |
-| cuBLAS (complex) | Listed in docs | **IMPLEMENTED** | C/Z Level-1/2/3: GEMM, GEMV, AXPY, DOT, SCAL, NRM2, ROT, COPY, SWAP, TRSV, GER, TRSM, SYRK, SYR2K, SYMM, TRMM all present |
-| cuDNN (legacy) | All major ops | All major ops | Fwd/bwd for conv, pool, activation, softmax, BN, dropout, RNN, attention, LRN, divisive norm, CTC loss, tensor ops |
-| cuDNN Backend API | Wired to legacy | **Fully wired** | Conv, pool, activation, softmax, reduction, matmul, BN, norm, RNN, concat, signal, gen_stats, bn_bwd_weights, **attention (SDPA)**. |
-| NCCL | P2P + collectives | P2P + collectives | Single-node shared-memory; ring-reduce for tensors > 1 MB; multi-node routes through TCPCluster |
-| cuFFT | O(n log n) FFT | O(n log n) FFT + FP16 shim | Built-in Cooley-Tukey + Bluestein. Optional FFTW3 delegation via `VGRE_HAS_FFTW3`. Plan caching, IPC, strided `PlanMany`, and half-precision C16C/R16C/C16R are implemented. |
-| cuRAND | 4 generators | 4 generators + Sobol | Per-handle `std::mutex genMutex`; concurrent calls on different handles are fully parallel. Sobol quasi-random (32/64-bit, scrambled). |
-| cuSOLVER | 8 dense routines | **All dense + sparse** | Dense: potrf, geqrf, gesvd, syevd, getrf, getrs, ormqr, gelsd via LAPACK. Sparse (cusolverSp): csrlsvlu, csrlsvchol, csrlsqvqr, csreigvsi via dense extraction. |
-| cuSPARSE | CSR SpMV/SpMM | **Full generic API** | CSR, COO, CSC; SpMV, SpMM (S/D/C/Z/FP16/BF16/INT8); SparseToDense; DenseToSparse; SpSV (S/D/FP16/BF16, lower+upper, unit+non-unit, direct+transposed); SpGEMM (S/D/FP16/BF16); ILU0; IC0 |
-| cuBLASLt | Basic matmul + epilogues | **Full epilogue set + LRU cache** | ReLU, GELU, Bias, DRELU, DGELU, DRELU_BGRAD, DGELU_BGRAD, BGRADA/BGRADB; 128-entry LRU algo cache |
-| Profiling | Kernel timeline + Chrome trace | Kernel timeline + Chrome/OTLP trace + LLVM-IR instruction classification | No NVIDIA hardware PMU/CUPTI counters in CPU runtime; instruction mix is derived from generated LLVM IR when available and otherwise reported as unclassified. Split across `runtime_profiler.cpp` and `runtime_profiler_instruction.cpp`. |
-| File Organization | All large files split | **DONE** | 13 monolithic files split into 37 smaller files. 116 total tests. |
-| K8s Plugin | Go gRPC | Go gRPC | Basic daemonset; no dynamic device discovery |
-| SLURM GRES | C shared lib | C shared lib | Basic vGPU allocation tracker |
+**Audit Date**: 2026-05-18
+**Status**: The following list supersedes all previous claims of completion. This is an exhaustive, file-by-file accounting of every stub, simulation delay, cross-platform issue, and mock logic found in the codebase.
 
 ---
 
-## 2. Tier 1 — Critical Missing (limits framework compatibility)
-
-### 2.1 Complex BLAS (cuBLAS C/Z precisions)
-
-**Status**: **IMPLEMENTED** (2026-05-15). All core C/Z routines are in `src/api/cublas/cublas_complex.cpp`.
-
-| Implemented API | Level | Notes |
-|---|---|---|
-| `cublasCgemm_v2` / `cublasZgemm_v2` | L3 | Full complex GEMM with op(A), op(B) support incl. conjugate transpose |
-| `cublasCgemv_v2` / `cublasZgemv_v2` | L2 | Complex matrix-vector multiply with N/T/C transpose |
-| `cublasCaxpy_v2` / `cublasZaxpy_v2` | L1 | Complex vector AXPY |
-| `cublasCdotc_v2` / `cublasZdotc_v2` | L1 | Conjugated dot product |
-| `cublasCdotu_v2` / `cublasZdotu_v2` | L1 | Unconjugated dot product |
-| `cublasCscal_v2` / `cublasZscal_v2` / `cublasCsscal_v2` / `cublasZdscal_v2` | L1 | Complex and real-scaled complex |
-| `cublasCcopy_v2` / `cublasZcopy_v2` | L1 | Complex vector copy |
-| `cublasCswap_v2` / `cublasZswap_v2` | L1 | Complex vector swap |
-| `cublasScnrm2_v2` / `cublasDznrm2_v2` | L1 | Complex Euclidean norm |
-| `cublasIcamax_v2` / `cublasIzamax_v2` | L1 | Index of max absolute value |
-| `cublasScasum_v2` / `cublasDzasum_v2` | L1 | Sum of absolute values |
-| `cublasCrot_v2` / `cublasZrot_v2` | L1 | Complex plane rotation |
-| `cublasCtrsv_v2` / `cublasZtrsv_v2` | L2 | Complex triangular solve |
-| `cublasCgeru_v2` / `cublasZgeru_v2` | L2 | Unconjugated rank-1 update |
-| `cublasCgerc_v2` / `cublasZgerc_v2` | L2 | Conjugated rank-1 update |
-| `cublasCsyrk_v2` / `cublasZsyrk_v2` | L3 | Complex symmetric rank-k |
-| `cublasCsyr2k_v2` / `cublasZsyr2k_v2` | L3 | Complex symmetric rank-2k |
-| `cublasCtrsm_v2` / `cublasZtrsm_v2` | L3 | Complex triangular solve (matrix) |
-| `cublasCsymm_v2` / `cublasZsymm_v2` | L3 | Complex symmetric matrix multiply |
-| `cublasCtrmm_v2` / `cublasZtrmm_v2` | L3 | Complex triangular matrix multiply |
-| `cublasChemm`/`cublasCherk`/`cublasCher2k` | L3 | Hermitian variants (pre-existing in `cublas_hermitian.cpp`) |
+## 1. Stubs and Mocks (Incomplete Implementations)
+The following files contain empty stubs, dummy variables, or explicitly un-implemented logic.
+
+- **include/vgre/advanced/grpc_transport.h**: Line 46: `// VGREGRPCClient provides a C++ wrapper around the generated stub so that`
+- **include/vgre/advanced/grpc_transport.h**: Line 82: `void*       stubPtr_ = nullptr;   // VGRECluster::Stub* stored opaquely`
+- **include/vgre/advanced/tcp_cluster/internal/interfaces.h**: Line 18: `* manager, allowing for mock implementations in unit tests and fake`
+- **include/vgre/advanced/tcp_cluster/internal/interfaces.h**: Line 55: `* manager, allowing for mock implementations that can simulate different memory`
+- **include/vgre/advanced/tcp_cluster/internal/interfaces.h**: Line 84: `* manager, allowing for mock implementations that can simulate different`
+- **include/vgre/api/cuda_interceptor.h**: Line 35: `constexpr cudaError_t cudaErrorStubLibrary = 38;`
+- **include/vgre/common/system_utils.h**: Line 56: `static int dummy = 0;`
+- **include/vgre/common/system_utils.h**: Line 57: `if (dladdr((void*)&dummy, &info) && info.dli_fname) {`
+- **include/vgre/compiler/cuda_device_libs/cub_fallback.h**: Line 217: `// ── CachingDeviceAllocator stub ────────────────────────────────────────────────`
+- **include/vgre/compiler/cuda_device_libs/cub_fallback.h**: Line 218: `// Many CUB-using kernels instantiate this; provide a minimal stub.`
+- **src/advanced/grpc_transport.cpp**: Line 4: `// as empty stubs so the rest of the codebase can reference them unconditionally.`
+- **src/advanced/grpc_transport.cpp**: Line 255: `auto* stub = vgre::cluster::VGRECluster::NewStub(channel).release();`
+- **src/advanced/grpc_transport.cpp**: Line 256: `stubPtr_ = stub;`
+- **src/advanced/grpc_transport.cpp**: Line 260: `delete reinterpret_cast<vgre::cluster::VGRECluster::Stub*>(stubPtr_);`
+- **src/advanced/grpc_transport.cpp**: Line 263: `bool VGREGRPCClient::isConnected() const { return stubPtr_ != nullptr; }`
+- **src/advanced/grpc_transport.cpp**: Line 270: `auto st = reinterpret_cast<vgre::cluster::VGRECluster::Stub*>(stubPtr_)`
+- **src/advanced/grpc_transport.cpp**: Line 280: `auto st = reinterpret_cast<vgre::cluster::VGRECluster::Stub*>(stubPtr_)`
+- **src/advanced/grpc_transport.cpp**: Line 293: `auto st = reinterpret_cast<vgre::cluster::VGRECluster::Stub*>(stubPtr_)`
+- **src/advanced/grpc_transport.cpp**: Line 305: `auto st = reinterpret_cast<vgre::cluster::VGRECluster::Stub*>(stubPtr_)`
+- **src/advanced/grpc_transport.cpp**: Line 328: `auto st = reinterpret_cast<vgre::cluster::VGRECluster::Stub*>(stubPtr_)`
+- **src/advanced/grpc_transport.cpp**: Line 338: `auto st = reinterpret_cast<vgre::cluster::VGRECluster::Stub*>(stubPtr_)`
+- **src/advanced/grpc_transport.cpp**: Line 347: `auto st = reinterpret_cast<vgre::cluster::VGRECluster::Stub*>(stubPtr_)`
+- **src/advanced/grpc_transport.cpp**: Line 359: `// ── Stub implementations when gRPC is disabled ───────────────────────────────`
+- **src/api/cuda_driver/cuda_driver_module.cpp**: Line 191: `// VGRE does not have a CUDA linker; we provide stubs that collect PTX data`
+- **src/api/cuda_interceptor.cpp**: Line 666: `case cudaErrorStubLibrary:`
+- **src/api/cuda_interceptor.cpp**: Line 667: `return "CUDA runtime is a stub library";`
+- **src/api/cuda_interceptor.cpp**: Line 799: `case cudaErrorStubLibrary:`
+- **src/api/cuda_interceptor.cpp**: Line 800: `return "cudaErrorStubLibrary";`
+- **src/api/cudart/cudart_cooperative.cpp**: Line 147: `// Path: host stub pointer → device name → KernelId → KernelIR`
+- **src/api/cudart/cudart_shim_graph_nodes.cpp**: Line 4: `* P1.10  cudaGraphAddKernelNode        — resolves host stub → KernelId`
+- **src/api/cudnn/cudnn_internal.h**: Line 46: `// ── cuDNN type stubs (no cudnn.h needed) ─────────────────────────────────────`
+- **src/api/cusolver/cusolver_core.cpp**: Line 186: `std::vector<float> dummy_a(static_cast<size_t>(ld_a) * n);`
+- **src/api/cusolver/cusolver_core.cpp**: Line 187: `std::vector<float> dummy_b(static_cast<size_t>(ld_b) * std::max(1, nrhs));`
+- **src/api/cusolver/cusolver_core.cpp**: Line 188: `std::vector<float> dummy_s(std::min(m, n));`
+- **src/api/cusolver/cusolver_core.cpp**: Line 189: `sgelsd_(&m, &n, &nrhs, dummy_a.data(), &ld_a, dummy_b.data(), &ld_b,`
+- **src/api/cusolver/cusolver_core.cpp**: Line 190: `dummy_s.data(), &rcond_tmp, &rank_tmp, &work_query, &query_lwork, &iwork_query, &info);`
+- **src/api/cusolver/cusolver_core.cpp**: Line 204: `std::vector<double> dummy_a(static_cast<size_t>(ld_a) * n);`
+- **src/api/cusolver/cusolver_core.cpp**: Line 205: `std::vector<double> dummy_b(static_cast<size_t>(ld_b) * std::max(1, nrhs));`
+- **src/api/cusolver/cusolver_core.cpp**: Line 206: `std::vector<double> dummy_s(std::min(m, n));`
+- **src/api/cusolver/cusolver_core.cpp**: Line 207: `dgelsd_(&m, &n, &nrhs, dummy_a.data(), &ld_a, dummy_b.data(), &ld_b,`
+- **src/api/cusolver/cusolver_core.cpp**: Line 208: `dummy_s.data(), &rcond_tmp, &rank_tmp, &work_query, &query_lwork, &iwork_query, &info);`
+- **src/api/cusolver/cusolver_core.cpp**: Line 363: `std::vector<float> dummy_a(static_cast<size_t>(m) * n), dummy_s(std::min(m,n));`
+- **src/api/cusolver/cusolver_core.cpp**: Line 364: `std::vector<float> dummy_u(static_cast<size_t>(m) * m), dummy_vt(static_cast<size_t>(n) * n);`
+- **src/api/cusolver/cusolver_core.cpp**: Line 366: `sgesvd_(&jobu, &jobvt, &m, &n, dummy_a.data(), &m, dummy_s.data(),`
+- **src/api/cusolver/cusolver_core.cpp**: Line 367: `dummy_u.data(), &m, dummy_vt.data(), &n, &work_query, &query_lwork, &info);`
+- **src/api/cusolver/cusolver_core.cpp**: Line 375: `std::vector<double> dummy_a(static_cast<size_t>(m) * n), dummy_s(std::min(m,n));`
+- **src/api/cusolver/cusolver_core.cpp**: Line 376: `std::vector<double> dummy_u(static_cast<size_t>(m) * m), dummy_vt(static_cast<size_t>(n) * n);`
+- **src/api/cusolver/cusolver_core.cpp**: Line 378: `dgesvd_(&jobu, &jobvt, &m, &n, dummy_a.data(), &m, dummy_s.data(),`
+- **src/api/cusolver/cusolver_core.cpp**: Line 379: `dummy_u.data(), &m, dummy_vt.data(), &n, &work_query, &query_lwork, &info);`
+- **src/compiler/clang_kernel_parser.cpp**: Line 26: `// ── Minimal CUDA stub for AST-only analysis ─────────────────────────────────`
+- **src/compiler/clang_kernel_parser.cpp**: Line 32: `// stub provides only the declarations needed to parse typical CUDA kernel`
+- **src/compiler/clang_kernel_parser.cpp**: Line 34: `static constexpr const char kAstAnalysisStub[] = R"VGRE_STUB(`
+- **src/compiler/clang_kernel_parser.cpp**: Line 36: `// This stub provides only what is needed to parse kernel AST without OOM.`
+- **src/compiler/clang_kernel_parser.cpp**: Line 112: `// Minimal half-precision stubs (avoid heavy cuda_fp16.h)`
+- **src/compiler/clang_kernel_parser.cpp**: Line 116: `// Cooperative groups stub — provides just enough for AST parsing.`
+- **src/compiler/clang_kernel_parser.cpp**: Line 159: `)VGRE_STUB";`
+- **src/compiler/clang_kernel_parser.cpp**: Line 570: `// Use the minimal analysis stub (NOT the full cpu_cuda_env.h) so that the`
+- **src/compiler/clang_kernel_parser.cpp**: Line 572: `std::string sourceWithHeader = std::string(kAstAnalysisStub) + source;`
+- **src/compiler/clang_kernel_parser.cpp**: Line 768: `std::string sourceWithHeader = std::string(kAstAnalysisStub) + source;`
+- **src/compiler/kernel_parser.cpp**: Line 607: `KernelIR dummyIR;`
+- **src/compiler/kernel_parser.cpp**: Line 609: `// Create a dummy kernel that uses the struct to trigger AST analysis`
+- **src/compiler/kernel_parser.cpp**: Line 613: `VGREResult result = clangParser.parse("__vgre_struct_test__", testSource, dummyIR);`
+- **src/compiler/kernel_parser.cpp**: Line 617: `for (size_t i = 0; i < dummyIR.argTypes.size(); i++) {`
+- **src/compiler/kernel_parser.cpp**: Line 618: `if (dummyIR.argTypes[i] == ArgType::STRUCT && dummyIR.argSizes[i] > 0) {`
+- **src/compiler/kernel_parser.cpp**: Line 621: `"' size: " + std::to_string(dummyIR.argSizes[i]) + " bytes");`
+- **src/compiler/kernel_parser.cpp**: Line 622: `return dummyIR.argSizes[i];`
+- **src/core/memory/memory_manager_managed.cpp**: Line 127: `char dummy = p[i];`
+- **src/core/memory/memory_manager_managed.cpp**: Line 128: `(void)dummy;`
+- **src/core/memory/memory_manager_managed.cpp**: Line 131: `char dummyLast = p[count - 1];`
+- **src/core/memory/memory_manager_managed.cpp**: Line 132: `(void)dummyLast;`
+- **src/runtime/cdp_executor.cpp**: Line 120: `// ── C interface called from device-side CDP stubs ─────────────────────────────`
+- **src/runtime/cdp_executor.cpp**: Line 129: `// kernelFn: function pointer as returned by __device_stub__xxx (ignored in VGRE;`
+
+
+## 2. Simulation Artifacts (Execution Time Heuristics)
+The following files rely on arbitrary `sleep_for` delays or yielding rather than true event-driven synchronization.
+
+- **include/vgre/common/retry.h**: Line 36: `std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));`
+- **include/vgre/common/sockets.h**: Line 406: `std::this_thread::sleep_for(std::chrono::milliseconds(1));`
+- **src/advanced/adaptive_execution_engine.cpp**: Line 442: `std::this_thread::sleep_for(std::chrono::seconds(5));`
+- **src/advanced/hybrid_compute_manager_workload.cpp**: Line 321: `std::this_thread::sleep_for(std::chrono::milliseconds(100));`
+- **src/advanced/ipc_manager.cpp**: Line 83: `std::this_thread::yield();`
+- **src/advanced/rdma_transport.cpp**: Line 379: `// low on fast NICs), then yield (avoids starving other threads on`
+- **src/advanced/rdma_transport.cpp**: Line 385: `__builtin_ia32_pause();`
+- **src/advanced/rdma_transport.cpp**: Line 387: `asm volatile("yield" ::: "memory");`
+- **src/advanced/rdma_transport.cpp**: Line 392: `std::this_thread::yield();`
+- **src/advanced/secure_channel_crypto.cpp**: Line 375: `// Running 4 independent pipelines keeps all AES execution slots busy, yielding`
+- **src/advanced/tcp_cluster/client_loop.cpp**: Line 67: `std::this_thread::sleep_for(std::chrono::milliseconds(100));`
+- **src/advanced/tcp_cluster/client_loop.cpp**: Line 139: `std::this_thread::sleep_for(std::chrono::milliseconds(1));`
+- **src/advanced/tcp_cluster/client_loop.cpp**: Line 391: `else { std::this_thread::sleep_for(std::chrono::milliseconds(10)); break; }`
+- **src/advanced/tcp_cluster/client_loop.cpp**: Line 404: `else { std::this_thread::sleep_for(std::chrono::milliseconds(10)); break; }`
+- **src/advanced/tcp_cluster/client_loop.cpp**: Line 514: `std::this_thread::sleep_for(std::chrono::milliseconds(1000));`
+- **src/advanced/tcp_cluster/configuration_manager_monitoring.cpp**: Line 94: `std::this_thread::sleep_for(std::chrono::milliseconds(check_interval_ms));`
+- **src/advanced/tcp_cluster/configuration_manager_monitoring.cpp**: Line 97: `std::this_thread::sleep_for(std::chrono::milliseconds(check_interval_ms * 2)); // Back off on error`
+- **src/advanced/tcp_cluster/discovery_loops_proactive.cpp**: Line 289: `std::this_thread::sleep_for(std::chrono::milliseconds(50));`
+- **src/advanced/tcp_cluster/discovery_loops_udp.cpp**: Line 106: `std::this_thread::sleep_for(std::chrono::seconds(2));`
+- **src/advanced/tcp_cluster/discovery_loops_udp.cpp**: Line 123: `std::this_thread::sleep_for(std::chrono::milliseconds(100));`
+- **src/advanced/tcp_cluster/discovery_loops_udp.cpp**: Line 219: `std::this_thread::sleep_for(std::chrono::milliseconds(250));`
+- **src/advanced/tcp_cluster/discovery_manager.cpp**: Line 181: `std::this_thread::sleep_for(std::chrono::seconds(2));`
+- **src/advanced/tcp_cluster/discovery_manager.cpp**: Line 314: `std::this_thread::sleep_for(std::chrono::milliseconds(200));`
+- **src/advanced/tcp_cluster/memory_sync_manager.cpp**: Line 188: `std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));`
+- **src/advanced/tcp_cluster/tcp_cluster_restart.cpp**: Line 30: `std::this_thread::sleep_for(std::chrono::milliseconds(1000));`
+- **src/advanced/tcp_cluster/tcp_cluster_restart.cpp**: Line 62: `if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));`
+- **src/advanced/tcp_cluster/windows_socket_manager_lifecycle.cpp**: Line 61: `std::this_thread::sleep_for(std::chrono::milliseconds(500));`
+- **src/advanced/tcp_cluster/windows_socket_manager_recovery.cpp**: Line 29: `std::this_thread::sleep_for(std::chrono::milliseconds(100 * (1 << (attempt - 2))));`
+- **src/advanced/vgre_worker_cli.cpp**: Line 153: `std::this_thread::sleep_for(std::chrono::milliseconds(200));`
+- **src/advanced/vgre_worker_cli.cpp**: Line 161: `std::this_thread::sleep_for(std::chrono::seconds(2));`
+- **src/advanced/vgre_workload_engine.cpp**: Line 165: `std::this_thread::sleep_until(nextTarget);`
+- **src/compiler/llvm_translation_codegen.cpp**: Line 808: `VGRE_LOG_DEBUG("LLVMTranslationEngine", "JIT Instruction Recalibration yielded 0 (empty kernel or un`
+- **src/core/memory/memory_manager.cpp**: Line 144: `// short yields to let signal handlers run`
+- **src/core/memory/memory_manager.cpp**: Line 145: `std::this_thread::yield();`
+- **src/core/memory/memory_manager.cpp**: Line 149: `std::this_thread::sleep_for(milliseconds(sleepMs));`
+- **src/core/memory/memory_manager.cpp**: Line 810: `std::this_thread::sleep_for(1ms);`
+- **src/core/memory/memory_manager_copy.cpp**: Line 301: `// We no longer artificially throttle transfers with sleep_for.`
+- **src/core/memory/uvm_migration.cpp**: Line 67: `std::this_thread::sleep_for(kInterval);`
+- **src/core/memory/uvm_migration.cpp**: Line 207: `std::this_thread::sleep_for(1ms);`
+- **src/core/runtime_engine_launch.cpp**: Line 553: `// avoids the yield()-spin that wastes CPU between thread creation and launch.`
+- **src/runtime/block_worker_pool.cpp**: Line 116: `std::this_thread::yield();`
+- **src/runtime/block_worker_pool.cpp**: Line 154: `// Hybrid wait: short spin for fast-completing kernels, then yield to condvar.`
+- **src/runtime/block_worker_pool.cpp**: Line 163: `__builtin_ia32_pause();`
+- **src/runtime/block_worker_pool.cpp**: Line 224: `__builtin_ia32_pause();`
+
+
+## 3. Cross-Platform Deficiencies (Linux Hardcoding)
+The following files leak POSIX or Linux-specific headers into cross-platform logic.
+
+- **include/vgre/common/sockets.h**: Line 17: `#include <sys/socket.h>`
+- **include/vgre/common/sockets.h**: Line 18: `#include <sys/types.h>`
+- **include/vgre/common/sockets.h**: Line 19: `#include <unistd.h>`
+- **src/advanced/adaptive_execution_engine.cpp**: Line 24: `#include <unistd.h>`
+- **src/advanced/adaptive_execution_engine_record.cpp**: Line 24: `#include <unistd.h>`
+- **src/advanced/adaptive_execution_engine_tune.cpp**: Line 24: `#include <unistd.h>`
+- **src/advanced/hybrid_compute_manager.cpp**: Line 28: `#include <unistd.h>`
+- **src/advanced/hybrid_compute_manager.cpp**: Line 31: `#include <sys/socket.h>`
+- **src/advanced/hybrid_compute_manager.cpp**: Line 32: `#include <unistd.h>`
+- **src/advanced/hybrid_compute_manager_remote.cpp**: Line 28: `#include <unistd.h>`
+- **src/advanced/hybrid_compute_manager_remote.cpp**: Line 31: `#include <sys/socket.h>`
+- **src/advanced/hybrid_compute_manager_remote.cpp**: Line 32: `#include <unistd.h>`
+- **src/advanced/hybrid_compute_manager_workload.cpp**: Line 28: `#include <unistd.h>`
+- **src/advanced/hybrid_compute_manager_workload.cpp**: Line 31: `#include <sys/socket.h>`
+- **src/advanced/hybrid_compute_manager_workload.cpp**: Line 32: `#include <unistd.h>`
+- **src/advanced/ipc_manager.cpp**: Line 16: `#include <unistd.h>`
+- **src/advanced/mps_control.cpp**: Line 29: `#include <sys/socket.h>`
+- **src/advanced/mps_control.cpp**: Line 31: `#include <unistd.h>`
+- **src/advanced/resource_ledger.cpp**: Line 19: `#include <sys/types.h>`
+- **src/advanced/resource_ledger.cpp**: Line 20: `#include <unistd.h>`
+- **src/advanced/runtime_profiler.cpp**: Line 27: `#  include <sys/socket.h>`
+- **src/advanced/runtime_profiler.cpp**: Line 29: `#  include <unistd.h>`
+- **src/advanced/secure_channel.cpp**: Line 25: `#include <unistd.h>`
+- **src/advanced/secure_channel.cpp**: Line 32: `#include <unistd.h>`
+- **src/advanced/secure_channel_crypto.cpp**: Line 22: `#include <unistd.h>`
+- **src/advanced/secure_channel_crypto.cpp**: Line 29: `#include <unistd.h>`
+- **src/advanced/tcp_cluster/configuration_manager_backup.cpp**: Line 20: `#include <unistd.h>`
+- **src/advanced/tcp_cluster/configuration_manager_documentation.cpp**: Line 11: `#include <unistd.h>`
+- **src/advanced/tcp_cluster/configuration_manager_validation.cpp**: Line 20: `#include <unistd.h>`
+- **src/advanced/tcp_cluster/discovery_loops_proactive.cpp**: Line 30: `#include <sys/socket.h>`
+- **src/advanced/tcp_cluster/discovery_loops_udp.cpp**: Line 33: `#include <sys/socket.h>`
+- **src/advanced/tcp_cluster/interfaces.cpp**: Line 27: `#include <sys/socket.h>`
+- **src/advanced/tcp_cluster/interfaces.cpp**: Line 28: `#include <unistd.h>`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 15: `#include <unistd.h>`
+- **src/advanced/token/token_manager_linux.cpp**: Line 5: `#include <sys/types.h>`
+- **src/advanced/token/token_manager_linux.cpp**: Line 7: `#include <unistd.h>`
+- **src/advanced/websocket_transport.cpp**: Line 24: `#include <unistd.h>`
+- **src/advanced/websocket_transport.cpp**: Line 27: `#include <sys/socket.h>`
+- **src/api/cuda_driver/cuda_driver_external.cpp**: Line 18: `#include <unistd.h>`
+- **src/api/cuda_external_semaphore.cpp**: Line 24: `#include <unistd.h>`
+- **src/api/cuda_virtual_memory.cpp**: Line 25: `#include <unistd.h>`
+- **src/api/nccl/nccl_communicator.cpp**: Line 5: `#include <unistd.h>`
+- **src/api/nccl/nccl_core.cpp**: Line 8: `#  include <unistd.h>`
+- **src/api/opencl_adapter.cpp**: Line 18: `#include <unistd.h>`
+- **src/compiler/clang_kernel_analysis.cpp**: Line 18: `#include <unistd.h>`
+- **src/compiler/clang_kernel_parser.cpp**: Line 18: `#include <unistd.h>`
+- **src/compiler/kernel_cache.cpp**: Line 15: `#include <unistd.h>`
+- **src/core/memory/memory_manager.cpp**: Line 23: `#include <unistd.h>`
+- **src/core/scheduler_numa.cpp**: Line 10: `#include <pthread.h>`
+- **src/core/scheduler_numa.cpp**: Line 16: `#include <pthread.h>`
+- **src/core/scheduler_worker.cpp**: Line 8: `#include <pthread.h>`
+- **src/core/scheduler_worker.cpp**: Line 13: `#include <pthread.h>`
+- **src/core/shm_manager.cpp**: Line 13: `#include <unistd.h>`
+- **src/core/virtual_gpu_device.cpp**: Line 16: `#include <sys/types.h>`
+- **src/core/virtual_gpu_device.cpp**: Line 19: `#include <sys/types.h>`
+- **src/core/virtual_gpu_device.cpp**: Line 20: `#include <unistd.h>`
+- **src/runtime/block_worker_pool.cpp**: Line 12: `#include <unistd.h>`
+- **src/runtime/block_worker_pool.cpp**: Line 13: `#include <pthread.h>`
+- **src/runtime/vector_engine.cpp**: Line 16: `#include <unistd.h>`
+- **src/runtime/vector_engine_double.cpp**: Line 16: `#include <unistd.h>`
+- **src/runtime/vector_engine_float.cpp**: Line 16: `#include <unistd.h>`
+
+
+## 4. Cross-Platform Deficiencies (Windows Hardcoding)
+The following files leak Windows-specific headers into what should be cross-platform abstractions.
+
+- **include/vgre/advanced/tcp_cluster.h**: Line 2: `// sockets.h must come first on Windows: it includes <winsock2.h> which`
+- **include/vgre/advanced/tcp_cluster.h**: Line 3: `// must precede <windows.h>, and also defines ERROR_* macros via winerror.h.`
+- **include/vgre/advanced/tcp_cluster/internal/windows_socket_manager.h**: Line 17: `#include <winsock2.h>`
+- **include/vgre/common/error_codes.h**: Line 33: `// On Windows, <winerror.h> (pulled in via <winsock2.h>) defines many`
+- **include/vgre/common/sockets.h**: Line 5: `#include <winsock2.h>`
+- **include/vgre/common/system_utils.h**: Line 12: `#include <windows.h>`
+- **include/vgre/core/memory_manager.h**: Line 22: `#include <windows.h>`
+- **src/advanced/adaptive_execution_engine.cpp**: Line 34: `#include <windows.h>`
+- **src/advanced/adaptive_execution_engine_record.cpp**: Line 34: `#include <windows.h>`
+- **src/advanced/adaptive_execution_engine_tune.cpp**: Line 34: `#include <windows.h>`
+- **src/advanced/gpu_passthrough.cpp**: Line 9: `#  include <windows.h>`
+- **src/advanced/hybrid_compute_manager.cpp**: Line 23: `#include <winsock2.h>`
+- **src/advanced/hybrid_compute_manager.cpp**: Line 25: `#include <windows.h>`
+- **src/advanced/hybrid_compute_manager_remote.cpp**: Line 23: `#include <winsock2.h>`
+- **src/advanced/hybrid_compute_manager_remote.cpp**: Line 25: `#include <windows.h>`
+- **src/advanced/hybrid_compute_manager_workload.cpp**: Line 23: `#include <winsock2.h>`
+- **src/advanced/hybrid_compute_manager_workload.cpp**: Line 25: `#include <windows.h>`
+- **src/advanced/ipc_manager.cpp**: Line 12: `#include <windows.h>`
+- **src/advanced/mps_control.cpp**: Line 27: `#include <windows.h>`
+- **src/advanced/resource_ledger.cpp**: Line 14: `#include <windows.h>`
+- **src/advanced/runtime_profiler.cpp**: Line 20: `#  include <winsock2.h>`
+- **src/advanced/tcp_cluster/collective_ops_manager.cpp**: Line 14: `#include <windows.h>`
+- **src/advanced/tcp_cluster/configuration_manager_backup.cpp**: Line 16: `#include <windows.h>`
+- **src/advanced/tcp_cluster/configuration_manager_file_io.cpp**: Line 10: `#include <windows.h>`
+- **src/advanced/tcp_cluster/configuration_manager_validation.cpp**: Line 18: `#include <windows.h>`
+- **src/advanced/tcp_cluster/discovery_loops_proactive.cpp**: Line 25: `#include <winsock2.h>`
+- **src/advanced/tcp_cluster/discovery_loops_udp.cpp**: Line 28: `#include <winsock2.h>`
+- **src/advanced/tcp_cluster/interfaces.cpp**: Line 25: `#include <winsock2.h>`
+- **src/advanced/tcp_cluster/server_loop_connection_handling.cpp**: Line 17: `#include <winsock2.h>`
+- **src/advanced/tcp_cluster/windows_socket_manager_errors.cpp**: Line 11: `#include <winsock2.h>`
+- **src/advanced/tcp_cluster/windows_socket_manager_lifecycle.cpp**: Line 13: `#include <winsock2.h>`
+- **src/advanced/tcp_cluster/windows_socket_manager_recovery.cpp**: Line 13: `#include <winsock2.h>`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 20: `#include <windows.h>`
+- **src/advanced/token/token_manager_win32.cpp**: Line 5: `#include <windows.h>`
+- **src/advanced/vgre_worker_cli.cpp**: Line 19: `#include <windows.h>`
+- **src/advanced/websocket_transport.cpp**: Line 21: `#include <winsock2.h>`
+- **src/api/cuda_external_semaphore.cpp**: Line 28: `#include <windows.h>`
+- **src/api/cuda_virtual_memory.cpp**: Line 29: `#include <windows.h>`
+- **src/api/nccl/nccl_core.cpp**: Line 5: `#  include <windows.h>`
+- **src/api/opencl_adapter.cpp**: Line 16: `#include <windows.h>`
+- **src/compiler/kernel_cache.cpp**: Line 12: `#include <windows.h>`
+- **src/core/memory/memory_manager.cpp**: Line 19: `#include <windows.h>`
+- **src/core/memory/pool_allocator.cpp**: Line 8: `#include <windows.h>`
+- **src/core/runtime_engine.cpp**: Line 31: `#include <winsock2.h>`
+- **src/core/scheduler_numa.cpp**: Line 13: `#include <windows.h>`
+- **src/core/scheduler_worker.cpp**: Line 11: `#include <windows.h>`
+- **src/core/shm_manager.cpp**: Line 8: `#include <windows.h>`
+- **src/core/virtual_gpu_device.cpp**: Line 12: `#include <windows.h>`
+- **src/runtime/block_worker_pool.cpp**: Line 16: `#include <windows.h>`
+
+
+## 5. Poor Business Logic & Algorithmic Limitations
+The following files contain fallbacks, heuristics, hacks, or sub-optimal logic that bypass authoritative emulation.
+
+- **include/vgre/advanced/hardware_token_manager.h**: Line 27: `* - Fallback: TPM 2.0 NV storage (if available)`
+- **include/vgre/advanced/hardware_token_manager.h**: Line 29: `* This replaces the insecure environment variable fallback.`
+- **include/vgre/advanced/hardware_token_manager.h**: Line 43: `FALLBACK_ENCRYPTED  // Encrypted file (last resort)`
+- **include/vgre/advanced/hardware_token_manager.h**: Line 140: `VGREResult initFallbackEncrypted();`
+- **include/vgre/advanced/hardware_token_manager.h**: Line 147: `VGREResult storeFallbackEncrypted(const std::string& service, const std::string& token);`
+- **include/vgre/advanced/hardware_token_manager.h**: Line 154: `VGREResult getFallbackEncrypted(const std::string& service, std::string& outToken);`
+- **include/vgre/advanced/hardware_token_manager.h**: Line 161: `VGREResult deleteFallbackEncrypted(const std::string& service);`
+- **include/vgre/advanced/hardware_token_manager.h**: Line 163: `// Authenticated encryption for fallback storage (PBKDF2 + AES-256-CTR + HMAC-SHA256)`
+- **include/vgre/advanced/hardware_token_manager.h**: Line 171: `std::string fallback_path_;`
+- **include/vgre/advanced/tcp_cluster/internal/configuration_manager.h**: Line 54: `bool allow_auth_fallback = true;`
+- **include/vgre/advanced/tcp_cluster_protocol.h**: Line 288: `// Worker echoes back BandwidthAckPacket so master can measure round-trip.`
+- **include/vgre/advanced/tcp_cluster_protocol.h**: Line 290: `struct BandwidthAckPacket {`
+- **include/vgre/advanced/tcp_cluster_protocol.h**: Line 296: `// Cross-platform validation for BandwidthAckPacket`
+- **include/vgre/advanced/tcp_cluster_protocol.h**: Line 297: `static_assert(detail::validate_struct_size<BandwidthAckPacket>(16),`
+- **include/vgre/advanced/tcp_cluster_protocol.h**: Line 298: `"BandwidthAckPacket must be exactly 16 bytes across all platforms");`
+- **include/vgre/api/cublaslt_shim.h**: Line 156: `// ── Matmul preference (heuristic) ────────────────────────────────────────────`
+- **include/vgre/api/cublaslt_shim.h**: Line 170: `struct cublasLtMatmulHeuristicResult_t {`
+- **include/vgre/api/cublaslt_shim.h**: Line 188: `// ── Algorithm heuristic ──────────────────────────────────────────────────────`
+- **include/vgre/api/cublaslt_shim.h**: Line 189: `// Singular form: fills heuristicResultsArray[0..requestedAlgoCount-1].`
+- **include/vgre/api/cublaslt_shim.h**: Line 190: `cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t lightHandle,`
+- **include/vgre/api/cublaslt_shim.h**: Line 198: `cublasLtMatmulHeuristicResult_t *heuristicResultsArray,`
+- **include/vgre/api/cublaslt_shim.h**: Line 202: `cublasStatus_t cublasLtMatmulAlgoGetHeuristics(cublasLtHandle_t lightHandle,`
+- **include/vgre/api/cublaslt_shim.h**: Line 210: `cublasLtMatmulHeuristicResult_t *heuristicResultsArray,`
+- **include/vgre/common/sockets.h**: Line 346: `// Fallback: IPv4-only.`
+- **include/vgre/common/system_utils.h**: Line 97: `// 2. Fallback: Search upwards from CWD`
+- **include/vgre/common/system_utils.h**: Line 106: `// 3. Platform-specific absolute fallbacks`
+- **include/vgre/common/system_utils.h**: Line 157: `// Fallback to hoping it's in the system PATH`
+- **include/vgre/common/types.h**: Line 119: `// set by the heuristic syntax parser.  Used to distinguish "kernel has`
+- **include/vgre/compiler/cpu_cuda_env.h**: Line 65: `// ── Cooperative Groups & CUB Fallback ───────────────────────────────────────`
+- **include/vgre/compiler/cpu_cuda_env.h**: Line 70: `#include "cuda_device_libs/cub_fallback.h"`
+- **include/vgre/compiler/cuda_device_libs/cub_fallback.h**: Line 1: `#ifndef VGRE_COMPILER_CUDA_DEVICE_LIBS_CUB_FALLBACK_H`
+- **include/vgre/compiler/cuda_device_libs/cub_fallback.h**: Line 2: `#define VGRE_COMPILER_CUDA_DEVICE_LIBS_CUB_FALLBACK_H`
+- **include/vgre/compiler/cuda_device_libs/cub_fallback.h**: Line 228: `#endif // VGRE_COMPILER_CUDA_DEVICE_LIBS_CUB_FALLBACK_H`
+- **include/vgre/compiler/kernel_parser.h**: Line 96: `// Cache for token-based fallback results (keyed by kernel source SHA)`
+- **include/vgre/compiler/kernel_parser.h**: Line 97: `std::unordered_map<std::string, KernelIR> fallbackCache_;`
+- **include/vgre/compiler/wmma_emulation.h**: Line 4: `// Tensor Core Emulation via scalar FP32 fallback.`
+- **include/vgre/compiler/wmma_emulation.h**: Line 231: `// ── Tier 3: scalar fallback ───────────────────────────────────────────────────`
+- **include/vgre/compiler/wmma_emulation.h**: Line 252: `//   3. Scalar fallback (any hardware, any tile size)`
+- **include/vgre/core/runtime_engine.h**: Line 79: `// Look up KernelIR by compiled function pointer (used for iGPU fallback).`
+- **include/vgre/core/scheduler.h**: Line 176: `static bool enqueueWithWorkerFallback(int workerIdx,`
+- **include/vgre/core/scheduler.h**: Line 185: `std::priority_queue<WorkItem> queue_; // Global ready queue (work-stealing fallback)`
+- **src/advanced/adaptive_execution_engine.cpp**: Line 359: `// Fallback: optional helper writes temperature to /tmp/.vgre_cpu_temp`
+- **src/advanced/adaptive_execution_engine_tune.cpp**: Line 300: `// Fallback: use RDTSC to estimate instruction count via assumed IPC.`
+- **src/advanced/hybrid_compute_manager.cpp**: Line 197: `// Fallback: PCI class code — 0x030200 = 3D Controller (APU pattern)`
+- **src/advanced/hybrid_compute_manager_workload.cpp**: Line 108: `// Graceful fallback to CPU when iGPU path unavailable`
+- **src/advanced/memory_compression.cpp**: Line 154: `// Legacy fallback if signature fails (direct LZ4 decompress attempt)`
+- **src/advanced/rdma_transport.cpp**: Line 78: `VGRE_LOG_INFO("RDMATransport", "No RDMA devices found — TCP fallback active");`
+- **src/advanced/rdma_transport.cpp**: Line 91: `VGRE_LOG_WARN("RDMATransport", "Failed to open RDMA device — TCP fallback active");`
+- **src/advanced/rdma_transport.cpp**: Line 99: `VGRE_LOG_WARN("RDMATransport", "ibv_alloc_pd failed — TCP fallback active");`
+- **src/advanced/rdma_transport.cpp**: Line 111: `VGRE_LOG_WARN("RDMATransport", "ibv_create_cq failed — TCP fallback active");`
+- **src/advanced/rdma_transport.cpp**: Line 467: `// Fallback implementations when RDMA support is not compiled in.`
+- **src/advanced/secure_channel_crypto.cpp**: Line 337: `// Fallback: /dev/urandom for kernels < 3.17`
+- **src/advanced/secure_channel_crypto.cpp**: Line 642: `// Software fallback (portable — all platforms, all ISAs)`
+- **src/advanced/tcp_cluster/client_packet_dispatch.cpp**: Line 298: `BandwidthAckPacket ack{};`
+- **src/advanced/tcp_cluster/configuration_manager_core.cpp**: Line 120: `// Production: auth fallback is not supported.`
+- **src/advanced/tcp_cluster/configuration_manager_core.cpp**: Line 223: `config.connection_retry_delay_ms = 2000; config.allow_auth_fallback = false;`
+- **src/advanced/tcp_cluster/configuration_manager_core.cpp**: Line 233: `config.connection_retry_delay_ms = 1500; config.allow_auth_fallback = false;`
+- **src/advanced/tcp_cluster/configuration_manager_core.cpp**: Line 243: `config.connection_retry_delay_ms = 1000; config.allow_auth_fallback = false;`
+- **src/advanced/tcp_cluster/configuration_manager_core.cpp**: Line 278: `emit("allow_auth_fallback", old_config.allow_auth_fallback ? "true" : "false", new_config.allow_auth`
+- **src/advanced/tcp_cluster/configuration_manager_documentation.cpp**: Line 27: `j << "  \"allow_auth_fallback\": " << (config.allow_auth_fallback ? "true" : "false") << ",\n";`
+- **src/advanced/tcp_cluster/configuration_manager_documentation.cpp**: Line 60: `y << "allow_auth_fallback: " << (c.allow_auth_fallback ? "true" : "false") << "\n";`
+- **src/advanced/tcp_cluster/configuration_manager_documentation.cpp**: Line 92: `// Production: auth fallback is not supported.`
+- **src/advanced/tcp_cluster/configuration_manager_documentation.cpp**: Line 136: `md << "| `allow_auth_fallback` | " << (config.allow_auth_fallback ? "true" : "false") << " | Allow a`
+- **src/advanced/tcp_cluster/configuration_manager_file_io.cpp**: Line 131: `pos = 0; if (findKey("allow_auth_fallback")) config.allow_auth_fallback = parseBool();`
+- **src/advanced/tcp_cluster/configuration_manager_file_io.cpp**: Line 195: `else if (key == "allow_auth_fallback")      config.allow_auth_fallback = (value == "true" || value =`
+- **src/advanced/tcp_cluster/configuration_manager_monitoring.cpp**: Line 54: `new_config.allow_auth_fallback = env_config.allow_auth_fallback;`
+- **src/advanced/tcp_cluster/configuration_manager_validation.cpp**: Line 157: `if (config.allow_auth_fallback && config.auth_token.empty() && config.auth_token_file.empty()) {`
+- **src/advanced/tcp_cluster/configuration_manager_validation.cpp**: Line 158: `result.warnings.push_back("Auth fallback requested but is not supported in production builds");`
+- **src/advanced/tcp_cluster/dispatch_manager_remote.cpp**: Line 159: `// 3. CPU JIT fallback (always available)`
+- **src/advanced/tcp_cluster/memory_sync_manager.cpp**: Line 121: `// Full sync (first time or delta sync fallback)`
+- **src/advanced/tcp_cluster/memory_sync_manager.cpp**: Line 288: `VGRE_LOG_WARN("TCPCluster", "RDMA failed — TCP fallback for this delta range");`
+- **src/advanced/tcp_cluster/memory_sync_manager.cpp**: Line 291: `// TCP Fallback`
+- **src/advanced/tcp_cluster/memory_sync_manager.cpp**: Line 360: `VGRE_LOG_WARN("TCPCluster", "RDMA failed mid-stream — TCP fallback for full sync");`
+- **src/advanced/tcp_cluster/mesh_topology_impl.cpp**: Line 88: `// Fallback if packet_handler is not initialized`
+- **src/advanced/tcp_cluster/packet_handler.cpp**: Line 86: `// Fallback to direct send without encryption`
+- **src/advanced/tcp_cluster/security_manager.cpp**: Line 52: `// Production policy: strict authentication only. No runtime fallback modes.`
+- **src/advanced/tcp_cluster/security_manager.cpp**: Line 153: `return std::string("Authentication mode: ") + (strict_auth_mode_ ? "STRICT" : "FALLBACK") + " (" + (`
+- **src/advanced/tcp_cluster/server_packet_dispatch.cpp**: Line 421: `if (hdr.payloadSize < sizeof(BandwidthAckPacket)) {`
+- **src/advanced/tcp_cluster/server_packet_dispatch.cpp**: Line 425: `BandwidthAckPacket ack;`
+- **src/advanced/tcp_cluster/server_packet_dispatch.cpp**: Line 426: `std::memcpy(&ack, payload, sizeof(BandwidthAckPacket));`
+- **src/advanced/tcp_cluster/tcp_cluster_init.cpp**: Line 99: `discovery_manager_->startWorkerDiscovery(); // Start UDP discovery as fallback`
+- **src/advanced/tcp_cluster/tcp_cluster_manager.cpp**: Line 262: `// Fallback: any active worker (GPU-unaware dispatch is still valid)`
+- **src/advanced/tcp_cluster/tcp_cluster_transport.cpp**: Line 169: `// Direct send fallback (for non-queued scenarios like handshake packets)`
+- **src/advanced/tcp_cluster/tcp_cluster_transport.cpp**: Line 179: `// Fallback to direct send without encryption`
+- **src/advanced/tcp_cluster/tcp_cluster_transport.cpp**: Line 236: `// Fallback to direct send without encryption`
+- **src/advanced/tcp_cluster/windows_socket_manager_lifecycle.cpp**: Line 68: `int fallback_result = WSAStartup(MAKEWORD(2, 0), &wsa_data_);`
+- **src/advanced/tcp_cluster/windows_socket_manager_lifecycle.cpp**: Line 69: `if (fallback_result == 0) {`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 15: `fallback_path_("")`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 57: `if (std::string(name) == "file"      && initFallbackEncrypted() == VGREResult::SUCCESS) { backend_ =`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 112: `if (initFallbackEncrypted() == VGREResult::SUCCESS) {`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 113: `backend_ = BackendType::FALLBACK_ENCRYPTED;`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 115: `VGRE_LOG_WARN("HardwareTokenManager", "Using encrypted file fallback - not recommended for productio`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 146: `case BackendType::FALLBACK_ENCRYPTED:`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 147: `return storeFallbackEncrypted(service, token);`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 162: `const BackendType fallbackOrder[] = {`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 165: `BackendType::FALLBACK_ENCRYPTED`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 167: `for (BackendType candidate : fallbackOrder) {`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 173: `case BackendType::FALLBACK_ENCRYPTED: initRes = initFallbackEncrypted(); break;`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 212: `case BackendType::FALLBACK_ENCRYPTED:`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 213: `return getFallbackEncrypted(service, outToken);`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 225: `const BackendType fallbackOrder[] = {`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 228: `BackendType::FALLBACK_ENCRYPTED`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 230: `for (BackendType candidate : fallbackOrder) {`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 236: `case BackendType::FALLBACK_ENCRYPTED: initRes = initFallbackEncrypted(); break;`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 275: `case BackendType::FALLBACK_ENCRYPTED:`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 276: `return deleteFallbackEncrypted(service);`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 288: `const BackendType fallbackOrder[] = {`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 291: `BackendType::FALLBACK_ENCRYPTED`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 293: `for (BackendType candidate : fallbackOrder) {`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 299: `case BackendType::FALLBACK_ENCRYPTED: initRes = initFallbackEncrypted(); break;`
+- **src/advanced/token/hardware_token_manager.cpp**: Line 327: `case BackendType::FALLBACK_ENCRYPTED: return "Encrypted File (Fallback)";`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 26: `VGREResult HardwareTokenManager::initFallbackEncrypted() {`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 27: `const char* overridePath = vgre_get_config("VGRE_TOKEN_FALLBACK_PATH");`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 29: `fallback_path_ = overridePath;`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 34: `fallback_path_ = std::string(appdata) + "\\vgre\\tokens.enc";`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 36: `fallback_path_ = ".\\vgre\\tokens.enc";`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 41: `fallback_path_ = std::string(home) + "/.vgre/tokens.enc";`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 43: `// CI/sandbox fallback when HOME is unset.`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 44: `fallback_path_ = ".vgre/tokens.enc";`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 49: `std::string dir = fallback_path_.substr(0, fallback_path_.find_last_of("/\\"));`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 63: `VGREResult HardwareTokenManager::storeFallbackEncrypted(const std::string& service, const std::strin`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 65: `std::ifstream infile(fallback_path_);`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 81: `std::ofstream outfile(fallback_path_);`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 93: `chmod(fallback_path_.c_str(), 0600);`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 99: `VGREResult HardwareTokenManager::getFallbackEncrypted(const std::string& service, std::string& outTo`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 100: `std::ifstream infile(fallback_path_);`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 123: `VGREResult HardwareTokenManager::deleteFallbackEncrypted(const std::string& service) {`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 125: `std::ifstream infile(fallback_path_);`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 150: `std::ofstream outfile(fallback_path_);`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 211: `std::string identity = "vgre_fallback_kdf";`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 228: `std::string saltInput = "vgre_fallback_v2:" + identity;`
+- **src/advanced/token/token_manager_fallback.cpp**: Line 235: `reinterpret_cast<const uint8_t*>("vgre_fallback_kdf"), 17,`
+- **src/advanced/websocket_transport.cpp**: Line 293: `return true; // fallback to plain`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 1: `// cuBLASLt emulation shim — descriptors, layout management, algorithm heuristics.`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 267: `// ── Algorithm heuristics ─────────────────────────────────────────────────────`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 269: `cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t /*handle*/,`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 277: `cublasLtMatmulHeuristicResult_t *heuristicResultsArray,`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 279: `if (!heuristicResultsArray || !returnAlgoCount || requestedAlgoCount <= 0)`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 305: `heuristicResultsArray[0].algo          = 0;`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 306: `heuristicResultsArray[0].workspaceSize = 0;`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 307: `heuristicResultsArray[0].state         = CUBLAS_STATUS_SUCCESS;`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 308: `heuristicResultsArray[0].wavesCount    = 1.0f;`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 314: `cublasStatus_t cublasLtMatmulAlgoGetHeuristics(cublasLtHandle_t handle,`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 322: `cublasLtMatmulHeuristicResult_t *heuristicResultsArray,`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 324: `return cublasLtMatmulAlgoGetHeuristic(handle, matmulDesc, Adesc, Bdesc,`
+- **src/api/cublaslt/cublaslt_core.cpp**: Line 326: `heuristicResultsArray, returnAlgoCount);`
+- **src/api/cuda_driver/cuda_driver_module.cpp**: Line 27: `if (len == 0) len = 8 * 1024 * 1024; // Fallback to conservative estimate`
+- **src/api/cuda_driver/cuda_driver_occupancy.cpp**: Line 7: `// VGRE emulates a single virtual GPU.  Occupancy is a heuristic based on`
+- **src/api/cuda_driver/cuda_driver_occupancy.cpp**: Line 26: `// Heuristic: each "SM" can hold ~2048 threads (Ampere-like).`
+- **src/api/cuda_driver/cuda_driver_occupancy.cpp**: Line 31: `// Shared memory limitation heuristic: 48 KB per block default.`
+- **src/api/cuda_driver/cuda_driver_texture.cpp**: Line 310: `// Authoritative fallback: return a fresh one if it doesn't exist in the module`
+- **src/api/cudart/cudart_shim.cpp**: Line 67: `// Fallback: Scan for PTX signatures (.version, .target).`
+- **src/api/cudart/cudart_shim.cpp**: Line 154: `// Fallback: Scan for global variables if it's raw PTX`
+- **src/api/cudart/cudart_shim.cpp**: Line 630: `// Pool was never created — fallback to regular free`
+- **src/api/cudart/cudart_shim.cpp**: Line 636: `// Fallback: regular free`
+- **src/api/cusolver/lapack_fallback.cpp**: Line 2: `* VGRE built-in LAPACK fallback — portable CPU implementations.`
+- **src/api/cusolver/lapack_fallback.cpp**: Line 4: `* Compiled only when VGRE_LAPACK_FALLBACK is defined (no system LAPACK).`
+- **src/api/cusolver/lapack_fallback.cpp**: Line 16: `#ifdef VGRE_LAPACK_FALLBACK`
+- **src/api/cusolver/lapack_fallback.cpp**: Line 566: `#endif // VGRE_LAPACK_FALLBACK`
+- **src/api/nccl/nccl_communicator.cpp**: Line 30: `// Fallback: fill from /dev/urandom`
+- **src/api/nccl/nccl_core.cpp**: Line 121: `// Byte-level fallback for int8/uint8 sum`
+- **src/compiler/clang_kernel_parser.cpp**: Line 42: `#define VGRE_COMPILER_CUDA_DEVICE_LIBS_CUB_FALLBACK_H`
+- **src/compiler/clang_kernel_parser.cpp**: Line 674: `// Fallback: If requested name fails, try finding ANY global kernel`
+- **src/compiler/clang_kernel_parser.cpp**: Line 923: `// Fallback if no bytes calculated`
+- **src/compiler/kernel_parser.cpp**: Line 534: `// This replaces the old heuristic token-counting approach`
+- **src/compiler/kernel_parser.cpp**: Line 550: `// in production. Reject the kernel rather than using unreliable heuristics.`
+- **src/core/event.cpp**: Line 34: `task(); // Execute synchronously as fallback`
+- **src/core/graph_optimizer.cpp**: Line 194: `// Fallback to conservative limit if properties lookup fails.`
+- **src/core/memory/memory_manager.cpp**: Line 258: `if (si->si_code != SEGV_ACCERR) goto fallback;`
+- **src/core/memory/memory_manager.cpp**: Line 266: `goto fallback;`
+- **src/core/memory/memory_manager.cpp**: Line 295: `// migration heuristics. t_currentDevice is a thread-local set by the`
+- **src/core/memory/memory_manager.cpp**: Line 323: `// Fallback: enqueue for background drainer`
+- **src/core/memory/memory_manager.cpp**: Line 338: `fallback:`
+- **src/core/memory/memory_manager_managed.cpp**: Line 221: `nodes = 4; // Fallback for complex sparse masks`
+- **src/core/runtime_engine_graph.cpp**: Line 164: `// Fallback: single body exec (behaves like IF with integer condition)`
+- **src/core/runtime_engine_launch.cpp**: Line 172: `// Authoritative fallback based on type`
+- **src/core/runtime_engine_launch.cpp**: Line 302: `// calculations don't divide by zero; do NOT apply the 30% heuristic.`
+- **src/core/runtime_engine_launch.cpp**: Line 328: `(fpi > 0.0 ? " (ratio=" + std::to_string(fpi) + ")" : " (fallback)"));`
+- **src/core/scheduler.cpp**: Line 12: `bool Scheduler::enqueueWithWorkerFallback(int workerIdx,`
+- **src/core/scheduler_tasks.cpp**: Line 108: `Scheduler::enqueueWithWorkerFallback(t_workerIdx, std::move(item), workerDeques_, queue_, mutex_);`
+- **src/core/scheduler_tasks.cpp**: Line 138: `Scheduler::enqueueWithWorkerFallback(t_workerIdx, std::move(item), workerDeques_, queue_, mutex_);`
+- **src/core/scheduler_tasks.cpp**: Line 186: `Scheduler::enqueueWithWorkerFallback(t_workerIdx, std::move(item), workerDeques_, queue_, mutex_);`
+- **src/core/scheduler_worker.cpp**: Line 56: `// 3. Fallback: wait on global / NUMA-local priority queue`
+- **src/core/virtual_gpu_device.cpp**: Line 195: `// This avoids non-authoritative "multiplier" heuristics while protecting host stability.`
+- **src/core/virtual_gpu_device.cpp**: Line 239: `// Fallback synthetic PCI on Linux if no VGA class found (e.g. headless server)`
+- **src/core/virtual_gpu_device.cpp**: Line 265: `// Fallback: read nominal CPU MHz from registry (always present on Windows).`
+- **src/core/virtual_gpu_device.cpp**: Line 359: `// Fallback for non-gcc compilers on x86`
+- **src/runtime/cdp_executor.cpp**: Line 80: `// Fallback: over-allocate and align manually`
+- **src/runtime/cpu_parallel_executor.cpp**: Line 160: `std::string ompSuffix = " (OpenMP NOT available — single-threaded fallback)";`
+- **src/runtime/cpu_parallel_executor.cpp**: Line 302: `// ── No-OpenMP scalar fallback ─────────────────────────────────────────`
+- **src/runtime/igpu_opencl_executor.cpp**: Line 98: `// Previously searched for CPU fallback here.`
+- **src/runtime/igpu_opencl_executor.cpp**: Line 246: `// Warp Shuffles (Mapping to cl_intel_subgroups if available, or local memory fallback)`
+- **src/runtime/igpu_opencl_executor.cpp**: Line 253: `// Software warp-shuffle fallback using __local memory.`
+- **src/runtime/igpu_opencl_executor.cpp**: Line 344: `// No longer need the atomicAdd_f hack if we use 'overloadable'`
 
-All 21 test cases pass. OpenMP parallelization enabled for CGEMM/ZGEMM.
 
----
 
-### 2.2 cuSOLVER — Dense + Sparse (both complete)
-
-**Dense API status** — **ALL DONE** via LAPACK delegation in `cusolver_core.cpp`:
-
-| API | Status | LAPACK call |
-|---|---|---|
-| `cusolverDnSpotrf` / `Dpotrf` (Cholesky) | **DONE** | `spotrf_` / `dpotrf_` |
-| `cusolverDnSgeqrf` / `Dgeqrf` (QR) | **DONE** | `sgeqrf_` / `dgeqrf_` |
-| `cusolverDnSgesvd` / `Dgesvd` (SVD) | **DONE** | `sgesvd_` / `dgesvd_` |
-| `cusolverDnSsyevd` / `Dsyevd` (eigenvalues) | **DONE** | `ssyevd_` / `dsyevd_` |
-| `cusolverDnSgetrf` / `Dgetrf` (LU) | **DONE** | `sgetrf_` / `dgetrf_` |
-| `cusolverDnSgetrs` / `Dgetrs` (triangular solve from LU) | **DONE** | `sgetrs_` / `dgetrs_` |
-| `cusolverDnSormqr` / `Dormqr` (apply Q from QR) | **DONE** | `sormqr_` / `dormqr_` |
-| `cusolverDnSgelsd` / `Dgelsd` (least-squares driver) | **DONE** | `sgelsd_` / `dgelsd_` with workspace query |
-
-**Sparse API** — `cusolverSp*` routines: **DONE** (2026-05-16). Implemented via CSR→dense extraction + LAPACK in `cusolver_core.cpp`. See §3.6 for the complete API table and approach.
-
----
-
-### 2.3 cuFFT — O(n log n) FFT Backend
-
-**Status**: **IMPLEMENTED** (2026-05-15). Built-in Cooley-Tukey radix-2 + Bluestein for arbitrary sizes. Optional FFTW3 delegation.
-
-| Implemented | Notes |
-|---|---|
-| Cooley-Tukey radix-2 FFT | O(n log n) for power-of-2 sizes, OpenMP-parallelized butterfly |
-| Bluestein's algorithm | O(n log n) for arbitrary sizes (prime, non-power-of-2) |
-| FFTW3 delegation | Compile with `VGRE_HAS_FFTW3` for fftw3/fftw3f backend (auto-detected by CMake) |
-| 1D/2D/3D C2C, R2C, C2R | Float and double precision (C2C, Z2Z, R2C, C2R, D2Z, Z2D) |
-| Batched transforms | `cufftPlan1d` with batch > 1, parallelized over batches |
-| Plan handle caching | Plans stored in global map, reusable across exec calls |
-
-**Additional support added (2026-05-16)**: Half-precision `C16C`, `R16C`, and `C16R` execution paths widen to FP32 for FFT math and narrow back to IEEE FP16 on output. `cufftPlanMany` supports strided batched 1D layouts, and planning/state code is split into `cufft_plan.cpp`.
-
-All 13 cuFFT test cases pass.
-
----
-
-### 2.4 cuSPARSE — Format Conversions & Sparse Solvers
-
-**Status**: **IMPLEMENTED for the documented generic API; full-fill direct sparse factorization is an external-backend limitation** (2026-05-16).
-
-| API | Status | Notes |
-|---|---|---|
-| `cusparseCreateCsr` / `cusparseCreateCoo` (generic API descriptors) | **DONE** | Implemented |
-| `cusparseCreateCsc` | **DONE** | Added in `cusparse_format.cpp` — stored as transposed CSR |
-| `cusparseSparseToDense` / `cusparseSparseToDense_bufferSize` | **DONE** | Added in `cusparse_format.cpp` |
-| `cusparseDenseToSparse_bufferSize` / `_analysis` / `_compress` | **DONE** | Added in `cusparse_format.cpp` |
-| `cusparseSpMatGetAttribute` / `cusparseSpMatSetAttribute` | **DONE** | Fill mode, diagonal type |
-| `cusparseSpMatGetSize` / `cusparseCsrSetPointers` | **DONE** | Required by DenseToSparse workflow |
-| `cusparseSpSV_createDescr` / `_destroyDescr` / `_bufferSize` / `_analysis` / `_solve` | **DONE** | Full forward/backward/transposed triangular solve via gather+scatter in `cusparse_triangular.cpp`; supports lower+upper, unit+non-unit diagonal, non-transposed+transposed; FP16/BF16 widen-compute-narrow path |
-| `cusparseSpGEMM` (sparse × sparse) | **DONE** (2026-05-16) | 3-phase workEstimation+compute+copy in `cusparse_factorization.cpp`; float + double + FP16 + BF16 (widen-compute-narrow) |
-| `cusparseScsrilu02` / `cusparseDcsrilu02` (ILU0) | **DONE** (2026-05-16) | In-place ILU with zero fill-in; marker-based O(nnz * avg_row) |
-| `cusparseScsric02` / `cusparseDcsric02` (IC0) | **DONE** (2026-05-16) | In-place incomplete Cholesky with zero fill-in for SPD matrices |
-| Sparse direct factorization (full fill-in LU) | **DONE** (2026-05-17, optional) | `-DVGRE_USE_UMFPACK=ON` links SuiteSparse UMFPACK. When present, `cusparseScsrilu02`/`Dcsrilu02` performs exact full fill-in LU (via `umfpack_di_symbolic/numeric/get_numeric`) and writes L/U values back into the existing CSR sparsity pattern. Without UMFPACK, ILU(0) remains the default. |
-
----
-
-## 3. Tier 2 — Medium Priority Missing (performance/usability gaps)
-
-### 3.1 cuBLASLt — Epilogues & Heuristics
-
-**Status**: **IMPLEMENTED** (2026-05-16).
-
-| API | Status | Notes |
-|---|---|---|
-| `CUBLASLT_EPILOGUE_RELU_AUX` / `GELU_AUX` | **DONE** | Implemented — same as plain ReLU/GELU (no separate aux mask allocation needed for CPU model) |
-| `CUBLASLT_EPILOGUE_DRELU` / `DGELU` | **DONE** | Backward pass gradients: element-wise ReLU/GELU derivative applied in-place |
-| `CUBLASLT_EPILOGUE_DRELU_BGRAD` / `DGELU_BGRAD` | **DONE** | Bias gradient (column-sum) + ReLU/GELU gradient |
-| `CUBLASLT_EPILOGUE_BGRADA` / `BGRADB` | **DONE** | Pure bias gradient column-sum written to `epilogueAuxPtr` |
-| `cublasLtMatmulAlgoGetHeuristic` (singular) | **DONE** | Added singular form; plural `AlgoGetHeuristics` also exists |
-| A/B/C/D scale pointers, amaxD | **DONE** | Stored in MatmulDesc; quantization scale semantics deferred to future |
-| Algorithm caching | **DONE** (2026-05-16) | LRU cache (`kAlgoCacheMax=128` entries) keyed on M/N/K/dtype/epilogue/transA/transB; `cublasLtMatmulAlgoGetHeuristic` populates it |
-
----
-
-### 3.2 cuDNN Backend API — Attention Routing
-
-**Status**: **IMPLEMENTED** (2026-05-16).
-
-`CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR = 36` added. The Execute handler performs scaled dot-product attention directly: `softmax(Q·K^T / scale) · V` with float data. Tensor layout: `(batch, heads, seqLen, head_dim)`.
-
----
-
-### 3.3 cuRAND — Thread Safety
-
-**Status**: **IMPLEMENTED** (2026-05-16).
-
-Registry changed to `unique_ptr<GeneratorState>` with `std::mutex genMutex` per handle. All generate calls (`curandGenerate`, `GenerateUniform`, `GenerateNormal`, `GenerateLogNormal`, `GeneratePoisson`, etc.) lock `st->genMutex` before accessing `st->engine`. Concurrent calls on different handles are fully parallel; concurrent calls on the same handle serialize correctly.
-
-| Remaining limitation |
-|---|
-| Device-side `curand_*` API returns `CURAND_STATUS_NOT_SUPPORTED` by design (no device model in CPU emulation) |
-
----
-
-### 3.4 Profiling — Hardware Sampling Caveat
-
-| Missing | Impact | Notes |
-|---|---|---|
-| NVIDIA hardware PMU/CUPTI counters | No physical GPU counter stream in CPU runtime | `runtime_profiler_instruction.cpp` classifies generated LLVM IR into load/store/ALU/branch/barrier/other buckets. If IR is absent, counts are retained as `otherCount` rather than guessed. |
-| CUPTI-equivalent API surface | PyTorch profiler integration | Only basic kernel timeline + Chrome trace export exists |
-
----
-
-### 3.5 Texture / Surface — Filter Gaps
-
-| Feature | Status | Notes |
-|---|---|---|
-| Trilinear filtering (`LINEAR` + mipmaps) | **DONE** | `tex2DLod` performs bilinear sampling at each mip level then blends linearly between adjacent levels |
-| Anisotropic filtering | **DONE** | `maxAnisotropy` used in `tex2D` — up to 16× samples averaged along U and V axes |
-| SRGB gamma decode (`CU_TRSF_SRGB`) | **DONE** (2026-05-16) | `TextureDescriptor::srgbDecode` flag; when true, UINT8/UINT16 texels decoded via IEC 61966-2-1 (`srgbToLinear`) before sampling |
-
----
-
-## 3.6 cuSOLVER Sparse API (cusolverSp)
-
-**Status**: **IMPLEMENTED** (2026-05-16) via CSR→dense extraction + LAPACK.
-
-| API | Status | Implementation |
-|---|---|---|
-| `cusolverSpCreate` / `Destroy` / `SetStream` | **DONE** | Handle lifecycle |
-| `cusolverSpScsrlsvlu` / `Dcsrlsvlu` | **DONE** | CSR→dense + `sgetrf_`/`sgetrs_` |
-| `cusolverSpScsrlsvchol` / `Dcsrlsvchol` | **DONE** | CSR→dense + `spotrf_`/`spotrs_` |
-| `cusolverSpScsrlsqvqr` / `Dcsrlsqvqr` | **DONE** | CSR→dense + `sgelsd_` with workspace query |
-| `cusolverSpScsreigvsi` / `Dcsreigvsi` | **DONE** | Shift-invert power iteration with LU factored (A - mu0·I) |
-
-**Approach**: Each routine extracts the sparse CSR matrix into a dense column-major array
-(O(n²) memory), delegates to the corresponding LAPACK routine, then writes the result back.
-Correct for moderate n (≤ ~4096). For very large sparse systems where O(n²) memory is
-prohibitive, link against UMFPACK (LU) or CHOLMOD (Cholesky) and replace the extraction path.
-
-**Tested**: `tests/api/test_cusolver_sp.cpp` — 6 tests (handle, null rejection, LU double, LU float, Cholesky, least-squares QR). All pass.
-
----
-
-## 4. Tier 3 — Low Priority / Architectural Limitations
-
-### 4.1 NCCL — Multi-Node Performance
-
-| Limitation | Impact | Notes |
-|---|---|---|
-| RDMA requires explicit build + hardware/software RoCE | TCP fallback remains default | RDMA/RoCE transport is implemented in `src/advanced/rdma_transport.cpp` and activated with `-DVGRE_ENABLE_RDMA=ON` plus libibverbs; otherwise TCPCluster is used. Chunked large transfers (>bounceCapacity) are now supported via loop in `memory_sync_manager.cpp`. |
-| No NVLink-style P2P | Single-node only uses shared memory | `ncclSend/Recv` use shared-memory slots on single node; TCP routing is functional but not optimized |
-| ~~No topology-aware tree/ring~~ | **DONE** (2026-05-17) | Three-tier algorithm selection: flat barrier (≤64 KB, lowest latency), binary tree reduce (64 KB–1 MB, log₂N rounds distributing reduction work), ring allreduce (>1 MB, bandwidth-optimal). Thresholds: `kTreeThreshold=64 KB`, `kRingThreshold=1 MB`. |
-
----
-
-### 4.2 CUDA Runtime — Legacy/Debug Stubs
-
-| API | Status | Notes |
-|---|---|---|
-| `cudaThreadExit` / `cudaThreadSynchronize` | No-op wrappers | Legacy 1.x APIs; thin wrappers around device APIs |
-| `cudaDeviceFlushGPUDirectRDMAWrites` | No-op | RDMA not applicable in CPU model |
-| `cudaProfilerStart` / `cudaProfilerStop` | No-op | No external profiler attached |
-| `cudaGraphDebugDotPrint` | Full DOT output | Emits GraphViz with per-node labels: kernel name + grid/block dims + arg count; memcpy/memset byte sizes |
-
----
-
-### 4.3 PTX ISA — Edge Cases
-
-| Limitation | Impact | Notes |
-|---|---|---|
-| `tex` v2/v4 per-channel fetch | **DONE** (2026-05-17) | `vgre_tex{1D,2D,3D}_chan_f32(tex,…,channel)` reads the nth float from packed float2/float3/float4 elements. PTX translator updated to emit per-channel calls instead of scalar replication. |
-| `txq` real texture dimensions | **DONE** (2026-05-17) | `vgre_txq_{width,height,depth,channels}(tex)` queries the live `TextureManager` instance. `channels` = `elementSize / sizeof(float)` for FLOAT32 elements. PTX translator updated. |
-| `cp.async.bulk.tensor.{3,4,5}d` → serial loop | TMA is emulated as strided memcpy | Correctness preserved; performance is serial |
-| `tcgen05.mma` delegates to `wgmma` | Blackwell tensor core emulated as Hopper | Correct for BF16/FP16/TF32 shapes; no true SM100-specific behavior |
-
----
-
-## 5. Documentation vs. Source Discrepancies
-
-The following items were **previously claimed as separate files** in `implementationPlan.md` but are actually **implemented within existing files**:
-
-| Claimed File | Actual Location | Status |
-|---|---|---|
-| `src/core/graph/graph_manager_exec_update_v2.cpp` | `src/api/cuda_interceptor_graphs.cpp::graphExecUpdateV2()` | Implemented |
-| `src/api/cudnn/cudnn_int8_packed.cpp` | `src/api/cudnn/cudnn_{convolution,pooling,activation}.cpp` (INT8x4/INT8x32 branches) | Implemented |
-| `src/api/cudart/cudart_shim_cdp.cpp` | `src/runtime/cdp_executor.cpp` | Implemented |
-| `src/advanced/profiling/cupti_equivalent.cpp` | `src/advanced/runtime_profiler.cpp` | Implemented as Chrome/OTLP trace export, not NVIDIA CUPTI |
-| `src/advanced/profiling/kernel_timeline.cpp` | `src/advanced/runtime_profiler.cpp` | Implemented |
-| `src/advanced/profiling/instruction_sampler.cpp` | `src/advanced/runtime_profiler_instruction.cpp` | Implemented via LLVM-IR classification |
-
----
-
-## 6. Resolved Items (2026-05-15)
-
-The following items that were previously potential concerns have been resolved:
-
-| Item | Resolution | Date |
-|---|---|---|
-| Monolithic file maintainability | 8 files (>800 lines) split into 22 smaller files with zero method loss | 2026-05-15 |
-| `cudart_shim.cpp` too large (1429 lines) | Split into 4 files: core (994), memory_pool (240), cooperative (201), mipmap (90) | 2026-05-15 |
-| `cublas_level2.cpp` too large (1018 lines) | Split into standard (455) + packed/banded (570) | 2026-05-15 |
-| `cublas_level3.cpp` too large (1173 lines) | Split into GEMM/core (1025) + batched BLAS3 (154) | 2026-05-15 |
-| `cuda_interceptor.cpp` too large (1147 lines) | Split into core (869) + device attrs (309) | 2026-05-15 |
-| `vector_engine.cpp` too large (1163 lines) | Split into core (460) + float ops (371) + double ops (412) | 2026-05-15 |
-| `graph_manager.cpp` too large (975 lines) | Split into lifecycle (228) + nodes (519) + serde (265) | 2026-05-15 |
-| `adaptive_execution_engine.cpp` too large (1082 lines) | Split into core (489) + record (251) + tune (535) | 2026-05-15 |
-| `hybrid_compute_manager.cpp` too large (930 lines) | Split into core (342) + remote (288) + workload (383) | 2026-05-15 |
-
----
-
-## 7. Recommendations
-
-1. ~~**Complex BLAS**~~ — **DONE** (2026-05-15). C/Z Level-1/2/3 implemented.
-2. ~~**cuFFT FFTW3 delegation**~~ — **DONE** (2026-05-15). O(n log n) Cooley-Tukey + Bluestein + optional FFTW3.
-3. ~~**cuSOLVER LU/least-squares**~~ — **DONE** (2026-05-15). getrf, getrs, ormqr, gelsd all via LAPACK delegation.
-4. ~~**cuSPARSE format conversions + sparse triangular solve**~~ — **DONE** (2026-05-16). CSC, SparseToDense, DenseToSparse, SpSV, SpGEMM, ILU0, IC0 all implemented.
-5. ~~**cuBLASLt heuristic selection**~~ — **DONE** (2026-05-16). `cublasLtMatmulAlgoGetHeuristic` with 128-entry LRU cache.
-6. ~~**cuDNN Backend attention routing**~~ — **DONE** (2026-05-16). Scaled dot-product attention via `CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR`.
-7. ~~**cuSOLVER sparse API (cusolverSp)**~~ — **DONE** (2026-05-16). `csrlsvlu`, `csrlsvchol`, `csrlsqvqr`, `csreigvsi` via CSR→dense + LAPACK. 6 tests pass.
-8. **Cross-platform discipline**: New OS-dependent code must use `*_linux.cpp` / `*_macos.cpp` / `*_win32.cpp` split pattern.
-9. **Memory discipline**: Every new memory allocation goes through `MemoryManager`. Every new compute path integrates with `AdaptiveExecutionEngine`.
-10. **File size discipline**: No source file should exceed 800 lines for shims or 600 lines for core logic. Split by concern when approaching limits.
-
----
-
-## 8. Sixth Pass — Additional Fixes (2026-05-16)
-
-| Item | Resolution |
-|------|-----------|
-| `TCPClusterPreservation` test failure | Hardcoded port 17779 conflicted with VS Code. Fixed: all test ports use `findFreePort()` |
-| `cudnn_backend_internal.h` extern/linkage mismatch | `cudnn_backend_api.cpp` now includes the header; duplicate definitions removed; globals at file scope |
-| `cudart_shim_array_memcpy.cpp` not compiled | Added to `vgre_cudart_shims`; fixed `cudaArray_const_t` typedef and missing `kind` argument |
-| Test count | **116/116 pass** |
-
----
-
-## 9. Seventh Pass — Additional Fixes (2026-05-16)
-
-| Item | Resolution |
-|------|-----------|
-| `curandGeneratePoisson`, `curandGenerateSeeds`, `curandGetVersion`, IPC functions | Added to `curand_shim.h`; `curandGetVersion` returns 1100000 |
-| `curandGetDirectionVectors32/64` signature | Changed `*` → `**` to match NVIDIA API (returns pointer to pre-computed static table) |
-| `curandGeneratorIpcHandle_t` | Now a public typedef in header (was private struct); 64-byte layout matches implementation |
-| `cufftSetStream` was a stub | Added `stream` field to `CufftPlan`; `cufftSetStream` stores it; `cufftGetStream` retrieves it |
-| `cufftGetVersion` missing | Implemented; returns 11000 (cuFFT 11.0) |
-| `cublasLtGetVersion`, `cublasLtGetCudartVersion`, `cublasLtGetStatusName/String`, `cublasLtMatmulAlgoGetHeuristics` | Declared in header; plural heuristics delegates to singular (LRU cache shared) |
-| `cudaArrayDestroy` missing | Added to `cudart_shim_stream.cpp` as alias for `cudaFreeArray` |
-| cuRAND test coverage | New `tests/api/test_curand.cpp` — 15 tests all pass |
-| Test count | **117/117 pass** |
-
----
-
-## 10. Eighth Pass — Missing API Implementations (2026-05-16)
-
-| Item | Resolution |
-|------|-----------|
-| `cudnnGetFilter4dDescriptor`, `cudnnGetConvolution2dDescriptor`, `cudnnGetActivationDescriptor`, `cudnnGetOpTensorDescriptor`, `cudnnGetReduceTensorDescriptor` | Implemented in `cudnn_core.cpp`; read back all descriptor fields |
-| `cudnnSetConvolutionGroupCount` / `cudnnGetConvolutionGroupCount` | Implemented in `cudnn_core.cpp`; `ConvDesc.groupCount` field added |
-| `cudnnSetConvolutionMathType` / `cudnnGetConvolutionMathType` | Implemented in `cudnn_core.cpp`; `ConvDesc.mathType` field added |
-| `cudnnGetDropoutDescriptor` | Implemented in `cudnn_core.cpp`; reads dropout/states/seed |
-| `cudnnConvolutionBiasActivationForward` | Fused `y = activation(α₁·conv(x,w) + α₂·z + bias)` in `cudnn_convolution.cpp` |
-| `cusparseScsrmv` / `cusparseDcsrmv` | Legacy Level-2 CSR SpMV with transpose + index-base support |
-| `cusparseScsrmm` / `cusparseDcsrmm` | Legacy Level-3 CSR SpMM (sparse × dense → dense) |
-| `cusparseMatDescr_t` + create/destroy/set helpers | Legacy matrix descriptor in `cusparse_core.cpp` |
-| `cublasGetVersion` | Unversioned alias for `cublasGetVersion_v2` |
-| `cublasSetVector` / `cublasGetVector` | Strided element copy |
-| `cublasSetMatrix` / `cublasGetMatrix` | Row-major ↔ column-major strided layout conversion |
-| Test count | **117/117 pass** |
-
----
-
-## 11. Ninth Pass — File Size Discipline (2026-05-16)
-
-| Item | Resolution |
-|------|-----------|
-| `cublas_level3.cpp` 1024 → 698 lines | HGEMM + GemmEx (FP16/BF16/INT8/complex) extracted to `cublas_gemm_ex.cpp` (302 lines) |
-| `cudart_shim.cpp` 993 → 671 lines | CUDA Graph create/destroy/capture/launch/clone/update + ext-semaphore nodes extracted to `cudart_shim_graph_basic.cpp` (252 lines) |
-| All other shim files | Under 800-line limit |
-| Test count | **117/117 pass** |
-
----
-
----
-
-## 12. Cross-Platform Hardening (2026-05-17)
-
-| Item | Resolution |
-|------|-----------|
-| `vgre_sync.bat` hardcoded `Visual Studio\2022` | Dynamic `vswhere.exe` detection; multi-version fallback (VS 2015–2025 + Preview) |
-| `- was unexpected at this time` batch crash | `_PF86`/`_PF64` variables capture `ProgramFiles(x86)`/`ProgramFiles` before nested blocks |
-| CMake generator mismatch on reconfigure | `CMakeCache.txt` `CMAKE_GENERATOR:INTERNAL` read; cache deleted when generator changes |
-| `Unknown escape "\P"` in CMake REGEX REPLACE | Backslashes converted to forward slashes before REGEX on DIA SDK path |
-| `Could NOT find LAPACK` on Windows | `VGRE_USE_LAPACK` defaults `OFF` on `WIN32`; `ON` on Linux/macOS |
-| `vgre-token` CommandNotFoundException | CLI tools installed before build; current-session PATH updated immediately |
-| macOS `libomp` not found on Apple Silicon | `/opt/homebrew/{lib,opt/libomp/lib}` paths added to OMP search |
-| macOS Flutter URL wrong (`.tar.xz` vs `.zip`) | Platform-conditional download URL |
-| macOS `ldd` unavailable for ASAN check | Uses `otool -L` on `darwin`, `ldd` on Linux |
-| macOS GCC symlink creation failure | Guarded to Linux only |
-| Test count | **117/117 pass** |
-
----
-
-## 13. RDMA Transport Improvements (2026-05-17)
-
-| Item | Resolution |
-|------|-----------|
-| Per-call `ibv_reg_mr` (one MR per write) | Single MR registered for full source buffer per `rdmaWriteToRemote` call |
-| `pollCompletion` 100% CPU spin | First 1000 spins: `__builtin_ia32_pause()` / ARM `yield`; then `std::this_thread::yield()` |
-| No chunking for transfers > bounceCapacity | `sendFullSyncTCP` and delta-sync loop over bounce-sized chunks; each chunk sends `DATA_HEADER_RDMA` with `chunk_size`+`dst_offset` |
-| Receiver always wrote chunk to allocation base | Client `DATA_HEADER_RDMA` handler now uses `rdmaPkt.dst_offset`; allocates only on `dst_offset==0` |
-| ARM cache coherency after bounce copy | `std::atomic_thread_fence(std::memory_order_acquire)` added after memcpy from bounce buffer |
-| `DataHeaderRDMAPacket` `size` field ambiguous for multi-chunk | Replaced `uint64_t size` with `uint32_t chunk_size` + `uint32_t dst_offset` (struct stays 16 bytes) |
-| `#include <thread>` missing in rdma_transport.cpp | Added for `std::this_thread::yield()` |
-| Test count | **117/117 pass** |
-
----
-
-## 14. Cluster / GPU / Mesh Improvements (2026-05-17)
-
-| Item | Resolution |
-|------|-----------|
-| Worker lacked `--threads`/`--no-gpu` flags | `vgre_worker_cli.cpp`: `--threads <n>` sets `VGRE_WORKER_THREADS`; `--no-gpu` skips all GPU probes |
-| Dispatch always used CPU JIT | `dispatch_manager_remote.cpp`: cascade — GPUPassthrough → IGPUOpenCLExecutor → CPU JIT |
-| Master always picked first active worker | `tcp_cluster_manager.cpp`: `getGpuCapableWorker()` picks lowest-`in_flight` GPU-capable worker |
-| Full-mesh required env var `VGRE_ENABLE_MESH_TOPOLOGY=1` | Auto-enabled when 2nd `CAPABILITY` packet received in `server_packet_dispatch.cpp` |
-| `test_phase3_cluster` timeout under `ctest -j$(nproc)` | `RUN_SERIAL TRUE` in `tests/CMakeLists.txt` prevents CPU starvation |
-| `INT_MAX` undeclared in `tcp_cluster_manager.cpp` | `#include <climits>` added |
-| IGPUBackendIntegration SEGFAULT on missing OpenCL | Failure path changed to graceful skip + non-zero return to CTest |
-| Test count | **117/117 pass** |
-
----
-
-## 15. vgre-token & CLI Tools (2026-05-17)
-
-| Item | Resolution |
-|------|-----------|
-| `vgre-token install` subcommand missing | `vgre-token.ps1`: new `Cmd-Install` copies scripts to `%LOCALAPPDATA%\VGRE\scripts\`, updates User + Process PATH |
-| No standalone CLI installer | New `scripts/Install-VGRETools.ps1`: installs all VGRE scripts + bat launchers, updates User + Process PATH, requires no build |
-| CLI tools only available after successful build | `vgre_sync.bat` runs CLI install step before `cmake`/`cmake --build`; tools available even on build failure |
-| `Setup-VGRECluster.ps1` didn't update current-session PATH | Added `$env:PATH` Process-scope update; expanded copied-file list to include all VGRE scripts |
-| Test count | **117/117 pass** |
-
----
-
----
-
-## 16. Eleventh Pass — PTX Texture, cuSPARSE UMFPACK, NCCL Tree (2026-05-17)
-
-| Item | Resolution |
-|------|-----------|
-| PTX `txq.width/height/depth/channels` hardcoded 1024/1/1 | `vgre_txq_{width,height,depth,channels}(tex)` added to `texture_builtins.cpp`; backed by `TextureManager::getTextureInfo()`. `ptx_texture_ops.cpp` updated to emit real calls. |
-| PTX `tex.*.v2/v4` replicated scalar for all channels | Per-channel functions `vgre_tex{1D,2D,3D}_chan_f32(tex,…,ch)` added; `TextureManager::tex{1D,2D,3D}Chan()` + `sampleTexelChan()` + `readElementChannel()` implemented. PTX translator emits per-channel call for each component. |
-| `tld4.2d.v4` single-sample replicated | Updated to fetch four distinct 2×2 footprint samples (point offsets +0/+1 in x and y) via per-channel function. |
-| cuSPARSE full fill-in sparse LU (UMFPACK-style) | Optional `-DVGRE_USE_UMFPACK=ON`; CMake auto-detects via pkg-config or manual search. `umfpack_lu_inplace<T>` in `cusparse_factorization.cpp` performs exact LU, writes factors back into original CSR sparsity. ILU(0) remains fallback. |
-| NCCL AllReduce: only flat-barrier or ring | Three-tier: flat barrier (≤64 KB), binary tree reduce (64 KB–1 MB, distributes reduction across log₂N ranks), ring (>1 MB). |
-| `TextureManager::getTextureInfo()` absent | Added to `texture_manager.h` + `texture_manager_sampling.cpp`; `channels = elementSize/sizeof(float)` for packed float vector textures. |
-| Test count | **117/117 pass** |
-
----
-
----
-
-## 17. Twelfth Pass — JIT Cache Corruption + header fix (2026-05-18)
-
-| Item | Resolution |
-|------|-----------|
-| `registerKernel` reused stale cached function when `KernelId` passed uninitialized (O3 stack reuse → `outId != 0` collision with existing kernel ID) | Added name-deduplication check at top of `registerKernel`: if kernel name already exists, return its existing ID immediately. Tightened `outId` guard: only accept non-zero `outId` values within `nextKernelId_ + 65536` range. `src/core/runtime_engine.cpp`. |
-| JIT wrapper `compute_kernel_wrapper` declared without `extern "C"` → C++ name mangling caused `ES.lookup` to fall back to the wrong symbol (previous kernel's compiled code) | Added `extern "C"` to the generated wrapper function in `generateWrapperSource`. `src/compiler/llvm_translation_codegen.cpp`. |
-| `cub_fallback.h` redeclared `__shfl_sync`/`__shfl_up_sync` with default arguments already defined in `cpu_cuda_warp.h` → JIT kernel compilation failure (C++11 error: redefinition of default argument) | Removed duplicate forward declarations from `cub_fallback.h`. `include/vgre/compiler/cuda_device_libs/cub_fallback.h`. |
-| `MultiDeviceCooperativeComprehensive` SEGFAULT (wrong function executed for `compute_kernel`) | Fixed by all three changes above. Test now passes. |
-| Test count | **117/117 pass** |
-
----
-
-*Last updated: 2026-05-18 (twelfth pass). 117/117 tests pass. JIT cache corruption fixed (name deduplication + extern C wrapper + cub_fallback header).*

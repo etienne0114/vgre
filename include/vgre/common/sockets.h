@@ -1,23 +1,14 @@
 #ifndef VGRE_COMMON_SOCKETS_H
 #define VGRE_COMMON_SOCKETS_H
 
+#include "vgre/common/os_backend.h"
 #if defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <mstcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 #else
-#include <arpa/inet.h>
-#include <fcntl.h>
 #include <netdb.h>
-#include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <poll.h>
 #include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <errno.h>
 #endif
 
 #include <atomic>

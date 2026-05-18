@@ -247,6 +247,7 @@ private:
   friend class SecurityManager;
   friend class CollectiveOpsManager;
   friend class DispatchManager;
+  friend class MemorySyncManager;
   std::unique_ptr<ISocketFactory> socket_factory_;
   std::unique_ptr<IMemoryManager> memory_manager_;
   std::unique_ptr<IKernelManager> kernel_manager_;
@@ -445,6 +446,9 @@ private:
   std::vector<uint8_t> *active_staging_ = &client_rx_staging_A_;
   std::vector<uint8_t> *processing_staging_ = &client_rx_staging_B_;
   std::mutex staging_mutex_;
+  
+  std::mutex shutdown_mutex_;
+  std::condition_variable shutdown_cv_;
   std::condition_variable staging_cv_;
   std::atomic<bool> staging_ready_{false};
   struct PendingArg {

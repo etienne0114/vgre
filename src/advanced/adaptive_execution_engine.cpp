@@ -16,12 +16,12 @@
 
 #include "vgre/common/openmp_helper.h"
 
+#include "vgre/common/os_backend.h"
 #if defined(__linux__)
 #include <dirent.h>
 #include <linux/perf_event.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
-#include <unistd.h>
 #endif
 
 #if defined(__APPLE__)
@@ -31,7 +31,6 @@
 #endif
 
 #if defined(_WIN32)
-#include <windows.h>
 #include <wbemidl.h>
 #include <comdef.h>
 #pragma comment(lib, "wbemuuid.lib")
@@ -438,8 +437,11 @@ float AdaptiveExecutionEngine::getDeviceTemperature() const {
           }
 
           s_cachedTemp.store(maxTemp, std::memory_order_relaxed);
-          // Sleep 5 seconds between polls — temperature doesn't change faster.
-          std::this_thread::sleep_for(std::chrono::seconds(5));
+          // Wait 5 seconds between polls — use CV so it is interruptible.
+          static std::mutex s_tempPollMutex;
+          static std::condition_variable s_tempPollCv;
+          std::unique_lock<std::mutex> pollLock(s_tempPollMutex);
+          s_tempPollCv.wait_for(pollLock, std::chrono::seconds(5));
         }
 
         CoUninitialize();

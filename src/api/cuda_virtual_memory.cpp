@@ -20,14 +20,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#if defined(__linux__) || defined(__APPLE__)
-#include <sys/mman.h>
-#include <unistd.h>
-#endif
-
-#if defined(_WIN32)
-#include <windows.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 // ── Types (mirror CUresult / CUmemHandle from cuda.h) ────────────────────────
 using CUresult = int;
@@ -111,11 +104,7 @@ std::unordered_map<uint64_t, MCObject>& getMCObjects() {
 }
 
 static size_t pageSize() {
-#if defined(_WIN32)
-    SYSTEM_INFO si; GetSystemInfo(&si); return si.dwPageSize;
-#else
-    return static_cast<size_t>(sysconf(_SC_PAGESIZE));
-#endif
+    return vgre::os::page_size();
 }
 
 struct ShareableMemHandle {

@@ -11,14 +11,7 @@
 #include <cstring>
 #include <algorithm>
 
-#if defined(__linux__) || defined(__APPLE__)
-#include <unistd.h>
-#include <sys/stat.h>
-#endif
-
-#if defined(_WIN32)
-#include <windows.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace advanced {

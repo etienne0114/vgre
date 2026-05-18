@@ -19,18 +19,10 @@
 #include <thread>
 #include <vector>
 
-#if defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
-#elif defined(__APPLE__)
-#include <sys/sysctl.h>
-#include <unistd.h>
-#else
+#include "vgre/common/os_backend.h"
+#if !defined(_WIN32)
+#include <dirent.h>  // opendir/readdir — Linux/macOS iGPU device scan
 #include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <dirent.h>
 #endif
 
 namespace vgre {
@@ -302,6 +294,7 @@ void HybridComputeManager::startRebalancing(unsigned int intervalMs) {
 
 void HybridComputeManager::stopRebalancing() {
   stopRebalance_.store(true);
+  rebalanceCv_.notify_all();
   if (rebalanceThread_.joinable()) {
     rebalanceThread_.join();
     VGRE_LOG_INFO("HybridComputeManager", "Dynamic rebalancing stopped");
@@ -314,12 +307,9 @@ bool HybridComputeManager::isRebalancing() const {
 
 void HybridComputeManager::rebalanceLoop(unsigned int intervalMs) {
   while (!stopRebalance_.load()) {
-    // Sleep in 100 ms increments so we can respond to stop quickly.
-    for (unsigned int elapsed = 0;
-         elapsed < intervalMs && !stopRebalance_.load();
-         elapsed += 100) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+    std::unique_lock<std::mutex> lock(rebalanceMutex_);
+    rebalanceCv_.wait_for(lock, std::chrono::milliseconds(intervalMs),
+                          [this]() { return stopRebalance_.load(); });
     if (!stopRebalance_.load()) {
       doRebalance();
     }

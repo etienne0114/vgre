@@ -2,8 +2,8 @@
 #include "vgre/common/logger.h"
 
 #if defined(_WIN32)
-#include <windows.h>
-#include <wincred.h>
+#include "vgre/common/os_backend.h"
+#include <wincred.h>  // CredWriteW/CredReadW/CredDeleteW
 
 namespace vgre {
 namespace advanced {

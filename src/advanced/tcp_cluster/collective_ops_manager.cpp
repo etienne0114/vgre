@@ -6,12 +6,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include "vgre/common/os_backend.h"
 #if defined(__linux__)
-#include <sys/sysinfo.h>
+#include <sys/sysinfo.h>  // struct sysinfo — RAM stats
 #elif defined(__APPLE__)
-#include <sys/sysctl.h>
-#elif defined(_WIN32)
-#include <windows.h>
+#include <sys/sysctl.h>   // sysctl — memory query
 #endif
 
 // SIMD intrinsics headers

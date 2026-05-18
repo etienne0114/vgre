@@ -19,13 +19,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "vgre/common/os_backend.h"
 #if defined(__linux__)
-#include <sys/eventfd.h>
-#include <unistd.h>
-#include <poll.h>
-#endif
-#if defined(_WIN32)
-#include <windows.h>
+#include <sys/eventfd.h>  // eventfd() — semaphore file descriptor
 #endif
 
 // ── External semaphore handle types (mirror CUDA headers) ────────────────────

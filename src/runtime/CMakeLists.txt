@@ -16,6 +16,5 @@ target_include_directories(vgre_runtime PUBLIC
     ${PROJECT_SOURCE_DIR}/include
 )
 
-target_link_libraries(vgre_runtime PUBLIC
-    OpenMP::OpenMP_CXX
+target_link_libraries(vgre_runtime PRIVATE
 )

@@ -9,15 +9,12 @@
 #include <sstream>
 #include <unordered_map>
 
+#include "vgre/common/os_backend.h"
 #if defined(_WIN32)
-#include <shlobj.h>
-#include <windows.h>
-#include <direct.h>
+#include <shlobj.h>   // SHGetFolderPathA
+#include <direct.h>   // _mkdir
 #else
-#include <pwd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
+#include <pwd.h>      // getpwuid — home dir lookup
 #endif
 
 namespace vgre {

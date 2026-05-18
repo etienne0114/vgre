@@ -9,9 +9,7 @@
 #include <thread>
 #include <chrono>
 
-#ifdef _WIN32
-#include <winsock2.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace advanced {
@@ -58,7 +56,12 @@ VGREResult WindowsSocketManager::initialize() {
                 if (recovery_result == VGREResult::SUCCESS) return VGREResult::SUCCESS;
             } else if (result == WSAEINPROGRESS) {
                 VGRE_LOG_WARN("WindowsSocketManager", "WSAStartup already in progress");
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                {
+                    std::mutex wsa_cv_mutex;
+                    std::condition_variable wsa_cv;
+                    std::unique_lock<std::mutex> lk(wsa_cv_mutex);
+                    wsa_cv.wait_for(lk, std::chrono::milliseconds(500));
+                }
                 ref_count_ = 0;
                 VGREResult recovery_result = attemptRecovery(3);
                 if (recovery_result == VGREResult::SUCCESS) return VGREResult::SUCCESS;

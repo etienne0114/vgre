@@ -12,15 +12,16 @@
 #endif
 
 #if defined(__linux__) && defined(__x86_64__)
-#include <sys/syscall.h>
-#include <unistd.h>
-// arch_prctl numbers for AMX tile-data state enablement
+#include "vgre/common/os_backend.h"
+#include <sys/syscall.h>  // SYS_arch_prctl — AMX tile-data state
 #ifndef ARCH_REQ_XCOMP_PERM
 #define ARCH_REQ_XCOMP_PERM  0x1023
 #endif
 #ifndef XFEATURE_XTILEDATA
 #define XFEATURE_XTILEDATA   18
 #endif
+#else
+#include "vgre/common/os_backend.h"
 #endif
 
 // SIMD intrinsics — guarded by compile-time checks

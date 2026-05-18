@@ -19,18 +19,10 @@
 #include <thread>
 #include <vector>
 
-#if defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
-#elif defined(__APPLE__)
-#include <sys/sysctl.h>
-#include <unistd.h>
-#else
+#include "vgre/common/os_backend.h"
+#if !defined(_WIN32)
+#include <dirent.h>  // opendir/readdir — Linux/macOS iGPU device scan
 #include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <dirent.h>
 #endif
 
 namespace vgre {

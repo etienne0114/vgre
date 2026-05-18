@@ -8,12 +8,11 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/FormatVariadic.h"
 
-#ifdef _WIN32
-#include <windows.h>
-#include <shlobj.h>
+#include "vgre/common/os_backend.h"
+#if defined(_WIN32)
+#include <shlobj.h>  // SHGetFolderPathA — AppData path
 #else
-#include <unistd.h>
-#include <pwd.h>
+#include <pwd.h>     // getpwuid — home dir for cache path
 #endif
 
 namespace vgre {
