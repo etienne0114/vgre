@@ -399,5 +399,128 @@ double TextureManager::sampleTexel(const TextureObject &tex, int x, int y, int z
   return readElementValue(tex, linear);
 }
 
+// ── Per-channel element read ──────────────────────────────────────────────────
+// Reads the nth float-channel within a packed vector element (e.g. float4).
+// For FLOAT32: element layout is [ch0 f32, ch1 f32, ...].
+// For all other element types channel 0 is the whole element; ch>0 returns 0.
+float TextureManager::readElementChannel(const TextureObject &tex,
+                                          size_t linearIndex,
+                                          unsigned channel) const {
+  if (!tex.data) return 0.0f;
+  const uint8_t *base = static_cast<const uint8_t *>(tex.data);
+  const uint8_t *elem = base + tex.offsetInBytes + linearIndex * tex.elementSize;
+
+  if (tex.desc.elementType == TextureElementType::FLOAT32) {
+    unsigned numCh = static_cast<unsigned>(tex.elementSize / sizeof(float));
+    if (numCh == 0) numCh = 1;
+    if (channel >= numCh) return 0.0f;
+    return reinterpret_cast<const float *>(elem)[channel];
+  }
+  // For non-float element types multi-channel packing is not supported;
+  // channel 0 returns the scalar value, higher channels return 0.
+  if (channel > 0) return 0.0f;
+  return readElementAsFloat(tex, linearIndex);
+}
+
+// ── Per-channel texel sample ──────────────────────────────────────────────────
+float TextureManager::sampleTexelChan(const TextureObject &tex,
+                                       int x, int y, int z,
+                                       unsigned channel) const {
+  if (tex.width == 0) return 0.0f;
+
+  int rx = applyAddressMode(x, static_cast<int>(tex.width),  tex.desc.addressMode);
+  int ry = applyAddressMode(y, static_cast<int>(tex.height), tex.desc.addressMode);
+  int rz = applyAddressMode(z, static_cast<int>(tex.depth),  tex.desc.addressMode);
+
+  if (rx < 0 || ry < 0 || rz < 0)
+    return tex.desc.borderColor;
+
+  size_t linear = static_cast<size_t>(rz) * tex.width * tex.height +
+                  static_cast<size_t>(ry) * tex.width +
+                  static_cast<size_t>(rx);
+
+  return readElementChannel(tex, linear, channel);
+}
+
+// ── getTextureInfo ────────────────────────────────────────────────────────────
+bool TextureManager::getTextureInfo(TextureId id, TextureInfo &out) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = textures_.find(id);
+  if (it == textures_.end()) return false;
+  const auto &tex = it->second;
+  out.width  = tex.width;
+  out.height = (tex.height == 0) ? 1 : tex.height;
+  out.depth  = (tex.depth  == 0) ? 1 : tex.depth;
+  if (tex.desc.elementType == TextureElementType::FLOAT32 && tex.elementSize > sizeof(float)) {
+    out.channels = static_cast<unsigned>(tex.elementSize / sizeof(float));
+  } else {
+    out.channels = 1;
+  }
+  return true;
+}
+
+// ── Per-channel tex1D/2D/3D ──────────────────────────────────────────────────
+float TextureManager::tex2DChan(TextureId id, float x, float y,
+                                 unsigned channel) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = textures_.find(id);
+  if (it == textures_.end()) return 0.0f;
+  const auto &tex = it->second;
+
+  int w = static_cast<int>(tex.width);
+  int h = static_cast<int>(tex.height);
+  float sx = tex.desc.normalizedCoords ? x * static_cast<float>(w) : x;
+  float sy = tex.desc.normalizedCoords ? y * static_cast<float>(h) : y;
+
+  if (tex.desc.filterMode == TextureFilterMode::POINT) {
+    int ix = static_cast<int>(std::floor(sx));
+    int iy = static_cast<int>(std::floor(sy));
+    return sampleTexelChan(tex, ix, iy, 0, channel);
+  }
+
+  // Bilinear interpolation per-channel
+  float fx = sx - 0.5f, fy = sy - 0.5f;
+  int x0 = static_cast<int>(std::floor(fx));
+  int y0 = static_cast<int>(std::floor(fy));
+  float frX = fx - static_cast<float>(x0);
+  float frY = fy - static_cast<float>(y0);
+  float v00 = sampleTexelChan(tex, x0,     y0,     0, channel);
+  float v10 = sampleTexelChan(tex, x0 + 1, y0,     0, channel);
+  float v01 = sampleTexelChan(tex, x0,     y0 + 1, 0, channel);
+  float v11 = sampleTexelChan(tex, x0 + 1, y0 + 1, 0, channel);
+  float top = v00 * (1.0f - frX) + v10 * frX;
+  float bot = v01 * (1.0f - frX) + v11 * frX;
+  return top * (1.0f - frY) + bot * frY;
+}
+
+float TextureManager::tex1DChan(TextureId id, float x, unsigned channel) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = textures_.find(id);
+  if (it == textures_.end()) return 0.0f;
+  const auto &tex = it->second;
+  int w  = static_cast<int>(tex.width);
+  float sx = tex.desc.normalizedCoords ? x * static_cast<float>(w) : x;
+  int ix = static_cast<int>(std::floor(sx));
+  return sampleTexelChan(tex, ix, 0, 0, channel);
+}
+
+float TextureManager::tex3DChan(TextureId id, float x, float y, float z,
+                                 unsigned channel) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = textures_.find(id);
+  if (it == textures_.end()) return 0.0f;
+  const auto &tex = it->second;
+  int w = static_cast<int>(tex.width);
+  int h = static_cast<int>(tex.height);
+  int d = static_cast<int>(tex.depth);
+  float sx = tex.desc.normalizedCoords ? x * static_cast<float>(w) : x;
+  float sy = tex.desc.normalizedCoords ? y * static_cast<float>(h) : y;
+  float sz = tex.desc.normalizedCoords ? z * static_cast<float>(d) : z;
+  int ix = static_cast<int>(std::floor(sx));
+  int iy = static_cast<int>(std::floor(sy));
+  int iz = static_cast<int>(std::floor(sz));
+  return sampleTexelChan(tex, ix, iy, iz, channel);
+}
+
 } // namespace core
 } // namespace vgre

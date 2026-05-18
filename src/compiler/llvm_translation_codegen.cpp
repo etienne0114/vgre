@@ -298,7 +298,9 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
       oss << "  };\n\n";
   }
  
-  oss << "  void " << ir.name << "_wrapper(void** args, \n"
+  // extern "C" prevents C++ name mangling so the JIT lookup by plain name
+  // (MangleAndInterner with no C++ mangling) resolves correctly.
+  oss << "extern \"C\" void " << ir.name << "_wrapper(void** args, \n"
       << "    vgre_cuda::dim3* pBlockIdx, vgre_cuda::dim3* pReserved, \n"
       << "    vgre_cuda::dim3* pBlockDim, vgre_cuda::dim3* pGridDim, \n"
       << "    void* smem, size_t smemSize) {\n\n"

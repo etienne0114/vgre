@@ -24,6 +24,22 @@ VGREResult DispatchManager::launchRemoteKernel(
   if (!parent_->is_master_)
     return VGREResult::ERR_INVALID_VALUE;
 
+  // Pre-compile JIT before acquiring clients_mutex_ or sending the packet.
+  // Master and worker share the same RuntimeEngine singleton, so once the
+  // kernel is in kernelCache_ the worker's launchKernel() finds it instantly
+  // (no cold-JIT blocking on the cluster wait path).
+  {
+    auto preRes = core::RuntimeEngine::instance().ensureKernelCompiled(kernel_id);
+    if (preRes != VGREResult::SUCCESS &&
+        preRes != VGREResult::ERR_INVALID_KERNEL) {
+      VGRE_LOG_ERROR("TCPCluster",
+                     "JIT pre-compilation failed for kernel " +
+                         std::to_string(kernel_id) +
+                         " — aborting remote launch");
+      return preRes;
+    }
+  }
+
   std::lock_guard<std::recursive_mutex> lock(parent_->clients_mutex_);
   if (worker_idx < 0 ||
       worker_idx >= static_cast<int>(parent_->clients_.size()) ||

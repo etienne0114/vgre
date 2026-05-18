@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=VGRE Dashboard
 Comment=Virtual GPU Runtime Engine Dashboard
-Exec=bash -ic /home/umwami/.local/share/VGRE/vgre-launch.sh
+Exec=bash -ic "/home/umwami/.local/share/VGRE/vgre-launch.sh"
 Icon=/home/umwami/.local/share/VGRE/vgre_icon.png
 Terminal=false
 Type=Application

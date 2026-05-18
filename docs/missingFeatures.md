@@ -119,7 +119,7 @@ All 13 cuFFT test cases pass.
 | `cusparseSpGEMM` (sparse × sparse) | **DONE** (2026-05-16) | 3-phase workEstimation+compute+copy in `cusparse_factorization.cpp`; float + double + FP16 + BF16 (widen-compute-narrow) |
 | `cusparseScsrilu02` / `cusparseDcsrilu02` (ILU0) | **DONE** (2026-05-16) | In-place ILU with zero fill-in; marker-based O(nnz * avg_row) |
 | `cusparseScsric02` / `cusparseDcsric02` (IC0) | **DONE** (2026-05-16) | In-place incomplete Cholesky with zero fill-in for SPD matrices |
-| Sparse direct factorization (UMFPACK-style full fill-in) | **EXTERNAL BACKEND LIMIT** | Requires UMFPACK/SuperLU/CHOLMOD-style sparse solver integration |
+| Sparse direct factorization (full fill-in LU) | **DONE** (2026-05-17, optional) | `-DVGRE_USE_UMFPACK=ON` links SuiteSparse UMFPACK. When present, `cusparseScsrilu02`/`Dcsrilu02` performs exact full fill-in LU (via `umfpack_di_symbolic/numeric/get_numeric`) and writes L/U values back into the existing CSR sparsity pattern. Without UMFPACK, ILU(0) remains the default. |
 
 ---
 
@@ -207,9 +207,9 @@ prohibitive, link against UMFPACK (LU) or CHOLMOD (Cholesky) and replace the ext
 
 | Limitation | Impact | Notes |
 |---|---|---|
-| RDMA requires explicit build + hardware/software RoCE | TCP fallback remains default | RDMA/RoCE transport is implemented in `src/advanced/rdma_transport.cpp` and activated with `-DVGRE_ENABLE_RDMA=ON` plus libibverbs; otherwise TCPCluster is used. |
+| RDMA requires explicit build + hardware/software RoCE | TCP fallback remains default | RDMA/RoCE transport is implemented in `src/advanced/rdma_transport.cpp` and activated with `-DVGRE_ENABLE_RDMA=ON` plus libibverbs; otherwise TCPCluster is used. Chunked large transfers (>bounceCapacity) are now supported via loop in `memory_sync_manager.cpp`. |
 | No NVLink-style P2P | Single-node only uses shared memory | `ncclSend/Recv` use shared-memory slots on single node; TCP routing is functional but not optimized |
-| No topology-aware tree/ring | AllReduce uses flat barrier for small tensors | Ring reduce-scatter + all-gather is used for tensors > 1 MB (`kRingThreshold`); flat barrier for smaller tensors (latency-optimal) |
+| ~~No topology-aware tree/ring~~ | **DONE** (2026-05-17) | Three-tier algorithm selection: flat barrier (≤64 KB, lowest latency), binary tree reduce (64 KB–1 MB, log₂N rounds distributing reduction work), ring allreduce (>1 MB, bandwidth-optimal). Thresholds: `kTreeThreshold=64 KB`, `kRingThreshold=1 MB`. |
 
 ---
 
@@ -228,8 +228,8 @@ prohibitive, link against UMFPACK (LU) or CHOLMOD (Cholesky) and replace the ext
 
 | Limitation | Impact | Notes |
 |---|---|---|
-| `tex` vector variants (v2/v4) return replicated scalar | Apps expecting per-channel data get duplicates | `TextureManager` is single-channel float; vector ops replicate scalar to all channels |
-| `txq` returns conservative defaults | 1024×1024×1, 1 channel | No texture metadata query support in `TextureManager` |
+| `tex` v2/v4 per-channel fetch | **DONE** (2026-05-17) | `vgre_tex{1D,2D,3D}_chan_f32(tex,…,channel)` reads the nth float from packed float2/float3/float4 elements. PTX translator updated to emit per-channel calls instead of scalar replication. |
+| `txq` real texture dimensions | **DONE** (2026-05-17) | `vgre_txq_{width,height,depth,channels}(tex)` queries the live `TextureManager` instance. `channels` = `elementSize / sizeof(float)` for FLOAT32 elements. PTX translator updated. |
 | `cp.async.bulk.tensor.{3,4,5}d` → serial loop | TMA is emulated as strided memcpy | Correctness preserved; performance is serial |
 | `tcgen05.mma` delegates to `wgmma` | Blackwell tensor core emulated as Hopper | Correct for BF16/FP16/TF32 shapes; no true SM100-specific behavior |
 
@@ -340,4 +340,96 @@ The following items that were previously potential concerns have been resolved:
 
 ---
 
-*Last updated: 2026-05-16 (ninth pass). 117/117 tests pass. All missing cuDNN/cuSPARSE/cuBLAS APIs implemented; file size discipline enforced.*
+---
+
+## 12. Cross-Platform Hardening (2026-05-17)
+
+| Item | Resolution |
+|------|-----------|
+| `vgre_sync.bat` hardcoded `Visual Studio\2022` | Dynamic `vswhere.exe` detection; multi-version fallback (VS 2015–2025 + Preview) |
+| `- was unexpected at this time` batch crash | `_PF86`/`_PF64` variables capture `ProgramFiles(x86)`/`ProgramFiles` before nested blocks |
+| CMake generator mismatch on reconfigure | `CMakeCache.txt` `CMAKE_GENERATOR:INTERNAL` read; cache deleted when generator changes |
+| `Unknown escape "\P"` in CMake REGEX REPLACE | Backslashes converted to forward slashes before REGEX on DIA SDK path |
+| `Could NOT find LAPACK` on Windows | `VGRE_USE_LAPACK` defaults `OFF` on `WIN32`; `ON` on Linux/macOS |
+| `vgre-token` CommandNotFoundException | CLI tools installed before build; current-session PATH updated immediately |
+| macOS `libomp` not found on Apple Silicon | `/opt/homebrew/{lib,opt/libomp/lib}` paths added to OMP search |
+| macOS Flutter URL wrong (`.tar.xz` vs `.zip`) | Platform-conditional download URL |
+| macOS `ldd` unavailable for ASAN check | Uses `otool -L` on `darwin`, `ldd` on Linux |
+| macOS GCC symlink creation failure | Guarded to Linux only |
+| Test count | **117/117 pass** |
+
+---
+
+## 13. RDMA Transport Improvements (2026-05-17)
+
+| Item | Resolution |
+|------|-----------|
+| Per-call `ibv_reg_mr` (one MR per write) | Single MR registered for full source buffer per `rdmaWriteToRemote` call |
+| `pollCompletion` 100% CPU spin | First 1000 spins: `__builtin_ia32_pause()` / ARM `yield`; then `std::this_thread::yield()` |
+| No chunking for transfers > bounceCapacity | `sendFullSyncTCP` and delta-sync loop over bounce-sized chunks; each chunk sends `DATA_HEADER_RDMA` with `chunk_size`+`dst_offset` |
+| Receiver always wrote chunk to allocation base | Client `DATA_HEADER_RDMA` handler now uses `rdmaPkt.dst_offset`; allocates only on `dst_offset==0` |
+| ARM cache coherency after bounce copy | `std::atomic_thread_fence(std::memory_order_acquire)` added after memcpy from bounce buffer |
+| `DataHeaderRDMAPacket` `size` field ambiguous for multi-chunk | Replaced `uint64_t size` with `uint32_t chunk_size` + `uint32_t dst_offset` (struct stays 16 bytes) |
+| `#include <thread>` missing in rdma_transport.cpp | Added for `std::this_thread::yield()` |
+| Test count | **117/117 pass** |
+
+---
+
+## 14. Cluster / GPU / Mesh Improvements (2026-05-17)
+
+| Item | Resolution |
+|------|-----------|
+| Worker lacked `--threads`/`--no-gpu` flags | `vgre_worker_cli.cpp`: `--threads <n>` sets `VGRE_WORKER_THREADS`; `--no-gpu` skips all GPU probes |
+| Dispatch always used CPU JIT | `dispatch_manager_remote.cpp`: cascade — GPUPassthrough → IGPUOpenCLExecutor → CPU JIT |
+| Master always picked first active worker | `tcp_cluster_manager.cpp`: `getGpuCapableWorker()` picks lowest-`in_flight` GPU-capable worker |
+| Full-mesh required env var `VGRE_ENABLE_MESH_TOPOLOGY=1` | Auto-enabled when 2nd `CAPABILITY` packet received in `server_packet_dispatch.cpp` |
+| `test_phase3_cluster` timeout under `ctest -j$(nproc)` | `RUN_SERIAL TRUE` in `tests/CMakeLists.txt` prevents CPU starvation |
+| `INT_MAX` undeclared in `tcp_cluster_manager.cpp` | `#include <climits>` added |
+| IGPUBackendIntegration SEGFAULT on missing OpenCL | Failure path changed to graceful skip + non-zero return to CTest |
+| Test count | **117/117 pass** |
+
+---
+
+## 15. vgre-token & CLI Tools (2026-05-17)
+
+| Item | Resolution |
+|------|-----------|
+| `vgre-token install` subcommand missing | `vgre-token.ps1`: new `Cmd-Install` copies scripts to `%LOCALAPPDATA%\VGRE\scripts\`, updates User + Process PATH |
+| No standalone CLI installer | New `scripts/Install-VGRETools.ps1`: installs all VGRE scripts + bat launchers, updates User + Process PATH, requires no build |
+| CLI tools only available after successful build | `vgre_sync.bat` runs CLI install step before `cmake`/`cmake --build`; tools available even on build failure |
+| `Setup-VGRECluster.ps1` didn't update current-session PATH | Added `$env:PATH` Process-scope update; expanded copied-file list to include all VGRE scripts |
+| Test count | **117/117 pass** |
+
+---
+
+---
+
+## 16. Eleventh Pass — PTX Texture, cuSPARSE UMFPACK, NCCL Tree (2026-05-17)
+
+| Item | Resolution |
+|------|-----------|
+| PTX `txq.width/height/depth/channels` hardcoded 1024/1/1 | `vgre_txq_{width,height,depth,channels}(tex)` added to `texture_builtins.cpp`; backed by `TextureManager::getTextureInfo()`. `ptx_texture_ops.cpp` updated to emit real calls. |
+| PTX `tex.*.v2/v4` replicated scalar for all channels | Per-channel functions `vgre_tex{1D,2D,3D}_chan_f32(tex,…,ch)` added; `TextureManager::tex{1D,2D,3D}Chan()` + `sampleTexelChan()` + `readElementChannel()` implemented. PTX translator emits per-channel call for each component. |
+| `tld4.2d.v4` single-sample replicated | Updated to fetch four distinct 2×2 footprint samples (point offsets +0/+1 in x and y) via per-channel function. |
+| cuSPARSE full fill-in sparse LU (UMFPACK-style) | Optional `-DVGRE_USE_UMFPACK=ON`; CMake auto-detects via pkg-config or manual search. `umfpack_lu_inplace<T>` in `cusparse_factorization.cpp` performs exact LU, writes factors back into original CSR sparsity. ILU(0) remains fallback. |
+| NCCL AllReduce: only flat-barrier or ring | Three-tier: flat barrier (≤64 KB), binary tree reduce (64 KB–1 MB, distributes reduction across log₂N ranks), ring (>1 MB). |
+| `TextureManager::getTextureInfo()` absent | Added to `texture_manager.h` + `texture_manager_sampling.cpp`; `channels = elementSize/sizeof(float)` for packed float vector textures. |
+| Test count | **117/117 pass** |
+
+---
+
+---
+
+## 17. Twelfth Pass — JIT Cache Corruption + header fix (2026-05-18)
+
+| Item | Resolution |
+|------|-----------|
+| `registerKernel` reused stale cached function when `KernelId` passed uninitialized (O3 stack reuse → `outId != 0` collision with existing kernel ID) | Added name-deduplication check at top of `registerKernel`: if kernel name already exists, return its existing ID immediately. Tightened `outId` guard: only accept non-zero `outId` values within `nextKernelId_ + 65536` range. `src/core/runtime_engine.cpp`. |
+| JIT wrapper `compute_kernel_wrapper` declared without `extern "C"` → C++ name mangling caused `ES.lookup` to fall back to the wrong symbol (previous kernel's compiled code) | Added `extern "C"` to the generated wrapper function in `generateWrapperSource`. `src/compiler/llvm_translation_codegen.cpp`. |
+| `cub_fallback.h` redeclared `__shfl_sync`/`__shfl_up_sync` with default arguments already defined in `cpu_cuda_warp.h` → JIT kernel compilation failure (C++11 error: redefinition of default argument) | Removed duplicate forward declarations from `cub_fallback.h`. `include/vgre/compiler/cuda_device_libs/cub_fallback.h`. |
+| `MultiDeviceCooperativeComprehensive` SEGFAULT (wrong function executed for `compute_kernel`) | Fixed by all three changes above. Test now passes. |
+| Test count | **117/117 pass** |
+
+---
+
+*Last updated: 2026-05-18 (twelfth pass). 117/117 tests pass. JIT cache corruption fixed (name deduplication + extern C wrapper + cub_fallback header).*

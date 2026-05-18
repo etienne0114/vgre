@@ -92,6 +92,12 @@ public:
 
   VGREResult unloadModule(ModuleHandle module);
 
+  // Block until JIT compilation for kernel `id` completes and the compiled
+  // function is stored in kernelCache_. Safe to call concurrently; idempotent.
+  // Used by the cluster dispatch path to pre-compile before sending LAUNCH_KERNEL
+  // to workers — eliminates cold-JIT latency from the cluster wait critical path.
+  VGREResult ensureKernelCompiled(KernelId id);
+
   VGREResult launchKernel(KernelId id, const dim3 &gridDim,
                           const dim3 &blockDim, void **args,
                           size_t sharedMem = 0, StreamId stream = 0,

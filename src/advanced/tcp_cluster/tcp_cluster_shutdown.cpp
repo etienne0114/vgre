@@ -62,7 +62,21 @@ static void joinWithTimeout(std::thread& t, const char* name, int timeoutSec = 5
 
 void TCPClusterManager::shutdown() {
   bool wasEnabled = enabled_.exchange(false);
-  if (!wasEnabled) return;
+
+  // Always notify CVs and join threads regardless of wasEnabled.
+  // A thread blocked on JIT inside data_processor_thread_ may still be running
+  // even after clientLoop set enabled_=false on a disconnect. Skipping join
+  // here would leave that thread running past the object's lifetime → UB.
+  if (!wasEnabled) {
+    staging_cv_.notify_all();
+    remote_results_cv_.notify_all();
+    barrier_cv_.notify_all();
+    joinWithTimeout(data_processor_thread_, "data_processor_thread_");
+    joinWithTimeout(client_loop_thread_,    "client_loop_thread_");
+    joinWithTimeout(cluster_thread_,        "cluster_thread_");
+    joinWithTimeout(monitoring_thread_,     "monitoring_thread_");
+    return;
+  }
 
   VGRE_LOG_INFO("TCPCluster", "Shutting down cluster...");
 

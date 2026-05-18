@@ -23,9 +23,144 @@
 namespace vgre {
 namespace compiler {
 
+// ── Minimal CUDA stub for AST-only analysis ─────────────────────────────────
+// Used instead of #include "cpu_cuda_env.h" when running clang++ purely for
+// AST structure analysis (argument types, FLOP counts, memory patterns, etc.).
+// The full cpu_cuda_env.h pulls in <cmath>, <cstdint>, CUB, cooperative groups
+// and other heavy headers, inflating the JSON AST dump to 300-400 MB and
+// making llvm::json::parse() consume 600 MB+ of RAM per call.  This inline
+// stub provides only the declarations needed to parse typical CUDA kernel
+// signatures without errors, keeping the JSON to ~50 KB.
+static constexpr const char kAstAnalysisStub[] = R"VGRE_STUB(
+// Block re-inclusion of the full vgre CUDA emulation headers.
+// This stub provides only what is needed to parse kernel AST without OOM.
+#define VGRE_COMPILER_CPU_CUDA_ENV_H
+#define VGRE_COMPILER_CPU_CUDA_FP16_H
+#define VGRE_COMPILER_CPU_CUDA_WARP_H
+#define VGRE_WMMA_EMULATION_H
+#define VGRE_COMPILER_CUDA_DEVICE_LIBS_COOPERATIVE_GROUPS_H
+#define VGRE_COMPILER_CUDA_DEVICE_LIBS_CUB_FALLBACK_H
+
+typedef signed char        int8_t;
+typedef short              int16_t;
+typedef int                int32_t;
+typedef long long          int64_t;
+typedef unsigned char      uint8_t;
+typedef unsigned short     uint16_t;
+typedef unsigned int       uint32_t;
+typedef unsigned long long uint64_t;
+typedef unsigned long      size_t;
+
+// CUDA kernel annotations — must produce SectionAttr "vgre_global" so that
+// hasSectionAttr() in the parser can identify __global__ functions.
+#define __global__ __attribute__((section("vgre_global")))
+#define __device__ __attribute__((section("vgre_device")))
+#define __host__
+#define __shared__
+#define __restrict__
+#define __forceinline__ inline
+#define __noinline__
+
+// Minimal CUDA built-in types
+struct dim3 {
+    unsigned int x, y, z;
+    dim3(unsigned int vx = 1, unsigned int vy = 1, unsigned int vz = 1)
+        : x(vx), y(vy), z(vz) {}
+    unsigned int total() const { return x * y * z; }
+};
+extern dim3 threadIdx, blockIdx, blockDim, gridDim;
+
+void __syncthreads();
+void __syncwarp(unsigned mask = 0xffffffff);
+
+// Scalar math (forward declarations — no heavy <cmath> needed)
+float sinf(float); float cosf(float); float tanf(float);
+float asinf(float); float acosf(float); float atanf(float);
+float atan2f(float, float);
+float expf(float); float exp2f(float); float logf(float); float log2f(float);
+float powf(float, float); float sqrtf(float); float rsqrtf(float);
+float fabsf(float); float floorf(float); float ceilf(float);
+float roundf(float); float truncf(float); float fmodf(float, float);
+float fmaf(float, float, float);
+float __fdividef(float, float);
+float __fadd_rn(float, float);
+float __fmul_rn(float, float);
+double sin(double); double cos(double); double tan(double);
+double exp(double); double log(double); double sqrt(double);
+double pow(double, double); double fabs(double);
+double floor(double); double ceil(double);
+
+// Atomic operations
+template<typename T> T atomicAdd(T*, T);
+template<typename T> T atomicSub(T*, T);
+template<typename T> T atomicExch(T*, T);
+template<typename T> T atomicCAS(T*, T, T);
+template<typename T> T atomicMin(T*, T);
+template<typename T> T atomicMax(T*, T);
+template<typename T> T atomicOr(T*, T);
+template<typename T> T atomicAnd(T*, T);
+
+// Warp primitives
+template<typename T> T __shfl_sync(unsigned mask, T var, int srcLane, int width = 32);
+template<typename T> T __shfl_up_sync(unsigned mask, T var, unsigned delta, int width = 32);
+template<typename T> T __shfl_down_sync(unsigned mask, T var, unsigned delta, int width = 32);
+template<typename T> T __shfl_xor_sync(unsigned mask, T var, int laneMask, int width = 32);
+unsigned __ballot_sync(unsigned mask, int pred);
+int __all_sync(unsigned mask, int pred);
+int __any_sync(unsigned mask, int pred);
+
+// Minimal half-precision stubs (avoid heavy cuda_fp16.h)
+struct __half { unsigned short __x; };
+struct __nv_bfloat16 { unsigned short __x; };
+
+// Cooperative groups stub — provides just enough for AST parsing.
+// Actual implementation lives in cuda_device_libs/cooperative_groups.h
+// which is still used by the JIT compilation path.
+namespace cooperative_groups {
+    class thread_block {
+    public:
+        void sync() {}
+        unsigned size() const { return 0; }
+        unsigned thread_rank() const { return 0; }
+    };
+    class grid_group {
+    public:
+        void sync() {}
+        unsigned size() const { return 0; }
+        unsigned thread_rank() const { return 0; }
+        bool is_valid() const { return true; }
+    };
+    class multi_grid_group {
+    public:
+        void sync() {}
+        unsigned size() const { return 0; }
+        unsigned thread_rank() const { return 0; }
+        unsigned num_grids() const { return 1; }
+        unsigned grid_rank() const { return 0; }
+    };
+    template<int Sz> class thread_block_tile {
+    public:
+        void sync() {}
+        unsigned size() const { return Sz; }
+        unsigned thread_rank() const { return 0; }
+        template<typename T> T shfl(T val, int src) { return val; }
+        template<typename T> T shfl_xor(T val, int mask) { return val; }
+        template<typename T> T shfl_down(T val, unsigned delta) { return val; }
+        template<typename T> T shfl_up(T val, unsigned delta) { return val; }
+    };
+    inline thread_block this_thread_block() { return thread_block{}; }
+    inline grid_group this_grid() { return grid_group{}; }
+    inline multi_grid_group this_multi_grid() { return multi_grid_group{}; }
+    template<int Sz>
+    inline thread_block_tile<Sz> tiled_partition(const thread_block&) {
+        return thread_block_tile<Sz>{};
+    }
+} // namespace cooperative_groups
+)VGRE_STUB";
+
 // ── Process-level caches shared across all ClangKernelParser instances ──────
-// Prevents repeated llvm::json::parse() (~12s per 378MB JSON) when different
-// test instances parse the same kernel within the same binary run.
+// Prevents repeated llvm::json::parse() when different test instances parse
+// the same kernel within the same binary run.
 namespace {
 static std::recursive_mutex& getProcessCacheMutex() {
     static std::recursive_mutex m;
@@ -432,8 +567,9 @@ VGREResult ClangKernelParser::parse(const std::string& name,
 
     VGRE_LOG_INFO("ClangKernelParser", "Authoritative Parsing: " + name);
 
-    // Inject the environment header to ensure __global__ and __device__ are correctly defined as annotations
-    std::string sourceWithHeader = "#include \"vgre/compiler/cpu_cuda_env.h\"\n" + source;
+    // Use the minimal analysis stub (NOT the full cpu_cuda_env.h) so that the
+    // clang JSON AST stays small (~50 KB vs ~300 MB) — avoids OOM during parsing.
+    std::string sourceWithHeader = std::string(kAstAnalysisStub) + source;
     std::string sourceHash = std::to_string(std::hash<std::string>{}(sourceWithHeader));
 
     // Check KernelIR disk cache first (Ultra-Fast Path)
@@ -629,7 +765,7 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
     // Build cache keys up-front (needed by all cache tiers)
     std::string cacheKey = name + ":::" + source;
     std::string enhHash = std::to_string(std::hash<std::string>{}(cacheKey));
-    std::string sourceWithHeader = "#include \"vgre/compiler/cpu_cuda_env.h\"\n" + source;
+    std::string sourceWithHeader = std::string(kAstAnalysisStub) + source;
 
     // ── Fast paths: check all cache tiers BEFORE calling parse() so that
     // the outIR is still empty when loadEnhancedIR() pushes into its vectors.

@@ -17,6 +17,51 @@
 namespace vgre {
 namespace core {
 
+// ── JIT pre-compilation barrier ───────────────────────────────────────────
+// Called by cluster dispatch before sending LAUNCH_KERNEL to workers.
+// Since master and worker share the same RuntimeEngine singleton, once this
+// returns the kernel is in kernelCache_ and worker's launchKernel() takes
+// the fast path (no JIT wait), eliminating cold-cache latency from the
+// cluster wait critical path.
+VGREResult RuntimeEngine::ensureKernelCompiled(KernelId id) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!initialized_) return VGREResult::ERR_NOT_INITIALIZED;
+
+  if (kernelCache_.count(id)) return VGREResult::SUCCESS; // already compiled
+
+  auto pendIt = pendingKernels_.find(id);
+  if (pendIt == pendingKernels_.end()) {
+    return kernelIRCache_.count(id) ? VGREResult::ERR_COMPILATION
+                                    : VGREResult::ERR_INVALID_KERNEL;
+  }
+
+  VGRE_LOG_INFO("RuntimeEngine",
+                "Pre-compiling kernel ID=" + std::to_string(id) +
+                    " before cluster dispatch (cold JIT)");
+  JITResult jres = pendIt->second.get();
+  if (!jres.fn) {
+    VGRE_LOG_ERROR("RuntimeEngine",
+                   "JIT pre-compilation failed for kernel ID=" +
+                       std::to_string(id));
+    return VGREResult::ERR_COMPILATION;
+  }
+
+  auto irIt = kernelIRCache_.find(id);
+  if (irIt != kernelIRCache_.end()) {
+    irIt->second.sharedMemSize             = jres.sharedMemSize;
+    irIt->second.argSizes                  = jres.argSizes;
+    irIt->second.estimatedInstructionCount = jres.estimatedInstructionCount;
+    irIt->second.staticFlopCount           = jres.staticFlopCount;
+  }
+  kernelCache_[id]            = jres.fn;
+  kernelFnAddrMap_[jres.fn.get()] = id;
+  pendingKernels_.erase(id);
+
+  VGRE_LOG_INFO("RuntimeEngine",
+                "Kernel ID=" + std::to_string(id) + " pre-compiled OK");
+  return VGREResult::SUCCESS;
+}
+
 // ── Kernel launch (by ID) ──────────────────────────────────────────────────
 VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
                                        const dim3 &blockDim, void **args,

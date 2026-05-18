@@ -465,6 +465,47 @@ else()
 endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
+# §8b Optional: SuiteSparse / UMFPACK  (full fill-in sparse factorization)
+# ──────────────────────────────────────────────────────────────────────────────
+option(VGRE_USE_UMFPACK "Link SuiteSparse UMFPACK for full fill-in sparse LU (cuSPARSE extension)" OFF)
+set(_VGRE_UMFPACK_FOUND FALSE)
+if(VGRE_USE_UMFPACK)
+    find_package(PkgConfig QUIET)
+    set(_umfpack_found FALSE)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(UMFPACK QUIET IMPORTED_TARGET SuiteSparse::UMFPACK)
+        if(UMFPACK_FOUND)
+            set(_umfpack_found TRUE)
+        endif()
+    endif()
+    if(NOT _umfpack_found)
+        # Fallback: manual header+lib search
+        find_path(UMFPACK_INCLUDE_DIR umfpack.h
+            PATHS /usr/include/suitesparse /usr/local/include/suitesparse
+                  /opt/homebrew/include/suitesparse /usr/include)
+        find_library(UMFPACK_LIBRARY NAMES umfpack
+            PATHS /usr/lib /usr/local/lib /opt/homebrew/lib)
+        if(UMFPACK_INCLUDE_DIR AND UMFPACK_LIBRARY)
+            if(NOT TARGET UMFPACK::UMFPACK)
+                add_library(UMFPACK::UMFPACK UNKNOWN IMPORTED)
+                set_target_properties(UMFPACK::UMFPACK PROPERTIES
+                    IMPORTED_LOCATION "${UMFPACK_LIBRARY}"
+                    INTERFACE_INCLUDE_DIRECTORIES "${UMFPACK_INCLUDE_DIR}")
+            endif()
+            set(_umfpack_found TRUE)
+        endif()
+    endif()
+    if(_umfpack_found)
+        set(_VGRE_UMFPACK_FOUND TRUE)
+        message(STATUS "SuiteSparse UMFPACK: found — full fill-in sparse LU enabled")
+    else()
+        message(STATUS "SuiteSparse UMFPACK: NOT found — falling back to ILU(0)")
+    endif()
+else()
+    message(STATUS "SuiteSparse UMFPACK: disabled (VGRE_USE_UMFPACK=OFF)")
+endif()
+
+# ──────────────────────────────────────────────────────────────────────────────
 # §9  Optional: FFTW3
 # ──────────────────────────────────────────────────────────────────────────────
 set(_VGRE_FFTW3_FOUND FALSE)
@@ -694,6 +735,14 @@ function(_vgre_configure_library target_name visibility)
         target_compile_definitions(${target_name} PRIVATE VGRE_HAS_FFTW3)
         target_link_libraries(${target_name} PRIVATE
             PkgConfig::FFTW3 PkgConfig::FFTW3F)
+    endif()
+    if(_VGRE_UMFPACK_FOUND)
+        target_compile_definitions(${target_name} PRIVATE VGRE_HAS_UMFPACK)
+        if(TARGET PkgConfig::UMFPACK)
+            target_link_libraries(${target_name} PRIVATE PkgConfig::UMFPACK)
+        elseif(TARGET UMFPACK::UMFPACK)
+            target_link_libraries(${target_name} PRIVATE UMFPACK::UMFPACK)
+        endif()
     endif()
     if(_VGRE_OPENCL_FOUND)
         target_compile_definitions(${target_name} PRIVATE VGRE_HAS_OPENCL_BACKEND)
