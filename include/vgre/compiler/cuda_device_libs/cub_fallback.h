@@ -5,9 +5,9 @@
 #include <type_traits>
 #include <limits>
 
-// Re-use the warp shuffle builtins declared in cpu_cuda_warp.h
-template<typename T> inline T __shfl_sync(unsigned int mask, T val, int srcLane, int width = 32);
-template<typename T> inline T __shfl_up_sync(unsigned int mask, T val, unsigned int delta, int width = 32);
+// Warp shuffle builtins (__shfl_sync, __shfl_up_sync, etc.) are defined in
+// cpu_cuda_warp.h which is included first via cpu_cuda_env.h.  Do NOT re-declare
+// them here — duplicate default arguments are a compile error in C++11 and later.
 
 namespace cub {
 

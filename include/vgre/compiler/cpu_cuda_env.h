@@ -101,12 +101,21 @@ struct ptr_unwrapper {
 
 // ── Texture/Surface Built-ins ──────────────────────────────────────────────
 extern "C" {
-  float vgre_tex1D_f32(uint64_t tex, float x);
-  float vgre_tex2D_f32(uint64_t tex, float x, float y);
-  float vgre_tex3D_f32(uint64_t tex, float x, float y, float z);
-  float vgre_tex1Dfetch_f32(uint64_t tex, int x);
-  void vgre_surf2Dwrite_f32(uint64_t surf, float val, int x, int y);
-  void vgre_surf2Dread_f32(uint64_t surf, float* val, int x, int y);
+  float    vgre_tex1D_f32(uint64_t tex, float x);
+  float    vgre_tex2D_f32(uint64_t tex, float x, float y);
+  float    vgre_tex3D_f32(uint64_t tex, float x, float y, float z);
+  float    vgre_tex1Dfetch_f32(uint64_t tex, int x);
+  void     vgre_surf2Dwrite_f32(uint64_t surf, float val, int x, int y);
+  void     vgre_surf2Dread_f32(uint64_t surf, float* val, int x, int y);
+  // Per-channel fetch for packed vector textures (float2/float3/float4)
+  float    vgre_tex1D_chan_f32(uint64_t tex, float x, unsigned channel);
+  float    vgre_tex2D_chan_f32(uint64_t tex, float x, float y, unsigned channel);
+  float    vgre_tex3D_chan_f32(uint64_t tex, float x, float y, float z, unsigned channel);
+  // Texture metadata queries for PTX txq instructions
+  uint32_t vgre_txq_width(uint64_t tex);
+  uint32_t vgre_txq_height(uint64_t tex);
+  uint32_t vgre_txq_depth(uint64_t tex);
+  uint32_t vgre_txq_channels(uint64_t tex);
 }
 
 template<typename T>

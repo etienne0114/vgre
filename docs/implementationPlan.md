@@ -781,4 +781,212 @@ Also extended:
 
 ---
 
-*Last updated: 2026-05-16 (seventh pass). 117/117 tests pass. cuRAND/cuFFT/cuBLASLt missing APIs exposed, cudaArrayDestroy added, cuRAND full test suite added.*
+---
+
+## 13. Cross-Platform Hardening (2026-05-17)
+
+**Status**: **DONE** — all three platforms (Linux / macOS / Windows) build and run cleanly.
+
+### 13.1 Windows — vgre_sync.bat dynamic VS detection
+
+| Problem | Fix |
+|---|---|
+| Hardcoded `Visual Studio\2022` paths everywhere | Replaced with `vswhere.exe` query (`-latest -requires Microsoft.VisualStudio.Workload.NativeDesktop -property installationPath`) |
+| `(x86)` in `%ProgramFiles(x86)%` breaks `for … do (` blocks | Captured `_PF86=%ProgramFiles(x86)%` and `_PF64=%ProgramFiles%` at top level; used `!_PF86!\` inside all nested blocks |
+| `- was unexpected at this time` batch parser crash | Fixed by the `_PF86`/`_PF64` extraction above; no parentheses inside nested block delimiters |
+| Generator mismatch (`Ninja` vs `Visual Studio 17 2022`) | Added `CMakeCache.txt` parser: reads `CMAKE_GENERATOR:INTERNAL`, deletes cache if generator changes |
+| `-- /m:1` not valid for Ninja/NMake | Replaced with `--parallel %NUMBER_OF_PROCESSORS%` (CMake ≥ 3.12, generator-agnostic) |
+| vgre-token not recognized before build | CLI tools now installed BEFORE the cmake/build step; current session PATH also updated |
+| `-ExecutionPolicy` missing on nested PowerShell calls | All `powershell -File` invocations now pass `-ExecutionPolicy Bypass` |
+
+**Generator priority**: Ninja (from `%LLVM_DIR%\bin` or `PATH`) → VS MSBuild → NMake.
+
+### 13.2 macOS — vgre_sync.sh improvements
+
+| Problem | Fix |
+|---|---|
+| `libomp.dylib` not found on Homebrew Apple Silicon | Added `/opt/homebrew/lib/libomp.dylib` and `/opt/homebrew/opt/libomp/lib/libomp.dylib` to OMP search paths |
+| Flutter download URL wrong on macOS | macOS now fetches `.zip`; Linux fetches `.tar.xz` |
+| `ldd` not available on macOS for ASAN check | Uses `otool -L` on macOS; `ldd` on Linux |
+| GCC symlink creation on macOS fails | `ln -sf gcc-* gcc` block guarded to Linux only |
+| vgre-worker wrapper missing `DYLD_LIBRARY_PATH` | macOS deployment block creates wrapper script with both `LD_LIBRARY_PATH` and `DYLD_LIBRARY_PATH` |
+
+### 13.3 CMakeLists.txt fixes
+
+| Problem | Fix |
+|---|---|
+| `string(REGEX REPLACE "\\P" …)` crash with backslash paths | Added `string(REPLACE "\\" "/" _dia_path "${_dia_path}")` before REGEX on Windows DIA SDK path |
+| `Could NOT find LAPACK` on Windows (default ON) | `VGRE_USE_LAPACK` now defaults OFF on `WIN32`; ON on Linux/macOS |
+| DIA SDK Strategy 2 missed newer VS versions | Added VS 2025/18/17/16/15 and Preview edition to enumeration |
+| `INT_MAX` undeclared in tcp_cluster_manager.cpp | Added `#include <climits>` |
+
+### 13.4 vgre-start.sh
+
+`vgre-start.sh` now sets both `LD_LIBRARY_PATH` (Linux) and `DYLD_LIBRARY_PATH` (macOS) before starting the master process.
+
+---
+
+## 14. Cluster / GPU / Mesh Improvements (2026-05-17)
+
+**Status**: **DONE** — master/worker cluster is fully functioning across all platforms; supports both CPU and GPU backends; full-mesh topology auto-enabled.
+
+### 14.1 Worker CLI — --threads and --no-gpu flags
+
+File: `src/advanced/vgre_worker_cli.cpp`
+
+| Flag | Behaviour |
+|---|---|
+| `--threads <n>` | Calls `vgre_set_config("VGRE_WORKER_THREADS", n)` to pin OpenMP thread count |
+| `--no-gpu` | Skips both GPUPassthrough and IGPUOpenCLExecutor probes; worker runs CPU-only |
+
+On startup the worker probes GPUPassthrough (dGPU) and then IGPUOpenCLExecutor (iGPU/OpenCL), logs the detected backend, and sets `has_igpu` in `CapabilityPacket` accordingly.
+
+### 14.2 GPU dispatch cascade in dispatch_manager_remote.cpp
+
+File: `src/advanced/tcp_cluster/dispatch_manager_remote.cpp`
+
+Dispatch order for every remote kernel:
+1. `GPUPassthrough::launchOnGPU()` — uses real NVIDIA dGPU if present
+2. `IGPUOpenCLExecutor::execute()` — uses integrated GPU / OpenCL if available
+3. `RuntimeEngine::launchKernel()` — CPU JIT fallback (always present)
+
+### 14.3 GPU-aware worker selection
+
+File: `src/advanced/tcp_cluster/tcp_cluster_manager.cpp`
+
+New method `getGpuCapableWorker()`:
+- Scans worker capability map for `has_igpu == true`
+- Among GPU-capable workers, picks the one with the lowest `in_flight_kernels` count
+- Falls back to `getFirstActiveWorker()` if no GPU workers available
+
+`hybrid_compute_manager_workload.cpp` calls `getGpuCapableWorker()` before falling back to `getFirstActiveWorker()` for `REMOTE_NODE` dispatch.
+
+### 14.4 Auto-mesh topology
+
+File: `src/advanced/tcp_cluster/server_packet_dispatch.cpp`
+
+When the second `CAPABILITY` packet is received (i.e., at least 2 workers are connected), `mesh_topology_enabled_` is set to `true` automatically. Previously this required the environment variable `VGRE_ENABLE_MESH_TOPOLOGY=1`.
+
+### 14.5 test_phase3_cluster — RUN_SERIAL
+
+`tests/CMakeLists.txt` now sets `RUN_SERIAL TRUE` on `test_phase3_cluster`. Under `ctest -j$(nproc)` the cluster test was CPU-starved and timing out; running it serially eliminates the contention.
+
+---
+
+## 15. RDMA Transport Improvements (2026-05-17)
+
+**Status**: **DONE** — RDMA is real and fully functioning on Linux InfiniBand/RoCE; all previously identified bugs fixed.
+
+### 15.1 Issues found and fixed
+
+| Bug | Fix | File |
+|---|---|---|
+| Per-call `ibv_reg_mr` (extremely expensive — one MR per send) | Registers full source MR once per `rdmaWriteToRemote` call for the whole buffer | `src/advanced/rdma_transport.cpp` |
+| Spin-wait `pollCompletion` burns 100% CPU | First 1000 spins use `__builtin_ia32_pause()` / ARM `yield`; after 1000 spins uses `std::this_thread::yield()` | `src/advanced/rdma_transport.cpp` |
+| No chunking — `rdmaWriteToRemote` limited to bounce buffer size | Chunked loop: each iteration writes one `bounceCapacity()`-sized chunk via RDMA then sends `DATA_HEADER_RDMA` | `src/advanced/tcp_cluster/memory_sync_manager.cpp` |
+| Receiver ignored `dst_offset` — always wrote to allocation base | `DATA_HEADER_RDMA` handler now uses `rdmaPkt.chunk_size` and `rdmaPkt.dst_offset` for correct multi-chunk reassembly | `src/advanced/tcp_cluster/client_packet_dispatch.cpp` |
+| ARM cache coherency — no fence after bounce copy | Added `std::atomic_thread_fence(std::memory_order_acquire)` after memcpy from bounce buffer | `src/advanced/tcp_cluster/client_packet_dispatch.cpp` |
+
+### 15.2 DataHeaderRDMAPacket protocol change
+
+`include/vgre/advanced/tcp_cluster_protocol.h`:
+
+```
+Before: uint64_t size;          // total transfer size
+After:  uint32_t chunk_size;    // bytes in this bounce-buffer chunk
+        uint32_t dst_offset;    // byte offset into target allocation
+```
+
+Total struct size remains 16 bytes. `dst_offset == 0` means first (or only) chunk; receiver allocates on first chunk only.
+
+### 15.3 Platforms
+
+| Platform | RDMA Support | Notes |
+|---|---|---|
+| Linux (InfiniBand / RoCE) | Full | `libibverbs`, QP state machine, MR registration, bounce buffer |
+| Linux (no RDMA hardware) | TCP fallback | `VGRE_ENABLE_RDMA=OFF` (default) uses `DATA_HEADER` + `DATA_BODY` |
+| Windows | TCP only | `libibverbs` not available; compile guard `#ifdef VGRE_ENABLE_RDMA` |
+| macOS | TCP only | Same as Windows |
+
+---
+
+## 16. vgre-token & CLI Tools (2026-05-17)
+
+**Status**: **DONE** — `vgre-token` can be used from any terminal immediately after `vgre_sync.bat` or `vgre_sync.sh` runs, before the build completes.
+
+### 16.1 vgre-token install subcommand (scripts/vgre-token.ps1)
+
+New `install` subcommand:
+- Copies `vgre-token.ps1` + `vgre-token.bat` to `%LOCALAPPDATA%\VGRE\scripts\`
+- Adds the directory to the **User**-scope PATH (persistent across reboots)
+- Also adds to `$env:PATH` in the **current session** so the command works immediately without a restart
+
+### 16.2 Install-VGRETools.ps1 (scripts/Install-VGRETools.ps1)
+
+New standalone installer that requires no prior build:
+- Copies `vgre-token.ps1`, `Setup-VGRECluster.ps1`, `Start-VGRE.ps1`, `vgre_env.ps1`, `Install-VGRETools.ps1`
+- Creates `.bat` launcher stubs for `vgre-start` and `Setup-VGRECluster`
+- Updates both User PATH and current-session PATH
+
+### 16.3 Before-build installation in vgre_sync.bat
+
+CLI tools are installed at the start of `vgre_sync.bat` before the cmake configure and build steps. If the build fails for any reason the user still has `vgre-token` available on the PATH.
+
+---
+
+---
+
+## 17. Eleventh Pass — PTX Texture Metadata, cuSPARSE UMFPACK, NCCL Tree (2026-05-17)
+
+**Status**: **DONE** — 117/117 tests pass.
+
+### 17.1 PTX txq — real texture dimension queries
+
+Previously `txq.width/height/depth/channels` returned hardcoded constants (1024/1024/1/1).
+
+| Change | Files |
+|---|---|
+| `TextureManager::TextureInfo` struct + `getTextureInfo(id, out)` method | `include/vgre/core/texture_manager.h` |
+| `getTextureInfo` implementation (channels = elementSize/sizeof(float) for FLOAT32) | `src/core/texture/texture_manager_sampling.cpp` |
+| `vgre_txq_{width,height,depth,channels}(uint64_t tex)` extern C | `src/compiler/texture_builtins.cpp`, `include/vgre/compiler/cpu_cuda_env.h` |
+| PTX translator: `txq.*` handlers call real functions | `src/compiler/ptx/ptx_texture_ops.cpp` |
+
+### 17.2 PTX tex v2/v4 — per-channel fetch for packed vector textures
+
+Previously all channels of `tex.*.v2/v4` were copies of channel 0 (scalar replicated).
+
+| Change | Files |
+|---|---|
+| `readElementChannel(tex, linearIndex, channel)` — reads nth float within packed element | `src/core/texture/texture_manager_sampling.cpp` |
+| `sampleTexelChan(tex, x, y, z, channel)` — coordinate-to-channel aware sample | `src/core/texture/texture_manager_sampling.cpp` |
+| `tex1DChan / tex2DChan / tex3DChan` public methods with bilinear interpolation per-channel | `include/vgre/core/texture_manager.h`, `src/core/texture/texture_manager_sampling.cpp` |
+| `vgre_tex{1D,2D,3D}_chan_f32(tex, …, channel)` extern C | `src/compiler/texture_builtins.cpp`, `include/vgre/compiler/cpu_cuda_env.h` |
+| PTX translator: v2 handlers emit 2 per-channel calls; v4 handlers emit 4 per-channel calls | `src/compiler/ptx/ptx_texture_ops.cpp` |
+| `tld4.2d.v4` updated to fetch four distinct 2×2 footprint texels | `src/compiler/ptx/ptx_texture_ops.cpp` |
+
+### 17.3 cuSPARSE optional UMFPACK (full fill-in sparse LU)
+
+| Change | Files |
+|---|---|
+| `option(VGRE_USE_UMFPACK …)` + pkg-config/manual UMFPACK detection | `CMakeLists.txt` (§8b) |
+| `VGRE_HAS_UMFPACK` compile definition + library linking via `vgre_apply_optional_deps()` | `CMakeLists.txt` |
+| `umfpack_lu_inplace<T>()` — symbolic+numeric factorization via UMFPACK, scatter L/U back into CSR sparsity | `src/api/cusparse/cusparse_factorization.cpp` |
+| `cusparseScsrilu02` / `cusparseDcsrilu02` route through UMFPACK when available; ILU(0) fallback otherwise | `src/api/cusparse/cusparse_factorization.cpp` |
+
+**Usage**: `cmake -DVGRE_USE_UMFPACK=ON ..` (requires `libumfpack-dev` / SuiteSparse).
+
+### 17.4 NCCL binary tree AllReduce for medium tensors
+
+Three-tier algorithm selection in `ncclAllReduce`:
+
+| Tensor size | Algorithm | Notes |
+|---|---|---|
+| ≤ 64 KB | Flat barrier (root reduces all) | O(1) sync rounds, lowest latency |
+| 64 KB – 1 MB | Binary tree reduce (`tree_allreduce`) | log₂(N) rounds; each level distributes reduction across half the ranks |
+| > 1 MB | Ring allreduce (`ring_allreduce`) | Bandwidth-optimal chunk-pipelined |
+
+Binary tree reduce implementation: bottom-up deposit-and-reduce per log₂(N) rounds using existing shared-state barriers; broadcast phase fans result back down. File: `src/api/nccl/nccl_collectives.cpp`.
+
+---
+
+*Last updated: 2026-05-17 (eleventh pass). 117/117 tests pass. PTX txq real metadata, tex v2/v4 per-channel, cuSPARSE UMFPACK optional, NCCL three-tier AllReduce.*

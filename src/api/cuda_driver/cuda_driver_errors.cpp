@@ -1,6 +1,10 @@
 // CUDA Driver API — error strings, profiler
 
 #include "cuda_driver_internal.h"
+#include "vgre/advanced/runtime_profiler.h"
+#include "vgre/api/vgre_c_api.h"
+#include "vgre/common/logger.h"
+#include <string>
 
 extern "C" {
 
@@ -33,12 +37,24 @@ CUresult cuGetErrorString(CUresult error, const char **pStr) {
 }
 
 CUresult cuProfilerStart(void) {
-  // VGRE profiler is always on in TRACE/DEBUG builds; this is a no-op
+  auto &prof = vgre::advanced::RuntimeProfiler::instance();
+  prof.setEnabled(true);
+  const char *dumpPath = vgre_get_config("VGRE_PROFILER_DUMP");
+  VGRE_LOG_INFO("CUDriver", std::string("cuProfilerStart(): profiling enabled") +
+                (dumpPath && dumpPath[0] ? std::string(" (dump=") + dumpPath + ")" : ""));
   return CUDA_SUCCESS;
 }
 
 CUresult cuProfilerStop(void) {
-  // No-op; profiling data is flushed at process exit via RuntimeProfiler
+  auto &prof = vgre::advanced::RuntimeProfiler::instance();
+  prof.setEnabled(false);
+  const char *dumpPath = vgre_get_config("VGRE_PROFILER_DUMP");
+  if (dumpPath && dumpPath[0]) {
+    prof.exportToFile(std::string(dumpPath));
+    VGRE_LOG_INFO("CUDriver", std::string("cuProfilerStop(): profiler dumped to ") + dumpPath);
+  } else {
+    VGRE_LOG_INFO("CUDriver", "cuProfilerStop(): profiling disabled");
+  }
   return CUDA_SUCCESS;
 }
 

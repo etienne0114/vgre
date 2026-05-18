@@ -151,6 +151,22 @@ public:
   size_t getTextureCount() const;
   size_t getSurfaceCount() const;
 
+  // Returns dimensions and channel count for PTX txq instructions.
+  // channels = elementSize / base-type-size for packed vector textures (e.g. float4 → 4).
+  struct TextureInfo {
+    size_t   width    = 0;
+    size_t   height   = 0;
+    size_t   depth    = 0;
+    unsigned channels = 1; // 1 for scalar; 2/3/4 for packed float2/float3/float4
+  };
+  bool getTextureInfo(TextureId id, TextureInfo &out) const;
+
+  // Per-channel 2D/1D/3D fetch for PTX tex.*.v2/v4 instructions.
+  // channel is zero-based; out-of-range channel returns 0.0f.
+  float tex2DChan(TextureId id, float x, float y, unsigned channel) const;
+  float tex1DChan(TextureId id, float x, unsigned channel) const;
+  float tex3DChan(TextureId id, float x, float y, float z, unsigned channel) const;
+
   // ── 3D Texture creation (explicit depth) ─────────────────────────────────
   VGREResult createTexture3D(TextureId &outId, const void *data,
                              size_t width, size_t height, size_t depth,
@@ -219,7 +235,11 @@ private:
   // ── Helpers ─────────────────────────────────────────────────────────────
   double readElementValue(const TextureObject &tex,
                           size_t linearIndex) const;
+  float  readElementChannel(const TextureObject &tex,
+                             size_t linearIndex, unsigned channel) const;
   double sampleTexel(const TextureObject &tex, int x, int y, int z) const;
+  float  sampleTexelChan(const TextureObject &tex,
+                          int x, int y, int z, unsigned channel) const;
 };
 
 } // namespace core

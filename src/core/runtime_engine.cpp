@@ -260,6 +260,20 @@ VGREResult RuntimeEngine::registerKernel(const std::string &name,
 
   VGRE_LOG_INFO("RuntimeEngine", "Registering kernel: " + name);
 
+  // Deduplication: if the kernel is already registered by name, return its
+  // existing ID immediately.  This prevents an uninitialized outId (non-zero
+  // garbage) from colliding with a previously-compiled kernel's cache entry.
+  {
+    auto nameIt = kernelNames_.find(name);
+    if (nameIt != kernelNames_.end()) {
+      outId = nameIt->second;
+      VGRE_LOG_INFO("RuntimeEngine",
+                    "Kernel '" + name + "' already registered (ID=" +
+                        std::to_string(outId) + "), returning cached entry");
+      return VGREResult::SUCCESS;
+    }
+  }
+
   // Parse kernel source
   KernelIR ir;
   auto r = parser_->parse(name, source, ir);
@@ -296,9 +310,16 @@ VGREResult RuntimeEngine::registerKernel(const std::string &name,
   // This is required for production TCPCluster: the master assigns kernel IDs
   // and workers must preserve them to keep dispatch and result tracking
   // consistent across processes.
-  KernelId id = (outId != 0) ? outId : nextKernelId_++;
-  if (outId != 0 && id >= nextKernelId_) {
-    nextKernelId_ = id + 1;
+  // Use caller-provided ID only when it looks like a deliberate pre-assignment
+  // (TCPCluster master assigns IDs to workers).  Any outId >= nextKernelId_
+  // is a forward reference: extend the counter.  outId == 0 always allocates
+  // a fresh ID, preventing uninitialized-variable collisions.
+  KernelId id;
+  if (outId != 0 && outId < (nextKernelId_ + 65536)) {
+    id = outId;
+    if (id >= nextKernelId_) nextKernelId_ = id + 1;
+  } else {
+    id = nextKernelId_++;
   }
   kernelIRCache_[id] = ir;
 

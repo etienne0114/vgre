@@ -55,6 +55,9 @@ add_test(NAME MultiDeviceIntegration COMMAND test_multi_device)
 add_executable(test_multi_device_cooperative_comprehensive integration/test_multi_device_cooperative_comprehensive.cpp)
 target_link_libraries(test_multi_device_cooperative_comprehensive PRIVATE vgre)
 add_test(NAME MultiDeviceCooperativeComprehensive COMMAND test_multi_device_cooperative_comprehensive)
+set_tests_properties(MultiDeviceCooperativeComprehensive PROPERTIES
+    TIMEOUT 300
+    RESOURCE_LOCK vgre_llvm_jit)
 
 add_executable(test_stream_concurrency integration/test_stream_concurrency.cpp)
 target_link_libraries(test_stream_concurrency PRIVATE vgre)
@@ -167,7 +170,7 @@ set_tests_properties(ClangParser PROPERTIES TIMEOUT 300)
 add_executable(test_clang_enhanced compiler/test_clang_enhanced.cpp)
 target_link_libraries(test_clang_enhanced PRIVATE vgre)
 add_test(NAME ClangEnhanced COMMAND test_clang_enhanced)
-set_tests_properties(ClangEnhanced PROPERTIES TIMEOUT 600)
+set_tests_properties(ClangEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
 
 add_executable(test_kernel_parser_enhanced compiler/test_kernel_parser_enhanced.cpp)
 target_link_libraries(test_kernel_parser_enhanced PRIVATE vgre)
