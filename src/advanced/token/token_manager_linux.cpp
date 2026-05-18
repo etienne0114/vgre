@@ -2,9 +2,8 @@
 #include "vgre/common/logger.h"
 
 #if defined(__linux__)
-#include <sys/types.h>
-#include <keyutils.h>
-#include <unistd.h>
+#include "vgre/common/os_backend.h"
+#include <keyutils.h>  // Linux kernel keyring API
 #include <vector>
 
 #if defined(VGRE_HAS_LIBSECRET)

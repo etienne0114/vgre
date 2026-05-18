@@ -15,18 +15,20 @@
 #include <thread>
 #include <chrono>
 #include <cstdlib>
-#if defined(_WIN32)
-#include <windows.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 static std::atomic<bool>& getStopRequested() {
     static std::atomic<bool> v{false};
     return v;
 }
 
+static std::condition_variable mainCv;
+static std::mutex mainMtx;
+
 void signal_handler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) {
         getStopRequested().store(true);
+        mainCv.notify_all();
     }
 }
 
@@ -118,7 +120,7 @@ int main(int argc, char** argv) {
 #ifdef VGRE_HAS_OPENCL_BACKEND
         // Integrated GPU via OpenCL
         auto& igpu = vgre::runtime::IGPUOpenCLExecutor::instance();
-        if (igpu.initialize()) {
+        if (igpu.initialize() == vgre::VGREResult::SUCCESS) {
             std::cout << "[Worker] Integrated GPU: " << igpu.getDeviceName()
                       << " (OpenCL, " << std::fixed
                       << igpu.getEstimatedGFLOPS() << " GFLOPS est.)" << std::endl;
@@ -150,7 +152,9 @@ int main(int argc, char** argv) {
     
     int reconnectCounter = 0;
     while (!getStopRequested().load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::unique_lock<std::mutex> lock(mainMtx);
+        mainCv.wait_for(lock, std::chrono::milliseconds(200), [] { return getStopRequested().load(); });
+        if (getStopRequested().load()) break;
         
         if (!cluster.isEnabled()) {
             if (master_ip == "auto") {
@@ -158,7 +162,8 @@ int main(int argc, char** argv) {
                 vgre::Logger::instance().log(vgre::LogLevel::WARN, "Worker", "Cluster engine went offline unexpectedly; attempting to re-enable (attempt #" + std::to_string(++reconnectCounter) + ")...");
                 std::cout << "[Worker] Cluster engine offline. Retrying..." << std::endl;
                 std::cout.flush();
-                std::this_thread::sleep_for(std::chrono::seconds(2));
+                mainCv.wait_for(lock, std::chrono::seconds(2), [] { return getStopRequested().load(); });
+                if (getStopRequested().load()) break;
                 cluster.initialize(false, master_ip, port);
             } else {
                 // In direct mode, we exit upon failure as per previous design.

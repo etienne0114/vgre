@@ -4,11 +4,9 @@
 #include "vgre/common/logger.h"
 #include <sstream>
 
-#ifdef _WIN32
-#include <direct.h>
-#else
-#include <sys/stat.h>
-#include <unistd.h>
+#include "vgre/common/os_backend.h"
+#if defined(_WIN32)
+#include <direct.h>  // _mkdir
 #endif
 
 namespace vgre {

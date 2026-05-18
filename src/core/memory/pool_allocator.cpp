@@ -4,10 +4,8 @@
 #include <cstring>
 #include <algorithm>
 
-#if defined(_WIN32)
-#include <windows.h>
-#elif defined(__linux__)
-#include <sys/mman.h>
+#include "vgre/common/os_backend.h"
+#if defined(__linux__)
 #include <sys/syscall.h>
 // mbind policy — avoid libnuma dependency.
 #ifndef MPOL_PREFERRED
@@ -16,8 +14,6 @@
 #ifndef SYS_mbind
 #  define SYS_mbind 237
 #endif
-#else
-#include <sys/mman.h>
 #endif
 
 namespace vgre {

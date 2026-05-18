@@ -4,16 +4,12 @@
 #include <sstream>
 #include <cstring>
 
+#include "vgre/common/os_backend.h"
 #if defined(__linux__)
-#include <dirent.h>
+#include <dirent.h>   // readdir — NUMA /sys/devices/system/node scan
 #include <fstream>
-#include <pthread.h>
-#include <sched.h>
-#elif defined(_WIN32)
-#include <windows.h>
 #elif defined(__APPLE__)
 #include <sys/sysctl.h>
-#include <pthread.h>
 #include <mach/thread_policy.h>
 #include <mach/thread_act.h>
 #endif

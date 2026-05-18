@@ -1,14 +1,9 @@
 #include "vgre/api/nccl_internal.h"
 #include "vgre/common/logger.h"
 
-#if defined(_WIN32)
-#  include <windows.h>
-#else
-#  include <fcntl.h>
-#  include <unistd.h>
-#  if defined(__linux__)
-#    include <sys/random.h>  // getrandom()
-#  endif
+#include "vgre/common/os_backend.h"
+#if !defined(_WIN32) && defined(__linux__)
+#  include <sys/random.h>  // getrandom()
 #endif
 
 // SIMD for reduction

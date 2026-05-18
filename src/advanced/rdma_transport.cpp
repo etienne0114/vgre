@@ -11,7 +11,7 @@
 
 #ifdef VGRE_HAS_RDMA
 #include <infiniband/verbs.h>
-#include <sys/mman.h>   // mmap, munmap
+#include "vgre/common/os_backend.h"
 
 namespace {
 // Bounce buffer size: controls the maximum single RDMA transfer size.
@@ -158,7 +158,7 @@ void RDMAContext::deregisterMemory(RDMARegion* region) {
 RDMAConnection::~RDMAConnection() {
     if (qp_) { ibv_destroy_qp(qp_); qp_ = nullptr; }
     if (bounceMR_ && ctxPtr_) { ctxPtr_->deregisterMemory(bounceMR_); bounceMR_ = nullptr; }
-    if (bouncePtr_) { munmap(bouncePtr_, bounceSize_); bouncePtr_ = nullptr; bounceSize_ = 0; }
+    if (bouncePtr_) { vgre::os::mmap_free(bouncePtr_, bounceSize_); bouncePtr_ = nullptr; bounceSize_ = 0; }
 }
 
 bool RDMAConnection::createQP(RDMAContext& ctx) {
@@ -263,16 +263,15 @@ bool RDMAConnection::connect(SecureChannel& ctrl, RDMAContext& ctx) {
     // remote peer RDMA-WRITEs directly into. Its rkey and virtual address are
     // included in the QP info exchange so the remote knows where to write.
     const size_t bsz = getRdmaBounceBufSize();
-    void* bptr = mmap(nullptr, bsz, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (bptr == MAP_FAILED) {
+    void* bptr = vgre::os::mmap_alloc(bsz);
+    if (!bptr) {
         VGRE_LOG_ERROR("RDMATransport",
                        "mmap failed for " + std::to_string(bsz) + "-byte bounce buffer");
         return false;
     }
     RDMARegion* bmr = ctx.registerMemory(bptr, bsz);
     if (!bmr) {
-        munmap(bptr, bsz);
+        vgre::os::mmap_free(bptr, bsz);
         VGRE_LOG_ERROR("RDMATransport", "ibv_reg_mr failed for bounce buffer");
         return false;
     }

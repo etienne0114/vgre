@@ -14,10 +14,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#ifndef _WIN32
-#include <unistd.h>
-#include <pwd.h>
-#include <sys/wait.h>
+#include "vgre/common/os_backend.h"
+#if !defined(_WIN32)
+#include <pwd.h>       // getpwuid — home dir for cache path
+#include <sys/wait.h>  // waitpid — clang subprocess
 #endif
 
 

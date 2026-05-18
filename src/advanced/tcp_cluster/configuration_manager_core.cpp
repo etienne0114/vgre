@@ -17,6 +17,8 @@ std::map<uint64_t, ConfigurationManager::ConfigurationChangeCallback> Configurat
 std::atomic<uint64_t> ConfigurationManager::next_callback_id_{1};
 std::atomic<bool> ConfigurationManager::monitoring_active_{false};
 std::thread ConfigurationManager::monitoring_thread_;
+std::mutex ConfigurationManager::monitoring_cv_mutex_;
+std::condition_variable ConfigurationManager::monitoring_cv_;
 
 // ── getEnvVar Specializations ──
 

@@ -346,7 +346,23 @@ if exist "%BUILD_DIR%\CMakeCache.txt" (
     )
 )
 
-"%CMAKE_EXE%" "%PROJECT_ROOT%" -G "!CMAKE_GENERATOR!" !CMAKE_ARCH_FLAG! !CMAKE_COMPILER_FLAGS! -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="!LLVM_DIR!" -DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=TRUE -DVGRE_ENABLE_NATIVE_SIMD=%VGRE_ENABLE_NATIVE_SIMD_FLAG%
+rem -- On Windows LAPACK is never searched by default (no system LAPACK ships).
+rem    Explicitly pass OFF so that a stale CMakeCache from a Linux build
+rem    (which may have VGRE_USE_LAPACK=ON cached) does not cause configure failure.
+rem    Users who have Intel oneAPI MKL or vcpkg OpenBLAS installed can override
+rem    by running:  cmake ... -DVGRE_USE_LAPACK=ON
+rem
+rem    Also detect and clear any stale cache where VGRE_USE_LAPACK was cached ON.
+if exist "%BUILD_DIR%\CMakeCache.txt" (
+    findstr /C:"VGRE_USE_LAPACK:BOOL=ON" "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
+    if not errorlevel 1 (
+        echo [INFO] Stale cache has VGRE_USE_LAPACK=ON — clearing to avoid LAPACK search on Windows.
+        del /f /q "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
+        rd /s /q "%BUILD_DIR%\CMakeFiles" >nul 2>&1
+    )
+)
+
+"%CMAKE_EXE%" "%PROJECT_ROOT%" -G "!CMAKE_GENERATOR!" !CMAKE_ARCH_FLAG! !CMAKE_COMPILER_FLAGS! -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="!LLVM_DIR!" -DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=TRUE -DVGRE_ENABLE_NATIVE_SIMD=%VGRE_ENABLE_NATIVE_SIMD_FLAG% -DVGRE_USE_LAPACK=OFF
 if errorlevel 1 (
     popd
     echo ERROR: CMake configure failed.

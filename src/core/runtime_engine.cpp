@@ -27,9 +27,7 @@
 #include <fstream>
 #include <set>
 #include <thread>
-#ifdef _WIN32
-#include <winsock2.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace core {

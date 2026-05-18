@@ -178,7 +178,8 @@ void DiscoveryManager::udpAnnouncerLoop() {
     { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
     if (!token.empty()) ping_msg += ':' + CryptoUtils::computeHmacHex(token, ping_msg);
     sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
+    parent_->shutdown_cv_.wait_for(lock, std::chrono::seconds(2), [this]() { return !parent_->enabled_; });
   }
   // Socket automatically closed by VgreSocketGuard destructor
 }
@@ -309,10 +310,8 @@ void DiscoveryManager::udpWorkerAnnouncerLoop() {
     if (!token.empty()) ping_msg += ':' + CryptoUtils::computeHmacHex(token, ping_msg);
     sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0,
            (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
-    // Sleep in 200ms increments so shutdown() can join within 200ms.
-    for (int i = 0; i < 25 && parent_->enabled_ && !parent_->is_master_; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
+    std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
+    parent_->shutdown_cv_.wait_for(lock, std::chrono::seconds(5), [this]() { return !parent_->enabled_ || parent_->is_master_; });
   }
   // Socket automatically closed by VgreSocketGuard destructor
 }

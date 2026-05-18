@@ -185,7 +185,8 @@ VGREResult MemorySyncManager::sendDeltaSyncWithRetry(
     if (attempt < MAX_DELTA_SYNC_RETRIES - 1) {
       int delay_ms = backoff.next();
       VGRE_LOG_DEBUG("TCPCluster", "Delta-sync attempt " + std::to_string(attempt + 1) + " failed, retrying after " + std::to_string(delay_ms) + "ms");
-      std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+      std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
+      parent_->shutdown_cv_.wait_for(lock, std::chrono::milliseconds(delay_ms), [this]() { return !parent_->enabled_; });
     }
   }
 

@@ -7,14 +7,11 @@
 #include "vgre/advanced/tcp_cluster/internal/windows_socket_manager.h"
 #include "vgre/common/logger.h"
 
+#include "vgre/common/os_backend.h"
 #ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <mstcpip.h>
-#else
-#include <cerrno>
-#include <cstring>
 #endif
+#include <cstring>
 
 namespace vgre {
 namespace advanced {

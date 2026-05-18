@@ -155,6 +155,8 @@ private:
     static std::atomic<uint64_t> next_callback_id_;
     static std::atomic<bool> monitoring_active_;
     static std::thread monitoring_thread_;
+    static std::mutex monitoring_cv_mutex_;
+    static std::condition_variable monitoring_cv_;
 
     static void notifyConfigurationChange(const ConfigurationChangeEvent& event);
     static std::vector<ConfigurationChangeEvent> compareConfigurations(const ClusterConfiguration& old_cfg, const ClusterConfiguration& new_cfg, const std::string& source = "api");

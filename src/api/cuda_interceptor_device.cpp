@@ -14,11 +14,7 @@
 #include <cstring>
 #include <stdexcept>
 
-#if defined(_WIN32)
-#include <malloc.h>
-#else
-#include <sys/mman.h>  // mlock/munlock for cudaHostRegister
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace api {

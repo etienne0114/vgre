@@ -12,13 +12,11 @@
 #include <algorithm>
 #include <chrono>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <direct.h>
+#include "vgre/common/os_backend.h"
+#if defined(_WIN32)
+#include <direct.h>   // _mkdir
 #else
-#include <dirent.h>
-#include <unistd.h>
-#include <sys/stat.h>
+#include <dirent.h>   // opendir/readdir — backup file listing
 #endif
 
 namespace vgre {

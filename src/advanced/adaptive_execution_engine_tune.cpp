@@ -16,12 +16,12 @@
 
 #include "vgre/common/openmp_helper.h"
 
+#include "vgre/common/os_backend.h"
 #if defined(__linux__)
 #include <dirent.h>
 #include <linux/perf_event.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
-#include <unistd.h>
 #endif
 
 #if defined(__APPLE__)
@@ -31,7 +31,6 @@
 #endif
 
 #if defined(_WIN32)
-#include <windows.h>
 #include <wbemidl.h>
 #include <comdef.h>
 #pragma comment(lib, "wbemuuid.lib")

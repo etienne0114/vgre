@@ -21,12 +21,7 @@
 #include <errno.h>
 #include <limits>
 
-#ifdef _WIN32
-#include <winsock2.h>
-#else
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace advanced {

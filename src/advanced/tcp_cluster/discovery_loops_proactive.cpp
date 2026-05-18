@@ -21,13 +21,10 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
+#include "vgre/common/os_backend.h"
+#if !defined(_WIN32)
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #endif
@@ -285,9 +282,8 @@ void DiscoveryManager::proactiveConnectionLoop() {
         }
 
         // ── 8. Sleep 500 ms in 50 ms slices so shutdown is responsive ────────
-        for (int i = 0; i < 10 && parent_->enabled_ && !stop_proactive_; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
+        std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
+        parent_->shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this]() { return !parent_->enabled_ || stop_proactive_; });
     }
 
     // Drain any remaining auth threads on exit

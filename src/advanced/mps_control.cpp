@@ -23,15 +23,9 @@
 #include <unordered_map>
 #include <vector>
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
+#include "vgre/common/os_backend.h"
+#if !defined(_WIN32)
+#include <sys/un.h>  // sockaddr_un — Unix domain sockets
 #endif
 
 namespace vgre {

@@ -27,7 +27,10 @@ VGREResult TCPClusterManager::performGracefulRestart(bool preserve_connections) 
   }
 
   shutdown();
-  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  {
+      std::unique_lock<std::mutex> lock(shutdown_mutex_);
+      shutdown_cv_.wait_for(lock, std::chrono::milliseconds(1000));
+  }
 
   VGREResult res = initialize(was_master, restart_host, restart_port);
   if (res == VGREResult::SUCCESS && preserve_connections && was_master) {
@@ -59,7 +62,10 @@ VGREResult TCPClusterManager::coordinateRestartWithPeers(uint32_t delay_ms) {
       send_packet(c->socket_fd, PacketType::RAW_DATA, &pkt, sizeof(pkt), c->secure_channel.get());
     }
   }
-  if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+  if (delay_ms > 0) {
+      std::unique_lock<std::mutex> lock(shutdown_mutex_);
+      shutdown_cv_.wait_for(lock, std::chrono::milliseconds(delay_ms));
+  }
   return VGREResult::SUCCESS;
 }
 

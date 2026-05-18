@@ -14,11 +14,7 @@
 #include <sys/stat.h>
 #include <cstring>
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
+#include "vgre/common/os_backend.h"
 
 namespace vgre {
 namespace advanced {

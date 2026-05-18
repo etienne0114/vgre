@@ -17,16 +17,9 @@
 #include <random>
 #include <sstream>
 
-#if defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <unistd.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <arpa/inet.h>
+#include "vgre/common/os_backend.h"
+#if !defined(_WIN32)
+#include <sys/select.h>  // select() — used in WebSocket recv loop
 #endif
 
 #ifdef VGRE_ENABLE_SSL

@@ -30,6 +30,7 @@ void MemoryManager::startMigrationThread() {
 
 void MemoryManager::stopMigrationThread() {
   migrationStop_.store(true, std::memory_order_release);
+  migrationCv_.notify_all();
   if (migrationThread_.joinable()) {
     auto future = std::async(std::launch::async, [this]() { migrationThread_.join(); });
     if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
@@ -64,7 +65,10 @@ void MemoryManager::migrationLoop() {
 #endif
 
   while (!migrationStop_.load(std::memory_order_acquire)) {
-    std::this_thread::sleep_for(kInterval);
+    {
+      std::unique_lock<std::mutex> lock(migrationMutex_);
+      migrationCv_.wait_for(lock, kInterval, [this]() { return migrationStop_.load(std::memory_order_acquire); });
+    }
     if (migrationStop_.load(std::memory_order_acquire)) break;
 
 #if defined(__linux__)
@@ -187,6 +191,7 @@ void MemoryManager::pendingDrainerLoop() {
       // Reset ready flag and advance tail to claim slot
       pendingRing_[slot].ready.store(false, std::memory_order_relaxed);
       pendingTail_.fetch_add(1, std::memory_order_release);
+      allocatorCv_.notify_all();
       tail++;
 
       // Process the fault outside signal handler: find managed region and mark dirty
@@ -203,8 +208,11 @@ void MemoryManager::pendingDrainerLoop() {
       }
       // release lock and continue
     }
-    // Sleep briefly to avoid busy-looping when idle
-    std::this_thread::sleep_for(1ms);
+    // Wait briefly to avoid busy-looping when idle, but allow instant wakeup on shutdown
+    {
+      std::unique_lock<std::mutex> lock(migrationMutex_);
+      migrationCv_.wait_for(lock, 1ms, [this]() { return migrationStop_.load(std::memory_order_acquire); });
+    }
   }
 }
 

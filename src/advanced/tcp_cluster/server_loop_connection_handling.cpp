@@ -13,9 +13,8 @@
 #include <cstring>
 #include <string>
 
-#ifdef _WIN32
-#include <winsock2.h>
-#else
+#include "vgre/common/os_backend.h"
+#if !defined(_WIN32)
 #include <arpa/inet.h>
 #endif
 

@@ -13,8 +13,9 @@
 #include <mutex>
 #include <string>
 
+#include "vgre/common/os_backend.h"
+
 #ifdef _WIN32
-#include <winsock2.h>
 #include <mstcpip.h>
 #endif
 
