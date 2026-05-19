@@ -22,7 +22,7 @@ namespace core {
  * @brief Non-temporal streaming memcpy for large buffers.
  * Bypasses the cache for writes to prevent cache pollution on large data transfers.
  */
-#if defined(__x86_64__)
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 __attribute__((target("avx")))
 #endif
 static void streamingMemcpy(void* dst, const void* src, size_t bytes) {

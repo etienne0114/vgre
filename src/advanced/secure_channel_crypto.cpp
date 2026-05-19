@@ -368,7 +368,9 @@ namespace {
 #  include <wmmintrin.h>  // _mm_aesenc_si128, _mm_aesenclast_si128, _mm_aeskeygenassist_si128
 
 // Even-round key assist: derives the next 128-bit round key from the previous two.
+#if defined(__GNUC__) || defined(__clang__)
 static __attribute__((target("aes")))
+#endif
 __m128i aes256_assist_128(__m128i t1, __m128i t2) {
     t2 = _mm_shuffle_epi32(t2, 0xff);
     t1 = _mm_xor_si128(t1, _mm_slli_si128(t1, 4));
@@ -378,7 +380,9 @@ __m128i aes256_assist_128(__m128i t1, __m128i t2) {
 }
 
 // Odd-round key assist: derives the 128-bit "odd" round key (second half of AES-256 key).
+#if defined(__GNUC__) || defined(__clang__)
 static __attribute__((target("aes")))
+#endif
 __m128i aes256_assist_256(__m128i t1, __m128i t3) {
     __m128i t2 = _mm_aeskeygenassist_si128(t1, 0);
     t2 = _mm_shuffle_epi32(t2, 0xaa);
@@ -389,7 +393,9 @@ __m128i aes256_assist_256(__m128i t1, __m128i t3) {
 }
 
 // AES-256 key schedule: expands a 32-byte key into 15 128-bit round keys (rounds 0–14).
+#if defined(__GNUC__) || defined(__clang__)
 static __attribute__((target("aes")))
+#endif
 void aes256_ni_key_expand(const uint8_t key[32], __m128i rk[15]) {
     __m128i t1 = _mm_loadu_si128((const __m128i*)key);
     __m128i t3 = _mm_loadu_si128((const __m128i*)(key + 16));
@@ -413,7 +419,9 @@ void aes256_ni_key_expand(const uint8_t key[32], __m128i rk[15]) {
 // AES-256-CTR using hardware AES-NI with 4-block interleaved pipeline.
 // counter_block = nonce[12] || be32(initialCounter + block_index) — identical format to
 // the software path, ensuring bit-exact results when switching implementations.
+#if defined(__GNUC__) || defined(__clang__)
 static __attribute__((target("aes")))
+#endif
 void aes256_ctr_hw(const uint8_t key[32], const uint8_t nonce[12],
                    uint64_t initialCounter,
                    const uint8_t* __restrict__ input,

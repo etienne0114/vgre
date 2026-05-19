@@ -294,7 +294,11 @@ bool WebsocketTransportClient::rawSend(const void* data, size_t len) {
         return SSL_write(tls_->ssl, data, static_cast<int>(len)) == static_cast<int>(len);
     }
 #endif
+#if defined(_WIN32)
+    return ::send(sockfd_, static_cast<const char*>(data), static_cast<int>(len), 0) == static_cast<int>(len);
+#else
     return ::send(sockfd_, static_cast<const char*>(data), len, 0) == static_cast<ssize_t>(len);
+#endif
 }
 
 bool WebsocketTransportClient::rawRecv(void* buf, size_t len, int timeoutMs) {
@@ -310,9 +314,13 @@ bool WebsocketTransportClient::rawRecv(void* buf, size_t len, int timeoutMs) {
         } else
 #endif
         {
+#if defined(_WIN32)
+            int n = ::recv(sockfd_, p + total, static_cast<int>(len - total), 0);
+#else
             ssize_t n = ::recv(sockfd_, p + total, len - total, 0);
+#endif
             if (n <= 0) return false;
-            total += n;
+            total += static_cast<size_t>(n);
         }
     }
     return true;

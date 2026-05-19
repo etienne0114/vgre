@@ -75,7 +75,20 @@ void* CDPExecutor::allocParamBufferV2(size_t alignment, size_t bytes) {
     alignment = pow2;
     void* p = nullptr;
     if (alignment <= alignof(max_align_t)) {
+#if defined(_WIN32)
+        // MSVC doesn't have std::aligned_alloc; use manual fallback
+        // so std::free remains valid for deallocation.
+        size_t extra = alignment - 1;
+        void* raw = std::malloc(bytes + extra + sizeof(void*));
+        if (raw) {
+            uintptr_t addr = reinterpret_cast<uintptr_t>(raw) + sizeof(void*);
+            addr = (addr + extra) & ~static_cast<uintptr_t>(extra);
+            p = reinterpret_cast<void*>(addr);
+            reinterpret_cast<void**>(p)[-1] = raw;
+        }
+#else
         p = std::aligned_alloc(alignment, bytes);
+#endif
     } else {
         // Fallback: over-allocate and align manually
         size_t extra = alignment - 1;
