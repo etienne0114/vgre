@@ -307,9 +307,14 @@ void AdaptiveExecutionEngine::runBenchmark() {
             //   SSE4:     4 FP32/reg → 8 accums = 2 VFMADD128 per iter → 2×kCalibN instructions
             //   Scalar:   1 FP32     → 8 accums = 8 FMADD per iter     → 8×kCalibN instructions
             int simdWidth = 1;
+#if defined(__GNUC__) || defined(__clang__)
             if (__builtin_cpu_supports("avx512f")) simdWidth = 16;
             else if (__builtin_cpu_supports("avx2"))    simdWidth = 8;
             else if (__builtin_cpu_supports("sse4.1"))  simdWidth = 4;
+#else
+            // Non-GCC/Clang (e.g. MSVC): assume AVX2 as conservative default
+            simdWidth = 8;
+#endif
             // Instructions per loop iteration = ceil(8 accumulators / simdWidth)
             int instsPerIter = (8 + simdWidth - 1) / simdWidth;
             // Total instructions ≈ kCalibN × instsPerIter  (+~10% overhead for loop/branch)

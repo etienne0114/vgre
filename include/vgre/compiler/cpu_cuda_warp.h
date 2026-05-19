@@ -9,6 +9,16 @@
 #include <cstring>
 #include "vgre/common/types.h"
 
+#ifdef _MSC_VER
+#include <intrin.h>
+#pragma intrinsic(_BitScanForward)
+#pragma intrinsic(_BitScanReverse)
+#ifdef _WIN64
+#pragma intrinsic(_BitScanForward64)
+#pragma intrinsic(_BitScanReverse64)
+#endif
+#endif
+
 // Forward-declare the JIT runtime functions this header needs.
 // These are defined in llvm_translation_engine.cpp / gpu_thread_context.cpp.
 extern "C" {
@@ -20,13 +30,94 @@ extern "C" {
 namespace vgre_cuda {
 
 // ── Bit utilities ─────────────────────────────────────────────────────────────
-inline int __popc (unsigned int x)      { return __builtin_popcount(x); }
-inline int __popcll(unsigned long long x){ return __builtin_popcountll(x); }
-inline int __clz  (unsigned int x)      { return x ? __builtin_clz(x) : 32; }
-inline int __clzll (unsigned long long x){ return x ? __builtin_clzll(x) : 64; }
-inline int __ffs  (unsigned int x)      { return __builtin_ffs(static_cast<int>(x)); }
-inline int __ffsll(unsigned long long x) { return __builtin_ffsll(static_cast<long long>(x)); }
-inline unsigned int __brev(unsigned int x) { return __builtin_bitreverse32(x); }
+// Portable wrappers: GCC/Clang builtins on non-MSVC, MSVC intrinsics on MSVC.
+inline int __popc (unsigned int x)      {
+#ifdef _MSC_VER
+    return static_cast<int>(__popcnt(x));
+#else
+    return __builtin_popcount(x);
+#endif
+}
+inline int __popcll(unsigned long long x){
+#ifdef _MSC_VER
+    return static_cast<int>(__popcnt64(x));
+#else
+    return __builtin_popcountll(x);
+#endif
+}
+inline int __clz  (unsigned int x)      {
+    if (!x) return 32;
+#ifdef _MSC_VER
+    unsigned long idx;
+    _BitScanReverse(&idx, x);
+    return 31 - static_cast<int>(idx);
+#else
+    return __builtin_clz(x);
+#endif
+}
+inline int __clzll (unsigned long long x){
+    if (!x) return 64;
+#ifdef _MSC_VER
+#ifdef _WIN64
+    unsigned long idx;
+    _BitScanReverse64(&idx, x);
+    return 63 - static_cast<int>(idx);
+#else
+    // 32-bit Windows: split into two 32-bit halves
+    unsigned long idx;
+    if (_BitScanReverse(&idx, static_cast<unsigned long>(x >> 32))) {
+        return 31 - static_cast<int>(idx);
+    }
+    _BitScanReverse(&idx, static_cast<unsigned long>(x));
+    return 63 - static_cast<int>(idx);
+#endif
+#else
+    return __builtin_clzll(x);
+#endif
+}
+inline int __ffs  (unsigned int x)      {
+    if (!x) return 0;
+#ifdef _MSC_VER
+    unsigned long idx;
+    _BitScanForward(&idx, x);
+    return static_cast<int>(idx) + 1;
+#else
+    return __builtin_ffs(static_cast<int>(x));
+#endif
+}
+inline int __ffsll(unsigned long long x) {
+    if (!x) return 0;
+#ifdef _MSC_VER
+#ifdef _WIN64
+    unsigned long idx;
+    _BitScanForward64(&idx, x);
+    return static_cast<int>(idx) + 1;
+#else
+    unsigned long idx;
+    if (_BitScanForward(&idx, static_cast<unsigned long>(x))) {
+        return static_cast<int>(idx) + 1;
+    }
+    if (_BitScanForward(&idx, static_cast<unsigned long>(x >> 32))) {
+        return static_cast<int>(idx) + 33;
+    }
+    return 0;
+#endif
+#else
+    return __builtin_ffsll(static_cast<long long>(x));
+#endif
+}
+inline unsigned int __brev(unsigned int x) {
+#ifdef _MSC_VER
+    x = ((x >> 1) & 0x55555555u) | ((x & 0x55555555u) << 1);
+    x = ((x >> 2) & 0x33333333u) | ((x & 0x33333333u) << 2);
+    x = ((x >> 4) & 0x0F0F0F0Fu) | ((x & 0x0F0F0F0Fu) << 4);
+    x = ((x >> 8) & 0x00FF00FFu) | ((x & 0x00FF00FFu) << 8);
+    x = (x >> 16) | (x << 16);
+    return x;
+#else
+    return __builtin_bitreverse32(x);
+#endif
+}
 
 // ── Active mask ───────────────────────────────────────────────────────────────
 // In VGRE all threads in the warp are always active (no divergence tracking).
@@ -69,7 +160,7 @@ inline T vgre_shfl_impl(uint64_t* buf, int lane, int srcLane, int width) {
     static_assert(sizeof(T) <= 8, "warp shuffle supports up to 64-bit types");
     T val;
     uint64_t raw = buf[srcLane % width];
-    __builtin_memcpy(&val, &raw, sizeof(T));
+    std::memcpy(&val, &raw, sizeof(T));
     (void)lane;
     return val;
 }
@@ -81,7 +172,7 @@ template<typename T>
 inline void vgre_shfl_write(unsigned int mask, uint64_t* buf, int lane, T val) {
     if ((mask >> (lane & 31)) & 1u) {
         uint64_t raw = 0;
-        __builtin_memcpy(&raw, &val, sizeof(T));
+        std::memcpy(&raw, &val, sizeof(T));
         buf[lane & 31] = raw;
     }
 }
@@ -98,7 +189,7 @@ inline T __shfl_sync(unsigned int mask, T val, int srcLane, int width = 32) {
     // Only participating lanes write their value
     if ((mask >> lane) & 1u) {
         uint64_t raw = 0;
-        __builtin_memcpy(&raw, &val, sizeof(T));
+        std::memcpy(&raw, &val, sizeof(T));
         buf[lane] = raw;
     }
     vgre_jit_block_barrier_sync();
@@ -123,7 +214,7 @@ inline T __shfl_up_sync(unsigned int mask, T val, unsigned int delta, int width 
     int lane = vgre_jit_get_threadIdx()->x % width;
     if ((mask >> lane) & 1u) {
         uint64_t raw = 0;
-        __builtin_memcpy(&raw, &val, sizeof(T));
+        std::memcpy(&raw, &val, sizeof(T));
         buf[lane] = raw;
     }
     vgre_jit_block_barrier_sync();
@@ -149,7 +240,7 @@ inline T __shfl_down_sync(unsigned int mask, T val, unsigned int delta, int widt
     int lane = vgre_jit_get_threadIdx()->x % width;
     if ((mask >> lane) & 1u) {
         uint64_t raw = 0;
-        __builtin_memcpy(&raw, &val, sizeof(T));
+        std::memcpy(&raw, &val, sizeof(T));
         buf[lane] = raw;
     }
     vgre_jit_block_barrier_sync();
@@ -175,7 +266,7 @@ inline T __shfl_xor_sync(unsigned int mask, T val, int laneMask, int width = 32)
     int lane = vgre_jit_get_threadIdx()->x % width;
     if ((mask >> lane) & 1u) {
         uint64_t raw = 0;
-        __builtin_memcpy(&raw, &val, sizeof(T));
+        std::memcpy(&raw, &val, sizeof(T));
         buf[lane] = raw;
     }
     vgre_jit_block_barrier_sync();
