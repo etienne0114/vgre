@@ -2,7 +2,10 @@
 #include "vgre/common/logger.h"
 
 #include "vgre/common/os_backend.h"
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include <windows.h>
+#include <wincrypt.h>
+#else
 #include <sys/random.h>  // getrandom()
 #endif
 
