@@ -192,7 +192,7 @@ bool ConfigurationManager::parseYamlConfiguration(const std::string& yaml_conten
 uint64_t ConfigurationManager::getFileModificationTime(const std::string& file_path) {
 #ifdef _WIN32
     WIN32_FILE_ATTRIBUTE_DATA fileInfo;
-    if (GetFileAttributesEx(file_path.c_str(), GetFileExInfoStandard, &fileInfo)) {
+    if (GetFileAttributesExA(file_path.c_str(), GetFileExInfoStandard, &fileInfo)) {
         ULARGE_INTEGER ull;
         ull.LowPart = fileInfo.ftLastWriteTime.dwLowDateTime;
         ull.HighPart = fileInfo.ftLastWriteTime.dwHighDateTime;

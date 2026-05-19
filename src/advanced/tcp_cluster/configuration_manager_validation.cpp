@@ -135,7 +135,7 @@ ConfigurationValidationResult ConfigurationManager::validateConfiguration(const 
     if (!config.backup_directory.empty()) {
         // Check if backup directory exists or can be created
         #ifdef _WIN32
-        DWORD attrs = GetFileAttributes(config.backup_directory.c_str());
+        DWORD attrs = GetFileAttributesA(config.backup_directory.c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES) {
             result.warnings.push_back("Backup directory does not exist: " + config.backup_directory + " (will be created if needed)");
         }
@@ -357,7 +357,7 @@ ConfigurationValidationResult ConfigurationManager::validateFilePermissions(cons
     // Check backup directory permissions
     if (!config.backup_directory.empty()) {
         #ifdef _WIN32
-        DWORD attrs = GetFileAttributes(config.backup_directory.c_str());
+        DWORD attrs = GetFileAttributesA(config.backup_directory.c_str());
         if (attrs != INVALID_FILE_ATTRIBUTES) {
             // Directory exists, check if we can write to it
             std::string test_file = config.backup_directory + "\\test_write.tmp";
