@@ -326,22 +326,33 @@ endif()
 # dynamic section even when no symbols are directly referenced — needed for
 # LD_PRELOAD scenarios where the loaded library initialises OpenMP lazily.
 function(vgre_target_link_openmp target_name visibility)
-    # Instead of linking OpenMP::OpenMP_CXX (which incorrectly injects libgomp.so),
-    # manually apply the OpenMP compile flags so Clang processes `#pragma omp`.
-    target_compile_options(${target_name} ${visibility} "-fopenmp")
-    
-    if(_VGRE_LIBOMP_EXTRA)
-        # Force the linker to find libomp by passing the directory and -lomp explicitly.
-        get_filename_component(_omp_dir "${_VGRE_LIBOMP_EXTRA}" DIRECTORY)
-        target_link_directories(${target_name} ${visibility} "${_omp_dir}")
-        target_link_libraries(${target_name} ${visibility} "-lomp")
-        
-        if(UNIX AND NOT APPLE)
-            target_link_options(${target_name} ${visibility} "LINKER:--no-as-needed")
+    if(MSVC)
+        # MSVC (cl.exe / clang-cl with MSVC driver): use /openmp flag.
+        # /openmp:llvm enables the Clang-compatible runtime on clang-cl.
+        # Fall back to /openmp for plain cl.exe which does not accept /openmp:llvm.
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+            target_compile_options(${target_name} ${visibility} /openmp:llvm)
+        else()
+            target_compile_options(${target_name} ${visibility} /openmp)
         endif()
+        # MSVC /openmp links the runtime automatically; no extra lib needed.
     else()
-        # Fallback to whatever the compiler's default OpenMP linker flag is
-        target_link_libraries(${target_name} ${visibility} "-fopenmp")
+        # GCC and non-driver Clang: use -fopenmp compile flag.
+        target_compile_options(${target_name} ${visibility} "-fopenmp")
+
+        if(_VGRE_LIBOMP_EXTRA)
+            # Force the linker to find libomp by passing the directory and -lomp explicitly.
+            get_filename_component(_omp_dir "${_VGRE_LIBOMP_EXTRA}" DIRECTORY)
+            target_link_directories(${target_name} ${visibility} "${_omp_dir}")
+            target_link_libraries(${target_name} ${visibility} "-lomp")
+
+            if(UNIX AND NOT APPLE)
+                target_link_options(${target_name} ${visibility} "LINKER:--no-as-needed")
+            endif()
+        else()
+            # Fallback to whatever the compiler's default OpenMP linker flag is
+            target_link_libraries(${target_name} ${visibility} "-fopenmp")
+        endif()
     endif()
 endfunction()
 
@@ -991,7 +1002,6 @@ if(VGRE_BUILD_DASHBOARD)
             "Dashboard build skipped.")
     else()
         if(APPLE)
-            set(_flt_platform linux)   # overridden below
             set(_flt_platform macos)
             set(_flt_out "${PROJECT_SOURCE_DIR}/vgre_dashboard/build/macos/Build/Products/Release")
             set(_lib_pfx "lib")

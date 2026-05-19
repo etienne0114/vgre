@@ -81,15 +81,20 @@ target_link_libraries(vgre_advanced PRIVATE
     vgre_llvm_iface
 )
 
-# Link libibverbs when RDMA is enabled
-if(VGRE_ENABLE_RDMA AND VGRE_RDMA_LIBS)
-    target_link_libraries(vgre_advanced PUBLIC ${VGRE_RDMA_LIBS})
+# RDMA: set compile definitions + include paths so rdma_transport.cpp compiles.
+# The libibverbs link itself is handled by _vgre_configure_library() on the
+# final shared libraries (vgre, vgre_cudart) and the vgre-worker executable.
+if(_VGRE_RDMA_FOUND)
+    target_compile_definitions(vgre_advanced PRIVATE VGRE_HAS_RDMA)
+    target_include_directories(vgre_advanced PRIVATE "${IBVERBS_INCLUDE}")
 endif()
 
-# Link gRPC/Protobuf when gRPC transport is enabled
-if(VGRE_ENABLE_GRPC AND VGRE_GRPC_LIBS)
-    target_link_libraries(vgre_advanced PUBLIC ${VGRE_GRPC_LIBS})
-    target_include_directories(vgre_advanced PRIVATE ${VGRE_PROTO_GEN})
+# gRPC: set compile definitions + generated proto include path so
+# grpc_transport.cpp sees the generated .pb.h headers.
+# Library linking is handled by _vgre_configure_library() on final targets.
+if(_VGRE_GRPC_FOUND)
+    target_compile_definitions(vgre_advanced PRIVATE VGRE_HAS_GRPC)
+    target_include_directories(vgre_advanced PRIVATE "${_gen_dir}")
 endif()
 
 if(APPLE)

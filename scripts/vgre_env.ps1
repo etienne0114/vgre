@@ -24,8 +24,14 @@ if ($null -eq $env:VGRE_TCP_AUTH_TOKEN -or $env:VGRE_TCP_AUTH_TOKEN -eq "") {
 }
 
 # ── Cluster Discovery ────────────────────────────────────────────────────────
-# Cluster Nodes — manual cross-subnet configuration
-if ($null -eq $env:VGRE_CLUSTER_NODES) {
+# Cluster Nodes — manual cross-subnet configuration.
+# Only set the loopback default when the variable is not already in the
+# environment.  Workers connecting to a remote master MUST NOT have this
+# overridden; the user should set VGRE_CLUSTER_NODES to the master IP before
+# sourcing this file, or pass --master-ip to vgre-start.
+if ($null -eq $env:VGRE_CLUSTER_NODES -or $env:VGRE_CLUSTER_NODES -eq "") {
+    Write-Host "VGRE_CLUSTER_NODES not set — defaulting to 127.0.0.1:7777 (local test only)." -ForegroundColor DarkGray
+    Write-Host "  For remote workers set: set-vgre-env VGRE_CLUSTER_NODES '<MASTER_IP>:7777'" -ForegroundColor DarkGray
     set-vgre-env "VGRE_CLUSTER_NODES" "127.0.0.1:7777"
 }
 
@@ -80,8 +86,10 @@ if ($null -eq $env:VGRE_CLUSTER_NODES) {
 # Adaptive engine exponential moving-average alpha (0.0–1.0, default 0.3)
 # set-vgre-env "VGRE_ADAPTIVE_ALPHA" "0.3"
 
-# ── Add VGRE bin directory to PATH ───────────────────────────────────────────
-$vgrePath = "$HOME\AppData\Local\VGRE"
+# ── Add VGRE bin directory to PATH ────────────────────────────────────────────
+# Use $env:LOCALAPPDATA (always set by Windows) rather than constructing
+# the path from $HOME, which may be absent in non-interactive sessions.
+$vgrePath = $env:LOCALAPPDATA + "\VGRE"
 if ($env:PATH -notlike "*$vgrePath*") {
     $env:PATH = "$vgrePath;$env:PATH"
     Write-Host "Added $vgrePath to PATH"

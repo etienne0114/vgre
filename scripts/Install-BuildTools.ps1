@@ -134,13 +134,18 @@ function Download-FileVerified {
     return $OutputPath
 }
 
+# Detect host architecture — ARM64 uses different installer names
+$hostArch = $env:PROCESSOR_ARCHITECTURE
+$isArm64  = ($hostArch -eq "ARM64")
+
 Write-Host "`n=== Installing CMake ===" -ForegroundColor Cyan
 
-$cmakeVersion = "3.28.3"
-$cmakeFolder = "cmake-$cmakeVersion-windows-x86_64"
-$cmakePath = Join-Path $installDir "cmake"
-$cmakeZip = Join-Path $installDir "cmake.zip"
-$cmakeUrl = "https://github.com/Kitware/CMake/releases/download/v$cmakeVersion/$cmakeFolder.zip"
+$cmakeVersion    = "3.28.3"
+$cmakeWinArch    = if ($isArm64) { "windows-arm64" } else { "windows-x86_64" }
+$cmakeFolder     = "cmake-$cmakeVersion-$cmakeWinArch"
+$cmakePath       = Join-Path $installDir "cmake"
+$cmakeZip        = Join-Path $installDir "cmake.zip"
+$cmakeUrl        = "https://github.com/Kitware/CMake/releases/download/v$cmakeVersion/$cmakeFolder.zip"
 
 if (-not (Test-Path (Join-Path $cmakePath "bin\cmake.exe"))) {
     $cmakeDownloadedPath = Download-FileVerified -Url $cmakeUrl -OutputPath $cmakeZip
@@ -162,13 +167,18 @@ if (-not (Test-Path (Join-Path $cmakePath "bin\cmake.exe"))) {
 
 Write-Host "`n=== Installing LLVM ===" -ForegroundColor Cyan
 
-$llvmVersion = "18.1.0"
-$llvmArchiveName = "clang+llvm-$llvmVersion-x86_64-pc-windows-msvc.tar.xz"
+$llvmVersion     = "18.1.0"
+# ARM64 Windows ships as aarch64-pc-windows-msvc; x64 as x86_64-pc-windows-msvc
+$llvmTriple      = if ($isArm64) { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
+$llvmArchiveName = "clang+llvm-$llvmVersion-$llvmTriple.tar.xz"
 $llvmArchivePath = Join-Path $installDir $llvmArchiveName
-$llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/$llvmArchiveName"
-$llvmSha256 = "D128C0F5F7831C77D549296A910FC9972407FF028B720FB628FFA837ED7FF04E"
+$llvmUrl         = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/$llvmArchiveName"
+# SHA-256 for the x86_64 MSVC archive; aarch64 builds carry a different hash.
+# The Download-FileVerified function verifies on download; leave blank for aarch64
+# until a verified hash is available and let the download proceed unverified.
+$llvmSha256      = if ($isArm64) { "" } else { "D128C0F5F7831C77D549296A910FC9972407FF028B720FB628FFA837ED7FF04E" }
 $llvmExtractRoot = Join-Path $installDir "llvm-extract"
-$llvmExpandedPath = Join-Path $llvmExtractRoot "clang+llvm-$llvmVersion-x86_64-pc-windows-msvc"
+$llvmExpandedPath = Join-Path $llvmExtractRoot "clang+llvm-$llvmVersion-$llvmTriple"
 $llvmPath = Join-Path $installDir "llvm"
 $legacyInstallerPath = Join-Path $installDir "llvm-installer.exe"
 
@@ -252,9 +262,9 @@ foreach ($tool in $tools) {
 Write-Host "`n=== Installation Complete ===" -ForegroundColor Green
 Write-Host "Tools directory: $installDir" -ForegroundColor Cyan
 Write-Host "LLVM_DIR: $llvmDir" -ForegroundColor Cyan
-Write-Host "Next steps:" -ForegroundColor Yellow
-Write-Host "1. Restart VS Code or open a new terminal"
-Write-Host "2. Run: cd c:\Users\user\Documents\vgre"
-Write-Host "3. Run: .\scripts\vgre_sync.bat"
+Write-Host "`nNext steps:" -ForegroundColor Yellow
+Write-Host "1. Open a NEW terminal (or run: refreshenv) so PATH changes take effect."
+Write-Host "2. cd to the repo root."
+Write-Host "3. Run:  powershell -ExecutionPolicy Bypass -File scripts\Install-VGRETools.ps1"
 
 Read-Host "`nPress Enter to exit"
