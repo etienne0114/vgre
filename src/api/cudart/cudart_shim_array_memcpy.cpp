@@ -33,6 +33,25 @@ typedef const struct cudaArray* cudaArray_const_t;
 
 using namespace vgre::api;
 
+// Portable cudaArray_t → TextureId conversion.
+// On Linux cudaArray_t is a pointer (from real CUDA headers).
+// On Windows VGRE defines cudaArray_t as uint64_t.
+static inline vgre::core::TextureId cudaArrayToId(cudaArray_t array) {
+#if defined(_WIN32)
+    return static_cast<vgre::core::TextureId>(array);
+#else
+    return reinterpret_cast<vgre::core::TextureId>(array);
+#endif
+}
+
+static inline vgre::core::TextureId cudaArrayToId(cudaArray_const_t array) {
+#if defined(_WIN32)
+    return static_cast<vgre::core::TextureId>(array);
+#else
+    return reinterpret_cast<vgre::core::TextureId>(array);
+#endif
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 // Reconstructs a cudaChannelFormatDesc from a TextureElementType and
@@ -92,12 +111,11 @@ cudaError_t cudaMemcpy3D(const struct cudaMemcpy3DParms *p) {
     // In VGRE, cudaArray_t is a TextureId which we map to its backing memory.
     const void *srcPtr = nullptr;
     void       *dstPtr = nullptr;
-    size_t      srcPitch = 0, dstPitch = 0;
+    uintptr_t   srcPitch = 0, dstPitch = 0;
 
     if (p->srcArray) {
         srcPtr   = vgre::core::TextureManager::instance().getCudaArrayData(
-                       static_cast<vgre::core::TextureId>(
-                           reinterpret_cast<uintptr_t>(p->srcArray)));
+                       cudaArrayToId(p->srcArray));
         srcPitch = p->extent.width; // array rows are contiguous
     } else {
         srcPtr   = static_cast<const uint8_t*>(p->srcPtr.ptr) +
@@ -109,8 +127,7 @@ cudaError_t cudaMemcpy3D(const struct cudaMemcpy3DParms *p) {
 
     if (p->dstArray) {
         dstPtr   = vgre::core::TextureManager::instance().getCudaArrayData(
-                       static_cast<vgre::core::TextureId>(
-                           reinterpret_cast<uintptr_t>(p->dstArray)));
+                       cudaArrayToId(p->dstArray));
         dstPitch = p->extent.width;
     } else {
         dstPtr   = static_cast<uint8_t*>(p->dstPtr.ptr) +
@@ -182,8 +199,7 @@ cudaError_t cudaArrayGetInfo(struct cudaChannelFormatDesc *desc,
                               unsigned int *flags,
                               cudaArray_t array) {
     if (!array) return cudaErrorInvalidValue;
-    auto id = static_cast<vgre::core::TextureId>(
-                  reinterpret_cast<uintptr_t>(array));
+    auto id = cudaArrayToId(array);
 
     auto &tm = vgre::core::TextureManager::instance();
 
@@ -244,7 +260,7 @@ cudaError_t cudaMemcpyToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
                                const void *src, size_t count,
                                int kind) {
     return CUDAInterceptor::instance().memcpyToArray(
-        static_cast<vgre::api::cudaArray_t>(reinterpret_cast<uintptr_t>(dst)),
+        cudaArrayToId(dst),
         wOffset, hOffset, src, count,
         static_cast<cudaMemcpyKind_t>(kind));
 }
@@ -256,7 +272,7 @@ cudaError_t cudaMemcpyFromArray(void *dst, cudaArray_const_t src,
                                  size_t count, int kind) {
     return CUDAInterceptor::instance().memcpyFromArray(
         dst,
-        static_cast<vgre::api::cudaArray_t>(reinterpret_cast<uintptr_t>(src)),
+        cudaArrayToId(src),
         wOffset, hOffset, count,
         static_cast<cudaMemcpyKind_t>(kind));
 }
@@ -268,7 +284,7 @@ cudaError_t cudaMemcpy2DToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
                                  size_t width, size_t height, int /*kind*/) {
     if (!dst || !src || width == 0 || height == 0) return cudaErrorInvalidValue;
 
-    auto id = static_cast<vgre::core::TextureId>(reinterpret_cast<uintptr_t>(dst));
+    auto id = cudaArrayToId(dst);
     void *arrayData = vgre::core::TextureManager::instance().getCudaArrayData(id);
     if (!arrayData) return cudaErrorInvalidValue;
 
@@ -302,7 +318,7 @@ cudaError_t cudaMemcpy2DFromArray(void *dst, size_t dpitch,
                                    size_t width, size_t height, int /*kind*/) {
     if (!dst || !src || width == 0 || height == 0) return cudaErrorInvalidValue;
 
-    auto id = static_cast<vgre::core::TextureId>(reinterpret_cast<uintptr_t>(src));
+    auto id = cudaArrayToId(src);
     const void *arrayData = vgre::core::TextureManager::instance().getCudaArrayData(id);
     if (!arrayData) return cudaErrorInvalidValue;
 
