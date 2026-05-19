@@ -133,7 +133,7 @@ cudaError_t CUDAInterceptor::memcpy(void *dst, const void *src, size_t count,
         dst, const_cast<MemoryHandle>(static_cast<const void *>(src)), count);
     break;
   case cudaMemcpyHostToHost:
-    memcpy(dst, src, count);
+    ::memcpy(dst, src, count);
     r = VGREResult::SUCCESS;
     break;
   default:
@@ -319,7 +319,7 @@ cudaError_t CUDAInterceptor::memset(void *devPtr, int value, size_t count) {
   if (!raw)
     return cudaErrorInvalidValue;
 
-  memset(raw, value, count);
+  ::memset(raw, value, count);
   return cudaSuccess;
 }
 
@@ -383,7 +383,7 @@ cudaError_t CUDAInterceptor::hostAlloc(void **pHost, size_t size,
 #endif
   if (!ptr)
     return cudaErrorMemoryAllocation;
-  memset(ptr, 0, size);
+  ::memset(ptr, 0, size);
   *pHost = ptr;
   return cudaSuccess;
 }
@@ -750,7 +750,7 @@ cudaError_t CUDAInterceptor::memcpyToArray(cudaArray_t dst, size_t wOffset,
   // them as byte offsets since element sizes are tracked by TextureManager.
   // The caller is responsible for converting element offsets to byte offsets
   // which is what the CUDA runtime spec requires for cudaMemcpyToArray.
-  memcpy(base + hOffset + wOffset, src, count);
+  ::memcpy(base + hOffset + wOffset, src, count);
 
   return cudaSuccess;
 }
@@ -773,7 +773,7 @@ cudaError_t CUDAInterceptor::memcpyFromArray(void *dst, cudaArray_t src,
   }
 
   const uint8_t *base = static_cast<const uint8_t *>(arrayData);
-  memcpy(dst, base + hOffset + wOffset, count);
+  ::memcpy(dst, base + hOffset + wOffset, count);
 
   return cudaSuccess;
 }
