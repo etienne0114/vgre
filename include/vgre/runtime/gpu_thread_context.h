@@ -180,10 +180,10 @@ inline float atomicAdd(float *addr, float val) {
   uint32_t oldBits = bits->load(std::memory_order_relaxed);
   while (true) {
     float oldVal;
-    std::memcpy(&oldVal, &oldBits, sizeof(float));
+    memcpy(&oldVal, &oldBits, sizeof(float));
     float newVal = oldVal + val;
     uint32_t newBits;
-    std::memcpy(&newBits, &newVal, sizeof(uint32_t));
+    memcpy(&newBits, &newVal, sizeof(uint32_t));
     if (bits->compare_exchange_weak(oldBits, newBits, std::memory_order_seq_cst,
                                     std::memory_order_relaxed)) {
       return oldVal;
@@ -197,10 +197,10 @@ inline double atomicAdd(double *addr, double val) {
   uint64_t oldBits = bits->load(std::memory_order_relaxed);
   while (true) {
     double oldVal;
-    std::memcpy(&oldVal, &oldBits, sizeof(double));
+    memcpy(&oldVal, &oldBits, sizeof(double));
     double newVal = oldVal + val;
     uint64_t newBits;
-    std::memcpy(&newBits, &newVal, sizeof(uint64_t));
+    memcpy(&newBits, &newVal, sizeof(uint64_t));
     if (bits->compare_exchange_weak(oldBits, newBits, std::memory_order_seq_cst,
                                     std::memory_order_relaxed)) {
       return oldVal;

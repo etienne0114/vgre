@@ -23,12 +23,12 @@ class ActivationCheckpoint {
   void save(const float* activation, uint32_t num_elements) {
     size_bytes_ = num_elements * sizeof(float);
     data_.resize(num_elements);
-    std::memcpy(data_.data(), activation, size_bytes_);
+    memcpy(data_.data(), activation, size_bytes_);
   }
 
   // Load activation from checkpoint
   void load(float* activation) const {
-    std::memcpy(activation, data_.data(), size_bytes_);
+    memcpy(activation, data_.data(), size_bytes_);
   }
 
   bool is_valid() const { return !data_.empty(); }
