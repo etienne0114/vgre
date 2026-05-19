@@ -366,6 +366,22 @@ if exist "%BUILD_DIR%\CMakeCache.txt" (
     )
 )
 
+rem -- If a previous configure succeeded but the build failed (vgre.dll absent),
+rem    wipe CMakeCache + CMakeFiles so CMake re-reads LLVMTargets-release.cmake
+rem    and our DIA SDK patch re-applies cleanly on the next configure.
+rem    Without this, Ninja can retain a stale link.txt with the old DIA path.
+if exist "%BUILD_DIR%\CMakeCache.txt" (
+    set "_vgre_dll_found=0"
+    if exist "%BUILD_DIR%\vgre.dll"         set "_vgre_dll_found=1"
+    if exist "%BUILD_DIR%\Release\vgre.dll" set "_vgre_dll_found=1"
+    if "!_vgre_dll_found!"=="0" (
+        echo [INFO] Previous configure exists but vgre.dll is absent — cleaning stale cache
+        echo        so LLVM imported-target DIA SDK paths are patched from scratch.
+        del /f /q "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
+        rd /s /q "%BUILD_DIR%\CMakeFiles"      >nul 2>&1
+    )
+)
+
 "%CMAKE_EXE%" "%PROJECT_ROOT%" -G "!CMAKE_GENERATOR!" !CMAKE_ARCH_FLAG! !CMAKE_COMPILER_FLAGS! -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="!LLVM_DIR!" -DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=TRUE -DVGRE_ENABLE_NATIVE_SIMD=%VGRE_ENABLE_NATIVE_SIMD_FLAG% -DVGRE_USE_LAPACK=OFF
 if errorlevel 1 (
     popd
