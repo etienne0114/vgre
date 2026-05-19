@@ -453,38 +453,42 @@ if(WIN32)
         # Forward slashes are accepted by all Windows file-I/O APIs.
         string(REPLACE "\\" "/" _dia_path "${_dia_path}")
 
-        # LLVM's generated LLVMTargets-release.cmake (and similar) bakes the DIA
-        # SDK path used at LLVM compile-time into IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE
-        # (and other per-config variants).  Any machine that has a different VS
-        # installation will fail at link time with a missing-file error.
-        # We must patch ALL target properties that may carry the stale path.
-        set(_dia_patched_props
-            INTERFACE_LINK_LIBRARIES
-            IMPORTED_LINK_INTERFACE_LIBRARIES
-            IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE
-            IMPORTED_LINK_INTERFACE_LIBRARIES_DEBUG
-            IMPORTED_LINK_INTERFACE_LIBRARIES_RELWITHDEBINFO
-            IMPORTED_LINK_INTERFACE_LIBRARIES_MINSIZEREL
-            IMPORTED_LINK_DEPENDENT_LIBRARIES
-            IMPORTED_LINK_DEPENDENT_LIBRARIES_RELEASE
-            IMPORTED_LINK_DEPENDENT_LIBRARIES_DEBUG
-            IMPORTED_LINK_DEPENDENT_LIBRARIES_RELWITHDEBINFO
-            IMPORTED_LINK_DEPENDENT_LIBRARIES_MINSIZEREL
-        )
-        foreach(_lt IN LISTS VGRE_LLVM_LIBS)
-            if(TARGET ${_lt})
-                foreach(_prop IN LISTS _dia_patched_props)
-                    get_target_property(_val ${_lt} ${_prop})
-                    if(_val)
-                        string(REGEX REPLACE "[^;]*/diaguids\\.lib" "${_dia_path}"
-                            _val_fixed "${_val}")
-                        if(NOT "${_val_fixed}" STREQUAL "${_val}")
-                            set_target_properties(${_lt} PROPERTIES ${_prop} "${_val_fixed}")
+        # LLVM's LLVMExports.cmake bakes the absolute DIA SDK path used at LLVM
+        # compile-time into LLVMDebugInfoPDB's INTERFACE_LINK_LIBRARIES property.
+        # (See LLVM issue #152268, #86250, #111829.)
+        # Any machine with a different VS version/edition/install path fails at
+        # link time with a missing-file error.
+        # We patch the ONLY target known to carry the stale path, plus a safety
+        # net that scans every LLVM imported target if LLVM_AVAILABLE_LIBS exists.
+        if(TARGET LLVMDebugInfoPDB)
+            get_target_property(_iface LLVMDebugInfoPDB INTERFACE_LINK_LIBRARIES)
+            if(_iface)
+                string(REGEX REPLACE "[^;]*/diaguids\.lib" "${_dia_path}"
+                    _iface_fixed "${_iface}")
+                if(NOT "${_iface_fixed}" STREQUAL "${_iface}")
+                    set_target_properties(LLVMDebugInfoPDB PROPERTIES
+                        INTERFACE_LINK_LIBRARIES "${_iface_fixed}")
+                endif()
+            endif()
+        endif()
+
+        # Safety-net: scan all LLVM libraries if LLVM_AVAILABLE_LIBS was set
+        # (older LLVM versions may not export it, so this is conditional).
+        if(DEFINED LLVM_AVAILABLE_LIBS)
+            foreach(_lt IN LISTS LLVM_AVAILABLE_LIBS)
+                if(TARGET ${_lt})
+                    get_target_property(_iface ${_lt} INTERFACE_LINK_LIBRARIES)
+                    if(_iface)
+                        string(REGEX REPLACE "[^;]*/diaguids\.lib" "${_dia_path}"
+                            _iface_fixed "${_iface}")
+                        if(NOT "${_iface_fixed}" STREQUAL "${_iface}")
+                            set_target_properties(${_lt} PROPERTIES
+                                INTERFACE_LINK_LIBRARIES "${_iface_fixed}")
                         endif()
                     endif()
-                endforeach()
-            endif()
-        endforeach()
+                endif()
+            endforeach()
+        endif()
     else()
         message(STATUS "LLVM DIA SDK: not found — PDB symbol generation may be limited")
     endif()
