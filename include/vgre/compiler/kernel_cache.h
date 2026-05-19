@@ -42,6 +42,13 @@ public:
     void putAST(const std::string& sourceHash, const std::string& ast);
 
     /**
+     * Remove a cached AST entry (both memory and disk) so the next call to
+     * getAST returns a miss and Clang is re-invoked with the current source.
+     * Used to recover from hash-collision entries that contain the wrong AST.
+     */
+    void evictAST(const std::string& sourceHash);
+
+    /**
      * Get cached Kernel IR metadata
      * @param sourceHash Hash of the kernel source
      * @param name Name of the kernel

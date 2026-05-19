@@ -40,6 +40,7 @@ static constexpr const char kAstAnalysisStub[] = R"VGRE_STUB(
 #define VGRE_WMMA_EMULATION_H
 #define VGRE_COMPILER_CUDA_DEVICE_LIBS_COOPERATIVE_GROUPS_H
 #define VGRE_COMPILER_CUDA_DEVICE_LIBS_CUB_FALLBACK_H
+#define VGRE_CURAND_KERNEL_H
 
 typedef signed char        int8_t;
 typedef short              int16_t;
@@ -671,9 +672,41 @@ VGREResult ClangKernelParser::parse(const std::string& name,
 
     const auto* kernelObj = findKernel(inner, name);
     if (!kernelObj && !name.empty()) {
-        // Fallback: If requested name fails, try finding ANY global kernel
-        VGRE_LOG_WARN("ClangKernelParser", "Specific name '" + name + "' not found, falling back to first global kernel found.");
-        kernelObj = findKernel(inner, ""); // Pass empty name to find any
+        // Kernel not found in this AST — the AST cache may have a hash
+        // collision (different kernel source hashing to the same key).
+        // Evict the stale AST entry and re-run Clang to get the correct AST.
+        VGRE_LOG_WARN("ClangKernelParser",
+                      "Kernel '" + name + "' not found in cached AST (hash: " +
+                      sourceHash.substr(0, 8) + ") — evicting and re-parsing.");
+        KernelCache::instance().evictAST(sourceHash);
+        {
+            std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
+            astCache_.erase(sourceHash);
+        }
+        // Re-run Clang (cache miss guaranteed after eviction above).
+        jsonAst = runClangAstDump(sourceWithHeader);
+        if (jsonAst.empty()) {
+            VGRE_LOG_ERROR("ClangKernelParser", "Re-parse failed for '" + name + "'");
+            return VGREResult::ERR_COMPILATION;
+        }
+        auto expectedAst2 = llvm::json::parse(jsonAst);
+        if (!expectedAst2) return VGREResult::ERR_INVALID_KERNEL;
+        const auto* root2 = expectedAst2->getAsObject();
+        if (!root2) return VGREResult::ERR_INVALID_KERNEL;
+        inner = root2->getArray("inner");
+        if (!inner) return VGREResult::ERR_INVALID_KERNEL;
+        kernelObj = findKernel(inner, name);
+        if (!kernelObj) {
+            VGRE_LOG_ERROR("ClangKernelParser",
+                           "Kernel '" + name + "' not found even after fresh Clang parse");
+            return VGREResult::ERR_INVALID_KERNEL;
+        }
+        // inner now points into expectedAst2 which is stack-allocated — safe
+        // because we do not return or yield between here and the use below.
+        // Store root2/expectedAst2 so they outlive the kernelObj pointer.
+        // (expectedAst is still in scope and will be used if kernelObj came from it)
+        expectedAst = std::move(expectedAst2);
+        root = expectedAst->getAsObject();
     }
 
     if (kernelObj) {

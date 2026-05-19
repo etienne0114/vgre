@@ -148,10 +148,12 @@ public:
     }
     
     static bool testVSBPHeaderAlignment() {
-        // Test VSBP header alignment
-        size_t expected_size = 20;  // Should be 20 bytes when properly packed
+        // VSBPHeader is 24 bytes: uint32 magic + uint32 version + uint64 sequence +
+        // uint16 type + uint16 flags + uint32 payloadSize = 24 bytes.
+        // The static_assert in tcp_cluster_protocol.h enforces this.
+        size_t expected_size = 24;
         size_t actual_size = sizeof(VSBPHeader);
-        
+
         if (actual_size != expected_size) {
             std::cout << "ALIGNMENT BUG: VSBPHeader size mismatch - "
                       << "expected " << expected_size << ", got " << actual_size << std::endl;
@@ -351,13 +353,18 @@ int main() {
     std::cout << "This test is EXPECTED TO FAIL on unfixed code.\n";
     std::cout << "Finding bugs confirms they exist and need fixing.\n\n";
     
-    // Set up test environment
+    // Set up test environment.
+    // Use minimum allowed PBKDF2 iterations (10000) for test speed; the
+    // production default of 600000 would make 15 SecureChannel init calls
+    // take 30-90 s, exceeding the test timeout.
     setenv("VGRE_TCP_AUTH_TOKEN", "test_exploration_token_12345", 1);
-    
+    setenv("VGRE_PBKDF2_ITERATIONS", "10000", 1);
+
     bool bugs_found = runBugExplorationTests(15);  // Run 15 test cases
-    
+
     // Clean up
     unsetenv("VGRE_TCP_AUTH_TOKEN");
+    unsetenv("VGRE_PBKDF2_ITERATIONS");
     
     if (bugs_found) {
         std::cout << "\n=== BUG EXPLORATION SUCCESSFUL ===\n";

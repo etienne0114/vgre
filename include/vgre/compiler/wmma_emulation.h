@@ -865,4 +865,254 @@ inline void vgre_tcgen05_m128n256k16_bf16_f32(float* d, uint64_t descA, uint64_t
     vgre_wgmma_m64n256k16_bf16_f32(d + 64 * 256, descA1, descB);
 }
 
+// ── SM100 FP8 (E4M3 / E5M2) support ─────────────────────────────────────────
+// Blackwell's tcgen05 tensor cores introduce FP8 operand types.
+// Two encodings are defined:
+//   E4M3 — 1 sign, 4 exponent (bias 7), 3 mantissa bits.  No infinity.
+//           Special value: 0b_S1111111 = NaN.  Max finite: 448.0.
+//   E5M2 — 1 sign, 5 exponent (bias 15), 2 mantissa bits.  Has Inf/NaN.
+//           Max finite: 57344.0.
+// tcgen05 FP8 shapes use K=32 (each FP8 element is 1 byte; 32-element K-tile).
+
+namespace detail {
+
+// ── E4M3 byte → float ────────────────────────────────────────────────────────
+inline float fp8e4m3_to_f32(uint8_t b) {
+    uint8_t sign = (b >> 7) & 1u;
+    uint8_t exp4 = (b >> 3) & 0x0Fu;
+    uint8_t mant = b & 0x07u;
+    if (exp4 == 0x0Fu && mant == 0x07u) {
+        // NaN encoding (S1111111)
+        uint32_t nan = 0x7FC00000u | (static_cast<uint32_t>(sign) << 31);
+        float f; std::memcpy(&f, &nan, 4); return f;
+    }
+    float value;
+    if (exp4 == 0) {
+        // Denormal: value = (-1)^sign × 2^(-6) × (mant/8)
+        value = static_cast<float>(mant) * (1.0f / 8.0f) * (1.0f / 64.0f);
+    } else {
+        // Normal: value = (-1)^sign × 2^(exp4-7) × (1 + mant/8)
+        int e = static_cast<int>(exp4) - 7;
+        value = (1.0f + static_cast<float>(mant) * (1.0f / 8.0f))
+                * std::ldexp(1.0f, e);
+    }
+    return sign ? -value : value;
+}
+
+// ── E5M2 byte → float ────────────────────────────────────────────────────────
+inline float fp8e5m2_to_f32(uint8_t b) {
+    uint8_t sign = (b >> 7) & 1u;
+    uint8_t exp5 = (b >> 2) & 0x1Fu;
+    uint8_t mant = b & 0x03u;
+    if (exp5 == 0x1Fu) {
+        if (mant == 0) {
+            // Infinity
+            uint32_t inf = 0x7F800000u | (static_cast<uint32_t>(sign) << 31);
+            float f; std::memcpy(&f, &inf, 4); return f;
+        } else {
+            // NaN
+            uint32_t nan = 0x7FC00000u | (static_cast<uint32_t>(sign) << 31);
+            float f; std::memcpy(&f, &nan, 4); return f;
+        }
+    }
+    float value;
+    if (exp5 == 0) {
+        // Denormal: value = (-1)^sign × 2^(-14) × (mant/4)
+        value = static_cast<float>(mant) * (1.0f / 4.0f) * std::ldexp(1.0f, -14);
+    } else {
+        // Normal: value = (-1)^sign × 2^(exp5-15) × (1 + mant/4)
+        int e = static_cast<int>(exp5) - 15;
+        value = (1.0f + static_cast<float>(mant) * (1.0f / 4.0f))
+                * std::ldexp(1.0f, e);
+    }
+    return sign ? -value : value;
+}
+
+// ── float → E4M3 byte ────────────────────────────────────────────────────────
+inline uint8_t f32_to_fp8e4m3(float f) {
+    if (std::isnan(f)) return 0x7Fu; // canonical NaN (positive, S=0,e=0xF,m=0x7)
+    uint32_t bits; std::memcpy(&bits, &f, 4);
+    uint8_t sign = static_cast<uint8_t>((bits >> 31) & 1u);
+    int exp32 = static_cast<int>((bits >> 23) & 0xFFu) - 127;
+    uint32_t mant32 = bits & 0x7FFFFFu;
+
+    if (std::isinf(f)) {
+        // Map Inf to max finite E4M3 value (no Inf encoding)
+        return static_cast<uint8_t>((sign << 7) | 0x7E); // S1111110 = ±448.0
+    }
+
+    // Clamp to E4M3 range ±448.0
+    if (exp32 > 8) {
+        return static_cast<uint8_t>((sign << 7) | 0x7E);
+    }
+
+    int e4 = exp32 + 7;
+    uint8_t m3;
+    if (e4 <= 0) {
+        // Denormal: 2^(-6) × (m/8), so value = |f| / 2^(-6) / (1/8)
+        float scaled = std::fabs(f) * 512.0f; // 2^9 = 2^(6+3)
+        m3 = static_cast<uint8_t>(static_cast<int>(scaled + 0.5f) & 0x07u);
+        e4 = 0;
+    } else {
+        m3 = static_cast<uint8_t>((mant32 >> 20) & 0x07u); // top 3 mantissa bits
+    }
+    return static_cast<uint8_t>((sign << 7) | (static_cast<uint8_t>(e4 & 0x0F) << 3) | m3);
+}
+
+// ── float → E5M2 byte ────────────────────────────────────────────────────────
+inline uint8_t f32_to_fp8e5m2(float f) {
+    if (std::isnan(f)) return 0x7Fu;
+    if (std::isinf(f)) {
+        return static_cast<uint8_t>(f > 0 ? 0x7C : 0xFC); // ±Inf
+    }
+    uint32_t bits; std::memcpy(&bits, &f, 4);
+    uint8_t sign = static_cast<uint8_t>((bits >> 31) & 1u);
+    int exp32 = static_cast<int>((bits >> 23) & 0xFFu) - 127;
+    uint32_t mant32 = bits & 0x7FFFFFu;
+
+    int e5 = exp32 + 15;
+    uint8_t m2;
+    if (e5 <= 0) {
+        float scaled = std::fabs(f) * (1 << 16); // 2^(14+2)
+        m2 = static_cast<uint8_t>(static_cast<int>(scaled + 0.5f) & 0x03u);
+        e5 = 0;
+    } else if (e5 >= 0x1F) {
+        // Overflow → ±Inf
+        return static_cast<uint8_t>((sign << 7) | 0x7Cu);
+    } else {
+        m2 = static_cast<uint8_t>((mant32 >> 21) & 0x03u); // top 2 mantissa bits
+    }
+    return static_cast<uint8_t>((sign << 7) | (static_cast<uint8_t>(e5 & 0x1F) << 2) | m2);
+}
+
+// ── Generic FP8 GEMM kernel (M×N×K, K-tile of 32 bytes) ─────────────────────
+// fp8_to_f32: pointer-to-function for element conversion (e4m3 or e5m2)
+template<typename ConvA, typename ConvB>
+inline void fp8_gemm(float* d, const uint8_t* A, const uint8_t* B,
+                     int M, int N, int K,
+                     ConvA conv_a, ConvB conv_b)
+{
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
+            float acc = d[m * N + n];
+            for (int k = 0; k < K; ++k) {
+                acc += conv_a(A[m * K + k]) * conv_b(B[k * N + n]);
+            }
+            d[m * N + n] = acc;
+        }
+    }
+}
+
+// AVX-512 path: convert 16 E4M3 bytes to FP32 via scatter, then use VFMADD
+#if defined(VGRE_HAS_AVX512F) || defined(VGRE_HAS_AVX512)
+template<typename ConvFn>
+inline void fp8_gemm_avx512(float* d, const uint8_t* A, const uint8_t* B,
+                             int M, int N, int K, ConvFn conv)
+{
+    for (int m = 0; m < M; ++m) {
+        for (int n0 = 0; n0 < N; n0 += 16) {
+            int nend = (n0 + 16 <= N) ? 16 : (N - n0);
+            __m512 acc = _mm512_loadu_ps(&d[m * N + n0]);
+            for (int k = 0; k < K; ++k) {
+                float av = conv(A[m * K + k]);
+                alignas(64) float btmp[16];
+                for (int ni = 0; ni < nend; ++ni)
+                    btmp[ni] = conv(B[k * N + n0 + ni]);
+                __m512 bv = _mm512_loadu_ps(btmp);
+                acc = _mm512_fmadd_ps(_mm512_set1_ps(av), bv, acc);
+            }
+            _mm512_storeu_ps(&d[m * N + n0], acc);
+        }
+    }
+}
+#endif
+
+} // namespace detail
+
+// ── tcgen05 FP8 MMA — E4M3×E4M3→FP32, K=32 ──────────────────────────────────
+// descA encodes a pointer to an M×K E4M3 matrix (1 byte/element)
+// descB encodes a pointer to a K×N E4M3 matrix (1 byte/element)
+inline void vgre_tcgen05_m64n256k32_e4m3_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
+    const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
+#if defined(VGRE_HAS_AVX512F) || defined(VGRE_HAS_AVX512)
+    detail::fp8_gemm_avx512(d, A, B, 64, 256, 32, detail::fp8e4m3_to_f32);
+#else
+    detail::fp8_gemm(d, A, B, 64, 256, 32, detail::fp8e4m3_to_f32, detail::fp8e4m3_to_f32);
+#endif
+}
+
+inline void vgre_tcgen05_m64n128k32_e4m3_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
+    const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
+#if defined(VGRE_HAS_AVX512F) || defined(VGRE_HAS_AVX512)
+    detail::fp8_gemm_avx512(d, A, B, 64, 128, 32, detail::fp8e4m3_to_f32);
+#else
+    detail::fp8_gemm(d, A, B, 64, 128, 32, detail::fp8e4m3_to_f32, detail::fp8e4m3_to_f32);
+#endif
+}
+
+inline void vgre_tcgen05_m64n64k32_e4m3_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
+    const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
+    detail::fp8_gemm(d, A, B, 64, 64, 32, detail::fp8e4m3_to_f32, detail::fp8e4m3_to_f32);
+}
+
+// ── tcgen05 FP8 MMA — E5M2×E5M2→FP32, K=32 ──────────────────────────────────
+inline void vgre_tcgen05_m64n256k32_e5m2_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
+    const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
+#if defined(VGRE_HAS_AVX512F) || defined(VGRE_HAS_AVX512)
+    detail::fp8_gemm_avx512(d, A, B, 64, 256, 32, detail::fp8e5m2_to_f32);
+#else
+    detail::fp8_gemm(d, A, B, 64, 256, 32, detail::fp8e5m2_to_f32, detail::fp8e5m2_to_f32);
+#endif
+}
+
+inline void vgre_tcgen05_m64n128k32_e5m2_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
+    const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
+#if defined(VGRE_HAS_AVX512F) || defined(VGRE_HAS_AVX512)
+    detail::fp8_gemm_avx512(d, A, B, 64, 128, 32, detail::fp8e5m2_to_f32);
+#else
+    detail::fp8_gemm(d, A, B, 64, 128, 32, detail::fp8e5m2_to_f32, detail::fp8e5m2_to_f32);
+#endif
+}
+
+// ── tcgen05 FP8 MMA — mixed E4M3×E5M2→FP32 (common in Blackwell transformers) ─
+inline void vgre_tcgen05_m64n256k32_e4m3e5m2_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
+    const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
+    detail::fp8_gemm(d, A, B, 64, 256, 32, detail::fp8e4m3_to_f32, detail::fp8e5m2_to_f32);
+}
+
+inline void vgre_tcgen05_m64n128k32_e4m3e5m2_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
+    const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
+    detail::fp8_gemm(d, A, B, 64, 128, 32, detail::fp8e4m3_to_f32, detail::fp8e5m2_to_f32);
+}
+
+// ── tcgen05 FP8 MMA — 128×256 shapes (wide tiles used by Flash-Attention-3) ──
+inline void vgre_tcgen05_m128n256k32_e4m3_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
+    const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
+    // Two 64×256 tiles along M
+    detail::fp8_gemm(d,           A,           B, 64, 256, 32, detail::fp8e4m3_to_f32, detail::fp8e4m3_to_f32);
+    detail::fp8_gemm(d + 64*256,  A + 64*32,   B, 64, 256, 32, detail::fp8e4m3_to_f32, detail::fp8e4m3_to_f32);
+}
+
+// ── FP8 conversion helpers (exposed for host-side packing/unpacking) ─────────
+inline float vgre_fp8e4m3_to_f32(uint8_t b)  { return detail::fp8e4m3_to_f32(b); }
+inline float vgre_fp8e5m2_to_f32(uint8_t b)  { return detail::fp8e5m2_to_f32(b); }
+inline uint8_t vgre_f32_to_fp8e4m3(float f)  { return detail::f32_to_fp8e4m3(f); }
+inline uint8_t vgre_f32_to_fp8e5m2(float f)  { return detail::f32_to_fp8e5m2(f); }
+
 #endif // VGRE_COMPILER_WMMA_EMULATION_H

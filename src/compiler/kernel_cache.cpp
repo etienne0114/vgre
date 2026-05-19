@@ -184,6 +184,20 @@ void KernelCache::putAST(const std::string& sourceHash, const std::string& ast) 
     VGRE_LOG_INFO("KernelCache", "✓ Cached AST for hash: " + sourceHash.substr(0, 8) + "... at " + cachePath);
 }
 
+void KernelCache::evictAST(const std::string& sourceHash) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // Remove from in-memory LRU
+    auto it = memoryCache_.find(sourceHash);
+    if (it != memoryCache_.end()) {
+        lruOrder_.erase(it->second.second);
+        memoryCache_.erase(it);
+    }
+    // Remove from disk
+    std::string cachePath = getCacheFilePath(sourceHash);
+    std::filesystem::remove(cachePath);
+    VGRE_LOG_INFO("KernelCache", "Evicted stale AST for hash: " + sourceHash.substr(0, 8));
+}
+
 void KernelCache::clear() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     
@@ -245,7 +259,27 @@ bool KernelCache::getKernelIR(const std::string& sourceHash, const std::string& 
         return false;
     }
     
-    outIr.name = obj->getString("name").value_or("").str();
+    // ── Integrity checks: name and sourceHash must match the lookup key ─────────
+    // Any mismatch means the file was written for a different kernel (hash
+    // collision, renamed kernel, or prior serialization bug).  Evict and treat
+    // as a miss so the caller re-parses and writes a clean entry.
+    std::string storedName       = obj->getString("name").value_or("").str();
+    std::string storedSourceHash = obj->getString("sourceHash").value_or("").str();
+
+    bool nameMismatch = !storedName.empty() && storedName != name;
+    bool hashMismatch = !storedSourceHash.empty() && storedSourceHash != sourceHash;
+
+    if (nameMismatch || hashMismatch) {
+        VGRE_LOG_WARN("KernelCache",
+                      "Evicting corrupt cache entry for '" + name + "': " +
+                      (nameMismatch ? "stored name='" + storedName + "' " : "") +
+                      (hashMismatch ? "stored hash='" + storedSourceHash.substr(0,8) +
+                                     "' vs expected='" + sourceHash.substr(0,8) + "'" : ""));
+        file.close();
+        std::filesystem::remove(cachePath);
+        return false;
+    }
+    outIr.name   = name;
     outIr.source = obj->getString("source").value_or("").str();
     outIr.irCode = obj->getString("irCode").value_or("").str();
     VGRE_LOG_DEBUG("KernelCache", "Loaded basic IR metadata for " + outIr.name);
@@ -314,7 +348,10 @@ void KernelCache::putKernelIR(const std::string& sourceHash, const std::string& 
     }
     
     llvm::json::Object obj;
-    obj["name"] = ir.name;
+    // Store the canonical lookup key components so getKernelIR can verify
+    // integrity and evict corrupt/collided entries automatically.
+    obj["name"]       = name;
+    obj["sourceHash"] = sourceHash;
     obj["source"] = ir.source;
     obj["irCode"] = ir.irCode;
     
