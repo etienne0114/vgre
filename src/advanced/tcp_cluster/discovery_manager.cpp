@@ -8,6 +8,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include "vgre/api/vgre_c_api.h"
+#include "vgre/advanced/tcp_cluster/tcp_cluster_defaults.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/system_utils.h"
 #include "vgre/common/sockets.h"
@@ -42,7 +43,7 @@ using vgre::common::VgreSocketGuard;
 int DiscoveryManager::getUdpAnnouncePort() {
     const char* e = vgre_get_config("VGRE_CLUSTER_UDP_ANNOUNCE_PORT");
     if (e) { int v = std::atoi(e); if (v > 1024 && v < 65536) return v; }
-    return 7778;
+    return vgre::advanced::kDefaultDiscoveryPort;
 }
 
 int DiscoveryManager::getUdpWorkerPort() {
@@ -232,18 +233,18 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
         inet_ntop(AF_INET, &(sender_addr.sin_addr), ip, INET_ADDRSTRLEN);
 
         // Format: VGRE_WORKER_PING:port[:hmac64hex]
-        int worker_port = 7777;
+        int worker_port = vgre::advanced::kDefaultClusterPort;
         std::string hmac_field;
         size_t colon1 = msg.find(':');
         if (colon1 != std::string::npos) {
             size_t colon2 = msg.find(':', colon1 + 1);
             if (colon2 != std::string::npos) {
                 try { worker_port = std::stoi(msg.substr(colon1 + 1, colon2 - colon1 - 1)); }
-                catch (...) { worker_port = 7777; }
+                catch (...) { worker_port = vgre::advanced::kDefaultClusterPort; }
                 hmac_field = msg.substr(colon2 + 1);
             } else {
                 try { worker_port = std::stoi(msg.substr(colon1 + 1)); }
-                catch (...) { worker_port = 7777; }
+                catch (...) { worker_port = vgre::advanced::kDefaultClusterPort; }
             }
         }
 

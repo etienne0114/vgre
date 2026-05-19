@@ -289,8 +289,15 @@ void DiagnosticLogger::updateBandwidthMetrics(size_t bytes, double latency_ms) {
     constexpr double alpha = 0.1;
     network_quality_.average_bandwidth_gbps =
         (1.0 - alpha) * network_quality_.average_bandwidth_gbps + alpha * bw;
+    double link_gbps = 1.0;
+    { const char* env = vgre_get_config("VGRE_CLUSTER_LINK_GBPS");
+      if (env) { try { double v = std::stod(env); if (v > 0.0) link_gbps = v; } catch (...) {} } }
     network_quality_.bandwidth_utilization =
-        std::min(1.0, network_quality_.average_bandwidth_gbps / 1.0);
+        std::min(1.0, network_quality_.average_bandwidth_gbps / link_gbps);
+}
+
+double DiagnosticLogger::getAverageBandwidthGbps() const {
+    return network_quality_.average_bandwidth_gbps;
 }
 
 // ── Operational Dashboard ──
@@ -411,7 +418,8 @@ DiagnosticLogger::HealthStatus DiagnosticLogger::getHealthStatus() const {
 }
 
 void DiagnosticLogger::flushMetrics() {
-    std::string filename = "/tmp/vgre_tcp_cluster_metrics.json";
+    const char* env_path = vgre_get_config("VGRE_METRICS_OUTPUT_PATH");
+    std::string filename = env_path ? env_path : "/tmp/vgre_tcp_cluster_metrics.json";
     try {
         std::ofstream file(filename);
         if (!file.is_open()) return;

@@ -4,7 +4,9 @@
 #include "vgre/common/logger.h"
 #include <fstream>
 #include <sstream>
+#if !defined(_WIN32)
 #include <sys/stat.h>
+#endif
 
 #include "vgre/common/os_backend.h"
 

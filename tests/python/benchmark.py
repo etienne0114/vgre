@@ -13,6 +13,10 @@ try:
 except ImportError:
     VGRE_AVAILABLE = False
 
+if not VGRE_AVAILABLE:
+    print("ERROR: VGRE bindings not importable", file=sys.stderr)
+    sys.exit(1)
+
 
 def run_benchmark(name, func, warmup=5, iters=20):
     # Warmup

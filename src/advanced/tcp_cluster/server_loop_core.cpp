@@ -6,6 +6,7 @@
 #include "vgre/advanced/tcp_cluster/internal/connection_manager.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
+#include <algorithm>
 #include <chrono>
 #include <vector>
 
@@ -62,6 +63,20 @@ void TCPClusterManager::serverLoop() {
     handleClientDataEvents(fds);
   }
   VGRE_LOG_DEBUG("TCPCluster", "Master Server Loop exiting.");
+}
+
+void TCPClusterManager::cleanupServerAuthThreads() {
+  std::lock_guard<std::mutex> lk(server_auth_mutex_);
+  server_auth_threads_.erase(
+    std::remove_if(server_auth_threads_.begin(), server_auth_threads_.end(),
+      [](AuthEntry& e) {
+        if (e.done && e.done->load(std::memory_order_acquire)) {
+          if (e.t.joinable()) e.t.join();
+          return true;
+        }
+        return false;
+      }),
+    server_auth_threads_.end());
 }
 
 } // namespace advanced

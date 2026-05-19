@@ -1,13 +1,13 @@
 # VGRE Implementation Plan
 
-**Version**: 5.0.0  
-**Date**: 2026-05-19  
+**Version**: 6.0.0  
+**Date**: 2026-05-19 (updated)  
 **Basis**: Full code-verified audit — tcp_cluster (43 files), all advanced/, api/, core/, runtime/, compiler/, scripts/  
-**Format**: Priority-ordered. Each item has a file + line reference and a concrete fix description.
+**Format**: Priority-ordered. Completed items moved to ✅ section. Remaining items have file + line reference and concrete fix.
 
 ---
 
-## ✅ Completed (Verified by Code Read)
+## ✅ Completed (Verified by Code Read + Tests)
 
 ### Core Runtime
 - ✅ Memory Manager — cudaMalloc/Free, pool, copy engine, UVM managed + `mbind()`
@@ -24,10 +24,11 @@
 - ✅ cuBLAS L1/L2/L3, cuBLASLt — real cache-blocked GEMM
 - ✅ cuFFT 1D/2D/3D — Cooley-Tukey + Bluestein; optional FFTW3
 - ✅ cuDNN — conv, BN, activation, pooling, softmax, dropout, MHA, CTC loss, LRN
+- ✅ cuDNN RNN — LSTM, GRU, RNN_TANH, RNN_RELU: full forward + BPTT backward + weight gradients (8/8 tests pass)
 - ✅ cuRAND host (XORWOW, Philox, MRG32K3A, Sobol) + device (curand_kernel.h)
 - ✅ cuSPARSE SpMV/SpMM, ILU0/IC0, triangular solve
-- ✅ cuSolver LU/QR/SVD (LAPACK-backed)
-- ✅ NCCL AllReduce/Broadcast/ReduceScatter (float32, float64, int32, int64)
+- ✅ cuSolver LU (getrf/getrs), QR (geqrf/ormqr), SVD (gesvd), eigenvalue (syevd), least-squares (gelsd) — LAPACK-backed
+- ✅ NCCL AllReduce/Broadcast/ReduceScatter — float32, float64, int32, int64, float16, bfloat16
 - ✅ CUDA Driver API — module load, function lookup, kernel launch, cuLinkXxx (concatenation only)
 - ✅ OpenCL adapter, GPU passthrough (conditional on hardware)
 
@@ -39,37 +40,25 @@
 - ✅ SM100 FP8 MMA (E4M3/E5M2 tcgen05)
 - ✅ KernelCache — sourceHash + name integrity, AST collision eviction
 
----
+### TCP Cluster Hardcoding / Configurability (P2 items — all resolved)
+- ✅ P0-3/P2-6: Bandwidth utilization denominator — reads `VGRE_CLUSTER_LINK_GBPS` env var (`diagnostic_logger.cpp:293`)
+- ✅ P2-1: Default port constant unified in `include/vgre/advanced/tcp_cluster/tcp_cluster_defaults.h` (replaces hardcoded 7777/7778 in `discovery_manager.cpp` and `configuration_manager_validation.cpp`)
+- ✅ P2-2: `sendScalarArg` uses `vgre_get_type_size()` (`packet_handler.cpp`)
+- ✅ P2-3: Windows `supports_rdma` reads `VGRE_RDMA_ENABLED` env var instead of hardcoded `true`
+- ✅ P2-4: `result_shm_offset_` reads `VGRE_SHM_RESULT_OFFSET` env var (default 128 MB)
+- ✅ P2-5: Worker AllReduce/Barrier timeout reads `VGRE_REDUCTION_TIMEOUT_MS` (matches master)
+- ✅ P2-7: Bandwidth probe payload filled with `mt19937_64` pseudo-random bytes
+- ✅ P2-8: Both metrics writers use `VGRE_METRICS_OUTPUT_PATH` env var
+- ✅ P2-9: AllReduce timeout heuristic replaced — data-volume based: `bytes/bandwidth × workers × 3 + 5s`
 
-## 🔴 P0 — Silent Wrong Results (Fix Before Any Other Work)
+### Platform / Header (P3 items — all resolved)
+- ✅ P3-1: `<sys/stat.h>` guarded with `#if !defined(_WIN32)` in `configuration_manager_validation.cpp`, `configuration_manager_file_io.cpp`, `ipc_manager.cpp`
+- ✅ P3-2: macOS `#elif defined(__APPLE__)` branch added to `PlatformDetection::getCurrentPlatform()`
 
-These must be fixed first because they silently return `SUCCESS` with incorrect data.
-
-### P0-1: LSTM and GRU Compute Vanilla RNN Instead
-**File**: `src/api/cudnn/cudnn_rnn.cpp` lines 46-91  
-`rd->mode` is never checked. All modes run identical tanh RNN.
-
-**Fix**: Add switch on `rd->mode`:
-- `CUDNN_LSTM`: implement 4-gate cell (forget f, input i, output o, cell gate g), track cell state `c` across timesteps
-- `CUDNN_GRU`: implement 3-gate cell (reset r, update z, new n = tanh(W_n×x + r⊙(U_n×h)))
-
-**Estimated effort**: 2 days. Both forward and backward passes needed.
-
-### P0-2: FP16/BF16 AllReduce Produces Garbage
-**File**: `src/advanced/tcp_cluster/collective_ops_manager.cpp`  
-`applyReduce<T>` has explicit instantiations for float, double, int32, int64 only. `ncclFloat16`/`ncclBfloat16` dispatch hits an unhandled code path.
-
-**Fix**: Add `applyReduce<uint16_t>` with correct FP16 accumulation (upcast to float, accumulate, downcast). BF16: use existing `wgmma_bf16_to_f32` / `f32_to_fp8e*` conversions.
-
-**Estimated effort**: 1 day.
-
-### P0-3: Bandwidth Utilization Always Shows ≤1% on Fast NICs
-**File**: `src/advanced/tcp_cluster/diagnostic_logger.cpp:293`  
-`bandwidth_utilization = average_bandwidth_gbps / 1.0` — denominator hardcoded to 1.
-
-**Fix**: Read link speed via `VGRE_CLUSTER_LINK_GBPS` env var. If unset, detect from NIC using `ethtool -s` output on Linux or `GetIfTable2` on Windows. Default to the measured peak if detection fails.
-
-**Estimated effort**: 0.5 days.
+### Code Quality (P4 items — partial)
+- ✅ P4-1: `cleanupServerAuthThreads()` merged into `server_loop_core.cpp`; `server_loop_auth_mgmt.cpp` deleted
+- ✅ P4-4: Python integration tests registered in `tests/CMakeLists.txt` with `SKIP_REGULAR_EXPRESSION` for missing deps
+- ✅ P4-5: `benchmark.py` exits 1 with error message when VGRE bindings are not importable
 
 ---
 
@@ -117,146 +106,7 @@ for (int b = 0; b < batchSize; ++b)
 
 ---
 
-## 🟡 P2 — TCP Cluster Hardcoding and Heuristics
-
-### P2-1: Unify Default Port Constant
-**Files**: 6 locations listed in missingFeatures.md §1.2
-
-**Fix**: Create `include/vgre/advanced/tcp_cluster_defaults.h`:
-```cpp
-namespace vgre::advanced {
-constexpr int kDefaultClusterPort    = 7777;
-constexpr int kDefaultDiscoveryPort  = 7778;
-}
-```
-Replace all 6 hardcoded occurrences with this constant.
-
-**Estimated effort**: 1 hour.
-
-### P2-2: Use `vgre_get_type_size()` in `sendScalarArg`
-**File**: `src/advanced/tcp_cluster/memory_sync_manager.cpp:202`
-
-**Fix**: Replace:
-```cpp
-size_t arg_size = 8;
-if (type == ArgType::INT32 || ...) arg_size = 4;
-```
-With:
-```cpp
-size_t arg_size = vgre_get_type_size(static_cast<int>(type));
-```
-
-**Estimated effort**: 5 minutes.
-
-### P2-3: Fix Windows RDMA Assumption
-**File**: `src/advanced/tcp_cluster/shared_utilities_base.cpp:60`
-
-**Fix**: Change `info.supports_rdma = true` on Windows to:
-```cpp
-info.supports_rdma = (vgre_get_config("VGRE_RDMA_ENABLED") != nullptr);
-```
-
-**Estimated effort**: 5 minutes.
-
-### P2-4: Make SHM Result Offset Configurable
-**File**: `src/advanced/tcp_cluster/dispatch_manager_core.cpp:14`
-
-**Fix**:
-```cpp
-result_shm_offset_([]() -> uint64_t {
-    const char* e = vgre_get_config("VGRE_SHM_RESULT_OFFSET");
-    return e ? std::stoull(e) : 128ULL * 1024 * 1024;
-}())
-```
-
-**Estimated effort**: 15 minutes.
-
-### P2-5: Worker AllReduce/Barrier Timeout Must Match Master
-**File**: `collective_ops_manager.cpp:145,179,210`
-
-**Fix**: Replace `std::chrono::seconds(30)` with the same configurable lookup used on master:
-```cpp
-int ms = 30000;
-const char* e = vgre_get_config("VGRE_REDUCTION_TIMEOUT_MS");
-if (e) { int v = std::atoi(e); if (v > 0) ms = v; }
-wait_for(lock, std::chrono::milliseconds(ms), predicate);
-```
-
-**Estimated effort**: 30 minutes.
-
-### P2-6: Fix Bandwidth Utilization Denominator
-**File**: `diagnostic_logger.cpp:293` — see P0-3 above.
-
-### P2-7: Fix Bandwidth Probe Payload (Use Random Data)
-**File**: `server_loop_connection_handling.cpp:73`
-
-**Fix**: Fill probe buffer with pseudo-random bytes instead of zeroes:
-```cpp
-std::mt19937_64 rng(std::random_device{}());
-for (size_t i = sizeof(uint64_t); i < probe_buf.size(); ++i)
-    probe_buf[i] = static_cast<uint8_t>(rng());
-```
-
-**Estimated effort**: 15 minutes.
-
-### P2-8: Unify Metrics Output to Single Configurable Path
-**Files**: `diagnostic_logger.cpp:414` (writes `/tmp/vgre_tcp_cluster_metrics.json`) and `tcp_cluster_metrics.cpp:62` (writes `vgre_tcp_cluster_metrics.json` in CWD)
-
-**Fix**: Consolidate to one function in `tcp_cluster_metrics.cpp`. Path controlled by `VGRE_METRICS_OUTPUT_PATH` env var. Remove the redundant write in `diagnostic_logger.cpp`.
-
-**Estimated effort**: 1 hour.
-
-### P2-9: AllReduce Timeout Heuristic Is Unsound
-**File**: `collective_ops_manager.cpp:87-93`  
-Current: `2 × maxKernelLatencyMs + 5000`. Unrelated to AllReduce data volume.
-
-**Fix**: Base the timeout on actual data transfer estimate:
-```cpp
-// Estimate: size/bandwidth + 3× network RTT buffer
-double transferMs = (total_bytes * 8.0) / (measured_bandwidth_gbps * 1e9) * 1000.0;
-reductionTimeoutMs = static_cast<int>(transferMs * num_workers * 3.0) + 5000;
-reductionTimeoutMs = std::max(reductionTimeoutMs, 10000);
-```
-
-**Estimated effort**: 1 hour.
-
----
-
-## 🟡 P3 — Platform / Header Issues
-
-### P3-1: `<sys/stat.h>` Used Unguarded in 3 Files
-**Files**:
-- `src/advanced/tcp_cluster/configuration_manager_validation.cpp:14`
-- `src/advanced/tcp_cluster/configuration_manager_file_io.cpp:7`
-- `src/advanced/ipc_manager.cpp:8`
-
-These will fail to compile on Windows without `#if !defined(_WIN32)` guards. The uses are typically `stat()` for file existence / mtime checks.
-
-**Fix**: Replace `stat()` calls with `vgre::os::file_exists()` and `vgre::os::file_mtime()` from `os_backend.h`, which already have the cross-platform implementations.
-
-**Estimated effort**: 1-2 hours.
-
-### P3-2: macOS Platform Not Mapped in PlatformDetection
-**File**: `src/advanced/tcp_cluster/shared_utilities_base.cpp:57-70`  
-`PlatformDetection::getCurrentPlatform()` has `#ifdef _WIN32`, `#elif defined(__linux__)`, but no `#elif defined(__APPLE__)`. macOS falls through to `PlatformType::UNKNOWN` with no SHM/RDMA flags set.
-
-**Fix**: Add `#elif defined(__APPLE__)` branch:
-```cpp
-info.type = PlatformType::MACOS; info.name = "macOS";
-info.supports_shm_local = true; info.supports_rdma = false;
-```
-
-**Estimated effort**: 10 minutes.
-
----
-
-## 🟢 P4 — Code Quality / Structural Issues
-
-### P4-1: Merge `server_loop_auth_mgmt.cpp` Into `server_loop_core.cpp`
-**File**: `server_loop_auth_mgmt.cpp` (26 lines, 1 function)  
-A 26-line file is not a module. Move `cleanupServerAuthThreads()` into `server_loop_core.cpp` and delete the file.
-
-**Estimated effort**: 15 minutes.
+##  P4 — Code Quality / Structural Issues (remaining)
 
 ### P4-2: Dispatch Files Naming Confusion
 4 files implement the `DispatchManager` class: `dispatch_impl.cpp` (actually partition dispatch), `dispatch_manager_core.cpp`, `dispatch_manager_partitioned.cpp`, `dispatch_manager_remote.cpp`.
@@ -273,35 +123,30 @@ The file implements its own JSON/YAML/INI parser using string scanning. The rest
 
 **Estimated effort**: 1-2 days (careful migration with tests).
 
-### P4-4: Python Tests Not in CTest
-**Files**: `tests/python/test_pytorch.py`, `tests/python/test_tensorflow.py`
+### P4-6: Remaining Hardcoded Port Occurrences
+**Files** (not yet updated to use `kDefaultClusterPort`):
+- `src/advanced/hybrid_compute_manager_remote.cpp:91` → `node.port = 7777;`
+- `src/advanced/vgre_worker_cli.cpp:48` → `int port = 7777;`
+- `scripts/vgre-start.sh:35` → `PORT="${VGRE_PORT:-7777}"`
+- `scripts/Start-VGRE.ps1:123` → `$port = "7777"`
 
-**Fix**: Add to `tests/CMakeLists.txt`:
-```cmake
-find_program(PYTHON3 python3)
-if (PYTHON3)
-    add_test(NAME PyTorchIntegration
-             COMMAND ${PYTHON3} ${CMAKE_SOURCE_DIR}/tests/python/test_pytorch.py
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    set_tests_properties(PyTorchIntegration PROPERTIES
-                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
-                         TIMEOUT 120)
-endif()
-```
+The `tcp_cluster_defaults.h` constant exists but these four locations were not yet updated.
 
 **Estimated effort**: 30 minutes.
 
-### P4-5: Benchmark Script Silently Passes on Missing Bindings
-**File**: `tests/python/benchmark.py` + `scripts/run_benchmarks.sh`
+### P4-7: `test_python_authoritative.py` Masks Launch Failures
+**File**: `tests/python/test_python_authoritative.py:62`  
+Comment: `# Launch a dummy kernel if possible, or just check JSON`. When kernel launch fails the test falls back to JSON-only check and still passes, hiding actual launch errors.
 
-**Fix**: In `benchmark.py`, after the import check:
-```python
-if not VGRE_AVAILABLE:
-    print("ERROR: VGRE bindings not importable", file=sys.stderr)
-    sys.exit(1)
-```
+**Estimated effort**: 1 hour.
 
-**Estimated effort**: 5 minutes.
+### P4-8: `vgre_sync.sh` Does Not Verify LLVM Version
+**File**: `scripts/vgre_sync.sh`  
+Installs LLVM if missing but does not verify it is version 18. Installing system `llvm-17` produces a silent miscompile.
+
+**Fix**: Add `clang-18 --version | grep -q 'version 18'` check before proceeding.
+
+**Estimated effort**: 30 minutes.
 
 ---
 
@@ -311,33 +156,31 @@ These require significant architectural work. Listed for roadmap awareness.
 
 | Item | Gap | Effort |
 |---|---|---|
-| LSTM / GRU (P0-1) | Already listed above — must be P0 | 2 days |
-| cuDNN Backend v8 | PyTorch 2.x dependency | 4-6 days |
-| cuSPARSE SpGEMM | GNN workloads | 3-4 days |
-| PTX multi-module linker | Separate compilation | 3-4 days |
+| cuDNN Backend v8 | PyTorch 2.x dependency (P1-1) | 4-6 days |
+| cuSPARSE SpGEMM | GNN workloads (P1-2) | 3-4 days |
+| cuSolver batched APIs | Transformer attention (P1-3) | 1 day |
+| PTX multi-module linker | Separate compilation (P1-4) | 3-4 days |
 | CUDA TMA instructions | Hopper kernels | Medium — PTX translator extension |
 | SASS binary execution | Precompiled CUDA libraries | Very large — full ISA simulator |
 | Multi-GPU P2P | Frameworks using cudaMemcpyPeer | Large — multi-context model |
 | CUPTI hardware counters | Profiling | Medium — proxy software counters |
 | MPS multi-process | Single process per device | Large — IPC context sharing |
 | cuFFT BF16 | bfloat16 complex FFT | 0.5 days |
-| cuDNN RNN backward (BPTT) | RNN training | 2 days |
 | OpenMP for `__syncthreads` kernels | Single-threaded fallback | Medium — two-level dispatch |
 | OS keystore integration | macOS Keychain, libsecret, DPAPI | 1 day each |
+| cuOccupancy accurate SM count | Hardcoded 2048 threads/SM (Ampere only) | 0.5 days |
 
 ---
 
 ## Test Coverage Gaps (Currently Untested)
 
-The 117-test suite passes but does NOT validate:
+The 119-test suite passes (2 Python tests skip when deps missing) but does NOT validate:
 
 | Untested Area | Risk If Undetected |
 |---|---|
-| LSTM/GRU numerical output | Silent wrong gradients in training |
-| FP16/BF16 AllReduce | Wrong parameters after distributed step |
 | cuDNN Backend v8 | PyTorch 2.x ops fail silently |
-| Bandwidth utilization accuracy | Monitoring shows 0% on fast cluster |
 | Cross-module PTX linking | Separate-compilation apps JIT-fail |
-| Python binding importability | `run_benchmarks.sh` exits 0 on broken install |
 | MTGP32 device cuRAND | JIT compile error in kernel |
 | cuSolver batched | Transformer attention fails |
+| cuOccupancy SM heuristic | Suboptimal launch configs go undetected |
+| `vgre_sync.sh` LLVM version | Silent miscompile with wrong LLVM |

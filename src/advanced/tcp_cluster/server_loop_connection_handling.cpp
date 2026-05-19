@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstring>
 #include <string>
+#include <random>
 
 #include "vgre/common/os_backend.h"
 #if !defined(_WIN32)
@@ -70,8 +71,10 @@ void TCPClusterManager::performServerMaintenance() {
             uint64_t ts_ms = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count());
-            std::vector<uint8_t> probe_buf(sizeof(uint64_t) + kProbePayloadBytes, 0);
+            std::vector<uint8_t> probe_buf(sizeof(uint64_t) + kProbePayloadBytes);
             std::memcpy(probe_buf.data(), &ts_ms, sizeof(uint64_t));
+            { std::mt19937_64 rng(ts_ms ^ static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&probe_buf)));
+              for (size_t i = sizeof(uint64_t); i < probe_buf.size(); ++i) probe_buf[i] = static_cast<uint8_t>(rng()); }
 
             client->bandwidth_probe_start = now;
             client->bandwidth_probe_in_flight = true;

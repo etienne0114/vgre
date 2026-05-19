@@ -124,6 +124,11 @@ public:
      * @return Current metrics snapshot
      */
     OperationalMetrics getOperationalMetrics() const;
+
+    /**
+     * Get the EWMA-smoothed measured bandwidth in Gbps (0 if not yet measured).
+     */
+    double getAverageBandwidthGbps() const;
     
     /**
      * Generate and log comprehensive operational report

@@ -349,6 +349,15 @@ void TCPClusterManager::processClientStagingBuffer() {
                     reinterpret_cast<const int64_t *>(client_rx_buffer_.data() +
                                                       sizeof(VSBPHeader)),
                     pending_collective_count_, redOp);
+              } else if (pending_collective_datatype_ ==
+                         static_cast<uint32_t>(ArgType::FLOAT16) ||
+                         pending_collective_datatype_ ==
+                         static_cast<uint32_t>(ArgType::BFLOAT16)) {
+                collective_ops_manager_->applyReduceFp16(
+                    active_reduction_buffer_.data(),
+                    client_rx_buffer_.data() + sizeof(VSBPHeader),
+                    pending_collective_count_, redOp,
+                    static_cast<int>(pending_collective_datatype_));
               }
               reduction_count_++;
               reduction_cv_.notify_all();
