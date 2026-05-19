@@ -381,20 +381,26 @@ inline std::string vgre_peer_address(vgre_socket_t fd) {
 // ── Blocking send with optional shutdown-flag ─────────────────────────────
 // Sends all `len` bytes; returns false on timeout (5s), error, or if
 // `enabled` is non-null and cleared (shutdown signal).
+// On EAGAIN/EWOULDBLOCK, polls for socket writability with the remaining
+// time budget rather than sleeping an arbitrary fixed interval.
 inline bool vgre_send_all(vgre_socket_t sock, const void* buf, size_t len,
                           const std::atomic<bool>* enabled = nullptr) {
   const char* p = static_cast<const char*>(buf);
   size_t sent = 0;
+  const int kTimeoutMs = 5000;
   auto start = std::chrono::steady_clock::now();
   while (sent < len) {
     if (enabled && !enabled->load()) return false;
-    if (std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count() > 5)
-      return false;
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    if (elapsed >= kTimeoutMs) return false;
     int n = send(sock, p + sent, static_cast<int>(len - sent), MSG_NOSIGNAL);
     if (n <= 0) {
       if (n < 0 && vgre_is_would_block(vgre_get_last_socket_error())) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        int remaining = kTimeoutMs - static_cast<int>(elapsed);
+        vgre_pollfd pfd{sock, POLLOUT, 0};
+        int pr = vgre_poll(&pfd, 1, remaining > 0 ? remaining : 1);
+        if (pr <= 0 || !(pfd.revents & POLLOUT)) return false;
         continue;
       }
       return false;

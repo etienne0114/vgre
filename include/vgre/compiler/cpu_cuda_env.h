@@ -214,4 +214,10 @@ inline void cudaDeviceSynchronize() {
 
 using namespace vgre_cuda;
 
+// ── Device-side cuRAND ───────────────────────────────────────────────────────
+// Included outside namespace vgre_cuda so its <cmath>/<cstring> transitive
+// pulls don't pollute that namespace.  curand_* symbols land in the global
+// namespace, matching CUDA's own curand_kernel.h placement.
+#include "cuda_device_libs/curand_kernel.h"
+
 #endif // VGRE_COMPILER_CPU_CUDA_ENV_H

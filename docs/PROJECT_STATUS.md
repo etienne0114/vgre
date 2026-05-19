@@ -1,76 +1,116 @@
-# VGRE Project Status (Canonical)
+# VGRE Project Status
 
-**Last Updated**: 2026-05-18 (Audited for Accuracy)  
-**Status**: Experimental / Proof-of-Concept. **NOT Production Ready**.  
-**Warning**: Previous versions of this document incorrectly claimed 100% completion and full API coverage. This document has been revised to reflect reality.
-
----
-
-## Executive Summary
-
-VGRE (Virtual GPU Runtime Engine) is a CPU-based CUDA emulation runtime. While basic memory, stream, and compute paths compile, the system heavily relies on stubs, simulation delays, and OS-specific hardcoding. The project is currently a functional prototype on Linux, but lacks true production robustness across macOS and Windows. 
-
-**Key Metrics (Revised):**
-- **Test Coverage**: Passes existing tests, but many tests succeed because the underlying functionality falls back to mock logic, stubs, or simulated `sleep_for` delays.
-- **Platform Support**: **Linux (Primary)**. macOS and Windows build, but their implementations often lack parity, relying on basic fallback logic because POSIX headers (`sys/socket.h`, `unistd.h`) bleed into core logic.
-- **Performance**: Heavily bottlenecked. Claims of "Zero-Simulation" are inaccurate as the runtime uses arbitrary `sleep_for(1ms)` loops and spin-locks instead of event-driven OS primitives.
-- **CUDA API Coverage**: **STUBBED**. While the API surface *exists* to allow compilation (~95% coverage claimed), many core functions (like Driver Module loading, CDP, and Graph Topological Replay) simply resolve to empty stubs or host-pointers.
-- **Production Readiness**: **EXPERIMENTAL**. VGRE cannot run large-scale arbitrary ML workloads natively until the stubs are replaced with authoritative logic and the OS-specific networking/memory bottlenecks are resolved.
+**Last Updated**: 2026-05-19 (code-verified audit)  
+**Build**: 117/117 tests pass — but see "Test Coverage Gaps" below  
+**Status**: Advanced prototype. Core numerical paths are real. Several critical ML APIs produce wrong results or are absent.
 
 ---
 
-## What Actually Works
+## What Actually Works (Code-Verified)
 
-### Core Functionality
-- **Memory Management**: Basic `cudaMalloc`, `cudaMemcpy`, and UVM managed memory are implemented (though UVM migration uses sleep-based simulation delays).
-- **Kernel Execution**: JIT kernel compilation via LLVM-18 ORC works. Basic block scheduling and cooperative groups work (but pool workers poll using sleeps).
-- **Basic Shims**: `cuBLAS` (Level 1-3), `cuFFT`, and basic `cuDNN` forward passes work for standard types.
+### Kernel Execution
+- LLVM-18 ORC JIT: Clang AST parse → LLVM IR → native code. Full PTX translator.
+- Block worker pool: real `__syncthreads()` support via barrier objects.
+- CUDA Dynamic Parallelism: recursive child kernel dispatch through host bridge.
+- CUDA Graphs: real DAG, topological sort, kernel fusion.
+- KernelCache: now includes sourceHash integrity check + AST collision eviction.
 
-### Cluster Networking
-- TCP cluster networking exists, but cross-platform networking abstractions are leaky. The discovery and payload systems function on Linux but behave inconsistently on Windows due to POSIX assumptions.
+### Memory
+- `cudaMalloc/Free`, pinned memory, pool allocator, copy engine.
+- UVM: `cudaMallocManaged`, `cudaMemAdvise` (real `madvise()`), `cudaMemPrefetchAsync` (real `mbind()` on Linux).
+- Virtual memory: `cuMemCreate/Map/SetAccess` via `mmap(PROT_NONE)` + `mprotect`.
+- Texture: 1D/2D/3D, bilinear, mipmap generation (box filter).
+
+### Compute APIs
+- cuBLAS L1/L2/L3: real cache-blocked GEMM, CBLAS delegation.
+- cuFFT: Cooley-Tukey radix-2 + Bluestein for all sizes; FFTW3 optional.
+- cuDNN: convolution, batchnorm, activation, pooling, softmax, dropout, attention, CTC loss, LRN — all real CPU implementations with OpenMP.
+- cuSPARSE: SpMV/SpMM (CSR), ILU0/IC0, triangular solve.
+- cuSolver: LU, QR, SVD, least-squares — LAPACK-backed or built-in.
+- NCCL: AllReduce (3 algorithms), Broadcast, ReduceScatter.
+- cuRAND: host-side (all generators + distributions) and device-side (XORWOW, Philox — added 2026-05-19).
+
+### Cluster / Transport
+- TCP cluster: peer discovery (UDP + proactive), full mesh, HMAC-SHA256 auth.
+- Ring all-reduce, RDMA delta-sync (requires InfiniBand), TCP fallback.
+- AES-256-GCM secure channel (PBKDF2 600K iterations).
+- WebSocket (RFC 6455), gRPC (optional).
+- GPU passthrough: real NVRTC + CUDA execution if NVIDIA GPU present.
 
 ---
 
-## Critical Gaps (The Reality Check)
+## What Returns Wrong Results (Silent Failures)
 
-### 1. The Stub Problem
-Many libraries were marked "DONE" simply because their function signatures were added. 
-- **CUDA Driver API**: Lacks a real PTX linker. Module loading is a stub.
-- **CUDA Dynamic Parallelism (CDP)**: Relies on host-side stubs.
-- **gRPC Transport**: Implemented as empty stubs to satisfy compilation.
-- **cuRAND**: Device-side RNG generation explicitly returns `NOT_SUPPORTED`.
+**These are the most dangerous — they compile, link, and produce output, but the output is incorrect.**
 
-### 2. The Simulation Problem
-The runtime claims "Authoritative Zero-Simulation", yet core loops (e.g., `block_worker_pool.cpp`, `uvm_migration.cpp`) rely on `std::this_thread::sleep_for`. This leads to unpredictable latencies, high idle CPU usage, and non-deterministic execution timing that fails under heavy load.
-
-### 3. The Cross-Platform Illusion
-VGRE claims Windows and macOS support, but core files (`shm_manager.cpp`, `scheduler_numa.cpp`, `virtual_gpu_device.cpp`) are littered with `<sys/socket.h>` and `<unistd.h>`. `#ifdef __linux__` logic is robust, but the corresponding `#elif defined(_WIN32)` branches are often incomplete stubs.
-
-### 4. Poor Business Logic & Architecture
-- **Duplication**: The recent effort to "split monolithic files" just copy-pasted global static variables and anonymous namespaces across multiple files, violating DRY principles and risking ODR (One Definition Rule) violations.
-- **Algorithmic Shortcuts**: Advanced PTX like `tcgen05.mma` delegates to older `wgmma` logic, offering no true SM100 accuracy.
+| API | Symptom |
+|---|---|
+| `cudnnRNNForwardInference` with `CUDNN_LSTM` | Returns tanh-RNN output; cell state ignored. LSTM networks produce garbage. |
+| `cudnnRNNForwardInference` with `CUDNN_GRU` | Returns tanh-RNN output; no gating. GRU networks produce garbage. |
+| `cuOccupancyMaxActiveBlocksPerMultiprocessor` | Returns heuristic based on fixed 2048 threads/SM. Auto-tuned block sizes may be suboptimal. |
+| `cudnnFindConvolutionForwardAlgorithm` returning WINOGRAD | Falls back silently to GEMM. Output is correct but performance contract is violated. |
 
 ---
 
-## Build & Test
+## What Returns NOT_SUPPORTED (Hard Failures)
+
+| API | Notes |
+|---|---|
+| `cusparseSpGEMM_compute` | Requires UMFPACK. Graph neural networks fail. |
+| `curandStateMtgp32` in-kernel | Header not implemented. Kernels using MTGP32 fail to JIT-compile. |
+| `cudnnBackendExecute` | cuDNN v8 backend (PyTorch ≥ 2.0). |
+| cuSolver batched APIs | `cusolverDnSgetrfBatched`, etc. |
+| macOS Keychain, Linux libsecret, Windows DPAPI | Token manager backends fall back to encrypted file. |
+| `cuModuleGetFunction` on SASS-only cubins | Only PTX-embedded binaries supported. |
+
+---
+
+## What Is Missing Entirely
+
+| Missing Feature | Impact |
+|---|---|
+| PTX multi-module symbol linking | Separate-compilation CUDA workflows fail |
+| CUDA TMA (Tensor Memory Accelerator) PTX | Hopper TMA kernels fail to JIT-compile |
+| cuDNN RNN backward (BPTT) | RNN training broken |
+| Multi-GPU P2P memory | Frameworks using `cudaMemcpyPeer` get slow host-staged copies |
+| CUPTI / hardware performance counters | No profiling capability |
+| MPS (multi-process service) | Only one process per virtual device |
+| SASS disassembler | Pre-compiled library binaries cannot run |
+| cuFFT CUDA_C_16BF | Bfloat16 complex FFT absent |
+
+---
+
+## Test Coverage Truthful Assessment
+
+117 tests pass. They cover:
+- Core memory and stream semantics ✓
+- Kernel JIT for standard patterns ✓
+- TCP cluster + security ✓
+- cuBLAS, cuFFT, cuSPARSE, cuSolver ✓ (unbatched)
+- cuDNN convolution, BN, activation ✓
+- cuRAND host-side ✓
+
+They do **NOT** cover:
+- LSTM/GRU training — would expose Section 2 wrong-result bugs
+- Cross-module PTX linking
+- cuDNN v8 backend execution
+- MTGP32 device-side cuRAND
+- cuSolver batched
+- TMA instruction execution
+- Multi-process / MPS scenarios
+
+**Passing 117/117 does not mean these gaps are fixed. It means these gaps are not tested.**
+
+---
+
+## Build
 
 ```bash
-# Build
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-
-# Test
-ctest --output-on-failure -j$(nproc)
+cmake --build . -j$(nproc)
+cd tests && ctest --output-on-failure -j$(nproc)
 ```
 
-**Note**: A passing test suite currently indicates that the *stubs* compile and return success codes. It does not guarantee authoritative hardware emulation.
-
----
-
-## Next Steps
-Future work must focus on **De-simulation** (removing `sleep_for`), **True OS Native APIs** (removing Linux-hardcoding), and replacing API stubs with functional emulation logic. See `docs/implementationPlan.md` for the revised roadmap.
-
----
-
-*Last updated: 2026-05-18*
+Expected output: `100% tests passed, 0 tests failed out of 117`
+Expected runtime: ~64 seconds with -j$(nproc) on a modern CPU.
