@@ -33,7 +33,7 @@ cudnnStatus_t cudnnSoftmaxForward(cudnnHandle_t,
         }
     } else {
         #ifdef _OPENMP
-        #pragma omp parallel for collapse(2) if (N * HW > 1024)
+        #pragma omp parallel for OMP_COLLAPSE(2) if (N * HW > 1024)
         #endif
         for (int n=0; n<N; ++n)
         for (int hw=0; hw<HW; ++hw) {
@@ -90,7 +90,7 @@ cudnnStatus_t cudnnSoftmaxBackward(cudnnHandle_t,
         }
     } else {
         #ifdef _OPENMP
-        #pragma omp parallel for collapse(2) if (N * HW > 1024)
+        #pragma omp parallel for OMP_COLLAPSE(2) if (N * HW > 1024)
         #endif
         for (int n=0; n<N; ++n)
         for (int hw=0; hw<HW; ++hw) {

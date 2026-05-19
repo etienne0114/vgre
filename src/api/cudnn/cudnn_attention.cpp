@@ -41,7 +41,7 @@ cudnnStatus_t cudnnMultiHeadAttnForward(
     std::vector<float> Q(total), K(total), V(total);
 
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (seqLen * batchSize > 4)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (seqLen * batchSize > 4)
     #endif
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {
@@ -61,7 +61,7 @@ cudnnStatus_t cudnnMultiHeadAttnForward(
     }
 
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (batchSize * seqLen > 4)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (batchSize * seqLen > 4)
     #endif
     for (int b = 0; b < batchSize; ++b) {
         for (int tq = 0; tq < seqLen; ++tq) {
@@ -142,7 +142,7 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardData(
 
     std::vector<float> dOut(total, 0.f);
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (seqLen * batchSize > 4)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (seqLen * batchSize > 4)
     #endif
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {
@@ -155,7 +155,7 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardData(
     }
 
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (seqLen * batchSize > 4)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (seqLen * batchSize > 4)
     #endif
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {
@@ -206,7 +206,7 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardWeights(
     float* dbo = dwf + 4*wSize + 3*D;
 
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (seqLen * batchSize > 4)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (seqLen * batchSize > 4)
     #endif
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {
@@ -225,7 +225,7 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardWeights(
     }
 
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (seqLen * batchSize > 4)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (seqLen * batchSize > 4)
     #endif
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {

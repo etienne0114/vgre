@@ -76,7 +76,7 @@ VGREResult TextureManager::createMipmappedArray(TextureId &outId,
 static void boxFilter2D(const float *src, size_t sw, size_t sh,
                         float *dst, size_t dw, size_t dh) {
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (dw * dh > 1024)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (dw * dh > 1024)
     #endif
     for (size_t y = 0; y < dh; ++y) {
         for (size_t x = 0; x < dw; ++x) {

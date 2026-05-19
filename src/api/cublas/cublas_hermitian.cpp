@@ -283,7 +283,7 @@ cublasStatus_t cublasChemm_v2(cublasHandle_t handle,
 
     // C = beta * C
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (m * n > 256)
     #endif
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < n; ++j) {
@@ -293,7 +293,7 @@ cublasStatus_t cublasChemm_v2(cublasHandle_t handle,
 
     // C += alpha * (A * B)  or  alpha * (B * A)
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (m * n > 256)
     #endif
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < n; ++j) {
@@ -335,7 +335,7 @@ cublasStatus_t cublasZhemm_v2(cublasHandle_t handle,
     bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
     int ka = left ? m : n;
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (m * n > 256)
     #endif
     for (int i=0;i<m;++i)
         for (int j=0;j<n;++j) {
@@ -343,7 +343,7 @@ cublasStatus_t cublasZhemm_v2(cublasHandle_t handle,
             c = {c.x*beta->x-c.y*beta->y, c.x*beta->y+c.y*beta->x};
         }
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (m * n > 256)
     #endif
     for (int i=0;i<m;++i)
         for (int j=0;j<n;++j) {

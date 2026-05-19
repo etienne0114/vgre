@@ -261,7 +261,7 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
 
       // schedule(guided) — OpenMP picks decreasing chunk sizes, balancing
       // load without the per-chunk atomics that schedule(guided,1) causes.
-#pragma omp for collapse(3) schedule(guided)
+#pragma omp for OMP_COLLAPSE(3) schedule(guided)
       for (int gz = 0; gz < static_cast<int>(gridDim.z); ++gz) {
         for (int gy = 0; gy < static_cast<int>(gridDim.y); ++gy) {
           for (int gx = 0; gx < static_cast<int>(gridDim.x); ++gx) {

@@ -251,6 +251,8 @@ CUresult cuLinkAddFile_v2(CUlinkState state, int type, const char *path,
     return cuLinkAddFile(state, type, path, numOptions, options, optionValues);
 }
 
+} // extern "C" — PTX helpers below use std::string return type (incompatible with C linkage)
+
 // ── PTX symbol linker helpers ─────────────────────────────────────────────────
 
 // Extract every function name that has a real definition (not extern) in PTX src.
@@ -336,6 +338,8 @@ static std::string ptx_strip_extern_decls(const std::string &src,
     }
     return out;
 }
+
+extern "C" {
 
 CUresult cuLinkComplete(CUlinkState state, void **cubinOut, size_t *sizeOut) {
     if (!state || !cubinOut || !sizeOut) return CUDA_ERROR_INVALID_VALUE;

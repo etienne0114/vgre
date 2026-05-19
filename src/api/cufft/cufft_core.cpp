@@ -193,14 +193,14 @@ void fft3d(const std::complex<T> *in, std::complex<T> *out, int nx, int ny, int 
 
     // X-axis
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (nz * ny > 4)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (nz * ny > 4)
     #endif
     for (int z = 0; z < nz; ++z)
         for (int y = 0; y < ny; ++y)
             fft1d(in + (z * ny + y) * nx, tmp0.data() + (z * ny + y) * nx, nx, direction);
     // Y-axis
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (nz * nx > 4)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (nz * nx > 4)
     #endif
     for (int z = 0; z < nz; ++z) {
         for (int x = 0; x < nx; ++x) {
@@ -212,7 +212,7 @@ void fft3d(const std::complex<T> *in, std::complex<T> *out, int nx, int ny, int 
     }
     // Z-axis
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (ny * nx > 4)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (ny * nx > 4)
     #endif
     for (int y = 0; y < ny; ++y) {
         for (int x = 0; x < nx; ++x) {

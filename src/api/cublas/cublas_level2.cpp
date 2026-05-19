@@ -82,7 +82,7 @@ cublasStatus_t cublasSger_v2(cublasHandle_t handle, int m, int n,
     cblas_sger(CblasRowMajor, m, n, *alpha, x, incx, y, incy, A, lda);
 #else
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (m * n > 256)
     #endif
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < n; ++j)
@@ -100,7 +100,7 @@ cublasStatus_t cublasDger_v2(cublasHandle_t handle, int m, int n,
     cblas_dger(CblasRowMajor, m, n, *alpha, x, incx, y, incy, A, lda);
 #else
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (m * n > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (m * n > 256)
     #endif
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < n; ++j)
@@ -371,7 +371,7 @@ cublasStatus_t cublasSsyr2k_v2(cublasHandle_t handle, cublasFillMode_t uplo,
                  n, k, *alpha, A, lda, B, ldb, *beta, C, ldc);
 #else
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (n * n > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (n * n > 256)
     #endif
     for (int i = 0; i < n; ++i)
         for (int j = 0; j < n; ++j)
@@ -418,7 +418,7 @@ cublasStatus_t cublasDsyr2k_v2(cublasHandle_t handle, cublasFillMode_t uplo,
                  n, k, *alpha, A, lda, B, ldb, *beta, C, ldc);
 #else
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (n * n > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (n * n > 256)
     #endif
     for (int i = 0; i < n; ++i)
         for (int j = 0; j < n; ++j)

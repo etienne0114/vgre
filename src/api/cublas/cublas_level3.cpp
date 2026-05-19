@@ -34,7 +34,7 @@ void refSgemm(bool tA, bool tB,
             C[m*ldc+n] = (beta == 0.0f) ? 0.0f : beta * C[m*ldc+n];
     }
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static) if (M * N * K > 4096)
+    #pragma omp parallel for OMP_COLLAPSE(2) schedule(static) if (M * N * K > 4096)
     #endif
     for (int m0 = 0; m0 < M; m0 += kTile)
     for (int n0 = 0; n0 < N; n0 += kTile)
@@ -84,7 +84,7 @@ void refDgemm(bool tA, bool tB,
             C[m*ldc+n] = (beta == 0.0) ? 0.0 : beta * C[m*ldc+n];
     }
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static) if (M * N * K > 4096)
+    #pragma omp parallel for OMP_COLLAPSE(2) schedule(static) if (M * N * K > 4096)
     #endif
     for (int m0 = 0; m0 < M; m0 += kTile)
     for (int n0 = 0; n0 < N; n0 += kTile)
