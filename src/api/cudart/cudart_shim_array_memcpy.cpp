@@ -45,11 +45,8 @@ static inline vgre::core::TextureId cudaArrayToId(cudaArray_t array) {
 }
 
 static inline vgre::core::TextureId cudaArrayToId(cudaArray_const_t array) {
-#if defined(_WIN32)
-    return static_cast<vgre::core::TextureId>(array);
-#else
+    // cudaArray_const_t is a pointer type on all platforms.
     return reinterpret_cast<vgre::core::TextureId>(array);
-#endif
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
