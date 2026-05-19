@@ -103,15 +103,15 @@ std::vector<std::string> ConfigurationManager::listConfigurationBackups(const st
     }
     
     #ifdef _WIN32
-    WIN32_FIND_DATA findFileData;
+    WIN32_FIND_DATAA findFileData;
     std::string search_pattern = search_dir + "\\vgre_config_backup_*.json";
-    HANDLE hFind = FindFirstFile(search_pattern.c_str(), &findFileData);
-    
+    HANDLE hFind = FindFirstFileA(search_pattern.c_str(), &findFileData);
+
     if (hFind != INVALID_HANDLE_VALUE) {
         do {
             std::string full_path = search_dir + "\\" + findFileData.cFileName;
             backups.push_back(full_path);
-        } while (FindNextFile(hFind, &findFileData) != 0);
+        } while (FindNextFileA(hFind, &findFileData) != 0);
         FindClose(hFind);
     }
     #else
