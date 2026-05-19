@@ -44,8 +44,8 @@ if not defined VCVARS64 (
     for %%Y in (2022 2019 2017) do (
         if not defined VCVARS64 (
             for %%E in (BuildTools Community Professional Enterprise) do (
-                if not defined VCVARS64 if exist "C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
-                    set "VCVARS64=C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
+                if not defined VCVARS64 if exist "!_PF64!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+                    set "VCVARS64=!_PF64!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
                     set "VS_YEAR=%%Y"
                 )
                 if not defined VCVARS64 if exist "!_PF86!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
@@ -312,6 +312,10 @@ if "!NINJA_FOUND!"=="0" (
     )
 )
 
+rem -- Detect host architecture for the VS -A platform flag ------------------
+set "_CMAKE_VSARCH=x64"
+if /I "!PROCESSOR_ARCHITECTURE!"=="ARM64" set "_CMAKE_VSARCH=ARM64"
+
 rem -- Select CMake generator ---------------------------------------------------
 rem   Priority: Ninja (if found) > VS MSBuild (if VS detected) > NMake Makefiles
 set "CMAKE_GENERATOR=Ninja"
@@ -319,9 +323,9 @@ set "CMAKE_ARCH_FLAG="
 set "CMAKE_COMPILER_FLAGS="
 if "!NINJA_FOUND!"=="0" (
     rem Ninja not available — try VS MSBuild or NMake
-    if "!VS_YEAR!"=="2022" ( set "CMAKE_GENERATOR=Visual Studio 17 2022" & set "CMAKE_ARCH_FLAG=-A x64" )
-    if "!VS_YEAR!"=="2025" ( set "CMAKE_GENERATOR=Visual Studio 17 2022" & set "CMAKE_ARCH_FLAG=-A x64" )
-    if "!VS_YEAR!"=="2019" ( set "CMAKE_GENERATOR=Visual Studio 16 2019" & set "CMAKE_ARCH_FLAG=-A x64" )
+    if "!VS_YEAR!"=="2025" ( set "CMAKE_GENERATOR=Visual Studio 18 2025" & set "CMAKE_ARCH_FLAG=-A !_CMAKE_VSARCH!" )
+    if "!VS_YEAR!"=="2022" ( set "CMAKE_GENERATOR=Visual Studio 17 2022" & set "CMAKE_ARCH_FLAG=-A !_CMAKE_VSARCH!" )
+    if "!VS_YEAR!"=="2019" ( set "CMAKE_GENERATOR=Visual Studio 16 2019" & set "CMAKE_ARCH_FLAG=-A !_CMAKE_VSARCH!" )
     if "!VS_YEAR!"=="2017" ( set "CMAKE_GENERATOR=Visual Studio 15 2017 Win64" )
     rem VS_YEAR empty = no VS found; fall back to NMake (needs cl.exe on PATH)
     if "!VS_YEAR!"=="" set "CMAKE_GENERATOR=NMake Makefiles"
@@ -379,6 +383,16 @@ if errorlevel 1 (
 )
 popd
 
+rem -- Resolve DLL and exe output locations based on selected generator --------
+rem Ninja and NMake (single-config) emit outputs directly into the build root.
+rem VS MSBuild (multi-config) places Release outputs into a Release\ subdir.
+set "BUILD_OUT_DIR=!BUILD_DIR!"
+set "WORKER_OUT_DIR=!BUILD_DIR!\src\advanced"
+if not "!CMAKE_GENERATOR!"=="Ninja" if not "!CMAKE_GENERATOR!"=="NMake Makefiles" (
+    set "BUILD_OUT_DIR=!BUILD_DIR!\Release"
+    set "WORKER_OUT_DIR=!BUILD_DIR!\src\advanced\Release"
+)
+
 echo.
 echo === Building VGRE Dashboard ===
 if "%SKIP_DASHBOARD%"=="1" (
@@ -386,7 +400,7 @@ if "%SKIP_DASHBOARD%"=="1" (
     goto :dashboard_skip
 )
 pushd "%DASHBOARD_DIR%" || exit /b 1
-powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%FLUTTER_CMD%' build windows --release"
+call "!FLUTTER_CMD!" build windows --release
 if errorlevel 1 (
     popd
     echo WARNING: Flutter build failed. Continuing without dashboard.
@@ -406,29 +420,32 @@ timeout /t 1 /nobreak >nul
 if not exist "%INSTALL_DIR%\lib" mkdir "%INSTALL_DIR%\lib"
 if not exist "%INSTALL_DIR%\include" mkdir "%INSTALL_DIR%\include"
 
-if not exist "%BUNDLE_DIR%\vgre_dashboard.exe" (
-    echo ERROR: Dashboard bundle not found at:
-    echo   %BUNDLE_DIR%
+if not "!SKIP_DASHBOARD!"=="1" (
+    if not exist "%BUNDLE_DIR%\vgre_dashboard.exe" (
+        echo ERROR: Dashboard bundle not found at:
+        echo   %BUNDLE_DIR%
+        exit /b 1
+    )
+    xcopy /E /Y /I "%BUNDLE_DIR%" "%INSTALL_DIR%" >nul
+    if errorlevel 1 (
+        echo ERROR: Failed to copy dashboard bundle.
+        exit /b 1
+    )
+) else (
+    echo [SKIP] Dashboard bundle deployment skipped ^(Flutter was unavailable^).
+)
+
+copy /Y "!BUILD_OUT_DIR!\vgre.dll" "%INSTALL_DIR%\" >nul
+copy /Y "!BUILD_OUT_DIR!\vgre.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Failed to copy vgre.dll from !BUILD_OUT_DIR!\vgre.dll
     exit /b 1
 )
 
-xcopy /E /Y /I "%BUNDLE_DIR%" "%INSTALL_DIR%" >nul
+copy /Y "!BUILD_OUT_DIR!\vgre_cudart.dll" "%INSTALL_DIR%\" >nul
+copy /Y "!BUILD_OUT_DIR!\vgre_cudart.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Failed to copy dashboard bundle.
-    exit /b 1
-)
-
-copy /Y "%BUILD_DIR%\Release\vgre.dll" "%INSTALL_DIR%\" >nul
-copy /Y "%BUILD_DIR%\Release\vgre.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Failed to copy vgre.dll from %BUILD_DIR%\Release\vgre.dll
-    exit /b 1
-)
-
-copy /Y "%BUILD_DIR%\Release\vgre_cudart.dll" "%INSTALL_DIR%\" >nul
-copy /Y "%BUILD_DIR%\Release\vgre_cudart.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Failed to copy vgre_cudart.dll from %BUILD_DIR%\Release\vgre_cudart.dll
+    echo ERROR: Failed to copy vgre_cudart.dll from !BUILD_OUT_DIR!\vgre_cudart.dll
     exit /b 1
 )
 
@@ -472,9 +489,9 @@ if exist "%TOOLS_ROOT%\llvm\bin\*.dll" (
     )
 )
 
-copy /Y "%BUILD_DIR%\src\advanced\Release\vgre-worker.exe" "%INSTALL_DIR%\" >nul
+copy /Y "!WORKER_OUT_DIR!\vgre-worker.exe" "%INSTALL_DIR%\" >nul
 if errorlevel 1 (
-    echo ERROR: Failed to copy vgre-worker.exe
+    echo ERROR: Failed to copy vgre-worker.exe from !WORKER_OUT_DIR!\vgre-worker.exe
     exit /b 1
 ) else (
     echo [OK] vgre-worker.exe deployed
@@ -528,16 +545,12 @@ set "LAUNCHER_PATH=%INSTALL_DIR%\Launch-VGRE-Dashboard.cmd"
     echo rem Ensure LLVM, OpenMP, and VGRE libs are found first
     echo set "PATH=%%APP_DIR%%lib;%%APP_DIR%%;%%TOOLS_ROOT%%\llvm\bin;%%TOOLS_ROOT%%\llvm\lib;%%PATH%%"
     echo.
-    echo rem -- Set environment for hardware token storage
-    echo if defined VGRE_TCP_AUTH_TOKEN ^(
-    echo     set "VGRE_TCP_AUTH_TOKEN=%%VGRE_TCP_AUTH_TOKEN%%"
+    echo rem -- Load cluster auth token from standard file location if not already set
+    echo if not defined VGRE_TCP_AUTH_TOKEN_FILE ^(
+    echo     if exist "%%USERPROFILE%%\.vgre\token" set "VGRE_TCP_AUTH_TOKEN_FILE=%%USERPROFILE%%\.vgre\token"
     echo ^)
     echo.
     echo cd /d "%%APP_DIR%%"
-    echo.
-    echo rem -- Add current directory to DLL search path ^(Windows-specific^)
-    echo set "VGRE_LIB_PATH=%%APP_DIR%%vgre.dll"
-    echo.
     echo start "" "%%APP_DIR%%vgre_dashboard.exe"
 ) > "%LAUNCHER_PATH%"
 if errorlevel 1 (
@@ -641,8 +654,8 @@ if defined VCVARS64 exit /b 0
 for %%Y in (2022 2019 2017) do (
     if not defined VCVARS64 (
         for %%E in (BuildTools Community Professional Enterprise) do (
-            if not defined VCVARS64 if exist "C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
-                set "VCVARS64=C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
+            if not defined VCVARS64 if exist "!_PF64!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+                set "VCVARS64=!_PF64!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
                 set "VS_YEAR=%%Y"
             )
             if not defined VCVARS64 if exist "!_PF86!\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
@@ -658,7 +671,7 @@ exit /b 0
 where flutter >nul 2>&1
 if not errorlevel 1 exit /b 0
 
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$roots=@('$env:USERPROFILE\Downloads\Compressed','$env:USERPROFILE\Downloads','$env:USERPROFILE','C:\src','C:\tools'); $hit=Get-ChildItem -Path $roots -Filter flutter.bat -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty DirectoryName; if($hit){$hit}"`) do set "FLUTTER_BIN=%%I"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$up=$env:USERPROFILE; $roots=@($up+'\Downloads\Compressed',$up+'\Downloads',$up,'C:\src','C:\tools'); $hit=Get-ChildItem -Path $roots -Filter flutter.bat -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty DirectoryName; if($hit){$hit}"`) do set "FLUTTER_BIN=%%I"
 
 if defined FLUTTER_BIN (
     set "FLUTTER_CMD=!FLUTTER_BIN!\flutter.bat"
