@@ -689,4 +689,68 @@ cusolverStatus_t cusolverSpDcsreigvsi(cusolverSpHandle_t /*h*/, int m, int nnz,
             dgetrs_(t, n, r, a, lda, p, b, ldb, i); });
 }
 
+// ── Batched Cholesky (potrfBatched) ───────────────────────────────────────────
+// Loops the unbatched potrf over each matrix pointer in the array.
+
+cusolverStatus_t cusolverDnSpotrfBatched(cusolverDnHandle_t h, char uplo,
+                                          int n, float **Aarray, int lda,
+                                          int *infoArray, int batchSize) {
+    if (!Aarray || !infoArray || n <= 0 || batchSize <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchSize; ++b) {
+        cusolverStatus_t s = cusolverDnSpotrf(h, uplo, n, Aarray[b], lda, nullptr, 0, &infoArray[b]);
+        if (s != CUSOLVER_STATUS_SUCCESS) return s;
+    }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnDpotrfBatched(cusolverDnHandle_t h, char uplo,
+                                          int n, double **Aarray, int lda,
+                                          int *infoArray, int batchSize) {
+    if (!Aarray || !infoArray || n <= 0 || batchSize <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchSize; ++b) {
+        cusolverStatus_t s = cusolverDnDpotrf(h, uplo, n, Aarray[b], lda, nullptr, 0, &infoArray[b]);
+        if (s != CUSOLVER_STATUS_SUCCESS) return s;
+    }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Batched LU triangular solve (getrsBatched) ────────────────────────────────
+// Loops the unbatched getrs over each matrix/RHS pointer pair in the arrays.
+
+cusolverStatus_t cusolverDnSgetrsBatched(cusolverDnHandle_t h, int trans,
+                                          int n, int nrhs,
+                                          const float **Aarray, int lda,
+                                          const int *devIpivArray,
+                                          float **Barray, int ldb,
+                                          int *info, int batchSize) {
+    if (!Aarray || !Barray || !devIpivArray || !info || n <= 0 || batchSize <= 0)
+        return CUSOLVER_STATUS_INVALID_VALUE;
+    *info = 0;
+    for (int b = 0; b < batchSize; ++b) {
+        int binfo = 0;
+        cusolverStatus_t s = cusolverDnSgetrs(h, trans, n, nrhs,
+            Aarray[b], lda, devIpivArray + b * n, Barray[b], ldb, &binfo);
+        if (s != CUSOLVER_STATUS_SUCCESS) return s;
+        if (binfo != 0 && *info == 0) *info = binfo;
+    }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnDgetrsBatched(cusolverDnHandle_t h, int trans,
+                                          int n, int nrhs,
+                                          const double **Aarray, int lda,
+                                          const int *devIpivArray,
+                                          double **Barray, int ldb,
+                                          int *info, int batchSize) {
+    if (!Aarray || !Barray || !devIpivArray || !info || n <= 0 || batchSize <= 0)
+        return CUSOLVER_STATUS_INVALID_VALUE;
+    *info = 0;
+    for (int b = 0; b < batchSize; ++b) {
+        int binfo = 0;
+        cusolverStatus_t s = cusolverDnDgetrs(h, trans, n, nrhs,
+            Aarray[b], lda, devIpivArray + b * n, Barray[b], ldb, &binfo);
+        if (s != CUSOLVER_STATUS_SUCCESS) return s;
+        if (binfo != 0 && *info == 0) *info = binfo;
+    }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
 } // extern "C"

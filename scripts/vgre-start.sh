@@ -32,7 +32,7 @@ fi
 
 INSTALL_DIR="${VGRE_INSTALL_DIR:-$HOME/.local/share/VGRE}"
 TOKEN_FILE="${VGRE_TCP_AUTH_TOKEN_FILE:-$HOME/.vgre/token}"
-PORT="${VGRE_PORT:-7777}"
+PORT="${VGRE_PORT:-7777}"  # Must match kDefaultClusterPort in tcp_cluster_defaults.h
 MODE=""
 MASTER_IP=""
 EXTRA_ARGS=()
@@ -130,6 +130,14 @@ case "$MODE" in
 
     worker)
         if [[ -n "$MASTER_IP" ]]; then
+            # Verify the master IP is reachable before starting the worker.
+            if command -v ping >/dev/null 2>&1; then
+                if ! ping -c 1 -W 2 "$MASTER_IP" >/dev/null 2>&1; then
+                    echo "❌ Master IP $MASTER_IP is not reachable (ping failed)."
+                    echo "   Check the IP address, firewall rules, and network connectivity."
+                    exit 1
+                fi
+            fi
             export VGRE_CLUSTER_NODES="$MASTER_IP:$PORT"
             echo "Starting VGRE Worker → master at $MASTER_IP:$PORT"
         else

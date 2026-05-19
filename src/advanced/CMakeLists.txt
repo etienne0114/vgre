@@ -36,7 +36,7 @@ add_library(vgre_advanced OBJECT
     tcp_cluster/dispatch_manager_core.cpp
     tcp_cluster/dispatch_manager_remote.cpp
     tcp_cluster/dispatch_manager_partitioned.cpp
-    tcp_cluster/dispatch_impl.cpp
+    tcp_cluster/dispatch_partition_impl.cpp
     tcp_cluster/server_loop_core.cpp
     tcp_cluster/server_loop_connection_handling.cpp
     tcp_cluster/server_loop_data_handling.cpp

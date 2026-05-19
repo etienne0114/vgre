@@ -1,4 +1,5 @@
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/advanced/tcp_cluster/tcp_cluster_defaults.h"
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/gpu_passthrough.h"
 #include "vgre/common/logger.h"
@@ -36,7 +37,7 @@ void print_usage(const char* prog) {
     std::cout << "VGRE Remote Worker Utility\n";
     std::cout << "Usage: " << prog << " [options]\n";
     std::cout << "Options:\n";
-    std::cout << "  --port <p>          Port to listen on (default: 7777)\n";
+    std::cout << "  --port <p>          Port to listen on (default: " << vgre::advanced::kDefaultClusterPort << ")\n";
     std::cout << "  --threads <n>       Number of worker threads (default: auto = CPU cores)\n";
     std::cout << "  --auth-token <t>    Authentication token for secure cluster access\n";
     std::cout << "  --master <ip>       IP address of the master node (default: auto-discovery)\n";
@@ -45,7 +46,7 @@ void print_usage(const char* prog) {
 }
 
 int main(int argc, char** argv) {
-    int  port       = 7777;
+    int  port       = vgre::advanced::kDefaultClusterPort;
     int  threads    = 0;       // 0 = auto-detect from CPU cores
     bool enable_gpu = true;
     std::string auth_token;

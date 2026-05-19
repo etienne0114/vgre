@@ -547,4 +547,47 @@ cufftResult_t cufftExecC16C(cufftHandle plan, void *idata, void *odata, int dire
     return execC16C(p, idata, odata, direction);
 }
 
+cufftResult_t cufftExecC16BFC(cufftHandle plan, void *idata, void *odata, int direction) {
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_C16BFC) return CUFFT_INVALID_TYPE;
+    auto *in  = static_cast<cufftBF16Complex*>(idata);
+    auto *out = static_cast<cufftBF16Complex*>(odata);
+    if (!in || !out || !isValidDirection(direction)) return CUFFT_INVALID_VALUE;
+    int64_t total = logicalElementCount(p);
+    for (int b = 0; b < p.batch; ++b) {
+        std::vector<std::complex<float>> tmp(static_cast<size_t>(total));
+        std::vector<std::complex<float>> res(static_cast<size_t>(total));
+        for (int64_t i = 0; i < total; ++i) {
+            const cufftBF16Complex &v = in[inputIndex(p, b, i)];
+            // BF16 → float32: place the 16-bit value in the upper 2 bytes of a float
+            uint32_t rx = static_cast<uint32_t>(v.x) << 16;
+            uint32_t ry = static_cast<uint32_t>(v.y) << 16;
+            float fx, fy;
+            std::memcpy(&fx, &rx, sizeof(float));
+            std::memcpy(&fy, &ry, sizeof(float));
+            tmp[static_cast<size_t>(i)] = {fx, fy};
+        }
+        if (p.rank == 1) fft1d(tmp.data(), res.data(), p.nx, direction);
+        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.nx, p.ny, direction);
+        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nx, p.ny, p.nz, direction);
+        else return CUFFT_INVALID_PLAN;
+        for (int64_t i = 0; i < total; ++i) {
+            cufftBF16Complex &v = out[outputIndex(p, b, i)];
+            // float32 → BF16: take the upper 16 bits (round-to-nearest-even)
+            uint32_t ur, ui;
+            float re = res[static_cast<size_t>(i)].real();
+            float im = res[static_cast<size_t>(i)].imag();
+            std::memcpy(&ur, &re, sizeof(float));
+            std::memcpy(&ui, &im, sizeof(float));
+            // Round: add 0x7FFF + round bit, then truncate
+            ur = (ur + 0x7FFF + ((ur >> 16) & 1)) >> 16;
+            ui = (ui + 0x7FFF + ((ui >> 16) & 1)) >> 16;
+            v.x = static_cast<uint16_t>(ur);
+            v.y = static_cast<uint16_t>(ui);
+        }
+    }
+    return CUFFT_SUCCESS;
+}
+
 } // extern "C"

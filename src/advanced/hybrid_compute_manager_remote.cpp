@@ -2,6 +2,7 @@
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/advanced/tcp_cluster/tcp_cluster_defaults.h"
 #include "vgre/common/logger.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
 
@@ -88,7 +89,7 @@ VGREResult HybridComputeManager::updateRemoteNodeCapability(const std::string &a
   if (!found) {
     RemoteNode node;
     node.address = address;
-    node.port = 7777; // Default cluster port
+    node.port = vgre::advanced::kDefaultClusterPort;
     node.cpuCores = cores;
     node.cpuMemoryBytes = memory;
     node.hasIntegratedGPU = hasIGPU;

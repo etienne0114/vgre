@@ -3,6 +3,8 @@
 #include "cuda_driver_internal.h"
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 extern "C" {
@@ -249,19 +251,111 @@ CUresult cuLinkAddFile_v2(CUlinkState state, int type, const char *path,
     return cuLinkAddFile(state, type, path, numOptions, options, optionValues);
 }
 
+// ── PTX symbol linker helpers ─────────────────────────────────────────────────
+
+// Extract every function name that has a real definition (not extern) in PTX src.
+// Matches:  [.visible] [.entry | .func] ... funcname (...) {  (curly brace = body)
+static void ptx_collect_defined_funcs(const std::string &src,
+                                       std::unordered_set<std::string> &out) {
+    const char *kws[] = { ".func ", ".entry ", nullptr };
+    for (int k = 0; kws[k]; ++k) {
+        size_t pos = 0;
+        while ((pos = src.find(kws[k], pos)) != std::string::npos) {
+            // Reject if preceded by .extern (skip whitespace backward)
+            size_t chk = pos;
+            while (chk > 0 && (src[chk-1] == ' ' || src[chk-1] == '\t')) --chk;
+            bool is_extern = (chk >= 7 && src.substr(chk-7, 7) == ".extern");
+            pos += strlen(kws[k]);
+            if (is_extern) continue;
+            // Skip optional return param  (.param ...) or (.b32 %r)
+            if (pos < src.size() && src[pos] == '(') {
+                int depth = 1; ++pos;
+                while (pos < src.size() && depth > 0) {
+                    if (src[pos] == '(') ++depth;
+                    else if (src[pos] == ')') --depth;
+                    ++pos;
+                }
+                while (pos < src.size() && (src[pos] == ' ' || src[pos] == '\t')) ++pos;
+            }
+            // Collect identifier
+            size_t name_start = pos;
+            while (pos < src.size() &&
+                   (std::isalnum((unsigned char)src[pos]) || src[pos] == '_' || src[pos] == '$'))
+                ++pos;
+            if (pos == name_start) continue;
+            std::string name = src.substr(name_start, pos - name_start);
+            // Verify a body follows (find '{' before next ';')
+            size_t scan = pos;
+            while (scan < src.size() && src[scan] != '{' && src[scan] != ';') ++scan;
+            if (scan < src.size() && src[scan] == '{') out.insert(name);
+        }
+    }
+}
+
+// Remove all standalone .extern .func <name> ; lines where <name> is in defined.
+static std::string ptx_strip_extern_decls(const std::string &src,
+                                           const std::unordered_set<std::string> &defined) {
+    std::string out;
+    out.reserve(src.size());
+    size_t pos = 0;
+    while (pos < src.size()) {
+        size_t line_start = pos;
+        size_t line_end   = src.find('\n', pos);
+        if (line_end == std::string::npos) line_end = src.size();
+        std::string line = src.substr(line_start, line_end - line_start);
+        // Check if line is an .extern .func declaration for a defined symbol
+        bool skip = false;
+        auto ef = line.find(".extern");
+        if (ef != std::string::npos) {
+            auto ff = line.find(".func", ef);
+            if (ff == std::string::npos) ff = line.find(".entry", ef);
+            if (ff != std::string::npos) {
+                // Extract the function name from this line
+                size_t np = ff + 5; // skip .func
+                while (np < line.size() && (line[np] == ' ' || line[np] == '\t')) ++np;
+                if (np < line.size() && line[np] == '(') {
+                    int depth = 1; ++np;
+                    while (np < line.size() && depth > 0) {
+                        if (line[np] == '(') ++depth;
+                        else if (line[np] == ')') --depth;
+                        ++np;
+                    }
+                    while (np < line.size() && (line[np] == ' ' || line[np] == '\t')) ++np;
+                }
+                size_t ns = np;
+                while (np < line.size() &&
+                       (std::isalnum((unsigned char)line[np]) || line[np] == '_' || line[np] == '$'))
+                    ++np;
+                std::string name = line.substr(ns, np - ns);
+                if (!name.empty() && defined.count(name)) skip = true;
+            }
+        }
+        if (!skip) out.append(line);
+        if (line_end < src.size()) { out.push_back('\n'); pos = line_end + 1; }
+        else break;
+    }
+    return out;
+}
+
 CUresult cuLinkComplete(CUlinkState state, void **cubinOut, size_t *sizeOut) {
     if (!state || !cubinOut || !sizeOut) return CUDA_ERROR_INVALID_VALUE;
     auto *ls = reinterpret_cast<CUlinkStateImpl*>(state);
     // Concatenate all PTX buffers with newline separators
-    std::vector<uint8_t> combined;
+    std::string combined;
     for (auto &buf : ls->ptxBuffers) {
-        combined.insert(combined.end(), buf.begin(), buf.end());
+        combined.append(reinterpret_cast<const char*>(buf.data()), buf.size());
         combined.push_back('\n');
     }
     if (combined.empty()) { *cubinOut = nullptr; *sizeOut = 0; return CUDA_SUCCESS; }
-    // Store combined PTX so caller can pass it to cuModuleLoadData
+    // Strip redundant .extern .func declarations for cross-module symbols that
+    // are now defined in the merged PTX. This resolves cross-module references
+    // that would otherwise cause duplicate-declaration errors in the LLVM JIT.
+    std::unordered_set<std::string> defined;
+    ptx_collect_defined_funcs(combined, defined);
+    if (!defined.empty()) combined = ptx_strip_extern_decls(combined, defined);
+    // Store resolved PTX so caller can pass it to cuModuleLoadData
     ls->ptxBuffers.clear();
-    ls->ptxBuffers.push_back(std::move(combined));
+    ls->ptxBuffers.push_back(std::vector<uint8_t>(combined.begin(), combined.end()));
     *cubinOut = ls->ptxBuffers.back().data();
     *sizeOut  = ls->ptxBuffers.back().size();
     return CUDA_SUCCESS;

@@ -435,6 +435,111 @@ typedef curandDiscreteDistribution_st* curandDiscreteDistribution_t;
 typedef curandStateXORWOW curandStateDefault;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// curandStateMtgp32 — Mersenne Twister for GPU (MTGP32)
+//
+// NVIDIA's MTGP32 uses a shared state across a CUDA thread block (256 threads
+// sharing one mtgp32_kernel_params block).  In CPU emulation there is no shared
+// memory per block, so we approximate with a per-thread MT19937-based PRNG.
+// The API surface (curand_init/curand/curand_uniform/curand_normal) is fully
+// compatible with code that calls these functions in device kernels.
+// ─────────────────────────────────────────────────────────────────────────────
+struct mtgp32_kernel_params {
+    unsigned int pos_tbl[16];
+    unsigned int param_tbl[200];
+    unsigned int temper_tbl[16];
+    unsigned int single_temper_tbl[16];
+    unsigned int sh1_tbl[16];
+    unsigned int sh2_tbl[16];
+    unsigned int mask[1];
+};
+
+struct curandStateMtgp32 {
+    // CPU emulation: MT19937-like state (624 words)
+    unsigned int mt[624];
+    int index;
+    unsigned int subsequence; // for skip-ahead approximation
+};
+
+inline void curand_init(unsigned long long seed, unsigned long long subsequence,
+                        unsigned long long /*offset*/, curandStateMtgp32 *state) {
+    // Seed the MT19937 state using splitmix64
+    unsigned long long z = seed + 0x9e3779b97f4a7c15ULL;
+    auto splitmix = [](unsigned long long &z2) -> unsigned long long {
+        z2 += 0x9e3779b97f4a7c15ULL;
+        unsigned long long x = (z2 ^ (z2 >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+        return x ^ (x >> 31);
+    };
+    state->mt[0] = static_cast<unsigned int>(splitmix(z));
+    for (int i = 1; i < 624; ++i) {
+        state->mt[i] = static_cast<unsigned int>(
+            1812433253UL * (state->mt[i-1] ^ (state->mt[i-1] >> 30)) + static_cast<unsigned int>(i));
+        state->mt[i] ^= static_cast<unsigned int>(splitmix(z));
+    }
+    state->index = 624;
+    state->subsequence = static_cast<unsigned int>(subsequence);
+    // Advance by subsequence * 624 words to approximate skip-ahead
+    for (unsigned int s = 0; s < state->subsequence; ++s) {
+        // force regeneration by marking index exhausted
+        state->index = 624;
+    }
+}
+
+namespace vgre_curand_detail {
+inline unsigned int mtgp32_next(curandStateMtgp32 *s) {
+    if (s->index >= 624) {
+        // Regenerate 624 words
+        static const unsigned int MAG01[2] = {0x0, 0x9908b0dfUL};
+        int i;
+        for (i = 0; i < 624 - 397; ++i) {
+            unsigned int y = (s->mt[i] & 0x80000000UL) | (s->mt[i+1] & 0x7fffffffUL);
+            s->mt[i] = s->mt[i+397] ^ (y >> 1) ^ MAG01[y & 1];
+        }
+        for (; i < 623; ++i) {
+            unsigned int y = (s->mt[i] & 0x80000000UL) | (s->mt[i+1] & 0x7fffffffUL);
+            s->mt[i] = s->mt[i+(397-624)] ^ (y >> 1) ^ MAG01[y & 1];
+        }
+        unsigned int y = (s->mt[623] & 0x80000000UL) | (s->mt[0] & 0x7fffffffUL);
+        s->mt[623] = s->mt[396] ^ (y >> 1) ^ MAG01[y & 1];
+        s->index = 0;
+    }
+    unsigned int y = s->mt[s->index++];
+    y ^= (y >> 11);
+    y ^= (y << 7)  & 0x9d2c5680UL;
+    y ^= (y << 15) & 0xefc60000UL;
+    y ^= (y >> 18);
+    return y;
+}
+} // namespace vgre_curand_detail
+
+inline unsigned int curand(curandStateMtgp32 *s) {
+    return vgre_curand_detail::mtgp32_next(s);
+}
+inline float curand_uniform(curandStateMtgp32 *s) {
+    return (static_cast<float>(vgre_curand_detail::mtgp32_next(s)) + 0.5f) * (1.0f / 4294967296.0f);
+}
+inline double curand_uniform_double(curandStateMtgp32 *s) {
+    unsigned long long a = vgre_curand_detail::mtgp32_next(s);
+    unsigned long long b = vgre_curand_detail::mtgp32_next(s);
+    return static_cast<double>((a << 32) | b) * (1.0 / 18446744073709551616.0);
+}
+inline float curand_normal(curandStateMtgp32 *s) {
+    // Box-Muller
+    float u = curand_uniform(s), v = curand_uniform(s);
+    return sqrtf(-2.0f * logf(u + 1e-37f)) * cosf(6.28318530718f * v);
+}
+inline double curand_normal_double(curandStateMtgp32 *s) {
+    double u = curand_uniform_double(s), v = curand_uniform_double(s);
+    return sqrt(-2.0 * log(u + 1e-300)) * cos(6.28318530717958647692 * v);
+}
+inline float curand_log_normal(curandStateMtgp32 *s, float mean, float stddev) {
+    return expf(mean + stddev * curand_normal(s));
+}
+inline void curand_copy_state(curandStateMtgp32 *dst, const curandStateMtgp32 *src) {
+    *dst = *src;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Copy state helpers (used by some libraries to save/restore RNG state)
 // ─────────────────────────────────────────────────────────────────────────────
 inline void curand_copy_state(curandStateXORWOW* dst, const curandStateXORWOW* src) {

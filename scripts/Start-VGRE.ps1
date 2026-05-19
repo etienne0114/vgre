@@ -120,7 +120,7 @@ function Test-WorkerDependencies {
 # -------------------------------
 $mode = ""
 $masterIp = ""
-$port = "7777"
+$port = "7777"  # Must match kDefaultClusterPort in tcp_cluster_defaults.h
 $threads = ""
 
 for ($i = 0; $i -lt $args.Length; $i++) {
