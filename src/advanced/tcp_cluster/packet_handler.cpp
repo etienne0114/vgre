@@ -131,7 +131,7 @@ bool PacketHandler::parseVSBPHeader(const uint8_t* data, size_t dataSize,
   if (!data || dataSize < sizeof(VSBPHeader)) return false;
 
   // Copy header
-  std::memcpy(&header, data, sizeof(VSBPHeader));
+  memcpy(&header, data, sizeof(VSBPHeader));
 
   // Use shared validation logic
   if (!PacketUtils::validateVSBPHeader(header)) {
@@ -205,8 +205,8 @@ VGREResult MemorySyncManager::sendScalarArg(
   ArgScalarPacket apkt{};
   apkt.arg_index = static_cast<uint32_t>(arg_index);
   apkt.arg_type = static_cast<uint8_t>(type);
-  std::memset(&apkt.value, 0, 8);
-  std::memcpy(&apkt.value, arg, arg_size);
+  memset(&apkt.value, 0, 8);
+  memcpy(&apkt.value, arg, arg_size);
 
   if (parent_->send_packet(client->socket_fd, PacketType::ARG_SCALAR, &apkt, 
                            sizeof(ArgScalarPacket), client->secure_channel.get()) != VGREResult::SUCCESS) {

@@ -17,7 +17,7 @@ static int g_pass = 0, g_total = 0;
 
 static uint16_t f2h(float f) {
     uint32_t bits;
-    std::memcpy(&bits, &f, sizeof(bits));
+    memcpy(&bits, &f, sizeof(bits));
     uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
     int exp = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
     uint32_t mant = bits & 0x7fffffu;
@@ -51,7 +51,7 @@ static float h2f(uint16_t h) {
         bits = sign | ((exp + 112u) << 23) | (mant << 13);
     }
     float f;
-    std::memcpy(&f, &bits, sizeof(f));
+    memcpy(&f, &bits, sizeof(f));
     return f;
 }
 

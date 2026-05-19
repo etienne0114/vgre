@@ -11,7 +11,7 @@ void test_sha256() {
     std::cout << "Testing SHA-256..." << std::endl;
     uint8_t digest[32];
     const char* msg = "vgre-secure-test";
-    crypto::sha256(reinterpret_cast<const uint8_t*>(msg), std::strlen(msg), digest);
+    crypto::sha256(reinterpret_cast<const uint8_t*>(msg), strlen(msg), digest);
     
     // Simple verification (not full test vectors here for brevity, but enough to see it runs)
     assert(digest[0] != 0 || digest[31] != 0);

@@ -74,7 +74,7 @@ int main() {
         constexpr size_t W = 8, H = 4, PITCH = 16;  // pad to 16 bytes
         void *buf = nullptr;
         cudaMalloc(&buf, PITCH * H);
-        std::memset(buf, 0xAA, PITCH * H);
+        memset(buf, 0xAA, PITCH * H);
 
         cudaError_t e = cudaMemset2D(buf, PITCH, 0x5C, W, H);
         if (e != cudaSuccess) {
@@ -124,7 +124,7 @@ int main() {
         constexpr size_t W = 4, H = 3, D = 2, PITCH = 8;
         void *buf = nullptr;
         cudaMalloc(&buf, PITCH * H * D);
-        std::memset(buf, 0xBB, PITCH * H * D);
+        memset(buf, 0xBB, PITCH * H * D);
 
         cudaPitchedPtr pp{buf, PITCH, W, H};
         cudaExtent ext{W, H, D};
@@ -151,7 +151,7 @@ int main() {
         constexpr size_t W = 6, H = 4, PITCH = 8;
         void *buf = nullptr;
         cudaMalloc(&buf, PITCH * H);
-        std::memset(buf, 0, PITCH * H);
+        memset(buf, 0, PITCH * H);
 
         cudaStream_t stream;
         cudaStreamCreate(&stream);

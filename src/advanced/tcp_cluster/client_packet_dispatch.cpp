@@ -40,7 +40,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           break;
 
         VSBPHeader header;
-        std::memcpy(&header, client_rx_buffer_.data(), sizeof(VSBPHeader));
+        memcpy(&header, client_rx_buffer_.data(), sizeof(VSBPHeader));
 
         // VSBP Validation
         if (!PacketUtils::validateVSBPHeader(header)) {
@@ -65,7 +65,7 @@ void TCPClusterManager::processClientStagingBuffer() {
 
         if (type == PacketType::ARG_SCALAR || type == PacketType::ARG_POINTER) {
           ArgScalarPacket apkt;
-          std::memcpy(&apkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&apkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(ArgScalarPacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -77,7 +77,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           pending_args_[apkt.arg_index] = std::move(arg);
         } else if (type == PacketType::DATA_HEADER) {
           DataHeaderPacket dpkt;
-          std::memcpy(&dpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&dpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(DataHeaderPacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -89,7 +89,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           receive_state_ = ReceiveState::EXPECTING_BODY;
         } else if (type == PacketType::DATA_HEADER_DIRTY) {
           DataHeaderDirtyPacket dhpkt;
-          std::memcpy(&dhpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&dhpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(DataHeaderDirtyPacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -100,7 +100,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           receive_state_ = ReceiveState::EXPECTING_RANGES_TCP;
         } else if (type == PacketType::DATA_SHM_DIRTY) {
           DataShmDirtyPacket dspkt;
-          std::memcpy(&dspkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&dspkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(DataShmDirtyPacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -112,7 +112,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           receive_state_ = ReceiveState::EXPECTING_RANGES_SHM;
         } else if (type == PacketType::DATA_SHM) {
           DataShmPacket dspkt;
-          std::memcpy(&dspkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&dspkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(DataShmPacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -142,7 +142,7 @@ void TCPClusterManager::processClientStagingBuffer() {
               }
               void *local_ptr = mm.getPointer(handle);
               if (local_ptr) {
-                std::memcpy(local_ptr,
+                memcpy(local_ptr,
                             static_cast<uint8_t *>(shm_base) + dspkt.shm_offset,
                             dspkt.size);
               }
@@ -157,7 +157,7 @@ void TCPClusterManager::processClientStagingBuffer() {
               sizeof(VSBPHeader) + sizeof(DataHeaderRDMAPacket))
             break;
           DataHeaderRDMAPacket rdmaPkt;
-          std::memcpy(&rdmaPkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&rdmaPkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(DataHeaderRDMAPacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -178,7 +178,7 @@ void TCPClusterManager::processClientStagingBuffer() {
             void *local_ptr = mm.getPointer(handle);
             if (local_ptr) {
               // Copy this chunk to the correct offset inside the allocation.
-              std::memcpy(static_cast<uint8_t*>(local_ptr) + rdmaPkt.dst_offset,
+              memcpy(static_cast<uint8_t*>(local_ptr) + rdmaPkt.dst_offset,
                           client_rdma_conn_->bounceBuf(),
                           rdmaPkt.chunk_size);
               // On non-x86 (ARM) the RDMA DMA may have bypassed the CPU cache;
@@ -202,7 +202,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           }
         } else if (type == PacketType::STRUCT_DATA) {
           StructDataPacket spkt;
-          std::memcpy(&spkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&spkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(StructDataPacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -213,7 +213,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           receive_state_ = ReceiveState::EXPECTING_STRUCT_BODY;
         } else if (type == PacketType::REGISTER_KERNEL) {
           KernelRegisterPacket kpkt;
-          std::memcpy(&kpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&kpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(KernelRegisterPacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -239,7 +239,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           receive_state_ = ReceiveState::EXPECTING_KERNEL_SOURCE;
         } else if (type == PacketType::LAUNCH_KERNEL) {
           RemoteCommandPacket pkt;
-          std::memcpy(&pkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&pkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(RemoteCommandPacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -248,7 +248,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           handleRemoteCommand(pkt);
         } else if (type == PacketType::PARTITION_DISPATCH) {
           PartitionDispatchPacket pkt;
-          std::memcpy(&pkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&pkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(PartitionDispatchPacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -257,7 +257,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           handlePartitionDispatch(pkt);
         } else if (type == PacketType::ROTATE_KEY) {
           SecureHandshakePacket rpkt;
-          std::memcpy(&rpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&rpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(SecureHandshakePacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -274,7 +274,7 @@ void TCPClusterManager::processClientStagingBuffer() {
                                       sizeof(VSBPHeader) + header.payloadSize);
         } else if (type == PacketType::SHM_INIT) {
           ShmInitPacket sipkt;
-          std::memcpy(&sipkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+          memcpy(&sipkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                       sizeof(ShmInitPacket));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                   client_rx_buffer_.begin() +
@@ -289,7 +289,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           // Discard the rest of the payload (zero-filled bandwidth padding).
           uint64_t probe_sent_ms = 0;
           if (header.payloadSize >= sizeof(uint64_t))
-            std::memcpy(&probe_sent_ms,
+            memcpy(&probe_sent_ms,
                         client_rx_buffer_.data() + sizeof(VSBPHeader),
                         sizeof(uint64_t));
           client_rx_buffer_.erase(client_rx_buffer_.begin(),
@@ -379,7 +379,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           // Master receives collective operation request from worker
           if (is_master_) {
             CollectiveOpPacket op_packet;
-            std::memcpy(&op_packet,
+            memcpy(&op_packet,
                         client_rx_buffer_.data() + sizeof(VSBPHeader),
                         sizeof(CollectiveOpPacket));
             client_rx_buffer_.erase(client_rx_buffer_.begin(),
@@ -467,7 +467,7 @@ void TCPClusterManager::processClientStagingBuffer() {
         VSBPHeader header;
         if (client_rx_buffer_.size() < sizeof(VSBPHeader))
           break;
-        std::memcpy(&header, client_rx_buffer_.data(), sizeof(VSBPHeader));
+        memcpy(&header, client_rx_buffer_.data(), sizeof(VSBPHeader));
         if (client_rx_buffer_.size() < sizeof(VSBPHeader) + header.payloadSize)
           break;
         PacketType type = static_cast<PacketType>(header.type);
@@ -500,7 +500,7 @@ void TCPClusterManager::processClientStagingBuffer() {
             sizeof(VSBPHeader) + sizeof(DirtyRangePacket))
           break;
         VSBPHeader hdr;
-        std::memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
+        memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
         if (hdr.magic != VSBP_MAGIC || hdr.version != VSBP_VERSION ||
             static_cast<PacketType>(hdr.type) != PacketType::DIRTY_RANGE ||
             hdr.payloadSize < sizeof(DirtyRangePacket)) {
@@ -512,7 +512,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           break;
         }
         DirtyRangePacket rpkt;
-        std::memcpy(&rpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+        memcpy(&rpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                     sizeof(DirtyRangePacket));
         client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                 client_rx_buffer_.begin() + sizeof(VSBPHeader) +
@@ -525,7 +525,7 @@ void TCPClusterManager::processClientStagingBuffer() {
             sizeof(VSBPHeader) + sizeof(DirtyRangePacket))
           break;
         VSBPHeader hdr;
-        std::memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
+        memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
         if (hdr.magic != VSBP_MAGIC || hdr.version != VSBP_VERSION ||
             static_cast<PacketType>(hdr.type) != PacketType::DIRTY_RANGE ||
             hdr.payloadSize < sizeof(DirtyRangePacket)) {
@@ -537,7 +537,7 @@ void TCPClusterManager::processClientStagingBuffer() {
           break;
         }
         DirtyRangePacket rpkt;
-        std::memcpy(&rpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
+        memcpy(&rpkt, client_rx_buffer_.data() + sizeof(VSBPHeader),
                     sizeof(DirtyRangePacket));
         client_rx_buffer_.erase(client_rx_buffer_.begin(),
                                 client_rx_buffer_.begin() + sizeof(VSBPHeader) +
@@ -547,7 +547,7 @@ void TCPClusterManager::processClientStagingBuffer() {
               core::RuntimeEngine::instance().getMemoryManager().getPointer(
                   reinterpret_cast<void *>(pending_target_ptr_));
           if (local_ptr)
-            std::memcpy(
+            memcpy(
                 static_cast<uint8_t *>(local_ptr) + rpkt.offset,
                 static_cast<uint8_t *>(client_shm_manager_->getBasePtr()) +
                     pending_shm_offset_,
@@ -560,7 +560,7 @@ void TCPClusterManager::processClientStagingBuffer() {
         if (client_rx_buffer_.size() < sizeof(VSBPHeader))
           break;
         VSBPHeader hdr;
-        std::memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
+        memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
         if (hdr.magic != VSBP_MAGIC || hdr.version != VSBP_VERSION ||
             static_cast<PacketType>(hdr.type) != PacketType::DATA_BODY) {
           VGRE_LOG_ERROR(
@@ -582,7 +582,7 @@ void TCPClusterManager::processClientStagingBuffer() {
         }
         void *local_ptr = mm.getPointer(handle);
         if (local_ptr)
-          std::memcpy(static_cast<uint8_t *>(local_ptr) + pending_range_offset_,
+          memcpy(static_cast<uint8_t *>(local_ptr) + pending_range_offset_,
                       client_rx_buffer_.data() + sizeof(VSBPHeader),
                       pending_data_size_);
         client_rx_buffer_.erase(client_rx_buffer_.begin(),
@@ -596,7 +596,7 @@ void TCPClusterManager::processClientStagingBuffer() {
         if (client_rx_buffer_.size() < sizeof(VSBPHeader))
           break;
         VSBPHeader hdr;
-        std::memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
+        memcpy(&hdr, client_rx_buffer_.data(), sizeof(VSBPHeader));
         if (hdr.magic != VSBP_MAGIC || hdr.version != VSBP_VERSION ||
             static_cast<PacketType>(hdr.type) != PacketType::DATA_BODY ||
             hdr.payloadSize < pending_struct_arg_size_ ||

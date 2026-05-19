@@ -118,7 +118,7 @@ void sha256_init(SHA256Context &ctx) {
   ctx.state[6] = 0x1f83d9ab;
   ctx.state[7] = 0x5be0cd19;
   ctx.bitcount = 0;
-  std::memset(ctx.buffer, 0, sizeof(ctx.buffer));
+  memset(ctx.buffer, 0, sizeof(ctx.buffer));
 }
 
 void sha256_update(SHA256Context &ctx, const uint8_t *data, size_t len) {
@@ -129,7 +129,7 @@ void sha256_update(SHA256Context &ctx, const uint8_t *data, size_t len) {
   if (bufferFill > 0) {
     size_t need = 64 - bufferFill;
     size_t take = std::min(need, len);
-    std::memcpy(ctx.buffer + bufferFill, data, take);
+    memcpy(ctx.buffer + bufferFill, data, take);
     offset += take;
     if (bufferFill + take < 64)
       return;
@@ -143,7 +143,7 @@ void sha256_update(SHA256Context &ctx, const uint8_t *data, size_t len) {
 
   size_t remaining = len - offset;
   if (remaining > 0) {
-    std::memcpy(ctx.buffer, data + offset, remaining);
+    memcpy(ctx.buffer, data + offset, remaining);
   }
 }
 
@@ -152,12 +152,12 @@ void sha256_final(SHA256Context &ctx, uint8_t digest[kSHA256DigestLen]) {
   ctx.buffer[bufferFill++] = 0x80;
 
   if (bufferFill > 56) {
-    std::memset(ctx.buffer + bufferFill, 0, 64 - bufferFill);
+    memset(ctx.buffer + bufferFill, 0, 64 - bufferFill);
     sha256_transform(ctx.state, ctx.buffer);
     bufferFill = 0;
   }
 
-  std::memset(ctx.buffer + bufferFill, 0, 56 - bufferFill);
+  memset(ctx.buffer + bufferFill, 0, 56 - bufferFill);
 
   // Append bit length (big-endian)
   for (int i = 0; i < 8; ++i) {
@@ -175,7 +175,7 @@ void sha256_final(SHA256Context &ctx, uint8_t digest[kSHA256DigestLen]) {
   }
 
   // Clear sensitive state
-  std::memset(&ctx, 0, sizeof(ctx));
+  memset(&ctx, 0, sizeof(ctx));
 }
 
 void sha256(const uint8_t *data, size_t len,
@@ -190,12 +190,12 @@ void sha256(const uint8_t *data, size_t len,
 void hmac_sha256(const uint8_t *key, size_t keyLen, const uint8_t *data,
                  size_t dataLen, uint8_t mac[kSHA256DigestLen]) {
   uint8_t keyBlock[64];
-  std::memset(keyBlock, 0, sizeof(keyBlock));
+  memset(keyBlock, 0, sizeof(keyBlock));
 
   if (keyLen > 64) {
     sha256(key, keyLen, keyBlock);
   } else {
-    std::memcpy(keyBlock, key, keyLen);
+    memcpy(keyBlock, key, keyLen);
   }
 
   // Inner hash: H((key XOR ipad) || data)
@@ -224,10 +224,10 @@ void hmac_sha256(const uint8_t *key, size_t keyLen, const uint8_t *data,
   sha256_final(outerCtx, mac);
 
   // Clear sensitive data
-  std::memset(keyBlock, 0, sizeof(keyBlock));
-  std::memset(iPad, 0, sizeof(iPad));
-  std::memset(oPad, 0, sizeof(oPad));
-  std::memset(innerHash, 0, sizeof(innerHash));
+  memset(keyBlock, 0, sizeof(keyBlock));
+  memset(iPad, 0, sizeof(iPad));
+  memset(oPad, 0, sizeof(oPad));
+  memset(innerHash, 0, sizeof(innerHash));
 }
 
 // ── PBKDF2-HMAC-SHA256 ──────────────────────────────────────────────────
@@ -240,7 +240,7 @@ void pbkdf2_sha256(const uint8_t *password, size_t passwordLen,
   while (offset < derivedKeyLen) {
     // U_1 = HMAC(password, salt || INT_32_BE(blockIndex))
     std::vector<uint8_t> saltBlock(saltLen + 4);
-    std::memcpy(saltBlock.data(), salt, saltLen);
+    memcpy(saltBlock.data(), salt, saltLen);
     saltBlock[saltLen] = static_cast<uint8_t>(blockIndex >> 24);
     saltBlock[saltLen + 1] = static_cast<uint8_t>(blockIndex >> 16);
     saltBlock[saltLen + 2] = static_cast<uint8_t>(blockIndex >> 8);
@@ -250,19 +250,19 @@ void pbkdf2_sha256(const uint8_t *password, size_t passwordLen,
     hmac_sha256(password, passwordLen, saltBlock.data(), saltBlock.size(), U);
 
     uint8_t T[kSHA256DigestLen];
-    std::memcpy(T, U, kSHA256DigestLen);
+    memcpy(T, U, kSHA256DigestLen);
 
     for (uint32_t iter = 1; iter < iterations; ++iter) {
       uint8_t Unext[kSHA256DigestLen];
       hmac_sha256(password, passwordLen, U, kSHA256DigestLen, Unext);
-      std::memcpy(U, Unext, kSHA256DigestLen);
+      memcpy(U, Unext, kSHA256DigestLen);
       for (size_t j = 0; j < kSHA256DigestLen; ++j) {
         T[j] ^= U[j];
       }
     }
 
     size_t copyLen = std::min(derivedKeyLen - offset, kSHA256DigestLen);
-    std::memcpy(derivedKey + offset, T, copyLen);
+    memcpy(derivedKey + offset, T, copyLen);
     offset += copyLen;
     ++blockIndex;
   }
@@ -423,7 +423,7 @@ void aes256_ctr_hw(const uint8_t key[32], const uint8_t nonce[12],
 
     // Counter block template: nonce in bytes 0–11; counter (big-endian) in bytes 12–15.
     alignas(16) uint8_t cb[16];
-    std::memcpy(cb, nonce, 12);
+    memcpy(cb, nonce, 12);
 
     // Set bytes 12–15 of cb[] to big-endian representation of a 32-bit counter value.
     auto set_ctr = [](uint8_t* b, uint32_t c) {
@@ -440,9 +440,9 @@ void aes256_ctr_hw(const uint8_t key[32], const uint8_t nonce[12],
     alignas(16) uint8_t cb1[16], cb2[16], cb3[16];
     while (offset + 64 <= len) {
         set_ctr(cb,  (uint32_t)ctr);
-        std::memcpy(cb1, cb, 12); set_ctr(cb1, (uint32_t)(ctr+1));
-        std::memcpy(cb2, cb, 12); set_ctr(cb2, (uint32_t)(ctr+2));
-        std::memcpy(cb3, cb, 12); set_ctr(cb3, (uint32_t)(ctr+3));
+        memcpy(cb1, cb, 12); set_ctr(cb1, (uint32_t)(ctr+1));
+        memcpy(cb2, cb, 12); set_ctr(cb2, (uint32_t)(ctr+2));
+        memcpy(cb3, cb, 12); set_ctr(cb3, (uint32_t)(ctr+3));
 
         __m128i b0 = _mm_load_si128((const __m128i*)cb);
         __m128i b1 = _mm_load_si128((const __m128i*)cb1);
@@ -492,11 +492,11 @@ void aes256_ctr_hw(const uint8_t key[32], const uint8_t nonce[12],
         _mm_store_si128((__m128i*)ks, b);
         for (size_t i = 0; offset < len; ++i, ++offset)
             output[offset] = input[offset] ^ ks[i];
-        std::memset(ks, 0, 16);
+        memset(ks, 0, 16);
     }
 
-    std::memset(rk, 0, sizeof(rk));
-    std::memset(cb, 0, sizeof(cb));
+    memset(rk, 0, sizeof(rk));
+    memset(cb, 0, sizeof(cb));
 }
 #endif // AES-NI
 
@@ -561,7 +561,7 @@ static void aes256_key_schedule(const uint8_t key[32], uint32_t rk[60]) {
 static void aes256_encrypt_block(const uint8_t in[16], uint8_t out[16],
                                   const uint32_t rk[60]) {
     uint8_t s[16];
-    std::memcpy(s, in, 16);
+    memcpy(s, in, 16);
 
     // AddRoundKey (round 0)
     for (int col = 0; col < 4; ++col) {
@@ -608,7 +608,7 @@ static void aes256_encrypt_block(const uint8_t in[16], uint8_t out[16],
             s[4*col+3] ^=  w        & 0xff;
         }
     }
-    std::memcpy(out, s, 16);
+    memcpy(out, s, 16);
 }
 
 } // anonymous namespace
@@ -634,7 +634,7 @@ void aes256_ctr(const uint8_t key[32], const uint8_t nonce[12],
     aes256_key_schedule(key, rk);
 
     uint8_t counterBlock[16];
-    std::memcpy(counterBlock, nonce, 12);
+    memcpy(counterBlock, nonce, 12);
 
     size_t offset = 0;
     uint64_t counter = initialCounter;
@@ -654,11 +654,11 @@ void aes256_ctr(const uint8_t key[32], const uint8_t nonce[12],
         for (size_t i = 0; i < blockLen; ++i)
             output[offset + i] = input[offset + i] ^ keystream[i];
 
-        std::memset(keystream, 0, 16);
+        memset(keystream, 0, 16);
         offset += blockLen;
         ++counter;
     }
-    std::memset(rk, 0, sizeof(rk));
+    memset(rk, 0, sizeof(rk));
 }
 } // namespace crypto
 

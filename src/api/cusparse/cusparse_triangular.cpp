@@ -92,14 +92,14 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t /*h*/,
                 ((static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
                   (static_cast<uint32_t>((h >> 10) & 0x1f) + 112u)) << 23) |
                 (static_cast<uint32_t>(h & 0x3ff) << 13);
-            float f; std::memcpy(&f, &bits, 4); return f;
+            float f; memcpy(&f, &bits, 4); return f;
         };
         auto bf2f = [](uint16_t h) -> float {
             uint32_t bits = static_cast<uint32_t>(h) << 16;
-            float f; std::memcpy(&f, &bits, 4); return f;
+            float f; memcpy(&f, &bits, 4); return f;
         };
         auto f2h = [](float f) -> uint16_t {
-            uint32_t bits; std::memcpy(&bits, &f, 4);
+            uint32_t bits; memcpy(&bits, &f, 4);
             uint16_t sign = (bits >> 16) & 0x8000;
             int exp = ((bits >> 23) & 0xff) - 127 + 15;
             if (exp <= 0) return sign;
@@ -107,7 +107,7 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t /*h*/,
             return sign | (static_cast<uint16_t>(exp) << 10) | ((bits >> 13) & 0x3ff);
         };
         auto f2bf = [](float f) -> uint16_t {
-            uint32_t bits; std::memcpy(&bits, &f, 4); return static_cast<uint16_t>(bits >> 16);
+            uint32_t bits; memcpy(&bits, &f, 4); return static_cast<uint16_t>(bits >> 16);
         };
 
         bool isFP16 = (computeType == CUDA_R_16F);
@@ -122,7 +122,7 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t /*h*/,
             const uint16_t *aH = static_cast<const uint16_t*>(A.values);
             for (int64_t i = 0; i < A.nnz; ++i) aF[i] = aFP16 ? h2f(aH[i]) : bf2f(aH[i]);
         } else if (A.valueType == CUDA_R_32F) {
-            std::memcpy(aF.data(), A.values, static_cast<size_t>(A.nnz) * sizeof(float));
+            memcpy(aF.data(), A.values, static_cast<size_t>(A.nnz) * sizeof(float));
         }
         // Build widened descriptors for recursive call (float compute)
         CsrMat Af = A; Af.valueType = CUDA_R_32F;

@@ -19,7 +19,7 @@ void TCPClusterManager::getConnectedNodes(std::vector<TCPClusterManager::Cluster
     info.ip_address = c->ip_address; info.port = c->port;
     info.last_telemetry = c->last_telemetry; info.active = c->active;
     info.cpu_cores = c->cpu_cores; info.cpu_memory = c->cpu_memory;
-    info.has_igpu = c->has_igpu; std::memcpy(info.igpu_name, c->igpu_name, sizeof(info.igpu_name));
+    info.has_igpu = c->has_igpu; memcpy(info.igpu_name, c->igpu_name, sizeof(info.igpu_name));
     info.security_established = c->security_established; info.is_authenticating = c->is_authenticating;
     info.worker_idx = static_cast<int>(outNodes.size());
     outNodes.push_back(std::move(info));
@@ -28,7 +28,7 @@ void TCPClusterManager::getConnectedNodes(std::vector<TCPClusterManager::Cluster
 
 void TCPClusterManager::getAggregatedTelemetry(vgre_telemetry_t &outCombined) const {
   std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
-  std::memset(&outCombined, 0, sizeof(vgre_telemetry_t));
+  memset(&outCombined, 0, sizeof(vgre_telemetry_t));
   for (const auto &c : clients_) {
     if (!c || !c->active) continue;
     outCombined.active_kernels += c->last_telemetry.active_kernels;

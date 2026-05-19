@@ -41,7 +41,7 @@ static void makeChannelDesc(struct cudaChannelFormatDesc *desc,
                             vgre::core::TextureElementType type,
                             size_t elementSize) {
     if (!desc) return;
-    std::memset(desc, 0, sizeof(*desc));
+    memset(desc, 0, sizeof(*desc));
     // Distribute all bits into the x channel (single-channel texture model).
     int bitsPerElement = static_cast<int>(elementSize * 8);
     desc->x = bitsPerElement;
@@ -130,7 +130,7 @@ cudaError_t cudaMemcpy3D(const struct cudaMemcpy3DParms *p) {
         const uint8_t *sSlice = static_cast<const uint8_t*>(srcPtr) + z * srcPitch * p->extent.height;
         uint8_t       *dSlice = static_cast<uint8_t*>(dstPtr)       + z * dstPitch * p->extent.height;
         for (size_t y = 0; y < p->extent.height; ++y) {
-            std::memcpy(dSlice + y * dstPitch, sSlice + y * srcPitch, rowBytes);
+            memcpy(dSlice + y * dstPitch, sSlice + y * srcPitch, rowBytes);
         }
     }
     {
@@ -284,7 +284,7 @@ cudaError_t cudaMemcpy2DToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
         const uint8_t *srcRow = static_cast<const uint8_t*>(src) + y * spitch + wOffset;
         uint8_t *dstRow = static_cast<uint8_t*>(arrayData) +
                           (hOffset + y) * dpitch + wOffset;
-        std::memcpy(dstRow, srcRow, width);
+        memcpy(dstRow, srcRow, width);
     }
     {
         double ms = std::chrono::duration<double, std::milli>(
@@ -318,7 +318,7 @@ cudaError_t cudaMemcpy2DFromArray(void *dst, size_t dpitch,
         const uint8_t *srcRow = static_cast<const uint8_t*>(arrayData) +
                                 (hOffset + y) * spitch + wOffset;
         uint8_t *dstRow = static_cast<uint8_t*>(dst) + y * dpitch;
-        std::memcpy(dstRow, srcRow, width);
+        memcpy(dstRow, srcRow, width);
     }
     {
         double ms = std::chrono::duration<double, std::milli>(

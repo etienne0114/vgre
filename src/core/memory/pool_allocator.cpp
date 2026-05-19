@@ -116,7 +116,7 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
     size_t alignedSz = (size + 63) & ~63;
     void *bigPtr = poolAlignedAlloc(alignedSz, 64);
     if (!bigPtr) return VGREResult::ERR_OUT_OF_MEMORY;
-    std::memset(bigPtr, 0, alignedSz);
+    memset(bigPtr, 0, alignedSz);
     usedMemory_.fetch_add(alignedSz, std::memory_order_relaxed);
     pool.oversizedAllocs[bigPtr] = alignedSz;
     outHandle = bigPtr;
@@ -174,7 +174,7 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
   void *blockPtr = pool.freeListHead;
   pool.freeListHead = *reinterpret_cast<void**>(blockPtr);
   
-  std::memset(blockPtr, 0, pool.blockSize);
+  memset(blockPtr, 0, pool.blockSize);
   outHandle = blockPtr;
   pool.liveSlabAllocs.insert(blockPtr);
   

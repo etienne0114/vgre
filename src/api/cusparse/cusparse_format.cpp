@@ -130,7 +130,7 @@ cusparseStatus_t cusparseSparseToDense(cusparseHandle_t /*h*/,
 
     // Zero the output
     size_t elem = (B.valueType == CUDA_R_64F) ? sizeof(double) : sizeof(float);
-    std::memset(B.values, 0, static_cast<size_t>(B.rows * B.cols) * elem);
+    memset(B.values, 0, static_cast<size_t>(B.rows * B.cols) * elem);
 
     for (int64_t r = 0; r < rows; ++r) {
         int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)     - base;

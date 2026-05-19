@@ -176,7 +176,7 @@ static void executeOpsInline(const std::vector<NativeGraphOperation> &ops,
         for (size_t h = 0; h < op.memsetHeight; ++h) {
           // Slice offset: d * (pitch * height); row offset: h * pitch.
           size_t sliceOff = d * op.memsetPitch * op.memsetHeight;
-          std::memset(base + sliceOff + h * op.memsetPitch,
+          memset(base + sliceOff + h * op.memsetPitch,
                       op.memsetValue, op.memsetWidth);
         }
       }
@@ -394,7 +394,7 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode> &nodes
                                  ai < node.capturedArgs.size(); ++ai) {
               if (irIt->second.argTypes[ai] == ArgType::POINTER) {
                 uint64_t raw = 0;
-                std::memcpy(&raw, node.capturedArgs[ai].data(), sizeof(uint64_t));
+                memcpy(&raw, node.capturedArgs[ai].data(), sizeof(uint64_t));
                 void *ptr = reinterpret_cast<void *>(raw);
                 if (memoryManager_ && memoryManager_->isValidHandle(ptr))
                   memBytes += memoryManager_->getAllocationSize(ptr);

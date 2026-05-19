@@ -87,7 +87,7 @@ static void test_pool_alloc_free() {
   ASSERT_NE(handle, nullptr, "handle should be non-null");
 
   // Write to the allocation to verify it's real memory
-  std::memset(handle, 0xAB, 1024);
+  memset(handle, 0xAB, 1024);
 
   // Verify first byte
   uint8_t *data = static_cast<uint8_t *>(handle);
@@ -157,7 +157,7 @@ static void test_pool_multiple_allocs() {
     ASSERT_NE(h, nullptr, "handle should be non-null");
 
     // Write unique pattern to verify isolation
-    std::memset(h, i + 1, 512);
+    memset(h, i + 1, 512);
     handles.push_back(h);
   }
 
@@ -227,7 +227,7 @@ static void test_pool_block_size() {
   ASSERT_NE(h, nullptr, "handle should be non-null");
 
   // We can write the full block size since it's rounded up
-  std::memset(h, 0, 64);
+  memset(h, 0, 64);
 
   r = mm.freeToPool(pool, h);
   ASSERT_EQ(r, VGREResult::SUCCESS, "free should succeed");

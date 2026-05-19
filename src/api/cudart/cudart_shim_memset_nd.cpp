@@ -3,7 +3,7 @@
  *
  * Implements cudaMemset2D, cudaMemset3D and their async variants.
  * All operations write to CPU-side "device" memory managed by MemoryManager,
- * so pitched memset is a row-by-row (and slice-by-slice) std::memset.
+ * so pitched memset is a row-by-row (and slice-by-slice) memset.
  *
  * cudaMemset2D(devPtr, pitch, value, width, height)
  *   - Writes `value` to `width` bytes per row, with rows spaced `pitch` bytes apart.
@@ -40,7 +40,7 @@ extern "C" cudaError_t cudaMemset2D(void *devPtr, size_t pitch,
     auto *base = static_cast<uint8_t *>(devPtr);
     const unsigned char fill = static_cast<unsigned char>(value);
     for (size_t row = 0; row < height; ++row)
-        std::memset(base + row * pitch, fill, width);
+        memset(base + row * pitch, fill, width);
 
     VGRE_LOG_DEBUG("CUDART", "cudaMemset2D: " + std::to_string(width) +
                    "x" + std::to_string(height) + " pitch=" + std::to_string(pitch));
@@ -62,7 +62,7 @@ extern "C" cudaError_t cudaMemset2DAsync(void *devPtr, size_t pitch,
         auto *base = static_cast<uint8_t *>(devPtr);
         const unsigned char fill = static_cast<unsigned char>(value);
         for (size_t row = 0; row < height; ++row)
-            std::memset(base + row * pitch, fill, width);
+            memset(base + row * pitch, fill, width);
     };
 
     auto &sched = vgre::core::Scheduler::instance();
@@ -99,7 +99,7 @@ extern "C" cudaError_t cudaMemset3D(struct cudaPitchedPtr pitchedDevPtr,
     for (size_t d = 0; d < extent.depth; ++d) {
         uint8_t *sliceBase = base + d * sliceStride;
         for (size_t h = 0; h < extent.height; ++h)
-            std::memset(sliceBase + h * pitch, fill, extent.width);
+            memset(sliceBase + h * pitch, fill, extent.width);
     }
 
     VGRE_LOG_DEBUG("CUDART",
@@ -130,7 +130,7 @@ extern "C" cudaError_t cudaMemset3DAsync(struct cudaPitchedPtr pitchedDevPtr,
         for (size_t d = 0; d < extent.depth; ++d) {
             uint8_t *sliceBase = base + d * sliceStride;
             for (size_t h = 0; h < extent.height; ++h)
-                std::memset(sliceBase + h * pitch, fill, extent.width);
+                memset(sliceBase + h * pitch, fill, extent.width);
         }
     };
 

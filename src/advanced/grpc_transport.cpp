@@ -137,7 +137,7 @@ public:
         case vgre::cluster::HOST_TO_DEVICE: {
             void* dst = doResolve(req->dst_ptr());
             if (dst && req->host_data().size() >= req->size_bytes())
-                std::memcpy(dst, req->host_data().data(), req->size_bytes());
+                memcpy(dst, req->host_data().data(), req->size_bytes());
             else st = 1;
             break;
         }
@@ -150,7 +150,7 @@ public:
         case vgre::cluster::DEVICE_TO_DEVICE: {
             void* dst = doResolve(req->dst_ptr());
             void* src = doResolve(req->src_ptr());
-            if (dst && src) std::memcpy(dst, src, req->size_bytes());
+            if (dst && src) memcpy(dst, src, req->size_bytes());
             else st = 1;
             break;
         }
@@ -305,7 +305,7 @@ bool VGREGRPCClient::memcpyD2H(void* dst, uint64_t devPtr, uint64_t bytes) {
     auto st = reinterpret_cast<vgre::cluster::VGRECluster::Stub*>(stubPtr_)
                   ->CopyMemory(&ctx, req, &resp);
     if (!st.ok() || resp.status() != 0) return false;
-    std::memcpy(dst, resp.host_data().data(),
+    memcpy(dst, resp.host_data().data(),
                 std::min(bytes, static_cast<uint64_t>(resp.host_data().size())));
     return true;
 }

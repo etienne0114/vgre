@@ -76,7 +76,7 @@ int main() {
     {
         // Printable ASCII: valid
         const char valid_buf[] = "VGRE_DISCOVERY_PING:7777:SECURE";
-        assert(isValidDiscoveryPacket(valid_buf, static_cast<int>(std::strlen(valid_buf))));
+        assert(isValidDiscoveryPacket(valid_buf, static_cast<int>(strlen(valid_buf))));
 
         // Contains control characters: rejected
         unsigned char invalid_raw[] = {static_cast<unsigned char>('V'),

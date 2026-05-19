@@ -181,19 +181,19 @@ static void sha256CtrEncrypt(const uint8_t key[32], const uint8_t nonce[16],
     uint32_t counter = 0;
     while (offset < len) {
         uint8_t block[32 + 16 + 4];
-        std::memcpy(block, key, 32);
-        std::memcpy(block + 32, nonce, 16);
+        memcpy(block, key, 32);
+        memcpy(block + 32, nonce, 16);
         block[48] = (counter >> 24) & 0xff;
         block[49] = (counter >> 16) & 0xff;
         block[50] = (counter >>  8) & 0xff;
         block[51] =  counter        & 0xff;
         uint8_t ks[32];
         crypto::sha256(block, sizeof(block), ks);
-        std::memset(block, 0, sizeof(block));
+        memset(block, 0, sizeof(block));
         size_t n = std::min(len - offset, static_cast<size_t>(32));
         for (size_t i = 0; i < n; ++i)
             output[offset + i] = input[offset + i] ^ ks[i];
-        std::memset(ks, 0, sizeof(ks));
+        memset(ks, 0, sizeof(ks));
         offset += n;
         ++counter;
     }
@@ -230,7 +230,7 @@ std::array<uint8_t, 32> HardwareTokenManager::getMachineKey() {
         100000,
         key.data(), key.size());
 
-    std::memset(salt, 0, sizeof(salt));
+    memset(salt, 0, sizeof(salt));
     return key;
 }
 
@@ -246,9 +246,9 @@ std::string HardwareTokenManager::encryptToken(const std::string& plaintext) {
                      cipher.data(), plaintext.size());
 
     std::vector<uint8_t> macInput(sizeof(nonce) + cipher.size());
-    std::memcpy(macInput.data(), nonce, sizeof(nonce));
+    memcpy(macInput.data(), nonce, sizeof(nonce));
     if (!cipher.empty())
-        std::memcpy(macInput.data() + sizeof(nonce), cipher.data(), cipher.size());
+        memcpy(macInput.data() + sizeof(nonce), cipher.data(), cipher.size());
     uint8_t mac[32];
     crypto::hmac_sha256(key.data(), 32, macInput.data(), macInput.size(), mac);
 
@@ -273,9 +273,9 @@ std::string HardwareTokenManager::decryptToken(const std::string& ciphertext) {
     auto key = getMachineKey();
 
     std::vector<uint8_t> macInput(nonce.size() + cipher.size());
-    std::memcpy(macInput.data(), nonce.data(), nonce.size());
+    memcpy(macInput.data(), nonce.data(), nonce.size());
     if (!cipher.empty())
-        std::memcpy(macInput.data() + nonce.size(), cipher.data(), cipher.size());
+        memcpy(macInput.data() + nonce.size(), cipher.data(), cipher.size());
 
     uint8_t expectedMac[32];
     crypto::hmac_sha256(key.data(), 32, macInput.data(), macInput.size(), expectedMac);

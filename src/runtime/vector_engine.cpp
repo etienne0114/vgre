@@ -353,7 +353,7 @@ void VectorEngine::vectorFill(float* dst, float value, size_t n) {
 }
 
 void VectorEngine::vectorCopy(const float* src, float* dst, size_t n) {
-    std::memcpy(dst, src, n * sizeof(float));
+    memcpy(dst, src, n * sizeof(float));
 }
 
 // ── BF16 dot product ───────────────────────────────────────────────────────

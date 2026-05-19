@@ -61,7 +61,7 @@ template<int M, int N, int K, typename T, typename Layout>
 struct fragment<matrix_a, M, N, K, T, Layout> {
     static constexpr int kRows = M, kCols = K;
     float data[M * K];  // stored in row-major order, promoted to float32
-    fragment() { std::memset(data, 0, sizeof(data)); }
+    fragment() { memset(data, 0, sizeof(data)); }
 };
 
 // B-matrix fragment: K×N tile of T
@@ -69,7 +69,7 @@ template<int M, int N, int K, typename T, typename Layout>
 struct fragment<matrix_b, M, N, K, T, Layout> {
     static constexpr int kRows = K, kCols = N;
     float data[K * N];
-    fragment() { std::memset(data, 0, sizeof(data)); }
+    fragment() { memset(data, 0, sizeof(data)); }
 };
 
 // Accumulator fragment: M×N tile of float
@@ -77,7 +77,7 @@ template<int M, int N, int K, typename Layout>
 struct fragment<accumulator, M, N, K, float, Layout> {
     static constexpr int kRows = M, kCols = N;
     float data[M * N];
-    fragment() { std::memset(data, 0, sizeof(data)); }
+    fragment() { memset(data, 0, sizeof(data)); }
 };
 
 // ── fill_fragment ─────────────────────────────────────────────────────────────

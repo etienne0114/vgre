@@ -51,12 +51,12 @@ int main() {
         SessionInfo info = sm.getSecurityInfo();
 
         // cipher_name must be shorter than the field and null-terminated
-        size_t cipher_len = std::strlen(info.cipher_name);
+        size_t cipher_len = strlen(info.cipher_name);
         assert(cipher_len < sizeof(info.cipher_name));
         assert(info.cipher_name[cipher_len] == '\0');
 
         // key_fingerprint likewise
-        size_t key_len = std::strlen(info.key_fingerprint);
+        size_t key_len = strlen(info.key_fingerprint);
         assert(key_len < sizeof(info.key_fingerprint));
         assert(info.key_fingerprint[key_len] == '\0');
 
@@ -87,14 +87,14 @@ int main() {
         char cipher[64] = {};
         const char* long_src = "AES-256-CTR+HMAC-SHA256 [Build: Jan  1 2025 00:00:00]"
                                " extra-text-that-would-overflow-if-unchecked";
-        size_t src_len = std::strlen(long_src);
+        size_t src_len = strlen(long_src);
         size_t max_copy = std::min(src_len, sizeof(cipher) - 1);
-        std::strncpy(cipher, long_src, max_copy);
+        strncpy(cipher, long_src, max_copy);
         cipher[max_copy] = '\0';
 
         // Must be null-terminated and within bounds
-        assert(std::strlen(cipher) < sizeof(cipher));
-        assert(cipher[sizeof(cipher) - 1] == '\0' || cipher[std::strlen(cipher)] == '\0');
+        assert(strlen(cipher) < sizeof(cipher));
+        assert(cipher[sizeof(cipher) - 1] == '\0' || cipher[strlen(cipher)] == '\0');
 
         std::cout << "[PASS] safe_strncpy_truncation" << std::endl;
     }

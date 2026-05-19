@@ -296,7 +296,7 @@ void TCPClusterManager::flush_tx_queues(std::shared_ptr<ClientConnection> client
         
         // Trace disabled in production — uncomment for debugging only:
         // if (is_master_ && qItem.data.size() >= sizeof(VSBPHeader)) {
-        //     VSBPHeader h; std::memcpy(&h, qItem.data.data(), sizeof(VSBPHeader));
+        //     VSBPHeader h; memcpy(&h, qItem.data.data(), sizeof(VSBPHeader));
         //     VGRE_LOG_DEBUG("TCPCluster", "[TX] Type=" + std::to_string((int)h.type) + " Size=" + std::to_string(qItem.data.size()));
         // }
 

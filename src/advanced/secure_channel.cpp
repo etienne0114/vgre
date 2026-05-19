@@ -78,8 +78,8 @@ VGREResult SecureChannel::initializeFromSecret(
 
   // Combine nonces for salt: master_nonce || client_nonce
   uint8_t salt[crypto::kNonceLen * 2];
-  std::memcpy(salt, masterNonce, crypto::kNonceLen);
-  std::memcpy(salt + crypto::kNonceLen, clientNonce, crypto::kNonceLen);
+  memcpy(salt, masterNonce, crypto::kNonceLen);
+  memcpy(salt + crypto::kNonceLen, clientNonce, crypto::kNonceLen);
 
   // PBKDF2 iteration count: default 600k (NIST SP 800-132 2025 recommendation).
   // Operators can override via VGRE_PBKDF2_ITERATIONS for performance tuning.
@@ -110,7 +110,7 @@ VGREResult SecureChannel::initializeFromSecret(
           .count());
 
   sendSequence_ = 0;
-  std::memset(replayBitmap_, 0, sizeof(replayBitmap_));
+  memset(replayBitmap_, 0, sizeof(replayBitmap_));
   highestSeenSeq_ = 0;
   replayWindowSeeded_ = false;
   packetsSent_ = 0;
@@ -146,8 +146,8 @@ SecureChannel::rotateKey(const uint8_t nextNonce[crypto::kNonceLen]) {
   // Derive NewKey = HMAC(OldKey, "VGRE_ROTATE_v1" || nextNonce)
   const char *saltLabel = "VGRE_ROTATE_v1";
   std::vector<uint8_t> data;
-  data.reserve(std::strlen(saltLabel) + crypto::kNonceLen);
-  data.insert(data.end(), saltLabel, saltLabel + std::strlen(saltLabel));
+  data.reserve(strlen(saltLabel) + crypto::kNonceLen);
+  data.insert(data.end(), saltLabel, saltLabel + strlen(saltLabel));
   data.insert(data.end(), nextNonce, nextNonce + crypto::kNonceLen);
 
   uint8_t newKey[crypto::kHMACKeyLen];
@@ -155,7 +155,7 @@ SecureChannel::rotateKey(const uint8_t nextNonce[crypto::kNonceLen]) {
                       data.size(), newKey);
 
   // Update session key and fingerprint
-  std::memcpy(sessionKey_, newKey, crypto::kHMACKeyLen);
+  memcpy(sessionKey_, newKey, crypto::kHMACKeyLen);
   vgre_secure_zero(newKey, sizeof(newKey)); // erase transient key from stack
   crypto::sha256(sessionKey_, crypto::kHMACKeyLen, keyFingerprint_);
 
@@ -182,11 +182,11 @@ std::string SecureChannel::getKeyFingerprint() const {
 
 SessionInfo SecureChannel::getSessionInfo() const {
   SessionInfo info{};
-  std::strncpy(info.cipher_name, "VGRE-HMAC-SHA256-AES256-CTR",
+  strncpy(info.cipher_name, "VGRE-HMAC-SHA256-AES256-CTR",
                sizeof(info.cipher_name) - 1);
 
   std::string fp = getKeyFingerprint();
-  std::strncpy(info.key_fingerprint, fp.c_str(),
+  strncpy(info.key_fingerprint, fp.c_str(),
                sizeof(info.key_fingerprint) - 1);
 
   info.is_encrypted = initialized_.load();
@@ -214,16 +214,16 @@ void SecureChannel::aesCtr(const uint8_t *input, uint8_t *output, size_t len,
   // Derive per-session CTR nonce from the session key (deterministic, 12 bytes)
   static const uint8_t kNonceSuffix[] = "aes_nonce_v1";
   uint8_t nonceInput[crypto::kHMACKeyLen + 12];
-  std::memcpy(nonceInput, sessionKey_, crypto::kHMACKeyLen);
-  std::memcpy(nonceInput + crypto::kHMACKeyLen, kNonceSuffix, 12);
+  memcpy(nonceInput, sessionKey_, crypto::kHMACKeyLen);
+  memcpy(nonceInput + crypto::kHMACKeyLen, kNonceSuffix, 12);
 
   uint8_t nonce[crypto::kSHA256DigestLen];
   crypto::sha256(nonceInput, sizeof(nonceInput), nonce);
-  std::memset(nonceInput, 0, sizeof(nonceInput));
+  memset(nonceInput, 0, sizeof(nonceInput));
 
   // Use first 12 bytes of the hash as the CTR nonce; sequenceNum as counter
   crypto::aes256_ctr(sessionKey_, nonce, sequenceNum, input, output, len);
-  std::memset(nonce, 0, sizeof(nonce));
+  memset(nonce, 0, sizeof(nonce));
 }
 
 // ── Compute packet HMAC ──────────────────────────────────────────────────
@@ -388,9 +388,9 @@ VGREResult SecureChannel::sendSecure(vgre_socket_t fd, const void *data,
   // Two separate sends risk a partial-write scenario where the header lands
   // but the payload doesn't, leaving the receiver blocked in recvAll() forever.
   std::vector<uint8_t> wire(sizeof(SecurePacketHeader) + len);
-  std::memcpy(wire.data(), &hdr, sizeof(SecurePacketHeader));
+  memcpy(wire.data(), &hdr, sizeof(SecurePacketHeader));
   if (len > 0) {
-    std::memcpy(wire.data() + sizeof(SecurePacketHeader), encrypted.data(),
+    memcpy(wire.data() + sizeof(SecurePacketHeader), encrypted.data(),
                 len);
   }
   if (!sendAll(fd, wire.data(), wire.size())) {
@@ -497,7 +497,7 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
     if (!replayWindowSeeded_) {
       // First packet ever — bootstrap the 2048-bit window.
       highestSeenSeq_ = seq;
-      std::memset(replayBitmap_, 0, sizeof(replayBitmap_));
+      memset(replayBitmap_, 0, sizeof(replayBitmap_));
       replayBitmap_[0] = 1ULL; // bit 0 = offset 0 from highestSeenSeq_
       replayWindowSeeded_ = true;
     } else if (seq > highestSeenSeq_) {
@@ -505,7 +505,7 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
 
       if (advance >= kReplayWindowBits) {
         // The new packet is far ahead — entire window is stale, reset it.
-        std::memset(replayBitmap_, 0, sizeof(replayBitmap_));
+        memset(replayBitmap_, 0, sizeof(replayBitmap_));
       } else {
         // Left-shift the 2048-bit bitmap by 'advance' bits.
         // Words are in little-endian order: replayBitmap_[0] is the most-recent
@@ -523,7 +523,7 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
               tmp[i] |= replayBitmap_[src - 1] >> (64 - bs);
           }
         }
-        std::memcpy(replayBitmap_, tmp, sizeof(replayBitmap_));
+        memcpy(replayBitmap_, tmp, sizeof(replayBitmap_));
       }
 
       highestSeenSeq_ = seq;

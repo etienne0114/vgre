@@ -300,7 +300,7 @@ public:
         ptr = std::malloc(large_size);
         if (ptr) {
             // If allocation succeeds, test that we can use it
-            std::memset(ptr, 0, 4096); // Just touch the first page
+            memset(ptr, 0, 4096); // Just touch the first page
             std::free(ptr);
             std::cout << "INFO: Large allocation (1GB) succeeded" << std::endl;
         } else {

@@ -75,7 +75,7 @@ static void flushRecords() {
     size_t written = 0;
     for (auto& rec : snap) {
         if (written + sizeof(CUpti_ActivityKernel5) > size) break;
-        std::memcpy(buf + written, &rec.kernel, sizeof(CUpti_ActivityKernel5));
+        memcpy(buf + written, &rec.kernel, sizeof(CUpti_ActivityKernel5));
         written += sizeof(CUpti_ActivityKernel5);
     }
     g_bufComp(nullptr, 0, buf, size, written);

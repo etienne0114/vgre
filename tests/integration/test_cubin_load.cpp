@@ -64,14 +64,14 @@ void test_cubin_loading() {
   size_t shstr_off = 1024;
   static const char shstr_names[] = "\0.shstrtab\0.nv_ptx\0.symtab\0.strtab\0";
   constexpr size_t shstr_size = sizeof(shstr_names);
-  std::memcpy(buffer.data() + shstr_off, shstr_names, shstr_size);
+  memcpy(buffer.data() + shstr_off, shstr_names, shstr_size);
   sh[1].name = 1; sh[1].type = 3; sh[1].offset = shstr_off; sh[1].size = shstr_size;
 
   // Section 2: .nv_ptx
   size_t ptx_off = 2048;
   const char* ptx_src = ".version 7.0\n.target sm_75\n.global .b32 my_global[10];\n";
-  std::memcpy(buffer.data() + ptx_off, ptx_src, std::strlen(ptx_src) + 1);
-  sh[2].name = 11; sh[2].type = 1; sh[2].offset = ptx_off; sh[2].size = std::strlen(ptx_src) + 1;
+  memcpy(buffer.data() + ptx_off, ptx_src, strlen(ptx_src) + 1);
+  sh[2].name = 11; sh[2].type = 1; sh[2].offset = ptx_off; sh[2].size = strlen(ptx_src) + 1;
 
   // Section 3: .symtab
   size_t sym_off = 3072;
@@ -83,7 +83,7 @@ void test_cubin_loading() {
   // Section 4: .strtab
   size_t str_off = 3500;
   const char* sym_names = "\0my_global\0";
-  std::memcpy(buffer.data() + str_off, sym_names, 12);
+  memcpy(buffer.data() + str_off, sym_names, 12);
   sh[4].name = 27; sh[4].type = 3; sh[4].offset = str_off; sh[4].size = 12;
 
   // Register the module

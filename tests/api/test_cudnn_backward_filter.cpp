@@ -70,7 +70,7 @@ static void refConvBackwardFilter(
 {
     int outH = (H + 2*pad_h - R)/str_h + 1;
     int outW = (W + 2*pad_w - S)/str_w + 1;
-    std::memset(dw, 0, K*C*R*S*sizeof(float));
+    memset(dw, 0, K*C*R*S*sizeof(float));
     for (int n = 0; n < N; ++n)
     for (int k = 0; k < K; ++k)
     for (int c = 0; c < C; ++c)

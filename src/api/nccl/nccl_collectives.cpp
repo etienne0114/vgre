@@ -29,7 +29,7 @@ ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
         auto& tcm = vgre::advanced::TCPClusterManager::instance();
         // Copy input to output buffer (TCPCluster allReduce operates in-place)
         size_t bytes = count * nccl_elem_size(datatype);
-        std::memcpy(recvbuff, sendbuff, bytes);
+        memcpy(recvbuff, sendbuff, bytes);
         int argtype = nccl_datatype_to_argtype(datatype);
         vgre::advanced::ReductionOp redOp = nccl_op_to_tcpcluster(op);
         vgre::VGREResult r = tcm.allReduce(recvbuff, count, argtype, redOp);
@@ -64,7 +64,7 @@ ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
     if (st.arrived_phase0 == st.nranks) {
         // Root performs the reduction
         st.result_buf.resize(total);
-        std::memcpy(st.result_buf.data(), st.sendbufs[0], total);
+        memcpy(st.result_buf.data(), st.sendbufs[0], total);
         for (int r = 1; r < st.nranks; ++r)
             apply_reduce(st.result_buf.data(), st.sendbufs[r], count, datatype, op);
         if (op == ncclAvg) scale_avg(st.result_buf.data(), count, datatype, st.nranks);
@@ -78,7 +78,7 @@ ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
     }
 
     // Phase 1: copy result out
-    std::memcpy(recvbuff, st.result_buf.data(), total);
+    memcpy(recvbuff, st.result_buf.data(), total);
     st.arrived_phase1++;
 
     if (st.arrived_phase1 == st.nranks) {
@@ -150,7 +150,7 @@ static ncclResult_t tree_allreduce(const void* sendbuff, void* recvbuff,
 
     // Build per-rank scratch buffer (stack-allocated for small tensors).
     std::vector<uint8_t> myBuf(total);
-    std::memcpy(myBuf.data(), sendbuff, total);
+    memcpy(myBuf.data(), sendbuff, total);
 
     int step = 1;
     while (step < nranks) {
@@ -170,7 +170,7 @@ static ncclResult_t tree_allreduce(const void* sendbuff, void* recvbuff,
                 const void* childBuf = st.sendbufs[r + step];
                 if (r == 0) {
                     // r=0 reduces into result_buf directly
-                    std::memcpy(st.result_buf.data(), st.sendbufs[0], total);
+                    memcpy(st.result_buf.data(), st.sendbufs[0], total);
                     apply_reduce(st.result_buf.data(), childBuf, count, datatype, op);
                     // push the result back into sendbufs[0] so next round reads it
                     st.sendbufs[0] = st.result_buf.data();
@@ -179,7 +179,7 @@ static ncclResult_t tree_allreduce(const void* sendbuff, void* recvbuff,
                     // We can't update myBuf here (it belongs to another thread),
                     // so we use a temporary stored in gather_slots[r].
                     st.gather_slots[r].resize(total);
-                    std::memcpy(st.gather_slots[r].data(), st.sendbufs[r], total);
+                    memcpy(st.gather_slots[r].data(), st.sendbufs[r], total);
                     apply_reduce(st.gather_slots[r].data(), childBuf, count, datatype, op);
                     st.sendbufs[r] = st.gather_slots[r].data();
                 }
@@ -198,7 +198,7 @@ static ncclResult_t tree_allreduce(const void* sendbuff, void* recvbuff,
             // to either result_buf (rank 0) or gather_slots[rank].
             // We already hold the lock; read after the barrier above.
             if (st.sendbufs[rank] != myBuf.data()) {
-                std::memcpy(myBuf.data(), st.sendbufs[rank], total);
+                memcpy(myBuf.data(), st.sendbufs[rank], total);
             }
         }
         step <<= 1;
@@ -221,7 +221,7 @@ static ncclResult_t tree_allreduce(const void* sendbuff, void* recvbuff,
     }
 
     // ── Broadcast phase: all ranks copy from result_buf ────────────────
-    std::memcpy(recvbuff, st.result_buf.data(), total);
+    memcpy(recvbuff, st.result_buf.data(), total);
 
     {
         std::unique_lock<std::mutex> lk(st.mu);
@@ -278,7 +278,7 @@ static ncclResult_t ring_allreduce(const void* sendbuff, void* recvbuff,
             if (start >= count) break;
             size_t cBytes = (end - start) * elem_sz;
             // Initialize chunk from rank 0
-            std::memcpy(st.result_buf.data() + start * elem_sz,
+            memcpy(st.result_buf.data() + start * elem_sz,
                         static_cast<const uint8_t*>(st.sendbufs[0]) + start * elem_sz,
                         cBytes);
             // Reduce remaining ranks into this chunk
@@ -301,7 +301,7 @@ static ncclResult_t ring_allreduce(const void* sendbuff, void* recvbuff,
     }
 
     // All-gather phase: every rank copies the full result
-    std::memcpy(recvbuff, st.result_buf.data(), total);
+    memcpy(recvbuff, st.result_buf.data(), total);
     st.arrived_phase1++;
     if (st.arrived_phase1 == nranks) {
         st.arrived_phase1 = 0;
@@ -328,7 +328,7 @@ ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count,
         st.root_sendbuf = sendbuff;
         st.root_rank    = root;
         st.result_buf.resize(total);
-        std::memcpy(st.result_buf.data(), sendbuff, total);
+        memcpy(st.result_buf.data(), sendbuff, total);
         st.arrived_phase0 = st.nranks;  // root signals "ready"
         st.generation++;
         st.cv.notify_all();
@@ -338,7 +338,7 @@ ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count,
         if (!ok) return ncclSystemError;
     }
 
-    std::memcpy(recvbuff, st.result_buf.data(), total);
+    memcpy(recvbuff, st.result_buf.data(), total);
     st.arrived_phase1++;
     if (st.arrived_phase1 == st.nranks) {
         st.arrived_phase0 = 0;
@@ -369,7 +369,7 @@ ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count,
 
     if (st.arrived_phase0 == st.nranks) {
         st.result_buf.resize(total);
-        std::memcpy(st.result_buf.data(), st.sendbufs[0], total);
+        memcpy(st.result_buf.data(), st.sendbufs[0], total);
         for (int r = 1; r < st.nranks; ++r)
             apply_reduce(st.result_buf.data(), st.sendbufs[r], count, datatype, op);
         if (op == ncclAvg) scale_avg(st.result_buf.data(), count, datatype, st.nranks);
@@ -383,7 +383,7 @@ ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count,
 
     // Only root copies the result
     if (c->rank == root && recvbuff)
-        std::memcpy(recvbuff, st.result_buf.data(), total);
+        memcpy(recvbuff, st.result_buf.data(), total);
 
     st.arrived_phase1++;
     if (st.arrived_phase1 == st.nranks) {
@@ -413,7 +413,7 @@ ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff,
 
     // Each rank deposits its slice into gather_slots
     st.gather_slots[c->rank].resize(slot_sz);
-    std::memcpy(st.gather_slots[c->rank].data(), sendbuff, slot_sz);
+    memcpy(st.gather_slots[c->rank].data(), sendbuff, slot_sz);
     st.gather_elem_count = sendcount;
     st.gather_dtype      = datatype;
     st.arrived_phase0++;
@@ -423,7 +423,7 @@ ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff,
         const size_t total = st.nranks * slot_sz;
         st.result_buf.resize(total);
         for (int r = 0; r < st.nranks; ++r)
-            std::memcpy(st.result_buf.data() + r * slot_sz,
+            memcpy(st.result_buf.data() + r * slot_sz,
                         st.gather_slots[r].data(), slot_sz);
         st.arrived_phase0 = 0;
         st.generation++;
@@ -434,7 +434,7 @@ ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff,
     }
 
     // All ranks copy the full gathered buffer
-    std::memcpy(recvbuff, st.result_buf.data(), st.result_buf.size());
+    memcpy(recvbuff, st.result_buf.data(), st.result_buf.size());
 
     st.arrived_phase1++;
     if (st.arrived_phase1 == st.nranks) {
@@ -468,7 +468,7 @@ ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff,
 
     if (st.arrived_phase0 == st.nranks) {
         st.result_buf.resize(total);
-        std::memcpy(st.result_buf.data(), st.sendbufs[0], total);
+        memcpy(st.result_buf.data(), st.sendbufs[0], total);
         for (int r = 1; r < st.nranks; ++r)
             apply_reduce(st.result_buf.data(), st.sendbufs[r],
                          recvcount * st.nranks, datatype, op);
@@ -482,7 +482,7 @@ ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff,
     }
 
     // Each rank copies its own slice
-    std::memcpy(recvbuff,
+    memcpy(recvbuff,
                 st.result_buf.data() + c->rank * recv_sz,
                 recv_sz);
 

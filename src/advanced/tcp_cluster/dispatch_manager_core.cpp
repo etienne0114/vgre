@@ -27,7 +27,7 @@ void DispatchManager::broadcastKernelRegistration(uint64_t kernel_id, const std:
   KernelRegisterPacket kpkt{}; 
   kpkt.auth_token = parent_->auth_token_; 
   kpkt.kernel_id = kernel_id;
-  std::strncpy(kpkt.name, name.c_str(), sizeof(kpkt.name) - 1); 
+  strncpy(kpkt.name, name.c_str(), sizeof(kpkt.name) - 1); 
   kpkt.source_len = static_cast<uint32_t>(source.length());
 
   for (auto& client : parent_->clients_) {

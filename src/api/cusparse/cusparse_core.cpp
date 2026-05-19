@@ -46,10 +46,10 @@ static inline float bf162f(uint16_t h) {
     uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
         ((static_cast<uint32_t>((h >> 7) & 0xff) + (127 - 127)) << 23) |
         (static_cast<uint32_t>(h & 0x7f) << 16);
-    float f; std::memcpy(&f, &bits, 4); return f;
+    float f; memcpy(&f, &bits, 4); return f;
 }
 static inline uint16_t f2bf(float f) {
-    uint32_t bits; std::memcpy(&bits, &f, 4);
+    uint32_t bits; memcpy(&bits, &f, 4);
     uint16_t sign = (bits >> 16) & 0x8000;
     int exp = ((bits >> 23) & 0xff) - 127 + 127;
     if (exp <= 0) return sign;

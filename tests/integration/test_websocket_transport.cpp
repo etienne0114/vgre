@@ -50,7 +50,7 @@ static void testClientServerHandshake() {
         auto [data, len] = client->recv(5000);
         assert(data != nullptr);
         assert(len == sizeof(payload));
-        assert(std::memcmp(data.get(), payload, len) == 0);
+        assert(memcmp(data.get(), payload, len) == 0);
         std::cout << "  [Client] Received " << len << " bytes, matches sent" << std::endl;
 
         client->disconnect();
@@ -101,7 +101,7 @@ static void testFrameEncoding() {
             auto [data, len] = client->recv(5000);
             assert(data != nullptr);
             assert(len == size);
-            assert(std::memcmp(data.get(), payload.data(), size) == 0);
+            assert(memcmp(data.get(), payload.data(), size) == 0);
         }
         std::cout << "  [Client] All payload sizes verified (1..65536)" << std::endl;
         client->disconnect();

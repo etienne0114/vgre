@@ -121,7 +121,7 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pExec, cudaGraph_t graph,
             const char* msg = (r == cudaErrorInvalidValue)
                 ? "Graph instantiation failed: invalid node or dependency cycle"
                 : "Graph instantiation failed: internal error";
-            std::strncpy(pLog, msg, logSz - 1); pLog[logSz - 1] = '\0';
+            strncpy(pLog, msg, logSz - 1); pLog[logSz - 1] = '\0';
         }
     }
     return r;

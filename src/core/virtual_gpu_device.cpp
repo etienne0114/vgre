@@ -16,7 +16,7 @@
 #include <dirent.h>         // readdir — PCI device scan
 #endif
 
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
 #include <cpuid.h>
 #endif
 
@@ -110,7 +110,7 @@ static int readCPUMaxFrequencyKHz() {
 // ── Constructor / Destructor ───────────────────────────────────────────────
 VirtualGPUDevice::VirtualGPUDevice(DeviceId id) : id_(id) {
   props_ = DeviceProperties{};
-  std::strncpy(props_.name, "VGRE Virtual GPU", sizeof(props_.name) - 1);
+  strncpy(props_.name, "VGRE Virtual GPU", sizeof(props_.name) - 1);
   props_.totalGlobalMem = 4ULL * 1024 * 1024 * 1024;
   props_.sharedMemPerBlock = 48 * 1024;
   props_.maxThreadsPerBlock = 1024;
@@ -152,7 +152,7 @@ void VirtualGPUDevice::detectHardware() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   std::string cpuName = readCPUModelName();
   std::string deviceName = "VGRE Virtual GPU [" + cpuName + "]";
-  std::strncpy(props_.name, deviceName.c_str(), sizeof(props_.name) - 1);
+  strncpy(props_.name, deviceName.c_str(), sizeof(props_.name) - 1);
   props_.name[sizeof(props_.name) - 1] = '\0';
 
   props_.multiProcessorCount = getCPUCoreCount();

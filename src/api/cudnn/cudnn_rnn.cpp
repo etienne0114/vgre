@@ -198,8 +198,8 @@ static cudnnStatus_t rnn_forward(
     // Per-layer current hidden/cell states (carry across timesteps)
     std::vector<float> hprev((size_t)numL*B*H, 0.f);
     std::vector<float> cprev((size_t)numL*B*H, 0.f);  // LSTM only
-    if (hxf) std::memcpy(hprev.data(), hxf, (size_t)numL*B*H*sizeof(float));
-    if (isLSTM && cxf) std::memcpy(cprev.data(), cxf, (size_t)numL*B*H*sizeof(float));
+    if (hxf) memcpy(hprev.data(), hxf, (size_t)numL*B*H*sizeof(float));
+    if (isLSTM && cxf) memcpy(cprev.data(), cxf, (size_t)numL*B*H*sizeof(float));
 
     // Intermediate layer outputs (needed for multilayer forward + reserve Part A)
     // For layer l, timestep t: stored in Part A if rsv, else in tmp_inter.
@@ -227,25 +227,25 @@ static cudnnStatus_t rnn_forward(
 
             if (isLSTM) {
                 lstm_fwd(lw,B,H,li, x_t,hp,cp, h_t,ctmp.data(),fwd_out);
-                std::memcpy(cp, ctmp.data(), (size_t)B*H*sizeof(float));
+                memcpy(cp, ctmp.data(), (size_t)B*H*sizeof(float));
             } else if (isGRU) {
                 gru_fwd(lw,B,H,li, x_t,hp, h_t,fwd_out);
             } else {
                 rnn_fwd(lw,B,H,li,relu, x_t,hp,h_t);
             }
             // Update hprev for next timestep
-            std::memcpy(hp, h_t, (size_t)B*H*sizeof(float));
+            memcpy(hp, h_t, (size_t)B*H*sizeof(float));
         }
     }
 
     // Copy final layer output to y (when using reserve, inter_ptr(numL-1,t) is in Part A)
     if (rsv) {
         for (int t=0;t<T;++t)
-            std::memcpy(yf+(size_t)t*B*H, hAt(pa,numL-1,t,0,T,B,H), (size_t)B*H*sizeof(float));
+            memcpy(yf+(size_t)t*B*H, hAt(pa,numL-1,t,0,T,B,H), (size_t)B*H*sizeof(float));
     }
 
-    if (hyf) std::memcpy(hyf, hprev.data(), (size_t)numL*B*H*sizeof(float));
-    if (isLSTM && cyf) std::memcpy(cyf, cprev.data(), (size_t)numL*B*H*sizeof(float));
+    if (hyf) memcpy(hyf, hprev.data(), (size_t)numL*B*H*sizeof(float));
+    if (isLSTM && cyf) memcpy(cyf, cprev.data(), (size_t)numL*B*H*sizeof(float));
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -317,7 +317,7 @@ cudnnStatus_t cudnnRNNForwardTraining(
     auto* rd=(RNNDesc*)rnnDesc;
     auto* xt=(TensorDesc*)xDesc[0];
     int B=xt->n, I=xt->c*xt->h*xt->w;
-    if (rsv) std::memset(rsv,0,rsvSz);
+    if (rsv) memset(rsv,0,rsvSz);
     return rnn_forward(rd->mode,rd->numLayers,rd->hiddenSize,T,B,I,
         (const float*)w,(const float*)hx,(const float*)cx,
         (const float*)x,(float*)y,(float*)hy,(float*)cy,(float*)rsv);
@@ -363,12 +363,12 @@ cudnnStatus_t cudnnRNNBackwardData(
     float* pb=rB(rf,nL,T,B,H);
     float* pc=rC(rf,nL,T,B,H,fs);
 
-    std::memset(dxf,0,(size_t)T*B*I*sizeof(float));
+    memset(dxf,0,(size_t)T*B*I*sizeof(float));
 
     // Running gradients: dh[l][B×H], dc[l][B×H] (carry from t to t-1)
     std::vector<float> dh((size_t)nL*B*H,0.f), dc((size_t)nL*B*H,0.f);
-    if (dhyf) std::memcpy(dh.data(),dhyf,(size_t)nL*B*H*sizeof(float));
-    if (isLSTM&&dcyf) std::memcpy(dc.data(),dcyf,(size_t)nL*B*H*sizeof(float));
+    if (dhyf) memcpy(dh.data(),dhyf,(size_t)nL*B*H*sizeof(float));
+    if (isLSTM&&dcyf) memcpy(dc.data(),dcyf,(size_t)nL*B*H*sizeof(float));
 
     // Temp buffers per timestep
     std::vector<float> dh_new(B*H), dx_l(B*H);  // dx_l is input-grad for intermediate layers
@@ -400,7 +400,7 @@ cudnnStatus_t cudnnRNNBackwardData(
             std::fill(dh_new.begin(),dh_new.end(),0.f);
             float* dx_out=(l==0)?(dxf+(size_t)t*B*li):(dx_l.data());
             if (l>0) std::fill(dx_l.begin(),dx_l.end(),0.f);
-            else std::memset(dx_out,0,(size_t)B*li*sizeof(float));
+            else memset(dx_out,0,(size_t)B*li*sizeof(float));
 
             if (isLSTM) {
                 // Part C layout for LSTM: s=0→di,1→df,2→dg,3→do
@@ -494,7 +494,7 @@ cudnnStatus_t cudnnRNNBackwardData(
             }
 
             // Update dh_l with the gradient to h_{t-1} (carry to next t iteration)
-            std::memcpy(dh_l,dh_new.data(),(size_t)B*H*sizeof(float));
+            memcpy(dh_l,dh_new.data(),(size_t)B*H*sizeof(float));
 
             // Propagate dx from intermediate layer to layer below
             if (l>0) {
@@ -504,8 +504,8 @@ cudnnStatus_t cudnnRNNBackwardData(
         }
     }
 
-    if (dhxf) std::memcpy(dhxf,dh.data(),(size_t)nL*B*H*sizeof(float));
-    if (isLSTM&&dcxf) std::memcpy(dcxf,dc.data(),(size_t)nL*B*H*sizeof(float));
+    if (dhxf) memcpy(dhxf,dh.data(),(size_t)nL*B*H*sizeof(float));
+    if (isLSTM&&dcxf) memcpy(dcxf,dc.data(),(size_t)nL*B*H*sizeof(float));
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -541,7 +541,7 @@ cudnnStatus_t cudnnRNNBackwardWeights(
 
     // Zero dw
     { size_t tot=lpc(mode,H,I); for(int l=1;l<nL;++l) tot+=lpc(mode,H,H);
-      std::memset(dwf,0,tot*sizeof(float)); }
+      memset(dwf,0,tot*sizeof(float)); }
 
     for (int l=0;l<nL;++l) {
         int li=(l==0)?I:H;

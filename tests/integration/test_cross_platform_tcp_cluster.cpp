@@ -65,7 +65,7 @@ static void test_packet_round_trip() {
     assert(hdr.payloadSize == sizeof(RemoteCommandPacket));
 
     RemoteCommandPacket decoded{};
-    std::memcpy(&decoded, wire.data() + sizeof(VSBPHeader), sizeof(decoded));
+    memcpy(&decoded, wire.data() + sizeof(VSBPHeader), sizeof(decoded));
     assert(decoded.auth_token  == cmd.auth_token);
     assert(decoded.kernel_id   == cmd.kernel_id);
     assert(decoded.grid_dim[0] == cmd.grid_dim[0]);

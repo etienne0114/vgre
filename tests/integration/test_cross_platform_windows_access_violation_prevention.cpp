@@ -204,7 +204,7 @@ public:
             }
             
             // Test memory access without ACCESS_VIOLATION
-            std::memset(aligned_ptr, 0xAB, test.actual_size);
+            memset(aligned_ptr, 0xAB, test.actual_size);
             
             // Verify pattern
             uint8_t* bytes = static_cast<uint8_t*>(aligned_ptr);
@@ -320,10 +320,10 @@ public:
         const char* test_string = "This is a test string that should not cause buffer overflow";
         
         // Use safe string functions
-        std::strncpy(safe_buffer, test_string, sizeof(safe_buffer) - 1);
+        strncpy(safe_buffer, test_string, sizeof(safe_buffer) - 1);
         safe_buffer[sizeof(safe_buffer) - 1] = '\0';
         
-        if (std::strlen(safe_buffer) >= sizeof(safe_buffer)) {
+        if (strlen(safe_buffer) >= sizeof(safe_buffer)) {
             std::cout << "FAIL: String buffer overflow not prevented" << std::endl;
             all_passed = false;
         }
@@ -364,7 +364,7 @@ public:
             }
             
             // Test memory access (should not cause ACCESS_VIOLATION)
-            std::memset(aligned_ptr, 0xCC, 1024);
+            memset(aligned_ptr, 0xCC, 1024);
             
             std::free(aligned_ptr);
         }
@@ -420,8 +420,8 @@ public:
         SecureHandshakePacket handshake{};
         
         // Initialize with test data
-        std::memset(handshake.nonce, 0xAA, sizeof(handshake.nonce));
-        std::memset(handshake.key_verification, 0xBB, sizeof(handshake.key_verification));
+        memset(handshake.nonce, 0xAA, sizeof(handshake.nonce));
+        memset(handshake.key_verification, 0xBB, sizeof(handshake.key_verification));
         
         // Test packet size consistency
         if (sizeof(handshake) != crypto::kNonceLen + crypto::kSHA256DigestLen) {

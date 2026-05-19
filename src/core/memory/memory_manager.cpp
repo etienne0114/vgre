@@ -238,7 +238,6 @@ LONG
         }
       }
     }
-  }
   return EXCEPTION_CONTINUE_SEARCH;
 }
 #else
@@ -368,7 +367,7 @@ bool MemoryManager::registerManagedRegion(void *ptr, size_t size, bool hostAcces
   region.pageSize = pageSize;
   region.pageCount = (size + pageSize - 1) / pageSize;
   region.dirtyPages = new uint8_t[region.pageCount];
-  std::memset(region.dirtyPages, 0, region.pageCount);
+  memset(region.dirtyPages, 0, region.pageCount);
   
   masterRegions_.push_back(region);
   
@@ -476,7 +475,7 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
     return VGREResult::ERR_OUT_OF_MEMORY;
   }
 
-  std::memset(ptr, 0, alignedSize);
+  memset(ptr, 0, alignedSize);
 
   Allocation alloc;
   alloc.ptr = ptr;
@@ -621,7 +620,7 @@ void *MemoryManager::getPointer(MemoryHandle handle) const {
 
 void MemoryManager::getPageResidency(uint8_t outMap[1024]) const {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
-  std::memset(outMap, 0, 1024);
+  memset(outMap, 0, 1024);
 
   if (poolSize_ == 0) return;
 
@@ -703,12 +702,12 @@ void MemoryManager::calibrateBandwidth() {
   auto runTest = [&](void* dst, void* src, size_t size, int iterations) {
     // Warmup
     for (int i = 0; i < 5; ++i) {
-      std::memcpy(dst, src, size);
+      memcpy(dst, src, size);
     }
     
     auto start = std::chrono::steady_clock::now();
     for (int i = 0; i < iterations; ++i) {
-      std::memcpy(dst, src, size);
+      memcpy(dst, src, size);
     }
     auto end = std::chrono::steady_clock::now();
     
@@ -799,7 +798,7 @@ VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
   if (it == masterRegions_.end()) return VGREResult::ERR_INVALID_VALUE;
 
   if (it->dirtyPages) {
-    std::memset(it->dirtyPages, 0, it->pageCount);
+    memset(it->dirtyPages, 0, it->pageCount);
   }
 
   // Re-protect to PROT_READ to catch the next write, but ONLY for regions

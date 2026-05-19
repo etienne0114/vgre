@@ -106,13 +106,13 @@ cublasStatus_t cublasLtMatrixLayoutGetAttribute(cublasLtMatrixLayout_t matLayout
     const MatrixLayout &l = it->second;
     size_t sz = 0;
     switch (attr) {
-    case CUBLASLT_MATRIX_LAYOUT_TYPE:                sz = sizeof(l.type);        std::memcpy(buf, &l.type,        sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_ORDER:               sz = sizeof(l.order);       std::memcpy(buf, &l.order,       sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_ROWS:                sz = sizeof(l.rows);        std::memcpy(buf, &l.rows,        sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_COLS:                sz = sizeof(l.cols);        std::memcpy(buf, &l.cols,        sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_LD:                  sz = sizeof(l.ld);          std::memcpy(buf, &l.ld,          sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT:         sz = sizeof(l.batchCount);  std::memcpy(buf, &l.batchCount,  sz); break;
-    case CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET:sz = sizeof(l.batchStride); std::memcpy(buf, &l.batchStride, sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_TYPE:                sz = sizeof(l.type);        memcpy(buf, &l.type,        sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_ORDER:               sz = sizeof(l.order);       memcpy(buf, &l.order,       sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_ROWS:                sz = sizeof(l.rows);        memcpy(buf, &l.rows,        sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_COLS:                sz = sizeof(l.cols);        memcpy(buf, &l.cols,        sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_LD:                  sz = sizeof(l.ld);          memcpy(buf, &l.ld,          sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT:         sz = sizeof(l.batchCount);  memcpy(buf, &l.batchCount,  sz); break;
+    case CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET:sz = sizeof(l.batchStride); memcpy(buf, &l.batchStride, sz); break;
     default: return CUBLAS_STATUS_INVALID_VALUE;
     }
     if (sizeWritten) *sizeWritten = sz;
@@ -165,24 +165,24 @@ cublasStatus_t cublasLtMatmulDescSetAttribute(cublasLtMatmulDesc_t matmulDesc,
         if (sizeInBytes >= sizeof(int)) d.transB = *static_cast<const int*>(buf);
         break;
     case CUBLASLT_MATMUL_DESC_BIAS_POINTER:
-        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.biasPtr, buf, sizeof(void*));
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.biasPtr, buf, sizeof(void*));
         break;
     case CUBLASLT_MATMUL_DESC_SCALE_TYPE:
         if (sizeInBytes >= sizeof(cublasLtDatatype_t))
             d.scaleType = *static_cast<const cublasLtDatatype_t*>(buf);
         break;
     case CUBLASLT_MATMUL_DESC_A_SCALE_POINTER:
-        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.aScalePtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.aScalePtr, buf, sizeof(void*)); break;
     case CUBLASLT_MATMUL_DESC_B_SCALE_POINTER:
-        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.bScalePtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.bScalePtr, buf, sizeof(void*)); break;
     case CUBLASLT_MATMUL_DESC_C_SCALE_POINTER:
-        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.cScalePtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.cScalePtr, buf, sizeof(void*)); break;
     case CUBLASLT_MATMUL_DESC_D_SCALE_POINTER:
-        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.dScalePtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.dScalePtr, buf, sizeof(void*)); break;
     case CUBLASLT_MATMUL_DESC_AMAX_D:
-        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.amaxDPtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.amaxDPtr, buf, sizeof(void*)); break;
     case CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER:
-        if (sizeInBytes >= sizeof(void*)) std::memcpy(&d.epilogueAuxPtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.epilogueAuxPtr, buf, sizeof(void*)); break;
     case CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD:
         if (sizeInBytes >= sizeof(int64_t)) d.epilogueAuxLd = *static_cast<const int64_t*>(buf); break;
     case CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE:
@@ -205,12 +205,12 @@ cublasStatus_t cublasLtMatmulDescGetAttribute(cublasLtMatmulDesc_t matmulDesc,
     const MatmulDesc &d = it->second;
     size_t sz = 0;
     switch (attr) {
-    case CUBLASLT_MATMUL_DESC_EPILOGUE:     sz = sizeof(d.epilogue);    std::memcpy(buf, &d.epilogue,    sz); break;
-    case CUBLASLT_MATMUL_DESC_POINTER_MODE: sz = sizeof(d.pointerMode); std::memcpy(buf, &d.pointerMode, sz); break;
-    case CUBLASLT_MATMUL_DESC_TRANSA:       sz = sizeof(d.transA);      std::memcpy(buf, &d.transA,      sz); break;
-    case CUBLASLT_MATMUL_DESC_TRANSB:       sz = sizeof(d.transB);      std::memcpy(buf, &d.transB,      sz); break;
-    case CUBLASLT_MATMUL_DESC_BIAS_POINTER: sz = sizeof(d.biasPtr);     std::memcpy(buf, &d.biasPtr,     sz); break;
-    case CUBLASLT_MATMUL_DESC_SCALE_TYPE:   sz = sizeof(d.scaleType);   std::memcpy(buf, &d.scaleType,   sz); break;
+    case CUBLASLT_MATMUL_DESC_EPILOGUE:     sz = sizeof(d.epilogue);    memcpy(buf, &d.epilogue,    sz); break;
+    case CUBLASLT_MATMUL_DESC_POINTER_MODE: sz = sizeof(d.pointerMode); memcpy(buf, &d.pointerMode, sz); break;
+    case CUBLASLT_MATMUL_DESC_TRANSA:       sz = sizeof(d.transA);      memcpy(buf, &d.transA,      sz); break;
+    case CUBLASLT_MATMUL_DESC_TRANSB:       sz = sizeof(d.transB);      memcpy(buf, &d.transB,      sz); break;
+    case CUBLASLT_MATMUL_DESC_BIAS_POINTER: sz = sizeof(d.biasPtr);     memcpy(buf, &d.biasPtr,     sz); break;
+    case CUBLASLT_MATMUL_DESC_SCALE_TYPE:   sz = sizeof(d.scaleType);   memcpy(buf, &d.scaleType,   sz); break;
     default: return CUBLAS_STATUS_INVALID_VALUE;
     }
     if (sizeWritten) *sizeWritten = sz;

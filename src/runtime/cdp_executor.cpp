@@ -157,7 +157,7 @@ void vgre_cdp_launch_device(void* kernelFn, void* paramBuf,
             size_t argSize = ir->argSizes[argIdx];
             if (argSize == 0) argSize = sizeof(void*); // pointer arguments
             std::vector<uint8_t> blob(argSize);
-            std::memcpy(blob.data(), static_cast<const uint8_t*>(paramBuf) + offset, argSize);
+            memcpy(blob.data(), static_cast<const uint8_t*>(paramBuf) + offset, argSize);
             req.argBlobs.push_back(std::move(blob));
             offset += argSize;
         }

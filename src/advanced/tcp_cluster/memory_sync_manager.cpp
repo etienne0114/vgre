@@ -138,7 +138,7 @@ VGREResult MemorySyncManager::syncPointerFromWorker(
   if (client->is_local && client->shm_manager && client->shm_manager->getBasePtr()) {
     uint64_t offset = client->shm_offset;
     if (offset + size <= client->shm_manager->getSize()) {
-      std::memcpy(static_cast<uint8_t *>(client->shm_manager->getBasePtr()) + offset, ptr, size);
+      memcpy(static_cast<uint8_t *>(client->shm_manager->getBasePtr()) + offset, ptr, size);
       client->shm_offset += size;
       
       DataShmPacket p{handle, offset, size};
@@ -229,7 +229,7 @@ VGREResult MemorySyncManager::sendDeltaSyncSHM(
     if (parent_->send_packet(client->socket_fd, PacketType::DIRTY_RANGE, &rp, sizeof(rp), client->secure_channel.get()) != VGREResult::SUCCESS) {
       return VGREResult::ERR_IO;
     }
-    std::memcpy(static_cast<uint8_t *>(client->shm_manager->getBasePtr()) + cur, static_cast<uint8_t *>(ptr) + r.first, r.second);
+    memcpy(static_cast<uint8_t *>(client->shm_manager->getBasePtr()) + cur, static_cast<uint8_t *>(ptr) + r.first, r.second);
     cur += r.second;
   }
   
@@ -319,7 +319,7 @@ VGREResult MemorySyncManager::sendFullSyncSHM(
   
   uint64_t off = client->shm_offset; 
   client->shm_offset += size;
-  std::memcpy(static_cast<uint8_t *>(client->shm_manager->getBasePtr()) + off, ptr, size);
+  memcpy(static_cast<uint8_t *>(client->shm_manager->getBasePtr()) + off, ptr, size);
   
   DataShmPacket p{handle, off, size};
   return parent_->send_packet(client->socket_fd, PacketType::DATA_SHM, &p, sizeof(p), client->secure_channel.get());
