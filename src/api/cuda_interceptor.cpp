@@ -99,13 +99,13 @@ cudaError_t CUDAInterceptor::getDeviceProperties(cudaDeviceProp_t *prop,
     return convertResult(r);
   }
 
-  memset(prop, 0, sizeof(cudaDeviceProp_t));
+  ::memset(prop, 0, sizeof(cudaDeviceProp_t));
   std::snprintf(prop->name, sizeof(prop->name), "%s", dp.name);
   prop->totalGlobalMem = dp.totalGlobalMem;
   prop->sharedMemPerBlock = dp.sharedMemPerBlock;
   prop->maxThreadsPerBlock = dp.maxThreadsPerBlock;
-  memcpy(prop->maxThreadsDim, dp.maxThreadsDim, sizeof(dp.maxThreadsDim));
-  memcpy(prop->maxGridSize, dp.maxGridSize, sizeof(dp.maxGridSize));
+  ::memcpy(prop->maxThreadsDim, dp.maxThreadsDim, sizeof(dp.maxThreadsDim));
+  ::memcpy(prop->maxGridSize, dp.maxGridSize, sizeof(dp.maxGridSize));
   prop->warpSize = dp.warpSize;
   prop->multiProcessorCount = dp.multiProcessorCount;
   prop->major = dp.major;
