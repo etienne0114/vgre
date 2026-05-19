@@ -9,8 +9,22 @@
 
 #include "cpu_cuda_fp16.h"
 #include "vgre/runtime/vector_engine.h"  // SIMDCapabilities, fp32_to_bf16
+#include <atomic>
 #include <cstring>
 #include <cmath>
+
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
+
+// Portable popcount wrapper (MSVC lacks __builtin_popcount)
+inline int vgre_popcount(unsigned int x) {
+#ifdef _MSC_VER
+    return static_cast<int>(__popcnt(x));
+#else
+    return __builtin_popcount(x);
+#endif
+}
 
 // SIMD intrinsics for accelerated mma_sync paths
 #if defined(VGRE_HAS_AVX512) || defined(VGRE_HAS_AVX512F)
@@ -436,10 +450,10 @@ inline void vgre_mma_m8n8k128_b1_and(
     int c0, int c1)
 {
     int bits =
-        __builtin_popcount(a0 & b0) +
-        __builtin_popcount(a1 & b1) +
-        __builtin_popcount(a2 & b2) +
-        __builtin_popcount(a3 & b3);
+        vgre_popcount(a0 & b0) +
+        vgre_popcount(a1 & b1) +
+        vgre_popcount(a2 & b2) +
+        vgre_popcount(a3 & b3);
     d0 = c0 + bits;
     d1 = c1 + bits;
 }
@@ -453,10 +467,10 @@ inline void vgre_mma_m8n8k128_b1_xor(
     int c0, int c1)
 {
     int bits =
-        __builtin_popcount(a0 ^ b0) +
-        __builtin_popcount(a1 ^ b1) +
-        __builtin_popcount(a2 ^ b2) +
-        __builtin_popcount(a3 ^ b3);
+        vgre_popcount(a0 ^ b0) +
+        vgre_popcount(a1 ^ b1) +
+        vgre_popcount(a2 ^ b2) +
+        vgre_popcount(a3 ^ b3);
     d0 = c0 + bits;
     d1 = c1 + bits;
 }
@@ -760,59 +774,63 @@ inline void vgre_tma_load_5d(void* dst, const VgreTMADescriptor* desc,
 inline void vgre_cp_reduce_async_add_f32(float* dst, const float* src, unsigned count)
 {
     for (unsigned i = 0; i < count; ++i) {
-        unsigned expected = __atomic_load_n(
-            reinterpret_cast<unsigned*>(&dst[i]), __ATOMIC_SEQ_CST);
+        std::atomic<unsigned>* a =
+            reinterpret_cast<std::atomic<unsigned>*>(&dst[i]);
+        unsigned expected = a->load(std::memory_order_seq_cst);
         unsigned desired;
         do {
             float f = src[i] + *reinterpret_cast<const float*>(&expected);
             desired = *reinterpret_cast<const unsigned*>(&f);
-        } while (!__atomic_compare_exchange_n(
-            reinterpret_cast<unsigned*>(&dst[i]), &expected, desired,
-            false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+        } while (!a->compare_exchange_weak(
+            expected, desired,
+            std::memory_order_seq_cst, std::memory_order_seq_cst));
     }
 }
 inline void vgre_cp_reduce_async_add_f64(double* dst, const double* src, unsigned count)
 {
     for (unsigned i = 0; i < count; ++i) {
-        unsigned long long expected = __atomic_load_n(
-            reinterpret_cast<unsigned long long*>(&dst[i]), __ATOMIC_SEQ_CST);
+        std::atomic<unsigned long long>* a =
+            reinterpret_cast<std::atomic<unsigned long long>*>(&dst[i]);
+        unsigned long long expected = a->load(std::memory_order_seq_cst);
         unsigned long long desired;
         do {
             double f = src[i] + *reinterpret_cast<const double*>(&expected);
             desired = *reinterpret_cast<const unsigned long long*>(&f);
-        } while (!__atomic_compare_exchange_n(
-            reinterpret_cast<unsigned long long*>(&dst[i]), &expected, desired,
-            false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+        } while (!a->compare_exchange_weak(
+            expected, desired,
+            std::memory_order_seq_cst, std::memory_order_seq_cst));
     }
 }
 inline void vgre_cp_reduce_async_min_f32(float* dst, const float* src, unsigned count)
 {
     for (unsigned i = 0; i < count; ++i) {
-        unsigned expected = __atomic_load_n(
-            reinterpret_cast<unsigned*>(&dst[i]), __ATOMIC_SEQ_CST);
+        std::atomic<unsigned>* a =
+            reinterpret_cast<std::atomic<unsigned>*>(&dst[i]);
+        unsigned expected = a->load(std::memory_order_seq_cst);
         unsigned desired;
         do {
             float f = (src[i] < *reinterpret_cast<const float*>(&expected))
                       ? src[i] : *reinterpret_cast<const float*>(&expected);
             desired = *reinterpret_cast<const unsigned*>(&f);
-        } while (!__atomic_compare_exchange_n(
-            reinterpret_cast<unsigned*>(&dst[i]), &expected, desired,
-            false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+        } while (!a->compare_exchange_weak(
+            expected, desired,
+            std::memory_order_seq_cst, std::memory_order_seq_cst));
     }
 }
 inline void vgre_cp_reduce_async_max_f32(float* dst, const float* src, unsigned count)
 {
     for (unsigned i = 0; i < count; ++i) {
-        unsigned expected = __atomic_load_n(
-            reinterpret_cast<unsigned*>(&dst[i]), __ATOMIC_SEQ_CST);
+        std::atomic<unsigned>* a =
+            reinterpret_cast<std::atomic<unsigned>*>(&dst[i]);
+        unsigned expected = a->load(std::memory_order_seq_cst);
         unsigned desired;
         do {
             float f = (src[i] > *reinterpret_cast<const float*>(&expected))
                       ? src[i] : *reinterpret_cast<const float*>(&expected);
             desired = *reinterpret_cast<const unsigned*>(&f);
-        } while (!__atomic_compare_exchange_n(
-            reinterpret_cast<unsigned*>(&dst[i]), &expected, desired,
-            false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+        } while (!a->compare_exchange_weak(
+            expected, desired,
+            std::memory_order_seq_cst, std::memory_order_seq_cst));
     }
 }
 

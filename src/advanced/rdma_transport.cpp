@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <random>
 #include <thread>
+#include <immintrin.h>  // _mm_pause (x86 spin-wait hint)
 
 #ifdef VGRE_HAS_RDMA
 #include <infiniband/verbs.h>
@@ -381,7 +382,7 @@ size_t RDMAConnection::pollCompletion(int timeoutMs) {
         // loop is in progress, reducing pipeline pressure and power consumption.
         if (++spins < 1000) {
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
-            __builtin_ia32_pause();
+            _mm_pause();
 #elif defined(__aarch64__) || defined(_M_ARM64)
             asm volatile("yield" ::: "memory");
 #else

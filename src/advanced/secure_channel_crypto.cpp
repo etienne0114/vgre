@@ -618,10 +618,12 @@ namespace crypto {
 void aes256_ctr(const uint8_t key[32], const uint8_t nonce[12],
                 uint64_t initialCounter,
                 const uint8_t *input, uint8_t *output, size_t len) {
-#if defined(__AES__) && (defined(__x86_64__) || defined(_M_X64) || \
-                         defined(__i386__)  || defined(_M_IX86))
+#if defined(__AES__) && (defined(__GNUC__) || defined(__clang__)) && \
+    (defined(__x86_64__) || defined(_M_X64) || \
+     defined(__i386__)  || defined(_M_IX86))
     // Runtime CPU feature check prevents SIGILL when binary is built with
     // -maes on a system that then runs on a CPU without AES-NI support.
+    // __builtin_cpu_supports is GCC/Clang-only; MSVC falls through to software.
     if (__builtin_cpu_supports("aes")) {
         aes256_ctr_hw(key, nonce, initialCounter, input, output, len);
         return;
