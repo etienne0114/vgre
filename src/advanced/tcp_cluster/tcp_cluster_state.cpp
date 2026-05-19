@@ -21,10 +21,10 @@ void TCPClusterManager::syncToIPC() {
           if (!c || !c->active) continue;
           if (!c->capability_received && !c->is_local) continue;
           vgre_cluster_node_t node{};
-          std::strncpy(node.address, c->ip_address.c_str(), sizeof(node.address) - 1);
+          strncpy(node.address, c->ip_address.c_str(), sizeof(node.address) - 1);
           node.port = c->port; node.cpu_cores = c->cpu_cores; node.memory_bytes = c->cpu_memory;
           node.latency_ms = c->last_telemetry.avg_kernel_latency_ms; node.available = 1;
-          std::strncpy(node.igpu_name, c->igpu_name, sizeof(node.igpu_name) - 1);
+          strncpy(node.igpu_name, c->igpu_name, sizeof(node.igpu_name) - 1);
           ipcNodes.push_back(node);
       }
   }

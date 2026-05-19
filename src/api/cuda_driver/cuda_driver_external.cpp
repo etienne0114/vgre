@@ -59,7 +59,7 @@ CUresult cuImportExternalMemory(CUexternalMemory *extMemOut,
   size_t sz = static_cast<size_t>(memHandleDesc->size);
   void *ptr = std::malloc(sz);
   if (!ptr) return CUDA_ERROR_INVALID_VALUE;
-  std::memset(ptr, 0, sz);
+  memset(ptr, 0, sz);
 
   uint64_t id = g_cuNextExtMemId.fetch_add(1, std::memory_order_relaxed);
   {

@@ -45,7 +45,7 @@ public:
   explicit SharedMemory(size_t sizeBytes) : size_(sizeBytes), buffer_(nullptr) {
     if (sizeBytes > 0) {
       buffer_ = new uint8_t[sizeBytes];
-      std::memset(buffer_, 0, sizeBytes);
+      memset(buffer_, 0, sizeBytes);
     }
   }
 
@@ -87,7 +87,7 @@ public:
 
   void reset() {
     if (buffer_ && size_ > 0)
-      std::memset(buffer_, 0, size_);
+      memset(buffer_, 0, size_);
     conflicts_ = 0;
   }
 
@@ -290,14 +290,14 @@ inline float atomicAdd(float *addr, float val) {
   do {
     assumed = old_val;
     float newVal;
-    std::memcpy(&newVal, &assumed, sizeof(float));
+    memcpy(&newVal, &assumed, sizeof(float));
     newVal += val;
     uint32_t newBits;
-    std::memcpy(&newBits, &newVal, sizeof(uint32_t));
+    memcpy(&newBits, &newVal, sizeof(uint32_t));
     old_val = __sync_val_compare_and_swap(addr_as_uint, assumed, newBits);
   } while (assumed != old_val);
   float result;
-  std::memcpy(&result, &old_val, sizeof(float));
+  memcpy(&result, &old_val, sizeof(float));
   return result;
 }
 
@@ -310,14 +310,14 @@ inline double atomicAdd(double *addr, double val) {
   do {
     assumed = old_val;
     double newVal;
-    std::memcpy(&newVal, &assumed, sizeof(double));
+    memcpy(&newVal, &assumed, sizeof(double));
     newVal += val;
     uint64_t newBits;
-    std::memcpy(&newBits, &newVal, sizeof(uint64_t));
+    memcpy(&newBits, &newVal, sizeof(uint64_t));
     old_val = __sync_val_compare_and_swap(addr_as_uint, assumed, newBits);
   } while (assumed != old_val);
   double result;
-  std::memcpy(&result, &old_val, sizeof(double));
+  memcpy(&result, &old_val, sizeof(double));
   return result;
 }
 

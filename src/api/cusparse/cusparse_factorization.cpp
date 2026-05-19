@@ -271,14 +271,14 @@ static inline float h2f_sp(uint16_t h) {
         ((static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0u :
           (static_cast<uint32_t>((h >> 10) & 0x1f) + 112u)) << 23) |
         (static_cast<uint32_t>(h & 0x3ff) << 13);
-    float f; std::memcpy(&f, &bits, 4); return f;
+    float f; memcpy(&f, &bits, 4); return f;
 }
 static inline float bf2f_sp(uint16_t h) {
     uint32_t bits = static_cast<uint32_t>(h) << 16;
-    float f; std::memcpy(&f, &bits, 4); return f;
+    float f; memcpy(&f, &bits, 4); return f;
 }
 static inline uint16_t f2h_sp(float f) {
-    uint32_t bits; std::memcpy(&bits, &f, 4);
+    uint32_t bits; memcpy(&bits, &f, 4);
     uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
     int exp = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
     if (exp <= 0) return sign;
@@ -286,14 +286,14 @@ static inline uint16_t f2h_sp(float f) {
     return static_cast<uint16_t>(sign | (static_cast<uint16_t>(exp) << 10) | ((bits >> 13) & 0x3ffu));
 }
 static inline uint16_t f2bf_sp(float f) {
-    uint32_t bits; std::memcpy(&bits, &f, 4);
+    uint32_t bits; memcpy(&bits, &f, 4);
     return static_cast<uint16_t>(bits >> 16);
 }
 // Extract values from a CsrMat as float, handling float/FP16/BF16 inputs.
 static std::vector<float> widen_csr_values(const CsrMat &M) {
     std::vector<float> out(static_cast<size_t>(M.nnz));
     if (M.valueType == CUDA_R_32F) {
-        std::memcpy(out.data(), M.values, static_cast<size_t>(M.nnz) * sizeof(float));
+        memcpy(out.data(), M.values, static_cast<size_t>(M.nnz) * sizeof(float));
     } else if (M.valueType == CUDA_R_16F) {
         const uint16_t *h = static_cast<const uint16_t*>(M.values);
         for (int64_t i = 0; i < M.nnz; ++i) out[static_cast<size_t>(i)] = h2f_sp(h[i]);
@@ -546,9 +546,9 @@ cusparseStatus_t cusparseSpGEMM_copy(cusparseHandle_t /*h*/,
 
     // Write values
     if (computeType == CUDA_R_32F)
-        std::memcpy(C.values, st.cValF.data(), static_cast<size_t>(st.cNnz) * sizeof(float));
+        memcpy(C.values, st.cValF.data(), static_cast<size_t>(st.cNnz) * sizeof(float));
     else if (computeType == CUDA_R_64F)
-        std::memcpy(C.values, st.cValD.data(), static_cast<size_t>(st.cNnz) * sizeof(double));
+        memcpy(C.values, st.cValD.data(), static_cast<size_t>(st.cNnz) * sizeof(double));
     else if (computeType == CUDA_R_16F) {
         uint16_t *out = static_cast<uint16_t*>(C.values);
         for (int64_t k = 0; k < st.cNnz; ++k)

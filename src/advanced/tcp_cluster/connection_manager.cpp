@@ -193,7 +193,7 @@ VGREResult MemorySyncManager::initializeShmForClient(
   client->shm_offset = 0;
   
   ShmInitPacket sipkt{};
-  std::strncpy(sipkt.shm_name, shmName.c_str(), sizeof(sipkt.shm_name) - 1);
+  strncpy(sipkt.shm_name, shmName.c_str(), sizeof(sipkt.shm_name) - 1);
   sipkt.shm_name[sizeof(sipkt.shm_name) - 1] = '\0';
   sipkt.shm_size = shmSize;
   

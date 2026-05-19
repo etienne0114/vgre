@@ -215,7 +215,7 @@ CUresult cuDeviceGetUuid(unsigned char *uuid, CUdevice dev) {
       0x47, 0x50, 0x55, 0x2d, 0x56, 0x47, 0x52, 0x45,
       0x2d, 0x30, 0x30, 0x30
   };
-  std::memcpy(uuid, kVgreUuidPrefix, 12);
+  memcpy(uuid, kVgreUuidPrefix, 12);
   uuid[12] = 0x00; uuid[13] = 0x00;
   uuid[14] = 0x00; uuid[15] = static_cast<unsigned char>(dev);
   return CUDA_SUCCESS;

@@ -102,7 +102,7 @@ static void ref_rnn(int T, int B, int I, int H, const float* x, const float* hx,
 {
     const float* W_ih=w, *W_hh=w+H*I, *b=w+H*I+H*H;
     std::vector<float> hp(B*H,0.f);
-    if (hx) std::memcpy(hp.data(),hx,B*H*sizeof(float));
+    if (hx) memcpy(hp.data(),hx,B*H*sizeof(float));
     for (int t=0;t<T;++t) {
         const float* xt=x+t*B*I; float* yt=y+t*B*H;
         for (int n=0;n<B;++n)
@@ -112,7 +112,7 @@ static void ref_rnn(int T, int B, int I, int H, const float* x, const float* hx,
                 for(int k=0;k<H;++k) s+=W_hh[j*H+k]*hp[n*H+k];
                 yt[n*H+j]=tanhf(s);
             }
-        std::memcpy(hp.data(),yt,B*H*sizeof(float));
+        memcpy(hp.data(),yt,B*H*sizeof(float));
     }
 }
 
@@ -124,8 +124,8 @@ static void ref_lstm(int T, int B, int I, int H, const float* x, const float* hx
 {
     const float* W_ih=w, *W_hh=w+4*H*I, *b_ih=w+4*H*I+4*H*H, *b_hh=b_ih+4*H;
     std::vector<float> hp(B*H,0.f), cp(B*H,0.f);
-    if (hx) std::memcpy(hp.data(),hx,B*H*sizeof(float));
-    if (cx) std::memcpy(cp.data(),cx,B*H*sizeof(float));
+    if (hx) memcpy(hp.data(),hx,B*H*sizeof(float));
+    if (cx) memcpy(cp.data(),cx,B*H*sizeof(float));
     for (int t=0;t<T;++t) {
         const float* xt=x+t*B*I; float* yt=y+t*B*H;
         for (int n=0;n<B;++n)
@@ -151,9 +151,9 @@ static void ref_lstm(int T, int B, int I, int H, const float* x, const float* hx
                 yt[n*H+j]=ov*tanhf(cn);
                 cp[n*H+j]=cn;
             }
-        std::memcpy(hp.data(),yt,B*H*sizeof(float));
+        memcpy(hp.data(),yt,B*H*sizeof(float));
     }
-    if (cy_out) std::memcpy(cy_out,cp.data(),B*H*sizeof(float));
+    if (cy_out) memcpy(cy_out,cp.data(),B*H*sizeof(float));
 }
 
 // Reference GRU forward
@@ -164,7 +164,7 @@ static void ref_gru(int T, int B, int I, int H, const float* x, const float* hx,
 {
     const float* W_ih=w, *W_hh=w+3*H*I, *b_ih=w+3*H*I+3*H*H, *b_hh=b_ih+3*H;
     std::vector<float> hp(B*H,0.f);
-    if (hx) std::memcpy(hp.data(),hx,B*H*sizeof(float));
+    if (hx) memcpy(hp.data(),hx,B*H*sizeof(float));
     for (int t=0;t<T;++t) {
         const float* xt=x+t*B*I; float* yt=y+t*B*H;
         for (int n=0;n<B;++n)
@@ -185,7 +185,7 @@ static void ref_gru(int T, int B, int I, int H, const float* x, const float* hx,
                 float rv=ref_sig(sr), zv=ref_sig(sz), nv=tanhf(snx+rv*snh);
                 yt[n*H+j]=(1.f-zv)*nv+zv*hp[n*H+j];
             }
-        std::memcpy(hp.data(),yt,B*H*sizeof(float));
+        memcpy(hp.data(),yt,B*H*sizeof(float));
     }
 }
 

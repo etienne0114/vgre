@@ -90,7 +90,7 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
     }
     std::vector<uint8_t> buf(size, 0);
     if (size > 0 && args && args[i]) {
-      std::memcpy(buf.data(), args[i], size);
+      memcpy(buf.data(), args[i], size);
     } else if (size > 0) {
       return vgre::VGREResult::ERR_INVALID_VALUE;
     }
@@ -102,7 +102,7 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
     // of each 8-byte-aligned slot to detect embedded pointer fields.
     if (argTypes[i] == ArgType::POINTER && buf.size() >= sizeof(void *)) {
       void *p = nullptr;
-      std::memcpy(&p, buf.data(), sizeof(void *));
+      memcpy(&p, buf.data(), sizeof(void *));
       if (p != nullptr) {
         node.capturedWritePtrs.push_back(p);
         node.capturedReadPtrs.push_back(p);
@@ -115,7 +115,7 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
       static constexpr uintptr_t kPtrHi = 0x0000'7FFF'FFFF'FFFFull; // user space
       for (size_t off = 0; off + sizeof(void *) <= buf.size(); off += sizeof(void *)) {
         void *candidate = nullptr;
-        std::memcpy(&candidate, buf.data() + off, sizeof(void *));
+        memcpy(&candidate, buf.data() + off, sizeof(void *));
         uintptr_t addr = reinterpret_cast<uintptr_t>(candidate);
         if (addr >= kPtrLo && addr <= kPtrHi) {
           node.capturedReadPtrs.push_back(candidate);
@@ -309,7 +309,7 @@ vgre::VGREResult GraphManager::updateKernelNodeArgs(
 
     std::vector<uint8_t> buf(size, 0);
     if (size > 0 && args && args[i]) {
-      std::memcpy(buf.data(), args[i], size);
+      memcpy(buf.data(), args[i], size);
     } else if (size > 0) {
       return vgre::VGREResult::ERR_INVALID_VALUE;
     }

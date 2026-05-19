@@ -40,11 +40,11 @@ static void streamingMemcpy(void* dst, const void* src, size_t bytes) {
             _mm256_stream_si256(reinterpret_cast<__m256i*>(d + i), val);
         }
         if (i < bytes) {
-            std::memcpy(d + i, s + i, bytes - i);
+            memcpy(d + i, s + i, bytes - i);
         }
         _mm_sfence(); // Memory fence to ensure non-temporal stores are visible
     } else {
-        std::memcpy(dst, src, bytes);
+        memcpy(dst, src, bytes);
     }
 }
 

@@ -117,7 +117,7 @@ int MockSocketFactory::recv(vgre_socket_t fd, void* buf, size_t len, int flags) 
     
     auto& data = it->second.recv_queue.front();
     size_t copy_len = std::min(len, data.size());
-    std::memcpy(buf, data.data(), copy_len);
+    memcpy(buf, data.data(), copy_len);
     
     if (copy_len == data.size()) {
         it->second.recv_queue.pop();
@@ -414,7 +414,7 @@ int FakeSocketFactory::recv(vgre_socket_t fd, void* buf, size_t len, int flags) 
     
     auto& data = it->second.recv_queue.front();
     size_t copy_len = std::min(len, data.size());
-    std::memcpy(buf, data.data(), copy_len);
+    memcpy(buf, data.data(), copy_len);
     
     if (copy_len == data.size()) {
         it->second.recv_queue.pop();

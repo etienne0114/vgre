@@ -266,7 +266,7 @@ cl_int OpenCLAdapter::enqueueWriteBuffer(cl_command_queue queue, cl_mem buffer,
     void *base = mmLocal.getPointer(buffer);
     if (!base)
       throw std::runtime_error("Invalid device buffer in enqueueWriteBuffer");
-    std::memcpy(static_cast<char *>(base) + offset, ptr, size);
+    memcpy(static_cast<char *>(base) + offset, ptr, size);
   },
       priority);
   if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -311,7 +311,7 @@ cl_int OpenCLAdapter::enqueueReadBuffer(cl_command_queue queue, cl_mem buffer,
     void *base = mmLocal.getPointer(buffer);
     if (!base)
       throw std::runtime_error("Invalid device buffer in enqueueReadBuffer");
-    std::memcpy(ptr, static_cast<char *>(base) + offset, size);
+    memcpy(ptr, static_cast<char *>(base) + offset, size);
   },
       priority);
   if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -430,7 +430,7 @@ cl_int OpenCLAdapter::setKernelArg(cl_kernel_handle kernel, cl_uint argIndex,
   // dangling pointer access when the kernel is launched later.
   if (argValue && argSize > 0) {
     arg.ownedData.resize(argSize);
-    std::memcpy(arg.ownedData.data(), argValue, argSize);
+    memcpy(arg.ownedData.data(), argValue, argSize);
   }
 
   arg.type = it->second.expectedArgTypes[argIndex];
@@ -663,7 +663,7 @@ cl_int OpenCLAdapter::getEventProfilingInfo(cl_event event, cl_profiling_info pa
 
   if (paramValue) {
     if (paramValueSize < sizeof(cl_ulong)) return CL_INVALID_VALUE;
-    std::memcpy(paramValue, &val, sizeof(cl_ulong));
+    memcpy(paramValue, &val, sizeof(cl_ulong));
   }
   if (paramValueSizeRet) *paramValueSizeRet = sizeof(cl_ulong);
   return CL_SUCCESS;

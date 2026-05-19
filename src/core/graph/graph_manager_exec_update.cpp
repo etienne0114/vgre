@@ -66,11 +66,11 @@ VGREResult GraphManager::execKernelNodeSetParams(
 
         std::vector<uint8_t> buf(sz, 0);
         if (args && args[i] && sz > 0)
-            std::memcpy(buf.data(), args[i], sz);
+            memcpy(buf.data(), args[i], sz);
 
         if (argTypes[i] == ArgType::POINTER && buf.size() >= sizeof(void *)) {
             void *p = nullptr;
-            std::memcpy(&p, buf.data(), sizeof(void *));
+            memcpy(&p, buf.data(), sizeof(void *));
             if (p) {
                 n->capturedWritePtrs.push_back(p);
                 n->capturedReadPtrs.push_back(p);

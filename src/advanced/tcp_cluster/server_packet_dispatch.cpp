@@ -49,7 +49,7 @@ void TCPClusterManager::processServerPackets(
         break;
 
       VSBPHeader hdr;
-      std::memcpy(&hdr, client->rx_buffer.data(), sizeof(VSBPHeader));
+      memcpy(&hdr, client->rx_buffer.data(), sizeof(VSBPHeader));
 
       // Per-connection packet rate limiter (token bucket, 1-second window).
       // Rejects packets from peers that exceed kMaxPacketsPerSec to prevent
@@ -128,7 +128,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         vgre_telemetry_t tel;
-        std::memcpy(&tel, payload, sizeof(vgre_telemetry_t));
+        memcpy(&tel, payload, sizeof(vgre_telemetry_t));
         client->last_telemetry = tel;
         vgre::advanced::HybridComputeManager::instance()
             .updateRemoteNodeTelemetry(client->ip_address, tel);
@@ -140,7 +140,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         ResponsePacket resp;
-        std::memcpy(&resp, payload, sizeof(ResponsePacket));
+        memcpy(&resp, payload, sizeof(ResponsePacket));
         client->rx_buffer.erase(client->rx_buffer.begin(),
                                 client->rx_buffer.begin() + totalLen);
         VGRE_LOG_DEBUG("TCPCluster",
@@ -155,7 +155,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         DataHeaderPacket dpkt;
-        std::memcpy(&dpkt, payload, sizeof(DataHeaderPacket));
+        memcpy(&dpkt, payload, sizeof(DataHeaderPacket));
         client->rx_buffer.erase(client->rx_buffer.begin(),
                                 client->rx_buffer.begin() + totalLen);
         client->pending_target_ptr = dpkt.target_ptr;
@@ -169,7 +169,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         DataHeaderDirtyPacket dhpkt;
-        std::memcpy(&dhpkt, payload, sizeof(DataHeaderDirtyPacket));
+        memcpy(&dhpkt, payload, sizeof(DataHeaderDirtyPacket));
         client->rx_buffer.erase(client->rx_buffer.begin(),
                                 client->rx_buffer.begin() + totalLen);
         client->pending_target_ptr = dhpkt.target_ptr;
@@ -181,7 +181,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         DataShmDirtyPacket dspkt;
-        std::memcpy(&dspkt, payload, sizeof(DataShmDirtyPacket));
+        memcpy(&dspkt, payload, sizeof(DataShmDirtyPacket));
         client->rx_buffer.erase(client->rx_buffer.begin(),
                                 client->rx_buffer.begin() + totalLen);
         client->pending_target_ptr = dspkt.target_ptr;
@@ -194,7 +194,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         DataShmPacket dspkt;
-        std::memcpy(&dspkt, payload, sizeof(DataShmPacket));
+        memcpy(&dspkt, payload, sizeof(DataShmPacket));
         client->rx_buffer.erase(client->rx_buffer.begin(),
                                 client->rx_buffer.begin() + totalLen);
         if (client->is_local && client->shm_manager) {
@@ -217,7 +217,7 @@ void TCPClusterManager::processServerPackets(
                 core::RuntimeEngine::instance().getMemoryManager().getPointer(
                     reinterpret_cast<void *>(dspkt.target_ptr));
             if (ptr)
-              std::memcpy(ptr,
+              memcpy(ptr,
                           static_cast<uint8_t *>(shm_base) + dspkt.shm_offset,
                           dspkt.size);
           }
@@ -232,7 +232,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         DataHeaderRDMAPacket rdmaPkt;
-        std::memcpy(&rdmaPkt, payload, sizeof(DataHeaderRDMAPacket));
+        memcpy(&rdmaPkt, payload, sizeof(DataHeaderRDMAPacket));
         client->rx_buffer.erase(client->rx_buffer.begin(),
                                 client->rx_buffer.begin() + totalLen);
 
@@ -249,7 +249,7 @@ void TCPClusterManager::processServerPackets(
           void *local_ptr = mm.getPointer(handle);
           if (local_ptr) {
             // Copy this chunk to the correct byte offset inside the allocation.
-            std::memcpy(static_cast<uint8_t*>(local_ptr) + rdmaPkt.dst_offset,
+            memcpy(static_cast<uint8_t*>(local_ptr) + rdmaPkt.dst_offset,
                         client->rdma_conn->bounceBuf(),
                         rdmaPkt.chunk_size);
             // Acquire fence: ensures CPU reads NIC-written data, not stale cache
@@ -281,7 +281,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         CapabilityPacket cpkt;
-        std::memcpy(&cpkt, payload, sizeof(CapabilityPacket));
+        memcpy(&cpkt, payload, sizeof(CapabilityPacket));
         // B3: Force null-termination on all string fields.
         cpkt.igpu_name[sizeof(cpkt.igpu_name) - 1] = '\0';
         cpkt.gpu_name[sizeof(cpkt.gpu_name) - 1] = '\0';
@@ -350,7 +350,7 @@ void TCPClusterManager::processServerPackets(
           if (client->shm_manager->open(shmName, shmSize, true) ==
               VGREResult::SUCCESS) {
             ShmInitPacket sipkt{};
-            std::strncpy(sipkt.shm_name, shmName.c_str(),
+            strncpy(sipkt.shm_name, shmName.c_str(),
                          sizeof(sipkt.shm_name) - 1);
             sipkt.shm_size = shmSize;
             (void)send_packet_direct(client->socket_fd, PacketType::SHM_INIT,
@@ -410,7 +410,7 @@ void TCPClusterManager::processServerPackets(
           // Build probe buffer: [8-byte timestamp][kProbePayloadBytes zeros]
           std::vector<uint8_t> probe_buf(sizeof(uint64_t) + kProbePayloadBytes,
                                          0);
-          std::memcpy(probe_buf.data(), &now_ms, sizeof(uint64_t));
+          memcpy(probe_buf.data(), &now_ms, sizeof(uint64_t));
           client->bandwidth_probe_start = std::chrono::steady_clock::now();
           client->bandwidth_probe_in_flight = true;
           send_packet(client->socket_fd, PacketType::BANDWIDTH_PROBE,
@@ -423,7 +423,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         BandwidthAckPacket ack;
-        std::memcpy(&ack, payload, sizeof(BandwidthAckPacket));
+        memcpy(&ack, payload, sizeof(BandwidthAckPacket));
         client->rx_buffer.erase(client->rx_buffer.begin(),
                                 client->rx_buffer.begin() + totalLen);
         if (client->bandwidth_probe_in_flight) {
@@ -457,7 +457,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         PartitionResultPacket prpkt;
-        std::memcpy(&prpkt, payload, sizeof(PartitionResultPacket));
+        memcpy(&prpkt, payload, sizeof(PartitionResultPacket));
         client->rx_buffer.erase(client->rx_buffer.begin(),
                                 client->rx_buffer.begin() + totalLen);
         if (client->in_flight_kernels > 0)
@@ -471,7 +471,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         CreditReportPacket crpkt;
-        std::memcpy(&crpkt, payload, sizeof(CreditReportPacket));
+        memcpy(&crpkt, payload, sizeof(CreditReportPacket));
         client->rx_buffer.erase(client->rx_buffer.begin(),
                                 client->rx_buffer.begin() + totalLen);
         ResourceLedger::instance().recordCompute(
@@ -483,7 +483,7 @@ void TCPClusterManager::processServerPackets(
           break;
         }
         SecureHandshakePacket rpkt;
-        std::memcpy(&rpkt, payload, sizeof(SecureHandshakePacket));
+        memcpy(&rpkt, payload, sizeof(SecureHandshakePacket));
         client->rx_buffer.erase(client->rx_buffer.begin(),
                                 client->rx_buffer.begin() + totalLen);
         if (client->secure_channel)
@@ -507,7 +507,7 @@ void TCPClusterManager::processServerPackets(
         // MT.6: compute clock offset from NTP-style 3-timestamp exchange.
         if (hdr.payloadSize >= sizeof(ClockSyncReplyPayload)) {
           ClockSyncReplyPayload rpl;
-          std::memcpy(&rpl, payload, sizeof(rpl));
+          memcpy(&rpl, payload, sizeof(rpl));
           int64_t t4 = static_cast<int64_t>(
               std::chrono::duration_cast<std::chrono::microseconds>(
                   std::chrono::system_clock::now().time_since_epoch()).count());
@@ -533,14 +533,14 @@ void TCPClusterManager::processServerPackets(
           sizeof(VSBPHeader) + sizeof(DirtyRangePacket))
         break;
       VSBPHeader hdr;
-      std::memcpy(&hdr, client->rx_buffer.data(), sizeof(VSBPHeader));
+      memcpy(&hdr, client->rx_buffer.data(), sizeof(VSBPHeader));
       if (hdr.magic != VSBP_MAGIC) {
         client->rx_buffer.clear();
         client->receive_state = ReceiveState::IDLE;
         break;
       }
       DirtyRangePacket rpkt;
-      std::memcpy(&rpkt, client->rx_buffer.data() + sizeof(VSBPHeader),
+      memcpy(&rpkt, client->rx_buffer.data() + sizeof(VSBPHeader),
                   sizeof(DirtyRangePacket));
       client->rx_buffer.erase(client->rx_buffer.begin(),
                               client->rx_buffer.begin() + sizeof(VSBPHeader) +
@@ -554,14 +554,14 @@ void TCPClusterManager::processServerPackets(
           sizeof(VSBPHeader) + sizeof(DirtyRangePacket))
         break;
       VSBPHeader hdr;
-      std::memcpy(&hdr, client->rx_buffer.data(), sizeof(VSBPHeader));
+      memcpy(&hdr, client->rx_buffer.data(), sizeof(VSBPHeader));
       if (hdr.magic != VSBP_MAGIC) {
         client->rx_buffer.clear();
         client->receive_state = ReceiveState::IDLE;
         break;
       }
       DirtyRangePacket rpkt;
-      std::memcpy(&rpkt, client->rx_buffer.data() + sizeof(VSBPHeader),
+      memcpy(&rpkt, client->rx_buffer.data() + sizeof(VSBPHeader),
                   sizeof(DirtyRangePacket));
       client->rx_buffer.erase(client->rx_buffer.begin(),
                               client->rx_buffer.begin() + sizeof(VSBPHeader) +
@@ -586,7 +586,7 @@ void TCPClusterManager::processServerPackets(
               core::RuntimeEngine::instance().getMemoryManager().getPointer(
                   reinterpret_cast<void *>(client->pending_target_ptr));
           if (ptr)
-            std::memcpy(static_cast<uint8_t *>(ptr) + rpkt.offset,
+            memcpy(static_cast<uint8_t *>(ptr) + rpkt.offset,
                         static_cast<uint8_t *>(shm_base) +
                             client->pending_shm_offset,
                         rpkt.size);
@@ -600,7 +600,7 @@ void TCPClusterManager::processServerPackets(
       if (client->rx_buffer.size() < sizeof(VSBPHeader))
         break;
       VSBPHeader hdr;
-      std::memcpy(&hdr, client->rx_buffer.data(), sizeof(VSBPHeader));
+      memcpy(&hdr, client->rx_buffer.data(), sizeof(VSBPHeader));
       if (hdr.magic != VSBP_MAGIC) {
         client->rx_buffer.clear();
         client->receive_state = ReceiveState::IDLE;
@@ -614,7 +614,7 @@ void TCPClusterManager::processServerPackets(
             core::RuntimeEngine::instance().getMemoryManager().getPointer(
                 reinterpret_cast<void *>(client->pending_target_ptr));
         if (ptr)
-          std::memcpy(
+          memcpy(
               static_cast<uint8_t *>(ptr) + client->pending_range_offset,
               client->rx_buffer.data() + sizeof(VSBPHeader), hdr.payloadSize);
       }

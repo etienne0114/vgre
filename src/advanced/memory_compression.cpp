@@ -64,13 +64,13 @@ VGREResult MemoryCompression::compress(const void *src, size_t srcSize,
   hdr.payloadSize = payloadSize;
 
   dst.resize(sizeof(CompressionHeader) + static_cast<size_t>(payloadSize));
-  std::memcpy(dst.data(), &hdr, sizeof(CompressionHeader));
+  memcpy(dst.data(), &hdr, sizeof(CompressionHeader));
   if (payloadSize > 0) {
     if (useCompressed) {
-      std::memcpy(dst.data() + sizeof(CompressionHeader), compressed.data(),
+      memcpy(dst.data() + sizeof(CompressionHeader), compressed.data(),
                   static_cast<size_t>(payloadSize));
     } else if (srcSize > 0) {
-      std::memcpy(dst.data() + sizeof(CompressionHeader), src, srcSize);
+      memcpy(dst.data() + sizeof(CompressionHeader), src, srcSize);
     }
   }
 
@@ -107,7 +107,7 @@ VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
 
   if (srcSize >= sizeof(CompressionHeader)) {
     CompressionHeader hdr{};
-    std::memcpy(&hdr, src, sizeof(CompressionHeader));
+    memcpy(&hdr, src, sizeof(CompressionHeader));
     if (hdr.magic == kCompressionMagic && hdr.version == kCompressionVersion) {
       const char *payload =
           static_cast<const char *>(src) + sizeof(CompressionHeader);
@@ -135,7 +135,7 @@ VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
           return VGREResult::ERR_COMPRESSION;
         }
         if (originalSize > 0) {
-          std::memcpy(dst, payload, originalSize);
+          memcpy(dst, payload, originalSize);
         }
       }
       outActualSize = originalSize;
@@ -161,7 +161,7 @@ VGREResult MemoryCompression::decompress(const void *src, size_t srcSize,
     if (srcSize > dstCapacity) {
       return VGREResult::ERR_COMPRESSION;
     }
-    std::memcpy(dst, src, srcSize);
+    memcpy(dst, src, srcSize);
     decompressedSize = static_cast<int>(srcSize);
   }
   outActualSize = static_cast<size_t>(decompressedSize);

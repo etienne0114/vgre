@@ -7,7 +7,7 @@ extern "C" {
 
 CUresult cuMemsetD8(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
   if (!dstDevice || N == 0) return CUDA_ERROR_INVALID_VALUE;
-  std::memset(reinterpret_cast<void*>(dstDevice), static_cast<int>(uc), N);
+  memset(reinterpret_cast<void*>(dstDevice), static_cast<int>(uc), N);
   return CUDA_SUCCESS;
 }
 
@@ -30,7 +30,7 @@ CUresult cuMemsetD2D8(CUdeviceptr dstDevice, size_t dstPitch,
   if (!dstDevice || Width == 0 || Height == 0) return CUDA_ERROR_INVALID_VALUE;
   auto *row = reinterpret_cast<unsigned char*>(dstDevice);
   for (size_t y = 0; y < Height; ++y) {
-    std::memset(row + y * dstPitch, static_cast<int>(uc), Width);
+    memset(row + y * dstPitch, static_cast<int>(uc), Width);
   }
   return CUDA_SUCCESS;
 }

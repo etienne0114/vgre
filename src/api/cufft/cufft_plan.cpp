@@ -246,7 +246,7 @@ cufftResult_t cufftGetPlanIpcHandle(cufftHandle plan, vgre_cufft_ipc_handle_t *h
     handle->nz = p.nz;
     handle->batch = p.batch;
     handle->type = static_cast<int32_t>(p.type);
-    std::memset(handle->reserved, 0, sizeof(handle->reserved));
+    memset(handle->reserved, 0, sizeof(handle->reserved));
     return CUFFT_SUCCESS;
 }
 

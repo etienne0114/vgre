@@ -84,7 +84,7 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
     return VGRE_ERROR_INVALID_VALUE;
   if (int s = require_initialized_tel(); s != VGRE_SUCCESS)
     return s;
-  std::memset(telemetry, 0, sizeof(*telemetry));
+  memset(telemetry, 0, sizeof(*telemetry));
 
   auto &ae = vgre::advanced::AdaptiveExecutionEngine::instance();
   auto &mm = vgre::core::RuntimeEngine::instance().getMemoryManager();
@@ -286,13 +286,13 @@ int vgre_get_telemetry(vgre_telemetry_t *telemetry) {
       std::vector<vgre_cluster_node_t> to_sync;
       for (const auto &conn : connections) {
           vgre_cluster_node_t node{};
-          std::strncpy(node.address, conn.ip_address.c_str(), sizeof(node.address) - 1);
+          strncpy(node.address, conn.ip_address.c_str(), sizeof(node.address) - 1);
           node.port = conn.port;
           node.cpu_cores = conn.cpu_cores;
           node.memory_bytes = conn.cpu_memory;
           node.latency_ms = conn.last_telemetry.avg_kernel_latency_ms;
           node.available = conn.active ? 1 : 0;
-          std::strncpy(node.igpu_name, conn.igpu_name, sizeof(node.igpu_name) - 1);
+          strncpy(node.igpu_name, conn.igpu_name, sizeof(node.igpu_name) - 1);
           to_sync.push_back(node);
       }
       ipc.updateClusterNodes(to_sync);
@@ -344,7 +344,7 @@ int vgre_get_memory_info_json(char **out_json) {
   std::string s = ss.str();
   *out_json = (char *)std::malloc(s.size() + 1);
   if (!*out_json) return VGRE_ERROR_OUT_OF_MEMORY;
-  std::strcpy(*out_json, s.c_str());
+  strcpy(*out_json, s.c_str());
   return VGRE_SUCCESS;
 }
 
@@ -374,7 +374,7 @@ int vgre_get_logs(char ***buffer, int *count) {
     size_t len = line.size();
     lines[i] = static_cast<char *>(malloc(len + 1));
     if (lines[i]) {
-      std::memcpy(lines[i], line.c_str(), len + 1);
+      memcpy(lines[i], line.c_str(), len + 1);
     }
     if (!lines[i]) {
       for (int j = 0; j < i; ++j) {
@@ -444,7 +444,7 @@ int vgre_get_profiler_json(char **out_json, int top_n) {
   char *buf = static_cast<char *>(malloc(json.size() + 1));
   if (!buf)
     return VGRE_ERROR_OUT_OF_MEMORY;
-  std::memcpy(buf, json.c_str(), json.size() + 1);
+  memcpy(buf, json.c_str(), json.size() + 1);
   *out_json = buf;
   return VGRE_SUCCESS;
 }
@@ -474,7 +474,7 @@ int vgre_get_kernel_history_json(const char *kernel_name, char **out_json) {
   const std::string json = oss.str();
   char *buf = static_cast<char *>(malloc(json.size() + 1));
   if (!buf) return VGRE_ERROR_OUT_OF_MEMORY;
-  std::memcpy(buf, json.c_str(), json.size() + 1);
+  memcpy(buf, json.c_str(), json.size() + 1);
   *out_json = buf;
   return VGRE_SUCCESS;
 }
@@ -527,9 +527,9 @@ int vgre_cluster_get_security_info(vgre_security_info_t *info) {
   if (!info) return VGRE_ERROR_INVALID_VALUE;
 
   auto sinfo = vgre::advanced::TCPClusterManager::instance().getSecurityInfo();
-  std::strncpy(info->cipher_name, sinfo.cipher_name, sizeof(info->cipher_name) - 1);
+  strncpy(info->cipher_name, sinfo.cipher_name, sizeof(info->cipher_name) - 1);
   info->cipher_name[sizeof(info->cipher_name) - 1] = '\0';
-  std::strncpy(info->key_fingerprint, sinfo.key_fingerprint, sizeof(info->key_fingerprint) - 1);
+  strncpy(info->key_fingerprint, sinfo.key_fingerprint, sizeof(info->key_fingerprint) - 1);
   info->key_fingerprint[sizeof(info->key_fingerprint) - 1] = '\0';
   info->session_seconds = sinfo.session_seconds;
   info->is_encrypted = sinfo.is_encrypted ? 1 : 0;
@@ -555,7 +555,7 @@ int vgre_credits_get_balance(const char *address, vgre_credit_info_t *info) {
   vgre::VGREResult r = vgre::advanced::ResourceLedger::instance().getBalance(address, bal);
   if (r != vgre::VGREResult::SUCCESS) return to_status_tel(r);
 
-  std::strncpy(info->address, bal.address.c_str(), sizeof(info->address) - 1);
+  strncpy(info->address, bal.address.c_str(), sizeof(info->address) - 1);
   info->address[sizeof(info->address) - 1] = '\0'; // Ensure null termination
   info->total_credits = bal.total_credits;
   info->total_debits = bal.total_debits;
@@ -579,7 +579,7 @@ int vgre_credits_get_all(vgre_credit_info_t *nodes, int *count) {
 
   int to_fill = std::min(*count, total);
   for (int i = 0; i < to_fill; ++i) {
-    std::strncpy(nodes[i].address, balances[i].address.c_str(), sizeof(nodes[i].address) - 1);
+    strncpy(nodes[i].address, balances[i].address.c_str(), sizeof(nodes[i].address) - 1);
     nodes[i].address[sizeof(nodes[i].address) - 1] = '\0'; // Ensure null termination
     nodes[i].total_credits = balances[i].total_credits;
     nodes[i].total_debits = balances[i].total_debits;
@@ -690,7 +690,7 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
 
   for (int i = 0; i < copy_count; ++i) {
     const auto &conn = connections[i];
-    std::strncpy(nodes[i].address, conn.ip_address.c_str(), sizeof(nodes[i].address) - 1);
+    strncpy(nodes[i].address, conn.ip_address.c_str(), sizeof(nodes[i].address) - 1);
     nodes[i].port = conn.port;
     nodes[i].cpu_cores = conn.cpu_cores;
     nodes[i].memory_bytes = conn.cpu_memory;
@@ -705,7 +705,7 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
     } else {
         nodes[i].available = 0;
     }
-    std::strncpy(nodes[i].igpu_name, conn.igpu_name, sizeof(nodes[i].igpu_name) - 1);
+    strncpy(nodes[i].igpu_name, conn.igpu_name, sizeof(nodes[i].igpu_name) - 1);
 
     to_sync.push_back(nodes[i]);
   }

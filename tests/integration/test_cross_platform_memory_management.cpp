@@ -115,7 +115,7 @@ public:
             }
             
             // Test memory access (should not crash)
-            std::memset(aligned_ptr, 0xAB, size);
+            memset(aligned_ptr, 0xAB, size);
             
             // Verify pattern
             uint8_t* bytes = static_cast<uint8_t*>(aligned_ptr);
@@ -169,7 +169,7 @@ public:
             allocated_ptrs.push_back(ptr);
             
             // Test memory access
-            std::memset(ptr, 0x55, size);
+            memset(ptr, 0x55, size);
             
             // Verify pattern
             uint8_t* bytes = static_cast<uint8_t*>(ptr);
@@ -249,7 +249,7 @@ public:
         }
         
         // Test SHM access
-        std::memset(shm_ptr, 0xCC, shm_size);
+        memset(shm_ptr, 0xCC, shm_size);
         
         // Verify pattern
         uint8_t* bytes = static_cast<uint8_t*>(shm_ptr);
@@ -314,10 +314,10 @@ public:
         }
         
         // Test full synchronization
-        std::memcpy(target_memory.data(), source_memory.data(), region_size);
+        memcpy(target_memory.data(), source_memory.data(), region_size);
         
         // Verify full sync
-        if (std::memcmp(source_memory.data(), target_memory.data(), region_size) != 0) {
+        if (memcmp(source_memory.data(), target_memory.data(), region_size) != 0) {
             std::cout << "FAIL: Full memory synchronization failed" << std::endl;
             all_passed = false;
         }
@@ -339,7 +339,7 @@ public:
             size_t size = range.second;
             
             if (offset + size <= region_size) {
-                std::memcpy(target_memory.data() + offset, 
+                memcpy(target_memory.data() + offset, 
                            source_memory.data() + offset, 
                            size);
             }
@@ -351,7 +351,7 @@ public:
             size_t size = range.second;
             
             if (offset + size <= region_size) {
-                if (std::memcmp(source_memory.data() + offset,
+                if (memcmp(source_memory.data() + offset,
                                target_memory.data() + offset,
                                size) != 0) {
                     std::cout << "FAIL: Delta synchronization failed for range " 
@@ -395,10 +395,10 @@ public:
         const char* test_string = "This is a test string for buffer overflow testing";
         
         // Test strncpy (safe)
-        std::strncpy(buffer, test_string, sizeof(buffer) - 1);
+        strncpy(buffer, test_string, sizeof(buffer) - 1);
         buffer[sizeof(buffer) - 1] = '\0';
         
-        if (std::strlen(buffer) >= sizeof(buffer)) {
+        if (strlen(buffer) >= sizeof(buffer)) {
             std::cout << "FAIL: strncpy did not prevent buffer overflow" << std::endl;
             all_passed = false;
         }
@@ -409,7 +409,7 @@ public:
         
         // Safe copy (within bounds)
         size_t safe_copy_size = std::min(src_buffer.size(), dst_buffer.size());
-        std::memcpy(dst_buffer.data(), src_buffer.data(), safe_copy_size);
+        memcpy(dst_buffer.data(), src_buffer.data(), safe_copy_size);
         
         // Verify safe copy
         for (size_t i = 0; i < safe_copy_size; i++) {
@@ -475,7 +475,7 @@ public:
             all_passed = false;
         } else {
             // Test memory access
-            std::memset(virtual_ptr, 0xBB, 4096);
+            memset(virtual_ptr, 0xBB, 4096);
             
             // Verify pattern
             uint8_t* bytes = static_cast<uint8_t*>(virtual_ptr);
@@ -495,7 +495,7 @@ public:
                 std::cout << "FAIL: HeapAlloc failed" << std::endl;
                 all_passed = false;
             } else {
-                std::memset(heap_ptr, 0xEE, 2048);
+                memset(heap_ptr, 0xEE, 2048);
                 HeapFree(heap, 0, heap_ptr);
             }
         }
@@ -512,7 +512,7 @@ public:
             all_passed = false;
         } else {
             // Test memory access
-            std::memset(mmap_ptr, 0xBB, 4096);
+            memset(mmap_ptr, 0xBB, 4096);
             
             // Verify pattern
             uint8_t* bytes = static_cast<uint8_t*>(mmap_ptr);
@@ -563,7 +563,7 @@ public:
             tracked_allocations.push_back(ptr);
             
             // Use the memory to prevent optimization
-            std::memset(ptr, 0x77, size);
+            memset(ptr, 0x77, size);
         }
         
         // Verify all allocations are tracked
@@ -585,7 +585,7 @@ public:
             
             for (size_t size : sizes) {
                 auto ptr = std::make_unique<uint8_t[]>(size);
-                std::memset(ptr.get(), 0x88, size);
+                memset(ptr.get(), 0x88, size);
                 raii_allocations.push_back(std::move(ptr));
             }
             
@@ -602,7 +602,7 @@ public:
         for (int i = 0; i < 100; i++) {
             void* temp_ptr = std::malloc(1024);
             if (temp_ptr) {
-                std::memset(temp_ptr, i & 0xFF, 1024);
+                memset(temp_ptr, i & 0xFF, 1024);
                 std::free(temp_ptr);
             }
         }

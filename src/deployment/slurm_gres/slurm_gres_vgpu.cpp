@@ -52,7 +52,7 @@ int vgre_gres_node_config_load(char * /*node_name*/, char **gres_data, size_t *g
 
     char *out = static_cast<char*>(std::malloc(n + 1));
     if (!out) return -1;
-    std::memcpy(out, buf, n + 1);
+    memcpy(out, buf, n + 1);
     *gres_data = out;
     *gres_data_size = n + 1;
     return 0;

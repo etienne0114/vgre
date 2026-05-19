@@ -56,8 +56,8 @@ VGREResult DispatchManager::launchPartitionedKernel(uint64_t kernel_id, const ui
       if (parent_->streamArgumentsToWorker(args, num_args, kernel_id, client) == VGREResult::SUCCESS) {
         PartitionDispatchPacket pdpkt{};
         pdpkt.auth_token = parent_->auth_token_; pdpkt.kernel_id = kernel_id;
-        std::memcpy(pdpkt.full_grid_dim, grid_dim, 12); std::memcpy(pdpkt.partition_grid_dim, slice.partition_dim, 12);
-        std::memcpy(pdpkt.block_dim, block_dim, 12); std::memcpy(pdpkt.grid_start, slice.grid_start, 12);
+        memcpy(pdpkt.full_grid_dim, grid_dim, 12); memcpy(pdpkt.partition_grid_dim, slice.partition_dim, 12);
+        memcpy(pdpkt.block_dim, block_dim, 12); memcpy(pdpkt.grid_start, slice.grid_start, 12);
         pdpkt.shared_mem = shared_mem; pdpkt.num_args = num_args; pdpkt.partition_id = slice.partition_id; pdpkt.total_partitions = plan.total_partitions;
         if (parent_->send_packet(client->socket_fd, PacketType::PARTITION_DISPATCH, &pdpkt, sizeof(pdpkt), client->secure_channel.get()) == VGREResult::SUCCESS) client->in_flight_kernels++;
       }

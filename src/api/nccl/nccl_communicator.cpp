@@ -20,7 +20,7 @@ ncclResult_t ncclGetVersion(int* version) {
 
 ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId) {
     if (!uniqueId) return ncclInvalidArgument;
-    std::memset(uniqueId->internal, 0, NCCL_UNIQUE_ID_BYTES);
+    memset(uniqueId->internal, 0, NCCL_UNIQUE_ID_BYTES);
 #if defined(_WIN32)
     HCRYPTPROV hProv = 0;
     if (CryptAcquireContextA(&hProv, nullptr, nullptr, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))  {
@@ -51,7 +51,7 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId) {
     // but belt-and-suspenders for deterministic test environments).
     static std::atomic<uint64_t> counter{0};
     uint64_t cnt = counter.fetch_add(1, std::memory_order_relaxed);
-    std::memcpy(uniqueId->internal + NCCL_UNIQUE_ID_BYTES - sizeof(cnt), &cnt, sizeof(cnt));
+    memcpy(uniqueId->internal + NCCL_UNIQUE_ID_BYTES - sizeof(cnt), &cnt, sizeof(cnt));
     VGRE_LOG_DEBUG("NCCL", "ncclGetUniqueId generated new communicator ID");
     return ncclSuccess;
 }

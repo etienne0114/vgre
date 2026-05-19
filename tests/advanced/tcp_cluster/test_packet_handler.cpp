@@ -59,7 +59,7 @@ void test_constructPacket_payload_appended() {
     assert(pkt.size() == sizeof(VSBPHeader) + sizeof(payload));
     const VSBPHeader* hdr = reinterpret_cast<const VSBPHeader*>(pkt.data());
     assert(hdr->payloadSize == sizeof(payload));
-    assert(std::memcmp(pkt.data() + sizeof(VSBPHeader), payload, sizeof(payload)) == 0);
+    assert(memcmp(pkt.data() + sizeof(VSBPHeader), payload, sizeof(payload)) == 0);
     pass("constructPacket_payload_appended");
 }
 

@@ -100,7 +100,7 @@ int cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle, void* devPtr) {
 
     // Copy current device memory into the SHM segment so remote processes
     // see the initial values.
-    std::memcpy(shm->getBasePtr(), rawPtr, size);
+    memcpy(shm->getBasePtr(), rawPtr, size);
 
     // Store the opened region so we can sync back on close.
     {
@@ -113,8 +113,8 @@ int cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle, void* devPtr) {
     h.magic  = kIPCMagic;
     h.devPtr = reinterpret_cast<uint64_t>(devPtr);
     h.size   = static_cast<uint64_t>(size);
-    std::strncpy(h.shmName, shmName, kShmNameMax - 1);
-    std::memcpy(handle->reserved, &h, sizeof(IPCHandle));
+    strncpy(h.shmName, shmName, kShmNameMax - 1);
+    memcpy(handle->reserved, &h, sizeof(IPCHandle));
 
     VGRE_LOG_INFO("cudaIPC", "IPC handle created: " + std::string(shmName) +
                   " size=" + std::to_string(size));
@@ -127,7 +127,7 @@ int cudaIpcOpenMemHandle(void** devPtr, cudaIpcMemHandle_t handle, unsigned int 
     if (!devPtr) return 1;
 
     IPCHandle h{};
-    std::memcpy(&h, handle.reserved, sizeof(IPCHandle));
+    memcpy(&h, handle.reserved, sizeof(IPCHandle));
     if (h.magic != kIPCMagic) {
         VGRE_LOG_ERROR("cudaIPC", "Invalid IPC handle magic");
         return 1;
@@ -209,7 +209,7 @@ int cudaIpcGetEventHandle(EventIPCHandle_st* handle, void* event) {
     }
     // Copy current event signalled state (VGRE events are host atomics at *event).
     int32_t state = *reinterpret_cast<std::atomic<int32_t>*>(event);
-    std::memcpy(shm->getBasePtr(), &state, 4);
+    memcpy(shm->getBasePtr(), &state, 4);
 
     {
         std::lock_guard<std::mutex> lk(getIPCMutex());
@@ -219,15 +219,15 @@ int cudaIpcGetEventHandle(EventIPCHandle_st* handle, void* event) {
     EventIPCHandle h{};
     h.magic   = kEventIPCMagic;
     h.eventId = eid;
-    std::strncpy(h.shmName, shmName, sizeof(h.shmName) - 1);
-    std::memcpy(handle->reserved, &h, 64);
+    strncpy(h.shmName, shmName, sizeof(h.shmName) - 1);
+    memcpy(handle->reserved, &h, 64);
     return 0;
 }
 
 int cudaIpcOpenEventHandle(void** event, EventIPCHandle_st handle) {
     if (!event) return 1;
     EventIPCHandle h{};
-    std::memcpy(&h, handle.reserved, 64);
+    memcpy(&h, handle.reserved, 64);
     if (h.magic != kEventIPCMagic) return 1;
 
     auto shm = std::make_shared<vgre::core::ShmManager>();

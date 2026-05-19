@@ -35,7 +35,7 @@ float getAttrFloat(const BackendNode* node, int attr, float def) {
     auto* v = getAttrVec(node, attr);
     if (!v || v->empty()) return def;
     float f = 0.0f;
-    std::memcpy(&f, &(*v)[0], sizeof(float));
+    memcpy(&f, &(*v)[0], sizeof(float));
     return f;
 }
 
@@ -56,12 +56,12 @@ static size_t backendAttributeElementSize(int attributeType) {
 
 static uint64_t readBackendAttributeElement(const uint8_t *base, size_t elemSize) {
     uint64_t out = 0;
-    std::memcpy(&out, base, std::min(elemSize, sizeof(out)));
+    memcpy(&out, base, std::min(elemSize, sizeof(out)));
     return out;
 }
 
 static void writeBackendAttributeElement(uint8_t *base, size_t elemSize, uint64_t value) {
-    std::memcpy(base, &value, std::min(elemSize, sizeof(value)));
+    memcpy(base, &value, std::min(elemSize, sizeof(value)));
 }
 
 static TensorDesc buildTensorDesc(uintptr_t nodeId) {
@@ -603,12 +603,12 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             TensorDesc yDesc = buildTensorDesc(yId);
             size_t xBytes = static_cast<size_t>(xDesc.n) * xDesc.c * xDesc.h * xDesc.w * sizeof(float);
             size_t yBytes = static_cast<size_t>(yDesc.n) * yDesc.c * yDesc.h * yDesc.w * sizeof(float);
-            std::memcpy(yPtr, xPtr, xBytes);
+            memcpy(yPtr, xPtr, xBytes);
             // Second input (if present) appended after first
             uintptr_t x2Id = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_X); // reuse attr slot
             void* x2Ptr = dataPtrs.count(x2Id) ? dataPtrs[x2Id] : nullptr;
             if (x2Ptr && x2Id != xId)
-                std::memcpy(static_cast<char*>(yPtr) + xBytes, x2Ptr, yBytes - xBytes);
+                memcpy(static_cast<char*>(yPtr) + xBytes, x2Ptr, yBytes - xBytes);
             break;
         }
         case CUDNN_BACKEND_OPERATION_SIGNAL_DESCRIPTOR: {

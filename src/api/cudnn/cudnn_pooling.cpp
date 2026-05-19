@@ -134,7 +134,7 @@ cudnnStatus_t cudnnPoolingBackward(
         if (b != 0.0f) {
             for (int i=0; i<xSize; ++i) dxf[i] = b * dxf[i];
         } else {
-            std::memset(dxf, 0, xSize*sizeof(float));
+            memset(dxf, 0, xSize*sizeof(float));
         }
     }
 

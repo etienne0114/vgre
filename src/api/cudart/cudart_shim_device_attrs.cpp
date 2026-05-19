@@ -116,7 +116,7 @@ extern "C" cudaError_t cudaFuncGetAttributes(
     auto &re = vgre::core::RuntimeEngine::instance();
     if (!re.isInitialized()) return cudaErrorNotInitialized;
 
-    std::memset(attr, 0, sizeof(*attr));
+    memset(attr, 0, sizeof(*attr));
     attr->maxThreadsPerBlock       = 1024;
     attr->ptxVersion               = 86;  // SM 8.6 (Ampere)
     attr->binaryVersion            = 86;

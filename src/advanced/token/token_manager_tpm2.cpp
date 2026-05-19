@@ -92,7 +92,7 @@ VGREResult HardwareTokenManager::storeTPM(const std::string& service, const std:
     
     TPM2B_MAX_NV_BUFFER nv_write_data;
     nv_write_data.size = token.size();
-    std::memcpy(nv_write_data.buffer, token.c_str(), token.size());
+    memcpy(nv_write_data.buffer, token.c_str(), token.size());
     
     rc = Esys_NV_Write(tpm_context_,
                       nv_handle,

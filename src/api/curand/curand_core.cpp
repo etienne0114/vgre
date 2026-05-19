@@ -534,7 +534,7 @@ curandStatus_t curandGetGeneratorIpcHandle(curandGenerator_t generator,
     handle->ordering   = static_cast<uint32_t>(st->ordering);
     handle->quasi_dims = st->quasiDimensions;
     handle->scrambled  = st->scrambled ? 1u : 0u;
-    std::memset(handle->reserved, 0, sizeof(handle->reserved));
+    memset(handle->reserved, 0, sizeof(handle->reserved));
     return CURAND_STATUS_SUCCESS;
 }
 

@@ -161,10 +161,10 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
                 ((static_cast<uint32_t>((h >> 10) & 0x1fu) == 0u ? 0u :
                   (static_cast<uint32_t>((h >> 10) & 0x1fu) + 112u)) << 23) |
                 (static_cast<uint32_t>(h & 0x3ffu) << 13);
-            float f; std::memcpy(&f, &bits, 4); return f;
+            float f; memcpy(&f, &bits, 4); return f;
         };
         auto f2h = [](float f) -> uint16_t {
-            uint32_t bits; std::memcpy(&bits, &f, 4);
+            uint32_t bits; memcpy(&bits, &f, 4);
             uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
             int exp = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
             if (exp <= 0) return sign;
@@ -174,10 +174,10 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         // BF16 ↔ float helpers
         auto bf2f = [](uint16_t h) -> float {
             uint32_t bits = static_cast<uint32_t>(h) << 16;
-            float f; std::memcpy(&f, &bits, 4); return f;
+            float f; memcpy(&f, &bits, 4); return f;
         };
         auto f2bf = [](float f) -> uint16_t {
-            uint32_t bits; std::memcpy(&bits, &f, 4);
+            uint32_t bits; memcpy(&bits, &f, 4);
             return static_cast<uint16_t>(bits >> 16);
         };
 
@@ -192,7 +192,7 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
             const int8_t *p = static_cast<const int8_t*>(A);
             for (int i = 0; i < m * k; ++i) Af[static_cast<size_t>(i)] = static_cast<float>(p[i]);
         } else {
-            std::memcpy(Af.data(), A, static_cast<size_t>(m * k) * sizeof(float));
+            memcpy(Af.data(), A, static_cast<size_t>(m * k) * sizeof(float));
         }
 
         // Widen B
@@ -206,7 +206,7 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
             const int8_t *p = static_cast<const int8_t*>(B);
             for (int i = 0; i < k * n; ++i) Bf[static_cast<size_t>(i)] = static_cast<float>(p[i]);
         } else {
-            std::memcpy(Bf.data(), B, static_cast<size_t>(k * n) * sizeof(float));
+            memcpy(Bf.data(), B, static_cast<size_t>(k * n) * sizeof(float));
         }
 
         // Widen C (for beta accumulation)
@@ -223,7 +223,7 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
             const int32_t *p = static_cast<const int32_t*>(C);
             for (int i = 0; i < m * n; ++i) Cf[static_cast<size_t>(i)] = static_cast<float>(p[i]);
         } else {
-            std::memcpy(Cf.data(), C, static_cast<size_t>(m * n) * sizeof(float));
+            memcpy(Cf.data(), C, static_cast<size_t>(m * n) * sizeof(float));
         }
 
         refSgemm(tB, tA, n, m, k, alphaF, Bf.data(), static_cast<int>(lb.ld),
@@ -243,7 +243,7 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
             int32_t *p = static_cast<int32_t*>(C);
             for (size_t i = 0; i < static_cast<size_t>(m * n); ++i) p[i] = static_cast<int32_t>(Cf[i]);
         } else {
-            std::memcpy(C, Cf.data(), static_cast<size_t>(m * n) * sizeof(float));
+            memcpy(C, Cf.data(), static_cast<size_t>(m * n) * sizeof(float));
         }
     }
 
@@ -253,11 +253,11 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         if (dIt2 != g_layouts.end()) {
             size_t count = static_cast<size_t>(lc.rows * lc.cols);
             if (lc.type == CUDA_R_32F)
-                std::memcpy(D, C, count * sizeof(float));
+                memcpy(D, C, count * sizeof(float));
             else if (lc.type == CUDA_R_64F)
-                std::memcpy(D, C, count * sizeof(double));
+                memcpy(D, C, count * sizeof(double));
             else if (lc.type == CUDA_R_16F || lc.type == CUDA_R_16BF)
-                std::memcpy(D, C, count * sizeof(uint16_t));
+                memcpy(D, C, count * sizeof(uint16_t));
         }
     }
 

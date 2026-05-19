@@ -194,7 +194,7 @@ bool IPCManager::initialize(bool isMaster) {
 
   if (isMaster_) {
     // Master initializes the state
-    std::memset(state_, 0, sizeof(GlobalState));
+    memset(state_, 0, sizeof(GlobalState));
 #if defined(_WIN32)
     state_->master_pid = static_cast<int32_t>(GetCurrentProcessId());
 #else
@@ -218,7 +218,7 @@ bool IPCManager::initialize(bool isMaster) {
     if (pid != 0 && !processIsAlive(pid)) {
       state_->slots[i].active = false;
       state_->slots[i].pid = 0;
-      std::memset(&state_->slots[i].telemetry, 0, sizeof(vgre_telemetry_t));
+      memset(&state_->slots[i].telemetry, 0, sizeof(vgre_telemetry_t));
     }
   }
 

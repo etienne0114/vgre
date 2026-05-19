@@ -142,7 +142,7 @@ cublasStatus_t cublasSetVector(int n, int elemSize, const void* x, int incx,
     const char* src = static_cast<const char*>(x);
     char*       dst = static_cast<char*>(y);
     for (int i = 0; i < n; ++i)
-        std::memcpy(dst + (size_t)i * incy * elemSize,
+        memcpy(dst + (size_t)i * incy * elemSize,
                     src + (size_t)i * incx * elemSize,
                     elemSize);
     return CUBLAS_STATUS_SUCCESS;
@@ -167,7 +167,7 @@ cublasStatus_t cublasSetMatrix(int rows, int cols, int elemSize,
     // copy column-by-column: dst col j starts at dst + j*ldb*elemSize
     for (int j = 0; j < cols; ++j)
         for (int i = 0; i < rows; ++i)
-            std::memcpy(dst + ((size_t)j*ldb + i)*elemSize,
+            memcpy(dst + ((size_t)j*ldb + i)*elemSize,
                         src + ((size_t)i*lda + j)*elemSize,
                         elemSize);
     return CUBLAS_STATUS_SUCCESS;
@@ -183,7 +183,7 @@ cublasStatus_t cublasGetMatrix(int rows, int cols, int elemSize,
     // devA is column-major (lda >= rows), B is row-major (ldb >= cols)
     for (int j = 0; j < cols; ++j)
         for (int i = 0; i < rows; ++i)
-            std::memcpy(dst + ((size_t)i*ldb + j)*elemSize,
+            memcpy(dst + ((size_t)i*ldb + j)*elemSize,
                         src + ((size_t)j*lda + i)*elemSize,
                         elemSize);
     return CUBLAS_STATUS_SUCCESS;

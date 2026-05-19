@@ -66,7 +66,7 @@ static void refConvBackwardData(
 {
     int outH = (H + 2*pad_h - R)/str_h + 1;
     int outW = (W + 2*pad_w - S)/str_w + 1;
-    std::memset(dx, 0, N*C*H*W*sizeof(float));
+    memset(dx, 0, N*C*H*W*sizeof(float));
     for (int n = 0; n < N; ++n)
     for (int k = 0; k < K; ++k)
     for (int oh = 0; oh < outH; ++oh)

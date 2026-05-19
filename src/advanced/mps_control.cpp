@@ -174,7 +174,7 @@ bool MPSServer::start() {
 
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    std::strncpy(addr.sun_path, socketPath_.c_str(), sizeof(addr.sun_path) - 1);
+    strncpy(addr.sun_path, socketPath_.c_str(), sizeof(addr.sun_path) - 1);
 
     if (bind(listenFd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         VGRE_LOG_ERROR("MPS", "bind() failed: " + std::string(strerror(errno)));
@@ -333,7 +333,7 @@ void MPSServer::handleClient(mps_handle_t fd, uint32_t slotId) {
             std::vector<uint8_t> buf(static_cast<size_t>(req.bytes));
             if (!readAll(fd, buf.data(), static_cast<uint32_t>(req.bytes))) break;
             void* dst = mpsResolve(req.devPtr);
-            if (dst) std::memcpy(dst, buf.data(), req.bytes);
+            if (dst) memcpy(dst, buf.data(), req.bytes);
             MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::MEMCPY_RESP), 4 };
             uint32_t st = dst ? 0u : 1u;
             writeAll(fd, &rh, sizeof(rh));
@@ -401,7 +401,7 @@ void MPSServer::handleClient(mps_handle_t fd, uint32_t slotId) {
                 pArgs += 4; bytesLeft -= 4;
                 if (bytesLeft < size) { parseOk = false; break; }
                 std::vector<uint8_t> argBuf(size);
-                std::memcpy(argBuf.data(), pArgs, size);
+                memcpy(argBuf.data(), pArgs, size);
                 pArgs += size; bytesLeft -= size;
                 argDataBuffers.push_back(std::move(argBuf));
                 args.push_back(argDataBuffers.back().data());
@@ -533,7 +533,7 @@ bool MPSClient::connect(const std::string& socketPath) {
 
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    std::strncpy(addr.sun_path, socketPath.c_str(), sizeof(addr.sun_path) - 1);
+    strncpy(addr.sun_path, socketPath.c_str(), sizeof(addr.sun_path) - 1);
 
     if (::connect(fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         close(fd_); fd_ = MPS_INVALID_HANDLE;
@@ -653,7 +653,7 @@ bool MPSClient::launchKernel(const char* name,
     }
 
     MPSLaunchReq req{ gx, gy, gz, bx, by, bz, sharedMem, static_cast<uint32_t>(numArgs) };
-    uint32_t nameLen = static_cast<uint32_t>(std::strlen(name)) + 1; // include null-terminator
+    uint32_t nameLen = static_cast<uint32_t>(strlen(name)) + 1; // include null-terminator
     
     uint32_t totalPayloadLen = sizeof(req) + nameLen + static_cast<uint32_t>(argPayload.size());
     MPSHeader h{ static_cast<uint32_t>(MPSMsgType::LAUNCH_KERNEL), totalPayloadLen };

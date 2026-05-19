@@ -89,7 +89,7 @@ cusolverStatus_t cusolverDnSgetrf(cusolverDnHandle_t /*h*/, int m, int n,
     if (devInfo) *devInfo = 0;
     std::vector<int> ipiv(std::min(m, n));
     sgetrf_(&m, &n, A, &lda, ipiv.data(), devInfo);
-    if (devIpiv) std::memcpy(devIpiv, ipiv.data(), ipiv.size() * sizeof(int));
+    if (devIpiv) memcpy(devIpiv, ipiv.data(), ipiv.size() * sizeof(int));
     return CUSOLVER_STATUS_SUCCESS;
 }
 cusolverStatus_t cusolverDnDgetrf(cusolverDnHandle_t /*h*/, int m, int n,
@@ -99,7 +99,7 @@ cusolverStatus_t cusolverDnDgetrf(cusolverDnHandle_t /*h*/, int m, int n,
     if (devInfo) *devInfo = 0;
     std::vector<int> ipiv(std::min(m, n));
     dgetrf_(&m, &n, A, &lda, ipiv.data(), devInfo);
-    if (devIpiv) std::memcpy(devIpiv, ipiv.data(), ipiv.size() * sizeof(int));
+    if (devIpiv) memcpy(devIpiv, ipiv.data(), ipiv.size() * sizeof(int));
     return CUSOLVER_STATUS_SUCCESS;
 }
 
@@ -510,7 +510,7 @@ cusolverStatus_t cusolverSpScsrlsvlu(cusolverSpHandle_t /*h*/, int m, int nnz,
     if (info != 0) { if (singularity) *singularity = info - 1; return CUSOLVER_STATUS_SUCCESS; }
     char trans = 'N'; int nrhs = 1;
     sgetrs_(&trans, &m, &nrhs, A.data(), &m, ipiv.data(), rhs.data(), &m, &info);
-    std::memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(float));
+    memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(float));
     if (singularity) *singularity = -1;
     return CUSOLVER_STATUS_SUCCESS;
 }
@@ -529,7 +529,7 @@ cusolverStatus_t cusolverSpDcsrlsvlu(cusolverSpHandle_t /*h*/, int m, int nnz,
     if (info != 0) { if (singularity) *singularity = info - 1; return CUSOLVER_STATUS_SUCCESS; }
     char trans = 'N'; int nrhs = 1;
     dgetrs_(&trans, &m, &nrhs, A.data(), &m, ipiv.data(), rhs.data(), &m, &info);
-    std::memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(double));
+    memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(double));
     if (singularity) *singularity = -1;
     return CUSOLVER_STATUS_SUCCESS;
 }
@@ -549,7 +549,7 @@ cusolverStatus_t cusolverSpScsrlsvchol(cusolverSpHandle_t /*h*/, int m, int nnz,
     if (info != 0) { if (singularity) *singularity = info - 1; return CUSOLVER_STATUS_SUCCESS; }
     int nrhs = 1;
     spotrs_(&uplo, &m, &nrhs, A.data(), &m, rhs.data(), &m, &info);
-    std::memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(float));
+    memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(float));
     if (singularity) *singularity = -1;
     return CUSOLVER_STATUS_SUCCESS;
 }
@@ -567,7 +567,7 @@ cusolverStatus_t cusolverSpDcsrlsvchol(cusolverSpHandle_t /*h*/, int m, int nnz,
     if (info != 0) { if (singularity) *singularity = info - 1; return CUSOLVER_STATUS_SUCCESS; }
     int nrhs = 1;
     dpotrs_(&uplo, &m, &nrhs, A.data(), &m, rhs.data(), &m, &info);
-    std::memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(double));
+    memcpy(x, rhs.data(), static_cast<size_t>(m) * sizeof(double));
     if (singularity) *singularity = -1;
     return CUSOLVER_STATUS_SUCCESS;
 }
@@ -583,7 +583,7 @@ cusolverStatus_t cusolverSpScsrlsqvqr(cusolverSpHandle_t /*h*/, int m, int n, in
     std::vector<float> A; csr_to_dense_colmajor(m, n, csrVal, csrRowPtr, csrColInd, A);
     int ldb = std::max(m, n);
     std::vector<float> rhs(static_cast<size_t>(ldb), 0.0f);
-    std::memcpy(rhs.data(), b, static_cast<size_t>(m) * sizeof(float));
+    memcpy(rhs.data(), b, static_cast<size_t>(m) * sizeof(float));
     std::vector<float> S(std::min(m, n));
     int rank_out = 0, info = 0, lwork = -1; float work_q; int iwork_q, one = 1;
     sgelsd_(&m, &n, &one, A.data(), &m, rhs.data(), &ldb, S.data(), &tol,
@@ -594,7 +594,7 @@ cusolverStatus_t cusolverSpScsrlsqvqr(cusolverSpHandle_t /*h*/, int m, int n, in
     std::vector<float> work2(lwork); std::vector<int> iwork2(liwork);
     sgelsd_(&m, &n, &one, A.data(), &m, rhs.data(), &ldb, S.data(), &tol,
             &rank_out, work2.data(), &lwork, iwork2.data(), &info);
-    std::memcpy(x, rhs.data(), static_cast<size_t>(n) * sizeof(float));
+    memcpy(x, rhs.data(), static_cast<size_t>(n) * sizeof(float));
     if (rankA)    *rankA = rank_out;
     if (min_norm) { *min_norm = 0.0f; for (int i = n; i < ldb && i < m; ++i) *min_norm += rhs[i]*rhs[i]; *min_norm = std::sqrt(*min_norm); }
     if (p) for (int i = 0; i < n; ++i) p[i] = i;
@@ -610,7 +610,7 @@ cusolverStatus_t cusolverSpDcsrlsqvqr(cusolverSpHandle_t /*h*/, int m, int n, in
     std::vector<double> A; csr_to_dense_colmajor(m, n, csrVal, csrRowPtr, csrColInd, A);
     int ldb = std::max(m, n);
     std::vector<double> rhs(static_cast<size_t>(ldb), 0.0);
-    std::memcpy(rhs.data(), b, static_cast<size_t>(m) * sizeof(double));
+    memcpy(rhs.data(), b, static_cast<size_t>(m) * sizeof(double));
     std::vector<double> S(std::min(m, n));
     int rank_out = 0, info = 0, lwork = -1; double work_q; int iwork_q, one = 1;
     dgelsd_(&m, &n, &one, A.data(), &m, rhs.data(), &ldb, S.data(), &tol,
@@ -621,7 +621,7 @@ cusolverStatus_t cusolverSpDcsrlsqvqr(cusolverSpHandle_t /*h*/, int m, int n, in
     std::vector<double> work2(lwork); std::vector<int> iwork2(liwork);
     dgelsd_(&m, &n, &one, A.data(), &m, rhs.data(), &ldb, S.data(), &tol,
             &rank_out, work2.data(), &lwork, iwork2.data(), &info);
-    std::memcpy(x, rhs.data(), static_cast<size_t>(n) * sizeof(double));
+    memcpy(x, rhs.data(), static_cast<size_t>(n) * sizeof(double));
     if (rankA)    *rankA = rank_out;
     if (min_norm) { *min_norm = 0.0; for (int i = n; i < ldb && i < m; ++i) *min_norm += rhs[i]*rhs[i]; *min_norm = std::sqrt(*min_norm); }
     if (p) for (int i = 0; i < n; ++i) p[i] = i;
@@ -660,7 +660,7 @@ static cusolverStatus_t eigvsi_impl(int m, int /*nnz*/,
         muCur = muNext; xCur = xNext;
     }
     *mu = muCur;
-    std::memcpy(x, xCur.data(), static_cast<size_t>(m) * sizeof(T));
+    memcpy(x, xCur.data(), static_cast<size_t>(m) * sizeof(T));
     return CUSOLVER_STATUS_SUCCESS;
 }
 

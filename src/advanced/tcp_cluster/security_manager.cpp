@@ -42,9 +42,9 @@ namespace {
 // Production key verification - real HMAC implementation
 static void computeKeyVerification(const std::string& token, const char* label, const uint8_t nonce[crypto::kNonceLen], uint8_t out[crypto::kSHA256DigestLen]) {
   if (!label || !nonce || !out || token.empty()) return;
-  size_t labelLen = std::strlen(label);
+  size_t labelLen = strlen(label);
   std::vector<uint8_t> data(labelLen + crypto::kNonceLen);
-  std::memcpy(data.data(), label, labelLen); std::memcpy(data.data() + labelLen, nonce, crypto::kNonceLen);
+  memcpy(data.data(), label, labelLen); memcpy(data.data() + labelLen, nonce, crypto::kNonceLen);
   crypto::hmac_sha256(reinterpret_cast<const uint8_t*>(token.data()), token.size(), data.data(), data.size(), out);
 }
 
@@ -106,7 +106,7 @@ bool SecurityManager::isSecurityEnabled() const { return parent_->security_enabl
 SessionInfo SecurityManager::getSecurityInfo() const {
   SessionInfo info{};
   if (!parent_->security_enabled_) {
-    std::strncpy(info.cipher_name, "NONE (plaintext)", sizeof(info.cipher_name) - 1);
+    strncpy(info.cipher_name, "NONE (plaintext)", sizeof(info.cipher_name) - 1);
     info.cipher_name[sizeof(info.cipher_name) - 1] = '\0'; return info;
   }
   // Real traffic counters
@@ -120,10 +120,10 @@ SessionInfo SecurityManager::getSecurityInfo() const {
       if (client && client->active) {
         if (client->secure_channel && client->secure_channel->isInitialized()) {
           any_secure = true;
-          if (std::strlen(info.cipher_name) == 0) {
+          if (strlen(info.cipher_name) == 0) {
             SessionInfo s = client->secure_channel->getSessionInfo();
-            std::strncpy(info.cipher_name, s.cipher_name, sizeof(info.cipher_name) - 1); info.cipher_name[sizeof(info.cipher_name) - 1] = '\0';
-            std::strncpy(info.key_fingerprint, s.key_fingerprint, sizeof(info.key_fingerprint) - 1); info.key_fingerprint[sizeof(info.key_fingerprint) - 1] = '\0';
+            strncpy(info.cipher_name, s.cipher_name, sizeof(info.cipher_name) - 1); info.cipher_name[sizeof(info.cipher_name) - 1] = '\0';
+            strncpy(info.key_fingerprint, s.key_fingerprint, sizeof(info.key_fingerprint) - 1); info.key_fingerprint[sizeof(info.key_fingerprint) - 1] = '\0';
             info.session_seconds = s.session_seconds;
           }
         } else if (client->is_authenticating) { any_pending = true; }
@@ -132,15 +132,15 @@ SessionInfo SecurityManager::getSecurityInfo() const {
   } else if (parent_->client_secure_channel_ && parent_->client_secure_channel_->isInitialized()) {
     any_secure = true;
     SessionInfo s = parent_->client_secure_channel_->getSessionInfo();
-    std::strncpy(info.cipher_name, s.cipher_name, sizeof(info.cipher_name) - 1); info.cipher_name[sizeof(info.cipher_name) - 1] = '\0';
-    std::strncpy(info.key_fingerprint, s.key_fingerprint, sizeof(info.key_fingerprint) - 1); info.key_fingerprint[sizeof(info.key_fingerprint) - 1] = '\0';
+    strncpy(info.cipher_name, s.cipher_name, sizeof(info.cipher_name) - 1); info.cipher_name[sizeof(info.cipher_name) - 1] = '\0';
+    strncpy(info.key_fingerprint, s.key_fingerprint, sizeof(info.key_fingerprint) - 1); info.key_fingerprint[sizeof(info.key_fingerprint) - 1] = '\0';
     info.session_seconds = s.session_seconds;
   } else if (parent_->is_authenticating_) { any_pending = true; }
   
   info.is_encrypted = any_secure || any_pending;
-  if (any_secure) { std::strncat(info.cipher_name, " [Production]", sizeof(info.cipher_name) - std::strlen(info.cipher_name) - 1); }
-  else if (any_pending) { std::strncpy(info.cipher_name, "PENDING (handshake in progress)", sizeof(info.cipher_name) - 1); info.cipher_name[sizeof(info.cipher_name) - 1] = '\0'; }
-  else { std::strncpy(info.cipher_name, "WAITING FOR PEERS", sizeof(info.cipher_name) - 1); info.cipher_name[sizeof(info.cipher_name) - 1] = '\0'; }
+  if (any_secure) { strncat(info.cipher_name, " [Production]", sizeof(info.cipher_name) - strlen(info.cipher_name) - 1); }
+  else if (any_pending) { strncpy(info.cipher_name, "PENDING (handshake in progress)", sizeof(info.cipher_name) - 1); info.cipher_name[sizeof(info.cipher_name) - 1] = '\0'; }
+  else { strncpy(info.cipher_name, "WAITING FOR PEERS", sizeof(info.cipher_name) - 1); info.cipher_name[sizeof(info.cipher_name) - 1] = '\0'; }
   return info;
 }
 
@@ -199,7 +199,7 @@ VGREResult SecurityManager::performServerHandshake(std::shared_ptr<TCPClusterMan
   }
   if (rx.size() < expectedLen) return VGREResult::ERR_IO;
   
-  SecureHandshakePacket clientHs{}; std::memcpy(&clientHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
+  SecureHandshakePacket clientHs{}; memcpy(&clientHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
   
   // Verify key
   uint8_t expectedKV[crypto::kSHA256DigestLen]; computeKeyVerification(token, "VGRE_KEYVER_WORKER_v1", clientHs.nonce, expectedKV);
@@ -267,7 +267,7 @@ VGREResult SecurityManager::performClientHandshake() {
   }
   
   SecureHandshakePacket masterHs{}; if (rx.size() < expected) return VGREResult::ERR_IO;
-  std::memcpy(&masterHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
+  memcpy(&masterHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
   
   // Verify master
   uint8_t expectedKV[crypto::kSHA256DigestLen]; computeKeyVerification(token, "VGRE_KEYVER_MASTER_v1", masterHs.nonce, expectedKV);
@@ -317,7 +317,7 @@ VGREResult SecurityManager::performPeerClientHandshake(std::shared_ptr<TCPCluste
   if (phdr->magic != VSBP_MAGIC || phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) { return VGREResult::ERR_AUTH_FAILED; }
   
   SecureHandshakePacket peerHs{}; if (rx.size() < expected) return VGREResult::ERR_IO;
-  std::memcpy(&peerHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
+  memcpy(&peerHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
   
   // Verify peer
   uint8_t expectedKV[crypto::kSHA256DigestLen]; computeKeyVerification(token, "VGRE_KEYVER_MASTER_v1", peerHs.nonce, expectedKV);
@@ -344,7 +344,7 @@ VGREResult SecurityManager::rotateSessionKey(std::shared_ptr<TCPClusterManager::
   // Real key rotation implementation
   uint8_t nextNonce[crypto::kNonceLen]; SecureChannel::generateNonce(nextNonce);
   struct RotateKeyPacket { uint8_t nonce[crypto::kNonceLen]; };
-  RotateKeyPacket rpkt; std::memcpy(rpkt.nonce, nextNonce, crypto::kNonceLen);
+  RotateKeyPacket rpkt; memcpy(rpkt.nonce, nextNonce, crypto::kNonceLen);
   
   VGREResult result = parent_->send_packet(client->socket_fd, PacketType::ROTATE_KEY, &rpkt, sizeof(RotateKeyPacket), client->secure_channel.get());
   if (result != VGREResult::SUCCESS) return result;

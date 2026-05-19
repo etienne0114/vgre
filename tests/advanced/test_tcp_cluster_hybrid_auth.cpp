@@ -96,7 +96,7 @@ void test_token_hash_computation() {
     SessionInfo info = master.getSecurityInfo();
     
     // Verify cipher name contains expected text
-    assert(std::strlen(info.cipher_name) > 0);
+    assert(strlen(info.cipher_name) > 0);
     
     master.shutdown();
     
@@ -145,7 +145,7 @@ void test_security_info_shows_mode() {
     master.enableSecurity(true);
     
     SessionInfo info = master.getSecurityInfo();
-    assert(std::strlen(info.cipher_name) > 0);
+    assert(strlen(info.cipher_name) > 0);
     
     master.shutdown();
     
@@ -197,7 +197,7 @@ void test_err_auth_retry_exists() {
     const char* error_str = resultToString(retry_code);
     
     assert(error_str != nullptr);
-    assert(std::strlen(error_str) > 0);
+    assert(strlen(error_str) > 0);
     
     std::cout << "  [INFO] ERR_AUTH_RETRY string: " << error_str << std::endl;
     

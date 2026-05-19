@@ -485,8 +485,8 @@ VGREResult RealSecureChannelFactory::validateConfiguration() {
   bool hasToken = (token_env && token_env[0] != '\0') ||
                   (token_file && token_file[0] != '\0');
 
-  if (hasToken && token_env && std::strlen(token_env) > 0 &&
-      std::strlen(token_env) < kMinTokenLen) {
+  if (hasToken && token_env && strlen(token_env) > 0 &&
+      strlen(token_env) < kMinTokenLen) {
     // Token is set but too short — warn but do not fail startup so callers
     // can still connect (SecurityManager emits the same warning on its path).
     // Return success so production systems aren't blocked by a warning.

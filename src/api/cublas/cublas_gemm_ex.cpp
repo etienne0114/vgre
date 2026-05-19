@@ -31,10 +31,10 @@ cublasStatus_t cublasHgemm(
                         (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
                          (static_cast<uint32_t>((h >> 10) & 0x1f) + (127 - 15)) << 23) |
                         (static_cast<uint32_t>(h & 0x3ff) << 13);
-        float f; std::memcpy(&f, &bits, 4); return f;
+        float f; memcpy(&f, &bits, 4); return f;
     };
     auto float_to_half = [](float f) -> uint16_t {
-        uint32_t bits; std::memcpy(&bits, &f, 4);
+        uint32_t bits; memcpy(&bits, &f, 4);
         uint16_t sign = (bits >> 16) & 0x8000;
         int exp = ((bits >> 23) & 0xff) - 127 + 15;
         uint16_t mant = (bits >> 13) & 0x3ff;
@@ -44,7 +44,7 @@ cublasStatus_t cublasHgemm(
     };
 
     uint16_t ah, bh;
-    std::memcpy(&ah, alpha, 2); std::memcpy(&bh, beta, 2);
+    memcpy(&ah, alpha, 2); memcpy(&bh, beta, 2);
     float fa = half_to_float(ah), fb = half_to_float(bh);
 
     const size_t szA = (transa == CUBLAS_OP_N ? m * lda : k * lda);
@@ -127,10 +127,10 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
                 (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
                  (static_cast<uint32_t>((h >> 10) & 0x1f) + (127 - 15)) << 23) |
                 (static_cast<uint32_t>(h & 0x3ff) << 13);
-            float f; std::memcpy(&f, &bits, 4); return f;
+            float f; memcpy(&f, &bits, 4); return f;
         };
         auto f2h = [](float f) -> uint16_t {
-            uint32_t bits; std::memcpy(&bits, &f, 4);
+            uint32_t bits; memcpy(&bits, &f, 4);
             uint16_t sign = (bits >> 16) & 0x8000;
             int exp = ((bits >> 23) & 0xff) - 127 + 15;
             if (exp <= 0) return sign;
@@ -158,7 +158,7 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
                 (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
                  (static_cast<uint32_t>((h >> 10) & 0x1f) + (127 - 15)) << 23) |
                 (static_cast<uint32_t>(h & 0x3ff) << 13);
-            float f; std::memcpy(&f, &bits, 4); return f;
+            float f; memcpy(&f, &bits, 4); return f;
         };
         for (int i = 0; i < m * k; ++i)
             Af[i] = (Atype == (int)GEMEX_R_16F) ? h2f(static_cast<const uint16_t*>(A)[i])
@@ -176,10 +176,10 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         std::vector<float> Af(m * k), Bf(k * n), Cf(m * n);
         auto bf2f = [](uint16_t h) -> float {
             uint32_t bits = static_cast<uint32_t>(h) << 16;
-            float f; std::memcpy(&f, &bits, 4); return f;
+            float f; memcpy(&f, &bits, 4); return f;
         };
         auto f2bf = [](float f) -> uint16_t {
-            uint32_t bits; std::memcpy(&bits, &f, 4);
+            uint32_t bits; memcpy(&bits, &f, 4);
             return static_cast<uint16_t>(bits >> 16);
         };
         const uint16_t* pA = static_cast<const uint16_t*>(A);
@@ -200,7 +200,7 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         std::vector<float> Af(m * k), Bf(k * n);
         auto bf2f = [](uint16_t h) -> float {
             uint32_t bits = static_cast<uint32_t>(h) << 16;
-            float f; std::memcpy(&f, &bits, 4); return f;
+            float f; memcpy(&f, &bits, 4); return f;
         };
         for (int i = 0; i < m * k; ++i)
             Af[i] = (Atype == (int)GEMEX_R_16BF) ? bf2f(static_cast<const uint16_t*>(A)[i])

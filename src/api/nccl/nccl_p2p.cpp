@@ -19,7 +19,7 @@ ncclResult_t ncclSend(const void* sendbuff, size_t count,
 
     // Write sender's data into the peer's slot
     st.p2p_slots[peer].resize(bytes);
-    std::memcpy(st.p2p_slots[peer].data(), sendbuff, bytes);
+    memcpy(st.p2p_slots[peer].data(), sendbuff, bytes);
 
     st.arrived_phase0++;
     if (st.arrived_phase0 == st.nranks) {
@@ -56,7 +56,7 @@ ncclResult_t ncclRecv(void* recvbuff, size_t count,
 
     // After barrier, copy the peer's data
     if (st.p2p_slots[c->rank].size() >= bytes)
-        std::memcpy(recvbuff, st.p2p_slots[c->rank].data(), bytes);
+        memcpy(recvbuff, st.p2p_slots[c->rank].data(), bytes);
     return ncclSuccess;
 }
 // ── ncclAllToAll ─────────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ ncclResult_t ncclAllToAll(const void* sendbuff, void* recvbuff,
     // Deposit this rank's chunks into every peer's slot
     for (int peer = 0; peer < st.nranks; ++peer) {
         st.p2p_slots[peer].resize(total_bytes);
-        std::memcpy(st.p2p_slots[peer].data() + c->rank * chunk_bytes,
+        memcpy(st.p2p_slots[peer].data() + c->rank * chunk_bytes,
                     static_cast<const uint8_t*>(sendbuff) + peer * chunk_bytes,
                     chunk_bytes);
     }
@@ -95,7 +95,7 @@ ncclResult_t ncclAllToAll(const void* sendbuff, void* recvbuff,
     }
 
     // Copy data from all peers into this rank's recvbuff
-    std::memcpy(recvbuff, st.p2p_slots[c->rank].data(), total_bytes);
+    memcpy(recvbuff, st.p2p_slots[c->rank].data(), total_bytes);
 
     st.arrived_phase1++;
     if (st.arrived_phase1 == st.nranks) {
@@ -128,7 +128,7 @@ ncclResult_t ncclGather(const void* sendbuff, void* recvbuff,
     if (st.arrived_phase0 == st.nranks) {
         if (recvbuff) {
             for (int r = 0; r < st.nranks; ++r)
-                std::memcpy(static_cast<uint8_t*>(recvbuff) + r * chunk_bytes,
+                memcpy(static_cast<uint8_t*>(recvbuff) + r * chunk_bytes,
                             st.sendbufs[r], chunk_bytes);
         }
         st.sendbufs.assign(st.nranks, nullptr);
@@ -163,7 +163,7 @@ ncclResult_t ncclScatter(const void* sendbuff, void* recvbuff,
     st.arrived_phase0++;
 
     if (st.arrived_phase0 == st.nranks) {
-        std::memcpy(recvbuff,
+        memcpy(recvbuff,
                     static_cast<const uint8_t*>(st.root_sendbuf) + c->rank * chunk_bytes,
                     chunk_bytes);
         st.root_sendbuf = nullptr;

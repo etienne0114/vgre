@@ -47,13 +47,13 @@ static inline float halfToFloat(uint16_t h) {
         bits = sign | ((exp + 112u) << 23) | (mant << 13);
     }
     float f;
-    std::memcpy(&f, &bits, sizeof(f));
+    memcpy(&f, &bits, sizeof(f));
     return f;
 }
 
 static inline uint16_t floatToHalf(float f) {
     uint32_t bits;
-    std::memcpy(&bits, &f, sizeof(bits));
+    memcpy(&bits, &f, sizeof(bits));
     uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
     int exp = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
     uint32_t mant = bits & 0x7fffffu;
@@ -564,8 +564,8 @@ cufftResult_t cufftExecC16BFC(cufftHandle plan, void *idata, void *odata, int di
             uint32_t rx = static_cast<uint32_t>(v.x) << 16;
             uint32_t ry = static_cast<uint32_t>(v.y) << 16;
             float fx, fy;
-            std::memcpy(&fx, &rx, sizeof(float));
-            std::memcpy(&fy, &ry, sizeof(float));
+            memcpy(&fx, &rx, sizeof(float));
+            memcpy(&fy, &ry, sizeof(float));
             tmp[static_cast<size_t>(i)] = {fx, fy};
         }
         if (p.rank == 1) fft1d(tmp.data(), res.data(), p.nx, direction);
@@ -578,8 +578,8 @@ cufftResult_t cufftExecC16BFC(cufftHandle plan, void *idata, void *odata, int di
             uint32_t ur, ui;
             float re = res[static_cast<size_t>(i)].real();
             float im = res[static_cast<size_t>(i)].imag();
-            std::memcpy(&ur, &re, sizeof(float));
-            std::memcpy(&ui, &im, sizeof(float));
+            memcpy(&ur, &re, sizeof(float));
+            memcpy(&ui, &im, sizeof(float));
             // Round: add 0x7FFF + round bit, then truncate
             ur = (ur + 0x7FFF + ((ur >> 16) & 1)) >> 16;
             ui = (ui + 0x7FFF + ((ui >> 16) & 1)) >> 16;

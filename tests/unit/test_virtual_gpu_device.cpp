@@ -18,7 +18,7 @@ void test_device_creation() {
   assert(dev.getId() == 0);
 
   const auto &props = dev.getProperties();
-  assert(std::strlen(props.name) > 0);
+  assert(strlen(props.name) > 0);
   assert(props.totalGlobalMem > 0);
   assert(props.maxThreadsPerBlock > 0);
   assert(props.multiProcessorCount > 0);

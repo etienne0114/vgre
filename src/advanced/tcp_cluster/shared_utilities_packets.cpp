@@ -21,9 +21,9 @@ std::vector<uint8_t> PacketUtils::constructVSBPPacket(PacketType type,
       static_cast<uint8_t>(PlatformDetection::getCurrentPlatform().type),
       {0, 0, 0}};
   std::vector<uint8_t> packet(sizeof(VSBPHeader) + payload_size);
-  std::memcpy(packet.data(), &header, sizeof(VSBPHeader));
+  memcpy(packet.data(), &header, sizeof(VSBPHeader));
   if (payload && payload_size > 0)
-    std::memcpy(packet.data() + sizeof(VSBPHeader), payload, payload_size);
+    memcpy(packet.data() + sizeof(VSBPHeader), payload, payload_size);
   return packet;
 }
 

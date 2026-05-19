@@ -77,7 +77,7 @@ VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int da
   parent_->reduction_element_count_ = count; parent_->reduction_sequence_++;
   parent_->pending_collective_op_type_ = static_cast<uint32_t>(op);
   // Allocate buffer and copy master's local data
-  parent_->active_reduction_buffer_.resize(total_bytes); std::memcpy(parent_->active_reduction_buffer_.data(), ptr, total_bytes);
+  parent_->active_reduction_buffer_.resize(total_bytes); memcpy(parent_->active_reduction_buffer_.data(), ptr, total_bytes);
 
   // Configurable reduction timeout: VGRE_REDUCTION_TIMEOUT_MS (default 30 s).
   int reductionTimeoutMs = 30000;
@@ -119,7 +119,7 @@ VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int da
   }
   
   // Copy result back to master's ptr
-  std::memcpy(ptr, parent_->active_reduction_buffer_.data(), total_bytes);
+  memcpy(ptr, parent_->active_reduction_buffer_.data(), total_bytes);
   // Reset state
   parent_->is_reducing_ = false; parent_->reduction_cv_.notify_all();
   return VGREResult::SUCCESS;
@@ -159,7 +159,7 @@ VGREResult CollectiveOpsManager::workerAllReduce(void* ptr, size_t count, int da
   }
 
   // Copy result back to ptr
-  std::memcpy(ptr, parent_->active_reduction_buffer_.data(), total_bytes); parent_->active_reduction_buffer_.clear();
+  memcpy(ptr, parent_->active_reduction_buffer_.data(), total_bytes); parent_->active_reduction_buffer_.clear();
   return VGREResult::SUCCESS;
 }
 
@@ -354,7 +354,7 @@ static float fp16_to_f32(uint16_t h) {
 }
 
 static uint16_t f32_to_fp16(float f) {
-    uint32_t u; std::memcpy(&u, &f, sizeof(u));
+    uint32_t u; memcpy(&u, &f, sizeof(u));
     uint32_t sign = (u >> 31) & 1;
     int32_t exp = static_cast<int32_t>((u >> 23) & 0xFF) - 127;
     uint32_t mant = u & 0x7FFFFF;
@@ -376,12 +376,12 @@ static uint16_t f32_to_fp16(float f) {
 
 static float bf16_to_f32(uint16_t b) {
     uint32_t u = (static_cast<uint32_t>(b) << 16);
-    float f; std::memcpy(&f, &u, sizeof(f));
+    float f; memcpy(&f, &u, sizeof(f));
     return f;
 }
 
 static uint16_t f32_to_bf16(float f) {
-    uint32_t u; std::memcpy(&u, &f, sizeof(u));
+    uint32_t u; memcpy(&u, &f, sizeof(u));
     // Round to nearest even: add 1 to bit 15 if bit 16 is 1
     if ((u & 0x0001FFFFU) > 0x00010000U) u += 0x00010000U;
     return static_cast<uint16_t>(u >> 16);
@@ -402,38 +402,38 @@ void CollectiveOpsManager::applyReduceFp16(
     if (op == ReductionOp::Sum) {
         for (size_t i = 0; i < count; ++i) {
             uint16_t dv, sv;
-            std::memcpy(&dv, dst + i * 2, sizeof(dv));
-            std::memcpy(&sv, src + i * 2, sizeof(sv));
+            memcpy(&dv, dst + i * 2, sizeof(dv));
+            memcpy(&sv, src + i * 2, sizeof(sv));
             float fv = decode(dv) + decode(sv);
             uint16_t rv = encode(fv);
-            std::memcpy(dst + i * 2, &rv, sizeof(rv));
+            memcpy(dst + i * 2, &rv, sizeof(rv));
         }
     } else if (op == ReductionOp::Prod) {
         for (size_t i = 0; i < count; ++i) {
             uint16_t dv, sv;
-            std::memcpy(&dv, dst + i * 2, sizeof(dv));
-            std::memcpy(&sv, src + i * 2, sizeof(sv));
+            memcpy(&dv, dst + i * 2, sizeof(dv));
+            memcpy(&sv, src + i * 2, sizeof(sv));
             float fv = decode(dv) * decode(sv);
             uint16_t rv = encode(fv);
-            std::memcpy(dst + i * 2, &rv, sizeof(rv));
+            memcpy(dst + i * 2, &rv, sizeof(rv));
         }
     } else if (op == ReductionOp::Max) {
         for (size_t i = 0; i < count; ++i) {
             uint16_t dv, sv;
-            std::memcpy(&dv, dst + i * 2, sizeof(dv));
-            std::memcpy(&sv, src + i * 2, sizeof(sv));
+            memcpy(&dv, dst + i * 2, sizeof(dv));
+            memcpy(&sv, src + i * 2, sizeof(sv));
             float fv = decode(dv), fsv = decode(sv);
             uint16_t rv = (fsv > fv) ? sv : dv;
-            std::memcpy(dst + i * 2, &rv, sizeof(rv));
+            memcpy(dst + i * 2, &rv, sizeof(rv));
         }
     } else if (op == ReductionOp::Min) {
         for (size_t i = 0; i < count; ++i) {
             uint16_t dv, sv;
-            std::memcpy(&dv, dst + i * 2, sizeof(dv));
-            std::memcpy(&sv, src + i * 2, sizeof(sv));
+            memcpy(&dv, dst + i * 2, sizeof(dv));
+            memcpy(&sv, src + i * 2, sizeof(sv));
             float fv = decode(dv), fsv = decode(sv);
             uint16_t rv = (fsv < fv) ? sv : dv;
-            std::memcpy(dst + i * 2, &rv, sizeof(rv));
+            memcpy(dst + i * 2, &rv, sizeof(rv));
         }
     }
 }

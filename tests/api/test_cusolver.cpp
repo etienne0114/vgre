@@ -128,7 +128,7 @@ static void test_ormqr() {
 
     const int M = 3, N = 2;
     double A[6] = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
-    double A_orig[6]; std::memcpy(A_orig, A, sizeof(A));
+    double A_orig[6]; memcpy(A_orig, A, sizeof(A));
     double tau[2];
     int info = 0, lwork;
 

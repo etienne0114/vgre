@@ -51,12 +51,12 @@ static void test_seeding() {
     curandGenerateUniform(g2, b.data(), N);
 
     // Same seed → same output
-    bool ok = (std::memcmp(a.data(), b.data(), N * sizeof(float)) == 0);
+    bool ok = (memcmp(a.data(), b.data(), N * sizeof(float)) == 0);
 
     // Different seed → different output
     curandSetPseudoRandomGeneratorSeed(g2, 99ULL);
     curandGenerateUniform(g2, b.data(), N);
-    ok &= (std::memcmp(a.data(), b.data(), N * sizeof(float)) != 0);
+    ok &= (memcmp(a.data(), b.data(), N * sizeof(float)) != 0);
 
     curandDestroyGenerator(g1);
     curandDestroyGenerator(g2);
@@ -177,7 +177,7 @@ static void test_generate_seeds() {
     curandGenerateSeeds(gen);
     curandGenerateUniform(gen, after.data(), 16);
 
-    bool ok = (std::memcmp(before.data(), after.data(), 16 * sizeof(float)) != 0);
+    bool ok = (memcmp(before.data(), after.data(), 16 * sizeof(float)) != 0);
     curandDestroyGenerator(gen);
     check("curandGenerateSeeds: re-seed changes output", ok);
 }
@@ -261,7 +261,7 @@ static void test_ipc_handle() {
     std::vector<float> a(N), b(N);
     curandGenerateUniform(orig,  a.data(), N);
     curandGenerateUniform(clone, b.data(), N);
-    ok &= (std::memcmp(a.data(), b.data(), N * sizeof(float)) == 0);
+    ok &= (memcmp(a.data(), b.data(), N * sizeof(float)) == 0);
 
     // Null rejection
     ok &= (curandGetGeneratorIpcHandle(orig, nullptr) != CURAND_STATUS_SUCCESS);
@@ -313,7 +313,7 @@ static void test_offset() {
     curandSetGeneratorOffset(g2, SKIP);
     curandGenerate(g2, b.data(), N);
 
-    bool ok = (std::memcmp(a.data(), b.data(), N * sizeof(unsigned int)) == 0);
+    bool ok = (memcmp(a.data(), b.data(), N * sizeof(unsigned int)) == 0);
     curandDestroyGenerator(g1);
     curandDestroyGenerator(g2);
     check("curandSetGeneratorOffset: offset matches manual skip", ok);

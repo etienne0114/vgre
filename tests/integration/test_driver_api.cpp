@@ -60,7 +60,7 @@ int main() {
   char name[256] = {0};
   r = cuDeviceGetName(name, sizeof(name), dev);
   assert(r == 0);
-  assert(std::strlen(name) > 0);
+  assert(strlen(name) > 0);
 
   size_t total = 0;
   r = cuDeviceTotalMem(&total, dev);

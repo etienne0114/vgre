@@ -220,14 +220,14 @@ int vgre_get_device_properties(int device_id, vgre_device_properties_t *props) {
     return to_status(r);
   }
 
-  std::memset(props, 0, sizeof(vgre_device_properties_t));
+  memset(props, 0, sizeof(vgre_device_properties_t));
   std::snprintf(props->name, sizeof(props->name), "%s", dp.name);
   props->total_global_mem = dp.totalGlobalMem;
   props->shared_mem_per_block = dp.sharedMemPerBlock;
   props->max_threads_per_block = dp.maxThreadsPerBlock;
-  std::memcpy(props->max_threads_dim, dp.maxThreadsDim,
+  memcpy(props->max_threads_dim, dp.maxThreadsDim,
               sizeof(dp.maxThreadsDim));
-  std::memcpy(props->max_grid_size, dp.maxGridSize, sizeof(dp.maxGridSize));
+  memcpy(props->max_grid_size, dp.maxGridSize, sizeof(dp.maxGridSize));
   props->warp_size = dp.warpSize;
   props->multi_processor_count = dp.multiProcessorCount;
   props->major = dp.major;
@@ -329,7 +329,7 @@ int vgre_memset(void *ptr, int value, size_t count) {
   void *raw = mm.getPointer(ptr);
   if (!raw)
     return VGRE_ERROR_INVALID_VALUE;
-  std::memset(raw, value, count);
+  memset(raw, value, count);
   return VGRE_SUCCESS;
 }
 

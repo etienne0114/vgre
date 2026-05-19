@@ -163,7 +163,7 @@ void TCPClusterManager::clientLoop() {
         }
 
         VSBPHeader hdr{};
-        std::memcpy(&hdr, hdrBuf.data(), sizeof(VSBPHeader));
+        memcpy(&hdr, hdrBuf.data(), sizeof(VSBPHeader));
         if (!PacketUtils::validateVSBPHeader(hdr) ||
             static_cast<PacketType>(hdr.type) != PacketType::SECURE_READY) {
           VGRE_LOG_ERROR(
@@ -211,14 +211,14 @@ void TCPClusterManager::clientLoop() {
           if (!recv_exact(csBuf, sizeof(VSBPHeader))) csOk = false;
           if (csOk) {
             VSBPHeader csHdr{};
-            std::memcpy(&csHdr, csBuf.data(), sizeof(VSBPHeader));
+            memcpy(&csHdr, csBuf.data(), sizeof(VSBPHeader));
             if (PacketUtils::validateVSBPHeader(csHdr) &&
                 static_cast<PacketType>(csHdr.type) == PacketType::CLOCK_SYNC &&
                 csHdr.payloadSize == sizeof(ClockSyncPayload)) {
               std::vector<uint8_t> csPay;
               if (recv_exact(csPay, sizeof(ClockSyncPayload))) {
                 ClockSyncPayload cs;
-                std::memcpy(&cs, csPay.data(), sizeof(cs));
+                memcpy(&cs, csPay.data(), sizeof(cs));
                 int64_t t2 = static_cast<int64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count());
@@ -281,10 +281,10 @@ void TCPClusterManager::clientLoop() {
         cpkt.has_igpu = true;
         DeviceProperties props;
         engine.getDeviceProperties(0, props);
-        std::strncpy(cpkt.igpu_name, props.name, sizeof(cpkt.igpu_name) - 1);
+        strncpy(cpkt.igpu_name, props.name, sizeof(cpkt.igpu_name) - 1);
       } else {
         cpkt.has_igpu = false;
-        std::strncpy(cpkt.igpu_name, "None (CPU-only)", sizeof(cpkt.igpu_name) - 1);
+        strncpy(cpkt.igpu_name, "None (CPU-only)", sizeof(cpkt.igpu_name) - 1);
       }
 
       // Discrete NVIDIA GPU via GPUPassthrough (dlopen libcuda / nvcuda)
@@ -294,7 +294,7 @@ void TCPClusterManager::clientLoop() {
         cpkt.gpu_count = static_cast<int>(gpuDevs.size());
         if (!gpuDevs.empty()) {
           const auto& primary = gpuDevs[0];
-          std::strncpy(cpkt.gpu_name, primary.name, sizeof(cpkt.gpu_name) - 1);
+          strncpy(cpkt.gpu_name, primary.name, sizeof(cpkt.gpu_name) - 1);
           cpkt.gpu_memory_bytes  = primary.totalMemBytes;
           cpkt.gpu_compute_major = primary.computeMajor;
           cpkt.gpu_compute_minor = primary.computeMinor;
@@ -307,7 +307,7 @@ void TCPClusterManager::clientLoop() {
         }
       } else {
         cpkt.gpu_count = 0;
-        std::strncpy(cpkt.gpu_name, "None", sizeof(cpkt.gpu_name) - 1);
+        strncpy(cpkt.gpu_name, "None", sizeof(cpkt.gpu_name) - 1);
         cpkt.gpu_memory_bytes  = 0;
         cpkt.gpu_compute_major = 0;
         cpkt.gpu_compute_minor = 0;

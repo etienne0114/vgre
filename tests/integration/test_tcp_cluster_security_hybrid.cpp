@@ -67,12 +67,12 @@ static bool test_auth_retry_error_code() {
     vgre::VGREResult code = vgre::VGREResult::ERR_AUTH_RETRY;
     const char* str = vgre::resultToString(code);
     CHECK(str != nullptr);
-    CHECK(std::strlen(str) > 0);
+    CHECK(strlen(str) > 0);
 
     vgre::VGREResult fail = vgre::VGREResult::ERR_AUTH_FAILED;
     const char* fs = vgre::resultToString(fail);
     CHECK(fs != nullptr);
-    CHECK(std::strlen(fs) > 0);
+    CHECK(strlen(fs) > 0);
 
     std::cout << "[PASS] ERR_AUTH_RETRY (deprecated) = \"" << str << "\"\n";
     return true;
@@ -129,7 +129,7 @@ static bool test_security_info_cipher() {
     mgr.enableSecurity(true);
 
     vgre::advanced::SessionInfo info = mgr.getSecurityInfo();
-    CHECK(std::strlen(info.cipher_name) > 0);
+    CHECK(strlen(info.cipher_name) > 0);
 
     mgr.shutdown();
     unsetenv("VGRE_TCP_AUTH_TOKEN");

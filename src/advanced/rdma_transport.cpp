@@ -52,7 +52,7 @@ bool recvQPInfo(vgre::advanced::SecureChannel& ch,
 bool queryGID(ibv_context* ctx, uint8_t portNum, uint8_t gid[16]) {
     ibv_gid g{};
     if (ibv_query_gid(ctx, portNum, 0, &g) != 0) return false;
-    std::memcpy(gid, g.raw, 16);
+    memcpy(gid, g.raw, 16);
     return true;
 }
 
@@ -219,7 +219,7 @@ bool RDMAConnection::transitionToRTR(const RDMAQPInfo& remote) {
     // RoCE uses GRH (global routing header) when lid == 0
     if (remote.lid == 0) {
         attr.ah_attr.is_global = 1;
-        std::memcpy(attr.ah_attr.grh.dgid.raw, remote.gid, 16);
+        memcpy(attr.ah_attr.grh.dgid.raw, remote.gid, 16);
         attr.ah_attr.grh.sgid_index    = 0;
         attr.ah_attr.grh.hop_limit     = 64;
         attr.ah_attr.grh.traffic_class = 0;

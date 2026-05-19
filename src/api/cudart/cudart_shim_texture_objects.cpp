@@ -69,7 +69,7 @@ extern "C" cudaError_t cudaGetTextureObjectResourceDesc(
         return cudaErrorInvalidValue;
     }
 
-    std::memset(pResDesc, 0, sizeof(*pResDesc));
+    memset(pResDesc, 0, sizeof(*pResDesc));
     // resType == cudaResourceTypeLinear = 2
     pResDesc->resType = 2;
     pResDesc->res.devPtr = const_cast<void *>(data);
@@ -86,7 +86,7 @@ extern "C" cudaError_t cudaGetTextureObjectTextureDesc(
     if (!tm.getCudaArrayData(tid))
         return cudaErrorInvalidValue;
 
-    std::memset(pTexDesc, 0, sizeof(*pTexDesc));
+    memset(pTexDesc, 0, sizeof(*pTexDesc));
     // filterMode: 0 = point, 1 = linear
     pTexDesc->filterMode         = 1;
     pTexDesc->normalizedCoords   = 0;
@@ -109,7 +109,7 @@ extern "C" cudaError_t cudaGetTextureObjectResourceViewDesc(
     vgre::core::TextureId tid = static_cast<vgre::core::TextureId>(texObject);
     if (!tm.getCudaArrayData(tid)) return cudaErrorInvalidValue;
 
-    std::memset(pResViewDesc, 0, sizeof(*pResViewDesc));
+    memset(pResViewDesc, 0, sizeof(*pResViewDesc));
     pResViewDesc->format = CUDAInterceptor::CU_RES_VIEW_FORMAT_FLOAT_32X1;
     return cudaSuccess;
 }
@@ -134,7 +134,7 @@ extern "C" cudaError_t cudaGetSurfaceObjectResourceDesc(
     auto &tm = vgre::core::TextureManager::instance();
     vgre::core::SurfaceId sid = static_cast<vgre::core::SurfaceId>(surfObject);
 
-    std::memset(pResDesc, 0, sizeof(*pResDesc));
+    memset(pResDesc, 0, sizeof(*pResDesc));
     pResDesc->resType = 2;  // cudaResourceTypeLinear
     // Surface objects' backing memory is tracked by TextureManager.
     // We use getCudaArrayData which works for the surface as well.

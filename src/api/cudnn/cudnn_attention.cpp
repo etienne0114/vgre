@@ -130,9 +130,9 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardData(
     float* dvf = (float*)dv;
 
     int total = seqLen * batchSize * D;
-    std::memset(dqf, 0, total * sizeof(float));
-    std::memset(dkf, 0, total * sizeof(float));
-    std::memset(dvf, 0, total * sizeof(float));
+    memset(dqf, 0, total * sizeof(float));
+    memset(dkf, 0, total * sizeof(float));
+    memset(dvf, 0, total * sizeof(float));
 
     int wSize = D * D;
     const float* Wq = wf;

@@ -113,7 +113,7 @@ cudnnStatus_t cudnnConvolutionForward(
         if (b != 0.0f) {
             for (int i = 0; i < ySize; ++i) yf[i] *= b;
         } else {
-            std::memset(yf, 0, ySize * sizeof(float));
+            memset(yf, 0, ySize * sizeof(float));
         }
     }
 
@@ -209,7 +209,7 @@ cudnnStatus_t cudnnConvolutionBackwardData(
     if (b != 0.0f) {
         for (int i = 0; i < dxSize; ++i) dxf[i] *= b;
     } else {
-        std::memset(dxf, 0, dxSize * sizeof(float));
+        memset(dxf, 0, dxSize * sizeof(float));
     }
 
     std::vector<float> tmp(dxSize, 0.f);
@@ -292,7 +292,7 @@ cudnnStatus_t cudnnConvolutionBackwardFilter(
     if (b != 0.0f) {
         for (int i = 0; i < dwSize; ++i) dwf[i] *= b;
     } else {
-        std::memset(dwf, 0, dwSize * sizeof(float));
+        memset(dwf, 0, dwSize * sizeof(float));
     }
 
     std::vector<float> tmp(dwSize, 0.f);

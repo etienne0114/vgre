@@ -28,7 +28,7 @@ CUresult cuModuleLoadData(CUmodule *module, const void *image) {
         len = reader.getTotalSize();
         if (len == 0) len = 8 * 1024 * 1024; // Fallback to conservative estimate
     } else {
-        len = std::strlen(reinterpret_cast<const char *>(image));
+        len = strlen(reinterpret_cast<const char *>(image));
     }
 
     if (len == 0) return CUDA_ERROR_INVALID_VALUE;
@@ -64,7 +64,7 @@ CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name)
   if (!hfunc || !hmod || !name) return CUDA_ERROR_INVALID_VALUE;
   // If module is from memory PTX, compile source and register kernel on the fly.
   const char *src = vgre_get_module_source(hmod);
-  if (src && std::strlen(src) > 0) {
+  if (src && strlen(src) > 0) {
     vgre::KernelId id = 0;
     auto r = vgre::core::RuntimeEngine::instance().registerKernel(name, src, id);
     if (r != vgre::VGREResult::SUCCESS) return CUDA_ERROR_UNKNOWN;

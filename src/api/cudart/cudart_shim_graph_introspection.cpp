@@ -204,7 +204,7 @@ cudaError_t cudaGraphMemcpyNodeGetParams(
         static_cast<vgre::GraphId>(graph), node, dst, src, count, kind);
     if (r != vgre::VGREResult::SUCCESS) return cudaErrorInvalidValue;
 
-    std::memset(pNodeParams, 0, sizeof(*pNodeParams));
+    memset(pNodeParams, 0, sizeof(*pNodeParams));
     pNodeParams->dstPtr.ptr   = dst;
     pNodeParams->srcPtr.ptr   = src;
     pNodeParams->extent.width = count;

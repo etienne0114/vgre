@@ -58,8 +58,8 @@ VGREResult DispatchManager::launchRemoteKernel(
   RemoteCommandPacket pkt{};
   pkt.auth_token = parent_->auth_token_;
   pkt.kernel_id = kernel_id;
-  std::memcpy(pkt.grid_dim, grid_dim, sizeof(pkt.grid_dim));
-  std::memcpy(pkt.block_dim, block_dim, sizeof(pkt.block_dim));
+  memcpy(pkt.grid_dim, grid_dim, sizeof(pkt.grid_dim));
+  memcpy(pkt.block_dim, block_dim, sizeof(pkt.block_dim));
   pkt.shared_mem = shared_mem;
   pkt.num_args = num_args;
 

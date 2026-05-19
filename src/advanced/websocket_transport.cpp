@@ -514,7 +514,7 @@ WebsocketTransportClient::recv(int timeoutMs) {
     }
 
     auto data = std::make_unique<uint8_t[]>(recvBuffer_.size());
-    std::memcpy(data.get(), recvBuffer_.data(), recvBuffer_.size());
+    memcpy(data.get(), recvBuffer_.data(), recvBuffer_.size());
     size_t len = recvBuffer_.size();
     recvBuffer_.clear();
     return {std::move(data), len};
