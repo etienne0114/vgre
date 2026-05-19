@@ -78,6 +78,7 @@ target_include_directories(vgre_advanced PUBLIC
 
 target_link_libraries(vgre_advanced PRIVATE
     Threads::Threads
+    vgre_llvm_iface
 )
 
 # Link libibverbs when RDMA is enabled

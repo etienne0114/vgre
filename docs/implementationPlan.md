@@ -1,6 +1,6 @@
 # VGRE Implementation Plan
 
-**Version**: 7.0.0  
+**Version**: 8.0.0  
 **Date**: 2026-05-19 (updated)  
 **Basis**: Full code-verified audit — tcp_cluster (43 files), all advanced/, api/, core/, runtime/, compiler/, scripts/  
 **Format**: Priority-ordered. Completed items moved to ✅ section. Remaining items have file + line reference and concrete fix.
@@ -78,17 +78,18 @@
 ### Script / Infrastructure
 - ✅ `vgre-start.sh` — ping reachability check when `--master-ip` is provided; fails fast with diagnostics
 
----
+### Code Quality (additional)
+- ✅ P4-3: Config manager JSON parser replaced with `llvm::json::parse()`; `vgre_llvm_iface` linked into `vgre_advanced`
 
-## � P4 — Code Quality / Structural Issues (remaining)
+### CUPTI
+- ✅ CUPTI software-proxy counters — full `cupti_shim.cpp`: subscriber/activity/buffer/metric APIs backed by `RuntimeProfiler`; IPC, occupancy, FLOP, DRAM throughput, branch efficiency metrics
 
-### P4-3: Configuration Manager Hand-Rolled JSON Parser
-**File**: `configuration_manager_file_io.cpp`  
-The file implements its own JSON/YAML/INI parser using string scanning. The rest of the codebase uses `llvm::json::parse()` (available via `<llvm/Support/JSON.h>` already linked). The hand-rolled parser has edge cases (no Unicode escape handling, no nested object support beyond 2 levels).
-
-**Fix**: Replace the JSON parsing section with `llvm::json::parse()`. YAML/INI can remain hand-rolled since LLVM JSON only covers JSON.
-
-**Estimated effort**: 1-2 days (careful migration with tests).
+### Previously Misreported as Stubs (confirmed implemented by audit)
+- ✅ Multi-GPU P2P — `cudaMemcpyPeer` routes through `MemoryManager::copyDeviceToDevice` + `memAdvise`
+- ✅ GPU passthrough (VFIO) — dlopen/NVRTC pipeline in `gpu_passthrough.cpp`; activates when `libcuda.so.1` present
+- ✅ Token manager: macOS Keychain — real `SecKeychain*` APIs; `ERR_NOT_SUPPORTED` is the non-Apple platform stub only
+- ✅ Token manager: Linux keyring + libsecret — real `keyctl_*` (always) + `secret_password_*` (when `VGRE_HAS_LIBSECRET`)
+- ✅ Token manager: Windows Credential Manager — real `CredWriteW/CredReadW/CredDeleteW`; non-Windows stub only
 
 ---
 

@@ -40,6 +40,7 @@ add_library(vgre_api OBJECT
     vgre_c_api.cpp
     vgre_c_api_graphs.cpp
     vgre_c_api_telemetry.cpp
+    cupti/cupti_shim.cpp
 )
 
 # New CUDART shim files — compiled as a separate OBJECT library so they can

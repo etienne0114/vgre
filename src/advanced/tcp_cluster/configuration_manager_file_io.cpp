@@ -9,6 +9,7 @@
 #endif
 
 #include "vgre/common/os_backend.h"
+#include <llvm/Support/JSON.h>
 
 namespace vgre {
 namespace advanced {
@@ -51,114 +52,80 @@ bool ConfigurationManager::saveToYamlFile(const std::string& file_path, const Cl
     return ok;
 }
 
-// ── JSON Parser ──
+// ── JSON Parser (llvm::json) ──
 
 bool ConfigurationManager::parseJsonConfiguration(const std::string& json_content, ClusterConfiguration& config) {
-    size_t pos = 0;
-
-    auto skipWhitespace = [&]() {
-        while (pos < json_content.size() && std::isspace(json_content[pos])) pos++;
-    };
-
-    auto parseString = [&]() -> std::string {
-        skipWhitespace();
-        if (pos >= json_content.size() || json_content[pos] != '"') return "";
-        pos++;
-        std::string result;
-        while (pos < json_content.size() && json_content[pos] != '"') {
-            if (json_content[pos] == '\\' && pos + 1 < json_content.size()) {
-                pos++;
-                switch (json_content[pos]) {
-                    case 'n': result += '\n'; break;
-                    case 't': result += '\t'; break;
-                    case 'r': result += '\r'; break;
-                    case '\\': result += '\\'; break;
-                    case '"': result += '"'; break;
-                    default: result += json_content[pos]; break;
-                }
-            } else {
-                result += json_content[pos];
-            }
-            pos++;
-        }
-        if (pos < json_content.size()) pos++;
-        return result;
-    };
-
-    auto parseNumber = [&]() -> double {
-        skipWhitespace();
-        std::string num;
-        while (pos < json_content.size() &&
-               (std::isdigit(json_content[pos]) || json_content[pos] == '.' ||
-                json_content[pos] == '-' || json_content[pos] == '+' ||
-                json_content[pos] == 'e' || json_content[pos] == 'E')) {
-            num += json_content[pos++];
-        }
-        try { return std::stod(num); } catch (...) { return 0.0; }
-    };
-
-    auto parseBool = [&]() -> bool {
-        skipWhitespace();
-        if (pos + 4 <= json_content.size() && json_content.substr(pos, 4) == "true") { pos += 4; return true; }
-        if (pos + 5 <= json_content.size() && json_content.substr(pos, 5) == "false") { pos += 5; return false; }
-        return false;
-    };
-
-    auto findKey = [&](const std::string& key) -> bool {
-        size_t start = pos;
-        while (pos < json_content.size()) {
-            skipWhitespace();
-            if (pos >= json_content.size() || json_content[pos] != '"') { pos++; continue; }
-            std::string found = parseString();
-            skipWhitespace();
-            if (pos < json_content.size() && json_content[pos] == ':') {
-                pos++;
-                if (found == key) return true;
-            }
-        }
-        pos = start;
-        return false;
-    };
-
-    try {
-        // Network
-        if (findKey("handshake_timeout_sec")) config.handshake_timeout_sec = static_cast<int>(parseNumber());
-        pos = 0; if (findKey("max_queue_depth")) config.max_queue_depth = static_cast<size_t>(parseNumber());
-        pos = 0; if (findKey("max_packets_per_sec")) config.max_packets_per_sec = static_cast<size_t>(parseNumber());
-        pos = 0; if (findKey("connection_retry_attempts")) config.connection_retry_attempts = static_cast<int>(parseNumber());
-        pos = 0; if (findKey("connection_retry_delay_ms")) config.connection_retry_delay_ms = static_cast<int>(parseNumber());
-        // Security
-        pos = 0; if (findKey("allow_auth_fallback")) config.allow_auth_fallback = parseBool();
-        pos = 0; if (findKey("auth_token")) config.auth_token = parseString();
-        pos = 0; if (findKey("auth_token_file")) config.auth_token_file = parseString();
-        pos = 0; if (findKey("require_encryption")) config.require_encryption = parseBool();
-        // Transport
-        pos = 0; if (findKey("shm_threshold_bytes")) config.shm_threshold_bytes = static_cast<size_t>(parseNumber());
-        pos = 0; if (findKey("rdma_threshold_bytes")) config.rdma_threshold_bytes = static_cast<size_t>(parseNumber());
-        pos = 0; if (findKey("delta_sync_threshold")) config.delta_sync_threshold = parseNumber();
-        pos = 0; if (findKey("coalescing_threshold_bytes")) config.coalescing_threshold_bytes = static_cast<size_t>(parseNumber());
-        // Mesh
-        pos = 0; if (findKey("cluster_nodes")) config.cluster_nodes = parseString();
-        pos = 0; if (findKey("enable_mesh_topology")) config.enable_mesh_topology = parseBool();
-        pos = 0; if (findKey("mesh_discovery_port")) config.mesh_discovery_port = static_cast<int>(parseNumber());
-        // Monitoring
-        pos = 0; if (findKey("enable_metrics_export")) config.enable_metrics_export = parseBool();
-        pos = 0; if (findKey("metrics_export_interval_sec")) config.metrics_export_interval_sec = static_cast<int>(parseNumber());
-        pos = 0; if (findKey("log_level")) config.log_level = parseString();
-        // Backup
-        pos = 0; if (findKey("enable_hot_reload")) config.enable_hot_reload = parseBool();
-        pos = 0; if (findKey("backup_directory")) config.backup_directory = parseString();
-        pos = 0; if (findKey("enable_auto_backup")) config.enable_auto_backup = parseBool();
-        pos = 0; if (findKey("max_backup_files")) config.max_backup_files = static_cast<int>(parseNumber());
-        // Validation
-        pos = 0; if (findKey("strict_validation")) config.strict_validation = parseBool();
-        pos = 0; if (findKey("validate_network_connectivity")) config.validate_network_connectivity = parseBool();
-        pos = 0; if (findKey("validate_file_permissions")) config.validate_file_permissions = parseBool();
-        return true;
-    } catch (const std::exception& e) {
-        VGRE_LOG_ERROR("ConfigurationManager", "JSON parse error: " + std::string(e.what()));
+    llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(json_content);
+    if (!parsed) {
+        std::string errMsg;
+        llvm::raw_string_ostream os(errMsg);
+        os << parsed.takeError();
+        VGRE_LOG_ERROR("ConfigurationManager", "JSON parse error: " + os.str());
         return false;
     }
+
+    const llvm::json::Object* obj = parsed->getAsObject();
+    if (!obj) {
+        VGRE_LOG_ERROR("ConfigurationManager", "JSON root must be an object");
+        return false;
+    }
+
+    // Helper lambdas for type-safe extraction with graceful fallback.
+    auto getInt = [&](llvm::StringRef key, int &out) {
+        if (auto *v = obj->get(key))
+            if (auto n = v->getAsInteger()) out = static_cast<int>(*n);
+    };
+    auto getUInt64 = [&](llvm::StringRef key, size_t &out) {
+        if (auto *v = obj->get(key))
+            if (auto n = v->getAsInteger()) out = static_cast<size_t>(*n);
+    };
+    auto getDouble = [&](llvm::StringRef key, double &out) {
+        if (auto *v = obj->get(key))
+            if (auto n = v->getAsNumber()) out = *n;
+    };
+    auto getBool = [&](llvm::StringRef key, bool &out) {
+        if (auto *v = obj->get(key))
+            if (auto b = v->getAsBoolean()) out = *b;
+    };
+    auto getString = [&](llvm::StringRef key, std::string &out) {
+        if (auto *v = obj->get(key))
+            if (auto s = v->getAsString()) out = s->str();
+    };
+
+    // Network
+    getInt   ("handshake_timeout_sec",    config.handshake_timeout_sec);
+    getUInt64("max_queue_depth",          config.max_queue_depth);
+    getUInt64("max_packets_per_sec",      config.max_packets_per_sec);
+    getInt   ("connection_retry_attempts",config.connection_retry_attempts);
+    getInt   ("connection_retry_delay_ms",config.connection_retry_delay_ms);
+    // Security
+    getBool  ("allow_auth_fallback",      config.allow_auth_fallback);
+    getString("auth_token",               config.auth_token);
+    getString("auth_token_file",          config.auth_token_file);
+    getBool  ("require_encryption",       config.require_encryption);
+    // Transport
+    getUInt64("shm_threshold_bytes",      config.shm_threshold_bytes);
+    getUInt64("rdma_threshold_bytes",     config.rdma_threshold_bytes);
+    getDouble("delta_sync_threshold",     config.delta_sync_threshold);
+    getUInt64("coalescing_threshold_bytes",config.coalescing_threshold_bytes);
+    // Mesh
+    getString("cluster_nodes",            config.cluster_nodes);
+    getBool  ("enable_mesh_topology",     config.enable_mesh_topology);
+    getInt   ("mesh_discovery_port",      config.mesh_discovery_port);
+    // Monitoring
+    getBool  ("enable_metrics_export",    config.enable_metrics_export);
+    getInt   ("metrics_export_interval_sec", config.metrics_export_interval_sec);
+    getString("log_level",                config.log_level);
+    // Backup
+    getBool  ("enable_hot_reload",        config.enable_hot_reload);
+    getString("backup_directory",         config.backup_directory);
+    getBool  ("enable_auto_backup",       config.enable_auto_backup);
+    getInt   ("max_backup_files",         config.max_backup_files);
+    // Validation
+    getBool  ("strict_validation",        config.strict_validation);
+    getBool  ("validate_network_connectivity", config.validate_network_connectivity);
+    getBool  ("validate_file_permissions",config.validate_file_permissions);
+    return true;
 }
 
 // ── YAML Parser ──
