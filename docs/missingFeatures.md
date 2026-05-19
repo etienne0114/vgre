@@ -1,21 +1,13 @@
 # VGRE — Honest Feature Status (Code-Verified Audit)
 
-**Audit Date**: 2026-05-19 (v2)  
+**Audit Date**: 2026-05-19 (v3)  
 **Method**: Direct source file reads + grep analysis of every file category.  
 **Scope**: tcp_cluster (all 43 files), advanced/, core/, api/, runtime/, compiler/, scripts/  
 **Policy**: ✅ Fixed = real computation confirmed in source. ⚠️ Issue = confirmed by reading the actual line(s) cited. Items not listed here have been resolved.
 
 ---
 
-## Section 1 — TCP Cluster: Open Issues
-
-### 1.1 Configuration Manager Hand-Rolled JSON Parser
-**File**: `src/advanced/tcp_cluster/configuration_manager_file_io.cpp`  
-Implements its own JSON/YAML/INI parser by string scanning. The codebase has `llvm::json::parse()` via `<llvm/Support/JSON.h>` already linked. The hand-rolled parser has no Unicode escape handling and only supports nested objects up to 2 levels.
-
----
-
-## Section 2 — Platform Header Issues
+## Section 1 — Platform Header Issues
 
 | File | Header / Syscall | Status |
 |---|---|---|
@@ -31,7 +23,7 @@ Implements its own JSON/YAML/INI parser by string scanning. The codebase has `ll
 
 ---
 
-## Section 3 — Codebase-Wide: Confirmed Real Implementations
+## Section 2 — Codebase-Wide: Confirmed Real Implementations
 
 | Component | Verified |
 |---|---|
@@ -47,6 +39,13 @@ Implements its own JSON/YAML/INI parser by string scanning. The codebase has `ll
 | cuFFT BF16 complex (`CUFFT_C16BFC`) | ✅ BF16↔float32 round-trip + Cooley-Tukey FFT |
 | cuRAND MTGP32 device-side | ✅ `curandStateMtgp32` + MT19937 twist engine in `curand_kernel.h` |
 | PTX multi-module linker | ✅ `.extern .func` deduplication after concatenation in `cuLinkComplete` |
+| Config manager JSON parser | ✅ Replaced hand-rolled scanner with `llvm::json::parse()` in `configuration_manager_file_io.cpp` |
+| CUPTI software-proxy counters | ✅ Full `cupti_shim.cpp`: subscriber/activity/metric APIs backed by `RuntimeProfiler` |
+| Multi-GPU P2P (`cudaMemcpyPeer`) | ✅ Real copy via `MemoryManager::copyDeviceToDevice` + `memAdvise` in `cuda_interceptor_memory.cpp` |
+| GPU passthrough (VFIO) | ✅ Real dlopen/NVRTC pipeline in `gpu_passthrough.cpp`; activates if `libcuda.so.1` is present |
+| Token manager: macOS Keychain | ✅ Real `SecKeychain*` APIs in `token_manager_macos.cpp` (under `#ifdef __APPLE__`) |
+| Token manager: Linux keyring + libsecret | ✅ Real `keyctl_*` APIs (always); `secret_password_*` when `VGRE_HAS_LIBSECRET` is defined |
+| Token manager: Windows Credential Manager | ✅ Real `CredWriteW/CredReadW/CredDeleteW` in `token_manager_win32.cpp` (under `#ifdef _WIN32`) |
 | NCCL AllReduce/Broadcast/ReduceScatter | ✅ float32, float64, int32, int64, float16, bfloat16 |
 | Events (timing) | ✅ steady_clock |
 | CUDA Graphs | ✅ Real DAG/topological sort |
@@ -60,7 +59,7 @@ Implements its own JSON/YAML/INI parser by string scanning. The codebase has `ll
 
 ---
 
-## Section 4 — Confirmed Wrong Results (Silent)
+## Section 3 — Confirmed Wrong Results (Silent)
 
 **These APIs return `SUCCESS` but compute incorrect output.**
 
@@ -78,23 +77,19 @@ Implements its own JSON/YAML/INI parser by string scanning. The codebase has `ll
 
 ---
 
-## Section 5 — Confirmed Stubs (Accept Calls, Return Success / NOT_SUPPORTED, Do Nothing Real)
+## Section 4 — Confirmed Stubs (Accept Calls, Return Success / NOT_SUPPORTED, Do Nothing Real)
 
 | API / Feature | File | Gap |
 |---|---|---|
-| Token manager: macOS Keychain | `token_manager_macos.cpp:102` | Always `ERR_NOT_SUPPORTED` |
-| Token manager: Linux libsecret | `token_manager_linux.cpp:204,218` | Always `ERR_NOT_SUPPORTED` |
-| Token manager: Windows DPAPI | `token_manager_win32.cpp:70` | Always `ERR_NOT_SUPPORTED` |
-| VFIO GPU passthrough | `gpu_passthrough.cpp` | Detected, not activated |
+| CUPTI event group read (hardware) | `cupti_shim.cpp` | Returns empty — software counters only, no real HW PMU |
+| CUPTI `achieved_occupancy` | `cupti_shim.cpp` | Fixed 0.75 proxy; no real warp scheduler data |
 
 ---
 
-## Section 6 — Not Implemented (No Code Exists)
+## Section 5 — Not Implemented (No Code Exists)
 
 | Missing | Impact |
 |---|---|
 | SASS execution | Pre-compiled CUDA libraries unusable |
 | CUDA TMA instructions | Hopper TMA kernels fail to JIT-compile |
-| Multi-GPU P2P | `cudaMemcpyPeer` uses slow host staging |
-| Hardware performance counters | No CUPTI/profiling capability |
 | MPS multi-process | Single process per virtual device |
