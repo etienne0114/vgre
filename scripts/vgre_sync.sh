@@ -72,15 +72,24 @@ _check_and_install_deps() {
         echo "  [OK] Build driver present"
     fi
 
-    # LLVM dev libraries
+    # LLVM dev libraries — VGRE requires exactly LLVM 18
     local LLVM_FOUND=0
-    for cfg in llvm-config llvm-config-18 llvm-config-17 llvm-config-16; do
-        command -v "$cfg" >/dev/null 2>&1 && LLVM_FOUND=1 && \
-            echo "  [OK] LLVM $($cfg --version) ($cfg)" && break
+    for cfg in llvm-config-18 llvm-config; do
+        if command -v "$cfg" >/dev/null 2>&1; then
+            local VER
+            VER=$("$cfg" --version 2>/dev/null | grep -oE '^[0-9]+' || echo "0")
+            if [[ "$VER" == "18" ]]; then
+                LLVM_FOUND=1
+                echo "  [OK] LLVM $("$cfg" --version) ($cfg)"
+                break
+            else
+                echo "  [WARN] Found LLVM $("$cfg" --version) ($cfg) — VGRE requires LLVM 18; ignoring"
+            fi
+        fi
     done
     if [[ $LLVM_FOUND -eq 0 ]]; then
-        echo "  [MISSING] LLVM dev libraries"
-        MISSING_APT+=(llvm-dev clang libclang-dev); MISSING_DNF+=(llvm-devel clang-devel)
+        echo "  [MISSING] LLVM 18 dev libraries (llvm-18, clang-18, libclang-18-dev)"
+        MISSING_APT+=(llvm-18-dev clang-18 libclang-18-dev); MISSING_DNF+=(llvm18-devel clang18-devel)
         MISSING_BREW+=(llvm)
         NEED_INSTALL=1
     fi

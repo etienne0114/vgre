@@ -23,8 +23,8 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(
   int sms = props.multiProcessorCount;
   if (sms <= 0) sms = 1;
 
-  // Heuristic: each "SM" can hold ~2048 threads (Ampere-like).
-  constexpr int kThreadsPerSM = 2048;
+  // Use the device-reported threads-per-SM; fall back to 2048 (Ampere) if unset.
+  int kThreadsPerSM = (props.maxThreadsPerSM > 0) ? props.maxThreadsPerSM : 2048;
   int blocksPerSM = kThreadsPerSM / blockSize;
   if (blocksPerSM < 1) blocksPerSM = 1;
 
@@ -70,7 +70,8 @@ CUresult cuOccupancyMaxPotentialBlockSize(
     int sms = props.multiProcessorCount;
     if (sms <= 0) sms = 1;
     // minGridSize = number of blocks to saturate all SMs.
-    int blocksPerSM = 2048 / preferred;
+    int tPerSM = (props.maxThreadsPerSM > 0) ? props.maxThreadsPerSM : 2048;
+    int blocksPerSM = tPerSM / preferred;
     if (blocksPerSM < 1) blocksPerSM = 1;
     *minGridSize = blocksPerSM * sms;
   }

@@ -41,15 +41,21 @@ typedef enum {
     // VGRE extension: half-precision transforms. CUDA exposes FP16 plans
     // through cuFFT Xt; these compact types keep the shim usable without
     // pulling in the CUDA headers.
-    CUFFT_R16C = 0x72,
-    CUFFT_C16R = 0x73,
-    CUFFT_C16C = 0x74
+    CUFFT_R16C   = 0x72,
+    CUFFT_C16R   = 0x73,
+    CUFFT_C16C   = 0x74,
+    CUFFT_C16BFC = 0x75  // bfloat16 complex-to-complex
 } cufftType_t;
 
 typedef struct {
     uint16_t x;
     uint16_t y;
 } cufftHalfComplex;
+
+typedef struct {
+    uint16_t x;  // bfloat16 real part
+    uint16_t y;  // bfloat16 imaginary part
+} cufftBF16Complex;
 
 // ── Direction ────────────────────────────────────────────────────────────────
 typedef enum {
@@ -78,6 +84,7 @@ cufftResult_t cufftExecZ2D(cufftHandle plan, void *idata, void *odata);
 cufftResult_t cufftExecR16C(cufftHandle plan, void *idata, void *odata);
 cufftResult_t cufftExecC16R(cufftHandle plan, void *idata, void *odata);
 cufftResult_t cufftExecC16C(cufftHandle plan, void *idata, void *odata, int direction);
+cufftResult_t cufftExecC16BFC(cufftHandle plan, void *idata, void *odata, int direction);
 
 // ── Stream / workspace association ───────────────────────────────────────────
 cufftResult_t cufftSetStream(cufftHandle plan, void *stream);

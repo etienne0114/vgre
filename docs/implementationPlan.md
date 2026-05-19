@@ -1,6 +1,6 @@
 # VGRE Implementation Plan
 
-**Version**: 6.0.0  
+**Version**: 7.0.0  
 **Date**: 2026-05-19 (updated)  
 **Basis**: Full code-verified audit — tcp_cluster (43 files), all advanced/, api/, core/, runtime/, compiler/, scripts/  
 **Format**: Priority-ordered. Completed items moved to ✅ section. Remaining items have file + line reference and concrete fix.
@@ -55,65 +55,32 @@
 - ✅ P3-1: `<sys/stat.h>` guarded with `#if !defined(_WIN32)` in `configuration_manager_validation.cpp`, `configuration_manager_file_io.cpp`, `ipc_manager.cpp`
 - ✅ P3-2: macOS `#elif defined(__APPLE__)` branch added to `PlatformDetection::getCurrentPlatform()`
 
-### Code Quality (P4 items — partial)
+### Code Quality (P4 items — all resolved)
 - ✅ P4-1: `cleanupServerAuthThreads()` merged into `server_loop_core.cpp`; `server_loop_auth_mgmt.cpp` deleted
+- ✅ P4-2: `dispatch_impl.cpp` renamed to `dispatch_partition_impl.cpp`; CMakeLists.txt updated
 - ✅ P4-4: Python integration tests registered in `tests/CMakeLists.txt` with `SKIP_REGULAR_EXPRESSION` for missing deps
 - ✅ P4-5: `benchmark.py` exits 1 with error message when VGRE bindings are not importable
+- ✅ P4-6: Remaining 4 hardcoded `7777` occurrences replaced with `kDefaultClusterPort` (`hybrid_compute_manager_remote.cpp`, `vgre_worker_cli.cpp`) or commented cross-reference (`vgre-start.sh`, `Start-VGRE.ps1`)
+- ✅ P4-7: `test_python_authoritative.py` now asserts profiler report is non-empty (no silent fallback)
+- ✅ P4-8: `vgre_sync.sh` now verifies LLVM is version 18; rejects older versions with a clear error
+
+### Functionality Gaps (formerly P1 — all resolved or confirmed already implemented)
+- ✅ P1-1: cuDNN Backend v8 — fully implemented (conv fwd/bwd, act, BN, pool, matmul, reduction, attention, pointwise, reshape, gen_stats, signal)
+- ✅ P1-2: cuSPARSE SpGEMM — fully implemented; two-pass CSR×CSR algorithm in `cusparse_factorization.cpp`
+- ✅ P1-3: cuSolver batched APIs — `cusolverDnSpotrfBatched/DpotrfBatched` + `cusolverDnSgetrsBatched/DgetrsBatched` loop unbatched routines per problem
+- ✅ P1-4: PTX multi-module linker — `cuLinkComplete` now strips redundant `.extern .func` declarations for symbols defined in the merged PTX, enabling cross-module linking
+
+### Smaller Gaps (Section 7)
+- ✅ cuFFT BF16 — `CUFFT_C16BFC` type + `cufftExecC16BFC` implemented; BF16↔float32 via bit-shift with round-to-nearest-even
+- ✅ cuOccupancy SM count — `cuOccupancyMaxActiveBlocksPerMultiprocessor` now reads `props.maxThreadsPerSM` instead of hardcoded 2048
+- ✅ cuRAND MTGP32 device-side — `curandStateMtgp32` + full MT19937 twist engine added to `curand_kernel.h`
+
+### Script / Infrastructure
+- ✅ `vgre-start.sh` — ping reachability check when `--master-ip` is provided; fails fast with diagnostics
 
 ---
 
-## 🟠 P1 — Functionality Gaps (Impact ML Workloads)
-
-### P1-1: cuDNN Backend v8 Execution Graph
-**File**: `src/api/cudnn/cudnn_backend_api.cpp:744`  
-`cudnnBackendExecute` returns NOT_SUPPORTED. PyTorch ≥ 2.0 uses v8 backend for all cuDNN ops.
-
-**Fix**: Map the v8 descriptor graph to existing v7 calls (cudnnConvolutionForward, etc.). The descriptor types already parsed; the execution path just needs a dispatch table.
-
-**Estimated effort**: 4-6 days.
-
-### P1-2: cuSPARSE SpGEMM Without External Library
-**File**: `src/api/cusparse/cusparse_factorization.cpp:497,561`  
-Returns NOT_SUPPORTED. Graph neural networks (DGL, PyG) use SpGEMM for message passing.
-
-**Fix**: Implement row-merge CSR×CSR multiplication in-house. Algorithm:
-1. Symbolic pass: compute per-row nnz of output
-2. Numeric pass: accumulate with hash-map or sorted merge
-
-**Estimated effort**: 3-4 days.
-
-### P1-3: cuSolver Batched APIs
-Not implemented. PyTorch uses these for transformer attention.
-
-**Fix**: Loop the unbatched routines with stride arithmetic:
-```cpp
-for (int b = 0; b < batchSize; ++b)
-    cusolverDnSgetrf(A + b*lda*n, ldb, ipiv + b*n, info + b);
-```
-
-**Estimated effort**: 1 day.
-
-### P1-4: PTX Multi-Module Symbol Linking
-**File**: `src/api/cuda_driver/cuda_driver_module.cpp:189-273`  
-`cuLinkComplete` concatenates PTX without symbol resolution. Cross-module calls produce JIT errors.
-
-**Fix**: After concatenating PTX buffers:
-1. Parse each buffer's `.func` declarations to build a symbol table
-2. Rewrite cross-module calls to match the merged symbol names
-3. Deduplicate shared `.extern` and `.visible` declarations before passing to LLVM JIT
-
-**Estimated effort**: 3-4 days.
-
----
-
-##  P4 — Code Quality / Structural Issues (remaining)
-
-### P4-2: Dispatch Files Naming Confusion
-4 files implement the `DispatchManager` class: `dispatch_impl.cpp` (actually partition dispatch), `dispatch_manager_core.cpp`, `dispatch_manager_partitioned.cpp`, `dispatch_manager_remote.cpp`.
-
-`dispatch_impl.cpp` is misnamed — its header comment says "Partition dispatch implementation". Rename to `dispatch_partition_impl.cpp` for clarity.
-
-**Estimated effort**: 5 minutes (rename + update CMakeLists.txt).
+## � P4 — Code Quality / Structural Issues (remaining)
 
 ### P4-3: Configuration Manager Hand-Rolled JSON Parser
 **File**: `configuration_manager_file_io.cpp`  
@@ -123,31 +90,6 @@ The file implements its own JSON/YAML/INI parser using string scanning. The rest
 
 **Estimated effort**: 1-2 days (careful migration with tests).
 
-### P4-6: Remaining Hardcoded Port Occurrences
-**Files** (not yet updated to use `kDefaultClusterPort`):
-- `src/advanced/hybrid_compute_manager_remote.cpp:91` → `node.port = 7777;`
-- `src/advanced/vgre_worker_cli.cpp:48` → `int port = 7777;`
-- `scripts/vgre-start.sh:35` → `PORT="${VGRE_PORT:-7777}"`
-- `scripts/Start-VGRE.ps1:123` → `$port = "7777"`
-
-The `tcp_cluster_defaults.h` constant exists but these four locations were not yet updated.
-
-**Estimated effort**: 30 minutes.
-
-### P4-7: `test_python_authoritative.py` Masks Launch Failures
-**File**: `tests/python/test_python_authoritative.py:62`  
-Comment: `# Launch a dummy kernel if possible, or just check JSON`. When kernel launch fails the test falls back to JSON-only check and still passes, hiding actual launch errors.
-
-**Estimated effort**: 1 hour.
-
-### P4-8: `vgre_sync.sh` Does Not Verify LLVM Version
-**File**: `scripts/vgre_sync.sh`  
-Installs LLVM if missing but does not verify it is version 18. Installing system `llvm-17` produces a silent miscompile.
-
-**Fix**: Add `clang-18 --version | grep -q 'version 18'` check before proceeding.
-
-**Estimated effort**: 30 minutes.
-
 ---
 
 ## 🔵 P5 — Long-Term / Large Scope
@@ -156,19 +98,13 @@ These require significant architectural work. Listed for roadmap awareness.
 
 | Item | Gap | Effort |
 |---|---|---|
-| cuDNN Backend v8 | PyTorch 2.x dependency (P1-1) | 4-6 days |
-| cuSPARSE SpGEMM | GNN workloads (P1-2) | 3-4 days |
-| cuSolver batched APIs | Transformer attention (P1-3) | 1 day |
-| PTX multi-module linker | Separate compilation (P1-4) | 3-4 days |
 | CUDA TMA instructions | Hopper kernels | Medium — PTX translator extension |
 | SASS binary execution | Precompiled CUDA libraries | Very large — full ISA simulator |
 | Multi-GPU P2P | Frameworks using cudaMemcpyPeer | Large — multi-context model |
 | CUPTI hardware counters | Profiling | Medium — proxy software counters |
 | MPS multi-process | Single process per device | Large — IPC context sharing |
-| cuFFT BF16 | bfloat16 complex FFT | 0.5 days |
 | OpenMP for `__syncthreads` kernels | Single-threaded fallback | Medium — two-level dispatch |
 | OS keystore integration | macOS Keychain, libsecret, DPAPI | 1 day each |
-| cuOccupancy accurate SM count | Hardcoded 2048 threads/SM (Ampere only) | 0.5 days |
 
 ---
 
@@ -178,9 +114,7 @@ The 119-test suite passes (2 Python tests skip when deps missing) but does NOT v
 
 | Untested Area | Risk If Undetected |
 |---|---|
-| cuDNN Backend v8 | PyTorch 2.x ops fail silently |
-| Cross-module PTX linking | Separate-compilation apps JIT-fail |
-| MTGP32 device cuRAND | JIT compile error in kernel |
-| cuSolver batched | Transformer attention fails |
-| cuOccupancy SM heuristic | Suboptimal launch configs go undetected |
-| `vgre_sync.sh` LLVM version | Silent miscompile with wrong LLVM |
+| cuDNN Backend v8 graph execution | Untested op type crashes silently |
+| Cross-module PTX linking | Merged PTX may still have symbol conflicts not caught by unit tests |
+| MTGP32 statistical uniformity | MT19937 approximation may differ from real MTGP32 output |
+| cuSolver batched correctness | Loop-based batch correctness under concurrent use |

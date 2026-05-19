@@ -135,6 +135,28 @@ cusolverStatus_t cusolverDnDsyevd(cusolverDnHandle_t handle, char jobz, char upl
                                   int n, double *A, int lda, double *W, double *work,
                                   int Lwork, int *devInfo);
 
+// ── Batched Cholesky (potrfBatched) ──────────────────────────────────────────
+cusolverStatus_t cusolverDnSpotrfBatched(cusolverDnHandle_t handle, char uplo,
+                                          int n, float **Aarray, int lda,
+                                          int *infoArray, int batchSize);
+cusolverStatus_t cusolverDnDpotrfBatched(cusolverDnHandle_t handle, char uplo,
+                                          int n, double **Aarray, int lda,
+                                          int *infoArray, int batchSize);
+
+// ── Batched LU triangular solve (getrsBatched) ───────────────────────────────
+cusolverStatus_t cusolverDnSgetrsBatched(cusolverDnHandle_t handle, int trans,
+                                          int n, int nrhs,
+                                          const float **Aarray, int lda,
+                                          const int *devIpivArray,
+                                          float **Barray, int ldb,
+                                          int *info, int batchSize);
+cusolverStatus_t cusolverDnDgetrsBatched(cusolverDnHandle_t handle, int trans,
+                                          int n, int nrhs,
+                                          const double **Aarray, int lda,
+                                          const int *devIpivArray,
+                                          double **Barray, int ldb,
+                                          int *info, int batchSize);
+
 // ── cusolverSp — sparse solver handle and routines ─────────────────────────────
 // Implementation converts CSR to dense and delegates to LAPACK (getrf/getrs,
 // potrf, gelsd) — correct for small/medium systems without external sparse libs.

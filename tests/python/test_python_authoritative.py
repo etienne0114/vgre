@@ -59,12 +59,9 @@ def test_profiler_and_logs():
     with Runtime() as rt:
         rt.set_native_profiler_enabled(True)
         
-        # Launch a dummy kernel if possible, or just check JSON
-        try:
-            prof_json = rt.get_native_profiler_report()
-            assert isinstance(prof_json, str)
-        except Exception as e:
-            print(f"Profiler report failed (might be empty): {e}")
+        prof_json = rt.get_native_profiler_report()
+        assert isinstance(prof_json, str), f"Profiler report must return a string, got {type(prof_json)}"
+        assert len(prof_json) > 0, "Profiler report must not be empty when profiler is enabled"
             
         logs = rt.get_engine_logs()
         if isinstance(logs, list) and logs:
