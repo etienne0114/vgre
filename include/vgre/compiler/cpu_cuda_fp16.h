@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 
 namespace vgre_cuda {
 
@@ -16,7 +17,7 @@ struct __half {
 
     __half(float f) {
         uint32_t fi;
-        std::memcpy(&fi, &f, 4);
+        memcpy(&fi, &f, 4);
         uint16_t sign  = (fi >> 31) & 0x1u;
         int32_t  exp32 = ((fi >> 23) & 0xFF) - 127;  // unbiased exponent
         uint32_t mant  = fi & 0x7FFFFFu;              // 23-bit mantissa
@@ -73,7 +74,7 @@ struct __half {
             fi = (sign << 31) | (e << 23) | (mant << 13);
         }
         float result;
-        std::memcpy(&result, &fi, 4);
+        memcpy(&result, &fi, 4);
         return result;
     }
 };

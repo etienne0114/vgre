@@ -316,15 +316,15 @@ inline void vgre_mma_m16n8k16_f32_f16(
     // For correctness in the CPU serial model we simply accumulate.
     auto f16_lo = [](unsigned r) -> float {
         uint16_t lo = static_cast<uint16_t>(r & 0xFFFF);
-        uint32_t f; std::memcpy(&f, &lo, sizeof(uint16_t));
+        uint32_t f; memcpy(&f, &lo, sizeof(uint16_t));
         f = (f & 0x8000u) << 16 | (((f & 0x7C00u) + 0x1C000u) << 13) | ((f & 0x03FFu) << 13);
-        float rv; std::memcpy(&rv, &f, sizeof(float)); return rv;
+        float rv; memcpy(&rv, &f, sizeof(float)); return rv;
     };
     auto f16_hi = [](unsigned r) -> float {
         uint16_t hi = static_cast<uint16_t>(r >> 16);
-        uint32_t f; std::memcpy(&f, &hi, sizeof(uint16_t));
+        uint32_t f; memcpy(&f, &hi, sizeof(uint16_t));
         f = (f & 0x8000u) << 16 | (((f & 0x7C00u) + 0x1C000u) << 13) | ((f & 0x03FFu) << 13);
-        float rv; std::memcpy(&rv, &f, sizeof(float)); return rv;
+        float rv; memcpy(&rv, &f, sizeof(float)); return rv;
     };
     // A fragments: a0=(a[0],a[1]), a1=(a[2],a[3]), a2=(a[4],a[5]), a3=(a[6],a[7])
     float A[8] = { f16_lo(a0), f16_hi(a0), f16_lo(a1), f16_hi(a1),
@@ -348,11 +348,11 @@ inline void vgre_mma_m16n8k16_f32_bf16(
     // BF16: top 16 bits of FP32 representation
     auto bf16_lo = [](unsigned r) -> float {
         uint32_t f = (r & 0xFFFF) << 16;
-        float rv; std::memcpy(&rv, &f, sizeof(float)); return rv;
+        float rv; memcpy(&rv, &f, sizeof(float)); return rv;
     };
     auto bf16_hi = [](unsigned r) -> float {
         uint32_t f = (r & 0xFFFF0000u);
-        float rv; std::memcpy(&rv, &f, sizeof(float)); return rv;
+        float rv; memcpy(&rv, &f, sizeof(float)); return rv;
     };
     float A[8] = { bf16_lo(a0), bf16_hi(a0), bf16_lo(a1), bf16_hi(a1),
                    bf16_lo(a2), bf16_hi(a2), bf16_lo(a3), bf16_hi(a3) };
@@ -373,7 +373,7 @@ inline void vgre_mma_m16n8k8_tf32(
     // TF32: round to nearest with 10-bit mantissa (mask lower 13 bits)
     auto tf32 = [](unsigned r) -> float {
         uint32_t masked = r & 0xFFFFE000u;
-        float rv; std::memcpy(&rv, &masked, sizeof(float)); return rv;
+        float rv; memcpy(&rv, &masked, sizeof(float)); return rv;
     };
     float A[2] = { tf32(a0), tf32(a1) };
     float acc[4] = {c0, c1, c2, c3};
@@ -522,7 +522,7 @@ inline const float* wgmma_desc_ptr_f32(uint64_t desc) {
 // BF16 word → float
 inline float wgmma_bf16_to_f32(uint16_t v) {
     uint32_t f = static_cast<uint32_t>(v) << 16;
-    float rv; std::memcpy(&rv, &f, 4); return rv;
+    float rv; memcpy(&rv, &f, 4); return rv;
 }
 // FP16 word → float  (IEEE 754 half-precision)
 inline float wgmma_f16_to_f32(uint16_t v) {
@@ -542,7 +542,7 @@ inline float wgmma_f16_to_f32(uint16_t v) {
     } else {
         f = sign | ((exp + 0x1C000u) << 13) | (mant << 13);
     }
-    float rv; std::memcpy(&rv, &f, 4); return rv;
+    float rv; memcpy(&rv, &f, 4); return rv;
 }
 
 } // namespace detail
@@ -651,9 +651,9 @@ inline void vgre_wgmma_m64n256k8_tf32_f32(float* d, uint64_t descA, uint64_t des
     const float* B = detail::wgmma_desc_ptr_f32(descB);
     // TF32: truncate mantissa to 10 bits
     auto tf32 = [](float v) -> float {
-        uint32_t u; std::memcpy(&u, &v, 4);
+        uint32_t u; memcpy(&u, &v, 4);
         u &= 0xFFFFE000u;
-        float rv; std::memcpy(&rv, &u, 4); return rv;
+        float rv; memcpy(&rv, &u, 4); return rv;
     };
     for (int m = 0; m < 64; ++m)
         for (int n = 0; n < 256; ++n) {
@@ -679,7 +679,7 @@ inline uint64_t vgre_make_wgmma_desc(const void* ptr)
 // cp.async.bulk: copy `bytes` bytes from src (global) into dst (shared/smem).
 inline void vgre_cp_async_bulk(void* dst, const void* src, unsigned bytes)
 {
-    std::memcpy(dst, src, bytes);
+    memcpy(dst, src, bytes);
 }
 
 // cp.async.bulk.tensor.Nd: copy a tensor tile using TMA descriptor.
@@ -698,7 +698,7 @@ inline void vgre_tma_load_2d(void* dst, const VgreTMADescriptor* desc,
     const uint8_t* base = reinterpret_cast<const uint8_t*>(desc->baseAddr);
     uint8_t* out = reinterpret_cast<uint8_t*>(dst);
     for (uint32_t row = 0; row < tileH; ++row)
-        std::memcpy(out + row * tileW * desc->elemBytes,
+        memcpy(out + row * tileW * desc->elemBytes,
                     base + (r + row) * desc->stride[0] + c * desc->elemBytes,
                     tileW * desc->elemBytes);
 }
@@ -709,7 +709,7 @@ inline void vgre_tma_store_2d(const VgreTMADescriptor* desc, const void* src,
     uint8_t* base = reinterpret_cast<uint8_t*>(desc->baseAddr);
     const uint8_t* in = reinterpret_cast<const uint8_t*>(src);
     for (uint32_t row = 0; row < tileH; ++row)
-        std::memcpy(base + (r + row) * desc->stride[0] + c * desc->elemBytes,
+        memcpy(base + (r + row) * desc->stride[0] + c * desc->elemBytes,
                     in + row * tileW * desc->elemBytes,
                     tileW * desc->elemBytes);
 }
@@ -728,7 +728,7 @@ inline void vgre_tma_load_3d(void* dst, const VgreTMADescriptor* desc,
         for (uint32_t row = 0; row < th; ++row) {
             size_t dst_off = (d * th + row) * tw * e;
             size_t src_off = ((z + d) * desc->stride[1] + (y + row) * desc->stride[0] + x) * e;
-            std::memcpy(out + dst_off, base + src_off, tw * e);
+            memcpy(out + dst_off, base + src_off, tw * e);
         }
 }
 
@@ -745,7 +745,7 @@ inline void vgre_tma_load_4d(void* dst, const VgreTMADescriptor* desc,
                 size_t dst_off = ((q * td + d) * th + row) * tw * e;
                 size_t src_off = ((w + q) * desc->stride[2] + (z + d) * desc->stride[1]
                                   + (y + row) * desc->stride[0] + x) * e;
-                std::memcpy(out + dst_off, base + src_off, tw * e);
+                memcpy(out + dst_off, base + src_off, tw * e);
             }
 }
 
@@ -764,7 +764,7 @@ inline void vgre_tma_load_5d(void* dst, const VgreTMADescriptor* desc,
                     size_t src_off = (((v + p) * desc->stride[3] + (w + q) * desc->stride[2]
                                        + (z + d) * desc->stride[1]
                                        + (y + row) * desc->stride[0] + x)) * e;
-                    std::memcpy(out + dst_off, base + src_off, tw * e);
+                    memcpy(out + dst_off, base + src_off, tw * e);
                 }
 }
 
@@ -902,7 +902,7 @@ inline float fp8e4m3_to_f32(uint8_t b) {
     if (exp4 == 0x0Fu && mant == 0x07u) {
         // NaN encoding (S1111111)
         uint32_t nan = 0x7FC00000u | (static_cast<uint32_t>(sign) << 31);
-        float f; std::memcpy(&f, &nan, 4); return f;
+        float f; memcpy(&f, &nan, 4); return f;
     }
     float value;
     if (exp4 == 0) {
@@ -926,11 +926,11 @@ inline float fp8e5m2_to_f32(uint8_t b) {
         if (mant == 0) {
             // Infinity
             uint32_t inf = 0x7F800000u | (static_cast<uint32_t>(sign) << 31);
-            float f; std::memcpy(&f, &inf, 4); return f;
+            float f; memcpy(&f, &inf, 4); return f;
         } else {
             // NaN
             uint32_t nan = 0x7FC00000u | (static_cast<uint32_t>(sign) << 31);
-            float f; std::memcpy(&f, &nan, 4); return f;
+            float f; memcpy(&f, &nan, 4); return f;
         }
     }
     float value;
@@ -949,7 +949,7 @@ inline float fp8e5m2_to_f32(uint8_t b) {
 // ── float → E4M3 byte ────────────────────────────────────────────────────────
 inline uint8_t f32_to_fp8e4m3(float f) {
     if (std::isnan(f)) return 0x7Fu; // canonical NaN (positive, S=0,e=0xF,m=0x7)
-    uint32_t bits; std::memcpy(&bits, &f, 4);
+    uint32_t bits; memcpy(&bits, &f, 4);
     uint8_t sign = static_cast<uint8_t>((bits >> 31) & 1u);
     int exp32 = static_cast<int>((bits >> 23) & 0xFFu) - 127;
     uint32_t mant32 = bits & 0x7FFFFFu;
@@ -983,7 +983,7 @@ inline uint8_t f32_to_fp8e5m2(float f) {
     if (std::isinf(f)) {
         return static_cast<uint8_t>(f > 0 ? 0x7C : 0xFC); // ±Inf
     }
-    uint32_t bits; std::memcpy(&bits, &f, 4);
+    uint32_t bits; memcpy(&bits, &f, 4);
     uint8_t sign = static_cast<uint8_t>((bits >> 31) & 1u);
     int exp32 = static_cast<int>((bits >> 23) & 0xFFu) - 127;
     uint32_t mant32 = bits & 0x7FFFFFu;

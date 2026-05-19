@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 #include <algorithm>
 #include <immintrin.h>
 
@@ -44,13 +45,13 @@ struct fp16_t {
     uint32_t result = (sign << 31) | (fp32_exp << 23) | fp32_mantissa;
     
     float res;
-    std::memcpy(&res, &result, sizeof(float));
+    memcpy(&res, &result, sizeof(float));
     return res;
   }
 
   void from_float(float f) {
     uint32_t bits;
-    std::memcpy(&bits, &f, sizeof(float));
+    memcpy(&bits, &f, sizeof(float));
 
     uint32_t sign = (bits >> 31) & 1;
     uint32_t exponent = (bits >> 23) & 0xFF;

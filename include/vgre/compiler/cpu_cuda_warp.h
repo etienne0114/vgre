@@ -160,7 +160,7 @@ inline T vgre_shfl_impl(uint64_t* buf, int lane, int srcLane, int width) {
     static_assert(sizeof(T) <= 8, "warp shuffle supports up to 64-bit types");
     T val;
     uint64_t raw = buf[srcLane % width];
-    std::memcpy(&val, &raw, sizeof(T));
+    memcpy(&val, &raw, sizeof(T));
     (void)lane;
     return val;
 }
@@ -172,7 +172,7 @@ template<typename T>
 inline void vgre_shfl_write(unsigned int mask, uint64_t* buf, int lane, T val) {
     if ((mask >> (lane & 31)) & 1u) {
         uint64_t raw = 0;
-        std::memcpy(&raw, &val, sizeof(T));
+        memcpy(&raw, &val, sizeof(T));
         buf[lane & 31] = raw;
     }
 }
@@ -189,7 +189,7 @@ inline T __shfl_sync(unsigned int mask, T val, int srcLane, int width = 32) {
     // Only participating lanes write their value
     if ((mask >> lane) & 1u) {
         uint64_t raw = 0;
-        std::memcpy(&raw, &val, sizeof(T));
+        memcpy(&raw, &val, sizeof(T));
         buf[lane] = raw;
     }
     vgre_jit_block_barrier_sync();
@@ -214,7 +214,7 @@ inline T __shfl_up_sync(unsigned int mask, T val, unsigned int delta, int width 
     int lane = vgre_jit_get_threadIdx()->x % width;
     if ((mask >> lane) & 1u) {
         uint64_t raw = 0;
-        std::memcpy(&raw, &val, sizeof(T));
+        memcpy(&raw, &val, sizeof(T));
         buf[lane] = raw;
     }
     vgre_jit_block_barrier_sync();
@@ -240,7 +240,7 @@ inline T __shfl_down_sync(unsigned int mask, T val, unsigned int delta, int widt
     int lane = vgre_jit_get_threadIdx()->x % width;
     if ((mask >> lane) & 1u) {
         uint64_t raw = 0;
-        std::memcpy(&raw, &val, sizeof(T));
+        memcpy(&raw, &val, sizeof(T));
         buf[lane] = raw;
     }
     vgre_jit_block_barrier_sync();
@@ -266,7 +266,7 @@ inline T __shfl_xor_sync(unsigned int mask, T val, int laneMask, int width = 32)
     int lane = vgre_jit_get_threadIdx()->x % width;
     if ((mask >> lane) & 1u) {
         uint64_t raw = 0;
-        std::memcpy(&raw, &val, sizeof(T));
+        memcpy(&raw, &val, sizeof(T));
         buf[lane] = raw;
     }
     vgre_jit_block_barrier_sync();
