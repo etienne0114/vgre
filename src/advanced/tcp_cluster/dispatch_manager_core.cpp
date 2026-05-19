@@ -4,14 +4,19 @@
 
 #include "vgre/advanced/tcp_cluster/internal/dispatch_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include <cstring>
+#include <cstdlib>
 
 namespace vgre {
 namespace advanced {
 
 DispatchManager::DispatchManager(TCPClusterManager* parent) 
-    : parent_(parent), result_shm_offset_(128ULL * 1024 * 1024) {
+    : parent_(parent), result_shm_offset_([]() -> uint64_t {
+        const char* e = vgre_get_config("VGRE_SHM_RESULT_OFFSET");
+        return e ? static_cast<uint64_t>(std::stoull(e)) : 128ULL * 1024 * 1024;
+    }()) {
   if (!parent_) { throw std::invalid_argument("DispatchManager: parent cannot be null"); }
 }
 

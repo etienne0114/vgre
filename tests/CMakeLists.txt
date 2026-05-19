@@ -608,3 +608,24 @@ set_tests_properties(
     WebSocketTransportIntegration
     PROPERTIES RESOURCE_LOCK vgre_tcp_cluster_port
 )
+
+# ── Python integration tests ─────────────────────────────────────────────────
+find_program(PYTHON3 python3)
+if(PYTHON3)
+    add_test(NAME PyTorchIntegration
+             COMMAND ${PYTHON3} ${CMAKE_SOURCE_DIR}/tests/python/test_pytorch.py
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(PyTorchIntegration PROPERTIES
+                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+                         TIMEOUT 120
+                         LABELS "python"
+                         SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named")
+    add_test(NAME TensorFlowIntegration
+             COMMAND ${PYTHON3} ${CMAKE_SOURCE_DIR}/tests/python/test_tensorflow.py
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(TensorFlowIntegration PROPERTIES
+                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+                         TIMEOUT 120
+                         LABELS "python"
+                         SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named")
+endif()

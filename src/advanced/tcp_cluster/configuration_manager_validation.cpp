@@ -6,12 +6,15 @@
  */
 
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
+#include "vgre/advanced/tcp_cluster/tcp_cluster_defaults.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
 #include <sstream>
 #include <algorithm>
 #include <fstream>
+#if !defined(_WIN32)
 #include <sys/stat.h>
+#endif
 #include <cstring>
 
 #include "vgre/common/os_backend.h"
@@ -98,7 +101,7 @@ ConfigurationValidationResult ConfigurationManager::validateConfiguration(const 
             // Basic IP:port validation
             size_t colon_pos = node.find(':');
             if (colon_pos == std::string::npos) {
-                result.warnings.push_back("Cluster node missing port: " + node + " (assuming default port 7777)");
+                result.warnings.push_back("Cluster node missing port: " + node + " (assuming default port " + std::to_string(vgre::advanced::kDefaultClusterPort) + ")");
             } else {
                 std::string port_str = node.substr(colon_pos + 1);
                 try {
@@ -213,7 +216,7 @@ ConfigurationValidationResult ConfigurationManager::validateNetworkConnectivity(
             
             // Parse IP and port
             std::string ip = node;
-            int port = 7777; // Default port
+            int port = vgre::advanced::kDefaultClusterPort; // Default port
             
             size_t colon_pos = node.find(':');
             if (colon_pos != std::string::npos) {

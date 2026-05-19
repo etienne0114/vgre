@@ -6,6 +6,7 @@
 #include "vgre/common/sockets.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include "vgre/core/runtime_engine.h"
+#include "vgre/common/types.h"
 #include "vgre/core/memory_manager.h"
 #include <cstring>
 #include <algorithm>
@@ -199,10 +200,7 @@ VGREResult MemorySyncManager::streamArgumentsToWorker(
 VGREResult MemorySyncManager::sendScalarArg(
     void *arg, int arg_index, ArgType type,
     std::shared_ptr<TCPClusterManager::ClientConnection> client) {
-  size_t arg_size = 8;
-  if (type == ArgType::INT32 || type == ArgType::UINT32 || type == ArgType::FLOAT32) {
-    arg_size = 4;
-  }
+  size_t arg_size = vgre_get_type_size(static_cast<int>(type));
 
   ArgScalarPacket apkt{};
   apkt.arg_index = static_cast<uint32_t>(arg_index);

@@ -5,6 +5,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include "vgre/advanced/tcp_cluster/internal/diagnostic_logger.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include <fstream>
 
@@ -57,9 +58,10 @@ void TCPClusterManager::exportMetricsForMonitoring() {
         json << "  }\n";
         json << "}";
 
-        // Export to a local JSON file in the working directory (cross-platform)
-        // In a real production environment, this could be sent to a telemetry service.
-        std::ofstream f("vgre_tcp_cluster_metrics.json");
+        // Export to a configurable path (default: /tmp) for consistency with DiagnosticLogger.
+        const char* env_path = vgre_get_config("VGRE_METRICS_OUTPUT_PATH");
+        std::string out_path = env_path ? env_path : "/tmp/vgre_tcp_cluster_metrics.json";
+        std::ofstream f(out_path);
         if (f.is_open()) { f << json.str(); f.close(); }
     } catch (...) {}
 }

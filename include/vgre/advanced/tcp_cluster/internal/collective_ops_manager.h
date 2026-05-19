@@ -39,6 +39,11 @@ public:
   template<typename T>
   void applyReduce(T* dst, const T* src, size_t count, ReductionOp op);
 
+  // FP16/BF16 reduction: upcasts to float for Sum, accumulates, then downcasts.
+  // dst and src point to raw uint16_t buffers (2 bytes per element).
+  // datatype should be ArgType::FLOAT16 or ArgType::BFLOAT16.
+  void applyReduceFp16(uint8_t* dst, const uint8_t* src, size_t count, ReductionOp op, int datatype);
+
 private:
   // Master/worker paths for allReduce
   VGREResult masterAllReduce(void* ptr, size_t count, int datatype, ReductionOp op);

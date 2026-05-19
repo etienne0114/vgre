@@ -1,11 +1,14 @@
 #include "vgre/advanced/tcp_cluster/internal/collective_ops_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/advanced/tcp_cluster/internal/diagnostic_logger.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include "vgre/common/os_backend.h"
 #if defined(__linux__)
 #include <sys/sysinfo.h>  // struct sysinfo — RAM stats
@@ -82,18 +85,16 @@ VGREResult CollectiveOpsManager::masterAllReduce(void* ptr, size_t count, int da
     const char *envT = vgre_get_config("VGRE_REDUCTION_TIMEOUT_MS");
     if (envT) { int v = std::atoi(envT); if (v > 0) reductionTimeoutMs = v; }
     else {
-      // Estimate: count live workers, use their telemetry to compute timeout.
-      double maxWorkerLatencyMs = 0.0;
+      // Estimate timeout from data volume and measured bandwidth.
+      // transferMs = total_bytes / bandwidth; multiply by num_workers and 3× for ring overhead.
+      double bw_gbps = DiagnosticLogger::instance().getAverageBandwidthGbps();
+      if (bw_gbps <= 0.0) bw_gbps = 1.0; // fallback: 1 Gbps
+      size_t num_workers = 0;
       { std::lock_guard<std::recursive_mutex> cl(parent_->clients_mutex_);
-        for (const auto &c : parent_->clients_) {
-          if (c && c->active && c->last_telemetry.avg_kernel_latency_ms > 0)
-            maxWorkerLatencyMs = std::max(maxWorkerLatencyMs, c->last_telemetry.avg_kernel_latency_ms);
-        }
-      }
-      if (maxWorkerLatencyMs > 0.0) {
-        reductionTimeoutMs = static_cast<int>(maxWorkerLatencyMs * 2.0) + 5000; // 2× max observed latency + 5 s network buffer
-        reductionTimeoutMs = std::max(reductionTimeoutMs, 10000); // at least 10 s
-      }
+        for (const auto &c : parent_->clients_) if (c && c->active) ++num_workers; }
+      double transferMs = (static_cast<double>(total_bytes) * 8.0) / (bw_gbps * 1e9) * 1000.0;
+      reductionTimeoutMs = static_cast<int>(transferMs * static_cast<double>(num_workers > 0 ? num_workers : 1) * 3.0) + 5000;
+      reductionTimeoutMs = std::max(reductionTimeoutMs, 10000);
     }
   }
   // C4: Count active workers live inside the predicate — if a worker disconnects mid-reduction, the stale pre-captured count would deadlock.
@@ -139,10 +140,13 @@ VGREResult CollectiveOpsManager::workerAllReduce(void* ptr, size_t count, int da
   parent_->send_packet(parent_->client_fd_, PacketType::COLLECTIVE_OP, &op_packet, sizeof(op_packet), parent_->client_secure_channel_.get());
   parent_->send_packet(parent_->client_fd_, PacketType::RAW_DATA, ptr, total_bytes, parent_->client_secure_channel_.get());
   
-  // Wait for result from master (with 30-second timeout).
+  // Wait for result from master (configurable timeout, default 30 s).
+  int reductionTimeoutMs = 30000;
+  { const char* envT = vgre_get_config("VGRE_REDUCTION_TIMEOUT_MS");
+    if (envT) { int v = std::atoi(envT); if (v > 0) reductionTimeoutMs = v; } }
   std::unique_lock<std::mutex> lock(parent_->reduction_mutex_);
   parent_->active_reduction_buffer_.clear(); // discard stale data from prior call
-  bool success = parent_->reduction_cv_.wait_for(lock, std::chrono::seconds(30), [this]() {
+  bool success = parent_->reduction_cv_.wait_for(lock, std::chrono::milliseconds(reductionTimeoutMs), [this]() {
     return !parent_->active_reduction_buffer_.empty() || !parent_->isEnabled();
   });
   
@@ -176,7 +180,10 @@ VGREResult CollectiveOpsManager::barrier() {
     
     // Wait for all workers to send COOP_BARRIER_SYNC
     parent_->barrier_count_ = 0;
-    auto result = parent_->barrier_cv_.wait_for(lock, std::chrono::seconds(30), [this, active_workers]() {
+    int barrierTimeoutMs = 30000;
+    { const char* envT = vgre_get_config("VGRE_REDUCTION_TIMEOUT_MS");
+      if (envT) { int v = std::atoi(envT); if (v > 0) barrierTimeoutMs = v; } }
+    auto result = parent_->barrier_cv_.wait_for(lock, std::chrono::milliseconds(barrierTimeoutMs), [this, active_workers]() {
       return parent_->barrier_count_ >= static_cast<uint32_t>(active_workers);
     });
     
@@ -207,7 +214,10 @@ VGREResult CollectiveOpsManager::barrier() {
     
     // Wait for master to broadcast COOP_BARRIER_RESUME
     parent_->barrier_count_ = 0;
-    auto result = parent_->barrier_cv_.wait_for(lock, std::chrono::seconds(30), [this]() { return parent_->barrier_count_ > 0; });
+    int barrierTimeoutMs = 30000;
+    { const char* envT = vgre_get_config("VGRE_REDUCTION_TIMEOUT_MS");
+      if (envT) { int v = std::atoi(envT); if (v > 0) barrierTimeoutMs = v; } }
+    auto result = parent_->barrier_cv_.wait_for(lock, std::chrono::milliseconds(barrierTimeoutMs), [this]() { return parent_->barrier_count_ > 0; });
     if (!result) {
       VGRE_LOG_ERROR("TCPCluster", "Worker: Barrier timeout - master did not send resume");
       parent_->barrier_count_ = 0; return VGREResult::ERR_TIMEOUT;
@@ -321,6 +331,111 @@ void CollectiveOpsManager::applyReduce(T* dst, const T* src, size_t count, Reduc
   } else if (op == ReductionOp::Min) {
     for (size_t i = 0; i < count; ++i) if (src[i] < dst[i]) dst[i] = src[i];
   }
+}
+
+// ── FP16/BF16 helpers ─────────────────────────────────────────────────────────
+
+static float fp16_to_f32(uint16_t h) {
+    uint32_t sign = (h >> 15) & 1;
+    uint32_t exp  = (h >> 10) & 0x1F;
+    uint32_t mant = h & 0x3FF;
+    if (exp == 0) {
+        if (mant == 0) return sign ? -0.0f : 0.0f;
+        float f = static_cast<float>(mant) / 1024.0f * (1.0f / 16384.0f);
+        return sign ? -f : f;
+    } else if (exp == 31) {
+        return (mant == 0) ? (sign ? -std::numeric_limits<float>::infinity()
+                                   :  std::numeric_limits<float>::infinity())
+                           : std::numeric_limits<float>::quiet_NaN();
+    }
+    float f = (1.0f + static_cast<float>(mant) / 1024.0f)
+              * std::pow(2.0f, static_cast<int>(exp) - 15);
+    return sign ? -f : f;
+}
+
+static uint16_t f32_to_fp16(float f) {
+    uint32_t u; std::memcpy(&u, &f, sizeof(u));
+    uint32_t sign = (u >> 31) & 1;
+    int32_t exp = static_cast<int32_t>((u >> 23) & 0xFF) - 127;
+    uint32_t mant = u & 0x7FFFFF;
+    if (std::isnan(f)) return (sign << 15) | 0x7E00;
+    if (std::isinf(f)) return (sign << 15) | 0x7C00;
+    if (exp <= -25) return sign << 15; // zero / underflow
+    if (exp > 15) return (sign << 15) | 0x7C00; // overflow → inf
+    if (exp <= -14) {
+        int shift = -14 - exp;
+        uint32_t m = (1U << 23) | mant;
+        m >>= (shift + 1);
+        return static_cast<uint16_t>((sign << 15) | (m & 0x3FF));
+    }
+    uint32_t e = static_cast<uint32_t>(exp + 15);
+    uint32_t m = (mant + 0xFFFU) >> 13; // round to nearest
+    if (m > 0x3FF) { m = 0; e++; }
+    return static_cast<uint16_t>((sign << 15) | (e << 10) | (m & 0x3FF));
+}
+
+static float bf16_to_f32(uint16_t b) {
+    uint32_t u = (static_cast<uint32_t>(b) << 16);
+    float f; std::memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+static uint16_t f32_to_bf16(float f) {
+    uint32_t u; std::memcpy(&u, &f, sizeof(u));
+    // Round to nearest even: add 1 to bit 15 if bit 16 is 1
+    if ((u & 0x0001FFFFU) > 0x00010000U) u += 0x00010000U;
+    return static_cast<uint16_t>(u >> 16);
+}
+
+// ── applyReduceFp16 ───────────────────────────────────────────────────────────
+
+void CollectiveOpsManager::applyReduceFp16(
+    uint8_t* dst, const uint8_t* src, size_t count, ReductionOp op, int datatype) {
+    bool isBf16 = (static_cast<ArgType>(datatype) == ArgType::BFLOAT16);
+    auto decode = [&](uint16_t v) -> float {
+        return isBf16 ? bf16_to_f32(v) : fp16_to_f32(v);
+    };
+    auto encode = [&](float f) -> uint16_t {
+        return isBf16 ? f32_to_bf16(f) : f32_to_fp16(f);
+    };
+
+    if (op == ReductionOp::Sum) {
+        for (size_t i = 0; i < count; ++i) {
+            uint16_t dv, sv;
+            std::memcpy(&dv, dst + i * 2, sizeof(dv));
+            std::memcpy(&sv, src + i * 2, sizeof(sv));
+            float fv = decode(dv) + decode(sv);
+            uint16_t rv = encode(fv);
+            std::memcpy(dst + i * 2, &rv, sizeof(rv));
+        }
+    } else if (op == ReductionOp::Prod) {
+        for (size_t i = 0; i < count; ++i) {
+            uint16_t dv, sv;
+            std::memcpy(&dv, dst + i * 2, sizeof(dv));
+            std::memcpy(&sv, src + i * 2, sizeof(sv));
+            float fv = decode(dv) * decode(sv);
+            uint16_t rv = encode(fv);
+            std::memcpy(dst + i * 2, &rv, sizeof(rv));
+        }
+    } else if (op == ReductionOp::Max) {
+        for (size_t i = 0; i < count; ++i) {
+            uint16_t dv, sv;
+            std::memcpy(&dv, dst + i * 2, sizeof(dv));
+            std::memcpy(&sv, src + i * 2, sizeof(sv));
+            float fv = decode(dv), fsv = decode(sv);
+            uint16_t rv = (fsv > fv) ? sv : dv;
+            std::memcpy(dst + i * 2, &rv, sizeof(rv));
+        }
+    } else if (op == ReductionOp::Min) {
+        for (size_t i = 0; i < count; ++i) {
+            uint16_t dv, sv;
+            std::memcpy(&dv, dst + i * 2, sizeof(dv));
+            std::memcpy(&sv, src + i * 2, sizeof(sv));
+            float fv = decode(dv), fsv = decode(sv);
+            uint16_t rv = (fsv < fv) ? sv : dv;
+            std::memcpy(dst + i * 2, &rv, sizeof(rv));
+        }
+    }
 }
 
 // Explicit template instantiations

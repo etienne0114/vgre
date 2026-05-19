@@ -40,12 +40,17 @@ enum class ArgType : uint8_t {
   FLOAT64,
   UINT32,
   UINT64,
-  STRUCT
+  STRUCT,
+  FLOAT16,
+  BFLOAT16
 };
 
 // Returns byte size of a scalar ArgType; POINTER/STRUCT/unknown → 8 (safe default).
 inline size_t vgre_get_type_size(int datatype) {
   switch (static_cast<ArgType>(datatype)) {
+    case ArgType::FLOAT16:
+    case ArgType::BFLOAT16:
+      return 2;
     case ArgType::INT32:
     case ArgType::UINT32:
     case ArgType::FLOAT32:

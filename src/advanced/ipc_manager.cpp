@@ -5,7 +5,9 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
+#endif
 #include <thread>
 
 #include "vgre/common/os_backend.h"

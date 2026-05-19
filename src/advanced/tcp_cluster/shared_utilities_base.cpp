@@ -3,6 +3,7 @@
  */
 
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include <sstream>
 #include <iomanip>
@@ -57,9 +58,12 @@ std::string TimeUtils::formatDuration(int ms) {
 PlatformInfo PlatformDetection::getCurrentPlatform() {
     PlatformInfo info;
 #ifdef _WIN32
-    info.type = PlatformType::WINDOWS; info.name = "Windows"; info.supports_shm_local = true; info.supports_rdma = true;
+    info.type = PlatformType::WINDOWS; info.name = "Windows"; info.supports_shm_local = true;
+    info.supports_rdma = (vgre_get_config("VGRE_RDMA_ENABLED") != nullptr);
 #elif defined(__linux__)
     info.type = PlatformType::LINUX; info.name = "Linux"; info.supports_shm_local = true; info.supports_rdma = true;
+#elif defined(__APPLE__)
+    info.type = PlatformType::MACOS; info.name = "macOS"; info.supports_shm_local = true; info.supports_rdma = false;
 #else
     info.type = PlatformType::UNKNOWN; info.name = "Unknown";
 #endif
