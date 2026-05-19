@@ -163,8 +163,9 @@ if (-not $keepExisting) {
     Write-Host "     SHA256: $($newFingerprint.Substring(0,16))..." -ForegroundColor Green
 
     Write-Host ""
-    Write-Host "Copy this token file to ALL worker nodes." -ForegroundColor Yellow
-    Write-Host "scp $TokenFile user@WORKER_IP:$TokenFile" -ForegroundColor Yellow
+    Write-Host "Copy this token file to ALL worker nodes:" -ForegroundColor Yellow
+    Write-Host "  scp `"$TokenFile`" $($env:USERNAME)@<WORKER_IP>:`"$TokenFile`"" -ForegroundColor Yellow
+    Write-Host "  (Replace <WORKER_IP> with the actual worker's IP address.)" -ForegroundColor DarkGray
 }
 
 # -- Step 2: Environment variable --------------------------------------------

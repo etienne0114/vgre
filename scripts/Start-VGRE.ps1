@@ -193,11 +193,12 @@ if ($fp) {
 # -------------------------------
 $env:PATH = "$InstallDir\lib;$InstallDir;$env:PATH"
 
-$workerExe = Join-Path $InstallDir "vgre-worker.exe"
+$workerExe    = Join-Path $InstallDir "vgre-worker.exe"
 $dashboardExe = Join-Path $InstallDir "vgre_dashboard.exe"
 
 if (-not (Test-Path $workerExe)) {
-    Write-Host "[ERROR] Worker not found." -ForegroundColor Red
+    Write-Host "[ERROR] vgre-worker.exe not found at $workerExe" -ForegroundColor Red
+    Write-Host "        Run Install-VGRETools.ps1 to install VGRE." -ForegroundColor Red
     exit 1
 }
 
@@ -215,6 +216,11 @@ if ($threads) {
 switch ($mode) {
 
     "master" {
+        if (-not (Test-Path $dashboardExe)) {
+            Write-Host "[ERROR] vgre_dashboard.exe not found at $dashboardExe" -ForegroundColor Red
+            Write-Host "        Run Install-VGRETools.ps1 to install the dashboard." -ForegroundColor Red
+            exit 1
+        }
         Write-Host "Starting master..." -ForegroundColor Green
         $env:VGRE_PORT = $port
         Start-Process -FilePath $dashboardExe
@@ -244,6 +250,12 @@ switch ($mode) {
         Write-Host "Press Enter to stop..."
 
         if (-not (Test-WorkerDependencies -WorkerExe $workerExe)) {
+            exit 1
+        }
+
+        if (-not (Test-Path $dashboardExe)) {
+            Write-Host "[ERROR] vgre_dashboard.exe not found at $dashboardExe" -ForegroundColor Red
+            Write-Host "        Run Install-VGRETools.ps1 to install the dashboard." -ForegroundColor Red
             exit 1
         }
 
