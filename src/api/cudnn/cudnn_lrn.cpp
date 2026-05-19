@@ -98,7 +98,7 @@ cudnnStatus_t cudnnLRNCrossChannelForward(
 
     // Compute scale and output in one pass
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (N * H * W > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (N * H * W > 256)
     #endif
     for (int n = 0; n < N; ++n)
     for (int h = 0; h < H; ++h)
@@ -172,7 +172,7 @@ cudnnStatus_t cudnnLRNCrossChannelBackward(
     std::vector<double> xOverScale(N * C * H * W);
 
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (N * C * H * W > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (N * C * H * W > 256)
     #endif
     for (int n = 0; n < N; ++n)
     for (int h = 0; h < H; ++h)
@@ -208,7 +208,7 @@ cudnnStatus_t cudnnLRNCrossChannelBackward(
     // For simplicity we compute the summation term directly.
 
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (N * H * W > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (N * H * W > 256)
     #endif
     for (int n = 0; n < N; ++n)
     for (int h = 0; h < H; ++h)

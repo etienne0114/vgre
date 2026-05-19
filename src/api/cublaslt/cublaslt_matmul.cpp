@@ -8,6 +8,10 @@
 #include <cstring>
 #include <vector>
 
+#ifndef M_PI
+#  define M_PI 3.14159265358979323846
+#endif
+
 using namespace vgre_lt;
 
 extern void refSgemm(bool tA, bool tB, int M, int N, int K,
@@ -26,7 +30,7 @@ void applyRelu(T *data, size_t count) {
     #ifdef _OPENMP
     #pragma omp parallel for if (count > 1024)
     #endif
-    for (size_t i = 0; i < count; ++i) if (data[i] < T(0)) data[i] = T(0);
+    for (int i = 0; i < (int)count; ++i) if (data[i] < T(0)) data[i] = T(0);
 }
 
 // DRELU: element-wise ReLU gradient — 1 where input > 0, else 0.
@@ -35,7 +39,7 @@ void applyDRelu(T *data, size_t count) {
     #ifdef _OPENMP
     #pragma omp parallel for if (count > 1024)
     #endif
-    for (size_t i = 0; i < count; ++i) data[i] = (data[i] > T(0)) ? T(1) : T(0);
+    for (int i = 0; i < (int)count; ++i) data[i] = (data[i] > T(0)) ? T(1) : T(0);
 }
 
 template<typename T>
@@ -43,7 +47,7 @@ void applyGelu(T *data, size_t count) {
     #ifdef _OPENMP
     #pragma omp parallel for if (count > 1024)
     #endif
-    for (size_t i = 0; i < count; ++i) {
+    for (int i = 0; i < (int)count; ++i) {
         T x = data[i];
         data[i] = T(0.5) * x * (T(1.0) + std::tanh(std::sqrt(T(2.0) / T(M_PI)) *
                                (x + T(0.044715) * x * x * x)));
@@ -58,7 +62,7 @@ void applyDGelu(T *data, size_t count) {
     #ifdef _OPENMP
     #pragma omp parallel for if (count > 1024)
     #endif
-    for (size_t i = 0; i < count; ++i) {
+    for (int i = 0; i < (int)count; ++i) {
         T x   = data[i];
         T cx  = c * (x + k * x * x * x);
         T th  = std::tanh(cx);
@@ -70,10 +74,10 @@ void applyDGelu(T *data, size_t count) {
 template<typename T>
 void applyBias(T *data, size_t rows, size_t cols, const T *bias) {
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (rows * cols > 1024)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (rows * cols > 1024)
     #endif
-    for (size_t r = 0; r < rows; ++r)
-        for (size_t c = 0; c < cols; ++c)
+    for (int r = 0; r < (int)rows; ++r)
+        for (int c = 0; c < (int)cols; ++c)
             data[r * cols + c] += bias[c];
 }
 
@@ -84,7 +88,7 @@ void applyBiasGrad(const T *data, size_t rows, size_t cols, T *biasGrad) {
     #ifdef _OPENMP
     #pragma omp parallel for if (rows > 64)
     #endif
-    for (size_t r = 0; r < rows; ++r)
+    for (int r = 0; r < (int)rows; ++r)
         for (size_t c = 0; c < cols; ++c)
             biasGrad[c] += data[r * cols + c];
 }

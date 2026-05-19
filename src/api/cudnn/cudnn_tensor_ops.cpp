@@ -96,7 +96,7 @@ cudnnStatus_t cudnnReduceTensor(
 
     // Per-output-element reduction
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static) if (ct->n * ct->c * ct->h * ct->w > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) schedule(static) if (ct->n * ct->c * ct->h * ct->w > 256)
     #endif
     for (int on = 0; on < ct->n; ++on)
     for (int oc = 0; oc < ct->c; ++oc)

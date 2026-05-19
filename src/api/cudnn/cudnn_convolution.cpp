@@ -125,7 +125,7 @@ cudnnStatus_t cudnnConvolutionForward(
         const float* xf = xPtr;
         const float* wf = wPtr;
         #ifdef _OPENMP
-        #pragma omp parallel for collapse(2) schedule(static) if (xt->n * ft->k * yt->h * yt->w > 1024)
+        #pragma omp parallel for OMP_COLLAPSE(2) schedule(static) if (xt->n * ft->k * yt->h * yt->w > 1024)
         #endif
         for (int n = 0; n < xt->n; ++n)
         for (int k = 0; k < ft->k; ++k)
@@ -219,7 +219,7 @@ cudnnStatus_t cudnnConvolutionBackwardData(
         const float* dyf = (const float*)dy;
         const float* wf = (const float*)w;
         #ifdef _OPENMP
-        #pragma omp parallel for collapse(2) schedule(static) if (dxt->n * dxt->c * dxt->h * dxt->w > 1024)
+        #pragma omp parallel for OMP_COLLAPSE(2) schedule(static) if (dxt->n * dxt->c * dxt->h * dxt->w > 1024)
         #endif
         for (int n = 0; n < dxt->n; ++n)
         for (int c = 0; c < dxt->c; ++c)
@@ -360,7 +360,7 @@ cudnnStatus_t cudnnConvolutionBiasActivationForward(
         const float* xf = (const float*)x;
         const float* wf = (const float*)w;
         #ifdef _OPENMP
-        #pragma omp parallel for collapse(2) schedule(static) if (xt->n * ft->k * yt->h * yt->w > 1024)
+        #pragma omp parallel for OMP_COLLAPSE(2) schedule(static) if (xt->n * ft->k * yt->h * yt->w > 1024)
         #endif
         for (int n = 0; n < xt->n; ++n)
         for (int k = 0; k < ft->k; ++k)

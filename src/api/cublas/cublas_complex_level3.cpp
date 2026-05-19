@@ -1,6 +1,7 @@
 // cuBLAS Complex (C/Z) Level-3 routines: GEMM, SYRK, SYR2K, TRSM, SYMM, TRMM
 
 #include "cublas_internal.h"
+#include "vgre/common/openmp_helper.h"
 #include <algorithm>
 #include <vector>
 
@@ -31,7 +32,7 @@ cublasStatus_t cublasCgemm_v2(cublasHandle_t handle,
 
     // C += alpha * op(A) * op(B)
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static) if(m * n > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) schedule(static) if(m * n > 256)
     #endif
     for (int j = 0; j < n; ++j) {
         for (int i = 0; i < m; ++i) {
@@ -75,7 +76,7 @@ cublasStatus_t cublasZgemm_v2(cublasHandle_t handle,
             C[j * ldc + i] = cuCmul(b, C[j * ldc + i]);
 
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static) if(m * n > 256)
+    #pragma omp parallel for OMP_COLLAPSE(2) schedule(static) if(m * n > 256)
     #endif
     for (int j = 0; j < n; ++j) {
         for (int i = 0; i < m; ++i) {

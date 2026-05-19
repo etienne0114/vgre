@@ -22,7 +22,7 @@ cudnnStatus_t cudnnBatchNormalizationForwardInference(
     const float* sc=(const float*)scale; const float* bi=(const float*)bias;
     const float* mu=(const float*)mean; const float* va=(const float*)var;
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (N * C * HW > 1024)
+    #pragma omp parallel for OMP_COLLAPSE(2) if (N * C * HW > 1024)
     #endif
     for (int n=0; n<N; ++n)
     for (int c=0; c<C; ++c)
@@ -104,7 +104,7 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
 
     if (mode == CUDNN_BATCHNORM_SPATIAL) {
         #ifdef _OPENMP
-        #pragma omp parallel for collapse(2) if (N * C * HW > 1024)
+        #pragma omp parallel for OMP_COLLAPSE(2) if (N * C * HW > 1024)
         #endif
         for (int n=0; n<N; ++n)
         for (int c=0; c<C; ++c) {
@@ -117,7 +117,7 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
         }
     } else {
         #ifdef _OPENMP
-        #pragma omp parallel for collapse(2) if (N * C * HW > 1024)
+        #pragma omp parallel for OMP_COLLAPSE(2) if (N * C * HW > 1024)
         #endif
         for (int n=0; n<N; ++n)
         for (int c=0; c<C; ++c)
@@ -217,7 +217,7 @@ cudnnStatus_t cudnnBatchNormalizationBackward(
         }
 
         #ifdef _OPENMP
-        #pragma omp parallel for collapse(2) if (N * C * HW > 1024)
+        #pragma omp parallel for OMP_COLLAPSE(2) if (N * C * HW > 1024)
         #endif
         for (int n=0; n<N; ++n)
         for (int c=0; c<C; ++c)
@@ -261,7 +261,7 @@ cudnnStatus_t cudnnBatchNormalizationBackward(
         }
 
         #ifdef _OPENMP
-        #pragma omp parallel for collapse(2) if (N * C * HW > 1024)
+        #pragma omp parallel for OMP_COLLAPSE(2) if (N * C * HW > 1024)
         #endif
         for (int n=0; n<N; ++n)
         for (int i=0; i<C*HW; ++i) {
