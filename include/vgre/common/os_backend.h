@@ -64,6 +64,10 @@
 #  include <netinet/in.h>
 #  include <arpa/inet.h>
 #  include <cerrno>
+// macOS uses MAP_ANON; Linux/BSD use MAP_ANONYMOUS. Provide a single name.
+#  ifndef MAP_ANONYMOUS
+#    define MAP_ANONYMOUS MAP_ANON
+#  endif
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────

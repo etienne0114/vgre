@@ -20,10 +20,15 @@
 #include <sys/wait.h>
 #endif
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#pragma GCC diagnostic ignored "-Wpedantic"
-#pragma GCC diagnostic ignored "-Wredundant-move"
+#if defined(__GNUC__) || defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wunused-parameter"
+#  pragma GCC diagnostic ignored "-Wpedantic"
+#  pragma GCC diagnostic ignored "-Wredundant-move"
+#elif defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable: 4100 4127 4244 4267 4324 4456 4459 4996)
+#endif
 #include <llvm/IR/DataLayout.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
@@ -45,7 +50,11 @@
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/Linker/Linker.h>
 #include <llvm/Transforms/Utils/Cloning.h>
-#pragma GCC diagnostic pop
+#if defined(__GNUC__) || defined(__clang__)
+#  pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#  pragma warning(pop)
+#endif
 
 
 #include "vgre/compiler/llvm_translation_engine.h"
