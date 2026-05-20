@@ -337,9 +337,13 @@ cudaError_t cudaFreeHost(void *pHost) {
   return vgre::api::CUDAInterceptor::instance().freeHost(pHost);
 }
 
+} // extern "C" — variables of C++ type must have C++ linkage, not C linkage
+
 // Per-registration flags — shared with cudaHostGetFlags in cudart_shim_array_memcpy.cpp
 std::mutex g_hostFlagsMutex;
 std::unordered_map<const void*, unsigned int> g_hostFlags;
+
+extern "C" {
 
 cudaError_t cudaHostRegister(void *pHost, size_t size, unsigned int flags) {
   cudaError_t err = vgre::api::CUDAInterceptor::instance().hostRegister(
