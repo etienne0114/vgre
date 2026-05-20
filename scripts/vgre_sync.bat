@@ -456,6 +456,17 @@ if errorlevel 1 (
 popd
 :dashboard_skip
 
+rem -- Detect actual Flutter build output arch (x64 is the default; fall back to
+rem    arm64 when running on a Windows-on-ARM machine or when Flutter chose arm64).
+rem    This runs outside any block so %VAR% expansion is not affected by parsing.
+if "!SKIP_DASHBOARD!"=="1" goto :bundle_dir_ok
+if exist "!BUNDLE_DIR!\vgre_dashboard.exe" goto :bundle_dir_ok
+if exist "%DASHBOARD_DIR%\build\windows\arm64\runner\Release\vgre_dashboard.exe" (
+    set "BUNDLE_DIR=%DASHBOARD_DIR%\build\windows\arm64\runner\Release"
+    echo [INFO] Flutter build output detected at arm64 path.
+)
+:bundle_dir_ok
+
 echo.
 echo === Deploying ===
 echo Stopping running VGRE processes...
@@ -467,16 +478,24 @@ if not exist "%INSTALL_DIR%\lib" mkdir "%INSTALL_DIR%\lib"
 if not exist "%INSTALL_DIR%\include" mkdir "%INSTALL_DIR%\include"
 
 if not "!SKIP_DASHBOARD!"=="1" (
-    if not exist "%BUNDLE_DIR%\vgre_dashboard.exe" (
+    if not exist "!BUNDLE_DIR!\vgre_dashboard.exe" (
         echo ERROR: Dashboard bundle not found at:
-        echo   %BUNDLE_DIR%
+        echo   !BUNDLE_DIR!
+        echo         The Flutter build may have failed. Run:
+        echo           flutter build windows --release
+        echo         from the vgre_dashboard directory for full error output.
         exit /b 1
     )
-    xcopy /E /Y /I "%BUNDLE_DIR%" "%INSTALL_DIR%" >nul
+    xcopy /E /Y /I "!BUNDLE_DIR!" "%INSTALL_DIR%"
     if errorlevel 1 (
-        echo ERROR: Failed to copy dashboard bundle.
+        echo ERROR: Failed to copy dashboard bundle from !BUNDLE_DIR!
         exit /b 1
     )
+    if not exist "%INSTALL_DIR%\vgre_dashboard.exe" (
+        echo ERROR: vgre_dashboard.exe missing from %INSTALL_DIR% after xcopy.
+        exit /b 1
+    )
+    echo [OK] Dashboard deployed to %INSTALL_DIR%
 ) else (
     echo [SKIP] Dashboard bundle deployment skipped ^(Flutter was unavailable^).
 )
@@ -594,6 +613,14 @@ set "LAUNCHER_PATH=%INSTALL_DIR%\Launch-VGRE-Dashboard.cmd"
     echo rem -- Load cluster auth token from standard file location if not already set
     echo if not defined VGRE_TCP_AUTH_TOKEN_FILE ^(
     echo     if exist "%%USERPROFILE%%\.vgre\token" set "VGRE_TCP_AUTH_TOKEN_FILE=%%USERPROFILE%%\.vgre\token"
+    echo ^)
+    echo.
+    echo if not exist "%%APP_DIR%%vgre_dashboard.exe" ^(
+    echo     echo [ERROR] vgre_dashboard.exe not found in %%APP_DIR%%
+    echo     echo         The dashboard was not built or was not deployed.
+    echo     echo         Fix: run  .\scripts\vgre_sync.bat  from the VGRE repository root.
+    echo     pause
+    echo     exit /b 1
     echo ^)
     echo.
     echo cd /d "%%APP_DIR%%"
