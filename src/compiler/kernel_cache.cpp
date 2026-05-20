@@ -5,8 +5,15 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#if defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable: 4244 4267 4100 4127 4624)
+#endif
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/FormatVariadic.h"
+#if defined(_MSC_VER)
+#  pragma warning(pop)
+#endif
 
 #include "vgre/common/os_backend.h"
 #if defined(_WIN32)
