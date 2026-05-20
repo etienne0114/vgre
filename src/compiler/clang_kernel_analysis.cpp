@@ -3,9 +3,16 @@
 #include "vgre/common/logger.h"
 #include "vgre/common/system_utils.h"
 
+#if defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable: 4244 4267 4100 4127 4624)
+#endif
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/FormatVariadic.h>
+#if defined(_MSC_VER)
+#  pragma warning(pop)
+#endif
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -21,8 +28,15 @@
 #endif
 
 
+#if defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable: 4244 4267 4100 4127 4624)
+#endif
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/raw_ostream.h>
+#if defined(_MSC_VER)
+#  pragma warning(pop)
+#endif
 
 namespace vgre {
 namespace compiler {

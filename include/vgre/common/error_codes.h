@@ -28,6 +28,7 @@ enum class VGREResult : int {
     ERR_BUSY                = 17,
     ERR_NOT_FOUND           = 18,
     ERR_AUTH_RETRY          = 19,
+    ERR_PLATFORM_SPECIFIC   = 20,
     ERR_UNKNOWN             = 99,
     // NOTE: No ERROR_* aliases are defined here.
     // On Windows, <winerror.h> (pulled in via <winsock2.h>) defines many
@@ -59,8 +60,9 @@ inline const char* resultToString(VGREResult r) {
         case VGREResult::ERR_CRYPTO:          return "Cryptographic error";
         case VGREResult::ERR_BUSY:            return "Device or resource busy";
         case VGREResult::ERR_NOT_FOUND:       return "Not found";
-        case VGREResult::ERR_AUTH_RETRY:      return "Authentication retry (deprecated)";
-        case VGREResult::ERR_UNKNOWN:         return "Unknown error";
+        case VGREResult::ERR_AUTH_RETRY:        return "Authentication retry (deprecated)";
+        case VGREResult::ERR_PLATFORM_SPECIFIC: return "Platform-specific constraint failure";
+        case VGREResult::ERR_UNKNOWN:           return "Unknown error";
         default:                                return "Unrecognized error code";
     }
 }
