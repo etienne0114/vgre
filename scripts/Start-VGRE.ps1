@@ -218,7 +218,7 @@ switch ($mode) {
     "master" {
         if (-not (Test-Path $dashboardExe)) {
             Write-Host "[ERROR] vgre_dashboard.exe not found at $dashboardExe" -ForegroundColor Red
-            Write-Host "        Run Install-VGRETools.ps1 to install the dashboard." -ForegroundColor Red
+            Write-Host "        Run  .\scripts\vgre_sync.bat  from the VGRE repository to build and deploy the dashboard." -ForegroundColor Red
             exit 1
         }
         Write-Host "Starting master..." -ForegroundColor Green
@@ -255,7 +255,7 @@ switch ($mode) {
 
         if (-not (Test-Path $dashboardExe)) {
             Write-Host "[ERROR] vgre_dashboard.exe not found at $dashboardExe" -ForegroundColor Red
-            Write-Host "        Run Install-VGRETools.ps1 to install the dashboard." -ForegroundColor Red
+            Write-Host "        Run  .\scripts\vgre_sync.bat  from the VGRE repository to build and deploy the dashboard." -ForegroundColor Red
             exit 1
         }
 
