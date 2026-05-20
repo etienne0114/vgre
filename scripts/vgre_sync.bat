@@ -415,11 +415,41 @@ if "%SKIP_DASHBOARD%"=="1" (
     echo [SKIP] Flutter not available - dashboard build skipped.
     goto :dashboard_skip
 )
+
+rem -- Step 1: precache Windows engine artifacts (flutter_windows.dll, icudtl.dat,
+rem    cpp_client_wrapper sources).  Without this, tool_backend.bat cannot find
+rem    them and emits "The system cannot find the path specified." (3x) before
+rem    failing.  --no-analytics avoids a consent prompt in CI/automation.
+echo [INFO] Pre-caching Flutter Windows engine artifacts...
+call "!FLUTTER_CMD!" precache --windows --no-analytics >nul 2>&1
+if errorlevel 1 (
+    echo [WARN] flutter precache failed - engine DLLs may be missing.
+    echo        Run manually: flutter precache --windows
+)
+
+rem -- Step 2: resolve Dart packages in the Windows environment.  pubspec.lock
+rem    was created on Linux; the local Dart pub cache on this machine may be
+rem    empty.  Running pub get here ensures every dependency is downloaded
+rem    before cmake configures the Windows build.
 pushd "%DASHBOARD_DIR%" || exit /b 1
-call "!FLUTTER_CMD!" build windows --release
+echo [INFO] Fetching Dart packages (flutter pub get)...
+call "!FLUTTER_CMD!" pub get --no-analytics
+if errorlevel 1 (
+    popd
+    echo WARNING: flutter pub get failed. Dashboard build skipped.
+    echo          Check internet connectivity and try again.
+    set "SKIP_DASHBOARD=1"
+    goto :dashboard_skip
+)
+
+rem -- Step 3: build the Windows release bundle.
+echo [INFO] Building Flutter Windows release bundle...
+call "!FLUTTER_CMD!" build windows --release --no-analytics
 if errorlevel 1 (
     popd
     echo WARNING: Flutter build failed. Continuing without dashboard.
+    echo          Run  flutter build windows --release  from %DASHBOARD_DIR%
+    echo          for full build output.
     set "SKIP_DASHBOARD=1"
     goto :dashboard_skip
 )

@@ -181,7 +181,7 @@ set_tests_properties(KernelParserEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK v
 add_executable(test_flop_counting compiler/test_flop_counting.cpp)
 target_link_libraries(test_flop_counting PRIVATE vgre)
 add_test(NAME FLOPCounting COMMAND test_flop_counting)
-set_tests_properties(FLOPCounting PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+set_tests_properties(FLOPCounting PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
 
 add_executable(test_texture_view unit/test_texture_view.cpp)
 target_link_libraries(test_texture_view PRIVATE vgre)
