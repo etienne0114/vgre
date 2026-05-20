@@ -56,7 +56,7 @@ cublasStatus_t cublasCherk_v2(cublasHandle_t handle,
     #endif
     for (int j = 0; j < n; ++j) {
         for (int i = (uplo == CUBLAS_FILL_MODE_LOWER) ? j : 0;
-                 i <= (uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j; ++i) {
+                 i <= ((uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j); ++i) {
             cuComplex acc = make_cuComplex(0.f, 0.f);
             if (trans == CUBLAS_OP_N) {
                 for (int p = 0; p < k; ++p) {
@@ -104,7 +104,7 @@ cublasStatus_t cublasZherk_v2(cublasHandle_t handle,
     #endif
     for (int j = 0; j < n; ++j) {
         for (int i = (uplo == CUBLAS_FILL_MODE_LOWER) ? j : 0;
-                 i <= (uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j; ++i) {
+                 i <= ((uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j); ++i) {
             cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
             if (trans == CUBLAS_OP_N) {
                 for (int p = 0; p < k; ++p) {
@@ -152,7 +152,7 @@ cublasStatus_t cublasCher2k_v2(cublasHandle_t handle,
     #endif
     for (int j = 0; j < n; ++j) {
         for (int i = (uplo == CUBLAS_FILL_MODE_LOWER) ? j : 0;
-                 i <= (uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j; ++i) {
+                 i <= ((uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j); ++i) {
             cuComplex acc = make_cuComplex(0.f, 0.f);
             if (trans == CUBLAS_OP_N) {
                 for (int p = 0; p < k; ++p) {
@@ -208,7 +208,7 @@ cublasStatus_t cublasZher2k_v2(cublasHandle_t handle,
     #endif
     for (int j = 0; j < n; ++j) {
         for (int i = (uplo == CUBLAS_FILL_MODE_LOWER) ? j : 0;
-                 i <= (uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j; ++i) {
+                 i <= ((uplo == CUBLAS_FILL_MODE_LOWER) ? n - 1 : j); ++i) {
             cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
             if (trans == CUBLAS_OP_N) {
                 for (int p = 0; p < k; ++p) {

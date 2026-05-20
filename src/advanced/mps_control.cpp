@@ -247,7 +247,7 @@ void MPSServer::acceptLoop() {
         // we create a fresh pipe for the next client and hand off the current one.
         uint32_t slot = slotCounter.fetch_add(1, std::memory_order_relaxed);
         VGRE_LOG_INFO("MPS", "Client connected: slot=" + std::to_string(slot));
-        int clientFd = listenFd_;
+        mps_handle_t clientFd = listenFd_;
         // Create next pipe for the following client.
         std::string pipeName = socketPath_;
         listenFd_ = CreateNamedPipeA(
@@ -586,7 +586,7 @@ bool MPSClient::recvBytes(void* buf, uint32_t len) {
 }
 
 uint64_t MPSClient::malloc(uint64_t bytes) {
-    if (fd_ == -1) return 0;
+    if (fd_ == MPS_INVALID_HANDLE) return 0;
     MPSMallocReq req{ bytes };
     if (!sendMsg(MPSMsgType::MALLOC, &req, sizeof(req))) return 0;
     MPSHeader rh{};
@@ -596,7 +596,7 @@ uint64_t MPSClient::malloc(uint64_t bytes) {
 }
 
 bool MPSClient::free(uint64_t devPtr) {
-    if (fd_ == -1) return false;
+    if (fd_ == MPS_INVALID_HANDLE) return false;
     MPSFreeReq req{ devPtr };
     if (!sendMsg(MPSMsgType::FREE, &req, sizeof(req))) return false;
     MPSHeader rh{};
@@ -605,7 +605,7 @@ bool MPSClient::free(uint64_t devPtr) {
 }
 
 bool MPSClient::memcpyH2D(uint64_t devPtr, const void* hostSrc, uint64_t bytes) {
-    if (fd_ == -1) return false;
+    if (fd_ == MPS_INVALID_HANDLE) return false;
     MPSMemcpyReq req{ devPtr, bytes };
     MPSHeader h{ static_cast<uint32_t>(MPSMsgType::MEMCPY_H2D),
                  static_cast<uint32_t>(sizeof(req) + bytes) };
@@ -618,7 +618,7 @@ bool MPSClient::memcpyH2D(uint64_t devPtr, const void* hostSrc, uint64_t bytes) 
 }
 
 bool MPSClient::memcpyD2H(void* hostDst, uint64_t devPtr, uint64_t bytes) {
-    if (fd_ == -1) return false;
+    if (fd_ == MPS_INVALID_HANDLE) return false;
     MPSMemcpyReq req{ devPtr, bytes };
     if (!sendMsg(MPSMsgType::MEMCPY_D2H, &req, sizeof(req))) return false;
     MPSHeader rh{};
@@ -636,7 +636,7 @@ bool MPSClient::launchKernel(const char* name,
                               uint32_t bx, uint32_t by, uint32_t bz,
                               uint64_t sharedMem,
                               void** args, int numArgs) {
-    if (fd_ == -1) return false;
+    if (fd_ == MPS_INVALID_HANDLE) return false;
     
     // 1. Prepare argument payload
     // In CUDA, we don't have sizes, but VGRE's launchKernel (the one called on server)
@@ -669,7 +669,7 @@ bool MPSClient::launchKernel(const char* name,
 }
 
 bool MPSClient::sync() {
-    if (fd_ == -1) return false;
+    if (fd_ == MPS_INVALID_HANDLE) return false;
     MPSHeader h{ static_cast<uint32_t>(MPSMsgType::SYNC), 0 };
     if (!writeAll(fd_, &h, sizeof(h))) return false;
     MPSHeader rh{};
