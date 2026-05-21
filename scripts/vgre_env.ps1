@@ -24,30 +24,61 @@ if ($null -eq $env:VGRE_TCP_AUTH_TOKEN -or $env:VGRE_TCP_AUTH_TOKEN -eq "") {
 }
 
 # ── Cluster Discovery ────────────────────────────────────────────────────────
-# Cluster Nodes — manual cross-subnet configuration.
-# Only set the loopback default when the variable is not already in the
-# environment.  Workers connecting to a remote master MUST NOT have this
-# overridden; the user should set VGRE_CLUSTER_NODES to the master IP before
-# sourcing this file, or pass --master-ip to vgre-start.
+# LAN mode (default): master broadcasts on UDP 7778; workers auto-discover.
+# WAN mode: set VGRE_CLUSTER_MASTER_ADDRESS on each worker (no broadcast needed).
+#
+# NEVER set a hardcoded default for VGRE_CLUSTER_NODES — the old loopback
+# default (127.0.0.1:7777) silently overwrote any value the user already had.
+
 if ($null -eq $env:VGRE_CLUSTER_NODES -or $env:VGRE_CLUSTER_NODES -eq "") {
-    Write-Host "VGRE_CLUSTER_NODES not set — defaulting to 127.0.0.1:7777 (local test only)." -ForegroundColor DarkGray
-    Write-Host "  For remote workers set: set-vgre-env VGRE_CLUSTER_NODES '<MASTER_IP>:7777'" -ForegroundColor DarkGray
-    set-vgre-env "VGRE_CLUSTER_NODES" "127.0.0.1:7777"
+    Write-Host "VGRE_CLUSTER_NODES not set." -ForegroundColor DarkGray
+    Write-Host "  LAN  (auto-discover) : leave unset — UDP broadcast handles it." -ForegroundColor DarkGray
+    Write-Host "  WAN  (direct connect): set-vgre-env VGRE_CLUSTER_MASTER_ADDRESS '<PUBLIC_IP>:7777'" -ForegroundColor DarkGray
+    Write-Host "  Mesh (explicit peers): set-vgre-env VGRE_MESH_PEERS '<IP1>:7777,<IP2>:7777'" -ForegroundColor DarkGray
+} else {
+    Write-Host "VGRE_CLUSTER_NODES = $env:VGRE_CLUSTER_NODES" -ForegroundColor DarkGray
 }
 
-# UDP announce port — master broadcasts presence on this port (workers listen)
+# -- WAN / NAT connectivity ---------------------------------------------------
+# VGRE_CLUSTER_MASTER_ADDRESS  (worker side)
+#   The worker connects directly to this address instead of waiting for a
+#   UDP broadcast. Supports IPv4, IPv6 ([::1]:port), and hostnames.
+#   The proactive-reconnect loop will re-establish the connection automatically
+#   if the master restarts (exponential backoff, default cap 120 s).
+#   Example: set-vgre-env "VGRE_CLUSTER_MASTER_ADDRESS" "203.0.113.5:7777"
+# set-vgre-env "VGRE_CLUSTER_MASTER_ADDRESS" ""
+
+# VGRE_CLUSTER_ADVERTISED_ADDRESS  (master side)
+#   The master includes this address in its UDP ping message so workers that
+#   receive the LAN broadcast still connect to the correct public IP.
+#   Useful when the master is behind NAT or a VPN gateway.
+#   Example: set-vgre-env "VGRE_CLUSTER_ADVERTISED_ADDRESS" "203.0.113.5:7777"
+# set-vgre-env "VGRE_CLUSTER_ADVERTISED_ADDRESS" ""
+
+# VGRE_CLUSTER_CONNECT_TIMEOUT_SEC  (default 10, range 1-120)
+#   TCP connect timeout for both direct dial-out and proactive reconnection.
+#   Increase for very high-latency WAN links.
+# set-vgre-env "VGRE_CLUSTER_CONNECT_TIMEOUT_SEC" "10"
+
+# VGRE_CLUSTER_MAX_BACKOFF_SEC  (default 120, range 10-3600)
+#   Maximum retry interval for the proactive reconnection loop.
+# set-vgre-env "VGRE_CLUSTER_MAX_BACKOFF_SEC" "120"
+
+# VGRE_MESH_PEERS  — full mesh: comma-separated host:port list.
+#   Each node connects to every other node.  All nodes must list all peers.
+#   Example: set-vgre-env "VGRE_MESH_PEERS" "10.0.0.2:7777,10.0.0.3:7777"
+# set-vgre-env "VGRE_MESH_PEERS" ""
+
+# UDP announce port — master broadcasts on this port (workers listen).
 # Default: 7778. Must match on master and all workers.
 # set-vgre-env "VGRE_CLUSTER_UDP_ANNOUNCE_PORT" "7778"
 
-# UDP worker port — workers broadcast presence on this port (master listens)
+# UDP worker port — workers broadcast on this port (master listens).
 # Default: 7779. Must match on master and all workers.
 # set-vgre-env "VGRE_CLUSTER_UDP_WORKER_PORT" "7779"
 
-# Master IP allowlist — comma-separated list of IP addresses workers will accept
-# UDP broadcast from. Prevents rogue master injection on shared subnets.
-# Leave unset to accept broadcasts from any master (development only).
-# Example: set-vgre-env "VGRE_CLUSTER_MASTER_IP" "192.168.1.1,10.0.0.1"
-# set-vgre-env "VGRE_CLUSTER_MASTER_IP" ""
+# VGRE_CLUSTER_DISCOVERY=OFF — disable UDP broadcast entirely (pure WAN mode).
+# set-vgre-env "VGRE_CLUSTER_DISCOVERY" "OFF"
 
 # ── Cluster Security ─────────────────────────────────────────────────────────
 # Strict auth mode — set to 1 to reject connections with mismatched tokens.

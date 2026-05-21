@@ -67,13 +67,16 @@ void TCPClusterManager::parseMeshPeers() {
         int peer_port = port_;
         try { peer_port = std::stoi(peer.substr(colon + 1)); } catch (...) {}
         mesh_peer_ips_.insert(peer_ip);
-        if ((port_ < peer_port) || (port_ == peer_port && host_ < peer_ip)) {
-            bool found = false;
-            for (const auto& existing : proactive_worker_addresses_) {
-                if (existing == peer) { found = true; break; }
-            }
-            if (!found) proactive_worker_addresses_.push_back(peer);
+        // Always add the peer to the proactive connection list.  The old
+        // port-ordering tie-break that prevented symmetric initiation is not
+        // needed here: the proactive loop checks whether a live connection to
+        // the peer already exists before opening a new socket, so duplicate
+        // connections cannot occur even when both sides add each other.
+        bool found = false;
+        for (const auto& existing : proactive_worker_addresses_) {
+            if (existing == peer) { found = true; break; }
         }
+        if (!found) proactive_worker_addresses_.push_back(peer);
     }
 }
 

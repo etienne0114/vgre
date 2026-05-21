@@ -276,7 +276,7 @@ class ClusterTopologyPage extends StatelessWidget {
     final disconnectedAt = node.disconnectedAt;
     String? countdownText;
     if (!node.available && disconnectedAt != null) {
-      const gracePeriod = 30;
+      const gracePeriod = TelemetryBloc.kGracePeriodSeconds;
       final elapsed = DateTime.now().difference(disconnectedAt).inSeconds;
       final remaining = gracePeriod - elapsed;
       if (remaining > 0) countdownText = 'Removing in ${remaining}s';

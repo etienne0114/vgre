@@ -48,7 +48,7 @@ struct PeerState {
 
     void on_connect_failure() {
         next_attempt = std::chrono::steady_clock::now() + std::chrono::seconds(backoff_sec);
-        backoff_sec = std::min(backoff_sec * 2, 64); // cap at 64 s
+        backoff_sec = std::min(backoff_sec * 2, getMaxBackoffSec());
     }
 };
 
@@ -78,6 +78,22 @@ bool parseAddress(const std::string& addr, std::string& host, int& port) {
     return !host.empty() && port > 0 && port < 65536;
 }
 
+// Read the configurable TCP connect timeout.
+// VGRE_CLUSTER_CONNECT_TIMEOUT_SEC: 1–120, default 10 s (WAN-appropriate).
+static int getConnectTimeoutSec() {
+    const char* e = vgre_get_config("VGRE_CLUSTER_CONNECT_TIMEOUT_SEC");
+    if (e) { int v = std::atoi(e); if (v >= 1 && v <= 120) return v; }
+    return 10;
+}
+
+// Read the configurable proactive backoff ceiling.
+// VGRE_CLUSTER_MAX_BACKOFF_SEC: 10–3600, default 120 s.
+static int getMaxBackoffSec() {
+    const char* e = vgre_get_config("VGRE_CLUSTER_MAX_BACKOFF_SEC");
+    if (e) { int v = std::atoi(e); if (v >= 10 && v <= 3600) return v; }
+    return 120;
+}
+
 // Resolve hostname/IP to a connected socket.  Tries all getaddrinfo results
 // (handles both IPv4 and IPv6 transparently).
 // Returns VGRE_INVALID_SOCKET on failure.
@@ -86,24 +102,24 @@ vgre::common::vgre_socket_t connectTo(const std::string& host, int port) {
     snprintf(portStr, sizeof(portStr), "%d", port);
 
     addrinfo hints{};
-    hints.ai_family   = AF_UNSPEC;    // allow IPv4 or IPv6
+    hints.ai_family   = AF_UNSPEC;    // IPv4 or IPv6
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
     hints.ai_flags    = AI_ADDRCONFIG;
 
     addrinfo* res = nullptr;
-    if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0 || !res) {
+    if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0 || !res)
         return vgre::common::VGRE_INVALID_SOCKET;
-    }
+
+    // Read timeout once per connect attempt (hot-reloadable via env).
+    int timeoutSec = getConnectTimeoutSec();
 
     vgre::common::vgre_socket_t sock = vgre::common::VGRE_INVALID_SOCKET;
     for (addrinfo* rp = res; rp; rp = rp->ai_next) {
         vgre::common::vgre_socket_t s = ::socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (s == vgre::common::VGRE_INVALID_SOCKET) continue;
 
-        // Switch to non-blocking for the connect so we can impose a 5 s timeout.
         vgre::common::vgre_ioctl_nonblock(s);
-
         int rc = ::connect(s, rp->ai_addr, static_cast<int>(rp->ai_addrlen));
 
 #ifdef _WIN32
@@ -117,12 +133,13 @@ vgre::common::vgre_socket_t connectTo(const std::string& host, int port) {
                 fd_set wset;
                 FD_ZERO(&wset);
                 FD_SET(s, &wset);
-                timeval tv{5, 0};
+                timeval tv{timeoutSec, 0};
                 int sel = ::select(static_cast<int>(s) + 1, nullptr, &wset, nullptr, &tv);
                 if (sel <= 0) { vgre::common::vgre_close_socket(s); continue; }
                 int err = 0;
                 socklen_t elen = sizeof(err);
-                getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&err), &elen);
+                getsockopt(s, SOL_SOCKET, SO_ERROR,
+                           reinterpret_cast<char*>(&err), &elen);
                 if (err != 0) { vgre::common::vgre_close_socket(s); continue; }
             }
             // Restore blocking mode
@@ -131,7 +148,6 @@ vgre::common::vgre_socket_t connectTo(const std::string& host, int port) {
 #else
             { int f = fcntl(s, F_GETFL, 0); if (f != -1) fcntl(s, F_SETFL, f & ~O_NONBLOCK); }
 #endif
-            // Apply TCP keep-alive using the shared cross-platform helper
             vgre::common::vgre_set_tcp_keepalive(s, 30, 10, 5);
             sock = s;
             break;
