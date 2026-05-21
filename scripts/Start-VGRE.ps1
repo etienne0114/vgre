@@ -218,8 +218,11 @@ if ($fp) {
 
 # -------------------------------
 # Locate executables
+# Prepend VGRE lib dir AND the LLVM runtime bin so vgre.dll and libomp.dll
+# are both resolvable by the Windows loader before any DLL is mapped.
 # -------------------------------
-$env:PATH = "$InstallDir\lib;$InstallDir;$env:PATH"
+$LLVMBin = Join-Path $env:LOCALAPPDATA "VGRE\BuildTools\llvm\bin"
+$env:PATH = "$InstallDir\lib;$InstallDir;$LLVMBin;$env:PATH"
 
 $workerExe    = Join-Path $InstallDir "vgre-worker.exe"
 $dashboardExe = Join-Path $InstallDir "vgre_dashboard.exe"
@@ -290,7 +293,15 @@ switch ($mode) {
         & $workerExe @workerArgs
 
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "[ERROR] Worker exited with code $LASTEXITCODE" -ForegroundColor Red
+            $hexCode = "0x{0:X8}" -f [uint32]$LASTEXITCODE
+            Write-Host "[ERROR] Worker exited with code $LASTEXITCODE ($hexCode)" -ForegroundColor Red
+            if ($LASTEXITCODE -eq -1073741819 -or $LASTEXITCODE -eq 0xC0000005 -or
+                $LASTEXITCODE -eq [int]0xC0000005) {
+                Write-Host "        STATUS_ACCESS_VIOLATION — possible causes:" -ForegroundColor Yellow
+                Write-Host "          1. Missing DLL: check $InstallDir\lib for libomp.dll" -ForegroundColor Yellow
+                Write-Host "          2. Run: .\scripts\vgre_sync.bat  to rebuild and redeploy" -ForegroundColor Yellow
+                Write-Host "          3. See docs/TROUBLESHOOTING_WINDOWS.md for full diagnostics" -ForegroundColor Yellow
+            }
         }
     }
 
