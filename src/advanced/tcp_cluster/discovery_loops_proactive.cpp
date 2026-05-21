@@ -34,6 +34,22 @@ namespace advanced {
 
 namespace {
 
+// Read the configurable TCP connect timeout.
+// VGRE_CLUSTER_CONNECT_TIMEOUT_SEC: 1–120, default 10 s (WAN-appropriate).
+static int getConnectTimeoutSec() {
+    const char* e = vgre_get_config("VGRE_CLUSTER_CONNECT_TIMEOUT_SEC");
+    if (e) { int v = std::atoi(e); if (v >= 1 && v <= 120) return v; }
+    return 10;
+}
+
+// Read the configurable proactive backoff ceiling.
+// VGRE_CLUSTER_MAX_BACKOFF_SEC: 10–3600, default 120 s.
+static int getMaxBackoffSec() {
+    const char* e = vgre_get_config("VGRE_CLUSTER_MAX_BACKOFF_SEC");
+    if (e) { int v = std::atoi(e); if (v >= 10 && v <= 3600) return v; }
+    return 120;
+}
+
 // Per-peer state for exponential backoff and reconnect tracking
 struct PeerState {
     std::chrono::steady_clock::time_point next_attempt;
@@ -76,22 +92,6 @@ bool parseAddress(const std::string& addr, std::string& host, int& port) {
     try { port = std::stoi(addr.substr(colon + 1)); }
     catch (...) { return false; }
     return !host.empty() && port > 0 && port < 65536;
-}
-
-// Read the configurable TCP connect timeout.
-// VGRE_CLUSTER_CONNECT_TIMEOUT_SEC: 1–120, default 10 s (WAN-appropriate).
-static int getConnectTimeoutSec() {
-    const char* e = vgre_get_config("VGRE_CLUSTER_CONNECT_TIMEOUT_SEC");
-    if (e) { int v = std::atoi(e); if (v >= 1 && v <= 120) return v; }
-    return 10;
-}
-
-// Read the configurable proactive backoff ceiling.
-// VGRE_CLUSTER_MAX_BACKOFF_SEC: 10–3600, default 120 s.
-static int getMaxBackoffSec() {
-    const char* e = vgre_get_config("VGRE_CLUSTER_MAX_BACKOFF_SEC");
-    if (e) { int v = std::atoi(e); if (v >= 10 && v <= 3600) return v; }
-    return 120;
 }
 
 // Resolve hostname/IP to a connected socket.  Tries all getaddrinfo results
