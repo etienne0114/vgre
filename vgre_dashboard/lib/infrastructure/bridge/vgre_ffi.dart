@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:ffi/ffi.dart';
 
 // ── VGRE C API Types ───────────────────────────────────────────────────────
+@Packed(8)
 final class VgreTelemetry extends Struct {
   @Uint64()
   external int timestamp;
@@ -150,9 +151,9 @@ final class VgreCacheStats extends Struct {
   external int l2Evictions;
   @Double()
   external double l2HitRate;
-  @Uint32()
+  @Uint64()
   external int l1ConfigKb;
-  @Uint32()
+  @Uint64()
   external int l2ConfigMb;
 }
 

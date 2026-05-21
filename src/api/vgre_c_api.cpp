@@ -131,7 +131,7 @@ std::unordered_map<std::string, std::string>& getConfigMap() {
 
 extern "C" {
 
-int vgre_set_config(const char *key, const char *value) {
+VGRE_EXPORT int vgre_set_config(const char *key, const char *value) {
   if (!key || !key[0]) return VGRE_ERROR_INVALID_VALUE;
   std::lock_guard<std::mutex> lk(getConfigMutex());
   if (value && value[0]) {
@@ -142,7 +142,7 @@ int vgre_set_config(const char *key, const char *value) {
   return VGRE_SUCCESS;
 }
 
-const char *vgre_get_config(const char *key) {
+VGRE_EXPORT const char *vgre_get_config(const char *key) {
   if (!key || !key[0]) return nullptr;
   {
     std::lock_guard<std::mutex> lk(getConfigMutex());

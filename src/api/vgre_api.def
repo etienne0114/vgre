@@ -49,3 +49,11 @@ EXPORTS
     vgre_credits_get_balance
     vgre_credits_get_all
     vgre_credits_reset
+    vgre_set_config
+    vgre_get_config
+    vgre_get_cache_stats
+    vgre_reset_cache_stats
+    vgre_pool_create
+    vgre_pool_alloc
+    vgre_pool_free
+    vgre_pool_destroy
