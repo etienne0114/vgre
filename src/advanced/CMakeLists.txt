@@ -106,18 +106,34 @@ if(APPLE)
 endif()
 
 # ── Standalone Worker CLI ────────────────────────────────────────────────────
+# Link against the vgre shared library instead of embedding all object files.
+# This eliminates duplicate singletons, static initialization order issues,
+# and OpenMP runtime conflicts (MSVC vcomp.dll vs LLVM libomp.dll) that cause
+# STATUS_ACCESS_VIOLATION (0xC0000005) on Windows.
+#
+# All test executables already use this pattern (target_link_libraries PRIVATE vgre)
+# and pass 100% of CTests.  The worker must behave identically.
+#
+# On Windows, vgre-worker.exe finds vgre.dll because both are deployed to the
+# same INSTALL_DIR by vgre_sync.bat, and Windows searches the application
+# directory first.  On Linux/macOS, the launch wrapper sets LD_LIBRARY_PATH /
+# DYLD_LIBRARY_PATH.
 add_executable(vgre-worker vgre_worker_cli.cpp)
-target_sources(vgre-worker PRIVATE
-    $<TARGET_OBJECTS:vgre_common>
-    $<TARGET_OBJECTS:vgre_core>
-    $<TARGET_OBJECTS:vgre_compiler>
-    $<TARGET_OBJECTS:vgre_api>
-    $<TARGET_OBJECTS:vgre_runtime>
-    $<TARGET_OBJECTS:vgre_advanced>
-)
-_vgre_configure_library(vgre-worker PRIVATE)
+target_link_libraries(vgre-worker PRIVATE vgre)
+target_include_directories(vgre-worker PRIVATE ${PROJECT_SOURCE_DIR}/include)
+
+# ── Cross-platform dependencies ──────────────────────────────────────────────
+# The vgre shared library already links these PRIVATE, so they are resolved
+# internally at load time.  We add them here defensively so that:
+#   (a) any direct platform calls from the CLI itself (Win32 diagnostics,
+#       signal handling, etc.) resolve cleanly at link time,
+#   (b) linkers with strict --no-undefined / LINK.EXE /FORCE:UNRESOLVED never
+#       report missing symbols,
+#   (c) cross-platform intent is documented explicitly in the build system.
 if(WIN32)
     target_link_libraries(vgre-worker PRIVATE Advapi32 ws2_32 bcrypt)
+    set_target_properties(vgre-worker PROPERTIES
+        MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 elseif(APPLE)
     target_link_libraries(vgre-worker PRIVATE "-framework Security")
 elseif(UNIX)
@@ -126,7 +142,10 @@ elseif(UNIX)
         target_link_libraries(vgre-worker PRIVATE ${KEYUTILS_LIB})
     endif()
 endif()
-if(VGRE_USE_OPENCL_BACKEND)
+
+# OpenCL backend — worker probes iGPU capabilities on startup.
+if(_VGRE_OPENCL_FOUND)
+    target_compile_definitions(vgre-worker PRIVATE VGRE_HAS_OPENCL_BACKEND)
     target_link_libraries(vgre-worker PRIVATE OpenCL::OpenCL)
 endif()
-target_include_directories(vgre-worker PRIVATE ${PROJECT_SOURCE_DIR}/include)
+

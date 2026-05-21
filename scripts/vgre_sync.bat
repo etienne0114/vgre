@@ -448,17 +448,15 @@ rem -- Suppress Flutter analytics for all commands below.
 set "FLUTTER_SUPPRESS_ANALYTICS=1"
 
 rem -- Step 1: Pre-cache engine artifacts.
-rem    flutter precache --windows calls git on the SDK; hard-fails for
-rem    non-git-clone Flutter installs (winget/Scoop/FVM).  Use a SET flag
-rem    so we never nest if-errorlevel inside if-exist (CMD misparses that).
-set "_do_precache=0"
-if exist "!_flutter_sdk!\.git" set "_do_precache=1"
-if "!_do_precache!"=="1" (
-    echo [INFO] Pre-caching Flutter Windows engine artifacts...
-    cmd /c ""!FLUTTER_CMD!" precache --windows" 2>nul
-    echo [INFO] flutter precache done ^(errors above are non-fatal^).
-)
-if "!_do_precache!"=="0" echo [INFO] Flutter SDK pre-built install - skipping precache.
+rem    Always attempt to pre-cache the Windows engine artifacts.
+rem    Change directory to the Flutter SDK root first so that Git does not
+rem    traverse up to the VGRE repository's .git folder, which would crash
+rem    precache on non-git-clone Flutter installations (e.g. Winget/Zip installs).
+echo [INFO] Pre-caching Flutter Windows engine artifacts...
+pushd "!_flutter_sdk!"
+cmd /c ""!FLUTTER_CMD!" precache --windows" 2>nul
+popd
+echo [INFO] flutter precache done (errors above are non-fatal).
 
 rem -- Step 2: resolve Dart packages.
 rem    Try dart.exe pub get first: avoids Flutter git-SDK version checks.
@@ -831,9 +829,57 @@ exit /b 0
 
 :find_flutter
 where flutter >nul 2>&1
-if not errorlevel 1 exit /b 0
+if not errorlevel 1 (
+    for /f "usebackq tokens=*" %%F in (`where flutter 2^>nul`) do (
+        if not defined FLUTTER_CMD set "FLUTTER_CMD=%%F"
+    )
+    exit /b 0
+)
 
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$up=$env:USERPROFILE; $roots=@($up+'\Downloads\Compressed',$up+'\Downloads',$up,'C:\src','C:\tools'); $hit=Get-ChildItem -Path $roots -Filter flutter.bat -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty DirectoryName; if($hit){$hit}"`) do set "FLUTTER_BIN=%%I"
+rem -- Try checking registry Path variables directly (covers recently added path vars)
+set "_reg_paths="
+for /f "usebackq tokens=2*" %%A in (`reg query "HKCU\Environment" /v Path 2^>nul`) do set "_reg_paths=%%B"
+for /f "usebackq tokens=2*" %%A in (`reg query "HKLM\System\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul`) do set "_reg_paths=!_reg_paths!;%%B"
+
+if defined _reg_paths (
+    for %%P in ("!_reg_paths:;=" "!") do (
+        if not defined FLUTTER_BIN (
+            set "_p=%%~P"
+            rem Expand environment strings if any (e.g. %USERPROFILE%)
+            for /f "usebackq delims=" %%E in (`echo !_p!`) do set "_p_expanded=%%E"
+            if exist "!_p_expanded!\flutter.bat" (
+                set "FLUTTER_BIN=!_p_expanded!"
+            ) else if exist "!_p_expanded!\bin\flutter.bat" (
+                set "FLUTTER_BIN=!_p_expanded!\bin"
+            )
+        )
+    )
+)
+
+rem -- Try common default installation paths
+if not defined FLUTTER_BIN (
+    for %%D in (
+        "%LOCALAPPDATA%\Programs\flutter\bin"
+        "%LOCALAPPDATA%\Microsoft\WinGet\Packages\Google.FlutterSDK\bin"
+        "%USERPROFILE%\flutter\bin"
+        "%USERPROFILE%\development\flutter\bin"
+        "C:\src\flutter\bin"
+        "C:\tools\flutter\bin"
+        "C:\ProgramData\chocolatey\bin"
+        "C:\ProgramData\chocolatey\lib\flutter\tools\flutter\bin"
+    ) do (
+        if not defined FLUTTER_BIN (
+            if exist "%%~D\flutter.bat" (
+                set "FLUTTER_BIN=%%~D"
+            )
+        )
+    )
+)
+
+rem -- Fallback: slow recursive search via PowerShell
+if not defined FLUTTER_BIN (
+    for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$up=$env:USERPROFILE; $roots=@($up+'\Downloads\Compressed',$up+'\Downloads',$up,'C:\src','C:\tools'); $hit=Get-ChildItem -Path $roots -Filter flutter.bat -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty DirectoryName; if($hit){$hit}"`) do set "FLUTTER_BIN=%%I"
+)
 
 if defined FLUTTER_BIN (
     set "FLUTTER_CMD=!FLUTTER_BIN!\flutter.bat"

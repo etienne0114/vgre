@@ -47,7 +47,7 @@ void test_basic_arithmetic() {
     (void)     B.CreateFDiv(p,    fn.b);  // 1
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*fn.mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*fn.mod);
     std::cout << "[INFO] Basic Arithmetic FLOPs: " << flops << std::endl;
     assert(flops == 4 && "fadd+fsub+fmul+fdiv must yield 4 FLOPs");
     std::cout << "[PASS] Basic Arithmetic FLOP counting" << std::endl;
@@ -67,7 +67,7 @@ void test_fma_vector() {
     B.CreateCall(fmaF, {f->getArg(0), f->getArg(1), f->getArg(2)}); // 2*4=8
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*mod);
     std::cout << "[INFO] FMA/Vector FLOPs: " << flops << std::endl;
     assert(flops == 8 && "<4 x float> fma must yield 8 FLOPs");
     std::cout << "[PASS] FMA/Vector FLOP counting" << std::endl;
@@ -81,7 +81,7 @@ void test_frem_and_fneg() {
     (void)    B.CreateFNeg(r);            // 1 FLOP
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*fn.mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*fn.mod);
     std::cout << "[INFO] FRem + FNeg FLOPs: " << flops << std::endl;
     assert(flops == 2 && "frem + fneg must yield 2 FLOPs");
     std::cout << "[PASS] FRem + FNeg FLOP counting" << std::endl;
@@ -96,7 +96,7 @@ void test_fcmp() {
     (void) B.CreateFCmpOLT(fn.a, fn.b);  // 1 FLOP
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*fn.mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*fn.mod);
     std::cout << "[INFO] FCmp FLOPs: " << flops << std::endl;
     assert(flops == 1 && "scalar fcmp must yield 1 FLOP");
     std::cout << "[PASS] FCmp FLOP counting" << std::endl;
@@ -115,7 +115,7 @@ void test_fcmp_vector() {
     (void) B.CreateFCmpOLT(f->getArg(0), f->getArg(1)); // 4 FLOPs
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*mod);
     std::cout << "[INFO] Vector FCmp FLOPs: " << flops << std::endl;
     assert(flops == 4 && "<4 x float> fcmp must yield 4 FLOPs");
     std::cout << "[PASS] Vector FCmp FLOP counting" << std::endl;
@@ -130,7 +130,7 @@ void test_sqrt() {
     B.CreateCall(sqrtF, {fn.a});  // 4 FLOPs
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*fn.mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*fn.mod);
     std::cout << "[INFO] sqrt FLOPs: " << flops << std::endl;
     assert(flops == 4 && "sqrt must yield 4 FLOPs");
     std::cout << "[PASS] sqrt FLOP counting" << std::endl;
@@ -159,7 +159,7 @@ void test_cheap_fp_intrinsics() {
     call2(llvm::Intrinsic::minnum);    // 1 FLOP
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*fn.mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*fn.mod);
     std::cout << "[INFO] Cheap FP intrinsics FLOPs: " << flops << std::endl;
     assert(flops == 5 && "fabs+floor+ceil+round+minnum must yield 5 FLOPs");
     std::cout << "[PASS] Cheap FP intrinsics FLOP counting" << std::endl;
@@ -177,7 +177,7 @@ void test_sin_cos() {
     B.CreateCall(cosF, {fn.b});  // 8 FLOPs
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*fn.mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*fn.mod);
     std::cout << "[INFO] sin + cos FLOPs: " << flops << std::endl;
     assert(flops == 16 && "sin+cos must yield 16 FLOPs");
     std::cout << "[PASS] sin/cos FLOP counting" << std::endl;
@@ -200,7 +200,7 @@ void test_exp_log_family() {
     call1(llvm::Intrinsic::log10);  // 8
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*fn.mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*fn.mod);
     std::cout << "[INFO] exp/log family FLOPs: " << flops << std::endl;
     assert(flops == 40 && "exp+log+exp2+log2+log10 must yield 40 FLOPs");
     std::cout << "[PASS] exp/log family FLOP counting" << std::endl;
@@ -215,7 +215,7 @@ void test_pow() {
     B.CreateCall(powF, {fn.a, fn.b});  // 16 FLOPs
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*fn.mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*fn.mod);
     std::cout << "[INFO] pow FLOPs: " << flops << std::endl;
     assert(flops == 16 && "pow must yield 16 FLOPs");
     std::cout << "[PASS] pow FLOP counting" << std::endl;
@@ -235,7 +235,7 @@ void test_sqrt_vector() {
     B.CreateCall(sqrtF, {f->getArg(0)});  // 4 FLOPs * 4 lanes = 16
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*mod);
     std::cout << "[INFO] Vector sqrt FLOPs: " << flops << std::endl;
     assert(flops == 16 && "<4 x float> sqrt must yield 16 FLOPs");
     std::cout << "[PASS] Vector sqrt FLOP counting" << std::endl;
@@ -275,7 +275,7 @@ void test_inst_count_excludes_pseudos() {
     B.CreateUnreachable();  // pseudo
 
     uint64_t instCount = 0;
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*mod, &instCount);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*mod, &instCount);
     std::cout << "[INFO] Pseudo-inst exclusion — FLOPs=" << flops
               << " instCount=" << instCount << std::endl;
     // The only real instructions are: branch (entry→loop), fadd, branch (loop→loop).
@@ -299,7 +299,7 @@ void test_zero_fp_kernel() {
     B.CreateAdd(f->getArg(0), f->getArg(1));  // integer add — not a FLOP
     B.CreateRetVoid();
 
-    uint64_t flops = LLVMTranslationEngine().analyzeStaticFlops(*mod);
+    uint64_t flops = LLVMTranslationEngine::analyzeStaticFlops(*mod);
     std::cout << "[INFO] Zero-FP kernel FLOPs: " << flops << std::endl;
     assert(flops == 0 && "integer-only kernel must yield 0 FLOPs");
     std::cout << "[PASS] Zero-FP kernel correctly reports 0 FLOPs" << std::endl;
