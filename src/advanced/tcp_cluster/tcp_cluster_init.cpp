@@ -205,13 +205,18 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       }
     }
 
-    VGRE_LOG_INFO("TCPCluster",
-        "Worker initializing (master=" + effectiveHost + ":" +
-        std::to_string(effectivePort) + ")");
+    if (!effectiveHost.empty()) {
+        VGRE_LOG_INFO("TCPCluster",
+            "Worker initializing (master=" + effectiveHost + ":" +
+            std::to_string(effectivePort) + ")");
+    } else {
+        VGRE_LOG_INFO("TCPCluster",
+            "Worker starting in UDP auto-discovery mode (no explicit master address)");
+    }
 
     // ── Direct dial-out to master ──────────────────────────────────────────
-    // Handles IPv4 literals, IPv6, and hostnames.  Uses a non-blocking connect
-    // with a configurable WAN-appropriate timeout.
+    // Only attempt when the caller provided a real host address.
+    // An empty host means "use LAN UDP broadcast discovery only".
     if (!effectiveHost.empty() && effectiveHost != "0.0.0.0") {
       int tSec = getConnectTimeoutSec();
       auto sock = connectWithTimeout(effectiveHost, effectivePort, tSec);
