@@ -444,60 +444,58 @@ if not defined _flutter_sdk (
     set "SKIP_DASHBOARD=1"
     goto :dashboard_skip
 )
-rem -- Suppress Flutter analytics and version checks for all commands below.
+rem -- Suppress Flutter analytics for all commands below.
 set "FLUTTER_SUPPRESS_ANALYTICS=1"
 
-rem -- Step 1: Pre-cache engine artifacts ONLY for git-clone Flutter installs.
-rem    Non-git Flutter (winget/Scoop/FVM) ships pre-cached; precache --windows
-rem    calls "git rev-parse" on the SDK directory and hard-fails when the SDK
-rem    is not a git clone.  Skip it entirely in that case.
-rem    NOTE: avoid nested if-errorlevel inside if-exist-else; CMD misparses it.
-if not exist "!_flutter_sdk!\.git" goto :skip_precache
-echo [INFO] Pre-caching Flutter Windows engine artifacts...
-cmd /c ""!FLUTTER_CMD!" precache --windows --no-analytics"
-if errorlevel 1 (
-    echo [WARN] flutter precache failed - continuing anyway.
-    echo        Run manually: flutter precache --windows
+rem -- Step 1: Pre-cache engine artifacts.
+rem    flutter precache --windows calls git on the SDK; hard-fails for
+rem    non-git-clone Flutter installs (winget/Scoop/FVM).  Use a SET flag
+rem    so we never nest if-errorlevel inside if-exist (CMD misparses that).
+set "_do_precache=0"
+if exist "!_flutter_sdk!\.git" set "_do_precache=1"
+if "!_do_precache!"=="1" (
+    echo [INFO] Pre-caching Flutter Windows engine artifacts...
+    cmd /c ""!FLUTTER_CMD!" precache --windows" 2>nul
+    echo [INFO] flutter precache done ^(errors above are non-fatal^).
 )
-goto :precache_done
-:skip_precache
-echo [INFO] Flutter SDK is a pre-built install ^(no .git^) - skipping precache.
-echo        Engine artifacts are already bundled with this Flutter distribution.
-:precache_done
+if "!_do_precache!"=="0" echo [INFO] Flutter SDK pre-built install - skipping precache.
 
 rem -- Step 2: resolve Dart packages.
-rem    Prefer "dart pub get" for non-git Flutter: the dart tool does not run
-rem    git-based SDK version checks.  Fall back to "flutter pub get" if the
-rem    standalone dart binary is not available at the expected path.
-pushd "%DASHBOARD_DIR%" || exit /b 1
+rem    Try dart.exe pub get first: avoids Flutter git-SDK version checks.
+rem    Fall back to flutter pub get when dart binary is not found.
+set "_dart_bin=!_flutter_sdk!\bin\cache\dart-sdk\bin\dart.exe"
+if not exist "!_dart_bin!" set "_dart_bin=!_flutter_sdk!\bin\dart.exe"
+if not exist "!_dart_bin!" set "_dart_bin="
 
-set "_dart_exe=!_flutter_sdk!\bin\cache\dart-sdk\bin\dart.exe"
-if not exist "!_dart_exe!" set "_dart_exe=!_flutter_sdk!\bin\dart.exe"
+pushd "!DASHBOARD_DIR!"
+if errorlevel 1 (
+    echo [WARN] Cannot enter dashboard directory. Dashboard build skipped.
+    set "SKIP_DASHBOARD=1"
+    goto :dashboard_skip
+)
 
-if exist "!_dart_exe!" (
-    echo [INFO] Fetching Dart packages (dart pub get)...
-    cmd /c ""!_dart_exe!" pub get --no-analytics"
+if defined _dart_bin (
+    echo [INFO] Fetching Dart packages via dart pub get...
+    cmd /c ""!_dart_bin!" pub get"
 ) else (
-    echo [INFO] Fetching Dart packages (flutter pub get)...
-    cmd /c ""!FLUTTER_CMD!" pub get --no-analytics"
+    echo [INFO] Fetching Dart packages via flutter pub get...
+    cmd /c ""!FLUTTER_CMD!" pub get"
 )
 if errorlevel 1 (
     popd
-    echo WARNING: pub get failed. Dashboard build skipped.
-    echo          Check internet connectivity and run:
-    echo            cd %DASHBOARD_DIR%  ^&^&  flutter pub get
+    echo [WARN] pub get failed. Dashboard build skipped.
+    echo        Run manually from !DASHBOARD_DIR!:  flutter pub get
     set "SKIP_DASHBOARD=1"
     goto :dashboard_skip
 )
 
 rem -- Step 3: build the Windows release bundle.
 echo [INFO] Building Flutter Windows release bundle...
-cmd /c ""!FLUTTER_CMD!" build windows --release --no-analytics"
+cmd /c ""!FLUTTER_CMD!" build windows --release"
 if errorlevel 1 (
     popd
-    echo WARNING: Flutter build failed. Continuing without dashboard.
-    echo          Run  flutter build windows --release  from %DASHBOARD_DIR%
-    echo          for full build output.
+    echo [WARN] Flutter build failed. Continuing without dashboard.
+    echo        Run manually from !DASHBOARD_DIR!:  flutter build windows --release
     set "SKIP_DASHBOARD=1"
     goto :dashboard_skip
 )
