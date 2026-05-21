@@ -451,17 +451,19 @@ rem -- Step 1: Pre-cache engine artifacts ONLY for git-clone Flutter installs.
 rem    Non-git Flutter (winget/Scoop/FVM) ships pre-cached; precache --windows
 rem    calls "git rev-parse" on the SDK directory and hard-fails when the SDK
 rem    is not a git clone.  Skip it entirely in that case.
-if exist "!_flutter_sdk!\.git" (
-    echo [INFO] Pre-caching Flutter Windows engine artifacts...
-    cmd /c ""!FLUTTER_CMD!" precache --windows --no-analytics"
-    if errorlevel 1 (
-        echo [WARN] flutter precache failed - continuing anyway.
-        echo        Run manually: flutter precache --windows
-    )
-) else (
-    echo [INFO] Flutter SDK is a pre-built install ^(no .git^) - skipping precache.
-    echo        Engine artifacts are already bundled with this Flutter distribution.
+rem    NOTE: avoid nested if-errorlevel inside if-exist-else; CMD misparses it.
+if not exist "!_flutter_sdk!\.git" goto :skip_precache
+echo [INFO] Pre-caching Flutter Windows engine artifacts...
+cmd /c ""!FLUTTER_CMD!" precache --windows --no-analytics"
+if errorlevel 1 (
+    echo [WARN] flutter precache failed - continuing anyway.
+    echo        Run manually: flutter precache --windows
 )
+goto :precache_done
+:skip_precache
+echo [INFO] Flutter SDK is a pre-built install ^(no .git^) - skipping precache.
+echo        Engine artifacts are already bundled with this Flutter distribution.
+:precache_done
 
 rem -- Step 2: resolve Dart packages.
 rem    Prefer "dart pub get" for non-git Flutter: the dart tool does not run
