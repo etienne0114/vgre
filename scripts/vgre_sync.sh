@@ -512,16 +512,13 @@ EOF
     chmod +x "$INSTALL_DIR/vgre-worker"
     ln -sf "$INSTALL_DIR/vgre-launch.sh" "$BIN_DIR/vgre-dashboard"
     ln -sf "$INSTALL_DIR/vgre-worker" "$BIN_DIR/vgre-worker"
-    # Install vgre-start for easy cluster management
-    if [[ -f "$SCRIPT_DIR/vgre-start.sh" ]]; then
-        chmod +x "$SCRIPT_DIR/vgre-start.sh"
-        ln -sf "$SCRIPT_DIR/vgre-start.sh" "$BIN_DIR/vgre-start"
-    fi
-    # Install vgre-token token manager (works from any directory)
-    if [[ -f "$SCRIPT_DIR/vgre-token.sh" ]]; then
-        chmod +x "$SCRIPT_DIR/vgre-token.sh"
-        ln -sf "$SCRIPT_DIR/vgre-token.sh" "$BIN_DIR/vgre-token"
-    fi
+    # Install token manager, cluster launch, and discovery scripts into bin
+    for _script in vgre-token.sh vgre-start.sh vgre-discover.sh; do
+        if [[ -f "$SCRIPT_DIR/$_script" ]]; then
+            chmod +x "$SCRIPT_DIR/$_script"
+            ln -sf "$SCRIPT_DIR/$_script" "$BIN_DIR/${_script%.sh}"
+        fi
+    done
 fi
 
 echo ""
@@ -531,9 +528,14 @@ echo ""
 if [[ -f "$HOME/.vgre/token" ]]; then
     echo "🔐 Cluster auth token: ready  ($HOME/.vgre/token)"
     echo ""
-    echo "   Start master:  vgre-start --master"
-    echo "   Start worker:  vgre-start --worker"
-    echo "   Local test:    vgre-start --test"
+    echo "   Start master:            vgre-start --master"
+    echo "   Start worker (LAN):      vgre-start --worker"
+    echo "   Start worker (WAN):      vgre-start --worker --master-address <IP>:<PORT>"
+    echo "   Local test:              vgre-start --test"
+    echo ""
+    echo "   Detect public IP:        vgre-discover"
+    echo "   Register for discovery:  vgre-discover --register"
+    echo "   Find master (worker):    vgre-discover --find <BUCKET_ID>"
 else
     echo "⚙️  Cluster not yet configured. Run the setup to enable secure clustering:"
     echo "   bash scripts/setup-cluster.sh"

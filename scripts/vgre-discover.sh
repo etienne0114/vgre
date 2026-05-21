@@ -302,8 +302,36 @@ case "${1:-}" in
     --find)         shift; cmd_find "${1:-}" ;;
     --unregister)   cmd_unregister ;;
     --help|-h)
-        grep '^#' "$0" | head -30 | sed 's/^# \?//'
+        cat <<'HELP'
+vgre-discover -- Detect real public IP and enable cross-LAN token-keyed cluster discovery
+
+Usage:
+  vgre-discover                  Show public IP + worker connection command
+  vgre-discover --set-master     Set VGRE_CLUSTER_ADVERTISED_ADDRESS for this session
+                                 (called automatically by vgre-start --master)
+  vgre-discover --register       Register master's IP in a token-keyed KV store
+                                 Workers with the same token can find the master
+                                 without knowing its IP. Prints BUCKET_ID to share.
+  vgre-discover --find [BUCKET]  Find master's IP using the local token + BUCKET_ID
+                                 Verifies token fingerprint before connecting.
+  vgre-discover --unregister     Remove registration from KV store
+
+Cross-LAN discovery flow (no manual IP sharing needed):
+  # On master (run once, or after IP changes):
+  vgre-discover --register
+  # Output: Bucket ID: aBcDeFgH  <- share with workers
+
+  # On each worker (same token, any network):
+  vgre-discover --find aBcDeFgH
+  vgre-start --worker --master-address <printed address>
+
+Environment:
+  VGRE_DISCOVERY_BUCKET_ID   Override the kvdb.io bucket ID
+  VGRE_PORT                  TCP port (default 7777)
+  VGRE_TCP_AUTH_TOKEN_FILE   Path to token file (default ~/.vgre/token)
+HELP
         ;;
+
     *)
         echo "[ERROR] Unknown command: $1  (run vgre-discover --help)"
         exit 1
