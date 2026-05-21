@@ -510,14 +510,17 @@ class _DashboardOverviewContentState extends State<DashboardOverviewContent> {
               Expanded(
                 child: Row(
                   children: [
-                    const Text(
-                      "UVM MEMORY MAP",
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 1.5,
-                        fontSize: 12,
+                    const Flexible(
+                      child: Text(
+                        "UVM MEMORY MAP",
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1.5,
+                          fontSize: 12,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
                       ),
-                      overflow: TextOverflow.ellipsis,
                     ),
                     const SizedBox(width: 8),
                     IconButton(
@@ -1027,11 +1030,12 @@ class UvmMapPainter extends CustomPainter {
     const int gridCount = 32;
     const double spacing = 2.0;
 
-    // Safety check for empty map or invalid size
+    // Safety check: empty map, zero/infinite/NaN size.
     if (uvmMap.length < gridCount * gridCount ||
-        size.width <= 0 ||
-        size.height <= 0)
+        size.width <= 0 || !size.width.isFinite ||
+        size.height <= 0 || !size.height.isFinite) {
       return;
+    }
 
     final double cellWidth =
         (size.width - (gridCount - 1) * spacing) / gridCount;
