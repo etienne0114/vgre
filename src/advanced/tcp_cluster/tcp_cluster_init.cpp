@@ -9,6 +9,7 @@
 #include "vgre/advanced/tcp_cluster/internal/windows_socket_manager.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
+#include <cstdio>
 #include <fstream>
 #include <thread>
 
@@ -123,14 +124,27 @@ static bool splitHostPort(const std::string& addr,
 
 VGREResult TCPClusterManager::initialize(bool is_master,
                                          const std::string &host, int port) {
+  fprintf(stderr, "VGRE-DIAG initialize: entry is_master=%d port=%d\n",
+          (int)is_master, port);
+  fflush(stderr);
   if (enabled_ && is_master_ == is_master && port_ == port)
     return VGREResult::SUCCESS;
+  fprintf(stderr, "VGRE-DIAG initialize: calling shutdown()\n"); fflush(stderr);
   shutdown();
+  fprintf(stderr, "VGRE-DIAG initialize: shutdown() returned\n"); fflush(stderr);
 
+  if (!windows_socket_manager_) {
+    fprintf(stderr, "VGRE-DIAG initialize: windows_socket_manager_ is NULL!\n");
+    fflush(stderr);
+    return VGREResult::ERR_IO;
+  }
+  fprintf(stderr, "VGRE-DIAG initialize: calling WSA init\n"); fflush(stderr);
   if (windows_socket_manager_->initialize() != VGREResult::SUCCESS) {
+    fprintf(stderr, "VGRE-DIAG initialize: WSA init FAILED\n"); fflush(stderr);
     enabled_ = false;
     return VGREResult::ERR_IO;
   }
+  fprintf(stderr, "VGRE-DIAG initialize: WSA init OK\n"); fflush(stderr);
 
   is_master_ = is_master;
   {
@@ -139,13 +153,19 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     port_ = port;
   }
   enabled_ = true;
+  fprintf(stderr, "VGRE-DIAG initialize: enabled=true host='%s' port=%d\n",
+          host.c_str(), port);
+  fflush(stderr);
 
   if (is_master_) {
+    fprintf(stderr, "VGRE-DIAG initialize: MASTER path, creating server socket\n"); fflush(stderr);
     server_fd_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (server_fd_ == vgre::common::VGRE_INVALID_SOCKET) {
+      fprintf(stderr, "VGRE-DIAG initialize: server socket() FAILED\n"); fflush(stderr);
       enabled_ = false;
       return VGREResult::ERR_IO;
     }
+    fprintf(stderr, "VGRE-DIAG initialize: server socket created, binding port %d\n", port_); fflush(stderr);
 
     int opt = 1;
     vgre::common::vgre_setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR,
@@ -158,11 +178,13 @@ VGREResult TCPClusterManager::initialize(bool is_master,
 
     if (bind(server_fd_, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
         listen(server_fd_, 128) < 0) {
+      fprintf(stderr, "VGRE-DIAG initialize: bind/listen FAILED on port %d\n", port_); fflush(stderr);
       vgre::common::vgre_close_socket(server_fd_);
       server_fd_ = vgre::common::VGRE_INVALID_SOCKET;
       enabled_ = false;
       return VGREResult::ERR_IO;
     }
+    fprintf(stderr, "VGRE-DIAG initialize: bind/listen OK\n"); fflush(stderr);
 
     const char* advAddr = vgre_get_config("VGRE_CLUSTER_ADVERTISED_ADDRESS");
     if (advAddr && advAddr[0] != '\0') {
@@ -175,12 +197,16 @@ VGREResult TCPClusterManager::initialize(bool is_master,
           " (set VGRE_CLUSTER_ADVERTISED_ADDRESS=<public-ip>:<port> for WAN/NAT)");
     }
 
+    fprintf(stderr, "VGRE-DIAG initialize: starting serverLoop thread\n"); fflush(stderr);
     cluster_thread_ = std::thread(&TCPClusterManager::serverLoop, this);
+    fprintf(stderr, "VGRE-DIAG initialize: startMasterAnnouncer\n"); fflush(stderr);
     discovery_manager_->startMasterAnnouncer();
+    fprintf(stderr, "VGRE-DIAG initialize: startMasterWorkerDiscovery\n"); fflush(stderr);
     discovery_manager_->startMasterWorkerDiscovery();
     parseProactiveNodes();
     parseMeshPeers();
     discovery_manager_->startProactiveConnections();
+    fprintf(stderr, "VGRE-DIAG initialize: MASTER path complete\n"); fflush(stderr);
 
   } else {
     // ── Worker init ────────────────────────────────────────────────────────
@@ -243,15 +269,21 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       if (!found) proactive_worker_addresses_.push_back(masterAddr);
     }
 
+    fprintf(stderr, "VGRE-DIAG initialize: starting data_processor_thread\n"); fflush(stderr);
     data_processor_thread_ =
         std::thread(&TCPClusterManager::processClientStagingBuffer, this);
+    fprintf(stderr, "VGRE-DIAG initialize: starting client_loop_thread\n"); fflush(stderr);
     client_loop_thread_ = std::thread(&TCPClusterManager::clientLoop, this);
+    fprintf(stderr, "VGRE-DIAG initialize: threads started\n"); fflush(stderr);
 
     // UDP discovery is used as a LAN fallback when no explicit master is set.
     // When VGRE_CLUSTER_MASTER_ADDRESS is configured, these loops still run
     // but won't initiate a duplicate connection (has_master_fd_ check).
+    fprintf(stderr, "VGRE-DIAG initialize: startWorkerDiscovery\n"); fflush(stderr);
     discovery_manager_->startWorkerDiscovery();
+    fprintf(stderr, "VGRE-DIAG initialize: startWorkerAnnouncer\n"); fflush(stderr);
     discovery_manager_->startWorkerAnnouncer();
+    fprintf(stderr, "VGRE-DIAG initialize: discovery started\n"); fflush(stderr);
 
     parseMeshPeers();
 
@@ -261,6 +293,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     }
   }
 
+  fprintf(stderr, "VGRE-DIAG initialize: returning SUCCESS\n"); fflush(stderr);
   return VGREResult::SUCCESS;
 }
 

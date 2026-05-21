@@ -20,6 +20,7 @@
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -88,11 +89,10 @@ std::string senderToString(const sockaddr_storage& ss) {
 } // anonymous namespace
 
 void DiscoveryManager::udpDiscoveryLoop() {
-    if (!parent_->data_processor_thread_.joinable()) {
-        parent_->data_processor_thread_ =
-            std::thread(&TCPClusterManager::processClientStagingBuffer, parent_);
-    }
-
+    fprintf(stderr, "VGRE-DIAG udpDiscoveryLoop: thread started\n"); fflush(stderr);
+    // NOTE: data_processor_thread_ is already started by initialize() before
+    // this function runs. Do NOT reassign it here — assigning to a joinable
+    // std::thread calls std::terminate().
     while (parent_ && parent_->enabled_) {
 
         // ── Create UDP socket (prefer IPv4 for broadcast compatibility) ──────

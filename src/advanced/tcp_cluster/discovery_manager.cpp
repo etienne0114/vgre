@@ -12,10 +12,10 @@
 #include "vgre/common/logger.h"
 #include "vgre/common/system_utils.h"
 #include "vgre/common/sockets.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <algorithm>
 #include <thread>
 
 namespace vgre {
@@ -304,6 +304,7 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
 // ── UDP Worker Announcer Loop (Worker broadcasts presence) ────────────────
 
 void DiscoveryManager::udpWorkerAnnouncerLoop() {
+  fprintf(stderr, "VGRE-DIAG udpWorkerAnnouncerLoop: thread started\n"); fflush(stderr);
   VgreSocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
   if (udp_guard.get() == VGRE_INVALID_SOCKET) return;
   vgre_set_nosigpipe(udp_guard.get()); // suppress SIGPIPE on macOS
