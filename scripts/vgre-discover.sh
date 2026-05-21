@@ -70,41 +70,56 @@ _detect_public_ip() {
 }
 
 # Get or create the per-cluster kvdb.io bucket.
-# The bucket ID is stored in ~/.vgre/discovery_bucket.
-# An explicit VGRE_DISCOVERY_BUCKET_ID env var always wins.
+# Priority:  VGRE_DISCOVERY_BUCKET_ID env var  >  ~/.vgre/discovery_bucket file  >  auto-create.
+# The bucket ID is persisted to the file on first use so future sessions work without the env var.
 _bucket_id() {
+    local bid=""
+
     if [[ -n "${VGRE_DISCOVERY_BUCKET_ID:-}" ]]; then
-        echo "$VGRE_DISCOVERY_BUCKET_ID"
-        return 0
+        bid="$VGRE_DISCOVERY_BUCKET_ID"
+    elif [[ -f "$BUCKET_ID_FILE" ]]; then
+        bid=$(cat "$BUCKET_ID_FILE")
     fi
-    if [[ -f "$BUCKET_ID_FILE" ]]; then
-        cat "$BUCKET_ID_FILE"
+
+    # Persist to file so subsequent sessions don't need the env var.
+    if [[ -n "$bid" ]]; then
+        if [[ ! -f "$BUCKET_ID_FILE" ]] || [[ "$(cat "$BUCKET_ID_FILE")" != "$bid" ]]; then
+            echo "$bid" > "$BUCKET_ID_FILE"
+            chmod 600 "$BUCKET_ID_FILE"
+        fi
+        echo "$bid"
         return 0
     fi
 
+    # Auto-create a new bucket.  kvdb.io sends a verification email; the bucket
+    # is writable only after confirming that email.
     echo "[INFO] No discovery bucket configured — creating one at kvdb.io (free)..." >&2
+    echo "[INFO] You will receive a verification email. Visit https://kvdb.io/login to activate." >&2
     local host
     host=$(hostname -s 2>/dev/null || echo "vgre")
     local resp
-    resp=$(curl -sf --max-time 10 -X POST \
+    resp=$(curl -s --max-time 10 -X POST \
         -d "email=vgre-${host}@cluster.local" \
         "${KV_BASE}/" 2>/dev/null) || true
 
-    # Response format: {"bucket_id":"ABC123",...}
-    local bid
     bid=$(echo "$resp" | grep -o '"bucket_id":"[^"]*"' | cut -d'"' -f4)
 
     if [[ -z "$bid" ]]; then
         echo "" >&2
-        echo "[ERROR] Could not create discovery bucket." >&2
-        echo "        1. Visit https://kvdb.io and create a free bucket." >&2
-        echo "        2. Set: export VGRE_DISCOVERY_BUCKET_ID=<your-bucket-id>" >&2
-        echo "        3. Re-run: vgre-discover --register" >&2
+        echo "[ERROR] Could not auto-create discovery bucket." >&2
+        echo "        Solution A (easiest): create a free bucket manually:" >&2
+        echo "          1. Visit https://kvdb.io → Get Started → enter your email" >&2
+        echo "          2. Confirm the verification email you receive" >&2
+        echo "          3. Copy the bucket ID from your browser URL" >&2
+        echo "          4. Run: export VGRE_DISCOVERY_BUCKET_ID=<your-bucket-id>" >&2
+        echo "          5. Re-run: vgre-discover --register" >&2
+        echo "        Solution B: share the IP manually — vgre-discover (no flags)" >&2
         return 1
     fi
 
     echo "$bid" > "$BUCKET_ID_FILE"
     chmod 600 "$BUCKET_ID_FILE"
+    echo "[INFO] Bucket $bid created. Check your email to verify before writing." >&2
     echo "$bid"
 }
 
@@ -196,15 +211,39 @@ cmd_register() {
     local payload="${ip}:${PORT}|fp=${fp:0:16}|ts=$(date -u +%s)"
 
     echo "[...] Registering ${ip}:${PORT} at kvdb.io bucket ${bucket}..."
+
+    # Capture both response body AND HTTP status code.
+    # Using a temp file avoids subshell issues with multi-line output from -w.
+    local tmp_body
+    tmp_body=$(mktemp)
     local http_code
-    http_code=$(curl -sf --max-time 10 -o /dev/null -w "%{http_code}" \
+    http_code=$(curl -s --max-time 10 -o "$tmp_body" -w "%{http_code}" \
         -X POST "${KV_BASE}/${bucket}/${key}" \
         -d "$payload" 2>/dev/null)
+    local resp_body
+    resp_body=$(cat "$tmp_body" 2>/dev/null)
+    rm -f "$tmp_body"
 
     if [[ "$http_code" != "200" && "$http_code" != "201" ]]; then
         echo "[ERROR] Registration failed (HTTP ${http_code})." >&2
-        echo "        Bucket: $bucket | Key: $key" >&2
-        echo "        Try: export VGRE_DISCOVERY_BUCKET_ID=<your-bucket-id> and retry." >&2
+        if [[ -n "$resp_body" ]]; then
+            echo "        Server says: ${resp_body}" >&2
+        fi
+        if echo "$resp_body" | grep -qi "not verified\|activate\|confirm"; then
+            echo "" >&2
+            echo "        Your kvdb.io account needs email verification:" >&2
+            echo "          1. Visit https://kvdb.io/login" >&2
+            echo "          2. Verify your email address" >&2
+            echo "          3. Re-run: vgre-discover --register" >&2
+        elif [[ "$http_code" == "403" ]]; then
+            echo "" >&2
+            echo "        Bucket ID: $bucket" >&2
+            echo "        If this bucket was just created, verify the email first:" >&2
+            echo "          visit https://kvdb.io/login" >&2
+            echo "        Or create a new bucket: visit https://kvdb.io" >&2
+        else
+            echo "        Bucket: $bucket | Key: $key" >&2
+        fi
         exit 1
     fi
 
@@ -242,13 +281,36 @@ cmd_find() {
     local key
     key=$(_discovery_key) || exit 1
 
-    echo "[...] Looking up master in bucket ${bucket}..."
-    local payload
-    payload=$(curl -sf --max-time 10 "${KV_BASE}/${bucket}/${key}" 2>/dev/null)
+    # Save bucket ID to file so future sessions don't need the env var.
+    if [[ ! -f "$BUCKET_ID_FILE" ]] || [[ "$(cat "$BUCKET_ID_FILE")" != "$bucket" ]]; then
+        echo "$bucket" > "$BUCKET_ID_FILE"
+        chmod 600 "$BUCKET_ID_FILE"
+    fi
 
-    if [[ -z "$payload" ]]; then
+    echo "[...] Looking up master in bucket ${bucket}..."
+    local tmp_body
+    tmp_body=$(mktemp)
+    local http_code
+    http_code=$(curl -s --max-time 10 -o "$tmp_body" -w "%{http_code}" \
+        "${KV_BASE}/${bucket}/${key}" 2>/dev/null)
+    local payload
+    payload=$(cat "$tmp_body" 2>/dev/null)
+    rm -f "$tmp_body"
+
+    if [[ "$http_code" == "404" || -z "$payload" || "$payload" == "Not Found" ]]; then
         echo "[ERROR] No master registered in bucket ${bucket}." >&2
         echo "        Ask the master to run: vgre-discover --register" >&2
+        exit 1
+    fi
+
+    if [[ "$http_code" != "200" ]]; then
+        echo "[ERROR] Lookup failed (HTTP ${http_code})." >&2
+        if [[ -n "$payload" ]]; then
+            echo "        Server says: ${payload}" >&2
+        fi
+        if echo "$payload" | grep -qi "not verified\|activate"; then
+            echo "        Verify the bucket owner's email at https://kvdb.io/login" >&2
+        fi
         exit 1
     fi
 
@@ -290,8 +352,14 @@ cmd_unregister() {
     local bucket
     bucket=$(_bucket_id) || exit 1
 
-    curl -sf --max-time 10 -X DELETE "${KV_BASE}/${bucket}/${key}" >/dev/null 2>&1 || true
-    echo "[OK] Discovery registration removed."
+    local http_code
+    http_code=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" \
+        -X DELETE "${KV_BASE}/${bucket}/${key}" 2>/dev/null)
+    if [[ "$http_code" == "200" || "$http_code" == "204" ]]; then
+        echo "[OK] Discovery registration removed."
+    else
+        echo "[WARN] DELETE returned HTTP ${http_code} — entry may not have existed."
+    fi
 }
 
 # ── Entry point ───────────────────────────────────────────────────────────────
