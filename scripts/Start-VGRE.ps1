@@ -249,6 +249,21 @@ switch ($mode) {
             Write-Host "        Run  .\scripts\vgre_sync.bat  from the VGRE repository to build and deploy the dashboard." -ForegroundColor Red
             exit 1
         }
+
+        # Auto-detect real public IP so the master broadcasts with it.
+        # Workers on different LANs then receive the correct address in the UDP ping.
+        $discoverPs1 = Join-Path $InstallDir "scripts\vgre-discover.ps1"
+        if (-not (Test-Path $discoverPs1)) {
+            $discoverPs1 = Join-Path (Split-Path $PSCommandPath -Parent) "vgre-discover.ps1"
+        }
+        if (Test-Path $discoverPs1) {
+            Write-Host "[...] Detecting public IP for WAN broadcast..." -ForegroundColor Cyan
+            try {
+                & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                    -File $discoverPs1 --set-master 2>$null
+            } catch {}
+        }
+
         Write-Host "Starting master..." -ForegroundColor Green
         $env:VGRE_PORT = $port
         Start-Process -FilePath $dashboardExe

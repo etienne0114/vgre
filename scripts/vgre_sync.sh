@@ -379,8 +379,8 @@ if [[ "$(uname)" == "Darwin" ]]; then
         echo "⚠️  vgre-worker binary not found at $WORKER_SRC — skipping"
     fi
 
-    # Install token manager and cluster scripts into bin
-    for _script in vgre-token.sh vgre-start.sh; do
+    # Install token manager, cluster launch, and discovery scripts into bin
+    for _script in vgre-token.sh vgre-start.sh vgre-discover.sh; do
         if [[ -f "$SCRIPT_DIR/$_script" ]]; then
             chmod +x "$SCRIPT_DIR/$_script"
             ln -sf "$SCRIPT_DIR/$_script" "$BIN_DIR/${_script%.sh}"
