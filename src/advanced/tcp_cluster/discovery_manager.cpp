@@ -170,15 +170,30 @@ void DiscoveryManager::udpAnnouncerLoop() {
   VGRE_LOG_INFO("TCPCluster", "Master: UDP Announcer active (broadcasting master presence)...");
 
   while (parent_ && parent_->enabled_ && parent_->is_master_) {
-    // Recompute each iteration so security-mode toggles are reflected immediately.
+    // Recompute each iteration so security-mode/address toggles take effect
+    // without a restart.
+    //
+    // Ping format:
+    //   VGRE_DISCOVERY_PING:<tcp_port>:<sec_mode>[:<adv_addr>][:<hmac_hex>]
+    //
+    // <adv_addr> is the value of VGRE_CLUSTER_ADVERTISED_ADDRESS and is
+    // included only when that variable is set.  Workers that receive it use
+    // it instead of the UDP sender address to establish the TCP connection —
+    // essential for NAT/WAN scenarios where the LAN broadcast still reaches
+    // the worker but the sender IP is a private address.
     std::string security_str = (parent_->security_enabled_ ? ":SECURE" : ":PLAIN");
     std::string ping_msg = "VGRE_DISCOVERY_PING:" + std::to_string(parent_->port_) + security_str;
-    // Append HMAC-SHA256 tag so workers can verify master identity.
-    // Skipped when no auth token is configured (open/trusted-network mode).
+
+    const char* advAddr = vgre_get_config("VGRE_CLUSTER_ADVERTISED_ADDRESS");
+    if (advAddr && advAddr[0] != '\0')
+        ping_msg += ':' + std::string(advAddr);
+
     std::string token;
     { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
     if (!token.empty()) ping_msg += ':' + CryptoUtils::computeHmacHex(token, ping_msg);
-    sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+
+    sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0,
+           (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
     std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
     parent_->shutdown_cv_.wait_for(lock, std::chrono::seconds(2), [this]() { return !parent_->enabled_; });
   }

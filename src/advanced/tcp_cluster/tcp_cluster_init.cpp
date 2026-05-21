@@ -12,8 +12,114 @@
 #include <fstream>
 #include <thread>
 
+#include "vgre/common/os_backend.h"
+#if !defined(_WIN32)
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <fcntl.h>
+#endif
+
 namespace vgre {
 namespace advanced {
+
+namespace {
+
+// Read the configurable TCP connect timeout (used for both direct-connect and
+// proactive reconnection).  Default is 10 s — appropriate for WAN links.
+static int getConnectTimeoutSec() {
+    const char* e = vgre_get_config("VGRE_CLUSTER_CONNECT_TIMEOUT_SEC");
+    if (e) { int v = std::atoi(e); if (v >= 1 && v <= 120) return v; }
+    return 10;
+}
+
+// Full-featured non-blocking connect: resolves hostnames, supports IPv4 and
+// IPv6, and applies a wall-clock timeout so WAN connections don't block forever.
+static vgre::common::vgre_socket_t connectWithTimeout(
+        const std::string& host, int port, int timeoutSec) {
+    char portStr[8];
+    snprintf(portStr, sizeof(portStr), "%d", port);
+
+    addrinfo hints{};
+    hints.ai_family   = AF_UNSPEC;      // IPv4 and IPv6
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags    = AI_ADDRCONFIG;
+
+    addrinfo* res = nullptr;
+    if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0 || !res)
+        return vgre::common::VGRE_INVALID_SOCKET;
+
+    vgre::common::vgre_socket_t sock = vgre::common::VGRE_INVALID_SOCKET;
+    for (addrinfo* rp = res; rp && sock == vgre::common::VGRE_INVALID_SOCKET; rp = rp->ai_next) {
+        vgre::common::vgre_socket_t s = ::socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (s == vgre::common::VGRE_INVALID_SOCKET) continue;
+
+        vgre::common::vgre_ioctl_nonblock(s);
+        int rc = ::connect(s, rp->ai_addr, static_cast<int>(rp->ai_addrlen));
+
+#ifdef _WIN32
+        bool inProgress = (rc < 0 && WSAGetLastError() == WSAEWOULDBLOCK);
+#else
+        bool inProgress = (rc < 0 && (errno == EINPROGRESS || errno == EAGAIN));
+#endif
+
+        if (rc == 0 || inProgress) {
+            if (inProgress) {
+                fd_set wset;
+                FD_ZERO(&wset);
+                FD_SET(s, &wset);
+                timeval tv{timeoutSec, 0};
+                int sel = ::select(static_cast<int>(s) + 1, nullptr, &wset, nullptr, &tv);
+                if (sel > 0) {
+                    int err = 0;
+                    socklen_t elen = sizeof(err);
+                    getsockopt(s, SOL_SOCKET, SO_ERROR,
+                               reinterpret_cast<char*>(&err), &elen);
+                    if (err != 0) { vgre::common::vgre_close_socket(s); continue; }
+                } else {
+                    vgre::common::vgre_close_socket(s);
+                    continue;
+                }
+            }
+            // Restore blocking mode
+#ifdef _WIN32
+            u_long blk = 0;
+            ioctlsocket(s, FIONBIO, &blk);
+#else
+            { int f = fcntl(s, F_GETFL, 0); if (f != -1) fcntl(s, F_SETFL, f & ~O_NONBLOCK); }
+#endif
+            vgre::common::vgre_set_tcp_keepalive(s, 30, 10, 5);
+            sock = s;
+        } else {
+            vgre::common::vgre_close_socket(s);
+        }
+    }
+    freeaddrinfo(res);
+    return sock;
+}
+
+// Parse "host:port" or "[::1]:port" into components.  Returns false on error.
+static bool splitHostPort(const std::string& addr,
+                          std::string& outHost, int& outPort) {
+    if (addr.empty()) return false;
+    if (addr.front() == '[') {
+        size_t close = addr.find(']');
+        if (close == std::string::npos) return false;
+        outHost = addr.substr(1, close - 1);
+        size_t colon = addr.find(':', close + 1);
+        if (colon == std::string::npos) return false;
+        try { outPort = std::stoi(addr.substr(colon + 1)); } catch (...) { return false; }
+    } else {
+        size_t colon = addr.rfind(':');
+        if (colon == std::string::npos) return false;
+        outHost = addr.substr(0, colon);
+        try { outPort = std::stoi(addr.substr(colon + 1)); } catch (...) { return false; }
+    }
+    return !outHost.empty() && outPort > 0 && outPort < 65536;
+}
+
+} // anonymous namespace
 
 VGREResult TCPClusterManager::initialize(bool is_master,
                                          const std::string &host, int port) {
@@ -46,9 +152,9 @@ VGREResult TCPClusterManager::initialize(bool is_master,
                                   (const char *)&opt, sizeof(opt));
 
     struct sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(static_cast<uint16_t>(port_));
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;  // listen on all interfaces (0.0.0.0)
+    addr.sin_port        = htons(static_cast<uint16_t>(port_));
 
     if (bind(server_fd_, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
         listen(server_fd_, 128) < 0) {
@@ -58,8 +164,16 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       return VGREResult::ERR_IO;
     }
 
-    VGRE_LOG_INFO("TCPCluster",
-                  "Master node listening on port " + std::to_string(port_));
+    const char* advAddr = vgre_get_config("VGRE_CLUSTER_ADVERTISED_ADDRESS");
+    if (advAddr && advAddr[0] != '\0') {
+      VGRE_LOG_INFO("TCPCluster",
+          "Master listening on port " + std::to_string(port_) +
+          " | advertised address: " + std::string(advAddr));
+    } else {
+      VGRE_LOG_INFO("TCPCluster",
+          "Master listening on 0.0.0.0:" + std::to_string(port_) +
+          " (set VGRE_CLUSTER_ADVERTISED_ADDRESS=<public-ip>:<port> for WAN/NAT)");
+    }
 
     cluster_thread_ = std::thread(&TCPClusterManager::serverLoop, this);
     discovery_manager_->startMasterAnnouncer();
@@ -67,39 +181,77 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     parseProactiveNodes();
     parseMeshPeers();
     discovery_manager_->startProactiveConnections();
+
   } else {
-    VGRE_LOG_INFO("TCPCluster", "Worker node initializing (master=" + host_ +
-                                    ":" + std::to_string(port_) + ")");
-    
-    // Direct dial-out to explicitly provided master
-    if (!host_.empty() && host_ != "0.0.0.0") {
-      vgre::common::vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-      if (sock != vgre::common::VGRE_INVALID_SOCKET) {
-        struct sockaddr_in serv_addr{};
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_port = htons(static_cast<uint16_t>(port_));
-        if (inet_pton(AF_INET, host_.c_str(), &serv_addr.sin_addr) > 0) {
-          if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) >= 0) {
-            std::lock_guard<std::mutex> lk(client_mutex_);
-            client_fd_ = sock;
-            has_master_fd_.store(true, std::memory_order_release);
-            VGRE_LOG_INFO("TCPCluster", "Worker connected directly to master at " + host_ + ":" + std::to_string(port_));
-          } else {
-            vgre::common::vgre_close_socket(sock);
-          }
-        } else {
-          vgre::common::vgre_close_socket(sock);
-        }
+    // ── Worker init ────────────────────────────────────────────────────────
+
+    // VGRE_CLUSTER_MASTER_ADDRESS overrides the host passed at construction.
+    // Use it for explicit WAN connectivity (public IP, hostname, IPv6).
+    std::string effectiveHost = host_;
+    int effectivePort = port_;
+    const char* masterAddrEnv = vgre_get_config("VGRE_CLUSTER_MASTER_ADDRESS");
+    if (masterAddrEnv && masterAddrEnv[0] != '\0') {
+      std::string parsed;
+      int parsedPort = port_;
+      if (splitHostPort(std::string(masterAddrEnv), parsed, parsedPort)) {
+        effectiveHost = parsed;
+        effectivePort = parsedPort;
+        std::lock_guard<std::mutex> lk(client_mutex_);
+        host_  = effectiveHost;
+        port_  = effectivePort;
+        VGRE_LOG_INFO("TCPCluster",
+            "Worker: using VGRE_CLUSTER_MASTER_ADDRESS=" +
+            effectiveHost + ":" + std::to_string(effectivePort));
       }
+    }
+
+    VGRE_LOG_INFO("TCPCluster",
+        "Worker initializing (master=" + effectiveHost + ":" +
+        std::to_string(effectivePort) + ")");
+
+    // ── Direct dial-out to master ──────────────────────────────────────────
+    // Handles IPv4 literals, IPv6, and hostnames.  Uses a non-blocking connect
+    // with a configurable WAN-appropriate timeout.
+    if (!effectiveHost.empty() && effectiveHost != "0.0.0.0") {
+      int tSec = getConnectTimeoutSec();
+      auto sock = connectWithTimeout(effectiveHost, effectivePort, tSec);
+      if (sock != vgre::common::VGRE_INVALID_SOCKET) {
+        std::lock_guard<std::mutex> lk(client_mutex_);
+        client_fd_ = sock;
+        has_master_fd_.store(true, std::memory_order_release);
+        VGRE_LOG_INFO("TCPCluster",
+            "Worker: connected to master at " + effectiveHost + ":" +
+            std::to_string(effectivePort));
+      } else {
+        VGRE_LOG_WARN("TCPCluster",
+            "Worker: direct connect to " + effectiveHost + ":" +
+            std::to_string(effectivePort) + " failed (timeout=" +
+            std::to_string(tSec) + "s) — falling back to discovery");
+      }
+
+      // Register master address for proactive reconnection with exponential
+      // backoff so the worker rejoins automatically after a master restart.
+      std::string masterAddr = effectiveHost + ":" + std::to_string(effectivePort);
+      bool found = false;
+      for (const auto& a : proactive_worker_addresses_)
+        if (a == masterAddr) { found = true; break; }
+      if (!found) proactive_worker_addresses_.push_back(masterAddr);
     }
 
     data_processor_thread_ =
         std::thread(&TCPClusterManager::processClientStagingBuffer, this);
     client_loop_thread_ = std::thread(&TCPClusterManager::clientLoop, this);
-    discovery_manager_->startWorkerDiscovery(); // Start UDP discovery as fallback
+
+    // UDP discovery is used as a LAN fallback when no explicit master is set.
+    // When VGRE_CLUSTER_MASTER_ADDRESS is configured, these loops still run
+    // but won't initiate a duplicate connection (has_master_fd_ check).
+    discovery_manager_->startWorkerDiscovery();
     discovery_manager_->startWorkerAnnouncer();
+
     parseMeshPeers();
-    if (!mesh_peer_ips_.empty()) {
+
+    // Start proactive reconnection if we have an explicit master OR mesh peers.
+    if (!proactive_worker_addresses_.empty() || !mesh_peer_ips_.empty()) {
       discovery_manager_->startProactiveConnections();
     }
   }

@@ -347,7 +347,8 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
   }
 
   // How long an unavailable node remains visible before being removed from the UI.
-  static const _kGracePeriodSeconds = 30;
+  // Exposed as a public constant so UI widgets can display the same countdown.
+  static const kGracePeriodSeconds = 30;
 
   void _poll() {
     try {
@@ -428,7 +429,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
           if (node.available) return true;
           if (node.disconnectedAt == null) return false;
           return now.difference(node.disconnectedAt!).inSeconds <=
-              _kGracePeriodSeconds;
+              kGracePeriodSeconds;
         }).toList();
 
         List<KernelStat> topKernels = const [];

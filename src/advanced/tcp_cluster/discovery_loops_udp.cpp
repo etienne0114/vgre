@@ -138,29 +138,63 @@ void DiscoveryManager::udpDiscoveryLoop() {
             // Expect: VGRE_DISCOVERY_PING:<tcp_port>[:<sec_mode>][:<hmac_hex>]
             if (msg.find("VGRE_DISCOVERY_PING") != 0) continue;
 
-            std::string masterIp = senderToString(sender_ss);
-            if (masterIp.empty()) continue;
+            std::string senderIp = senderToString(sender_ss);
+            if (senderIp.empty()) continue;
 
-            // Extract TCP port from the message
-            int masterTcpPort = parent_->port_; // sensible default
+            // Parse message fields:
+            //   VGRE_DISCOVERY_PING:<tcp_port>:<sec_mode>[:<adv_addr>][:<hmac_hex>]
+            // Fields beyond <sec_mode> are optional and added in newer versions.
+            int masterTcpPort = parent_->port_;
+            std::string advertisedAddr;  // optional master public address
             std::string hmacField;
-            size_t colon1 = msg.find(':');
-            if (colon1 != std::string::npos) {
-                size_t colon2 = msg.find(':', colon1 + 1);
-                if (colon2 != std::string::npos) {
-                    try { masterTcpPort = std::stoi(msg.substr(colon1 + 1, colon2 - colon1 - 1)); }
-                    catch (...) {}
-                    // Skip security-mode field; look for HMAC after it
-                    size_t colon3 = msg.find(':', colon2 + 1);
-                    if (colon3 != std::string::npos)
-                        hmacField = msg.substr(colon3 + 1);
+
+            // Split into tokens on ':'
+            std::vector<std::string> fields;
+            {
+                std::string s = msg;
+                size_t pos = 0;
+                while (true) {
+                    size_t c = s.find(':', pos);
+                    fields.push_back(s.substr(pos, c == std::string::npos ? std::string::npos : c - pos));
+                    if (c == std::string::npos) break;
+                    pos = c + 1;
+                }
+            }
+            // fields[0] = "VGRE_DISCOVERY_PING"
+            // fields[1] = tcp_port
+            // fields[2] = sec_mode  (SECURE/PLAIN)
+            // fields[3] = adv_addr or hmac_hex  (64-char hex = HMAC, else addr)
+            // fields[4] = hmac_hex              (when fields[3] is adv_addr)
+            if (fields.size() >= 2) {
+                try { masterTcpPort = std::stoi(fields[1]); } catch (...) {}
+            }
+            if (fields.size() >= 4) {
+                // Detect HMAC by its fixed 64-character hex length
+                if (fields.back().size() == 64) {
+                    hmacField = fields.back();
+                    // If there's a field between sec_mode and hmac, it's adv_addr
+                    if (fields.size() >= 5) advertisedAddr = fields[3];
                 } else {
-                    try { masterTcpPort = std::stoi(msg.substr(colon1 + 1)); }
+                    // No HMAC present; last field might be adv_addr
+                    advertisedAddr = fields.back();
+                }
+            }
+
+            // Prefer the master's self-advertised address (public IP/hostname)
+            // over the UDP sender address for NAT/WAN scenarios.
+            std::string masterIp = advertisedAddr.empty() ? senderIp : advertisedAddr;
+            // Strip port from adv_addr if it includes one (e.g. "1.2.3.4:7777")
+            if (!advertisedAddr.empty()) {
+                size_t colon = advertisedAddr.rfind(':');
+                if (colon != std::string::npos) {
+                    masterIp = advertisedAddr.substr(0, colon);
+                    try { masterTcpPort = std::stoi(advertisedAddr.substr(colon + 1)); }
                     catch (...) {}
                 }
             }
 
-            // Verify HMAC when an auth token is configured
+            // Verify HMAC when an auth token is configured.
+            // The HMAC covers the message prefix UP TO (not including) the HMAC field.
             std::string token;
             {
                 std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_);
@@ -169,19 +203,23 @@ void DiscoveryManager::udpDiscoveryLoop() {
             if (!token.empty()) {
                 if (hmacField.empty()) {
                     VGRE_LOG_WARN("TCPCluster",
-                        "UDP master ping from " + masterIp + " has no HMAC — ignoring");
+                        "UDP master ping from " + senderIp + " has no HMAC — ignoring");
                     continue;
                 }
-                std::string prefix = "VGRE_DISCOVERY_PING:" + std::to_string(masterTcpPort);
+                // Rebuild the signed prefix (everything before the HMAC field).
+                // Drop the last colon-separated token (the HMAC) to reconstruct it.
+                std::string prefix = msg.substr(0, msg.size() - hmacField.size() - 1);
                 if (!CryptoUtils::verifyHmacHex(token, prefix, hmacField)) {
                     VGRE_LOG_WARN("TCPCluster",
-                        "UDP master ping from " + masterIp + " failed HMAC — ignoring");
+                        "UDP master ping from " + senderIp + " failed HMAC — ignoring");
                     continue;
                 }
             }
 
             VGRE_LOG_INFO("TCPCluster",
-                "Worker: discovered master at " + masterIp + ":" + std::to_string(masterTcpPort));
+                "Worker: discovered master at " + masterIp + ":" +
+                std::to_string(masterTcpPort) +
+                (advertisedAddr.empty() ? " (LAN)" : " (advertised/WAN)"));
 
             // ── Attempt TCP connect ────────────────────────────────────────────
             vgre::common::vgre_socket_t sock = connectToMaster(masterIp, masterTcpPort);
