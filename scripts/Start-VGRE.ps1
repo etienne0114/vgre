@@ -293,11 +293,9 @@ switch ($mode) {
         & $workerExe @workerArgs
 
         if ($LASTEXITCODE -ne 0) {
-            $hexCode = "0x{0:X8}" -f [uint32]$LASTEXITCODE
-            Write-Host "[ERROR] Worker exited with code $LASTEXITCODE ($hexCode)" -ForegroundColor Red
-            if ($LASTEXITCODE -eq -1073741819 -or $LASTEXITCODE -eq 0xC0000005 -or
-                $LASTEXITCODE -eq [int]0xC0000005) {
-                Write-Host "        STATUS_ACCESS_VIOLATION — possible causes:" -ForegroundColor Yellow
+            Write-Host "[ERROR] Worker exited with code $LASTEXITCODE" -ForegroundColor Red
+            if ($LASTEXITCODE -eq -1073741819) {
+                Write-Host "        STATUS_ACCESS_VIOLATION (0xC0000005) - possible causes:" -ForegroundColor Yellow
                 Write-Host "          1. Missing DLL: check $InstallDir\lib for libomp.dll" -ForegroundColor Yellow
                 Write-Host "          2. Run: .\scripts\vgre_sync.bat  to rebuild and redeploy" -ForegroundColor Yellow
                 Write-Host "          3. See docs/TROUBLESHOOTING_WINDOWS.md for full diagnostics" -ForegroundColor Yellow
