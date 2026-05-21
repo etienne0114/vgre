@@ -51,8 +51,9 @@ vgre_socket_t RealSocketFactory::createSocket(int domain, int type,
 
   vgre_socket_t fd = ::socket(domain, type, protocol);
   if (fd == VGRE_INVALID_SOCKET) {
+    int err = vgre::common::vgre_get_last_socket_error();
     VGRE_LOG_ERROR("RealSocketFactory",
-                   "Failed to create socket: " + std::string(strerror(errno)));
+                   "Failed to create socket: " + vgre::common::vgre_socket_error_string(err));
   }
   return fd;
 }
@@ -67,8 +68,9 @@ int RealSocketFactory::bind(vgre_socket_t fd, const sockaddr *addr,
 
   int result = ::bind(fd, addr, len);
   if (result != 0) {
+    int err = vgre::common::vgre_get_last_socket_error();
     VGRE_LOG_ERROR("RealSocketFactory",
-                   "Bind failed: " + std::string(strerror(errno)));
+                   "Bind failed: " + vgre::common::vgre_socket_error_string(err));
   }
   return result;
 }
@@ -88,8 +90,9 @@ int RealSocketFactory::listen(vgre_socket_t fd, int backlog) {
 
   int result = ::listen(fd, backlog);
   if (result != 0) {
+    int err = vgre::common::vgre_get_last_socket_error();
     VGRE_LOG_ERROR("RealSocketFactory",
-                   "Listen failed: " + std::string(strerror(errno)));
+                   "Listen failed: " + vgre::common::vgre_socket_error_string(err));
   }
   return result;
 }
@@ -104,10 +107,11 @@ vgre_socket_t RealSocketFactory::accept(vgre_socket_t fd, sockaddr *addr,
 
   vgre_socket_t client_fd = ::accept(fd, addr, len);
   if (client_fd == VGRE_INVALID_SOCKET) {
+    int err = vgre::common::vgre_get_last_socket_error();
     // Don't log EAGAIN/EWOULDBLOCK as errors (normal for non-blocking sockets)
-    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+    if (!vgre::common::vgre_is_would_block(err)) {
       VGRE_LOG_ERROR("RealSocketFactory",
-                     "Accept failed: " + std::string(strerror(errno)));
+                     "Accept failed: " + vgre::common::vgre_socket_error_string(err));
     }
   }
   return client_fd;
@@ -123,10 +127,11 @@ int RealSocketFactory::connect(vgre_socket_t fd, const sockaddr *addr,
 
   int result = ::connect(fd, addr, len);
   if (result != 0) {
-    // Don't log EINPROGRESS as error (normal for non-blocking sockets)
-    if (errno != EINPROGRESS) {
+    int err = vgre::common::vgre_get_last_socket_error();
+    // Don't log EINPROGRESS/WSAEWOULDBLOCK (normal for non-blocking connect)
+    if (!vgre::common::vgre_is_would_block(err)) {
       VGRE_LOG_ERROR("RealSocketFactory",
-                     "Connect failed: " + std::string(strerror(errno)));
+                     "Connect failed: " + vgre::common::vgre_socket_error_string(err));
     }
   }
   return result;
@@ -157,10 +162,11 @@ int RealSocketFactory::send(vgre_socket_t fd, const void *buf, size_t len,
                                        flags));
 
   if (result < 0) {
+    int err = vgre::common::vgre_get_last_socket_error();
     // Don't log EAGAIN/EWOULDBLOCK as errors (normal for non-blocking sockets)
-    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+    if (!vgre::common::vgre_is_would_block(err)) {
       VGRE_LOG_ERROR("RealSocketFactory",
-                     "Send failed: " + std::string(strerror(errno)));
+                     "Send failed: " + vgre::common::vgre_socket_error_string(err));
     }
   }
   return result;
@@ -191,10 +197,11 @@ int RealSocketFactory::recv(vgre_socket_t fd, void *buf, size_t len,
                                        flags));
 
   if (result < 0) {
+    int err = vgre::common::vgre_get_last_socket_error();
     // Don't log EAGAIN/EWOULDBLOCK as errors (normal for non-blocking sockets)
-    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+    if (!vgre::common::vgre_is_would_block(err)) {
       VGRE_LOG_ERROR("RealSocketFactory",
-                     "Recv failed: " + std::string(strerror(errno)));
+                     "Recv failed: " + vgre::common::vgre_socket_error_string(err));
     }
   }
   return result;
@@ -216,8 +223,9 @@ int RealSocketFactory::poll(vgre_pollfd *fds, int nfds, int timeout) {
 
   int result = vgre_poll(fds, nfds, timeout);
   if (result < 0) {
+    int err = vgre::common::vgre_get_last_socket_error();
     VGRE_LOG_ERROR("RealSocketFactory",
-                   "Poll failed: " + std::string(strerror(errno)));
+                   "Poll failed: " + vgre::common::vgre_socket_error_string(err));
   }
   return result;
 }
@@ -242,8 +250,9 @@ int RealSocketFactory::setSockOpt(vgre_socket_t fd, int level, int optname,
   int result =
       vgre::common::vgre_setsockopt(fd, level, optname, optval, optlen);
   if (result != 0) {
+    int err = vgre::common::vgre_get_last_socket_error();
     VGRE_LOG_ERROR("RealSocketFactory",
-                   "SetSockOpt failed: " + std::string(strerror(errno)));
+                   "SetSockOpt failed: " + vgre::common::vgre_socket_error_string(err));
   }
   return result;
 }
@@ -265,8 +274,9 @@ int RealSocketFactory::getSockOpt(vgre_socket_t fd, int level, int optname,
 #endif
 
   if (result != 0) {
+    int err = vgre::common::vgre_get_last_socket_error();
     VGRE_LOG_ERROR("RealSocketFactory",
-                   "GetSockOpt failed: " + std::string(strerror(errno)));
+                   "GetSockOpt failed: " + vgre::common::vgre_socket_error_string(err));
   }
   return result;
 }

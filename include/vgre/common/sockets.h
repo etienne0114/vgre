@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -68,6 +69,23 @@ inline bool vgre_is_would_block(int error) {
   return error == WSAEWOULDBLOCK || error == WSAEINPROGRESS;
 #else
   return error == EAGAIN || error == EWOULDBLOCK || error == EINPROGRESS;
+#endif
+}
+
+inline std::string vgre_socket_error_string(int error) {
+#if defined(_WIN32)
+  char buf[256] = {};
+  FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                 nullptr, static_cast<DWORD>(error),
+                 MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                 buf, static_cast<DWORD>(sizeof(buf) - 1), nullptr);
+  // Strip trailing newline that FormatMessage appends
+  size_t len = strlen(buf);
+  while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r')) buf[--len] = '\0';
+  if (len == 0) return "WSA error " + std::to_string(error);
+  return std::string(buf);
+#else
+  return std::string(strerror(error));
 #endif
 }
 
