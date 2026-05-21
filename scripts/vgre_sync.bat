@@ -490,20 +490,37 @@ if errorlevel 1 (
 )
 
 rem -- Step 3: build the Windows bundle (release preferred; debug fallback).
+rem    Both attempts suppress stderr because Flutter prints "The system cannot
+rem    find the path specified" for shell helper scripts on non-git-clone
+rem    installs (winget/Scoop/FVM) — these are non-fatal and do not affect the
+rem    build output.  Full output is only shown when both builds fail.
 set "_flutter_build_mode=Release"
+set "_flutter_build_ok=0"
 echo [INFO] Attempting Flutter Windows release build...
-cmd /c ""!FLUTTER_CMD!" build windows --release" 2>nul
-if errorlevel 1 (
+cmd /c ""!FLUTTER_CMD!" build windows --release" >nul 2>&1
+if not errorlevel 1 set "_flutter_build_ok=1"
+
+if "!_flutter_build_ok!"=="0" (
     echo [INFO] Release build unavailable ^(engine not cached^). Trying debug build...
     set "_flutter_build_mode=Debug"
-    cmd /c ""!FLUTTER_CMD!" build windows --debug"
-    if errorlevel 1 (
-        popd
-        echo [WARN] Flutter build failed. Continuing without dashboard.
-        echo        Run manually from !DASHBOARD_DIR!:  flutter build windows --release
-        set "SKIP_DASHBOARD=1"
-        goto :dashboard_skip
-    )
+    cmd /c ""!FLUTTER_CMD!" build windows --debug" >nul 2>&1
+    if not errorlevel 1 set "_flutter_build_ok=1"
+)
+
+if "!_flutter_build_ok!"=="0" (
+    echo [WARN] Flutter build failed ^(both release and debug^). Continuing without dashboard.
+    echo.
+    echo        To diagnose, run manually from !DASHBOARD_DIR!:
+    echo          flutter doctor
+    echo          flutter build windows --release
+    echo.
+    echo        Common causes on Windows:
+    echo          - Flutter not installed as a git clone ^(run: git clone -b stable https://github.com/flutter/flutter.git^)
+    echo          - Visual Studio 2022 desktop workload missing ^(run: flutter doctor^)
+    echo          - Engine artifacts not cached ^(run: flutter precache --windows^)
+    popd
+    set "SKIP_DASHBOARD=1"
+    goto :dashboard_skip
 )
 popd
 :dashboard_skip
@@ -599,20 +616,23 @@ if not exist "%INSTALL_DIR%\lib\vgre.dll" (
 
 echo.
 echo === Attempting to copy LLVM/OpenMP Runtime Dependencies ===
-if exist "%TOOLS_ROOT%\llvm\bin\libomp.dll" (
-    echo Copying OpenMP runtime...
-    copy /Y "%TOOLS_ROOT%\llvm\bin\libomp.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
-    copy /Y "%TOOLS_ROOT%\llvm\bin\libomp.dll" "%INSTALL_DIR%\" >nul 2>&1
-) else (
-    echo WARNING: OpenMP runtime ^(libomp.dll^) not found. Runtime errors may occur.
-)
-
+rem Copy ALL LLVM DLLs first so libomp.dll is present before vgre-worker runs.
 if exist "%TOOLS_ROOT%\llvm\bin\*.dll" (
-    echo Copying LLVM support libraries...
+    echo Copying LLVM support libraries ^(including OpenMP runtime^)...
     for %%F in ("%TOOLS_ROOT%\llvm\bin\*.dll") do (
         copy /Y "%%F" "%INSTALL_DIR%\lib\" >nul 2>&1
         copy /Y "%%F" "%INSTALL_DIR%\" >nul 2>&1
     )
+    if exist "%INSTALL_DIR%\libomp.dll" (
+        echo [OK] libomp.dll deployed
+    ) else (
+        echo [WARN] libomp.dll not found in %TOOLS_ROOT%\llvm\bin — vgre-worker may crash.
+        echo        Rebuild LLVM with OpenMP enabled or install libomp.dll manually.
+    )
+) else (
+    echo [WARN] No LLVM DLLs found in %TOOLS_ROOT%\llvm\bin
+    echo        libomp.dll is required; vgre-worker.exe may crash on startup.
+    echo        Run:  powershell -File scripts\Install-BuildTools.ps1
 )
 
 copy /Y "!WORKER_OUT_DIR!\vgre-worker.exe" "%INSTALL_DIR%\" >nul

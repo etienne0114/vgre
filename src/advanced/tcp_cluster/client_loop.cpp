@@ -25,6 +25,9 @@
 
 // sockets.h above already pulls in all platform socket headers.
 // Only include headers not provided by sockets.h:
+#if !defined(_WIN32)
+#include <netdb.h>        // getaddrinfo / freeaddrinfo for reconnect path
+#endif
 #if defined(__APPLE__)
 #include <sys/sysctl.h>   // sysctlbyname("hw.memsize") for macOS RAM detection
 #endif
@@ -381,7 +384,7 @@ void TCPClusterManager::clientLoop() {
 
       // TSS2 Priority Flush (Client side)
       {
-        std::lock_guard<std::mutex> lock(client_tx_mutex_);
+        std::lock_guard<std::mutex> tx_lock(client_tx_mutex_);
         while (enabled_ && !client_high_priority_tx_.empty()) {
           auto &pkt = client_high_priority_tx_.back();
           bool success = false;
@@ -392,10 +395,11 @@ void TCPClusterManager::clientLoop() {
             success = vgre_send_all(cur_fd, pkt.data.data(), pkt.data.size(), &enabled_);
           }
           if (success) { client_high_priority_tx_.pop_back(); }
-          else { 
-            std::unique_lock<std::mutex> lock(shutdown_mutex_);
-            shutdown_cv_.wait_for(lock, std::chrono::milliseconds(10), [this]() { return !enabled_; });
-            break; 
+          else {
+            std::unique_lock<std::mutex> cv_lock(shutdown_mutex_);
+            shutdown_cv_.wait_for(cv_lock, std::chrono::milliseconds(10),
+                                  [this]() { return !enabled_; });
+            break;
           }
         }
         while (enabled_ && !client_low_priority_tx_.empty() &&
@@ -409,10 +413,11 @@ void TCPClusterManager::clientLoop() {
             success = vgre_send_all(cur_fd, pkt.data.data(), pkt.data.size(), &enabled_);
           }
           if (success) { client_low_priority_tx_.pop_front(); }
-          else { 
-            std::unique_lock<std::mutex> lock(shutdown_mutex_);
-            shutdown_cv_.wait_for(lock, std::chrono::milliseconds(10), [this]() { return !enabled_; });
-            break; 
+          else {
+            std::unique_lock<std::mutex> cv_lock(shutdown_mutex_);
+            shutdown_cv_.wait_for(cv_lock, std::chrono::milliseconds(10),
+                                  [this]() { return !enabled_; });
+            break;
           }
         }
       }
@@ -477,10 +482,14 @@ void TCPClusterManager::clientLoop() {
       }
     }
     // Clear per-connection state so the next master gets a clean handshake.
+    // client_rx_buffer_ is accessed under staging_mutex_ in
+    // processClientStagingBuffer(); clear it under the same lock to avoid a
+    // data race that manifests as STATUS_ACCESS_VIOLATION on Windows.
     {
       std::lock_guard<std::mutex> lock(staging_mutex_);
       active_staging_->clear();
       processing_staging_->clear();
+      client_rx_buffer_.clear();
       staging_ready_ = false;
     }
     {
@@ -489,7 +498,6 @@ void TCPClusterManager::clientLoop() {
       client_low_priority_tx_.clear();
     }
     pending_args_.clear();
-    client_rx_buffer_.clear();
     client_secure_channel_.reset();
     client_security_established_ = false;
     receive_state_ = ReceiveState::IDLE;
@@ -507,12 +515,11 @@ void TCPClusterManager::clientLoop() {
       return;
     }
 
-    // Standby workers loop back and wait for the next master connection.
-    // Non-standby workers (dialled out) should attempt to reconnect instead of exiting.
+    // Non-standby workers (server_fd_ == INVALID): re-enter discovery or
+    // attempt a direct reconnect, then loop back to wait for client_fd_.
+    // Standby workers (server_fd_ valid): loop back immediately; serverLoop
+    // will set client_fd_ on the next inbound master connection.
     if (server_fd_ == VGRE_INVALID_SOCKET) {
-      VGRE_LOG_INFO("TCPCluster", "Client command channel disconnected - attempting reconnection...");
-      
-      // Attempt to reconnect to the master
       std::string host;
       int port;
       {
@@ -520,39 +527,72 @@ void TCPClusterManager::clientLoop() {
         host = host_;
         port = port_;
       }
-      
-      if (!host.empty() && host != "0.0.0.0") {
-        // Wait a bit before reconnecting to avoid tight loop
-        std::unique_lock<std::mutex> lock(shutdown_mutex_);
-        shutdown_cv_.wait_for(lock, std::chrono::milliseconds(1000), [this]() { return !enabled_; });
-        
-        vgre::common::vgre_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (sock != vgre::common::VGRE_INVALID_SOCKET) {
-          struct sockaddr_in serv_addr{};
-          serv_addr.sin_family = AF_INET;
-          serv_addr.sin_port = htons(static_cast<uint16_t>(port));
-          if (inet_pton(AF_INET, host.c_str(), &serv_addr.sin_addr) > 0) {
-            if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) >= 0) {
-              std::lock_guard<std::mutex> lk(client_mutex_);
-              client_fd_ = sock;
-              has_master_fd_.store(true, std::memory_order_release);
-              VGRE_LOG_INFO("TCPCluster", "Worker reconnected to master at " + host + ":" + std::to_string(port));
-              continue; // Continue the outer loop to retry connection
+
+      if (host.empty() || host == "0.0.0.0") {
+        // UDP auto-discovery mode — re-enter discovery loop.
+        // udpDiscoveryLoop() is still running and will reconnect when a
+        // master ping arrives; this thread just loops back to Phase 0 and
+        // waits for client_fd_ to become valid again.
+        VGRE_LOG_INFO("TCPCluster",
+            "Worker: master disconnected — re-entering UDP auto-discovery");
+      } else {
+        // Explicit master address — try a direct reconnect before looping.
+        // Use getaddrinfo so hostnames, IPv4, and IPv6 literals all work.
+        VGRE_LOG_INFO("TCPCluster",
+            "Worker: master disconnected — reconnecting to " +
+            host + ":" + std::to_string(port));
+
+        // Brief pause to avoid hammering a restarting master.
+        {
+          std::unique_lock<std::mutex> cv_lock(shutdown_mutex_);
+          shutdown_cv_.wait_for(cv_lock, std::chrono::milliseconds(2000),
+                                [this]() { return !enabled_; });
+        }
+        if (!enabled_) return;
+
+        char portStr[8];
+        snprintf(portStr, sizeof(portStr), "%d", port);
+        addrinfo hints{};
+        hints.ai_family   = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        hints.ai_flags    = AI_ADDRCONFIG;
+        addrinfo* res = nullptr;
+        if (getaddrinfo(host.c_str(), portStr, &hints, &res) == 0 && res) {
+          vgre::common::vgre_socket_t sock = VGRE_INVALID_SOCKET;
+          for (addrinfo* rp = res;
+               rp && sock == VGRE_INVALID_SOCKET; rp = rp->ai_next) {
+            vgre::common::vgre_socket_t s =
+                ::socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (s == VGRE_INVALID_SOCKET) continue;
+            if (::connect(s, rp->ai_addr,
+                          static_cast<int>(rp->ai_addrlen)) == 0) {
+              vgre::common::vgre_set_tcp_keepalive(s, 30, 10, 5);
+              sock = s;
             } else {
-              vgre::common::vgre_close_socket(sock);
+              vgre::common::vgre_close_socket(s);
             }
+          }
+          freeaddrinfo(res);
+          if (sock != VGRE_INVALID_SOCKET) {
+            std::lock_guard<std::mutex> lk(client_mutex_);
+            client_fd_ = sock;
+            has_master_fd_.store(true, std::memory_order_release);
+            VGRE_LOG_INFO("TCPCluster",
+                "Worker: reconnected to master at " +
+                host + ":" + std::to_string(port));
           } else {
-            vgre::common::vgre_close_socket(sock);
+            VGRE_LOG_WARN("TCPCluster",
+                "Worker: direct reconnect failed — proactive loop will retry");
           }
         }
+        // Whether or not direct reconnect succeeded, loop back to Phase 0.
+        // The proactive reconnect thread (startProactiveConnections) will
+        // keep retrying with exponential backoff in the background.
       }
-      
-      // If reconnection failed, exit
-      VGRE_LOG_ERROR("TCPCluster", "Failed to reconnect to master - worker exiting");
-      enabled_ = false;
-      return;
+    } else {
+      VGRE_LOG_INFO("TCPCluster", "Worker: Standby — waiting for next master connection...");
     }
-    VGRE_LOG_INFO("TCPCluster", "Worker: Standby — waiting for next master connection...");
     // outer loop continues: Phase 0 will wait for new client_fd_
   }
 }
