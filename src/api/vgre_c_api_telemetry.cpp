@@ -615,14 +615,14 @@ extern "C" void vgre_jit_report_memory(uint64_t bytes) {
 
 // ── Memory Pool C-API ─────────────────────────────────────────────────────
 
-int vgre_pool_create(uint64_t *out_pool, size_t block_size) {
+VGRE_EXPORT int vgre_pool_create(uint64_t *out_pool, size_t block_size) {
   if (!out_pool) return VGRE_ERROR_INVALID_VALUE;
   if (int s = require_initialized_tel(); s != VGRE_SUCCESS) return s;
   auto r = vgre::core::MemoryManager::instance().createPool(*out_pool, block_size);
   return to_status_tel(r);
 }
 
-int vgre_pool_alloc(uint64_t pool, size_t size, void **out_ptr) {
+VGRE_EXPORT int vgre_pool_alloc(uint64_t pool, size_t size, void **out_ptr) {
   if (!out_ptr || size == 0) return VGRE_ERROR_INVALID_VALUE;
   if (int s = require_initialized_tel(); s != VGRE_SUCCESS) return s;
   vgre::MemoryHandle handle;
@@ -632,14 +632,14 @@ int vgre_pool_alloc(uint64_t pool, size_t size, void **out_ptr) {
   return VGRE_SUCCESS;
 }
 
-int vgre_pool_free(uint64_t pool, void *ptr) {
+VGRE_EXPORT int vgre_pool_free(uint64_t pool, void *ptr) {
   if (!ptr) return VGRE_SUCCESS;
   if (int s = require_initialized_tel(); s != VGRE_SUCCESS) return s;
   auto r = vgre::core::MemoryManager::instance().freeToPool(pool, ptr);
   return to_status_tel(r);
 }
 
-int vgre_pool_destroy(uint64_t pool) {
+VGRE_EXPORT int vgre_pool_destroy(uint64_t pool) {
   if (int s = require_initialized_tel(); s != VGRE_SUCCESS) return s;
   auto r = vgre::core::MemoryManager::instance().destroyPool(pool);
   return to_status_tel(r);
@@ -719,7 +719,7 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
 
 // ── GPU Cache Statistics ───────────────────────────────────────────────────────
 
-int vgre_get_cache_stats(vgre_cache_stats_t *stats) {
+VGRE_EXPORT int vgre_get_cache_stats(vgre_cache_stats_t *stats) {
     if (!stats) return VGRE_ERROR_INVALID_VALUE;
 
     auto s = vgre::runtime::GPUCacheL2::instance().stats();
@@ -739,7 +739,7 @@ int vgre_get_cache_stats(vgre_cache_stats_t *stats) {
     return VGRE_SUCCESS;
 }
 
-int vgre_reset_cache_stats(void) {
+VGRE_EXPORT int vgre_reset_cache_stats(void) {
     vgre::runtime::GPUCacheL2::instance().flush();
     return VGRE_SUCCESS;
 }

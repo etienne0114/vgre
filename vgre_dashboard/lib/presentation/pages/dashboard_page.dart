@@ -97,8 +97,6 @@ class _DashboardPageState extends State<DashboardPage> {
         return const MemoryAnalysisPage();
       case 5:
         return const DashboardSettingsPage();
-      case 5:
-        return const DashboardSettingsPage();
       default:
         return Center(
           child: Text(
