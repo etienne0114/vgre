@@ -30,8 +30,27 @@ static void vgreDiag(const char* msg) {
         WriteFile(h, msg, n, &written, NULL);
 }
 
+// Persistent file log — survives even when console/pipe handles are invalid.
+static void vgreFileLog(const char* msg) {
+    char path[MAX_PATH];
+    DWORD len = GetTempPathA(MAX_PATH, path);
+    if (len == 0 || len >= MAX_PATH) return;
+    strncat(path, "\\vgre_worker_startup.log", MAX_PATH - len - 1);
+    path[MAX_PATH - 1] = '\0';
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "a") == 0 && f) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d.%03d  %s\n",
+                st.wYear, st.wMonth, st.wDay,
+                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                msg);
+        fclose(f);
+    }
+}
+
 static LONG WINAPI vgreWorkerExceptionFilter(EXCEPTION_POINTERS* ep) {
-    char buf[256];
+    char buf[512];
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     // Use Win32 directly so it works even after C++ infrastructure fails.
     vgreDiag("\r\n[VGRE CRASH] Unhandled exception — see code below.\r\n");
@@ -41,9 +60,11 @@ static LONG WINAPI vgreWorkerExceptionFilter(EXCEPTION_POINTERS* ep) {
         (unsigned long)code, ep->ExceptionRecord->ExceptionAddress);
     vgreDiag(buf);
     vgreDiag("[VGRE CRASH] Check the last [VGRE-DIAG] line above for location.\r\n");
+    vgreFileLog(buf);
+    vgreFileLog("[VGRE CRASH] Check %TEMP%\\vgre_worker_startup.log for startup trace.");
     return EXCEPTION_CONTINUE_SEARCH;
 }
-#define VGRE_DIAG(msg) vgreDiag("[VGRE-DIAG] " msg "\r\n")
+#define VGRE_DIAG(msg) do { vgreDiag("[VGRE-DIAG] " msg "\r\n"); vgreFileLog(msg); } while(0)
 #else
 #define VGRE_DIAG(msg) ((void)0)
 #endif
@@ -184,11 +205,18 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ── Crash-probe: stdout+flush at each step so the crash location is visible
+    // even if stderr is piped. Remove after the crash is diagnosed.
+#define VGRE_PROBE(msg) do { \
+    std::cout << "[VGRE-PROBE] " msg "\n"; std::cout.flush(); } while(0)
+
+    VGRE_PROBE("step-2a: before vgre_get_config");
     VGRE_DIAG("step 2/6: env-var config read");
     // Environment variable fallback for master address (set by vgre-start/vgre-discover).
     // Only applies when no --master* flag was given on the command line.
     if (!explicit_master) {
         const char* envAddr = vgre_get_config("VGRE_CLUSTER_MASTER_ADDRESS");
+        VGRE_PROBE("step-2b: vgre_get_config done");
         if (envAddr && envAddr[0]) {
             std::string parsed_host;
             int parsed_port = port;
@@ -200,6 +228,8 @@ int main(int argc, char** argv) {
             }
             explicit_master = true;
         }
+    } else {
+        VGRE_PROBE("step-2b: explicit_master already set");
     }
 
     // Thread count
@@ -208,6 +238,7 @@ int main(int argc, char** argv) {
         std::cout << "[Worker] Thread pool: " << threads << " threads\n";
     }
 
+    VGRE_PROBE("step-3: signal handlers");
     VGRE_DIAG("step 3/6: signal handlers");
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
@@ -215,8 +246,10 @@ int main(int argc, char** argv) {
     std::signal(SIGPIPE, SIG_IGN);
 #endif
 
+    VGRE_PROBE("step-4a: Logger::instance()");
     VGRE_DIAG("step 4/6: logger init");
     vgre::Logger::instance().setLevel(vgre::LogLevel::INFO);
+    VGRE_PROBE("step-4b: Logger OK");
     VGRE_DIAG("step 4/6: logger OK");
 
     // Auth token from flag
@@ -235,23 +268,29 @@ int main(int argc, char** argv) {
         vgre_set_config("VGRE_TCP_AUTH_TOKEN", auth_token.c_str());
     }
 
+    VGRE_PROBE("step-5a: compute backends probe");
     VGRE_DIAG("step 5/6: compute backends probe");
     // ── Compute backend probe ─────────────────────────────────────────────────
     // Print and flush BEFORE initializing the TCP cluster manager so the
     // console always shows something even if networking init crashes on Windows.
     std::cout << "[Worker] Compute backends:\n";
+    std::cout.flush();
 
     if (enable_gpu) {
         // ── NVIDIA GPU passthrough (optional) ─────────────────────────────────
+        VGRE_PROBE("step-5b: GPUPassthrough::instance()");
         auto& gp = vgre::advanced::GPUPassthrough::instance();
+        VGRE_PROBE("step-5c: gp.initialize()");
         if (gp.initialize() && gp.isAvailable()) {
             const auto& devs = gp.getDevices();
             for (size_t di = 0; di < devs.size(); ++di) {
                 std::cout << "[Worker]   NVIDIA CUDA   ACTIVE  " << devs[di].name
                           << "  (device " << di << ", passthrough)\n";
+                std::cout.flush();
             }
         } else {
             std::cout << "[Worker]   NVIDIA CUDA   n/a     no NVIDIA GPU detected\n";
+            std::cout.flush();
         }
 
         // ── Integrated / discrete non-NVIDIA GPU via OpenCL (optional) ────────
@@ -260,27 +299,34 @@ int main(int argc, char** argv) {
         if (igpu.initialize() == vgre::VGREResult::SUCCESS) {
             std::cout << "[Worker]   iGPU OpenCL   ACTIVE  " << igpu.getDeviceName()
                       << "  (" << std::fixed << igpu.getEstimatedGFLOPS() << " GFLOPS est.)\n";
+            std::cout.flush();
         } else {
             std::cout << "[Worker]   iGPU OpenCL   n/a     no OpenCL device found\n";
+            std::cout.flush();
         }
 #else
         std::cout << "[Worker]   iGPU OpenCL   n/a     not compiled in (VGRE_HAS_OPENCL_BACKEND off)\n";
+        std::cout.flush();
 #endif
     } else {
         std::cout << "[Worker]   NVIDIA CUDA   off     --no-gpu\n";
+        std::cout.flush();
         std::cout << "[Worker]   iGPU OpenCL   off     --no-gpu\n";
+        std::cout.flush();
     }
 
     // CPU LLVM JIT is always active — it is the primary CUDA emulation engine.
     std::cout << "[Worker]   CPU LLVM JIT  ACTIVE  primary CUDA emulation engine\n";
     std::cout.flush();
 
+    VGRE_PROBE("step-6a: TCPClusterManager::instance()");
     VGRE_DIAG("step 6/6: TCP cluster init (Winsock)");
     // Initialize the TCP cluster manager (Winsock / networking).
     // Done here — after flushing compute-backend output — so the console always
     // shows something useful if this step crashes on Windows.
     fprintf(stderr, "VGRE-DIAG main: constructing TCPClusterManager singleton\n"); fflush(stderr);
     vgre::advanced::TCPClusterManager& cluster = vgre::advanced::TCPClusterManager::instance();
+    VGRE_PROBE("step-6b: TCPClusterManager ready, calling initialize()");
     fprintf(stderr, "VGRE-DIAG main: TCPClusterManager singleton ready\n"); fflush(stderr);
 
     vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker",
