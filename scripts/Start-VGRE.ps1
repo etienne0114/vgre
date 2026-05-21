@@ -118,20 +118,29 @@ function Test-WorkerDependencies {
 # -------------------------------
 # Parse arguments
 # -------------------------------
-$mode = ""
-$masterIp = ""
-$port = "7777"  # Must match kDefaultClusterPort in tcp_cluster_defaults.h
-$threads = ""
+$mode          = ""
+$masterIp      = ""    # --master-ip  (LAN: sets VGRE_CLUSTER_NODES)
+$masterAddress = ""    # --master-address (WAN: sets VGRE_CLUSTER_MASTER_ADDRESS)
+$port          = "7777"  # Must match kDefaultClusterPort in tcp_cluster_defaults.h
+$threads       = ""
 
 for ($i = 0; $i -lt $args.Length; $i++) {
     switch ($args[$i]) {
-        "--master" { $mode = "master" }
-        "--worker" { $mode = "worker" }
-        "--test"   { $mode = "test" }
+        "--master"  { $mode = "master" }
+        "--worker"  { $mode = "worker" }
+        "--test"    { $mode = "test"   }
 
         "--master-ip" {
             if (($i + 1) -lt $args.Length) {
                 $masterIp = $args[++$i]
+            }
+        }
+
+        # WAN / hostname / IPv6 direct connect.
+        # Value format: IP:port, hostname:port, or [::1]:port
+        "--master-address" {
+            if (($i + 1) -lt $args.Length) {
+                $masterAddress = $args[++$i]
             }
         }
 
@@ -147,21 +156,40 @@ for ($i = 0; $i -lt $args.Length; $i++) {
             }
         }
 
+        "--help" {
+            Write-Host ""
+            Write-Host "vgre-start -- VGRE Cluster Launcher"
+            Write-Host ""
+            Write-Host "Usage:"
+            Write-Host "  vgre-start --master                          Start master + dashboard"
+            Write-Host "  vgre-start --worker                          Start worker (LAN auto-discover)"
+            Write-Host "  vgre-start --worker --master-ip <IP>         LAN: connect to specific master IP"
+            Write-Host "  vgre-start --worker --master-address <H:P>   WAN: hostname/IPv4/IPv6 + port"
+            Write-Host "  vgre-start --test                            Local self-test (master+worker)"
+            Write-Host ""
+            Write-Host "Options:"
+            Write-Host "  --port <N>         TCP port (default 7777)"
+            Write-Host "  --threads <N>      Worker thread count (default: auto)"
+            Write-Host ""
+            exit 0
+        }
+
         default {
             Write-Host "[ERROR] Unknown option: $($args[$i])" -ForegroundColor Red
+            Write-Host "        Run  vgre-start --help  for usage." -ForegroundColor Red
             exit 1
         }
     }
 }
 
 if (-not (Test-Port $port)) {
-    Write-Host "[ERROR] Invalid port number." -ForegroundColor Red
+    Write-Host "[ERROR] Invalid port number: $port" -ForegroundColor Red
     exit 1
 }
 
 if (-not $mode) {
-    Write-Host "Usage:"
-    Write-Host "  --master | --worker | --test"
+    Write-Host "Usage: vgre-start --master | --worker [--master-ip IP | --master-address HOST:PORT] | --test"
+    Write-Host "       vgre-start --help"
     exit 1
 }
 
@@ -198,7 +226,7 @@ $dashboardExe = Join-Path $InstallDir "vgre_dashboard.exe"
 
 if (-not (Test-Path $workerExe)) {
     Write-Host "[ERROR] vgre-worker.exe not found at $workerExe" -ForegroundColor Red
-    Write-Host "        Run Install-VGRETools.ps1 to install VGRE." -ForegroundColor Red
+    Write-Host "        Run  .\scripts\vgre_sync.bat  from the VGRE repository to build and install." -ForegroundColor Red
     exit 1
 }
 
@@ -231,11 +259,17 @@ switch ($mode) {
             exit 1
         }
 
-        if ($masterIp) {
-            $env:VGRE_CLUSTER_NODES = "${masterIp}:${port}"
-            Write-Host "Connecting to $masterIp`:$port"
+        if ($masterAddress) {
+            # WAN / explicit hostname:port — resolves via getaddrinfo in the C++ engine
+            $env:VGRE_CLUSTER_MASTER_ADDRESS = $masterAddress
+            Write-Host "Connecting to master at $masterAddress (WAN)" -ForegroundColor Cyan
+        } elseif ($masterIp) {
+            # Legacy LAN shorthand: only an IP was provided, append the port
+            $env:VGRE_CLUSTER_NODES          = "${masterIp}:${port}"
+            $env:VGRE_CLUSTER_MASTER_ADDRESS = "${masterIp}:${port}"
+            Write-Host "Connecting to master at $masterIp`:$port" -ForegroundColor Cyan
         } else {
-            Write-Host "Auto-discovering master..."
+            Write-Host "Auto-discovering master on LAN (UDP broadcast)..." -ForegroundColor Cyan
         }
 
         & $workerExe @workerArgs

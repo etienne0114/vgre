@@ -35,23 +35,38 @@ TOKEN_FILE="${VGRE_TCP_AUTH_TOKEN_FILE:-$HOME/.vgre/token}"
 PORT="${VGRE_PORT:-7777}"  # Must match kDefaultClusterPort in tcp_cluster_defaults.h
 MODE=""
 MASTER_IP=""
+MASTER_ADDRESS=""
 EXTRA_ARGS=()
 
 # ── Parse Arguments ───────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --master)       MODE="master" ;;
-        --worker)       MODE="worker" ;;
-        --test)         MODE="test" ;;
-        --master-ip)    MASTER_IP="$2"; shift ;;
-        --port)         PORT="$2"; shift ;;
-        --threads)      EXTRA_ARGS+=("--threads" "$2"); shift ;;
+        --master)           MODE="master" ;;
+        --worker)           MODE="worker" ;;
+        --test)             MODE="test" ;;
+        --master-ip)        MASTER_IP="$2"; shift ;;
+        --master-address)   MASTER_ADDRESS="$2"; shift ;;
+        --port)             PORT="$2"; shift ;;
+        --threads)          EXTRA_ARGS+=("--threads" "$2"); shift ;;
         --help|-h)
-            grep '^# ' "$0" | sed 's/^# //'
+            cat <<'EOF'
+vgre-start -- VGRE Cluster Launcher
+
+Usage:
+  vgre-start --master                          Start master + dashboard
+  vgre-start --worker                          Start worker (LAN auto-discover)
+  vgre-start --worker --master-ip <IP>         LAN: connect to specific master IP
+  vgre-start --worker --master-address <H:P>   WAN: hostname/IPv4/IPv6 + port
+  vgre-start --test                            Local self-test (master+worker)
+
+Options:
+  --port <N>       TCP port (default 7777)
+  --threads <N>    Worker thread count (default: auto)
+EOF
             exit 0
             ;;
         *)
-            echo "Unknown option: $1  (run vgre-start --help)"
+            echo "[ERROR] Unknown option: $1  (run vgre-start --help)"
             exit 1
             ;;
     esac
@@ -129,16 +144,21 @@ case "$MODE" in
         ;;
 
     worker)
-        if [[ -n "$MASTER_IP" ]]; then
+        if [[ -n "$MASTER_ADDRESS" ]]; then
+            # WAN / explicit hostname:port — handled by getaddrinfo in C++ engine
+            export VGRE_CLUSTER_MASTER_ADDRESS="$MASTER_ADDRESS"
+            echo "Starting VGRE Worker → master at $MASTER_ADDRESS (WAN)"
+        elif [[ -n "$MASTER_IP" ]]; then
+            # Legacy LAN shorthand: only an IP was given, append port
+            export VGRE_CLUSTER_NODES="$MASTER_IP:$PORT"
+            export VGRE_CLUSTER_MASTER_ADDRESS="$MASTER_IP:$PORT"
             # Verify the master IP is reachable before starting the worker.
             if command -v ping >/dev/null 2>&1; then
                 if ! ping -c 1 -W 2 "$MASTER_IP" >/dev/null 2>&1; then
-                    echo "❌ Master IP $MASTER_IP is not reachable (ping failed)."
-                    echo "   Check the IP address, firewall rules, and network connectivity."
-                    exit 1
+                    echo "[WARN] Master IP $MASTER_IP is not reachable (ping timed out)."
+                    echo "       Check the IP address and firewall rules."
                 fi
             fi
-            export VGRE_CLUSTER_NODES="$MASTER_IP:$PORT"
             echo "Starting VGRE Worker → master at $MASTER_IP:$PORT"
         else
             echo "Starting VGRE Worker (auto-discovering master on local subnet)..."
