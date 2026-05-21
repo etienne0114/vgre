@@ -6,12 +6,14 @@
 #include "vgre/common/logger.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
+#include <cstdio>
 #include <cstring>
 
 namespace vgre {
 namespace advanced {
 
 void TCPClusterManager::processClientStagingBuffer() {
+  fprintf(stderr, "VGRE-DIAG processClientStagingBuffer: thread started\n"); fflush(stderr);
   while (enabled_) {
     std::unique_lock<std::mutex> lock(staging_mutex_);
     staging_cv_.wait(lock,

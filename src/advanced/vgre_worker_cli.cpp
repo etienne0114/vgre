@@ -17,7 +17,22 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include "vgre/common/os_backend.h"
+
+#if defined(_WIN32)
+static LONG WINAPI vgreWorkerExceptionFilter(EXCEPTION_POINTERS* ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    PVOID addr = ep->ExceptionRecord->ExceptionAddress;
+    fprintf(stderr,
+        "\n[VGRE CRASH] Unhandled exception: code=0x%08lX addr=%p\n"
+        "[VGRE CRASH] This is STATUS_ACCESS_VIOLATION (0xC0000005) if code matches.\n"
+        "[VGRE CRASH] Check the last VGRE-DIAG line above for crash location.\n",
+        (unsigned long)code, addr);
+    fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
 
 static std::atomic<bool>& getStopRequested() {
     static std::atomic<bool> v{false};
@@ -87,6 +102,9 @@ static bool splitHostPort(const std::string& addr, std::string& host, int& port)
 }
 
 int main(int argc, char** argv) {
+#if defined(_WIN32)
+    SetUnhandledExceptionFilter(vgreWorkerExceptionFilter);
+#endif
     int         port       = vgre::advanced::kDefaultClusterPort;
     int         threads    = 0;    // 0 = auto-detect from CPU cores
     bool        enable_gpu = true;
@@ -239,7 +257,9 @@ int main(int argc, char** argv) {
     // Initialize the TCP cluster manager (Winsock / networking).
     // Done here — after flushing compute-backend output — so the console always
     // shows something useful if this step crashes on Windows.
+    fprintf(stderr, "VGRE-DIAG main: constructing TCPClusterManager singleton\n"); fflush(stderr);
     vgre::advanced::TCPClusterManager& cluster = vgre::advanced::TCPClusterManager::instance();
+    fprintf(stderr, "VGRE-DIAG main: TCPClusterManager singleton ready\n"); fflush(stderr);
 
     vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker",
         "Initializing VGRE Remote Worker on port " + std::to_string(port));
@@ -247,7 +267,10 @@ int main(int argc, char** argv) {
     std::cout.flush();
 
     // Initialize as worker.  Empty master_host → pure UDP auto-discovery.
+    fprintf(stderr, "VGRE-DIAG main: calling cluster.initialize()\n"); fflush(stderr);
     vgre::VGREResult initRes = cluster.initialize(false, master_host, port);
+    fprintf(stderr, "VGRE-DIAG main: cluster.initialize() returned %d\n",
+            (int)initRes); fflush(stderr);
     if (initRes != vgre::VGREResult::SUCCESS) {
         vgre::Logger::instance().log(vgre::LogLevel::ERR, "Worker",
             "Failed to initialize TCP Cluster: " + std::to_string(static_cast<int>(initRes)));

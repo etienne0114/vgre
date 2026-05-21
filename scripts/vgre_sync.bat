@@ -429,10 +429,10 @@ if "%SKIP_DASHBOARD%"=="1" (
     goto :dashboard_skip
 )
 
-rem -- Step 1: verify Flutter SDK is a proper git clone BEFORE calling any
-rem    flutter commands.  Flutter on Windows calls exit (not exit /b) when it
-rem    encounters the "not a git clone" error, which terminates the entire CMD
-rem    process and skips the errorlevel check entirely.  Check proactively.
+rem -- Step 1: locate the Flutter SDK root so we can print diagnostic info.
+rem    All flutter commands below are wrapped in cmd /c so that if Flutter calls
+rem    exit (not exit /b) internally it only kills the nested cmd process and
+rem    the errorlevel check in this script still fires correctly.
 set "_flutter_sdk="
 for /f "usebackq tokens=*" %%F in (`where "!FLUTTER_CMD!" 2^>nul`) do (
     if not defined _flutter_sdk (
@@ -445,12 +445,9 @@ if not defined _flutter_sdk (
     goto :dashboard_skip
 )
 if not exist "!_flutter_sdk!\.git" (
-    echo [WARN] Flutter SDK at !_flutter_sdk! is not a git clone.
-    echo        Dashboard build skipped. To build the dashboard, install Flutter via git:
-    echo          git clone -b stable https://github.com/flutter/flutter.git
-    echo          setx PATH "%%PATH%%;C:\path\to\flutter\bin"
-    set "SKIP_DASHBOARD=1"
-    goto :dashboard_skip
+    echo [INFO] Flutter SDK at !_flutter_sdk! was not installed via git clone.
+    echo        This is fine for release installs. Proceeding with build.
+    echo        ^(If flutter commands fail, re-install via: git clone -b stable https://github.com/flutter/flutter.git^)
 )
 echo [INFO] Pre-caching Flutter Windows engine artifacts...
 cmd /c ""!FLUTTER_CMD!" precache --windows --no-analytics"
