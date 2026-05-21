@@ -64,10 +64,24 @@ function Get-PublicIp {
 }
 
 function Get-BucketId {
-    if ($env:VGRE_DISCOVERY_BUCKET_ID) { return $env:VGRE_DISCOVERY_BUCKET_ID }
-    if (Test-Path $BucketIdFile) { return [System.IO.File]::ReadAllText($BucketIdFile).Trim() }
+    $bid = ""
+    if ($env:VGRE_DISCOVERY_BUCKET_ID) {
+        $bid = $env:VGRE_DISCOVERY_BUCKET_ID
+    } elseif (Test-Path $BucketIdFile) {
+        $bid = [System.IO.File]::ReadAllText($BucketIdFile).Trim()
+    }
+
+    # Persist to file so future sessions don't need the env var.
+    if ($bid) {
+        $existing = if (Test-Path $BucketIdFile) { [System.IO.File]::ReadAllText($BucketIdFile).Trim() } else { "" }
+        if ($existing -ne $bid) {
+            [System.IO.File]::WriteAllText($BucketIdFile, $bid)
+        }
+        return $bid
+    }
 
     Write-Host "[INFO] No discovery bucket configured -- creating one at kvdb.io (free)..." -ForegroundColor Cyan
+    Write-Host "[INFO] You will receive a verification email. Visit https://kvdb.io/login to activate." -ForegroundColor Cyan
     try {
         $resp = Invoke-RestMethod -Method Post -Uri "${KvBase}/" `
             -Body "email=vgre-$(${env:COMPUTERNAME}.ToLower())@cluster.local" `
@@ -76,15 +90,20 @@ function Get-BucketId {
         $bid = $resp.bucket_id
         if ($bid) {
             [System.IO.File]::WriteAllText($BucketIdFile, $bid)
+            Write-Host "[INFO] Bucket $bid created. Check your email to verify before writing." -ForegroundColor Cyan
             return $bid
         }
     } catch {}
 
     Write-Host ""
-    Write-Host "[ERROR] Could not create discovery bucket automatically." -ForegroundColor Red
-    Write-Host "        1. Visit https://kvdb.io and create a free bucket." -ForegroundColor Red
-    Write-Host "        2. set-vgre-env VGRE_DISCOVERY_BUCKET_ID '<your-bucket-id>'" -ForegroundColor Red
-    Write-Host "        3. Re-run: vgre-discover --register" -ForegroundColor Red
+    Write-Host "[ERROR] Could not auto-create discovery bucket." -ForegroundColor Red
+    Write-Host "        Solution A (easiest): create a free bucket manually:" -ForegroundColor Yellow
+    Write-Host "          1. Visit https://kvdb.io -> Get Started -> enter your email" -ForegroundColor Yellow
+    Write-Host "          2. Confirm the verification email you receive" -ForegroundColor Yellow
+    Write-Host "          3. Copy the bucket ID from your browser URL" -ForegroundColor Yellow
+    Write-Host "          4. Run: `$env:VGRE_DISCOVERY_BUCKET_ID = '<your-bucket-id>'" -ForegroundColor Yellow
+    Write-Host "          5. Re-run: vgre-discover --register" -ForegroundColor Yellow
+    Write-Host "        Solution B: share the IP manually -- vgre-discover (no flags)" -ForegroundColor Yellow
     return $null
 }
 
@@ -168,14 +187,47 @@ function Cmd-Register {
     $payload = "${ip}:${Port}|fp=${fpShort}|ts=${ts}"
 
     Write-Host "[...] Registering ${ip}:${Port} at kvdb.io bucket $bucket..." -ForegroundColor Cyan
+
+    $httpCode = 0
+    $respBody = ""
     try {
         $resp = Invoke-WebRequest -Uri "${KvBase}/${bucket}/${key}" `
             -Method Post -Body $payload -ContentType "text/plain" `
-            -TimeoutSec 10 -ErrorAction Stop -UseBasicParsing
-        if ($resp.StatusCode -notin @(200, 201)) { throw "HTTP $($resp.StatusCode)" }
+            -TimeoutSec 10 -UseBasicParsing
+        $httpCode = [int]$resp.StatusCode
+        $respBody = $resp.Content
+    } catch [System.Net.WebException] {
+        $httpCode = [int]$_.Exception.Response.StatusCode
+        try {
+            $stream = $_.Exception.Response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            $respBody = $reader.ReadToEnd()
+        } catch { $respBody = "" }
     } catch {
-        Write-Host "[ERROR] Registration failed: $_" -ForegroundColor Red
-        Write-Host "        Bucket: $bucket | Key: $key" -ForegroundColor Red
+        $httpCode = 0
+        $respBody = "$_"
+    }
+
+    if ($httpCode -notin @(200, 201)) {
+        Write-Host "[ERROR] Registration failed (HTTP $httpCode)." -ForegroundColor Red
+        if ($respBody) {
+            Write-Host "        Server says: $respBody" -ForegroundColor Red
+        }
+        if ($respBody -match "not verified|activate|confirm") {
+            Write-Host ""
+            Write-Host "        Your kvdb.io account needs email verification:" -ForegroundColor Yellow
+            Write-Host "          1. Visit https://kvdb.io/login" -ForegroundColor Yellow
+            Write-Host "          2. Verify your email address" -ForegroundColor Yellow
+            Write-Host "          3. Re-run: vgre-discover --register" -ForegroundColor Yellow
+        } elseif ($httpCode -eq 403) {
+            Write-Host ""
+            Write-Host "        Bucket ID: $bucket" -ForegroundColor Yellow
+            Write-Host "        If this bucket was just created, verify the email first:" -ForegroundColor Yellow
+            Write-Host "          visit https://kvdb.io/login" -ForegroundColor Yellow
+            Write-Host "        Or create a new bucket: visit https://kvdb.io" -ForegroundColor Yellow
+        } else {
+            Write-Host "        Bucket: $bucket | Key: $key" -ForegroundColor Red
+        }
         exit 1
     }
 
@@ -214,19 +266,48 @@ function Cmd-Find {
     $key = Get-DiscoveryKey
     if (-not $key) { exit 1 }
 
+    # Save bucket ID to file so future sessions don't need to pass it explicitly.
+    $existing = if (Test-Path $BucketIdFile) { [System.IO.File]::ReadAllText($BucketIdFile).Trim() } else { "" }
+    if ($existing -ne $bucket) {
+        [System.IO.File]::WriteAllText($BucketIdFile, $bucket)
+    }
+
     Write-Host "[...] Looking up master in bucket $bucket..." -ForegroundColor Cyan
-    $payload = $null
+    $httpCode = 0
+    $payload  = $null
     try {
-        $payload = (Invoke-RestMethod -Uri "${KvBase}/${bucket}/${key}" `
-            -TimeoutSec 10 -ErrorAction Stop).Trim()
+        $resp    = Invoke-WebRequest -Uri "${KvBase}/${bucket}/${key}" `
+            -TimeoutSec 10 -UseBasicParsing
+        $httpCode = [int]$resp.StatusCode
+        $payload  = $resp.Content.Trim()
+    } catch [System.Net.WebException] {
+        $httpCode = [int]$_.Exception.Response.StatusCode
+        $body = ""
+        try {
+            $stream = $_.Exception.Response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            $body = $reader.ReadToEnd()
+        } catch {}
+
+        if ($httpCode -eq 404 -or $body -match "Not Found") {
+            Write-Host "[ERROR] No master registered in bucket $bucket." -ForegroundColor Red
+            Write-Host "        Ask the master to run: vgre-discover --register" -ForegroundColor Red
+        } else {
+            Write-Host "[ERROR] Lookup failed (HTTP $httpCode)." -ForegroundColor Red
+            if ($body) { Write-Host "        Server says: $body" -ForegroundColor Red }
+            if ($body -match "not verified|activate") {
+                Write-Host "        Verify the bucket owner's email at https://kvdb.io/login" -ForegroundColor Yellow
+            }
+        }
+        exit 1
     } catch {
-        Write-Host "[ERROR] No master registered in bucket $bucket." -ForegroundColor Red
-        Write-Host "        Ask the master to run: vgre-discover --register" -ForegroundColor Red
+        Write-Host "[ERROR] Lookup failed: $_" -ForegroundColor Red
         exit 1
     }
 
-    if (-not $payload) {
-        Write-Host "[ERROR] Empty response from discovery bucket." -ForegroundColor Red
+    if (-not $payload -or $payload -eq "Not Found") {
+        Write-Host "[ERROR] No master registered in bucket $bucket." -ForegroundColor Red
+        Write-Host "        Ask the master to run: vgre-discover --register" -ForegroundColor Red
         exit 1
     }
 
@@ -261,11 +342,23 @@ function Cmd-Unregister {
     if (-not $key) { exit 1 }
     $bucket = Get-BucketId
     if (-not $bucket) { exit 1 }
+
+    $httpCode = 0
     try {
-        Invoke-RestMethod -Uri "${KvBase}/${bucket}/${key}" `
-            -Method Delete -TimeoutSec 10 -ErrorAction SilentlyContinue | Out-Null
-    } catch {}
-    Write-Host "[OK] Discovery registration removed." -ForegroundColor Green
+        $resp = Invoke-WebRequest -Uri "${KvBase}/${bucket}/${key}" `
+            -Method Delete -TimeoutSec 10 -UseBasicParsing
+        $httpCode = [int]$resp.StatusCode
+    } catch [System.Net.WebException] {
+        $httpCode = [int]$_.Exception.Response.StatusCode
+    } catch {
+        $httpCode = 0
+    }
+
+    if ($httpCode -in @(200, 204)) {
+        Write-Host "[OK] Discovery registration removed." -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] DELETE returned HTTP $httpCode -- entry may not have existed." -ForegroundColor Yellow
+    }
 }
 
 # ── Entry point ───────────────────────────────────────────────────────────────
