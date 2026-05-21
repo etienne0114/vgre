@@ -14,30 +14,25 @@ namespace vgre {
 namespace advanced {
 
 namespace {
-const size_t kProbePayloadBytes = []() -> size_t {
-  const char *env = vgre_get_config("VGRE_CLUSTER_PROBE_BYTES");
-  if (env) {
-    try {
-      long long v = std::stoll(env);
-      if (v >= 4096 && v <= 64 * 1024 * 1024)
-        return static_cast<size_t>(v);
-    } catch (...) {
-    }
-  }
-  return 1024ULL * 1024;
-}();
-const size_t kMaxPacketsPerSec = []() -> size_t {
-  const char *env = vgre_get_config("VGRE_CLUSTER_MAX_PACKETS_PER_SEC");
-  if (env) {
-    try {
-      long long v = std::stoll(env);
-      if (v > 0)
-        return static_cast<size_t>(v);
-    } catch (...) {
-    }
-  }
-  return 10000;
-}();
+static size_t kProbePayloadBytes_get() {
+  static const size_t v = []() -> size_t {
+    const char *env = vgre_get_config("VGRE_CLUSTER_PROBE_BYTES");
+    if (env) { try { long long x = std::stoll(env); if (x >= 4096 && x <= 64 * 1024 * 1024) return static_cast<size_t>(x); } catch (...) {} }
+    return 1024ULL * 1024;
+  }();
+  return v;
+}
+#define kProbePayloadBytes (kProbePayloadBytes_get())
+
+static size_t kMaxPacketsPerSec_get() {
+  static const size_t v = []() -> size_t {
+    const char *env = vgre_get_config("VGRE_CLUSTER_MAX_PACKETS_PER_SEC");
+    if (env) { try { long long x = std::stoll(env); if (x > 0) return static_cast<size_t>(x); } catch (...) {} }
+    return 10000;
+  }();
+  return v;
+}
+#define kMaxPacketsPerSec (kMaxPacketsPerSec_get())
 } // namespace
 
 void TCPClusterManager::processServerPackets(

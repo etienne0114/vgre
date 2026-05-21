@@ -13,18 +13,15 @@ namespace vgre {
 namespace advanced {
 
 namespace {
-const size_t kMaxRxBuffer = []() -> size_t {
-  const char *env = vgre_get_config("VGRE_CLUSTER_MAX_RX_BUFFER");
-  if (env) {
-    try {
-      long long v = std::stoll(env);
-      if (v > 0)
-        return static_cast<size_t>(v);
-    } catch (...) {
-    }
-  }
-  return 256ULL * 1024 * 1024;
-}();
+static size_t kMaxRxBuffer_get() {
+  static const size_t v = []() -> size_t {
+    const char *env = vgre_get_config("VGRE_CLUSTER_MAX_RX_BUFFER");
+    if (env) { try { long long x = std::stoll(env); if (x > 0) return static_cast<size_t>(x); } catch (...) {} }
+    return 256ULL * 1024 * 1024;
+  }();
+  return v;
+}
+#define kMaxRxBuffer (kMaxRxBuffer_get())
 } // namespace
 
 void TCPClusterManager::handleClientDataEvents(std::vector<vgre_pollfd> &fds) {

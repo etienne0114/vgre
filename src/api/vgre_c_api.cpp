@@ -160,17 +160,7 @@ const char *vgre_get_config(const char *key) {
 // ── Initialization ─────────────────────────────────────────────────────────
 
 int vgre_init(void) {
-  static std::mutex init_mutex;
-  static bool initialized = false;
-  std::lock_guard<std::mutex> lock(init_mutex);
-  if (initialized) {
-    return VGRE_SUCCESS;
-  }
-
   auto result = vgre::core::RuntimeEngine::instance().initialize();
-  if (result == vgre::VGREResult::SUCCESS) {
-    initialized = true;
-  }
   return to_status(result);
 }
 

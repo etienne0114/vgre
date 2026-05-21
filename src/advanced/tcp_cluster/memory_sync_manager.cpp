@@ -13,49 +13,48 @@
 namespace {
 
 // ── Configuration Constants ──────────────────────────────────────────────────
+// Use function-local statics (initialized on first call, NOT at DLL/exe load
+// time) to avoid static-initialization-order issues on Windows.
 
-const size_t kRdmaThreshold = []() {
-  const char* env = vgre_get_config("VGRE_RDMA_THRESHOLD_BYTES");
-  if (env) {
-    try {
-      return static_cast<size_t>(std::stoll(env));
-    } catch (...) {}
-  }
-  return static_cast<size_t>(65536); // 64 KB default
-}();
+static size_t kRdmaThreshold_get() {
+  static const size_t v = []() -> size_t {
+    const char* env = vgre_get_config("VGRE_RDMA_THRESHOLD_BYTES");
+    if (env) { try { return static_cast<size_t>(std::stoll(env)); } catch (...) {} }
+    return 65536; // 64 KB default
+  }();
+  return v;
+}
+#define kRdmaThreshold (kRdmaThreshold_get())
 
-const int MAX_DELTA_SYNC_RETRIES = []() {
-  const char* env = vgre_get_config("VGRE_CLUSTER_MAX_DELTA_SYNC_RETRIES");
-  if (env) {
-    try {
-      int v = std::stoi(env);
-      if (v > 0 && v <= 100) return v;
-    } catch (...) {}
-  }
-  return 3;
-}();
+static int MAX_DELTA_SYNC_RETRIES_get() {
+  static const int v = []() -> int {
+    const char* env = vgre_get_config("VGRE_CLUSTER_MAX_DELTA_SYNC_RETRIES");
+    if (env) { try { int x = std::stoi(env); if (x > 0 && x <= 100) return x; } catch (...) {} }
+    return 3;
+  }();
+  return v;
+}
+#define MAX_DELTA_SYNC_RETRIES (MAX_DELTA_SYNC_RETRIES_get())
 
-const int INITIAL_RETRY_BACKOFF_MS = []() {
-  const char* env = vgre_get_config("VGRE_CLUSTER_RETRY_BACKOFF_INITIAL_MS");
-  if (env) {
-    try {
-      int v = std::stoi(env);
-      if (v > 0) return v;
-    } catch (...) {}
-  }
-  return 100;
-}();
+static int INITIAL_RETRY_BACKOFF_MS_get() {
+  static const int v = []() -> int {
+    const char* env = vgre_get_config("VGRE_CLUSTER_RETRY_BACKOFF_INITIAL_MS");
+    if (env) { try { int x = std::stoi(env); if (x > 0) return x; } catch (...) {} }
+    return 100;
+  }();
+  return v;
+}
+#define INITIAL_RETRY_BACKOFF_MS (INITIAL_RETRY_BACKOFF_MS_get())
 
-const int MAX_RETRY_BACKOFF_MS = []() {
-  const char* env = vgre_get_config("VGRE_CLUSTER_RETRY_BACKOFF_MAX_MS");
-  if (env) {
-    try {
-      int v = std::stoi(env);
-      if (v > 0) return v;
-    } catch (...) {}
-  }
-  return 5000;
-}();
+static int MAX_RETRY_BACKOFF_MS_get() {
+  static const int v = []() -> int {
+    const char* env = vgre_get_config("VGRE_CLUSTER_RETRY_BACKOFF_MAX_MS");
+    if (env) { try { int x = std::stoi(env); if (x > 0) return x; } catch (...) {} }
+    return 5000;
+  }();
+  return v;
+}
+#define MAX_RETRY_BACKOFF_MS (MAX_RETRY_BACKOFF_MS_get())
 
 // ── Exponential Backoff Utility ──────────────────────────────────────────────
 

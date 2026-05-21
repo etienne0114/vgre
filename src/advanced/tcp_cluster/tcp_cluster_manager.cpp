@@ -64,8 +64,6 @@ TCPClusterManager::TCPClusterManager()
       windows_socket_manager_(std::make_unique<WindowsSocketManager>()) {
   local_platform_ = detail::detect_platform();
   local_platform_name_ = MeshTopologyManager::getPlatformName(local_platform_);
-  fprintf(stderr, "VGRE-DIAG TCPClusterManager ctor: all subsystems constructed OK\n");
-  fflush(stderr);
 }
 
 TCPClusterManager &TCPClusterManager::instance() {

@@ -21,17 +21,31 @@
 #include "vgre/common/os_backend.h"
 
 #if defined(_WIN32)
+// Win32 raw console write — guaranteed before any C++ stream init.
+static void vgreDiag(const char* msg) {
+    HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+    DWORD n = (DWORD)strlen(msg);
+    DWORD written = 0;
+    if (!WriteConsoleA(h, msg, n, &written, NULL))
+        WriteFile(h, msg, n, &written, NULL);
+}
+
 static LONG WINAPI vgreWorkerExceptionFilter(EXCEPTION_POINTERS* ep) {
+    char buf[256];
     DWORD code = ep->ExceptionRecord->ExceptionCode;
-    PVOID addr = ep->ExceptionRecord->ExceptionAddress;
-    fprintf(stderr,
-        "\n[VGRE CRASH] Unhandled exception: code=0x%08lX addr=%p\n"
-        "[VGRE CRASH] This is STATUS_ACCESS_VIOLATION (0xC0000005) if code matches.\n"
-        "[VGRE CRASH] Check the last VGRE-DIAG line above for crash location.\n",
-        (unsigned long)code, addr);
-    fflush(stderr);
+    // Use Win32 directly so it works even after C++ infrastructure fails.
+    vgreDiag("\r\n[VGRE CRASH] Unhandled exception — see code below.\r\n");
+    snprintf(buf, sizeof(buf),
+        "[VGRE CRASH] code=0x%08lX  STATUS_ACCESS_VIOLATION=0xC0000005\r\n"
+        "[VGRE CRASH] addr=%p\r\n",
+        (unsigned long)code, ep->ExceptionRecord->ExceptionAddress);
+    vgreDiag(buf);
+    vgreDiag("[VGRE CRASH] Check the last [VGRE-DIAG] line above for location.\r\n");
     return EXCEPTION_CONTINUE_SEARCH;
 }
+#define VGRE_DIAG(msg) vgreDiag("[VGRE-DIAG] " msg "\r\n")
+#else
+#define VGRE_DIAG(msg) ((void)0)
 #endif
 
 static std::atomic<bool>& getStopRequested() {
@@ -102,9 +116,11 @@ static bool splitHostPort(const std::string& addr, std::string& host, int& port)
 }
 
 int main(int argc, char** argv) {
+    VGRE_DIAG("main() entered");
 #if defined(_WIN32)
     SetUnhandledExceptionFilter(vgreWorkerExceptionFilter);
 #endif
+    VGRE_DIAG("step 1/6: arg parse");
     int         port       = vgre::advanced::kDefaultClusterPort;
     int         threads    = 0;    // 0 = auto-detect from CPU cores
     bool        enable_gpu = true;
@@ -168,6 +184,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    VGRE_DIAG("step 2/6: env-var config read");
     // Environment variable fallback for master address (set by vgre-start/vgre-discover).
     // Only applies when no --master* flag was given on the command line.
     if (!explicit_master) {
@@ -191,13 +208,16 @@ int main(int argc, char** argv) {
         std::cout << "[Worker] Thread pool: " << threads << " threads\n";
     }
 
+    VGRE_DIAG("step 3/6: signal handlers");
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 #if !defined(_WIN32)
     std::signal(SIGPIPE, SIG_IGN);
 #endif
 
+    VGRE_DIAG("step 4/6: logger init");
     vgre::Logger::instance().setLevel(vgre::LogLevel::INFO);
+    VGRE_DIAG("step 4/6: logger OK");
 
     // Auth token from flag
     if (!auth_token.empty()) {
@@ -215,6 +235,7 @@ int main(int argc, char** argv) {
         vgre_set_config("VGRE_TCP_AUTH_TOKEN", auth_token.c_str());
     }
 
+    VGRE_DIAG("step 5/6: compute backends probe");
     // ── Compute backend probe ─────────────────────────────────────────────────
     // Print and flush BEFORE initializing the TCP cluster manager so the
     // console always shows something even if networking init crashes on Windows.
@@ -254,6 +275,7 @@ int main(int argc, char** argv) {
     std::cout << "[Worker]   CPU LLVM JIT  ACTIVE  primary CUDA emulation engine\n";
     std::cout.flush();
 
+    VGRE_DIAG("step 6/6: TCP cluster init (Winsock)");
     // Initialize the TCP cluster manager (Winsock / networking).
     // Done here — after flushing compute-backend output — so the console always
     // shows something useful if this step crashes on Windows.

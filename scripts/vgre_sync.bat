@@ -444,29 +444,46 @@ if not defined _flutter_sdk (
     set "SKIP_DASHBOARD=1"
     goto :dashboard_skip
 )
-if not exist "!_flutter_sdk!\.git" (
-    echo [INFO] Flutter SDK at !_flutter_sdk! was not installed via git clone.
-    echo        This is fine for release installs. Proceeding with build.
-    echo        ^(If flutter commands fail, re-install via: git clone -b stable https://github.com/flutter/flutter.git^)
-)
-echo [INFO] Pre-caching Flutter Windows engine artifacts...
-cmd /c ""!FLUTTER_CMD!" precache --windows --no-analytics"
-if errorlevel 1 (
-    echo [WARN] flutter precache failed - engine DLLs may be missing.
-    echo        Run manually: flutter precache --windows
+rem -- Suppress Flutter analytics and version checks for all commands below.
+set "FLUTTER_SUPPRESS_ANALYTICS=1"
+
+rem -- Step 1: Pre-cache engine artifacts ONLY for git-clone Flutter installs.
+rem    Non-git Flutter (winget/Scoop/FVM) ships pre-cached; precache --windows
+rem    calls "git rev-parse" on the SDK directory and hard-fails when the SDK
+rem    is not a git clone.  Skip it entirely in that case.
+if exist "!_flutter_sdk!\.git" (
+    echo [INFO] Pre-caching Flutter Windows engine artifacts...
+    cmd /c ""!FLUTTER_CMD!" precache --windows --no-analytics"
+    if errorlevel 1 (
+        echo [WARN] flutter precache failed - continuing anyway.
+        echo        Run manually: flutter precache --windows
+    )
+) else (
+    echo [INFO] Flutter SDK is a pre-built install ^(no .git^) - skipping precache.
+    echo        Engine artifacts are already bundled with this Flutter distribution.
 )
 
-rem -- Step 2: resolve Dart packages in the Windows environment.  pubspec.lock
-rem    was created on Linux; the local Dart pub cache on this machine may be
-rem    empty.  Running pub get here ensures every dependency is downloaded
-rem    before cmake configures the Windows build.
+rem -- Step 2: resolve Dart packages.
+rem    Prefer "dart pub get" for non-git Flutter: the dart tool does not run
+rem    git-based SDK version checks.  Fall back to "flutter pub get" if the
+rem    standalone dart binary is not available at the expected path.
 pushd "%DASHBOARD_DIR%" || exit /b 1
-echo [INFO] Fetching Dart packages (flutter pub get)...
-cmd /c ""!FLUTTER_CMD!" pub get --no-analytics"
+
+set "_dart_exe=!_flutter_sdk!\bin\cache\dart-sdk\bin\dart.exe"
+if not exist "!_dart_exe!" set "_dart_exe=!_flutter_sdk!\bin\dart.exe"
+
+if exist "!_dart_exe!" (
+    echo [INFO] Fetching Dart packages (dart pub get)...
+    cmd /c ""!_dart_exe!" pub get --no-analytics"
+) else (
+    echo [INFO] Fetching Dart packages (flutter pub get)...
+    cmd /c ""!FLUTTER_CMD!" pub get --no-analytics"
+)
 if errorlevel 1 (
     popd
-    echo WARNING: flutter pub get failed. Dashboard build skipped.
-    echo          Check internet connectivity and try again.
+    echo WARNING: pub get failed. Dashboard build skipped.
+    echo          Check internet connectivity and run:
+    echo            cd %DASHBOARD_DIR%  ^&^&  flutter pub get
     set "SKIP_DASHBOARD=1"
     goto :dashboard_skip
 )

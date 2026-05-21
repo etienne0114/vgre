@@ -23,34 +23,59 @@ namespace vgre {
 namespace advanced {
 
 namespace {
-const size_t kProbePayloadBytes = []() -> size_t {
-    const char* env = vgre_get_config("VGRE_CLUSTER_PROBE_BYTES");
-    if (env) { try { long long v = std::stoll(env); if (v >= 4096 && v <= 64 * 1024 * 1024) return static_cast<size_t>(v); } catch (...) {} }
-    return 1024ULL * 1024;
-}();
-const int kBandwidthReprobeIntervalSec = []() -> int {
-    const char* env = vgre_get_config("VGRE_CLUSTER_BANDWIDTH_REPROBE_SEC");
-    if (env) { try { int v = std::stoi(env); if (v >= 30 && v <= 86400) return v; } catch (...) {} }
-    return 300;
-}();
-const size_t kMaxHandshakeThreads = []() -> size_t {
-    const char* env = vgre_get_config("VGRE_CLUSTER_MAX_HANDSHAKE_THREADS");
-    if (env) { try { long v = std::stol(env); if (v > 0 && v <= 512) return static_cast<size_t>(v); } catch (...) {} }
-    return 32;
-}();
-const uint32_t kKeyRotationThreshold = []() -> uint32_t {
-    const char* env = vgre_get_config("VGRE_CLUSTER_KEY_ROTATION_THRESHOLD");
-    if (env) { try { long v = std::stol(env); if (v > 0) return static_cast<uint32_t>(v); } catch (...) {} }
-    return 10000;
-}();
+// Function-local statics — initialized on first call, not at DLL/exe load time.
+static size_t kProbePayloadBytes_get() {
+    static const size_t v = []() -> size_t {
+        const char* env = vgre_get_config("VGRE_CLUSTER_PROBE_BYTES");
+        if (env) { try { long long x = std::stoll(env); if (x >= 4096 && x <= 64 * 1024 * 1024) return static_cast<size_t>(x); } catch (...) {} }
+        return 1024ULL * 1024;
+    }();
+    return v;
+}
+#define kProbePayloadBytes (kProbePayloadBytes_get())
+
+static int kBandwidthReprobeIntervalSec_get() {
+    static const int v = []() -> int {
+        const char* env = vgre_get_config("VGRE_CLUSTER_BANDWIDTH_REPROBE_SEC");
+        if (env) { try { int x = std::stoi(env); if (x >= 30 && x <= 86400) return x; } catch (...) {} }
+        return 300;
+    }();
+    return v;
+}
+#define kBandwidthReprobeIntervalSec (kBandwidthReprobeIntervalSec_get())
+
+static size_t kMaxHandshakeThreads_get() {
+    static const size_t v = []() -> size_t {
+        const char* env = vgre_get_config("VGRE_CLUSTER_MAX_HANDSHAKE_THREADS");
+        if (env) { try { long x = std::stol(env); if (x > 0 && x <= 512) return static_cast<size_t>(x); } catch (...) {} }
+        return 32;
+    }();
+    return v;
+}
+#define kMaxHandshakeThreads (kMaxHandshakeThreads_get())
+
+static uint32_t kKeyRotationThreshold_get() {
+    static const uint32_t v = []() -> uint32_t {
+        const char* env = vgre_get_config("VGRE_CLUSTER_KEY_ROTATION_THRESHOLD");
+        if (env) { try { long x = std::stol(env); if (x > 0) return static_cast<uint32_t>(x); } catch (...) {} }
+        return 10000;
+    }();
+    return v;
+}
+#define kKeyRotationThreshold (kKeyRotationThreshold_get())
+
 // Idle-connection eviction: drop clients that have not sent any data within
 // this many seconds.  WAN connections can go silent for a long time; default
 // is 300 s (5 min).  Set 0 to disable.
-const int kIdleEvictSec = []() -> int {
-    const char* env = vgre_get_config("VGRE_CLUSTER_IDLE_EVICT_SEC");
-    if (env) { try { int v = std::stoi(env); if (v >= 0) return v; } catch (...) {} }
-    return 300;
-}();
+static int kIdleEvictSec_get() {
+    static const int v = []() -> int {
+        const char* env = vgre_get_config("VGRE_CLUSTER_IDLE_EVICT_SEC");
+        if (env) { try { int x = std::stoi(env); if (x >= 0) return x; } catch (...) {} }
+        return 300;
+    }();
+    return v;
+}
+#define kIdleEvictSec (kIdleEvictSec_get())
 }
 
 void TCPClusterManager::performServerMaintenance() {
