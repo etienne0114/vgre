@@ -429,19 +429,34 @@ if "%SKIP_DASHBOARD%"=="1" (
     goto :dashboard_skip
 )
 
-rem -- Step 1: precache Windows engine artifacts (flutter_windows.dll, icudtl.dat,
-rem    cpp_client_wrapper sources).  Without this, tool_backend.bat cannot find
-rem    them and emits "The system cannot find the path specified." (3x) before
-rem    failing.  --no-analytics avoids a consent prompt in CI/automation.
-echo [INFO] Pre-caching Flutter Windows engine artifacts...
-call "!FLUTTER_CMD!" precache --windows --no-analytics
-if errorlevel 1 (
-    echo [WARN] flutter precache failed ^(Flutter may not be a full git clone^).
-    echo        Dashboard build will be skipped. To fix, install Flutter via:
+rem -- Step 1: verify Flutter SDK is a proper git clone BEFORE calling any
+rem    flutter commands.  Flutter on Windows calls exit (not exit /b) when it
+rem    encounters the "not a git clone" error, which terminates the entire CMD
+rem    process and skips the errorlevel check entirely.  Check proactively.
+set "_flutter_sdk="
+for /f "usebackq tokens=*" %%F in (`where "!FLUTTER_CMD!" 2^>nul`) do (
+    if not defined _flutter_sdk (
+        for %%D in ("%%~dpF..") do set "_flutter_sdk=%%~fD"
+    )
+)
+if not defined _flutter_sdk (
+    echo [WARN] Flutter not found on PATH. Dashboard build skipped.
+    set "SKIP_DASHBOARD=1"
+    goto :dashboard_skip
+)
+if not exist "!_flutter_sdk!\.git" (
+    echo [WARN] Flutter SDK at !_flutter_sdk! is not a git clone.
+    echo        Dashboard build skipped. To build the dashboard, install Flutter via git:
     echo          git clone -b stable https://github.com/flutter/flutter.git
     echo          setx PATH "%%PATH%%;C:\path\to\flutter\bin"
     set "SKIP_DASHBOARD=1"
     goto :dashboard_skip
+)
+echo [INFO] Pre-caching Flutter Windows engine artifacts...
+cmd /c ""!FLUTTER_CMD!" precache --windows --no-analytics"
+if errorlevel 1 (
+    echo [WARN] flutter precache failed - engine DLLs may be missing.
+    echo        Run manually: flutter precache --windows
 )
 
 rem -- Step 2: resolve Dart packages in the Windows environment.  pubspec.lock
@@ -450,7 +465,7 @@ rem    empty.  Running pub get here ensures every dependency is downloaded
 rem    before cmake configures the Windows build.
 pushd "%DASHBOARD_DIR%" || exit /b 1
 echo [INFO] Fetching Dart packages (flutter pub get)...
-call "!FLUTTER_CMD!" pub get --no-analytics
+cmd /c ""!FLUTTER_CMD!" pub get --no-analytics"
 if errorlevel 1 (
     popd
     echo WARNING: flutter pub get failed. Dashboard build skipped.
@@ -461,7 +476,7 @@ if errorlevel 1 (
 
 rem -- Step 3: build the Windows release bundle.
 echo [INFO] Building Flutter Windows release bundle...
-call "!FLUTTER_CMD!" build windows --release --no-analytics
+cmd /c ""!FLUTTER_CMD!" build windows --release --no-analytics"
 if errorlevel 1 (
     popd
     echo WARNING: Flutter build failed. Continuing without dashboard.
