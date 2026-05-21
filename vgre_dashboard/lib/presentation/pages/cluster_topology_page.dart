@@ -14,7 +14,37 @@ class ClusterTopologyPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return BlocBuilder<TelemetryBloc, TelemetryState>(
+    return BlocConsumer<TelemetryBloc, TelemetryState>(
+      listenWhen: (prev, curr) =>
+          curr is TelemetryActive && curr.disconnectNotices.isNotEmpty,
+      listener: (context, state) {
+        if (state is! TelemetryActive) return;
+        for (final addr in state.disconnectNotices) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(Icons.wifi_off, color: Colors.redAccent, size: 16),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Worker $addr disconnected',
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ),
+                ],
+              ),
+              backgroundColor: const Color(0xFF2A0A0A),
+              duration: const Duration(seconds: 6),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      },
+      buildWhen: (prev, curr) {
+        if (prev is! TelemetryActive || curr is! TelemetryActive) return true;
+        return prev.telemetry != curr.telemetry;
+      },
       builder: (context, state) {
         if (state is! TelemetryActive) {
           return const Center(child: CircularProgressIndicator());
@@ -48,7 +78,6 @@ class ClusterTopologyPage extends StatelessWidget {
               const SizedBox(height: 32),
               _buildNodeList(nodes),
             ],
-
           ),
         );
       },
@@ -243,13 +272,27 @@ class ClusterTopologyPage extends StatelessWidget {
   }
 
   Widget _buildNodeEntry(ClusterNode node) {
+    // Compute countdown seconds remaining before node is removed from the list.
+    final disconnectedAt = node.disconnectedAt;
+    String? countdownText;
+    if (!node.available && disconnectedAt != null) {
+      const gracePeriod = 30;
+      final elapsed = DateTime.now().difference(disconnectedAt).inSeconds;
+      final remaining = gracePeriod - elapsed;
+      if (remaining > 0) countdownText = 'Removing in ${remaining}s';
+    }
+
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.05),
+        color: node.available
+            ? Colors.white.withValues(alpha: 0.05)
+            : Colors.red.withValues(alpha: 0.04),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white10),
+        border: Border.all(
+          color: node.available ? Colors.white10 : Colors.redAccent.withValues(alpha: 0.25),
+        ),
       ),
       child: Row(
         children: [
@@ -261,12 +304,32 @@ class ClusterTopologyPage extends StatelessWidget {
               children: [
                 Text(
                   node.address,
-                  style: VgreTheme.bodyStyle.copyWith(fontWeight: FontWeight.bold),
+                  style: VgreTheme.bodyStyle.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: node.available ? Colors.white : Colors.white60,
+                  ),
                 ),
                 Text(
                   "CPU: ${node.cpuCores} Cores | RAM: ${(node.memoryBytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB",
                   style: VgreTheme.bodyStyle.copyWith(fontSize: 12, color: Colors.white60),
                 ),
+                if (!node.available) ...[
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      const Icon(Icons.wifi_off, size: 11, color: Colors.redAccent),
+                      const SizedBox(width: 4),
+                      Text(
+                        countdownText ?? 'DISCONNECTED',
+                        style: const TextStyle(
+                          color: Colors.redAccent,
+                          fontSize: 10,
+                          letterSpacing: 0.8,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ),
           ),

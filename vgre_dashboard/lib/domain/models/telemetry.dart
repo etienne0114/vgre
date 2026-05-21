@@ -87,12 +87,16 @@ class ClusterNode extends Equatable {
   final double latencyMs;
   final bool available;
   final String igpuName;
-  
+
   // Phase 5: Credits
   final double totalCredits;
   final double totalDebits;
   final double balance;
   final int transactionCount;
+
+  // Disconnect tracking: set to the moment the node first went unavailable;
+  // null while the node is connected.
+  final DateTime? disconnectedAt;
 
   const ClusterNode({
     required this.address,
@@ -106,6 +110,7 @@ class ClusterNode extends Equatable {
     this.totalDebits = 0.0,
     this.balance = 0.0,
     this.transactionCount = 0,
+    this.disconnectedAt,
   });
 
   @override
@@ -121,6 +126,7 @@ class ClusterNode extends Equatable {
         totalDebits,
         balance,
         transactionCount,
+        disconnectedAt,
       ];
 }
 

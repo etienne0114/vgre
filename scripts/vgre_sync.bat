@@ -421,7 +421,7 @@ rem    cpp_client_wrapper sources).  Without this, tool_backend.bat cannot find
 rem    them and emits "The system cannot find the path specified." (3x) before
 rem    failing.  --no-analytics avoids a consent prompt in CI/automation.
 echo [INFO] Pre-caching Flutter Windows engine artifacts...
-call "!FLUTTER_CMD!" precache --windows --no-analytics >nul 2>&1
+call "!FLUTTER_CMD!" precache --windows --no-analytics
 if errorlevel 1 (
     echo [WARN] flutter precache failed - engine DLLs may be missing.
     echo        Run manually: flutter precache --windows
@@ -573,6 +573,53 @@ echo set "PATH=%%~dp0lib;%%~dp0;%%TOOLS_ROOT%%\llvm\bin;%%PATH%%" >> "%INSTALL_D
 echo "%%~dp0vgre-worker.exe" %%* >> "%INSTALL_DIR%\vgre-worker.cmd"
 
 echo.
+echo === Creating Launcher ===
+rem Write the launcher BEFORE the worker self-check so it is always up-to-date
+rem even if the worker fails its startup validation.
+set "LAUNCHER_PATH=%INSTALL_DIR%\Launch-VGRE-Dashboard.cmd"
+(
+    echo @echo off
+    echo setlocal EnableExtensions EnableDelayedExpansion
+    echo set "APP_DIR=%%~dp0"
+    echo set "TOOLS_ROOT=%%LOCALAPPDATA%%\VGRE\BuildTools"
+    echo.
+    echo rem -- Ensure LLVM, OpenMP, and VGRE libs are found first --
+    echo set "PATH=%%APP_DIR%%lib;%%APP_DIR%%;%%TOOLS_ROOT%%\llvm\bin;%%TOOLS_ROOT%%\llvm\lib;%%PATH%%"
+    echo.
+    echo rem -- Load cluster auth token if not already set --
+    echo if not defined VGRE_TCP_AUTH_TOKEN_FILE ^(
+    echo     if exist "%%USERPROFILE%%\.vgre\token" set "VGRE_TCP_AUTH_TOKEN_FILE=%%USERPROFILE%%\.vgre\token"
+    echo ^)
+    echo.
+    echo if not exist "%%APP_DIR%%vgre_dashboard.exe" ^(
+    echo     echo [ERROR] vgre_dashboard.exe not found in %%APP_DIR%%
+    echo     echo         The dashboard was not built or deployed.
+    echo     echo         Fix: run  .\scripts\vgre_sync.bat  from the VGRE repository root.
+    echo     pause
+    echo     exit /b 1
+    echo ^)
+    echo.
+    echo cd /d "%%APP_DIR%%"
+    echo start "" "%%APP_DIR%%vgre_dashboard.exe"
+) > "%LAUNCHER_PATH%"
+if errorlevel 1 (
+    echo ERROR: Failed to create launcher script.
+    exit /b 1
+)
+echo [OK] Launcher written to %LAUNCHER_PATH%
+
+echo.
+echo === Creating Desktop Shortcut ===
+set "SHORTCUT_PATH="
+set "VGRE_EXE_PATH=%INSTALL_DIR%\vgre_dashboard.exe"
+set "VGRE_LAUNCHER_PATH=%LAUNCHER_PATH%"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$desktop=[Environment]::GetFolderPath('Desktop'); if([string]::IsNullOrWhiteSpace($desktop) -and $env:OneDrive){$desktop=Join-Path $env:OneDrive 'Desktop'}; if([string]::IsNullOrWhiteSpace($desktop)){$desktop=Join-Path $env:USERPROFILE 'Desktop'}; $target=$env:VGRE_LAUNCHER_PATH; $icon=$env:VGRE_EXE_PATH; $workdir=$env:INSTALL_DIR; if (!(Test-Path -LiteralPath $desktop)) { New-Item -ItemType Directory -Path $desktop -Force | Out-Null }; $shortcut=Join-Path $desktop 'VGRE Dashboard.lnk'; $shell=New-Object -ComObject WScript.Shell; $s=$shell.CreateShortcut($shortcut); $s.TargetPath=$target; $s.WorkingDirectory=$workdir; $s.IconLocation=($icon + ',0'); $s.Save(); Write-Output $shortcut"`) do set "SHORTCUT_PATH=%%I"
+if errorlevel 1 (
+    echo WARNING: Failed to create desktop shortcut.
+)
+if not "!SHORTCUT_PATH!"=="" echo [OK] Desktop shortcut updated: !SHORTCUT_PATH!
+
+echo.
 echo === Validating vgre-worker ===
 if not exist "%INSTALL_DIR%\vgre-worker.exe" (
     echo ERROR: vgre-worker.exe not found after deployment
@@ -594,51 +641,6 @@ xcopy /E /Y /I "%PROJECT_ROOT%\include\vgre" "%INSTALL_DIR%\include\vgre" >nul
 if errorlevel 1 (
     echo ERROR: Failed to copy JIT headers.
     exit /b 1
-)
-
-echo.
-echo === Creating Launcher ===
-rem Create Launcher script
-set "LAUNCHER_PATH=%INSTALL_DIR%\Launch-VGRE-Dashboard.cmd"
-(
-    echo @echo off
-    echo setlocal EnableExtensions EnableDelayedExpansion
-    echo set "APP_DIR=%%~dp0"
-    echo set "TOOLS_ROOT=%%LOCALAPPDATA%%\VGRE\BuildTools"
-    echo.
-    echo rem -- Critical PATH Setup for DLL Dependencies --
-    echo rem Ensure LLVM, OpenMP, and VGRE libs are found first
-    echo set "PATH=%%APP_DIR%%lib;%%APP_DIR%%;%%TOOLS_ROOT%%\llvm\bin;%%TOOLS_ROOT%%\llvm\lib;%%PATH%%"
-    echo.
-    echo rem -- Load cluster auth token from standard file location if not already set
-    echo if not defined VGRE_TCP_AUTH_TOKEN_FILE ^(
-    echo     if exist "%%USERPROFILE%%\.vgre\token" set "VGRE_TCP_AUTH_TOKEN_FILE=%%USERPROFILE%%\.vgre\token"
-    echo ^)
-    echo.
-    echo if not exist "%%APP_DIR%%vgre_dashboard.exe" ^(
-    echo     echo [ERROR] vgre_dashboard.exe not found in %%APP_DIR%%
-    echo     echo         The dashboard was not built or was not deployed.
-    echo     echo         Fix: run  .\scripts\vgre_sync.bat  from the VGRE repository root.
-    echo     pause
-    echo     exit /b 1
-    echo ^)
-    echo.
-    echo cd /d "%%APP_DIR%%"
-    echo start "" "%%APP_DIR%%vgre_dashboard.exe"
-) > "%LAUNCHER_PATH%"
-if errorlevel 1 (
-    echo ERROR: Failed to create launcher script.
-    exit /b 1
-)
-
-echo.
-echo === Creating Desktop Shortcut ===
-set "SHORTCUT_PATH="
-set "VGRE_EXE_PATH=%INSTALL_DIR%\vgre_dashboard.exe"
-set "VGRE_LAUNCHER_PATH=%LAUNCHER_PATH%"
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$desktop=[Environment]::GetFolderPath('Desktop'); if([string]::IsNullOrWhiteSpace($desktop) -and $env:OneDrive){$desktop=Join-Path $env:OneDrive 'Desktop'}; if([string]::IsNullOrWhiteSpace($desktop)){$desktop=Join-Path $env:USERPROFILE 'Desktop'}; $target=$env:VGRE_LAUNCHER_PATH; $icon=$env:VGRE_EXE_PATH; $workdir=$env:INSTALL_DIR; if (!(Test-Path -LiteralPath $desktop)) { New-Item -ItemType Directory -Path $desktop -Force | Out-Null }; $shortcut=Join-Path $desktop 'VGRE Dashboard.lnk'; $shell=New-Object -ComObject WScript.Shell; $s=$shell.CreateShortcut($shortcut); $s.TargetPath=$target; $s.WorkingDirectory=$workdir; $s.IconLocation=($icon + ',0'); $s.Save(); Write-Output $shortcut"`) do set "SHORTCUT_PATH=%%I"
-if errorlevel 1 (
-    echo WARNING: Failed to create desktop shortcut.
 )
 
 echo.

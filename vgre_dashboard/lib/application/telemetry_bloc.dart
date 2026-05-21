@@ -82,9 +82,10 @@ class ExportKernelHistory extends TelemetryEvent {
 
 class UpdateTelemetry extends TelemetryEvent {
   final Telemetry telemetry;
-  const UpdateTelemetry(this.telemetry);
+  final List<String> disconnectNotices;
+  const UpdateTelemetry(this.telemetry, {this.disconnectNotices = const []});
   @override
-  List<Object?> get props => [telemetry];
+  List<Object?> get props => [telemetry, disconnectNotices];
 }
 
 class SelectKernel extends TelemetryEvent {
@@ -110,6 +111,8 @@ class TelemetryActive extends TelemetryState {
   final String deviceName;
   final String backendVersion;
   final int deviceCount;
+  // Worker addresses that transitioned to unavailable since last poll tick.
+  final List<String> disconnectNotices;
 
   const TelemetryActive({
     required this.telemetry,
@@ -118,6 +121,7 @@ class TelemetryActive extends TelemetryState {
     required this.backendVersion,
     required this.deviceCount,
     this.selectedKernelName,
+    this.disconnectNotices = const [],
   });
   @override
   List<Object?> get props => [
@@ -127,6 +131,7 @@ class TelemetryActive extends TelemetryState {
     deviceName,
     backendVersion,
     deviceCount,
+    disconnectNotices,
   ];
 }
 
@@ -147,7 +152,6 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
   String? _selectedKernelName;
   KernelStat? _lastSelectedKernelStats;
   bool _profilerEnabled = true;
-  final bool _clusterSecurityActive = false;
   String _backendVersion = '0.0.0';
 
   bool _clusterSecuritySupported = false;
@@ -336,10 +340,14 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
           backendVersion: _backendVersion,
           deviceCount: _deviceCount,
           selectedKernelName: _selectedKernelName,
+          disconnectNotices: event.disconnectNotices,
         ),
       );
     });
   }
+
+  // How long an unavailable node remains visible before being removed from the UI.
+  static const _kGracePeriodSeconds = 30;
 
   void _poll() {
     try {
@@ -365,25 +373,62 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         } catch (_) {}
 
         final creditData = bridge.getCreditsAll();
+
+        // Previous node list — used to preserve disconnect timestamps and
+        // detect newly-disconnected workers.
+        final prevNodes = (state is TelemetryActive)
+            ? (state as TelemetryActive).telemetry.clusterNodes
+            : const <ClusterNode>[];
+
+        final now = DateTime.now();
+        final disconnectNotices = <String>[];
+
         final List<ClusterNode> clusterNodes = clusterData.map((m) {
           final addr = m['address'] as String;
+          final isAvailable = m['available'] as bool;
           final cred = creditData.firstWhere(
             (c) => c['address'] == addr,
             orElse: () => {},
           );
+
+          // Preserve the moment a node first became unavailable.
+          DateTime? disconnectedAt;
+          if (!isAvailable) {
+            DateTime? prevTime;
+            for (final prev in prevNodes) {
+              if (prev.address == addr) {
+                prevTime = prev.disconnectedAt;
+                break;
+              }
+            }
+            disconnectedAt = prevTime ?? now;
+            // Only emit a notice the first time (transition available→unavailable).
+            if (prevTime == null && state is TelemetryActive) {
+              disconnectNotices.add(addr);
+            }
+          }
+
           return ClusterNode(
             address: addr,
             port: m['port'] as int,
             cpuCores: m['cpuCores'] as int,
             memoryBytes: m['memoryBytes'] as int,
             latencyMs: m['latencyMs'] as double,
-            available: m['available'] as bool,
+            available: isAvailable,
             igpuName: m['igpuName'] as String,
             totalCredits: (cred['totalCredits'] ?? 0.0) as double,
             totalDebits: (cred['totalDebits'] ?? 0.0) as double,
             balance: (cred['balance'] ?? 0.0) as double,
             transactionCount: (cred['transactionCount'] ?? 0) as int,
+            disconnectedAt: disconnectedAt,
           );
+        })
+            // Remove nodes that have been unavailable past the grace period.
+            .where((node) {
+          if (node.available) return true;
+          if (node.disconnectedAt == null) return false;
+          return now.difference(node.disconnectedAt!).inSeconds <=
+              _kGracePeriodSeconds;
         }).toList();
 
         List<KernelStat> topKernels = const [];
@@ -521,7 +566,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         _backendVersion = t.backendVersion;
         _clusterSecuritySupported = t.clusterSecuritySupported;
         _lastSelectedKernelStats = t.lastSelectedKernelStats;
-        add(UpdateTelemetry(t));
+        add(UpdateTelemetry(t, disconnectNotices: disconnectNotices));
       } finally {
         calloc.free(ptr);
       }
