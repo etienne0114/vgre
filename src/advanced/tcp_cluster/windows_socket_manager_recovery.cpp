@@ -17,7 +17,7 @@ namespace advanced {
 #ifdef _WIN32
 
 VGREResult WindowsSocketManager::attemptRecovery(int max_retries) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Caller (initialize() / forceReinitialize()) already holds mutex_.
     if (initialized_) { WSACleanup(); initialized_ = false; }
     ref_count_ = 0;
 
