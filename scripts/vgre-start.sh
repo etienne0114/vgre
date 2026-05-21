@@ -132,11 +132,23 @@ fi
 case "$MODE" in
 
     master)
+        # Auto-detect real public IP so master broadcasts with it in UDP pings.
+        # Workers on different LANs will receive the correct public address.
+        _DISCOVER="$(command -v vgre-discover 2>/dev/null || true)"
+        [[ -z "$_DISCOVER" ]] && [[ -x "$INSTALL_DIR/vgre-discover" ]] && _DISCOVER="$INSTALL_DIR/vgre-discover"
+        [[ -z "$_DISCOVER" ]] && [[ -x "$(dirname "$0")/vgre-discover.sh" ]] && _DISCOVER="$(dirname "$0")/vgre-discover.sh"
+        if [[ -n "$_DISCOVER" ]]; then
+            echo "[...] Detecting public IP for WAN broadcast..."
+            # Run in a sub-shell so its 'export' doesn't affect this script's env;
+            # instead capture the printed assignment and eval it.
+            _ADV=$(bash "$_DISCOVER" --set-master 2>/dev/null | grep "^VGRE_CLUSTER_ADVERTISED_ADDRESS=" || true)
+            [[ -n "$_ADV" ]] && export "$_ADV" && echo "[OK] $_ADV"
+        fi
+
         echo "Starting VGRE Master Node..."
         echo "  Port:  $PORT"
         echo "  Token: $TOKEN_FILE"
         echo ""
-        # Master is embedded in the dashboard; export cluster port for it to pick up.
         export VGRE_PORT="$PORT"
         DASHBOARD_BIN="$INSTALL_DIR/vgre-launch.sh"
         [[ -x "$DASHBOARD_BIN" ]] || DASHBOARD_BIN="$INSTALL_DIR/vgre_dashboard"
