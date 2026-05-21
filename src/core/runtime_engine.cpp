@@ -196,7 +196,12 @@ VGREResult RuntimeEngine::shutdown() {
   kernelCache_.clear();
   kernelIRCache_.clear();
   kernelFnAddrMap_.clear();
+  pendingKernels_.clear();
+  kernelNames_.clear();
+  warnedSyncthreads_.clear();
   captureState_.clear();
+  lastCapturedNodeId_.clear();
+  captureSeedDeps_.clear();
   nextKernelId_ = 1;
   currentDeviceId_ = 0;
   initialized_ = false;

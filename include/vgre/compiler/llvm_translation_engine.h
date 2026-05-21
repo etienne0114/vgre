@@ -33,7 +33,7 @@ public:
   ~LLVMTranslationEngine();
 
   // Perform static analysis on LLVM module to count FP operations
-  uint64_t analyzeStaticFlops(const llvm::Module &module, uint64_t *outInstCount = nullptr);
+  static uint64_t analyzeStaticFlops(const llvm::Module &module, uint64_t *outInstCount = nullptr);
 
   // Recalibrate instruction count for a kernel using the JIT compiler
   uint64_t getInstructionCount(const std::string &source);

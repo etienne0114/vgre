@@ -18,8 +18,8 @@ namespace advanced {
 
 VGREResult WindowsSocketManager::attemptRecovery(int max_retries) {
     // Caller (initialize() / forceReinitialize()) already holds mutex_.
-    if (initialized_) { WSACleanup(); initialized_ = false; }
-    ref_count_ = 0;
+    if (getInitialized()) { WSACleanup(); getInitialized() = false; }
+    getRefCount() = 0;
 
     for (int attempt = 1; attempt <= max_retries; ++attempt) {
         if (attempt > 1) {
@@ -29,10 +29,10 @@ VGREResult WindowsSocketManager::attemptRecovery(int max_retries) {
             std::unique_lock<std::mutex> lk(wsa_retry_mutex);
             wsa_retry_cv.wait_for(lk, std::chrono::milliseconds(backoff_ms));
         }
-        int result = WSAStartup(MAKEWORD(2, 2), &wsa_data_);
+        int result = WSAStartup(MAKEWORD(2, 2), &getWsaData());
         if (result == 0) {
-            initialized_ = true;
-            ref_count_ = 1;
+            getInitialized() = true;
+            getRefCount() = 1;
             return VGREResult::SUCCESS;
         }
     }
@@ -50,7 +50,7 @@ std::string WindowsSocketManager::getWSAStartupDiagnostics(int error_code) {
 }
 
 bool WindowsSocketManager::needsReinitialization() {
-    if (!initialized_.load()) return true;
+    if (!getInitialized().load()) return true;
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return true;
     closesocket(s);

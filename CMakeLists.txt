@@ -1119,10 +1119,7 @@ endif()
 # ──────────────────────────────────────────────────────────────────────────────
 # §22  Install rules  (GNUInstallDirs — no hardcoded lib/bin/include paths)
 # ──────────────────────────────────────────────────────────────────────────────
-# NOTE: 'vgre-worker' was referenced in the original install block but was
-# never defined as a build target. It is intentionally omitted here. Add it
-# to this block once the worker executable target is introduced.
-install(TARGETS vgre vgre_cudart
+install(TARGETS vgre vgre_cudart vgre-worker
     EXPORT   VGRETargets
     LIBRARY  DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     RUNTIME  DESTINATION "${CMAKE_INSTALL_BINDIR}"

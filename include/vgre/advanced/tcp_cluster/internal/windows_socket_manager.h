@@ -123,12 +123,11 @@ public:
     VGREResult validateWinsockFunctionality();
 
 private:
-    static std::mutex mutex_;
-    static std::atomic<int> ref_count_;
-    static std::atomic<bool> initialized_;
-    
 #ifdef _WIN32
-    static WSADATA wsa_data_;
+    static std::mutex& getMutex();
+    static std::atomic<int>& getRefCount();
+    static std::atomic<bool>& getInitialized();
+    static WSADATA& getWsaData();
 #endif
 };
 
