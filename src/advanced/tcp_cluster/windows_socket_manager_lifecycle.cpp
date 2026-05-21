@@ -23,7 +23,12 @@ std::atomic<bool> WindowsSocketManager::initialized_{false};
 WSADATA WindowsSocketManager::wsa_data_{};
 
 WindowsSocketManager::WindowsSocketManager() {
-    initialize();
+    // Do NOT call initialize() here.
+    // WSAStartup is invoked explicitly by TCPClusterManager::initialize()
+    // via windows_socket_manager_->initialize().  Calling it from the constructor
+    // means it runs inside TCPClusterManager::instance() (static singleton init),
+    // before any diagnostic output, and the nested-mutex recovery path in
+    // initialize() can deadlock if WSAStartup returns an error.
 }
 
 WindowsSocketManager::~WindowsSocketManager() {
