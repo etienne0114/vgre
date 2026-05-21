@@ -68,6 +68,11 @@ void TCPClusterManager::shutdown() {
   // even after clientLoop set enabled_=false on a disconnect. Skipping join
   // here would leave that thread running past the object's lifetime → UB.
   if (!wasEnabled) {
+    // Discovery threads may still be running from a prior init/shutdown
+    // cycle; stop them now so ~DiscoveryManager() doesn't std::terminate().
+    if (discovery_manager_) {
+      discovery_manager_->stopAll();
+    }
     shutdown_cv_.notify_all();
     staging_cv_.notify_all();
     remote_results_cv_.notify_all();
