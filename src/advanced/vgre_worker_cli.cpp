@@ -197,12 +197,9 @@ int main(int argc, char** argv) {
         vgre_set_config("VGRE_TCP_AUTH_TOKEN", auth_token.c_str());
     }
 
-    vgre::advanced::TCPClusterManager& cluster = vgre::advanced::TCPClusterManager::instance();
-
     // ── Compute backend probe ─────────────────────────────────────────────────
-    // Shows every available execution path.  Missing optional hardware (no
-    // NVIDIA GPU, no OpenCL device) is not an error — CPU LLVM JIT handles all
-    // CUDA emulation regardless.
+    // Print and flush BEFORE initializing the TCP cluster manager so the
+    // console always shows something even if networking init crashes on Windows.
     std::cout << "[Worker] Compute backends:\n";
 
     if (enable_gpu) {
@@ -237,6 +234,12 @@ int main(int argc, char** argv) {
 
     // CPU LLVM JIT is always active — it is the primary CUDA emulation engine.
     std::cout << "[Worker]   CPU LLVM JIT  ACTIVE  primary CUDA emulation engine\n";
+    std::cout.flush();
+
+    // Initialize the TCP cluster manager (Winsock / networking).
+    // Done here — after flushing compute-backend output — so the console always
+    // shows something useful if this step crashes on Windows.
+    vgre::advanced::TCPClusterManager& cluster = vgre::advanced::TCPClusterManager::instance();
 
     vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker",
         "Initializing VGRE Remote Worker on port " + std::to_string(port));

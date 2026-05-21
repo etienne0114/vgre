@@ -98,13 +98,11 @@ TCPClusterManager::TCPClusterManager(
 
 // ── Destructor: shutdown is a no-op if never initialised ─────────────────
 TCPClusterManager::~TCPClusterManager() {
-  fprintf(stderr, "DEBUG [TCPCluster] TCPClusterManager destructor starting...\n");
   try {
     shutdown();
   } catch (...) {
-    fprintf(stderr, "ERROR [TCPCluster] Exception in TCPClusterManager destructor\n");
+    VGRE_LOG_ERROR("TCPCluster", "Exception in TCPClusterManager destructor");
   }
-  fprintf(stderr, "DEBUG [TCPCluster] TCPClusterManager destructor finished.\n");
 }
 
 // ── initialize ────────────────────────────────────────────────────────────
