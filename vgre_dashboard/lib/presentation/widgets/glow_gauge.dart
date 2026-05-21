@@ -46,13 +46,17 @@ class GlowGauge extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                Text(
-                  label.toUpperCase(),
-                  style: GoogleFonts.orbitron(
-                    letterSpacing: 2,
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
+                Flexible(
+                  child: Text(
+                    label.toUpperCase(),
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                    style: GoogleFonts.orbitron(
+                      letterSpacing: 2,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
                   ),
                 ),
               ],
@@ -65,6 +69,15 @@ class GlowGauge extends StatelessWidget {
                   duration: const Duration(milliseconds: 800),
                   curve: Curves.easeOutCubic,
                   builder: (context, animValue, child) {
+                    // Guard against NaN/Infinity before passing to painter.
+                    final safePercent = (max > 0 && animValue.isFinite)
+                        ? (animValue / max).clamp(0.0, 1.0)
+                        : 0.0;
+                    final displayVal = animValue.isFinite ? animValue : 0.0;
+                    final unitSuffix = animValue >= 1000 && unit.length > 1
+                        ? 'T${unit.substring(1)}'
+                        : unit;
+
                     return SizedBox(
                       width: initialGaugeSize,
                       height: initialGaugeSize,
@@ -74,7 +87,7 @@ class GlowGauge extends StatelessWidget {
                           CustomPaint(
                             size: Size(initialGaugeSize, initialGaugeSize),
                             painter: _GaugePainter(
-                              percent: animValue / max,
+                              percent: safePercent,
                               color: color,
                             ),
                           ),
@@ -82,9 +95,9 @@ class GlowGauge extends StatelessWidget {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Text(
-                                animValue >= 1000 
-                                    ? (animValue / 1000).toStringAsFixed(1) 
-                                    : animValue.toStringAsFixed(1),
+                                displayVal >= 1000
+                                    ? (displayVal / 1000).toStringAsFixed(1)
+                                    : displayVal.toStringAsFixed(1),
                                 style: GoogleFonts.orbitron(
                                   fontSize: initialGaugeSize < 100 ? 18 : 28,
                                   fontWeight: FontWeight.w900,
@@ -98,7 +111,7 @@ class GlowGauge extends StatelessWidget {
                                 ),
                               ),
                               Text(
-                                animValue >= 1000 ? "T${unit.substring(1)}" : unit,
+                                unitSuffix,
                                 style: GoogleFonts.inter(
                                   color: VgreTheme.textMuted,
                                   fontSize: initialGaugeSize < 100 ? 9 : 11,
@@ -154,6 +167,9 @@ class _GaugePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    // Bail out on degenerate inputs to prevent NaN offsets.
+    if (size.isEmpty || percent.isNaN || percent.isInfinite) return;
+
     final center = Offset(size.width / 2, size.height / 2);
     final radius = min(size.width / 2, size.height / 2);
     const strokeWidth = 10.0;
