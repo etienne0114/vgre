@@ -80,9 +80,38 @@ GPUPassthrough& GPUPassthrough::instance() {
 }
 
 bool GPUPassthrough::loadDriverAPI() {
-    libHandle_ = VGRE_DLOPEN(VGRE_CUDA_LIB);
+    // Try multiple well-known locations so CUDA found via the toolkit installer
+    // (non-standard path) or via a distro package is detected automatically.
+    static const char* const kLibs[] = {
+#if defined(_WIN32)
+        "nvcuda.dll",
+#elif defined(__APPLE__)
+        "libcuda.dylib",
+        "/usr/local/cuda/lib/libcuda.dylib",
+#else
+        "libcuda.so.1",                          // standard ldconfig path
+        "libcuda.so",
+        "/usr/local/cuda/lib64/libcuda.so.1",    // CUDA toolkit default
+        "/usr/local/cuda/lib/libcuda.so.1",      // 32-bit fallback
+        "/opt/cuda/lib64/libcuda.so.1",          // Arch Linux / custom prefix
+#endif
+        nullptr
+    };
+
+    for (const char* const* p = kLibs; *p; ++p) {
+        libHandle_ = VGRE_DLOPEN(*p);
+        if (libHandle_) {
+            VGRE_LOG_DEBUG("GPUPassthrough",
+                std::string("Loaded CUDA library: ") + *p);
+            break;
+        }
+    }
+
     if (!libHandle_) {
-        VGRE_LOG_INFO("GPUPassthrough", "libcuda not found — GPU passthrough disabled");
+        // Expected on machines without NVIDIA hardware — not an error.
+        VGRE_LOG_DEBUG("GPUPassthrough",
+            "No CUDA library found — GPU passthrough not available "
+            "(normal on non-NVIDIA machines; CPU LLVM JIT handles all CUDA emulation)");
         return false;
     }
     api_ = new DriverAPI();

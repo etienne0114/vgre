@@ -199,30 +199,44 @@ int main(int argc, char** argv) {
 
     vgre::advanced::TCPClusterManager& cluster = vgre::advanced::TCPClusterManager::instance();
 
-    // ── GPU capability probe ──────────────────────────────────────────────────
+    // ── Compute backend probe ─────────────────────────────────────────────────
+    // Shows every available execution path.  Missing optional hardware (no
+    // NVIDIA GPU, no OpenCL device) is not an error — CPU LLVM JIT handles all
+    // CUDA emulation regardless.
+    std::cout << "[Worker] Compute backends:\n";
+
     if (enable_gpu) {
+        // ── NVIDIA GPU passthrough (optional) ─────────────────────────────────
         auto& gp = vgre::advanced::GPUPassthrough::instance();
         if (gp.initialize() && gp.isAvailable()) {
             const auto& devs = gp.getDevices();
-            std::cout << "[Worker] Discrete GPU: " << (devs.empty() ? "?" : devs[0].name)
-                      << " (" << devs.size() << " device(s) via GPU passthrough)\n";
+            for (size_t di = 0; di < devs.size(); ++di) {
+                std::cout << "[Worker]   NVIDIA CUDA   ACTIVE  " << devs[di].name
+                          << "  (device " << di << ", passthrough)\n";
+            }
         } else {
-            std::cout << "[Worker] Discrete GPU: not found (libcuda not present)\n";
+            std::cout << "[Worker]   NVIDIA CUDA   n/a     no NVIDIA GPU detected\n";
         }
+
+        // ── Integrated / discrete non-NVIDIA GPU via OpenCL (optional) ────────
 #ifdef VGRE_HAS_OPENCL_BACKEND
         auto& igpu = vgre::runtime::IGPUOpenCLExecutor::instance();
         if (igpu.initialize() == vgre::VGREResult::SUCCESS) {
-            std::cout << "[Worker] Integrated GPU: " << igpu.getDeviceName()
-                      << " (OpenCL, " << std::fixed << igpu.getEstimatedGFLOPS() << " GFLOPS est.)\n";
+            std::cout << "[Worker]   iGPU OpenCL   ACTIVE  " << igpu.getDeviceName()
+                      << "  (" << std::fixed << igpu.getEstimatedGFLOPS() << " GFLOPS est.)\n";
         } else {
-            std::cout << "[Worker] Integrated GPU: not available (no OpenCL device)\n";
+            std::cout << "[Worker]   iGPU OpenCL   n/a     no OpenCL device found\n";
         }
 #else
-        std::cout << "[Worker] Integrated GPU: disabled (no VGRE_HAS_OPENCL_BACKEND)\n";
+        std::cout << "[Worker]   iGPU OpenCL   n/a     not compiled in (VGRE_HAS_OPENCL_BACKEND off)\n";
 #endif
     } else {
-        std::cout << "[Worker] GPU dispatch disabled (--no-gpu)\n";
+        std::cout << "[Worker]   NVIDIA CUDA   off     --no-gpu\n";
+        std::cout << "[Worker]   iGPU OpenCL   off     --no-gpu\n";
     }
+
+    // CPU LLVM JIT is always active — it is the primary CUDA emulation engine.
+    std::cout << "[Worker]   CPU LLVM JIT  ACTIVE  primary CUDA emulation engine\n";
 
     vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker",
         "Initializing VGRE Remote Worker on port " + std::to_string(port));
