@@ -299,6 +299,16 @@ echo [INFO] vgre-token is available in this terminal and all new terminals.
 echo        Run: vgre-token generate
 
 echo.
+echo === Pulling Latest Source ===
+git -C "%PROJECT_ROOT%" pull --rebase --autostash 2>&1
+if errorlevel 1 (
+    echo [WARN] git pull failed - building from current local source.
+    echo        If you have local changes or no network, this is expected.
+) else (
+    echo [OK] Source is up to date.
+)
+
+echo.
 echo === Building VGRE Native Engine ===
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 pushd "%BUILD_DIR%" || exit /b 1
@@ -426,8 +436,12 @@ rem    failing.  --no-analytics avoids a consent prompt in CI/automation.
 echo [INFO] Pre-caching Flutter Windows engine artifacts...
 call "!FLUTTER_CMD!" precache --windows --no-analytics
 if errorlevel 1 (
-    echo [WARN] flutter precache failed - engine DLLs may be missing.
-    echo        Run manually: flutter precache --windows
+    echo [WARN] flutter precache failed ^(Flutter may not be a full git clone^).
+    echo        Dashboard build will be skipped. To fix, install Flutter via:
+    echo          git clone -b stable https://github.com/flutter/flutter.git
+    echo          setx PATH "%%PATH%%;C:\path\to\flutter\bin"
+    set "SKIP_DASHBOARD=1"
+    goto :dashboard_skip
 )
 
 rem -- Step 2: resolve Dart packages in the Windows environment.  pubspec.lock
