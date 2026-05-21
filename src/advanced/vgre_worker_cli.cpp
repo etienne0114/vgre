@@ -16,6 +16,7 @@
 #include <thread>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include "vgre/common/os_backend.h"
 
 static std::atomic<bool>& getStopRequested() {
@@ -34,43 +35,139 @@ void signal_handler(int signal) {
 }
 
 void print_usage(const char* prog) {
-    std::cout << "VGRE Remote Worker Utility\n";
-    std::cout << "Usage: " << prog << " [options]\n";
-    std::cout << "Options:\n";
-    std::cout << "  --port <p>          Port to listen on (default: " << vgre::advanced::kDefaultClusterPort << ")\n";
-    std::cout << "  --threads <n>       Number of worker threads (default: auto = CPU cores)\n";
-    std::cout << "  --auth-token <t>    Authentication token for secure cluster access\n";
-    std::cout << "  --master <ip>       IP address of the master node (default: auto-discovery)\n";
-    std::cout << "  --no-gpu            Disable GPU dispatch (force CPU-only execution)\n";
-    std::cout << "  --help              Print this help message\n";
+    std::cout <<
+        "VGRE Remote Worker\n"
+        "\n"
+        "Usage:\n"
+        "  " << prog << " [options]\n"
+        "\n"
+        "Options:\n"
+        "  --port <N>                   TCP port (default: " << vgre::advanced::kDefaultClusterPort << ")\n"
+        "  --threads <N>                Worker thread count (default: auto = CPU cores)\n"
+        "  --master <IP>                Master IP for direct LAN connect\n"
+        "  --master-address <HOST:PORT> Master address — hostname, IPv4, or [::1]:port\n"
+        "                               Required for WAN / internet clusters.\n"
+        "                               Also reads from VGRE_CLUSTER_MASTER_ADDRESS env var.\n"
+        "  --auth-token <TOKEN>         Auth token (prefer VGRE_TCP_AUTH_TOKEN_FILE)\n"
+        "  --no-gpu                     Disable GPU dispatch (CPU-only execution)\n"
+        "  --help                       Print this help\n"
+        "\n"
+        "Connection modes:\n"
+        "  No --master*       — LAN UDP broadcast auto-discovery (default)\n"
+        "  --master <IP>      — direct connect to LAN master, auto-discover as fallback\n"
+        "  --master-address   — direct connect to WAN/hostname master\n"
+        "\n"
+        "Recommended: use 'vgre-start --worker' which sets up PATH and token automatically.\n"
+        "\n"
+        "Examples:\n"
+        "  vgre-worker                                  # LAN auto-discover\n"
+        "  vgre-worker --master 192.168.1.10            # LAN explicit master\n"
+        "  vgre-worker --master-address 78.45.12.99:7777  # WAN master\n"
+        "  vgre-worker --master-address myhost.example.com:7777  # hostname\n";
+}
+
+// Split "host:port" or "[::1]:port" into components.
+// Returns false on parse failure (address used unchanged, port unchanged).
+static bool splitHostPort(const std::string& addr, std::string& host, int& port) {
+    if (addr.empty()) return false;
+    if (addr.front() == '[') {
+        size_t close = addr.find(']');
+        if (close == std::string::npos) return false;
+        host = addr.substr(1, close - 1);
+        size_t colon = addr.find(':', close + 1);
+        if (colon == std::string::npos) return false;
+        try { port = std::stoi(addr.substr(colon + 1)); } catch (...) { return false; }
+    } else {
+        size_t colon = addr.rfind(':');
+        if (colon == std::string::npos) { host = addr; return true; }
+        host = addr.substr(0, colon);
+        try { port = std::stoi(addr.substr(colon + 1)); } catch (...) { return false; }
+    }
+    return !host.empty() && port > 0 && port < 65536;
 }
 
 int main(int argc, char** argv) {
-    int  port       = vgre::advanced::kDefaultClusterPort;
-    int  threads    = 0;       // 0 = auto-detect from CPU cores
-    bool enable_gpu = true;
+    int         port       = vgre::advanced::kDefaultClusterPort;
+    int         threads    = 0;    // 0 = auto-detect from CPU cores
+    bool        enable_gpu = true;
     std::string auth_token;
-    std::string master_ip = "auto";
+    std::string master_host;       // empty = use UDP auto-discovery
+    bool        explicit_master = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
+
         if (arg == "--port" && i + 1 < argc) {
-            port = std::stoi(argv[++i]);
+            try { port = std::stoi(argv[++i]); }
+            catch (...) {
+                std::cerr << "[Worker] Invalid port: " << argv[i] << "\n";
+                return 1;
+            }
         } else if (arg == "--threads" && i + 1 < argc) {
-            threads = std::stoi(argv[++i]);
+            try { threads = std::stoi(argv[++i]); }
+            catch (...) {
+                std::cerr << "[Worker] Invalid thread count: " << argv[i] << "\n";
+                return 1;
+            }
         } else if (arg == "--auth-token" && i + 1 < argc) {
             auth_token = argv[++i];
+
         } else if (arg == "--master" && i + 1 < argc) {
-            master_ip = argv[++i];
+            // Legacy: just an IP, no port.
+            master_host    = argv[++i];
+            explicit_master = true;
+
+        } else if (arg == "--master-address" && i + 1 < argc) {
+            // New: HOST:PORT — parses hostname, IPv4 literal, or [::1]:port.
+            std::string raw = argv[++i];
+            int parsed_port  = port;
+            std::string parsed_host;
+            if (splitHostPort(raw, parsed_host, parsed_port)) {
+                master_host = parsed_host;
+                port        = parsed_port;
+            } else {
+                master_host = raw;   // pass as-is; getaddrinfo will resolve it
+            }
+            explicit_master = true;
+
         } else if (arg == "--no-gpu") {
             enable_gpu = false;
-        } else if (arg == "--help") {
+        } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
+        } else if (!arg.empty() && arg[0] == '-') {
+            std::cerr << "[Worker] Unknown option: " << arg << "\n"
+                      << "         Run: vgre-worker --help\n";
+            return 1;
+        } else {
+            // Positional argument — most likely user typed a subcommand by mistake.
+            std::cerr << "[Worker] Unexpected argument: '" << arg << "'\n"
+                      << "         vgre-worker does not take subcommands.\n"
+                      << "         To start a worker node, just run:  vgre-worker\n"
+                      << "         Or use the high-level launcher:     vgre-start --worker\n"
+                      << "         See all options:                     vgre-worker --help\n";
+            return 1;
         }
     }
 
-    // Apply thread count to the runtime config before init
+    // Environment variable fallback for master address (set by vgre-start/vgre-discover).
+    // Only applies when no --master* flag was given on the command line.
+    if (!explicit_master) {
+        const char* envAddr = vgre_get_config("VGRE_CLUSTER_MASTER_ADDRESS");
+        if (envAddr && envAddr[0]) {
+            std::string parsed_host;
+            int parsed_port = port;
+            if (splitHostPort(std::string(envAddr), parsed_host, parsed_port)) {
+                master_host = parsed_host;
+                port        = parsed_port;
+            } else {
+                master_host = std::string(envAddr);
+            }
+            explicit_master = true;
+        }
+    }
+
+    // Thread count
     if (threads > 0) {
         vgre_set_config("VGRE_WORKER_THREADS", std::to_string(threads).c_str());
         std::cout << "[Worker] Thread pool: " << threads << " threads\n";
@@ -79,14 +176,13 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 #if !defined(_WIN32)
-    std::signal(SIGPIPE, SIG_IGN); // suppress SIGPIPE on broken pipes (Linux + macOS)
+    std::signal(SIGPIPE, SIG_IGN);
 #endif
 
     vgre::Logger::instance().setLevel(vgre::LogLevel::INFO);
-    
+
+    // Auth token from flag
     if (!auth_token.empty()) {
-        // Hash the token for logging — SHA256, same algorithm as the C++ engine
-        // startup log and handshake failure messages so all output is consistent.
         uint8_t digest[vgre::advanced::crypto::kSHA256DigestLen];
         vgre::advanced::crypto::sha256(
             reinterpret_cast<const uint8_t*>(auth_token.data()),
@@ -98,88 +194,93 @@ int main(int argc, char** argv) {
         }
         vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker",
             "Using provided auth token (SHA256: " + token_hash_hex.substr(0, 16) + "...)");
-        // Use thread-safe config store instead of setenv to avoid glibc heap corruption race
         vgre_set_config("VGRE_TCP_AUTH_TOKEN", auth_token.c_str());
     }
 
     vgre::advanced::TCPClusterManager& cluster = vgre::advanced::TCPClusterManager::instance();
-    
+
     // ── GPU capability probe ──────────────────────────────────────────────────
-    // Probe BEFORE cluster init so the capability packet sent during handshake
-    // carries accurate GPU information. Results are logged to help operators
-    // verify which compute backends are active on this worker node.
     if (enable_gpu) {
-        // Discrete NVIDIA GPU via libcuda / nvcuda.dll (runtime dlopen)
         auto& gp = vgre::advanced::GPUPassthrough::instance();
         if (gp.initialize() && gp.isAvailable()) {
             const auto& devs = gp.getDevices();
             std::cout << "[Worker] Discrete GPU: " << (devs.empty() ? "?" : devs[0].name)
-                      << " (" << devs.size() << " device(s) via GPU passthrough)" << std::endl;
+                      << " (" << devs.size() << " device(s) via GPU passthrough)\n";
         } else {
-            std::cout << "[Worker] Discrete GPU: not found (libcuda not present)" << std::endl;
+            std::cout << "[Worker] Discrete GPU: not found (libcuda not present)\n";
         }
 #ifdef VGRE_HAS_OPENCL_BACKEND
-        // Integrated GPU via OpenCL
         auto& igpu = vgre::runtime::IGPUOpenCLExecutor::instance();
         if (igpu.initialize() == vgre::VGREResult::SUCCESS) {
             std::cout << "[Worker] Integrated GPU: " << igpu.getDeviceName()
-                      << " (OpenCL, " << std::fixed
-                      << igpu.getEstimatedGFLOPS() << " GFLOPS est.)" << std::endl;
+                      << " (OpenCL, " << std::fixed << igpu.getEstimatedGFLOPS() << " GFLOPS est.)\n";
         } else {
-            std::cout << "[Worker] Integrated GPU: not available (no OpenCL device)" << std::endl;
+            std::cout << "[Worker] Integrated GPU: not available (no OpenCL device)\n";
         }
 #else
-        std::cout << "[Worker] Integrated GPU: disabled (compiled without VGRE_HAS_OPENCL_BACKEND)" << std::endl;
+        std::cout << "[Worker] Integrated GPU: disabled (no VGRE_HAS_OPENCL_BACKEND)\n";
 #endif
     } else {
-        std::cout << "[Worker] GPU dispatch disabled (--no-gpu)" << std::endl;
+        std::cout << "[Worker] GPU dispatch disabled (--no-gpu)\n";
     }
 
-    vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Initializing VGRE Remote Worker on port " + std::to_string(port));
-    std::cout << "[Worker] Startup phase 1/2: Initializing networking..." << std::endl;
+    vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker",
+        "Initializing VGRE Remote Worker on port " + std::to_string(port));
+    std::cout << "[Worker] Startup phase 1/2: Initializing networking...\n";
     std::cout.flush();
 
-    // Initialize as Worker (is_master = false)
-    vgre::VGREResult initRes = cluster.initialize(false, master_ip, port);
+    // Initialize as worker.  Empty master_host → pure UDP auto-discovery.
+    vgre::VGREResult initRes = cluster.initialize(false, master_host, port);
     if (initRes != vgre::VGREResult::SUCCESS) {
-        vgre::Logger::instance().log(vgre::LogLevel::ERR, "Worker", "Failed to initialize TCP Cluster worker: " + std::to_string(static_cast<int>(initRes)));
-        std::cerr << "[Worker] FATAL: Initialization failed. Check if port " << port << " is available." << std::endl;
+        vgre::Logger::instance().log(vgre::LogLevel::ERR, "Worker",
+            "Failed to initialize TCP Cluster: " + std::to_string(static_cast<int>(initRes)));
+        std::cerr << "[Worker] FATAL: Initialization failed. Check if port " << port << " is available.\n";
         return 1;
     }
 
-    vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Worker node is active and scanning for master (UDP Discovery)...");
-    std::cout << "[Worker] Startup phase 2/2: Entering discovery loop, scanning local subnet..." << std::endl;
+    if (explicit_master) {
+        std::cout << "[Worker] Startup phase 2/2: Connecting to master at "
+                  << master_host << ":" << port << " ...\n";
+    } else {
+        std::cout << "[Worker] Startup phase 2/2: Scanning local subnet for master (UDP discovery)...\n";
+    }
     std::cout.flush();
-    
+
+    // ── Main loop — keep worker running; handle reconnection ─────────────────
     int reconnectCounter = 0;
     while (!getStopRequested().load()) {
         std::unique_lock<std::mutex> lock(mainMtx);
-        mainCv.wait_for(lock, std::chrono::milliseconds(200), [] { return getStopRequested().load(); });
+        mainCv.wait_for(lock, std::chrono::milliseconds(200),
+                        [] { return getStopRequested().load(); });
         if (getStopRequested().load()) break;
-        
+
         if (!cluster.isEnabled()) {
-            if (master_ip == "auto") {
-                // If in standby mode, don't exit! Try to restart the cluster manager.
-                vgre::Logger::instance().log(vgre::LogLevel::WARN, "Worker", "Cluster engine went offline unexpectedly; attempting to re-enable (attempt #" + std::to_string(++reconnectCounter) + ")...");
-                std::cout << "[Worker] Cluster engine offline. Retrying..." << std::endl;
+            if (!explicit_master) {
+                // Auto-discovery mode: keep scanning, never give up.
+                vgre::Logger::instance().log(vgre::LogLevel::WARN, "Worker",
+                    "Cluster engine went offline; restarting (attempt #" +
+                    std::to_string(++reconnectCounter) + ")...");
+                std::cout << "[Worker] Cluster engine offline. Retrying...\n";
                 std::cout.flush();
-                mainCv.wait_for(lock, std::chrono::seconds(2), [] { return getStopRequested().load(); });
+                mainCv.wait_for(lock, std::chrono::seconds(2),
+                                [] { return getStopRequested().load(); });
                 if (getStopRequested().load()) break;
-                cluster.initialize(false, master_ip, port);
+                cluster.initialize(false, master_host, port);
             } else {
-                // In direct mode, we exit upon failure as per previous design.
-                vgre::Logger::instance().log(vgre::LogLevel::WARN, "Worker", "Direct connection lost; shutting down.");
-                break;
+                // Explicit master: the proactive reconnect loop inside the cluster
+                // manager handles retries with exponential backoff.  Only exit when
+                // explicitly stopped.
+                mainCv.wait_for(lock, std::chrono::seconds(5),
+                                [] { return getStopRequested().load(); });
             }
         } else {
-            reconnectCounter = 0; // reset on success
+            reconnectCounter = 0;
         }
     }
 
     vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Shutting down worker...");
-    std::cout << "[Worker] Shutdown signal received. Cleaning up..." << std::endl;
+    std::cout << "[Worker] Shutdown signal received. Cleaning up...\n";
     std::cout.flush();
     cluster.shutdown();
-
     return 0;
 }
