@@ -489,27 +489,42 @@ if errorlevel 1 (
     goto :dashboard_skip
 )
 
-rem -- Step 3: build the Windows release bundle.
-echo [INFO] Building Flutter Windows release bundle...
-cmd /c ""!FLUTTER_CMD!" build windows --release"
+rem -- Step 3: build the Windows bundle (release preferred; debug fallback).
+set "_flutter_build_mode=Release"
+echo [INFO] Attempting Flutter Windows release build...
+cmd /c ""!FLUTTER_CMD!" build windows --release" 2>nul
 if errorlevel 1 (
-    popd
-    echo [WARN] Flutter build failed. Continuing without dashboard.
-    echo        Run manually from !DASHBOARD_DIR!:  flutter build windows --release
-    set "SKIP_DASHBOARD=1"
-    goto :dashboard_skip
+    echo [INFO] Release build unavailable ^(engine not cached^). Trying debug build...
+    set "_flutter_build_mode=Debug"
+    cmd /c ""!FLUTTER_CMD!" build windows --debug"
+    if errorlevel 1 (
+        popd
+        echo [WARN] Flutter build failed. Continuing without dashboard.
+        echo        Run manually from !DASHBOARD_DIR!:  flutter build windows --release
+        set "SKIP_DASHBOARD=1"
+        goto :dashboard_skip
+    )
 )
 popd
 :dashboard_skip
 
-rem -- Detect actual Flutter build output arch (x64 is the default; fall back to
-rem    arm64 when running on a Windows-on-ARM machine or when Flutter chose arm64).
-rem    This runs outside any block so %VAR% expansion is not affected by parsing.
+rem -- Detect actual Flutter build output arch/mode.
+rem    Priority: x64 Release -> x64 Debug -> arm64 Release -> arm64 Debug
 if "!SKIP_DASHBOARD!"=="1" goto :bundle_dir_ok
 if exist "!BUNDLE_DIR!\vgre_dashboard.exe" goto :bundle_dir_ok
+if exist "%DASHBOARD_DIR%\build\windows\x64\runner\Debug\vgre_dashboard.exe" (
+    set "BUNDLE_DIR=%DASHBOARD_DIR%\build\windows\x64\runner\Debug"
+    echo [INFO] Flutter build output detected at x64 Debug path.
+    goto :bundle_dir_ok
+)
 if exist "%DASHBOARD_DIR%\build\windows\arm64\runner\Release\vgre_dashboard.exe" (
     set "BUNDLE_DIR=%DASHBOARD_DIR%\build\windows\arm64\runner\Release"
-    echo [INFO] Flutter build output detected at arm64 path.
+    echo [INFO] Flutter build output detected at arm64 Release path.
+    goto :bundle_dir_ok
+)
+if exist "%DASHBOARD_DIR%\build\windows\arm64\runner\Debug\vgre_dashboard.exe" (
+    set "BUNDLE_DIR=%DASHBOARD_DIR%\build\windows\arm64\runner\Debug"
+    echo [INFO] Flutter build output detected at arm64 Debug path.
 )
 :bundle_dir_ok
 
