@@ -69,18 +69,18 @@ bool ConfigurationManager::reloadIfChanged(ClusterConfiguration& config) {
 }
 
 bool ConfigurationManager::startConfigurationMonitoring(int check_interval_ms) {
-    if (monitoring_active_.load()) {
+    if (state().monitoring_active.load()) {
         VGRE_LOG_WARN("ConfigurationManager", "Configuration monitoring is already active");
         return false;
     }
     
-    monitoring_active_.store(true);
+    state().monitoring_active.store(true);
     
-    monitoring_thread_ = std::thread([check_interval_ms]() {
+    state().monitoring_thread = std::thread([check_interval_ms]() {
         VGRE_LOG_INFO("ConfigurationManager", "Started configuration monitoring (interval: " + 
                       std::to_string(check_interval_ms) + "ms)");
         
-        while (monitoring_active_.load()) {
+        while (state().monitoring_active.load()) {
             try {
                 ClusterConfiguration config = getCurrentConfiguration();
                 
@@ -90,12 +90,12 @@ bool ConfigurationManager::startConfigurationMonitoring(int check_interval_ms) {
                         VGRE_LOG_INFO("ConfigurationManager", "Configuration hot-reloaded successfully");
                     }
                 }
-                std::unique_lock<std::mutex> lock(monitoring_cv_mutex_);
-                monitoring_cv_.wait_for(lock, std::chrono::milliseconds(check_interval_ms), []() { return !monitoring_active_.load(); });
+                std::unique_lock<std::mutex> lock(state().state().monitoring_cvmutex);
+                state().monitoring_cv.wait_for(lock, std::chrono::milliseconds(check_interval_ms), []() { return !state().monitoring_active.load(); });
             } catch (const std::exception& e) {
                 VGRE_LOG_ERROR("ConfigurationManager", "Configuration monitoring error: " + std::string(e.what()));
-                std::unique_lock<std::mutex> lock(monitoring_cv_mutex_);
-                monitoring_cv_.wait_for(lock, std::chrono::milliseconds(check_interval_ms * 2), []() { return !monitoring_active_.load(); }); // Back off on error
+                std::unique_lock<std::mutex> lock(state().state().monitoring_cvmutex);
+                state().monitoring_cv.wait_for(lock, std::chrono::milliseconds(check_interval_ms * 2), []() { return !state().monitoring_active.load(); }); // Back off on error
             }
         }
         
@@ -106,11 +106,11 @@ bool ConfigurationManager::startConfigurationMonitoring(int check_interval_ms) {
 }
 
 void ConfigurationManager::stopConfigurationMonitoring() {
-    if (monitoring_active_.load()) {
-        monitoring_active_.store(false);
-        monitoring_cv_.notify_all();
-        if (monitoring_thread_.joinable()) {
-            monitoring_thread_.join();
+    if (state().monitoring_active.load()) {
+        state().monitoring_active.store(false);
+        state().monitoring_cv.notify_all();
+        if (state().monitoring_thread.joinable()) {
+            state().monitoring_thread.join();
         }
         VGRE_LOG_INFO("ConfigurationManager", "Configuration monitoring stopped");
     }

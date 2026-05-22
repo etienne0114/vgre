@@ -23,13 +23,13 @@ namespace vgre {
 namespace advanced {
 
 std::string ConfigurationManager::createConfigurationBackup(const std::string& backup_path) {
-    std::lock_guard<std::mutex> lock(config_mutex_);
+    std::lock_guard<std::mutex> lock(state().config_mutex);
     
     std::string actual_backup_path = backup_path;
     
     // Generate backup path if not provided
     if (actual_backup_path.empty()) {
-        std::string backup_dir = current_config_.backup_directory;
+        std::string backup_dir = state().current_config.backup_directory;
         if (backup_dir.empty()) {
             backup_dir = "./config_backups";
         }
@@ -51,10 +51,10 @@ std::string ConfigurationManager::createConfigurationBackup(const std::string& b
     }
     
     // Save current configuration as backup
-    if (saveToJsonFile(actual_backup_path, current_config_)) {
+    if (saveToJsonFile(actual_backup_path, state().current_config)) {
         // Clean up old backups if auto-cleanup is enabled
-        if (current_config_.enable_auto_backup && current_config_.max_backup_files > 0) {
-            cleanupOldBackups(current_config_.backup_directory, current_config_.max_backup_files);
+        if (state().current_config.enable_auto_backup && state().current_config.max_backup_files > 0) {
+            cleanupOldBackups(state().current_config.backup_directory, state().current_config.max_backup_files);
         }
         return actual_backup_path;
     }
@@ -95,8 +95,8 @@ std::vector<std::string> ConfigurationManager::listConfigurationBackups(const st
     
     std::string search_dir = backup_directory;
     if (search_dir.empty()) {
-        std::lock_guard<std::mutex> lock(config_mutex_);
-        search_dir = current_config_.backup_directory;
+        std::lock_guard<std::mutex> lock(state().config_mutex);
+        search_dir = state().current_config.backup_directory;
         if (search_dir.empty()) {
             search_dir = "./config_backups";
         }

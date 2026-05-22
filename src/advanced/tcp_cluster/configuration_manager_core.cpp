@@ -9,16 +9,14 @@
 namespace vgre {
 namespace advanced {
 
-// ── Static Member Definitions ──
-
-std::mutex ConfigurationManager::config_mutex_;
-ClusterConfiguration ConfigurationManager::current_config_;
-std::map<uint64_t, ConfigurationManager::ConfigurationChangeCallback> ConfigurationManager::change_callbacks_;
-std::atomic<uint64_t> ConfigurationManager::next_callback_id_{1};
-std::atomic<bool> ConfigurationManager::monitoring_active_{false};
-std::thread ConfigurationManager::monitoring_thread_;
-std::mutex ConfigurationManager::monitoring_cv_mutex_;
-std::condition_variable ConfigurationManager::monitoring_cv_;
+// ── State singleton ──
+// Function-local static — initialized on first call, not at DLL load time.
+// This prevents STATUS_DLL_INIT_FAILED (0xC0000142) on Windows where
+// non-trivial global constructors run under the loader lock.
+ConfigurationManager::State& ConfigurationManager::state() {
+    static State s;
+    return s;
+}
 
 // ── getEnvVar Specializations ──
 
@@ -88,7 +86,7 @@ std::string ConfigurationManager::getEnvVar<std::string>(const char* name,
 // ── Core Configuration Management ──
 
 ClusterConfiguration ConfigurationManager::getClusterConfiguration() {
-    std::lock_guard<std::mutex> lock(config_mutex_);
+    std::lock_guard<std::mutex> lock(state().config_mutex);
     ClusterConfiguration config;
 
     ConfigurationProfile profile = getConfigurationProfile();
@@ -145,12 +143,12 @@ ClusterConfiguration ConfigurationManager::getClusterConfiguration() {
     config.validate_network_connectivity = getEnvVar<bool>("VGRE_CONFIG_VALIDATE_NETWORK", config.validate_network_connectivity);
     config.validate_file_permissions = getEnvVar<bool>("VGRE_CONFIG_VALIDATE_FILES", config.validate_file_permissions);
 
-    current_config_ = config;
+    state().current_config = config;
     return config;
 }
 
 bool ConfigurationManager::updateConfiguration(const ClusterConfiguration& new_config, const std::string& source) {
-    std::lock_guard<std::mutex> lock(config_mutex_);
+    std::lock_guard<std::mutex> lock(state().config_mutex);
 
     auto validation = validateConfiguration(new_config);
     if (!validation.is_valid) {
@@ -160,14 +158,14 @@ bool ConfigurationManager::updateConfiguration(const ClusterConfiguration& new_c
         return false;
     }
 
-    if (new_config.enable_auto_backup && !current_config_.config_file_path.empty()) {
+    if (new_config.enable_auto_backup && !state().current_config.config_file_path.empty()) {
         std::string backup_path = createConfigurationBackup();
         if (!backup_path.empty())
             VGRE_LOG_INFO("ConfigurationManager", "Backup created: " + backup_path);
     }
 
-    auto change_events = compareConfigurations(current_config_, new_config, source);
-    current_config_ = new_config;
+    auto change_events = compareConfigurations(state().current_config, new_config, source);
+    state().current_config = new_config;
 
     for (const auto& event : change_events)
         notifyConfigurationChange(event);
@@ -178,27 +176,27 @@ bool ConfigurationManager::updateConfiguration(const ClusterConfiguration& new_c
 }
 
 ClusterConfiguration ConfigurationManager::getCurrentConfiguration() {
-    std::lock_guard<std::mutex> lock(config_mutex_);
-    return current_config_;
+    std::lock_guard<std::mutex> lock(state().config_mutex);
+    return state().current_config;
 }
 
 // ── Change Notification ──
 
 uint64_t ConfigurationManager::registerChangeCallback(ConfigurationChangeCallback callback) {
-    std::lock_guard<std::mutex> lock(config_mutex_);
-    uint64_t id = next_callback_id_.fetch_add(1);
-    change_callbacks_[id] = callback;
+    std::lock_guard<std::mutex> lock(state().config_mutex);
+    uint64_t id = state().next_callback_id.fetch_add(1);
+    state().change_callbacks[id] = callback;
     return id;
 }
 
 void ConfigurationManager::unregisterChangeCallback(uint64_t callback_id) {
-    std::lock_guard<std::mutex> lock(config_mutex_);
-    change_callbacks_.erase(callback_id);
+    std::lock_guard<std::mutex> lock(state().config_mutex);
+    state().change_callbacks.erase(callback_id);
 }
 
 void ConfigurationManager::notifyConfigurationChange(const ConfigurationChangeEvent& event) {
-    std::lock_guard<std::mutex> lock(config_mutex_);
-    for (const auto& [id, callback] : change_callbacks_) {
+    std::lock_guard<std::mutex> lock(state().config_mutex);
+    for (const auto& [id, callback] : state().change_callbacks) {
         try { callback(event); }
         catch (const std::exception& e) {
             VGRE_LOG_ERROR("ConfigurationManager", "Callback failed: " + std::string(e.what()));
