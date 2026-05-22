@@ -90,11 +90,11 @@ bool ConfigurationManager::startConfigurationMonitoring(int check_interval_ms) {
                         VGRE_LOG_INFO("ConfigurationManager", "Configuration hot-reloaded successfully");
                     }
                 }
-                std::unique_lock<std::mutex> lock(state().state().monitoring_cvmutex);
+                std::unique_lock<std::mutex> lock(state().monitoring_cv_mutex);
                 state().monitoring_cv.wait_for(lock, std::chrono::milliseconds(check_interval_ms), []() { return !state().monitoring_active.load(); });
             } catch (const std::exception& e) {
                 VGRE_LOG_ERROR("ConfigurationManager", "Configuration monitoring error: " + std::string(e.what()));
-                std::unique_lock<std::mutex> lock(state().state().monitoring_cvmutex);
+                std::unique_lock<std::mutex> lock(state().monitoring_cv_mutex);
                 state().monitoring_cv.wait_for(lock, std::chrono::milliseconds(check_interval_ms * 2), []() { return !state().monitoring_active.load(); }); // Back off on error
             }
         }
