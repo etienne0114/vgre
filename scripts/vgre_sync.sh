@@ -287,12 +287,49 @@ mkdir -p build && cd build
 if [[ "$(uname)" == "Linux" ]] && [[ -z "$CC" ]] && [[ -z "$CXX" ]]; then
     export CC=gcc
     export CXX=g++
-    # Clear cache to force Re-detection with correct compiler
     rm -f CMakeCache.txt
 fi
 
-cmake .. -DCMAKE_BUILD_TYPE=Release -DVGRE_ENABLE_NATIVE_SIMD="$VGRE_ENABLE_NATIVE_SIMD_FLAG"
-make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) vgre vgre_cudart vgre-worker
+# Auto-detect LLVM cmake dir (no hardcoded paths).
+# Priority: LLVM_DIR env var → llvm-config-18 → llvm-config → cmake will search itself.
+_LLVM_CMAKE_ARG=""
+if [[ -n "${LLVM_DIR:-}" ]] && [[ -f "$LLVM_DIR/LLVMConfig.cmake" ]]; then
+    _LLVM_CMAKE_ARG="-DLLVM_DIR=$LLVM_DIR"
+    echo "  [LLVM] Using LLVM_DIR from environment: $LLVM_DIR"
+else
+    for _cfg in llvm-config-18 llvm-config; do
+        if command -v "$_cfg" >/dev/null 2>&1; then
+            _ver=$("$_cfg" --version 2>/dev/null | grep -oE '^[0-9]+' || echo "0")
+            if [[ "$_ver" == "18" ]]; then
+                _cmake_dir=$("$_cfg" --cmakedir 2>/dev/null || true)
+                if [[ -n "$_cmake_dir" ]] && [[ -f "$_cmake_dir/LLVMConfig.cmake" ]]; then
+                    _LLVM_CMAKE_ARG="-DLLVM_DIR=$_cmake_dir"
+                    echo "  [LLVM] Detected via $_cfg: $_cmake_dir"
+                    break
+                fi
+            fi
+        fi
+    done
+fi
+
+# Prefer Ninja for faster incremental builds; fall back to make.
+_BUILD_CMD="make"
+_GEN_ARG=""
+if command -v ninja >/dev/null 2>&1; then
+    _BUILD_CMD="ninja"
+    _GEN_ARG="-G Ninja"
+fi
+
+cmake .. $_GEN_ARG -DCMAKE_BUILD_TYPE=Release \
+    -DVGRE_ENABLE_NATIVE_SIMD="$VGRE_ENABLE_NATIVE_SIMD_FLAG" \
+    $_LLVM_CMAKE_ARG
+
+_NCPU=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+if [[ "$_BUILD_CMD" == "ninja" ]]; then
+    ninja -j"$_NCPU" vgre vgre_cudart vgre-worker
+else
+    make -j"$_NCPU" vgre vgre_cudart vgre-worker
+fi
 
 # Verify the built library is a Release build (no ASAN symbols).
 # An ASan build is 2-3x larger and will abort on the first heap error it detects.
@@ -519,6 +556,29 @@ EOF
             ln -sf "$SCRIPT_DIR/$_script" "$BIN_DIR/${_script%.sh}"
         fi
     done
+fi
+
+# ── vgre-worker self-check ────────────────────────────────────────────────────
+# Run vgre-worker --help with proper library paths.  Exit code must be exactly 0.
+# Any non-zero code (including negative values from OS signals or DLL init failures)
+# is treated as a hard error.
+_WORKER_BIN="$INSTALL_DIR/vgre-worker"
+if [[ -x "$_WORKER_BIN" ]]; then
+    echo ""
+    echo "=== Validating vgre-worker ==="
+    if [[ "$OS" == "Darwin" ]]; then
+        DYLD_LIBRARY_PATH="$INSTALL_DIR/lib:${DYLD_LIBRARY_PATH:-}" "$_WORKER_BIN" --help >/dev/null 2>&1
+    else
+        LD_LIBRARY_PATH="$INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}" "$_WORKER_BIN" --help >/dev/null 2>&1
+    fi
+    _WORKER_RC=$?
+    if [[ $_WORKER_RC -ne 0 ]]; then
+        echo "ERROR: vgre-worker failed startup self-check (exit code $_WORKER_RC)."
+        echo "       Check that libvgre.so / libvgre.dylib is in $INSTALL_DIR/lib"
+        exit 1
+    else
+        echo "[OK] vgre-worker startup self-check passed"
+    fi
 fi
 
 echo ""

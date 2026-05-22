@@ -57,6 +57,8 @@ if not defined VCVARS64 (
     )
 )
 
+rem ── Early PATH enrichment: add known-good VGRE BuildTools only if present ──
+rem    (full auto-detection happens in the Verifying Dependencies section below)
 if exist "%TOOLS_ROOT%\cmake\bin\cmake.exe" (
     set "CMAKE_EXE=%TOOLS_ROOT%\cmake\bin\cmake.exe"
     set "PATH=%TOOLS_ROOT%\cmake\bin;%PATH%"
@@ -64,6 +66,13 @@ if exist "%TOOLS_ROOT%\cmake\bin\cmake.exe" (
 if exist "%TOOLS_ROOT%\llvm\bin\clang.exe" (
     set "CLANG_EXE=%TOOLS_ROOT%\llvm\bin\clang.exe"
     set "PATH=%TOOLS_ROOT%\llvm\bin;%PATH%"
+)
+rem ── Scoop installs (user-local, often on PATH already) ─────────────────────
+for /f "usebackq delims=" %%P in (`where cmake 2^>nul`) do (
+    if not defined CMAKE_EXE set "CMAKE_EXE=%%P"
+)
+for /f "usebackq delims=" %%P in (`where clang 2^>nul`) do (
+    if not defined CLANG_EXE set "CLANG_EXE=%%P"
 )
 
 call :find_flutter
@@ -134,49 +143,84 @@ echo         Or run: winget install Kitware.CMake
 exit /b 1
 :cmake_ok
 
-rem ── Check and auto-install LLVM ──────────────────────────────────────────
+rem ── Auto-detect LLVM_DIR (no hardcoded paths) ────────────────────────────
 echo Resolving LLVM_DIR...
+
+rem 1. User/machine environment variable (highest precedence)
 if "!LLVM_DIR!"=="" (
-    for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::GetEnvironmentVariable('LLVM_DIR','User')"`) do set "LLVM_DIR=%%I"
+    for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::GetEnvironmentVariable('LLVM_DIR','User')" 2^>nul`) do (
+        if not "%%I"=="" set "LLVM_DIR=%%I"
+    )
 )
-if "!LLVM_DIR!"=="" (
+if "!LLVM_DIR!" neq "" if exist "!LLVM_DIR!\LLVMConfig.cmake" goto :llvm_ok
+
+rem 2. llvm-config on PATH → ask it directly (works for system llvm, Scoop, Homebrew-on-WSL)
+for /f "usebackq delims=" %%I in (`llvm-config-18 --cmakedir 2^>nul`) do (
+    if exist "%%I\LLVMConfig.cmake" ( set "LLVM_DIR=%%I" & goto :llvm_ok )
+)
+for /f "usebackq delims=" %%I in (`llvm-config --cmakedir 2^>nul`) do (
+    if exist "%%I\LLVMConfig.cmake" ( set "LLVM_DIR=%%I" & goto :llvm_ok )
+)
+
+rem 3. Windows Registry — official LLVM installer writes install root here
+for /f "usebackq skip=2 tokens=2,*" %%A in (`reg query "HKLM\SOFTWARE\WOW6432Node\LLVM\LLVM" /v "" 2^>nul`) do (
+    if exist "%%B\lib\cmake\llvm\LLVMConfig.cmake" (
+        set "LLVM_DIR=%%B\lib\cmake\llvm" & goto :llvm_ok
+    )
+)
+for /f "usebackq skip=2 tokens=2,*" %%A in (`reg query "HKLM\SOFTWARE\LLVM\LLVM" /v "" 2^>nul`) do (
+    if exist "%%B\lib\cmake\llvm\LLVMConfig.cmake" (
+        set "LLVM_DIR=%%B\lib\cmake\llvm" & goto :llvm_ok
+    )
+)
+
+rem 4. Common install locations (winget default, scoop, chocolatey)
+for %%D in (
+    "%ProgramFiles%\LLVM\lib\cmake\llvm"
+    "%ProgramFiles(x86)%\LLVM\lib\cmake\llvm"
+    "%USERPROFILE%\scoop\apps\llvm\current\lib\cmake\llvm"
+    "%USERPROFILE%\AppData\Local\Programs\LLVM\lib\cmake\llvm"
+    "C:\LLVM\lib\cmake\llvm"
+    "%LOCALAPPDATA%\VGRE\BuildTools\llvm\lib\cmake\llvm"
+) do (
+    if exist "%%~D\LLVMConfig.cmake" ( set "LLVM_DIR=%%~D" & goto :llvm_ok )
+)
+
+rem 5. Last resort: attempt auto-install
+echo [MISSING] LLVM dev libraries ^(LLVM 18 required^) - attempting auto-install...
+if "%HAS_WINGET%"=="1" (
+    winget install --id LLVM.LLVM --version 18.1.8 --silent ^
+        --accept-package-agreements --accept-source-agreements >nul 2>&1
+    if not errorlevel 1 (
+        set "LLVM_DIR=%ProgramFiles%\LLVM\lib\cmake\llvm"
+        if exist "!LLVM_DIR!\LLVMConfig.cmake" goto :llvm_ok
+    )
+)
+if "%HAS_CHOCO%"=="1" (
+    choco install llvm --confirm >nul 2>&1
+    if not errorlevel 1 (
+        set "LLVM_DIR=%ProgramFiles%\LLVM\lib\cmake\llvm"
+        if exist "!LLVM_DIR!\LLVMConfig.cmake" goto :llvm_ok
+    )
+)
+if exist "%SCRIPT_DIR%Install-BuildTools.ps1" (
+    echo [INFO] Running Install-BuildTools.ps1 to download LLVM...
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Install-BuildTools.ps1" -LLVM
     set "LLVM_DIR=%LOCALAPPDATA%\VGRE\BuildTools\llvm\lib\cmake\llvm"
+    if exist "!LLVM_DIR!\LLVMConfig.cmake" goto :llvm_ok
 )
-if not exist "!LLVM_DIR!\LLVMConfig.cmake" (
-    echo [MISSING] LLVM dev libraries - attempting auto-install...
-    if "%HAS_WINGET%"=="1" (
-        winget install --id LLVM.LLVM --version 18.1.8 --silent ^
-            --accept-package-agreements --accept-source-agreements
-        if not errorlevel 1 (
-            set "LLVM_DIR=C:\Program Files\LLVM\lib\cmake\llvm"
-            echo [OK] LLVM installed via winget
-            goto :llvm_ok
-        )
-    )
-    if "%HAS_CHOCO%"=="1" (
-        choco install llvm --confirm
-        if not errorlevel 1 (
-            set "LLVM_DIR=C:\Program Files\LLVM\lib\cmake\llvm"
-            echo [OK] LLVM installed via chocolatey
-            goto :llvm_ok
-        )
-    )
-    rem Fall back to Install-BuildTools.ps1 in the repo
-    if exist "%SCRIPT_DIR%Install-BuildTools.ps1" (
-        echo [INFO] Running Install-BuildTools.ps1 to download LLVM...
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Install-BuildTools.ps1" -LLVM
-        if not errorlevel 1 (
-            set "LLVM_DIR=%LOCALAPPDATA%\VGRE\BuildTools\llvm\lib\cmake\llvm"
-            goto :llvm_ok
-        )
-    )
-    echo [ERROR] LLVM not found and auto-install failed.
-    echo         Run:  powershell -File scripts\Install-BuildTools.ps1
-    echo         Or:   winget install LLVM.LLVM
-    exit /b 1
-)
+echo [ERROR] LLVM 18 not found. Install with one of:
+echo         winget install LLVM.LLVM --version 18.1.8
+echo         choco install llvm
+echo         powershell -File scripts\Install-BuildTools.ps1
+exit /b 1
+
 :llvm_ok
 echo [OK] LLVM at !LLVM_DIR!
+rem ── Derive LLVM bin dir for runtime DLL copying (no hardcoded path) ─────────
+rem    LLVM_DIR is   <root>/lib/cmake/llvm  →  go up 3 levels to get <root>
+for %%D in ("!LLVM_DIR!\..\..\..") do set "_LLVM_ROOT=%%~fD"
+set "_LLVM_BIN=!_LLVM_ROOT!\bin"
 
 rem ── Check Visual Studio Build Tools ──────────────────────────────────────
 if defined VCVARS64 (
@@ -613,22 +657,23 @@ if not exist "%INSTALL_DIR%\lib\vgre.dll" (
 )
 
 echo.
-echo === Attempting to copy LLVM/OpenMP Runtime Dependencies ===
-rem Copy ALL LLVM DLLs first so libomp.dll is present before vgre-worker runs.
-if exist "%TOOLS_ROOT%\llvm\bin\*.dll" (
-    echo Copying LLVM support libraries ^(including OpenMP runtime^)...
-    for %%F in ("%TOOLS_ROOT%\llvm\bin\*.dll") do (
+echo === Copying LLVM/OpenMP Runtime Dependencies ===
+rem _LLVM_BIN is derived from LLVM_DIR (set in the auto-detection section above).
+rem No hardcoded TOOLS_ROOT path — follows wherever LLVM was actually installed.
+if exist "!_LLVM_BIN!\*.dll" (
+    echo Copying LLVM runtime DLLs from !_LLVM_BIN!...
+    for %%F in ("!_LLVM_BIN!\*.dll") do (
         copy /Y "%%F" "%INSTALL_DIR%\lib\" >nul 2>&1
         copy /Y "%%F" "%INSTALL_DIR%\" >nul 2>&1
     )
     if exist "%INSTALL_DIR%\libomp.dll" (
         echo [OK] libomp.dll deployed
     ) else (
-        echo [WARN] libomp.dll not found in %TOOLS_ROOT%\llvm\bin — vgre-worker may crash.
-        echo        Rebuild LLVM with OpenMP enabled or install libomp.dll manually.
+        echo [WARN] libomp.dll not found in !_LLVM_BIN! — vgre-worker may crash.
+        echo        Ensure LLVM was built with OpenMP support.
     )
 ) else (
-    echo [WARN] No LLVM DLLs found in %TOOLS_ROOT%\llvm\bin
+    echo [WARN] No LLVM DLLs found in !_LLVM_BIN!
     echo        libomp.dll is required; vgre-worker.exe may crash on startup.
     echo        Run:  powershell -File scripts\Install-BuildTools.ps1
 )
@@ -643,12 +688,11 @@ if errorlevel 1 (
 
 echo.
 echo === Configuring vgre-worker PATH ===
-rem Ensure vgre-worker can find its DLL dependencies
+rem Embed the actual detected LLVM bin dir so the wrapper works on any machine.
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 echo @echo off > "%INSTALL_DIR%\vgre-worker.cmd"
 echo setlocal EnableExtensions EnableDelayedExpansion >> "%INSTALL_DIR%\vgre-worker.cmd"
-echo set "TOOLS_ROOT=%%LOCALAPPDATA%%\VGRE\BuildTools" >> "%INSTALL_DIR%\vgre-worker.cmd"
-echo set "PATH=%%~dp0lib;%%~dp0;%%TOOLS_ROOT%%\llvm\bin;%%PATH%%" >> "%INSTALL_DIR%\vgre-worker.cmd"
+echo set "PATH=%%~dp0lib;%%~dp0;!_LLVM_BIN!;%%PATH%%" >> "%INSTALL_DIR%\vgre-worker.cmd"
 echo "%%~dp0vgre-worker.exe" %%* >> "%INSTALL_DIR%\vgre-worker.cmd"
 
 echo.
@@ -660,10 +704,9 @@ set "LAUNCHER_PATH=%INSTALL_DIR%\Launch-VGRE-Dashboard.cmd"
     echo @echo off
     echo setlocal EnableExtensions EnableDelayedExpansion
     echo set "APP_DIR=%%~dp0"
-    echo set "TOOLS_ROOT=%%LOCALAPPDATA%%\VGRE\BuildTools"
     echo.
-    echo rem -- Ensure LLVM, OpenMP, and VGRE libs are found first --
-    echo set "PATH=%%APP_DIR%%lib;%%APP_DIR%%;%%TOOLS_ROOT%%\llvm\bin;%%TOOLS_ROOT%%\llvm\lib;%%PATH%%"
+    echo rem -- Ensure VGRE libs are found first; LLVM bin recorded at build time --
+    echo set "PATH=%%APP_DIR%%lib;%%APP_DIR%%;!_LLVM_BIN!;%%PATH%%"
     echo.
     echo rem -- Load cluster auth token if not already set --
     echo if not defined VGRE_TCP_AUTH_TOKEN_FILE ^(
@@ -706,11 +749,21 @@ if not exist "%INSTALL_DIR%\vgre-worker.exe" (
 ) else (
     echo [OK] vgre-worker.exe verified
 )
-set "PATH=%INSTALL_DIR%\lib;%INSTALL_DIR%;%TOOLS_ROOT%\llvm\bin;%PATH%"
+rem Add INSTALL_DIR and detected LLVM bin to PATH so vgre.dll and libomp.dll
+rem are found by Windows loader during the self-check (no hardcoded TOOLS_ROOT).
+set "PATH=%INSTALL_DIR%\lib;%INSTALL_DIR%;!_LLVM_BIN!;%PATH%"
 "%INSTALL_DIR%\vgre-worker.exe" --help >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: vgre-worker failed startup self-check.
-    echo ERROR: see docs/TROUBLESHOOTING_WINDOWS.md
+rem  IMPORTANT: use %ERRORLEVEL% neq 0, NOT "if errorlevel 1".
+rem  STATUS_DLL_INIT_FAILED = -1073741502 and STATUS_ACCESS_VIOLATION = -1073741819
+rem  are both NEGATIVE — "if errorlevel 1" only triggers for exit codes >= 1 and
+rem  silently misreports a crash as "passed".
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: vgre-worker failed startup self-check ^(exit code %ERRORLEVEL%^).
+    echo        Possible causes:
+    echo          - STATUS_DLL_INIT_FAILED ^(0xC0000142^): DLL global constructor fault
+    echo          - STATUS_ACCESS_VIOLATION ^(0xC0000005^): invalid memory access
+    echo          - Missing dependency: check %INSTALL_DIR%\lib for libomp.dll
+    echo        See docs/TROUBLESHOOTING_WINDOWS.md for full diagnostics.
     exit /b 1
 ) else (
     echo [OK] vgre-worker startup self-check passed

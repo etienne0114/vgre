@@ -149,14 +149,22 @@ public:
     static std::string generateHtmlDocumentation(const ClusterConfiguration& config);
 
 private:
-    static std::mutex config_mutex_;
-    static ClusterConfiguration current_config_;
-    static std::map<uint64_t, ConfigurationChangeCallback> change_callbacks_;
-    static std::atomic<uint64_t> next_callback_id_;
-    static std::atomic<bool> monitoring_active_;
-    static std::thread monitoring_thread_;
-    static std::mutex monitoring_cv_mutex_;
-    static std::condition_variable monitoring_cv_;
+    // All mutable state lives in a Meyers-singleton struct so it initializes
+    // on first use rather than during DLL_PROCESS_ATTACH on Windows.
+    // File-scope static class-member definitions with non-trivial constructors
+    // (std::string, std::map, std::thread…) can raise STATUS_DLL_INIT_FAILED
+    // (0xC0000142) on Windows when the DLL loader runs them under the loader lock.
+    struct State {
+        std::mutex              config_mutex;
+        ClusterConfiguration   current_config;
+        std::map<uint64_t, ConfigurationChangeCallback> change_callbacks;
+        std::atomic<uint64_t>  next_callback_id{1};
+        std::atomic<bool>      monitoring_active{false};
+        std::thread            monitoring_thread;
+        std::mutex             monitoring_cv_mutex;
+        std::condition_variable monitoring_cv;
+    };
+    static State& state();
 
     static void notifyConfigurationChange(const ConfigurationChangeEvent& event);
     static std::vector<ConfigurationChangeEvent> compareConfigurations(const ClusterConfiguration& old_cfg, const ClusterConfiguration& new_cfg, const std::string& source = "api");
