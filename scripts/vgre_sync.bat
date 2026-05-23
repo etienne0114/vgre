@@ -682,14 +682,20 @@ if not "!SKIP_DASHBOARD!"=="1" (
     )
     rem Delete the old exe first to release any stale handle
     if exist "%INSTALL_DIR%\vgre_dashboard.exe" del /f /q "%INSTALL_DIR%\vgre_dashboard.exe" >nul 2>&1
-    rem Copy root-level files (exe + flutter_windows.dll + other DLLs).
-    rem xcopy /Y /I handles paths with spaces and expands wildcards reliably.
-    rem The quoted-wildcard form "path\*.*" in a FOR loop does NOT expand on all
-    rem Windows versions and silently skips files - use xcopy instead.
-    xcopy "!BUNDLE_DIR!\*" "%INSTALL_DIR%\" /Y /I /Q >nul 2>&1
-    rem Copy data/ subdirectory recursively (flutter_assets, fonts, shaders, etc.)
-    if exist "!BUNDLE_DIR!\data" (
-        xcopy "!BUNDLE_DIR!\data" "%INSTALL_DIR%\data\" /Y /I /Q /E >nul 2>&1
+    rem Copy root-level files (exe + DLLs) individually - copy /Y never blocks
+    for %%F in ("!BUNDLE_DIR!\*.*") do copy /Y "%%F" "%INSTALL_DIR%\" >nul 2>&1
+    rem Explicitly copy flutter_windows.dll by name so it is guaranteed to be present
+    rem even when the wildcard form above is incomplete on some cmd.exe versions.
+    if exist "!BUNDLE_DIR!\flutter_windows.dll" (
+        copy /Y "!BUNDLE_DIR!\flutter_windows.dll" "%INSTALL_DIR%\" >nul 2>&1
+    )
+    rem Copy data directory files
+    if exist "!BUNDLE_DIR!\data\*.*" (
+        for %%F in ("!BUNDLE_DIR!\data\*.*") do copy /Y "%%F" "%INSTALL_DIR%\data\" >nul 2>&1
+    )
+    rem Copy flutter_assets recursively using a subroutine (no xcopy/robocopy)
+    if exist "!BUNDLE_DIR!\data\flutter_assets" (
+        call :copy_dir "!BUNDLE_DIR!\data\flutter_assets" "%INSTALL_DIR%\data\flutter_assets"
     )
     if not exist "%INSTALL_DIR%\vgre_dashboard.exe" (
         echo ERROR: vgre_dashboard.exe missing from %INSTALL_DIR% after copy.
@@ -697,8 +703,8 @@ if not "!SKIP_DASHBOARD!"=="1" (
     )
     if not exist "%INSTALL_DIR%\flutter_windows.dll" (
         echo ERROR: flutter_windows.dll missing from %INSTALL_DIR% after copy.
-        echo        Expected source: !BUNDLE_DIR!\flutter_windows.dll
-        echo        The dashboard will fail with "flutter_windows.dll was not found".
+        echo        Source: !BUNDLE_DIR!\flutter_windows.dll
+        echo        Dashboard will fail at startup with "flutter_windows.dll was not found".
         exit /b 1
     )
     echo [OK] Dashboard deployed to %INSTALL_DIR%
