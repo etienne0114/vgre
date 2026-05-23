@@ -357,7 +357,9 @@ switch ($mode) {
 
         if (Test-Path $dashboardExe) {
             Write-Host "Starting dashboard..." -ForegroundColor Green
-            Start-Process -FilePath $dashboardExe
+            # WorkingDirectory must be $InstallDir so Windows finds flutter_windows.dll
+            # alongside the exe (DLL search order: exe dir, then system, then PATH).
+            Start-Process -FilePath $dashboardExe -WorkingDirectory $InstallDir
         } else {
             Write-Host "[WARN] vgre_dashboard.exe not found - running headless (no UI)." -ForegroundColor Yellow
             Write-Host "       Re-run .\scripts\vgre_sync.bat to build and deploy the dashboard." -ForegroundColor Yellow
@@ -423,7 +425,7 @@ switch ($mode) {
         $env:VGRE_PORT = $port
         $dashProc = $null
         if (Test-Path $dashboardExe) {
-            $dashProc = Start-Process -FilePath $dashboardExe -PassThru
+            $dashProc = Start-Process -FilePath $dashboardExe -WorkingDirectory $InstallDir -PassThru
         }
 
         Write-Host "Press Ctrl+C to stop." -ForegroundColor Cyan
