@@ -169,6 +169,15 @@ class _VgreBootstrapAppState extends State<VgreBootstrapApp> {
 
     // 6. Windows %LOCALAPPDATA%\VGRE
     if (Platform.isWindows) {
+      final String? vgreInstallDir = Platform.environment['VGRE_INSTALL_DIR'];
+      if (vgreInstallDir != null && vgreInstallDir.isNotEmpty) {
+        for (final p in [
+          '$vgreInstallDir\\lib\\$libName',
+          '$vgreInstallDir\\$libName',
+        ]) {
+          if (File(p).existsSync()) return p;
+        }
+      }
       final appData = Platform.environment['LOCALAPPDATA'] ?? '';
       if (appData.isNotEmpty) {
         for (final p in [

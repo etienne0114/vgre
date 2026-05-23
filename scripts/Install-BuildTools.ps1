@@ -3,7 +3,13 @@ $ErrorActionPreference = "Stop"
 Write-Host "=== VGRE Build Tools Installation ===" -ForegroundColor Cyan
 Write-Host "This script installs build tools without requiring Chocolatey." -ForegroundColor Yellow
 
-$installDir = Join-Path $env:LOCALAPPDATA "VGRE\BuildTools"
+$installDir = if ($env:VGRE_TOOLS_ROOT) {
+    $env:VGRE_TOOLS_ROOT
+} elseif ($env:VGRE_INSTALL_DIR) {
+    Join-Path $env:VGRE_INSTALL_DIR "BuildTools"
+} else {
+    Join-Path $env:LOCALAPPDATA "VGRE\BuildTools"
+}
 if (-not (Test-Path $installDir)) {
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
     Write-Host "Created directory: $installDir" -ForegroundColor Green
