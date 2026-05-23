@@ -5,9 +5,11 @@ set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "PROJECT_ROOT=%%~fI"
 set "BUILD_DIR=%PROJECT_ROOT%\build"
 set "DASHBOARD_DIR=%PROJECT_ROOT%\vgre_dashboard"
-set "INSTALL_DIR=%LOCALAPPDATA%\VGRE"
+if not defined VGRE_INSTALL_DIR set "VGRE_INSTALL_DIR=%LOCALAPPDATA%\VGRE"
+set "INSTALL_DIR=%VGRE_INSTALL_DIR%"
 set "BUNDLE_DIR=%DASHBOARD_DIR%\build\windows\x64\runner\Release"
-set "TOOLS_ROOT=%LOCALAPPDATA%\VGRE\BuildTools"
+if not defined VGRE_TOOLS_ROOT set "VGRE_TOOLS_ROOT=%INSTALL_DIR%\BuildTools"
+set "TOOLS_ROOT=%VGRE_TOOLS_ROOT%"
 set "CMAKE_EXE=cmake"
 set "CLANG_EXE=clang"
 set "FLUTTER_CMD=flutter"
@@ -16,7 +18,7 @@ set "VCVARS64="
 set "VS_YEAR="
 
 rem -- Cache (x86) path prefix at top level so the literal ')' in "(x86)" never
-rem    appears inside a parenthesised block — the batch parser counts parens even
+rem    appears inside a parenthesised block - the batch parser counts parens even
 rem    inside quoted strings and misidentifies the close-paren as a block end.
 set "_PF86=%ProgramFiles(x86)%"
 set "_PF64=%ProgramFiles%"
@@ -57,7 +59,7 @@ if not defined VCVARS64 (
     )
 )
 
-rem ── Early PATH enrichment: add known-good VGRE BuildTools only if present ──
+rem -- Early PATH enrichment: add known-good VGRE BuildTools only if present --
 rem    (full auto-detection happens in the Verifying Dependencies section below)
 if exist "%TOOLS_ROOT%\cmake\bin\cmake.exe" (
     set "CMAKE_EXE=%TOOLS_ROOT%\cmake\bin\cmake.exe"
@@ -67,7 +69,7 @@ if exist "%TOOLS_ROOT%\llvm\bin\clang.exe" (
     set "CLANG_EXE=%TOOLS_ROOT%\llvm\bin\clang.exe"
     set "PATH=%TOOLS_ROOT%\llvm\bin;%PATH%"
 )
-rem ── Scoop installs (user-local, often on PATH already) ─────────────────────
+rem -- Scoop installs (user-local, often on PATH already) ---------------------
 for /f "usebackq delims=" %%P in (`where cmake 2^>nul`) do (
     if not defined CMAKE_EXE set "CMAKE_EXE=%%P"
 )
@@ -103,15 +105,15 @@ if defined VGRE_TCP_AUTH_TOKEN_FILE (
 echo.
 echo === Verifying Dependencies ===
 
-rem ── Helper: detect winget (Windows Package Manager) ──────────────────────
+rem -- Helper: detect winget (Windows Package Manager) ----------------------
 set "HAS_WINGET=0"
 winget --version >nul 2>&1 && set "HAS_WINGET=1"
 
-rem ── Helper: detect chocolatey ─────────────────────────────────────────────
+rem -- Helper: detect chocolatey ---------------------------------------------
 set "HAS_CHOCO=0"
 choco --version >nul 2>&1 && set "HAS_CHOCO=1"
 
-rem ── Check and auto-install CMake ──────────────────────────────────────────
+rem -- Check and auto-install CMake ------------------------------------------
 if exist "%CMAKE_EXE%" (
     echo [OK] cmake (explicit path: %CMAKE_EXE%)
     goto :cmake_ok
@@ -125,8 +127,26 @@ echo [MISSING] cmake - attempting auto-install...
 if "%HAS_WINGET%"=="1" (
     winget install --id Kitware.CMake --silent --accept-package-agreements --accept-source-agreements
     if not errorlevel 1 (
-        set "PATH=C:\Program Files\CMake\bin;!PATH!"
-        echo [OK] cmake installed via winget
+        set "_CMAKE_INSTALL_DIR="
+        for /f "usebackq skip=2 tokens=2,*" %%A in (`reg query "HKLM\SOFTWARE\Kitware\CMake" /v "InstallLocation" 2^>nul`) do set "_CMAKE_INSTALL_DIR=%%B"
+        if not defined _CMAKE_INSTALL_DIR for /f "usebackq skip=2 tokens=2,*" %%A in (`reg query "HKCU\SOFTWARE\Kitware\CMake" /v "InstallLocation" 2^>nul`) do set "_CMAKE_INSTALL_DIR=%%B"
+        if defined _CMAKE_INSTALL_DIR (
+            set "PATH=!_CMAKE_INSTALL_DIR!\bin;!PATH!"
+            set "CMAKE_EXE=!_CMAKE_INSTALL_DIR!\bin\cmake.exe"
+            echo [OK] cmake installed via winget at !_CMAKE_INSTALL_DIR!
+        ) else (
+            if exist "%ProgramFiles%\CMake\bin\cmake.exe" (
+                set "PATH=%ProgramFiles%\CMake\bin;!PATH!"
+                set "CMAKE_EXE=%ProgramFiles%\CMake\bin\cmake.exe"
+                echo [OK] cmake installed via winget at %ProgramFiles%\CMake
+            ) else if exist "%ProgramFiles(x86)%\CMake\bin\cmake.exe" (
+                set "PATH=%ProgramFiles(x86)%\CMake\bin;!PATH!"
+                set "CMAKE_EXE=%ProgramFiles(x86)%\CMake\bin\cmake.exe"
+                echo [OK] cmake installed via winget at %ProgramFiles(x86)%\CMake
+            ) else (
+                echo [WARN] cmake installed via winget but install location could not be detected.
+            )
+        )
         goto :cmake_ok
     )
 )
@@ -143,7 +163,7 @@ echo         Or run: winget install Kitware.CMake
 exit /b 1
 :cmake_ok
 
-rem ── Auto-detect LLVM_DIR (no hardcoded paths) ────────────────────────────
+rem -- Auto-detect LLVM_DIR (no hardcoded paths) ----------------------------
 echo Resolving LLVM_DIR...
 
 rem 1. User/machine environment variable (highest precedence)
@@ -154,7 +174,17 @@ if "!LLVM_DIR!"=="" (
 )
 if "!LLVM_DIR!" neq "" if exist "!LLVM_DIR!\LLVMConfig.cmake" goto :llvm_ok
 
-rem 2. llvm-config on PATH → ask it directly (works for system llvm, Scoop, Homebrew-on-WSL)
+rem 2. Derived from CLANG_EXE if clang is on PATH
+if defined CLANG_EXE (
+    for %%I in ("!CLANG_EXE!") do set "_clang_bin_dir=%%~dpI"
+    for %%I in ("!_clang_bin_dir!..") do set "_clang_root=%%~fI"
+    if exist "!_clang_root!\lib\cmake\llvm\LLVMConfig.cmake" (
+        set "LLVM_DIR=!_clang_root!\lib\cmake\llvm"
+        goto :llvm_ok
+    )
+)
+
+rem 3. llvm-config on PATH -> ask it directly (works for system llvm, Scoop, Homebrew-on-WSL)
 for /f "usebackq delims=" %%I in (`llvm-config-18 --cmakedir 2^>nul`) do (
     if exist "%%I\LLVMConfig.cmake" ( set "LLVM_DIR=%%I" & goto :llvm_ok )
 )
@@ -162,7 +192,7 @@ for /f "usebackq delims=" %%I in (`llvm-config --cmakedir 2^>nul`) do (
     if exist "%%I\LLVMConfig.cmake" ( set "LLVM_DIR=%%I" & goto :llvm_ok )
 )
 
-rem 3. Windows Registry — official LLVM installer writes install root here
+rem 4. Windows Registry - official LLVM installer writes install root here
 for /f "usebackq skip=2 tokens=2,*" %%A in (`reg query "HKLM\SOFTWARE\WOW6432Node\LLVM\LLVM" /v "" 2^>nul`) do (
     if exist "%%B\lib\cmake\llvm\LLVMConfig.cmake" (
         set "LLVM_DIR=%%B\lib\cmake\llvm" & goto :llvm_ok
@@ -173,20 +203,46 @@ for /f "usebackq skip=2 tokens=2,*" %%A in (`reg query "HKLM\SOFTWARE\LLVM\LLVM"
         set "LLVM_DIR=%%B\lib\cmake\llvm" & goto :llvm_ok
     )
 )
+for /f "usebackq skip=2 tokens=2,*" %%A in (`reg query "HKCU\SOFTWARE\WOW6432Node\LLVM\LLVM" /v "" 2^>nul`) do (
+    if exist "%%B\lib\cmake\llvm\LLVMConfig.cmake" (
+        set "LLVM_DIR=%%B\lib\cmake\llvm" & goto :llvm_ok
+    )
+)
+for /f "usebackq skip=2 tokens=2,*" %%A in (`reg query "HKCU\SOFTWARE\LLVM\LLVM" /v "" 2^>nul`) do (
+    if exist "%%B\lib\cmake\llvm\LLVMConfig.cmake" (
+        set "LLVM_DIR=%%B\lib\cmake\llvm" & goto :llvm_ok
+    )
+)
 
-rem 4. Common install locations (winget default, scoop, chocolatey)
+rem 5. Visual Studio LLVM component (via vswhere)
+if exist "!_VSWHERE!" (
+    for /f "usebackq delims=" %%I in (`"!_VSWHERE!" -latest -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang -find VC\Tools\Llvm 2^>nul`) do (
+        if exist "%%I\lib\cmake\llvm\LLVMConfig.cmake" (
+            set "LLVM_DIR=%%I\lib\cmake\llvm" & goto :llvm_ok
+        )
+    )
+    rem More general search for LLVMConfig.cmake under Visual Studio installations
+    for /f "usebackq delims=" %%I in (`"!_VSWHERE!" -latest -find **\LLVMConfig.cmake 2^>nul`) do (
+        for %%D in ("%%~dpI.") do (
+            if exist "%%~fD\LLVMConfig.cmake" (
+                set "LLVM_DIR=%%~fD" & goto :llvm_ok
+            )
+        )
+    )
+)
+
+rem 6. Common install locations (winget default, scoop, chocolatey)
 for %%D in (
     "%ProgramFiles%\LLVM\lib\cmake\llvm"
     "%ProgramFiles(x86)%\LLVM\lib\cmake\llvm"
     "%USERPROFILE%\scoop\apps\llvm\current\lib\cmake\llvm"
     "%USERPROFILE%\AppData\Local\Programs\LLVM\lib\cmake\llvm"
-    "C:\LLVM\lib\cmake\llvm"
-    "%LOCALAPPDATA%\VGRE\BuildTools\llvm\lib\cmake\llvm"
+    "!TOOLS_ROOT!\llvm\lib\cmake\llvm"
 ) do (
     if exist "%%~D\LLVMConfig.cmake" ( set "LLVM_DIR=%%~D" & goto :llvm_ok )
 )
 
-rem 5. Last resort: attempt auto-install
+rem 7. Last resort: attempt auto-install
 echo [MISSING] LLVM dev libraries ^(LLVM 18 required^) - attempting auto-install...
 if "%HAS_WINGET%"=="1" (
     winget install --id LLVM.LLVM --version 18.1.8 --silent ^
@@ -205,8 +261,10 @@ if "%HAS_CHOCO%"=="1" (
 )
 if exist "%SCRIPT_DIR%Install-BuildTools.ps1" (
     echo [INFO] Running Install-BuildTools.ps1 to download LLVM...
+    set "VGRE_INSTALL_DIR=%INSTALL_DIR%"
+    set "VGRE_TOOLS_ROOT=%TOOLS_ROOT%"
     powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Install-BuildTools.ps1" -LLVM
-    set "LLVM_DIR=%LOCALAPPDATA%\VGRE\BuildTools\llvm\lib\cmake\llvm"
+    set "LLVM_DIR=!TOOLS_ROOT!\llvm\lib\cmake\llvm"
     if exist "!LLVM_DIR!\LLVMConfig.cmake" goto :llvm_ok
 )
 echo [ERROR] LLVM 18 not found. Install with one of:
@@ -217,19 +275,31 @@ exit /b 1
 
 :llvm_ok
 echo [OK] LLVM at !LLVM_DIR!
-rem ── Derive LLVM bin dir for runtime DLL copying (no hardcoded path) ─────────
-rem    LLVM_DIR is   <root>/lib/cmake/llvm  →  go up 3 levels to get <root>
+rem -- Derive LLVM bin dir for runtime DLL copying (no hardcoded path) ---------
+rem    LLVM_DIR is   <root>/lib/cmake/llvm  ->  go up 3 levels to get <root>
 for %%D in ("!LLVM_DIR!\..\..\..") do set "_LLVM_ROOT=%%~fD"
 set "_LLVM_BIN=!_LLVM_ROOT!\bin"
+if not exist "!_LLVM_BIN!\clang.exe" (
+    rem fallback: search for bin folder from LLVM_DIR up to 4 levels
+    for %%D in ("!LLVM_DIR!\..") do (
+        if exist "%%~fD\bin\clang.exe" set "_LLVM_BIN=%%~fD\bin"
+    )
+    for %%D in ("!LLVM_DIR!\..\..") do (
+        if exist "%%~fD\bin\clang.exe" set "_LLVM_BIN=%%~fD\bin"
+    )
+    for %%D in ("!LLVM_DIR!\..\..\..") do (
+        if exist "%%~fD\bin\clang.exe" set "_LLVM_BIN=%%~fD\bin"
+    )
+)
 
-rem ── Check Visual Studio Build Tools ──────────────────────────────────────
+rem -- Check Visual Studio Build Tools --------------------------------------
 if defined VCVARS64 (
     echo [OK] Visual Studio Build Tools at !VCVARS64!
 ) else (
     call :install_vs_buildtools
 )
 
-rem ── Check and auto-install Flutter ─────────────────────────────────────────
+rem -- Check and auto-install Flutter -----------------------------------------
 if exist "%FLUTTER_CMD%" (
     echo [OK] Flutter (explicit path: %FLUTTER_CMD%)
     goto :flutter_ok
@@ -309,12 +379,12 @@ echo.
 echo === Tool Versions ===
 echo cmake: %CMAKE_EXE%
 echo clang: %CLANG_EXE%
-echo flutter: %FLUTTER_CMD%
+echo flutter: !FLUTTER_CMD!
 echo LLVM_DIR: !LLVM_DIR!
 
 echo.
 echo === Installing VGRE CLI Tools (vgre-token, vgre-start) ===
-rem Install CLI tools NOW — before the build — so they are available even if
+rem Install CLI tools NOW - before the build - so they are available even if
 rem the native build fails.  Also updates the current session PATH immediately
 rem so the user does not need to restart their terminal.
 set "TOKEN_SCRIPT_DIR=%INSTALL_DIR%\scripts"
@@ -335,7 +405,7 @@ rem Update User PATH (persistent across new terminals)
 for /f "usebackq" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$d='%TOKEN_SCRIPT_DIR%';$d2='%INSTALL_DIR%';$p=[Environment]::GetEnvironmentVariable('Path','User');$changed=$false;foreach($dir in @($d2,$d)){if($p -notlike '*'+$dir+'*'){$p+=';'+$dir;$changed=$true}};if($changed){[Environment]::SetEnvironmentVariable('Path',$p,'User');'CHANGED'}else{'EXISTS'}"`) do set "_CLI_PATH_STATUS=%%I"
 if "!_CLI_PATH_STATUS!"=="CHANGED" echo [OK] Added CLI tools to User PATH.
 
-rem Update current session PATH too — vgre-token works WITHOUT restarting terminal
+rem Update current session PATH too - vgre-token works WITHOUT restarting terminal
 if "!PATH!" neq "!PATH:%TOKEN_SCRIPT_DIR%=!" goto :cli_path_ok
 set "PATH=%TOKEN_SCRIPT_DIR%;%INSTALL_DIR%;!PATH!"
 :cli_path_ok
@@ -344,10 +414,9 @@ echo        Run: vgre-token generate
 
 echo.
 echo === Pulling Latest Source ===
-git -C "%PROJECT_ROOT%" pull --rebase --autostash 2>&1
+git -C "%PROJECT_ROOT%" pull --rebase --autostash >nul 2>&1
 if errorlevel 1 (
     echo [WARN] git pull failed - building from current local source.
-    echo        If you have local changes or no network, this is expected.
 ) else (
     echo [OK] Source is up to date.
 )
@@ -362,10 +431,14 @@ set "NINJA_FOUND=0"
 where ninja >nul 2>&1
 if not errorlevel 1 set "NINJA_FOUND=1"
 if "!NINJA_FOUND!"=="0" (
-    if exist "%TOOLS_ROOT%\llvm\bin\ninja.exe" (
+    if exist "!_LLVM_BIN!\ninja.exe" (
         set "NINJA_FOUND=1"
-        set "PATH=%TOOLS_ROOT%\llvm\bin;!PATH!"
-        echo [INFO] Found ninja in LLVM build tools — added to PATH
+        set "PATH=!_LLVM_BIN!;!PATH!"
+        echo [INFO] Found ninja in LLVM build tools - added to PATH
+    ) else if exist "!TOOLS_ROOT!\llvm\bin\ninja.exe" (
+        set "NINJA_FOUND=1"
+        set "PATH=!TOOLS_ROOT!\llvm\bin;!PATH!"
+        echo [INFO] Found ninja in LLVM build tools - added to PATH
     )
 )
 
@@ -379,7 +452,7 @@ set "CMAKE_GENERATOR=Ninja"
 set "CMAKE_ARCH_FLAG="
 set "CMAKE_COMPILER_FLAGS="
 if "!NINJA_FOUND!"=="0" (
-    rem Ninja not available — try VS MSBuild or NMake
+    rem Ninja not available - try VS MSBuild or NMake
     if "!VS_YEAR!"=="2025" ( set "CMAKE_GENERATOR=Visual Studio 18 2025" & set "CMAKE_ARCH_FLAG=-A !_CMAKE_VSARCH!" )
     if "!VS_YEAR!"=="2022" ( set "CMAKE_GENERATOR=Visual Studio 17 2022" & set "CMAKE_ARCH_FLAG=-A !_CMAKE_VSARCH!" )
     if "!VS_YEAR!"=="2019" ( set "CMAKE_GENERATOR=Visual Studio 16 2019" & set "CMAKE_ARCH_FLAG=-A !_CMAKE_VSARCH!" )
@@ -400,7 +473,7 @@ if exist "%BUILD_DIR%\CMakeCache.txt" (
     for /f "usebackq tokens=2 delims==" %%G in (`findstr /B /C:"CMAKE_GENERATOR:INTERNAL=" "%BUILD_DIR%\CMakeCache.txt" 2^>nul`) do set "_cached_gen=%%G"
     if defined _cached_gen (
         if not "!_cached_gen!"=="!CMAKE_GENERATOR!" (
-            echo [INFO] Generator changed from "!_cached_gen!" to "!CMAKE_GENERATOR!" — cleaning stale build cache.
+            echo [INFO] Generator changed from "!_cached_gen!" to "!CMAKE_GENERATOR!" - cleaning stale build cache.
             del /f /q "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
             rd /s /q "%BUILD_DIR%\CMakeFiles" >nul 2>&1
         )
@@ -417,7 +490,7 @@ rem    Also detect and clear any stale cache where VGRE_USE_LAPACK was cached ON
 if exist "%BUILD_DIR%\CMakeCache.txt" (
     findstr /C:"VGRE_USE_LAPACK:BOOL=ON" "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
     if not errorlevel 1 (
-        echo [INFO] Stale cache has VGRE_USE_LAPACK=ON — clearing to avoid LAPACK search on Windows.
+        echo [INFO] Stale cache has VGRE_USE_LAPACK=ON - clearing to avoid LAPACK search on Windows.
         del /f /q "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
         rd /s /q "%BUILD_DIR%\CMakeFiles" >nul 2>&1
     )
@@ -432,7 +505,7 @@ if exist "%BUILD_DIR%\CMakeCache.txt" (
     if exist "%BUILD_DIR%\vgre.dll"         set "_vgre_dll_found=1"
     if exist "%BUILD_DIR%\Release\vgre.dll" set "_vgre_dll_found=1"
     if "!_vgre_dll_found!"=="0" (
-        echo [INFO] Previous configure exists but vgre.dll is absent — cleaning stale cache
+        echo [INFO] Previous configure exists but vgre.dll is absent - cleaning stale cache
         echo        so LLVM imported-target DIA SDK paths are patched from scratch.
         del /f /q "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
         rd /s /q "%BUILD_DIR%\CMakeFiles"      >nul 2>&1
@@ -447,7 +520,7 @@ if errorlevel 1 (
 )
 
 rem --parallel works for all generators (CMake 3.12+):
-rem   Ninja / NMake → maps to -j N,  VS MSBuild → maps to /m:N
+rem   Ninja / NMake -> maps to -j N,  VS MSBuild -> maps to /m:N
 "%CMAKE_EXE%" --build . --config Release --target vgre vgre_cudart vgre-worker --parallel %NUMBER_OF_PROCESSORS%
 if errorlevel 1 (
     popd
@@ -473,38 +546,37 @@ if "%SKIP_DASHBOARD%"=="1" (
     goto :dashboard_skip
 )
 
-rem -- Step 1: locate the Flutter SDK root so we can print diagnostic info.
-rem    All flutter commands below are wrapped in cmd /c so that if Flutter calls
-rem    exit (not exit /b) internally it only kills the nested cmd process and
-rem    the errorlevel check in this script still fires correctly.
+rem -- Step 1: derive the Flutter SDK root directly from FLUTTER_CMD path.
+rem    FLUTTER_CMD is always a full path to flutter.bat (set by :find_flutter).
+rem    SDK root = parent of the bin\ directory that contains flutter.bat.
 set "_flutter_sdk="
-for /f "usebackq tokens=*" %%F in (`where "!FLUTTER_CMD!" 2^>nul`) do (
-    if not defined _flutter_sdk (
-        for %%D in ("%%~dpF..") do set "_flutter_sdk=%%~fD"
-    )
+for %%F in ("!FLUTTER_CMD!") do (
+    for %%D in ("%%~dpF..") do set "_flutter_sdk=%%~fD"
 )
 if not defined _flutter_sdk (
-    echo [WARN] Flutter not found on PATH. Dashboard build skipped.
+    echo [WARN] Cannot derive Flutter SDK root from FLUTTER_CMD=!FLUTTER_CMD!. Dashboard build skipped.
     set "SKIP_DASHBOARD=1"
     goto :dashboard_skip
 )
-rem -- Suppress Flutter analytics for all commands below.
+if not exist "!_flutter_sdk!\bin\flutter.bat" (
+    echo [WARN] Flutter SDK root invalid: !_flutter_sdk!. Dashboard build skipped.
+    set "SKIP_DASHBOARD=1"
+    goto :dashboard_skip
+)
+rem -- Suppress Flutter analytics - prevents interactive consent prompts
 set "FLUTTER_SUPPRESS_ANALYTICS=1"
+set "DART_SUPPRESS_ANALYTICS=1"
+set "PUB_ENVIRONMENT=bot.ci"
+set "_flutter_log=%TEMP%\vgre_flutter_build.log"
 
-rem -- Step 1: Pre-cache engine artifacts.
-rem    Always attempt to pre-cache the Windows engine artifacts.
-rem    Change directory to the Flutter SDK root first so that Git does not
-rem    traverse up to the VGRE repository's .git folder, which would crash
-rem    precache on non-git-clone Flutter installations (e.g. Winget/Zip installs).
+rem -- Step 1: Pre-cache engine artifacts (non-blocking, 60s timeout).
 echo [INFO] Pre-caching Flutter Windows engine artifacts...
 pushd "!_flutter_sdk!"
-cmd /c ""!FLUTTER_CMD!" precache --windows" 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process '!FLUTTER_CMD!' -ArgumentList 'precache','--windows' -RedirectStandardOutput '%TEMP%\vgre_precache.log' -RedirectStandardError '%TEMP%\vgre_precache_err.log' -PassThru; if(-not $p.WaitForExit(60000)){$p.Kill()}"
 popd
 echo [INFO] flutter precache done (errors above are non-fatal).
 
-rem -- Step 2: resolve Dart packages.
-rem    Try dart.exe pub get first: avoids Flutter git-SDK version checks.
-rem    Fall back to flutter pub get when dart binary is not found.
+rem -- Step 2: resolve Dart packages (120s timeout).
 set "_dart_bin=!_flutter_sdk!\bin\cache\dart-sdk\bin\dart.exe"
 if not exist "!_dart_bin!" set "_dart_bin=!_flutter_sdk!\bin\dart.exe"
 if not exist "!_dart_bin!" set "_dart_bin="
@@ -518,10 +590,10 @@ if errorlevel 1 (
 
 if defined _dart_bin (
     echo [INFO] Fetching Dart packages via dart pub get...
-    cmd /c ""!_dart_bin!" pub get"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process '!_dart_bin!' -ArgumentList 'pub','get' -RedirectStandardOutput '%TEMP%\vgre_pubget.log' -RedirectStandardError '%TEMP%\vgre_pubget_err.log' -PassThru; if(-not $p.WaitForExit(120000)){$p.Kill();exit 1}; exit $p.ExitCode"
 ) else (
     echo [INFO] Fetching Dart packages via flutter pub get...
-    cmd /c ""!FLUTTER_CMD!" pub get"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process '!FLUTTER_CMD!' -ArgumentList 'pub','get' -RedirectStandardOutput '%TEMP%\vgre_pubget.log' -RedirectStandardError '%TEMP%\vgre_pubget_err.log' -PassThru; if(-not $p.WaitForExit(120000)){$p.Kill();exit 1}; exit $p.ExitCode"
 )
 if errorlevel 1 (
     popd
@@ -531,21 +603,15 @@ if errorlevel 1 (
     goto :dashboard_skip
 )
 
-rem -- Step 3: build the Windows bundle (release preferred; debug fallback).
-rem    Both attempts suppress stderr because Flutter prints "The system cannot
-rem    find the path specified" for shell helper scripts on non-git-clone
-rem    installs (winget/Scoop/FVM) — these are non-fatal and do not affect the
-rem    build output.  Full output is only shown when both builds fail.
-set "_flutter_build_mode=Release"
+rem -- Step 3: build the Windows bundle (release preferred; debug fallback, 5min timeout each).
 set "_flutter_build_ok=0"
 echo [INFO] Attempting Flutter Windows release build...
-cmd /c ""!FLUTTER_CMD!" build windows --release" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process '!FLUTTER_CMD!' -ArgumentList 'build','windows','--release' -RedirectStandardOutput '!_flutter_log!' -RedirectStandardError '%TEMP%\vgre_flutter_build_err.log' -PassThru; if(-not $p.WaitForExit(300000)){$p.Kill();exit 1}; exit $p.ExitCode"
 if not errorlevel 1 set "_flutter_build_ok=1"
 
 if "!_flutter_build_ok!"=="0" (
-    echo [INFO] Release build unavailable ^(engine not cached^). Trying debug build...
-    set "_flutter_build_mode=Debug"
-    cmd /c ""!FLUTTER_CMD!" build windows --debug" >nul 2>&1
+    echo [INFO] Release build unavailable. Trying debug build...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process '!FLUTTER_CMD!' -ArgumentList 'build','windows','--debug' -RedirectStandardOutput '!_flutter_log!' -RedirectStandardError '%TEMP%\vgre_flutter_build_err.log' -PassThru; if(-not $p.WaitForExit(300000)){$p.Kill();exit 1}; exit $p.ExitCode"
     if not errorlevel 1 set "_flutter_build_ok=1"
 )
 
@@ -590,12 +656,20 @@ if exist "%DASHBOARD_DIR%\build\windows\arm64\runner\Debug\vgre_dashboard.exe" (
 echo.
 echo === Deploying ===
 echo Stopping running VGRE processes...
-taskkill /IM vgre_dashboard.exe /F >nul 2>&1
-taskkill /IM vgre-worker.exe /F >nul 2>&1
-timeout /t 1 /nobreak >nul
+taskkill /IM vgre_dashboard.exe /F /T >nul 2>&1
+taskkill /IM vgre-worker.exe /F /T >nul 2>&1
 
+rem Ensure all target directories exist before any copy operations
+if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 if not exist "%INSTALL_DIR%\lib" mkdir "%INSTALL_DIR%\lib"
 if not exist "%INSTALL_DIR%\include" mkdir "%INSTALL_DIR%\include"
+if not exist "%INSTALL_DIR%\data" mkdir "%INSTALL_DIR%\data"
+if not exist "%INSTALL_DIR%\data\flutter_assets" mkdir "%INSTALL_DIR%\data\flutter_assets"
+
+rem Add INSTALL_DIR to Avast exclusions so deployed executables are not quarantined.
+rem This uses the HKCU registry path which does not require elevation.
+reg add "HKCU\SOFTWARE\AVAST Software\Avast\exclusions" /v "vgre_install" /t REG_SZ /d "%INSTALL_DIR%" /f >nul 2>&1
+reg add "HKCU\SOFTWARE\AVAST Software\Avast\exclusions" /v "vgre_install_lib" /t REG_SZ /d "%INSTALL_DIR%\lib" /f >nul 2>&1
 
 if not "!SKIP_DASHBOARD!"=="1" (
     if not exist "!BUNDLE_DIR!\vgre_dashboard.exe" (
@@ -606,13 +680,20 @@ if not "!SKIP_DASHBOARD!"=="1" (
         echo         from the vgre_dashboard directory for full error output.
         exit /b 1
     )
-    xcopy /E /Y /I "!BUNDLE_DIR!" "%INSTALL_DIR%"
-    if errorlevel 1 (
-        echo ERROR: Failed to copy dashboard bundle from !BUNDLE_DIR!
-        exit /b 1
+    rem Delete the old exe first to release any stale handle
+    if exist "%INSTALL_DIR%\vgre_dashboard.exe" del /f /q "%INSTALL_DIR%\vgre_dashboard.exe" >nul 2>&1
+    rem Copy root-level files (exe + DLLs) individually - copy /Y never blocks
+    for %%F in ("!BUNDLE_DIR!\*.*") do copy /Y "%%F" "%INSTALL_DIR%\" >nul 2>&1
+    rem Copy data directory files
+    if exist "!BUNDLE_DIR!\data\*.*" (
+        for %%F in ("!BUNDLE_DIR!\data\*.*") do copy /Y "%%F" "%INSTALL_DIR%\data\" >nul 2>&1
+    )
+    rem Copy flutter_assets recursively using a subroutine (no xcopy/robocopy)
+    if exist "!BUNDLE_DIR!\data\flutter_assets" (
+        call :copy_dir "!BUNDLE_DIR!\data\flutter_assets" "%INSTALL_DIR%\data\flutter_assets"
     )
     if not exist "%INSTALL_DIR%\vgre_dashboard.exe" (
-        echo ERROR: vgre_dashboard.exe missing from %INSTALL_DIR% after xcopy.
+        echo ERROR: vgre_dashboard.exe missing from %INSTALL_DIR% after copy.
         exit /b 1
     )
     echo [OK] Dashboard deployed to %INSTALL_DIR%
@@ -620,16 +701,16 @@ if not "!SKIP_DASHBOARD!"=="1" (
     echo [SKIP] Dashboard bundle deployment skipped ^(Flutter was unavailable^).
 )
 
-copy /Y "!BUILD_OUT_DIR!\vgre.dll" "%INSTALL_DIR%\" >nul
+copy /Y "!BUILD_OUT_DIR!\vgre.dll" "%INSTALL_DIR%\" >nul 2>&1
 copy /Y "!BUILD_OUT_DIR!\vgre.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
-if errorlevel 1 (
+if not exist "%INSTALL_DIR%\vgre.dll" (
     echo ERROR: Failed to copy vgre.dll from !BUILD_OUT_DIR!\vgre.dll
     exit /b 1
 )
 
-copy /Y "!BUILD_OUT_DIR!\vgre_cudart.dll" "%INSTALL_DIR%\" >nul
+copy /Y "!BUILD_OUT_DIR!\vgre_cudart.dll" "%INSTALL_DIR%\" >nul 2>&1
 copy /Y "!BUILD_OUT_DIR!\vgre_cudart.dll" "%INSTALL_DIR%\lib\" >nul 2>&1
-if errorlevel 1 (
+if not exist "%INSTALL_DIR%\vgre_cudart.dll" (
     echo ERROR: Failed to copy vgre_cudart.dll from !BUILD_OUT_DIR!\vgre_cudart.dll
     exit /b 1
 )
@@ -659,17 +740,34 @@ if not exist "%INSTALL_DIR%\lib\vgre.dll" (
 echo.
 echo === Copying LLVM/OpenMP Runtime Dependencies ===
 rem _LLVM_BIN is derived from LLVM_DIR (set in the auto-detection section above).
-rem No hardcoded TOOLS_ROOT path — follows wherever LLVM was actually installed.
+rem No hardcoded TOOLS_ROOT path - follows wherever LLVM was actually installed.
+rem
+rem IMPORTANT: VC runtime DLLs (msvcp140*, vcruntime140*, concrt140, ucrtbase)
+rem must NEVER be copied here. Bundling old versions causes STATUS_DLL_INIT_FAILED
+rem (0xC0000142) when the binary was compiled with a newer toolchain. Windows
+rem always resolves these from System32 automatically.
 if exist "!_LLVM_BIN!\*.dll" (
     echo Copying LLVM runtime DLLs from !_LLVM_BIN!...
     for %%F in ("!_LLVM_BIN!\*.dll") do (
-        copy /Y "%%F" "%INSTALL_DIR%\lib\" >nul 2>&1
-        copy /Y "%%F" "%INSTALL_DIR%\" >nul 2>&1
+        rem Skip VC runtime DLLs - must come from System32, not bundled
+        set "_skip_dll=0"
+        for %%R in (msvcp140 msvcp140_1 msvcp140_2 msvcp140_atomic_wait msvcp140_codecvt_ids vcruntime140 vcruntime140_1 concrt140 ucrtbase) do (
+            if /I "%%~nF"=="%%R" set "_skip_dll=1"
+        )
+        if "!_skip_dll!"=="0" (
+            copy /Y "%%F" "%INSTALL_DIR%\lib\" >nul 2>&1
+            copy /Y "%%F" "%INSTALL_DIR%\" >nul 2>&1
+        )
+    )
+    rem Also purge any stale VC runtime DLLs left from previous syncs
+    for %%R in (msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll vcruntime140.dll vcruntime140_1.dll concrt140.dll ucrtbase.dll) do (
+        if exist "%INSTALL_DIR%\lib\%%R" del /f /q "%INSTALL_DIR%\lib\%%R" >nul 2>&1
+        if exist "%INSTALL_DIR%\%%R"     del /f /q "%INSTALL_DIR%\%%R"     >nul 2>&1
     )
     if exist "%INSTALL_DIR%\libomp.dll" (
         echo [OK] libomp.dll deployed
     ) else (
-        echo [WARN] libomp.dll not found in !_LLVM_BIN! — vgre-worker may crash.
+        echo [WARN] libomp.dll not found in !_LLVM_BIN! - vgre-worker may crash.
         echo        Ensure LLVM was built with OpenMP support.
     )
 ) else (
@@ -713,16 +811,18 @@ set "LAUNCHER_PATH=%INSTALL_DIR%\Launch-VGRE-Dashboard.cmd"
     echo     if exist "%%USERPROFILE%%\.vgre\token" set "VGRE_TCP_AUTH_TOKEN_FILE=%%USERPROFILE%%\.vgre\token"
     echo ^)
     echo.
-    echo if not exist "%%APP_DIR%%vgre_dashboard.exe" ^(
-    echo     echo [ERROR] vgre_dashboard.exe not found in %%APP_DIR%%
-    echo     echo         The dashboard was not built or deployed.
-    echo     echo         Fix: run  .\scripts\vgre_sync.bat  from the VGRE repository root.
-    echo     pause
-    echo     exit /b 1
+    echo rem -- Launch dashboard if built, otherwise start master worker headlessly --
+    echo if exist "%%APP_DIR%%vgre_dashboard.exe" ^(
+    echo     cd /d "%%APP_DIR%%"
+    echo     start "" "%%APP_DIR%%vgre_dashboard.exe"
+    echo ^) else ^(
+    echo     echo [INFO] Dashboard not built - starting VGRE master worker headlessly.
+    echo     echo        Workers can connect via LAN auto-discovery or --master-address.
+    echo     echo        To build the dashboard: git clone -b stable https://github.com/flutter/flutter.git C:\flutter
+    echo     echo        Then re-run: .\scripts\vgre_sync.bat from the VGRE repository root.
+    echo     echo.
+    echo     powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%%APP_DIR%%scripts\Start-VGRE.ps1" --master
     echo ^)
-    echo.
-    echo cd /d "%%APP_DIR%%"
-    echo start "" "%%APP_DIR%%vgre_dashboard.exe"
 ) > "%LAUNCHER_PATH%"
 if errorlevel 1 (
     echo ERROR: Failed to create launcher script.
@@ -755,7 +855,7 @@ set "PATH=%INSTALL_DIR%\lib;%INSTALL_DIR%;!_LLVM_BIN!;%PATH%"
 "%INSTALL_DIR%\vgre-worker.exe" --help >nul 2>&1
 rem  IMPORTANT: use %ERRORLEVEL% neq 0, NOT "if errorlevel 1".
 rem  STATUS_DLL_INIT_FAILED = -1073741502 and STATUS_ACCESS_VIOLATION = -1073741819
-rem  are both NEGATIVE — "if errorlevel 1" only triggers for exit codes >= 1 and
+rem  are both NEGATIVE - "if errorlevel 1" only triggers for exit codes >= 1 and
 rem  silently misreports a crash as "passed".
 if %ERRORLEVEL% neq 0 (
     echo ERROR: vgre-worker failed startup self-check ^(exit code %ERRORLEVEL%^).
@@ -786,7 +886,7 @@ if "%PATH_STATUS%"=="CHANGED" (
     echo [OK] %INSTALL_DIR% is already in your PATH.
 )
 
-rem ── Refresh CLI scripts (already installed before the build; this updates them) --
+rem -- Refresh CLI scripts (already installed before the build; this updates them) --
 copy /Y "%SCRIPT_DIR%vgre-token.ps1"        "%TOKEN_SCRIPT_DIR%\vgre-token.ps1"        >nul 2>&1
 copy /Y "%SCRIPT_DIR%vgre-token.bat"        "%TOKEN_SCRIPT_DIR%\vgre-token.bat"        >nul 2>&1
 copy /Y "%SCRIPT_DIR%vgre-start.bat"        "%TOKEN_SCRIPT_DIR%\vgre-start.bat"        >nul 2>&1
@@ -826,7 +926,6 @@ echo    vgre-start --help                                show all options
 echo.
 echo  Open a NEW terminal for PATH changes to take effect.
 echo ============================================================
-pause
 exit /b 0
 
 rem =============================================================================
@@ -880,62 +979,107 @@ for %%Y in (2022 2019 2017) do (
 )
 exit /b 0
 
+:wait_for_file_release
+rem Subroutine: no-op kept for compatibility. taskkill /F is synchronous.
+exit /b 0
+
+:copy_dir
+rem Subroutine: recursively copy a directory using only copy /Y (never blocks).
+rem Usage: call :copy_dir "source_dir" "dest_dir"
+rem Creates dest_dir if it does not exist.
+if not exist %2 mkdir %2 >nul 2>&1
+for %%F in (%1\*.*) do copy /Y "%%F" %2\ >nul 2>&1
+for /d %%D in (%1\*) do (
+    call :copy_dir "%%D" "%~2\%%~nxD"
+)
+exit /b 0
+
 :find_flutter
-where flutter >nul 2>&1
-if not errorlevel 1 (
+rem -- Priority 1: FLUTTER_CMD already set by caller (env var override)
+if defined FLUTTER_CMD (
+    if exist "!FLUTTER_CMD!" exit /b 0
+    set "FLUTTER_CMD="
+)
+
+rem -- Priority 2: resolve from PATH - prefer .bat so cmd /c works reliably
+set "_flutter_on_path="
+for /f "usebackq tokens=*" %%F in (`where flutter.bat 2^>nul`) do (
+    if not defined _flutter_on_path set "_flutter_on_path=%%F"
+)
+if not defined _flutter_on_path (
     for /f "usebackq tokens=*" %%F in (`where flutter 2^>nul`) do (
-        if not defined FLUTTER_CMD set "FLUTTER_CMD=%%F"
+        if not defined _flutter_on_path set "_flutter_on_path=%%F"
     )
+)
+if defined _flutter_on_path (
+    rem Prefer the one that is a git clone (has a .git folder two levels up)
+    for /f "usebackq tokens=*" %%F in (`where flutter.bat 2^>nul`) do (
+        set "_candidate_bat=%%F"
+        rem %%~dpF = directory of the .bat, parent of that = SDK root
+        for %%D in ("%%~dpF..") do (
+            if exist "%%~fD\.git" (
+                if not defined FLUTTER_CMD set "FLUTTER_CMD=%%F"
+            )
+        )
+    )
+    rem If no git-clone found, just take the first .bat on PATH
+    if not defined FLUTTER_CMD (
+        for /f "usebackq tokens=*" %%F in (`where flutter.bat 2^>nul`) do (
+            if not defined FLUTTER_CMD set "FLUTTER_CMD=%%F"
+        )
+    )
+    if not defined FLUTTER_CMD set "FLUTTER_CMD=!_flutter_on_path!"
+    set "PATH=!FLUTTER_CMD:~0,-11!;%PATH%"
     exit /b 0
 )
 
-rem -- Try checking registry Path variables directly (covers recently added path vars)
+rem -- Priority 3: check registry Path variables (covers recently added entries)
 set "_reg_paths="
 for /f "usebackq tokens=2*" %%A in (`reg query "HKCU\Environment" /v Path 2^>nul`) do set "_reg_paths=%%B"
 for /f "usebackq tokens=2*" %%A in (`reg query "HKLM\System\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul`) do set "_reg_paths=!_reg_paths!;%%B"
 
 if defined _reg_paths (
     for %%P in ("!_reg_paths:;=" "!") do (
-        if not defined FLUTTER_BIN (
+        if not defined FLUTTER_CMD (
             set "_p=%%~P"
-            rem Expand environment strings if any (e.g. %USERPROFILE%)
-            for /f "usebackq delims=" %%E in (`echo !_p!`) do set "_p_expanded=%%E"
-            if exist "!_p_expanded!\flutter.bat" (
-                set "FLUTTER_BIN=!_p_expanded!"
-            ) else if exist "!_p_expanded!\bin\flutter.bat" (
-                set "FLUTTER_BIN=!_p_expanded!\bin"
+            if exist "!_p!\flutter.bat" (
+                set "FLUTTER_CMD=!_p!\flutter.bat"
+                set "PATH=!_p!;%PATH%"
+            ) else if exist "!_p!\bin\flutter.bat" (
+                set "FLUTTER_CMD=!_p!\bin\flutter.bat"
+                set "PATH=!_p!\bin;%PATH%"
             )
         )
     )
 )
+if defined FLUTTER_CMD exit /b 0
 
-rem -- Try common default installation paths
-if not defined FLUTTER_BIN (
-    for %%D in (
-        "%LOCALAPPDATA%\Programs\flutter\bin"
-        "%LOCALAPPDATA%\Microsoft\WinGet\Packages\Google.FlutterSDK\bin"
-        "%USERPROFILE%\flutter\bin"
-        "%USERPROFILE%\development\flutter\bin"
-        "C:\src\flutter\bin"
-        "C:\tools\flutter\bin"
-        "C:\ProgramData\chocolatey\bin"
-        "C:\ProgramData\chocolatey\lib\flutter\tools\flutter\bin"
-    ) do (
-        if not defined FLUTTER_BIN (
-            if exist "%%~D\flutter.bat" (
-                set "FLUTTER_BIN=%%~D"
-            )
+rem -- Priority 4: well-known install locations (no hardcoded user names)
+for %%D in (
+    "%USERPROFILE%\flutter\bin"
+    "%USERPROFILE%\Documents\flutter\bin"
+    "%USERPROFILE%\development\flutter\bin"
+    "%LOCALAPPDATA%\Programs\flutter\bin"
+    "!TOOLS_ROOT!\flutter\bin"
+    "%LOCALAPPDATA%\Microsoft\WinGet\Packages\Google.FlutterSDK\bin"
+    "C:\src\flutter\bin"
+    "C:\tools\flutter\bin"
+    "C:\flutter\bin"
+) do (
+    if not defined FLUTTER_CMD (
+        if exist "%%~D\flutter.bat" (
+            set "FLUTTER_CMD=%%~D\flutter.bat"
+            set "PATH=%%~D;%PATH%"
         )
     )
 )
+if defined FLUTTER_CMD exit /b 0
 
-rem -- Fallback: slow recursive search via PowerShell
-if not defined FLUTTER_BIN (
-    for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$up=$env:USERPROFILE; $roots=@($up+'\Downloads\Compressed',$up+'\Downloads',$up,'C:\src','C:\tools'); $hit=Get-ChildItem -Path $roots -Filter flutter.bat -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty DirectoryName; if($hit){$hit}"`) do set "FLUTTER_BIN=%%I"
-)
-
-if defined FLUTTER_BIN (
-    set "FLUTTER_CMD=!FLUTTER_BIN!\flutter.bat"
-    set "PATH=!FLUTTER_BIN!;%PATH%"
+rem -- Priority 5: slow PowerShell search under USERPROFILE and common roots
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$roots=@($env:USERPROFILE,'C:\src','C:\tools','C:\flutter'); $hit=Get-ChildItem -Path $roots -Filter flutter.bat -Recurse -Depth 4 -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path (Split-Path (Split-Path $_.FullName)) '.git') } | Select-Object -First 1 -ExpandProperty DirectoryName; if(-not $hit){$hit=Get-ChildItem -Path $roots -Filter flutter.bat -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty DirectoryName}; if($hit){$hit}"`) do (
+    if not defined FLUTTER_CMD (
+        set "FLUTTER_CMD=%%I\flutter.bat"
+        set "PATH=%%I;%PATH%"
+    )
 )
 exit /b 0

@@ -14,8 +14,8 @@
 $ErrorActionPreference = "Stop"
 
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
-$InstallDir = Join-Path $env:LOCALAPPDATA "VGRE\scripts"
-$VgreDir    = Join-Path $env:LOCALAPPDATA "VGRE"
+$VgreDir    = if ($env:VGRE_INSTALL_DIR) { $env:VGRE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "VGRE" }
+$InstallDir = Join-Path $VgreDir "scripts"
 
 Write-Host ""
 Write-Host "==================================================" -ForegroundColor Cyan
@@ -57,6 +57,7 @@ $startBat = Join-Path $InstallDir "vgre-start.bat"
 setlocal
 set "SCRIPT_DIR=%~dp0"
 set "PS1=%SCRIPT_DIR%Start-VGRE.ps1"
+if not exist "%PS1%" if defined VGRE_INSTALL_DIR set "PS1=%VGRE_INSTALL_DIR%\scripts\Start-VGRE.ps1"
 if not exist "%PS1%" set "PS1=%LOCALAPPDATA%\VGRE\scripts\Start-VGRE.ps1"
 if not exist "%PS1%" (
     echo [ERROR] Start-VGRE.ps1 not found. Re-run Install-VGRETools.ps1.
@@ -75,6 +76,7 @@ $setupBat = Join-Path $InstallDir "Setup-VGRECluster.bat"
 setlocal
 set "SCRIPT_DIR=%~dp0"
 set "PS1=%SCRIPT_DIR%Setup-VGRECluster.ps1"
+if not exist "%PS1%" if defined VGRE_INSTALL_DIR set "PS1=%VGRE_INSTALL_DIR%\scripts\Setup-VGRECluster.ps1"
 if not exist "%PS1%" set "PS1=%LOCALAPPDATA%\VGRE\scripts\Setup-VGRECluster.ps1"
 if not exist "%PS1%" (
     echo [ERROR] Setup-VGRECluster.ps1 not found. Re-run Install-VGRETools.ps1.

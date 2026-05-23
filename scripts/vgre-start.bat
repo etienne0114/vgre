@@ -14,7 +14,8 @@
 
 setlocal EnableExtensions EnableDelayedExpansion
 
-set "INSTALL_DIR=%LOCALAPPDATA%\VGRE"
+if not defined VGRE_INSTALL_DIR set "VGRE_INSTALL_DIR=%LOCALAPPDATA%\VGRE"
+set "INSTALL_DIR=%VGRE_INSTALL_DIR%"
 set "SCRIPTS_DIR=%INSTALL_DIR%\scripts"
 set "SCRIPT_DIR=%~dp0"
 
@@ -33,7 +34,7 @@ if not exist "!PS1!" (
 set "_HAS_LIB=0"
 echo "!PATH!" | findstr /I /C:"%INSTALL_DIR%\lib" >nul 2>&1 && set "_HAS_LIB=1"
 if "!_HAS_LIB!"=="0" (
-    set "PATH=%INSTALL_DIR%\lib;%INSTALL_DIR%;%LOCALAPPDATA%\VGRE\BuildTools\llvm\bin;!PATH!"
+    set "PATH=%INSTALL_DIR%\lib;%INSTALL_DIR%;!PATH!"
 )
 
 :: Auto-load auth token from default location if not already set

@@ -1,8 +1,8 @@
-# VGRE Start — launch a master or worker node with one command (Windows)
+# VGRE Start - launch a master or worker node with one command (Windows)
 
 $ErrorActionPreference = "Stop"
 
-$InstallDir = Join-Path $env:LOCALAPPDATA "VGRE"
+$InstallDir = if ($env:VGRE_INSTALL_DIR) { $env:VGRE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "VGRE" }
 $TokenFile = if ($env:VGRE_TCP_AUTH_TOKEN_FILE) {
     $env:VGRE_TCP_AUTH_TOKEN_FILE
 } else {
@@ -69,6 +69,81 @@ function Get-TokenFingerprint {
     catch {
         return ""
     }
+}
+
+# -------------------------------
+# Locate LLVM bin folder dynamically
+# -------------------------------
+function Get-LLVMBinPath {
+    # 1. Environment Variable
+    if ($env:LLVM_DIR -and (Test-Path $env:LLVM_DIR)) {
+        $dir = $env:LLVM_DIR
+        for ($i = 0; $i -lt 4; $i++) {
+            $bin = Join-Path $dir "bin"
+            if (Test-Path (Join-Path $bin "clang.exe")) { return $bin }
+            $dir = Split-Path $dir -Parent
+        }
+    }
+
+    # 2. Clang on PATH
+    $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
+    if ($clang) {
+        return Split-Path $clang.Source -Parent
+    }
+
+    # 3. Registry
+    $regPaths = @(
+        "HKLM:\SOFTWARE\LLVM\LLVM",
+        "HKLM:\SOFTWARE\WOW6432Node\LLVM\LLVM",
+        "HKCU:\SOFTWARE\LLVM\LLVM",
+        "HKCU:\SOFTWARE\WOW6432Node\LLVM\LLVM"
+    )
+    foreach ($regPath in $regPaths) {
+        if (Test-Path $regPath) {
+            $val = Get-ItemPropertyValue -Path $regPath -Name "" -ErrorAction SilentlyContinue
+            if ($val -and (Test-Path $val)) {
+                $bin = Join-Path $val "bin"
+                if (Test-Path (Join-Path $bin "clang.exe")) { return $bin }
+            }
+        }
+    }
+
+    # 4. Visual Studio LLVM component (via vswhere if available)
+    $pf86 = $env:ProgramFiles(x86)
+    $vswhere = if ($pf86) { Join-Path $pf86 "Microsoft Visual Studio\Installer\vswhere.exe" } else { "" }
+    if ($vswhere -and (Test-Path $vswhere)) {
+        $vsLlvm = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang -find VC\Tools\Llvm 2>$null
+        if ($vsLlvm -and (Test-Path $vsLlvm)) {
+            $bin = Join-Path $vsLlvm "bin"
+            if (Test-Path (Join-Path $bin "clang.exe")) { return $bin }
+        }
+        $cmakeConfigs = & $vswhere -latest -find **\LLVMConfig.cmake 2>$null
+        foreach ($cfg in $cmakeConfigs) {
+            if ($cfg -and (Test-Path $cfg)) {
+                $dir = Split-Path $cfg -Parent
+                for ($i = 0; $i -lt 4; $i++) {
+                    $bin = Join-Path $dir "bin"
+                    if (Test-Path (Join-Path $bin "clang.exe")) { return $bin }
+                    $dir = Split-Path $dir -Parent
+                }
+            }
+        }
+    }
+
+    # 5. Fallback default paths
+    $toolsRoot = if ($env:VGRE_TOOLS_ROOT) { $env:VGRE_TOOLS_ROOT } else { Join-Path $InstallDir "BuildTools" }
+    $common = @(
+        "$env:ProgramFiles\LLVM\bin",
+        "$env:ProgramFiles(x86)\LLVM\bin",
+        (Join-Path $toolsRoot "llvm\bin"),
+        "$env:USERPROFILE\scoop\apps\llvm\current\bin",
+        "$env:LOCALAPPDATA\Programs\LLVM\bin"
+    )
+    foreach ($path in $common) {
+        if ($path -and (Test-Path (Join-Path $path "clang.exe"))) { return $path }
+    }
+
+    return $null
 }
 
 # -------------------------------
@@ -221,8 +296,12 @@ if ($fp) {
 # Prepend VGRE lib dir AND the LLVM runtime bin so vgre.dll and libomp.dll
 # are both resolvable by the Windows loader before any DLL is mapped.
 # -------------------------------
-$LLVMBin = Join-Path $env:LOCALAPPDATA "VGRE\BuildTools\llvm\bin"
-$env:PATH = "$InstallDir\lib;$InstallDir;$LLVMBin;$env:PATH"
+$LLVMBin = Get-LLVMBinPath
+if ($LLVMBin) {
+    $env:PATH = "$InstallDir\lib;$InstallDir;$LLVMBin;$env:PATH"
+} else {
+    $env:PATH = "$InstallDir\lib;$InstallDir;$env:PATH"
+}
 
 $workerExe    = Join-Path $InstallDir "vgre-worker.exe"
 $dashboardExe = Join-Path $InstallDir "vgre_dashboard.exe"
@@ -247,12 +326,6 @@ if ($threads) {
 switch ($mode) {
 
     "master" {
-        if (-not (Test-Path $dashboardExe)) {
-            Write-Host "[ERROR] vgre_dashboard.exe not found at $dashboardExe" -ForegroundColor Red
-            Write-Host "        Run  .\scripts\vgre_sync.bat  from the VGRE repository to build and deploy the dashboard." -ForegroundColor Red
-            exit 1
-        }
-
         # Auto-detect real public IP so the master broadcasts with it.
         # Workers on different LANs then receive the correct address in the UDP ping.
         $discoverPs1 = Join-Path $InstallDir "scripts\vgre-discover.ps1"
@@ -262,14 +335,37 @@ switch ($mode) {
         if (Test-Path $discoverPs1) {
             Write-Host "[...] Detecting public IP for WAN broadcast..." -ForegroundColor Cyan
             try {
-                & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
-                    -File $discoverPs1 --set-master 2>$null
+                # Pass --set-master as a positional string argument, not a named param.
+                # Using -Command instead of -File avoids PowerShell treating '--set-master'
+                # as a named parameter binding.
+                $dp = Start-Process -FilePath "powershell.exe" `
+                    -ArgumentList "-NoLogo","-NoProfile","-ExecutionPolicy","Bypass",`
+                                  "-Command","& '$discoverPs1' '--set-master'" `
+                    -NoNewWindow -PassThru
+                if (-not $dp.WaitForExit(10000)) { $dp.Kill() }
             } catch {}
         }
 
-        Write-Host "Starting master..." -ForegroundColor Green
+        if (-not (Test-WorkerDependencies -WorkerExe $workerExe)) {
+            exit 1
+        }
+
+        Write-Host "Starting master worker..." -ForegroundColor Green
         $env:VGRE_PORT = $port
-        Start-Process -FilePath $dashboardExe
+        $masterWorkerArgs = $workerArgs + @("--master")
+        $workerProc = Start-Process -FilePath $workerExe -ArgumentList $masterWorkerArgs -PassThru
+
+        if (Test-Path $dashboardExe) {
+            Write-Host "Starting dashboard..." -ForegroundColor Green
+            Start-Process -FilePath $dashboardExe
+        } else {
+            Write-Host "[WARN] vgre_dashboard.exe not found - running headless (no UI)." -ForegroundColor Yellow
+            Write-Host "       Re-run .\scripts\vgre_sync.bat to build and deploy the dashboard." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "Master is running (PID $($workerProc.Id)). Press Ctrl+C to stop." -ForegroundColor Green
+            # Keep the terminal alive without blocking on Read-Host
+            try { $workerProc.WaitForExit() } catch { }
+        }
     }
 
     "worker" {
@@ -278,7 +374,7 @@ switch ($mode) {
         }
 
         if ($masterAddress) {
-            # WAN / explicit hostname:port — resolves via getaddrinfo in the C++ engine
+            # WAN / explicit hostname:port - resolves via getaddrinfo in the C++ engine
             $env:VGRE_CLUSTER_MASTER_ADDRESS = $masterAddress
             Write-Host "Connecting to master at $masterAddress (WAN)" -ForegroundColor Cyan
         } elseif ($masterIp) {
@@ -295,10 +391,8 @@ switch ($mode) {
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[ERROR] Worker exited with code $LASTEXITCODE" -ForegroundColor Red
             if ($LASTEXITCODE -eq -1073741819) {
-                Write-Host "        STATUS_ACCESS_VIOLATION (0xC0000005) - possible causes:" -ForegroundColor Yellow
-                Write-Host "          1. Missing DLL: check $InstallDir\lib for libomp.dll" -ForegroundColor Yellow
-                Write-Host "          2. Run: .\scripts\vgre_sync.bat  to rebuild and redeploy" -ForegroundColor Yellow
-                Write-Host "          3. See docs/TROUBLESHOOTING_WINDOWS.md for full diagnostics" -ForegroundColor Yellow
+                Write-Host "        STATUS_ACCESS_VIOLATION - possible missing DLL in $InstallDir\lib" -ForegroundColor Yellow
+                Write-Host "        Run: .\scripts\vgre_sync.bat to rebuild and redeploy" -ForegroundColor Yellow
             }
         }
     }
@@ -312,9 +406,7 @@ switch ($mode) {
         }
 
         if (-not (Test-Path $dashboardExe)) {
-            Write-Host "[ERROR] vgre_dashboard.exe not found at $dashboardExe" -ForegroundColor Red
-            Write-Host "        Run  .\scripts\vgre_sync.bat  from the VGRE repository to build and deploy the dashboard." -ForegroundColor Red
-            exit 1
+            Write-Host "[WARN] vgre_dashboard.exe not found - running test without dashboard UI." -ForegroundColor Yellow
         }
 
         $workerProc = Start-Process -FilePath $workerExe `
@@ -329,13 +421,16 @@ switch ($mode) {
         }
 
         $env:VGRE_PORT = $port
-        $dashProc = Start-Process -FilePath $dashboardExe -PassThru
+        $dashProc = $null
+        if (Test-Path $dashboardExe) {
+            $dashProc = Start-Process -FilePath $dashboardExe -PassThru
+        }
 
-        Read-Host | Out-Null
-
-        Stop-Process -Id $workerProc.Id -ErrorAction SilentlyContinue
-        Stop-Process -Id $dashProc.Id -ErrorAction SilentlyContinue
-
+        Write-Host "Press Ctrl+C to stop." -ForegroundColor Cyan
+        try { $workerProc.WaitForExit() } catch { }
+        if ($dashProc -and -not $dashProc.HasExited) {
+            Stop-Process -Id $dashProc.Id -ErrorAction SilentlyContinue
+        }
         Write-Host "Test stopped." -ForegroundColor Green
     }
 }

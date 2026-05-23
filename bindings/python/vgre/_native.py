@@ -140,12 +140,33 @@ NATIVE_AVAILABLE = False
 
 def _find_library() -> Optional[str]:
     """Search for libvgre.so in common locations."""
-    # 1. Environment variable
+    # 1. Environment variable override
     env_path = os.environ.get("VGRE_LIB_PATH")
     if env_path and os.path.isfile(env_path):
         return env_path
 
-    # 2. Relative to this file (project build dir)
+    # 2. VGRE_INSTALL_DIR environment variable
+    vgre_install_dir = os.environ.get("VGRE_INSTALL_DIR")
+    if vgre_install_dir:
+        install_path = Path(vgre_install_dir)
+        for name in ("libvgre.so", "libvgre.dylib", "vgre.dll"):
+            for sub in ("", "lib"):
+                candidate = install_path / sub / name
+                if candidate.is_file():
+                    return str(candidate)
+
+    # 3. Windows LOCALAPPDATA default installation path
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            install_path = Path(local_app_data) / "VGRE"
+            for name in ("vgre.dll",):
+                for sub in ("", "lib"):
+                    candidate = install_path / sub / name
+                    if candidate.is_file():
+                        return str(candidate)
+
+    # 4. Relative to this file (project build dir)
     this_dir = Path(__file__).resolve().parent
     search_dirs = [
         this_dir / ".." / ".." / ".." / "build",         # bindings/python/vgre -> build
@@ -159,7 +180,7 @@ def _find_library() -> Optional[str]:
             if candidate.is_file():
                 return str(candidate)
 
-    # 3. System search
+    # 5. System search
     found = ctypes.util.find_library("vgre")
     if found:
         return found
