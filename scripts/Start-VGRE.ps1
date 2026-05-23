@@ -48,6 +48,42 @@ function Repair-TokenFile {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Resolve dashboard exe + working directory.
+# Windows DLL search starts from the EXE's own directory, so vgre_dashboard.exe
+# must be launched FROM the directory that contains flutter_windows.dll.
+# When Avast blocks the flutter_windows.dll copy to InstallDir, vgre_sync.bat
+# bakes the actual build-output path into VGRE_DASHBOARD_DIR in the launcher.
+# ---------------------------------------------------------------------------
+function Resolve-DashboardPaths {
+    param([string]$InstallDir)
+
+    $installExe = Join-Path $InstallDir "vgre_dashboard.exe"
+
+    # Happy path: flutter_windows.dll is in InstallDir alongside the exe
+    if (Test-Path (Join-Path $InstallDir "flutter_windows.dll")) {
+        return @{ Exe = $installExe; WorkDir = $InstallDir }
+    }
+
+    # AV-blocked path: read VGRE_DASHBOARD_DIR from the launcher script
+    $launcherPath = Join-Path $InstallDir "Launch-VGRE-Dashboard.cmd"
+    if (Test-Path $launcherPath) {
+        $line = Get-Content $launcherPath |
+                Where-Object { $_ -match 'set "VGRE_DASHBOARD_DIR=' } |
+                Select-Object -First 1
+        if ($line) {
+            $bundleDir = $line -replace '^set "VGRE_DASHBOARD_DIR=(.+)"$', '$1'
+            $bundleExe = Join-Path $bundleDir "vgre_dashboard.exe"
+            if ((Test-Path $bundleExe) -and (Test-Path (Join-Path $bundleDir "flutter_windows.dll"))) {
+                return @{ Exe = $bundleExe; WorkDir = $bundleDir }
+            }
+        }
+    }
+
+    # Fallback: InstallDir (will error at runtime if flutter_windows.dll is missing)
+    return @{ Exe = $installExe; WorkDir = $InstallDir }
+}
+
 # -------------------------------
 # Fingerprint
 # -------------------------------
@@ -109,7 +145,7 @@ function Get-LLVMBinPath {
     }
 
     # 4. Visual Studio LLVM component (via vswhere if available)
-    $pf86 = $env:ProgramFiles(x86)
+    $pf86 = ${env:ProgramFiles(x86)}
     $vswhere = if ($pf86) { Join-Path $pf86 "Microsoft Visual Studio\Installer\vswhere.exe" } else { "" }
     if ($vswhere -and (Test-Path $vswhere)) {
         $vsLlvm = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang -find VC\Tools\Llvm 2>$null
@@ -134,7 +170,7 @@ function Get-LLVMBinPath {
     $toolsRoot = if ($env:VGRE_TOOLS_ROOT) { $env:VGRE_TOOLS_ROOT } else { Join-Path $InstallDir "BuildTools" }
     $common = @(
         "$env:ProgramFiles\LLVM\bin",
-        "$env:ProgramFiles(x86)\LLVM\bin",
+        "${env:ProgramFiles(x86)}\LLVM\bin",
         (Join-Path $toolsRoot "llvm\bin"),
         "$env:USERPROFILE\scoop\apps\llvm\current\bin",
         "$env:LOCALAPPDATA\Programs\LLVM\bin"
@@ -304,7 +340,9 @@ if ($LLVMBin) {
 }
 
 $workerExe    = Join-Path $InstallDir "vgre-worker.exe"
-$dashboardExe = Join-Path $InstallDir "vgre_dashboard.exe"
+$dashPaths    = Resolve-DashboardPaths -InstallDir $InstallDir
+$dashboardExe = $dashPaths.Exe
+$dashWorkDir  = $dashPaths.WorkDir
 
 if (-not (Test-Path $workerExe)) {
     Write-Host "[ERROR] vgre-worker.exe not found at $workerExe" -ForegroundColor Red
@@ -357,9 +395,11 @@ switch ($mode) {
 
         if (Test-Path $dashboardExe) {
             Write-Host "Starting dashboard..." -ForegroundColor Green
-            # WorkingDirectory must be $InstallDir so Windows finds flutter_windows.dll
-            # alongside the exe (DLL search order: exe dir, then system, then PATH).
-            Start-Process -FilePath $dashboardExe -WorkingDirectory $InstallDir
+            if ($dashWorkDir -ne $InstallDir) {
+                Write-Host "[INFO] Dashboard running from build output (AV blocked DLL copy to InstallDir)." -ForegroundColor DarkGray
+                Write-Host "       $dashWorkDir" -ForegroundColor DarkGray
+            }
+            Start-Process -FilePath $dashboardExe -WorkingDirectory $dashWorkDir
         } else {
             Write-Host "[WARN] vgre_dashboard.exe not found - running headless (no UI)." -ForegroundColor Yellow
             Write-Host "       Re-run .\scripts\vgre_sync.bat to build and deploy the dashboard." -ForegroundColor Yellow
@@ -425,7 +465,7 @@ switch ($mode) {
         $env:VGRE_PORT = $port
         $dashProc = $null
         if (Test-Path $dashboardExe) {
-            $dashProc = Start-Process -FilePath $dashboardExe -WorkingDirectory $InstallDir -PassThru
+            $dashProc = Start-Process -FilePath $dashboardExe -WorkingDirectory $dashWorkDir -PassThru
         }
 
         Write-Host "Press Ctrl+C to stop." -ForegroundColor Cyan
