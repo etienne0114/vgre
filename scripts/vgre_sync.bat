@@ -653,6 +653,39 @@ if exist "%DASHBOARD_DIR%\build\windows\arm64\runner\Debug\vgre_dashboard.exe" (
 )
 :bundle_dir_ok
 
+rem === Recover flutter_windows.dll if missing from build output ===
+rem Flutter incremental builds do not re-emit the engine DLL when the compiled
+rem Dart code is unchanged.  If it is absent, copy it from the Flutter SDK
+rem artifact cache (downloaded by 'flutter precache --windows').
+if not "!SKIP_DASHBOARD!"=="1" if "!_flutter_build_ok!"=="1" if defined _flutter_sdk (
+    if not exist "!BUNDLE_DIR!\flutter_windows.dll" (
+        echo [INFO] flutter_windows.dll absent from build output - checking Flutter SDK engine cache...
+        set "_fwdll_src="
+        if exist "!_flutter_sdk!\bin\cache\artifacts\engine\windows-x64-release\flutter_windows.dll" (
+            set "_fwdll_src=!_flutter_sdk!\bin\cache\artifacts\engine\windows-x64-release\flutter_windows.dll"
+        )
+        if not defined _fwdll_src if exist "!_flutter_sdk!\bin\cache\artifacts\engine\windows-x64\flutter_windows.dll" (
+            set "_fwdll_src=!_flutter_sdk!\bin\cache\artifacts\engine\windows-x64\flutter_windows.dll"
+        )
+        if not defined _fwdll_src if exist "!_flutter_sdk!\bin\cache\artifacts\engine\windows-arm64-release\flutter_windows.dll" (
+            set "_fwdll_src=!_flutter_sdk!\bin\cache\artifacts\engine\windows-arm64-release\flutter_windows.dll"
+        )
+        if defined _fwdll_src (
+            copy /Y "!_fwdll_src!" "!BUNDLE_DIR!\" >nul 2>&1
+            if exist "!BUNDLE_DIR!\flutter_windows.dll" (
+                echo [OK] flutter_windows.dll restored from Flutter engine cache.
+            ) else (
+                echo [WARN] Could not copy flutter_windows.dll from engine cache.
+            )
+        )
+        if not defined _fwdll_src (
+            echo [WARN] flutter_windows.dll not found in Flutter SDK engine cache.
+            echo        Run:  flutter precache --windows
+            echo        Then: .\scripts\vgre_sync.bat
+        )
+    )
+)
+
 echo.
 echo === Deploying ===
 echo Stopping running VGRE processes...
