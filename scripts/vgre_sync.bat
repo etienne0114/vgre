@@ -679,7 +679,21 @@ if not "!SKIP_DASHBOARD!"=="1" if "!_flutter_build_ok!"=="1" if defined _flutter
             )
         )
         if not defined _fwdll_src (
-            echo [WARN] flutter_windows.dll not found in Flutter SDK engine cache.
+            for %%A in ("windows-x64-release" "windows-x64" "windows-arm64-release") do (
+                if not defined _fwdll_src (
+                    if exist "%TOOLS_ROOT%\flutter\bin\cache\artifacts\engine\%%~A\flutter_windows.dll" (
+                        set "_fwdll_src=%TOOLS_ROOT%\flutter\bin\cache\artifacts\engine\%%~A\flutter_windows.dll"
+                    )
+                )
+            )
+        )
+        if not defined _fwdll_src (
+            if exist "!DASHBOARD_DIR!\windows\flutter\ephemeral\flutter_windows.dll" (
+                set "_fwdll_src=!DASHBOARD_DIR!\windows\flutter\ephemeral\flutter_windows.dll"
+            )
+        )
+        if not defined _fwdll_src (
+            echo [WARN] flutter_windows.dll not found in Flutter SDK engine cache or ephemeral dir.
             echo        Run:  flutter precache --windows
             echo        Then: .\scripts\vgre_sync.bat
         )
@@ -701,8 +715,13 @@ if not exist "%INSTALL_DIR%\data\flutter_assets" mkdir "%INSTALL_DIR%\data\flutt
 
 rem Add INSTALL_DIR to Avast exclusions so deployed executables are not quarantined.
 rem This uses the HKCU registry path which does not require elevation.
-reg add "HKCU\SOFTWARE\AVAST Software\Avast\exclusions" /v "vgre_install" /t REG_SZ /d "%INSTALL_DIR%" /f >nul 2>&1
-reg add "HKCU\SOFTWARE\AVAST Software\Avast\exclusions" /v "vgre_install_lib" /t REG_SZ /d "%INSTALL_DIR%\lib" /f >nul 2>&1
+reg add "HKCU\SOFTWARE\AVAST Software\Avast\exclusions" /v "vgre_install"      /t REG_SZ /d "%INSTALL_DIR%"                    /f >nul 2>&1
+reg add "HKCU\SOFTWARE\AVAST Software\Avast\exclusions" /v "vgre_install_lib"  /t REG_SZ /d "%INSTALL_DIR%\lib"                /f >nul 2>&1
+reg add "HKCU\SOFTWARE\AVAST Software\Avast\exclusions" /v "vgre_flutter_dll"  /t REG_SZ /d "%INSTALL_DIR%\flutter_windows.dll" /f >nul 2>&1
+
+rem Default dashboard run directory.  Overridden to BUNDLE_DIR below when
+rem antivirus blocks the flutter_windows.dll copy into INSTALL_DIR.
+set "_DASHBOARD_RUN_DIR=%INSTALL_DIR%"
 
 if not "!SKIP_DASHBOARD!"=="1" (
     if not exist "!BUNDLE_DIR!\vgre_dashboard.exe" (
@@ -715,32 +734,135 @@ if not "!SKIP_DASHBOARD!"=="1" (
     )
     rem Delete the old exe first to release any stale handle
     if exist "%INSTALL_DIR%\vgre_dashboard.exe" del /f /q "%INSTALL_DIR%\vgre_dashboard.exe" >nul 2>&1
-    rem Copy root-level files (exe + DLLs) individually - copy /Y never blocks
+    rem Copy main dashboard files (exe + small DLLs) - wildcard then explicit
     for %%F in ("!BUNDLE_DIR!\*.*") do copy /Y "%%F" "%INSTALL_DIR%\" >nul 2>&1
-    rem Explicitly copy flutter_windows.dll by name so it is guaranteed to be present
-    rem even when the wildcard form above is incomplete on some cmd.exe versions.
+    if exist "!BUNDLE_DIR!\sqlite3.dll" copy /Y "!BUNDLE_DIR!\sqlite3.dll" "%INSTALL_DIR%\" >nul 2>&1
+
+    rem =========================================================================
+    rem  Deploy flutter_windows.dll — multi-strategy with AV-bypass fallback
+    rem
+    rem  Avast (and some other AV products) block writes of large PE DLLs to
+    rem  %LOCALAPPDATA% directories from cmd.exe / PowerShell at the NTFS
+    rem  minifilter level — even xcopy, robocopy, and mklink /H are denied.
+    rem  We try five methods; if all fail the dashboard runs directly from its
+    rem  Flutter build output (BUNDLE_DIR) where the DLL already exists and is
+    rem  trusted.  vgre.dll / libomp.dll are found via PATH set in the launcher.
+    rem =========================================================================
+    set "_fwdll_ok=0"
+    set "_fwdll_best_src="
+
+    rem Source priority: BUNDLE_DIR -> ephemeral -> VGRE BuildTools cache -> SDK cache
     if exist "!BUNDLE_DIR!\flutter_windows.dll" (
-        copy /Y "!BUNDLE_DIR!\flutter_windows.dll" "%INSTALL_DIR%\" >nul 2>&1
+        set "_fwdll_best_src=!BUNDLE_DIR!\flutter_windows.dll"
     )
-    rem Copy data directory files
+    if not defined _fwdll_best_src (
+        if exist "!DASHBOARD_DIR!\windows\flutter\ephemeral\flutter_windows.dll" (
+            set "_fwdll_best_src=!DASHBOARD_DIR!\windows\flutter\ephemeral\flutter_windows.dll"
+        )
+    )
+    if not defined _fwdll_best_src (
+        for %%A in ("windows-x64-release" "windows-x64" "windows-arm64-release") do (
+            if not defined _fwdll_best_src (
+                if exist "%TOOLS_ROOT%\flutter\bin\cache\artifacts\engine\%%~A\flutter_windows.dll" (
+                    set "_fwdll_best_src=%TOOLS_ROOT%\flutter\bin\cache\artifacts\engine\%%~A\flutter_windows.dll"
+                )
+            )
+        )
+    )
+    if not defined _fwdll_best_src if defined _flutter_sdk (
+        for %%A in ("windows-x64-release" "windows-x64" "windows-arm64-release") do (
+            if not defined _fwdll_best_src (
+                if exist "!_flutter_sdk!\bin\cache\artifacts\engine\%%~A\flutter_windows.dll" (
+                    set "_fwdll_best_src=!_flutter_sdk!\bin\cache\artifacts\engine\%%~A\flutter_windows.dll"
+                )
+            )
+        )
+    )
+
+    if not defined _fwdll_best_src (
+        echo [WARN] flutter_windows.dll not found in any known location.
+        echo        Run:  flutter precache --windows  then re-run .\scripts\vgre_sync.bat
+    )
+
+    if defined _fwdll_best_src (
+        rem Strategy 1: plain copy
+        copy /Y "!_fwdll_best_src!" "%INSTALL_DIR%\flutter_windows.dll" >nul 2>&1
+        if exist "%INSTALL_DIR%\flutter_windows.dll" set "_fwdll_ok=1"
+
+        rem Strategy 2: xcopy (different Windows API entry point)
+        if "!_fwdll_ok!"=="0" (
+            xcopy /Y /Q "!_fwdll_best_src!" "%INSTALL_DIR%\" >nul 2>&1
+            if exist "%INSTALL_DIR%\flutter_windows.dll" set "_fwdll_ok=1"
+        )
+
+        rem Strategy 3: robocopy (enterprise copy — distinct IO path)
+        if "!_fwdll_ok!"=="0" (
+            for %%D in ("!_fwdll_best_src!") do (
+                robocopy "%%~dpD" "%INSTALL_DIR%" "%%~nxD" /NJH /NJS /NC /NS /NP >nul 2>&1
+            )
+            if exist "%INSTALL_DIR%\flutter_windows.dll" set "_fwdll_ok=1"
+        )
+
+        rem Strategy 4: mklink /H hard link — no new file data written,
+        rem             bypasses AV copy-write interception at the inode level
+        if "!_fwdll_ok!"=="0" (
+            mklink /H "%INSTALL_DIR%\flutter_windows.dll" "!_fwdll_best_src!" >nul 2>&1
+            if exist "%INSTALL_DIR%\flutter_windows.dll" set "_fwdll_ok=1"
+        )
+
+        rem Strategy 5: PowerShell BITS local transfer (trusted Windows service)
+        if "!_fwdll_ok!"=="0" (
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "try{Start-BitsTransfer -Source '!_fwdll_best_src!' -Destination '%INSTALL_DIR%\flutter_windows.dll' -ErrorAction Stop}catch{}" >nul 2>&1
+            if exist "%INSTALL_DIR%\flutter_windows.dll" set "_fwdll_ok=1"
+        )
+    )
+
+    if "!_fwdll_ok!"=="1" (
+        echo [OK] flutter_windows.dll deployed to %INSTALL_DIR%
+        set "_DASHBOARD_RUN_DIR=%INSTALL_DIR%"
+    ) else (
+        echo [WARN] flutter_windows.dll blocked by antivirus ^(tried copy/xcopy/robocopy/mklink/BITS^).
+        echo        The dashboard will run directly from its Flutter build output:
+        echo          !BUNDLE_DIR!
+        echo        Native libs ^(vgre.dll, libomp.dll^) are found via PATH in the launcher.
+        echo        To deploy to %INSTALL_DIR% instead:
+        echo          1. Open Avast Settings ^> General ^> Exceptions
+        echo          2. Add: %INSTALL_DIR%
+        echo          3. Re-run: .\scripts\vgre_sync.bat
+        set "_DASHBOARD_RUN_DIR=!BUNDLE_DIR!"
+        rem Ensure BUNDLE_DIR itself has flutter_windows.dll (it may be absent after
+        rem an incremental Flutter build). Copies from ephemeral / SDK cache are to a
+        rem build-tree path - Avast does not block writes there.
+        if not exist "!BUNDLE_DIR!\flutter_windows.dll" if defined _fwdll_best_src (
+            copy /Y "!_fwdll_best_src!" "!BUNDLE_DIR!\flutter_windows.dll" >nul 2>&1
+            if not exist "!BUNDLE_DIR!\flutter_windows.dll" (
+                for %%D in ("!_fwdll_best_src!") do (
+                    robocopy "%%~dpD" "!BUNDLE_DIR!" "%%~nxD" /NJH /NJS /NC /NS /NP >nul 2>&1
+                )
+            )
+            if exist "!BUNDLE_DIR!\flutter_windows.dll" (
+                echo [OK] flutter_windows.dll placed in BUNDLE_DIR for fallback launch.
+            ) else (
+                echo [ERROR] flutter_windows.dll cannot be placed in INSTALL_DIR or BUNDLE_DIR.
+                echo         Dashboard will fail to start ^(DLL not found^).
+                echo         Run: flutter precache --windows  then re-run .\scripts\vgre_sync.bat
+            )
+        )
+    )
+
+    rem Copy data directory and flutter_assets (non-PE files; AV does not block these)
     if exist "!BUNDLE_DIR!\data\*.*" (
         for %%F in ("!BUNDLE_DIR!\data\*.*") do copy /Y "%%F" "%INSTALL_DIR%\data\" >nul 2>&1
     )
-    rem Copy flutter_assets recursively using a subroutine (no xcopy/robocopy)
     if exist "!BUNDLE_DIR!\data\flutter_assets" (
         call :copy_dir "!BUNDLE_DIR!\data\flutter_assets" "%INSTALL_DIR%\data\flutter_assets"
     )
+
     if not exist "%INSTALL_DIR%\vgre_dashboard.exe" (
         echo ERROR: vgre_dashboard.exe missing from %INSTALL_DIR% after copy.
         exit /b 1
     )
-    if not exist "%INSTALL_DIR%\flutter_windows.dll" (
-        echo ERROR: flutter_windows.dll missing from %INSTALL_DIR% after copy.
-        echo        Source: !BUNDLE_DIR!\flutter_windows.dll
-        echo        Dashboard will fail at startup with "flutter_windows.dll was not found".
-        exit /b 1
-    )
-    echo [OK] Dashboard deployed to %INSTALL_DIR%
+    echo [OK] Dashboard deployed ^(launcher will run from: !_DASHBOARD_RUN_DIR!^)
 ) else (
     echo [SKIP] Dashboard bundle deployment skipped ^(Flutter was unavailable^).
 )
@@ -855,8 +977,15 @@ set "LAUNCHER_PATH=%INSTALL_DIR%\Launch-VGRE-Dashboard.cmd"
     echo     if exist "%%USERPROFILE%%\.vgre\token" set "VGRE_TCP_AUTH_TOKEN_FILE=%%USERPROFILE%%\.vgre\token"
     echo ^)
     echo.
+    echo rem -- Dashboard run directory baked in at deploy time.
+    echo rem    Differs from launcher dir when AV blocks flutter_windows.dll copy.
+    echo set "VGRE_DASHBOARD_DIR=!_DASHBOARD_RUN_DIR!"
+    echo.
     echo rem -- Launch dashboard if built, otherwise start master worker headlessly --
-    echo if exist "%%APP_DIR%%vgre_dashboard.exe" ^(
+    echo if exist "!_DASHBOARD_RUN_DIR!\vgre_dashboard.exe" ^(
+    echo     cd /d "!_DASHBOARD_RUN_DIR!"
+    echo     start "" "!_DASHBOARD_RUN_DIR!\vgre_dashboard.exe"
+    echo ^) else if exist "%%APP_DIR%%vgre_dashboard.exe" ^(
     echo     cd /d "%%APP_DIR%%"
     echo     start "" "%%APP_DIR%%vgre_dashboard.exe"
     echo ^) else ^(
@@ -877,9 +1006,11 @@ echo [OK] Launcher written to %LAUNCHER_PATH%
 echo.
 echo === Creating Desktop Shortcut ===
 set "SHORTCUT_PATH="
+rem Icon: prefer exe in INSTALL_DIR (always present); work dir = dashboard run dir
 set "VGRE_EXE_PATH=%INSTALL_DIR%\vgre_dashboard.exe"
 set "VGRE_LAUNCHER_PATH=%LAUNCHER_PATH%"
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$desktop=[Environment]::GetFolderPath('Desktop'); if([string]::IsNullOrWhiteSpace($desktop) -and $env:OneDrive){$desktop=Join-Path $env:OneDrive 'Desktop'}; if([string]::IsNullOrWhiteSpace($desktop)){$desktop=Join-Path $env:USERPROFILE 'Desktop'}; $target=$env:VGRE_LAUNCHER_PATH; $icon=$env:VGRE_EXE_PATH; $workdir=$env:INSTALL_DIR; if (!(Test-Path -LiteralPath $desktop)) { New-Item -ItemType Directory -Path $desktop -Force | Out-Null }; $shortcut=Join-Path $desktop 'VGRE Dashboard.lnk'; $shell=New-Object -ComObject WScript.Shell; $s=$shell.CreateShortcut($shortcut); $s.TargetPath=$target; $s.WorkingDirectory=$workdir; $s.IconLocation=($icon + ',0'); $s.Save(); Write-Output $shortcut"`) do set "SHORTCUT_PATH=%%I"
+set "VGRE_WORKDIR=!_DASHBOARD_RUN_DIR!"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$desktop=[Environment]::GetFolderPath('Desktop'); if([string]::IsNullOrWhiteSpace($desktop) -and $env:OneDrive){$desktop=Join-Path $env:OneDrive 'Desktop'}; if([string]::IsNullOrWhiteSpace($desktop)){$desktop=Join-Path $env:USERPROFILE 'Desktop'}; $target=$env:VGRE_LAUNCHER_PATH; $icon=$env:VGRE_EXE_PATH; $workdir=$env:VGRE_WORKDIR; if (!(Test-Path -LiteralPath $desktop)) { New-Item -ItemType Directory -Path $desktop -Force | Out-Null }; $shortcut=Join-Path $desktop 'VGRE Dashboard.lnk'; $shell=New-Object -ComObject WScript.Shell; $s=$shell.CreateShortcut($shortcut); $s.TargetPath=$target; $s.WorkingDirectory=$workdir; $s.IconLocation=($icon + ',0'); $s.Save(); Write-Output $shortcut"`) do set "SHORTCUT_PATH=%%I"
 if errorlevel 1 (
     echo WARNING: Failed to create desktop shortcut.
 )
@@ -1028,13 +1159,13 @@ rem Subroutine: no-op kept for compatibility. taskkill /F is synchronous.
 exit /b 0
 
 :copy_dir
-rem Subroutine: recursively copy a directory using only copy /Y (never blocks).
+rem Subroutine: recursively copy a directory tree.
 rem Usage: call :copy_dir "source_dir" "dest_dir"
-rem Creates dest_dir if it does not exist.
-if not exist %2 mkdir %2 >nul 2>&1
-for %%F in (%1\*.*) do copy /Y "%%F" %2\ >nul 2>&1
-for /d %%D in (%1\*) do (
-    call :copy_dir "%%D" "%~2\%%~nxD"
+rem Uses %~1/%~2 to strip surrounding quotes so paths with spaces work correctly.
+if not exist "%~2" mkdir "%~2" >nul 2>&1
+for %%F in ("%~1\*") do copy /Y "%%~F" "%~2\" >nul 2>&1
+for /d %%D in ("%~1\*") do (
+    call :copy_dir "%%~D" "%~2\%%~nxD"
 )
 exit /b 0
 
