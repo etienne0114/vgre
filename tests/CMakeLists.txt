@@ -318,6 +318,22 @@ add_executable(test_cudnn_attention api/test_cudnn_attention.cpp)
 target_link_libraries(test_cudnn_attention PRIVATE vgre)
 add_test(NAME CudnnAttention COMMAND test_cudnn_attention)
 
+add_executable(test_cudnn_backend_v8 api/test_cudnn_backend_v8.cpp)
+target_link_libraries(test_cudnn_backend_v8 PRIVATE vgre)
+add_test(NAME CudnnBackendV8 COMMAND test_cudnn_backend_v8)
+
+add_executable(test_ptx_cross_module_link api/test_ptx_cross_module_link.cpp)
+target_link_libraries(test_ptx_cross_module_link PRIVATE vgre_cudart)
+add_test(NAME PTXCrossModuleLink COMMAND test_ptx_cross_module_link)
+
+add_executable(test_curand_mtgp32 api/test_curand_mtgp32.cpp)
+target_link_libraries(test_curand_mtgp32 PRIVATE vgre_cudart)
+add_test(NAME CuRANDMTGP32Uniformity COMMAND test_curand_mtgp32)
+
+add_executable(test_cusolver_batched api/test_cusolver_batched.cpp)
+target_link_libraries(test_cusolver_batched PRIVATE vgre_cudart)
+add_test(NAME CusolverBatchedAPIs COMMAND test_cusolver_batched)
+
 add_executable(test_memset2d_graph_kernelnode api/test_memset2d_graph_kernelnode.cpp)
 target_link_libraries(test_memset2d_graph_kernelnode PRIVATE vgre_cudart)
 add_test(NAME Memset2DGraphKernelNode COMMAND test_memset2d_graph_kernelnode)

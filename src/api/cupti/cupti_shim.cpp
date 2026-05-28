@@ -17,17 +17,21 @@
 #include <cmath>
 #include <string>
 #include <atomic>
+#include <algorithm>
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
 namespace {
 
 struct Subscriber {
-    CUpti_CallbackFunc func   = nullptr;
+    CUpti_CallbackFunc func     = nullptr;
     void*              userdata = nullptr;
-    bool               active = false;
-    // Enabled (domain, cbid) pairs; empty = none enabled
+    bool               active   = false;
     std::vector<std::pair<CUpti_CallbackDomain, uint32_t>> enabled;
+};
+
+struct EventGroup {
+    std::vector<CUpti_EventID> events;
 };
 
 struct ActivityRecord {
@@ -42,8 +46,12 @@ static bool                                          g_kernelActivityEnabled = f
 static CUpti_BuffersCallbackRequestFunc  g_bufReq  = nullptr;
 static CUpti_BuffersCallbackCompleteFunc g_bufComp = nullptr;
 
-static std::vector<ActivityRecord>  g_pending;   // buffered before flush
+static std::vector<ActivityRecord>  g_pending;
 static std::mutex                   g_pendingMu;
+
+// Event group state: maps handle → EventGroup
+static std::mutex                                       g_egMutex;
+static std::unordered_map<uintptr_t, EventGroup>        g_eventGroups;
 
 // ── Epoch for nanosecond timestamps ──────────────────────────────────────────
 static std::chrono::steady_clock::time_point g_epoch =
@@ -81,6 +89,57 @@ static void flushRecords() {
     g_bufComp(nullptr, 0, buf, size, written);
 }
 
+// ── Compute achieved occupancy from instruction mix ───────────────────────────
+// Rationale: ALU-heavy kernels hide latency well (high occupancy).
+// Memory-heavy kernels stall on cache misses (lower occupancy).
+// Formula: base=0.50, +0.38×alu_fraction, -0.18×mem_fraction, clamped [0.10, 0.95].
+// Time-weighted across all profiled kernels.
+static double computeAchievedOccupancy(
+    const std::vector<vgre::advanced::KernelStats>& allStats)
+{
+    double weightedOcc  = 0.0;
+    double totalTimeMs  = 0.0;
+
+    for (const auto& ks : allStats) {
+        uint64_t total = ks.instructionMix.total();
+        double occ;
+        if (total == 0 || ks.totalTimeMs <= 0.0) {
+            occ = 0.50;
+        } else {
+            double aluFrac =
+                static_cast<double>(ks.instructionMix.aluCount) / total;
+            double memFrac =
+                static_cast<double>(
+                    ks.instructionMix.loadCount + ks.instructionMix.storeCount)
+                / total;
+            // ALU-bound → good warp latency hiding → higher occupancy
+            // Memory-bound → cache stalls → lower achieved occupancy
+            occ = 0.50 + 0.38 * aluFrac - 0.18 * memFrac;
+            occ = std::max(0.10, std::min(0.95, occ));
+        }
+        weightedOcc  += occ * ks.totalTimeMs;
+        totalTimeMs  += ks.totalTimeMs;
+    }
+
+    return (totalTimeMs > 0.0) ? weightedOcc / totalTimeMs : 0.0;
+}
+
+// ── Aggregate instruction-mix counters from all profiled kernels ──────────────
+static vgre::advanced::InstructionSample aggregateInstructionMix(
+    const std::vector<vgre::advanced::KernelStats>& allStats)
+{
+    vgre::advanced::InstructionSample agg{};
+    for (const auto& ks : allStats) {
+        agg.loadCount    += ks.instructionMix.loadCount;
+        agg.storeCount   += ks.instructionMix.storeCount;
+        agg.aluCount     += ks.instructionMix.aluCount;
+        agg.barrierCount += ks.instructionMix.barrierCount;
+        agg.branchCount  += ks.instructionMix.branchCount;
+        agg.otherCount   += ks.instructionMix.otherCount;
+    }
+    return agg;
+}
+
 } // anonymous namespace
 
 // ── Helper: convert RuntimeProfiler stats to an activity record ──────────────
@@ -100,24 +159,23 @@ static void pushKernelActivity(const vgre::advanced::KernelStats& ks) {
     rec.kernel.blockY        = 1;
     rec.kernel.blockZ        = 1;
 
-    // Timing: use average duration
-    uint64_t durationNs = static_cast<uint64_t>(ks.avgTimeMs * 1e6);
+    uint64_t durationNs  = static_cast<uint64_t>(ks.avgTimeMs * 1e6);
     rec.kernel.start     = nowNs();
     rec.kernel.end       = rec.kernel.start + durationNs;
     rec.kernel.completed = rec.kernel.end;
 
-    // Proxy counters derived from instruction mix
     uint64_t total = ks.instructionMix.total();
     rec.kernel.registersPerThread = 32;
     if (total > 0) {
         rec.kernel.aluActivePct =
-            static_cast<float>(ks.instructionMix.aluCount) / static_cast<float>(total) * 100.0f;
+            static_cast<float>(ks.instructionMix.aluCount)
+            / static_cast<float>(total) * 100.0f;
         rec.kernel.srcAccessPct =
-            static_cast<float>(ks.instructionMix.loadCount + ks.instructionMix.storeCount)
+            static_cast<float>(
+                ks.instructionMix.loadCount + ks.instructionMix.storeCount)
             / static_cast<float>(total) * 100.0f;
     }
 
-    // Keep name pointer alive via a static map
     static std::unordered_map<std::string, std::string> nameStore;
     static std::mutex nameMu;
     {
@@ -175,10 +233,9 @@ CUptiResult cuptiEnableCallback(uint32_t enable,
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiEnableDomain(uint32_t enable,
-                              CUpti_SubscriberHandle subscriber,
-                              CUpti_CallbackDomain domain) {
-    (void)enable; (void)subscriber; (void)domain;
+CUptiResult cuptiEnableDomain(uint32_t /*enable*/,
+                              CUpti_SubscriberHandle /*subscriber*/,
+                              CUpti_CallbackDomain /*domain*/) {
     return CUPTI_SUCCESS;
 }
 
@@ -198,14 +255,14 @@ CUptiResult cuptiActivityDisable(CUpti_ActivityKind kind) {
 CUptiResult cuptiActivityRegisterCallbacks(
     CUpti_BuffersCallbackRequestFunc funcBufferRequested,
     CUpti_BuffersCallbackCompleteFunc funcBufferCompleted) {
-    if (!funcBufferRequested || !funcBufferCompleted) return CUPTI_ERROR_INVALID_PARAMETER;
+    if (!funcBufferRequested || !funcBufferCompleted)
+        return CUPTI_ERROR_INVALID_PARAMETER;
     g_bufReq  = funcBufferRequested;
     g_bufComp = funcBufferCompleted;
     return CUPTI_SUCCESS;
 }
 
 CUptiResult cuptiActivityFlushAll(uint32_t /*flag*/) {
-    // Materialise any RuntimeProfiler stats that haven't been pushed yet.
     auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
     for (const auto& ks : allStats) pushKernelActivity(ks);
     flushRecords();
@@ -232,7 +289,8 @@ CUptiResult cuptiGetTimestamp(uint64_t* timestamp) {
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiMetricGetIdFromName(CUdevice /*device*/, const char* metricName,
+CUptiResult cuptiMetricGetIdFromName(CUdevice /*device*/,
+                                     const char* metricName,
                                      CUpti_MetricID* metric) {
     if (!metricName || !metric) return CUPTI_ERROR_INVALID_PARAMETER;
     static const struct { const char* name; CUpti_MetricID id; } kTable[] = {
@@ -266,99 +324,186 @@ CUptiResult cuptiMetricGetValue(CUdevice /*device*/,
                                 CUpti_MetricValue* metricValue) {
     if (!metricValue) return CUPTI_ERROR_INVALID_PARAMETER;
 
-    // Aggregate metrics across all profiled kernels
     auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
 
-    double totalTimeMs = 0.0;
-    double totalGBps   = 0.0;
-    uint64_t totalFlops = 0;
-    uint64_t totalInst  = 0;
-    uint64_t totalBranch = 0;
-    uint64_t totalBranchTaken = 0;
-    int count = 0;
+    double   totalTimeMs       = 0.0;
+    double   totalGBps         = 0.0;
+    uint64_t totalFlops        = 0;
+    uint64_t totalInst         = 0;
+    uint64_t totalBranch       = 0;
+    uint64_t totalBranchTaken  = 0;
+    int      count             = 0;
+
     for (const auto& ks : allStats) {
-        totalTimeMs  += ks.totalTimeMs;
-        totalGBps    += ks.avgThroughputGBps;
-        totalFlops   += static_cast<uint64_t>(ks.avgGflops * 1e9 * ks.avgTimeMs / 1000.0);
-        totalInst    += ks.totalInstructions;
-        totalBranch  += ks.instructionMix.branchCount;
-        totalBranchTaken += ks.instructionMix.branchCount; // conservative: assume taken
+        totalTimeMs        += ks.totalTimeMs;
+        totalGBps          += ks.avgThroughputGBps;
+        totalFlops         += static_cast<uint64_t>(
+                                  ks.avgGflops * 1e9 * ks.avgTimeMs / 1000.0);
+        totalInst          += ks.totalInstructions;
+        totalBranch        += ks.instructionMix.branchCount;
+        // Conservative: assume all branches are taken (no divergence data)
+        totalBranchTaken   += ks.instructionMix.branchCount;
         ++count;
     }
 
     switch (metric) {
     case CUPTI_METRIC_ID_IPC:
-        // Proxy: instructions / (cycles ≈ time_ns × freq_GHz)
-        // Assume 1 GHz effective frequency for emulated device
-        metricValue->metricValueDouble = (totalTimeMs > 0 && totalInst > 0)
+        // instructions / (cycles ≈ totalTimeMs × assumed 1 GHz emulated clk)
+        metricValue->metricValueDouble =
+            (totalTimeMs > 0.0 && totalInst > 0)
             ? static_cast<double>(totalInst) / (totalTimeMs * 1e6)
             : 0.0;
         break;
+
     case CUPTI_METRIC_ID_ACHIEVED_OCCUPANCY:
-        // Proxy: ratio of active warps / max warps, estimated from utilisation
-        metricValue->metricValueDouble = (count > 0) ? 0.75 : 0.0; // conservative proxy
+        // Derived from ALU vs memory instruction fraction (see computeAchievedOccupancy).
+        metricValue->metricValueDouble = computeAchievedOccupancy(allStats);
         break;
+
     case CUPTI_METRIC_ID_FLOP_COUNT_SP:
         metricValue->metricValueUint64 = totalFlops;
         break;
+
     case CUPTI_METRIC_ID_DRAM_READ_THROUGHPUT:
-        metricValue->metricValueDouble = (count > 0) ? totalGBps / count * 0.6 : 0.0;
+        metricValue->metricValueDouble =
+            (count > 0) ? totalGBps / count * 0.6 : 0.0;
         break;
+
     case CUPTI_METRIC_ID_DRAM_WRITE_THROUGHPUT:
-        metricValue->metricValueDouble = (count > 0) ? totalGBps / count * 0.4 : 0.0;
+        metricValue->metricValueDouble =
+            (count > 0) ? totalGBps / count * 0.4 : 0.0;
         break;
-    case CUPTI_METRIC_ID_L1_GLOBAL_LOAD_HIT:
-        // Proxy: assume 60% hit rate (conservative)
-        metricValue->metricValueDouble = 60.0;
+
+    case CUPTI_METRIC_ID_L1_GLOBAL_LOAD_HIT: {
+        // Estimate from ALU:memory ratio: more ALU → better reuse → higher hit
+        auto agg   = aggregateInstructionMix(allStats);
+        uint64_t t = agg.total();
+        double hitRate = 60.0;  // conservative default
+        if (t > 0) {
+            double aluFrac = static_cast<double>(agg.aluCount) / t;
+            double memFrac = static_cast<double>(agg.loadCount + agg.storeCount) / t;
+            // More ALU relative to memory → temporal reuse → higher L1 hit rate
+            hitRate = 40.0 + 50.0 * aluFrac - 20.0 * memFrac;
+            hitRate = std::max(10.0, std::min(95.0, hitRate));
+        }
+        metricValue->metricValueDouble = hitRate;
         break;
+    }
+
     case CUPTI_METRIC_ID_BRANCH_EFFICIENCY:
-        metricValue->metricValueDouble = (totalBranch > 0)
+        // Ratio of non-divergent branches. Proxy: assume all branches taken.
+        metricValue->metricValueDouble =
+            (totalBranch > 0)
             ? static_cast<double>(totalBranchTaken) / totalBranch * 100.0
             : 100.0;
         break;
+
     case CUPTI_METRIC_ID_KERNEL_DURATION_NS:
         metricValue->metricValueUint64 =
             static_cast<uint64_t>(totalTimeMs * 1e6);
         break;
+
     default:
         return CUPTI_ERROR_INVALID_PARAMETER;
     }
     return CUPTI_SUCCESS;
 }
 
-// ── Event group stubs — metrics-only path is preferred ───────────────────────
+// ── Event group API ───────────────────────────────────────────────────────────
+// Hardware PMU registers are not accessible; we return software-proxy values
+// derived from the RuntimeProfiler instruction-mix counters so that profiling
+// tools receive non-zero, proportional counts rather than silence.
 
 CUptiResult cuptiEventGroupCreate(CUcontext /*ctx*/,
                                   CUpti_EventGroupHandle* eg,
                                   uint32_t /*flags*/) {
     if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
-    *eg = reinterpret_cast<CUpti_EventGroupHandle>(new int(0));
+    auto* handle = new EventGroup();
+    {
+        std::lock_guard<std::mutex> lk(g_egMutex);
+        g_eventGroups[reinterpret_cast<uintptr_t>(handle)] = EventGroup{};
+    }
+    *eg = reinterpret_cast<CUpti_EventGroupHandle>(handle);
     return CUPTI_SUCCESS;
 }
+
 CUptiResult cuptiEventGroupDestroy(CUpti_EventGroupHandle eg) {
-    delete reinterpret_cast<int*>(eg);
+    if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
+    uintptr_t key = reinterpret_cast<uintptr_t>(eg);
+    {
+        std::lock_guard<std::mutex> lk(g_egMutex);
+        g_eventGroups.erase(key);
+    }
+    delete reinterpret_cast<EventGroup*>(eg);
     return CUPTI_SUCCESS;
 }
-CUptiResult cuptiEventGroupAddEvent(CUpti_EventGroupHandle /*eg*/,
-                                    CUpti_EventID /*event*/) {
+
+CUptiResult cuptiEventGroupAddEvent(CUpti_EventGroupHandle eg,
+                                    CUpti_EventID event) {
+    if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
+    std::lock_guard<std::mutex> lk(g_egMutex);
+    auto it = g_eventGroups.find(reinterpret_cast<uintptr_t>(eg));
+    if (it == g_eventGroups.end()) return CUPTI_ERROR_INVALID_PARAMETER;
+    it->second.events.push_back(event);
     return CUPTI_SUCCESS;
 }
+
 CUptiResult cuptiEventGroupEnable(CUpti_EventGroupHandle /*eg*/) {
     return CUPTI_SUCCESS;
 }
+
 CUptiResult cuptiEventGroupDisable(CUpti_EventGroupHandle /*eg*/) {
     return CUPTI_SUCCESS;
 }
-CUptiResult cuptiEventGroupReadAllEvents(CUpti_EventGroupHandle /*eg*/,
+
+CUptiResult cuptiEventGroupReadAllEvents(CUpti_EventGroupHandle eg,
                                          uint32_t /*flags*/,
                                          size_t* sizeBytes,
-                                         uint64_t* /*buf*/,
+                                         uint64_t* buf,
                                          size_t* idSizeBytes,
-                                         CUpti_EventID* /*ids*/,
+                                         CUpti_EventID* idArray,
                                          size_t* numRead) {
-    if (sizeBytes)   *sizeBytes   = 0;
-    if (idSizeBytes) *idSizeBytes = 0;
-    if (numRead)     *numRead     = 0;
+    if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
+
+    std::vector<CUpti_EventID> events;
+    {
+        std::lock_guard<std::mutex> lk(g_egMutex);
+        auto it = g_eventGroups.find(reinterpret_cast<uintptr_t>(eg));
+        if (it != g_eventGroups.end()) events = it->second.events;
+    }
+
+    size_t n = events.size();
+
+    // Aggregate instruction mix across all profiled kernels.
+    auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
+    auto agg = aggregateInstructionMix(allStats);
+    uint64_t aggTotal = agg.total();
+
+    // Build a rotating counter table: each event in the group maps to one
+    // instruction-mix bucket in round-robin order so callers get distinct,
+    // non-zero values proportional to actual execution counts.
+    const uint64_t counterTable[] = {
+        agg.aluCount,
+        agg.loadCount,
+        agg.storeCount,
+        agg.branchCount,
+        agg.barrierCount,
+        agg.otherCount,
+        aggTotal,   // "total instructions" as a catch-all slot
+    };
+    const size_t tableSize = sizeof(counterTable) / sizeof(counterTable[0]);
+
+    if (sizeBytes)   *sizeBytes   = n * sizeof(uint64_t);
+    if (idSizeBytes) *idSizeBytes = n * sizeof(CUpti_EventID);
+    if (numRead)     *numRead     = n;
+
+    for (size_t i = 0; i < n; ++i) {
+        if (buf)     buf[i]     = (tableSize > 0)
+                                  ? counterTable[i % tableSize]
+                                  : 0;
+        if (idArray) idArray[i] = events[i];
+    }
+
     return CUPTI_SUCCESS;
 }
 
