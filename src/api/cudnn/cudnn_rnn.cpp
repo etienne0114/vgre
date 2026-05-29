@@ -613,4 +613,393 @@ cudnnStatus_t cudnnRNNBackwardWeights(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// ── RNNData descriptor (for Ex variants) ────────────────────────────────────
+cudnnStatus_t cudnnCreateRNNDataDescriptor(cudnnRNNDataDescriptor_t* d) {
+    if (!d) return CUDNN_STATUS_INVALID_VALUE;
+    *d = new cudnnRNNData_st();
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnDestroyRNNDataDescriptor(cudnnRNNDataDescriptor_t d) {
+    delete d;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnSetRNNDataDescriptor(
+    cudnnRNNDataDescriptor_t d,
+    cudnnDataType_t dataType,
+    cudnnRNNDataLayout_t layout,
+    int maxSeqLength,
+    int batchSize,
+    int vectorSize,
+    const int* seqLengthArray,
+    void* paddingFill)
+{
+    if (!d || !seqLengthArray) return CUDNN_STATUS_INVALID_VALUE;
+    d->dataType     = dataType;
+    d->layout       = layout;
+    d->maxSeqLength = maxSeqLength;
+    d->batchSize    = batchSize;
+    d->vectorSize   = vectorSize;
+    d->seqLengthArray.assign(seqLengthArray, seqLengthArray + batchSize);
+    (void)paddingFill;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetRNNDataDescriptor(
+    cudnnRNNDataDescriptor_t d,
+    cudnnDataType_t* dataType,
+    cudnnRNNDataLayout_t* layout,
+    int* maxSeqLength,
+    int* batchSize,
+    int* vectorSize,
+    int arrayLengthRequested,
+    int* seqLengthArray)
+{
+    if (!d) return CUDNN_STATUS_INVALID_VALUE;
+    if (dataType)     *dataType    = d->dataType;
+    if (layout)       *layout      = d->layout;
+    if (maxSeqLength) *maxSeqLength = d->maxSeqLength;
+    if (batchSize)    *batchSize   = d->batchSize;
+    if (vectorSize)   *vectorSize  = d->vectorSize;
+    if (seqLengthArray && arrayLengthRequested > 0) {
+        int n = std::min(arrayLengthRequested, (int)d->seqLengthArray.size());
+        for (int i = 0; i < n; ++i) seqLengthArray[i] = d->seqLengthArray[i];
+    }
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── RNNForwardInferenceEx / RNNForwardTrainingEx ─────────────────────────────
+static cudnnStatus_t rnn_forward_ex(
+    cudnnRNNDescriptor_t      rnnDesc,
+    cudnnRNNDataDescriptor_t  xD,   const void* x,
+    cudnnTensorDescriptor_t   hxDesc, const void* hx,
+    cudnnTensorDescriptor_t   cxDesc, const void* cx,
+    cudnnFilterDescriptor_t   wDesc,  const void* w,
+    cudnnRNNDataDescriptor_t  yD,   void* y,
+    cudnnTensorDescriptor_t   hyDesc, void* hy,
+    cudnnTensorDescriptor_t   cyDesc, void* cy,
+    void* rsv, size_t rsvSz)
+{
+    if (!rnnDesc || !xD || !x || !yD || !y || !w) return CUDNN_STATUS_INVALID_VALUE;
+    (void)hxDesc; (void)cxDesc; (void)wDesc; (void)hyDesc; (void)cyDesc;
+
+    auto* rd = (RNNDesc*)rnnDesc;
+    int T  = xD->maxSeqLength;
+    int B  = xD->batchSize;
+    int I  = xD->vectorSize;
+    int H  = rd->hiddenSize;
+
+    if (rsv) memset(rsv, 0, rsvSz);
+    cudnnStatus_t st = rnn_forward(
+        rd->mode, rd->numLayers, H, T, B, I,
+        (const float*)w, (const float*)hx, (const float*)cx,
+        (const float*)x, (float*)y, (float*)hy, (float*)cy, (float*)rsv);
+    if (st != CUDNN_STATUS_SUCCESS) return st;
+
+    // Mask output past each sample's actual sequence length.
+    int outVec = H;
+    bool seqFirst = (yD->layout == 0 || yD->layout == 1);
+    for (int n = 0; n < B; ++n) {
+        int slen = (n < (int)yD->seqLengthArray.size()) ? yD->seqLengthArray[n] : T;
+        for (int t = slen; t < T; ++t) {
+            float* dst;
+            if (seqFirst)
+                dst = (float*)y + (t * B + n) * outVec;
+            else
+                dst = (float*)y + (n * T + t) * outVec;
+            memset(dst, 0, outVec * sizeof(float));
+        }
+    }
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnRNNForwardInferenceEx(
+    cudnnHandle_t,
+    cudnnRNNDescriptor_t rnnDesc,
+    cudnnRNNDataDescriptor_t xD, const void* x,
+    cudnnTensorDescriptor_t hxDesc, const void* hx,
+    cudnnTensorDescriptor_t cxDesc, const void* cx,
+    cudnnFilterDescriptor_t wDesc, const void* w,
+    cudnnRNNDataDescriptor_t yD, void* y,
+    cudnnTensorDescriptor_t hyDesc, void* hy,
+    cudnnTensorDescriptor_t cyDesc, void* cy,
+    void*, size_t,
+    void*, size_t)
+{
+    return rnn_forward_ex(rnnDesc, xD, x, hxDesc, hx, cxDesc, cx,
+                          wDesc, w, yD, y, hyDesc, hy, cyDesc, cy,
+                          nullptr, 0);
+}
+
+cudnnStatus_t cudnnRNNForwardTrainingEx(
+    cudnnHandle_t,
+    cudnnRNNDescriptor_t rnnDesc,
+    cudnnRNNDataDescriptor_t xD, const void* x,
+    cudnnTensorDescriptor_t hxDesc, const void* hx,
+    cudnnTensorDescriptor_t cxDesc, const void* cx,
+    cudnnFilterDescriptor_t wDesc, const void* w,
+    cudnnRNNDataDescriptor_t yD, void* y,
+    cudnnTensorDescriptor_t hyDesc, void* hy,
+    cudnnTensorDescriptor_t cyDesc, void* cy,
+    void*, size_t,
+    void* rsv, size_t rsvSz,
+    void*, size_t)
+{
+    return rnn_forward_ex(rnnDesc, xD, x, hxDesc, hx, cxDesc, cx,
+                          wDesc, w, yD, y, hyDesc, hy, cyDesc, cy,
+                          rsv, rsvSz);
+}
+
+cudnnStatus_t cudnnRNNBackwardDataEx(
+    cudnnHandle_t,
+    cudnnRNNDescriptor_t rnnDesc,
+    cudnnRNNDataDescriptor_t yD,   const void* y,
+    cudnnRNNDataDescriptor_t dyD,  const void* dy,
+    cudnnRNNDataDescriptor_t,      const void*,
+    cudnnTensorDescriptor_t,       const void* dhy,
+    cudnnTensorDescriptor_t,       const void* dcy,
+    cudnnFilterDescriptor_t,       const void* w,
+    cudnnTensorDescriptor_t,       const void* hx,
+    cudnnTensorDescriptor_t,       const void* cx,
+    cudnnRNNDataDescriptor_t dxD,  void* dx,
+    cudnnTensorDescriptor_t,       void* dhx,
+    cudnnTensorDescriptor_t,       void* dcx,
+    void*, size_t,
+    void* rsv, size_t rsvSz,
+    void*, size_t)
+{
+    if (!rnnDesc || !dy || !dx || !w || !rsv) return CUDNN_STATUS_INVALID_VALUE;
+    (void)y; (void)dxD;
+    auto* rd = (RNNDesc*)rnnDesc;
+    int H  = rd->hiddenSize, nL = rd->numLayers;
+    int T  = (dyD && dyD->maxSeqLength > 0) ? dyD->maxSeqLength : 1;
+    int B  = (dyD && dyD->batchSize    > 0) ? dyD->batchSize    : 1;
+    int I  = (yD  && yD->vectorSize    > 0) ? yD->vectorSize    : H;
+    (void)yD; (void)dyD;
+
+    cudnnRNNMode_t mode = rd->mode;
+    bool isLSTM = (mode == CUDNN_LSTM), isGRU = (mode == CUDNN_GRU);
+    bool relu = (mode == CUDNN_RNN_RELU);
+    int fs = fwd_slots(mode), bs = bwd_slots(mode);
+
+    const float* wf  = (const float*)w;
+    const float* hxf = (const float*)hx;
+    const float* cxf = (const float*)cx;
+    const float* dyf = (const float*)dy;
+    const float* dhyf= (const float*)dhy;
+    const float* dcyf= (const float*)dcy;
+    float*       dxf = (float*)dx;
+    float*       dhxf= (float*)dhx;
+    float*       dcxf= (float*)dcx;
+
+    const float* rsv_f = (const float*)rsv;
+    size_t partA = (size_t)nL * T * B * H;
+    size_t partB = (size_t)nL * T * B * fs * H;
+    const float* fwd_g = rsv_f + partA;
+    float*       dpre  = (float*)rsv + partA + partB;   // Part C: bwd_dpre
+
+    memset(dpre, 0, (size_t)nL * T * B * bs * H * sizeof(float));
+    if (dxf) memset(dxf, 0, (size_t)T * B * I * sizeof(float));
+
+    // Simplified BPTT: reverse timesteps per layer.
+    std::vector<float> dh((size_t)nL * B * H, 0.0f);
+    std::vector<float> dc((size_t)nL * B * H, 0.0f);
+    if (dhyf) memcpy(dh.data(), dhyf, (size_t)nL * B * H * sizeof(float));
+    if (dcyf) memcpy(dc.data(), dcyf, (size_t)nL * B * H * sizeof(float));
+
+    for (int l = nL - 1; l >= 0; --l) {
+        int li = (l == 0) ? I : H;
+        size_t wOff = lw_off(mode, H, I, l);
+        LW lw = get_lw(mode, H, I, wf + wOff);
+        float* dh_l = dh.data() + (size_t)l * B * H;
+        float* dc_l = dc.data() + (size_t)l * B * H;
+        const float* h_store = rsv_f + (size_t)l * T * B * H;
+        const float* fg_l    = fwd_g + (size_t)l * T * B * fs * H;
+        float* dp_l          = dpre  + (size_t)l * T * B * bs * H;
+
+        for (int t = T - 1; t >= 0; --t) {
+            const float* dyo_t = (l == nL-1) ? dyf + (size_t)t*B*H : nullptr;
+            float* dx_t  = (l == 0)    ? dxf + (size_t)t*B*I : nullptr;
+            const float* fg_t = fg_l + (size_t)t * B * fs * H;
+            float* dp_t       = dp_l + (size_t)t * B * bs * H;
+            const float* hp_t = (t > 0) ? h_store + (size_t)(t-1)*B*H : hxf ? hxf+(size_t)l*B*H : nullptr;
+
+            for (int n = 0; n < B; ++n) {
+                float* dh_n  = dh_l + n*H;
+                float* dc_n  = dc_l + n*H;
+                const float* dyo_n = dyo_t ? dyo_t + n*H : nullptr;
+                float* dp_n  = dp_t + n*bs*H;
+
+                if (isLSTM) {
+                    // fg layout: i,f,g,o,c  (indices 0-4)
+                    const float* fg_n = fg_t + n*fs*H;
+                    std::vector<float> dct(H);
+                    for (int j = 0; j < H; ++j) {
+                        float do_ = dyo_n ? dyo_n[j] : 0.0f;
+                        float dh_j = dh_n[j] + do_;
+                        float ct = fg_n[4*H+j];
+                        float ot = fg_n[3*H+j];
+                        // dC from output gate path
+                        float tanh_ct = tanhf(ct);
+                        float dct_j = dh_j * ot * (1.f - tanh_ct*tanh_ct) + dc_n[j];
+                        dct[j] = dct_j;
+                        // gate gradients (pre-activation)
+                        float ft = fg_n[1*H+j];
+                        dp_n[0*H+j] = dct_j * fg_n[2*H+j] * fg_n[0*H+j]*(1.f-fg_n[0*H+j]); // di
+                        dp_n[1*H+j] = dct_j * (t>0?hp_t[n*H+j]:0.f) * ft*(1.f-ft);           // df (approx)
+                        dp_n[2*H+j] = dct_j * fg_n[0*H+j] * (1.f - fg_n[2*H+j]*fg_n[2*H+j]);// dg
+                        dp_n[3*H+j] = dh_j  * tanh_ct * ot*(1.f-ot);                          // do
+                        dc_n[j]     = dct_j * ft;
+                    }
+                    // propagate dh to previous timestep/layer via W_hh/W_ih
+                    if (l == nL-1) {
+                        for (int j=0;j<H;++j) dh_n[j] = 0.f;
+                        for (int s=0;s<4;++s)
+                            for (int j=0;j<H;++j)
+                                for (int k=0;k<H;++k)
+                                    dh_n[k] += dp_n[s*H+j]*lw.W_hh[s*H*H+j*H+k];
+                    }
+                    if (dx_t)
+                        for (int s=0;s<4;++s)
+                            for (int j=0;j<H;++j)
+                                for (int k=0;k<li;++k)
+                                    dx_t[n*li+k] += dp_n[s*H+j]*lw.W_ih[s*H*li+j*li+k];
+                } else if (isGRU) {
+                    const float* fg_n = fg_t + n*fs*H;
+                    for (int j=0;j<H;++j) {
+                        float dyo_j = (dyo_n?dyo_n[j]:0.f) + dh_n[j];
+                        float zt = fg_n[1*H+j], nt = fg_n[2*H+j];
+                        float dnt = dyo_j*(1.f-zt)*(1.f-nt*nt);
+                        float dzt = dyo_j*(-(hp_t?hp_t[n*H+j]:0.f)+nt)*zt*(1.f-zt);
+                        float rt  = fg_n[0*H+j];
+                        dp_n[0*H+j] = dnt*(hp_t?hp_t[n*H+j]:0.f)*rt*(1.f-rt);  // dr
+                        dp_n[1*H+j] = dzt;                                        // dz
+                        dp_n[2*H+j] = dnt;                                        // dn_ih
+                        dp_n[3*H+j] = dnt*rt;                                     // dn_hh
+                        dh_n[j]     = dyo_j * zt;
+                    }
+                    if (dx_t)
+                        for (int s=0;s<3;++s)
+                            for (int j=0;j<H;++j)
+                                for (int k=0;k<li;++k)
+                                    dx_t[n*li+k] += dp_n[s*H+j]*lw.W_ih[s*H*li+j*li+k];
+                } else {
+                    const float* fg_n = fg_t + n*fs*H;
+                    for (int j=0;j<H;++j) {
+                        float dyo_j = (dyo_n?dyo_n[j]:0.f)+dh_n[j];
+                        float ht = fg_n[j];
+                        dp_n[j] = relu ? (ht>0?dyo_j:0.f) : dyo_j*(1.f-ht*ht);
+                        dh_n[j] = 0.f;
+                        for (int k=0;k<H;++k) dh_n[k] += dp_n[j]*lw.W_hh[j*H+k];
+                    }
+                    if (dx_t)
+                        for (int j=0;j<H;++j)
+                            for (int k=0;k<li;++k)
+                                dx_t[n*li+k] += dp_n[j]*lw.W_ih[j*li+k];
+                }
+            }
+        }
+        if (dhxf) memcpy(dhxf+(size_t)l*B*H, dh_l, (size_t)B*H*sizeof(float));
+        if (dcxf) memcpy(dcxf+(size_t)l*B*H, dc_l, (size_t)B*H*sizeof(float));
+    }
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnRNNBackwardWeightsEx(
+    cudnnHandle_t,
+    cudnnRNNDescriptor_t rnnDesc,
+    cudnnRNNDataDescriptor_t xD, const void* x,
+    cudnnTensorDescriptor_t,     const void* hx,
+    cudnnRNNDataDescriptor_t yD, const void* y,
+    void*, size_t,
+    void* rsv, size_t rsvSz,
+    cudnnFilterDescriptor_t, void* dw,
+    void*, size_t)
+{
+    if (!rnnDesc || !x || !y || !dw || !rsv) return CUDNN_STATUS_INVALID_VALUE;
+    (void)hx;
+    auto* rd = (RNNDesc*)rnnDesc;
+    int H  = rd->hiddenSize;
+    int nL = rd->numLayers;
+    int T  = (xD && xD->maxSeqLength > 0) ? xD->maxSeqLength : 1;
+    int B  = (xD && xD->batchSize    > 0) ? xD->batchSize    : 1;
+    int I  = (xD && xD->vectorSize   > 0) ? xD->vectorSize   : H;
+    (void)yD;
+
+    cudnnRNNMode_t mode = rd->mode;
+    bool isLSTM = (mode == CUDNN_LSTM), isGRU = (mode == CUDNN_GRU);
+    int gs = isLSTM ? 4 : (isGRU ? 3 : 1);
+    int fs = fwd_slots(mode), bs_slots = bwd_slots(mode);
+    size_t lpc_val = lpc(mode, H, I);
+
+    const float* xf  = (const float*)x;
+    const float* rsv_f = (const float*)rsv;
+    float*       dwf = (float*)dw;
+
+    // Reserve layout: Part A h_store [nL×T×B×H], Part B fwd_gates, Part C bwd_dpre
+    size_t partA = (size_t)nL * T * B * H;
+    size_t partB = (size_t)nL * T * B * fs * H;
+    const float* dpre = rsv_f + partA + partB;  // Part C
+
+    for (int l = 0; l < nL; ++l) {
+        int li = (l == 0) ? I : H;
+        float* dw_l = dwf + lw_off(mode, H, I, l);
+        LWm dlw = get_lwm(mode, H, I, dw_l);
+
+        const float* h_store = rsv_f + l * T * B * H;
+        const float* dp_l    = dpre  + l * T * B * bs_slots * H;
+
+        for (int t = 0; t < T; ++t) {
+            const float* x_t  = (l == 0) ? xf + t * B * I : (h_store - (size_t)T * B * H) + t * B * H;
+            if (l == 0) x_t = xf + t * B * I;
+            const float* hp   = (t > 0) ? h_store + (t-1) * B * H : nullptr;
+            const float* dp   = dp_l + t * B * bs_slots * H;
+
+            for (int n = 0; n < B; ++n) {
+                const float* xt_n = x_t ? x_t + n * li : nullptr;
+                const float* hp_n = hp  ? hp  + n * H  : nullptr;
+                if (isLSTM) {
+                    for (int s = 0; s < 4; ++s) {
+                        for (int j = 0; j < H; ++j) {
+                            float d = dp[(n*4+s)*H+j];
+                            if (!d) continue;
+                            dlw.b_ih[s*H+j] += d;
+                            if (dlw.b_hh) dlw.b_hh[s*H+j] += d;
+                            if (xt_n) for (int k=0;k<li;++k) dlw.W_ih[(s*H+j)*li+k] += d*xt_n[k];
+                            if (hp_n) for (int k=0;k<H; ++k) dlw.W_hh[(s*H+j)*H +k] += d*hp_n[k];
+                        }
+                    }
+                } else if (isGRU) {
+                    for (int j = 0; j < H; ++j) {
+                        float dr=dp[(n*4+0)*H+j], dz=dp[(n*4+1)*H+j];
+                        float dn=dp[(n*4+2)*H+j], dnr=dp[(n*4+3)*H+j];
+                        dlw.b_ih[0*H+j]+=dr; dlw.b_ih[1*H+j]+=dz; dlw.b_ih[2*H+j]+=dn;
+                        if (dlw.b_hh) { dlw.b_hh[0*H+j]+=dr; dlw.b_hh[1*H+j]+=dz; dlw.b_hh[2*H+j]+=dnr; }
+                        if (xt_n) for (int k=0;k<li;++k) {
+                            dlw.W_ih[(0*H+j)*li+k]+=dr*xt_n[k];
+                            dlw.W_ih[(1*H+j)*li+k]+=dz*xt_n[k];
+                            dlw.W_ih[(2*H+j)*li+k]+=dn*xt_n[k];
+                        }
+                        if (hp_n) for (int k=0;k<H;++k) {
+                            dlw.W_hh[(0*H+j)*H+k]+=dr *hp_n[k];
+                            dlw.W_hh[(1*H+j)*H+k]+=dz *hp_n[k];
+                            dlw.W_hh[(2*H+j)*H+k]+=dnr*hp_n[k];
+                        }
+                    }
+                } else {
+                    for (int j = 0; j < H; ++j) {
+                        float d = dp[(n*1+0)*H+j];
+                        if (!d) continue;
+                        dlw.b_ih[j] += d;
+                        if (xt_n) for (int k=0;k<li;++k) dlw.W_ih[j*li+k] += d*xt_n[k];
+                        if (hp_n) for (int k=0;k<H; ++k) dlw.W_hh[j*H +k] += d*hp_n[k];
+                    }
+                }
+            }
+        }
+    }
+    return CUDNN_STATUS_SUCCESS;
+}
+
 } // extern "C"

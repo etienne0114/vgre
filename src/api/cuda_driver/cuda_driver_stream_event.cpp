@@ -1,6 +1,21 @@
 // CUDA Driver API — cuda driver stream event
 
 #include "cuda_driver_internal.h"
+#include <atomic>
+#include <chrono>
+#include <thread>
+
+// ── cuStreamWaitValue / cuStreamWriteValue flag constants ─────────────────────
+// (Defined here; not yet in cuda_driver_internal.h)
+static constexpr unsigned int CU_STREAM_WAIT_VALUE_GEQ  = 0x0;
+static constexpr unsigned int CU_STREAM_WAIT_VALUE_EQ   = 0x1;
+static constexpr unsigned int CU_STREAM_WAIT_VALUE_AND  = 0x2;
+static constexpr unsigned int CU_STREAM_WAIT_VALUE_NOR  = 0x3;
+static constexpr unsigned int CU_STREAM_WAIT_VALUE_FLUSH = 0x40000000u;
+static constexpr CUresult CUDA_ERROR_TIMEOUT = 6;
+
+using cuuint32_t = unsigned int;
+using cuuint64_t = unsigned long long;
 
 extern "C" {
 
@@ -133,6 +148,80 @@ CUresult cuEventElapsedTime(float *ms, CUevent hStart, CUevent hEnd) {
 CUresult cuEventDestroy(CUevent hEvent) {
   auto err = vgre::api::CUDAInterceptor::instance().eventDestroy(hEvent);
   return toCU(err);
+}
+
+// ── cuStreamWaitValue32 / cuStreamWriteValue32 ────────────────────────────────
+// Stream-ordered memory polling. In VGRE all streams execute serially on the
+// host so memory is directly accessible; implement as a spin-wait.
+
+CUresult cuStreamWaitValue32(CUstream /*hStream*/, CUdeviceptr addr,
+                              cuuint32_t value, unsigned int flags) {
+  if (!addr) return CUDA_ERROR_INVALID_VALUE;
+  volatile uint32_t* ptr = reinterpret_cast<volatile uint32_t*>(
+      static_cast<uintptr_t>(reinterpret_cast<size_t>(addr)));
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  unsigned int cmpFlags = flags & 0x3u;
+  while (true) {
+    uint32_t cur = *ptr;
+    bool cond = false;
+    switch (cmpFlags) {
+    case CU_STREAM_WAIT_VALUE_GEQ: cond = (cur >= value); break;
+    case CU_STREAM_WAIT_VALUE_EQ:  cond = (cur == value); break;
+    case CU_STREAM_WAIT_VALUE_AND: cond = (cur &  value) != 0; break;
+    case CU_STREAM_WAIT_VALUE_NOR: cond = (cur |  value) == 0; break;
+    default: cond = (cur >= value); break;
+    }
+    if (cond) break;
+    if (std::chrono::steady_clock::now() > deadline) return CUDA_ERROR_TIMEOUT;
+    std::this_thread::yield();
+  }
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return CUDA_SUCCESS;
+}
+
+CUresult cuStreamWaitValue64(CUstream /*hStream*/, CUdeviceptr addr,
+                              cuuint64_t value, unsigned int flags) {
+  if (!addr) return CUDA_ERROR_INVALID_VALUE;
+  volatile uint64_t* ptr = reinterpret_cast<volatile uint64_t*>(
+      static_cast<uintptr_t>(reinterpret_cast<size_t>(addr)));
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  unsigned int cmpFlags = flags & 0x3u;
+  while (true) {
+    uint64_t cur = *ptr;
+    bool cond = false;
+    switch (cmpFlags) {
+    case CU_STREAM_WAIT_VALUE_GEQ: cond = (cur >= value); break;
+    case CU_STREAM_WAIT_VALUE_EQ:  cond = (cur == value); break;
+    case CU_STREAM_WAIT_VALUE_AND: cond = (cur &  value) != 0; break;
+    case CU_STREAM_WAIT_VALUE_NOR: cond = (cur |  value) == 0; break;
+    default: cond = (cur >= value); break;
+    }
+    if (cond) break;
+    if (std::chrono::steady_clock::now() > deadline) return CUDA_ERROR_TIMEOUT;
+    std::this_thread::yield();
+  }
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return CUDA_SUCCESS;
+}
+
+CUresult cuStreamWriteValue32(CUstream /*hStream*/, CUdeviceptr addr,
+                               cuuint32_t value, unsigned int /*flags*/) {
+  if (!addr) return CUDA_ERROR_INVALID_VALUE;
+  volatile uint32_t* ptr = reinterpret_cast<volatile uint32_t*>(
+      static_cast<uintptr_t>(reinterpret_cast<size_t>(addr)));
+  std::atomic_thread_fence(std::memory_order_release);
+  *ptr = value;
+  return CUDA_SUCCESS;
+}
+
+CUresult cuStreamWriteValue64(CUstream /*hStream*/, CUdeviceptr addr,
+                               cuuint64_t value, unsigned int /*flags*/) {
+  if (!addr) return CUDA_ERROR_INVALID_VALUE;
+  volatile uint64_t* ptr = reinterpret_cast<volatile uint64_t*>(
+      static_cast<uintptr_t>(reinterpret_cast<size_t>(addr)));
+  std::atomic_thread_fence(std::memory_order_release);
+  *ptr = static_cast<uint64_t>(value);
+  return CUDA_SUCCESS;
 }
 
 } // extern "C"

@@ -457,3 +457,69 @@ struct MultiHeadAttnDesc {
     int batchSize;
     float scaling;
 };
+
+// ── Pointwise operation modes (cudnnPointwiseMode_t) ─────────────────────────
+// Used by CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR and
+// CUDNN_BACKEND_POINTWISE_DESCRIPTOR (the mode sub-descriptor).
+enum cudnnPointwiseMode_t {
+    CUDNN_POINTWISE_ADD           = 0,   // binary: Y = alpha1*X + alpha2*B
+    CUDNN_POINTWISE_MUL           = 1,   // binary: Y = alpha1*X * alpha2*B
+    CUDNN_POINTWISE_MIN           = 2,
+    CUDNN_POINTWISE_MAX           = 3,
+    CUDNN_POINTWISE_SQRT          = 4,   // unary
+    CUDNN_POINTWISE_RELU_FWD      = 5,
+    CUDNN_POINTWISE_TANH_FWD      = 6,
+    CUDNN_POINTWISE_SIGMOID_FWD   = 7,
+    CUDNN_POINTWISE_ELU_FWD       = 8,
+    CUDNN_POINTWISE_GELU_FWD      = 9,
+    CUDNN_POINTWISE_SOFTPLUS_FWD  = 10,
+    CUDNN_POINTWISE_SWISH_FWD     = 11,
+    CUDNN_POINTWISE_RELU_BWD      = 12,
+    CUDNN_POINTWISE_TANH_BWD      = 13,
+    CUDNN_POINTWISE_SIGMOID_BWD   = 14,
+    CUDNN_POINTWISE_ELU_BWD       = 15,
+    CUDNN_POINTWISE_GELU_BWD      = 16,
+    CUDNN_POINTWISE_SOFTPLUS_BWD  = 17,
+    CUDNN_POINTWISE_SWISH_BWD     = 18,
+    CUDNN_POINTWISE_DIV           = 19,
+    CUDNN_POINTWISE_ADD_SQUARE    = 20,
+    CUDNN_POINTWISE_EXP           = 21,
+    CUDNN_POINTWISE_LOG           = 22,
+    CUDNN_POINTWISE_NEG           = 23,
+    CUDNN_POINTWISE_MOD           = 24,
+    CUDNN_POINTWISE_POW           = 25,
+    CUDNN_POINTWISE_ABS           = 26,
+    CUDNN_POINTWISE_CEIL          = 27,
+    CUDNN_POINTWISE_CMP_EQ        = 28,  // binary compare → bool
+    CUDNN_POINTWISE_CMP_NEQ       = 29,
+    CUDNN_POINTWISE_CMP_GT        = 30,
+    CUDNN_POINTWISE_CMP_GE        = 31,
+    CUDNN_POINTWISE_CMP_LT        = 32,
+    CUDNN_POINTWISE_CMP_LE        = 33,
+    CUDNN_POINTWISE_LOGICAL_AND   = 34,
+    CUDNN_POINTWISE_LOGICAL_OR    = 35,
+    CUDNN_POINTWISE_LOGICAL_NOT   = 36,
+    CUDNN_POINTWISE_FLOOR         = 37,
+    CUDNN_POINTWISE_IDENTITY      = 38,
+    CUDNN_POINTWISE_GELU_APPROX_TANH_FWD = 39,
+    CUDNN_POINTWISE_GELU_APPROX_TANH_BWD = 40,
+    CUDNN_POINTWISE_RECIPROCAL    = 41,
+};
+
+// ── cudnnRNNDataDescriptor (for RNNForwardTrainingEx) ─────────────────────────
+enum cudnnRNNDataLayout_t {
+    CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_UNPACKED = 0,
+    CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_PACKED   = 1,
+    CUDNN_RNN_DATA_LAYOUT_BATCH_MAJOR_UNPACKED = 2,
+};
+
+struct cudnnRNNData_st {
+    cudnnDataType_t      dataType    = CUDNN_DATA_FLOAT;
+    cudnnRNNDataLayout_t layout      = CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_UNPACKED;
+    int                  maxSeqLength = 0;
+    int                  batchSize    = 0;
+    int                  vectorSize   = 0;
+    std::vector<int>     seqLengthArray;
+    float                paddingFill  = 0.0f;
+};
+typedef cudnnRNNData_st* cudnnRNNDataDescriptor_t;

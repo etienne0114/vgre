@@ -248,6 +248,61 @@ const TranslateMap& getConversionMap() {
         {"cp.async.bulk.prefetch.tensor.3d.l2.global",  [](auto&){ return "/* cp.async.bulk.prefetch 3D */"; }},
         {"cp.async.bulk.prefetch.tensor.4d.l2.global",  [](auto&){ return "/* cp.async.bulk.prefetch 4D */"; }},
         {"cp.async.bulk.prefetch.tensor.5d.l2.global",  [](auto&){ return "/* cp.async.bulk.prefetch 5D */"; }},
+
+        // ── elect.sync — cooperative group leader election (SM90+) ─────────────
+        // In serial CPU model there is exactly one thread per warp, so it is
+        // always "elected".  Output predicate is always true; membermask ignored.
+        {"elect.sync", [](auto& o){
+            return (o.size()>0 ? o[0]+" = 1;" : "")
+                   + " /* elect.sync: always elected in serial model */";
+        }},
+
+        // ── griddepcontrol — CDP2 grid dependency (CUDA 12.0+) ────────────────
+        // All streams execute serially in VGRE; dependencies are always satisfied.
+        {"griddepcontrol.launch_dependents", [](auto&){
+            return "/* griddepcontrol.launch_dependents: serial noop */";
+        }},
+        {"griddepcontrol.wait", [](auto&){
+            return "/* griddepcontrol.wait: serial noop */";
+        }},
+        {"griddepcontrol.wait_ifnot_lbi", [](auto&){
+            return "/* griddepcontrol.wait_ifnot_lbi: serial noop */";
+        }},
+
+        // ── setmaxnreg — register-file reconfiguration (Ada SM89+) ───────────
+        // No register file on CPU; ignored.
+        {"setmaxnreg.inc.sync.aligned.u32", [](auto&){
+            return "/* setmaxnreg.inc: no-op on CPU */";
+        }},
+        {"setmaxnreg.dec.sync.aligned.u32", [](auto&){
+            return "/* setmaxnreg.dec: no-op on CPU */";
+        }},
+
+        // ── cp.reduce.async.bulk — write-combining reduction to global ─────────
+        // On CPU emulator all memory is directly accessible; perform the add
+        // reduction immediately (no async needed).
+        {"cp.reduce.async.bulk.tensor.1d.global.shared::cta.add.f32", [](auto& o){
+            if (o.size() < 3) return std::string("/* cp.reduce.async.bulk.1d */");
+            return "{ float* _dst=(float*)(uintptr_t)("+o[0]+");"
+                   " const float* _src=(const float*)(uintptr_t)("+o[1]+");"
+                   " size_t _n=(size_t)("+o[2]+")>>2;"
+                   " for(size_t _i=0;_i<_n;_i++) _dst[_i]+=_src[_i]; }";
+        }},
+        {"cp.reduce.async.bulk.tensor.2d.global.shared::cta.add.f32", [](auto& o){
+            if (o.size() < 3) return std::string("/* cp.reduce.async.bulk.2d */");
+            return "{ float* _dst=(float*)(uintptr_t)("+o[0]+");"
+                   " const float* _src=(const float*)(uintptr_t)("+o[1]+");"
+                   " size_t _n=(size_t)("+o[2]+")>>2;"
+                   " for(size_t _i=0;_i<_n;_i++) _dst[_i]+=_src[_i]; }";
+        }},
+        // Integer accumulation variant
+        {"cp.reduce.async.bulk.tensor.2d.global.shared::cta.add.u32", [](auto& o){
+            if (o.size() < 3) return std::string("/* cp.reduce.async.bulk.u32 */");
+            return "{ uint32_t* _dst=(uint32_t*)(uintptr_t)("+o[0]+");"
+                   " const uint32_t* _src=(const uint32_t*)(uintptr_t)("+o[1]+");"
+                   " size_t _n=(size_t)("+o[2]+")>>2;"
+                   " for(size_t _i=0;_i<_n;_i++) _dst[_i]+=_src[_i]; }";
+        }},
     };
     return kMap;
 }
