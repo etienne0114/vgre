@@ -471,6 +471,84 @@ cusparseStatus_t cusparseSpMM_batched(cusparseHandle_t handle,
         int batchCount, int64_t bStride, int64_t cStride,
         void *buffer);
 
+// ── Sparse triangular solve with matrix RHS (SpSM) ───────────────────────────
+typedef enum { CUSPARSE_SPSM_ALG_DEFAULT = 0 } cusparseSpSMAlg_t;
+
+struct cusparseSpSMDescr;
+typedef struct cusparseSpSMDescr *cusparseSpSMDescr_t;
+
+cusparseStatus_t cusparseSpSM_createDescr(cusparseSpSMDescr_t *descr);
+cusparseStatus_t cusparseSpSM_destroyDescr(cusparseSpSMDescr_t descr);
+cusparseStatus_t cusparseSpSM_bufferSize(cusparseHandle_t handle,
+                                          cusparseOperation_t opA,
+                                          cusparseOperation_t opB,
+                                          const void *alpha,
+                                          cusparseSpMatDescr_t matA,
+                                          cusparseDnMatDescr_t matB,
+                                          cusparseDnMatDescr_t matC,
+                                          cudaDataType_t computeType,
+                                          cusparseSpSMAlg_t alg,
+                                          cusparseSpSMDescr_t spsmDescr,
+                                          size_t *bufferSize);
+cusparseStatus_t cusparseSpSM_analysis(cusparseHandle_t handle,
+                                        cusparseOperation_t opA,
+                                        cusparseOperation_t opB,
+                                        const void *alpha,
+                                        cusparseSpMatDescr_t matA,
+                                        cusparseDnMatDescr_t matB,
+                                        cusparseDnMatDescr_t matC,
+                                        cudaDataType_t computeType,
+                                        cusparseSpSMAlg_t alg,
+                                        cusparseSpSMDescr_t spsmDescr,
+                                        void *buffer);
+cusparseStatus_t cusparseSpSM_solve(cusparseHandle_t handle,
+                                     cusparseOperation_t opA,
+                                     cusparseOperation_t opB,
+                                     const void *alpha,
+                                     cusparseSpMatDescr_t matA,
+                                     cusparseDnMatDescr_t matB,
+                                     cusparseDnMatDescr_t matC,
+                                     cudaDataType_t computeType,
+                                     cusparseSpSMAlg_t alg,
+                                     cusparseSpSMDescr_t spsmDescr);
+
+// ── Sampled Dense-Dense Matrix Multiplication (SDDMM) ────────────────────────
+typedef enum { CUSPARSE_SDDMM_ALG_DEFAULT = 0 } cusparseSDDMMAlg_t;
+
+cusparseStatus_t cusparseSDDMM_bufferSize(cusparseHandle_t handle,
+                                           cusparseOperation_t opA,
+                                           cusparseOperation_t opB,
+                                           const void *alpha,
+                                           cusparseDnMatDescr_t matA,
+                                           cusparseDnMatDescr_t matB,
+                                           const void *beta,
+                                           cusparseSpMatDescr_t matC,
+                                           cudaDataType_t computeType,
+                                           cusparseSDDMMAlg_t alg,
+                                           size_t *bufferSize);
+cusparseStatus_t cusparseSDDMM_preprocess(cusparseHandle_t handle,
+                                           cusparseOperation_t opA,
+                                           cusparseOperation_t opB,
+                                           const void *alpha,
+                                           cusparseDnMatDescr_t matA,
+                                           cusparseDnMatDescr_t matB,
+                                           const void *beta,
+                                           cusparseSpMatDescr_t matC,
+                                           cudaDataType_t computeType,
+                                           cusparseSDDMMAlg_t alg,
+                                           void *buffer);
+cusparseStatus_t cusparseSDDMM(cusparseHandle_t handle,
+                                cusparseOperation_t opA,
+                                cusparseOperation_t opB,
+                                const void *alpha,
+                                cusparseDnMatDescr_t matA,
+                                cusparseDnMatDescr_t matB,
+                                const void *beta,
+                                cusparseSpMatDescr_t matC,
+                                cudaDataType_t computeType,
+                                cusparseSDDMMAlg_t alg,
+                                void *buffer);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

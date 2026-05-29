@@ -424,4 +424,165 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t /*h*/,
     return CUSPARSE_STATUS_SUCCESS;
 }
 
+// ── cusparseSpSM: Sparse Triangular Matrix Solve (matrix RHS) ─────────────────
+// Solves op(A) * X = alpha * B where B is a dense matrix.
+// Strategy: column-by-column substitution using the same triangular solve math as SpSV.
+
+cusparseStatus_t cusparseSpSM_createDescr(cusparseSpSMDescr_t *descr) {
+    if (!descr) return CUSPARSE_STATUS_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    uintptr_t id = g_nextSpSM++;
+    g_spsmDescrs[id] = {};
+    *descr = reinterpret_cast<cusparseSpSMDescr_t>(id);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpSM_destroyDescr(cusparseSpSMDescr_t descr) {
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    g_spsmDescrs.erase(reinterpret_cast<uintptr_t>(descr));
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpSM_bufferSize(cusparseHandle_t /*h*/,
+    cusparseOperation_t /*opA*/, cusparseOperation_t /*opX*/,
+    const void * /*alpha*/, cusparseSpMatDescr_t /*matA*/,
+    cusparseDnMatDescr_t /*matB*/, cusparseDnMatDescr_t /*matX*/,
+    cudaDataType_t /*ct*/, cusparseSpSMAlg_t /*alg*/,
+    cusparseSpSMDescr_t /*descr*/, size_t *bufferSize) {
+    if (bufferSize) *bufferSize = 0;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpSM_analysis(cusparseHandle_t /*h*/,
+    cusparseOperation_t /*opA*/, cusparseOperation_t /*opX*/,
+    const void * /*alpha*/, cusparseSpMatDescr_t /*matA*/,
+    cusparseDnMatDescr_t /*matB*/, cusparseDnMatDescr_t /*matX*/,
+    cudaDataType_t /*ct*/, cusparseSpSMAlg_t /*alg*/,
+    cusparseSpSMDescr_t descr, void * /*buffer*/) {
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    auto it = g_spsmDescrs.find(reinterpret_cast<uintptr_t>(descr));
+    if (it != g_spsmDescrs.end()) it->second.analyzed = true;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Solves op(A) * X = alpha * B column-by-column using direct triangular substitution.
+// matB is the source dense matrix (input RHS), matX is the output dense matrix.
+cusparseStatus_t cusparseSpSM_solve(cusparseHandle_t /*h*/,
+    cusparseOperation_t opA, cusparseOperation_t /*opX*/,
+    const void *alpha, cusparseSpMatDescr_t matA,
+    cusparseDnMatDescr_t matB, cusparseDnMatDescr_t matX,
+    cudaDataType_t computeType, cusparseSpSMAlg_t /*alg*/,
+    cusparseSpSMDescr_t /*descr*/) {
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    auto aIt = g_csrMats.find(reinterpret_cast<uintptr_t>(matA));
+    auto bIt = g_dnMats.find(reinterpret_cast<uintptr_t>(matB));
+    auto xIt = g_dnMats.find(reinterpret_cast<uintptr_t>(matX));
+    if (aIt == g_csrMats.end() || bIt == g_dnMats.end() || xIt == g_dnMats.end())
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    const CsrMat &A = aIt->second;
+    const DnMat  &B = bIt->second;
+    DnMat        &X = xIt->second;
+    if (!A.rowOffsets || !A.colInd || !A.values || !B.values || !X.values)
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    if (computeType != CUDA_R_32F && computeType != CUDA_R_64F)
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+
+    int64_t n        = A.rows;
+    int64_t numCols  = B.cols;
+    bool    isDouble = (computeType == CUDA_R_64F);
+    bool    lowerTri = (A.fillMode == CUSPARSE_FILL_MODE_LOWER);
+    bool    unitDiag = (A.diagType == CUSPARSE_DIAG_TYPE_UNIT);
+    bool    transposed = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    int     base     = (A.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+    double  alphaD   = isDouble ? *static_cast<const double*>(alpha)
+                                : static_cast<double>(*static_cast<const float*>(alpha));
+
+    auto getA = [&](int64_t i) -> double {
+        return isDouble ? static_cast<const double*>(A.values)[i]
+                        : static_cast<double>(static_cast<const float*>(A.values)[i]);
+    };
+
+    // Process each column of B independently
+    std::vector<double> col(static_cast<size_t>(n));
+    for (int64_t j = 0; j < numCols; ++j) {
+        // Load column j of B (col-major ld = B.ld, row-major ld = B.ld)
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t idx = (B.order == CUSPARSE_ORDER_COL) ? i + j * B.ld : i * B.ld + j;
+            col[static_cast<size_t>(i)] = isDouble
+                ? static_cast<const double*>(B.values)[idx]
+                : static_cast<double>(static_cast<const float*>(B.values)[idx]);
+            col[static_cast<size_t>(i)] *= alphaD;
+        }
+
+        // Triangular substitution on col[]
+        if (!transposed) {
+            if (lowerTri) {
+                for (int64_t r = 0; r < n; ++r) {
+                    int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)     - base;
+                    int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r + 1) - base;
+                    double rhs = col[static_cast<size_t>(r)], diag = 1.0;
+                    for (int64_t k = rs; k < re; ++k) {
+                        int64_t c = getIdx(A.colInd, A.colIndType, k) - base;
+                        if (c < r)            rhs -= getA(k) * col[static_cast<size_t>(c)];
+                        else if (c == r && !unitDiag) diag = getA(k);
+                    }
+                    col[static_cast<size_t>(r)] = rhs / diag;
+                }
+            } else {
+                for (int64_t r = n - 1; r >= 0; --r) {
+                    int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)     - base;
+                    int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r + 1) - base;
+                    double rhs = col[static_cast<size_t>(r)], diag = 1.0;
+                    for (int64_t k = rs; k < re; ++k) {
+                        int64_t c = getIdx(A.colInd, A.colIndType, k) - base;
+                        if (c > r)            rhs -= getA(k) * col[static_cast<size_t>(c)];
+                        else if (c == r && !unitDiag) diag = getA(k);
+                    }
+                    col[static_cast<size_t>(r)] = rhs / diag;
+                }
+            }
+        } else {
+            if (lowerTri) {
+                for (int64_t r = n - 1; r >= 0; --r) {
+                    int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)     - base;
+                    int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r + 1) - base;
+                    double diag = 1.0;
+                    if (!unitDiag)
+                        for (int64_t k = rs; k < re; ++k)
+                            if (getIdx(A.colInd, A.colIndType, k) - base == r) { diag = getA(k); break; }
+                    double yr = col[static_cast<size_t>(r)] / diag;
+                    col[static_cast<size_t>(r)] = yr;
+                    for (int64_t k = rs; k < re; ++k) {
+                        int64_t c = getIdx(A.colInd, A.colIndType, k) - base;
+                        if (c < r) col[static_cast<size_t>(c)] -= getA(k) * yr;
+                    }
+                }
+            } else {
+                for (int64_t r = 0; r < n; ++r) {
+                    int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)     - base;
+                    int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r + 1) - base;
+                    double diag = 1.0;
+                    if (!unitDiag)
+                        for (int64_t k = rs; k < re; ++k)
+                            if (getIdx(A.colInd, A.colIndType, k) - base == r) { diag = getA(k); break; }
+                    double yr = col[static_cast<size_t>(r)] / diag;
+                    col[static_cast<size_t>(r)] = yr;
+                    for (int64_t k = rs; k < re; ++k) {
+                        int64_t c = getIdx(A.colInd, A.colIndType, k) - base;
+                        if (c > r) col[static_cast<size_t>(c)] -= getA(k) * yr;
+                    }
+                }
+            }
+        }
+
+        // Write solved column j to X
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t idx = (X.order == CUSPARSE_ORDER_COL) ? i + j * X.ld : i * X.ld + j;
+            if (isDouble) static_cast<double*>(X.values)[idx] = col[static_cast<size_t>(i)];
+            else          static_cast<float* >(X.values)[idx] = static_cast<float>(col[static_cast<size_t>(i)]);
+        }
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
 } // extern "C"

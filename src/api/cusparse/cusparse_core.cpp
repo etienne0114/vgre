@@ -38,6 +38,9 @@ namespace vgre_sp {
 
     std::unordered_map<uintptr_t, SpSVState> g_spsvDescrs;
     uintptr_t g_nextSpSV = 1;
+
+    std::unordered_map<uintptr_t, SpSMState> g_spsmDescrs;
+    uintptr_t g_nextSpSM = 1;
 }
 using namespace vgre_sp;
 
@@ -854,6 +857,101 @@ cusparseStatus_t cusparseSpMM_batched(cusparseHandle_t h,
     bIt->second.values = origB;
     cIt->second.values = origC;
     (void)h; (void)buffer;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── cusparseSDDMM: Sampled Dense-Dense Matrix Multiplication ──────────────────
+// Computes C = alpha * (C_pattern ⊙ (op(A) * op(B)^T)) + beta * C
+// where C is sparse (CSR sampler pattern), A and B are dense matrices.
+// For each non-zero (r, c) in C: C[r,c] = alpha * dot(A_row[r], B_row[c]) + beta*C[r,c]
+// This is the core primitive for graph attention network edge scoring.
+
+cusparseStatus_t cusparseSDDMM_bufferSize(cusparseHandle_t /*h*/,
+    cusparseOperation_t /*opA*/, cusparseOperation_t /*opB*/,
+    const void * /*alpha*/, cusparseDnMatDescr_t /*matA*/,
+    cusparseDnMatDescr_t /*matB*/, const void * /*beta*/,
+    cusparseSpMatDescr_t /*matC*/, cudaDataType_t /*ct*/,
+    cusparseSDDMMAlg_t /*alg*/, size_t *bufferSize) {
+    if (bufferSize) *bufferSize = 0;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSDDMM_preprocess(cusparseHandle_t /*h*/,
+    cusparseOperation_t /*opA*/, cusparseOperation_t /*opB*/,
+    const void * /*alpha*/, cusparseDnMatDescr_t /*matA*/,
+    cusparseDnMatDescr_t /*matB*/, const void * /*beta*/,
+    cusparseSpMatDescr_t /*matC*/, cudaDataType_t /*ct*/,
+    cusparseSDDMMAlg_t /*alg*/, void * /*buffer*/) {
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSDDMM(cusparseHandle_t /*h*/,
+    cusparseOperation_t opA, cusparseOperation_t opB,
+    const void *alpha, cusparseDnMatDescr_t matA,
+    cusparseDnMatDescr_t matB, const void *beta,
+    cusparseSpMatDescr_t matC, cudaDataType_t computeType,
+    cusparseSDDMMAlg_t /*alg*/, void * /*buffer*/) {
+    std::lock_guard<std::mutex> lk(g_descrMutex);
+    auto aIt = g_dnMats.find(reinterpret_cast<uintptr_t>(matA));
+    auto bIt = g_dnMats.find(reinterpret_cast<uintptr_t>(matB));
+    auto cIt = g_csrMats.find(reinterpret_cast<uintptr_t>(matC));
+    if (aIt == g_dnMats.end() || bIt == g_dnMats.end() || cIt == g_csrMats.end())
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    const DnMat &A = aIt->second;
+    const DnMat &B = bIt->second;
+    CsrMat      &C = cIt->second;
+    if (!A.values || !B.values || !C.rowOffsets || !C.colInd || !C.values)
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    if (computeType != CUDA_R_32F && computeType != CUDA_R_64F)
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+
+    bool   isDouble = (computeType == CUDA_R_64F);
+    bool   transpA  = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    bool   transpB  = (opB != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    int    base     = (C.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+    double alphaD   = isDouble ? *static_cast<const double*>(alpha)
+                               : static_cast<double>(*static_cast<const float*>(alpha));
+    double betaD    = isDouble ? *static_cast<const double*>(beta)
+                               : static_cast<double>(*static_cast<const float*>(beta));
+
+    // k = the shared contraction dimension
+    int64_t k = transpA ? A.rows : A.cols;
+
+    auto getA = [&](int64_t row, int64_t col) -> double {
+        // row/col after applying opA: non-transposed reads A[row,col]
+        int64_t r = transpA ? col : row, c = transpA ? row : col;
+        int64_t idx = (A.order == CUSPARSE_ORDER_COL) ? r + c * A.ld : r * A.ld + c;
+        return isDouble ? static_cast<const double*>(A.values)[idx]
+                        : static_cast<double>(static_cast<const float*>(A.values)[idx]);
+    };
+    auto getB = [&](int64_t row, int64_t col) -> double {
+        // Called as getB(c_sparse, p). We want op(B)[p, c_sparse].
+        // opB=N: op(B)[p,c] = B[p,c]  → swap: r=col=p, c_mat=row=c_sparse
+        // opB=T: op(B)[p,c] = B[c,p]  → no swap: r=row=c_sparse, c_mat=col=p
+        int64_t r = transpB ? row : col, c = transpB ? col : row;
+        int64_t idx = (B.order == CUSPARSE_ORDER_COL) ? r + c * B.ld : r * B.ld + c;
+        return isDouble ? static_cast<const double*>(B.values)[idx]
+                        : static_cast<double>(static_cast<const float*>(B.values)[idx]);
+    };
+
+    int64_t nnz = C.nnz;
+    for (int64_t r = 0; r < C.rows; ++r) {
+        int64_t rs = getIdx(C.rowOffsets, C.rowOffsetType, r)     - base;
+        int64_t re = getIdx(C.rowOffsets, C.rowOffsetType, r + 1) - base;
+        for (int64_t e = rs; e < re; ++e) {
+            int64_t c = getIdx(C.colInd, C.colIndType, e) - base;
+            // Dot product: sum_p A[r, p] * B[c, p]  (B is accessed by its row c, col p)
+            double dot = 0.0;
+            for (int64_t p = 0; p < k; ++p) dot += getA(r, p) * getB(c, p);
+            double cval = 0.0;
+            if (isDouble) cval = static_cast<const double*>(C.values)[e];
+            else          cval = static_cast<double>(static_cast<const float*>(C.values)[e]);
+            double result = alphaD * dot + betaD * cval;
+            if (isDouble) static_cast<double*>(C.values)[e] = result;
+            else          static_cast<float*>(C.values)[e]  = static_cast<float>(result);
+        }
+    }
+    (void)nnz;
     return CUSPARSE_STATUS_SUCCESS;
 }
 

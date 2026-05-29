@@ -386,6 +386,21 @@ enum cudnnBatchNormMode_t {
     CUDNN_BATCHNORM_SPATIAL        = 1
 };
 
+// ── Normalization (cuDNN 8.5+) ────────────────────────────────────────────────
+enum cudnnNormMode_t {
+    CUDNN_NORM_PER_ACTIVATION = 0,  // layer norm: per element scale/bias
+    CUDNN_NORM_PER_CHANNEL    = 1   // batch norm: per channel (reuses BN path)
+};
+enum cudnnNormAlgo_t {
+    CUDNN_NORM_ALGO_STANDARD   = 0,
+    CUDNN_NORM_ALGO_PERSIST    = 1
+};
+enum cudnnNormOps_t {
+    CUDNN_NORM_OPS_NORM        = 0,
+    CUDNN_NORM_OPS_NORM_ACTIVATION = 1,
+    CUDNN_NORM_OPS_NORM_ADD_ACTIVATION = 2
+};
+
 // ── OpTensor ─────────────────────────────────────────────────────────────────
 enum cudnnOpTensorOp_t {
     CUDNN_OP_TENSOR_ADD = 0,
