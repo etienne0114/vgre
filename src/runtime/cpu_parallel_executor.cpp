@@ -179,17 +179,14 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
   const uint32_t totalBlocks = gridDim.total();
   const int totalBlocksI = static_cast<int>(totalBlocks);
 
-  // ── Syncthreads kernels must use per-block threading ──────────────────────
-  // Kernels that use __syncthreads() require proper barrier setup within each block.
-  // We need to dispatch multiple threads per block and set up BlockBarriers.
-  // NOTE: Currently disabled due to thread-local shared memory limitation.
-  // Multi-threaded syncthreads requires shared memory to be shared across threads,
-  // but the JIT wrapper uses thread-local storage which doesn't work for this.
-  // For now, syncthreads kernels fall back to single-threaded execution.
-  if (usesSyncthreads) {
-    VGRE_LOG_WARN("CPUParallelExecutor", "Syncthreads kernel detected - using single-threaded execution (multi-threaded syncthreads not yet supported)");
-    // Fall through to single-threaded path
-  }
+  // ── Syncthreads kernels ───────────────────────────────────────────────────
+  // For JIT-compiled kernels the wrapper function handles __syncthreads()
+  // multi-threading internally via vgre_jit_block_dispatch().  We do NOT
+  // double-dispatch here — just fall through to the normal single-call path,
+  // which invokes the wrapper once per block; the wrapper spawns per-thread
+  // workers itself when it detects usesSyncthreads.
+  // executeSyncthreads() is reserved for non-JIT compiled kernels.
+  (void)usesSyncthreads;
 
   // Hoist the FLOP/instruction ratio lookup — called once, not per block.
   // This avoids a virtual dispatch + atomic load inside the hot loop.

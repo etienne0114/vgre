@@ -4,7 +4,37 @@
 #include "vgre/api/cuda_interceptor.h"
 #include "vgre/common/elf_reader.h"
 #include "vgre/core/runtime_engine.h"
+// VgreTMADescriptor is a C++ type (contains templates indirectly) — include
+// outside any extern "C" block so templates are compiled with C++ linkage.
+#include "vgre/compiler/wmma_emulation.h"
 #include <cstring>
+
+// CUtensorMap is layout-identical to VgreTMADescriptor (128 bytes).
+// PTX emulation code casts TMA descriptor pointers directly to VgreTMADescriptor*.
+using CUtensorMap = VgreTMADescriptor;
+
+// TMA data-type codes (from CUDA Driver API)
+enum CUtensorMapDataType {
+    CU_TENSOR_MAP_DATA_TYPE_UINT8    = 0,
+    CU_TENSOR_MAP_DATA_TYPE_UINT16   = 1,
+    CU_TENSOR_MAP_DATA_TYPE_UINT32   = 2,
+    CU_TENSOR_MAP_DATA_TYPE_INT32    = 3,
+    CU_TENSOR_MAP_DATA_TYPE_UINT64   = 4,
+    CU_TENSOR_MAP_DATA_TYPE_INT64    = 5,
+    CU_TENSOR_MAP_DATA_TYPE_FLOAT16  = 6,
+    CU_TENSOR_MAP_DATA_TYPE_FLOAT32  = 7,
+    CU_TENSOR_MAP_DATA_TYPE_FLOAT64  = 8,
+    CU_TENSOR_MAP_DATA_TYPE_BFLOAT16 = 9,
+    CU_TENSOR_MAP_DATA_TYPE_FLOAT32_FTZ  = 10,
+    CU_TENSOR_MAP_DATA_TYPE_TFLOAT32     = 11,
+    CU_TENSOR_MAP_DATA_TYPE_TFLOAT32_FTZ = 12,
+};
+
+// TMA interleave / swizzle / l2promotion / oobfill (opaque to CPU emulation)
+enum CUtensorMapInterleave   { CU_TENSOR_MAP_INTERLEAVE_NONE = 0 };
+enum CUtensorMapSwizzle      { CU_TENSOR_MAP_SWIZZLE_NONE = 0 };
+enum CUtensorMapL2promotion  { CU_TENSOR_MAP_L2_PROMOTION_NONE = 0 };
+enum CUtensorMapFloatOOBfill { CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE = 0 };
 
 extern "C" {
 

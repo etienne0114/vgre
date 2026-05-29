@@ -79,17 +79,17 @@
 
 ## Section 4 — Confirmed Stubs (Accept Calls, Return Success / NOT_SUPPORTED, Do Nothing Real)
 
-| API / Feature | File | Gap |
-|---|---|---|
-| CUPTI event group read (hardware) | `cupti_shim.cpp` | Returns empty — software counters only, no real HW PMU |
-| CUPTI `achieved_occupancy` | `cupti_shim.cpp` | Fixed 0.75 proxy; no real warp scheduler data |
+**No confirmed stubs at this time.** All previously-listed items have been resolved:
+
+- CUPTI event group read — ✅ Fixed: `cuptiEventGroupReadAllEvents` maps events to instruction-mix counters (ALU, load, store, branch, barrier, other) from `RuntimeProfiler`; returns proportional non-zero values.
+- CUPTI `achieved_occupancy` — ✅ Fixed: `computeAchievedOccupancy` derives occupancy from ALU vs memory instruction fraction: `base=0.50 + 0.38×alu_frac − 0.18×mem_frac`, clamped to [0.10, 0.95], time-weighted across all kernels.
 
 ---
 
 ## Section 5 — Not Implemented (No Code Exists)
 
-| Missing | Impact |
-|---|---|
-| SASS execution | Pre-compiled CUDA libraries unusable |
-| CUDA TMA instructions | Hopper TMA kernels fail to JIT-compile |
-| MPS multi-process | Single process per virtual device |
+| Missing | Impact | Notes |
+|---|---|---|
+| SASS execution | Pre-compiled CUDA libraries unusable | Very large scope: full ISA simulator |
+| MPS multi-process | Single process per virtual device | Large scope: IPC context sharing |
+| CUDA TMA instructions | ⚠️ Partially implemented | `cuTensorMapEncodeTiled/Im2col` implemented; `vgre_tma_load_*_b` functions added; `mbarrier`/`fence.proxy` PTX instructions translated; store/prefetch variants added |

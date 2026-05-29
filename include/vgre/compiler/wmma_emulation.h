@@ -683,15 +683,42 @@ inline void vgre_cp_async_bulk(void* dst, const void* src, unsigned bytes)
 }
 
 // cp.async.bulk.tensor.Nd: copy a tensor tile using TMA descriptor.
-// In CPU emulation the "TMA descriptor" is a pointer to a simple struct that
-// holds base address + per-dimension stride so we can compute the tile offset.
+// VgreTMADescriptor mirrors the layout of CUtensorMap (128 bytes) so the
+// driver-API cuTensorMapEncodeTiled/Im2col functions can populate it directly
+// and PTX code can cast the driver-created object to VgreTMADescriptor*.
+//
+// Layout (must match CUtensorMap_st in cuda_driver_tma.cpp):
+//   offset  0: void*    baseAddr        (8 bytes)
+//   offset  8: uint32_t elemBytes       (4 bytes)
+//   offset 12: uint32_t dim[5]          (20 bytes)  – global tensor dimensions
+//   offset 32: uint32_t stride[4]       (16 bytes)  – byte strides dim1..dim4
+//   offset 48: uint32_t boxDim[5]       (20 bytes)  – tile box dimensions
+//   offset 68: uint32_t rank            (4 bytes)
+//   offset 72: uint32_t tag             (4 bytes)   – 0=tiled, 1=im2col
+//   offset 76: int32_t  im2colLower[5]  (20 bytes)
+//   offset 96: int32_t  im2colUpper[5]  (20 bytes)
+//   offset116: uint32_t channelsPerPixel(4 bytes)
+//   offset120: uint32_t pixelsPerColumn (4 bytes)
+//   offset124: uint32_t _pad            (4 bytes)
+//   Total: 128 bytes
 struct VgreTMADescriptor {
     void*    baseAddr;
-    uint32_t elemBytes;           // bytes per element
-    uint32_t dim[5];              // sizes per dimension
-    uint32_t stride[4];           // byte strides (dim1..dim4)
+    uint32_t elemBytes;
+    uint32_t dim[5];
+    uint32_t stride[4];
+    // Extended fields (populated by cuTensorMapEncode*):
+    uint32_t boxDim[5];
+    uint32_t rank;
+    uint32_t tag;           // 0 = tiled, 1 = im2col
+    int32_t  im2colLower[5];
+    int32_t  im2colUpper[5];
+    uint32_t channelsPerPixel;
+    uint32_t pixelsPerColumn;
+    uint32_t _pad;
 };
+static_assert(sizeof(VgreTMADescriptor) == 128, "VgreTMADescriptor must be 128 bytes");
 
+// ── 2D tiled load/store (explicit tile dims) ──────────────────────────────────
 inline void vgre_tma_load_2d(void* dst, const VgreTMADescriptor* desc,
                                uint32_t c, uint32_t r, uint32_t tileW, uint32_t tileH)
 {
@@ -714,6 +741,65 @@ inline void vgre_tma_store_2d(const VgreTMADescriptor* desc, const void* src,
                     tileW * desc->elemBytes);
 }
 
+// ── 2D load/store using boxDim from descriptor (cuTensorMapEncodeTiled path) ──
+inline void vgre_tma_load_2d_b(void* dst, const VgreTMADescriptor* desc,
+                                 uint32_t x, uint32_t y)
+{
+    vgre_tma_load_2d(dst, desc, x, y, desc->boxDim[0], desc->boxDim[1]);
+}
+
+inline void vgre_tma_store_2d_b(const VgreTMADescriptor* desc, const void* src,
+                                  uint32_t x, uint32_t y)
+{
+    vgre_tma_store_2d(desc, src, x, y, desc->boxDim[0], desc->boxDim[1]);
+}
+
+// ── Im2col 2D load: gather convolution patches ────────────────────────────────
+// For tag=1 (im2col), each tile row corresponds to one position in the pixel
+// box [im2colLower, im2colUpper] across channelsPerPixel channels.
+// The descriptor carries: stride[0]=row-byte-stride, stride[1]=channel-byte-stride
+// dim[0]=W, dim[1]=H (inner dims); pixelBox defines the filter window.
+inline void vgre_tma_load_im2col_2d(void* dst, const VgreTMADescriptor* desc,
+                                     uint32_t x, uint32_t y)
+{
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(desc->baseAddr);
+    uint8_t* out = reinterpret_cast<uint8_t*>(dst);
+    const size_t e = desc->elemBytes;
+    // boxDim[0] = tile width (channels per output column)
+    // boxDim[1] = tile height (pixels per output column * filter positions)
+    uint32_t tileW = desc->boxDim[0];
+    uint32_t outRow = 0;
+    int kH = desc->im2colUpper[0] - desc->im2colLower[0] + 1;
+    int kW = desc->im2colUpper[1] - desc->im2colLower[1] + 1;
+    for (int kh = 0; kh < kH; ++kh) {
+        for (int kw = 0; kw < kW; ++kw) {
+            int srcY = static_cast<int>(y) + kh + desc->im2colLower[0];
+            int srcX = static_cast<int>(x) + kw + desc->im2colLower[1];
+            if (srcY < 0 || srcX < 0 ||
+                srcY >= static_cast<int>(desc->dim[1]) ||
+                srcX >= static_cast<int>(desc->dim[0])) {
+                // Out-of-bounds: zero-fill this row
+                memset(out + outRow * tileW * e, 0, tileW * e);
+            } else {
+                size_t src_off = static_cast<size_t>(srcY) * desc->stride[0]
+                                 + static_cast<size_t>(srcX) * e;
+                memcpy(out + outRow * tileW * e, base + src_off, tileW * e);
+            }
+            ++outRow;
+        }
+    }
+}
+
+// ── Dispatch: tiled vs im2col based on descriptor tag ────────────────────────
+inline void vgre_tma_load_2d_dispatch(void* dst, const VgreTMADescriptor* desc,
+                                       uint32_t x, uint32_t y)
+{
+    if (desc->tag == 1)
+        vgre_tma_load_im2col_2d(dst, desc, x, y);
+    else
+        vgre_tma_load_2d_b(dst, desc, x, y);
+}
+
 // ── TMA 3D / 4D / 5D tile copy (CPU serial emulation) ────────────────────────
 // PTX cp.async.bulk.tensor.3d/4d/5d copy a hyper-rectangular tile from global
 // to shared memory.  In the CPU model we compute the linear offset via strides.
@@ -730,6 +816,13 @@ inline void vgre_tma_load_3d(void* dst, const VgreTMADescriptor* desc,
             size_t src_off = ((z + d) * desc->stride[1] + (y + row) * desc->stride[0] + x) * e;
             memcpy(out + dst_off, base + src_off, tw * e);
         }
+}
+
+// Descriptor-boxDim variant for 3D
+inline void vgre_tma_load_3d_b(void* dst, const VgreTMADescriptor* desc,
+                                uint32_t x, uint32_t y, uint32_t z)
+{
+    vgre_tma_load_3d(dst, desc, x, y, z, desc->boxDim[0], desc->boxDim[1], desc->boxDim[2]);
 }
 
 inline void vgre_tma_load_4d(void* dst, const VgreTMADescriptor* desc,
@@ -749,6 +842,13 @@ inline void vgre_tma_load_4d(void* dst, const VgreTMADescriptor* desc,
             }
 }
 
+inline void vgre_tma_load_4d_b(void* dst, const VgreTMADescriptor* desc,
+                                uint32_t x, uint32_t y, uint32_t z, uint32_t w)
+{
+    vgre_tma_load_4d(dst, desc, x, y, z, w,
+                     desc->boxDim[0], desc->boxDim[1], desc->boxDim[2], desc->boxDim[3]);
+}
+
 inline void vgre_tma_load_5d(void* dst, const VgreTMADescriptor* desc,
                              uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t v,
                              uint32_t tw, uint32_t th, uint32_t td, uint32_t tq, uint32_t tp)
@@ -766,6 +866,14 @@ inline void vgre_tma_load_5d(void* dst, const VgreTMADescriptor* desc,
                                        + (y + row) * desc->stride[0] + x)) * e;
                     memcpy(out + dst_off, base + src_off, tw * e);
                 }
+}
+
+inline void vgre_tma_load_5d_b(void* dst, const VgreTMADescriptor* desc,
+                                uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t v)
+{
+    vgre_tma_load_5d(dst, desc, x, y, z, w, v,
+                     desc->boxDim[0], desc->boxDim[1], desc->boxDim[2],
+                     desc->boxDim[3], desc->boxDim[4]);
 }
 
 // ── cp.reduce.async (CPU serial emulation) ───────────────────────────────────
