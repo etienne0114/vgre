@@ -189,6 +189,140 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t /*h*/,
         return CUSPARSE_STATUS_SUCCESS;
     }
 
+    // Complex types: interleaved (re,im) pairs; solve with full complex arithmetic.
+    if (computeType == CUDA_C_32F || computeType == CUDA_C_64F) {
+        bool isC64 = (computeType == CUDA_C_64F);
+        double alphaRe = isC64 ? static_cast<const double*>(alpha)[0]
+                                : static_cast<double>(static_cast<const float*>(alpha)[0]);
+        double alphaIm = isC64 ? static_cast<const double*>(alpha)[1]
+                                : static_cast<double>(static_cast<const float*>(alpha)[1]);
+        int64_t n64 = A.rows;
+        std::vector<double> yRe(static_cast<size_t>(n64)), yIm(static_cast<size_t>(n64));
+
+        auto getXZ = [&](int64_t i, double &re, double &im) {
+            if (isC64) { re = static_cast<const double*>(X.values)[2*i]; im = static_cast<const double*>(X.values)[2*i+1]; }
+            else       { re = static_cast<const float* >(X.values)[2*i]; im = static_cast<const float* >(X.values)[2*i+1]; }
+        };
+        auto getAZ = [&](int64_t k, double &re, double &im) {
+            if (isC64) { re = static_cast<const double*>(A.values)[2*k]; im = static_cast<const double*>(A.values)[2*k+1]; }
+            else       { re = static_cast<const float* >(A.values)[2*k]; im = static_cast<const float* >(A.values)[2*k+1]; }
+        };
+        auto cmul = [](double ar, double ai, double br, double bi, double &cr, double &ci) {
+            cr = ar*br - ai*bi; ci = ar*bi + ai*br;
+        };
+        auto cdiv = [](double ar, double ai, double br, double bi, double &cr, double &ci) {
+            double d = br*br + bi*bi; if (d == 0.0) d = 1e-300;
+            cr = (ar*br + ai*bi)/d; ci = (ai*br - ar*bi)/d;
+        };
+
+        // y = alpha * x
+        for (int64_t i = 0; i < n64; ++i) {
+            double xre, xim; getXZ(i, xre, xim);
+            double yre, yim; cmul(alphaRe, alphaIm, xre, xim, yre, yim);
+            yRe[static_cast<size_t>(i)] = yre;
+            yIm[static_cast<size_t>(i)] = yim;
+        }
+
+        int base64 = (A.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+        bool lowerZ   = (A.fillMode == CUSPARSE_FILL_MODE_LOWER);
+        bool unitZ    = (A.diagType == CUSPARSE_DIAG_TYPE_UNIT);
+        bool transpZ  = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+        bool conjugZ  = (opA == CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE);
+
+        auto getA_Z = [&](int64_t k, double &ar, double &ai) {
+            getAZ(k, ar, ai); if (conjugZ) ai = -ai;
+        };
+
+        if (!transpZ) {
+            if (lowerZ) {
+                for (int64_t r = 0; r < n64; ++r) {
+                    int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)   - base64;
+                    int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r+1) - base64;
+                    double rhRe = yRe[static_cast<size_t>(r)], rhIm = yIm[static_cast<size_t>(r)];
+                    double dRe = 1.0, dIm = 0.0;
+                    for (int64_t k = rs; k < re; ++k) {
+                        int64_t c = getIdx(A.colInd, A.colIndType, k) - base64;
+                        double ar, ai; getA_Z(k, ar, ai);
+                        if (c < r) {
+                            double pr, pi; cmul(ar, ai, yRe[static_cast<size_t>(c)], yIm[static_cast<size_t>(c)], pr, pi);
+                            rhRe -= pr; rhIm -= pi;
+                        } else if (c == r && !unitZ) { dRe = ar; dIm = ai; }
+                    }
+                    double yr, yi; cdiv(rhRe, rhIm, dRe, dIm, yr, yi);
+                    yRe[static_cast<size_t>(r)] = yr; yIm[static_cast<size_t>(r)] = yi;
+                }
+            } else {
+                for (int64_t r = n64-1; r >= 0; --r) {
+                    int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)   - base64;
+                    int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r+1) - base64;
+                    double rhRe = yRe[static_cast<size_t>(r)], rhIm = yIm[static_cast<size_t>(r)];
+                    double dRe = 1.0, dIm = 0.0;
+                    for (int64_t k = rs; k < re; ++k) {
+                        int64_t c = getIdx(A.colInd, A.colIndType, k) - base64;
+                        double ar, ai; getA_Z(k, ar, ai);
+                        if (c > r) {
+                            double pr, pi; cmul(ar, ai, yRe[static_cast<size_t>(c)], yIm[static_cast<size_t>(c)], pr, pi);
+                            rhRe -= pr; rhIm -= pi;
+                        } else if (c == r && !unitZ) { dRe = ar; dIm = ai; }
+                    }
+                    double yr, yi; cdiv(rhRe, rhIm, dRe, dIm, yr, yi);
+                    yRe[static_cast<size_t>(r)] = yr; yIm[static_cast<size_t>(r)] = yi;
+                }
+            }
+        } else {
+            if (lowerZ) {
+                for (int64_t r = n64-1; r >= 0; --r) {
+                    int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)   - base64;
+                    int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r+1) - base64;
+                    double dRe = 1.0, dIm = 0.0;
+                    if (!unitZ)
+                        for (int64_t k = rs; k < re; ++k)
+                            if (getIdx(A.colInd, A.colIndType, k)-base64 == r) { getA_Z(k, dRe, dIm); break; }
+                    double yr, yi; cdiv(yRe[static_cast<size_t>(r)], yIm[static_cast<size_t>(r)], dRe, dIm, yr, yi);
+                    yRe[static_cast<size_t>(r)] = yr; yIm[static_cast<size_t>(r)] = yi;
+                    for (int64_t k = rs; k < re; ++k) {
+                        int64_t c = getIdx(A.colInd, A.colIndType, k) - base64;
+                        if (c < r) {
+                            double ar, ai; getA_Z(k, ar, ai);
+                            double pr, pi; cmul(ar, ai, yr, yi, pr, pi);
+                            yRe[static_cast<size_t>(c)] -= pr; yIm[static_cast<size_t>(c)] -= pi;
+                        }
+                    }
+                }
+            } else {
+                for (int64_t r = 0; r < n64; ++r) {
+                    int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)   - base64;
+                    int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r+1) - base64;
+                    double dRe = 1.0, dIm = 0.0;
+                    if (!unitZ)
+                        for (int64_t k = rs; k < re; ++k)
+                            if (getIdx(A.colInd, A.colIndType, k)-base64 == r) { getA_Z(k, dRe, dIm); break; }
+                    double yr, yi; cdiv(yRe[static_cast<size_t>(r)], yIm[static_cast<size_t>(r)], dRe, dIm, yr, yi);
+                    yRe[static_cast<size_t>(r)] = yr; yIm[static_cast<size_t>(r)] = yi;
+                    for (int64_t k = rs; k < re; ++k) {
+                        int64_t c = getIdx(A.colInd, A.colIndType, k) - base64;
+                        if (c > r) {
+                            double ar, ai; getA_Z(k, ar, ai);
+                            double pr, pi; cmul(ar, ai, yr, yi, pr, pi);
+                            yRe[static_cast<size_t>(c)] -= pr; yIm[static_cast<size_t>(c)] -= pi;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (int64_t i = 0; i < n64; ++i) {
+            if (isC64) {
+                static_cast<double*>(Y.values)[2*i]   = yRe[static_cast<size_t>(i)];
+                static_cast<double*>(Y.values)[2*i+1] = yIm[static_cast<size_t>(i)];
+            } else {
+                static_cast<float*>(Y.values)[2*i]   = static_cast<float>(yRe[static_cast<size_t>(i)]);
+                static_cast<float*>(Y.values)[2*i+1] = static_cast<float>(yIm[static_cast<size_t>(i)]);
+            }
+        }
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F)
         return CUSPARSE_STATUS_NOT_SUPPORTED;
 

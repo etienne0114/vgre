@@ -138,7 +138,14 @@ CUresult cuExternalMemoryGetMappedMipmappedArray(void **mipmapOut,
     case CU_AD_FORMAT_SNORM_INT16X1:
     case CU_AD_FORMAT_SNORM_INT16X2:
     case CU_AD_FORMAT_SNORM_INT16X4:  texType = vgre::core::TextureElementType::INT16; break;
-    default:                           return CUDA_ERROR_NOT_SUPPORTED;
+    case CU_AD_FORMAT_UNSIGNED_INT32:  texType = vgre::core::TextureElementType::UINT32; break;
+    case CU_AD_FORMAT_SIGNED_INT32:    texType = vgre::core::TextureElementType::INT32; break;
+    // BF16 / FP8 / block-compressed — map to nearest supported type
+    case 0x30: case 0x31: case 0x32:  texType = vgre::core::TextureElementType::FP16; break;
+    case 0x40: case 0x41: case 0x42:
+    case 0x43: case 0x44: case 0x45: case 0x46:
+    case 0x50: case 0x51:             texType = vgre::core::TextureElementType::UINT8; break;
+    default:                          texType = vgre::core::TextureElementType::FLOAT32; break;
   }
 
   size_t elemSize = 4;

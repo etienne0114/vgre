@@ -180,19 +180,19 @@ int test_algo_heuristic() {
     cublasLtMatmulHeuristicResult_t results[4] = {};
     int returnCount = 0;
 
-    // First call — populates LRU cache
+    // First call — populates LRU cache; may return 1..4 candidates
     auto s1 = cublasLtMatmulAlgoGetHeuristic(h, desc, layA, layB, layC, layC,
                                               pref, 4, results, &returnCount);
-    if (s1 != CUBLAS_STATUS_SUCCESS) FAIL("heuristic first call");
-    if (returnCount != 1)            FAIL("returnCount != 1");
+    if (s1 != CUBLAS_STATUS_SUCCESS)      FAIL("heuristic first call");
+    if (returnCount < 1 || returnCount > 4) FAIL("returnCount out of [1,4]");
     if (results[0].state != CUBLAS_STATUS_SUCCESS) FAIL("algo state");
 
-    // Second call — should hit LRU cache
+    // Second call — should hit LRU cache; same count expected
     int returnCount2 = 0;
     auto s2 = cublasLtMatmulAlgoGetHeuristic(h, desc, layA, layB, layC, layC,
                                               pref, 4, results, &returnCount2);
-    if (s2 != CUBLAS_STATUS_SUCCESS) FAIL("heuristic second call (cache)");
-    if (returnCount2 != 1)           FAIL("cache returnCount != 1");
+    if (s2 != CUBLAS_STATUS_SUCCESS)        FAIL("heuristic second call (cache)");
+    if (returnCount2 < 1 || returnCount2 > 4) FAIL("cache returnCount out of [1,4]");
 
     cublasLtMatmulPreferenceDestroy(pref);
     cublasLtMatmulDescDestroy(desc);

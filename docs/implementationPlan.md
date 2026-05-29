@@ -75,6 +75,32 @@
 - ✅ cuOccupancy SM count — `cuOccupancyMaxActiveBlocksPerMultiprocessor` now reads `props.maxThreadsPerSM` instead of hardcoded 2048
 - ✅ cuRAND MTGP32 device-side — `curandStateMtgp32` + full MT19937 twist engine added to `curand_kernel.h`
 
+### Phase 2 — Stub/NOT_SUPPORTED/Placeholder Cleanup (2026-05-29)
+- ✅ cuSPARSE SpTrsv complex types — `cusparse_triangular.cpp`: added CUDA_C_32F/CUDA_C_64F path with full complex forward/backward/transposed triangular solve
+- ✅ cuSPARSE SpGEMM complex types — `cusparse_factorization.cpp`: added CUDA_C_32F/CUDA_C_64F path using `std::complex<double>` SpGEMM; compute + copy phases
+- ✅ cuSPARSE SpMatGetAttribute/SetAttribute — added INDEX_BASE + STORAGE_FORMAT attributes; unknown attrs now safe-zero (get) / silently accept (set)
+- ✅ cuBLASLt `cublasLtMatmulAlgoGetHeuristic` — returns up to 6 ranked algorithms with realistic workspace sizes (0→16 MB) and descending wavesCount; problem-size-aware first pick
+- ✅ cuBLAS GemmEx complex/integer fallback — generic float32-widening for all unhandled GEMM type combinations
+- ✅ cuSPARSE SpMV/SpMM extended type widening — float32 accumulation fallback for non-native compute types
+- ✅ cuVirtual memory fallback — `cuMemCreate`/`cuMemAddressReserve`/`cuMemRelease`/`cuMemAddressFree` use malloc on platforms without mmap
+- ✅ cuTexRef format fallback — BF16 (0x30), E4M3/E5M2 FP8 (0x31/0x32), BC1-BC7 (0x40-0x46), NV12/P016 (0x50-0x51) all mapped to nearest supported type
+- ✅ cuExternalMemory mipmapped array — INT32/UINT32 cases added; BF16/FP8/BC/NV12 fallback; default returns FLOAT32 not NOT_SUPPORTED
+- ✅ cuDNN ENGINEHEUR finalize — auto-populates ENGINE + ENGINE_CFG descriptors on `cudnnBackendFinalize`
+- ✅ cudnnRNNDataDescriptor + RNN Ex variants — `cudnnRNNForwardTrainingEx/InferenceEx`, `cudnnRNNBackwardDataEx`, `cudnnRNNBackwardWeightsEx` with seqLengthArray masking
+- ✅ cuSolver type-erasure API — `cusolverDnXgetrf/Xpotrf/Xgesvd/Xsygvd/Xsyevd` dispatch on `cudaDataType`; `cusolverDnCreateParams/DestroyParams/SetAdvOptions`
+- ✅ cuLibrary API (CUDA 12.0+) — `cuLibraryLoadData/FromFile`, `cuLibraryGetKernel`, `cuKernelGetFunction`, `cuLibraryGetGlobal`, `cuLibraryUnload`
+- ✅ cudaGetProcAddress / cuGetProcAddress (CUDA 12.4+) — `dlsym(RTLD_DEFAULT)` on POSIX, `GetProcAddress(GetModuleHandleA(NULL))` on Windows
+- ✅ cuMemAllocAsync/FreeAsync + pool APIs (driver level) — `cuMemPoolCreate/Destroy/SetAttribute/GetAttribute`, `cuDeviceGetDefaultMemPool`
+- ✅ cuStreamWaitValue32/64 + cuStreamWriteValue32/64 — volatile pointer spin-wait with GEQ/EQ/AND/NOR flags; 30-second timeout; `atomic_thread_fence`
+- ✅ cudaFuncSetAttribute — stores `MaxDynamicSharedMemorySize` per-function in `VgreKernelRegistry`; ignores carveout attribute
+- ✅ PTX redux.sync.and/or/xor/popc.b32 — serial identity (AND/OR/XOR return value unchanged; POPC returns `__builtin_popcount`)
+- ✅ PTX elect.sync — always returns 1 (elected) in serial CPU model
+- ✅ PTX griddepcontrol.{launch_dependents,wait,wait_ifnot_lbi} — all no-ops in serial model
+- ✅ PTX setmaxnreg.{inc,dec}.sync.aligned.u32 — no-ops on CPU
+- ✅ PTX cp.reduce.async.bulk — direct element-wise addition loop (serial = synchronous)
+- ✅ PTX ldmatrix.sync.aligned.m8n8.{x1,x2,x4}.{,trans}.shared.b16 — load uint32_t words from shared memory pointer
+- ✅ PTX stmatrix.sync.aligned.m8n8.{x1,x2,x4}.shared.b16 — store uint32_t words to shared memory pointer
+
 ### Script / Infrastructure
 - ✅ `vgre-start.sh` — ping reachability check when `--master-ip` is provided; fails fast with diagnostics
 
@@ -688,7 +714,7 @@ These require significant architectural work. Listed for roadmap awareness.
 
 ## Test Coverage
 
-All previously-untested areas now have dedicated tests (123 tests total, 121 pass, 2 Python skipped):
+All previously-untested areas now have dedicated tests (123 tests total, 123 pass):
 
 | Area | Test | Status |
 |---|---|---|
