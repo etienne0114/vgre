@@ -427,6 +427,50 @@ cusparseStatus_t cusparseDcsrmm(cusparseHandle_t handle, cusparseOperation_t tra
                                  const int *csrColIndA, const double *B, int ldb,
                                  const double *beta, double *C, int ldc);
 
+// ── BSR (Block Sparse Row) matrix descriptor ──────────────────────────────────
+typedef enum {
+    CUSPARSE_DIRECTION_ROW = 0,
+    CUSPARSE_DIRECTION_COLUMN = 1
+} cusparseDirection_t;
+
+cusparseStatus_t cusparseCreateBsr(cusparseSpMatDescr_t *spMatDescr,
+                                    int64_t mb, int64_t nb, int64_t nnzb,
+                                    int64_t blockDim,
+                                    void *bsrRowPtr, void *bsrColInd, void *bsrValues,
+                                    cusparseIndexType_t rowPtrType,
+                                    cusparseIndexType_t colIndType,
+                                    cusparseIndexBase_t idxBase,
+                                    cudaDataType_t valueType);
+
+cusparseStatus_t cusparseSpMV_bsr(cusparseHandle_t handle, cusparseOperation_t opA,
+                                   const void *alpha, cusparseSpMatDescr_t matA,
+                                   cusparseDnVecDescr_t vecX, const void *beta,
+                                   cusparseDnVecDescr_t vecY, cudaDataType_t computeType,
+                                   void *buffer);
+
+cusparseStatus_t cusparseSpMM_bsr(cusparseHandle_t handle, cusparseOperation_t opA,
+                                   cusparseOperation_t opB,
+                                   const void *alpha, cusparseSpMatDescr_t matA,
+                                   cusparseDnMatDescr_t matB,
+                                   const void *beta, cusparseDnMatDescr_t matC,
+                                   cudaDataType_t computeType, void *buffer);
+
+// ── Batched SpMM ──────────────────────────────────────────────────────────────
+cusparseStatus_t cusparseSpMM_batched_bufferSize(cusparseHandle_t handle,
+        cusparseOperation_t opA, cusparseOperation_t opB,
+        const void *alpha, cusparseSpMatDescr_t matA,
+        cusparseDnMatDescr_t matB, const void *beta,
+        cusparseDnMatDescr_t matC, cudaDataType_t computeType,
+        int batchCount, size_t *bufferSize);
+
+cusparseStatus_t cusparseSpMM_batched(cusparseHandle_t handle,
+        cusparseOperation_t opA, cusparseOperation_t opB,
+        const void *alpha, cusparseSpMatDescr_t matA,
+        cusparseDnMatDescr_t matB, const void *beta,
+        cusparseDnMatDescr_t matC, cudaDataType_t computeType,
+        int batchCount, int64_t bStride, int64_t cStride,
+        void *buffer);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

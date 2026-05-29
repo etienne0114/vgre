@@ -46,6 +46,20 @@ struct DnMat {
 
 struct SpSVState { bool analyzed = false; };
 
+// ── BSR (Block Sparse Row) descriptor ─────────────────────────────────────────
+struct BsrMat {
+    int64_t mb = 0, nb = 0, nnzb = 0;  // block-row count, block-col count, non-zero blocks
+    int64_t blockDim = 1;                // square block dimension
+    void *bsrRowPtr = nullptr;
+    void *bsrColInd = nullptr;
+    void *values = nullptr;
+    cusparseIndexType_t rowPtrType = CUSPARSE_INDEX_32I;
+    cusparseIndexType_t colIndType = CUSPARSE_INDEX_32I;
+    cusparseIndexBase_t idxBase = CUSPARSE_INDEX_BASE_ZERO;
+    cudaDataType_t valueType = CUDA_R_32F;
+    cusparseDirection_t dir = CUSPARSE_DIRECTION_ROW;
+};
+
 // ── Shared globals (defined in cusparse_core.cpp) ─────────────────────────────
 extern std::mutex g_handleMutex;
 extern std::unordered_map<uintptr_t, bool>    g_handles;
@@ -53,6 +67,7 @@ extern uintptr_t g_nextHandle;
 
 extern std::mutex g_descrMutex;
 extern std::unordered_map<uintptr_t, CsrMat>  g_csrMats;
+extern std::unordered_map<uintptr_t, BsrMat>  g_bsrMats;
 extern std::unordered_map<uintptr_t, DnVec>   g_dnVecs;
 extern std::unordered_map<uintptr_t, DnMat>   g_dnMats;
 extern std::unordered_map<uintptr_t, std::vector<int32_t>> g_cooRowOffsets;

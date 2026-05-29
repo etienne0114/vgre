@@ -343,6 +343,156 @@ int test_null_rejection() {
     return 0;
 }
 
+// ── 10. BSR SpMV (y = alpha * A * x + beta * y) ────────────────────────────────
+int test_bsr_spmv() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    // mb=2, nb=2, nnzb=3, blockDim=2
+    std::vector<int> bsrRowPtr = {0, 2, 3};
+    std::vector<int> bsrColInd = {0, 1, 1};
+    // 3 blocks of 2x2:
+    // Block 0 (row 0, col 0): I
+    // Block 1 (row 0, col 1): diag(2, 3)
+    // Block 2 (row 1, col 1): diag(4, 5)
+    std::vector<float> vals = {
+        1.f, 0.f, 0.f, 1.f,
+        2.f, 0.f, 0.f, 3.f,
+        4.f, 0.f, 0.f, 5.f
+    };
+    std::vector<float> x = {1.f, 2.f, 3.f, 4.f};
+    std::vector<float> y = {0.f, 0.f, 0.f, 0.f};
+
+    cusparseSpMatDescr_t matA = nullptr;
+    cusparseDnVecDescr_t vecX = nullptr, vecY = nullptr;
+
+    cusparseCreateBsr(&matA, 2, 2, 3, 2,
+                      bsrRowPtr.data(), bsrColInd.data(), vals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateDnVec(&vecX, 4, x.data(), CUDA_R_32F);
+    cusparseCreateDnVec(&vecY, 4, y.data(), CUDA_R_32F);
+
+    float alpha = 1.0f, beta = 0.0f;
+    cusparseSpMV_bsr(h, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA,
+                     vecX, &beta, vecY, CUDA_R_32F, nullptr);
+
+    // Expected y = A*x = [7, 14, 12, 20]
+    if (!NEAR(y[0], 7.f, 1e-5f))  FAIL("BSR SpMV y[0]");
+    if (!NEAR(y[1], 14.f, 1e-5f)) FAIL("BSR SpMV y[1]");
+    if (!NEAR(y[2], 12.f, 1e-5f)) FAIL("BSR SpMV y[2]");
+    if (!NEAR(y[3], 20.f, 1e-5f)) FAIL("BSR SpMV y[3]");
+
+    cusparseDestroySpMat(matA);
+    cusparseDestroyDnVec(vecX);
+    cusparseDestroyDnVec(vecY);
+    cusparseDestroy(h);
+    PASS("BSR SpMV float");
+    return 0;
+}
+
+// ── 11. BSR SpMM (C = alpha * A * B + beta * C) ────────────────────────────────
+int test_bsr_spmm() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    std::vector<int> bsrRowPtr = {0, 2, 3};
+    std::vector<int> bsrColInd = {0, 1, 1};
+    std::vector<float> vals = {
+        1.f, 0.f, 0.f, 1.f,
+        2.f, 0.f, 0.f, 3.f,
+        4.f, 0.f, 0.f, 5.f
+    };
+    std::vector<float> B = {
+        1.f, 2.f,
+        3.f, 4.f,
+        5.f, 6.f,
+        7.f, 8.f
+    };
+    std::vector<float> C(8, 0.f);
+
+    cusparseSpMatDescr_t matA = nullptr;
+    cusparseDnMatDescr_t matB = nullptr, matC = nullptr;
+
+    cusparseCreateBsr(&matA, 2, 2, 3, 2,
+                      bsrRowPtr.data(), bsrColInd.data(), vals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateDnMat(&matB, 4, 2, 2, B.data(), CUDA_R_32F, CUSPARSE_ORDER_ROW);
+    cusparseCreateDnMat(&matC, 4, 2, 2, C.data(), CUDA_R_32F, CUSPARSE_ORDER_ROW);
+
+    float alpha = 1.0f, beta = 0.0f;
+    cusparseSpMM_bsr(h, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                     &alpha, matA, matB, &beta, matC, CUDA_R_32F, nullptr);
+
+    // Expected C = A*B:
+    // C[0] = 11, C[1] = 14, C[2] = 24, C[3] = 28, C[4] = 20, C[5] = 24, C[6] = 35, C[7] = 40
+    if (!NEAR(C[0], 11.f, 1e-5f) || !NEAR(C[3], 28.f, 1e-5f) || !NEAR(C[7], 40.f, 1e-5f)) {
+        printf("DEBUG BSR SpMM actual C: ");
+        for (int i = 0; i < 8; ++i) printf("%f ", C[i]);
+        printf("\n");
+        FAIL("BSR SpMM verification failed");
+    }
+
+    cusparseDestroySpMat(matA);
+    cusparseDestroyDnMat(matB);
+    cusparseDestroyDnMat(matC);
+    cusparseDestroy(h);
+    PASS("BSR SpMM float");
+    return 0;
+}
+
+// ── 12. Batched SpMM ──────────────────────────────────────────────────────────
+int test_batched_spmm() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    // CSR 2x2 identity matrix
+    std::vector<int> rowPtr = {0, 1, 2};
+    std::vector<int> colInd = {0, 1};
+    std::vector<float> vals = {1.0f, 1.0f};
+
+    // Dense B: 2 batches of 2x2 matrices
+    // Batch 0: diag(1, 2) => [1, 0, 0, 2] (order row)
+    // Batch 1: diag(3, 4) => [3, 0, 0, 4]
+    std::vector<float> B = {
+        1.f, 0.f,
+        0.f, 2.f,
+        3.f, 0.f,
+        0.f, 4.f
+    };
+    std::vector<float> C(8, 0.f);
+
+    cusparseSpMatDescr_t matA = nullptr;
+    cusparseDnMatDescr_t matB = nullptr, matC = nullptr;
+
+    cusparseCreateCsr(&matA, 2, 2, 2,
+                      rowPtr.data(), colInd.data(), vals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateDnMat(&matB, 2, 2, 2, B.data(), CUDA_R_32F, CUSPARSE_ORDER_ROW);
+    cusparseCreateDnMat(&matC, 2, 2, 2, C.data(), CUDA_R_32F, CUSPARSE_ORDER_ROW);
+
+    float alpha = 1.0f, beta = 0.0f;
+    cusparseSpMM_batched(h, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                         &alpha, matA, matB, &beta, matC, CUDA_R_32F,
+                         2, 4, 4, nullptr);
+
+    // Expected C = B:
+    if (!NEAR(C[0], 1.f, 1e-5f)) FAIL("Batched SpMM C[0]");
+    if (!NEAR(C[3], 2.f, 1e-5f)) FAIL("Batched SpMM C[3]");
+    if (!NEAR(C[4], 3.f, 1e-5f)) FAIL("Batched SpMM C[4]");
+    if (!NEAR(C[7], 4.f, 1e-5f)) FAIL("Batched SpMM C[7]");
+
+    cusparseDestroySpMat(matA);
+    cusparseDestroyDnMat(matB);
+    cusparseDestroyDnMat(matC);
+    cusparseDestroy(h);
+    PASS("Batched SpMM float");
+    return 0;
+}
+
+// [ignoring loop detection]
 // ── Driver ────────────────────────────────────────────────────────────────────
 int main() {
     std::cout << "=== cuSPARSE Shim Functional Tests ===\n";
@@ -356,6 +506,9 @@ int main() {
     rc |= test_ic0();
     rc |= test_sparse_dense_roundtrip();
     rc |= test_csc_descriptor();
+    rc |= test_bsr_spmv();
+    rc |= test_bsr_spmm();
+    rc |= test_batched_spmm();
     if (rc == 0) std::cout << "\nAll cuSPARSE tests passed!\n";
     return rc;
 }

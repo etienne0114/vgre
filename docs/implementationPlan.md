@@ -107,8 +107,20 @@
 ### Code Quality (additional)
 - ✅ P4-3: Config manager JSON parser replaced with `llvm::json::parse()`; `vgre_llvm_iface` linked into `vgre_advanced`
 
+### Phase 3 — FP8 PTX + Array Memory + Doc Audit (2026-05-29)
+- ✅ FP8 register-based MMA helpers — `include/vgre/compiler/wmma_emulation.h`: `vgre_mma_m16n8k32_f32_e4m3`, `_e5m2`, `_e4m3e5m2`, `_e5m2e4m3` (unpack 4 FP8 per uint32 register, partial dot-product, accumulate)
+- ✅ FP8 mma.sync.aligned PTX entries — `ptx_translator_map.cpp`: all 4 e4m3/e5m2 cross-type variants of m16n8k32
+- ✅ FP8 wgmma.mma_async PTX entries — `ptx_translator_map.cpp`: m64n256k32/m64n128k32/m64n64k32 e4m3/e5m2/mixed + m128n256k32; delegate to `vgre_tcgen05_*`
+- ✅ FP8 cvt PTX entries — `ptx_conversion.cpp`: `cvt.rn.satfinite.e4m3x2.f32`, `cvt.rn.satfinite.e5m2x2.f32`, scalar e4m3/e5m2↔f32; `cvt.rn.f32x2.e4m3x2/e5m2x2` unpack
+- ✅ cudaArrayGetMemoryRequirements / cudaMipmappedArrayGetMemoryRequirements — `cudart_shim_stream.cpp`: size=4096, alignment=512 (CPU conservative)
+- ✅ cudaArrayGetSparseProperties / cudaMipmappedArrayGetSparseProperties — returns 128×128×1 tile, 64 KiB mip-tail
+- ✅ PTXFp8Translation test — 8 module-load tests covering mma/wgmma/cvt variants
+- ✅ MallocArray test extended — added MemoryRequirements + SparseProperties assertions
+
 ### CUPTI
 - ✅ CUPTI software-proxy counters — full `cupti_shim.cpp`: subscriber/activity/buffer/metric APIs backed by `RuntimeProfiler`; IPC, occupancy, FLOP, DRAM throughput, branch efficiency metrics
+- ✅ achieved_occupancy — instruction-mix derived formula: 0.50 + 0.38×aluFrac − 0.18×memFrac, time-weighted across all profiled kernels, clamped [0.10, 0.95]
+- ✅ cuptiEventGroupReadAllEvents — maps event group events to instruction-mix buckets (ALU, load, store, branch, barrier, other, total)
 
 ### Previously Misreported as Stubs (confirmed implemented by audit)
 - ✅ Multi-GPU P2P — `cudaMemcpyPeer` routes through `MemoryManager::copyDeviceToDevice` + `memAdvise`

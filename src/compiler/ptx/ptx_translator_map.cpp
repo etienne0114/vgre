@@ -179,6 +179,33 @@ const TranslateMap& getMap() {
                    +o[6]+","+o[7]+","+o[8]+","+o[9]+","
                    +o[10]+","+o[11]+");";
         }},
+        // ── FP8 mma.sync.aligned (Ada/Hopper FP8 tensor cores) ──────────────
+        // PTX: mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32
+        // Operands: d[0..3], a[0..3](4 uint32, 4 FP8 each), b[0..1](2 uint32), c[0..3]
+        {"mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32", [](auto& o){
+            return "vgre_mma_m16n8k32_f32_e4m3("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
+                   +o[4]+","+o[5]+","+o[6]+","+o[7]+","
+                   +o[8]+","+o[9]+","
+                   +o[10]+","+o[11]+","+o[12]+","+o[13]+");";
+        }},
+        {"mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32", [](auto& o){
+            return "vgre_mma_m16n8k32_f32_e5m2("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
+                   +o[4]+","+o[5]+","+o[6]+","+o[7]+","
+                   +o[8]+","+o[9]+","
+                   +o[10]+","+o[11]+","+o[12]+","+o[13]+");";
+        }},
+        {"mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e5m2.f32", [](auto& o){
+            return "vgre_mma_m16n8k32_f32_e4m3e5m2("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
+                   +o[4]+","+o[5]+","+o[6]+","+o[7]+","
+                   +o[8]+","+o[9]+","
+                   +o[10]+","+o[11]+","+o[12]+","+o[13]+");";
+        }},
+        {"mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e4m3.f32", [](auto& o){
+            return "vgre_mma_m16n8k32_f32_e5m2e4m3("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
+                   +o[4]+","+o[5]+","+o[6]+","+o[7]+","
+                   +o[8]+","+o[9]+","
+                   +o[10]+","+o[11]+","+o[12]+","+o[13]+");";
+        }},
         // Warp-group MMA (Hopper) — full emulation via vgre_wgmma_* helpers.
         // operand layout: o[0]=descA, o[1]=descB, o[2]=d_ptr (FP32 accumulator)
         // The accumulator pointer is the output of wgmma; callers pass
@@ -211,6 +238,51 @@ const TranslateMap& getMap() {
         {"wgmma.mma_async.sync.aligned.m64n256k8.f32.tf32.tf32", [](auto& o){
             auto d = o.size() > 2 ? o[2] : std::string("nullptr");
             return "vgre_wgmma_m64n256k8_tf32_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        // ── FP8 wgmma.mma_async (Hopper/Blackwell tcgen05 FP8 tiles, K=32) ──
+        // E4M3×E4M3→FP32 (most common in Flash-Attention-3 and FP8 transformers)
+        {"wgmma.mma_async.sync.aligned.m64n256k32.f32.e4m3.e4m3", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_tcgen05_m64n256k32_e4m3_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        {"wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_tcgen05_m64n128k32_e4m3_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        {"wgmma.mma_async.sync.aligned.m64n64k32.f32.e4m3.e4m3", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_tcgen05_m64n64k32_e4m3_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        // E5M2×E5M2→FP32
+        {"wgmma.mma_async.sync.aligned.m64n256k32.f32.e5m2.e5m2", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_tcgen05_m64n256k32_e5m2_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        {"wgmma.mma_async.sync.aligned.m64n128k32.f32.e5m2.e5m2", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_tcgen05_m64n128k32_e5m2_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        // Mixed E4M3(A)×E5M2(B)→FP32
+        {"wgmma.mma_async.sync.aligned.m64n256k32.f32.e4m3.e5m2", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_tcgen05_m64n256k32_e4m3e5m2_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        {"wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e5m2", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_tcgen05_m64n128k32_e4m3e5m2_f32((float*)(uintptr_t)("+d+"),"
+                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+        }},
+        // 128×256 tiles (Flash-Attention-3 wide tiles)
+        {"wgmma.mma_async.sync.aligned.m128n256k32.f32.e4m3.e4m3", [](auto& o){
+            auto d = o.size() > 2 ? o[2] : std::string("nullptr");
+            return "vgre_tcgen05_m128n256k32_e4m3_f32((float*)(uintptr_t)("+d+"),"
                    "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
         }},
         // TMA bulk async copy: cp.async.bulk copies from global→shared in one call.

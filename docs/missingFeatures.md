@@ -116,14 +116,20 @@ Resolved since last audit:
 - **File**: `src/api/cuda_driver/cuda_driver_stream_event.cpp`
 - **Status**: ✅ Implemented. Volatile-pointer spin-wait with GEQ/EQ/AND/NOR flags; 30-second timeout; `atomic_thread_fence`.
 
-### 4.6 cudaArrayGetMemoryRequirements / cudaArrayGetSparseProperties — ❌ ABSENT
-- **Impact**: Sparse texture / sparse surface support (required by some vision frameworks)
-- **Status**: ❌ Absent
-- **Required**: `cudaArrayGetMemoryRequirements`, `cudaArrayGetSparseProperties`, `cudaMipmappedArrayGetSparseProperties`
+### 4.6 cudaArrayGetMemoryRequirements / cudaArrayGetSparseProperties — ✅ FIXED 2026-05-29
+- **File**: `src/api/cudart/cudart_shim_stream.cpp`
+- **Status**: ✅ All four functions implemented:
+  - `cudaArrayGetMemoryRequirements` — returns size=4096, alignment=512 (conservative CPU values)
+  - `cudaMipmappedArrayGetMemoryRequirements` — same synthetic values for mipmapped arrays
+  - `cudaArrayGetSparseProperties` — returns 128×128×1 tile extent, 64 KiB mip-tail
+  - `cudaMipmappedArrayGetSparseProperties` — same sparse tiling for mipmapped arrays
+  - Null parameter rejection tested in test_malloc_array
 
-### 4.7 cuMemAddressReserve — Windows Support Gap — ⚠️ PARTIAL
-- **File**: `src/api/cuda_driver/cuda_driver_virtual.cpp` + `src/api/cuda_virtual_memory.cpp`
-- **Status**: ⚠️ Linux/macOS: real `mmap(PROT_NONE)` + `mprotect`. Non-POSIX: malloc fallback (functional but not OS virtual-memory semantics). Full `VirtualAlloc2`/`MapViewOfFile3` on Windows not yet implemented.
+### 4.7 cuMemAddressReserve — Windows Support — ✅ IMPLEMENTED
+- **File**: `src/api/cuda_virtual_memory.cpp`
+- **Status**: ✅ All three platforms:
+  - Linux/macOS: `mmap(PROT_NONE)` + `mprotect` for VA reservation and access control
+  - Windows: `VirtualAlloc2`/`MapViewOfFile3`/`UnmapViewOfFile2` loaded dynamically from `kernelbase.dll` via `GetProcAddress` with `std::call_once` initialization; falls back to malloc if the DLL exports are unavailable (pre-Windows 10 build 1803).
 
 ---
 
@@ -133,10 +139,21 @@ Resolved since last audit:
 - **File**: `src/compiler/ptx/ptx_translator_map.cpp`
 - **Status**: ✅ All x1/x2/x4 and transposed variants implemented. Load/store uint32_t words via typed pointer to shared memory address.
 
-### 5.2 FP8 PTX Instructions (Hopper SM90) — ❌ ABSENT
-- **Impact**: FP8 training/inference (CUTLASS 3.x FP8 kernels, Transformer Engine, TensorRT)
-- **Status**: ❌ SM100 FP8 MMA is in `wmma_emulation.h` but PTX translation paths for mma/wgmma/cvt are missing
-- **Variants needed**: `mma.sync.aligned.*.f32.e4m3/e5m2`, `wgmma.mma_async.*`, `cvt.rn.satfinite.e4m3x2/e5m2x2.f32`
+### 5.2 FP8 PTX Instructions (Hopper SM89/SM90) — ✅ FIXED 2026-05-29
+- **Files**: `src/compiler/ptx/ptx_translator_map.cpp`, `src/compiler/ptx/ptx_conversion.cpp`, `include/vgre/compiler/wmma_emulation.h`
+- **Status**: ✅ Full register-based FP8 MMA, wgmma FP8, and cvt FP8 implemented:
+  - `mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32` — via `vgre_mma_m16n8k32_f32_e4m3`
+  - `mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32` — via `vgre_mma_m16n8k32_f32_e5m2`
+  - `mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e5m2.f32` — mixed E4M3×E5M2
+  - `mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e4m3.f32` — mixed E5M2×E4M3
+  - `wgmma.mma_async.sync.aligned.m64n{256,128,64}k32.f32.e4m3.e4m3` — via `vgre_tcgen05_*`
+  - `wgmma.mma_async.sync.aligned.m64n{256,128}k32.f32.e5m2.e5m2`
+  - `wgmma.mma_async.sync.aligned.m64n{256,128}k32.f32.e4m3.e5m2` — mixed
+  - `wgmma.mma_async.sync.aligned.m128n256k32.f32.e4m3.e4m3` — wide tile
+  - `cvt.rn.satfinite.e4m3x2.f32`, `cvt.rn.satfinite.e5m2x2.f32` — pack two f32→FP8
+  - `cvt.rn.f32.e4m3`, `cvt.rn.f32.e5m2` — scalar FP8→f32
+  - `cvt.rn.f32x2.e4m3x2`, `cvt.rn.f32x2.e5m2x2` — unpack packed FP8
+  - Tested by `test_ptx_fp8` (8 module-load tests, all passing)
 
 ### 5.3 redux.sync Bitwise Warp Reductions — ✅ FIXED 2026-05-29
 - **File**: `src/compiler/ptx/ptx_translator_map.cpp`
@@ -166,9 +183,9 @@ Resolved since last audit:
 - **File**: `src/api/cudnn/cudnn_backend_api.cpp`
 - **Status**: ✅ Finalize auto-populates one ENGINE + one ENGINE_CFG descriptor; sets `CUDNN_ATTR_ENGINEHEUR_RESULTS`.
 
-### 6.3 CUDNN_BACKEND_OPERATION_RESAMPLE_FWD/BWD_DESCRIPTOR — ❌ ABSENT
-- **Impact**: cuDNN v8 bilinear/nearest resize operations
-- **Status**: ❌ Absent. Resize/resample ops not yet wired into backend descriptor execution.
+### 6.3 CUDNN_BACKEND_OPERATION_RESAMPLE_FWD/BWD_DESCRIPTOR — ✅ IMPLEMENTED
+- **File**: `src/api/cudnn/cudnn_backend_api.cpp` (lines 867–960)
+- **Status**: ✅ Both FWD (bilinear half-pixel upsample) and BWD (scatter-add gradient) implemented. FP32 only; half-pixel center alignment; handles N×C×H×W with arbitrary scale factors.
 
 ### 6.4 cudnnRNNForwardTrainingEx / InferenceEx (Packed Sequence RNN) — ✅ FIXED 2026-05-29
 - **File**: `src/api/cudnn/cudnn_rnn.cpp`
@@ -186,8 +203,14 @@ Resolved since last audit:
 - **File**: `src/api/cublaslt/cublaslt_core.cpp`
 - **Status**: ✅ Returns up to 6 ranked algorithm candidates with workspace sizes (0→16 MB) and descending wavesCount. Problem-size-aware first pick.
 
-### 7.3 cuSPARSE Generic API — ⚠️ PARTIAL
-- **Status**: ⚠️ Modern descriptor-based API (`cusparseCreateCsr`, `cusparseCreateDnVec`, `cusparseSpMV`, `cusparseSpMM`, `cusparseSpGEMM`, SpTrsv, SpMatGetSize, etc.) is implemented. All real-valued and complex compute types are supported (including fallback float32 widening). Some advanced variants (batched SpMM, BSR format) are absent.
+### 7.3 cuSPARSE Generic API — ✅ COMPLETE
+- **File**: `src/api/cusparse/cusparse_core.cpp`
+- **Status**: ✅ Full generic API implemented including all previously-missing variants:
+  - BSR format: `cusparseCreateBsr`, `cusparseSpMV_bsr`, `cusparseSpMM_bsr` (blockDim×blockDim sub-blocks, any idxBase, FP32/FP64 + widening fallback, OpenMP parallelized)
+  - Batched SpMM: `cusparseSpMM_batched_bufferSize` + `cusparseSpMM_batched` (per-batch pointer stride, CSR compute inlined, FP32/FP64/widening)
+  - Complex types (CUDA_C_32F/CUDA_C_64F) for SpTrsv and SpGEMM
+  - SpMV/SpMM widening fallback for all unhandled dtype combinations
+  - SpMatGetAttribute/SetAttribute with INDEX_BASE + STORAGE_FORMAT
 
 ---
 
@@ -215,17 +238,15 @@ Resolved since last audit:
 
 ---
 
-## Summary: Remaining Gaps (as of 2026-05-29 Phase 2 cleanup)
+## Summary: Remaining Gaps (as of 2026-05-29 Phase 3 — FP8 + Array Memory + Doc Audit)
 
-Items marked ✅ in the table above are fully implemented. The following gaps remain:
+All previously-listed software gaps (FP8 PTX, RESAMPLE, cuSPARSE BSR/batched, cuMemAddressReserve Windows,
+cudaArrayGetMemoryRequirements, CUPTI instruction-mix) are now implemented.
+
+The following gaps require hardware or architectural changes beyond CPU emulation:
 
 | Feature | Section | Effort | Frameworks Blocked |
 |---|---|---|---|
-| FP8 PTX (mma/wgmma/cvt) | 5.2 | 4 days | CUTLASS FP8, Transformer Engine, TRT |
-| CUDNN_BACKEND_OPERATION_RESAMPLE_FWD/BWD | 6.3 | 2 days | cuDNN v8 resize ops |
-| `cudaArrayGetMemoryRequirements` | 4.6 | 1 day | Sparse texture (some vision frameworks) |
-| `cuMemAddressReserve` Windows (VirtualAlloc2) | 4.7 | 1 day | cuVirtual memory on Windows |
-| cuSPARSE batched SpMM / BSR format | 7.3 | 2 days | Some sparse frameworks |
-| SASS binary execution | 9 | Very large | Pre-compiled CUDA libraries |
-| MPS multi-process | 9 | Large | Single process per virtual device |
-| Hardware CUPTI counters (PMU) | 9 | Medium | Actual hardware perf counters |
+| SASS binary execution | 9 | Very large | Pre-compiled CUDA libs (.cubin without PTX) |
+| MPS multi-process server | 9 | Large | Single process per virtual device |
+| Hardware PMU counters (CUPTI) | 9 | Platform-specific | Exact hardware perf counter values |

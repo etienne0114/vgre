@@ -55,12 +55,40 @@ struct PhysAlloc {
     void*  ptr;
     size_t size;
     bool   mapped = false; // mprotect(R|W) applied
+    void*  hSection = nullptr; // Windows section handle
 };
 
 struct VAReservation {
     void*  ptr;
     size_t size;
 };
+
+#if defined(_WIN32)
+using PFN_VirtualAlloc2 = PVOID (WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, ULONG,
+                                           void*, ULONG);
+using PFN_MapViewOfFile3 = PVOID (WINAPI*)(HANDLE, HANDLE, PVOID, ULONG64, SIZE_T,
+                                            ULONG, ULONG, void*, ULONG);
+using PFN_UnmapViewOfFile2 = BOOL (WINAPI*)(HANDLE, PVOID, ULONG);
+
+static PFN_VirtualAlloc2 pVirtualAlloc2 = nullptr;
+static PFN_MapViewOfFile3 pMapViewOfFile3 = nullptr;
+static PFN_UnmapViewOfFile2 pUnmapViewOfFile2 = nullptr;
+static std::once_flag s_win_vm_init;
+
+static void initWinVMFunctions() {
+    std::call_once(s_win_vm_init, []() {
+        HMODULE kb = GetModuleHandleW(L"kernelbase.dll");
+        if (!kb) {
+            kb = LoadLibraryW(L"kernelbase.dll");
+        }
+        if (kb) {
+            pVirtualAlloc2 = (PFN_VirtualAlloc2)GetProcAddress(kb, "VirtualAlloc2");
+            pMapViewOfFile3 = (PFN_MapViewOfFile3)GetProcAddress(kb, "MapViewOfFile3");
+            pUnmapViewOfFile2 = (PFN_UnmapViewOfFile2)GetProcAddress(kb, "UnmapViewOfFile2");
+        }
+    });
+}
+#endif
 
 // Multicast state: mcHandle → list of bound physAlloc handles sharing the same backing.
 // In a single-CPU emulator "multicast" = aliasing the same physical pages to multiple
@@ -130,18 +158,29 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle* handle,
     void* ptr = mmap(nullptr, size, PROT_NONE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (ptr == MAP_FAILED) return CUDA_ERROR_OUT_OF_MEMORY;
+    void* hSection = nullptr;
 #elif defined(_WIN32)
-    void* ptr = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
-    if (!ptr) return CUDA_ERROR_OUT_OF_MEMORY;
+    void* ptr = nullptr;
+    void* hSection = nullptr;
+    initWinVMFunctions();
+    if (pVirtualAlloc2 && pMapViewOfFile3) {
+        hSection = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_COMMIT,
+                                       (DWORD)(size >> 32), (DWORD)(size & 0xFFFFFFFF), nullptr);
+        if (!hSection) return CUDA_ERROR_OUT_OF_MEMORY;
+    } else {
+        ptr = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
+        if (!ptr) return CUDA_ERROR_OUT_OF_MEMORY;
+    }
 #else
     void* ptr = ::malloc(size);
     if (!ptr) return CUDA_ERROR_OUT_OF_MEMORY;
     ::memset(ptr, 0, size);
+    void* hSection = nullptr;
 #endif
 
     uint64_t h = getNextVMHandle().fetch_add(1, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(getVMMutex());
-    getPhysAllocs()[h] = {ptr, size, false};
+    getPhysAllocs()[h] = {ptr, size, false, hSection};
     *handle = h;
     VGRE_LOG_DEBUG("VirtualMemory",
         "cuMemCreate: handle=" + std::to_string(h) +
@@ -158,9 +197,13 @@ CUresult cuMemRelease(CUmemGenericAllocationHandle handle) {
 #if defined(__linux__) || defined(__APPLE__)
     munmap(pa.ptr, pa.size);
 #elif defined(_WIN32)
-    VirtualFree(pa.ptr, 0, MEM_RELEASE);
+    if (pa.hSection) {
+        CloseHandle((HANDLE)pa.hSection);
+    } else if (pa.ptr) {
+        VirtualFree(pa.ptr, 0, MEM_RELEASE);
+    }
 #else
-    ::free(pa.ptr);
+    if (pa.ptr) ::free(pa.ptr);
 #endif
     getPhysAllocs().erase(it);
     VGRE_LOG_DEBUG("VirtualMemory", "cuMemRelease: handle=" + std::to_string(handle));
@@ -179,7 +222,14 @@ CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) return CUDA_ERROR_OUT_OF_MEMORY;
 #elif defined(_WIN32)
-    void* p = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
+    void* p = nullptr;
+    initWinVMFunctions();
+    if (pVirtualAlloc2 && pMapViewOfFile3) {
+        // MEM_RESERVE | MEM_RESERVE_PLACEHOLDER (0x00040000)
+        p = pVirtualAlloc2(GetCurrentProcess(), nullptr, size, MEM_RESERVE | 0x00040000, PAGE_NOACCESS, nullptr, 0);
+    } else {
+        p = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
+    }
     if (!p) return CUDA_ERROR_OUT_OF_MEMORY;
 #else
     void* p = ::malloc(size);
@@ -204,9 +254,25 @@ CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size) {
     // Remove any reservation that starts at this address
     for (auto it = getVAReservations().begin(); it != getVAReservations().end(); ++it) {
         if (it->second.ptr == p) {
+            size_t rSize = it->second.size;
 #if defined(__linux__) || defined(__APPLE__)
-            munmap(p, it->second.size);
+            munmap(p, rSize);
 #elif defined(_WIN32)
+            initWinVMFunctions();
+            if (pUnmapViewOfFile2) {
+                uintptr_t start = reinterpret_cast<uintptr_t>(p);
+                uintptr_t end = start + rSize;
+                std::vector<uintptr_t> to_unmap;
+                for (const auto& entry : getMappings()) {
+                    if (entry.first >= start && entry.first < end) {
+                        to_unmap.push_back(entry.first);
+                    }
+                }
+                for (uintptr_t va : to_unmap) {
+                    pUnmapViewOfFile2(GetCurrentProcess(), reinterpret_cast<void*>(va), 0x00000002); // MEM_PRESERVE_PLACEHOLDER
+                    getMappings().erase(va);
+                }
+            }
             VirtualFree(p, 0, MEM_RELEASE);
 #else
             ::free(p);
@@ -230,8 +296,28 @@ CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t /*offset*/,
     if (mprotect(va, size, PROT_READ | PROT_WRITE) != 0)
         return CUDA_ERROR_INVALID_VALUE;
 #elif defined(_WIN32)
-    DWORD old;
-    VirtualProtect(va, size, PAGE_READWRITE, &old);
+    if (it->second.hSection) {
+        initWinVMFunctions();
+        if (pMapViewOfFile3) {
+            // Split placeholder: MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER (0x00000002)
+            VirtualFree(va, size, MEM_RELEASE | 0x00000002);
+            // Map view: MEM_REPLACE_PLACEHOLDER (0x00000002)
+            void* mapped_ptr = pMapViewOfFile3((HANDLE)it->second.hSection, GetCurrentProcess(), va, 0, size,
+                                               0x00000002, PAGE_READWRITE, nullptr, 0);
+            if (!mapped_ptr) {
+                // Restore placeholder if failed: MEM_RESERVE | MEM_RESERVE_PLACEHOLDER (0x00040000)
+                if (pVirtualAlloc2) {
+                    pVirtualAlloc2(GetCurrentProcess(), va, size, MEM_RESERVE | 0x00040000, PAGE_NOACCESS, nullptr, 0);
+                }
+                return CUDA_ERROR_INVALID_VALUE;
+            }
+        } else {
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+    } else {
+        DWORD old;
+        VirtualProtect(va, size, PAGE_READWRITE, &old);
+    }
 #else
     // malloc-backed fallback: memory is already readable/writable
     (void)va; (void)size;
@@ -250,8 +336,26 @@ CUresult cuMemUnmap(CUdeviceptr ptr, size_t size) {
 #if defined(__linux__) || defined(__APPLE__)
     mprotect(va, size, PROT_NONE);
 #elif defined(_WIN32)
-    DWORD old;
-    VirtualProtect(va, size, PAGE_NOACCESS, &old);
+    initWinVMFunctions();
+    bool mapped_via_section = false;
+    {
+        std::lock_guard<std::mutex> lk(getVMMutex());
+        auto mIt = getMappings().find(static_cast<uintptr_t>(ptr));
+        if (mIt != getMappings().end()) {
+            auto physIt = getPhysAllocs().find(mIt->second);
+            if (physIt != getPhysAllocs().end() && physIt->second.hSection != nullptr) {
+                mapped_via_section = true;
+            }
+        }
+    }
+
+    if (mapped_via_section && pUnmapViewOfFile2) {
+        // MEM_PRESERVE_PLACEHOLDER (0x00000002)
+        pUnmapViewOfFile2(GetCurrentProcess(), va, 0x00000002);
+    } else {
+        DWORD old;
+        VirtualProtect(va, size, PAGE_NOACCESS, &old);
+    }
 #endif
     std::lock_guard<std::mutex> lk(getVMMutex());
     getMappings().erase(static_cast<uintptr_t>(ptr));

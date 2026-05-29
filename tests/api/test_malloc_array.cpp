@@ -22,6 +22,28 @@ cudaError_t cudaMallocArray(void **array, const struct cudaChannelFormatDesc *de
 cudaError_t cudaMalloc3DArray(void **array, const struct cudaChannelFormatDesc *desc,
                                 struct cudaExtent extent);
 cudaError_t cudaFreeArray(void *array);
+
+// CUDA 11.6+ array memory requirement query
+struct cudaArrayMemoryRequirements {
+    size_t       size;
+    size_t       alignment;
+    unsigned int reserved[4];
+};
+cudaError_t cudaArrayGetMemoryRequirements(
+    struct cudaArrayMemoryRequirements* memRequirements, void* array, int device);
+
+// CUDA 11.1+ sparse-texture tile query
+struct cudaArraySparseProperties {
+    struct { unsigned int width; unsigned int height; unsigned int depth; } tileExtent;
+    unsigned int       miptailFirstLevel;
+    unsigned long long miptailSize;
+    unsigned int       flags;
+    unsigned int       reserved[4];
+};
+cudaError_t cudaArrayGetSparseProperties(
+    struct cudaArraySparseProperties* sparseProperties, void* array);
+cudaError_t cudaMipmappedArrayGetSparseProperties(
+    struct cudaArraySparseProperties* sparseProperties, void* mipArray);
 }
 
 int main() {
@@ -115,5 +137,68 @@ int main() {
   std::cout << "  -> Zero-bit descriptor correctly rejected\n";
 
   std::cout << "[PASS] cudaMallocArray / cudaMalloc3DArray / cudaFreeArray work correctly!\n";
+
+  // ── cudaArrayGetMemoryRequirements ──────────────────────────────────────────
+  std::cout << "Testing cudaArrayGetMemoryRequirements...\n";
+  void *arr_mr = nullptr;
+  err = cudaMallocArray(&arr_mr, &desc, 64, 64);
+  if (err != cudaSuccess || !arr_mr) {
+    std::cerr << "FAIL: cudaMallocArray for memreq test failed (err=" << err << ")\n";
+    return 1;
+  }
+  cudaArrayMemoryRequirements memReq{};
+  err = cudaArrayGetMemoryRequirements(&memReq, arr_mr, 0);
+  if (err != cudaSuccess) {
+    std::cerr << "FAIL: cudaArrayGetMemoryRequirements failed (err=" << err << ")\n";
+    return 1;
+  }
+  if (memReq.size == 0) {
+    std::cerr << "FAIL: cudaArrayGetMemoryRequirements returned size=0\n";
+    return 1;
+  }
+  if (memReq.alignment == 0) {
+    std::cerr << "FAIL: cudaArrayGetMemoryRequirements returned alignment=0\n";
+    return 1;
+  }
+  std::cout << "  -> size=" << memReq.size << " alignment=" << memReq.alignment << "\n";
+
+  // Null output pointer must be rejected
+  err = cudaArrayGetMemoryRequirements(nullptr, arr_mr, 0);
+  if (err != cudaErrorInvalidValue) {
+    std::cerr << "FAIL: Expected cudaErrorInvalidValue for null memRequirements\n";
+    return 1;
+  }
+  cudaFreeArray(arr_mr);
+  std::cout << "[PASS] cudaArrayGetMemoryRequirements works correctly!\n";
+
+  // ── cudaArrayGetSparseProperties ────────────────────────────────────────────
+  std::cout << "Testing cudaArrayGetSparseProperties...\n";
+  void *arr_sp = nullptr;
+  err = cudaMallocArray(&arr_sp, &desc, 16, 16);
+  if (err != cudaSuccess || !arr_sp) {
+    std::cerr << "FAIL: cudaMallocArray for sparse test failed (err=" << err << ")\n";
+    return 1;
+  }
+  cudaArraySparseProperties sp{};
+  err = cudaArrayGetSparseProperties(&sp, arr_sp);
+  if (err != cudaSuccess) {
+    std::cerr << "FAIL: cudaArrayGetSparseProperties failed (err=" << err << ")\n";
+    return 1;
+  }
+  if (sp.tileExtent.width == 0 || sp.miptailSize == 0) {
+    std::cerr << "FAIL: cudaArrayGetSparseProperties returned zero tile width or miptailSize\n";
+    return 1;
+  }
+  std::cout << "  -> tile=" << sp.tileExtent.width << "x" << sp.tileExtent.height
+            << " miptailSize=" << sp.miptailSize << "\n";
+  err = cudaArrayGetSparseProperties(nullptr, arr_sp);
+  if (err != cudaErrorInvalidValue) {
+    std::cerr << "FAIL: Expected cudaErrorInvalidValue for null sparseProperties\n";
+    return 1;
+  }
+  cudaFreeArray(arr_sp);
+  std::cout << "[PASS] cudaArrayGetSparseProperties works correctly!\n";
+
+  std::cout << "[PASS] All cudaArray tests passed!\n";
   return 0;
 }

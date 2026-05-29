@@ -1241,4 +1241,135 @@ inline float vgre_fp8e5m2_to_f32(uint8_t b)  { return detail::fp8e5m2_to_f32(b);
 inline uint8_t vgre_f32_to_fp8e4m3(float f)  { return detail::f32_to_fp8e4m3(f); }
 inline uint8_t vgre_f32_to_fp8e5m2(float f)  { return detail::f32_to_fp8e5m2(f); }
 
+// ── register-based FP8 mma helpers (Ampere/Ada mma.sync.aligned) ─────────────
+// PTX: mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32
+// Operand layout per thread (serial CPU model = one thread per warp):
+//   D: d0..d3 (4 × f32 accumulator output)
+//   A: a0..a3 (4 × b32, each holds 4 FP8 E4M3 bytes = 16 FP8 total)
+//   B: b0..b1 (2 × b32, each holds 4 FP8 E4M3 bytes = 8 FP8 total)
+//   C: c0..c3 (4 × f32 accumulator input)
+// In VGRE's serial CPU model the entire warp's tile computation is performed
+// by thread 0 using thread 0's register fragment.  We unpack all FP8 bytes
+// from the A and B registers and compute a partial dot-product contribution
+// for each output accumulator element, consistent with the INT8/INT4 approach.
+inline void vgre_mma_m16n8k32_f32_e4m3(
+    float& d0, float& d1, float& d2, float& d3,
+    unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+    unsigned b0, unsigned b1,
+    float c0, float c1, float c2, float c3)
+{
+    // Unpack 4 FP8 E4M3 bytes from each uint32 register
+    auto unpack = [](unsigned r, float out[4], auto conv) {
+        for (int i = 0; i < 4; ++i)
+            out[i] = conv(static_cast<uint8_t>((r >> (8 * i)) & 0xFFu));
+    };
+    float av[16], bv[8];
+    unpack(a0, av+0,  detail::fp8e4m3_to_f32);
+    unpack(a1, av+4,  detail::fp8e4m3_to_f32);
+    unpack(a2, av+8,  detail::fp8e4m3_to_f32);
+    unpack(a3, av+12, detail::fp8e4m3_to_f32);
+    unpack(b0, bv+0,  detail::fp8e4m3_to_f32);
+    unpack(b1, bv+4,  detail::fp8e4m3_to_f32);
+
+    float acc[4] = {c0, c1, c2, c3};
+    // Each k-step contributes to all 4 output elements (serial warp model)
+    for (int k = 0; k < 8; ++k)
+        for (int n = 0; n < 4; ++n)
+            acc[n] += av[k] * bv[k];
+    // Second half of A operand (a2,a3) maps to B second half (b1)
+    for (int k = 0; k < 8; ++k)
+        for (int n = 0; n < 4; ++n)
+            acc[n] += av[8 + k] * bv[4 + k % 4];
+    d0 = acc[0]; d1 = acc[1]; d2 = acc[2]; d3 = acc[3];
+}
+
+// FP8 E5M2×E5M2→FP32 variant
+inline void vgre_mma_m16n8k32_f32_e5m2(
+    float& d0, float& d1, float& d2, float& d3,
+    unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+    unsigned b0, unsigned b1,
+    float c0, float c1, float c2, float c3)
+{
+    auto unpack = [](unsigned r, float out[4], auto conv) {
+        for (int i = 0; i < 4; ++i)
+            out[i] = conv(static_cast<uint8_t>((r >> (8 * i)) & 0xFFu));
+    };
+    float av[16], bv[8];
+    unpack(a0, av+0,  detail::fp8e5m2_to_f32);
+    unpack(a1, av+4,  detail::fp8e5m2_to_f32);
+    unpack(a2, av+8,  detail::fp8e5m2_to_f32);
+    unpack(a3, av+12, detail::fp8e5m2_to_f32);
+    unpack(b0, bv+0,  detail::fp8e5m2_to_f32);
+    unpack(b1, bv+4,  detail::fp8e5m2_to_f32);
+
+    float acc[4] = {c0, c1, c2, c3};
+    for (int k = 0; k < 8; ++k)
+        for (int n = 0; n < 4; ++n)
+            acc[n] += av[k] * bv[k];
+    for (int k = 0; k < 8; ++k)
+        for (int n = 0; n < 4; ++n)
+            acc[n] += av[8 + k] * bv[4 + k % 4];
+    d0 = acc[0]; d1 = acc[1]; d2 = acc[2]; d3 = acc[3];
+}
+
+// Mixed E4M3(A)×E5M2(B)→FP32 variant
+inline void vgre_mma_m16n8k32_f32_e4m3e5m2(
+    float& d0, float& d1, float& d2, float& d3,
+    unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+    unsigned b0, unsigned b1,
+    float c0, float c1, float c2, float c3)
+{
+    auto unpackA = [](unsigned r, float out[4]) {
+        for (int i = 0; i < 4; ++i)
+            out[i] = detail::fp8e4m3_to_f32(static_cast<uint8_t>((r >> (8 * i)) & 0xFFu));
+    };
+    auto unpackB = [](unsigned r, float out[4]) {
+        for (int i = 0; i < 4; ++i)
+            out[i] = detail::fp8e5m2_to_f32(static_cast<uint8_t>((r >> (8 * i)) & 0xFFu));
+    };
+    float av[16], bv[8];
+    unpackA(a0, av+0);  unpackA(a1, av+4);
+    unpackA(a2, av+8);  unpackA(a3, av+12);
+    unpackB(b0, bv+0);  unpackB(b1, bv+4);
+
+    float acc[4] = {c0, c1, c2, c3};
+    for (int k = 0; k < 8; ++k)
+        for (int n = 0; n < 4; ++n)
+            acc[n] += av[k] * bv[k];
+    for (int k = 0; k < 8; ++k)
+        for (int n = 0; n < 4; ++n)
+            acc[n] += av[8 + k] * bv[4 + k % 4];
+    d0 = acc[0]; d1 = acc[1]; d2 = acc[2]; d3 = acc[3];
+}
+
+// Mixed E5M2(A)×E4M3(B)→FP32 variant
+inline void vgre_mma_m16n8k32_f32_e5m2e4m3(
+    float& d0, float& d1, float& d2, float& d3,
+    unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+    unsigned b0, unsigned b1,
+    float c0, float c1, float c2, float c3)
+{
+    auto unpackA = [](unsigned r, float out[4]) {
+        for (int i = 0; i < 4; ++i)
+            out[i] = detail::fp8e5m2_to_f32(static_cast<uint8_t>((r >> (8 * i)) & 0xFFu));
+    };
+    auto unpackB = [](unsigned r, float out[4]) {
+        for (int i = 0; i < 4; ++i)
+            out[i] = detail::fp8e4m3_to_f32(static_cast<uint8_t>((r >> (8 * i)) & 0xFFu));
+    };
+    float av[16], bv[8];
+    unpackA(a0, av+0);  unpackA(a1, av+4);
+    unpackA(a2, av+8);  unpackA(a3, av+12);
+    unpackB(b0, bv+0);  unpackB(b1, bv+4);
+
+    float acc[4] = {c0, c1, c2, c3};
+    for (int k = 0; k < 8; ++k)
+        for (int n = 0; n < 4; ++n)
+            acc[n] += av[k] * bv[k];
+    for (int k = 0; k < 8; ++k)
+        for (int n = 0; n < 4; ++n)
+            acc[n] += av[8 + k] * bv[4 + k % 4];
+    d0 = acc[0]; d1 = acc[1]; d2 = acc[2]; d3 = acc[3];
+}
+
 #endif // VGRE_COMPILER_WMMA_EMULATION_H
