@@ -23,6 +23,7 @@ add_library(vgre_api OBJECT
     cudnn/cudnn_softmax.cpp
     cudnn/cudnn_pooling.cpp
     cudnn/cudnn_batchnorm.cpp
+    cudnn/cudnn_normalization.cpp
     cudnn/cudnn_dropout.cpp
     cudnn/cudnn_tensor_ops.cpp
     cudnn/cudnn_rnn.cpp

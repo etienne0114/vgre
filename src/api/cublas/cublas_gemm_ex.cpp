@@ -411,4 +411,48 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// cublasHgemmBatched: FP16 batched GEMM (pointer array form)
+cublasStatus_t cublasHgemmBatched(cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const void *alpha,             // __half*
+    const void *const *Aarray, int lda,
+    const void *const *Barray, int ldb,
+    const void *beta,              // __half*
+    void *const *Carray, int ldc,
+    int batchCount)
+{
+    if (!handle || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b] || !Barray[b] || !Carray[b]) return CUBLAS_STATUS_INVALID_VALUE;
+        cublasStatus_t r = cublasHgemm(handle, transa, transb, m, n, k,
+            alpha, Aarray[b], lda, Barray[b], ldb, beta, Carray[b], ldc);
+        if (r != CUBLAS_STATUS_SUCCESS) return r;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// cublasHgemmStridedBatched: FP16 strided batched GEMM
+cublasStatus_t cublasHgemmStridedBatched(cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const void *alpha,             // __half*
+    const void *A, int lda, long long strideA,
+    const void *B, int ldb, long long strideB,
+    const void *beta,              // __half*
+    void *C, int ldc, long long strideC,
+    int batchCount)
+{
+    if (!handle || !A || !B || !C || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        const void* Ab = static_cast<const char*>(A) + b * strideA * 2; // 2 bytes per FP16
+        const void* Bb = static_cast<const char*>(B) + b * strideB * 2;
+        void*       Cb = static_cast<char*>(C)       + b * strideC * 2;
+        cublasStatus_t r = cublasHgemm(handle, transa, transb, m, n, k,
+            alpha, Ab, lda, Bb, ldb, beta, Cb, ldc);
+        if (r != CUBLAS_STATUS_SUCCESS) return r;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 } // extern "C"

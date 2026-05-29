@@ -76,6 +76,10 @@ extern uintptr_t g_nextDescr;
 extern std::unordered_map<uintptr_t, SpSVState> g_spsvDescrs;
 extern uintptr_t g_nextSpSV;
 
+struct SpSMState { bool analyzed = false; };
+extern std::unordered_map<uintptr_t, SpSMState> g_spsmDescrs;
+extern uintptr_t g_nextSpSM;
+
 // ── Shared helpers ────────────────────────────────────────────────────────────
 inline uintptr_t allocHandle() {
     std::lock_guard<std::mutex> lk(g_handleMutex);

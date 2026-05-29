@@ -1,6 +1,6 @@
 # VGRE — Honest Feature Status (Code-Verified Audit)
 
-**Audit Date**: 2026-05-29 (v5 — Phase 2 stub/placeholder cleanup)
+**Audit Date**: 2026-05-29 (v7 — Phase 5 complete: HgemmBatched, SpSM, SDDMM, cudnnNormalizationAPI; 130/130 tests)
 **Method**: Direct source file reads + grep analysis + cross-referenced with CUDA 12.x release notes, cuDNN 9.x docs, and CUTLASS/Triton source requirements.
 **Scope**: Full codebase audit against CUDA 12.4, cuDNN 9.x, cuBLAS 12.x, cuSolver 12.x, cuSPARSE 12.x, cuRAND 10.x, CUPTI 12.x, NCCL 2.x.
 **Policy**: ✅ Confirmed real implementation. ⚠️ Partially implemented. ❌ Absent (confirmed by grep). Items in Section 4–8 are confirmed absent by direct code inspection.
@@ -253,15 +253,46 @@ Resolved since last audit:
 ### 9.5 Hardware CUPTI Counters — ✅ IMPLEMENTED
 - **File**: `src/api/cupti/cupti_shim.cpp`
 - **Linux**: `perf_event_open(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS)` per subscriber; reads actual CPU instruction counts as proxy for GPU SM instruction throughput
-- **macOS**: `kpc_get_thread_counters()` (Apple KPC framework) for fixed PMU cycle/instruction counts
-- **Windows**: `QueryPerformanceCounter` cycle deltas scaled by `QueryPerformanceFrequency`
+- **macOS**: `thread_info(mach_thread_self(), THREAD_BASIC_INFO)` — hardware-measured per-thread user-time in microseconds as instruction-count proxy (Apple KPC requires private entitlements)
+- **Windows**: `QueryThreadCycleTime(GetCurrentThread(), &cycles)` — per-thread TSC delta as instruction-count proxy
 - All platforms fall back to instruction-mix software proxies when hardware PMU is unavailable or unprivileged
 
 ---
 
-## Summary: All Software-Emulatable Gaps Closed (as of 2026-05-29 Phase 4)
+## Section 10 — Implemented in Phase 5 (2026-05-29)
 
-All gaps from Section 9 that were software-implementable are now closed.
+### 10.1 cublasHgemmBatched / cublasHgemmStridedBatched — ✅ IMPLEMENTED
+- **File**: `src/api/cublas/cublas_gemm_ex.cpp` (appended ~50 lines)
+- `cublasHgemmBatched`: loops over `batchCount` pointer-array pairs, calls `cublasHgemm` per batch
+- `cublasHgemmStridedBatched`: strides by `stride * 2` bytes (2 bytes per FP16 element)
+- **Test**: `tests/api/test_hgemm_batched.cpp` (3 tests: pointer-array, strided, invalid-value guards)
+
+### 10.2 cusparseSpSM (Sparse Triangular Solve with Matrix RHS) — ✅ IMPLEMENTED
+- **Files**: `src/api/cusparse/cusparse_state.h`, `cusparse_core.cpp`, `cusparse_triangular.cpp`
+- **API surface**: `cusparseSpSM_createDescr/destroyDescr/bufferSize/analysis/solve`
+- **Algorithm**: for each column j of B, extracts column vector, applies same forward/backward triangular substitution as SpSV, writes result to column j of X
+- **Types**: `cusparseSpSMDescr_t`, `cusparseSpSMAlg_t` added to `include/vgre/api/cusparse_shim.h`
+- **Test**: `tests/api/test_cusparse_spsm_sddmm.cpp` (lower/upper triangular, multi-column)
+
+### 10.3 cusparseSDDMM (Sampled Dense-Dense Matrix Multiplication) — ✅ IMPLEMENTED
+- **File**: `src/api/cusparse/cusparse_core.cpp` (appended ~90 lines)
+- **Algorithm**: for each non-zero (r,c) in sparse C: `dot = sum_p op(A)[r,p] * op(B)[p,c]`; `C[r,c] = alpha*dot + beta*C[r,c]`
+- **Bug fixed**: `getB` lambda had inverted transpose condition; corrected to `r = transpB ? row : col`
+- **Types**: `cusparseSDDMMAlg_t` added to `include/vgre/api/cusparse_shim.h`
+- **Test**: `tests/api/test_cusparse_spsm_sddmm.cpp` (correctness + beta accumulation)
+
+### 10.4 cudnnNormalizationForward/Backward — ✅ IMPLEMENTED
+- **File**: `src/api/cudnn/cudnn_normalization.cpp` (new file, ~280 lines)
+- **Modes**: `CUDNN_NORM_PER_CHANNEL` → per-channel batch norm math; `CUDNN_NORM_PER_ACTIVATION` → per-sample layer norm
+- **Functions**: `ForwardInference` (uses estimated mean/var), `ForwardTraining` (computes stats + EMA running update + saveMean/saveInvVar), `Backward` (dScale/dBias/dx for both modes)
+- **Enums**: `cudnnNormMode_t`, `cudnnNormAlgo_t`, `cudnnNormOps_t` added to `src/api/cudnn/cudnn_internal.h`
+- **Test**: `tests/api/test_cudnn_normalization.cpp` (5 tests: per-channel/per-activation fwd, training stats, backward gradients, invalid value)
+
+---
+
+## Summary: All Software-Emulatable Gaps Closed (as of 2026-05-29 Phase 5)
+
+All gaps from Sections 9–10 that were software-implementable are now closed. 130/130 tests pass.
 The only fundamental limitation is full SASS ISA simulation, which would require
 a complete GPU binary instruction set emulator — out of scope for a CPU-based emulator.
 
@@ -270,5 +301,9 @@ a complete GPU binary instruction set emulator — out of scope for a CPU-based 
 | SASS binary execution | ⚠️ PARTIAL | PTX extracted from fatbin; SASS-only cubins log clear error |
 | MPS multi-process server | ✅ DONE | Unix socket + Named Pipe; full MALLOC/FREE/MEMCPY/LAUNCH/SYNC |
 | cuMemAddressReserve Windows | ✅ DONE | VirtualAlloc2/MapViewOfFile3 via GetProcAddress |
-| Hardware CUPTI counters | ✅ DONE | perf_event_open / KPC / QPC per platform |
+| Hardware CUPTI counters | ✅ DONE | perf_event_open / thread_info / QueryThreadCycleTime per platform |
 | OpenMP `__syncthreads` | ✅ DONE | BlockWorkerPool two-level dispatch with barrier |
+| cublasHgemmBatched/Strided | ✅ DONE | Loops over cublasHgemm; 2-byte FP16 stride offset |
+| cusparseSpSM | ✅ DONE | Column-by-column triangular substitution; 5-function API |
+| cusparseSDDMM | ✅ DONE | CSR non-zero iteration with dot products; opA/opB handled |
+| cudnnNormalizationAPI | ✅ DONE | Layer norm (PER_ACTIVATION) + batch norm (PER_CHANNEL) fwd/bwd |

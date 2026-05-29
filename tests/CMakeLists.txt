@@ -342,6 +342,18 @@ add_executable(test_cupti_hw_counters api/test_cupti_hw_counters.cpp)
 target_link_libraries(test_cupti_hw_counters PRIVATE vgre_api vgre_cudart)
 add_test(NAME CuptiHwCounters COMMAND test_cupti_hw_counters)
 
+add_executable(test_hgemm_batched api/test_hgemm_batched.cpp)
+target_link_libraries(test_hgemm_batched PRIVATE vgre_cudart)
+add_test(NAME HgemmBatched COMMAND test_hgemm_batched)
+
+add_executable(test_cusparse_spsm_sddmm api/test_cusparse_spsm_sddmm.cpp)
+target_link_libraries(test_cusparse_spsm_sddmm PRIVATE vgre_cudart)
+add_test(NAME CuSPARSESpSMSDDMM COMMAND test_cusparse_spsm_sddmm)
+
+add_executable(test_cudnn_normalization api/test_cudnn_normalization.cpp)
+target_link_libraries(test_cudnn_normalization PRIVATE vgre)
+add_test(NAME CuDNNNormalization COMMAND test_cudnn_normalization)
+
 add_executable(test_curand_mtgp32 api/test_curand_mtgp32.cpp)
 target_link_libraries(test_curand_mtgp32 PRIVATE vgre_cudart)
 add_test(NAME CuRANDMTGP32Uniformity COMMAND test_curand_mtgp32)
