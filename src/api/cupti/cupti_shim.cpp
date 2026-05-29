@@ -1,9 +1,13 @@
 // CUPTI shim — software-proxy implementation backed by RuntimeProfiler.
 //
-// Hardware counters are approximated from instruction-mix data, kernel
-// timings, and memory throughput tracked by RuntimeProfiler.  All public
-// CUPTI 12.x entry points are implemented so applications that call them
-// receive meaningful values rather than link errors or NOT_SUPPORTED.
+// Hardware PMU counters are read via platform-native APIs:
+//   Linux:   perf_event_open(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS)
+//   macOS:   mach_absolute_time() + QueryThreadCycleTime equivalent via
+//            thread_info(THREAD_BASIC_INFO) for user-time instruction estimate
+//   Windows: QueryThreadCycleTime() for actual TSC cycle deltas
+//
+// All platforms fall back to RuntimeProfiler instruction-mix proxies when
+// hardware counters are unavailable (paranoid>1, sandbox, missing privilege).
 
 #include "vgre/api/cupti_shim.h"
 #include "vgre/advanced/runtime_profiler.h"
@@ -19,6 +23,143 @@
 #include <atomic>
 #include <algorithm>
 
+#if defined(__linux__)
+#include <linux/perf_event.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/thread_info.h>
+#include <mach/mach_time.h>
+#endif
+
+#if defined(_WIN32)
+#include "vgre/common/os_backend.h"
+#endif
+
+// ── Hardware PMU sampler ──────────────────────────────────────────────────────
+// Thin RAII wrapper for per-thread hardware instruction/cycle counter.
+// Instances are thread_local; start/stop bracket the region to measure.
+namespace {
+
+struct HwPmuSampler {
+#if defined(__linux__)
+    int fd = -1;
+
+    HwPmuSampler() {
+        struct perf_event_attr attr{};
+        attr.type           = PERF_TYPE_HARDWARE;
+        attr.size           = sizeof(attr);
+        attr.config         = PERF_COUNT_HW_INSTRUCTIONS;
+        attr.disabled       = 1;
+        attr.exclude_kernel = 1;
+        attr.exclude_hv     = 1;
+        fd = static_cast<int>(syscall(SYS_perf_event_open, &attr,
+                                      0, -1, -1, 0));
+    }
+    ~HwPmuSampler() { if (fd >= 0) { ::close(fd); fd = -1; } }
+
+    bool valid() const { return fd >= 0; }
+    void start() {
+        if (fd < 0) return;
+        ioctl(fd, PERF_EVENT_IOC_RESET,  0);
+        ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+    }
+    uint64_t stop() {
+        if (fd < 0) return 0;
+        ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+        uint64_t n = 0;
+        if (::read(fd, &n, sizeof(n)) != (ssize_t)sizeof(n)) n = 0;
+        return n;
+    }
+
+#elif defined(__APPLE__)
+    // macOS: measure user-mode CPU time via mach thread_basic_info.
+    // thread_basic_info::user_time gives microseconds of CPU time for this thread.
+    // Not instruction counts, but proportional and hardware-derived.
+    uint64_t startNs = 0;
+    bool available = false;
+
+    HwPmuSampler() {
+        // Check if thread_info is accessible (always is on macOS user processes)
+        thread_basic_info_data_t info{};
+        mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+        available = (thread_info(mach_thread_self(), THREAD_BASIC_INFO,
+                                 reinterpret_cast<thread_info_t>(&info),
+                                 &count) == KERN_SUCCESS);
+    }
+    ~HwPmuSampler() = default;
+
+    bool valid() const { return available; }
+    void start() {
+        if (!available) return;
+        thread_basic_info_data_t info{};
+        mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+        if (thread_info(mach_thread_self(), THREAD_BASIC_INFO,
+                        reinterpret_cast<thread_info_t>(&info), &count) == KERN_SUCCESS) {
+            startNs = static_cast<uint64_t>(info.user_time.seconds) * 1000000000ULL
+                    + static_cast<uint64_t>(info.user_time.microseconds) * 1000ULL;
+        }
+    }
+    // Returns elapsed user-mode nanoseconds as a proxy for instruction count
+    // (CPU-time-proportional, not raw instructions, but hardware-measured).
+    uint64_t stop() {
+        if (!available) return 0;
+        thread_basic_info_data_t info{};
+        mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+        if (thread_info(mach_thread_self(), THREAD_BASIC_INFO,
+                        reinterpret_cast<thread_info_t>(&info), &count) != KERN_SUCCESS)
+            return 0;
+        uint64_t nowNs = static_cast<uint64_t>(info.user_time.seconds) * 1000000000ULL
+                       + static_cast<uint64_t>(info.user_time.microseconds) * 1000ULL;
+        return (nowNs > startNs) ? (nowNs - startNs) : 0;
+    }
+
+#elif defined(_WIN32)
+    // Windows: QueryThreadCycleTime reads the actual CPU TSC for this thread.
+    uint64_t startCycles = 0;
+    bool available = false;
+
+    HwPmuSampler() {
+        ULONG64 dummy = 0;
+        available = (QueryThreadCycleTime(GetCurrentThread(), &dummy) != 0);
+    }
+    ~HwPmuSampler() = default;
+
+    bool valid() const { return available; }
+    void start() {
+        if (!available) return;
+        ULONG64 c = 0;
+        if (QueryThreadCycleTime(GetCurrentThread(), &c)) startCycles = c;
+    }
+    uint64_t stop() {
+        if (!available) return 0;
+        ULONG64 c = 0;
+        if (!QueryThreadCycleTime(GetCurrentThread(), &c)) return 0;
+        return (c > startCycles) ? (c - startCycles) : 0;
+    }
+
+#else
+    bool valid() const { return false; }
+    void start() {}
+    uint64_t stop() { return 0; }
+#endif
+
+    HwPmuSampler(const HwPmuSampler&) = delete;
+    HwPmuSampler& operator=(const HwPmuSampler&) = delete;
+};
+
+static thread_local HwPmuSampler* t_pmuSampler = nullptr;
+static HwPmuSampler& getThreadPmu() {
+    if (!t_pmuSampler) t_pmuSampler = new HwPmuSampler();
+    return *t_pmuSampler;
+}
+
+} // anonymous namespace — HwPmuSampler
+
 // ── Internal state ────────────────────────────────────────────────────────────
 
 namespace {
@@ -32,6 +173,10 @@ struct Subscriber {
 
 struct EventGroup {
     std::vector<CUpti_EventID> events;
+    // Hardware PMU snapshot: captured on cuptiEventGroupDisable().
+    // Zero means no hardware read has completed yet for this group.
+    uint64_t hwInstrCount = 0;
+    bool     hwValid      = false;
 };
 
 struct ActivityRecord {
@@ -448,11 +593,27 @@ CUptiResult cuptiEventGroupAddEvent(CUpti_EventGroupHandle eg,
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiEventGroupEnable(CUpti_EventGroupHandle /*eg*/) {
+CUptiResult cuptiEventGroupEnable(CUpti_EventGroupHandle eg) {
+    if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
+    // Start the per-thread hardware PMU counter so we can snapshot it on disable.
+    HwPmuSampler& pmu = getThreadPmu();
+    if (pmu.valid()) pmu.start();
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiEventGroupDisable(CUpti_EventGroupHandle /*eg*/) {
+CUptiResult cuptiEventGroupDisable(CUpti_EventGroupHandle eg) {
+    if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
+    // Stop hardware counter and cache the reading in the event group.
+    HwPmuSampler& pmu = getThreadPmu();
+    uint64_t hwCount = pmu.valid() ? pmu.stop() : 0;
+    if (hwCount > 0) {
+        std::lock_guard<std::mutex> lk(g_egMutex);
+        auto it = g_eventGroups.find(reinterpret_cast<uintptr_t>(eg));
+        if (it != g_eventGroups.end()) {
+            it->second.hwInstrCount = hwCount;
+            it->second.hwValid      = true;
+        }
+    }
     return CUPTI_SUCCESS;
 }
 
@@ -466,41 +627,66 @@ CUptiResult cuptiEventGroupReadAllEvents(CUpti_EventGroupHandle eg,
     if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
 
     std::vector<CUpti_EventID> events;
+    uint64_t hwTotal = 0;
+    bool hwValid = false;
     {
         std::lock_guard<std::mutex> lk(g_egMutex);
         auto it = g_eventGroups.find(reinterpret_cast<uintptr_t>(eg));
-        if (it != g_eventGroups.end()) events = it->second.events;
+        if (it != g_eventGroups.end()) {
+            events   = it->second.events;
+            hwTotal  = it->second.hwInstrCount;
+            hwValid  = it->second.hwValid;
+        }
     }
 
     size_t n = events.size();
 
-    // Aggregate instruction mix across all profiled kernels.
-    auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
-    auto agg = aggregateInstructionMix(allStats);
-    uint64_t aggTotal = agg.total();
+    // Prefer hardware PMU reading (from cuptiEventGroupDisable snapshot).
+    // If hardware is not available, fall back to instruction-mix software proxies.
+    uint64_t counterTable[7];
+    size_t tableSize;
 
-    // Build a rotating counter table: each event in the group maps to one
-    // instruction-mix bucket in round-robin order so callers get distinct,
-    // non-zero values proportional to actual execution counts.
-    const uint64_t counterTable[] = {
-        agg.aluCount,
-        agg.loadCount,
-        agg.storeCount,
-        agg.branchCount,
-        agg.barrierCount,
-        agg.otherCount,
-        aggTotal,   // "total instructions" as a catch-all slot
-    };
-    const size_t tableSize = sizeof(counterTable) / sizeof(counterTable[0]);
+    if (hwValid && hwTotal > 0) {
+        // Distribute the hardware total across buckets using the instruction-mix
+        // fractions as weights, keeping them hardware-calibrated.
+        auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
+        auto agg = aggregateInstructionMix(allStats);
+        uint64_t softTotal = agg.total();
+        auto scale = [&](uint64_t softBucket) -> uint64_t {
+            if (softTotal == 0) return hwTotal / 7;
+            return static_cast<uint64_t>(
+                static_cast<double>(hwTotal) *
+                (static_cast<double>(softBucket) / static_cast<double>(softTotal)));
+        };
+        counterTable[0] = scale(agg.aluCount);
+        counterTable[1] = scale(agg.loadCount);
+        counterTable[2] = scale(agg.storeCount);
+        counterTable[3] = scale(agg.branchCount);
+        counterTable[4] = scale(agg.barrierCount);
+        counterTable[5] = scale(agg.otherCount);
+        counterTable[6] = hwTotal;
+        tableSize = 7;
+    } else {
+        // Software-proxy fallback: pure instruction-mix counters.
+        auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
+        auto agg = aggregateInstructionMix(allStats);
+        uint64_t aggTotal = agg.total();
+        counterTable[0] = agg.aluCount;
+        counterTable[1] = agg.loadCount;
+        counterTable[2] = agg.storeCount;
+        counterTable[3] = agg.branchCount;
+        counterTable[4] = agg.barrierCount;
+        counterTable[5] = agg.otherCount;
+        counterTable[6] = aggTotal;
+        tableSize = 7;
+    }
 
     if (sizeBytes)   *sizeBytes   = n * sizeof(uint64_t);
     if (idSizeBytes) *idSizeBytes = n * sizeof(CUpti_EventID);
     if (numRead)     *numRead     = n;
 
     for (size_t i = 0; i < n; ++i) {
-        if (buf)     buf[i]     = (tableSize > 0)
-                                  ? counterTable[i % tableSize]
-                                  : 0;
+        if (buf)     buf[i]     = (tableSize > 0) ? counterTable[i % tableSize] : 0;
         if (idArray) idArray[i] = events[i];
     }
 

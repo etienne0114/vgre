@@ -17,17 +17,40 @@ extern "C" void *vgre_lookup_texture_ref(void *handle, const char *name);
 
 CUresult cuModuleLoadData(CUmodule *module, const void *image) {
     if (!module || !image) return CUDA_ERROR_INVALID_VALUE;
-    
-    const uint32_t ELF_MAGIC = 0x464c457f;
+
     const uint32_t *header = reinterpret_cast<const uint32_t *>(image);
-    
+    const uint32_t ELF_MAGIC     = 0x464c457fu;
+    const uint32_t FATBIN_MAGIC  = 0xba55ed50u;
+    const uint32_t FATBIN_OLD    = 0xba55ed01u;
+    const uint32_t WRAPPER_MAGIC = 0x466243b1u; // __fatBinC_Wrapper_t
+
     size_t len = 0;
     if (header[0] == ELF_MAGIC) {
-        // Authoritative: Parse ELF headers to find the exact image size
-        vgre::common::ELFReader reader(image, 1024 * 1024); // Initial scan size
+        vgre::common::ELFReader reader(image, 1024 * 1024);
         len = reader.getTotalSize();
-        if (len == 0) len = 8 * 1024 * 1024; // Fallback to conservative estimate
+        if (len == 0) len = 8 * 1024 * 1024;
+    } else if (header[0] == FATBIN_MAGIC || header[0] == FATBIN_OLD) {
+        // Fatbinary container: read total size from the 16-byte container header.
+        // Header layout: magic(4) + version(2) + headerSize(2) + fatSize(8).
+        struct FbHdr { uint32_t magic; uint16_t version; uint16_t headerSize; uint64_t fatSize; };
+        const auto* fh = reinterpret_cast<const FbHdr*>(image);
+        len = static_cast<size_t>(fh->headerSize) + static_cast<size_t>(fh->fatSize);
+        if (len < 16 || len > 256 * 1024 * 1024u) len = 256 * 1024; // sanity cap
+    } else if (header[0] == WRAPPER_MAGIC) {
+        // __fatBinC_Wrapper_t: follow data pointer at bytes 8-15.
+        const uint64_t* wrap = reinterpret_cast<const uint64_t*>(image);
+        const uint8_t* inner = reinterpret_cast<const uint8_t*>(
+            static_cast<uintptr_t>(wrap[1]));
+        if (inner) {
+            struct FbHdr { uint32_t magic; uint16_t version; uint16_t headerSize; uint64_t fatSize; };
+            const auto* fh = reinterpret_cast<const FbHdr*>(inner);
+            if (fh->magic == FATBIN_MAGIC || fh->magic == FATBIN_OLD)
+                len = static_cast<size_t>(fh->headerSize) + static_cast<size_t>(fh->fatSize);
+        }
+        if (len == 0) len = 4 * 1024 * 1024;
+        len = std::max(len, (size_t)32);
     } else {
+        // Plain PTX text (null-terminated)
         len = strlen(reinterpret_cast<const char *>(image));
     }
 
@@ -65,9 +88,14 @@ CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name)
   // If module is from memory PTX, compile source and register kernel on the fly.
   const char *src = vgre_get_module_source(hmod);
   if (src && strlen(src) > 0) {
+    // SASS-only binary: no PTX is available for JIT compilation.
+    static const char kSassMarker[] = "__VGRE_SASS_ONLY__";
+    if (std::strncmp(src, kSassMarker, sizeof(kSassMarker) - 1) == 0) {
+      return CUDA_ERROR_NO_BINARY_FOR_GPU; // 209
+    }
     vgre::KernelId id = 0;
     auto r = vgre::core::RuntimeEngine::instance().registerKernel(name, src, id);
-    if (r != vgre::VGREResult::SUCCESS) return CUDA_ERROR_UNKNOWN;
+    if (r != vgre::VGREResult::SUCCESS) return CUDA_ERROR_INVALID_PTX;
     *hfunc = static_cast<CUfunction>(id);
     return CUDA_SUCCESS;
   }

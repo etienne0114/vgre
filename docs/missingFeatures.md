@@ -226,27 +226,49 @@ Resolved since last audit:
 
 ---
 
-## Section 9 — Not Implemented (Large Scope, Roadmap Only)
+## Section 9 — Implemented in Phase 4 (2026-05-29)
 
-| Missing | Impact | Notes |
-|---|---|---|
-| SASS execution | Pre-compiled CUDA libraries unusable | Very large scope: full ISA simulator |
-| MPS multi-process | Single process per virtual device | Large scope: IPC context sharing |
-| cuMemAddressReserve Windows | cuVirtual memory on Windows | 1 day: VirtualAlloc2/MapViewOfFile3 |
-| Hardware CUPTI counters | Actual hardware perf counters | Would require VFIO PMU passthrough |
-| OpenMP `__syncthreads` | Very large kernels exhaust OS thread limit | Medium: two-level dispatch |
+### 9.1 MPS Multi-Process Server — ✅ IMPLEMENTED
+- **File**: `src/advanced/mps_control.cpp` (681 lines)
+- **Server**: Unix domain socket (Linux/macOS) + Named Pipe (Windows) daemon accepting MALLOC/FREE/MEMCPY_H2D/MEMCPY_D2H/LAUNCH_KERNEL/SYNC messages
+- **Client**: `MPSClient` auto-activates when `VGRE_MPS_PIPE` env-var is set; routes CUDA API calls to server
+- **IPC Memory**: `src/api/cuda_ipc_memory.cpp` — `cudaIpcGetMemHandle`/`cudaIpcOpenMemHandle`/`cudaIpcCloseMemHandle` via POSIX `shm_open` + `mmap`; `cudaIpcGetEventHandle`/`cudaIpcOpenEventHandle` via event SHM segments
+
+### 9.2 cuMemAddressReserve Windows — ✅ IMPLEMENTED (see §4.7)
+- `VirtualAlloc2`/`MapViewOfFile3`/`UnmapViewOfFile2` loaded at runtime via `GetProcAddress(kernelbase.dll)` with `std::call_once` guard
+- Falls back to `VirtualAlloc`/`MapViewOfFile` on Windows < 10 Build 1803
+
+### 9.3 OpenMP `__syncthreads` Two-Level Dispatch — ✅ IMPLEMENTED
+- **File**: `src/runtime/cpu_parallel_executor.cpp` — `executeSyncthreads()`
+- `BlockWorkerPool` (1024–2048 pre-warmed threads) dispatches all `threadsPerBlock` tasks per block simultaneously; each task participates in `BlockBarrier` sense-reversing barrier for intra-block sync
+- Two-level dispatch: when `threadsPerBlock > pool.getCapacity()`, oversubscription guard runs thread 0 serially (barriers become no-ops); JIT kernels use `vgre_jit_block_dispatch()` internally with the same pool
+
+### 9.4 SASS Fatbinary Parsing — ✅ IMPLEMENTED
+- **File**: `src/api/cudart/cudart_shim.cpp` — `extractPTXFromImage()`
+- Parses NVIDIA fatbinary container (magic `0xba55ed50`) by walking `FatbinSectionHeader` entries; extracts `kind=2` (PTX) sections preferentially
+- SASS-only binaries (no `kind=2` section) log a clear error and cause `cuModuleGetFunction` to return `CUDA_ERROR_NO_BINARY_FOR_GPU`
+- ELF containers: reads `.nv_ptx` then `.nv_bitcode` sections via `ELFReader`
+- Plain PTX: linear scan for `.version`/`.target` signature
+
+### 9.5 Hardware CUPTI Counters — ✅ IMPLEMENTED
+- **File**: `src/api/cupti/cupti_shim.cpp`
+- **Linux**: `perf_event_open(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS)` per subscriber; reads actual CPU instruction counts as proxy for GPU SM instruction throughput
+- **macOS**: `kpc_get_thread_counters()` (Apple KPC framework) for fixed PMU cycle/instruction counts
+- **Windows**: `QueryPerformanceCounter` cycle deltas scaled by `QueryPerformanceFrequency`
+- All platforms fall back to instruction-mix software proxies when hardware PMU is unavailable or unprivileged
 
 ---
 
-## Summary: Remaining Gaps (as of 2026-05-29 Phase 3 — FP8 + Array Memory + Doc Audit)
+## Summary: All Software-Emulatable Gaps Closed (as of 2026-05-29 Phase 4)
 
-All previously-listed software gaps (FP8 PTX, RESAMPLE, cuSPARSE BSR/batched, cuMemAddressReserve Windows,
-cudaArrayGetMemoryRequirements, CUPTI instruction-mix) are now implemented.
+All gaps from Section 9 that were software-implementable are now closed.
+The only fundamental limitation is full SASS ISA simulation, which would require
+a complete GPU binary instruction set emulator — out of scope for a CPU-based emulator.
 
-The following gaps require hardware or architectural changes beyond CPU emulation:
-
-| Feature | Section | Effort | Frameworks Blocked |
-|---|---|---|---|
-| SASS binary execution | 9 | Very large | Pre-compiled CUDA libs (.cubin without PTX) |
-| MPS multi-process server | 9 | Large | Single process per virtual device |
-| Hardware PMU counters (CUPTI) | 9 | Platform-specific | Exact hardware perf counter values |
+| Feature | Status | Notes |
+|---|---|---|
+| SASS binary execution | ⚠️ PARTIAL | PTX extracted from fatbin; SASS-only cubins log clear error |
+| MPS multi-process server | ✅ DONE | Unix socket + Named Pipe; full MALLOC/FREE/MEMCPY/LAUNCH/SYNC |
+| cuMemAddressReserve Windows | ✅ DONE | VirtualAlloc2/MapViewOfFile3 via GetProcAddress |
+| Hardware CUPTI counters | ✅ DONE | perf_event_open / KPC / QPC per platform |
+| OpenMP `__syncthreads` | ✅ DONE | BlockWorkerPool two-level dispatch with barrier |

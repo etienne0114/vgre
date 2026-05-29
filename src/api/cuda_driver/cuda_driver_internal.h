@@ -67,6 +67,8 @@ static constexpr CUresult CUDA_ERROR_OUT_OF_MEMORY = 2;
 static constexpr CUresult CUDA_ERROR_INVALID_DEVICE = 101;
 static constexpr CUresult CUDA_ERROR_FILE_NOT_FOUND = 301;
 static constexpr CUresult CUDA_ERROR_INVALID_PTX = 218;
+static constexpr CUresult CUDA_ERROR_NO_BINARY_FOR_GPU = 209;
+static constexpr CUresult CUDA_ERROR_INVALID_IMAGE = 200;
 static constexpr CUresult CUDA_ERROR_NOT_SUPPORTED = 801;
 static constexpr CUresult CUDA_ERROR_UNKNOWN = 999;
 

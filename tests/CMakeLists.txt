@@ -334,6 +334,14 @@ add_executable(test_ptx_fp8 api/test_ptx_fp8.cpp)
 target_link_libraries(test_ptx_fp8 PRIVATE vgre_cudart)
 add_test(NAME PTXFp8Translation COMMAND test_ptx_fp8)
 
+add_executable(test_sass_detection api/test_sass_detection.cpp)
+target_link_libraries(test_sass_detection PRIVATE vgre_cudart)
+add_test(NAME SASSDetection COMMAND test_sass_detection)
+
+add_executable(test_cupti_hw_counters api/test_cupti_hw_counters.cpp)
+target_link_libraries(test_cupti_hw_counters PRIVATE vgre_api vgre_cudart)
+add_test(NAME CuptiHwCounters COMMAND test_cupti_hw_counters)
+
 add_executable(test_curand_mtgp32 api/test_curand_mtgp32.cpp)
 target_link_libraries(test_curand_mtgp32 PRIVATE vgre_cudart)
 add_test(NAME CuRANDMTGP32Uniformity COMMAND test_curand_mtgp32)
