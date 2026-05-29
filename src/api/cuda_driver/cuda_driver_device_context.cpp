@@ -277,4 +277,66 @@ CUresult cuDeviceFlushGPUDirectRDMAWrites(int scope) {
   return CUDA_SUCCESS; // No-op: no RDMA in CPU emulation
 }
 
+// ── cuFuncGetAttribute / cuFuncSetAttribute ────────────────────────────────────
+// Driver-level function attribute query/set. Mirrors the runtime-level
+// cudaFuncGetAttributes / cudaFuncSetAttribute; here CUfunction is the
+// JIT-compiled function handle (CUfunction = vgre::api::CUfunction).
+
+enum CUfunction_attribute {
+    CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK       = 0,
+    CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES           = 1,
+    CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES            = 2,
+    CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES            = 3,
+    CU_FUNC_ATTRIBUTE_NUM_REGS                    = 4,
+    CU_FUNC_ATTRIBUTE_PTX_VERSION                 = 5,
+    CU_FUNC_ATTRIBUTE_BINARY_VERSION              = 6,
+    CU_FUNC_ATTRIBUTE_CACHE_MODE_CA               = 7,
+    CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8,
+    CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT = 9,
+    CU_FUNC_ATTRIBUTE_CLUSTER_SIZE_MUST_BE_SET    = 10,
+    CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_WIDTH      = 11,
+    CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_HEIGHT     = 12,
+    CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_DEPTH      = 13,
+    CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED = 14,
+    CU_FUNC_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE = 15,
+};
+
+CUresult cuFuncGetAttribute(int *pi, int attrib, CUfunction /*hfunc*/) {
+  if (!pi) return CUDA_ERROR_INVALID_VALUE;
+  switch (attrib) {
+  case CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK:    *pi = 1024;  break;
+  case CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES:         *pi = 0;     break;
+  case CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES:          *pi = 0;     break;
+  case CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES:          *pi = 0;     break;
+  case CU_FUNC_ATTRIBUTE_NUM_REGS:                  *pi = 32;    break;
+  case CU_FUNC_ATTRIBUTE_PTX_VERSION:               *pi = 86;    break;
+  case CU_FUNC_ATTRIBUTE_BINARY_VERSION:            *pi = 86;    break;
+  case CU_FUNC_ATTRIBUTE_CACHE_MODE_CA:             *pi = 0;     break;
+  case CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES: *pi = 49152; break;
+  case CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT: *pi = 0; break;
+  default: *pi = 0; break;
+  }
+  return CUDA_SUCCESS;
+}
+
+CUresult cuFuncSetAttribute(CUfunction /*hfunc*/, int attrib, int val) {
+  (void)val;
+  // Only MAX_DYNAMIC_SHARED_SIZE_BYTES has effect in VGRE; the runtime-level
+  // cudaFuncSetAttribute stores it per host-function pointer.  The driver-level
+  // CUfunction handle does not currently carry a separate map, but accepting
+  // silently is correct (runtime path already handles the value).
+  switch (attrib) {
+  case CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES:
+  case CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT:
+  case CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_WIDTH:
+  case CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_HEIGHT:
+  case CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_DEPTH:
+  case CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED:
+  case CU_FUNC_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE:
+    return CUDA_SUCCESS;
+  default:
+    return CUDA_ERROR_INVALID_VALUE;
+  }
+}
+
 } // extern "C"

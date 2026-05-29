@@ -145,6 +145,43 @@ extern "C" cudaError_t cudaFuncGetAttributes(
 // ── cudaFuncSetCacheConfig / cudaFuncSetSharedMemConfig ───────────────────────
 // On CPU these are no-ops; we record the requested configuration so queries return it.
 
+// ── cudaFuncSetAttribute ──────────────────────────────────────────────────────
+// Store per-function overrides. The only attribute that changes VGRE's behaviour
+// is cudaFuncAttributeMaxDynamicSharedMemorySize — it enlarges the JIT-allocated
+// SharedMemory buffer limit beyond the default 48 KB.
+
+namespace {
+static std::unordered_map<const void*, size_t> g_funcMaxSharedMem;
+static constexpr int cudaFuncAttributeMaxDynamicSharedMemorySize = 8;
+static constexpr int cudaFuncAttributePreferredSharedMemoryCarveout = 9;
+} // namespace
+
+// Allow other compilation units (e.g., cuda_interceptor.cpp) to query the limit.
+size_t vgre_func_max_shared_mem(const void* func) {
+    std::lock_guard<std::mutex> lk(g_limitMu);
+    auto it = g_funcMaxSharedMem.find(func);
+    return (it != g_funcMaxSharedMem.end()) ? it->second : 0;
+}
+
+extern "C" cudaError_t cudaFuncSetAttribute(
+        const void *func, int attr, int value) {
+    if (!func) return cudaErrorInvalidValue;
+    if (value < 0) return cudaErrorInvalidValue;
+    switch (attr) {
+    case cudaFuncAttributeMaxDynamicSharedMemorySize: {
+        std::lock_guard<std::mutex> lk(g_limitMu);
+        g_funcMaxSharedMem[func] = static_cast<size_t>(value);
+        break;
+    }
+    case cudaFuncAttributePreferredSharedMemoryCarveout:
+        // No L1/shared partition on CPU emulator; silently accepted.
+        break;
+    default:
+        return cudaErrorInvalidValue;
+    }
+    return cudaSuccess;
+}
+
 extern "C" cudaError_t cudaFuncSetCacheConfig(
         const void *func, int cacheConfig) {
     (void)func;

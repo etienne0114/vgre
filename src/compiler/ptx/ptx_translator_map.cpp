@@ -1,9 +1,63 @@
 // PTX opcode to C++ translation map.
 
 #include "ptx_translator_internal.h"
+#include <sstream>
 
 namespace vgre {
 namespace compiler {
+
+// ── PTX operand helpers ───────────────────────────────────────────────────────
+
+// Strip outermost { } or [ ] delimiters from a PTX operand token.
+static std::string stripDelimiters(const std::string& s) {
+    if (s.size() >= 2 &&
+        ((s.front() == '{' && s.back() == '}') ||
+         (s.front() == '[' && s.back() == ']')))
+        return s.substr(1, s.size() - 2);
+    return s;
+}
+
+// Split a comma-separated PTX register list into individual tokens.
+static std::vector<std::string> splitRegs(const std::string& s) {
+    std::vector<std::string> r;
+    std::istringstream ss(s);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+        while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+        while (!tok.empty() && tok.back()  == ' ') tok.pop_back();
+        if (!tok.empty()) r.push_back(tok);
+    }
+    return r;
+}
+
+// Emit ldmatrix: load N uint32_t words from shared memory into register list.
+// PTX: ldmatrix.sync.aligned.m8n8.xN.shared.b16  {r0[,r1[,r2[,r3]]]}, [addr]
+// After splitOperands: o[0] = "{r0,...}", o[1] = "[addr]"
+static std::string ldmatrix_emit(const std::vector<std::string>& o, int n) {
+    if (o.size() < 2) return "/* ldmatrix: bad operands */";
+    auto regs = splitRegs(stripDelimiters(o[0]));
+    std::string addr = stripDelimiters(o[1]);
+    std::string out = "{ const uint32_t* _ldm = reinterpret_cast<const uint32_t*>("
+                      + addr + ");";
+    for (int i = 0; i < n && i < static_cast<int>(regs.size()); ++i)
+        out += " " + regs[i] + " = _ldm[" + std::to_string(i) + "];";
+    out += " }";
+    return out;
+}
+
+// Emit stmatrix: store N uint32_t words from register list to shared memory.
+// PTX: stmatrix.sync.aligned.m8n8.xN.shared.b16  [addr], {r0[,r1[,r2[,r3]]]}
+// After splitOperands: o[0] = "[addr]", o[1] = "{r0,...}"
+static std::string stmatrix_emit(const std::vector<std::string>& o, int n) {
+    if (o.size() < 2) return "/* stmatrix: bad operands */";
+    std::string addr = stripDelimiters(o[0]);
+    auto regs = splitRegs(stripDelimiters(o[1]));
+    std::string out = "{ uint32_t* _stm = reinterpret_cast<uint32_t*>(" + addr + ");";
+    for (int i = 0; i < n && i < static_cast<int>(regs.size()); ++i)
+        out += " _stm[" + std::to_string(i) + "] = " + regs[i] + ";";
+    out += " }";
+    return out;
+}
 
 const TranslateMap& getMap() {
     static const TranslateMap kMap = {
@@ -186,12 +240,50 @@ const TranslateMap& getMap() {
         {"wgmma.wait_group.sync.aligned", [](auto&){
             return "__atomic_thread_fence(__ATOMIC_SEQ_CST);";
         }},
+        // ── ldmatrix / stmatrix — load/store WMMA tile fragments ──────────────
+        // In the serial CPU model, shared memory is a host pointer.
+        // ldmatrix loads N×uint32 (16 bytes per fragment) from smem into registers.
+        // stmatrix stores register list back to smem.
+        // Transposed variants: layout transposition is handled by the matmul
+        // emulator (wmma_emulation.h), not by the load itself, so same logic.
+        {"ldmatrix.sync.aligned.m8n8.x1.shared.b16",
+            [](auto& o){ return ldmatrix_emit(o, 1); }},
+        {"ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+            [](auto& o){ return ldmatrix_emit(o, 2); }},
+        {"ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+            [](auto& o){ return ldmatrix_emit(o, 4); }},
+        {"ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16",
+            [](auto& o){ return ldmatrix_emit(o, 1); }},
+        {"ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            [](auto& o){ return ldmatrix_emit(o, 2); }},
+        {"ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+            [](auto& o){ return ldmatrix_emit(o, 4); }},
+        {"stmatrix.sync.aligned.m8n8.x1.shared.b16",
+            [](auto& o){ return stmatrix_emit(o, 1); }},
+        {"stmatrix.sync.aligned.m8n8.x2.shared.b16",
+            [](auto& o){ return stmatrix_emit(o, 2); }},
+        {"stmatrix.sync.aligned.m8n8.x4.shared.b16",
+            [](auto& o){ return stmatrix_emit(o, 4); }},
+        {"stmatrix.sync.aligned.m8n8.x1.trans.shared.b16",
+            [](auto& o){ return stmatrix_emit(o, 1); }},
+        {"stmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            [](auto& o){ return stmatrix_emit(o, 2); }},
+        {"stmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+            [](auto& o){ return stmatrix_emit(o, 4); }},
         // ── Warp reductions (redux.sync, bar.red) ─────────────────────────────
         // In serial CPU model, reduction is already complete per-thread.
         {"redux.sync.add.s32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
         {"redux.sync.add.u32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
         {"redux.sync.min.s32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
         {"redux.sync.max.s32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
+        // AND/OR/XOR/POPC: in serial CPU model each warp is one thread, so the
+        // reduction of a single value against itself is identity for AND/OR/XOR.
+        {"redux.sync.and.b32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
+        {"redux.sync.or.b32",   [](auto& o){ return o[0]+" = "+o[1]+";"; }},
+        {"redux.sync.xor.b32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
+        {"redux.sync.popc.b32", [](auto& o){
+            return o[0]+" = __builtin_popcount((unsigned)("+o[1]+"));";
+        }},
         {"bar.red.popc.u32", [](auto& o){
             return o[0]+" = __syncthreads_count("+o[2]+");";
         }},

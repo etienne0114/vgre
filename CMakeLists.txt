@@ -868,6 +868,8 @@ set(_VGRE_CUDART_SOURCES
     src/api/cuda_driver/cuda_driver_graph.cpp
     src/api/cuda_driver/cuda_driver_external.cpp
     src/api/cuda_driver/cuda_driver_tma.cpp
+    src/api/cuda_driver/cuda_driver_library.cpp
+    src/api/cudart/cudart_proc_address.cpp
     src/api/cuda_virtual_memory.cpp
     src/api/cuda_external_semaphore.cpp
     src/api/cuda_interceptor.cpp
@@ -896,6 +898,7 @@ set(_VGRE_CUDART_SOURCES
     src/api/cusparse/cusparse_triangular.cpp
     src/api/cusparse/cusparse_factorization.cpp
     src/api/cusolver/cusolver_core.cpp
+    src/api/cusolver/cusolver_type_erasure.cpp
     $<$<BOOL:${VGRE_LAPACK_FALLBACK}>:src/api/cusolver/lapack_fallback.cpp>
     src/api/cublaslt/cublaslt_core.cpp
     src/api/cublaslt/cublaslt_matmul.cpp
