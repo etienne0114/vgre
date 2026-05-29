@@ -886,20 +886,70 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
                         for (int wy = 0; wy < yD.w; ++wy) {
                             float sx = (hy + 0.5f) * scaleH - 0.5f;
                             float sy = (wy + 0.5f) * scaleW - 0.5f;
-                            int x0 = static_cast<int>(sx); int x1 = x0 + 1;
-                            int y0 = static_cast<int>(sy); int y1 = y0 + 1;
-                            x0 = std::max(0, std::min(xD.h - 1, x0));
-                            x1 = std::max(0, std::min(xD.h - 1, x1));
-                            y0 = std::max(0, std::min(xD.w - 1, y0));
-                            y1 = std::max(0, std::min(xD.w - 1, y1));
-                            float wx = sx - static_cast<int>(sx);
-                            float wy_ = sy - static_cast<int>(sy);
+                            sx = std::max(0.f, std::min(static_cast<float>(xD.h - 1), sx));
+                            sy = std::max(0.f, std::min(static_cast<float>(xD.w - 1), sy));
+                            int x0 = static_cast<int>(sx);
+                            int x1 = std::min(xD.h - 1, x0 + 1);
+                            int y0 = static_cast<int>(sy);
+                            int y1 = std::min(xD.w - 1, y0 + 1);
+                            float wx = sx - x0;
+                            float wy_ = sy - y0;
                             size_t base = static_cast<size_t>(n * xD.c + c) * xD.h * xD.w;
                             float v = X[base + x0*xD.w + y0] * (1-wx)*(1-wy_)
                                     + X[base + x0*xD.w + y1] * (1-wx)*wy_
                                     + X[base + x1*xD.w + y0] * wx*(1-wy_)
                                     + X[base + x1*xD.w + y1] * wx*wy_;
                             Y[static_cast<size_t>(n*yD.c + c)*yD.h*yD.w + hy*yD.w + wy] = v;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+
+        case CUDNN_BACKEND_OPERATION_RESAMPLE_BWD_DESCRIPTOR: {
+            // Backward pass: dX = scatter-add of bilinear-weighted dY gradients.
+            // xDesc = dX (gradient w.r.t. input),  yDesc = dY (upstream gradient)
+            uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RESAMPLE_XDESC);
+            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RESAMPLE_YDESC);
+            void* dxPtr = dataPtrs[xId];
+            void* dyPtr = dataPtrs[yId];
+            if (!dxPtr || !dyPtr) return CUDNN_STATUS_INVALID_VALUE;
+
+            TensorDesc xD = buildTensorDesc(xId);  // input (dX) dimensions
+            TensorDesc yD = buildTensorDesc(yId);   // output (dY) dimensions
+            float scaleH = (yD.h > 0 && xD.h > 0) ? static_cast<float>(xD.h) / yD.h : 1.f;
+            float scaleW = (yD.w > 0 && xD.w > 0) ? static_cast<float>(xD.w) / yD.w : 1.f;
+
+            float*       dX = static_cast<float*>(dxPtr);
+            const float* dY = static_cast<const float*>(dyPtr);
+
+            // Zero-initialize dX
+            size_t dxCount = static_cast<size_t>(xD.n) * xD.c * xD.h * xD.w;
+            std::memset(dX, 0, dxCount * sizeof(float));
+
+            // Scatter-add: for each output pixel, distribute gradient to 4 input neighbors
+            for (int n = 0; n < yD.n; ++n) {
+                for (int c = 0; c < yD.c; ++c) {
+                    size_t xBase = static_cast<size_t>(n * xD.c + c) * xD.h * xD.w;
+                    size_t yBase = static_cast<size_t>(n * yD.c + c) * yD.h * yD.w;
+                    for (int hy = 0; hy < yD.h; ++hy) {
+                        for (int wy = 0; wy < yD.w; ++wy) {
+                            float sx = (hy + 0.5f) * scaleH - 0.5f;
+                            float sy = (wy + 0.5f) * scaleW - 0.5f;
+                            sx = std::max(0.f, std::min(static_cast<float>(xD.h - 1), sx));
+                            sy = std::max(0.f, std::min(static_cast<float>(xD.w - 1), sy));
+                            int x0 = static_cast<int>(sx);
+                            int x1 = std::min(xD.h - 1, x0 + 1);
+                            int y0 = static_cast<int>(sy);
+                            int y1 = std::min(xD.w - 1, y0 + 1);
+                            float wx = sx - x0;
+                            float wy_ = sy - y0;
+                            float grad = dY[yBase + hy * yD.w + wy];
+                            dX[xBase + x0 * xD.w + y0] += grad * (1 - wx) * (1 - wy_);
+                            dX[xBase + x0 * xD.w + y1] += grad * (1 - wx) * wy_;
+                            dX[xBase + x1 * xD.w + y0] += grad * wx * (1 - wy_);
+                            dX[xBase + x1 * xD.w + y1] += grad * wx * wy_;
                         }
                     }
                 }

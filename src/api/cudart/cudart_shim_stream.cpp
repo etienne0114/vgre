@@ -305,6 +305,94 @@ cudaError_t cudaArrayDestroy(void *array) {
   return cudaFreeArray(array);
 }
 
+// ── cudaArrayGetMemoryRequirements (CUDA 11.6+) ──────────────────────────────
+// Returns the memory allocation requirements for a cudaArray.
+// VGRE arrays are flat malloc'd host buffers; return synthetic requirements
+// that match the minimum GPU page alignment so callers can proceed.
+struct cudaArrayMemoryRequirements {
+    size_t       size;
+    size_t       alignment;
+    unsigned int reserved[4];
+};
+
+// Forward-declare the opaque CUDA array handle types to avoid pulling in
+// the real CUDA runtime headers (which conflict with VGRE's own definitions).
+struct _vgre_cudaArray {};
+struct _vgre_cudaMipmappedArray {};
+using _cudaArray_t          = struct _vgre_cudaArray*;
+using _cudaMipmappedArray_t = struct _vgre_cudaMipmappedArray*;
+
+cudaError_t cudaArrayGetMemoryRequirements(
+    struct cudaArrayMemoryRequirements* memRequirements,
+    _cudaArray_t  array,
+    int           device)
+{
+    if (!memRequirements) return cudaErrorInvalidValue;
+    (void)array; (void)device;
+    // VGRE arrays are plain host memory; report a 4 KiB minimum size and
+    // 512-byte alignment (matching the CUDA driver's documented minimum).
+    memRequirements->size      = 4096;
+    memRequirements->alignment = 512;
+    memset(memRequirements->reserved, 0, sizeof(memRequirements->reserved));
+    return cudaSuccess;
+}
+
+cudaError_t cudaMipmappedArrayGetMemoryRequirements(
+    struct cudaArrayMemoryRequirements* memRequirements,
+    _cudaMipmappedArray_t mipArray,
+    int                   device)
+{
+    if (!memRequirements) return cudaErrorInvalidValue;
+    (void)mipArray; (void)device;
+    memRequirements->size      = 4096;
+    memRequirements->alignment = 512;
+    memset(memRequirements->reserved, 0, sizeof(memRequirements->reserved));
+    return cudaSuccess;
+}
+
+// ── cudaArrayGetSparseProperties / cudaMipmappedArrayGetSparseProperties ─────
+// CUDA 11.1+ sparse-texture tile query.  VGRE does not implement sparse
+// residency; return a synthetic 64 KiB tile layout so callers can proceed.
+struct cudaArraySparseProperties {
+    struct { unsigned int width; unsigned int height; unsigned int depth; } tileExtent;
+    unsigned int       miptailFirstLevel;
+    unsigned long long miptailSize;
+    unsigned int       flags;
+    unsigned int       reserved[4];
+};
+
+cudaError_t cudaArrayGetSparseProperties(
+    struct cudaArraySparseProperties* sparseProperties,
+    _cudaArray_t array)
+{
+    if (!sparseProperties) return cudaErrorInvalidValue;
+    (void)array;
+    memset(sparseProperties, 0, sizeof(*sparseProperties));
+    sparseProperties->tileExtent.width  = 128;
+    sparseProperties->tileExtent.height = 128;
+    sparseProperties->tileExtent.depth  = 1;
+    sparseProperties->miptailFirstLevel = 0;
+    sparseProperties->miptailSize       = 65536;
+    sparseProperties->flags             = 0;
+    return cudaSuccess;
+}
+
+cudaError_t cudaMipmappedArrayGetSparseProperties(
+    struct cudaArraySparseProperties* sparseProperties,
+    _cudaMipmappedArray_t mipArray)
+{
+    if (!sparseProperties) return cudaErrorInvalidValue;
+    (void)mipArray;
+    memset(sparseProperties, 0, sizeof(*sparseProperties));
+    sparseProperties->tileExtent.width  = 128;
+    sparseProperties->tileExtent.height = 128;
+    sparseProperties->tileExtent.depth  = 1;
+    sparseProperties->miptailFirstLevel = 1;
+    sparseProperties->miptailSize       = 65536;
+    sparseProperties->flags             = 0;
+    return cudaSuccess;
+}
+
 cudaError_t cudaPointerGetAttributes(
     struct cudaPointerAttributes *attributes, const void *ptr) {
   return vgre::api::CUDAInterceptor::instance().pointerGetAttributes(

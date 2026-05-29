@@ -303,6 +303,58 @@ const TranslateMap& getConversionMap() {
                    " size_t _n=(size_t)("+o[2]+")>>2;"
                    " for(size_t _i=0;_i<_n;_i++) _dst[_i]+=_src[_i]; }";
         }},
+
+        // ── FP8 cvt — scalar and packed E4M3/E5M2 conversions ─────────────────
+        // Scalar: FP8 → f32 (byte in low 8 bits of source register)
+        {"cvt.rn.f32.e4m3", [](auto& o){
+            return o[0]+" = vgre_fp8e4m3_to_f32((uint8_t)((unsigned)("+o[1]+")&0xFFu));";
+        }},
+        {"cvt.rn.f32.e5m2", [](auto& o){
+            return o[0]+" = vgre_fp8e5m2_to_f32((uint8_t)((unsigned)("+o[1]+")&0xFFu));";
+        }},
+        // Scalar: f32 → FP8 (result in low 8 bits of destination register)
+        {"cvt.rn.e4m3.f32", [](auto& o){
+            return o[0]+" = (unsigned)vgre_f32_to_fp8e4m3((float)("+o[1]+"));";
+        }},
+        {"cvt.rn.e5m2.f32", [](auto& o){
+            return o[0]+" = (unsigned)vgre_f32_to_fp8e5m2((float)("+o[1]+"));";
+        }},
+        // Saturating variants (same semantics; satfinite clamps to FP8 range, same as our impl)
+        {"cvt.rn.satfinite.e4m3.f32", [](auto& o){
+            return o[0]+" = (unsigned)vgre_f32_to_fp8e4m3((float)("+o[1]+"));";
+        }},
+        {"cvt.rn.satfinite.e5m2.f32", [](auto& o){
+            return o[0]+" = (unsigned)vgre_f32_to_fp8e5m2((float)("+o[1]+"));";
+        }},
+        // Packed: f32×2 → e4m3x2 (two FP8 bytes packed into one uint32)
+        // PTX syntax: cvt.rn.satfinite.e4m3x2.f32 d, b, a
+        //   d[7:0]  = f32_to_e4m3(a)   (first source = low byte)
+        //   d[15:8] = f32_to_e4m3(b)   (second source = high byte)
+        {"cvt.rn.satfinite.e4m3x2.f32", [](auto& o){
+            auto a = o.size() > 2 ? o[2] : o[1];
+            auto b = o.size() > 1 ? o[1] : o[1];
+            return o[0]+" = (unsigned)vgre_f32_to_fp8e4m3((float)("+a+"))"
+                   " | ((unsigned)vgre_f32_to_fp8e4m3((float)("+b+")))<<8;";
+        }},
+        {"cvt.rn.satfinite.e5m2x2.f32", [](auto& o){
+            auto a = o.size() > 2 ? o[2] : o[1];
+            auto b = o.size() > 1 ? o[1] : o[1];
+            return o[0]+" = (unsigned)vgre_f32_to_fp8e5m2((float)("+a+"))"
+                   " | ((unsigned)vgre_f32_to_fp8e5m2((float)("+b+")))<<8;";
+        }},
+        // Packed: e4m3x2 → f32×2 (unpack to two float variables)
+        // PTX syntax: cvt.rn.f32x2.e4m3x2 {fa, fb}, d
+        //   fa = e4m3_to_f32(d[7:0]), fb = e4m3_to_f32(d[15:8])
+        {"cvt.rn.f32x2.e4m3x2", [](auto& o){
+            if (o.size() < 3) return std::string("/* cvt.rn.f32x2.e4m3x2 */");
+            return o[0]+" = vgre_fp8e4m3_to_f32((uint8_t)((unsigned)("+o[2]+")&0xFFu));"
+                   " "+o[1]+" = vgre_fp8e4m3_to_f32((uint8_t)(((unsigned)("+o[2]+")>>8)&0xFFu));";
+        }},
+        {"cvt.rn.f32x2.e5m2x2", [](auto& o){
+            if (o.size() < 3) return std::string("/* cvt.rn.f32x2.e5m2x2 */");
+            return o[0]+" = vgre_fp8e5m2_to_f32((uint8_t)((unsigned)("+o[2]+")&0xFFu));"
+                   " "+o[1]+" = vgre_fp8e5m2_to_f32((uint8_t)(((unsigned)("+o[2]+")>>8)&0xFFu));";
+        }},
     };
     return kMap;
 }
