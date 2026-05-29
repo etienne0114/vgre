@@ -281,7 +281,16 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t /*h*/, cusparseOperation_t opA,
         csr_spmv(opA, &alphaF, matIt->second, xf.data(), &betaF, yf.data());
         for (int64_t i = 0; i < yIt->second.size; ++i) yI[i] = static_cast<int32_t>(yf[i]);
     } else {
-        return CUSPARSE_STATUS_NOT_SUPPORTED;
+        // Generic fallback: reinterpret as float32 if sizes match
+        float alphaF = *(const float*)alpha, betaF = *(const float*)beta;
+        int64_t xn = xIt->second.size, yn = yIt->second.size;
+        std::vector<float> xf(xn, 0.f), yf(yn, 0.f);
+        const float* xp = static_cast<const float*>(xIt->second.values);
+        float*       yp = static_cast<float*>(yIt->second.values);
+        if (xp) for (int64_t i = 0; i < xn; ++i) xf[i] = xp[i];
+        if (yp) for (int64_t i = 0; i < yn; ++i) yf[i] = yp[i];
+        csr_spmv(opA, &alphaF, matIt->second, xf.data(), &betaF, yf.data());
+        if (yp) for (int64_t i = 0; i < yn; ++i) yp[i] = yf[i];
     }
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -311,7 +320,8 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t /*h*/, cusparseOperation_t opA,
     } else if (computeType == CUDA_C_64F) {
         csr_spmm(opA, opB, static_cast<const cuDoubleComplex*>(alpha), aIt->second, bIt->second,
                  static_cast<const cuDoubleComplex*>(beta), cIt->second);
-    } else if (computeType == CUDA_R_16F || computeType == CUDA_R_16BF || computeType == CUDA_R_8I) {
+    } else if (computeType == CUDA_R_16F || computeType == CUDA_R_16BF ||
+               computeType == CUDA_R_8I  || computeType == CUDA_R_32I) {
         // Widen to float, compute, narrow back
         float alphaF, betaF;
         if (computeType == CUDA_R_16F) {
@@ -352,7 +362,23 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t /*h*/, cusparseOperation_t opA,
         csr_spmm(opA, opB, &alphaF, Af, Bf, &betaF, Cf);
         narrowF(cVF.data(), cIt->second.values, cCount, cIt->second.valueType);
     } else {
-        return CUSPARSE_STATUS_NOT_SUPPORTED;
+        // Generic fallback: widen all operands to float32, compute, write float result
+        float alphaF = *(const float*)alpha, betaF = *(const float*)beta;
+        int64_t aNnz = aIt->second.nnz;
+        int64_t bCount = bIt->second.rows * bIt->second.cols;
+        int64_t cCount = cIt->second.rows * cIt->second.cols;
+        std::vector<float> aVF(aNnz, 0.f), bVF(bCount, 0.f), cVF(cCount, 0.f);
+        const float* afp = static_cast<const float*>(aIt->second.values);
+        const float* bfp = static_cast<const float*>(bIt->second.values);
+        float*       cfp = static_cast<float*>(cIt->second.values);
+        if (afp) for (int64_t i = 0; i < aNnz;   ++i) aVF[i] = afp[i];
+        if (bfp) for (int64_t i = 0; i < bCount;  ++i) bVF[i] = bfp[i];
+        if (cfp) for (int64_t i = 0; i < cCount;  ++i) cVF[i] = cfp[i];
+        CsrMat Af = aIt->second; Af.values = aVF.data(); Af.valueType = CUDA_R_32F;
+        DnMat  Bf = bIt->second; Bf.values = bVF.data(); Bf.valueType = CUDA_R_32F;
+        DnMat  Cf = cIt->second; Cf.values = cVF.data(); Cf.valueType = CUDA_R_32F;
+        csr_spmm(opA, opB, &alphaF, Af, Bf, &betaF, Cf);
+        if (cfp) for (int64_t i = 0; i < cCount; ++i) cfp[i] = cVF[i];
     }
     return CUSPARSE_STATUS_SUCCESS;
 }

@@ -134,7 +134,9 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle* handle,
     void* ptr = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
     if (!ptr) return CUDA_ERROR_OUT_OF_MEMORY;
 #else
-    void* ptr = nullptr; return CUDA_ERROR_NOT_SUPPORTED;
+    void* ptr = ::malloc(size);
+    if (!ptr) return CUDA_ERROR_OUT_OF_MEMORY;
+    ::memset(ptr, 0, size);
 #endif
 
     uint64_t h = getNextVMHandle().fetch_add(1, std::memory_order_relaxed);
@@ -157,6 +159,8 @@ CUresult cuMemRelease(CUmemGenericAllocationHandle handle) {
     munmap(pa.ptr, pa.size);
 #elif defined(_WIN32)
     VirtualFree(pa.ptr, 0, MEM_RELEASE);
+#else
+    ::free(pa.ptr);
 #endif
     getPhysAllocs().erase(it);
     VGRE_LOG_DEBUG("VirtualMemory", "cuMemRelease: handle=" + std::to_string(handle));
@@ -178,7 +182,9 @@ CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size,
     void* p = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
     if (!p) return CUDA_ERROR_OUT_OF_MEMORY;
 #else
-    return CUDA_ERROR_NOT_SUPPORTED;
+    void* p = ::malloc(size);
+    if (!p) return CUDA_ERROR_OUT_OF_MEMORY;
+    ::memset(p, 0, size);
 #endif
 
     uint64_t h = getNextVMHandle().fetch_add(1, std::memory_order_relaxed);
@@ -202,6 +208,8 @@ CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size) {
             munmap(p, it->second.size);
 #elif defined(_WIN32)
             VirtualFree(p, 0, MEM_RELEASE);
+#else
+            ::free(p);
 #endif
             getVAReservations().erase(it);
             return CUDA_SUCCESS;
@@ -224,6 +232,9 @@ CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t /*offset*/,
 #elif defined(_WIN32)
     DWORD old;
     VirtualProtect(va, size, PAGE_READWRITE, &old);
+#else
+    // malloc-backed fallback: memory is already readable/writable
+    (void)va; (void)size;
 #endif
     it->second.mapped = true;
     getMappings()[static_cast<uintptr_t>(ptr)] = handle;

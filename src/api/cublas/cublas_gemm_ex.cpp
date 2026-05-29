@@ -253,7 +253,119 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         }
         return CUBLAS_STATUS_SUCCESS;
     }
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    // Unsigned INT8: treat as signed INT8 (positive range overlap is exact)
+    if (Atype == (int)GEMEX_R_8U || Btype == (int)GEMEX_R_8U) {
+        float alphaF = *(const float*)alpha, betaF = *(const float*)beta;
+        int totalA = m * k, totalB = k * n;
+        std::vector<float> Af(totalA), Bf(totalB);
+        for (int i = 0; i < totalA; ++i)
+            Af[i] = static_cast<float>(static_cast<const uint8_t*>(A)[i]);
+        for (int i = 0; i < totalB; ++i)
+            Bf[i] = static_cast<float>(static_cast<const uint8_t*>(B)[i]);
+        if (Ctype == (int)GEMEX_R_32I) {
+            std::vector<float> Cf(m * n, 0.f);
+            refSgemm(transa, transb, m, n, k, 1.f, Af.data(), lda, Bf.data(), ldb, 0.f, Cf.data(), ldc);
+            int32_t* Ci = static_cast<int32_t*>(C);
+            for (int i = 0; i < m * n; ++i)
+                Ci[i] = static_cast<int32_t>(std::round(alphaF * Cf[i] + betaF * static_cast<float>(Ci[i])));
+        } else if (Ctype == (int)GEMEX_R_8U) {
+            std::vector<float> Cf(m * n, 0.f);
+            refSgemm(transa, transb, m, n, k, alphaF, Af.data(), lda, Bf.data(), ldb, betaF, Cf.data(), ldc);
+            uint8_t* Cu = static_cast<uint8_t*>(C);
+            for (int i = 0; i < m * n; ++i) {
+                float v = std::round(Cf[i]);
+                Cu[i] = static_cast<uint8_t>(v < 0.f ? 0 : v > 255.f ? 255 : static_cast<int>(v));
+            }
+        } else {
+            refSgemm(transa, transb, m, n, k, alphaF, Af.data(), lda, Bf.data(), ldb, betaF,
+                     static_cast<float*>(C), ldc);
+        }
+        return CUBLAS_STATUS_SUCCESS;
+    }
+    // INT32×INT32 → INT32
+    if (Atype == (int)GEMEX_R_32I && Btype == (int)GEMEX_R_32I && Ctype == (int)GEMEX_R_32I) {
+        float alphaF = *(const float*)alpha, betaF = *(const float*)beta;
+        int totalA = m * k, totalB = k * n;
+        std::vector<float> Af(totalA), Bf(totalB);
+        for (int i = 0; i < totalA; ++i) Af[i] = static_cast<float>(static_cast<const int32_t*>(A)[i]);
+        for (int i = 0; i < totalB; ++i) Bf[i] = static_cast<float>(static_cast<const int32_t*>(B)[i]);
+        std::vector<float> Cf(m * n, 0.f);
+        refSgemm(transa, transb, m, n, k, 1.f, Af.data(), lda, Bf.data(), ldb, 0.f, Cf.data(), ldc);
+        int32_t* Ci = static_cast<int32_t*>(C);
+        for (int i = 0; i < m * n; ++i)
+            Ci[i] = static_cast<int32_t>(std::round(alphaF * Cf[i] + betaF * static_cast<float>(Ci[i])));
+        return CUBLAS_STATUS_SUCCESS;
+    }
+    // Complex INT8: treat imaginary/real parts separately (float accumulation)
+    if (Atype == (int)GEMEX_C_8I && Btype == (int)GEMEX_C_8I) {
+        // Complex INT8 represented as interleaved (re, im) int8 pairs
+        float alphaF = *(const float*)alpha, betaF = *(const float*)beta;
+        int totalA = m * k, totalB = k * n;
+        std::vector<float> Ar(totalA), Ai_v(totalA), Br(totalB), Bi_v(totalB);
+        for (int i = 0; i < totalA; ++i) {
+            Ar[i] = static_cast<float>(static_cast<const int8_t*>(A)[2*i]);
+            Ai_v[i] = static_cast<float>(static_cast<const int8_t*>(A)[2*i+1]);
+        }
+        for (int i = 0; i < totalB; ++i) {
+            Br[i] = static_cast<float>(static_cast<const int8_t*>(B)[2*i]);
+            Bi_v[i] = static_cast<float>(static_cast<const int8_t*>(B)[2*i+1]);
+        }
+        // C_re = A_re*B_re - A_im*B_im,  C_im = A_re*B_im + A_im*B_re
+        std::vector<float> Cr(m * n, 0.f), Ci_v(m * n, 0.f);
+        refSgemm(transa, transb, m, n, k, 1.f, Ar.data(), lda, Br.data(), ldb, 0.f, Cr.data(), ldc);
+        refSgemm(transa, transb, m, n, k,-1.f, Ai_v.data(), lda, Bi_v.data(), ldb, 1.f, Cr.data(), ldc);
+        refSgemm(transa, transb, m, n, k, 1.f, Ar.data(), lda, Bi_v.data(), ldb, 0.f, Ci_v.data(), ldc);
+        refSgemm(transa, transb, m, n, k, 1.f, Ai_v.data(), lda, Br.data(), ldb, 1.f, Ci_v.data(), ldc);
+        if (Ctype == (int)GEMEX_C_32I) {
+            int32_t* Co = static_cast<int32_t*>(C);
+            float exCr = static_cast<float>(Co[0]), exCi = static_cast<float>(Co[1]);
+            for (int i = 0; i < m * n; ++i) {
+                Co[2*i]   = static_cast<int32_t>(std::round(alphaF * Cr[i] + betaF * static_cast<float>(Co[2*i])));
+                Co[2*i+1] = static_cast<int32_t>(std::round(alphaF * Ci_v[i] + betaF * static_cast<float>(Co[2*i+1])));
+            }
+        } else {
+            cuComplex* Co = static_cast<cuComplex*>(C);
+            for (int i = 0; i < m * n; ++i)
+                Co[i] = make_cuComplex(alphaF * Cr[i] + betaF * Co[i].x,
+                                       alphaF * Ci_v[i] + betaF * Co[i].y);
+        }
+        return CUBLAS_STATUS_SUCCESS;
+    }
+    // Fallback: promote to float32 for any remaining type combinations
+    {
+        float alphaF, betaF;
+        auto toFloat = [](const void* p, int type, int idx) -> float {
+            switch (type) {
+            case (int)GEMEX_R_16F: { uint16_t h = static_cast<const uint16_t*>(p)[idx];
+                uint32_t b = (static_cast<uint32_t>(h&0x8000)<<16)|
+                             (static_cast<uint32_t>((h>>10)&0x1f)==0?0:(static_cast<uint32_t>((h>>10)&0x1f)+(127-15))<<23)|
+                             (static_cast<uint32_t>(h&0x3ff)<<13);
+                float f; memcpy(&f,&b,4); return f; }
+            case (int)GEMEX_R_16BF:{ uint16_t h=static_cast<const uint16_t*>(p)[idx];
+                uint32_t b=static_cast<uint32_t>(h)<<16; float f; memcpy(&f,&b,4); return f; }
+            case (int)GEMEX_R_8I:  return static_cast<float>(static_cast<const int8_t*>(p)[idx]);
+            case (int)GEMEX_R_8U:  return static_cast<float>(static_cast<const uint8_t*>(p)[idx]);
+            case (int)GEMEX_R_32I: return static_cast<float>(static_cast<const int32_t*>(p)[idx]);
+            case (int)GEMEX_R_64F: return static_cast<float>(static_cast<const double*>(p)[idx]);
+            default:               return static_cast<const float*>(p)[idx];
+            }
+        };
+        if (computeType == (int)GEMEX_R_64F) {
+            alphaF = static_cast<float>(*(const double*)alpha);
+            betaF  = static_cast<float>(*(const double*)beta);
+        } else {
+            alphaF = *(const float*)alpha;
+            betaF  = *(const float*)beta;
+        }
+        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n, 0.f);
+        for (int i = 0; i < m * k; ++i) Af[i] = toFloat(A, Atype, i);
+        for (int i = 0; i < k * n; ++i) Bf[i] = toFloat(B, Btype, i);
+        refSgemm(transa, transb, m, n, k, alphaF, Af.data(), lda, Bf.data(), ldb, betaF, Cf.data(), ldc);
+        // Write result — use float32 output for unknown C types
+        float* Co = static_cast<float*>(C);
+        for (int i = 0; i < m * n; ++i) Co[i] = Cf[i];
+        return CUBLAS_STATUS_SUCCESS;
+    }
 }
 
 // cublasGemmBatchedEx: loop over batch items

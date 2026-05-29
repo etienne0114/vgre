@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <complex>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -306,10 +307,11 @@ static std::vector<float> widen_csr_values(const CsrMat &M) {
 
 struct SpGEMMState {
     // Result of sparse matmul: CSR stored inline
-    std::vector<int32_t> cRowPtr;
-    std::vector<int32_t> cColInd;
-    std::vector<float>   cValF;
-    std::vector<double>  cValD;
+    std::vector<int32_t>              cRowPtr;
+    std::vector<int32_t>              cColInd;
+    std::vector<float>                cValF;
+    std::vector<double>               cValD;
+    std::vector<std::complex<double>> cValZ;  // for CUDA_C_32F / CUDA_C_64F
     int64_t cRows = 0, cCols = 0, cNnz = 0;
     cudaDataType_t dtype = CUDA_R_32F;
 };
@@ -493,6 +495,35 @@ cusparseStatus_t cusparseSpGEMM_compute(cusparseHandle_t /*h*/,
             brPtr.data(), bcInd.data(), bValF.data(), 0,
             st.cRowPtr, st.cColInd, st.cValF);
         if (alphaF != 1.0f) for (auto &v : st.cValF) v *= alphaF;
+    } else if (computeType == CUDA_C_32F || computeType == CUDA_C_64F) {
+        // Complex types: values stored as interleaved {re,im} pairs.
+        bool isC64 = (computeType == CUDA_C_64F);
+        double alphaRe = isC64 ? static_cast<const double*>(alpha)[0]
+                                : static_cast<double>(static_cast<const float*>(alpha)[0]);
+        double alphaIm = isC64 ? static_cast<const double*>(alpha)[1]
+                                : static_cast<double>(static_cast<const float*>(alpha)[1]);
+        std::complex<double> alphaZ(alphaRe, alphaIm);
+
+        auto widenComplex = [&](const CsrMat &M) {
+            std::vector<std::complex<double>> out(static_cast<size_t>(M.nnz));
+            if (M.valueType == CUDA_C_64F) {
+                const double *d = static_cast<const double*>(M.values);
+                for (int64_t i = 0; i < M.nnz; ++i) out[static_cast<size_t>(i)] = {d[2*i], d[2*i+1]};
+            } else {
+                const float *f = static_cast<const float*>(M.values);
+                for (int64_t i = 0; i < M.nnz; ++i)
+                    out[static_cast<size_t>(i)] = {static_cast<double>(f[2*i]), static_cast<double>(f[2*i+1])};
+            }
+            return out;
+        };
+        std::vector<std::complex<double>> aValZ = widenComplex(A);
+        std::vector<std::complex<double>> bValZ = widenComplex(B);
+        csr_spgemm<std::complex<double>>(m, A.cols, n,
+            arPtr.data(), acInd.data(), aValZ.data(), 0,
+            brPtr.data(), bcInd.data(), bValZ.data(), 0,
+            st.cRowPtr, st.cColInd, st.cValZ);
+        if (alphaZ != std::complex<double>(1.0, 0.0))
+            for (auto &v : st.cValZ) v *= alphaZ;
     } else {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
     }
@@ -557,6 +588,18 @@ cusparseStatus_t cusparseSpGEMM_copy(cusparseHandle_t /*h*/,
         uint16_t *out = static_cast<uint16_t*>(C.values);
         for (int64_t k = 0; k < st.cNnz; ++k)
             out[static_cast<size_t>(k)] = f2bf_sp(st.cValF[static_cast<size_t>(k)]);
+    } else if (computeType == CUDA_C_32F) {
+        float *out = static_cast<float*>(C.values);
+        for (int64_t k = 0; k < st.cNnz; ++k) {
+            out[2*k]   = static_cast<float>(st.cValZ[static_cast<size_t>(k)].real());
+            out[2*k+1] = static_cast<float>(st.cValZ[static_cast<size_t>(k)].imag());
+        }
+    } else if (computeType == CUDA_C_64F) {
+        double *out = static_cast<double*>(C.values);
+        for (int64_t k = 0; k < st.cNnz; ++k) {
+            out[2*k]   = st.cValZ[static_cast<size_t>(k)].real();
+            out[2*k+1] = st.cValZ[static_cast<size_t>(k)].imag();
+        }
     } else
         return CUSPARSE_STATUS_NOT_SUPPORTED;
 

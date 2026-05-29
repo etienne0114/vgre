@@ -302,11 +302,27 @@ cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t /*handle*/,
     }
     g_algoCache.put(key);
 
-    heuristicResultsArray[0].algo          = 0;
-    heuristicResultsArray[0].workspaceSize = 0;
-    heuristicResultsArray[0].state         = CUBLAS_STATUS_SUCCESS;
-    heuristicResultsArray[0].wavesCount    = 1.0f;
-    *returnAlgoCount = 1;
+    // Estimate workspace based on matrix dimensions: larger tiles need more scratch.
+    // algo 0 (default): no workspace; algo 1..N: progressively larger scratch buffers.
+    // wavesCount descends so callers rank by preference (highest = best).
+    static const size_t kWorkspaceSizes[] = { 0, 4096, 65536, 1 << 20, 4 << 20, 16 << 20 };
+    static const float  kWavesCounts[]    = { 1.0f, 0.92f, 0.84f, 0.76f, 0.68f, 0.60f };
+    static constexpr int kMaxAlgos = static_cast<int>(sizeof(kWorkspaceSizes)/sizeof(kWorkspaceSizes[0]));
+
+    // For larger problem sizes, recommend workspace-backed algorithms first.
+    int64_t problem = static_cast<int64_t>(key.m) * key.n * key.k;
+    int bestFirst = (problem > 1000000) ? 2 : (problem > 100000) ? 1 : 0;
+
+    int count = std::min(requestedAlgoCount, kMaxAlgos);
+    for (int i = 0; i < count; ++i) {
+        int slot = (bestFirst + i) % kMaxAlgos;
+        heuristicResultsArray[i].algo          = static_cast<uint64_t>(slot);
+        heuristicResultsArray[i].workspaceSize = kWorkspaceSizes[slot];
+        heuristicResultsArray[i].state         = CUBLAS_STATUS_SUCCESS;
+        heuristicResultsArray[i].wavesCount    = kWavesCounts[i < kMaxAlgos ? i : kMaxAlgos-1];
+        for (int j = 0; j < 4; ++j) heuristicResultsArray[i].reserved[j] = 0;
+    }
+    *returnAlgoCount = count;
     return CUBLAS_STATUS_SUCCESS;
 }
 

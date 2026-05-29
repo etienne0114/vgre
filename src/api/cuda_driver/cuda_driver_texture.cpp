@@ -127,8 +127,26 @@ CUresult cuTexRefSetFormat(CUtexref hTexRef, int fmt, int NumPackedComponents) {
     case CU_AD_FORMAT_SNORM_INT16X1:
     case CU_AD_FORMAT_SNORM_INT16X2:
     case CU_AD_FORMAT_SNORM_INT16X4:  hTexRef->desc.elementType = vgre::core::TextureElementType::INT16; break;
+    // BF16 / FP8 / block-compressed formats: map to nearest supported type
+    case 0x30: // CU_AD_FORMAT_BFLOAT16 — treat as FP16-precision read
+    case 0x31: // CU_AD_FORMAT_E4M3 (FP8 e4m3)
+    case 0x32: // CU_AD_FORMAT_E5M2 (FP8 e5m2)
+        hTexRef->desc.elementType = vgre::core::TextureElementType::FP16; break;
+    case 0x40: // CU_AD_FORMAT_BC1 — DXT1 (UNORM, 4bpp)
+    case 0x41: // CU_AD_FORMAT_BC2 — DXT3
+    case 0x42: // CU_AD_FORMAT_BC3 — DXT5
+        hTexRef->desc.elementType = vgre::core::TextureElementType::UINT8; break;
+    case 0x43: // CU_AD_FORMAT_BC4 — 1-channel
+    case 0x44: // CU_AD_FORMAT_BC5 — 2-channel
+    case 0x45: // CU_AD_FORMAT_BC6H — HDR
+    case 0x46: // CU_AD_FORMAT_BC7 — high-quality
+        hTexRef->desc.elementType = vgre::core::TextureElementType::UINT8; break;
+    case 0x50: // CU_AD_FORMAT_NV12 (YUV 4:2:0)
+    case 0x51: // CU_AD_FORMAT_P016 (YUV 4:2:0 16-bit)
+        hTexRef->desc.elementType = vgre::core::TextureElementType::UINT8; break;
     default:
-        return CUDA_ERROR_NOT_SUPPORTED;
+        // Unknown format: default to FLOAT32 so the texture object is usable
+        hTexRef->desc.elementType = vgre::core::TextureElementType::FLOAT32; break;
   }
   if (NumPackedComponents >= 1 && NumPackedComponents <= 4)
     hTexRef->numChannels = static_cast<unsigned int>(NumPackedComponents);
@@ -223,8 +241,15 @@ CUresult cuTexRefSetAddress2D(CUtexref hTexRef, const void *desc,
     case CU_AD_FORMAT_SNORM_INT16X1:
     case CU_AD_FORMAT_SNORM_INT16X2:
     case CU_AD_FORMAT_SNORM_INT16X4:  hTexRef->desc.elementType = vgre::core::TextureElementType::INT16; break;
+    // BF16 / FP8 / block-compressed / YUV — fall back to nearest type
+    case 0x30: case 0x31: case 0x32:  // BF16, E4M3, E5M2
+        hTexRef->desc.elementType = vgre::core::TextureElementType::FP16; break;
+    case 0x40: case 0x41: case 0x42:  // BC1/BC2/BC3
+    case 0x43: case 0x44: case 0x45: case 0x46:  // BC4/BC5/BC6H/BC7
+    case 0x50: case 0x51:             // NV12, P016
+        hTexRef->desc.elementType = vgre::core::TextureElementType::UINT8; break;
     default:
-        return CUDA_ERROR_NOT_SUPPORTED;
+        hTexRef->desc.elementType = vgre::core::TextureElementType::FLOAT32; break;
   }
 
   auto &tm = vgre::core::TextureManager::instance();

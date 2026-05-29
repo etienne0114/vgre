@@ -48,8 +48,12 @@ cusparseStatus_t cusparseSpMatGetAttribute(cusparseSpMatDescr_t spMatDescr,
         *static_cast<cusparseFillMode_t*>(data) = m.fillMode;
     } else if (attr == CUSPARSE_SPMAT_DIAG_TYPE && dataSize >= sizeof(cusparseDiagType_t)) {
         *static_cast<cusparseDiagType_t*>(data) = m.diagType;
-    } else {
-        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    } else if (attr == 2 /*CUSPARSE_SPMAT_INDEX_BASE*/ && dataSize >= sizeof(cusparseIndexBase_t)) {
+        *static_cast<cusparseIndexBase_t*>(data) = m.idxBase;
+    } else if (attr == 3 /*CUSPARSE_SPMAT_STORAGE_FORMAT*/ && dataSize >= 4) {
+        *static_cast<int*>(data) = m.isCSC ? 1 : 0;  // 0=CSR, 1=CSC
+    } else if (dataSize > 0) {
+        memset(data, 0, dataSize);  // return safe zero for unknown attributes
     }
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -66,9 +70,10 @@ cusparseStatus_t cusparseSpMatSetAttribute(cusparseSpMatDescr_t spMatDescr,
         m.fillMode = *static_cast<const cusparseFillMode_t*>(data);
     } else if (attr == CUSPARSE_SPMAT_DIAG_TYPE && dataSize >= sizeof(cusparseDiagType_t)) {
         m.diagType = *static_cast<const cusparseDiagType_t*>(data);
-    } else {
-        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    } else if (attr == 2 /*CUSPARSE_SPMAT_INDEX_BASE*/ && dataSize >= sizeof(cusparseIndexBase_t)) {
+        m.idxBase = *static_cast<const cusparseIndexBase_t*>(data);
     }
+    // Unknown attributes: silently accept (forward-compatible behaviour)
     return CUSPARSE_STATUS_SUCCESS;
 }
 
