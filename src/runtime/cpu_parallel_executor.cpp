@@ -454,8 +454,23 @@ VGREResult CPUParallelExecutor::executeCooperative(CompiledKernelFn fn,
 }
 
 // ── Syncthreads kernel execution ──────────────────────────────────────────
-// Executes kernels that use __syncthreads() by creating multiple threads per block.
-// Each block gets its own BlockBarrier for intra-block synchronization.
+// Two-level dispatch strategy:
+//
+// Level 1 (outer): iterate blocks sequentially so each block's threads can
+//   share a single SharedMemory region and participate in the same BlockBarrier.
+//   Blocks never run concurrently here — that prevents barrier deadlocks when
+//   the grid has millions of blocks.
+//
+// Level 2 (inner, normal path): dispatch threadsPerBlock tasks into the
+//   BlockWorkerPool simultaneously; the pool's BlockBarrier implements
+//   __syncthreads() across all tasks for this block.
+//
+// Overflow guard: if threadsPerBlock exceeds the pool capacity, every thread
+//   in the block would queue a task, but fewer pool workers are available to
+//   execute them — the barrier's totalCount would never be satisfied, causing
+//   deadlock.  In that case we fall back to serial execution of thread 0 only
+//   (barriers become no-ops); this mirrors the JIT path where the emulated
+//   warp IS thread 0.
 VGREResult CPUParallelExecutor::executeSyncthreads(CompiledKernelFn fn,
                                                    const dim3 &gridDim,
                                                    const dim3 &blockDim,
@@ -465,84 +480,87 @@ VGREResult CPUParallelExecutor::executeSyncthreads(CompiledKernelFn fn,
                                                    uint64_t bytesPerBlock,
                                                    const dim3 &gridOffset) {
     totalLaunches_++;
-    const uint32_t totalBlocks = gridDim.total();
+    const uint32_t totalBlocks    = gridDim.total();
     const uint32_t threadsPerBlock = blockDim.total();
-    
+
     auto& pool = vgre::runtime::BlockWorkerPool::instance();
     pool.initialize(); // no-op if already initialized
+
+    // Overflow guard: pool must have at least as many workers as threads per
+    // block, otherwise all tasks queue but none can complete (deadlock at barrier).
+    const size_t poolCap = pool.getCapacity();
+    const bool useParallel = (threadsPerBlock > 1) &&
+                             (static_cast<size_t>(threadsPerBlock) <= poolCap);
+
+    if (!useParallel && threadsPerBlock > 1) {
+        VGRE_LOG_WARN("CPUParallelExecutor",
+            "threadsPerBlock=" + std::to_string(threadsPerBlock) +
+            " > pool capacity=" + std::to_string(poolCap) +
+            " — falling back to serial thread-0 path (barriers are no-ops)");
+    }
 
     uint64_t totalFlops = 0, totalBytes = 0;
     auto gridStart = std::chrono::steady_clock::now();
 
-    // Execute each block sequentially, but with multiple threads per block
     for (uint32_t blockLinear = 0; blockLinear < totalBlocks; ++blockLinear) {
-        // Compute 3D block index
         uint32_t gx = blockLinear % gridDim.x;
         uint32_t gy = (blockLinear / gridDim.x) % gridDim.y;
         uint32_t gz = blockLinear / (gridDim.x * gridDim.y);
         dim3 blockIdx(gx + gridOffset.x, gy + gridOffset.y, gz + gridOffset.z);
 
-        // Context for this block's threads
-        struct BlockCtx {
-            const CompiledKernelFn* fn;
-            const dim3* blockIdx;
-            const dim3* blockDim;
-            const dim3* gridDim;
-            void** args;
-            void* sharedMem;
-            size_t sharedMemSize;
-            uint64_t flopsPerBlock;
-            uint64_t bytesPerBlock;
-        };
-
-        // Create shared memory for this block
         SharedMemory* smem = getThreadSharedMem(sharedMemSize);
         smem->reset();
 
-        BlockCtx ctx{
-            &fn, &blockIdx, &blockDim, &gridDim, args,
-            smem->raw(), smem->size(),
-            flopsPerBlock, bytesPerBlock
-        };
+        if (useParallel) {
+            // ── Parallel inner dispatch (normal path) ─────────────────────────
+            struct BlockCtx {
+                const CompiledKernelFn* fn;
+                const dim3* blockIdx;
+                const dim3* blockDim;
+                const dim3* gridDim;
+                void** args;
+                void* sharedMem;
+                size_t sharedMemSize;
+            };
 
-        // Dispatch threads for this block with shared memory
-        pool.dispatch(static_cast<int>(threadsPerBlock),
-            [](int tid, void* arg) {
-                BlockCtx* c = static_cast<BlockCtx*>(arg);
-                
-                // Set threaded context flag
-                t_in_threaded_context = true;
-                
-                // Compute 3D thread index
-                uint32_t tx = tid % c->blockDim->x;
-                uint32_t ty = (tid / c->blockDim->x) % c->blockDim->y;
-                uint32_t tz = tid / (c->blockDim->x * c->blockDim->y);
-                dim3 threadIdx(tx, ty, tz);
+            BlockCtx ctx{ &fn, &blockIdx, &blockDim, &gridDim, args,
+                          smem->raw(), smem->size() };
 
-                // Set up thread context (barrier and sharedMem are already set by BlockWorkerPool::workerLoop)
-                vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
+            pool.dispatch(static_cast<int>(threadsPerBlock),
+                [](int tid, void* arg) {
+                    BlockCtx* c = static_cast<BlockCtx*>(arg);
+                    t_in_threaded_context = true;
+                    uint32_t tx = tid % c->blockDim->x;
+                    uint32_t ty = (tid / c->blockDim->x) % c->blockDim->y;
+                    uint32_t tz = tid / (c->blockDim->x * c->blockDim->y);
+                    dim3 threadIdx(tx, ty, tz);
+                    vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
+                    (**c->fn)(c->args, c->blockIdx, &threadIdx, c->blockDim,
+                              c->gridDim, c->sharedMem, c->sharedMemSize);
+                    vgre::runtime::GPUThreadContext::clearWarpMask();
+                    vgre::runtime::GPUThreadContext::clearBlockBarrier();
+                    t_in_threaded_context = false;
+                },
+                &ctx,
+                smem->raw()
+            );
+        } else {
+            // ── Serial fallback (thread 0 only, barriers are no-ops) ──────────
+            // Used when: threadsPerBlock == 1, or threadsPerBlock > pool capacity.
+            dim3 threadIdx(0, 0, 0);
+            vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
+            vgre::runtime::GPUThreadContext::clearBlockBarrier();
+            (*fn)(args, &blockIdx, &threadIdx, &blockDim, &gridDim,
+                  smem->raw(), smem->size());
+            vgre_cdp_drain();
+            vgre::runtime::GPUThreadContext::clearWarpMask();
+            vgre::runtime::GPUThreadContext::clearBlockBarrier();
+        }
 
-                // Execute the kernel function for this thread
-                (**c->fn)(c->args, c->blockIdx, &threadIdx, c->blockDim,
-                          c->gridDim, c->sharedMem, c->sharedMemSize);
-
-                // Clean up thread context
-                vgre::runtime::GPUThreadContext::clearWarpMask();
-                vgre::runtime::GPUThreadContext::clearBlockBarrier();
-                t_in_threaded_context = false;
-            },
-            &ctx,
-            smem->raw()
-        );
-
-        VGRE_LOG_DEBUG("CPUParallelExecutor", "Block " + std::to_string(blockLinear) + " completed");
-
-        // Accumulate stats for this block
         totalFlops += flopsPerBlock;
         totalBytes += bytesPerBlock;
     }
 
-    // Record telemetry
     double gridMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - gridStart).count();
     auto& aee = vgre::advanced::AdaptiveExecutionEngine::instance();
