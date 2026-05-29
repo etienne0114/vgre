@@ -166,8 +166,11 @@ const TranslateMap& getMap() {
                    "(const void*)(uintptr_t)("+o[1]+"),"+(o.size()>2?o[2]:std::string("0"))+");";
         }},
         {"cp.async.bulk.tensor.2d.global.shared::cta.bulk_group", [](auto& o){
-            return "vgre_cp_async_bulk((void*)(uintptr_t)("+o[0]+"),"
-                   "(const void*)(uintptr_t)("+o[1]+"),"+(o.size()>2?o[2]:std::string("0"))+");";
+            // o[0]=dst, o[1]=tma_desc, o[2]=x, o[3]=y; tile dims come from desc->boxDim
+            return "vgre_tma_load_2d_dispatch((void*)(uintptr_t)("+o[0]+"),"
+                   "(const VgreTMADescriptor*)(uintptr_t)("+o[1]+"),"
+                   +(o.size()>2?o[2]:std::string("0"))+","
+                   +(o.size()>3?o[3]:std::string("0"))+");";
         }},
         {"cp.async.bulk.tensor.1d.shared::cta.global", [](auto& o){
             return "vgre_cp_async_bulk((void*)(uintptr_t)("+o[0]+"),"
@@ -410,8 +413,8 @@ const TranslateMap& getMap() {
         {"selp.u32",  [](auto& o){ return o[0]+" = ("+o[3]+") ? (unsigned)("+o[1]+") : (unsigned)("+o[2]+");"; }},
         {"selp.b32",  [](auto& o){ return o[0]+" = ("+o[3]+") ? "+o[1]+" : "+o[2]+";"; }},
         // ── Control flow ───────────────────────────────────────────────────
-        {"bar.sync",  [](auto&){ return "/* bar.sync — handled by __syncthreads */"; }},
-        {"bar.arrive",[](auto&){ return "/* bar.arrive */"; }},
+        {"bar.sync",  [](auto&){ return "__syncthreads();"; }},
+        {"bar.arrive",[](auto&){ return "__syncthreads();"; }},
         {"membar.gl", [](auto&){ return "__atomic_thread_fence(__ATOMIC_SEQ_CST);"; }},
         {"membar.sys",[](auto&){ return "__atomic_thread_fence(__ATOMIC_SEQ_CST);"; }},
         {"membar.cta",[](auto&){ return "__atomic_thread_fence(__ATOMIC_SEQ_CST);"; }},

@@ -109,13 +109,22 @@ These require significant architectural work. Listed for roadmap awareness.
 
 ---
 
-## Test Coverage Gaps (Currently Untested)
+## Test Coverage
 
-The 119-test suite passes (2 Python tests skip when deps missing) but does NOT validate:
+All previously-untested areas now have dedicated tests (123 tests total, 121 pass, 2 Python skipped):
 
-| Untested Area | Risk If Undetected |
-|---|---|
-| cuDNN Backend v8 graph execution | Untested op type crashes silently |
-| Cross-module PTX linking | Merged PTX may still have symbol conflicts not caught by unit tests |
-| MTGP32 statistical uniformity | MT19937 approximation may differ from real MTGP32 output |
-| cuSolver batched correctness | Loop-based batch correctness under concurrent use |
+| Area | Test | Status |
+|---|---|---|
+| cuDNN Backend v8 graph execution | `test_cudnn_backend_v8` | ✅ Pass |
+| Cross-module PTX linking | `test_ptx_cross_module_link` | ✅ Pass |
+| MTGP32 statistical uniformity | `test_curand_mtgp32` | ✅ Pass |
+| cuSolver batched APIs (potrfBatched, getrsBatched) | `test_cusolver_batched` | ✅ Pass |
+
+## Recent Implementation Additions
+
+- **CUDA TMA** (`src/api/cuda_driver/cuda_driver_tma.cpp`): Full `cuTensorMapEncodeTiled` and `cuTensorMapEncodeIm2col` implementations; `VgreTMADescriptor` extended to 128 bytes with `boxDim`, `rank`, `tag`, and im2col parameters.
+- **mbarrier PTX** (`src/compiler/ptx/ptx_conversion.cpp`): All Hopper SM90 mbarrier variants translated (init, arrive, arrive.noComplete, test_wait, try_wait, try_wait.parity, wait, wait.parity, inval, complete_tx) — no-ops in serial CPU model since async copies complete synchronously.
+- **fence.proxy PTX**: `fence.proxy.async`, `fence.proxy.async.shared::cta`, `fence.proxy.tensormap::generic.*` variants all mapped to `__atomic_thread_fence` or no-ops.
+- **tensormap.replace PTX**: Updates `VgreTMADescriptor::baseAddr` at runtime for dynamic descriptor modification.
+- **bar.sync PTX**: Fixed from comment to `__syncthreads()` call for correct block synchronization.
+- **SharedMemory test fixes**: `ExternSharedIntegration` and `StaticSharedIntegration` now pass (shared memory buffer properly zeroed and reused via `ensureCapacity/reset`).

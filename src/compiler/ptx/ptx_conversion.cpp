@@ -92,26 +92,31 @@ const TranslateMap& getConversionMap() {
         {"griddepcontrol.launch_dependents", [](auto&){ return "/* griddepcontrol.launch_dependents */"; }},
         {"griddepcontrol.wait", [](auto&){ return "/* griddepcontrol.wait */"; }},
         // ── TMA 3D / 4D / 5D bulk copy ─────────────────────────────────────
+        // Tile dimensions come from desc->boxDim (set by cuTensorMapEncodeTiled),
+        // NOT from PTX instruction operands.  Use the _b variants.
         {"cp.async.bulk.tensor.3d.global.shared::cta.bulk_group", [](auto& o){
-            return "vgre_tma_load_3d((void*)(uintptr_t)("+o[0]+"),(const VgreTMADescriptor*)(uintptr_t)("+o[1]+
-                   "),"+(o.size()>2?o[2]:std::string("0"))+","+(o.size()>3?o[3]:std::string("0"))+
-                   ","+(o.size()>4?o[4]:std::string("0"))+","+(o.size()>5?o[5]:std::string("1"))+
-                   ","+(o.size()>6?o[6]:std::string("1"))+","+(o.size()>7?o[7]:std::string("1"))+");";
+            return "vgre_tma_load_3d_b((void*)(uintptr_t)("+o[0]+"),"
+                   "(const VgreTMADescriptor*)(uintptr_t)("+o[1]+"),"
+                   +(o.size()>2?o[2]:std::string("0"))+","
+                   +(o.size()>3?o[3]:std::string("0"))+","
+                   +(o.size()>4?o[4]:std::string("0"))+");";
         }},
         {"cp.async.bulk.tensor.4d.global.shared::cta.bulk_group", [](auto& o){
-            return "vgre_tma_load_4d((void*)(uintptr_t)("+o[0]+"),(const VgreTMADescriptor*)(uintptr_t)("+o[1]+
-                   "),"+(o.size()>2?o[2]:std::string("0"))+","+(o.size()>3?o[3]:std::string("0"))+
-                   ","+(o.size()>4?o[4]:std::string("0"))+","+(o.size()>5?o[5]:std::string("0"))+
-                   ","+(o.size()>6?o[6]:std::string("1"))+","+(o.size()>7?o[7]:std::string("1"))+
-                   ","+(o.size()>8?o[8]:std::string("1"))+","+(o.size()>9?o[9]:std::string("1"))+");";
+            return "vgre_tma_load_4d_b((void*)(uintptr_t)("+o[0]+"),"
+                   "(const VgreTMADescriptor*)(uintptr_t)("+o[1]+"),"
+                   +(o.size()>2?o[2]:std::string("0"))+","
+                   +(o.size()>3?o[3]:std::string("0"))+","
+                   +(o.size()>4?o[4]:std::string("0"))+","
+                   +(o.size()>5?o[5]:std::string("0"))+");";
         }},
         {"cp.async.bulk.tensor.5d.global.shared::cta.bulk_group", [](auto& o){
-            return "vgre_tma_load_5d((void*)(uintptr_t)("+o[0]+"),(const VgreTMADescriptor*)(uintptr_t)("+o[1]+
-                   "),"+(o.size()>2?o[2]:std::string("0"))+","+(o.size()>3?o[3]:std::string("0"))+
-                   ","+(o.size()>4?o[4]:std::string("0"))+","+(o.size()>5?o[5]:std::string("0"))+
-                   ","+(o.size()>6?o[6]:std::string("0"))+","+(o.size()>7?o[7]:std::string("1"))+
-                   ","+(o.size()>8?o[8]:std::string("1"))+","+(o.size()>9?o[9]:std::string("1"))+
-                   ","+(o.size()>10?o[10]:std::string("1"))+","+(o.size()>11?o[11]:std::string("1"))+");";
+            return "vgre_tma_load_5d_b((void*)(uintptr_t)("+o[0]+"),"
+                   "(const VgreTMADescriptor*)(uintptr_t)("+o[1]+"),"
+                   +(o.size()>2?o[2]:std::string("0"))+","
+                   +(o.size()>3?o[3]:std::string("0"))+","
+                   +(o.size()>4?o[4]:std::string("0"))+","
+                   +(o.size()>5?o[5]:std::string("0"))+","
+                   +(o.size()>6?o[6]:std::string("0"))+");";
         }},
         // ── cp.reduce.async (shared → global atomic reduction) ─────────────
         {"cp.reduce.async.add.f32", [](auto& o){
@@ -155,6 +160,94 @@ const TranslateMap& getConversionMap() {
             return "vgre_tcgen05_m128n256k16_bf16_f32((float*)(uintptr_t)("+o[0]+
                    "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
         }},
+        // ── mbarrier (Hopper SM90 async pipeline synchronization) ──────────────
+        // CPU serial emulation: all async copies complete synchronously, so
+        // barriers are trivially satisfied.  init=noop, arrive=complete token,
+        // test_wait/try_wait=1 (always done), wait=noop, inval=noop.
+        {"mbarrier.init.shared.b64",       [](auto&){ return "/* mbarrier.init serial */"; }},
+        {"mbarrier.init.shared::cta.b64",  [](auto&){ return "/* mbarrier.init serial */"; }},
+        {"mbarrier.arrive.shared.b64", [](auto& o){
+            // token = arrive(); in serial, token=0 (phase 0 immediately complete)
+            return (o.size()>0 ? o[0]+" = 0ull; " : "")+"/* mbarrier.arrive serial */";
+        }},
+        {"mbarrier.arrive.shared::cta.b64", [](auto& o){
+            return (o.size()>0 ? o[0]+" = 0ull; " : "")+"/* mbarrier.arrive serial */";
+        }},
+        {"mbarrier.arrive.noComplete.shared.b64", [](auto& o){
+            return (o.size()>0 ? o[0]+" = 0ull; " : "")+"/* mbarrier.arrive.noComplete serial */";
+        }},
+        {"mbarrier.arrive.noComplete.shared::cta.b64", [](auto& o){
+            return (o.size()>0 ? o[0]+" = 0ull; " : "")+"/* mbarrier.arrive.noComplete serial */";
+        }},
+        {"mbarrier.test_wait.shared.b64", [](auto& o){
+            return (o.size()>0 ? o[0]+" = 1; " : "")+"/* mbarrier.test_wait always done in serial */";
+        }},
+        {"mbarrier.test_wait.shared::cta.b64", [](auto& o){
+            return (o.size()>0 ? o[0]+" = 1; " : "")+"/* mbarrier.test_wait always done */";
+        }},
+        {"mbarrier.try_wait.shared.b64", [](auto& o){
+            return (o.size()>0 ? o[0]+" = 1; " : "")+"/* mbarrier.try_wait always done in serial */";
+        }},
+        {"mbarrier.try_wait.shared::cta.b64", [](auto& o){
+            return (o.size()>0 ? o[0]+" = 1; " : "")+"/* mbarrier.try_wait always done */";
+        }},
+        {"mbarrier.try_wait.parity.shared.b64", [](auto& o){
+            return (o.size()>0 ? o[0]+" = 1; " : "")+"/* mbarrier.try_wait.parity always done */";
+        }},
+        {"mbarrier.try_wait.parity.shared::cta.b64", [](auto& o){
+            return (o.size()>0 ? o[0]+" = 1; " : "")+"/* mbarrier.try_wait.parity always done */";
+        }},
+        {"mbarrier.wait.shared.b64",        [](auto&){ return "/* mbarrier.wait serial noop */"; }},
+        {"mbarrier.wait.shared::cta.b64",   [](auto&){ return "/* mbarrier.wait serial noop */"; }},
+        {"mbarrier.wait.parity.shared.b64", [](auto&){ return "/* mbarrier.wait.parity serial noop */"; }},
+        {"mbarrier.wait.parity.shared::cta.b64",[](auto&){ return "/* mbarrier.wait.parity noop */"; }},
+        {"mbarrier.inval.shared.b64",       [](auto&){ return "/* mbarrier.inval serial */"; }},
+        {"mbarrier.inval.shared::cta.b64",  [](auto&){ return "/* mbarrier.inval serial */"; }},
+        {"mbarrier.complete_tx.shared.b64", [](auto&){
+            // In serial CPU model all async copies complete synchronously: noop.
+            return "/* mbarrier.complete_tx serial (copy already synchronous) */";
+        }},
+        {"mbarrier.complete_tx.shared::cta.b64", [](auto&){
+            return "/* mbarrier.complete_tx serial */";
+        }},
+        // ── fence.proxy (Hopper async-copy memory ordering) ────────────────────
+        // On CPU, all operations are already sequentially consistent.
+        {"fence.proxy.async",                          [](auto&){ return "__atomic_thread_fence(__ATOMIC_SEQ_CST);"; }},
+        {"fence.proxy.async.shared::cta",              [](auto&){ return "__atomic_thread_fence(__ATOMIC_SEQ_CST);"; }},
+        {"fence.proxy.async.global",                   [](auto&){ return "__atomic_thread_fence(__ATOMIC_SEQ_CST);"; }},
+        {"fence.proxy.tensormap::generic.acquire.gpu", [](auto&){ return "/* fence.proxy.tensormap acquire */"; }},
+        {"fence.proxy.tensormap::generic.release.cta", [](auto&){ return "/* fence.proxy.tensormap release */"; }},
+        {"fence.proxy.tensormap::generic.acquire.cta", [](auto&){ return "/* fence.proxy.tensormap acquire.cta */"; }},
+        {"fence.proxy.tensormap::generic.release.gpu", [](auto&){ return "/* fence.proxy.tensormap release.gpu */"; }},
+        // ── tensormap.replace (update TMA descriptor address at runtime) ───────
+        // The TMA descriptor is laid out as VgreTMADescriptor; baseAddr is at offset 0.
+        {"tensormap.replace.tile.global_address.shared::cta.b1024.b64", [](auto& o){
+            return "{VgreTMADescriptor* _td=(VgreTMADescriptor*)(uintptr_t)("+
+                   (o.size()>0?o[0]:std::string("0"))+
+                   "); if(_td) _td->baseAddr=(void*)(uintptr_t)("+
+                   (o.size()>1?o[1]:std::string("0"))+"); } /* tensormap.replace.tile.global_address */";
+        }},
+        // ── cp.async.bulk TMA store variants (shared → global) ─────────────────
+        {"cp.async.bulk.tensor.2d.global.shared::cta.bulk_group", [](auto& o){
+            return "vgre_tma_store_2d_b((void*)(uintptr_t)("+
+                   (o.size()>0?o[0]:std::string("0"))+"),"
+                   "(const VgreTMADescriptor*)(uintptr_t)("+
+                   (o.size()>1?o[1]:std::string("0"))+"),"
+                   +(o.size()>2?o[2]:std::string("0"))+","
+                   +(o.size()>3?o[3]:std::string("0"))+");";
+        }},
+        {"cp.async.bulk.tensor.1d.global.shared::cta.bulk_group.store", [](auto& o){
+            return "vgre_cp_async_bulk((void*)(uintptr_t)("+
+                   (o.size()>0?o[0]:std::string("0"))+"),"
+                   "(const void*)(uintptr_t)("+
+                   (o.size()>1?o[1]:std::string("0"))+"),"
+                   +(o.size()>2?o[2]:std::string("1"))+");";
+        }},
+        // ── Prefetch / cache hint variants (no-ops on CPU) ─────────────────────
+        {"cp.async.bulk.prefetch.tensor.2d.l2.global",  [](auto&){ return "/* cp.async.bulk.prefetch 2D */"; }},
+        {"cp.async.bulk.prefetch.tensor.3d.l2.global",  [](auto&){ return "/* cp.async.bulk.prefetch 3D */"; }},
+        {"cp.async.bulk.prefetch.tensor.4d.l2.global",  [](auto&){ return "/* cp.async.bulk.prefetch 4D */"; }},
+        {"cp.async.bulk.prefetch.tensor.5d.l2.global",  [](auto&){ return "/* cp.async.bulk.prefetch 5D */"; }},
     };
     return kMap;
 }
