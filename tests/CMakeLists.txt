@@ -461,6 +461,11 @@ target_link_libraries(test_vector_engine_benchmark PRIVATE vgre)
 add_test(NAME VectorEngineBenchmark COMMAND test_vector_engine_benchmark)
 set_tests_properties(VectorEngineBenchmark PROPERTIES TIMEOUT 120)
 
+add_executable(test_matmul_amx unit/test_matmul_amx.cpp)
+target_link_libraries(test_matmul_amx PRIVATE vgre)
+add_test(NAME MatMulAMX COMMAND test_matmul_amx)
+set_tests_properties(MatMulAMX PROPERTIES TIMEOUT 60)
+
 add_executable(test_memory_manager_benchmark unit/test_memory_manager_benchmark.cpp)
 target_link_libraries(test_memory_manager_benchmark PRIVATE vgre)
 add_test(NAME MemoryManagerBenchmark COMMAND test_memory_manager_benchmark)

@@ -91,6 +91,9 @@ option(ENABLE_VGRE_KERNEL_FUSION
 option(ENABLE_VGRE_MEMORY_COMPRESSION
     "LZ4 memory compression on host↔device transfers above threshold"
     ON)
+option(ENABLE_VGRE_AMX
+    "AVX-VNNI INT8 GEMM (Alder Lake+) and AMX-BF16 GEMM (Sapphire Rapids+)"
+    ON)
 
 # Hide developer-only knobs from cmake-gui unless explicitly set
 mark_as_advanced(VGRE_WARNINGS_AS_ERRORS VGRE_USE_TPM2 VGRE_USE_LIBSECRET)
@@ -836,6 +839,9 @@ function(_vgre_configure_library target_name visibility)
     if(ENABLE_VGRE_MEMORY_COMPRESSION)
         target_compile_definitions(${target_name} PRIVATE ENABLE_VGRE_MEMORY_COMPRESSION)
     endif()
+    if(ENABLE_VGRE_AMX)
+        target_compile_definitions(${target_name} PRIVATE ENABLE_VGRE_AMX)
+    endif()
 endfunction()
 
 vgre_add_subdirectory(src/common)
@@ -1228,6 +1234,7 @@ _vgre_row("  TLB cache (UVM fast-path)   →   " ENABLE_VGRE_TLB)
 _vgre_row("  SPSC per-worker rings       →   " ENABLE_VGRE_SPSC)
 _vgre_row("  Kernel fusion               →   " ENABLE_VGRE_KERNEL_FUSION)
 _vgre_row("  Memory compression (LZ4)   →   " ENABLE_VGRE_MEMORY_COMPRESSION)
+_vgre_row("  AVX-VNNI / AMX acceleration →  " ENABLE_VGRE_AMX)
 _vgre_row("  LAPACK / BLAS               →   " VGRE_USE_LAPACK)
 _vgre_row("  FFTW3 backend               →   " _VGRE_FFTW3_FOUND)
 _vgre_row("  OpenCL backend              →   " _VGRE_OPENCL_FOUND)
