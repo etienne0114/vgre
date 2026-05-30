@@ -149,6 +149,69 @@ bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
         return false;
     }
 
+    // ── Populate GraphNode cost fields from KernelIR ──────────────────────────
+    // KernelIR carries staticFlopCount (from LLVM IR analysis) and estimated
+    // instruction count. Use these to populate the DAG weight fields so the
+    // roofline cost-benefit check below has real data to work with.
+    {
+        auto& mA = const_cast<GraphNode&>(a);
+        auto& mB = const_cast<GraphNode&>(b);
+
+        // FLOPs: staticFlopCount × threads gives total floating-point operations.
+        // Use per-block estimate scaled by total thread count.
+        uint64_t threadsA = static_cast<uint64_t>(a.gridDim.x) * a.gridDim.y * a.gridDim.z *
+                            static_cast<uint64_t>(a.blockDim.x) * a.blockDim.y * a.blockDim.z;
+        uint64_t threadsB = static_cast<uint64_t>(b.gridDim.x) * b.gridDim.y * b.gridDim.z *
+                            static_cast<uint64_t>(b.blockDim.x) * b.blockDim.y * b.blockDim.z;
+
+        if (mA.computeFlops == 0.f && irA->staticFlopCount > 0)
+            mA.computeFlops = static_cast<float>(irA->staticFlopCount * threadsA);
+
+        if (mB.computeFlops == 0.f && irB->staticFlopCount > 0)
+            mB.computeFlops = static_cast<float>(irB->staticFlopCount * threadsB);
+
+        // Memory bandwidth: estimate from argument sizes × thread count.
+        // Each pointer arg is read once and written once per thread (conservative).
+        auto argBytesEstimate = [](const KernelIR* ir, uint64_t threads) -> float {
+            size_t ptrArgBytes = 0;
+            for (size_t i = 0; i < ir->argTypes.size(); ++i) {
+                if (ir->argTypes[i] == ArgType::POINTER) {
+                    size_t sz = (i < ir->argSizes.size()) ? ir->argSizes[i] : 8;
+                    // Assume each thread accesses sz bytes from each pointer arg
+                    ptrArgBytes += sz;
+                }
+            }
+            // Total bytes = pointer args × element size × threads
+            return static_cast<float>(ptrArgBytes * threads) / 1e9f; // GB
+        };
+
+        if (mA.memoryBandwidthGB == 0.f)
+            mA.memoryBandwidthGB = argBytesEstimate(irA, threadsA);
+        if (mB.memoryBandwidthGB == 0.f)
+            mB.memoryBandwidthGB = argBytesEstimate(irB, threadsB);
+
+        // Intermediate bytes: the output of A consumed by B (the RAW link).
+        // Estimate as A's write-pointer argument size × thread count.
+        if (mA.intermediateBytes == 0.f && !a.capturedWritePtrs.empty()) {
+            // Each write pointer carries one output element per thread.
+            // Use 4 bytes (float) as the default element size.
+            size_t writeArgBytes = 4; // default float element
+            for (size_t i = 0; i < irA->argTypes.size(); ++i) {
+                if (irA->argTypes[i] == ArgType::POINTER && i < irA->argSizes.size()) {
+                    writeArgBytes = irA->argSizes[i];
+                    break;
+                }
+            }
+            mA.intermediateBytes = static_cast<float>(writeArgBytes * threadsA) / 1e9f; // GB
+        }
+
+        // Arithmetic intensity for roofline classification
+        if (mA.arithmeticIntensity == 0.f && mA.memoryBandwidthGB > 0.f)
+            mA.arithmeticIntensity = mA.computeFlops / (mA.memoryBandwidthGB * 1e9f);
+        if (mB.arithmeticIntensity == 0.f && mB.memoryBandwidthGB > 0.f)
+            mB.arithmeticIntensity = mB.computeFlops / (mB.memoryBandwidthGB * 1e9f);
+    }
+
     // 2. Output-output hazard detection: if both kernels write to the same pointer,
     //    fusing them would create a WAW (write-after-write) race condition.
     //    `capturedWritePtrs` holds all pointer-type args (conservative: any pointer

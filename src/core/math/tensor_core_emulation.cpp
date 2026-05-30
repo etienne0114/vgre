@@ -2,8 +2,10 @@
 // Implements CPU-based tensor core operations using AVX-512/AMX
 
 #include "tensor_core_emulation.h"
+#include "vgre/runtime/vector_engine.h"  // VectorEngine::matMulInt8 / matMulBF16
 #include <cstring>
 #include <algorithm>
+#include <vector>
 
 #ifdef __AVX512VNNI__
 #include <immintrin.h>
@@ -76,13 +78,38 @@ void tensorCoreMatmul(const InputType* A, const InputType* B, OutputType* C,
     size_t n = config.n;
     size_t k = config.k;
     
-    // Route to simdMatmul with the concrete float type (AccumType=float covers
-    // the BF16/INT8 accumulation use-case; InputType is cast at the call site).
-    // TODO: add specialized paths for BF16/INT8 via vgre::runtime::VectorEngine.
-    (void)config;  // precision/hw selection is a no-op in this scalar fallback
-    simdMatmul(reinterpret_cast<const AccumType*>(A),
-               reinterpret_cast<const AccumType*>(B),
-               C, m, n, k, k, n, n);
+    // ── Precision-aware dispatch through VectorEngine ────────────────────────
+    // INT8 and BF16 routes use VectorEngine::matMulInt8 / matMulBF16 which
+    // dispatch to AVX-VNNI (Alder Lake+) or AMX (Sapphire Rapids+) as available.
+    // FP32 / FP64 fall through to simdMatmul which uses AVX2/AVX-512 FMA.
+    if (config.precision == TensorPrecision::INT8) {
+        // Signed INT8 → INT32 accumulation (AVX-VNNI or AMX path)
+        std::vector<int32_t> tmp(m * n, 0);
+        vgre::runtime::VectorEngine::instance().matMulInt8(
+            reinterpret_cast<const int8_t*>(A),
+            reinterpret_cast<const int8_t*>(B),
+            tmp.data(),
+            static_cast<int>(m), static_cast<int>(n), static_cast<int>(k));
+        // Narrow INT32 → OutputType
+        for (size_t i = 0; i < m * n; ++i)
+            C[i] = static_cast<OutputType>(tmp[i]);
+    } else if (config.precision == TensorPrecision::BF16) {
+        // BF16 → FP32 accumulation (AMX-BF16 or AVX2 software path)
+        using BF16 = vgre::runtime::vgre_bf16;
+        std::vector<float> tmp(m * n, 0.f);
+        vgre::runtime::VectorEngine::instance().matMulBF16(
+            reinterpret_cast<const BF16*>(A),
+            reinterpret_cast<const BF16*>(B),
+            tmp.data(),
+            static_cast<int>(m), static_cast<int>(n), static_cast<int>(k));
+        for (size_t i = 0; i < m * n; ++i)
+            C[i] = static_cast<OutputType>(tmp[i]);
+    } else {
+        // FP32 / FP64: use AVX2/AVX-512 SIMD matmul
+        simdMatmul(reinterpret_cast<const AccumType*>(A),
+                   reinterpret_cast<const AccumType*>(B),
+                   C, m, n, k, k, n, n);
+    }
 }
 
 #ifdef __AVX512VNNI__

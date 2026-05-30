@@ -119,7 +119,8 @@ struct ManagedRegion {
   mutable int       prefetchStrideConf = 0;  // confidence counter (0-4)
 
   ManagedRegion() = default;
-  ManagedRegion(const ManagedRegion &other) : ptr(other.ptr), size(other.size), pageCount(other.pageCount), dirtyPages(other.dirtyPages), pageSize(other.pageSize) {
+  // Helper: copy all scalar fields from other (both copy-ctor and copy-assign use this)
+  void copyScalarFields(const ManagedRegion& other) {
     isResidentOnHost.store(other.isResidentOnHost.load(std::memory_order_relaxed));
     lastAccessTime.store(other.lastAccessTime.load(std::memory_order_relaxed));
     accessCount.store(other.accessCount.load(std::memory_order_relaxed));
@@ -131,25 +132,23 @@ struct ManagedRegion {
     hostAccessible.store(other.hostAccessible.load(std::memory_order_relaxed));
     for (int i = 0; i < kMaxDevices; ++i)
       deviceAccessCounts[i].store(other.deviceAccessCounts[i].load(std::memory_order_relaxed));
+    nodeAccessBitmap.store(other.nodeAccessBitmap.load(std::memory_order_relaxed));
+    for (int i = 0; i < kMaxDevices; ++i) emaAccessRate[i] = other.emaAccessRate[i];
+    for (int i = 0; i < 4; ++i) lastFaultPages[i] = other.lastFaultPages[i];
+    prefetchStride    = other.prefetchStride;
+    prefetchStrideConf = other.prefetchStrideConf;
+  }
+
+  ManagedRegion(const ManagedRegion &other)
+    : ptr(other.ptr), size(other.size), pageCount(other.pageCount),
+      dirtyPages(other.dirtyPages), pageSize(other.pageSize) {
+    copyScalarFields(other);
   }
   ManagedRegion &operator=(const ManagedRegion &other) {
     if (this != &other) {
-      ptr = other.ptr;
-      size = other.size;
-      pageCount = other.pageCount;
-      dirtyPages = other.dirtyPages;
-      pageSize = other.pageSize;
-      isResidentOnHost.store(other.isResidentOnHost.load(std::memory_order_relaxed));
-      lastAccessTime.store(other.lastAccessTime.load(std::memory_order_relaxed));
-      accessCount.store(other.accessCount.load(std::memory_order_relaxed));
-      preferredLocation.store(other.preferredLocation.load(std::memory_order_relaxed));
-      isReadMostly.store(other.isReadMostly.load(std::memory_order_relaxed));
-      lastPrefetchDev.store(other.lastPrefetchDev.load(std::memory_order_relaxed));
-      accessedByMask.store(other.accessedByMask.load(std::memory_order_relaxed));
-      conflictCount.store(other.conflictCount.load(std::memory_order_relaxed));
-      hostAccessible.store(other.hostAccessible.load(std::memory_order_relaxed));
-      for (int i = 0; i < kMaxDevices; ++i)
-        deviceAccessCounts[i].store(other.deviceAccessCounts[i].load(std::memory_order_relaxed));
+      ptr = other.ptr; size = other.size;
+      pageCount = other.pageCount; dirtyPages = other.dirtyPages; pageSize = other.pageSize;
+      copyScalarFields(other);
     }
     return *this;
   }
