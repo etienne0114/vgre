@@ -12,6 +12,7 @@
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/compiler/kernel_parser.h"
+#include "../../compiler/sass/sass_decoder.h"
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -151,8 +152,18 @@ static std::string extractPTXFromImage(const void *image, size_t sizeHint = 0) {
     if (ptx) return std::string(ptx, sSize);
     const char* bc = reader.getSectionData(".nv_bitcode", sSize);
     if (bc) return std::string(bc, sSize);
-    // ELF is SASS-only if no PTX section
-    VGRE_LOG_WARN("CUDART", "ELF/cubin has no .nv_ptx section — SASS-only binary");
+    // ELF is SASS-only if no PTX section — attempt SASS decode before giving up
+    VGRE_LOG_WARN("CUDART", "ELF/cubin has no .nv_ptx section — attempting SASS decode");
+    {
+        std::string decoded = vgre::sass::decodeSassToPtx(
+            reinterpret_cast<const uint8_t*>(image), scanSize);
+        if (!decoded.empty()) {
+            VGRE_LOG_INFO("CUDART", "SASS decode produced " +
+                          std::to_string(decoded.size()) + " bytes of PTX");
+            return decoded;
+        }
+    }
+    VGRE_LOG_WARN("CUDART", "SASS decode failed — SASS-only binary unsupported");
     return kSassOnlyMarker;
   }
 

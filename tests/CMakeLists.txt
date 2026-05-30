@@ -326,6 +326,10 @@ add_executable(test_cudnn_resample_bwd api/test_cudnn_resample_bwd.cpp)
 target_link_libraries(test_cudnn_resample_bwd PRIVATE vgre)
 add_test(NAME CudnnResampleBwd COMMAND test_cudnn_resample_bwd)
 
+add_executable(test_cudnn_graph_v9 api/test_cudnn_graph_v9.cpp)
+target_link_libraries(test_cudnn_graph_v9 PRIVATE vgre)
+add_test(NAME CudnnGraphV9 COMMAND test_cudnn_graph_v9)
+
 add_executable(test_ptx_cross_module_link api/test_ptx_cross_module_link.cpp)
 target_link_libraries(test_ptx_cross_module_link PRIVATE vgre_cudart)
 add_test(NAME PTXCrossModuleLink COMMAND test_ptx_cross_module_link)

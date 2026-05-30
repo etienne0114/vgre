@@ -198,5 +198,32 @@ Scheduler::submitNumaTask(StreamId stream, std::function<void()> taskFn,
   return future;
 }
 
+// ── Per-stream SPSC fast path (Track 7.3) ─────────────────────────────────
+void Scheduler::enqueueToStream(uint64_t streamId, WorkItem item) {
+    // Try SPSC ring fast path (single-producer: caller is the submitting thread)
+    {
+        std::lock_guard<std::mutex> lg(streamRingsMutex_);
+        auto it = streamRings_.find(streamId);
+        if (it == streamRings_.end()) {
+            streamRings_[streamId] = std::make_unique<SPSCRing<WorkItem>>();
+            it = streamRings_.find(streamId);
+        }
+        if (it->second->push(std::move(item))) {
+            pending_.fetch_add(1, std::memory_order_relaxed);
+            cv_.notify_one();
+            return;
+        }
+        // Ring full — fall through to global work-stealing queue below
+        // Move item back out from the failed push; item was moved-from so rebuild
+        // from the original push attempt: re-acquire the item we tried to push.
+        // Since push() moves-from on success only, item is still valid here.
+    }
+    // Ring full or multi-stream: fall through to global work-stealing queue
+    Scheduler::enqueueWithWorkerFallback(t_workerIdx, std::move(item),
+                                         workerDeques_, queue_, mutex_);
+    pending_.fetch_add(1, std::memory_order_relaxed);
+    cv_.notify_one();
+}
+
 } // namespace core
 } // namespace vgre
