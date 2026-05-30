@@ -28,8 +28,19 @@ std::vector<uint8_t> PacketUtils::constructVSBPPacket(PacketType type,
 }
 
 bool PacketUtils::validateVSBPHeader(const VSBPHeader &header) {
+  // Configurable max packet size via VGRE_MAX_PACKET_SIZE_MB (default 64MB)
+  static const size_t kMaxPacketSize = []() -> size_t {
+      const char* e = vgre_get_config("VGRE_MAX_PACKET_SIZE_MB");
+      if (e) {
+          try {
+              int v = std::stoi(e);
+              if (v >= 1 && v <= 1024) return static_cast<size_t>(v) * 1024 * 1024; // 1MB to 1GB
+          } catch (...) {}
+      }
+      return 64 * 1024 * 1024; // 64MB default
+  }();
   return header.magic == VSBP_MAGIC && header.version == VSBP_VERSION &&
-         header.payloadSize <= 64 * 1024 * 1024;
+         header.payloadSize <= kMaxPacketSize;
 }
 
 std::string PacketUtils::packetTypeToString(PacketType type) {
@@ -163,11 +174,22 @@ bool ErrorHandlingPatterns::isSocketError(int error_code) {
 
 std::string ErrorHandlingPatterns::getSocketErrorString(int error_code) {
 #ifdef _WIN32
-  char buffer[256];
+  // Configurable error buffer size via VGRE_ERROR_BUFFER_SIZE (default 256)
+  static const int kErrorBufferSize = []() -> int {
+      const char* e = vgre_get_config("VGRE_ERROR_BUFFER_SIZE");
+      if (e) {
+          try {
+              int v = std::stoi(e);
+              if (v >= 128 && v <= 4096) return v;
+          } catch (...) {}
+      }
+      return 256;
+  }();
+  char buffer[kErrorBufferSize];
   if (FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
                      NULL, error_code,
                      MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buffer,
-                     sizeof(buffer), NULL)) {
+                     kErrorBufferSize, NULL)) {
     std::string s(buffer);
     while (!s.empty() &&
            (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))

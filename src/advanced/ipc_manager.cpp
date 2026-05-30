@@ -1,16 +1,37 @@
 #include "vgre/advanced/ipc_manager.h"
+#include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <random>
+#include <chrono>
 #if !defined(_WIN32)
 #include <sys/stat.h>
+#include <sys/random.h>   // getrandom()
 #endif
 #include <thread>
 
 #include "vgre/common/os_backend.h"
+
+// Platform-specific crypto includes
+#if defined(_WIN32)
+#include <windows.h>
+#include <wincrypt.h>
+#elif defined(__APPLE__)
+#include <CommonCrypto/CommonHMAC.h>
+#include <CommonCrypto/CommonDigest.h>
+#else
+#include <openssl/hmac.h>
+#include <openssl/sha.h>
+#endif
+
+// Platform-specific shared memory includes
+#if defined(__APPLE__)
+#include <sys/stat.h>
+#endif
 
 namespace vgre {
 namespace advanced {
@@ -35,6 +56,52 @@ static bool processIsAlive(int32_t pid) {
   return kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
 #endif
 }
+
+// Generate HMAC-SHA256 for authentication using VGRE's internal crypto.
+// This avoids a dependency on OpenSSL while using the same HMAC-SHA256
+// implementation already present in secure_channel_crypto.cpp.
+static void generateHMAC(const uint8_t* data, size_t len, const std::string& secret, uint8_t* hmac) {
+    vgre::advanced::crypto::hmac_sha256(
+        reinterpret_cast<const uint8_t*>(secret.data()), secret.size(),
+        data, len, hmac);
+}
+
+// Generate random token (platform-specific)
+static void generateRandomToken(uint8_t* token, size_t size) {
+#if defined(_WIN32)
+    HCRYPTPROV hProv = 0;
+    if (CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+        CryptGenRandom(hProv, size, token);
+        CryptReleaseContext(hProv, 0);
+    } else {
+        // Fallback to std::random_device
+        std::random_device rd;
+        std::mt19937_64 gen(rd());
+        std::uniform_int_distribution<uint8_t> dist(0, 255);
+        for (size_t i = 0; i < size; ++i) {
+            token[i] = dist(gen);
+        }
+    }
+#elif defined(__APPLE__)
+    // macOS: Use arc4random_buf
+    arc4random_buf(token, size);
+#else
+    // Linux: Use getrandom if available, otherwise std::random_device
+    #if defined(__linux__)
+    ssize_t ret = getrandom(token, size, 0);
+    if (ret == static_cast<ssize_t>(size)) {
+        return;
+    }
+    #endif
+    // Fallback
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    std::uniform_int_distribution<uint8_t> dist(0, 255);
+    for (size_t i = 0; i < size; ++i) {
+        token[i] = dist(gen);
+    }
+#endif
+}
 } // namespace
 
 IPCManager &IPCManager::instance() {
@@ -46,7 +113,21 @@ IPCManager &IPCManager::instance() {
   return inst;
 }
 
-IPCManager::IPCManager() = default;
+IPCManager::IPCManager() {
+    // Initialize authentication secret from environment or generate random
+    const char* secret = vgre_get_config("VGRE_IPC_SECRET");
+    if (secret) {
+        auth_secret_ = secret;
+    } else {
+        // Generate random secret if not provided
+        uint8_t random_bytes[32];
+        generateRandomToken(random_bytes, 32);
+        auth_secret_.assign(reinterpret_cast<char*>(random_bytes), 32);
+    }
+    
+    // Generate local authentication token
+    generateAuthToken(local_auth_, 0);
+}
 
 IPCManager::~IPCManager() {
   // Skip shutdown during static destruction to prevent deadlock
@@ -154,7 +235,13 @@ bool IPCManager::initialize(bool isMaster) {
   };
 
   // Phase 10: Dynamic SHM name for test isolation
+  // macOS requires shared memory names to start with '/' for shm_open
   std::string fullShmName = VGRE_SHM_NAME;
+#if defined(__APPLE__)
+  if (fullShmName[0] != '/') {
+      fullShmName = "/" + fullShmName;
+  }
+#endif
   const char* shmSuffix = vgre_get_config("VGRE_SHM_SUFFIX");
   if (shmSuffix) {
       fullShmName += "_" + std::string(shmSuffix);
@@ -162,7 +249,17 @@ bool IPCManager::initialize(bool isMaster) {
 
   // Restrict shared memory to owner-only: prevents unauthorized processes
   // from reading or corrupting VGRE global state.
-  shm_fd_ = shm_open(fullShmName.c_str(), O_CREAT | O_RDWR, 0600);
+  // On macOS, ensure the shared memory is created with proper permissions
+  int shm_flags = O_CREAT | O_RDWR;
+#if defined(__APPLE__)
+  // macOS: Try to open existing first, then create if it doesn't exist
+  shm_fd_ = shm_open(fullShmName.c_str(), O_RDWR, 0600);
+  if (shm_fd_ == -1 && errno == ENOENT) {
+      shm_fd_ = shm_open(fullShmName.c_str(), shm_flags, 0600);
+  }
+#else
+  shm_fd_ = shm_open(fullShmName.c_str(), shm_flags, 0600);
+#endif
   if (shm_fd_ == -1) {
     logInitFailure("Failed to open shared memory: " + fullShmName);
     return false;
@@ -200,8 +297,14 @@ bool IPCManager::initialize(bool isMaster) {
 #else
     state_->master_pid = (int32_t)getpid();
 #endif
+    
+    // Generate master authentication token
+    generateAuthToken(state_->master_auth, state_->master_pid);
+    state_->state_version = 1;
+    updateStateHMAC();
+    
     VGRE_LOG_INFO("IPCManager",
-                  "VGRE Global Service Initialized (Master Mode)");
+                  "VGRE Global Service Initialized (Master Mode with IPC hardening)");
   }
 
   // Register local process
@@ -211,7 +314,17 @@ bool IPCManager::initialize(bool isMaster) {
   int32_t myPid = (int32_t)getpid();
 #endif
   local_slot_ = -1;
+  
+  // Update local auth token with actual PID
+  generateAuthToken(local_auth_, myPid);
 
+  // Verify state integrity before accessing
+  if (!verifyStateIntegrity()) {
+    VGRE_LOG_ERROR("IPCManager", "State integrity check failed - possible hijacking attempt");
+    cleanupPosix();
+    return false;
+  }
+  
   // Reclaim stale slots left by dead processes.
   for (int i = 0; i < VGRE_MAX_PROCESSES; ++i) {
     int32_t pid = state_->slots[i].pid;
@@ -219,6 +332,7 @@ bool IPCManager::initialize(bool isMaster) {
       state_->slots[i].active = false;
       state_->slots[i].pid = 0;
       memset(&state_->slots[i].telemetry, 0, sizeof(vgre_telemetry_t));
+      memset(&state_->slots[i].auth, 0, sizeof(AuthToken));
     }
   }
 
@@ -237,6 +351,9 @@ bool IPCManager::initialize(bool isMaster) {
     if (_InterlockedCompareExchange((volatile long *)&state_->slots[i].pid,
                                     myPid, expected) == expected) {
       state_->slots[i].active = true;
+      state_->slots[i].auth = local_auth_;
+      state_->slots[i].last_heartbeat = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
       local_slot_ = i;
       break;
     }
@@ -245,6 +362,9 @@ bool IPCManager::initialize(bool isMaster) {
                                     false, __ATOMIC_SEQ_CST,
                                     __ATOMIC_SEQ_CST)) {
       state_->slots[i].active = true;
+      state_->slots[i].auth = local_auth_;
+      state_->slots[i].last_heartbeat = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
       local_slot_ = i;
       break;
     }
@@ -283,6 +403,11 @@ bool IPCManager::initialize(bool isMaster) {
     }
   }
   state_->active_count = activeCount;
+  
+  // Update state HMAC after modifications
+  if (isMaster_) {
+      updateStateHMAC();
+  }
 
   enabled_ = true;
   upgrading_.store(false, std::memory_order_release); // upgrade complete; clear the barrier
@@ -361,8 +486,21 @@ void IPCManager::updateLocalTelemetry(const vgre_telemetry_t &telemetry) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!enabled_ || !state_ || local_slot_ == -1)
       return;
+    
+    // Verify authentication before updating
+    if (!validateAuthToken(state_->slots[local_slot_].auth)) {
+        VGRE_LOG_ERROR("IPCManager", "Authentication failed - telemetry update rejected");
+        return;
+    }
+    
     state_->slots[local_slot_].telemetry = telemetry;
+    state_->slots[local_slot_].last_heartbeat = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     shouldBroadcast = true;
+    
+    if (isMaster_) {
+        updateStateHMAC();
+    }
   }
   if (shouldBroadcast) {
     TCPClusterManager::instance().broadcastLocalTelemetry(telemetry);
@@ -374,6 +512,12 @@ void IPCManager::getGlobalTelemetry(vgre_telemetry_t &outCombined) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!enabled_ || !state_)
       return;
+    
+    // Verify state integrity
+    if (!verifyStateIntegrity()) {
+        VGRE_LOG_ERROR("IPCManager", "State integrity check failed during telemetry read");
+        return;
+    }
 
     // Use master metadata or first slot as base for non-additive fields
     // (We do NOT memset to 0 because outCombined might already contain 
@@ -416,10 +560,19 @@ void IPCManager::updateClusterNodes(const std::vector<vgre_cluster_node_t>& node
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!enabled_ || !state_) return;
   
+  if (!verifyStateIntegrity()) {
+      VGRE_LOG_ERROR("IPCManager", "State integrity check failed during cluster update");
+      return;
+  }
+  
   uint32_t count = std::min(static_cast<uint32_t>(nodes.size()), static_cast<uint32_t>(VGRE_MAX_NODES));
   state_->cluster_node_count = count;
   for (uint32_t i = 0; i < count; ++i) {
     state_->cluster_nodes[i] = nodes[i];
+  }
+  
+  if (isMaster_) {
+      updateStateHMAC();
   }
 }
 
@@ -427,11 +580,70 @@ void IPCManager::getClusterNodes(std::vector<vgre_cluster_node_t>& outNodes) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!enabled_ || !state_) return;
   
+  if (!verifyStateIntegrity()) {
+      VGRE_LOG_ERROR("IPCManager", "State integrity check failed during cluster read");
+      return;
+  }
+  
   outNodes.clear();
   uint32_t count = state_->cluster_node_count;
   for (uint32_t i = 0; i < count; ++i) {
     outNodes.push_back(state_->cluster_nodes[i]);
   }
+}
+
+// Generate authentication token for a process
+void IPCManager::generateAuthToken(AuthToken& token, int32_t pid) {
+    generateRandomToken(token.token, VGRE_AUTH_TOKEN_SIZE);
+    token.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    token.pid = pid;
+    
+    // Generate HMAC for integrity
+    generateHMAC(reinterpret_cast<uint8_t*>(&token), 
+                 sizeof(AuthToken) - sizeof(token.hmac),
+                 auth_secret_, token.hmac);
+}
+
+// Validate authentication token
+bool IPCManager::validateAuthToken(const AuthToken& token) const {
+    if (token.pid <= 0) return false;
+  
+    // Check if token is too old (5 minute expiry)
+  auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (now - token.timestamp > 300000) return false;
+  
+  // Verify HMAC
+  uint8_t computed_hmac[32];
+  generateHMAC(reinterpret_cast<const uint8_t*>(&token),
+               sizeof(AuthToken) - sizeof(token.hmac),
+               auth_secret_, computed_hmac);
+  
+  return memcmp(computed_hmac, token.hmac, 32) == 0;
+}
+
+// Verify shared memory state integrity
+bool IPCManager::verifyStateIntegrity() const {
+    if (!state_) return false;
+  
+    // Compute HMAC of state (excluding the HMAC field itself)
+  size_t hmac_offset = offsetof(GlobalState, state_hmac);
+  uint8_t computed_hmac[32];
+  generateHMAC(reinterpret_cast<uint8_t*>(state_), hmac_offset,
+               auth_secret_, computed_hmac);
+  
+  return memcmp(computed_hmac, state_->state_hmac, 32) == 0;
+}
+
+// Update state HMAC after modifications
+void IPCManager::updateStateHMAC() {
+    if (!state_) return;
+  
+  state_->state_version++;
+  size_t hmac_offset = offsetof(GlobalState, state_hmac);
+  generateHMAC(reinterpret_cast<uint8_t*>(state_), hmac_offset,
+               auth_secret_, state_->state_hmac);
 }
 
 } // namespace advanced

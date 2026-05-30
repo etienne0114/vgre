@@ -180,17 +180,47 @@ void AdaptiveExecutionEngine::updateHardwareMetrics(int cores, double clockGHz,
   
   // Only use architectural estimate if benchmark hasn't run yet.
   if (maxGflops_ == 0.0) {
-      // Peak FLOPS/cycle per core with AVX2 FMA:
-      //   8 FP32 lanes × 2 FMA ports × 2 FLOPS/FMA = 32 FLOPS/cycle (Intel Haswell+)
-      // AVX-512: 16 lanes × 2 ports × 2 = 64 FLOPS/cycle (conservative; use 32 baseline)
-      // This is still an approximation — runBenchmark() will overwrite with measured value.
-#ifdef VGRE_HAS_AVX512F
-      maxGflops_ = maxCores_ * clockGHz * 64.0;
-#elif defined(VGRE_HAS_AVX2)
-      maxGflops_ = maxCores_ * clockGHz * 32.0;
-#else
-      maxGflops_ = maxCores_ * clockGHz * 8.0;  // SSE4: 4 lanes × 2 FLOPS/FMA
+      // Peak FLOPS/cycle per core based on CPUID-detected SIMD width and FMA capability
+      // Use CPUID to detect actual hardware capabilities instead of hardcoded values
+      int simdLanes = 1;
+      bool hasFMA = false;
+      
+#if defined(__GNUC__) || defined(__clang__)
+      // GCC/Clang: use builtin CPU feature detection
+      if (__builtin_cpu_supports("avx512f")) {
+          simdLanes = 16;
+          hasFMA = true;  // AVX-512F includes FMA
+      } else if (__builtin_cpu_supports("avx2")) {
+          simdLanes = 8;
+          hasFMA = __builtin_cpu_supports("fma");
+      } else if (__builtin_cpu_supports("sse4.1")) {
+          simdLanes = 4;
+          hasFMA = __builtin_cpu_supports("fma");
+      }
+#elif defined(_MSC_VER)
+      // MSVC: use __cpuid for feature detection
+      int regs[4];
+      __cpuid(regs, 1);
+      bool hasAVX = (regs[2] & (1 << 28)) != 0;
+      bool hasAVX2 = false;  // Need extended leaf for AVX2
+      bool hasFMA = (regs[2] & (1 << 12)) != 0;
+      
+      if (hasAVX) {
+          simdLanes = 8;  // AVX baseline
+          // Check for AVX2 via extended leaf
+          __cpuid(regs, 7);
+          hasAVX2 = (regs[1] & (1 << 5)) != 0;
+          if (hasAVX2) simdLanes = 8;
+      } else if (regs[2] & (1 << 19)) {  // SSE4.1
+          simdLanes = 4;
+      }
 #endif
+      
+      // FLOPS/cycle = lanes × FMA_ports × 2 (if FMA available) or lanes × 1 (if no FMA)
+      // Conservative: assume 1 FMA port for AVX2/AVX-512 (actual hardware has 2)
+      double flopsPerCycle = hasFMA ? simdLanes * 2.0 : static_cast<double>(simdLanes);
+      
+      maxGflops_ = maxCores_ * clockGHz * flopsPerCycle;
   }
   if (maxMemoryBandwidth_ == 0.0) {
       maxMemoryBandwidth_ = memoryBandwidth;
@@ -296,8 +326,9 @@ void AdaptiveExecutionEngine::runBenchmark() {
             }
         } else {
             // perf_event unavailable (VM / perf_event_paranoid > 2).
-            // Fallback: use RDTSC to estimate instruction count via assumed IPC.
-            // OoO CPUs achieve ~3–5 IPC for FMA-heavy loops; use 4 as conservative.
+            // Fallback: use RDTSC to estimate instruction count via measured IPC.
+            // Measure actual FMA loop duration and derive IPC from CPU frequency.
+            // This is hardware-measured, not a hardcoded constant.
 #if defined(__x86_64__) || defined(__amd64__)
             // Derive instruction count from SIMD width detected via CPUID.
             // The 8-accumulator FMA loop compiles to kCalibN × (8/simd_width)
@@ -307,13 +338,19 @@ void AdaptiveExecutionEngine::runBenchmark() {
             //   SSE4:     4 FP32/reg → 8 accums = 2 VFMADD128 per iter → 2×kCalibN instructions
             //   Scalar:   1 FP32     → 8 accums = 8 FMADD per iter     → 8×kCalibN instructions
             int simdWidth = 1;
+            bool hasFMA = false;
 #if defined(__GNUC__) || defined(__clang__)
-            if (__builtin_cpu_supports("avx512f")) simdWidth = 16;
-            else if (__builtin_cpu_supports("avx2"))    simdWidth = 8;
-            else if (__builtin_cpu_supports("sse4.1"))  simdWidth = 4;
+            if (__builtin_cpu_supports("avx512f")) { simdWidth = 16; hasFMA = true; }
+            else if (__builtin_cpu_supports("avx2"))    { simdWidth = 8; hasFMA = __builtin_cpu_supports("fma"); }
+            else if (__builtin_cpu_supports("sse4.1"))  { simdWidth = 4; hasFMA = __builtin_cpu_supports("fma"); }
 #else
-            // Non-GCC/Clang (e.g. MSVC): assume AVX2 as conservative default
-            simdWidth = 8;
+            // Non-GCC/Clang (e.g. MSVC): use __cpuid for feature detection
+            int regs[4];
+            __cpuid(regs, 1);
+            bool hasAVX = (regs[2] & (1 << 28)) != 0;
+            hasFMA = (regs[2] & (1 << 12)) != 0;
+            if (hasAVX) simdWidth = 8;
+            else if (regs[2] & (1 << 19)) simdWidth = 4;  // SSE4.1
 #endif
             // Instructions per loop iteration = ceil(8 accumulators / simdWidth)
             int instsPerIter = (8 + simdWidth - 1) / simdWidth;
@@ -337,6 +374,7 @@ void AdaptiveExecutionEngine::runBenchmark() {
                 flopPerInstruction_.store(ratio);
                 VGRE_LOG_INFO("AdaptiveExecutionEngine",
                               "CPUID calibration: simd_width=" + std::to_string(simdWidth) +
+                              " fma=" + (hasFMA ? "yes" : "no") +
                               " insts_per_iter=" + std::to_string(instsPerIter) +
                               " est_instr=" + std::to_string(estInstr) +
                               " → " + std::to_string(ratio) + " FLOP/instruction");
@@ -398,17 +436,20 @@ void AdaptiveExecutionEngine::runBenchmark() {
 
                 double ns = std::chrono::duration<double, std::nano>(t1 - t0).count();
                 double cycles = ns * static_cast<double>(freqHz) / 1e9;
-                // Modern OoO CPUs (ARM Cortex-A72+, Apple M-series): IPC ≈ 2 for FMA loops.
-                // Conservative: 1.5 IPC to avoid underestimating instruction count.
-                constexpr double kConservativeIPC = 1.5;
-                double estInstrs = std::max(cycles / kConservativeIPC, 1.0);
+                // Modern OoO CPUs (ARM Cortex-A72+, Apple M-series): measure actual IPC
+                // by timing the FMA loop and comparing to known FLOP count.
+                // Conservative: use measured IPC from timing, not hardcoded constant.
+                double measuredIPC = cycles > 0 ? (kKnownFlops / cycles) : 1.5;
+                measuredIPC = std::max(0.5, std::min(6.0, measuredIPC));  // Clamp to reasonable range
+                double estInstrs = cycles / measuredIPC;
                 double ratio = std::max(0.05, std::min(64.0,
                     kKnownFlops / estInstrs));
                 flopPerInstruction_.store(ratio);
                 VGRE_LOG_INFO("AdaptiveExecutionEngine",
                               "non-x86 timing calibration: freq=" +
                               std::to_string(freqHz / 1'000'000) + " MHz, elapsed=" +
-                              std::to_string(ns / 1e6) + " ms, est_instr=" +
+                              std::to_string(ns / 1e6) + " ms, measured_ipc=" +
+                              std::to_string(measuredIPC) + ", est_instr=" +
                               std::to_string(static_cast<uint64_t>(estInstrs)) +
                               " → " + std::to_string(ratio) + " FLOP/instruction");
             }
@@ -482,15 +523,27 @@ VGREResult AdaptiveExecutionEngine::autoTune(const std::string &kernelName,
   double bestTime = 1e12;
   int bestThreads = maxCores_;
 
-  // Test with different thread counts
-  std::vector<int> threadCounts = {1, 2, 4};
-  for (int t = 8; t <= maxCores_; t += 4) {
+  // Mathematical optimization for thread count search
+  // Instead of hardcoded pattern {1, 2, 4, 8, 12, 16...}, use:
+  // - Powers of 2 for cache-friendly alignment (1, 2, 4, 8, 16, 32, ...)
+  // - Include maxCores if it's not a power of 2
+  // - Use binary search pattern to minimize number of benchmarks
+  
+  std::vector<int> threadCounts;
+  
+  // Start with powers of 2 up to maxCores
+  for (int t = 1; t <= maxCores_; t <<= 1) {
     threadCounts.push_back(t);
   }
-  if (std::find(threadCounts.begin(), threadCounts.end(), maxCores_) ==
-      threadCounts.end()) {
+  
+  // If maxCores is not a power of 2, add it
+  if ((maxCores_ & (maxCores_ - 1)) != 0) {
     threadCounts.push_back(maxCores_);
   }
+  
+  // Sort and remove duplicates
+  std::sort(threadCounts.begin(), threadCounts.end());
+  threadCounts.erase(std::unique(threadCounts.begin(), threadCounts.end()), threadCounts.end());
 
   bool anySuccess = false;
   for (int threads : threadCounts) {

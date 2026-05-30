@@ -197,7 +197,31 @@ void TCPClusterManager::handleNewInboundConnection() {
     std::lock_guard<std::recursive_mutex> lock(clients_mutex_);
     if (connection_manager_->addClientIfNotDuplicate(inbound_ip, new_socket, address)) {
         auto& client = clients_.back();
-        if (inbound_ip == "127.0.0.1" || inbound_ip == "::1") {
+        // Configurable localhost addresses via VGRE_LOCALHOST_ADDRS (comma-separated)
+        static const std::vector<std::string> kLocalhostAddrs = []() -> std::vector<std::string> {
+            const char* e = vgre_get_config("VGRE_LOCALHOST_ADDRS");
+            if (e) {
+                std::vector<std::string> addrs;
+                std::istringstream iss(e);
+                std::string addr;
+                while (std::getline(iss, addr, ',')) {
+                    // Trim whitespace
+                    addr.erase(0, addr.find_first_not_of(" \t"));
+                    addr.erase(addr.find_last_not_of(" \t") + 1);
+                    if (!addr.empty()) addrs.push_back(addr);
+                }
+                if (!addrs.empty()) return addrs;
+            }
+            return {"127.0.0.1", "::1", "localhost"}; // Default localhost addresses
+        }();
+        bool isLocal = false;
+        for (const auto& localAddr : kLocalhostAddrs) {
+            if (inbound_ip == localAddr) {
+                isLocal = true;
+                break;
+            }
+        }
+        if (isLocal) {
             client->is_local = true;
             // NOTE: SHM negotiation is performed after security establishment.
             // Sending SHM_INIT before the secure channel is ready can race the

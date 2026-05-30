@@ -1,7 +1,7 @@
 # VGRE Future Implementation Plan
 
-**Version**: 10.0.0  
-**Date**: 2026-05-29 (Consolidated Architecture Phase)  
+**Version**: 11.0.0  
+**Date**: 2026-05-30 (Advanced Mathematical Optimizations Phase)  
 **Status**: Forward-Looking Roadmap (For advanced phases beyond the core 130/130 verified baseline)
 
 This document outlines the detailed implementation plans, technical designs, and steps required to resolve the remaining hardware-level gaps, partial implementations, and advanced future enhancements in the VGRE (Virtual GPU Runtime Engine) platform.
@@ -252,6 +252,137 @@ flowchart TD
   - Replace standard work queues in `src/core/scheduler.cpp` with circular lock-free SPSC task rings. The main coordinator thread acts as the single producer, and the `BlockWorkerPool` threads act as consumers, executing work without acquiring a single lock.
 - **Step 7.4: Cross-Platform Thread Affinity Pinning Registry**
   - Implement a unified thread-affinity manager (`VgreThreadRegistry`) that wraps `pthread_setaffinity_np` (Linux), `SetThreadAffinityMask` (Windows), and `thread_policy_set` (macOS), ensuring that host worker threads are pinned to physical cores in a NUMA-aware, cache-local layout on all CPUs.
+
+---
+
+## Track 8: Advanced Mathematical Optimizations (Research-Based Innovations)
+
+### 8.1 The Issue
+Based on 2024-2025 research in GPU virtualization, CPU-based GPU emulation can be significantly enhanced through advanced mathematical algorithms and SIMD optimizations that leverage modern CPU instruction sets (AVX-512, AMX).
+
+### 8.2 Implementation Plan
+
+#### Step 8.1: Zero-Copy Sparse Matrix View System
+- **Research Basis**: Sparse matrix format conversions (CSR, COO, BSR, CSC) typically require deep copies of index arrays, causing significant memory bandwidth overhead.
+- **Implementation**: Implement lightweight view-based format conversions in `src/api/cusparse/sparse_view.{h,cpp}`:
+  - Zero-copy CSR ↔ CSC conversion (pointer reinterpretation)
+  - Zero-copy CSR → BSR conversion for blockSize=1
+  - Lazy coordinate computation for COO → CSR
+- **Files**: `src/api/cusparse/sparse_view.{h,cpp}`
+- **Status**: ✅ DONE
+
+#### Step 8.2: Cache-Oblivious Matrix Operations
+- **Research Basis**: Cache-oblivious algorithms automatically adapt to any cache hierarchy without explicit tuning, providing optimal performance across diverse CPU architectures.
+- **Implementation**: Implement recursive divide-and-conquer algorithms in `src/core/math/cache_oblivious.{h,cpp}`:
+  - Cache-oblivious matrix multiplication (recursive block decomposition)
+  - Cache-oblivious matrix transposition
+  - Cache-oblivious 2D convolution for deep learning
+  - Cache-oblivious SpMV for sparse matrices
+- **Files**: `src/core/math/cache_oblivious.{h,cpp}`
+- **Status**: ✅ DONE
+
+#### Step 8.3: Mixed Precision Computing (FP16/BF16/FP8)
+- **Research Basis**: Mixed precision computing (FP16, BF16, FP8) reduces memory usage and increases throughput while maintaining accuracy for deep learning workloads.
+- **Implementation**: Implement comprehensive mixed precision support in `src/core/math/mixed_precision.{h,cpp}`:
+  - FP16 (IEEE 754 binary16) conversion and operations
+  - BF16 (Brain float 16) conversion and operations
+  - FP8 (E4M3 for training, E5M2 for inference) conversion and operations
+  - AVX-512 VNNI/AVX-512 BF16 vectorized conversions
+  - Quantization-aware training support (INT8/INT4)
+- **Files**: `src/core/math/mixed_precision.{h,cpp}`
+- **Status**: ✅ DONE
+
+#### Step 8.4: Block Sparse Matrix Multiplication with SIMD
+- **Research Basis**: Block-sparse matrix formats (SELLPACK, VBSF, ALBUS) enable SIMD vectorization of sparse operations, achieving up to 10× speedup.
+- **Implementation**: Implement block-sparse operations in `src/core/math/block_sparse.{h,cpp}`:
+  - CSR to block-sparse format conversion
+  - Block-sparse matrix-vector multiplication (SpMV) with SIMD
+  - Block-sparse matrix-matrix multiplication with SIMD
+  - AVX-512/AVX2 optimized block multiplication
+  - N:M structured sparsity support (e.g., 2:4, 4:8) for tensor core emulation
+- **Files**: `src/core/math/block_sparse.{h,cpp}`
+- **Status**: ✅ DONE
+
+#### Step 8.5: Tensor Core Emulation with AVX-512/AMX
+- **Research Basis**: Intel AMX (Advanced Matrix Extensions) and AVX-512 VNNI/BF16 provide hardware acceleration for matrix operations, emulating NVIDIA Tensor Core functionality on CPUs.
+- **Implementation**: Implement tensor core emulation in `src/core/math/tensor_core_emulation.{h,cpp}`:
+  - AVX-512 VNNI INT8 matrix multiplication
+  - AVX-512 BF16 matrix multiplication
+  - Intel AMX matrix multiplication (Sapphire Rapids+)
+  - Tensor core convolution emulation (im2col + matmul)
+  - Automatic CPU feature detection and optimal implementation selection
+- **Files**: `src/core/math/tensor_core_emulation.{h,cpp}`
+- **Status**: ✅ DONE
+
+---
+
+## Track 9: Heuristic Elimination & Mathematical Exactness (2026-05-30)
+
+### 9.1 The Issue
+The codebase contained several hardcoded heuristics, magic numbers, and approximations that deviated from mathematically rigorous implementations:
+- Hardcoded GPU peak bandwidth (2000 GB/s) instead of dynamic calibration
+- Hardcoded algorithm selection parameters (workspace sizes, wave counts) instead of problem-size-based computation
+- Hardcoded IPC estimates (4.0, 1.5) instead of CPUID-based hardware detection
+- Hardcoded thread search patterns ({1, 2, 4, 8, 12, 16...}) instead of mathematical optimization
+- Hardcoded bandwidth-bound threshold (10%) instead of statistical Z-score analysis
+
+### 9.2 Implementation Plan
+
+#### Step 9.1: Dynamic Bandwidth Calibration
+- **File**: `src/core/memory/bandwidth_model.cpp`
+- **Changes**:
+  - Replace hardcoded 2000 GB/s GPU peak with dynamic detection based on memory type (DDR4/DDR5/HBM)
+  - Replace hardcoded 10% bandwidth-bound threshold with statistical Z-score analysis (2σ = 95% confidence)
+  - Replace hardcoded 2.0 CPU peak multiplier with direct measurement
+- **Mathematical Basis**: Z-score = (μ - x) / μ, bandwidth-bound when Z > 2.0
+
+#### Step 9.2: Dynamic Algorithm Selection
+- **File**: `src/api/cublaslt/cublaslt_core.cpp`
+- **Changes**:
+  - Replace hardcoded workspace sizes {0, 4096, 65536, 1M, 4M, 16M} with problem-size-based computation
+  - Replace hardcoded wave counts {1.0, 0.92, 0.84, 0.76, 0.68, 0.60} with linear degradation model
+- **Mathematical Basis**: 
+  - workspace_size = min(problem_size × 0.25, available_memory × 0.5)
+  - waves_count = 1.0 - (workspace_size / max_workspace) × 0.4
+
+#### Step 9.3: CPUID-Based Hardware Detection
+- **File**: `src/advanced/adaptive_execution_engine_tune.cpp`
+- **Changes**:
+  - Replace hardcoded FLOPS/cycle estimates (64, 32, 8) with CPUID-detected SIMD width and FMA capability
+  - Replace hardcoded IPC estimates (4.0, 1.5) with measured IPC from timing calibration
+  - Add MSVC __cpuid support for Windows compatibility
+- **Mathematical Basis**: FLOPS/cycle = lanes × FMA_ports × 2 (if FMA) or lanes × 1 (if no FMA)
+
+#### Step 9.4: Mathematical Thread Search Optimization
+- **File**: `src/advanced/adaptive_execution_engine_tune.cpp`
+- **Changes**:
+  - Replace hardcoded thread pattern {1, 2, 4, 8, 12, 16...} with powers of 2 for cache alignment
+  - Add maxCores if not a power of 2 for completeness
+  - Use bit manipulation for power-of-2 detection
+- **Mathematical Basis**: Powers of 2 align with CPU cache line boundaries and SIMD vector widths
+
+---
+
+## ✅ Phase 10 — Implemented (2026-05-30) — Heuristic Elimination
+
+| Track | Item | File(s) | Status |
+|---|---|---|---|
+| 9.1 | Dynamic bandwidth calibration with Z-score analysis | `src/core/memory/bandwidth_model.cpp` | ✅ DONE |
+| 9.2 | Dynamic algorithm selection with problem-size-based computation | `src/api/cublaslt/cublaslt_core.cpp` | ✅ DONE |
+| 9.3 | CPUID-based hardware detection for FLOPS and IPC | `src/advanced/adaptive_execution_engine_tune.cpp` | ✅ DONE |
+| 9.4 | Mathematical thread search with powers-of-2 optimization | `src/advanced/adaptive_execution_engine_tune.cpp` | ✅ DONE |
+
+---
+
+## ✅ Phase 9 — Implemented (2026-05-30) — Advanced Mathematical Optimizations
+
+| Track | Item | File(s) | Status |
+|---|---|---|---|
+| 8.1 | Zero-copy sparse matrix view system (CSR↔CSC, CSR→BSR) | `src/api/cusparse/sparse_view.{h,cpp}` | ✅ DONE |
+| 8.2 | Cache-oblivious matrix operations (MatMul, Transpose, Conv2D, SpMV) | `src/core/math/cache_oblivious.{h,cpp}` | ✅ DONE |
+| 8.3 | Mixed precision computing (FP16, BF16, FP8, INT8/INT4 quantization) | `src/core/math/mixed_precision.{h,cpp}` | ✅ DONE |
+| 8.4 | Block sparse matrix multiplication with SIMD (AVX-512/AVX2) | `src/core/math/block_sparse.{h,cpp}` | ✅ DONE |
+| 8.5 | Tensor core emulation with AVX-512/AMX (INT8, BF16, FP32) | `src/core/math/tensor_core_emulation.{h,cpp}` | ✅ DONE |
 
 ---
 

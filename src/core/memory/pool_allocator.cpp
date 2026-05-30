@@ -20,6 +20,12 @@
 #ifndef SYS_getcpu
 #  define SYS_getcpu 309   // x86-64 syscall number
 #endif
+#elif defined(_WIN32)
+// Windows: Use GetNumaProcessorNodeEx for NUMA awareness
+#include <windows.h>
+#elif defined(__APPLE__)
+// macOS: NUMA awareness not available in same way as Linux
+// Use thread affinity instead if needed
 #endif
 
 namespace vgre {
@@ -39,8 +45,17 @@ static const size_t kTlsCacheMax = []() -> size_t {
 static constexpr size_t kTlsMaxBlockSz = 1 * 1024 * 1024;
 static std::atomic<uint32_t> g_poolGen[1024]{};
 
+// Sharded mutex array for reduced contention - 64 shards based on pool handle
+static constexpr size_t kNumMutexShards = 64;
+static std::mutex g_poolMutexShards[kNumMutexShards];
+
 struct TlsEntry { void* head; size_t count; size_t blockSz; uint32_t gen; };
 static thread_local std::unordered_map<PoolHandle, TlsEntry> t_cache;
+
+// Get mutex shard for a pool handle
+static inline std::mutex& getPoolMutexShard(PoolHandle handle) {
+    return g_poolMutexShards[handle % kNumMutexShards];
+}
 
 static bool belongsToPoolSlabs(const MemoryPool &pool, void *ptr) {
   uint8_t *p = static_cast<uint8_t*>(ptr);
@@ -74,9 +89,12 @@ static void poolAlignedFree(void *ptr) {
 }
 
 VGREResult MemoryManager::createPool(PoolHandle &outHandle, size_t blockSize) {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  // Use sharded mutex - lock the shard for the next pool ID
+  PoolHandle newId = nextPoolId_.fetch_add(1, std::memory_order_relaxed);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(newId));
+  
   MemoryPool pool;
-  pool.id = nextPoolId_++;
+  pool.id = newId;
   // Enforce minimum block size to hold a pointer (8 bytes on 64-bit)
   pool.blockSize = (blockSize < sizeof(void*)) ? sizeof(void*) : blockSize;
   // Align to 64 bytes (typical cache line)
@@ -93,7 +111,7 @@ VGREResult MemoryManager::createPool(PoolHandle &outHandle, size_t blockSize) {
 }
 
 VGREResult MemoryManager::destroyPool(PoolHandle handle) {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(handle));
   auto it = pools_.find(handle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
 
@@ -131,7 +149,7 @@ VGREResult MemoryManager::destroyPool(PoolHandle handle) {
 
 VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
                                            MemoryHandle &outHandle) {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(poolHandle));
   {
     auto& tlsEntry = t_cache[poolHandle];
     uint32_t curGen = g_poolGen[static_cast<size_t>(poolHandle) % 1024].load(std::memory_order_acquire);
@@ -192,12 +210,22 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
       int bindNode = pool.numaNode;
       // Query calling thread's NUMA node when pool has no preference
       if (bindNode < 0) {
+#if defined(__linux__)
 #ifdef SYS_getcpu
           unsigned cpu = 0, node = 0;
           if (::syscall(SYS_getcpu, &cpu, &node, nullptr) == 0)
               bindNode = static_cast<int>(node);
 #endif
+#elif defined(_WIN32)
+          PROCESSOR_NUMBER procNum;
+          USHORT nodeNumber;
+          if (GetCurrentProcessorNumberEx(&procNum) &&
+              GetNumaProcessorNodeEx(&procNum, &nodeNumber)) {
+              bindNode = static_cast<int>(nodeNumber);
+          }
+#endif
       }
+#if defined(__linux__)
       if (bindNode >= 0 && bindNode < 64) {
         unsigned long nodeMask = 1UL << static_cast<unsigned>(bindNode);
         ::syscall(SYS_mbind, slabMemory, slabSize, MPOL_PREFERRED,
@@ -207,6 +235,20 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
         ::syscall(SYS_mbind, slabMemory, slabSize, 0 /* MPOL_DEFAULT */,
                   nullptr, 0, 0);
       }
+#elif defined(_WIN32)
+      // Windows: Use VirtualAllocExNuma for NUMA-aware allocation
+      if (bindNode >= 0 && bindNode < 64) {
+          // Free the original allocation and reallocate with NUMA preference
+          poolAlignedFree(slabMemory);
+          slabMemory = VirtualAllocExNuma(GetCurrentProcess(), nullptr, slabSize,
+                                          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE,
+                                          static_cast<DWORD>(bindNode));
+          if (!slabMemory) {
+              // Fallback to regular allocation if NUMA allocation fails
+              slabMemory = poolAlignedAlloc(slabSize, alignment);
+          }
+      }
+#endif
     }
 #endif
 
@@ -253,7 +295,7 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
 
 VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
                                      MemoryHandle handle) {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(poolHandle));
   auto it = pools_.find(poolHandle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
 
@@ -313,7 +355,7 @@ VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
 // ── Pool statistics & trim ─────────────────────────────────────────────────────
 
 uint64_t MemoryManager::getPoolUsedBytes(PoolHandle handle) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(handle));
   auto it = pools_.find(handle);
   if (it == pools_.end()) return 0;
   const auto& pool = it->second;
@@ -326,14 +368,14 @@ uint64_t MemoryManager::getPoolUsedBytes(PoolHandle handle) const {
 }
 
 uint64_t MemoryManager::getPoolPeakBytes(PoolHandle handle) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(handle));
   auto it = pools_.find(handle);
   if (it == pools_.end()) return 0;
   return static_cast<uint64_t>(it->second.peakAllocated);
 }
 
 VGREResult MemoryManager::trimPool(PoolHandle handle, size_t minBytes) {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(handle));
   auto it = pools_.find(handle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
   auto& pool = it->second;
@@ -432,7 +474,7 @@ VGREResult MemoryManager::trimPool(PoolHandle handle, size_t minBytes) {
 }
 
 VGREResult MemoryManager::setPoolReleaseThreshold(PoolHandle handle, uint64_t threshold) {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(handle));
   auto it = pools_.find(handle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
   it->second.releaseThreshold = threshold;
@@ -441,7 +483,7 @@ VGREResult MemoryManager::setPoolReleaseThreshold(PoolHandle handle, uint64_t th
 
 VGREResult MemoryManager::getPoolReleaseThreshold(PoolHandle handle,
                                                   uint64_t &threshold) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(handle));
   auto it = pools_.find(handle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
   threshold = it->second.releaseThreshold;
@@ -452,7 +494,7 @@ VGREResult MemoryManager::setPoolReuseFlags(PoolHandle handle,
                                             bool followEventDeps,
                                             bool opportunistic,
                                             bool internalDeps) {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(handle));
   auto it = pools_.find(handle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
   it->second.reuseFollowEventDependencies = followEventDeps;
@@ -465,7 +507,7 @@ VGREResult MemoryManager::getPoolReuseFlags(PoolHandle handle,
                                             bool &followEventDeps,
                                             bool &opportunistic,
                                             bool &internalDeps) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(handle));
   auto it = pools_.find(handle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
   followEventDeps = it->second.reuseFollowEventDependencies;
@@ -476,7 +518,7 @@ VGREResult MemoryManager::getPoolReuseFlags(PoolHandle handle,
 
 VGREResult MemoryManager::setPoolAccess(PoolHandle handle, int device,
                                         unsigned int flags) {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(handle));
   auto it = pools_.find(handle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
   it->second.accessFlagsByDevice[device] = flags;
@@ -485,7 +527,7 @@ VGREResult MemoryManager::setPoolAccess(PoolHandle handle, int device,
 
 VGREResult MemoryManager::getPoolAccess(PoolHandle handle, int device,
                                         unsigned int &flags) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(getPoolMutexShard(handle));
   auto it = pools_.find(handle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
   auto fit = it->second.accessFlagsByDevice.find(device);

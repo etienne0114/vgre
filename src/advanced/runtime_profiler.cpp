@@ -326,7 +326,18 @@ std::string RuntimeProfiler::toOTLPJSON() const {
     oss << std::fixed << std::setprecision(6);
 
     // Collect hw.gpu.* metrics for resource attributes from runtime state.
-    uint64_t memLimit = 4ULL * 1024 * 1024 * 1024;
+    // Configurable default memory limit via VGRE_DEFAULT_MEMORY_GB
+    static const uint64_t kDefaultMemoryLimit = []() -> uint64_t {
+        const char* e = vgre_get_config("VGRE_DEFAULT_MEMORY_GB");
+        if (e) {
+            try {
+                int v = std::stoi(e);
+                if (v >= 1 && v <= 128) return static_cast<uint64_t>(v) * 1024ULL * 1024 * 1024;
+            } catch (...) {}
+        }
+        return 4ULL * 1024 * 1024 * 1024; // 4GB default
+    }();
+    uint64_t memLimit = kDefaultMemoryLimit;
     if (vgre::core::RuntimeEngine::instance().isInitialized()) {
       memLimit =
           vgre::core::RuntimeEngine::instance().getDevice().getProperties().totalGlobalMem;
@@ -461,7 +472,11 @@ VGREResult RuntimeProfiler::exportOTLPToHTTP(const std::string& endpoint) const 
     } else {
         host = hostPort;
     }
-    if (host.empty()) host = "localhost";
+    // Configurable default host via VGRE_DEFAULT_HOST
+    if (host.empty()) {
+        const char* e = vgre_get_config("VGRE_DEFAULT_HOST");
+        host = e ? e : "localhost";
+    }
 
     // Resolve and connect
     struct addrinfo hints{}, *res = nullptr;

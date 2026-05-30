@@ -36,7 +36,7 @@ VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, D
 #if defined(__linux__) || defined(__APPLE__)
   // Align pointer to page boundary as required by madvise
   long pageSize = sysconf(_SC_PAGESIZE);
-  if (pageSize <= 0) pageSize = 4096;
+  if (pageSize <= 0) pageSize = 4096; // Fallback to 4KB if sysconf fails
   
   uintptr_t pBase = reinterpret_cast<uintptr_t>(ptr);
   uintptr_t pAligned = pBase & ~(pageSize - 1);
@@ -76,7 +76,7 @@ VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, D
 
   // Phase 11: Authoritative UVM Usage Telemetry
   {
-      std::unique_lock<std::recursive_mutex> lock(mutex_);
+      std::unique_lock<std::shared_mutex> lock(mutex_);
       for (auto& region : masterRegions_) {
           uintptr_t base = reinterpret_cast<uintptr_t>(region.ptr);
           if (pBase >= base && pBase < base + region.size) {
@@ -114,7 +114,7 @@ VGREResult MemoryManager::memPrefetchAsync(const void *ptr, size_t count, Device
   // Physically force page faults ahead of time on the CPU executor thread.
   // This physically migrates pages into the active resident set before bulk kernel execution.
   volatile const char *p = static_cast<volatile const char *>(ptr);
-  size_t pageSize = 4096;
+  size_t pageSize = 4096; // Default fallback
 #if defined(_WIN32)
   SYSTEM_INFO si;
   GetSystemInfo(&si);
@@ -133,7 +133,7 @@ VGREResult MemoryManager::memPrefetchAsync(const void *ptr, size_t count, Device
 
   // Update preferred location metadata to reflect caller intent.
   {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
     uintptr_t end = start + count;
     for (auto &region : masterRegions_) {
@@ -159,7 +159,7 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
   if (size == 0)
     return VGREResult::ERR_INVALID_VALUE;
 
-  size_t pageSize = 4096;
+  size_t pageSize = 4096; // Default fallback
 #if defined(_WIN32)
   SYSTEM_INFO si;
   GetSystemInfo(&si);
@@ -228,12 +228,27 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
   }();
 
   int target_node = static_cast<int>(deviceId) % s_num_numa_nodes;
+#if defined(__linux__)
   unsigned long node_mask = 1UL << target_node;
   // maxnode is highest node index + 1
   long mbind_res = syscall(SYS_mbind, ptr, alignedSize, MPOL_PREFERRED, &node_mask, sizeof(node_mask) * 8, MPOL_MF_MOVE);
   if (mbind_res == 0) {
       VGRE_LOG_DEBUG("MemoryManager", "Pinned " + std::to_string(alignedSize) + " bytes to NUMA node " + std::to_string(target_node));
   }
+#elif defined(_WIN32)
+  // Windows: NUMA-aware allocation using VirtualAllocExNuma
+  // Free the original allocation and reallocate with NUMA preference
+  VirtualFree(ptr, 0, MEM_RELEASE);
+  ptr = VirtualAllocExNuma(GetCurrentProcess(), nullptr, alignedSize,
+                           MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE,
+                           static_cast<DWORD>(target_node));
+  if (!ptr) {
+      // Fallback to regular allocation if NUMA allocation fails
+      ptr = alignedAlloc(alignedSize, pageSize);
+  } else {
+      VGRE_LOG_DEBUG("MemoryManager", "Pinned " + std::to_string(alignedSize) + " bytes to NUMA node " + std::to_string(target_node));
+  }
+#endif
 #endif
 #endif
 
@@ -249,7 +264,7 @@ VGREResult MemoryManager::allocateManaged(size_t size, MemoryHandle &outHandle,
   alloc.attachmentFlags = flags;
 
   {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     allocations_[ptr] = alloc;
     allocRange_[static_cast<uint8_t*>(ptr)] = alignedSize;
 
@@ -278,7 +293,7 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
     return VGREResult::ERR_INVALID_VALUE;
   
   // Align size to page boundary
-  size_t pageSize = 4096;
+  size_t pageSize = 4096; // Default fallback
 #if defined(_WIN32)
   SYSTEM_INFO si;
   GetSystemInfo(&si);
@@ -294,7 +309,7 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
       return VGREResult::ERR_INVALID_VALUE;
 
   {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     uint8_t* base = static_cast<uint8_t*>(addr);
     uint8_t* end = base + alignedSize;
     auto it = allocRange_.lower_bound(base);
@@ -353,7 +368,7 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
   alloc.attachmentFlags = flags;
 
   {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     allocations_[ptr] = alloc;
     allocRange_[static_cast<uint8_t*>(ptr)] = alignedSize;
 
@@ -384,7 +399,7 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
 // ── UVM range attribute queries ───────────────────────────────────────────────
 
 int MemoryManager::getPreferredLocation(void *ptr) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   for (const auto& region : masterRegions_) {
     if (region.ptr == ptr ||
         (static_cast<uint8_t*>(ptr) >= static_cast<uint8_t*>(region.ptr) &&
@@ -397,7 +412,7 @@ int MemoryManager::getPreferredLocation(void *ptr) const {
 }
 
 bool MemoryManager::isReadMostly(void *ptr) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   for (const auto& region : masterRegions_) {
     if (region.ptr == ptr ||
         (static_cast<uint8_t*>(ptr) >= static_cast<uint8_t*>(region.ptr) &&
@@ -409,7 +424,7 @@ bool MemoryManager::isReadMostly(void *ptr) const {
 }
 
 int MemoryManager::getLastPrefetchLocation(void *ptr) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   for (const auto &region : masterRegions_) {
     if (region.ptr == ptr ||
         (static_cast<uint8_t *>(ptr) >= static_cast<uint8_t *>(region.ptr) &&
@@ -421,7 +436,7 @@ int MemoryManager::getLastPrefetchLocation(void *ptr) const {
 }
 
 uint32_t MemoryManager::getAccessedByMask(void *ptr) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   for (const auto &region : masterRegions_) {
     if (region.ptr == ptr ||
         (static_cast<uint8_t *>(ptr) >= static_cast<uint8_t *>(region.ptr) &&

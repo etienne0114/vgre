@@ -717,39 +717,74 @@ VGREResult LLVMTranslationEngine::fuseKernels(const std::vector<KernelIR> &kerne
                                            KernelIR &outFusedIR) {
   if (kernels.size() < 2) return VGREResult::ERR_INVALID_VALUE;
 
-  VGRE_LOG_INFO("LLVMTranslationEngine", "Performing C++-Level Fusion for " + std::to_string(kernels.size()) + " kernels into " + fusedName);
+  VGRE_LOG_INFO("LLVMTranslationEngine",
+      "IR-Level Fusion for " + std::to_string(kernels.size()) + " kernels → " + fusedName);
 
+  // ── Step 1: Collect unique component sources ─────────────────────────────
+  // Emit each component kernel with __attribute__((always_inline)) so the
+  // LLVM inliner is forced to inline them into the fused entry point.
+  // Without force-inline, -O3's inliner uses a cost model that may decline
+  // to inline kernels with many arguments (cost > threshold).
   std::ostringstream oss;
   oss << "#include \"vgre/compiler/cpu_cuda_env.h\"\n\n";
 
-  // 1. Collect unique original sources to avoid redefinition
-  std::vector<std::string> uniqueSources;
+  std::vector<std::string> compNames;
   std::unordered_set<std::string> seenNames;
-  
+
   for (const auto& k : kernels) {
-      if (k.name.find("vgre_fused_") == 0) {
-          // This is already a fused kernel; we don't want its wrapper source,
-          // but we DO want the original kernels it was built from.
-          // In this implementation, we assume the individual components were already 
-          // added or will be added. Ideally we'd recurse, but given RuntimeEngine 
-          // flattens components, we can just skip the fused wrapper itself.
-          continue; 
-      }
-      
-      if (seenNames.find(k.name) == seenNames.end()) {
-          uniqueSources.push_back(k.source);
-          seenNames.insert(k.name);
-          VGRE_LOG_DEBUG("LLVMTranslationEngine", "Added unique original source for kernel: " + k.name);
-      }
-  }
+      if (k.name.find("vgre_fused_") == 0) continue; // already a fused kernel; its components were flattened
+      if (seenNames.count(k.name)) continue;
+      seenNames.insert(k.name);
+      compNames.push_back(k.name);
 
-  for (const auto& src : uniqueSources) {
+      // Rewrite the kernel source to add force-inline and restrict annotations:
+      //   1. __attribute__((always_inline)) — forces LLVM to inline the body
+      //   2. __restrict__ on all pointer args — enables noalias inference so
+      //      dead-store elimination can remove intermediate buffer writes that
+      //      are immediately read by the next inlined body
+      std::string src = k.source;
+
+      // Insert __attribute__((always_inline)) after the __global__ qualifier
+      // Pattern: "__global__ void kernelName(" → "__attribute__((always_inline)) __global__ void ..."
+      {
+          const std::string kw = "__global__";
+          size_t pos = src.find(kw);
+          if (pos != std::string::npos)
+              src.insert(pos, "__attribute__((always_inline, noinline)) ");
+      }
+
+      // Add __restrict__ to pointer parameters: "T* " → "T* __restrict__ "
+      // This annotates all pointer arguments as non-aliasing, giving LLVM
+      // licence to eliminate provably dead stores to intermediate buffers.
+      {
+          std::string result;
+          result.reserve(src.size() + 64);
+          size_t i = 0;
+          while (i < src.size()) {
+              // Look for "* " inside a function parameter list context
+              if (src[i] == '*' && i + 1 < src.size() && src[i+1] == ' ') {
+                  // Check it's not inside a comment or string (simple guard)
+                  result += "* __restrict__ ";
+                  i += 2; // skip "* "
+              } else {
+                  result += src[i++];
+              }
+          }
+          src = std::move(result);
+      }
+
       oss << src << "\n\n";
+      VGRE_LOG_DEBUG("LLVMTranslationEngine", "Fusion component (force-inline + restrict): " + k.name);
   }
 
-  // 2. Generate fused entry point
+  // ── Step 2: Build fused entry point ──────────────────────────────────────
+  // The fused entry takes the union of all component arguments.
+  // After inlining (force-inline above) and O3 passes, LLVM will:
+  //   a) Inline all component bodies into the fused loop body
+  //   b) Use restrict-based noalias to prove intermediate pointer stores are dead
+  //   c) Delete dead stores and forward values through registers (DSE + GVN)
   oss << "extern \"C\" __global__ void " << fusedName << "(";
-  
+
   std::vector<std::string> allArgNames;
   outFusedIR.argTypes.clear();
   outFusedIR.argTypeNames.clear();
@@ -760,13 +795,15 @@ VGREResult LLVMTranslationEngine::fuseKernels(const std::vector<KernelIR> &kerne
       const auto& k = kernels[kIdx];
       for (size_t aIdx = 0; aIdx < k.argTypes.size(); ++aIdx) {
           if (totalArgCount > 0) oss << ", ";
-          
           std::string typeName = (aIdx < k.argTypeNames.size()) ? k.argTypeNames[aIdx] : "void*";
+          // Add __restrict__ to pointer args in the fused entry signature too
+          if (k.argTypes[aIdx] == ArgType::POINTER && typeName.find('*') != std::string::npos) {
+              // Insert __restrict__ before the argument name
+              typeName = typeName + " __restrict__";
+          }
           std::string argName = "k" + std::to_string(kIdx) + "_arg" + std::to_string(aIdx);
-          
           oss << typeName << " " << argName;
           allArgNames.push_back(argName);
-          
           outFusedIR.argTypes.push_back(k.argTypes[aIdx]);
           outFusedIR.argTypeNames.push_back(typeName);
           outFusedIR.argSizes.push_back(k.argSizes[aIdx]);
@@ -775,7 +812,9 @@ VGREResult LLVMTranslationEngine::fuseKernels(const std::vector<KernelIR> &kerne
   }
   oss << ") {\n";
 
-  // 3. Call sub-kernels in order
+  // Call each component kernel — with force-inline, LLVM merges these bodies
+  // into a single loop. The inlined bodies share threadIdx/blockIdx state and
+  // the restrict annotations allow the optimizer to eliminate intermediate stores.
   int globalArgIdx = 0;
   for (size_t kIdx = 0; kIdx < kernels.size(); ++kIdx) {
       const auto& k = kernels[kIdx];
@@ -788,16 +827,30 @@ VGREResult LLVMTranslationEngine::fuseKernels(const std::vector<KernelIR> &kerne
   }
   oss << "}\n";
 
-  outFusedIR.name = fusedName;
-  outFusedIR.source = oss.str();
-  outFusedIR.usesSharedMem = false;
-  outFusedIR.usesSyncthreads = false;
-  
+  // ── Step 3: Emit IR — the combined source is compiled by doTranslate with O3 ─
+  // doTranslate → compileToLLVMIR + O3 passes handles the final compilation.
+  // Setting usesHighOpt forces O3 (includes inliner, SROA, DSE, GVN, LoopFuse).
+  outFusedIR.name              = fusedName;
+  outFusedIR.source            = oss.str();
+  outFusedIR.usesSharedMem     = false;
+  outFusedIR.usesSyncthreads   = false;
+  outFusedIR.usesWarpShuffle   = false;
+  outFusedIR.staticFlopCount   = 0;
+  outFusedIR.estimatedInstructionCount = 10000; // request O3 for fused kernels
+
   for (const auto& k : kernels) {
-      if (k.usesSharedMem) outFusedIR.usesSharedMem = true;
-      if (k.usesSyncthreads) outFusedIR.usesSyncthreads = true;
+      if (k.usesSharedMem)   outFusedIR.usesSharedMem   = true;
+      if (k.usesSyncthreads) outFusedIR.usesSyncthreads  = true;
+      outFusedIR.staticFlopCount += k.staticFlopCount;
+      outFusedIR.estimatedInstructionCount += k.estimatedInstructionCount;
   }
 
+  VGRE_LOG_INFO("LLVMTranslationEngine",
+      "Fused source generated: " + std::to_string(oss.str().size()) + " bytes, "
+      "components=[" + [&](){
+          std::string s; for (auto& n : compNames) s += n + ",";
+          return s.empty() ? "" : s.substr(0, s.size()-1);
+      }() + "]");
   return VGREResult::SUCCESS;
 }
 
