@@ -521,6 +521,12 @@ enum cudnnPointwiseMode_t {
     CUDNN_POINTWISE_RECIPROCAL    = 41,
 };
 
+// ── cudnnForwardMode_t (cuDNN v8.5+) ─────────────────────────────────────────
+enum cudnnForwardMode_t {
+    CUDNN_FWD_MODE_INFERENCE = 0,
+    CUDNN_FWD_MODE_TRAINING  = 1
+};
+
 // ── cudnnRNNDataDescriptor (for RNNForwardTrainingEx) ─────────────────────────
 enum cudnnRNNDataLayout_t {
     CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_UNPACKED = 0,

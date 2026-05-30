@@ -54,6 +54,44 @@ void sgetrs_(const char *trans, const int *n, const int *nrhs, const float *a,
 void dgetrs_(const char *trans, const int *n, const int *nrhs, const double *a,
              const int *lda, const int *ipiv, double *b, const int *ldb, int *info);
 
+// Complex LU factorisation (getrf) + triangular solve (getrs)
+void cgetrf_(const int *m, const int *n, float *a, const int *lda, int *ipiv, int *info);
+void zgetrf_(const int *m, const int *n, double *a, const int *lda, int *ipiv, int *info);
+void cgetrs_(const char *trans, const int *n, const int *nrhs,
+             const float *A, const int *lda, const int *ipiv,
+             float *B, const int *ldb, int *info);
+void zgetrs_(const char *trans, const int *n, const int *nrhs,
+             const double *A, const int *lda, const int *ipiv,
+             double *B, const int *ldb, int *info);
+
+// Complex Cholesky (potrf/potrs)
+void cpotrf_(const char *uplo, const int *n, float *a, const int *lda, int *info);
+void zpotrf_(const char *uplo, const int *n, double *a, const int *lda, int *info);
+void cpotrs_(const char *uplo, const int *n, const int *nrhs,
+             const float *A, const int *lda, float *B, const int *ldb, int *info);
+void zpotrs_(const char *uplo, const int *n, const int *nrhs,
+             const double *A, const int *lda, double *B, const int *ldb, int *info);
+
+// Complex SVD (gesvd)
+void cgesvd_(const char *jobu, const char *jobvt, const int *m, const int *n,
+             float *A, const int *lda, float *S, float *U, const int *ldu,
+             float *VT, const int *ldvt, float *work, const int *lwork,
+             float *rwork, int *info);
+void zgesvd_(const char *jobu, const char *jobvt, const int *m, const int *n,
+             double *A, const int *lda, double *S, double *U, const int *ldu,
+             double *VT, const int *ldvt, double *work, const int *lwork,
+             double *rwork, int *info);
+
+// Complex Hermitian eigenvalue (heevd)
+void cheevd_(const char *jobz, const char *uplo, const int *n,
+             float *A, const int *lda, float *W,
+             float *work, const int *lwork, float *rwork, const int *lrwork,
+             int *iwork, const int *liwork, int *info);
+void zheevd_(const char *jobz, const char *uplo, const int *n,
+             double *A, const int *lda, double *W,
+             double *work, const int *lwork, double *rwork, const int *lrwork,
+             int *iwork, const int *liwork, int *info);
+
 // Apply Q from QR (ormqr)
 void sormqr_(const char *side, const char *trans, const int *m, const int *n,
              const int *k, const float *a, const int *lda, const float *tau,
@@ -750,6 +788,234 @@ cusolverStatus_t cusolverDnDgetrsBatched(cusolverDnHandle_t h, int trans,
         if (s != CUSOLVER_STATUS_SUCCESS) return s;
         if (binfo != 0 && *info == 0) *info = binfo;
     }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Complex LU factorization (getrf) — C/Z prefix ────────────────────────────
+
+cusolverStatus_t cusolverDnCgetrf_bufferSize(cusolverDnHandle_t /*h*/, int /*m*/, int /*n*/,
+                                              float * /*A*/, int /*lda*/, int *Lwork) {
+    if (!Lwork) return CUSOLVER_STATUS_INVALID_VALUE;
+    *Lwork = 0;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnZgetrf_bufferSize(cusolverDnHandle_t /*h*/, int /*m*/, int /*n*/,
+                                              double * /*A*/, int /*lda*/, int *Lwork) {
+    if (!Lwork) return CUSOLVER_STATUS_INVALID_VALUE;
+    *Lwork = 0;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnCgetrf(cusolverDnHandle_t /*h*/, int m, int n,
+                                   float *A, int lda, float * /*Workspace*/,
+                                   int *devIpiv, int *devInfo) {
+    if (!A || m <= 0 || n <= 0 || lda < m) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    std::vector<int> ipiv(std::min(m, n));
+    cgetrf_(&m, &n, A, &lda, ipiv.data(), devInfo);
+    if (devIpiv) memcpy(devIpiv, ipiv.data(), ipiv.size() * sizeof(int));
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnZgetrf(cusolverDnHandle_t /*h*/, int m, int n,
+                                   double *A, int lda, double * /*Workspace*/,
+                                   int *devIpiv, int *devInfo) {
+    if (!A || m <= 0 || n <= 0 || lda < m) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    std::vector<int> ipiv(std::min(m, n));
+    zgetrf_(&m, &n, A, &lda, ipiv.data(), devInfo);
+    if (devIpiv) memcpy(devIpiv, ipiv.data(), ipiv.size() * sizeof(int));
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Complex triangular solve (getrs) — C/Z prefix ────────────────────────────
+
+cusolverStatus_t cusolverDnCgetrs(cusolverDnHandle_t /*h*/, int trans,
+                                   int n, int nrhs, const float *A, int lda,
+                                   const int *devIpiv, float *B, int ldb,
+                                   int *devInfo) {
+    if (!A || !B || !devIpiv || n <= 0 || nrhs <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    char t = (trans == 1) ? 'T' : (trans == 2) ? 'C' : 'N';
+    cgetrs_(&t, &n, &nrhs, A, &lda, devIpiv, B, &ldb, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnZgetrs(cusolverDnHandle_t /*h*/, int trans,
+                                   int n, int nrhs, const double *A, int lda,
+                                   const int *devIpiv, double *B, int ldb,
+                                   int *devInfo) {
+    if (!A || !B || !devIpiv || n <= 0 || nrhs <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    char t = (trans == 1) ? 'T' : (trans == 2) ? 'C' : 'N';
+    zgetrs_(&t, &n, &nrhs, A, &lda, devIpiv, B, &ldb, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Complex Cholesky (potrf/potrs) — C/Z prefix ───────────────────────────────
+
+cusolverStatus_t cusolverDnCpotrf_bufferSize(cusolverDnHandle_t /*h*/, char /*uplo*/,
+                                              int /*n*/, float * /*A*/, int /*lda*/, int *Lwork) {
+    if (!Lwork) return CUSOLVER_STATUS_INVALID_VALUE;
+    *Lwork = 0;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnZpotrf_bufferSize(cusolverDnHandle_t /*h*/, char /*uplo*/,
+                                              int /*n*/, double * /*A*/, int /*lda*/, int *Lwork) {
+    if (!Lwork) return CUSOLVER_STATUS_INVALID_VALUE;
+    *Lwork = 0;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnCpotrf(cusolverDnHandle_t /*h*/, char uplo,
+                                   int n, float *A, int lda, float * /*Workspace*/,
+                                   int /*Lwork*/, int *devInfo) {
+    if (!A || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    cpotrf_(&uplo, &n, A, &lda, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnZpotrf(cusolverDnHandle_t /*h*/, char uplo,
+                                   int n, double *A, int lda, double * /*Workspace*/,
+                                   int /*Lwork*/, int *devInfo) {
+    if (!A || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    zpotrf_(&uplo, &n, A, &lda, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnCpotrs(cusolverDnHandle_t /*h*/, char uplo,
+                                   int n, int nrhs, const float *A, int lda,
+                                   float *B, int ldb, int *devInfo) {
+    if (!A || !B || n <= 0 || nrhs <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    cpotrs_(&uplo, &n, &nrhs, A, &lda, B, &ldb, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnZpotrs(cusolverDnHandle_t /*h*/, char uplo,
+                                   int n, int nrhs, const double *A, int lda,
+                                   double *B, int ldb, int *devInfo) {
+    if (!A || !B || n <= 0 || nrhs <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    zpotrs_(&uplo, &n, &nrhs, A, &lda, B, &ldb, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Complex SVD (gesvd) — C/Z prefix ─────────────────────────────────────────
+
+cusolverStatus_t cusolverDnCgesvd_bufferSize(cusolverDnHandle_t /*h*/, int m, int n, int *Lwork) {
+    if (!Lwork || m <= 0 || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    char jobu = 'A', jobvt = 'A';
+    int info = 0, lwork = -1;
+    float work_q[2] = {0.f, 0.f};
+    int ldu = m, ldvt = n;
+    std::vector<float> dummy_A(static_cast<size_t>(m) * n * 2, 0.f);
+    std::vector<float> dummy_S(std::min(m, n));
+    std::vector<float> dummy_U(static_cast<size_t>(m) * m * 2, 0.f);
+    std::vector<float> dummy_VT(static_cast<size_t>(n) * n * 2, 0.f);
+    float rwork_dummy = 0.f;
+    cgesvd_(&jobu, &jobvt, &m, &n, dummy_A.data(), &m, dummy_S.data(),
+            dummy_U.data(), &ldu, dummy_VT.data(), &ldvt,
+            work_q, &lwork, &rwork_dummy, &info);
+    *Lwork = (info == 0) ? static_cast<int>(work_q[0]) + 1 : 5 * (m + n);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnZgesvd_bufferSize(cusolverDnHandle_t /*h*/, int m, int n, int *Lwork) {
+    if (!Lwork || m <= 0 || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    char jobu = 'A', jobvt = 'A';
+    int info = 0, lwork = -1;
+    double work_q[2] = {0.0, 0.0};
+    int ldu = m, ldvt = n;
+    std::vector<double> dummy_A(static_cast<size_t>(m) * n * 2, 0.0);
+    std::vector<double> dummy_S(std::min(m, n));
+    std::vector<double> dummy_U(static_cast<size_t>(m) * m * 2, 0.0);
+    std::vector<double> dummy_VT(static_cast<size_t>(n) * n * 2, 0.0);
+    double rwork_dummy = 0.0;
+    zgesvd_(&jobu, &jobvt, &m, &n, dummy_A.data(), &m, dummy_S.data(),
+            dummy_U.data(), &ldu, dummy_VT.data(), &ldvt,
+            work_q, &lwork, &rwork_dummy, &info);
+    *Lwork = (info == 0) ? static_cast<int>(work_q[0]) + 1 : 5 * (m + n);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnCgesvd(cusolverDnHandle_t /*h*/, signed char jobu, signed char jobvt,
+                                   int m, int n, float *A, int lda, float *S,
+                                   float *U, int ldu, float *VT, int ldvt,
+                                   float *work, int lwork, float * /*rwork*/, int *devInfo) {
+    if (!A || !S || m <= 0 || n <= 0 || lda < m) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    std::vector<float> rwork(5 * std::min(m, n));
+    char cu = static_cast<char>(jobu), cv = static_cast<char>(jobvt);
+    cgesvd_(&cu, &cv, &m, &n, A, &lda, S, U, &ldu, VT, &ldvt, work, &lwork, rwork.data(), devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnZgesvd(cusolverDnHandle_t /*h*/, signed char jobu, signed char jobvt,
+                                   int m, int n, double *A, int lda, double *S,
+                                   double *U, int ldu, double *VT, int ldvt,
+                                   double *work, int lwork, double * /*rwork*/, int *devInfo) {
+    if (!A || !S || m <= 0 || n <= 0 || lda < m) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    std::vector<double> rwork(5 * std::min(m, n));
+    char cu = static_cast<char>(jobu), cv = static_cast<char>(jobvt);
+    zgesvd_(&cu, &cv, &m, &n, A, &lda, S, U, &ldu, VT, &ldvt, work, &lwork, rwork.data(), devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Complex Hermitian eigenvalue (heevd) — C/Z prefix ────────────────────────
+
+cusolverStatus_t cusolverDnCheevd_bufferSize(cusolverDnHandle_t /*h*/, char jobz, char uplo,
+                                              int n, const float * /*A*/, int /*lda*/,
+                                              const float * /*W*/, int *Lwork) {
+    if (!Lwork || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    int lwork = -1, info = 0;
+    float work_q[2] = {0.f, 0.f};
+    int lrwork = 1, liwork = 1;
+    float rwork_dummy = 0.f;
+    int iwork_dummy = 0;
+    std::vector<float> dummy(static_cast<size_t>(n) * n * 2, 0.f);
+    std::vector<float> dummy_W(n, 0.f);
+    cheevd_(&jobz, &uplo, &n, dummy.data(), &n, dummy_W.data(),
+            work_q, &lwork, &rwork_dummy, &lrwork, &iwork_dummy, &liwork, &info);
+    *Lwork = (info == 0) ? static_cast<int>(work_q[0]) + 1 : 5 * n;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnZheevd_bufferSize(cusolverDnHandle_t /*h*/, char jobz, char uplo,
+                                              int n, const double * /*A*/, int /*lda*/,
+                                              const double * /*W*/, int *Lwork) {
+    if (!Lwork || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    int lwork = -1, info = 0;
+    double work_q[2] = {0.0, 0.0};
+    int lrwork = 1, liwork = 1;
+    double rwork_dummy = 0.0;
+    int iwork_dummy = 0;
+    std::vector<double> dummy(static_cast<size_t>(n) * n * 2, 0.0);
+    std::vector<double> dummy_W(n, 0.0);
+    zheevd_(&jobz, &uplo, &n, dummy.data(), &n, dummy_W.data(),
+            work_q, &lwork, &rwork_dummy, &lrwork, &iwork_dummy, &liwork, &info);
+    *Lwork = (info == 0) ? static_cast<int>(work_q[0]) + 1 : 5 * n;
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnCheevd(cusolverDnHandle_t /*h*/, char jobz, char uplo,
+                                   int n, float *A, int lda, float *W,
+                                   float *work, int lwork, int *devInfo) {
+    if (!A || !W || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    int lrwork = 1 + 5 * n + 2 * n * n;
+    int liwork = 3 + 5 * n;
+    std::vector<float> rwork(lrwork);
+    std::vector<int> iwork(liwork);
+    cheevd_(&jobz, &uplo, &n, A, &lda, W, work, &lwork, rwork.data(), &lrwork, iwork.data(), &liwork, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+cusolverStatus_t cusolverDnZheevd(cusolverDnHandle_t /*h*/, char jobz, char uplo,
+                                   int n, double *A, int lda, double *W,
+                                   double *work, int lwork, int *devInfo) {
+    if (!A || !W || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+    int lrwork = 1 + 5 * n + 2 * n * n;
+    int liwork = 3 + 5 * n;
+    std::vector<double> rwork(lrwork);
+    std::vector<int> iwork(liwork);
+    zheevd_(&jobz, &uplo, &n, A, &lda, W, work, &lwork, rwork.data(), &lrwork, iwork.data(), &liwork, devInfo);
     return CUSOLVER_STATUS_SUCCESS;
 }
 

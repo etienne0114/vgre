@@ -1010,4 +1010,41 @@ cudnnStatus_t cudnnRNNBackwardWeightsEx(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// ── cudnnRNNForward (cuDNN v8.5+ unified API) ─────────────────────────────────
+// Dispatches to rnn_forward_ex: training mode fills reserve space; inference
+// passes nullptr/0 to skip reserve allocation.
+cudnnStatus_t cudnnRNNForward(
+    cudnnHandle_t /*handle*/,
+    cudnnRNNDescriptor_t rnnDesc,
+    cudnnForwardMode_t fwdMode,
+    const int32_t* /*devSeqLengths*/,   // optional; sequence lengths embedded in xDesc
+    cudnnRNNDataDescriptor_t xDesc, const void* x,
+    cudnnRNNDataDescriptor_t yDesc, void* y,
+    cudnnTensorDescriptor_t hDesc, const void* hx, void* hy,
+    cudnnTensorDescriptor_t cDesc, const void* cx, void* cy,
+    size_t weightSpaceSize, const void* weightSpace,
+    size_t workSpaceSize, void* /*workSpace*/,
+    size_t reserveSpaceSize, void* reserveSpace)
+{
+    if (!rnnDesc || !xDesc || !x || !yDesc || !y || !weightSpace)
+        return CUDNN_STATUS_INVALID_VALUE;
+    (void)hDesc; (void)cDesc; (void)weightSpaceSize; (void)workSpaceSize;
+
+    if (fwdMode == CUDNN_FWD_MODE_TRAINING) {
+        return rnn_forward_ex(rnnDesc, xDesc, x,
+                              hDesc, hx, cDesc, cx,
+                              nullptr, weightSpace,
+                              yDesc, y,
+                              hDesc, hy, cDesc, cy,
+                              reserveSpace, reserveSpaceSize);
+    } else {
+        return rnn_forward_ex(rnnDesc, xDesc, x,
+                              hDesc, hx, cDesc, cx,
+                              nullptr, weightSpace,
+                              yDesc, y,
+                              hDesc, hy, cDesc, cy,
+                              nullptr, 0);
+    }
+}
+
 } // extern "C"
