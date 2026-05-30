@@ -143,6 +143,70 @@ cusolverStatus_t cusolverDnDpotrfBatched(cusolverDnHandle_t handle, char uplo,
                                           int n, double **Aarray, int lda,
                                           int *infoArray, int batchSize);
 
+// ── Complex LU factorization (getrf) — C/Z prefix ────────────────────────────
+cusolverStatus_t cusolverDnCgetrf_bufferSize(cusolverDnHandle_t handle, int m, int n,
+                                              float *A, int lda, int *Lwork);
+cusolverStatus_t cusolverDnZgetrf_bufferSize(cusolverDnHandle_t handle, int m, int n,
+                                              double *A, int lda, int *Lwork);
+cusolverStatus_t cusolverDnCgetrf(cusolverDnHandle_t handle, int m, int n,
+                                   float *A, int lda, float *Workspace,
+                                   int *devIpiv, int *devInfo);
+cusolverStatus_t cusolverDnZgetrf(cusolverDnHandle_t handle, int m, int n,
+                                   double *A, int lda, double *Workspace,
+                                   int *devIpiv, int *devInfo);
+
+// ── Complex triangular solve (getrs) — C/Z prefix ────────────────────────────
+cusolverStatus_t cusolverDnCgetrs(cusolverDnHandle_t handle, int trans,
+                                   int n, int nrhs, const float *A, int lda,
+                                   const int *devIpiv, float *B, int ldb, int *devInfo);
+cusolverStatus_t cusolverDnZgetrs(cusolverDnHandle_t handle, int trans,
+                                   int n, int nrhs, const double *A, int lda,
+                                   const int *devIpiv, double *B, int ldb, int *devInfo);
+
+// ── Complex Cholesky (potrf/potrs) — C/Z prefix ──────────────────────────────
+cusolverStatus_t cusolverDnCpotrf_bufferSize(cusolverDnHandle_t handle, char uplo,
+                                              int n, float *A, int lda, int *Lwork);
+cusolverStatus_t cusolverDnZpotrf_bufferSize(cusolverDnHandle_t handle, char uplo,
+                                              int n, double *A, int lda, int *Lwork);
+cusolverStatus_t cusolverDnCpotrf(cusolverDnHandle_t handle, char uplo,
+                                   int n, float *A, int lda, float *Workspace,
+                                   int Lwork, int *devInfo);
+cusolverStatus_t cusolverDnZpotrf(cusolverDnHandle_t handle, char uplo,
+                                   int n, double *A, int lda, double *Workspace,
+                                   int Lwork, int *devInfo);
+cusolverStatus_t cusolverDnCpotrs(cusolverDnHandle_t handle, char uplo,
+                                   int n, int nrhs, const float *A, int lda,
+                                   float *B, int ldb, int *devInfo);
+cusolverStatus_t cusolverDnZpotrs(cusolverDnHandle_t handle, char uplo,
+                                   int n, int nrhs, const double *A, int lda,
+                                   double *B, int ldb, int *devInfo);
+
+// ── Complex SVD (gesvd) — C/Z prefix ─────────────────────────────────────────
+cusolverStatus_t cusolverDnCgesvd_bufferSize(cusolverDnHandle_t handle, int m, int n, int *Lwork);
+cusolverStatus_t cusolverDnZgesvd_bufferSize(cusolverDnHandle_t handle, int m, int n, int *Lwork);
+cusolverStatus_t cusolverDnCgesvd(cusolverDnHandle_t handle, signed char jobu, signed char jobvt,
+                                   int m, int n, float *A, int lda, float *S,
+                                   float *U, int ldu, float *VT, int ldvt,
+                                   float *work, int lwork, float *rwork, int *devInfo);
+cusolverStatus_t cusolverDnZgesvd(cusolverDnHandle_t handle, signed char jobu, signed char jobvt,
+                                   int m, int n, double *A, int lda, double *S,
+                                   double *U, int ldu, double *VT, int ldvt,
+                                   double *work, int lwork, double *rwork, int *devInfo);
+
+// ── Complex Hermitian eigenvalue (heevd) — C/Z prefix ────────────────────────
+cusolverStatus_t cusolverDnCheevd_bufferSize(cusolverDnHandle_t handle, char jobz, char uplo,
+                                              int n, const float *A, int lda,
+                                              const float *W, int *Lwork);
+cusolverStatus_t cusolverDnZheevd_bufferSize(cusolverDnHandle_t handle, char jobz, char uplo,
+                                              int n, const double *A, int lda,
+                                              const double *W, int *Lwork);
+cusolverStatus_t cusolverDnCheevd(cusolverDnHandle_t handle, char jobz, char uplo,
+                                   int n, float *A, int lda, float *W,
+                                   float *work, int lwork, int *devInfo);
+cusolverStatus_t cusolverDnZheevd(cusolverDnHandle_t handle, char jobz, char uplo,
+                                   int n, double *A, int lda, double *W,
+                                   double *work, int lwork, int *devInfo);
+
 // ── Batched LU triangular solve (getrsBatched) ───────────────────────────────
 cusolverStatus_t cusolverDnSgetrsBatched(cusolverDnHandle_t handle, int trans,
                                           int n, int nrhs,

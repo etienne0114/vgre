@@ -274,6 +274,10 @@ add_executable(test_cusolver_sp api/test_cusolver_sp.cpp)
 target_link_libraries(test_cusolver_sp PRIVATE vgre_cudart)
 add_test(NAME CusolverSparse COMMAND test_cusolver_sp)
 
+add_executable(test_cusolver_complex api/test_cusolver_complex.cpp)
+target_link_libraries(test_cusolver_complex PRIVATE vgre_cudart)
+add_test(NAME CusolverComplexCZ COMMAND test_cusolver_complex)
+
 add_executable(test_cusparse api/test_cusparse.cpp)
 target_link_libraries(test_cusparse PRIVATE vgre_cudart)
 add_test(NAME CuSPARSEFunctional COMMAND test_cusparse)

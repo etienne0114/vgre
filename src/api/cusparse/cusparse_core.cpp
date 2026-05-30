@@ -807,6 +807,16 @@ cusparseStatus_t cusparseSpMM_batched_bufferSize(cusparseHandle_t /*h*/,
     return CUSPARSE_STATUS_SUCCESS;
 }
 
+// Helper: return element size in bytes for a cudaDataType_t
+static size_t elemSzBytes(cudaDataType_t t) {
+    switch (t) {
+    case CUDA_R_64F: case CUDA_C_32F: return 8;
+    case CUDA_C_64F:                  return 16;
+    case CUDA_R_16F: case CUDA_R_16BF: return 2;
+    default:                           return sizeof(float);  // CUDA_R_32F and others
+    }
+}
+
 cusparseStatus_t cusparseSpMM_batched(cusparseHandle_t h,
         cusparseOperation_t opA, cusparseOperation_t opB,
         const void *alpha, cusparseSpMatDescr_t matA,
@@ -825,10 +835,11 @@ cusparseStatus_t cusparseSpMM_batched(cusparseHandle_t h,
     void *origB = bIt->second.values;
     void *origC = cIt->second.values;
 
+    const size_t elemSz = elemSzBytes(computeType);
     for (int b = 0; b < batchCount; ++b) {
-        // Adjust pointers for this batch
-        bIt->second.values = static_cast<char*>(origB) + b * bStride * sizeof(float);
-        cIt->second.values = static_cast<char*>(origC) + b * cStride * sizeof(float);
+        // Adjust pointers for this batch using correct element byte size
+        bIt->second.values = static_cast<char*>(origB) + b * bStride * elemSz;
+        cIt->second.values = static_cast<char*>(origC) + b * cStride * elemSz;
 
         // Unlock for the inner call (it acquires g_descrMutex)
         // We must call the inner function directly without lock
