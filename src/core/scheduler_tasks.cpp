@@ -199,25 +199,25 @@ Scheduler::submitNumaTask(StreamId stream, std::function<void()> taskFn,
 }
 
 // ── Per-stream SPSC fast path (Track 7.3) ─────────────────────────────────
-// Stream S is pinned deterministically to worker (S % numThreads_).
-// Only ONE thread may produce to a given stream (CUDA API contract).
-// The assigned worker is the sole consumer — no mutex required.
 void Scheduler::enqueueToStream(uint64_t streamId, WorkItem item) {
     if (shutdown_.load(std::memory_order_relaxed)) return;
 
+#ifdef ENABLE_VGRE_SPSC
+    // Stream S is pinned deterministically to worker (S % numThreads_).
+    // Only ONE thread may produce to a given stream (CUDA API contract).
     int targetWorker = static_cast<int>(streamId % static_cast<uint64_t>(numThreads_));
-
     if (workerRings_[targetWorker]->push(std::move(item))) {
         pending_.fetch_add(1, std::memory_order_relaxed);
-        // Wake all workers: each will check its own ring in the cv_ predicate.
-        // Workers whose rings are empty re-evaluate to false and go back to sleep.
         cv_.notify_all();
         return;
     }
-
-    // Ring full: fall through to the Chase-Lev work-stealing deque.
+    // Ring full: fall through to Chase-Lev deque.
     Scheduler::enqueueWithWorkerFallback(targetWorker, std::move(item),
                                          workerDeques_, queue_, mutex_);
+#else
+    Scheduler::enqueueWithWorkerFallback(t_workerIdx, std::move(item),
+                                         workerDeques_, queue_, mutex_);
+#endif
     pending_.fetch_add(1, std::memory_order_relaxed);
     cv_.notify_one();
 }

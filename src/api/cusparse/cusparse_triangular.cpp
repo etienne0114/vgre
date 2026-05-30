@@ -601,6 +601,142 @@ cusparseStatus_t cusparseSpSM_solve(cusparseHandle_t /*h*/,
         return CUSPARSE_STATUS_SUCCESS;
     }
 
+    // FP16 / BF16: widen matrix values to float, solve column-by-column, narrow back.
+    // Mirrors the same widening strategy used in cusparseSpSV_solve above.
+    if (computeType == CUDA_R_16F || computeType == CUDA_R_16BF) {
+        bool isFP16 = (computeType == CUDA_R_16F);
+        auto h2f = [](uint16_t h) -> float {
+            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                ((static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
+                  (static_cast<uint32_t>((h >> 10) & 0x1f) + 112u)) << 23) |
+                (static_cast<uint32_t>(h & 0x3ff) << 13);
+            float f; memcpy(&f, &bits, 4); return f;
+        };
+        auto bf2f = [](uint16_t h) -> float {
+            uint32_t bits = static_cast<uint32_t>(h) << 16;
+            float f; memcpy(&f, &bits, 4); return f;
+        };
+        auto toF = [&](uint16_t h) -> float { return isFP16 ? h2f(h) : bf2f(h); };
+        auto f2h = [](float f) -> uint16_t {
+            uint32_t bits; memcpy(&bits, &f, 4);
+            uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000);
+            int exp = static_cast<int>((bits >> 23) & 0xff) - 127 + 15;
+            if (exp <= 0) return sign;
+            if (exp >= 31) return sign | 0x7c00u;
+            return static_cast<uint16_t>(sign | (static_cast<uint16_t>(exp) << 10) | ((bits >> 13) & 0x3ff));
+        };
+        auto f2bf = [](float f) -> uint16_t {
+            uint32_t bits; memcpy(&bits, &f, 4); return static_cast<uint16_t>(bits >> 16);
+        };
+        auto fromF = [&](float f) -> uint16_t { return isFP16 ? f2h(f) : f2bf(f); };
+
+        float alphaF = toF(*static_cast<const uint16_t*>(alpha));
+        int64_t n64  = A.rows;
+        int64_t nCols = B.cols;
+        bool lowerTri  = (A.fillMode == CUSPARSE_FILL_MODE_LOWER);
+        bool unitDiag  = (A.diagType == CUSPARSE_DIAG_TYPE_UNIT);
+        bool transposed = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+        int  base = (A.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+
+        // Widen A values
+        std::vector<float> aF(static_cast<size_t>(A.nnz));
+        if (A.valueType == CUDA_R_16F || A.valueType == CUDA_R_16BF) {
+            bool aFP16 = (A.valueType == CUDA_R_16F);
+            const uint16_t *aH = static_cast<const uint16_t*>(A.values);
+            for (int64_t k = 0; k < A.nnz; ++k)
+                aF[static_cast<size_t>(k)] = aFP16 ? h2f(aH[k]) : bf2f(aH[k]);
+        } else if (A.valueType == CUDA_R_32F) {
+            memcpy(aF.data(), A.values, static_cast<size_t>(A.nnz) * sizeof(float));
+        }
+
+        auto getA2 = [&](int64_t k) -> double { return static_cast<double>(aF[static_cast<size_t>(k)]); };
+
+        std::vector<float> col(static_cast<size_t>(n64));
+
+        for (int64_t j = 0; j < nCols; ++j) {
+            // Load column j of B, apply alpha, into working vector
+            for (int64_t i = 0; i < n64; ++i) {
+                int64_t bIdx = (B.order == CUSPARSE_ORDER_COL) ? i + j * B.ld : i * B.ld + j;
+                float bVal = toF(static_cast<const uint16_t*>(B.values)[bIdx]);
+                col[static_cast<size_t>(i)] = alphaF * bVal;
+            }
+
+            if (!transposed) {
+                if (lowerTri) {
+                    for (int64_t r = 0; r < n64; ++r) {
+                        int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)     - base;
+                        int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r + 1) - base;
+                        double diag = 1.0;
+                        if (!unitDiag)
+                            for (int64_t k = rs; k < re; ++k)
+                                if (getIdx(A.colInd, A.colIndType, k) - base == r) { diag = getA2(k); break; }
+                        double yr = static_cast<double>(col[static_cast<size_t>(r)]);
+                        for (int64_t k = rs; k < re; ++k) {
+                            int64_t c = getIdx(A.colInd, A.colIndType, k) - base;
+                            if (c < r) yr -= getA2(k) * static_cast<double>(col[static_cast<size_t>(c)]);
+                        }
+                        col[static_cast<size_t>(r)] = static_cast<float>(yr / diag);
+                    }
+                } else {
+                    for (int64_t r = n64 - 1; r >= 0; --r) {
+                        int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)     - base;
+                        int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r + 1) - base;
+                        double diag = 1.0;
+                        if (!unitDiag)
+                            for (int64_t k = rs; k < re; ++k)
+                                if (getIdx(A.colInd, A.colIndType, k) - base == r) { diag = getA2(k); break; }
+                        double yr = static_cast<double>(col[static_cast<size_t>(r)]);
+                        for (int64_t k = rs; k < re; ++k) {
+                            int64_t c = getIdx(A.colInd, A.colIndType, k) - base;
+                            if (c > r) yr -= getA2(k) * static_cast<double>(col[static_cast<size_t>(c)]);
+                        }
+                        col[static_cast<size_t>(r)] = static_cast<float>(yr / diag);
+                    }
+                }
+            } else {
+                // Transposed: scatter-based
+                if (!lowerTri) {
+                    for (int64_t r = n64 - 1; r >= 0; --r) {
+                        int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)     - base;
+                        int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r + 1) - base;
+                        double diag = 1.0;
+                        if (!unitDiag)
+                            for (int64_t k = rs; k < re; ++k)
+                                if (getIdx(A.colInd, A.colIndType, k) - base == r) { diag = getA2(k); break; }
+                        double yr = static_cast<double>(col[static_cast<size_t>(r)]) / diag;
+                        col[static_cast<size_t>(r)] = static_cast<float>(yr);
+                        for (int64_t k = rs; k < re; ++k) {
+                            int64_t c = getIdx(A.colInd, A.colIndType, k) - base;
+                            if (c < r) col[static_cast<size_t>(c)] -= static_cast<float>(getA2(k) * yr);
+                        }
+                    }
+                } else {
+                    for (int64_t r = 0; r < n64; ++r) {
+                        int64_t rs = getIdx(A.rowOffsets, A.rowOffsetType, r)     - base;
+                        int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r + 1) - base;
+                        double diag = 1.0;
+                        if (!unitDiag)
+                            for (int64_t k = rs; k < re; ++k)
+                                if (getIdx(A.colInd, A.colIndType, k) - base == r) { diag = getA2(k); break; }
+                        double yr = static_cast<double>(col[static_cast<size_t>(r)]) / diag;
+                        col[static_cast<size_t>(r)] = static_cast<float>(yr);
+                        for (int64_t k = rs; k < re; ++k) {
+                            int64_t c = getIdx(A.colInd, A.colIndType, k) - base;
+                            if (c > r) col[static_cast<size_t>(c)] -= static_cast<float>(getA2(k) * yr);
+                        }
+                    }
+                }
+            }
+
+            // Narrow and write column j of X
+            for (int64_t i = 0; i < n64; ++i) {
+                int64_t xIdx = (X.order == CUSPARSE_ORDER_COL) ? i + j * X.ld : i * X.ld + j;
+                static_cast<uint16_t*>(X.values)[xIdx] = fromF(col[static_cast<size_t>(i)]);
+            }
+        }
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F)
         return CUSPARSE_STATUS_NOT_SUPPORTED;
 

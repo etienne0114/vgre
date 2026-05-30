@@ -878,6 +878,10 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
 
+        case CUDNN_BACKEND_OPERATION_RESAMPLE_DESCRIPTOR:
+            // Deprecated combined resample descriptor (cuDNN ≤ v8.8, no explicit
+            // direction attribute). Treat as forward resample.
+            [[fallthrough]];
         case CUDNN_BACKEND_OPERATION_RESAMPLE_FWD_DESCRIPTOR: {
             uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RESAMPLE_XDESC);
             uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RESAMPLE_YDESC);
@@ -970,6 +974,11 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             }
             break;
         }
+
+        case CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR:
+            // Random number generation (dropout noise, etc.) — hardware PRNG state
+            // not emulated. Callers must use cudnnDropoutForward or host-side RNG.
+            return CUDNN_STATUS_NOT_SUPPORTED;
 
         default:
             return CUDNN_STATUS_NOT_SUPPORTED;

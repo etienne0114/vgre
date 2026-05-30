@@ -111,6 +111,7 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
 
   auto start = std::chrono::steady_clock::now();
 
+#ifdef ENABLE_VGRE_MEMORY_COMPRESSION
   auto &compEngine = vgre::advanced::MemoryCompression::instance();
   if (compEngine.shouldCompress(bytes)) {
     std::vector<uint8_t> compBuffer;
@@ -127,6 +128,9 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
   } else {
     streamingMemcpy(dstPtr, src, bytes);
   }
+#else
+  streamingMemcpy(dstPtr, src, bytes);
+#endif // ENABLE_VGRE_MEMORY_COMPRESSION
 
   auto end = std::chrono::steady_clock::now();
   double ms = std::chrono::duration<double, std::milli>(end - start).count();
@@ -176,6 +180,7 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
 
   auto start = std::chrono::steady_clock::now();
 
+#ifdef ENABLE_VGRE_MEMORY_COMPRESSION
   auto &compEngine = vgre::advanced::MemoryCompression::instance();
   if (compEngine.shouldCompress(bytes)) {
     std::vector<uint8_t> compBuffer;
@@ -192,6 +197,9 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
   } else {
     streamingMemcpy(dst, srcPtr, bytes);
   }
+#else
+  streamingMemcpy(dst, srcPtr, bytes);
+#endif // ENABLE_VGRE_MEMORY_COMPRESSION
 
   auto end = std::chrono::steady_clock::now();
   double ms = std::chrono::duration<double, std::milli>(end - start).count();

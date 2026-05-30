@@ -285,28 +285,32 @@ VGREResult RuntimeEngine::registerKernel(const std::string &name,
     return r;
   }
 
+#ifdef ENABLE_VGRE_KERNEL_FUSION
   // Kernel Fusion Engine: detect and register fused variants
-  auto& fusion = compiler::KernelFusionEngine::instance();
-  auto meta = fusion.tryFuse(ir);
-  if (meta.pattern != compiler::FusionPattern::NONE) {
-    VGRE_LOG_INFO("RuntimeEngine",
-                  "Fusion pattern detected for '" + name + "': " +
-                  std::to_string(static_cast<int>(meta.pattern)));
-    auto fusedSrc = fusion.generateFusedSource(meta, ir);
-    if (!fusedSrc.empty()) {
-      KernelIR fusedIr;
-      auto fr = parser_->parse(meta.fusedKernelName, fusedSrc, fusedIr);
-      if (fr == VGREResult::SUCCESS) {
-        KernelId fusedId = nextKernelId_++;
-        kernelIRCache_[fusedId] = fusedIr;
-        pendingKernels_[fusedId] = translator_->prepare(kernelIRCache_[fusedId]);
-        kernelNames_[meta.fusedKernelName] = fusedId;
-        VGRE_LOG_INFO("RuntimeEngine",
-                      "Fused kernel '" + meta.fusedKernelName +
-                      "' registered with ID " + std::to_string(fusedId));
+  {
+    auto& fusion = compiler::KernelFusionEngine::instance();
+    auto meta = fusion.tryFuse(ir);
+    if (meta.pattern != compiler::FusionPattern::NONE) {
+      VGRE_LOG_INFO("RuntimeEngine",
+                    "Fusion pattern detected for '" + name + "': " +
+                    std::to_string(static_cast<int>(meta.pattern)));
+      auto fusedSrc = fusion.generateFusedSource(meta, ir);
+      if (!fusedSrc.empty()) {
+        KernelIR fusedIr;
+        auto fr = parser_->parse(meta.fusedKernelName, fusedSrc, fusedIr);
+        if (fr == VGREResult::SUCCESS) {
+          KernelId fusedId = nextKernelId_++;
+          kernelIRCache_[fusedId] = fusedIr;
+          pendingKernels_[fusedId] = translator_->prepare(kernelIRCache_[fusedId]);
+          kernelNames_[meta.fusedKernelName] = fusedId;
+          VGRE_LOG_INFO("RuntimeEngine",
+                        "Fused kernel '" + meta.fusedKernelName +
+                        "' registered with ID " + std::to_string(fusedId));
+        }
       }
     }
   }
+#endif // ENABLE_VGRE_KERNEL_FUSION
 
   // Translate to executable
   // If the caller provided a non-zero kernel id, treat it as authoritative.
@@ -396,6 +400,10 @@ VGREResult RuntimeEngine::getKernelFromModule(ModuleHandle module,
 
 VGREResult RuntimeEngine::fuseKernels(const std::vector<KernelId> &ids,
                                       KernelId &outFusedId, std::string* outName) {
+#ifndef ENABLE_VGRE_KERNEL_FUSION
+  (void)ids; (void)outFusedId; (void)outName;
+  return VGREResult::ERR_NOT_SUPPORTED;
+#else
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (ids.size() < 2) return VGREResult::ERR_INVALID_VALUE;
 
@@ -453,6 +461,7 @@ VGREResult RuntimeEngine::fuseKernels(const std::vector<KernelId> &ids,
 
   VGRE_LOG_INFO("RuntimeEngine", "Fused kernel '" + fusedName + "' (IR-Linked) registered as ID " + std::to_string(outFusedId));
   return VGREResult::SUCCESS;
+#endif // ENABLE_VGRE_KERNEL_FUSION
 }
 
 VGREResult RuntimeEngine::getKernelArgTypes(KernelId id,

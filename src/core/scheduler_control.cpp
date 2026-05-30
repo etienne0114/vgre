@@ -79,13 +79,17 @@ void Scheduler::setThreadCount(int n) {
   workerNumaNodes_.assign(numThreads_, -1);
   workerNumaNodeSet_.clear();
   workerDeques_.clear();
-  workerRings_.clear();
   workerDeques_.resize(numThreads_);
-  workerRings_.resize(numThreads_);
   for (int i = 0; i < numThreads_; ++i) {
     workerDeques_[i] = std::make_unique<ChaseLevDeque<WorkItem*>>();
-    workerRings_[i]  = std::make_unique<SPSCRing<WorkItem>>();
   }
+#ifdef ENABLE_VGRE_SPSC
+  workerRings_.clear();
+  workerRings_.resize(numThreads_);
+  for (int i = 0; i < numThreads_; ++i) {
+    workerRings_[i] = std::make_unique<SPSCRing<WorkItem>>();
+  }
+#endif
   for (int i = 0; i < numThreads_; ++i) {
     workers_.emplace_back([this, i]() {
       this->workerLoop(i);

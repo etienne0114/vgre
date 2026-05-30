@@ -47,10 +47,11 @@ void Scheduler::workerLoop(int workerIdx) {
     }
 
     // 2b. Drain own per-worker SPSC ring (lock-free, single consumer).
-    // Stream S maps to this worker when S % numThreads_ == workerIdx.
+#ifdef ENABLE_VGRE_SPSC
     if (!gotItem) {
         if (workerRings_[workerIdx]->pop(item)) gotItem = true;
     }
+#endif
 
     // 3. Fallback: wait on global / NUMA-local priority queue
     if (!gotItem) {
@@ -58,7 +59,9 @@ void Scheduler::workerLoop(int workerIdx) {
       cv_.wait(lock, [this, myNode, workerIdx] {
         if (shutdown_) return true;
         if (!queue_.empty()) return true;
+#ifdef ENABLE_VGRE_SPSC
         if (!workerRings_[workerIdx]->empty()) return true;
+#endif
         if (myNode >= 0) {
           auto it = numaQueues_.find(myNode);
           if (it != numaQueues_.end() && !it->second.empty()) return true;
