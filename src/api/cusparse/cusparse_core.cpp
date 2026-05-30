@@ -989,6 +989,66 @@ cusparseStatus_t cusparseSDDMM(cusparseHandle_t /*h*/,
         return CUSPARSE_STATUS_SUCCESS;
     }
 
+    // FP16 / BF16: widen dense matrix values to float, compute in FP32, narrow C values back.
+    if (computeType == CUDA_R_16F || computeType == CUDA_R_16BF) {
+        bool isFP16 = (computeType == CUDA_R_16F);
+        auto h2f = [](uint16_t h) -> float {
+            uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                ((static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
+                  (static_cast<uint32_t>((h >> 10) & 0x1f) + 112u)) << 23) |
+                (static_cast<uint32_t>(h & 0x3ff) << 13);
+            float f; memcpy(&f, &bits, 4); return f;
+        };
+        auto bf2f = [](uint16_t h) -> float {
+            uint32_t bits = static_cast<uint32_t>(h) << 16;
+            float f; memcpy(&f, &bits, 4); return f;
+        };
+        auto f2h = [](float f) -> uint16_t {
+            uint32_t bits; memcpy(&bits, &f, 4);
+            uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
+            int exp = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
+            if (exp <= 0) return sign;
+            if (exp >= 31) return sign | 0x7c00u;
+            return static_cast<uint16_t>(sign | (static_cast<uint16_t>(exp) << 10) | ((bits >> 13) & 0x3ffu));
+        };
+        auto f2bf = [](float f) -> uint16_t {
+            uint32_t bits; memcpy(&bits, &f, 4); return static_cast<uint16_t>(bits >> 16);
+        };
+        auto toF = [&](uint16_t h) -> float { return isFP16 ? h2f(h) : bf2f(h); };
+        auto fromF = [&](float v) -> uint16_t { return isFP16 ? f2h(v) : f2bf(v); };
+
+        float alphaF = toF(*static_cast<const uint16_t*>(alpha));
+        float betaF  = toF(*static_cast<const uint16_t*>(beta));
+        bool transpA = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+        bool transpB = (opB != CUSPARSE_OPERATION_NON_TRANSPOSE);
+        int  base    = (C.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+        int64_t k    = transpA ? A.rows : A.cols;
+
+        auto getAf = [&](int64_t row, int64_t col) -> float {
+            int64_t r = transpA ? col : row, c = transpA ? row : col;
+            int64_t idx = (A.order == CUSPARSE_ORDER_COL) ? r + c * A.ld : r * A.ld + c;
+            return toF(static_cast<const uint16_t*>(A.values)[idx]);
+        };
+        auto getBf = [&](int64_t row, int64_t col) -> float {
+            int64_t r = transpB ? row : col, c = transpB ? col : row;
+            int64_t idx = (B.order == CUSPARSE_ORDER_COL) ? r + c * B.ld : r * B.ld + c;
+            return toF(static_cast<const uint16_t*>(B.values)[idx]);
+        };
+
+        for (int64_t r = 0; r < C.rows; ++r) {
+            int64_t rs = getIdx(C.rowOffsets, C.rowOffsetType, r)     - base;
+            int64_t re = getIdx(C.rowOffsets, C.rowOffsetType, r + 1) - base;
+            for (int64_t e = rs; e < re; ++e) {
+                int64_t c = getIdx(C.colInd, C.colIndType, e) - base;
+                float dot = 0.f;
+                for (int64_t p = 0; p < k; ++p) dot += getAf(r, p) * getBf(c, p);
+                float cval = toF(static_cast<const uint16_t*>(C.values)[e]);
+                static_cast<uint16_t*>(C.values)[e] = fromF(alphaF * dot + betaF * cval);
+            }
+        }
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F)
         return CUSPARSE_STATUS_NOT_SUPPORTED;
 

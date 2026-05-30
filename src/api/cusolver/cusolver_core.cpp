@@ -443,6 +443,7 @@ cusolverStatus_t cusolverDnDgesvd(cusolverDnHandle_t /*handle*/, char jobu, char
 
 cusolverStatus_t cusolverDnSsyevd_bufferSize(cusolverDnHandle_t /*handle*/, char jobz, char uplo,
                                              int n, float * /*A*/, int lda, float * /*W*/, int *Lwork) {
+    (void)jobz; (void)uplo; // workspace size independent of jobz/uplo in this simplified model
     if (!Lwork || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
     *Lwork = 2 * n * n + 6 * n + 1;
     return CUSOLVER_STATUS_SUCCESS;
@@ -450,6 +451,7 @@ cusolverStatus_t cusolverDnSsyevd_bufferSize(cusolverDnHandle_t /*handle*/, char
 
 cusolverStatus_t cusolverDnDsyevd_bufferSize(cusolverDnHandle_t /*handle*/, char jobz, char uplo,
                                              int n, double * /*A*/, int lda, double * /*W*/, int *Lwork) {
+    (void)jobz; (void)uplo;
     if (!Lwork || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
     *Lwork = 2 * n * n + 6 * n + 1;
     return CUSOLVER_STATUS_SUCCESS;
@@ -539,6 +541,7 @@ cusolverStatus_t cusolverSpScsrlsvlu(cusolverSpHandle_t /*h*/, int m, int nnz,
                                       const int *csrColInd, const float *b,
                                       float /*tol*/, int /*reorder*/,
                                       float *x, int *singularity) {
+    (void)nnz; // nnz derived from csrRowPtr in csr_to_dense_colmajor
     if (!csrVal || !csrRowPtr || !csrColInd || !b || !x || m <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
     std::vector<float> A; csr_to_dense_colmajor(m, m, csrVal, csrRowPtr, csrColInd, A);
     std::vector<int> ipiv(m);
@@ -558,6 +561,7 @@ cusolverStatus_t cusolverSpDcsrlsvlu(cusolverSpHandle_t /*h*/, int m, int nnz,
                                       const int *csrColInd, const double *b,
                                       double /*tol*/, int /*reorder*/,
                                       double *x, int *singularity) {
+    (void)nnz;
     if (!csrVal || !csrRowPtr || !csrColInd || !b || !x || m <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
     std::vector<double> A; csr_to_dense_colmajor(m, m, csrVal, csrRowPtr, csrColInd, A);
     std::vector<int> ipiv(m);
@@ -579,6 +583,7 @@ cusolverStatus_t cusolverSpScsrlsvchol(cusolverSpHandle_t /*h*/, int m, int nnz,
                                         const int *csrColInd, const float *b,
                                         float /*tol*/, int /*reorder*/,
                                         float *x, int *singularity) {
+    (void)nnz;
     if (!csrVal || !csrRowPtr || !csrColInd || !b || !x || m <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
     std::vector<float> A; csr_to_dense_colmajor(m, m, csrVal, csrRowPtr, csrColInd, A);
     std::vector<float> rhs(b, b + m);
@@ -597,6 +602,7 @@ cusolverStatus_t cusolverSpDcsrlsvchol(cusolverSpHandle_t /*h*/, int m, int nnz,
                                         const int *csrColInd, const double *b,
                                         double /*tol*/, int /*reorder*/,
                                         double *x, int *singularity) {
+    (void)nnz;
     if (!csrVal || !csrRowPtr || !csrColInd || !b || !x || m <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
     std::vector<double> A; csr_to_dense_colmajor(m, m, csrVal, csrRowPtr, csrColInd, A);
     std::vector<double> rhs(b, b + m);

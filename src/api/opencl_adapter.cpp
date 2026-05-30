@@ -439,6 +439,11 @@ cl_int OpenCLAdapter::setKernelArg(cl_kernel_handle kernel, cl_uint argIndex,
     if (argSize != sizeof(cl_mem))
       return CL_INVALID_VALUE;
     break;
+  case ArgType::FLOAT16:
+  case ArgType::BFLOAT16:
+    if (argSize != sizeof(uint16_t))
+      return CL_INVALID_VALUE;
+    break;
   case ArgType::INT32:
   case ArgType::UINT32:
   case ArgType::FLOAT32:

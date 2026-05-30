@@ -66,6 +66,7 @@ CUresult cuTensorMapEncodeTiled(
 
     memset(tensorMap, 0, sizeof(VgreTMADescriptor));
 
+    (void)elementStrides; // per-dim element strides not modelled in CPU emulation
     tensorMap->baseAddr  = globalAddress;
     tensorMap->elemBytes = tmaElemBytes(tensorDataType);
     tensorMap->rank      = tensorRank;
@@ -122,6 +123,7 @@ CUresult cuTensorMapEncodeIm2col(
     if (tensorRank < 3 || tensorRank > 5)
         return CUDA_ERROR_INVALID_VALUE;
 
+    (void)elementStrides; // per-dim element strides not modelled in CPU emulation
     memset(tensorMap, 0, sizeof(VgreTMADescriptor));
 
     tensorMap->baseAddr  = globalAddress;
