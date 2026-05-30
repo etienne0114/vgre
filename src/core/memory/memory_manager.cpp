@@ -44,6 +44,7 @@ struct ManagedRegion;
 } // namespace core
 } // namespace vgre
 
+#ifdef ENABLE_VGRE_TLB
 static constexpr int kTlbSets = 64;
 static constexpr int kTlbWays = 4;
 
@@ -66,7 +67,6 @@ inline vgre::core::ManagedRegion* tlbLookup(uintptr_t addr) {
 inline void tlbFill(uintptr_t addr, vgre::core::ManagedRegion* r) {
     uintptr_t page = addr >> 12;
     int set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
-    // CLOCK replacement: find first invalid slot, else evict at clock hand
     for (int i = 0; i < kTlbWays; ++i) {
         int w = (t_tlb_clock[set] + i) % kTlbWays;
         if (t_tlb[set][w].tag == 0) {
@@ -90,6 +90,12 @@ inline void tlbEvict(uintptr_t addr, size_t size) {
             if (t_tlb[set][w].tag == page) t_tlb[set][w].tag = 0;
     }
 }
+#else
+// TLB disabled: all lookups fall directly to the radix page table.
+inline vgre::core::ManagedRegion* tlbLookup(uintptr_t)          { return nullptr; }
+inline void tlbFill(uintptr_t, vgre::core::ManagedRegion*)       {}
+inline void tlbEvict(uintptr_t, size_t)                          {}
+#endif // ENABLE_VGRE_TLB
 
 // ── Resume original namespaces ────────────────────────────────────────────────
 
