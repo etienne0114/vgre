@@ -285,6 +285,14 @@ On Windows they are set in User scope by `vgre_sync.bat` / `vgre_env.ps1`.
 | `VGRE_WORKER_THREADS` | auto (nproc) | Override worker thread count |
 | `VGRE_SIMD_LEVEL` | auto-detected | Force SIMD level: `SSE4` \| `AVX` \| `AVX2` \| `AVX512` |
 
+### Configuration Management
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VGRE_CONFIG_FILE` | _(empty)_ | Path to a JSON or YAML configuration file. If defined, loads configuration variables from the file. |
+| `VGRE_CONFIG_HOT_RELOAD` | `false` | If set to `true`, the system monitors the configuration file for changes and hot-reloads config on the fly. |
+| `VGRE_DEPLOYMENT_PROFILE` | `development` | Active configuration profile: `development` \| `staging` \| `production` \| `custom`. |
+
 ---
 
 ## 6. Token Management (`vgre-token`)
@@ -802,7 +810,24 @@ sudo apt-get install libomp-dev       # Ubuntu/Debian
 sudo dnf install libomp-devel         # Fedora
 brew install libomp                   # macOS
 cmake --build build -j$(nproc)
-```
+### 11.12 Windows: Socket and Port Bind Failures (ACCESS_VIOLATION 0xC0000005)
+
+When setting up or testing VGRE TCP clusters on Windows, you may encounter Winsock errors or dynamic-link crashes. These are resolved in the runtime through the following configurations:
+
+#### 1. WSAStartup Lifecycle (WSANOTINITIALIZED)
+- **Symptom**: Socket creations fail with WinSock error `10093`.
+- **Cause**: Multithreaded execution starting socket operations before Winsock is initialized, or static destruction cleaning up Winsock too early.
+- **Solution**: VGRE utilizes a thread-safe `WindowsSocketManager` with Meyers singletons and dynamic `std::call_once` bounds to manage WSAStartup/WSACleanup lifecycles automatically. If a custom application experiences this, ensure Winsock is not closed prematurely by external libraries.
+
+#### 2. Cross-Platform Struct Packing Inconsistencies
+- **Symptom**: Buffer overruns or ACCESS_VIOLATION crashes when connecting a Linux master to a Windows worker (or vice-versa).
+- **Cause**: Structural memory alignment discrepancies. On Linux, 64-bit offsets in network headers default to 8-byte alignment; Windows MSVC compiler defaults may align differently, causing packet headers to mismatch in size (e.g., `SecurePacketHeader` or `VSBPHeader`).
+- **Solution**: All cross-platform network packet headers are compiled using strict `#pragma pack(push, 1)` and `__attribute__((packed))` directives to guarantee bit-level structural identity across compilers.
+
+#### 3. Socket Port Conflicts
+- **Symptom**: Master fails to start, logging "Address already in use" or crashing on bind.
+- **Cause**: Multiple tests or workers executing concurrently on ports `7777` (cluster) or `7778` (discovery) before the OS has fully released the socket from a previous run (TIME_WAIT state).
+- **Solution**: Set the environment variable `VGRE_PORT` to allocate a distinct TCP port, or increase `VGRE_CLUSTER_CONNECT_TIMEOUT_SEC` to allow lingering connections to close naturally.
 
 ---
 
