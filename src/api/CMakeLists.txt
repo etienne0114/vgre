@@ -33,6 +33,7 @@ add_library(vgre_api OBJECT
     cudnn/cudnn_graph.cpp
     cudnn/cudnn_lrn.cpp
     cudnn/cudnn_divisive_norm.cpp
+    cudnn/cudnn_spatial_tf.cpp
     nccl/nccl_core.cpp
     nccl/nccl_communicator.cpp
     nccl/nccl_collectives.cpp

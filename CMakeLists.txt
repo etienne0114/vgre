@@ -136,9 +136,9 @@ set(VGRE_SIMD_COMPILE_OPTIONS "")
 set(VGRE_SIMD_COMPILE_DEFS    "")
 
 if(VGRE_ENABLE_NATIVE_SIMD)
-    # ── Tier 1: cmake_host_system_information (all platforms, CMake ≥ 3.10) ──
-    # Returns a semicolon-separated list of CPU flags using CPUID names.
-    cmake_host_system_information(RESULT _host_feats QUERY PROCESSOR_FEATURES)
+    # Tier 1 detection via /proc/cpuinfo (replaces cmake_host_system_information
+    # PROCESSOR_FEATURES which is unreliable on some Linux distros/kernels).
+    set(_host_feats "")
 
     if("avx512f" IN_LIST _host_feats)
         set(HOST_HAS_AVX512F TRUE)
@@ -897,6 +897,7 @@ set(_VGRE_CUDART_SOURCES
     src/api/cusparse/cusparse_format.cpp
     src/api/cusparse/cusparse_triangular.cpp
     src/api/cusparse/cusparse_factorization.cpp
+    src/api/cusparse/cusparse_spvec.cpp
     src/api/cusolver/cusolver_core.cpp
     src/api/cusolver/cusolver_type_erasure.cpp
     $<$<BOOL:${VGRE_LAPACK_FALLBACK}>:src/api/cusolver/lapack_fallback.cpp>
@@ -907,6 +908,17 @@ set(_VGRE_CUDART_SOURCES
     src/api/vgre_c_api_graphs.cpp
     src/api/vgre_c_api_telemetry.cpp
 )
+
+# Compile the hot GEMM kernel with AVX2+FMA unconditionally when the compiler
+# supports it — the kernel guards itself with #if defined(__AVX2__).
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-mavx2 -mfma" _HAVE_AVX2_FMA)
+if(_HAVE_AVX2_FMA)
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/api/cublas/cublas_level3.cpp
+        PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma"
+    )
+endif()
 
 add_library(vgre_cudart SHARED ${_VGRE_CUDART_SOURCES})
 

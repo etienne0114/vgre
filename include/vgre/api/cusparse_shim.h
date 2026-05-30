@@ -549,6 +549,64 @@ cusparseStatus_t cusparseSDDMM(cusparseHandle_t handle,
                                 cusparseSDDMMAlg_t alg,
                                 void *buffer);
 
+// ── Sparse Vector descriptor ──────────────────────────────────────────────────
+struct cusparseSpVecDescr;
+typedef struct cusparseSpVecDescr *cusparseSpVecDescr_t;
+
+typedef enum { CUSPARSE_SPVV_ALG_DEFAULT  = 0 } cusparseSpVVAlg_t;
+typedef enum { CUSPARSE_AXPBY_ALG_DEFAULT = 0 } cusparseAxpbyAlg_t;
+typedef enum { CUSPARSE_GATHER_ALG_DEFAULT= 0 } cusparseGatherAlg_t;
+typedef enum { CUSPARSE_SCATTER_ALG_DEFAULT=0 } cusparseScatterAlg_t;
+typedef enum { CUSPARSE_ROT_ALG_DEFAULT   = 0 } cusparseRotAlg_t;
+
+cusparseStatus_t cusparseCreateSpVec(cusparseSpVecDescr_t *descr,
+    int64_t size, int64_t nnz,
+    void *indices, void *values,
+    cusparseIndexType_t idxType,
+    cusparseIndexBase_t idxBase,
+    cudaDataType_t valueType);
+
+cusparseStatus_t cusparseDestroySpVec(cusparseSpVecDescr_t descr);
+
+cusparseStatus_t cusparseSpVecGetIndexBase(
+    cusparseSpVecDescr_t descr, cusparseIndexBase_t *idxBase);
+
+cusparseStatus_t cusparseSpVV_bufferSize(
+    cusparseHandle_t handle, cusparseOperation_t opX,
+    cusparseSpVecDescr_t vecX, cusparseDnVecDescr_t vecY,
+    void *result, cudaDataType_t computeType,
+    cusparseSpVVAlg_t alg, size_t *bufferSize);
+
+cusparseStatus_t cusparseSpVV(
+    cusparseHandle_t handle, cusparseOperation_t opX,
+    cusparseSpVecDescr_t vecX, cusparseDnVecDescr_t vecY,
+    void *result, cudaDataType_t computeType,
+    cusparseSpVVAlg_t alg, void *buf);
+
+cusparseStatus_t cusparseAxpby(
+    cusparseHandle_t handle,
+    const void *alpha, cusparseSpVecDescr_t vecX,
+    const void *beta,  cusparseDnVecDescr_t vecY,
+    cudaDataType_t computeType,
+    cusparseAxpbyAlg_t alg, void *buf);
+
+cusparseStatus_t cusparseGather(
+    cusparseHandle_t handle,
+    cusparseDnVecDescr_t vecY, cusparseSpVecDescr_t vecX,
+    cusparseGatherAlg_t alg, void *buf);
+
+cusparseStatus_t cusparseScatter(
+    cusparseHandle_t handle,
+    cusparseSpVecDescr_t vecX, cusparseDnVecDescr_t vecY,
+    cusparseScatterAlg_t alg, void *buf);
+
+cusparseStatus_t cusparseRot(
+    cusparseHandle_t handle,
+    const void *c_coeff, const void *s_coeff,
+    cusparseSpVecDescr_t vecX, cusparseDnVecDescr_t vecY,
+    cudaDataType_t xType, cudaDataType_t yType,
+    cusparseRotAlg_t alg);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
