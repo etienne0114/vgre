@@ -270,7 +270,32 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
 
   auto start = std::chrono::steady_clock::now();
 
+#ifdef ENABLE_VGRE_MEMORY_COMPRESSION
+  // Cross-device D2D: compress for large cross-NUMA transfers to reduce bandwidth
+  if (dstDeviceId_ != srcDeviceId_) {
+    auto &compEngine = vgre::advanced::MemoryCompression::instance();
+    if (compEngine.shouldCompress(bytes)) {
+      std::vector<uint8_t> compBuffer;
+      auto r = compEngine.compress(srcPtr, bytes, compBuffer);
+      if (r == VGREResult::SUCCESS && !compBuffer.empty()) {
+        size_t actualSize = 0;
+        auto dr = compEngine.decompress(compBuffer.data(), compBuffer.size(),
+                                        dstPtr, bytes, actualSize);
+        if (dr != VGREResult::SUCCESS || actualSize != bytes)
+          streamingMemcpy(dstPtr, srcPtr, bytes);
+      } else {
+        streamingMemcpy(dstPtr, srcPtr, bytes);
+      }
+    } else {
+      streamingMemcpy(dstPtr, srcPtr, bytes);
+    }
+  } else {
+    streamingMemcpy(dstPtr, srcPtr, bytes);
+  }
+#else
   streamingMemcpy(dstPtr, srcPtr, bytes);
+#endif // ENABLE_VGRE_MEMORY_COMPRESSION
+
   auto end = std::chrono::steady_clock::now();
 
   double ms = std::chrono::duration<double, std::milli>(end - start).count();

@@ -64,6 +64,40 @@
 #endif
 
 #include "vgre/common/types.h"
+#include "vgre/runtime/vector_engine.h"
+
+// ── VNNI / AMX runtime dispatch wrappers ─────────────────────────────────────
+// These plain-C functions are registered as LLVM JIT external symbols so that
+// CUDA kernels compiled by the JIT can call `vgre_matmul_int8` / `vgre_matmul_bf16`
+// directly in generated code without going through CUDA device emulation layers.
+// A JIT-compiled kernel implementing a quantized linear layer can call these
+// instead of falling back to scalar loops, gaining AVX-VNNI / AMX acceleration.
+extern "C" {
+  void vgre_matmul_int8(const int8_t* A, const int8_t* B, int32_t* C,
+                         int M, int N, int K) {
+      vgre::runtime::VectorEngine::instance().matMulInt8(A, B, C, M, N, K);
+  }
+  void vgre_matmul_bf16(const uint16_t* A, const uint16_t* B, float* C,
+                         int M, int N, int K) {
+      vgre::runtime::VectorEngine::instance().matMulBF16(
+          reinterpret_cast<const vgre::runtime::vgre_bf16*>(A),
+          reinterpret_cast<const vgre::runtime::vgre_bf16*>(B),
+          C, M, N, K);
+  }
+  // INT8 quantize/dequantize helpers — allow JIT kernels to perform scale
+  // conversion without calling into the cuDNN layer.
+  int8_t vgre_quant_f32_to_int8(float val, float inv_scale) {
+      float scaled = val * inv_scale;
+      if (scaled > 127.f) return 127;
+      if (scaled < -128.f) return -128;
+      return static_cast<int8_t>(scaled >= 0.f
+          ? static_cast<int>(scaled + 0.5f)
+          : -static_cast<int>(-scaled + 0.5f));
+  }
+  float vgre_dequant_int8_to_f32(int8_t val, float scale) {
+      return static_cast<float>(val) * scale;
+  }
+}
 
 extern "C" {
   int vgre_jit_get_thread_id();
@@ -284,6 +318,22 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
         llvm::JITSymbolFlags::Exported};
     Symbols[Mangle("vgre_surf2Dread_f32")] = {
         llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_surf2Dread_f32)),
+        llvm::JITSymbolFlags::Exported};
+
+    // ── VNNI / AMX accelerated matmul dispatch (Phase 13-G) ──────────────────
+    // JIT-compiled CUDA kernels can call these to get AVX-VNNI / AMX acceleration
+    // for INT8 and BF16 matrix multiplies without modifying source code.
+    Symbols[Mangle("vgre_matmul_int8")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_matmul_int8)),
+        llvm::JITSymbolFlags::Exported};
+    Symbols[Mangle("vgre_matmul_bf16")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_matmul_bf16)),
+        llvm::JITSymbolFlags::Exported};
+    Symbols[Mangle("vgre_quant_f32_to_int8")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_quant_f32_to_int8)),
+        llvm::JITSymbolFlags::Exported};
+    Symbols[Mangle("vgre_dequant_int8_to_f32")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_dequant_int8_to_f32)),
         llvm::JITSymbolFlags::Exported};
 
     llvm::cantFail(MainJD.define(llvm::orc::absoluteSymbols(std::move(Symbols))));

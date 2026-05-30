@@ -94,6 +94,9 @@ option(ENABLE_VGRE_MEMORY_COMPRESSION
 option(ENABLE_VGRE_AMX
     "AVX-VNNI INT8 GEMM (Alder Lake+) and AMX-BF16 GEMM (Sapphire Rapids+)"
     ON)
+option(VGRE_ENABLE_ZLIB
+    "Use system zlib to decompress compressed PTX sections in fat binaries"
+    ON)
 
 # Hide developer-only knobs from cmake-gui unless explicitly set
 mark_as_advanced(VGRE_WARNINGS_AS_ERRORS VGRE_USE_TPM2 VGRE_USE_LIBSECRET)
@@ -374,6 +377,20 @@ function(vgre_target_link_openmp target_name visibility)
 endfunction()
 
 find_package(Threads REQUIRED)
+
+# ── zlib: optional, used to decompress compressed PTX sections in fat binaries ─
+if(VGRE_ENABLE_ZLIB)
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        message(STATUS "zlib: found ${ZLIB_VERSION_STRING} — compressed fat-binary PTX enabled")
+        set(_VGRE_HAS_ZLIB ON)
+    else()
+        message(STATUS "zlib: not found — compressed fat-binary PTX sections will not be decompressed")
+        set(_VGRE_HAS_ZLIB OFF)
+    endif()
+else()
+    set(_VGRE_HAS_ZLIB OFF)
+endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # §7  LLVM (version 18 enforced; target-scoped INTERFACE target)
@@ -825,6 +842,11 @@ function(_vgre_configure_library target_name visibility)
         target_compile_definitions(${target_name} PRIVATE VGRE_HAS_GRPC)
         target_link_libraries(${target_name} PRIVATE
             $<TARGET_OBJECTS:vgre_grpc_gen> ${_VGRE_GRPC_LIBS})
+    endif()
+    # zlib for compressed fat-binary PTX decompression
+    if(_VGRE_HAS_ZLIB)
+        target_compile_definitions(${target_name} PRIVATE VGRE_HAS_ZLIB)
+        target_link_libraries(${target_name} PRIVATE ZLIB::ZLIB)
     endif()
     # Runtime feature gates
     if(ENABLE_VGRE_TLB)
