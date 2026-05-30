@@ -46,6 +46,14 @@ void Scheduler::workerLoop(int workerIdx) {
       }
     }
 
+    // 2b. Drain any per-stream SPSC ring
+    if (!gotItem) {
+        std::lock_guard<std::mutex> lg(streamRingsMutex_);
+        for (auto& [sid, ring] : streamRings_) {
+            if (ring->pop(item)) { gotItem = true; break; }
+        }
+    }
+
     // 3. Fallback: wait on global / NUMA-local priority queue
     if (!gotItem) {
       std::unique_lock<std::mutex> lock(mutex_);

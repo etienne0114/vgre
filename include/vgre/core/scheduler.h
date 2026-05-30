@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -17,6 +18,38 @@
 
 namespace vgre {
 namespace core {
+
+// ── Lock-free SPSC Ring Buffer (Track 7.3) ────────────────────────────────
+// Single-Producer Single-Consumer ring: zero-mutex fast path for streams
+// where one host thread submits all work.
+template<typename T, size_t N = 4096>
+class SPSCRing {
+    static_assert((N & (N - 1)) == 0, "N must be power of 2");
+    alignas(64) std::atomic<size_t> head_{0};
+    char pad0_[64 - sizeof(std::atomic<size_t>)];
+    alignas(64) std::atomic<size_t> tail_{0};
+    char pad1_[64 - sizeof(std::atomic<size_t>)];
+    T buf_[N];
+public:
+    bool push(T val) {
+        size_t h = head_.load(std::memory_order_relaxed);
+        if (h - tail_.load(std::memory_order_acquire) >= N) return false;
+        buf_[h & (N - 1)] = std::move(val);
+        head_.store(h + 1, std::memory_order_release);
+        return true;
+    }
+    bool pop(T& val) {
+        size_t t = tail_.load(std::memory_order_relaxed);
+        if (t == head_.load(std::memory_order_acquire)) return false;
+        val = std::move(buf_[t & (N - 1)]);
+        tail_.store(t + 1, std::memory_order_release);
+        return true;
+    }
+    bool empty() const {
+        return tail_.load(std::memory_order_acquire) ==
+               head_.load(std::memory_order_relaxed);
+    }
+};
 
 // ── Work item ──────────────────────────────────────────────────────────────
 struct WorkItem {
@@ -163,6 +196,9 @@ public:
   uint64_t getCompletedTasks() const;
   uint64_t getPendingTasks() const;
 
+  // Per-stream SPSC fast path (Track 7.3)
+  void enqueueToStream(uint64_t streamId, WorkItem item);
+
   // Singleton convenience
   static Scheduler &instance();
 
@@ -206,6 +242,10 @@ private:
   std::atomic<uint64_t> completed_{0};
   std::atomic<uint64_t> pending_{0};
   int numThreads_;
+
+  // Per-stream SPSC rings (Track 7.3)
+  std::unordered_map<uint64_t, std::unique_ptr<SPSCRing<WorkItem>>> streamRings_;
+  std::mutex streamRingsMutex_;
 };
 
 } // namespace core

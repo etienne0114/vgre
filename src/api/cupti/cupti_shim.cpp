@@ -28,17 +28,90 @@
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <dlfcn.h>
 #endif
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/thread_info.h>
 #include <mach/mach_time.h>
+#include <dlfcn.h>
 #endif
 
 #if defined(_WIN32)
 #include "vgre/common/os_backend.h"
 #endif
+
+// ── Native CUPTI passthrough (Track 2) ───────────────────────────────────────
+// Attempt to load the native CUPTI library at startup. When a real GPU and
+// driver are present, all CUPTI calls are forwarded to the hardware library
+// first; the software-proxy path is used only when hardware is unavailable.
+namespace {
+
+typedef CUptiResult (*fn_cuptiSubscribe_t)(CUpti_SubscriberHandle*, CUpti_CallbackFunc, void*);
+typedef CUptiResult (*fn_cuptiUnsubscribe_t)(CUpti_SubscriberHandle);
+typedef CUptiResult (*fn_cuptiEnableCallback_t)(uint32_t, CUpti_SubscriberHandle, CUpti_CallbackDomain, CUpti_CallbackId);
+typedef CUptiResult (*fn_cuptiActivityEnable_t)(CUpti_ActivityKind);
+typedef CUptiResult (*fn_cuptiActivityDisable_t)(CUpti_ActivityKind);
+typedef CUptiResult (*fn_cuptiActivityFlushAll_t)(uint32_t);
+typedef CUptiResult (*fn_cuptiGetResultString_t)(CUptiResult, const char**);
+
+struct NativeCupti {
+    void*                       handle             = nullptr;
+    fn_cuptiSubscribe_t         subscribe          = nullptr;
+    fn_cuptiUnsubscribe_t       unsubscribe        = nullptr;
+    fn_cuptiEnableCallback_t    enableCallback     = nullptr;
+    fn_cuptiActivityEnable_t    activityEnable     = nullptr;
+    fn_cuptiActivityDisable_t   activityDisable    = nullptr;
+    fn_cuptiActivityFlushAll_t  activityFlushAll   = nullptr;
+    fn_cuptiGetResultString_t   getResultString    = nullptr;
+    bool                        active             = false;
+
+    static NativeCupti& instance() {
+        static NativeCupti inst = NativeCupti::init();
+        return inst;
+    }
+
+private:
+    static NativeCupti init() {
+        NativeCupti nc{};
+#if defined(_WIN32)
+        nc.handle = reinterpret_cast<void*>(LoadLibraryA("cupti.dll"));
+#define DLSYM(h, sym) GetProcAddress(reinterpret_cast<HMODULE>(h), sym)
+#elif defined(__APPLE__)
+        nc.handle = dlopen("libcupti.dylib", RTLD_LAZY | RTLD_LOCAL);
+#define DLSYM(h, sym) dlsym(h, sym)
+#else
+        // Linux: try versioned names first, then generic
+        nc.handle = dlopen("libcupti.so.12", RTLD_LAZY | RTLD_LOCAL);
+        if (!nc.handle) nc.handle = dlopen("libcupti.so.11", RTLD_LAZY | RTLD_LOCAL);
+        if (!nc.handle) nc.handle = dlopen("libcupti.so",    RTLD_LAZY | RTLD_LOCAL);
+#define DLSYM(h, sym) dlsym(h, sym)
+#endif
+        if (!nc.handle) {
+            // Logger not yet accessible from static init — will use VGRE_LOG macros at call time
+            return nc;
+        }
+
+        nc.subscribe        = reinterpret_cast<fn_cuptiSubscribe_t>       (DLSYM(nc.handle, "cuptiSubscribe"));
+        nc.unsubscribe      = reinterpret_cast<fn_cuptiUnsubscribe_t>     (DLSYM(nc.handle, "cuptiUnsubscribe"));
+        nc.enableCallback   = reinterpret_cast<fn_cuptiEnableCallback_t>  (DLSYM(nc.handle, "cuptiEnableCallback"));
+        nc.activityEnable   = reinterpret_cast<fn_cuptiActivityEnable_t>  (DLSYM(nc.handle, "cuptiActivityEnable"));
+        nc.activityDisable  = reinterpret_cast<fn_cuptiActivityDisable_t> (DLSYM(nc.handle, "cuptiActivityDisable"));
+        nc.activityFlushAll = reinterpret_cast<fn_cuptiActivityFlushAll_t>(DLSYM(nc.handle, "cuptiActivityFlushAll"));
+        nc.getResultString  = reinterpret_cast<fn_cuptiGetResultString_t> (DLSYM(nc.handle, "cuptiGetResultString"));
+
+        // All core function pointers must resolve; otherwise the library is unusable.
+        if (nc.subscribe && nc.unsubscribe && nc.enableCallback &&
+            nc.activityEnable && nc.activityDisable && nc.activityFlushAll) {
+            nc.active = true;
+        }
+        return nc;
+    }
+};
+#undef DLSYM
+
+} // anonymous namespace — NativeCupti
 
 // ── Hardware PMU sampler ──────────────────────────────────────────────────────
 // Thin RAII wrapper for per-thread hardware instruction/cycle counter.
@@ -341,6 +414,24 @@ CUptiResult cuptiSubscribe(CUpti_SubscriberHandle* subscriber,
                            CUpti_CallbackFunc callback,
                            void* userdata) {
     if (!subscriber || !callback) return CUPTI_ERROR_INVALID_PARAMETER;
+    // Track 2: forward to native library first when available
+    auto& nc = NativeCupti::instance();
+    {
+        // Log once on first call (after Logger is initialized)
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            if (nc.active)
+                VGRE_LOG_INFO("CUPTI", "CUPTI: native GPU library loaded — hardware telemetry active");
+            else
+                VGRE_LOG_INFO("CUPTI", "CUPTI: no native GPU library — using CPU PMU proxies");
+        }
+    }
+    if (nc.active) {
+        CUptiResult r = nc.subscribe(subscriber, callback, userdata);
+        if (r == CUPTI_SUCCESS) return r;
+        // Fall through to software proxy on error
+    }
     uintptr_t id = g_nextSubId.fetch_add(1);
     Subscriber sub;
     sub.func     = callback;
@@ -355,6 +446,12 @@ CUptiResult cuptiSubscribe(CUpti_SubscriberHandle* subscriber,
 }
 
 CUptiResult cuptiUnsubscribe(CUpti_SubscriberHandle subscriber) {
+    // Track 2: forward to native library first when available
+    auto& nc = NativeCupti::instance();
+    if (nc.active) {
+        CUptiResult r = nc.unsubscribe(subscriber);
+        if (r == CUPTI_SUCCESS) return r;
+    }
     std::lock_guard<std::mutex> lk(g_mutex);
     g_subscribers.erase(reinterpret_cast<uintptr_t>(subscriber));
     return CUPTI_SUCCESS;
@@ -385,6 +482,12 @@ CUptiResult cuptiEnableDomain(uint32_t /*enable*/,
 }
 
 CUptiResult cuptiActivityEnable(CUpti_ActivityKind kind) {
+    // Track 2: forward to native library first when available
+    auto& nc = NativeCupti::instance();
+    if (nc.active) {
+        CUptiResult r = nc.activityEnable(kind);
+        if (r == CUPTI_SUCCESS) return r;
+    }
     if (kind == CUPTI_ACTIVITY_KIND_KERNEL) {
         g_kernelActivityEnabled = true;
         vgre::advanced::RuntimeProfiler::instance().setEnabled(true);
@@ -393,6 +496,12 @@ CUptiResult cuptiActivityEnable(CUpti_ActivityKind kind) {
 }
 
 CUptiResult cuptiActivityDisable(CUpti_ActivityKind kind) {
+    // Track 2: forward to native library first when available
+    auto& nc = NativeCupti::instance();
+    if (nc.active) {
+        CUptiResult r = nc.activityDisable(kind);
+        if (r == CUPTI_SUCCESS) return r;
+    }
     if (kind == CUPTI_ACTIVITY_KIND_KERNEL) g_kernelActivityEnabled = false;
     return CUPTI_SUCCESS;
 }
@@ -407,7 +516,13 @@ CUptiResult cuptiActivityRegisterCallbacks(
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiActivityFlushAll(uint32_t /*flag*/) {
+CUptiResult cuptiActivityFlushAll(uint32_t flag) {
+    // Track 2: forward to native library first when available
+    auto& nc = NativeCupti::instance();
+    if (nc.active) {
+        CUptiResult r = nc.activityFlushAll(flag);
+        if (r == CUPTI_SUCCESS) return r;
+    }
     auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
     for (const auto& ks : allStats) pushKernelActivity(ks);
     flushRecords();

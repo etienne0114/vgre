@@ -30,6 +30,69 @@
 #endif
 #endif  // __linux__
 
+// ── Thread-local TLB Cache (Track 7.1) ───────────────────────────────────────
+// 4-way set-associative TLB with 64 sets for caching virtual→ManagedRegion*
+// translations inside signal handlers. Uses CLOCK replacement policy.
+// These helpers are defined at file scope, before the signal handlers.
+
+namespace vgre {
+namespace core {
+
+// Forward-declare ManagedRegion so TLB helpers compile (full def is in the header)
+struct ManagedRegion;
+
+} // namespace core
+} // namespace vgre
+
+static constexpr int kTlbSets = 64;
+static constexpr int kTlbWays = 4;
+
+struct TlbEntry {
+    uintptr_t tag;    // virtual page (addr >> 12), 0 = invalid
+    vgre::core::ManagedRegion* region;
+};
+
+static thread_local TlbEntry t_tlb[kTlbSets][kTlbWays];
+static thread_local uint8_t  t_tlb_clock[kTlbSets];
+
+inline vgre::core::ManagedRegion* tlbLookup(uintptr_t addr) {
+    uintptr_t page = addr >> 12;
+    int set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
+    for (int w = 0; w < kTlbWays; ++w)
+        if (t_tlb[set][w].tag == page) return t_tlb[set][w].region;
+    return nullptr;
+}
+
+inline void tlbFill(uintptr_t addr, vgre::core::ManagedRegion* r) {
+    uintptr_t page = addr >> 12;
+    int set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
+    // CLOCK replacement: find first invalid slot, else evict at clock hand
+    for (int i = 0; i < kTlbWays; ++i) {
+        int w = (t_tlb_clock[set] + i) % kTlbWays;
+        if (t_tlb[set][w].tag == 0) {
+            t_tlb[set][w] = {page, r};
+            t_tlb_clock[set] = static_cast<uint8_t>((w + 1) % kTlbWays);
+            return;
+        }
+    }
+    int w = t_tlb_clock[set];
+    t_tlb[set][w] = {page, r};
+    t_tlb_clock[set] = static_cast<uint8_t>((w + 1) % kTlbWays);
+}
+
+inline void tlbEvict(uintptr_t addr, size_t size) {
+    if (size == 0) return;
+    uintptr_t first = addr >> 12;
+    uintptr_t last  = (addr + size - 1) >> 12;
+    for (uintptr_t page = first; page <= last; ++page) {
+        int set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
+        for (int w = 0; w < kTlbWays; ++w)
+            if (t_tlb[set][w].tag == page) t_tlb[set][w].tag = 0;
+    }
+}
+
+// ── Resume original namespaces ────────────────────────────────────────────────
+
 namespace vgre {
 namespace core {
 
@@ -212,9 +275,13 @@ LONG
 
     {
       uintptr_t target = reinterpret_cast<uintptr_t>(addr);
-      
-      // O(1) lookup via radix page table (no tree traversal, fully signal-safe)
-      ManagedRegion* regionPtr = mgr->pageTable_.lookup(target);
+
+      // O(1) lookup: try TLB first, then radix page table
+      ManagedRegion* regionPtr = tlbLookup(target);
+      if (!regionPtr) {
+          regionPtr = mgr->pageTable_.lookup(target);
+          if (regionPtr) tlbFill(target, regionPtr);
+      }
       if (regionPtr) {
           ManagedRegion &region = *regionPtr;
           DWORD oldProtect;
@@ -256,9 +323,13 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
     mgr->activeHandlers_.fetch_add(1, std::memory_order_acquire);
 
     uintptr_t target = reinterpret_cast<uintptr_t>(addr);
-    
-    // O(1) lookup via radix page table (no tree traversal, fully signal-safe)
-    ManagedRegion* regionPtr = mgr->pageTable_.lookup(target);
+
+    // O(1) lookup: try TLB first, then radix page table
+    ManagedRegion* regionPtr = tlbLookup(target);
+    if (!regionPtr) {
+        regionPtr = mgr->pageTable_.lookup(target);
+        if (regionPtr) tlbFill(target, regionPtr);
+    }
     if (regionPtr) {
         ManagedRegion &region = *regionPtr;
         // Precise Delta-Sync: Protect only the faulting page
@@ -410,6 +481,9 @@ void MemoryManager::unregisterManagedRegion(void *ptr) {
   
   // Remove from radix page table
   pageTable_.remove(reinterpret_cast<uintptr_t>(it->ptr), it->size);
+
+  // Evict TLB entries covering this region so stale translations aren't used
+  tlbEvict(reinterpret_cast<uintptr_t>(it->ptr), it->size);
 
   masterRegions_.erase(it);
   

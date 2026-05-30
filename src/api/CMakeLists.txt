@@ -30,6 +30,7 @@ add_library(vgre_api OBJECT
     cudnn/cudnn_attention.cpp
     cudnn/cudnn_ctc_loss.cpp
     cudnn/cudnn_backend_api.cpp
+    cudnn/cudnn_graph.cpp
     cudnn/cudnn_lrn.cpp
     cudnn/cudnn_divisive_norm.cpp
     nccl/nccl_core.cpp
