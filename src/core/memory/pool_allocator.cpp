@@ -1,5 +1,6 @@
 #include "vgre/core/memory_manager.h"
 #include "vgre/common/logger.h"
+#include "vgre/api/vgre_c_api.h"
 
 #include <atomic>
 #include <cstring>
@@ -16,12 +17,25 @@
 #ifndef SYS_mbind
 #  define SYS_mbind 237
 #endif
+#ifndef SYS_getcpu
+#  define SYS_getcpu 309   // x86-64 syscall number
+#endif
 #endif
 
 namespace vgre {
 namespace core {
 
-static constexpr size_t kTlsCacheMax = 32;
+// TLS cache depth: configurable at startup via VGRE_POOL_TLS_DEPTH (default 64, range 8–256).
+// A deeper cache reduces global-mutex trips under heavy multi-threaded workloads.
+// The old hardcoded value of 32 caused thrashing when PyTorch dataloaders cycle many small allocs.
+static const size_t kTlsCacheMax = []() -> size_t {
+    const char* e = vgre_get_config("VGRE_POOL_TLS_DEPTH");
+    if (e) {
+        long v = std::atol(e);
+        if (v >= 8 && v <= 256) return static_cast<size_t>(v);
+    }
+    return 64;
+}();
 static constexpr size_t kTlsMaxBlockSz = 1 * 1024 * 1024;
 static std::atomic<uint32_t> g_poolGen[1024]{};
 
@@ -170,13 +184,29 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
     }
 
 #if defined(__linux__)
-    // NUMA-aware binding: for slabs ≥ 2 MB, bind to NUMA node 0 (matches the
-    // policy used by the UVM managed allocator) to maximise bandwidth locality.
-    // Silently ignore failures (mbind is advisory).
-    if (slabSize >= 2 * 1024 * 1024) {
-      unsigned long nodeMask = 1UL;  // node 0
-      ::syscall(SYS_mbind, slabMemory, slabSize, MPOL_PREFERRED,
-                &nodeMask, sizeof(nodeMask) * 8, 0);
+    // NUMA-aware binding: use the pool's preferred NUMA node (set at createPool).
+    // For pools with numaNode == -1 (any), fall back to the calling thread's NUMA
+    // node by using MPOL_DEFAULT (kernel picks the local node automatically).
+    // Silently ignore failures — mbind is advisory.
+    if (slabSize >= 2 * 1024 * 1024 || pool.numaNode >= 0) {
+      int bindNode = pool.numaNode;
+      // Query calling thread's NUMA node when pool has no preference
+      if (bindNode < 0) {
+#ifdef SYS_getcpu
+          unsigned cpu = 0, node = 0;
+          if (::syscall(SYS_getcpu, &cpu, &node, nullptr) == 0)
+              bindNode = static_cast<int>(node);
+#endif
+      }
+      if (bindNode >= 0 && bindNode < 64) {
+        unsigned long nodeMask = 1UL << static_cast<unsigned>(bindNode);
+        ::syscall(SYS_mbind, slabMemory, slabSize, MPOL_PREFERRED,
+                  &nodeMask, sizeof(nodeMask) * 8, 0);
+      } else {
+        // No preference or out-of-range: let kernel assign local node
+        ::syscall(SYS_mbind, slabMemory, slabSize, 0 /* MPOL_DEFAULT */,
+                  nullptr, 0, 0);
+      }
     }
 #endif
 

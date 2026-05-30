@@ -22,6 +22,9 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#ifdef VGRE_HAS_ZLIB
+#include <zlib.h>
+#endif
 
 // To avoid name conflicts, we define exactly the symbols frameworks need.
 
@@ -102,16 +105,33 @@ static std::string parseFatbinSections(const uint8_t* ptr, size_t totalBytes) {
         if (payloadEnd > totalBytes) break;
 
         if (sec->kind == kFatbinKindPTX && sec->dataSize > 0) {
-            // PTX payload — return as string (null-terminate defensively)
             const char* ptxData = reinterpret_cast<const char*>(ptr + payloadOff);
             VGRE_LOG_INFO("CUDART", "Found PTX section in fatbinary (" +
                           std::to_string(sec->dataSize) + " bytes, sm_" +
                           std::to_string(sec->majorSM) + std::to_string(sec->minorSM) + ")");
-            // Handle zlib-compressed PTX (flags & 0x02 or uncompressedSize > 0)
-            // We can't decompress here without zlib, so fall back to linear scan.
+
             if (sec->uncompressedSize > 0) {
-                VGRE_LOG_WARN("CUDART", "Compressed PTX section not supported — falling back to linear scan");
-                return ""; // signal caller to continue to linear scan
+                // Compressed PTX (zlib/deflate, identified by uncompressedSize > 0)
+#ifdef VGRE_HAS_ZLIB
+                uLongf destLen = static_cast<uLongf>(sec->uncompressedSize) + 1;
+                std::vector<char> decompressed(destLen + 1, '\0');
+                int ret = uncompress(
+                    reinterpret_cast<Bytef*>(decompressed.data()), &destLen,
+                    reinterpret_cast<const Bytef*>(ptxData),
+                    static_cast<uLong>(sec->dataSize));
+                if (ret == Z_OK && destLen > 0) {
+                    VGRE_LOG_INFO("CUDART", "Decompressed PTX section: " +
+                                  std::to_string(destLen) + " bytes");
+                    return std::string(decompressed.data(), destLen);
+                }
+                VGRE_LOG_WARN("CUDART", "zlib decompression failed (ret=" +
+                              std::to_string(ret) + ") — trying linear scan");
+#else
+                VGRE_LOG_WARN("CUDART",
+                    "Compressed PTX section found but zlib not available "
+                    "(build with -DVGRE_ENABLE_ZLIB=ON). Falling back to linear scan.");
+#endif
+                return ""; // signal caller to fall through to linear scan
             }
             return std::string(ptxData, static_cast<size_t>(sec->dataSize));
         } else if (sec->kind == kFatbinKindSASS) {

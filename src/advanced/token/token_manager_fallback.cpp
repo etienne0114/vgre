@@ -12,6 +12,9 @@
 #include <algorithm>
 
 #include "vgre/common/os_backend.h"
+#if defined(__x86_64__)
+#include <cpuid.h>
+#endif
 
 namespace vgre {
 namespace advanced {
@@ -201,9 +204,10 @@ static void sha256CtrEncrypt(const uint8_t key[32], const uint8_t nonce[16],
 }
 
 std::array<uint8_t, 32> HardwareTokenManager::getMachineKey() {
-    std::string identity = "vgre_fallback_kdf";
+    std::string identity = "vgre_fallback_kdf_v3";
 
 #if defined(_WIN32)
+    // Windows: computer name + hardware product ID
     char hostname[256] = {}; DWORD sz = sizeof(hostname);
     GetComputerNameA(hostname, &sz);
     identity += hostname;
@@ -211,12 +215,58 @@ std::array<uint8_t, 32> HardwareTokenManager::getMachineKey() {
     GetUserNameA(username, &sz);
     identity += username;
 #else
-    char hostname[256] = {};
-    gethostname(hostname, sizeof(hostname));
-    identity += hostname;
-    const char* user = vgre_get_config("USER");
-    if (user) identity += user;
-#endif
+    // Linux / macOS: layer multiple hardware-unique sources for entropy
+
+    // Source 1: /etc/machine-id — 128-bit systemd-generated UUID, persistent
+    // across reboots. Available on all modern Linux distributions.
+    {
+        std::ifstream f("/etc/machine-id");
+        if (f) {
+            std::string mid; f >> mid;
+            if (!mid.empty()) identity += "mid:" + mid;
+        }
+    }
+
+    // Source 2: SMBIOS product UUID from kernel DMI interface.
+    // Hardware-unique: tied to the physical motherboard/VM hypervisor identity.
+    {
+        std::ifstream f("/sys/class/dmi/id/product_uuid");
+        if (f) {
+            std::string uuid; f >> uuid;
+            if (!uuid.empty()) identity += "dmi:" + uuid;
+        }
+    }
+
+#if defined(__x86_64__)
+    // Source 3: CPUID brand string (48 bytes) — processor model + stepping.
+    // Not globally unique but adds CPU-specific entropy and migrates with the CPU.
+    {
+        char brand[49] = {};
+        unsigned int eax, ebx, ecx, edx;
+        for (unsigned int leaf = 0x80000002u; leaf <= 0x80000004u; ++leaf) {
+            if (__get_cpuid(leaf, &eax, &ebx, &ecx, &edx)) {
+                unsigned int idx = (leaf - 0x80000002u) * 16u;
+                memcpy(&brand[idx + 0],  &eax, 4);
+                memcpy(&brand[idx + 4],  &ebx, 4);
+                memcpy(&brand[idx + 8],  &ecx, 4);
+                memcpy(&brand[idx + 12], &edx, 4);
+            }
+        }
+        brand[48] = '\0';
+        if (brand[0] != '\0') identity += "cpu:" + std::string(brand);
+    }
+#endif // __x86_64__
+
+    // Source 4: hostname + USER — backward-compatible fallback. Always present.
+    // Ensures key derivation succeeds in minimal container environments.
+    {
+        char hostname[256] = {};
+        gethostname(hostname, sizeof(hostname) - 1);
+        identity += "host:" + std::string(hostname);
+        const char* user = vgre_get_config("USER");
+        if (user && *user) identity += "user:" + std::string(user);
+    }
+#endif // !_WIN32
 
     std::string saltInput = "vgre_fallback_v2:" + identity;
     uint8_t salt[32];

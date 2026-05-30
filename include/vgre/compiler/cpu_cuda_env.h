@@ -99,6 +99,19 @@ struct ptr_unwrapper {
   operator T*() const { return static_cast<T*>(p); }
 };
 
+// ── VNNI / AMX accelerated matmul — callable from JIT-compiled CUDA kernels ──
+// A CUDA kernel that needs an INT8 matrix multiply can call vgre_matmul_int8
+// directly. The runtime dispatches to AVX-VNNI (Alder Lake+) or AMX-BF16
+// (Sapphire Rapids+) as detected at startup.
+extern "C" {
+  void  vgre_matmul_int8(const signed char* A, const signed char* B,
+                          int* C, int M, int N, int K);
+  void  vgre_matmul_bf16(const unsigned short* A, const unsigned short* B,
+                          float* C, int M, int N, int K);
+  signed char vgre_quant_f32_to_int8(float val, float inv_scale);
+  float       vgre_dequant_int8_to_f32(signed char val, float scale);
+}
+
 // ── Texture/Surface Built-ins ──────────────────────────────────────────────
 extern "C" {
   float    vgre_tex1D_f32(uint64_t tex, float x);

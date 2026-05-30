@@ -48,6 +48,7 @@ struct PoolSlab {
 struct MemoryPool {
   PoolHandle id = 0;
   size_t blockSize = 0;            // Minimum allocation granularity
+  int    numaNode  = -1;           // Preferred NUMA node for slab allocation (-1 = any)
   void *freeListHead = nullptr;    // Intrusive free list head
   PoolSlab *slabList = nullptr;    // List of backing slabs
   size_t totalAllocated = 0;

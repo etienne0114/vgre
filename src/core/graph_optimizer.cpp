@@ -124,9 +124,22 @@ bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
         return false;
     }
 
-    // 1. Dimensions must match exactly for point-wise fusion.
-    if (a.gridDim.x != b.gridDim.x || a.gridDim.y != b.gridDim.y || a.gridDim.z != b.gridDim.z) return false;
-    if (a.blockDim.x != b.blockDim.x || a.blockDim.y != b.blockDim.y || a.blockDim.z != b.blockDim.z) return false;
+    // 1. Dimensions: identical grid+block OR compatible element count.
+    // Identical dims: always fusible (pointwise fusion).
+    bool identicalDims = (a.gridDim.x == b.gridDim.x && a.gridDim.y == b.gridDim.y &&
+                          a.gridDim.z == b.gridDim.z &&
+                          a.blockDim.x == b.blockDim.x && a.blockDim.y == b.blockDim.y &&
+                          a.blockDim.z == b.blockDim.z);
+    if (!identicalDims) {
+        // Compatible element count: total threads (grid × block) must match.
+        // Allows fusing kernels with different tile shapes over the same element count.
+        uint64_t threadsA = static_cast<uint64_t>(a.gridDim.x) * a.gridDim.y * a.gridDim.z *
+                            static_cast<uint64_t>(a.blockDim.x) * a.blockDim.y * a.blockDim.z;
+        uint64_t threadsB = static_cast<uint64_t>(b.gridDim.x) * b.gridDim.y * b.gridDim.z *
+                            static_cast<uint64_t>(b.blockDim.x) * b.blockDim.y * b.blockDim.z;
+        if (threadsA == 0 || threadsA != threadsB) return false;
+        // Use A's launch geometry for the fused kernel (fused body iterates all elements)
+    }
 
     VGRE_LOG_INFO("GraphOptimizer", "areFusible check: NodeA=" + std::to_string(a.nodeId) + " (KernelID " + std::to_string(a.kernelId) + "), NodeB=" + std::to_string(b.nodeId) + " (KernelID " + std::to_string(b.kernelId) + ")");
     const auto* irA = RuntimeEngine::instance().getKernelIR(a.kernelId);
@@ -191,8 +204,32 @@ bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
     if (RuntimeEngine::instance().getDeviceProperties(0, props) == VGREResult::SUCCESS) {
         if (irA->sharedMemSize + irB->sharedMemSize > props.sharedMemPerBlock) return false;
     } else {
-        // Fallback to conservative limit if properties lookup fails.
         if (irA->sharedMemSize + irB->sharedMemSize > 48 * 1024) return false;
+    }
+
+    // 4. Register pressure estimation.
+    // Heuristic: count scalar-typed arguments + local variable patterns in the
+    // source. Each float/double ≈ 1-2 registers. Keep headroom below 200
+    // (hardware limit 255, ~55 register overhead for the fused wrapper).
+    // Over-counting is safe: it may reject fusible pairs but never allows invalid fusions.
+    auto estimateRegs = [](const KernelIR* ir) -> int {
+        int regs = static_cast<int>(ir->argSizes.size()); // one reg per arg
+        const std::string& src = ir->source;
+        // Count 'float ' and 'double ' local var declarations (rough register estimate)
+        size_t pos = 0;
+        while ((pos = src.find("float ", pos)) != std::string::npos) { ++regs; ++pos; }
+        pos = 0;
+        while ((pos = src.find("double ", pos)) != std::string::npos) { regs += 2; ++pos; }
+        pos = 0;
+        while ((pos = src.find("int ", pos)) != std::string::npos) { ++regs; ++pos; }
+        return regs;
+    };
+    int combinedRegs = estimateRegs(irA) + estimateRegs(irB);
+    if (combinedRegs > 200) {
+        VGRE_LOG_DEBUG("GraphOptimizer",
+            "Fusion blocked: estimated register pressure " + std::to_string(combinedRegs) +
+            " > 200 for nodes " + std::to_string(a.nodeId) + " + " + std::to_string(b.nodeId));
+        return false;
     }
 
     return true;

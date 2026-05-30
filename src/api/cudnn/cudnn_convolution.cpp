@@ -3,6 +3,43 @@
 #include "cudnn_internal.h"
 
 #include "vgre/common/openmp_helper.h"
+#include "vgre/runtime/vector_engine.h"
+
+// ── INT8 native helpers ────────────────────────────────────────────────────
+
+// Transpose int8 weight matrix from K_out×K_in → K_in×K_out so it can be
+// passed as the K×N "B" argument of VectorEngine::matMulInt8.
+static void transpose_w_int8(const int8_t* w, int8_t* wT, int K_out, int K_in) {
+    for (int k = 0; k < K_out; ++k)
+        for (int c = 0; c < K_in; ++c)
+            wT[c * K_out + k] = w[k * K_in + c];
+}
+
+// im2col for INT8 input: converts (N,C,H,W) input into a
+// (N*outH*outW) × (C*KH*KW) column matrix using zero-padding.
+static void im2col_int8(const int8_t* src, int8_t* col,
+                        int N, int C, int H, int W,
+                        int KH, int KW,
+                        int padH, int padW, int strH, int strW,
+                        int outH, int outW) {
+    const int K_inner = C * KH * KW;
+    for (int n = 0; n < N; ++n)
+    for (int oh = 0; oh < outH; ++oh)
+    for (int ow = 0; ow < outW; ++ow) {
+        int rowIdx = (n * outH + oh) * outW + ow;
+        for (int c = 0; c < C; ++c)
+        for (int kh = 0; kh < KH; ++kh)
+        for (int kw = 0; kw < KW; ++kw) {
+            int colIdx = (c * KH + kh) * KW + kw;
+            int ih = oh * strH + kh - padH;
+            int iw = ow * strW + kw - padW;
+            int8_t val = 0;
+            if (ih >= 0 && ih < H && iw >= 0 && iw < W)
+                val = src[((n * C + c) * H + ih) * W + iw];
+            col[rowIdx * K_inner + colIdx] = val;
+        }
+    }
+}
 
 // Algorithm selection
 static cudnnConvolutionFwdAlgo_t selectConvFwdAlgo(
@@ -88,33 +125,82 @@ cudnnStatus_t cudnnConvolutionForward(
 
     bool isInt8 = (xt->dtype == CUDNN_DATA_INT8 || xt->dtype == CUDNN_DATA_INT8x4 ||
                    xt->dtype == CUDNN_DATA_INT8x32);
-    int xElem = xt->n * xt->c * xt->h * xt->w;
-    int wElem = ft->k * ft->c * ft->r * ft->s;
-    std::vector<float> xFloat, wFloat;
-    const float* xPtr = (const float*)x;
-    const float* wPtr = (const float*)w;
+    int ySize = yt->n * yt->c * yt->h * yt->w;
+
+    // ── Native INT8 path: AVX-VNNI / AMX accelerated (no FP32 round-trip) ────
+    // Replaces the old dequant→FP32→requant path for both 1×1 and general convs.
     if (isInt8) {
-        float xScale = (a > 1e-8f) ? a : (1.f / 128.f);
-        float wScale = (b > 1e-8f) ? b : (1.f / 128.f);
-        xFloat.resize(xElem);
-        wFloat.resize(wElem);
-        const int8_t* xi = (const int8_t*)x;
-        const int8_t* wi = (const int8_t*)w;
-        for (int i = 0; i < xElem; ++i) xFloat[i] = vgre_dequant_i8(xi[i], xScale);
-        for (int i = 0; i < wElem; ++i) wFloat[i] = vgre_dequant_i8(wi[i], wScale);
-        xPtr = xFloat.data();
-        wPtr = wFloat.data();
-        a = 1.f; b = 0.f;
+        const int8_t* xi = static_cast<const int8_t*>(x);
+        const int8_t* wi = static_cast<const int8_t*>(w);
+        int8_t*       yi = static_cast<int8_t*>(y);
+
+        const float xScale  = (a > 1e-8f) ? a : (1.f / 128.f);
+        const float wScale  = (b > 1e-8f) ? b : (1.f / 128.f);
+        // Output: real_value = int32_result * xScale * wScale; requantize with outScale=xScale
+        const float combScale = wScale;  // xScale / outScale cancels (outScale == xScale)
+
+        const int M       = xt->n * yt->h * yt->w;   // output pixels
+        const int N_out   = ft->k;                    // output channels
+        const int K_inner = xt->c * ft->r * ft->s;   // inner dimension
+
+        // Transpose weights: K_out×K_inner → K_inner×K_out (required by matMulInt8 B shape)
+        std::vector<int8_t> wT(static_cast<size_t>(K_inner) * N_out);
+        transpose_w_int8(wi, wT.data(), N_out, K_inner);
+
+        std::vector<int32_t> out_i32(static_cast<size_t>(M) * N_out, 0);
+
+        if (ft->r == 1 && ft->s == 1) {
+            // 1×1 conv: input is already in (N*H*W)×C layout when read row-by-row
+            // x[n][c][h][w] → reshaped as x_mat[(n*H+h)*W+w][c] = M×C_in
+            // For CHW layout this means reading C_in elements apart (stride C) — need contiguous copy
+            std::vector<int8_t> xMat(static_cast<size_t>(M) * xt->c);
+            for (int n = 0; n < xt->n; ++n)
+            for (int h = 0; h < yt->h; ++h)
+            for (int w_ = 0; w_ < yt->w; ++w_) {
+                int row = (n * yt->h + h) * yt->w + w_;
+                int ih = h * cv->str_h - cv->pad_h;
+                int iw = w_ * cv->str_w - cv->pad_w;
+                if (ih >= 0 && ih < xt->h && iw >= 0 && iw < xt->w) {
+                    for (int c = 0; c < xt->c; ++c)
+                        xMat[row * xt->c + c] = xi[((n * xt->c + c) * xt->h + ih) * xt->w + iw];
+                } // else: stays 0 (already zeroed)
+            }
+            vgre::runtime::VectorEngine::instance().matMulInt8(
+                xMat.data(), wT.data(), out_i32.data(), M, N_out, xt->c);
+        } else {
+            // General conv: im2col then INT8 GEMM
+            std::vector<int8_t> col(static_cast<size_t>(M) * K_inner, 0);
+            im2col_int8(xi, col.data(),
+                        xt->n, xt->c, xt->h, xt->w,
+                        ft->r, ft->s,
+                        cv->pad_h, cv->pad_w, cv->str_h, cv->str_w,
+                        yt->h, yt->w);
+            vgre::runtime::VectorEngine::instance().matMulInt8(
+                col.data(), wT.data(), out_i32.data(), M, N_out, K_inner);
+        }
+
+        // Scale int32 → int8 output: out[n][k][h][w] = clamp(round(acc * combScale))
+        for (int n = 0; n < xt->n; ++n)
+        for (int k = 0; k < N_out; ++k)
+        for (int h = 0; h < yt->h; ++h)
+        for (int w_ = 0; w_ < yt->w; ++w_) {
+            int srcIdx = ((n * yt->h + h) * yt->w + w_) * N_out + k;
+            int dstIdx = ((n * N_out + k) * yt->h + h) * yt->w + w_;
+            yi[dstIdx] = vgre_quant_f32_to_i8(
+                static_cast<float>(out_i32[srcIdx]) * combScale, 1.f);
+        }
+        return CUDNN_STATUS_SUCCESS;
     }
 
-    int ySize = yt->n * yt->c * yt->h * yt->w;
-    float* yf = (float*)y;
-    if (!isInt8) {
-        if (b != 0.0f) {
-            for (int i = 0; i < ySize; ++i) yf[i] *= b;
-        } else {
-            memset(yf, 0, ySize * sizeof(float));
-        }
+    // ── FP32 / FP16 path (unchanged) ──────────────────────────────────────────
+    const float* xPtr = static_cast<const float*>(x);
+    const float* wPtr = static_cast<const float*>(w);
+
+    float* yf = static_cast<float*>(y);
+    if (b != 0.0f) {
+        for (int i = 0; i < ySize; ++i) yf[i] *= b;
+    } else {
+        memset(yf, 0, ySize * sizeof(float));
     }
 
     std::vector<float> tmp(ySize, 0.f);
@@ -122,8 +208,6 @@ cudnnStatus_t cudnnConvolutionForward(
     if ((algo == CUDNN_CONVOLUTION_FWD_ALGO_GEMM
          || algo == CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM)
         && ft->r == 1 && ft->s == 1) {
-        const float* xf = xPtr;
-        const float* wf = wPtr;
         #ifdef _OPENMP
         #pragma omp parallel for OMP_COLLAPSE(2) schedule(static) if (xt->n * ft->k * yt->h * yt->w > 1024)
         #endif
@@ -136,8 +220,8 @@ cudnnStatus_t cudnnConvolutionForward(
             int iw = ow * cv->str_w - cv->pad_w;
             if (ih >= 0 && ih < xt->h && iw >= 0 && iw < xt->w) {
                 for (int c = 0; c < xt->c; ++c) {
-                    acc += xf[((n * xt->c + c) * xt->h + ih) * xt->w + iw]
-                         * wf[(k * ft->c + c) * ft->r * ft->s];
+                    acc += xPtr[((n * xt->c + c) * xt->h + ih) * xt->w + iw]
+                         * wPtr[(k * ft->c + c) * ft->r * ft->s];
                 }
             }
             tmp[((n * yt->c + k) * yt->h + oh) * yt->w + ow] = acc;
@@ -148,15 +232,7 @@ cudnnStatus_t cudnnConvolutionForward(
                   cv->pad_h, cv->pad_w, cv->str_h, cv->str_w, cv->dil_h, cv->dil_w,
                   xPtr, wPtr, tmp.data());
     }
-    if (isInt8) {
-        float outScale = (a > 1e-8f) ? a : (1.f / 128.f);
-        float invOutScale = 1.f / outScale;
-        int8_t* yi = (int8_t*)y;
-        for (int i = 0; i < ySize; ++i)
-            yi[i] = vgre_quant_f32_to_i8(tmp[i], invOutScale);
-    } else {
-        for (int i = 0; i < ySize; ++i) yf[i] += a * tmp[i];
-    }
+    for (int i = 0; i < ySize; ++i) yf[i] += a * tmp[i];
     return CUDNN_STATUS_SUCCESS;
 }
 
