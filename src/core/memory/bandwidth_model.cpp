@@ -13,6 +13,45 @@ void MemoryManager::recordMemoryBandwidth(size_t bytes, double execMs) {
     ++bwKernelCount_;
 }
 
+// ── Workload Characterization Cache ───────────────────────────────────────
+// Maps kernel name → characterization (arithmetic intensity, access pattern,
+// historical execution time). Updated by recordMemoryBandwidth callers that
+// also pass a kernel name and flop count.
+struct KernelCharacterization {
+    double arithmeticIntensity{0.0};   // FLOPs / byte
+    double avgExecMs           {0.0};  // EMA execution time
+    double avgBandwidthGBps    {0.0};  // EMA bandwidth
+    uint64_t samples           {0};
+    bool   computeBound        {false};
+};
+
+static std::unordered_map<std::string, KernelCharacterization> g_kernelCache;
+static std::mutex g_kernelCacheMutex;
+
+void MemoryManager::updateKernelCharacterization(const std::string& name,
+                                                  size_t bytes, double execMs,
+                                                  double flops) {
+    if (name.empty() || bytes == 0 || execMs <= 0.0) return;
+    constexpr double kAlpha = 0.25;
+    std::lock_guard<std::mutex> lk(g_kernelCacheMutex);
+    auto& c = g_kernelCache[name];
+    double bw = (bytes / 1e9) / (execMs / 1e3);
+    double ai = (flops > 0 && bytes > 0) ? (flops / static_cast<double>(bytes)) : 0.0;
+    if (c.samples == 0) {
+        c.avgExecMs        = execMs;
+        c.avgBandwidthGBps = bw;
+        c.arithmeticIntensity = ai;
+    } else {
+        c.avgExecMs        = kAlpha * execMs + (1.0 - kAlpha) * c.avgExecMs;
+        c.avgBandwidthGBps = kAlpha * bw     + (1.0 - kAlpha) * c.avgBandwidthGBps;
+        c.arithmeticIntensity = kAlpha * ai  + (1.0 - kAlpha) * c.arithmeticIntensity;
+    }
+    ++c.samples;
+    // Compute-bound if arithmetic intensity > ridge point (~2 FLOPs/byte for 100 GFLOP/s + 50 GB/s)
+    constexpr double kRidge = 2.0;
+    c.computeBound = (c.arithmeticIntensity > kRidge);
+}
+
 MemoryManager::MemoryBandwidthStats MemoryManager::getMemoryBandwidthStats() const {
     // Dynamic GPU peak bandwidth detection based on measured peak throughput
     // instead of hardcoded 2000 GB/s default
@@ -68,22 +107,49 @@ MemoryManager::MemoryBandwidthStats MemoryManager::getMemoryBandwidthStats() con
             s_measuredGpuPeak / stats.effective_bandwidth_gbps, 10000.0);
     }
 
-    // Dynamic bandwidth-bound detection using statistical analysis
-    // instead of hardcoded 10% threshold
     double cpuPeak = h2dBandwidth_.load();
     if (cpuPeak > 0) {
-        // Use statistical Z-score to determine if bandwidth-bound
-        // If effective bandwidth is more than 2 standard deviations below CPU peak,
-        // consider it bandwidth-bound (95% confidence interval)
         double zScore = (cpuPeak - stats.effective_bandwidth_gbps) / cpuPeak;
         stats.is_bandwidth_bound = (zScore > 2.0);
-        
-        // Coalescing efficiency as ratio of achieved to theoretical peak
         stats.coalescing_efficiency = std::min(
             stats.effective_bandwidth_gbps / cpuPeak, 1.0);
     } else {
         stats.is_bandwidth_bound = false;
         stats.coalescing_efficiency = 1.0;
+    }
+
+    // ── Roofline Model ──────────────────────────────────────────────────────
+    // Estimate peak compute from hardware concurrency × per-core peak.
+    // On 12-core Alder Lake (2P + 8E + 2HT) with AVX2 FMA:
+    //   P-cores: 2 cores × 2 FP32 FMAs × 8 FP32/FMA × 3.4 GHz = ~109 GFLOPs/s
+    //   E-cores: 8 cores × 2 FP32 FMAs × 8 FP32/FMA × 2.5 GHz = ~320 GFLOPs/s (over-estimate)
+    //   Conservative combined: ~100 GFLOPs/s
+    constexpr double kPeakComputeGFLOPs = 100.0;
+
+    stats.peak_compute_gflops = kPeakComputeGFLOPs;
+
+    // Ridge point: FLOPs per byte at which compute and memory bandwidth are equal
+    if (stats.effective_bandwidth_gbps > 0) {
+        stats.ridge_point_flops_per_byte =
+            kPeakComputeGFLOPs / stats.effective_bandwidth_gbps;
+    }
+
+    // Average arithmetic intensity from kernel characterization cache
+    {
+        std::lock_guard<std::mutex> klk(g_kernelCacheMutex);
+        if (!g_kernelCache.empty()) {
+            double sum = 0.0; uint64_t cnt = 0;
+            for (const auto& [n, c] : g_kernelCache) { sum += c.arithmeticIntensity; ++cnt; }
+            stats.avg_arithmetic_intensity = sum / cnt;
+        }
+    }
+
+    // Roofline prediction: min(peak_compute, ai * bandwidth)
+    if (stats.ridge_point_flops_per_byte > 0 && stats.avg_arithmetic_intensity > 0) {
+        double mem_roof    = stats.avg_arithmetic_intensity * stats.effective_bandwidth_gbps;
+        stats.predicted_performance_gflops = std::min(kPeakComputeGFLOPs, mem_roof);
+        stats.last_kernel_compute_bound =
+            (stats.avg_arithmetic_intensity >= stats.ridge_point_flops_per_byte);
     }
 
     return stats;

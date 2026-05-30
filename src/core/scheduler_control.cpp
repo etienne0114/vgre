@@ -115,6 +115,13 @@ void Scheduler::setThreadCount(int n) {
 uint64_t Scheduler::getCompletedTasks() const { return completed_.load(); }
 uint64_t Scheduler::getPendingTasks() const { return pending_.load(); }
 
+void Scheduler::updateStreamPriority(StreamId stream, int newPriority) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  queue_.updatePriority(stream, newPriority);
+  for (auto& [node, heap] : numaQueues_)
+    heap.updatePriority(stream, newPriority);
+}
+
 Scheduler &Scheduler::instance() {
   static Scheduler inst;
   return inst;

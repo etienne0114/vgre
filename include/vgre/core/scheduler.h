@@ -199,29 +199,98 @@ public:
   // Per-stream SPSC fast path (Track 7.3)
   void enqueueToStream(uint64_t streamId, WorkItem item);
 
+  // Update the priority of all queued items belonging to a stream.
+  // O(log n) due to the indexed priority heap.
+  void updateStreamPriority(StreamId stream, int newPriority);
+
   // Singleton convenience
   static Scheduler &instance();
 
 private:
-  void buildNumaTopology();          // Discover NUMA nodes; pin worker threads
-  void workerLoop(int workerIdx);    // Worker body: NUMA-local queue first, then steal
+  // ── Task Priority Heap ────────────────────────────────────────────────────
+  // An indexed binary max-heap that supports O(log n) priority updates
+  // (decrease-key / increase-key). This enables stream priority changes to
+  // take effect on already-queued items without dequeue-requeue.
+  //
+  // Unlike std::priority_queue, we maintain a position index (stream → index)
+  // so updateStreamPriority() can find and re-sort items in O(log n).
+  struct IndexedHeap {
+    std::vector<WorkItem>                 data;
+    std::unordered_map<StreamId, size_t>  pos;   // stream → heap index
+
+    bool empty() const { return data.empty(); }
+    const WorkItem& top() const { return data[0]; }
+
+    void push(WorkItem item) {
+      size_t idx = data.size();
+      pos[item.streamId] = idx;
+      data.push_back(std::move(item));
+      siftUp(idx);
+    }
+
+    void pop() {
+      if (data.empty()) return;
+      pos.erase(data[0].streamId);
+      if (data.size() > 1) {
+        data[0] = std::move(data.back());
+        pos[data[0].streamId] = 0;
+      }
+      data.pop_back();
+      if (!data.empty()) siftDown(0);
+    }
+
+    void updatePriority(StreamId stream, int newPriority) {
+      auto it = pos.find(stream);
+      if (it == pos.end()) return;
+      size_t idx = it->second;
+      int old = data[idx].priority;
+      data[idx].priority = newPriority;
+      if (newPriority > old) siftUp(idx);
+      else                   siftDown(idx);
+    }
+
+  private:
+    void siftUp(size_t i) {
+      while (i > 0) {
+        size_t p = (i - 1) / 2;
+        if (data[p] < data[i]) { swap(p, i); i = p; }
+        else break;
+      }
+    }
+    void siftDown(size_t i) {
+      size_t n = data.size();
+      while (true) {
+        size_t best = i, l = 2*i+1, r = 2*i+2;
+        if (l < n && data[best] < data[l]) best = l;
+        if (r < n && data[best] < data[r]) best = r;
+        if (best == i) break;
+        swap(i, best); i = best;
+      }
+    }
+    void swap(size_t a, size_t b) {
+      pos[data[a].streamId] = b;
+      pos[data[b].streamId] = a;
+      std::swap(data[a], data[b]);
+    }
+  };
+
+  void buildNumaTopology();
+  void workerLoop(int workerIdx);
   struct StreamQueue;
   void tryProcessStream(std::shared_ptr<StreamQueue> sq, StreamId stream);
 
-  // Helper functions shared across split implementation files
   static bool enqueueWithWorkerFallback(int workerIdx,
                                        WorkItem&& item,
                                        std::vector<std::unique_ptr<ChaseLevDeque<WorkItem*>>>& workerDeques,
-                                       std::priority_queue<WorkItem>& globalQueue,
+                                       IndexedHeap& globalQueue,
                                        std::mutex& queueMutex);
   bool hasNumaNode(int numaNode) const;
 
   std::vector<std::thread> workers_;
   std::vector<std::unique_ptr<ChaseLevDeque<WorkItem*>>> workerDeques_;
-  std::priority_queue<WorkItem> queue_; // Global ready queue (work-stealing fallback)
+  IndexedHeap queue_;
 
-  // Per-NUMA dispatch queues: tasks submitted via submitNumaTask() land here.
-  std::unordered_map<int, std::priority_queue<WorkItem>> numaQueues_;
+  std::unordered_map<int, IndexedHeap> numaQueues_;
   // NUMA node assigned to each worker thread (index == worker index in workers_).
   std::vector<int> workerNumaNodes_;
   // Set of NUMA nodes for O(1) membership testing (kept in sync with workerNumaNodes_)

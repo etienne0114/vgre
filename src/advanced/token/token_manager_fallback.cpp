@@ -268,16 +268,18 @@ std::array<uint8_t, 32> HardwareTokenManager::getMachineKey() {
     }
 #endif // !_WIN32
 
-    std::string saltInput = "vgre_fallback_v2:" + identity;
+    std::string saltInput = "vgre_fallback_v3_pbkdf2:" + identity;
     uint8_t salt[32];
     crypto::sha256(reinterpret_cast<const uint8_t*>(saltInput.data()),
                    saltInput.size(), salt);
 
     std::array<uint8_t, 32> key{};
+    // Use PBKDF2-SHA256 with increased iterations for stronger security
+    // 200,000 iterations provides ~2x security margin over previous 100,000
     crypto::pbkdf2_sha256(
         reinterpret_cast<const uint8_t*>("vgre_fallback_kdf"), 17,
         salt, sizeof(salt),
-        100000,
+        200000,  // Increased from 100k to 200k for stronger security
         key.data(), key.size());
 
     memset(salt, 0, sizeof(salt));

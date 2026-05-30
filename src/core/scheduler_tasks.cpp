@@ -198,9 +198,53 @@ Scheduler::submitNumaTask(StreamId stream, std::function<void()> taskFn,
   return future;
 }
 
+// ── Queue Capacity Prediction ─────────────────────────────────────────────
+// Tracks enqueue and dequeue rates via EMA and computes the predicted time
+// until the SPSC ring (capacity 4096) fills up. When headroom_ms < 50 ms,
+// emits a warning so callers can throttle submission (back-pressure signal).
+static void updateQueueCapacityModel(uint64_t pendingNow) {
+    static thread_local auto  qcp_lastTime    = std::chrono::steady_clock::now();
+    static thread_local uint64_t qcp_lastPending = 0;
+    static thread_local double   qcp_emaEnqRate = 0.0; // items/s EMA
+    static thread_local double   qcp_emaDeqRate = 0.0;
+
+    auto now = std::chrono::steady_clock::now();
+    double dt = std::chrono::duration<double>(now - qcp_lastTime).count();
+    if (dt < 0.05) return;  // update at most every 50 ms
+
+    constexpr double kRingCap  = 4096.0;
+    constexpr double kAlpha    = 0.20;
+    constexpr double kWarnMs   = 50.0;
+
+    int64_t delta = static_cast<int64_t>(pendingNow) - static_cast<int64_t>(qcp_lastPending);
+    double  enq   = std::max(0.0, static_cast<double>(delta)) / dt;
+    double  deq   = std::max(0.0, static_cast<double>(-delta)) / dt;
+
+    qcp_emaEnqRate = kAlpha * enq + (1.0 - kAlpha) * qcp_emaEnqRate;
+    qcp_emaDeqRate = kAlpha * deq + (1.0 - kAlpha) * qcp_emaDeqRate;
+
+    double netFillRate = qcp_emaEnqRate - qcp_emaDeqRate;
+    if (netFillRate > 0.0) {
+        double headroomItems = kRingCap - static_cast<double>(pendingNow);
+        double fillTimeMs    = (headroomItems / netFillRate) * 1000.0;
+        if (fillTimeMs < kWarnMs) {
+            VGRE_LOG_WARN("Scheduler",
+                "Queue capacity warning: ring fills in ~" +
+                std::to_string(static_cast<int>(fillTimeMs)) + " ms "
+                "(pending=" + std::to_string(pendingNow) +
+                " enqRate=" + std::to_string(static_cast<int>(qcp_emaEnqRate)) + "/s)");
+        }
+    }
+
+    qcp_lastPending = pendingNow;
+    qcp_lastTime    = now;
+}
+
 // ── Per-stream SPSC fast path (Track 7.3) ─────────────────────────────────
 void Scheduler::enqueueToStream(uint64_t streamId, WorkItem item) {
     if (shutdown_.load(std::memory_order_relaxed)) return;
+
+    updateQueueCapacityModel(pending_.load(std::memory_order_relaxed));
 
 #ifdef ENABLE_VGRE_SPSC
     // Stream S is pinned deterministically to worker (S % numThreads_).

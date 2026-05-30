@@ -76,116 +76,233 @@ struct VgreTlbStats {
 } // namespace
 static VgreTlbStats g_tlbStats;
 
-// TLB dimensions: compile-time constants so thread-local arrays are statically
-// sized. Runtime env overrides are checked at lookup time for the active range.
+// ── TLB Dimensions ────────────────────────────────────────────────────────────
 static constexpr int kTlbSets = 256;
 static constexpr int kTlbWays = 8;
 
-struct TlbEntry {
-    uintptr_t tag;    // virtual page (addr >> 12), 0 = invalid
-    vgre::core::ManagedRegion* region;
-    uint64_t access_count; // For LRU-like replacement
+// ── Structure-of-Arrays TLB set for vectorized lookup ────────────────────────
+// Storing tags and regions as separate contiguous arrays allows AVX2 to load
+// 4 tags in a single 256-bit register and compare all 4 simultaneously.
+struct alignas(64) TlbSet {
+    uintptr_t              tags[kTlbWays];    // page tags (0 = invalid)
+    vgre::core::ManagedRegion* regions[kTlbWays]; // corresponding region pointers
+    uint64_t               access[kTlbWays];  // LRU access counter per way
+    uint8_t                clock;             // CLOCK replacement hand
 };
 
-// L1 TLB - Fast, small cache for hot pages
-static thread_local TlbEntry t_tlb[kTlbSets][kTlbWays];
-static thread_local uint8_t  t_tlb_clock[kTlbSets];
-static thread_local uint64_t t_tlb_access_counter = 0;
+// L1 TLB — thread-local, 256 sets × 8 ways
+static thread_local TlbSet  t_tlb[kTlbSets];
+static thread_local uint64_t t_tlb_ctr = 0;
 
-// L2 TLB - Larger cache for better hit rates on larger working sets
+// ── L2 Thread-Local TLB (larger, slower) ─────────────────────────────────────
 static constexpr int kL2TlbSets = 1024;
 static constexpr int kL2TlbWays = 16;
-static thread_local TlbEntry t_l2_tlb[kL2TlbSets][kL2TlbWays];
-static thread_local uint64_t t_l2_tlb_access_counter = 0;
 
-// Forward declarations (tlbFill used inside tlbLookup for L2→L1 promotion)
+struct alignas(64) L2TlbSet {
+    uintptr_t              tags[kL2TlbWays];
+    vgre::core::ManagedRegion* regions[kL2TlbWays];
+    uint64_t               access[kL2TlbWays];
+};
+static thread_local L2TlbSet  t_l2[kL2TlbSets];
+static thread_local uint64_t  t_l2_ctr = 0;
+
+// ── L2 Shared TLB (process-wide) ─────────────────────────────────────────────
+// Sharded to allow concurrent access from all worker threads.
+// 16 shards × 256 sets × 4 ways = 16K entries total.
+// Uses atomic pointer to the region so no mutex is needed on the hot read path.
+static constexpr int kSharedL2Shards = 16;
+static constexpr int kSharedL2Sets   = 256;
+static constexpr int kSharedL2Ways   = 4;
+
+struct alignas(64) SharedTlbEntry {
+    std::atomic<uintptr_t>              tag{0};
+    std::atomic<vgre::core::ManagedRegion*> region{nullptr};
+    std::atomic<uint64_t>               access{0};
+};
+
+struct alignas(4096) SharedTlbShard {
+    SharedTlbEntry sets[kSharedL2Sets][kSharedL2Ways];
+};
+
+static SharedTlbShard g_sharedL2[kSharedL2Shards];
+static std::atomic<uint64_t> g_sharedL2Ctr{0};
+
+// ── NUMA Latency Model ────────────────────────────────────────────────────────
+// Calibrated inter-NUMA bandwidth in GB/s. Index [src][dst].
+// Initialised lazily on first access; updated by calibrateBandwidth().
+static constexpr int kMaxNumaNodes = 8;
+static std::atomic<double> g_numaLatencyNs[kMaxNumaNodes][kMaxNumaNodes]{};
+static std::atomic<double> g_numaBandwidthGBps[kMaxNumaNodes][kMaxNumaNodes]{};
+
+// Expose inter-node bandwidth for compression break-even calculation
+static double getInterNodeBandwidthGBps(int srcNode, int dstNode) {
+    if (srcNode < 0 || dstNode < 0 ||
+        srcNode >= kMaxNumaNodes || dstNode >= kMaxNumaNodes)
+        return 20.0; // conservative default
+    double bw = g_numaBandwidthGBps[srcNode][dstNode].load(std::memory_order_relaxed);
+    return (bw > 0.0) ? bw : (srcNode == dstNode ? 40.0 : 20.0);
+}
+
+// ── Forward declarations ──────────────────────────────────────────────────────
 inline void tlbFill(uintptr_t addr, vgre::core::ManagedRegion* r);
 inline void tlbEvict(uintptr_t addr, size_t size);
 
+// ── Vectorized TLB Lookup ────────────────────────────────────────────────────
+// For kTlbWays == 8, AVX2 can compare 4 tags per 256-bit register in two rounds.
 inline vgre::core::ManagedRegion* tlbLookup(uintptr_t addr) {
     if (!kTlbEnabled) return nullptr;
-    
-    uintptr_t page = addr >> 12;
-    
-    // L1 TLB lookup
-    int l1_set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
-    for (int w = 0; w < kTlbWays; ++w) {
-        if (t_tlb[l1_set][w].tag == page) {
-            t_tlb[l1_set][w].access_count = ++t_tlb_access_counter;
+
+    const uintptr_t page = addr >> 12;
+
+    // ── L1 TLB (vectorized tag comparison) ───────────────────────────────────
+    const int l1_set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
+    TlbSet& S1 = t_tlb[l1_set];
+
+#if defined(__AVX2__) && defined(ENABLE_VGRE_TLB)
+    // Load 4 tags at a time using 256-bit vector (4 × 64-bit)
+    const __m256i vtgt = _mm256_set1_epi64x(static_cast<int64_t>(page));
+    // First 4 ways
+    {
+        __m256i vtags = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(S1.tags));
+        __m256i vcmp  = _mm256_cmpeq_epi64(vtags, vtgt);
+        int     mask  = _mm256_movemask_epi8(vcmp); // 8 bits → 4 bits active
+        if (mask) {
+            int way = __builtin_ctz(static_cast<unsigned>(mask)) >> 3; // 8 bytes per lane
+            S1.access[way] = ++t_tlb_ctr;
             g_tlbStats.l1Hits.fetch_add(1, std::memory_order_relaxed);
-            return t_tlb[l1_set][w].region;
+            return S1.regions[way];
         }
     }
+    // Ways 4-7
+    if constexpr (kTlbWays > 4) {
+        __m256i vtags = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(S1.tags + 4));
+        __m256i vcmp  = _mm256_cmpeq_epi64(vtags, vtgt);
+        int     mask  = _mm256_movemask_epi8(vcmp);
+        if (mask) {
+            int way = 4 + (__builtin_ctz(static_cast<unsigned>(mask)) >> 3);
+            S1.access[way] = ++t_tlb_ctr;
+            g_tlbStats.l1Hits.fetch_add(1, std::memory_order_relaxed);
+            return S1.regions[way];
+        }
+    }
+#else
+    for (int w = 0; w < kTlbWays; ++w) {
+        if (S1.tags[w] == page) {
+            S1.access[w] = ++t_tlb_ctr;
+            g_tlbStats.l1Hits.fetch_add(1, std::memory_order_relaxed);
+            return S1.regions[w];
+        }
+    }
+#endif
     g_tlbStats.l1Misses.fetch_add(1, std::memory_order_relaxed);
 
-    // L2 TLB lookup - larger cache for better hit rates
-    int l2_set = static_cast<int>(page % static_cast<uintptr_t>(kL2TlbSets));
+    // ── L2 Thread-Local TLB ──────────────────────────────────────────────────
+    const int l2_set = static_cast<int>(page % static_cast<uintptr_t>(kL2TlbSets));
+    L2TlbSet& S2 = t_l2[l2_set];
     for (int w = 0; w < kL2TlbWays; ++w) {
-        if (t_l2_tlb[l2_set][w].tag == page) {
-            t_l2_tlb[l2_set][w].access_count = ++t_l2_tlb_access_counter;
-            // Promote to L1 on L2 hit
-            tlbFill(addr, t_l2_tlb[l2_set][w].region);
+        if (S2.tags[w] == page) {
+            S2.access[w] = ++t_l2_ctr;
+            tlbFill(addr, S2.regions[w]);  // promote to L1
             g_tlbStats.l2Hits.fetch_add(1, std::memory_order_relaxed);
-            return t_l2_tlb[l2_set][w].region;
+            return S2.regions[w];
         }
     }
     g_tlbStats.l2Misses.fetch_add(1, std::memory_order_relaxed);
+
+    // ── L2 Shared TLB (process-wide) ─────────────────────────────────────────
+    const int shard  = static_cast<int>(page % static_cast<uintptr_t>(kSharedL2Shards));
+    const int s2_set = static_cast<int>((page / kSharedL2Shards) % kSharedL2Sets);
+    for (int w = 0; w < kSharedL2Ways; ++w) {
+        SharedTlbEntry& e = g_sharedL2[shard].sets[s2_set][w];
+        uintptr_t etag = e.tag.load(std::memory_order_acquire);
+        if (etag == page) {
+            vgre::core::ManagedRegion* rptr =
+                e.region.load(std::memory_order_acquire);
+            if (rptr) {
+                e.access.fetch_add(1, std::memory_order_relaxed);
+                tlbFill(addr, rptr);  // promote to L1 + thread-local L2
+                return rptr;
+            }
+        }
+    }
 
     return nullptr;
 }
 
 inline void tlbFill(uintptr_t addr, vgre::core::ManagedRegion* r) {
     if (!kTlbEnabled) return;
-    
-    uintptr_t page = addr >> 12;
-    
-    // Fill L1 TLB
-    int l1_set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
+    const uintptr_t page = addr >> 12;
+
+    // ── Fill L1 TLB (CLOCK replacement) ──────────────────────────────────────
+    const int l1_set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
+    TlbSet& S1 = t_tlb[l1_set];
+    // Find invalid slot or evict CLOCK victim
     for (int i = 0; i < kTlbWays; ++i) {
-        int w = (t_tlb_clock[l1_set] + i) % kTlbWays;
-        if (t_tlb[l1_set][w].tag == 0) {
-            t_tlb[l1_set][w] = {page, r, ++t_tlb_access_counter};
-            t_tlb_clock[l1_set] = static_cast<uint8_t>((w + 1) % kTlbWays);
-            break;
+        int w = (S1.clock + i) % kTlbWays;
+        if (S1.tags[w] == 0) {
+            S1.tags[w] = page; S1.regions[w] = r; S1.access[w] = ++t_tlb_ctr;
+            S1.clock = static_cast<uint8_t>((w + 1) % kTlbWays);
+            goto fill_l2;
         }
     }
-    
-    // Fill L2 TLB (always fill L2 as well for better coverage)
-    int l2_set = static_cast<int>(page % static_cast<uintptr_t>(kL2TlbSets));
-    int l2_lru_way = 0;
-    uint64_t l2_min_access = t_l2_tlb[l2_set][0].access_count;
+    // All ways occupied: evict at clock hand
+    { int w = S1.clock;
+      S1.tags[w] = page; S1.regions[w] = r; S1.access[w] = ++t_tlb_ctr;
+      S1.clock = static_cast<uint8_t>((w + 1) % kTlbWays); }
+
+fill_l2:
+    // ── Fill thread-local L2 TLB (LRU eviction) ──────────────────────────────
+    const int l2_set = static_cast<int>(page % static_cast<uintptr_t>(kL2TlbSets));
+    L2TlbSet& S2 = t_l2[l2_set];
+    int lru = 0; uint64_t lru_acc = S2.access[0];
     for (int w = 1; w < kL2TlbWays; ++w) {
-        if (t_l2_tlb[l2_set][w].access_count < l2_min_access) {
-            l2_min_access = t_l2_tlb[l2_set][w].access_count;
-            l2_lru_way = w;
-        }
+        if (S2.access[w] < lru_acc) { lru_acc = S2.access[w]; lru = w; }
     }
-    t_l2_tlb[l2_set][l2_lru_way] = {page, r, ++t_l2_tlb_access_counter};
+    S2.tags[lru] = page; S2.regions[lru] = r; S2.access[lru] = ++t_l2_ctr;
+
+    // ── Fill L2 Shared TLB ────────────────────────────────────────────────────
+    const int shard  = static_cast<int>(page % static_cast<uintptr_t>(kSharedL2Shards));
+    const int s2_set = static_cast<int>((page / kSharedL2Shards) % kSharedL2Sets);
+    // LRU eviction using atomic access counters
+    uint64_t glob = g_sharedL2Ctr.fetch_add(1, std::memory_order_relaxed);
+    int evict = 0;
+    uint64_t min_acc = g_sharedL2[shard].sets[s2_set][0].access.load(std::memory_order_relaxed);
+    for (int w = 1; w < kSharedL2Ways; ++w) {
+        uint64_t a = g_sharedL2[shard].sets[s2_set][w].access.load(std::memory_order_relaxed);
+        if (a < min_acc) { min_acc = a; evict = w; }
+    }
+    SharedTlbEntry& se = g_sharedL2[shard].sets[s2_set][evict];
+    se.region.store(r,    std::memory_order_release);
+    se.tag.store(page,    std::memory_order_release);
+    se.access.store(glob, std::memory_order_relaxed);
 }
 
 inline void tlbEvict(uintptr_t addr, size_t size) {
     if (!kTlbEnabled || size == 0) return;
-    
-    uintptr_t first = addr >> 12;
-    uintptr_t last  = (addr + size - 1) >> 12;
+    const uintptr_t first = addr >> 12;
+    const uintptr_t last  = (addr + size - 1) >> 12;
     for (uintptr_t page = first; page <= last; ++page) {
-        // Evict from L1 TLB
-        int l1_set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
+        // L1 eviction
+        int l1s = static_cast<int>(page % kTlbSets);
         for (int w = 0; w < kTlbWays; ++w)
-            if (t_tlb[l1_set][w].tag == page) {
-                t_tlb[l1_set][w].tag = 0;
-                t_tlb[l1_set][w].region = nullptr;
-                t_tlb[l1_set][w].access_count = 0;
+            if (t_tlb[l1s].tags[w] == page) {
+                t_tlb[l1s].tags[w] = 0; t_tlb[l1s].regions[w] = nullptr;
             }
-        
-        // Evict from L2 TLB
-        int l2_set = static_cast<int>(page % static_cast<uintptr_t>(kL2TlbSets));
+        // Thread-local L2 eviction
+        int l2s = static_cast<int>(page % kL2TlbSets);
         for (int w = 0; w < kL2TlbWays; ++w)
-            if (t_l2_tlb[l2_set][w].tag == page) {
-                t_l2_tlb[l2_set][w].tag = 0;
-                t_l2_tlb[l2_set][w].region = nullptr;
-                t_l2_tlb[l2_set][w].access_count = 0;
+            if (t_l2[l2s].tags[w] == page) {
+                t_l2[l2s].tags[w] = 0; t_l2[l2s].regions[w] = nullptr;
             }
+        // Shared L2 eviction
+        int shard = static_cast<int>(page % kSharedL2Shards);
+        int s2s   = static_cast<int>((page / kSharedL2Shards) % kSharedL2Sets);
+        for (int w = 0; w < kSharedL2Ways; ++w) {
+            SharedTlbEntry& e = g_sharedL2[shard].sets[s2s][w];
+            uintptr_t expected = page;
+            e.tag.compare_exchange_strong(expected, 0,
+                std::memory_order_release, std::memory_order_relaxed);
+        }
     }
 }
 
@@ -508,6 +625,56 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
 #endif
           
           mgr->faultCount_.fetch_add(1, std::memory_order_relaxed);
+
+          // ── NUMA Node Bitmap update ─────────────────────────────────────
+          // Record which NUMA node caused this fault (signal-safe syscall).
+#ifdef SYS_getcpu
+          { unsigned cpu_id = 0, node_id = 0;
+            if (::syscall(SYS_getcpu, &cpu_id, &node_id, nullptr) == 0 &&
+                node_id < 64) {
+                region.nodeAccessBitmap.fetch_or(
+                    1ULL << node_id, std::memory_order_relaxed);
+            }
+          }
+#endif
+
+          // ── Predictive Page Prefetch ────────────────────────────────────
+          // Track the last 4 faulted pages. If a linear stride is detected,
+          // prefetch the next predicted page by touching it with mprotect.
+          {
+            uintptr_t faultPage = target >> 12;
+            // Shift history
+            region.lastFaultPages[0] = region.lastFaultPages[1];
+            region.lastFaultPages[1] = region.lastFaultPages[2];
+            region.lastFaultPages[2] = region.lastFaultPages[3];
+            region.lastFaultPages[3] = faultPage;
+            // Detect stride from last 3 pages
+            if (region.lastFaultPages[1] && region.lastFaultPages[2] && region.lastFaultPages[3]) {
+                uintptr_t d1 = region.lastFaultPages[2] - region.lastFaultPages[1];
+                uintptr_t d2 = region.lastFaultPages[3] - region.lastFaultPages[2];
+                if (d1 == d2 && d1 >= 1 && d1 <= 64) {
+                    if (d1 == region.prefetchStride) {
+                        region.prefetchStrideConf = std::min(region.prefetchStrideConf + 1, 4);
+                    } else {
+                        region.prefetchStride    = d1;
+                        region.prefetchStrideConf = 1;
+                    }
+                    // Prefetch if confidence >= 2
+                    if (region.prefetchStrideConf >= 2) {
+                        uintptr_t nextPage = faultPage + region.prefetchStride;
+                        uintptr_t regionEnd = (reinterpret_cast<uintptr_t>(region.ptr) + region.size) >> 12;
+                        if (nextPage < regionEnd) {
+                            void* nextAddr = reinterpret_cast<void*>(nextPage << 12);
+                            // Pre-fault: make the next page writable before the kernel faults on it
+                            vgre::os::mprotect_rw(nextAddr, region.pageSize);
+                        }
+                    }
+                } else {
+                    region.prefetchStrideConf = 0;
+                }
+            }
+          }
+
           mgr->activeHandlers_.fetch_sub(1, std::memory_order_release);
           return;
         }
@@ -870,14 +1037,27 @@ void MemoryManager::getPageResidency(uint8_t outMap[1024]) const {
     if (virtualOffset >= poolSize_) break;
   }
 
-  // Update fault rate (exponential moving average)
-  static auto lastCheck = std::chrono::steady_clock::now();
-  auto now = std::chrono::steady_clock::now();
-  double dt = std::chrono::duration<double>(now - lastCheck).count();
-  if (dt > 0.1) {
-    float currentRate = static_cast<float>(faultCount_.exchange(0) / dt);
-    pageFaultRate_ = pageFaultRate_ * 0.7f + currentRate * 0.3f;
-    lastCheck = now;
+  // ── Holt-Winters double exponential smoothing for page-fault rate ──────────
+  // Level L_t = α * x_t + (1-α) * (L_{t-1} + T_{t-1})
+  // Trend  T_t = β * (L_t - L_{t-1}) + (1-β) * T_{t-1}
+  // Forecast for next interval: L_t + T_t
+  // α=0.3 (smoothing), β=0.1 (trend damping) — chosen for 100-500 ms intervals
+  static auto   hw_lastCheck = std::chrono::steady_clock::now();
+  static float  hw_level  = 0.0f;  // current level (faults/s)
+  static float  hw_trend  = 0.0f;  // current trend (Δ faults/s per interval)
+  static constexpr float kAlpha = 0.30f;
+  static constexpr float kBeta  = 0.10f;
+
+  auto hw_now = std::chrono::steady_clock::now();
+  double hw_dt = std::chrono::duration<double>(hw_now - hw_lastCheck).count();
+  if (hw_dt > 0.1) {
+    float x_t = static_cast<float>(faultCount_.exchange(0) / hw_dt); // observed rate
+    float L_prev = hw_level;
+    hw_level = kAlpha * x_t + (1.0f - kAlpha) * (hw_level + hw_trend);
+    hw_trend = kBeta  * (hw_level - L_prev) + (1.0f - kBeta) * hw_trend;
+    // pageFaultRate_ stores the one-step-ahead forecast: L + T
+    pageFaultRate_.store(hw_level + hw_trend, std::memory_order_relaxed);
+    hw_lastCheck = hw_now;
   }
 }
 
