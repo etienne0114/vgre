@@ -1,6 +1,8 @@
 #include "vgre/core/scheduler.h"
 #include "vgre/common/logger.h"
 #include "vgre/api/vgre_c_api.h"
+#include <thread>
+#include <chrono>
 
 namespace vgre {
 namespace core {
@@ -39,15 +41,45 @@ bool Scheduler::isStreamIdle(StreamId stream) const {
 }
 
 void Scheduler::waitAll() {
-  std::unique_lock<std::mutex> lock(mutex_);
-  // Add timeout to prevent indefinite blocking in test environments
-  // If tasks don't complete within 5 seconds, proceed with shutdown
-  if (cv_.wait_for(lock, std::chrono::seconds(5), [this]() { return pending_.load() == 0; })) {
-    // All tasks completed
-  } else {
-    // Timeout - some tasks may still be pending
-    VGRE_LOG_WARN("Scheduler", "waitAll() timeout - proceeding with shutdown despite pending tasks");
+  // Drain-aware wait: poll pending_ with back-off instead of a hard 5-second
+  // timeout. Three phases:
+  //   1. Spin-wait (0–2 ms) for near-immediate completion.
+  //   2. Short cv_.wait_for (10 ms) intervals during active draining.
+  //   3. Hard 30-second deadline (log warning only, does not crash).
+  //
+  // This prevents two failure modes:
+  //   a. 5-second false timeouts in slow CI environments (old behaviour)
+  //   b. Infinite hangs when the last task is in an SPSC ring not yet drained
+  {
+    // Phase 1: fast spin for up to 2 ms (avoids cv overhead for quick paths)
+    const auto spinDeadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
+    while (pending_.load(std::memory_order_acquire) != 0 &&
+           std::chrono::steady_clock::now() < spinDeadline) {
+#if defined(__x86_64__) || defined(_M_X64)
+      __asm__ volatile("pause" ::: "memory");
+#else
+      std::this_thread::yield();
+#endif
+    }
+    if (pending_.load(std::memory_order_acquire) == 0) return;
   }
+
+  // Phase 2 + 3: cv_ wait with 10 ms intervals, 30 s hard deadline
+  constexpr int kMaxIntervals = 3000;  // 3000 × 10 ms = 30 s
+  std::unique_lock<std::mutex> lock(mutex_);
+  for (int i = 0; i < kMaxIntervals; ++i) {
+    if (cv_.wait_for(lock, std::chrono::milliseconds(10),
+                     [this]() { return pending_.load() == 0; }))
+      return;  // all tasks drained
+    // Re-notify workers that may be stuck (e.g. SPSC ring items not yet drained)
+    lock.unlock();
+    cv_.notify_all();
+    lock.lock();
+  }
+  VGRE_LOG_WARN("Scheduler",
+      "waitAll() hard deadline reached (30 s) — " +
+      std::to_string(pending_.load()) + " tasks still pending");
 }
 
 int Scheduler::getThreadCount() const { return numThreads_; }
