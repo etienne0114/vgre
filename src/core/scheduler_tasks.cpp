@@ -199,27 +199,24 @@ Scheduler::submitNumaTask(StreamId stream, std::function<void()> taskFn,
 }
 
 // ── Per-stream SPSC fast path (Track 7.3) ─────────────────────────────────
+// Stream S is pinned deterministically to worker (S % numThreads_).
+// Only ONE thread may produce to a given stream (CUDA API contract).
+// The assigned worker is the sole consumer — no mutex required.
 void Scheduler::enqueueToStream(uint64_t streamId, WorkItem item) {
-    // Try SPSC ring fast path (single-producer: caller is the submitting thread)
-    {
-        std::lock_guard<std::mutex> lg(streamRingsMutex_);
-        auto it = streamRings_.find(streamId);
-        if (it == streamRings_.end()) {
-            streamRings_[streamId] = std::make_unique<SPSCRing<WorkItem>>();
-            it = streamRings_.find(streamId);
-        }
-        if (it->second->push(std::move(item))) {
-            pending_.fetch_add(1, std::memory_order_relaxed);
-            cv_.notify_one();
-            return;
-        }
-        // Ring full — fall through to global work-stealing queue below
-        // Move item back out from the failed push; item was moved-from so rebuild
-        // from the original push attempt: re-acquire the item we tried to push.
-        // Since push() moves-from on success only, item is still valid here.
+    if (shutdown_.load(std::memory_order_relaxed)) return;
+
+    int targetWorker = static_cast<int>(streamId % static_cast<uint64_t>(numThreads_));
+
+    if (workerRings_[targetWorker]->push(std::move(item))) {
+        pending_.fetch_add(1, std::memory_order_relaxed);
+        // Wake all workers: each will check its own ring in the cv_ predicate.
+        // Workers whose rings are empty re-evaluate to false and go back to sleep.
+        cv_.notify_all();
+        return;
     }
-    // Ring full or multi-stream: fall through to global work-stealing queue
-    Scheduler::enqueueWithWorkerFallback(t_workerIdx, std::move(item),
+
+    // Ring full: fall through to the Chase-Lev work-stealing deque.
+    Scheduler::enqueueWithWorkerFallback(targetWorker, std::move(item),
                                          workerDeques_, queue_, mutex_);
     pending_.fetch_add(1, std::memory_order_relaxed);
     cv_.notify_one();

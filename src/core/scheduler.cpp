@@ -49,8 +49,10 @@ Scheduler::Scheduler(int numThreads) : numThreads_(numThreads) {
   workerNumaNodes_.resize(numThreads_, -1);
   workerNumaNodeSet_.clear();
   workerDeques_.resize(numThreads_);
+  workerRings_.resize(numThreads_);
   for (int i = 0; i < numThreads_; ++i) {
     workerDeques_[i] = std::make_unique<ChaseLevDeque<WorkItem*>>();
+    workerRings_[i]  = std::make_unique<SPSCRing<WorkItem>>();
   }
 
   for (int i = 0; i < numThreads_; ++i) {
