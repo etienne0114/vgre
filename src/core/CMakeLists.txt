@@ -30,6 +30,10 @@ add_library(vgre_core OBJECT
     texture/texture_manager_array.cpp
     texture/texture_manager_mipmap.cpp
     shm_manager.cpp
+    math/cache_oblivious.cpp
+    math/mixed_precision.cpp
+    math/block_sparse.cpp
+    math/tensor_core_emulation.cpp
 )
 
 target_include_directories(vgre_core PUBLIC

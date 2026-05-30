@@ -32,8 +32,19 @@ void MemoryManager::stopMigrationThread() {
   migrationStop_.store(true, std::memory_order_release);
   migrationCv_.notify_all();
   if (migrationThread_.joinable()) {
+    // Configurable thread join timeout via VGRE_THREAD_JOIN_TIMEOUT_MS
+    static const int joinTimeoutMs = []() -> int {
+        const char* e = vgre_get_config("VGRE_THREAD_JOIN_TIMEOUT_MS");
+        if (e) {
+            try {
+                int v = std::stoi(e);
+                if (v >= 1000 && v <= 30000) return v; // 1s to 30s range
+            } catch (...) {}
+        }
+        return 5000; // 5 seconds default
+    }();
     auto future = std::async(std::launch::async, [this]() { migrationThread_.join(); });
-    if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+    if (future.wait_for(std::chrono::milliseconds(joinTimeoutMs)) == std::future_status::timeout) {
       VGRE_LOG_WARN("MemoryManager", "Migration thread join timeout - detaching");
       migrationThread_.detach();
     } else {
@@ -62,6 +73,9 @@ void MemoryManager::migrationLoop() {
     int            dominantDev;
     float          dominance;
   };
+#else
+  // NUMA migration is Linux-only - on other platforms, just track statistics
+  VGRE_LOG_DEBUG("MemoryManager", "NUMA migration not supported on this platform - statistics tracking only");
 #endif
 
   while (!migrationStop_.load(std::memory_order_acquire)) {
@@ -74,7 +88,7 @@ void MemoryManager::migrationLoop() {
 #if defined(__linux__)
     std::unordered_map<int, std::vector<MigBatch>> batches;
     {
-      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      std::unique_lock<std::shared_mutex> lock(mutex_);
       for (auto& region : masterRegions_) {
         uint32_t total = region.accessCount.load(std::memory_order_relaxed);
         if (total < 10) continue;
@@ -111,7 +125,7 @@ void MemoryManager::migrationLoop() {
                             &nodemask, maxnode,
                             static_cast<unsigned long>(MPOL_MF_MOVE));
         if (rc == 0) {
-          std::lock_guard<std::recursive_mutex> lock(mutex_);
+          std::unique_lock<std::shared_mutex> lock(mutex_);
           for (auto& region : masterRegions_) {
             if (reinterpret_cast<uintptr_t>(region.ptr) != entry.regionBase) {
               continue;
@@ -132,13 +146,16 @@ void MemoryManager::migrationLoop() {
     }
 
 #else
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    for (auto& region : masterRegions_) {
-      uint32_t total = region.accessCount.load(std::memory_order_relaxed);
-      if (total < 10) continue;
-      int dominantDev = -1;
-      uint32_t maxCount = 0;
-      for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
+    // On non-Linux platforms, just track access statistics without NUMA migration
+    {
+      std::unique_lock<std::shared_mutex> lock(mutex_);
+      for (auto& region : masterRegions_) {
+        uint32_t total = region.accessCount.load(std::memory_order_relaxed);
+        if (total < 10) continue;
+
+        int dominantDev = -1;
+        uint32_t maxCount = 0;
+        for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
         uint32_t cnt = region.deviceAccessCounts[d].load(std::memory_order_relaxed);
         if (cnt > maxCount) { maxCount = cnt; dominantDev = d; }
       }
@@ -166,8 +183,19 @@ void MemoryManager::startPendingDrainer() {
 void MemoryManager::stopPendingDrainer() {
   pendingDrainerStop_.store(true, std::memory_order_release);
   if (pendingDrainerThread_.joinable()) {
+    // Use the same configurable timeout for consistency
+    static const int joinTimeoutMs = []() -> int {
+        const char* e = vgre_get_config("VGRE_THREAD_JOIN_TIMEOUT_MS");
+        if (e) {
+            try {
+                int v = std::stoi(e);
+                if (v >= 1000 && v <= 30000) return v;
+            } catch (...) {}
+        }
+        return 5000;
+    }();
     auto future = std::async(std::launch::async, [this]() { pendingDrainerThread_.join(); });
-    if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+    if (future.wait_for(std::chrono::milliseconds(joinTimeoutMs)) == std::future_status::timeout) {
       VGRE_LOG_WARN("MemoryManager", "Pending drainer thread join timeout - detaching");
       pendingDrainerThread_.detach();
     } else {
@@ -196,7 +224,7 @@ void MemoryManager::pendingDrainerLoop() {
 
       // Process the fault outside signal handler: find managed region and mark dirty
       // Use lock since we're calling non-async-safe APIs
-      std::unique_lock<std::recursive_mutex> lock(mutex_);
+      std::unique_lock<std::shared_mutex> lock(mutex_);
       RegionTreeContainer* container = activeTree_.load(std::memory_order_acquire);
       if (container && container->count > 0) {
         ManagedRegion* r = container->tree.findOverlap(addr);

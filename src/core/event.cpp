@@ -59,8 +59,18 @@ VGREResult Event::synchronize() const {
 
   if (fut.valid()) {
     // Add a timeout to prevent indefinite blocking in test environments
-    // Use a reasonable timeout (5 seconds) for event synchronization
-    if (fut.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+    // Configurable via VGRE_EVENT_TIMEOUT_MS (default 5000ms)
+    static const int eventTimeoutMs = []() -> int {
+        const char* e = vgre_get_config("VGRE_EVENT_TIMEOUT_MS");
+        if (e) {
+            try {
+                int v = std::stoi(e);
+                if (v >= 100 && v <= 60000) return v; // 100ms to 60s range
+            } catch (...) {}
+        }
+        return 5000; // 5 seconds default
+    }();
+    if (fut.wait_for(std::chrono::milliseconds(eventTimeoutMs)) == std::future_status::timeout) {
       return VGREResult::ERR_TIMEOUT;
     }
     return VGREResult::SUCCESS;

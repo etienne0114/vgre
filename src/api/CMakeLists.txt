@@ -34,6 +34,12 @@ add_library(vgre_api OBJECT
     cudnn/cudnn_lrn.cpp
     cudnn/cudnn_divisive_norm.cpp
     cudnn/cudnn_spatial_tf.cpp
+    cusparse/cusparse_core.cpp
+    cusparse/cusparse_factorization.cpp
+    cusparse/cusparse_format.cpp
+    cusparse/cusparse_spvec.cpp
+    cusparse/cusparse_triangular.cpp
+    cusparse/sparse_view.cpp
     nccl/nccl_core.cpp
     nccl/nccl_communicator.cpp
     nccl/nccl_collectives.cpp

@@ -355,9 +355,11 @@ float AdaptiveExecutionEngine::getDeviceTemperature() const {
       }
     }
   }
-  // Fallback: optional helper writes temperature to /tmp/.vgre_cpu_temp
+  // Fallback: optional helper writes temperature to configurable path
   {
-    std::ifstream f("/tmp/.vgre_cpu_temp");
+    const char* e = vgre_get_config("VGRE_CPU_TEMP_PATH");
+    std::string tempPath = e ? e : "/tmp/.vgre_cpu_temp";
+    std::ifstream f(tempPath);
     float t = 0.0f;
     if (f.is_open() && (f >> t) && t > 0.0f && t < 150.0f) return t;
   }

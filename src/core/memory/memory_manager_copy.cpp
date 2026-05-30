@@ -77,7 +77,7 @@ VGREResult MemoryManager::copyHostToDevice(MemoryHandle dst, const void *src,
   void*  regionPtr = nullptr;
   size_t regionSz  = 0;
   {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     size_t offset = 0;
     auto it = findAllocationForPtr(dst, offset);
     if (it == allocations_.end())
@@ -150,7 +150,7 @@ VGREResult MemoryManager::copyDeviceToHost(void *dst, MemoryHandle src,
   void*  regionPtr = nullptr;
   size_t regionSz  = 0;
   {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     size_t offset = 0;
     auto it = findAllocationForPtr(src, offset);
     if (it == allocations_.end())
@@ -220,7 +220,7 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
   size_t   dstRegSz   = 0, srcRegSz = 0;
   DeviceId dstDeviceId_ = 0, srcDeviceId_ = 0;
   {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     size_t offsetDst = 0, offsetSrc = 0;
     auto itDst = findAllocationForPtr(dst, offsetDst);
     auto itSrc = findAllocationForPtr(src, offsetSrc);
@@ -355,7 +355,7 @@ VGREResult MemoryManager::copyDeviceToDevice(MemoryHandle dst, MemoryHandle src,
 
 VGREResult MemoryManager::enablePeerAccess(DeviceId currentDevice,
                                            DeviceId peerDevice) {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   peerAccessMap_[currentDevice][peerDevice] = true;
   VGRE_LOG_INFO("MemoryManager", "Enabled P2P access: Dev" +
                                      std::to_string(currentDevice) + " -> Dev" +
@@ -365,7 +365,7 @@ VGREResult MemoryManager::enablePeerAccess(DeviceId currentDevice,
 
 VGREResult MemoryManager::disablePeerAccess(DeviceId currentDevice,
                                             DeviceId peerDevice) {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   peerAccessMap_[currentDevice][peerDevice] = false;
   VGRE_LOG_INFO("MemoryManager", "Disabled P2P access: Dev" +
                                      std::to_string(currentDevice) + " -> Dev" +
@@ -375,7 +375,7 @@ VGREResult MemoryManager::disablePeerAccess(DeviceId currentDevice,
 
 bool MemoryManager::canAccessPeer(DeviceId currentDevice,
                                   DeviceId peerDevice) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   auto it = peerAccessMap_.find(currentDevice);
   if (it == peerAccessMap_.end())
     return false;
@@ -386,7 +386,7 @@ bool MemoryManager::canAccessPeer(DeviceId currentDevice,
 }
 
 DeviceId MemoryManager::getOwnerDevice(MemoryHandle handle) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   auto it = allocations_.find(handle);
   if (it == allocations_.end())
     return -1;

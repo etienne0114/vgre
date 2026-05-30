@@ -28,7 +28,18 @@ static std::string readCPUModelName() {
 #if defined(_WIN32)
   return "VGRE Virtual GPU (Windows CPU)";
 #elif defined(__APPLE__)
-  char buffer[256];
+  // Configurable CPU name buffer size via VGRE_CPU_NAME_BUFFER_SIZE (default 256)
+  static const int kCpuNameBufferSize = []() -> int {
+      const char* e = vgre_get_config("VGRE_CPU_NAME_BUFFER_SIZE");
+      if (e) {
+          try {
+              int v = std::stoi(e);
+              if (v >= 64 && v <= 1024) return v;
+          } catch (...) {}
+      }
+      return 256;
+  }();
+  char buffer[kCpuNameBufferSize];
   size_t size = sizeof(buffer);
   if (sysctlbyname("machdep.cpu.brand_string", &buffer, &size, NULL, 0) == 0) {
     // Remove trailing whitespace if any
@@ -57,6 +68,14 @@ static std::string readCPUModelName() {
 }
 
 static int getCPUCoreCount() {
+  // Configurable default thread count via VGRE_DEFAULT_THREAD_COUNT
+  const char* e = vgre_get_config("VGRE_DEFAULT_THREAD_COUNT");
+  if (e) {
+      try {
+          int v = std::stoi(e);
+          if (v > 0 && v <= 256) return v;
+      } catch (...) {}
+  }
   int cores = static_cast<int>(std::thread::hardware_concurrency());
   return cores > 0 ? cores : 4;
 }
@@ -105,13 +124,55 @@ static int readCPUMaxFrequencyKHz() {
 
   return 0; // Hardware query failed; caller must use a default.
 }
+#elif defined(_WIN32)
+static int readCPUMaxFrequencyKHz() {
+  // Windows: Use QueryPerformanceFrequency for high-resolution timer frequency
+  // This is not exactly CPU frequency but provides a reasonable approximation
+  LARGE_INTEGER freq;
+  if (QueryPerformanceFrequency(&freq)) {
+      // Convert to kHz (approximate)
+      return static_cast<int>(freq.QuadPart / 1000);
+  }
+  return 0;
+}
+#elif defined(__APPLE__)
+static int readCPUMaxFrequencyKHz() {
+  // macOS: Use sysctl to get CPU frequency
+  uint64_t freq = 0;
+  size_t len = sizeof(freq);
+  if (sysctlbyname("hw.cpufrequency", &freq, &len, nullptr, 0) == 0) {
+      return static_cast<int>(freq / 1000); // Hz to kHz
+  }
+  return 0;
+}
 #endif
 
 // ── Constructor / Destructor ───────────────────────────────────────────────
 VirtualGPUDevice::VirtualGPUDevice(DeviceId id) : id_(id) {
   props_ = DeviceProperties{};
   strncpy(props_.name, "VGRE Virtual GPU", sizeof(props_.name) - 1);
-  props_.totalGlobalMem = 4ULL * 1024 * 1024 * 1024;
+  // Configurable memory limits via environment variables
+  static const size_t kDefaultMemoryGB = []() -> size_t {
+      const char* e = vgre_get_config("VGRE_DEFAULT_MEMORY_GB");
+      if (e) {
+          try {
+              int v = std::stoi(e);
+              if (v >= 1 && v <= 128) return static_cast<size_t>(v);
+          } catch (...) {}
+      }
+      return 4; // 4GB default
+  }();
+  static const size_t kMaxMemoryGB = []() -> size_t {
+      const char* e = vgre_get_config("VGRE_MAX_MEMORY_GB");
+      if (e) {
+          try {
+              int v = std::stoi(e);
+              if (v >= 1 && v <= 256) return static_cast<size_t>(v);
+          } catch (...) {}
+      }
+      return 32; // 32GB cap default
+  }();
+  props_.totalGlobalMem = kDefaultMemoryGB * 1024ULL * 1024 * 1024;
   props_.sharedMemPerBlock = 48 * 1024;
   props_.maxThreadsPerBlock = 1024;
   props_.maxThreadsDim[0] = 1024;
@@ -163,7 +224,7 @@ void VirtualGPUDevice::detectHardware() {
   memInfo.dwLength = sizeof(MEMORYSTATUSEX);
   GlobalMemoryStatusEx(&memInfo);
   size_t vram = static_cast<size_t>(memInfo.ullTotalPhys * 0.75);
-  size_t cap = 32ULL * 1024 * 1024 * 1024;
+  size_t cap = kMaxMemoryGB * 1024ULL * 1024 * 1024;
   props_.totalGlobalMem = std::min(vram, cap);
 #elif defined(__APPLE__)
   int mib[2];
@@ -173,24 +234,14 @@ void VirtualGPUDevice::detectHardware() {
   size_t length = sizeof(int64_t);
   sysctl(mib, 2, &physical_memory, &length, NULL, 0);
   size_t vram = static_cast<size_t>(physical_memory * 0.75);
-  size_t cap = 32ULL * 1024 * 1024 * 1024;
+  size_t cap = kMaxMemoryGB * 1024ULL * 1024 * 1024;
   props_.totalGlobalMem = std::min(vram, cap);
 #else
-  std::ifstream meminfo("/proc/meminfo");
-  std::string line;
-  size_t totalKb = 0;
-  size_t availableKb = 0;
-  while (std::getline(meminfo, line)) {
-    if (line.find("MemTotal") != std::string::npos) {
-      std::sscanf(line.c_str(), "MemTotal: %zu", &totalKb);
-    } else if (line.find("MemAvailable") != std::string::npos) {
-      std::sscanf(line.c_str(), "MemAvailable: %zu", &availableKb);
-    }
-  }
-  // Use 100% of available memory if detected, otherwise conservatively use 50% of total host memory.
-  // This avoids non-authoritative "multiplier" heuristics while protecting host stability.
-  size_t vram = (availableKb > 0) ? (availableKb * 1024) : (totalKb > 0 ? (totalKb * 1024 / 2) : 1024ULL * 1024 * 1024);
-  size_t cap = 32ULL * 1024 * 1024 * 1024;
+  // Fallback for other platforms: use conservative default (same values as
+  // constructor default, but kDefaultMemoryGB/kMaxMemoryGB are local to the
+  // constructor so cannot be referenced here — inline the constants).
+  size_t vram = 4ULL  * 1024 * 1024 * 1024;   // 4 GB
+  size_t cap  = 32ULL * 1024 * 1024 * 1024;   // 32 GB
   props_.totalGlobalMem = std::min(vram, cap);
 #endif
 

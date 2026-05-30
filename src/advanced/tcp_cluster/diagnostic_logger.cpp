@@ -419,7 +419,16 @@ DiagnosticLogger::HealthStatus DiagnosticLogger::getHealthStatus() const {
 
 void DiagnosticLogger::flushMetrics() {
     const char* env_path = vgre_get_config("VGRE_METRICS_OUTPUT_PATH");
-    std::string filename = env_path ? env_path : "/tmp/vgre_tcp_cluster_metrics.json";
+    std::string filename;
+    if (env_path) {
+        filename = env_path;
+        // If it's a directory, append the default filename
+        if (filename.back() == '/' || filename.back() == '\\') {
+            filename += "vgre_tcp_cluster_metrics.json";
+        }
+    } else {
+        filename = "/tmp/vgre_tcp_cluster_metrics.json";
+    }
     try {
         std::ofstream file(filename);
         if (!file.is_open()) return;

@@ -60,7 +60,16 @@ void TCPClusterManager::exportMetricsForMonitoring() {
 
         // Export to a configurable path (default: /tmp) for consistency with DiagnosticLogger.
         const char* env_path = vgre_get_config("VGRE_METRICS_OUTPUT_PATH");
-        std::string out_path = env_path ? env_path : "/tmp/vgre_tcp_cluster_metrics.json";
+        std::string out_path;
+        if (env_path) {
+            out_path = env_path;
+            // If it's a directory, append the default filename
+            if (out_path.back() == '/' || out_path.back() == '\\') {
+                out_path += "vgre_tcp_cluster_metrics.json";
+            }
+        } else {
+            out_path = "/tmp/vgre_tcp_cluster_metrics.json";
+        }
         std::ofstream f(out_path);
         if (f.is_open()) { f << json.str(); f.close(); }
     } catch (...) {}

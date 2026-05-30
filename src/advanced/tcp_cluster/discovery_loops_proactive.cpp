@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <map>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -55,6 +56,7 @@ struct PeerState {
     std::chrono::steady_clock::time_point next_attempt;
     int backoff_sec = 1;        // current backoff interval in seconds
     bool was_connected = false; // true if successfully connected at least once
+    std::mt19937 rng{std::random_device{}()}; // Per-peer RNG for jitter
 
     void on_connect_success() {
         backoff_sec = 1;
@@ -63,7 +65,13 @@ struct PeerState {
     }
 
     void on_connect_failure() {
-        next_attempt = std::chrono::steady_clock::now() + std::chrono::seconds(backoff_sec);
+        // Add jitter: ±25% of backoff time to prevent thundering herd
+        std::uniform_int_distribution<int> dist(-25, 25);
+        int jitter_pct = dist(rng);
+        double jitter_factor = 1.0 + (jitter_pct / 100.0);
+        int jittered_backoff = static_cast<int>(backoff_sec * jitter_factor);
+        
+        next_attempt = std::chrono::steady_clock::now() + std::chrono::seconds(jittered_backoff);
         backoff_sec = std::min(backoff_sec * 2, getMaxBackoffSec());
     }
 };

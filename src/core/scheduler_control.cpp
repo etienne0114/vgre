@@ -1,5 +1,6 @@
 #include "vgre/core/scheduler.h"
 #include "vgre/common/logger.h"
+#include "vgre/api/vgre_c_api.h"
 
 namespace vgre {
 namespace core {
@@ -53,9 +54,19 @@ int Scheduler::getThreadCount() const { return numThreads_; }
 
 void Scheduler::setThreadCount(int n) {
   if (n <= 0) {
-    n = static_cast<int>(std::thread::hardware_concurrency());
-    if (n <= 0)
-      n = 4;
+    // Configurable default thread count via VGRE_DEFAULT_THREAD_COUNT
+    const char* e = vgre_get_config("VGRE_DEFAULT_THREAD_COUNT");
+    if (e) {
+        try {
+            int v = std::stoi(e);
+            if (v > 0 && v <= 256) { n = v; }
+        } catch (...) {}
+    }
+    if (n <= 0) {
+        n = static_cast<int>(std::thread::hardware_concurrency());
+        if (n <= 0)
+            n = 4;
+    }
   }
   if (n == numThreads_)
     return;

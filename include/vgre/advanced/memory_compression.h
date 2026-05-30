@@ -47,14 +47,27 @@ public:
     // Statistics
     CompressionStats getStats() const;
     void  resetStats();
+    
+    // Compression budgeting to control CPU overhead
+    void setCompressionBudgetMs(double budgetMs); // Max time per compression
+    double getCompressionBudgetMs() const;
+    bool isWithinBudget(double elapsedMs) const;
 
     // Singleton
     static MemoryCompression& instance();
 
 private:
     size_t            minTransferSize_ = 4096; // 4 KB default threshold
+    std::atomic<size_t> adaptiveThreshold_{4096}; // Dynamically adjusted threshold
+    std::chrono::steady_clock::time_point lastAdjustmentTime_;
+    std::atomic<double> compressionBudgetMs_{10.0}; // Max 10ms per compression
+    std::atomic<uint64_t> totalCompressionTimeUs_{0}; // Track total compression time
+    std::atomic<uint64_t> compressionCount_{0}; // Track number of compressions
     CompressionStats  stats_;
     mutable std::mutex mutex_;
+    
+    // Adaptive threshold adjustment based on performance metrics
+    void adjustAdaptiveThreshold(size_t inputSize, size_t outputSize, double compressTimeMs);
 };
 
 } // namespace advanced

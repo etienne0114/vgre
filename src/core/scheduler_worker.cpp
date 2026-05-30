@@ -53,6 +53,38 @@ void Scheduler::workerLoop(int workerIdx) {
     }
 #endif
 
+    // 2c. Exponential backoff with jitter before blocking (Fix 4).
+    // Spinning briefly before entering cv_.wait() reduces wakeup latency for
+    // bursty workloads without burning CPU when truly idle.
+    // The spin count is randomised (jitter) to avoid thundering-herd synchronisation
+    // between workers all waking at the same time after a burst.
+    // Implementation: simple PRNG using the worker index as a seed component —
+    // no shared state, no synchronisation, deterministic per-thread distribution.
+    if (!gotItem) {
+        // Per-thread xorshift64 state (initialised once, evolves per iteration)
+        static thread_local uint64_t t_spin_rng = static_cast<uint64_t>(workerIdx + 1) * 6364136223846793005ULL;
+        // Xorshift64 step — period 2^64-1, state never zero
+        t_spin_rng ^= t_spin_rng << 13;
+        t_spin_rng ^= t_spin_rng >> 7;
+        t_spin_rng ^= t_spin_rng << 17;
+        // Jittered spin count: 4 to 68 iterations (low range keeps latency tight)
+        const int spinCount = 4 + static_cast<int>(t_spin_rng & 63);
+        for (int s = 0; s < spinCount && !gotItem; ++s) {
+#ifdef ENABLE_VGRE_SPSC
+            if (workerRings_[workerIdx]->pop(item)) { gotItem = true; break; }
+#endif
+            // Yield the hyperthreading slot — cheaper than a full sleep and
+            // keeps the core available for the OS scheduler.
+#if defined(__x86_64__) || defined(_M_X64)
+            __asm__ volatile("pause" ::: "memory");
+#elif defined(__aarch64__)
+            __asm__ volatile("yield" ::: "memory");
+#else
+            std::this_thread::yield();
+#endif
+        }
+    }
+
     // 3. Fallback: wait on global / NUMA-local priority queue
     if (!gotItem) {
       std::unique_lock<std::mutex> lock(mutex_);

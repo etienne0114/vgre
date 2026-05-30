@@ -11,6 +11,7 @@
 #include <list>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -277,6 +278,20 @@ public:
   // Reset bandwidth counters (call between benchmark phases to isolate measurements).
   void resetMemoryBandwidthStats();
 
+  // ── TLB telemetry (Fix 3) ──────────────────────────────────────────────
+  struct TlbStats {
+    uint64_t l1Hits;
+    uint64_t l1Misses;
+    uint64_t l2Hits;
+    uint64_t l2Misses;
+    double   l1HitRate;
+    double   l2HitRate;
+  };
+  // Returns cumulative TLB hit/miss counts since process start.
+  // Useful for production observability: log at regular intervals to confirm
+  // ≥85% L1 hit rate under steady-state workloads.
+  static TlbStats getTlbStats();
+
   // Singleton convenience
   static MemoryManager &instance();
 
@@ -310,7 +325,13 @@ private:
   // Sorted by base address — enables O(log n) range lookup for H2D/D2H/D2D
   // copies instead of the O(n) linear scan over allocations_.
   std::map<uint8_t*, size_t> allocRange_;
-  mutable std::recursive_mutex mutex_;
+  // Replaced recursive_mutex with shared_mutex (Fix 1: global mutex bottleneck).
+  // Rationale: profiling showed 10-50% CPU cycles wasted in lock contention for
+  // read-heavy paths (isValidHandle, getPointer, getAllocationSize, H2D/D2H lookup).
+  // No recursive acquisition exists in the current call graph — unregisterManagedRegion
+  // requires the caller to hold the lock but does NOT re-acquire it.
+  // Read paths use shared_lock (N concurrent readers); write paths use unique_lock.
+  mutable std::shared_mutex mutex_;
   
   std::mutex memoryFreedMutex_;
   std::condition_variable memoryFreedCv_;
@@ -361,7 +382,7 @@ private:
 
   // Memory pools
   std::unordered_map<PoolHandle, MemoryPool> pools_;
-  PoolHandle nextPoolId_ = 1;
+  std::atomic<PoolHandle> nextPoolId_{1};
 
   // Adaptive UVM page-migration background thread
   std::thread         migrationThread_;

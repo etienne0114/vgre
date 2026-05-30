@@ -302,14 +302,12 @@ cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t /*handle*/,
     }
     g_algoCache.put(key);
 
-    // Estimate workspace based on matrix dimensions: larger tiles need more scratch.
-    // algo 0 (default): no workspace; algo 1..N: progressively larger scratch buffers.
-    // wavesCount descends so callers rank by preference (highest = best).
-    static const size_t kWorkspaceSizes[] = { 0, 4096, 65536, 1 << 20, 4 << 20, 16 << 20 };
-    static const float  kWavesCounts[]    = { 1.0f, 0.92f, 0.84f, 0.76f, 0.68f, 0.60f };
-    static constexpr int kMaxAlgos = static_cast<int>(sizeof(kWorkspaceSizes)/sizeof(kWorkspaceSizes[0]));
+    // Algorithm workspace sizes derived from matrix dimensions in key (m, n, k).
+    // Larger problems benefit from larger tiles → more workspace.
+    static constexpr int kMaxAlgos = 6;
+    static const size_t kWorkspaceSizes[kMaxAlgos] = {0, 1<<16, 1<<18, 1<<20, 1<<22, 1<<24};
+    static const float  kWavesCounts  [kMaxAlgos] = {1.0f, 1.0f, 0.9f, 0.8f, 0.7f, 0.6f};
 
-    // For larger problem sizes, recommend workspace-backed algorithms first.
     int64_t problem = static_cast<int64_t>(key.m) * key.n * key.k;
     int bestFirst = (problem > 1000000) ? 2 : (problem > 100000) ? 1 : 0;
 

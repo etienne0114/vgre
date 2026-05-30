@@ -55,7 +55,9 @@ VGREResult KernelCache::initialize(const std::string& cacheDir) {
         if (home) {
             cacheDir_ = std::string(home) + "/.vgre/cache";
         } else {
-            cacheDir_ = "/tmp/vgre_cache";
+            // Configurable cache directory via VGRE_CACHE_DIR
+            const char* e = vgre_get_config("VGRE_CACHE_DIR");
+            cacheDir_ = e ? e : "/tmp/vgre_cache";
         }
 #endif
     }

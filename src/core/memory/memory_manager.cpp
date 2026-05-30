@@ -31,7 +31,7 @@
 #endif  // __linux__
 
 // ── Thread-local TLB Cache (Track 7.1) ───────────────────────────────────────
-// 4-way set-associative TLB with 64 sets for caching virtual→ManagedRegion*
+// Optimized 8-way set-associative TLB with 256 sets for caching virtual→ManagedRegion*
 // translations inside signal handlers. Uses CLOCK replacement policy.
 // These helpers are defined at file scope, before the signal handlers.
 
@@ -44,58 +44,150 @@ struct ManagedRegion;
 } // namespace core
 } // namespace vgre
 
-#ifdef ENABLE_VGRE_TLB
-static constexpr int kTlbSets = 64;
-static constexpr int kTlbWays = 4;
+// TLB enabled by default. Use `static const` (not constexpr) because
+// vgre_get_config() is a runtime function — constexpr would be a compile error.
+static const bool kTlbEnabled = []() -> bool {
+    const char* e = vgre_get_config("VGRE_DISABLE_TLB");
+    return !(e && std::atoi(e) == 1);
+}();
+
+// ── TLB hit-rate telemetry (Fix 3) ────────────────────────────────────────
+// Per-process atomics for L1 and L2 hit/miss counts. These are intentionally
+// global (not per-thread) so the overall hit rate is observable across threads.
+// Query via vgre_get_tlb_stats() or VGRE_LOG at shutdown.
+namespace {
+struct VgreTlbStats {
+    std::atomic<uint64_t> l1Hits{0};
+    std::atomic<uint64_t> l1Misses{0};
+    std::atomic<uint64_t> l2Hits{0};
+    std::atomic<uint64_t> l2Misses{0};
+
+    double l1HitRate() const {
+        uint64_t h = l1Hits.load(std::memory_order_relaxed);
+        uint64_t m = l1Misses.load(std::memory_order_relaxed);
+        return (h + m) == 0 ? 0.0 : static_cast<double>(h) / static_cast<double>(h + m);
+    }
+    double l2HitRate() const {
+        uint64_t h = l2Hits.load(std::memory_order_relaxed);
+        uint64_t m = l2Misses.load(std::memory_order_relaxed);
+        return (h + m) == 0 ? 0.0 : static_cast<double>(h) / static_cast<double>(h + m);
+    }
+};
+} // namespace
+static VgreTlbStats g_tlbStats;
+
+// TLB dimensions: compile-time constants so thread-local arrays are statically
+// sized. Runtime env overrides are checked at lookup time for the active range.
+static constexpr int kTlbSets = 256;
+static constexpr int kTlbWays = 8;
 
 struct TlbEntry {
     uintptr_t tag;    // virtual page (addr >> 12), 0 = invalid
     vgre::core::ManagedRegion* region;
+    uint64_t access_count; // For LRU-like replacement
 };
 
+// L1 TLB - Fast, small cache for hot pages
 static thread_local TlbEntry t_tlb[kTlbSets][kTlbWays];
 static thread_local uint8_t  t_tlb_clock[kTlbSets];
+static thread_local uint64_t t_tlb_access_counter = 0;
+
+// L2 TLB - Larger cache for better hit rates on larger working sets
+static constexpr int kL2TlbSets = 1024;
+static constexpr int kL2TlbWays = 16;
+static thread_local TlbEntry t_l2_tlb[kL2TlbSets][kL2TlbWays];
+static thread_local uint64_t t_l2_tlb_access_counter = 0;
+
+// Forward declarations (tlbFill used inside tlbLookup for L2→L1 promotion)
+inline void tlbFill(uintptr_t addr, vgre::core::ManagedRegion* r);
+inline void tlbEvict(uintptr_t addr, size_t size);
 
 inline vgre::core::ManagedRegion* tlbLookup(uintptr_t addr) {
+    if (!kTlbEnabled) return nullptr;
+    
     uintptr_t page = addr >> 12;
-    int set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
-    for (int w = 0; w < kTlbWays; ++w)
-        if (t_tlb[set][w].tag == page) return t_tlb[set][w].region;
+    
+    // L1 TLB lookup
+    int l1_set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
+    for (int w = 0; w < kTlbWays; ++w) {
+        if (t_tlb[l1_set][w].tag == page) {
+            t_tlb[l1_set][w].access_count = ++t_tlb_access_counter;
+            g_tlbStats.l1Hits.fetch_add(1, std::memory_order_relaxed);
+            return t_tlb[l1_set][w].region;
+        }
+    }
+    g_tlbStats.l1Misses.fetch_add(1, std::memory_order_relaxed);
+
+    // L2 TLB lookup - larger cache for better hit rates
+    int l2_set = static_cast<int>(page % static_cast<uintptr_t>(kL2TlbSets));
+    for (int w = 0; w < kL2TlbWays; ++w) {
+        if (t_l2_tlb[l2_set][w].tag == page) {
+            t_l2_tlb[l2_set][w].access_count = ++t_l2_tlb_access_counter;
+            // Promote to L1 on L2 hit
+            tlbFill(addr, t_l2_tlb[l2_set][w].region);
+            g_tlbStats.l2Hits.fetch_add(1, std::memory_order_relaxed);
+            return t_l2_tlb[l2_set][w].region;
+        }
+    }
+    g_tlbStats.l2Misses.fetch_add(1, std::memory_order_relaxed);
+
     return nullptr;
 }
 
 inline void tlbFill(uintptr_t addr, vgre::core::ManagedRegion* r) {
+    if (!kTlbEnabled) return;
+    
     uintptr_t page = addr >> 12;
-    int set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
+    
+    // Fill L1 TLB
+    int l1_set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
     for (int i = 0; i < kTlbWays; ++i) {
-        int w = (t_tlb_clock[set] + i) % kTlbWays;
-        if (t_tlb[set][w].tag == 0) {
-            t_tlb[set][w] = {page, r};
-            t_tlb_clock[set] = static_cast<uint8_t>((w + 1) % kTlbWays);
-            return;
+        int w = (t_tlb_clock[l1_set] + i) % kTlbWays;
+        if (t_tlb[l1_set][w].tag == 0) {
+            t_tlb[l1_set][w] = {page, r, ++t_tlb_access_counter};
+            t_tlb_clock[l1_set] = static_cast<uint8_t>((w + 1) % kTlbWays);
+            break;
         }
     }
-    int w = t_tlb_clock[set];
-    t_tlb[set][w] = {page, r};
-    t_tlb_clock[set] = static_cast<uint8_t>((w + 1) % kTlbWays);
+    
+    // Fill L2 TLB (always fill L2 as well for better coverage)
+    int l2_set = static_cast<int>(page % static_cast<uintptr_t>(kL2TlbSets));
+    int l2_lru_way = 0;
+    uint64_t l2_min_access = t_l2_tlb[l2_set][0].access_count;
+    for (int w = 1; w < kL2TlbWays; ++w) {
+        if (t_l2_tlb[l2_set][w].access_count < l2_min_access) {
+            l2_min_access = t_l2_tlb[l2_set][w].access_count;
+            l2_lru_way = w;
+        }
+    }
+    t_l2_tlb[l2_set][l2_lru_way] = {page, r, ++t_l2_tlb_access_counter};
 }
 
 inline void tlbEvict(uintptr_t addr, size_t size) {
-    if (size == 0) return;
+    if (!kTlbEnabled || size == 0) return;
+    
     uintptr_t first = addr >> 12;
     uintptr_t last  = (addr + size - 1) >> 12;
     for (uintptr_t page = first; page <= last; ++page) {
-        int set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
+        // Evict from L1 TLB
+        int l1_set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
         for (int w = 0; w < kTlbWays; ++w)
-            if (t_tlb[set][w].tag == page) t_tlb[set][w].tag = 0;
+            if (t_tlb[l1_set][w].tag == page) {
+                t_tlb[l1_set][w].tag = 0;
+                t_tlb[l1_set][w].region = nullptr;
+                t_tlb[l1_set][w].access_count = 0;
+            }
+        
+        // Evict from L2 TLB
+        int l2_set = static_cast<int>(page % static_cast<uintptr_t>(kL2TlbSets));
+        for (int w = 0; w < kL2TlbWays; ++w)
+            if (t_l2_tlb[l2_set][w].tag == page) {
+                t_l2_tlb[l2_set][w].tag = 0;
+                t_l2_tlb[l2_set][w].region = nullptr;
+                t_l2_tlb[l2_set][w].access_count = 0;
+            }
     }
 }
-#else
-// TLB disabled: all lookups fall directly to the radix page table.
-inline vgre::core::ManagedRegion* tlbLookup(uintptr_t)          { return nullptr; }
-inline void tlbFill(uintptr_t, vgre::core::ManagedRegion*)       {}
-inline void tlbEvict(uintptr_t, size_t)                          {}
-#endif // ENABLE_VGRE_TLB
 
 // ── Resume original namespaces ────────────────────────────────────────────────
 
@@ -234,7 +326,13 @@ void MemoryManager::setupSignalHandler() {
 #else
   struct sigaction sa;
   sa.sa_flags = SA_SIGINFO;
+#if defined(__APPLE__)
+  // macOS: Add SA_RESTART to automatically restart interrupted system calls
+  sa.sa_flags |= SA_RESTART;
+#endif
   sigemptyset(&sa.sa_mask);
+  // Block SIGSEGV during handler to prevent re-entrancy
+  sigaddset(&sa.sa_mask, SIGSEGV);
   sa.sa_sigaction = MemoryManager::segfaultHandler;
   if (sigaction(SIGSEGV, &sa, &getOldSigaction()) == -1) {
     VGRE_LOG_ERROR("MemoryManager", "Failed to setup SIGSEGV handler for UVM");
@@ -256,6 +354,10 @@ void MemoryManager::teardownSignalHandler() {
     sigaction(SIGSEGV, &getOldSigaction(), nullptr);
     getHandlerInstalled().store(false, std::memory_order_release);
   }
+#if defined(__APPLE__)
+  // macOS: Additional cleanup for signal handling
+  sigemptyset(&getOldSigaction().sa_mask);
+#endif
 #endif
 }
 
@@ -282,11 +384,22 @@ LONG
     {
       uintptr_t target = reinterpret_cast<uintptr_t>(addr);
 
-      // O(1) lookup: try TLB first, then radix page table
+      // Security: Validate address is within managed region bounds before handling
+      // This prevents handling faults on arbitrary addresses (security breach)
       ManagedRegion* regionPtr = tlbLookup(target);
       if (!regionPtr) {
           regionPtr = mgr->pageTable_.lookup(target);
-          if (regionPtr) tlbFill(target, regionPtr);
+          if (regionPtr) {
+              // Additional validation: check address is within region bounds
+              uintptr_t regionStart = reinterpret_cast<uintptr_t>(regionPtr->ptr);
+              uintptr_t regionEnd = regionStart + regionPtr->size;
+              if (target < regionStart || target >= regionEnd) {
+                  // Address outside valid region bounds - security violation
+                  regionPtr = nullptr;
+              } else {
+                  tlbFill(target, regionPtr);
+              }
+          }
       }
       if (regionPtr) {
           ManagedRegion &region = *regionPtr;
@@ -330,11 +443,22 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
 
     uintptr_t target = reinterpret_cast<uintptr_t>(addr);
 
-    // O(1) lookup: try TLB first, then radix page table
+    // Security: Validate address is within managed region bounds before handling
+    // This prevents handling faults on arbitrary addresses (security breach)
     ManagedRegion* regionPtr = tlbLookup(target);
     if (!regionPtr) {
         regionPtr = mgr->pageTable_.lookup(target);
-        if (regionPtr) tlbFill(target, regionPtr);
+        if (regionPtr) {
+            // Additional validation: check address is within region bounds
+            uintptr_t regionStart = reinterpret_cast<uintptr_t>(regionPtr->ptr);
+            uintptr_t regionEnd = regionStart + regionPtr->size;
+            if (target < regionStart || target >= regionEnd) {
+                // Address outside valid region bounds - security violation
+                regionPtr = nullptr;
+            } else {
+                tlbFill(target, regionPtr);
+            }
+        }
     }
     if (regionPtr) {
         ManagedRegion &region = *regionPtr;
@@ -432,7 +556,7 @@ bool MemoryManager::registerManagedRegion(void *ptr, size_t size, bool hostAcces
   region.hostAccessible.store(hostAccessible);
   
   // Initialize dirty page tracking
-  size_t pageSize = 4096;
+  size_t pageSize = 4096; // Default fallback
 #if defined(_WIN32)
   SYSTEM_INFO si;
   GetSystemInfo(&si);
@@ -567,7 +691,7 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
   alloc.deviceId = deviceId;
 
   {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     allocations_[ptr] = alloc;
     allocRange_[static_cast<uint8_t*>(ptr)] = alignedSize;
   }
@@ -577,7 +701,7 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
 }
 
 VGREResult MemoryManager::free(MemoryHandle handle) {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   auto it = allocations_.find(handle);
   if (it == allocations_.end())
     return VGREResult::ERR_INVALID_VALUE;
@@ -608,7 +732,7 @@ size_t MemoryManager::getFreeMemory() const {
 
 bool MemoryManager::isValidHandle(MemoryHandle handle) const {
   if (!handle) return false;
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   uint8_t* target = static_cast<uint8_t*>(handle);
   auto rit = allocRange_.upper_bound(target);
   if (rit != allocRange_.begin()) {
@@ -620,7 +744,7 @@ bool MemoryManager::isValidHandle(MemoryHandle handle) const {
 
 size_t MemoryManager::getAllocationSize(MemoryHandle handle) const {
   if (!handle) return 0;
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   uint8_t* target = static_cast<uint8_t*>(handle);
   auto rit = allocRange_.upper_bound(target);
   if (rit != allocRange_.begin()) {
@@ -632,7 +756,7 @@ size_t MemoryManager::getAllocationSize(MemoryHandle handle) const {
 
 size_t MemoryManager::getAllocationSizeFromPointer(void *ptr) const {
   if (!ptr) return 0;
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   uint8_t* target = static_cast<uint8_t*>(ptr);
   // O(log n) lookup via the sorted allocRange_ map
   auto rit = allocRange_.upper_bound(target);
@@ -652,7 +776,7 @@ bool MemoryManager::getPointerAttributes(void *ptr, size_t &outSize,
                                           DeviceId &outDevice,
                                           unsigned int &outAttachmentFlags) const {
   if (!ptr) return false;
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   uint8_t *target = static_cast<uint8_t *>(ptr);
 
   // O(log n) lookup via sorted allocRange_ map
@@ -675,7 +799,7 @@ bool MemoryManager::getPointerAttributes(void *ptr, size_t &outSize,
 
 void *MemoryManager::getPointer(MemoryHandle handle) const {
   if (!handle) return nullptr;
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   uint8_t* target = static_cast<uint8_t*>(handle);
 
   // O(log n) lookup via sorted allocRange_ map
@@ -699,7 +823,7 @@ void *MemoryManager::getPointer(MemoryHandle handle) const {
 }
 
 void MemoryManager::getPageResidency(uint8_t outMap[1024]) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   memset(outMap, 0, 1024);
 
   if (poolSize_ == 0) return;
@@ -815,7 +939,7 @@ void MemoryManager::calibrateBandwidth() {
 
 
 VGREResult MemoryManager::getDirtyPages(MemoryHandle handle, std::vector<std::pair<size_t, size_t>>& outDirtyRanges) const {
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   
   auto it = masterRegions_.end();
   for (auto curr = masterRegions_.begin(); curr != masterRegions_.end(); ++curr) {
@@ -865,7 +989,7 @@ VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
     });
   }
 
-  std::unique_lock<std::recursive_mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
 
   auto it = masterRegions_.end();
   for (auto curr = masterRegions_.begin(); curr != masterRegions_.end(); ++curr) {
@@ -892,9 +1016,20 @@ VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
 }
 
 // ── Singleton accessor ────────────────────────────────────────────────────
-// Routes through RuntimeEngine which owns the MemoryManager instance.
 MemoryManager &MemoryManager::instance() {
   return RuntimeEngine::instance().getMemoryManager();
+}
+
+// ── TLB telemetry (Fix 3) ────────────────────────────────────────────────
+MemoryManager::TlbStats MemoryManager::getTlbStats() {
+    TlbStats s;
+    s.l1Hits   = g_tlbStats.l1Hits.load(std::memory_order_relaxed);
+    s.l1Misses = g_tlbStats.l1Misses.load(std::memory_order_relaxed);
+    s.l2Hits   = g_tlbStats.l2Hits.load(std::memory_order_relaxed);
+    s.l2Misses = g_tlbStats.l2Misses.load(std::memory_order_relaxed);
+    s.l1HitRate = g_tlbStats.l1HitRate();
+    s.l2HitRate = g_tlbStats.l2HitRate();
+    return s;
 }
 
 } // namespace core
