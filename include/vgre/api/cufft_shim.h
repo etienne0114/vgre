@@ -115,6 +115,68 @@ cufftResult_t cufftGetPlanIpcHandle(cufftHandle plan, vgre_cufft_ipc_handle_t *h
 cufftResult_t cufftCreatePlanFromIpcHandle(cufftHandle *plan,
                                            const vgre_cufft_ipc_handle_t *handle);
 
+// ── cuFFT Xt multi-GPU / callback API ────────────────────────────────────────
+
+typedef enum {
+    CUFFT_XT_FORMAT_INPUT              = 0x00,
+    CUFFT_XT_FORMAT_OUTPUT             = 0x01,
+    CUFFT_XT_FORMAT_INPLACE            = 0x02,
+    CUFFT_XT_FORMAT_INPLACE_SHUFFLED   = 0x03,
+    CUFFT_XT_FORMAT_1D_INPUT_SHUFFLED  = 0x04,
+    CUFFT_XT_FORMAT_UNDEFINED          = 0x80
+} cufftXtSubFormat_t;
+
+typedef enum {
+    CUFFT_COPY_HOST_TO_DEVICE   = 1,
+    CUFFT_COPY_DEVICE_TO_HOST   = 2,
+    CUFFT_COPY_DEVICE_TO_DEVICE = 3
+} cufftXtCopyType_t;
+
+typedef enum {
+    CUFFT_CB_LD_COMPLEX        = 0x0,
+    CUFFT_CB_LD_COMPLEX_DOUBLE = 0x1,
+    CUFFT_CB_LD_REAL           = 0x2,
+    CUFFT_CB_LD_REAL_DOUBLE    = 0x3,
+    CUFFT_CB_ST_COMPLEX        = 0x4,
+    CUFFT_CB_ST_COMPLEX_DOUBLE = 0x5,
+    CUFFT_CB_ST_REAL           = 0x6,
+    CUFFT_CB_ST_REAL_DOUBLE    = 0x7,
+    CUFFT_CB_UNDEFINED         = 0x8
+} cufftXtCallbackType_t;
+
+typedef struct cudaLibXtDesc {
+    int    version;
+    int    nGPUs;
+    int    GPUs[16];
+    void*  data[16];
+    size_t size[16];
+    void*  subFormat;
+} cudaLibXtDesc;
+
+cufftResult_t cufftXtMalloc(cufftHandle plan, cudaLibXtDesc **descriptor,
+                             cufftXtSubFormat_t format);
+cufftResult_t cufftXtFree(cudaLibXtDesc *descriptor);
+cufftResult_t cufftXtMemcpy(cufftHandle plan, void *dstPointer, void *srcPointer,
+                             cufftXtCopyType_t type);
+cufftResult_t cufftXtExecDescriptor(cufftHandle plan, cudaLibXtDesc *input,
+                                    cudaLibXtDesc *output, int direction);
+cufftResult_t cufftXtGetSizeMany(cufftHandle plan, size_t *workSize,
+                                 cufftXtSubFormat_t inputFormat,
+                                 cufftXtSubFormat_t outputFormat,
+                                 cufftXtSubFormat_t executionFormat,
+                                 int executionType,
+                                 int numGPUs, int *whichGPUs);
+cufftResult_t cufftXtMakePlanMany(cufftHandle plan, int rank, long long int *n,
+                                  long long int *inembed, long long int istride,
+                                  long long int idist, int inputType,
+                                  long long int *onembed, long long int ostride,
+                                  long long int odist, int outputType,
+                                  long long int batch, size_t *workSize,
+                                  int executionType);
+cufftResult_t cufftXtSetCallback(cufftHandle plan, void **callbackRoutine,
+                                  cufftXtCallbackType_t cbType, void **callerInfo);
+cufftResult_t cufftXtClearCallback(cufftHandle plan, cufftXtCallbackType_t cbType);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

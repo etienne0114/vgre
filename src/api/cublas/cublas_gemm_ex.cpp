@@ -455,4 +455,57 @@ cublasStatus_t cublasHgemmStridedBatched(cublasHandle_t handle,
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// cublasGemmGroupedBatchedEx: execute a list of grouped GEMMs where each
+// group can have different dimensions and batch sizes.
+cublasStatus_t cublasGemmGroupedBatchedEx(
+    cublasHandle_t handle,
+    const cublasOperation_t* transa_array,
+    const cublasOperation_t* transb_array,
+    const int* m_array, const int* n_array, const int* k_array,
+    const void* const alpha_array[],
+    const void* const Aarray[],
+    int Atype,
+    const int* lda_array,
+    const void* const Barray[],
+    int Btype,
+    const int* ldb_array,
+    const void* const beta_array[],
+    void* const Carray[],
+    int Ctype,
+    const int* ldc_array,
+    int groupCount,
+    const int* groupSize_array,
+    int computeType)
+{
+    if (!handle || groupCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    if (!transa_array || !transb_array || !m_array || !n_array || !k_array)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (!alpha_array || !Aarray || !lda_array || !Barray || !ldb_array)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (!beta_array || !Carray || !ldc_array || !groupSize_array)
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+    static constexpr int CUBLAS_GEMM_DEFAULT = 0;
+
+    int batchOffset = 0;
+    for (int g = 0; g < groupCount; ++g) {
+        int gSize = groupSize_array[g];
+        for (int b = 0; b < gSize; ++b) {
+            int idx = batchOffset + b;
+            cublasStatus_t r = cublasGemmEx(handle,
+                transa_array[g], transb_array[g],
+                m_array[g], n_array[g], k_array[g],
+                alpha_array[g],
+                Aarray[idx], Atype, lda_array[g],
+                Barray[idx], Btype, ldb_array[g],
+                beta_array[g],
+                Carray[idx], Ctype, ldc_array[g],
+                computeType, CUBLAS_GEMM_DEFAULT);
+            if (r != CUBLAS_STATUS_SUCCESS) return r;
+        }
+        batchOffset += gSize;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 } // extern "C"
