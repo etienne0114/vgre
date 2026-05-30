@@ -66,9 +66,13 @@ VGRE (Virtual GPU Runtime Engine) is a CUDA emulation runtime that intercepts GP
 - `cuda_interceptor.h` - CUDA API interception
 - `opencl_adapter.h` - OpenCL 1.2 compatibility
 - `vgre_c_api.h` - C API for Python bindings
-- `cublas_shim.cpp` - cuBLAS implementation
-- `cudnn_shim.cpp` - cuDNN implementation
-- `nccl_shim.cpp` - NCCL collective operations
+- `cublas_shim.cpp` - cuBLAS implementation (supporting L1/L2/L3, StridedBatched GEMM, and heuristics)
+- `cudnn_shim.cpp` - cuDNN core, pointwise, and attention descriptors
+- `cudnn_normalization.cpp` - cuDNN Layer and Batch Normalization (forward/backward)
+- `cudnn_rnn.cpp` - cuDNN RNN packed sequence LSTM/GRU and BPTT backward APIs
+- `cusparse_core.cpp` - cuSPARSE CSR/BSR format, SpMV, SpMM, and batched SpMM
+- `cusparse_triangular.cpp` - cuSPARSE SpSM (Sparse Triangular Solve for real and complex types) and SDDMM (Sampled Dense-Dense GEMM)
+- `nccl_shim.cpp` - NCCL collective operations (supporting Ring AllReduce and SHM bypass)
 
 **Interception Methods**:
 - **Linux/macOS**: `LD_PRELOAD` environment variable loads `libvgre_cudart.so`
@@ -104,29 +108,32 @@ struct RuntimeEngine {
 
 **Pipeline**:
 ```
-CUDA Kernel Source
+CUDA Kernel Source / PTX Input
     ↓
-Clang Parser (Extract AST)
+Clang Parser / PTX Scanner (Extract AST & register count via .reg directives)
     ↓
-Wrapper Generator (Bridge GPU→CPU concepts)
+Wrapper Generator (Bridge GPU calling conventions with gridDim, blockDim, sharedMem to C++ function)
     ↓
-Clang Compiler (-O3 -march=native)
+Clang Compiler (-O3 -march=native -ffast-math)
     ↓
-LLVM ORC JIT (Generate machine code)
+LLVM ORC JIT (Generate high-performance host machine code)
     ↓
-Executable Function Pointer
+Executable Function Pointer (registered in kernelAddressMap_)
 ```
 
 **Key Files**:
-- `clang_kernel_parser.cpp` - Parse CUDA kernel source
-- `llvm_translation_engine.cpp` - LLVM IR generation and JIT
-- `kernel_cache.cpp` - Persistent disk + memory cache
-- `ptx_translator.cpp` - Inline PTX assembly translation
+- `clang_kernel_parser.cpp` - Parse CUDA kernel source and build AST representations
+- `llvm_translation_engine.cpp` - LLVM IR translation and JIT execution engine
+- `kernel_cache.cpp` - Thread-safe LRU JIT cache with checksum verification and cache-eviction guards
+- `ptx_translator.cpp` - Inline/standalone PTX translation, featuring `.reg` register-count scanning and hardware fatbinary SASS parsing
+
+**Register & shared Memory Scanner**:
+During translation, VGRE performs static analysis on PTX source or LLVM IR, scanning `.reg` register declarations and `__shared__` buffer allocations. This dynamically computes each kernel's static/dynamic shared memory requirements and occupancy bounds (stored in `VgreKernelRegistry`), avoiding fixed hardcoded limits.
 
 **Caching Strategy**:
-- **Memory Cache**: LRU hash table (0ms lookup on hit)
-- **Disk Cache**: `~/.vgre/cache/` directory (5–10ms on hit)
-- **Cache Key**: Includes compilation flags, kernel source hash, and target CPU features
+- **Memory Cache**: Thread-safe LRU hash table (0ms lookup on hit) with lock-free eviction guards.
+- **Disk Cache**: Located at `~/.vgre/cache/` (5–10ms lookup on hit) containing compiled shared object binaries with checksum-validated AST structures.
+- **Cache Key**: Generated from the SHA-256 hash of the kernel source, target architecture flags, SIMD vector level, and compiler optimization flags.
 
 ### 4. Memory Manager (`src/core/memory_manager.cpp`)
 
@@ -242,13 +249,11 @@ aee.recordRealFlops(totalFlops);
 **Purpose**: Pre-warmed thread pool for block-level execution — eliminates per-launch OS thread-create overhead.
 
 **Design**:
-- Pool is initialized at startup with `N = hardware_concurrency()` threads waiting on a work queue
-- `dispatch(fn)` pushes a task without creating any OS thread — tasks run on pre-warmed workers
-- `__syncthreads()` is implemented as a sense-reversing barrier shared among all workers in the same block group
-- Cooperative kernel launch: uses a `condition_variable` start-gate so all block-worker threads reach the entry point before any begins executing (matches CUDA cooperative grid semantics)
-
-**Why it matters**:
-Creating 5–50 `std::thread` objects per cooperative kernel batch costs 5–50 µs in OS overhead per launch. The pool reduces this to near zero for all subsequent launches.
+- **Initialization**: The pool is initialized at startup with `N = hardware_concurrency()` (typically 1024-2048 pre-warmed threads) waiting on a synchronization queue.
+- **Dispatch**: `dispatch(fn)` schedules a task block onto the pre-warmed threads, completely avoiding the 5–50 µs overhead of creating standard OS threads during hot paths.
+- **Intra-Block Barrier (`__syncthreads()`)**: Implemented as a lock-free sense-reversing barrier (`BlockBarrier`) shared among all workers within a cooperative block group. Threads toggle their private phase Sense bit and wait on a generation counter, ensuring low-latency synchronization without spinning cycles on CPU resources.
+- **Two-Level Dispatch & Oversubscription Guard**: When the block launching requests `threadsPerBlock > pool.getCapacity()`, VGRE automatically triggers an oversubscription safeguard. Instead of launching parallel threads that exceed the host pool's thread limit (which would cause massive OS context-switching overhead and potential thread exhaustion), thread 0 runs the block serially. The sense-reversing barriers (`__syncthreads()`) are dynamically transformed into no-ops to prevent deadlocks. JIT kernels utilize the same pool through `vgre_jit_block_dispatch()`.
+- **Cooperative grid Launch**: Employs a thread-safe `condition_variable` start-gate. All worker threads wait until the entire block group reaches the entry boundary before executing, satisfying physical CUDA cooperative grid semantics.
 
 ### 8. Adaptive Execution Engine (`src/advanced/adaptive_execution_engine.cpp`)
 
@@ -317,11 +322,67 @@ launchRemoteKernel()
 - Minimum latency floor `std::max(latency_ms, 0.001)` prevents divide-by-near-zero artifacts
 - Accuracy factor EWMA (α = 0.25) adjusts future slice sizes based on observed vs predicted execution time
 
+### 10. MPS Multi-Process Server (`src/advanced/mps_control.cpp`)
+
+**Purpose**: Provide CUDA Multi-Process Service (MPS) capabilities for isolated CPU-based resource pooling across separate host processes.
+
+**Architecture**:
+- **Daemon-Client Model**: A background server process (`vgre-mps-daemon`) listens on a platform-native IPC channel: Unix domain sockets on POSIX (Linux/macOS) and Named Pipes on Windows (`VGRE_MPS_PIPE` environment variable).
+- **IPC Message Interception**: When `VGRE_MPS_PIPE` is active, client CUDA runtime instances bypass local allocation/execution layers and serialize API calls (MALLOC, FREE, MEMCPY, LAUNCH_KERNEL, SYNC) into highly efficient binary payload commands sent over the pipe.
+- **Shared Memory Allocations**: Pointer sharing and buffer ownership across client boundaries are managed via `src/api/cuda_ipc_memory.cpp` using POSIX shared memory segments (`shm_open`, `mmap`) and event handles, enabling zero-copy IPC data mapping.
+
+### 11. Configuration Management (`src/core/config_manager.cpp`)
+
+**Purpose**: Manage global configuration variables, environment overrides, JSON/YAML profile parsing, and dynamic hot-reloading parameters.
+
+**Design**:
+- **Meyers Singletons**: Built around the `ConfigurationManager` thread-safe Meyers singleton to provide thread-safe, lock-free global parameter access during highly parallel kernel launches.
+- **Hot-Reloading Thread**: When `VGRE_CONFIG_HOT_RELOAD` is enabled, VGRE starts a low-priority background thread that watches the configuration file (specified by `VGRE_CONFIG_FILE`). If the file is modified (via JSON/YAML updates), the manager parses the file and hot-reloads parameter states (such as cache dimensions, worker thread allocations, or log levels) in real time without restarting the runtime.
+- **Cross-Platform Isolation**: Automatically maps and loads configuration files from platform-native directories (e.g., `%LOCALAPPDATA%\VGRE` on Windows, `~/.config/vgre/` or `/etc/vgre/` on Linux/macOS).
+
 ---
 
 ## Execution Flow
 
 ### Kernel Launch Sequence
+
+When your application executes a CUDA kernel, VGRE routes the computation through a multi-stage compilation and execution pipeline:
+
+```mermaid
+graph TD
+    subgraph "1. Interception"
+        A["Application calls cudaLaunchKernel"] --> B["API Layer Intercepts\n(LD_PRELOAD / DLL Injection)"]
+    end
+
+    subgraph "2. Compilation & Caching"
+        B --> C{"Is Kernel Cached?"}
+        C -- "Yes (0ms)" --> F["Extract Compiled Function Pointer"]
+        C -- "No" --> D["PTX/AST Parser & Scanner\n(Extracts structure, registers, SMEM)"]
+        D --> E["LLVM ORC JIT Compiler\n(Optimized -O3 -march=native)"]
+        E --> F
+    end
+
+    subgraph "3. Scheduling"
+        F --> G["Create Task & Submit to Scheduler"]
+        G --> H["Assign to Stream Queue\n(Thread-Safe Queue)"]
+    end
+
+    subgraph "4. Execution"
+        H --> I["Pre-Warmed BlockWorkerPool Thread"]
+        I --> J["CPUParallelExecutor\n(OpenMP Guided Loop + SIMD Vector Lanes)"]
+        J --> K["Intra-Block Barriers\n(Sense-Reversing BlockBarrier)"]
+        K --> L["Write Numerical Output Directly to Host Memory"]
+    end
+
+    style A fill:#4a90d9,color:#fff
+    style B fill:#e74c3c,color:#fff
+    style D fill:#f39c12,color:#fff
+    style E fill:#f39c12,color:#fff
+    style F fill:#2ecc71,color:#fff
+    style H fill:#8e44ad,color:#fff
+    style J fill:#27ae60,color:#fff
+    style L fill:#2ecc71,color:#fff
+```
 
 ```
 1. Application calls cudaLaunchKernel(kernel_id, grid, block, args)
@@ -334,10 +395,11 @@ launchRemoteKernel()
 3. RuntimeEngine::launchKernel()
    ├── Look up kernel in cache
    ├── If not cached:
-   │   ├── Parse kernel source (Clang)
-   │   ├── Generate LLVM IR
+   │   ├── Parse kernel source (Clang) or PTX assembly
+   │   ├── Scan register (.reg) and shared memory requirements
+   │   ├── Generate LLVM IR with native CPU optimizations
    │   ├── JIT compile (LLVM ORC)
-   │   └── Cache result
+   │   └── Cache compiled binary to disk
    ├── Create task with kernel, grid, block, args
    └── Submit to Scheduler
    ↓
@@ -368,6 +430,24 @@ launchRemoteKernel()
 
 ### Memory Access Sequence (UVM)
 
+Unified Virtual Memory allows the CPU and virtual GPU boundaries to map the same physical address space. This is executed using OS-level memory boundaries and signal traps:
+
+```mermaid
+flowchart TB
+    ALLOC["1. App calls cudaMallocManaged()"] --> RESERVE["2. VGRE reserves virtual memory\n(marked as NO ACCESS via PROT_NONE)"]
+    RESERVE --> ACCESS["3. App attempts to read/write memory page"]
+    ACCESS --> FAULT["4. Hardware Page Fault!\n(OS traps illegal access)"]
+    FAULT --> HANDLER["5. VGRE Signal Handler\n(SIGSEGV on Linux/macOS, VEH on Windows)"]
+    HANDLER --> UNLOCK["6. O(1) RadixPageTable Lookup\n(Mark page READ+WRITE via mprotect)"]
+    UNLOCK --> TRACK["7. Record dirty bit & timestamp in registry"]
+    TRACK --> CONTINUE["8. Resume application thread\n(Execution continues transparently)"]
+
+    style ALLOC fill:#3498db,color:#fff
+    style FAULT fill:#e74c3c,color:#fff
+    style HANDLER fill:#f39c12,color:#fff
+    style UNLOCK fill:#2ecc71,color:#fff
+```
+
 ```
 1. Application accesses managed memory
    ↓
@@ -375,8 +455,8 @@ launchRemoteKernel()
    ↓
 3. Signal handler intercepts
    ├── Identify faulting address
-   ├── Find corresponding MasterRegion
-   ├── Call mprotect() to make page writable
+   ├── Find corresponding MasterRegion in RadixPageTable
+   ├── Call mprotect() or VirtualProtect() to make page writable
    ├── Record access in dirty bitmap
    └── Return to application
    ↓
@@ -384,7 +464,7 @@ launchRemoteKernel()
    ↓
 5. Migration thread (every 500ms)
    ├── Scan dirty pages
-   ├── Batch migrate to NUMA node 0
+   ├── Batch migrate to NUMA node 0 (affinity bindings)
    └── Clear dirty bitmap
 ```
 

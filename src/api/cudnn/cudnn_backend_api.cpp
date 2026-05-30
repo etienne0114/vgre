@@ -846,6 +846,20 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
                 case CUDNN_POINTWISE_RELU_BWD:   y = (b > 0.f) ? x : 0.f; break;
                 case CUDNN_POINTWISE_TANH_BWD:   y = x * (1.f - b * b); break;
                 case CUDNN_POINTWISE_SIGMOID_BWD:y = x * b * (1.f - b); break;
+                case CUDNN_POINTWISE_ELU_BWD:    y = x * (b >= 0.f ? 1.f : b + 1.f); break;
+                case CUDNN_POINTWISE_GELU_BWD:
+                case CUDNN_POINTWISE_GELU_APPROX_TANH_BWD: {
+                    float t = 0.7978845608f * (b + 0.044715f * b * b * b);
+                    float th = std::tanh(t); float sech2 = 1.f - th * th;
+                    float dgelu = 0.5f * (1.f + th) + 0.5f * b * sech2 * 0.7978845608f * (1.f + 3.f * 0.044715f * b * b);
+                    y = x * dgelu; break;
+                }
+                case CUDNN_POINTWISE_SOFTPLUS_BWD:y = x / (1.f + std::exp(-b)); break;
+                case CUDNN_POINTWISE_SWISH_BWD: {
+                    float sig = 1.f / (1.f + std::exp(-b));
+                    y = x * (sig + b * sig * (1.f - sig)); break;
+                }
+                case CUDNN_POINTWISE_MOD:        y = b != 0.f ? std::fmod(x, b) : 0.f; break;
                 case CUDNN_POINTWISE_ADD_SQUARE:  y = x + b * b; break;
                 case CUDNN_POINTWISE_POW:        y = std::pow(x, b); break;
                 case CUDNN_POINTWISE_CMP_EQ:     y = (x == b) ? 1.f : 0.f; break;

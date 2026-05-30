@@ -902,6 +902,82 @@ cusparseStatus_t cusparseSDDMM(cusparseHandle_t /*h*/,
     CsrMat      &C = cIt->second;
     if (!A.values || !B.values || !C.rowOffsets || !C.colInd || !C.values)
         return CUSPARSE_STATUS_INVALID_VALUE;
+    // Complex single-precision SDDMM
+    if (computeType == CUDA_C_32F) {
+        cuComplex alphaC = *static_cast<const cuComplex*>(alpha);
+        cuComplex betaC  = *static_cast<const cuComplex*>(beta);
+        bool conjA = (opA == CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE);
+        bool conjB = (opB == CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE);
+        bool transpA = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+        bool transpB = (opB != CUSPARSE_OPERATION_NON_TRANSPOSE);
+        int base = (C.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+        int64_t k = transpA ? A.rows : A.cols;
+        auto getAc = [&](int64_t row, int64_t col) -> cuComplex {
+            int64_t r = transpA ? col : row, c = transpA ? row : col;
+            int64_t idx = (A.order == CUSPARSE_ORDER_COL) ? r + c * A.ld : r * A.ld + c;
+            const float* p = static_cast<const float*>(A.values) + idx * 2;
+            return conjA ? cuComplex{p[0], -p[1]} : cuComplex{p[0], p[1]};
+        };
+        auto getBc = [&](int64_t row, int64_t col) -> cuComplex {
+            int64_t r = transpB ? row : col, c = transpB ? col : row;
+            int64_t idx = (B.order == CUSPARSE_ORDER_COL) ? r + c * B.ld : r * B.ld + c;
+            const float* p = static_cast<const float*>(B.values) + idx * 2;
+            return conjB ? cuComplex{p[0], -p[1]} : cuComplex{p[0], p[1]};
+        };
+        for (int64_t row = 0; row < C.rows; ++row) {
+            int64_t rs = getIdx(C.rowOffsets, C.rowOffsetType, row)     - base;
+            int64_t re = getIdx(C.rowOffsets, C.rowOffsetType, row + 1) - base;
+            for (int64_t e = rs; e < re; ++e) {
+                int64_t col = getIdx(C.colInd, C.colIndType, e) - base;
+                cuComplex dot{0.f, 0.f};
+                for (int64_t p = 0; p < k; ++p) dot += getAc(row, p) * getBc(col, p);
+                float* cv = static_cast<float*>(C.values) + e * 2;
+                cuComplex cval{cv[0], cv[1]};
+                cuComplex res = alphaC * dot + betaC * cval;
+                cv[0] = res.x; cv[1] = res.y;
+            }
+        }
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+
+    // Complex double-precision SDDMM
+    if (computeType == CUDA_C_64F) {
+        cuDoubleComplex alphaZ = *static_cast<const cuDoubleComplex*>(alpha);
+        cuDoubleComplex betaZ  = *static_cast<const cuDoubleComplex*>(beta);
+        bool conjA = (opA == CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE);
+        bool conjB = (opB == CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE);
+        bool transpA = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+        bool transpB = (opB != CUSPARSE_OPERATION_NON_TRANSPOSE);
+        int base = (C.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+        int64_t k = transpA ? A.rows : A.cols;
+        auto getAz = [&](int64_t row, int64_t col) -> cuDoubleComplex {
+            int64_t r = transpA ? col : row, c = transpA ? row : col;
+            int64_t idx = (A.order == CUSPARSE_ORDER_COL) ? r + c * A.ld : r * A.ld + c;
+            const double* p = static_cast<const double*>(A.values) + idx * 2;
+            return conjA ? cuDoubleComplex{p[0], -p[1]} : cuDoubleComplex{p[0], p[1]};
+        };
+        auto getBz = [&](int64_t row, int64_t col) -> cuDoubleComplex {
+            int64_t r = transpB ? row : col, c = transpB ? col : row;
+            int64_t idx = (B.order == CUSPARSE_ORDER_COL) ? r + c * B.ld : r * B.ld + c;
+            const double* p = static_cast<const double*>(B.values) + idx * 2;
+            return conjB ? cuDoubleComplex{p[0], -p[1]} : cuDoubleComplex{p[0], p[1]};
+        };
+        for (int64_t row = 0; row < C.rows; ++row) {
+            int64_t rs = getIdx(C.rowOffsets, C.rowOffsetType, row)     - base;
+            int64_t re = getIdx(C.rowOffsets, C.rowOffsetType, row + 1) - base;
+            for (int64_t e = rs; e < re; ++e) {
+                int64_t col = getIdx(C.colInd, C.colIndType, e) - base;
+                cuDoubleComplex dot{0.0, 0.0};
+                for (int64_t p = 0; p < k; ++p) dot += getAz(row, p) * getBz(col, p);
+                double* cv = static_cast<double*>(C.values) + e * 2;
+                cuDoubleComplex cval{cv[0], cv[1]};
+                cuDoubleComplex res = alphaZ * dot + betaZ * cval;
+                cv[0] = res.x; cv[1] = res.y;
+            }
+        }
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F)
         return CUSPARSE_STATUS_NOT_SUPPORTED;
 

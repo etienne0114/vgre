@@ -1,8 +1,10 @@
 #include "vgre/core/memory_manager.h"
 #include "vgre/common/logger.h"
 
+#include <atomic>
 #include <cstring>
 #include <algorithm>
+#include <unordered_map>
 
 #include "vgre/common/os_backend.h"
 #if defined(__linux__)
@@ -18,6 +20,13 @@
 
 namespace vgre {
 namespace core {
+
+static constexpr size_t kTlsCacheMax = 32;
+static constexpr size_t kTlsMaxBlockSz = 1 * 1024 * 1024;
+static std::atomic<uint32_t> g_poolGen[1024]{};
+
+struct TlsEntry { void* head; size_t count; size_t blockSz; uint32_t gen; };
+static thread_local std::unordered_map<PoolHandle, TlsEntry> t_cache;
 
 static bool belongsToPoolSlabs(const MemoryPool &pool, void *ptr) {
   uint8_t *p = static_cast<uint8_t*>(ptr);
@@ -61,6 +70,7 @@ VGREResult MemoryManager::createPool(PoolHandle &outHandle, size_t blockSize) {
 
   outHandle = pool.id;
   pools_[pool.id] = std::move(pool);
+  g_poolGen[static_cast<size_t>(outHandle) % 1024].store(0, std::memory_order_release);
 
   VGRE_LOG_INFO("MemoryManager",
                 "Created memory pool " + std::to_string(outHandle) +
@@ -93,6 +103,9 @@ VGREResult MemoryManager::destroyPool(PoolHandle handle) {
     slab = next;
   }
 
+  // Invalidate any stale TLS caches that still hold blocks from this pool.
+  g_poolGen[static_cast<size_t>(handle) % 1024].fetch_add(1, std::memory_order_acq_rel);
+
   VGRE_LOG_INFO("MemoryManager",
                 "Destroyed pool " + std::to_string(handle) +
                 " (allocs: " + std::to_string(pool.allocCount) +
@@ -105,6 +118,27 @@ VGREResult MemoryManager::destroyPool(PoolHandle handle) {
 VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
                                            MemoryHandle &outHandle) {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
+  {
+    auto& tlsEntry = t_cache[poolHandle];
+    uint32_t curGen = g_poolGen[static_cast<size_t>(poolHandle) % 1024].load(std::memory_order_acquire);
+    if (tlsEntry.gen != curGen) { tlsEntry = {nullptr, 0, 0, curGen}; }
+    if (tlsEntry.count > 0 && tlsEntry.blockSz > 0 && size <= tlsEntry.blockSz && size <= kTlsMaxBlockSz) {
+      auto poolIt = pools_.find(poolHandle);
+      if (poolIt != pools_.end()) {
+        void* blk = tlsEntry.head;
+        tlsEntry.head = *reinterpret_cast<void**>(blk);
+        tlsEntry.count--;
+        memset(blk, 0, tlsEntry.blockSz);
+        poolIt->second.liveSlabAllocs.insert(blk);
+        poolIt->second.allocCount++;
+        poolIt->second.totalAllocated += tlsEntry.blockSz;
+        if (poolIt->second.totalAllocated > poolIt->second.peakAllocated)
+          poolIt->second.peakAllocated = poolIt->second.totalAllocated;
+        outHandle = blk;
+        return VGREResult::SUCCESS;
+      }
+    }
+  }
   auto it = pools_.find(poolHandle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
 
@@ -220,6 +254,21 @@ VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
                     std::to_string(poolHandle));
     }
     return VGREResult::ERR_INVALID_VALUE;
+  }
+
+  if (pool.blockSize <= kTlsMaxBlockSz) {
+    auto& tlsEntry = t_cache[poolHandle];
+    uint32_t curGen = g_poolGen[static_cast<size_t>(poolHandle) % 1024].load(std::memory_order_acquire);
+    if (tlsEntry.gen != curGen) { tlsEntry = {nullptr, 0, 0, curGen}; }
+    if (tlsEntry.count < kTlsCacheMax) {
+      tlsEntry.blockSz = pool.blockSize;
+      *reinterpret_cast<void**>(ptr) = tlsEntry.head;
+      tlsEntry.head = ptr;
+      tlsEntry.count++;
+      pool.freeCount++;
+      if (pool.totalAllocated >= pool.blockSize) pool.totalAllocated -= pool.blockSize;
+      return VGREResult::SUCCESS;
+    }
   }
 
   // Normal path: push to intrusive slab free list (O(1) reuse)

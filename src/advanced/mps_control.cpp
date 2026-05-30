@@ -24,6 +24,9 @@
 #include <vector>
 
 #include "vgre/common/os_backend.h"
+#if defined(_WIN32)
+#  include <aclapi.h>
+#endif
 #if !defined(_WIN32)
 #include <sys/un.h>  // sockaddr_un — Unix domain sockets
 #endif
@@ -144,13 +147,51 @@ bool MPSServer::start() {
     if (socketPath_.find("\\\\.\\pipe\\") == 0) pipeName = socketPath_;
     else if (socketPath_.find("/tmp/") == 0) pipeName = "\\\\.\\pipe\\vgre_mps";
 
+    // Build a DACL allowing only CREATOR_OWNER + SYSTEM — no other local users.
+    PSECURITY_DESCRIPTOR pSD = nullptr;
+    PACL pACL = nullptr;
+    PSID pOwnerSid = nullptr, pSystemSid = nullptr;
+    EXPLICIT_ACCESS_W ea[2] = {};
+    SID_IDENTIFIER_AUTHORITY creatorAuth = SECURITY_CREATOR_SID_AUTHORITY;
+    SID_IDENTIFIER_AUTHORITY ntAuth     = SECURITY_NT_AUTHORITY;
+    AllocateAndInitializeSid(&creatorAuth, 1, SECURITY_CREATOR_OWNER_RID,
+                             0,0,0,0,0,0,0, &pOwnerSid);
+    AllocateAndInitializeSid(&ntAuth, 1, SECURITY_LOCAL_SYSTEM_RID,
+                             0,0,0,0,0,0,0, &pSystemSid);
+    ea[0].grfAccessPermissions = GENERIC_ALL;
+    ea[0].grfAccessMode        = SET_ACCESS;
+    ea[0].grfInheritance       = NO_INHERITANCE;
+    ea[0].Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea[0].Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea[0].Trustee.ptstrName    = (LPWSTR)pOwnerSid;
+    ea[1].grfAccessPermissions = GENERIC_ALL;
+    ea[1].grfAccessMode        = SET_ACCESS;
+    ea[1].grfInheritance       = NO_INHERITANCE;
+    ea[1].Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea[1].Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea[1].Trustee.ptstrName    = (LPWSTR)pSystemSid;
+    SetEntriesInAclW(2, ea, nullptr, &pACL);
+    pSD = LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH);
+    InitializeSecurityDescriptor(pSD, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(pSD, TRUE, pACL, FALSE);
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = pSD;
+    sa.bInheritHandle = FALSE;
+
     listenFd_ = CreateNamedPipeA(
         pipeName.c_str(),
         PIPE_ACCESS_DUPLEX,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
         maxClients_,
         65536, 65536,
-        0, nullptr);
+        0, &sa);
+
+    if (pOwnerSid) FreeSid(pOwnerSid);
+    if (pSystemSid) FreeSid(pSystemSid);
+    if (pACL) LocalFree(pACL);
+    if (pSD) LocalFree(pSD);
+
     if (listenFd_ == INVALID_HANDLE_VALUE) {
         VGRE_LOG_ERROR("MPS", "CreateNamedPipe failed: " + std::to_string(GetLastError()));
         listenFd_ = MPS_INVALID_HANDLE;
@@ -181,6 +222,9 @@ bool MPSServer::start() {
         close(listenFd_); listenFd_ = -1;
         return false;
     }
+
+    // Prevent local privilege escalation via the socket — owner access only.
+    chmod(socketPath_.c_str(), 0600);
 
     if (listen(listenFd_, maxClients_) < 0) {
         VGRE_LOG_ERROR("MPS", "listen() failed: " + std::string(strerror(errno)));

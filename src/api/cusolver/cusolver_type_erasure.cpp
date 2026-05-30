@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 // All typed cuSolver functions are declared in cusolver_shim.h (included above).
 
@@ -243,10 +244,99 @@ cusolverStatus_t cusolverDnXsygvd_bufferSize(
     return st;
 }
 
+} // extern "C" — pause for C++ template helpers
+
+template<typename T>
+static void transform_generalized_congruence(int n, char uplo, T* A, int lda, const T* B, int ldb) {
+    bool lower = (uplo == 'L' || uplo == 'l');
+    std::vector<T> Y(static_cast<size_t>(n) * n, 0);
+
+    if (lower) {
+        // Solve L * Y = A (forward substitution on columns of A)
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+                T sum = A[i + j * lda];
+                for (int k = 0; k < i; ++k) {
+                    sum -= B[i + k * ldb] * Y[k + j * n];
+                }
+                Y[i + j * n] = sum / B[i + i * ldb];
+            }
+        }
+        // Solve L * A' = Y^T (forward substitution on rows of A')
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < n; ++j) {
+                T sum = Y[j + i * n]; // Y^T_{j,i}
+                for (int k = 0; k < j; ++k) {
+                    sum -= B[j + k * ldb] * A[i + k * lda];
+                }
+                A[i + j * lda] = sum / B[j + j * ldb];
+            }
+        }
+    } else {
+        // Solve U^T * Y = A
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+                T sum = A[i + j * lda];
+                for (int k = 0; k < i; ++k) {
+                    sum -= B[k + i * ldb] * Y[k + j * n];
+                }
+                Y[i + j * n] = sum / B[i + i * ldb];
+            }
+        }
+        // Solve U^T * A' = Y^T
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < n; ++j) {
+                T sum = Y[j + i * n];
+                for (int k = 0; k < j; ++k) {
+                    sum -= B[k + j * ldb] * A[i + k * lda];
+                }
+                A[i + j * lda] = sum / B[j + j * ldb];
+            }
+        }
+    }
+}
+
+template<typename T>
+static void back_project_eigenvectors(int n, char uplo, T* A, int lda, const T* B, int ldb) {
+    bool lower = (uplo == 'L' || uplo == 'l');
+    std::vector<T> X_col(n);
+
+    if (lower) {
+        // Solve L^T * X = Z (backward substitution on columns of Z in A)
+        for (int j = 0; j < n; ++j) {
+            for (int i = n - 1; i >= 0; --i) {
+                T sum = A[i + j * lda];
+                for (int k = i + 1; k < n; ++k) {
+                    sum -= B[k + i * ldb] * X_col[k];
+                }
+                X_col[i] = sum / B[i + i * ldb];
+            }
+            for (int i = 0; i < n; ++i) {
+                A[i + j * lda] = X_col[i];
+            }
+        }
+    } else {
+        // Solve U * X = Z
+        for (int j = 0; j < n; ++j) {
+            for (int i = n - 1; i >= 0; --i) {
+                T sum = A[i + j * lda];
+                for (int k = i + 1; k < n; ++k) {
+                    sum -= B[i + k * ldb] * X_col[k];
+                }
+                X_col[i] = sum / B[i + i * ldb];
+            }
+            for (int i = 0; i < n; ++i) {
+                A[i + j * lda] = X_col[i];
+            }
+        }
+    }
+}
+
+extern "C" { // resume C linkage
+
 // ── cusolverDnXsygvd ──────────────────────────────────────────────────────────
 // Generalised eigenvalue problem A*x = lambda*B*x.
-// Strategy: compute Cholesky of B, transform A, then syevd.
-// For float, uses float syevd; for double, uses double syevd.
+// Strategy: compute Cholesky of B, transform A, then syevd, and back-project.
 cusolverStatus_t cusolverDnXsygvd(
     cusolverDnHandle_t handle,
     cusolverDnParams_t /*params*/,
@@ -272,12 +362,18 @@ cusolverStatus_t cusolverDnXsygvd(
         if (st != CUSOLVER_STATUS_SUCCESS) return st;
         if (*devInfo != 0) return CUSOLVER_STATUS_SUCCESS;  // not positive definite
 
-        // Step 2: Transform A → L^{-1} A L^{-T} (for itype=1).
-        // Simplified: solve L X = A (ignoring the right-side transform for emulation).
-        // Full sygvd would use ssygst; we use the syevd result directly on A.
-        // This is an approximation that works when B is close to identity.
+        // Step 2: Transform A → L^{-1} A L^{-T} or U^{-T} A U^{-1} (itype=1).
+        transform_generalized_congruence<float>(n, uplo, (float*)A, lda, (const float*)B, ldb);
+
+        // Step 3: Solve standard symmetric eigenvalue problem on transformed A
         st = cusolverDnSsyevd(handle, jobz, uplo, n, (float*)A, lda,
                               (float*)W, (float*)bufferOnDevice, lwork, devInfo);
+        if (st != CUSOLVER_STATUS_SUCCESS) return st;
+
+        // Step 4: Back-project eigenvectors (if requested)
+        if (jobz == 'V' || jobz == 'v') {
+            back_project_eigenvectors<float>(n, uplo, (float*)A, lda, (const float*)B, ldb);
+        }
     } else {
         int lwork = (int)(bufferOnDeviceBytes / sizeof(double));
         st = cusolverDnDpotrf(handle, uplo, n, (double*)B, ldb,
@@ -285,8 +381,15 @@ cusolverStatus_t cusolverDnXsygvd(
         if (st != CUSOLVER_STATUS_SUCCESS) return st;
         if (*devInfo != 0) return CUSOLVER_STATUS_SUCCESS;
 
+        transform_generalized_congruence<double>(n, uplo, (double*)A, lda, (const double*)B, ldb);
+
         st = cusolverDnDsyevd(handle, jobz, uplo, n, (double*)A, lda,
                               (double*)W, (double*)bufferOnDevice, lwork, devInfo);
+        if (st != CUSOLVER_STATUS_SUCCESS) return st;
+
+        if (jobz == 'V' || jobz == 'v') {
+            back_project_eigenvectors<double>(n, uplo, (double*)A, lda, (const double*)B, ldb);
+        }
     }
     return st;
 }

@@ -847,7 +847,15 @@ cudnnStatus_t cudnnRNNBackwardDataEx(
                         // gate gradients (pre-activation)
                         float ft = fg_n[1*H+j];
                         dp_n[0*H+j] = dct_j * fg_n[2*H+j] * fg_n[0*H+j]*(1.f-fg_n[0*H+j]); // di
-                        dp_n[1*H+j] = dct_j * (t>0?hp_t[n*H+j]:0.f) * ft*(1.f-ft);           // df (approx)
+                        // Exact: multiply by previous cell state C_{t-1}, not hidden state H_{t-1}
+                        float cp_j = 0.f;
+                        if (t > 0) {
+                            const float* fg_prev = fg_l + (size_t)(t-1) * B * fs * H + (size_t)n * fs * H;
+                            cp_j = fg_prev[4*H+j];
+                        } else if (cxf) {
+                            cp_j = cxf[l*B*H + n*H + j];
+                        }
+                        dp_n[1*H+j] = dct_j * cp_j * ft*(1.f-ft);                             // df (exact)
                         dp_n[2*H+j] = dct_j * fg_n[0*H+j] * (1.f - fg_n[2*H+j]*fg_n[2*H+j]);// dg
                         dp_n[3*H+j] = dh_j  * tanh_ct * ot*(1.f-ot);                          // do
                         dc_n[j]     = dct_j * ft;

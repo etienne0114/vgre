@@ -91,7 +91,8 @@ cudnnStatus_t cudnnDivisiveNormalizationForward(
 // Let D = (mu^2 + eps)^beta
 // dy/dx = 1/D  (direct term)  +  x * d(1/D)/dx  (indirect through mu)
 //
-// For CPU reference we approximate: dx ≈ dy * (1/D) scaled by local window avg.
+// Exact analytical gradient:
+//   dx_k = dy_k / D_k  -  sum_{i in N(k)} [ dy_i * 2*beta*mu_i*x_i / (|N(i)| * (mu_i^2+eps)^(beta+1)) ]
 
 cudnnStatus_t cudnnDivisiveNormalizationBackward(
     cudnnHandle_t /*handle*/,
@@ -126,35 +127,68 @@ cudnnStatus_t cudnnDivisiveNormalizationBackward(
     #endif
     for (int n = 0; n < N; ++n)
     for (int c = 0; c < C; ++c) {
-        // Precompute D = (mu^2 + eps)^beta
+        std::vector<float> mu(H * W, 0.f);
+        std::vector<int> N_count(H * W, 0);
         std::vector<float> denom(H * W, 1.f);
+
         for (int h = 0; h < H; ++h)
         for (int w = 0; w < W; ++w) {
             int idx = ((n * C + c) * H + h) * W + w;
-            float mu = 0.f;
             if (mptr) {
-                mu = mptr[idx];
+                mu[h * W + w] = mptr[idx];
+                int cnt = 0;
+                for (int dh = -pad; dh <= pad; ++dh) {
+                    for (int dw = -pad; dw <= pad; ++dw) {
+                        int hh = h + dh, ww = w + dw;
+                        if (hh >= 0 && hh < H && ww >= 0 && ww < W) {
+                            ++cnt;
+                        }
+                    }
+                }
+                N_count[h * W + w] = cnt;
             } else {
                 float sum = 0.f;
                 int cnt = 0;
-                for (int dh = -pad; dh <= pad; ++dh)
-                for (int dw = -pad; dw <= pad; ++dw) {
-                    int hh = h + dh, ww = w + dw;
-                    if (hh < 0 || hh >= H || ww < 0 || ww >= W) continue;
-                    sum += xptr[((n * C + c) * H + hh) * W + ww];
-                    ++cnt;
+                for (int dh = -pad; dh <= pad; ++dh) {
+                    for (int dw = -pad; dw <= pad; ++dw) {
+                        int hh = h + dh, ww = w + dw;
+                        if (hh >= 0 && hh < H && ww >= 0 && ww < W) {
+                            sum += xptr[((n * C + c) * H + hh) * W + ww];
+                            ++cnt;
+                        }
+                    }
                 }
-                mu = (cnt > 0) ? (sum / cnt) : 0.f;
+                mu[h * W + w] = (cnt > 0) ? (sum / cnt) : 0.f;
+                N_count[h * W + w] = cnt;
             }
-            denom[h * W + w] = static_cast<float>(std::pow(double(mu) * double(mu) + eps, beta));
+            denom[h * W + w] = static_cast<float>(std::pow(double(mu[h * W + w]) * double(mu[h * W + w]) + eps, beta));
         }
 
         for (int h = 0; h < H; ++h)
         for (int w = 0; w < W; ++w) {
             int idx = ((n * C + c) * H + h) * W + w;
             float d = denom[h * W + w];
-            // Approximate backward: dx = dy / D
-            dxptr[idx] = dyptr[idx] / d;
+            float term1 = dyptr[idx] / d;
+
+            float term2 = 0.f;
+            for (int dh = -pad; dh <= pad; ++dh) {
+                for (int dw = -pad; dw <= pad; ++dw) {
+                    int hh = h + dh, ww = w + dw;
+                    if (hh < 0 || hh >= H || ww < 0 || ww >= W) continue;
+                    
+                    int n_idx = ((n * C + c) * H + hh) * W + ww;
+                    float mu_n = mu[hh * W + ww];
+                    float x_n = xptr[n_idx];
+                    float dy_n = dyptr[n_idx];
+                    int cnt_n = N_count[hh * W + ww];
+                    
+                    float base_n = mu_n * mu_n + eps;
+                    float denom_n = static_cast<float>(std::pow(base_n, beta + 1.0));
+                    
+                    term2 += (dy_n * 2.f * static_cast<float>(beta) * mu_n * x_n) / (static_cast<float>(cnt_n) * denom_n);
+                }
+            }
+            dxptr[idx] = term1 - term2;
         }
     }
     return CUDNN_STATUS_SUCCESS;
