@@ -122,8 +122,11 @@ cublasStatus_t cublasStrmmBatched(cublasHandle_t handle,
     if (!handle || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
     for (int b = 0; b < batchCount; ++b) {
         if (!A[b]||!B[b]||!C[b]) return CUBLAS_STATUS_INVALID_VALUE;
-        // Copy B into C first, then trmm in-place on C
-        for (int i = 0; i < m*n; ++i) C[b][i] = B[b][i];
+        // Copy B (m×n col-major, stride ldb) → C (m×n col-major, stride ldc),
+        // then trmm in-place on C. Flat copy (old code) was wrong when ldb != ldc.
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < m; ++i)
+                C[b][j*ldc + i] = B[b][j*ldb + i];
         auto s = cublasStrmm_v2(handle,side,uplo,trans,diag,m,n,alpha,A[b],lda,C[b],ldc);
         if (s != CUBLAS_STATUS_SUCCESS) return s;
     }
@@ -138,7 +141,9 @@ cublasStatus_t cublasDtrmmBatched(cublasHandle_t handle,
     if (!handle || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
     for (int b = 0; b < batchCount; ++b) {
         if (!A[b]||!B[b]||!C[b]) return CUBLAS_STATUS_INVALID_VALUE;
-        for (int i = 0; i < m*n; ++i) C[b][i] = B[b][i];
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < m; ++i)
+                C[b][j*ldc + i] = B[b][j*ldb + i];
         auto s = cublasDtrmm_v2(handle,side,uplo,trans,diag,m,n,alpha,A[b],lda,C[b],ldc);
         if (s != CUBLAS_STATUS_SUCCESS) return s;
     }

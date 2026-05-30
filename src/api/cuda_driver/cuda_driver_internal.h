@@ -72,7 +72,7 @@ static constexpr CUresult CUDA_ERROR_INVALID_IMAGE = 200;
 static constexpr CUresult CUDA_ERROR_NOT_SUPPORTED = 801;
 static constexpr CUresult CUDA_ERROR_UNKNOWN = 999;
 
-static CUresult toCU(vgre::api::cudaError_t err) {
+[[maybe_unused]] static CUresult toCU(vgre::api::cudaError_t err) {
   switch (err) {
   case vgre::api::cudaSuccess:
     return CUDA_SUCCESS;

@@ -277,13 +277,13 @@ cublasStatus_t cublasSsyr2_v2(cublasHandle_t handle, cublasFillMode_t uplo, int 
     #endif
     for (int j = 0; j < n; ++j) {
         float temp1 = (*alpha) * x[j*incx];
-        float temp2 = (*alpha) * y[j*incx];
+        float temp2 = (*alpha) * y[j*incy];  // was j*incx — bug: y uses incy
         if (upper) {
             for (int i = 0; i <= j; ++i)
-                A[i*lda+j] += x[i*incx] * temp2 + y[i*incx] * temp1;
+                A[i*lda+j] += x[i*incx] * temp2 + y[i*incy] * temp1;
         } else {
             for (int i = j; i < n; ++i)
-                A[i*lda+j] += x[i*incx] * temp2 + y[i*incx] * temp1;
+                A[i*lda+j] += x[i*incx] * temp2 + y[i*incy] * temp1;
         }
     }
 #endif
@@ -305,13 +305,13 @@ cublasStatus_t cublasDsyr2_v2(cublasHandle_t handle, cublasFillMode_t uplo, int 
     #endif
     for (int j = 0; j < n; ++j) {
         double temp1 = (*alpha) * x[j*incx];
-        double temp2 = (*alpha) * y[j*incx];
+        double temp2 = (*alpha) * y[j*incy];  // was j*incx — bug: y uses incy
         if (upper) {
             for (int i = 0; i <= j; ++i)
-                A[i*lda+j] += x[i*incx] * temp2 + y[i*incx] * temp1;
+                A[i*lda+j] += x[i*incx] * temp2 + y[i*incy] * temp1;
         } else {
             for (int i = j; i < n; ++i)
-                A[i*lda+j] += x[i*incx] * temp2 + y[i*incx] * temp1;
+                A[i*lda+j] += x[i*incx] * temp2 + y[i*incy] * temp1;
         }
     }
 #endif

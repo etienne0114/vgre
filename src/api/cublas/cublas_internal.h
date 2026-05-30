@@ -168,8 +168,11 @@ extern void refDgemm(bool tA, bool tB,
     double beta,        double* C, int ldc);
 
 // ── Reference helpers for Level-2 BLAS ─────────────────────────────────────
+// [[maybe_unused]]: these are static functions defined in a shared header.
+// Each TU that includes this header but doesn't call a particular helper
+// would otherwise emit an -Wunused-function diagnostic.
 
-static void refStrsv(bool upper, bool trans, bool unit,
+[[maybe_unused]] static void refStrsv(bool upper, bool trans, bool unit,
     int n, const float* A, int lda, float* x, int incx)
 {
     if (trans) {
@@ -207,7 +210,7 @@ static void refStrsv(bool upper, bool trans, bool unit,
     }
 }
 
-static void refDtrsv(bool upper, bool trans, bool unit,
+[[maybe_unused]] static void refDtrsv(bool upper, bool trans, bool unit,
     int n, const double* A, int lda, double* x, int incx)
 {
     if (trans) {
@@ -245,7 +248,7 @@ static void refDtrsv(bool upper, bool trans, bool unit,
     }
 }
 
-static void refStrmv(bool upper, bool trans, bool unit,
+[[maybe_unused]] static void refStrmv(bool upper, bool trans, bool unit,
     int n, const float* A, int lda, float* x, int incx)
 {
     std::vector<float> tmp(n);
@@ -281,7 +284,7 @@ static void refStrmv(bool upper, bool trans, bool unit,
     }
 }
 
-static void refDtrmv(bool upper, bool trans, bool unit,
+[[maybe_unused]] static void refDtrmv(bool upper, bool trans, bool unit,
     int n, const double* A, int lda, double* x, int incx)
 {
     std::vector<double> tmp(n);
@@ -323,7 +326,7 @@ static void refDtrmv(bool upper, bool trans, bool unit,
 
 // ── Reference helpers for Level-3 BLAS ────────────────────────────────────
 
-static void refStrsm(bool left, bool upper, bool trans, bool unit,
+[[maybe_unused]] static void refStrsm(bool left, bool upper, bool trans, bool unit,
     int m, int n, float alpha, const float* A, int lda, float* B, int ldb)
 {
     for (int j = 0; j < n; ++j)
@@ -408,7 +411,7 @@ static void refStrsm(bool left, bool upper, bool trans, bool unit,
     }
 }
 
-static void refDtrsm(bool left, bool upper, bool trans, bool unit,
+[[maybe_unused]] static void refDtrsm(bool left, bool upper, bool trans, bool unit,
     int m, int n, double alpha, const double* A, int lda, double* B, int ldb)
 {
     for (int j = 0; j < n; ++j)
@@ -502,7 +505,7 @@ static inline double symAd(const double* A, int lda, int i, int k, bool upper) {
                  : ((k <= i) ? A[i*lda+k] : A[k*lda+i]);
 }
 
-static void refSsymm(bool left, bool upper, int m, int n,
+[[maybe_unused]] static void refSsymm(bool left, bool upper, int m, int n,
     float alpha, const float* A, int lda, const float* B, int ldb,
     float beta, float* C, int ldc)
 {
@@ -526,7 +529,7 @@ static void refSsymm(bool left, bool upper, int m, int n,
     }
 }
 
-static void refDsymm(bool left, bool upper, int m, int n,
+[[maybe_unused]] static void refDsymm(bool left, bool upper, int m, int n,
     double alpha, const double* A, int lda, const double* B, int ldb,
     double beta, double* C, int ldc)
 {
