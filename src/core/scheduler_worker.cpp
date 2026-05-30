@@ -46,20 +46,19 @@ void Scheduler::workerLoop(int workerIdx) {
       }
     }
 
-    // 2b. Drain any per-stream SPSC ring
+    // 2b. Drain own per-worker SPSC ring (lock-free, single consumer).
+    // Stream S maps to this worker when S % numThreads_ == workerIdx.
     if (!gotItem) {
-        std::lock_guard<std::mutex> lg(streamRingsMutex_);
-        for (auto& [sid, ring] : streamRings_) {
-            if (ring->pop(item)) { gotItem = true; break; }
-        }
+        if (workerRings_[workerIdx]->pop(item)) gotItem = true;
     }
 
     // 3. Fallback: wait on global / NUMA-local priority queue
     if (!gotItem) {
       std::unique_lock<std::mutex> lock(mutex_);
-      cv_.wait(lock, [this, myNode] {
+      cv_.wait(lock, [this, myNode, workerIdx] {
         if (shutdown_) return true;
         if (!queue_.empty()) return true;
+        if (!workerRings_[workerIdx]->empty()) return true;
         if (myNode >= 0) {
           auto it = numaQueues_.find(myNode);
           if (it != numaQueues_.end() && !it->second.empty()) return true;

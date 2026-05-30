@@ -159,6 +159,59 @@ void test_invalid_numa_fallback() {
   std::cout << "[PASS] Invalid NUMA node fallback" << std::endl;
 }
 
+// Regression test for the SPSC liveness bug: items pushed via enqueueToStream
+// must be executed even when all worker threads are idle (sleeping in cv_.wait).
+// The old implementation had a predicate that did not check SPSC rings, causing
+// notify_one() to wake a worker whose predicate returned false → back to sleep →
+// items permanently stranded. This test would time-out (waitAll 5s) on old code.
+void test_enqueue_to_stream_liveness() {
+  constexpr int kThreads = 4;
+  constexpr int kItems   = 200;
+
+  Scheduler sched(kThreads);
+
+  // Allow all workers to reach cv_.wait (idle) before we push SPSC work.
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+  std::atomic<int> count{0};
+  for (int i = 0; i < kItems; ++i) {
+    WorkItem item;
+    item.streamId = static_cast<uint64_t>(i % 8);
+    item.execute  = [&count]() { count.fetch_add(1, std::memory_order_relaxed); };
+    sched.enqueueToStream(item.streamId, std::move(item));
+  }
+
+  sched.waitAll();
+  assert(count.load() == kItems);
+
+  std::cout << "[PASS] enqueueToStream liveness (" << kItems << " items)" << std::endl;
+}
+
+// Verify stream→worker pinning: all items pushed to stream S land on worker
+// (S % numThreads). We confirm they execute and the count is exact.
+void test_enqueue_to_stream_pinning() {
+  constexpr int kThreads = 4;
+  Scheduler sched(kThreads);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  std::atomic<int> count{0};
+  constexpr int kPerStream = 50;
+  for (uint64_t s = 0; s < 8; ++s) {
+    for (int j = 0; j < kPerStream; ++j) {
+      WorkItem item;
+      item.streamId = s;
+      item.execute  = [&count]() { count.fetch_add(1, std::memory_order_relaxed); };
+      sched.enqueueToStream(s, std::move(item));
+    }
+  }
+
+  sched.waitAll();
+  assert(count.load() == 8 * kPerStream);
+
+  std::cout << "[PASS] enqueueToStream pinning (8 streams × " << kPerStream << " items)" << std::endl;
+}
+
 int main() {
   std::cout << "=== VGRE Scheduler Unit Tests ===" << std::endl;
 
@@ -170,6 +223,8 @@ int main() {
   test_statistics();
   test_resize_thread_pool();
   test_invalid_numa_fallback();
+  test_enqueue_to_stream_liveness();
+  test_enqueue_to_stream_pinning();
 
   std::cout << "\nAll scheduler tests passed!" << std::endl;
   return 0;

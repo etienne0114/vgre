@@ -243,9 +243,11 @@ private:
   std::atomic<uint64_t> pending_{0};
   int numThreads_;
 
-  // Per-stream SPSC rings (Track 7.3)
-  std::unordered_map<uint64_t, std::unique_ptr<SPSCRing<WorkItem>>> streamRings_;
-  std::mutex streamRingsMutex_;
+  // Per-worker SPSC rings (Track 7.3 — one ring per worker, not per stream).
+  // Stream S is pinned to worker (S % numThreads_). The submitting thread is
+  // the sole producer; the assigned worker is the sole consumer. No mutex
+  // is needed on either side — the ring's atomic head/tail provide ordering.
+  std::vector<std::unique_ptr<SPSCRing<WorkItem>>> workerRings_;
 };
 
 } // namespace core
