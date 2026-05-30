@@ -306,14 +306,14 @@ static std::vector<float> widen_csr_values(const CsrMat &M) {
 }
 
 struct SpGEMMState {
-    // Result of sparse matmul: CSR stored inline
     std::vector<int32_t>              cRowPtr;
     std::vector<int32_t>              cColInd;
     std::vector<float>                cValF;
     std::vector<double>               cValD;
-    std::vector<std::complex<double>> cValZ;  // for CUDA_C_32F / CUDA_C_64F
+    std::vector<std::complex<double>> cValZ;
     int64_t cRows = 0, cCols = 0, cNnz = 0;
     cudaDataType_t dtype = CUDA_R_32F;
+    double betaScalar = 0.0;  // stored from compute phase, applied in copy phase
 };
 
 std::mutex g_spgemmMutex;
@@ -471,19 +471,16 @@ cusparseStatus_t cusparseSpGEMM_compute(cusparseHandle_t /*h*/,
             arPtr.data(), acInd.data(), static_cast<const float*>(A.values), 0,
             brPtr.data(), bcInd.data(), static_cast<const float*>(B.values), 0,
             st.cRowPtr, st.cColInd, st.cValF);
-        float betaF = *static_cast<const float*>(beta);
+        st.betaScalar = static_cast<double>(*static_cast<const float*>(beta));
         if (alphaF != 1.0f) for (auto &v : st.cValF) v *= alphaF;
-        // beta*C not applied here since C's arrays aren't filled yet (handled in copy)
-        (void)betaF;
     } else if (computeType == CUDA_R_64F) {
         double alphaD = *static_cast<const double*>(alpha);
         csr_spgemm<double>(m, A.cols, n,
             arPtr.data(), acInd.data(), static_cast<const double*>(A.values), 0,
             brPtr.data(), bcInd.data(), static_cast<const double*>(B.values), 0,
             st.cRowPtr, st.cColInd, st.cValD);
-        double betaD = *static_cast<const double*>(beta);
+        st.betaScalar = *static_cast<const double*>(beta);
         if (alphaD != 1.0) for (auto &v : st.cValD) v *= alphaD;
-        (void)betaD;
     } else if (computeType == CUDA_R_16F || computeType == CUDA_R_16BF) {
         bool isFP16 = (computeType == CUDA_R_16F);
         float alphaF = isFP16 ? h2f_sp(*static_cast<const uint16_t*>(alpha))
@@ -540,7 +537,7 @@ cusparseStatus_t cusparseSpGEMM_compute(cusparseHandle_t /*h*/,
 cusparseStatus_t cusparseSpGEMM_copy(cusparseHandle_t /*h*/,
         cusparseOperation_t /*opA*/, cusparseOperation_t /*opB*/,
         const void * /*alpha*/, cusparseSpMatDescr_t /*matA*/,
-        cusparseSpMatDescr_t /*matB*/, const void * /*beta*/,
+        cusparseSpMatDescr_t /*matB*/, const void *beta,
         cusparseSpMatDescr_t matC, cudaDataType_t computeType,
         cusparseSpGEMMAlg_t /*alg*/, cusparseSpGEMMDescr_t spgemmDescr) {
     std::lock_guard<std::mutex> lkD(g_descrMutex);
@@ -548,6 +545,49 @@ cusparseStatus_t cusparseSpGEMM_copy(cusparseHandle_t /*h*/,
     if (cIt == g_csrMats.end()) return CUSPARSE_STATUS_INVALID_VALUE;
     CsrMat &C = cIt->second;
     if (!C.rowOffsets || !C.colInd || !C.values) return CUSPARSE_STATUS_INVALID_VALUE;
+
+    // Snapshot existing C values before overwriting (needed for beta != 0).
+    // Key: (row << 32) | col; Value: existing value as double.
+    double betaD = 0.0;
+    if (beta) {
+        if (computeType == CUDA_R_64F || computeType == CUDA_C_64F)
+            betaD = *static_cast<const double*>(beta);
+        else
+            betaD = static_cast<double>(*static_cast<const float*>(beta));
+    }
+    std::unordered_map<uint64_t, double> oldValsRe, oldValsIm;
+    if (std::fabs(betaD) > 1e-15 && C.nnz > 0 && C.values) {
+        int cBase = (C.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+        int64_t rows = C.rows;
+        for (int64_t r = 0; r < rows; ++r) {
+            int64_t rs = (C.rowOffsetType == CUSPARSE_INDEX_64I)
+                ? static_cast<int64_t*>(C.rowOffsets)[r]   - cBase
+                : static_cast<int32_t*>(C.rowOffsets)[r]   - cBase;
+            int64_t re = (C.rowOffsetType == CUSPARSE_INDEX_64I)
+                ? static_cast<int64_t*>(C.rowOffsets)[r+1] - cBase
+                : static_cast<int32_t*>(C.rowOffsets)[r+1] - cBase;
+            for (int64_t k = rs; k < re; ++k) {
+                int64_t col = (C.colIndType == CUSPARSE_INDEX_64I)
+                    ? static_cast<int64_t*>(C.colInd)[k] - cBase
+                    : static_cast<int32_t*>(C.colInd)[k] - cBase;
+                uint64_t key = (static_cast<uint64_t>(r) << 32) | static_cast<uint64_t>(col);
+                if (computeType == CUDA_R_32F)
+                    oldValsRe[key] = static_cast<double*>(C.values)[k];  // wrong type but handled below
+                // Use type-safe read
+                if (computeType == CUDA_R_32F)
+                    oldValsRe[key] = static_cast<double>(static_cast<float*>(C.values)[k]);
+                else if (computeType == CUDA_R_64F)
+                    oldValsRe[key] = static_cast<double*>(C.values)[k];
+                else if (computeType == CUDA_C_32F) {
+                    oldValsRe[key] = static_cast<double>(static_cast<float*>(C.values)[2*k]);
+                    oldValsIm[key] = static_cast<double>(static_cast<float*>(C.values)[2*k+1]);
+                } else if (computeType == CUDA_C_64F) {
+                    oldValsRe[key] = static_cast<double*>(C.values)[2*k];
+                    oldValsIm[key] = static_cast<double*>(C.values)[2*k+1];
+                }
+            }
+        }
+    }
 
     std::lock_guard<std::mutex> lkG(g_spgemmMutex);
     auto stIt = g_spgemmStates.find(reinterpret_cast<uintptr_t>(spgemmDescr));
@@ -602,6 +642,38 @@ cusparseStatus_t cusparseSpGEMM_copy(cusparseHandle_t /*h*/,
         }
     } else
         return CUSPARSE_STATUS_NOT_SUPPORTED;
+
+    // Apply beta * old_C for positions that existed in both old and new C
+    if (std::fabs(betaD) > 1e-15 && !oldValsRe.empty()) {
+        int cBaseNew = (C.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+        for (int64_t r = 0; r < st.cRows; ++r) {
+            int64_t rs = st.cRowPtr[static_cast<size_t>(r)];
+            int64_t re = st.cRowPtr[static_cast<size_t>(r+1)];
+            for (int64_t k = rs; k < re; ++k) {
+                int64_t col = st.cColInd[static_cast<size_t>(k)];
+                uint64_t key = (static_cast<uint64_t>(r) << 32) | static_cast<uint64_t>(col);
+                auto it = oldValsRe.find(key);
+                if (it == oldValsRe.end()) continue;
+                int64_t wk = k;  // physical write index in new C arrays
+                (void)cBaseNew;
+                if (computeType == CUDA_R_32F)
+                    static_cast<float*>(C.values)[wk] += static_cast<float>(betaD * it->second);
+                else if (computeType == CUDA_R_64F)
+                    static_cast<double*>(C.values)[wk] += betaD * it->second;
+                else if (computeType == CUDA_C_32F) {
+                    static_cast<float*>(C.values)[2*wk]   += static_cast<float>(betaD * it->second);
+                    auto itI = oldValsIm.find(key);
+                    if (itI != oldValsIm.end())
+                        static_cast<float*>(C.values)[2*wk+1] += static_cast<float>(betaD * itI->second);
+                } else if (computeType == CUDA_C_64F) {
+                    static_cast<double*>(C.values)[2*wk]   += betaD * it->second;
+                    auto itI = oldValsIm.find(key);
+                    if (itI != oldValsIm.end())
+                        static_cast<double*>(C.values)[2*wk+1] += betaD * itI->second;
+                }
+            }
+        }
+    }
 
     return CUSPARSE_STATUS_SUCCESS;
 }

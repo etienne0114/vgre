@@ -105,12 +105,58 @@ void refSgemm(bool tA, bool tB,
     }
 }
 
+// ── AVX2 DGEMM kernel (NN layout: C += alpha * A * B) ────────────────────────
+// Processes 4 output columns per iteration using 256-bit FMA on doubles.
+#if defined(__AVX2__)
+static void dgemm_nn_avx2(int M, int N, int K,
+                           double alpha, const double* __restrict__ A, int lda,
+                                         const double* __restrict__ B, int ldb,
+                           double beta,        double* __restrict__ C, int ldc)
+{
+    const __m256d valpha = _mm256_set1_pd(alpha);
+    const __m256d vbeta  = _mm256_set1_pd(beta);
+    const bool    betaZ  = (beta == 0.0);
+
+    #ifdef _OPENMP
+    #pragma omp parallel for schedule(static) if (M * N * K > 4096)
+    #endif
+    for (int m = 0; m < M; ++m) {
+        const double* Am = A + m * lda;
+        double*       Cm = C + m * ldc;
+        int n = 0;
+        for (; n + 3 < N; n += 4) {
+            __m256d vc = betaZ ? _mm256_setzero_pd()
+                                : _mm256_mul_pd(_mm256_loadu_pd(Cm + n), vbeta);
+            for (int k = 0; k < K; ++k) {
+                __m256d va = _mm256_set1_pd(Am[k]);
+                __m256d vb = _mm256_loadu_pd(B + k * ldb + n);
+                vc = _mm256_fmadd_pd(va, vb, vc);
+            }
+            _mm256_storeu_pd(Cm + n, _mm256_mul_pd(vc, valpha));
+        }
+        for (; n < N; ++n) {
+            double acc = 0.0;
+            for (int k = 0; k < K; ++k) acc += Am[k] * B[k * ldb + n];
+            Cm[n] = alpha * acc + (betaZ ? 0.0 : beta * Cm[n]);
+        }
+    }
+}
+#endif // __AVX2__
+
 void refDgemm(bool tA, bool tB,
     int M, int N, int K,
     double alpha, const double* A, int lda,
                   const double* B, int ldb,
     double beta,        double* C, int ldc)
 {
+    // AVX2 fast path for non-transposed row-major NN form
+#if defined(__AVX2__)
+    if (!tA && !tB) {
+        dgemm_nn_avx2(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+#endif
+
     constexpr int kTile = 64;
     if (M * N * K < 4096) {
         for (int m = 0; m < M; ++m)

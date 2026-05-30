@@ -301,4 +301,48 @@ cudnnStatus_t cudnnAddTensor(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// ── cudnnScaleTensor ──────────────────────────────────────────────────────────
+// Multiply every element of y in-place by alpha.
+cudnnStatus_t cudnnScaleTensor(
+    cudnnHandle_t /*handle*/,
+    cudnnTensorDescriptor_t yDesc, void* y,
+    const void* alpha)
+{
+    if (!yDesc || !y || !alpha) return CUDNN_STATUS_INVALID_VALUE;
+    auto* yt = (TensorDesc*)yDesc;
+    int total = yt->n * yt->c * yt->h * yt->w;
+    float a = *(const float*)alpha;
+    float* yf = (float*)y;
+
+    #ifdef _OPENMP
+    #pragma omp parallel for if (total > 1024)
+    #endif
+    for (int i = 0; i < total; ++i)
+        yf[i] *= a;
+
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── cudnnSetTensor ────────────────────────────────────────────────────────────
+// Set every element of y to the scalar value pointed to by valuePtr.
+cudnnStatus_t cudnnSetTensor(
+    cudnnHandle_t /*handle*/,
+    cudnnTensorDescriptor_t yDesc, void* y,
+    const void* valuePtr)
+{
+    if (!yDesc || !y || !valuePtr) return CUDNN_STATUS_INVALID_VALUE;
+    auto* yt = (TensorDesc*)yDesc;
+    int total = yt->n * yt->c * yt->h * yt->w;
+    float val = *(const float*)valuePtr;
+    float* yf = (float*)y;
+
+    #ifdef _OPENMP
+    #pragma omp parallel for if (total > 1024)
+    #endif
+    for (int i = 0; i < total; ++i)
+        yf[i] = val;
+
+    return CUDNN_STATUS_SUCCESS;
+}
+
 } // extern "C"

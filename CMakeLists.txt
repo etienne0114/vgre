@@ -893,6 +893,7 @@ set(_VGRE_CUDART_SOURCES
     src/api/curand/curand_core.cpp
     src/api/cufft/cufft_core.cpp
     src/api/cufft/cufft_plan.cpp
+    src/api/cufft/cufft_xt.cpp
     src/api/cusparse/cusparse_core.cpp
     src/api/cusparse/cusparse_format.cpp
     src/api/cusparse/cusparse_triangular.cpp
