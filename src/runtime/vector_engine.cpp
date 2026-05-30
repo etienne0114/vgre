@@ -59,10 +59,16 @@ void VectorEngine::detectCapabilities() {
     if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
         caps_.hasAVX2    = (ebx >> 5)  & 1;
         caps_.hasAVX512  = (ebx >> 16) & 1;
-        caps_.hasVNNI    = (ecx >> 11) & 1;
+        caps_.hasVNNI    = (ecx >> 11) & 1;  // AVX-512 VNNI (Ice Lake+)
         caps_.hasAMXBF16 = (edx >> 22) & 1;  // AMX-BF16: leaf 7.0 EDX[22]
         caps_.hasAMXTile = (edx >> 24) & 1;  // AMX-TILE: leaf 7.0 EDX[24]
     }
+    // AVX-VNNI without AVX-512: CPUID leaf 7.1 EAX[4] (Alder Lake / Raptor Lake)
+    if (__get_cpuid_count(7, 1, &eax, &ebx, &ecx, &edx)) {
+        caps_.hasAVXVNNI = (eax >> 4) & 1;
+    }
+    // Treat either VNNI variant as usable for INT8 acceleration
+    if (caps_.hasAVXVNNI) caps_.hasVNNI = true;
 
     // AMX requires both CPUID bits AND OS permission.
     // Verify via XGETBV that the OS has enabled XTILECFG (bit 17) and
@@ -122,7 +128,8 @@ std::string VectorEngine::getCapabilityString() const {
     oss << "SIMD: ";
     if (caps_.amxEnabled)  oss << "AMX-BF16(active) ";
     else if (caps_.hasAMXTile) oss << "AMX(hw-only/disabled) ";
-    if (caps_.hasVNNI)   oss << "VNNI ";
+    if (caps_.hasAVXVNNI) oss << "AVX-VNNI ";
+    else if (caps_.hasVNNI) oss << "AVX512-VNNI ";
     if (caps_.hasAVX512) oss << "AVX-512F ";
     if (caps_.hasAVX2)   oss << "AVX2 ";
     if (caps_.hasAVX)    oss << "AVX ";

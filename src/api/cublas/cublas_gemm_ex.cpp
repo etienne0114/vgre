@@ -3,6 +3,7 @@
 
 #include "cublas_internal.h"
 #include "vgre/common/openmp_helper.h"
+#include "vgre/runtime/vector_engine.h"
 #include <cmath>
 
 extern "C" {
@@ -94,6 +95,25 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
 
     if (Atype == (int)GEMEX_R_8I || Btype == (int)GEMEX_R_8I) {
         float alphaF = *(const float*)alpha, betaF = *(const float*)beta;
+        const bool isInt8Both = (Atype == (int)GEMEX_R_8I && Btype == (int)GEMEX_R_8I);
+        const bool noTranspose = (transa == CUBLAS_OP_N && transb == CUBLAS_OP_N);
+
+        // Fast path: AVX-VNNI / AMX INT8 direct GEMM for NN non-transposed INT8×INT8.
+        // Avoids FP32 heap allocation (~2× m*k + 2× k*n floats) and per-element widening.
+        if (isInt8Both && noTranspose && Ctype == (int)GEMEX_R_32I) {
+            int32_t* Ci = static_cast<int32_t*>(C);
+            std::vector<int32_t> tmp(static_cast<size_t>(m) * n);
+            vgre::runtime::VectorEngine::instance().matMulInt8(
+                static_cast<const int8_t*>(A),
+                static_cast<const int8_t*>(B),
+                tmp.data(), m, n, k);
+            for (int i = 0; i < m * n; ++i)
+                Ci[i] = static_cast<int32_t>(std::round(alphaF * static_cast<float>(tmp[i])
+                                                        + betaF  * static_cast<float>(Ci[i])));
+            return CUBLAS_STATUS_SUCCESS;
+        }
+
+        // General INT8 path (transposed, mixed-type, FP32 output): widen to FP32.
         std::vector<float> Af(m * k), Bf(k * n);
         for (int i = 0; i < m * k; ++i) Af[i] = _i8_to_f32_ex(A, i);
         for (int i = 0; i < k * n; ++i) Bf[i] = _i8_to_f32_ex(B, i);

@@ -19,7 +19,8 @@ struct SIMDCapabilities {
     bool hasAVX2    = false;
     bool hasAVX512  = false;
     bool hasFMA     = false;
-    bool hasVNNI    = false;
+    bool hasVNNI    = false;    // AVX-512 VNNI (CPUID 7.0 ECX[11], Ice Lake+)
+    bool hasAVXVNNI = false;   // AVX-VNNI without AVX-512 (CPUID 7.1 EAX[4], Alder Lake+)
     // AMX sub-features (Intel Sapphire Rapids / Granite Rapids)
     bool hasAMXTile = false;   // CPUID 7.0 EDX[24] — AMX-TILE base support
     bool hasAMXBF16 = false;   // CPUID 7.0 EDX[22] — AMX-BF16 dot-product
@@ -98,6 +99,19 @@ public:
     // ── Memory operations ──────────────────────────────────────────────────
     void vectorFill(float* dst, float value, size_t n);
     void vectorCopy(const float* src, float* dst, size_t n);
+
+    // ── Matrix multiply (AMX / VNNI accelerated, Phase 12-B) ──────────────
+    // INT8 GEMM: C = A × B, row-major, signed INT8 inputs → INT32 output.
+    // Uses AVX-VNNI on Alder Lake+, AMX-INT8 on Sapphire Rapids+,
+    // falls back to AVX2 INT16 widening or scalar.
+    // Requires ENABLE_VGRE_AMX at compile time; scalar fallback always present.
+    void matMulInt8(const int8_t* A, const int8_t* B, int32_t* C,
+                    int M, int N, int K);
+
+    // BF16 GEMM: C = A × B, row-major, BF16 inputs → FP32 output.
+    // Uses AMX-BF16 on Sapphire Rapids+, falls back to AVX2 FP32 or scalar.
+    void matMulBF16(const vgre_bf16* A, const vgre_bf16* B, float* C,
+                    int M, int N, int K);
 
     // Singleton
     static VectorEngine& instance();

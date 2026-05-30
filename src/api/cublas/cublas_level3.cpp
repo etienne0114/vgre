@@ -3,6 +3,7 @@
 #include "cublas_internal.h"
 
 #include "vgre/common/openmp_helper.h"
+#include "vgre/runtime/vector_engine.h"
 
 #if defined(__AVX2__)
 #include <immintrin.h>
