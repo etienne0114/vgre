@@ -354,6 +354,18 @@ add_executable(test_cusparse_spsm_sddmm api/test_cusparse_spsm_sddmm.cpp)
 target_link_libraries(test_cusparse_spsm_sddmm PRIVATE vgre_cudart)
 add_test(NAME CuSPARSESpSMSDDMM COMMAND test_cusparse_spsm_sddmm)
 
+add_executable(test_cusparse_spvec api/test_cusparse_spvec.cpp)
+target_link_libraries(test_cusparse_spvec PRIVATE vgre_cudart)
+add_test(NAME CuSPARSESpVec COMMAND test_cusparse_spvec)
+
+add_executable(test_cudnn_spatial_tf api/test_cudnn_spatial_tf.cpp)
+target_link_libraries(test_cudnn_spatial_tf PRIVATE vgre)
+add_test(NAME CuDNNSpatialTf COMMAND test_cudnn_spatial_tf)
+
+add_executable(test_cublas_complex_batched api/test_cublas_complex_batched.cpp)
+target_link_libraries(test_cublas_complex_batched PRIVATE vgre_cudart)
+add_test(NAME CuBLASComplexBatched COMMAND test_cublas_complex_batched)
+
 add_executable(test_cudnn_normalization api/test_cudnn_normalization.cpp)
 target_link_libraries(test_cudnn_normalization PRIVATE vgre)
 add_test(NAME CuDNNNormalization COMMAND test_cudnn_normalization)

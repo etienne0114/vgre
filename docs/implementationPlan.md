@@ -255,6 +255,18 @@ flowchart TD
 
 ---
 
+## ✅ Phase 8 — Implemented (2026-05-29) — 131/131 tests
+
+| Track | Item | File(s) | Status |
+|---|---|---|---|
+| 1 | SASS ELF decoder + SM80/SM90 opcode → PTX | `compiler/sass/sass_decoder.{h,cpp}`, `cudart_shim.cpp` | ✅ DONE |
+| 2 | CUPTI native GPU library passthrough via dlopen | `cupti_shim.cpp` | ✅ DONE |
+| 4 | cuDNN v9 Graph API (`cudnnGraph_t`, Build/Execute) | `cudnn_graph.cpp` | ✅ DONE |
+| 7.1 | Thread-local 64-set 4-way TLB cache (CLOCK replacement) | `memory_manager.cpp` | ✅ DONE |
+| 7.3 | SPSC ring buffer per stream; `enqueueToStream()` fast path | `scheduler.h`, `scheduler_tasks.cpp`, `scheduler_worker.cpp` | ✅ DONE |
+
+---
+
 ## ✅ Phase 7 — Implemented (2026-05-29) — 130/130 tests
 
 Deep source audit identified four concrete gaps. All closed:

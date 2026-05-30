@@ -4,6 +4,48 @@
 
 #include "vgre/common/openmp_helper.h"
 
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
+// ── AVX2 SGEMM kernel (NN layout: C += alpha * A * B) ────────────────────────
+// Processes 8 output columns at a time using 256-bit FMA.
+#if defined(__AVX2__)
+static void sgemm_nn_avx2(int M, int N, int K,
+                           float alpha, const float* __restrict__ A, int lda,
+                                        const float* __restrict__ B, int ldb,
+                           float beta,        float* __restrict__ C, int ldc)
+{
+    const __m256 valpha = _mm256_set1_ps(alpha);
+    const __m256 vbeta  = _mm256_set1_ps(beta);
+    const bool   betaZ  = (beta == 0.0f);
+
+    #ifdef _OPENMP
+    #pragma omp parallel for schedule(static) if (M * N * K > 4096)
+    #endif
+    for (int m = 0; m < M; ++m) {
+        const float* Am = A + m * lda;
+        float*       Cm = C + m * ldc;
+        int n = 0;
+        for (; n + 7 < N; n += 8) {
+            __m256 vc = betaZ ? _mm256_setzero_ps()
+                               : _mm256_mul_ps(_mm256_loadu_ps(Cm + n), vbeta);
+            for (int k = 0; k < K; ++k) {
+                __m256 va = _mm256_set1_ps(Am[k]);
+                __m256 vb = _mm256_loadu_ps(B + k * ldb + n);
+                vc = _mm256_fmadd_ps(va, vb, vc);
+            }
+            _mm256_storeu_ps(Cm + n, _mm256_mul_ps(vc, valpha));
+        }
+        for (; n < N; ++n) {
+            float acc = 0.f;
+            for (int k = 0; k < K; ++k) acc += Am[k] * B[k * ldb + n];
+            Cm[n] = alpha * acc + (betaZ ? 0.f : beta * Cm[n]);
+        }
+    }
+}
+#endif // __AVX2__
+
 // ── Cache-blocked reference GEMM (external linkage) ──────────────────────────
 void refSgemm(bool tA, bool tB,
     int M, int N, int K,
@@ -11,6 +53,14 @@ void refSgemm(bool tA, bool tB,
                  const float* B, int ldb,
     float beta,        float* C, int ldc)
 {
+    // AVX2 fast path: non-transposed row-major NN form
+#if defined(__AVX2__)
+    if (!tA && !tB) {
+        sgemm_nn_avx2(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+#endif
+
     constexpr int kTile = 64;
     if (M * N * K < 4096) {
         for (int m = 0; m < M; ++m)

@@ -697,4 +697,110 @@ cublasStatus_t cublasZtrmm_v2(cublasHandle_t handle,
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// ── Complex batched GEMM ─────────────────────────────────────────────────────
+
+cublasStatus_t cublasCgemmBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const cuComplex* alpha,
+    const cuComplex* const Aarray[], int lda,
+    const cuComplex* const Barray[], int ldb,
+    const cuComplex* beta,
+    cuComplex* const Carray[], int ldc,
+    int batchCount)
+{
+    if (!handle || !Aarray || !Barray || !Carray || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b] || !Barray[b] || !Carray[b]) continue;
+        cublasStatus_t r = cublasCgemm_v2(handle, transa, transb, m, n, k,
+            alpha, Aarray[b], lda, Barray[b], ldb, beta, Carray[b], ldc);
+        if (r != CUBLAS_STATUS_SUCCESS) return r;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasCgemm(cublasHandle_t h, cublasOperation_t ta, cublasOperation_t tb,
+    int m, int n, int k, const cuComplex* a, const cuComplex* A, int lda,
+    const cuComplex* B, int ldb, const cuComplex* b, cuComplex* C, int ldc) {
+    return cublasCgemm_v2(h, ta, tb, m, n, k, a, A, lda, B, ldb, b, C, ldc);
+}
+
+cublasStatus_t cublasCgemmStridedBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const cuComplex* alpha,
+    const cuComplex* A, int lda, long long strideA,
+    const cuComplex* B, int ldb, long long strideB,
+    const cuComplex* beta,
+    cuComplex* C, int ldc, long long strideC,
+    int batchCount)
+{
+    if (!handle || !A || !B || !C || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        const cuComplex* Ab = A + b * strideA;
+        const cuComplex* Bb = B + b * strideB;
+        cuComplex*       Cb = C + b * strideC;
+        cublasStatus_t r = cublasCgemm_v2(handle, transa, transb, m, n, k,
+            alpha, Ab, lda, Bb, ldb, beta, Cb, ldc);
+        if (r != CUBLAS_STATUS_SUCCESS) return r;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZgemmBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const cuDoubleComplex* alpha,
+    const cuDoubleComplex* const Aarray[], int lda,
+    const cuDoubleComplex* const Barray[], int ldb,
+    const cuDoubleComplex* beta,
+    cuDoubleComplex* const Carray[], int ldc,
+    int batchCount)
+{
+    if (!handle || !Aarray || !Barray || !Carray || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b] || !Barray[b] || !Carray[b]) continue;
+        cublasStatus_t r = cublasZgemm_v2(handle, transa, transb, m, n, k,
+            alpha, Aarray[b], lda, Barray[b], ldb, beta, Carray[b], ldc);
+        if (r != CUBLAS_STATUS_SUCCESS) return r;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZgemm(cublasHandle_t h, cublasOperation_t ta, cublasOperation_t tb,
+    int m, int n, int k, const cuDoubleComplex* a, const cuDoubleComplex* A, int lda,
+    const cuDoubleComplex* B, int ldb, const cuDoubleComplex* b, cuDoubleComplex* C, int ldc) {
+    return cublasZgemm_v2(h, ta, tb, m, n, k, a, A, lda, B, ldb, b, C, ldc);
+}
+
+cublasStatus_t cublasZgemmStridedBatched(
+    cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k,
+    const cuDoubleComplex* alpha,
+    const cuDoubleComplex* A, int lda, long long strideA,
+    const cuDoubleComplex* B, int ldb, long long strideB,
+    const cuDoubleComplex* beta,
+    cuDoubleComplex* C, int ldc, long long strideC,
+    int batchCount)
+{
+    if (!handle || !A || !B || !C || !alpha || !beta || batchCount <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        const cuDoubleComplex* Ab = A + b * strideA;
+        const cuDoubleComplex* Bb = B + b * strideB;
+        cuDoubleComplex*       Cb = C + b * strideC;
+        cublasStatus_t r = cublasZgemm_v2(handle, transa, transb, m, n, k,
+            alpha, Ab, lda, Bb, ldb, beta, Cb, ldc);
+        if (r != CUBLAS_STATUS_SUCCESS) return r;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 } // extern "C"
