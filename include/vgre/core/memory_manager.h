@@ -34,6 +34,11 @@ struct Allocation {
   DeviceId deviceId = 0;
   unsigned int attachmentFlags =
       0; // Support for cudaMemAttachGlobal / cudaMemAttachHost
+
+  // NUMA Node Bitmap — bit i set when NUMA node i has accessed this allocation.
+  // Plain uint64_t; updated only while holding the shard mutex (non-atomic is
+  // safe here because all writers are serialised by the mutex_).
+  uint64_t nodeAccessBitmap{0};
 };
 
 // ── Memory pool handle ─────────────────────────────────────────────────────
@@ -94,10 +99,24 @@ struct ManagedRegion {
   mutable std::atomic<bool> hostAccessible{false}; // true if mapped R/W (flags==2), skip re-protection in clearDirtyPages
 
   // Per-device NUMA access counters (updated from SIGSEGV handler via signal-safe atomics).
-  // Migration background thread uses these to decide whether to mbind() pages to a
-  // different NUMA node when one device dominates (>80% of page-fault accesses).
   static constexpr int kMaxDevices = 4;
-  mutable std::atomic<uint32_t> deviceAccessCounts[kMaxDevices];  // index = device id
+  mutable std::atomic<uint32_t> deviceAccessCounts[kMaxDevices];
+
+  // NUMA Node Bitmap — bit i set when NUMA node i has caused a page fault on
+  // this region. Allows migration policy to make per-region placement decisions.
+  mutable std::atomic<uint64_t> nodeAccessBitmap{0};
+
+  // Per-device EMA access rates for adaptive NUMA migration policy.
+  // rate[d] = exponential moving average of access rate on device d (accesses/s).
+  // Updated by the migration background thread.
+  mutable float emaAccessRate[kMaxDevices] = {0.f, 0.f, 0.f, 0.f};
+
+  // Predictive prefetch stride state.
+  // We track the last 4 faulted pages to detect linear strides.
+  // prefetchStride = 0 means no stride detected.
+  mutable uintptr_t lastFaultPages[4] = {0, 0, 0, 0};
+  mutable uintptr_t prefetchStride    = 0;
+  mutable int       prefetchStrideConf = 0;  // confidence counter (0-4)
 
   ManagedRegion() = default;
   ManagedRegion(const ManagedRegion &other) : ptr(other.ptr), size(other.size), pageCount(other.pageCount), dirtyPages(other.dirtyPages), pageSize(other.pageSize) {
@@ -270,10 +289,29 @@ public:
     double coalescing_efficiency{1.0};   // Access pattern efficiency vs ideal (1.0 = stride-1)
     bool is_bandwidth_bound{false};      // True when effective_bw < 10% of CPU peak
     uint64_t total_kernels_sampled{0};   // Number of kernel dispatches contributing to the stats
+
+    // ── Roofline Model ────────────────────────────────────────────────────
+    // Classifies each kernel as compute-bound or memory-bound using the
+    // Roofline model: ridge_point = peak_compute / peak_bandwidth.
+    // If arithmetic_intensity < ridge_point → memory-bound.
+    // If arithmetic_intensity >= ridge_point → compute-bound.
+    double peak_compute_gflops{0};          // Measured or estimated peak (GFLOPs/s)
+    double ridge_point_flops_per_byte{0};   // peak_compute / peak_bandwidth
+    double avg_arithmetic_intensity{0};     // EMA of FLOPs/byte across sampled kernels
+    double predicted_performance_gflops{0}; // Roofline-predicted achievable GFLOPs/s
+    bool   last_kernel_compute_bound{false};// true = compute-bound, false = memory-bound
   };
 
   // Returns accumulated bandwidth statistics since last reset (or process start).
   MemoryBandwidthStats getMemoryBandwidthStats() const;
+
+  // Update the Workload Characterization Cache for a named kernel.
+  // bytes = memory traffic, execMs = measured time, flops = arithmetic ops.
+  // The cache stores per-kernel EMA profiles used by the Roofline model and
+  // by the graph optimizer's cost-benefit fusion analysis.
+  void updateKernelCharacterization(const std::string& name,
+                                     size_t bytes, double execMs,
+                                     double flops = 0.0);
 
   // Reset bandwidth counters (call between benchmark phases to isolate measurements).
   void resetMemoryBandwidthStats();

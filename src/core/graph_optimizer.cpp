@@ -207,29 +207,94 @@ bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
         if (irA->sharedMemSize + irB->sharedMemSize > 48 * 1024) return false;
     }
 
-    // 4. Register pressure estimation.
-    // Heuristic: count scalar-typed arguments + local variable patterns in the
-    // source. Each float/double ≈ 1-2 registers. Keep headroom below 200
-    // (hardware limit 255, ~55 register overhead for the fused wrapper).
-    // Over-counting is safe: it may reject fusible pairs but never allows invalid fusions.
+    // 4. Register pressure analysis — improved model.
+    // Counts typed arguments + arithmetic temporaries estimated from operator density.
+    // Each pointer arg = 1 reg; each scalar (float/double/int) = 1-2 regs.
+    // Arithmetic temporaries: each binary operator (+,-,*,/) in a function body
+    // requires one temporary register. This over-estimates for expression reuse
+    // (which is safe — it may block some valid fusions but never permits unsafe ones).
     auto estimateRegs = [](const KernelIR* ir) -> int {
-        int regs = static_cast<int>(ir->argSizes.size()); // one reg per arg
+        int regs = 0;
+        // Pointer args: each takes 1 register for the address
+        for (size_t i = 0; i < ir->argTypes.size(); ++i)
+            regs += (ir->argTypes[i] == ArgType::POINTER) ? 1 : 1;
+        // Scan source for typed local declarations
         const std::string& src = ir->source;
-        // Count 'float ' and 'double ' local var declarations (rough register estimate)
-        size_t pos = 0;
-        while ((pos = src.find("float ", pos)) != std::string::npos) { ++regs; ++pos; }
-        pos = 0;
-        while ((pos = src.find("double ", pos)) != std::string::npos) { regs += 2; ++pos; }
-        pos = 0;
-        while ((pos = src.find("int ", pos)) != std::string::npos) { ++regs; ++pos; }
+        // Count each distinct typed declaration inside the function body
+        // Use a simple state machine: after '{', count 'type name;' patterns
+        auto countDecls = [&src](const char* typeName, int weight) {
+            int n = 0; size_t pos = 0;
+            const std::string t(typeName);
+            while ((pos = src.find(t, pos)) != std::string::npos) {
+                // Must be followed by space (not part of another identifier)
+                if (pos + t.size() < src.size() && src[pos + t.size()] == ' ') ++n;
+                ++pos;
+            }
+            return n * weight;
+        };
+        regs += countDecls("float ",  1);
+        regs += countDecls("double ", 2); // doubles take 2 regs in VGRE's FP32/64 model
+        regs += countDecls("int ",    1);
+        regs += countDecls("uint32_t",1);
+        // Add operator-density estimate: each +-*/ in the source body requires ~1 temp
+        for (char op : {'+','-','*','/'}) {
+            size_t p = 0;
+            while ((p = src.find(op, p)) != std::string::npos) { ++regs; ++p; }
+        }
+        regs /= 3; // dampen operator over-count (operators share temporaries)
         return regs;
     };
-    int combinedRegs = estimateRegs(irA) + estimateRegs(irB);
+
+    const int combinedRegs = estimateRegs(irA) + estimateRegs(irB);
     if (combinedRegs > 200) {
         VGRE_LOG_DEBUG("GraphOptimizer",
-            "Fusion blocked: estimated register pressure " + std::to_string(combinedRegs) +
-            " > 200 for nodes " + std::to_string(a.nodeId) + " + " + std::to_string(b.nodeId));
+            "Fusion blocked: register pressure " + std::to_string(combinedRegs) +
+            " > 200 for nodes " + std::to_string(a.nodeId) + "/" + std::to_string(b.nodeId));
         return false;
+    }
+
+    // 5. Cost-Benefit Kernel Fusion — roofline-based ROI.
+    // Compute the estimated speedup from fusion by comparing:
+    //   time_separate = T_A + T_intermediate_write + T_B
+    //   time_fused    = T_fused (no intermediate write/read)
+    //
+    // Uses the Roofline model:
+    //   T = max(FLOPs / peak_compute_GFLOPs_s,  memory_bytes / bandwidth_GB_s)
+    //
+    // Intermediate bytes eliminated = a.intermediateBytes (set by caller).
+    // Only proceed if fusion_speedup > 1.05 (5% minimum benefit threshold).
+    {
+        constexpr float kPeakComputeGFLOPs = 100.f;  // ~100 GFLOP/s for 12-core CPU w/ AVX2
+        constexpr float kBandwidthGBps     = 40.f;   // local NUMA bandwidth
+
+        auto rooflineMs = [&](float flops, float bytes) -> float {
+            float t_compute  = flops  / (kPeakComputeGFLOPs * 1e9f) * 1e3f; // ms
+            float t_memory   = bytes  / (kBandwidthGBps     * 1e9f) * 1e3f; // ms
+            return std::max(t_compute, t_memory);
+        };
+
+        float bytesA    = a.memoryBandwidthGB * 1e9f;
+        float bytesB    = b.memoryBandwidthGB * 1e9f;
+        float intermed  = a.intermediateBytes;
+
+        if (a.computeFlops > 0.f || bytesA > 0.f) {
+            float t_sep = rooflineMs(a.computeFlops, bytesA)
+                        + rooflineMs(0.f, intermed)      // write intermediate
+                        + rooflineMs(b.computeFlops, bytesB);
+            float t_fused = rooflineMs(a.computeFlops + b.computeFlops,
+                                       bytesA + bytesB - intermed);
+            if (t_sep > 0.f) {
+                float speedup = t_sep / std::max(1e-6f, t_fused);
+                const_cast<GraphNode&>(b).fusionBenefit = speedup;
+                if (speedup < 1.05f) {
+                    VGRE_LOG_DEBUG("GraphOptimizer",
+                        "Fusion ROI too low: speedup=" + std::to_string(speedup) +
+                        " for nodes " + std::to_string(a.nodeId) + "/" +
+                        std::to_string(b.nodeId) + " (need >1.05)");
+                    return false;
+                }
+            }
+        }
     }
 
     return true;

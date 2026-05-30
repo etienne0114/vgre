@@ -86,26 +86,58 @@ void MemoryManager::migrationLoop() {
     if (migrationStop_.load(std::memory_order_acquire)) break;
 
 #if defined(__linux__)
+    // ── Adaptive NUMA Migration Policy ──────────────────────────────────────
+    // Uses EMA per-device access rates with hysteresis (20% headroom) to prevent
+    // thrashing. A region migrates only when the new dominant device's EMA rate
+    // exceeds the current preferred device's rate by the hysteresis margin.
+    // This replaces the simple per-interval dominance threshold.
+    static constexpr float kEmaAlpha     = 0.25f;  // EMA smoothing (faster response)
+    static constexpr float kHysteresis   = 0.20f;  // 20% headroom against thrashing
+    static constexpr float kMinRateDiff  = 0.10f;  // Minimum absolute rate difference
+    const float kDtSeconds = static_cast<float>(kInterval.count()) / 1000.0f;
+
     std::unordered_map<int, std::vector<MigBatch>> batches;
     {
       std::unique_lock<std::shared_mutex> lock(mutex_);
       for (auto& region : masterRegions_) {
         uint32_t total = region.accessCount.load(std::memory_order_relaxed);
-        if (total < 10) continue;
+        if (total < 5) continue; // need at least 5 faults before migrating
 
-        int dominantDev = -1;
-        uint32_t maxCount = 0;
+        // Update EMA rates for each device
+        float newDominantRate = 0.f;
+        int   newDominantDev  = -1;
         for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
           uint32_t cnt = region.deviceAccessCounts[d].load(std::memory_order_relaxed);
-          if (cnt > maxCount) { maxCount = cnt; dominantDev = d; }
+          float instantRate = static_cast<float>(cnt) / kDtSeconds;
+          region.emaAccessRate[d] = kEmaAlpha * instantRate +
+                                    (1.0f - kEmaAlpha) * region.emaAccessRate[d];
+          if (region.emaAccessRate[d] > newDominantRate) {
+            newDominantRate = region.emaAccessRate[d];
+            newDominantDev  = d;
+          }
         }
-        if (dominantDev < 0) continue;
-        float dominance = static_cast<float>(maxCount) / static_cast<float>(total);
-        if (dominance < kDominanceThreshold) continue;
-        if (region.preferredLocation.load(std::memory_order_relaxed) == dominantDev) continue;
+        if (newDominantDev < 0) continue;
 
-        batches[dominantDev].push_back(
-            {reinterpret_cast<uintptr_t>(region.ptr), region.size, dominantDev, dominance});
+        // Hysteresis: only migrate if new dominant device's rate is significantly
+        // higher than the current preferred device's rate (prevents oscillation).
+        int curDev = region.preferredLocation.load(std::memory_order_relaxed);
+        float curRate = (curDev >= 0 && curDev < ManagedRegion::kMaxDevices)
+                        ? region.emaAccessRate[curDev] : 0.f;
+        bool newIsBetter = (newDominantRate > curRate * (1.0f + kHysteresis)) &&
+                           (newDominantRate - curRate) > kMinRateDiff;
+        if (!newIsBetter || newDominantDev == curDev) continue;
+
+        float dominance = newDominantRate / std::max(1e-6f,
+            [&]() { float s = 0.f;
+                    for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) s += region.emaAccessRate[d];
+                    return s; }());
+        batches[newDominantDev].push_back(
+            {reinterpret_cast<uintptr_t>(region.ptr), region.size, newDominantDev, dominance});
+
+        // Reset instant counters (not EMA — that carries over)
+        for (int d = 0; d < ManagedRegion::kMaxDevices; ++d)
+          region.deviceAccessCounts[d].store(0, std::memory_order_relaxed);
+        region.accessCount.store(0, std::memory_order_relaxed);
       }
     }
 
@@ -131,10 +163,6 @@ void MemoryManager::migrationLoop() {
               continue;
             }
             region.preferredLocation.store(node, std::memory_order_relaxed);
-            for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
-              region.deviceAccessCounts[d].store(0, std::memory_order_relaxed);
-            }
-            region.accessCount.store(0, std::memory_order_relaxed);
             VGRE_LOG_DEBUG("MemoryManager",
                 "UVM migration: region " + std::to_string(entry.regionBase) +
                 " → NUMA node " + std::to_string(node) +

@@ -82,6 +82,20 @@ struct GraphNode {
   void (*hostFn)(void *) = nullptr;
   void *hostUserData = nullptr;
 
+  // ── Dependency DAG cost weights ───────────────────────────────────────────
+  // Estimated execution cost and fusion ROI for this node.
+  // Populated by the runtime profiler and used by the graph optimizer to make
+  // data-driven fusion decisions (cost-benefit kernel fusion).
+  float executionCostMs    = 0.0f;   // Estimated wall-clock execution time
+  float memoryBandwidthGB  = 0.0f;   // Estimated memory traffic (read+write GB)
+  float computeFlops       = 0.0f;   // Estimated floating-point operations
+  float arithmeticIntensity= 0.0f;   // FLOPs / byte (roofline x-axis)
+  float intermediateBytes  = 0.0f;   // Bytes in intermediate output buffer (if producer)
+  // Estimated speedup from fusing this node with its immediate producer.
+  // 1.0 = no benefit, >1.0 = fusion saves time.
+  // Computed by areFusible() and stored here for the optimizer to use.
+  float fusionBenefit = 1.0f;
+
   // CHILD node data: child graph to run inline (reuses bodyGraphId)
 
   // EVENT_RECORD / EVENT_WAIT node data

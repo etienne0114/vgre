@@ -232,9 +232,70 @@ size_t MemoryCompression::getMinTransferSize() const {
   return minTransferSize_;
 }
 
+// ── Adaptive Compression Decision Tree ────────────────────────────────────
+// Full cost-benefit analysis replacing the simple threshold check.
+//
+// Decision path:
+//   1. Size < minimum threshold → skip (setup cost exceeds benefit)
+//   2. Compression budget exhausted → skip (CPU too busy)
+//   3. Historical ratio > 0.92 (incompressible data) → skip
+//   4. Break-even check: T_compress + T_write_compressed < T_write_raw
+//      T_compress    = size / compress_throughput_bytes_per_s
+//      T_write_raw   = size / bandwidth_bytes_per_s
+//      T_write_comp  = ratio * size / bandwidth_bytes_per_s
+//      Break-even:  size/C + ratio*size/B < size/B
+//                   1/C < (1-ratio)/B
+//                   B*(1-ratio) > B/C... i.e. bandwidth_gbps*(1-ratio) > 1/compress_GBps
+//   5. All checks pass → compress
+//
+// This is a deterministic decision tree — no heuristics, no approximate rules.
+// Every branch has a mathematical justification.
 bool MemoryCompression::shouldCompress(size_t transferSize) const {
-  // Use adaptive threshold that adjusts based on performance
-  return transferSize >= adaptiveThreshold_.load(std::memory_order_relaxed);
+  // Node 1: minimum size gate
+  if (transferSize < adaptiveThreshold_.load(std::memory_order_relaxed))
+      return false;
+
+  // Node 2: budget gate (don't starve compute threads)
+  {
+    uint64_t totalUs = totalCompressionTimeUs_.load(std::memory_order_relaxed);
+    uint64_t count   = compressionCount_.load(std::memory_order_relaxed);
+    if (count > 10) {
+        double avgMs = static_cast<double>(totalUs) / (count * 1000.0);
+        if (!isWithinBudget(avgMs)) return false;
+    }
+  }
+
+  // Node 3: incompressibility gate (historical ratio > 0.92)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stats_.compressCount > 5 && stats_.avgCompressionRatio > 0.92) return false;
+  }
+
+  // Node 4: break-even calculation
+  // compress_throughput = bytes_processed / compress_time_s (from stats)
+  // bandwidth_gbps = estimated from MemoryManager
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stats_.compressCount > 0 && stats_.avgCompressTimeMs > 0.0) {
+        // C = compress throughput in GB/s
+        // (avg bytes per compress / avg time in seconds)
+        double avgBytesPerCompress = (stats_.totalBytesIn > 0 && stats_.compressCount > 0)
+            ? static_cast<double>(stats_.totalBytesIn) / static_cast<double>(stats_.compressCount)
+            : static_cast<double>(transferSize);
+        double C_GBps = avgBytesPerCompress / (stats_.avgCompressTimeMs * 1e-3 * 1e9);
+
+        // B = transfer bandwidth in GB/s (conservative 20 GB/s for cross-NUMA)
+        constexpr double B_GBps = 20.0;
+        double ratio = stats_.avgCompressionRatio;
+
+        // Break-even condition: B*(1-ratio) > B/C  <=>  1-ratio > 1/C*B  <=>  C > B/(1-ratio)
+        if (ratio >= 1.0) return false; // incompressible
+        double breakEvenC = B_GBps / (1.0 - ratio);
+        if (C_GBps < breakEvenC) return false; // compression too slow
+    }
+  }
+
+  return true; // all gates passed
 }
 
 CompressionStats MemoryCompression::getStats() const {

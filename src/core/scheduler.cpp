@@ -12,7 +12,7 @@ thread_local int t_workerIdx = -1;
 bool Scheduler::enqueueWithWorkerFallback(int workerIdx,
                                         WorkItem&& item,
                                         std::vector<std::unique_ptr<ChaseLevDeque<WorkItem*>>>& workerDeques,
-                                        std::priority_queue<WorkItem>& globalQueue,
+                                        IndexedHeap& globalQueue,
                                         std::mutex& queueMutex) {
   if (workerIdx >= 0 && workerIdx < static_cast<int>(workerDeques.size())) {
     WorkItem* localItem = new WorkItem(std::move(item));

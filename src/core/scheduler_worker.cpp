@@ -32,16 +32,27 @@ void Scheduler::workerLoop(int workerIdx) {
       }
     }
 
-    // 2. Work-stealing from other deques (lock-free)
+    // 2. Heterogeneous Workload Balancing — NUMA-aware work stealing.
+    // Prefer stealing from workers on the SAME NUMA node (data is cache-local).
+    // Fall back to remote-NUMA workers only after exhausting local options.
+    // This reduces cross-NUMA cache invalidation under large-scale workloads.
     if (!gotItem) {
-      for (int i = 1; i < numThreads_; ++i) {
-        WorkItem* p = nullptr;
-        int targetIdx = (workerIdx + i) % numThreads_;
-        if (workerDeques_[targetIdx]->steal(p) && p) {
-          item = std::move(*p);
-          delete p;
-          gotItem = true;
-          break;
+      // Two-phase steal: first try same-NUMA workers, then any worker
+      for (int phase = 0; phase < 2 && !gotItem; ++phase) {
+        for (int i = 1; i < numThreads_; ++i) {
+          int targetIdx = (workerIdx + i) % numThreads_;
+          bool sameNuma = (myNode >= 0 &&
+                           targetIdx < static_cast<int>(workerNumaNodes_.size()) &&
+                           workerNumaNodes_[targetIdx] == myNode);
+          if (phase == 0 && !sameNuma) continue; // phase 0: same NUMA only
+          if (phase == 1 && sameNuma)  continue; // phase 1: remote NUMA only
+          WorkItem* p = nullptr;
+          if (workerDeques_[targetIdx]->steal(p) && p) {
+            item = std::move(*p);
+            delete p;
+            gotItem = true;
+            break;
+          }
         }
       }
     }

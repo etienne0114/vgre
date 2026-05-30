@@ -205,17 +205,36 @@ bool MPSServer::start() {
     VGRE_LOG_INFO("MPS", "MPS daemon listening on named pipe " + pipeName);
     return true;
 #elif defined(__linux__) || defined(__APPLE__)
+    // Security: relocate socket from /tmp/ to user-owned $HOME/.vgre/ directory
+    // to prevent local privilege escalation via socket hijacking.
+    std::string secureSocketPath = socketPath_;
+    if (socketPath_.find("/tmp/") == 0) {
+        const char* homeDir = getenv("HOME");
+        if (homeDir && homeDir[0] != '\0') {
+            std::string vgreDir = std::string(homeDir) + "/.vgre";
+            // Create .vgre directory with owner-only permissions if it doesn't exist
+            struct stat st;
+            if (stat(vgreDir.c_str(), &st) != 0) {
+                mkdir(vgreDir.c_str(), 0700);
+                chmod(vgreDir.c_str(), 0700);
+            }
+            // Replace /tmp/vgre_mps with $HOME/.vgre/vgre_mps
+            std::string socketName = socketPath_.substr(socketPath_.find_last_of('/') + 1);
+            secureSocketPath = vgreDir + "/" + socketName;
+        }
+    }
+
     listenFd_ = socket(AF_UNIX, SOCK_STREAM, 0);
     if (listenFd_ < 0) {
         VGRE_LOG_ERROR("MPS", "socket() failed: " + std::string(strerror(errno)));
         return false;
     }
 
-    ::unlink(socketPath_.c_str()); // remove stale socket
+    ::unlink(secureSocketPath.c_str()); // remove stale socket
 
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, socketPath_.c_str(), sizeof(addr.sun_path) - 1);
+    strncpy(addr.sun_path, secureSocketPath.c_str(), sizeof(addr.sun_path) - 1);
 
     if (bind(listenFd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         VGRE_LOG_ERROR("MPS", "bind() failed: " + std::string(strerror(errno)));
@@ -224,7 +243,8 @@ bool MPSServer::start() {
     }
 
     // Prevent local privilege escalation via the socket — owner access only.
-    chmod(socketPath_.c_str(), 0600);
+    chmod(secureSocketPath.c_str(), 0600);
+    socketPath_ = secureSocketPath; // update stored path
 
     if (listen(listenFd_, maxClients_) < 0) {
         VGRE_LOG_ERROR("MPS", "listen() failed: " + std::string(strerror(errno)));
