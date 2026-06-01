@@ -1,4 +1,5 @@
 #include "vgre/core/scheduler.h"
+#include "vgre/core/stream_dep_tracker.h"
 #include "vgre/common/logger.h"
 
 #include <sstream>
@@ -76,6 +77,9 @@ void Scheduler::tryProcessStream(std::shared_ptr<StreamQueue> sq, StreamId strea
       if (node->task) {
         node->task();
       }
+      // Notify the segment-tree tracker that one task completed on this stream.
+      // Complexity: O(log kMaxTrackedStreams).
+      StreamDepTracker::instance().notifyKernelComplete(stream);
       try {
         node->promise.set_value(VGREResult::SUCCESS);
       } catch (...) {

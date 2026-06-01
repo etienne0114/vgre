@@ -34,6 +34,7 @@ add_library(vgre_core OBJECT
     math/mixed_precision.cpp
     math/block_sparse.cpp
     math/tensor_core_emulation.cpp
+    graph_dependency_tracker.cpp
 )
 
 target_include_directories(vgre_core PUBLIC
