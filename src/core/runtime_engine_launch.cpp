@@ -343,6 +343,14 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
     vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
         kName, blockDim.total(), 8, ms, memBytes, flops);
 
+    // Update per-kernel Workload Characterization Cache (Roofline model input).
+    // Converts raw counters to bandwidth (GB/s) and FLOPs before storing EMA.
+    vgre::core::MemoryManager::instance().updateKernelCharacterization(
+        kName,
+        memBytes,
+        ms,
+        static_cast<double>(flops));
+
     auto &profiler = vgre::advanced::RuntimeProfiler::instance();
     if (profiler.isEnabled()) {
       vgre::advanced::ProfileEvent ev;
