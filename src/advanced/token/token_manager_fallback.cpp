@@ -273,13 +273,26 @@ std::array<uint8_t, 32> HardwareTokenManager::getMachineKey() {
     crypto::sha256(reinterpret_cast<const uint8_t*>(saltInput.data()),
                    saltInput.size(), salt);
 
+    // PBKDF2 iteration count: default 600k (NIST SP 800-132 2025 minimum).
+    // Operators can override via VGRE_PBKDF2_ITERATIONS for performance tuning,
+    // mirroring the same pattern used in SecureChannel::deriveSessionKey().
+    uint32_t pbkdf2Iters = static_cast<uint32_t>(crypto::kPBKDF2Iterations);
+    const char *iterEnv = vgre_get_config("VGRE_PBKDF2_ITERATIONS");
+    if (iterEnv && iterEnv[0] != '\0') {
+        try {
+            long val = std::stol(iterEnv);
+            if (val >= 10000 && val <= 10000000) {
+                pbkdf2Iters = static_cast<uint32_t>(val);
+            }
+        } catch (...) {
+        }
+    }
+
     std::array<uint8_t, 32> key{};
-    // Use PBKDF2-SHA256 with increased iterations for stronger security
-    // 200,000 iterations provides ~2x security margin over previous 100,000
     crypto::pbkdf2_sha256(
         reinterpret_cast<const uint8_t*>("vgre_fallback_kdf"), 17,
         salt, sizeof(salt),
-        200000,  // Increased from 100k to 200k for stronger security
+        pbkdf2Iters,
         key.data(), key.size());
 
     memset(salt, 0, sizeof(salt));
