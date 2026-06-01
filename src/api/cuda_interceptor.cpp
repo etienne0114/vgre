@@ -834,7 +834,7 @@ cudaError_t CUDAInterceptor::convertResult(VGREResult r) {
   case VGREResult::ERR_INVALID_KERNEL:
     return cudaErrorInvalidDeviceFunction;
   case VGREResult::ERR_NOT_INITIALIZED:
-    return cudaErrorInvalidValue;
+    return cudaErrorNotInitialized;
   case VGREResult::ERR_LAUNCH_FAILURE:
     return cudaErrorLaunchFailure;
   case VGREResult::ERR_IO:

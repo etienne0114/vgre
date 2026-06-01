@@ -73,8 +73,56 @@ Scheduler::Scheduler(int numThreads) : numThreads_(numThreads) {
 
 // ── Destructor ─────────────────────────────────────────────────────────────
 Scheduler::~Scheduler() {
+  // Phase 1: signal shutdown so workers exit their cv_.wait loops.
   shutdown_ = true;
   cv_.notify_all();
+
+  // Phase 2: drain all per-worker deques and SPSC rings.
+  // Workers are waking up right now. Any tasks they haven't popped yet
+  // are still in their Chase-Lev deques or SPSC rings.  Execute them on
+  // the calling thread so they are never silently dropped.
+  {
+    WorkItem item;
+    for (int i = 0; i < numThreads_; ++i) {
+      // Drain Chase-Lev deque
+      while (true) {
+        WorkItem *p = nullptr;
+        if (!workerDeques_[i]->pop(p) || !p) break;
+        if (p->execute) {
+          try { p->execute(); } catch (...) {}
+        }
+        pending_.fetch_sub(1, std::memory_order_acq_rel);
+        completed_.fetch_add(1, std::memory_order_relaxed);
+        delete p;
+      }
+#ifdef ENABLE_VGRE_SPSC
+      // Drain SPSC ring
+      while (workerRings_[i]->pop(item)) {
+        if (item.execute) {
+          try { item.execute(); } catch (...) {}
+        }
+        pending_.fetch_sub(1, std::memory_order_acq_rel);
+        completed_.fetch_add(1, std::memory_order_relaxed);
+      }
+#endif
+    }
+    // Drain global priority queue
+    {
+      std::lock_guard<std::mutex> lk(mutex_);
+      while (!queue_.empty()) {
+        WorkItem qi = std::move(const_cast<WorkItem&>(queue_.top()));
+        queue_.pop();
+        if (qi.execute) {
+          try { qi.execute(); } catch (...) {}
+        }
+        pending_.fetch_sub(1, std::memory_order_acq_rel);
+        completed_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  }
+  cv_.notify_all(); // wake workers so they see shutdown_ and exit
+
+  // Phase 3: join workers with timeout.
   for (auto &w : workers_) {
     if (!w.joinable()) continue;
     auto p = std::make_shared<std::promise<void>>();
@@ -84,7 +132,7 @@ Scheduler::~Scheduler() {
         p->set_value();
     });
     joiner.detach();
-    f.wait_for(std::chrono::seconds(5)); // non-blocking after timeout
+    f.wait_for(std::chrono::seconds(5));
   }
   VGRE_LOG_DEBUG("Scheduler", "Shut down — completed " +
                                   std::to_string(completed_.load()) + " tasks");
