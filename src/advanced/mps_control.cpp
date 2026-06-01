@@ -18,6 +18,10 @@
 
 #include <atomic>
 #include <cstring>
+#if !defined(_WIN32)
+#include <pwd.h>    // getpwuid
+#include <unistd.h> // getuid
+#endif
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -207,9 +211,22 @@ bool MPSServer::start() {
 #elif defined(__linux__) || defined(__APPLE__)
     // Security: relocate socket from /tmp/ to user-owned $HOME/.vgre/ directory
     // to prevent local privilege escalation via socket hijacking.
+    // Use getpwuid(getuid()) as authoritative home directory instead of $HOME
+    // so that the path cannot be spoofed by the calling environment.
     std::string secureSocketPath = socketPath_;
     if (socketPath_.find("/tmp/") == 0) {
-        const char* homeDir = getenv("HOME");
+        const char* homeDir = nullptr;
+#if !defined(_WIN32)
+        struct passwd *pw = getpwuid(getuid());
+        if (pw && pw->pw_dir && pw->pw_dir[0] == '/') {
+            homeDir = pw->pw_dir;
+        } else {
+            // Validated fallback: accept $HOME only if it starts with '/'
+            // (rejects relative paths and shell substitutions like ~)
+            const char* envHome = getenv("HOME");
+            if (envHome && envHome[0] == '/') homeDir = envHome;
+        }
+#endif
         if (homeDir && homeDir[0] != '\0') {
             std::string vgreDir = std::string(homeDir) + "/.vgre";
             // Create .vgre directory with owner-only permissions if it doesn't exist
