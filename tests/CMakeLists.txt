@@ -194,6 +194,14 @@ add_test(NAME TextureViewAdvanced COMMAND test_texture_view_advanced)
 add_executable(test_dirty_page_tracking core/test_dirty_page_tracking.cpp)
 target_link_libraries(test_dirty_page_tracking PRIVATE vgre)
 add_test(NAME DirtyPageTracking COMMAND test_dirty_page_tracking)
+
+add_executable(test_roofline_autotuner core/test_roofline_autotuner.cpp)
+target_link_libraries(test_roofline_autotuner PRIVATE vgre)
+add_test(NAME RooflineAutoTuner COMMAND test_roofline_autotuner)
+set_tests_properties(RooflineAutoTuner PROPERTIES
+    TIMEOUT 120
+    RESOURCE_LOCK vgre_llvm_jit)
+
 add_executable(test_memory_concurrency unit/test_memory_concurrency.cpp)
 target_link_libraries(test_memory_concurrency PRIVATE vgre)
 add_test(NAME MemoryConcurrency COMMAND test_memory_concurrency)
