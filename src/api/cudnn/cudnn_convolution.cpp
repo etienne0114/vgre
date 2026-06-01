@@ -230,7 +230,7 @@ cudnnStatus_t cudnnConvolutionForward(
         cpuConv2d(xt->n, xt->c, xt->h, xt->w,
                   ft->k, ft->r, ft->s,
                   cv->pad_h, cv->pad_w, cv->str_h, cv->str_w, cv->dil_h, cv->dil_w,
-                  xPtr, wPtr, tmp.data());
+                  xPtr, wPtr, tmp.data(), cv->groupCount);
     }
     for (int i = 0; i < ySize; ++i) yf[i] += a * tmp[i];
     return CUDNN_STATUS_SUCCESS;
@@ -312,7 +312,8 @@ cudnnStatus_t cudnnConvolutionBackwardData(
                               ft->k, ft->r, ft->s,
                               cv->pad_h, cv->pad_w, cv->str_h, cv->str_w,
                               cv->dil_h, cv->dil_w,
-                              (const float*)dy, (const float*)w, tmp.data());
+                              (const float*)dy, (const float*)w, tmp.data(),
+                              cv->groupCount);
     }
 
     for (int i = 0; i < dxSize; ++i) dxf[i] += a * tmp[i];
@@ -393,7 +394,8 @@ cudnnStatus_t cudnnConvolutionBackwardFilter(
                                 dwt->k, dwt->r, dwt->s,
                                 cv->pad_h, cv->pad_w, cv->str_h, cv->str_w,
                                 cv->dil_h, cv->dil_w,
-                                (const float*)x, (const float*)dy, tmp.data());
+                                (const float*)x, (const float*)dy, tmp.data(),
+                                cv->groupCount);
     }
 
     for (int i = 0; i < dwSize; ++i) dwf[i] += a * tmp[i];
@@ -456,7 +458,7 @@ cudnnStatus_t cudnnConvolutionBiasActivationForward(
         cpuConv2d(xt->n, xt->c, xt->h, xt->w,
                   ft->k, ft->r, ft->s,
                   cv->pad_h, cv->pad_w, cv->str_h, cv->str_w, cv->dil_h, cv->dil_w,
-                  (const float*)x, (const float*)w, tmp.data());
+                  (const float*)x, (const float*)w, tmp.data(), cv->groupCount);
     }
 
     float a1 = *(const float*)alpha1;
