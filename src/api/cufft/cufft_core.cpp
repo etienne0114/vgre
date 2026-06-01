@@ -69,6 +69,88 @@ static inline uint16_t floatToHalf(float f) {
                                  ((mant + 0x1000u) >> 13));
 }
 
+// ── Radix-4 digit-reversal permutation (n must be power of 4) ────────────────
+// Base-4 analog of bit-reversal: reverses the base-4 digits of each index.
+// Achieves the DIT input ordering needed before bottom-up butterfly passes.
+// Invariant: digit_reverse4(digit_reverse4(x)) = x (self-inverse).
+// O(n) time via carry-propagation — same structure as binary bit-reversal.
+template<typename T>
+static void digit_reverse4(std::complex<T> *x, int n) {
+    // Each base-4 digit occupies 2 bits; step is the power-of-4 weight of the
+    // current digit in j. (j & (3*step)) == 3*step detects a digit at max value 3
+    // — equivalent to the `j & bit` carry check in the radix-2 bit-reversal, but
+    // operating on 2-bit groups rather than individual bits.
+    for (int i = 1, j = 0; i < n; ++i) {
+        int step = n >> 2;
+        while (step && (j & (step * 3)) == step * 3) { j -= step * 3; step >>= 2; }
+        j += step;
+        if (i < j) std::swap(x[i], x[j]);
+    }
+}
+
+// ── Cooley-Tukey radix-4 in-place FFT (O(n log n), n must be power of 4) ────
+// DIT (decimation-in-time). Each butterfly stage processes groups of 4 elements:
+//
+//   p = a + c,  q = a − c
+//   r = b + d,  s = j_rot × (b − d)    j_rot = −j (forward) or +j (inverse)
+//
+//   out[k]       = p + r
+//   out[k+M]     = q + s
+//   out[k+2M]    = p − r
+//   out[k+3M]    = q − s
+//
+// Derivation: X[k]     = A[k] + W^k B[k] + W^{2k} C[k] + W^{3k} D[k]
+//             X[k+M]   = A[k] − j W^k B[k] −     W^{2k} C[k] + j W^{3k} D[k]
+//             X[k+2M]  = A[k] −   W^k B[k] +     W^{2k} C[k] −   W^{3k} D[k]
+//             X[k+3M]  = A[k] + j W^k B[k] −     W^{2k} C[k] − j W^{3k} D[k]
+// where W = exp(−2πi/N) (forward) and M = N/4 per stage.
+// Complexity: (3/8) N log₂N complex multiplications — ≈25% fewer than radix-2.
+template<typename T>
+static void fft_radix4(std::complex<T> *x, int n, int direction) {
+    if (n <= 1) return;
+    digit_reverse4(x, n);
+
+    const T sign = (direction == CUFFT_FORWARD) ? T(-1) : T(1);
+    const std::complex<T> j_rot(0, sign);  // −j forward, +j inverse
+
+    for (int len = 4; len <= n; len <<= 2) {
+        int M = len >> 2;   // sub-DFT size = len/4
+        T base_angle = sign * static_cast<T>(2.0 * PI) / static_cast<T>(len);
+        // Precompute independent twiddle step factors for W^1, W^2, W^3
+        // to avoid accumulating error from repeated w2 = w1*w1 squaring.
+        std::complex<T> w1s(std::cos(base_angle),   std::sin(base_angle));
+        std::complex<T> w2s(std::cos(2*base_angle), std::sin(2*base_angle));
+        std::complex<T> w3s(std::cos(3*base_angle), std::sin(3*base_angle));
+
+        #ifdef _OPENMP
+        #pragma omp parallel for if (n > 4096)
+        #endif
+        for (int i = 0; i < n; i += len) {
+            std::complex<T> w1(1, 0), w2(1, 0), w3(1, 0);
+            for (int k = 0; k < M; ++k) {
+                std::complex<T> a = x[i + k];
+                std::complex<T> b = x[i + k +     M] * w1;
+                std::complex<T> c = x[i + k + 2 * M] * w2;
+                std::complex<T> d = x[i + k + 3 * M] * w3;
+
+                std::complex<T> p = a + c;
+                std::complex<T> q = a - c;
+                std::complex<T> r = b + d;
+                std::complex<T> s = j_rot * (b - d);
+
+                x[i + k]           = p + r;
+                x[i + k +     M]   = q + s;
+                x[i + k + 2 * M]   = p - r;
+                x[i + k + 3 * M]   = q - s;
+
+                w1 *= w1s;
+                w2 *= w2s;
+                w3 *= w3s;
+            }
+        }
+    }
+}
+
 // ── Cooley-Tukey radix-2 in-place FFT (O(n log n), n must be power-of-2) ────
 template<typename T>
 void fft_radix2(std::complex<T> *x, int n, int direction) {
@@ -143,11 +225,20 @@ void fft_bluestein(const std::complex<T> *in, std::complex<T> *out, int n, int d
 }
 
 // ── Unified 1D FFT dispatcher ───────────────────────────────────────────────
+// Priority: radix-4 (n = 4^m) > radix-2 (n = 2^m) > Bluestein (arbitrary n).
+// isPow4 is a subset of isPow2, so the check order matters.
 template<typename T>
 void fft1d(const std::complex<T> *in, std::complex<T> *out, int n, int direction) {
     if (n <= 1) { if (n == 1 && out != in) out[0] = in[0]; return; }
 
-    if (isPow2(n)) {
+    if (isPow4(n)) {
+        if (out != in) std::copy(in, in + n, out);
+        fft_radix4(out, n, direction);
+        if (direction == CUFFT_INVERSE) {
+            T inv = static_cast<T>(1.0) / static_cast<T>(n);
+            for (int i = 0; i < n; ++i) out[i] *= inv;
+        }
+    } else if (isPow2(n)) {
         if (out != in) std::copy(in, in + n, out);
         fft_radix2(out, n, direction);
         if (direction == CUFFT_INVERSE) {

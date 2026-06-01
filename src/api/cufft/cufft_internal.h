@@ -18,6 +18,13 @@ inline int nextPow2(int n) {
 
 inline bool isPow2(int n) { return n > 0 && (n & (n - 1)) == 0; }
 
+// n is a power of 4 iff it is a power of 2 with its single set bit at an
+// even bit position (bit 0, 2, 4, …): 4^k = 2^{2k} for k = 0,1,2,…
+// Mask 0x55555555 selects even-position bits in a 32-bit integer.
+inline bool isPow4(int n) {
+    return n > 0 && (n & (n - 1)) == 0 && (n & 0x55555555) != 0;
+}
+
 inline bool isValidType(cufftType_t type) {
     return type == CUFFT_C2C || type == CUFFT_R2C || type == CUFFT_C2R ||
            type == CUFFT_Z2Z || type == CUFFT_D2Z || type == CUFFT_Z2D ||

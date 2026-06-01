@@ -282,6 +282,12 @@ add_executable(test_cufft_xt api/test_cufft_xt.cpp)
 target_link_libraries(test_cufft_xt PRIVATE vgre_cudart)
 add_test(NAME CufftXt COMMAND test_cufft_xt)
 
+# Radix-4 FFT correctness (QUEUE-04)
+add_executable(test_cufft_radix4 api/test_cufft_radix4.cpp)
+target_link_libraries(test_cufft_radix4 PRIVATE vgre_cudart)
+add_test(NAME CufftRadix4 COMMAND test_cufft_radix4)
+set_tests_properties(CufftRadix4 PROPERTIES TIMEOUT 60)
+
 add_executable(test_curand api/test_curand.cpp)
 target_link_libraries(test_curand PRIVATE vgre_cudart)
 add_test(NAME CuRANDFunctional COMMAND test_curand)
