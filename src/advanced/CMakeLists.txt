@@ -81,6 +81,15 @@ target_link_libraries(vgre_advanced PRIVATE
     vgre_llvm_iface
 )
 
+# Propagate SIMD compile options to vgre_advanced so that AES-NI/PCLMUL/AVX2
+# intrinsics in secure_channel_crypto.cpp etc. compile with the right ISA flags.
+if(VGRE_SIMD_COMPILE_OPTIONS)
+    target_compile_options(vgre_advanced PRIVATE ${VGRE_SIMD_COMPILE_OPTIONS})
+endif()
+if(VGRE_SIMD_COMPILE_DEFS)
+    target_compile_definitions(vgre_advanced PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
+endif()
+
 # RDMA: set compile definitions + include paths so rdma_transport.cpp compiles.
 # The libibverbs link itself is handled by _vgre_configure_library() on the
 # final shared libraries (vgre, vgre_cudart) and the vgre-worker executable.

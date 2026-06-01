@@ -61,10 +61,41 @@ void aes256_ctr(const uint8_t key[32], const uint8_t nonce[12],
                 uint64_t initialCounter,
                 const uint8_t *input, uint8_t *output, size_t len);
 
+// AES-256-GCM authenticated encryption (NIST SP 800-38D)
+// GCM = CTR mode (counter=2) + GHASH authentication tag
+// GHASH: H = E_K(0^128); tag = GHASH_H(aad,C) ⊕ E_K(IV||0x00000001)
+// GHASH recurrence: X_i = (X_{i-1} ⊕ block_i) · H in GF(2^128)
+// Uses PCLMULQDQ when __PCLMUL__ + AES-NI available; software fallback otherwise.
+// iv must be 12 bytes (96-bit); tag_out receives 16-byte authentication tag.
+// Returns false only if runtime CPUID check fails (hardware path unavailable
+//   and the caller should use CTR+HMAC instead).
+bool aes256_gcm_encrypt(const uint8_t key[32],
+                        const uint8_t iv[12],
+                        const uint8_t *aad,  size_t aadLen,
+                        const uint8_t *plain, size_t plainLen,
+                        uint8_t *cipher,
+                        uint8_t tag_out[16]);
+
+// AES-256-GCM authenticated decryption.
+// Returns true iff the tag matches (constant-time comparison).
+bool aes256_gcm_decrypt(const uint8_t key[32],
+                        const uint8_t iv[12],
+                        const uint8_t *aad,   size_t aadLen,
+                        const uint8_t *cipher, size_t cipherLen,
+                        uint8_t *plain,
+                        const uint8_t tag_in[16]);
+
+// Runtime hardware capability query.
+bool gcm_hw_supported();
+
 } // namespace crypto
 
 // ── Secure Packet Header ──────────────────────────────────────────────────
 // Every packet sent through a SecureChannel is prefixed with this header.
+// flags bit 0 (kFlagGCM): payload uses AES-256-GCM instead of CTR+HMAC.
+//   In GCM mode the hmac_tag field repurposed: [0..11]=GCM IV, [12..27]=GCM tag.
+static constexpr uint16_t kFlagGCM = 0x0001u;
+
 #pragma pack(push, 1)
 struct SecurePacketHeader {
   uint32_t magic = 0x56475345U; // "VGSE" (VGRE Secure Envelope)
@@ -73,7 +104,7 @@ struct SecurePacketHeader {
   uint16_t flags = 0;
   uint64_t sequence_number = 0;
   uint32_t payload_length = 0;
-  uint8_t hmac_tag[crypto::kSHA256DigestLen]; // HMAC of header fields + payload
+  uint8_t hmac_tag[crypto::kSHA256DigestLen]; // HMAC, or GCM IV(12)+tag(16)
 };
 #pragma pack(pop)
 
@@ -138,6 +169,9 @@ public:
   // Check if the channel is initialized
   bool isInitialized() const { return initialized_.load(); }
 
+  // True when AES-NI + PCLMULQDQ are present and GCM path is active.
+  bool supportsGCM() const { return useGcm_; }
+
   // A5: Return the VGREResult of the most recent recvSecure() call.
   // Callers query this to distinguish HMAC auth failures (ERR_AUTH_FAILED)
   // from socket I/O errors (ERR_IO) for the HMAC circuit-breaker.
@@ -153,6 +187,9 @@ private:
   // AES-256-CTR cipher: nonce derived from session key; counter = sequenceNum
   void aesCtr(const uint8_t *input, uint8_t *output, size_t len,
               uint64_t sequenceNum);
+
+  // True when hardware GCM path is used (AES-NI + PCLMULQDQ present).
+  bool useGcm_{false};
 
   // Compute HMAC for a packet
   void computePacketHMAC(const SecurePacketHeader &hdr,

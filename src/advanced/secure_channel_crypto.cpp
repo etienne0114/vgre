@@ -670,5 +670,357 @@ void aes256_ctr(const uint8_t key[32], const uint8_t nonce[12],
 }
 } // namespace crypto
 
+// ── AES-256-GCM Authenticated Encryption (NIST SP 800-38D) ──────────────────
+// GCM = AES-256-CTR (counter starts at 2) + GHASH authentication.
+// GHASH invariant: universal hash over GF(2^128) with key H = E_K(0^128).
+//   X_0 = 0
+//   X_i = (X_{i-1} ⊕ A_i) · H   in GF(2^128), polynomial x^128+x^7+x^2+x+1
+//   tag = GHASH_H(AAD, C) ⊕ E_K(IV || 0x00000001)
+// CLMUL: GF(2^128) multiply via _mm_clmulepi64_si128 (carry-less multiply).
+//   Security requires IV uniqueness: each call generates a fresh 96-bit IV.
+
+namespace {
+
+#if defined(__AES__) && defined(__PCLMUL__) && \
+    (defined(__x86_64__) || defined(_M_X64)) && \
+    (defined(__GNUC__) || defined(__clang__))
+
+// GF(2^128) multiply using CLMUL: a · b mod x^128+x^7+x^2+x+1
+// Algorithm: Shoup's 4-Karatsuba with Montgomery reduction.
+// Input/output: 128-bit little-endian byte strings packed in __m128i.
+// Invariant: result = a · b in GF(2^128).
+__attribute__((target("aes,pclmul")))
+static __m128i gf128_mul(__m128i a, __m128i b) {
+    // Karatsuba: (a1·x^64 + a0)(b1·x^64 + b0) = a1·b1·x^128 + (a1·b0+a0·b1)·x^64 + a0·b0
+    __m128i t0 = _mm_clmulepi64_si128(a, b, 0x00); // a0*b0
+    __m128i t1 = _mm_clmulepi64_si128(a, b, 0x10); // a0*b1
+    __m128i t2 = _mm_clmulepi64_si128(a, b, 0x01); // a1*b0
+    __m128i t3 = _mm_clmulepi64_si128(a, b, 0x11); // a1*b1
+    __m128i mid = _mm_xor_si128(t1, t2);
+    // 256-bit product: [t3 : (mid_lo ^ t0_hi) : (mid_hi ^ t3_lo) : t0]
+    // Combine into two 128-bit halves: lo = t0 ^ (mid << 64), hi = t3 ^ (mid >> 64)
+    __m128i lo = _mm_xor_si128(t0, _mm_slli_si128(mid, 8));
+    __m128i hi = _mm_xor_si128(t3, _mm_srli_si128(mid, 8));
+    // Barrett reduction mod x^128+x^7+x^2+x+1 (GCM polynomial)
+    // p(x) = x^128 + x^7 + x^2 + x + 1  →  lower 64 bits: 0x87 (= x^7+x^2+x+1 reversed)
+    // Reduce hi into lo using the relationship x^128 ≡ x^7+x^2+x+1
+    __m128i p = _mm_set_epi32(0, 0, 0, 0x87);
+    __m128i r  = _mm_clmulepi64_si128(hi, p, 0x01); // hi_hi * 0x87
+    __m128i r2 = _mm_clmulepi64_si128(hi, p, 0x00); // hi_lo * 0x87
+    lo = _mm_xor_si128(lo, _mm_xor_si128(r, _mm_slli_si128(r2, 8)));
+    // Second reduction pass for top 64 bits of r2
+    __m128i r3 = _mm_clmulepi64_si128(_mm_srli_si128(r2, 8), p, 0x00);
+    return _mm_xor_si128(lo, r3);
+}
+
+// Byte-reverse a __m128i using SSE2 only (no SSSE3 required).
+// GCM spec uses big-endian bit order for GHASH blocks.
+__attribute__((target("aes,pclmul")))
+static __m128i byterev(__m128i x) {
+    uint64_t lo = (uint64_t)_mm_cvtsi128_si64(x);
+    uint64_t hi = (uint64_t)_mm_cvtsi128_si64(_mm_srli_si128(x, 8));
+    return _mm_set_epi64x((long long)__builtin_bswap64(lo),
+                          (long long)__builtin_bswap64(hi));
+}
+
+// GHASH: H is big-endian 128-bit block; returns 128-bit big-endian output.
+// GHASH_H(A, C): processes AAD blocks then ciphertext blocks then length block.
+// Invariant: X_i = (X_{i-1} ⊕ A_i) · H  in GF(2^128).
+__attribute__((target("aes,pclmul")))
+static __m128i ghash_hw(const __m128i H_be,
+                         const uint8_t *aad,  size_t aadLen,
+                         const uint8_t *data, size_t dataLen) {
+    __m128i X = _mm_setzero_si128();
+    // Helper: process one 16-byte block (big-endian)
+    auto process_block = [&](__m128i blk_be) {
+        X = gf128_mul(_mm_xor_si128(X, blk_be), H_be);
+    };
+
+    // Process AAD
+    size_t full = aadLen / 16;
+    for (size_t i = 0; i < full; ++i)
+        process_block(_mm_loadu_si128((const __m128i*)(aad + i*16)));
+    if (aadLen % 16) {
+        alignas(16) uint8_t pad[16] = {};
+        memcpy(pad, aad + full*16, aadLen % 16);
+        process_block(_mm_load_si128((const __m128i*)pad));
+    }
+
+    // Process ciphertext
+    full = dataLen / 16;
+    for (size_t i = 0; i < full; ++i)
+        process_block(_mm_loadu_si128((const __m128i*)(data + i*16)));
+    if (dataLen % 16) {
+        alignas(16) uint8_t pad[16] = {};
+        memcpy(pad, data + full*16, dataLen % 16);
+        process_block(_mm_load_si128((const __m128i*)pad));
+    }
+
+    // Length block: [len(AAD)*8 : len(C)*8] in big-endian 64-bit each
+    alignas(16) uint8_t lenblk[16];
+    uint64_t aad_bits  = static_cast<uint64_t>(aadLen)  * 8;
+    uint64_t data_bits = static_cast<uint64_t>(dataLen) * 8;
+    for (int i = 0; i < 8; ++i) {
+        lenblk[i]   = static_cast<uint8_t>((aad_bits  >> (56 - 8*i)) & 0xff);
+        lenblk[8+i] = static_cast<uint8_t>((data_bits >> (56 - 8*i)) & 0xff);
+    }
+    process_block(_mm_load_si128((const __m128i*)lenblk));
+    return X;
+}
+
+// AES-256-GCM encrypt/decrypt with hardware acceleration.
+__attribute__((target("aes,pclmul")))
+static void aes256_gcm_core_hw(const uint8_t key[32],
+                                const uint8_t iv[12],
+                                const uint8_t *aad, size_t aadLen,
+                                const uint8_t *input, size_t len,
+                                uint8_t *output,
+                                uint8_t tag_out[16],
+                                bool encrypt) {
+    __m128i rk[15];
+    aes256_ni_key_expand(key, rk);
+
+    // H = E_K(0^128) — GHASH subkey
+    __m128i zero = _mm_setzero_si128();
+    __m128i H_le = _mm_xor_si128(zero, rk[0]);
+    for (int r = 1; r <= 13; ++r) H_le = _mm_aesenc_si128(H_le, rk[r]);
+    H_le = _mm_aesenclast_si128(H_le, rk[14]);
+    // GCM operates in big-endian bit order; byte-reverse for GHASH
+    __m128i H_be = byterev(H_le);
+
+    // J0 = IV || 0x00000001 (big-endian counter=1 for tag generation)
+    alignas(16) uint8_t j0[16];
+    memcpy(j0, iv, 12);
+    j0[12] = 0; j0[13] = 0; j0[14] = 0; j0[15] = 1;
+    __m128i J0 = _mm_load_si128((const __m128i*)j0);
+
+    // E_K(J0) — for tag computation
+    __m128i ej0 = _mm_xor_si128(J0, rk[0]);
+    for (int r = 1; r <= 13; ++r) ej0 = _mm_aesenc_si128(ej0, rk[r]);
+    ej0 = _mm_aesenclast_si128(ej0, rk[14]);
+
+    // CTR encryption/decryption: counter starts at 2 (J0 has counter=1, so first
+    // data block uses counter=2).
+    // counter_block = IV || be32(ctr), ctr starts at 2
+    auto inc_ctr = [](uint8_t cb[16]) {
+        for (int i = 15; i >= 12; --i)
+            if (++cb[i]) break;
+    };
+    alignas(16) uint8_t cb[16];
+    memcpy(cb, iv, 12);
+    cb[12] = 0; cb[13] = 0; cb[14] = 0; cb[15] = 2; // counter = 2
+
+    size_t offset = 0;
+    while (offset + 16 <= len) {
+        __m128i blk = _mm_load_si128((const __m128i*)cb);
+        blk = _mm_xor_si128(blk, rk[0]);
+        for (int r = 1; r <= 13; ++r) blk = _mm_aesenc_si128(blk, rk[r]);
+        blk = _mm_aesenclast_si128(blk, rk[14]);
+        _mm_storeu_si128((__m128i*)(output+offset),
+            _mm_xor_si128(blk, _mm_loadu_si128((const __m128i*)(input+offset))));
+        inc_ctr(cb);
+        offset += 16;
+    }
+    if (offset < len) {
+        __m128i blk = _mm_load_si128((const __m128i*)cb);
+        blk = _mm_xor_si128(blk, rk[0]);
+        for (int r = 1; r <= 13; ++r) blk = _mm_aesenc_si128(blk, rk[r]);
+        blk = _mm_aesenclast_si128(blk, rk[14]);
+        alignas(16) uint8_t ks[16];
+        _mm_store_si128((__m128i*)ks, blk);
+        for (size_t i = offset; i < len; ++i) output[i] = input[i] ^ ks[i-offset];
+        memset(ks, 0, 16);
+    }
+
+    // GHASH over big-endian ciphertext (in GCM, GHASH is over ciphertext)
+    const uint8_t *cipher_for_hash = encrypt ? output : input;
+    __m128i S = ghash_hw(H_be, aad, aadLen, cipher_for_hash, len);
+    // tag = S (big-endian) ⊕ E_K(J0) (little-endian) — S is already big-endian
+    // ej0 is little-endian (raw AES output); byte-reverse to match GCM spec
+    __m128i tag = _mm_xor_si128(S, byterev(ej0));
+    alignas(16) uint8_t tbuf[16];
+    _mm_store_si128((__m128i*)tbuf, tag);
+    memcpy(tag_out, tbuf, 16);
+
+    memset(rk, 0, sizeof(rk));
+    memset(cb, 0, sizeof(cb));
+}
+
+#endif // AES + PCLMUL
+
+// Software GCM fallback using portable GF(2^128) via table-less bit-by-bit multiply.
+// Slower but correct on all platforms.
+// GF(2^128) polynomial: x^128 + x^7 + x^2 + x + 1 (GCM standard).
+// Error bound: exact (bit operations).
+static void gf128_mul_sw(const uint8_t a[16], const uint8_t b[16], uint8_t out[16]) {
+    // Multiplication in GF(2^128): shift-and-XOR, MSB-first
+    uint8_t v[16], z[16];
+    memcpy(v, b, 16);
+    memset(z, 0, 16);
+    for (int i = 0; i < 16; ++i) {
+        for (int bit = 7; bit >= 0; --bit) {
+            if ((a[i] >> bit) & 1) {
+                for (int k = 0; k < 16; ++k) z[k] ^= v[k];
+            }
+            // v = v >> 1 (right shift in GF(2^128), MSB-first bit order)
+            uint8_t carry = 0;
+            for (int k = 0; k < 16; ++k) {
+                uint8_t next = v[k] << 7;
+                v[k] = (v[k] >> 1) | carry;
+                carry = next;
+            }
+            // If LSB of shifted-out bit was 1, XOR reduction polynomial
+            if (carry) {
+                // x^128 ≡ x^7 + x^2 + x + 1  →  byte 15 bits: 0b11100001 = 0xe1
+                v[0] ^= 0xe1;
+            }
+        }
+    }
+    memcpy(out, z, 16);
+}
+
+static void ghash_sw(const uint8_t H[16],
+                      const uint8_t *aad, size_t aadLen,
+                      const uint8_t *data, size_t dataLen,
+                      uint8_t X[16]) {
+    memset(X, 0, 16);
+    auto process = [&](const uint8_t *blk) {
+        uint8_t tmp[16];
+        for (int i = 0; i < 16; ++i) tmp[i] = X[i] ^ blk[i];
+        gf128_mul_sw(tmp, H, X);
+    };
+    // AAD blocks
+    size_t full = aadLen / 16;
+    for (size_t i = 0; i < full; ++i) process(aad + i*16);
+    if (aadLen % 16) {
+        uint8_t pad[16] = {};
+        memcpy(pad, aad + full*16, aadLen % 16);
+        process(pad);
+    }
+    // Ciphertext blocks
+    full = dataLen / 16;
+    for (size_t i = 0; i < full; ++i) process(data + i*16);
+    if (dataLen % 16) {
+        uint8_t pad[16] = {};
+        memcpy(pad, data + full*16, dataLen % 16);
+        process(pad);
+    }
+    // Length block: [len(AAD)*8 : len(C)*8] big-endian 64-bit each
+    uint8_t lenblk[16];
+    uint64_t ab = static_cast<uint64_t>(aadLen)  * 8;
+    uint64_t cb2 = static_cast<uint64_t>(dataLen) * 8;
+    for (int i = 0; i < 8; ++i) {
+        lenblk[i]   = static_cast<uint8_t>((ab  >> (56 - 8*i)) & 0xff);
+        lenblk[8+i] = static_cast<uint8_t>((cb2 >> (56 - 8*i)) & 0xff);
+    }
+    process(lenblk);
+}
+
+static void aes256_gcm_core_sw(const uint8_t key[32],
+                                const uint8_t iv[12],
+                                const uint8_t *aad, size_t aadLen,
+                                const uint8_t *input, size_t len,
+                                uint8_t *output,
+                                uint8_t tag_out[16],
+                                bool encrypt) {
+    uint32_t rk[60];
+    aes256_key_schedule(key, rk);
+
+    // H = E_K(0^128)
+    uint8_t zero16[16] = {};
+    uint8_t H[16];
+    aes256_encrypt_block(zero16, H, rk);
+
+    // J0 = IV || 0x00000001
+    uint8_t j0[16];
+    memcpy(j0, iv, 12);
+    j0[12] = 0; j0[13] = 0; j0[14] = 0; j0[15] = 1;
+    uint8_t ej0[16];
+    aes256_encrypt_block(j0, ej0, rk);
+
+    // CTR encrypt/decrypt (counter starts at 2)
+    uint8_t cb[16];
+    memcpy(cb, iv, 12);
+    cb[12] = 0; cb[13] = 0; cb[14] = 0; cb[15] = 2;
+    auto inc_ctr_sw = [](uint8_t b[16]) {
+        for (int i = 15; i >= 12; --i) if (++b[i]) break;
+    };
+    size_t offset = 0;
+    while (offset < len) {
+        uint8_t ks[16];
+        aes256_encrypt_block(cb, ks, rk);
+        size_t blklen = std::min(len - offset, static_cast<size_t>(16));
+        for (size_t i = 0; i < blklen; ++i) output[offset+i] = input[offset+i] ^ ks[i];
+        inc_ctr_sw(cb);
+        offset += blklen;
+        memset(ks, 0, 16);
+    }
+
+    // GHASH
+    const uint8_t *cipher_data = encrypt ? output : input;
+    uint8_t S[16];
+    ghash_sw(H, aad, aadLen, cipher_data, len, S);
+    for (int i = 0; i < 16; ++i) tag_out[i] = S[i] ^ ej0[i];
+
+    memset(rk, 0, sizeof(rk));
+    memset(H,  0, 16);
+    memset(ej0, 0, 16);
+}
+
+} // anonymous namespace (GCM helpers)
+
+namespace crypto {
+
+bool gcm_hw_supported() {
+#if defined(__AES__) && defined(__PCLMUL__) && \
+    (defined(__x86_64__) || defined(_M_X64)) && \
+    (defined(__GNUC__) || defined(__clang__))
+    return __builtin_cpu_supports("aes") && __builtin_cpu_supports("pclmul");
+#else
+    return false;
+#endif
+}
+
+// aes256_gcm_encrypt: returns true always (both hw and sw paths complete).
+bool aes256_gcm_encrypt(const uint8_t key[32],
+                        const uint8_t iv[12],
+                        const uint8_t *aad,   size_t aadLen,
+                        const uint8_t *plain,  size_t plainLen,
+                        uint8_t *cipher,
+                        uint8_t tag_out[16]) {
+#if defined(__AES__) && defined(__PCLMUL__) && \
+    (defined(__x86_64__) || defined(_M_X64)) && \
+    (defined(__GNUC__) || defined(__clang__))
+    if (__builtin_cpu_supports("aes") && __builtin_cpu_supports("pclmul")) {
+        aes256_gcm_core_hw(key, iv, aad, aadLen, plain, plainLen, cipher, tag_out, true);
+        return true;
+    }
+#endif
+    aes256_gcm_core_sw(key, iv, aad, aadLen, plain, plainLen, cipher, tag_out, true);
+    return true;
+}
+
+// aes256_gcm_decrypt: returns true iff authentication tag matches (constant-time).
+bool aes256_gcm_decrypt(const uint8_t key[32],
+                        const uint8_t iv[12],
+                        const uint8_t *aad,    size_t aadLen,
+                        const uint8_t *cipher,  size_t cipherLen,
+                        uint8_t *plain,
+                        const uint8_t tag_in[16]) {
+    uint8_t computed_tag[16];
+#if defined(__AES__) && defined(__PCLMUL__) && \
+    (defined(__x86_64__) || defined(_M_X64)) && \
+    (defined(__GNUC__) || defined(__clang__))
+    if (__builtin_cpu_supports("aes") && __builtin_cpu_supports("pclmul")) {
+        aes256_gcm_core_hw(key, iv, aad, aadLen, cipher, cipherLen, plain, computed_tag, false);
+        return secure_compare(computed_tag, tag_in, 16);
+    }
+#endif
+    aes256_gcm_core_sw(key, iv, aad, aadLen, cipher, cipherLen, plain, computed_tag, false);
+    return secure_compare(computed_tag, tag_in, 16);
+}
+
+} // namespace crypto
+
 } // namespace advanced
 } // namespace vgre

@@ -294,6 +294,12 @@ target_link_libraries(test_cudnn_winograd PRIVATE vgre)
 add_test(NAME CUDNNWinograd COMMAND test_cudnn_winograd)
 set_tests_properties(CUDNNWinograd PROPERTIES TIMEOUT 120)
 
+# AES-256-GCM authenticated encryption (QUEUE-06)
+add_executable(test_aes_gcm api/test_aes_gcm.cpp)
+target_link_libraries(test_aes_gcm PRIVATE vgre)
+add_test(NAME AES256GCM COMMAND test_aes_gcm)
+set_tests_properties(AES256GCM PROPERTIES TIMEOUT 60)
+
 add_executable(test_curand api/test_curand.cpp)
 target_link_libraries(test_curand PRIVATE vgre_cudart)
 add_test(NAME CuRANDFunctional COMMAND test_curand)
