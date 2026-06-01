@@ -14,6 +14,9 @@
 #include <algorithm>
 #include <vector>
 #include <random>
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
 // Thin RAII timer for cuDNN operations — records AEE and profiler events.
 struct VgreDnnTimed {
@@ -320,6 +323,211 @@ inline void cpuConv2dBackwardFilter(
                        dy[nchw(N,K,outH,outW,n,k,oh,ow)];
             }
             dw[((k * Cg + cg) * R + r) * S + s] += acc;
+        }
+    }
+}
+
+// ── Winograd F(4×4, 3×3) convolution forward pass ──────────────────────────
+// Reference: Lavin & Gray 2015, "Fast Algorithms for Convolutional Neural Networks"
+// Math: Y_tile = A^T ⊙ [(G·g·G^T) ⊗ (B^T·d·B)] · A
+//   where ⊗ denotes element-wise product, g=filter(3×3), d=input-tile(6×6)
+//   G(6×3): filter transform; B^T(6×6): input transform; A^T(4×6): output inverse
+// FLOP savings: element-wise multiply 36 ops/tile vs 9×16=144 for direct 4×4 output
+//   → ~2.25× theoretical speedup for large channel counts (transform overhead amortised)
+// Constraints: R=S=3, stride=1, dilation=1, groupCount≥1
+
+// Winograd transform matrices for F(4,3): α = m+r-1 = 6 (tile side)
+// B^T (6×6): maps 6×6 input patch to Winograd transform domain
+static const float kWinoB[6][6] = {
+    { 4.f,  0.f, -5.f,  0.f,  1.f,  0.f},
+    { 0.f, -4.f, -4.f,  1.f,  1.f,  0.f},
+    { 0.f,  4.f, -4.f, -1.f,  1.f,  0.f},
+    { 0.f, -2.f, -1.f,  2.f,  1.f,  0.f},
+    { 0.f,  2.f, -1.f, -2.f,  1.f,  0.f},
+    { 0.f,  4.f,  0.f, -5.f,  0.f,  1.f}
+};
+
+// G (6×3): maps 3×3 filter to Winograd transform domain
+static const float kWinoG[6][3] = {
+    { 1.f/4.f,    0.f,       0.f      },
+    {-1.f/6.f,  -1.f/6.f,  -1.f/6.f  },
+    {-1.f/6.f,   1.f/6.f,  -1.f/6.f  },
+    { 1.f/24.f,  1.f/12.f,  1.f/6.f  },
+    { 1.f/24.f, -1.f/12.f,  1.f/6.f  },
+    { 0.f,       0.f,       1.f      }
+};
+
+// A^T (4×6): inverse-transforms 6×6 product to 4×4 output tile
+static const float kWinoA[4][6] = {
+    {1.f, 1.f,  1.f, 1.f,  1.f, 0.f},
+    {0.f, 1.f, -1.f, 2.f, -2.f, 0.f},
+    {0.f, 1.f,  1.f, 4.f,  4.f, 0.f},
+    {0.f, 1.f, -1.f, 8.f, -8.f, 1.f}
+};
+
+// g_hat[6×6] = G[6×3] × g[3×3] × G^T[3×6]
+static inline void winoFilterTransform(const float g[3][3], float g_hat[6][6]) {
+    float tmp[6][3];
+    for (int i = 0; i < 6; ++i)
+    for (int j = 0; j < 3; ++j) {
+        float s = 0.f;
+        for (int k = 0; k < 3; ++k) s += kWinoG[i][k] * g[k][j];
+        tmp[i][j] = s;
+    }
+    // g_hat = tmp × G^T  (G^T[k][j] = kWinoG[j][k])
+    for (int i = 0; i < 6; ++i)
+    for (int j = 0; j < 6; ++j) {
+        float s = 0.f;
+        for (int k = 0; k < 3; ++k) s += tmp[i][k] * kWinoG[j][k];
+        g_hat[i][j] = s;
+    }
+}
+
+// d_hat[6×6] = B^T[6×6] × d[6×6] × B[6×6]  (B = (B^T)^T)
+static inline void winoInputTransform(const float d[6][6], float d_hat[6][6]) {
+    float tmp[6][6];
+    for (int i = 0; i < 6; ++i)
+    for (int j = 0; j < 6; ++j) {
+        float s = 0.f;
+        for (int k = 0; k < 6; ++k) s += kWinoB[i][k] * d[k][j];
+        tmp[i][j] = s;
+    }
+    // d_hat = tmp × B  (B[k][j] = B^T[j][k] = kWinoB[j][k])
+    for (int i = 0; i < 6; ++i)
+    for (int j = 0; j < 6; ++j) {
+        float s = 0.f;
+        for (int k = 0; k < 6; ++k) s += tmp[i][k] * kWinoB[j][k];
+        d_hat[i][j] = s;
+    }
+}
+
+// y[4×4] = A^T[4×6] × m_hat[6×6] × A[6×4]  (A = (A^T)^T)
+static inline void winoOutputTransform(const float m_hat[6][6], float y[4][4]) {
+    float tmp[4][6];
+    for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 6; ++j) {
+        float s = 0.f;
+        for (int k = 0; k < 6; ++k) s += kWinoA[i][k] * m_hat[k][j];
+        tmp[i][j] = s;
+    }
+    // y = tmp × A  (A[k][j] = A^T[j][k] = kWinoA[j][k])
+    for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 4; ++j) {
+        float s = 0.f;
+        for (int k = 0; k < 6; ++k) s += tmp[i][k] * kWinoA[j][k];
+        y[i][j] = s;
+    }
+}
+
+// cpuWinograd4x4_3x3: Winograd F(4×4,3×3) forward pass.
+// Complexity: O(N·G·Kg·Cg·T·36) multiply-adds where T = ⌈outH/4⌉·⌈outW/4⌉
+//   vs O(N·K·C·outH·outW·9) for direct — speedup ≈2.25× for large C,K.
+// Preconditions: R=S=3, stride=1, dilation=1, groupCount divides C and K.
+// Filter layout: W[K, C/G, 3, 3] (K outer, C/G inner).
+// Output layout: NCHW; output zeroed by caller.
+inline void cpuWinograd4x4_3x3(
+    int N, int C, int H, int W,
+    int K, int pad_h, int pad_w,
+    const float* input, const float* filter, float* output,
+    int groupCount = 1)
+{
+    int Cg   = C / groupCount;
+    int Kg   = K / groupCount;
+    int outH = H + 2*pad_h - 2;  // R=3: outH = H + 2·pad - (R-1)
+    int outW = W + 2*pad_w - 2;
+    int nt_h = (outH + 3) / 4;   // tiles needed in H direction
+    int nt_w = (outW + 3) / 4;   // tiles needed in W direction
+
+    // Pre-compute filter transforms: g_hat[k][cg] is a flattened 6×6 matrix
+    // Layout: g_hat[(k·Cg + cg)·36 + i·6 + j]
+    // Invariant: g_hat = G·W[k,cg,:,:]·G^T for each (k, cg)
+    std::vector<float> g_hat(static_cast<size_t>(K) * Cg * 36, 0.f);
+    for (int k = 0; k < K; ++k)
+    for (int cg = 0; cg < Cg; ++cg) {
+        float g[3][3];
+        const float* fp = filter + (k * Cg + cg) * 9;
+        for (int r = 0; r < 3; ++r)
+        for (int s = 0; s < 3; ++s)
+            g[r][s] = fp[r*3 + s];
+        float gh[6][6];
+        winoFilterTransform(g, gh);
+        float* dst = g_hat.data() + (k * Cg + cg) * 36;
+        for (int i = 0; i < 6; ++i)
+        for (int j = 0; j < 6; ++j)
+            dst[i*6+j] = gh[i][j];
+    }
+
+    // Per-tile work: transform, multiply, inverse-transform
+    // d_hat[cg·36]: transformed input patches for all Cg channels of this tile
+    // m_hat[kg·36]: accumulated element-wise products in transform domain
+    std::vector<float> d_hat(static_cast<size_t>(Cg) * 36);
+    std::vector<float> m_hat(static_cast<size_t>(Kg) * 36);
+
+    for (int n = 0; n < N; ++n)
+    for (int grp = 0; grp < groupCount; ++grp) {
+        int cin_base  = grp * Cg;
+        int cout_base = grp * Kg;
+        for (int th = 0; th < nt_h; ++th)
+        for (int tw = 0; tw < nt_w; ++tw) {
+            int h0 = th * 4 - pad_h;  // top-left row in original input
+            int w0 = tw * 4 - pad_w;  // top-left col in original input
+
+            // Input transform: d_hat[cg] = B^T · patch[cg] · B
+            for (int cg = 0; cg < Cg; ++cg) {
+                int c = cin_base + cg;
+                float patch[6][6];
+                for (int pi = 0; pi < 6; ++pi)
+                for (int pj = 0; pj < 6; ++pj) {
+                    int ih = h0 + pi, iw = w0 + pj;
+                    patch[pi][pj] = (ih >= 0 && ih < H && iw >= 0 && iw < W)
+                                    ? input[nchw(N,C,H,W,n,c,ih,iw)] : 0.f;
+                }
+                float dh[6][6];
+                winoInputTransform(patch, dh);
+                float* dp = d_hat.data() + cg * 36;
+                for (int i = 0; i < 36; ++i) dp[i] = (&dh[0][0])[i];
+            }
+
+            // Element-wise multiply in transform domain (the Winograd hotspot):
+            // m_hat[kg][i] = Σ_{cg} g_hat[cout_base+kg][cg][i] · d_hat[cg][i]
+            // AVX2: process 8 transform coefficients per cycle with FMA.
+            std::fill(m_hat.begin(), m_hat.end(), 0.f);
+            for (int kg = 0; kg < Kg; ++kg) {
+                int k = cout_base + kg;
+                float* mp = m_hat.data() + kg * 36;
+                for (int cg = 0; cg < Cg; ++cg) {
+                    const float* gp = g_hat.data() + (k * Cg + cg) * 36;
+                    const float* dp = d_hat.data() + cg * 36;
+#ifdef __AVX2__
+                    // AVX2 FMA: 8 floats/iter × 4 iters = 32 elements
+                    for (int i = 0; i < 32; i += 8) {
+                        __m256 m = _mm256_loadu_ps(mp + i);
+                        __m256 g = _mm256_loadu_ps(gp + i);
+                        __m256 d = _mm256_loadu_ps(dp + i);
+                        _mm256_storeu_ps(mp + i, _mm256_fmadd_ps(g, d, m));
+                    }
+                    for (int i = 32; i < 36; ++i) mp[i] += gp[i] * dp[i];
+#else
+                    for (int i = 0; i < 36; ++i) mp[i] += gp[i] * dp[i];
+#endif
+                }
+            }
+
+            // Output inverse transform: y[4×4] = A^T · m_hat[kg] · A
+            for (int kg = 0; kg < Kg; ++kg) {
+                int k = cout_base + kg;
+                float mh[6][6];
+                const float* mp = m_hat.data() + kg * 36;
+                for (int i = 0; i < 36; ++i) (&mh[0][0])[i] = mp[i];
+                float y_tile[4][4];
+                winoOutputTransform(mh, y_tile);
+                for (int ti = 0; ti < 4; ++ti)
+                for (int tj = 0; tj < 4; ++tj) {
+                    int oh = th*4 + ti, ow = tw*4 + tj;
+                    if (oh < outH && ow < outW)
+                        output[nchw(N,K,outH,outW,n,k,oh,ow)] += y_tile[ti][tj];
+                }
+            }
         }
     }
 }
