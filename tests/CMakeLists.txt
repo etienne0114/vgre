@@ -31,6 +31,12 @@ add_executable(test_cudnn_activation_backward unit/test_cudnn_activation_backwar
 target_link_libraries(test_cudnn_activation_backward PRIVATE vgre)
 add_test(NAME CUDNNActivationBackward COMMAND test_cudnn_activation_backward)
 
+# Chase-Lev work-stealing deque stress test (QUEUE-02)
+add_executable(test_chase_lev_stress unit/test_chase_lev_stress.cpp)
+target_link_libraries(test_chase_lev_stress PRIVATE vgre)
+add_test(NAME ChaseLevStress COMMAND test_chase_lev_stress)
+set_tests_properties(ChaseLevStress PROPERTIES TIMEOUT 120)
+
 # ── Integration tests ──────────────────────────────────────────────────────
 add_executable(test_vector_addition integration/test_vector_addition.cpp)
 target_link_libraries(test_vector_addition PRIVATE vgre)
