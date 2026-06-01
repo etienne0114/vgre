@@ -119,9 +119,12 @@ VGREResult SecureChannel::initializeFromSecret(
   bytesReceived_ = 0;
 
   initialized_ = true;
+  useGcm_ = crypto::gcm_hw_supported();
 
-  VGRE_LOG_INFO("SecureChannel", "Initialized — Key fingerprint: " +
-                                     getKeyFingerprint().substr(0, 16) + "...");
+  VGRE_LOG_INFO("SecureChannel",
+      std::string("Initialized — cipher: ") +
+      (useGcm_ ? "AES-256-GCM (hw)" : "AES-256-CTR+HMAC") +
+      " — Key fingerprint: " + getKeyFingerprint().substr(0, 16) + "...");
   return VGREResult::SUCCESS;
 }
 
@@ -370,19 +373,46 @@ VGREResult SecureChannel::sendSecure(vgre_socket_t fd, const void *data,
 
   uint64_t seq = sendSequence_++;
 
-  // Encrypt the payload
-  std::vector<uint8_t> encrypted(len);
-  if (len > 0 && data) {
-    aesCtr(static_cast<const uint8_t *>(data), encrypted.data(), len, seq);
-  }
-
-  // Build header
+  // Build header early (needed for AAD in GCM mode)
   SecurePacketHeader hdr{};
   hdr.sequence_number = seq;
   hdr.payload_length = static_cast<uint32_t>(len);
 
-  // Compute HMAC over header fields + encrypted payload
-  computePacketHMAC(hdr, encrypted.data(), len, hdr.hmac_tag);
+  // Encrypt the payload
+  std::vector<uint8_t> encrypted(len);
+  if (useGcm_) {
+    // AES-256-GCM: generate fresh 96-bit random IV, store in hmac_tag[0..11].
+    // GCM IV uniqueness invariant: each packet uses a new random IV from
+    // getrandom(), so probability of collision ≤ 2^{-96} per pair. Tag is 128-bit.
+    hdr.flags = kFlagGCM;
+    uint8_t iv[12];
+    crypto::random_bytes(iv, 12);
+    memcpy(hdr.hmac_tag, iv, 12);
+    // AAD = version || sequence_number || payload_length (covers header integrity)
+    uint8_t aad[13];
+    aad[0] = hdr.version;
+    memcpy(aad+1, &hdr.sequence_number, 8);
+    memcpy(aad+9, &hdr.payload_length, 4);
+    uint8_t tag[16];
+    if (len > 0 && data) {
+      crypto::aes256_gcm_encrypt(sessionKey_, iv,
+                                 aad, sizeof(aad),
+                                 static_cast<const uint8_t*>(data), len,
+                                 encrypted.data(), tag);
+    } else {
+      // Empty payload: just compute tag over AAD
+      crypto::aes256_gcm_encrypt(sessionKey_, iv,
+                                 aad, sizeof(aad),
+                                 nullptr, 0, nullptr, tag);
+    }
+    // Store tag in hmac_tag[12..27] (16 bytes after the IV)
+    memcpy(hdr.hmac_tag + 12, tag, 16);
+  } else {
+    if (len > 0 && data)
+      aesCtr(static_cast<const uint8_t *>(data), encrypted.data(), len, seq);
+    // Compute HMAC over header fields + encrypted payload
+    computePacketHMAC(hdr, encrypted.data(), len, hdr.hmac_tag);
+  }
 
   // A3: Coalesce header + payload into a single sendAll() call.
   // Two separate sends risk a partial-write scenario where the header lands
@@ -466,24 +496,43 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
     }
   }
 
-  // Verify HMAC
-  uint8_t expectedMAC[crypto::kSHA256DigestLen];
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    computePacketHMAC(hdr, encrypted.data(), hdr.payload_length, expectedMAC);
-  }
-
-  if (!crypto::secure_compare(hdr.hmac_tag, expectedMAC,
-                              crypto::kSHA256DigestLen)) {
-    VGRE_LOG_ERROR(
-        "SecureChannel",
-        "HMAC verification failed — session key mismatch between master and "
-        "worker. "
-        "Most likely cause: VGRE_TCP_AUTH_TOKEN is set on one node but not the "
-        "other, or is set to different values.  Either set the same token on "
-        "all "
-        "nodes, or unset it on all nodes to use the default encrypted mode.");
-    return finish(VGREResult::ERR_AUTH_FAILED);
+  // Authenticate and decrypt
+  if (hdr.flags & kFlagGCM) {
+    // AES-256-GCM path: IV in hmac_tag[0..11], tag in hmac_tag[12..27]
+    const uint8_t *iv  = hdr.hmac_tag;
+    const uint8_t *tag = hdr.hmac_tag + 12;
+    uint8_t aad[13];
+    aad[0] = hdr.version;
+    memcpy(aad+1, &hdr.sequence_number, 8);
+    memcpy(aad+9, &hdr.payload_length, 4);
+    outData.resize(hdr.payload_length);
+    bool auth_ok = crypto::aes256_gcm_decrypt(
+        sessionKey_, iv, aad, sizeof(aad),
+        encrypted.data(), hdr.payload_length,
+        outData.data(), tag);
+    if (!auth_ok) {
+      VGRE_LOG_ERROR("SecureChannel", "AES-256-GCM tag verification failed");
+      return finish(VGREResult::ERR_AUTH_FAILED);
+    }
+  } else {
+    // CTR+HMAC path
+    uint8_t expectedMAC[crypto::kSHA256DigestLen];
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      computePacketHMAC(hdr, encrypted.data(), hdr.payload_length, expectedMAC);
+    }
+    if (!crypto::secure_compare(hdr.hmac_tag, expectedMAC,
+                                crypto::kSHA256DigestLen)) {
+      VGRE_LOG_ERROR(
+          "SecureChannel",
+          "HMAC verification failed — session key mismatch between master and "
+          "worker. "
+          "Most likely cause: VGRE_TCP_AUTH_TOKEN is set on one node but not "
+          "the other, or is set to different values. Either set the same token "
+          "on all nodes, or unset it on all nodes to use the default encrypted "
+          "mode.");
+      return finish(VGREResult::ERR_AUTH_FAILED);
+    }
   }
 
   // A1: Sliding 256-bit bitmap replay detection (RFC 4303 §3.4.3).
@@ -548,12 +597,14 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
     }
   } // end replay-detection mutex scope
 
-  // Decrypt payload
-  outData.resize(hdr.payload_length);
-  if (hdr.payload_length > 0) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    aesCtr(encrypted.data(), outData.data(), hdr.payload_length,
-           hdr.sequence_number);
+  // Decrypt payload (CTR path only; GCM already decrypted during auth above)
+  if (!(hdr.flags & kFlagGCM)) {
+    outData.resize(hdr.payload_length);
+    if (hdr.payload_length > 0) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      aesCtr(encrypted.data(), outData.data(), hdr.payload_length,
+             hdr.sequence_number);
+    }
   }
 
   packetsReceived_++;
