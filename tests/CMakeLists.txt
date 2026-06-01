@@ -288,6 +288,12 @@ target_link_libraries(test_cufft_radix4 PRIVATE vgre_cudart)
 add_test(NAME CufftRadix4 COMMAND test_cufft_radix4)
 set_tests_properties(CufftRadix4 PROPERTIES TIMEOUT 60)
 
+# Winograd F(4x4,3x3) forward-pass correctness (QUEUE-05)
+add_executable(test_cudnn_winograd api/test_cudnn_winograd.cpp)
+target_link_libraries(test_cudnn_winograd PRIVATE vgre)
+add_test(NAME CUDNNWinograd COMMAND test_cudnn_winograd)
+set_tests_properties(CUDNNWinograd PROPERTIES TIMEOUT 120)
+
 add_executable(test_curand api/test_curand.cpp)
 target_link_libraries(test_curand PRIVATE vgre_cudart)
 add_test(NAME CuRANDFunctional COMMAND test_curand)

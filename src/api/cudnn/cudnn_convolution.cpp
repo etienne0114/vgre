@@ -226,6 +226,15 @@ cudnnStatus_t cudnnConvolutionForward(
             }
             tmp[((n * yt->c + k) * yt->h + oh) * yt->w + ow] = acc;
         }
+    } else if (algo == CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD
+               && ft->r == 3 && ft->s == 3
+               && cv->str_h == 1 && cv->str_w == 1
+               && cv->dil_h == 1 && cv->dil_w == 1) {
+        // Winograd F(4×4,3×3): Ŷ = A^T[(G·g·G^T) ⊙ (B^T·d·B)]·A
+        // FLOP savings: 36 mults/tile vs 9×16=144 for direct → ~2.25× speedup
+        cpuWinograd4x4_3x3(xt->n, xt->c, xt->h, xt->w,
+                            ft->k, cv->pad_h, cv->pad_w,
+                            xPtr, wPtr, tmp.data(), cv->groupCount);
     } else {
         cpuConv2d(xt->n, xt->c, xt->h, xt->w,
                   ft->k, ft->r, ft->s,
