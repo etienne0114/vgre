@@ -452,4 +452,70 @@ cublasStatus_t cublasDsyr2k_v2(cublasHandle_t handle, cublasFillMode_t uplo,
 
 
 
+// ── Hermitian GEMV (cublasChemv / cublasZhemv) ────────────────────────────
+// These are NOT in cublas_complex.cpp or cublas_complex_level2.cpp.
+// y = alpha * A * x + beta * y  where A is Hermitian (A[j][i] = conj(A[i][j])).
+
+cublasStatus_t cublasChemv_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    int n,
+    const cuComplex *alpha, const cuComplex *A, int lda,
+    const cuComplex *x, int incx,
+    const cuComplex *beta,  cuComplex *y, int incy) {
+    if (!handle || !alpha || !A || !x || !beta || !y || n <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int i = 0; i < n; ++i) {
+        float sr = 0.f, si = 0.f;
+        for (int j = 0; j < n; ++j) {
+            float ar_, aim;
+            if ((upper && j >= i) || (!upper && j <= i)) {
+                ar_ = A[i*lda+j].x; aim = A[i*lda+j].y;
+            } else {
+                ar_ = A[j*lda+i].x; aim = -A[j*lda+i].y;
+            }
+            if (i == j) aim = 0.f; // diagonal of Hermitian matrix is real
+            float xr = x[j*incx].x, xi_ = x[j*incx].y;
+            sr += ar_*xr - aim*xi_;
+            si += ar_*xi_ + aim*xr;
+        }
+        float ar2 = alpha->x, ai2 = alpha->y;
+        float br = beta->x,  bi = beta->y;
+        float yr = y[i*incy].x, yi_ = y[i*incy].y;
+        y[i*incy].x = (ar2*sr - ai2*si) + (br*yr - bi*yi_);
+        y[i*incy].y = (ar2*si + ai2*sr) + (br*yi_ + bi*yr);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZhemv_v2(cublasHandle_t handle, cublasFillMode_t uplo,
+    int n,
+    const cuDoubleComplex *alpha, const cuDoubleComplex *A, int lda,
+    const cuDoubleComplex *x, int incx,
+    const cuDoubleComplex *beta,  cuDoubleComplex *y, int incy) {
+    if (!handle || !alpha || !A || !x || !beta || !y || n <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int i = 0; i < n; ++i) {
+        double sr = 0.0, si = 0.0;
+        for (int j = 0; j < n; ++j) {
+            double ar_, aim;
+            if ((upper && j >= i) || (!upper && j <= i)) {
+                ar_ = A[i*lda+j].x; aim = A[i*lda+j].y;
+            } else {
+                ar_ = A[j*lda+i].x; aim = -A[j*lda+i].y;
+            }
+            if (i == j) aim = 0.0;
+            double xr = x[j*incx].x, xi_ = x[j*incx].y;
+            sr += ar_*xr - aim*xi_;
+            si += ar_*xi_ + aim*xr;
+        }
+        double ar2 = alpha->x, ai2 = alpha->y;
+        double br = beta->x,  bi = beta->y;
+        double yr = y[i*incy].x, yi_ = y[i*incy].y;
+        y[i*incy].x = (ar2*sr - ai2*si) + (br*yr - bi*yi_);
+        y[i*incy].y = (ar2*si + ai2*sr) + (br*yi_ + bi*yr);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 } // extern "C"

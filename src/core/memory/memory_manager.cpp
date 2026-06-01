@@ -826,12 +826,61 @@ void MemoryManager::alignedFree(void *ptr) {
 #endif
 }
 
+// ── Memory pressure check (Linux) ─────────────────────────────────────────
+// Returns approximate free system memory in bytes. Returns SIZE_MAX on error
+// (treat as unlimited — never blocks a valid allocation on a read failure).
+static size_t systemFreeMemoryBytes() {
+#if defined(__linux__)
+  std::ifstream f("/proc/meminfo");
+  if (!f.is_open()) return SIZE_MAX;
+  std::string line;
+  while (std::getline(f, line)) {
+    if (line.rfind("MemAvailable:", 0) == 0) {
+      size_t kb = 0;
+      if (std::sscanf(line.c_str(), "MemAvailable: %zu kB", &kb) == 1)
+        return kb * 1024;
+    }
+  }
+#endif
+  return SIZE_MAX;
+}
+
 VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
                                    DeviceId deviceId) {
   if (size == 0)
     return VGREResult::ERR_INVALID_VALUE;
   constexpr size_t ALIGN = 64;
   size_t alignedSize = (size + ALIGN - 1) & ~(ALIGN - 1);
+
+  // Memory pressure backoff: for large allocations (> 1 MB) check system free
+  // memory before attempting. If < 10% of MemAvailable remains, retry with
+  // exponential backoff rather than immediately returning OOM.
+  constexpr size_t kPressureThresholdBytes = 1 * 1024 * 1024; // 1 MB
+  if (alignedSize >= kPressureThresholdBytes) {
+    constexpr int kMaxRetries = 3;
+    const int kDelaysMs[kMaxRetries] = {50, 100, 200};
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+      size_t freeBytes = systemFreeMemoryBytes();
+      if (freeBytes == SIZE_MAX) break; // can't read — proceed normally
+      // Threshold: if < 10% free (freeBytes < total * 0.10), back off.
+      // We don't know total easily, so use an absolute minimum: 64 MB must remain.
+      constexpr size_t kMinFreeBytes = 64 * 1024 * 1024;
+      if (freeBytes >= kMinFreeBytes + alignedSize) break; // enough room
+      if (attempt == 0)
+        VGRE_LOG_WARN("MemoryManager",
+          "Memory pressure: only " + std::to_string(freeBytes / (1024*1024)) +
+          " MB free, requested " + std::to_string(alignedSize / (1024*1024)) +
+          " MB — backing off " + std::to_string(kDelaysMs[attempt]) + " ms");
+      if (attempt == kMaxRetries - 1) {
+        VGRE_LOG_ERROR("MemoryManager",
+          "Memory pressure: allocation of " +
+          std::to_string(alignedSize / (1024*1024)) + " MB failed after retries");
+        return VGREResult::ERR_OUT_OF_MEMORY;
+      }
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(kDelaysMs[attempt]));
+    }
+  }
 
   // Atomic CAS reservation: eliminates TOCTOU race between check and add
   size_t current = usedMemory_.load(std::memory_order_relaxed);

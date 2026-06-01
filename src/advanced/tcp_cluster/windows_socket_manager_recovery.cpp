@@ -23,7 +23,9 @@ VGREResult WindowsSocketManager::attemptRecovery(int max_retries) {
 
     for (int attempt = 1; attempt <= max_retries; ++attempt) {
         if (attempt > 1) {
-            int backoff_ms = 100 * (1 << (attempt - 2));
+            // Cap shift at 30 to prevent overflow: 100 * 2^30 = ~107 s max
+            int backoff_ms = static_cast<int>(
+                100LL * (1LL << std::min(attempt - 2, 30)));
             std::mutex wsa_retry_mutex;
             std::condition_variable wsa_retry_cv;
             std::unique_lock<std::mutex> lk(wsa_retry_mutex);
