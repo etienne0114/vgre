@@ -3,6 +3,7 @@
 #include "vgre/advanced/runtime_profiler.h"
 #include "vgre/common/logger.h"
 #include "vgre/core/graph_manager.h"
+#include "vgre/core/kernel_tuner.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/scheduler.h"
 #include "vgre/core/virtual_gpu_device.h"
@@ -12,10 +13,22 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <thread>
+#include <unordered_map>
 
 namespace vgre {
 namespace core {
+
+namespace {
+// Singleton tuner cache — process-lifetime, lock-protected internally.
+// O(1) get/put; capacity 256 entries (LRU eviction).
+static KernelTunerLRU g_tunerCache;
+
+// Per-kernel launch counters — O(1) amortised per access.
+static std::unordered_map<std::string, uint32_t> g_execCount;
+static std::mutex g_execCountMu;
+} // anonymous namespace
 
 // ── JIT pre-compilation barrier ───────────────────────────────────────────
 // Called by cluster dispatch before sending LAUNCH_KERNEL to workers.
@@ -331,8 +344,26 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       flopsPerBlock = blockDim.total(); // absolute minimum baseline
     }
 
-    exec->execute(fn, gridDim, blockDim, safeArgs->data(), totalSharedMem, flopsPerBlock, bytesPerBlock, gridOffset, usesSyncthreads);
+    // ── Roofline auto-tuner: optimal block size lookup ────────────────────
+    // On subsequent launches, substitute the cached block size when the
+    // tuner has established a faster configuration for this kernel.
+    // Only applies to 1-D kernels (blockDim.y == blockDim.z == 1) to avoid
+    // corrupting thread-index computation in multi-dimensional kernels.
+    dim3 effectiveBlock = blockDim;
+    dim3 effectiveGrid  = gridDim;
+    if (blockDim.y == 1 && blockDim.z == 1) {
+        TuneConfig* cached = g_tunerCache.get(kName);
+        if (cached && cached->blockSize != blockDim.x && cached->blockSize > 0) {
+            uint32_t totalThreads = gridDim.total() * blockDim.x;
+            uint32_t newGridX = (totalThreads + cached->blockSize - 1) / cached->blockSize;
+            effectiveBlock = dim3(cached->blockSize, 1, 1);
+            effectiveGrid  = dim3(newGridX, 1, 1);
+        }
+    }
 
+    exec->execute(fn, effectiveGrid, effectiveBlock, safeArgs->data(),
+                  totalSharedMem, flopsPerBlock, bytesPerBlock, gridOffset,
+                  usesSyncthreads);
 
     auto end = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(end - start).count();
@@ -341,15 +372,83 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
     size_t flops = flopsPerBlock * totalBlocksCount;
 
     vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
-        kName, blockDim.total(), 8, ms, memBytes, flops);
+        kName, effectiveBlock.total(), 8, ms, memBytes, flops);
 
     // Update per-kernel Workload Characterization Cache (Roofline model input).
-    // Converts raw counters to bandwidth (GB/s) and FLOPs before storing EMA.
-    vgre::core::MemoryManager::instance().updateKernelCharacterization(
-        kName,
-        memBytes,
-        ms,
-        static_cast<double>(flops));
+    // Use pre-captured rawMm to avoid going through the global singleton
+    // (which would fail when called from a local RuntimeEngine in tests).
+    if (rawMm) {
+        rawMm->updateKernelCharacterization(
+            kName, memBytes, ms, static_cast<double>(flops));
+    }
+
+    // ── Roofline check and auto-tuning ───────────────────────────────────
+    // Roofline: perf_bound = min(B_peak, AI × BW_peak)
+    // Only 1-D kernels (blockDim.y == blockDim.z == 1) are auto-tuned to avoid
+    // corrupting multi-dimensional thread-index computation.
+    // Fires exactly once per kernel (execN == kAutoTuneMinSamples).
+    if (blockDim.y == 1 && blockDim.z == 1 && ms > 0.0 && memBytes > 0 && flops > 0) {
+        uint32_t execN = 0;
+        {
+            std::lock_guard<std::mutex> lk(g_execCountMu);
+            execN = ++g_execCount[kName];
+        }
+
+        if (execN == kAutoTuneMinSamples) {
+            // AI = FLOPs / byte — arithmetic intensity
+            double measuredGFLOPs = static_cast<double>(flops) / 1e9 /
+                                    (ms / 1000.0);
+            double bwGBps = (static_cast<double>(memBytes) / 1e9) /
+                             (ms / 1000.0);
+            double ai     = static_cast<double>(flops) /
+                             static_cast<double>(memBytes);
+            // Roofline bound: min(compute ceiling, memory-bandwidth ceiling)
+            double rooflineGFLOPs = std::min(kAutoTunePeakComputeGFLOPs,
+                                             ai * bwGBps);
+
+            bool underTuned = (rooflineGFLOPs > 0.0) &&
+                              (measuredGFLOPs <
+                               kAutoTuneUndertunedRatio * rooflineGFLOPs);
+
+            if (underTuned && !g_tunerCache.get(kName)) {
+                // Remap grid: newGrid.x = ceil(totalThreads / newBlock.x).
+                // Invariant: newGrid.x × newBlock.x ≥ gridDim.x × blockDim.x
+                // so every original element index is covered by at least one thread.
+                uint32_t totalThreads  = gridDim.total() * blockDim.x;
+                uint32_t bestBlockSize = effectiveBlock.x;
+                double   bestMs        = ms;
+
+                for (uint32_t bs : kAutoTuneCandidates) {
+                    if (bs == effectiveBlock.x) continue;
+                    uint32_t newGridX = (totalThreads + bs - 1) / bs;
+                    dim3 trialGrid(newGridX, 1, 1);
+                    dim3 trialBlock(bs, 1, 1);
+
+                    auto t0 = std::chrono::steady_clock::now();
+                    exec->execute(fn, trialGrid, trialBlock,
+                                  safeArgs->data(), totalSharedMem,
+                                  flopsPerBlock, bytesPerBlock,
+                                  gridOffset, usesSyncthreads);
+                    auto t1 = std::chrono::steady_clock::now();
+                    double trialMs = std::chrono::duration<double,
+                                      std::milli>(t1 - t0).count();
+
+                    if (trialMs < bestMs) {
+                        bestMs        = trialMs;
+                        bestBlockSize = bs;
+                    }
+                }
+
+                g_tunerCache.put(kName, TuneConfig{bestBlockSize, bestMs});
+                VGRE_LOG_INFO("RuntimeEngine",
+                    "AutoTuner: '" + kName + "' under-tuned (" +
+                    std::to_string(measuredGFLOPs) + "/" +
+                    std::to_string(rooflineGFLOPs) +
+                    " GFLOPs) → optimal block=" +
+                    std::to_string(bestBlockSize));
+            }
+        }
+    }
 
     auto &profiler = vgre::advanced::RuntimeProfiler::instance();
     if (profiler.isEnabled()) {
