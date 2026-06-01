@@ -300,6 +300,12 @@ target_link_libraries(test_aes_gcm PRIVATE vgre)
 add_test(NAME AES256GCM COMMAND test_aes_gcm)
 set_tests_properties(AES256GCM PROPERTIES TIMEOUT 60)
 
+# Min-segment tree stream dependency tracker (QUEUE-07)
+add_executable(test_stream_dep_tracker unit/test_stream_dep_tracker.cpp)
+target_link_libraries(test_stream_dep_tracker PRIVATE vgre)
+add_test(NAME StreamDepTracker COMMAND test_stream_dep_tracker)
+set_tests_properties(StreamDepTracker PROPERTIES TIMEOUT 30)
+
 add_executable(test_curand api/test_curand.cpp)
 target_link_libraries(test_curand PRIVATE vgre_cudart)
 add_test(NAME CuRANDFunctional COMMAND test_curand)

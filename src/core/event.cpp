@@ -2,6 +2,7 @@
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/virtual_gpu_device.h"
 #include "vgre/core/scheduler.h"
+#include "vgre/core/stream_dep_tracker.h"
 
 namespace vgre {
 namespace core {
@@ -40,6 +41,10 @@ VGREResult Event::record(StreamId stream) {
 
   if (res == VGREResult::SUCCESS) {
     recorded_ = true;
+    // Snapshot the stream's completion counter so waitEventSatisfied() can
+    // determine when all work enqueued before this record() has finished.
+    // O(1): reads the leaf counter and stores it in the event snapshot map.
+    StreamDepTracker::instance().recordEventCounter(this, stream);
   } else {
     recorded_ = false;
   }
