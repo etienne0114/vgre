@@ -203,83 +203,124 @@ static inline int nchw(int N, int C, int H, int W, int n, int c, int h, int w) {
     return ((n*C + c)*H + h)*W + w;
 }
 
-// ── Direct (naive) convolution: output = input * filter + bias ────────────────
+// ── Direct (naive) convolution — supports group, dilation, stride ─────────────
+// Forward: Y[n,k,oh,ow] = Σ_{g,c_local,r,s} X[n, g*Cg+c_local, ih, iw]
+//                                           × W[g*Kg+k_local, c_local, r, s]
+//   where group g ∈ [0,G), Cg = C/G (input channels per group),
+//   Kg = K/G (output channels per group), k_local = k - g*Kg.
+//   Depthwise = group G==C==K (Cg=1, Kg=1).
+// Filter layout: W[K, C/G, R, S] = W[(k * Cg + c_local) * R * S + r*S + s].
 inline void cpuConv2d(
     int N, int C, int H, int W,
     int K, int R, int S,
     int pad_h, int pad_w, int str_h, int str_w, int dil_h, int dil_w,
-    const float* input, const float* filter, float* output)
+    const float* input, const float* filter, float* output,
+    int groupCount = 1)
 {
     int outH = (H + 2*pad_h - dil_h*(R-1) - 1)/str_h + 1;
     int outW = (W + 2*pad_w - dil_w*(S-1) - 1)/str_w + 1;
+    int Cg = C / groupCount; // input channels per group
+    int Kg = K / groupCount; // output channels per group
 
     for (int n = 0; n < N; ++n)
-    for (int k = 0; k < K; ++k)
-    for (int oh = 0; oh < outH; ++oh)
-    for (int ow = 0; ow < outW; ++ow) {
-        float acc = 0.f;
-        for (int c = 0; c < C; ++c)
-        for (int r = 0; r < R; ++r)
-        for (int s = 0; s < S; ++s) {
-            int ih = oh*str_h + r*dil_h - pad_h;
-            int iw = ow*str_w + s*dil_w - pad_w;
-            if (ih < 0 || iw < 0 || ih >= H || iw >= W) continue;
-            acc += input[nchw(N,C,H,W,n,c,ih,iw)] *
-                   filter[((k*C + c)*R + r)*S + s];
+    for (int g = 0; g < groupCount; ++g)
+    for (int kg = 0; kg < Kg; ++kg) {
+        int k = g * Kg + kg;
+        for (int oh = 0; oh < outH; ++oh)
+        for (int ow = 0; ow < outW; ++ow) {
+            float acc = 0.f;
+            for (int cg = 0; cg < Cg; ++cg)
+            for (int r = 0; r < R; ++r)
+            for (int s = 0; s < S; ++s) {
+                int ih = oh*str_h + r*dil_h - pad_h;
+                int iw = ow*str_w + s*dil_w - pad_w;
+                if (ih < 0 || iw < 0 || ih >= H || iw >= W) continue;
+                int c = g * Cg + cg;
+                acc += input[nchw(N,C,H,W,n,c,ih,iw)] *
+                       filter[((k * Cg + cg) * R + r) * S + s];
+            }
+            output[nchw(N,K,outH,outW,n,k,oh,ow)] = acc;
         }
-        output[nchw(N,K,outH,outW,n,k,oh,ow)] = acc;
     }
 }
 
-// ── Backward-data convolution: computes dx from dy and w ─────────────────────
+// ── Backward-data: ∂L/∂X = rot180(W) ⊛_full dY ──────────────────────────────
+// For group g: dX[n, g*Cg+cg, ih, iw] += Σ_{kg,oh,ow} dY[n,g*Kg+kg,oh,ow]
+//                                       × W[(g*Kg+kg)*Cg+cg, r, s]
+// where ih = oh*str + r*dil - pad (only when in-bounds).
+// Dilation inserts (dil-1) zeros between filter taps:
+//   effective filter position at ih,iw: r = (ih + pad - oh*str) / dil (integer).
+// Filter layout: W[K, C/G, R, S].
 inline void cpuConv2dBackwardData(
     int N, int C, int H, int W,
     int K, int R, int S,
     int pad_h, int pad_w, int str_h, int str_w, int dil_h, int dil_w,
-    const float* dy, const float* w, float* dx)
+    const float* dy, const float* w, float* dx,
+    int groupCount = 1)
 {
     int outH = (H + 2*pad_h - dil_h*(R-1) - 1)/str_h + 1;
     int outW = (W + 2*pad_w - dil_w*(S-1) - 1)/str_w + 1;
+    int Cg = C / groupCount;
+    int Kg = K / groupCount;
 
     for (int n = 0; n < N; ++n)
-    for (int k = 0; k < K; ++k)
-    for (int oh = 0; oh < outH; ++oh)
-    for (int ow = 0; ow < outW; ++ow) {
-        float dyVal = dy[nchw(N,K,outH,outW,n,k,oh,ow)];
-        for (int c = 0; c < C; ++c)
-        for (int r = 0; r < R; ++r)
-        for (int s = 0; s < S; ++s) {
-            int ih = oh*str_h + r*dil_h - pad_h;
-            int iw = ow*str_w + s*dil_w - pad_w;
-            if (ih < 0 || iw < 0 || ih >= H || iw >= W) continue;
-            dx[nchw(N,C,H,W,n,c,ih,iw)] += dyVal * w[((k*C + c)*R + r)*S + s];
+    for (int g = 0; g < groupCount; ++g)
+    for (int kg = 0; kg < Kg; ++kg) {
+        int k = g * Kg + kg;
+        for (int oh = 0; oh < outH; ++oh)
+        for (int ow = 0; ow < outW; ++ow) {
+            float dyVal = dy[nchw(N,K,outH,outW,n,k,oh,ow)];
+            for (int cg = 0; cg < Cg; ++cg)
+            for (int r = 0; r < R; ++r)
+            for (int s = 0; s < S; ++s) {
+                int ih = oh*str_h + r*dil_h - pad_h;
+                int iw = ow*str_w + s*dil_w - pad_w;
+                if (ih < 0 || iw < 0 || ih >= H || iw >= W) continue;
+                int c = g * Cg + cg;
+                dx[nchw(N,C,H,W,n,c,ih,iw)] +=
+                    dyVal * w[((k * Cg + cg) * R + r) * S + s];
+            }
         }
     }
 }
 
-// ── Backward-filter convolution: computes dw from x and dy ─────────────────────
+// ── Backward-filter: ∂L/∂W = X ⊛ dY (cross-correlation) ─────────────────────
+// For group g: dW[(g*Kg+kg)*Cg+cg, r, s] +=
+//     Σ_{n,oh,ow} X[n, g*Cg+cg, oh*str+r*dil-pad, ow*str+s*dil-pad]
+//               × dY[n, g*Kg+kg, oh, ow]
+// Dilated filter: effective position (r*dil_h, s*dil_w) in the input.
+// Filter layout: W[K, C/G, R, S].
 inline void cpuConv2dBackwardFilter(
     int N, int C, int H, int W,
     int K, int R, int S,
     int pad_h, int pad_w, int str_h, int str_w, int dil_h, int dil_w,
-    const float* x, const float* dy, float* dw)
+    const float* x, const float* dy, float* dw,
+    int groupCount = 1)
 {
     int outH = (H + 2*pad_h - dil_h*(R-1) - 1)/str_h + 1;
     int outW = (W + 2*pad_w - dil_w*(S-1) - 1)/str_w + 1;
+    int Cg = C / groupCount;
+    int Kg = K / groupCount;
+
     for (int n = 0; n < N; ++n)
-    for (int k = 0; k < K; ++k)
-    for (int c = 0; c < C; ++c)
-    for (int r = 0; r < R; ++r)
-    for (int s = 0; s < S; ++s) {
-        float acc = 0.f;
-        for (int oh = 0; oh < outH; ++oh)
-        for (int ow = 0; ow < outW; ++ow) {
-            int ih = oh*str_h + r*dil_h - pad_h;
-            int iw = ow*str_w + s*dil_w - pad_w;
-            if (ih < 0 || iw < 0 || ih >= H || iw >= W) continue;
-            acc += x[nchw(N,C,H,W,n,c,ih,iw)] * dy[nchw(N,K,outH,outW,n,k,oh,ow)];
+    for (int g = 0; g < groupCount; ++g)
+    for (int kg = 0; kg < Kg; ++kg) {
+        int k = g * Kg + kg;
+        for (int cg = 0; cg < Cg; ++cg)
+        for (int r = 0; r < R; ++r)
+        for (int s = 0; s < S; ++s) {
+            float acc = 0.f;
+            for (int oh = 0; oh < outH; ++oh)
+            for (int ow = 0; ow < outW; ++ow) {
+                int ih = oh*str_h + r*dil_h - pad_h;
+                int iw = ow*str_w + s*dil_w - pad_w;
+                if (ih < 0 || iw < 0 || ih >= H || iw >= W) continue;
+                int c = g * Cg + cg;
+                acc += x[nchw(N,C,H,W,n,c,ih,iw)] *
+                       dy[nchw(N,K,outH,outW,n,k,oh,ow)];
+            }
+            dw[((k * Cg + cg) * R + r) * S + s] += acc;
         }
-        dw[((k*C + c)*R + r)*S + s] += acc;
     }
 }
 

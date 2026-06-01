@@ -37,6 +37,12 @@ target_link_libraries(test_chase_lev_stress PRIVATE vgre)
 add_test(NAME ChaseLevStress COMMAND test_chase_lev_stress)
 set_tests_properties(ChaseLevStress PROPERTIES TIMEOUT 120)
 
+# cuDNN backward conv: group + dilated + depthwise gradient check (QUEUE-03)
+add_executable(test_cudnn_conv_group_dilated api/test_cudnn_conv_group_dilated.cpp)
+target_link_libraries(test_cudnn_conv_group_dilated PRIVATE vgre)
+add_test(NAME CUDNNConvGroupDilated COMMAND test_cudnn_conv_group_dilated)
+set_tests_properties(CUDNNConvGroupDilated PROPERTIES TIMEOUT 60)
+
 # ── Integration tests ──────────────────────────────────────────────────────
 add_executable(test_vector_addition integration/test_vector_addition.cpp)
 target_link_libraries(test_vector_addition PRIVATE vgre)
