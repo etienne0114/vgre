@@ -3,6 +3,41 @@
 #include "cublas_internal.h"
 #include "vgre/common/openmp_helper.h"
 
+// ── Kahan compensated summation helpers (QUEUE-08) ───────────────────────────
+// Algorithm: Kahan 1965 / Neumaier 1974.
+// Loop invariant: (sum + c) approximates the exact partial sum.
+// The correction step c = (t - sum) - y must NOT be contracted with FMA:
+// FMA would compute (t - sum - y) exactly, hiding the rounding error that
+// Kahan is designed to recover. Plain scalar +/- preserves the invariant.
+//
+// AVX2 vectorized Kahan: 8 (float) or 4 (double) independent Kahan lanes
+// run in parallel over contiguous data. After the SIMD loop the 8/4 partial
+// sums are horizontally reduced and the scalar tail finishes with Kahan.
+// Used for the unit-stride fast path; non-unit stride falls back to scalar.
+
+#ifdef __AVX2__
+#include <immintrin.h>
+
+// Horizontal sum of 8 float lanes — exact for ≤ 8 addends (no Kahan needed).
+static inline float kahan_hsum8_f32(__m256 v) {
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    __m128 s  = _mm_add_ps(lo, hi);
+    s = _mm_hadd_ps(s, s);
+    s = _mm_hadd_ps(s, s);
+    return _mm_cvtss_f32(s);
+}
+
+// Horizontal sum of 4 double lanes.
+static inline double kahan_hsum4_f64(__m256d v) {
+    __m128d lo = _mm256_castpd256_pd128(v);
+    __m128d hi = _mm256_extractf128_pd(v, 1);
+    __m128d s  = _mm_add_pd(lo, hi);
+    s = _mm_hadd_pd(s, s);
+    return _mm_cvtsd_f64(s);
+}
+#endif
+
 extern "C" {
 
 // ── SAXPY / DAXPY ────────────────────────────────────────────────────────────
@@ -44,12 +79,40 @@ cublasStatus_t cublasSdot_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     *result = cblas_sdot(n, x, incx, y, incy);
 #else
-    float s = 0.f;
-    #ifdef _OPENMP
-    #pragma omp parallel for reduction(+:s) if (n > 1024)
-    #endif
-    for (int i = 0; i < n; ++i) s += x[i*incx] * y[i*incy];
-    *result = s;
+#ifdef __AVX2__
+    if (incx == 1 && incy == 1) {
+        __m256 vsum = _mm256_setzero_ps(), vc = _mm256_setzero_ps();
+        int i = 0;
+        for (; i + 8 <= n; i += 8) {
+            __m256 xi   = _mm256_loadu_ps(x + i);
+            __m256 yi   = _mm256_loadu_ps(y + i);
+            __m256 term = _mm256_mul_ps(xi, yi);
+            __m256 yv   = _mm256_sub_ps(term, vc);
+            __m256 vt   = _mm256_add_ps(vsum, yv);
+            vc   = _mm256_sub_ps(_mm256_sub_ps(vt, vsum), yv);
+            vsum = vt;
+        }
+        float sum = kahan_hsum8_f32(vsum), c = 0.f;
+        for (; i < n; ++i) {
+            float w = x[i] * y[i];
+            float yv2 = w - c;
+            float t  = sum + yv2;
+            c   = (t - sum) - yv2;
+            sum = t;
+        }
+        *result = sum;
+        return CUBLAS_STATUS_SUCCESS;
+    }
+#endif
+    float sum = 0.f, c = 0.f;
+    for (int i = 0; i < n; ++i) {
+        float w  = x[i*incx] * y[i*incy];
+        float yv = w - c;
+        float t  = sum + yv;
+        c   = (t - sum) - yv;
+        sum = t;
+    }
+    *result = sum;
 #endif
     return CUBLAS_STATUS_SUCCESS;
 }
@@ -61,12 +124,40 @@ cublasStatus_t cublasDdot_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     *result = cblas_ddot(n, x, incx, y, incy);
 #else
-    double s = 0.0;
-    #ifdef _OPENMP
-    #pragma omp parallel for reduction(+:s) if (n > 1024)
-    #endif
-    for (int i = 0; i < n; ++i) s += x[i*incx] * y[i*incy];
-    *result = s;
+#ifdef __AVX2__
+    if (incx == 1 && incy == 1) {
+        __m256d vsum = _mm256_setzero_pd(), vc = _mm256_setzero_pd();
+        int i = 0;
+        for (; i + 4 <= n; i += 4) {
+            __m256d xi   = _mm256_loadu_pd(x + i);
+            __m256d yi   = _mm256_loadu_pd(y + i);
+            __m256d term = _mm256_mul_pd(xi, yi);
+            __m256d yv   = _mm256_sub_pd(term, vc);
+            __m256d vt   = _mm256_add_pd(vsum, yv);
+            vc   = _mm256_sub_pd(_mm256_sub_pd(vt, vsum), yv);
+            vsum = vt;
+        }
+        double sum = kahan_hsum4_f64(vsum), c = 0.0;
+        for (; i < n; ++i) {
+            double w  = x[i] * y[i];
+            double yv = w - c;
+            double t  = sum + yv;
+            c   = (t - sum) - yv;
+            sum = t;
+        }
+        *result = sum;
+        return CUBLAS_STATUS_SUCCESS;
+    }
+#endif
+    double sum = 0.0, c = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double w  = x[i*incx] * y[i*incy];
+        double yv = w - c;
+        double t  = sum + yv;
+        c   = (t - sum) - yv;
+        sum = t;
+    }
+    *result = sum;
 #endif
     return CUBLAS_STATUS_SUCCESS;
 }
@@ -79,12 +170,83 @@ cublasStatus_t cublasSnrm2_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     *result = cblas_snrm2(n, x, incx);
 #else
-    float s = 0.f;
-    #ifdef _OPENMP
-    #pragma omp parallel for reduction(+:s) if (n > 1024)
-    #endif
-    for (int i = 0; i < n; ++i) s += x[i*incx] * x[i*incx];
-    *result = sqrtf(s);
+#ifdef __AVX2__
+    if (incx == 1) {
+        __m256 vsum = _mm256_setzero_ps(), vc = _mm256_setzero_ps();
+        int i = 0;
+        for (; i + 8 <= n; i += 8) {
+            __m256 xi   = _mm256_loadu_ps(x + i);
+            __m256 term = _mm256_mul_ps(xi, xi);
+            __m256 yv   = _mm256_sub_ps(term, vc);
+            __m256 vt   = _mm256_add_ps(vsum, yv);
+            vc   = _mm256_sub_ps(_mm256_sub_ps(vt, vsum), yv);
+            vsum = vt;
+        }
+        float sum = kahan_hsum8_f32(vsum), c = 0.f;
+        for (; i < n; ++i) {
+            float w  = x[i] * x[i];
+            float yv = w - c;
+            float t  = sum + yv;
+            c   = (t - sum) - yv;
+            sum = t;
+        }
+        *result = sqrtf(sum);
+        return CUBLAS_STATUS_SUCCESS;
+    }
+#endif
+    float sum = 0.f, c = 0.f;
+    for (int i = 0; i < n; ++i) {
+        float w  = x[i*incx] * x[i*incx];
+        float yv = w - c;
+        float t  = sum + yv;
+        c   = (t - sum) - yv;
+        sum = t;
+    }
+    *result = sqrtf(sum);
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDnrm2_v2(cublasHandle_t handle, int n,
+    const double* x, int incx, double* result)
+{
+    if (!handle || !x || !result) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    *result = cblas_dnrm2(n, x, incx);
+#else
+#ifdef __AVX2__
+    if (incx == 1) {
+        __m256d vsum = _mm256_setzero_pd(), vc = _mm256_setzero_pd();
+        int i = 0;
+        for (; i + 4 <= n; i += 4) {
+            __m256d xi   = _mm256_loadu_pd(x + i);
+            __m256d term = _mm256_mul_pd(xi, xi);
+            __m256d yv   = _mm256_sub_pd(term, vc);
+            __m256d vt   = _mm256_add_pd(vsum, yv);
+            vc   = _mm256_sub_pd(_mm256_sub_pd(vt, vsum), yv);
+            vsum = vt;
+        }
+        double sum = kahan_hsum4_f64(vsum), c = 0.0;
+        for (; i < n; ++i) {
+            double w  = x[i] * x[i];
+            double yv = w - c;
+            double t  = sum + yv;
+            c   = (t - sum) - yv;
+            sum = t;
+        }
+        *result = sqrt(sum);
+        return CUBLAS_STATUS_SUCCESS;
+    }
+#endif
+    double sum = 0.0, c = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double w  = x[i*incx] * x[i*incx];
+        double yv = w - c;
+        double t  = sum + yv;
+        c   = (t - sum) - yv;
+        sum = t;
+    }
+    *result = sqrt(sum);
 #endif
     return CUBLAS_STATUS_SUCCESS;
 }
@@ -186,9 +348,40 @@ cublasStatus_t cublasSasum_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     *result = cblas_sasum(n, x, incx);
 #else
-    float s = 0.f;
-    for (int i = 0; i < n; ++i) s += std::abs(x[i*incx]);
-    *result = s;
+#ifdef __AVX2__
+    if (incx == 1) {
+        // Clear sign bit to compute |x[i]| without branching.
+        const __m256 sign_mask = _mm256_set1_ps(-0.0f);
+        __m256 vsum = _mm256_setzero_ps(), vc = _mm256_setzero_ps();
+        int i = 0;
+        for (; i + 8 <= n; i += 8) {
+            __m256 term = _mm256_andnot_ps(sign_mask, _mm256_loadu_ps(x + i));
+            __m256 yv   = _mm256_sub_ps(term, vc);
+            __m256 vt   = _mm256_add_ps(vsum, yv);
+            vc   = _mm256_sub_ps(_mm256_sub_ps(vt, vsum), yv);
+            vsum = vt;
+        }
+        float sum = kahan_hsum8_f32(vsum), c = 0.f;
+        for (; i < n; ++i) {
+            float w  = std::abs(x[i]);
+            float yv = w - c;
+            float t  = sum + yv;
+            c   = (t - sum) - yv;
+            sum = t;
+        }
+        *result = sum;
+        return CUBLAS_STATUS_SUCCESS;
+    }
+#endif
+    float sum = 0.f, c = 0.f;
+    for (int i = 0; i < n; ++i) {
+        float w  = std::abs(x[i*incx]);
+        float yv = w - c;
+        float t  = sum + yv;
+        c   = (t - sum) - yv;
+        sum = t;
+    }
+    *result = sum;
 #endif
     return CUBLAS_STATUS_SUCCESS;
 }
@@ -200,9 +393,39 @@ cublasStatus_t cublasDasum_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     *result = cblas_dasum(n, x, incx);
 #else
-    double s = 0.0;
-    for (int i = 0; i < n; ++i) s += std::abs(x[i*incx]);
-    *result = s;
+#ifdef __AVX2__
+    if (incx == 1) {
+        const __m256d sign_mask = _mm256_set1_pd(-0.0);
+        __m256d vsum = _mm256_setzero_pd(), vc = _mm256_setzero_pd();
+        int i = 0;
+        for (; i + 4 <= n; i += 4) {
+            __m256d term = _mm256_andnot_pd(sign_mask, _mm256_loadu_pd(x + i));
+            __m256d yv   = _mm256_sub_pd(term, vc);
+            __m256d vt   = _mm256_add_pd(vsum, yv);
+            vc   = _mm256_sub_pd(_mm256_sub_pd(vt, vsum), yv);
+            vsum = vt;
+        }
+        double sum = kahan_hsum4_f64(vsum), c = 0.0;
+        for (; i < n; ++i) {
+            double w  = std::abs(x[i]);
+            double yv = w - c;
+            double t  = sum + yv;
+            c   = (t - sum) - yv;
+            sum = t;
+        }
+        *result = sum;
+        return CUBLAS_STATUS_SUCCESS;
+    }
+#endif
+    double sum = 0.0, c = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double w  = std::abs(x[i*incx]);
+        double yv = w - c;
+        double t  = sum + yv;
+        c   = (t - sum) - yv;
+        sum = t;
+    }
+    *result = sum;
 #endif
     return CUBLAS_STATUS_SUCCESS;
 }

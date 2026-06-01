@@ -306,6 +306,12 @@ target_link_libraries(test_stream_dep_tracker PRIVATE vgre)
 add_test(NAME StreamDepTracker COMMAND test_stream_dep_tracker)
 set_tests_properties(StreamDepTracker PROPERTIES TIMEOUT 30)
 
+# cuBLAS DOT/NRM2/ASUM Kahan summation + cublasDnrm2 (QUEUE-08)
+add_executable(test_kahan_level1 api/test_kahan_level1.cpp)
+target_link_libraries(test_kahan_level1 PRIVATE vgre)
+add_test(NAME KahanLevel1 COMMAND test_kahan_level1)
+set_tests_properties(KahanLevel1 PROPERTIES TIMEOUT 60)
+
 add_executable(test_curand api/test_curand.cpp)
 target_link_libraries(test_curand PRIVATE vgre_cudart)
 add_test(NAME CuRANDFunctional COMMAND test_curand)
