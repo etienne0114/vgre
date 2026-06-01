@@ -64,10 +64,18 @@ struct WorkItem {
 };
 
 // ── Chase-Lev Work-Stealing Deque ──────────────────────────────────────────
+// Single-owner, multi-thief concurrent deque (Chase & Lev 1993).
+// C++11 memory model mapping from Le et al. 2013 "Correct and Efficient
+// Work-Stealing for Weak Memory Models."
+//
+// Invariant: |bottom - top| = number of live items ± 1 during the CAS window
+//            when owner and thief race on the final element.
+// Complexity: push O(1), pop O(1) amortised, steal O(1).
 template <typename T>
 class ChaseLevDeque {
 public:
-  explicit ChaseLevDeque(size_t capacity = 1024) : capacity_(capacity), mask_(capacity - 1) {
+  explicit ChaseLevDeque(size_t capacity = 1024)
+      : capacity_(capacity), mask_(capacity - 1) {
     buffer_ = new std::atomic<T>[capacity_];
     top_.store(0, std::memory_order_relaxed);
     bottom_.store(0, std::memory_order_relaxed);
@@ -75,56 +83,92 @@ public:
 
   ~ChaseLevDeque() { delete[] buffer_; }
 
+  // push — owner only.  Release fence orders buffer write before bottom store
+  // so that any stealer who reads the updated bottom via acquire also sees
+  // the data written into buffer[b].
   bool push(T item) {
     int64_t b = bottom_.load(std::memory_order_relaxed);
     int64_t t = top_.load(std::memory_order_acquire);
-    if (b - t >= static_cast<int64_t>(capacity_) - 1) {
-      return false;
-    }
+    if (b - t >= static_cast<int64_t>(capacity_) - 1) return false;
     buffer_[b & mask_].store(std::move(item), std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
     bottom_.store(b + 1, std::memory_order_relaxed);
     return true;
   }
 
+  // pop — owner only.
+  // Paper algorithm (Le et al. 2013, Fig. 3):
+  //   1. b = bottom - 1; store bottom = b  [before seq_cst fence]
+  //   2. seq_cst fence
+  //   3. t = top  [after fence]
+  //   4. if t <= b: read item; if t == b: CAS(top,t,t+1) to win last-item race
+  //   5. else restore bottom = b+1, return empty
   bool pop(T& item) {
     int64_t b = bottom_.load(std::memory_order_relaxed) - 1;
+    // Store bottom-1 BEFORE the seq_cst fence so that concurrent stealers
+    // who load bottom after the fence see the decremented value and correctly
+    // detect the last-element race via their own CAS on top.
     bottom_.store(b, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_seq_cst);
     int64_t t = top_.load(std::memory_order_relaxed);
     if (t <= b) {
       item = buffer_[b & mask_].load(std::memory_order_relaxed);
-      if (t != b) return true;
-      // Last item, compete with stealers
-      if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+      if (t != b) return true; // More than one item; no race possible.
+      // Last item: race with stealers via CAS on top.
+      // Winner gets the item; loser restores bottom and returns false.
+      if (!top_.compare_exchange_strong(
+              t, t + 1,
+              std::memory_order_seq_cst,
+              std::memory_order_relaxed)) {
         bottom_.store(b + 1, std::memory_order_relaxed);
-        return false; // Lost race
+        return false;
       }
       bottom_.store(b + 1, std::memory_order_relaxed);
       return true;
     }
     bottom_.store(b + 1, std::memory_order_relaxed);
-    return false; // Empty
+    return false;
   }
 
+  // steal — any thread except the owner.
+  // Paper algorithm (Le et al. 2013, Fig. 3):
+  //   1. t = top  [seq_cst — participates in total order with pop's fence]
+  //   2. seq_cst fence (orders t load before b load on weak hw)
+  //   3. b = bottom  [acquire]
+  //   4. if t < b: read item, CAS(top,t,t+1) — failure means another thief won
+  // Note: loading top with seq_cst (not acquire+fence) is the idiomatic form
+  // from the paper.  The seq_cst total order guarantees that two concurrent
+  // stealers loading the same t value will resolve via CAS, not by racing
+  // undetected on separate non-atomic copies of the index.
   bool steal(T& item) {
-    int64_t t = top_.load(std::memory_order_acquire);
+    int64_t t = top_.load(std::memory_order_seq_cst);
     std::atomic_thread_fence(std::memory_order_seq_cst);
     int64_t b = bottom_.load(std::memory_order_acquire);
     if (t < b) {
       item = buffer_[t & mask_].load(std::memory_order_relaxed);
-      if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
-        return false; // Lost race
+      if (!top_.compare_exchange_strong(
+              t, t + 1,
+              std::memory_order_seq_cst,
+              std::memory_order_relaxed)) {
+        return false; // Another thief or owner won the CAS.
       }
       return true;
     }
-    return false; // Empty
+    return false;
+  }
+
+  // size — approximate (may be stale by the time caller inspects).
+  int64_t size() const {
+    int64_t b = bottom_.load(std::memory_order_acquire);
+    int64_t t = top_.load(std::memory_order_acquire);
+    return b - t;
   }
 
 private:
   size_t capacity_;
   size_t mask_;
   std::atomic<T>* buffer_;
+  // Padding prevents false sharing between top and bottom on the same cache line.
   alignas(64) std::atomic<int64_t> top_;
   alignas(64) std::atomic<int64_t> bottom_;
 };
