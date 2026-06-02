@@ -8,6 +8,7 @@
 #include "vgre/core/runtime_engine.h"
 #include <algorithm>
 #include <chrono>
+#include <random>
 #include <thread>
 
 namespace {
@@ -50,31 +51,47 @@ static int MAX_RETRY_BACKOFF_MS_get() {
   static const int v = []() -> int {
     const char* env = vgre_get_config("VGRE_CLUSTER_RETRY_BACKOFF_MAX_MS");
     if (env) { try { int x = std::stoi(env); if (x > 0) return x; } catch (...) {} }
-    return 5000;
+    return 30000; // 30 s (AWS decorrelated jitter cap)
   }();
   return v;
 }
 #define MAX_RETRY_BACKOFF_MS (MAX_RETRY_BACKOFF_MS_get())
 
-// ── Exponential Backoff Utility ──────────────────────────────────────────────
+// ── Decorrelated Jitter Backoff (AWS formula) ────────────────────────────────
+//
+// Formula: delay_n = min(cap, uniform(base, prev_{n-1} * 3))
+// Invariant: E[delay_n] = min(cap, (base + min(cap, prev*3)) / 2)
+//             ≈ min(cap, 1.5 * prev_{n-1})  when base << cap
+//
+// Per-connection instance — each sendDeltaSyncWithRetry call constructs one.
 
-class ExponentialBackoff {
+class DecorrelatedJitterBackoff {
 public:
-  ExponentialBackoff(int initial_ms, int max_ms, double multiplier = 2.0)
-      : initial_ms_(initial_ms), max_ms_(max_ms), multiplier_(multiplier),
-        current_ms_(initial_ms) {}
+  explicit DecorrelatedJitterBackoff(int initial_ms, int max_ms)
+      : kBaseMs_(static_cast<int64_t>(initial_ms)),
+        kCapMs_(static_cast<int64_t>(max_ms)),
+        prev_ms_(static_cast<int64_t>(initial_ms)),
+        rng_(std::random_device{}()) {}
 
   int next() {
-    int delay = current_ms_;
-    current_ms_ = std::min(static_cast<int>(current_ms_ * multiplier_), max_ms_);
-    return delay;
+    // Overflow guard: prev*3 can overflow int32_t for large prev; use int64_t
+    // arithmetic. If prev > cap/3 clamp upper to cap directly.
+    int64_t upper = (prev_ms_ > kCapMs_ / 3) ? kCapMs_ : prev_ms_ * 3;
+    if (upper < kBaseMs_) upper = kBaseMs_;
+
+    // AWS decorrelated jitter: E[delay_n] = min(cap, 1.5*prev_{n-1})
+    std::uniform_int_distribution<int64_t> dist(kBaseMs_, upper);
+    int64_t delay = dist(rng_);
+
+    prev_ms_ = delay; // update state for next call
+    return static_cast<int>(delay);
   }
 
 private:
-  int initial_ms_;
-  int max_ms_;
-  double multiplier_;
-  int current_ms_;
+  int64_t         kBaseMs_;
+  int64_t         kCapMs_;
+  int64_t         prev_ms_;
+  std::mt19937_64 rng_;
 };
 
 } // anonymous namespace
@@ -168,7 +185,7 @@ VGREResult MemorySyncManager::sendDeltaSync(
 VGREResult MemorySyncManager::sendDeltaSyncWithRetry(
     void *ptr, uint64_t handle, const std::vector<std::pair<size_t, size_t>> &dirty, 
     std::shared_ptr<TCPClusterManager::ClientConnection> client) {
-  ExponentialBackoff backoff(INITIAL_RETRY_BACKOFF_MS, MAX_RETRY_BACKOFF_MS);
+  DecorrelatedJitterBackoff backoff(INITIAL_RETRY_BACKOFF_MS, MAX_RETRY_BACKOFF_MS);
 
   for (int attempt = 0; attempt < MAX_DELTA_SYNC_RETRIES; ++attempt) {
     VGREResult r = sendDeltaSync(ptr, handle, dirty, client);
