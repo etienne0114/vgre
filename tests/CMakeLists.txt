@@ -493,6 +493,11 @@ add_executable(test_reconnect_backoff unit/test_reconnect_backoff.cpp)
 add_test(NAME ReconnectBackoff COMMAND test_reconnect_backoff)
 set_tests_properties(ReconnectBackoff PROPERTIES TIMEOUT 30)
 
+# OpenCL NDRange arithmetic: 3D grid, local_size, offset (QUEUE-18)
+add_executable(test_opencl_ndrange unit/test_opencl_ndrange.cpp)
+add_test(NAME OpenCLNDRange COMMAND test_opencl_ndrange)
+set_tests_properties(OpenCLNDRange PROPERTIES TIMEOUT 30)
+
 
 add_executable(test_tcp_cluster_preservation advanced/test_tcp_cluster_preservation.cpp)
 target_link_libraries(test_tcp_cluster_preservation PRIVATE vgre)

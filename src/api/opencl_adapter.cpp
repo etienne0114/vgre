@@ -470,6 +470,7 @@ cl_int OpenCLAdapter::setKernelArg(cl_kernel_handle kernel, cl_uint argIndex,
 cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
                                            cl_kernel_handle kernel,
                                            cl_uint workDim,
+                                           const size_t *globalWorkOffset,
                                            const size_t *globalWorkSize,
                                            const size_t *localWorkSize,
                                            cl_uint numEventsInWaitList,
@@ -505,6 +506,22 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
   dim3 gridDim, blockDim;
   if (workDim == 0 || workDim > 3)
     return CL_INVALID_VALUE;
+
+  // Capture global_work_offset into a fixed 3-element array, defaulting to 0.
+  // global_id[d] = group_id[d]*local[d] + local_id[d] + offset[d]
+  // Dimensions d >= workDim are unused and treated as zero per the OpenCL spec.
+  // O(work_dim) — at most 3 iterations, constant time.
+  size_t offset[3] = {0, 0, 0}; // offset[d] for d in [0, workDim)
+  if (globalWorkOffset) {
+    for (cl_uint d = 0; d < workDim && d < 3; ++d) {
+      offset[d] = globalWorkOffset[d];
+    }
+  }
+  // Convert to dim3 for launchKernel.  dim3 is uint32_t; offset values that
+  // exceed UINT32_MAX would wrap — document as unsupported (matches CUDA grid limit).
+  dim3 gridOffset(static_cast<uint32_t>(offset[0]),
+                  static_cast<uint32_t>(offset[1]),
+                  static_cast<uint32_t>(offset[2]));
 
   // Exact NDRange to CUDA grid/block mapping
   if (localWorkSize) {
@@ -587,8 +604,11 @@ cl_int OpenCLAdapter::enqueueNDRangeKernel(cl_command_queue queue,
     }
   }
 
+  // Pass gridOffset so CPUParallelExecutor shifts global IDs:
+  // global_id[d] = group_id[d]*local[d] + local_id[d] + offset[d]
   auto r = core::RuntimeEngine::instance().launchKernel(
-      kernelInfo.vgreKernelId, gridDim, blockDim, argPtrs.data(), 0, stream);
+      kernelInfo.vgreKernelId, gridDim, blockDim, argPtrs.data(), 0, stream,
+      gridOffset);
 
   if (event) {
     std::lock_guard<std::mutex> lock(mutex_);
