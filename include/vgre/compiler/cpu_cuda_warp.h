@@ -107,15 +107,15 @@ inline int __ffsll(unsigned long long x) {
 #endif
 }
 inline unsigned int __brev(unsigned int x) {
-#ifdef _MSC_VER
+#if defined(__clang__)
+    return __builtin_bitreverse32(x);
+#else
+    // Portable 5-step bit reversal (MSVC and GCC)
     x = ((x >> 1) & 0x55555555u) | ((x & 0x55555555u) << 1);
     x = ((x >> 2) & 0x33333333u) | ((x & 0x33333333u) << 2);
     x = ((x >> 4) & 0x0F0F0F0Fu) | ((x & 0x0F0F0F0Fu) << 4);
     x = ((x >> 8) & 0x00FF00FFu) | ((x & 0x00FF00FFu) << 8);
-    x = (x >> 16) | (x << 16);
-    return x;
-#else
-    return __builtin_bitreverse32(x);
+    return (x >> 16) | (x << 16);
 #endif
 }
 
@@ -153,127 +153,127 @@ inline int __all_sync(unsigned int mask, int predicate) {
     return (__ballot_sync(mask, predicate) & mask) == mask;
 }
 
-// ── Generic warp shuffle helper ───────────────────────────────────────────────
-// Template to support float, int, unsigned, double, uint64_t.
-template<typename T>
-inline T vgre_shfl_impl(uint64_t* buf, int lane, int srcLane, int width) {
-    static_assert(sizeof(T) <= 8, "warp shuffle supports up to 64-bit types");
-    T val;
-    uint64_t raw = buf[srcLane % width];
-    memcpy(&val, &raw, sizeof(T));
-    (void)lane;
-    return val;
-}
+// ── Warp shuffle — correct group-aware implementation ─────────────────────────
+// Math invariant: For width W, warp partitions into 32/W groups of W threads.
+// group_id = warp_lane / W; src_warp_lane = group_id * W + (srcLane % W).
+// The warp buffer has 32 uint64_t slots, one per warp lane (0-31).
+// All threads write to buf[warp_lane] and read from buf[src_warp_lane].
+// Mask bit (warp_lane & 31): if clear, thread does not write and returns own val.
+// 64-bit slots handle int32, uint32, float, int64, double via memcpy.
 
-// ── Shared shuffle core ───────────────────────────────────────────────────────
-// Writes to the warp buffer only if this lane participates in `mask`, then
-// syncs and reads back. Non-participating lanes return their own value unchanged.
 template<typename T>
-inline void vgre_shfl_write(unsigned int mask, uint64_t* buf, int lane, T val) {
-    if ((mask >> (lane & 31)) & 1u) {
-        uint64_t raw = 0;
-        memcpy(&raw, &val, sizeof(T));
-        buf[lane & 31] = raw;
-    }
+static inline T vgre_shfl_read(uint64_t* buf, int src_warp_lane) {
+    static_assert(sizeof(T) <= 8, "warp shuffle: type must be ≤ 64 bits");
+    T out;
+    memcpy(&out, &buf[src_warp_lane], sizeof(T));
+    return out;
 }
 
 // ── __shfl_sync ───────────────────────────────────────────────────────────────
-// All masked lanes exchange their value; each thread returns srcLane's value.
-// Non-masked lanes do not write and return their own value.
+// thread t reads from: group_id*width + (srcLane % width)
+// Implements a complete permutation network on `width` values within each group.
 template<typename T>
 inline T __shfl_sync(unsigned int mask, T val, int srcLane, int width = 32) {
     auto** pbuf = vgre_jit_get_warp_buffer();
     if (!pbuf || !*pbuf) return val;
     uint64_t* buf = static_cast<uint64_t*>(*pbuf);
-    int lane = vgre_jit_get_threadIdx()->x % width;
-    // Only participating lanes write their value
-    if ((mask >> lane) & 1u) {
+    int wlane = vgre_jit_get_threadIdx()->x & 31; // position 0-31 within warp
+    if ((mask >> wlane) & 1u) {
         uint64_t raw = 0;
         memcpy(&raw, &val, sizeof(T));
-        buf[lane] = raw;
+        buf[wlane] = raw;
     }
     vgre_jit_block_barrier_sync();
-    // Non-participating lanes return their own value; participating ones read src
     T result = val;
-    if ((mask >> lane) & 1u) {
-        int src = srcLane % width;
-        result = vgre_shfl_impl<T>(buf, lane, src, width);
+    if ((mask >> wlane) & 1u) {
+        int group_id  = wlane / width;
+        int src       = group_id * width + (srcLane % width);
+        result = vgre_shfl_read<T>(buf, src);
     }
     vgre_jit_block_barrier_sync();
     return result;
 }
 
 // ── __shfl_up_sync ────────────────────────────────────────────────────────────
-// Returns value of (lane - delta) within segment; lanes < segment_base+delta
-// or non-masked lanes return their own value.
+// src = group_id*width + max(lane_in_group - delta, 0)
+// Lanes where lane_in_group < delta return their own value (clamp to group start).
 template<typename T>
 inline T __shfl_up_sync(unsigned int mask, T val, unsigned int delta, int width = 32) {
     auto** pbuf = vgre_jit_get_warp_buffer();
     if (!pbuf || !*pbuf) return val;
     uint64_t* buf = static_cast<uint64_t*>(*pbuf);
-    int lane = vgre_jit_get_threadIdx()->x % width;
-    if ((mask >> lane) & 1u) {
+    int wlane = vgre_jit_get_threadIdx()->x & 31;
+    if ((mask >> wlane) & 1u) {
         uint64_t raw = 0;
         memcpy(&raw, &val, sizeof(T));
-        buf[lane] = raw;
+        buf[wlane] = raw;
     }
     vgre_jit_block_barrier_sync();
     T result = val;
-    if ((mask >> lane) & 1u) {
-        // Segment base: floor(lane / width) * width; within segment, clamp at base
-        int segBase = (lane / width) * width;
-        int srcLane = lane - static_cast<int>(delta);
-        if (srcLane < segBase) srcLane = lane;  // clamp to own value
-        result = vgre_shfl_impl<T>(buf, lane, srcLane, width);
+    if ((mask >> wlane) & 1u) {
+        int group_id     = wlane / width;
+        int lane_in_grp  = wlane % width;
+        int src_in_grp   = lane_in_grp - static_cast<int>(delta);
+        int src          = (src_in_grp < 0)
+                           ? wlane                            // clamp: own value
+                           : group_id * width + src_in_grp;
+        result = vgre_shfl_read<T>(buf, src);
     }
     vgre_jit_block_barrier_sync();
     return result;
 }
 
 // ── __shfl_down_sync ──────────────────────────────────────────────────────────
-// Returns value of (lane + delta); lanes past segment end return own value.
+// src = group_id*width + min(lane_in_group + delta, width-1)
+// Lanes where lane_in_group + delta >= width return their own value.
 template<typename T>
 inline T __shfl_down_sync(unsigned int mask, T val, unsigned int delta, int width = 32) {
     auto** pbuf = vgre_jit_get_warp_buffer();
     if (!pbuf || !*pbuf) return val;
     uint64_t* buf = static_cast<uint64_t*>(*pbuf);
-    int lane = vgre_jit_get_threadIdx()->x % width;
-    if ((mask >> lane) & 1u) {
+    int wlane = vgre_jit_get_threadIdx()->x & 31;
+    if ((mask >> wlane) & 1u) {
         uint64_t raw = 0;
         memcpy(&raw, &val, sizeof(T));
-        buf[lane] = raw;
+        buf[wlane] = raw;
     }
     vgre_jit_block_barrier_sync();
     T result = val;
-    if ((mask >> lane) & 1u) {
-        // Segment end = next multiple of width above lane
-        int segEnd = ((lane / width) + 1) * width;
-        int srcLane = lane + static_cast<int>(delta);
-        if (srcLane >= segEnd) srcLane = lane;  // past segment end: own value
-        result = vgre_shfl_impl<T>(buf, lane, srcLane, width);
+    if ((mask >> wlane) & 1u) {
+        int group_id    = wlane / width;
+        int lane_in_grp = wlane % width;
+        int src_in_grp  = lane_in_grp + static_cast<int>(delta);
+        int src         = (src_in_grp >= width)
+                          ? wlane                            // clamp: own value
+                          : group_id * width + src_in_grp;
+        result = vgre_shfl_read<T>(buf, src);
     }
     vgre_jit_block_barrier_sync();
     return result;
 }
 
 // ── __shfl_xor_sync ───────────────────────────────────────────────────────────
-// Returns value of (lane XOR laneMask); butterfly pattern for reductions.
+// src = group_id*width + (lane_in_group XOR laneMask), bounded to [0, width-1].
+// Butterfly permutation network: implements parallel prefix sums and reductions.
 template<typename T>
 inline T __shfl_xor_sync(unsigned int mask, T val, int laneMask, int width = 32) {
     auto** pbuf = vgre_jit_get_warp_buffer();
     if (!pbuf || !*pbuf) return val;
     uint64_t* buf = static_cast<uint64_t*>(*pbuf);
-    int lane = vgre_jit_get_threadIdx()->x % width;
-    if ((mask >> lane) & 1u) {
+    int wlane = vgre_jit_get_threadIdx()->x & 31;
+    if ((mask >> wlane) & 1u) {
         uint64_t raw = 0;
         memcpy(&raw, &val, sizeof(T));
-        buf[lane] = raw;
+        buf[wlane] = raw;
     }
     vgre_jit_block_barrier_sync();
     T result = val;
-    if ((mask >> lane) & 1u) {
-        int srcLane = (lane ^ laneMask) % width;
-        result = vgre_shfl_impl<T>(buf, lane, srcLane, width);
+    if ((mask >> wlane) & 1u) {
+        int group_id    = wlane / width;
+        int lane_in_grp = wlane % width;
+        int src_in_grp  = (lane_in_grp ^ laneMask) % width; // XOR within group
+        int src         = group_id * width + src_in_grp;
+        result = vgre_shfl_read<T>(buf, src);
     }
     vgre_jit_block_barrier_sync();
     return result;

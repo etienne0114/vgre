@@ -312,6 +312,14 @@ target_link_libraries(test_nccl_ring_allreduce PRIVATE vgre)
 add_test(NAME NCCLRingAllReduce COMMAND test_nccl_ring_allreduce)
 set_tests_properties(NCCLRingAllReduce PROPERTIES TIMEOUT 60)
 
+# PTX warp shuffle emulation — group-aware permutation network (QUEUE-10)
+# Self-contained: provides its own JIT runtime stubs; does not link vgre.
+add_executable(test_warp_shuffle unit/test_warp_shuffle.cpp)
+target_include_directories(test_warp_shuffle PRIVATE
+    ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME WarpShuffle COMMAND test_warp_shuffle)
+set_tests_properties(WarpShuffle PROPERTIES TIMEOUT 30)
+
 # cuBLAS DOT/NRM2/ASUM Kahan summation + cublasDnrm2 (QUEUE-08)
 add_executable(test_kahan_level1 api/test_kahan_level1.cpp)
 target_link_libraries(test_kahan_level1 PRIVATE vgre)
