@@ -306,6 +306,12 @@ target_link_libraries(test_stream_dep_tracker PRIVATE vgre)
 add_test(NAME StreamDepTracker COMMAND test_stream_dep_tracker)
 set_tests_properties(StreamDepTracker PROPERTIES TIMEOUT 30)
 
+# NCCL Ring AllReduce — 2(N-1) step bandwidth-optimal ring (QUEUE-09)
+add_executable(test_nccl_ring_allreduce unit/test_nccl_ring_allreduce.cpp)
+target_link_libraries(test_nccl_ring_allreduce PRIVATE vgre)
+add_test(NAME NCCLRingAllReduce COMMAND test_nccl_ring_allreduce)
+set_tests_properties(NCCLRingAllReduce PROPERTIES TIMEOUT 60)
+
 # cuBLAS DOT/NRM2/ASUM Kahan summation + cublasDnrm2 (QUEUE-08)
 add_executable(test_kahan_level1 api/test_kahan_level1.cpp)
 target_link_libraries(test_kahan_level1 PRIVATE vgre)
