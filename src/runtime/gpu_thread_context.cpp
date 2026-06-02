@@ -55,7 +55,6 @@ void vgre_jit_clear_block_barrier() {
 
 extern "C" VGRE_PUBLIC_API
 void vgre_jit_block_barrier_sync() {
-  // printf("[DEBUG] Thread entering block barrier\n"); fflush(stdout);
   GPUThreadContext::blockBarrier();
 }
 
@@ -67,7 +66,7 @@ void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), 
         return;
     }
 
-    // Utilize the persistent BlockWorkerPool to handle block-level concurrency 
+    // Utilize the persistent BlockWorkerPool to handle block-level concurrency
     // without the overhead of spawning/joining OS threads for every launch.
     BlockWorkerPool::instance().dispatch(threadCount, task, arg);
 }
