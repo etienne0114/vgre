@@ -2,7 +2,7 @@
  * Test: cuBLAS Level-3 functions (P2.4)
  *
  * Verifies: TRSM, SYRK, SYR2K, TRMM, SYMM
- * Both single (S) and double (D) precision.
+ * Both single (S) and double (D) precision, plus complex (C/Z).
  */
 
 #include <iostream>
@@ -26,8 +26,13 @@ typedef int cublasSideMode_t;
 #define CUBLAS_DIAG_UNIT 1
 #define CUBLAS_OP_N 0
 #define CUBLAS_OP_T 1
+#define CUBLAS_OP_C 2
 #define CUBLAS_SIDE_LEFT 0
 #define CUBLAS_SIDE_RIGHT 1
+
+// cuComplex types (must match cublas_internal.h)
+struct cuComplex { float x, y; };
+struct cuDoubleComplex { double x, y; };
 
 cublasStatus_t cublasCreate_v2(cublasHandle_t* handle);
 cublasStatus_t cublasDestroy_v2(cublasHandle_t handle);
@@ -56,6 +61,36 @@ cublasStatus_t cublasSsymm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t
     int, int, const float*, const float*, int, const float*, int, const float*, float*, int);
 cublasStatus_t cublasDsymm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
     int, int, const double*, const double*, int, const double*, int, const double*, double*, int);
+
+// Complex Level-3 declarations
+cublasStatus_t cublasCsymm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
+    int, int, const cuComplex*, const cuComplex*, int, const cuComplex*, int,
+    const cuComplex*, cuComplex*, int);
+cublasStatus_t cublasZsymm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
+    int, int, const cuDoubleComplex*, const cuDoubleComplex*, int, const cuDoubleComplex*, int,
+    const cuDoubleComplex*, cuDoubleComplex*, int);
+cublasStatus_t cublasCsyrk_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const cuComplex*, const cuComplex*, int, const cuComplex*, cuComplex*, int);
+cublasStatus_t cublasZsyrk_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const cuDoubleComplex*, const cuDoubleComplex*, int, const cuDoubleComplex*, cuDoubleComplex*, int);
+cublasStatus_t cublasCsyr2k_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const cuComplex*, const cuComplex*, int, const cuComplex*, int,
+    const cuComplex*, cuComplex*, int);
+cublasStatus_t cublasZsyr2k_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const cuDoubleComplex*, const cuDoubleComplex*, int, const cuDoubleComplex*, int,
+    const cuDoubleComplex*, cuDoubleComplex*, int);
+cublasStatus_t cublasCtrmm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
+    cublasOperation_t, cublasDiagType_t, int, int, const cuComplex*, const cuComplex*, int,
+    cuComplex*, int);
+cublasStatus_t cublasZtrmm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
+    cublasOperation_t, cublasDiagType_t, int, int, const cuDoubleComplex*, const cuDoubleComplex*, int,
+    cuDoubleComplex*, int);
+cublasStatus_t cublasCtrsm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
+    cublasOperation_t, cublasDiagType_t, int, int, const cuComplex*, const cuComplex*, int,
+    cuComplex*, int);
+cublasStatus_t cublasZtrsm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
+    cublasOperation_t, cublasDiagType_t, int, int, const cuDoubleComplex*, const cuDoubleComplex*, int,
+    cuDoubleComplex*, int);
 }
 
 static bool approx_eq(float a, float b, float eps = 1e-4f) {
@@ -63,6 +98,17 @@ static bool approx_eq(float a, float b, float eps = 1e-4f) {
 }
 static bool approx_eq(double a, double b, double eps = 1e-8) {
     return std::abs(a - b) <= eps;
+}
+
+// Helper: make complex values from real components
+static cuComplex C(float r, float i = 0.f) { return {r, i}; }
+static cuDoubleComplex Z(double r, double i = 0.0) { return {r, i}; }
+
+static bool approx_eq_c(cuComplex a, cuComplex b, float eps = 1e-4f) {
+    return std::abs(a.x - b.x) <= eps && std::abs(a.y - b.y) <= eps;
+}
+static bool approx_eq_z(cuDoubleComplex a, cuDoubleComplex b, double eps = 1e-8) {
+    return std::abs(a.x - b.x) <= eps && std::abs(a.y - b.y) <= eps;
 }
 
 int main() {
