@@ -482,6 +482,12 @@ add_executable(test_input_validation unit/test_input_validation.cpp)
 target_link_libraries(test_input_validation PRIVATE vgre)
 add_test(NAME InputValidation COMMAND test_input_validation)
 
+# CUDA Virtual Memory unit tests (QUEUE-13)
+add_executable(test_virtual_memory unit/test_virtual_memory.cpp)
+target_link_libraries(test_virtual_memory PRIVATE vgre)
+add_test(NAME VirtualMemory COMMAND test_virtual_memory)
+set_tests_properties(VirtualMemory PROPERTIES TIMEOUT 30)
+
 
 add_executable(test_tcp_cluster_preservation advanced/test_tcp_cluster_preservation.cpp)
 target_link_libraries(test_tcp_cluster_preservation PRIVATE vgre)
