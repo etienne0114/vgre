@@ -393,16 +393,23 @@ static ncclResult_t ring_allreduce(const void* sendbuff, void* recvbuff,
                st.ring_accum[rank].data() + start * elem_sz,
                (end - start) * elem_sz);
     }
+    // AllGather: each step copies the fully-reduced chunk owned by the
+    // rank that is (s+1) hops back in the ring.
+    // Invariant after reduce-scatter: ring_accum[r] owns chunk (r+1)%N.
+    // For step s, the target chunk is (rank-s+N)%N, owned by rank (rank-s-1+N)%N.
+    // No intermediate barriers needed — ring_accum is read-only from this point,
+    // so all ranks can read from any position after the phase-transition barrier above.
     for (int s = 0; s < nranks - 1; ++s) {
-        int src_chunk = ((rank - s - 1) % nranks + nranks) % nranks;
-        int src_rank  = (rank - 1 + nranks) % nranks;
+        // Owner of chunk (rank-s)%N is rank (rank-s-1+N)%N
+        // because ring_accum[r] contains fully-reduced data at index (r+1)%N,
+        // so (r+1)%N == (rank-s)%N  ⟹  r = (rank-s-1+N)%N.
+        int src_rank  = ((rank - s - 1) % nranks + nranks) % nranks;
+        int src_chunk = (rank - s + nranks) % nranks;   // = (src_rank+1)%N
 
         auto [start, end] = chunk_range(src_chunk);
         memcpy(static_cast<uint8_t*>(recvbuff) + start * elem_sz,
                st.ring_accum[src_rank].data() + start * elem_sz,
                (end - start) * elem_sz);
-
-        if (s < nranks - 2 && !ring_barrier(lk)) return ncclSystemError;
     }
     if (nranks > 1 && !ring_barrier(lk)) return ncclSystemError;
 
