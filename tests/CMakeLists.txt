@@ -226,6 +226,12 @@ add_executable(test_memory_concurrency unit/test_memory_concurrency.cpp)
 target_link_libraries(test_memory_concurrency PRIVATE vgre)
 add_test(NAME MemoryConcurrency COMMAND test_memory_concurrency)
 
+# QUEUE-22: Michael-Scott two-lock queue concurrency tests
+add_executable(test_pool_two_lock unit/test_pool_two_lock.cpp)
+target_link_libraries(test_pool_two_lock PRIVATE vgre)
+add_test(NAME PoolTwoLock COMMAND test_pool_two_lock)
+set_tests_properties(PoolTwoLock PROPERTIES TIMEOUT 60)
+
 add_executable(test_events api/test_events.cpp)
 target_link_libraries(test_events PRIVATE vgre_cudart)
 add_test(NAME Events COMMAND test_events)

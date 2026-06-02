@@ -45,14 +45,15 @@ static const size_t kTlsCacheMax = []() -> size_t {
 static constexpr size_t kTlsMaxBlockSz = 1 * 1024 * 1024;
 static std::atomic<uint32_t> g_poolGen[1024]{};
 
-// Sharded mutex array for reduced contention - 64 shards based on pool handle
+// Sharded mutex array — used only for stats/metadata paths (not free-list enqueue/dequeue).
+// Enqueue (freeToPool) uses tail_mutex; Dequeue (allocateFromPool) uses head_mutex (M&S 1996).
 static constexpr size_t kNumMutexShards = 64;
 static std::mutex g_poolMutexShards[kNumMutexShards];
 
 struct TlsEntry { void* head; size_t count; size_t blockSz; uint32_t gen; };
 static thread_local std::unordered_map<PoolHandle, TlsEntry> t_cache;
 
-// Get mutex shard for a pool handle
+// Get mutex shard for a pool handle — used for stats/metadata, NOT for free-list manipulation.
 static inline std::mutex& getPoolMutexShard(PoolHandle handle) {
     return g_poolMutexShards[handle % kNumMutexShards];
 }
@@ -89,24 +90,31 @@ static void poolAlignedFree(void *ptr) {
 }
 
 VGREResult MemoryManager::createPool(PoolHandle &outHandle, size_t blockSize) {
-  // Use sharded mutex - lock the shard for the next pool ID
+  // Use sharded mutex for pool map insertion (metadata path, not free-list).
   PoolHandle newId = nextPoolId_.fetch_add(1, std::memory_order_relaxed);
   std::lock_guard<std::mutex> lock(getPoolMutexShard(newId));
-  
+
   MemoryPool pool;
   pool.id = newId;
-  // Enforce minimum block size to hold a pointer (8 bytes on 64-bit)
-  pool.blockSize = (blockSize < sizeof(void*)) ? sizeof(void*) : blockSize;
+  // Enforce minimum block size to hold at least a FreeBlock pointer (8 bytes on 64-bit)
+  pool.blockSize = (blockSize < sizeof(FreeBlock)) ? sizeof(FreeBlock) : blockSize;
   // Align to 64 bytes (typical cache line)
   pool.blockSize = (pool.blockSize + 63) & ~63;
 
+  // M&S invariant I3: head = tail = dummy; dummy->next = nullptr.
+  // The dummy sentinel is a separately heap-allocated node (never freed from pool).
+  pool.freeListDummy = new FreeBlock{};    // sentinel; next == nullptr by default
+  pool.freeList      = pool.freeListDummy; // head points at dummy
+  pool.freeListTail  = pool.freeListDummy; // tail points at dummy
+
+  size_t savedBlockSize = pool.blockSize;
   outHandle = pool.id;
   pools_[pool.id] = std::move(pool);
   g_poolGen[static_cast<size_t>(outHandle) % 1024].store(0, std::memory_order_release);
 
   VGRE_LOG_INFO("MemoryManager",
                 "Created memory pool " + std::to_string(outHandle) +
-                " (block size: " + std::to_string(pool.blockSize) + ")");
+                " (block size: " + std::to_string(savedBlockSize) + ")");
   return VGREResult::SUCCESS;
 }
 
@@ -135,6 +143,12 @@ VGREResult MemoryManager::destroyPool(PoolHandle handle) {
     slab = next;
   }
 
+  // Release the M&S dummy sentinel allocated in createPool (M&S I3).
+  delete pool.freeListDummy;
+  pool.freeListDummy = nullptr;
+  pool.freeList      = nullptr;
+  pool.freeListTail  = nullptr;
+
   // Invalidate any stale TLS caches that still hold blocks from this pool.
   g_poolGen[static_cast<size_t>(handle) % 1024].fetch_add(1, std::memory_order_acq_rel);
 
@@ -149,28 +163,34 @@ VGREResult MemoryManager::destroyPool(PoolHandle handle) {
 
 VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
                                            MemoryHandle &outHandle) {
-  std::lock_guard<std::mutex> lock(getPoolMutexShard(poolHandle));
+  // ── TLS fast path (checked before acquiring any M&S mutex) ──────────────
   {
     auto& tlsEntry = t_cache[poolHandle];
     uint32_t curGen = g_poolGen[static_cast<size_t>(poolHandle) % 1024].load(std::memory_order_acquire);
     if (tlsEntry.gen != curGen) { tlsEntry = {nullptr, 0, 0, curGen}; }
     if (tlsEntry.count > 0 && tlsEntry.blockSz > 0 && size <= tlsEntry.blockSz && size <= kTlsMaxBlockSz) {
+      // TLS hit: pop from thread-local stack (lock-free; only this thread touches it).
+      void* blk = tlsEntry.head;
+      tlsEntry.head = *reinterpret_cast<void**>(blk);
+      tlsEntry.count--;
+      memset(blk, 0, tlsEntry.blockSz);
+      // Record live alloc and stats — requires metadata shard (not M&S mutex).
+      std::lock_guard<std::mutex> shard_lk(getPoolMutexShard(poolHandle));
       auto poolIt = pools_.find(poolHandle);
       if (poolIt != pools_.end()) {
-        void* blk = tlsEntry.head;
-        tlsEntry.head = *reinterpret_cast<void**>(blk);
-        tlsEntry.count--;
-        memset(blk, 0, tlsEntry.blockSz);
         poolIt->second.liveSlabAllocs.insert(blk);
         poolIt->second.allocCount++;
         poolIt->second.totalAllocated += tlsEntry.blockSz;
         if (poolIt->second.totalAllocated > poolIt->second.peakAllocated)
           poolIt->second.peakAllocated = poolIt->second.totalAllocated;
-        outHandle = blk;
-        return VGREResult::SUCCESS;
       }
+      outHandle = blk;
+      return VGREResult::SUCCESS;
     }
   }
+
+  // ── Metadata shard lock for pool lookup and oversized path ───────────────
+  std::lock_guard<std::mutex> shard_lk(getPoolMutexShard(poolHandle));
   auto it = pools_.find(poolHandle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
 
@@ -192,8 +212,36 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
     return VGREResult::SUCCESS;
   }
 
-  if (!pool.freeListHead) {
-    // Allocate a new slab (64 blocks at a time).
+  // ── M&S dequeue (head_mutex guards head advance, M&S I6) ─────────────────
+  // Invariants (M&S 1996):
+  //   I6: lock head; next = head->next; if !next → empty (need slab); head = next; unlock head.
+  //   The real first node is freeList->next (freeList is the current dummy/sentinel).
+  //
+  // Dequeue strategy: keep pool.freeList (sentinel) in place; unlink 'next' (the first
+  // real free block) by setting pool.freeList->next = next->next.  Return 'next' to the
+  // caller.  Because 'next' is fully removed from the chain before memset, the sentinel's
+  // ->next pointer is unaffected by the subsequent zero-fill of the returned block.
+  // This is the correct fix for QUEUE-22 (the prior bug advanced the sentinel to 'next'
+  // and then memset zeroed the new sentinel's ->next, severing the remaining chain).
+  FreeBlock* block = nullptr;
+  {
+    std::lock_guard<std::mutex> head_lk(*pool.head_mutex); // M&S I1: at most one dequeuer at a time
+    FreeBlock* next = pool.freeList->next; // first real free node (sentinel->next)
+    if (next != nullptr) {
+      // Unlink 'next' from the chain and return it as user memory.
+      // Sentinel stays; its ->next now skips 'next' and points to the rest of the chain.
+      pool.freeList->next = next->next; // splice out 'next'
+      // If 'next' was also the tail, reset tail to the sentinel (queue now empty).
+      if (pool.freeListTail == next) {
+        pool.freeListTail = pool.freeList;
+      }
+      block = next;
+    }
+    // If next == nullptr the queue is empty; block stays nullptr → slab path below.
+  }
+
+  if (block == nullptr) {
+    // ── Slab allocation: queue empty, allocate a fresh slab outside any M&S lock ──
     size_t numBlocks = 64;
     size_t slabSize = numBlocks * pool.blockSize;
     void *slabMemory = poolAlignedAlloc(slabSize, 64);
@@ -245,7 +293,7 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
                                           static_cast<DWORD>(bindNode));
           if (!slabMemory) {
               // Fallback to regular allocation if NUMA allocation fails
-              slabMemory = poolAlignedAlloc(slabSize, alignment);
+              slabMemory = poolAlignedAlloc(slabSize, 64);
           }
       }
 #endif
@@ -261,41 +309,54 @@ VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
     pool.slabList = newSlab;
     pool.slabRanges.emplace_back(static_cast<uint8_t*>(slabMemory),
                                  static_cast<uint8_t*>(slabMemory) + slabSize);
-    
-    // Chunk the slab into blocks and form the intrusive list
+
+    // Carve slab into FreeBlock nodes and enqueue all but the first via tail_mutex.
+    // First block is returned immediately as the allocation.
     char *curr = static_cast<char*>(slabMemory);
-    for (size_t i = 0; i < numBlocks; ++i) {
-      void **node = reinterpret_cast<void**>(curr);
-      if (i < numBlocks - 1) {
-        *node = curr + pool.blockSize;
-      } else {
-        *node = nullptr; // Tail
+    block = reinterpret_cast<FreeBlock*>(curr); // first block is the allocation
+    curr += pool.blockSize;
+
+    // Build the remaining numBlocks-1 blocks into a local chain first,
+    // then bulk-enqueue via a single tail_mutex acquisition.
+    if (numBlocks > 1) {
+      FreeBlock* chainHead = reinterpret_cast<FreeBlock*>(curr);
+      FreeBlock* chainTail = chainHead;
+      chainHead->next = nullptr;
+      for (size_t i = 2; i < numBlocks; ++i) {
+        curr += pool.blockSize;
+        FreeBlock* node = reinterpret_cast<FreeBlock*>(curr);
+        node->next = nullptr;
+        chainTail->next = node; // extend chain
+        chainTail = node;
       }
-      curr += pool.blockSize;
+      // M&S enqueue: lock tail, splice chain, advance tail (M&S I5).
+      // Invariant I5: {lock tail; tail->next = new_node; tail = new_node; unlock tail}
+      std::lock_guard<std::mutex> tail_lk(*pool.tail_mutex); // M&S I2: at most one enqueuer
+      pool.freeListTail->next = chainHead; // splice chain after current tail
+      pool.freeListTail = chainTail;       // I4: tail advances to end of new chain
     }
-    pool.freeListHead = slabMemory;
   }
 
-  // Pop from intrusive free list (O(1))
-  void *blockPtr = pool.freeListHead;
-  pool.freeListHead = *reinterpret_cast<void**>(blockPtr);
-  
-  memset(blockPtr, 0, pool.blockSize);
-  outHandle = blockPtr;
+  // 'block' is the node to return — zero-fill and register it.
+  // Safe to memset: 'block' was fully unlinked from the chain before this point,
+  // so zeroing it does not touch any sentinel or chain pointer (QUEUE-22 fix).
+  memset(block, 0, pool.blockSize);
+  void* blockPtr = static_cast<void*>(block);
   pool.liveSlabAllocs.insert(blockPtr);
-  
+  outHandle = blockPtr;
   pool.allocCount++;
   pool.totalAllocated += pool.blockSize;
   if (pool.totalAllocated > pool.peakAllocated) {
     pool.peakAllocated = pool.totalAllocated;
   }
-  
+
   return VGREResult::SUCCESS;
 }
 
 VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
                                      MemoryHandle handle) {
-  std::lock_guard<std::mutex> lock(getPoolMutexShard(poolHandle));
+  // ── Metadata shard lock for pool lookup and validation ───────────────────
+  std::lock_guard<std::mutex> shard_lk(getPoolMutexShard(poolHandle));
   auto it = pools_.find(poolHandle);
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
 
@@ -303,7 +364,7 @@ VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
   void *ptr = handle;
   if (!ptr) return VGREResult::SUCCESS;
 
-  // Oversized path: release direct allocation back to the OS
+  // Oversized path: release direct allocation back to the OS (outside M&S locks).
   auto ovIt = pool.oversizedAllocs.find(ptr);
   if (ovIt != pool.oversizedAllocs.end()) {
     size_t sz = ovIt->second;
@@ -328,6 +389,7 @@ VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
     return VGREResult::ERR_INVALID_VALUE;
   }
 
+  // ── TLS cache fast path (thread-local; no global lock needed) ───────────
   if (pool.blockSize <= kTlsMaxBlockSz) {
     auto& tlsEntry = t_cache[poolHandle];
     uint32_t curGen = g_poolGen[static_cast<size_t>(poolHandle) % 1024].load(std::memory_order_acquire);
@@ -343,10 +405,19 @@ VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
     }
   }
 
-  // Normal path: push to intrusive slab free list (O(1) reuse)
-  void **node = reinterpret_cast<void**>(ptr);
-  *node = pool.freeListHead;
-  pool.freeListHead = ptr;
+  // ── M&S enqueue: tail_mutex guards tail advance only (M&S I5) ───────────
+  // Invariants (M&S 1996):
+  //   I5: {lock tail; tail->next = new_node; tail = new_node; unlock tail}
+  //   I2: tail_mutex is held only by the enqueueing thread.
+  //   Alloc and free paths hold DIFFERENT mutexes → truly concurrent (O(1) amortized).
+  FreeBlock* node = reinterpret_cast<FreeBlock*>(ptr);
+  node->next = nullptr; // I4: new tail node's next must be null
+  {
+    std::lock_guard<std::mutex> tail_lk(*pool.tail_mutex); // M&S I2
+    pool.freeListTail->next = node; // link after current tail
+    pool.freeListTail = node;       // advance tail pointer (M&S I5)
+  }
+
   pool.freeCount++;
   if (pool.totalAllocated >= pool.blockSize) pool.totalAllocated -= pool.blockSize;
   return VGREResult::SUCCESS;
@@ -380,13 +451,18 @@ VGREResult MemoryManager::trimPool(PoolHandle handle, size_t minBytes) {
   if (it == pools_.end()) return VGREResult::ERR_INVALID_VALUE;
   auto& pool = it->second;
 
-  // Collect current free-list block pointers (before any slab is freed).
+  // Drain the M&S free-list to collect all currently-free block pointers.
+  // We hold both head_mutex and tail_mutex to prevent concurrent enqueue/dequeue
+  // during the rebuild (this is a stop-the-world operation on the pool free-list).
   std::vector<void*> freeBlocks;
   {
-    void* cur = pool.freeListHead;
+    std::lock_guard<std::mutex> head_lk(*pool.head_mutex);
+    std::lock_guard<std::mutex> tail_lk(*pool.tail_mutex);
+    // Walk from dummy->next to the end of the chain (M&S I3/I4).
+    FreeBlock* cur = pool.freeList->next; // skip dummy sentinel
     while (cur) {
-      freeBlocks.push_back(cur);
-      cur = *reinterpret_cast<void**>(cur);
+      freeBlocks.push_back(static_cast<void*>(cur));
+      cur = cur->next;
     }
   }
 
@@ -436,16 +512,36 @@ VGREResult MemoryManager::trimPool(PoolHandle handle, size_t minBytes) {
     return false;
   };
 
-  // Rebuild free list using only blocks from slabs we keep.
+  // Rebuild the M&S free-list using only blocks from slabs we keep.
+  // We hold both mutexes (taken above) so no concurrent access is possible.
   std::vector<void*> keptBlocks;
   keptBlocks.reserve(freeBlocks.size());
   for (void* block : freeBlocks) {
     if (!shouldDropFreeBlock(block)) keptBlocks.push_back(block);
   }
-  pool.freeListHead = keptBlocks.empty() ? nullptr : keptBlocks.front();
-  for (size_t i = 0; i < keptBlocks.size(); ++i) {
-    void** node = reinterpret_cast<void**>(keptBlocks[i]);
-    *node = (i + 1 < keptBlocks.size()) ? keptBlocks[i + 1] : nullptr;
+
+  // Reconstruct the M&S queue from kept blocks.
+  // After rebuild: freeList == freeListDummy (sentinel), sentinel->next = first kept block.
+  // Invariant I3: dummy is never dequeued — remains as head always.
+  {
+    std::lock_guard<std::mutex> head_lk(*pool.head_mutex);
+    std::lock_guard<std::mutex> tail_lk(*pool.tail_mutex);
+    // Reset dummy sentinel.
+    pool.freeListDummy->next = nullptr;
+    pool.freeList = pool.freeListDummy;
+    pool.freeListTail = pool.freeListDummy;
+
+    // Re-enqueue kept blocks by re-linking them and splicing after dummy.
+    if (!keptBlocks.empty()) {
+      FreeBlock* prev = pool.freeListDummy;
+      for (void* blk : keptBlocks) {
+        FreeBlock* node = reinterpret_cast<FreeBlock*>(blk);
+        node->next = nullptr;
+        prev->next = node;
+        prev = node;
+      }
+      pool.freeListTail = reinterpret_cast<FreeBlock*>(keptBlocks.back());
+    }
   }
 
   // Unlink and free selected slabs.

@@ -51,11 +51,37 @@ struct PoolSlab {
   PoolSlab *next = nullptr;
 };
 
+// Intrusive free-block node for the Michael-Scott two-lock queue.
+// The first word of every free slab block is reinterpreted as FreeBlock*.
+// Invariant: next == nullptr iff this is the tail node (M&S 1996, I4).
+struct FreeBlock {
+  FreeBlock* next{nullptr};
+};
+
 struct MemoryPool {
   PoolHandle id = 0;
   size_t blockSize = 0;            // Minimum allocation granularity
   int    numaNode  = -1;           // Preferred NUMA node for slab allocation (-1 = any)
-  void *freeListHead = nullptr;    // Intrusive free list head
+
+  // ── Michael-Scott Two-Lock Queue (M&S 1996) ──────────────────────────────
+  // freeList is the HEAD pointer (dummy sentinel); freeListTail is the TAIL.
+  // Invariants (M&S 1996):
+  //   I1: head_mutex guards freeList; at most one thread holds it at a time.
+  //   I2: tail_mutex guards freeListTail; at most one thread holds it at a time.
+  //   I3: freeListDummy (sentinel) is never dequeued; head always points at it
+  //       or past it — the real first node is freeList->next.
+  //   I4: freeList and freeListTail form a valid singly-linked chain.
+  //   I5: Enqueue: {lock tail; tail->next = new; tail = new; unlock tail}
+  //   I6: Dequeue: {lock head; next = head->next; if !next → empty;
+  //                 head = next; unlock head} — returns *next
+  // Using unique_ptr<mutex> because std::mutex is not movable/copyable and
+  // MemoryPool is stored by value in an unordered_map (which may rehash/move).
+  FreeBlock*  freeList{nullptr};            // head pointer (dummy sentinel)
+  FreeBlock*  freeListTail{nullptr};        // tail pointer for enqueue
+  FreeBlock*  freeListDummy{nullptr};       // dummy sentinel node (never freed)
+  std::unique_ptr<std::mutex> head_mutex;   // guards head (dequeue path, M&S I1)
+  std::unique_ptr<std::mutex> tail_mutex;   // guards tail (enqueue path, M&S I2)
+
   PoolSlab *slabList = nullptr;    // List of backing slabs
   size_t totalAllocated = 0;
   size_t peakAllocated = 0;
@@ -75,6 +101,17 @@ struct MemoryPool {
   bool reuseAllowInternalDependencies = true;
   // location device -> access flags (cudaMemAccessFlags*)
   std::unordered_map<int, unsigned int> accessFlagsByDevice;
+
+  // Constructor: initialise two-lock mutexes and dummy sentinel (M&S I3).
+  MemoryPool()
+    : head_mutex(std::make_unique<std::mutex>()),
+      tail_mutex(std::make_unique<std::mutex>()) {}
+
+  // Move-only (mutex unique_ptrs are movable; raw data is trivially moved).
+  MemoryPool(MemoryPool&&) = default;
+  MemoryPool& operator=(MemoryPool&&) = default;
+  MemoryPool(const MemoryPool&) = delete;
+  MemoryPool& operator=(const MemoryPool&) = delete;
 };
 
 // ── Dynamic UVM region tracking for signal-safe lookup ─────────────────────
