@@ -178,6 +178,8 @@ public:
   cudaError_t memcpy2DAsync(void *dst, size_t dpitch, const void *src,
                             size_t spitch, size_t width, size_t height,
                             cudaMemcpyKind_t kind, cudaStream_t stream);
+  cudaError_t memcpy3D(const cudaMemcpy3DParms *p);
+  cudaError_t memcpy3DAsync(const cudaMemcpy3DParms *p, cudaStream_t stream);
   cudaError_t memcpyBatchAsync(void **dstPtr, const void **srcPtr,
                                size_t *size, size_t count,
                                cudaMemcpyKind_t kind, cudaStream_t stream);

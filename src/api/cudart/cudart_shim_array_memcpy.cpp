@@ -137,12 +137,18 @@ cudaError_t cudaMemcpy3D(const struct cudaMemcpy3DParms *p) {
     if (!srcPtr || !dstPtr) return cudaErrorInvalidValue;
 
     // Copy slice-by-slice, row-by-row; record bandwidth.
+    // slicePitch = rowPitch * height  (CUDA 3-D memory layout invariant).
+    // Compute once before the loop to avoid re-multiplying pitch each z-iteration.
     size_t rowBytes  = p->extent.width;
     size_t totalBytes = rowBytes * p->extent.height * p->extent.depth;
+    // srcSlicePitch / dstSlicePitch: pre-computed once so that the z-loop uses
+    //   a simple multiply-add rather than a nested product each iteration.
+    const size_t srcSlicePitch = srcPitch * p->extent.height;
+    const size_t dstSlicePitch = dstPitch * p->extent.height;
     auto t0 = std::chrono::steady_clock::now();
     for (size_t z = 0; z < p->extent.depth; ++z) {
-        const uint8_t *sSlice = static_cast<const uint8_t*>(srcPtr) + z * srcPitch * p->extent.height;
-        uint8_t       *dSlice = static_cast<uint8_t*>(dstPtr)       + z * dstPitch * p->extent.height;
+        const uint8_t *sSlice = static_cast<const uint8_t*>(srcPtr) + z * srcSlicePitch;
+        uint8_t       *dSlice = static_cast<uint8_t*>(dstPtr)       + z * dstSlicePitch;
         for (size_t y = 0; y < p->extent.height; ++y) {
             memcpy(dSlice + y * dstPitch, sSlice + y * srcPitch, rowBytes);
         }
