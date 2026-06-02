@@ -7,7 +7,7 @@
  * Test plan:
  *  1. Normal range accuracy  — spot-check {0.25, 1.0, 2.0, 4.0, 100.0}
  *  2. Edge cases             — a=0 → +Inf, a=+Inf → 0, a=-1 → NaN
- *  3. Large array (n=1001)   — tail-element coverage, all within 2^-23
+ *  3. Large array (n=1001)   — tail-element coverage, all within 2 ULP (≤ 2·2^-23)
  *  4. ULP precision check    — compare against 1/sqrtf(x) reference
  */
 
@@ -58,7 +58,7 @@ static void test_normal_accuracy() {
                       << "  got=" << out[i] << "  ref=" << ref
                       << "  rel_err=" << rel_err << "  tol=" << kRelTol
                       << std::endl;
-            assert(false);
+            std::exit(EXIT_FAILURE);
         }
     }
     std::cout << "[PASS] Normal range accuracy (5 spot-checks)" << std::endl;
@@ -81,21 +81,21 @@ static void test_edge_cases() {
     if (!std::isinf(out[0]) || out[0] < 0.0f) {
         std::cerr << "[FAIL] test_edge_cases: rsqrt(0) expected +Inf, got "
                   << out[0] << std::endl;
-        assert(false);
+        std::exit(EXIT_FAILURE);
     }
 
     // a = +Inf  →  0
     if (out[1] != 0.0f) {
         std::cerr << "[FAIL] test_edge_cases: rsqrt(+Inf) expected 0, got "
                   << out[1] << std::endl;
-        assert(false);
+        std::exit(EXIT_FAILURE);
     }
 
     // a = -1  →  NaN
     if (!std::isnan(out[2])) {
         std::cerr << "[FAIL] test_edge_cases: rsqrt(-1) expected NaN, got "
                   << out[2] << std::endl;
-        assert(false);
+        std::exit(EXIT_FAILURE);
     }
 
     std::cout << "[PASS] Edge cases (0→+Inf, +Inf→0, -1→NaN)" << std::endl;
@@ -131,11 +131,11 @@ static void test_large_array_tail() {
     }
     if (failures > 0) {
         std::cerr << "[FAIL] test_large_array_tail: " << failures
-                  << " / " << N << " elements exceeded 2^-23 relative error"
+                  << " / " << N << " elements exceeded 2 ULP relative error"
                   << std::endl;
-        assert(false);
+        std::exit(EXIT_FAILURE);
     }
-    std::cout << "[PASS] Large array n=1001 — all within 2^-23 relative error"
+    std::cout << "[PASS] Large array n=1001 — all within 2 ULP relative error"
               << std::endl;
 }
 
@@ -165,7 +165,7 @@ static void test_ulp_precision() {
             std::cerr << "[FAIL] test_ulp_precision: probe=" << probes[i]
                       << " got=" << out[i] << " ref=" << ref
                       << " ulps=" << ulps << " (limit 2)" << std::endl;
-            assert(false);
+            std::exit(EXIT_FAILURE);
         }
     }
     std::cout << "[PASS] ULP precision (≤ 2 ULP for 5 probes)" << std::endl;
