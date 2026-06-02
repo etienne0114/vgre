@@ -44,35 +44,79 @@ static int getConnectTimeoutSec() {
 }
 
 // Read the configurable proactive backoff ceiling.
-// VGRE_CLUSTER_MAX_BACKOFF_SEC: 10–3600, default 120 s.
-static int getMaxBackoffSec() {
-    const char* e = vgre_get_config("VGRE_CLUSTER_MAX_BACKOFF_SEC");
-    if (e) { int v = std::atoi(e); if (v >= 10 && v <= 3600) return v; }
-    return 120;
+// VGRE_CLUSTER_MAX_BACKOFF_MS: 10000–3600000, default 30000 ms (30 s).
+static int64_t getMaxBackoffMs() {
+    const char* e = vgre_get_config("VGRE_CLUSTER_MAX_BACKOFF_MS");
+    if (e) { int64_t v = static_cast<int64_t>(std::atoll(e)); if (v >= 10000 && v <= 3600000) return v; }
+    return 30000;
 }
 
-// Per-peer state for exponential backoff and reconnect tracking
+// Per-peer state: AWS decorrelated jitter backoff + attempt limit tracking.
+//
+// Formula (per AWS Architecture Blog):
+//   delay_n = min(cap, uniform(base, prev_{n-1} * 3))
+// Invariant: E[delay_n] = min(cap, (base + min(cap, prev*3)) / 2)
+//             ≈ min(cap, 1.5 * prev_{n-1})  when base << cap
+//
+// Attempt limit: after kMaxAttempts consecutive failures the peer enters a
+// kCooldownMs cooldown; on_connect_success() resets the counter to 0.
+
+static constexpr int     kMaxAttempts = 10;
+static constexpr int64_t kCooldownMs  = 300000; // 5 minutes
+
 struct PeerState {
     std::chrono::steady_clock::time_point next_attempt;
-    int backoff_sec = 1;        // current backoff interval in seconds
-    bool was_connected = false; // true if successfully connected at least once
-    std::mt19937 rng{std::random_device{}()}; // Per-peer RNG for jitter
+    int64_t prev_delay_ms = 100; // prev_delay_0 = base = 100 ms
+    bool was_connected = false;  // true if successfully connected at least once
+    int reconnect_attempts = 0;  // consecutive failure counter; reset on success
+    bool backoff_exhausted = false; // true after kMaxAttempts consecutive failures
+    std::mt19937_64 rng{std::random_device{}()}; // Per-peer RNG for jitter
 
     void on_connect_success() {
-        backoff_sec = 1;
-        was_connected = true;
+        prev_delay_ms      = 100; // reset to base
+        reconnect_attempts = 0;
+        backoff_exhausted  = false;
+        was_connected      = true;
         next_attempt = std::chrono::steady_clock::now(); // eligible immediately next check
     }
 
     void on_connect_failure() {
-        // Add jitter: ±25% of backoff time to prevent thundering herd
-        std::uniform_int_distribution<int> dist(-25, 25);
-        int jitter_pct = dist(rng);
-        double jitter_factor = 1.0 + (jitter_pct / 100.0);
-        int jittered_backoff = static_cast<int>(backoff_sec * jitter_factor);
-        
-        next_attempt = std::chrono::steady_clock::now() + std::chrono::seconds(jittered_backoff);
-        backoff_sec = std::min(backoff_sec * 2, getMaxBackoffSec());
+        ++reconnect_attempts;
+
+        // After kMaxAttempts consecutive failures enter a long cooldown.
+        if (reconnect_attempts >= kMaxAttempts) {
+            backoff_exhausted = true;
+            VGRE_LOG_WARN("TCPCluster",
+                "Proactive: peer exhausted " + std::to_string(kMaxAttempts) +
+                " reconnect attempts; cooling down for " +
+                std::to_string(kCooldownMs / 1000) + "s");
+            next_attempt = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(kCooldownMs);
+            // Reset for the next round after cooldown expires.
+            reconnect_attempts = 0;
+            prev_delay_ms      = 100;
+            return;
+        }
+
+        // AWS decorrelated jitter: E[delay_n] = min(cap, 1.5*prev_{n-1})
+        // delay_n = min(cap, uniform(base, min(cap, prev_{n-1}*3)))
+        static constexpr int64_t kBaseMs = 100;
+        const int64_t kCapMs = getMaxBackoffMs();
+
+        // Overflow guard: prev*3 can overflow int32_t for large prev; use int64_t
+        // arithmetic. If prev > cap/3 clamp upper to cap directly.
+        int64_t upper = (prev_delay_ms > kCapMs / 3)
+                        ? kCapMs
+                        : prev_delay_ms * 3;
+        // Clamp lower bound; upper is already <= cap by construction above.
+        if (upper < kBaseMs) upper = kBaseMs;
+
+        std::uniform_int_distribution<int64_t> dist(kBaseMs, upper);
+        int64_t delay_ms = dist(rng);
+
+        prev_delay_ms = delay_ms;
+        next_attempt = std::chrono::steady_clock::now() +
+                       std::chrono::milliseconds(delay_ms);
     }
 };
 
@@ -200,8 +244,8 @@ void DiscoveryManager::proactiveConnectionLoop() {
                     if (c && c->active && c->ip_address == host) { live = true; break; }
                 }
                 if (live) {
-                    // Reset backoff since the peer is connected
-                    if (peerState.count(addr)) peerState[addr].backoff_sec = 1;
+                    // Reset backoff since the peer is already connected
+                    if (peerState.count(addr)) peerState[addr].on_connect_success();
                     continue;
                 }
             }
@@ -214,13 +258,14 @@ void DiscoveryManager::proactiveConnectionLoop() {
             VGRE_LOG_INFO("TCPCluster",
                 "Proactive: connecting to " + addr +
                 (ps.was_connected ? " (reconnect)" : " (first connect)") +
-                " backoff=" + std::to_string(ps.backoff_sec) + "s");
+                " prev_delay=" + std::to_string(ps.prev_delay_ms) + "ms");
 
             vgre::common::vgre_socket_t sock = connectTo(host, port);
             if (sock == vgre::common::VGRE_INVALID_SOCKET) {
                 VGRE_LOG_WARN("TCPCluster",
-                    "Proactive: connect to " + addr + " failed, retry in " +
-                    std::to_string(ps.backoff_sec) + "s");
+                    "Proactive: connect to " + addr + " failed (attempt " +
+                    std::to_string(ps.reconnect_attempts) + "), retry in " +
+                    std::to_string(ps.prev_delay_ms) + "ms");
                 ps.on_connect_failure();
                 continue;
             }
