@@ -232,6 +232,12 @@ target_link_libraries(test_pool_two_lock PRIVATE vgre)
 add_test(NAME PoolTwoLock COMMAND test_pool_two_lock)
 set_tests_properties(PoolTwoLock PROPERTIES TIMEOUT 60)
 
+# QUEUE-23: Halley's method fast inverse square root
+add_executable(test_vector_engine_rsqrt unit/test_vector_engine_rsqrt.cpp)
+target_link_libraries(test_vector_engine_rsqrt PRIVATE vgre)
+add_test(NAME VectorEngineRsqrt COMMAND test_vector_engine_rsqrt)
+set_tests_properties(VectorEngineRsqrt PROPERTIES TIMEOUT 30)
+
 add_executable(test_events api/test_events.cpp)
 target_link_libraries(test_events PRIVATE vgre_cudart)
 add_test(NAME Events COMMAND test_events)

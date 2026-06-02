@@ -367,6 +367,70 @@ void VectorEngine::vectorSqrt(const float* a, float* c, size_t n) {
     }
 }
 
+// ── Float inverse square root (Halley's method) ────────────────────────────
+// Computes out[i] = 1/sqrt(a[i]) for each element.
+//
+// Algorithm: one step of Halley's 3rd-order iteration for rsqrt.
+//   x₀  = hardware rsqrt (~12-bit, |e₀| ≈ 2⁻¹²)
+//   r   = a * x₀²
+//   x₁  = x₀ * (r + 3) / (3r + 1)          [Halley step]
+// Error analysis: e₁ ≈ e₀³/4 ≈ 2⁻³⁸ — well below the 2⁻²³ invariant in ≤2
+// iterations (one step suffices). Complexity: O(1) per element, O(N/8) AVX2
+// iterations.
+//
+// IEEE-754 special cases:
+//   a = 0      → +Inf
+//   a = +Inf   → 0
+//   a < 0, NaN → NaN
+// The Halley step can corrupt specials (0→NaN, Inf→NaN due to 0*Inf), so the
+// AVX2 path uses a masked blend to preserve the hardware-computed specials.
+void VectorEngine::vectorRsqrt(const float* __restrict__ a,
+                                float* __restrict__ out, size_t n) {
+    size_t i = 0;
+#if defined(VGRE_HAS_AVX2)
+    const __m256 three  = _mm256_set1_ps(3.0f);
+    const __m256 one    = _mm256_set1_ps(1.0f);
+    const __m256 zero   = _mm256_setzero_ps();
+    const __m256 posinf = _mm256_set1_ps(std::numeric_limits<float>::infinity());
+
+    for (; i + 8 <= n; i += 8) {
+        __m256 a8 = _mm256_loadu_ps(&a[i]);
+
+        // Hardware rsqrt: 0→+Inf, +Inf→0, neg/NaN→NaN (correct specials)
+        __m256 x0 = _mm256_rsqrt_ps(a8);
+
+        // Halley iteration: r = a*x0², x1 = x0*(r+3)/(3r+1)
+        __m256 r   = _mm256_mul_ps(a8, _mm256_mul_ps(x0, x0));
+        __m256 num = _mm256_add_ps(r, three);
+        __m256 den = _mm256_fmadd_ps(three, r, one);          // 3r + 1
+        __m256 halley = _mm256_mul_ps(x0, _mm256_div_ps(num, den));
+
+        // Mask: apply Halley only for finite positive inputs; keep x0 for specials
+        __m256 is_finite_pos = _mm256_and_ps(
+            _mm256_cmp_ps(a8, zero,   _CMP_GT_OQ),   // a > 0
+            _mm256_cmp_ps(a8, posinf, _CMP_LT_OQ)    // a < +Inf
+        );
+        _mm256_storeu_ps(&out[i], _mm256_blendv_ps(x0, halley, is_finite_pos));
+    }
+#endif
+    // Scalar tail — also handles the entire array when AVX2 is unavailable.
+    for (; i < n; ++i) {
+        float a_i = a[i];
+        if (a_i == 0.0f) {
+            out[i] = std::numeric_limits<float>::infinity();
+        } else if (!std::isfinite(a_i) && a_i > 0.0f) {
+            out[i] = 0.0f;                                    // rsqrt(+Inf) = 0
+        } else if (a_i < 0.0f || std::isnan(a_i)) {
+            out[i] = std::numeric_limits<float>::quiet_NaN();
+        } else {
+            // Normal positive finite: Halley step from 1/sqrt reference
+            float x0 = 1.0f / std::sqrt(a_i);
+            float r  = a_i * x0 * x0;
+            out[i]   = x0 * (r + 3.0f) / (3.0f * r + 1.0f);
+        }
+    }
+}
+
 
 } // namespace runtime
 } // namespace vgre

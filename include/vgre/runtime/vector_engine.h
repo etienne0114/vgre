@@ -74,6 +74,10 @@ public:
     float vectorSum(const float* a, size_t n);
     void  vectorDiv(const float* a, const float* b, float* c, size_t n);
     void  vectorSqrt(const float* a, float* c, size_t n);
+    // Inverse square root via Halley's 3rd-order iteration (QUEUE-23).
+    // |error| < 2^-23 in ≤ 2 iterations for all normal IEEE-754 floats.
+    // Special cases: a=0 → +Inf, a=+Inf → 0, a<0 or NaN → NaN.
+    void  vectorRsqrt(const float* a, float* out, size_t n);
     double benchmarkFMA(size_t n, int iterations);
     double benchmarkBF16(size_t n, int iterations);
 
