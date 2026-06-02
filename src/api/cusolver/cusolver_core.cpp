@@ -757,6 +757,39 @@ cusolverStatus_t cusolverDnDpotrfBatched(cusolverDnHandle_t h, char uplo,
     return CUSOLVER_STATUS_SUCCESS;
 }
 
+// ── Batched Cholesky for complex float (CpotrfBatched) ───────────────────────
+// Banachiewicz batched Cholesky for Hermitian positive-definite complex float
+// matrices. For each batch b, factorizes A_b = L_b * L_b^H (lower) or
+// A_b = U_b^H * U_b (upper). Delegates to unbatched Cpotrf (→ cpotrf_).
+// Invariant: infoArray[b] = 0 on success, j+1 if A_b[j,j] ≤ 0 (not HPD).
+// Complexity: O(batchSize * n³/3).
+cusolverStatus_t cusolverDnCpotrfBatched(cusolverDnHandle_t h, char uplo,
+                                          int n, float **Aarray, int lda,
+                                          int *infoArray, int batchSize) {
+    if (!Aarray || !infoArray || n <= 0 || batchSize <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchSize; ++b) {
+        cusolverStatus_t s = cusolverDnCpotrf(h, uplo, n, Aarray[b], lda, nullptr, 0, &infoArray[b]);
+        if (s != CUSOLVER_STATUS_SUCCESS) return s;
+    }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Batched Cholesky for complex double (ZpotrfBatched) ──────────────────────
+// Banachiewicz batched Cholesky for Hermitian positive-definite complex double
+// matrices. Delegates to unbatched Zpotrf (→ zpotrf_).
+// Invariant: infoArray[b] = 0 on success, j+1 if A_b[j,j] ≤ 0 (not HPD).
+// Complexity: O(batchSize * n³/3).
+cusolverStatus_t cusolverDnZpotrfBatched(cusolverDnHandle_t h, char uplo,
+                                          int n, double **Aarray, int lda,
+                                          int *infoArray, int batchSize) {
+    if (!Aarray || !infoArray || n <= 0 || batchSize <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchSize; ++b) {
+        cusolverStatus_t s = cusolverDnZpotrf(h, uplo, n, Aarray[b], lda, nullptr, 0, &infoArray[b]);
+        if (s != CUSOLVER_STATUS_SUCCESS) return s;
+    }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
 // ── Batched LU triangular solve (getrsBatched) ────────────────────────────────
 // Loops the unbatched getrs over each matrix/RHS pointer pair in the arrays.
 

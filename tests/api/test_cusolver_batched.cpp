@@ -266,6 +266,117 @@ static void test_getrs_batched_3x3() {
     check("getrsBatched: 3×3 single system x=[1,2,3]", ok);
 }
 
+// ── CpotrfBatched: complex float batch Cholesky ──────────────────────────────
+// Batch of two 2×2 Hermitian PD matrices (real-valued for simplicity):
+//   A0 = I₂  → Chol(A0) = I₂
+//   A1 = [[4,1],[1,3]] col-major → L with L[0,0]=2, L[1,0]=0.5, L[1,1]=sqrt(11)/2
+// Storage: complex float = pairs {re, im} interleaved; all imaginary parts zero.
+// Invariant (Banachiewicz lower): L[j,j] = sqrt(A[j,j] - Σ_{k<j} |L[j,k]|²),
+//   L[i,j] = (A[i,j] - Σ_{k<j} L[i,k]*conj(L[j,k])) / L[j,j].
+static void test_Cpotrf_batched() {
+    cusolverDnHandle_t h = nullptr;
+    cusolverDnCreate(&h);
+
+    const int N = 2, BATCH = 2;
+    // Complex float: each element = {re, im}; col-major 2×2 = 4 elements = 8 floats
+    // A0 = identity: col0=[(1,0),(0,0)], col1=[(0,0),(1,0)]
+    float A0[8] = {1.f,0.f,  0.f,0.f,  0.f,0.f,  1.f,0.f};
+    // A1 = [[4,1],[1,3]]: col0=[(4,0),(1,0)], col1=[(1,0),(3,0)]
+    float A1[8] = {4.f,0.f,  1.f,0.f,  1.f,0.f,  3.f,0.f};
+    float *Aarray[BATCH] = {A0, A1};
+    int info[BATCH] = {-1, -1};
+
+    bool ok = (cusolverDnCpotrfBatched(h, 'L', N, Aarray, N, info, BATCH)
+               == CUSOLVER_STATUS_SUCCESS);
+    ok &= (info[0] == 0 && info[1] == 0);
+
+    if (ok) {
+        // A0 Chol = I: L[0,0]=1, L[1,0]=0, L[1,1]=1
+        ok &= approx(A0[0], 1.f);  // re(L[0,0])
+        ok &= approx(A0[2], 0.f);  // re(L[1,0])
+        ok &= approx(A0[6], 1.f);  // re(L[1,1])
+        // A1 Chol: L[0,0]=2, L[1,0]=0.5, L[1,1]=sqrt(11)/2 ≈ 1.6583
+        ok &= approx(A1[0], 2.f);
+        ok &= approx(A1[2], 0.5f);
+        ok &= approx(A1[6], std::sqrt(11.f) / 2.f);
+        if (!ok) {
+            std::cerr << "  A0=[" << A0[0] << "," << A0[2] << "," << A0[6] << "]\n";
+            std::cerr << "  A1=[" << A1[0] << "," << A1[2] << "," << A1[6] << "]\n";
+        }
+    }
+
+    cusolverDnDestroy(h);
+    check("CpotrfBatched: I and HPD [[4,1],[1,3]] complex float", ok);
+}
+
+// ── ZpotrfBatched: complex double batch Cholesky ─────────────────────────────
+// Same two matrices as above but with complex double precision.
+// Invariant: same Banachiewicz formula as CpotrfBatched, higher precision.
+static void test_Zpotrf_batched() {
+    cusolverDnHandle_t h = nullptr;
+    cusolverDnCreate(&h);
+
+    const int N = 2, BATCH = 2;
+    // Complex double: each element = {re, im}; 4 elements per matrix = 8 doubles
+    double A0[8] = {1.0,0.0,  0.0,0.0,  0.0,0.0,  1.0,0.0};
+    double A1[8] = {4.0,0.0,  1.0,0.0,  1.0,0.0,  3.0,0.0};
+    double *Aarray[BATCH] = {A0, A1};
+    int info[BATCH] = {-1, -1};
+
+    bool ok = (cusolverDnZpotrfBatched(h, 'L', N, Aarray, N, info, BATCH)
+               == CUSOLVER_STATUS_SUCCESS);
+    ok &= (info[0] == 0 && info[1] == 0);
+
+    if (ok) {
+        // A0: L[0,0]=1, L[1,0]=0, L[1,1]=1
+        ok &= (std::fabs(A0[0] - 1.0) < 1e-9);
+        ok &= (std::fabs(A0[2] - 0.0) < 1e-9);
+        ok &= (std::fabs(A0[6] - 1.0) < 1e-9);
+        // A1: L[0,0]=2, L[1,0]=0.5, L[1,1]=sqrt(11)/2
+        ok &= (std::fabs(A1[0] - 2.0) < 1e-9);
+        ok &= (std::fabs(A1[2] - 0.5) < 1e-9);
+        ok &= (std::fabs(A1[6] - std::sqrt(11.0) / 2.0) < 1e-9);
+        if (!ok) {
+            std::cerr << "  A0=[" << A0[0] << "," << A0[2] << "," << A0[6] << "]\n";
+            std::cerr << "  A1=[" << A1[0] << "," << A1[2] << "," << A1[6] << "]\n";
+        }
+    }
+
+    cusolverDnDestroy(h);
+    check("ZpotrfBatched: I and HPD [[4,1],[1,3]] complex double", ok);
+}
+
+// ── potrfBatched: mixed PD/non-PD batch ──────────────────────────────────────
+// Verifies per-batch infoArray: A0 PD (success), A1 not PD (fail at j=0).
+// A0 = diag(4,4) → infoArray[0] = 0
+// A1 = [[-1,0],[0,1]] col-major → infoArray[1] = 1 (A[0,0]=-1 ≤ 0, j+1=1)
+// Invariant: Banachiewicz sets info=j+1 when diagonal entry ≤ 0 after subtracting
+// sum of squares of previous entries in the same column.
+static void test_potrf_batched_mixed_pd() {
+    cusolverDnHandle_t h = nullptr;
+    cusolverDnCreate(&h);
+
+    const int N = 2, BATCH = 2;
+    float A0[4] = {4.f, 0.f, 0.f, 4.f};   // diag(4,4), PD
+    float A1[4] = {-1.f, 0.f, 0.f, 1.f};  // [[-1,0],[0,1]], not PD
+    float *Aarray[BATCH] = {A0, A1};
+    int info[BATCH] = {-1, -1};
+
+    bool ok = (cusolverDnSpotrfBatched(h, 'L', N, Aarray, N, info, BATCH)
+               == CUSOLVER_STATUS_SUCCESS);
+    // A0 succeeded: info[0] = 0
+    ok &= (info[0] == 0);
+    // A1 failed at j=0 (A[0,0]=-1 ≤ 0): info[1] = 1
+    ok &= (info[1] == 1);
+
+    if (!ok) {
+        std::cerr << "  info[0]=" << info[0] << " info[1]=" << info[1] << "\n";
+    }
+
+    cusolverDnDestroy(h);
+    check("potrfBatched mixed PD/non-PD: info[0]=0 info[1]=1", ok);
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main()
@@ -279,6 +390,9 @@ int main()
     test_getrs_batched();
     test_getrs_batched_null();
     test_getrs_batched_3x3();
+    test_Cpotrf_batched();
+    test_Zpotrf_batched();
+    test_potrf_batched_mixed_pd();
 
     std::cout << "\nResult: " << g_pass << "/" << g_total << " passed\n";
     return (g_pass == g_total) ? 0 : 1;

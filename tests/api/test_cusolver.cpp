@@ -233,6 +233,58 @@ static void test_gelsd() {
     check("gelsd least-squares (3x2 overdetermined)", ok);
 }
 
+// ── Test: potrf failure on non-positive-definite matrix ─────────────────────
+// A = [[-1,0],[0,1]] is not positive-definite; Cholesky must fail at j=0
+// (A[0,0] = -1 ≤ 0), so devInfo must equal 1 (LAPACK convention: j+1).
+// Invariant: spotrf_ sets info = j+1 when A[j,j] ≤ 0 after subtracting sum of
+// squares of previous column entries; here j=0 so info = 1.
+static void test_potrf_not_pd() {
+    cusolverDnHandle_t h;
+    cusolverDnCreate(&h);
+
+    float A[4] = {-1.0f, 0.0f, 0.0f, 1.0f}; // col-major [[-1,0],[0,1]]
+    int info = 0;
+    int lwork = 0;
+    cusolverDnSpotrf_bufferSize(h, 'L', 2, A, 2, &lwork);
+    std::vector<float> work(std::max(lwork, 1));
+    cusolverDnSpotrf(h, 'L', 2, A, 2, work.data(), lwork, &info);
+
+    // info must be 1: j=0 fails because A[0,0]=-1 ≤ 0
+    bool ok = (info == 1);
+
+    cusolverDnDestroy(h);
+    check("potrf non-PD: info=1 for A[0,0]=-1", ok);
+}
+
+// ── Test: potrf upper-triangular (UPLO='U') ──────────────────────────────────
+// A = [[4,2],[2,3]] stored upper-triangular in col-major: col0=[4,X], col1=[2,3]
+// (lower triangle unused). Cholesky U factor: U[0,0]=2, U[0,1]=1, U[1,1]=sqrt(2).
+// Invariant (upper Banachiewicz): U[j,j] = sqrt(A[j,j] - Σ_{k<j} U[k,j]²),
+//   U[j,i] = (A[j,i] - Σ_{k<j} U[k,j]*U[k,i]) / U[j,j]  for i > j.
+static void test_potrf_upper() {
+    cusolverDnHandle_t h;
+    cusolverDnCreate(&h);
+
+    // col-major, upper triangle: A[0,0]=4, A[0,1]=2, A[1,1]=3; lower unused
+    double A[4] = {4.0, 0.0, 2.0, 3.0};
+    int info = 0;
+    int lwork = 0;
+    cusolverDnDpotrf_bufferSize(h, 'U', 2, A, 2, &lwork);
+    std::vector<double> work(std::max(lwork, 1));
+    cusolverDnDpotrf(h, 'U', 2, A, 2, work.data(), lwork, &info);
+
+    bool ok = (info == 0);
+    // U[0,0] = sqrt(4) = 2  (A[0] in col-major)
+    ok &= (std::fabs(A[0] - 2.0) < 1e-10);
+    // U[0,1] = A[0,1] / U[0,0] = 2/2 = 1  (A[2] in col-major: row0,col1)
+    ok &= (std::fabs(A[2] - 1.0) < 1e-10);
+    // U[1,1] = sqrt(3 - U[0,1]²) = sqrt(2)  (A[3] in col-major)
+    ok &= (std::fabs(A[3] - std::sqrt(2.0)) < 1e-10);
+
+    cusolverDnDestroy(h);
+    check("potrf upper-triangular: U for [[4,2],[2,3]]", ok);
+}
+
 // ── Test: null/invalid parameter rejection ──────────────────────────────────
 static void test_invalid_params() {
     cusolverDnHandle_t h;
@@ -255,6 +307,8 @@ int main() {
     test_getrf_getrs();
     test_getrf_float();
     test_potrf();
+    test_potrf_not_pd();
+    test_potrf_upper();
     test_geqrf();
     test_ormqr();
     test_gesvd();
