@@ -498,6 +498,12 @@ add_executable(test_opencl_ndrange unit/test_opencl_ndrange.cpp)
 add_test(NAME OpenCLNDRange COMMAND test_opencl_ndrange)
 set_tests_properties(OpenCLNDRange PROPERTIES TIMEOUT 30)
 
+# AVX2 blocked matrix transpose with cache-oblivious tiling (QUEUE-19)
+add_executable(test_cache_oblivious_transpose unit/test_cache_oblivious_transpose.cpp)
+target_link_libraries(test_cache_oblivious_transpose PRIVATE vgre)
+add_test(NAME CacheObliviousTranspose COMMAND test_cache_oblivious_transpose)
+set_tests_properties(CacheObliviousTranspose PROPERTIES TIMEOUT 30)
+
 
 add_executable(test_tcp_cluster_preservation advanced/test_tcp_cluster_preservation.cpp)
 target_link_libraries(test_tcp_cluster_preservation PRIVATE vgre)
