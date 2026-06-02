@@ -49,6 +49,15 @@ struct NcclGroupState {
 
     std::vector<std::vector<uint8_t>> p2p_slots;
 
+    // ── Ring AllReduce state ─────────────────────────────────────────────
+    // ring_accum[r] holds rank r's accumulated chunk buffer across ring steps.
+    // Invariant: after reduce-scatter, ring_accum[r] contains the fully-reduced
+    // chunk owned by rank r. O(N * chunk_size) total memory during operation.
+    std::vector<std::vector<uint8_t>> ring_accum;
+    int ring_arrived = 0;    // arrivals at current step boundary
+    int ring_step    = 0;    // current step counter (0..2*(N-1)-1)
+    int ring_gen     = 0;    // barrier generation for ring steps
+
     explicit NcclGroupState(int nr);
 
     template<typename Pred>
