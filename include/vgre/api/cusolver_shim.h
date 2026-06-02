@@ -143,6 +143,16 @@ cusolverStatus_t cusolverDnDpotrfBatched(cusolverDnHandle_t handle, char uplo,
                                           int n, double **Aarray, int lda,
                                           int *infoArray, int batchSize);
 
+// Batched Cholesky for complex types (C = complex float, Z = complex double).
+// Each batch element b must be Hermitian positive definite; infoArray[b] = 0
+// on success, j+1 if A_b[j,j] ≤ 0 (not HPD). Delegates to cpotrf_/zpotrf_.
+cusolverStatus_t cusolverDnCpotrfBatched(cusolverDnHandle_t handle, char uplo,
+                                          int n, float **Aarray, int lda,
+                                          int *infoArray, int batchSize);
+cusolverStatus_t cusolverDnZpotrfBatched(cusolverDnHandle_t handle, char uplo,
+                                          int n, double **Aarray, int lda,
+                                          int *infoArray, int batchSize);
+
 // ── Complex LU factorization (getrf) — C/Z prefix ────────────────────────────
 cusolverStatus_t cusolverDnCgetrf_bufferSize(cusolverDnHandle_t handle, int m, int n,
                                               float *A, int lda, int *Lwork);
