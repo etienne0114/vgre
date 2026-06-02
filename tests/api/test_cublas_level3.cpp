@@ -350,6 +350,206 @@ int main() {
         }
     }
 
+    // ── 12. Csymm left upper (complex float) ──────────────────────────────────
+    ++total;
+    {
+        // A (upper stored, col-major) = [[2+0i, 1+0i], [*, 3+0i]]
+        // stored as: col0={2,0}, col1={1,3} -> A = {2+0i, 0+0i, 1+0i, 3+0i}
+        // Symmetric fill: A_sym = [[2,1],[1,3]]
+        // B = identity, alpha=1, beta=0
+        // C = A_sym * I = A_sym = [[2,1],[1,3]]
+        cuComplex A[4] = {C(2),C(0), C(1),C(3)};
+        cuComplex B[4] = {C(1),C(0), C(0),C(1)};
+        cuComplex Cv[4] = {C(0),C(0), C(0),C(0)};
+        cuComplex alpha = C(1), beta = C(0);
+        auto r = cublasCsymm_v2(handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+                                2, 2, &alpha, A, 2, B, 2, &beta, Cv, 2);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq_c(Cv[0], C(2)) && approx_eq_c(Cv[1], C(1)) &&
+                  approx_eq_c(Cv[2], C(1)) && approx_eq_c(Cv[3], C(3));
+        if (ok) { std::cout << "PASS [12] Csymm left upper\n"; ++pass; }
+        else    std::cerr << "FAIL [12] Csymm left upper (C=" << Cv[0].x << "," << Cv[1].x << "," << Cv[2].x << "," << Cv[3].x << ")\n";
+    }
+
+    // ── 13. Zsymm left upper (complex double) ─────────────────────────────────
+    ++total;
+    {
+        // Same structure as test 12 but double precision
+        // A_sym = [[2,1],[1,3]], B = identity -> C = A_sym
+        cuDoubleComplex A[4] = {Z(2),Z(0), Z(1),Z(3)};
+        cuDoubleComplex B[4] = {Z(1),Z(0), Z(0),Z(1)};
+        cuDoubleComplex Cv[4] = {Z(0),Z(0), Z(0),Z(0)};
+        cuDoubleComplex alpha = Z(1), beta = Z(0);
+        auto r = cublasZsymm_v2(handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+                                2, 2, &alpha, A, 2, B, 2, &beta, Cv, 2);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq_z(Cv[0], Z(2)) && approx_eq_z(Cv[1], Z(1)) &&
+                  approx_eq_z(Cv[2], Z(1)) && approx_eq_z(Cv[3], Z(3));
+        if (ok) { std::cout << "PASS [13] Zsymm left upper\n"; ++pass; }
+        else    std::cerr << "FAIL [13] Zsymm left upper (C=" << Cv[0].x << "," << Cv[1].x << "," << Cv[2].x << "," << Cv[3].x << ")\n";
+    }
+
+    // ── 14. Csyrk non-trans upper (complex float) ──────────────────────────────
+    ++total;
+    {
+        // A is 2x1 (n=2, k=1), stored col-major: A = {2+0i, 3+0i}
+        // SYRK non-trans: C = alpha * A * A^T + beta * C (no conjugate for SYRK)
+        // A * A^T = [[4, 6], [6, 9]], upper triangle stored
+        // col-major upper: C[0]=4, C[2]=6 (element [0,1]), C[3]=9
+        cuComplex A[2] = {C(2), C(3)};
+        cuComplex Cv[4] = {C(0),C(0), C(0),C(0)};
+        cuComplex alpha = C(1), beta = C(0);
+        auto r = cublasCsyrk_v2(handle, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+                                2, 1, &alpha, A, 2, &beta, Cv, 2);
+        // upper: Cv[0]=C[0,0]=4, Cv[2]=C[0,1]=6, Cv[3]=C[1,1]=9
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq_c(Cv[0], C(4)) && approx_eq_c(Cv[2], C(6)) &&
+                  approx_eq_c(Cv[3], C(9));
+        if (ok) { std::cout << "PASS [14] Csyrk non-trans upper\n"; ++pass; }
+        else    std::cerr << "FAIL [14] Csyrk (C=" << Cv[0].x << "," << Cv[2].x << "," << Cv[3].x << ")\n";
+    }
+
+    // ── 15. Zsyrk non-trans upper (complex double) ────────────────────────────
+    ++total;
+    {
+        // Same as test 14 but double precision
+        // A = {2, 3}, C upper = [[4,6],[*,9]]
+        cuDoubleComplex A[2] = {Z(2), Z(3)};
+        cuDoubleComplex Cv[4] = {Z(0),Z(0), Z(0),Z(0)};
+        cuDoubleComplex alpha = Z(1), beta = Z(0);
+        auto r = cublasZsyrk_v2(handle, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+                                2, 1, &alpha, A, 2, &beta, Cv, 2);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq_z(Cv[0], Z(4)) && approx_eq_z(Cv[2], Z(6)) &&
+                  approx_eq_z(Cv[3], Z(9));
+        if (ok) { std::cout << "PASS [15] Zsyrk non-trans upper\n"; ++pass; }
+        else    std::cerr << "FAIL [15] Zsyrk (C=" << Cv[0].x << "," << Cv[2].x << "," << Cv[3].x << ")\n";
+    }
+
+    // ── 16. Csyr2k non-trans upper (complex float) ────────────────────────────
+    ++total;
+    {
+        // A = I (2x2), B = diag(2,3) (2x2), n=2, k=2, alpha=1, beta=0
+        // C = alpha*(A*B^T + B*A^T) + beta*C
+        // A*B^T = I*diag(2,3) = diag(2,3), B*A^T = diag(2,3)*I = diag(2,3)
+        // Sum = 2*diag(2,3) = diag(4,6)
+        // Upper: C[0,0]=4, C[0,1]=0, C[1,1]=6
+        // col-major upper: Cv[0]=4, Cv[2]=0, Cv[3]=6
+        cuComplex A[4] = {C(1),C(0), C(0),C(1)};
+        cuComplex B_[4] = {C(2),C(0), C(0),C(3)};
+        cuComplex Cv[4] = {C(0),C(0), C(0),C(0)};
+        cuComplex alpha = C(1), beta = C(0);
+        auto r = cublasCsyr2k_v2(handle, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+                                 2, 2, &alpha, A, 2, B_, 2, &beta, Cv, 2);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq_c(Cv[0], C(4)) && approx_eq_c(Cv[2], C(0)) &&
+                  approx_eq_c(Cv[3], C(6));
+        if (ok) { std::cout << "PASS [16] Csyr2k non-trans upper\n"; ++pass; }
+        else    std::cerr << "FAIL [16] Csyr2k (C=" << Cv[0].x << "," << Cv[2].x << "," << Cv[3].x << ")\n";
+    }
+
+    // ── 17. Zsyr2k trans lower (complex double) ───────────────────────────────
+    ++total;
+    {
+        // A = I (2x2 col-major), B = diag(2,3) (2x2 col-major), n=2, k=2
+        // trans=OP_T: C = alpha*(A^T*B + B^T*A) + beta*C
+        //           = I^T*diag(2,3) + diag(2,3)^T*I = diag(2,3) + diag(2,3) = diag(4,6)
+        // Lower: C[0,0]=4, C[1,0]=0, C[1,1]=6
+        // col-major lower: Cv[0]=4, Cv[1]=0, Cv[3]=6
+        cuDoubleComplex A[4] = {Z(1),Z(0), Z(0),Z(1)};
+        cuDoubleComplex B_[4] = {Z(2),Z(0), Z(0),Z(3)};
+        cuDoubleComplex Cv[4] = {Z(0),Z(0), Z(0),Z(0)};
+        cuDoubleComplex alpha = Z(1), beta = Z(0);
+        auto r = cublasZsyr2k_v2(handle, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T,
+                                 2, 2, &alpha, A, 2, B_, 2, &beta, Cv, 2);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq_z(Cv[0], Z(4)) && approx_eq_z(Cv[1], Z(0)) &&
+                  approx_eq_z(Cv[3], Z(6));
+        if (ok) { std::cout << "PASS [17] Zsyr2k trans lower\n"; ++pass; }
+        else    std::cerr << "FAIL [17] Zsyr2k (C=" << Cv[0].x << "," << Cv[1].x << "," << Cv[3].x << ")\n";
+    }
+
+    // ── 18. Ctrmm left upper non-unit (complex float) ─────────────────────────
+    ++total;
+    {
+        // B = alpha * A * B, A = [[2,1],[0,3]] upper, B = identity
+        // A col-major: {2+0i, 0+0i, 1+0i, 3+0i}
+        // B col-major: {1+0i, 0+0i, 0+0i, 1+0i}
+        // Result = A * I = A = [[2,1],[0,3]] col-major = {2,0,1,3}
+        cuComplex A[4] = {C(2),C(0), C(1),C(3)};
+        cuComplex B[4] = {C(1),C(0), C(0),C(1)};
+        cuComplex alpha = C(1);
+        auto r = cublasCtrmm_v2(handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+                                CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT,
+                                2, 2, &alpha, A, 2, B, 2);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq_c(B[0], C(2)) && approx_eq_c(B[1], C(0)) &&
+                  approx_eq_c(B[2], C(1)) && approx_eq_c(B[3], C(3));
+        if (ok) { std::cout << "PASS [18] Ctrmm left upper non-unit\n"; ++pass; }
+        else    std::cerr << "FAIL [18] Ctrmm (B=" << B[0].x << "," << B[1].x << "," << B[2].x << "," << B[3].x << ")\n";
+    }
+
+    // ── 19. Ztrmm left upper non-unit (complex double) ────────────────────────
+    ++total;
+    {
+        // Same as test 18 but double precision
+        // A = [[2,1],[0,3]] upper, B = identity -> B_result = A
+        cuDoubleComplex A[4] = {Z(2),Z(0), Z(1),Z(3)};
+        cuDoubleComplex B[4] = {Z(1),Z(0), Z(0),Z(1)};
+        cuDoubleComplex alpha = Z(1);
+        auto r = cublasZtrmm_v2(handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+                                CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT,
+                                2, 2, &alpha, A, 2, B, 2);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq_z(B[0], Z(2)) && approx_eq_z(B[1], Z(0)) &&
+                  approx_eq_z(B[2], Z(1)) && approx_eq_z(B[3], Z(3));
+        if (ok) { std::cout << "PASS [19] Ztrmm left upper non-unit\n"; ++pass; }
+        else    std::cerr << "FAIL [19] Ztrmm (B=" << B[0].x << "," << B[1].x << "," << B[2].x << "," << B[3].x << ")\n";
+    }
+
+    // ── 20. Ctrsm left upper non-unit conjugate-transpose (complex float) ──────
+    ++total;
+    {
+        // Solve A^H * X = B, A = [[2+0i, 1+0i],[0, 3+0i]] (upper, non-unit)
+        // A^H = [[2, 0],[1, 3]] (A is real so A^H = A^T)
+        // B = [[4+0i],[6+0i]] (2x1), alpha=1
+        // Row 0: 2*X[0] = 4 -> X[0] = 2
+        // Row 1: 1*X[0] + 3*X[1] = 6 -> X[1] = (6 - 2) / 3 = 4/3
+        // col-major A: {2+0i, 0+0i, 1+0i, 3+0i}
+        cuComplex A[4] = {C(2),C(0), C(1),C(3)};
+        cuComplex B[2] = {C(4), C(6)};
+        cuComplex alpha = C(1);
+        auto r = cublasCtrsm_v2(handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+                                CUBLAS_OP_C, CUBLAS_DIAG_NON_UNIT,
+                                2, 1, &alpha, A, 2, B, 2);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq_c(B[0], C(2.0f)) &&
+                  approx_eq_c(B[1], C(4.0f / 3.0f));
+        if (ok) { std::cout << "PASS [20] Ctrsm left upper non-unit conj-trans\n"; ++pass; }
+        else    std::cerr << "FAIL [20] Ctrsm (B=" << B[0].x << "," << B[1].x << ")\n";
+    }
+
+    // ── 21. Ztrsm left upper non-unit no-trans (complex double) ──────────────
+    ++total;
+    {
+        // Solve A * X = B, A = [[2+0i, 1+0i],[0, 3+0i]] (upper, non-unit)
+        // B = [[4, 6],[6, 15]] (2x2), alpha=1
+        // col 0: 3*X[1]=6 -> X[1]=2; 2*X[0]+1*2=4 -> X[0]=1
+        // col 1: 3*X[1]=15 -> X[1]=5; 2*X[0]+1*5=6 -> X[0]=0.5
+        // col-major A: {2, 0, 1, 3}, B: {4, 6, 6, 15}
+        cuDoubleComplex A[4] = {Z(2),Z(0), Z(1),Z(3)};
+        cuDoubleComplex B[4] = {Z(4),Z(6), Z(6),Z(15)};
+        cuDoubleComplex alpha = Z(1);
+        auto r = cublasZtrsm_v2(handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+                                CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT,
+                                2, 2, &alpha, A, 2, B, 2);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq_z(B[0], Z(1.0)) && approx_eq_z(B[1], Z(2.0)) &&
+                  approx_eq_z(B[2], Z(0.5)) && approx_eq_z(B[3], Z(5.0));
+        if (ok) { std::cout << "PASS [21] Ztrsm left upper non-unit\n"; ++pass; }
+        else    std::cerr << "FAIL [21] Ztrsm (B=" << B[0].x << "," << B[1].x << "," << B[2].x << "," << B[3].x << ")\n";
+    }
+
     cublasDestroy_v2(handle);
 
     std::cout << "\n" << pass << "/" << total << " tests passed.\n";
