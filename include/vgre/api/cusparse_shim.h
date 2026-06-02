@@ -100,12 +100,26 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle, cusparseOperation_t opA,
                               cusparseDnVecDescr_t vecY, cudaDataType_t computeType,
                               void *buffer);
 
+// ── SpMM algorithm selector (NVIDIA cuSPARSE spec §cusparseSpMMAlg_t) ─────────
+typedef enum {
+    CUSPARSE_SPMM_ALG_DEFAULT  = 0,  // auto-select; maps to CSR row-by-row here
+    CUSPARSE_SPMM_CSR_ALG1     = 1,  // explicit CSR algorithm (row-merge)
+    CUSPARSE_SPMM_CSR_ALG2     = 2,  // explicit CSR algorithm (non-zero merge)
+    CUSPARSE_SPMM_CSR_ALG3     = 3,  // explicit CSR algorithm (merge-path)
+    CUSPARSE_SPMM_COO_ALG1     = 4,  // COO segment reduce
+    CUSPARSE_SPMM_COO_ALG2     = 5,  // COO atomic
+    CUSPARSE_SPMM_COO_ALG3     = 6,  // COO prefetch
+    CUSPARSE_SPMM_COO_ALG4     = 7,  // COO stream
+    CUSPARSE_SPMM_BLOCKED_ELL_ALG1 = 8  // blocked-ELL
+} cusparseSpMMAlg_t;
+
 // ── Generic SpMM (C = alpha * op(A) * op(B) + beta * C) ───────────────────────
 cusparseStatus_t cusparseSpMM(cusparseHandle_t handle, cusparseOperation_t opA,
                               cusparseOperation_t opB, const void *alpha,
                               cusparseSpMatDescr_t matA, cusparseDnMatDescr_t matB,
                               const void *beta, cusparseDnMatDescr_t matC,
-                              cudaDataType_t computeType, void *buffer);
+                              cudaDataType_t computeType,
+                              cusparseSpMMAlg_t alg, void *buffer);
 
 // ── Descriptor creation ──────────────────────────────────────────────────────
 cusparseStatus_t cusparseCreateCsr(cusparseSpMatDescr_t *spMatDescr, int64_t rows,
@@ -145,6 +159,7 @@ cusparseStatus_t cusparseSpMM_bufferSize(cusparseHandle_t handle,
                                           const void *beta,
                                           cusparseDnMatDescr_t matC,
                                           cudaDataType_t computeType,
+                                          cusparseSpMMAlg_t alg,
                                           size_t *bufferSize);
 
 // ── Legacy Level-1 ────────────────────────────────────────────────────────────

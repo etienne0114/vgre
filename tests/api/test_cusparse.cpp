@@ -492,6 +492,187 @@ int test_batched_spmm() {
     return 0;
 }
 
+// ── 13. SpMM with explicit alg parameter ──────────────────────────────────────
+// A = [[1,2,0],[0,3,4],[5,0,0]] (3×3, nnz=5)   B = [[1,2],[3,4],[5,6]] (3×2)
+// C = A*B : C[0]={7,10}, C[1]={29,36}, C[2]={5,10}
+// Verifies CUSPARSE_SPMM_ALG_DEFAULT and CUSPARSE_SPMM_CSR_ALG1 both accepted.
+int test_spmm_alg_default() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    // CSR for 3×3 A with nnz=5: rowPtr, colInd, vals
+    // Row 0: (0,1), Row 1: (3,4), Row 2: (5) — zero-indexed cols 0,1,1,2,0
+    // Invariant: row i spans [rowPtr[i], rowPtr[i+1]) in colInd/vals (CSR).
+    std::vector<int>   rowPtr = {0, 2, 4, 5};
+    std::vector<int>   colInd = {0, 1,  1, 2,  0};
+    std::vector<float> vals   = {1.f, 2.f,  3.f, 4.f,  5.f};
+
+    // Dense B stored row-major, ld=2 (B has 3 rows × 2 cols)
+    std::vector<float> B = {1.f, 2.f,  3.f, 4.f,  5.f, 6.f};
+    // Output C (3×2), ld=2, zero-initialised
+    std::vector<float> C(6, 0.f);
+
+    cusparseSpMatDescr_t matA = nullptr;
+    cusparseDnMatDescr_t matB = nullptr, matC = nullptr;
+    cusparseCreateCsr(&matA, 3, 3, 5,
+                      rowPtr.data(), colInd.data(), vals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateDnMat(&matB, 3, 2, 2, B.data(), CUDA_R_32F, CUSPARSE_ORDER_ROW);
+    cusparseCreateDnMat(&matC, 3, 2, 2, C.data(), CUDA_R_32F, CUSPARSE_ORDER_ROW);
+
+    float alpha = 1.f, beta = 0.f;
+    size_t bufSz = 0;
+    cusparseSpMM_bufferSize(h,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha, matA, matB, &beta, matC, CUDA_R_32F,
+        CUSPARSE_SPMM_ALG_DEFAULT, &bufSz);
+    std::vector<char> buf(bufSz + 1);
+
+    // Test ALG_DEFAULT path
+    cusparseStatus_t st = cusparseSpMM(h,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha, matA, matB, &beta, matC, CUDA_R_32F,
+        CUSPARSE_SPMM_ALG_DEFAULT, buf.data());
+    if (st != CUSPARSE_STATUS_SUCCESS) FAIL("SpMM alg_default status");
+
+    // C[row,col] = sum_k A[row,k]*B[k,col]; A row-indices per CSR rowPtr above.
+    if (!NEAR(C[0],  7.f, 1e-5f)) FAIL("spmm_alg_default C[0,0]");
+    if (!NEAR(C[1], 10.f, 1e-5f)) FAIL("spmm_alg_default C[0,1]");
+    if (!NEAR(C[2], 29.f, 1e-5f)) FAIL("spmm_alg_default C[1,0]");
+    if (!NEAR(C[3], 36.f, 1e-5f)) FAIL("spmm_alg_default C[1,1]");
+    if (!NEAR(C[4],  5.f, 1e-5f)) FAIL("spmm_alg_default C[2,0]");
+    if (!NEAR(C[5], 10.f, 1e-5f)) FAIL("spmm_alg_default C[2,1]");
+
+    // Test CSR_ALG1 path (same result, different alg token)
+    std::fill(C.begin(), C.end(), 0.f);
+    st = cusparseSpMM(h,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha, matA, matB, &beta, matC, CUDA_R_32F,
+        CUSPARSE_SPMM_CSR_ALG1, buf.data());
+    if (st != CUSPARSE_STATUS_SUCCESS) FAIL("SpMM csr_alg1 status");
+    if (!NEAR(C[0], 7.f, 1e-5f)) FAIL("spmm_csr_alg1 C[0,0]");
+
+    // Unsupported algorithm must return NOT_SUPPORTED
+    st = cusparseSpMM(h,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha, matA, matB, &beta, matC, CUDA_R_32F,
+        CUSPARSE_SPMM_CSR_ALG3, buf.data());
+    if (st != CUSPARSE_STATUS_NOT_SUPPORTED) FAIL("SpMM unsupported alg should return NOT_SUPPORTED");
+
+    cusparseDestroySpMat(matA);
+    cusparseDestroyDnMat(matB);
+    cusparseDestroyDnMat(matC);
+    cusparseDestroy(h);
+    PASS("SpMM alg_default and csr_alg1");
+    return 0;
+}
+
+// ── 14. Batched SpMM stride correctness ───────────────────────────────────────
+// 2×2 identity A, 2 batches of 2×2 B with bStride=8 (non-minimal; minimal=4).
+// Batch 0 at element [0..3], padding [4..7]; Batch 1 at elements [8..11].
+// Invariant: byte offset for batch b = b * bStride * sizeof(float).
+// Verifies that batch[1] reads from offset 8*4=32 bytes, not batch[0]'s data.
+int test_batched_spmm_stride_correctness() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    // 2×2 CSR identity matrix: A = I
+    std::vector<int>   rowPtr = {0, 1, 2};
+    std::vector<int>   colInd = {0, 1};
+    std::vector<float> vals   = {1.f, 1.f};
+
+    // B flat array: 16 elements.
+    // Batch 0 at [0..3]: [[1,0],[0,2]]; elements [4..7]: sentinel values (-99).
+    // Batch 1 at [8..11]: [[10,0],[0,20]]; elements [12..15]: unused.
+    // Using bStride=8 means batch 1 starts at element 8, skipping the sentinels.
+    std::vector<float> B = {
+        1.f,   0.f,   0.f,   2.f,     // batch 0  (elements 0-3)
+        -99.f, -99.f, -99.f, -99.f,   // padding   (elements 4-7)
+        10.f,  0.f,   0.f,   20.f,    // batch 1  (elements 8-11)
+        0.f,   0.f,   0.f,   0.f      // unused   (elements 12-15)
+    };
+    // cStride=4 (minimal, no extra padding in output)
+    std::vector<float> C(8, 0.f);  // 2 batches × 4 elements each
+
+    cusparseSpMatDescr_t matA = nullptr;
+    cusparseDnMatDescr_t matB = nullptr, matC = nullptr;
+    cusparseCreateCsr(&matA, 2, 2, 2,
+                      rowPtr.data(), colInd.data(), vals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    // matB and matC descriptors point to the start; the batched call advances internally.
+    cusparseCreateDnMat(&matB, 2, 2, 2, B.data(), CUDA_R_32F, CUSPARSE_ORDER_ROW);
+    cusparseCreateDnMat(&matC, 2, 2, 2, C.data(), CUDA_R_32F, CUSPARSE_ORDER_ROW);
+
+    float alpha = 1.f, beta = 0.f;
+    // bStride=8 (elements), cStride=4 (elements)
+    cusparseSpMM_batched(h,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha, matA, matB, &beta, matC, CUDA_R_32F,
+        2, 8, 4, nullptr);
+
+    // I * B_batch0 = B_batch0; C[0..3] should equal B[0..3]
+    if (!NEAR(C[0],  1.f, 1e-5f)) FAIL("stride batch0 C[0]");
+    if (!NEAR(C[3],  2.f, 1e-5f)) FAIL("stride batch0 C[3]");
+    // I * B_batch1 = B_batch1; C[4..7] should equal B[8..11] (NOT B[4..7] = sentinels)
+    if (!NEAR(C[4], 10.f, 1e-5f)) FAIL("stride batch1 C[4] — wrong stride reads sentinel");
+    if (!NEAR(C[7], 20.f, 1e-5f)) FAIL("stride batch1 C[7]");
+
+    cusparseDestroySpMat(matA);
+    cusparseDestroyDnMat(matB);
+    cusparseDestroyDnMat(matC);
+    cusparseDestroy(h);
+    PASS("Batched SpMM bStride correctness");
+    return 0;
+}
+
+// ── 15. Batched SpMM beta scaling ─────────────────────────────────────────────
+// Single batch: 2×2 identity A, B=[[1,2],[3,4]], initial C=[[10,20],[30,40]], beta=0.5.
+// Invariant: C_out = alpha*A*B + beta*C_in = B + 0.5*C_in.
+// Verifies beta is applied to the original C values (before SpMM), not zeroed first.
+int test_batched_spmm_beta_scaling() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    std::vector<int>   rowPtr = {0, 1, 2};
+    std::vector<int>   colInd = {0, 1};
+    std::vector<float> vals   = {1.f, 1.f};  // 2×2 identity
+
+    std::vector<float> B = {1.f, 2.f, 3.f, 4.f};               // [[1,2],[3,4]]
+    std::vector<float> C = {10.f, 20.f, 30.f, 40.f};           // initial C
+
+    cusparseSpMatDescr_t matA = nullptr;
+    cusparseDnMatDescr_t matB = nullptr, matC = nullptr;
+    cusparseCreateCsr(&matA, 2, 2, 2,
+                      rowPtr.data(), colInd.data(), vals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateDnMat(&matB, 2, 2, 2, B.data(), CUDA_R_32F, CUSPARSE_ORDER_ROW);
+    cusparseCreateDnMat(&matC, 2, 2, 2, C.data(), CUDA_R_32F, CUSPARSE_ORDER_ROW);
+
+    float alpha = 1.f, beta = 0.5f;
+    // Single batch, bStride=4, cStride=4
+    cusparseSpMM_batched(h,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha, matA, matB, &beta, matC, CUDA_R_32F,
+        1, 4, 4, nullptr);
+
+    // Expected: C_out[i] = 1*B[i] + 0.5*C_in[i]
+    // C_out = {1+5, 2+10, 3+15, 4+20} = {6, 12, 18, 24}
+    if (!NEAR(C[0],  6.f, 1e-5f)) FAIL("beta_scaling C[0]");
+    if (!NEAR(C[1], 12.f, 1e-5f)) FAIL("beta_scaling C[1]");
+    if (!NEAR(C[2], 18.f, 1e-5f)) FAIL("beta_scaling C[2]");
+    if (!NEAR(C[3], 24.f, 1e-5f)) FAIL("beta_scaling C[3]");
+
+    cusparseDestroySpMat(matA);
+    cusparseDestroyDnMat(matB);
+    cusparseDestroyDnMat(matC);
+    cusparseDestroy(h);
+    PASS("Batched SpMM beta scaling");
+    return 0;
+}
+
 // [ignoring loop detection]
 // ── Driver ────────────────────────────────────────────────────────────────────
 int main() {
@@ -509,6 +690,9 @@ int main() {
     rc |= test_bsr_spmv();
     rc |= test_bsr_spmm();
     rc |= test_batched_spmm();
+    rc |= test_spmm_alg_default();
+    rc |= test_batched_spmm_stride_correctness();
+    rc |= test_batched_spmm_beta_scaling();
     if (rc == 0) std::cout << "\nAll cuSPARSE tests passed!\n";
     return rc;
 }

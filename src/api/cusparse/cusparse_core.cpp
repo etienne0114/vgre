@@ -94,11 +94,22 @@ void csr_spmm(cusparseOperation_t opA, cusparseOperation_t opB,
     int64_t m = transA ? A.cols : A.rows;
     int64_t n = transB ? B.rows : B.cols;
 
+    // Invariant: C = alpha*op(A)*op(B) + beta*C.
+    // Step 1: Scale existing C by beta in-place (or zero if beta==0).
+    //         C[row,col] lives at element offset row*ld+col, NOT row*n+col;
+    //         ld >= n (leading dimension), so we must use row*ld+col. O(m*n).
+    T zero = T{};
     #ifdef _OPENMP
-    #pragma omp parallel for if (m * n > 1024)
+    #pragma omp parallel for collapse(2) if (m * n > 1024)
     #endif
-    for (int64_t i = 0; i < m * n; ++i) static_cast<T*>(C.values)[i] = T{};
+    for (int64_t row = 0; row < m; ++row)
+        for (int64_t col = 0; col < n; ++col) {
+            T &cRef = static_cast<T*>(C.values)[row * C.ld + col];
+            // beta*C preserves existing C when beta != 0; zeros C when beta == 0.
+            cRef = (*beta != zero) ? (*beta) * cRef : zero;
+        }
 
+    // Step 2: Accumulate alpha * op(A) * op(B) into the beta-scaled C.
     #ifdef _OPENMP
     #pragma omp parallel for schedule(guided) if (m > 64)
     #endif
@@ -115,11 +126,6 @@ void csr_spmm(cusparseOperation_t opA, cusparseOperation_t opB,
             }
         }
     }
-
-    T zero = T{};
-    if (*beta != zero)
-        for (int64_t i = 0; i < m * n; ++i)
-            static_cast<T*>(C.values)[i] += (*beta) * static_cast<T*>(C.values)[i];
 }
 } // anonymous namespace
 
@@ -221,7 +227,8 @@ cusparseStatus_t cusparseSpMM_bufferSize(cusparseHandle_t /*h*/, cusparseOperati
                                           cusparseOperation_t /*opB*/, const void * /*alpha*/,
                                           cusparseSpMatDescr_t /*matA*/, cusparseDnMatDescr_t /*matB*/,
                                           const void * /*beta*/, cusparseDnMatDescr_t /*matC*/,
-                                          cudaDataType_t /*ct*/, size_t *bufferSize) {
+                                          cudaDataType_t /*ct*/, cusparseSpMMAlg_t /*alg*/,
+                                          size_t *bufferSize) {
     if (bufferSize) *bufferSize = 0;
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -305,7 +312,13 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t /*h*/, cusparseOperation_t opA,
                               cusparseOperation_t opB, const void *alpha,
                               cusparseSpMatDescr_t matA, cusparseDnMatDescr_t matB,
                               const void *beta, cusparseDnMatDescr_t matC,
-                              cudaDataType_t computeType, void * /*buffer*/) {
+                              cudaDataType_t computeType,
+                              cusparseSpMMAlg_t alg, void * /*buffer*/) {
+    // Invariant: only CSR-compatible algorithms are supported by this shim.
+    // CUSPARSE_SPMM_ALG_DEFAULT (0) and CUSPARSE_SPMM_CSR_ALG1 (1) are accepted;
+    // all other algorithm tokens return NOT_SUPPORTED.
+    if (alg != CUSPARSE_SPMM_ALG_DEFAULT && alg != CUSPARSE_SPMM_CSR_ALG1)
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
     std::lock_guard<std::mutex> lk(g_descrMutex);
     auto aIt = g_csrMats.find(reinterpret_cast<uintptr_t>(matA));
     auto bIt = g_dnMats.find(reinterpret_cast<uintptr_t>(matB));
