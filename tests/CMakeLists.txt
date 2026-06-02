@@ -238,6 +238,12 @@ target_link_libraries(test_vector_engine_rsqrt PRIVATE vgre)
 add_test(NAME VectorEngineRsqrt COMMAND test_vector_engine_rsqrt)
 set_tests_properties(VectorEngineRsqrt PROPERTIES TIMEOUT 30)
 
+# QUEUE-24: cuBLAS GemmBatched all precisions (FP16, BF16, INT8, FP64)
+add_executable(test_cublas_gemm_ex_batched api/test_cublas_gemm_ex_batched.cpp)
+target_link_libraries(test_cublas_gemm_ex_batched vgre)
+add_test(NAME CublasGemmExBatched COMMAND test_cublas_gemm_ex_batched)
+set_tests_properties(CublasGemmExBatched PROPERTIES TIMEOUT 30 ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF")
+
 add_executable(test_events api/test_events.cpp)
 target_link_libraries(test_events PRIVATE vgre_cudart)
 add_test(NAME Events COMMAND test_events)

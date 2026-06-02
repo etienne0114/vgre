@@ -419,11 +419,23 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
     void *C, int Ctype, int ldc, long long strideC,
     int batchCount, int computeType, int algo)
 {
-    int elemSize = (Atype == (int)GEMEX_R_8I) ? 1 : 4;
+    // Byte size per element, keyed on GEMEX type enum
+    auto elemBytes = [](int t) -> int {
+        switch (t) {
+            case (int)GEMEX_R_8I:  case (int)GEMEX_R_8U:  case (int)GEMEX_C_8I:  return 1;
+            case (int)GEMEX_R_16F: case (int)GEMEX_R_16BF:                        return 2;
+            case (int)GEMEX_R_32F: case (int)GEMEX_R_32I:  case (int)GEMEX_C_32F: return 4;
+            case (int)GEMEX_R_64F: case (int)GEMEX_C_64F:  case (int)GEMEX_C_32I: return 8;
+            default:                                                                return 4;
+        }
+    };
+    int aBytes = elemBytes(Atype);
+    int bBytes = elemBytes(Btype);
+    int cBytes = elemBytes(Ctype);
     for (int b = 0; b < batchCount; ++b) {
-        const void* Ab = static_cast<const char*>(A) + b * strideA * elemSize;
-        const void* Bb = static_cast<const char*>(B) + b * strideB * elemSize;
-        void*       Cb = static_cast<char*>(C)       + b * strideC * 4;
+        const void* Ab = static_cast<const char*>(A) + (long long)b * strideA * aBytes;
+        const void* Bb = static_cast<const char*>(B) + (long long)b * strideB * bBytes;
+        void*       Cb = static_cast<char*>(C)       + (long long)b * strideC * cBytes;
         cublasStatus_t r = cublasGemmEx(handle, transa, transb, m, n, k,
             alpha, Ab, Atype, lda, Bb, Btype, ldb, beta, Cb, Ctype, ldc, computeType, algo);
         if (r != CUBLAS_STATUS_SUCCESS) return r;
