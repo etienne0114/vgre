@@ -30,11 +30,14 @@ public:
   std::string getDeviceName() const;
 
   // Execute the kernel on the iGPU, automatically transpiling if not cached.
+  // globalWorkOffset[3]: per-dimension origin offsets (OpenCL global_work_offset).
+  // global_id[d] = get_group_id(d)*local_size[d] + get_local_id(d) + globalWorkOffset[d]
   VGREResult execute(const std::string &kernelName,
                      const std::string &cudaSource,
                      const std::vector<ArgType> &argTypes, const dim3 &gridDim,
                      const dim3 &blockDim, void **args,
-                     const std::vector<size_t> &argSizes);
+                     const std::vector<size_t> &argSizes,
+                     const size_t globalWorkOffset[3] = nullptr);
 
   // Returns estimated peak GFLOPS based on OpenCL device compute units and
   // max clock frequency.  Returns 0.0 if device info is unavailable.

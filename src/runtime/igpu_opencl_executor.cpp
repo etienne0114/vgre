@@ -392,7 +392,8 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
                                        const std::vector<ArgType> &argTypes,
                                        const dim3 &gridDim,
                                        const dim3 &blockDim, void **args,
-                                       const std::vector<size_t> &argSizes) {
+                                       const std::vector<size_t> &argSizes,
+                                       const size_t globalWorkOffset[3]) {
   if (!initialized_) {
     auto init_res = initialize();
     if (init_res != VGREResult::SUCCESS)
@@ -510,11 +511,26 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
   }
 
   size_t localWorkSize[3] = {blockDim.x, blockDim.y, blockDim.z};
+  // global_work_size is total thread count per dimension (not group count).
+  // global_id[d] = get_group_id(d)*local_size[d] + get_local_id(d) + offset[d]
   size_t globalWorkSize[3] = {gridDim.x * blockDim.x, gridDim.y * blockDim.y,
                               gridDim.z * blockDim.z};
 
+  // Normalise the caller-supplied offset into a fixed 3-element array.
+  // A null pointer means all offsets are zero (OpenCL spec §5.8).
+  // O(1) — exactly 3 elements, independent of grid size.
+  size_t workOffset[3] = {0, 0, 0};
+  bool hasNonZeroOffset = false;
+  if (globalWorkOffset) {
+    workOffset[0] = globalWorkOffset[0];
+    workOffset[1] = globalWorkOffset[1];
+    workOffset[2] = globalWorkOffset[2];
+    hasNonZeroOffset = (workOffset[0] | workOffset[1] | workOffset[2]) != 0;
+  }
+
   cl_event kernelEvent;
-  err = clEnqueueNDRangeKernel(queue_, compiled.kernel, 3, nullptr,
+  err = clEnqueueNDRangeKernel(queue_, compiled.kernel, 3,
+                               hasNonZeroOffset ? workOffset : nullptr,
                                globalWorkSize, localWorkSize, 0, nullptr,
                                &kernelEvent);
   if (err != CL_SUCCESS) {

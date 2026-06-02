@@ -87,7 +87,9 @@ public:
   cl_int setKernelArg(cl_kernel_handle kernel, cl_uint argIndex, size_t argSize,
                       const void *argValue);
   cl_int enqueueNDRangeKernel(cl_command_queue queue, cl_kernel_handle kernel,
-                              cl_uint workDim, const size_t *globalWorkSize,
+                              cl_uint workDim,
+                              const size_t *globalWorkOffset,
+                              const size_t *globalWorkSize,
                               const size_t *localWorkSize,
                               cl_uint numEventsInWaitList = 0,
                               const cl_event *eventWaitList = nullptr,
