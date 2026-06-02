@@ -315,8 +315,9 @@ bool KernelCache::getKernelIR(const std::string& sourceHash, const std::string& 
     }
     VGRE_LOG_DEBUG("KernelCache", "Deserialized argSizes");
     
-    outIr.usesSharedMem = obj->getBoolean("usesSharedMem").value_or(false);
-    outIr.usesSyncthreads = obj->getBoolean("usesSyncthreads").value_or(false);
+    outIr.usesSharedMem    = obj->getBoolean("usesSharedMem").value_or(false);
+    outIr.usesSyncthreads  = obj->getBoolean("usesSyncthreads").value_or(false);
+    outIr.usesWarpShuffle  = obj->getBoolean("usesWarpShuffle").value_or(false);
     outIr.sharedMemSize = static_cast<size_t>(obj->getInteger("sharedMemSize").value_or(0));
     outIr.estimatedInstructionCount = static_cast<uint64_t>(obj->getInteger("estimatedInstructionCount").value_or(0));
     outIr.estimatedMemoryAccessCount = static_cast<uint64_t>(obj->getInteger("estimatedMemoryAccessCount").value_or(0));
@@ -376,8 +377,9 @@ void KernelCache::putKernelIR(const std::string& sourceHash, const std::string& 
     for (auto s : ir.argSizes) sizes.push_back(static_cast<int64_t>(s));
     obj["argSizes"] = std::move(sizes);
     
-    obj["usesSharedMem"] = ir.usesSharedMem;
+    obj["usesSharedMem"]   = ir.usesSharedMem;
     obj["usesSyncthreads"] = ir.usesSyncthreads;
+    obj["usesWarpShuffle"] = ir.usesWarpShuffle;
     obj["sharedMemSize"] = static_cast<int64_t>(ir.sharedMemSize);
     obj["estimatedInstructionCount"] = static_cast<int64_t>(ir.estimatedInstructionCount);
     obj["estimatedMemoryAccessCount"] = static_cast<int64_t>(ir.estimatedMemoryAccessCount);

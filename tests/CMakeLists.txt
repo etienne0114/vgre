@@ -101,6 +101,14 @@ target_link_libraries(test_syncthreads PRIVATE vgre)
 add_test(NAME SyncthreadsIntegration COMMAND test_syncthreads)
 set_tests_properties(SyncthreadsIntegration PROPERTIES FIXTURES_REQUIRED KMPRegistrationClean)
 
+add_executable(test_warp_shuffle_jit integration/test_warp_shuffle.cpp)
+target_link_libraries(test_warp_shuffle_jit PRIVATE vgre)
+add_test(NAME WarpShuffleJITIntegration COMMAND test_warp_shuffle_jit)
+set_tests_properties(WarpShuffleJITIntegration PROPERTIES
+    TIMEOUT 120
+    FIXTURES_REQUIRED KMPRegistrationClean
+    RESOURCE_LOCK vgre_llvm_jit)
+
 add_executable(test_extern_shared integration/test_extern_shared.cpp)
 target_link_libraries(test_extern_shared PRIVATE vgre)
 add_test(NAME ExternSharedIntegration COMMAND test_extern_shared)

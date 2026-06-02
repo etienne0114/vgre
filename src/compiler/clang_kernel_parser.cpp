@@ -265,6 +265,7 @@ static void saveEnhancedIR(const std::string& hash, const EnhancedKernelIR& ir) 
     obj["argSizes"] = std::move(sizes);
     obj["usesSharedMem"]              = ir.usesSharedMem;
     obj["usesSyncthreads"]            = ir.usesSyncthreads;
+    obj["usesWarpShuffle"]            = ir.usesWarpShuffle;
     obj["sharedMemSize"]              = static_cast<int64_t>(ir.sharedMemSize);
     obj["estimatedInstructionCount"]  = static_cast<int64_t>(ir.estimatedInstructionCount);
     obj["estimatedMemoryAccessCount"] = static_cast<int64_t>(ir.estimatedMemoryAccessCount);
@@ -339,6 +340,7 @@ static bool loadEnhancedIR(const std::string& hash, EnhancedKernelIR& outIR) {
             outIR.argSizes.push_back(static_cast<size_t>(v.getAsInteger().value_or(0)));
     outIR.usesSharedMem              = obj->getBoolean("usesSharedMem").value_or(false);
     outIR.usesSyncthreads            = obj->getBoolean("usesSyncthreads").value_or(false);
+    outIR.usesWarpShuffle            = obj->getBoolean("usesWarpShuffle").value_or(false);
     outIR.sharedMemSize              = static_cast<size_t>(obj->getInteger("sharedMemSize").value_or(0));
     outIR.estimatedInstructionCount  = static_cast<uint64_t>(obj->getInteger("estimatedInstructionCount").value_or(0));
     outIR.estimatedMemoryAccessCount = static_cast<uint64_t>(obj->getInteger("estimatedMemoryAccessCount").value_or(0));
@@ -750,9 +752,16 @@ VGREResult ClangKernelParser::parse(const std::string& name,
                 }
             }
         }
-        outIR.usesSharedMem = (source.find("__shared__") != std::string::npos || 
+        outIR.usesSharedMem = (source.find("__shared__") != std::string::npos ||
                                source.find("sharedMem") != std::string::npos);
-        outIR.usesSyncthreads = (source.find("__syncthreads") != std::string::npos);
+        outIR.usesSyncthreads  = (source.find("__syncthreads") != std::string::npos);
+        outIR.usesWarpShuffle  = (source.find("__shfl_sync") != std::string::npos
+                               || source.find("__shfl_down_sync") != std::string::npos
+                               || source.find("__shfl_up_sync") != std::string::npos
+                               || source.find("__shfl_xor_sync") != std::string::npos
+                               || source.find("__ballot_sync") != std::string::npos
+                               || source.find("__shfl(") != std::string::npos
+                               || source.find("__shfl_down(") != std::string::npos);
 
         // Authoritative Instruction Estimation (AST-based)
         outIR.estimatedInstructionCount = countInstructionsRecursively(kernelObj);
@@ -863,9 +872,10 @@ VGREResult ClangKernelParser::parseEnhanced(const std::string& name,
     outIR.source = basicIR.source;
     outIR.argTypes = basicIR.argTypes;
     outIR.argTypeNames = basicIR.argTypeNames;
-    outIR.argSizes = basicIR.argSizes;
-    outIR.usesSharedMem = basicIR.usesSharedMem;
+    outIR.argSizes        = basicIR.argSizes;
+    outIR.usesSharedMem   = basicIR.usesSharedMem;
     outIR.usesSyncthreads = basicIR.usesSyncthreads;
+    outIR.usesWarpShuffle = basicIR.usesWarpShuffle;
     outIR.estimatedInstructionCount = basicIR.estimatedInstructionCount;
 
     std::string jsonAst = runClangAstDump(sourceWithHeader);
