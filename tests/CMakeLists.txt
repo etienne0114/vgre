@@ -504,6 +504,12 @@ target_link_libraries(test_cache_oblivious_transpose PRIVATE vgre)
 add_test(NAME CacheObliviousTranspose COMMAND test_cache_oblivious_transpose)
 set_tests_properties(CacheObliviousTranspose PROPERTIES TIMEOUT 30)
 
+# cudaMemcpy3D / cudaMemcpy3DAsync all 4 transfer directions (QUEUE-21)
+add_executable(test_memcpy3d unit/test_memcpy3d.cpp)
+target_link_libraries(test_memcpy3d PRIVATE vgre)
+add_test(NAME Memcpy3D COMMAND test_memcpy3d)
+set_tests_properties(Memcpy3D PROPERTIES TIMEOUT 30)
+
 
 add_executable(test_tcp_cluster_preservation advanced/test_tcp_cluster_preservation.cpp)
 target_link_libraries(test_tcp_cluster_preservation PRIVATE vgre)
