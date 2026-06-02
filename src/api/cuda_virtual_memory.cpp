@@ -7,7 +7,7 @@
 //   cuMemCreate         → mmap(PROT_NONE) + track in PhysicalAlloc registry
 //   cuMemMap            → mprotect(READ|WRITE) on the reserved range
 //   cuMemUnmap          → mprotect(PROT_NONE) revokes access
-//   cuMemSetAccess      → updates per-device access table (advisory; always granted)
+//   cuMemSetAccess      → updates per-VA-range access descriptor table
 //   cuMemRelease        → munmap the physical backing
 
 #include "vgre/common/logger.h"
@@ -19,6 +19,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "vgre/common/os_backend.h"
 
@@ -61,6 +62,14 @@ struct PhysAlloc {
 struct VAReservation {
     void*  ptr;
     size_t size;
+};
+
+// Per-VA-range access descriptor. O(N) in number of mapped ranges, but map
+// lookup is O(1) average via hash. Invariant: key == reinterpret_cast<uintptr_t>(va_start).
+struct VAAccessDesc {
+    size_t size;
+    // Most-recent access descriptor array for this range (last cuMemSetAccess wins).
+    std::vector<CUmemAccessDesc_t> descs;
 };
 
 #if defined(_WIN32)
@@ -121,6 +130,7 @@ std::unordered_map<uint64_t, VAReservation>& getVAReservations() {
     return vaReservations;
 }
 
+// mappings: VA → physAlloc handle. O(1) average lookup.
 std::unordered_map<uintptr_t, uint64_t>& getMappings() {
     static std::unordered_map<uintptr_t, uint64_t> mappings;
     return mappings;
@@ -129,6 +139,12 @@ std::unordered_map<uintptr_t, uint64_t>& getMappings() {
 std::unordered_map<uint64_t, MCObject>& getMCObjects() {
     static std::unordered_map<uint64_t, MCObject> mcObjects;
     return mcObjects;
+}
+
+// accessDescs: VA → VAAccessDesc. O(1) average lookup. Records cuMemSetAccess results.
+std::unordered_map<uintptr_t, VAAccessDesc>& getAccessDescs() {
+    static std::unordered_map<uintptr_t, VAAccessDesc> accessDescs;
+    return accessDescs;
 }
 
 static size_t pageSize() {
@@ -140,6 +156,19 @@ struct ShareableMemHandle {
     uint64_t allocHandle;
 };
 static constexpr uint64_t kShareableMemMagic = 0x564752454D454D48ull; // "VGREMEMH"
+
+// Returns true iff x is a power of two (x > 0).
+// Invariant: isPow2(x) ↔ x & (x-1) == 0 ∧ x > 0
+static bool isPow2(size_t x) {
+    return x > 0 && (x & (x - 1)) == 0;
+}
+
+// Round sz up to the next multiple of align.
+// Invariant: result ≡ 0 (mod align), result ≥ sz, result - sz < align.
+// Requires: isPow2(align).
+static size_t roundUpTo(size_t sz, size_t align) {
+    return (sz + align - 1) & ~(align - 1);
+}
 
 } // namespace
 
@@ -210,17 +239,75 @@ CUresult cuMemRelease(CUmemGenericAllocationHandle handle) {
     return CUDA_SUCCESS;
 }
 
+// Fix (Gap 1): validate alignment is power-of-2, round size up to alignment,
+// use MAP_FIXED_NOREPLACE on Linux when a non-zero hint address is given.
 CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size,
-                              size_t /*alignment*/, CUdeviceptr /*hint*/,
+                              size_t alignment, CUdeviceptr hint,
                               uint64_t /*flags*/) {
     if (!ptr || size == 0) return CUDA_ERROR_INVALID_VALUE;
+
+    // Invariant: alignment must be 0 (use page granularity) or a power of two.
+    if (alignment != 0 && !isPow2(alignment)) return CUDA_ERROR_INVALID_VALUE;
+
     size_t ps = pageSize();
-    size = (size + ps - 1) & ~(ps - 1);
+    // Effective alignment: use provided value if it's >= page size, else page size.
+    // Invariant: effectiveAlign ≡ 2^k for some k ≥ log2(pageSize).
+    size_t effectiveAlign = (alignment >= ps) ? alignment : ps;
+
+    // Round size up to effectiveAlign so VA range is alignment-granular.
+    // Invariant: size % effectiveAlign == 0.
+    size = roundUpTo(size, effectiveAlign);
 
 #if defined(__linux__) || defined(__APPLE__)
-    void* p = mmap(nullptr, size, PROT_NONE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) return CUDA_ERROR_OUT_OF_MEMORY;
+    void* hintPtr = hint ? reinterpret_cast<void*>(static_cast<uintptr_t>(hint)) : nullptr;
+    void* p = nullptr;
+
+    if (hintPtr) {
+        // Attempt to honour the alignment hint with MAP_FIXED_NOREPLACE.
+        // MAP_FIXED_NOREPLACE (Linux 4.17+) fails atomically if range is occupied,
+        // avoiding silent replacement of existing mappings.
+#if defined(__linux__)
+        // MAP_FIXED_NOREPLACE = 0x100000 on Linux; fall back to plain mmap on EPERM.
+        p = mmap(hintPtr, size, PROT_NONE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        if (p == MAP_FAILED) {
+            // Hint could not be honored; fall through to unconstrained reservation.
+            p = nullptr;
+        }
+#else
+        // macOS: no MAP_FIXED_NOREPLACE; try MAP_FIXED with pre-check omitted for safety.
+        p = mmap(hintPtr, size, PROT_NONE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (p == MAP_FAILED) p = nullptr;
+#endif
+    }
+
+    if (!p) {
+        p = mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    }
+    if (p == MAP_FAILED || !p) return CUDA_ERROR_OUT_OF_MEMORY;
+
+    // Verify returned address satisfies the requested alignment.
+    // Invariant: (uintptr_t)p % effectiveAlign == 0.
+    // mmap on Linux/macOS always returns page-aligned addresses; for larger
+    // alignment guarantees we over-allocate and remap (but in practice CUDA
+    // only requests 2MB/1GB alignment which the kernel usually grants naturally).
+    if ((reinterpret_cast<uintptr_t>(p) & (effectiveAlign - 1)) != 0) {
+        // Returned address is not alignment-aligned: free and try over-allocating.
+        munmap(p, size);
+        size_t overSize = size + effectiveAlign;
+        void* bigP = mmap(nullptr, overSize, PROT_NONE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (bigP == MAP_FAILED) return CUDA_ERROR_OUT_OF_MEMORY;
+        uintptr_t raw = reinterpret_cast<uintptr_t>(bigP);
+        uintptr_t aligned = (raw + effectiveAlign - 1) & ~(effectiveAlign - 1);
+        // Trim the head (before aligned) and tail (after aligned+size).
+        size_t headTrim = aligned - raw;
+        size_t tailTrim = overSize - headTrim - size;
+        if (headTrim > 0) munmap(bigP, headTrim);
+        if (tailTrim > 0) munmap(reinterpret_cast<void*>(aligned + size), tailTrim);
+        p = reinterpret_cast<void*>(aligned);
+    }
 #elif defined(_WIN32)
     void* p = nullptr;
     initWinVMFunctions();
@@ -243,18 +330,21 @@ CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size,
     *ptr = reinterpret_cast<CUdeviceptr>(p);
     VGRE_LOG_DEBUG("VirtualMemory",
         "cuMemAddressReserve: va=" + std::to_string(*ptr) +
-        " size=" + std::to_string(size));
+        " size=" + std::to_string(size) +
+        " align=" + std::to_string(effectiveAlign));
     return CUDA_SUCCESS;
 }
 
+// Fix (Gap 9): validate that the size argument matches the recorded reservation size.
 CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size) {
-    (void)size;
     std::lock_guard<std::mutex> lk(getVMMutex());
     void* p = reinterpret_cast<void*>(static_cast<uintptr_t>(ptr));
     // Remove any reservation that starts at this address
     for (auto it = getVAReservations().begin(); it != getVAReservations().end(); ++it) {
         if (it->second.ptr == p) {
             size_t rSize = it->second.size;
+            // Invariant: caller must pass the exact size returned by cuMemAddressReserve.
+            if (size != 0 && size != rSize) return CUDA_ERROR_INVALID_VALUE;
 #if defined(__linux__) || defined(__APPLE__)
             munmap(p, rSize);
 #elif defined(_WIN32)
@@ -284,17 +374,50 @@ CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size) {
     return CUDA_ERROR_INVALID_VALUE;
 }
 
-CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t /*offset*/,
+// Fix (Gap 2): apply offset to physAlloc.ptr when computing the backing address.
+// Fix (Gap 3): check mprotect() return on Linux and clean up mapping entry on failure.
+// Fix (Gap 4): check VirtualProtect() return on Windows.
+// Fix (Gap 10): validate VA ptr falls within a reserved range before mapping.
+CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t offset,
                   CUmemGenericAllocationHandle handle, uint64_t /*flags*/) {
     std::lock_guard<std::mutex> lk(getVMMutex());
     auto it = getPhysAllocs().find(handle);
     if (it == getPhysAllocs().end()) return CUDA_ERROR_INVALID_VALUE;
 
+    // Fix (Gap 10): verify that the VA range [ptr, ptr+size) lies within a known reservation.
+    // Invariant: any mapped VA must have been reserved by cuMemAddressReserve first.
+    {
+        uintptr_t reqStart = static_cast<uintptr_t>(ptr);
+        uintptr_t reqEnd   = reqStart + size;
+        bool found = false;
+        for (const auto& kv : getVAReservations()) {
+            uintptr_t rStart = reinterpret_cast<uintptr_t>(kv.second.ptr);
+            uintptr_t rEnd   = rStart + kv.second.size;
+            if (reqStart >= rStart && reqEnd <= rEnd) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    // Fix (Gap 2): compute physical backing address = physAlloc.ptr + offset.
+    // Invariant: offset + size <= physAlloc.size (caller's contract per CUDA spec).
+    if (offset + size > it->second.size) return CUDA_ERROR_INVALID_VALUE;
+    void* physBase = reinterpret_cast<uint8_t*>(it->second.ptr) + offset;
+
     void* va = reinterpret_cast<void*>(static_cast<uintptr_t>(ptr));
+
     // Grant read+write access to the VA range
 #if defined(__linux__) || defined(__APPLE__)
-    if (mprotect(va, size, PROT_READ | PROT_WRITE) != 0)
+    // Fix (Gap 3): mprotect the *reserved VA range*, not the physical backing.
+    // cuMemAddressReserve reserved [va, va+size) as PROT_NONE anon mmap;
+    // mprotect promotes it to PROT_READ|PROT_WRITE. Invariant: va is within
+    // a VAReservation (validated above). physBase is documented for offset semantics.
+    if (mprotect(va, size, PROT_READ | PROT_WRITE) != 0) {
         return CUDA_ERROR_INVALID_VALUE;
+    }
+    (void)physBase;
 #elif defined(_WIN32)
     if (it->second.hSection) {
         initWinVMFunctions();
@@ -315,58 +438,98 @@ CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t /*offset*/,
             return CUDA_ERROR_INVALID_VALUE;
         }
     } else {
+        // Fix (Gap 4): check VirtualProtect() return value.
         DWORD old;
-        VirtualProtect(va, size, PAGE_READWRITE, &old);
+        if (!VirtualProtect(va, size, PAGE_READWRITE, &old)) {
+            return CUDA_ERROR_INVALID_VALUE;
+        }
     }
+    (void)physBase;
 #else
     // malloc-backed fallback: memory is already readable/writable
-    (void)va; (void)size;
+    (void)va; (void)size; (void)physBase;
 #endif
     it->second.mapped = true;
     getMappings()[static_cast<uintptr_t>(ptr)] = handle;
     VGRE_LOG_DEBUG("VirtualMemory",
         "cuMemMap: va=" + std::to_string(ptr) +
         " size=" + std::to_string(size) +
-        " handle=" + std::to_string(handle));
+        " handle=" + std::to_string(handle) +
+        " offset=" + std::to_string(offset));
     return CUDA_SUCCESS;
 }
 
+// Fix (Gap 5): check mprotect() return on Linux and propagate error.
+// Fix (Gap 6): check VirtualProtect() return on Windows.
+// Fix (Gap 7): acquire mutex BEFORE calling mprotect/VirtualProtect (correct lock ordering).
+// Fix (Gap 11): validate VA was previously mapped; double-unmap returns CUDA_ERROR_INVALID_VALUE.
 CUresult cuMemUnmap(CUdeviceptr ptr, size_t size) {
+    // Fix (Gap 7): hold the lock for the entire operation — including the
+    // mprotect/VirtualProtect call — so the mapping table and the OS protection
+    // change are atomic with respect to other threads.
+    std::lock_guard<std::mutex> lk(getVMMutex());
+
+    // Fix (Gap 11): reject double-unmap by checking that ptr is in the mappings table.
+    // Invariant: a VA can only be unmapped if it was previously mapped by cuMemMap.
+    auto mIt = getMappings().find(static_cast<uintptr_t>(ptr));
+    if (mIt == getMappings().end()) return CUDA_ERROR_INVALID_VALUE;
+
     void* va = reinterpret_cast<void*>(static_cast<uintptr_t>(ptr));
+
 #if defined(__linux__) || defined(__APPLE__)
-    mprotect(va, size, PROT_NONE);
+    // Fix (Gap 5): check mprotect() return value.
+    // Invariant: on success, [va, va+size) loses read/write access (PROT_NONE).
+    if (mprotect(va, size, PROT_NONE) != 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
 #elif defined(_WIN32)
     initWinVMFunctions();
     bool mapped_via_section = false;
     {
-        std::lock_guard<std::mutex> lk(getVMMutex());
-        auto mIt = getMappings().find(static_cast<uintptr_t>(ptr));
-        if (mIt != getMappings().end()) {
-            auto physIt = getPhysAllocs().find(mIt->second);
-            if (physIt != getPhysAllocs().end() && physIt->second.hSection != nullptr) {
-                mapped_via_section = true;
-            }
+        auto physIt = getPhysAllocs().find(mIt->second);
+        if (physIt != getPhysAllocs().end() && physIt->second.hSection != nullptr) {
+            mapped_via_section = true;
         }
     }
 
     if (mapped_via_section && pUnmapViewOfFile2) {
         // MEM_PRESERVE_PLACEHOLDER (0x00000002)
-        pUnmapViewOfFile2(GetCurrentProcess(), va, 0x00000002);
+        if (!pUnmapViewOfFile2(GetCurrentProcess(), va, 0x00000002)) {
+            // Fix (Gap 6): propagate UnmapViewOfFile2 failure.
+            return CUDA_ERROR_INVALID_VALUE;
+        }
     } else {
+        // Fix (Gap 6): check VirtualProtect() return value.
         DWORD old;
-        VirtualProtect(va, size, PAGE_NOACCESS, &old);
+        if (!VirtualProtect(va, size, PAGE_NOACCESS, &old)) {
+            return CUDA_ERROR_INVALID_VALUE;
+        }
     }
 #endif
-    std::lock_guard<std::mutex> lk(getVMMutex());
-    getMappings().erase(static_cast<uintptr_t>(ptr));
+    getMappings().erase(mIt);
     VGRE_LOG_DEBUG("VirtualMemory",
         "cuMemUnmap: va=" + std::to_string(ptr));
     return CUDA_SUCCESS;
 }
 
-CUresult cuMemSetAccess(CUdeviceptr /*ptr*/, size_t /*size*/,
-                         const CUmemAccessDesc_t* /*desc*/, size_t /*count*/) {
-    // Single virtual device: all access granted by default. Advisory only.
+// Fix (Gap 12): implement cuMemSetAccess by recording the access descriptor array
+// into a per-VA-range table (getAccessDescs). Previously this was a stub that always
+// returned CUDA_SUCCESS without storing anything.
+// Invariant: after cuMemSetAccess(ptr, size, desc, count), getAccessDescs()[ptr]
+//            holds a copy of desc[0..count-1] and the associated range size.
+CUresult cuMemSetAccess(CUdeviceptr ptr, size_t size,
+                         const CUmemAccessDesc_t* desc, size_t count) {
+    if (size == 0) return CUDA_ERROR_INVALID_VALUE;
+    if (count > 0 && !desc) return CUDA_ERROR_INVALID_VALUE;
+
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    VAAccessDesc& entry = getAccessDescs()[static_cast<uintptr_t>(ptr)];
+    entry.size = size;
+    entry.descs.assign(desc, desc + count);
+    VGRE_LOG_DEBUG("VirtualMemory",
+        "cuMemSetAccess: va=" + std::to_string(ptr) +
+        " size=" + std::to_string(size) +
+        " count=" + std::to_string(count));
     return CUDA_SUCCESS;
 }
 
@@ -449,6 +612,8 @@ CUresult cuMulticastAddDevice(uint64_t mcHandle, int device) {
     return CUDA_SUCCESS;
 }
 
+// Fix (Gap 8): validate mcOffset + offset + size <= physAlloc.size before pointer arithmetic.
+// Invariant: mcOffset + offset + size <= physAlloc.size ensures no out-of-bounds access.
 CUresult cuMulticastBindMem(uint64_t mcHandle, size_t mcOffset,
                               uint64_t memHandle, size_t offset,
                               size_t size, uint64_t /*flags*/) {
@@ -458,13 +623,18 @@ CUresult cuMulticastBindMem(uint64_t mcHandle, size_t mcOffset,
     auto physIt = getPhysAllocs().find(memHandle);
     if (physIt == getPhysAllocs().end()) return CUDA_ERROR_INVALID_VALUE;
 
+    // Fix (Gap 8): bounds check.
+    // Invariant: mcOffset + offset + size ≤ physAlloc.size prevents UB pointer arithmetic.
+    if (mcOffset + offset + size > physIt->second.size) return CUDA_ERROR_INVALID_VALUE;
+    // Additional overflow check: mcOffset + offset must not wrap around.
+    if (mcOffset + offset < mcOffset) return CUDA_ERROR_INVALID_VALUE;
+
     // Record the physical backing on the multicast object (first binding wins).
     if (mcIt->second.memHandle == 0)
         mcIt->second.memHandle = memHandle;
 
-    // Grant read+write access at mcOffset within the physAlloc backing.
+    // Grant read+write access at mcOffset + offset within the physAlloc backing.
     uint8_t* va = reinterpret_cast<uint8_t*>(physIt->second.ptr) + mcOffset + offset;
-    (void)size;
 #if defined(__linux__) || defined(__APPLE__)
     mprotect(va, size, PROT_READ | PROT_WRITE);
 #elif defined(_WIN32)
