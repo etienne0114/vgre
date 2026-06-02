@@ -47,6 +47,24 @@ void cacheObliviousSpMV(const T* values, const IndexType* col_indices,
                         const IndexType* row_offsets, const T* x, T* y,
                         size_t num_rows, size_t num_cols);
 
+// Cache-oblivious in-place transpose of a square NxN float matrix.
+//
+// Complexity analysis (Frigo et al., 1999 "Cache-Oblivious Algorithms"):
+//   T(N) = 2·T(N/2) + O((N/2)²/B)       [diagonal blocks recurse in-place]
+//          + O(N²/B)                      [off-diagonal block swap via recursion]
+//   By master theorem: T(N) = O(N²/B) cache misses total,
+//   where B = cache_line_bytes / sizeof(float) = 64/4 = 16 floats per cache line.
+//   This is optimal: every element must be touched at least once → Ω(N²/B).
+//
+// kTile = 32: a 32×32 float block = 4 KiB; fits in L1 cache (typically 32 KiB),
+// ensuring the AVX2 8×8 base kernel operates entirely from registers + L1.
+//
+// Parameters:
+//   A   - pointer to the first element of the NxN matrix (row-major)
+//   N   - matrix dimension
+//   ld  - leading dimension (stride between rows, ld >= N)
+void cacheObliviousTransposeInPlace(float* A, size_t N, size_t ld);
+
 } // namespace math
 } // namespace vgre
 
