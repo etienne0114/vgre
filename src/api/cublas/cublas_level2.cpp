@@ -35,6 +35,42 @@ cublasStatus_t cublasSgemv_v2(
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// ── DGEMV ────────────────────────────────────────────────────────────────────
+// Math invariant (RowMajor):
+//   no-trans: y[i] = alpha * sum_j(A[i*lda+j]*x[j*incx]) + beta*y[i*incy]
+//   trans:    y[j] = alpha * sum_i(A[i*lda+j]*x[i*incx]) + beta*y[j*incy]
+// O(m*n) time, O(1) additional space.
+cublasStatus_t cublasDgemv_v2(
+    cublasHandle_t handle,
+    cublasOperation_t trans,
+    int m, int n,
+    const double* alpha, const double* A, int lda,
+    const double* x, int incx,
+    const double* beta, double* y, int incy)
+{
+    if (!handle || !A || !x || !y || !alpha || !beta) return CUBLAS_STATUS_INVALID_VALUE;
+#if HAVE_CBLAS
+    CBLAS_TRANSPOSE t = (trans == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
+    cblas_dgemv(CblasRowMajor, t, m, n, *alpha, A, lda, x, incx, *beta, y, incy);
+#else
+    bool doTrans = (trans != CUBLAS_OP_N);
+    int rows = doTrans ? n : m;
+    int cols = doTrans ? m : n;
+    #ifdef _OPENMP
+    #pragma omp parallel for if (rows > 64)
+    #endif
+    for (int r = 0; r < rows; ++r) {
+        double acc = 0.0;
+        for (int c = 0; c < cols; ++c)
+            // no-trans: A[r*lda+c] = A[i*lda+j]
+            // trans:    A[c*lda+r] = A[i*lda+j] where i=c (row), j=r (col)
+            acc += (doTrans ? A[c*lda+r] : A[r*lda+c]) * x[c*incx];
+        y[r*incy] = (*alpha)*acc + (*beta)*y[r*incy];
+    }
+#endif
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 // ── TRSV ─────────────────────────────────────────────────────────────────────
 cublasStatus_t cublasStrsv_v2(cublasHandle_t handle, cublasFillMode_t uplo,
     cublasOperation_t trans, cublasDiagType_t diag, int n,
