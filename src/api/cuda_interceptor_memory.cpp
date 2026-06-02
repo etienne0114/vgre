@@ -235,6 +235,123 @@ cudaError_t CUDAInterceptor::memcpy2DAsync(void *dst, size_t dpitch,
   return cudaSuccess;
 }
 
+cudaError_t CUDAInterceptor::memcpy3D(const cudaMemcpy3DParms *p) {
+  // Invariant: for a 3-D pitched buffer, the byte offset of element (x,y,z) is
+  //   z * slicePitch + y * rowPitch + x,   where slicePitch = rowPitch * height.
+  // Total bytes transferred = extent.width * extent.height * extent.depth.
+  if (!p) return cudaErrorInvalidValue;
+  if (p->extent.width == 0 || p->extent.height == 0 || p->extent.depth == 0)
+    return cudaErrorInvalidValue;
+
+  // Resolve source base pointer and pitches.
+  const uint8_t *srcBase = nullptr;
+  size_t srcPitch = 0, srcSlicePitch = 0;
+  if (p->srcArray) {
+    // cudaArray source: rows are contiguous (no padding).
+    srcBase = static_cast<const uint8_t *>(
+        vgre::core::TextureManager::instance().getCudaArrayData(p->srcArray));
+    srcPitch = p->extent.width;  // contiguous row
+  } else {
+    srcBase = static_cast<const uint8_t *>(p->srcPtr.ptr)
+              + p->srcPos.z * (p->srcPtr.pitch * p->srcPtr.ysize)
+              + p->srcPos.y * p->srcPtr.pitch
+              + p->srcPos.x;
+    srcPitch = p->srcPtr.pitch ? p->srcPtr.pitch : p->extent.width;
+  }
+  // slicePitch = rowPitch * height (CUDA 3-D memory layout invariant)
+  srcSlicePitch = srcPitch * p->extent.height;
+
+  // Resolve destination base pointer and pitches.
+  uint8_t *dstBase = nullptr;
+  size_t dstPitch = 0, dstSlicePitch = 0;
+  if (p->dstArray) {
+    dstBase = static_cast<uint8_t *>(
+        vgre::core::TextureManager::instance().getCudaArrayData(p->dstArray));
+    dstPitch = p->extent.width;
+  } else {
+    dstBase = static_cast<uint8_t *>(p->dstPtr.ptr)
+              + p->dstPos.z * (p->dstPtr.pitch * p->dstPtr.ysize)
+              + p->dstPos.y * p->dstPtr.pitch
+              + p->dstPos.x;
+    dstPitch = p->dstPtr.pitch ? p->dstPtr.pitch : p->extent.width;
+  }
+  // slicePitch = rowPitch * height (CUDA 3-D memory layout invariant)
+  dstSlicePitch = dstPitch * p->extent.height;
+
+  if (!srcBase || !dstBase) return cudaErrorInvalidValue;
+
+  auto &mm = core::RuntimeEngine::instance().getMemoryManager();
+  const size_t rowBytes = p->extent.width;
+
+  // Loop: z in [0,depth), y in [0,height); dispatch on transfer direction.
+  // Offset formula: base + z*slicePitch + y*rowPitch  (as derived above).
+  for (size_t z = 0; z < p->extent.depth; ++z) {
+    for (size_t y = 0; y < p->extent.height; ++y) {
+      const uint8_t *srcRow = srcBase + z * srcSlicePitch + y * srcPitch;
+      uint8_t *dstRow       = dstBase + z * dstSlicePitch + y * dstPitch;
+
+      switch (p->kind) {
+      case cudaMemcpyHostToHost:
+        ::memcpy(dstRow, srcRow, rowBytes);
+        break;
+      case cudaMemcpyHostToDevice: {
+        auto r = mm.copyHostToDevice(dstRow, srcRow, rowBytes);
+        if (r != VGREResult::SUCCESS) return convertResult(r);
+        break;
+      }
+      case cudaMemcpyDeviceToHost: {
+        auto r = mm.copyDeviceToHost(dstRow,
+            const_cast<MemoryHandle>(static_cast<const void *>(srcRow)),
+            rowBytes);
+        if (r != VGREResult::SUCCESS) return convertResult(r);
+        break;
+      }
+      case cudaMemcpyDeviceToDevice: {
+        auto r = mm.copyDeviceToDevice(dstRow,
+            const_cast<MemoryHandle>(static_cast<const void *>(srcRow)),
+            rowBytes);
+        if (r != VGREResult::SUCCESS) return convertResult(r);
+        break;
+      }
+      default:
+        return cudaErrorInvalidMemcpyDirection;
+      }
+    }
+  }
+  return cudaSuccess;
+}
+
+cudaError_t CUDAInterceptor::memcpy3DAsync(const cudaMemcpy3DParms *p,
+                                            cudaStream_t stream) {
+  if (!p) return cudaErrorInvalidValue;
+
+  // Capture the params by value so the lambda owns a copy and the caller's
+  // stack frame can be freed before the task executes.
+  cudaMemcpy3DParms pCopy = *p;
+
+  int priority = 0;
+  (void)core::RuntimeEngine::instance().getDevice().getStreamPriority(stream,
+                                                                      priority);
+  auto fut = core::Scheduler::instance().submitStreamTask(
+      stream,
+      [this, pCopy]() {
+        auto err = this->memcpy3D(&pCopy);
+        if (err != cudaSuccess) {
+          throw std::runtime_error("async memcpy3D failed");
+        }
+      },
+      priority);
+  // Wait up to 5 s for the task to complete; fall back to a synchronous copy
+  // on timeout (matches the behaviour of memcpyAsync).
+  if (fut.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+    VGRE_LOG_WARN("CUDAInterceptor",
+                  "memcpy3DAsync task timeout - executing synchronously");
+    return this->memcpy3D(p);
+  }
+  auto r = fut.get();
+  return convertResult(r);
+}
+
 cudaError_t CUDAInterceptor::memcpyBatchAsync(void **dstPtr, const void **srcPtr,
                                                size_t *size, size_t count,
                                                cudaMemcpyKind_t kind,
