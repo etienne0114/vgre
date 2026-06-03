@@ -706,6 +706,14 @@ add_executable(test_btree_region_lookup unit/test_btree_region_lookup.cpp)
 add_test(NAME BTreeRegionLookup COMMAND test_btree_region_lookup)
 set_tests_properties(BTreeRegionLookup PROPERTIES TIMEOUT 30)
 
+# QUEUE-34: Robin Hood open-addressing hash table — 10k-entry stress test.
+# Standalone: header-only, no vgre linkage needed.
+add_executable(test_robin_hood_hash_table unit/test_robin_hood_hash_table.cpp)
+target_include_directories(test_robin_hood_hash_table PRIVATE
+    ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME RobinHoodHashTable COMMAND test_robin_hood_hash_table)
+set_tests_properties(RobinHoodHashTable PROPERTIES TIMEOUT 30)
+
 # ── Cross-Platform Integration Tests ────────────────────────────────────────
 add_executable(test_cross_platform_tcp_cluster
     integration/test_cross_platform_tcp_cluster.cpp)

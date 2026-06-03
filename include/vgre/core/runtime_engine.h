@@ -4,6 +4,7 @@
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
 #include "vgre/core/graph_manager.h"
+#include "vgre/core/robin_hood_hash_table.h"
 
 #include <memory>
 #include <mutex>
@@ -359,7 +360,7 @@ private:
   std::unordered_map<KernelId, KernelIR> kernelIRCache_;
   std::unordered_map<void*, KernelId> kernelFnAddrMap_; // reverse map for CDP
   std::unordered_map<KernelId, JITFuture> pendingKernels_;
-  std::unordered_map<std::string, KernelId> kernelNames_;
+  RobinHoodHashTable<std::string, KernelId> kernelNames_;
   KernelId nextKernelId_ = 1;
   std::unordered_set<KernelId> warnedSyncthreads_;
   std::thread benchmarkThread_;
