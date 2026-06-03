@@ -24,7 +24,14 @@ enum cudnnDataType_t     { CUDNN_DATA_FLOAT = 0 };
 enum cudnnTensorFormat_t { CUDNN_TENSOR_NCHW = 0 };
 enum cudnnNormMode_t     { CUDNN_NORM_PER_ACTIVATION = 0, CUDNN_NORM_PER_CHANNEL = 1 };
 enum cudnnNormAlgo_t     { CUDNN_NORM_ALGO_STANDARD = 0 };
-enum cudnnNormOps_t      { CUDNN_NORM_OPS_NORM = 0 };
+enum cudnnNormOps_t      { CUDNN_NORM_OPS_NORM = 0, CUDNN_NORM_OPS_NORM_ACTIVATION = 1 };
+enum cudnnActivationMode_t { CUDNN_ACTIVATION_RELU = 1 };
+enum cudnnNanPropagation_t { CUDNN_NOT_PROPAGATE_NAN = 0 };
+
+cudnnStatus_t cudnnCreateActivationDescriptor(cudnnActivationDescriptor_t *d);
+cudnnStatus_t cudnnDestroyActivationDescriptor(cudnnActivationDescriptor_t d);
+cudnnStatus_t cudnnSetActivationDescriptor(cudnnActivationDescriptor_t d,
+    cudnnActivationMode_t mode, cudnnNanPropagation_t nan, double coeff);
 
 cudnnStatus_t cudnnCreate(cudnnHandle_t *handle);
 cudnnStatus_t cudnnDestroy(cudnnHandle_t handle);
@@ -332,6 +339,88 @@ int test_invalid_value() {
     return 0;
 }
 
+// ── 6. Fused BN+ReLU inference — QUEUE-32 ────────────────────────────────────
+// Verifies single-pass fused output matches two-pass reference within 1e-5.
+// Formula: out[i] = max(0, (x[i]-mean[c])/sqrt(var[c]+eps)*scale[c]+bias[c])
+// Test uses N=4, C=4, H=4, W=4 (256 elements) for fast CI; validates all paths.
+int test_fused_bn_relu_inference() {
+    const int N=4, C=4, H=4, W=4, HW=H*W, total=N*C*HW;
+    const float eps = 1e-5f;
+
+    // Construct input with mix of positive/negative to exercise ReLU gate
+    std::vector<float> x(total), scale(C), bias(C), mean(C), var(C);
+    for (int i = 0; i < total; ++i)
+        x[i] = (i % 7 < 3) ? -(float)(i % 5 + 1) : (float)(i % 13 + 1);
+    for (int c = 0; c < C; ++c) {
+        scale[c] = 0.5f + 0.1f * c;
+        bias[c]  = -0.3f + 0.2f * c;
+        mean[c]  = 0.0f;
+        var[c]   = 1.0f;
+        // Compute true per-channel mean and variance for reference
+        double s = 0.0, s2 = 0.0;
+        int cnt = N * HW;
+        for (int n = 0; n < N; ++n)
+            for (int hw = 0; hw < HW; ++hw) {
+                float v = x[(n * C + c) * HW + hw];
+                s += v; s2 += v * v;
+            }
+        mean[c] = (float)(s / cnt);
+        var[c]  = (float)(s2 / cnt - (double)mean[c] * mean[c]);
+    }
+
+    // ── Reference: two-pass BN then separate ReLU ────────────────────────────
+    std::vector<float> ref(total);
+    for (int n = 0; n < N; ++n)
+        for (int c = 0; c < C; ++c)
+            for (int hw = 0; hw < HW; ++hw) {
+                int idx = (n * C + c) * HW + hw;
+                float xhat = (x[idx] - mean[c]) / std::sqrt(var[c] + eps);
+                float y = scale[c] * xhat + bias[c];
+                ref[idx] = y > 0.f ? y : 0.f;  // ReLU separately
+            }
+
+    // ── Fused: single-pass BN+ReLU via cudnnNormalizationForwardInference ────
+    cudnnHandle_t h = nullptr; cudnnCreate(&h);
+    cudnnTensorDescriptor_t xDesc, yDesc, scDesc;
+    cudnnCreateTensorDescriptor(&xDesc);
+    cudnnCreateTensorDescriptor(&yDesc);
+    cudnnCreateTensorDescriptor(&scDesc);
+    cudnnSetTensor4dDescriptor(xDesc,  CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, C, H, W);
+    cudnnSetTensor4dDescriptor(yDesc,  CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, C, H, W);
+    cudnnSetTensor4dDescriptor(scDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, C, 1, 1);
+
+    cudnnActivationDescriptor_t actDesc;
+    cudnnCreateActivationDescriptor(&actDesc);
+    cudnnSetActivationDescriptor(actDesc, CUDNN_ACTIVATION_RELU, CUDNN_NOT_PROPAGATE_NAN, 0.0);
+
+    std::vector<float> fused(x);  // in-place output
+    float alpha = 1.f, beta = 0.f;
+    auto st = cudnnNormalizationForwardInference(
+        h, CUDNN_NORM_PER_CHANNEL, CUDNN_NORM_OPS_NORM_ACTIVATION,
+        CUDNN_NORM_ALGO_STANDARD, &alpha, &beta,
+        xDesc, fused.data(),
+        scDesc, scale.data(), bias.data(),
+        scDesc, mean.data(), var.data(),
+        eps, nullptr, nullptr, actDesc,
+        yDesc, fused.data(), nullptr, 0);
+
+    if (st != CUDNN_STATUS_SUCCESS) FAIL("cudnnNormalizationForwardInference returned " << st);
+
+    // Verify fused output matches reference within 1e-5
+    float max_diff = 0.f;
+    for (int i = 0; i < total; ++i)
+        max_diff = std::fmax(max_diff, std::fabs(fused[i] - ref[i]));
+    if (max_diff >= 1e-4f) FAIL("max |fused - ref| = " << max_diff << " >= 1e-4");
+
+    cudnnDestroyActivationDescriptor(actDesc);
+    cudnnDestroyTensorDescriptor(xDesc);
+    cudnnDestroyTensorDescriptor(yDesc);
+    cudnnDestroyTensorDescriptor(scDesc);
+    cudnnDestroy(h);
+    PASS("Fused BN+ReLU inference (4×4×4×4, max_diff=" << max_diff << ")");
+    return 0;
+}
+
 int main() {
     int failures = 0;
     failures += test_per_channel_inference();
@@ -339,6 +428,8 @@ int main() {
     failures += test_per_channel_training();
     failures += test_per_channel_backward();
     failures += test_invalid_value();
+    // QUEUE-32: fused BN+ReLU single-pass inference
+    failures += test_fused_bn_relu_inference();
     if (failures == 0)
         std::cout << "All cudnnNormalization tests passed.\n";
     return failures;

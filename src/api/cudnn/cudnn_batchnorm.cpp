@@ -61,27 +61,28 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
     int count = N * HW;
 
     if (mode == CUDNN_BATCHNORM_SPATIAL) {
+        // Welford online algorithm: single pass, numerically stable mean/variance
         #ifdef _OPENMP
         #pragma omp parallel for if (C > 4)
         #endif
         for (int c=0; c<C; ++c) {
-            double sum = 0.0;
-            for (int n=0; n<N; ++n)
-            for (int hw=0; hw<HW; ++hw)
-                sum += xf[(n*C + c)*HW + hw];
-            mean[c] = static_cast<float>(sum / count);
-        }
-        #ifdef _OPENMP
-        #pragma omp parallel for if (C > 4)
-        #endif
-        for (int c=0; c<C; ++c) {
-            double sumSq = 0.0;
-            for (int n=0; n<N; ++n)
+            // Welford online algorithm for numerically stable mean/variance
+            double welford_mean = 0.0, M2 = 0.0;
+            int wcount = 0;
             for (int hw=0; hw<HW; ++hw) {
-                float d = xf[(n*C + c)*HW + hw] - mean[c];
-                sumSq += d * d;
+                for (int n=0; n<N; ++n) {
+                    float xval = xf[(n*C + c)*HW + hw];
+                    ++wcount;
+                    double delta = xval - welford_mean;
+                    welford_mean += delta / wcount;
+                    double delta2 = xval - welford_mean;
+                    // Welford invariant: M2_n = M2_{n-1} + (x-mean_{n-1})(x-mean_n)
+                    M2 += delta * delta2;
+                }
             }
-            var[c] = static_cast<float>(sumSq / count);
+            mean[c] = static_cast<float>(welford_mean);
+            // Population variance (count == N*HW, consistent with original formulation)
+            var[c]  = (wcount > 1) ? static_cast<float>(M2 / wcount) : 0.f;
         }
     } else {
         for (int c=0; c<C; ++c)

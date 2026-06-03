@@ -16,7 +16,7 @@ extern "C" {
 cudnnStatus_t cudnnNormalizationForwardInference(
     cudnnHandle_t /*handle*/,
     cudnnNormMode_t mode,
-    cudnnNormOps_t /*normOps*/,
+    cudnnNormOps_t normOps,
     cudnnNormAlgo_t /*algo*/,
     const void *alpha, const void *beta,
     const cudnnTensorDescriptor_t xDesc, const void *x,
@@ -26,7 +26,7 @@ cudnnStatus_t cudnnNormalizationForwardInference(
     const void *estimatedMean, const void *estimatedVariance,
     double epsilon,
     const cudnnTensorDescriptor_t /*zDesc*/, const void * /*z*/,
-    const cudnnActivationDescriptor_t /*actDesc*/,
+    const cudnnActivationDescriptor_t actDesc,
     const cudnnTensorDescriptor_t yDesc, void *y,
     void * /*workspace*/, size_t /*workspaceSizeInBytes*/)
 {
@@ -42,8 +42,12 @@ cudnnStatus_t cudnnNormalizationForwardInference(
     const float *mu = static_cast<const float*>(estimatedMean);
     const float *va = static_cast<const float*>(estimatedVariance);
 
+    // Decode the activation descriptor (null → identity / no activation)
+    const ActDesc *act = static_cast<const ActDesc*>(actDesc);
+    const bool fuse_act = (normOps == CUDNN_NORM_OPS_NORM_ACTIVATION) && (act != nullptr);
+
     if (mode == CUDNN_NORM_PER_CHANNEL) {
-        // Batch norm inference: normalize per channel
+        // Fused BN+ReLU: single pass O(N·C·H·W), no intermediate buffer
         #ifdef _OPENMP
         #pragma omp parallel for OMP_COLLAPSE(2) if (N * C * HW > 1024)
         #endif
@@ -52,7 +56,10 @@ cudnnStatus_t cudnnNormalizationForwardInference(
         for (int hw = 0; hw < HW; ++hw) {
             int idx = (n * C + c) * HW + hw;
             float xhat = (xf[idx] - mu[c]) / std::sqrt(va[c] + static_cast<float>(epsilon));
-            yf[idx] = a * (sc[c] * xhat + bi[c]) + b_scale * yf[idx];
+            float yval = sc[c] * xhat + bi[c];
+            // ReLU fusion: single pass, no intermediate buffer
+            if (fuse_act) yval = applyActivation(yval, *act);
+            yf[idx] = a * yval + b_scale * yf[idx];
         }
     } else {
         // Layer norm inference: normalize over all C*HW elements per sample
@@ -71,7 +78,10 @@ cudnnStatus_t cudnnNormalizationForwardInference(
             float inv_std = 1.0f / std::sqrt(var_n + static_cast<float>(epsilon));
             for (int i = 0; i < D; ++i) {
                 float xhat = (xn[i] - mean_n) * inv_std;
-                yn[i] = a * (sc[i] * xhat + bi[i]) + b_scale * yn[i];
+                float yval = sc[i] * xhat + bi[i];
+                // Fused BN+ReLU: single pass O(N·C·H·W), no intermediate buffer
+                if (fuse_act) yval = applyActivation(yval, *act);
+                yn[i] = a * yval + b_scale * yn[i];
             }
         }
     }
@@ -111,16 +121,28 @@ cudnnStatus_t cudnnNormalizationForwardTraining(
 
     if (mode == CUDNN_NORM_PER_CHANNEL) {
         // Per-channel batch norm training: statistics over N*HW per channel
+        // Uses Welford online algorithm for numerically stable mean/variance
         int group = N * HW;
         std::vector<float> mean(C, 0.f), var(C, 0.f);
         for (int c = 0; c < C; ++c) {
-            double s = 0.0, s2 = 0.0;
-            for (int n = 0; n < N; ++n) for (int hw = 0; hw < HW; ++hw) {
-                float v = xf[(n * C + c) * HW + hw];
-                s += v; s2 += v * v;
+            // Welford online algorithm for numerically stable mean/variance
+            // Invariant: M2_n = M2_{n-1} + (x-mean_{n-1})(x-mean_n)
+            double welford_mean = 0.0, M2 = 0.0;
+            int count = 0;
+            for (int hw = 0; hw < HW; ++hw) {
+                for (int n = 0; n < N; ++n) {
+                    float xval = xf[(n * C + c) * HW + hw];
+                    ++count;
+                    double delta = xval - welford_mean;
+                    welford_mean += delta / count;
+                    double delta2 = xval - welford_mean;
+                    // Welford invariant: M2_n = M2_{n-1} + (x-mean_{n-1})(x-mean_n)
+                    M2 += delta * delta2;
+                }
             }
-            mean[c] = static_cast<float>(s / group);
-            var[c]  = static_cast<float>(s2 / group - static_cast<double>(mean[c]) * mean[c]);
+            mean[c] = static_cast<float>(welford_mean);
+            // Population variance (consistent with two-pass BN training)
+            var[c]  = (count > 1) ? static_cast<float>(M2 / count) : 0.f;
         }
         float ema = static_cast<float>(exponentialAverageFactor);
         float ema1 = 1.0f - ema;
