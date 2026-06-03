@@ -25,6 +25,9 @@
 #ifdef VGRE_ENABLE_SSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509.h>
+#include <openssl/evp.h>
+#include "vgre/advanced/secure_channel.h"  // CertificateFingerprint, verifyCertPin
 #endif
 
 namespace vgre {
@@ -163,6 +166,18 @@ static std::string sha1Base64(const std::string& input) {
 struct WebsocketTransportClient::TlsState {
     SSL_CTX* ctx = nullptr;
     SSL*     ssl = nullptr;
+
+    // mTLS: optional client certificate and private key paths.
+    // When non-empty, the client authenticates itself to the server.
+    // Default empty → plain TLS (server auth only).
+    std::string clientCertPath;
+    std::string clientKeyPath;
+
+    // mTLS: optional expected server certificate fingerprint (SHA-256 of SPKI DER).
+    // When has_pinned_fp == true, the server certificate fingerprint is verified
+    // against pinnedFingerprint after the handshake.
+    bool has_pinned_fp = false;
+    crypto::CertificateFingerprint pinnedFingerprint{};
 };
 #else
 struct WebsocketTransportClient::TlsState {};
@@ -267,7 +282,34 @@ bool WebsocketTransportClient::tlsConnect(int timeoutMs) {
     if (!tls_ || !tls_->ctx) {
         tls_->ctx = SSL_CTX_new(TLS_client_method());
         if (!tls_->ctx) return false;
+
+        // mTLS client authentication: load the client certificate and private key
+        // when cert paths are configured.  This presents the client identity to the
+        // server, satisfying the mutual-TLS requirement (RFC 8446 §4.3.2).
+        if (!tls_->clientCertPath.empty() && !tls_->clientKeyPath.empty()) {
+            if (SSL_CTX_use_certificate_file(tls_->ctx,
+                    tls_->clientCertPath.c_str(), SSL_FILETYPE_PEM) != 1) {
+                VGRE_LOG_ERROR("WebSocket", "mTLS: failed to load client cert: "
+                    + tls_->clientCertPath);
+                return false;
+            }
+            if (SSL_CTX_use_PrivateKey_file(tls_->ctx,
+                    tls_->clientKeyPath.c_str(), SSL_FILETYPE_PEM) != 1) {
+                VGRE_LOG_ERROR("WebSocket", "mTLS: failed to load client key: "
+                    + tls_->clientKeyPath);
+                return false;
+            }
+            // Invariant: private key must correspond to the certificate public key.
+            if (SSL_CTX_check_private_key(tls_->ctx) != 1) {
+                VGRE_LOG_ERROR("WebSocket",
+                    "mTLS: client cert/key mismatch — key does not match certificate");
+                return false;
+            }
+            VGRE_LOG_INFO("WebSocket",
+                "mTLS: client certificate loaded from " + tls_->clientCertPath);
+        }
     }
+
     tls_->ssl = SSL_new(tls_->ctx);
     if (!tls_->ssl) return false;
     SSL_set_fd(tls_->ssl, sockfd_);
@@ -277,12 +319,29 @@ bool WebsocketTransportClient::tlsConnect(int timeoutMs) {
         VGRE_LOG_WARN("WebSocket", "TLS handshake failed for " + host_);
         return false;
     }
+
+    // Certificate pinning: verify the server's SPKI fingerprint when configured.
+    // Invariant: SHA-256(DER SubjectPublicKeyInfo) == pinnedFingerprint.bytes
+    // Constant-time comparison prevents timing side-channels.
+    if (tls_->has_pinned_fp) {
+        if (!crypto::verifyCertPin(tls_->ssl, tls_->pinnedFingerprint)) {
+            VGRE_LOG_ERROR("WebSocket",
+                "mTLS: server certificate fingerprint mismatch — aborting connection");
+            SSL_shutdown(tls_->ssl);
+            SSL_free(tls_->ssl);
+            tls_->ssl = nullptr;
+            return false;
+        }
+        VGRE_LOG_INFO("WebSocket", "mTLS: server certificate pin verified for " + host_);
+    }
+
     VGRE_LOG_INFO("WebSocket", "TLS connected to " + host_);
     return true;
 #else
     (void)timeoutMs;
     VGRE_LOG_WARN("WebSocket",
-        "wss:// requested but VGRE_ENABLE_SSL is OFF; falling back to plain ws://");
+        "wss:// requested but VGRE_ENABLE_SSL is OFF — falling back to plain ws://. "
+        "mTLS and certificate pinning require VGRE_ENABLE_SSL.");
     return true; // fallback to plain
 #endif
 }
@@ -581,13 +640,97 @@ bool WebsocketTransportClient::poll(int timeoutMs) {
 // ── Server implementation ────────────────────────────────────────────────────
 // ═════════════════════════════════════════════════════════════════════════════
 
+#ifdef VGRE_ENABLE_SSL
+// Server-side TLS state: SSL_CTX shared across all accepted connections,
+// plus optional mTLS fields (server cert/key, expected client cert fingerprint).
+struct WebsocketTransportServer::ServerTlsState {
+    SSL_CTX* ctx = nullptr;
+
+    // Server certificate and private key (PEM paths).
+    // When non-empty, server-side TLS (and optionally mTLS) is enabled.
+    std::string serverCertPath;
+    std::string serverKeyPath;
+
+    // mTLS: when has_client_fp == true, the server verifies the client
+    // certificate fingerprint against expectedClientFp after SSL_accept().
+    bool has_client_fp = false;
+    crypto::CertificateFingerprint expectedClientFp{};
+};
+#else
+struct WebsocketTransportServer::ServerTlsState {};
+#endif
+
 WebsocketTransportServer::~WebsocketTransportServer() { stop(); }
 
-WebsocketTransportServer::WebsocketTransportServer(int port) : port_(port) {}
+WebsocketTransportServer::WebsocketTransportServer(int port) : port_(port) {
+    serverTls_ = std::make_unique<ServerTlsState>();
+}
 
 std::unique_ptr<WebsocketTransportServer> WebsocketTransportServer::create(int port) {
     return std::unique_ptr<WebsocketTransportServer>(new WebsocketTransportServer(port));
 }
+
+#ifdef VGRE_ENABLE_SSL
+// Configure server-side TLS.  Call before start().
+// serverCert, serverKey: PEM-encoded certificate and private key paths.
+// When clientFp is non-null, enables mutual TLS: clients must present a
+// certificate whose SPKI fingerprint matches *clientFp (constant-time check).
+bool WebsocketTransportServer::configureTls(
+        const std::string& serverCert,
+        const std::string& serverKey,
+        const crypto::CertificateFingerprint* clientFp) {
+    if (!serverTls_) return false;
+
+    serverTls_->serverCertPath = serverCert;
+    serverTls_->serverKeyPath  = serverKey;
+
+    // Lazy-init SSL_CTX here so callers can call configureTls() before start().
+    if (!serverTls_->ctx) {
+        serverTls_->ctx = SSL_CTX_new(TLS_server_method());
+        if (!serverTls_->ctx) {
+            VGRE_LOG_ERROR("WebSocket", "Server TLS: SSL_CTX_new failed");
+            return false;
+        }
+    }
+
+    if (SSL_CTX_use_certificate_file(serverTls_->ctx,
+            serverCert.c_str(), SSL_FILETYPE_PEM) != 1) {
+        VGRE_LOG_ERROR("WebSocket", "Server TLS: failed to load cert: " + serverCert);
+        return false;
+    }
+    if (SSL_CTX_use_PrivateKey_file(serverTls_->ctx,
+            serverKey.c_str(), SSL_FILETYPE_PEM) != 1) {
+        VGRE_LOG_ERROR("WebSocket", "Server TLS: failed to load key: " + serverKey);
+        return false;
+    }
+    // Invariant: private key modulus must match the certificate public key modulus.
+    if (SSL_CTX_check_private_key(serverTls_->ctx) != 1) {
+        VGRE_LOG_ERROR("WebSocket", "Server TLS: cert/key mismatch");
+        return false;
+    }
+
+    if (clientFp) {
+        // mTLS: require clients to present a certificate.
+        // SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT: the handshake is
+        // aborted if the client does not provide a certificate (RFC 8446 §4.3.2).
+        SSL_CTX_set_verify(serverTls_->ctx,
+            SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
+        serverTls_->has_client_fp  = true;
+        serverTls_->expectedClientFp = *clientFp;
+        VGRE_LOG_INFO("WebSocket",
+            "Server mTLS: mutual authentication enabled; client cert pinning active");
+    } else {
+        // Server-only TLS: clients are not required to present a certificate.
+        SSL_CTX_set_verify(serverTls_->ctx, SSL_VERIFY_NONE, nullptr);
+        serverTls_->has_client_fp = false;
+        VGRE_LOG_INFO("WebSocket",
+            "Server TLS: one-way TLS (no client certificate required)");
+    }
+
+    VGRE_LOG_INFO("WebSocket", "Server TLS configured with cert: " + serverCert);
+    return true;
+}
+#endif // VGRE_ENABLE_SSL
 
 VGREResult WebsocketTransportServer::start(int backlog) {
     listenfd_ = socket(AF_INET, SOCK_STREAM, 0);
@@ -643,6 +786,60 @@ WebsocketTransportServer::accept(int timeoutMs) {
     client->sockfd_ = clientFd;
     client->host_ = inet_ntoa(clientAddr.sin_addr);
     client->port_ = ntohs(clientAddr.sin_port);
+    client->tls_ = std::make_unique<WebsocketTransportClient::TlsState>();
+
+#ifdef VGRE_ENABLE_SSL
+    // Server-side TLS / mTLS: if the server has a configured SSL_CTX, wrap the
+    // accepted socket in a TLS session.  This is the server half of mutual TLS.
+    // Activation is opt-in: if serverTls_->ctx is null the server operates in
+    // plain-WebSocket mode, preserving backward compatibility.
+    if (serverTls_ && serverTls_->ctx) {
+        SSL* serverSsl = SSL_new(serverTls_->ctx);
+        if (!serverSsl) {
+            VGRE_LOG_ERROR("WebSocket",
+                "Server TLS: SSL_new failed for client " + client->host_);
+            return nullptr;
+        }
+        SSL_set_fd(serverSsl, static_cast<int>(clientFd));
+
+        // SSL_accept completes the TLS handshake from the server side.
+        // In mTLS mode the context was set with SSL_VERIFY_PEER so the library
+        // enforces that the client presents a valid certificate.
+        int rc = SSL_accept(serverSsl);
+        if (rc <= 0) {
+            VGRE_LOG_WARN("WebSocket",
+                "Server TLS: handshake failed for " + client->host_
+                + " (SSL error=" + std::to_string(SSL_get_error(serverSsl, rc)) + ")");
+            SSL_free(serverSsl);
+            return nullptr;
+        }
+
+        // mTLS certificate pinning: verify the client certificate SPKI fingerprint.
+        // Invariant: SHA-256(DER SubjectPublicKeyInfo) == expectedClientFp.bytes
+        // Constant-time compare prevents oracle attacks on the fingerprint.
+        if (serverTls_->has_client_fp) {
+            if (!crypto::verifyCertPin(serverSsl, serverTls_->expectedClientFp)) {
+                VGRE_LOG_WARN("WebSocket",
+                    "Server mTLS: client certificate fingerprint mismatch — "
+                    "rejecting connection from " + client->host_);
+                SSL_shutdown(serverSsl);
+                SSL_free(serverSsl);
+                return nullptr;
+            }
+            VGRE_LOG_INFO("WebSocket",
+                "Server mTLS: client certificate pin verified for " + client->host_);
+        }
+
+        // Hand the established TLS session to the client object so rawSend/rawRecv
+        // route through SSL_write/SSL_read for the rest of the connection.
+        client->tls_->ssl = serverSsl;
+        // We do NOT store the SSL_CTX on the client — the server owns the CTX.
+        // Setting ctx = nullptr ensures disconnect() won't double-free it.
+        client->tls_->ctx = nullptr;
+        VGRE_LOG_INFO("WebSocket",
+            "Server TLS: handshake complete for " + client->host_);
+    }
+#endif // VGRE_ENABLE_SSL
 
     // Read HTTP upgrade request
     std::string req;
@@ -658,14 +855,14 @@ WebsocketTransportServer::accept(int timeoutMs) {
     size_t keyStart = keyPos + 19;
     size_t keyEnd = req.find("\r\n", keyStart);
     std::string key = req.substr(keyStart, keyEnd - keyStart);
-    std::string accept = sha1Base64(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    std::string wsAccept = sha1Base64(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
 
     // Send 101 response
     std::ostringstream resp;
     resp << "HTTP/1.1 101 Switching Protocols\r\n"
          << "Upgrade: websocket\r\n"
          << "Connection: Upgrade\r\n"
-         << "Sec-WebSocket-Accept: " << accept << "\r\n"
+         << "Sec-WebSocket-Accept: " << wsAccept << "\r\n"
          << "\r\n";
     std::string respStr = resp.str();
     if (!client->rawSend(respStr.data(), respStr.size())) return nullptr;
@@ -681,6 +878,15 @@ void WebsocketTransportServer::stop() {
         vgre_close_socket(listenfd_);
         listenfd_ = VGRE_INVALID_SOCKET;
     }
+#ifdef VGRE_ENABLE_SSL
+    // Free the server SSL_CTX on shutdown.  The CTX is shared across all
+    // accepted connections; individual SSL* objects are owned by the
+    // WebsocketTransportClient objects and freed in their disconnect().
+    if (serverTls_ && serverTls_->ctx) {
+        SSL_CTX_free(serverTls_->ctx);
+        serverTls_->ctx = nullptr;
+    }
+#endif
 }
 
 int WebsocketTransportServer::boundPort() const { return port_; }

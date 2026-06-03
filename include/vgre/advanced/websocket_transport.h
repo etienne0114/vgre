@@ -19,6 +19,11 @@
  * Build: no extra dependency — uses plain BSD sockets and a minimal
  * WebSocket handshake parser (no external library required).
  *
+ * mTLS: when VGRE_ENABLE_SSL is defined (OpenSSL linked), mutual TLS is
+ * available:
+ *   - client: set tls_->clientCertPath / clientKeyPath before connect()
+ *   - server: call configureTls(cert, key, &clientFp) before start()
+ *
  * Usage:
  *   auto ws = WebsocketTransportClient::create("wss://master.example.com:443/vgre");
  *   ws->connect();
@@ -33,6 +38,13 @@
 #include <string>
 #include <vector>
 #include <functional>
+
+// Forward-declare the crypto namespace for CertificateFingerprint
+#ifdef VGRE_ENABLE_SSL
+namespace vgre { namespace advanced { namespace crypto {
+    struct CertificateFingerprint;
+} } }
+#endif
 
 namespace vgre {
 namespace advanced {
@@ -157,12 +169,31 @@ public:
 
     int boundPort() const;
 
+#ifdef VGRE_ENABLE_SSL
+    // Configure server-side TLS / mTLS.  Must be called before start().
+    //
+    // serverCert: PEM path to the server's X.509 certificate.
+    // serverKey:  PEM path to the server's private key.
+    // clientFp:   When non-null, enables mutual TLS — clients must present a
+    //             certificate whose SHA-256(SPKI DER) matches *clientFp.
+    //             When null, only one-way TLS (server auth) is used.
+    //
+    // Invariant (mTLS): fingerprint == SHA-256(DER SubjectPublicKeyInfo)
+    bool configureTls(const std::string& serverCert,
+                      const std::string& serverKey,
+                      const crypto::CertificateFingerprint* clientFp = nullptr);
+#endif // VGRE_ENABLE_SSL
+
 private:
     WebsocketTransportServer(int port);
 
     vgre::common::vgre_socket_t listenfd_ = vgre::common::VGRE_INVALID_SOCKET;
     int port_ = 0;
     bool running_ = false;
+
+    // Server-side TLS state (opaque — OpenSSL types hidden in .cpp)
+    struct ServerTlsState;
+    std::unique_ptr<ServerTlsState> serverTls_;
 };
 
 } // namespace advanced
