@@ -329,6 +329,12 @@ target_link_libraries(test_cufft_radix4 PRIVATE vgre_cudart)
 add_test(NAME CufftRadix4 COMMAND test_cufft_radix4)
 set_tests_properties(CufftRadix4 PROPERTIES TIMEOUT 60)
 
+# cuFFT 2D/3D test coverage — C2C roundtrip, R2C/C2R, 3D C2C, batched, single-frequency (QUEUE-26)
+add_executable(test_cufft_2d_3d unit/test_cufft_2d_3d.cpp)
+target_link_libraries(test_cufft_2d_3d PRIVATE vgre_cudart)
+add_test(NAME CufftFFT2D3D COMMAND test_cufft_2d_3d)
+set_tests_properties(CufftFFT2D3D PROPERTIES TIMEOUT 60)
+
 # Winograd F(4x4,3x3) forward-pass correctness (QUEUE-05)
 add_executable(test_cudnn_winograd api/test_cudnn_winograd.cpp)
 target_link_libraries(test_cudnn_winograd PRIVATE vgre)
