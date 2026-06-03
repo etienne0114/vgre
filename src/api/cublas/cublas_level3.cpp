@@ -47,6 +47,86 @@ static void sgemm_nn_avx2(int M, int N, int K,
 }
 #endif // __AVX2__
 
+// ── Strassen matrix multiply (QUEUE-37) ───────────────────────────────────────
+// C = alpha * A * B + beta * C for square n×n matrices stored row-major contiguously.
+// Complexity: O(n^log2(7)) ≈ O(n^2.807) multiplications vs O(n^3) for standard GEMM.
+// Recursion terminates at n ≤ STRASSEN_THRESHOLD; submatrices are extracted into
+// contiguous half-size buffers to avoid stride complications inside the recursion.
+// Math: 7 products replace 8 via M1=(A11+A22)(B11+B22), M2=(A21+A22)B11,
+//   M3=A11(B12-B22), M4=A22(B21-B11), M5=(A11+A12)B22,
+//   M6=(A21-A11)(B11+B12), M7=(A12-A22)(B21+B22).
+// Then C11=M1+M4-M5+M7, C12=M3+M5, C21=M2+M4, C22=M1-M2+M3+M6.
+
+static constexpr int STRASSEN_THRESHOLD = 64;
+
+template<typename T>
+static void strassen_mul(int n, T alpha, const T* A, const T* B, T beta, T* C) {
+    if (n <= STRASSEN_THRESHOLD) {
+        // Base case: ikj-order cache-friendly GEMM on contiguous n×n matrices
+        if (beta == T(0))
+            for (int i = 0; i < n*n; ++i) C[i] = T(0);
+        else if (beta != T(1))
+            for (int i = 0; i < n*n; ++i) C[i] *= beta;
+        for (int i = 0; i < n; ++i)
+        for (int k = 0; k < n; ++k) {
+            T aik = alpha * A[i*n+k];
+            for (int j = 0; j < n; ++j)
+                C[i*n+j] += aik * B[k*n+j];
+        }
+        return;
+    }
+
+    int h = n >> 1;
+    size_t hsz = static_cast<size_t>(h) * h;
+
+    // Extract submatrices into contiguous half-size buffers
+    std::vector<T> A11(hsz), A12(hsz), A21(hsz), A22(hsz);
+    std::vector<T> B11(hsz), B12(hsz), B21(hsz), B22(hsz);
+    for (int i = 0; i < h; ++i)
+    for (int j = 0; j < h; ++j) {
+        size_t ij = static_cast<size_t>(i)*h + j;
+        A11[ij]=A[i*n+j];      A12[ij]=A[i*n+h+j];
+        A21[ij]=A[(h+i)*n+j];  A22[ij]=A[(h+i)*n+h+j];
+        B11[ij]=B[i*n+j];      B12[ij]=B[i*n+h+j];
+        B21[ij]=B[(h+i)*n+j];  B22[ij]=B[(h+i)*n+h+j];
+    }
+
+    std::vector<T> sa(hsz), sb(hsz);
+    std::vector<T> P1(hsz),P2(hsz),P3(hsz),P4(hsz),P5(hsz),P6(hsz),P7(hsz);
+
+    // M1 = (A11+A22) * (B11+B22)
+    for (size_t i=0;i<hsz;++i){sa[i]=A11[i]+A22[i]; sb[i]=B11[i]+B22[i];}
+    strassen_mul(h, T(1), sa.data(), sb.data(), T(0), P1.data());
+    // M2 = (A21+A22) * B11
+    for (size_t i=0;i<hsz;++i) sa[i]=A21[i]+A22[i];
+    strassen_mul(h, T(1), sa.data(), B11.data(), T(0), P2.data());
+    // M3 = A11 * (B12-B22)
+    for (size_t i=0;i<hsz;++i) sb[i]=B12[i]-B22[i];
+    strassen_mul(h, T(1), A11.data(), sb.data(), T(0), P3.data());
+    // M4 = A22 * (B21-B11)
+    for (size_t i=0;i<hsz;++i) sb[i]=B21[i]-B11[i];
+    strassen_mul(h, T(1), A22.data(), sb.data(), T(0), P4.data());
+    // M5 = (A11+A12) * B22
+    for (size_t i=0;i<hsz;++i) sa[i]=A11[i]+A12[i];
+    strassen_mul(h, T(1), sa.data(), B22.data(), T(0), P5.data());
+    // M6 = (A21-A11) * (B11+B12)
+    for (size_t i=0;i<hsz;++i){sa[i]=A21[i]-A11[i]; sb[i]=B11[i]+B12[i];}
+    strassen_mul(h, T(1), sa.data(), sb.data(), T(0), P6.data());
+    // M7 = (A12-A22) * (B21+B22)
+    for (size_t i=0;i<hsz;++i){sa[i]=A12[i]-A22[i]; sb[i]=B21[i]+B22[i];}
+    strassen_mul(h, T(1), sa.data(), sb.data(), T(0), P7.data());
+
+    // Assemble: C_ij = alpha * (Strassen combination) + beta * C_ij_old
+    for (int i = 0; i < h; ++i)
+    for (int j = 0; j < h; ++j) {
+        size_t ij = static_cast<size_t>(i)*h + j;
+        C[i*n + j]       = alpha*(P1[ij]+P4[ij]-P5[ij]+P7[ij]) + beta*C[i*n + j];
+        C[i*n + h+j]     = alpha*(P3[ij]+P5[ij])                + beta*C[i*n + h+j];
+        C[(h+i)*n + j]   = alpha*(P2[ij]+P4[ij])                + beta*C[(h+i)*n + j];
+        C[(h+i)*n + h+j] = alpha*(P1[ij]-P2[ij]+P3[ij]+P6[ij]) + beta*C[(h+i)*n + h+j];
+    }
+}
+
 // ── Cache-blocked reference GEMM (external linkage) ──────────────────────────
 void refSgemm(bool tA, bool tB,
     int M, int N, int K,
@@ -54,6 +134,12 @@ void refSgemm(bool tA, bool tB,
                  const float* B, int ldb,
     float beta,        float* C, int ldc)
 {
+    // Strassen fast path: square power-of-2, no-transpose, contiguous storage
+    if (!tA && !tB && M == N && N == K && (M & (M-1)) == 0
+            && M >= 2*STRASSEN_THRESHOLD && lda == K && ldb == N && ldc == M) {
+        strassen_mul<float>(M, alpha, A, B, beta, C);
+        return;
+    }
     // AVX2 fast path: non-transposed row-major NN form
 #if defined(__AVX2__)
     if (!tA && !tB) {
@@ -150,6 +236,12 @@ void refDgemm(bool tA, bool tB,
                   const double* B, int ldb,
     double beta,        double* C, int ldc)
 {
+    // Strassen fast path: square power-of-2, no-transpose, contiguous storage
+    if (!tA && !tB && M == N && N == K && (M & (M-1)) == 0
+            && M >= 2*STRASSEN_THRESHOLD && lda == K && ldb == N && ldc == M) {
+        strassen_mul<double>(M, alpha, A, B, beta, C);
+        return;
+    }
     // AVX2 fast path for non-transposed row-major NN form
 #if defined(__AVX2__)
     if (!tA && !tB) {
