@@ -135,6 +135,8 @@ struct cublasContext {
     cublasPointerMode_t pointerMode = CUBLAS_POINTER_MODE_HOST;
     cublasAtomicsMode_t atomicsMode = CUBLAS_ATOMICS_ALLOWED;
     int                deviceId    = 0;
+    void*              workspace              = nullptr;
+    size_t             workspaceSizeInBytes   = 0;
 };
 
 #if HAVE_CBLAS

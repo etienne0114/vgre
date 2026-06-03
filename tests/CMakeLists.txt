@@ -318,6 +318,10 @@ add_executable(test_cublas_pointer_atomics_mode api/test_cublas_pointer_atomics_
 target_link_libraries(test_cublas_pointer_atomics_mode PRIVATE vgre)
 add_test(NAME CublasPointerAtomicsMode COMMAND test_cublas_pointer_atomics_mode)
 
+add_executable(test_cublas_workspace api/test_cublas_workspace.cpp)
+target_link_libraries(test_cublas_workspace PRIVATE vgre)
+add_test(NAME CublasWorkspace COMMAND test_cublas_workspace)
+
 add_executable(test_cublas_level2 api/test_cublas_level2.cpp)
 target_link_libraries(test_cublas_level2 PRIVATE vgre)
 add_test(NAME CublasLevel2 COMMAND test_cublas_level2)

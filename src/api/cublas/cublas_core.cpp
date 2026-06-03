@@ -69,6 +69,31 @@ cublasStatus_t cublasGetAtomicsMode(cublasHandle_t handle, int* mode) {
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// ── Workspace APIs (QUEUE-36) ─────────────────────────────────────────────────
+// cublasSetWorkspace_v2: associates a user-provided scratch buffer with the handle.
+// workspace==nullptr with workspaceSizeInBytes==0 is valid and clears the binding.
+// workspace==nullptr with workspaceSizeInBytes>0 is rejected (INVALID_VALUE).
+// Math: cuBLAS operations use workspace for split-K GEMM tiles and other
+// temporary storage proportional to the problem size.
+cublasStatus_t cublasSetWorkspace_v2(cublasHandle_t handle,
+                                      void *workspace, size_t workspaceSizeInBytes) {
+    if (!handle) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (workspace == nullptr && workspaceSizeInBytes != 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    auto *ctx = static_cast<cublasContext*>(handle);
+    ctx->workspace            = workspace;
+    ctx->workspaceSizeInBytes = workspaceSizeInBytes;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// cublasGetWorkspaceSize: returns the workspace buffer size currently bound to handle.
+cublasStatus_t cublasGetWorkspaceSize(cublasHandle_t handle, size_t *workspaceSizeInBytes) {
+    if (!handle)               return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!workspaceSizeInBytes) return CUBLAS_STATUS_INVALID_VALUE;
+    *workspaceSizeInBytes = static_cast<cublasContext*>(handle)->workspaceSizeInBytes;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 // ── SYR ──────────────────────────────────────────────────────────────────────
 cublasStatus_t cublasSsyr_v2(cublasHandle_t handle, cublasFillMode_t uplo, int n,
     const float* alpha, const float* x, int incx, float* A, int lda)
