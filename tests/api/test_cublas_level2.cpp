@@ -58,6 +58,15 @@ cublasStatus_t cublasStrmv_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_
     cublasDiagType_t, int, const float*, int, float*, int);
 cublasStatus_t cublasDtrmv_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
     cublasDiagType_t, int, const double*, int, double*, int);
+// QUEUE-31: packed triangular operations
+cublasStatus_t cublasStpmv_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    cublasDiagType_t, int, const float*, float*, int);
+cublasStatus_t cublasDtpmv_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    cublasDiagType_t, int, const double*, double*, int);
+cublasStatus_t cublasStpsv_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    cublasDiagType_t, int, const float*, float*, int);
+cublasStatus_t cublasDtpsv_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    cublasDiagType_t, int, const double*, double*, int);
 
 // ── New functions under test ──────────────────────────────────────────────────
 cublasStatus_t cublasSgemv_v2(cublasHandle_t, cublasOperation_t,
@@ -418,6 +427,95 @@ int main() {
         else    std::cerr << "FAIL [18] Zher (A[0,0]=" << A[0].x << "+" << A[0].y << "i"
                           << " A[1,0]=" << A[1].x << "+" << A[1].y << "i"
                           << " A[1,1]=" << A[3].x << "+" << A[3].y << "i)\n";
+    }
+
+    // ── 19. STPMV upper non-unit — compare packed with reference dense trmv ──
+    // Math: packed upper AP[j*(j+1)/2+i] = A[i,j] for i<=j; y = A*x, O(n^2).
+    // 4×4 upper triangular: A = [[2,3,1,4],[0,5,2,1],[0,0,3,2],[0,0,0,4]]
+    // packed column-major: AP[0]=2, AP[1]=3,AP[2]=5, AP[3]=1,AP[4]=2,AP[5]=3,
+    //                       AP[6]=4,AP[7]=1,AP[8]=2,AP[9]=4
+    // x=[1,2,3,4], expected y=A*x: row0=2*1+3*2+1*3+4*4=2+6+3+16=27
+    //                               row1=5*2+2*3+1*4=10+6+4=20
+    //                               row2=3*3+2*4=9+8=17
+    //                               row3=4*4=16
+    ++total;
+    {
+        const int n = 4;
+        // Upper packed (column-major): AP[j*(j+1)/2 + i] = A[i,j] for i<=j
+        // col0: A[0,0]=2             → AP[0]=2
+        // col1: A[0,1]=3,A[1,1]=5   → AP[1]=3, AP[2]=5
+        // col2: A[0,2]=1,A[1,2]=2,A[2,2]=3 → AP[3]=1,AP[4]=2,AP[5]=3
+        // col3: A[0,3]=4,A[1,3]=1,A[2,3]=2,A[3,3]=4 → AP[6]=4,AP[7]=1,AP[8]=2,AP[9]=4
+        float AP[10] = {2,3,5,1,2,3,4,1,2,4};
+        float x[4] = {1,2,3,4};
+        auto r = cublasStpmv_v2(handle, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+                                 CUBLAS_DIAG_NON_UNIT, n, AP, x, 1);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq(x[0], 27.f) && approx_eq(x[1], 20.f) &&
+                  approx_eq(x[2], 17.f) && approx_eq(x[3], 16.f);
+        if (ok) { std::cout << "PASS [19] Stpmv upper non-unit\n"; ++pass; }
+        else    std::cerr << "FAIL [19] Stpmv x=["<<x[0]<<","<<x[1]<<","<<x[2]<<","<<x[3]<<"]\n";
+    }
+
+    // ── 20. STPSV upper non-unit — solve A*x=b, verify A*(A\b)=b ─────────────
+    // Math: TPSV solves op(A)*x=b in-place via backward substitution. O(n^2).
+    // Use same A as test 19; b=[27,20,17,16]; expect x=[1,2,3,4] after solve.
+    ++total;
+    {
+        const int n = 4;
+        float AP[10] = {2,3,5,1,2,3,4,1,2,4};
+        float x[4] = {27,20,17,16};  // rhs = A*[1,2,3,4]
+        auto r = cublasStpsv_v2(handle, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+                                 CUBLAS_DIAG_NON_UNIT, n, AP, x, 1);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq(x[0], 1.f) && approx_eq(x[1], 2.f) &&
+                  approx_eq(x[2], 3.f) && approx_eq(x[3], 4.f);
+        if (ok) { std::cout << "PASS [20] Stpsv upper non-unit (recovers x=[1,2,3,4])\n"; ++pass; }
+        else    std::cerr << "FAIL [20] Stpsv x=["<<x[0]<<","<<x[1]<<","<<x[2]<<","<<x[3]<<"]\n";
+    }
+
+    // ── 21. DTPMV upper unit diagonal ─────────────────────────────────────────
+    // Unit diagonal: diagonal entries treated as 1 regardless of AP values.
+    // A = [[1,3,1],[0,1,2],[0,0,1]] (unit upper), x=[1,2,3]
+    // y = A*x: row0=1+3*2+1*3=10, row1=2+2*3=8, row2=3
+    ++total;
+    {
+        const int n = 3;
+        // AP (unit upper — diagonal is ignored):
+        // col0: AP[0]=ignored(diag)
+        // col1: AP[1]=3, AP[2]=ignored(diag)
+        // col2: AP[3]=1, AP[4]=2, AP[5]=ignored(diag)
+        double AP[6] = {99,3,99,1,2,99};  // diagonal entries irrelevant for UNIT
+        double x[3] = {1,2,3};
+        auto r = cublasDtpmv_v2(handle, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+                                 CUBLAS_DIAG_UNIT, n, AP, x, 1);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq(x[0], 10.0) && approx_eq(x[1], 8.0) && approx_eq(x[2], 3.0);
+        if (ok) { std::cout << "PASS [21] Dtpmv upper unit diagonal\n"; ++pass; }
+        else    std::cerr << "FAIL [21] Dtpmv x=["<<x[0]<<","<<x[1]<<","<<x[2]<<"]\n";
+    }
+
+    // ── 22. DTPSV lower non-unit — verify round-trip ──────────────────────────
+    // Lower packed: AP[j*(2n-j-1)/2 + i] = A[i,j] for i>=j
+    // 3×3 lower: A=[[2,0,0],[3,4,0],[1,2,5]], x=[2,11,21]
+    // After TPSV: x should recover [1,2,3].
+    // Verify: A*[1,2,3]: row0=2*1=2, row1=3*1+4*2=11, row2=1*1+2*2+5*3=20
+    // Correction: row2=1+4+15=20 not 21; use b=A*[1,2,3]=[2,11,20]
+    ++total;
+    {
+        const int n = 3;
+        // Lower packed col-major: AP[j*(2n-j-1)/2 + i]
+        // col0 (j=0): AP[0]=A[0,0]=2, AP[1]=A[1,0]=3, AP[2]=A[2,0]=1
+        // col1 (j=1): AP[3]=A[1,1]=4, AP[4]=A[2,1]=2
+        // col2 (j=2): AP[5]=A[2,2]=5
+        double AP[6] = {2,3,1,4,2,5};
+        double x[3] = {2,11,20};  // rhs = A*[1,2,3]
+        auto r = cublasDtpsv_v2(handle, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
+                                 CUBLAS_DIAG_NON_UNIT, n, AP, x, 1);
+        bool ok = (r == CUBLAS_STATUS_SUCCESS) &&
+                  approx_eq(x[0], 1.0) && approx_eq(x[1], 2.0) && approx_eq(x[2], 3.0);
+        if (ok) { std::cout << "PASS [22] Dtpsv lower non-unit (recovers x=[1,2,3])\n"; ++pass; }
+        else    std::cerr << "FAIL [22] Dtpsv x=["<<x[0]<<","<<x[1]<<","<<x[2]<<"]\n";
     }
 
     cublasDestroy_v2(handle);
