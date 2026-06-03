@@ -540,6 +540,14 @@ add_executable(test_reconnect_backoff unit/test_reconnect_backoff.cpp)
 add_test(NAME ReconnectBackoff COMMAND test_reconnect_backoff)
 set_tests_properties(ReconnectBackoff PROPERTIES TIMEOUT 30)
 
+# QUEUE-28: JIT disk cache — SHA-256 key, atomic write, integrity footer, corruption detection.
+# Standalone: no LLVM linkage, no vgre linkage — header-only jit_cache_utils.h only.
+add_executable(test_jit_disk_cache unit/test_jit_disk_cache.cpp)
+target_include_directories(test_jit_disk_cache PRIVATE
+    ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME JITDiskCache COMMAND test_jit_disk_cache)
+set_tests_properties(JITDiskCache PROPERTIES TIMEOUT 30)
+
 # OpenCL NDRange arithmetic: 3D grid, local_size, offset (QUEUE-18)
 add_executable(test_opencl_ndrange unit/test_opencl_ndrange.cpp)
 add_test(NAME OpenCLNDRange COMMAND test_opencl_ndrange)
