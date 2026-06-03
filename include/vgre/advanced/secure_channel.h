@@ -33,6 +33,16 @@ using vgre_socket_t = vgre::common::vgre_socket_t;
 // Built-in SHA-256 per RFC 6234 — no external dependency required.
 namespace crypto {
 
+// ── X25519 + HKDF-SHA256 forward declarations ─────────────────────────────
+// Defined in secure_channel_crypto.cpp; used by SecureChannel::executeKeyExchange.
+#ifdef VGRE_ENABLE_SSL
+bool x25519_genkeypair(uint8_t privateKey[32], uint8_t publicKey[32]);
+bool x25519_shared_secret(const uint8_t privateKey[32],
+                           const uint8_t peerPublic[32],
+                           uint8_t sharedSecret[32]);
+#endif // VGRE_ENABLE_SSL
+void derive_session_key_from_dh(const uint8_t sharedSecret[32], uint8_t sessionKey[32]);
+
 constexpr size_t kSHA256DigestLen = 32;
 constexpr size_t kHMACKeyLen = 32;
 constexpr size_t kNonceLen = 16;
@@ -232,6 +242,29 @@ public:
   // Get the key fingerprint (hex-encoded SHA256 of session key)
   std::string getKeyFingerprint() const;
 
+  // ── X25519 ECDH ephemeral key exchange (RFC 7748) ────────────────────────
+  // Perform X25519 ECDH key exchange using pre-shared public keys.
+  // Call AFTER generating our keypair and receiving peer's public key.
+  // Derives session key via HKDF-SHA256 and stores in sessionKey_.
+  // Falls back to PSK if ecdhEnabled_ is false.
+  VGREResult executeKeyExchange(const std::string& authToken,
+                                 const uint8_t masterNonce[crypto::kNonceLen],
+                                 const uint8_t clientNonce[crypto::kNonceLen]);
+
+  // Generate our ephemeral X25519 keypair; sets ephemeralPublic_[32].
+  // Returns true on success (requires OpenSSL; false if unavailable).
+  // Math: X25519 uses Montgomery ladder on Curve25519 (RFC 7748).
+  bool generateEphemeralKeypair();
+
+  // Set peer's public key received over the channel.
+  void setPeerPublicKey(const uint8_t peerPublic[32]);
+
+  // Get our ephemeral public key for transmission (32 bytes).
+  const uint8_t* getEphemeralPublicKey() const;
+
+  // Set ECDH capability flag (called when peer announces support).
+  void setPeerECDHCapable(bool capable);
+
 private:
   // AES-256-CTR cipher: nonce derived from session key; counter = sequenceNum
   void aesCtr(const uint8_t *input, uint8_t *output, size_t len,
@@ -283,6 +316,18 @@ private:
 
   std::atomic<bool> initialized_{false};
   mutable std::mutex mutex_;
+
+  // ── X25519 ECDH ephemeral state (cleared after key derivation) ──────────
+  // ephemeralPrivate_: our 32-byte scalar — zeroized immediately after use.
+  // ephemeralPublic_:  our public key — transmitted to peer.
+  // peerPublicKey_:    received from peer before executeKeyExchange().
+  // ecdhSharedSecret_: raw DH output — zeroized after HKDF derivation.
+  // ecdhEnabled_:      true if peer supports X25519 (set via setPeerECDHCapable).
+  uint8_t ephemeralPrivate_[32] = {};
+  uint8_t ephemeralPublic_[32]  = {};
+  uint8_t peerPublicKey_[32]    = {};
+  uint8_t ecdhSharedSecret_[32] = {};
+  bool    ecdhEnabled_          = false;
 };
 
 } // namespace advanced
