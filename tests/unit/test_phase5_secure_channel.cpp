@@ -432,10 +432,11 @@ void test_hmac_pbkdf2_key_derivation() {
                           salt, sizeof(salt),
                           iterations, dk, dkLen);
 
-    // RFC 6070 / known-good SHA-256 PBKDF2 vector (c=1):
-    // 120fb6cffccd202c0187b8a4cfe2f7b6a936a8caee43e21f8e23a7eedc93c22c
+    // PBKDF2-HMAC-SHA256, "password"/"salt", c=1, dkLen=32.
+    // Reference: hashlib.pbkdf2_hmac('sha256', b'password', b'salt', 1, 32)
+    // Full key: 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
     static const uint8_t expected_first8[8] = {
-        0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xcd, 0x20, 0x2c
+        0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c
     };
 
     // Verify the first 8 bytes match the known test vector.
