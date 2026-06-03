@@ -314,36 +314,28 @@ struct SpGEMMState {
     int64_t cRows = 0, cCols = 0, cNnz = 0;
     cudaDataType_t dtype = CUDA_R_32F;
     double betaScalar = 0.0;  // stored from compute phase, applied in copy phase
+    bool symbolicDone = false; // true after workEstimation ran the symbolic phase
 };
 
 std::mutex g_spgemmMutex;
 std::unordered_map<uintptr_t, SpGEMMState> g_spgemmStates;
 uintptr_t g_nextSpGEMM = 1;
 
-// CSR × CSR → CSR product (template for float/double).
-//
-// Two-pass algorithm:
-//   Pass 1: count nonzero columns per output row using inUse[] boolean marker.
-//           Using a dedicated bool array (not dense[]) avoids false re-marking
-//           when an accumulated product is exactly zero.
-//   Pass 2: accumulate values using the same inUse[] approach, then sort and
-//           write to the output CSR arrays.
-template<typename T>
-void csr_spgemm(
-        int64_t m, int64_t /*k*/, int64_t n,
-        const int *arPtr, const int *acInd, const T *aVal, int aBase,
-        const int *brPtr, const int *bcInd, const T *bVal, int bBase,
-        std::vector<int32_t> &cRowPtr, std::vector<int32_t> &cColInd, std::vector<T> &cVal) {
-
+// Symbolic phase: compute cRowPtr + sorted cColInd without touching values.
+// Complexity: O(nnz(A) * avg_row_B) time; O(n) scratch for inUse[] marker.
+// Invariant: cRowPtr is a valid prefix-sum; cColInd entries within each row
+// are sorted ascending (canonical CSR column order).
+static void csr_spgemm_symbolic(
+        int64_t m, int64_t n,
+        const int *arPtr, const int *acInd, int aBase,
+        const int *brPtr, const int *bcInd, int bBase,
+        std::vector<int32_t> &cRowPtr, std::vector<int32_t> &cColInd) {
     cRowPtr.resize(static_cast<size_t>(m + 1), 0);
-    // inUse[c] == true means column c has been pushed to `used` for this row.
-    // Separate from dense[] so zero accumulated values don't cause re-marking.
-    std::vector<bool> inUse(static_cast<size_t>(n), false);
-    std::vector<T>    dense(static_cast<size_t>(n), T(0));
-    std::vector<int>  used;
-
-    // ── Pass 1: count distinct output NNZ per row ─────────────────────────────
+    std::vector<bool>    inUse(static_cast<size_t>(n), false);
+    std::vector<int>     used;
     std::vector<int32_t> rowNnz(static_cast<size_t>(m), 0);
+
+    // Pass 1: count distinct output columns per row
     for (int64_t i = 0; i < m; ++i) {
         for (int pa = arPtr[i] - aBase; pa < arPtr[i+1] - aBase; ++pa) {
             int64_t jj = acInd[pa] - aBase;
@@ -360,15 +352,13 @@ void csr_spgemm(
         used.clear();
     }
 
-    // Prefix sum → build cRowPtr
     cRowPtr[0] = 0;
     for (int64_t i = 0; i < m; ++i)
         cRowPtr[static_cast<size_t>(i+1)] = cRowPtr[static_cast<size_t>(i)] + rowNnz[static_cast<size_t>(i)];
     int64_t totalNnz = cRowPtr[static_cast<size_t>(m)];
-    cColInd.resize(static_cast<size_t>(totalNnz));
-    cVal.resize(static_cast<size_t>(totalNnz));
 
-    // ── Pass 2: accumulate values, sort, write ────────────────────────────────
+    // Structural pass: collect + sort cColInd per row (same traversal, no values)
+    cColInd.resize(static_cast<size_t>(totalNnz));
     for (int64_t i = 0; i < m; ++i) {
         for (int pa = arPtr[i] - aBase; pa < arPtr[i+1] - aBase; ++pa) {
             int64_t jj = acInd[pa] - aBase;
@@ -378,21 +368,62 @@ void csr_spgemm(
                     inUse[static_cast<size_t>(cc)] = true;
                     used.push_back(static_cast<int>(cc));
                 }
-                dense[static_cast<size_t>(cc)] += aVal[pa] * bVal[pb];
             }
         }
-        // Sort columns for canonical CSR output
         std::sort(used.begin(), used.end());
         int32_t base_idx = cRowPtr[static_cast<size_t>(i)];
-        for (size_t idx = 0; idx < used.size(); ++idx) {
-            int c = used[idx];
-            cColInd[static_cast<size_t>(base_idx + static_cast<int32_t>(idx))] = c;
-            cVal   [static_cast<size_t>(base_idx + static_cast<int32_t>(idx))] = dense[static_cast<size_t>(c)];
-            dense [static_cast<size_t>(c)] = T(0);
-            inUse [static_cast<size_t>(c)] = false;
-        }
+        for (size_t idx = 0; idx < used.size(); ++idx)
+            cColInd[static_cast<size_t>(base_idx + static_cast<int32_t>(idx))] =
+                static_cast<int32_t>(used[idx]);
+        for (int c : used) inUse[static_cast<size_t>(c)] = false;
         used.clear();
     }
+}
+
+// Numeric phase: given pre-computed cRowPtr + cColInd, accumulate values into cVal.
+// Uses a dense colToPos[] scatter map for O(1) column lookup per row.
+template<typename T>
+static void csr_spgemm_numeric(
+        int64_t m, int64_t n,
+        const int *arPtr, const int *acInd, const T *aVal, int aBase,
+        const int *brPtr, const int *bcInd, const T *bVal, int bBase,
+        const std::vector<int32_t> &cRowPtr, const std::vector<int32_t> &cColInd,
+        std::vector<T> &cVal) {
+    int64_t totalNnz = cRowPtr[static_cast<size_t>(m)];
+    cVal.assign(static_cast<size_t>(totalNnz), T(0));
+    std::vector<int32_t> colToPos(static_cast<size_t>(n), -1);
+
+    for (int64_t i = 0; i < m; ++i) {
+        int32_t rs = cRowPtr[static_cast<size_t>(i)];
+        int32_t re = cRowPtr[static_cast<size_t>(i+1)];
+        for (int32_t k = rs; k < re; ++k)
+            colToPos[static_cast<size_t>(cColInd[static_cast<size_t>(k)])] = k;
+        for (int pa = arPtr[i] - aBase; pa < arPtr[i+1] - aBase; ++pa) {
+            int64_t jj = acInd[pa] - aBase;
+            for (int pb = brPtr[jj] - bBase; pb < brPtr[jj+1] - bBase; ++pb) {
+                int64_t cc = bcInd[pb] - bBase;
+                int32_t pos = colToPos[static_cast<size_t>(cc)];
+                if (pos >= 0) cVal[static_cast<size_t>(pos)] += aVal[pa] * bVal[pb];
+            }
+        }
+        for (int32_t k = rs; k < re; ++k)
+            colToPos[static_cast<size_t>(cColInd[static_cast<size_t>(k)])] = -1;
+    }
+}
+
+// Full two-pass SpGEMM. When skipSymbolic=true the cRowPtr+cColInd are already
+// populated (by workEstimation) and only the numeric phase runs.
+template<typename T>
+static void csr_spgemm(
+        int64_t m, int64_t /*k*/, int64_t n,
+        const int *arPtr, const int *acInd, const T *aVal, int aBase,
+        const int *brPtr, const int *bcInd, const T *bVal, int bBase,
+        std::vector<int32_t> &cRowPtr, std::vector<int32_t> &cColInd, std::vector<T> &cVal,
+        bool skipSymbolic = false) {
+    if (!skipSymbolic)
+        csr_spgemm_symbolic(m, n, arPtr, acInd, aBase, brPtr, bcInd, bBase, cRowPtr, cColInd);
+    csr_spgemm_numeric<T>(m, n, arPtr, acInd, aVal, aBase, brPtr, bcInd, bVal, bBase,
+                          cRowPtr, cColInd, cVal);
 }
 } // anonymous namespace
 
@@ -413,15 +444,77 @@ cusparseStatus_t cusparseSpGEMM_destroyDescr(cusparseSpGEMMDescr_t descr) {
     return CUSPARSE_STATUS_SUCCESS;
 }
 
-// Phase 1: workEstimation — no-op, buffer size 0
+// Phase 1: workEstimation — symbolic phase.
+// Determines the sparsity structure of C (cRowPtr + cColInd) without computing
+// values. On the first call (externalBuffer1==nullptr) the symbolic analysis
+// runs and bufferSize1 is set to the size of the stored structural data.
+// On a second call with an allocated buffer the work is already done; this
+// call is a no-op that returns the same size. This mirrors the cuSPARSE two-
+// call pattern while keeping all state in the SpGEMMState descriptor.
+// After this call, cusparseSpMatGetSize(matC, ...) returns the correct NNZ.
 cusparseStatus_t cusparseSpGEMM_workEstimation(cusparseHandle_t /*h*/,
-        cusparseOperation_t /*opA*/, cusparseOperation_t /*opB*/,
-        const void * /*alpha*/, cusparseSpMatDescr_t /*matA*/,
-        cusparseSpMatDescr_t /*matB*/, const void * /*beta*/,
-        cusparseSpMatDescr_t /*matC*/, cudaDataType_t /*ct*/,
-        cusparseSpGEMMAlg_t /*alg*/, cusparseSpGEMMDescr_t /*d*/,
+        cusparseOperation_t opA, cusparseOperation_t opB,
+        const void * /*alpha*/, cusparseSpMatDescr_t matA,
+        cusparseSpMatDescr_t matB, const void * /*beta*/,
+        cusparseSpMatDescr_t matC, cudaDataType_t /*ct*/,
+        cusparseSpGEMMAlg_t /*alg*/, cusparseSpGEMMDescr_t spgemmDescr,
         size_t *bufferSize1, void * /*externalBuffer1*/) {
-    if (bufferSize1) *bufferSize1 = 0;
+    std::lock_guard<std::mutex> lkD(g_descrMutex);
+    auto aIt = g_csrMats.find(reinterpret_cast<uintptr_t>(matA));
+    auto bIt = g_csrMats.find(reinterpret_cast<uintptr_t>(matB));
+    auto cIt = g_csrMats.find(reinterpret_cast<uintptr_t>(matC));
+    if (aIt == g_csrMats.end() || bIt == g_csrMats.end() || cIt == g_csrMats.end()) {
+        if (bufferSize1) *bufferSize1 = 0;
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const CsrMat &A = aIt->second;
+    const CsrMat &B = bIt->second;
+    if (!A.rowOffsets || !A.colInd || !B.rowOffsets || !B.colInd) {
+        if (bufferSize1) *bufferSize1 = 0;
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+
+    int64_t m = (opA == CUSPARSE_OPERATION_NON_TRANSPOSE) ? A.rows : A.cols;
+    int64_t n = (opB == CUSPARSE_OPERATION_NON_TRANSPOSE) ? B.cols : B.rows;
+
+    std::lock_guard<std::mutex> lkG(g_spgemmMutex);
+    auto stIt = g_spgemmStates.find(reinterpret_cast<uintptr_t>(spgemmDescr));
+    if (stIt == g_spgemmStates.end()) {
+        if (bufferSize1) *bufferSize1 = 0;
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    SpGEMMState &st = stIt->second;
+
+    // Second call (buffer allocated): work already done, just return the size
+    if (st.symbolicDone) {
+        if (bufferSize1)
+            *bufferSize1 = static_cast<size_t>(m + 1 + st.cNnz) * sizeof(int32_t);
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+
+    // First call: run symbolic phase — O(nnz(A)*avg_row_B) time, O(n) space
+    std::vector<int32_t> arPtr, acInd, brPtr, bcInd;
+    extractRowPtr(A, arPtr);
+    extractColInd(A, acInd);
+    extractRowPtr(B, brPtr);
+    extractColInd(B, bcInd);
+
+    csr_spgemm_symbolic(m, n, arPtr.data(), acInd.data(), 0,
+                        brPtr.data(), bcInd.data(), 0, st.cRowPtr, st.cColInd);
+
+    st.cRows = m;
+    st.cCols = n;
+    st.cNnz  = static_cast<int64_t>(st.cRowPtr[static_cast<size_t>(m)]);
+    st.symbolicDone = true;
+
+    // Expose NNZ in the C descriptor so cusparseSpMatGetSize reflects reality
+    cIt->second.nnz  = st.cNnz;
+    cIt->second.rows = m;
+    cIt->second.cols = n;
+
+    // bufferSize1 = bytes of symbolic data stored (cRowPtr + cColInd)
+    if (bufferSize1)
+        *bufferSize1 = static_cast<size_t>(m + 1 + st.cNnz) * sizeof(int32_t);
     return CUSPARSE_STATUS_SUCCESS;
 }
 
@@ -470,7 +563,7 @@ cusparseStatus_t cusparseSpGEMM_compute(cusparseHandle_t /*h*/,
         csr_spgemm<float>(m, A.cols, n,
             arPtr.data(), acInd.data(), static_cast<const float*>(A.values), 0,
             brPtr.data(), bcInd.data(), static_cast<const float*>(B.values), 0,
-            st.cRowPtr, st.cColInd, st.cValF);
+            st.cRowPtr, st.cColInd, st.cValF, st.symbolicDone);
         st.betaScalar = static_cast<double>(*static_cast<const float*>(beta));
         if (alphaF != 1.0f) for (auto &v : st.cValF) v *= alphaF;
     } else if (computeType == CUDA_R_64F) {
@@ -478,7 +571,7 @@ cusparseStatus_t cusparseSpGEMM_compute(cusparseHandle_t /*h*/,
         csr_spgemm<double>(m, A.cols, n,
             arPtr.data(), acInd.data(), static_cast<const double*>(A.values), 0,
             brPtr.data(), bcInd.data(), static_cast<const double*>(B.values), 0,
-            st.cRowPtr, st.cColInd, st.cValD);
+            st.cRowPtr, st.cColInd, st.cValD, st.symbolicDone);
         st.betaScalar = *static_cast<const double*>(beta);
         if (alphaD != 1.0) for (auto &v : st.cValD) v *= alphaD;
     } else if (computeType == CUDA_R_16F || computeType == CUDA_R_16BF) {
@@ -490,7 +583,7 @@ cusparseStatus_t cusparseSpGEMM_compute(cusparseHandle_t /*h*/,
         csr_spgemm<float>(m, A.cols, n,
             arPtr.data(), acInd.data(), aValF.data(), 0,
             brPtr.data(), bcInd.data(), bValF.data(), 0,
-            st.cRowPtr, st.cColInd, st.cValF);
+            st.cRowPtr, st.cColInd, st.cValF, st.symbolicDone);
         if (alphaF != 1.0f) for (auto &v : st.cValF) v *= alphaF;
     } else if (computeType == CUDA_C_32F || computeType == CUDA_C_64F) {
         // Complex types: values stored as interleaved {re,im} pairs.
@@ -518,7 +611,7 @@ cusparseStatus_t cusparseSpGEMM_compute(cusparseHandle_t /*h*/,
         csr_spgemm<std::complex<double>>(m, A.cols, n,
             arPtr.data(), acInd.data(), aValZ.data(), 0,
             brPtr.data(), bcInd.data(), bValZ.data(), 0,
-            st.cRowPtr, st.cColInd, st.cValZ);
+            st.cRowPtr, st.cColInd, st.cValZ, st.symbolicDone);
         if (alphaZ != std::complex<double>(1.0, 0.0))
             for (auto &v : st.cValZ) v *= alphaZ;
     } else {

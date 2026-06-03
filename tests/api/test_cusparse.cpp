@@ -673,6 +673,123 @@ int test_batched_spmm_beta_scaling() {
     return 0;
 }
 
+// ── SpGEMM symbolic phase (QUEUE-35) ─────────────────────────────────────────
+// Verifies that workEstimation runs a real symbolic phase:
+//   – bufferSize1 > 0 (structural data stored in descriptor)
+//   – cusparseSpMatGetSize reports correct NNZ before compute/copy
+//   – compute reuses the symbolic structure (numeric-only pass)
+//   – copy produces correct values
+//
+// A (3×3): rows = {[1,2,_],[_,_,3],[4,5,_]}  nnz=5
+// B (3×2): rows = {[1,_],[_,2],[3,_]}          nnz=3
+// C = A*B (3×2):
+//   row 0: A[0,0]*B[0,*] + A[0,1]*B[1,*] = 1·[1,0] + 2·[0,2] = [1, 4]
+//   row 1: A[1,2]*B[2,*] = 3·[3,0]              = [9, 0]  (col 0 only)
+//   row 2: A[2,0]*B[0,*] + A[2,1]*B[1,*] = 4·[1,0]+5·[0,2] = [4,10]
+// NNZ(C) = 5; cRowPtr = {0,2,3,5}
+int test_spgemm_symbolic_phase() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    std::vector<int>   arPtr = {0, 2, 3, 5};
+    std::vector<int>   acInd = {0, 1, 2, 0, 1};
+    std::vector<float> aVals = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+    std::vector<int>   brPtr = {0, 1, 2, 3};
+    std::vector<int>   bcInd = {0, 1, 0};
+    std::vector<float> bVals = {1.0f, 2.0f, 3.0f};
+    std::vector<int>   crPtr(4, 0);
+    std::vector<int>   ccInd(5, 0);
+    std::vector<float> cVals(5, 0.0f);
+
+    cusparseSpMatDescr_t matA = nullptr, matB = nullptr, matC = nullptr;
+    cusparseCreateCsr(&matA, 3, 3, 5, arPtr.data(), acInd.data(), aVals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateCsr(&matB, 3, 2, 3, brPtr.data(), bcInd.data(), bVals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateCsr(&matC, 3, 2, 0, crPtr.data(), ccInd.data(), cVals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+
+    cusparseSpGEMMDescr_t spgemmDescr = nullptr;
+    cusparseSpGEMM_createDescr(&spgemmDescr);
+    float alpha = 1.0f, beta = 0.0f;
+
+    // Phase 1a: workEstimation with null buffer — runs symbolic analysis
+    size_t buf1 = 0;
+    if (cusparseSpGEMM_workEstimation(h, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                      CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                      &alpha, matA, matB, &beta, matC,
+                                      CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT,
+                                      spgemmDescr, &buf1, nullptr)
+            != CUSPARSE_STATUS_SUCCESS) FAIL("SpGEMM symbolic: workEstimation failed");
+    if (buf1 == 0) FAIL("SpGEMM symbolic: bufferSize1 must be > 0 after symbolic phase");
+
+    // NNZ must already be correct in the C descriptor (before compute/copy)
+    int64_t symRows = 0, symCols = 0, symNnz = 0;
+    cusparseSpMatGetSize(matC, &symRows, &symCols, &symNnz);
+    if (symNnz != 5)
+        FAIL("SpGEMM symbolic: NNZ after workEstimation must be 5");
+
+    // Phase 1b: second workEstimation call with allocated buffer (no-op, returns same size)
+    std::vector<char> wsBuf(buf1);
+    size_t buf1b = 0;
+    cusparseSpGEMM_workEstimation(h, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                  CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                  &alpha, matA, matB, &beta, matC,
+                                  CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT,
+                                  spgemmDescr, &buf1b, wsBuf.data());
+    if (buf1b != buf1) FAIL("SpGEMM symbolic: second workEstimation must return same size");
+
+    // Phase 2: compute — reuses symbolic structure (numeric-only)
+    size_t buf2 = 0;
+    if (cusparseSpGEMM_compute(h, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                               CUSPARSE_OPERATION_NON_TRANSPOSE,
+                               &alpha, matA, matB, &beta, matC,
+                               CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT,
+                               spgemmDescr, &buf2, nullptr)
+            != CUSPARSE_STATUS_SUCCESS) FAIL("SpGEMM symbolic: compute failed");
+
+    // Phase 3: copy
+    int64_t cRows = 0, cCols = 0, cNnz = 0;
+    cusparseSpMatGetSize(matC, &cRows, &cCols, &cNnz);
+    if (cNnz != 5) FAIL("SpGEMM symbolic: final NNZ must be 5");
+    crPtr.resize(static_cast<size_t>(cRows + 1));
+    ccInd.resize(static_cast<size_t>(cNnz));
+    cVals.resize(static_cast<size_t>(cNnz));
+    cusparseCsrSetPointers(matC, crPtr.data(), ccInd.data(), cVals.data());
+    if (cusparseSpGEMM_copy(h, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                            CUSPARSE_OPERATION_NON_TRANSPOSE,
+                            &alpha, matA, matB, &beta, matC,
+                            CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, spgemmDescr)
+            != CUSPARSE_STATUS_SUCCESS) FAIL("SpGEMM symbolic: copy failed");
+
+    // Verify structure: cRowPtr = {0,2,3,5}
+    if (crPtr[0]!=0 || crPtr[1]!=2 || crPtr[2]!=3 || crPtr[3]!=5)
+        FAIL("SpGEMM symbolic: cRowPtr mismatch");
+
+    // Verify values (column-order within each row may vary; use lookup)
+    auto getC = [&](int r, int c) -> float {
+        for (int k = crPtr[static_cast<size_t>(r)]; k < crPtr[static_cast<size_t>(r+1)]; ++k)
+            if (ccInd[static_cast<size_t>(k)] == c) return cVals[static_cast<size_t>(k)];
+        return 0.0f;
+    };
+    if (!NEAR(getC(0, 0),  1.0f, 1e-5f)) FAIL("SpGEMM symbolic C[0,0]");
+    if (!NEAR(getC(0, 1),  4.0f, 1e-5f)) FAIL("SpGEMM symbolic C[0,1]");
+    if (!NEAR(getC(1, 0),  9.0f, 1e-5f)) FAIL("SpGEMM symbolic C[1,0]");
+    if (!NEAR(getC(2, 0),  4.0f, 1e-5f)) FAIL("SpGEMM symbolic C[2,0]");
+    if (!NEAR(getC(2, 1), 10.0f, 1e-5f)) FAIL("SpGEMM symbolic C[2,1]");
+
+    cusparseSpGEMM_destroyDescr(spgemmDescr);
+    cusparseDestroySpMat(matA);
+    cusparseDestroySpMat(matB);
+    cusparseDestroySpMat(matC);
+    cusparseDestroy(h);
+    PASS("SpGEMM symbolic phase 3×3×2 (buf>0, NNZ=5 after workEstimation, values correct)");
+    return 0;
+}
+
 // [ignoring loop detection]
 // ── Driver ────────────────────────────────────────────────────────────────────
 int main() {
@@ -683,6 +800,7 @@ int main() {
     rc |= test_spmv_float();
     rc |= test_spsv_lower();
     rc |= test_spgemm_float();
+    rc |= test_spgemm_symbolic_phase();
     rc |= test_ilu0();
     rc |= test_ic0();
     rc |= test_sparse_dense_roundtrip();
