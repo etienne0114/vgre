@@ -62,6 +62,10 @@ SecureChannel::~SecureChannel() {
   vgre_secure_zero(sessionKey_, sizeof(sessionKey_));
   vgre_secure_zero(keyFingerprint_, sizeof(keyFingerprint_));
   vgre_secure_zero(replayBitmap_, sizeof(replayBitmap_));
+  // Zeroize ECDH ephemeral key material — forward secrecy.
+  vgre_secure_zero(ephemeralPrivate_, sizeof(ephemeralPrivate_));
+  vgre_secure_zero(peerPublicKey_, sizeof(peerPublicKey_));
+  vgre_secure_zero(ecdhSharedSecret_, sizeof(ecdhSharedSecret_));
   sendSequence_.store(0, std::memory_order_relaxed);
   highestSeenSeq_ = 0;
   replayWindowSeeded_ = false;
@@ -137,6 +141,76 @@ VGREResult SecureChannel::initializeFromHardware(
     return res;
   }
   return initializeFromSecret(token, masterNonce, clientNonce);
+}
+
+// ── X25519 ECDH Ephemeral Key Exchange ───────────────────────────────────────
+
+bool SecureChannel::generateEphemeralKeypair() {
+#ifdef VGRE_ENABLE_SSL
+    // X25519: random 32-byte scalar, clamped internally by OpenSSL.
+    // Montgomery ladder: O(log p) field operations on Curve25519.
+    return crypto::x25519_genkeypair(ephemeralPrivate_, ephemeralPublic_);
+#else
+    return false; // OpenSSL required for X25519
+#endif
+}
+
+void SecureChannel::setPeerPublicKey(const uint8_t peerPublic[32]) {
+    memcpy(peerPublicKey_, peerPublic, 32);
+}
+
+const uint8_t* SecureChannel::getEphemeralPublicKey() const {
+    return ephemeralPublic_;
+}
+
+void SecureChannel::setPeerECDHCapable(bool capable) {
+    ecdhEnabled_ = capable;
+}
+
+VGREResult SecureChannel::executeKeyExchange(const std::string& authToken,
+                                               const uint8_t masterNonce[crypto::kNonceLen],
+                                               const uint8_t clientNonce[crypto::kNonceLen]) {
+    std::unique_lock<std::mutex> lock(mutex_);
+#ifdef VGRE_ENABLE_SSL
+    if (ecdhEnabled_) {
+        // X25519 path: compute shared secret then derive session key via HKDF-SHA256.
+        // Math: DH = clamp(priv) · peer_pub on Curve25519 (Montgomery ladder).
+        if (!crypto::x25519_shared_secret(ephemeralPrivate_, peerPublicKey_, ecdhSharedSecret_)) {
+            return VGREResult::ERR_CRYPTO;
+        }
+        // HKDF-SHA256 RFC 5869: Extract-then-Expand, two-step PRF.
+        // Derive session key: HKDF-SHA256(IKM=DH, salt="VGRE-session-key", info="").
+        crypto::derive_session_key_from_dh(ecdhSharedSecret_, sessionKey_);
+        // Zeroize ephemeral key material — forward secrecy requires no lingering scalars.
+        vgre_secure_zero(ephemeralPrivate_, 32);
+        vgre_secure_zero(ecdhSharedSecret_, 32);
+        // Compute fingerprint for diagnostics / test verification.
+        crypto::sha256(sessionKey_, 32, keyFingerprint_);
+        // Record session start time.
+        sessionStartMs_ = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        sendSequence_ = 0;
+        memset(replayBitmap_, 0, sizeof(replayBitmap_));
+        highestSeenSeq_ = 0;
+        replayWindowSeeded_ = false;
+        packetsSent_ = 0;
+        packetsReceived_ = 0;
+        bytesSent_ = 0;
+        bytesReceived_ = 0;
+        useGcm_ = crypto::gcm_hw_supported();
+        initialized_.store(true, std::memory_order_release);
+        VGRE_LOG_INFO("SecureChannel",
+            std::string("ECDH key exchange complete — cipher: ") +
+            (useGcm_ ? "AES-256-GCM (hw)" : "AES-256-CTR+HMAC") +
+            " — Key fingerprint: " + getKeyFingerprint().substr(0, 16) + "...");
+        return VGREResult::SUCCESS;
+    }
+#endif
+    // Fallback: PSK mode via PBKDF2 (peer doesn't support ECDH or OpenSSL absent).
+    // initializeFromSecret acquires mutex_ internally — release before delegating.
+    lock.unlock();
+    return initializeFromSecret(authToken, masterNonce, clientNonce);
 }
 
 VGREResult

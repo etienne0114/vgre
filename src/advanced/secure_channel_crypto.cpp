@@ -1022,5 +1022,105 @@ bool aes256_gcm_decrypt(const uint8_t key[32],
 
 } // namespace crypto
 
+// ── X25519 ECDH Ephemeral Key Exchange (RFC 7748) ────────────────────────────
+// X25519 uses Curve25519 in Montgomery form: u-coordinate of scalar × basepoint.
+// Montgomery ladder: O(log p) field operations on Curve25519.
+// OpenSSL EVP_PKEY_X25519 handles clamping (bits 0,1,2,255) internally.
+
+#ifdef VGRE_ENABLE_SSL
+#include <openssl/evp.h>
+
+namespace crypto {
+
+// X25519 ephemeral keypair generation (RFC 7748)
+// Sets privateKey[32] and publicKey[32]; returns true on success.
+// Montgomery ladder scalar multiplication is performed internally by OpenSSL.
+// Security: private key is a random 32-byte scalar (clamping done by EVP internally).
+bool x25519_genkeypair(uint8_t privateKey[32], uint8_t publicKey[32]) {
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr);
+    if (!ctx) return false;
+    EVP_PKEY* pkey = nullptr;
+    bool ok = (EVP_PKEY_keygen_init(ctx) > 0) &&
+              (EVP_PKEY_keygen(ctx, &pkey) > 0);
+    if (ok) {
+        size_t len = 32;
+        ok = EVP_PKEY_get_raw_private_key(pkey, privateKey, &len) > 0;
+        len = 32;
+        ok = ok && (EVP_PKEY_get_raw_public_key(pkey, publicKey, &len) > 0);
+    }
+    if (pkey) EVP_PKEY_free(pkey);
+    EVP_PKEY_CTX_free(ctx);
+    return ok;
+}
+
+// X25519 shared secret: sharedSecret = clamp(privateKey) · peerPublic on Curve25519
+// Montgomery ladder: O(log p) field operations on Curve25519.
+// Returns true on success.
+bool x25519_shared_secret(const uint8_t privateKey[32],
+                           const uint8_t peerPublic[32],
+                           uint8_t sharedSecret[32]) {
+    EVP_PKEY* priv = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr, privateKey, 32);
+    EVP_PKEY* pub  = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, nullptr, peerPublic, 32);
+    EVP_PKEY_CTX* ctx = (priv && pub) ? EVP_PKEY_CTX_new(priv, nullptr) : nullptr;
+    size_t outLen = 32;
+    bool ok = ctx &&
+              (EVP_PKEY_derive_init(ctx) > 0) &&
+              (EVP_PKEY_derive_set_peer(ctx, pub) > 0) &&
+              (EVP_PKEY_derive(ctx, sharedSecret, &outLen) > 0) &&
+              (outLen == 32);
+    if (ctx)  EVP_PKEY_CTX_free(ctx);
+    if (priv) EVP_PKEY_free(priv);
+    if (pub)  EVP_PKEY_free(pub);
+    return ok;
+}
+
+} // namespace crypto
+#endif // VGRE_ENABLE_SSL
+
+// ── HKDF-SHA256 (RFC 5869) ───────────────────────────────────────────────────
+// HKDF-SHA256 RFC 5869: Extract-then-Expand, two-step PRF.
+// The functions below are in the vgre::advanced namespace (not the crypto
+// sub-namespace) so they can be called from secure_channel.cpp without
+// introducing a cross-namespace forward declaration cycle.
+
+namespace crypto {
+
+// HKDF-SHA256 Extract (RFC 5869 §2.2): PRK = HMAC-SHA256(salt, IKM)
+// salt: "VGRE-session-key" (16 bytes), ikm: X25519 shared secret (32 bytes)
+// Output PRK is a 32-byte pseudorandom key.
+static void hkdf_sha256_extract(const uint8_t* salt, size_t saltLen,
+                                  const uint8_t* ikm,  size_t ikmLen,
+                                  uint8_t prk[32]) {
+    hmac_sha256(salt, saltLen, ikm, ikmLen, prk);
+}
+
+// HKDF-SHA256 Expand (RFC 5869 §2.3): OKM = T(1) where T(1) = HMAC(PRK, info || 0x01)
+// For a single 32-byte output block, T(1) = HMAC-SHA256(PRK, info || 0x01).
+static void hkdf_sha256_expand(const uint8_t* prk, size_t prkLen,
+                                 const uint8_t* info, size_t infoLen,
+                                 uint8_t okm[32]) {
+    // T(1) = HMAC-SHA256(PRK, "" || 0x01) with info=""
+    uint8_t ctr = 0x01;
+    std::vector<uint8_t> msg(infoLen + 1);
+    if (info && infoLen > 0) memcpy(msg.data(), info, infoLen);
+    msg[infoLen] = ctr;
+    hmac_sha256(prk, prkLen, msg.data(), msg.size(), okm);
+}
+
+// Derive session key from X25519 shared secret using HKDF-SHA256
+// sessionKey = HKDF-SHA256(IKM=sharedSecret, salt="VGRE-session-key", info="")
+// HKDF-SHA256 RFC 5869: Extract-then-Expand, two-step PRF.
+void derive_session_key_from_dh(const uint8_t sharedSecret[32], uint8_t sessionKey[32]) {
+    static const uint8_t kSalt[] = "VGRE-session-key"; // 16 bytes
+    uint8_t prk[32];
+    hkdf_sha256_extract(kSalt, sizeof(kSalt) - 1, sharedSecret, 32, prk);
+    hkdf_sha256_expand(prk, 32, nullptr, 0, sessionKey);
+    // Zeroize intermediate PRK — forward secrecy requires no key material lingers.
+    volatile uint8_t* vp = static_cast<volatile uint8_t*>(static_cast<void*>(prk));
+    for (size_t i = 0; i < 32; ++i) vp[i] = 0;
+}
+
+} // namespace crypto
+
 } // namespace advanced
 } // namespace vgre

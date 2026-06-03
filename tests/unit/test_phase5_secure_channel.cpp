@@ -492,6 +492,76 @@ void test_hmac_mismatch_rejection() {
     std::cout << "  Passed." << std::endl;
 }
 
+// ── QUEUE-30: X25519 ECDH key exchange tests ─────────────────────────────────
+
+#ifdef VGRE_ENABLE_SSL
+static void test_x25519_keypair_generation() {
+    std::cout << "Testing X25519 keypair generation..." << std::endl;
+    uint8_t privA[32], pubA[32], privB[32], pubB[32];
+    assert(crypto::x25519_genkeypair(privA, pubA));
+    assert(crypto::x25519_genkeypair(privB, pubB));
+    // Public keys must differ (overwhelming probability from random scalars)
+    assert(memcmp(pubA, pubB, 32) != 0);
+    std::cout << "  Passed." << std::endl;
+}
+
+static void test_x25519_shared_secret_matches() {
+    std::cout << "Testing X25519 DH symmetry: X25519(a,B) == X25519(b,A)..." << std::endl;
+    // Math: X25519(a, X25519(b,G)) == X25519(b, X25519(a,G)) — CDH on Curve25519
+    uint8_t privA[32], pubA[32], privB[32], pubB[32];
+    uint8_t secretA[32], secretB[32];
+    assert(crypto::x25519_genkeypair(privA, pubA));
+    assert(crypto::x25519_genkeypair(privB, pubB));
+    // Montgomery ladder: O(log p) field operations on Curve25519
+    assert(crypto::x25519_shared_secret(privA, pubB, secretA));
+    assert(crypto::x25519_shared_secret(privB, pubA, secretB));
+    // Both sides must derive identical shared secret (Diffie-Hellman symmetry)
+    assert(crypto::secure_compare(secretA, secretB, 32));
+    std::cout << "  Passed." << std::endl;
+}
+
+static void test_ecdh_full_key_exchange() {
+    std::cout << "Testing full ECDH key exchange (two SecureChannel instances)..." << std::endl;
+    SecureChannel alice, bob;
+    uint8_t masterNonce[16] = {}, clientNonce[16] = {};
+    crypto::random_bytes(masterNonce, 16);
+    crypto::random_bytes(clientNonce, 16);
+
+    // Both parties generate ephemeral keypairs
+    assert(alice.generateEphemeralKeypair());
+    assert(bob.generateEphemeralKeypair());
+
+    // Simulate key exchange: swap public keys (would be sent over socket in production)
+    alice.setPeerPublicKey(bob.getEphemeralPublicKey());
+    bob.setPeerPublicKey(alice.getEphemeralPublicKey());
+
+    // Both mark peer as ECDH-capable (version flag exchange)
+    alice.setPeerECDHCapable(true);
+    bob.setPeerECDHCapable(true);
+
+    // Execute ECDH + HKDF-SHA256 key derivation on both sides
+    assert(alice.executeKeyExchange("", masterNonce, clientNonce) == vgre::VGREResult::SUCCESS);
+    assert(bob.executeKeyExchange("", masterNonce, clientNonce) == vgre::VGREResult::SUCCESS);
+
+    // Both must derive identical session key fingerprints — shared secret matches
+    assert(alice.getKeyFingerprint() == bob.getKeyFingerprint());
+    std::cout << "  Passed (fingerprint: " << alice.getKeyFingerprint().substr(0, 16) << "...)." << std::endl;
+}
+#endif // VGRE_ENABLE_SSL
+
+static void test_ecdh_psk_fallback() {
+    std::cout << "Testing ECDH fallback to PSK when peer lacks ECDH capability..." << std::endl;
+    SecureChannel alice;
+    uint8_t masterNonce[16] = {}, clientNonce[16] = {};
+    crypto::random_bytes(masterNonce, 16);
+    crypto::random_bytes(clientNonce, 16);
+    // ecdhEnabled_ defaults to false — falls back to PSK path
+    vgre::VGREResult r = alice.executeKeyExchange("test-token", masterNonce, clientNonce);
+    assert(r == vgre::VGREResult::SUCCESS);
+    assert(!alice.getKeyFingerprint().empty());
+    std::cout << "  Passed." << std::endl;
+}
+
 int main() {
     try {
         test_sha256();
@@ -510,6 +580,13 @@ int main() {
         test_packet_hmac_tamper_detection();
         test_hmac_pbkdf2_key_derivation();
         test_hmac_mismatch_rejection();
+        // QUEUE-30: X25519 ECDH key exchange
+#ifdef VGRE_ENABLE_SSL
+        test_x25519_keypair_generation();
+        test_x25519_shared_secret_matches();
+        test_ecdh_full_key_exchange();
+#endif
+        test_ecdh_psk_fallback();
         std::cout << "\nALL SecureChannel tests PASSED." << std::endl;
         return 0;
     } catch (const std::exception& e) {
