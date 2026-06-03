@@ -255,6 +255,70 @@ inline unsigned int match_all(const Group&, T, int* pred) {
     return 0xFFFFFFFFu;
 }
 
+// ── partition_copy() ─────────────────────────────────────────────────────────
+// Copies elements from [first,last) to two output ranges based on predicate.
+// Elements satisfying pred(e) go to out_true; others go to out_false.
+// Returns iterator past the end of the out_true range (mirrors std::partition_copy).
+// CPU model: each calling thread owns its [first,last) slice; partition is local.
+// Complexity: O(k) where k = distance(first, last) per thread.
+// Math invariant: |out_true range| + |out_false range| == distance(first, last).
+template<typename Group, typename InputIt, typename OutputIt1, typename OutputIt2,
+         typename UnaryPredicate>
+inline OutputIt1 partition_copy(const Group& g,
+                                 InputIt first, InputIt last,
+                                 OutputIt1 out_true, OutputIt2 out_false,
+                                 UnaryPredicate pred) {
+    // Sync group before starting partition to ensure all threads see consistent input
+    g.sync();
+    OutputIt1 true_pos  = out_true;
+    OutputIt2 false_pos = out_false;
+    for (InputIt it = first; it != last; ++it) {
+        if (pred(*it)) *true_pos++ = *it;
+        else           *false_pos++ = *it;
+    }
+    g.sync();  // sync after so all threads complete before caller uses outputs
+    return true_pos;
+}
+
+// ── inclusive_scan() ─────────────────────────────────────────────────────────
+// Parallel prefix scan across group members using binary op.
+// Each thread provides val; returns the inclusive prefix (own value included).
+// Butterfly network: O(log N) rounds for group of size N.
+// Math: result[i] = op(val[0], val[1], ..., val[i])
+template<typename Group, typename T, typename BinaryOp>
+inline T inclusive_scan(const Group& g, T val, BinaryOp op) {
+    const unsigned int sz   = g.size();
+    const unsigned int rank = g.thread_rank();
+    // Butterfly up-sweep: log2(sz) rounds with shfl_up
+    for (unsigned int offset = 1; offset < sz; offset <<= 1) {
+        // shfl_up: receive value from thread (rank - offset)
+        T other = g.shfl_up(val, static_cast<int>(offset));
+        if (rank >= offset) val = op(other, val);  // inclusive: include own value
+    }
+    return val;
+}
+
+template<typename Group, typename T>
+inline T inclusive_scan(const Group& g, T val) {
+    return inclusive_scan(g, val, detail::sum_op{});
+}
+
+// ── exclusive_scan() ─────────────────────────────────────────────────────────
+// Exclusive prefix scan: result[i] = op(val[0], ..., val[i-1]); result[0] = init.
+// Math: result[i] = init ⊕ val[0] ⊕ ... ⊕ val[i-1] (identity for rank==0)
+template<typename Group, typename T, typename BinaryOp>
+inline T exclusive_scan(const Group& g, T val, BinaryOp op, T init = T{}) {
+    T inc = inclusive_scan(g, val, op);
+    // Exclusive = shift inclusive left by one rank, filling rank-0 with init
+    T exc = g.shfl_up(inc, 1);
+    return (g.thread_rank() == 0) ? init : exc;
+}
+
+template<typename Group, typename T>
+inline T exclusive_scan(const Group& g, T val, T init = T{}) {
+    return exclusive_scan(g, val, detail::sum_op{}, init);
+}
+
 } // namespace cooperative_groups
 
 #endif // VGRE_COMPILER_CUDA_DEVICE_LIBS_COOPERATIVE_GROUPS_H

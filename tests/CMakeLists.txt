@@ -71,6 +71,13 @@ set_tests_properties(MultiDeviceCooperativeComprehensive PROPERTIES
     TIMEOUT 300
     RESOURCE_LOCK vgre_llvm_jit)
 
+add_executable(test_cooperative_groups_partition unit/test_cooperative_groups_partition.cpp)
+target_link_libraries(test_cooperative_groups_partition PRIVATE vgre)
+add_test(NAME CooperativeGroupsPartition COMMAND test_cooperative_groups_partition)
+set_tests_properties(CooperativeGroupsPartition PROPERTIES
+    TIMEOUT 120
+    RESOURCE_LOCK vgre_llvm_jit)
+
 add_executable(test_stream_concurrency integration/test_stream_concurrency.cpp)
 target_link_libraries(test_stream_concurrency PRIVATE vgre)
 add_test(NAME test_stream_concurrency COMMAND test_stream_concurrency)
