@@ -157,6 +157,14 @@ add_executable(test_graph_update integration/test_graph_update.cpp)
 target_link_libraries(test_graph_update PRIVATE vgre)
 add_test(NAME test_graph_update COMMAND test_graph_update)
 
+# QUEUE-27: cudaGraph full replay — topological sort + dependency-ordered
+# kernel execution.  Five tests: diamond, multi-root, relaunch, memcpy chain,
+# and disconnected components.
+add_executable(test_graph_topo_advanced integration/test_graph_topo_advanced.cpp)
+target_link_libraries(test_graph_topo_advanced PRIVATE vgre)
+add_test(NAME GraphTopoAdvanced COMMAND test_graph_topo_advanced)
+set_tests_properties(GraphTopoAdvanced PROPERTIES TIMEOUT 60)
+
 add_executable(test_phase3_cluster integration/test_phase3_cluster.cpp)
 target_link_libraries(test_phase3_cluster PRIVATE vgre)
 add_test(NAME test_phase3_cluster COMMAND test_phase3_cluster)
