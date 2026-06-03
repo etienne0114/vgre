@@ -127,42 +127,72 @@ struct __nv_bfloat16 { unsigned short __x; };
 namespace cooperative_groups {
     class thread_block {
     public:
-        void sync() {}
+        void sync() const {}
         unsigned size() const { return 0; }
         unsigned thread_rank() const { return 0; }
     };
     class grid_group {
     public:
-        void sync() {}
+        void sync() const {}
         unsigned size() const { return 0; }
         unsigned thread_rank() const { return 0; }
         bool is_valid() const { return true; }
     };
     class multi_grid_group {
     public:
-        void sync() {}
+        void sync() const {}
         unsigned size() const { return 0; }
         unsigned thread_rank() const { return 0; }
         unsigned num_grids() const { return 1; }
         unsigned grid_rank() const { return 0; }
     };
+    // coalesced_group: active-thread subset; sync() + shfl operations
+    class coalesced_group {
+    public:
+        void sync() const {}
+        unsigned size() const { return 32; }
+        unsigned thread_rank() const { return 0; }
+        template<typename T> T shfl(T val, int) const { return val; }
+        template<typename T> T shfl_up(T val, unsigned) const { return val; }
+        template<typename T> T shfl_down(T val, unsigned) const { return val; }
+        template<typename T> T shfl_xor(T val, int) const { return val; }
+    };
     template<int Sz> class thread_block_tile {
     public:
-        void sync() {}
+        void sync() const {}
         unsigned size() const { return Sz; }
         unsigned thread_rank() const { return 0; }
-        template<typename T> T shfl(T val, int src) { return val; }
-        template<typename T> T shfl_xor(T val, int mask) { return val; }
-        template<typename T> T shfl_down(T val, unsigned delta) { return val; }
-        template<typename T> T shfl_up(T val, unsigned delta) { return val; }
+        template<typename T> T shfl(T val, int) const { return val; }
+        template<typename T> T shfl_xor(T val, int) const { return val; }
+        template<typename T> T shfl_down(T val, unsigned) const { return val; }
+        template<typename T> T shfl_up(T val, unsigned) const { return val; }
     };
     inline thread_block this_thread_block() { return thread_block{}; }
     inline grid_group this_grid() { return grid_group{}; }
     inline multi_grid_group this_multi_grid() { return multi_grid_group{}; }
+    inline coalesced_group coalesced_threads() { return coalesced_group{}; }
     template<int Sz>
     inline thread_block_tile<Sz> tiled_partition(const thread_block&) {
         return thread_block_tile<Sz>{};
     }
+    // partition_copy stub: forwards to simple sequential copy (AST parse only)
+    template<typename Group, typename InIt, typename OutIt1, typename OutIt2, typename Pred>
+    inline OutIt1 partition_copy(const Group&, InIt first, InIt last,
+                                  OutIt1 out_t, OutIt2 out_f, Pred pred) {
+        for (; first != last; ++first) {
+            if (pred(*first)) *out_t++ = *first; else *out_f++ = *first;
+        }
+        return out_t;
+    }
+    // inclusive_scan / exclusive_scan stubs for AST parsing
+    template<typename Group, typename T, typename BinaryOp>
+    inline T inclusive_scan(const Group&, T val, BinaryOp) { return val; }
+    template<typename Group, typename T>
+    inline T inclusive_scan(const Group&, T val) { return val; }
+    template<typename Group, typename T, typename BinaryOp>
+    inline T exclusive_scan(const Group&, T val, BinaryOp, T init = T{}) { (void)val; return init; }
+    template<typename Group, typename T>
+    inline T exclusive_scan(const Group&, T, T init = T{}) { return init; }
 } // namespace cooperative_groups
 )VGRE_STUB";
 
