@@ -3,6 +3,7 @@
 
 #include "vgre/common/error_codes.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,17 @@
 #include <vector>
 
 #include "vgre/common/sockets.h"
+
+// Forward-declare OpenSSL types so callers can use mTLS helpers without
+// pulling in the full OpenSSL headers at every include site.
+#ifdef VGRE_ENABLE_SSL
+struct ssl_st;
+struct x509_st;
+struct evp_pkey_st;
+typedef struct ssl_st      SSL;
+typedef struct x509_st     X509;
+typedef struct evp_pkey_st EVP_PKEY;
+#endif
 
 namespace vgre {
 namespace advanced {
@@ -53,6 +65,43 @@ void random_bytes(uint8_t *buf, size_t len);
 
 // Constant-time comparison
 bool secure_compare(const uint8_t *a, const uint8_t *b, size_t len);
+
+// ── mTLS: Certificate Fingerprint (SHA-256 of SubjectPublicKeyInfo DER) ─────
+//
+// Invariant: fingerprint == SHA-256( DER-encoded SubjectPublicKeyInfo )
+// This binds the pinned identity to the raw public-key bytes, independent
+// of the certificate chain or CA.  SPKI-level pinning is the same strategy
+// used by HTTP Public Key Pinning (RFC 7469 §2.4).
+struct CertificateFingerprint {
+  std::array<uint8_t, kSHA256DigestLen> bytes{};
+
+  // Constant-time compare: returns true iff all 32 bytes are equal.
+  // Uses the existing secure_compare() primitive to prevent timing side-channels.
+  bool operator==(const CertificateFingerprint &o) const noexcept {
+    return secure_compare(bytes.data(), o.bytes.data(), kSHA256DigestLen);
+  }
+  bool operator!=(const CertificateFingerprint &o) const noexcept {
+    return !(*this == o);
+  }
+};
+
+#ifdef VGRE_ENABLE_SSL
+// Compute SHA-256( SubjectPublicKeyInfo DER ) for the peer certificate.
+// Invariant: result.bytes == SHA-256(i2d_X509_PUBKEY(cert))
+CertificateFingerprint computeCertFingerprint(X509 *cert);
+
+// Retrieve peer certificate from an established SSL connection, compute its
+// SPKI fingerprint, and constant-time compare against `expected`.
+// Returns true iff the peer certificate is present and its fingerprint matches.
+bool verifyCertPin(SSL *ssl, const CertificateFingerprint &expected);
+
+// ECDSA-P256 verify with SHA-256 digest via EVP_DigestVerify.
+// Mathematical invariant: valid iff u1·G + u2·Q has x-coordinate ≡ r (mod n)
+// where u1 = e·s⁻¹ mod n,  u2 = r·s⁻¹ mod n,  e = SHA-256(msg).
+// `sig` must be DER-encoded ECDSA signature (SEQUENCE { INTEGER r, INTEGER s }).
+bool ecdsaP256Verify(EVP_PKEY *pubkey, const uint8_t *msg, size_t msgLen,
+                     const uint8_t *sig, size_t sigLen);
+#endif // VGRE_ENABLE_SSL
 
 // AES-256-CTR encryption/decryption (FIPS 197 + RFC 3686)
 // counter_block = nonce[12] || be32(initialCounter + block_index)

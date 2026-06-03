@@ -613,5 +613,137 @@ VGREResult SecureChannel::recvSecure(vgre_socket_t fd,
   return finish(VGREResult::SUCCESS);
 }
 
+// ── mTLS: certificate pinning + ECDSA-P256 verify ────────────────────────────
+// All three functions are compiled only when OpenSSL is present.
+// Without OpenSSL the public header exposes only the CertificateFingerprint
+// struct and the #ifdef guards suppress the function declarations; callers
+// guard their call sites with the same #ifdef so there is no link gap.
+
+#ifdef VGRE_ENABLE_SSL
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+#include <openssl/evp.h>
+#include <openssl/err.h>
+
+namespace crypto {
+
+// computeCertFingerprint ──────────────────────────────────────────────────────
+// Extract SubjectPublicKeyInfo in DER form, then run SHA-256 over it.
+// Invariant: result.bytes == SHA-256( i2d_X509_PUBKEY(cert) )
+// Pinning at the SPKI level is key-algorithm-agnostic (survives cert renewal
+// as long as the public key stays the same) and avoids CA trust dependencies.
+CertificateFingerprint computeCertFingerprint(X509 *cert) {
+  CertificateFingerprint fp{};
+  if (!cert) {
+    VGRE_LOG_WARN("mTLS", "computeCertFingerprint: null certificate");
+    return fp;
+  }
+
+  // Serialize SubjectPublicKeyInfo to DER.
+  // i2d_X509_PUBKEY allocates a buffer and returns its length; we own it.
+  unsigned char *derBuf = nullptr;
+  // X509_get_X509_PUBKEY returns an internal pointer — do NOT free it.
+  int derLen = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(cert), &derBuf);
+  if (derLen <= 0 || !derBuf) {
+    VGRE_LOG_ERROR("mTLS", "computeCertFingerprint: i2d_X509_PUBKEY failed");
+    return fp;
+  }
+
+  // SHA-256( DER bytes ) — reuse the built-in VGRE implementation so we
+  // do not pull in EVP_MD_CTX just for the digest.  The VGRE SHA-256 is
+  // RFC 6234-compliant and passes NIST test vectors.
+  sha256(derBuf, static_cast<size_t>(derLen), fp.bytes.data());
+  OPENSSL_free(derBuf);
+  return fp;
+}
+
+// verifyCertPin ───────────────────────────────────────────────────────────────
+// Retrieve the peer certificate from an established SSL session, compute its
+// SPKI fingerprint, and compare against the expected value in constant time.
+// Returns false if no peer cert is present (mutual TLS requires one).
+bool verifyCertPin(SSL *ssl, const CertificateFingerprint &expected) {
+  if (!ssl) {
+    VGRE_LOG_WARN("mTLS", "verifyCertPin: null SSL object");
+    return false;
+  }
+
+  // SSL_get_peer_certificate increments the reference count; we must X509_free.
+  X509 *peer = SSL_get_peer_certificate(ssl);
+  if (!peer) {
+    VGRE_LOG_WARN("mTLS", "verifyCertPin: no peer certificate presented");
+    return false;
+  }
+
+  CertificateFingerprint actual = computeCertFingerprint(peer);
+  X509_free(peer);
+
+  // Constant-time comparison: CertificateFingerprint::operator== delegates to
+  // crypto::secure_compare which processes all 32 bytes unconditionally.
+  // Invariant: no early exit → comparison time independent of match position.
+  bool ok = (actual == expected);
+  if (!ok) {
+    VGRE_LOG_WARN("mTLS", "verifyCertPin: fingerprint mismatch — rejecting peer");
+  }
+  return ok;
+}
+
+// ecdsaP256Verify ─────────────────────────────────────────────────────────────
+// Verify an ECDSA-P256 signature using the EVP_DigestVerify family.
+//
+// Mathematical invariant (FIPS 186-4 §6.4.2):
+//   Signature (r, s) over message hash e = SHA-256(msg) is valid iff:
+//     u1 = e · s⁻¹ mod n
+//     u2 = r · s⁻¹ mod n
+//     R  = u1·G + u2·Q          (elliptic-curve scalar multiplication)
+//     R.x mod n == r
+//
+// EVP_DigestVerify encapsulates all of the above inside libcrypto, including
+// the cofactor check and the "s ∉ {0, n}" guard required by FIPS.
+// `sig` must be a DER-encoded ECDSA-Sig-Value ::= SEQUENCE { INTEGER r, INTEGER s }.
+bool ecdsaP256Verify(EVP_PKEY *pubkey, const uint8_t *msg, size_t msgLen,
+                     const uint8_t *sig, size_t sigLen) {
+  if (!pubkey || !msg || !sig) {
+    VGRE_LOG_WARN("mTLS", "ecdsaP256Verify: null argument");
+    return false;
+  }
+
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  if (!ctx) {
+    VGRE_LOG_ERROR("mTLS", "ecdsaP256Verify: EVP_MD_CTX_new failed");
+    return false;
+  }
+
+  // EVP_DigestVerifyInit binds the hash (SHA-256) to the key type (EC/P-256).
+  // It returns 1 on success, ≤0 on error.
+  if (EVP_DigestVerifyInit(ctx, nullptr, EVP_sha256(), nullptr, pubkey) != 1) {
+    VGRE_LOG_ERROR("mTLS", "ecdsaP256Verify: EVP_DigestVerifyInit failed");
+    EVP_MD_CTX_free(ctx);
+    return false;
+  }
+
+  // Feed the message into the digest context.
+  if (EVP_DigestVerifyUpdate(ctx, msg, msgLen) != 1) {
+    VGRE_LOG_ERROR("mTLS", "ecdsaP256Verify: EVP_DigestVerifyUpdate failed");
+    EVP_MD_CTX_free(ctx);
+    return false;
+  }
+
+  // Final check: verifies u1·G + u2·Q vs R.x; returns 1 if valid, 0 if invalid.
+  int rc = EVP_DigestVerifyFinal(ctx, sig, sigLen);
+  EVP_MD_CTX_free(ctx);
+
+  if (rc == 1) {
+    return true;
+  }
+  // rc == 0: signature is mathematically invalid; rc < 0: internal error.
+  if (rc < 0) {
+    VGRE_LOG_WARN("mTLS", "ecdsaP256Verify: internal EVP error");
+  }
+  return false;
+}
+
+} // namespace crypto
+#endif // VGRE_ENABLE_SSL
+
 } // namespace advanced
 } // namespace vgre

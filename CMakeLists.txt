@@ -402,6 +402,18 @@ else()
 endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
+# §6b  Optional: OpenSSL — mTLS, ECDSA-P256, certificate pinning
+# ──────────────────────────────────────────────────────────────────────────────
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+    message(STATUS "OpenSSL: found ${OPENSSL_VERSION} — mTLS / ECDSA / cert-pinning enabled")
+    set(_VGRE_HAS_SSL ON)
+else()
+    message(STATUS "OpenSSL: not found — mTLS disabled; auth-token fallback active")
+    set(_VGRE_HAS_SSL OFF)
+endif()
+
+# ──────────────────────────────────────────────────────────────────────────────
 # §7  LLVM (version 18 enforced; target-scoped INTERFACE target)
 # ──────────────────────────────────────────────────────────────────────────────
 # Version specifier in CONFIG mode is unreliable with distro-packaged LLVM
@@ -856,6 +868,16 @@ function(_vgre_configure_library target_name visibility)
     if(_VGRE_HAS_ZLIB)
         target_compile_definitions(${target_name} PRIVATE VGRE_HAS_ZLIB)
         target_link_libraries(${target_name} PRIVATE ZLIB::ZLIB)
+    endif()
+    # OpenSSL: mTLS, ECDSA-P256 verify, certificate pinning.
+    # VGRE_ENABLE_SSL is propagated with ${visibility} so that downstream
+    # consumers (tests, examples, user code) that include vgre headers and call
+    # the mTLS API see the same definition that the library was compiled with.
+    # OpenSSL libraries are PRIVATE because callers do not need to link OpenSSL
+    # directly — they go through the VGRE API symbols.
+    if(_VGRE_HAS_SSL)
+        target_compile_definitions(${target_name} ${visibility} VGRE_ENABLE_SSL)
+        target_link_libraries(${target_name} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     endif()
     # Runtime feature gates
     if(ENABLE_VGRE_TLB)

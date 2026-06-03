@@ -98,6 +98,18 @@ if(_VGRE_RDMA_FOUND)
     target_include_directories(vgre_advanced PRIVATE "${IBVERBS_INCLUDE}")
 endif()
 
+# OpenSSL: compile secure_channel.cpp and websocket_transport.cpp mTLS blocks.
+# VGRE_ENABLE_SSL must be set on the OBJECT library (not just on the final
+# shared targets) so that #ifdef VGRE_ENABLE_SSL guards in these source files
+# are active during compilation of vgre_advanced objects.
+# The include directories are needed here; actual linking happens on the final
+# shared libraries via _vgre_configure_library().
+if(_VGRE_HAS_SSL)
+    target_compile_definitions(vgre_advanced PRIVATE VGRE_ENABLE_SSL)
+    target_include_directories(vgre_advanced PRIVATE
+        ${OPENSSL_INCLUDE_DIR})
+endif()
+
 # gRPC: set compile definitions + generated proto include path so
 # grpc_transport.cpp sees the generated .pb.h headers.
 # Library linking is handled by _vgre_configure_library() on final targets.

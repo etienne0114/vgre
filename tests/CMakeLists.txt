@@ -244,6 +244,21 @@ target_link_libraries(test_cublas_gemm_ex_batched vgre)
 add_test(NAME CublasGemmExBatched COMMAND test_cublas_gemm_ex_batched)
 set_tests_properties(CublasGemmExBatched PROPERTIES TIMEOUT 30 ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF")
 
+# QUEUE-25: mTLS — certificate pinning + ECDSA-P256 verify
+# All 5 tests are self-contained (in-memory keys/certs via OpenSSL EVP APIs).
+# The OpenSSL-dependent tests are guarded by #ifdef VGRE_ENABLE_SSL inside the
+# source file; the fallback test runs on every build.
+add_executable(test_mtls unit/test_mtls.cpp)
+target_link_libraries(test_mtls PRIVATE vgre)
+# test_mtls directly calls OpenSSL EVP APIs (keygen, sign, etc.) to generate
+# in-memory test keys — it must link OpenSSL::Crypto directly.
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+    target_link_libraries(test_mtls PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+add_test(NAME mTLSCertPinningECDSA COMMAND test_mtls)
+set_tests_properties(mTLSCertPinningECDSA PROPERTIES TIMEOUT 30)
+
 add_executable(test_events api/test_events.cpp)
 target_link_libraries(test_events PRIVATE vgre_cudart)
 add_test(NAME Events COMMAND test_events)
