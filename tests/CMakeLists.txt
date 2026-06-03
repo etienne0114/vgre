@@ -322,6 +322,10 @@ add_executable(test_cublas_workspace api/test_cublas_workspace.cpp)
 target_link_libraries(test_cublas_workspace PRIVATE vgre)
 add_test(NAME CublasWorkspace COMMAND test_cublas_workspace)
 
+add_executable(test_cublas_strassen api/test_cublas_strassen.cpp)
+target_link_libraries(test_cublas_strassen PRIVATE vgre)
+add_test(NAME CublasStrassen COMMAND test_cublas_strassen)
+
 add_executable(test_cublas_level2 api/test_cublas_level2.cpp)
 target_link_libraries(test_cublas_level2 PRIVATE vgre)
 add_test(NAME CublasLevel2 COMMAND test_cublas_level2)
