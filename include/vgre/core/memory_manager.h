@@ -8,7 +8,6 @@
 
 #include <atomic>
 #include <cstddef>
-#include <list>
 #include <map>
 #include <mutex>
 #include <shared_mutex>
@@ -430,7 +429,13 @@ private:
   // retired trees, preventing use-after-free when a SIGSEGV fires between the
   // tree swap and the subsequent delete of the old pointer.
   mutable std::atomic<int> activeHandlers_{0};
-  std::list<ManagedRegion> masterRegions_; // Master list with STABLE ADDRESSES protected by mutex_
+  // O(log n): std::map binary search
+  // BST invariant: left.key < node.key < right.key
+  std::map<uintptr_t, ManagedRegion> masterRegions_;  // O(log n) key=base_address
+
+  // O(log n) helpers for masterRegions_ lookups
+  ManagedRegion* findRegionByPtr(void* ptr);           // O(log n) exact key lookup
+  ManagedRegion* findRegionContaining(uintptr_t addr); // O(log n) finds region that contains addr
 
   // Delta-Sync: Dirty Page Management
   std::atomic<double> h2dBandwidth_{25.0};

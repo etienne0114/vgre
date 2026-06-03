@@ -77,7 +77,7 @@ VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, D
   // Phase 11: Authoritative UVM Usage Telemetry
   {
       std::unique_lock<std::shared_mutex> lock(mutex_);
-      for (auto& region : masterRegions_) {
+      for (auto& [key, region] : masterRegions_) {
           uintptr_t base = reinterpret_cast<uintptr_t>(region.ptr);
           if (pBase >= base && pBase < base + region.size) {
               if (advice == 3) { // PreferredLocation
@@ -136,7 +136,7 @@ VGREResult MemoryManager::memPrefetchAsync(const void *ptr, size_t count, Device
     std::unique_lock<std::shared_mutex> lock(mutex_);
     uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
     uintptr_t end = start + count;
-    for (auto &region : masterRegions_) {
+    for (auto &[key, region] : masterRegions_) {
       uintptr_t regionStart = reinterpret_cast<uintptr_t>(region.ptr);
       uintptr_t regionEnd = regionStart + region.size;
       if (start < regionEnd && end > regionStart) {
@@ -400,49 +400,45 @@ VGREResult MemoryManager::allocateManagedAt(void* addr, size_t size, MemoryHandl
 
 int MemoryManager::getPreferredLocation(void *ptr) const {
   std::unique_lock<std::shared_mutex> lock(mutex_);
-  for (const auto& region : masterRegions_) {
-    if (region.ptr == ptr ||
-        (static_cast<uint8_t*>(ptr) >= static_cast<uint8_t*>(region.ptr) &&
-         static_cast<uint8_t*>(ptr) < static_cast<uint8_t*>(region.ptr) + region.size)) {
-      int pref = region.preferredLocation.load(std::memory_order_relaxed);
-      return (pref > 0) ? (pref - 1) : -1;
-    }
+  // O(log n): findRegionContaining uses upper_bound then step back
+  const ManagedRegion* region = const_cast<MemoryManager*>(this)->findRegionContaining(
+      reinterpret_cast<uintptr_t>(ptr));
+  if (region) {
+    int pref = region->preferredLocation.load(std::memory_order_relaxed);
+    return (pref > 0) ? (pref - 1) : -1;
   }
   return -1; // Not a managed region → CPU (cudaCpuDeviceId)
 }
 
 bool MemoryManager::isReadMostly(void *ptr) const {
   std::unique_lock<std::shared_mutex> lock(mutex_);
-  for (const auto& region : masterRegions_) {
-    if (region.ptr == ptr ||
-        (static_cast<uint8_t*>(ptr) >= static_cast<uint8_t*>(region.ptr) &&
-         static_cast<uint8_t*>(ptr) < static_cast<uint8_t*>(region.ptr) + region.size)) {
-      return region.isReadMostly.load(std::memory_order_relaxed);
-    }
+  // O(log n): findRegionContaining uses upper_bound then step back
+  const ManagedRegion* region = const_cast<MemoryManager*>(this)->findRegionContaining(
+      reinterpret_cast<uintptr_t>(ptr));
+  if (region) {
+    return region->isReadMostly.load(std::memory_order_relaxed);
   }
   return false;
 }
 
 int MemoryManager::getLastPrefetchLocation(void *ptr) const {
   std::unique_lock<std::shared_mutex> lock(mutex_);
-  for (const auto &region : masterRegions_) {
-    if (region.ptr == ptr ||
-        (static_cast<uint8_t *>(ptr) >= static_cast<uint8_t *>(region.ptr) &&
-         static_cast<uint8_t *>(ptr) < static_cast<uint8_t *>(region.ptr) + region.size)) {
-      return region.lastPrefetchDev.load(std::memory_order_relaxed);
-    }
+  // O(log n): findRegionContaining uses upper_bound then step back
+  const ManagedRegion* region = const_cast<MemoryManager*>(this)->findRegionContaining(
+      reinterpret_cast<uintptr_t>(ptr));
+  if (region) {
+    return region->lastPrefetchDev.load(std::memory_order_relaxed);
   }
   return -1;
 }
 
 uint32_t MemoryManager::getAccessedByMask(void *ptr) const {
   std::unique_lock<std::shared_mutex> lock(mutex_);
-  for (const auto &region : masterRegions_) {
-    if (region.ptr == ptr ||
-        (static_cast<uint8_t *>(ptr) >= static_cast<uint8_t *>(region.ptr) &&
-         static_cast<uint8_t *>(ptr) < static_cast<uint8_t *>(region.ptr) + region.size)) {
-      return region.accessedByMask.load(std::memory_order_relaxed);
-    }
+  // O(log n): findRegionContaining uses upper_bound then step back
+  const ManagedRegion* region = const_cast<MemoryManager*>(this)->findRegionContaining(
+      reinterpret_cast<uintptr_t>(ptr));
+  if (region) {
+    return region->accessedByMask.load(std::memory_order_relaxed);
   }
   return 0;
 }

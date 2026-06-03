@@ -99,7 +99,7 @@ void MemoryManager::migrationLoop() {
     std::unordered_map<int, std::vector<MigBatch>> batches;
     {
       std::unique_lock<std::shared_mutex> lock(mutex_);
-      for (auto& region : masterRegions_) {
+      for (auto& [key, region] : masterRegions_) {
         uint32_t total = region.accessCount.load(std::memory_order_relaxed);
         if (total < 5) continue; // need at least 5 faults before migrating
 
@@ -158,16 +158,14 @@ void MemoryManager::migrationLoop() {
                             static_cast<unsigned long>(MPOL_MF_MOVE));
         if (rc == 0) {
           std::unique_lock<std::shared_mutex> lock(mutex_);
-          for (auto& region : masterRegions_) {
-            if (reinterpret_cast<uintptr_t>(region.ptr) != entry.regionBase) {
-              continue;
-            }
-            region.preferredLocation.store(node, std::memory_order_relaxed);
+          // O(log n): exact key lookup by region base address
+          auto rit = masterRegions_.find(entry.regionBase);
+          if (rit != masterRegions_.end()) {
+            rit->second.preferredLocation.store(node, std::memory_order_relaxed);
             VGRE_LOG_DEBUG("MemoryManager",
                 "UVM migration: region " + std::to_string(entry.regionBase) +
                 " → NUMA node " + std::to_string(node) +
                 " (dominance=" + std::to_string(static_cast<int>(entry.dominance * 100)) + "%)");
-            break;
           }
         }
       }
@@ -177,25 +175,26 @@ void MemoryManager::migrationLoop() {
     // On non-Linux platforms, just track access statistics without NUMA migration
     {
       std::unique_lock<std::shared_mutex> lock(mutex_);
-      for (auto& region : masterRegions_) {
+      for (auto& [key, region] : masterRegions_) {
         uint32_t total = region.accessCount.load(std::memory_order_relaxed);
         if (total < 10) continue;
 
         int dominantDev = -1;
         uint32_t maxCount = 0;
         for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
-        uint32_t cnt = region.deviceAccessCounts[d].load(std::memory_order_relaxed);
-        if (cnt > maxCount) { maxCount = cnt; dominantDev = d; }
+          uint32_t cnt = region.deviceAccessCounts[d].load(std::memory_order_relaxed);
+          if (cnt > maxCount) { maxCount = cnt; dominantDev = d; }
+        }
+        if (dominantDev < 0) continue;
+        float dominance = static_cast<float>(maxCount) / static_cast<float>(total);
+        if (dominance < kDominanceThreshold) continue;
+        if (region.preferredLocation.load(std::memory_order_relaxed) == dominantDev) continue;
+        region.preferredLocation.store(dominantDev, std::memory_order_relaxed);
+        for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
+          region.deviceAccessCounts[d].store(0, std::memory_order_relaxed);
+        }
+        region.accessCount.store(0, std::memory_order_relaxed);
       }
-      if (dominantDev < 0) continue;
-      float dominance = static_cast<float>(maxCount) / static_cast<float>(total);
-      if (dominance < kDominanceThreshold) continue;
-      if (region.preferredLocation.load(std::memory_order_relaxed) == dominantDev) continue;
-      region.preferredLocation.store(dominantDev, std::memory_order_relaxed);
-      for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
-        region.deviceAccessCounts[d].store(0, std::memory_order_relaxed);
-      }
-      region.accessCount.store(0, std::memory_order_relaxed);
     }
 #endif
   }
