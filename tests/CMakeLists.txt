@@ -693,6 +693,12 @@ add_executable(test_diagnostic_logger
 target_link_libraries(test_diagnostic_logger PRIVATE vgre)
 add_test(NAME DiagnosticLogger COMMAND test_diagnostic_logger)
 
+# QUEUE-29: B-tree region lookup — O(log n) std::map<uintptr_t, ManagedRegion>
+# Standalone: no vgre linkage — pure std::map instrumented comparison test.
+add_executable(test_btree_region_lookup unit/test_btree_region_lookup.cpp)
+add_test(NAME BTreeRegionLookup COMMAND test_btree_region_lookup)
+set_tests_properties(BTreeRegionLookup PROPERTIES TIMEOUT 30)
+
 # ── Cross-Platform Integration Tests ────────────────────────────────────────
 add_executable(test_cross_platform_tcp_cluster
     integration/test_cross_platform_tcp_cluster.cpp)

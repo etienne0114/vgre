@@ -391,7 +391,7 @@ MemoryManager::~MemoryManager() {
   }
 
   // Cleanup remaining dirty bitsets in master list
-  for (auto& region : masterRegions_) {
+  for (auto& [key, region] : masterRegions_) {
       delete[] region.dirtyPages;
       region.dirtyPages = nullptr;
   }
@@ -715,6 +715,23 @@ fallback:
 }
 #endif
 
+ManagedRegion* MemoryManager::findRegionByPtr(void* ptr) {
+  // O(log n): std::map binary search by exact base address
+  auto it = masterRegions_.find(reinterpret_cast<uintptr_t>(ptr));
+  return (it != masterRegions_.end()) ? &it->second : nullptr;
+}
+
+ManagedRegion* MemoryManager::findRegionContaining(uintptr_t addr) {
+  // O(log n): upper_bound then step back to find region whose key <= addr,
+  // then verify addr < key + size to confirm containment.
+  auto it = masterRegions_.upper_bound(addr);
+  if (it == masterRegions_.begin()) return nullptr;
+  --it;
+  uintptr_t base = it->first;
+  if (addr < base + it->second.size) return &it->second;
+  return nullptr;
+}
+
 bool MemoryManager::registerManagedRegion(void *ptr, size_t size, bool hostAccessible) {
   // Note: lock must be held by caller (allocateManaged / allocateManagedAt)
   
@@ -739,18 +756,19 @@ bool MemoryManager::registerManagedRegion(void *ptr, size_t size, bool hostAcces
   region.dirtyPages = new uint8_t[region.pageCount];
   memset(region.dirtyPages, 0, region.pageCount);
   
-  masterRegions_.push_back(region);
-  
+  uintptr_t key = reinterpret_cast<uintptr_t>(ptr);
+  auto [ins_it, ok] = masterRegions_.emplace(key, region);
+
   // Create new active tree (RCU swap)
   RegionTreeContainer* newContainer = new RegionTreeContainer();
   newContainer->count = masterRegions_.size();
-  for (auto &r : masterRegions_) {
-    newContainer->tree.insert(reinterpret_cast<uintptr_t>(r.ptr), 
+  for (auto &[k, r] : masterRegions_) {
+    newContainer->tree.insert(reinterpret_cast<uintptr_t>(r.ptr),
                              reinterpret_cast<uintptr_t>(r.ptr) + r.size, &r);
   }
-  
-  // Insert into radix page table for O(1) lookup
-  pageTable_.insert(reinterpret_cast<uintptr_t>(region.ptr), region.size, &masterRegions_.back());
+
+  // Insert into radix page table for O(1) lookup — use stable map node address
+  pageTable_.insert(reinterpret_cast<uintptr_t>(ins_it->second.ptr), ins_it->second.size, &ins_it->second);
   
   RegionTreeContainer* oldContainer = activeTree_.exchange(newContainer, std::memory_order_acq_rel);
   if (oldContainer) {
@@ -768,29 +786,30 @@ bool MemoryManager::registerManagedRegion(void *ptr, size_t size, bool hostAcces
 
 void MemoryManager::unregisterManagedRegion(void *ptr) {
   // Note: lock must be held by caller (free)
-  
-  auto it = std::find_if(masterRegions_.begin(), masterRegions_.end(),
-                         [ptr](const ManagedRegion& r) { return r.ptr == ptr; });
-  
+
+  // O(log n): std::map binary search by exact base address
+  uintptr_t key = reinterpret_cast<uintptr_t>(ptr);
+  auto it = masterRegions_.find(key);
+
   if (it == masterRegions_.end()) return;
-  
+
   // Owner deletes the shared dirty pages buffer
-  delete[] it->dirtyPages;
-  it->dirtyPages = nullptr; // Prevent double delete just in case
-  
+  delete[] it->second.dirtyPages;
+  it->second.dirtyPages = nullptr; // Prevent double delete just in case
+
   // Remove from radix page table
-  pageTable_.remove(reinterpret_cast<uintptr_t>(it->ptr), it->size);
+  pageTable_.remove(reinterpret_cast<uintptr_t>(it->second.ptr), it->second.size);
 
   // Evict TLB entries covering this region so stale translations aren't used
-  tlbEvict(reinterpret_cast<uintptr_t>(it->ptr), it->size);
+  tlbEvict(reinterpret_cast<uintptr_t>(it->second.ptr), it->second.size);
 
   masterRegions_.erase(it);
-  
+
   // Create new active tree
   RegionTreeContainer* newContainer = new RegionTreeContainer();
   newContainer->count = masterRegions_.size();
-  for (auto &r : masterRegions_) {
-    newContainer->tree.insert(reinterpret_cast<uintptr_t>(r.ptr), 
+  for (auto &[k, r] : masterRegions_) {
+    newContainer->tree.insert(reinterpret_cast<uintptr_t>(r.ptr),
                              reinterpret_cast<uintptr_t>(r.ptr) + r.size, &r);
   }
   
@@ -1065,12 +1084,11 @@ void MemoryManager::getPageResidency(uint8_t outMap[1024]) const {
     // Feature 12: Real-time UVM Residency sync from lock-free tracking
     bool isActuallyResident = alloc.isResidentOnHost;
     if (!isActuallyResident) {
-      for (const auto& region : masterRegions_) {
-        if (region.ptr == alloc.ptr) {
-          if (region.isResidentOnHost.load(std::memory_order_relaxed)) {
-            isActuallyResident = true;
-          }
-          break;
+      // O(log n): exact key lookup by base address
+      auto rit = masterRegions_.find(reinterpret_cast<uintptr_t>(alloc.ptr));
+      if (rit != masterRegions_.end()) {
+        if (rit->second.isResidentOnHost.load(std::memory_order_relaxed)) {
+          isActuallyResident = true;
         }
       }
     }
@@ -1216,37 +1234,32 @@ void MemoryManager::calibrateBandwidth() {
 
 VGREResult MemoryManager::getDirtyPages(MemoryHandle handle, std::vector<std::pair<size_t, size_t>>& outDirtyRanges) const {
   std::shared_lock<std::shared_mutex> lock(mutex_);
-  
-  auto it = masterRegions_.end();
-  for (auto curr = masterRegions_.begin(); curr != masterRegions_.end(); ++curr) {
-    if (curr->ptr == handle) {
-      it = curr;
-      break;
-    }
-  }
-  
+
+  // O(log n): std::map binary search by exact base address
+  auto it = masterRegions_.find(reinterpret_cast<uintptr_t>(handle));
+
   if (it == masterRegions_.end()) return VGREResult::ERR_INVALID_VALUE;
   
   outDirtyRanges.clear();
-  if (!it->dirtyPages) return VGREResult::SUCCESS;
-  
+  if (!it->second.dirtyPages) return VGREResult::SUCCESS;
+
   size_t startIdx = 0;
   bool inRange = false;
-  for (size_t i = 0; i < it->pageCount; ++i) {
-    if (it->dirtyPages[i]) {
+  for (size_t i = 0; i < it->second.pageCount; ++i) {
+    if (it->second.dirtyPages[i]) {
       if (!inRange) {
         startIdx = i;
         inRange = true;
       }
     } else {
       if (inRange) {
-        outDirtyRanges.push_back(std::make_pair(startIdx * it->pageSize, i * it->pageSize));
+        outDirtyRanges.push_back(std::make_pair(startIdx * it->second.pageSize, i * it->second.pageSize));
         inRange = false;
       }
     }
   }
   if (inRange) {
-    outDirtyRanges.push_back(std::make_pair(startIdx * it->pageSize, it->pageCount * it->pageSize));
+    outDirtyRanges.push_back(std::make_pair(startIdx * it->second.pageSize, it->second.pageCount * it->second.pageSize));
   }
   
   return VGREResult::SUCCESS;
@@ -1267,25 +1280,20 @@ VGREResult MemoryManager::clearDirtyPages(MemoryHandle handle) {
 
   std::unique_lock<std::shared_mutex> lock(mutex_);
 
-  auto it = masterRegions_.end();
-  for (auto curr = masterRegions_.begin(); curr != masterRegions_.end(); ++curr) {
-    if (curr->ptr == handle) {
-      it = curr;
-      break;
-    }
-  }
+  // O(log n): std::map binary search by exact base address
+  auto it = masterRegions_.find(reinterpret_cast<uintptr_t>(handle));
 
   if (it == masterRegions_.end()) return VGREResult::ERR_INVALID_VALUE;
 
-  if (it->dirtyPages) {
-    memset(it->dirtyPages, 0, it->pageCount);
+  if (it->second.dirtyPages) {
+    memset(it->second.dirtyPages, 0, it->second.pageCount);
   }
 
   // Re-protect to PROT_READ to catch the next write, but ONLY for regions
   // that were originally allocated with PROT_NONE (flags != 2). Host-accessible
   // regions (flags == 2) stay writable for application-level managed memory.
-  if (!it->hostAccessible.load(std::memory_order_relaxed)) {
-    vgre::os::mprotect_ro(it->ptr, it->size);
+  if (!it->second.hostAccessible.load(std::memory_order_relaxed)) {
+    vgre::os::mprotect_ro(it->second.ptr, it->second.size);
   }
 
   return VGREResult::SUCCESS;
