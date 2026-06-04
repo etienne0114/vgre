@@ -558,6 +558,11 @@ add_executable(test_memcpy_peer_async api/test_memcpy_peer_async.cpp)
 target_link_libraries(test_memcpy_peer_async PRIVATE vgre_cudart)
 add_test(NAME MemcpyPeerAsync COMMAND test_memcpy_peer_async)
 
+# QUEUE-63: cublasStrsmStridedBatched / cublasDtrsmStridedBatched
+add_executable(test_cublas_trsm_strided api/test_cublas_trsm_strided_batched.cpp)
+target_link_libraries(test_cublas_trsm_strided PRIVATE vgre_cudart)
+add_test(NAME CuBLASTrsmStridedBatched COMMAND test_cublas_trsm_strided)
+
 add_executable(test_cudnn_normalization api/test_cudnn_normalization.cpp)
 target_link_libraries(test_cudnn_normalization PRIVATE vgre)
 add_test(NAME CuDNNNormalization COMMAND test_cudnn_normalization)

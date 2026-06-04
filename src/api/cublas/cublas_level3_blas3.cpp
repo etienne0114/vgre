@@ -320,6 +320,48 @@ cublasStatus_t cublasDtrsvStridedBatched(cublasHandle_t handle,
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// ── QUEUE-63: TRSM strided-batched ───────────────────────────────────────────
+// Solve op(A[b]) * X[b] = alpha * B[b] for b=0..batchCount-1 using stride addressing.
+// strideA = distance (elements) between successive A matrices.
+// strideB = distance (elements) between successive B matrices (in-place solve).
+// Complexity: O(n²m) per batch element (same as single TRSM).
+// Math invariant: ||A[b]*X[b] - alpha*B_orig[b]||_F < ε_mach * n after solve.
+cublasStatus_t cublasStrsmStridedBatched(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag, int m, int n,
+    const float *alpha,
+    const float *A, int lda, long long int strideA,
+    float *B, int ldb, long long int strideB,
+    int batchCount)
+{
+    if (!handle || !A || !B || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        const float *Ab = A + b * strideA;
+        float       *Bb = B + b * strideB;
+        auto s = cublasStrsm_v2(handle, side, uplo, trans, diag, m, n, alpha, Ab, lda, Bb, ldb);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrsmStridedBatched(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag, int m, int n,
+    const double *alpha,
+    const double *A, int lda, long long int strideA,
+    double *B, int ldb, long long int strideB,
+    int batchCount)
+{
+    if (!handle || !A || !B || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        const double *Ab = A + b * strideA;
+        double       *Bb = B + b * strideB;
+        auto s = cublasDtrsm_v2(handle, side, uplo, trans, diag, m, n, alpha, Ab, lda, Bb, ldb);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 // ── QUEUE-59: Hermitian batched Level-3 BLAS ─────────────────────────────────
 // Array-of-pointers pattern: loop over batchCount, delegate to scalar _v2 fn.
 // Complexity: O(n²k) per batch element (HEMM/HERK/HER2K all scale as n²k).
