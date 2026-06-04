@@ -35,6 +35,7 @@ add_library(vgre_core OBJECT
     math/block_sparse.cpp
     math/tensor_core_emulation.cpp
     math/scan.cpp
+    math/radix_sort.cpp
     graph_dependency_tracker.cpp
 )
 
