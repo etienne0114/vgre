@@ -943,5 +943,70 @@ cublasStatus_t cublasDdgmm(cublasHandle_t h, cublasSideMode_t m,
     double *C, int ldc)
 { return cublasDdgmm_v2(h, m, rows, cols, A, lda, x, incx, C, ldc); }
 
+// ── General matrix addition / transposition (geam) — QUEUE-43 ────────────────
+// C = alpha * op(A) + beta * op(B),  C is m×n column-major (ldc >= m).
+// op(X) = X (CUBLAS_OP_N) or X^T (CUBLAS_OP_T).
+//   OP_N: X is m×n, X[i,j] = X[j*ldx+i]
+//   OP_T: X is n×m, X^T[i,j] = X[i*ldx+j]
+// C may alias A or B only when the layout is identical (same op, lda/ldb == ldc).
+
+cublasStatus_t cublasSgeam_v2(cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n,
+    const float *alpha, const float *A, int lda,
+    const float *beta,  const float *B, int ldb,
+    float *C, int ldc)
+{
+    if (!handle || !alpha || !A || !beta || !B || !C ||
+        m <= 0 || n <= 0 || ldc < m) return CUBLAS_STATUS_INVALID_VALUE;
+    if (transa == 0 /*OP_N*/ && lda < m) return CUBLAS_STATUS_INVALID_VALUE;
+    if (transa != 0 /*OP_T*/ && lda < n) return CUBLAS_STATUS_INVALID_VALUE;
+    if (transb == 0 /*OP_N*/ && ldb < m) return CUBLAS_STATUS_INVALID_VALUE;
+    if (transb != 0 /*OP_T*/ && ldb < n) return CUBLAS_STATUS_INVALID_VALUE;
+    float a = *alpha, b = *beta;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < m; ++i) {
+            float av = (transa == 0) ? A[j * lda + i] : A[i * lda + j];
+            float bv = (transb == 0) ? B[j * ldb + i] : B[i * ldb + j];
+            C[j * ldc + i] = a * av + b * bv;
+        }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDgeam_v2(cublasHandle_t handle,
+    cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n,
+    const double *alpha, const double *A, int lda,
+    const double *beta,  const double *B, int ldb,
+    double *C, int ldc)
+{
+    if (!handle || !alpha || !A || !beta || !B || !C ||
+        m <= 0 || n <= 0 || ldc < m) return CUBLAS_STATUS_INVALID_VALUE;
+    if (transa == 0 && lda < m) return CUBLAS_STATUS_INVALID_VALUE;
+    if (transa != 0 && lda < n) return CUBLAS_STATUS_INVALID_VALUE;
+    if (transb == 0 && ldb < m) return CUBLAS_STATUS_INVALID_VALUE;
+    if (transb != 0 && ldb < n) return CUBLAS_STATUS_INVALID_VALUE;
+    double a = *alpha, b = *beta;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < m; ++i) {
+            double av = (transa == 0) ? A[j * lda + i] : A[i * lda + j];
+            double bv = (transb == 0) ? B[j * ldb + i] : B[i * ldb + j];
+            C[j * ldc + i] = a * av + b * bv;
+        }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasSgeam(cublasHandle_t h,
+    cublasOperation_t ta, cublasOperation_t tb, int m, int n,
+    const float *al, const float *A, int lda,
+    const float *be, const float *B, int ldb, float *C, int ldc)
+{ return cublasSgeam_v2(h, ta, tb, m, n, al, A, lda, be, B, ldb, C, ldc); }
+
+cublasStatus_t cublasDgeam(cublasHandle_t h,
+    cublasOperation_t ta, cublasOperation_t tb, int m, int n,
+    const double *al, const double *A, int lda,
+    const double *be, const double *B, int ldb, double *C, int ldc)
+{ return cublasDgeam_v2(h, ta, tb, m, n, al, A, lda, be, B, ldb, C, ldc); }
+
 } // extern "C"
 
