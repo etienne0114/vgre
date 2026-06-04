@@ -336,6 +336,11 @@ add_executable(test_secure_zero unit/test_secure_zero.cpp)
 target_link_libraries(test_secure_zero PRIVATE vgre)
 add_test(NAME SecureZero COMMAND test_secure_zero)
 
+# cuSolver batch QR factorization (QUEUE-40)
+add_executable(test_cusolver_batchqr api/test_cusolver_batchqr.cpp)
+target_link_libraries(test_cusolver_batchqr PRIVATE vgre_cudart)
+add_test(NAME CusolverBatchQR COMMAND test_cusolver_batchqr)
+
 add_executable(test_cublas_level2 api/test_cublas_level2.cpp)
 target_link_libraries(test_cublas_level2 PRIVATE vgre)
 add_test(NAME CublasLevel2 COMMAND test_cublas_level2)

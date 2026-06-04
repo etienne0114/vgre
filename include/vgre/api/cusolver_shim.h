@@ -111,6 +111,14 @@ cusolverStatus_t cusolverDnDgeqrf(cusolverDnHandle_t handle, int m, int n,
                                   double *A, int lda, double *TAU, double *Workspace,
                                   int Lwork, int *devInfo);
 
+// ── Batched QR factorization (geqrfBatched) — QUEUE-40 ───────────────────────
+cusolverStatus_t cusolverDnSgeqrfBatched(cusolverDnHandle_t handle, int m, int n,
+                                          float **Aarray, int lda,
+                                          float **TauArray, int *info, int batchSize);
+cusolverStatus_t cusolverDnDgeqrfBatched(cusolverDnHandle_t handle, int m, int n,
+                                          double **Aarray, int lda,
+                                          double **TauArray, int *info, int batchSize);
+
 // ── SVD (gesvd) ──────────────────────────────────────────────────────────────
 cusolverStatus_t cusolverDnSgesvd_bufferSize(cusolverDnHandle_t handle, int m, int n, int *Lwork);
 cusolverStatus_t cusolverDnDgesvd_bufferSize(cusolverDnHandle_t handle, int m, int n, int *Lwork);
