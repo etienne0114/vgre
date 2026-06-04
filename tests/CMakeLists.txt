@@ -326,6 +326,11 @@ add_executable(test_cublas_strassen api/test_cublas_strassen.cpp)
 target_link_libraries(test_cublas_strassen PRIVATE vgre)
 add_test(NAME CublasStrassen COMMAND test_cublas_strassen)
 
+# cuDNN RNN peephole LSTM (QUEUE-38)
+add_executable(test_cudnn_rnn_peephole api/test_cudnn_rnn_peephole.cpp)
+target_link_libraries(test_cudnn_rnn_peephole PRIVATE vgre)
+add_test(NAME CudnnRNNPeephole COMMAND test_cudnn_rnn_peephole)
+
 add_executable(test_cublas_level2 api/test_cublas_level2.cpp)
 target_link_libraries(test_cublas_level2 PRIVATE vgre)
 add_test(NAME CublasLevel2 COMMAND test_cublas_level2)
