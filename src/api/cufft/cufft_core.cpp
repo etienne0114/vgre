@@ -569,6 +569,71 @@ cufftResult_t execC16R(const CufftPlan &p, void *idata, void *odata) {
     return CUFFT_SUCCESS;
 }
 
+// ── DCT-II via 2N-point FFT embedding (Makhoul 1980) ─────────────────────────
+// X[k] = Σ x[n]·cos(π(2n+1)k/(2N)), n=0..N-1, k=0..N-1
+// Step 1: build even extension y[n]=x[n] for n<N, y[2N-1-n]=x[n] for n<N
+// Step 2: Y = FFT(y, 2N)
+// Step 3: X[k] = Re(Y[k]·exp(-jπk/(2N))) / 2
+// Derivation: Y[k] = 2·exp(+jπk/(2N))·X[k]  →  X[k] = Re(Y[k]·conj(tw[k]))/2
+// Complexity: O(N log N) — one 2N-point FFT
+// Note: VGRE's Bluestein FFT returns conj(Y_std[k]) for non-pow2 sizes.
+// For real y: Re(conj(Y)*e^{-jφ}) = Re(Y*e^{+jφ}), so twiddle sign flips.
+template<typename T>
+static cufftResult_t dct2_1d(const T* in, T* out, int N) {
+    if (N <= 0) return CUFFT_INVALID_VALUE;
+    int TwoN = 2 * N;
+    std::vector<std::complex<T>> y(static_cast<std::size_t>(TwoN));
+    for (int n = 0; n < N; ++n) {
+        y[static_cast<std::size_t>(n)]           = std::complex<T>(in[n], T(0));
+        y[static_cast<std::size_t>(TwoN-1-n)]    = std::complex<T>(in[n], T(0));
+    }
+    std::vector<std::complex<T>> Y(static_cast<std::size_t>(TwoN));
+    fft1d(y.data(), Y.data(), TwoN, CUFFT_FORWARD);
+    // Bluestein FFT gives conj(Y_std) for non-pow2 sizes, so flip twiddle sign.
+    const T sign = isPow2(TwoN) ? T(-1) : T(+1);
+    for (int k = 0; k < N; ++k) {
+        T angle = sign * static_cast<T>(PI) * k / static_cast<T>(TwoN);
+        std::complex<T> tw(std::cos(angle), std::sin(angle));
+        out[k] = (Y[static_cast<std::size_t>(k)] * tw).real() / T(2);
+    }
+    return CUFFT_SUCCESS;
+}
+
+// ── DCT-III via 2N-point IFFT with Hermitian construction ────────────────────
+// x[n] = X[0]/2 + Σ X[k]·cos(π(2n+1)k/(2N)), k=1..N-1
+// DCT-III(DCT-II(x)) = (N/2)·x  (orthogonality up to scale)
+// Step 1: V[0]=X[0], V[k]=X[k]·exp(+jπk/(2N)) for k=1..N-1,
+//         V[N]=0, V[2N-k]=conj(V[k]) for k=1..N-1 (Hermitian → real IFFT output)
+// Step 2: y = IFFT(V, 2N)  (fft1d applies 1/(2N) internally)
+// Step 3: x[n] = N · Re(y[n])
+// Derivation: IFFT[V][n] = (1/N)·DCT-III[n]  →  DCT-III[n] = N·Re(IFFT[V][n])
+// Complexity: O(N log N) — one 2N-point IFFT
+// Note: VGRE's Bluestein IFFT computes exp(-j2πnk/N) instead of exp(+j2πnk/N),
+// so the twiddle in V must use the negative angle to compensate.
+template<typename T>
+static cufftResult_t dct3_1d(const T* in, T* out, int N) {
+    if (N <= 0) return CUFFT_INVALID_VALUE;
+    int TwoN = 2 * N;
+    // Bluestein IFFT uses exp(-j2πnk/N) instead of standard exp(+j2πnk/N),
+    // so flip the twiddle sign for non-pow2 sizes.
+    const T sign3 = isPow2(TwoN) ? T(+1) : T(-1);
+    std::vector<std::complex<T>> V(static_cast<std::size_t>(TwoN), std::complex<T>(T(0), T(0)));
+    V[0] = std::complex<T>(in[0], T(0));
+    for (int k = 1; k < N; ++k) {
+        T angle = sign3 * static_cast<T>(PI) * k / static_cast<T>(TwoN);
+        std::complex<T> tw(std::cos(angle), std::sin(angle));
+        V[static_cast<std::size_t>(k)]       = std::complex<T>(in[k], T(0)) * tw;
+        V[static_cast<std::size_t>(TwoN-k)]  = std::conj(V[static_cast<std::size_t>(k)]);
+    }
+    // V[N] stays 0 (already initialized)
+    std::vector<std::complex<T>> y(static_cast<std::size_t>(TwoN));
+    fft1d(V.data(), y.data(), TwoN, CUFFT_INVERSE);
+    const T scale = static_cast<T>(N);
+    for (int n = 0; n < N; ++n)
+        out[n] = y[static_cast<std::size_t>(n)].real() * scale;
+    return CUFFT_SUCCESS;
+}
+
 } // namespace
 
 // ── Public execution entry points ────────────────────────────────────────────
@@ -677,6 +742,32 @@ cufftResult_t cufftExecC16BFC(cufftHandle plan, void *idata, void *odata, int di
             v.x = static_cast<uint16_t>(ur);
             v.y = static_cast<uint16_t>(ui);
         }
+    }
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftExecDCT2(cufftHandle plan, float *idata, float *odata) {
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_DCT2) return CUFFT_INVALID_TYPE;
+    if (!idata || !odata) return CUFFT_INVALID_VALUE;
+    if (p.rank != 1) return CUFFT_INVALID_PLAN;
+    for (int b = 0; b < p.batch; ++b) {
+        cufftResult_t st = dct2_1d<float>(idata + b * p.nx, odata + b * p.nx, p.nx);
+        if (st != CUFFT_SUCCESS) return st;
+    }
+    return CUFFT_SUCCESS;
+}
+
+cufftResult_t cufftExecDCT3(cufftHandle plan, float *idata, float *odata) {
+    CufftPlan p;
+    if (!lookupPlan(plan, p)) return CUFFT_INVALID_PLAN;
+    if (p.type != CUFFT_DCT3) return CUFFT_INVALID_TYPE;
+    if (!idata || !odata) return CUFFT_INVALID_VALUE;
+    if (p.rank != 1) return CUFFT_INVALID_PLAN;
+    for (int b = 0; b < p.batch; ++b) {
+        cufftResult_t st = dct3_1d<float>(idata + b * p.nx, odata + b * p.nx, p.nx);
+        if (st != CUFFT_SUCCESS) return st;
     }
     return CUFFT_SUCCESS;
 }

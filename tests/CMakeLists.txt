@@ -415,6 +415,11 @@ add_executable(test_chacha20_poly1305 api/test_chacha20_poly1305.cpp)
 target_link_libraries(test_chacha20_poly1305 PRIVATE vgre)
 add_test(NAME ChaCha20Poly1305 COMMAND test_chacha20_poly1305)
 
+# QUEUE-65: cuFFT DCT-II/III via FFT embedding
+add_executable(test_cufft_dct api/test_cufft_dct.cpp)
+target_link_libraries(test_cufft_dct PRIVATE vgre_cudart)
+add_test(NAME CuFFTDCT COMMAND test_cufft_dct)
+
 # Min-segment tree stream dependency tracker (QUEUE-07)
 add_executable(test_stream_dep_tracker unit/test_stream_dep_tracker.cpp)
 target_link_libraries(test_stream_dep_tracker PRIVATE vgre)
