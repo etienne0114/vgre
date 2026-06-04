@@ -393,6 +393,66 @@ cusolverStatus_t cusolverDnDgeqrf(cusolverDnHandle_t /*handle*/, int m, int n,
     return CUSOLVER_STATUS_SUCCESS;
 }
 
+// ── Batched QR factorization (geqrfBatched) — QUEUE-40 ──────────────────────
+// cusolverDnS/DgeqrfBatched: applies Householder QR to each of batchSize
+// independent m×n matrices stored at Aarray[b], placing Householder scalars
+// into TauArray[b].  Each batch slot is factorized independently using the
+// single-matrix LAPACK sgeqrf_/dgeqrf_ with an internally-allocated workspace.
+//
+// Math: for each b: A[b] = Q[b] * R[b] via batchSize sequential Householder QRs.
+// Workspace per call: LAPACK optimal (via workspace query) floats/doubles.
+// info: set to 0 on success; first non-zero LAPACK info negated if any batch fails.
+// Complexity: O(batchSize * (2*m*n^2 - 2/3*n^3))  — same as batchSize × geqrf.
+
+cusolverStatus_t cusolverDnSgeqrfBatched(cusolverDnHandle_t /*handle*/,
+                                          int m, int n,
+                                          float **Aarray, int lda,
+                                          float **TauArray,
+                                          int *info, int batchSize) {
+    if (!Aarray || !TauArray || !info || m <= 0 || n <= 0 || lda < m || batchSize <= 0)
+        return CUSOLVER_STATUS_INVALID_VALUE;
+    *info = 0;
+    // Optimal workspace size via LAPACK query (lwork=-1)
+    float wq; int lwork = -1, qinfo = 0;
+    {
+        std::vector<float> tmp_a((size_t)m * n, 0.f), tmp_tau(std::min(m, n), 0.f);
+        sgeqrf_(&m, &n, tmp_a.data(), &lda, tmp_tau.data(), &wq, &lwork, &qinfo);
+    }
+    lwork = (qinfo == 0 && wq > 0.f) ? static_cast<int>(wq) : m * n;
+    std::vector<float> work(static_cast<size_t>(lwork));
+    for (int b = 0; b < batchSize; ++b) {
+        if (!Aarray[b] || !TauArray[b]) { *info = -(b + 1); return CUSOLVER_STATUS_INVALID_VALUE; }
+        int binfo = 0;
+        sgeqrf_(&m, &n, Aarray[b], &lda, TauArray[b], work.data(), &lwork, &binfo);
+        if (binfo != 0 && *info == 0) *info = binfo;
+    }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnDgeqrfBatched(cusolverDnHandle_t /*handle*/,
+                                          int m, int n,
+                                          double **Aarray, int lda,
+                                          double **TauArray,
+                                          int *info, int batchSize) {
+    if (!Aarray || !TauArray || !info || m <= 0 || n <= 0 || lda < m || batchSize <= 0)
+        return CUSOLVER_STATUS_INVALID_VALUE;
+    *info = 0;
+    double wq; int lwork = -1, qinfo = 0;
+    {
+        std::vector<double> tmp_a((size_t)m * n, 0.0), tmp_tau(std::min(m, n), 0.0);
+        dgeqrf_(&m, &n, tmp_a.data(), &lda, tmp_tau.data(), &wq, &lwork, &qinfo);
+    }
+    lwork = (qinfo == 0 && wq > 0.0) ? static_cast<int>(wq) : m * n;
+    std::vector<double> work(static_cast<size_t>(lwork));
+    for (int b = 0; b < batchSize; ++b) {
+        if (!Aarray[b] || !TauArray[b]) { *info = -(b + 1); return CUSOLVER_STATUS_INVALID_VALUE; }
+        int binfo = 0;
+        dgeqrf_(&m, &n, Aarray[b], &lda, TauArray[b], work.data(), &lwork, &binfo);
+        if (binfo != 0 && *info == 0) *info = binfo;
+    }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
 // ── SVD (gesvd) ──────────────────────────────────────────────────────────────
 
 cusolverStatus_t cusolverDnSgesvd_bufferSize(cusolverDnHandle_t /*handle*/, int m, int n, int *Lwork) {
