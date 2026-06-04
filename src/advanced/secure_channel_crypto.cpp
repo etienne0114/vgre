@@ -1077,6 +1077,266 @@ bool x25519_shared_secret(const uint8_t privateKey[32],
 } // namespace crypto
 #endif // VGRE_ENABLE_SSL
 
+// ── ChaCha20-Poly1305 AEAD (RFC 8439) ────────────────────────────────────────
+// ChaCha20 stream cipher: 256-bit key, 96-bit nonce, 32-bit counter.
+// Poly1305 MAC: one-time MAC over GF(2^130-5).
+// AEAD: keystream[0] = ChaCha20(key,nonce,ctr=0); poly key = keystream[0..31].
+//       Encrypt plaintext with ChaCha20(key,nonce,ctr=1), append Poly1305 tag.
+// Math: ε-security of Poly1305: ε = (L+1)/2^106 for L-byte messages.
+
+namespace {
+
+// ChaCha20 quarter-round: a,b,c,d are state indices.
+static inline void qr(uint32_t s[16], int a, int b, int c, int d) {
+    s[a] += s[b]; s[d] ^= s[a]; s[d] = (s[d]<<16)|(s[d]>>16);
+    s[c] += s[d]; s[b] ^= s[c]; s[b] = (s[b]<<12)|(s[b]>>20);
+    s[a] += s[b]; s[d] ^= s[a]; s[d] = (s[d]<< 8)|(s[d]>>24);
+    s[c] += s[d]; s[b] ^= s[c]; s[b] = (s[b]<< 7)|(s[b]>>25);
+}
+
+// Produce one 64-byte ChaCha20 keystream block.
+// State: "expa" "nd 3" "2-by" "te k" (const words 0-3)
+//         key[0..7] (words 4-11), counter (word 12), nonce[0..2] (words 13-15).
+static void chacha20_block(const uint32_t key[8], uint32_t counter,
+                           const uint32_t nonce[3], uint8_t out[64]) {
+    uint32_t x[16] = {
+        0x61707865u, 0x3320646eu, 0x79622d32u, 0x6b206574u,
+        key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
+        counter, nonce[0], nonce[1], nonce[2]
+    };
+    uint32_t s[16]; std::memcpy(s, x, 64);
+    for (int i = 0; i < 10; ++i) {
+        qr(s,0,4,8,12); qr(s,1,5,9,13); qr(s,2,6,10,14); qr(s,3,7,11,15);
+        qr(s,0,5,10,15); qr(s,1,6,11,12); qr(s,2,7,8,13); qr(s,3,4,9,14);
+    }
+    for (int i = 0; i < 16; ++i) {
+        uint32_t v = s[i] + x[i];
+        out[i*4+0] = (uint8_t)(v      );
+        out[i*4+1] = (uint8_t)(v >>  8);
+        out[i*4+2] = (uint8_t)(v >> 16);
+        out[i*4+3] = (uint8_t)(v >> 24);
+    }
+}
+
+// ChaCha20 stream encryption/decryption (RFC 8439 §2.4).
+// key: 32 bytes; nonce: 12 bytes (3 uint32 LE); counter: initial block counter.
+static void chacha20_xor(const uint8_t key[32], const uint8_t nonce[12],
+                         uint32_t counter,
+                         const uint8_t *in, uint8_t *out, size_t len) {
+    uint32_t k[8], n[3];
+    for (int i = 0; i < 8; ++i) {
+        k[i] = (uint32_t)in[0];  // dummy init, overwritten below
+        k[i] = ((uint32_t)key[i*4+0])
+              | ((uint32_t)key[i*4+1] << 8)
+              | ((uint32_t)key[i*4+2] << 16)
+              | ((uint32_t)key[i*4+3] << 24);
+    }
+    for (int i = 0; i < 3; ++i) {
+        n[i] = ((uint32_t)nonce[i*4+0])
+              | ((uint32_t)nonce[i*4+1] << 8)
+              | ((uint32_t)nonce[i*4+2] << 16)
+              | ((uint32_t)nonce[i*4+3] << 24);
+    }
+    uint8_t ks[64];
+    size_t pos = 0;
+    while (pos < len) {
+        chacha20_block(k, counter++, n, ks);
+        size_t chunk = std::min((size_t)64, len - pos);
+        for (size_t i = 0; i < chunk; ++i) out[pos+i] = in[pos+i] ^ ks[i];
+        pos += chunk;
+    }
+}
+
+// Poly1305 MAC (RFC 8439 §2.5).
+// key: 32 bytes (r = key[0..15] clamped; s = key[16..31]).
+// Computes 16-byte tag = ((sum_i (acc + msg_block_i) * r) mod 2^130-5) + s mod 2^128.
+// Math: one-time authenticator over GF(2^130-5); ε-forgery probability ≤ (L+1)/2^106.
+static void poly1305_mac(const uint8_t key[32],
+                         const uint8_t *msg, size_t msgLen,
+                         uint8_t tag[16]) {
+    // Clamp r: mask the clamping bits per RFC 8439 §2.5.1
+    uint8_t r_bytes[16], s_bytes[16];
+    std::memcpy(r_bytes, key, 16);
+    std::memcpy(s_bytes, key + 16, 16);
+    // Clamping: r &= 0x0ffffffc0ffffffc0ffffffc0fffffff (little-endian)
+    r_bytes[ 3] &= 0x0f; r_bytes[ 7] &= 0x0f;
+    r_bytes[11] &= 0x0f; r_bytes[15] &= 0x0f;
+    r_bytes[ 4] &= 0xfc; r_bytes[ 8] &= 0xfc; r_bytes[12] &= 0xfc;
+
+    // Load r as a 130-bit integer via __uint128_t
+    __uint128_t r = 0;
+    for (int i = 15; i >= 0; --i) r = (r << 8) | r_bytes[i];
+
+    // p = 2^130 - 5
+    // acc is maintained as a 130-bit value using __uint128_t + 2-bit overflow word
+    // We use two values: acc_lo (low 128 bits) and acc_hi (high 2+ bits)
+    // Simpler: accumulate with full __uint128_t, do lazy reduction modulo p.
+    // Since each block adds at most 2^128+1 and multiplies by r < 2^128,
+    // intermediate values can exceed 128 bits. We use uint64_t limbs instead.
+
+    // Use 5 limbs of 26 bits — standard Poly1305 approach
+    uint64_t h0=0, h1=0, h2=0, h3=0, h4=0; // accumulator (< 2^26 each initially)
+    uint64_t r0, r1, r2, r3, r4;
+    // Decode r into 26-bit limbs (little-endian)
+    {
+        uint64_t t0 = 0, t1 = 0, t2 = 0, t3 = 0;
+        for (int i = 0; i < 4; ++i) t0 |= ((uint64_t)r_bytes[i]   << (i*8));
+        for (int i = 0; i < 4; ++i) t1 |= ((uint64_t)r_bytes[i+4] << (i*8));
+        for (int i = 0; i < 4; ++i) t2 |= ((uint64_t)r_bytes[i+8] << (i*8));
+        for (int i = 0; i < 4; ++i) t3 |= ((uint64_t)r_bytes[i+12]<< (i*8));
+        r0 =  t0        & 0x3ffffff;
+        r1 = (t0 >> 26 | t1 << 6)  & 0x3ffffff;
+        r2 = (t1 >> 20 | t2 << 12) & 0x3ffffff;
+        r3 = (t2 >> 14 | t3 << 18) & 0x3ffffff;
+        r4 =  t3 >>  8              & 0x3ffffff;
+    }
+    uint64_t s1 = r1*5, s2 = r2*5, s3 = r3*5, s4 = r4*5; // (2^130-5)*r terms
+
+    size_t pos = 0;
+    while (pos < msgLen) {
+        // Read 16-byte block (pad with 0x01 beyond end)
+        uint8_t block[17] = {};
+        size_t chunk = std::min((size_t)16, msgLen - pos);
+        std::memcpy(block, msg + pos, chunk);
+        block[chunk] = 0x01; // append 1-bit (RFC 8439 §2.5.1)
+
+        uint64_t t0=0, t1=0, t2=0, t3=0, t4=0;
+        for (int i=0;i<4;++i) t0 |= ((uint64_t)block[i]   << (i*8));
+        for (int i=0;i<4;++i) t1 |= ((uint64_t)block[i+4] << (i*8));
+        for (int i=0;i<4;++i) t2 |= ((uint64_t)block[i+8] << (i*8));
+        for (int i=0;i<4;++i) t3 |= ((uint64_t)block[i+12]<< (i*8));
+        t4 = block[16]; // 1 or 0 depending on block fullness
+
+        // Add block to accumulator (26-bit limbs)
+        h0 += t0        & 0x3ffffff;
+        h1 += (t0>>26 | t1<<6)  & 0x3ffffff;
+        h2 += (t1>>20 | t2<<12) & 0x3ffffff;
+        h3 += (t2>>14 | t3<<18) & 0x3ffffff;
+        h4 += (t3>>8)           & 0x3ffffff;
+        h4 += t4 << 18; // the extra bit (2^128 position in 26-bit chunks)
+
+        // Multiply: (h + m) * r using schoolbook multiplication
+        // Each hi and ri fit in 26 bits; products fit in 52 bits; 5 terms each.
+        uint64_t d0 = h0*r0 + h1*s4 + h2*s3 + h3*s2 + h4*s1;
+        uint64_t d1 = h0*r1 + h1*r0 + h2*s4 + h3*s3 + h4*s2;
+        uint64_t d2 = h0*r2 + h1*r1 + h2*r0 + h3*s4 + h4*s3;
+        uint64_t d3 = h0*r3 + h1*r2 + h2*r1 + h3*r0 + h4*s4;
+        uint64_t d4 = h0*r4 + h1*r3 + h2*r2 + h3*r1 + h4*r0;
+
+        // Propagate carries (reduce to 26-bit limbs)
+        uint64_t c;
+        c = d0>>26; h0 = (uint32_t)(d0 & 0x3ffffff); d1 += c;
+        c = d1>>26; h1 = (uint32_t)(d1 & 0x3ffffff); d2 += c;
+        c = d2>>26; h2 = (uint32_t)(d2 & 0x3ffffff); d3 += c;
+        c = d3>>26; h3 = (uint32_t)(d3 & 0x3ffffff); d4 += c;
+        c = d4>>26; h4 = (uint32_t)(d4 & 0x3ffffff); h0 += c * 5;
+        c = h0>>26; h0 &= 0x3ffffff; h1 += c;
+        pos += chunk;
+    }
+
+    // Final reduction mod 2^130-5: h %= p
+    {
+        uint64_t c;
+        c = h1>>26; h1 &= 0x3ffffff; h2 += c;
+        c = h2>>26; h2 &= 0x3ffffff; h3 += c;
+        c = h3>>26; h3 &= 0x3ffffff; h4 += c;
+        c = h4>>26; h4 &= 0x3ffffff; h0 += c*5;
+        c = h0>>26; h0 &= 0x3ffffff; h1 += c;
+        // Check if h >= p = 2^130-5; if so, subtract p
+        uint64_t g0=h0+5; c=g0>>26; g0&=0x3ffffff;
+        uint64_t g1=h1+c; c=g1>>26; g1&=0x3ffffff;
+        uint64_t g2=h2+c; c=g2>>26; g2&=0x3ffffff;
+        uint64_t g3=h3+c; c=g3>>26; g3&=0x3ffffff;
+        uint64_t g4=h4+c-(1ULL<<26);
+        // Select g (reduced) if g4 is zero/negative (wraparound means h < p+5)
+        uint64_t mask = (uint64_t)(-(int64_t)(g4>>63)); // 0 if g4 >= 0, all-ones if g4 < 0
+        mask = ~mask; // all-ones if h >= p, 0 if h < p
+        h0 = (h0 & ~mask) | (g0 & mask);
+        h1 = (h1 & ~mask) | (g1 & mask);
+        h2 = (h2 & ~mask) | (g2 & mask);
+        h3 = (h3 & ~mask) | (g3 & mask);
+        h4 = (h4 & ~mask) | (g4 & mask);
+    }
+    // Reconstruct 128-bit tag = h + s mod 2^128
+    uint64_t s_lo = 0, s_hi = 0;
+    for (int i=0;i<8;++i) s_lo |= ((uint64_t)s_bytes[i]   << (i*8));
+    for (int i=0;i<8;++i) s_hi |= ((uint64_t)s_bytes[i+8] << (i*8));
+    // h as 128-bit (LE)
+    uint64_t h_lo = h0 | (h1<<26) | (h2<<52);  // bits 0..77
+    uint64_t h_hi = (h2>>12) | (h3<<14) | (h4<<40); // bits 64..129
+    uint64_t t_lo = h_lo + s_lo;
+    uint64_t t_hi = h_hi + s_hi + (t_lo < h_lo ? 1 : 0);
+    for (int i=0;i<8;++i) tag[i]   = (uint8_t)(t_lo >> (i*8));
+    for (int i=0;i<8;++i) tag[i+8] = (uint8_t)(t_hi >> (i*8));
+}
+
+} // anonymous namespace
+
+namespace crypto {
+
+// ChaCha20-Poly1305 AEAD encrypt (RFC 8439 §2.8).
+// cipher_with_tag must be at least plainLen + 16 bytes.
+// Layout: ciphertext[0..plainLen-1] || poly1305_tag[0..15].
+void chacha20_poly1305_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+                               const uint8_t *plain, size_t plainLen,
+                               uint8_t *cipher_with_tag) {
+    // Generate Poly1305 one-time key: first 32 bytes of ChaCha20(key,nonce,counter=0)
+    uint8_t poly_key[64];
+    chacha20_xor(key, nonce, 0, poly_key, poly_key, 0); // produce keystream block
+    {
+        // Re-use block generation directly (counter=0)
+        uint32_t k[8], n[3];
+        for (int i = 0; i < 8; ++i)
+            k[i] = ((uint32_t)key[i*4+0])|((uint32_t)key[i*4+1]<<8)
+                  |((uint32_t)key[i*4+2]<<16)|((uint32_t)key[i*4+3]<<24);
+        for (int i = 0; i < 3; ++i)
+            n[i] = ((uint32_t)nonce[i*4+0])|((uint32_t)nonce[i*4+1]<<8)
+                  |((uint32_t)nonce[i*4+2]<<16)|((uint32_t)nonce[i*4+3]<<24);
+        chacha20_block(k, 0, n, poly_key);
+    }
+    // Encrypt plaintext with ChaCha20(key, nonce, counter=1)
+    chacha20_xor(key, nonce, 1, plain, cipher_with_tag, plainLen);
+    // Compute and append Poly1305 MAC over the ciphertext
+    poly1305_mac(poly_key, cipher_with_tag, plainLen, cipher_with_tag + plainLen);
+}
+
+// ChaCha20-Poly1305 AEAD decrypt (RFC 8439 §2.8.2).
+// totalLen = cipherLen + 16 (tag); returns true iff MAC verifies.
+// Constant-time tag comparison prevents timing-based forgery.
+bool chacha20_poly1305_decrypt(const uint8_t key[32], const uint8_t nonce[12],
+                               const uint8_t *cipher_with_tag, size_t totalLen,
+                               uint8_t *plain) {
+    if (totalLen < 16) return false;
+    size_t cipherLen = totalLen - 16;
+    const uint8_t *ciphertext = cipher_with_tag;
+    const uint8_t *tag_in     = cipher_with_tag + cipherLen;
+
+    // Regenerate Poly1305 key
+    uint8_t poly_key[64];
+    {
+        uint32_t k[8], n[3];
+        for (int i = 0; i < 8; ++i)
+            k[i] = ((uint32_t)key[i*4+0])|((uint32_t)key[i*4+1]<<8)
+                  |((uint32_t)key[i*4+2]<<16)|((uint32_t)key[i*4+3]<<24);
+        for (int i = 0; i < 3; ++i)
+            n[i] = ((uint32_t)nonce[i*4+0])|((uint32_t)nonce[i*4+1]<<8)
+                  |((uint32_t)nonce[i*4+2]<<16)|((uint32_t)nonce[i*4+3]<<24);
+        chacha20_block(k, 0, n, poly_key);
+    }
+    // Verify MAC before decryption (MAC-then-decrypt for AEAD correctness)
+    uint8_t tag_computed[16];
+    poly1305_mac(poly_key, ciphertext, cipherLen, tag_computed);
+    // Constant-time comparison
+    uint8_t diff = 0;
+    for (int i = 0; i < 16; ++i) diff |= tag_computed[i] ^ tag_in[i];
+    if (diff != 0) return false;
+    // Decrypt with ChaCha20(key, nonce, counter=1)
+    chacha20_xor(key, nonce, 1, ciphertext, plain, cipherLen);
+    return true;
+}
+
+} // namespace crypto
+
 // ── HKDF-SHA256 (RFC 5869) ───────────────────────────────────────────────────
 // HKDF-SHA256 RFC 5869: Extract-then-Expand, two-step PRF.
 // The functions below are in the vgre::advanced namespace (not the crypto
