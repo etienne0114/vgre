@@ -294,6 +294,17 @@ void refDgemm(bool tA, bool tB,
     }
 }
 
+// ── Hermitian helper — outside extern "C" because templates need C++ linkage ──
+// Read A[r,c] respecting Hermitian symmetry: A[j,i] = conj(A[i,j]), diagonal real.
+// upper=true: stored triangle is upper (r<=c); lower=true: lower (r>=c).
+// Complexity: O(1).
+template<typename Cx>
+static inline Cx hermGet(bool upper, const Cx* A, int lda, int r, int c) {
+    if ((upper && r <= c) || (!upper && r >= c)) return A[r * lda + c];
+    Cx v = A[c * lda + r];
+    return {v.x, -v.y};  // conj(v)
+}
+
 extern "C" {
 
 // ── SGEMM ────────────────────────────────────────────────────────────────────
@@ -716,6 +727,248 @@ cublasStatus_t cublasDsymm_v2(cublasHandle_t handle,
     refDsymm(left, upper, m, n, *alpha, A, lda, B, ldb, *beta, C, ldc);
 #endif
     return CUBLAS_STATUS_SUCCESS;
+}
+
+// cublasCHemm_v2: C = alpha*A*B + beta*C  (A Hermitian, left side)
+// Math: C[i,k] = alpha * sum_j A_herm[i,j] * B[j,k] + beta * C[i,k]
+// Complexity: O(m*n*m) for left, O(n*m*n) for right.
+cublasStatus_t cublasCHemm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    int m, int n,
+    const cuComplex* alpha, const cuComplex* A, int lda,
+                             const cuComplex* B, int ldb,
+    const cuComplex* beta,  cuComplex* C, int ldc)
+{
+    if (!handle || !alpha || !A || !B || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left  = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    // Scale C by beta first
+    for (int i = 0; i < m; ++i)
+        for (int k = 0; k < n; ++k)
+            C[i*ldc+k] = cuCaddf(cuCmulf(*beta, C[i*ldc+k]), {0.f, 0.f});
+    if (left) {
+        // C += alpha * A_herm * B; A is m×m Hermitian
+        for (int i = 0; i < m; ++i)
+            for (int k = 0; k < n; ++k) {
+                cuComplex s{0.f, 0.f};
+                for (int j = 0; j < m; ++j)
+                    s = cuCaddf(s, cuCmulf(hermGet(upper, A, lda, i, j), B[j*ldb+k]));
+                C[i*ldc+k] = cuCaddf(C[i*ldc+k], cuCmulf(*alpha, s));
+            }
+    } else {
+        // C += alpha * B * A_herm; A is n×n Hermitian
+        for (int i = 0; i < m; ++i)
+            for (int k = 0; k < n; ++k) {
+                cuComplex s{0.f, 0.f};
+                for (int j = 0; j < n; ++j)
+                    s = cuCaddf(s, cuCmulf(B[i*ldb+j], hermGet(upper, A, lda, j, k)));
+                C[i*ldc+k] = cuCaddf(C[i*ldc+k], cuCmulf(*alpha, s));
+            }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZHemm_v2(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    int m, int n,
+    const cuDoubleComplex* alpha, const cuDoubleComplex* A, int lda,
+                                  const cuDoubleComplex* B, int ldb,
+    const cuDoubleComplex* beta,  cuDoubleComplex* C, int ldc)
+{
+    if (!handle || !alpha || !A || !B || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool left  = (side == CUBLAS_SIDE_LEFT);
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int i = 0; i < m; ++i)
+        for (int k = 0; k < n; ++k)
+            C[i*ldc+k] = cuCadd(cuCmul(*beta, C[i*ldc+k]), {0.0, 0.0});
+    if (left) {
+        for (int i = 0; i < m; ++i)
+            for (int k = 0; k < n; ++k) {
+                cuDoubleComplex s{0.0, 0.0};
+                for (int j = 0; j < m; ++j) {
+                    cuDoubleComplex a = hermGet(upper, A, lda, i, j);
+                    s = cuCadd(s, cuCmul(a, B[j*ldb+k]));
+                }
+                C[i*ldc+k] = cuCadd(C[i*ldc+k], cuCmul(*alpha, s));
+            }
+    } else {
+        for (int i = 0; i < m; ++i)
+            for (int k = 0; k < n; ++k) {
+                cuDoubleComplex s{0.0, 0.0};
+                for (int j = 0; j < n; ++j) {
+                    cuDoubleComplex a = hermGet(upper, A, lda, j, k);
+                    s = cuCadd(s, cuCmul(B[i*ldb+j], a));
+                }
+                C[i*ldc+k] = cuCadd(C[i*ldc+k], cuCmul(*alpha, s));
+            }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+cublasStatus_t cublasCHemm(cublasHandle_t h, cublasSideMode_t si, cublasFillMode_t up,
+    int m, int n, const cuComplex* al, const cuComplex* A, int lda,
+    const cuComplex* B, int ldb, const cuComplex* be, cuComplex* C, int ldc) {
+    return cublasCHemm_v2(h, si, up, m, n, al, A, lda, B, ldb, be, C, ldc);
+}
+cublasStatus_t cublasZHemm(cublasHandle_t h, cublasSideMode_t si, cublasFillMode_t up,
+    int m, int n, const cuDoubleComplex* al, const cuDoubleComplex* A, int lda,
+    const cuDoubleComplex* B, int ldb, const cuDoubleComplex* be, cuDoubleComplex* C, int ldc) {
+    return cublasZHemm_v2(h, si, up, m, n, al, A, lda, B, ldb, be, C, ldc);
+}
+
+// cublasCHerk_v2: C = alpha*A*A^H + beta*C  (C Hermitian, upper/lower updated)
+// Math: C[i,j] += alpha * sum_k A[i,k]*conj(A[j,k])  (no-trans case)
+// Complexity: O(n*n*k).
+cublasStatus_t cublasCHerk_v2(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans,
+    int n, int k,
+    const float* alpha, const cuComplex* A, int lda,
+    const float* beta,  cuComplex* C, int ldc)
+{
+    if (!handle || !alpha || !A || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool conj_trans = (trans != CUBLAS_OP_N);
+    int nrows = conj_trans ? k : n;
+    int ncols = conj_trans ? n : k;
+    // Scale C by beta
+    for (int i = 0; i < n; ++i)
+        for (int j = (upper ? i : 0); j <= (upper ? n-1 : i); ++j)
+            C[i*ldc+j] = cuCmulf_real(C[i*ldc+j], *beta);
+    // Accumulate rank-k update
+    for (int i = 0; i < n; ++i)
+        for (int j = (upper ? i : 0); j <= (upper ? n-1 : i); ++j) {
+            float real_acc = 0.f;
+            // C[i,j] += alpha * sum_p A[i,p]*conj(A[j,p])   (no-trans)
+            for (int p = 0; p < (conj_trans ? nrows : ncols); ++p) {
+                cuComplex ai = conj_trans ? A[p*lda+i] : A[i*lda+p];
+                cuComplex aj = conj_trans ? A[p*lda+j] : A[j*lda+p];
+                // (ai) * conj(aj): (ax+iay)(bx-iby) = ax*bx+ay*by + i(ay*bx-ax*by)
+                cuComplex prod = cuCmulf(ai, {aj.x, -aj.y});
+                real_acc += prod.x;  // only real part contributes to Hermitian update
+                C[i*ldc+j].y += (*alpha) * prod.y;
+            }
+            C[i*ldc+j].x += (*alpha) * real_acc;
+        }
+    // Mirror to maintain symmetry; diagonal is forced real
+    for (int i = 0; i < n; ++i) C[i*ldc+i].y = 0.f;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZHerk_v2(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans,
+    int n, int k,
+    const double* alpha, const cuDoubleComplex* A, int lda,
+    const double* beta,  cuDoubleComplex* C, int ldc)
+{
+    if (!handle || !alpha || !A || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool conj_trans = (trans != CUBLAS_OP_N);
+    int ncols_k = conj_trans ? n : k;
+    for (int i = 0; i < n; ++i)
+        for (int j = (upper ? i : 0); j <= (upper ? n-1 : i); ++j)
+            C[i*ldc+j] = cuCmul_real(C[i*ldc+j], *beta);
+    for (int i = 0; i < n; ++i)
+        for (int j = (upper ? i : 0); j <= (upper ? n-1 : i); ++j) {
+            double real_acc = 0.0;
+            for (int p = 0; p < ncols_k; ++p) {
+                cuDoubleComplex ai = conj_trans ? A[p*lda+i] : A[i*lda+p];
+                cuDoubleComplex aj = conj_trans ? A[p*lda+j] : A[j*lda+p];
+                cuDoubleComplex prod = cuCmul(ai, {aj.x, -aj.y});
+                real_acc += prod.x;
+                C[i*ldc+j].y += (*alpha) * prod.y;
+            }
+            C[i*ldc+j].x += (*alpha) * real_acc;
+        }
+    for (int i = 0; i < n; ++i) C[i*ldc+i].y = 0.0;
+    return CUBLAS_STATUS_SUCCESS;
+}
+cublasStatus_t cublasCHerk(cublasHandle_t h, cublasFillMode_t up, cublasOperation_t t,
+    int n, int k, const float* al, const cuComplex* A, int lda,
+    const float* be, cuComplex* C, int ldc) {
+    return cublasCHerk_v2(h, up, t, n, k, al, A, lda, be, C, ldc);
+}
+cublasStatus_t cublasZHerk(cublasHandle_t h, cublasFillMode_t up, cublasOperation_t t,
+    int n, int k, const double* al, const cuDoubleComplex* A, int lda,
+    const double* be, cuDoubleComplex* C, int ldc) {
+    return cublasZHerk_v2(h, up, t, n, k, al, A, lda, be, C, ldc);
+}
+
+// cublasCHer2k_v2: C = alpha*A*B^H + conj(alpha)*B*A^H + beta*C
+// Math: C[i,j] += alpha*sum_k A[i,k]*conj(B[j,k]) + conj(alpha)*sum_k B[i,k]*conj(A[j,k])
+// Complexity: O(n*n*k).
+cublasStatus_t cublasCHer2k_v2(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans,
+    int n, int k,
+    const cuComplex* alpha, const cuComplex* A, int lda,
+                             const cuComplex* B, int ldb,
+    const float* beta, cuComplex* C, int ldc)
+{
+    if (!handle || !alpha || !A || !B || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool ct = (trans != CUBLAS_OP_N);
+    int nk = ct ? n : k;
+    cuComplex conj_alpha = {alpha->x, -alpha->y};
+    for (int i = 0; i < n; ++i)
+        for (int j = (upper?i:0); j <= (upper?n-1:i); ++j)
+            C[i*ldc+j] = cuCmulf_real(C[i*ldc+j], *beta);
+    for (int i = 0; i < n; ++i)
+        for (int j = (upper?i:0); j <= (upper?n-1:i); ++j) {
+            cuComplex acc{0.f, 0.f};
+            for (int p = 0; p < nk; ++p) {
+                cuComplex ai = ct ? A[p*lda+i] : A[i*lda+p];
+                cuComplex bj = ct ? B[p*ldb+j] : B[j*ldb+p];
+                cuComplex bi = ct ? B[p*ldb+i] : B[i*ldb+p];
+                cuComplex aj = ct ? A[p*lda+j] : A[j*lda+p];
+                // alpha * A[i,p] * conj(B[j,p])
+                acc = cuCaddf(acc, cuCmulf(*alpha, cuCmulf(ai, {bj.x, -bj.y})));
+                // conj(alpha) * B[i,p] * conj(A[j,p])
+                acc = cuCaddf(acc, cuCmulf(conj_alpha, cuCmulf(bi, {aj.x, -aj.y})));
+            }
+            C[i*ldc+j] = cuCaddf(C[i*ldc+j], acc);
+        }
+    for (int i = 0; i < n; ++i) C[i*ldc+i].y = 0.f;  // diagonal stays real
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZHer2k_v2(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans,
+    int n, int k,
+    const cuDoubleComplex* alpha, const cuDoubleComplex* A, int lda,
+                                  const cuDoubleComplex* B, int ldb,
+    const double* beta, cuDoubleComplex* C, int ldc)
+{
+    if (!handle || !alpha || !A || !B || !beta || !C) return CUBLAS_STATUS_INVALID_VALUE;
+    bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    bool ct = (trans != CUBLAS_OP_N);
+    int nk = ct ? n : k;
+    cuDoubleComplex conj_alpha = {alpha->x, -alpha->y};
+    for (int i = 0; i < n; ++i)
+        for (int j = (upper?i:0); j <= (upper?n-1:i); ++j)
+            C[i*ldc+j] = cuCmul_real(C[i*ldc+j], *beta);
+    for (int i = 0; i < n; ++i)
+        for (int j = (upper?i:0); j <= (upper?n-1:i); ++j) {
+            cuDoubleComplex acc{0.0, 0.0};
+            for (int p = 0; p < nk; ++p) {
+                cuDoubleComplex ai = ct ? A[p*lda+i] : A[i*lda+p];
+                cuDoubleComplex bj = ct ? B[p*ldb+j] : B[j*ldb+p];
+                cuDoubleComplex bi = ct ? B[p*ldb+i] : B[i*ldb+p];
+                cuDoubleComplex aj = ct ? A[p*lda+j] : A[j*lda+p];
+                acc = cuCadd(acc, cuCmul(*alpha, cuCmul(ai, {bj.x, -bj.y})));
+                acc = cuCadd(acc, cuCmul(conj_alpha, cuCmul(bi, {aj.x, -aj.y})));
+            }
+            C[i*ldc+j] = cuCadd(C[i*ldc+j], acc);
+        }
+    for (int i = 0; i < n; ++i) C[i*ldc+i].y = 0.0;
+    return CUBLAS_STATUS_SUCCESS;
+}
+cublasStatus_t cublasCHer2k(cublasHandle_t h, cublasFillMode_t up, cublasOperation_t t,
+    int n, int k, const cuComplex* al, const cuComplex* A, int lda,
+    const cuComplex* B, int ldb, const float* be, cuComplex* C, int ldc) {
+    return cublasCHer2k_v2(h, up, t, n, k, al, A, lda, B, ldb, be, C, ldc);
+}
+cublasStatus_t cublasZHer2k(cublasHandle_t h, cublasFillMode_t up, cublasOperation_t t,
+    int n, int k, const cuDoubleComplex* al, const cuDoubleComplex* A, int lda,
+    const cuDoubleComplex* B, int ldb, const double* be, cuDoubleComplex* C, int ldc) {
+    return cublasZHer2k_v2(h, up, t, n, k, al, A, lda, B, ldb, be, C, ldc);
 }
 
 // ── Batched SGEMM ─────────────────────────────────────────────────────────────

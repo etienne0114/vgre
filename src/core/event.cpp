@@ -7,21 +7,33 @@
 namespace vgre {
 namespace core {
 
-Event::Event() : recorded_(false) {}
+Event::Event() : recorded_(false), flags_(kEventDefault) {}
+
+// Constructor respecting CUDA event creation flags.
+// kEventBlockingSync: synchronize() uses cv_.wait instead of future spin-poll.
+// kEventDisableTiming: record() skips timestamp capture (faster, no allocation).
+Event::Event(unsigned int flags) : recorded_(false), flags_(flags) {}
 
 VGREResult Event::record(StreamId stream) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // Create a new promise for this specific recording execution
+  // kEventDisableTiming: skip timestamp capture entirely — use a sentinel
+  // future that resolves immediately with the epoch. This avoids the overhead
+  // of steady_clock::now() on the hot path when timing is not needed.
+  const bool timing = !(flags_ & kEventDisableTiming);
+
   auto sharedPromise = std::make_shared<std::promise<TimePoint>>();
   future_ = sharedPromise->get_future().share();
 
-  auto task = [sharedPromise]() {
+  // Capture cv_ by reference — it lives in this Event which outlives the task.
+  // When kEventBlockingSync is set, notify the cv_ after setting the promise so
+  // that synchronize()'s cv_.wait_for() wakes immediately.
+  auto task = [this, sharedPromise, timing]() {
     try {
-      sharedPromise->set_value(std::chrono::steady_clock::now());
-    } catch (...) {
-      // Ignore if value is already set or promise is broken
-    }
+      TimePoint tp = timing ? std::chrono::steady_clock::now() : TimePoint{};
+      sharedPromise->set_value(tp);
+      cv_.notify_all();  // wake any blocking synchronize() calls
+    } catch (...) {}
   };
 
   VGREResult res;
@@ -53,34 +65,32 @@ VGREResult Event::record(StreamId stream) {
 
 VGREResult Event::synchronize() const {
   std::unique_lock<std::mutex> lock(mutex_);
-  if (!recorded_) {
-    // Event hasn't even been submitted to record yet
-    return VGREResult::ERR_INVALID_VALUE;
-  }
+  if (!recorded_) return VGREResult::ERR_INVALID_VALUE;
 
-  // Future wait blocks until the promise is resolved by the worker thread
-  auto fut = future_; // copy under lock to be safe
+  auto fut = future_;
   lock.unlock();
+  if (!fut.valid()) return VGREResult::ERR_INVALID_VALUE;
 
-  if (fut.valid()) {
-    // Add a timeout to prevent indefinite blocking in test environments
-    // Configurable via VGRE_EVENT_TIMEOUT_MS (default 5000ms)
-    static const int eventTimeoutMs = []() -> int {
-        const char* e = vgre_get_config("VGRE_EVENT_TIMEOUT_MS");
-        if (e) {
-            try {
-                int v = std::stoi(e);
-                if (v >= 100 && v <= 60000) return v; // 100ms to 60s range
-            } catch (...) {}
-        }
-        return 5000; // 5 seconds default
-    }();
-    if (fut.wait_for(std::chrono::milliseconds(eventTimeoutMs)) == std::future_status::timeout) {
-      return VGREResult::ERR_TIMEOUT;
-    }
-    return VGREResult::SUCCESS;
+  static const int kTimeoutMs = []() -> int {
+      const char* e = vgre_get_config("VGRE_EVENT_TIMEOUT_MS");
+      if (e) { try { int v = std::stoi(e); if (v >= 100 && v <= 60000) return v; } catch (...) {} }
+      return 5000;
+  }();
+
+  if (flags_ & kEventBlockingSync) {
+    // Blocking-sync: park the thread on a cv_ instead of spinning on the future.
+    // The worker sets the promise → future becomes ready → cv_ is notified.
+    // Math invariant: wait is O(1) wakeups (the promise is set exactly once).
+    std::unique_lock<std::mutex> lk(mutex_);
+    bool done = cv_.wait_for(lk, std::chrono::milliseconds(kTimeoutMs),
+        [&]{ return fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready; });
+    return done ? VGREResult::SUCCESS : VGREResult::ERR_TIMEOUT;
   }
-  return VGREResult::ERR_INVALID_VALUE;
+
+  // Default: spin on the future (low-latency for short waits)
+  if (fut.wait_for(std::chrono::milliseconds(kTimeoutMs)) == std::future_status::timeout)
+    return VGREResult::ERR_TIMEOUT;
+  return VGREResult::SUCCESS;
 }
 
 VGREResult Event::elapsedTime(const Event &start, float &outMs) const {

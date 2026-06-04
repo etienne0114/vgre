@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "vgre/common/siphash.h"
+
 namespace vgre {
 
 // Robin Hood open-addressing hash table.
@@ -79,6 +81,10 @@ public:
     // Lifecycle
     // -------------------------------------------------------------------------
     RobinHoodHashTable() { resize(kInitialCap); }
+
+    // Construct with a caller-supplied hasher (useful when Hash has no default
+    // constructor, or when a fixed-key hasher is needed for testing).
+    explicit RobinHoodHashTable(Hash h) : hash_(std::move(h)) { resize(kInitialCap); }
 
     // -------------------------------------------------------------------------
     // Capacity helpers
@@ -329,5 +335,11 @@ private:
         }
     }
 };
+
+// Convenience alias: kernel-name-to-id table backed by SipHash-2-4.
+// Drop-in for RobinHoodHashTable<std::string, KernelId, std::hash<std::string>>
+// but with hash-flooding resistance.
+using KernelNameTable =
+    RobinHoodHashTable<std::string, uint64_t, vgre::common::SipHash24>;
 
 } // namespace vgre

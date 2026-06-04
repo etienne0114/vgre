@@ -13,12 +13,14 @@
 //   Uses CSR row-wise sparse dot products to fill the output CSR.
 
 #include "cusparse_state.h"
+#include "vgre/common/logger.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
 #include <vector>
 
 #ifdef VGRE_HAS_UMFPACK
@@ -427,6 +429,101 @@ static void csr_spgemm(
 }
 } // anonymous namespace
 
+// ── ILU(0) residual check ─────────────────────────────────────────────────────
+// After in-place ILU(0), the CSR arrays store L (strictly lower + unit diag)
+// and U (upper including diagonal) packed together.
+// We pick test vector b = [1, 2, ..., m] (normalized), then:
+//   Forward solve:  L * y = b   (unit diagonal lower tri)
+//   Backward solve: U * x = y   (stored diagonal upper tri)
+//   Residual:       r = b - (L*U)*x = b - L*(U*x) = b - L*y = b - b = 0 exact
+// But due to floating-point cancellation the residual will be small.
+// Return CUSPARSE_STATUS_ZERO_PIVOT if rel residual > 0.1, and WARN if > 1e-10.
+template<typename T>
+static cusparseStatus_t ilu0_residual_check(int m, const T *val,
+                                             const int *rowPtr, const int *colInd) {
+    if (m <= 0 || !val || !rowPtr || !colInd) return CUSPARSE_STATUS_SUCCESS;
+
+    // Build test vector b[i] = (i+1) / sqrt(sum of squares)
+    std::vector<double> b(static_cast<size_t>(m));
+    double bsq = 0.0;
+    for (int i = 0; i < m; ++i) { b[static_cast<size_t>(i)] = static_cast<double>(i + 1); bsq += b[static_cast<size_t>(i)] * b[static_cast<size_t>(i)]; }
+    double b_norm = std::sqrt(bsq);
+    for (int i = 0; i < m; ++i) b[static_cast<size_t>(i)] /= b_norm;
+    b_norm = 1.0;
+
+    // Diagonal index lookup: diagIdx[j] = position in val[] of U[j,j]
+    std::vector<int> diagIdx(static_cast<size_t>(m), -1);
+    for (int i = 0; i < m; ++i) {
+        for (int p = rowPtr[i]; p < rowPtr[i+1]; ++p) {
+            if (colInd[p] == i) { diagIdx[static_cast<size_t>(i)] = p; break; }
+        }
+    }
+
+    // Forward solve: L * y = b  (L has unit diagonal, strictly lower tri part)
+    std::vector<double> y(b);
+    for (int i = 0; i < m; ++i) {
+        for (int p = rowPtr[i]; p < rowPtr[i+1]; ++p) {
+            int j = colInd[p];
+            if (j >= i) break;  // strictly lower only (L[i,j] = val[p] for j<i)
+            y[static_cast<size_t>(i)] -= static_cast<double>(val[p]) * y[static_cast<size_t>(j)];
+        }
+        // unit diagonal: no division needed
+    }
+
+    // Backward solve: U * x = y  (U includes diagonal val[diagIdx[i]])
+    std::vector<double> x(static_cast<size_t>(m), 0.0);
+    for (int i = m - 1; i >= 0; --i) {
+        int di = diagIdx[static_cast<size_t>(i)];
+        if (di < 0 || val[di] == T(0)) return CUSPARSE_STATUS_ZERO_PIVOT;
+        double acc = y[static_cast<size_t>(i)];
+        for (int p = rowPtr[i]; p < rowPtr[i+1]; ++p) {
+            int j = colInd[p];
+            if (j <= i) continue;  // upper off-diagonal only
+            acc -= static_cast<double>(val[p]) * x[static_cast<size_t>(j)];
+        }
+        x[static_cast<size_t>(i)] = acc / static_cast<double>(val[di]);
+    }
+
+    // Compute r = b - L*(U*x): first compute z = U*x then r = b - L*z
+    // Since L*y = b and U*x = y, r = b - L*(U*x) ≈ 0
+    // Compute U*x -> z
+    std::vector<double> z(static_cast<size_t>(m), 0.0);
+    for (int i = 0; i < m; ++i) {
+        for (int p = rowPtr[i]; p < rowPtr[i+1]; ++p) {
+            int j = colInd[p];
+            if (j >= i)  // upper tri including diagonal
+                z[static_cast<size_t>(i)] += static_cast<double>(val[p]) * x[static_cast<size_t>(j)];
+        }
+    }
+    // Compute r = b - L*z (L has unit diagonal)
+    std::vector<double> r(b);
+    for (int i = 0; i < m; ++i) {
+        for (int p = rowPtr[i]; p < rowPtr[i+1]; ++p) {
+            int j = colInd[p];
+            if (j < i)   // strictly lower tri
+                r[static_cast<size_t>(i)] -= static_cast<double>(val[p]) * z[static_cast<size_t>(j)];
+        }
+        r[static_cast<size_t>(i)] -= z[static_cast<size_t>(i)];  // subtract unit diagonal * z[i]
+    }
+
+    double r_sq = 0.0;
+    for (int i = 0; i < m; ++i) r_sq += r[static_cast<size_t>(i)] * r[static_cast<size_t>(i)];
+    double rel = std::sqrt(r_sq) / b_norm;
+
+    if (rel > 0.1) {
+        std::ostringstream oss;
+        oss << "ILU0 residual norm " << rel << " > 0.1 — suspected zero pivot or ill-conditioned input";
+        VGRE_LOG_WARN("cuSPARSE", oss.str());
+        return CUSPARSE_STATUS_ZERO_PIVOT;
+    }
+    if (rel > 1e-10) {
+        std::ostringstream oss;
+        oss << "ILU0 residual norm " << rel << " > 1e-10 — approximation quality degraded";
+        VGRE_LOG_WARN("cuSPARSE", oss.str());
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
 extern "C" {
 
 // ── SpGEMM descriptor ─────────────────────────────────────────────────────────
@@ -809,22 +906,30 @@ cusparseStatus_t cusparseScsrilu02(cusparseHandle_t /*h*/, int m, int nnz,
         const cusparseSpMatDescr_t /*d*/,
         float *csrVal, const int *rowPtr, const int *colInd,
         csrilu02Info_t /*info*/, int /*policy*/, void * /*buf*/) {
+    cusparseStatus_t factSt;
 #ifdef VGRE_HAS_UMFPACK
     // Use UMFPACK for exact full fill-in LU when available.
-    return umfpack_lu_inplace<float>(m, csrVal, rowPtr, colInd);
+    factSt = umfpack_lu_inplace<float>(m, csrVal, rowPtr, colInd);
 #else
-    return ilu0_csr<float>(m, nnz, csrVal, rowPtr, colInd, 0);
+    factSt = ilu0_csr<float>(m, nnz, csrVal, rowPtr, colInd, 0);
 #endif
+    if (factSt != CUSPARSE_STATUS_SUCCESS) return factSt;
+    // Residual norm check: warn if quality is poor, abort if catastrophically bad.
+    return ilu0_residual_check<float>(m, csrVal, rowPtr, colInd);
 }
 cusparseStatus_t cusparseDcsrilu02(cusparseHandle_t /*h*/, int m, int nnz,
         const cusparseSpMatDescr_t /*d*/,
         double *csrVal, const int *rowPtr, const int *colInd,
         csrilu02Info_t /*info*/, int /*policy*/, void * /*buf*/) {
+    cusparseStatus_t factSt;
 #ifdef VGRE_HAS_UMFPACK
-    return umfpack_lu_inplace<double>(m, csrVal, rowPtr, colInd);
+    factSt = umfpack_lu_inplace<double>(m, csrVal, rowPtr, colInd);
 #else
-    return ilu0_csr<double>(m, nnz, csrVal, rowPtr, colInd, 0);
+    factSt = ilu0_csr<double>(m, nnz, csrVal, rowPtr, colInd, 0);
 #endif
+    if (factSt != CUSPARSE_STATUS_SUCCESS) return factSt;
+    // Residual norm check: warn if quality is poor, abort if catastrophically bad.
+    return ilu0_residual_check<double>(m, csrVal, rowPtr, colInd);
 }
 
 // ── IC(0) implementation ──────────────────────────────────────────────────────

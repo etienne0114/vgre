@@ -3,6 +3,7 @@
 
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
+#include "vgre/core/fib_heap.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -333,6 +334,14 @@ private:
   std::vector<std::thread> workers_;
   std::vector<std::unique_ptr<ChaseLevDeque<WorkItem*>>> workerDeques_;
   IndexedHeap queue_;
+
+  // Fibonacci heap used for O(1) amortised increase_key on stream-priority
+  // updates.  Maintains a parallel view of WorkItems alongside IndexedHeap;
+  // the scheduler may use fibHeap_.increase_key(node, newPriority) instead of
+  // IndexedHeap::updatePriority() when stream-priority changes are frequent.
+  // Node pointers are stored per-stream in fibNodeByStream_.
+  FibHeap<WorkItem>                                    fibHeap_;
+  std::unordered_map<StreamId, FibHeap<WorkItem>::Node*> fibNodeByStream_;
 
   std::unordered_map<int, IndexedHeap> numaQueues_;
   // NUMA node assigned to each worker thread (index == worker index in workers_).

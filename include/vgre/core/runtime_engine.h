@@ -360,7 +360,7 @@ private:
   std::unordered_map<KernelId, KernelIR> kernelIRCache_;
   std::unordered_map<void*, KernelId> kernelFnAddrMap_; // reverse map for CDP
   std::unordered_map<KernelId, JITFuture> pendingKernels_;
-  RobinHoodHashTable<std::string, KernelId> kernelNames_;
+  RobinHoodHashTable<std::string, KernelId, vgre::common::SipHash24> kernelNames_;
   KernelId nextKernelId_ = 1;
   std::unordered_set<KernelId> warnedSyncthreads_;
   std::thread benchmarkThread_;

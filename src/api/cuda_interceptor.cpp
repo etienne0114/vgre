@@ -438,8 +438,15 @@ cudaError_t CUDAInterceptor::eventCreate(cudaEvent_t *event) {
 
 cudaError_t CUDAInterceptor::eventCreateWithFlags(cudaEvent_t *event,
                                                   unsigned int flags) {
-  (void)flags;
-  return eventCreate(event);
+  if (!event) return cudaErrorInvalidValue;
+  // Map CUDA flags to VGRE Event flags.
+  // cudaEventBlockingSync = 0x01, cudaEventDisableTiming = 0x02.
+  unsigned int vgre_flags = 0;
+  if (flags & 0x01) vgre_flags |= vgre::core::kEventBlockingSync;
+  if (flags & 0x02) vgre_flags |= vgre::core::kEventDisableTiming;
+  auto *ev = new vgre::core::Event(vgre_flags);
+  *event = reinterpret_cast<cudaEvent_t>(ev);
+  return cudaSuccess;
 }
 
 cudaError_t CUDAInterceptor::eventRecord(cudaEvent_t event,

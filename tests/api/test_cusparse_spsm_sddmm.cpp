@@ -298,6 +298,112 @@ int test_sddmm_beta_accumulate() {
     return 0;
 }
 
+// ── 7. SpSV FP64 precision: 100×100 upper triangular, residual < 1e-12 ─────────
+// Build A: upper triangular 100×100 CSR.
+//   diagonal[i] = i + 2.0   (so cond(A) < 100 / 2 = 50)
+//   off-diagonal entries (i, j), j > i: random in [-0.5, 0.5], ~3 per row.
+// Construct b = A * x_ref where x_ref = [1, 1, ..., 1].
+// Solve A * x = b and verify ||A*x - b||_2 / ||b||_2 < 1e-12.
+int test_spsv_fp64_precision() {
+    const int N = 100;
+
+    // Build CSR for upper triangular matrix A (FP64)
+    // Row i has: diagonal entry (i,i) = i+2, plus up to 3 off-diagonal entries
+    // at columns i+1, i+3, i+7 (clamped to N-1) with fixed small values.
+    // Using fixed offsets (not random) keeps the test deterministic and
+    // guaranteed well-conditioned while exercising the full 100×100 path.
+    std::vector<int>    rowPtr;
+    std::vector<int>    colInd;
+    std::vector<double> vals;
+
+    rowPtr.push_back(0);
+    // off-diagonal column offsets to use (each > 0 so strictly upper-tri)
+    const int offsets[3] = {1, 3, 7};
+    // fixed off-diagonal values, well within [-0.5, 0.5]
+    const double offVals[3] = {0.3, -0.2, 0.1};
+
+    for (int i = 0; i < N; ++i) {
+        // diagonal
+        colInd.push_back(i);
+        vals.push_back(static_cast<double>(i) + 2.0);
+        // off-diagonal
+        for (int k = 0; k < 3; ++k) {
+            int j = i + offsets[k];
+            if (j < N) {
+                colInd.push_back(j);
+                vals.push_back(offVals[k]);
+            }
+        }
+        rowPtr.push_back(static_cast<int>(colInd.size()));
+    }
+    int nnz = static_cast<int>(vals.size());
+
+    // b = A * x_ref, x_ref = [1, ..., 1]  (backward-substitute row by row)
+    std::vector<double> b(N, 0.0);
+    for (int i = 0; i < N; ++i) {
+        for (int p = rowPtr[i]; p < rowPtr[i+1]; ++p)
+            b[i] += vals[p]; // x_ref[j] = 1 for all j
+    }
+
+    // cuSPARSE solve: SpSV with CUDA_R_64F
+    cusparseHandle_t h = nullptr;
+    if (cusparseCreate(&h) != CUSPARSE_STATUS_SUCCESS) FAIL("SpSV FP64: create handle");
+
+    cusparseSpMatDescr_t matA = nullptr;
+    cusparseCreateCsr(&matA, N, N, nnz,
+                      rowPtr.data(), colInd.data(), vals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F);
+    cusparseFillMode_t fillMode = CUSPARSE_FILL_MODE_UPPER;
+    cusparseSpMatSetAttribute(matA, CUSPARSE_SPMAT_FILL_MODE, &fillMode, sizeof(fillMode));
+
+    cusparseDnVecDescr_t vecB = nullptr, vecX = nullptr;
+    std::vector<double> x(N, 0.0);
+    cusparseCreateDnVec(&vecB, N, b.data(), CUDA_R_64F);
+    cusparseCreateDnVec(&vecX, N, x.data(), CUDA_R_64F);
+
+    cusparseSpSVDescr_t spsv = nullptr;
+    cusparseSpSV_createDescr(&spsv);
+
+    double alpha = 1.0;
+    size_t bufSize = 0;
+    cusparseSpSV_bufferSize(h,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha, matA, vecB, vecX,
+        CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsv, &bufSize);
+    std::vector<char> buf(bufSize + 1);
+    cusparseSpSV_analysis(h,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha, matA, vecB, vecX,
+        CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsv, buf.data());
+    cusparseStatus_t st = cusparseSpSV_solve(h,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha, matA, vecB, vecX,
+        CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsv);
+    if (st != CUSPARSE_STATUS_SUCCESS) FAIL("SpSV FP64: solve returned error");
+
+    // Compute residual r = b - A*x, then ||r||/||b||
+    std::vector<double> r(b);  // r = b
+    for (int i = 0; i < N; ++i) {
+        for (int p = rowPtr[i]; p < rowPtr[i+1]; ++p)
+            r[i] -= vals[p] * x[colInd[p]];
+    }
+    double r_norm = 0.0, b_norm = 0.0;
+    for (int i = 0; i < N; ++i) { r_norm += r[i]*r[i]; b_norm += b[i]*b[i]; }
+    r_norm = std::sqrt(r_norm);
+    b_norm = std::sqrt(b_norm);
+    double rel = (b_norm > 0.0) ? r_norm / b_norm : r_norm;
+    if (rel >= 1e-12) FAIL("SpSV FP64: residual " << rel << " >= 1e-12");
+
+    cusparseSpSV_destroyDescr(spsv);
+    cusparseDestroySpMat(matA);
+    cusparseDestroyDnVec(vecB);
+    cusparseDestroyDnVec(vecX);
+    cusparseDestroy(h);
+    PASS("SpSV FP64 100x100 upper triangular residual < 1e-12");
+    return 0;
+}
+
 int main() {
     int failures = 0;
     failures += test_spsm_descr_lifecycle();
@@ -306,6 +412,7 @@ int main() {
     failures += test_sddmm_lifecycle();
     failures += test_sddmm_correctness();
     failures += test_sddmm_beta_accumulate();
+    failures += test_spsv_fp64_precision();
     if (failures == 0)
         std::cout << "All SpSM/SDDMM tests passed.\n";
     return failures;

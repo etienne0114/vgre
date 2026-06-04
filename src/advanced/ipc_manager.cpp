@@ -620,7 +620,7 @@ bool IPCManager::validateAuthToken(const AuthToken& token) const {
                sizeof(AuthToken) - sizeof(token.hmac),
                auth_secret_, computed_hmac);
   
-  return memcmp(computed_hmac, token.hmac, 32) == 0;
+  return crypto::secure_compare(computed_hmac, token.hmac, 32);
 }
 
 // Verify shared memory state integrity
@@ -633,7 +633,7 @@ bool IPCManager::verifyStateIntegrity() const {
   generateHMAC(reinterpret_cast<uint8_t*>(state_), hmac_offset,
                auth_secret_, computed_hmac);
   
-  return memcmp(computed_hmac, state_->state_hmac, 32) == 0;
+  return crypto::secure_compare(computed_hmac, state_->state_hmac, 32);
 }
 
 // Update state HMAC after modifications
