@@ -2,6 +2,7 @@
 #include "vgre/advanced/hardware_token_manager.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/secure_zero.h"
 
 #include <algorithm>
 #include <chrono>
@@ -32,29 +33,7 @@ using vgre::common::vgre_setsockopt;
 
 SecureChannel::SecureChannel() = default;
 
-// Portable cryptographic zeroization — prevents dead-store elimination by
-// the optimizer. Each platform has an OS-provided function for this:
-//   Windows:       SecureZeroMemory (kernel32, always available)
-//   Linux (glibc): explicit_bzero   (glibc ≥ 2.25 / kernel ≥ 3.17)
-//   macOS:         memset_s         (C11, available since macOS 10.9)
-// Falls back to a volatile write loop which every major compiler preserves.
-static void vgre_secure_zero(void *p, size_t n) noexcept {
-#if defined(_WIN32)
-  SecureZeroMemory(p, n);
-#elif defined(__GLIBC__) &&                                                    \
-    (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25))
-  explicit_bzero(p, n);
-#elif defined(__APPLE__)
-  memset_s(p, n, 0, n);
-#else
-  // Volatile pointer loop — reliable on all conforming C++ implementations.
-  volatile uint8_t *vp = static_cast<volatile uint8_t *>(p);
-  for (size_t i = 0; i < n; ++i)
-    vp[i] = 0;
-  // Memory fence to ensure writes are not reordered past this point.
-  std::atomic_thread_fence(std::memory_order_seq_cst);
-#endif
-}
+using vgre::common::vgre_secure_zero;
 
 SecureChannel::~SecureChannel() {
   // Zeroize ALL sensitive fields so key material doesn't linger on the heap
