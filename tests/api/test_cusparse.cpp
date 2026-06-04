@@ -790,6 +790,83 @@ int test_spgemm_symbolic_phase() {
     return 0;
 }
 
+// ── QUEUE-72: DenseToSparse — three-phase workflow ────────────────────────────
+// Dense 3×4 matrix → CSR. Tests correct NNZ count, row offsets, col indices,
+// and values via the bufferSize→analysis→(query+alloc+setPointers)→compress flow.
+// Row-major layout; zero threshold is exact equality to 0.0f.
+int test_dense_to_sparse() {
+    // Dense 3×4 (row-major):
+    //   row 0: [1, 0, 0, 2]  → 2 NNZ
+    //   row 1: [0, 0, 3, 0]  → 1 NNZ
+    //   row 2: [4, 5, 0, 6]  → 3 NNZ
+    // Total NNZ = 6
+    std::vector<float> dense = {1,0,0,2, 0,0,3,0, 4,5,0,6};
+
+    cusparseHandle_t     h    = nullptr; cusparseCreate(&h);
+    cusparseDnMatDescr_t matA = nullptr;
+    cusparseCreateDnMat(&matA, 3, 4, /*ld=*/4, dense.data(), CUDA_R_32F, CUSPARSE_ORDER_ROW);
+
+    // Sparse output descriptor (initially no pointers — set after analysis)
+    cusparseSpMatDescr_t matB = nullptr;
+    cusparseCreateCsr(&matB, 3, 4, /*nnz=*/0,
+                      nullptr, nullptr, nullptr,
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+
+    // Phase 1: bufferSize (always 0 in this shim)
+    size_t bufSize = 999;
+    if (cusparseDenseToSparse_bufferSize(h, matA, matB,
+            CUSPARSE_DENSETOSPARSE_ALG_DEFAULT, &bufSize) != CUSPARSE_STATUS_SUCCESS)
+        FAIL("DenseToSparse_bufferSize status");
+    if (bufSize != 0) FAIL("bufferSize should be 0");
+
+    // Phase 2: analysis — counts NNZ
+    if (cusparseDenseToSparse_analysis(h, matA, matB,
+            CUSPARSE_DENSETOSPARSE_ALG_DEFAULT, nullptr) != CUSPARSE_STATUS_SUCCESS)
+        FAIL("DenseToSparse_analysis status");
+
+    // Query NNZ from the sparse descriptor
+    int64_t rows64, cols64, nnz64;
+    if (cusparseSpMatGetSize(matB, &rows64, &cols64, &nnz64) != CUSPARSE_STATUS_SUCCESS)
+        FAIL("SpMatGetSize status");
+    if (nnz64 != 6) FAIL("NNZ should be 6, got " + std::to_string(nnz64));
+
+    // Allocate CSR arrays and wire them into the descriptor
+    std::vector<int>   rowOff(rows64 + 1, 0);
+    std::vector<int>   colIdx(nnz64, 0);
+    std::vector<float> vals(nnz64, 0.0f);
+    if (cusparseCsrSetPointers(matB, rowOff.data(), colIdx.data(), vals.data())
+            != CUSPARSE_STATUS_SUCCESS)
+        FAIL("CsrSetPointers status");
+
+    // Phase 3: compress — fill CSR arrays
+    if (cusparseDenseToSparse_compress(h, matA, matB,
+            CUSPARSE_DENSETOSPARSE_ALG_DEFAULT, nullptr) != CUSPARSE_STATUS_SUCCESS)
+        FAIL("DenseToSparse_compress status");
+
+    // Verify row offsets: [0, 2, 3, 6]
+    if (rowOff[0]!=0) FAIL("rowOff[0]"); if (rowOff[1]!=2) FAIL("rowOff[1]");
+    if (rowOff[2]!=3) FAIL("rowOff[2]"); if (rowOff[3]!=6) FAIL("rowOff[3]");
+
+    // Verify col indices (row 0: {0,3}, row 1: {2}, row 2: {0,1,3})
+    if (colIdx[0]!=0) FAIL("colIdx[0]"); if (colIdx[1]!=3) FAIL("colIdx[1]");
+    if (colIdx[2]!=2) FAIL("colIdx[2]");
+    if (colIdx[3]!=0) FAIL("colIdx[3]"); if (colIdx[4]!=1) FAIL("colIdx[4]");
+    if (colIdx[5]!=3) FAIL("colIdx[5]");
+
+    // Verify values: 1,2,3,4,5,6
+    float expected[] = {1,2,3,4,5,6};
+    for (int i=0;i<6;++i)
+        if (!NEAR(vals[i], expected[i], 1e-6f))
+            FAIL("vals[" + std::to_string(i) + "] got " + std::to_string(vals[i]));
+
+    cusparseDestroyDnMat(matA);
+    cusparseDestroySpMat(matB);
+    cusparseDestroy(h);
+    PASS("DenseToSparse 3×4: NNZ=6, rowOff/colIdx/vals correct (QUEUE-72)");
+    return 0;
+}
+
 // [ignoring loop detection]
 // ── Driver ────────────────────────────────────────────────────────────────────
 int main() {
@@ -811,6 +888,7 @@ int main() {
     rc |= test_spmm_alg_default();
     rc |= test_batched_spmm_stride_correctness();
     rc |= test_batched_spmm_beta_scaling();
+    rc |= test_dense_to_sparse();
     if (rc == 0) std::cout << "\nAll cuSPARSE tests passed!\n";
     return rc;
 }
