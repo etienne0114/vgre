@@ -850,6 +850,48 @@ cusolverStatus_t cusolverDnZpotrfBatched(cusolverDnHandle_t h, char uplo,
     return CUSOLVER_STATUS_SUCCESS;
 }
 
+// ── Batched LU factorization (getrfBatched) — QUEUE-41 ───────────────────────
+// Factorizes batchSize independent n×n matrices using partial-pivoting LU
+// (PA = LU) via LAPACK sgetrf_/dgetrf_. Pivot indices are stored 1-based in
+// PivotArray[b*n .. b*n+n-1] per LAPACK convention, matching what getrsBatched
+// passes to getrs_. infoArray[b] = 0 on success, k+1 if U[k,k] == 0.
+// If PivotArray is NULL a local buffer is used (still performs partial pivoting).
+cusolverStatus_t cusolverDnSgetrfBatched(cusolverDnHandle_t /*handle*/,
+                                          int n,
+                                          float **Aarray, int lda,
+                                          int *PivotArray,
+                                          int *infoArray, int batchSize) {
+    if (!Aarray || !infoArray || n <= 0 || lda < n || batchSize <= 0)
+        return CUSOLVER_STATUS_INVALID_VALUE;
+    std::vector<int> local_piv;
+    if (!PivotArray) local_piv.resize(static_cast<size_t>(n));
+    for (int b = 0; b < batchSize; ++b) {
+        if (!Aarray[b]) { infoArray[b] = -(b + 1); return CUSOLVER_STATUS_INVALID_VALUE; }
+        infoArray[b] = 0;
+        int *ipiv = PivotArray ? PivotArray + b * n : local_piv.data();
+        sgetrf_(&n, &n, Aarray[b], &lda, ipiv, &infoArray[b]);
+    }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnDgetrfBatched(cusolverDnHandle_t /*handle*/,
+                                          int n,
+                                          double **Aarray, int lda,
+                                          int *PivotArray,
+                                          int *infoArray, int batchSize) {
+    if (!Aarray || !infoArray || n <= 0 || lda < n || batchSize <= 0)
+        return CUSOLVER_STATUS_INVALID_VALUE;
+    std::vector<int> local_piv;
+    if (!PivotArray) local_piv.resize(static_cast<size_t>(n));
+    for (int b = 0; b < batchSize; ++b) {
+        if (!Aarray[b]) { infoArray[b] = -(b + 1); return CUSOLVER_STATUS_INVALID_VALUE; }
+        infoArray[b] = 0;
+        int *ipiv = PivotArray ? PivotArray + b * n : local_piv.data();
+        dgetrf_(&n, &n, Aarray[b], &lda, ipiv, &infoArray[b]);
+    }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
 // ── Batched LU triangular solve (getrsBatched) ────────────────────────────────
 // Loops the unbatched getrs over each matrix/RHS pointer pair in the arrays.
 

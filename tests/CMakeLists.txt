@@ -341,6 +341,11 @@ add_executable(test_cusolver_batchqr api/test_cusolver_batchqr.cpp)
 target_link_libraries(test_cusolver_batchqr PRIVATE vgre_cudart)
 add_test(NAME CusolverBatchQR COMMAND test_cusolver_batchqr)
 
+# cuSolver batch LU factorization (QUEUE-41)
+add_executable(test_cusolver_batchlu api/test_cusolver_batchlu.cpp)
+target_link_libraries(test_cusolver_batchlu PRIVATE vgre_cudart)
+add_test(NAME CusolverBatchLU COMMAND test_cusolver_batchlu)
+
 add_executable(test_cublas_level2 api/test_cublas_level2.cpp)
 target_link_libraries(test_cublas_level2 PRIVATE vgre)
 add_test(NAME CublasLevel2 COMMAND test_cublas_level2)
