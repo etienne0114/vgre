@@ -74,6 +74,24 @@ cublasStatus_t cublasCtrsm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t
 cublasStatus_t cublasCsymm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
     int, int, const cuComplex*, const cuComplex*, int, const cuComplex*, int,
     const cuComplex*, cuComplex*, int);
+
+// Hermitian Level-3
+cublasStatus_t cublasChemm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
+    int, int, const cuComplex*, const cuComplex*, int,
+    const cuComplex*, int, const cuComplex*, cuComplex*, int);
+cublasStatus_t cublasZhemm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
+    int, int, const cuDoubleComplex*, const cuDoubleComplex*, int,
+    const cuDoubleComplex*, int, const cuDoubleComplex*, cuDoubleComplex*, int);
+cublasStatus_t cublasCherk_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const float*, const cuComplex*, int, const float*, cuComplex*, int);
+cublasStatus_t cublasZherk_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const double*, const cuDoubleComplex*, int, const double*, cuDoubleComplex*, int);
+cublasStatus_t cublasCher2k_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const cuComplex*, const cuComplex*, int,
+    const cuComplex*, int, const float*, cuComplex*, int);
+cublasStatus_t cublasZher2k_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const cuDoubleComplex*, const cuDoubleComplex*, int,
+    const cuDoubleComplex*, int, const double*, cuDoubleComplex*, int);
 } // extern "C"
 
 static cuComplex mc(float x, float y) { return {x, y}; }
@@ -314,6 +332,94 @@ int main() {
         cuComplex x[1] = {mc(0,0)};
         cublasStatus_t r = cublasCcopy_v2(nullptr, 1, x, 1, x, 1);
         CHECK("Null handle reject", r == CUBLAS_STATUS_INVALID_VALUE);
+    }
+
+    // ── Hermitian Level-3 (QUEUE-44) ─────────────────────────────────────────
+
+    // 22. CHERK: C = alpha*A*A^H + beta*C (upper, n=3, k=2, column-major A)
+    // A col-major lda=3: col0={1+i, 0+i, 1}, col1={2, 1-i, 0+i}
+    // C[i,j] = sum_p A[i,p]*conj(A[j,p]).  hermIndex(3,r,c,UPPER) = c*3+r for r<=c.
+    // C[0,0]=6, C[0,1]=3+i (idx 3), C[0,2]=1-i (idx 6), C[1,1]=3 (idx 4), C[1,2]=-1 (idx 7), C[2,2]=2 (idx 8)
+    {
+        float alpha = 1.f, beta = 0.f;
+        cuComplex A[] = {mc(1,1), mc(0,1), mc(1,0),   // col 0
+                         mc(2,0), mc(1,-1), mc(0,1)};  // col 1
+        cuComplex C[9] = {};
+        cublasCherk_v2(handle, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, 3, 2,
+            &alpha, A, 3, &beta, C, 3);
+        CHECK("Cherk upper diag real",
+            ceq(C[0], 6, 0) && ceq(C[4], 3, 0) && ceq(C[8], 2, 0));
+        CHECK("Cherk upper off-diag",
+            ceq(C[3], 3, 1) && ceq(C[6], 1, -1) && ceq(C[7], -1, 0));
+    }
+
+    // 23. ZHERK: double-precision Cherk, same matrix
+    {
+        double alpha = 1.0, beta = 0.0;
+        cuDoubleComplex A[] = {mz(1,1), mz(0,1), mz(1,0),
+                               mz(2,0), mz(1,-1), mz(0,1)};
+        cuDoubleComplex C[9] = {};
+        cublasZherk_v2(handle, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, 3, 2,
+            &alpha, A, 3, &beta, C, 3);
+        CHECK("Zherk upper diag real",
+            zeq(C[0], 6, 0) && zeq(C[4], 3, 0) && zeq(C[8], 2, 0));
+        CHECK("Zherk upper off-diag",
+            zeq(C[3], 3, 1) && zeq(C[6], 1, -1) && zeq(C[7], -1, 0));
+    }
+
+    // 24. CHER2K: C = alpha*A*B^H + conj(alpha)*B*A^H (upper, n=2, k=2, col-major)
+    // A: {1+i, 1-i, 0+i, 2}, B: {0+i, 1-i, 1, 0+i}
+    // C[0,0]=2 (idx 0), C[0,1]=2+3i (idx 2), C[1,1]=4 (idx 3)
+    {
+        cuComplex alpha = mc(1, 0);
+        float beta = 0.f;
+        cuComplex A[] = {mc(1,1), mc(1,-1), mc(0,1), mc(2,0)};   // 2x2 col-major
+        cuComplex B[] = {mc(0,1), mc(1,-1), mc(1,0), mc(0,1)};   // 2x2 col-major
+        cuComplex C[4] = {};
+        cublasCher2k_v2(handle, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, 2, 2,
+            &alpha, A, 2, B, 2, &beta, C, 2);
+        CHECK("Cher2k upper diag real", ceq(C[0], 2, 0) && ceq(C[3], 4, 0));
+        CHECK("Cher2k upper off-diag", ceq(C[2], 2, 3));
+    }
+
+    // 25. ZHER2K: double-precision Cher2k
+    {
+        cuDoubleComplex alpha = mz(1, 0);
+        double beta = 0.0;
+        cuDoubleComplex A[] = {mz(1,1), mz(1,-1), mz(0,1), mz(2,0)};
+        cuDoubleComplex B[] = {mz(0,1), mz(1,-1), mz(1,0), mz(0,1)};
+        cuDoubleComplex C[4] = {};
+        cublasZher2k_v2(handle, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, 2, 2,
+            &alpha, A, 2, B, 2, &beta, C, 2);
+        CHECK("Zher2k upper diag real", zeq(C[0], 2, 0) && zeq(C[3], 4, 0));
+        CHECK("Zher2k upper off-diag", zeq(C[2], 2, 3));
+    }
+
+    // 26. CHEMM: C = alpha*A*B + beta*C (left, upper, row-major storage)
+    // Chemm uses row-major: A[row*lda+col], C[row*ldc+col].
+    // A = [[3, 1+2i],[1-2i, 5]], upper stored as A[0*2+1]=1+2i, A[1*2+1]=5.
+    // B = I_2x2.  Result C = A: C[0,0]=3, C[0,1]=1+2i, C[1,0]=1-2i, C[1,1]=5.
+    {
+        cuComplex alpha = mc(1, 0), beta = mc(0, 0);
+        cuComplex A[] = {mc(3,0), mc(1,2), mc(0,0), mc(5,0)};  // row-major upper
+        cuComplex B[] = {mc(1,0), mc(0,0), mc(0,0), mc(1,0)};  // identity row-major
+        cuComplex C[4] = {};
+        cublasChemm_v2(handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER, 2, 2,
+            &alpha, A, 2, B, 2, &beta, C, 2);
+        CHECK("Chemm left-upper diag", ceq(C[0], 3, 0) && ceq(C[3], 5, 0));
+        CHECK("Chemm left-upper off-diag", ceq(C[1], 1, 2) && ceq(C[2], 1, -2));
+    }
+
+    // 27. ZHEMM: double-precision Chemm, same matrix
+    {
+        cuDoubleComplex alpha = mz(1, 0), beta = mz(0, 0);
+        cuDoubleComplex A[] = {mz(3,0), mz(1,2), mz(0,0), mz(5,0)};
+        cuDoubleComplex B[] = {mz(1,0), mz(0,0), mz(0,0), mz(1,0)};
+        cuDoubleComplex C[4] = {};
+        cublasZhemm_v2(handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER, 2, 2,
+            &alpha, A, 2, B, 2, &beta, C, 2);
+        CHECK("Zhemm left-upper diag", zeq(C[0], 3, 0) && zeq(C[3], 5, 0));
+        CHECK("Zhemm left-upper off-diag", zeq(C[1], 1, 2) && zeq(C[2], 1, -2));
     }
 
     cublasDestroy_v2(handle);
