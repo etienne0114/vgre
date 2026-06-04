@@ -235,47 +235,50 @@ cudnnStatus_t cudnnNormalizationBackward(
     const float *sc = static_cast<const float*>(normScale);
 
     if (mode == CUDNN_NORM_PER_CHANNEL) {
-        // Per-channel backward: dscale, dbias, dx — same as BN backward
-        const float *mu_s  = static_cast<const float*>(savedMean);
+        // BN backward: dX[n,c,h,w] = γ[c]·σ⁻¹[c]/M·(M·dY - Σ_all dY - x̂·Σ_all dY·x̂)
+        // where M = N·H·W, sums are over all (n,h,w) for the same channel c.
+        // Math: Ioffe & Szegedy 2015 eq. (3), with Σ over the full N·HW group.
+        // Complexity: O(N·C·H·W) — two passes over the data.
+        const float *mu_s   = static_cast<const float*>(savedMean);
         const float *ivar_s = static_cast<const float*>(savedInvVariance);
         if (!mu_s || !ivar_s) return CUDNN_STATUS_INVALID_VALUE;
-        int group = N * HW;
-        std::vector<float> dsc(C, 0.f), dbi(C, 0.f);
+        int M = N * HW;  // full group size per channel
+        // Pass 1: accumulate per-channel sums over ALL n and hw.
+        std::vector<double> sum_dy_c(C, 0.0), sum_dy_xhat_c(C, 0.0);
         for (int c = 0; c < C; ++c) {
             for (int n = 0; n < N; ++n) for (int hw = 0; hw < HW; ++hw) {
                 int idx = (n * C + c) * HW + hw;
                 float xhat = (xf[idx] - mu_s[c]) * ivar_s[c];
-                dsc[c] += dyf[idx] * xhat;
-                dbi[c] += dyf[idx];
+                sum_dy_c[c]      += dyf[idx];
+                sum_dy_xhat_c[c] += dyf[idx] * xhat;
             }
         }
+        // Write dScale = adP·(Σ dY·x̂) + bdP·dScale
         if (resultBnScaleDiff) {
             float *ds = static_cast<float*>(resultBnScaleDiff);
-            for (int c = 0; c < C; ++c) ds[c] = adP * dsc[c] + bdP * ds[c];
+            for (int c = 0; c < C; ++c)
+                ds[c] = adP * static_cast<float>(sum_dy_xhat_c[c]) + bdP * ds[c];
         }
+        // Write dBias = adP·(Σ dY) + bdP·dBias
         if (resultBnBiasDiff) {
             float *db = static_cast<float*>(resultBnBiasDiff);
-            for (int c = 0; c < C; ++c) db[c] = adP * dbi[c] + bdP * db[c];
+            for (int c = 0; c < C; ++c)
+                db[c] = adP * static_cast<float>(sum_dy_c[c]) + bdP * db[c];
         }
+        // Pass 2: compute dX using the full-group sums (correct Ioffe-Szegedy formula).
         #ifdef _OPENMP
-        #pragma omp parallel for OMP_COLLAPSE(2) if (N * C * HW > 1024)
+        #pragma omp parallel for collapse(2) if (N * C * HW > 1024)
         #endif
         for (int n = 0; n < N; ++n)
-        for (int c = 0; c < C; ++c) {
-            double sum_dy = 0.0, sum_dy_xhat = 0.0;
-            for (int hw = 0; hw < HW; ++hw) {
-                int idx = (n * C + c) * HW + hw;
-                float xhat = (xf[idx] - mu_s[c]) * ivar_s[c];
-                sum_dy      += dyf[idx];
-                sum_dy_xhat += dyf[idx] * xhat;
-            }
-            for (int hw = 0; hw < HW; ++hw) {
-                int idx = (n * C + c) * HW + hw;
-                float xhat = (xf[idx] - mu_s[c]) * ivar_s[c];
-                float dx_val = sc[c] * ivar_s[c] / group *
-                    (group * dyf[idx] - static_cast<float>(sum_dy) - xhat * static_cast<float>(sum_dy_xhat));
-                dxf[idx] = adD * dx_val + bdD * dxf[idx];
-            }
+        for (int c = 0; c < C; ++c)
+        for (int hw = 0; hw < HW; ++hw) {
+            int idx = (n * C + c) * HW + hw;
+            float xhat = (xf[idx] - mu_s[c]) * ivar_s[c];
+            float dx_val = sc[c] * ivar_s[c] / static_cast<float>(M) *
+                (static_cast<float>(M) * dyf[idx]
+                 - static_cast<float>(sum_dy_c[c])
+                 - xhat * static_cast<float>(sum_dy_xhat_c[c]));
+            dxf[idx] = adD * dx_val + bdD * dxf[idx];
         }
     } else {
         // Per-activation (layer norm) backward

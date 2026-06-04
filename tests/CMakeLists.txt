@@ -426,6 +426,11 @@ target_include_directories(test_skip_list PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_skip_list PRIVATE vgre)
 add_test(NAME SkipList COMMAND test_skip_list)
 
+# QUEUE-67: cudnnNormalizationBackward full BN backward
+add_executable(test_cudnn_bn_backward_full api/test_cudnn_bn_backward_full.cpp)
+target_link_libraries(test_cudnn_bn_backward_full PRIVATE vgre)
+add_test(NAME CuDNNBNBackwardFull COMMAND test_cudnn_bn_backward_full)
+
 # Min-segment tree stream dependency tracker (QUEUE-07)
 add_executable(test_stream_dep_tracker unit/test_stream_dep_tracker.cpp)
 target_link_libraries(test_stream_dep_tracker PRIVATE vgre)
