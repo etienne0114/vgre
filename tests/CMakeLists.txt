@@ -431,6 +431,11 @@ add_executable(test_cudnn_bn_backward_full api/test_cudnn_bn_backward_full.cpp)
 target_link_libraries(test_cudnn_bn_backward_full PRIVATE vgre)
 add_test(NAME CuDNNBNBackwardFull COMMAND test_cudnn_bn_backward_full)
 
+# QUEUE-69: cudaStreamCreateWithPriority / cudaStreamGetPriority
+add_executable(test_stream_priority api/test_stream_priority.cpp)
+target_link_libraries(test_stream_priority PRIVATE vgre_cudart)
+add_test(NAME StreamPriority COMMAND test_stream_priority)
+
 # Min-segment tree stream dependency tracker (QUEUE-07)
 add_executable(test_stream_dep_tracker unit/test_stream_dep_tracker.cpp)
 target_link_libraries(test_stream_dep_tracker PRIVATE vgre)
