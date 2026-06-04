@@ -351,6 +351,11 @@ add_executable(test_cublas_dgmm api/test_cublas_dgmm.cpp)
 target_link_libraries(test_cublas_dgmm PRIVATE vgre)
 add_test(NAME CublasDGMM COMMAND test_cublas_dgmm)
 
+# cuBLAS GEAM general matrix add/transpose (QUEUE-43)
+add_executable(test_cublas_geam api/test_cublas_geam.cpp)
+target_link_libraries(test_cublas_geam PRIVATE vgre)
+add_test(NAME CublasGEAM COMMAND test_cublas_geam)
+
 add_executable(test_cublas_level2 api/test_cublas_level2.cpp)
 target_link_libraries(test_cublas_level2 PRIVATE vgre)
 add_test(NAME CublasLevel2 COMMAND test_cublas_level2)
