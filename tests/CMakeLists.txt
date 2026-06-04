@@ -420,6 +420,12 @@ add_executable(test_cufft_dct api/test_cufft_dct.cpp)
 target_link_libraries(test_cufft_dct PRIVATE vgre_cudart)
 add_test(NAME CuFFTDCT COMMAND test_cufft_dct)
 
+# QUEUE-66: SkipList ordered event tracker
+add_executable(test_skip_list core/test_skip_list.cpp)
+target_include_directories(test_skip_list PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_skip_list PRIVATE vgre)
+add_test(NAME SkipList COMMAND test_skip_list)
+
 # Min-segment tree stream dependency tracker (QUEUE-07)
 add_executable(test_stream_dep_tracker unit/test_stream_dep_tracker.cpp)
 target_link_libraries(test_stream_dep_tracker PRIVATE vgre)
