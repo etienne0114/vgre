@@ -214,6 +214,66 @@ void test_vector_clamp() {
   std::cout << "[PASS] Float vectorClamp" << std::endl;
 }
 
+// QUEUE-68: Newton-Raphson fast division — |e| ≤ 2⁻²⁴ (AVX2) / 2⁻²⁸ (AVX-512).
+// Relative error tolerance 4e-6 — comfortably above 2⁻²⁴ ≈ 6e-8 and 2⁻²⁸ ≈ 4e-9.
+void test_vector_div() {
+  VectorEngine engine;
+
+  // 1. Large N: exercises AVX2 (8-wide) and/or AVX-512 (16-wide) paths.
+  {
+    const int N = 256;
+    std::vector<float> a(N), b(N), c(N);
+    for (int i = 0; i < N; ++i) {
+      a[i] = static_cast<float>(i + 1) * 1.3f;
+      b[i] = static_cast<float>(i + 1) * 0.7f;
+    }
+    engine.vectorDiv(a.data(), b.data(), c.data(), N);
+    for (int i = 0; i < N; ++i) {
+      float expected = a[i] / b[i];
+      float rel_err = std::fabs(c[i] - expected) / (std::fabs(expected) + 1e-30f);
+      assert(rel_err < 4e-6f);
+    }
+    std::cout << "[PASS] vectorDiv N=256 relative error < 4e-6" << std::endl;
+  }
+
+  // 2. Non-multiple-of-8: scalar tail path also exercised.
+  {
+    const int N = 13;
+    std::vector<float> a(N), b(N), c(N);
+    for (int i = 0; i < N; ++i) { a[i] = 1.0f + i * 0.5f; b[i] = 2.0f + i * 0.3f; }
+    engine.vectorDiv(a.data(), b.data(), c.data(), N);
+    for (int i = 0; i < N; ++i) {
+      float expected = a[i] / b[i];
+      assert(std::fabs(c[i] - expected) / (std::fabs(expected) + 1e-30f) < 4e-6f);
+    }
+    std::cout << "[PASS] vectorDiv N=13 (scalar tail)" << std::endl;
+  }
+
+  // 3. Negative numerator: sign correctness.
+  {
+    const int N = 16;
+    std::vector<float> a(N), b(N), c(N);
+    for (int i = 0; i < N; ++i) { a[i] = -(float)(i + 1); b[i] = (float)(i + 1); }
+    engine.vectorDiv(a.data(), b.data(), c.data(), N);
+    for (int i = 0; i < N; ++i)
+      assert(std::fabs(c[i] - (-1.0f)) < 4e-6f);
+    std::cout << "[PASS] vectorDiv sign correctness (a<0, b>0)" << std::endl;
+  }
+
+  // 4. Division by large magnitude: accuracy at extremes.
+  {
+    const int N = 8;
+    std::vector<float> a(N, 1.0f), b(N), c(N);
+    for (int i = 0; i < N; ++i) b[i] = 1e6f * (float)(i + 1);
+    engine.vectorDiv(a.data(), b.data(), c.data(), N);
+    for (int i = 0; i < N; ++i) {
+      float expected = a[i] / b[i];
+      assert(std::fabs(c[i] - expected) / (std::fabs(expected) + 1e-40f) < 4e-6f);
+    }
+    std::cout << "[PASS] vectorDiv large denominator" << std::endl;
+  }
+}
+
 int main() {
   std::cout << "=== VGRE Vector Engine Unit Tests ===" << std::endl;
 
@@ -230,6 +290,7 @@ int main() {
   test_vector_relu();
   test_vector_abs();
   test_vector_clamp();
+  test_vector_div();
 
   std::cout << "\nAll vector engine tests passed!" << std::endl;
   return 0;
