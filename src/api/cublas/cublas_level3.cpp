@@ -883,5 +883,65 @@ cublasStatus_t cublasGetLoggerCallback(cublasLogCallback *callback) {
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// ── Diagonal matrix scaling (dgmm) — QUEUE-42 ────────────────────────────────
+// C = diag(x) * A  (CUBLAS_SIDE_LEFT,  scales row i by x[i*incx])
+// C = A * diag(x)  (CUBLAS_SIDE_RIGHT, scales col j by x[j*incx])
+// A and C are m×n column-major (element (r,c) at offset c*lda+r / c*ldc+r).
+// x has stride incx; x[k] = *(x + k * incx).
+// C may alias A (in-place is allowed when lda == ldc).
+
+cublasStatus_t cublasSdgmm_v2(cublasHandle_t handle, cublasSideMode_t mode,
+    int m, int n, const float *A, int lda, const float *x, int incx,
+    float *C, int ldc)
+{
+    if (!handle || !A || !x || !C || m <= 0 || n <= 0 || lda < m || ldc < m || incx == 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (mode == CUBLAS_SIDE_LEFT) {
+        // C[i,j] = x[i * incx] * A[i,j]
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < m; ++i)
+                C[j * ldc + i] = x[i * incx] * A[j * lda + i];
+    } else {
+        // C[i,j] = A[i,j] * x[j * incx]
+        for (int j = 0; j < n; ++j) {
+            float xj = x[j * incx];
+            for (int i = 0; i < m; ++i)
+                C[j * ldc + i] = A[j * lda + i] * xj;
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDdgmm_v2(cublasHandle_t handle, cublasSideMode_t mode,
+    int m, int n, const double *A, int lda, const double *x, int incx,
+    double *C, int ldc)
+{
+    if (!handle || !A || !x || !C || m <= 0 || n <= 0 || lda < m || ldc < m || incx == 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (mode == CUBLAS_SIDE_LEFT) {
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < m; ++i)
+                C[j * ldc + i] = x[i * incx] * A[j * lda + i];
+    } else {
+        for (int j = 0; j < n; ++j) {
+            double xj = x[j * incx];
+            for (int i = 0; i < m; ++i)
+                C[j * ldc + i] = A[j * lda + i] * xj;
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// v1 aliases
+cublasStatus_t cublasSdgmm(cublasHandle_t h, cublasSideMode_t m,
+    int rows, int cols, const float *A, int lda, const float *x, int incx,
+    float *C, int ldc)
+{ return cublasSdgmm_v2(h, m, rows, cols, A, lda, x, incx, C, ldc); }
+
+cublasStatus_t cublasDdgmm(cublasHandle_t h, cublasSideMode_t m,
+    int rows, int cols, const double *A, int lda, const double *x, int incx,
+    double *C, int ldc)
+{ return cublasDdgmm_v2(h, m, rows, cols, A, lda, x, incx, C, ldc); }
+
 } // extern "C"
 

@@ -346,6 +346,11 @@ add_executable(test_cusolver_batchlu api/test_cusolver_batchlu.cpp)
 target_link_libraries(test_cusolver_batchlu PRIVATE vgre_cudart)
 add_test(NAME CusolverBatchLU COMMAND test_cusolver_batchlu)
 
+# cuBLAS DGMM diagonal matrix scaling (QUEUE-42)
+add_executable(test_cublas_dgmm api/test_cublas_dgmm.cpp)
+target_link_libraries(test_cublas_dgmm PRIVATE vgre)
+add_test(NAME CublasDGMM COMMAND test_cublas_dgmm)
+
 add_executable(test_cublas_level2 api/test_cublas_level2.cpp)
 target_link_libraries(test_cublas_level2 PRIVATE vgre)
 add_test(NAME CublasLevel2 COMMAND test_cublas_level2)
