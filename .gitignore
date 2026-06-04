@@ -64,6 +64,7 @@ CLAUDE.md
 .env
 
 # In-source CMake build artifacts (from running cmake in source tree)
+CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 CTestTestfile.cmake
