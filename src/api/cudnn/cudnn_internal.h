@@ -706,6 +706,7 @@ struct RNNDesc {
     cudnnRNNMode_t mode;
     cudnnDropoutDescriptor_t dropoutDesc;
     int inputSize;
+    bool peephole = false;  // QUEUE-38: LSTM peephole connections
 };
 
 // ── Attention enums ──────────────────────────────────────────────────────────

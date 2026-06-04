@@ -30,10 +30,12 @@ static inline int fwd_slots(cudnnRNNMode_t m)   // Part B depth per hidden unit
 static inline int bwd_slots(cudnnRNNMode_t m)   // Part C depth per hidden unit
 { return m==CUDNN_LSTM ? 4 : (m==CUDNN_GRU ? 4 : 1); }
 
-static size_t lpc(cudnnRNNMode_t m, int H, int I) {  // layer param count
+static size_t lpc(cudnnRNNMode_t m, int H, int I, bool peephole=false) {  // layer param count
     int G = gate_count(m);
     bool twoB = (m!=CUDNN_RNN_TANH && m!=CUDNN_RNN_RELU);
-    return (size_t)G*(H*I + H*H + H) + (twoB ? (size_t)G*H : 0);
+    size_t base = (size_t)G*(H*I + H*H + H) + (twoB ? (size_t)G*H : 0);
+    if (peephole && m==CUDNN_LSTM) base += 3*(size_t)H;  // p_i, p_f, p_o
+    return base;
 }
 
 // Weight layout accessors
@@ -51,11 +53,23 @@ static LWm get_lwm(cudnnRNNMode_t m, int H, int I, float* p) {
     LWm r; r.W_ih=p; r.W_hh=p+(size_t)G*H*I; r.b_ih=r.W_hh+(size_t)G*H*H;
     r.b_hh = twoB ? r.b_ih+(size_t)G*H : nullptr; return r;
 }
-static size_t lw_off(cudnnRNNMode_t m, int H, int I, int l) {
+static size_t lw_off(cudnnRNNMode_t m, int H, int I, int l, bool peephole=false) {
     if (l==0) return 0;
-    size_t off = lpc(m,H,I);
-    for (int i=1;i<l;++i) off+=lpc(m,H,H);
+    size_t off = lpc(m,H,I,peephole);
+    for (int i=1;i<l;++i) off+=lpc(m,H,H,peephole);
     return off;
+}
+
+// Returns pointer to peephole weights [p_i:H | p_f:H | p_o:H] for layer l.
+// Appended after standard (non-peephole) weights in the layer block.
+// Returns nullptr if mode != LSTM or peephole is false.
+static const float* get_peephole_w(cudnnRNNMode_t m, int H, int I, const float* w, int l, bool peephole) {
+    if (!peephole || m != CUDNN_LSTM) return nullptr;
+    int li = (l==0) ? I : H;
+    return w + lw_off(m, H, I, l, true) + lpc(m, H, li, false);
+}
+static float* get_peephole_wm(cudnnRNNMode_t m, int H, int I, float* w, int l, bool peephole) {
+    return const_cast<float*>(get_peephole_w(m, H, I, (const float*)w, l, peephole));
 }
 
 // Reserve space pointers: a=Part A, b=Part B, c=Part C
@@ -102,9 +116,11 @@ static void rnn_fwd(const LW& lw, int B, int H, int I, bool relu,
 
 // LSTM: h_t = o*tanh(c_t),  c_t = f*c_prev + i*g
 // fwd_out layout [n*5*H + s*H + j]: s=0→i,1→f,2→g,3→o,4→c_t  (may be null)
+// Peephole (QUEUE-38): p_i*c_{t-1}→i, p_f*c_{t-1}→f, p_o*c_t→o  (null = standard LSTM)
 static void lstm_fwd(const LW& lw, int B, int H, int I,
                      const float* x_t, const float* hp, const float* cp,
-                     float* h_t, float* c_t, float* fwd_out)
+                     float* h_t, float* c_t, float* fwd_out,
+                     const float* p_i=nullptr, const float* p_f=nullptr, const float* p_o=nullptr)
 {
     #ifdef _OPENMP
     #pragma omp parallel for if(B>4)
@@ -125,8 +141,13 @@ static void lstm_fwd(const LW& lw, int B, int H, int I,
                 s0+=lw.W_hh[(0*H+j)*H+k]*hk; s1+=lw.W_hh[(1*H+j)*H+k]*hk;
                 s2+=lw.W_hh[(2*H+j)*H+k]*hk; s3+=lw.W_hh[(3*H+j)*H+k]*hk;
             }
-            float iv=sig(s0), fv=sig(s1), gv=tanhf(s2), ov=sig(s3);
-            float cn= fv*(cp?cp[n*H+j]:0.f) + iv*gv;
+            float cp_j = cp ? cp[n*H+j] : 0.f;
+            if (p_i) s0 += p_i[j] * cp_j;  // peephole: i gate sees c_{t-1}
+            if (p_f) s1 += p_f[j] * cp_j;  // peephole: f gate sees c_{t-1}
+            float iv=sig(s0), fv=sig(s1), gv=tanhf(s2);
+            float cn = fv * cp_j + iv * gv;
+            if (p_o) s3 += p_o[j] * cn;    // peephole: o gate sees c_t
+            float ov=sig(s3);
             float hn= ov * std::tanh(cn);
             c_t[n*H+j] = cn;
             h_t[n*H+j] = hn;
@@ -185,7 +206,7 @@ static cudnnStatus_t rnn_forward(
     int T, int B, int I,
     const float* w, const float* hxf, const float* cxf,
     const float* xf, float* yf, float* hyf, float* cyf,
-    float* rsv)  // null for inference
+    float* rsv, bool peephole=false)  // null for inference
 {
     bool isLSTM=(mode==CUDNN_LSTM), isGRU=(mode==CUDNN_GRU);
     bool relu=(mode==CUDNN_RNN_RELU);
@@ -217,7 +238,7 @@ static cudnnStatus_t rnn_forward(
     for (int t=0;t<T;++t) {
         for (int l=0;l<numL;++l) {
             int li=(l==0)?I:H;
-            LW lw=get_lw(mode,H,li, w+lw_off(mode,H,I,l));
+            LW lw=get_lw(mode,H,li, w+lw_off(mode,H,I,l,peephole));
             float* hp=hprev.data()+l*B*H;
             float* cp=isLSTM ? (cprev.data()+l*B*H) : nullptr;
             const float* x_t=(l==0)?(xf+(size_t)t*B*I):(inter_ptr(l-1,t));
@@ -226,7 +247,10 @@ static cudnnStatus_t rnn_forward(
             if (pb && fs>0) fwd_out=gAt(pb,l,t,0,0,fs,T,B,H);
 
             if (isLSTM) {
-                lstm_fwd(lw,B,H,li, x_t,hp,cp, h_t,ctmp.data(),fwd_out);
+                const float* pi=get_peephole_w(mode,H,I,w,l,peephole);
+                const float* pf=pi?pi+H:nullptr;
+                const float* po=pi?pi+2*H:nullptr;
+                lstm_fwd(lw,B,H,li, x_t,hp,cp, h_t,ctmp.data(),fwd_out, pi,pf,po);
                 memcpy(cp, ctmp.data(), (size_t)B*H*sizeof(float));
             } else if (isGRU) {
                 gru_fwd(lw,B,H,li, x_t,hp, h_t,fwd_out);
@@ -274,8 +298,8 @@ cudnnStatus_t cudnnGetRNNParamsSize(
     if (!sizeInBytes||!rnnDesc||!xDesc) return CUDNN_STATUS_INVALID_VALUE;
     auto* rd=(RNNDesc*)rnnDesc; auto* td=(TensorDesc*)xDesc;
     int H=rd->hiddenSize, I=td->c*td->h*td->w, nL=rd->numLayers;
-    size_t tot=lpc(rd->mode,H,I);
-    for (int l=1;l<nL;++l) tot+=lpc(rd->mode,H,H);
+    size_t tot=lpc(rd->mode,H,I,rd->peephole);
+    for (int l=1;l<nL;++l) tot+=lpc(rd->mode,H,H,rd->peephole);
     *sizeInBytes=tot*sizeof(float);
     return CUDNN_STATUS_SUCCESS;
 }
@@ -298,7 +322,7 @@ cudnnStatus_t cudnnRNNForwardInference(
     int B=xt->n, I=xt->c*xt->h*xt->w;
     return rnn_forward(rd->mode,rd->numLayers,rd->hiddenSize,T,B,I,
         (const float*)w,(const float*)hx,(const float*)cx,
-        (const float*)x,(float*)y,(float*)hy,(float*)cy,nullptr);
+        (const float*)x,(float*)y,(float*)hy,(float*)cy,nullptr,rd->peephole);
 }
 
 cudnnStatus_t cudnnRNNForwardTraining(
@@ -320,7 +344,7 @@ cudnnStatus_t cudnnRNNForwardTraining(
     if (rsv) memset(rsv,0,rsvSz);
     return rnn_forward(rd->mode,rd->numLayers,rd->hiddenSize,T,B,I,
         (const float*)w,(const float*)hx,(const float*)cx,
-        (const float*)x,(float*)y,(float*)hy,(float*)cy,(float*)rsv);
+        (const float*)x,(float*)y,(float*)hy,(float*)cy,(float*)rsv,rd->peephole);
 }
 
 // ── Backward data (BPTT) ───────────────────────────────────────────────────────
@@ -346,6 +370,7 @@ cudnnStatus_t cudnnRNNBackwardData(
     int B=xt->n, I=xt->c*xt->h*xt->w;
     cudnnRNNMode_t mode=rd->mode;
     bool isLSTM=(mode==CUDNN_LSTM), isGRU=(mode==CUDNN_GRU), relu=(mode==CUDNN_RNN_RELU);
+    bool peephole=rd->peephole;
     int fs=fwd_slots(mode), bs=bwd_slots(mode);
 
     const float* wf=(const float*)w;
@@ -376,7 +401,7 @@ cudnnStatus_t cudnnRNNBackwardData(
     for (int t=T-1;t>=0;--t) {
         for (int l=nL-1;l>=0;--l) {
             int li=(l==0)?I:H;
-            LW lw=get_lw(mode,H,li,wf+lw_off(mode,H,I,l));
+            LW lw=get_lw(mode,H,li,wf+lw_off(mode,H,I,l,peephole));
             float* dh_l=dh.data()+l*B*H;
             float* dc_l=dc.data()+l*B*H;
 
@@ -404,6 +429,9 @@ cudnnStatus_t cudnnRNNBackwardData(
 
             if (isLSTM) {
                 // Part C layout for LSTM: s=0→di,1→df,2→dg,3→do
+                const float* pi_w=get_peephole_w(mode,H,I,wf,l,peephole);
+                const float* pf_w=pi_w?pi_w+H:nullptr;
+                const float* po_w=pi_w?pi_w+2*H:nullptr;
                 for (int n=0;n<B;++n) {
                     for (int j=0;j<H;++j) {
                         float iv=g_fwd[(n*5+0)*H+j], fv=g_fwd[(n*5+1)*H+j];
@@ -418,11 +446,19 @@ cudnnStatus_t cudnnRNNBackwardData(
 
                         float do_act=dh_j*tanh_cn;
                         dc_j+=dh_j*ov*(1.f-tanh_cn*tanh_cn);
+                        // Peephole o: o gate sees c_t; doo contributes back to dc_t
+                        float doo=do_act*ov*(1.f-ov);
+                        if (po_w) dc_j += doo * po_w[j];
+
                         float df_act=dc_j*cp_j, di_act=dc_j*gv, dg_act=dc_j*iv;
                         dc_l[n*H+j]=dc_j*fv;  // propagate to c_{t-1}
 
                         float di=di_act*iv*(1.f-iv), df=df_act*fv*(1.f-fv);
-                        float dg=dg_act*(1.f-gv*gv), doo=do_act*ov*(1.f-ov);
+                        float dg=dg_act*(1.f-gv*gv);
+                        // Peephole i/f: i and f gates see c_{t-1}
+                        if (pi_w) dc_l[n*H+j] += di * pi_w[j];
+                        if (pf_w) dc_l[n*H+j] += df * pf_w[j];
+
                         g_bwd[(n*4+0)*H+j]=di; g_bwd[(n*4+1)*H+j]=df;
                         g_bwd[(n*4+2)*H+j]=dg; g_bwd[(n*4+3)*H+j]=doo;
 
@@ -529,6 +565,7 @@ cudnnStatus_t cudnnRNNBackwardWeights(
     int B=xt->n, I=xt->c*xt->h*xt->w;
     cudnnRNNMode_t mode=rd->mode;
     bool isLSTM=(mode==CUDNN_LSTM), isGRU=(mode==CUDNN_GRU);
+    bool peephole=rd->peephole;
     int fs=fwd_slots(mode), bs=bwd_slots(mode);
 
     const float* xf=(const float*)x;
@@ -537,15 +574,16 @@ cudnnStatus_t cudnnRNNBackwardWeights(
     float* rf=(float*)rsv;
 
     float* pa=rA(rf);
+    const float* pb_rsv=rBc((const float*)rf,nL,T,B,H);  // Part B: fwd gate values
     float* pc=rC(rf,nL,T,B,H,fs);
 
     // Zero dw
-    { size_t tot=lpc(mode,H,I); for(int l=1;l<nL;++l) tot+=lpc(mode,H,H);
+    { size_t tot=lpc(mode,H,I,peephole); for(int l=1;l<nL;++l) tot+=lpc(mode,H,H,peephole);
       memset(dwf,0,tot*sizeof(float)); }
 
     for (int l=0;l<nL;++l) {
         int li=(l==0)?I:H;
-        LWm dlw=get_lwm(mode,H,li,dwf+lw_off(mode,H,I,l));
+        LWm dlw=get_lwm(mode,H,li,dwf+lw_off(mode,H,I,l,peephole));
         int G=gate_count(mode);
 
         for (int t=0;t<T;++t) {
@@ -573,6 +611,24 @@ cudnnStatus_t cudnnRNNBackwardWeights(
                             dlw.b_hh[s*H+j]+=d;
                             if (xt_n) for(int k=0;k<li;++k) dlw.W_ih[(s*H+j)*li+k]+=d*xt_n[k];
                             if (hp_n) for(int k=0;k<H;++k)  dlw.W_hh[(s*H+j)*H+k] +=d*hp_n[k];
+                        }
+                    }
+                    // Peephole weight gradients: dp_i[j]+=di*c_{t-1}[j], dp_f+=df*c_{t-1}[j], dp_o+=do*c_t[j]
+                    if (peephole) {
+                        float* dpi=get_peephole_wm(mode,H,I,dwf,l,true);
+                        float* dpf=dpi+H, *dpo=dpi+2*H;
+                        // c_t from Part B slot 4 at (l,t,n)
+                        const float* ct_ptr=pb_rsv+((size_t)l*T*B+t*B+n)*fs*H+4*H;
+                        // c_{t-1}: Part B slot 4 at t-1, or 0 for t=0
+                        const float* ct1=(t>0)?(pb_rsv+((size_t)l*T*B+(t-1)*B+n)*fs*H+4*H):nullptr;
+                        const float* di=dp+(n*4+0)*H;
+                        const float* df=dp+(n*4+1)*H;
+                        const float* doo=dp+(n*4+3)*H;
+                        for (int j=0;j<H;++j) {
+                            float cp_j=ct1?ct1[j]:0.f;
+                            dpi[j]+=di[j]*cp_j;
+                            dpf[j]+=df[j]*cp_j;
+                            dpo[j]+=doo[j]*ct_ptr[j];
                         }
                     }
                 } else if (isGRU) {
@@ -694,7 +750,7 @@ static cudnnStatus_t rnn_forward_ex(
     cudnnStatus_t st = rnn_forward(
         rd->mode, rd->numLayers, H, T, B, I,
         (const float*)w, (const float*)hx, (const float*)cx,
-        (const float*)x, (float*)y, (float*)hy, (float*)cy, (float*)rsv);
+        (const float*)x, (float*)y, (float*)hy, (float*)cy, (float*)rsv, rd->peephole);
     if (st != CUDNN_STATUS_SUCCESS) return st;
 
     // Mask output past each sample's actual sequence length.
@@ -781,6 +837,7 @@ cudnnStatus_t cudnnRNNBackwardDataEx(
     cudnnRNNMode_t mode = rd->mode;
     bool isLSTM = (mode == CUDNN_LSTM), isGRU = (mode == CUDNN_GRU);
     bool relu = (mode == CUDNN_RNN_RELU);
+    bool peephole = rd->peephole;
     int fs = fwd_slots(mode), bs = bwd_slots(mode);
 
     const float* wf  = (const float*)w;
@@ -810,7 +867,7 @@ cudnnStatus_t cudnnRNNBackwardDataEx(
 
     for (int l = nL - 1; l >= 0; --l) {
         int li = (l == 0) ? I : H;
-        size_t wOff = lw_off(mode, H, I, l);
+        size_t wOff = lw_off(mode, H, I, l, peephole);
         LW lw = get_lw(mode, H, I, wf + wOff);
         float* dh_l = dh.data() + (size_t)l * B * H;
         float* dc_l = dc.data() + (size_t)l * B * H;
@@ -834,20 +891,24 @@ cudnnStatus_t cudnnRNNBackwardDataEx(
                 if (isLSTM) {
                     // fg layout: i,f,g,o,c  (indices 0-4)
                     const float* fg_n = fg_t + n*fs*H;
+                    const float* pi_w=get_peephole_w(mode,H,I,wf,l,peephole);
+                    const float* pf_w=pi_w?pi_w+H:nullptr;
+                    const float* po_w=pi_w?pi_w+2*H:nullptr;
                     std::vector<float> dct(H);
                     for (int j = 0; j < H; ++j) {
                         float do_ = dyo_n ? dyo_n[j] : 0.0f;
                         float dh_j = dh_n[j] + do_;
                         float ct = fg_n[4*H+j];
                         float ot = fg_n[3*H+j];
-                        // dC from output gate path
                         float tanh_ct = tanhf(ct);
                         float dct_j = dh_j * ot * (1.f - tanh_ct*tanh_ct) + dc_n[j];
+                        // Peephole o: o gate sees c_t; its gradient feeds back into dc_t
+                        float doo_j = dh_j * tanh_ct * ot*(1.f-ot);
+                        if (po_w) dct_j += doo_j * po_w[j];
                         dct[j] = dct_j;
                         // gate gradients (pre-activation)
                         float ft = fg_n[1*H+j];
                         dp_n[0*H+j] = dct_j * fg_n[2*H+j] * fg_n[0*H+j]*(1.f-fg_n[0*H+j]); // di
-                        // Exact: multiply by previous cell state C_{t-1}, not hidden state H_{t-1}
                         float cp_j = 0.f;
                         if (t > 0) {
                             const float* fg_prev = fg_l + (size_t)(t-1) * B * fs * H + (size_t)n * fs * H;
@@ -857,8 +918,11 @@ cudnnStatus_t cudnnRNNBackwardDataEx(
                         }
                         dp_n[1*H+j] = dct_j * cp_j * ft*(1.f-ft);                             // df (exact)
                         dp_n[2*H+j] = dct_j * fg_n[0*H+j] * (1.f - fg_n[2*H+j]*fg_n[2*H+j]);// dg
-                        dp_n[3*H+j] = dh_j  * tanh_ct * ot*(1.f-ot);                          // do
+                        dp_n[3*H+j] = doo_j;                                                    // do
                         dc_n[j]     = dct_j * ft;
+                        // Peephole i/f: i and f gates see c_{t-1}
+                        if (pi_w) dc_n[j] += dp_n[0*H+j] * pi_w[j];
+                        if (pf_w) dc_n[j] += dp_n[1*H+j] * pf_w[j];
                     }
                     // propagate dh to previous timestep/layer via W_hh/W_ih
                     if (l == nL-1) {
@@ -937,9 +1001,10 @@ cudnnStatus_t cudnnRNNBackwardWeightsEx(
 
     cudnnRNNMode_t mode = rd->mode;
     bool isLSTM = (mode == CUDNN_LSTM), isGRU = (mode == CUDNN_GRU);
+    bool peephole = rd->peephole;
     int gs = isLSTM ? 4 : (isGRU ? 3 : 1);
     int fs = fwd_slots(mode), bs_slots = bwd_slots(mode);
-    size_t lpc_val = lpc(mode, H, I);
+    size_t lpc_val = lpc(mode, H, I, peephole);
 
     const float* xf  = (const float*)x;
     const float* rsv_f = (const float*)rsv;
@@ -948,11 +1013,12 @@ cudnnStatus_t cudnnRNNBackwardWeightsEx(
     // Reserve layout: Part A h_store [nL×T×B×H], Part B fwd_gates, Part C bwd_dpre
     size_t partA = (size_t)nL * T * B * H;
     size_t partB = (size_t)nL * T * B * fs * H;
+    const float* fwd_g_base = rsv_f + partA;   // Part B: fwd gate values
     const float* dpre = rsv_f + partA + partB;  // Part C
 
     for (int l = 0; l < nL; ++l) {
         int li = (l == 0) ? I : H;
-        float* dw_l = dwf + lw_off(mode, H, I, l);
+        float* dw_l = dwf + lw_off(mode, H, I, l, peephole);
         LWm dlw = get_lwm(mode, H, I, dw_l);
 
         const float* h_store = rsv_f + l * T * B * H;
@@ -976,6 +1042,22 @@ cudnnStatus_t cudnnRNNBackwardWeightsEx(
                             if (dlw.b_hh) dlw.b_hh[s*H+j] += d;
                             if (xt_n) for (int k=0;k<li;++k) dlw.W_ih[(s*H+j)*li+k] += d*xt_n[k];
                             if (hp_n) for (int k=0;k<H; ++k) dlw.W_hh[(s*H+j)*H +k] += d*hp_n[k];
+                        }
+                    }
+                    if (peephole) {
+                        float* dpi=get_peephole_wm(mode,H,I,dwf,l,true);
+                        float* dpf=dpi+H, *dpo=dpi+2*H;
+                        const float* fg_l = fwd_g_base + (size_t)l*T*B*fs*H;
+                        const float* ct  =fg_l+(size_t)t*B*fs*H+(size_t)n*fs*H+4*H;
+                        const float* ct1 =(t>0)?(fg_l+(size_t)(t-1)*B*fs*H+(size_t)n*fs*H+4*H):nullptr;
+                        const float* di=dp+(n*4+0)*H;
+                        const float* df=dp+(n*4+1)*H;
+                        const float* doo=dp+(n*4+3)*H;
+                        for (int j=0;j<H;++j) {
+                            float cp_j=ct1?ct1[j]:0.f;
+                            dpi[j]+=di[j]*cp_j;
+                            dpf[j]+=df[j]*cp_j;
+                            dpo[j]+=doo[j]*ct[j];
                         }
                     }
                 } else if (isGRU) {

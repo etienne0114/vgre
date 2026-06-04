@@ -242,6 +242,20 @@ cudnnStatus_t cudnnSetRNNDescriptor(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// QUEUE-38: Peephole LSTM — enable/disable diagonal c→gate connections.
+// When enabled: i/f gates see c_{t-1} via p_i/p_f; o gate sees c_t via p_o.
+// Peephole weights occupy 3*H floats appended after standard weights per layer.
+cudnnStatus_t cudnnRNNSetPeephole(cudnnRNNDescriptor_t desc, int enable) {
+    if (!desc) return CUDNN_STATUS_INVALID_VALUE;
+    static_cast<RNNDesc*>(desc)->peephole = (enable != 0);
+    return CUDNN_STATUS_SUCCESS;
+}
+cudnnStatus_t cudnnRNNGetPeephole(cudnnRNNDescriptor_t desc, int* enable) {
+    if (!desc || !enable) return CUDNN_STATUS_INVALID_VALUE;
+    *enable = static_cast<RNNDesc*>(desc)->peephole ? 1 : 0;
+    return CUDNN_STATUS_SUCCESS;
+}
+
 // ── Multi-Head Attention descriptors ─────────────────────────────────────────
 cudnnStatus_t cudnnCreateMultiHeadAttnDescriptor(cudnnMultiHeadAttnDescriptor_t* desc) {
     if (!desc) return CUDNN_STATUS_INVALID_VALUE;
