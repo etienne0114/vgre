@@ -28,7 +28,8 @@ inline bool isPow4(int n) {
 inline bool isValidType(cufftType_t type) {
     return type == CUFFT_C2C || type == CUFFT_R2C || type == CUFFT_C2R ||
            type == CUFFT_Z2Z || type == CUFFT_D2Z || type == CUFFT_Z2D ||
-           type == CUFFT_R16C || type == CUFFT_C16R || type == CUFFT_C16C;
+           type == CUFFT_R16C || type == CUFFT_C16R || type == CUFFT_C16C ||
+           type == CUFFT_DCT2 || type == CUFFT_DCT3;
 }
 
 inline bool isValidDirection(int direction) {

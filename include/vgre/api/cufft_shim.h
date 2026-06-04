@@ -44,7 +44,13 @@ typedef enum {
     CUFFT_R16C   = 0x72,
     CUFFT_C16R   = 0x73,
     CUFFT_C16C   = 0x74,
-    CUFFT_C16BFC = 0x75  // bfloat16 complex-to-complex
+    CUFFT_C16BFC = 0x75, // bfloat16 complex-to-complex
+    // VGRE extension: real-to-real DCT via 2N-point FFT embedding (RFC-none).
+    // DCT-II: X[k] = Σ x[n]·cos(π(2n+1)k/(2N)), n=0..N-1, O(N log N)
+    // DCT-III: x[n] = X[0]/2 + Σ X[k]·cos(π(2n+1)k/(2N)), k=1..N-1
+    // DCT-III(DCT-II(x)) = (N/2)·x  (orthogonality up to scale)
+    CUFFT_DCT2 = 0x80,
+    CUFFT_DCT3 = 0x81
 } cufftType_t;
 
 typedef struct {
@@ -85,6 +91,10 @@ cufftResult_t cufftExecR16C(cufftHandle plan, void *idata, void *odata);
 cufftResult_t cufftExecC16R(cufftHandle plan, void *idata, void *odata);
 cufftResult_t cufftExecC16C(cufftHandle plan, void *idata, void *odata, int direction);
 cufftResult_t cufftExecC16BFC(cufftHandle plan, void *idata, void *odata, int direction);
+
+// ── DCT-II / DCT-III (real → real, float only) ────────────────────────────────
+cufftResult_t cufftExecDCT2(cufftHandle plan, float *idata, float *odata);
+cufftResult_t cufftExecDCT3(cufftHandle plan, float *idata, float *odata);
 
 // ── Stream / workspace association ───────────────────────────────────────────
 cufftResult_t cufftSetStream(cufftHandle plan, void *stream);
