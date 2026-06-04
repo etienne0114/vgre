@@ -408,11 +408,30 @@ cudaError_t CUDAInterceptor::memcpyPeerAsync(void *dst, int dstDevice,
                                              const void *src, int srcDevice,
                                              size_t count,
                                              cudaStream_t stream) {
-  // Route through synchronous peer copy then submit a fence on the stream.
-  cudaError_t r = memcpyPeer(dst, dstDevice, src, srcDevice, count);
-  if (r != cudaSuccess) return r;
-  // Record a stream event so the caller can synchronize with cudaStreamSynchronize.
-  return streamSynchronize(stream);
+  // In VGRE single-process model all devices share the host address space;
+  // peer copy == regular device-to-device copy submitted to the stream scheduler.
+  // Math: peer bandwidth = same-node BW (1/hops factor collapses to 1 here).
+  if (!dst || !src || count == 0) return cudaErrorInvalidValue;
+  auto& engine = core::RuntimeEngine::instance();
+  int devCount = engine.getDeviceCount();
+  if (dstDevice < 0 || dstDevice >= devCount ||
+      srcDevice < 0 || srcDevice >= devCount)
+    return cudaErrorInvalidDevice;
+
+  int priority = 0;
+  (void)engine.getDevice().getStreamPriority(stream, priority);
+  auto fut = core::Scheduler::instance().submitStreamTask(
+      stream,
+      [=]() {
+        auto r2 = this->memcpyPeer(dst, dstDevice, src, srcDevice, count);
+        if (r2 != cudaSuccess)
+          throw std::runtime_error("memcpyPeerAsync failed");
+      },
+      priority);
+  if (fut.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+    return this->memcpyPeer(dst, dstDevice, src, srcDevice, count);
+  }
+  return convertResult(fut.get());
 }
 
 cudaError_t CUDAInterceptor::memset(void *devPtr, int value, size_t count) {

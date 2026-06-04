@@ -235,6 +235,11 @@ add_executable(test_prefix_scan core/test_prefix_scan.cpp)
 target_link_libraries(test_prefix_scan PRIVATE vgre)
 add_test(NAME BlellochPrefixScan COMMAND test_prefix_scan)
 
+# QUEUE-62: LSD radix sort O(n) for uint32_t keys
+add_executable(test_radix_sort core/test_radix_sort.cpp)
+target_link_libraries(test_radix_sort PRIVATE vgre)
+add_test(NAME RadixSort COMMAND test_radix_sort)
+
 add_executable(test_roofline_autotuner core/test_roofline_autotuner.cpp)
 target_link_libraries(test_roofline_autotuner PRIVATE vgre)
 add_test(NAME RooflineAutoTuner COMMAND test_roofline_autotuner)
@@ -547,6 +552,11 @@ add_test(NAME CuBLASComplexBatched COMMAND test_cublas_complex_batched)
 add_executable(test_cublas_hermitian_batched api/test_cublas_hermitian_batched.cpp)
 target_link_libraries(test_cublas_hermitian_batched PRIVATE vgre_cudart)
 add_test(NAME CuBLASHermitianBatched COMMAND test_cublas_hermitian_batched)
+
+# QUEUE-61: cudaMemcpyPeerAsync cross-device async copy
+add_executable(test_memcpy_peer_async api/test_memcpy_peer_async.cpp)
+target_link_libraries(test_memcpy_peer_async PRIVATE vgre_cudart)
+add_test(NAME MemcpyPeerAsync COMMAND test_memcpy_peer_async)
 
 add_executable(test_cudnn_normalization api/test_cudnn_normalization.cpp)
 target_link_libraries(test_cudnn_normalization PRIVATE vgre)
