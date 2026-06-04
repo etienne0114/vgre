@@ -50,7 +50,45 @@ static std::atomic<uint32_t> g_poolGen[1024]{};
 static constexpr size_t kNumMutexShards = 64;
 static std::mutex g_poolMutexShards[kNumMutexShards];
 
-struct TlsEntry { void* head; size_t count; size_t blockSz; uint32_t gen; };
+// ── Per-Size-Class TLS Cache (QUEUE-46) ─────────────────────────────────────
+// 8 power-of-2 size classes indexed by floor(log2(blockSize / 8)).
+//   class 0: blockSize ∈ [8,   16)  B
+//   class 1: blockSize ∈ [16,  32)  B
+//   class 2: blockSize ∈ [32,  64)  B
+//   class 3: blockSize ∈ [64, 128)  B
+//   class 4: blockSize ∈ [128, 256) B
+//   class 5: blockSize ∈ [256, 512) B
+//   class 6: blockSize ∈ [512K, 1M) B  (clamped upper end)
+//   class 7: blockSize ∈ [1M, ...)  B  (and anything larger, clamped)
+// Keeping same-size blocks together in dedicated per-class free-lists
+// dramatically reduces cache-line pollution vs. a single mixed-size list.
+static constexpr int    kNumSizeClasses = 8;
+static constexpr size_t kSizeClassBase  = 8; // minimum representable block
+
+// Map a block size to its size class [0, kNumSizeClasses-1].
+static inline int sizeClass(size_t blockSz) {
+    if (blockSz < kSizeClassBase) return 0;
+    // highest_bit(blockSz / kSizeClassBase) — fast log2 floor via __builtin_clzll
+    size_t ratio = blockSz / kSizeClassBase;
+    int cls = 0;
+    if (ratio > 1) {
+#if defined(__GNUC__) || defined(__clang__)
+        cls = 63 - __builtin_clzll(static_cast<unsigned long long>(ratio));
+#else
+        // Portable fallback
+        size_t r = ratio;
+        while (r >>= 1) ++cls;
+#endif
+    }
+    return (cls < kNumSizeClasses) ? cls : (kNumSizeClasses - 1);
+}
+
+struct SizeClassEntry { void* head = nullptr; size_t count = 0; };
+struct TlsEntry {
+    SizeClassEntry classes[kNumSizeClasses];
+    size_t blockSz = 0;   // the pool's actual block size (set on first use)
+    uint32_t gen   = 0;
+};
 static thread_local std::unordered_map<PoolHandle, TlsEntry> t_cache;
 
 // Get mutex shard for a pool handle — used for stats/metadata, NOT for free-list manipulation.
@@ -164,28 +202,34 @@ VGREResult MemoryManager::destroyPool(PoolHandle handle) {
 VGREResult MemoryManager::allocateFromPool(PoolHandle poolHandle, size_t size,
                                            MemoryHandle &outHandle) {
   // ── TLS fast path (checked before acquiring any M&S mutex) ──────────────
+  // Uses per-size-class free-lists (QUEUE-46) so same-size blocks are kept
+  // together, improving cache utilisation under mixed-size workloads.
   {
     auto& tlsEntry = t_cache[poolHandle];
     uint32_t curGen = g_poolGen[static_cast<size_t>(poolHandle) % 1024].load(std::memory_order_acquire);
-    if (tlsEntry.gen != curGen) { tlsEntry = {nullptr, 0, 0, curGen}; }
-    if (tlsEntry.count > 0 && tlsEntry.blockSz > 0 && size <= tlsEntry.blockSz && size <= kTlsMaxBlockSz) {
-      // TLS hit: pop from thread-local stack (lock-free; only this thread touches it).
-      void* blk = tlsEntry.head;
-      tlsEntry.head = *reinterpret_cast<void**>(blk);
-      tlsEntry.count--;
-      memset(blk, 0, tlsEntry.blockSz);
-      // Record live alloc and stats — requires metadata shard (not M&S mutex).
-      std::lock_guard<std::mutex> shard_lk(getPoolMutexShard(poolHandle));
-      auto poolIt = pools_.find(poolHandle);
-      if (poolIt != pools_.end()) {
-        poolIt->second.liveSlabAllocs.insert(blk);
-        poolIt->second.allocCount++;
-        poolIt->second.totalAllocated += tlsEntry.blockSz;
-        if (poolIt->second.totalAllocated > poolIt->second.peakAllocated)
-          poolIt->second.peakAllocated = poolIt->second.totalAllocated;
+    if (tlsEntry.gen != curGen) { tlsEntry = TlsEntry{}; tlsEntry.gen = curGen; }
+    if (tlsEntry.blockSz > 0 && size <= tlsEntry.blockSz && tlsEntry.blockSz <= kTlsMaxBlockSz) {
+      int cls = sizeClass(tlsEntry.blockSz);
+      auto& sc = tlsEntry.classes[cls];
+      if (sc.count > 0) {
+        // TLS hit: pop from this size-class's free-list.
+        void* blk = sc.head;
+        sc.head = *reinterpret_cast<void**>(blk);
+        sc.count--;
+        memset(blk, 0, tlsEntry.blockSz);
+        // Record live alloc and stats — requires metadata shard (not M&S mutex).
+        std::lock_guard<std::mutex> shard_lk(getPoolMutexShard(poolHandle));
+        auto poolIt = pools_.find(poolHandle);
+        if (poolIt != pools_.end()) {
+          poolIt->second.liveSlabAllocs.insert(blk);
+          poolIt->second.allocCount++;
+          poolIt->second.totalAllocated += tlsEntry.blockSz;
+          if (poolIt->second.totalAllocated > poolIt->second.peakAllocated)
+            poolIt->second.peakAllocated = poolIt->second.totalAllocated;
+        }
+        outHandle = blk;
+        return VGREResult::SUCCESS;
       }
-      outHandle = blk;
-      return VGREResult::SUCCESS;
     }
   }
 
@@ -389,16 +433,19 @@ VGREResult MemoryManager::freeToPool(PoolHandle poolHandle,
     return VGREResult::ERR_INVALID_VALUE;
   }
 
-  // ── TLS cache fast path (thread-local; no global lock needed) ───────────
+  // ── TLS cache fast path — per-size-class free-list (QUEUE-46) ──────────
+  // Each size class has its own LIFO stack of up to kTlsCacheMax blocks.
   if (pool.blockSize <= kTlsMaxBlockSz) {
     auto& tlsEntry = t_cache[poolHandle];
     uint32_t curGen = g_poolGen[static_cast<size_t>(poolHandle) % 1024].load(std::memory_order_acquire);
-    if (tlsEntry.gen != curGen) { tlsEntry = {nullptr, 0, 0, curGen}; }
-    if (tlsEntry.count < kTlsCacheMax) {
-      tlsEntry.blockSz = pool.blockSize;
-      *reinterpret_cast<void**>(ptr) = tlsEntry.head;
-      tlsEntry.head = ptr;
-      tlsEntry.count++;
+    if (tlsEntry.gen != curGen) { tlsEntry = TlsEntry{}; tlsEntry.gen = curGen; }
+    tlsEntry.blockSz = pool.blockSize;
+    int cls = sizeClass(pool.blockSize);
+    auto& sc = tlsEntry.classes[cls];
+    if (sc.count < kTlsCacheMax) {
+      *reinterpret_cast<void**>(ptr) = sc.head;
+      sc.head = ptr;
+      sc.count++;
       pool.freeCount++;
       if (pool.totalAllocated >= pool.blockSize) pool.totalAllocated -= pool.blockSize;
       return VGREResult::SUCCESS;

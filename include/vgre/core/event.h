@@ -18,11 +18,17 @@ namespace core {
  * and synchronizing host threads against specific points in a stream's
  * execution timeline.
  */
+// CUDA event creation flags — subset supported by VGRE.
+static constexpr unsigned kEventDefault      = 0x00;
+static constexpr unsigned kEventBlockingSync = 0x01;  // cv_ wait instead of spin
+static constexpr unsigned kEventDisableTiming = 0x02; // skip timestamp recording
+
 class Event {
 public:
   using TimePoint = std::chrono::time_point<std::chrono::steady_clock>;
 
   Event();
+  explicit Event(unsigned int flags);
   ~Event() = default;
 
   // ── Modifiers ────────────────────────────────────────────────────────────
@@ -68,8 +74,10 @@ public:
 
 private:
   mutable std::mutex mutex_;
+  mutable std::condition_variable cv_;  // used when kEventBlockingSync set
   std::shared_future<TimePoint> future_;
   bool recorded_;
+  unsigned int flags_ = kEventDefault;  // creation flags
 };
 
 } // namespace core

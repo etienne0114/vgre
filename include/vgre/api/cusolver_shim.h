@@ -143,6 +143,31 @@ cusolverStatus_t cusolverDnDsyevd(cusolverDnHandle_t handle, char jobz, char upl
                                   int n, double *A, int lda, double *W, double *work,
                                   int Lwork, int *devInfo);
 
+// ── Generalized symmetric eigenvalue (sygvd, itype=1: A*x = λ*B*x) ──────────
+// Solves the generalized symmetric eigenvalue problem A*x = λ*B*x where B is
+// symmetric positive definite.  Only itype=1 is supported; itype=2,3 return
+// CUSOLVER_STATUS_NOT_SUPPORTED.  jobz/uplo semantics match Ssyevd/Dsyevd.
+cusolverStatus_t cusolverDnSsygvd_bufferSize(cusolverDnHandle_t handle, int itype,
+                                             char jobz, char uplo,
+                                             int n, float *A, int lda,
+                                             float *B, int ldb,
+                                             float *W, int *Lwork);
+cusolverStatus_t cusolverDnDsygvd_bufferSize(cusolverDnHandle_t handle, int itype,
+                                             char jobz, char uplo,
+                                             int n, double *A, int lda,
+                                             double *B, int ldb,
+                                             double *W, int *Lwork);
+cusolverStatus_t cusolverDnSsygvd(cusolverDnHandle_t handle, int itype,
+                                  char jobz, char uplo,
+                                  int n, float *A, int lda,
+                                  float *B, int ldb,
+                                  float *W, float *work, int Lwork, int *devInfo);
+cusolverStatus_t cusolverDnDsygvd(cusolverDnHandle_t handle, int itype,
+                                  char jobz, char uplo,
+                                  int n, double *A, int lda,
+                                  double *B, int ldb,
+                                  double *W, double *work, int Lwork, int *devInfo);
+
 // ── Batched Cholesky (potrfBatched) ──────────────────────────────────────────
 cusolverStatus_t cusolverDnSpotrfBatched(cusolverDnHandle_t handle, char uplo,
                                           int n, float **Aarray, int lda,

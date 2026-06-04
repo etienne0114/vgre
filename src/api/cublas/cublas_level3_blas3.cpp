@@ -1,5 +1,13 @@
 #include "cublas_internal.h"
 
+// Forward declarations for level-2 functions used in batched helpers below
+extern "C" {
+cublasStatus_t cublasStrsv_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    cublasDiagType_t, int, const float*, int, float*, int);
+cublasStatus_t cublasDtrsv_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    cublasDiagType_t, int, const double*, int, double*, int);
+}
+
 // ─── Forward declarations for Level-2 functions used in batched calls ───────────
 // These are defined in cublas_level2.cpp and linked in.
 extern "C" {
@@ -171,6 +179,122 @@ cublasStatus_t cublasDsymmBatched(cublasHandle_t handle,
     for (int b = 0; b < batchCount; ++b) {
         if (!A[b]||!B[b]||!C[b]) return CUBLAS_STATUS_INVALID_VALUE;
         auto s = cublasDsymm_v2(handle,side,uplo,m,n,alpha,A[b],lda,B[b],ldb,beta,C[b],ldc);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── TRMM strided-batched (QUEUE-47) ──────────────────────────────────────────
+// B[b] = alpha * op(A[b]) * B[b] for b=0..batchCount-1, using stride addressing.
+// strideA = distance between successive A matrices (in elements).
+// strideB = distance between successive B (input) matrices.
+// strideC = distance between successive C (output) matrices.
+// Complexity: O(n²m) per batch element (same as single TRMM).
+// Math invariant: same triangular matrix multiply as cublasStrmm_v2, tiled over batch.
+cublasStatus_t cublasStrmmStridedBatched(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag, int m, int n,
+    const float *alpha,
+    const float *A, int lda, long long int strideA,
+    const float *B, int ldb, long long int strideB,
+    float *C, int ldc, long long int strideC,
+    int batchCount)
+{
+    if (!handle || !A || !B || !C || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        const float *Ab = A + b * strideA;
+        const float *Bb = B + b * strideB;
+        float       *Cb = C + b * strideC;
+        // Copy B slice to C slice respecting leading dimensions
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < m; ++i)
+                Cb[j*ldc + i] = Bb[j*ldb + i];
+        auto s = cublasStrmm_v2(handle, side, uplo, trans, diag, m, n, alpha, Ab, lda, Cb, ldc);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrmmStridedBatched(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo,
+    cublasOperation_t trans, cublasDiagType_t diag, int m, int n,
+    const double *alpha,
+    const double *A, int lda, long long int strideA,
+    const double *B, int ldb, long long int strideB,
+    double *C, int ldc, long long int strideC,
+    int batchCount)
+{
+    if (!handle || !A || !B || !C || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        const double *Ab = A + b * strideA;
+        const double *Bb = B + b * strideB;
+        double       *Cb = C + b * strideC;
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < m; ++i)
+                Cb[j*ldc + i] = Bb[j*ldb + i];
+        auto s = cublasDtrmm_v2(handle, side, uplo, trans, diag, m, n, alpha, Ab, lda, Cb, ldc);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── TRSV batched (QUEUE-52) ───────────────────────────────────────────────────
+// Solve op(A[b]) * x[b] = b_vec[b] for each batch element.
+// Array-of-pointers form + strided form.
+// Complexity: O(n²) per batch element (forward/backward substitution).
+// Math invariant: after solve, ||A[b]*x[b] - b_vec[b]||/||b_vec[b]|| < ε_mach*n.
+cublasStatus_t cublasStrsvBatched(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans, cublasDiagType_t diag,
+    int n, const float *const *Aarray, int lda,
+    float *const *xarray, int incx, int batchCount)
+{
+    if (!handle || batchCount <= 0 || n <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b] || !xarray[b]) return CUBLAS_STATUS_INVALID_VALUE;
+        auto s = cublasStrsv_v2(handle, uplo, trans, diag, n, Aarray[b], lda, xarray[b], incx);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrsvBatched(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans, cublasDiagType_t diag,
+    int n, const double *const *Aarray, int lda,
+    double *const *xarray, int incx, int batchCount)
+{
+    if (!handle || batchCount <= 0 || n <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b] || !xarray[b]) return CUBLAS_STATUS_INVALID_VALUE;
+        auto s = cublasDtrsv_v2(handle, uplo, trans, diag, n, Aarray[b], lda, xarray[b], incx);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// Strided-batched TRSV: Aarray[b] = A + b*strideA, xarray[b] = x + b*strideX.
+cublasStatus_t cublasStrsvStridedBatched(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans, cublasDiagType_t diag,
+    int n, const float *A, int lda, long long int strideA,
+    float *x, int incx, long long int strideX, int batchCount)
+{
+    if (!handle || batchCount <= 0 || n <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        auto s = cublasStrsv_v2(handle, uplo, trans, diag, n,
+                                A + b*strideA, lda, x + b*strideX, incx);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrsvStridedBatched(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans, cublasDiagType_t diag,
+    int n, const double *A, int lda, long long int strideA,
+    double *x, int incx, long long int strideX, int batchCount)
+{
+    if (!handle || batchCount <= 0 || n <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        auto s = cublasDtrsv_v2(handle, uplo, trans, diag, n,
+                                A + b*strideA, lda, x + b*strideX, incx);
         if (s != CUBLAS_STATUS_SUCCESS) return s;
     }
     return CUBLAS_STATUS_SUCCESS;

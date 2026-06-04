@@ -341,11 +341,91 @@ cusolverStatus_t cusolverDnDpotrf_bufferSize(cusolverDnHandle_t /*handle*/, char
     return CUSOLVER_STATUS_SUCCESS;
 }
 
+#ifdef VGRE_LAPACK_FALLBACK
+// ── Blocked Banachiewicz Cholesky (k=64 tiles, lower triangular) ────────────
+// Used when LAPACK is absent and n > 256.  The block size k=64 is chosen so
+// two 64×64 float tiles fit in a typical 32 KiB L1 D-cache.
+//
+// Algorithm (lower, column-major, LDA stride):
+//   For j = 0, k, 2k, ...
+//     1. Scalar Banachiewicz on the diagonal block A[j:j+nb, j:j+nb]
+//     2. TRSM:  A[j+nb:n, j:j+nb] = A[j+nb:n, j:j+nb] * L[j:j+nb,j:j+nb]^{-T}
+//        (update the column panel below the diagonal tile)
+//     3. SYRK:  A[j+nb:n, j+nb:n] -= A[j+nb:n, j:j+nb] * A[j+nb:n, j:j+nb]^T
+//        (Schur complement of trailing sub-matrix — lower triangle only)
+//
+template<typename T>
+static int potrf_blocked(int n, T *A, int lda) {
+    constexpr int k = 64;
+    for (int j = 0; j < n; j += k) {
+        int nb = std::min(k, n - j);
+
+        // Step 1 — Banachiewicz on diagonal block A[j:j+nb, j:j+nb] (lower)
+        for (int jj = 0; jj < nb; ++jj) {
+            int gi = j + jj; // global column index
+            T ajj = A[gi + gi * lda];
+            for (int kk = 0; kk < jj; ++kk) {
+                T l = A[gi + (j + kk) * lda];
+                ajj -= l * l;
+            }
+            if (ajj <= T(0)) return gi + 1; // not positive definite
+            ajj = std::sqrt(ajj);
+            A[gi + gi * lda] = ajj;
+            T inv = T(1) / ajj;
+            // Update column panel within the diagonal block
+            for (int ii = jj + 1; ii < nb; ++ii) {
+                int gr = j + ii;
+                T s = A[gr + gi * lda];
+                for (int kk = 0; kk < jj; ++kk)
+                    s -= A[gr + (j + kk) * lda] * A[gi + (j + kk) * lda];
+                A[gr + gi * lda] = s * inv;
+            }
+        }
+
+        int trail = n - (j + nb); // rows/cols in trailing sub-matrix
+        if (trail <= 0) break;
+
+        // Step 2 — TRSM: solve A[j+nb:n, j:j+nb] * L[j:j+nb,j:j+nb]^T = A[j+nb:n, j:j+nb]
+        // i.e., for each row r in [j+nb, n) and each column c in [j, j+nb):
+        //   row[c] = (row[c] - sum_{p<c} L[c,p]*row[p]) / L[c,c]
+        // Here L is stored in A[j:j+nb, j:j+nb] (lower triangle).
+        for (int r = j + nb; r < n; ++r) {
+            for (int c = 0; c < nb; ++c) {
+                int gc = j + c;
+                T s = A[r + gc * lda];
+                for (int p = 0; p < c; ++p)
+                    s -= A[gc + (j + p) * lda] * A[r + (j + p) * lda];
+                A[r + gc * lda] = s / A[gc + gc * lda];
+            }
+        }
+
+        // Step 3 — SYRK: A[j+nb:n, j+nb:n] -= A[j+nb:n, j:j+nb] * A[j+nb:n, j:j+nb]^T
+        // Only update the lower triangle to preserve symmetry.
+        for (int r = j + nb; r < n; ++r) {
+            for (int c = j + nb; c <= r; ++c) {
+                T dot = T(0);
+                for (int p = 0; p < nb; ++p)
+                    dot += A[r + (j + p) * lda] * A[c + (j + p) * lda];
+                A[r + c * lda] -= dot;
+            }
+        }
+    }
+    return 0; // success
+}
+#endif // VGRE_LAPACK_FALLBACK
+
 cusolverStatus_t cusolverDnSpotrf(cusolverDnHandle_t /*handle*/, char uplo,
                                   int n, float *A, int lda, float * /*Workspace*/,
                                   int /*Lwork*/, int *devInfo) {
     if (!A || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
     if (devInfo) *devInfo = 0;
+#ifdef VGRE_LAPACK_FALLBACK
+    if (n > 256 && (uplo == 'L' || uplo == 'l')) {
+        int info = potrf_blocked<float>(n, A, lda);
+        if (devInfo) *devInfo = info;
+        return CUSOLVER_STATUS_SUCCESS;
+    }
+#endif
     spotrf_(&uplo, &n, A, &lda, devInfo);
     return CUSOLVER_STATUS_SUCCESS;
 }
@@ -355,6 +435,13 @@ cusolverStatus_t cusolverDnDpotrf(cusolverDnHandle_t /*handle*/, char uplo,
                                   int /*Lwork*/, int *devInfo) {
     if (!A || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
     if (devInfo) *devInfo = 0;
+#ifdef VGRE_LAPACK_FALLBACK
+    if (n > 256 && (uplo == 'L' || uplo == 'l')) {
+        int info = potrf_blocked<double>(n, A, lda);
+        if (devInfo) *devInfo = info;
+        return CUSOLVER_STATUS_SUCCESS;
+    }
+#endif
     dpotrf_(&uplo, &n, A, &lda, devInfo);
     return CUSOLVER_STATUS_SUCCESS;
 }
@@ -536,6 +623,164 @@ cusolverStatus_t cusolverDnDsyevd(cusolverDnHandle_t /*handle*/, char jobz, char
     int liwork = 3 + 5 * n;
     std::vector<int> iwork(liwork);
     dsyevd_(&jobz, &uplo, &n, A, &lda, W, work, &Lwork, iwork.data(), &liwork, devInfo);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+// ── Generalized symmetric eigenvalue (sygvd) ─────────────────────────────────
+// Solves A*x = λ*B*x (itype=1) for real symmetric A and symmetric positive
+// definite B, using the reduction:
+//   1. Cholesky factorize B = L*L^T (lower).
+//   2. Form A' = L^{-1} * A * L^{-T} via two triangular solves.
+//   3. Solve standard symmetric eigenproblem A'*y = λ*y  (call syevd).
+//   4. Back-transform eigenvectors: x = L^{-T} * y.
+//
+// Math: if B = L*L^T, substitute x = L^{-T}*y into A*x = λ*B*x to get
+//   A*L^{-T}*y = λ*L*L^T*L^{-T}*y  =>  L^{-1}*A*L^{-T}*y = λ*y.
+//
+// itype=2,3: not implemented — returns CUSOLVER_STATUS_NOT_SUPPORTED.
+
+cusolverStatus_t cusolverDnSsygvd_bufferSize(cusolverDnHandle_t handle, int itype,
+                                             char jobz, char uplo,
+                                             int n, float * /*A*/, int lda,
+                                             float * /*B*/, int /*ldb*/,
+                                             float * /*W*/, int *Lwork) {
+    if (itype != 1) return CUSOLVER_STATUS_NOT_SUPPORTED;
+    if (!Lwork || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
+    // workspace = max(potrf workspace, syevd workspace)
+    // potrf: n*n; syevd: 2*n*n + 6*n + 1
+    int ws_potrf = n * n;
+    int ws_syevd = 0;
+    cusolverDnSsyevd_bufferSize(handle, jobz, uplo, n, nullptr, lda, nullptr, &ws_syevd);
+    *Lwork = std::max(ws_potrf, ws_syevd);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnDsygvd_bufferSize(cusolverDnHandle_t handle, int itype,
+                                             char jobz, char uplo,
+                                             int n, double * /*A*/, int lda,
+                                             double * /*B*/, int /*ldb*/,
+                                             double * /*W*/, int *Lwork) {
+    if (itype != 1) return CUSOLVER_STATUS_NOT_SUPPORTED;
+    if (!Lwork || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
+    int ws_potrf = n * n;
+    int ws_syevd = 0;
+    cusolverDnDsyevd_bufferSize(handle, jobz, uplo, n, nullptr, lda, nullptr, &ws_syevd);
+    *Lwork = std::max(ws_potrf, ws_syevd);
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnSsygvd(cusolverDnHandle_t handle, int itype,
+                                  char jobz, char uplo,
+                                  int n, float *A, int lda,
+                                  float *B, int ldb,
+                                  float *W, float *work, int Lwork, int *devInfo) {
+    if (itype != 1) return CUSOLVER_STATUS_NOT_SUPPORTED;
+    if (!A || !B || !W || n <= 0 || lda < n || ldb < n) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+
+    // Step 1 — Cholesky: B = L*L^T (lower triangular, in-place)
+    char lo = 'L';
+    cusolverDnSpotrf(handle, lo, n, B, ldb, work, Lwork, devInfo);
+    if (devInfo && *devInfo != 0) return CUSOLVER_STATUS_SUCCESS; // B not SPD
+
+    // Step 2 — Form A' = L^{-1} * A * L^{-T}
+    // A is symmetric; we operate on the lower triangle stored in A.
+    // First: for each column j of A, solve L * x = A[:,j]  (forward substitution).
+    // Then:  for each row i of the result, solve L * x = row_i^T (forward sub).
+    // This transforms A → L^{-1} * A * L^{-T} in the lower triangle.
+    //
+    // Implementation: two-pass row/column triangular solve.
+    // Pass 1 (columns): A[:,j] = L^{-1} * A[:,j]  for j = 0..n-1
+    for (int j = 0; j < n; ++j) {
+        // Forward solve L * x = A[j:n, j]  (only lower triangle)
+        for (int i = j; i < n; ++i) {
+            float s = A[i + j * lda];
+            for (int p = 0; p < i; ++p)
+                s -= B[i + p * ldb] * A[p + j * lda];
+            A[i + j * lda] = s / B[i + i * ldb];
+        }
+    }
+    // Pass 2 (rows): A[i,:] = (L^{-1} * A[i,:]^T)^T  for i = 0..n-1
+    // i.e., solve L * y = A[i, 0:i]^T  (upper part, transposed column)
+    for (int i = 0; i < n; ++i) {
+        // Forward solve L * y = A[0:i+1, i]  (the i-th column upper half = symmetric copy)
+        for (int j = 0; j <= i; ++j) {
+            float s = A[j + i * lda]; // col-major: row j, col i
+            for (int p = 0; p < j; ++p)
+                s -= B[j + p * ldb] * A[p + i * lda];
+            A[j + i * lda] = s / B[j + j * ldb];
+        }
+    }
+
+    // Step 3 — Standard symmetric eigenproblem on A' (now in A)
+    cusolverDnSsyevd(handle, jobz, lo, n, A, lda, W, work, Lwork, devInfo);
+    if (devInfo && *devInfo != 0) return CUSOLVER_STATUS_SUCCESS;
+
+    // Step 4 — Back-transform eigenvectors: x = L^{-T} * y
+    // Solve L^T * x = y  (backward substitution), column by column.
+    if (jobz == 'V' || jobz == 'v') {
+        for (int j = 0; j < n; ++j) {
+            // Backward solve L^T * x = A[:,j]
+            for (int i = n - 1; i >= 0; --i) {
+                float s = A[i + j * lda];
+                for (int p = i + 1; p < n; ++p)
+                    s -= B[p + i * ldb] * A[p + j * lda]; // B[p,i] = L^T[i,p]
+                A[i + j * lda] = s / B[i + i * ldb];
+            }
+        }
+    }
+    return CUSOLVER_STATUS_SUCCESS;
+}
+
+cusolverStatus_t cusolverDnDsygvd(cusolverDnHandle_t handle, int itype,
+                                  char jobz, char uplo,
+                                  int n, double *A, int lda,
+                                  double *B, int ldb,
+                                  double *W, double *work, int Lwork, int *devInfo) {
+    if (itype != 1) return CUSOLVER_STATUS_NOT_SUPPORTED;
+    if (!A || !B || !W || n <= 0 || lda < n || ldb < n) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (devInfo) *devInfo = 0;
+
+    // Step 1 — Cholesky: B = L*L^T
+    char lo = 'L';
+    cusolverDnDpotrf(handle, lo, n, B, ldb, work, Lwork, devInfo);
+    if (devInfo && *devInfo != 0) return CUSOLVER_STATUS_SUCCESS;
+
+    // Step 2 — Form A' = L^{-1} * A * L^{-T}
+    // Pass 1 (columns): A[:,j] = L^{-1} * A[:,j]
+    for (int j = 0; j < n; ++j) {
+        for (int i = j; i < n; ++i) {
+            double s = A[i + j * lda];
+            for (int p = 0; p < i; ++p)
+                s -= B[i + p * ldb] * A[p + j * lda];
+            A[i + j * lda] = s / B[i + i * ldb];
+        }
+    }
+    // Pass 2 (rows): A[i,0:i+1] = L^{-1} * A[i,0:i+1]^T  transposed
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j <= i; ++j) {
+            double s = A[j + i * lda];
+            for (int p = 0; p < j; ++p)
+                s -= B[j + p * ldb] * A[p + i * lda];
+            A[j + i * lda] = s / B[j + j * ldb];
+        }
+    }
+
+    // Step 3 — Standard symmetric eigenproblem
+    cusolverDnDsyevd(handle, jobz, lo, n, A, lda, W, work, Lwork, devInfo);
+    if (devInfo && *devInfo != 0) return CUSOLVER_STATUS_SUCCESS;
+
+    // Step 4 — Back-transform eigenvectors: x = L^{-T} * y
+    if (jobz == 'V' || jobz == 'v') {
+        for (int j = 0; j < n; ++j) {
+            for (int i = n - 1; i >= 0; --i) {
+                double s = A[i + j * lda];
+                for (int p = i + 1; p < n; ++p)
+                    s -= B[p + i * ldb] * A[p + j * lda];
+                A[i + j * lda] = s / B[i + i * ldb];
+            }
+        }
+    }
     return CUSOLVER_STATUS_SUCCESS;
 }
 

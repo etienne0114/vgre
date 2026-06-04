@@ -752,6 +752,47 @@ target_include_directories(test_robin_hood_hash_table PRIVATE
 add_test(NAME RobinHoodHashTable COMMAND test_robin_hood_hash_table)
 set_tests_properties(RobinHoodHashTable PROPERTIES TIMEOUT 30)
 
+# QUEUE-50: SipHash-2-4 — known test vector + collision resistance in RobinHoodHashTable.
+add_executable(test_siphash unit/test_siphash.cpp)
+target_link_libraries(test_siphash PRIVATE vgre_common)
+target_include_directories(test_siphash PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME SipHash24 COMMAND test_siphash)
+set_tests_properties(SipHash24 PROPERTIES TIMEOUT 30)
+
+# QUEUE-51: Fibonacci Max-Heap — O(1) insert, O(log n) pop, O(1) increase_key.
+add_executable(test_fib_heap unit/test_fib_heap.cpp)
+target_link_libraries(test_fib_heap PRIVATE vgre)
+target_include_directories(test_fib_heap PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME FibHeap COMMAND test_fib_heap)
+set_tests_properties(FibHeap PROPERTIES TIMEOUT 30)
+
+# QUEUE-58: Treiber lock-free stack — LIFO, empty-pop, 8-thread concurrency.
+add_executable(test_treiber_stack unit/test_treiber_stack.cpp)
+target_include_directories(test_treiber_stack PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME TreiberStack COMMAND test_treiber_stack)
+set_tests_properties(TreiberStack PROPERTIES TIMEOUT 60)
+
+# ── QUEUE-47/52: TRMM strided-batched + TRSV batched ─────────────────────────
+add_executable(test_trmm_trsv_batched unit/test_trmm_trsv_batched.cpp)
+target_link_libraries(test_trmm_trsv_batched PRIVATE vgre)
+add_test(NAME TrmmTrsvBatched COMMAND test_trmm_trsv_batched)
+set_tests_properties(TrmmTrsvBatched PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
+
+# ── QUEUE-49: Event creation flags + elapsed time ────────────────────────────
+add_executable(test_event_flags unit/test_event_flags.cpp)
+target_link_libraries(test_event_flags PRIVATE vgre)
+add_test(NAME EventFlags COMMAND test_event_flags)
+set_tests_properties(EventFlags PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
+
+# ── QUEUE-57: cuSOLVER sygvd generalized eigenvalue ──────────────────────────
+add_executable(test_cusolver_sygvd api/test_cusolver_sygvd.cpp)
+target_link_libraries(test_cusolver_sygvd PRIVATE vgre_cudart)
+add_test(NAME CusolverSygvd COMMAND test_cusolver_sygvd)
+set_tests_properties(CusolverSygvd PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
+
 # ── Cross-Platform Integration Tests ────────────────────────────────────────
 add_executable(test_cross_platform_tcp_cluster
     integration/test_cross_platform_tcp_cluster.cpp)
