@@ -323,8 +323,20 @@ VGREResult RuntimeEngine::registerKernel(const std::string &name,
   // a fresh ID, preventing uninitialized-variable collisions.
   KernelId id;
   if (outId != 0 && outId < (nextKernelId_ + 65536)) {
-    id = outId;
-    if (id >= nextKernelId_) nextKernelId_ = id + 1;
+    // TCP-cluster pre-assignment: honour only if the ID is free or already
+    // belongs to THIS kernel (idempotent re-register).  If a different kernel
+    // owns the ID (uninitialized-variable collision), allocate a fresh ID.
+    auto existIt = kernelIRCache_.find(outId);
+    if (existIt == kernelIRCache_.end() || existIt->second.name == name) {
+      id = outId;
+      if (id >= nextKernelId_) nextKernelId_ = id + 1;
+    } else {
+      VGRE_LOG_WARN("RuntimeEngine",
+          "registerKernel: outId=" + std::to_string(outId) +
+          " already owned by '" + existIt->second.name +
+          "', ignoring and allocating fresh ID for '" + name + "'");
+      id = nextKernelId_++;
+    }
   } else {
     id = nextKernelId_++;
   }
