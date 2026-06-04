@@ -331,6 +331,11 @@ add_executable(test_cudnn_rnn_peephole api/test_cudnn_rnn_peephole.cpp)
 target_link_libraries(test_cudnn_rnn_peephole PRIVATE vgre)
 add_test(NAME CudnnRNNPeephole COMMAND test_cudnn_rnn_peephole)
 
+# Secure memory zeroing (QUEUE-39)
+add_executable(test_secure_zero unit/test_secure_zero.cpp)
+target_link_libraries(test_secure_zero PRIVATE vgre)
+add_test(NAME SecureZero COMMAND test_secure_zero)
+
 add_executable(test_cublas_level2 api/test_cublas_level2.cpp)
 target_link_libraries(test_cublas_level2 PRIVATE vgre)
 add_test(NAME CublasLevel2 COMMAND test_cublas_level2)
