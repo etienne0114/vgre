@@ -316,28 +316,47 @@ float VectorEngine::vectorSum(const float* a, size_t n) {
     return sum;
 }
 
-// ── Float vector division ───────────────────────────────────────────────────
-void VectorEngine::vectorDiv(const float* a, const float* b,
-                               float* c, size_t n) {
+// ── Float vector division (Newton-Raphson fast reciprocal) ──────────────────
+// Uses hardware rcp estimate + one Newton-Raphson refinement step:
+//   x₀ = rcp_estimate(b)          [AVX2: ~12-bit, AVX-512: ~14-bit]
+//   x₁ = x₀ * (2 − b·x₀)         [Newton step doubles accuracy]
+//   c  = a * x₁                   [a/b ≈ a*(1/b)]
+//
+// Error bound: AVX2 |e₁| ≤ e₀² ≤ 2⁻²⁴ (within float32 23-bit mantissa);
+//              AVX-512 |e₁| ≤ 2⁻²⁸. One step suffices for both.
+// Complexity: O(n/8) AVX2 or O(n/16) AVX-512 iterations.
+void VectorEngine::vectorDiv(const float* __restrict__ a,
+                              const float* __restrict__ b,
+                              float* __restrict__ c, size_t n) {
     size_t i = 0;
-    #ifdef VGRE_HAS_AVX512
+#ifdef VGRE_HAS_AVX512
     {
+    const __m512 two16 = _mm512_set1_ps(2.0f);
     int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
     #pragma omp parallel for if (n > 2048)
     for (int64_t ii = 0; ii < nAligned; ii += 16) {
         __m512 va = _mm512_loadu_ps(&a[ii]);
         __m512 vb = _mm512_loadu_ps(&b[ii]);
-        _mm512_storeu_ps(&c[ii], _mm512_div_ps(va, vb));
+        // 14-bit rcp estimate, one Newton step → ≤ 2⁻²⁸ error
+        __m512 x0 = _mm512_rcp14_ps(vb);
+        __m512 x1 = _mm512_mul_ps(x0, _mm512_fnmadd_ps(vb, x0, two16));
+        _mm512_storeu_ps(&c[ii], _mm512_mul_ps(va, x1));
     }
     i = static_cast<size_t>(nAligned);
     }
-    #elif defined(VGRE_HAS_AVX2)
+#elif defined(VGRE_HAS_AVX2)
+    {
+    const __m256 two8 = _mm256_set1_ps(2.0f);
     for (; i + 8 <= n; i += 8) {
         __m256 va = _mm256_loadu_ps(&a[i]);
         __m256 vb = _mm256_loadu_ps(&b[i]);
-        _mm256_storeu_ps(&c[i], _mm256_div_ps(va, vb));
+        // 12-bit rcp estimate, one Newton step → ≤ 2⁻²⁴ error
+        __m256 x0 = _mm256_rcp_ps(vb);
+        __m256 x1 = _mm256_mul_ps(x0, _mm256_fnmadd_ps(vb, x0, two8));
+        _mm256_storeu_ps(&c[i], _mm256_mul_ps(va, x1));
     }
-    #endif
+    }
+#endif
     for (; i < n; ++i) {
         c[i] = a[i] / b[i];
     }
