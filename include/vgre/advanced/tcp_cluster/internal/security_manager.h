@@ -126,6 +126,22 @@ public:
    */
   std::string getAuthModeDescription() const;
 
+  // ── Test hooks (thin wrappers around anonymous-namespace helpers) ─────────
+  // Used by unit tests to exercise rate-limiting without socket infrastructure.
+
+  // Returns the penalty in seconds after `fail_count` consecutive failures.
+  // Formula: min(2^(fail_count-1), MAX_BACKOFF_SEC=300). O(1).
+  static int authPenaltySec(int fail_count);
+
+  // Records a synthetic auth failure for `ip`, applying the backoff state.
+  static void testInjectAuthFailure(const std::string& ip);
+
+  // Returns true if the IP is currently within its backoff window.
+  static bool testIsRateLimited(const std::string& ip);
+
+  // Clears all rate-limit state for `ip` (allows re-testing from clean state).
+  static void testClearRateLimit(const std::string& ip);
+
 private:
   // Parent cluster manager (non-owning pointer)
   // Used to access: clients_, client_fd_, client_secure_channel_,
