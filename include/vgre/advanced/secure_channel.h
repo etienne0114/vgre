@@ -147,6 +147,17 @@ bool aes256_gcm_decrypt(const uint8_t key[32],
 // Runtime hardware capability query.
 bool gcm_hw_supported();
 
+// ChaCha20-Poly1305 AEAD (RFC 8439)
+// Encrypt: cipher_with_tag must be at least plainLen + 16 bytes.
+// Decrypt: totalLen = cipherLen + 16; returns false if MAC fails (tampered).
+// Math: Poly1305 ε-security ε = (L+1)/2^106 for L-byte messages.
+void chacha20_poly1305_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+                               const uint8_t *plain, size_t plainLen,
+                               uint8_t *cipher_with_tag);
+bool chacha20_poly1305_decrypt(const uint8_t key[32], const uint8_t nonce[12],
+                               const uint8_t *cipher_with_tag, size_t totalLen,
+                               uint8_t *plain);
+
 } // namespace crypto
 
 // ── Secure Packet Header ──────────────────────────────────────────────────

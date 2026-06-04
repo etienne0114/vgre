@@ -410,6 +410,11 @@ target_link_libraries(test_aes_gcm PRIVATE vgre)
 add_test(NAME AES256GCM COMMAND test_aes_gcm)
 set_tests_properties(AES256GCM PROPERTIES TIMEOUT 60)
 
+# QUEUE-64: ChaCha20-Poly1305 AEAD
+add_executable(test_chacha20_poly1305 api/test_chacha20_poly1305.cpp)
+target_link_libraries(test_chacha20_poly1305 PRIVATE vgre)
+add_test(NAME ChaCha20Poly1305 COMMAND test_chacha20_poly1305)
+
 # Min-segment tree stream dependency tracker (QUEUE-07)
 add_executable(test_stream_dep_tracker unit/test_stream_dep_tracker.cpp)
 target_link_libraries(test_stream_dep_tracker PRIVATE vgre)
