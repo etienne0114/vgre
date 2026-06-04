@@ -341,6 +341,8 @@ cusolverStatus_t cusolverDnDpotrf_bufferSize(cusolverDnHandle_t /*handle*/, char
     return CUSOLVER_STATUS_SUCCESS;
 }
 
+} // extern "C" — templates cannot have C linkage; close before fallback helpers
+
 #ifdef VGRE_LAPACK_FALLBACK
 // ── Blocked Banachiewicz Cholesky (k=64 tiles, lower triangular) ────────────
 // Used when LAPACK is absent and n > 256.  The block size k=64 is chosen so
@@ -413,6 +415,8 @@ static int potrf_blocked(int n, T *A, int lda) {
     return 0; // success
 }
 #endif // VGRE_LAPACK_FALLBACK
+
+extern "C" { // reopen for cuSolver API functions
 
 cusolverStatus_t cusolverDnSpotrf(cusolverDnHandle_t /*handle*/, char uplo,
                                   int n, float *A, int lda, float * /*Workspace*/,
