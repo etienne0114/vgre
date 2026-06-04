@@ -441,6 +441,11 @@ add_executable(test_auth_rate_limit unit/test_auth_rate_limit.cpp)
 target_link_libraries(test_auth_rate_limit PRIVATE vgre)
 add_test(NAME AuthRateLimit COMMAND test_auth_rate_limit)
 
+# QUEUE-71: Van Emde Boas tree O(log log U) KernelId lookup
+add_executable(test_veb_tree core/test_veb_tree.cpp)
+target_link_libraries(test_veb_tree PRIVATE vgre)
+add_test(NAME VEBTree COMMAND test_veb_tree)
+
 # Min-segment tree stream dependency tracker (QUEUE-07)
 add_executable(test_stream_dep_tracker unit/test_stream_dep_tracker.cpp)
 target_link_libraries(test_stream_dep_tracker PRIVATE vgre)
