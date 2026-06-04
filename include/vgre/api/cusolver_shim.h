@@ -225,6 +225,20 @@ cusolverStatus_t cusolverDnZheevd(cusolverDnHandle_t handle, char jobz, char upl
                                    int n, double *A, int lda, double *W,
                                    double *work, int lwork, int *devInfo);
 
+// ── Batched LU factorization (getrfBatched) — QUEUE-41 ───────────────────────
+// Factorizes batchSize independent n×n matrices (PA = LU) using partial pivoting.
+// PivotArray: flat n*batchSize array; slot b at PivotArray + b*n (1-based, LAPACK).
+// infoArray[b] = 0 on success; = k+1 if U[k,k] == 0 (singular diagonal).
+// PivotArray may be NULL (pivoting skipped, potentially unstable).
+cusolverStatus_t cusolverDnSgetrfBatched(cusolverDnHandle_t handle, int n,
+                                          float **Aarray, int lda,
+                                          int *PivotArray, int *infoArray,
+                                          int batchSize);
+cusolverStatus_t cusolverDnDgetrfBatched(cusolverDnHandle_t handle, int n,
+                                          double **Aarray, int lda,
+                                          int *PivotArray, int *infoArray,
+                                          int batchSize);
+
 // ── Batched LU triangular solve (getrsBatched) ───────────────────────────────
 cusolverStatus_t cusolverDnSgetrsBatched(cusolverDnHandle_t handle, int trans,
                                           int n, int nrhs,
