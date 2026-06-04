@@ -26,6 +26,47 @@ namespace {
     std::unordered_map<std::string, uint64_t> last_violation_time;
   };
   SecurityMetrics g_metrics;
+
+  // Per-IP exponential backoff for auth failures.
+  // Penalty after k-th failure: min(2^(k-1), MAX_BACKOFF_SEC) seconds.
+  // O(1) check, O(distinct IPs) space.
+  static constexpr int MAX_BACKOFF_SEC = 300; // 5-minute cap
+  struct RateLimitState {
+    std::unordered_map<std::string, int>     fail_count;     // cumulative failures per IP
+    std::unordered_map<std::string, int64_t> backoff_until;  // steady_clock ns timestamp
+    std::mutex mu;
+  };
+  RateLimitState g_ratelimit;
+
+  // Returns true if the IP is currently in a backoff window (request must be rejected).
+  bool isRateLimited(const std::string& ip) {
+    std::lock_guard<std::mutex> lk(g_ratelimit.mu);
+    auto it = g_ratelimit.backoff_until.find(ip);
+    if (it == g_ratelimit.backoff_until.end()) return false;
+    return std::chrono::steady_clock::now().time_since_epoch().count() < it->second;
+  }
+
+  // Record one auth failure for IP and set the next backoff window.
+  // Penalty doubles each failure: 1s, 2s, 4s, 8s, … up to MAX_BACKOFF_SEC.
+  void recordAuthFailure(const std::string& ip) {
+    std::lock_guard<std::mutex> lk(g_ratelimit.mu);
+    int& k = g_ratelimit.fail_count[ip];
+    ++k;
+    int penalty_sec = (k >= 31) ? MAX_BACKOFF_SEC
+                                 : std::min(1 << (k - 1), MAX_BACKOFF_SEC);
+    int64_t now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+    g_ratelimit.backoff_until[ip] = now_ns + static_cast<int64_t>(penalty_sec) * 1'000'000'000LL;
+    VGRE_LOG_WARN("TCPCluster.Security",
+        "Auth failure #" + std::to_string(k) + " from " + ip +
+        ": blocked for " + std::to_string(penalty_sec) + "s (exp backoff)");
+  }
+
+  // Clear penalty after successful auth to avoid stale blocking.
+  void clearAuthPenalty(const std::string& ip) {
+    std::lock_guard<std::mutex> lk(g_ratelimit.mu);
+    g_ratelimit.fail_count.erase(ip);
+    g_ratelimit.backoff_until.erase(ip);
+  }
   const int HANDSHAKE_TIMEOUT_SEC = []() { const char* e = vgre_get_config("VGRE_CLUSTER_HANDSHAKE_TIMEOUT_SEC"); return (e && std::atoi(e) > 0) ? std::atoi(e) : 5; }();
   void logSecurityEvent(const std::string& event, const std::string& ip, const std::string& details) { VGRE_LOG_INFO("TCPCluster.Security", "[" + event + "] " + ip + ": " + details); }
   bool recordViolation(const std::string& ip, const std::string& type) {
@@ -158,6 +199,12 @@ VGREResult SecurityManager::performServerHandshake(std::shared_ptr<TCPClusterMan
   auto& client = *clientPtr; g_metrics.handshakes_attempted++;
   
   if (!client.security_enabled || !parent_->security_enabled_) { logSecurityEvent("HANDSHAKE_SKIPPED", client.ip_address, "security_disabled"); return VGREResult::SUCCESS; }
+  // Rate-limit: reject immediately if this IP is within its exponential backoff window.
+  if (isRateLimited(client.ip_address)) {
+    g_metrics.auth_failures++; g_metrics.handshakes_failed++;
+    VGRE_LOG_WARN("TCPCluster.Security", "Handshake rejected (rate-limited): " + client.ip_address);
+    return VGREResult::ERR_AUTH_FAILED;
+  }
   logSecurityEvent("HANDSHAKE_START", client.ip_address, "server_mode");
   
   // Get token
@@ -208,6 +255,8 @@ VGREResult SecurityManager::performServerHandshake(std::shared_ptr<TCPClusterMan
     vgre::common::vgre_close_socket(client.socket_fd);
     client.socket_fd = vgre::common::VGRE_INVALID_SOCKET;
     client.active = false;
+    g_metrics.auth_failures++; g_metrics.handshakes_failed++;
+    recordAuthFailure(client.ip_address);  // exponential backoff penalty
     return VGREResult::ERR_AUTH_FAILED;
   }
   
@@ -216,6 +265,7 @@ VGREResult SecurityManager::performServerHandshake(std::shared_ptr<TCPClusterMan
   VGREResult r = client.secure_channel->initializeFromSecret(token, shpkt.nonce, clientHs.nonce);
   if (r != VGREResult::SUCCESS) return r;
   client.security_established = true; g_metrics.handshakes_successful++;
+  clearAuthPenalty(client.ip_address);  // reset backoff on successful auth
   logSecurityEvent("HANDSHAKE_SUCCESS", client.ip_address, "server_completed"); return VGREResult::SUCCESS;
 }
 
@@ -352,6 +402,16 @@ VGREResult SecurityManager::rotateSessionKey(std::shared_ptr<TCPClusterManager::
   if (result != VGREResult::SUCCESS) return result;
   logSecurityEvent("KEY_ROTATION", client->ip_address, "successful"); return VGREResult::SUCCESS;
 }
+
+// ── Test hooks ────────────────────────────────────────────────────────────────
+int SecurityManager::authPenaltySec(int fail_count) {
+    if (fail_count <= 0) return 0;
+    return (fail_count >= 31) ? MAX_BACKOFF_SEC
+                              : std::min(1 << (fail_count - 1), MAX_BACKOFF_SEC);
+}
+void SecurityManager::testInjectAuthFailure(const std::string& ip) { recordAuthFailure(ip); }
+bool SecurityManager::testIsRateLimited(const std::string& ip)     { return isRateLimited(ip); }
+void SecurityManager::testClearRateLimit(const std::string& ip)    { clearAuthPenalty(ip); }
 
 } // namespace advanced
 } // namespace vgre

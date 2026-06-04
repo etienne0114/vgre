@@ -436,6 +436,11 @@ add_executable(test_stream_priority api/test_stream_priority.cpp)
 target_link_libraries(test_stream_priority PRIVATE vgre_cudart)
 add_test(NAME StreamPriority COMMAND test_stream_priority)
 
+# QUEUE-70: Auth rate-limiting — exponential backoff for cluster auth failures
+add_executable(test_auth_rate_limit unit/test_auth_rate_limit.cpp)
+target_link_libraries(test_auth_rate_limit PRIVATE vgre)
+add_test(NAME AuthRateLimit COMMAND test_auth_rate_limit)
+
 # Min-segment tree stream dependency tracker (QUEUE-07)
 add_executable(test_stream_dep_tracker unit/test_stream_dep_tracker.cpp)
 target_link_libraries(test_stream_dep_tracker PRIVATE vgre)
