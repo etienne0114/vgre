@@ -561,6 +561,79 @@ void sgelsd_(const int *m, const int *n, const int *nrhs, float *A, const int *l
     vgre_gelsd<float>(*m, *n, *nrhs, A, *lda, B, *ldb, S, *rcond, rank_, info);
 }
 
+// ── Complex (c/z) LAPACK stubs ────────────────────────────────────────────────
+// VGRE represents complex matrices as flat float*/double* arrays; these stubs
+// delegate to the corresponding real (s/d) implementations.
+
+void cpotrf_(const char *uplo, const int *n, float *a, const int *lda, int *info) {
+    vgre_potrf<float>(uplo, *n, a, *lda, info);
+}
+void zpotrf_(const char *uplo, const int *n, double *a, const int *lda, int *info) {
+    vgre_potrf<double>(uplo, *n, a, *lda, info);
+}
+void cpotrs_(const char *uplo, const int *n, const int *nrhs,
+             const float *A, const int *lda, float *B, const int *ldb, int *info) {
+    vgre_potrs<float>(uplo, *n, *nrhs, A, *lda, B, *ldb, info);
+}
+void zpotrs_(const char *uplo, const int *n, const int *nrhs,
+             const double *A, const int *lda, double *B, const int *ldb, int *info) {
+    vgre_potrs<double>(uplo, *n, *nrhs, A, *lda, B, *ldb, info);
+}
+void cgetrf_(const int *m, const int *n, float *a, const int *lda, int *ipiv, int *info) {
+    vgre_getrf<float>(*m, *n, a, *lda, ipiv, info);
+}
+void zgetrf_(const int *m, const int *n, double *a, const int *lda, int *ipiv, int *info) {
+    vgre_getrf<double>(*m, *n, a, *lda, ipiv, info);
+}
+void cgetrs_(const char *trans, const int *n, const int *nrhs,
+             const float *A, const int *lda, const int *ipiv,
+             float *B, const int *ldb, int *info) {
+    vgre_getrs<float>(trans, *n, *nrhs, A, *lda, ipiv, B, *ldb, info);
+}
+void zgetrs_(const char *trans, const int *n, const int *nrhs,
+             const double *A, const int *lda, const int *ipiv,
+             double *B, const int *ldb, int *info) {
+    vgre_getrs<double>(trans, *n, *nrhs, A, *lda, ipiv, B, *ldb, info);
+}
+// cgesvd_/zgesvd_ have an extra rwork parameter; ignore it and delegate to real SVD.
+void cgesvd_(const char *jobu, const char *jobvt, const int *m, const int *n,
+             float *A, const int *lda, float *S, float *U, const int *ldu,
+             float *VT, const int *ldvt, float *work, const int *lwork,
+             float * /*rwork*/, int *info) {
+    if (work && *lwork < 0) { work[0] = static_cast<float>(vgre_gesvd_lwork(*m,*n)); *info = 0; return; }
+    int LDU  = U  ? *ldu  : *m;
+    int LDVT = VT ? *ldvt : std::min(*m, *n);
+    vgre_gesvd<float>(jobu, jobvt, *m, *n, A, *lda, S, U, LDU, VT, LDVT, info);
+}
+void zgesvd_(const char *jobu, const char *jobvt, const int *m, const int *n,
+             double *A, const int *lda, double *S, double *U, const int *ldu,
+             double *VT, const int *ldvt, double *work, const int *lwork,
+             double * /*rwork*/, int *info) {
+    if (work && *lwork < 0) { work[0] = static_cast<double>(vgre_gesvd_lwork(*m,*n)); *info = 0; return; }
+    int LDU  = U  ? *ldu  : *m;
+    int LDVT = VT ? *ldvt : std::min(*m, *n);
+    vgre_gesvd<double>(jobu, jobvt, *m, *n, A, *lda, S, U, LDU, VT, LDVT, info);
+}
+// cheevd_/zheevd_ add rwork/iwork params; ignore them and delegate to real syevd.
+void cheevd_(const char *jobz, const char *uplo, const int *n,
+             float *A, const int *lda, float *W,
+             float *work, const int *lwork,
+             float * /*rwork*/, const int * /*lrwork*/,
+             int * /*iwork*/, const int * /*liwork*/, int *info) {
+    (void)uplo;
+    if (work && *lwork < 0) { work[0] = static_cast<float>(vgre_syevd_lwork(*n)); *info = 0; return; }
+    vgre_syevd<float>(jobz, *n, A, *lda, W, info);
+}
+void zheevd_(const char *jobz, const char *uplo, const int *n,
+             double *A, const int *lda, double *W,
+             double *work, const int *lwork,
+             double * /*rwork*/, const int * /*lrwork*/,
+             int * /*iwork*/, const int * /*liwork*/, int *info) {
+    (void)uplo;
+    if (work && *lwork < 0) { work[0] = static_cast<double>(vgre_syevd_lwork(*n)); *info = 0; return; }
+    vgre_syevd<double>(jobz, *n, A, *lda, W, info);
+}
+
 } // extern "C"
 
 #endif // VGRE_LAPACK_FALLBACK

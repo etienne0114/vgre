@@ -230,6 +230,11 @@ add_executable(test_dirty_page_tracking core/test_dirty_page_tracking.cpp)
 target_link_libraries(test_dirty_page_tracking PRIVATE vgre)
 add_test(NAME DirtyPageTracking COMMAND test_dirty_page_tracking)
 
+# QUEUE-60: Blelloch (1990) parallel prefix scan
+add_executable(test_prefix_scan core/test_prefix_scan.cpp)
+target_link_libraries(test_prefix_scan PRIVATE vgre)
+add_test(NAME BlellochPrefixScan COMMAND test_prefix_scan)
+
 add_executable(test_roofline_autotuner core/test_roofline_autotuner.cpp)
 target_link_libraries(test_roofline_autotuner PRIVATE vgre)
 add_test(NAME RooflineAutoTuner COMMAND test_roofline_autotuner)
@@ -537,6 +542,11 @@ add_test(NAME CuDNNSpatialTf COMMAND test_cudnn_spatial_tf)
 add_executable(test_cublas_complex_batched api/test_cublas_complex_batched.cpp)
 target_link_libraries(test_cublas_complex_batched PRIVATE vgre_cudart)
 add_test(NAME CuBLASComplexBatched COMMAND test_cublas_complex_batched)
+
+# QUEUE-59: cuBLAS HEMM/HERK/HER2K batched variants
+add_executable(test_cublas_hermitian_batched api/test_cublas_hermitian_batched.cpp)
+target_link_libraries(test_cublas_hermitian_batched PRIVATE vgre_cudart)
+add_test(NAME CuBLASHermitianBatched COMMAND test_cublas_hermitian_batched)
 
 add_executable(test_cudnn_normalization api/test_cudnn_normalization.cpp)
 target_link_libraries(test_cudnn_normalization PRIVATE vgre)

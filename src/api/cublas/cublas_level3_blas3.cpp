@@ -17,6 +17,26 @@ cublasStatus_t cublasDsyr2k_v2(cublasHandle_t, cublasFillMode_t, cublasOperation
     int, int, const double*, const double*, int, const double*, int, const double*, double*, int);
 }
 
+// ─── Forward declarations for Hermitian Level-3 functions (cublas_hermitian.cpp) ─
+extern "C" {
+cublasStatus_t cublasChemm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
+    int, int, const cuComplex*, const cuComplex*, int,
+    const cuComplex*, int, const cuComplex*, cuComplex*, int);
+cublasStatus_t cublasZhemm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
+    int, int, const cuDoubleComplex*, const cuDoubleComplex*, int,
+    const cuDoubleComplex*, int, const cuDoubleComplex*, cuDoubleComplex*, int);
+cublasStatus_t cublasCherk_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const float*, const cuComplex*, int, const float*, cuComplex*, int);
+cublasStatus_t cublasZherk_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const double*, const cuDoubleComplex*, int, const double*, cuDoubleComplex*, int);
+cublasStatus_t cublasCher2k_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const cuComplex*, const cuComplex*, int,
+    const cuComplex*, int, const float*, cuComplex*, int);
+cublasStatus_t cublasZher2k_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
+    int, int, const cuDoubleComplex*, const cuDoubleComplex*, int,
+    const cuDoubleComplex*, int, const double*, cuDoubleComplex*, int);
+}
+
 // Forward declarations for Level-3 functions defined in cublas_level3.cpp
 extern "C" {
 cublasStatus_t cublasStrsm_v2(cublasHandle_t, cublasSideMode_t, cublasFillMode_t,
@@ -295,6 +315,111 @@ cublasStatus_t cublasDtrsvStridedBatched(cublasHandle_t handle,
     for (int b = 0; b < batchCount; ++b) {
         auto s = cublasDtrsv_v2(handle, uplo, trans, diag, n,
                                 A + b*strideA, lda, x + b*strideX, incx);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── QUEUE-59: Hermitian batched Level-3 BLAS ─────────────────────────────────
+// Array-of-pointers pattern: loop over batchCount, delegate to scalar _v2 fn.
+// Complexity: O(n²k) per batch element (HEMM/HERK/HER2K all scale as n²k).
+// Math invariant: C[b] = alpha*op(A[b])*op(B[b]) + beta*C[b], A[b] Hermitian.
+
+cublasStatus_t cublasChemmBatched(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo, int m, int n,
+    const cuComplex *alpha,
+    const cuComplex *const *Aarray, int lda,
+    const cuComplex *const *Barray, int ldb,
+    const cuComplex *beta,
+    cuComplex **Carray, int ldc, int batchCount)
+{
+    if (!handle || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b]||!Barray[b]||!Carray[b]) return CUBLAS_STATUS_INVALID_VALUE;
+        auto s = cublasChemm_v2(handle,side,uplo,m,n,alpha,Aarray[b],lda,Barray[b],ldb,beta,Carray[b],ldc);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZhemmBatched(cublasHandle_t handle,
+    cublasSideMode_t side, cublasFillMode_t uplo, int m, int n,
+    const cuDoubleComplex *alpha,
+    const cuDoubleComplex *const *Aarray, int lda,
+    const cuDoubleComplex *const *Barray, int ldb,
+    const cuDoubleComplex *beta,
+    cuDoubleComplex **Carray, int ldc, int batchCount)
+{
+    if (!handle || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b]||!Barray[b]||!Carray[b]) return CUBLAS_STATUS_INVALID_VALUE;
+        auto s = cublasZhemm_v2(handle,side,uplo,m,n,alpha,Aarray[b],lda,Barray[b],ldb,beta,Carray[b],ldc);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasCHerkBatched(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans, int n, int k,
+    const float *alpha,
+    const cuComplex *const *Aarray, int lda,
+    const float *beta,
+    cuComplex **Carray, int ldc, int batchCount)
+{
+    if (!handle || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b]||!Carray[b]) return CUBLAS_STATUS_INVALID_VALUE;
+        auto s = cublasCherk_v2(handle,uplo,trans,n,k,alpha,Aarray[b],lda,beta,Carray[b],ldc);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZHerkBatched(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans, int n, int k,
+    const double *alpha,
+    const cuDoubleComplex *const *Aarray, int lda,
+    const double *beta,
+    cuDoubleComplex **Carray, int ldc, int batchCount)
+{
+    if (!handle || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b]||!Carray[b]) return CUBLAS_STATUS_INVALID_VALUE;
+        auto s = cublasZherk_v2(handle,uplo,trans,n,k,alpha,Aarray[b],lda,beta,Carray[b],ldc);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasCHer2kBatched(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans, int n, int k,
+    const cuComplex *alpha,
+    const cuComplex *const *Aarray, int lda,
+    const cuComplex *const *Barray, int ldb,
+    const float *beta,
+    cuComplex **Carray, int ldc, int batchCount)
+{
+    if (!handle || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b]||!Barray[b]||!Carray[b]) return CUBLAS_STATUS_INVALID_VALUE;
+        auto s = cublasCher2k_v2(handle,uplo,trans,n,k,alpha,Aarray[b],lda,Barray[b],ldb,beta,Carray[b],ldc);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZHer2kBatched(cublasHandle_t handle,
+    cublasFillMode_t uplo, cublasOperation_t trans, int n, int k,
+    const cuDoubleComplex *alpha,
+    const cuDoubleComplex *const *Aarray, int lda,
+    const cuDoubleComplex *const *Barray, int ldb,
+    const double *beta,
+    cuDoubleComplex **Carray, int ldc, int batchCount)
+{
+    if (!handle || batchCount <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batchCount; ++b) {
+        if (!Aarray[b]||!Barray[b]||!Carray[b]) return CUBLAS_STATUS_INVALID_VALUE;
+        auto s = cublasZher2k_v2(handle,uplo,trans,n,k,alpha,Aarray[b],lda,Barray[b],ldb,beta,Carray[b],ldc);
         if (s != CUBLAS_STATUS_SUCCESS) return s;
     }
     return CUBLAS_STATUS_SUCCESS;

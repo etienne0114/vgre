@@ -972,6 +972,7 @@ set(_VGRE_CUDART_SOURCES
     src/api/cublas/cublas_complex.cpp
     src/api/cublas/cublas_complex_level2.cpp
     src/api/cublas/cublas_complex_level3.cpp
+    src/api/cublas/cublas_hermitian.cpp
     src/api/nccl/nccl_core.cpp
     src/api/nccl/nccl_communicator.cpp
     src/api/nccl/nccl_collectives.cpp
