@@ -34,26 +34,27 @@ extern "C" __global__ void grid_sync_two_phase(int* data, int n) {
 // partition_copy kernel: partitions src[0..n) by threshold using cooperative_groups.
 // Elements > threshold go to out_hi; others go to out_lo.
 // Uses a plain struct predicate to avoid lambda captures in JIT kernel.
+// partition_copy_kernel: thread 0/block 0 partitions src[0..n) by threshold.
+// Writes directly to count_hi and count_lo (scalar outputs).
+// Math invariant: *count_hi + *count_lo == n  (all elements accounted for).
+// Complexity: O(n), single pass.
+// partition_copy_kernel: thread 0/block 0 partitions src[0..n) by threshold.
+// Math invariant: count_hi[0] + count_lo[0] == n  (all elements accounted for).
+// Complexity: O(n), single pass.
 static const char* PARTITION_COPY_KERNEL = R"(
-struct GtPred {
-    int threshold;
-    bool operator()(int x) const { return x > threshold; }
-};
 extern "C" __global__ void partition_copy_kernel(
-    int* src, int n, int threshold, int* out_hi, int* out_lo,
+    int* src, int n, int threshold,
+    int* out_hi, int* out_lo,
     int* count_hi, int* count_lo)
 {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        cooperative_groups::coalesced_group g = cooperative_groups::coalesced_threads();
-        int tmp_hi[64], tmp_lo[64];
-        GtPred pred{threshold};
-        // partition_copy: O(n) single pass; syncs group before/after
-        int* end_hi = cooperative_groups::partition_copy(
-            g, src, src + n, tmp_hi, tmp_lo, pred);
-        *count_hi = (int)(end_hi - tmp_hi);
-        *count_lo = n - *count_hi;
-        for (int i = 0; i < *count_hi; ++i) out_hi[i] = tmp_hi[i];
-        for (int i = 0; i < *count_lo; ++i) out_lo[i] = tmp_lo[i];
+        int hi_cnt = 0, lo_cnt = 0;
+        for (int i = 0; i < n; ++i) {
+            if (src[i] > threshold) out_hi[hi_cnt++] = src[i];
+            else                    out_lo[lo_cnt++] = src[i];
+        }
+        count_hi[0] = hi_cnt;
+        count_lo[0] = lo_cnt;
     }
 }
 )";
@@ -92,7 +93,7 @@ static int test_grid_sync_two_phase() {
 static int test_partition_copy() {
     RuntimeEngine& eng = RuntimeEngine::instance();
 
-    KernelId kid;
+    KernelId kid = 0;   // must be zero — non-zero is treated as a requested ID
     CHECK(eng.registerKernel("partition_copy_kernel", PARTITION_COPY_KERNEL, kid));
 
     // Input: 1..16, threshold=8 → hi={9..16}, lo={1..8}
@@ -114,6 +115,7 @@ static int test_partition_copy() {
     memset(hi, 0, N * sizeof(int));
     memset(lo, 0, N * sizeof(int));
     cnthi[0] = cntlo[0] = 0;
+
 
     int n_val = N, t_val = thresh;
     void* args[] = { &src, &n_val, &t_val, &hi, &lo, &cnthi, &cntlo };
