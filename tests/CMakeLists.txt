@@ -446,6 +446,11 @@ add_executable(test_veb_tree core/test_veb_tree.cpp)
 target_link_libraries(test_veb_tree PRIVATE vgre)
 add_test(NAME VEBTree COMMAND test_veb_tree)
 
+# QUEUE-73: Fast GELU via degree-7 Horner polynomial (Chebyshev minimax)
+add_executable(test_gelu_horner unit/test_gelu_horner.cpp)
+target_link_libraries(test_gelu_horner PRIVATE vgre)
+add_test(NAME FastGELUHorner7 COMMAND test_gelu_horner)
+
 # Min-segment tree stream dependency tracker (QUEUE-07)
 add_executable(test_stream_dep_tracker unit/test_stream_dep_tracker.cpp)
 target_link_libraries(test_stream_dep_tracker PRIVATE vgre)

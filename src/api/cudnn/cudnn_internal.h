@@ -183,10 +183,28 @@ static inline float applyActivation(float x, const ActDesc& act) {
     case CUDNN_ACTIVATION_ELU:          return x > 0.f ? x : (float)(act.coeff * (expf(x) - 1.f));
     case CUDNN_ACTIVATION_SWISH:        return x / (1.f + expf(-x));
     case CUDNN_ACTIVATION_GELU: {
-        static constexpr float kSqrt2OverPi = 0.7978845608f;
-        static constexpr float kCoeff       = 0.044715f;
-        float inner = kSqrt2OverPi * (x + kCoeff * x * x * x);
-        return 0.5f * x * (1.f + tanhf(inner));
+        // Fast GELU via degree-7 Horner polynomial; Hendrycks & Gimpel 2016.
+        // inner = √(2/π)·(x + 0.044715·x³); tanh(inner) ≈ Horner7 on |inner|<4.
+        // Coefficients: Chebyshev minimax on [−4,4], not Taylor (Taylor diverges for
+        // |inner|>π/2≈1.57). For |inner|≥4: tanh≈±1 → GELU→x or 0.
+        static constexpr float kA  = 0.7978845608f;  // √(2/π)
+        static constexpr float kB  = 0.044715f;
+        // Chebyshev minimax degree-7 coefficients for tanh(u) on [−4,4]:
+        static constexpr float kH1 =  0.924533f;
+        static constexpr float kH3 = -0.152054f;
+        static constexpr float kH5 =  0.012711f;
+        static constexpr float kH7 = -0.000368f;
+        float inner = kA * (x + kB * (x * x * x));
+        float t;
+        if (inner >= 4.0f)       t =  1.0f;
+        else if (inner <= -4.0f) t = -1.0f;
+        else {
+            float u2 = inner * inner;
+            // Horner: u·(kH1 + u²·(kH3 + u²·(kH5 + u²·kH7)))  O(log U) → O(1) ops
+            t = inner * (kH1 + u2 * (kH3 + u2 * (kH5 + u2 * kH7)));
+            t = (t >  1.0f) ?  1.0f : (t < -1.0f) ? -1.0f : t;
+        }
+        return 0.5f * x * (1.0f + t);
     }
     case CUDNN_ACTIVATION_SELU: {
         static constexpr float kAlpha = 1.6732632423543772f;
@@ -551,14 +569,37 @@ static inline float applyActivationDerivative(float x, float y, const ActDesc& a
         return sig + x * sig * (1.f - sig);
     }
     case CUDNN_ACTIVATION_GELU: {
-        static constexpr float kSqrt2OverPi = 0.7978845608f;
-        static constexpr float kCoeff       = 0.044715f;
-        float x3 = x * x * x;
-        float inner = kSqrt2OverPi * (x + kCoeff * x3);
-        float tanh_i = tanhf(inner);
-        float sech2 = 1.f - tanh_i * tanh_i;
-        float inner_prime = kSqrt2OverPi * (1.f + 3.f * kCoeff * x * x);
-        return 0.5f * (1.f + tanh_i) + 0.5f * x * sech2 * inner_prime;
+        // Derivative must use ACTUAL polynomial derivative dp/du, NOT 1−t².
+        // (1−t² is only exact for mathematical tanh; our t is a polynomial.)
+        // For |inner|≥4: t=±1, polynomial derivative=0 → grad=1 or 0 correctly.
+        static constexpr float kA  = 0.7978845608f;
+        static constexpr float kB  = 0.044715f;
+        static constexpr float kH1 =  0.924533f;
+        static constexpr float kH3 = -0.152054f;
+        static constexpr float kH5 =  0.012711f;
+        static constexpr float kH7 = -0.000368f;
+        float inner = kA * (x + kB * (x * x * x));
+        float t;
+        float dpdu;
+        if (inner >= 4.0f) {
+            t = 1.0f; dpdu = 0.0f;
+        } else if (inner <= -4.0f) {
+            t = -1.0f; dpdu = 0.0f;
+        } else {
+            float u2 = inner * inner;
+            float t_raw = inner * (kH1 + u2 * (kH3 + u2 * (kH5 + u2 * kH7)));
+            if (t_raw >= 1.0f) {
+                t = 1.0f; dpdu = 0.0f;
+            } else if (t_raw <= -1.0f) {
+                t = -1.0f; dpdu = 0.0f;
+            } else {
+                t = t_raw;
+                // p'(u) = kH1 + u²·(3·kH3 + u²·(5·kH5 + u²·7·kH7))  O(1) Horner
+                dpdu = kH1 + u2 * (3.0f*kH3 + u2 * (5.0f*kH5 + u2 * 7.0f*kH7));
+            }
+        }
+        float inner_prime = kA * (1.0f + 3.0f * kB * x * x);
+        return 0.5f * (1.0f + t) + 0.5f * x * dpdu * inner_prime;
     }
     case CUDNN_ACTIVATION_SELU: {
         static constexpr float kAlpha = 1.6732632423543772f;
