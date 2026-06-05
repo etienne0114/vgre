@@ -226,6 +226,102 @@ int main() {
         }
     }
 
+    // ── Test 3: Numerical gradient check (central difference) ────────────
+    // Loss = dot(w, y) with non-uniform w; NOT BN-invariant (sum(w*xhat) ≠ const).
+    // h=1e-2 is the float32-optimal step (h=1e-4 is too small: signal ~3e-4 ≈ float noise).
+    // Analytical dx uses fixed dy=w through the BN backward formula.
+    // Math: dx = scale/std*(dy - mean(dy) - xhat*mean(dy*xhat)); m=N*H*W
+    ++total;
+    {
+        const float h = 1e-2f;  // float32 optimal: noise ≈ 8e-5, approx_err ≈ 1e-4
+        const int N=2, C=1, H=2, W=2;  // C=1 to isolate channel maths
+        const int HW = H*W, SZ = N*C*HW;
+
+        std::vector<float> x(SZ), sc(C), bi(C);
+        for (int i=0; i<SZ; ++i) x[i] = static_cast<float>((i%7) - 3) * 0.5f;
+        sc[0] = 1.5f; bi[0] = 0.3f;
+
+        // Non-uniform dy weights (alternating sign + magnitude variation)
+        std::vector<float> dy(SZ);
+        for (int i=0; i<SZ; ++i) dy[i] = static_cast<float>(i%3) - 1.0f + 0.1f*i;
+
+        cudnnTensorDescriptor_t xDesc3, bnDesc3;
+        cudnnCreateTensorDescriptor(&xDesc3);
+        cudnnSetTensor4dDescriptor(xDesc3, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N,C,H,W);
+        cudnnCreateTensorDescriptor(&bnDesc3);
+        cudnnSetTensor4dDescriptor(bnDesc3, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1,C,1,1);
+
+        // Forward pass to get saved mean/inv-std
+        std::vector<float> y0(SZ), sm0(C), siv0(C);
+        {
+            std::vector<float> rm(C, 0.f), rv(C, 1.f);
+            float a=1.f, b=0.f;
+            cudnnBatchNormalizationForwardTraining(
+                handle, CUDNN_BATCHNORM_SPATIAL,
+                &a, &b,
+                xDesc3, x.data(),
+                xDesc3, y0.data(),
+                bnDesc3, sc.data(), bi.data(),
+                0.1, rm.data(), rv.data(),
+                1e-5,
+                sm0.data(), siv0.data());
+        }
+
+        // Analytical backward with fixed dy weights
+        std::vector<float> dx_an(SZ, 0.f), dSc(C, 0.f), dBi(C, 0.f);
+        {
+            float a=1.f, b=0.f;
+            cudnnBatchNormalizationBackward(
+                handle, CUDNN_BATCHNORM_SPATIAL,
+                &a, &b, &a, &b,
+                xDesc3, x.data(),
+                xDesc3, dy.data(),
+                xDesc3, dx_an.data(),
+                bnDesc3, sc.data(),
+                dSc.data(), dBi.data(),
+                1e-5, sm0.data(), siv0.data());
+        }
+
+        // Numerical gradient: L = dot(dy, y(x))  →  dL/dx[i] via central diff
+        bool ok = true;
+        for (int i=0; i<SZ && ok; ++i) {
+            std::vector<float> xp = x, xm = x;
+            xp[i] += h; xm[i] -= h;
+
+            std::vector<float> yp(SZ,0.f), ym(SZ,0.f), smp(C), sivp(C), smm(C), sivm(C);
+            std::vector<float> rm1(C,0.f), rv1(C,1.f), rm2(C,0.f), rv2(C,1.f);
+            float a=1.f, b=0.f;
+            cudnnBatchNormalizationForwardTraining(
+                handle, CUDNN_BATCHNORM_SPATIAL,
+                &a, &b, xDesc3, xp.data(), xDesc3, yp.data(),
+                bnDesc3, sc.data(), bi.data(), 0.1, rm1.data(), rv1.data(),
+                1e-5, smp.data(), sivp.data());
+            cudnnBatchNormalizationForwardTraining(
+                handle, CUDNN_BATCHNORM_SPATIAL,
+                &a, &b, xDesc3, xm.data(), xDesc3, ym.data(),
+                bnDesc3, sc.data(), bi.data(), 0.1, rm2.data(), rv2.data(),
+                1e-5, smm.data(), sivm.data());
+
+            float Lp = 0.f, Lm = 0.f;
+            for (int j=0; j<SZ; ++j) { Lp += dy[j]*yp[j]; Lm += dy[j]*ym[j]; }
+            float dx_num_i = (Lp - Lm) / (2.f * h);
+
+            float err = std::abs(dx_an[i] - dx_num_i);
+            if (err > 1e-3f) {
+                std::cerr << "FAIL [NumGrad] i=" << i
+                          << " dx_an=" << dx_an[i]
+                          << " dx_num=" << dx_num_i
+                          << " err=" << err << "\n";
+                ok = false;
+            }
+        }
+
+        if (ok) { std::cout << "PASS [Numerical gradient dX, tol 1e-3]\n"; ++pass; }
+
+        cudnnDestroyTensorDescriptor(xDesc3);
+        cudnnDestroyTensorDescriptor(bnDesc3);
+    }
+
     cudnnDestroy(handle);
 
     std::cout << "\n" << pass << "/" << total << " tests passed.\n";
