@@ -1125,7 +1125,6 @@ static void chacha20_xor(const uint8_t key[32], const uint8_t nonce[12],
                          const uint8_t *in, uint8_t *out, size_t len) {
     uint32_t k[8], n[3];
     for (int i = 0; i < 8; ++i) {
-        k[i] = (uint32_t)in[0];  // dummy init, overwritten below
         k[i] = ((uint32_t)key[i*4+0])
               | ((uint32_t)key[i*4+1] << 8)
               | ((uint32_t)key[i*4+2] << 16)
