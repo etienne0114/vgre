@@ -152,6 +152,51 @@ void RDMAContext::deregisterMemory(RDMARegion* region) {
     delete region;
 }
 
+// ── Zero-copy pre-registration ────────────────────────────────────────────────
+// Pins the memory region at cudaMalloc time so rdmaWriteToRemote avoids the
+// per-transfer ibv_reg_mr syscall (O(n/4K) page-table walks).
+// Complexity: O(1) insert into hash map after O(n/4K) ibv_reg_mr.
+
+void RDMAContext::preRegisterAllocation(void* ptr, size_t size) {
+    if (!ptr || size == 0) return;
+    RDMARegion* region = registerMemory(ptr, size);
+    if (!region) {
+        VGRE_LOG_WARN("RDMATransport",
+                      "preRegisterAllocation: ibv_reg_mr failed for " +
+                      std::to_string(size) + " bytes at " +
+                      std::to_string(reinterpret_cast<uintptr_t>(ptr)));
+        return;
+    }
+    std::lock_guard<std::mutex> lk(allocCacheMu_);
+    // Replace any stale entry (shouldn't happen but guard against reuse)
+    auto it = allocCache_.find(ptr);
+    if (it != allocCache_.end()) {
+        deregisterMemory(it->second);
+    }
+    allocCache_[ptr] = region;
+    VGRE_LOG_DEBUG("RDMATransport",
+                   "pre-pinned allocation " + std::to_string(size) +
+                   " bytes at " + std::to_string(reinterpret_cast<uintptr_t>(ptr)));
+}
+
+void RDMAContext::deregisterAllocation(void* ptr) {
+    RDMARegion* region = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(allocCacheMu_);
+        auto it = allocCache_.find(ptr);
+        if (it == allocCache_.end()) return;
+        region = it->second;
+        allocCache_.erase(it);
+    }
+    deregisterMemory(region);
+}
+
+RDMARegion* RDMAContext::lookupCachedRegion(void* ptr) {
+    std::lock_guard<std::mutex> lk(allocCacheMu_);
+    auto it = allocCache_.find(ptr);
+    return (it != allocCache_.end()) ? it->second : nullptr;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // RDMAConnection
 // ─────────────────────────────────────────────────────────────────────────────
@@ -418,11 +463,13 @@ bool RDMAConnection::rdmaWriteToRemote(RDMAContext& ctx, const void* src, size_t
     // into the same remote bounce buffer region.
     std::lock_guard<std::mutex> lk(writeMtx_);
 
-    // Register the FULL source buffer with a single ibv_reg_mr call.
-    // This pins all required pages once rather than per-chunk, which is
-    // critical for performance: ibv_reg_mr is a blocking syscall that can take
-    // tens of microseconds per MB on a cold page table.
-    RDMARegion* srcMR = ctx.registerMemory(const_cast<void*>(src), size);
+    // Zero-copy fast path: use the pre-registered region if available (pinned at cudaMalloc time).
+    // Falls back to on-demand ibv_reg_mr if the caller didn't pre-register.
+    // Math: pre-registered path = O(1); fallback = O(n/4K) page-table walks.
+    void* srcMutable = const_cast<void*>(src);
+    RDMARegion* cachedMR = ctx.lookupCachedRegion(srcMutable);
+    bool ownedRegion = (cachedMR == nullptr);
+    RDMARegion* srcMR = cachedMR ? cachedMR : ctx.registerMemory(srcMutable, size);
     if (!srcMR) {
         VGRE_LOG_ERROR("RDMATransport",
                        "rdmaWriteToRemote: ibv_reg_mr failed for " +
@@ -448,7 +495,9 @@ bool RDMAConnection::rdmaWriteToRemote(RDMAContext& ctx, const void* src, size_t
         }
     }
 
-    ctx.deregisterMemory(srcMR);
+    // Only deregister if we allocated this region ourselves (not pre-cached).
+    // Pre-registered regions are managed by the allocation lifecycle.
+    if (ownedRegion) ctx.deregisterMemory(srcMR);
 
     // On non-x86 platforms (e.g. ARM), RDMA DMA writes bypass the CPU cache.
     // A compiler/memory barrier ensures the CPU does not read stale cached
@@ -486,6 +535,9 @@ RDMAConnection::~RDMAConnection() {}
 bool   RDMAConnection::connect(SecureChannel&, RDMAContext&)                      { return false; }
 bool   RDMAConnection::rdmaWrite(const RDMARegion*, uint64_t, uint32_t, size_t)   { return false; }
 bool   RDMAConnection::rdmaWriteToRemote(RDMAContext&, const void*, size_t)       { return false; }
+void   RDMAContext::preRegisterAllocation(void* /*ptr*/, size_t /*size*/)         {}
+void   RDMAContext::deregisterAllocation(void* /*ptr*/)                          {}
+RDMARegion* RDMAContext::lookupCachedRegion(void* /*ptr*/)                       { return nullptr; }
 size_t RDMAConnection::pollCompletion(int)                                        { return 0; }
 
 } // namespace advanced

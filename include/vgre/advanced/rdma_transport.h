@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <unordered_map>
 #include <string>
 
 #ifdef VGRE_HAS_RDMA
@@ -75,6 +76,19 @@ public:
     RDMARegion* registerMemory(void* ptr, size_t size);
     void        deregisterMemory(RDMARegion* region);
 
+    // ── Zero-copy pre-registration for cudaMalloc blocks ─────────────────────
+    // Called at cudaMalloc time to pin memory immediately.
+    // Math: ibv_reg_mr cost = O(n/4K) page-table walks (blocked syscall).
+    //       Pre-registering at alloc time amortises this cost; rdmaWriteToRemote
+    //       then uses the cached region in O(1) instead of O(n/4K).
+    // Invariant: each (ptr,size) pair maps to at most one live RDMARegion*.
+    void        preRegisterAllocation(void* ptr, size_t size);
+    void        deregisterAllocation(void* ptr);
+
+    // Look up a previously pre-registered region.  Returns nullptr if the
+    // pointer was not pre-registered (caller falls back to on-demand reg_mr).
+    RDMARegion* lookupCachedRegion(void* ptr);
+
     // Accessors for RDMAConnection
 #ifdef VGRE_HAS_RDMA
     ibv_context* ctx() const { return ctx_; }
@@ -93,6 +107,11 @@ private:
     ibv_cq*      cq_  = nullptr;
 #endif
     std::string deviceName_;
+
+    // Zero-copy allocation cache: ptr → pre-registered RDMARegion*.
+    // Protected by allocCacheMu_. O(1) lookup via hash map.
+    std::mutex                          allocCacheMu_;
+    std::unordered_map<void*, RDMARegion*> allocCache_;
 };
 
 // ── RDMA connection (one per peer) ────────────────────────────────────────────
