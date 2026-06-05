@@ -11,6 +11,7 @@
 #include "vgre/core/graph_manager.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/scheduler.h"
+#include "vgre/core/stream_dep_tracker.h"
 #include "vgre/core/virtual_gpu_device.h"
 #include "vgre/compiler/clang_kernel_parser.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
@@ -56,6 +57,13 @@ VGREResult RuntimeEngine::initialize() {
 #endif
 
   VGRE_LOG_INFO("RuntimeEngine", "Initializing VGRE Runtime Engine...");
+
+  // Force StreamDepTracker construction BEFORE Scheduler.
+  // Meyers singletons are destroyed in reverse construction order.  Workers
+  // call StreamDepTracker::notifyKernelComplete during their final task loop,
+  // so StreamDepTracker must outlive the Scheduler (which joins workers in its
+  // dtor).  Constructing StreamDepTracker first ensures it is destroyed last.
+  StreamDepTracker::instance();
 
   // Create sub-systems
   scheduler_ = &Scheduler::instance();

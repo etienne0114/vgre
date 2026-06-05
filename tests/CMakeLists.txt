@@ -946,6 +946,7 @@ if(EXISTS "${VGRE_VENV_PYTHON}")
     set_tests_properties(PythonCAPIVectorAdd PROPERTIES
         ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
         LABELS "python;e2e"
+        SKIP_RETURN_CODE 77
     )
 else()
     # Fallback: use the system Python3 found by CMake.
@@ -956,6 +957,7 @@ else()
         set_tests_properties(PythonCAPIVectorAdd PROPERTIES
             ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
             LABELS "python;e2e"
+            SKIP_RETURN_CODE 77
         )
     endif()
 endif()
