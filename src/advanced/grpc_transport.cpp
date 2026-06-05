@@ -14,8 +14,11 @@
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/server_builder.h>
 
-#include "vgre/core/memory_manager.h"    // getUsedMemory / getTotalMemory
+#include "vgre/common/types.h"           // MemoryHandle, VGREResult
+#include "vgre/common/error_codes.h"     // VGREResult enum
+#include "vgre/core/memory_manager.h"    // MemoryManager singleton
 #include "vgre/core/runtime_engine.h"    // RuntimeEngine singleton
+#include "vgre/advanced/adaptive_execution_engine.h"
 #endif
 
 #include <cstring>
@@ -35,8 +38,8 @@ class VGREClusterServiceImpl final
     std::unordered_map<uint64_t, void*>    allocMap_;
 
     uint64_t doAlloc(uint64_t bytes) {
-        vgre::core::MemoryHandle h = nullptr;
-        if (vgre::core::MemoryManager::instance().allocate(bytes, h) != vgre::core::VGREResult::SUCCESS) {
+        vgre::MemoryHandle h = nullptr;
+        if (vgre::core::MemoryManager::instance().allocate(bytes, h) != vgre::VGREResult::SUCCESS) {
             return 0;
         }
         uint64_t handle = nextPtr_.fetch_add(bytes, std::memory_order_relaxed);
@@ -102,7 +105,7 @@ public:
         auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t0).count();
             
-        resp->set_status(rc == vgre::core::VGREResult::SUCCESS ? 0 : 1);
+        resp->set_status(rc == vgre::VGREResult::SUCCESS ? 0 : 1);
         resp->set_elapsed_us(static_cast<uint64_t>(elapsed));
         return grpc::Status::OK;
     }

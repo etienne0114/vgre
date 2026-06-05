@@ -902,33 +902,27 @@ cusparseStatus_t cusparseDcsrilu02_analysis(cusparseHandle_t /*h*/, int /*m*/, i
         csrilu02Info_t /*info*/, int /*policy*/, void * /*buf*/) {
     return CUSPARSE_STATUS_SUCCESS;
 }
+// cusparseScsrilu02 / cusparseDcsrilu02 implement ILU(0) — zero fill-in,
+// no pivoting. This MUST use the ilu0_csr path regardless of UMFPACK availability.
+// UMFPACK computes a FULL fill-in LU with row/column pivoting which violates the
+// ILU(0) contract (sparsity pattern unchanged, factorization differs from zero-fill).
+// UMFPACK is reserved for cusparseSparseToDense and future full-fill variants only.
 cusparseStatus_t cusparseScsrilu02(cusparseHandle_t /*h*/, int m, int nnz,
         const cusparseSpMatDescr_t /*d*/,
         float *csrVal, const int *rowPtr, const int *colInd,
         csrilu02Info_t /*info*/, int /*policy*/, void * /*buf*/) {
-    cusparseStatus_t factSt;
-#ifdef VGRE_HAS_UMFPACK
-    // Use UMFPACK for exact full fill-in LU when available.
-    factSt = umfpack_lu_inplace<float>(m, csrVal, rowPtr, colInd);
-#else
-    factSt = ilu0_csr<float>(m, nnz, csrVal, rowPtr, colInd, 0);
-#endif
+    // ILU(0): zero-fill in-place factorization preserving original sparsity.
+    // Complexity: O(nnz * max_row_len). No pivoting — preserves sparsity invariant.
+    cusparseStatus_t factSt = ilu0_csr<float>(m, nnz, csrVal, rowPtr, colInd, 0);
     if (factSt != CUSPARSE_STATUS_SUCCESS) return factSt;
-    // Residual norm check: warn if quality is poor, abort if catastrophically bad.
     return ilu0_residual_check<float>(m, csrVal, rowPtr, colInd);
 }
 cusparseStatus_t cusparseDcsrilu02(cusparseHandle_t /*h*/, int m, int nnz,
         const cusparseSpMatDescr_t /*d*/,
         double *csrVal, const int *rowPtr, const int *colInd,
         csrilu02Info_t /*info*/, int /*policy*/, void * /*buf*/) {
-    cusparseStatus_t factSt;
-#ifdef VGRE_HAS_UMFPACK
-    factSt = umfpack_lu_inplace<double>(m, csrVal, rowPtr, colInd);
-#else
-    factSt = ilu0_csr<double>(m, nnz, csrVal, rowPtr, colInd, 0);
-#endif
+    cusparseStatus_t factSt = ilu0_csr<double>(m, nnz, csrVal, rowPtr, colInd, 0);
     if (factSt != CUSPARSE_STATUS_SUCCESS) return factSt;
-    // Residual norm check: warn if quality is poor, abort if catastrophically bad.
     return ilu0_residual_check<double>(m, csrVal, rowPtr, colInd);
 }
 
