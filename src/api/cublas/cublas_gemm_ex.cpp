@@ -419,14 +419,26 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
     void *C, int Ctype, int ldc, long long strideC,
     int batchCount, int computeType, int algo)
 {
-    // Byte size per element, keyed on GEMEX type enum
+    // Byte size per element, keyed on GEMEX type enum.
+    // Complex types have two components (re+im interleaved), so each complex
+    // element is exactly twice the size of the corresponding real element:
+    //   C_8I  = 2×int8   =  2 bytes   (was incorrectly sharing the R_8I case)
+    //   C_16F = 2×fp16   =  4 bytes   (handled by default)
+    //   C_32F = 2×float  =  8 bytes   (was incorrectly grouped with R_32F)
+    //   C_64F = 2×double = 16 bytes   (was incorrectly grouped with R_64F)
+    //   C_32I = 2×int32  =  8 bytes   (correct: was grouped with R_64F which is also 8)
     auto elemBytes = [](int t) -> int {
         switch (t) {
-            case (int)GEMEX_R_8I:  case (int)GEMEX_R_8U:  case (int)GEMEX_C_8I:  return 1;
-            case (int)GEMEX_R_16F: case (int)GEMEX_R_16BF:                        return 2;
-            case (int)GEMEX_R_32F: case (int)GEMEX_R_32I:  case (int)GEMEX_C_32F: return 4;
-            case (int)GEMEX_R_64F: case (int)GEMEX_C_64F:  case (int)GEMEX_C_32I: return 8;
-            default:                                                                return 4;
+            case (int)GEMEX_R_8I:  case (int)GEMEX_R_8U:              return 1;
+            case (int)GEMEX_C_8I:                                      return 2;  // 2×int8
+            case (int)GEMEX_R_16F: case (int)GEMEX_R_16BF:            return 2;
+            case (int)GEMEX_C_16F: case (int)GEMEX_C_16BF:            return 4;  // 2×fp16/bf16
+            case (int)GEMEX_R_32F: case (int)GEMEX_R_32I:             return 4;
+            case (int)GEMEX_C_32F:                                     return 8;  // 2×float
+            case (int)GEMEX_C_32I:                                     return 8;  // 2×int32
+            case (int)GEMEX_R_64F:                                     return 8;
+            case (int)GEMEX_C_64F:                                     return 16; // 2×double
+            default:                                                    return 4;
         }
     };
     int aBytes = elemBytes(Atype);

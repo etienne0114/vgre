@@ -61,6 +61,37 @@ cudnnStatus_t cudnnNormalizationForwardInference(
             if (fuse_act) yval = applyActivation(yval, *act);
             yf[idx] = a * yval + b_scale * yf[idx];
         }
+    } else if (mode == CUDNN_NORM_RMS_LAYER) {
+        // RMSNorm inference: y[i] = x[i] / rms * scale[i]
+        // where rms = sqrt(mean(x²) + eps).  No mean subtraction — only
+        // root-mean-square normalisation.  Used by LLaMA, Mistral, Gemma.
+        // Math: RMS(x) = sqrt((1/D) * sum_i x[i]²),  y = x/RMS * scale.
+        // Complexity: O(N*D), single pass with Kahan-compensated accumulation.
+        int D = C * HW;
+        #ifdef _OPENMP
+        #pragma omp parallel for if (N > 1)
+        #endif
+        for (int n = 0; n < N; ++n) {
+            const float *xn = xf + n * D;
+            float       *yn = yf + n * D;
+            // Kahan compensated sum of squares for numerical stability:
+            // error bound O(ε) vs O(D·ε) for naive sum.
+            double sum2 = 0.0, comp = 0.0;
+            for (int i = 0; i < D; ++i) {
+                double v = static_cast<double>(xn[i]) * xn[i];
+                double y_k = v - comp;
+                double t   = sum2 + y_k;
+                comp  = (t - sum2) - y_k;
+                sum2  = t;
+            }
+            float rms     = std::sqrt(static_cast<float>(sum2 / D) + static_cast<float>(epsilon));
+            float inv_rms = 1.0f / rms;
+            for (int i = 0; i < D; ++i) {
+                float yval = xn[i] * inv_rms * sc[i];
+                if (fuse_act) yval = applyActivation(yval, *act);
+                yn[i] = a * yval + b_scale * yn[i];
+            }
+        }
     } else {
         // Layer norm inference: normalize over all C*HW elements per sample
         int D = C * HW;
@@ -70,7 +101,6 @@ cudnnStatus_t cudnnNormalizationForwardInference(
         for (int n = 0; n < N; ++n) {
             const float *xn = xf + n * D;
             float *yn = yf + n * D;
-            // Compute mean and variance over D elements
             double sum = 0.0, sum2 = 0.0;
             for (int i = 0; i < D; ++i) { sum += xn[i]; sum2 += static_cast<double>(xn[i]) * xn[i]; }
             float mean_n = static_cast<float>(sum / D);
@@ -79,7 +109,6 @@ cudnnStatus_t cudnnNormalizationForwardInference(
             for (int i = 0; i < D; ++i) {
                 float xhat = (xn[i] - mean_n) * inv_std;
                 float yval = sc[i] * xhat + bi[i];
-                // Fused BN+ReLU: single pass O(N·C·H·W), no intermediate buffer
                 if (fuse_act) yval = applyActivation(yval, *act);
                 yn[i] = a * yval + b_scale * yn[i];
             }

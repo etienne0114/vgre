@@ -565,53 +565,215 @@ ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff,
 
     return ncclSuccess;
 }
-// ── ncclReduceScatter ─────────────────────────────────────────────────────────
-// Each rank gets 1/nranks of the fully reduced array (rank r gets slice [r]).
+// ── ncclReduceScatter — Ring Phase 1 ─────────────────────────────────────────
+// Each rank r receives the fully-reduced chunk r out of N_ranks chunks.
+// Math: recvbuff = Σ_{i=0}^{N-1} sendbuff_i[r*recvcount : (r+1)*recvcount]
+//
+// Algorithm: Phase 1 of the Rabenseifner ring AllReduce (reduce-scatter step).
+// Bandwidth efficiency: η = (N-1)/N (half of the full AllReduce).
+//
+// N-1 barrier-synchronised steps:
+//   Step s: rank i accumulates chunk (i-s-1+N)%N from its left predecessor's
+//   ring_accum into its own ring_accum for that chunk position.
+//   After N-1 steps, ring_accum[r] holds the fully-reduced data for chunk
+//   (r+1)%N (ring invariant).  Rank r then copies chunk r out of
+//   ring_accum[(r-1+N)%N] into recvbuff.
+//
+// For nranks==1 or very small payloads (≤kTreeThreshold) we fall through to
+// the flat-barrier path for lowest latency.
 ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff,
                                 size_t recvcount, ncclDataType_t datatype,
                                 ncclRedOp_t op, ncclComm_t comm, void* /*stream*/) {
     if (!comm || !sendbuff || !recvbuff) return ncclInvalidArgument;
     auto* c = static_cast<ncclComm*>(comm);
     auto& st = *c->state;
+    const int    nranks   = st.nranks;
+    const int    rank     = c->rank;
     const size_t elem_sz  = nccl_elem_size(datatype);
-    const size_t total    = recvcount * st.nranks * elem_sz;
+    const size_t total    = recvcount * static_cast<size_t>(nranks) * elem_sz;
     const size_t recv_sz  = recvcount * elem_sz;
 
+    // Single-rank trivial case: copy sendbuff → recvbuff directly.
+    if (nranks == 1) {
+        memcpy(recvbuff, sendbuff, recv_sz);
+        return ncclSuccess;
+    }
+
+    // ── Flat-barrier path for small payloads (latency-optimal) ───────────────
+    if (total <= kTreeThreshold) {
+        std::unique_lock<std::mutex> lk(st.mu);
+        const int gen = st.generation;
+
+        st.sendbufs[rank] = sendbuff;
+        st.arrived_phase0++;
+
+        if (st.arrived_phase0 == nranks) {
+            st.result_buf.resize(total);
+            memcpy(st.result_buf.data(), st.sendbufs[0], total);
+            for (int r = 1; r < nranks; ++r)
+                apply_reduce(st.result_buf.data(), st.sendbufs[r],
+                             recvcount * static_cast<size_t>(nranks), datatype, op);
+            if (op == ncclAvg)
+                scale_avg(st.result_buf.data(),
+                          recvcount * static_cast<size_t>(nranks), datatype, nranks);
+            st.arrived_phase0 = 0;
+            st.generation++;
+            st.cv.notify_all();
+        } else {
+            bool ok = st.wait_pred(lk, [&]{ return st.generation != gen; });
+            if (!ok) return ncclSystemError;
+        }
+
+        memcpy(recvbuff, st.result_buf.data() + static_cast<size_t>(rank) * recv_sz, recv_sz);
+
+        st.arrived_phase1++;
+        if (st.arrived_phase1 == nranks) {
+            st.arrived_phase1 = 0;
+            st.result_buf.clear();
+            st.cv.notify_all();
+        } else {
+            st.wait_pred(lk, [&]{ return st.arrived_phase1 == 0; });
+        }
+        return ncclSuccess;
+    }
+
+    // ── Ring Phase 1 (bandwidth-optimal reduce-scatter) ───────────────────────
+    // Chunk layout: chunk k starts at element index k * chunk_count.
+    // chunk_count = ceil(recvcount / N) — last chunk may be smaller.
+    const size_t chunk_count = (recvcount + static_cast<size_t>(nranks) - 1)
+                                / static_cast<size_t>(nranks);
+    auto chunk_range = [&](int k) -> std::pair<size_t, size_t> {
+        size_t start = static_cast<size_t>(k) * chunk_count;
+        size_t end   = std::min(start + chunk_count, recvcount);
+        return {start, end};
+    };
+
+    // Barrier helper shared with ring_allreduce.
+    // ring_gen / ring_arrived synchronise all N ranks at each step boundary.
+    auto ring_barrier = [&](std::unique_lock<std::mutex>& lk) -> bool {
+        int target = st.ring_gen + 1;
+        st.ring_arrived++;
+        if (st.ring_arrived == nranks) {
+            st.ring_arrived = 0;
+            st.ring_gen     = target;
+            st.cv.notify_all();
+        } else {
+            bool ok = st.wait_pred(lk, [&]{ return st.ring_gen == target; });
+            if (!ok) return false;
+        }
+        return true;
+    };
+
     std::unique_lock<std::mutex> lk(st.mu);
-    const int gen = st.generation;
 
-    st.sendbufs[c->rank] = sendbuff;
+    // ── Initialisation barrier: all ranks deposit their send buffers ──────────
+    // ring_accum[r] is initialised to a full copy of rank r's sendbuff.
+    // Total = N * recvcount elements (one full message per rank).
+    st.sendbufs[rank] = sendbuff;
     st.arrived_phase0++;
-
-    if (st.arrived_phase0 == st.nranks) {
-        st.result_buf.resize(total);
-        memcpy(st.result_buf.data(), st.sendbufs[0], total);
-        for (int r = 1; r < st.nranks; ++r)
-            apply_reduce(st.result_buf.data(), st.sendbufs[r],
-                         recvcount * st.nranks, datatype, op);
-        if (op == ncclAvg) scale_avg(st.result_buf.data(), recvcount * st.nranks, datatype, st.nranks);
+    if (st.arrived_phase0 == nranks) {
+        st.ring_accum.resize(nranks);
+        for (int r = 0; r < nranks; ++r) {
+            st.ring_accum[r].resize(total);
+            memcpy(st.ring_accum[r].data(), st.sendbufs[r], total);
+        }
         st.arrived_phase0 = 0;
+        st.ring_step      = 0;
         st.generation++;
         st.cv.notify_all();
     } else {
-        bool ok = st.wait_pred(lk, [&]{ return st.generation != gen; });
+        bool ok = st.wait_pred(lk, [&]{ return st.arrived_phase0 == 0; });
         if (!ok) return ncclSystemError;
     }
 
-    // Each rank copies its own slice
-    memcpy(recvbuff,
-                st.result_buf.data() + c->rank * recv_sz,
-                recv_sz);
+    // ── Phase 1: Reduce-Scatter (N-1 ring steps) ──────────────────────────────
+    // Step s: rank i reduces chunk (i-s-1+N)%N — accumulating from the
+    // left-predecessor's ring_accum (rank (i-1+N)%N) into its own ring_accum.
+    // Kahan compensated summation is used for fp32/fp64 Sum/Avg to bound error.
+    const int src_rank = (rank - 1 + nranks) % nranks;
 
+    std::vector<float>  kahan_f32(
+        (datatype == ncclFloat32 && (op == ncclSum || op == ncclAvg)) ? recvcount : 0, 0.f);
+    std::vector<double> kahan_f64(
+        (datatype == ncclFloat64 && (op == ncclSum || op == ncclAvg)) ? recvcount : 0, 0.0);
+
+    for (int s = 0; s < nranks - 1; ++s) {
+        int src_chunk = ((rank - s - 1) % nranks + nranks) % nranks;
+        auto [start, end] = chunk_range(src_chunk);
+        size_t nelems = end - start;
+
+        uint8_t*       dst_ptr = st.ring_accum[rank].data()     + start * elem_sz;
+        const uint8_t* src_ptr = st.ring_accum[src_rank].data() + start * elem_sz;
+
+        if (datatype == ncclFloat32 && (op == ncclSum || op == ncclAvg)) {
+            float*       dst  = reinterpret_cast<float*>(dst_ptr);
+            const float* src  = reinterpret_cast<const float*>(src_ptr);
+            float*       comp = kahan_f32.data() + start;
+            for (size_t i = 0; i < nelems; ++i) {
+                float y = src[i] - comp[i];
+                float t = dst[i] + y;
+                comp[i] = (t - dst[i]) - y;
+                dst[i]  = t;
+            }
+        } else if (datatype == ncclFloat64 && (op == ncclSum || op == ncclAvg)) {
+            double*       dst  = reinterpret_cast<double*>(dst_ptr);
+            const double* src  = reinterpret_cast<const double*>(src_ptr);
+            double*       comp = kahan_f64.data() + start;
+            for (size_t i = 0; i < nelems; ++i) {
+                double y = src[i] - comp[i];
+                double t = dst[i] + y;
+                comp[i] = (t - dst[i]) - y;
+                dst[i]  = t;
+            }
+        } else {
+            apply_reduce(dst_ptr, src_ptr, nelems, datatype, op);
+        }
+
+        if (!ring_barrier(lk)) return ncclSystemError;
+    }
+
+    // ── Average scaling ───────────────────────────────────────────────────────
+    // Scale the owned chunk by 1/N before copying to recvbuff.
+    if (op == ncclAvg)
+        scale_avg(st.ring_accum[rank].data(), recvcount, datatype, nranks);
+
+    // Final phase-transition barrier so all ranks have finished their last step
+    // before any rank reads from a predecessor's ring_accum below.
+    if (!ring_barrier(lk)) return ncclSystemError;
+
+    // ── Copy fully-reduced chunk for this rank into recvbuff ──────────────────
+    // After N-1 reduce-scatter steps, ring_accum[r] holds the fully-reduced data
+    // for chunk (r+1)%N (ring invariant).  Rank i wants chunk i, which is owned
+    // by ring_accum[(i-1+N)%N].
+    {
+        const int owner = (rank - 1 + nranks) % nranks;
+        auto [start, end] = chunk_range(rank);
+        size_t copy_bytes = (end - start) * elem_sz;
+        memcpy(recvbuff,
+               st.ring_accum[owner].data() + start * elem_sz,
+               copy_bytes);
+        // If recvcount is not evenly divisible the last rank's slice may be
+        // shorter; zero-pad the remainder so the caller always sees recvcount
+        // elements (consistent with NCCL reference behaviour).
+        if (copy_bytes < recv_sz)
+            memset(static_cast<uint8_t*>(recvbuff) + copy_bytes, 0,
+                   recv_sz - copy_bytes);
+    }
+
+    // ── Teardown barrier: last rank clears ring_accum ─────────────────────────
     st.arrived_phase1++;
-    if (st.arrived_phase1 == st.nranks) {
+    if (st.arrived_phase1 == nranks) {
         st.arrived_phase1 = 0;
-        st.result_buf.clear();
+        st.ring_accum.clear();
         st.cv.notify_all();
     } else {
         st.wait_pred(lk, [&]{ return st.arrived_phase1 == 0; });
     }
 
+    VGRE_LOG_DEBUG("NCCL", "ncclReduceScatter (ring): " +
+                   std::to_string(total) + " bytes, " +
+                   std::to_string(nranks) + " ranks, η=(N-1)/N=" +
+                   std::to_string(static_cast<double>(nranks - 1) / nranks));
     return ncclSuccess;
 }
 

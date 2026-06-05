@@ -679,7 +679,8 @@ enum cudnnBatchNormMode_t {
 // ── Normalization (cuDNN 8.5+) ────────────────────────────────────────────────
 enum cudnnNormMode_t {
     CUDNN_NORM_PER_ACTIVATION = 0,  // layer norm: per element scale/bias
-    CUDNN_NORM_PER_CHANNEL    = 1   // batch norm: per channel (reuses BN path)
+    CUDNN_NORM_PER_CHANNEL    = 1,  // batch norm: per channel (reuses BN path)
+    CUDNN_NORM_RMS_LAYER      = 2   // RMSNorm: normalise by root-mean-square (LLaMA/Gemma)
 };
 enum cudnnNormAlgo_t {
     CUDNN_NORM_ALGO_STANDARD   = 0,

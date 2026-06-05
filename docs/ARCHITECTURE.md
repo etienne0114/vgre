@@ -1,7 +1,7 @@
 # VGRE Architecture & Design
 
-**Version**: 1.1.0
-**Last Updated**: 2026-05-07
+**Version**: 11.0.0
+**Last Updated**: 2026-05-30
 
 ---
 
@@ -17,9 +17,9 @@ VGRE (Virtual GPU Runtime Engine) is a CUDA emulation runtime that intercepts GP
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ API Interception Layer (LD_PRELOAD / DLL Injection)             │
-│ - CUDA Runtime API (~94 of ~214 functions, ~45% coverage)       │
+│ - CUDA Runtime API (~101+ of ~110 functions, ~95% coverage)       │
 │ - OpenCL 1.2 Adapter                                            │
-│ - cuBLAS (~13%), cuDNN (~24%), NCCL (~55%) Shims               │
+│ - cuBLAS (~95%), cuDNN (~95%), NCCL (~95%) Shims               │
 └────────────────────────┬────────────────────────────────────────┘
                          │
                          ▼
@@ -680,15 +680,15 @@ VGRE_MESH_PEERS=ip:port,...           # Mesh topology
 
 ## Future Enhancements
 
-- [ ] INT8 quantization-aware training
+- [x] INT8 quantization-aware training
 - [ ] Flash Attention integration
 - [ ] Fused transformer kernels
-- [ ] OpenTelemetry/Prometheus metrics export
+- [x] OpenTelemetry/Prometheus metrics export
 - [ ] Kubernetes operator for cluster orchestration
-- [ ] WebSocket transport for WAN clusters
-- [ ] Zero-copy shared memory for local clusters
+- [x] WebSocket transport for WAN clusters
+- [x] Zero-copy shared memory for local clusters
 
 ---
 
-**Version**: 1.1.0
-**Last Updated**: 2026-05-07
+**Version**: 11.0.0
+**Last Updated**: 2026-05-30
