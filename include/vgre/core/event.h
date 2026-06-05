@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <future>
+#include <memory>
 #include <mutex>
 
 namespace vgre {
@@ -19,9 +20,9 @@ namespace core {
  * execution timeline.
  */
 // CUDA event creation flags — subset supported by VGRE.
-static constexpr unsigned kEventDefault      = 0x00;
-static constexpr unsigned kEventBlockingSync = 0x01;  // cv_ wait instead of spin
-static constexpr unsigned kEventDisableTiming = 0x02; // skip timestamp recording
+static constexpr unsigned kEventDefault       = 0x00;
+static constexpr unsigned kEventBlockingSync  = 0x01;  // fut.wait_for blocks kernel-side
+static constexpr unsigned kEventDisableTiming = 0x02;  // skip timestamp recording
 
 class Event {
 public:
@@ -74,7 +75,11 @@ public:
 
 private:
   mutable std::mutex mutex_;
-  mutable std::condition_variable cv_;  // used when kEventBlockingSync set
+  // cv_ is heap-allocated and shared with task lambdas so it outlives the Event.
+  // Worker threads call cv_->notify_all() after set_value(); without shared ownership
+  // the destructor could race with an in-flight notify_all (TSan Race 2).
+  mutable std::shared_ptr<std::condition_variable> cv_ =
+      std::make_shared<std::condition_variable>();
   std::shared_future<TimePoint> future_;
   bool recorded_;
   unsigned int flags_ = kEventDefault;  // creation flags

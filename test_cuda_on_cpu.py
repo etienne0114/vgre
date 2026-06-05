@@ -18,7 +18,11 @@ import ctypes
 import ctypes.util
 import os
 import sys
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    print("SKIP: numpy not available — install it to run PythonCAPIVectorAdd")
+    sys.exit(77)  # CTest SKIP_RETURN_CODE
 
 # ---------------------------------------------------------------------------
 # Locate libvgre.so

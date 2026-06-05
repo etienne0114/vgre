@@ -25,14 +25,16 @@ VGREResult Event::record(StreamId stream) {
   auto sharedPromise = std::make_shared<std::promise<TimePoint>>();
   future_ = sharedPromise->get_future().share();
 
-  // Capture cv_ by reference — it lives in this Event which outlives the task.
-  // When kEventBlockingSync is set, notify the cv_ after setting the promise so
-  // that synchronize()'s cv_.wait_for() wakes immediately.
-  auto task = [this, sharedPromise, timing]() {
+  // Capture cv_ by value (copies the shared_ptr, extends lifetime).
+  // Without shared ownership the Event destructor could race with an in-flight
+  // notify_all(): set_value() wakes synchronize() → main thread destroys Event →
+  // worker calls notify_all() on the dead cv_ → SIGSEGV (TSan Race 2).
+  auto cv_copy = cv_;
+  auto task = [sharedPromise, cv_copy, timing]() {
     try {
       TimePoint tp = timing ? std::chrono::steady_clock::now() : TimePoint{};
       sharedPromise->set_value(tp);
-      cv_.notify_all();  // wake any blocking synchronize() calls
+      cv_copy->notify_all();  // safe: shared_ptr keeps cv_ alive past Event dtor
     } catch (...) {}
   };
 
@@ -78,11 +80,12 @@ VGREResult Event::synchronize() const {
   }();
 
   if (flags_ & kEventBlockingSync) {
-    // Blocking-sync: park the thread on a cv_ instead of spinning on the future.
-    // The worker sets the promise → future becomes ready → cv_ is notified.
-    // Math invariant: wait is O(1) wakeups (the promise is set exactly once).
+    // Blocking-sync: park on a cv_ rather than spinning on the future.
+    // Copy the shared_ptr so cv_ stays alive even if the caller destroys the
+    // Event immediately after synchronize() returns (TSan Race 2 prevention).
+    auto cv_local = cv_;
     std::unique_lock<std::mutex> lk(mutex_);
-    bool done = cv_.wait_for(lk, std::chrono::milliseconds(kTimeoutMs),
+    bool done = cv_local->wait_for(lk, std::chrono::milliseconds(kTimeoutMs),
         [&]{ return fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready; });
     return done ? VGREResult::SUCCESS : VGREResult::ERR_TIMEOUT;
   }
