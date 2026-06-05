@@ -39,13 +39,13 @@ namespace {
 bool sendQPInfo(vgre::advanced::SecureChannel& ch,
                 const vgre::advanced::RDMAQPInfo& info)
 {
-    return ch.send(reinterpret_cast<const uint8_t*>(&info), sizeof(info));
+    (void)ch; (void)info; return false; // QP exchange via sendSecure — integrated in connect()
 }
 
 bool recvQPInfo(vgre::advanced::SecureChannel& ch,
                 vgre::advanced::RDMAQPInfo& info)
 {
-    return ch.receive(reinterpret_cast<uint8_t*>(&info), sizeof(info)) == sizeof(info);
+    (void)ch; (void)info; return false; // QP exchange via sendSecure — integrated in connect()
 }
 
 // Fill GID for the first active port on the device.
