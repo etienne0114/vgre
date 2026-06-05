@@ -6,7 +6,9 @@
 #include "vgre/core/event.h"
 #include "vgre/core/texture_manager.h"
 #include <cstddef>
+#include <mutex>
 #include <string>
+#include <unordered_set>
 
 namespace vgre {
 namespace api {
@@ -441,6 +443,14 @@ private:
 
   bool initialized_ = false;
   unsigned int deviceFlags_ = 0;
+
+  // ── Host-pinned allocation tracking (for cudaPointerGetAttributes) ────────
+  // Pointers registered via cudaHostAlloc or cudaHostRegister are tracked here
+  // so pointerGetAttributes can classify them as cudaMemoryTypeHost (1).
+  // Unregistered pointers (not in this set and not in MemoryManager) are also
+  // reported as cudaMemoryTypeHost (1) for CUDA 10 backward compatibility.
+  mutable std::mutex hostAllocMutex_;
+  std::unordered_set<void*> hostAllocSet_;
 };
 
 } // namespace api

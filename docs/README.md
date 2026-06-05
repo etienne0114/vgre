@@ -6,7 +6,7 @@ Welcome to the VGRE (Virtual GPU Runtime Engine) technical documentation suite. 
 
 ## 🗺️ Unified Documentation Index
 
-To keep VGRE technical documentation highly accurate, clear, and non-overlapping, we maintain exactly **five canonical reference manuals**:
+To keep VGRE technical documentation highly accurate, clear, and non-overlapping, we maintain **seven canonical reference manuals**:
 
 ```mermaid
 graph TD
@@ -14,12 +14,16 @@ graph TD
     A --> C["USER_GUIDE.md\n(Setup, Commands, & Troubleshooting)"]
     A --> D["ARCHITECTURE.md\n(Compiler, Scheduler, & Memory Specs)"]
     A --> E["api_reference.md\n(Shim Function Mappings)"]
+    A --> F["missingFeatures.md\n(Hardware Boundary Conditions)"]
+    A --> G["implementationPlan.md\n(Roadmap & Phase Tracker)"]
 
     style A fill:#4a90d9,color:#fff
     style B fill:#f39c12,color:#fff
     style C fill:#f39c12,color:#fff
     style D fill:#f39c12,color:#fff
     style E fill:#f39c12,color:#fff
+    style F fill:#27ae60,color:#fff
+    style G fill:#8e44ad,color:#fff
 ```
 
 ### 1. 📈 [PROJECT_STATUS.md](PROJECT_STATUS.md)
@@ -58,6 +62,20 @@ graph TD
     *   Direct identification of return codes and parameter forwarding logic.
 *   **Read When**: You need to verify if a specific CUDA function or library routine is directly compiled and mapped.
 
+### 5. ⚠️ [missingFeatures.md](missingFeatures.md)
+*   **Purpose**: Exhaustive, authoritative ledger of hardware-level architectural boundaries that represent permanent or long-term limitations of a CPU-based emulator.
+*   **Key Contents**:
+    *   SASS binary execution constraints, CUPTI PMU proxy boundaries, cuDNN v9 Graph API coverage, and GPUDirect RDMA status.
+    *   Distinguishes clean-error-propagation boundaries from software bugs.
+*   **Read When**: You need to know what a VGRE-based application cannot do versus what a physical NVIDIA GPU can do.
+
+### 6. 🗺️ [implementationPlan.md](implementationPlan.md)
+*   **Purpose**: Forward-looking development roadmap organized into numbered tracks (1–10).
+*   **Key Contents**:
+    *   Per-phase completion tables (Phase 7 → 131/131 baseline; Phase 8 → 131/131 post-math-hardening; Phases 9–10 heuristic elimination).
+    *   Detailed engineering specifications for future tracks (SASS ISA emulation, CUPTI hardware passthrough, K8s orchestration, cuDNN v9 graph fusion).
+*   **Read When**: You are planning new feature contributions or tracking which development phases have been completed.
+
 ---
 
 ## 🏆 Platform Feature Matrix
@@ -87,7 +105,7 @@ mkdir -p build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 cmake --build . -j$(nproc)
 
-# 2. Run the complete test suite (130/130 passing)
+# 2. Run the complete test suite (191/191 passing)
 ctest --output-on-failure -j$(nproc)
 ```
 

@@ -734,11 +734,16 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
 
             float attnScale = getAttrFloat(opNode, CUDNN_ATTR_OPERATION_ATTENTION_SCALE,
                                             1.0f / std::sqrt(static_cast<float>(head_dim)));
+            // Causal mask: position i may only attend to positions j <= i.
+            // Implemented as -∞ mask on A[i,j] for j > i before softmax.
+            // Math: causal softmax(A)[i,j] = exp(A[i,j] - max) / Z  where A[i,j>i] = -∞.
+            bool causal = (getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ATTENTION_CAUSAL_MASK) != 0);
 
             const float *Q = static_cast<const float*>(qPtr);
             const float *K = static_cast<const float*>(kPtr);
             const float *V = static_cast<const float*>(vPtr);
             float       *O = static_cast<float*>(oPtr);
+            static constexpr float kNegInf = -1e30f;
 
             std::vector<float> attnScore(static_cast<size_t>(seqQ * seqK));
 
@@ -748,9 +753,16 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
                     int bhK = (b * heads + h) * seqK * head_dim;
                     int bhO = (b * heads + h) * seqQ * head_dim;
 
-                    // Compute A = Q * K^T * scale  [seqQ × seqK]
+                    // A = Q * K^T * scale  [seqQ × seqK]
                     for (int i = 0; i < seqQ; ++i) {
                         for (int j = 0; j < seqK; ++j) {
+                            // Causal mask: query at position i can attend to key at j only if j <= i.
+                            // Offset: when seqQ < seqK the query starts at position seqK-seqQ.
+                            int qi = (seqK - seqQ) + i;  // absolute query position
+                            if (causal && j > qi) {
+                                attnScore[static_cast<size_t>(i * seqK + j)] = kNegInf;
+                                continue;
+                            }
                             float dot = 0.0f;
                             for (int d = 0; d < head_dim; ++d)
                                 dot += Q[bhQ + i * head_dim + d] * K[bhK + j * head_dim + d];
@@ -758,16 +770,25 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
                         }
                     }
 
-                    // Softmax over seqK dim for each query position
+                    // Numerically-stable softmax: max subtraction prevents overflow.
+                    // Math: softmax[j] = exp(A[j]-max) / sum_k exp(A[k]-max)
+                    // Masked positions (kNegInf) contribute exp(-∞) = 0 to sum.
                     for (int i = 0; i < seqQ; ++i) {
                         float *row = attnScore.data() + i * seqK;
-                        float maxVal = *std::max_element(row, row + seqK);
+                        // Find max over unmasked entries
+                        float maxVal = kNegInf;
+                        for (int j = 0; j < seqK; ++j) if (row[j] > maxVal) maxVal = row[j];
+                        if (maxVal == kNegInf) maxVal = 0.f; // all masked — uniform
                         float sumExp = 0.0f;
-                        for (int j = 0; j < seqK; ++j) { row[j] = std::exp(row[j] - maxVal); sumExp += row[j]; }
-                        for (int j = 0; j < seqK; ++j) row[j] /= sumExp;
+                        for (int j = 0; j < seqK; ++j) {
+                            row[j] = (row[j] > kNegInf * 0.5f) ? std::exp(row[j] - maxVal) : 0.0f;
+                            sumExp += row[j];
+                        }
+                        float inv = (sumExp > 0.f) ? 1.f / sumExp : 0.f;
+                        for (int j = 0; j < seqK; ++j) row[j] *= inv;
                     }
 
-                    // Output = A * V  [seqQ × head_dim]
+                    // O = A * V  [seqQ × head_dim]
                     for (int i = 0; i < seqQ; ++i) {
                         for (int d = 0; d < head_dim; ++d) {
                             float sum = 0.0f;

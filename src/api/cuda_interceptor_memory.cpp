@@ -521,12 +521,22 @@ cudaError_t CUDAInterceptor::hostAlloc(void **pHost, size_t size,
     return cudaErrorMemoryAllocation;
   ::memset(ptr, 0, size);
   *pHost = ptr;
+  // Track this pointer so pointerGetAttributes returns cudaMemoryTypeHost (1).
+  {
+    std::lock_guard<std::mutex> lk(hostAllocMutex_);
+    hostAllocSet_.insert(ptr);
+  }
   return cudaSuccess;
 }
 
 cudaError_t CUDAInterceptor::freeHost(void *pHost) {
   if (!pHost)
     return cudaSuccess;
+  // Remove from host-pinned tracking set before freeing.
+  {
+    std::lock_guard<std::mutex> lk(hostAllocMutex_);
+    hostAllocSet_.erase(pHost);
+  }
 #if defined(_WIN32)
   _aligned_free(pHost);
 #else
@@ -539,6 +549,11 @@ cudaError_t CUDAInterceptor::hostRegister(void *pHost, size_t size,
                                           unsigned int flags) {
   if (!pHost || size == 0) return cudaErrorInvalidValue;
   (void)flags;
+  // Track registered host pointer so pointerGetAttributes returns type=1.
+  {
+    std::lock_guard<std::mutex> lk(hostAllocMutex_);
+    hostAllocSet_.insert(pHost);
+  }
 #if defined(_WIN32)
   // Windows: VirtualLock pins pages (requires SeLockMemoryPrivilege or small sizes)
   if (!VirtualLock(pHost, size)) {
@@ -560,6 +575,11 @@ cudaError_t CUDAInterceptor::hostRegister(void *pHost, size_t size,
 
 cudaError_t CUDAInterceptor::hostUnregister(void *pHost) {
   if (!pHost) return cudaErrorInvalidValue;
+  // Remove from host-pinned tracking set.
+  {
+    std::lock_guard<std::mutex> lk(hostAllocMutex_);
+    hostAllocSet_.erase(pHost);
+  }
 #if defined(_WIN32)
   // VirtualUnlock — ignore failure if not actually locked
   VirtualUnlock(pHost, 0);
@@ -832,6 +852,9 @@ cudaError_t CUDAInterceptor::pointerGetAttributes(
   if (!attributes)
     return cudaErrorInvalidValue;
 
+  // ── Step 1: Check MemoryManager — handles cudaMalloc and cudaMallocManaged ──
+  // getPointerAttributes returns true for any allocation tracked by VGRE,
+  // including managed (UVM) and device-local allocations.
   auto &mm = core::RuntimeEngine::instance().getMemoryManager();
   size_t size = 0;
   bool isManaged = false;
@@ -839,11 +862,15 @@ cudaError_t CUDAInterceptor::pointerGetAttributes(
   unsigned int attachmentFlags = 0;
   if (mm.getPointerAttributes(const_cast<void *>(ptr), size, isManaged,
                               device, attachmentFlags)) {
-    // Tracked allocation
     if (isManaged) {
+      // cudaMallocManaged: accessible from both host and device.
+      // type=3 (cudaMemoryTypeManaged), devicePointer == hostPointer == ptr.
       attributes->memoryType = 3; // cudaMemoryTypeManaged
       attributes->isManaged = 1;
     } else {
+      // cudaMalloc: device-only allocation.
+      // type=2 (cudaMemoryTypeDevice), hostPointer mirrors devicePointer since
+      // VGRE backs device memory with host RAM in the virtual-GPU model.
       attributes->memoryType = 2; // cudaMemoryTypeDevice
       attributes->isManaged = 0;
     }
@@ -853,8 +880,27 @@ cudaError_t CUDAInterceptor::pointerGetAttributes(
     return cudaSuccess;
   }
 
-  // Not a tracked VGRE allocation. In modern CUDA (>=11) behaviour,
-  // unregistered host pointers are reported as cudaMemoryTypeHost.
+  // ── Step 2: Check host-pinned allocation set ──────────────────────────────
+  // Pointers registered via cudaHostAlloc or cudaHostRegister are tracked in
+  // hostAllocSet_ and classified as cudaMemoryTypeHost (1).
+  {
+    std::lock_guard<std::mutex> lk(hostAllocMutex_);
+    if (hostAllocSet_.count(const_cast<void *>(ptr))) {
+      attributes->memoryType = 1; // cudaMemoryTypeHost
+      attributes->device = -1;
+      attributes->devicePointer = nullptr;
+      attributes->hostPointer = const_cast<void *>(ptr);
+      attributes->isManaged = 0;
+      return cudaSuccess;
+    }
+  }
+
+  // ── Step 3: Unrecognised pointer ──────────────────────────────────────────
+  // Any pointer not tracked by VGRE is treated as a plain host (CPU) pointer.
+  // This covers stack variables, heap allocations from malloc/new, and other
+  // non-CUDA memory.  We report cudaMemoryTypeHost (1) for compatibility with
+  // CUDA 10 behaviour; CUDA 11+ would return cudaMemoryTypeUnregistered (0)
+  // but the test suite relies on the CUDA 10 convention.
   attributes->memoryType = 1; // cudaMemoryTypeHost
   attributes->device = -1;
   attributes->devicePointer = nullptr;

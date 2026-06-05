@@ -198,7 +198,7 @@ static void test_work_item_heap() {
         WorkItem wi;
         wi.streamId = static_cast<StreamId>(pri);
         wi.priority = pri;
-        nodes.push_back(wh.push(wi));
+        nodes.push_back(wh.push(std::move(wi)));  // VGREFunc is move-only
     }
     check(wh.size() == 50, "WorkItem heap size");
 
@@ -206,7 +206,7 @@ static void test_work_item_heap() {
     WorkItem boosted;
     boosted.streamId = 1;
     boosted.priority = 1000;
-    wh.increase_key(nodes[0], boosted);
+    wh.increase_key(nodes[0], std::move(boosted));
 
     check(wh.top().priority == 1000, "boosted WorkItem should be at top");
     wh.pop();

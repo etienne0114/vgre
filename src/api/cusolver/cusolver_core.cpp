@@ -23,6 +23,15 @@ extern "C" {
 void spotrf_(const char *uplo, const int *n, float *a, const int *lda, int *info);
 void dpotrf_(const char *uplo, const int *n, double *a, const int *lda, int *info);
 
+// Generalized symmetric eigenvalue solver (all three itypes).
+// Handles A*x=λ*B*x (itype=1), A*B*x=λ*x (itype=2), B*A*x=λ*x (itype=3).
+void ssygvd_(const int *itype, const char *jobz, const char *uplo, const int *n,
+             float *a, const int *lda, float *b, const int *ldb, float *w,
+             float *work, const int *lwork, int *iwork, const int *liwork, int *info);
+void dsygvd_(const int *itype, const char *jobz, const char *uplo, const int *n,
+             double *a, const int *lda, double *b, const int *ldb, double *w,
+             double *work, const int *lwork, int *iwork, const int *liwork, int *info);
+
 void sgeqrf_(const int *m, const int *n, float *a, const int *lda,
              float *tau, float *work, const int *lwork, int *info);
 void dgeqrf_(const int *m, const int *n, double *a, const int *lda,
@@ -643,19 +652,24 @@ cusolverStatus_t cusolverDnDsyevd(cusolverDnHandle_t /*handle*/, char jobz, char
 //
 // itype=2,3: not implemented — returns CUSOLVER_STATUS_NOT_SUPPORTED.
 
+// Buffer size for sygvd: all three itypes supported via LAPACK ssygvd_.
+// itype=1: A*x=λ*B*x; itype=2: A*B*x=λ*x; itype=3: B*A*x=λ*x (all SPD B).
 cusolverStatus_t cusolverDnSsygvd_bufferSize(cusolverDnHandle_t handle, int itype,
                                              char jobz, char uplo,
                                              int n, float * /*A*/, int lda,
                                              float * /*B*/, int /*ldb*/,
                                              float * /*W*/, int *Lwork) {
-    if (itype != 1) return CUSOLVER_STATUS_NOT_SUPPORTED;
+    if (itype < 1 || itype > 3) return CUSOLVER_STATUS_INVALID_VALUE;
     if (!Lwork || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
-    // workspace = max(potrf workspace, syevd workspace)
-    // potrf: n*n; syevd: 2*n*n + 6*n + 1
-    int ws_potrf = n * n;
-    int ws_syevd = 0;
-    cusolverDnSsyevd_bufferSize(handle, jobz, uplo, n, nullptr, lda, nullptr, &ws_syevd);
-    *Lwork = std::max(ws_potrf, ws_syevd);
+    // Workspace via LAPACK query: ssygvd_ with lwork=-1
+    float work_q = 0.f; int lwork_q = -1, liwork_q = -1, info = 0;
+    int iwork_dummy = 0;
+    std::vector<float> dummy_A(n*n, 0.f), dummy_B(n*n, 0.f);
+    for (int i = 0; i < n; ++i) { dummy_A[i*n+i] = 1.f; dummy_B[i*n+i] = 1.f; }
+    std::vector<float> dummy_W(n, 0.f);
+    ssygvd_(&itype, &jobz, &uplo, &n, dummy_A.data(), &lda, dummy_B.data(), &lda,
+            dummy_W.data(), &work_q, &lwork_q, &iwork_dummy, &liwork_q, &info);
+    *Lwork = (info == 0) ? std::max(1, static_cast<int>(work_q)) : 3*n*n + 5*n;
     return CUSOLVER_STATUS_SUCCESS;
 }
 
@@ -664,12 +678,16 @@ cusolverStatus_t cusolverDnDsygvd_bufferSize(cusolverDnHandle_t handle, int ityp
                                              int n, double * /*A*/, int lda,
                                              double * /*B*/, int /*ldb*/,
                                              double * /*W*/, int *Lwork) {
-    if (itype != 1) return CUSOLVER_STATUS_NOT_SUPPORTED;
+    if (itype < 1 || itype > 3) return CUSOLVER_STATUS_INVALID_VALUE;
     if (!Lwork || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
-    int ws_potrf = n * n;
-    int ws_syevd = 0;
-    cusolverDnDsyevd_bufferSize(handle, jobz, uplo, n, nullptr, lda, nullptr, &ws_syevd);
-    *Lwork = std::max(ws_potrf, ws_syevd);
+    double work_q = 0.0; int lwork_q = -1, liwork_q = -1, info = 0;
+    int iwork_dummy = 0;
+    std::vector<double> dummy_A(n*n, 0.0), dummy_B(n*n, 0.0);
+    for (int i = 0; i < n; ++i) { dummy_A[i*n+i] = 1.0; dummy_B[i*n+i] = 1.0; }
+    std::vector<double> dummy_W(n, 0.0);
+    dsygvd_(&itype, &jobz, &uplo, &n, dummy_A.data(), &lda, dummy_B.data(), &lda,
+            dummy_W.data(), &work_q, &lwork_q, &iwork_dummy, &liwork_q, &info);
+    *Lwork = (info == 0) ? std::max(1, static_cast<int>(work_q)) : 3*n*n + 5*n;
     return CUSOLVER_STATUS_SUCCESS;
 }
 
@@ -678,61 +696,19 @@ cusolverStatus_t cusolverDnSsygvd(cusolverDnHandle_t handle, int itype,
                                   int n, float *A, int lda,
                                   float *B, int ldb,
                                   float *W, float *work, int Lwork, int *devInfo) {
-    if (itype != 1) return CUSOLVER_STATUS_NOT_SUPPORTED;
+    if (itype < 1 || itype > 3) return CUSOLVER_STATUS_NOT_SUPPORTED;
     if (!A || !B || !W || n <= 0 || lda < n || ldb < n) return CUSOLVER_STATUS_INVALID_VALUE;
     if (devInfo) *devInfo = 0;
 
-    // Step 1 — Cholesky: B = L*L^T (lower triangular, in-place)
-    char lo = 'L';
-    cusolverDnSpotrf(handle, lo, n, B, ldb, work, Lwork, devInfo);
-    if (devInfo && *devInfo != 0) return CUSOLVER_STATUS_SUCCESS; // B not SPD
-
-    // Step 2 — Form A' = L^{-1} * A * L^{-T}
-    // A is symmetric; we operate on the lower triangle stored in A.
-    // First: for each column j of A, solve L * x = A[:,j]  (forward substitution).
-    // Then:  for each row i of the result, solve L * x = row_i^T (forward sub).
-    // This transforms A → L^{-1} * A * L^{-T} in the lower triangle.
-    //
-    // Implementation: two-pass row/column triangular solve.
-    // Pass 1 (columns): A[:,j] = L^{-1} * A[:,j]  for j = 0..n-1
-    for (int j = 0; j < n; ++j) {
-        // Forward solve L * x = A[j:n, j]  (only lower triangle)
-        for (int i = j; i < n; ++i) {
-            float s = A[i + j * lda];
-            for (int p = 0; p < i; ++p)
-                s -= B[i + p * ldb] * A[p + j * lda];
-            A[i + j * lda] = s / B[i + i * ldb];
-        }
-    }
-    // Pass 2 (rows): A[i,:] = (L^{-1} * A[i,:]^T)^T  for i = 0..n-1
-    // i.e., solve L * y = A[i, 0:i]^T  (upper part, transposed column)
-    for (int i = 0; i < n; ++i) {
-        // Forward solve L * y = A[0:i+1, i]  (the i-th column upper half = symmetric copy)
-        for (int j = 0; j <= i; ++j) {
-            float s = A[j + i * lda]; // col-major: row j, col i
-            for (int p = 0; p < j; ++p)
-                s -= B[j + p * ldb] * A[p + i * lda];
-            A[j + i * lda] = s / B[j + j * ldb];
-        }
-    }
-
-    // Step 3 — Standard symmetric eigenproblem on A' (now in A)
-    cusolverDnSsyevd(handle, jobz, lo, n, A, lda, W, work, Lwork, devInfo);
-    if (devInfo && *devInfo != 0) return CUSOLVER_STATUS_SUCCESS;
-
-    // Step 4 — Back-transform eigenvectors: x = L^{-T} * y
-    // Solve L^T * x = y  (backward substitution), column by column.
-    if (jobz == 'V' || jobz == 'v') {
-        for (int j = 0; j < n; ++j) {
-            // Backward solve L^T * x = A[:,j]
-            for (int i = n - 1; i >= 0; --i) {
-                float s = A[i + j * lda];
-                for (int p = i + 1; p < n; ++p)
-                    s -= B[p + i * ldb] * A[p + j * lda]; // B[p,i] = L^T[i,p]
-                A[i + j * lda] = s / B[i + i * ldb];
-            }
-        }
-    }
+    // Delegate all three itypes to LAPACK ssygvd_ which handles
+    // itype=1 (A*x=λ*B*x), itype=2 (A*B*x=λ*x), itype=3 (B*A*x=λ*x).
+    // Math: Cholesky(B)=L*L^T; reduce A to standard form; syevd; back-transform.
+    // Backward-stable: Householder reflections + divide-and-conquer.
+    char lo = uplo;
+    int liwork = 3 + 5*n;
+    std::vector<int> iwork(static_cast<size_t>(liwork), 0);
+    ssygvd_(&itype, &jobz, &lo, &n, A, &lda, B, &ldb, W,
+            work, &Lwork, iwork.data(), &liwork, devInfo);
     return CUSOLVER_STATUS_SUCCESS;
 }
 
@@ -741,50 +717,18 @@ cusolverStatus_t cusolverDnDsygvd(cusolverDnHandle_t handle, int itype,
                                   int n, double *A, int lda,
                                   double *B, int ldb,
                                   double *W, double *work, int Lwork, int *devInfo) {
-    if (itype != 1) return CUSOLVER_STATUS_NOT_SUPPORTED;
+    (void)handle;
+    if (itype < 1 || itype > 3) return CUSOLVER_STATUS_NOT_SUPPORTED;
     if (!A || !B || !W || n <= 0 || lda < n || ldb < n) return CUSOLVER_STATUS_INVALID_VALUE;
     if (devInfo) *devInfo = 0;
 
-    // Step 1 — Cholesky: B = L*L^T
-    char lo = 'L';
-    cusolverDnDpotrf(handle, lo, n, B, ldb, work, Lwork, devInfo);
-    if (devInfo && *devInfo != 0) return CUSOLVER_STATUS_SUCCESS;
-
-    // Step 2 — Form A' = L^{-1} * A * L^{-T}
-    // Pass 1 (columns): A[:,j] = L^{-1} * A[:,j]
-    for (int j = 0; j < n; ++j) {
-        for (int i = j; i < n; ++i) {
-            double s = A[i + j * lda];
-            for (int p = 0; p < i; ++p)
-                s -= B[i + p * ldb] * A[p + j * lda];
-            A[i + j * lda] = s / B[i + i * ldb];
-        }
-    }
-    // Pass 2 (rows): A[i,0:i+1] = L^{-1} * A[i,0:i+1]^T  transposed
-    for (int i = 0; i < n; ++i) {
-        for (int j = 0; j <= i; ++j) {
-            double s = A[j + i * lda];
-            for (int p = 0; p < j; ++p)
-                s -= B[j + p * ldb] * A[p + i * lda];
-            A[j + i * lda] = s / B[j + j * ldb];
-        }
-    }
-
-    // Step 3 — Standard symmetric eigenproblem
-    cusolverDnDsyevd(handle, jobz, lo, n, A, lda, W, work, Lwork, devInfo);
-    if (devInfo && *devInfo != 0) return CUSOLVER_STATUS_SUCCESS;
-
-    // Step 4 — Back-transform eigenvectors: x = L^{-T} * y
-    if (jobz == 'V' || jobz == 'v') {
-        for (int j = 0; j < n; ++j) {
-            for (int i = n - 1; i >= 0; --i) {
-                double s = A[i + j * lda];
-                for (int p = i + 1; p < n; ++p)
-                    s -= B[p + i * ldb] * A[p + j * lda];
-                A[i + j * lda] = s / B[i + i * ldb];
-            }
-        }
-    }
+    // All three itypes delegated to LAPACK dsygvd_.
+    // itype=1: A*x=λ*B*x; itype=2: A*B*x=λ*x; itype=3: B*A*x=λ*x  (B SPD).
+    char lo = uplo;
+    int liwork = 3 + 5*n;
+    std::vector<int> iwork(static_cast<size_t>(liwork), 0);
+    dsygvd_(&itype, &jobz, &lo, &n, A, &lda, B, &ldb, W,
+            work, &Lwork, iwork.data(), &liwork, devInfo);
     return CUSOLVER_STATUS_SUCCESS;
 }
 
