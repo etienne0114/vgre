@@ -934,6 +934,24 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
   }
 
   outHandle = ptr;
+
+#ifdef VGRE_HAS_RDMA
+  // Track 3: pre-register the allocation with any active RDMA context.
+  // This pins the pages immediately (ibv_reg_mr at cudaMalloc time) so that
+  // rdmaWriteToRemote() uses the cached region in O(1) instead of calling
+  // ibv_reg_mr per transfer (O(n/4K) page-table walks).
+  // Gated by VGRE_HAS_RDMA; no-op when RDMA is disabled.
+  // Only pre-register allocations ≥ 64 KB to avoid pinning small temporaries.
+  if (alignedSize >= 64 * 1024) {
+    if (!rdmaCtx_) {
+      rdmaCtx_.reset(vgre::advanced::RDMAContext::tryCreate());
+    }
+    if (rdmaCtx_) {
+      rdmaCtx_->preRegisterAllocation(ptr, alignedSize);
+    }
+  }
+#endif
+
   return VGREResult::SUCCESS;
 }
 
@@ -943,17 +961,27 @@ VGREResult MemoryManager::free(MemoryHandle handle) {
   if (it == allocations_.end())
     return VGREResult::ERR_INVALID_VALUE;
 
+  void* ptr = it->second.ptr;
   size_t freed = it->second.size;
-  allocRange_.erase(static_cast<uint8_t*>(it->second.ptr));
+
+#ifdef VGRE_HAS_RDMA
+  // Track 3: deregister from RDMA context before freeing (ibv_dereg_mr).
+  // Must happen BEFORE alignedFree/munmap to avoid use-after-free in the NIC.
+  if (rdmaCtx_ && freed >= 64 * 1024) {
+    rdmaCtx_->deregisterAllocation(ptr);
+  }
+#endif
+
+  allocRange_.erase(static_cast<uint8_t*>(ptr));
   if (it->second.isManaged) {
-    unregisterManagedRegion(it->second.ptr);
+    unregisterManagedRegion(ptr);
 #if defined(_WIN32)
-    VirtualFree(it->second.ptr, 0, MEM_RELEASE);
+    VirtualFree(ptr, 0, MEM_RELEASE);
 #else
-    munmap(it->second.ptr, it->second.size);
+    munmap(ptr, it->second.size);
 #endif
   } else {
-    alignedFree(it->second.ptr);
+    alignedFree(ptr);
   }
   allocations_.erase(it);
   usedMemory_.fetch_sub(freed, std::memory_order_acq_rel);

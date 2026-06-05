@@ -5,6 +5,9 @@
 #include "vgre/common/types.h"
 #include "vgre/core/interval_tree.h"
 #include "vgre/core/page_table.h"
+#ifdef VGRE_HAS_RDMA
+#include "vgre/advanced/rdma_transport.h"
+#endif
 
 #include <atomic>
 #include <cstddef>
@@ -394,6 +397,12 @@ private:
 
   size_t poolSize_;
   std::atomic<size_t> usedMemory_{0};
+
+#ifdef VGRE_HAS_RDMA
+  // Track 3: lazy-initialised RDMA context for zero-copy pre-registration.
+  // Created on first large allocation when RDMA is enabled.
+  std::unique_ptr<vgre::advanced::RDMAContext> rdmaCtx_;
+#endif
   std::unordered_map<MemoryHandle, Allocation> allocations_;
   // Sorted by base address — enables O(log n) range lookup for H2D/D2H/D2D
   // copies instead of the O(n) linear scan over allocations_.

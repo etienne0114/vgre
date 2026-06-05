@@ -534,11 +534,14 @@ CUptiResult cuptiEnableDomain(uint32_t /*enable*/,
 }
 
 CUptiResult cuptiActivityEnable(CUpti_ActivityKind kind) {
-    // Track 2: forward to native library first when available
+    // Track 2: forward to native library AND enable PMU proxy in parallel.
+    // Unified normalisation: both paths produce data; toOTLPJSON() exports
+    // the PMU proxy path regardless of whether native CUPTI also runs.
+    // This ensures the same OTLP export format for all telemetry consumers.
     auto& nc = NativeCupti::instance();
     if (nc.active) {
-        CUptiResult r = nc.activityEnable(kind);
-        if (r == CUPTI_SUCCESS) return r;
+        nc.activityEnable(kind); // fire-and-forget; ignore return (may not support all kinds)
+        // Fall through to also enable the PMU proxy for unified OTLP output.
     }
     if (kind == CUPTI_ACTIVITY_KIND_KERNEL) {
         g_kernelActivityEnabled = true;
@@ -569,12 +572,17 @@ CUptiResult cuptiActivityRegisterCallbacks(
 }
 
 CUptiResult cuptiActivityFlushAll(uint32_t flag) {
-    // Track 2: forward to native library first when available
+    // Track 2: flush both native CUPTI AND PMU proxy for unified OTLP output.
+    // When native CUPTI is active, its flush populates hardware activity buffers.
+    // The PMU proxy flush ALSO runs to normalise both data streams into the
+    // same OTLP JSON format via RuntimeProfiler::toOTLPJSON().
+    // This is the "Unified Telemetry Collector" step from the implementation plan.
     auto& nc = NativeCupti::instance();
     if (nc.active) {
-        CUptiResult r = nc.activityFlushAll(flag);
-        if (r == CUPTI_SUCCESS) return r;
+        nc.activityFlushAll(flag); // flush native hardware buffers
+        // Fall through to also flush PMU proxy for unified OTLP export.
     }
+    // PMU proxy flush: always run so toOTLPJSON() has current data.
     auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
     for (const auto& ks : allStats) pushKernelActivity(ks);
     flushRecords();
