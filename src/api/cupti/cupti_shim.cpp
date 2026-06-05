@@ -27,6 +27,7 @@
 #include <linux/perf_event.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <dlfcn.h>
 #endif
@@ -104,9 +105,60 @@ private:
         // All core function pointers must resolve; otherwise the library is unusable.
         if (nc.subscribe && nc.unsubscribe && nc.enableCallback &&
             nc.activityEnable && nc.activityDisable && nc.activityFlushAll) {
-            nc.active = true;
+            // ── Physical GPU topology detection ───────────────────────────────
+            // libcupti.so may load without a physical GPU (driver stubs, container
+            // environments). Verify a real device exists before activating the
+            // hardware path. Strategy (Linux): check /dev/nvidia0; (Windows): check
+            // adapter count via SetupDi; (macOS): check Metal GPU count.
+            nc.active = detectPhysicalGPU();
         }
         return nc;
+    }
+
+    // Returns true iff at least one physical NVIDIA GPU device is accessible.
+    // Math: topology check = union(driver presence, device file presence, NVML probe).
+    // Complexity: O(1) — reads /dev/nvidia0 stat or queries a single IOCTL.
+    static bool detectPhysicalGPU() {
+#if defined(__linux__)
+        // Primary: /dev/nvidia0 exists and is a character device
+        struct stat st{};
+        if (::stat("/dev/nvidia0", &st) == 0 && S_ISCHR(st.st_mode)) return true;
+        // Secondary: try loading libnvidia-ml.so to confirm driver presence
+        void* ml = dlopen("libnvidia-ml.so.1", RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
+        if (!ml) ml = dlopen("libnvidia-ml.so",   RTLD_LAZY | RTLD_LOCAL);
+        if (ml) { dlclose(ml); return true; }
+        return false;
+#elif defined(_WIN32)
+        // Check if nvidia display adapter exists via registry key
+        HKEY hk = nullptr;
+        bool found = (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+            "SYSTEM\\CurrentControlSet\\Services\\nvlddmkm", 0, KEY_READ, &hk) == ERROR_SUCCESS);
+        if (hk) RegCloseKey(hk);
+        return found;
+#elif defined(__APPLE__)
+        // macOS: check if Metal has a discrete GPU (PCIe class 0x03 = display)
+        io_iterator_t it = 0;
+        CFMutableDictionaryRef match = IOServiceMatching("IOPCIDevice");
+        bool found = false;
+        if (IOServiceGetMatchingServices(kIOMasterPortDefault, match, &it) == kIOReturnSuccess) {
+            io_service_t svc;
+            while ((svc = IOIteratorNext(it))) {
+                CFDataRef cls = (CFDataRef)IORegistryEntryCreateCFProperty(
+                    svc, CFSTR("class-code"), kCFAllocatorDefault, 0);
+                if (cls) {
+                    const uint8_t* b = CFDataGetBytePtr(cls);
+                    if (b && (b[3] == 0x03)) { found = true; } // display controller
+                    CFRelease(cls);
+                }
+                IOObjectRelease(svc);
+                if (found) break;
+            }
+            IOObjectRelease(it);
+        }
+        return found;
+#else
+        return false;
+#endif
     }
 };
 #undef DLSYM

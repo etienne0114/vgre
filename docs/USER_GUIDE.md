@@ -24,7 +24,7 @@ VGRE lets you run unmodified CUDA applications on any x86-64 or ARM64 CPU by int
 
 ## 1. Quick Start
 
-### Linux / macOS — one command
+### Automated Deployment (Linux / macOS)
 
 ```bash
 git clone https://github.com/vgre-org/vgre-runtime.git
@@ -47,7 +47,7 @@ vgre-dashboard          # launch the real-time monitor
 vgre-start --test       # local master + worker self-test
 ```
 
-### Windows — one command
+### Automated Deployment (Windows)
 
 ```powershell
 git clone https://github.com/vgre-org/vgre-runtime.git
@@ -100,7 +100,7 @@ vgre-start --master       # launch master + dashboard
 
 ## 3. Installation
 
-### 3.1 Linux — step by step
+### 3.1 Linux Manual Installation
 
 ```bash
 # Install build tools (Ubuntu/Debian)
@@ -128,7 +128,7 @@ vgre-token fingerprint    # prints: SHA-256 of your token
 vgre-discover             # shows your public IP + worker connection command
 ```
 
-### 3.2 macOS — step by step
+### 3.2 macOS Manual Installation
 
 ```bash
 brew install cmake llvm libomp openssl git
@@ -138,7 +138,7 @@ bash install_local.sh
 
 > **Apple Silicon (M1/M2/M3):** VGRE builds natively for ARM64. AVX-512 is disabled; performance comes from OpenMP parallelism.
 
-### 3.3 Windows — step by step
+### 3.3 Windows Manual Installation
 
 1. Open **PowerShell** (no admin needed):
 
@@ -359,22 +359,22 @@ vgre-start --threads <N>                         Worker thread count (default: a
 vgre-start --help                                Show all options
 ```
 
-### Complete cluster setup — same LAN (4 steps)
+### Local Area Network (LAN) Cluster Initialization
 
-**Step 1 — Install on every machine**
+**Phase 1: Node Installation**
 
 ```bash
 bash install_local.sh   # Linux/macOS
 .\scripts\vgre_sync.bat # Windows (installs all CLI tools including vgre-start)
 ```
 
-**Step 2 — Generate token on master**
+**Phase 2: Master Token Generation**
 
 ```bash
 vgre-token generate
 ```
 
-**Step 3 — Copy token to workers** (choose one method)
+**Phase 3: Worker Token Distribution**
 
 ```bash
 # scp (Linux/macOS)
@@ -386,7 +386,7 @@ vgre-token copy         # prints the robocopy command
 # Or: vgre-token set <paste-token-here> on the worker
 ```
 
-**Step 4 — Start**
+**Phase 4: Service Initialization**
 
 ```bash
 # Master:
@@ -399,11 +399,11 @@ vgre-start --worker
 vgre-start --worker --master-ip 192.168.1.10
 ```
 
-### WAN cluster setup (different LANs / internet)
+### Wide Area Network (WAN) Cluster Initialization
 
 For workers on a **different network** than the master, UDP broadcast cannot cross routers. Use direct TCP connection instead.
 
-**Option A — Manual IP sharing (simplest)**
+**Method A: Explicit IP Configuration**
 
 ```bash
 # On master: find your public IP
@@ -415,7 +415,7 @@ vgre-discover
 vgre-start --worker --master-address 78.45.12.99:7777
 ```
 
-**Option B — Automatic token-keyed discovery (cross-LAN, one-time bucket setup)**
+**Method B: Automated Token-Keyed Discovery**
 
 ```bash
 # On master (run once, or after IP changes):
@@ -430,7 +430,7 @@ vgre-discover --find aBcDeFgH
 vgre-start --worker --master-address 78.45.12.99:7777
 ```
 
-**Option C — VPN (Tailscale / ZeroTier — no port forwarding needed)**
+**Method C: Virtual Private Network (VPN) Overlay**
 
 ```bash
 # Both machines on the same Tailscale network
@@ -520,7 +520,7 @@ key = "vgre-" + first_32_hex_chars_of( SHA256(token) )
 ```
 Only nodes with the same token can compute or look up the same key. The bucket ID is a non-secret opaque identifier that must be shared once with workers (like a meeting room ID, not a password).
 
-### Quick start — WAN cluster with auto-discovery
+### Quick Start: WAN Cluster with Automated Discovery
 
 ```bash
 # ── Master ────────────────────────────────────────────────────────────────
@@ -552,7 +552,7 @@ vgre-discover --find aBcDeFgH
 vgre-start --worker --master-address 78.45.12.99:7777
 ```
 
-### Discovery: LAN vs WAN
+### Discovery Modes: LAN vs WAN
 
 | Scenario | How discovery works |
 |----------|-------------------|
