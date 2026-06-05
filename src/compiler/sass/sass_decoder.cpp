@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include <unordered_set>
 
 namespace vgre::sass {
 
@@ -606,14 +607,7 @@ std::string decodeSassToPtx(const uint8_t* data, size_t size) {
         ptx << "    .param .u64 param0,\n";
         ptx << "    .param .u64 param1\n";
         ptx << ")\n{\n";
-        ptx << "    .reg .f32 %f<256>;\n";
-        ptx << "    .reg .u32 %r<256>;\n";
-        ptx << "    .reg .u64 %rd<64>;\n";
-        ptx << "    .reg .pred %p<16>;\n";
-        ptx << "\n";
-        ptx << "    ld.param.u64 %rd0, [param0];\n";
-        ptx << "    ld.param.u64 %rd1, [param1];\n";
-        ptx << "\n";
+        // Register declarations emitted after pass-1 usage analysis below.
 
         // Decode instructions: process 32-byte bundles (4 x 64-bit words)
         // Bundle layout: [ctrl, instr0, instr1, instr2]
@@ -621,19 +615,92 @@ std::string decodeSassToPtx(const uint8_t* data, size_t size) {
         const uint64_t* words = reinterpret_cast<const uint64_t*>(ts.ptr);
         size_t numWords = ts.sz / sizeof(uint64_t);
 
+        // ── Pass 1: Collect branch targets and register usage ─────────────────
+        // Branch instructions use extractRs1() as the target instruction index.
+        // We must emit PTX labels at those positions so bra.uni LABEL_N resolves.
+        // Also track which register classes are actually used for minimal .reg decls.
+        std::unordered_set<uint32_t> branchTargets;
+        bool usesF32 = false, usesU32 = false, usesU64 = false, usesPred = false;
+        uint32_t maxF = 0, maxR = 0, maxRD = 0, maxP = 0;
+
+        size_t instrIdx = 0;
+        for (size_t wi = 0; wi < numWords; ++wi) {
+            if ((wi % 4) == 0) continue;
+            uint64_t instr = words[wi];
+            uint32_t op = extractOpcode(instr);
+            uint8_t rd  = extractRd(instr);
+            uint8_t rs1 = extractRs1(instr);
+
+            // Collect branch targets
+            if (op == 0x947 || op == 0x94C) branchTargets.insert(rs1);
+
+            // Track register usage
+            switch (op) {
+            case 0x223: case 0x20C: case 0x221: // FFMA FMUL FADD
+            case 0x208: case 0x20B: case 0x20D: case 0x209: case 0x205: // FMNMX etc.
+            case 0x107: case 0x108: case 0x109: case 0x10A:
+            case 0x10B: case 0x10C: case 0x10D: // MUFU
+                usesF32 = true; maxF = std::max(maxF, (uint32_t)rd + 1); break;
+            case 0x1C4: case 0x1C0: case 0x1C8: case 0x1D2: case 0x1D3:
+            case 0x1D4: case 0x1E0: case 0x1E1: case 0x1E2: case 0x1C1:
+            case 0x1D0: case 0x1C6: case 0x1CC: case 0x1CF: // Integer
+            case 0x1A8: case 0x1A9: case 0x1AB: case 0x1AC:
+            case 0x1B0: case 0x1B1: case 0x002: case 0x003: // conversions/MOV
+            case 0x2F5: case 0x2F4: // LDG/STG 32
+            case 0x38D: case 0x38E: case 0x38F: // ATOM s32 / RED
+                usesU32 = true; maxR = std::max(maxR, (uint32_t)rd + 1); break;
+            case 0x2F8: case 0x2F9: case 0x004: // LDG/STG 64, MOV64
+            case 0x009: case 0x00A: case 0x00B: case 0x00C: case 0x00D:
+            case 0x00E: case 0x00F: case 0x010: case 0x011: case 0x012:
+            case 0x013: // S2R
+                usesU64 = true; maxRD = std::max(maxRD, (uint32_t)rd + 1); break;
+            case 0x20E: case 0x20A: case 0x3A0: case 0x3A1: case 0x3A2: // predicates
+                usesPred = true; maxP = std::max(maxP, (uint32_t)(rd & 0x7) + 1); break;
+            default: break;
+            }
+            ++instrIdx;
+        }
+
+        // ── Emit register declarations (only what's used) ─────────────────────
+        // Build declarations string then emit, followed by parameter loads.
+        std::ostringstream regDecls;
+        if (usesF32)  regDecls << "    .reg .f32 %f<" << std::max(maxF, 1u) << ">;\n";
+        if (usesU32)  regDecls << "    .reg .u32 %r<" << std::max(maxR, 1u) << ">;\n";
+        regDecls << "    .reg .u64 %rd<" << std::max(maxRD + 2u, 8u) << ">;\n";
+        if (usesPred) regDecls << "    .reg .pred %p<" << std::max(maxP, 1u) << ">;\n";
+        regDecls << "\n";
+        regDecls << "    ld.param.u64 %rd0, [param0];\n";
+        regDecls << "    ld.param.u64 %rd1, [param1];\n";
+        regDecls << "\n";
+        ptx << regDecls.str();
+
+        // ── Pass 2: Emit decoded instructions with label injection ────────────
+        // At each instruction position i, if branchTargets contains i, emit the
+        // label LABEL_i before the instruction. PTX labels are identifiers followed
+        // by a colon at line start.
+        instrIdx = 0;
         size_t instrCount = 0;
         for (size_t wi = 0; wi < numWords; ++wi) {
-            if ((wi % 4) == 0) continue; // skip control word
+            if ((wi % 4) == 0) continue;
             uint64_t instr = words[wi];
+
+            // Emit label if this instruction is a branch target
+            if (branchTargets.count(static_cast<uint32_t>(instrIdx)))
+                ptx << "LABEL_" << instrIdx << ":\n";
+
             std::string decoded = decodeInstruction(instr);
             if (!decoded.empty()) {
                 ptx << decoded << "\n";
                 ++instrCount;
             }
+            ++instrIdx;
         }
+        // Emit any labels that point past the last instruction (exit labels)
+        for (uint32_t tgt : branchTargets)
+            if (tgt >= instrIdx)
+                ptx << "LABEL_" << tgt << ":\n";
 
         if (instrCount == 0) {
-            // Emit a comment so the PTX is still valid
             ptx << "    // No decodeable SASS instructions found\n";
         }
 
