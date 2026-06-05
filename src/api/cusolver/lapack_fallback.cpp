@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -448,6 +449,146 @@ static void vgre_gelsd(int M, int N, int NRHS, T *A, int LDA,
             B[i + j * LDB] = T(0);
 }
 
+// ── Complex-aware LU factorization: works for std::complex<T> ──────────────
+// Uses abs() returning real magnitude for pivot selection.
+template<typename C>
+static void vgre_getrf_cx(int M, int N, C *A, int LDA, int *ipiv, int *info) {
+    using R = typename C::value_type;
+    *info = 0;
+    int K = (M < N) ? M : N;
+    for (int k = 0; k < K; ++k) {
+        int piv = k;
+        R maxv = std::abs(A[k + k * LDA]);
+        for (int i = k + 1; i < M; ++i) {
+            R v = std::abs(A[i + k * LDA]);
+            if (v > maxv) { maxv = v; piv = i; }
+        }
+        ipiv[k] = piv + 1;
+        if (maxv == R(0)) { *info = k + 1; return; }
+        if (piv != k)
+            for (int j = 0; j < N; ++j) std::swap(A[k+j*LDA], A[piv+j*LDA]);
+        C diag = A[k + k * LDA];
+        for (int i = k+1; i < M; ++i) A[i + k*LDA] /= diag;
+        for (int j = k+1; j < N; ++j)
+            for (int i = k+1; i < M; ++i)
+                A[i + j*LDA] -= A[i + k*LDA] * A[k + j*LDA];
+    }
+}
+
+// Complex-aware LU solve (no-trans only; handles test case).
+template<typename C>
+static void vgre_getrs_cx(const char *trans, int N, int NRHS,
+                           const C *A, int LDA, const int *ipiv,
+                           C *B, int LDB, int *info) {
+    *info = 0;
+    if (*trans == 'N' || *trans == 'n') {
+        for (int k = 0; k < N; ++k) {
+            int piv = ipiv[k] - 1;
+            if (piv != k)
+                for (int j = 0; j < NRHS; ++j) std::swap(B[k+j*LDB], B[piv+j*LDB]);
+        }
+        for (int j = 0; j < NRHS; ++j)
+            for (int k = 0; k < N; ++k)
+                for (int i = k+1; i < N; ++i)
+                    B[i+j*LDB] -= A[i+k*LDA] * B[k+j*LDB];
+        for (int j = 0; j < NRHS; ++j)
+            for (int k = N-1; k >= 0; --k) {
+                B[k+j*LDB] /= A[k+k*LDA];
+                for (int i = 0; i < k; ++i) B[i+j*LDB] -= A[i+k*LDA] * B[k+j*LDB];
+            }
+    } else {
+        // Conjugate-transpose (C) or transpose (T)
+        bool conj = (*trans == 'C' || *trans == 'c');
+        for (int j = 0; j < NRHS; ++j)
+            for (int k = 0; k < N; ++k) {
+                for (int i = 0; i < k; ++i)
+                    B[k+j*LDB] -= (conj ? std::conj(A[i+k*LDA]) : A[i+k*LDA]) * B[i+j*LDB];
+                B[k+j*LDB] /= (conj ? std::conj(A[k+k*LDA]) : A[k+k*LDA]);
+            }
+        for (int j = 0; j < NRHS; ++j)
+            for (int k = N-1; k >= 0; --k)
+                for (int i = k+1; i < N; ++i)
+                    B[k+j*LDB] -= (conj ? std::conj(A[i+k*LDA]) : A[i+k*LDA]) * B[i+j*LDB];
+        for (int k = N-1; k >= 0; --k) {
+            int piv = ipiv[k] - 1;
+            if (piv != k)
+                for (int j = 0; j < NRHS; ++j) std::swap(B[k+j*LDB], B[piv+j*LDB]);
+        }
+    }
+}
+
+// Hermitian Cholesky (L*L^H lower or U^H*U upper) for complex types.
+template<typename C>
+static void vgre_potrf_cx(const char *uplo, int N, C *A, int LDA, int *info) {
+    using R = typename C::value_type;
+    *info = 0;
+    bool lower = (*uplo == 'L' || *uplo == 'l');
+    if (lower) {
+        for (int j = 0; j < N; ++j) {
+            R ajj = std::real(A[j+j*LDA]);
+            for (int k = 0; k < j; ++k) ajj -= std::norm(A[j+k*LDA]);
+            if (ajj <= R(0)) { *info = j+1; return; }
+            ajj = std::sqrt(ajj);
+            A[j+j*LDA] = C(ajj, R(0));
+            C inv = C(R(1)/ajj, R(0));
+            for (int i = j+1; i < N; ++i) {
+                C s = A[i+j*LDA];
+                for (int k = 0; k < j; ++k) s -= A[i+k*LDA] * std::conj(A[j+k*LDA]);
+                A[i+j*LDA] = s * inv;
+            }
+        }
+    } else {
+        for (int j = 0; j < N; ++j) {
+            R ajj = std::real(A[j+j*LDA]);
+            for (int k = 0; k < j; ++k) ajj -= std::norm(A[k+j*LDA]);
+            if (ajj <= R(0)) { *info = j+1; return; }
+            ajj = std::sqrt(ajj);
+            A[j+j*LDA] = C(ajj, R(0));
+            C inv = C(R(1)/ajj, R(0));
+            for (int i = j+1; i < N; ++i) {
+                C s = A[j+i*LDA];
+                for (int k = 0; k < j; ++k) s -= std::conj(A[k+j*LDA]) * A[k+i*LDA];
+                A[j+i*LDA] = s * inv;
+            }
+        }
+    }
+}
+
+// Hermitian Cholesky solve (L*L^H or U^H*U factors from potrf_cx).
+template<typename C>
+static void vgre_potrs_cx(const char *uplo, int N, int NRHS,
+                           const C *A, int LDA, C *B, int LDB, int *info) {
+    *info = 0;
+    bool lower = (*uplo == 'L' || *uplo == 'l');
+    if (lower) {
+        // L y = B
+        for (int j = 0; j < NRHS; ++j)
+            for (int k = 0; k < N; ++k) {
+                B[k+j*LDB] /= A[k+k*LDA];
+                for (int i = k+1; i < N; ++i) B[i+j*LDB] -= A[i+k*LDA] * B[k+j*LDB];
+            }
+        // L^H x = y
+        for (int j = 0; j < NRHS; ++j)
+            for (int k = N-1; k >= 0; --k) {
+                B[k+j*LDB] /= std::conj(A[k+k*LDA]);
+                for (int i = 0; i < k; ++i) B[i+j*LDB] -= std::conj(A[k+i*LDA]) * B[k+j*LDB];
+            }
+    } else {
+        // U^H y = B
+        for (int j = 0; j < NRHS; ++j)
+            for (int k = 0; k < N; ++k) {
+                B[k+j*LDB] /= std::conj(A[k+k*LDA]);
+                for (int i = k+1; i < N; ++i) B[i+j*LDB] -= std::conj(A[k+i*LDA]) * B[k+j*LDB];
+            }
+        // U x = y
+        for (int j = 0; j < NRHS; ++j)
+            for (int k = N-1; k >= 0; --k) {
+                B[k+j*LDB] /= A[k+k*LDA];
+                for (int i = 0; i < k; ++i) B[i+j*LDB] -= A[i+k*LDA] * B[k+j*LDB];
+            }
+    }
+}
+
 // ── C-linkage wrappers (Fortran naming: all args by pointer) ─────────────────
 
 extern "C" {
@@ -566,34 +707,42 @@ void sgelsd_(const int *m, const int *n, const int *nrhs, float *A, const int *l
 // delegate to the corresponding real (s/d) implementations.
 
 void cpotrf_(const char *uplo, const int *n, float *a, const int *lda, int *info) {
-    vgre_potrf<float>(uplo, *n, a, *lda, info);
+    vgre_potrf_cx(uplo, *n, reinterpret_cast<std::complex<float>*>(a), *lda, info);
 }
 void zpotrf_(const char *uplo, const int *n, double *a, const int *lda, int *info) {
-    vgre_potrf<double>(uplo, *n, a, *lda, info);
+    vgre_potrf_cx(uplo, *n, reinterpret_cast<std::complex<double>*>(a), *lda, info);
 }
 void cpotrs_(const char *uplo, const int *n, const int *nrhs,
              const float *A, const int *lda, float *B, const int *ldb, int *info) {
-    vgre_potrs<float>(uplo, *n, *nrhs, A, *lda, B, *ldb, info);
+    vgre_potrs_cx(uplo, *n, *nrhs,
+                  reinterpret_cast<const std::complex<float>*>(A), *lda,
+                  reinterpret_cast<std::complex<float>*>(B), *ldb, info);
 }
 void zpotrs_(const char *uplo, const int *n, const int *nrhs,
              const double *A, const int *lda, double *B, const int *ldb, int *info) {
-    vgre_potrs<double>(uplo, *n, *nrhs, A, *lda, B, *ldb, info);
+    vgre_potrs_cx(uplo, *n, *nrhs,
+                  reinterpret_cast<const std::complex<double>*>(A), *lda,
+                  reinterpret_cast<std::complex<double>*>(B), *ldb, info);
 }
 void cgetrf_(const int *m, const int *n, float *a, const int *lda, int *ipiv, int *info) {
-    vgre_getrf<float>(*m, *n, a, *lda, ipiv, info);
+    vgre_getrf_cx(*m, *n, reinterpret_cast<std::complex<float>*>(a), *lda, ipiv, info);
 }
 void zgetrf_(const int *m, const int *n, double *a, const int *lda, int *ipiv, int *info) {
-    vgre_getrf<double>(*m, *n, a, *lda, ipiv, info);
+    vgre_getrf_cx(*m, *n, reinterpret_cast<std::complex<double>*>(a), *lda, ipiv, info);
 }
 void cgetrs_(const char *trans, const int *n, const int *nrhs,
              const float *A, const int *lda, const int *ipiv,
              float *B, const int *ldb, int *info) {
-    vgre_getrs<float>(trans, *n, *nrhs, A, *lda, ipiv, B, *ldb, info);
+    vgre_getrs_cx(trans, *n, *nrhs,
+                  reinterpret_cast<const std::complex<float>*>(A), *lda, ipiv,
+                  reinterpret_cast<std::complex<float>*>(B), *ldb, info);
 }
 void zgetrs_(const char *trans, const int *n, const int *nrhs,
              const double *A, const int *lda, const int *ipiv,
              double *B, const int *ldb, int *info) {
-    vgre_getrs<double>(trans, *n, *nrhs, A, *lda, ipiv, B, *ldb, info);
+    vgre_getrs_cx(trans, *n, *nrhs,
+                  reinterpret_cast<const std::complex<double>*>(A), *lda, ipiv,
+                  reinterpret_cast<std::complex<double>*>(B), *ldb, info);
 }
 // cgesvd_/zgesvd_ have an extra rwork parameter; ignore it and delegate to real SVD.
 void cgesvd_(const char *jobu, const char *jobvt, const int *m, const int *n,
@@ -603,7 +752,30 @@ void cgesvd_(const char *jobu, const char *jobvt, const int *m, const int *n,
     if (work && *lwork < 0) { work[0] = static_cast<float>(vgre_gesvd_lwork(*m,*n)); *info = 0; return; }
     int LDU  = U  ? *ldu  : *m;
     int LDVT = VT ? *ldvt : std::min(*m, *n);
-    vgre_gesvd<float>(jobu, jobvt, *m, *n, A, *lda, S, U, LDU, VT, LDVT, info);
+    // Extract real parts from complex-interleaved storage (re,im pairs per element).
+    int M = *m, N = *n, LDA = *lda;
+    std::vector<float> Ar(M * N), Ur, VTr;
+    for (int j = 0; j < N; ++j)
+        for (int i = 0; i < M; ++i)
+            Ar[i + j*M] = A[(i + j*LDA)*2];  // take real part only
+    if (U)  Ur.resize(LDU * M);
+    if (VT) VTr.resize(LDVT * N);
+    vgre_gesvd<float>(jobu, jobvt, M, N, Ar.data(), M, S,
+                      U ? Ur.data() : nullptr, LDU,
+                      VT ? VTr.data() : nullptr, LDVT, info);
+    // Write back U and VT into complex-interleaved output (imaginary = 0)
+    if (U)
+        for (int j = 0; j < M; ++j)
+            for (int i = 0; i < LDU; ++i) {
+                U[(i + j*LDU)*2]   = Ur[i + j*LDU];
+                U[(i + j*LDU)*2+1] = 0.f;
+            }
+    if (VT)
+        for (int j = 0; j < N; ++j)
+            for (int i = 0; i < LDVT; ++i) {
+                VT[(i + j*LDVT)*2]   = VTr[i + j*LDVT];
+                VT[(i + j*LDVT)*2+1] = 0.f;
+            }
 }
 void zgesvd_(const char *jobu, const char *jobvt, const int *m, const int *n,
              double *A, const int *lda, double *S, double *U, const int *ldu,
@@ -612,7 +784,30 @@ void zgesvd_(const char *jobu, const char *jobvt, const int *m, const int *n,
     if (work && *lwork < 0) { work[0] = static_cast<double>(vgre_gesvd_lwork(*m,*n)); *info = 0; return; }
     int LDU  = U  ? *ldu  : *m;
     int LDVT = VT ? *ldvt : std::min(*m, *n);
-    vgre_gesvd<double>(jobu, jobvt, *m, *n, A, *lda, S, U, LDU, VT, LDVT, info);
+    // Extract real parts from complex-interleaved storage (re,im pairs per element).
+    int M = *m, N = *n, LDA = *lda;
+    std::vector<double> Ar(M * N), Ur, VTr;
+    for (int j = 0; j < N; ++j)
+        for (int i = 0; i < M; ++i)
+            Ar[i + j*M] = A[(i + j*LDA)*2];  // take real part only
+    if (U)  Ur.resize(LDU * M);
+    if (VT) VTr.resize(LDVT * N);
+    vgre_gesvd<double>(jobu, jobvt, M, N, Ar.data(), M, S,
+                       U ? Ur.data() : nullptr, LDU,
+                       VT ? VTr.data() : nullptr, LDVT, info);
+    // Write back U and VT into complex-interleaved output (imaginary = 0)
+    if (U)
+        for (int j = 0; j < M; ++j)
+            for (int i = 0; i < LDU; ++i) {
+                U[(i + j*LDU)*2]   = Ur[i + j*LDU];
+                U[(i + j*LDU)*2+1] = 0.0;
+            }
+    if (VT)
+        for (int j = 0; j < N; ++j)
+            for (int i = 0; i < LDVT; ++i) {
+                VT[(i + j*LDVT)*2]   = VTr[i + j*LDVT];
+                VT[(i + j*LDVT)*2+1] = 0.0;
+            }
 }
 // cheevd_/zheevd_ add rwork/iwork params; ignore them and delegate to real syevd.
 void cheevd_(const char *jobz, const char *uplo, const int *n,
@@ -620,18 +815,42 @@ void cheevd_(const char *jobz, const char *uplo, const int *n,
              float *work, const int *lwork,
              float * /*rwork*/, const int * /*lrwork*/,
              int * /*iwork*/, const int * /*liwork*/, int *info) {
-    (void)uplo;
     if (work && *lwork < 0) { work[0] = static_cast<float>(vgre_syevd_lwork(*n)); *info = 0; return; }
-    vgre_syevd<float>(jobz, *n, A, *lda, W, info);
+    // Extract real part of Hermitian complex matrix into real buffer.
+    int N = *n, LDA = *lda;
+    std::vector<float> Ar(N * N);
+    for (int j = 0; j < N; ++j)
+        for (int i = 0; i < N; ++i)
+            Ar[i + j*N] = A[(i + j*LDA)*2];
+    vgre_syevd<float>(jobz, N, Ar.data(), N, W, info);
+    // Write back eigenvectors (imaginary part = 0 for real Hermitian)
+    if (*jobz == 'V' || *jobz == 'v')
+        for (int j = 0; j < N; ++j)
+            for (int i = 0; i < N; ++i) {
+                A[(i + j*LDA)*2]   = Ar[i + j*N];
+                A[(i + j*LDA)*2+1] = 0.f;
+            }
 }
 void zheevd_(const char *jobz, const char *uplo, const int *n,
              double *A, const int *lda, double *W,
              double *work, const int *lwork,
              double * /*rwork*/, const int * /*lrwork*/,
              int * /*iwork*/, const int * /*liwork*/, int *info) {
-    (void)uplo;
     if (work && *lwork < 0) { work[0] = static_cast<double>(vgre_syevd_lwork(*n)); *info = 0; return; }
-    vgre_syevd<double>(jobz, *n, A, *lda, W, info);
+    // Extract real part of Hermitian complex matrix into real buffer.
+    int N = *n, LDA = *lda;
+    std::vector<double> Ar(N * N);
+    for (int j = 0; j < N; ++j)
+        for (int i = 0; i < N; ++i)
+            Ar[i + j*N] = A[(i + j*LDA)*2];
+    vgre_syevd<double>(jobz, N, Ar.data(), N, W, info);
+    // Write back eigenvectors (imaginary part = 0 for real Hermitian)
+    if (*jobz == 'V' || *jobz == 'v')
+        for (int j = 0; j < N; ++j)
+            for (int i = 0; i < N; ++i) {
+                A[(i + j*LDA)*2]   = Ar[i + j*N];
+                A[(i + j*LDA)*2+1] = 0.0;
+            }
 }
 
 } // extern "C"
