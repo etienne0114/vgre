@@ -1,29 +1,27 @@
 # VGRE Future Implementation Plan
 
-**Version**: 11.0.0  
-**Date**: 2026-06-05 (Code-Verified Audit Update)  
-**Status**: Real-Time Capabilities & Roadmap (Updated to reflect current implementation status)
+**Version**: 12.0.0  
+**Date**: 2026-06-06 (Deep Code-Verified Audit)  
+**Status**: Code-Verified Accuracy Pass — All four original tracks confirmed implemented; partial gaps documented; newly discovered subsystems catalogued.
 
-This document outlines the detailed implementation plans, technical designs, and steps for the VGRE (Virtual GPU Runtime Engine) platform, tracking both implemented tracks and remaining future deployment targets.
+This document tracks the implementation status of the VGRE (Virtual GPU Runtime Engine) platform. Every claim has been verified against the actual source files. Items marked **Partial** have real code but a specific gap noted.
 
 ---
 
 ## 🗺️ Roadmap Overview
 
-The development tracks of VGRE are organized into **four specialized architectural tracks**:
-
 ```mermaid
 graph TD
-    A["VGRE Expansion Roadmap"] --> B["Track 1: True SASS ISA Emulation\n(Implemented)"]
+    A["VGRE Expansion Roadmap"] --> B["Track 1: SASS ISA Emulation\n(Implemented — tensor-core opcodes: partial)"]
     A --> C["Track 2: Physical PMU & Telemetry\n(Implemented)"]
-    A --> D["Track 3: High-Performance Networking\n(RDMA: Implemented / K8s Operator: Implemented)"]
-    A --> E["Track 4: cuDNN Graph API v9+\n(Implemented)"]
+    A --> D["Track 3: High-Performance Networking\n(K8s Operator: Implemented / RDMA: partial — QP handshake gap)"]
+    A --> E["Track 4: cuDNN Graph API v9+\n(Implemented — CONV_NORM + RNG backend: partial)"]
 
     style A fill:#4a90d9,color:#fff
-    style B fill:#2ecc71,color:#fff
+    style B fill:#f0a500,color:#fff
     style C fill:#2ecc71,color:#fff
-    style D fill:#2ecc71,color:#fff
-    style E fill:#2ecc71,color:#fff
+    style D fill:#f0a500,color:#fff
+    style E fill:#f0a500,color:#fff
 ```
 
 ---
@@ -31,128 +29,205 @@ graph TD
 ## Track 1: True SASS ISA Emulation (SM80–SM90)
 
 ### 1.1 Status
-**Implemented**. The JIT SASS ELF decoder and PTX synthesizer are fully integrated.
+**Implemented** (tensor-core opcodes: partial). The SASS ELF decoder and PTX synthesizer are real and functional.
 
 ### 1.2 Implementation Details
-VGRE has built a user-space **SASS disassembler and interpreter engine** integrated into the compiler pipeline:
 
-```mermaid
-flowchart LR
-    A["Raw SASS Binaries\n(No PTX)"] --> B["ELF cubin Reader\n(Extract .text.fn)"]
-    B --> C["SASS Disassembler\n(Decode Opcode Map)"]
-    C --> D["LLVM-IR Translation\n(Map registers to virtual memory)"]
-    D --> E["LLVM JIT Compiler\n(Generate Host Assembly)"]
+**Source**: `src/compiler/sass/sass_decoder.cpp`
 
-    style A fill:#e74c3c,color:#fff
-    style B fill:#2ecc71,color:#fff
-    style C fill:#2ecc71,color:#fff
-    style D fill:#2ecc71,color:#fff
-    style E fill:#2ecc71,color:#fff
-```
+The decoder implements a two-pass pipeline over 32-byte SASS bundles (4 × 64-bit words):
 
-#### Step 1: Cubin ELF Disassembly & Parsing
-- Implemented `decodeSassToPtx` in `src/compiler/sass/sass_decoder.cpp` which parses ELF headers of NVVM cubins.
-- Extracts compiled instructions from `.text.kernel_name` and Relocation Maps.
+- **Pass 1** — Scans all instructions to collect branch targets and register class usage, emitting minimal `.reg` declarations.
+- **Pass 2** — Emits decoded PTX text with correct label injection at branch target positions.
 
-#### Step 2: Instruction Set Architecture (ISA) Map
-- Implemented a SASS instruction decoder targeting Ampere (SM80) and Hopper (SM90) architectures.
-- Decodes opcodes like `FFMA`, `FMUL`, `FADD`, `IMAD`, `IADD3`, `LDG`, `STG`, `MOV`, `S2R`, `MUFU`, `BRA`, `EXIT`, etc.
+#### Verified opcode coverage (SM80/SM90 encoding — bits [62:55])
 
-#### Step 3: LLVM-IR JIT Translation
-- Synthesizes equivalent PTX representations of decoded SASS instructions, dynamically generating register and instruction streams that compile seamlessly via the LLVM JIT compiler.
+| Category | Opcodes Decoded |
+|---|---|
+| FP32 arithmetic | FFMA, FMUL, FADD, FMNMX, FABS, FNEG, FCHK, FCMP |
+| FP64 arithmetic | DFMA, DMUL, DADD, DSETP |
+| FP16 arithmetic | HFMA2, HMUL2, HADD2 |
+| Integer | IMAD, IADD3, IMUL, ISCADD, SHF, SHR, SHL, FLO, POPC, IABS, INEG, IMNMX, LOP3 |
+| Predicates | ISETP, FSETP, SEL |
+| Global memory | LDG/STG (32-bit and 64-bit) |
+| Shared memory | LDS/STS (32-bit and 64-bit) |
+| Local memory | LDL/STL |
+| Atomics | ATOM.ADD.f32, ATOM.ADD.s32, ATOM.CAS, RED.ADD |
+| Warp primitives | SHFL.IDX/UP/DOWN/BFLY, VOTE.UNI/ALL/ANY, MATCH.ANY |
+| Control flow | BRA, BRA.pred, EXIT, RET, CALL, BAR.SYNC, BAR.ARV, MEMBAR.{GL,SYS,CTA}, BSYNC |
+| Type conversion | I2F, F2I, F2F (all precision pairs), I2I |
+| Special registers | S2R → tid.{x,y,z}, ctaid.{x,y,z}, ntid.x, laneid, warpid, nwarpid, clock |
+| MUFU | SIN, COS, RCP, RSQ, SQRT, LG2, EX2 |
+| MOV / misc | MOV, MOV32I, MOV64, PRMT |
+| NOP | Silently skipped |
+
+#### Partial: Tensor core opcodes
+`HMMA.884` (0x538), `HMMA.1688` (0x539), and `WGMMA` (SM90, 0x53A) are decoded to PTX **comment lines** only (`// HMMA_884_F32: wmma matmul ...`). No real `wmma.mma.sync` intrinsic is emitted, so tensor-core-only kernels will not produce correct numerical results.
+
+#### LLVM JIT compiler
+`src/compiler/llvm_translation_engine.cpp` uses real LLVM ORC JIT headers (`llvm/ExecutionEngine/Orc/LLJIT.h`) with `PassBuilder` optimization pipelines. The synthesized PTX from the decoder is compiled via this JIT into host assembly.
 
 ---
 
 ## Track 2: Ground-Truth CUPTI Passthrough (Physical PMU)
 
 ### 2.1 Status
-**Implemented**. Dual-path telemetry dynamically intercepts native hardware counters and scales via CPU PMU proxies when physical cards are absent.
+**Fully Implemented**.
 
 ### 2.2 Implementation Details
-A **Dual-Path Telemetry engine** detects physical NVIDIA GPUs and binds directly to native CUPTI layers:
 
-```
-                  ┌──────────────────────────────┐
-                  │ VGRE CUPTI Telemetry Manager │
-                  └──────────────┬───────────────┘
-                                 │
-                      [Detect Hardware Topology]
-                                 │
-                    ┌─────────────┴─────────────┐
-                    │                           │
-           [Physical GPU Found]        [No Physical GPU]
-                    │                           │
-                    ▼                           ▼
-       ┌─────────────────────────┐ ┌─────────────────────────┐
-       │ Direct CUPTI Dynamic    │ │ Host CPU PMU Proxy      │
-       │ Driver Binding via dlopen│ │ (perf_event_open / TSC) │
-       └─────────────────────────┘ └─────────────────────────┘
-```
+**Source**: `src/api/cupti/cupti_shim.cpp`
 
-#### Step 1: Dynamic Driver Binding
-- Implemented in `src/api/cupti/cupti_shim.cpp`. Checks for the presence of `/dev/nvidia0`, NVML display adapters on Windows, or discrete GPUs via IOService on macOS.
-- Dynamically loads `libcupti.so`, `cupti.dll`, or `libcupti.dylib` using standard platform APIs.
+#### Native library detection and passthrough
+At static-init time, `NativeCupti::init()` calls `dlopen("libcupti.so.12")` (Linux) / `cupti.dll` (Windows) / `libcupti.dylib` (macOS). Physical GPU topology is confirmed via:
 
-#### Step 2: Unified Telemetry Collector
-- Telemetry router registers callbacks with the native CUPTI driver on physical GPUs to capture hardware metrics (e.g., cache hit ratios, warp execution efficiency).
-- Falls back to `perf_event_open` on Linux, cycle counters on Windows/macOS, and normalizes both channels to identical OpenTelemetry (OTLP) JSON formats via `RuntimeProfiler`.
+- Linux: `stat("/dev/nvidia0")` + `dlopen("libnvidia-ml.so")`
+- Windows: `RegOpenKeyExA(HKEY_LOCAL_MACHINE, "...nvlddmkm", ...)`
+- macOS: `IOServiceGetMatchingServices("IOPCIDevice")` checking PCI class 0x03
+
+When a physical GPU and driver are present, all `cupti*` calls forward to the native library. The software proxy runs in parallel to produce unified OTLP output regardless.
+
+#### Per-thread hardware PMU sampler (`HwPmuSampler`)
+- Linux: `perf_event_open(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS)` via `SYS_perf_event_open`
+- Windows: `QueryThreadCycleTime(GetCurrentThread(), &cycles)`
+- macOS: `thread_info(THREAD_BASIC_INFO)` for user-mode CPU time
+
+Hardware counters are captured between `cuptiEventGroupEnable` / `cuptiEventGroupDisable`, then distributed across instruction-mix buckets via `aggregateInstructionMix`.
+
+#### Unified metrics (`cuptiMetricGetValue`)
+Supports: `ipc`, `achieved_occupancy`, `flop_count_sp`, `dram_read_throughput`, `dram_write_throughput`, `l1_global_load_hit_rate`, `branch_efficiency`, `kernel_duration`. Occupancy is computed from ALU:memory instruction fraction (formula: `0.50 + 0.38×alu_frac - 0.18×mem_frac`, clamped [0.10, 0.95]).
 
 ---
 
 ## Track 3: High-Performance Networking & Orchestration
 
 ### 3.1 Status
-- **Kubernetes VGRE Operator**: **Implemented** (Orchestrates VGRE cluster components).
-- **GPUDirect RDMA User-Space Bypass**: **Implemented** (Available in RDMA-enabled builds).
+- **Kubernetes VGRE Operator**: **Fully Implemented**.
+- **GPUDirect RDMA User-Space Bypass**: **Implemented** (when compiled with `-DVGRE_ENABLE_RDMA=ON`); **partial** — cross-node QP handshake not connected to SecureChannel.
 
-### 3.2 Implementation Details
+### 3.2 Kubernetes VGRE Operator
 
-#### Step 1: Kubernetes VGRE Operator [IMPLEMENTED]
-- **Implementation**: Located under `src/deployment/vgre_operator/`. Implements the `VgreCluster` Custom Resource Definition (CRD) via a controller-runtime reconciler loop.
-- **Features**:
-  - Automatically provisions the Master `Service` (port `7777` TCP, `7778` UDP) and single-replica Master workload.
-  - Deploys and scales Worker workloads using either `Deployment` (replica-controlled) or `DaemonSet` (host-node-controlled) modes based on specifications.
-  - Automatically generates and securely injects cryptographically secure 256-bit HMAC-SHA256 authentication tokens via `Secrets`.
-  - Configures dynamic `NetworkPolicies` to lock down intra-cluster TCP control and UDP data planes.
-  - Resolves host shared memory namespace isolation by passing custom `VGRE_SHM_SUFFIX` (derived from cluster name) to prevent IPC collisions between multiple clusters.
+**Source**: `src/deployment/vgre_operator/controllers/vgrecluster_controller.go`
 
-#### Step 2: GPUDirect RDMA User-Space Bypass [IMPLEMENTED]
-- Implemented under the `-DVGRE_ENABLE_RDMA=ON` compilation flag in `src/advanced/rdma_transport.cpp`.
-- Utilizes the Infiniband Verbs API (`ibv_open_device`, `ibv_alloc_pd`, `ibv_reg_mr`) for zero-copy memory transport directly over IB Queue Pairs.
-- Remotely maps device memory segments (`cudaMalloc` ranges) to enable direct RDMA Read and RDMA Write operations without host-CPU scheduling interrupts.
+The Go controller-runtime reconciler handles the full `VgreCluster` CRD lifecycle:
+
+1. **Secret** — Generates cryptographically secure 256-bit HMAC-SHA256 tokens via `crypto/rand`, stores in `corev1.Secret`.
+2. **Master Service** — Provisions `ClusterIP` Service with TCP (port 7777) and UDP (port 7778) endpoints. Updates in-place when ports change.
+3. **Master Deployment** — Single-replica Deployment with `VGRE_PORT`, `VGRE_TCP_AUTH_TOKEN` (from Secret), `VGRE_SHM_SUFFIX`, and `VGRE_CLUSTER_ADVERTISED_ADDRESS` injected via env vars.
+4. **Worker workloads** — Switches between `Deployment` (replica-controlled) and `DaemonSet` (host-node-controlled) based on `spec.deploymentMode`; tears down the old mode on switch.
+5. **NetworkPolicy** — Dynamically creates/deletes `NetworkPolicy` locking intra-cluster TCP/UDP to `vgre.io/cluster` label when `spec.networkPolicy: true`.
+6. **Status** — Updates `status.masterIP`, `status.readyWorkers`, `status.phase` on every reconciliation.
+
+RBAC markers cover Deployments, DaemonSets, Services, Secrets, NetworkPolicies.
+
+### 3.3 GPUDirect RDMA User-Space Bypass
+
+**Source**: `src/advanced/rdma_transport.cpp` (gate: `#ifdef VGRE_HAS_RDMA`)
+
+#### Implemented
+- `RDMAContext::tryCreate()` — `ibv_get_device_list`, `ibv_open_device`, `ibv_alloc_pd`, `ibv_create_cq`
+- `registerMemory` / `deregisterMemory` — `ibv_reg_mr` with `IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE`
+- **Zero-copy pre-registration cache** — `preRegisterAllocation(ptr, size)` pins memory at `cudaMalloc` time into a hash map; `rdmaWriteToRemote` looks up the cached `ibv_mr*` to avoid per-transfer page-table walks (O(1) vs O(n/4K))
+- **QP state machine** — `ibv_create_qp(IBV_QPT_RC)`, `ibv_modify_qp` transitions RESET→INIT→RTR (with RoCE GRH support when `lid == 0`)→RTS. Cryptographically seeded PSN via `std::random_device`.
+- **Bounce buffer** — `mmap_alloc(256 MB)` registered at connect time; remote peer writes into it via RDMA WRITE
+- **Completion polling** — Adaptive spin-then-yield loop using `_mm_pause` / ARM `yield` for first 1000 iterations, then `std::this_thread::yield()`, with configurable timeout
+- **Non-RDMA fallback** — All methods return `nullptr`/`false` when `VGRE_HAS_RDMA` is off
+
+#### Partial: QP info exchange
+`sendQPInfo()` and `recvQPInfo()` in the anonymous namespace both `return false` immediately (`// QP exchange via sendSecure — integrated in connect()`). The `RDMAConnection::connect()` function calls them and returns `false` if either fails. **Result**: two peers cannot currently exchange QP parameters (LID, QPN, PSN, rkey, remote address) over SecureChannel to complete the end-to-end RDMA handshake. RDMA context and local memory registration work; cross-node RDMA Write transfers do not.
 
 ---
 
 ## Track 4: cuDNN Graph API (v9+)
 
 ### 4.1 Status
-**Implemented**. The Backend Graph Engine compiles mathematical DAG execution graphs into fused CPU execution plans.
+**Implemented** (CONV_NORM execution and RNG backend: partial).
 
 ### 4.2 Implementation Details
-A **cuDNN Backend Graph Engine** compiles mathematical execution DAGs and executes them with high cache locality:
 
-```
-cuDNN Graph Definition (Nodes: Conv + ReLU + Add)
-                       ↓
-       VgreGraphBuilder Parses Node Structure
-                       ↓
-   Generate Unified Plan (Fused Math Loop Block)
-                       ↓
-      In-Place Local Kernel Execution
-                       ↓
-Single Parallel Execution Loop (AVX-512 Vector Lanes)
-```
+**Sources**: `src/api/cudnn/cudnn_graph.cpp`, `src/api/cudnn/cudnn_backend_api.cpp`
 
-#### Step 1: Graph Builder Descriptor Interface
-- Implemented cuDNN Graph endpoints in `src/api/cudnn/cudnn_graph.cpp`:
-  - `cudnnGraphCreate`, `cudnnGraphAddNode`, `cudnnGraphBuildAndCheck`, and `cudnnGraphExecute`.
-  - Descriptor and attributes structures defined in `src/api/cudnn/cudnn_backend_api.cpp`.
+#### Graph builder
+`cudnnGraphCreate` / `cudnnGraphAddNode` / `cudnnGraphBuildAndCheck` / `cudnnGraphExecute` are all real.
 
-#### Step 2: Loop Fusion & Execution
-- Detects fusible node pairs in topological order:
-  - `CONV_ACTIVATION` (Convolution + Activation in-place)
-  - `CONV_NORM` (Convolution + BatchNorm)
-  - `GEMM_POINTWISE` (MatMul + BiasAdd/Scale)
-  - `GEMM_ACTIVATION` (MatMul + Activation)
-  - `NORM_ACTIVATION` (Normalization + Activation)
-- Fused operations write directly to final output, eliminating intermediate DRAM load/store latency.
+#### Fusion analysis (`cudnnGraphBuildAndCheck`)
+Scans consecutive op-pairs in topological order, greedily fusing the first match:
+
+| Pattern | Kind | Execution |
+|---|---|---|
+| CONV_FWD → ACTIVATION_FWD | `CONV_ACTIVATION` | **Fused**: Conv runs first, Activation reads Conv output in-place from cache |
+| CONV_FWD → NORM_FWD | `CONV_NORM` | Detected but falls back to sequential execute |
+| MATMUL → POINTWISE | `GEMM_POINTWISE` | **Fused**: both ops in a single `OperationSet` plan |
+| MATMUL → ACTIVATION_FWD | `GEMM_ACTIVATION` | **Fused**: same as above |
+| NORM_FWD → ACTIVATION_FWD | `NORM_ACTIVATION` | **Fused**: sets `CUDNN_NORM_OPS_NORM_ACTIVATION` on the norm descriptor |
+
+Unfused nodes execute sequentially via a dynamically constructed `OPERATIONSET → ENGINE → ENGINECFG → PLAN` chain.
+
+#### Partial gaps
+- **CONV_NORM**: Detected as a fusion but `executeFusedPair` returns `false` for this kind — falls back to sequential (two separate backend calls).
+- **`CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR`**: Returns `CUDNN_STATUS_NOT_SUPPORTED` — random number generation nodes are not executed.
+
+---
+
+## Additional Implemented Subsystems (Newly Documented)
+
+These subsystems are fully implemented in the codebase but were not tracked in previous versions of this plan.
+
+### A. NCCL Collective Operations
+
+**Source**: `src/api/nccl/nccl_collectives.cpp`
+
+Three-tier algorithm selection based on buffer size:
+- `≤ 64 KB`: flat-barrier reduce (O(1) sync rounds, lowest latency)
+- `64 KB – 1 MB`: binary-tree reduce (log₂(N) rounds)
+- `> 1 MB`: ring-allreduce (bandwidth-optimal, chunk-pipelined)
+
+When `TCPClusterManager` has active remote peers, `ncclAllReduce` delegates to `tcm.allReduce()` for true distributed multi-node reduction.
+
+### B. Tensor Core Emulation (AVX-512 VNNI / BF16 / AMX)
+
+**Source**: `src/core/math/tensor_core_emulation.cpp`, `src/runtime/vector_engine_amx.cpp`
+
+CPU feature detection at startup (`g_hasAVX512VNNI`, `g_hasAVX512BF16`, `g_hasAMX`). Dispatch hierarchy:
+1. AMX tile-based matmul (`#ifdef __AMX__`)
+2. AVX-512 VNNI int8 accumulation (`#ifdef __AVX512VNNI__`)
+3. AVX-512 BF16 accumulation (`#ifdef __AVX512BF16__`)
+4. Scalar FP32 fallback (any platform)
+
+These are registered as LLVM JIT external symbols (`vgre_matmul_int8`, `vgre_matmul_bf16`) so JIT-compiled kernels can call them directly from generated code.
+
+### C. NUMA-Aware Scheduler
+
+**Source**: `src/core/scheduler_numa.cpp`
+
+On Linux, scans `/sys/devices/system/node/nodeN/cpulist` to discover NUMA topology. Binds worker threads to CPU sets via `pthread_setaffinity_np`. On macOS, uses `thread_policy_set(THREAD_AFFINITY_POLICY)`. Falls back gracefully when NUMA topology is unavailable.
+
+### D. iGPU OpenCL Executor (CUDA→OpenCL Transpiler)
+
+**Source**: `src/runtime/igpu_opencl_executor.cpp`
+
+Translates CUDA kernel source to OpenCL C via regex-based substitution (`blockIdx.x → get_group_id(0)`, etc.) and dispatches on integrated GPUs via the OpenCL runtime. Supports warp-shuffle via `cl_intel_subgroups` when available, with local-memory software fallback.
+
+### E. UVM Background Migration Thread
+
+**Source**: `src/core/memory/uvm_migration.cpp`
+
+Manages unified virtual memory page migration. On Linux, issues `SYS_mbind` (`MPOL_PREFERRED`, `MPOL_MF_MOVE`) to migrate managed memory to the NUMA node where the application thread is running. Configurable poll interval; stops cleanly on `cudaDeviceReset`.
+
+### F. Hardware Token Manager
+
+**Source**: `src/advanced/token/hardware_token_manager.cpp`
+
+Priority chain: TPM 2.0 NV storage → Linux `libsecret` keyring → macOS Keychain → Windows DPAPI → encrypted-file fallback (PBKDF2 + AES-256-CTR + HMAC-SHA256). Stores per-service auth tokens for the cluster authentication system.
+
+### G. Adaptive Execution Engine
+
+**Source**: `src/advanced/adaptive_execution_engine.cpp`
+
+Monitors CPU thermal state and dynamically adjusts thread count / frequency target to avoid thermal throttling. Reads CPU temperature from `/tmp/.vgre_cpu_temp` (populated by an optional helper) or system sensors; backs off workload dispatch when temperature exceeds threshold.
+
+### H. LZ4 Memory Compression (P2P fallback)
+
+**Source**: `src/advanced/memory_compression.cpp`, `src/advanced/vendor/lz4/lz4.h`
+
+Applied on cross-NUMA / cross-node transfers when RDMA is unavailable. LZ4 compressed payload includes a 4-byte signature header; legacy frames without the signature are decompressed directly (backward-compat path).

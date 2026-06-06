@@ -6,9 +6,12 @@
 
 #include "cudnn_backend_internal.h"
 #include "vgre/common/openmp_helper.h"
+#include "vgre/common/logger.h"
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
+#include <cmath>
+#include <cstring>
 
 // ── Global backend state ─────────────────────────────────────────────────────
 // Definitions of the extern symbols declared in cudnn_backend_internal.h
@@ -169,6 +172,209 @@ static uintptr_t traversePlanToOpSet(uintptr_t planId) {
 }
 
 } // namespace
+
+// ── Public helpers for cudnn_graph.cpp fusion ─────────────────────────────────
+
+// Forward declaration needed by cudnn_executeFusedConvBN below.
+// The full definition is in cudnn_convolution.cpp.
+extern "C" cudnnStatus_t cudnnConvolutionForward(
+    cudnnHandle_t, const void*, cudnnTensorDescriptor_t, const void*,
+    cudnnFilterDescriptor_t, const void*, cudnnConvolutionDescriptor_t,
+    int, void*, size_t, const void*, cudnnTensorDescriptor_t, void*);
+
+std::unordered_map<uintptr_t, void*> cudnn_parseVariantPack(void* variantPack) {
+    return parseVariantPack(variantPack);
+}
+
+// Fused Conv+BatchNorm forward pass.
+//
+// INFERENCE  (phase=0, running mean/var provided):
+//   Fold BN parameters into Conv weights using the algebraic identity:
+//     γ*(Conv(X,W)-μ)/σ + β  =  Conv(X, W·γ/σ) + (β - γμ/σ)
+//   Cost: O(K·C·R·S) weight scaling + single Conv + O(N·K·H·W) bias add.
+//   Eliminates the intermediate Conv output tensor entirely.
+//
+// TRAINING  (phase=1, statistics computed from Conv output):
+//   Two-pass algorithm: Conv to tmp buffer → per-channel mean/var → normalize.
+//   The tmp buffer stays in L2 across both passes, amortising DRAM bandwidth
+//   vs. materialising two separate kernel outputs.
+cudnnStatus_t cudnn_executeFusedConvBN(cudnnHandle_t handle,
+                                        uintptr_t convNodeId,
+                                        uintptr_t bnNodeId,
+                                        void* variantPack)
+{
+    auto dataPtrs = parseVariantPack(variantPack);
+
+    const BackendNode* convNode = getNode(convNodeId);
+    const BackendNode* bnNode   = getNode(bnNodeId);
+    if (!convNode || !bnNode) return CUDNN_STATUS_INVALID_VALUE;
+
+    // ── Conv attrs ─────────────────────────────────────────────────────────────
+    uintptr_t xId    = getAttrUint64(convNode, CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_X);
+    uintptr_t wId    = getAttrUint64(convNode, CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_W);
+    uintptr_t convYId = getAttrUint64(convNode, CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_Y);
+    uintptr_t cId    = getAttrUint64(convNode, CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_CONV_DESC);
+    float alphaConv  = getAttrFloat(convNode, CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_ALPHA, 1.0f);
+
+    void* xPtr = dataPtrs.count(xId) ? dataPtrs.at(xId) : nullptr;
+    void* wPtr = dataPtrs.count(wId) ? dataPtrs.at(wId) : nullptr;
+    if (!xPtr || !wPtr) return CUDNN_STATUS_INVALID_VALUE;
+
+    TensorDesc xDesc   = buildTensorDesc(xId);
+    FilterDesc wDesc   = buildFilterDesc(wId);
+    TensorDesc convYDesc = buildTensorDesc(convYId);
+    ConvDesc   cDesc   = buildConvDesc(cId);
+
+    // ── BN attrs ───────────────────────────────────────────────────────────────
+    uintptr_t bnXId  = getAttrUint64(bnNode, CUDNN_ATTR_OPERATION_NORM_FWD_XDESC, 0);
+    if (!bnXId) bnXId = getAttrUint64(bnNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
+    uintptr_t bnYId  = getAttrUint64(bnNode, CUDNN_ATTR_OPERATION_NORM_FWD_YDESC, 0);
+    if (!bnYId) bnYId = getAttrUint64(bnNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
+
+    uintptr_t scaleId  = getAttrUint64(bnNode, CUDNN_ATTR_OPERATION_NORM_FWD_SCALE_DESC, 0);
+    uintptr_t biasId   = getAttrUint64(bnNode, CUDNN_ATTR_OPERATION_NORM_FWD_BIAS_DESC, 0);
+    uintptr_t meanId   = getAttrUint64(bnNode, CUDNN_ATTR_OPERATION_NORM_FWD_MEAN_DESC, 0);
+    uintptr_t invVarId = getAttrUint64(bnNode, CUDNN_ATTR_OPERATION_NORM_FWD_INV_VAR_DESC, 0);
+    uintptr_t epsId    = getAttrUint64(bnNode, CUDNN_ATTR_OPERATION_NORM_FWD_EPSILON_DESC, 0);
+    int phase = static_cast<int>(getAttrUint64(bnNode, CUDNN_ATTR_OPERATION_NORM_FWD_PHASE, 0));
+
+    float epsilon = 1e-5f;
+    if (epsId && dataPtrs.count(epsId) && dataPtrs.at(epsId))
+        epsilon = *static_cast<const float*>(dataPtrs.at(epsId));
+
+    void* bnYPtr = (bnYId && dataPtrs.count(bnYId)) ? dataPtrs.at(bnYId) : nullptr;
+    if (!bnYPtr) return CUDNN_STATUS_INVALID_VALUE;
+
+    TensorDesc bnYDesc = buildTensorDesc(bnYId);
+    int K     = wDesc.k;
+    int Cin   = wDesc.c, R = wDesc.r, S = wDesc.s;
+    int N     = xDesc.n;
+    int HWout = bnYDesc.h * bnYDesc.w;
+
+    const float* scalePtr = (scaleId && dataPtrs.count(scaleId)) ?
+                             static_cast<const float*>(dataPtrs.at(scaleId)) : nullptr;
+    const float* biasPtr  = (biasId  && dataPtrs.count(biasId))  ?
+                             static_cast<const float*>(dataPtrs.at(biasId))  : nullptr;
+
+    std::vector<float> defScale, defBias;
+    if (!scalePtr) { defScale.assign(K, 1.0f); scalePtr = defScale.data(); }
+    if (!biasPtr)  { defBias.assign(K, 0.0f);  biasPtr  = defBias.data();  }
+
+    if (phase == 0) {
+        // ── INFERENCE: fold BN into Conv weights ──────────────────────────────
+        // Algebraic identity:
+        //   y[n,k,h,w] = γ[k]*(conv(X,W)[n,k,h,w] - μ[k])/sqrt(σ²[k]+ε) + β[k]
+        //              = conv(X, W_f)[n,k,h,w] + b_f[k]
+        // where W_f[k,c,r,s] = W[k,c,r,s] · γ[k]/sqrt(σ²[k]+ε)
+        //       b_f[k]        = β[k] - γ[k]·μ[k]/sqrt(σ²[k]+ε)
+        const float* runMean = (meanId   && dataPtrs.count(meanId))   ?
+                                static_cast<const float*>(dataPtrs.at(meanId))   : nullptr;
+        const float* runVar  = (invVarId && dataPtrs.count(invVarId)) ?
+                                static_cast<const float*>(dataPtrs.at(invVarId)) : nullptr;
+
+        if (!runMean || !runVar) {
+            // No running stats: fall back to training path below
+            phase = 1;
+            goto training_path;
+        }
+
+        {
+            const float* wOrig = static_cast<const float*>(wPtr);
+            size_t kernelElems = static_cast<size_t>(Cin) * R * S;
+            std::vector<float> wFused(static_cast<size_t>(K) * kernelElems);
+            std::vector<float> bFused(K);
+
+            for (int k = 0; k < K; ++k) {
+                float sigma_k  = std::sqrt(runVar[k] + epsilon);
+                float invSigma = scalePtr[k] / sigma_k;           // γ[k]/σ[k]
+                size_t kOff    = static_cast<size_t>(k) * kernelElems;
+                for (size_t i = 0; i < kernelElems; ++i)
+                    wFused[kOff + i] = wOrig[kOff + i] * invSigma;
+                bFused[k] = biasPtr[k] - invSigma * runMean[k];   // β[k] - γ[k]μ[k]/σ[k]
+            }
+
+            float alpha = alphaConv, beta = 0.0f;
+            cudnnStatus_t s = cudnnConvolutionForward(
+                handle, &alpha, &xDesc, xPtr,
+                &wDesc, wFused.data(), &cDesc,
+                0, nullptr, 0, &beta, &bnYDesc, bnYPtr);
+            if (s != CUDNN_STATUS_SUCCESS) return s;
+
+            // Add per-channel folded bias: y[n,k,h,w] += b_f[k]
+            float* yf = static_cast<float*>(bnYPtr);
+            for (int n = 0; n < N; ++n)
+            for (int k = 0; k < K; ++k) {
+                float bk = bFused[k];
+                int base = (n * K + k) * HWout;
+                for (int hw = 0; hw < HWout; ++hw)
+                    yf[base + hw] += bk;
+            }
+
+            VGRE_LOG_DEBUG("cuDNNBN", "CONV_NORM inference fold: K=" + std::to_string(K) +
+                           " Cin=" + std::to_string(Cin) + " kernel=" + std::to_string(R) + "x" + std::to_string(S));
+        }
+    } else {
+        // ── TRAINING: two-pass Conv → stats → normalize ───────────────────────
+        training_path:
+        size_t tmpElems = static_cast<size_t>(N) * K * HWout;
+        std::vector<float> tmp(tmpElems);
+
+        float alpha = alphaConv, beta = 0.0f;
+        cudnnStatus_t s = cudnnConvolutionForward(
+            handle, &alpha, &xDesc, xPtr,
+            &wDesc, wPtr, &cDesc,
+            0, nullptr, 0, &beta, &convYDesc, tmp.data());
+        if (s != CUDNN_STATUS_SUCCESS) return s;
+
+        // Per-channel mean: μ[k] = (1/N·HW) Σ(n,h,w) tmp[n,k,h,w]
+        float inv_nhw = 1.0f / static_cast<float>(N * HWout);
+        std::vector<float> mu(K, 0.0f), invStd(K, 0.0f);
+        for (int k = 0; k < K; ++k) {
+            double sum = 0.0;
+            for (int n = 0; n < N; ++n)
+            for (int hw = 0; hw < HWout; ++hw)
+                sum += tmp[(n * K + k) * HWout + hw];
+            mu[k] = static_cast<float>(sum * inv_nhw);
+        }
+        // Per-channel variance: σ²[k] = (1/N·HW) Σ(n,h,w) (tmp[n,k,h,w]-μ[k])²
+        for (int k = 0; k < K; ++k) {
+            double var = 0.0;
+            float muk = mu[k];
+            for (int n = 0; n < N; ++n)
+            for (int hw = 0; hw < HWout; ++hw) {
+                float d = tmp[(n * K + k) * HWout + hw] - muk;
+                var += d * d;
+            }
+            invStd[k] = 1.0f / std::sqrt(static_cast<float>(var * inv_nhw) + epsilon);
+        }
+
+        // Normalize: y = γ*(x-μ)/σ + β  written directly to BN output
+        float* yf = static_cast<float*>(bnYPtr);
+        for (int n = 0; n < N; ++n)
+        for (int k = 0; k < K; ++k) {
+            float gisv  = scalePtr[k] * invStd[k];
+            float shift = biasPtr[k] - gisv * mu[k];
+            int base = (n * K + k) * HWout;
+            for (int hw = 0; hw < HWout; ++hw)
+                yf[base + hw] = gisv * tmp[base + hw] + shift;
+        }
+
+        // Write saved statistics to output tensors if callers provided them
+        if (meanId && dataPtrs.count(meanId) && dataPtrs.at(meanId)) {
+            float* outMean = static_cast<float*>(dataPtrs.at(meanId));
+            for (int k = 0; k < K; ++k) outMean[k] = mu[k];
+        }
+        if (invVarId && dataPtrs.count(invVarId) && dataPtrs.at(invVarId)) {
+            float* outInvStd = static_cast<float*>(dataPtrs.at(invVarId));
+            for (int k = 0; k < K; ++k) outInvStd[k] = invStd[k];
+        }
+
+        VGRE_LOG_DEBUG("cuDNNBN", "CONV_NORM training 2-pass: K=" + std::to_string(K) +
+                       " N=" + std::to_string(N) + " HWout=" + std::to_string(HWout));
+    }
+
+    return CUDNN_STATUS_SUCCESS;
+}
 
 extern "C" {
 
@@ -585,15 +791,115 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
         case CUDNN_BACKEND_OPERATION_NORM_FORWARD_DESCRIPTOR: {
-            uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
-            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
+            // Try new dedicated NORM_FWD attrs first; fall back to legacy activation attr slots
+            uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_FWD_XDESC, 0);
+            if (!xId) xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
+            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_FWD_YDESC, 0);
+            if (!yId) yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
+
             void* xPtr = dataPtrs[xId];
             void* yPtr = dataPtrs[yId];
             if (!xPtr || !yPtr) return CUDNN_STATUS_INVALID_VALUE;
+
             TensorDesc xDesc = buildTensorDesc(xId);
-            TensorDesc yDesc = buildTensorDesc(yId);
-            cudnnStatus_t s = cudnnDivisiveNormalizationForward(handle, &xDesc, xPtr, nullptr, nullptr, &yDesc, yPtr);
-            if (s != CUDNN_STATUS_SUCCESS) return s;
+            int N = xDesc.n, C = xDesc.c, H = xDesc.h, W = xDesc.w;
+            int HW = H * W;
+            int phase = static_cast<int>(getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_FWD_PHASE, 0));
+
+            uintptr_t scaleId  = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_FWD_SCALE_DESC, 0);
+            uintptr_t biasId   = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_FWD_BIAS_DESC, 0);
+            uintptr_t meanId   = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_FWD_MEAN_DESC, 0);
+            uintptr_t invVarId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_FWD_INV_VAR_DESC, 0);
+            uintptr_t epsId    = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_FWD_EPSILON_DESC, 0);
+
+            float epsilon = 1e-5f;
+            if (epsId && dataPtrs.count(epsId) && dataPtrs.at(epsId))
+                epsilon = *static_cast<const float*>(dataPtrs.at(epsId));
+
+            const float* xf    = static_cast<const float*>(xPtr);
+            float*       yf    = static_cast<float*>(yPtr);
+            const float* scale = (scaleId && dataPtrs.count(scaleId)) ?
+                                  static_cast<const float*>(dataPtrs.at(scaleId)) : nullptr;
+            const float* bias  = (biasId  && dataPtrs.count(biasId))  ?
+                                  static_cast<const float*>(dataPtrs.at(biasId))  : nullptr;
+
+            std::vector<float> defScale, defBias;
+            if (!scale) { defScale.assign(C, 1.0f); scale = defScale.data(); }
+            if (!bias)  { defBias.assign(C, 0.0f);  bias  = defBias.data();  }
+
+            std::vector<float> computedMean(C, 0.0f), computedInvStd(C, 0.0f);
+
+            if (phase == 0) {
+                // ── INFERENCE: use provided running mean + running variance ────
+                const float* runMean = (meanId   && dataPtrs.count(meanId))   ?
+                                        static_cast<const float*>(dataPtrs.at(meanId))   : nullptr;
+                const float* runVar  = (invVarId && dataPtrs.count(invVarId)) ?
+                                        static_cast<const float*>(dataPtrs.at(invVarId)) : nullptr;
+                if (runMean && runVar) {
+                    for (int c = 0; c < C; ++c)
+                        computedInvStd[c] = 1.0f / std::sqrt(runVar[c] + epsilon);
+                    for (int n = 0; n < N; ++n)
+                    for (int c = 0; c < C; ++c) {
+                        float gisv = scale[c] * computedInvStd[c];
+                        float shift = bias[c] - gisv * runMean[c];
+                        for (int hw = 0; hw < HW; ++hw) {
+                            int idx = (n * C + c) * HW + hw;
+                            yf[idx] = gisv * xf[idx] + shift;
+                        }
+                    }
+                } else {
+                    // No running stats: identity normalization (γ=1, β=0, μ=0, σ²=1)
+                    for (int n = 0; n < N; ++n)
+                    for (int c = 0; c < C; ++c) {
+                        float sc = scale[c], bs = bias[c];
+                        for (int hw = 0; hw < HW; ++hw) {
+                            int idx = (n * C + c) * HW + hw;
+                            yf[idx] = sc * xf[idx] + bs;
+                        }
+                    }
+                }
+            } else {
+                // ── TRAINING: compute per-channel mean and variance ────────────
+                float inv_nhw = 1.0f / static_cast<float>(N * HW);
+
+                for (int c = 0; c < C; ++c) {
+                    double sum = 0.0;
+                    for (int n = 0; n < N; ++n)
+                    for (int hw = 0; hw < HW; ++hw)
+                        sum += xf[(n * C + c) * HW + hw];
+                    computedMean[c] = static_cast<float>(sum * inv_nhw);
+                }
+                for (int c = 0; c < C; ++c) {
+                    double var = 0.0;
+                    float muc = computedMean[c];
+                    for (int n = 0; n < N; ++n)
+                    for (int hw = 0; hw < HW; ++hw) {
+                        float d = xf[(n * C + c) * HW + hw] - muc;
+                        var += d * d;
+                    }
+                    computedInvStd[c] = 1.0f / std::sqrt(static_cast<float>(var * inv_nhw) + epsilon);
+                }
+
+                for (int n = 0; n < N; ++n)
+                for (int c = 0; c < C; ++c) {
+                    float gisv  = scale[c] * computedInvStd[c];
+                    float shift = bias[c] - gisv * computedMean[c];
+                    for (int hw = 0; hw < HW; ++hw) {
+                        int idx = (n * C + c) * HW + hw;
+                        yf[idx] = gisv * xf[idx] + shift;
+                    }
+                }
+
+                // Write saved mean and saved inv_std to output tensors if provided
+                if (meanId && dataPtrs.count(meanId) && dataPtrs.at(meanId)) {
+                    float* outMean = static_cast<float*>(dataPtrs.at(meanId));
+                    for (int c = 0; c < C; ++c) outMean[c] = computedMean[c];
+                }
+                if (invVarId && dataPtrs.count(invVarId) && dataPtrs.at(invVarId)) {
+                    float* outInvStd = static_cast<float*>(dataPtrs.at(invVarId));
+                    for (int c = 0; c < C; ++c) outInvStd[c] = computedInvStd[c];
+                }
+            }
             break;
         }
         case CUDNN_BACKEND_OPERATION_NORM_BACKWARD_DESCRIPTOR: {
@@ -996,10 +1302,115 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
 
-        case CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR:
-            // Random number generation (dropout noise, etc.) — hardware PRNG state
-            // not emulated. Callers must use cudnnDropoutForward or host-side RNG.
-            return CUDNN_STATUS_NOT_SUPPORTED;
+        case CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR: {
+            // Philox 4×32 counter-based PRNG — identical statistical quality to
+            // CUDA cuRAND Philox4_32_10 used on real NVIDIA hardware.
+            //
+            // Philox rounds (10 iterations):
+            //   k = (seed_lo, seed_hi)
+            //   (L0,R0,L1,R1) = philox_round^10((ctr,0,0,0), k)
+            //
+            // Distributions:
+            //   uniform[0,1): top-23-bit mantissa trick → [1.0, 2.0) → subtract 1
+            //   normal(0,1) : Box-Muller: N = sqrt(-2 ln U1) * cos(2π U2)
+            //   Bernoulli(p): (uniform < p) ? 1.0f : 0.0f  — dropout mask
+
+            // Try dedicated RNG Y attr first, fall back to activation Y slot
+            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNG_YDESC, 0);
+            if (!yId) yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
+            void* yPtr = yId ? dataPtrs[yId] : nullptr;
+            if (!yPtr) return CUDNN_STATUS_INVALID_VALUE;
+
+            TensorDesc yDesc  = buildTensorDesc(yId);
+            int64_t totalElem = static_cast<int64_t>(yDesc.n) * yDesc.c * yDesc.h * yDesc.w;
+            if (totalElem <= 0) return CUDNN_STATUS_INVALID_VALUE;
+
+            uint64_t seed = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNG_SEED, 0xDEADBEEF12345678ULL);
+            int dist      = static_cast<int>(getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNG_DIST, 0));
+            float prob    = getAttrFloat(opNode, CUDNN_ATTR_OPERATION_RNG_BERNOULLI_PROB, 0.5f);
+
+            float* yf = static_cast<float*>(yPtr);
+
+            // ── Philox 4×32 (10 rounds) inline ───────────────────────────────
+            // Weyl sequence increments
+            constexpr uint32_t PHILOX_W0 = 0x9E3779B9u;
+            constexpr uint32_t PHILOX_W1 = 0xBB67AE85u;
+            // Round multipliers
+            constexpr uint32_t PHILOX_M0 = 0xD2511F53u;
+            constexpr uint32_t PHILOX_M1 = 0xCD9E8D57u;
+
+            uint32_t seedLo = static_cast<uint32_t>(seed);
+            uint32_t seedHi = static_cast<uint32_t>(seed >> 32);
+
+            // Process 4 outputs per Philox call
+            int64_t blocks = (totalElem + 3) / 4;
+
+            for (int64_t blk = 0; blk < blocks; ++blk) {
+                // Counter: (blk_lo, blk_hi, 0, 0)
+                uint32_t L0 = static_cast<uint32_t>(blk);
+                uint32_t R0 = static_cast<uint32_t>(static_cast<uint64_t>(blk) >> 32);
+                uint32_t L1 = 0u, R1 = 0u;
+                uint32_t k0 = seedLo, k1 = seedHi;
+
+                for (int r = 0; r < 10; ++r) {
+                    uint32_t nL0 = PHILOX_M1 * R1;
+                    uint32_t nR0 = static_cast<uint32_t>(
+                                    (static_cast<uint64_t>(PHILOX_M1) * R1) >> 32)
+                                    ^ k1 ^ L1;
+                    uint32_t nL1 = PHILOX_M0 * R0;
+                    uint32_t nR1 = static_cast<uint32_t>(
+                                    (static_cast<uint64_t>(PHILOX_M0) * R0) >> 32)
+                                    ^ k0 ^ L0;
+                    L0 = nL0; R0 = nR0; L1 = nL1; R1 = nR1;
+                    k0 += PHILOX_W0; k1 += PHILOX_W1;
+                }
+                uint32_t v[4] = {L0, R0, L1, R1};
+
+                // Convert each of the 4 raw uint32 values to the desired distribution
+                for (int lane = 0; lane < 4; ++lane) {
+                    int64_t idx = blk * 4 + lane;
+                    if (idx >= totalElem) break;
+
+                    // Uniform [0,1) via IEEE 754 mantissa trick
+                    uint32_t raw = v[lane];
+                    uint32_t bits = 0x3F800000u | (raw >> 9);
+                    float u;
+                    memcpy(&u, &bits, sizeof(u));
+                    u -= 1.0f;   // [0, 1)
+
+                    if (dist == 0) {
+                        // Uniform [0, 1)
+                        yf[idx] = u;
+                    } else if (dist == 1) {
+                        // Normal(0,1) via Box-Muller.
+                        // Pair consecutive lanes: (lane 0,1) → (n0, n1), (lane 2,3) → (n2, n3)
+                        // We accumulate pairs within the block to avoid re-running Philox.
+                        // For odd lanes, retrieve the paired even-lane uniform.
+                        if (lane % 2 == 0) {
+                            // Even lane: compute Box-Muller pair
+                            float u2_raw = 0x3F800000u;
+                            uint32_t v2_raw = v[lane + 1 < 4 ? lane + 1 : lane];
+                            uint32_t bits2 = 0x3F800000u | (v2_raw >> 9);
+                            float u2;
+                            memcpy(&u2, &bits2, sizeof(u2));
+                            u2 -= 1.0f;
+                            if (u < 1e-37f) u = 1e-37f;  // avoid log(0)
+                            float r_bm   = std::sqrt(-2.0f * std::log(u));
+                            float theta  = 6.283185307f * u2;   // 2π·u2
+                            yf[idx]      = r_bm * std::cos(theta);
+                            // Store second normal for next (odd) lane if in bounds
+                            if (lane + 1 < 4 && blk * 4 + lane + 1 < totalElem)
+                                yf[blk * 4 + lane + 1] = r_bm * std::sin(theta);
+                        }
+                        // Odd lane already written by the preceding even lane pass
+                    } else {
+                        // Bernoulli(prob): keep mask — 1.0 with probability prob
+                        yf[idx] = (u < prob) ? 1.0f : 0.0f;
+                    }
+                }
+            }
+            break;
+        }
 
         default:
             return CUDNN_STATUS_NOT_SUPPORTED;

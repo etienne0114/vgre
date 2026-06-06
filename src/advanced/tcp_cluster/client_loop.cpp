@@ -338,7 +338,7 @@ void TCPClusterManager::clientLoop() {
         if (raw && client_secure_channel_ && client_secure_channel_->isInitialized()) {
             client_rdma_ctx_.reset(raw);
             client_rdma_conn_ = std::make_unique<RDMAConnection>();
-            if (!client_rdma_conn_->connect(*client_secure_channel_, *client_rdma_ctx_)) {
+            if (!client_rdma_conn_->connect(*client_secure_channel_, client_fd_, *client_rdma_ctx_)) {
                 VGRE_LOG_INFO("TCPCluster",
                     "Worker: RDMA negotiation failed — using TCP for bulk transfers");
                 client_rdma_conn_.reset();

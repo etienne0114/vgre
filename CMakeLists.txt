@@ -59,8 +59,18 @@ option(VGRE_USE_FFTW3
     "Use FFTW3 as cuFFT backend; falls back to built-in Cooley-Tukey"    ON)
 option(VGRE_ENABLE_RDMA
     "Enable RDMA/RoCE zero-copy cluster transport (requires libibverbs)" OFF)
+# Auto-detect gRPC availability before the option is evaluated so callers
+# don't have to pass -DVGRE_ENABLE_GRPC=ON on systems where it is present.
+find_library(_grpc_autodetect NAMES grpc++)
+find_program(_grpc_plugin_autodetect NAMES grpc_cpp_plugin)
+if(_grpc_autodetect AND _grpc_plugin_autodetect)
+    set(_VGRE_GRPC_AUTO_DEFAULT ON)
+else()
+    set(_VGRE_GRPC_AUTO_DEFAULT OFF)
+endif()
 option(VGRE_ENABLE_GRPC
-    "Enable gRPC/Protobuf cluster transport (requires libgrpc++)"        OFF)
+    "Enable gRPC/Protobuf cluster transport (requires libgrpc++)"
+    ${_VGRE_GRPC_AUTO_DEFAULT})
 
 # Default OpenCL OFF on Windows (CL/cl.h rarely present without GPU SDK)
 if(WIN32)

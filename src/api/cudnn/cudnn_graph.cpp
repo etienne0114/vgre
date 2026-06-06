@@ -338,6 +338,29 @@ static bool executeFusedPair(cudnnHandle_t handle, const FusedPair& fp,
         return true;
     }
 
+    // ── CONV_NORM fusion ──────────────────────────────────────────────────────
+    // Dispatch to the dedicated fused Conv+BatchNorm kernel in cudnn_backend_api.cpp.
+    //
+    // INFERENCE (phase=0, running stats present):
+    //   Fold BN into Conv weights: W_f[k] = W[k]·γ[k]/σ[k], b_f[k] = β[k]-γ[k]μ[k]/σ[k]
+    //   Single Conv writes directly to BN output tensor; zero intermediate materialisation.
+    //
+    // TRAINING (phase=1 or no running stats):
+    //   Conv → tmp → per-channel μ/σ² → normalise; tmp stays cache-warm across both passes.
+    if (fp.kind == FusionKind::CONV_NORM) {
+        cudnnStatus_t s = cudnn_executeFusedConvBN(
+            handle,
+            opIds[fp.primaryIdx],    // Conv forward node
+            opIds[fp.secondaryIdx],  // Norm forward node
+            variantPack);
+        if (s == CUDNN_STATUS_SUCCESS) {
+            VGRE_LOG_DEBUG("cuDNNGraph", "CONV_NORM fused Conv+BatchNorm executed");
+            return true;
+        }
+        VGRE_LOG_DEBUG("cuDNNGraph", "CONV_NORM fusion fallback to sequential");
+        return false;
+    }
+
     return false;
 }
 

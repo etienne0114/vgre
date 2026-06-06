@@ -53,7 +53,11 @@ public:
 private:
   struct CompiledKernel {
     cl_program program = nullptr;
-    cl_kernel kernel = nullptr;
+    cl_kernel kernel   = nullptr;
+    // Number of __local memory args appended after the regular CUDA args.
+    // Each represents one `extern __shared__` declaration; the executor
+    // sets them as NULL cl_mem + sharedMemBytes via clSetKernelArg.
+    int localMemArgCount = 0;
   };
   struct CachedBuffer {
     cl_mem mem = nullptr;
@@ -63,7 +67,8 @@ private:
   VGREResult transpileKernel(const std::string &kernelName,
                              const std::string &cudaSource,
                              const std::vector<ArgType> &argTypes,
-                             std::string &outOpenCLSource);
+                             std::string &outOpenCLSource,
+                             int* outLocalMemArgCount = nullptr);
 
   VGREResult compileOpenCL(const std::string &kernelName,
                            const std::string &oclSource,

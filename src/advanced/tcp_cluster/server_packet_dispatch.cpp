@@ -368,6 +368,7 @@ void TCPClusterManager::processServerPackets(
               client->secure_channel->isInitialized()) {
             client->rdma_conn = std::make_unique<RDMAConnection>();
             if (client->rdma_conn->connect(*client->secure_channel,
+                                           client->socket_fd,
                                            *client->rdma_ctx)) {
               client->rdma_connected = true;
               VGRE_LOG_INFO("TCPCluster", "Master: RDMA transport active for " +
