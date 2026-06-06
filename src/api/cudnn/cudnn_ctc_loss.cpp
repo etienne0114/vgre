@@ -89,9 +89,15 @@ void ctcBackward(int T, int C, const float* probs,
                  float* beta) {
     const float negInf = -std::numeric_limits<float>::infinity();
 
-    // t = T-1
+    // t = T-1: only the two valid terminal states (last blank s=S-1 and last
+    // label s=S-2) can end the sequence.  All other states are unreachable
+    // terminators and must be -inf so they don't pollute Z[T-1] or back-propagate
+    // non-zero probability through invalid paths.
     for (int s = 0; s < S; ++s)
-        beta[(T - 1) * S + s] = 0.f; // log(1) = 0
+        beta[(T - 1) * S + s] = negInf;
+    beta[(T - 1) * S + (S - 1)] = 0.f;
+    if (S > 1)
+        beta[(T - 1) * S + (S - 2)] = 0.f;
 
     // t < T-1
     for (int t = T - 2; t >= 0; --t) {
