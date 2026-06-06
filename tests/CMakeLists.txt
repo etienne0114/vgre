@@ -551,6 +551,12 @@ add_executable(test_cudnn_backend_v8 api/test_cudnn_backend_v8.cpp)
 target_link_libraries(test_cudnn_backend_v8 PRIVATE vgre)
 add_test(NAME CudnnBackendV8 COMMAND test_cudnn_backend_v8)
 
+# CTC loss forward + backward terminal-state constraint
+add_executable(test_cudnn_ctc_loss unit/test_cudnn_ctc_loss.cpp)
+target_link_libraries(test_cudnn_ctc_loss PRIVATE vgre)
+add_test(NAME CudnnCTCLoss COMMAND test_cudnn_ctc_loss)
+set_tests_properties(CudnnCTCLoss PROPERTIES TIMEOUT 30)
+
 add_executable(test_cudnn_resample_bwd api/test_cudnn_resample_bwd.cpp)
 target_link_libraries(test_cudnn_resample_bwd PRIVATE vgre)
 add_test(NAME CudnnResampleBwd COMMAND test_cudnn_resample_bwd)
