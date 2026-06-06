@@ -9,6 +9,9 @@
 #include <unordered_map>
 #include <vector>
 #include <limits>
+#if defined(_WIN32)
+#  include <malloc.h>   // _aligned_malloc / _aligned_free
+#endif
 
 // Warp shuffle builtins (__shfl_sync, __shfl_up_sync, etc.) are defined in
 // cpu_cuda_warp.h which is included first via cpu_cuda_env.h.  Do NOT re-declare
@@ -237,7 +240,7 @@ public:
         // Drain all cached blocks on destruction to avoid leaks.
         std::lock_guard<std::mutex> lk(mu_);
         for (auto& [bytes, vec] : pool_) {
-            for (void* p : vec) ::free(p);
+            for (void* p : vec) aligned_free_impl(p);
         }
     }
     CachingDeviceAllocator(const CachingDeviceAllocator&) = delete;
@@ -257,7 +260,16 @@ public:
         }
         if (!raw) {
             // Align to 64 bytes (cache line) for optimal SIMD performance.
+            // Use platform-specific aligned allocation for Windows/POSIX portability.
+#if defined(_WIN32)
+            raw = ::_aligned_malloc(bytes, 64);
+#elif defined(__APPLE__) || defined(__linux__)
             if (::posix_memalign(&raw, 64, bytes) != 0) raw = nullptr;
+#else
+            // C++17 std::aligned_alloc requires size to be a multiple of alignment.
+            const size_t aligned_bytes = (bytes + 63u) & ~size_t{63u};
+            raw = std::aligned_alloc(64, aligned_bytes);
+#endif
             if (!raw) throw std::bad_alloc{};
         }
         return static_cast<T*>(raw);
@@ -272,11 +284,19 @@ public:
         if (vec.size() < 16) {
             vec.push_back(static_cast<void*>(p));
         } else {
-            ::free(p);
+            aligned_free_impl(p);
         }
     }
 
 private:
+    static void aligned_free_impl(void* p) noexcept {
+#if defined(_WIN32)
+        ::_aligned_free(p);
+#else
+        ::free(p);
+#endif
+    }
+
     std::mutex mu_;
     // Free-list: maps allocation byte-size → cached raw blocks.
     std::unordered_map<size_t, std::vector<void*>> pool_;
