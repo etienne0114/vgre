@@ -2,7 +2,12 @@
 #define VGRE_COMPILER_CUDA_DEVICE_LIBS_CUB_FALLBACK_H
 
 #include <cstdint>
+#include <cstdlib>
+#include <mutex>
+#include <new>
 #include <type_traits>
+#include <unordered_map>
+#include <vector>
 #include <limits>
 
 // Warp shuffle builtins (__shfl_sync, __shfl_up_sync, etc.) are defined in
@@ -214,13 +219,67 @@ public:
     }
 };
 
-// ── CachingDeviceAllocator stub ────────────────────────────────────────────────
-// Many CUB-using kernels instantiate this; provide a minimal stub.
+// ── CachingDeviceAllocator — thread-safe size-class free-list pool ─────────────
+// Caches freed allocations per byte-size in a per-allocator free list so that
+// repeated alloc/free cycles of the same size (common in CUB reduction kernels)
+// avoid repeated malloc/free calls.
+//
+// Alignment: all blocks are aligned to 64 bytes (cache-line) to keep SIMD loads
+// valid regardless of whether AVX-512 (64-byte) or AVX2 (32-byte) code is emitted.
+//
+// Thread safety: a single mutex guards the free lists; CUB typically instantiates
+// one allocator per device, so contention is bounded.
 template<typename T>
 class CachingDeviceAllocator {
 public:
-    T* allocate(size_t n) { return new T[n]; }
-    void deallocate(T* p, size_t) { delete[] p; }
+    CachingDeviceAllocator() = default;
+    ~CachingDeviceAllocator() {
+        // Drain all cached blocks on destruction to avoid leaks.
+        std::lock_guard<std::mutex> lk(mu_);
+        for (auto& [bytes, vec] : pool_) {
+            for (void* p : vec) ::free(p);
+        }
+    }
+    CachingDeviceAllocator(const CachingDeviceAllocator&) = delete;
+    CachingDeviceAllocator& operator=(const CachingDeviceAllocator&) = delete;
+
+    T* allocate(size_t n) {
+        if (n == 0) return nullptr;
+        const size_t bytes = n * sizeof(T);
+        void* raw = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            auto it = pool_.find(bytes);
+            if (it != pool_.end() && !it->second.empty()) {
+                raw = it->second.back();
+                it->second.pop_back();
+            }
+        }
+        if (!raw) {
+            // Align to 64 bytes (cache line) for optimal SIMD performance.
+            if (::posix_memalign(&raw, 64, bytes) != 0) raw = nullptr;
+            if (!raw) throw std::bad_alloc{};
+        }
+        return static_cast<T*>(raw);
+    }
+
+    void deallocate(T* p, size_t n) noexcept {
+        if (!p || n == 0) return;
+        const size_t bytes = n * sizeof(T);
+        // Cap the per-size cache at 16 entries to bound memory usage.
+        std::lock_guard<std::mutex> lk(mu_);
+        auto& vec = pool_[bytes];
+        if (vec.size() < 16) {
+            vec.push_back(static_cast<void*>(p));
+        } else {
+            ::free(p);
+        }
+    }
+
+private:
+    std::mutex mu_;
+    // Free-list: maps allocation byte-size → cached raw blocks.
+    std::unordered_map<size_t, std::vector<void*>> pool_;
 };
 
 } // namespace cub
