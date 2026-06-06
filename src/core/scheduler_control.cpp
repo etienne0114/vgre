@@ -3,6 +3,7 @@
 #include "vgre/api/vgre_c_api.h"
 #include <thread>
 #include <chrono>
+#include "vgre/common/cpu_barriers.h"
 
 namespace vgre {
 namespace core {
@@ -56,11 +57,7 @@ void Scheduler::waitAll() {
         std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
     while (pending_.load(std::memory_order_acquire) != 0 &&
            std::chrono::steady_clock::now() < spinDeadline) {
-#if defined(__x86_64__) || defined(_M_X64)
-      __asm__ volatile("pause" ::: "memory");
-#else
-      std::this_thread::yield();
-#endif
+      VGRE_CPU_PAUSE();
     }
     if (pending_.load(std::memory_order_acquire) == 0) return;
   }

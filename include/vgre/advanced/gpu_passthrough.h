@@ -16,6 +16,7 @@
 
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
+#include "vgre/common/library_loader.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -76,7 +77,8 @@ private:
     GPUPassthrough() = default;
 
     bool         available_  = false;
-    void*        libHandle_  = nullptr;
+    vgre::common::LibraryLoader libLoader_;
+    vgre::common::LibraryLoader nvrtcLoader_;
     int          deviceCount_ = 0;
     std::vector<GPUDeviceInfo> devices_;
 

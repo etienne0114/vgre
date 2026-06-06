@@ -8,7 +8,7 @@
 #include <cstdlib>
 #include <random>
 #include <thread>
-#include <immintrin.h>  // _mm_pause (x86 spin-wait hint)
+#include "vgre/common/cpu_barriers.h"
 
 #ifdef VGRE_HAS_RDMA
 #include <infiniband/verbs.h>
@@ -509,13 +509,7 @@ size_t RDMAConnection::pollCompletion(int timeoutMs) {
         // CPU-specific pause instruction which tells the processor a spin-wait
         // loop is in progress, reducing pipeline pressure and power consumption.
         if (++spins < 1000) {
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
-            _mm_pause();
-#elif defined(__aarch64__) || defined(_M_ARM64)
-            asm volatile("yield" ::: "memory");
-#else
-            (void)0;
-#endif
+            VGRE_CPU_PAUSE();
         } else {
             std::this_thread::yield();
             spins = 0;

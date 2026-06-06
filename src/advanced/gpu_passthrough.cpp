@@ -5,21 +5,7 @@
 #include <cstring>
 #include <vector>
 
-#if defined(_WIN32)
-#  include <windows.h>
-#  define VGRE_DLOPEN(lib)        LoadLibraryA(lib)
-#  define VGRE_DLSYM(h, sym)      GetProcAddress((HMODULE)(h), sym)
-#  define VGRE_DLCLOSE(h)         FreeLibrary((HMODULE)(h))
-#  define VGRE_CUDA_LIB           "nvcuda.dll"
-#  define VGRE_NVRTC_LIB          "nvrtc64_120_0.dll"
-#else
-#  include <dlfcn.h>
-#  define VGRE_DLOPEN(lib)        dlopen(lib, RTLD_LAZY | RTLD_LOCAL)
-#  define VGRE_DLSYM(h, sym)      dlsym(h, sym)
-#  define VGRE_DLCLOSE(h)         dlclose(h)
-#  define VGRE_CUDA_LIB           "libcuda.so.1"
-#  define VGRE_NVRTC_LIB          "libnvrtc.so"
-#endif
+#include "vgre/common/library_loader.h"
 
 namespace vgre {
 namespace advanced {
@@ -80,42 +66,34 @@ GPUPassthrough& GPUPassthrough::instance() {
 }
 
 bool GPUPassthrough::loadDriverAPI() {
-    // Try multiple well-known locations so CUDA found via the toolkit installer
-    // (non-standard path) or via a distro package is detected automatically.
-    static const char* const kLibs[] = {
 #if defined(_WIN32)
-        "nvcuda.dll",
+    libLoader_ = vgre::common::LibraryLoader::tryLoad({"nvcuda.dll"});
 #elif defined(__APPLE__)
+    libLoader_ = vgre::common::LibraryLoader::tryLoad({
         "libcuda.dylib",
-        "/usr/local/cuda/lib/libcuda.dylib",
+        "/usr/local/cuda/lib/libcuda.dylib"
+    });
 #else
-        "libcuda.so.1",                          // standard ldconfig path
+    libLoader_ = vgre::common::LibraryLoader::tryLoad({
+        "libcuda.so.1",
         "libcuda.so",
-        "/usr/local/cuda/lib64/libcuda.so.1",    // CUDA toolkit default
-        "/usr/local/cuda/lib/libcuda.so.1",      // 32-bit fallback
-        "/opt/cuda/lib64/libcuda.so.1",          // Arch Linux / custom prefix
+        "/usr/local/cuda/lib64/libcuda.so.1",
+        "/usr/local/cuda/lib/libcuda.so.1",
+        "/opt/cuda/lib64/libcuda.so.1"
+    });
 #endif
-        nullptr
-    };
 
-    for (const char* const* p = kLibs; *p; ++p) {
-        libHandle_ = VGRE_DLOPEN(*p);
-        if (libHandle_) {
-            VGRE_LOG_DEBUG("GPUPassthrough",
-                std::string("Loaded CUDA library: ") + *p);
-            break;
-        }
-    }
-
-    if (!libHandle_) {
+    if (!libLoader_.isLoaded()) {
         // Expected on machines without NVIDIA hardware — not an error.
         VGRE_LOG_DEBUG("GPUPassthrough",
             "No CUDA library found — GPU passthrough not available "
             "(normal on non-NVIDIA machines; CPU LLVM JIT handles all CUDA emulation)");
         return false;
     }
+    VGRE_LOG_DEBUG("GPUPassthrough", "Loaded CUDA library");
+
     api_ = new DriverAPI();
-#define LOAD_SYM(name) api_->name = (decltype(api_->name))VGRE_DLSYM(libHandle_, #name); \
+#define LOAD_SYM(name) api_->name = libLoader_.getFunc<decltype(api_->name)>(#name); \
     if (!api_->name) { VGRE_LOG_WARN("GPUPassthrough", "Symbol " #name " not found"); }
     LOAD_SYM(cuInit)
     LOAD_SYM(cuDeviceGetCount)
@@ -139,10 +117,24 @@ bool GPUPassthrough::loadDriverAPI() {
 }
 
 bool GPUPassthrough::loadNVRTC() {
-    void* h = VGRE_DLOPEN(VGRE_NVRTC_LIB);
-    if (!h) return false;
+#if defined(_WIN32)
+    nvrtcLoader_ = vgre::common::LibraryLoader::tryLoad({
+        "nvrtc64_120_0.dll",
+        "nvrtc64_110_0.dll",
+        "nvrtc.dll"
+    });
+#elif defined(__APPLE__)
+    nvrtcLoader_ = vgre::common::LibraryLoader::tryLoad({"libnvrtc.dylib"});
+#else
+    nvrtcLoader_ = vgre::common::LibraryLoader::tryLoad({
+        "libnvrtc.so.12",
+        "libnvrtc.so.11",
+        "libnvrtc.so"
+    });
+#endif
+    if (!nvrtcLoader_.isLoaded()) return false;
     nvrtc_ = new NVRTCApi();
-#define LOAD_NVRTC(name) nvrtc_->name = (decltype(nvrtc_->name))VGRE_DLSYM(h, #name);
+#define LOAD_NVRTC(name) nvrtc_->name = nvrtcLoader_.getFunc<decltype(nvrtc_->name)>(#name);
     LOAD_NVRTC(nvrtcCreateProgram)
     LOAD_NVRTC(nvrtcDestroyProgram)
     LOAD_NVRTC(nvrtcCompileProgram)
@@ -451,8 +443,8 @@ void GPUPassthrough::shutdown() {
         api_->cuCtxDestroy(api_->ctx);
     delete api_;   api_   = nullptr;
     delete nvrtc_; nvrtc_ = nullptr;
-    if (libHandle_) VGRE_DLCLOSE(libHandle_);
-    libHandle_  = nullptr;
+    libLoader_ = vgre::common::LibraryLoader();
+    nvrtcLoader_ = vgre::common::LibraryLoader();
     available_  = false;
     devices_.clear();
 }

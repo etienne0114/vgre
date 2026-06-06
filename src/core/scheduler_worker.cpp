@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "vgre/common/os_backend.h"
+#include "vgre/common/cpu_barriers.h"
 
 namespace vgre {
 namespace core {
@@ -86,13 +87,7 @@ void Scheduler::workerLoop(int workerIdx) {
 #endif
             // Yield the hyperthreading slot — cheaper than a full sleep and
             // keeps the core available for the OS scheduler.
-#if defined(__x86_64__) || defined(_M_X64)
-            __asm__ volatile("pause" ::: "memory");
-#elif defined(__aarch64__)
-            __asm__ volatile("yield" ::: "memory");
-#else
-            std::this_thread::yield();
-#endif
+            VGRE_CPU_PAUSE();
         }
     }
 

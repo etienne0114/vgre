@@ -10,6 +10,7 @@
 // hardware counters are unavailable (paranoid>1, sandbox, missing privilege).
 
 #include "vgre/api/cupti_shim.h"
+#include "vgre/common/library_loader.h"
 #include "vgre/advanced/runtime_profiler.h"
 #include "vgre/common/logger.h"
 
@@ -58,7 +59,7 @@ typedef CUptiResult (*fn_cuptiActivityFlushAll_t)(uint32_t);
 typedef CUptiResult (*fn_cuptiGetResultString_t)(CUptiResult, const char**);
 
 struct NativeCupti {
-    void*                       handle             = nullptr;
+    vgre::common::LibraryLoader handle;
     fn_cuptiSubscribe_t         subscribe          = nullptr;
     fn_cuptiUnsubscribe_t       unsubscribe        = nullptr;
     fn_cuptiEnableCallback_t    enableCallback     = nullptr;
@@ -77,30 +78,24 @@ private:
     static NativeCupti init() {
         NativeCupti nc{};
 #if defined(_WIN32)
-        nc.handle = reinterpret_cast<void*>(LoadLibraryA("cupti.dll"));
-#define DLSYM(h, sym) GetProcAddress(reinterpret_cast<HMODULE>(h), sym)
+        nc.handle = vgre::common::LibraryLoader::tryLoad({"cupti.dll"});
 #elif defined(__APPLE__)
-        nc.handle = dlopen("libcupti.dylib", RTLD_LAZY | RTLD_LOCAL);
-#define DLSYM(h, sym) dlsym(h, sym)
+        nc.handle = vgre::common::LibraryLoader::tryLoad({"libcupti.dylib"});
 #else
-        // Linux: try versioned names first, then generic
-        nc.handle = dlopen("libcupti.so.12", RTLD_LAZY | RTLD_LOCAL);
-        if (!nc.handle) nc.handle = dlopen("libcupti.so.11", RTLD_LAZY | RTLD_LOCAL);
-        if (!nc.handle) nc.handle = dlopen("libcupti.so",    RTLD_LAZY | RTLD_LOCAL);
-#define DLSYM(h, sym) dlsym(h, sym)
+        nc.handle = vgre::common::LibraryLoader::tryLoad({"libcupti.so.12", "libcupti.so.11", "libcupti.so"});
 #endif
-        if (!nc.handle) {
+        if (!nc.handle.isLoaded()) {
             // Logger not yet accessible from static init — will use VGRE_LOG macros at call time
             return nc;
         }
 
-        nc.subscribe        = reinterpret_cast<fn_cuptiSubscribe_t>       (DLSYM(nc.handle, "cuptiSubscribe"));
-        nc.unsubscribe      = reinterpret_cast<fn_cuptiUnsubscribe_t>     (DLSYM(nc.handle, "cuptiUnsubscribe"));
-        nc.enableCallback   = reinterpret_cast<fn_cuptiEnableCallback_t>  (DLSYM(nc.handle, "cuptiEnableCallback"));
-        nc.activityEnable   = reinterpret_cast<fn_cuptiActivityEnable_t>  (DLSYM(nc.handle, "cuptiActivityEnable"));
-        nc.activityDisable  = reinterpret_cast<fn_cuptiActivityDisable_t> (DLSYM(nc.handle, "cuptiActivityDisable"));
-        nc.activityFlushAll = reinterpret_cast<fn_cuptiActivityFlushAll_t>(DLSYM(nc.handle, "cuptiActivityFlushAll"));
-        nc.getResultString  = reinterpret_cast<fn_cuptiGetResultString_t> (DLSYM(nc.handle, "cuptiGetResultString"));
+        nc.subscribe        = nc.handle.getFunc<fn_cuptiSubscribe_t>("cuptiSubscribe");
+        nc.unsubscribe      = nc.handle.getFunc<fn_cuptiUnsubscribe_t>("cuptiUnsubscribe");
+        nc.enableCallback   = nc.handle.getFunc<fn_cuptiEnableCallback_t>("cuptiEnableCallback");
+        nc.activityEnable   = nc.handle.getFunc<fn_cuptiActivityEnable_t>("cuptiActivityEnable");
+        nc.activityDisable  = nc.handle.getFunc<fn_cuptiActivityDisable_t>("cuptiActivityDisable");
+        nc.activityFlushAll = nc.handle.getFunc<fn_cuptiActivityFlushAll_t>("cuptiActivityFlushAll");
+        nc.getResultString  = nc.handle.getFunc<fn_cuptiGetResultString_t>("cuptiGetResultString");
 
         // All core function pointers must resolve; otherwise the library is unusable.
         if (nc.subscribe && nc.unsubscribe && nc.enableCallback &&
@@ -124,9 +119,8 @@ private:
         struct stat st{};
         if (::stat("/dev/nvidia0", &st) == 0 && S_ISCHR(st.st_mode)) return true;
         // Secondary: try loading libnvidia-ml.so to confirm driver presence
-        void* ml = dlopen("libnvidia-ml.so.1", RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
-        if (!ml) ml = dlopen("libnvidia-ml.so",   RTLD_LAZY | RTLD_LOCAL);
-        if (ml) { dlclose(ml); return true; }
+        vgre::common::LibraryLoader ml = vgre::common::LibraryLoader::tryLoad({"libnvidia-ml.so.1", "libnvidia-ml.so"});
+        if (ml.isLoaded()) return true;
         return false;
 #elif defined(_WIN32)
         // Check if nvidia display adapter exists via registry key

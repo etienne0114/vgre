@@ -203,7 +203,7 @@ static void sha256CtrEncrypt(const uint8_t key[32], const uint8_t nonce[16],
 }
 }
 
-std::array<uint8_t, 32> HardwareTokenManager::getMachineKey() {
+std::array<uint8_t, 32> HardwareTokenManager::getMachineKey(const uint8_t dynamicSalt[32]) {
     std::string identity = "vgre_fallback_kdf_v3";
 
 #if defined(_WIN32)
@@ -268,10 +268,13 @@ std::array<uint8_t, 32> HardwareTokenManager::getMachineKey() {
     }
 #endif // !_WIN32
 
-    std::string saltInput = "vgre_fallback_v3_pbkdf2:" + identity;
+    // Mix the dynamic salt with machine identity using HMAC-SHA256.
+    // This binds the derived key to BOTH the per-token random salt
+    // AND the physical machine, preventing precomputation attacks.
     uint8_t salt[32];
-    crypto::sha256(reinterpret_cast<const uint8_t*>(saltInput.data()),
-                   saltInput.size(), salt);
+    crypto::hmac_sha256(dynamicSalt, 32,
+                        reinterpret_cast<const uint8_t*>(identity.data()),
+                        identity.size(), salt);
 
     // PBKDF2 iteration count: default 600k (NIST SP 800-132 2025 minimum).
     // Operators can override via VGRE_PBKDF2_ITERATIONS for performance tuning,
@@ -299,8 +302,71 @@ std::array<uint8_t, 32> HardwareTokenManager::getMachineKey() {
     return key;
 }
 
+std::array<uint8_t, 32> HardwareTokenManager::getMachineKey() {
+    // Legacy path: derive a deterministic salt from machine identity
+    // for backward compatibility with 3-field encrypted tokens.
+    std::string identity = "vgre_fallback_kdf_v3";
+
+#if defined(_WIN32)
+    char hostname[256] = {}; DWORD sz = sizeof(hostname);
+    GetComputerNameA(hostname, &sz);
+    identity += hostname;
+    char username[256] = {}; sz = sizeof(username);
+    GetUserNameA(username, &sz);
+    identity += username;
+#else
+    {
+        std::ifstream f("/etc/machine-id");
+        if (f) { std::string mid; f >> mid; if (!mid.empty()) identity += "mid:" + mid; }
+    }
+    {
+        std::ifstream f("/sys/class/dmi/id/product_uuid");
+        if (f) { std::string uuid; f >> uuid; if (!uuid.empty()) identity += "dmi:" + uuid; }
+    }
+#if defined(__x86_64__)
+    {
+        char brand[49] = {};
+        unsigned int eax, ebx, ecx, edx;
+        for (unsigned int leaf = 0x80000002u; leaf <= 0x80000004u; ++leaf) {
+            if (__get_cpuid(leaf, &eax, &ebx, &ecx, &edx)) {
+                unsigned int idx = (leaf - 0x80000002u) * 16u;
+                memcpy(&brand[idx + 0],  &eax, 4);
+                memcpy(&brand[idx + 4],  &ebx, 4);
+                memcpy(&brand[idx + 8],  &ecx, 4);
+                memcpy(&brand[idx + 12], &edx, 4);
+            }
+        }
+        brand[48] = '\0';
+        if (brand[0] != '\0') identity += "cpu:" + std::string(brand);
+    }
+#endif
+    {
+        char hostname[256] = {};
+        gethostname(hostname, sizeof(hostname) - 1);
+        identity += "host:" + std::string(hostname);
+        const char* user = vgre_get_config("USER");
+        if (user && *user) identity += "user:" + std::string(user);
+    }
+#endif
+
+    // Compute a deterministic salt from identity (legacy behavior)
+    std::string saltInput = "vgre_fallback_v3_pbkdf2:" + identity;
+    uint8_t legacySalt[32];
+    crypto::sha256(reinterpret_cast<const uint8_t*>(saltInput.data()),
+                   saltInput.size(), legacySalt);
+
+    auto key = getMachineKey(legacySalt);
+    memset(legacySalt, 0, sizeof(legacySalt));
+    return key;
+}
+
 std::string HardwareTokenManager::encryptToken(const std::string& plaintext) {
-    auto key = getMachineKey();
+    // Generate a cryptographically random 32-byte salt per token.
+    // This prevents precomputation attacks even if machine identity is known.
+    uint8_t salt[32];
+    crypto::random_bytes(salt, sizeof(salt));
+
+    auto key = getMachineKey(salt);
 
     uint8_t nonce[16];
     crypto::random_bytes(nonce, sizeof(nonce));
@@ -319,23 +385,39 @@ std::string HardwareTokenManager::encryptToken(const std::string& plaintext) {
 
     std::fill(key.begin(), key.end(), 0);
 
-    return toHex(nonce, sizeof(nonce)) + ":" +
+    // 4-field format: salt:nonce:cipher:mac (new dynamic-salt format)
+    return toHex(salt, sizeof(salt)) + ":" +
+           toHex(nonce, sizeof(nonce)) + ":" +
            toHex(cipher.data(), cipher.size()) + ":" +
            toHex(mac, sizeof(mac));
 }
 
 std::string HardwareTokenManager::decryptToken(const std::string& ciphertext) {
+    // Detect format: 3-field (legacy) vs 4-field (new dynamic-salt)
     size_t sep1 = ciphertext.find(':');
     if (sep1 == std::string::npos) return "";
     size_t sep2 = ciphertext.find(':', sep1 + 1);
     if (sep2 == std::string::npos) return "";
+    size_t sep3 = ciphertext.find(':', sep2 + 1);
 
     std::vector<uint8_t> nonce, cipher, storedMac;
-    if (!fromHex(ciphertext.substr(0, sep1), nonce)        || nonce.size() != 16) return "";
-    if (!fromHex(ciphertext.substr(sep1 + 1, sep2 - sep1 - 1), cipher)) return "";
-    if (!fromHex(ciphertext.substr(sep2 + 1), storedMac)   || storedMac.size() != 32) return "";
+    std::array<uint8_t, 32> key{};
 
-    auto key = getMachineKey();
+    if (sep3 != std::string::npos) {
+        // 4-field format: salt:nonce:cipher:mac
+        std::vector<uint8_t> salt;
+        if (!fromHex(ciphertext.substr(0, sep1), salt)           || salt.size() != 32) return "";
+        if (!fromHex(ciphertext.substr(sep1 + 1, sep2 - sep1 - 1), nonce) || nonce.size() != 16) return "";
+        if (!fromHex(ciphertext.substr(sep2 + 1, sep3 - sep2 - 1), cipher)) return "";
+        if (!fromHex(ciphertext.substr(sep3 + 1), storedMac)    || storedMac.size() != 32) return "";
+        key = getMachineKey(salt.data());
+    } else {
+        // 3-field format (legacy): nonce:cipher:mac
+        if (!fromHex(ciphertext.substr(0, sep1), nonce)         || nonce.size() != 16) return "";
+        if (!fromHex(ciphertext.substr(sep1 + 1, sep2 - sep1 - 1), cipher)) return "";
+        if (!fromHex(ciphertext.substr(sep2 + 1), storedMac)    || storedMac.size() != 32) return "";
+        key = getMachineKey();
+    }
 
     std::vector<uint8_t> macInput(nonce.size() + cipher.size());
     memcpy(macInput.data(), nonce.data(), nonce.size());

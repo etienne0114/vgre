@@ -164,6 +164,7 @@ private:
     std::string encryptToken(const std::string& plaintext);
     std::string decryptToken(const std::string& ciphertext);
     std::array<uint8_t, 32> getMachineKey();
+    std::array<uint8_t, 32> getMachineKey(const uint8_t dynamicSalt[32]);
 
     BackendType backend_;
     bool initialized_;
