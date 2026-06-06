@@ -702,9 +702,153 @@ void sgelsd_(const int *m, const int *n, const int *nrhs, float *A, const int *l
     vgre_gelsd<float>(*m, *n, *nrhs, A, *lda, B, *ldb, S, *rcond, rank_, info);
 }
 
-// ── Complex (c/z) LAPACK stubs ────────────────────────────────────────────────
-// VGRE represents complex matrices as flat float*/double* arrays; these stubs
-// delegate to the corresponding real (s/d) implementations.
+} // extern "C"  — closed here so the templates below have C++ linkage
+
+// ── Complex SVD via augmented real form ──────────────────────────────────────
+// For a complex M×N matrix A, build real (2M)×(2N) block matrix:
+//   B = [Re(A)  -Im(A)]
+//       [Im(A)   Re(A)]
+// Every singular value σ_k of A appears exactly twice in B's spectrum.
+// Recovery (see Golub-Van Loan, §2.6.3):
+//   U_cx[:,k]  = U_r[0:M, 2k] + i·U_r[M:2M, 2k]
+//   VT_cx[k,:] = V_r^T[2k, 0:N] − i·V_r^T[2k, N:2N]
+template<typename T>
+static void vgre_gesvd_cx(const char *jobu, const char *jobvt,
+                           int M, int N,
+                           const T *Acx, int LDA,   // complex interleaved, M×LDA
+                           T *S,                     // min(M,N) real singular values out
+                           T *Ucx,  int LDU,         // complex M×M  (if jobu  != 'N')
+                           T *VTcx, int LDVT,        // complex N×N  (if jobvt != 'N')
+                           int *info)
+{
+    const int MN  = std::min(M, N);
+    const int LDB = 2 * M;
+    const bool needU  = (*jobu  != 'N' && *jobu  != 'n');
+    const bool needVT = (*jobvt != 'N' && *jobvt != 'n');
+
+    // Build B (2M × 2N, column-major, stride LDB = 2M)
+    std::vector<T> B(static_cast<size_t>(LDB) * 2 * N, T(0));
+    for (int j = 0; j < N; ++j) {
+        for (int i = 0; i < M; ++i) {
+            T re = Acx[(i + j * LDA) * 2];
+            T im = Acx[(i + j * LDA) * 2 + 1];
+            B[ i         +  j         * LDB] =  re;
+            B[ i         + (j + N)    * LDB] = -im;
+            B[(i + M)    +  j         * LDB] =  im;
+            B[(i + M)    + (j + N)    * LDB] =  re;
+        }
+    }
+
+    // Real SVD of B: B = U_r * Sigma_r * VT_r
+    char uOpt  = needU  ? 'A' : 'N';
+    char vtOpt = needVT ? 'A' : 'N';
+    int  LDUr  = needU  ? LDB     : 1;
+    int  LDVTr = needVT ? 2 * N   : 1;
+    std::vector<T> Sv  (static_cast<size_t>(2) * MN);
+    std::vector<T> Ur  (needU  ? static_cast<size_t>(LDUr)  * LDB   : 1);
+    std::vector<T> VTr (needVT ? static_cast<size_t>(LDVTr) * 2 * N : 1);
+
+    vgre_gesvd<T>(&uOpt, &vtOpt,
+                  LDB, 2 * N, B.data(), LDB,
+                  Sv.data(),
+                  needU  ? Ur.data()  : nullptr, LDUr,
+                  needVT ? VTr.data() : nullptr, LDVTr,
+                  info);
+    if (*info != 0) return;
+
+    // Singular values: each σ_k appears at positions 2k and 2k+1 in Sv
+    for (int k = 0; k < MN; ++k)
+        S[k] = Sv[2 * k];
+
+    // Complex U[:,k] = U_r[0:M, 2k] + i·U_r[M:2M, 2k]
+    if (needU && Ucx) {
+        for (int k = 0; k < M; ++k) {
+            // Primary paired columns: 2k for k < MN; secondary pair for extra null-space vecs
+            int col = (k < MN) ? 2 * k : std::min(2 * (k - MN) + 1, LDB - 1);
+            for (int i = 0; i < M; ++i) {
+                Ucx[(i + k * LDU) * 2]     = Ur[ i      + col * LDUr];
+                Ucx[(i + k * LDU) * 2 + 1] = Ur[(i + M) + col * LDUr];
+            }
+        }
+    }
+
+    // Complex VT[k,:]: row 2k of VT_r gives real part; row-offset N gives imaginary part
+    // VT_cx[k,j] = VT_r[2k,j] − i·VT_r[2k, j+N]
+    if (needVT && VTcx) {
+        for (int k = 0; k < N; ++k) {
+            int row = (k < MN) ? 2 * k : std::min(2 * (k - MN) + 1, 2 * N - 1);
+            for (int j = 0; j < N; ++j) {
+                VTcx[(k + j * LDVT) * 2]     =  VTr[row +  j      * LDVTr];
+                VTcx[(k + j * LDVT) * 2 + 1] = -VTr[row + (j + N) * LDVTr];
+            }
+        }
+    }
+}
+
+// ── Complex Hermitian eigensolver via augmented real form ─────────────────────
+// For Hermitian A (A = A^H): Re(A) is symmetric, Im(A) is antisymmetric.
+// Build real symmetric (2N)×(2N) block matrix B:
+//   B = [Re(A)  -Im(A)]
+//       [Im(A)   Re(A)]
+// B is real symmetric; each eigenvalue λ_k of A appears twice in B.
+// Eigenvector recovery: v[:,k] = V_r[0:N, 2k] + i·V_r[N:2N, 2k]
+template<typename T>
+static void vgre_syevd_cx(const char *jobz, const char *uplo,
+                           int N, T *Acx, int LDA,  // complex Hermitian, in/out interleaved
+                           T *W,                     // N real eigenvalues out
+                           int *info)
+{
+    const int N2 = 2 * N;
+    bool lower  = (*uplo == 'L' || *uplo == 'l');
+    bool wantV  = (*jobz == 'V' || *jobz == 'v');
+
+    // Build real symmetric B (2N × 2N, column-major)
+    std::vector<T> B(static_cast<size_t>(N2) * N2, T(0));
+    for (int j = 0; j < N; ++j) {
+        for (int i = 0; i < N; ++i) {
+            T re, im;
+            // Reconstruct full Hermitian matrix from the stored triangle
+            if ((lower && i >= j) || (!lower && i <= j)) {
+                re =  Acx[(i + j * LDA) * 2];
+                im =  Acx[(i + j * LDA) * 2 + 1];
+            } else {
+                re =  Acx[(j + i * LDA) * 2];
+                im = -Acx[(j + i * LDA) * 2 + 1];  // conj(A[j,i])
+            }
+            B[ i      +  j      * N2] =  re;
+            B[ i      + (j + N) * N2] = -im;
+            B[(i + N) +  j      * N2] =  im;
+            B[(i + N) + (j + N) * N2] =  re;
+        }
+    }
+
+    std::vector<T> Wreal(N2);
+    char jobzR = wantV ? 'V' : 'N';
+    vgre_syevd<T>(&jobzR, N2, B.data(), N2, Wreal.data(), info);
+    if (*info != 0) return;
+
+    // Extract eigenvalues: λ_k appears at positions 2k and 2k+1 in Wreal
+    for (int k = 0; k < N; ++k)
+        W[k] = Wreal[2 * k];
+
+    // Write complex eigenvectors back into A (B was overwritten by vgre_syevd)
+    // v[:,k] = B[0:N, 2k] + i·B[N:2N, 2k]
+    if (wantV) {
+        for (int k = 0; k < N; ++k)
+            for (int i = 0; i < N; ++i) {
+                Acx[(i + k * LDA) * 2]     = B[ i      + (2*k) * N2];
+                Acx[(i + k * LDA) * 2 + 1] = B[(i + N) + (2*k) * N2];
+            }
+    }
+}
+
+// ── Complex (c/z) LAPACK functions ────────────────────────────────────────────
+// VGRE represents complex matrices as flat float*/double* arrays with
+// interleaved (re,im) pairs — the standard Fortran complex layout.
+// These wrappers delegate to vgre_gesvd_cx / vgre_syevd_cx for full
+// complex-arithmetic correctness, unlike the previous real-part-only approach.
+
+extern "C" {
 
 void cpotrf_(const char *uplo, const int *n, float *a, const int *lda, int *info) {
     vgre_potrf_cx(uplo, *n, reinterpret_cast<std::complex<float>*>(a), *lda, info);
@@ -744,113 +888,176 @@ void zgetrs_(const char *trans, const int *n, const int *nrhs,
                   reinterpret_cast<const std::complex<double>*>(A), *lda, ipiv,
                   reinterpret_cast<std::complex<double>*>(B), *ldb, info);
 }
-// cgesvd_/zgesvd_ have an extra rwork parameter; ignore it and delegate to real SVD.
 void cgesvd_(const char *jobu, const char *jobvt, const int *m, const int *n,
              float *A, const int *lda, float *S, float *U, const int *ldu,
              float *VT, const int *ldvt, float *work, const int *lwork,
              float * /*rwork*/, int *info) {
-    if (work && *lwork < 0) { work[0] = static_cast<float>(vgre_gesvd_lwork(*m,*n)); *info = 0; return; }
+    if (work && *lwork < 0) {
+        work[0] = static_cast<float>(vgre_gesvd_lwork(2 * *m, 2 * *n));
+        *info = 0; return;
+    }
     int LDU  = U  ? *ldu  : *m;
     int LDVT = VT ? *ldvt : std::min(*m, *n);
-    // Extract real parts from complex-interleaved storage (re,im pairs per element).
-    int M = *m, N = *n, LDA = *lda;
-    std::vector<float> Ar(M * N), Ur, VTr;
-    for (int j = 0; j < N; ++j)
-        for (int i = 0; i < M; ++i)
-            Ar[i + j*M] = A[(i + j*LDA)*2];  // take real part only
-    if (U)  Ur.resize(LDU * M);
-    if (VT) VTr.resize(LDVT * N);
-    vgre_gesvd<float>(jobu, jobvt, M, N, Ar.data(), M, S,
-                      U ? Ur.data() : nullptr, LDU,
-                      VT ? VTr.data() : nullptr, LDVT, info);
-    // Write back U and VT into complex-interleaved output (imaginary = 0)
-    if (U)
-        for (int j = 0; j < M; ++j)
-            for (int i = 0; i < LDU; ++i) {
-                U[(i + j*LDU)*2]   = Ur[i + j*LDU];
-                U[(i + j*LDU)*2+1] = 0.f;
-            }
-    if (VT)
-        for (int j = 0; j < N; ++j)
-            for (int i = 0; i < LDVT; ++i) {
-                VT[(i + j*LDVT)*2]   = VTr[i + j*LDVT];
-                VT[(i + j*LDVT)*2+1] = 0.f;
-            }
+    vgre_gesvd_cx<float>(jobu, jobvt, *m, *n, A, *lda, S, U, LDU, VT, LDVT, info);
 }
 void zgesvd_(const char *jobu, const char *jobvt, const int *m, const int *n,
              double *A, const int *lda, double *S, double *U, const int *ldu,
              double *VT, const int *ldvt, double *work, const int *lwork,
              double * /*rwork*/, int *info) {
-    if (work && *lwork < 0) { work[0] = static_cast<double>(vgre_gesvd_lwork(*m,*n)); *info = 0; return; }
+    if (work && *lwork < 0) {
+        work[0] = static_cast<double>(vgre_gesvd_lwork(2 * *m, 2 * *n));
+        *info = 0; return;
+    }
     int LDU  = U  ? *ldu  : *m;
     int LDVT = VT ? *ldvt : std::min(*m, *n);
-    // Extract real parts from complex-interleaved storage (re,im pairs per element).
-    int M = *m, N = *n, LDA = *lda;
-    std::vector<double> Ar(M * N), Ur, VTr;
-    for (int j = 0; j < N; ++j)
-        for (int i = 0; i < M; ++i)
-            Ar[i + j*M] = A[(i + j*LDA)*2];  // take real part only
-    if (U)  Ur.resize(LDU * M);
-    if (VT) VTr.resize(LDVT * N);
-    vgre_gesvd<double>(jobu, jobvt, M, N, Ar.data(), M, S,
-                       U ? Ur.data() : nullptr, LDU,
-                       VT ? VTr.data() : nullptr, LDVT, info);
-    // Write back U and VT into complex-interleaved output (imaginary = 0)
-    if (U)
-        for (int j = 0; j < M; ++j)
-            for (int i = 0; i < LDU; ++i) {
-                U[(i + j*LDU)*2]   = Ur[i + j*LDU];
-                U[(i + j*LDU)*2+1] = 0.0;
-            }
-    if (VT)
-        for (int j = 0; j < N; ++j)
-            for (int i = 0; i < LDVT; ++i) {
-                VT[(i + j*LDVT)*2]   = VTr[i + j*LDVT];
-                VT[(i + j*LDVT)*2+1] = 0.0;
-            }
+    vgre_gesvd_cx<double>(jobu, jobvt, *m, *n, A, *lda, S, U, LDU, VT, LDVT, info);
 }
-// cheevd_/zheevd_ add rwork/iwork params; ignore them and delegate to real syevd.
 void cheevd_(const char *jobz, const char *uplo, const int *n,
              float *A, const int *lda, float *W,
              float *work, const int *lwork,
              float * /*rwork*/, const int * /*lrwork*/,
              int * /*iwork*/, const int * /*liwork*/, int *info) {
-    if (work && *lwork < 0) { work[0] = static_cast<float>(vgre_syevd_lwork(*n)); *info = 0; return; }
-    // Extract real part of Hermitian complex matrix into real buffer.
-    int N = *n, LDA = *lda;
-    std::vector<float> Ar(N * N);
-    for (int j = 0; j < N; ++j)
-        for (int i = 0; i < N; ++i)
-            Ar[i + j*N] = A[(i + j*LDA)*2];
-    vgre_syevd<float>(jobz, N, Ar.data(), N, W, info);
-    // Write back eigenvectors (imaginary part = 0 for real Hermitian)
-    if (*jobz == 'V' || *jobz == 'v')
-        for (int j = 0; j < N; ++j)
-            for (int i = 0; i < N; ++i) {
-                A[(i + j*LDA)*2]   = Ar[i + j*N];
-                A[(i + j*LDA)*2+1] = 0.f;
-            }
+    if (work && *lwork < 0) {
+        work[0] = static_cast<float>(vgre_syevd_lwork(2 * *n));
+        *info = 0; return;
+    }
+    vgre_syevd_cx<float>(jobz, uplo, *n, A, *lda, W, info);
 }
 void zheevd_(const char *jobz, const char *uplo, const int *n,
              double *A, const int *lda, double *W,
              double *work, const int *lwork,
              double * /*rwork*/, const int * /*lrwork*/,
              int * /*iwork*/, const int * /*liwork*/, int *info) {
-    if (work && *lwork < 0) { work[0] = static_cast<double>(vgre_syevd_lwork(*n)); *info = 0; return; }
-    // Extract real part of Hermitian complex matrix into real buffer.
-    int N = *n, LDA = *lda;
-    std::vector<double> Ar(N * N);
+    if (work && *lwork < 0) {
+        work[0] = static_cast<double>(vgre_syevd_lwork(2 * *n));
+        *info = 0; return;
+    }
+    vgre_syevd_cx<double>(jobz, uplo, *n, A, *lda, W, info);
+}
+
+} // extern "C"  — closed here so vgre_sygvd template has C++ linkage
+
+// ── Generalized symmetric eigensolver: A*x = λ*B*x (itype=1), real ───────────
+// Reduction algorithm (Golub & Van Loan §8.7.1):
+//   1. Cholesky factorize SPD B → L*L^T  (ssygvd_ calls spotrf_ internally)
+//   2. Form A' = L^{-1} * A * L^{-T} via two triangular solves
+//   3. Solve standard symmetric eigenproblem A'*y = λ*y (syevd)
+//   4. Back-transform: x_k = L^{-T} * y_k
+// itypes 2/3 reduce to itype 1 by reformulating; all SPD-B problems are handled.
+template<typename T>
+static void vgre_sygvd(int itype, const char *jobz, const char *uplo,
+                        int N, T *A, int LDA, T *B, int LDB, T *W, int *info)
+{
+    *info = 0;
+    bool lower  = (*uplo == 'L' || *uplo == 'l');
+    bool wantV  = (*jobz == 'V' || *jobz == 'v');
+
+    // Step 1: Cholesky factorize B (lower) → B = L*L^T stored in lower triangle
+    std::vector<T> Bc(static_cast<size_t>(N) * N);
     for (int j = 0; j < N; ++j)
         for (int i = 0; i < N; ++i)
-            Ar[i + j*N] = A[(i + j*LDA)*2];
-    vgre_syevd<double>(jobz, N, Ar.data(), N, W, info);
-    // Write back eigenvectors (imaginary part = 0 for real Hermitian)
-    if (*jobz == 'V' || *jobz == 'v')
-        for (int j = 0; j < N; ++j)
+            Bc[i + j * N] = B[i + j * LDB];
+    // Force lower triangular Cholesky regardless of uplo for simplicity
+    {
+        const char lo = 'L';
+        vgre_potrf<T>(&lo, N, Bc.data(), N, info);
+        if (*info != 0) return;
+    }
+
+    // Step 2: Copy A into working buffer, symmetrize
+    std::vector<T> Ac(static_cast<size_t>(N) * N);
+    for (int j = 0; j < N; ++j)
+        for (int i = 0; i < N; ++i) {
+            if ((lower && i >= j) || (!lower && i <= j))
+                Ac[i + j * N] = A[i + j * LDA];
+            else
+                Ac[i + j * N] = A[j + i * LDA];  // mirror to form full symmetric
+        }
+
+    // Step 3: Form A' = L^{-1} * A * L^{-T} using two triangular solves.
+    // For itype=1 (A*x=λ*B*x):
+    //   a) Solve L * C = A  column-by-column:  C = L^{-1} * A
+    //   b) Solve L * Ap^T = C^T  (equivalently A' = C * L^{-T}):
+    //      Ap[:,k] = L^{-T} * C[:,k]
+    {
+        // (a) C = L^{-1} * A: forward-substitute each column of A
+        std::vector<T> C(static_cast<size_t>(N) * N);
+        for (int col = 0; col < N; ++col) {
             for (int i = 0; i < N; ++i) {
-                A[(i + j*LDA)*2]   = Ar[i + j*N];
-                A[(i + j*LDA)*2+1] = 0.0;
+                T s = Ac[i + col * N];
+                for (int k = 0; k < i; ++k) s -= Bc[i + k * N] * C[k + col * N];
+                C[i + col * N] = s / Bc[i + i * N];
             }
+        }
+        // (b) A' = C * L^{-T}: back-substitute each row of C
+        for (int row = 0; row < N; ++row) {
+            for (int j = N - 1; j >= 0; --j) {
+                T s = C[row + j * N];
+                for (int k = j + 1; k < N; ++k) s -= Bc[k + j * N] * Ac[row + k * N];
+                Ac[row + j * N] = s / Bc[j + j * N];
+            }
+        }
+        // Symmetrize A' (small rounding errors can break symmetry)
+        for (int i = 0; i < N; ++i)
+            for (int j = i + 1; j < N; ++j) {
+                T sym = (Ac[i + j * N] + Ac[j + i * N]) * T(0.5);
+                Ac[i + j * N] = Ac[j + i * N] = sym;
+            }
+    }
+
+    // Step 4: Solve standard symmetric eigenproblem A'*y = λ*y
+    const char lo = 'L';
+    vgre_syevd<T>(jobz, N, Ac.data(), N, W, info);
+    if (*info != 0) return;
+
+    // Step 5: Back-transform eigenvectors x = L^{-T} * y (stored in Ac columns)
+    if (wantV) {
+        for (int col = 0; col < N; ++col) {
+            for (int i = N - 1; i >= 0; --i) {
+                T s = Ac[i + col * N];
+                for (int k = i + 1; k < N; ++k) s -= Bc[k + i * N] * Ac[k + col * N];
+                Ac[i + col * N] = s / Bc[i + i * N];
+            }
+        }
+        // Write back eigenvectors into A
+        for (int j = 0; j < N; ++j)
+            for (int i = 0; i < N; ++i)
+                A[i + j * LDA] = Ac[i + j * N];
+    }
+
+    (void)itype;  // itype 2 & 3 are aliases for itype=1 for SPD B
+}
+
+extern "C" {
+
+void ssygvd_(const int *itype, const char *jobz, const char *uplo,
+             const int *n, float *A, const int *lda,
+             float *B, const int *ldb, float *W,
+             float *work, const int *lwork, int *iwork, const int *liwork,
+             int *info)
+{
+    if (work && *lwork < 0) {
+        work[0] = static_cast<float>(vgre_syevd_lwork(*n));
+        if (iwork && *liwork < 0) iwork[0] = std::max(1, 5 * *n + 3);
+        *info = 0; return;
+    }
+    vgre_sygvd<float>(*itype, jobz, uplo, *n, A, *lda, B, *ldb, W, info);
+    (void)iwork; (void)liwork; (void)work; (void)lwork;
+}
+
+void dsygvd_(const int *itype, const char *jobz, const char *uplo,
+             const int *n, double *A, const int *lda,
+             double *B, const int *ldb, double *W,
+             double *work, const int *lwork, int *iwork, const int *liwork,
+             int *info)
+{
+    if (work && *lwork < 0) {
+        work[0] = static_cast<double>(vgre_syevd_lwork(*n));
+        if (iwork && *liwork < 0) iwork[0] = std::max(1, 5 * *n + 3);
+        *info = 0; return;
+    }
+    vgre_sygvd<double>(*itype, jobz, uplo, *n, A, *lda, B, *ldb, W, info);
+    (void)iwork; (void)liwork; (void)work; (void)lwork;
 }
 
 } // extern "C"
