@@ -627,6 +627,43 @@ static void evictLRUCache(const std::string& cache_dir, size_t max_bytes) {
 
 } // anonymous namespace
 
+// ── PTX/CUDA source input sanitizer ──────────────────────────────────────────
+// Scans kernel source for patterns that could achieve host-system-call injection
+// through the LLVM ORC JIT.  Rejects kernels that contain:
+//   1. Inline assembly encoding OS trap instructions (syscall, int 0x80, sysenter)
+//   2. Direct calls to OS/shell/network APIs (system, exec*, fork, popen, socket)
+//
+// Defence-in-depth: source-level rejection runs BEFORE the Clang front-end so
+// even an adversary who crafts source that fools a regex (e.g. through macros)
+// must still survive the LLVM IR validation step.
+//
+// Returns a non-empty rejection reason on failure, empty string on success.
+static std::string validateKernelSource(const std::string& src) {
+    // ── 1. Inline-assembly system-call opcodes ────────────────────────────────
+    // Match `asm` / `asm volatile` blocks containing syscall, sysenter, int 0x80.
+    // Pattern: asm[_volatile]?(...) where the string argument contains the opcode.
+    static const std::regex kSyscallAsm(
+        R"(asm\s*(?:volatile\s*)?\([^)]*\b(syscall|sysenter|int\s+0x80|int\s+0X80)\b)",
+        std::regex::icase | std::regex::ECMAScript);
+    std::smatch m;
+    if (std::regex_search(src, m, kSyscallAsm))
+        return "inline-asm syscall opcode '" + m[1].str() + "'";
+
+    // ── 2. Dangerous OS/shell/network calls ──────────────────────────────────
+    // Exact word boundary match to avoid false positives (e.g. "socket" in a
+    // comment, or "execInfo" as a variable name).
+    static const std::regex kDangerousFn(
+        R"(\b(system|popen|execv|execvp|execve|execl|execlp|execle|)"
+        R"(fork|vfork|posix_spawn|socket|connect|bind|listen|accept|)"
+        R"(send|recv|sendto|recvfrom|gethostbyname|getaddrinfo|)"
+        R"(dlopen|dlsym|LoadLibraryA|LoadLibraryW|GetProcAddress)\s*\()",
+        std::regex::ECMAScript);
+    if (std::regex_search(src, m, kDangerousFn))
+        return "dangerous OS/network function call '" + m[1].str() + "'";
+
+    return ""; // accepted
+}
+
 static std::string getCacheDir() {
   std::string path = vgre::common::getCacheRoot();
   std::filesystem::create_directories(path);
@@ -647,6 +684,18 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
         VGRE_LOG_INFO("LLVMTranslationEngine", "Cache HIT for '" + ir.name + "' returning valid function.");
     }
     return vgre::VGREResult::SUCCESS;
+  }
+
+  // ── Security: reject dangerous source patterns before JIT compilation ───────
+  // Prevents a remote work-stream from achieving host code execution via
+  // inline-asm system calls or direct OS API calls embedded in kernel source.
+  {
+    std::string reason = validateKernelSource(ir.source);
+    if (!reason.empty()) {
+      VGRE_LOG_ERROR("LLVMTranslationEngine",
+                     "Kernel '" + ir.name + "' REJECTED by sanitizer: " + reason);
+      return vgre::VGREResult::ERR_INVALID_VALUE;
+    }
   }
 
   // v0.1.2: Post-JIT Instruction & FLOP Recalibration is handled after compileJIT

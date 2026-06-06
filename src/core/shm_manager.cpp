@@ -109,7 +109,7 @@ VGREResult ShmManager::open(const std::string& name, size_t size, bool create) {
         shmName = "/" + shmName;
     }
 
-    fd_ = shm_open(shmName.c_str(), flags, 0666);
+    fd_ = shm_open(shmName.c_str(), flags, 0600);
     if (fd_ == -1) {
         VGRE_LOG_ERROR("ShmManager", "shm_open failed for " + shmName + ": " + std::strerror(errno));
         return VGREResult::ERR_IO;
