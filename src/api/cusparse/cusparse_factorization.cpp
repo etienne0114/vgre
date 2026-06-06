@@ -147,7 +147,7 @@ static void extractColInd(const CsrMat &A, std::vector<int32_t> &colInd) {
 template<typename T>
 static cusparseStatus_t ilu0_csr(int m, int nnz, T *val,
                                   const int *rowPtr, const int *colInd, int base) {
-    if (!val || !rowPtr || !colInd || m <= 0) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (!val || !rowPtr || !colInd || m <= 0 || nnz < 0) return CUSPARSE_STATUS_INVALID_VALUE;
 
     // Build fast column→value-index lookup per row for scatter access
     // diag[j] = position in val[] of diagonal element A[j,j]
@@ -201,7 +201,7 @@ static cusparseStatus_t ilu0_csr(int m, int nnz, T *val,
 template<typename T>
 static cusparseStatus_t ic0_csr(int m, int nnz, T *val,
                                  const int *rowPtr, const int *colInd, int base) {
-    if (!val || !rowPtr || !colInd || m <= 0) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (!val || !rowPtr || !colInd || m <= 0 || nnz < 0) return CUSPARSE_STATUS_INVALID_VALUE;
 
     // For each row store: col -> (value index) for O(1) lookup
     // We need to access A[i,k] for columns k in both row i and row j

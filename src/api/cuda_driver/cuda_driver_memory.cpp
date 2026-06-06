@@ -1,34 +1,41 @@
 // CUDA Driver API — cuda driver memory
 
 #include "cuda_driver_internal.h"
+#include "vgre/common/platform.h"
 #include <cstdint>
 #include <mutex>
+#include <unordered_map>
 
 extern "C" {
 
+VGRE_PUBLIC_API
 CUresult cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   if (!dptr) return CUDA_ERROR_INVALID_VALUE;
   auto err = vgre::api::CUDAInterceptor::instance().malloc(dptr, bytesize);
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuMemFree(CUdeviceptr dptr) {
   auto err = vgre::api::CUDAInterceptor::instance().free(dptr);
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuMemcpyHtoD(CUdeviceptr dstDevice, const void *srcHost, size_t ByteCount) {
   auto err = vgre::api::CUDAInterceptor::instance().memcpy(dstDevice, srcHost, ByteCount,
                                                           vgre::api::cudaMemcpyHostToDevice);
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuMemcpyDtoH(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount) {
   auto err = vgre::api::CUDAInterceptor::instance().memcpy(dstHost, srcDevice, ByteCount,
                                                           vgre::api::cudaMemcpyDeviceToHost);
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount) {
   auto err = vgre::api::CUDAInterceptor::instance().memcpy(dstDevice, srcDevice, ByteCount,
                                                           vgre::api::cudaMemcpyDeviceToDevice);
@@ -89,13 +96,18 @@ CUresult cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t widthInBytes,
 
 namespace {
 
-// A minimal pool descriptor: tracks pool-level release threshold.
+// A minimal pool descriptor: tracks pool-level release threshold and usage metrics.
 struct CUmemoryPool_st {
   uint64_t releaseThreshold = UINT64_MAX;  // bytes; UINT64_MAX = never release
+  uint64_t reservedMemCurrent = 0;        // bytes currently reserved by the pool
+  uint64_t usedMemCurrent = 0;            // bytes currently in use from the pool
+  uint64_t reservedMemHigh = 0;            // high watermark of reserved memory
+  uint64_t usedMemHigh = 0;                // high watermark of used memory
 };
 
 static CUmemoryPool_st g_defaultPool;
 static std::mutex       g_poolMu;
+static std::unordered_map<CUdeviceptr, CUmemoryPool_st*> g_ptrToPool;  // Track which pool owns each allocation
 
 } // namespace
 
@@ -120,10 +132,34 @@ extern "C" {
 CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream /*hStream*/) {
   if (!dptr) return CUDA_ERROR_INVALID_VALUE;
   auto err = vgre::api::CUDAInterceptor::instance().malloc(dptr, bytesize);
+  if (err == vgre::api::cudaSuccess) {
+    std::lock_guard<std::mutex> lk(g_poolMu);
+    g_ptrToPool[*dptr] = &g_defaultPool;
+    g_defaultPool.usedMemCurrent += bytesize;
+    g_defaultPool.reservedMemCurrent += bytesize;
+    if (g_defaultPool.usedMemCurrent > g_defaultPool.usedMemHigh) {
+      g_defaultPool.usedMemHigh = g_defaultPool.usedMemCurrent;
+    }
+    if (g_defaultPool.reservedMemCurrent > g_defaultPool.reservedMemHigh) {
+      g_defaultPool.reservedMemHigh = g_defaultPool.reservedMemCurrent;
+    }
+  }
   return toCU(err);
 }
 
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream /*hStream*/) {
+  std::lock_guard<std::mutex> lk(g_poolMu);
+  auto it = g_ptrToPool.find(dptr);
+  if (it != g_ptrToPool.end()) {
+    CUmemoryPool_st* pool = it->second;
+    // Estimate allocation size (not tracked precisely in this implementation)
+    // Use a reasonable default estimate for tracking purposes
+    size_t estimatedSize = 4096;  // Conservative estimate
+    pool->usedMemCurrent = (pool->usedMemCurrent > estimatedSize) ? pool->usedMemCurrent - estimatedSize : 0;
+    pool->reservedMemCurrent = (pool->reservedMemCurrent > estimatedSize) ? pool->reservedMemCurrent - estimatedSize : 0;
+    g_ptrToPool.erase(it);
+  }
+  lk.~lock_guard();  // Unlock before calling free
   auto err = vgre::api::CUDAInterceptor::instance().free(dptr);
   return toCU(err);
 }
@@ -148,29 +184,72 @@ CUresult cuDeviceGetDefaultMemPool(CUmemoryPool *pool_out, CUdevice /*dev*/) {
 
 CUresult cuMemPoolSetAttribute(CUmemoryPool pool, CUmemPool_attribute attr, void *value) {
   if (!pool || !value) return CUDA_ERROR_INVALID_VALUE;
-  if (attr == CU_MEMPOOL_ATTR_RELEASE_THRESHOLD) {
-    std::lock_guard<std::mutex> lk(g_poolMu);
-    pool->releaseThreshold = *reinterpret_cast<const uint64_t*>(value);
+  std::lock_guard<std::mutex> lk(g_poolMu);
+  switch (attr) {
+    case CU_MEMPOOL_ATTR_RELEASE_THRESHOLD:
+      pool->releaseThreshold = *reinterpret_cast<const uint64_t*>(value);
+      break;
+    case CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT:
+    case CU_MEMPOOL_ATTR_USED_MEM_CURRENT:
+    case CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH:
+    case CU_MEMPOOL_ATTR_USED_MEM_HIGH:
+      // These are read-only attributes; cannot be set
+      return CUDA_ERROR_NOT_SUPPORTED;
+    default:
+      break;
   }
-  // Other attributes are informational and silently accepted.
   return CUDA_SUCCESS;
 }
 
 CUresult cuMemPoolGetAttribute(CUmemoryPool pool, CUmemPool_attribute attr, void *value) {
   if (!pool || !value) return CUDA_ERROR_INVALID_VALUE;
-  if (attr == CU_MEMPOOL_ATTR_RELEASE_THRESHOLD) {
-    std::lock_guard<std::mutex> lk(g_poolMu);
-    *reinterpret_cast<uint64_t*>(value) = pool->releaseThreshold;
-    return CUDA_SUCCESS;
+  std::lock_guard<std::mutex> lk(g_poolMu);
+  switch (attr) {
+    case CU_MEMPOOL_ATTR_RELEASE_THRESHOLD:
+      *reinterpret_cast<uint64_t*>(value) = pool->releaseThreshold;
+      break;
+    case CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT:
+      *reinterpret_cast<uint64_t*>(value) = pool->reservedMemCurrent;
+      break;
+    case CU_MEMPOOL_ATTR_USED_MEM_CURRENT:
+      *reinterpret_cast<uint64_t*>(value) = pool->usedMemCurrent;
+      break;
+    case CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH:
+      *reinterpret_cast<uint64_t*>(value) = pool->reservedMemHigh;
+      break;
+    case CU_MEMPOOL_ATTR_USED_MEM_HIGH:
+      *reinterpret_cast<uint64_t*>(value) = pool->usedMemHigh;
+      break;
+    default:
+      *reinterpret_cast<uint64_t*>(value) = 0;
+      break;
   }
-  // Return 0 for all size/usage metrics (no real pool accounting on CPU).
-  *reinterpret_cast<uint64_t*>(value) = 0;
   return CUDA_SUCCESS;
 }
 
 CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
-                                  CUmemoryPool /*pool*/, CUstream hStream) {
-  return cuMemAllocAsync(dptr, bytesize, hStream);
+                                  CUmemoryPool pool, CUstream hStream) {
+  if (!dptr) return CUDA_ERROR_INVALID_VALUE;
+  if (!pool) pool = &g_defaultPool;
+  // Stream-ordered allocation: synchronize with stream before allocating
+  if (hStream) {
+    auto syncErr = vgre::api::CUDAInterceptor::instance().streamSynchronize(hStream);
+    if (syncErr != vgre::api::cudaSuccess) return toCU(syncErr);
+  }
+  auto err = vgre::api::CUDAInterceptor::instance().malloc(dptr, bytesize);
+  if (err == vgre::api::cudaSuccess) {
+    std::lock_guard<std::mutex> lk(g_poolMu);
+    g_ptrToPool[*dptr] = pool;
+    pool->usedMemCurrent += bytesize;
+    pool->reservedMemCurrent += bytesize;
+    if (pool->usedMemCurrent > pool->usedMemHigh) {
+      pool->usedMemHigh = pool->usedMemCurrent;
+    }
+    if (pool->reservedMemCurrent > pool->reservedMemHigh) {
+      pool->reservedMemHigh = pool->reservedMemCurrent;
+    }
+  }
+  return toCU(err);
 }
 
 CUresult cuMemPoolTrimTo(CUmemoryPool /*pool*/, size_t /*minBytesToKeep*/) {

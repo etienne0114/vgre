@@ -65,6 +65,10 @@ vgre::VGREResult GraphManager::addKernelNodeWithDepsOut(
     case ArgType::FLOAT32:
       size = 4;
       break;
+    case ArgType::FLOAT16:
+    case ArgType::BFLOAT16:
+      size = 2;
+      break;
     case ArgType::STRUCT: {
       const auto *ir = RuntimeEngine::instance().getKernelIR(kernelId);
       if (ir && i < ir->argSizes.size()) {
@@ -292,6 +296,10 @@ vgre::VGREResult GraphManager::updateKernelNodeArgs(
     case ArgType::UINT32:
     case ArgType::FLOAT32:
       size = 4;
+      break;
+    case ArgType::FLOAT16:
+    case ArgType::BFLOAT16:
+      size = 2;
       break;
     case ArgType::STRUCT: {
       const auto *ir = RuntimeEngine::instance().getKernelIR(node->kernelId);

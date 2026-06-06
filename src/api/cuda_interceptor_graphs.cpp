@@ -261,38 +261,3 @@ cudaError_t CUDAInterceptor::graphExecUpdateV2(cudaGraphExec_t hGraphExec, cudaG
 
 } // namespace api
 } // namespace vgre
-
-#ifndef VGRE_CUDA_INTERCEPTOR_NO_EXPORTS
-extern "C" {
-
-VGRE_PUBLIC_API
-int cuInit(unsigned int flags) {
-  (void)flags;
-  return vgre::api::CUDAInterceptor::instance().init();
-}
-
-VGRE_PUBLIC_API
-int cuMemAlloc(void** dptr, size_t bytesize) {
-  return vgre::api::CUDAInterceptor::instance().malloc(dptr, bytesize);
-}
-
-VGRE_PUBLIC_API
-int cuMemFree(void* dptr) {
-  return vgre::api::CUDAInterceptor::instance().free(dptr);
-}
-
-VGRE_PUBLIC_API
-int cuTexObjectCreate(uint64_t* pTexObject,
-                     const vgre::api::CUDAInterceptor::cudaResourceDesc* pResDesc,
-                     const vgre::api::CUDAInterceptor::cudaTextureDesc* pTexDesc,
-                     const void *pResViewDesc) {
-  return vgre::api::CUDAInterceptor::instance().createTextureObject(pTexObject, pResDesc, pTexDesc, pResViewDesc);
-}
-
-VGRE_PUBLIC_API
-int cuTexObjectDestroy(uint64_t texObject) {
-  return vgre::api::CUDAInterceptor::instance().destroyTextureObject(texObject);
-}
-
-} // extern "C"
-#endif

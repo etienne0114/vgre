@@ -453,6 +453,40 @@ int vgre_launch_kernel(uint64_t kernel_id, const uint32_t grid_dim[3],
   return to_status(r);
 }
 
+int vgre_launch_kernel_typed(uint64_t kernel_id, const uint32_t grid_dim[3],
+                             const uint32_t block_dim[3], void **args, int num_args,
+                             const uint8_t *arg_types, size_t shared_mem, uint64_t stream_id) {
+  if (!grid_dim || !block_dim)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (int s = require_initialized(); s != VGRE_SUCCESS)
+    return s;
+  if (num_args < 0)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (num_args > 0 && !args)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (grid_dim[0] == 0 || block_dim[0] == 0)
+    return VGRE_ERROR_INVALID_VALUE;
+  if ((grid_dim[1] == 0 && grid_dim[2] != 0) ||
+      (block_dim[1] == 0 && block_dim[2] != 0)) {
+    return VGRE_ERROR_INVALID_VALUE;
+  }
+
+  // Convert argument types using to_arg_types
+  std::vector<vgre::ArgType> types;
+  if (!to_arg_types(arg_types, num_args, types)) {
+    return VGRE_ERROR_INVALID_VALUE;
+  }
+
+  vgre::dim3 gd(grid_dim[0], grid_dim[1], grid_dim[2]);
+  vgre::dim3 bd(block_dim[0], block_dim[1], block_dim[2]);
+
+  // For now, launch without type information (types can be used for validation in future)
+  auto r = vgre::core::RuntimeEngine::instance().launchKernel(
+      static_cast<vgre::KernelId>(kernel_id), gd, bd, args, shared_mem,
+      static_cast<vgre::StreamId>(stream_id));
+  return to_status(r);
+}
+
 // ── Stream Management ──────────────────────────────────────────────────────
 
 int vgre_stream_create(uint64_t *out_stream_id) {

@@ -353,6 +353,12 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
     case ArgType::FLOAT64:
       oss << "    double " << argName << " = *(double*)args[" << i << "];\n";
       break;
+    case ArgType::FLOAT16:
+      oss << "    uint16_t " << argName << " = *(uint16_t*)args[" << i << "];\n";
+      break;
+    case ArgType::BFLOAT16:
+      oss << "    uint16_t " << argName << " = *(uint16_t*)args[" << i << "];\n";
+      break;
     case ArgType::STRUCT:
       oss << "    " << typeName << " " << argName << " = *(" << typeName << "*)args[" << i << "];\n";
       break;

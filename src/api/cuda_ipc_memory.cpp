@@ -184,12 +184,12 @@ struct EventIPCHandle_st { char reserved[64]; };
 
 // Use function-local static initialization to prevent blocking during library load
 // This ensures the counter and map are only initialized when first used
-std::atomic<uint64_t>& getEventIPCCounter() {
+static std::atomic<uint64_t>& getEventIPCCounter() {
     static std::atomic<uint64_t> counter{1};
     return counter;
 }
 
-std::unordered_map<uint64_t, std::shared_ptr<vgre::core::ShmManager>>& getEventShm() {
+static std::unordered_map<uint64_t, std::shared_ptr<vgre::core::ShmManager>>& getEventShm() {
     static std::unordered_map<uint64_t, std::shared_ptr<vgre::core::ShmManager>> eventShm;
     return eventShm;
 }

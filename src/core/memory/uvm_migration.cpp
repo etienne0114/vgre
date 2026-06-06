@@ -127,10 +127,12 @@ void MemoryManager::migrationLoop() {
                            (newDominantRate - curRate) > kMinRateDiff;
         if (!newIsBetter || newDominantDev == curDev) continue;
 
-        float dominance = newDominantRate / std::max(1e-6f,
-            [&]() { float s = 0.f;
-                    for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) s += region.emaAccessRate[d];
-                    return s; }());
+        // Compute total access rate across all devices for dominance calculation
+        float totalRate = 0.f;
+        for (int d = 0; d < ManagedRegion::kMaxDevices; ++d) {
+            totalRate += region.emaAccessRate[d];
+        }
+        float dominance = newDominantRate / std::max(1e-6f, totalRate);
         batches[newDominantDev].push_back(
             {reinterpret_cast<uintptr_t>(region.ptr), region.size, newDominantDev, dominance});
 

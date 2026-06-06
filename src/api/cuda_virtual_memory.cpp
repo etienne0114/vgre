@@ -25,10 +25,10 @@
 
 // ── Types (mirror CUresult / CUmemHandle from cuda.h) ────────────────────────
 using CUresult = int;
-static constexpr CUresult CUDA_SUCCESS           = 0;
+static constexpr CUresult CUDA_SUCCESS [[maybe_unused]] = 0;
 static constexpr CUresult CUDA_ERROR_INVALID_VALUE = 1;
 static constexpr CUresult CUDA_ERROR_OUT_OF_MEMORY = 2;
-static constexpr CUresult CUDA_ERROR_NOT_SUPPORTED  = 801;
+static constexpr CUresult CUDA_ERROR_NOT_SUPPORTED = 801;
 
 using CUmemGenericAllocationHandle = uint64_t;
 using CUdeviceptr = uint64_t;
@@ -177,8 +177,29 @@ static size_t roundUpTo(size_t sz, size_t align) {
 extern "C" {
 
 CUresult cuMemCreate(CUmemGenericAllocationHandle* handle,
-                     size_t size, const void* /*prop*/, uint64_t /*flags*/) {
+                     size_t size, const void* prop, uint64_t flags) {
     if (!handle || size == 0) return CUDA_ERROR_INVALID_VALUE;
+    
+    // Validate allocation properties and flags
+    if (prop) {
+        const CUmemAllocationProp_t* props = static_cast<const CUmemAllocationProp_t*>(prop);
+        // Check for unsupported handle types
+        if (props->requestedHandleTypes != 0 && props->requestedHandleTypes != 1) {
+            // Only POSIX fd handle type (1) is supported
+            return CUDA_ERROR_NOT_SUPPORTED;
+        }
+        // Check for unsupported location types
+        if (props->location_type != 1 && props->location_type != 2) {
+            // Only device (1) and host (2) locations are supported
+            return CUDA_ERROR_NOT_SUPPORTED;
+        }
+    }
+    
+    // Check for unsupported flags
+    if (flags != 0) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    
     // Round up to page boundary
     size_t ps = pageSize();
     size = (size + ps - 1) & ~(ps - 1);

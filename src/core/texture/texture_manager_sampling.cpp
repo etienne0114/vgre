@@ -298,6 +298,29 @@ static double srgbToLinear(double v) {
 }
 
 // ── Type-aware element read ───────────────────────────────────────────────────
+// Helper function to convert FP16 (half precision) to float
+static float halfToFloat(uint16_t h) {
+    uint32_t sign = (h & 0x8000) << 16;
+    int32_t exponent = ((h >> 10) & 0x1F) - 15 + 127;
+    uint32_t mantissa = (h & 0x3FF) << 13;
+    
+    if (exponent <= 0) {
+        // Zero or subnormal
+        if (exponent < -10) return *reinterpret_cast<float*>(&sign); // Zero
+        mantissa |= 0x40000000; // Add implicit bit
+        mantissa >>= (1 - exponent);
+        exponent = 0;
+    } else if (exponent >= 255) {
+        // Infinity or NaN
+        if (mantissa == 0) mantissa = 0x7F800000; // Infinity
+        else mantissa = 0x7FC00000; // NaN
+        exponent = 255;
+    }
+    
+    uint32_t result = sign | (exponent << 23) | mantissa;
+    return *reinterpret_cast<float*>(&result);
+}
+
 double TextureManager::readElementValue(const TextureObject &tex, size_t linearIndex) const {
   const uint8_t *base = static_cast<const uint8_t *>(tex.data);
   const uint8_t *elem = base + tex.offsetInBytes + linearIndex * tex.elementSize;
@@ -309,6 +332,9 @@ double TextureManager::readElementValue(const TextureObject &tex, size_t linearI
     break;
   case TextureElementType::FLOAT64:
     raw = *reinterpret_cast<const double *>(elem);
+    break;
+  case TextureElementType::FP16:
+    raw = static_cast<double>(halfToFloat(*reinterpret_cast<const uint16_t *>(elem)));
     break;
   case TextureElementType::INT8:
     raw = static_cast<double>(*reinterpret_cast<const int8_t *>(elem));
@@ -365,6 +391,8 @@ float TextureManager::readElementAsFloat(const TextureObject &tex, size_t linear
     return *reinterpret_cast<const float *>(elem);
   case TextureElementType::FLOAT64:
     return static_cast<float>(*reinterpret_cast<const double *>(elem));
+  case TextureElementType::FP16:
+    return halfToFloat(*reinterpret_cast<const uint16_t *>(elem));
   case TextureElementType::INT8:
     return static_cast<float>(*reinterpret_cast<const int8_t *>(elem));
   case TextureElementType::INT16:

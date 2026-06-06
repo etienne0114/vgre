@@ -36,8 +36,10 @@ ncclResult_t ncclRecv(void* recvbuff, size_t count,
                       ncclDataType_t datatype, int peer,
                       ncclComm_t comm, void* /*stream*/) {
     if (!comm || !recvbuff) return ncclInvalidArgument;
+    if (peer < 0) return ncclInvalidArgument;
     auto* c = static_cast<ncclComm*>(comm);
     auto& st = *c->state;
+    if (peer >= st.nranks) return ncclInvalidArgument;
     const size_t bytes = count * nccl_elem_size(datatype);
 
     std::unique_lock<std::mutex> lk(st.mu);

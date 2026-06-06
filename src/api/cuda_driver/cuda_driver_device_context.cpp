@@ -1,23 +1,27 @@
 // CUDA Driver API — cuda driver device context
 
 #include "cuda_driver_internal.h"
+#include "vgre/common/platform.h"
 #include <unordered_map>
 #include <mutex>
 
 extern "C" {
 
+VGRE_PUBLIC_API
 CUresult cuInit(unsigned int flags) {
   (void)flags;
   auto err = vgre::api::CUDAInterceptor::instance().init();
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuDeviceGetCount(int *count) {
   if (!count) return CUDA_ERROR_INVALID_VALUE;
   auto err = vgre::api::CUDAInterceptor::instance().getDeviceCount(count);
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuDeviceGet(CUdevice *device, int ordinal) {
   if (!device) return CUDA_ERROR_INVALID_VALUE;
   int count = 0;
@@ -28,6 +32,7 @@ CUresult cuDeviceGet(CUdevice *device, int ordinal) {
   return CUDA_SUCCESS;
 }
 
+VGRE_PUBLIC_API
 CUresult cuDeviceGetName(char *name, int len, CUdevice dev) {
   if (!name || len <= 0) return CUDA_ERROR_INVALID_VALUE;
   vgre::api::cudaDeviceProp_t prop{};
@@ -37,6 +42,7 @@ CUresult cuDeviceGetName(char *name, int len, CUdevice dev) {
   return CUDA_SUCCESS;
 }
 
+VGRE_PUBLIC_API
 CUresult cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
   if (!bytes) return CUDA_ERROR_INVALID_VALUE;
   vgre::api::cudaDeviceProp_t prop{};
@@ -46,12 +52,14 @@ CUresult cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
   return CUDA_SUCCESS;
 }
 
+VGRE_PUBLIC_API
 CUresult cuDeviceGetAttribute(int *pi, int attrib, CUdevice dev) {
   if (!pi) return CUDA_ERROR_INVALID_VALUE;
   auto err = vgre::api::CUDAInterceptor::instance().deviceGetAttribute(pi, attrib, dev);
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuCtxCreate(CUcontext *pctx, unsigned int flags, CUdevice dev) {
   (void)flags;
   if (!pctx) return CUDA_ERROR_INVALID_VALUE;
@@ -61,6 +69,7 @@ CUresult cuCtxCreate(CUcontext *pctx, unsigned int flags, CUdevice dev) {
   return CUDA_SUCCESS;
 }
 
+VGRE_PUBLIC_API
 CUresult cuCtxDestroy(CUcontext ctx) {
   if (g_current_ctx == ctx) g_current_ctx = nullptr;
   return CUDA_SUCCESS;
@@ -81,6 +90,7 @@ CUresult cuCtxGetCurrent(CUcontext *pctx) {
   return CUDA_SUCCESS;
 }
 
+VGRE_PUBLIC_API
 CUresult cuCtxSynchronize(void) {
   auto err = vgre::api::CUDAInterceptor::instance().deviceSynchronize();
   return toCU(err);

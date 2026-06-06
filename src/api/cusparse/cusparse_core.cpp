@@ -9,18 +9,18 @@
 // ── Minimal complex types ─────────────────────────────────────────────────────
 struct cuComplex { float x, y; };
 struct cuDoubleComplex { double x, y; };
-static inline cuComplex operator+(cuComplex a, cuComplex b) { return {a.x+b.x, a.y+b.y}; }
-static inline cuComplex operator*(cuComplex a, cuComplex b) { return {a.x*b.x-a.y*b.y, a.x*b.y+a.y*b.x}; }
-static inline cuComplex operator*(cuComplex a, float s) { return {a.x*s, a.y*s}; }
-static inline cuComplex& operator+=(cuComplex& a, cuComplex b) { a.x+=b.x; a.y+=b.y; return a; }
-static inline cuComplex& operator*=(cuComplex& a, cuComplex b) { float rx=a.x*b.x-a.y*b.y; a.y=a.x*b.y+a.y*b.x; a.x=rx; return a; }
-static inline bool operator!=(cuComplex a, cuComplex b) { return a.x!=b.x||a.y!=b.y; }
-static inline cuDoubleComplex operator+(cuDoubleComplex a, cuDoubleComplex b) { return {a.x+b.x, a.y+b.y}; }
-static inline cuDoubleComplex operator*(cuDoubleComplex a, cuDoubleComplex b) { return {a.x*b.x-a.y*b.y, a.x*b.y+a.y*b.x}; }
-static inline cuDoubleComplex operator*(cuDoubleComplex a, double s) { return {a.x*s, a.y*s}; }
-static inline cuDoubleComplex& operator+=(cuDoubleComplex& a, cuDoubleComplex b) { a.x+=b.x; a.y+=b.y; return a; }
-static inline cuDoubleComplex& operator*=(cuDoubleComplex& a, cuDoubleComplex b) { double rx=a.x*b.x-a.y*b.y; a.y=a.x*b.y+a.y*b.x; a.x=rx; return a; }
-static inline bool operator!=(cuDoubleComplex a, cuDoubleComplex b) { return a.x!=b.x||a.y!=b.y; }
+inline cuComplex operator+(cuComplex a, cuComplex b) { return {a.x+b.x, a.y+b.y}; }
+inline cuComplex operator*(cuComplex a, cuComplex b) { return {a.x*b.x-a.y*b.y, a.x*b.y+a.y*b.x}; }
+inline cuComplex operator*(cuComplex a, float s) { return {a.x*s, a.y*s}; }
+inline cuComplex& operator+=(cuComplex& a, cuComplex b) { a.x+=b.x; a.y+=b.y; return a; }
+inline cuComplex& operator*=(cuComplex& a, cuComplex b) { float rx=a.x*b.x-a.y*b.y; a.y=a.x*b.y+a.y*b.x; a.x=rx; return a; }
+inline bool operator!=(cuComplex a, cuComplex b) { return a.x!=b.x||a.y!=b.y; }
+inline cuDoubleComplex operator+(cuDoubleComplex a, cuDoubleComplex b) { return {a.x+b.x, a.y+b.y}; }
+inline cuDoubleComplex operator*(cuDoubleComplex a, cuDoubleComplex b) { return {a.x*b.x-a.y*b.y, a.x*b.y+a.y*b.x}; }
+inline cuDoubleComplex operator*(cuDoubleComplex a, double s) { return {a.x*s, a.y*s}; }
+inline cuDoubleComplex& operator+=(cuDoubleComplex& a, cuDoubleComplex b) { a.x+=b.x; a.y+=b.y; return a; }
+inline cuDoubleComplex& operator*=(cuDoubleComplex& a, cuDoubleComplex b) { double rx=a.x*b.x-a.y*b.y; a.y=a.x*b.y+a.y*b.x; a.x=rx; return a; }
+inline bool operator!=(cuDoubleComplex a, cuDoubleComplex b) { return a.x!=b.x||a.y!=b.y; }
 
 // ── Define shared globals (declared extern in cusparse_state.h) ───────────────
 namespace vgre_sp {

@@ -479,7 +479,7 @@ inline void vgre_mma_m8n8k128_b1_xor(
 // m16n8k32 INT8×INT8→INT32
 inline void vgre_mma_m16n8k32_s8(
     int& d0, int& d1, int& d2, int& d3,
-    unsigned a0, unsigned a1,
+    unsigned a0, unsigned /*a1*/,
     unsigned b0,
     int c0, int c1, int c2, int c3)
 {
@@ -982,7 +982,7 @@ inline void vgre_tcgen05_m64n256k8_tf32_f32(float* d, uint64_t descA, uint64_t d
 inline void vgre_tcgen05_m128n256k16_bf16_f32(float* d, uint64_t descA, uint64_t descB)
 {
     const uint16_t* A = detail::wgmma_desc_ptr_bf16(descA);
-    const uint16_t* B = detail::wgmma_desc_ptr_bf16(descB);
+    (void)detail::wgmma_desc_ptr_bf16(descB); // B not directly used, descB passed to wgmma
     // Tile 0 (rows 0..63)
     vgre_wgmma_m64n256k16_bf16_f32(d, descA, descB);
     // Tile 1 (rows 64..127) — A pointer offset by 64×K elements

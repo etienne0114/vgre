@@ -180,6 +180,7 @@ cusolverStatus_t cusolverDnSormqr_bufferSize(cusolverDnHandle_t /*h*/, int /*sid
                                               const float * /*A*/, int /*lda*/,
                                               const float * /*tau*/, const float * /*C*/,
                                               int /*ldc*/, int *Lwork) {
+    if (m <= 0 || n <= 0 || k <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
     if (Lwork) *Lwork = std::max(1, std::max(m, n));
     return CUSOLVER_STATUS_SUCCESS;
 }
@@ -188,6 +189,7 @@ cusolverStatus_t cusolverDnDormqr_bufferSize(cusolverDnHandle_t /*h*/, int /*sid
                                               const double * /*A*/, int /*lda*/,
                                               const double * /*tau*/, const double * /*C*/,
                                               int /*ldc*/, int *Lwork) {
+    if (m <= 0 || n <= 0 || k <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
     if (Lwork) *Lwork = std::max(1, std::max(m, n));
     return CUSOLVER_STATUS_SUCCESS;
 }
@@ -225,6 +227,7 @@ cusolverStatus_t cusolverDnSgelsd_bufferSize(cusolverDnHandle_t /*h*/, int m, in
                                               const float * /*S*/, const float * /*rcond*/,
                                               int * /*rank*/, int *Lwork) {
     if (!Lwork || m <= 0 || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (lda < std::max(1, m) || ldb < std::max(1, std::max(m, n))) return CUSOLVER_STATUS_INVALID_VALUE;
     // Workspace query: call LAPACK with lwork=-1
     float work_query;
     int iwork_query, info, query_lwork = -1, rank_tmp = 0;
@@ -238,12 +241,14 @@ cusolverStatus_t cusolverDnSgelsd_bufferSize(cusolverDnHandle_t /*h*/, int m, in
     *Lwork = (info == 0) ? static_cast<int>(work_query) + 1 : 12 * std::min(m, n) + 2 * std::min(m, n) * std::max(m, n) + std::max(m, n) * nrhs + 1;
     return CUSOLVER_STATUS_SUCCESS;
 }
-cusolverStatus_t cusolverDnDgelsd_bufferSize(cusolverDnHandle_t /*h*/, int m, int n,
+cusolverStatus_t cusolverDnDgelsd_bufferSize(cusolverDnHandle_t h, int m, int n,
                                               int nrhs, const double * /*A*/, int lda,
                                               const double * /*B*/, int ldb,
                                               const double * /*S*/, const double * /*rcond*/,
                                               int * /*rank*/, int *Lwork) {
     if (!Lwork || m <= 0 || n <= 0) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (!h) return CUSOLVER_STATUS_INVALID_VALUE;
+    if (lda < std::max(1, m) || ldb < std::max(1, std::max(m, n))) return CUSOLVER_STATUS_INVALID_VALUE;
     double work_query;
     int iwork_query, info, query_lwork = -1, rank_tmp = 0;
     double rcond_tmp = -1.0;
@@ -650,15 +655,16 @@ cusolverStatus_t cusolverDnDsyevd(cusolverDnHandle_t /*handle*/, char jobz, char
 // Math: if B = L*L^T, substitute x = L^{-T}*y into A*x = λ*B*x to get
 //   A*L^{-T}*y = λ*L*L^T*L^{-T}*y  =>  L^{-1}*A*L^{-T}*y = λ*y.
 //
-// itype=2,3: not implemented — returns CUSOLVER_STATUS_NOT_SUPPORTED.
+// All three itypes (1, 2, 3) are implemented via LAPACK ssygvd_/dsygvd_:
+// itype=1: A*x=λ*B*x; itype=2: A*B*x=λ*x; itype=3: B*A*x=λ*x (all SPD B).
 
 // Buffer size for sygvd: all three itypes supported via LAPACK ssygvd_.
-// itype=1: A*x=λ*B*x; itype=2: A*B*x=λ*x; itype=3: B*A*x=λ*x (all SPD B).
 cusolverStatus_t cusolverDnSsygvd_bufferSize(cusolverDnHandle_t handle, int itype,
                                              char jobz, char uplo,
                                              int n, float * /*A*/, int lda,
                                              float * /*B*/, int /*ldb*/,
                                              float * /*W*/, int *Lwork) {
+    if (!handle) return CUSOLVER_STATUS_INVALID_VALUE;
     if (itype < 1 || itype > 3) return CUSOLVER_STATUS_INVALID_VALUE;
     if (!Lwork || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
     // Workspace via LAPACK query: ssygvd_ with lwork=-1
@@ -678,6 +684,7 @@ cusolverStatus_t cusolverDnDsygvd_bufferSize(cusolverDnHandle_t handle, int ityp
                                              int n, double * /*A*/, int lda,
                                              double * /*B*/, int /*ldb*/,
                                              double * /*W*/, int *Lwork) {
+    if (!handle) return CUSOLVER_STATUS_INVALID_VALUE;
     if (itype < 1 || itype > 3) return CUSOLVER_STATUS_INVALID_VALUE;
     if (!Lwork || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
     double work_q = 0.0; int lwork_q = -1, liwork_q = -1, info = 0;
@@ -696,6 +703,7 @@ cusolverStatus_t cusolverDnSsygvd(cusolverDnHandle_t handle, int itype,
                                   int n, float *A, int lda,
                                   float *B, int ldb,
                                   float *W, float *work, int Lwork, int *devInfo) {
+    if (!handle) return CUSOLVER_STATUS_INVALID_VALUE;
     if (itype < 1 || itype > 3) return CUSOLVER_STATUS_NOT_SUPPORTED;
     if (!A || !B || !W || n <= 0 || lda < n || ldb < n) return CUSOLVER_STATUS_INVALID_VALUE;
     if (devInfo) *devInfo = 0;
