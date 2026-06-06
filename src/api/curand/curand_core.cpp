@@ -52,74 +52,103 @@ unsigned long long g_sobolDir64[20000][64];
 unsigned int g_scramble32[20000];
 unsigned long long g_scramble64[20000];
 
-// ── Direction vectors (Sobol) — CPU reference implementation ─────────────────
+// ── GF(2) arithmetic for Sobol primitivity testing ────────────────────────────
+// Supports degrees 1..18 (covering all 21201 Joe-Kuo dimensions)
 
-// Primitive polynomial coefficients for degrees 1–8 (bit k = coeff of x^k, x^s implied)
-static const uint16_t kPrimitivePoly[8] = {
-    0b1,        // degree 1: x + 1
-    0b11,       // degree 2: x^2 + x + 1
-    0b011,      // degree 3: x^3 + x + 1
-    0b0011,     // degree 4: x^4 + x + 1
-    0b00101,    // degree 5: x^5 + x^2 + 1
-    0b000011,   // degree 6: x^6 + x + 1
-    0b0000011,  // degree 7: x^7 + x + 1
-    0b00011101, // degree 8: x^8 + x^4 + x^3 + x^2 + 1
+// a * b in GF(2^s), elements stored in bits 0..s-1, poly_low = lower s bits of
+// the irreducible polynomial (x^s is implicit, so full poly = (1<<s)|poly_low)
+static uint32_t gf2_mul(uint32_t a, uint32_t b, uint32_t poly_low, int s) {
+    uint32_t result = 0;
+    while (b) {
+        if (b & 1u) result ^= a;
+        b >>= 1;
+        a <<= 1;
+        if ((a >> s) & 1u) a ^= (1u << s) | poly_low;  // reduce mod x^s + poly_low
+    }
+    return result & ((1u << s) - 1u);
+}
+
+// base^exp in GF(2^s) mod poly_low
+static uint32_t gf2_pow(uint32_t base, uint64_t exp, uint32_t poly_low, int s) {
+    uint32_t result = 1;
+    base &= (1u << s) - 1u;
+    while (exp) {
+        if (exp & 1u) result = gf2_mul(result, base, poly_low, s);
+        base = gf2_mul(base, base, poly_low, s);
+        exp >>= 1;
+    }
+    return result;
+}
+
+// True iff poly_low (bits 0..s-1 of polynomial, x^s implicit) is primitive over GF(2)
+static bool gf2_is_primitive(uint32_t poly_low, int s) {
+    if (!(poly_low & 1u)) return false;  // constant term must be 1
+    uint64_t order = (1ULL << s) - 1ULL;
+    if (gf2_pow(2u, order, poly_low, s) != 1u) return false;  // x^(2^s-1) ≡ 1?
+    // For each prime factor p of order: x^(order/p) ≢ 1  (else x has smaller order)
+    uint64_t n = order;
+    for (uint64_t p = 2; p * p <= n; ++p) {
+        if (n % p == 0) {
+            if (gf2_pow(2u, order / p, poly_low, s) == 1u) return false;
+            while (n % p == 0) n /= p;
+        }
+    }
+    if (n > 1u && gf2_pow(2u, order / n, poly_low, s) == 1u) return false;
+    return true;
+}
+
+// ── Precomputed primitive polynomial tables for degrees 1–8 ──────────────────
+// VGRE encoding: bit k = coefficient of x^k (k=0..s-1), x^s is implicit.
+// Derived from Joe-Kuo's table: poly = 1 + (a_JoeKuo << 1).
+// Order matches Joe-Kuo dimension assignment (one unique poly per dimension).
+static const uint16_t kPrimPolyDeg1[ 1] = {0x001};
+static const uint16_t kPrimPolyDeg2[ 1] = {0x003};
+static const uint16_t kPrimPolyDeg3[ 2] = {0x003, 0x005};
+static const uint16_t kPrimPolyDeg4[ 3] = {0x003, 0x009, 0x00F};
+static const uint16_t kPrimPolyDeg5[ 6] = {0x005, 0x009, 0x00F, 0x017, 0x01B, 0x01D};
+static const uint16_t kPrimPolyDeg6[ 6] = {0x003, 0x01B, 0x021, 0x027, 0x02D, 0x033};
+static const uint16_t kPrimPolyDeg7[18] = {
+    0x003, 0x009, 0x00F, 0x017, 0x01B, 0x01D, 0x027, 0x02D,
+    0x033, 0x03F, 0x04B, 0x053, 0x059, 0x05F, 0x063, 0x069, 0x06F, 0x071
+};
+static const uint16_t kPrimPolyDeg8[16] = {
+    0x01D, 0x02B, 0x02D, 0x04D, 0x05F, 0x063, 0x065, 0x069,
+    0x071, 0x087, 0x08D, 0x0A9, 0x0C3, 0x0CF, 0x0E7, 0x0F5
+};
+static const uint16_t * const kPrecompPolys[9] = {
+    nullptr,
+    kPrimPolyDeg1, kPrimPolyDeg2, kPrimPolyDeg3, kPrimPolyDeg4,
+    kPrimPolyDeg5, kPrimPolyDeg6, kPrimPolyDeg7, kPrimPolyDeg8
 };
 
-static inline int sobolDegree(int d) {
-    if (d <= 1) return 0;
-    if (d <= 2) return 1;
-    if (d <= 4) return 2;
-    if (d <= 8) return 3;
-    if (d <= 16) return 4;
-    if (d <= 32) return 5;
-    if (d <= 64) return 6;
-    if (d <= 128) return 7;
-    return 8;
+// Number of primitive polynomials of each degree (= φ(2^s−1)/s)
+static const int kPolyPerDeg[19] = {
+    0, 1, 1, 2, 3, 6, 6, 18, 16, 48, 60, 176, 144, 630, 756, 1800, 2048, 7710, 7776
+};
+
+// ── Joe-Kuo Sobol recurrence ──────────────────────────────────────────────────
+// Fills direction numbers directly (V representation, 0-indexed):
+//   V[j] = 1 << (31-j) for j < s  (initial: m[j]=1 for all j)
+//   V[j] = V[j-s] ^ (V[j-s]>>s) ^ Σ_{k=1..s-1} bit_(s-k)(poly) * V[j-k]
+// This is exactly the Joe-Kuo 2010 recurrence applied to V values.
+static void fillSobolV32(uint32_t *V, int s, uint32_t poly) {
+    for (int j = 0; j < s; ++j) V[j] = 1u << (31 - j);
+    for (int j = s; j < 32; ++j) {
+        uint32_t vj = V[j-s] ^ (V[j-s] >> s);
+        for (int k = 1; k < s; ++k)
+            if ((poly >> (s - k)) & 1u) vj ^= V[j-k];
+        V[j] = vj;
+    }
 }
 
-static inline uint16_t sobolPoly(int d) {
-    int deg = sobolDegree(d);
-    if (deg == 0) return 0;
-    return kPrimitivePoly[(d - 1) % 8];
-}
-
-static void computeDirVectors32(unsigned int *v, int d) {
-    if (d == 1) {
-        for (int j = 0; j < 32; ++j) v[j] = 1u << (31 - j);
-        return;
+static void fillSobolV64(unsigned long long *V, int s, uint32_t poly) {
+    for (int j = 0; j < s; ++j) V[j] = 1ull << (63 - j);
+    for (int j = s; j < 64; ++j) {
+        uint64_t vj = V[j-s] ^ (V[j-s] >> s);
+        for (int k = 1; k < s; ++k)
+            if ((poly >> (s - k)) & 1u) vj ^= V[j-k];
+        V[j] = vj;
     }
-    int s = sobolDegree(d);
-    uint16_t poly = sobolPoly(d);
-    uint32_t m[33] = {0};
-    for (int i = 1; i <= s; ++i) m[i] = 1;
-    for (int j = s + 1; j <= 32; ++j) {
-        uint32_t mj = m[j - s];
-        for (int k = 1; k <= s; ++k) {
-            if ((poly >> (k - 1)) & 1) mj ^= m[j - k] << k;
-        }
-        m[j] = mj;
-    }
-    for (int j = 1; j <= 32; ++j) v[j - 1] = m[j] << (32 - j);
-}
-
-static void computeDirVectors64(unsigned long long *v, int d) {
-    if (d == 1) {
-        for (int j = 0; j < 64; ++j) v[j] = 1ull << (63 - j);
-        return;
-    }
-    int s = sobolDegree(d);
-    uint16_t poly = sobolPoly(d);
-    uint64_t m[65] = {0};
-    for (int i = 1; i <= s; ++i) m[i] = 1;
-    for (int j = s + 1; j <= 64; ++j) {
-        uint64_t mj = m[j - s];
-        for (int k = 1; k <= s; ++k) {
-            if ((poly >> (k - 1)) & 1) mj ^= m[j - k] << k;
-        }
-        m[j] = mj;
-    }
-    for (int j = 1; j <= 64; ++j) v[j - 1] = m[j] << (64 - j);
 }
 
 static inline uint32_t scrambleHash32(int d) {
@@ -137,27 +166,55 @@ static inline uint64_t scrambleHash64(int d) {
     return h | 1ull;
 }
 
+// Assign one unique primitive polynomial per dimension (Joe-Kuo ordering):
+// degree 1 gets dim 2, degree 2 gets dim 3, degree 3 gets dims 4-5, etc.
+// For degrees ≤ 8: use precomputed table. For degrees 9-18: enumerate dynamically.
+static void sobolInit32(int maxDim) {
+    // Dimension 1: van der Corput (all-ones initial direction numbers)
+    for (int j = 0; j < 32; ++j) g_sobolDir32[0][j] = 1u << (31 - j);
+
+    int dim = 1;  // 0-indexed destination slot (next fill = dimension dim+1)
+    for (int s = 1; s <= 18 && dim < maxDim; ++s) {
+        if (s <= 8) {
+            for (int i = 0; i < kPolyPerDeg[s] && dim < maxDim; ++i, ++dim)
+                fillSobolV32(g_sobolDir32[dim], s, kPrecompPolys[s][i]);
+        } else {
+            // Enumerate all degree-s primitive polynomials in ascending order
+            for (uint32_t mid = 0; mid < (1u << (s - 1)) && dim < maxDim; ++mid) {
+                uint32_t poly = (mid << 1) | 1u;  // odd: constant term = 1
+                if (gf2_is_primitive(poly, s)) {
+                    fillSobolV32(g_sobolDir32[dim], s, poly);
+                    ++dim;
+                }
+            }
+        }
+    }
+}
+
+static void sobolInit64(int maxDim) {
+    for (int j = 0; j < 64; ++j) g_sobolDir64[0][j] = 1ull << (63 - j);
+
+    int dim = 1;
+    for (int s = 1; s <= 18 && dim < maxDim; ++s) {
+        if (s <= 8) {
+            for (int i = 0; i < kPolyPerDeg[s] && dim < maxDim; ++i, ++dim)
+                fillSobolV64(g_sobolDir64[dim], s, kPrecompPolys[s][i]);
+        } else {
+            for (uint32_t mid = 0; mid < (1u << (s - 1)) && dim < maxDim; ++mid) {
+                uint32_t poly = (mid << 1) | 1u;
+                if (gf2_is_primitive(poly, s)) {
+                    fillSobolV64(g_sobolDir64[dim], s, poly);
+                    ++dim;
+                }
+            }
+        }
+    }
+}
+
 void ensureSobol32() {
     std::lock_guard<std::mutex> lk(g_sobolMutex);
     if (g_sobol32Ready) return;
-    for (int d = 1; d <= 20000; ++d) {
-        if (d == 1) {
-            for (int j = 0; j < 32; ++j) g_sobolDir32[d-1][j] = 1u << (31 - j);
-        } else {
-            int s = sobolDegree(d);
-            uint16_t poly = sobolPoly(d);
-            uint32_t m[33] = {0};
-            for (int i = 1; i <= s; ++i) m[i] = 1;
-            for (int j = s + 1; j <= 32; ++j) {
-                uint32_t mj = m[j - s];
-                for (int k = 1; k <= s; ++k) {
-                    if ((poly >> (k - 1)) & 1) mj ^= m[j - k] << k;
-                }
-                m[j] = mj;
-            }
-            for (int j = 1; j <= 32; ++j) g_sobolDir32[d-1][j-1] = m[j] << (32 - j);
-        }
-    }
+    sobolInit32(20000);
     for (int d = 0; d < 20000; ++d) g_scramble32[d] = scrambleHash32(d + 1);
     g_sobol32Ready = true;
 }
@@ -165,24 +222,7 @@ void ensureSobol32() {
 void ensureSobol64() {
     std::lock_guard<std::mutex> lk(g_sobolMutex);
     if (g_sobol64Ready) return;
-    for (int d = 1; d <= 20000; ++d) {
-        if (d == 1) {
-            for (int j = 0; j < 64; ++j) g_sobolDir64[d-1][j] = 1ull << (63 - j);
-        } else {
-            int s = sobolDegree(d);
-            uint16_t poly = sobolPoly(d);
-            uint64_t m[65] = {0};
-            for (int i = 1; i <= s; ++i) m[i] = 1;
-            for (int j = s + 1; j <= 64; ++j) {
-                uint64_t mj = m[j - s];
-                for (int k = 1; k <= s; ++k) {
-                    if ((poly >> (k - 1)) & 1) mj ^= m[j - k] << k;
-                }
-                m[j] = mj;
-            }
-            for (int j = 1; j <= 64; ++j) g_sobolDir64[d-1][j-1] = m[j] << (64 - j);
-        }
-    }
+    sobolInit64(20000);
     for (int d = 0; d < 20000; ++d) g_scramble64[d] = scrambleHash64(d + 1);
     g_sobol64Ready = true;
 }
@@ -570,7 +610,7 @@ curandStatus_t curandGetDirectionVectors32(curandDirectionVectors32_t **vectors,
     if (!vectors) return CURAND_STATUS_INVALID_VALUE;
     std::lock_guard<std::mutex> lk(g_sobolMutex);
     if (!g_sobol32Ready) {
-        for (int d = 1; d <= 20000; ++d) computeDirVectors32(g_sobolDir32[d - 1], d);
+        sobolInit32(20000);
         g_sobol32Ready = true;
     }
     *vectors = g_sobolDir32;
@@ -582,7 +622,7 @@ curandStatus_t curandGetDirectionVectors64(curandDirectionVectors64_t **vectors,
     if (!vectors) return CURAND_STATUS_INVALID_VALUE;
     std::lock_guard<std::mutex> lk(g_sobolMutex);
     if (!g_sobol64Ready) {
-        for (int d = 1; d <= 20000; ++d) computeDirVectors64(g_sobolDir64[d - 1], d);
+        sobolInit64(20000);
         g_sobol64Ready = true;
     }
     *vectors = g_sobolDir64;

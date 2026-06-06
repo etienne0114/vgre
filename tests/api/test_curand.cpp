@@ -9,6 +9,7 @@
 #include <iostream>
 #include <numeric>
 #include <vector>
+#include <algorithm>
 
 static int g_pass = 0, g_total = 0;
 
@@ -216,6 +217,31 @@ static void test_sobol64_quasi() {
     check("Sobol64 quasi-random uniform double in [0,1]", ok);
 }
 
+// ── 16. Van der Corput equidistribution of Sobol dim-1 ───────────────────────
+// The first 2^k points of dimension 1 must be a permutation of {i/2^k : i=0..2^k-1}.
+// This is the fundamental (t,m,1)-net property for k=3 (8 points, 8 equal intervals).
+static void test_sobol_van_der_corput() {
+    curandGenerator_t gen = nullptr;
+    curandCreateGenerator(&gen, CURAND_RNG_QUASI_SOBOL32);
+    curandSetQuasiRandomGeneratorDimensions(gen, 1);
+
+    const int N = 8;
+    unsigned int raw[N] = {};
+    curandGenerate(gen, raw, N);  // 8 raw uint32 values from dim 1
+
+    // Sort and verify each is an exact multiple of 2^(32-3)=2^29
+    std::vector<unsigned int> sorted(raw, raw + N);
+    std::sort(sorted.begin(), sorted.end());
+
+    const unsigned int step = 1u << 29;  // 2^(32-3)
+    bool ok = true;
+    for (int i = 0; i < N; ++i)
+        ok &= (sorted[i] == static_cast<unsigned int>(i) * step);
+
+    curandDestroyGenerator(gen);
+    check("Sobol dim-1 van der Corput 8-point equidistribution", ok);
+}
+
 // ── 12. Direction vectors and scramble constants ──────────────────────────────
 static void test_direction_vectors() {
     curandDirectionVectors32_t *vecs32 = nullptr;
@@ -334,6 +360,7 @@ int main() {
     test_sobol_quasi();
     test_sobol64_quasi();
     test_direction_vectors();
+    test_sobol_van_der_corput();
     test_ipc_handle();
     test_generate_normal_double();
     test_offset();
