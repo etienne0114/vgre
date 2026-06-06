@@ -61,26 +61,51 @@ static inline uint16_t f2bf(float f) {
     return sign | (exp << 7) | ((bits >> 16) & 0x7f);
 }
 
-// ── CSR SpMV: y = alpha * A * x + beta * y ───────────────────────────────────
+// ── CSR SpMV: y = alpha * op(A) * x + beta * y ──────────────────────────────
+// Non-transposed: y[i] = alpha * Σ_j A[i,j]*x[j] + beta*y[i]  — one result per row.
+// Transposed:     y[j] += alpha * A[i,j]*x[i]                  — scatter by column.
+//   Transpose uses two passes: (1) scale y by beta, (2) scatter-add over rows.
+//   Scatter is inherently non-parallel; serialised or protected by atomics.
 template<typename T>
 void csr_spmv(cusparseOperation_t op, const T *alpha, const CsrMat &A,
               const T *x, const T *beta, T *y) {
-    bool trans = (op != CUSPARSE_OPERATION_NON_TRANSPOSE);
-    int64_t m = trans ? A.cols : A.rows;
+    int base = (A.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
 
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(guided) if (m > 256)
-    #endif
-    for (int64_t i = 0; i < m; ++i) {
-        T sum = T{};
-        int64_t rowStart = getIdx(A.rowOffsets, A.rowOffsetType, i) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
-        int64_t rowEnd   = getIdx(A.rowOffsets, A.rowOffsetType, i+1) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
-        for (int64_t idx = rowStart; idx < rowEnd; ++idx) {
-            int64_t col = getIdx(A.colInd, A.colIndType, idx) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
-            T val = static_cast<const T*>(A.values)[idx];
-            sum += trans ? val * x[i] : val * x[col];
+    if (op == CUSPARSE_OPERATION_NON_TRANSPOSE) {
+        // Standard row-parallel SpMV: y[i] = alpha * Σ_j A[i,j]*x[j] + beta*y[i]
+        int64_t m = A.rows;
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(guided) if (m > 256)
+        #endif
+        for (int64_t i = 0; i < m; ++i) {
+            int64_t rowStart = getIdx(A.rowOffsets, A.rowOffsetType, i)   - base;
+            int64_t rowEnd   = getIdx(A.rowOffsets, A.rowOffsetType, i+1) - base;
+            T sum = T{};
+            for (int64_t idx = rowStart; idx < rowEnd; ++idx) {
+                int64_t col = getIdx(A.colInd, A.colIndType, idx) - base;
+                sum += static_cast<const T*>(A.values)[idx] * x[col];
+            }
+            y[i] = (*alpha) * sum + (*beta) * y[i];
         }
-        y[i] = (*alpha) * sum + (*beta) * y[i];
+    } else {
+        // Transposed SpMV: y[j] = alpha * Σ_i A[i,j]*x[i] + beta*y[j]
+        // Pass 1: scale y by beta (y[j] *= beta for all j in 0..A.cols).
+        int64_t n = A.cols;
+        T bv = *beta;
+        for (int64_t j = 0; j < n; ++j) y[j] = bv * y[j];
+        // Pass 2: scatter-add — for each row i, add A[i,j]*alpha*x[i] to y[j].
+        // Serialised over rows to avoid data races on y[j].
+        T av = *alpha;
+        int64_t m = A.rows;
+        for (int64_t i = 0; i < m; ++i) {
+            int64_t rowStart = getIdx(A.rowOffsets, A.rowOffsetType, i)   - base;
+            int64_t rowEnd   = getIdx(A.rowOffsets, A.rowOffsetType, i+1) - base;
+            T xi_scaled = av * x[i];
+            for (int64_t idx = rowStart; idx < rowEnd; ++idx) {
+                int64_t col = getIdx(A.colInd, A.colIndType, idx) - base;
+                y[col] += static_cast<const T*>(A.values)[idx] * xi_scaled;
+            }
+        }
     }
 }
 

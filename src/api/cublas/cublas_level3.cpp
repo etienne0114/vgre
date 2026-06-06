@@ -9,6 +9,8 @@
 #include <immintrin.h>
 #endif
 
+#include <unistd.h>
+
 // ── AVX2 SGEMM kernel (NN layout: C += alpha * A * B) ────────────────────────
 // Processes 8 output columns at a time using 256-bit FMA.
 #if defined(__AVX2__)
@@ -57,7 +59,27 @@ static void sgemm_nn_avx2(int M, int N, int K,
 //   M6=(A21-A11)(B11+B12), M7=(A12-A22)(B21+B22).
 // Then C11=M1+M4-M5+M7, C12=M3+M5, C21=M2+M4, C22=M1-M2+M3+M6.
 
-static constexpr int STRASSEN_THRESHOLD = 64;
+// Cache-aware Strassen threshold: optimal crossover is when three n×n sub-
+// matrices of T no longer fit in L2 cache, i.e. 3*(n/2)² * sizeof(T) ≈ L2.
+// Solved: n ≈ sqrt(L2 / (3 * sizeof(T))) × ½, rounded down to power of 2.
+// Below this threshold Strassen's extra 14 sub-matrix allocations cost more
+// than the O(n^2.807) vs O(n^3) computation savings.
+// sysconf(_SC_LEVEL2_CACHE_SIZE) returns 0 on some OSes; fall back to 4 MiB.
+static int strassenThreshold() {
+    static int kThresh = [] {
+        long l2 = sysconf(_SC_LEVEL2_CACHE_SIZE);
+        if (l2 <= 0) l2 = 4 * 1024 * 1024;
+        // float threshold: sqrt(L2 / 12) (3 sub-matrices, sizeof(float)=4)
+        int n = static_cast<int>(std::sqrt(static_cast<double>(l2) / 12.0));
+        // Round down to the nearest power of 2 ≥ 64
+        n = std::max(n, 64);
+        int p = 64;
+        while (p * 2 <= n) p <<= 1;
+        return p;
+    }();
+    return kThresh;
+}
+static const int STRASSEN_THRESHOLD = strassenThreshold();
 
 template<typename T>
 static void strassen_mul(int n, T alpha, const T* A, const T* B, T beta, T* C) {

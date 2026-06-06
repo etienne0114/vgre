@@ -398,14 +398,98 @@ curandStatus_t curandGenerateUniformDouble(curandGenerator_t generator, double *
 }
 
 // ── Normal float/double generation ───────────────────────────────────────────
+//
+// For quasi-random (Sobol) generators Box-Muller transform is applied to pairs
+// of Sobol uniform values to preserve the O(1/N) low-discrepancy convergence.
+//
+// Box-Muller (Marsaglia 1964): given uniform (u1, u2) ∈ (0,1)²:
+//   z0 = sqrt(-2·ln(u1)) · cos(2π·u2)
+//   z1 = sqrt(-2·ln(u1)) · sin(2π·u2)
+// Both z0, z1 ~ N(0,1).
+//
+// For Sobol we interleave two dimensions: even samples use dim d0, odd use d0+1,
+// advancing the sequence pointer by 1 each pair. Odd-count outputs leave the
+// last element from a degenerate pair (u2=next point, z0 only).
+
+static constexpr double kTwoPi = 6.28318530717958647692;
+
+// Generate n samples from N(mean,stddev) using Sobol uniform pairs (32-bit).
+static void sobolNormal32(GeneratorState *st, float *out, size_t n,
+                          float mean, float stddev) {
+    ensureSobol32();
+    unsigned int D = (st->quasiDimensions == 0) ? 1 : st->quasiDimensions;
+    constexpr double inv32 = 1.0 / 4294967296.0;
+
+    // Each normal output pair consumes one sequence point across two adjacent
+    // dimensions (d0, d0+1).  The d0 pairs cycle every 2 dimensions.
+    size_t seqPt = st->offset;
+    for (size_t i = 0; i < n; i += 2) {
+        unsigned int d0 = static_cast<unsigned int>((i % D));
+        unsigned int d1 = static_cast<unsigned int>(((i + 1) % D));
+        uint32_t v0 = sobolValue32(static_cast<uint32_t>(seqPt), g_sobolDir32[d0]);
+        uint32_t v1 = sobolValue32(static_cast<uint32_t>(seqPt), g_sobolDir32[d1]);
+        if (st->scrambled) { v0 ^= g_scramble32[d0]; v1 ^= g_scramble32[d1]; }
+        // Map to (0,1) — clamp away from exact 0 to avoid ln(0).
+        double u1 = std::max(v0 * inv32, 1e-38);
+        double u2 = v1 * inv32;
+        double r  = std::sqrt(-2.0 * std::log(u1));
+        double c  = std::cos(kTwoPi * u2);
+        double s  = std::sin(kTwoPi * u2);
+        out[i]     = static_cast<float>(mean + stddev * r * c);
+        if (i + 1 < n)
+            out[i + 1] = static_cast<float>(mean + stddev * r * s);
+        ++seqPt;
+    }
+    st->offset = seqPt;
+}
+
+// Generate n samples from N(mean,stddev) using Sobol uniform pairs (64-bit).
+static void sobolNormal64(GeneratorState *st, double *out, size_t n,
+                          double mean, double stddev) {
+    ensureSobol64();
+    unsigned int D = (st->quasiDimensions == 0) ? 1 : st->quasiDimensions;
+    constexpr double inv64 = 1.0 / 18446744073709551616.0;
+
+    size_t seqPt = st->offset;
+    for (size_t i = 0; i < n; i += 2) {
+        unsigned int d0 = static_cast<unsigned int>((i % D));
+        unsigned int d1 = static_cast<unsigned int>(((i + 1) % D));
+        uint64_t v0 = sobolValue64(seqPt, g_sobolDir64[d0]);
+        uint64_t v1 = sobolValue64(seqPt, g_sobolDir64[d1]);
+        if (st->scrambled) { v0 ^= g_scramble64[d0]; v1 ^= g_scramble64[d1]; }
+        double u1 = std::max(static_cast<double>(v0) * inv64, 1e-308);
+        double u2 = static_cast<double>(v1) * inv64;
+        double r  = std::sqrt(-2.0 * std::log(u1));
+        double c  = std::cos(kTwoPi * u2);
+        double s  = std::sin(kTwoPi * u2);
+        out[i]     = mean + stddev * r * c;
+        if (i + 1 < n)
+            out[i + 1] = mean + stddev * r * s;
+        ++seqPt;
+    }
+    st->offset = seqPt;
+}
 
 curandStatus_t curandGenerateNormal(curandGenerator_t generator, float *outputPtr, size_t n, float mean, float stddev) {
     if (!outputPtr || n == 0) return CURAND_STATUS_SUCCESS;
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
     std::lock_guard<std::mutex> genLk(st->genMutex);
-    std::normal_distribution<float> dist(mean, stddev);
-    for (size_t i = 0; i < n; ++i) outputPtr[i] = dist(st->engine);
+    if (isQuasi(st->type)) {
+        // Quasi-random: Box-Muller on Sobol uniform pairs preserves low discrepancy.
+        bool is64 = (st->type == CURAND_RNG_QUASI_SOBOL64 ||
+                     st->type == CURAND_RNG_QUASI_SCRAMBLED_SOBOL64);
+        if (is64) {
+            std::vector<double> tmp(n);
+            sobolNormal64(st, tmp.data(), n, static_cast<double>(mean), static_cast<double>(stddev));
+            for (size_t i = 0; i < n; ++i) outputPtr[i] = static_cast<float>(tmp[i]);
+        } else {
+            sobolNormal32(st, outputPtr, n, mean, stddev);
+        }
+    } else {
+        std::normal_distribution<float> dist(mean, stddev);
+        for (size_t i = 0; i < n; ++i) outputPtr[i] = dist(st->engine);
+    }
     return CURAND_STATUS_SUCCESS;
 }
 
@@ -414,8 +498,20 @@ curandStatus_t curandGenerateNormalDouble(curandGenerator_t generator, double *o
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
     std::lock_guard<std::mutex> genLk(st->genMutex);
-    std::normal_distribution<double> dist(mean, stddev);
-    for (size_t i = 0; i < n; ++i) outputPtr[i] = dist(st->engine);
+    if (isQuasi(st->type)) {
+        bool is64 = (st->type == CURAND_RNG_QUASI_SOBOL64 ||
+                     st->type == CURAND_RNG_QUASI_SCRAMBLED_SOBOL64);
+        if (is64) {
+            sobolNormal64(st, outputPtr, n, mean, stddev);
+        } else {
+            std::vector<float> tmp(n);
+            sobolNormal32(st, tmp.data(), n, static_cast<float>(mean), static_cast<float>(stddev));
+            for (size_t i = 0; i < n; ++i) outputPtr[i] = static_cast<double>(tmp[i]);
+        }
+    } else {
+        std::normal_distribution<double> dist(mean, stddev);
+        for (size_t i = 0; i < n; ++i) outputPtr[i] = dist(st->engine);
+    }
     return CURAND_STATUS_SUCCESS;
 }
 
@@ -426,8 +522,21 @@ curandStatus_t curandGenerateLogNormal(curandGenerator_t generator, float *outpu
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
     std::lock_guard<std::mutex> genLk(st->genMutex);
-    std::normal_distribution<float> dist(mean, stddev);
-    for (size_t i = 0; i < n; ++i) outputPtr[i] = std::exp(dist(st->engine));
+    if (isQuasi(st->type)) {
+        bool is64 = (st->type == CURAND_RNG_QUASI_SOBOL64 ||
+                     st->type == CURAND_RNG_QUASI_SCRAMBLED_SOBOL64);
+        if (is64) {
+            std::vector<double> tmp(n);
+            sobolNormal64(st, tmp.data(), n, static_cast<double>(mean), static_cast<double>(stddev));
+            for (size_t i = 0; i < n; ++i) outputPtr[i] = static_cast<float>(std::exp(tmp[i]));
+        } else {
+            sobolNormal32(st, outputPtr, n, mean, stddev);
+            for (size_t i = 0; i < n; ++i) outputPtr[i] = std::exp(outputPtr[i]);
+        }
+    } else {
+        std::normal_distribution<float> dist(mean, stddev);
+        for (size_t i = 0; i < n; ++i) outputPtr[i] = std::exp(dist(st->engine));
+    }
     return CURAND_STATUS_SUCCESS;
 }
 
@@ -436,8 +545,21 @@ curandStatus_t curandGenerateLogNormalDouble(curandGenerator_t generator, double
     auto *st = lookup(generator);
     if (!st) return CURAND_STATUS_NOT_INITIALIZED;
     std::lock_guard<std::mutex> genLk(st->genMutex);
-    std::normal_distribution<double> dist(mean, stddev);
-    for (size_t i = 0; i < n; ++i) outputPtr[i] = std::exp(dist(st->engine));
+    if (isQuasi(st->type)) {
+        bool is64 = (st->type == CURAND_RNG_QUASI_SOBOL64 ||
+                     st->type == CURAND_RNG_QUASI_SCRAMBLED_SOBOL64);
+        if (is64) {
+            sobolNormal64(st, outputPtr, n, mean, stddev);
+            for (size_t i = 0; i < n; ++i) outputPtr[i] = std::exp(outputPtr[i]);
+        } else {
+            std::vector<float> tmp(n);
+            sobolNormal32(st, tmp.data(), n, static_cast<float>(mean), static_cast<float>(stddev));
+            for (size_t i = 0; i < n; ++i) outputPtr[i] = std::exp(static_cast<double>(tmp[i]));
+        }
+    } else {
+        std::normal_distribution<double> dist(mean, stddev);
+        for (size_t i = 0; i < n; ++i) outputPtr[i] = std::exp(dist(st->engine));
+    }
     return CURAND_STATUS_SUCCESS;
 }
 

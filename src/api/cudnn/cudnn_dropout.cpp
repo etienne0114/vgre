@@ -3,6 +3,28 @@
 #include "cudnn_internal.h"
 #include "vgre/common/openmp_helper.h"
 
+#include <cstdint>
+
+// SplitMix64 avalanche hash: maps a 64-bit counter to a uniform 64-bit hash.
+// Used as a counter-based RNG: hash(seed ^ index) → uniform mask.
+// O(1) per element, no state initialization overhead, trivially parallelizable.
+// Constants from Sebastiano Vigna "Further scramblings of Marsaglia's xorshift
+// generators" (2018).
+static inline uint64_t splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+// Map 64-bit hash to float in [0, 1).
+static inline float hashToFloat(uint64_t h) {
+    // Top 23 mantissa bits → IEEE-754 float in [1,2); subtract 1 → [0,1).
+    uint32_t m = static_cast<uint32_t>(h >> 41) | 0x3f800000u;
+    float f; __builtin_memcpy(&f, &m, sizeof(f));
+    return f - 1.0f;
+}
+
 extern "C" {
 
 cudnnStatus_t cudnnGetDropoutReserveSpaceSize(
@@ -38,15 +60,16 @@ cudnnStatus_t cudnnDropoutForward(
     const float* xf = (const float*)x;
     float* yf = (float*)y;
     uint8_t* mask = (uint8_t*)reserveSpace;
+    uint64_t seed = d->seed;
 
+    // Counter-based RNG: each element i gets a unique hash splitmix64(seed ^ i).
+    // No per-element state allocation — O(1) arithmetic per element, fully
+    // data-parallel, identical mask sequence regardless of thread count.
     #ifdef _OPENMP
     #pragma omp parallel for if (N > 1024)
     #endif
     for (int i = 0; i < N; ++i) {
-        // Deterministic per-element RNG: seed + i
-        std::mt19937_64 elemRng(d->seed + static_cast<uint64_t>(i));
-        std::uniform_real_distribution<float> elemDist(0.0f, 1.0f);
-        float r = elemDist(elemRng);
+        float r = hashToFloat(splitmix64(seed ^ static_cast<uint64_t>(i)));
         if (r < d->dropout) {
             mask[i] = 0;
             yf[i] = 0.0f;
