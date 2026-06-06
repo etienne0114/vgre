@@ -606,19 +606,27 @@ cusolverStatus_t cusolverDnDgesvd(cusolverDnHandle_t /*handle*/, char jobu, char
 
 // ── Eigenvalue decomposition (syevd) ───────────────────────────────────────────
 
+// LAPACK syevd workspace requirements (LAPACK Working Note 135, §4.6):
+//   JOBZ='V' (eigenvectors + eigenvalues): lwork = 1 + 6*n + 2*n², liwork = 3 + 5*n
+//   JOBZ='N' (eigenvalues only):           lwork = 2*n + 1,         liwork = 1
+// These are the minimum requirements; allocate exactly what LAPACK needs to
+// avoid under-allocation when callers use the returned Lwork directly.
+
 cusolverStatus_t cusolverDnSsyevd_bufferSize(cusolverDnHandle_t /*handle*/, char jobz, char uplo,
                                              int n, float * /*A*/, int lda, float * /*W*/, int *Lwork) {
-    (void)jobz; (void)uplo; // workspace size independent of jobz/uplo in this simplified model
+    (void)uplo;
     if (!Lwork || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
-    *Lwork = 2 * n * n + 6 * n + 1;
+    char jz = (jobz == 'V' || jobz == 'v') ? 'V' : 'N';
+    *Lwork = (jz == 'V') ? (1 + 6*n + 2*n*n) : (2*n + 1);
     return CUSOLVER_STATUS_SUCCESS;
 }
 
 cusolverStatus_t cusolverDnDsyevd_bufferSize(cusolverDnHandle_t /*handle*/, char jobz, char uplo,
                                              int n, double * /*A*/, int lda, double * /*W*/, int *Lwork) {
-    (void)jobz; (void)uplo;
+    (void)uplo;
     if (!Lwork || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
-    *Lwork = 2 * n * n + 6 * n + 1;
+    char jz = (jobz == 'V' || jobz == 'v') ? 'V' : 'N';
+    *Lwork = (jz == 'V') ? (1 + 6*n + 2*n*n) : (2*n + 1);
     return CUSOLVER_STATUS_SUCCESS;
 }
 
@@ -627,9 +635,10 @@ cusolverStatus_t cusolverDnSsyevd(cusolverDnHandle_t /*handle*/, char jobz, char
                                   int Lwork, int *devInfo) {
     if (!A || !W || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
     if (devInfo) *devInfo = 0;
-    int liwork = 3 + 5 * n;
-    std::vector<int> iwork(liwork);
-    ssyevd_(&jobz, &uplo, &n, A, &lda, W, work, &Lwork, iwork.data(), &liwork, devInfo);
+    char jz = (jobz == 'V' || jobz == 'v') ? 'V' : 'N';
+    int liwork = (jz == 'V') ? (3 + 5*n) : 1;
+    std::vector<int> iwork(static_cast<size_t>(liwork));
+    ssyevd_(&jz, &uplo, &n, A, &lda, W, work, &Lwork, iwork.data(), &liwork, devInfo);
     return CUSOLVER_STATUS_SUCCESS;
 }
 
@@ -638,9 +647,10 @@ cusolverStatus_t cusolverDnDsyevd(cusolverDnHandle_t /*handle*/, char jobz, char
                                   int Lwork, int *devInfo) {
     if (!A || !W || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
     if (devInfo) *devInfo = 0;
-    int liwork = 3 + 5 * n;
-    std::vector<int> iwork(liwork);
-    dsyevd_(&jobz, &uplo, &n, A, &lda, W, work, &Lwork, iwork.data(), &liwork, devInfo);
+    char jz = (jobz == 'V' || jobz == 'v') ? 'V' : 'N';
+    int liwork = (jz == 'V') ? (3 + 5*n) : 1;
+    std::vector<int> iwork(static_cast<size_t>(liwork));
+    dsyevd_(&jz, &uplo, &n, A, &lda, W, work, &Lwork, iwork.data(), &liwork, devInfo);
     return CUSOLVER_STATUS_SUCCESS;
 }
 

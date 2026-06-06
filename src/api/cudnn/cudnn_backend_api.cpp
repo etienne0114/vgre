@@ -1017,8 +1017,19 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
         case CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR: {
-            // Scaled dot-product attention: O = softmax(Q*K^T / scale) * V
-            // Tensor layout expected: (batch, heads, seqLen, head_dim) for Q/K/V/O.
+            // FlashAttention-2 tiled scaled dot-product attention.
+            // Algorithm: Dao et al., "FlashAttention-2" (NeurIPS 2023).
+            //
+            // Standard SDPA: O = softmax(Q·K^T / scale) · V
+            //   Memory: O(N²) for the N×N score matrix.
+            //
+            // FlashAttention tiling: process Q in Br-row blocks, stream K/V in Bc-col blocks.
+            //   Online softmax: maintain running (m_i, l_i, O_i) per Q-block row:
+            //     m_new = max(m_old, rowmax(S_ij))
+            //     O_new = exp(m_old - m_new)·O_old + exp(S_ij - m_new)·V_j  (no division yet)
+            //     l_new = exp(m_old - m_new)·l_old + rowsum(exp(S_ij - m_new))
+            //   Final: O_i /= l_i
+            //   Memory: O((Br + Bc) · head_dim) instead of O(N · head_dim).
             uintptr_t qId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ATTENTION_QDESC);
             uintptr_t kId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ATTENTION_KDESC);
             uintptr_t vId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ATTENTION_VDESC);
@@ -1031,7 +1042,6 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             TensorDesc kDesc = buildTensorDesc(kId);
             TensorDesc vDesc = buildTensorDesc(vId);
 
-            // Infer dimensions: n=batch, c=heads, h=seqLen, w=head_dim
             int batch    = qDesc.n;
             int heads    = qDesc.c;
             int seqQ     = qDesc.h;
@@ -1040,71 +1050,110 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
 
             float attnScale = getAttrFloat(opNode, CUDNN_ATTR_OPERATION_ATTENTION_SCALE,
                                             1.0f / std::sqrt(static_cast<float>(head_dim)));
-            // Causal mask: position i may only attend to positions j <= i.
-            // Implemented as -∞ mask on A[i,j] for j > i before softmax.
-            // Math: causal softmax(A)[i,j] = exp(A[i,j] - max) / Z  where A[i,j>i] = -∞.
             bool causal = (getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ATTENTION_CAUSAL_MASK) != 0);
 
             const float *Q = static_cast<const float*>(qPtr);
             const float *K = static_cast<const float*>(kPtr);
             const float *V = static_cast<const float*>(vPtr);
             float       *O = static_cast<float*>(oPtr);
-            static constexpr float kNegInf = -1e30f;
 
-            std::vector<float> attnScore(static_cast<size_t>(seqQ * seqK));
+            // Tile sizes: 64 rows × 64 cols covers typical head_dim (64-128).
+            // At head_dim=128: S_tile = 64×64×4 = 16 KB, O_tile = 64×128×4 = 32 KB → fits L1.
+            static constexpr int Br = 64, Bc = 64;
 
-            for (int b = 0; b < batch; ++b) {
-                for (int h = 0; h < heads; ++h) {
-                    int bhQ = (b * heads + h) * seqQ * head_dim;
-                    int bhK = (b * heads + h) * seqK * head_dim;
-                    int bhO = (b * heads + h) * seqQ * head_dim;
+            // Per-thread accumulators (reused across heads).
+            std::vector<float> m_i(Br), l_i(Br);
+            std::vector<float> O_i(static_cast<size_t>(Br) * head_dim);
+            std::vector<float> S_ij(static_cast<size_t>(Br) * Bc);
+            std::vector<float> P_ij(static_cast<size_t>(Br) * Bc);
 
-                    // A = Q * K^T * scale  [seqQ × seqK]
-                    for (int i = 0; i < seqQ; ++i) {
-                        for (int j = 0; j < seqK; ++j) {
-                            // Causal mask: query at position i can attend to key at j only if j <= i.
-                            // Offset: when seqQ < seqK the query starts at position seqK-seqQ.
-                            int qi = (seqK - seqQ) + i;  // absolute query position
-                            if (causal && j > qi) {
-                                attnScore[static_cast<size_t>(i * seqK + j)] = kNegInf;
-                                continue;
+            for (int b = 0; b < batch; ++b)
+            for (int h = 0; h < heads; ++h) {
+                const float* Qh = Q + (b * heads + h) * seqQ * head_dim;
+                const float* Kh = K + (b * heads + h) * seqK * head_dim;
+                const float* Vh = V + (b * heads + h) * seqK * head_dim;
+                float*       Oh = O + (b * heads + h) * seqQ * head_dim;
+
+                for (int i0 = 0; i0 < seqQ; i0 += Br) {
+                    int br = std::min(Br, seqQ - i0);
+
+                    // Initialise per-Q-block running stats.
+                    for (int i = 0; i < br; ++i) { m_i[i] = -1e30f; l_i[i] = 0.0f; }
+                    for (int x = 0; x < br * head_dim; ++x) O_i[x] = 0.0f;
+
+                    for (int j0 = 0; j0 < seqK; j0 += Bc) {
+                        int bc = std::min(Bc, seqK - j0);
+
+                        // Step 1: compute score tile S_ij[br × bc] = Q_i · K_j^T · scale.
+                        for (int i = 0; i < br; ++i) {
+                            const float* qi = Qh + (i0 + i) * head_dim;
+                            // Absolute query position for causal masking.
+                            int qi_pos = (seqK - seqQ) + i0 + i;
+                            for (int j = 0; j < bc; ++j) {
+                                int kj = j0 + j;
+                                if (causal && kj > qi_pos) {
+                                    S_ij[static_cast<size_t>(i * bc + j)] = -1e30f;
+                                    continue;
+                                }
+                                const float* kj_ptr = Kh + kj * head_dim;
+                                float dot = 0.0f;
+                                for (int d = 0; d < head_dim; ++d)
+                                    dot += qi[d] * kj_ptr[d];
+                                S_ij[static_cast<size_t>(i * bc + j)] = dot * attnScale;
                             }
-                            float dot = 0.0f;
+                        }
+
+                        // Step 2: online softmax update per Q-block row.
+                        for (int i = 0; i < br; ++i) {
+                            const float* s = S_ij.data() + i * bc;
+
+                            // rowmax of this tile.
+                            float m_tilde = -1e30f;
+                            for (int j = 0; j < bc; ++j)
+                                if (s[j] > m_tilde) m_tilde = s[j];
+
+                            // exp(S - m_tilde) and rowsum.
+                            float l_tilde = 0.0f;
+                            float* p = P_ij.data() + i * bc;
+                            for (int j = 0; j < bc; ++j) {
+                                p[j] = (s[j] > -9e29f) ? std::exp(s[j] - m_tilde) : 0.0f;
+                                l_tilde += p[j];
+                            }
+
+                            // Online update: rescale old O_i and l_i to new max.
+                            float m_new   = (m_i[i] > m_tilde) ? m_i[i] : m_tilde;
+                            float alpha   = std::exp(m_i[i] - m_new); // correction for old stats
+                            float beta    = std::exp(m_tilde - m_new); // correction for new tile
+
+                            float* oi = O_i.data() + i * head_dim;
                             for (int d = 0; d < head_dim; ++d)
-                                dot += Q[bhQ + i * head_dim + d] * K[bhK + j * head_dim + d];
-                            attnScore[static_cast<size_t>(i * seqK + j)] = dot * attnScale;
-                        }
-                    }
+                                oi[d] *= alpha;
 
-                    // Numerically-stable softmax: max subtraction prevents overflow.
-                    // Math: softmax[j] = exp(A[j]-max) / sum_k exp(A[k]-max)
-                    // Masked positions (kNegInf) contribute exp(-∞) = 0 to sum.
-                    for (int i = 0; i < seqQ; ++i) {
-                        float *row = attnScore.data() + i * seqK;
-                        // Find max over unmasked entries
-                        float maxVal = kNegInf;
-                        for (int j = 0; j < seqK; ++j) if (row[j] > maxVal) maxVal = row[j];
-                        if (maxVal == kNegInf) maxVal = 0.f; // all masked — uniform
-                        float sumExp = 0.0f;
-                        for (int j = 0; j < seqK; ++j) {
-                            row[j] = (row[j] > kNegInf * 0.5f) ? std::exp(row[j] - maxVal) : 0.0f;
-                            sumExp += row[j];
-                        }
-                        float inv = (sumExp > 0.f) ? 1.f / sumExp : 0.f;
-                        for (int j = 0; j < seqK; ++j) row[j] *= inv;
-                    }
+                            // O_i += beta * P_ij * V_j
+                            for (int j = 0; j < bc; ++j) {
+                                float pv = beta * p[j];
+                                if (pv == 0.0f) continue;
+                                const float* vj = Vh + (j0 + j) * head_dim;
+                                for (int d = 0; d < head_dim; ++d)
+                                    oi[d] += pv * vj[d];
+                            }
 
-                    // O = A * V  [seqQ × head_dim]
-                    for (int i = 0; i < seqQ; ++i) {
-                        for (int d = 0; d < head_dim; ++d) {
-                            float sum = 0.0f;
-                            for (int j = 0; j < seqK; ++j)
-                                sum += attnScore[static_cast<size_t>(i * seqK + j)] * V[bhK + j * head_dim + d];
-                            O[bhO + i * head_dim + d] = sum;
+                            l_i[i] = alpha * l_i[i] + beta * l_tilde;
+                            m_i[i] = m_new;
                         }
+                    } // end K/V tile loop
+
+                    // Normalise and write output block.
+                    for (int i = 0; i < br; ++i) {
+                        float inv_l = (l_i[i] > 0.0f) ? 1.0f / l_i[i] : 0.0f;
+                        float* oi = O_i.data() + i * head_dim;
+                        float* oh = Oh + (i0 + i) * head_dim;
+                        for (int d = 0; d < head_dim; ++d)
+                            oh[d] = oi[d] * inv_l;
                     }
-                }
-            }
+                } // end Q tile loop
+            } // end batch × heads loop
+            (void)vDesc;
             break;
         }
         case CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR: {
