@@ -395,26 +395,26 @@ cufftResult_t execC2C(const CufftPlan &p, void *idata, void *odata, int directio
     } else if (p.rank == 2) {
         int64_t total = logicalElementCount(p);
         if (p.batch == 1 && !p.advanced) {
-            fft2d(in, out, p.nx, p.ny, direction);
+            fft2d(in, out, p.ny, p.nx, direction);
         } else {
             for (int b = 0; b < p.batch; ++b) {
                 std::vector<std::complex<T>> tmp(static_cast<size_t>(total));
                 std::vector<std::complex<T>> res(static_cast<size_t>(total));
                 for (int64_t i = 0; i < total; ++i) tmp[static_cast<size_t>(i)] = in[inputIndex(p, b, i)];
-                fft2d(tmp.data(), res.data(), p.nx, p.ny, direction);
+                fft2d(tmp.data(), res.data(), p.ny, p.nx, direction);
                 for (int64_t i = 0; i < total; ++i) out[outputIndex(p, b, i)] = res[static_cast<size_t>(i)];
             }
         }
     } else if (p.rank == 3) {
         int64_t total = logicalElementCount(p);
         if (p.batch == 1 && !p.advanced) {
-            fft3d(in, out, p.nx, p.ny, p.nz, direction);
+            fft3d(in, out, p.nz, p.ny, p.nx, direction);
         } else {
             for (int b = 0; b < p.batch; ++b) {
                 std::vector<std::complex<T>> tmp(static_cast<size_t>(total));
                 std::vector<std::complex<T>> res(static_cast<size_t>(total));
                 for (int64_t i = 0; i < total; ++i) tmp[static_cast<size_t>(i)] = in[inputIndex(p, b, i)];
-                fft3d(tmp.data(), res.data(), p.nx, p.ny, p.nz, direction);
+                fft3d(tmp.data(), res.data(), p.nz, p.ny, p.nx, direction);
                 for (int64_t i = 0; i < total; ++i) out[outputIndex(p, b, i)] = res[static_cast<size_t>(i)];
             }
         }
@@ -451,8 +451,8 @@ cufftResult_t execR2C(const CufftPlan &p, void *idata, void *odata) {
             std::vector<std::complex<T>> cin(static_cast<size_t>(total));
             std::vector<std::complex<T>> cout(static_cast<size_t>(total));
             for (int64_t i = 0; i < total; ++i) cin[static_cast<size_t>(i)] = std::complex<T>(in[inputIndex(p, b, i)], 0);
-            if (p.rank == 2) fft2d(cin.data(), cout.data(), p.nx, p.ny, CUFFT_FORWARD);
-            else if (p.rank == 3) fft3d(cin.data(), cout.data(), p.nx, p.ny, p.nz, CUFFT_FORWARD);
+            if (p.rank == 2) fft2d(cin.data(), cout.data(), p.ny, p.nx, CUFFT_FORWARD);
+            else if (p.rank == 3) fft3d(cin.data(), cout.data(), p.nz, p.ny, p.nx, CUFFT_FORWARD);
             else return CUFFT_INVALID_PLAN;
             for (int64_t i = 0; i < total; ++i) out[outputIndex(p, b, i)] = cout[static_cast<size_t>(i)];
         }
@@ -487,8 +487,8 @@ cufftResult_t execC2R(const CufftPlan &p, void *idata, void *odata) {
             std::vector<std::complex<T>> cin(static_cast<size_t>(total));
             std::vector<std::complex<T>> cout(static_cast<size_t>(total));
             for (int64_t i = 0; i < total; ++i) cin[static_cast<size_t>(i)] = in[inputIndex(p, b, i)];
-            if (p.rank == 2) fft2d(cin.data(), cout.data(), p.nx, p.ny, CUFFT_INVERSE);
-            else if (p.rank == 3) fft3d(cin.data(), cout.data(), p.nx, p.ny, p.nz, CUFFT_INVERSE);
+            if (p.rank == 2) fft2d(cin.data(), cout.data(), p.ny, p.nx, CUFFT_INVERSE);
+            else if (p.rank == 3) fft3d(cin.data(), cout.data(), p.nz, p.ny, p.nx, CUFFT_INVERSE);
             else return CUFFT_INVALID_PLAN;
             for (int64_t i = 0; i < total; ++i) out[outputIndex(p, b, i)] = cout[static_cast<size_t>(i)].real();
         }
@@ -510,8 +510,8 @@ cufftResult_t execC16C(const CufftPlan &p, void *idata, void *odata, int directi
             tmp[static_cast<size_t>(i)] = {halfToFloat(v.x), halfToFloat(v.y)};
         }
         if (p.rank == 1) fft1d(tmp.data(), res.data(), p.nx, direction);
-        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.nx, p.ny, direction);
-        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nx, p.ny, p.nz, direction);
+        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.ny, p.nx, direction);
+        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nz, p.ny, p.nx, direction);
         else return CUFFT_INVALID_PLAN;
         for (int64_t i = 0; i < total; ++i) {
             cufftHalfComplex &v = out[outputIndex(p, b, i)];
@@ -534,8 +534,8 @@ cufftResult_t execR16C(const CufftPlan &p, void *idata, void *odata) {
         for (int64_t i = 0; i < total; ++i)
             tmp[static_cast<size_t>(i)] = {halfToFloat(in[inputIndex(p, b, i)]), 0.0f};
         if (p.rank == 1) fft1d(tmp.data(), res.data(), p.nx, CUFFT_FORWARD);
-        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.nx, p.ny, CUFFT_FORWARD);
-        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nx, p.ny, p.nz, CUFFT_FORWARD);
+        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.ny, p.nx, CUFFT_FORWARD);
+        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nz, p.ny, p.nx, CUFFT_FORWARD);
         else return CUFFT_INVALID_PLAN;
         for (int64_t i = 0; i < total; ++i) {
             cufftHalfComplex &v = out[outputIndex(p, b, i)];
@@ -560,8 +560,8 @@ cufftResult_t execC16R(const CufftPlan &p, void *idata, void *odata) {
             tmp[static_cast<size_t>(i)] = {halfToFloat(v.x), halfToFloat(v.y)};
         }
         if (p.rank == 1) fft1d(tmp.data(), res.data(), p.nx, CUFFT_INVERSE);
-        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.nx, p.ny, CUFFT_INVERSE);
-        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nx, p.ny, p.nz, CUFFT_INVERSE);
+        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.ny, p.nx, CUFFT_INVERSE);
+        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nz, p.ny, p.nx, CUFFT_INVERSE);
         else return CUFFT_INVALID_PLAN;
         for (int64_t i = 0; i < total; ++i)
             out[outputIndex(p, b, i)] = floatToHalf(res[static_cast<size_t>(i)].real());
@@ -725,8 +725,8 @@ cufftResult_t cufftExecC16BFC(cufftHandle plan, void *idata, void *odata, int di
             tmp[static_cast<size_t>(i)] = {fx, fy};
         }
         if (p.rank == 1) fft1d(tmp.data(), res.data(), p.nx, direction);
-        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.nx, p.ny, direction);
-        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nx, p.ny, p.nz, direction);
+        else if (p.rank == 2) fft2d(tmp.data(), res.data(), p.ny, p.nx, direction);
+        else if (p.rank == 3) fft3d(tmp.data(), res.data(), p.nz, p.ny, p.nx, direction);
         else return CUFFT_INVALID_PLAN;
         for (int64_t i = 0; i < total; ++i) {
             cufftBF16Complex &v = out[outputIndex(p, b, i)];
