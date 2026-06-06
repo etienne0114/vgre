@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include "vgre/common/cpu_barriers.h"
 
 // ── cuStreamWaitValue / cuStreamWriteValue flag constants ─────────────────────
 // (Defined here; not yet in cuda_driver_internal.h)
@@ -159,78 +160,77 @@ CUresult cuEventDestroy(CUevent hEvent) {
   return toCU(err);
 }
 
+} // extern "C"
+
 // ── cuStreamWaitValue32 / cuStreamWriteValue32 ────────────────────────────────
-// Stream-ordered memory polling. In VGRE all streams execute serially on the
-// host so memory is directly accessible; implement as a spin-wait.
+// Stream-ordered memory polling.  In VGRE all streams execute serially on the
+// host, so memory is directly accessible via a spin-wait.
+//
+// Two-phase backoff strategy:
+//   Phase 1 (spins < kPauseSpins): VGRE_CPU_PAUSE() — x86 PAUSE / ARM YIELD.
+//     Prevents memory-order speculation hazards, reduces power, allows the
+//     adjacent hyper-thread to make progress.  Does NOT yield the CPU.
+//   Phase 2 (spins >= kPauseSpins): std::this_thread::yield() — hands CPU back.
+//     Prevents starvation when the writer is on a different physical thread
+//     and the value won't change without us yielding.
+// steady_clock::now() is only called in Phase 2 to reduce syscall overhead.
+static constexpr int kPauseSpins = 128;
+
+template<typename T>
+static inline bool evalCond(T cur, T value, unsigned int cmpFlags) {
+    switch (cmpFlags) {
+    case CU_STREAM_WAIT_VALUE_GEQ: return cur >= value;
+    case CU_STREAM_WAIT_VALUE_EQ:  return cur == value;
+    case CU_STREAM_WAIT_VALUE_AND: return (cur & value) != static_cast<T>(0);
+    case CU_STREAM_WAIT_VALUE_NOR: return (cur | value) == static_cast<T>(0);
+    default:                        return cur >= value;
+    }
+}
+
+template<typename T>
+static CUresult streamWaitValueImpl(CUdeviceptr addr, T value, unsigned int flags) {
+    if (!addr) return CUDA_ERROR_INVALID_VALUE;
+    volatile T* ptr = reinterpret_cast<volatile T*>(
+        static_cast<uintptr_t>(reinterpret_cast<size_t>(addr)));
+    const unsigned int cmpFlags  = flags & 0x3u;
+    const bool         flushEnabled = (flags & CU_STREAM_WAIT_VALUE_FLUSH) != 0;
+
+    int spins = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+
+    while (true) {
+        if (evalCond(*ptr, value, cmpFlags)) break;
+
+        if (spins < kPauseSpins) {
+            VGRE_CPU_PAUSE();
+            ++spins;
+        } else {
+            // Only check deadline in the yield phase to amortise the syscall cost.
+            if (std::chrono::steady_clock::now() > deadline)
+                return CUDA_ERROR_TIMEOUT;
+            std::this_thread::yield();
+        }
+    }
+
+    if (flushEnabled) {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        VGRE_COMPILER_BARRIER();
+    } else {
+        std::atomic_thread_fence(std::memory_order_acquire);
+    }
+    return CUDA_SUCCESS;
+}
+
+extern "C" {
 
 CUresult cuStreamWaitValue32(CUstream /*hStream*/, CUdeviceptr addr,
                               cuuint32_t value, unsigned int flags) {
-  if (!addr) return CUDA_ERROR_INVALID_VALUE;
-  volatile uint32_t* ptr = reinterpret_cast<volatile uint32_t*>(
-      static_cast<uintptr_t>(reinterpret_cast<size_t>(addr)));
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-  unsigned int cmpFlags = flags & 0x3u;
-  bool flushEnabled = (flags & CU_STREAM_WAIT_VALUE_FLUSH) != 0;
-  
-  while (true) {
-    uint32_t cur = *ptr;
-    bool cond = false;
-    switch (cmpFlags) {
-    case CU_STREAM_WAIT_VALUE_GEQ: cond = (cur >= value); break;
-    case CU_STREAM_WAIT_VALUE_EQ:  cond = (cur == value); break;
-    case CU_STREAM_WAIT_VALUE_AND: cond = (cur &  value) != 0; break;
-    case CU_STREAM_WAIT_VALUE_NOR: cond = (cur |  value) == 0; break;
-    default: cond = (cur >= value); break;
-    }
-    if (cond) break;
-    if (std::chrono::steady_clock::now() > deadline) return CUDA_ERROR_TIMEOUT;
-    std::this_thread::yield();
-  }
-  
-  // FLUSH flag: ensure all pending memory operations are visible
-  if (flushEnabled) {
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    // Force cache line flush for the monitored address
-    asm volatile("" : : : "memory");
-  } else {
-    std::atomic_thread_fence(std::memory_order_acquire);
-  }
-  return CUDA_SUCCESS;
+    return streamWaitValueImpl<uint32_t>(addr, value, flags);
 }
 
 CUresult cuStreamWaitValue64(CUstream /*hStream*/, CUdeviceptr addr,
                               cuuint64_t value, unsigned int flags) {
-  if (!addr) return CUDA_ERROR_INVALID_VALUE;
-  volatile uint64_t* ptr = reinterpret_cast<volatile uint64_t*>(
-      static_cast<uintptr_t>(reinterpret_cast<size_t>(addr)));
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-  unsigned int cmpFlags = flags & 0x3u;
-  bool flushEnabled = (flags & CU_STREAM_WAIT_VALUE_FLUSH) != 0;
-  
-  while (true) {
-    uint64_t cur = *ptr;
-    bool cond = false;
-    switch (cmpFlags) {
-    case CU_STREAM_WAIT_VALUE_GEQ: cond = (cur >= value); break;
-    case CU_STREAM_WAIT_VALUE_EQ:  cond = (cur == value); break;
-    case CU_STREAM_WAIT_VALUE_AND: cond = (cur &  value) != 0; break;
-    case CU_STREAM_WAIT_VALUE_NOR: cond = (cur |  value) == 0; break;
-    default: cond = (cur >= value); break;
-    }
-    if (cond) break;
-    if (std::chrono::steady_clock::now() > deadline) return CUDA_ERROR_TIMEOUT;
-    std::this_thread::yield();
-  }
-  
-  // FLUSH flag: ensure all pending memory operations are visible
-  if (flushEnabled) {
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    // Force cache line flush for the monitored address
-    asm volatile("" : : : "memory");
-  } else {
-    std::atomic_thread_fence(std::memory_order_acquire);
-  }
-  return CUDA_SUCCESS;
+    return streamWaitValueImpl<uint64_t>(addr, value, flags);
 }
 
 CUresult cuStreamWriteValue32(CUstream /*hStream*/, CUdeviceptr addr,
