@@ -859,122 +859,141 @@ cudnnStatus_t cudnnRNNBackwardDataEx(
     memset(dpre, 0, (size_t)nL * T * B * bs * H * sizeof(float));
     if (dxf) memset(dxf, 0, (size_t)T * B * I * sizeof(float));
 
-    // Simplified BPTT: reverse timesteps per layer.
+    // BPTT: outer loop over time (T-1 → 0), inner loop over layers (nL-1 → 0).
+    // This is the correct order: at each timestep we propagate gradients through
+    // all layers before advancing to t-1, so inter-layer and recurrent gradients
+    // both flow correctly.
     std::vector<float> dh((size_t)nL * B * H, 0.0f);
     std::vector<float> dc((size_t)nL * B * H, 0.0f);
     if (dhyf) memcpy(dh.data(), dhyf, (size_t)nL * B * H * sizeof(float));
     if (dcyf) memcpy(dc.data(), dcyf, (size_t)nL * B * H * sizeof(float));
 
-    for (int l = nL - 1; l >= 0; --l) {
-        int li = (l == 0) ? I : H;
-        size_t wOff = lw_off(mode, H, I, l, peephole);
-        LW lw = get_lw(mode, H, I, wf + wOff);
-        float* dh_l = dh.data() + (size_t)l * B * H;
-        float* dc_l = dc.data() + (size_t)l * B * H;
-        const float* h_store = rsv_f + (size_t)l * T * B * H;
-        const float* fg_l    = fwd_g + (size_t)l * T * B * fs * H;
-        float* dp_l          = dpre  + (size_t)l * T * B * bs * H;
+    // dx_l: temporary inter-layer gradient buffer (layer l's input grad → layer l-1's dh)
+    std::vector<float> dx_l(B * H);
 
-        for (int t = T - 1; t >= 0; --t) {
-            const float* dyo_t = (l == nL-1) ? dyf + (size_t)t*B*H : nullptr;
-            float* dx_t  = (l == 0)    ? dxf + (size_t)t*B*I : nullptr;
+    for (int t = T - 1; t >= 0; --t) {
+        for (int l = nL - 1; l >= 0; --l) {
+            int li = (l == 0) ? I : H;
+            LW lw = get_lw(mode, H, li, wf + lw_off(mode, H, I, l, peephole));
+            float* dh_l = dh.data() + (size_t)l * B * H;
+            float* dc_l = dc.data() + (size_t)l * B * H;
+
+            // Pointers into reserve space for this (l, t).
+            const float* fg_l = fwd_g + (size_t)l * T * B * fs * H;
             const float* fg_t = fg_l + (size_t)t * B * fs * H;
-            float* dp_t       = dp_l + (size_t)t * B * bs * H;
-            const float* hp_t = (t > 0) ? h_store + (size_t)(t-1)*B*H : hxf ? hxf+(size_t)l*B*H : nullptr;
+            float* dp_t = dpre + ((size_t)l * T * B + (size_t)t * B) * bs * H;
+            const float* h_store_l = rsv_f + (size_t)l * T * B * H;
+            const float* hp_t = (t > 0) ? h_store_l + (size_t)(t-1)*B*H
+                                         : (hxf ? hxf + (size_t)l*B*H : nullptr);
+
+            // Receive external output gradient at the top layer.
+            if (l == nL-1) {
+                const float* dy_t = dyf + (size_t)t * B * H;
+                for (int i = 0; i < B*H; ++i) dh_l[i] += dy_t[i];
+            }
+
+            std::fill(dx_l.begin(), dx_l.end(), 0.f);
 
             for (int n = 0; n < B; ++n) {
-                float* dh_n  = dh_l + n*H;
-                float* dc_n  = dc_l + n*H;
-                const float* dyo_n = dyo_t ? dyo_t + n*H : nullptr;
-                float* dp_n  = dp_t + n*bs*H;
+                float* dh_n = dh_l + n*H;
+                float* dc_n = dc_l + n*H;
+                float* dp_n = dp_t + n*bs*H;
 
                 if (isLSTM) {
-                    // fg layout: i,f,g,o,c  (indices 0-4)
                     const float* fg_n = fg_t + n*fs*H;
-                    const float* pi_w=get_peephole_w(mode,H,I,wf,l,peephole);
-                    const float* pf_w=pi_w?pi_w+H:nullptr;
-                    const float* po_w=pi_w?pi_w+2*H:nullptr;
-                    std::vector<float> dct(H);
+                    const float* pi_w = get_peephole_w(mode,H,I,wf,l,peephole);
+                    const float* pf_w = pi_w ? pi_w+H   : nullptr;
+                    const float* po_w = pi_w ? pi_w+2*H : nullptr;
+                    std::vector<float> new_dh(H, 0.f);
                     for (int j = 0; j < H; ++j) {
-                        float do_ = dyo_n ? dyo_n[j] : 0.0f;
-                        float dh_j = dh_n[j] + do_;
-                        float ct = fg_n[4*H+j];
-                        float ot = fg_n[3*H+j];
-                        float tanh_ct = tanhf(ct);
-                        float dct_j = dh_j * ot * (1.f - tanh_ct*tanh_ct) + dc_n[j];
-                        // Peephole o: o gate sees c_t; its gradient feeds back into dc_t
-                        float doo_j = dh_j * tanh_ct * ot*(1.f-ot);
+                        float dh_j   = dh_n[j];
+                        float ct     = fg_n[4*H+j], ot = fg_n[3*H+j];
+                        float tanh_ct= tanhf(ct);
+                        float dct_j  = dh_j * ot * (1.f - tanh_ct*tanh_ct) + dc_n[j];
+                        float doo_j  = dh_j * tanh_ct * ot*(1.f-ot);
                         if (po_w) dct_j += doo_j * po_w[j];
-                        dct[j] = dct_j;
-                        // gate gradients (pre-activation)
                         float ft = fg_n[1*H+j];
-                        dp_n[0*H+j] = dct_j * fg_n[2*H+j] * fg_n[0*H+j]*(1.f-fg_n[0*H+j]); // di
                         float cp_j = 0.f;
-                        if (t > 0) {
-                            const float* fg_prev = fg_l + (size_t)(t-1) * B * fs * H + (size_t)n * fs * H;
-                            cp_j = fg_prev[4*H+j];
-                        } else if (cxf) {
-                            cp_j = cxf[l*B*H + n*H + j];
-                        }
-                        dp_n[1*H+j] = dct_j * cp_j * ft*(1.f-ft);                             // df (exact)
+                        if (t > 0) { const float* fp = fg_l + (size_t)(t-1)*B*fs*H + (size_t)n*fs*H; cp_j = fp[4*H+j]; }
+                        else if (cxf) cp_j = cxf[(size_t)l*B*H + n*H + j];
+                        dp_n[0*H+j] = dct_j * fg_n[2*H+j] * fg_n[0*H+j]*(1.f-fg_n[0*H+j]); // di
+                        dp_n[1*H+j] = dct_j * cp_j         * ft*(1.f-ft);                     // df
                         dp_n[2*H+j] = dct_j * fg_n[0*H+j] * (1.f - fg_n[2*H+j]*fg_n[2*H+j]);// dg
                         dp_n[3*H+j] = doo_j;                                                    // do
                         dc_n[j]     = dct_j * ft;
-                        // Peephole i/f: i and f gates see c_{t-1}
                         if (pi_w) dc_n[j] += dp_n[0*H+j] * pi_w[j];
                         if (pf_w) dc_n[j] += dp_n[1*H+j] * pf_w[j];
+                        // accumulate W_hh^T * dp → recurrent gradient to t-1
+                        for (int k=0;k<H;++k)
+                            new_dh[k] += lw.W_hh[(0*H+j)*H+k]*dp_n[0*H+j]
+                                       + lw.W_hh[(1*H+j)*H+k]*dp_n[1*H+j]
+                                       + lw.W_hh[(2*H+j)*H+k]*dp_n[2*H+j]
+                                       + lw.W_hh[(3*H+j)*H+k]*dp_n[3*H+j];
+                        // accumulate W_ih^T * dp → gradient to this layer's input
+                        for (int k=0;k<li;++k)
+                            dx_l[n*H+k] += lw.W_ih[(0*H+j)*li+k]*dp_n[0*H+j]
+                                         + lw.W_ih[(1*H+j)*li+k]*dp_n[1*H+j]
+                                         + lw.W_ih[(2*H+j)*li+k]*dp_n[2*H+j]
+                                         + lw.W_ih[(3*H+j)*li+k]*dp_n[3*H+j];
                     }
-                    // propagate dh to previous timestep/layer via W_hh/W_ih
-                    if (l == nL-1) {
-                        for (int j=0;j<H;++j) dh_n[j] = 0.f;
-                        for (int s=0;s<4;++s)
-                            for (int j=0;j<H;++j)
-                                for (int k=0;k<H;++k)
-                                    dh_n[k] += dp_n[s*H+j]*lw.W_hh[s*H*H+j*H+k];
-                    }
-                    if (dx_t)
-                        for (int s=0;s<4;++s)
-                            for (int j=0;j<H;++j)
-                                for (int k=0;k<li;++k)
-                                    dx_t[n*li+k] += dp_n[s*H+j]*lw.W_ih[s*H*li+j*li+k];
+                    for (int k=0;k<H;++k) dh_n[k] = new_dh[k];
                 } else if (isGRU) {
                     const float* fg_n = fg_t + n*fs*H;
-                    for (int j=0;j<H;++j) {
-                        float dyo_j = (dyo_n?dyo_n[j]:0.f) + dh_n[j];
-                        float zt = fg_n[1*H+j], nt = fg_n[2*H+j];
-                        float dnt = dyo_j*(1.f-zt)*(1.f-nt*nt);
-                        float dzt = dyo_j*(-(hp_t?hp_t[n*H+j]:0.f)+nt)*zt*(1.f-zt);
-                        float rt  = fg_n[0*H+j];
-                        dp_n[0*H+j] = dnt*(hp_t?hp_t[n*H+j]:0.f)*rt*(1.f-rt);  // dr
-                        dp_n[1*H+j] = dzt;                                        // dz
-                        dp_n[2*H+j] = dnt;                                        // dn_ih
-                        dp_n[3*H+j] = dnt*rt;                                     // dn_hh
-                        dh_n[j]     = dyo_j * zt;
+                    std::vector<float> new_dh(H, 0.f);
+                    for (int j = 0; j < H; ++j) {
+                        float dh_j = dh_n[j];
+                        float zt   = fg_n[1*H+j], nt = fg_n[2*H+j], rt = fg_n[0*H+j];
+                        float hp_j = hp_t ? hp_t[n*H+j] : 0.f;
+                        float dnt  = dh_j*(1.f-zt)*(1.f-nt*nt);
+                        float dzt  = dh_j*(hp_j - nt)*zt*(1.f-zt);
+                        float snh  = lw.b_hh ? lw.b_hh[2*H+j] : 0.f;
+                        if (hp_t) for (int k=0;k<H;++k) snh += lw.W_hh[(2*H+j)*H+k]*hp_t[n*H+k];
+                        dp_n[0*H+j] = dnt*snh*rt*(1.f-rt); // dr
+                        dp_n[1*H+j] = dzt;                  // dz
+                        dp_n[2*H+j] = dnt;                  // dn_ih
+                        dp_n[3*H+j] = dnt*rt;               // dn_hh
+                        new_dh[j]  += dh_j * zt;
+                        for (int k=0;k<H;++k)
+                            new_dh[k] += lw.W_hh[(0*H+j)*H+k]*dp_n[0*H+j]
+                                       + lw.W_hh[(1*H+j)*H+k]*dp_n[1*H+j]
+                                       + lw.W_hh[(2*H+j)*H+k]*dp_n[3*H+j];
+                        for (int k=0;k<li;++k)
+                            dx_l[n*H+k] += lw.W_ih[(0*H+j)*li+k]*dp_n[0*H+j]
+                                         + lw.W_ih[(1*H+j)*li+k]*dp_n[1*H+j]
+                                         + lw.W_ih[(2*H+j)*li+k]*dp_n[2*H+j];
                     }
-                    if (dx_t)
-                        for (int s=0;s<3;++s)
-                            for (int j=0;j<H;++j)
-                                for (int k=0;k<li;++k)
-                                    dx_t[n*li+k] += dp_n[s*H+j]*lw.W_ih[s*H*li+j*li+k];
+                    for (int k=0;k<H;++k) dh_n[k] = new_dh[k];
                 } else {
-                    const float* fg_n = fg_t + n*fs*H;
-                    for (int j=0;j<H;++j) {
-                        float dyo_j = (dyo_n?dyo_n[j]:0.f)+dh_n[j];
-                        float ht = fg_n[j];
-                        dp_n[j] = relu ? (ht>0?dyo_j:0.f) : dyo_j*(1.f-ht*ht);
-                        dh_n[j] = 0.f;
-                        for (int k=0;k<H;++k) dh_n[k] += dp_n[j]*lw.W_hh[j*H+k];
+                    // Vanilla RNN: h_t stored in Part A
+                    const float* ht_n = (rsv_f + (size_t)l*T*B*H) + (size_t)t*B*H + (size_t)n*H;
+                    std::vector<float> new_dh(H, 0.f);
+                    for (int j = 0; j < H; ++j) {
+                        float ht = ht_n[j];
+                        float dpre_j = relu ? (ht>0?dh_n[j]:0.f) : dh_n[j]*(1.f-ht*ht);
+                        dp_n[j] = dpre_j;
+                        for (int k=0;k<H;++k)  new_dh[k]     += lw.W_hh[j*H+k] * dpre_j;
+                        for (int k=0;k<li;++k) dx_l[n*H+k]   += lw.W_ih[j*li+k] * dpre_j;
                     }
-                    if (dx_t)
-                        for (int j=0;j<H;++j)
-                            for (int k=0;k<li;++k)
-                                dx_t[n*li+k] += dp_n[j]*lw.W_ih[j*li+k];
+                    for (int k=0;k<H;++k) dh_n[k] = new_dh[k];
                 }
             }
+
+            // Propagate this layer's input gradient to the input source.
+            if (l == 0) {
+                // Bottom layer: write into dxf
+                float* dx_t = dxf + (size_t)t * B * I;
+                for (int i = 0; i < B*I; ++i) dx_t[i] += dx_l[i];
+            } else {
+                // Intermediate layer: inject into dh of the layer below as an input
+                // gradient — this arrives at layer l-1 as upstream for the same timestep.
+                float* dh_below = dh.data() + (size_t)(l-1) * B * H;
+                for (int i = 0; i < B*H; ++i) dh_below[i] += dx_l[i];
+            }
         }
-        if (dhxf) memcpy(dhxf+(size_t)l*B*H, dh_l, (size_t)B*H*sizeof(float));
-        if (dcxf) memcpy(dcxf+(size_t)l*B*H, dc_l, (size_t)B*H*sizeof(float));
     }
+
+    if (dhxf) memcpy(dhxf, dh.data(), (size_t)nL * B * H * sizeof(float));
+    if (dcxf && isLSTM) memcpy(dcxf, dc.data(), (size_t)nL * B * H * sizeof(float));
     return CUDNN_STATUS_SUCCESS;
 }
 
