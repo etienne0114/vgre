@@ -20,22 +20,21 @@ cublasStatus_t cublasCgemv_v2(cublasHandle_t handle,
     int rows = (trans == CUBLAS_OP_N) ? m : n;
     int cols = (trans == CUBLAS_OP_N) ? n : m;
 
-    // Math invariant (RowMajor, no-trans): y[i] = alpha * sum_j(A[i*lda+j]*x[j]) + beta*y[i]
-    // Math invariant (RowMajor, trans):    y[j] = alpha * sum_i(A[i*lda+j]*x[i]) + beta*y[j]
-    // Math invariant (RowMajor, conj-T):  y[j] = alpha * sum_i(conj(A[i*lda+j])*x[i]) + beta*y[j]
+    // cuBLAS matrices are column-major: element (row i, col j) is at A[i + j*lda].
+    // no-trans: y[i] = alpha * Σ_j A[i,j]*x[j] + beta*y[i]  → A[i+j*lda]
+    // trans:    y[i] = alpha * Σ_j A[j,i]*x[j] + beta*y[i]  → A[j+i*lda]
+    // conj-T:   y[i] = alpha * Σ_j conj(A[j,i])*x[j] + beta*y[i]
     // O(m*n) time, O(1) additional space.
     for (int i = 0; i < rows; ++i) {
         cuComplex acc = make_cuComplex(0.f, 0.f);
         for (int j = 0; j < cols; ++j) {
             cuComplex aij;
             if (trans == CUBLAS_OP_N)
-                // no-trans row-major: element (i,j) is at A[i*lda+j]
-                aij = A[i * lda + j];
+                aij = A[i + j * lda];           // col-major A[i,j]
             else if (trans == CUBLAS_OP_T)
-                // trans row-major: element (j,i) transposed -> A[j*lda+i]; here i=output, j=sum
-                aij = A[j * lda + i];
-            else // CUBLAS_OP_C: conjugate-transpose
-                aij = cuConjf(A[j * lda + i]);
+                aij = A[j + i * lda];           // col-major A[j,i] = A^T[i,j]
+            else                                // CUBLAS_OP_C: conjugate-transpose
+                aij = cuConjf(A[j + i * lda]); // conj(A[j,i]) = A^H[i,j]
             acc = cuCaddf(acc, cuCmulf(aij, x[j * incx]));
         }
         y[i * incy] = cuCaddf(cuCmulf(b, y[i * incy]), cuCmulf(a, acc));
@@ -57,21 +56,18 @@ cublasStatus_t cublasZgemv_v2(cublasHandle_t handle,
     int rows = (trans == CUBLAS_OP_N) ? m : n;
     int cols = (trans == CUBLAS_OP_N) ? n : m;
 
-    // Math invariant (RowMajor, no-trans): y[i] = alpha * sum_j(A[i*lda+j]*x[j]) + beta*y[i]
-    // Math invariant (RowMajor, trans):    y[j] = alpha * sum_i(A[i*lda+j]*x[i]) + beta*y[j]
+    // cuBLAS column-major: A[i,j] at A[i+j*lda]; A^T[i,j] = A[j,i] at A[j+i*lda].
     // O(m*n) time, O(1) additional space.
     for (int i = 0; i < rows; ++i) {
         cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
         for (int j = 0; j < cols; ++j) {
             cuDoubleComplex aij;
             if (trans == CUBLAS_OP_N)
-                // no-trans row-major: element (i,j) is at A[i*lda+j]
-                aij = A[i * lda + j];
+                aij = A[i + j * lda];
             else if (trans == CUBLAS_OP_T)
-                // trans row-major: element (j,i) -> A[j*lda+i]; i=output col, j=sum index
-                aij = A[j * lda + i];
+                aij = A[j + i * lda];
             else
-                aij = cuConj(A[j * lda + i]);
+                aij = cuConj(A[j + i * lda]);
             acc = cuCadd(acc, cuCmul(aij, x[j * incx]));
         }
         y[i * incy] = cuCadd(cuCmul(b, y[i * incy]), cuCmul(a, acc));

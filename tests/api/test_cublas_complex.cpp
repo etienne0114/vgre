@@ -198,15 +198,44 @@ int main() {
 
     // ── Level-2 ───────────────────────────────────────────────────────────
 
-    // 10. CGEMV: y = alpha*A*x + beta*y (2x2 identity, alpha=1, beta=0)
+    // 10. CGEMV: y = alpha*A*x + beta*y (column-major, non-trivial matrix)
+    // A col-major 2x2: A[0,0]=1+0i, A[1,0]=0+1i, A[0,1]=2+0i, A[1,1]=3+0i
+    //   layout: [A[0,0], A[1,0], A[0,1], A[1,1]] = [1, i, 2, 3]
+    // x = [1+0i, 0+1i], alpha=1, beta=0
+    // y[0] = A[0,0]*x[0] + A[0,1]*x[1] = 1*(1) + 2*(i) = 1+2i
+    // y[1] = A[1,0]*x[0] + A[1,1]*x[1] = i*(1) + 3*(i) = 0+4i
     {
         cuComplex alpha = mc(1,0), beta = mc(0,0);
-        // Column-major identity
-        cuComplex A[] = {mc(1,0), mc(0,0), mc(0,0), mc(1,0)};
-        cuComplex x[] = {mc(3,4), mc(5,6)};
+        cuComplex A[] = {mc(1,0), mc(0,1), mc(2,0), mc(3,0)};
+        cuComplex x[] = {mc(1,0), mc(0,1)};
         cuComplex y[] = {mc(0,0), mc(0,0)};
         cublasCgemv_v2(handle, CUBLAS_OP_N, 2, 2, &alpha, A, 2, x, 1, &beta, y, 1);
-        CHECK("Cgemv identity", ceq(y[0],3,4) && ceq(y[1],5,6));
+        CHECK("Cgemv no-trans", ceq(y[0],1,2) && ceq(y[1],0,4));
+    }
+    // CGEMV trans: y = A^T * x; A^T[i,j]=A[j,i], x=[1+0i,0+1i]
+    // y[0] = A[0,0]*x[0] + A[1,0]*x[1] = 1*(1) + i*(i) = 1-1 = 0+0i... wait:
+    // A^T[0,0]=A[0,0]=1, A^T[0,1]=A[1,0]=i, A^T[1,0]=A[0,1]=2, A^T[1,1]=A[1,1]=3
+    // y[0] = A^T[0,0]*x[0]+A^T[0,1]*x[1] = 1*(1) + i*(i) = 1 + i^2 = 1-1 = 0
+    // y[1] = A^T[1,0]*x[0]+A^T[1,1]*x[1] = 2*(1) + 3*(i) = 2+3i
+    {
+        cuComplex alpha = mc(1,0), beta = mc(0,0);
+        cuComplex A[] = {mc(1,0), mc(0,1), mc(2,0), mc(3,0)};
+        cuComplex x[] = {mc(1,0), mc(0,1)};
+        cuComplex y[] = {mc(0,0), mc(0,0)};
+        cublasCgemv_v2(handle, CUBLAS_OP_T, 2, 2, &alpha, A, 2, x, 1, &beta, y, 1);
+        CHECK("Cgemv trans", ceq(y[0],0,0) && ceq(y[1],2,3));
+    }
+    // CGEMV conj-trans: y = A^H * x; A^H[i,j]=conj(A[j,i])
+    // A^H[0,0]=conj(A[0,0])=1, A^H[0,1]=conj(A[1,0])=conj(i)=-i, A^H[1,0]=conj(A[0,1])=2, A^H[1,1]=conj(A[1,1])=3
+    // y[0] = 1*(1) + (-i)*(i) = 1 - i^2 = 1+1 = 2+0i
+    // y[1] = 2*(1) + 3*(i) = 2+3i
+    {
+        cuComplex alpha = mc(1,0), beta = mc(0,0);
+        cuComplex A[] = {mc(1,0), mc(0,1), mc(2,0), mc(3,0)};
+        cuComplex x[] = {mc(1,0), mc(0,1)};
+        cuComplex y[] = {mc(0,0), mc(0,0)};
+        cublasCgemv_v2(handle, CUBLAS_OP_C, 2, 2, &alpha, A, 2, x, 1, &beta, y, 1);
+        CHECK("Cgemv conj-trans", ceq(y[0],2,0) && ceq(y[1],2,3));
     }
 
     // 11. CTRSV: solve lower triangular [[2,0],[1+i,3]] * x = [2+4i, 8+5i]

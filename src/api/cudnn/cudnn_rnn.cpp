@@ -868,8 +868,10 @@ cudnnStatus_t cudnnRNNBackwardDataEx(
     if (dhyf) memcpy(dh.data(), dhyf, (size_t)nL * B * H * sizeof(float));
     if (dcyf) memcpy(dc.data(), dcyf, (size_t)nL * B * H * sizeof(float));
 
-    // dx_l: temporary inter-layer gradient buffer (layer l's input grad → layer l-1's dh)
-    std::vector<float> dx_l(B * H);
+    // dx_l: temporary inter-layer gradient buffer sized for the widest possible
+    // input (max of I and H) so it covers both the bottom layer (li=I) and
+    // intermediate layers (li=H) without overflow.
+    std::vector<float> dx_l(B * std::max(I, H));
 
     for (int t = T - 1; t >= 0; --t) {
         for (int l = nL - 1; l >= 0; --l) {
@@ -931,10 +933,10 @@ cudnnStatus_t cudnnRNNBackwardDataEx(
                                        + lw.W_hh[(3*H+j)*H+k]*dp_n[3*H+j];
                         // accumulate W_ih^T * dp → gradient to this layer's input
                         for (int k=0;k<li;++k)
-                            dx_l[n*H+k] += lw.W_ih[(0*H+j)*li+k]*dp_n[0*H+j]
-                                         + lw.W_ih[(1*H+j)*li+k]*dp_n[1*H+j]
-                                         + lw.W_ih[(2*H+j)*li+k]*dp_n[2*H+j]
-                                         + lw.W_ih[(3*H+j)*li+k]*dp_n[3*H+j];
+                            dx_l[n*li+k] += lw.W_ih[(0*H+j)*li+k]*dp_n[0*H+j]
+                                          + lw.W_ih[(1*H+j)*li+k]*dp_n[1*H+j]
+                                          + lw.W_ih[(2*H+j)*li+k]*dp_n[2*H+j]
+                                          + lw.W_ih[(3*H+j)*li+k]*dp_n[3*H+j];
                     }
                     for (int k=0;k<H;++k) dh_n[k] = new_dh[k];
                 } else if (isGRU) {
@@ -958,9 +960,9 @@ cudnnStatus_t cudnnRNNBackwardDataEx(
                                        + lw.W_hh[(1*H+j)*H+k]*dp_n[1*H+j]
                                        + lw.W_hh[(2*H+j)*H+k]*dp_n[3*H+j];
                         for (int k=0;k<li;++k)
-                            dx_l[n*H+k] += lw.W_ih[(0*H+j)*li+k]*dp_n[0*H+j]
-                                         + lw.W_ih[(1*H+j)*li+k]*dp_n[1*H+j]
-                                         + lw.W_ih[(2*H+j)*li+k]*dp_n[2*H+j];
+                            dx_l[n*li+k] += lw.W_ih[(0*H+j)*li+k]*dp_n[0*H+j]
+                                          + lw.W_ih[(1*H+j)*li+k]*dp_n[1*H+j]
+                                          + lw.W_ih[(2*H+j)*li+k]*dp_n[2*H+j];
                     }
                     for (int k=0;k<H;++k) dh_n[k] = new_dh[k];
                 } else {
@@ -971,8 +973,8 @@ cudnnStatus_t cudnnRNNBackwardDataEx(
                         float ht = ht_n[j];
                         float dpre_j = relu ? (ht>0?dh_n[j]:0.f) : dh_n[j]*(1.f-ht*ht);
                         dp_n[j] = dpre_j;
-                        for (int k=0;k<H;++k)  new_dh[k]     += lw.W_hh[j*H+k] * dpre_j;
-                        for (int k=0;k<li;++k) dx_l[n*H+k]   += lw.W_ih[j*li+k] * dpre_j;
+                        for (int k=0;k<H;++k)  new_dh[k]       += lw.W_hh[j*H+k] * dpre_j;
+                        for (int k=0;k<li;++k) dx_l[n*li+k]   += lw.W_ih[j*li+k] * dpre_j;
                     }
                     for (int k=0;k<H;++k) dh_n[k] = new_dh[k];
                 }
