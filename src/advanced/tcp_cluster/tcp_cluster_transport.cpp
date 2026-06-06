@@ -175,8 +175,27 @@ VGREResult TCPClusterManager::send_packet(vgre_socket_t fd, PacketType type, con
           global_packets_sent_++;
           global_bytes_sent_ += staging.size();
       }
+  } else if (sc) {
+      // SecureChannel exists but not yet initialized — only handshake
+      // bootstrapping packets may be sent in plaintext.
+      if (type != PacketType::SECURE_HANDSHAKE &&
+          type != PacketType::SECURE_HANDSHAKE_ACK) {
+          VGRE_LOG_ERROR("TCPCluster",
+              "Plaintext send_packet rejected: secure channel not initialized for packet type " +
+              std::to_string(static_cast<int>(type)));
+          result = VGREResult::ERR_AUTH_FAILED;
+      } else {
+          bool success = vgre_send_all(fd, staging.data(), staging.size());
+          if (success) {
+              global_packets_sent_++;
+              global_bytes_sent_ += staging.size();
+              result = VGREResult::SUCCESS;
+          } else {
+              result = VGREResult::ERR_IO;
+          }
+      }
   } else {
-      // Fallback to direct send without encryption
+      // No SecureChannel: security not requested for this connection.
       bool success = vgre_send_all(fd, staging.data(), staging.size());
       if (success) {
           global_packets_sent_++;
@@ -232,8 +251,19 @@ VGREResult TCPClusterManager::send_packet_direct(vgre_socket_t fd, PacketType ty
   // Send directly (bypass queue)
   if (sc && sc->isInitialized()) {
     return sc->sendSecure(fd, staging.data(), staging.size());
+  } else if (sc) {
+    // SecureChannel exists but not initialized — handshake packets only.
+    if (type != PacketType::SECURE_HANDSHAKE &&
+        type != PacketType::SECURE_HANDSHAKE_ACK) {
+      VGRE_LOG_ERROR("TCPCluster",
+          "Plaintext send_packet_direct rejected: secure channel not initialized for packet type " +
+          std::to_string(static_cast<int>(type)));
+      return VGREResult::ERR_AUTH_FAILED;
+    }
+    bool success = vgre_send_all(fd, staging.data(), staging.size());
+    return success ? VGREResult::SUCCESS : VGREResult::ERR_IO;
   } else {
-    // Fallback to direct send without encryption
+    // No SecureChannel: security not requested.
     bool success = vgre_send_all(fd, staging.data(), staging.size());
     return success ? VGREResult::SUCCESS : VGREResult::ERR_IO;
   }
@@ -270,6 +300,16 @@ void TCPClusterManager::flush_tx_queues(std::shared_ptr<ClientConnection> client
         bool success = false;
         if (client.secure_channel && client.secure_channel->isInitialized()) {
             success = (client.secure_channel->sendSecure(client.socket_fd, pkt.data.data(), pkt.data.size()) == VGREResult::SUCCESS);
+        } else if (client.secure_channel) {
+            // Queued packets are never handshakes — reject plaintext when security is expected.
+            VGRE_LOG_ERROR("TCPCluster", "flush_tx_queues: dropping high-priority packet — secure channel not initialized");
+            client.high_priority_tx.pop_back();
+            continue;
+        } else if (security_enabled_) {
+            // Global security enabled but no secure channel assigned — reject.
+            VGRE_LOG_ERROR("TCPCluster", "flush_tx_queues: dropping high-priority packet — security enabled but no channel");
+            client.high_priority_tx.pop_back();
+            continue;
         } else {
             success = vgre_send_all(client.socket_fd, pkt.data.data(), pkt.data.size());
         }
@@ -290,6 +330,15 @@ void TCPClusterManager::flush_tx_queues(std::shared_ptr<ClientConnection> client
         bool success = false;
         if (client.secure_channel && client.secure_channel->isInitialized()) {
             success = (client.secure_channel->sendSecure(client.socket_fd, qItem.data.data(), qItem.data.size()) == VGREResult::SUCCESS);
+        } else if (client.secure_channel) {
+            // Queued packets are never handshakes — reject plaintext when security is expected.
+            VGRE_LOG_ERROR("TCPCluster", "flush_tx_queues: dropping low-priority packet — secure channel not initialized");
+            client.low_priority_tx.pop_front();
+            continue;
+        } else if (security_enabled_) {
+            VGRE_LOG_ERROR("TCPCluster", "flush_tx_queues: dropping low-priority packet — security enabled but no channel");
+            client.low_priority_tx.pop_front();
+            continue;
         } else {
             success = vgre_send_all(client.socket_fd, qItem.data.data(), qItem.data.size(), &enabled_);
         }

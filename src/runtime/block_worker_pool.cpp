@@ -9,6 +9,7 @@
 #include <thread>
 
 #include "vgre/common/os_backend.h"
+#include "vgre/common/cpu_barriers.h"
 
 namespace vgre {
 namespace runtime {
@@ -151,11 +152,7 @@ void BlockWorkerPool::dispatch(int threadCount, void (*task)(int tid, void* arg)
     const uint32_t spinBudget = (threadCount <= 64) ? 1000u : 300u;
     uint32_t spin = 0;
     while (spin < spinBudget && signal->remaining.load(std::memory_order_acquire) > 0) {
-#if defined(_WIN32)
-        YieldProcessor();
-#else
-        __builtin_ia32_pause();
-#endif
+        VGRE_CPU_PAUSE();
         ++spin;
     }
     if (signal->remaining.load(std::memory_order_acquire) > 0) {
@@ -212,11 +209,7 @@ void BlockWorkerPool::workerLoop() {
             const uint32_t idleSpinBudget = workers_.size() <= 8 ? 1200u : 400u;
             uint32_t spin = 0;
             while (spin < idleSpinBudget && taskQueue_.empty() && !stop_) {
-#if defined(_WIN32)
-                YieldProcessor();
-#else
-                __builtin_ia32_pause();
-#endif
+                VGRE_CPU_PAUSE();
                 ++spin;
             }
             

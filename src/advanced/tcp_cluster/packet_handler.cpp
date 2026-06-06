@@ -57,9 +57,23 @@ VGREResult PacketHandler::sendPacket(vgre_socket_t fd, PacketType type,
   packets_sent_.fetch_add(1, std::memory_order_relaxed);
   bytes_sent_.fetch_add(staging.size(), std::memory_order_relaxed);
 
-  if (sc && sc->isInitialized()) {
-    return sc->sendSecure(fd, staging.data(), staging.size());
+  if (sc) {
+    if (sc->isInitialized()) {
+      return sc->sendSecure(fd, staging.data(), staging.size());
+    }
+    // SecureChannel provided but not yet initialized — only handshake
+    // packets may be sent in plaintext (key exchange has not happened yet).
+    // All other traffic MUST be encrypted; reject to prevent MITM exposure.
+    if (type != PacketType::SECURE_HANDSHAKE &&
+        type != PacketType::SECURE_HANDSHAKE_ACK) {
+      VGRE_LOG_ERROR("PacketHandler",
+          "Plaintext send rejected: secure channel not initialized for non-handshake packet type " +
+          std::to_string(static_cast<int>(type)));
+      return VGREResult::ERR_AUTH_FAILED;
+    }
   }
+  // Plaintext path: either sc==nullptr (security not requested) or
+  // this is a handshake bootstrapping packet.
   bool ok = vgre_send_all(fd, staging.data(), staging.size());
   return ok ? VGREResult::SUCCESS : VGREResult::ERR_IO;
 }
@@ -81,46 +95,60 @@ VGREResult PacketHandler::sendPacketDirect(vgre_socket_t fd, PacketType type,
   bytes_sent_.fetch_add(staging.size(), std::memory_order_relaxed);
 
   // Send directly (bypass queue)
-  if (sc && sc->isInitialized()) {
-    return sc->sendSecure(fd, staging.data(), staging.size());
-  } else {
-    // Fallback to direct send without encryption
-    bool success = vgre_send_all(fd, staging.data(), staging.size());
-    return success ? VGREResult::SUCCESS : VGREResult::ERR_IO;
+  if (sc) {
+    if (sc->isInitialized()) {
+      return sc->sendSecure(fd, staging.data(), staging.size());
+    }
+    // Strict transport: reject non-handshake plaintext when security is expected.
+    if (type != PacketType::SECURE_HANDSHAKE &&
+        type != PacketType::SECURE_HANDSHAKE_ACK) {
+      VGRE_LOG_ERROR("PacketHandler",
+          "Plaintext direct-send rejected: secure channel not initialized for packet type " +
+          std::to_string(static_cast<int>(type)));
+      return VGREResult::ERR_AUTH_FAILED;
+    }
   }
+  bool success = vgre_send_all(fd, staging.data(), staging.size());
+  return success ? VGREResult::SUCCESS : VGREResult::ERR_IO;
 }
 
 // ── Packet Receiving ─────────────────────────────────────────────────────
 int PacketHandler::recvPacket(vgre_socket_t fd, std::vector<uint8_t>& outBuffer, 
                               SecureChannel* sc) {
-  if (sc && sc->isInitialized()) {
-    std::vector<uint8_t> payload;
-    VGREResult r = sc->recvSecure(fd, payload);
-    if (r == VGREResult::SUCCESS) {
-      packets_received_.fetch_add(1, std::memory_order_relaxed);
-      // Total wire size includes secure packet header
-      bytes_received_.fetch_add(static_cast<uint64_t>(payload.size() + sizeof(SecurePacketHeader)), 
-                                std::memory_order_relaxed);
-      outBuffer.insert(outBuffer.end(), payload.begin(), payload.end());
-      return static_cast<int>(payload.size());
-    } else if (r == VGREResult::ERR_TIMEOUT) {
-      return 0;
+  if (sc) {
+    if (sc->isInitialized()) {
+      std::vector<uint8_t> payload;
+      VGREResult r = sc->recvSecure(fd, payload);
+      if (r == VGREResult::SUCCESS) {
+        packets_received_.fetch_add(1, std::memory_order_relaxed);
+        bytes_received_.fetch_add(static_cast<uint64_t>(payload.size() + sizeof(SecurePacketHeader)), 
+                                  std::memory_order_relaxed);
+        outBuffer.insert(outBuffer.end(), payload.begin(), payload.end());
+        return static_cast<int>(payload.size());
+      } else if (r == VGREResult::ERR_TIMEOUT) {
+        return 0;
+      }
+      return -1; // Error
     }
-    return -1; // Error
+    // SecureChannel provided but not initialized: only handshake-phase
+    // receives (raw VSBP headers) are expected here. Fall through to
+    // plaintext recv — the caller (SecurityManager) validates the packet
+    // type immediately upon receipt.
+  }
+  // Plaintext path: security not requested (sc==nullptr) or
+  // handshake bootstrapping (sc present but not initialized).
+  char temp[8192];
+  int n = recv(fd, temp, sizeof(temp), 0);
+  if (n > 0) {
+    packets_received_.fetch_add(1, std::memory_order_relaxed);
+    bytes_received_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+    outBuffer.insert(outBuffer.end(), temp, temp + n);
+    return n;
+  } else if (n == 0) {
+    return -1; // Disconnected
   } else {
-    char temp[8192];
-    int n = recv(fd, temp, sizeof(temp), 0);
-    if (n > 0) {
-      packets_received_.fetch_add(1, std::memory_order_relaxed);
-      bytes_received_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
-      outBuffer.insert(outBuffer.end(), temp, temp + n);
-      return n;
-    } else if (n == 0) {
-      return -1; // Disconnected
-    } else {
-      if (vgre_is_would_block(vgre_get_last_socket_error())) return 0;
-      return -1;
-    }
+    if (vgre_is_would_block(vgre_get_last_socket_error())) return 0;
+    return -1;
   }
 }
 

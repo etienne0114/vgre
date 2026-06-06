@@ -13,6 +13,8 @@
 #include <random>
 #include <sstream>
 #include <iomanip>
+#include <fstream>
+#include <algorithm>
 
 namespace vgre {
 namespace advanced {
@@ -104,6 +106,22 @@ VGREResult SecurityManager::enableSecurity(bool enabled) {
     if (env_token && env_token[0] != '\0') {
       token = env_token;
       { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
+    }
+  }
+  // Try reading from configured auth token file path if still empty
+  if (token.empty()) {
+    const char* env_token_file = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
+    if (env_token_file && env_token_file[0] != '\0') {
+      std::ifstream f(env_token_file);
+      if (f) {
+        std::string file_token;
+        std::getline(f, file_token);
+        file_token.erase(std::remove_if(file_token.begin(), file_token.end(), [](unsigned char c) { return std::isspace(c); }), file_token.end());
+        if (!file_token.empty()) {
+          token = file_token;
+          { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
+        }
+      }
     }
   }
   // If still empty, try to get from HardwareTokenManager
