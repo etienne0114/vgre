@@ -424,31 +424,32 @@ int main() {
         CHECK("Zher2k upper off-diag", zeq(C[2], 2, 3));
     }
 
-    // 26. CHEMM: C = alpha*A*B + beta*C (left, upper, row-major storage)
-    // Chemm uses row-major: A[row*lda+col], C[row*ldc+col].
-    // A = [[3, 1+2i],[1-2i, 5]], upper stored as A[0*2+1]=1+2i, A[1*2+1]=5.
-    // B = I_2x2.  Result C = A: C[0,0]=3, C[0,1]=1+2i, C[1,0]=1-2i, C[1,1]=5.
+    // 26. CHEMM: C = alpha*A*B + beta*C  (left, upper, column-major storage)
+    // A = [[3, 1+2i],[1-2i, 5]] (Hermitian).
+    // Column-major upper: A[0]=A[0,0]=3, A[1]=A[1,0]=unused, A[2]=A[0,1]=1+2i, A[3]=A[1,1]=5.
+    // B = I_2x2 (column-major identity).
+    // Result C = A*I = A, stored column-major: C[0]=3, C[1]=A[1,0]=1-2i, C[2]=A[0,1]=1+2i, C[3]=5.
     {
         cuComplex alpha = mc(1, 0), beta = mc(0, 0);
-        cuComplex A[] = {mc(3,0), mc(1,2), mc(0,0), mc(5,0)};  // row-major upper
-        cuComplex B[] = {mc(1,0), mc(0,0), mc(0,0), mc(1,0)};  // identity row-major
+        cuComplex A[] = {mc(3,0), mc(0,0), mc(1,2), mc(5,0)};  // col-major upper
+        cuComplex B[] = {mc(1,0), mc(0,0), mc(0,0), mc(1,0)};  // identity col-major
         cuComplex C[4] = {};
         cublasChemm_v2(handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER, 2, 2,
             &alpha, A, 2, B, 2, &beta, C, 2);
         CHECK("Chemm left-upper diag", ceq(C[0], 3, 0) && ceq(C[3], 5, 0));
-        CHECK("Chemm left-upper off-diag", ceq(C[1], 1, 2) && ceq(C[2], 1, -2));
+        CHECK("Chemm left-upper off-diag", ceq(C[1], 1, -2) && ceq(C[2], 1, 2));
     }
 
     // 27. ZHEMM: double-precision Chemm, same matrix
     {
         cuDoubleComplex alpha = mz(1, 0), beta = mz(0, 0);
-        cuDoubleComplex A[] = {mz(3,0), mz(1,2), mz(0,0), mz(5,0)};
+        cuDoubleComplex A[] = {mz(3,0), mz(0,0), mz(1,2), mz(5,0)};  // col-major upper
         cuDoubleComplex B[] = {mz(1,0), mz(0,0), mz(0,0), mz(1,0)};
         cuDoubleComplex C[4] = {};
         cublasZhemm_v2(handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER, 2, 2,
             &alpha, A, 2, B, 2, &beta, C, 2);
         CHECK("Zhemm left-upper diag", zeq(C[0], 3, 0) && zeq(C[3], 5, 0));
-        CHECK("Zhemm left-upper off-diag", zeq(C[1], 1, 2) && zeq(C[2], 1, -2));
+        CHECK("Zhemm left-upper off-diag", zeq(C[1], 1, -2) && zeq(C[2], 1, 2));
     }
 
     cublasDestroy_v2(handle);

@@ -281,17 +281,18 @@ cublasStatus_t cublasChemm_v2(cublasHandle_t handle,
     bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
     int ka = left ? m : n; // size of A: (m×m) if left, (n×n) if right
 
-    // C = beta * C
+    // C = beta * C  (column-major: element (i,j) at i + j*ldc)
     #ifdef _OPENMP
     #pragma omp parallel for OMP_COLLAPSE(2) if (m * n > 256)
     #endif
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < n; ++j) {
-            cuComplex &c = C[i*ldc+j];
+            cuComplex &c = C[i + j*ldc];
             c = {c.x*beta->x - c.y*beta->y, c.x*beta->y + c.y*beta->x};
         }
 
     // C += alpha * (A * B)  or  alpha * (B * A)
+    // Column-major: A[r,c] at r + c*lda, B[p,j] at p + j*ldb, C[i,j] at i + j*ldc
     #ifdef _OPENMP
     #pragma omp parallel for OMP_COLLAPSE(2) if (m * n > 256)
     #endif
@@ -299,26 +300,22 @@ cublasStatus_t cublasChemm_v2(cublasHandle_t handle,
         for (int j = 0; j < n; ++j) {
             cuComplex acc = {0.f, 0.f};
             for (int p = 0; p < ka; ++p) {
-                // Fetch A[r, c] from Hermitian storage
                 int r = left ? i : p;
                 int c = left ? p : j;
-                int ar = left ? p : i;
-                int ac = left ? j : p;
-                // Hermitian element A[r,c]
+                // Hermitian element A[r,c] from column-major packed storage
                 cuComplex aval;
                 if (upper) {
-                    if (r <= c) aval = A[r*lda+c];
-                    else        aval = cuConjf(A[c*lda+r]);
+                    if (r <= c) aval = A[r + c*lda];
+                    else        aval = cuConjf(A[c + r*lda]);
                 } else {
-                    if (r >= c) aval = A[r*lda+c];
-                    else        aval = cuConjf(A[c*lda+r]);
+                    if (r >= c) aval = A[r + c*lda];
+                    else        aval = cuConjf(A[c + r*lda]);
                 }
-                (void)ar; (void)ac;
-                cuComplex bval = left ? B[p*ldb+j] : B[i*ldb+p];
+                cuComplex bval = left ? B[p + j*ldb] : B[i + p*ldb];
                 acc = cuCaddf(acc, cuCmulf(aval, bval));
             }
             cuComplex contrib = cuCmulf(*alpha, acc);
-            C[i*ldc+j] = cuCaddf(C[i*ldc+j], contrib);
+            C[i + j*ldc] = cuCaddf(C[i + j*ldc], contrib);
         }
     return CUBLAS_STATUS_SUCCESS;
 }
@@ -334,14 +331,16 @@ cublasStatus_t cublasZhemm_v2(cublasHandle_t handle,
     bool left  = (side == CUBLAS_SIDE_LEFT);
     bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
     int ka = left ? m : n;
+    // C = beta * C  (column-major)
     #ifdef _OPENMP
     #pragma omp parallel for OMP_COLLAPSE(2) if (m * n > 256)
     #endif
     for (int i=0;i<m;++i)
         for (int j=0;j<n;++j) {
-            cuDoubleComplex &c = C[i*ldc+j];
+            cuDoubleComplex &c = C[i + j*ldc];
             c = {c.x*beta->x-c.y*beta->y, c.x*beta->y+c.y*beta->x};
         }
+    // C += alpha * (A * B or B * A)  (column-major)
     #ifdef _OPENMP
     #pragma omp parallel for OMP_COLLAPSE(2) if (m * n > 256)
     #endif
@@ -351,12 +350,12 @@ cublasStatus_t cublasZhemm_v2(cublasHandle_t handle,
             for (int p=0;p<ka;++p) {
                 int r=left?i:p, c=left?p:j;
                 cuDoubleComplex aval;
-                if (upper) { if (r<=c) aval=A[r*lda+c]; else aval=cuConj(A[c*lda+r]); }
-                else        { if (r>=c) aval=A[r*lda+c]; else aval=cuConj(A[c*lda+r]); }
-                cuDoubleComplex bval = left ? B[p*ldb+j] : B[i*ldb+p];
+                if (upper) { if (r<=c) aval=A[r + c*lda]; else aval=cuConj(A[c + r*lda]); }
+                else        { if (r>=c) aval=A[r + c*lda]; else aval=cuConj(A[c + r*lda]); }
+                cuDoubleComplex bval = left ? B[p + j*ldb] : B[i + p*ldb];
                 acc = cuCadd(acc, cuCmul(aval, bval));
             }
-            C[i*ldc+j] = cuCadd(C[i*ldc+j], cuCmul(*alpha, acc));
+            C[i + j*ldc] = cuCadd(C[i + j*ldc], cuCmul(*alpha, acc));
         }
     return CUBLAS_STATUS_SUCCESS;
 }
