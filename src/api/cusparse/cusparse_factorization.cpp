@@ -58,33 +58,11 @@ static cusparseStatus_t umfpack_lu_inplace(int m, T *csrVal,
         return CUSPARSE_STATUS_INTERNAL_ERROR;
     }
 
-    // Extract L and U and repack them back into the original CSR sparsity.
-    // UMFPACK exposes P*L*U*Q = A; we extract row-by-row and write back to
-    // csrVal at the positions where the original sparsity pattern allows.
-    // For fill-in positions that do not exist in the original pattern we drop
-    // them (matching the cuSPARSE ILU(0) contract — no structural changes).
-    std::vector<double> x(static_cast<size_t>(m), 0.0);
-    std::vector<double> b(static_cast<size_t>(m), 0.0);
-    for (int col = 0; col < m; ++col) {
-        // Solve L*U*e_col = P^{-T}*e_col to get column col of (P*L*U*Q)^{-1}
-        // (we just need the LU factors, not the solution — extract from internal).
-        (void)x; (void)b;  // extraction done element-wise below
-    }
-
-    // Simpler: iterate each existing entry (i, colInd[p]) and overwrite with
-    // the UMFPACK-factored value by solving a unit-vector RHS.
-    // This is O(nnz * m) which is only feasible for small matrices. For large
-    // matrices UMFPACK factorization itself is the bottleneck.
-    for (int i = 0; i < m; ++i) {
-        for (int p = rowPtr[i]; p < rowPtr[i+1]; ++p) {
-            int j = colInd[p];
-            // Recover L[i,j] (j<=i) or U[i,j] (j>=i) from the factored system.
-            // Use umfpack_di_get_numeric to retrieve L and U triplet data once.
-            (void)j;
-        }
-    }
-
     // Retrieve L and U from UMFPACK and overwrite CSR positions.
+    // P*L*U*Q = A; L is stored by column (col-major), U by row (row-major).
+    // We scatter the UMFPACK-factored values back into the original CSR positions,
+    // dropping any fill-in entries that do not exist in the original sparsity
+    // pattern (matching the ILU(0) contract of no structural changes).
     int lnz = 0, unz = 0, n_row = 0, n_col = 0, nz_udiag = 0;
     umfpack_di_get_lunz(&lnz, &unz, &n_row, &n_col, &nz_udiag, Numeric);
 

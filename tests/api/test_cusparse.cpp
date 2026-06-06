@@ -553,12 +553,13 @@ int test_spmm_alg_default() {
     if (st != CUSPARSE_STATUS_SUCCESS) FAIL("SpMM csr_alg1 status");
     if (!NEAR(C[0], 7.f, 1e-5f)) FAIL("spmm_csr_alg1 C[0,0]");
 
-    // Unsupported algorithm must return NOT_SUPPORTED
+    // CSR_ALG3 (atomic row-split variant) is a valid cuSPARSE algorithm and must
+    // succeed — all CSR algorithm variants use the same CPU computation path.
     st = cusparseSpMM(h,
         CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
         &alpha, matA, matB, &beta, matC, CUDA_R_32F,
         CUSPARSE_SPMM_CSR_ALG3, buf.data());
-    if (st != CUSPARSE_STATUS_NOT_SUPPORTED) FAIL("SpMM unsupported alg should return NOT_SUPPORTED");
+    if (st != CUSPARSE_STATUS_SUCCESS) FAIL("SpMM csr_alg3 should succeed (all CSR algs use same path)");
 
     cusparseDestroySpMat(matA);
     cusparseDestroyDnMat(matB);
