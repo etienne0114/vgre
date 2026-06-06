@@ -16,9 +16,13 @@
 #include "vgre/common/types.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#ifndef _WIN32
+#include <unistd.h>   // sysconf
+#endif
 
 using namespace vgre::api;
 
@@ -47,10 +51,54 @@ std::string vgre_lookup_kernel_name(const void *hostFn);
 
 namespace {
 
+// Detect available physical RAM pages.  Returns 0 on unsupported platforms.
+static size_t hostPhysicalRamBytes() {
+#if defined(_WIN32)
+    MEMORYSTATUSEX ms; ms.dwLength = sizeof(ms);
+    return GlobalMemoryStatusEx(&ms) ? static_cast<size_t>(ms.ullTotalPhys) : 0;
+#elif defined(_SC_PHYS_PAGES) && defined(_SC_PAGE_SIZE)
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long psize = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && psize > 0)
+        return static_cast<size_t>(pages) * static_cast<size_t>(psize);
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+// Parse VGRE_COMPUTE_CAPABILITY env var (format "major.minor" or "majorminor").
+// Returns SM version as major*10+minor (e.g. "8.6" or "86" → 86).
+// Falls back to 86 (Ampere SM 8.6) when unset or malformed.
+static int defaultComputeCapabilityVersion() {
+    const char* env = std::getenv("VGRE_COMPUTE_CAPABILITY");
+    if (env && env[0] != '\0') {
+        // Accept "8.6" or "86"
+        int major = 0, minor = 0;
+        if (std::sscanf(env, "%d.%d", &major, &minor) == 2)
+            return major * 10 + minor;
+        if (std::sscanf(env, "%d", &major) == 1 && major >= 10)
+            return major;  // already encoded as e.g. 86
+    }
+    return 86;  // default: SM 8.6 (Ampere)
+}
+
+// Compute the default malloc heap as min(totalRam/16, 512MB), but at least 8MB.
+static size_t defaultMallocHeapSize() {
+    size_t ram = hostPhysicalRamBytes();
+    if (ram > 0) {
+        size_t proposed = ram / 16;
+        constexpr size_t kMax = 512ULL << 20;  // 512 MB cap
+        constexpr size_t kMin = 8ULL << 20;    // 8 MB floor
+        return std::min(std::max(proposed, kMin), kMax);
+    }
+    return 8ULL << 20;  // safe default when detection fails
+}
+
 struct DeviceLimits {
-    size_t stackSize         = 8192;       // cudaLimitStackSize
-    size_t printfFifoSize    = 1 << 20;   // cudaLimitPrintfFifoSize (1 MB)
-    size_t mallocHeapSize    = 8 << 20;   // cudaLimitMallocHeapSize (8 MB)
+    size_t stackSize         = 8192;                    // cudaLimitStackSize (8 KB)
+    size_t printfFifoSize    = 1 << 20;                 // cudaLimitPrintfFifoSize (1 MB)
+    size_t mallocHeapSize    = defaultMallocHeapSize(); // cudaLimitMallocHeapSize — dynamic
     size_t devRuntimeSyncDepth = 2;       // cudaLimitDevRuntimeSyncDepth
     size_t devRuntimePendingLaunchCount = 2048; // cudaLimitDevRuntimePendingLaunchCount
     size_t maxL2FetchGranularity = 128;   // cudaLimitMaxL2FetchGranularity
@@ -118,8 +166,8 @@ extern "C" cudaError_t cudaFuncGetAttributes(
 
     memset(attr, 0, sizeof(*attr));
     attr->maxThreadsPerBlock       = 1024;
-    attr->ptxVersion               = 86;  // SM 8.6 (Ampere)
-    attr->binaryVersion            = 86;
+    attr->ptxVersion               = defaultComputeCapabilityVersion();
+    attr->binaryVersion            = attr->ptxVersion;
 
     // Attempt to query real kernel metadata from KernelIR.
     std::string kname = vgre_lookup_kernel_name(func);
