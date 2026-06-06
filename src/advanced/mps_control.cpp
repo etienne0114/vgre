@@ -467,6 +467,7 @@ void MPSServer::handleClient(mps_handle_t fd, uint32_t slotId) {
             }
 
             // Parse arguments with bounds checking.
+            // Argument type encoding: 0=scalar, 1=device pointer, 2=host pointer, 3=array
             std::vector<void*> args;
             std::vector<std::vector<uint8_t>> argDataBuffers;
             uint8_t* pArgs = payload.data() + nameLen;
@@ -475,14 +476,31 @@ void MPSServer::handleClient(mps_handle_t fd, uint32_t slotId) {
             for (uint32_t i = 0; i < req.numArgs && parseOk; ++i) {
                 if (bytesLeft < 5) { parseOk = false; break; }
                 uint8_t type = *pArgs++;
-                (void)type; // type reserved for future use
                 --bytesLeft;
                 if (bytesLeft < 4) { parseOk = false; break; }
                 uint32_t size = *reinterpret_cast<uint32_t*>(pArgs);
                 pArgs += 4; bytesLeft -= 4;
                 if (bytesLeft < size) { parseOk = false; break; }
+                
+                // Handle different argument types
                 std::vector<uint8_t> argBuf(size);
-                memcpy(argBuf.data(), pArgs, size);
+                if (type == 1 || type == 2) {
+                    // Pointer type: store the pointer value directly
+                    if (size == sizeof(void*)) {
+                        memcpy(argBuf.data(), pArgs, size);
+                    } else {
+                        // Invalid pointer size
+                        parseOk = false;
+                        break;
+                    }
+                } else if (type == 3) {
+                    // Array type: store array data
+                    memcpy(argBuf.data(), pArgs, size);
+                } else {
+                    // Scalar type (type == 0): store scalar value
+                    memcpy(argBuf.data(), pArgs, size);
+                }
+                
                 pArgs += size; bytesLeft -= size;
                 argDataBuffers.push_back(std::move(argBuf));
                 args.push_back(argDataBuffers.back().data());

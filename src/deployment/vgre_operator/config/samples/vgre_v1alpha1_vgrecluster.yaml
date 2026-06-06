@@ -1,0 +1,13 @@
+apiVersion: vgre.io/v1alpha1
+kind: VgreCluster
+metadata:
+  name: example-vgrecluster
+  namespace: default
+spec:
+  replicas: 3
+  deploymentMode: Deployment
+  masterImage: vgre-master:latest
+  workerImage: vgre-worker:latest
+  masterPort: 7777
+  discoveryPort: 7778
+  networkPolicy: true

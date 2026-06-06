@@ -298,6 +298,9 @@ cusparseStatus_t cusparseRot(
         py = &it->second;
     }
 
+    // Validate that the dense vector type matches the expected yType
+    if (py->valueType != yType) return CUSPARSE_STATUS_INVALID_VALUE;
+
     double c = readResult(c_coeff, xType);
     double s = readResult(s_coeff, xType);
 

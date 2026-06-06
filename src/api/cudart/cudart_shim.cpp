@@ -8,6 +8,7 @@
 
 #include "vgre/api/cuda_interceptor.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/platform.h"
 #include "vgre/common/elf_reader.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
@@ -603,6 +604,7 @@ extern "C" const char *vgre_get_module_source(void *handle) {
 
 extern "C" {
 
+VGRE_PUBLIC_API
 void **__cudaRegisterFatBinary(void *fatCubin) {
   return CUDAModuleRegistry::instance().registerFatBinary(fatCubin);
 }
@@ -715,6 +717,7 @@ cudaError_t cudaMemcpyFromSymbolAsync(void *dst, const void *symbol,
       dst, static_cast<char *>(devPtr) + offset, count, kind, stream);
 }
 
+VGRE_PUBLIC_API
 cudaError_t cudaLaunchKernel(const void *hostFun, dim3 gridDim, dim3 blockDim,
                              void **args, size_t sharedMem,
                              cudaStream_t stream) {

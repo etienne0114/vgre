@@ -1,6 +1,7 @@
 // CUDA Driver API — cuda driver stream event
 
 #include "cuda_driver_internal.h"
+#include "vgre/common/platform.h"
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -19,16 +20,19 @@ using cuuint64_t = unsigned long long;
 
 extern "C" {
 
+VGRE_PUBLIC_API
 CUresult cuStreamCreate(CUstream *phStream, unsigned int flags) {
   auto err = vgre::api::CUDAInterceptor::instance().streamCreateWithFlags(phStream, flags);
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuStreamDestroy(CUstream hStream) {
   auto err = vgre::api::CUDAInterceptor::instance().streamDestroy(hStream);
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuStreamSynchronize(CUstream hStream) {
   auto err = vgre::api::CUDAInterceptor::instance().streamSynchronize(hStream);
   return toCU(err);
@@ -119,12 +123,14 @@ CUresult cuStreamUpdateCaptureDependencies(CUstream hStream, void *dependencies,
   return (r == vgre::VGREResult::SUCCESS) ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
 }
 
+VGRE_PUBLIC_API
 CUresult cuEventCreate(CUevent *phEvent, unsigned int flags) {
   (void)flags;
   auto err = vgre::api::CUDAInterceptor::instance().eventCreate(phEvent);
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuEventRecord(CUevent hEvent, CUstream hStream) {
   auto err = vgre::api::CUDAInterceptor::instance().eventRecord(hEvent, hStream);
   return toCU(err);
@@ -135,16 +141,19 @@ CUresult cuEventQuery(CUevent hEvent) {
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuEventSynchronize(CUevent hEvent) {
   auto err = vgre::api::CUDAInterceptor::instance().eventSynchronize(hEvent);
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuEventElapsedTime(float *ms, CUevent hStart, CUevent hEnd) {
   auto err = vgre::api::CUDAInterceptor::instance().eventElapsedTime(ms, hStart, hEnd);
   return toCU(err);
 }
 
+VGRE_PUBLIC_API
 CUresult cuEventDestroy(CUevent hEvent) {
   auto err = vgre::api::CUDAInterceptor::instance().eventDestroy(hEvent);
   return toCU(err);
@@ -161,6 +170,8 @@ CUresult cuStreamWaitValue32(CUstream /*hStream*/, CUdeviceptr addr,
       static_cast<uintptr_t>(reinterpret_cast<size_t>(addr)));
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   unsigned int cmpFlags = flags & 0x3u;
+  bool flushEnabled = (flags & CU_STREAM_WAIT_VALUE_FLUSH) != 0;
+  
   while (true) {
     uint32_t cur = *ptr;
     bool cond = false;
@@ -175,7 +186,15 @@ CUresult cuStreamWaitValue32(CUstream /*hStream*/, CUdeviceptr addr,
     if (std::chrono::steady_clock::now() > deadline) return CUDA_ERROR_TIMEOUT;
     std::this_thread::yield();
   }
-  std::atomic_thread_fence(std::memory_order_acquire);
+  
+  // FLUSH flag: ensure all pending memory operations are visible
+  if (flushEnabled) {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    // Force cache line flush for the monitored address
+    asm volatile("" : : : "memory");
+  } else {
+    std::atomic_thread_fence(std::memory_order_acquire);
+  }
   return CUDA_SUCCESS;
 }
 
@@ -186,6 +205,8 @@ CUresult cuStreamWaitValue64(CUstream /*hStream*/, CUdeviceptr addr,
       static_cast<uintptr_t>(reinterpret_cast<size_t>(addr)));
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   unsigned int cmpFlags = flags & 0x3u;
+  bool flushEnabled = (flags & CU_STREAM_WAIT_VALUE_FLUSH) != 0;
+  
   while (true) {
     uint64_t cur = *ptr;
     bool cond = false;
@@ -200,7 +221,15 @@ CUresult cuStreamWaitValue64(CUstream /*hStream*/, CUdeviceptr addr,
     if (std::chrono::steady_clock::now() > deadline) return CUDA_ERROR_TIMEOUT;
     std::this_thread::yield();
   }
-  std::atomic_thread_fence(std::memory_order_acquire);
+  
+  // FLUSH flag: ensure all pending memory operations are visible
+  if (flushEnabled) {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    // Force cache line flush for the monitored address
+    asm volatile("" : : : "memory");
+  } else {
+    std::atomic_thread_fence(std::memory_order_acquire);
+  }
   return CUDA_SUCCESS;
 }
 

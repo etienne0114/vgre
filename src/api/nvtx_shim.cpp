@@ -170,7 +170,18 @@ nvtxDomainHandle_t nvtxDomainCreateA(const char* name) {
 
 nvtxDomainHandle_t nvtxDomainCreateW(const wchar_t* name) {
     // Convert wide string to narrow for logging; domain is otherwise identical.
-    return nvtxDomainCreateA("(wide-name domain)");
+    std::string narrowName;
+    if (name) {
+        // Simple conversion from wide to narrow string
+        size_t len = wcslen(name);
+        narrowName.resize(len);
+        for (size_t i = 0; i < len; ++i) {
+            narrowName[i] = static_cast<char>(name[i]);
+        }
+    } else {
+        narrowName = "(unnamed wide domain)";
+    }
+    return nvtxDomainCreateA(narrowName.c_str());
 }
 
 nvtxDomainHandle_t nvtxDomainCreate(const char* name) {

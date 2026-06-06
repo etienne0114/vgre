@@ -139,7 +139,7 @@ add_test(NAME DriverAPIIntegration COMMAND test_driver_api)
 add_executable(test_cubin_load integration/test_cubin_load.cpp)
 target_link_libraries(test_cubin_load PRIVATE vgre_cudart)
 add_executable(test_texture_driver_api integration/test_texture_driver_api.cpp)
-target_link_libraries(test_texture_driver_api vgre)
+target_link_libraries(test_texture_driver_api vgre_cudart)
 
 add_executable(test_async_sync integration/test_async_sync.cpp)
 target_link_libraries(test_async_sync vgre)

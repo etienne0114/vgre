@@ -25,10 +25,11 @@
 #endif
 
 // ── External semaphore handle types (mirror CUDA headers) ────────────────────
-static constexpr int CUDA_EXTERNAL_SEM_OPAQUE_FD            = 1;
-static constexpr int CUDA_EXTERNAL_SEM_TIMELINE_FD          = 4;
-static constexpr int CUDA_EXTERNAL_SEM_OPAQUE_WIN32         = 2;
-static constexpr int CUDA_EXTERNAL_SEM_TIMELINE_WIN32       = 8;
+static constexpr int CUDA_EXTERNAL_SEM_OPAQUE_FD            [[maybe_unused]] = 1;
+static constexpr int CUDA_EXTERNAL_SEM_OPAQUE_WIN32         [[maybe_unused]] = 2;
+static constexpr int CUDA_EXTERNAL_SEM_NVSCISYNCOBJ        [[maybe_unused]] = 3;
+static constexpr int CUDA_EXTERNAL_SEM_TIMELINE_FD          [[maybe_unused]] = 4;
+static constexpr int CUDA_EXTERNAL_SEM_TIMELINE_WIN32       [[maybe_unused]] = 8;
 
 // ── Internal semaphore object ─────────────────────────────────────────────────
 namespace {
@@ -115,6 +116,10 @@ vgre_err_t cudaImportExternalSemaphore(
     } else if (desc->type == CUDA_EXTERNAL_SEM_TIMELINE_FD) {
         s->efd = dup(desc->handle.fd);
         if (s->efd < 0) s->efd = eventfd(0, EFD_NONBLOCK);
+    } else if (desc->type == CUDA_EXTERNAL_SEM_NVSCISYNCOBJ) {
+        // NVSCI sync objects are not supported in this implementation
+        delete s;
+        return kNotSupported;
     } else {
         // Unsupported type: create a local semaphore for forward-compat
         s->efd = eventfd(0, EFD_NONBLOCK | EFD_SEMAPHORE);

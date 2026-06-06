@@ -1028,7 +1028,6 @@ target_include_directories(vgre_cudart
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
-target_compile_definitions(vgre_cudart PRIVATE VGRE_CUDA_INTERCEPTOR_NO_EXPORTS)
 _vgre_configure_library(vgre_cudart PRIVATE)
 
 # cuSOLVER shim — link system LAPACK if available, else compile built-in fallback.
@@ -1221,6 +1220,36 @@ if(VGRE_BUILD_SLURM_GRES)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
+# §21b  Kubernetes VGRE Operator  (Go, optional)
+# ──────────────────────────────────────────────────────────────────────────────
+option(VGRE_BUILD_K8S_OPERATOR "Build the Kubernetes VGRE Operator (requires Go 1.22+)" OFF)
+set(_VGRE_K8S_OPERATOR_FOUND FALSE)
+if(VGRE_BUILD_K8S_OPERATOR)
+    find_program(GO_EXECUTABLE go DOC "Go toolchain 'go' binary")
+    set(_operator_dir "${PROJECT_SOURCE_DIR}/src/deployment/vgre_operator")
+    if(NOT GO_EXECUTABLE)
+        message(WARNING
+            "VGRE_BUILD_K8S_OPERATOR=ON but 'go' not found in PATH. "
+            "Operator build skipped. Install Go: https://go.dev/dl/")
+    elseif(NOT EXISTS "${_operator_dir}/go.mod")
+        message(WARNING
+            "VGRE_BUILD_K8S_OPERATOR=ON but go.mod not found at "
+            "'${_operator_dir}/go.mod'. Operator build skipped.")
+    else()
+        set(_VGRE_K8S_OPERATOR_FOUND TRUE)
+        add_custom_target(vgre_operator ALL
+            COMMAND "${GO_EXECUTABLE}" build -o "${CMAKE_CURRENT_BINARY_DIR}/vgre-operator" main.go
+            WORKING_DIRECTORY "${_operator_dir}"
+            COMMENT "Building VGRE Kubernetes Operator (Go)"
+            VERBATIM
+        )
+        message(STATUS "K8s Operator: enabled (${_operator_dir})")
+    endif()
+else()
+    message(STATUS "K8s Operator: disabled (pass -DVGRE_BUILD_K8S_OPERATOR=ON to enable)")
+endif()
+
+# ──────────────────────────────────────────────────────────────────────────────
 # §22  Install rules  (GNUInstallDirs — no hardcoded lib/bin/include paths)
 # ──────────────────────────────────────────────────────────────────────────────
 install(TARGETS vgre vgre_cudart vgre-worker
@@ -1301,6 +1330,7 @@ endif()
 _vgre_row("  Tests                       →   " VGRE_BUILD_TESTS)
 _vgre_row("  Examples                    →   " VGRE_BUILD_EXAMPLES)
 _vgre_row("  Flutter dashboard           →   " VGRE_BUILD_DASHBOARD)
+_vgre_row("  K8s VGRE Operator           →   " _VGRE_K8S_OPERATOR_FOUND)
 _vgre_row("  Warnings-as-errors (CI)     →   " VGRE_WARNINGS_AS_ERRORS)
 message(STATUS "  ─────────────────────────────────────────")
 message(STATUS "  LLVM version : ${LLVM_PACKAGE_VERSION}")

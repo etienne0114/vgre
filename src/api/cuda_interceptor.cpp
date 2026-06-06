@@ -25,7 +25,6 @@ namespace api {
 
 namespace {
 static thread_local cudaError_t g_lastError = cudaSuccess;
-constexpr int kVgreCudaVersion = 11000;
 }
 
 CUDAInterceptor::CUDAInterceptor() = default;

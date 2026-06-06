@@ -317,8 +317,8 @@ struct cudaArrayMemoryRequirements {
 
 // Forward-declare the opaque CUDA array handle types to avoid pulling in
 // the real CUDA runtime headers (which conflict with VGRE's own definitions).
-struct _vgre_cudaArray {};
-struct _vgre_cudaMipmappedArray {};
+struct _vgre_cudaArray { char dummy; };
+struct _vgre_cudaMipmappedArray { char dummy; };
 using _cudaArray_t          = struct _vgre_cudaArray*;
 using _cudaMipmappedArray_t = struct _vgre_cudaMipmappedArray*;
 

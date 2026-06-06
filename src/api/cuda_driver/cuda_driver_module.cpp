@@ -1,6 +1,7 @@
 // CUDA Driver API — cuda driver module
 
 #include "cuda_driver_internal.h"
+#include "vgre/common/platform.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -15,6 +16,7 @@ extern "C" const char *vgre_get_module_source(void *handle);
 extern "C" void *vgre_lookup_symbol(void *handle, const char *name, size_t *size);
 extern "C" void *vgre_lookup_texture_ref(void *handle, const char *name);
 
+VGRE_PUBLIC_API
 CUresult cuModuleLoadData(CUmodule *module, const void *image) {
     if (!module || !image) return CUDA_ERROR_INVALID_VALUE;
 
@@ -61,6 +63,7 @@ CUresult cuModuleLoadData(CUmodule *module, const void *image) {
     return CUDA_SUCCESS;
 }
 
+VGRE_PUBLIC_API
 CUresult cuModuleLoadDataEx(CUmodule *module, const void *image,
                             unsigned int numOptions, int *options, void **optionValues) {
   (void)numOptions;
@@ -77,6 +80,7 @@ CUresult cuModuleGetGlobal(CUdeviceptr *dptr, size_t *bytes, CUmodule hmod, cons
   return CUDA_SUCCESS;
 }
 
+VGRE_PUBLIC_API
 CUresult cuModuleLoad(CUmodule *module, const char *fname) {
   if (!module || !fname) return CUDA_ERROR_INVALID_VALUE;
   auto err = vgre::api::CUDAInterceptor::instance().moduleLoad(module, fname);

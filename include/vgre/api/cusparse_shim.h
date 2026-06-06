@@ -194,7 +194,9 @@ cusparseStatus_t cusparseGetStream(cusparseHandle_t handle, void **stream);
 // ── Sparse matrix attributes ──────────────────────────────────────────────────
 typedef enum {
     CUSPARSE_SPMAT_FILL_MODE = 0,
-    CUSPARSE_SPMAT_DIAG_TYPE = 1
+    CUSPARSE_SPMAT_DIAG_TYPE = 1,
+    CUSPARSE_SPMAT_INDEX_BASE = 2,
+    CUSPARSE_SPMAT_STORAGE_FORMAT = 3
 } cusparseSpMatAttribute_t;
 
 cusparseStatus_t cusparseSpMatGetAttribute(cusparseSpMatDescr_t spMatDescr,

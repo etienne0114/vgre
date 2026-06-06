@@ -48,9 +48,9 @@ cusparseStatus_t cusparseSpMatGetAttribute(cusparseSpMatDescr_t spMatDescr,
         *static_cast<cusparseFillMode_t*>(data) = m.fillMode;
     } else if (attr == CUSPARSE_SPMAT_DIAG_TYPE && dataSize >= sizeof(cusparseDiagType_t)) {
         *static_cast<cusparseDiagType_t*>(data) = m.diagType;
-    } else if (attr == 2 /*CUSPARSE_SPMAT_INDEX_BASE*/ && dataSize >= sizeof(cusparseIndexBase_t)) {
+    } else if (attr == CUSPARSE_SPMAT_INDEX_BASE && dataSize >= sizeof(cusparseIndexBase_t)) {
         *static_cast<cusparseIndexBase_t*>(data) = m.idxBase;
-    } else if (attr == 3 /*CUSPARSE_SPMAT_STORAGE_FORMAT*/ && dataSize >= 4) {
+    } else if (attr == CUSPARSE_SPMAT_STORAGE_FORMAT && dataSize >= 4) {
         *static_cast<int*>(data) = m.isCSC ? 1 : 0;  // 0=CSR, 1=CSC
     } else if (dataSize > 0) {
         memset(data, 0, dataSize);  // return safe zero for unknown attributes
@@ -70,7 +70,7 @@ cusparseStatus_t cusparseSpMatSetAttribute(cusparseSpMatDescr_t spMatDescr,
         m.fillMode = *static_cast<const cusparseFillMode_t*>(data);
     } else if (attr == CUSPARSE_SPMAT_DIAG_TYPE && dataSize >= sizeof(cusparseDiagType_t)) {
         m.diagType = *static_cast<const cusparseDiagType_t*>(data);
-    } else if (attr == 2 /*CUSPARSE_SPMAT_INDEX_BASE*/ && dataSize >= sizeof(cusparseIndexBase_t)) {
+    } else if (attr == CUSPARSE_SPMAT_INDEX_BASE && dataSize >= sizeof(cusparseIndexBase_t)) {
         m.idxBase = *static_cast<const cusparseIndexBase_t*>(data);
     }
     // Unknown attributes: silently accept (forward-compatible behaviour)
@@ -133,6 +133,9 @@ cusparseStatus_t cusparseSparseToDense(cusparseHandle_t /*h*/,
     int base = (A.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
     int64_t rows = A.rows, cols = A.cols;
 
+    // Validate that output matrix dimensions are compatible
+    if (B.rows < rows || B.cols < cols) return CUSPARSE_STATUS_INVALID_VALUE;
+
     // Zero the output
     size_t elem = (B.valueType == CUDA_R_64F) ? sizeof(double) : sizeof(float);
     memset(B.values, 0, static_cast<size_t>(B.rows * B.cols) * elem);
@@ -142,6 +145,8 @@ cusparseStatus_t cusparseSparseToDense(cusparseHandle_t /*h*/,
         int64_t re = getIdx(A.rowOffsets, A.rowOffsetType, r + 1) - base;
         for (int64_t idx = rs; idx < re; ++idx) {
             int64_t c = getIdx(A.colInd, A.colIndType, idx) - base;
+            // Validate column index is within bounds
+            if (c >= cols) return CUSPARSE_STATUS_INVALID_VALUE;
             int64_t outIdx = (B.order == CUSPARSE_ORDER_ROW) ? r * B.ld + c : c * B.ld + r;
             if (B.valueType == CUDA_R_32F && A.valueType == CUDA_R_32F)
                 static_cast<float*>(B.values)[outIdx] = static_cast<const float*>(A.values)[idx];

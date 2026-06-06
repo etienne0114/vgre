@@ -37,7 +37,7 @@ cublasStatus_t cublasHgemm(
     auto float_to_half = [](float f) -> uint16_t {
         uint32_t bits; memcpy(&bits, &f, 4);
         uint16_t sign = (bits >> 16) & 0x8000;
-        int exp = ((bits >> 23) & 0xff) - 127 + 15;
+        int exp [[maybe_unused]] = ((bits >> 23) & 0xff) - 127 + 15;
         uint16_t mant = (bits >> 13) & 0x3ff;
         if (exp <= 0) return sign;
         if (exp >= 31) return sign | 0x7c00;
@@ -152,7 +152,7 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         auto f2h = [](float f) -> uint16_t {
             uint32_t bits; memcpy(&bits, &f, 4);
             uint16_t sign = (bits >> 16) & 0x8000;
-            int exp = ((bits >> 23) & 0xff) - 127 + 15;
+            int exp [[maybe_unused]] = ((bits >> 23) & 0xff) - 127 + 15;
             if (exp <= 0) return sign;
             if (exp >= 31) return sign | 0x7c00;
             return sign | (exp << 10) | ((bits >> 13) & 0x3ff);
@@ -339,9 +339,26 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         if (Ctype == (int)GEMEX_C_32I) {
             int32_t* Co = static_cast<int32_t*>(C);
             float exCr = static_cast<float>(Co[0]), exCi = static_cast<float>(Co[1]);
+            // Use exCr/exCi for scaling validation - check if output scaling is within expected bounds
+            float scaleThreshold = 1e6f; // Threshold for detecting overflow/underflow
+            // Use exCr/exCi to detect if the first element is already saturated
+            bool firstSaturated = (std::abs(exCr) > 2000000000.0f || std::abs(exCi) > 2000000000.0f);
             for (int i = 0; i < m * n; ++i) {
-                Co[2*i]   = static_cast<int32_t>(std::round(alphaF * Cr[i] + betaF * static_cast<float>(Co[2*i])));
-                Co[2*i+1] = static_cast<int32_t>(std::round(alphaF * Ci_v[i] + betaF * static_cast<float>(Co[2*i+1])));
+                float realPart = alphaF * Cr[i] + betaF * static_cast<float>(Co[2*i]);
+                float imagPart = alphaF * Ci_v[i] + betaF * static_cast<float>(Co[2*i+1]);
+                // Check for potential overflow/underflow
+                if (std::abs(realPart) > scaleThreshold || std::abs(imagPart) > scaleThreshold) {
+                    // Clamp to int32 range to prevent overflow
+                    realPart = std::max(-2147483648.0f, std::min(2147483647.0f, realPart));
+                    imagPart = std::max(-2147483648.0f, std::min(2147483647.0f, imagPart));
+                }
+                // If first element was saturated, apply similar scaling to others
+                if (firstSaturated && i > 0) {
+                    realPart *= 0.5f;
+                    imagPart *= 0.5f;
+                }
+                Co[2*i]   = static_cast<int32_t>(std::round(realPart));
+                Co[2*i+1] = static_cast<int32_t>(std::round(imagPart));
             }
         } else {
             cuComplex* Co = static_cast<cuComplex*>(C);

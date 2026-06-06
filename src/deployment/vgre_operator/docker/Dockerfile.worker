@@ -1,0 +1,45 @@
+# VGRE Worker Container Image
+#
+# Builds the VGRE runtime library and vgre-worker binary from source,
+# producing a container that connects to a VGRE master on startup.
+#
+# Build context: the repository root (virtual-gpu-runtime/)
+#
+# Usage:
+#   docker build -f src/deployment/vgre_operator/docker/Dockerfile.worker -t vgre-worker:latest .
+#
+# Required environment variables (injected by the VGRE Operator):
+#   VGRE_TCP_AUTH_TOKEN           — HMAC-SHA256 cluster authentication token
+#   VGRE_CLUSTER_MASTER_ADDRESS   — Master service address (e.g. vgre-mycluster-master:7777)
+#   VGRE_SHM_SUFFIX               — Shared memory namespace suffix for cluster isolation
+
+FROM ubuntu:22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build git \
+    llvm-18-dev libclang-18-dev libomp-18-dev \
+    libssl-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+RUN cmake -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DVGRE_BUILD_TESTS=OFF \
+    -DVGRE_BUILD_DASHBOARD=OFF \
+    && cmake --build build --parallel
+
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl3 libomp-18 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/build/libvgre*.so* /usr/local/lib/
+COPY --from=builder /build/build/vgre-worker /usr/local/bin/
+RUN ldconfig
+
+# The worker connects to master via VGRE_CLUSTER_MASTER_ADDRESS env var.
+# Port argument is passed via the operator's container args.
+ENTRYPOINT ["/usr/local/bin/vgre-worker"]
