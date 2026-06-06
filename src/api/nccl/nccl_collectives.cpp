@@ -638,13 +638,12 @@ ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff,
     }
 
     // ── Ring Phase 1 (bandwidth-optimal reduce-scatter) ───────────────────────
-    // Chunk layout: chunk k starts at element index k * chunk_count.
-    // chunk_count = ceil(recvcount / N) — last chunk may be smaller.
-    const size_t chunk_count = (recvcount + static_cast<size_t>(nranks) - 1)
-                                / static_cast<size_t>(nranks);
+    // Chunk layout: chunk k spans element indices [k*recvcount, (k+1)*recvcount).
+    // Each of the N chunks is exactly recvcount elements (rank r's output slice).
+    // Total data per ring_accum buffer = N * recvcount elements.
     auto chunk_range = [&](int k) -> std::pair<size_t, size_t> {
-        size_t start = static_cast<size_t>(k) * chunk_count;
-        size_t end   = std::min(start + chunk_count, recvcount);
+        size_t start = static_cast<size_t>(k) * recvcount;
+        size_t end   = start + recvcount;
         return {start, end};
     };
 
@@ -689,13 +688,9 @@ ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff,
     // ── Phase 1: Reduce-Scatter (N-1 ring steps) ──────────────────────────────
     // Step s: rank i reduces chunk (i-s-1+N)%N — accumulating from the
     // left-predecessor's ring_accum (rank (i-1+N)%N) into its own ring_accum.
-    // Kahan compensated summation is used for fp32/fp64 Sum/Avg to bound error.
+    // Each chunk position is accumulated exactly once per rank, so Kahan
+    // compensation gives no benefit here; apply_reduce is correct and sufficient.
     const int src_rank = (rank - 1 + nranks) % nranks;
-
-    std::vector<float>  kahan_f32(
-        (datatype == ncclFloat32 && (op == ncclSum || op == ncclAvg)) ? recvcount : 0, 0.f);
-    std::vector<double> kahan_f64(
-        (datatype == ncclFloat64 && (op == ncclSum || op == ncclAvg)) ? recvcount : 0, 0.0);
 
     for (int s = 0; s < nranks - 1; ++s) {
         int src_chunk = ((rank - s - 1) % nranks + nranks) % nranks;
@@ -705,37 +700,19 @@ ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff,
         uint8_t*       dst_ptr = st.ring_accum[rank].data()     + start * elem_sz;
         const uint8_t* src_ptr = st.ring_accum[src_rank].data() + start * elem_sz;
 
-        if (datatype == ncclFloat32 && (op == ncclSum || op == ncclAvg)) {
-            float*       dst  = reinterpret_cast<float*>(dst_ptr);
-            const float* src  = reinterpret_cast<const float*>(src_ptr);
-            float*       comp = kahan_f32.data() + start;
-            for (size_t i = 0; i < nelems; ++i) {
-                float y = src[i] - comp[i];
-                float t = dst[i] + y;
-                comp[i] = (t - dst[i]) - y;
-                dst[i]  = t;
-            }
-        } else if (datatype == ncclFloat64 && (op == ncclSum || op == ncclAvg)) {
-            double*       dst  = reinterpret_cast<double*>(dst_ptr);
-            const double* src  = reinterpret_cast<const double*>(src_ptr);
-            double*       comp = kahan_f64.data() + start;
-            for (size_t i = 0; i < nelems; ++i) {
-                double y = src[i] - comp[i];
-                double t = dst[i] + y;
-                comp[i] = (t - dst[i]) - y;
-                dst[i]  = t;
-            }
-        } else {
-            apply_reduce(dst_ptr, src_ptr, nelems, datatype, op);
-        }
+        apply_reduce(dst_ptr, src_ptr, nelems, datatype, op);
 
         if (!ring_barrier(lk)) return ncclSystemError;
     }
 
     // ── Average scaling ───────────────────────────────────────────────────────
-    // Scale the owned chunk by 1/N before copying to recvbuff.
-    if (op == ncclAvg)
-        scale_avg(st.ring_accum[rank].data(), recvcount, datatype, nranks);
+    // After N-1 steps, ring_accum[rank] owns chunk (rank+1)%N at byte offset
+    // (rank+1)%N * recvcount * elem_sz.  Scale only that slice by 1/N so the
+    // allgather phase reads pre-scaled data from each rank's owned chunk.
+    if (op == ncclAvg) {
+        size_t owned_off = static_cast<size_t>((rank + 1) % nranks) * recvcount * elem_sz;
+        scale_avg(st.ring_accum[rank].data() + owned_off, recvcount, datatype, nranks);
+    }
 
     // Final phase-transition barrier so all ranks have finished their last step
     // before any rank reads from a predecessor's ring_accum below.

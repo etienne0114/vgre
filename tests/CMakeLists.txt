@@ -463,6 +463,12 @@ target_link_libraries(test_nccl_ring_allreduce PRIVATE vgre)
 add_test(NAME NCCLRingAllReduce COMMAND test_nccl_ring_allreduce)
 set_tests_properties(NCCLRingAllReduce PROPERTIES TIMEOUT 60)
 
+# NCCL ReduceScatter — flat-barrier + ring path correctness
+add_executable(test_nccl_reduce_scatter unit/test_nccl_reduce_scatter.cpp)
+target_link_libraries(test_nccl_reduce_scatter PRIVATE vgre)
+add_test(NAME NCCLReduceScatter COMMAND test_nccl_reduce_scatter)
+set_tests_properties(NCCLReduceScatter PROPERTIES TIMEOUT 60)
+
 # PTX warp shuffle emulation — group-aware permutation network (QUEUE-10)
 # Self-contained: provides its own JIT runtime stubs; does not link vgre.
 add_executable(test_warp_shuffle unit/test_warp_shuffle.cpp)
