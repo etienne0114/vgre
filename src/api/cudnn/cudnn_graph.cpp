@@ -96,22 +96,49 @@ static FusionKind detectFusion(const BackendNode& primary,
                                 const BackendNode& secondary,
                                 const std::vector<uintptr_t>& allOps,
                                 size_t primaryIdx) {
-    // Check that no OTHER op reads the primary's output tensor (single-consumer check)
-    // We approximate this by verifying that the secondary is the only consumer.
-    // In practice cuDNN graphs are DAGs and this check is conservative.
+    // Extract the primary op's output tensor descriptor ID using the correct
+    // per-op-type attribute number.  Attribute 303 does not exist in the spec;
+    // use the real values:
+    //   CONV_FWD output   → attr 42 (CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_Y)
+    //   MATMUL   output   → attr 62 (CUDNN_ATTR_OPERATION_MATMUL_CDESC)
+    //   NORM_FWD output   → attr 701 (CUDNN_ATTR_OPERATION_NORM_FWD_YDESC)
     uintptr_t primaryOutTensor = 0;
     {
-        // Extract primary output tensor ID from known attribute slots
-        auto it = primary.attrs.end(); // placeholder — output tensor analysis done via shared tensor registry
-        (void)it;
-        if (it == primary.attrs.end()) {
-            // Use a generic "output" attribute (attr 303 = yDesc for conv/matmul/norm)
-            auto ito = primary.attrs.find(303);
+        using T = cudnnBackendDescriptorType_t;
+        T pt = static_cast<T>(primary.type);
+        int outAttr = -1;
+        if (pt == CUDNN_BACKEND_OPERATION_CONVOLUTION_FORWARD_DESCRIPTOR)
+            outAttr = 42;   // CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_Y
+        else if (pt == CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
+            outAttr = 62;   // CUDNN_ATTR_OPERATION_MATMUL_CDESC
+        else if (pt == CUDNN_BACKEND_OPERATION_NORM_FORWARD_DESCRIPTOR)
+            outAttr = 701;  // CUDNN_ATTR_OPERATION_NORM_FWD_YDESC
+
+        if (outAttr >= 0) {
+            auto ito = primary.attrs.find(outAttr);
             if (ito != primary.attrs.end() && !ito->second.empty())
-                primaryOutTensor = ito->second[0];
+                primaryOutTensor = static_cast<uintptr_t>(ito->second[0]);
         }
     }
-    (void)primaryOutTensor; // used for consumer analysis below
+
+    // Single-consumer check: if we found the output tensor ID, verify that no
+    // node OTHER than secondary uses it as an input.  If another node reads it,
+    // fusing would skip a required intermediate write → incorrect results.
+    // secondary is always at primaryIdx+1 (caller iterates consecutive pairs).
+    if (primaryOutTensor != 0) {
+        const size_t secondaryIdx = primaryIdx + 1;
+        for (size_t j = 0; j < allOps.size(); ++j) {
+            if (j == primaryIdx || j == secondaryIdx) continue;
+            auto nit = g_backendNodes.find(allOps[j]);
+            if (nit == g_backendNodes.end()) continue;
+            for (const auto& kv : nit->second.attrs) {
+                for (uint64_t v : kv.second) {
+                    if (static_cast<uintptr_t>(v) == primaryOutTensor)
+                        return FusionKind::NONE; // multiple consumers — cannot fuse
+                }
+            }
+        }
+    }
 
     // Pattern matching by operation type pair
     using T = cudnnBackendDescriptorType_t;
@@ -143,7 +170,6 @@ static FusionKind detectFusion(const BackendNode& primary,
         (st == CUDNN_BACKEND_OPERATION_ACTIVATION_FORWARD_DESCRIPTOR))
         return FusionKind::NORM_ACTIVATION;
 
-    (void)allOps; (void)primaryIdx;
     return FusionKind::NONE;
 }
 
