@@ -66,8 +66,33 @@ cudnnStatus_t cudnnGetConvolutionForwardWorkspaceSize(
     cudnnConvolutionDescriptor_t convDesc,
     cudnnTensorDescriptor_t yDesc, int algo, size_t* size)
 {
-    if (size) *size = 0;
-    (void)xDesc; (void)wDesc; (void)convDesc; (void)yDesc; (void)algo;
+    if (!size) return CUDNN_STATUS_INVALID_VALUE;
+    // Workspace is only needed for im2col-based algorithms.
+    // im2col buffer: (N × outH × outW) rows × (C × KH × KW) cols of float.
+    // This matches the buffer allocated internally in cudnnConvolutionForward.
+    auto* xt = (TensorDesc*)xDesc;
+    auto* ft = (FilterDesc*)wDesc;
+    auto* cv = (ConvDesc*)convDesc;
+    auto* yt = (TensorDesc*)yDesc;
+    if (!xt || !ft || !cv || !yt) { *size = 0; return CUDNN_STATUS_SUCCESS; }
+
+    // GEMM / DIRECT algorithms for 1×1 convolutions: no im2col workspace.
+    if (ft->r == 1 && ft->s == 1 &&
+        (algo == CUDNN_CONVOLUTION_FWD_ALGO_GEMM ||
+         algo == CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM)) {
+        *size = 0;
+        return CUDNN_STATUS_SUCCESS;
+    }
+    // Winograd: filter transform buffer G·W·G^T — K × (C/G) × 36 floats.
+    if (algo == CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD && ft->r == 3 && ft->s == 3) {
+        *size = static_cast<size_t>(ft->k) * ft->c * 36 * sizeof(float);
+        return CUDNN_STATUS_SUCCESS;
+    }
+    // IMPLICIT_PRECOMP_GEMM / DIRECT: im2col buffer.
+    // im2col row count = N × outH × outW; col count = C × KH × KW.
+    size_t im2colRows = static_cast<size_t>(xt->n) * yt->h * yt->w;
+    size_t im2colCols = static_cast<size_t>(xt->c) * ft->r * ft->s;
+    *size = im2colRows * im2colCols * sizeof(float);
     return CUDNN_STATUS_SUCCESS;
 }
 

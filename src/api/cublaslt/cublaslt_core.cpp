@@ -2,6 +2,8 @@
 // cublasLtMatmul execution lives in cublaslt_matmul.cpp.
 
 #include "cublaslt_state.h"
+#include <algorithm>
+#include <cstdint>
 
 using namespace vgre_lt;
 
@@ -302,22 +304,73 @@ cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t /*handle*/,
     }
     g_algoCache.put(key);
 
-    // Algorithm workspace sizes derived from matrix dimensions in key (m, n, k).
-    // Larger problems benefit from larger tiles → more workspace.
+    // Workspace = 2 × (TM×TK A-tile  +  TK×TN B-tile) double-buffered.
+    // wavesCount = ceil(tilesM × tilesN / numSMs) — lower means more SM parallelism.
+    // Tile shapes model Ampere tensor-core threadblock sizes (m16n8k8 warp tile).
+    // numSMs = 108 (A100); consumer Ampere (GA104) has 46; use conservative 108.
     static constexpr int kMaxAlgos = 6;
-    static const size_t kWorkspaceSizes[kMaxAlgos] = {0, 1<<16, 1<<18, 1<<20, 1<<22, 1<<24};
-    static const float  kWavesCounts  [kMaxAlgos] = {1.0f, 1.0f, 0.9f, 0.8f, 0.7f, 0.6f};
+    static constexpr int kNumSMs   = 108;      // Ampere SM count upper-bound
+    struct TileShape { int m, n, k; };
+    static constexpr TileShape kTiles[kMaxAlgos] = {
+        {  0,   0,  0},   // algo 0: no tiling — direct row-by-row (no workspace)
+        { 32,  32, 32},   // algo 1: small tiles
+        { 64,  64, 32},   // algo 2: medium tiles
+        {128,  64, 32},   // algo 3: large-M tiles
+        {128, 128, 32},   // algo 4: square large tiles
+        {256, 128, 32},   // algo 5: maximum tiles (stream-K)
+    };
 
-    int64_t problem = static_cast<int64_t>(key.m) * key.n * key.k;
-    int bestFirst = (problem > 1000000) ? 2 : (problem > 100000) ? 1 : 0;
+    // Per-element sizes for A and B (use dtypeA/dtypeB from key, default to 4).
+    static const int kElemSizes[8] = {4, 8, 2, 2, 1, 2, 4, 8}; // indexed by cudaDataType_t low bits
+    int esA = (key.dtypeA >= 0 && key.dtypeA < 8) ? kElemSizes[key.dtypeA] : 4;
+    int esB = (key.dtypeB >= 0 && key.dtypeB < 8) ? kElemSizes[key.dtypeB] : 4;
+
+    // Build per-algo workspace size and waves count, then sort by quality.
+    size_t workspaceSizes[kMaxAlgos];
+    float  wavesCounts  [kMaxAlgos];
+
+    for (int i = 0; i < kMaxAlgos; ++i) {
+        const auto &t = kTiles[i];
+        if (t.m == 0) {
+            // No-workspace direct algorithm — slowest but zero memory.
+            workspaceSizes[i] = 0;
+            // Serial row-by-row: waves = m*n (one wave per output element, conceptually).
+            int64_t mn = static_cast<int64_t>(key.m) * key.n;
+            wavesCounts[i] = static_cast<float>((mn > 0 ? mn : 1LL) / 256);
+        } else {
+            // Double-buffered tile workspace: 2 × (A-tile + B-tile).
+            workspaceSizes[i] = 2ULL * (
+                static_cast<size_t>(t.m) * t.k * esA +
+                static_cast<size_t>(t.k) * t.n * esB);
+            // Wave count: total tiles / SMs, minimum 1.
+            int tilesM = (key.m + t.m - 1) / t.m;
+            int tilesN = (key.n + t.n - 1) / t.n;
+            float waves = static_cast<float>((int64_t)tilesM * tilesN) / kNumSMs;
+            wavesCounts[i] = (waves < 1.0f) ? 1.0f : waves;
+        }
+    }
+
+    // Rank algorithms: prefer lowest wavesCount (highest SM utilisation).
+    // Among equal wavesCount, prefer smaller workspace (less memory pressure).
+    // The no-workspace algo (index 0, tile {0,0,0}) sorts last: worst for large
+    // problems since it cannot overlap computation and memory access.
+    int order[kMaxAlgos];
+    for (int i = 0; i < kMaxAlgos; ++i) order[i] = i;
+    std::sort(order, order + kMaxAlgos, [&](int a, int b) {
+        bool aNoWs = (kTiles[a].m == 0);
+        bool bNoWs = (kTiles[b].m == 0);
+        if (aNoWs != bNoWs) return bNoWs; // no-workspace sorts last
+        if (wavesCounts[a] != wavesCounts[b]) return wavesCounts[a] < wavesCounts[b];
+        return workspaceSizes[a] < workspaceSizes[b];
+    });
 
     int count = std::min(requestedAlgoCount, kMaxAlgos);
     for (int i = 0; i < count; ++i) {
-        int slot = (bestFirst + i) % kMaxAlgos;
+        int slot = order[i];
         heuristicResultsArray[i].algo          = static_cast<uint64_t>(slot);
-        heuristicResultsArray[i].workspaceSize = kWorkspaceSizes[slot];
+        heuristicResultsArray[i].workspaceSize = workspaceSizes[slot];
         heuristicResultsArray[i].state         = CUBLAS_STATUS_SUCCESS;
-        heuristicResultsArray[i].wavesCount    = kWavesCounts[i < kMaxAlgos ? i : kMaxAlgos-1];
+        heuristicResultsArray[i].wavesCount    = wavesCounts[slot];
         for (int j = 0; j < 4; ++j) heuristicResultsArray[i].reserved[j] = 0;
     }
     *returnAlgoCount = count;

@@ -146,14 +146,23 @@ cudaError_t CUDAInterceptor::deviceGetAttribute(int *value, int attr,
   case 35: // cudaDevAttrTccDriver
     *value = 0;
     return cudaSuccess;
-  case 36: // cudaDevAttrMemoryClockRate
-    *value = dp.clockRate;
+  case 36: // cudaDevAttrMemoryClockRate (kHz)
+    // Memory clock for Ampere GA10x: HBM2e at 1215 MHz = 1215000 kHz.
+    // Consumer GDDR6X (GA104): 19 Gbps / 2 = 9500 MHz effective → 9500000 kHz.
+    // Derive conservatively from compute clock × 6 (typical GDDR6X ratio).
+    *value = dp.clockRate * 6;
     return cudaSuccess;
-  case 37: // cudaDevAttrGlobalMemoryBusWidth
-    *value = 256;
+  case 37: // cudaDevAttrGlobalMemoryBusWidth (bits)
+    // Ampere GA102/GA104: 256-bit GDDR6X bus width.
+    // Use maxSharedMemPerSM as a proxy: >80KB → HBM2e 5120-bit, else GDDR6X 256-bit.
+    *value = (dp.maxSharedMemPerSM > 81920) ? 5120 : 256;
     return cudaSuccess;
-  case 38: // cudaDevAttrL2CacheSize
-    *value = 4 * 1024 * 1024;
+  case 38: // cudaDevAttrL2CacheSize (bytes)
+    // Ampere A100: 40 MB. GA102 (RTX 3090): 6 MB. GA104 (RTX 3070): 4 MB.
+    // Approximate: A100 has maxSharedMemPerSM=167936; consumer Ampere has 102400.
+    *value = (dp.maxSharedMemPerSM > 140000) ? (40 * 1024 * 1024)
+           : (dp.maxSharedMemPerSM > 80000)  ? ( 6 * 1024 * 1024)
+           :                                    ( 4 * 1024 * 1024);
     return cudaSuccess;
   case 75: // cudaDevAttrComputeCapabilityMajor
     *value = dp.major;
@@ -162,7 +171,9 @@ cudaError_t CUDAInterceptor::deviceGetAttribute(int *value, int attr,
     *value = dp.minor;
     return cudaSuccess;
   case 39: // cudaDevAttrMaxThreadsPerMultiProcessor
-    *value = dp.maxThreadsPerBlock * dp.multiProcessorCount;
+    // Threads per SM (not per device). Must use maxThreadsPerSM, not the
+    // product maxThreadsPerBlock×multiProcessorCount which gives per-GPU total.
+    *value = dp.maxThreadsPerSM;
     return cudaSuccess;
   case 40: // cudaDevAttrAsyncEngineCount
     *value = 1;
@@ -266,8 +277,68 @@ cudaError_t CUDAInterceptor::deviceGetAttribute(int *value, int attr,
   case 74: // cudaDevAttrMaxTexture2DMipmappedWidth
     *value = 1 << 15;
     return cudaSuccess;
+  case 77: // cudaDevAttrMaxSharedMemoryPerMultiprocessor
+    // maxSharedMemPerSM is populated in DeviceProperties with the correct Ampere value.
+    *value = dp.maxSharedMemPerSM;
+    return cudaSuccess;
+  case 78: // cudaDevAttrMaxRegistersPerMultiprocessor
+    *value = dp.maxRegsPerSM;
+    return cudaSuccess;
+  case 79: // cudaDevAttrManagedMemory
+    *value = 1;
+    return cudaSuccess;
+  case 80: // cudaDevAttrIsMultiGpuBoard
+    *value = 0;
+    return cudaSuccess;
+  case 81: // cudaDevAttrMultiGpuBoardGroupID
+    *value = 0;
+    return cudaSuccess;
+  case 82: // cudaDevAttrHostNativeAtomicSupported
+    *value = 1;
+    return cudaSuccess;
+  case 83: // cudaDevAttrSingleToDoublePrecisionPerfRatio
+    *value = 2; // Ampere: 1:2 ratio for FP64 vs FP32
+    return cudaSuccess;
+  case 84: // cudaDevAttrPageableMemoryAccess
+    *value = 0;
+    return cudaSuccess;
+  case 85: // cudaDevAttrConcurrentManagedAccess
+    *value = 1;
+    return cudaSuccess;
+  case 86: // cudaDevAttrComputePreemptionSupported
+    *value = 1;
+    return cudaSuccess;
+  case 87: // cudaDevAttrCanUseHostPointerForRegisteredMem
+    *value = 1;
+    return cudaSuccess;
+  case 90: // cudaDevAttrCooperativeLaunch
+    *value = 1;
+    return cudaSuccess;
+  case 91: // cudaDevAttrCooperativeMultiDeviceLaunch
+    *value = 0;
+    return cudaSuccess;
+  case 93: // cudaDevAttrMaxSharedMemoryPerBlockOptin (with cudaFuncSetAttribute opt-in)
+    // Ampere allows up to 99 KB / 164 KB with opt-in.
+    *value = dp.maxSharedMemPerSM;
+    return cudaSuccess;
+  case 94: // cudaDevAttrCanFlushRemoteWrites
+    *value = 0;
+    return cudaSuccess;
+  case 95: // cudaDevAttrHostRegisterSupported
+    *value = 1;
+    return cudaSuccess;
+  case 96: // cudaDevAttrPageableMemoryAccessUsesHostPageTables
+    *value = 0;
+    return cudaSuccess;
+  case 97: // cudaDevAttrDirectManagedMemAccessFromHost
+    *value = 0;
+    return cudaSuccess;
   default:
-    return cudaErrorInvalidValue;
+    // Return 0 for unknown/unimplemented attrs rather than an error.
+    // Many codes iterate through attr IDs to probe capabilities; an error
+    // would break those loops even when the capability is simply absent.
+    *value = 0;
+    return cudaSuccess;
   }
 }
 

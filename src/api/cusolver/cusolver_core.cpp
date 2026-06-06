@@ -1351,11 +1351,14 @@ cusolverStatus_t cusolverDnCheevd(cusolverDnHandle_t /*h*/, char jobz, char uplo
                                    float *work, int lwork, int *devInfo) {
     if (!A || !W || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
     if (devInfo) *devInfo = 0;
-    int lrwork = 1 + 5 * n + 2 * n * n;
-    int liwork = 3 + 5 * n;
-    std::vector<float> rwork(lrwork);
-    std::vector<int> iwork(liwork);
-    cheevd_(&jobz, &uplo, &n, A, &lda, W, work, &lwork, rwork.data(), &lrwork, iwork.data(), &liwork, devInfo);
+    char jz = (jobz == 'V' || jobz == 'v') ? 'V' : 'N';
+    // LAPACK cheevd rwork/iwork per spec: JOBZ='V': lrwork=1+5n+2n², liwork=3+5n.
+    //                                    JOBZ='N': lrwork=n,            liwork=1.
+    int lrwork = (jz == 'V') ? (1 + 5*n + 2*n*n) : n;
+    int liwork = (jz == 'V') ? (3 + 5*n) : 1;
+    std::vector<float> rwork(static_cast<size_t>(lrwork > 0 ? lrwork : 1));
+    std::vector<int> iwork(static_cast<size_t>(liwork));
+    cheevd_(&jz, &uplo, &n, A, &lda, W, work, &lwork, rwork.data(), &lrwork, iwork.data(), &liwork, devInfo);
     return CUSOLVER_STATUS_SUCCESS;
 }
 cusolverStatus_t cusolverDnZheevd(cusolverDnHandle_t /*h*/, char jobz, char uplo,
@@ -1363,11 +1366,12 @@ cusolverStatus_t cusolverDnZheevd(cusolverDnHandle_t /*h*/, char jobz, char uplo
                                    double *work, int lwork, int *devInfo) {
     if (!A || !W || n <= 0 || lda < n) return CUSOLVER_STATUS_INVALID_VALUE;
     if (devInfo) *devInfo = 0;
-    int lrwork = 1 + 5 * n + 2 * n * n;
-    int liwork = 3 + 5 * n;
-    std::vector<double> rwork(lrwork);
-    std::vector<int> iwork(liwork);
-    zheevd_(&jobz, &uplo, &n, A, &lda, W, work, &lwork, rwork.data(), &lrwork, iwork.data(), &liwork, devInfo);
+    char jz = (jobz == 'V' || jobz == 'v') ? 'V' : 'N';
+    int lrwork = (jz == 'V') ? (1 + 5*n + 2*n*n) : n;
+    int liwork = (jz == 'V') ? (3 + 5*n) : 1;
+    std::vector<double> rwork(static_cast<size_t>(lrwork > 0 ? lrwork : 1));
+    std::vector<int> iwork(static_cast<size_t>(liwork));
+    zheevd_(&jz, &uplo, &n, A, &lda, W, work, &lwork, rwork.data(), &lrwork, iwork.data(), &liwork, devInfo);
     return CUSOLVER_STATUS_SUCCESS;
 }
 

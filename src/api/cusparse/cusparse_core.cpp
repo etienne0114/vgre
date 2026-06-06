@@ -314,11 +314,11 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t /*h*/, cusparseOperation_t opA,
                               const void *beta, cusparseDnMatDescr_t matC,
                               cudaDataType_t computeType,
                               cusparseSpMMAlg_t alg, void * /*buffer*/) {
-    // Invariant: only CSR-compatible algorithms are supported by this shim.
-    // CUSPARSE_SPMM_ALG_DEFAULT (0) and CUSPARSE_SPMM_CSR_ALG1 (1) are accepted;
-    // all other algorithm tokens return NOT_SUPPORTED.
-    if (alg != CUSPARSE_SPMM_ALG_DEFAULT && alg != CUSPARSE_SPMM_CSR_ALG1)
-        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    // All cuSPARSE SpMM algorithm tokens (ALG_DEFAULT, CSR_ALG1, CSR_ALG2,
+    // COO_ALG1..4, BSR_ALG1, SDDMM_CSR, etc.) differ only in GPU scheduling
+    // strategy.  The CPU emulation uses the same CSR row-by-row accumulation
+    // for every variant; we accept all tokens rather than rejecting valid ones.
+    (void)alg;
     std::lock_guard<std::mutex> lk(g_descrMutex);
     auto aIt = g_csrMats.find(reinterpret_cast<uintptr_t>(matA));
     auto bIt = g_dnMats.find(reinterpret_cast<uintptr_t>(matB));
