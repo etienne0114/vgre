@@ -92,6 +92,13 @@ cublasStatus_t cublasCher2k_v2(cublasHandle_t, cublasFillMode_t, cublasOperation
 cublasStatus_t cublasZher2k_v2(cublasHandle_t, cublasFillMode_t, cublasOperation_t,
     int, int, const cuDoubleComplex*, const cuDoubleComplex*, int,
     const cuDoubleComplex*, int, const double*, cuDoubleComplex*, int);
+// Hermitian Level-2
+cublasStatus_t cublasChemv_v2(cublasHandle_t, cublasFillMode_t,
+    int, const cuComplex*, const cuComplex*, int,
+    const cuComplex*, int, const cuComplex*, cuComplex*, int);
+cublasStatus_t cublasZhemv_v2(cublasHandle_t, cublasFillMode_t,
+    int, const cuDoubleComplex*, const cuDoubleComplex*, int,
+    const cuDoubleComplex*, int, const cuDoubleComplex*, cuDoubleComplex*, int);
 } // extern "C"
 
 static cuComplex mc(float x, float y) { return {x, y}; }
@@ -450,6 +457,32 @@ int main() {
             &alpha, A, 2, B, 2, &beta, C, 2);
         CHECK("Zhemm left-upper diag", zeq(C[0], 3, 0) && zeq(C[3], 5, 0));
         CHECK("Zhemm left-upper off-diag", zeq(C[1], 1, -2) && zeq(C[2], 1, 2));
+    }
+
+    // 28. CHEMV: y = A*x for A = [[3, 1+2i],[1-2i, 5]] (col-major upper), x = [1, i]
+    // Expected: y[0] = 3*(1) + (1+2i)*(i) = 3 + (-2+i) = 1+i
+    //           y[1] = (1-2i)*(1) + 5*(i) = 1+3i
+    {
+        cuComplex alpha = mc(1, 0), beta = mc(0, 0);
+        cuComplex A[] = {mc(3,0), mc(0,0), mc(1,2), mc(5,0)};  // col-major upper
+        cuComplex x[] = {mc(1,0), mc(0,1)};
+        cuComplex y[2] = {};
+        cublasChemv_v2(handle, CUBLAS_FILL_MODE_UPPER, 2,
+            &alpha, A, 2, x, 1, &beta, y, 1);
+        CHECK("Chemv upper y[0]", ceq(y[0], 1.f, 1.f));
+        CHECK("Chemv upper y[1]", ceq(y[1], 1.f, 3.f));
+    }
+
+    // 29. ZHEMV: same matrix, double precision
+    {
+        cuDoubleComplex alpha = mz(1, 0), beta = mz(0, 0);
+        cuDoubleComplex A[] = {mz(3,0), mz(0,0), mz(1,2), mz(5,0)};
+        cuDoubleComplex x[] = {mz(1,0), mz(0,1)};
+        cuDoubleComplex y[2] = {};
+        cublasZhemv_v2(handle, CUBLAS_FILL_MODE_UPPER, 2,
+            &alpha, A, 2, x, 1, &beta, y, 1);
+        CHECK("Zhemv upper y[0]", zeq(y[0], 1.0, 1.0));
+        CHECK("Zhemv upper y[1]", zeq(y[1], 1.0, 3.0));
     }
 
     cublasDestroy_v2(handle);

@@ -504,10 +504,11 @@ cublasStatus_t cublasChemv_v2(cublasHandle_t handle, cublasFillMode_t uplo,
         float sr = 0.f, si = 0.f;
         for (int j = 0; j < n; ++j) {
             float ar_, aim;
+            // column-major: element (row,col) at row + col*lda
             if ((upper && j >= i) || (!upper && j <= i)) {
-                ar_ = A[i*lda+j].x; aim = A[i*lda+j].y;
+                ar_ = A[i + j*lda].x; aim = A[i + j*lda].y;
             } else {
-                ar_ = A[j*lda+i].x; aim = -A[j*lda+i].y;
+                ar_ = A[j + i*lda].x; aim = -A[j + i*lda].y;
             }
             if (i == j) aim = 0.f; // diagonal of Hermitian matrix is real
             float xr = x[j*incx].x, xi_ = x[j*incx].y;
@@ -535,10 +536,11 @@ cublasStatus_t cublasZhemv_v2(cublasHandle_t handle, cublasFillMode_t uplo,
         double sr = 0.0, si = 0.0;
         for (int j = 0; j < n; ++j) {
             double ar_, aim;
+            // column-major: element (row,col) at row + col*lda
             if ((upper && j >= i) || (!upper && j <= i)) {
-                ar_ = A[i*lda+j].x; aim = A[i*lda+j].y;
+                ar_ = A[i + j*lda].x; aim = A[i + j*lda].y;
             } else {
-                ar_ = A[j*lda+i].x; aim = -A[j*lda+i].y;
+                ar_ = A[j + i*lda].x; aim = -A[j + i*lda].y;
             }
             if (i == j) aim = 0.0;
             double xr = x[j*incx].x, xi_ = x[j*incx].y;
