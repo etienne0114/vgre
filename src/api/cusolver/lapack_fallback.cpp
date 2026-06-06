@@ -937,95 +937,117 @@ void zheevd_(const char *jobz, const char *uplo, const int *n,
 
 } // extern "C"  — closed here so vgre_sygvd template has C++ linkage
 
-// ── Generalized symmetric eigensolver: A*x = λ*B*x (itype=1), real ───────────
-// Reduction algorithm (Golub & Van Loan §8.7.1):
-//   1. Cholesky factorize SPD B → L*L^T  (ssygvd_ calls spotrf_ internally)
-//   2. Form A' = L^{-1} * A * L^{-T} via two triangular solves
-//   3. Solve standard symmetric eigenproblem A'*y = λ*y (syevd)
-//   4. Back-transform: x_k = L^{-T} * y_k
-// itypes 2/3 reduce to itype 1 by reformulating; all SPD-B problems are handled.
+// ── Generalized symmetric eigensolver (all three itypes), real ───────────────
+// Reduction to standard form via Cholesky factorization B = L*L^T (Golub &
+// Van Loan §8.7.1).  With L lower-triangular and y the standard eigenvector:
+//
+//   itype=1: A*x=λ*B*x  → A' = L^{-1}*A*L^{-T},  x = L^{-T}*y
+//   itype=2: A*B*x=λ*x  → A' = L^T*A*L,           x = L^{-T}*y
+//   itype=3: B*A*x=λ*x  → A' = L^T*A*L,           x = L*y
+//
+// Note: itypes 2 and 3 produce identical reduced matrix L^T*A*L; only the
+// back-transform differs (L^{-T} vs L).
 template<typename T>
 static void vgre_sygvd(int itype, const char *jobz, const char *uplo,
                         int N, T *A, int LDA, T *B, int LDB, T *W, int *info)
 {
     *info = 0;
-    bool lower  = (*uplo == 'L' || *uplo == 'l');
-    bool wantV  = (*jobz == 'V' || *jobz == 'v');
+    bool lower = (*uplo == 'L' || *uplo == 'l');
+    bool wantV = (*jobz == 'V' || *jobz == 'v');
 
-    // Step 1: Cholesky factorize B (lower) → B = L*L^T stored in lower triangle
+    // Step 1: Cholesky factorize B → L*L^T (lower triangle of Bc holds L)
     std::vector<T> Bc(static_cast<size_t>(N) * N);
     for (int j = 0; j < N; ++j)
         for (int i = 0; i < N; ++i)
             Bc[i + j * N] = B[i + j * LDB];
-    // Force lower triangular Cholesky regardless of uplo for simplicity
     {
         const char lo = 'L';
         vgre_potrf<T>(&lo, N, Bc.data(), N, info);
         if (*info != 0) return;
     }
 
-    // Step 2: Copy A into working buffer, symmetrize
+    // Step 2: Copy A into working buffer and symmetrize from stored triangle
     std::vector<T> Ac(static_cast<size_t>(N) * N);
     for (int j = 0; j < N; ++j)
         for (int i = 0; i < N; ++i) {
             if ((lower && i >= j) || (!lower && i <= j))
                 Ac[i + j * N] = A[i + j * LDA];
             else
-                Ac[i + j * N] = A[j + i * LDA];  // mirror to form full symmetric
+                Ac[i + j * N] = A[j + i * LDA];
         }
 
-    // Step 3: Form A' = L^{-1} * A * L^{-T} using two triangular solves.
-    // For itype=1 (A*x=λ*B*x):
-    //   a) Solve L * C = A  column-by-column:  C = L^{-1} * A
-    //   b) Solve L * Ap^T = C^T  (equivalently A' = C * L^{-T}):
-    //      Ap[:,k] = L^{-T} * C[:,k]
-    {
-        // (a) C = L^{-1} * A: forward-substitute each column of A
+    // Step 3: Reduce A to standard symmetric form A'
+    if (itype == 1) {
+        // A' = L^{-1} * A * L^{-T}
+        // (a) C = L^{-1} * A: forward-substitute each column
         std::vector<T> C(static_cast<size_t>(N) * N);
-        for (int col = 0; col < N; ++col) {
+        for (int col = 0; col < N; ++col)
             for (int i = 0; i < N; ++i) {
                 T s = Ac[i + col * N];
                 for (int k = 0; k < i; ++k) s -= Bc[i + k * N] * C[k + col * N];
                 C[i + col * N] = s / Bc[i + i * N];
             }
-        }
-        // (b) A' = C * L^{-T}: back-substitute each row of C
-        for (int row = 0; row < N; ++row) {
-            for (int j = N - 1; j >= 0; --j) {
-                T s = C[row + j * N];
-                for (int k = j + 1; k < N; ++k) s -= Bc[k + j * N] * Ac[row + k * N];
-                Ac[row + j * N] = s / Bc[j + j * N];
+        // (b) A' = C * L^{-T}: solve L * A'[row,:]^T = C[row,:]^T per row (forward-sub)
+        for (int row = 0; row < N; ++row)
+            for (int i = 0; i < N; ++i) {
+                T s = C[row + i * N];
+                for (int k = 0; k < i; ++k) s -= Bc[i + k * N] * Ac[row + k * N];
+                Ac[row + i * N] = s / Bc[i + i * N];
             }
-        }
-        // Symmetrize A' (small rounding errors can break symmetry)
-        for (int i = 0; i < N; ++i)
-            for (int j = i + 1; j < N; ++j) {
-                T sym = (Ac[i + j * N] + Ac[j + i * N]) * T(0.5);
-                Ac[i + j * N] = Ac[j + i * N] = sym;
+    } else {
+        // itype 2 or 3: A' = L^T * A * L
+        // (a) C = A * L: multiply A by lower-triangular L on the right
+        std::vector<T> C(static_cast<size_t>(N) * N, T(0));
+        for (int col = 0; col < N; ++col)
+            for (int row = 0; row < N; ++row)
+                for (int k = col; k < N; ++k)   // L is lower: L[k,col] = Bc[k + col*N]
+                    C[row + col * N] += Ac[row + k * N] * Bc[k + col * N];
+        // (b) A' = L^T * C: multiply C by L^T on the left (L^T[row,k] = Bc[k + row*N])
+        for (int col = 0; col < N; ++col)
+            for (int row = 0; row < N; ++row) {
+                T s = T(0);
+                for (int k = row; k < N; ++k)   // L^T[row,k] = L[k,row] = Bc[k + row*N]
+                    s += Bc[k + row * N] * C[k + col * N];
+                Ac[row + col * N] = s;
             }
     }
 
-    // Step 4: Solve standard symmetric eigenproblem A'*y = λ*y
-    const char lo = 'L';
+    // Symmetrize A' to eliminate rounding asymmetry
+    for (int i = 0; i < N; ++i)
+        for (int j = i + 1; j < N; ++j) {
+            T sym = (Ac[i + j * N] + Ac[j + i * N]) * T(0.5);
+            Ac[i + j * N] = Ac[j + i * N] = sym;
+        }
+
+    // Step 4: Standard symmetric eigenproblem A'*y = λ*y
     vgre_syevd<T>(jobz, N, Ac.data(), N, W, info);
     if (*info != 0) return;
 
-    // Step 5: Back-transform eigenvectors x = L^{-T} * y (stored in Ac columns)
+    // Step 5: Back-transform eigenvectors (Ac columns hold y after syevd)
     if (wantV) {
-        for (int col = 0; col < N; ++col) {
-            for (int i = N - 1; i >= 0; --i) {
-                T s = Ac[i + col * N];
-                for (int k = i + 1; k < N; ++k) s -= Bc[k + i * N] * Ac[k + col * N];
-                Ac[i + col * N] = s / Bc[i + i * N];
-            }
+        if (itype == 1 || itype == 2) {
+            // x = L^{-T} * y: back-substitute through L^T (lower)
+            for (int col = 0; col < N; ++col)
+                for (int i = N - 1; i >= 0; --i) {
+                    T s = Ac[i + col * N];
+                    for (int k = i + 1; k < N; ++k) s -= Bc[k + i * N] * Ac[k + col * N];
+                    Ac[i + col * N] = s / Bc[i + i * N];
+                }
+        } else {
+            // itype=3: x = L * y  (DTRMM lower-triangular multiply)
+            // Process rows bottom-to-top so we never read an already-updated entry:
+            // row i only uses y[0..i], so overwriting row N-1 first is safe.
+            for (int col = 0; col < N; ++col)
+                for (int i = N - 1; i >= 0; --i) {
+                    T s = T(0);
+                    for (int k = 0; k <= i; ++k) s += Bc[i + k * N] * Ac[k + col * N];
+                    Ac[i + col * N] = s;
+                }
         }
-        // Write back eigenvectors into A
         for (int j = 0; j < N; ++j)
             for (int i = 0; i < N; ++i)
                 A[i + j * LDA] = Ac[i + j * N];
     }
-
-    (void)itype;  // itype 2 & 3 are aliases for itype=1 for SPD B
 }
 
 extern "C" {
