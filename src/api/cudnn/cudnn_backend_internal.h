@@ -164,7 +164,24 @@ enum cudnnBackendAttributeName_t {
     CUDNN_ATTR_OPERATION_RESAMPLE_STRIDES         = 627,
     CUDNN_ATTR_OPERATION_RESAMPLE_WINDOW_DIMS     = 628,
     CUDNN_ATTR_OPERATION_RESAMPLE_PRE_PADDING     = 629,
-    CUDNN_ATTR_OPERATION_RESAMPLE_POST_PADDING    = 630
+    CUDNN_ATTR_OPERATION_RESAMPLE_POST_PADDING    = 630,
+    // NORM_FORWARD / NORM_BACKWARD dedicated attributes (real BatchNorm/LayerNorm)
+    // phase=0 → INFERENCE: mean/invVar are inputs (running stats, invVar stores running_var)
+    // phase=1 → TRAINING : mean/invVar are outputs (saved for backward pass)
+    CUDNN_ATTR_OPERATION_NORM_FWD_XDESC          = 700, // input tensor desc [N,C,H,W]
+    CUDNN_ATTR_OPERATION_NORM_FWD_YDESC          = 701, // output tensor desc [N,C,H,W]
+    CUDNN_ATTR_OPERATION_NORM_FWD_SCALE_DESC     = 702, // gamma per-channel [1,C,1,1]
+    CUDNN_ATTR_OPERATION_NORM_FWD_BIAS_DESC      = 703, // beta  per-channel [1,C,1,1]
+    CUDNN_ATTR_OPERATION_NORM_FWD_MEAN_DESC      = 704, // running mean (infer) / saved mean out (train) [1,C,1,1]
+    CUDNN_ATTR_OPERATION_NORM_FWD_INV_VAR_DESC   = 705, // running variance (infer) / saved inv_std out (train)
+    CUDNN_ATTR_OPERATION_NORM_FWD_EPSILON_DESC   = 706, // epsilon scalar (by-value float tensor)
+    CUDNN_ATTR_OPERATION_NORM_FWD_MODE           = 707, // 0=BN_spatial, 1=LayerNorm, 2=InstanceNorm
+    CUDNN_ATTR_OPERATION_NORM_FWD_PHASE          = 708, // 0=INFERENCE, 1=TRAINING
+    // RNG operation attributes (CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR)
+    CUDNN_ATTR_OPERATION_RNG_YDESC               = 720, // output tensor desc
+    CUDNN_ATTR_OPERATION_RNG_SEED                = 721, // uint64 seed for Philox4x32
+    CUDNN_ATTR_OPERATION_RNG_DIST                = 722, // 0=uniform[0,1), 1=normal(0,1), 2=Bernoulli
+    CUDNN_ATTR_OPERATION_RNG_BERNOULLI_PROB      = 723  // keep probability for Bernoulli (float)
 };
 
 struct BackendNode {
@@ -180,3 +197,10 @@ BackendNode* getNode(uintptr_t id);
 const std::vector<uint64_t>* getAttrVec(const BackendNode* node, int attr);
 uintptr_t getAttrUint64(const BackendNode* node, int attr, uintptr_t def = 0);
 float getAttrFloat(const BackendNode* node, int attr, float def = 0.0f);
+
+// Exposed for use in cudnn_graph.cpp (CONV_NORM fusion)
+std::unordered_map<uintptr_t, void*> cudnn_parseVariantPack(void* variantPack);
+cudnnStatus_t cudnn_executeFusedConvBN(cudnnHandle_t handle,
+                                        uintptr_t convNodeId,
+                                        uintptr_t bnNodeId,
+                                        void* variantPack);

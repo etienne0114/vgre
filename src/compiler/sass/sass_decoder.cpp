@@ -491,19 +491,102 @@ static std::string decodeInstruction(uint64_t instr) {
                  "    setp.eq.f32 %%p%u, %%f%u, %%f%u;", rd & 0x7, rs1, rs2);
         return buf;
 
-    // ── Tensor core (HMMA/WMMA) — emit placeholder intrinsic ──────────────
-    case 0x538: // HMMA.884.F32.F32 → wmma.mma.sync.aligned.m16n16k16.row.col.f32.f32
-        snprintf(buf, sizeof(buf),
-                 "    // HMMA_884_F32: wmma matmul rd=%u rs1=%u rs2=%u rs3=%u", rd, rs1, rs2, rs3);
-        return buf;
-    case 0x539: // HMMA.1688 → m16n8k16 variant
-        snprintf(buf, sizeof(buf),
-                 "    // HMMA_1688: wmma m16n8k16 rd=%u rs1=%u rs2=%u rs3=%u", rd, rs1, rs2, rs3);
-        return buf;
-    case 0x53A: // WGMMA — Hopper SM90 tensor core
-        snprintf(buf, sizeof(buf),
-                 "    // WGMMA.SM90 rd=%u rs1=%u rs2=%u", rd, rs1, rs2);
-        return buf;
+    // ── Tensor core (HMMA/WMMA) — emit real PTX wmma.mma.sync instructions ──
+    //
+    // SASS register model for tensor-core ops:
+    //   HMMA.884   (m16n16k16, FP32 acc, FP16 input):
+    //     D[0..7]  = rd..rd+7   (.f32 accumulators — 8 regs)
+    //     A[0..3]  = rs1..rs1+3 (.u32 packed FP16x2 — 4 regs = 8 fp16)
+    //     B[0..3]  = rs2..rs2+3 (.u32 packed FP16x2 — 4 regs = 8 fp16)
+    //     C[0..7]  = rs3..rs3+7 (.f32 accumulators — 8 regs)
+    //
+    //   HMMA.1688  (m16n8k16, FP32 acc, FP16 input, Ampere preferred form):
+    //     D[0..3]  = rd..rd+3   (.f32 — 4 regs)
+    //     A[0..3]  = rs1..rs1+3 (.u32 packed FP16x2 — 4 regs)
+    //     B[0..1]  = rs2..rs2+1 (.u32 packed FP16x2 — 2 regs)
+    //     C[0..3]  = rs3..rs3+3 (.f32 — 4 regs)
+    //
+    //   WGMMA (m64n8k16, Hopper SM90, warpgroup-level):
+    //     Decomposed into 4 × m16n8k16 wmma.mma.sync calls over the warpgroup
+    //     register space (each contributing warp's 4 D regs at rd+i*4).
+    //     A[0..3] / B[0..1] are shared across all four sub-ops.
+    //
+    // Note: A and B live in .u32 register space (packed FP16x2 SASS slots);
+    //       C and D live in .f32 register space.  ptxas treats .u32 and .b32
+    //       as the same 32-bit register class so wmma accepts the %r<n> names.
+    //
+    case 0x538: { // HMMA.884.F32.F32 → wmma.mma.sync.aligned.m16n16k16.row.col.f32.f32
+        // D (8 f32): %f[rd..rd+7]
+        // A (4 u32): %r[rs1..rs1+3]
+        // B (4 u32): %r[rs2..rs2+3]
+        // C (8 f32): %f[rs3..rs3+7]
+        std::string s = "    wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16 ";
+        // D group
+        s += "{%f";  s += std::to_string(rd);
+        for (int i = 1; i < 8; ++i) { s += ", %f"; s += std::to_string(rd + i); }
+        s += "}, ";
+        // A group
+        s += "{%r";  s += std::to_string(rs1);
+        for (int i = 1; i < 4; ++i) { s += ", %r"; s += std::to_string(rs1 + i); }
+        s += "}, ";
+        // B group
+        s += "{%r";  s += std::to_string(rs2);
+        for (int i = 1; i < 4; ++i) { s += ", %r"; s += std::to_string(rs2 + i); }
+        s += "}, ";
+        // C group
+        s += "{%f";  s += std::to_string(rs3);
+        for (int i = 1; i < 8; ++i) { s += ", %f"; s += std::to_string(rs3 + i); }
+        s += "};";
+        return s;
+    }
+    case 0x539: { // HMMA.1688 → wmma.mma.sync.aligned.m16n8k16.row.col.f32.f16
+        // D (4 f32): %f[rd..rd+3]
+        // A (4 u32): %r[rs1..rs1+3]
+        // B (2 u32): %r[rs2..rs2+1]
+        // C (4 f32): %f[rs3..rs3+3]
+        std::string s = "    wmma.mma.sync.aligned.m16n8k16.row.col.f32.f16 ";
+        s += "{%f";  s += std::to_string(rd);
+        for (int i = 1; i < 4; ++i) { s += ", %f"; s += std::to_string(rd + i); }
+        s += "}, ";
+        s += "{%r";  s += std::to_string(rs1);
+        for (int i = 1; i < 4; ++i) { s += ", %r"; s += std::to_string(rs1 + i); }
+        s += "}, ";
+        s += "{%r";  s += std::to_string(rs2);
+        s += ", %r"; s += std::to_string(rs2 + 1);
+        s += "}, ";
+        s += "{%f";  s += std::to_string(rs3);
+        for (int i = 1; i < 4; ++i) { s += ", %f"; s += std::to_string(rs3 + i); }
+        s += "};";
+        return s;
+    }
+    case 0x53A: { // WGMMA (SM90) → 4 × wmma.mma.sync.aligned.m16n8k16.row.col.f32.f16
+        // Hopper warpgroup MMA (m64n8k16) decomposes into 4 sub-warp m16n8k16 ops.
+        // Each contributing warp operates on a 4-register slice of the D accumulator:
+        //   warp 0: D[rd..rd+3],  warp 1: D[rd+4..rd+7]
+        //   warp 2: D[rd+8..rd+11], warp 3: D[rd+12..rd+15]
+        // A and B tile fragments are shared (warpgroup-broadcast assumed).
+        std::string s;
+        for (int w = 0; w < 4; ++w) {
+            uint8_t dBase = static_cast<uint8_t>(rd + w * 4);
+            s += "    wmma.mma.sync.aligned.m16n8k16.row.col.f32.f16 ";
+            s += "{%f"; s += std::to_string(dBase);
+            for (int i = 1; i < 4; ++i) { s += ", %f"; s += std::to_string(dBase + i); }
+            s += "}, ";
+            s += "{%r"; s += std::to_string(rs1);
+            for (int i = 1; i < 4; ++i) { s += ", %r"; s += std::to_string(rs1 + i); }
+            s += "}, ";
+            s += "{%r"; s += std::to_string(rs2);
+            s += ", %r"; s += std::to_string(rs2 + 1);
+            s += "}, ";
+            // C accumulator for each warp slice
+            uint8_t cBase = static_cast<uint8_t>(rs3 + w * 4);
+            s += "{%f"; s += std::to_string(cBase);
+            for (int i = 1; i < 4; ++i) { s += ", %f"; s += std::to_string(cBase + i); }
+            s += "};";
+            if (w < 3) s += "\n";
+        }
+        return s;
+    }
 
     default: {
         // Unknown opcode: emit as a comment, no real instruction
@@ -630,6 +713,8 @@ std::string decodeSassToPtx(const uint8_t* data, size_t size) {
             uint32_t op = extractOpcode(instr);
             uint8_t rd  = extractRd(instr);
             uint8_t rs1 = extractRs1(instr);
+            uint8_t rs2 = extractRs2(instr);
+            uint8_t rs3 = extractRs3(instr);
 
             // Collect branch targets
             if (op == 0x947 || op == 0x94C) branchTargets.insert(rs1);
@@ -656,6 +741,36 @@ std::string decodeSassToPtx(const uint8_t* data, size_t size) {
                 usesU64 = true; maxRD = std::max(maxRD, (uint32_t)rd + 1); break;
             case 0x20E: case 0x20A: case 0x3A0: case 0x3A1: case 0x3A2: // predicates
                 usesPred = true; maxP = std::max(maxP, (uint32_t)(rd & 0x7) + 1); break;
+            // ── Tensor core register group tracking ─────────────────────────────
+            // WMMA instructions reference multiple consecutive registers starting
+            // from rd/rs1/rs2/rs3. We must declare enough %f and %r registers to
+            // cover every slot the emitted wmma.mma.sync instruction accesses.
+            case 0x538: // HMMA.884 m16n16k16: D[0..7]=f32, A[0..3]=u32, B[0..3]=u32, C[0..7]=f32
+                usesF32 = true;
+                usesU32 = true;
+                // D and C are f32 groups of 8 starting at rd and rs3
+                maxF = std::max(maxF, (uint32_t)rd  + 8u);
+                maxF = std::max(maxF, (uint32_t)rs3 + 8u);
+                // A and B are u32 groups of 4 starting at rs1 and rs2
+                maxR = std::max(maxR, (uint32_t)rs1 + 4u);
+                maxR = std::max(maxR, (uint32_t)rs2 + 4u);
+                break;
+            case 0x539: // HMMA.1688 m16n8k16: D[0..3]=f32, A[0..3]=u32, B[0..1]=u32, C[0..3]=f32
+                usesF32 = true;
+                usesU32 = true;
+                maxF = std::max(maxF, (uint32_t)rd  + 4u);
+                maxF = std::max(maxF, (uint32_t)rs3 + 4u);
+                maxR = std::max(maxR, (uint32_t)rs1 + 4u);
+                maxR = std::max(maxR, (uint32_t)rs2 + 2u);
+                break;
+            case 0x53A: // WGMMA m64n8k16: D[0..15]=f32 (4 warps × 4), A[0..3]=u32, B[0..1]=u32, C[0..15]=f32
+                usesF32 = true;
+                usesU32 = true;
+                maxF = std::max(maxF, (uint32_t)rd  + 16u);  // 4 sub-warps × 4 D regs each
+                maxF = std::max(maxF, (uint32_t)rs3 + 16u);  // 4 sub-warps × 4 C regs each
+                maxR = std::max(maxR, (uint32_t)rs1 + 4u);
+                maxR = std::max(maxR, (uint32_t)rs2 + 2u);
+                break;
             default: break;
             }
             ++instrIdx;

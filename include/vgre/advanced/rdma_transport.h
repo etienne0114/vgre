@@ -30,6 +30,8 @@
 #include <unordered_map>
 #include <string>
 
+#include "vgre/common/sockets.h"   // vgre_socket_t
+
 #ifdef VGRE_HAS_RDMA
 #include <infiniband/verbs.h>
 #endif
@@ -121,12 +123,13 @@ public:
     ~RDMAConnection();
 
     // Exchange QP info and bounce buffer rkey/addr with a peer via the existing
-    // authenticated TCP channel, then transition: RESET → INIT → RTR → RTS.
+    // authenticated TCP channel (fd), then transition: RESET → INIT → RTR → RTS.
     // Allocates a pre-pinned bounce buffer (size controlled by VGRE_RDMA_BOUNCE_SIZE,
     // default 256 MB) and includes its rkey/addr in the QP info exchange so the
     // remote peer can RDMA-WRITE directly into it.
+    // fd must be the socket that backs ctrl; sendSecure/recvSecure use it for I/O.
     // Returns false on any failure; caller should continue with TCP.
-    bool connect(SecureChannel& ctrl, RDMAContext& ctx);
+    bool connect(SecureChannel& ctrl, vgre::common::vgre_socket_t fd, RDMAContext& ctx);
 
     // Write src[0..size) into the remote peer's bounce buffer using RDMA WRITE.
     // Registers src temporarily, posts the WR, spin-polls until complete, then

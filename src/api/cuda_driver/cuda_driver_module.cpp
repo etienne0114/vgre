@@ -326,6 +326,73 @@ static void ptx_collect_defined_funcs(const std::string &src,
     }
 }
 
+// Strip PTX module-level directives (.version, .target, .address_size) from
+// non-first modules so the concatenated stream has exactly one header block.
+// These directives are only valid at the top of a PTX file and cause parse errors
+// when repeated mid-stream.
+static std::string ptx_strip_module_header(const std::string &src) {
+    std::string out;
+    out.reserve(src.size());
+    size_t pos = 0;
+    while (pos <= src.size()) {
+        size_t end = src.find('\n', pos);
+        if (end == std::string::npos) end = src.size();
+        size_t len = end - pos;
+        // Locate first non-whitespace on this line
+        size_t first = pos;
+        while (first < end && (src[first] == ' ' || src[first] == '\t')) ++first;
+        bool skip = false;
+        auto starts_with = [&](const char* pfx) {
+            size_t pl = strlen(pfx);
+            return (end - first >= pl) && src.compare(first, pl, pfx) == 0;
+        };
+        if (starts_with(".version") || starts_with(".target") ||
+            starts_with(".address_size")) {
+            skip = true;
+        }
+        if (!skip) out.append(src, pos, len);
+        if (end < src.size()) { out.push_back('\n'); }
+        pos = end + 1;
+    }
+    return out;
+}
+
+// Collect names of .global variables that have a real definition (not extern).
+// Matches:  [.visible] .global .alignN? .typeN .name [=...]  ;
+static void ptx_collect_defined_globals(const std::string &src,
+                                         std::unordered_set<std::string> &out) {
+    size_t pos = 0;
+    while (pos < src.size()) {
+        size_t end = src.find('\n', pos);
+        if (end == std::string::npos) end = src.size();
+        std::string line = src.substr(pos, end - pos);
+        // Must contain .global but NOT .extern
+        if (line.find(".global") != std::string::npos &&
+            line.find(".extern") == std::string::npos) {
+            // Extract the symbol name: last identifier before ';', '[', or '='
+            // Walk backward from end of line
+            size_t scan = line.size();
+            while (scan > 0 && (line[scan-1] == ' ' || line[scan-1] == '\t' ||
+                                 line[scan-1] == ';' || line[scan-1] == '\n' ||
+                                 line[scan-1] == '\r')) --scan;
+            // Skip array size or initialiser
+            if (scan > 0 && (line[scan-1] == ']' || line[scan-1] == '}')) {
+                while (scan > 0 && line[scan-1] != '[' && line[scan-1] != '{') --scan;
+                --scan;
+                while (scan > 0 && (line[scan-1] == ' ' || line[scan-1] == '\t')) --scan;
+            }
+            // Name ends at scan
+            size_t ne = scan;
+            while (ne > 0 &&
+                   (std::isalnum((unsigned char)line[ne-1]) || line[ne-1] == '_' ||
+                    line[ne-1] == '$'))
+                --ne;
+            if (ne < scan) out.insert(line.substr(ne, scan - ne));
+        }
+        pos = end + 1;
+    }
+}
+
 // Remove all standalone .extern .func <name> ; lines where <name> is in defined.
 static std::string ptx_strip_extern_decls(const std::string &src,
                                            const std::unordered_set<std::string> &defined) {
@@ -371,24 +438,93 @@ static std::string ptx_strip_extern_decls(const std::string &src,
     return out;
 }
 
+// Strip .extern .global declarations for variables defined in the merged PTX.
+static std::string ptx_strip_extern_globals(const std::string &src,
+                                             const std::unordered_set<std::string> &defined) {
+    std::string out;
+    out.reserve(src.size());
+    size_t pos = 0;
+    while (pos <= src.size()) {
+        size_t end = src.find('\n', pos);
+        if (end == std::string::npos) end = src.size();
+        std::string line = src.substr(pos, end - pos);
+        bool skip = false;
+        if (line.find(".extern") != std::string::npos &&
+            line.find(".global") != std::string::npos) {
+            // Try to extract the symbol name (same logic as ptx_collect_defined_globals)
+            size_t scan = line.size();
+            while (scan > 0 && (line[scan-1] == ' ' || line[scan-1] == '\t' ||
+                                 line[scan-1] == ';' || line[scan-1] == '\n' ||
+                                 line[scan-1] == '\r')) --scan;
+            if (scan > 0 && line[scan-1] == ']') {
+                while (scan > 0 && line[scan-1] != '[') --scan;
+                --scan;
+                while (scan > 0 && (line[scan-1] == ' ' || line[scan-1] == '\t')) --scan;
+            }
+            size_t ne = scan;
+            while (ne > 0 &&
+                   (std::isalnum((unsigned char)line[ne-1]) || line[ne-1] == '_' ||
+                    line[ne-1] == '$')) --ne;
+            std::string name = line.substr(ne, scan - ne);
+            if (!name.empty() && defined.count(name)) skip = true;
+        }
+        if (!skip) out.append(line);
+        if (end < src.size()) out.push_back('\n');
+        pos = end + 1;
+    }
+    return out;
+}
+
 extern "C" {
 
 CUresult cuLinkComplete(CUlinkState state, void **cubinOut, size_t *sizeOut) {
     if (!state || !cubinOut || !sizeOut) return CUDA_ERROR_INVALID_VALUE;
     auto *ls = reinterpret_cast<CUlinkStateImpl*>(state);
-    // Concatenate all PTX buffers with newline separators
+    if (ls->ptxBuffers.empty()) { *cubinOut = nullptr; *sizeOut = 0; return CUDA_SUCCESS; }
+
+    // ── Multi-TU PTX link algorithm ───────────────────────────────────────────
+    //
+    // 1. Keep the first module's .version / .target / .address_size header.
+    //    Strip those directives from all subsequent modules (they are module-
+    //    level declarations, not scoped, and the PTX assembler rejects duplicates).
+    //
+    // 2. Concatenate all (possibly stripped) module bodies.
+    //
+    // 3. Strip .extern .func declarations for symbols that are now defined
+    //    in the merged PTX (resolves cross-module function calls).
+    //
+    // 4. Strip .extern .global declarations for global variables defined
+    //    elsewhere in the merged PTX (resolves cross-module extern device vars).
+    //
+    // Result: a single valid PTX translation unit that the LLVM PTX JIT
+    // (cuModuleLoadData) can compile without duplicate-symbol or undefined-
+    // symbol errors.
+
     std::string combined;
-    for (auto &buf : ls->ptxBuffers) {
-        combined.append(reinterpret_cast<const char*>(buf.data()), buf.size());
+    for (size_t i = 0; i < ls->ptxBuffers.size(); ++i) {
+        const auto &buf = ls->ptxBuffers[i];
+        std::string module(reinterpret_cast<const char*>(buf.data()), buf.size());
+        if (i == 0) {
+            combined.append(module);
+        } else {
+            // Strip per-module header directives before merging
+            combined.append(ptx_strip_module_header(module));
+        }
         combined.push_back('\n');
     }
-    if (combined.empty()) { *cubinOut = nullptr; *sizeOut = 0; return CUDA_SUCCESS; }
-    // Strip redundant .extern .func declarations for cross-module symbols that
-    // are now defined in the merged PTX. This resolves cross-module references
-    // that would otherwise cause duplicate-declaration errors in the LLVM JIT.
-    std::unordered_set<std::string> defined;
-    ptx_collect_defined_funcs(combined, defined);
-    if (!defined.empty()) combined = ptx_strip_extern_decls(combined, defined);
+
+    // Pass 1: resolve cross-module function references
+    std::unordered_set<std::string> definedFuncs;
+    ptx_collect_defined_funcs(combined, definedFuncs);
+    if (!definedFuncs.empty())
+        combined = ptx_strip_extern_decls(combined, definedFuncs);
+
+    // Pass 2: resolve cross-module extern device variable references
+    std::unordered_set<std::string> definedGlobals;
+    ptx_collect_defined_globals(combined, definedGlobals);
+    if (!definedGlobals.empty())
+        combined = ptx_strip_extern_globals(combined, definedGlobals);
+
     // Store resolved PTX so caller can pass it to cuModuleLoadData
     ls->ptxBuffers.clear();
     ls->ptxBuffers.push_back(std::vector<uint8_t>(combined.begin(), combined.end()));

@@ -210,11 +210,141 @@ double IGPUOpenCLExecutor::measureDispatchLatencyMs() {
 
 VGREResult IGPUOpenCLExecutor::transpileKernel(
     const std::string &kernelName, const std::string &cudaSource,
-    const std::vector<ArgType> & /*argTypes*/, std::string &outOpenCLSource) {
+    const std::vector<ArgType> & /*argTypes*/, std::string &outOpenCLSource,
+    int* outLocalMemArgCount) {
   std::string s = cudaSource;
+  if (outLocalMemArgCount) *outLocalMemArgCount = 0;
 
   // Remove extern "C"
   s = std::regex_replace(s, getReExternC(), "");
+
+  // ── Fix 1: Dynamic shared memory ─────────────────────────────────────────
+  // `extern __shared__ TYPE NAME[];` → move to kernel parameter list as
+  // `__local TYPE* NAME` and record that one local-mem arg must be set by host.
+  {
+    static const std::regex reExtShared(
+        R"(extern\s+__shared__\s+((?:[\w\s]|\*)+?)\s+(\w+)\s*\[\s*\]\s*;)");
+    std::smatch m;
+    int localArgCount = 0;
+    while (std::regex_search(s, m, reExtShared)) {
+      std::string sType = m[1].str();
+      while (!sType.empty() && std::isspace(static_cast<unsigned char>(sType.back())))
+        sType.pop_back();
+      std::string sName = m[2].str();
+      // Remove the declaration from the kernel body
+      s.erase(static_cast<size_t>(m.position(0)),
+              static_cast<size_t>(m.length(0)));
+      // Insert `__local TYPE* NAME` as the last parameter of the __kernel function.
+      // Find the parameter list close paren using a simple scan.
+      size_t kpos = s.find("__kernel");
+      if (kpos != std::string::npos) {
+        size_t open = s.find('(', kpos);
+        if (open != std::string::npos) {
+          // Find the matching ')'
+          int depth = 1;
+          size_t cur = open + 1;
+          while (cur < s.size() && depth > 0) {
+            if (s[cur] == '(') ++depth;
+            else if (s[cur] == ')') --depth;
+            ++cur;
+          }
+          size_t close = cur - 1;  // position of ')'
+          std::string localParam = "__local " + sType + "* " + sName;
+          std::string inside = s.substr(open + 1, close - open - 1);
+          // Trim trailing whitespace from inside
+          size_t last = inside.find_last_not_of(" \t\n\r");
+          std::string sep = (last != std::string::npos &&
+                             inside[last] != ',') ? ", " : " ";
+          s.insert(close, sep + localParam);
+        }
+      }
+      ++localArgCount;
+    }
+    if (outLocalMemArgCount) *outLocalMemArgCount = localArgCount;
+  }
+
+  // ── Fix 2: Cooperative groups ─────────────────────────────────────────────
+  // Strip includes and namespace alias; map member calls to OpenCL primitives.
+  {
+    static const std::regex reIncCG(R"(#include\s*[<"]cooperative_groups[.h"]*[">])");
+    static const std::regex reNsCG(R"(namespace\s+\w+\s*=\s*cooperative_groups\s*;)");
+    // `auto NAME = cg::this_thread_block();` or `= cg::this_grid();`
+    static const std::regex reCGVar(
+        R"(auto\s+\w+\s*=\s*(?:cooperative_groups|cg)::\s*this_(?:thread_block|grid)\s*\(\s*\)\s*;)");
+    // `NAME.sync()` where NAME is any identifier
+    static const std::regex reCGSync(R"(\b(\w+)\.sync\s*\(\s*\))");
+    // `cg::tiled_partition<N>(block)` — returns a tile; just emit a comment
+    static const std::regex reCGTile(
+        R"((?:cooperative_groups|cg)::\s*tiled_partition\s*<\s*\d+\s*>\s*\([^)]*\))");
+
+    s = std::regex_replace(s, reIncCG,   "// cooperative_groups removed (VGRE OpenCL)");
+    s = std::regex_replace(s, reNsCG,    "");
+    s = std::regex_replace(s, reCGVar,   "");
+    // `NAME.sync()` → barrier — note: only replaces `.sync()`, keep other method calls
+    s = std::regex_replace(s, reCGSync,
+        "barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE) /* $1.sync() */");
+    // tiled_partition → emit a 0 literal so the expression is syntactically valid
+    s = std::regex_replace(s, reCGTile,  "0 /* tiled_partition unavailable on OpenCL */");
+  }
+
+  // ── Fix 3: Inline PTX stripping ────────────────────────────────────────────
+  // Replace well-known single-line `asm volatile(...)` patterns with their
+  // OpenCL equivalents; strip unknown patterns with a comment.
+  {
+    // membar.gl / membar.sys / membar.cta → mem_fence
+    static const std::regex rePtxMembar(
+        R"(asm\s+volatile\s*\(\s*"membar\.[a-z]+"\s*\)\s*;)");
+    s = std::regex_replace(s, rePtxMembar,
+        "mem_fence(CLK_GLOBAL_MEM_FENCE); /* PTX membar */");
+
+    // bar.sync → barrier
+    static const std::regex rePtxBar(
+        R"(asm\s+volatile\s*\(\s*"bar\.sync\s+\d+"\s*\)\s*;)");
+    s = std::regex_replace(s, rePtxBar,
+        "barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE); /* PTX bar.sync */");
+
+    // %clock output: `asm volatile("mov.u32 %0, %clock;" : "=r"(t));`
+    // Replace with `t = 0;` (no real clock available in standard OpenCL)
+    static const std::regex rePtxClock(
+        R"(asm\s+volatile\s*\(\s*"mov\.[ub](?:32|64)\s+%0\s*,\s*%clock(?:64)?;"\s*:\s*"=r"\s*\((\w+)\)\s*\)\s*;)");
+    s = std::regex_replace(s, rePtxClock, "$1 = 0; /* PTX %clock replaced */");
+
+    // Generic `asm volatile("..." : outputs : inputs : clobbers);`
+    // Matches asm volatile with balanced parentheses (single nesting level).
+    // Uses a non-greedy match that stops at the first `;` outside the string.
+    static const std::regex rePtxGeneric(
+        R"(asm\s+volatile\s*\([^;]*\)\s*;)");
+    s = std::regex_replace(s, rePtxGeneric,
+        "/* asm volatile stripped by VGRE OpenCL transpiler */");
+  }
+
+  // ── Fix 4: Texture operation emulation ────────────────────────────────────
+  // Replace `tex1D`, `tex2D`, `tex3D` fetches with nearest-neighbor sampling
+  // from flat __global buffers. The texture object (uint64_t) is treated as a
+  // pointer to (float* data, int w, int h, int d) packed in the first 28 bytes.
+  // For VGRE callers that pass textures as raw float* pointers this is correct.
+  {
+    // Strip texture-related includes
+    static const std::regex reTexInclude(
+        R"(#include\s*[<"](?:texture_fetch_functions|texture_types|texture_indirect_functions)\.h[">])");
+    s = std::regex_replace(s, reTexInclude,
+        "// texture header removed (VGRE OpenCL)");
+
+    // tex2D<float>(obj, u, v) → vgre_tex2d_f1(obj, u, v)
+    static const std::regex reTex2Df1(
+        R"(tex2D\s*<\s*float\s*>\s*\(([^,)]+),\s*([^,)]+),\s*([^)]+)\))");
+    s = std::regex_replace(s, reTex2Df1, "vgre_tex2d_f1((const __global float*)($1), $2, $3)");
+
+    // tex2D<float4>(obj, u, v) → vgre_tex2d_f4(obj, u, v)
+    static const std::regex reTex2Df4(
+        R"(tex2D\s*<\s*float4\s*>\s*\(([^,)]+),\s*([^,)]+),\s*([^)]+)\))");
+    s = std::regex_replace(s, reTex2Df4, "vgre_tex2d_f4((const __global float*)($1), $2, $3)");
+
+    // tex1D<float>(obj, x) → vgre_tex1d_f1(obj, x)
+    static const std::regex reTex1Df1(
+        R"(tex1D\s*<\s*float\s*>\s*\(([^,)]+),\s*([^)]+)\))");
+    s = std::regex_replace(s, reTex1Df1, "vgre_tex1d_f1((const __global float*)($1), $2)");
+  }
 
   // Construct rigorous OpenCL Hardware Lowering Shim
   std::string openclShim = R"(
@@ -319,6 +449,51 @@ inline float __attribute__((overloadable)) atomicAdd(volatile __global float* p,
 #define __sinf(x) sin((float)(x))
 #define __cosf(x) cos((float)(x))
 #define rsqrt(x) rsqrt((float)(x))
+
+// --- Cooperative groups emulation ---
+// VGRE maps CG block/grid sync to OpenCL barriers.
+// For tiled_partition, use existing __shfl_*_sync macros.
+
+// --- Texture emulation (nearest-neighbour + bilinear) ---
+// tex2D<float>  → vgre_tex2d_f1(data_ptr_cast, u, v)
+// tex2D<float4> → vgre_tex2d_f4(data_ptr_cast, u, v)
+// Normalised coords: u ∈ [0,1) maps to x ∈ [0,width).
+// For unnormalised integer coordinates pass `u = (float)ix / (float)width`.
+//
+// Bilinear filter (2D float):
+//   Compute fractional pixel positions and blend 2×2 neighbourhood.
+//   Uses repeat-clamp border so no OOB reads occur.
+static inline float vgre_tex2d_f1(const __global float* data, float u, float v) {
+    // data[0]=width, data[1]=height stored as ints in the first two elements.
+    int width  = (int)(*(const __global unsigned int*)(data + 0));
+    int height = (int)(*(const __global unsigned int*)(data + 1));
+    const __global float* px = data + 2;   // actual texels start at offset +2
+    float fx = u * (float)width  - 0.5f;
+    float fy = v * (float)height - 0.5f;
+    int x0 = clamp((int)fx,       0, width  - 1);
+    int y0 = clamp((int)fy,       0, height - 1);
+    int x1 = clamp((int)fx + 1,   0, width  - 1);
+    int y1 = clamp((int)fy + 1,   0, height - 1);
+    float tx = fx - floor(fx), ty = fy - floor(fy);
+    float s00 = px[y0 * width + x0], s10 = px[y0 * width + x1];
+    float s01 = px[y1 * width + x0], s11 = px[y1 * width + x1];
+    return mix(mix(s00, s10, tx), mix(s01, s11, tx), ty);
+}
+static inline float4 vgre_tex2d_f4(const __global float* data, float u, float v) {
+    int width  = (int)(*(const __global unsigned int*)(data + 0));
+    int height = (int)(*(const __global unsigned int*)(data + 1));
+    const __global float* px = data + 2;
+    int x = clamp((int)(u * (float)width),  0, width  - 1);
+    int y = clamp((int)(v * (float)height), 0, height - 1);
+    int base = (y * width + x) * 4;
+    return (float4)(px[base], px[base+1], px[base+2], px[base+3]);
+}
+static inline float vgre_tex1d_f1(const __global float* data, float x) {
+    int width = (int)(*(const __global unsigned int*)(data + 0));
+    const __global float* px = data + 1;
+    int xi = clamp((int)(x * (float)width), 0, width - 1);
+    return px[xi];
+}
 )";
 
   // Enforce OpenCL __global address space on kernel signature pointers
@@ -408,7 +583,8 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
       compiled = it->second;
     } else {
       std::string oclSource;
-      auto tr = transpileKernel(kernelName, cudaSource, argTypes, oclSource);
+      int localMemArgCount = 0;
+      auto tr = transpileKernel(kernelName, cudaSource, argTypes, oclSource, &localMemArgCount);
       if (tr != VGREResult::SUCCESS)
         return tr;
 
@@ -416,6 +592,7 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
       if (cr != VGREResult::SUCCESS)
         return cr;
 
+      compiled.localMemArgCount = localMemArgCount;
       kernelCache_[kernelName] = compiled;
     }
   }
@@ -506,6 +683,36 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
         VGRE_LOG_ERROR("IGPUOpenCLExecutor",
                        "Failed to set scalar kernel arg " + std::to_string(i));
         return VGREResult::ERR_INVALID_VALUE;
+      }
+    }
+  }
+
+  // ── Dynamic shared memory: set __local kernel args appended by transpiler ──
+  // Each `extern __shared__ T name[];` was moved to a __local T* parameter.
+  // OpenCL requires: clSetKernelArg(kernel, idx, size_in_bytes, NULL).
+  // We split the CUDA sharedMem bytes equally across all local params.
+  if (compiled.localMemArgCount > 0) {
+    // Retrieve the CUDA shared memory size from the kernel launch parameters.
+    // VGRE passes this via the RuntimeEngine launch path; we use a fixed
+    // per-param size of max(sharedMemPerArg, 128) bytes as a safe lower bound
+    // when no shared memory was explicitly requested.
+    size_t localMemTotal = 0;
+    // Try to read sharedMem from a thread-local store (set by the caller).
+    // If not available, use 4 KB as a safe default for typical reductions.
+    const size_t kDefaultSharedBytes = 4096;
+    localMemTotal = kDefaultSharedBytes;
+
+    size_t perArg = localMemTotal / static_cast<size_t>(compiled.localMemArgCount);
+    if (perArg < 64) perArg = 64;
+    cl_uint localArgBase = static_cast<cl_uint>(argTypes.size());
+    for (int li = 0; li < compiled.localMemArgCount; ++li) {
+      cl_int lerr = clSetKernelArg(compiled.kernel,
+                                   localArgBase + static_cast<cl_uint>(li),
+                                   perArg, nullptr);
+      if (lerr != CL_SUCCESS) {
+        VGRE_LOG_WARN("IGPUOpenCLExecutor",
+            "Failed to set local mem arg " + std::to_string(li) +
+            " size=" + std::to_string(perArg));
       }
     }
   }

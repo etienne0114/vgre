@@ -33,19 +33,100 @@ size_t getRdmaBounceBufSize() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: serialize / deserialize RDMAQPInfo over the SecureChannel
+//
+// Wire format (38 bytes, all fields little-endian for cross-platform safety):
+//
+//   Offset  Size  Field
+//   ------  ----  -----
+//     0       2   lid        (uint16_t LE)
+//     2       4   qpn        (uint32_t LE)
+//     6       4   psn        (uint32_t LE)
+//    10      16   gid        (raw bytes, no byte-swap needed — opaque blob)
+//    26       4   rkey       (uint32_t LE)
+//    30       8   remoteAddr (uint64_t LE)
+//   ------
+//    38 bytes total
+//
+// Both sides send first then receive so that simultaneous connect() calls
+// on master and worker do not deadlock in the sendSecure/recvSecure pair.
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
 
+static constexpr size_t kQPInfoWireSize = 38;
+
+// Portable little-endian serialization helpers (avoids relying on host byte order).
+static void pack_le16(uint8_t* buf, uint16_t v) {
+    buf[0] = static_cast<uint8_t>(v);
+    buf[1] = static_cast<uint8_t>(v >> 8);
+}
+static void pack_le32(uint8_t* buf, uint32_t v) {
+    buf[0] = static_cast<uint8_t>(v);
+    buf[1] = static_cast<uint8_t>(v >> 8);
+    buf[2] = static_cast<uint8_t>(v >> 16);
+    buf[3] = static_cast<uint8_t>(v >> 24);
+}
+static void pack_le64(uint8_t* buf, uint64_t v) {
+    for (int i = 0; i < 8; ++i)
+        buf[i] = static_cast<uint8_t>(v >> (i * 8));
+}
+static uint16_t unpack_le16(const uint8_t* buf) {
+    return static_cast<uint16_t>(buf[0]) | (static_cast<uint16_t>(buf[1]) << 8);
+}
+static uint32_t unpack_le32(const uint8_t* buf) {
+    return  static_cast<uint32_t>(buf[0])
+          | (static_cast<uint32_t>(buf[1]) << 8)
+          | (static_cast<uint32_t>(buf[2]) << 16)
+          | (static_cast<uint32_t>(buf[3]) << 24);
+}
+static uint64_t unpack_le64(const uint8_t* buf) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i)
+        v |= static_cast<uint64_t>(buf[i]) << (i * 8);
+    return v;
+}
+
+// Serialize info into a 38-byte little-endian wire buffer.
+static void serializeQPInfo(const vgre::advanced::RDMAQPInfo& info,
+                             uint8_t buf[kQPInfoWireSize]) {
+    pack_le16(buf + 0,  info.lid);
+    pack_le32(buf + 2,  info.qpn);
+    pack_le32(buf + 6,  info.psn);
+    memcpy(buf + 10, info.gid, 16);          // GID: opaque blob, no byte-swap
+    pack_le32(buf + 26, info.rkey);
+    pack_le64(buf + 30, info.remoteAddr);
+}
+
+// Deserialize a 38-byte little-endian wire buffer into info.
+static void deserializeQPInfo(const uint8_t buf[kQPInfoWireSize],
+                               vgre::advanced::RDMAQPInfo& info) {
+    info.lid        = unpack_le16(buf + 0);
+    info.qpn        = unpack_le32(buf + 2);
+    info.psn        = unpack_le32(buf + 6);
+    memcpy(info.gid, buf + 10, 16);
+    info.rkey       = unpack_le32(buf + 26);
+    info.remoteAddr = unpack_le64(buf + 30);
+}
+
 bool sendQPInfo(vgre::advanced::SecureChannel& ch,
+                vgre::common::vgre_socket_t fd,
                 const vgre::advanced::RDMAQPInfo& info)
 {
-    (void)ch; (void)info; return false; // QP exchange via sendSecure — integrated in connect()
+    uint8_t wire[kQPInfoWireSize];
+    serializeQPInfo(info, wire);
+    vgre::VGREResult r = ch.sendSecure(fd, wire, kQPInfoWireSize);
+    return (r == vgre::VGREResult::SUCCESS);
 }
 
 bool recvQPInfo(vgre::advanced::SecureChannel& ch,
+                vgre::common::vgre_socket_t fd,
                 vgre::advanced::RDMAQPInfo& info)
 {
-    (void)ch; (void)info; return false; // QP exchange via sendSecure — integrated in connect()
+    std::vector<uint8_t> payload;
+    vgre::VGREResult r = ch.recvSecure(fd, payload);
+    if (r != vgre::VGREResult::SUCCESS) return false;
+    if (payload.size() < kQPInfoWireSize) return false;
+    deserializeQPInfo(payload.data(), info);
+    return true;
 }
 
 // Fill GID for the first active port on the device.
@@ -300,7 +381,9 @@ bool RDMAConnection::transitionToRTS() {
     return true;
 }
 
-bool RDMAConnection::connect(SecureChannel& ctrl, RDMAContext& ctx) {
+bool RDMAConnection::connect(SecureChannel& ctrl,
+                             vgre::common::vgre_socket_t fd,
+                             RDMAContext& ctx) {
     if (!createQP(ctx))      return false;
     if (!transitionToInit()) return false;
 
@@ -344,13 +427,13 @@ bool RDMAConnection::connect(SecureChannel& ctrl, RDMAContext& ctx) {
     // Exchange QP info (including bounce buffer rkey/addr) over the existing
     // authenticated TCP/SecureChannel. Both sides send first, then receive,
     // to avoid a deadlock when both peers call connect() simultaneously.
-    if (!sendQPInfo(ctrl, local)) {
+    if (!sendQPInfo(ctrl, fd, local)) {
         VGRE_LOG_ERROR("RDMATransport", "Failed to send local QP info");
         return false;
     }
 
     RDMAQPInfo remote{};
-    if (!recvQPInfo(ctrl, remote)) {
+    if (!recvQPInfo(ctrl, fd, remote)) {
         VGRE_LOG_ERROR("RDMATransport", "Failed to receive remote QP info");
         return false;
     }
@@ -532,7 +615,7 @@ RDMARegion* RDMAContext::registerMemory(void*, size_t)   { return nullptr; }
 void        RDMAContext::deregisterMemory(RDMARegion* r)  { delete r; }
 
 RDMAConnection::~RDMAConnection() {}
-bool   RDMAConnection::connect(SecureChannel&, RDMAContext&)                      { return false; }
+bool   RDMAConnection::connect(SecureChannel&, vgre::common::vgre_socket_t, RDMAContext&) { return false; }
 bool   RDMAConnection::rdmaWrite(const RDMARegion*, uint64_t, uint32_t, size_t)   { return false; }
 bool   RDMAConnection::rdmaWriteToRemote(RDMAContext&, const void*, size_t)       { return false; }
 void   RDMAContext::preRegisterAllocation(void* /*ptr*/, size_t /*size*/)         {}
