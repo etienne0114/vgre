@@ -231,6 +231,33 @@ static void test_c2c_prime_size() {
     check("C2C prime-size roundtrip (N=97)", approx_eq(in.data(), inv.data(), N, 1e-3f));
 }
 
+// ── Test: non-pow2 Bluestein gives correct frequency bin (not reversed) ──────
+// For a complex exponential at frequency k0, X[k0] should be the single peak.
+// The old sign bug reversed the spectrum: the peak appeared at N-k0 instead of k0.
+static void test_c2c_nonpow2_freq_bin() {
+    const int N = 100;  // non-pow2
+    const int k0 = 7;
+    std::vector<cfloat> in(N), out(N);
+    for (int m = 0; m < N; ++m) {
+        float angle = 2.0f * 3.14159265358979323846f * k0 * m / N;
+        in[m] = cfloat(std::cos(angle), std::sin(angle));  // exp(j*2π*k0*m/N)
+    }
+    cufftHandle plan;
+    cufftPlan1d(&plan, N, CUFFT_C2C, 1);
+    cufftExecC2C(plan, in.data(), out.data(), CUFFT_FORWARD);
+    cufftDestroy(plan);
+
+    // Forward DFT of exp(j2πk0m/N) = N * δ[k - k0], so |out[k0]| ≈ N, all other bins ≈ 0.
+    float mag_k0   = std::abs(out[k0]);
+    float mag_Nk0  = std::abs(out[N - k0]);
+    float max_other = 0.0f;
+    for (int k = 0; k < N; ++k)
+        if (k != k0) max_other = std::max(max_other, std::abs(out[k]));
+
+    bool ok = (mag_k0 > 95.0f && max_other < 1.0f);
+    check("Bluestein non-pow2 correct freq bin (peak at k0=7, not N-k0=93)", ok);
+}
+
 // ── Test: Parseval's theorem (energy conservation) ───────────────────────────
 static void test_parseval() {
     const int N = 512;
@@ -370,6 +397,7 @@ int main() {
 
     test_c2c_pow2_roundtrip();
     test_c2c_nonpow2_roundtrip();
+    test_c2c_nonpow2_freq_bin();
     test_c2c_single_freq();
     test_z2z_roundtrip();
     test_r2c_c2r_roundtrip();

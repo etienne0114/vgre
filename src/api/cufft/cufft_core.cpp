@@ -184,10 +184,17 @@ void fft_radix2(std::complex<T> *x, int n, int direction) {
 
 // ── Bluestein's algorithm for arbitrary-length FFT ──────────────────────────
 // Converts an n-point DFT into a 2M-point convolution (M = nextPow2(2n-1))
+//
+// Chirp identity: X[k] = Σ in[m]*exp(-j2πkm/n)
+// Let chirp[k] = exp(+jπk²/n).  Then a[m] = in[m]*conj(chirp[m]), b[k] = chirp[k], and
+// (a★b)[k] = exp(+jπk²/n) * X[k]  →  X[k] = (a★b)[k] * conj(chirp[k])
+// Forward uses +sign chirp (exp(+jπk²/n)); inverse uses −sign (exp(−jπk²/n)).
 template<typename T>
 void fft_bluestein(const std::complex<T> *in, std::complex<T> *out, int n, int direction) {
     int M = nextPow2(2 * n - 1);
-    const T sign = (direction == CUFFT_FORWARD) ? static_cast<T>(-1) : static_cast<T>(1);
+    // Forward DFT: chirp = exp(+jπk²/n)  (sign = +1)
+    // Inverse DFT: chirp = exp(−jπk²/n)  (sign = −1)
+    const T sign = (direction == CUFFT_FORWARD) ? static_cast<T>(1) : static_cast<T>(-1);
 
     // Chirp sequence: w_k = exp(sign * i * pi * k^2 / n)
     std::vector<std::complex<T>> chirp(n);
@@ -589,10 +596,9 @@ static cufftResult_t dct2_1d(const T* in, T* out, int N) {
     }
     std::vector<std::complex<T>> Y(static_cast<std::size_t>(TwoN));
     fft1d(y.data(), Y.data(), TwoN, CUFFT_FORWARD);
-    // Bluestein FFT gives conj(Y_std) for non-pow2 sizes, so flip twiddle sign.
-    const T sign = isPow2(TwoN) ? T(-1) : T(+1);
+    // Twiddle: X[k] = Re(Y[k] * exp(−jπk/(2N))) / 2  for all sizes.
     for (int k = 0; k < N; ++k) {
-        T angle = sign * static_cast<T>(PI) * k / static_cast<T>(TwoN);
+        T angle = -static_cast<T>(PI) * k / static_cast<T>(TwoN);
         std::complex<T> tw(std::cos(angle), std::sin(angle));
         out[k] = (Y[static_cast<std::size_t>(k)] * tw).real() / T(2);
     }
@@ -606,21 +612,19 @@ static cufftResult_t dct2_1d(const T* in, T* out, int N) {
 //         V[N]=0, V[2N-k]=conj(V[k]) for k=1..N-1 (Hermitian → real IFFT output)
 // Step 2: y = IFFT(V, 2N)  (fft1d applies 1/(2N) internally)
 // Step 3: x[n] = N · Re(y[n])
-// Derivation: IFFT[V][n] = (1/N)·DCT-III[n]  →  DCT-III[n] = N·Re(IFFT[V][n])
+// Derivation: IFFT[V][n] = (1/(2N))·Σ V[k]·exp(+j2πnk/(2N))
+//   With V[k]=X[k]·exp(+jπk/(2N)): IFFT[V][n] = (1/(2N))·(X[0] + 2·Σ X[k]·cos(π(2n+1)k/(2N)))
+//   ↠ N·Re(IFFT[V][n]) = X[0]/2 + Σ X[k]·cos(π(2n+1)k/(2N)) = DCT-III[n] ✓
 // Complexity: O(N log N) — one 2N-point IFFT
-// Note: VGRE's Bluestein IFFT computes exp(-j2πnk/N) instead of exp(+j2πnk/N),
-// so the twiddle in V must use the negative angle to compensate.
 template<typename T>
 static cufftResult_t dct3_1d(const T* in, T* out, int N) {
     if (N <= 0) return CUFFT_INVALID_VALUE;
     int TwoN = 2 * N;
-    // Bluestein IFFT uses exp(-j2πnk/N) instead of standard exp(+j2πnk/N),
-    // so flip the twiddle sign for non-pow2 sizes.
-    const T sign3 = isPow2(TwoN) ? T(+1) : T(-1);
     std::vector<std::complex<T>> V(static_cast<std::size_t>(TwoN), std::complex<T>(T(0), T(0)));
     V[0] = std::complex<T>(in[0], T(0));
+    // Twiddle: V[k] = X[k] * exp(+jπk/(2N)) for all sizes.
     for (int k = 1; k < N; ++k) {
-        T angle = sign3 * static_cast<T>(PI) * k / static_cast<T>(TwoN);
+        T angle = static_cast<T>(PI) * k / static_cast<T>(TwoN);
         std::complex<T> tw(std::cos(angle), std::sin(angle));
         V[static_cast<std::size_t>(k)]       = std::complex<T>(in[k], T(0)) * tw;
         V[static_cast<std::size_t>(TwoN-k)]  = std::conj(V[static_cast<std::size_t>(k)]);
