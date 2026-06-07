@@ -9,6 +9,13 @@
 // amxEnabled==false; the VNNI path activates when hasAVXVNNI==true.
 
 #ifdef ENABLE_VGRE_AMX
+// AMX and AVX-VNNI are x86-only ISA extensions.
+#if !defined(__x86_64__) && !defined(_M_X64) && !defined(__i386__) && !defined(_M_IX86)
+#  undef ENABLE_VGRE_AMX
+#endif
+#endif
+
+#ifdef ENABLE_VGRE_AMX
 
 #include "vgre/runtime/vector_engine.h"
 #include "vgre/common/logger.h"

@@ -9,7 +9,7 @@
 #include <immintrin.h>
 #endif
 
-#include <unistd.h>
+#include "vgre/common/os_backend.h"
 
 // ── AVX2 SGEMM kernel (NN layout: C += alpha * A * B) ────────────────────────
 // Processes 8 output columns at a time using 256-bit FMA.
@@ -67,8 +67,7 @@ static void sgemm_nn_avx2(int M, int N, int K,
 // sysconf(_SC_LEVEL2_CACHE_SIZE) returns 0 on some OSes; fall back to 4 MiB.
 static int strassenThreshold() {
     static int kThresh = [] {
-        long l2 = sysconf(_SC_LEVEL2_CACHE_SIZE);
-        if (l2 <= 0) l2 = 4 * 1024 * 1024;
+        long l2 = static_cast<long>(vgre::os::get_l2_cache_size());
         // float threshold: sqrt(L2 / 12) (3 sub-matrices, sizeof(float)=4)
         int n = static_cast<int>(std::sqrt(static_cast<double>(l2) / 12.0));
         // Round down to the nearest power of 2 ≥ 64

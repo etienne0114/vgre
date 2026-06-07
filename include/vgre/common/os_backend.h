@@ -64,10 +64,19 @@
 #  include <netinet/in.h>
 #  include <arpa/inet.h>
 #  include <cerrno>
+#  include <fstream>   // std::ifstream — Linux sysfs L2 cache size fallback
+#  ifdef __APPLE__
+#    include <sys/sysctl.h>  // sysctlbyname — macOS L2 cache size + NUMA info
+#  endif
 // macOS uses MAP_ANON; Linux/BSD use MAP_ANONYMOUS. Provide a single name.
 #  ifndef MAP_ANONYMOUS
 #    define MAP_ANONYMOUS MAP_ANON
 #  endif
+#endif
+
+// Windows needs <vector> for GetLogicalProcessorInformation buffer
+#if defined(_WIN32)
+#  include <vector>
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -347,6 +356,58 @@ inline bool make_directory(const char* path) noexcept {
         || ::GetLastError() == ERROR_ALREADY_EXISTS;
 #else
     return ::mkdir(path, 0700) == 0 || errno == EEXIST;
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// vgre::os::get_l2_cache_size — L2 data cache size in bytes (best-effort).
+// Returns 4 MiB when the OS query fails or is unsupported.
+// ─────────────────────────────────────────────────────────────────────────────
+inline std::size_t get_l2_cache_size() noexcept {
+    static const std::size_t kDefault = 4 * 1024 * 1024;
+#if defined(_WIN32)
+    // Walk the processor cache hierarchy via GetLogicalProcessorInformation.
+    DWORD bufSz = 0;
+    ::GetLogicalProcessorInformation(nullptr, &bufSz);
+    if (bufSz == 0) return kDefault;
+    std::vector<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> buf(
+        bufSz / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION));
+    if (!::GetLogicalProcessorInformation(buf.data(), &bufSz)) return kDefault;
+    for (auto& info : buf) {
+        if (info.Relationship == RelationCache &&
+            info.Cache.Level == 2 &&
+            (info.Cache.Type == CacheData || info.Cache.Type == CacheUnified)) {
+            return static_cast<std::size_t>(info.Cache.Size);
+        }
+    }
+    return kDefault;
+#elif defined(__APPLE__)
+    // sysctl hw.l2cachesize is available on both x86_64 and arm64 macOS.
+    std::size_t val = 0;
+    std::size_t len = sizeof(val);
+    if (::sysctlbyname("hw.l2cachesize", &val, &len, nullptr, 0) == 0 && val > 0)
+        return val;
+    // Apple Silicon M1 has 12 MiB shared L2; return that as a safe fallback.
+    return 12 * 1024 * 1024;
+#else
+    // Linux: _SC_LEVEL2_CACHE_SIZE is defined in unistd.h (x86_64 glibc).
+#  ifdef _SC_LEVEL2_CACHE_SIZE
+    long l2 = ::sysconf(_SC_LEVEL2_CACHE_SIZE);
+    if (l2 > 0) return static_cast<std::size_t>(l2);
+#  endif
+    // Fallback: read from sysfs (always present on Linux ≥ 2.6).
+    std::ifstream f("/sys/devices/system/cpu/cpu0/cache/index2/size");
+    if (f) {
+        std::string s; f >> s;
+        if (!s.empty()) {
+            char unit = s.back();
+            long v = std::stol(s);
+            if (unit == 'K' || unit == 'k') return static_cast<std::size_t>(v) * 1024;
+            if (unit == 'M' || unit == 'm') return static_cast<std::size_t>(v) * 1024 * 1024;
+            return static_cast<std::size_t>(v);
+        }
+    }
+    return kDefault;
 #endif
 }
 
