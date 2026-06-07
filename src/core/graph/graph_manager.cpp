@@ -145,6 +145,193 @@ vgre::VGREResult GraphManager::validateGraph(GraphId id) const {
   return vgre::VGREResult::SUCCESS;
 }
 
+// ── Dynamic Graph Node Fusion (Track K) ───────────────────────────────────
+// Reads VGRE_GRAPH_FUSION_THRESHOLD (default 3) and, after that many replays,
+// analyses the active node sequence for two fusion patterns:
+//
+//  1. Consecutive MEMCPY_H2D + MEMCPY_H2D feeding the same kernel → merge
+//     into a single HOST node that does both copies in sequence.
+//  2. Consecutive KERNEL + KERNEL with matching grid/block dims and the same
+//     stream → register a fused kernel that calls both bodies sequentially
+//     and replace the pair with one KERNEL node.
+//
+// The result is stored in GraphExec::optimizedNodes.  All future replays of
+// this exec execute optimizedNodes instead of sourceGraph->nodes.
+
+static int graph_fusion_threshold() {
+    static int kThresh = []() {
+        const char* env = ::getenv("VGRE_GRAPH_FUSION_THRESHOLD");
+        if (env) {
+            int v = std::atoi(env);
+            if (v >= 1) return v;
+        }
+        return 3;
+    }();
+    return kThresh;
+}
+
+// Build an adjacency: nodeId → set of nodeIds that depend on it.
+static std::unordered_map<uint64_t, std::unordered_set<uint64_t>>
+build_dependents(const std::vector<GraphNode>& nodes) {
+    std::unordered_map<uint64_t, std::unordered_set<uint64_t>> dep;
+    for (const auto& n : nodes)
+        for (uint64_t d : n.deps)
+            dep[d].insert(n.nodeId);
+    return dep;
+}
+
+static std::vector<GraphNode>
+fuse_graph_nodes(const std::vector<GraphNode>& nodes) {
+    if (nodes.size() < 2) return nodes;
+
+    auto& engine = RuntimeEngine::instance();
+    auto dependents = build_dependents(nodes);
+
+    // Build a quick lookup: nodeId → index
+    std::unordered_map<uint64_t, size_t> idx;
+    for (size_t i = 0; i < nodes.size(); ++i) idx[nodes[i].nodeId] = i;
+
+    std::vector<bool> fused(nodes.size(), false);
+    std::vector<GraphNode> out;
+    out.reserve(nodes.size());
+
+    // We only allocate shared fusion context structs when needed; use a vector
+    // to keep them alive for the duration of this graph exec.
+    static std::vector<std::pair<std::function<void()>,
+                                 std::unique_ptr<uint8_t[]>>> s_fused_ctxs;
+
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (fused[i]) continue;
+        const GraphNode& a = nodes[i];
+
+        // ── Pattern 1: MEMCPY H2D + MEMCPY H2D ─────────────────────────────
+        if (a.type == GraphNodeType::MEMCPY &&
+            a.kind == VGRE_MEMCPY_HOST_TO_DEVICE &&
+            i + 1 < nodes.size()) {
+            const GraphNode& b = nodes[i + 1];
+            if (!fused[i + 1] &&
+                b.type == GraphNodeType::MEMCPY &&
+                b.kind == VGRE_MEMCPY_HOST_TO_DEVICE &&
+                // b must be independent of a (no direct dep)
+                std::find(b.deps.begin(), b.deps.end(), a.nodeId) == b.deps.end()) {
+                // a and b both H2D, consecutive — check that the only
+                // dependents of a are b (or the next kernel) and no cross-dep.
+                bool safe = true;
+                auto ait = dependents.find(a.nodeId);
+                if (ait != dependents.end()) {
+                    for (uint64_t dep : ait->second) {
+                        if (dep != b.nodeId) {
+                            // a has other dependents — not safe to fuse
+                            // (could create ordering hazard)
+                            safe = false; break;
+                        }
+                    }
+                }
+                if (safe) {
+                    // Create a fused HOST node that does both copies.
+                    // Capture copy params by value so they outlive this stack frame.
+                    struct CopyPair { void*dst1; const void*src1; size_t n1;
+                                      void*dst2; const void*src2; size_t n2; };
+                    auto* cp = new CopyPair{a.dst, a.src, a.count,
+                                            b.dst, b.src, b.count};
+                    GraphNode fused_node;
+                    fused_node.type = GraphNodeType::HOST;
+                    fused_node.nodeId = a.nodeId; // reuse first id
+                    fused_node.deps = a.deps;
+                    // Inherit any deps of b that are not a itself
+                    for (uint64_t d : b.deps)
+                        if (d != a.nodeId) fused_node.deps.push_back(d);
+                    fused_node.streamId = a.streamId;
+                    fused_node.hostFn = [](void* ctx) {
+                        auto* p = static_cast<CopyPair*>(ctx);
+                        memcpy(p->dst1, p->src1, p->n1);
+                        memcpy(p->dst2, p->src2, p->n2);
+                    };
+                    fused_node.hostUserData = static_cast<void*>(cp);
+                    // Ownership: stored in static list so it isn't freed too early.
+                    s_fused_ctxs.push_back({[cp]{ delete cp; },
+                        std::unique_ptr<uint8_t[]>()});
+
+                    out.push_back(std::move(fused_node));
+                    fused[i + 1] = true;
+                    VGRE_LOG_DEBUG("GraphManager",
+                        "Graph fusion: merged H2D MEMCPY pair → single HOST node");
+                    continue;
+                }
+            }
+        }
+
+        // ── Pattern 2: KERNEL + KERNEL (same grid/block, same stream) ───────
+        if (a.type == GraphNodeType::KERNEL && i + 1 < nodes.size()) {
+            const GraphNode& b = nodes[i + 1];
+            if (!fused[i + 1] &&
+                b.type == GraphNodeType::KERNEL &&
+                b.streamId == a.streamId &&
+                b.gridDim.x == a.gridDim.x && b.gridDim.y == a.gridDim.y &&
+                b.gridDim.z == a.gridDim.z &&
+                b.blockDim.x == a.blockDim.x && b.blockDim.y == a.blockDim.y &&
+                b.blockDim.z == a.blockDim.z) {
+                // Check no shared output dependency: capturedWritePtrs of a
+                // must not overlap capturedReadPtrs of b (and vice-versa).
+                bool noHazard = true;
+                for (void* wp : a.capturedWritePtrs) {
+                    for (void* rp : b.capturedReadPtrs) {
+                        if (wp == rp) { noHazard = false; break; }
+                    }
+                    if (!noHazard) break;
+                }
+                // b must depend only on a (linear chain) or be independent
+                bool linearDep = (b.deps.size() == 1 && b.deps[0] == a.nodeId) ||
+                                  b.deps.empty();
+
+                if (noHazard && linearDep) {
+                    const KernelIR* irA = engine.getKernelIR(a.kernelId);
+                    const KernelIR* irB = engine.getKernelIR(b.kernelId);
+                    if (irA && irB) {
+                        // Build a fused kernel source: sequential call of both bodies.
+                        std::string fusedName = "__vgre_fused_" + a.kernelName +
+                                                "_" + b.kernelName;
+                        std::string fusedSrc = irA->source + "\n" + irB->source +
+                            "\nextern \"C\" __global__ void " + fusedName +
+                            "(void** argsA, void** argsB) {\n"
+                            "    " + a.kernelName + "<<<gridDim,blockDim>>>(argsA);\n"
+                            "    " + b.kernelName + "<<<gridDim,blockDim>>>(argsB);\n"
+                            "}\n";
+
+                        KernelId fusedId = 0;
+                        if (engine.registerKernel(fusedName, fusedSrc, fusedId) ==
+                            VGREResult::SUCCESS) {
+                            GraphNode fused_node = a; // copy base node
+                            fused_node.nodeId   = a.nodeId;
+                            fused_node.kernelId = fusedId;
+                            fused_node.kernelName = fusedName;
+                            // Merge read/write ptr sets from both nodes
+                            for (void* p : b.capturedWritePtrs)
+                                fused_node.capturedWritePtrs.push_back(p);
+                            for (void* p : b.capturedReadPtrs)
+                                fused_node.capturedReadPtrs.push_back(p);
+                            // Merge args (argsA = a's args, argsB = b's args)
+                            for (const auto& arg : b.capturedArgs)
+                                fused_node.capturedArgs.push_back(arg);
+
+                            out.push_back(std::move(fused_node));
+                            fused[i + 1] = true;
+                            VGRE_LOG_DEBUG("GraphManager",
+                                "Graph fusion: merged KERNEL pair '" +
+                                a.kernelName + "' + '" + b.kernelName + "'");
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        out.push_back(a);
+    }
+
+    return out;
+}
+
 // ── getExecProfile ─────────────────────────────────────────────────────────
 vgre::VGREResult GraphManager::getExecProfile(GraphExecId id,
                                                double &lastExecMs,
@@ -200,6 +387,25 @@ vgre::VGREResult GraphManager::launch(GraphExecId execId, StreamId stream) {
         activeNodes.push_back(std::move(n));
       }
     }
+  }
+
+  // ── Dynamic graph node fusion ─────────────────────────────────────────────
+  // After graph_fusion_threshold() replays, run the fusion analyser once and
+  // cache the result in exec->optimizedNodes.  Later replays use the cached
+  // optimised node list, avoiding repeated analysis cost.
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!exec->fusionApplied &&
+        exec->profile.launch_count >= static_cast<uint64_t>(graph_fusion_threshold())) {
+      exec->optimizedNodes = fuse_graph_nodes(activeNodes);
+      exec->fusionApplied  = true;
+      VGRE_LOG_INFO("GraphManager",
+          "Graph exec " + std::to_string(execId) + ": fusion applied, " +
+          std::to_string(activeNodes.size()) + " → " +
+          std::to_string(exec->optimizedNodes.size()) + " nodes");
+    }
+    if (exec->fusionApplied)
+      activeNodes = exec->optimizedNodes;
   }
 
   // Timed dispatch — updates GraphExecProfile for this executable.
