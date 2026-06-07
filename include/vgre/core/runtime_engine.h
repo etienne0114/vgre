@@ -336,11 +336,30 @@ public:
   // Singleton
   static RuntimeEngine &instance();
 
+  // Per-device helpers (returns scheduler/memory manager for the calling
+  // thread's current device; must be called with initialized_ == true).
+  Scheduler &currentScheduler();
+  MemoryManager &currentMemoryManager();
+
 private:
   bool initialized_ = false;
   std::vector<std::unique_ptr<VirtualGPUDevice>> devices_;
-  DeviceId currentDeviceId_ = 0;
-  std::unique_ptr<MemoryManager> memoryManager_;
+
+  // Thread-local current device: each OS thread has its own binding so that
+  // cudaSetDevice(i) in one thread does not affect other threads.
+  static thread_local DeviceId tlCurrentDeviceId_;
+
+  // Per-device MemoryManagers (index == device id).
+  std::vector<std::unique_ptr<MemoryManager>> deviceMemManagers_;
+
+  // Per-device Scheduler raw pointers (index == device id).
+  // deviceSchedulers_[0] == &Scheduler::instance() (global singleton).
+  // deviceSchedulers_[1..N-1] point into ownedDeviceSchedulers_.
+  std::vector<Scheduler*> deviceSchedulers_;
+  // Owned schedulers for devices 1..N (device 0 uses the global singleton).
+  std::vector<std::unique_ptr<Scheduler>> ownedDeviceSchedulers_;
+
+  // Kept for backwards compat; always == deviceSchedulers_[0].
   Scheduler *scheduler_ = nullptr;
   std::unique_ptr<compiler::KernelParser> parser_;
   std::unique_ptr<compiler::LLVMTranslationEngine> translator_;
