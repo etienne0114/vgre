@@ -235,6 +235,22 @@ VGRE_EXPORT int vgre_get_memory_info_json(char **out_json);
 VGRE_EXPORT int vgre_get_kernel_history_json(const char *kernel_name, char **out_json);
 
 /**
+ * @brief Exports the VGRE telemetry timeline as a Perfetto binary trace.
+ *
+ * Serializes all recorded kernel and memory events into Perfetto's
+ * TracePacket protobuf format.  Each kernel execution becomes a
+ * TYPE_SLICE_BEGIN / TYPE_SLICE_END pair with grid/block dimensions as
+ * debug annotations.  Memory operations become counter events on the
+ * MemoryBandwidth track.
+ *
+ * Open the resulting file at https://ui.perfetto.dev
+ *
+ * @param output_path  Filesystem path for the .perfetto-trace file.
+ * @return 0 on success, non-zero on error.
+ */
+VGRE_EXPORT int vgre_export_perfetto_trace(const char *output_path);
+
+/**
  * @brief Retrieves recent log lines from the engine.
  *
  * @param buffer Double pointer to a string buffer that will be allocated by the

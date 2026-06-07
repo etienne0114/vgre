@@ -213,6 +213,11 @@ std::vector<ProfileEvent> RuntimeProfiler::getEventsByKernel(
     return result;
 }
 
+std::vector<ProfileEvent> RuntimeProfiler::getAllEvents() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return events_;
+}
+
 // ── JSON export ────────────────────────────────────────────────────────────
 // ── Chrome Trace Export (chrome://tracing) ─────────────────────────────────
 std::string RuntimeProfiler::toChromeTraceJSON() const {

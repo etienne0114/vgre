@@ -87,6 +87,7 @@ public:
     KernelStats getKernelStats(const std::string& kernelName) const;
     std::vector<KernelStats> getAllStats() const;
     std::vector<ProfileEvent> getEventsByKernel(const std::string& kernelName) const;
+    std::vector<ProfileEvent> getAllEvents() const;
 
     // Export
     std::string toJSON() const;
