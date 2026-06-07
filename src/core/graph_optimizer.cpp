@@ -2,11 +2,16 @@
 #include "vgre/core/graph_manager.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/os_backend.h"
 #include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <queue>
 #include <map>
+#include <vector>
 
 namespace vgre {
 namespace core {
@@ -327,8 +332,42 @@ bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
     // Intermediate bytes eliminated = a.intermediateBytes (set by caller).
     // Only proceed if fusion_speedup > 1.05 (5% minimum benefit threshold).
     {
-        constexpr float kPeakComputeGFLOPs = 100.f;  // ~100 GFLOP/s for 12-core CPU w/ AVX2
-        constexpr float kBandwidthGBps     = 40.f;   // local NUMA bandwidth
+        // Compute peak GFLOP/s: cores × FMAs/cycle × FP32/FMA-width × GHz.
+        // AVX2 FMA: 2 × 256-bit (8 FP32) per cycle = 16 FP32 FMAs/core/cycle.
+        // Conservative 2.5 GHz base: 16 FP32/cycle × 2.5e9 = 40 GFLOPs/core/s.
+        // Non-AVX2 fallback: 2 FP32/cycle × 2.5 GHz = 5 GFLOPs/core/s.
+        static const float kPeakComputeGFLOPs = []() -> float {
+            int cores = vgre::os::get_cpu_count();
+            if (cores <= 0) cores = 1;
+#if defined(__AVX512F__)
+            return static_cast<float>(cores) * 64.0f;   // 2 × 512-bit = 32 FP32; ×2 FMAs
+#elif defined(__AVX2__)
+            return static_cast<float>(cores) * 40.0f;   // 16 FP32/cycle × ~2.5 GHz
+#elif defined(__AVX__)
+            return static_cast<float>(cores) * 20.0f;   // 8 FP32/cycle × ~2.5 GHz
+#else
+            return static_cast<float>(cores) * 5.0f;    // scalar/NEON conservative
+#endif
+        }();
+
+        // Measure system memory bandwidth via a STREAM-style copy benchmark.
+        static const float kBandwidthGBps = []() -> float {
+            constexpr size_t kN = 8 * 1024 * 1024;  // 8M floats = 32 MB per array
+            constexpr int    kR = 3;
+            try {
+                std::vector<float> src(kN, 1.0f), dst(kN, 0.0f);
+                std::memcpy(dst.data(), src.data(), kN * sizeof(float));  // warmup
+                auto t0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < kR; ++i)
+                    std::memcpy(dst.data(), src.data(), kN * sizeof(float));
+                auto t1 = std::chrono::steady_clock::now();
+                double ns = static_cast<double>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+                double gbps = (ns > 0.0) ? (2.0 * kN * sizeof(float) * kR / (ns * 1e-9) / 1e9) : 0.0;
+                if (gbps > 0.5 && gbps < 5000.0) return static_cast<float>(gbps);
+            } catch (...) {}
+            return 40.0f;  // fallback: typical dual-channel DDR4
+        }();
 
         auto rooflineMs = [&](float flops, float bytes) -> float {
             float t_compute  = flops  / (kPeakComputeGFLOPs * 1e9f) * 1e3f; // ms

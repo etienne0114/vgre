@@ -1,6 +1,10 @@
 #include "vgre/core/memory_manager.h"
 #include "vgre/api/vgre_c_api.h"
 #include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <thread>
+#include <vector>
 
 namespace vgre {
 namespace core {
@@ -73,15 +77,32 @@ MemoryManager::MemoryBandwidthStats MemoryManager::getMemoryBandwidthStats() con
                 } catch (...) {}
             }
             
-            // If not provided via env, use architectural estimation
-            // based on memory type and frequency (detect from system)
+            // If not provided via env, measure actual system memory bandwidth
+            // using a STREAM-style copy benchmark (read + write = 2× transfer).
             if (s_measuredGpuPeak == 0.0) {
-                // DDR4-3200: ~25.6 GB/s per channel × 2 channels = 51.2 GB/s
-                // DDR5-5600: ~44.8 GB/s per channel × 2 channels = 89.6 GB/s
-                // HBM2e: ~900 GB/s
-                // HBM3: ~1200 GB/s
-                // Use conservative DDR4 estimate as baseline for CPU emulation
-                s_measuredGpuPeak = 51.2;  // DDR4-3200 dual-channel baseline
+                constexpr size_t kN    = 16 * 1024 * 1024;  // 16M floats = 64 MB
+                constexpr int    kRuns = 5;
+                try {
+                    std::vector<float> src(kN, 1.0f), dst(kN, 0.0f);
+                    float* pSrc = src.data();
+                    float* pDst = dst.data();
+                    std::memcpy(pDst, pSrc, kN * sizeof(float));  // warmup
+
+                    auto t0 = std::chrono::steady_clock::now();
+                    for (int r = 0; r < kRuns; ++r)
+                        std::memcpy(pDst, pSrc, kN * sizeof(float));
+                    auto t1 = std::chrono::steady_clock::now();
+
+                    double ns = static_cast<double>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+                    // Each copy: kN floats read + kN floats written = 2 × kN × 4 bytes
+                    double totalBytes = 2.0 * kN * sizeof(float) * kRuns;
+                    double gbps = (ns > 0.0) ? totalBytes / (ns * 1e-9) / 1e9 : 0.0;
+                    if (gbps > 0.5 && gbps < 5000.0)
+                        s_measuredGpuPeak = gbps;
+                } catch (...) {}
+                if (s_measuredGpuPeak == 0.0)
+                    s_measuredGpuPeak = 51.2;  // safe fallback: DDR4-3200 dual-channel
             }
         }
     }
@@ -119,12 +140,21 @@ MemoryManager::MemoryBandwidthStats MemoryManager::getMemoryBandwidthStats() con
     }
 
     // ── Roofline Model ──────────────────────────────────────────────────────
-    // Estimate peak compute from hardware concurrency × per-core peak.
-    // On 12-core Alder Lake (2P + 8E + 2HT) with AVX2 FMA:
-    //   P-cores: 2 cores × 2 FP32 FMAs × 8 FP32/FMA × 3.4 GHz = ~109 GFLOPs/s
-    //   E-cores: 8 cores × 2 FP32 FMAs × 8 FP32/FMA × 2.5 GHz = ~320 GFLOPs/s (over-estimate)
-    //   Conservative combined: ~100 GFLOPs/s
-    constexpr double kPeakComputeGFLOPs = 100.0;
+    // Peak compute derived from core count × per-core SIMD throughput × base frequency.
+    // AVX2 FMA: 2 × 256-bit FMAs/cycle × 8 FP32/FMA = 16 FP32 ops/core/cycle @ ~2.5 GHz.
+    static const double kPeakComputeGFLOPs = []() -> double {
+        int cores = static_cast<int>(std::thread::hardware_concurrency());
+        if (cores <= 0) cores = 1;
+#if defined(__AVX512F__)
+        return cores * 64.0;
+#elif defined(__AVX2__)
+        return cores * 40.0;
+#elif defined(__AVX__)
+        return cores * 20.0;
+#else
+        return cores * 5.0;
+#endif
+    }();
 
     stats.peak_compute_gflops = kPeakComputeGFLOPs;
 

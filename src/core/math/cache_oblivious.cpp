@@ -2,6 +2,9 @@
 // Implements recursive divide-and-conquer algorithms that adapt to any cache hierarchy
 
 #include "cache_oblivious.h"
+#include "vgre/common/os_backend.h"
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 
@@ -14,15 +17,28 @@ namespace math {
 
 namespace {
 
-// Base case threshold for recursion (empirically chosen for good performance)
-constexpr size_t kBaseThreshold = 64;
+// kBaseThreshold: stop recursion when all three dimensions fit together in L2.
+// For 3 square sub-matrices of side s in FP32: 3 × s² × 4 ≤ L2_size.
+// → s ≤ sqrt(L2 / 12); round down to nearest power of 2, clamped [32, 512].
+static const size_t kBaseThreshold = []() -> size_t {
+    std::size_t l2 = vgre::os::get_l2_cache_size();
+    double s = std::sqrt(static_cast<double>(l2) / 12.0);
+    size_t t = 32;
+    while (t * 2 <= static_cast<size_t>(s) && t < 512) t *= 2;
+    return t;
+}();
 
-// kTile = 32: a 32×32 float block = 32*32*4 = 4 096 bytes = 4 KiB.
-// Fits comfortably in L1 cache (typically 32 KiB), ensuring that when the
-// recursion bottoms out at 8×8 AVX2 tiles the working set is already hot.
-// Invariant: T(N) = 2·T(N/2) + O((N/2)²/B) → T(N) = O(N²/B) cache misses,
-// where B = 64 / sizeof(float) = 16 floats per cache line.
-static constexpr size_t kTile = 32;
+// kTile: blocking tile for the base-case triple loop.
+// 3 tiles of side t in FP32 should fit in L1 cache (typ. 32-64 KiB).
+// → t ≤ sqrt(L1 / 12); approximate L1 as L2 / 8 (common ratio), clamp [16, 64].
+static const size_t kTile = []() -> size_t {
+    std::size_t l1_est = vgre::os::get_l2_cache_size() / 8;
+    if (l1_est < 4096) l1_est = 32768;  // use 32 KiB if estimate is too small
+    double s = std::sqrt(static_cast<double>(l1_est) / 12.0);
+    size_t t = 16;
+    while (t * 2 <= static_cast<size_t>(s) && t < 64) t *= 2;
+    return t;
+}();
 
 // Recursive helper for cache-oblivious matrix multiplication
 template<typename T>
