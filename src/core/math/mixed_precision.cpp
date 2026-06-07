@@ -185,20 +185,39 @@ float FP8::to_float() const {
     return result;
 }
 
-// Mixed precision matrix multiplication
+// Mixed precision matrix multiplication — tiled "i,j,k" loop order.
+// Row-major layout: A[i][j] and B[j][k] are both accessed in cache-friendly
+// (row-sequential) order. 32×32 tiles keep three sub-blocks ≤ 12 KiB in L1.
 template<typename InputType, typename AccumType, typename OutputType>
 void mixedPrecisionMatmul(const InputType* A, const InputType* B, OutputType* C,
-                        size_t m, size_t n, size_t p,
-                        size_t lda, size_t ldb, size_t ldc) {
-    for (size_t i = 0; i < m; ++i) {
-        for (size_t k = 0; k < p; ++k) {
-            AccumType sum = AccumType(0);
-            for (size_t j = 0; j < n; ++j) {
-                float a_val = static_cast<float>(A[i * lda + j]);
-                float b_val = static_cast<float>(B[j * ldb + k]);
-                sum += static_cast<AccumType>(a_val * b_val);
+                          size_t m, size_t n, size_t p,
+                          size_t lda, size_t ldb, size_t ldc) {
+    // Zero C
+    for (size_t i = 0; i < m; ++i)
+        for (size_t k = 0; k < p; ++k)
+            C[i * ldc + k] = OutputType(0);
+
+    constexpr size_t TILE = 32;
+    for (size_t ji = 0; ji < n; ji += TILE) {
+        const size_t jEnd = std::min(ji + TILE, n);
+        for (size_t ii = 0; ii < m; ii += TILE) {
+            const size_t iEnd = std::min(ii + TILE, m);
+            for (size_t ki = 0; ki < p; ki += TILE) {
+                const size_t kEnd = std::min(ki + TILE, p);
+                // Inner micro-kernel: accumulate into AccumType then write OutputType
+                for (size_t i = ii; i < iEnd; ++i) {
+                    for (size_t j = ji; j < jEnd; ++j) {
+                        const AccumType a_ij = static_cast<AccumType>(
+                            static_cast<float>(A[i * lda + j]));
+                        for (size_t k = ki; k < kEnd; ++k) {
+                            C[i * ldc + k] = static_cast<OutputType>(
+                                static_cast<AccumType>(C[i * ldc + k]) +
+                                a_ij * static_cast<AccumType>(
+                                    static_cast<float>(B[j * ldb + k])));
+                        }
+                    }
+                }
             }
-            C[i * ldc + k] = static_cast<OutputType>(sum);
         }
     }
 }
