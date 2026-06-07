@@ -29,7 +29,7 @@ graph TD
 ### 1. 📈 [PROJECT_STATUS.md](PROJECT_STATUS.md)
 *   **Purpose**: The single source of truth for VGRE capability, build metrics, and gaps.
 *   **Key Contents**:
-    *   Test suite statistics (130/130 passes).
+    *   Test suite statistics (192/192 passes).
     *   Core numerical verification guarantees.
     *   **Actual, verified hardware limitations and gaps** (SASS binary limits, CUPTI hardware counter scaling, and physical GPUDirect RDMA proxies) with no historical clutter.
 *   **Read When**: You want to check what specific CUDA/library features are numerical-exact or where emulation boundary conditions reside.
@@ -91,6 +91,9 @@ VGRE is designed as a cross-platform system, utilizing platform-native bindings 
 | **IPC Channels** | Unix Domain Sockets | Named Pipes | Unix Domain Sockets |
 | **Thermal Sensing** | `/sys/class/thermal` | WMI COM Thread | IOKit SMC Keys |
 | **Secure Keyring** | Linux Keyring (`keyctl`) | Credential Manager | macOS Keychain |
+| **TPM 2.0 Storage** | `libtss2-esys` (auto) | TPM 2.0 (auto) | TPM 2.0 (auto) |
+| **GNOME Keyring** | `libsecret-1` (auto) | N/A | N/A |
+| **RDMA Transport** | `libibverbs` (auto) | N/A | N/A |
 | **Telemetry PMU** | `perf_event_open` | QueryThreadCycleTime | mach_thread_self user-time |
 
 ---
@@ -105,7 +108,7 @@ mkdir -p build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 cmake --build . -j$(nproc)
 
-# 2. Run the complete test suite (191/191 passing)
+# 2. Run the complete test suite (192/192 passing)
 ctest --output-on-failure -j$(nproc)
 ```
 

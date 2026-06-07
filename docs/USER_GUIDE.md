@@ -1,6 +1,6 @@
 # VGRE User Guide
 
-**Version 1.3.0** — Virtual GPU Runtime Engine
+**Version 1.4.0** — Virtual GPU Runtime Engine
 
 VGRE lets you run unmodified CUDA applications on any x86-64 or ARM64 CPU by intercepting the CUDA runtime at load time. No GPU required. Includes a real-time Flutter dashboard, distributed cluster support with **full WAN connectivity**, and a complete token-management + discovery CLI.
 
@@ -87,14 +87,15 @@ vgre-start --master       # launch master + dashboard
 
 ### Optional — unlocks additional features
 
-| Package | Feature unlocked |
-|---------|-----------------|
-| `libomp-dev` | Multi-threaded kernel execution |
-| `libssl-dev` | Secure cluster transport (TLS) |
-| `libtpm2-tss-dev` | Hardware TPM token storage (Linux) |
-| `libibverbs-dev` | RDMA/RoCE zero-copy transport (`-DVGRE_ENABLE_RDMA=ON`) |
-| `libgrpc++-dev` | gRPC cluster transport (`-DVGRE_ENABLE_GRPC=ON`) |
-| Intel AMX CPU | AMX tile acceleration (auto-detected at build time) |
+| Package | Feature unlocked | Detection |
+|---------|-----------------|-----------|
+| `libomp-dev` | Multi-threaded kernel execution | Required |
+| `libssl-dev` | Secure cluster transport (TLS) | Required |
+| `libtss2-dev` | Hardware TPM 2.0 token storage (Linux) | **Auto-detected** |
+| `libibverbs-dev` | RDMA/RoCE zero-copy transport | **Auto-detected** |
+| `libsecret-1-dev` | GNOME Keyring token storage (Linux) | **Auto-detected** |
+| `libgrpc++-dev` | gRPC cluster transport | Manual (`-DVGRE_ENABLE_GRPC=ON`) |
+| Intel AMX CPU | AMX tile acceleration | **Auto-detected** (CPUID at build time) |
 
 ---
 
@@ -159,12 +160,17 @@ bash install_local.sh
 | Flag | Default | Effect |
 |------|---------|--------|
 | `-DCMAKE_BUILD_TYPE=Release` | Release | Optimized build |
-| `-DVGRE_ENABLE_NATIVE_SIMD=ON` | OFF | Enable `-march=native` (max SIMD, not portable) |
-| `-DVGRE_ENABLE_RDMA=ON` | OFF | RDMA/RoCE transport (requires `libibverbs-dev`) |
+| `-DVGRE_ENABLE_NATIVE_SIMD` | **auto** (ON if CPU supports it) | Enable `-march=native` (max SIMD, not portable) |
+| `-DVGRE_ENABLE_RDMA` | **auto** (ON if `libibverbs-dev` found) | RDMA/RoCE zero-copy transport |
+| `-DVGRE_ENABLE_TPM2` | **auto** (ON if `libtss2-dev` found) | TPM 2.0 hardware token storage |
+| `-DVGRE_ENABLE_LIBSECRET` | **auto** (ON if `libsecret-1-dev` found) | GNOME Keyring token storage |
 | `-DVGRE_ENABLE_GRPC=ON` | OFF | gRPC cluster transport (requires `libgrpc++-dev`) |
+| `-DVGRE_WARNINGS_AS_ERRORS=ON` | ON | Treat all compiler warnings as errors |
+
+Auto-detected features activate silently when their libraries are installed. The build never fails due to a missing optional dependency — it downgrades gracefully with a CMake warning.
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVGRE_ENABLE_RDMA=ON
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
@@ -240,6 +246,12 @@ On Windows they are set in User scope by `vgre_sync.bat` / `vgre_env.ps1`.
 | `LD_LIBRARY_PATH` | extended | Directory containing VGRE shared libraries |
 | `VGRE_LOG_LEVEL` | `INFO` | Verbosity: `DEBUG` \| `INFO` \| `WARN` \| `ERROR` |
 | `VGRE_INSTALL_DIR` | `~/.local/share/VGRE` | Installation directory |
+
+### Kubernetes / Container
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VGRE_DEVICE_PLUGIN_PATH` | `/var/lib/kubelet/device-plugins/kubelet.sock` | Override kubelet socket path for K8s device plugin registration |
 
 ### Cluster / networking
 
@@ -351,6 +363,7 @@ vgre-token fingerprint    # run on BOTH — output must be identical
 ```
 vgre-start --master                              Start master node (launches dashboard)
 vgre-start --worker                              Start worker (LAN auto-discovery)
+vgre-start --worker --is-master                  Start as headless master (no dashboard; K8s/container mode)
 vgre-start --worker --master-ip <IP>             LAN: connect to specific master IP
 vgre-start --worker --master-address <HOST:PORT> WAN: hostname, IPv4, or IPv6 direct connect
 vgre-start --test                                Local self-test (master + worker, same machine)
@@ -788,10 +801,25 @@ Check that `flutter precache --windows` and `flutter build windows --release` su
 
 ### 11.9 Low compute performance
 
+SIMD is auto-detected at configure time. Check which level was selected:
+
 ```bash
-VGRE_LOG_LEVEL=DEBUG ./build/examples/matrix_multiply 2>&1 | grep "SIMD\|AVX\|AMX"
+# See which SIMD features CMake detected
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release 2>&1 | grep -i "simd\|avx\|amx"
+
+# Force a specific SIMD level at runtime
 export VGRE_SIMD_LEVEL=AVX512
-cmake -S . -B build -DVGRE_ENABLE_NATIVE_SIMD=ON && cmake --build build -j$(nproc)
+
+# Debug-confirm which path VGRE is using
+VGRE_LOG_LEVEL=DEBUG ./build/examples/matrix_multiply 2>&1 | grep "SIMD\|AVX\|AMX"
+```
+
+If SIMD was not auto-enabled, install the dev tools and rebuild:
+
+```bash
+# Ubuntu/Debian — nothing extra needed; /proc/cpuinfo probed at configure time
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
 ```
 
 ### 11.10 Windows: DLL load failure (0xC000001D / error 1114)
