@@ -34,6 +34,7 @@ enum class FusionPattern {
     NONE,
     FLASH_ATTENTION,       // Q@K^T → softmax → @V
     FLASH_ATTENTION_V2,    // above + causal mask + ALiBi
+    FLASH_ATTENTION_GQA,   // Grouped Query Attention (num_heads > num_kv_heads)
     TRANSFORMER_BLOCK,     // QKV + attn + MLP
     LAYER_NORM_FUSED,      // ln + residual + dropout
     GEMM_GELU_FUSED        // matmul + bias + GELU
@@ -48,6 +49,8 @@ struct FusionMetadata {
     bool usesOnlineSoftmax = false;
     bool usesCausalMask = false;
     bool usesALiBi = false;
+    bool usesGQA = false;           // Grouped Query Attention
+    int  numKvHeads = 0;            // GQA: number of K/V heads (< num_q_heads)
 };
 
 // ── Kernel Fusion Engine ─────────────────────────────────────────────────
@@ -75,7 +78,8 @@ private:
     FusionPattern detectGemmGeluFused(const KernelIR& ir);
 
     // Source generators
-    std::string genFlashAttentionSource(const KernelIR& ir, bool causal, bool alibi);
+    std::string genFlashAttentionSource(const KernelIR& ir, bool causal, bool alibi,
+                                        bool gqa = false, int numKvHeads = 0);
     std::string genTransformerBlockSource(const KernelIR& ir);
     std::string genLayerNormFusedSource(const KernelIR& ir);
     std::string genGemmGeluFusedSource(const KernelIR& ir);

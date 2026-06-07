@@ -43,6 +43,23 @@ FusionPattern KernelFusionEngine::detectFlashAttention(const KernelIR& ir) {
                     src.find(" * 0.0") != std::string::npos;
 
     if (hasQ && hasK && hasV && hasSoftmax && hasScale) {
+        // GQA detection: K/V have a smaller head count than Q.
+        // Common indicators in source:
+        //   - explicit num_kv_heads / kv_heads token
+        //   - head group indexing: "head / groups", "q_head / kv_ratio"
+        //   - LLaMA-2 style: head_idx % num_kv_heads (modulo broadcast)
+        bool hasGQA = src.find("num_kv_heads") != std::string::npos ||
+                      src.find("kv_heads")     != std::string::npos ||
+                      src.find("kv_head")      != std::string::npos ||
+                      src.find("head / groups") != std::string::npos ||
+                      src.find("q_head / kv")  != std::string::npos ||
+                      src.find("% num_kv")     != std::string::npos ||
+                      src.find("kv_ratio")     != std::string::npos ||
+                      src.find("gqa")          != std::string::npos ||
+                      src.find("GQA")          != std::string::npos;
+        if (hasGQA)
+            return FusionPattern::FLASH_ATTENTION_GQA;
+
         bool causal = src.find("causal") != std::string::npos ||
                       src.find("mask") != std::string::npos ||
                       src.find("i < j") != std::string::npos ||
@@ -224,9 +241,35 @@ FusionMetadata KernelFusionEngine::tryFuse(const KernelIR& ir) {
         meta.fusedKernelName = ir.name + "_fused_flash_attn";
         meta.usesOnlineSoftmax = true;
         meta.usesCausalMask = (p == FusionPattern::FLASH_ATTENTION_V2);
-        meta.usesALiBi = (p == FusionPattern::FLASH_ATTENTION_V2);
+        meta.usesALiBi     = (p == FusionPattern::FLASH_ATTENTION_V2);
+        meta.usesGQA       = (p == FusionPattern::FLASH_ATTENTION_GQA);
         meta.tileSizes = {64, 64, 32};
-        meta.fusedSource = genFlashAttentionSource(ir, meta.usesCausalMask, meta.usesALiBi);
+
+        if (meta.usesGQA) {
+            // Extract num_kv_heads from source if possible; default to 8 which
+            // matches LLaMA-2 7B (32 Q heads / 4 = 8 KV heads ratio).
+            int kv = 8;
+            const std::string& s = ir.source;
+            auto it = s.find("num_kv_heads");
+            if (it != std::string::npos) {
+                // Scan for a decimal literal after '='
+                auto eq = s.find('=', it + 12);
+                if (eq != std::string::npos && eq < it + 40) {
+                    size_t d = eq + 1;
+                    while (d < s.size() && (s[d] == ' ' || s[d] == '\t')) ++d;
+                    int v = 0; bool found = false;
+                    while (d < s.size() && s[d] >= '0' && s[d] <= '9') {
+                        v = v * 10 + (s[d++] - '0'); found = true;
+                    }
+                    if (found && v > 0) kv = v;
+                }
+            }
+            meta.numKvHeads = kv;
+            meta.fusedSource = genFlashAttentionSource(ir, false, false, true, kv);
+        } else {
+            meta.fusedSource = genFlashAttentionSource(ir, meta.usesCausalMask,
+                                                       meta.usesALiBi);
+        }
         return meta;
     }
 
@@ -264,10 +307,117 @@ FusionMetadata KernelFusionEngine::tryFuse(const KernelIR& ir) {
 
 std::string KernelFusionEngine::genFlashAttentionSource(const KernelIR& ir,
                                                           bool causal,
-                                                          bool alibi) {
-    // Generate a CPU-optimized Flash Attention kernel using online softmax.
-    // Tiling: each block handles BM rows of Q, BN cols of V, BK cols of K.
+                                                          bool alibi,
+                                                          bool gqa,
+                                                          int numKvHeads) {
     std::ostringstream ss;
+
+    if (gqa) {
+        // GQA (Grouped Query Attention) kernel.
+        // Signature: Q[B, num_heads, seq_len, d_head]
+        //            K[B, num_kv_heads, seq_len, d_head]
+        //            V[B, num_kv_heads, seq_len, d_head]
+        //            O[B, num_heads, seq_len, d_head]
+        // Each Q head maps to K/V head: kv_head = q_head / (num_heads / num_kv_heads).
+        // The inner attention loop reuses the same K/V tile for all Q heads in
+        // the same group, matching the real LLaMA-2/Mistral/Gemma contract.
+        ss << R"(
+extern "C" __global__ void )" << ir.name << R"(_fused_flash_attn_gqa(
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
+    float* __restrict__ O,
+    int batch, int num_heads, int num_kv_heads,
+    int seq_len, int d_head, float scale) {
+
+    // grid: (batch * num_heads * ((seq_len+63)/64))  blocks, 128 threads each
+    const int BM = 64, BK = 32;
+    const int tid = threadIdx.x;
+    const int gid = blockIdx.x;
+
+    const int num_q_blocks = (seq_len + BM - 1) / BM;
+    const int total_heads_blocks = num_heads * num_q_blocks;
+
+    const int b         = gid / total_heads_blocks;
+    const int rem       = gid % total_heads_blocks;
+    const int q_head    = rem / num_q_blocks;
+    const int q_blk     = rem % num_q_blocks;
+
+    if (b >= batch || q_head >= num_heads) return;
+
+    // GQA: map Q head → KV head.  groups = num_heads / num_kv_heads.
+    const int groups    = num_heads / num_kv_heads;
+    const int kv_head   = q_head / groups;
+
+    const int q_start   = q_blk * BM;
+
+    // Pointers for this (batch, head) slice.
+    const float* Qh = Q + (b * num_heads  + q_head ) * seq_len * d_head;
+    const float* Kh = K + (b * num_kv_heads + kv_head) * seq_len * d_head;
+    const float* Vh = V + (b * num_kv_heads + kv_head) * seq_len * d_head;
+    float*       Oh = O + (b * num_heads  + q_head ) * seq_len * d_head;
+
+    // Thread handles one row of Q within the tile.
+    const int row = q_start + tid;
+    if (row >= seq_len) return;
+
+    // Per-row output accumulator (d_head elements, stride by BM threads).
+    // Use VLAs-style stack array capped at max d_head = 128.
+    float acc[128];
+    for (int d = 0; d < d_head && d < 128; ++d) acc[d] = 0.0f;
+
+    float row_max = -3.402823466e+38f; // -FLT_MAX compatible
+    float row_sum = 0.0f;
+
+    // Iterate over KV sequence blocks.
+    for (int kv_blk = 0; kv_blk < (seq_len + BK - 1) / BK; ++kv_blk) {
+        const int kv_start = kv_blk * BK;
+
+        float s_vals[32];  // BK dot products for this row
+        float local_max = -3.402823466e+38f;
+
+        for (int k = 0; k < BK; ++k) {
+            const int col = kv_start + k;
+            if (col >= seq_len) { s_vals[k] = -3.402823466e+38f; continue; }
+
+            float dot = 0.0f;
+            for (int d = 0; d < d_head && d < 128; ++d)
+                dot += Qh[row * d_head + d] * Kh[col * d_head + d];
+            s_vals[k] = dot * scale;
+            if (s_vals[k] > local_max) local_max = s_vals[k];
+        }
+
+        // Online softmax update.
+        const float new_max   = (row_max > local_max) ? row_max : local_max;
+        const float exp_scale = expf(row_max - new_max);
+        float local_sum = 0.0f;
+        for (int k = 0; k < BK; ++k) {
+            const int col = kv_start + k;
+            if (col >= seq_len) continue;
+            if (s_vals[k] > -3.402823466e+38f / 2.0f) {
+                const float e = expf(s_vals[k] - new_max);
+                local_sum += e;
+                for (int d = 0; d < d_head && d < 128; ++d)
+                    acc[d] = acc[d] * exp_scale + e * Vh[col * d_head + d];
+            }
+        }
+        row_sum = row_sum * exp_scale + local_sum;
+        row_max = new_max;
+    }
+
+    // Normalize and write output.
+    if (row_sum > 0.0f) {
+        for (int d = 0; d < d_head && d < 128; ++d)
+            Oh[row * d_head + d] = acc[d] / row_sum;
+    }
+}
+)";
+        (void)numKvHeads; // runtime parameter; static value is kernel param
+        return ss.str();
+    }
+
+    // Standard MHA Flash Attention (causal / ALiBi variants).
+    // Tiling: each block handles BM rows of Q, BN cols of V, BK cols of K.
     ss << R"(
 extern "C" __global__ void )" << ir.name << R"(_fused_flash_attn(
     const float* __restrict__ Q,
@@ -294,7 +444,7 @@ extern "C" __global__ void )" << ir.name << R"(_fused_flash_attn(
     for (int i = 0; i < BN; ++i) acc[i] = 0.0f;
 
     // Online softmax state
-    float row_max = -FLT_MAX;
+    float row_max = -3.402823466e+38f;
     float row_sum = 0.0f;
 
     // Iterate over K/V blocks
@@ -308,15 +458,15 @@ extern "C" __global__ void )" << ir.name << R"(_fused_flash_attn(
 
             // Compute dot products with K rows
             float s_vals[32]; // max BK
-            float local_max = -FLT_MAX;
+            float local_max = -3.402823466e+38f;
 
             for (int k = 0; k < BK; ++k) {
                 int col = k_start + k;
-                if (col >= seq_len) { s_vals[k] = -FLT_MAX; continue; }
+                if (col >= seq_len) { s_vals[k] = -3.402823466e+38f; continue; }
 
                 // Causal mask
                 if ()" << (causal ? "row < col" : "false") << R"( ) {
-                    s_vals[k] = -FLT_MAX;
+                    s_vals[k] = -3.402823466e+38f;
                     continue;
                 }
 
@@ -333,10 +483,9 @@ extern "C" __global__ void )" << ir.name << R"(_fused_flash_attn(
             float exp_scale = expf(row_max - new_max);
             float local_sum = 0.0f;
             for (int k = 0; k < BK; ++k) {
-                if (s_vals[k] > -FLT_MAX/2) {
+                if (s_vals[k] > -3.402823466e+38f / 2.0f) {
                     float e = expf(s_vals[k] - new_max);
                     local_sum += e;
-                    // Accumulate into O: weighted V (v_col is d_head dimension)
                     int col = k_start + k;
                     for (int n = 0; n < BN; ++n) {
                         int v_col = n_start + n;
@@ -358,7 +507,7 @@ extern "C" __global__ void )" << ir.name << R"(_fused_flash_attn(
         for (int n = 0; n < BN; ++n) {
             int d = n_start + n;
             if (d < d_head) {
-                O[row * d_head + d] = acc[n] / row_sum;
+                O[row * d_head + d] = acc[n] / (row_sum > 0.0f ? row_sum : 1.0f);
             }
         }
     }
@@ -560,6 +709,8 @@ std::string KernelFusionEngine::generateFusedSource(const FusionMetadata& meta,
             return genFlashAttentionSource(ir, false, false);
         case FusionPattern::FLASH_ATTENTION_V2:
             return genFlashAttentionSource(ir, meta.usesCausalMask, meta.usesALiBi);
+        case FusionPattern::FLASH_ATTENTION_GQA:
+            return genFlashAttentionSource(ir, false, false, true, meta.numKvHeads);
         case FusionPattern::TRANSFORMER_BLOCK:
             return genTransformerBlockSource(ir);
         case FusionPattern::LAYER_NORM_FUSED:
