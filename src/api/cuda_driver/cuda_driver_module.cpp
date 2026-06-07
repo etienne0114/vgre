@@ -10,11 +10,15 @@
 #include <unordered_set>
 #include <vector>
 
+#include "vgre/compiler/llvm_translation_engine.h"
+#include <vector>
+
 extern "C" {
 
 extern "C" void *vgre_register_module_data(const void *data, size_t size);
 extern "C" bool vgre_unregister_module_data(void *handle);
 extern "C" const char *vgre_get_module_source(void *handle);
+extern "C" const std::vector<uint8_t> *vgre_get_module_bitcode(void *handle);
 extern "C" void *vgre_lookup_symbol(void *handle, const char *name, size_t *size);
 extern "C" void *vgre_lookup_texture_ref(void *handle, const char *name);
 
@@ -53,6 +57,14 @@ CUresult cuModuleLoadData(CUmodule *module, const void *image) {
         }
         if (len == 0) len = 4 * 1024 * 1024;
         len = std::max(len, (size_t)32);
+    } else if ((reinterpret_cast<const uint8_t*>(image))[0] == 0x42 &&
+               (reinterpret_cast<const uint8_t*>(image))[1] == 0x43) {
+        // LLVM bitcode: magic 'B' 'C' (0x42 0x43).
+        // Raw LLVM bitcode is NOT self-delimiting — callers must use
+        // vgre_cuModuleLoadBitcode(module, data, size) which takes an explicit
+        // size.  cuModuleLoadData cannot safely memcpy unknown-length BC blobs.
+        // Return INVALID_VALUE so the caller uses the correct API.
+        return CUDA_ERROR_INVALID_VALUE;
     } else {
         // Plain PTX text (null-terminated)
         len = strlen(reinterpret_cast<const char *>(image));
@@ -99,6 +111,24 @@ CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name)
     if (std::strncmp(src, kSassMarker, sizeof(kSassMarker) - 1) == 0) {
       return CUDA_ERROR_NO_BINARY_FOR_GPU; // 209
     }
+
+    // LLVM bitcode direct path (Track N): bypass PTX parsing and Clang;
+    // parse the bitcode, strip nvvm.annotations, and JIT directly via ORC.
+    static const char kBCMarker[] = "__llvm_bitcode__";
+    if (std::strncmp(src, kBCMarker, sizeof(kBCMarker) - 1) == 0) {
+      const std::vector<uint8_t> *bc = vgre_get_module_bitcode(hmod);
+      if (!bc || bc->empty()) return CUDA_ERROR_INVALID_VALUE;
+      vgre::CompiledKernelFn fn = nullptr;
+      auto r = vgre::compiler::LLVMTranslationEngine::instance()
+                   .compileBitcodeKernel(*bc, name, fn);
+      if (r != vgre::VGREResult::SUCCESS || !fn) return CUDA_ERROR_INVALID_PTX;
+      vgre::KernelId id = 0;
+      auto regR = vgre::core::RuntimeEngine::instance().registerPrecompiledKernel(name, fn, id);
+      if (regR != vgre::VGREResult::SUCCESS || id == 0) return CUDA_ERROR_INVALID_PTX;
+      *hfunc = static_cast<CUfunction>(id);
+      return CUDA_SUCCESS;
+    }
+
     vgre::KernelId id = 0;
     auto r = vgre::core::RuntimeEngine::instance().registerKernel(name, src, id);
     if (r != vgre::VGREResult::SUCCESS) return CUDA_ERROR_INVALID_PTX;

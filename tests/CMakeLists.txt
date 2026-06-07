@@ -569,6 +569,10 @@ add_executable(test_ptx_cross_module_link api/test_ptx_cross_module_link.cpp)
 target_link_libraries(test_ptx_cross_module_link PRIVATE vgre_cudart)
 add_test(NAME PTXCrossModuleLink COMMAND test_ptx_cross_module_link)
 
+add_executable(test_llvm_bitcode_module api/test_llvm_bitcode_module.cpp)
+target_link_libraries(test_llvm_bitcode_module PRIVATE vgre_cudart)
+add_test(NAME LLVMBitcodeModuleDirect COMMAND test_llvm_bitcode_module)
+
 add_executable(test_ptx_fp8 api/test_ptx_fp8.cpp)
 target_link_libraries(test_ptx_fp8 PRIVATE vgre_cudart)
 add_test(NAME PTXFp8Translation COMMAND test_ptx_fp8)

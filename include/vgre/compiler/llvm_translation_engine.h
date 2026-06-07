@@ -4,6 +4,7 @@
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -12,6 +13,7 @@
 #include <atomic>
 #include <thread>
 #include <future>
+#include <vector>
 
 namespace llvm {
 class Module;
@@ -57,6 +59,18 @@ public:
 
   // Unload a previously loaded module
   VGREResult unloadModule(ModuleHandle module);
+
+  // LLVM bitcode direct-JIT path (Track N): parse BC blob, strip nvvm.annotations,
+  // and JIT directly via ORC. Cache key = SHA-256 of bitcode bytes + kernelName.
+  VGREResult compileBitcodeKernel(const std::vector<uint8_t> &bc,
+                                   const std::string &kernelName,
+                                   CompiledKernelFn &outFn);
+
+  // singleton accessor
+  static LLVMTranslationEngine &instance() {
+    static LLVMTranslationEngine eng;
+    return eng;
+  }
 
   // Check if a kernel is already cached
   bool isCached(const std::string &kernelName) const;

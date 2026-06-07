@@ -530,9 +530,15 @@ LLVMTranslationEngine::compileJIT(const std::string &irCode,
   if (!llvmState_ || irCode.empty())
     return nullptr;
 
+  // Each kernel gets its own LLVMContext so that type tables, metadata, and
+  // MachineRegisterInfo cannot be corrupted by cross-module contamination when
+  // multiple compilations share the same persistent context.  The LLJIT only
+  // needs the context alive until addIRModule returns (it copies what it needs).
+  llvm::orc::ThreadSafeContext kernelCtx(std::make_unique<llvm::LLVMContext>());
+
   auto buffer = llvm::MemoryBuffer::getMemBuffer(irCode);
   llvm::SMDiagnostic err;
-  auto module = llvm::parseIR(*buffer, err, *llvmState_->context.getContext());
+  auto module = llvm::parseIR(*buffer, err, *kernelCtx.getContext());
   if (!module) {
     VGRE_LOG_ERROR("LLVMTranslationEngine",
                    "Error parsing IR: " + err.getMessage().str());
@@ -542,8 +548,15 @@ LLVMTranslationEngine::compileJIT(const std::string &irCode,
   // We will extract parameter sizes AFTER adding the module to JIT.
   ir.argSizes.clear();
 
+  // Capture function names before moving the module into the JIT — the TSM
+  // becomes empty after addIRModule(std::move(tsm)) and cannot be accessed.
+  std::string moduleSymbols;
+  for (auto &f : *module)
+    if (!f.isDeclaration())
+      moduleSymbols += f.getName().str() + " ";
+
   auto tsm =
-      llvm::orc::ThreadSafeModule(std::move(module), llvmState_->context);
+      llvm::orc::ThreadSafeModule(std::move(module), std::move(kernelCtx));
 
   // Use a dedicated JITDylib per kernel to avoid duplicate symbol collisions.
   static std::atomic<uint64_t> s_kernel_jd_counter{0};
@@ -602,18 +615,9 @@ LLVMTranslationEngine::compileJIT(const std::string &irCode,
     VGRE_LOG_ERROR("LLVMTranslationEngine",
                    "Symbol not found in JIT: " + entryPoint + " (Mangled: " + mangledName + ")");
     
-    // CRITICAL: Consume the Expected error to prevent crash on destruction
     llvm::consumeError(sym.takeError());
-
-    // Deep Diagnostic: Dump all module symbols
-    std::string symbols;
-    tsm.withModuleDo([&symbols](llvm::Module &M) { 
-        for (auto &f : M) {
-            symbols += f.getName().str() + " ";
-        }
-    });
-    VGRE_LOG_INFO("LLVMTranslationEngine", "Full Module Symbol Dump: " + symbols);
-    
+    VGRE_LOG_INFO("LLVMTranslationEngine",
+                  "Module symbols available: " + moduleSymbols);
     return nullptr;
   }
 
