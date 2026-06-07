@@ -297,8 +297,18 @@ CUresult cuLinkAddData(CUlinkState state, int type, void *data, size_t size,
         return CUDA_SUCCESS;
     }
 
-    // CU_JIT_INPUT_CUBIN (0): standalone ELF cubin — look for .nv_ptx or SASS-decode
+    // CU_JIT_INPUT_CUBIN (0): standalone ELF cubin — look for .nv_ptx or SASS-decode.
+    // If data is not an ELF binary (no \x7fELF magic) treat it as raw PTX text,
+    // which some callers pass as type=0 for compatibility.
     if (type == 0) {
+        static constexpr uint8_t kElfMagic[4] = {0x7f, 'E', 'L', 'F'};
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        bool isElf = (size >= 4 && memcmp(bytes, kElfMagic, 4) == 0);
+        if (!isElf) {
+            ls->ptxBuffers.push_back(
+                std::vector<uint8_t>(bytes, bytes + size));
+            return CUDA_SUCCESS;
+        }
         vgre::common::ELFReader elf(data, size);
         size_t ptxSecSize = 0;
         const char* ptxPtr = elf.getSectionData(".nv_ptx", ptxSecSize);
@@ -307,8 +317,7 @@ CUresult cuLinkAddData(CUlinkState state, int type, void *data, size_t size,
                 std::vector<uint8_t>(ptxPtr, ptxPtr + ptxSecSize));
             return CUDA_SUCCESS;
         }
-        std::string decoded = vgre::sass::decodeSassToPtx(
-            static_cast<const uint8_t*>(data), size);
+        std::string decoded = vgre::sass::decodeSassToPtx(bytes, size);
         if (decoded.empty()) {
             VGRE_LOG_ERROR("cuLinkAddData",
                 "CU_JIT_INPUT_CUBIN: no .nv_ptx section and SASS decode failed.");
