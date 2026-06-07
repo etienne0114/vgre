@@ -100,17 +100,24 @@ void print_usage(const char* prog) {
         "                               Also reads from VGRE_CLUSTER_MASTER_ADDRESS env var.\n"
         "  --auth-token <TOKEN>         Auth token (prefer VGRE_TCP_AUTH_TOKEN_FILE)\n"
         "  --no-gpu                     Disable GPU dispatch (CPU-only execution)\n"
+        "  --is-master                  Start as cluster master (headless / container mode)\n"
+        "                               Listens on --port for incoming worker connections.\n"
+        "                               The dashboard app automatically starts master mode;\n"
+        "                               use this flag only for containerised / K8s deployments.\n"
         "  --help                       Print this help\n"
         "\n"
         "Connection modes:\n"
         "  No --master*       — LAN UDP broadcast auto-discovery (default)\n"
         "  --master <IP>      — direct connect to LAN master, auto-discover as fallback\n"
         "  --master-address   — direct connect to WAN/hostname master\n"
+        "  --is-master        — THIS node IS the master (no --master* needed)\n"
         "\n"
         "Recommended: use 'vgre-start --worker' which sets up PATH and token automatically.\n"
         "\n"
         "Examples:\n"
-        "  vgre-worker                                  # LAN auto-discover\n"
+        "  vgre-worker                                  # LAN auto-discover worker\n"
+        "  vgre-worker --is-master                      # headless master (K8s/Docker)\n"
+        "  vgre-worker --is-master --port 7777          # master on custom port\n"
         "  vgre-worker --master 192.168.1.10            # LAN explicit master\n"
         "  vgre-worker --master-address 78.45.12.99:7777  # WAN master\n"
         "  vgre-worker --master-address myhost.example.com:7777  # hostname\n";
@@ -145,6 +152,7 @@ int main(int argc, char** argv) {
     int         port       = vgre::advanced::kDefaultClusterPort;
     int         threads    = 0;    // 0 = auto-detect from CPU cores
     bool        enable_gpu = true;
+    bool        is_master  = false;
     std::string auth_token;
     std::string master_host;       // empty = use UDP auto-discovery
     bool        explicit_master = false;
@@ -187,6 +195,8 @@ int main(int argc, char** argv) {
 
         } else if (arg == "--no-gpu") {
             enable_gpu = false;
+        } else if (arg == "--is-master") {
+            is_master = true;
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
@@ -315,8 +325,10 @@ int main(int argc, char** argv) {
     std::cout << "[Worker] Startup phase 1/2: Initializing networking...\n";
     std::cout.flush();
 
-    // Initialize as worker.  Empty master_host → pure UDP auto-discovery.
-    vgre::VGREResult initRes = cluster.initialize(false, master_host, port);
+    // Initialize as master or worker depending on --is-master flag.
+    // Master: is_master=true, empty master_host, listens for incoming workers.
+    // Worker: is_master=false, master_host used for explicit connect or UDP discovery.
+    vgre::VGREResult initRes = cluster.initialize(is_master, master_host, port);
     if (initRes != vgre::VGREResult::SUCCESS) {
         vgre::Logger::instance().log(vgre::LogLevel::ERR, "Worker",
             "Failed to initialize TCP Cluster: " + std::to_string(static_cast<int>(initRes)));

@@ -33,16 +33,17 @@ RUN cmake -B build -G Ninja \
 
 FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libssl3 libomp-18 \
+    libssl3 libomp-18 libstdc++6 libgcc-s1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/build/libvgre*.so* /usr/local/lib/
 COPY --from=builder /build/build/vgre-worker /usr/local/bin/
-COPY --from=builder /build/scripts/vgre-start.sh /usr/local/bin/vgre-start
-RUN ldconfig && chmod +x /usr/local/bin/vgre-start
+RUN ldconfig
 
-# The master runs vgre-worker in master mode (is_master=true via IPC/service mode)
-# The operator sets VGRE_PORT and VGRE_TCP_AUTH_TOKEN via env vars.
+# The master runs vgre-worker in headless master mode.
+# --is-master tells the worker to call cluster.initialize(true, "", port)
+# so it acts as the cluster coordinator, listening for incoming worker connections.
+# VGRE_PORT and VGRE_TCP_AUTH_TOKEN are injected by the VGRE Operator.
 EXPOSE 7777/tcp 7778/udp
 
-ENTRYPOINT ["/usr/local/bin/vgre-worker", "--master"]
+ENTRYPOINT ["/usr/local/bin/vgre-worker", "--is-master"]
