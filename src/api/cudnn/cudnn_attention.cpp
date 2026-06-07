@@ -19,6 +19,7 @@ cudnnStatus_t cudnnMultiHeadAttnForward(
     if (!attnDesc || !weights || !q || !k || !v || !o) return CUDNN_STATUS_INVALID_VALUE;
 
     auto* ad = (MultiHeadAttnDesc*)attnDesc;
+    ad->cachedWeights = weights;  // cache for BackwardWeights
     int D = ad->modelDim;
     float scale = ad->scaling;
     const float* wf = (const float*)weights;
@@ -284,6 +285,28 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardData(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// Correct backward through all MHA weight matrices.
+//
+// Algorithm (same notation as BackwardData above):
+//   Forward recompute:
+//     Q[b,t,:] = Wq · q[b,t,:] + bq
+//     K[b,t,:] = Wk · k[b,t,:] + bk
+//     V[b,t,:] = Wv · v[b,t,:] + bv
+//     A[b,tq,tk] = softmax(scale · Q[b,tq]·K[b,tk]^T)
+//     C[b,tq,:] = Σ_tk A[b,tq,tk] · V[b,tk,:]   (context)
+//     output[b,tq,:] = Wo · C[b,tq,:] + bo
+//
+//   Weight gradients:
+//     dWo[j,i] += Σ_{b,tq} C[b,tq,i] · do[b,tq,j]
+//     dbo[j]   += Σ_{b,tq} do[b,tq,j]
+//     dC        = Wo^T · do  (per position)
+//     dV_proj, dQ_proj, dK_proj via attention softmax Jacobian (same as BackwardData)
+//     dWv[j,i] += Σ_{b,t} v[b,t,i] · dVp[b,t,j]
+//     dbv[j]   += Σ_{b,t} dVp[b,t,j]
+//     dWq[j,i] += Σ_{b,t} q[b,t,i] · dQp[b,t,j]
+//     dbq[j]   += Σ_{b,t} dQp[b,t,j]
+//     dWk[j,i] += Σ_{b,t} k[b,t,i] · dKp[b,t,j]
+//     dbk[j]   += Σ_{b,t} dKp[b,t,j]
 cudnnStatus_t cudnnMultiHeadAttnBackwardWeights(
     cudnnHandle_t,
     cudnnMultiHeadAttnDescriptor_t attnDesc,
@@ -298,8 +321,13 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardWeights(
     if (!attnDesc || !q || !k || !v || !do_ || !dw) return CUDNN_STATUS_INVALID_VALUE;
 
     auto* ad = (MultiHeadAttnDesc*)attnDesc;
+    if (!ad->cachedWeights) return CUDNN_STATUS_BAD_PARAM;
     int D = ad->modelDim;
-    const float* qf = (const float*)q;
+    float scale = ad->scaling;
+    const float* wf  = (const float*)ad->cachedWeights;
+    const float* qf  = (const float*)q;
+    const float* kf  = (const float*)k;
+    const float* vf  = (const float*)v;
     const float* dof = (const float*)do_;
     float* dwf = (float*)dw;
 
@@ -315,33 +343,137 @@ cudnnStatus_t cudnnMultiHeadAttnBackwardWeights(
     float* dbv = dwf + 4*wSize + 2*D;
     float* dbo = dwf + 4*wSize + 3*D;
 
-    #ifdef _OPENMP
-    #pragma omp parallel for OMP_COLLAPSE(2) if (seqLen * batchSize > 4)
-    #endif
+    const float* Wq = wf;
+    const float* Wk = wf + wSize;
+    const float* Wv = wf + 2*wSize;
+    const float* Wo = wf + 3*wSize;
+    const float* bq = wf + 4*wSize;
+    const float* bk = wf + 4*wSize + D;
+    const float* bv = wf + 4*wSize + 2*D;
+
+    int total = seqLen * batchSize * D;
+
+    // ── Step 1: Recompute Q, K, V projections ────────────────────────────────
+    std::vector<float> Q(total), K_(total), V_(total);
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {
         int base = (t * batchSize + b) * D;
         for (int j = 0; j < D; ++j) {
+            float sq = bq[j], sk_ = bk[j], sv = bv[j];
             for (int i = 0; i < D; ++i) {
-                float in = qf[base + i];
-                dWq[j*D+i] += in * dof[base + j];
-                dWk[j*D+i] += in * dof[base + j];
-                dWv[j*D+i] += in * dof[base + j];
+                sq  += Wq[j*D+i] * qf[base + i];
+                sk_ += Wk[j*D+i] * kf[base + i];
+                sv  += Wv[j*D+i] * vf[base + i];
             }
-            dbq[j] += dof[base + j];
-            dbk[j] += dof[base + j];
-            dbv[j] += dof[base + j];
+            Q[base + j]  = sq;
+            K_[base + j] = sk_;
+            V_[base + j] = sv;
         }
     }
 
-    #ifdef _OPENMP
-    #pragma omp parallel for OMP_COLLAPSE(2) if (seqLen * batchSize > 4)
-    #endif
+    // ── Step 2: Recompute attention weights A and context C ──────────────────
+    std::vector<float> C(total, 0.f);
+    std::vector<std::vector<float>> Abatch(batchSize,
+        std::vector<float>(static_cast<size_t>(seqLen) * seqLen, 0.f));
+    for (int b = 0; b < batchSize; ++b) {
+        auto& A = Abatch[b];
+        for (int tq = 0; tq < seqLen; ++tq) {
+            int qBase = (tq * batchSize + b) * D;
+            float maxS = -1e38f;
+            for (int tk = 0; tk < seqLen; ++tk) {
+                int kBase = (tk * batchSize + b) * D;
+                float dot = 0.f;
+                for (int d = 0; d < D; ++d) dot += Q[qBase + d] * K_[kBase + d];
+                A[tq * seqLen + tk] = dot * scale;
+                if (A[tq * seqLen + tk] > maxS) maxS = A[tq * seqLen + tk];
+            }
+            float sum = 0.f;
+            for (int tk = 0; tk < seqLen; ++tk) {
+                A[tq * seqLen + tk] = std::exp(A[tq * seqLen + tk] - maxS);
+                sum += A[tq * seqLen + tk];
+            }
+            for (int tk = 0; tk < seqLen; ++tk) A[tq * seqLen + tk] /= sum;
+
+            int cBase = (tq * batchSize + b) * D;
+            for (int tk = 0; tk < seqLen; ++tk) {
+                int vBase = (tk * batchSize + b) * D;
+                float attn = A[tq * seqLen + tk];
+                for (int d = 0; d < D; ++d) C[cBase + d] += attn * V_[vBase + d];
+            }
+        }
+    }
+
+    // ── Step 3: dWo += C^T · do;  dbo += sum(do) ────────────────────────────
     for (int t = 0; t < seqLen; ++t)
     for (int b = 0; b < batchSize; ++b) {
         int base = (t * batchSize + b) * D;
-        for (int j = 0; j < D; ++j)
+        for (int j = 0; j < D; ++j) {
             dbo[j] += dof[base + j];
+            for (int i = 0; i < D; ++i)
+                dWo[j*D+i] += C[base + i] * dof[base + j];
+        }
+    }
+
+    // ── Step 4: dC = Wo^T · do ───────────────────────────────────────────────
+    std::vector<float> dC(total, 0.f);
+    for (int t = 0; t < seqLen; ++t)
+    for (int b = 0; b < batchSize; ++b) {
+        int base = (t * batchSize + b) * D;
+        for (int i = 0; i < D; ++i)
+            for (int j = 0; j < D; ++j)
+                dC[base + i] += Wo[j*D+i] * dof[base + j];
+    }
+
+    // ── Step 5: Backprop through attention → dQp, dKp, dVp ─────────────────
+    std::vector<float> dQp(total, 0.f), dKp(total, 0.f), dVp(total, 0.f);
+    for (int b = 0; b < batchSize; ++b) {
+        const auto& A = Abatch[b];
+        // dVp[tk] += Σ_tq A[tq,tk] · dC[tq]
+        for (int tq = 0; tq < seqLen; ++tq) {
+            int cBase = (tq * batchSize + b) * D;
+            for (int tk = 0; tk < seqLen; ++tk) {
+                int vBase = (tk * batchSize + b) * D;
+                float attn = A[tq * seqLen + tk];
+                for (int d = 0; d < D; ++d) dVp[vBase + d] += attn * dC[cBase + d];
+            }
+        }
+        // Softmax Jacobian → dQp, dKp
+        for (int tq = 0; tq < seqLen; ++tq) {
+            int cBase = (tq * batchSize + b) * D;
+            std::vector<float> dA_row(seqLen, 0.f);
+            for (int tk = 0; tk < seqLen; ++tk) {
+                int vBase = (tk * batchSize + b) * D;
+                for (int d = 0; d < D; ++d) dA_row[tk] += dC[cBase + d] * V_[vBase + d];
+            }
+            float dot_AdA = 0.f;
+            for (int tk = 0; tk < seqLen; ++tk)
+                dot_AdA += A[tq * seqLen + tk] * dA_row[tk];
+            int qBase = (tq * batchSize + b) * D;
+            for (int tk = 0; tk < seqLen; ++tk) {
+                float dS = A[tq * seqLen + tk] * (dA_row[tk] - dot_AdA) * scale;
+                int kBase = (tk * batchSize + b) * D;
+                for (int d = 0; d < D; ++d) {
+                    dQp[qBase + d] += dS * K_[kBase + d];
+                    dKp[kBase + d] += dS * Q[qBase + d];
+                }
+            }
+        }
+    }
+
+    // ── Step 6: dWv += v^T · dVp;  dbv += sum(dVp); similarly Wq,Wk ────────
+    for (int t = 0; t < seqLen; ++t)
+    for (int b = 0; b < batchSize; ++b) {
+        int base = (t * batchSize + b) * D;
+        for (int j = 0; j < D; ++j) {
+            dbq[j] += dQp[base + j];
+            dbk[j] += dKp[base + j];
+            dbv[j] += dVp[base + j];
+            for (int i = 0; i < D; ++i) {
+                dWq[j*D+i] += qf[base + i] * dQp[base + j];
+                dWk[j*D+i] += kf[base + i] * dKp[base + j];
+                dWv[j*D+i] += vf[base + i] * dVp[base + j];
+            }
+        }
     }
 
     (void)qDesc; (void)kDesc; (void)vDesc; (void)doDesc;
