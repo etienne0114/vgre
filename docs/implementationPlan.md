@@ -21,8 +21,8 @@ This document tracks every remaining implementation task — real gaps, security
 | I | Flash Attention GQA | 🔴 Not started |
 | J | NVTX → Perfetto trace export | 🔴 Not started |
 | K | Dynamic CUDA Graph node fusion | 🔴 Not started |
-| L | ELLPACK / Blocked-ELL sparse formats | 🔴 Not started |
-| M | Tensor parallel intra-process AllReduce | 🔴 Not started |
+| L | ELLPACK / Blocked-ELL sparse formats | ✅ Done |
+| M | Tensor parallel intra-process AllReduce | ✅ Done |
 | N | PTX → LLVM bitcode direct path (Triton) | 🔴 Not started |
 | O | Kernel auto-vectorization hints | 🔴 Not started |
 | P | MPS per-client resource quotas | 🔴 Not started |

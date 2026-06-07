@@ -2,13 +2,15 @@
 // Tests the 2-phase ring algorithm with Kahan fp32 summation.
 // Validates: correctness across 2/4/8 ranks, Kahan error bound, bandwidth η=2(N-1)/N comment.
 #include "nccl.h"
-#include <cstdio>
-#include <cstring>
-#include <cmath>
 #include <cassert>
-#include <vector>
-#include <thread>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <numeric>
+#include <string>
+#include <thread>
+#include <vector>
 #include <algorithm>
 
 // ── Helper: initialise a communicator group of `nranks` in-process ────────
@@ -137,6 +139,88 @@ static void test_large_buffer(int nranks) {
     test_allreduce_sum(nranks, count);
 }
 
+// ── Test 5: TP same-process atomic-fence AllReduce (Track M) ──────────────
+// Set VGRE_TP_DEGREE before commInit so the NcclGroupState picks up the value
+// and routes ncclAllReduce through tp_ring_allreduce instead of the condvar path.
+static void tp_env_set(int n) {
+#ifdef _WIN32
+    _putenv_s("VGRE_TP_DEGREE", std::to_string(n).c_str());
+#else
+    setenv("VGRE_TP_DEGREE", std::to_string(n).c_str(), 1);
+#endif
+}
+static void tp_env_clear() {
+#ifdef _WIN32
+    _putenv_s("VGRE_TP_DEGREE", "");
+#else
+    unsetenv("VGRE_TP_DEGREE");
+#endif
+}
+
+static void test_tp_allreduce_sum(int nranks, size_t count) {
+    tp_env_set(nranks);
+    auto comms = make_comms(nranks);
+    float expected = 0.f;
+    for (int r = 0; r < nranks; ++r) expected += static_cast<float>(r + 1);
+
+    std::vector<std::vector<float>> send(nranks, std::vector<float>(count));
+    std::vector<std::vector<float>> recv(nranks, std::vector<float>(count, 0.f));
+    for (int r = 0; r < nranks; ++r)
+        std::fill(send[r].begin(), send[r].end(), static_cast<float>(r + 1));
+
+    std::vector<std::thread> threads(nranks);
+    for (int r = 0; r < nranks; ++r)
+        threads[r] = std::thread([&, r] {
+            ncclAllReduce(send[r].data(), recv[r].data(), count,
+                          ncclFloat32, ncclSum, comms[r], nullptr);
+        });
+    for (auto& t : threads) t.join();
+
+    for (int r = 0; r < nranks; ++r)
+        for (size_t i = 0; i < count; ++i)
+            assert(std::fabs(recv[r][i] - expected) < 1e-3f && "TP AllReduce sum mismatch");
+
+    destroy_comms(comms);
+    tp_env_clear();
+    printf("  [PASS] TP AllReduce sum nranks=%d count=%zu expected=%.1f\n",
+           nranks, count, expected);
+}
+
+static void test_tp_allreduce_avg(int nranks) {
+    constexpr size_t count = 64;
+    tp_env_set(nranks);
+    auto comms = make_comms(nranks);
+    float expected = 0.f;
+    for (int r = 0; r < nranks; ++r) expected += static_cast<float>(r + 1);
+    expected /= static_cast<float>(nranks);
+
+    std::vector<std::vector<float>> send(nranks, std::vector<float>(count));
+    std::vector<std::vector<float>> recv(nranks, std::vector<float>(count, 0.f));
+    for (int r = 0; r < nranks; ++r)
+        std::fill(send[r].begin(), send[r].end(), static_cast<float>(r + 1));
+
+    std::vector<std::thread> threads(nranks);
+    for (int r = 0; r < nranks; ++r)
+        threads[r] = std::thread([&, r] {
+            ncclAllReduce(send[r].data(), recv[r].data(), count,
+                          ncclFloat32, ncclAvg, comms[r], nullptr);
+        });
+    for (auto& t : threads) t.join();
+
+    for (int r = 0; r < nranks; ++r)
+        for (size_t i = 0; i < count; ++i)
+            assert(std::fabs(recv[r][i] - expected) < 1e-3f && "TP AllReduce avg mismatch");
+
+    destroy_comms(comms);
+    tp_env_clear();
+    printf("  [PASS] TP AllReduce avg nranks=%d expected=%.2f\n", nranks, expected);
+}
+
+static void test_tp_allreduce_large(int nranks) {
+    constexpr size_t count = 262144;  // 1 MB of floats — large tensor
+    test_tp_allreduce_sum(nranks, count);
+}
+
 int main() {
     printf("=== NCCL Ring AllReduce Tests ===\n");
     // Small buffers: flat-barrier path
@@ -152,6 +236,14 @@ int main() {
     // Avg
     test_allreduce_avg(2);
     test_allreduce_avg(4);
+    // TP same-process atomic-fence fast path (Track M)
+    printf("  --- TP AllReduce (VGRE_TP_DEGREE fast path) ---\n");
+    test_tp_allreduce_sum(2, 16);
+    test_tp_allreduce_sum(4, 64);
+    test_tp_allreduce_avg(2);
+    test_tp_allreduce_avg(4);
+    test_tp_allreduce_large(2);
+    test_tp_allreduce_large(4);
     printf("ALL NCCL Ring AllReduce tests PASSED.\n");
     return 0;
 }

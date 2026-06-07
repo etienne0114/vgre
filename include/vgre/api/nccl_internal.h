@@ -5,7 +5,9 @@
 #include "vgre/common/types.h"
 #include "vgre/advanced/tcp_cluster.h"
 
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -57,6 +59,17 @@ struct NcclGroupState {
     int ring_arrived = 0;    // arrivals at current step boundary
     int ring_step    = 0;    // current step counter (0..2*(N-1)-1)
     int ring_gen     = 0;    // barrier generation for ring steps
+
+    // ── Tensor-Parallel lock-free AllReduce state ─────────────────────
+    // Activated when VGRE_TP_DEGREE is set and all ranks share a process.
+    // Uses atomic_thread_fence(acq_rel) barriers instead of condvar to avoid
+    // kernel-mode wakeups on same-process tensor-parallel workloads.
+    int creator_pid = 0;    // getpid() at construction; used to detect same-process topology
+    int tp_degree   = 0;    // from VGRE_TP_DEGREE env var; 0 = disabled
+    std::unique_ptr<std::atomic<uintptr_t>[]> tp_sendbufs;  // rank i → sendbuff address
+    std::unique_ptr<std::atomic<uintptr_t>[]> tp_recvbufs;  // rank i → recvbuff address
+    std::atomic<int> tp_arrived{0};
+    std::atomic<int> tp_gen{0};
 
     explicit NcclGroupState(int nr);
 

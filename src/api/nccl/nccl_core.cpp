@@ -227,4 +227,14 @@ std::shared_ptr<NcclGroupState> find_or_create(const ncclUniqueId& id, int nrank
 thread_local int g_group_depth = 0;
 
 NcclGroupState::NcclGroupState(int nr)
-    : nranks(nr), sendbufs(nr, nullptr), gather_slots(nr), p2p_slots(nr) {}
+    : nranks(nr), sendbufs(nr, nullptr), gather_slots(nr), p2p_slots(nr) {
+    creator_pid   = vgre::os::getpid();
+    const char* tp = std::getenv("VGRE_TP_DEGREE");
+    tp_degree     = (tp && *tp) ? std::atoi(tp) : 0;
+    tp_sendbufs   = std::make_unique<std::atomic<uintptr_t>[]>(nr);
+    tp_recvbufs   = std::make_unique<std::atomic<uintptr_t>[]>(nr);
+    for (int i = 0; i < nr; ++i) {
+        tp_sendbufs[i].store(0, std::memory_order_relaxed);
+        tp_recvbufs[i].store(0, std::memory_order_relaxed);
+    }
+}
