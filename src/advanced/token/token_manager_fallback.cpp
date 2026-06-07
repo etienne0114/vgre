@@ -2,6 +2,7 @@
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/secure_zero.h"
 
 #include <fstream>
 #include <sstream>
@@ -298,7 +299,10 @@ std::array<uint8_t, 32> HardwareTokenManager::getMachineKey(const uint8_t dynami
         pbkdf2Iters,
         key.data(), key.size());
 
-    memset(salt, 0, sizeof(salt));
+    vgre::common::vgre_secure_zero(salt, sizeof(salt));
+    // Zero the identity string containing machine-specific entropy sources.
+    if (!identity.empty())
+        vgre::common::vgre_secure_zero(&identity[0], identity.size());
     return key;
 }
 
@@ -356,7 +360,9 @@ std::array<uint8_t, 32> HardwareTokenManager::getMachineKey() {
                    saltInput.size(), legacySalt);
 
     auto key = getMachineKey(legacySalt);
-    memset(legacySalt, 0, sizeof(legacySalt));
+    vgre::common::vgre_secure_zero(legacySalt, sizeof(legacySalt));
+    if (!identity.empty())
+        vgre::common::vgre_secure_zero(&identity[0], identity.size());
     return key;
 }
 
@@ -383,13 +389,21 @@ std::string HardwareTokenManager::encryptToken(const std::string& plaintext) {
     uint8_t mac[32];
     crypto::hmac_sha256(key.data(), 32, macInput.data(), macInput.size(), mac);
 
-    std::fill(key.begin(), key.end(), 0);
+    // Build the hex result before zeroizing intermediate secret buffers.
+    std::string result =
+        toHex(salt, sizeof(salt)) + ":" +
+        toHex(nonce, sizeof(nonce)) + ":" +
+        toHex(cipher.data(), cipher.size()) + ":" +
+        toHex(mac, sizeof(mac));
 
-    // 4-field format: salt:nonce:cipher:mac (new dynamic-salt format)
-    return toHex(salt, sizeof(salt)) + ":" +
-           toHex(nonce, sizeof(nonce)) + ":" +
-           toHex(cipher.data(), cipher.size()) + ":" +
-           toHex(mac, sizeof(mac));
+    vgre::common::vgre_secure_zero(salt,  sizeof(salt));
+    vgre::common::vgre_secure_zero(nonce, sizeof(nonce));
+    vgre::common::vgre_secure_zero(mac,   sizeof(mac));
+    std::fill(key.begin(), key.end(), 0);
+    if (!macInput.empty())
+        vgre::common::vgre_secure_zero(macInput.data(), macInput.size());
+
+    return result;
 }
 
 std::string HardwareTokenManager::decryptToken(const std::string& ciphertext) {
@@ -427,8 +441,12 @@ std::string HardwareTokenManager::decryptToken(const std::string& ciphertext) {
     uint8_t expectedMac[32];
     crypto::hmac_sha256(key.data(), 32, macInput.data(), macInput.size(), expectedMac);
 
-    if (!crypto::secure_compare(expectedMac, storedMac.data(), 32)) {
+    bool macOk = crypto::secure_compare(expectedMac, storedMac.data(), 32);
+    vgre::common::vgre_secure_zero(expectedMac, sizeof(expectedMac));
+    if (!macOk) {
         std::fill(key.begin(), key.end(), 0);
+        if (!macInput.empty())
+            vgre::common::vgre_secure_zero(macInput.data(), macInput.size());
         return "";
     }
 
@@ -437,7 +455,13 @@ std::string HardwareTokenManager::decryptToken(const std::string& ciphertext) {
         sha256CtrEncrypt(key.data(), nonce.data(), cipher.data(), plain.data(), cipher.size());
 
     std::fill(key.begin(), key.end(), 0);
-    return std::string(reinterpret_cast<const char*>(plain.data()), plain.size());
+    if (!macInput.empty())
+        vgre::common::vgre_secure_zero(macInput.data(), macInput.size());
+    // Copy plaintext to result string before zeroizing the intermediate buffer.
+    std::string result(reinterpret_cast<const char*>(plain.data()), plain.size());
+    if (!plain.empty())
+        vgre::common::vgre_secure_zero(plain.data(), plain.size());
+    return result;
 }
 
 } // namespace advanced

@@ -4,6 +4,7 @@
 #include "vgre/advanced/hardware_token_manager.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/secure_zero.h"
 #include "vgre/common/sockets.h"
 #include <chrono>
 #include <cstring>
@@ -106,6 +107,9 @@ VGREResult SecurityManager::enableSecurity(bool enabled) {
     if (env_token && env_token[0] != '\0') {
       token = env_token;
       { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
+      // Zeroize the local copy; the stored auth_token_str_ holds the canonical value.
+      if (!token.empty()) vgre::common::vgre_secure_zero(&token[0], token.size());
+      token.clear();
     }
   }
   // Try reading from configured auth token file path if still empty
@@ -120,6 +124,9 @@ VGREResult SecurityManager::enableSecurity(bool enabled) {
         if (!file_token.empty()) {
           token = file_token;
           { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
+          if (!file_token.empty()) vgre::common::vgre_secure_zero(&file_token[0], file_token.size());
+          if (!token.empty()) vgre::common::vgre_secure_zero(&token[0], token.size());
+          token.clear();
         }
       }
     }
