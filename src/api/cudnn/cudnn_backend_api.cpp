@@ -685,24 +685,40 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
         case CUDNN_BACKEND_OPERATION_POOLING_BACKWARD_DESCRIPTOR: {
+            // Pooling backward: computes the data gradient dx from upstream dy.
+            // For max pooling, also needs the forward x (to reconstruct the argmax)
+            // and optionally the forward y (the pooled output).  These are stored as
+            // separate tensor IDs — BWD_XDESC (78) and BWD_YDESC (79) — so that the
+            // caller can wire them from the same variant pack as the forward pass.
             uintptr_t dyId = getAttrUint64(opNode, CUDNN_ATTR_OPERATIONPOOLING_BWD_DYDESC);
             uintptr_t dxId = getAttrUint64(opNode, CUDNN_ATTR_OPERATIONPOOLING_BWD_DXDESC);
+            uintptr_t xId  = getAttrUint64(opNode, CUDNN_ATTR_OPERATIONPOOLING_BWD_XDESC);
+            uintptr_t yId  = getAttrUint64(opNode, CUDNN_ATTR_OPERATIONPOOLING_BWD_YDESC);
             uintptr_t pId  = getAttrUint64(opNode, CUDNN_ATTR_OPERATIONPOOLING_BWD_PDESC);
             float alpha = getAttrFloat(opNode, CUDNN_ATTR_OPERATION_POOLING_BWD_ALPHA, 1.0f);
             float beta  = getAttrFloat(opNode, CUDNN_ATTR_OPERATION_POOLING_BWD_BETA, 0.0f);
-            void* dyPtr = dataPtrs[dyId];
-            void* dxPtr = dataPtrs[dxId];
+
+            void* dyPtr = dataPtrs.count(dyId) ? dataPtrs.at(dyId) : nullptr;
+            void* dxPtr = dataPtrs.count(dxId) ? dataPtrs.at(dxId) : nullptr;
+            // Forward x — required for max-pooling argmax reconstruction; if absent, fall back to dx.
+            void* xPtr  = (xId && dataPtrs.count(xId)) ? dataPtrs.at(xId)
+                                                        : dxPtr;   // best-effort fallback for avg pool
+            // Forward y — needed by some implementations; fall back to dy if absent.
+            void* yPtr  = (yId && dataPtrs.count(yId)) ? dataPtrs.at(yId) : dyPtr;
             if (!dyPtr || !dxPtr) return CUDNN_STATUS_INVALID_VALUE;
-            // Pooling backward needs yDesc and xDesc; assume same shape as dy/dx
+
             TensorDesc dyDesc = buildTensorDesc(dyId);
-            TensorDesc yDesc  = buildTensorDesc(dyId);
-            TensorDesc xDesc  = buildTensorDesc(dxId);
             TensorDesc dxDesc = buildTensorDesc(dxId);
+            // xDesc: use forward x shape if available, otherwise mirror dx shape.
+            TensorDesc xDesc  = (xId && xId != dxId) ? buildTensorDesc(xId) : buildTensorDesc(dxId);
+            // yDesc: forward output y — must match dy shape; mirror dyDesc if absent.
+            TensorDesc yDesc  = (yId && yId != dyId) ? buildTensorDesc(yId) : buildTensorDesc(dyId);
+
             PoolDesc* poolDesc = reinterpret_cast<PoolDesc*>(pId);
             if (!poolDesc) return CUDNN_STATUS_INVALID_VALUE;
             cudnnStatus_t s = cudnnPoolingBackward(handle, poolDesc, &alpha,
-                                                     &yDesc, dyPtr, &dyDesc, dyPtr,
-                                                     &xDesc, dxPtr, &beta, &dxDesc, dxPtr);
+                                                     &yDesc, yPtr, &dyDesc, dyPtr,
+                                                     &xDesc, xPtr, &beta, &dxDesc, dxPtr);
             if (s != CUDNN_STATUS_SUCCESS) return s;
             break;
         }
