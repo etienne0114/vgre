@@ -161,6 +161,9 @@ cusparseStatus_t cusparseSparseToDense(cusparseHandle_t /*h*/,
 // Three-phase: bufferSize (no-op), analysis (count NNZ), compress (fill arrays).
 // After analysis, caller must query NNZ via cusparseSpMatGetSize, allocate CSR
 // arrays, update pointers via cusparseCsrSetPointers, then call compress.
+// Complexity: O(rows*cols) — analysis makes one full pass to count non-zeros
+// (tolerance: value != 0), compress makes a second full pass to scatter values
+// and column indices into the CSR arrays at their prefix-summed row offsets.
 
 cusparseStatus_t cusparseDenseToSparse_bufferSize(cusparseHandle_t /*h*/,
                                                    cusparseDnMatDescr_t /*matA*/,
