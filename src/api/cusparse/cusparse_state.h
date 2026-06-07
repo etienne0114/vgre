@@ -46,6 +46,18 @@ struct DnMat {
 
 struct SpSVState { bool analyzed = false; };
 
+// ── ELL (ELLPACK) descriptor ───────────────────────────────────────────────────
+// Column indices and values are stored row-major: element [i,k] is at index i*ellWidth+k.
+// Padding slots use col_idx = -1 (zero-based) or 0 (one-based); skip them during compute.
+struct EllMat {
+    int64_t rows = 0, cols = 0, ellWidth = 0;
+    void *colInd = nullptr;
+    void *values = nullptr;
+    cusparseIndexType_t colIndType = CUSPARSE_INDEX_32I;
+    cusparseIndexBase_t idxBase    = CUSPARSE_INDEX_BASE_ZERO;
+    cudaDataType_t      valueType  = CUDA_R_32F;
+};
+
 // ── BSR (Block Sparse Row) descriptor ─────────────────────────────────────────
 struct BsrMat {
     int64_t mb = 0, nb = 0, nnzb = 0;  // block-row count, block-col count, non-zero blocks
@@ -67,6 +79,7 @@ extern uintptr_t g_nextHandle;
 
 extern std::mutex g_descrMutex;
 extern std::unordered_map<uintptr_t, CsrMat>  g_csrMats;
+extern std::unordered_map<uintptr_t, EllMat>  g_ellMats;
 extern std::unordered_map<uintptr_t, BsrMat>  g_bsrMats;
 extern std::unordered_map<uintptr_t, DnVec>   g_dnVecs;
 extern std::unordered_map<uintptr_t, DnMat>   g_dnMats;

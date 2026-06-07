@@ -868,7 +868,152 @@ int test_dense_to_sparse() {
     return 0;
 }
 
-// [ignoring loop detection]
+// ── ELLPACK SpMV ─────────────────────────────────────────────────────────────
+// Matrix (3×4):
+//   row 0: (col=0, val=1)  (col=2, val=3)
+//   row 1: (col=1, val=2)  [padding]
+//   row 2: (col=3, val=4)  [padding]
+// ELLPACK layout (ellWidth=2, row-major):
+//   colInd = [0, 2,  1,-1,  3,-1]
+//   values = [1, 3,  2, 0,  4, 0]
+// x = [1, 2, 3, 4]
+// Expected y = alpha * A*x + 0 = [1*1+3*3, 2*2, 4*4] = [10, 4, 16]
+int test_ellpack_spmv() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    std::vector<int>   colInd = {0, 2,  1, -1,  3, -1};
+    std::vector<float> vals   = {1.f, 3.f,  2.f, 0.f,  4.f, 0.f};
+    std::vector<float> x      = {1.f, 2.f, 3.f, 4.f};
+    std::vector<float> y      = {0.f, 0.f, 0.f};
+
+    cusparseSpMatDescr_t matA = nullptr;
+    cusparseDnVecDescr_t vecX = nullptr, vecY = nullptr;
+
+    if (cusparseCreateEll(&matA, 3, 4, 2,
+                          colInd.data(), vals.data(),
+                          CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F)
+        != CUSPARSE_STATUS_SUCCESS) FAIL("cusparseCreateEll");
+
+    cusparseCreateDnVec(&vecX, 4, x.data(), CUDA_R_32F);
+    cusparseCreateDnVec(&vecY, 3, y.data(), CUDA_R_32F);
+
+    float alpha = 1.f, beta = 0.f;
+    size_t buf = 0;
+    cusparseSpMV_bufferSize(h, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA,
+                            vecX, &beta, vecY, CUDA_R_32F, &buf);
+    if (cusparseSpMV(h, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA,
+                     vecX, &beta, vecY, CUDA_R_32F, nullptr)
+        != CUSPARSE_STATUS_SUCCESS) FAIL("ELL SpMV dispatch");
+
+    if (!NEAR(y[0], 10.f, 1e-5f)) FAIL("ELL SpMV y[0] expected 10 got " + std::to_string(y[0]));
+    if (!NEAR(y[1],  4.f, 1e-5f)) FAIL("ELL SpMV y[1] expected 4 got "  + std::to_string(y[1]));
+    if (!NEAR(y[2], 16.f, 1e-5f)) FAIL("ELL SpMV y[2] expected 16 got " + std::to_string(y[2]));
+
+    cusparseDestroySpMat(matA);
+    cusparseDestroyDnVec(vecX);
+    cusparseDestroyDnVec(vecY);
+    cusparseDestroy(h);
+    PASS("ELLPACK SpMV 3×4: y = A*x = [10, 4, 16]");
+    return 0;
+}
+
+// ── ELLPACK SpMM ─────────────────────────────────────────────────────────────
+// Same 3×4 ELLPACK matrix A.  B is 4×2 (col-major, ld=4):
+//   B = [[1,5],[2,6],[3,7],[4,8]]
+// C = alpha * A * B + 0:
+//   row 0: [1*1+3*3, 1*5+3*7] = [10, 26]
+//   row 1: [2*2,     2*6    ] = [4,  12]
+//   row 2: [4*4,     4*8    ] = [16, 32]
+int test_ellpack_spmm() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    std::vector<int>   colInd = {0, 2,  1, -1,  3, -1};
+    std::vector<float> vals   = {1.f, 3.f,  2.f, 0.f,  4.f, 0.f};
+    // B col-major (ld=4): rows=4, cols=2
+    std::vector<float> bData  = {1.f, 2.f, 3.f, 4.f,  5.f, 6.f, 7.f, 8.f};
+    // C col-major (ld=3): rows=3, cols=2
+    std::vector<float> cData(6, 0.f);
+
+    cusparseSpMatDescr_t matA = nullptr;
+    cusparseDnMatDescr_t matB = nullptr, matC = nullptr;
+
+    cusparseCreateEll(&matA, 3, 4, 2,
+                      colInd.data(), vals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateDnMat(&matB, 4, 2, 4, bData.data(), CUDA_R_32F, CUSPARSE_ORDER_COL);
+    cusparseCreateDnMat(&matC, 3, 2, 3, cData.data(), CUDA_R_32F, CUSPARSE_ORDER_COL);
+
+    float alpha = 1.f, beta = 0.f;
+    size_t buf = 0;
+    cusparseSpMM_bufferSize(h, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                            &alpha, matA, matB, &beta, matC, CUDA_R_32F,
+                            CUSPARSE_SPMM_ALG_DEFAULT, &buf);
+    if (cusparseSpMM(h, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                     &alpha, matA, matB, &beta, matC, CUDA_R_32F,
+                     CUSPARSE_SPMM_ALG_DEFAULT, nullptr)
+        != CUSPARSE_STATUS_SUCCESS) FAIL("ELL SpMM dispatch");
+
+    // col-major layout: C[r,c] = cData[r + c*ld]
+    if (!NEAR(cData[0], 10.f, 1e-5f)) FAIL("ELL SpMM C[0,0] expected 10 got " + std::to_string(cData[0]));
+    if (!NEAR(cData[1],  4.f, 1e-5f)) FAIL("ELL SpMM C[1,0] expected 4 got "  + std::to_string(cData[1]));
+    if (!NEAR(cData[2], 16.f, 1e-5f)) FAIL("ELL SpMM C[2,0] expected 16 got " + std::to_string(cData[2]));
+    if (!NEAR(cData[3], 26.f, 1e-5f)) FAIL("ELL SpMM C[0,1] expected 26 got " + std::to_string(cData[3]));
+    if (!NEAR(cData[4], 12.f, 1e-5f)) FAIL("ELL SpMM C[1,1] expected 12 got " + std::to_string(cData[4]));
+    if (!NEAR(cData[5], 32.f, 1e-5f)) FAIL("ELL SpMM C[2,1] expected 32 got " + std::to_string(cData[5]));
+
+    cusparseDestroySpMat(matA);
+    cusparseDestroyDnMat(matB);
+    cusparseDestroyDnMat(matC);
+    cusparseDestroy(h);
+    PASS("ELLPACK SpMM 3×4 × 4×2: C = [[10,26],[4,12],[16,32]]");
+    return 0;
+}
+
+// ── ELLPACK transposed SpMV ───────────────────────────────────────────────────
+// Same matrix A (3×4). A^T * y where y = [1, 2, 3]:
+//   col 0: row 0 contributes val=1 * y[0]=1 → 1
+//   col 1: row 1 contributes val=2 * y[1]=2 → 4
+//   col 2: row 0 contributes val=3 * y[0]=1 → 3
+//   col 3: row 2 contributes val=4 * y[2]=3 → 12
+// Expected: z = [1, 4, 3, 12]
+int test_ellpack_spmv_transposed() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    std::vector<int>   colInd = {0, 2,  1, -1,  3, -1};
+    std::vector<float> vals   = {1.f, 3.f,  2.f, 0.f,  4.f, 0.f};
+    std::vector<float> y      = {1.f, 2.f, 3.f};
+    std::vector<float> z      = {0.f, 0.f, 0.f, 0.f};
+
+    cusparseSpMatDescr_t matA = nullptr;
+    cusparseDnVecDescr_t vecY = nullptr, vecZ = nullptr;
+
+    cusparseCreateEll(&matA, 3, 4, 2,
+                      colInd.data(), vals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateDnVec(&vecY, 3, y.data(), CUDA_R_32F);
+    cusparseCreateDnVec(&vecZ, 4, z.data(), CUDA_R_32F);
+
+    float alpha = 1.f, beta = 0.f;
+    if (cusparseSpMV(h, CUSPARSE_OPERATION_TRANSPOSE, &alpha, matA,
+                     vecY, &beta, vecZ, CUDA_R_32F, nullptr)
+        != CUSPARSE_STATUS_SUCCESS) FAIL("ELL transposed SpMV dispatch");
+
+    if (!NEAR(z[0],  1.f, 1e-5f)) FAIL("ELL^T z[0] expected 1 got "  + std::to_string(z[0]));
+    if (!NEAR(z[1],  4.f, 1e-5f)) FAIL("ELL^T z[1] expected 4 got "  + std::to_string(z[1]));
+    if (!NEAR(z[2],  3.f, 1e-5f)) FAIL("ELL^T z[2] expected 3 got "  + std::to_string(z[2]));
+    if (!NEAR(z[3], 12.f, 1e-5f)) FAIL("ELL^T z[3] expected 12 got " + std::to_string(z[3]));
+
+    cusparseDestroySpMat(matA);
+    cusparseDestroyDnVec(vecY);
+    cusparseDestroyDnVec(vecZ);
+    cusparseDestroy(h);
+    PASS("ELLPACK transposed SpMV 4×3: z = A^T * y = [1, 4, 3, 12]");
+    return 0;
+}
+
 // ── Driver ────────────────────────────────────────────────────────────────────
 int main() {
     std::cout << "=== cuSPARSE Shim Functional Tests ===\n";
@@ -890,6 +1035,9 @@ int main() {
     rc |= test_batched_spmm_stride_correctness();
     rc |= test_batched_spmm_beta_scaling();
     rc |= test_dense_to_sparse();
+    rc |= test_ellpack_spmv();
+    rc |= test_ellpack_spmm();
+    rc |= test_ellpack_spmv_transposed();
     if (rc == 0) std::cout << "\nAll cuSPARSE tests passed!\n";
     return rc;
 }
