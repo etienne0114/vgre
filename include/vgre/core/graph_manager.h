@@ -138,6 +138,14 @@ public:
   // Per-node enabled/disabled state: nodeId -> enabled (true = runs, false = skipped).
   // Nodes not in this map are enabled by default.
   std::unordered_map<uint64_t, bool> nodeEnabled;
+
+  // Dynamic fusion state (Track K):
+  // After VGRE_GRAPH_FUSION_THRESHOLD replays the optimizer analyses the active
+  // node sequence and stores a fused copy here.  Subsequent replays execute
+  // optimizedNodes instead of the original node list when fusionApplied == true.
+  // cudaGraphExecUpdate_v2 with topology changes clears this to force re-analysis.
+  bool fusionApplied = false;
+  std::vector<GraphNode> optimizedNodes;
 };
 
 // Set by RuntimeEngine before calling addKernelNodeWithDepsOut so the capturing

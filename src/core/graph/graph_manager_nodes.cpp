@@ -510,6 +510,16 @@ vgre::VGREResult GraphManager::updateExecV2(GraphExecId execId, GraphId newGraph
     oldNode = newNode;
   }
 
+  // Topology changed — invalidate any previously-computed fusion to force
+  // re-analysis on the next replay cycle.
+  auto& exec = execIt->second;
+  if (exec->fusionApplied) {
+    exec->fusionApplied = false;
+    exec->optimizedNodes.clear();
+    VGRE_LOG_INFO("GraphManager",
+        "updateExecV2: fusion invalidated for exec " + std::to_string(execId));
+  }
+
   VGRE_LOG_INFO("GraphManager",
       "updateExecV2: updated " + std::to_string(nodeIds.size()) + " nodes in exec " +
       std::to_string(execId));
