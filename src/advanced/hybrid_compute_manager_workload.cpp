@@ -169,7 +169,8 @@ VGREResult HybridComputeManager::distributeRegisteredKernel(
     }
 
     return runtime::IGPUOpenCLExecutor::instance().execute(
-        ir->name, ir->source, ir->argTypes, gridDim, blockDim, args, argSizes);
+        ir->name, ir->source, ir->argTypes, gridDim, blockDim, args, argSizes,
+        sharedMem);
 #else
     VGRE_LOG_ERROR("HybridComputeManager",
                    "VGRE was not compiled with OpenCL iGPU support.");

@@ -119,22 +119,27 @@ void csr_spmm(cusparseOperation_t opA, cusparseOperation_t opB,
     int64_t m = transA ? A.cols : A.rows;
     int64_t n = transB ? B.rows : B.cols;
 
-    // Invariant: C = alpha*op(A)*op(B) + beta*C.
-    // Step 1: Scale existing C by beta in-place (or zero if beta==0).
-    //         C[row,col] lives at element offset row*ld+col, NOT row*n+col;
-    //         ld >= n (leading dimension), so we must use row*ld+col. O(m*n).
+    bool bRowMajor = (B.order != CUSPARSE_ORDER_COL);
+    bool cRowMajor = (C.order != CUSPARSE_ORDER_COL);
+
+    // Index helpers: element [r,c] in a matrix with leading dimension ld
+    auto bIdx = [&](int64_t r, int64_t c) -> int64_t {
+        return bRowMajor ? r * B.ld + c : r + c * B.ld;
+    };
+    auto cIdx = [&](int64_t r, int64_t c) -> int64_t {
+        return cRowMajor ? r * C.ld + c : r + c * C.ld;
+    };
+
     T zero = T{};
     #ifdef _OPENMP
     #pragma omp parallel for collapse(2) if (m * n > 1024)
     #endif
     for (int64_t row = 0; row < m; ++row)
         for (int64_t col = 0; col < n; ++col) {
-            T &cRef = static_cast<T*>(C.values)[row * C.ld + col];
-            // beta*C preserves existing C when beta != 0; zeros C when beta == 0.
+            T &cRef = static_cast<T*>(C.values)[cIdx(row, col)];
             cRef = (*beta != zero) ? (*beta) * cRef : zero;
         }
 
-    // Step 2: Accumulate alpha * op(A) * op(B) into the beta-scaled C.
     #ifdef _OPENMP
     #pragma omp parallel for schedule(guided) if (m > 64)
     #endif
@@ -145,9 +150,10 @@ void csr_spmm(cusparseOperation_t opA, cusparseOperation_t opB,
             int64_t col = getIdx(A.colInd, A.colIndType, idx) - (A.idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0);
             T aVal = static_cast<const T*>(A.values)[idx];
             for (int64_t j = 0; j < n; ++j) {
-                T bVal = transB ? static_cast<const T*>(B.values)[j * B.ld + col]
-                                : static_cast<const T*>(B.values)[col * B.ld + j];
-                static_cast<T*>(C.values)[i * C.ld + j] += (*alpha) * aVal * bVal;
+                // B[col][j] for non-transposed; B[j][col] for transposed.
+                T bVal = transB ? static_cast<const T*>(B.values)[bIdx(j, col)]
+                                : static_cast<const T*>(B.values)[bIdx(col, j)];
+                static_cast<T*>(C.values)[cIdx(i, j)] += (*alpha) * aVal * bVal;
             }
         }
     }

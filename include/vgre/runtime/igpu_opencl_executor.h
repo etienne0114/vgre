@@ -37,6 +37,7 @@ public:
                      const std::vector<ArgType> &argTypes, const dim3 &gridDim,
                      const dim3 &blockDim, void **args,
                      const std::vector<size_t> &argSizes,
+                     size_t sharedMemBytes = 0,
                      const size_t globalWorkOffset[3] = nullptr);
 
   // Returns estimated peak GFLOPS based on OpenCL device compute units and
