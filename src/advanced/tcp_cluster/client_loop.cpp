@@ -457,6 +457,24 @@ void TCPClusterManager::clientLoop() {
             disconnected = true; break;
           }
         }
+      } else if (poll_res == 0) {
+        // poll() timed out with no events. WSAPoll does not reliably deliver
+        // POLLHUP/POLLERR for reset TCP connections on Windows (Vista/7 bug,
+        // unfixed in later SDKs). Issue a zero-byte send to probe the socket:
+        // a dead connection returns WSAECONNRESET / WSAECONNABORTED immediately.
+#if defined(_WIN32)
+        char probe = 0;
+        int r = send(cur_fd, &probe, 0, 0);
+        if (r == SOCKET_ERROR) {
+          int e = WSAGetLastError();
+          if (e == WSAECONNRESET || e == WSAECONNABORTED || e == WSAENETRESET) {
+            VGRE_LOG_INFO("TCPCluster",
+                "Worker: WSAPoll liveness probe failed (err=" + std::to_string(e) +
+                ") — master connection is dead");
+            disconnected = true; break;
+          }
+        }
+#endif
       } else if (poll_res < 0) {
 #if defined(_WIN32)
         if (WSAGetLastError() != WSAEINTR) {
