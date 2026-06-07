@@ -314,10 +314,19 @@ bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
     };
 
     const int combinedRegs = estimateRegs(irA) + estimateRegs(irB);
-    if (combinedRegs > 200) {
+    // IR register-pressure threshold: configurable via VGRE_FUSION_REG_LIMIT.
+    // Default 200 represents the heuristic point where fused IR becomes too wide
+    // for efficient instruction scheduling on typical 16-wide SIMD CPUs.
+    static const int kRegLimit = []() -> int {
+        const char* e = ::getenv("VGRE_FUSION_REG_LIMIT");
+        if (e) { try { int v = std::stoi(e); if (v > 0) return v; } catch (...) {} }
+        return 200;
+    }();
+    if (combinedRegs > kRegLimit) {
         VGRE_LOG_DEBUG("GraphOptimizer",
             "Fusion blocked: register pressure " + std::to_string(combinedRegs) +
-            " > 200 for nodes " + std::to_string(a.nodeId) + "/" + std::to_string(b.nodeId));
+            " > " + std::to_string(kRegLimit) + " for nodes " +
+            std::to_string(a.nodeId) + "/" + std::to_string(b.nodeId));
         return false;
     }
 

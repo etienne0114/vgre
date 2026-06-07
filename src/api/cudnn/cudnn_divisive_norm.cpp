@@ -45,11 +45,23 @@ cudnnStatus_t cudnnDivisiveNormalizationForward(
     const float* mptr = static_cast<const float*>(means);
     float*       yptr = static_cast<float*>(y);
 
-    // Default hyperparameters (cuDNN doesn't expose these via descriptor,
-    // real implementations use hardcoded or descriptor state).
-    const double eps  = 1.0;
-    const double beta = 0.5;
-    const int    pad  = 1;  // 3x3 spatial window
+    // Normalization hyperparameters. cuDNN 6.x did not pass an LRN descriptor
+    // to this function; override via env vars for production flexibility.
+    static const double eps  = []() -> double {
+        const char* e = ::getenv("VGRE_DIVNORM_EPS");
+        if (e) { try { double v = std::stod(e); if (v > 0) return v; } catch (...) {} }
+        return 1.0;
+    }();
+    static const double beta = []() -> double {
+        const char* e = ::getenv("VGRE_DIVNORM_BETA");
+        if (e) { try { double v = std::stod(e); if (v > 0 && v <= 10) return v; } catch (...) {} }
+        return 0.5;
+    }();
+    static const int pad = []() -> int {
+        const char* e = ::getenv("VGRE_DIVNORM_PAD");
+        if (e) { try { int v = std::stoi(e); if (v >= 0 && v <= 8) return v; } catch (...) {} }
+        return 1;  // 3×3 spatial window
+    }();
 
     #ifdef _OPENMP
     #pragma omp parallel for if (N * C > 4)
@@ -118,9 +130,22 @@ cudnnStatus_t cudnnDivisiveNormalizationBackward(
     const float* dyptr = static_cast<const float*>(dy);
     float*       dxptr = static_cast<float*>(dx);
 
-    const double eps  = 1.0;
-    const double beta = 0.5;
-    const int    pad  = 1;
+    // Reuse the same static parameters as the forward pass for consistency.
+    static const double eps  = []() -> double {
+        const char* e = ::getenv("VGRE_DIVNORM_EPS");
+        if (e) { try { double v = std::stod(e); if (v > 0) return v; } catch (...) {} }
+        return 1.0;
+    }();
+    static const double beta = []() -> double {
+        const char* e = ::getenv("VGRE_DIVNORM_BETA");
+        if (e) { try { double v = std::stod(e); if (v > 0 && v <= 10) return v; } catch (...) {} }
+        return 0.5;
+    }();
+    static const int pad = []() -> int {
+        const char* e = ::getenv("VGRE_DIVNORM_PAD");
+        if (e) { try { int v = std::stoi(e); if (v >= 0 && v <= 8) return v; } catch (...) {} }
+        return 1;
+    }();
 
     #ifdef _OPENMP
     #pragma omp parallel for if (N * C > 4)

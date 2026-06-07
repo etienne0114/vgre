@@ -111,8 +111,9 @@ static int getCPUCoreCount() {
 #if defined(__linux__)
 static int readCPUMaxFrequencyKHz() {
   // Pass 1: cpufreq driver — exact hardware maximum (preferred).
-  // Try all CPU cores in case cpu0 is offline.
-  for (int c = 0; c < 16; ++c) {
+  // Try up to the actual core count in case cpu0 is offline.
+  const int nCores = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+  for (int c = 0; c < nCores; ++c) {
     std::string path = "/sys/devices/system/cpu/cpu" + std::to_string(c)
                        + "/cpufreq/cpuinfo_max_freq";
     std::ifstream f(path);
