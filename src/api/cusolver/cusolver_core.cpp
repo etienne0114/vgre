@@ -958,19 +958,39 @@ static cusolverStatus_t eigvsi_impl(int m, int /*nnz*/,
     getrf_fn(&m, &m, A0.data(), &m, ipiv.data(), &info);
     if (info != 0) return CUSOLVER_STATUS_SUCCESS;
 
-    std::vector<T> xCur(x0, x0 + m), xNext(m);
+    // Normalise initial guess (||x0|| may be anything)
+    std::vector<T> xCur(x0, x0 + m);
+    {
+        T n0 = T(0);
+        for (int i = 0; i < m; ++i) n0 += xCur[i] * xCur[i];
+        n0 = std::sqrt(n0);
+        if (n0 > T(0)) for (int i = 0; i < m; ++i) xCur[i] /= n0;
+    }
+    std::vector<T> xNext(m);
     T muCur = mu0;
     char trans = 'N'; int nrhs = 1;
     for (int iter = 0; iter < std::max(1, maxIter); ++iter) {
-        std::vector<T> rhs(xCur);
-        getrs_fn(&trans, &m, &nrhs, A0.data(), &m, ipiv.data(), rhs.data(), &m, &info);
-        T norm = T(0);
-        for (int i = 0; i < m; ++i) norm += rhs[i] * rhs[i];
-        norm = std::sqrt(norm);
+        // Solve (A - mu0·I)·y = x_k  →  y ≈ (lambda - mu0)^{-1} · v  (v = eigenvector)
+        std::vector<T> y(xCur);
+        getrs_fn(&trans, &m, &nrhs, A0.data(), &m, ipiv.data(), y.data(), &m, &info);
+
+        // Eigenvalue estimate: mu = mu0 + (x_k^T · y) / (x_k^T · x_k)
+        // Since ||x_k|| = 1 (normalised), this simplifies to mu = mu0 + x_k^T · y.
+        // This is the signed Rayleigh-quotient-style update and correctly handles
+        // eigenvalues both above and below mu0 — unlike the unsigned 1/||y|| formula.
+        T xTy = T(0);
+        for (int i = 0; i < m; ++i) xTy += xCur[i] * y[i];
+
+        T norm2 = T(0);
+        for (int i = 0; i < m; ++i) norm2 += y[i] * y[i];
+        T norm = std::sqrt(norm2);
         if (norm <= T(0)) break;
-        for (int i = 0; i < m; ++i) xNext[i] = rhs[i] / norm;
-        // Rayleigh quotient: mu = x^T A x / x^T x (using shifted factored A)
-        T muNext = mu0 + T(1) / norm;
+
+        for (int i = 0; i < m; ++i) xNext[i] = y[i] / norm;
+
+        // mu_k+1 = mu0 + 1 / (x_k^T · y)  (signed, from Rayleigh quotient of (A-mu0·I)^{-1})
+        T muNext = (std::fabs(xTy) > T(0)) ? mu0 + T(1) / xTy : muCur;
+
         if (std::fabs(muNext - muCur) < tol) { muCur = muNext; xCur = xNext; break; }
         muCur = muNext; xCur = xNext;
     }

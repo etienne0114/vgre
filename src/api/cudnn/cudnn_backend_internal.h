@@ -177,6 +177,20 @@ enum cudnnBackendAttributeName_t {
     CUDNN_ATTR_OPERATION_NORM_FWD_EPSILON_DESC   = 706, // epsilon scalar (by-value float tensor)
     CUDNN_ATTR_OPERATION_NORM_FWD_MODE           = 707, // 0=BN_spatial, 1=LayerNorm, 2=InstanceNorm
     CUDNN_ATTR_OPERATION_NORM_FWD_PHASE          = 708, // 0=INFERENCE, 1=TRAINING
+
+    // NORM_BACKWARD dedicated attributes (mirror of NORM_FWD where applicable)
+    // The backward pass computes dx (data gradient), dγ, dβ (parameter gradients)
+    // using saved mean and inv-std from the forward training pass.
+    CUDNN_ATTR_OPERATION_NORM_BWD_XDESC         = 710, // forward input x [N,C,H,W]
+    CUDNN_ATTR_OPERATION_NORM_BWD_DYDESC        = 711, // upstream gradient dy [N,C,H,W]
+    CUDNN_ATTR_OPERATION_NORM_BWD_DXDESC        = 712, // output dx [N,C,H,W]
+    CUDNN_ATTR_OPERATION_NORM_BWD_SCALE_DESC    = 713, // γ (scale) [1,C,1,1]
+    CUDNN_ATTR_OPERATION_NORM_BWD_MEAN_DESC     = 714, // saved batch mean [1,C,1,1]
+    CUDNN_ATTR_OPERATION_NORM_BWD_INV_VAR_DESC  = 715, // saved batch inv-std [1,C,1,1]
+    CUDNN_ATTR_OPERATION_NORM_BWD_DSCALE_DESC   = 716, // output dγ [1,C,1,1]
+    CUDNN_ATTR_OPERATION_NORM_BWD_DBIAS_DESC    = 717, // output dβ [1,C,1,1]
+    CUDNN_ATTR_OPERATION_NORM_BWD_EPSILON_DESC  = 718, // epsilon scalar (float tensor)
+    CUDNN_ATTR_OPERATION_NORM_BWD_MODE          = 719, // 0=BN_spatial, 1=LayerNorm, 2=InstanceNorm
     // RNG operation attributes (CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR)
     CUDNN_ATTR_OPERATION_RNG_YDESC               = 720, // output tensor desc
     CUDNN_ATTR_OPERATION_RNG_SEED                = 721, // uint64 seed for Philox4x32

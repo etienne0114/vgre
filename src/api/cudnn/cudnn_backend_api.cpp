@@ -993,18 +993,206 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
         case CUDNN_BACKEND_OPERATION_NORM_BACKWARD_DESCRIPTOR: {
-            uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
-            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DYDESC);
-            uintptr_t dxId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DXDESC);
-            void* xPtr  = dataPtrs[xId];
-            void* dyPtr = dataPtrs[yId];
-            void* dxPtr = dataPtrs[dxId];
+            // Normalization backward: computes dx, dγ, dβ for BN / LayerNorm / InstanceNorm.
+            // Mirrors the NORM_FORWARD backward pass (Ioffe & Szegedy, Ba et al.).
+            //
+            // For BN_spatial over [N, C, H, W] with m = N*H*W elements per channel:
+            //   x_hat[i] = (x[i] - mean[c]) * invStd[c]
+            //   dβ[c]    = Σ_i dy[i]
+            //   dγ[c]    = Σ_i dy[i] * x_hat[i]
+            //   dx[i]    = γ[c]*invStd[c]/m * (m*dy[i] - dβ[c] - x_hat[i]*dγ[c])
+            //
+            // For LayerNorm / InstanceNorm, the reduction axis changes:
+            //   LN:  m = C*H*W  (reduce over all channels and spatial)
+            //   IN:  m = H*W    (reduce per sample per channel)
+
+            // Resolve tensor IDs — try dedicated BWD attrs first, then legacy activation attrs.
+            uintptr_t xId   = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_BWD_XDESC);
+            if (!xId) xId   = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
+            uintptr_t dyId  = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_BWD_DYDESC);
+            if (!dyId) dyId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DYDESC);
+            uintptr_t dxId  = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_BWD_DXDESC);
+            if (!dxId) dxId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DXDESC);
+
+            const float* xPtr  = xId  ? static_cast<const float*>(
+                dataPtrs.count(xId)  ? dataPtrs.at(xId)  : nullptr) : nullptr;
+            const float* dyPtr = dyId ? static_cast<const float*>(
+                dataPtrs.count(dyId) ? dataPtrs.at(dyId) : nullptr) : nullptr;
+            float* dxPtr       = dxId ? static_cast<float*>(
+                dataPtrs.count(dxId) ? dataPtrs.at(dxId) : nullptr) : nullptr;
             if (!xPtr || !dyPtr || !dxPtr) return CUDNN_STATUS_INVALID_VALUE;
+
+            uintptr_t scId    = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_BWD_SCALE_DESC);
+            uintptr_t meanId  = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_BWD_MEAN_DESC);
+            uintptr_t invId   = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_BWD_INV_VAR_DESC);
+            uintptr_t dscId   = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_BWD_DSCALE_DESC);
+            uintptr_t dbId    = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_BWD_DBIAS_DESC);
+            uintptr_t epsId   = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_BWD_EPSILON_DESC);
+
+            const float* scale   = (scId   && dataPtrs.count(scId))   ?
+                                    static_cast<const float*>(dataPtrs.at(scId))   : nullptr;
+            const float* savMean = (meanId && dataPtrs.count(meanId)) ?
+                                    static_cast<const float*>(dataPtrs.at(meanId)) : nullptr;
+            const float* savInv  = (invId  && dataPtrs.count(invId))  ?
+                                    static_cast<const float*>(dataPtrs.at(invId))  : nullptr;
+            float* dScale = (dscId && dataPtrs.count(dscId)) ?
+                             static_cast<float*>(dataPtrs.at(dscId)) : nullptr;
+            float* dBias  = (dbId  && dataPtrs.count(dbId))  ?
+                             static_cast<float*>(dataPtrs.at(dbId))  : nullptr;
+            float epsilon = 1e-5f;
+            if (epsId && dataPtrs.count(epsId) && dataPtrs.at(epsId))
+                epsilon = *static_cast<const float*>(dataPtrs.at(epsId));
+
             TensorDesc xDesc = buildTensorDesc(xId);
-            TensorDesc dyDesc = buildTensorDesc(yId);
-            TensorDesc dxDesc = buildTensorDesc(dxId);
-            cudnnStatus_t s = cudnnDivisiveNormalizationBackward(handle, &xDesc, xPtr, dyPtr, nullptr, nullptr, &dxDesc, dxPtr);
-            if (s != CUDNN_STATUS_SUCCESS) return s;
+            int N = xDesc.n, C = xDesc.c, H = xDesc.h, W = xDesc.w;
+            if (H <= 0) H = 1; if (W <= 0) W = 1;
+            int HW = H * W;
+
+            int normMode = static_cast<int>(
+                getAttrUint64(opNode, CUDNN_ATTR_OPERATION_NORM_BWD_MODE));
+            // 0=BN_spatial, 1=LayerNorm, 2=InstanceNorm
+
+            // If saved stats absent, recompute from x.
+            std::vector<float> tmpMean, tmpInv;
+            if (!savMean || !savInv) {
+                if (normMode == 0) {
+                    // BN: reduce over N*H*W per channel
+                    tmpMean.assign(C, 0.0f); tmpInv.assign(C, 0.0f);
+                    int NHW = N * HW;
+                    for (int n = 0; n < N; ++n)
+                        for (int c = 0; c < C; ++c)
+                            for (int hw = 0; hw < HW; ++hw)
+                                tmpMean[c] += xPtr[((n*C+c)*H + hw/W)*W + hw%W];
+                    for (int c = 0; c < C; ++c) tmpMean[c] /= NHW;
+                    for (int n = 0; n < N; ++n)
+                        for (int c = 0; c < C; ++c)
+                            for (int hw = 0; hw < HW; ++hw) {
+                                float d = xPtr[((n*C+c)*H + hw/W)*W + hw%W] - tmpMean[c];
+                                tmpInv[c] += d * d;
+                            }
+                    for (int c = 0; c < C; ++c)
+                        tmpInv[c] = 1.0f / std::sqrt(tmpInv[c] / NHW + epsilon);
+                    savMean = tmpMean.data(); savInv = tmpInv.data();
+                } else {
+                    // LN/IN: reuse the BN-bwd-weights path below; set dummy all-zero mean / all-one invStd
+                    tmpMean.assign(C, 0.0f); tmpInv.assign(C, 1.0f);
+                    savMean = tmpMean.data(); savInv = tmpInv.data();
+                }
+            }
+
+            // Allocate output grad buffers if not provided
+            std::vector<float> tmpDscale, tmpDbias;
+            if (!dScale) { tmpDscale.assign(C, 0.0f); dScale = tmpDscale.data(); }
+            if (!dBias)  { tmpDbias.assign(C, 0.0f);  dBias  = tmpDbias.data();  }
+
+            if (normMode == 0) {
+                // ── Batch Norm spatial backward (Ioffe-Szegedy 2015) ────────────
+                int NHW = N * HW;
+                std::fill(dScale, dScale + C, 0.0f);
+                std::fill(dBias,  dBias  + C, 0.0f);
+                // Pass 1: accumulate dγ and dβ
+                for (int n = 0; n < N; ++n)
+                    for (int c = 0; c < C; ++c)
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w) {
+                                int idx = ((n*C+c)*H+h)*W+w;
+                                float xhat = (xPtr[idx] - savMean[c]) * savInv[c];
+                                dScale[c] += dyPtr[idx] * xhat;
+                                dBias[c]  += dyPtr[idx];
+                            }
+                // Pass 2: compute dx
+                float mf = static_cast<float>(NHW);
+                for (int n = 0; n < N; ++n)
+                    for (int c = 0; c < C; ++c) {
+                        float g   = scale ? scale[c] : 1.0f;
+                        float inv = savInv[c];
+                        float db  = dBias[c], dg = dScale[c];
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w) {
+                                int idx = ((n*C+c)*H+h)*W+w;
+                                float xhat = (xPtr[idx] - savMean[c]) * inv;
+                                dxPtr[idx] = g * inv / mf * (mf * dyPtr[idx] - db - xhat * dg);
+                            }
+                    }
+            } else if (normMode == 1) {
+                // ── Layer Norm backward (Ba et al. 2016) ──────────────────────
+                // LN reduces over the entire feature vector [C*H*W] per sample n.
+                // γ and β have shape [C,H,W] (or [C]) per the standard VGRE encoding.
+                int CHW = C * HW;
+                std::fill(dScale, dScale + C, 0.0f);
+                std::fill(dBias,  dBias  + C, 0.0f);
+                for (int n = 0; n < N; ++n) {
+                    // Compute mean and inv-std for this sample over [C*H*W]
+                    double sum = 0.0, sq = 0.0;
+                    for (int c = 0; c < C; ++c)
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w) {
+                                double v = xPtr[((n*C+c)*H+h)*W+w];
+                                sum += v; sq += v * v;
+                            }
+                    float mean_n = static_cast<float>(sum / CHW);
+                    float inv_n  = static_cast<float>(1.0 / std::sqrt(sq / CHW - (sum/CHW)*(sum/CHW) + epsilon));
+
+                    // dβ[c] += Σ_{n,h,w} dy; dγ[c] += Σ_{n,h,w} dy*xhat
+                    // Per-sample data gradient
+                    float db_n = 0.0f, dg_n = 0.0f;
+                    for (int c = 0; c < C; ++c)
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w) {
+                                int idx = ((n*C+c)*H+h)*W+w;
+                                float xhat = (xPtr[idx] - mean_n) * inv_n;
+                                float g    = scale ? scale[c] : 1.0f;
+                                dScale[c] += dyPtr[idx] * xhat;
+                                dBias[c]  += dyPtr[idx];
+                                db_n += dyPtr[idx] * g;
+                                dg_n += dyPtr[idx] * g * xhat;
+                            }
+                    float mf = static_cast<float>(CHW);
+                    for (int c = 0; c < C; ++c)
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w) {
+                                int idx = ((n*C+c)*H+h)*W+w;
+                                float xhat = (xPtr[idx] - mean_n) * inv_n;
+                                float g    = scale ? scale[c] : 1.0f;
+                                dxPtr[idx] = g * inv_n / mf *
+                                    (mf * dyPtr[idx] - db_n - xhat * dg_n);
+                            }
+                }
+            } else {
+                // ── Instance Norm backward (mode==2): reduce over H*W per (n,c) ──
+                for (int n = 0; n < N; ++n)
+                    for (int c = 0; c < C; ++c) {
+                        double sum = 0.0, sq = 0.0;
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w) {
+                                double v = xPtr[((n*C+c)*H+h)*W+w];
+                                sum += v; sq += v * v;
+                            }
+                        float mean_nc = static_cast<float>(sum / HW);
+                        float inv_nc  = static_cast<float>(1.0 / std::sqrt(sq / HW - (sum/HW)*(sum/HW) + epsilon));
+
+                        float db_nc = 0.0f, dg_nc = 0.0f;
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w) {
+                                int idx = ((n*C+c)*H+h)*W+w;
+                                float xhat = (xPtr[idx] - mean_nc) * inv_nc;
+                                float g    = scale ? scale[c] : 1.0f;
+                                dScale[c] += dyPtr[idx] * xhat;
+                                dBias[c]  += dyPtr[idx];
+                                db_nc += dyPtr[idx] * g;
+                                dg_nc += dyPtr[idx] * g * xhat;
+                            }
+                        float mf = static_cast<float>(HW);
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w) {
+                                int idx = ((n*C+c)*H+h)*W+w;
+                                float xhat = (xPtr[idx] - mean_nc) * inv_nc;
+                                float g    = scale ? scale[c] : 1.0f;
+                                dxPtr[idx] = g * inv_nc / mf *
+                                    (mf * dyPtr[idx] - db_nc - xhat * dg_nc);
+                            }
+                    }
+            }
             break;
         }
         case CUDNN_BACKEND_OPERATION_RNN_DESCRIPTOR: {
