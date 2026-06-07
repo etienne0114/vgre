@@ -34,7 +34,14 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId) {
         // Fallback: fill from /dev/urandom
         int fd = ::open("/dev/urandom", O_RDONLY);
         if (fd >= 0) {
-            ::read(fd, uniqueId->internal, NCCL_UNIQUE_ID_BYTES);
+            size_t total = 0;
+            while (total < NCCL_UNIQUE_ID_BYTES) {
+                ssize_t nr = ::read(fd, uniqueId->internal + total,
+                                    NCCL_UNIQUE_ID_BYTES - total);
+                if (nr > 0) { total += static_cast<size_t>(nr); }
+                else if (nr < 0 && errno == EINTR) { continue; }
+                else { break; }
+            }
             ::close(fd);
         }
     }
@@ -42,7 +49,14 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId) {
     // macOS / other POSIX
     int fd = ::open("/dev/urandom", O_RDONLY);
     if (fd >= 0) {
-        ::read(fd, uniqueId->internal, NCCL_UNIQUE_ID_BYTES);
+        size_t total = 0;
+        while (total < NCCL_UNIQUE_ID_BYTES) {
+            ssize_t nr = ::read(fd, uniqueId->internal + total,
+                                NCCL_UNIQUE_ID_BYTES - total);
+            if (nr > 0) { total += static_cast<size_t>(nr); }
+            else if (nr < 0 && errno == EINTR) { continue; }
+            else { break; }
+        }
         ::close(fd);
     }
 #endif

@@ -41,7 +41,7 @@ extern "C" {
 // Basic CUDA Driver API types
 using CUdevice = int;
 using CUcontext = void*;
-static thread_local CUcontext g_current_ctx = nullptr;
+extern thread_local CUcontext g_current_ctx;
 using CUstream = vgre::api::cudaStream_t;
 using CUevent = vgre::core::Event*;
 using CUmodule = vgre::api::CUmodule;

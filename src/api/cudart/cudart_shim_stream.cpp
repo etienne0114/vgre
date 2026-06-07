@@ -656,7 +656,7 @@ cudaError_t cudaStreamGetAttribute(cudaStream_t stream,
       if (meta.hasAccessPolicy) {
         *window = meta.accessPolicy;
       } else {
-        memset(window, 0, sizeof(StreamAccessPolicyWindow));
+        *window = StreamAccessPolicyWindow{};
       }
       return cudaSuccess;
     }

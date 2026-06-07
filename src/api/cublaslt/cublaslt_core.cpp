@@ -174,19 +174,26 @@ cublasStatus_t cublasLtMatmulDescSetAttribute(cublasLtMatmulDesc_t matmulDesc,
             d.scaleType = *static_cast<const cublasLtDatatype_t*>(buf);
         break;
     case CUBLASLT_MATMUL_DESC_A_SCALE_POINTER:
-        if (sizeInBytes >= sizeof(void*)) memcpy(&d.aScalePtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.aScalePtr, buf, sizeof(void*));
+        break;
     case CUBLASLT_MATMUL_DESC_B_SCALE_POINTER:
-        if (sizeInBytes >= sizeof(void*)) memcpy(&d.bScalePtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.bScalePtr, buf, sizeof(void*));
+        break;
     case CUBLASLT_MATMUL_DESC_C_SCALE_POINTER:
-        if (sizeInBytes >= sizeof(void*)) memcpy(&d.cScalePtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.cScalePtr, buf, sizeof(void*));
+        break;
     case CUBLASLT_MATMUL_DESC_D_SCALE_POINTER:
-        if (sizeInBytes >= sizeof(void*)) memcpy(&d.dScalePtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.dScalePtr, buf, sizeof(void*));
+        break;
     case CUBLASLT_MATMUL_DESC_AMAX_D:
-        if (sizeInBytes >= sizeof(void*)) memcpy(&d.amaxDPtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.amaxDPtr, buf, sizeof(void*));
+        break;
     case CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER:
-        if (sizeInBytes >= sizeof(void*)) memcpy(&d.epilogueAuxPtr, buf, sizeof(void*)); break;
+        if (sizeInBytes >= sizeof(void*)) memcpy(&d.epilogueAuxPtr, buf, sizeof(void*));
+        break;
     case CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD:
-        if (sizeInBytes >= sizeof(int64_t)) d.epilogueAuxLd = *static_cast<const int64_t*>(buf); break;
+        if (sizeInBytes >= sizeof(int64_t)) d.epilogueAuxLd = *static_cast<const int64_t*>(buf);
+        break;
     case CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE:
         if (sizeInBytes >= sizeof(cublasLtDatatype_t))
             d.biasDataType = *static_cast<const cublasLtDatatype_t*>(buf);

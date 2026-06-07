@@ -30,7 +30,8 @@ void test_poll_loop_responsiveness() {
     // Simulate async data arrival
     std::thread writer([fds, message]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        write(fds[1], message, strlen(message));
+        ssize_t wr = write(fds[1], message, strlen(message));
+        if (wr < 0) { perror("test_tcp_poll write"); }
     });
 
     // Test poll() exactly as it's used in TCPClusterManager

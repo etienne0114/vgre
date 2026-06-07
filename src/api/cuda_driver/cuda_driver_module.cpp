@@ -269,7 +269,11 @@ CUresult cuLinkAddFile(CUlinkState state, int /*type*/, const char *path,
         FILE *f = fopen(path, "rb");
         if (!f) return CUDA_ERROR_FILE_NOT_FOUND;
         fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-        if (sz > 0) { buf.resize(static_cast<size_t>(sz)); fread(buf.data(), 1, buf.size(), f); }
+        if (sz > 0) {
+            buf.resize(static_cast<size_t>(sz));
+            size_t nr = fread(buf.data(), 1, buf.size(), f);
+            if (nr != buf.size()) { buf.resize(nr); }
+        }
         fclose(f);
     }
     if (buf.empty()) return CUDA_ERROR_INVALID_VALUE;

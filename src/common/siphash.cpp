@@ -73,8 +73,8 @@ SipHash24& processHasher() {
             // Fallback: /dev/urandom
             FILE* f = std::fopen("/dev/urandom", "rb");
             if (f) {
-                (void)std::fread(&k0, sizeof(k0), 1, f);
-                (void)std::fread(&k1, sizeof(k1), 1, f);
+                if (std::fread(&k0, sizeof(k0), 1, f) != 1) k0 = 0;
+                if (std::fread(&k1, sizeof(k1), 1, f) != 1) k1 = 0;
                 std::fclose(f);
             }
             // If both sources fail, keys stay 0 — suboptimal but not fatal.

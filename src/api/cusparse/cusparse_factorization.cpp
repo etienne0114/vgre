@@ -860,13 +860,15 @@ cusparseStatus_t cusparseScsrilu02_bufferSize(cusparseHandle_t /*h*/, int /*m*/,
         const cusparseSpMatDescr_t /*descr*/, float * /*val*/,
         const int * /*rowPtr*/, const int * /*colInd*/,
         csrilu02Info_t /*info*/, int *pBufSize) {
-    if (pBufSize) *pBufSize = 0; return CUSPARSE_STATUS_SUCCESS;
+    if (pBufSize) *pBufSize = 0;
+    return CUSPARSE_STATUS_SUCCESS;
 }
 cusparseStatus_t cusparseDcsrilu02_bufferSize(cusparseHandle_t /*h*/, int /*m*/, int /*nnz*/,
         const cusparseSpMatDescr_t /*descr*/, double * /*val*/,
         const int * /*rowPtr*/, const int * /*colInd*/,
         csrilu02Info_t /*info*/, int *pBufSize) {
-    if (pBufSize) *pBufSize = 0; return CUSPARSE_STATUS_SUCCESS;
+    if (pBufSize) *pBufSize = 0;
+    return CUSPARSE_STATUS_SUCCESS;
 }
 cusparseStatus_t cusparseScsrilu02_analysis(cusparseHandle_t /*h*/, int /*m*/, int /*nnz*/,
         const cusparseSpMatDescr_t /*d*/, const float * /*val*/,
@@ -918,13 +920,15 @@ cusparseStatus_t cusparseScsric02_bufferSize(cusparseHandle_t /*h*/, int /*m*/, 
         const cusparseSpMatDescr_t /*d*/, float * /*val*/,
         const int * /*rowPtr*/, const int * /*colInd*/,
         csric02Info_t /*info*/, int *pBufSize) {
-    if (pBufSize) *pBufSize = 0; return CUSPARSE_STATUS_SUCCESS;
+    if (pBufSize) *pBufSize = 0;
+    return CUSPARSE_STATUS_SUCCESS;
 }
 cusparseStatus_t cusparseDcsric02_bufferSize(cusparseHandle_t /*h*/, int /*m*/, int /*nnz*/,
         const cusparseSpMatDescr_t /*d*/, double * /*val*/,
         const int * /*rowPtr*/, const int * /*colInd*/,
         csric02Info_t /*info*/, int *pBufSize) {
-    if (pBufSize) *pBufSize = 0; return CUSPARSE_STATUS_SUCCESS;
+    if (pBufSize) *pBufSize = 0;
+    return CUSPARSE_STATUS_SUCCESS;
 }
 cusparseStatus_t cusparseScsric02_analysis(cusparseHandle_t /*h*/, int /*m*/, int /*nnz*/,
         const cusparseSpMatDescr_t /*d*/, const float * /*val*/,
