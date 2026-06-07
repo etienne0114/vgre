@@ -52,7 +52,9 @@ VGRE_PUBLIC_API int vgre_jit_get_thread_id() {
     static std::atomic<int> s_next_id{0};
     static thread_local int s_my_id = -1;
     if (s_my_id == -1) {
-        s_my_id = (s_next_id++) % 1024;
+        // Monotonically increasing; natural int wrap-around (INT_MAX → INT_MIN)
+        // is benign since each thread gets its ID exactly once.
+        s_my_id = s_next_id.fetch_add(1, std::memory_order_relaxed);
     }
     return s_my_id;
 }

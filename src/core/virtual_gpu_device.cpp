@@ -201,7 +201,14 @@ VirtualGPUDevice::VirtualGPUDevice(DeviceId id) : id_(id) {
       return 32; // 32GB cap default
   }();
   props_.totalGlobalMem = kDefaultMemoryGB * 1024ULL * 1024 * 1024;
-  props_.sharedMemPerBlock = 48 * 1024;
+  // Emulated device properties — Ampere SM 8.6 defaults.
+  // Override via VGRE_SHARED_MEM_KB, VGRE_COMPUTE_CAPABILITY, VGRE_WARP_SIZE.
+  {
+    int smKB = 48;
+    const char* smEnv = vgre_get_config("VGRE_SHARED_MEM_KB");
+    if (smEnv) { try { int v = std::stoi(smEnv); if (v >= 16 && v <= 256) smKB = v; } catch (...) {} }
+    props_.sharedMemPerBlock = static_cast<size_t>(smKB) * 1024;
+  }
   props_.maxThreadsPerBlock = 1024;
   props_.maxThreadsDim[0] = 1024;
   props_.maxThreadsDim[1] = 1024;
@@ -209,12 +216,22 @@ VirtualGPUDevice::VirtualGPUDevice(DeviceId id) : id_(id) {
   props_.maxGridSize[0] = 2147483647;
   props_.maxGridSize[1] = 65535;
   props_.maxGridSize[2] = 65535;
-  props_.warpSize = 32;
-  props_.major = 8;
-  props_.minor = 6;
+  {
+    int ws = 32;
+    const char* wsEnv = vgre_get_config("VGRE_WARP_SIZE");
+    if (wsEnv) { try { int v = std::stoi(wsEnv); if (v == 16 || v == 32 || v == 64) ws = v; } catch (...) {} }
+    props_.warpSize = ws;
+  }
+  {
+    int cc = 86;
+    const char* ccEnv = vgre_get_config("VGRE_COMPUTE_CAPABILITY");
+    if (ccEnv) { try { int v = std::stoi(ccEnv); if (v >= 30 && v <= 99) cc = v; } catch (...) {} }
+    props_.major = cc / 10;
+    props_.minor = cc % 10;
+    props_.computeCapability = cc;
+  }
   props_.clockRate = 1500000;
   props_.totalConstMem = 64 * 1024;
-  props_.computeCapability = 86;
 
   props_.pciDeviceId = 0;
   props_.isP2PCapable = true;
