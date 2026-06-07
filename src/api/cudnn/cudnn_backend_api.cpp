@@ -767,27 +767,117 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
         case CUDNN_BACKEND_OPERATION_BN_FINALIZE_STATISTICS_DESCRIPTOR: {
-            // Route to batch norm forward training with default parameters
-            uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
-            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
-            void* xPtr = dataPtrs[xId];
-            void* yPtr = dataPtrs[yId];
-            if (!xPtr || !yPtr) return CUDNN_STATUS_INVALID_VALUE;
-            TensorDesc xDesc = buildTensorDesc(xId);
-            TensorDesc yDesc = buildTensorDesc(yId);
-            float alpha = 1.0f, beta = 0.0f;
-            // Minimal BN scale/bias buffers (all ones / zeros)
-            int C = xDesc.c;
-            std::vector<float> scale(C, 1.0f), bias(C, 0.0f);
-            std::vector<float> runningMean(C, 0.0f), runningVar(C, 1.0f);
-            std::vector<float> savedMean(C, 0.0f), savedInvVar(C, 1.0f);
-            cudnnStatus_t s = cudnnBatchNormalizationForwardTraining(
-                handle, 1 /*CUDNN_BATCHNORM_SPATIAL*/, &alpha, &beta,
-                &xDesc, xPtr, &yDesc, yPtr,
-                nullptr, scale.data(), bias.data(),
-                0.0, runningMean.data(), runningVar.data(),
-                1e-5, savedMean.data(), savedInvVar.data());
-            if (s != CUDNN_STATUS_SUCCESS) return s;
+            // BN finalize statistics — two usage patterns:
+            //
+            // Pattern A (preferred, v8 backend): caller supplies accumulated ΣX / ΣX² per
+            //   channel via CUDNN_ATTR_BN_FINALIZE_STATS_SUM_DESC / _SQ_SUM_DESC and
+            //   optional running-mean/var update tensors.  Computes:
+            //     mean[c]    = sumX[c] / accumCount
+            //     var[c]     = sumXsq[c] / accumCount - mean[c]²
+            //     runMean[c] = (1-f)*prevMean[c] + f*mean[c]
+            //     runVar[c]  = (1-f)*prevVar[c]  + f*var[c]
+            //     savedMean[c]   = mean[c]
+            //     savedInvStd[c] = 1/sqrt(var[c] + epsilon)
+            //
+            // Pattern B (legacy / test fallback): caller supplies x via
+            //   CUDNN_ATTR_OPERATION_ACTIVATION_XDESC; we compute statistics from raw x,
+            //   apply BN forward, and write y via ACTIVATION_YDESC.
+
+            uintptr_t sumId    = getAttrUint64(opNode, CUDNN_ATTR_BN_FINALIZE_STATS_SUM_DESC);
+            uintptr_t sqSumId  = getAttrUint64(opNode, CUDNN_ATTR_BN_FINALIZE_STATS_SQ_SUM_DESC);
+
+            const float* sumX   = (sumId   && dataPtrs.count(sumId))   ?
+                                   static_cast<const float*>(dataPtrs.at(sumId))   : nullptr;
+            const float* sumXsq = (sqSumId && dataPtrs.count(sqSumId)) ?
+                                   static_cast<const float*>(dataPtrs.at(sqSumId)) : nullptr;
+
+            if (sumX && sumXsq) {
+                // ── Pattern A: statistics from pre-accumulated sums ───────────────
+                uintptr_t pMeanId = getAttrUint64(opNode, CUDNN_ATTR_BN_FINALIZE_PREV_RUNNING_MEAN_DESC);
+                uintptr_t pVarId  = getAttrUint64(opNode, CUDNN_ATTR_BN_FINALIZE_PREV_RUNNING_VAR_DESC);
+                uintptr_t rMeanId = getAttrUint64(opNode, CUDNN_ATTR_BN_FINALIZE_UPDATED_RUNNING_MEAN_DESC);
+                uintptr_t rVarId  = getAttrUint64(opNode, CUDNN_ATTR_BN_FINALIZE_UPDATED_RUNNING_VAR_DESC);
+                uintptr_t sMeanId = getAttrUint64(opNode, CUDNN_ATTR_BN_FINALIZE_SAVED_MEAN_DESC);
+                uintptr_t sInvId  = getAttrUint64(opNode, CUDNN_ATTR_BN_FINALIZE_SAVED_INV_STD_DESC);
+
+                const float* pMean = (pMeanId && dataPtrs.count(pMeanId)) ?
+                                      static_cast<const float*>(dataPtrs.at(pMeanId)) : nullptr;
+                const float* pVar  = (pVarId  && dataPtrs.count(pVarId))  ?
+                                      static_cast<const float*>(dataPtrs.at(pVarId))  : nullptr;
+                float* rMean = (rMeanId && dataPtrs.count(rMeanId)) ?
+                                static_cast<float*>(dataPtrs.at(rMeanId)) : nullptr;
+                float* rVar  = (rVarId  && dataPtrs.count(rVarId))  ?
+                                static_cast<float*>(dataPtrs.at(rVarId))  : nullptr;
+                float* sMean = (sMeanId && dataPtrs.count(sMeanId)) ?
+                                static_cast<float*>(dataPtrs.at(sMeanId)) : nullptr;
+                float* sInv  = (sInvId  && dataPtrs.count(sInvId))  ?
+                                static_cast<float*>(dataPtrs.at(sInvId))  : nullptr;
+
+                TensorDesc sumDesc = buildTensorDesc(sumId);
+                int C = std::max(sumDesc.c, std::max(sumDesc.n, 1));
+
+                uintptr_t accumAttr = getAttrUint64(opNode, CUDNN_ATTR_BN_FINALIZE_ACCUM_COUNT);
+                double accumCount   = (accumAttr > 0) ? static_cast<double>(accumAttr)
+                                                      : static_cast<double>(std::max(sumDesc.n, 1));
+                float expAvgFactor  = getAttrFloat(opNode, CUDNN_ATTR_BN_FINALIZE_EXP_AVG_FACTOR, 0.0f);
+                float epsilon       = getAttrFloat(opNode, CUDNN_ATTR_BN_FINALIZE_EPSILON, 1e-5f);
+
+                for (int c = 0; c < C; ++c) {
+                    double sx   = static_cast<double>(sumX[c]);
+                    double sx2  = static_cast<double>(sumXsq[c]);
+                    double mean = sx  / accumCount;
+                    double var  = sx2 / accumCount - mean * mean;
+                    if (var < 0.0) var = 0.0;
+
+                    if (sMean) sMean[c] = static_cast<float>(mean);
+                    if (sInv)  sInv[c]  = static_cast<float>(1.0 / std::sqrt(var + epsilon));
+                    if (rMean)
+                        rMean[c] = pMean ? (1.0f - expAvgFactor) * pMean[c] + expAvgFactor * static_cast<float>(mean)
+                                         : static_cast<float>(mean);
+                    if (rVar)
+                        rVar[c]  = pVar  ? (1.0f - expAvgFactor) * pVar[c]  + expAvgFactor * static_cast<float>(var)
+                                         : static_cast<float>(var);
+                }
+            } else {
+                // ── Pattern B: raw input x — compute statistics and apply BN forward ──
+                uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
+                uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
+                const float* xPtr = xId ? static_cast<const float*>(
+                    dataPtrs.count(xId) ? dataPtrs.at(xId) : nullptr) : nullptr;
+                float* yPtr = yId ? static_cast<float*>(
+                    dataPtrs.count(yId) ? dataPtrs.at(yId) : nullptr) : nullptr;
+                if (!xPtr) return CUDNN_STATUS_INVALID_VALUE;
+
+                TensorDesc xd = buildTensorDesc(xId);
+                int N = std::max(xd.n, 1), C = std::max(xd.c, 1);
+                int H = std::max(xd.h, 1), W = std::max(xd.w, 1);
+                int NHW = N * H * W;
+                float eps = 1e-5f;
+
+                // Compute per-channel mean and variance from x, then apply identity BN
+                // (γ=1, β=0) and write to y if provided.
+                for (int c = 0; c < C; ++c) {
+                    double sum = 0.0, sq = 0.0;
+                    for (int n = 0; n < N; ++n)
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w) {
+                                double v = static_cast<double>(xPtr[((n*C+c)*H+h)*W+w]);
+                                sum += v; sq += v * v;
+                            }
+                    double mean = sum / NHW;
+                    double var  = sq  / NHW - mean * mean;
+                    if (var < 0.0) var = 0.0;
+                    float inv = static_cast<float>(1.0 / std::sqrt(var + eps));
+                    if (yPtr) {
+                        for (int n = 0; n < N; ++n)
+                            for (int h = 0; h < H; ++h)
+                                for (int w = 0; w < W; ++w) {
+                                    int idx = ((n*C+c)*H+h)*W+w;
+                                    yPtr[idx] = (xPtr[idx] - static_cast<float>(mean)) * inv;
+                                }
+                    }
+                }
+            }
             break;
         }
         case CUDNN_BACKEND_OPERATION_NORM_FORWARD_DESCRIPTOR: {
@@ -918,23 +1008,133 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
         case CUDNN_BACKEND_OPERATION_RNN_DESCRIPTOR: {
-            uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
-            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
-            void* xPtr = dataPtrs[xId];
-            void* yPtr = dataPtrs[yId];
+            // Resolve X/Y tensor IDs — try RNN-specific attrs first, fall back to activation attrs.
+            uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNN_XDESC);
+            if (!xId) xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
+            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNN_YDESC);
+            if (!yId) yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
+            uintptr_t wId  = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNN_WDESC);
+            uintptr_t hxId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNN_HXDESC);
+            uintptr_t hyId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNN_HYDESC);
+            uintptr_t cxId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNN_CXDESC);
+            uintptr_t cyId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNN_CYDESC);
+
+            void* xPtr  = dataPtrs.count(xId)  ? dataPtrs[xId]  : nullptr;
+            void* yPtr  = dataPtrs.count(yId)  ? dataPtrs[yId]  : nullptr;
+            void* wPtr  = dataPtrs.count(wId)  ? dataPtrs[wId]  : nullptr;
+            void* hxPtr = dataPtrs.count(hxId) ? dataPtrs[hxId] : nullptr;
+            void* hyPtr = dataPtrs.count(hyId) ? dataPtrs[hyId] : nullptr;
+            void* cxPtr = dataPtrs.count(cxId) ? dataPtrs[cxId] : nullptr;
+            void* cyPtr = dataPtrs.count(cyId) ? dataPtrs[cyId] : nullptr;
             if (!xPtr || !yPtr) return CUDNN_STATUS_INVALID_VALUE;
-            TensorDesc xDesc = buildTensorDesc(xId);
-            TensorDesc yDesc = buildTensorDesc(yId);
-            // Minimal RNN descriptor with default hidden size
-            struct MiniRNNDesc { int hiddenSize = 128; int numLayers = 1; int inputSize = 128; } miniRnn;
-            // Use xDesc as both x and y descriptor arrays (single timestep)
-            cudnnTensorDescriptor_t xDescArr[1] = { &xDesc };
-            cudnnTensorDescriptor_t yDescArr[1] = { &yDesc };
-            int seqLength = 1;
+
+            // Retrieve (or construct) the RNN descriptor.
+            // CUDNN_ATTR_OPERATION_RNN_HANDLE stores the cudnnRNNDescriptor_t as uint64.
+            uintptr_t rnnHandle = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNN_HANDLE);
+            RNNDesc* rnnPtr = nullptr;
+            RNNDesc  tmpDesc{};   // used if the caller didn't set a handle
+
+            if (rnnHandle) {
+                rnnPtr = reinterpret_cast<RNNDesc*>(rnnHandle);
+            } else {
+                // Derive dimensions from backend tensor descriptors.
+                // Backend encoding: dims[0]=B, dims[1]=T (seq), dims[2]=feature_size.
+                // cudnnRNNForwardInference reads I = xt->c*xt->h*xt->w from xDescArr[0],
+                // so each element of xDescArr must carry [B, I, 1, 1].
+                // We detect whether the tensor is 3-D [B,T,I] or 2-D [B,I] by checking
+                // whether the third dimension (h) is > 0.
+                const BackendNode* xNode = getNode(xId);
+                const BackendNode* yNode = getNode(yId);
+                auto* xDims = xNode ? getAttrVec(xNode, CUDNN_ATTR_TENSOR_DIMENSIONS) : nullptr;
+                auto* yDims = yNode ? getAttrVec(yNode, CUDNN_ATTR_TENSOR_DIMENSIONS) : nullptr;
+
+                int B = 1, T = 1, inputSize = 128, hiddenSize = 128;
+                if (xDims && xDims->size() >= 3) {
+                    B = static_cast<int>((*xDims)[0]);
+                    T = static_cast<int>((*xDims)[1]);
+                    inputSize = static_cast<int>((*xDims)[2]);
+                } else if (xDims && xDims->size() >= 2) {
+                    B = static_cast<int>((*xDims)[0]);
+                    inputSize = static_cast<int>((*xDims)[1]);
+                }
+                if (yDims && yDims->size() >= 3)
+                    hiddenSize = static_cast<int>((*yDims)[2]);
+                else if (yDims && yDims->size() >= 2)
+                    hiddenSize = static_cast<int>((*yDims)[1]);
+
+                // T may also be set explicitly via CUDNN_ATTR_OPERATION_RNN_SEQ_LEN.
+                uintptr_t seqAttr = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNN_SEQ_LEN);
+                if (seqAttr) T = static_cast<int>(seqAttr);
+
+                tmpDesc.hiddenSize = hiddenSize;
+                tmpDesc.numLayers  = 1;
+                tmpDesc.inputSize  = inputSize;
+                tmpDesc.mode       = CUDNN_RNN_TANH;
+                tmpDesc.peephole   = false;
+                (void)B;   // B is read from the per-timestep xDesc below
+                rnnPtr = &tmpDesc;
+            }
+
+            // Sequence length: CUDNN_ATTR_OPERATION_RNN_SEQ_LEN overrides tensor shape.
+            int T = 1;
+            {
+                uintptr_t seqAttr = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_RNN_SEQ_LEN);
+                if (seqAttr) {
+                    T = static_cast<int>(seqAttr);
+                } else {
+                    // Try to read T from the 3-D input tensor (dim[1]).
+                    const BackendNode* xNode = getNode(xId);
+                    auto* xDims = xNode ? getAttrVec(xNode, CUDNN_ATTR_TENSOR_DIMENSIONS) : nullptr;
+                    if (xDims && xDims->size() >= 3)
+                        T = static_cast<int>((*xDims)[1]);
+                }
+            }
+
+            // Build per-timestep tensor descriptor arrays required by the legacy API.
+            // Each element is [B, inputSize, 1, 1] — the time axis is unrolled into the
+            // T-element arrays, with xPtr/yPtr laid out as contiguous [T][B][feature].
+            TensorDesc perStepXDesc{};
+            {
+                const BackendNode* xNode = getNode(xId);
+                auto* xDims = xNode ? getAttrVec(xNode, CUDNN_ATTR_TENSOR_DIMENSIONS) : nullptr;
+                if (xDims && xDims->size() >= 3) {
+                    perStepXDesc.n = static_cast<int>((*xDims)[0]);   // B
+                    perStepXDesc.c = static_cast<int>((*xDims)[2]);   // inputSize
+                    perStepXDesc.h = 1; perStepXDesc.w = 1;
+                } else {
+                    TensorDesc tmp = buildTensorDesc(xId);
+                    perStepXDesc = tmp;
+                }
+            }
+            TensorDesc perStepYDesc{};
+            {
+                const BackendNode* yNode = getNode(yId);
+                auto* yDims = yNode ? getAttrVec(yNode, CUDNN_ATTR_TENSOR_DIMENSIONS) : nullptr;
+                if (yDims && yDims->size() >= 3) {
+                    perStepYDesc.n = static_cast<int>((*yDims)[0]);   // B
+                    perStepYDesc.c = static_cast<int>((*yDims)[2]);   // hiddenSize
+                    perStepYDesc.h = 1; perStepYDesc.w = 1;
+                } else {
+                    perStepYDesc = buildTensorDesc(yId);
+                }
+            }
+            std::vector<cudnnTensorDescriptor_t> xDescArr(static_cast<size_t>(T), &perStepXDesc);
+            std::vector<cudnnTensorDescriptor_t> yDescArr(static_cast<size_t>(T), &perStepYDesc);
+
+            // Allocate workspace sized for training-reserve layout.
+            int H  = rnnPtr->hiddenSize;
+            int nL = rnnPtr->numLayers;
+            int B  = perStepXDesc.n;
+            int fs = (rnnPtr->mode == CUDNN_LSTM) ? 5 : (rnnPtr->mode == CUDNN_GRU ? 3 : 0);
+            size_t wsSz = static_cast<size_t>(nL) * T * B * H * fs * sizeof(float);
+            if (wsSz == 0) wsSz = static_cast<size_t>(nL) * T * B * H * sizeof(float);
+            std::vector<float> wsVec(wsSz / sizeof(float) + 1, 0.f);
+
             cudnnStatus_t s = cudnnRNNForwardInference(
-                handle, &miniRnn, seqLength, xDescArr, xPtr,
-                nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                yDescArr, yPtr, nullptr, nullptr, nullptr, nullptr, nullptr, 0);
+                handle, rnnPtr, T, xDescArr.data(), xPtr,
+                nullptr, hxPtr, nullptr, cxPtr, nullptr, wPtr,
+                yDescArr.data(), yPtr, nullptr, hyPtr, nullptr, cyPtr,
+                wsVec.data(), wsSz);
             if (s != CUDNN_STATUS_SUCCESS) return s;
             break;
         }
@@ -991,29 +1191,119 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
         case CUDNN_BACKEND_OPERATION_BN_BWD_WEIGHTS_DESCRIPTOR: {
-            // Route to batch norm backward to compute dScale and dBias
-            uintptr_t xId  = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
-            uintptr_t dyId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DYDESC);
-            uintptr_t dxId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DXDESC);
-            void* xPtr  = dataPtrs[xId];
-            void* dyPtr = dataPtrs[dyId];
-            void* dxPtr = dataPtrs[dxId];
-            if (!xPtr || !dyPtr || !dxPtr) return CUDNN_STATUS_INVALID_VALUE;
-            TensorDesc xDesc  = buildTensorDesc(xId);
-            TensorDesc dyDesc = buildTensorDesc(dyId);
-            TensorDesc dxDesc = buildTensorDesc(dxId);
-            int C = xDesc.c;
-            std::vector<float> scale(C, 1.0f), dScale(C, 0.0f), dBias(C, 0.0f);
-            std::vector<float> savedMean(C, 0.0f), savedInvVar(C, 1.0f);
-            float alphaDataDiff[1] = {1.0f}, betaDataDiff[1] = {0.0f};
-            float alphaParamDiff[1] = {1.0f}, betaParamDiff[1] = {0.0f};
-            cudnnStatus_t s = cudnnBatchNormalizationBackward(
-                handle, 1 /*CUDNN_BATCHNORM_SPATIAL*/,
-                alphaDataDiff, betaDataDiff, alphaParamDiff, betaParamDiff,
-                &xDesc, xPtr, &dyDesc, dyPtr, &dxDesc, dxPtr,
-                nullptr, scale.data(), dScale.data(), dBias.data(),
-                1e-5, savedMean.data(), savedInvVar.data());
-            if (s != CUDNN_STATUS_SUCCESS) return s;
+            // Batch normalisation weight-gradient (dγ, dβ) and optional data-gradient (dx).
+            // Requires the saved mean and saved inv-std from the matching forward training pass.
+            //
+            // Per Ioffe & Szegedy (2015), for spatial BN over [N, C, H, W]:
+            //   x_hat[n,c,h,w] = (x[n,c,h,w] - mean[c]) * invStd[c]
+            //   dβ[c]     = Σ_{n,h,w} dy[n,c,h,w]
+            //   dγ[c]     = Σ_{n,h,w} dy[n,c,h,w] · x_hat[n,c,h,w]
+            //
+            // dx (data gradient for fused conv+BN backward) follows the standard BN backward:
+            //   m  = N*H*W
+            //   dx = γ * invStd * (m*dy - dβ - x_hat*dγ) / m
+
+            // Resolve tensor IDs — try dedicated BWD_WEIGHTS attrs first, fall back to activation attrs.
+            uintptr_t xId     = getAttrUint64(opNode, CUDNN_ATTR_BN_BWD_WEIGHTS_X_DESC);
+            if (!xId) xId     = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
+            uintptr_t dyId    = getAttrUint64(opNode, CUDNN_ATTR_BN_BWD_WEIGHTS_DY_DESC);
+            if (!dyId) dyId   = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DYDESC);
+            uintptr_t dxId    = getAttrUint64(opNode, CUDNN_ATTR_BN_BWD_WEIGHTS_DX_DESC);
+            if (!dxId) dxId   = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_BWD_DXDESC);
+            uintptr_t scId    = getAttrUint64(opNode, CUDNN_ATTR_BN_BWD_WEIGHTS_SCALE_DESC);
+            uintptr_t meanId  = getAttrUint64(opNode, CUDNN_ATTR_BN_BWD_WEIGHTS_MEAN_DESC);
+            uintptr_t invId   = getAttrUint64(opNode, CUDNN_ATTR_BN_BWD_WEIGHTS_INVSTD_DESC);
+            uintptr_t dscId   = getAttrUint64(opNode, CUDNN_ATTR_BN_BWD_WEIGHTS_DSCALE_DESC);
+            uintptr_t dbId    = getAttrUint64(opNode, CUDNN_ATTR_BN_BWD_WEIGHTS_DBIAS_DESC);
+
+            const float* xPtr  = xId  ? static_cast<const float*>(
+                                   dataPtrs.count(xId)  ? dataPtrs.at(xId)  : nullptr) : nullptr;
+            const float* dyPtr = dyId ? static_cast<const float*>(
+                                   dataPtrs.count(dyId) ? dataPtrs.at(dyId) : nullptr) : nullptr;
+            float* dxPtr       = dxId ? static_cast<float*>(
+                                   dataPtrs.count(dxId) ? dataPtrs.at(dxId) : nullptr) : nullptr;
+            if (!xPtr || !dyPtr) return CUDNN_STATUS_INVALID_VALUE;
+
+            TensorDesc xDesc = buildTensorDesc(xId);
+            int N = xDesc.n, C = xDesc.c, H = xDesc.h, W = xDesc.w;
+            int HW  = H * W;
+            int NHW = N * HW;
+
+            float epsilon = getAttrFloat(opNode, CUDNN_ATTR_BN_BWD_WEIGHTS_EPSILON, 1e-5f);
+
+            // Load optional per-channel parameters — fall back to identity/zeros if absent.
+            const float* scale   = (scId   && dataPtrs.count(scId))   ?
+                                    static_cast<const float*>(dataPtrs.at(scId))   : nullptr;
+            const float* savMean = (meanId && dataPtrs.count(meanId)) ?
+                                    static_cast<const float*>(dataPtrs.at(meanId)) : nullptr;
+            const float* savInv  = (invId  && dataPtrs.count(invId))  ?
+                                    static_cast<const float*>(dataPtrs.at(invId))  : nullptr;
+            float*       dScale  = (dscId  && dataPtrs.count(dscId))  ?
+                                    static_cast<float*>(dataPtrs.at(dscId))        : nullptr;
+            float*       dBias   = (dbId   && dataPtrs.count(dbId))   ?
+                                    static_cast<float*>(dataPtrs.at(dbId))         : nullptr;
+
+            // If saved statistics are absent, fall back to the full Ioffe–Szegedy formula
+            // (recompute mean/variance on the fly — slower but always correct).
+            std::vector<float> tmpMean, tmpInv;
+            if (!savMean || !savInv) {
+                tmpMean.assign(C, 0.0f);
+                tmpInv.assign(C, 0.0f);
+                for (int n = 0; n < N; ++n)
+                    for (int c = 0; c < C; ++c)
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w)
+                                tmpMean[c] += xPtr[((n*C+c)*H+h)*W+w];
+                for (int c = 0; c < C; ++c) tmpMean[c] /= static_cast<float>(NHW);
+                for (int n = 0; n < N; ++n)
+                    for (int c = 0; c < C; ++c)
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w) {
+                                float d = xPtr[((n*C+c)*H+h)*W+w] - tmpMean[c];
+                                tmpInv[c] += d * d;
+                            }
+                for (int c = 0; c < C; ++c)
+                    tmpInv[c] = 1.0f / std::sqrt(tmpInv[c] / static_cast<float>(NHW) + epsilon);
+                savMean = tmpMean.data();
+                savInv  = tmpInv.data();
+            }
+
+            // Compute dγ, dβ, and (optionally) dx.
+            std::vector<float> tmpDscale, tmpDbias;
+            if (!dScale) { tmpDscale.assign(C, 0.0f); dScale = tmpDscale.data(); }
+            if (!dBias)  { tmpDbias.assign(C, 0.0f);  dBias  = tmpDbias.data();  }
+
+            std::fill(dScale, dScale + C, 0.0f);
+            std::fill(dBias,  dBias  + C, 0.0f);
+
+            for (int n = 0; n < N; ++n)
+                for (int c = 0; c < C; ++c)
+                    for (int h = 0; h < H; ++h)
+                        for (int w = 0; w < W; ++w) {
+                            int idx = ((n*C+c)*H+h)*W+w;
+                            float xhat = (xPtr[idx] - savMean[c]) * savInv[c];
+                            dScale[c] += dyPtr[idx] * xhat;
+                            dBias[c]  += dyPtr[idx];
+                        }
+
+            // Data gradient dx (used in fused conv+BN backward).
+            if (dxPtr) {
+                float mf = static_cast<float>(NHW);
+                float gammaSc = scale ? 1.0f : 1.0f; // γ is applied outside if absent
+                for (int c = 0; c < C; ++c) {
+                    float g  = scale ? scale[c] : 1.0f;
+                    float inv = savInv[c];
+                    float db = dBias[c], dg = dScale[c];
+                    for (int n = 0; n < N; ++n)
+                        for (int h = 0; h < H; ++h)
+                            for (int w = 0; w < W; ++w) {
+                                int idx = ((n*C+c)*H+h)*W+w;
+                                float xhat = (xPtr[idx] - savMean[c]) * inv;
+                                dxPtr[idx] = g * inv / mf * (mf * dyPtr[idx] - db - xhat * dg);
+                            }
+                }
+                (void)gammaSc;
+            }
             break;
         }
         case CUDNN_BACKEND_OPERATION_ATTENTION_DESCRIPTOR: {
