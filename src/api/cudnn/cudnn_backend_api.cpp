@@ -1343,22 +1343,63 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
         case CUDNN_BACKEND_OPERATION_CONCAT_DESCRIPTOR: {
-            // Simple concatenation: copy inputs contiguously into output buffer
-            uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
-            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
-            void* xPtr = dataPtrs[xId];
-            void* yPtr = dataPtrs[yId];
-            if (!xPtr || !yPtr) return CUDNN_STATUS_INVALID_VALUE;
-            TensorDesc xDesc = buildTensorDesc(xId);
+            // Axis-aware concatenation of N input tensors.
+            // Primary attr: CUDNN_ATTR_OPERATION_CONCAT_XDESCS (list of input IDs).
+            // Fallback (legacy single-input path): CUDNN_ATTR_OPERATION_ACTIVATION_XDESC.
+            const auto* xListAttr = getAttrVec(opNode, CUDNN_ATTR_OPERATION_CONCAT_XDESCS);
+            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_CONCAT_YDESC);
+            if (!yId) yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
+            void* yPtr = (yId && dataPtrs.count(yId)) ? dataPtrs.at(yId) : nullptr;
+            if (!yPtr) return CUDNN_STATUS_INVALID_VALUE;
+
+            // Build the input list (deduplicate, maintain order)
+            std::vector<uintptr_t> inputs;
+            if (xListAttr)
+                for (auto v : *xListAttr) inputs.push_back(static_cast<uintptr_t>(v));
+            else {
+                uintptr_t x0 = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
+                if (x0) inputs.push_back(x0);
+            }
+            if (inputs.empty()) return CUDNN_STATUS_INVALID_VALUE;
+
+            int axis = static_cast<int>(
+                getAttrUint64(opNode, CUDNN_ATTR_OPERATION_CONCAT_AXIS, 1)); // default: concat along C
+
             TensorDesc yDesc = buildTensorDesc(yId);
-            size_t xBytes = static_cast<size_t>(xDesc.n) * xDesc.c * xDesc.h * xDesc.w * sizeof(float);
-            size_t yBytes = static_cast<size_t>(yDesc.n) * yDesc.c * yDesc.h * yDesc.w * sizeof(float);
-            memcpy(yPtr, xPtr, xBytes);
-            // Second input (if present) appended after first
-            uintptr_t x2Id = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_X); // reuse attr slot
-            void* x2Ptr = dataPtrs.count(x2Id) ? dataPtrs[x2Id] : nullptr;
-            if (x2Ptr && x2Id != xId)
-                memcpy(static_cast<char*>(yPtr) + xBytes, x2Ptr, yBytes - xBytes);
+            int yDims[4] = {yDesc.n, yDesc.c, yDesc.h, yDesc.w};
+            float* yf = static_cast<float*>(yPtr);
+
+            // Iterate output tensor and fill from correct input
+            int axisOff = 0;
+            for (uintptr_t xId : inputs) {
+                const float* xf = (dataPtrs.count(xId) && dataPtrs.at(xId))
+                    ? static_cast<const float*>(dataPtrs.at(xId)) : nullptr;
+                if (!xf) { axisOff += 0; continue; }
+                TensorDesc xDesc = buildTensorDesc(xId);
+                int xDims[4] = {xDesc.n, xDesc.c, xDesc.h, xDesc.w};
+                int axisLen = xDims[axis];
+
+                // Walk all elements of the output that belong to this input
+                for (int n = 0; n < (axis == 0 ? axisLen : yDims[0]); ++n)
+                for (int c = 0; c < (axis == 1 ? axisLen : yDims[1]); ++c)
+                for (int h = 0; h < (axis == 2 ? axisLen : yDims[2]); ++h)
+                for (int w = 0; w < (axis == 3 ? axisLen : yDims[3]); ++w) {
+                    // Input index (local within this input's slice)
+                    int in_c = c, in_n = n, in_h = h, in_w = w;
+                    // Output index (add axisOff along the concat axis)
+                    int out_n = n, out_c = c, out_h = h, out_w = w;
+                    switch (axis) {
+                    case 0: out_n = n + axisOff; break;
+                    case 1: out_c = c + axisOff; break;
+                    case 2: out_h = h + axisOff; break;
+                    case 3: out_w = w + axisOff; break;
+                    }
+                    int inIdx  = ((in_n  * xDims[1] + in_c)  * xDims[2] + in_h)  * xDims[3] + in_w;
+                    int outIdx = ((out_n * yDims[1] + out_c) * yDims[2] + out_h) * yDims[3] + out_w;
+                    yf[outIdx] = xf[inIdx];
+                }
+                axisOff += axisLen;
+            }
             break;
         }
         case CUDNN_BACKEND_OPERATION_SIGNAL_DESCRIPTOR: {
@@ -1366,31 +1407,54 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
         case CUDNN_BACKEND_OPERATION_GEN_STATS_DESCRIPTOR: {
-            // Generate statistics (mean, variance) per-channel
-            uintptr_t xId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
-            uintptr_t yId = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC);
-            void* xPtr = dataPtrs[xId];
-            void* yPtr = dataPtrs[yId];
-            if (!xPtr || !yPtr) return CUDNN_STATUS_INVALID_VALUE;
+            // Generate per-channel sum ΣX and sum-of-squares ΣX² for BN_FINALIZE.
+            // Primary attrs: CUDNN_ATTR_OPERATION_GENSTATS_XDESC / SUMDESC / SQ_SUM_DESC.
+            // Fallback: legacy ACTIVATION_XDESC / ACTIVATION_YDESC (writes [mean,var]).
+            uintptr_t xId    = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_GENSTATS_XDESC);
+            if (!xId) xId    = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_XDESC);
+            uintptr_t sumId  = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_GENSTATS_SUMDESC);
+            uintptr_t sqId   = getAttrUint64(opNode, CUDNN_ATTR_OPERATION_GENSTATS_SQ_SUM_DESC);
+            uintptr_t legYId = (!sumId && !sqId)
+                ? getAttrUint64(opNode, CUDNN_ATTR_OPERATION_ACTIVATION_YDESC) : 0;
+
+            const float* xf = (xId && dataPtrs.count(xId) && dataPtrs.at(xId))
+                ? static_cast<const float*>(dataPtrs.at(xId)) : nullptr;
+            if (!xf) return CUDNN_STATUS_INVALID_VALUE;
+
             TensorDesc xDesc = buildTensorDesc(xId);
-            int N = xDesc.n, C = xDesc.c, HW = xDesc.h * xDesc.w;
-            const float* xf = static_cast<const float*>(xPtr);
-            float* meanOut = static_cast<float*>(yPtr);
-            float* varOut  = meanOut + C;
-            #ifdef _OPENMP
-            #pragma omp parallel for if (C > 4)
-            #endif
+            int N = xDesc.n, C = xDesc.c, H = xDesc.h, W = xDesc.w;
+            int HW = H * W;
+
+            std::vector<double> sumX(C, 0.0), sumXsq(C, 0.0);
             for (int c = 0; c < C; ++c) {
-                double sum = 0.0, sq = 0.0;
+                double s = 0.0, sq = 0.0;
                 for (int n = 0; n < N; ++n)
-                for (int hw = 0; hw < HW; ++hw) {
-                    float v = xf[((n * C + c) * xDesc.h + (hw / xDesc.w)) * xDesc.w + (hw % xDesc.w)];
-                    sum += v;
-                    sq += v * v;
+                for (int h = 0; h < H; ++h)
+                for (int w = 0; w < W; ++w) {
+                    double v = xf[((n * C + c) * H + h) * W + w];
+                    s += v; sq += v * v;
                 }
+                sumX[c] = s; sumXsq[c] = sq;
+            }
+
+            if (sumId && dataPtrs.count(sumId) && dataPtrs.at(sumId)) {
+                float* out = static_cast<float*>(dataPtrs.at(sumId));
+                for (int c = 0; c < C; ++c) out[c] = static_cast<float>(sumX[c]);
+            }
+            if (sqId && dataPtrs.count(sqId) && dataPtrs.at(sqId)) {
+                float* out = static_cast<float*>(dataPtrs.at(sqId));
+                for (int c = 0; c < C; ++c) out[c] = static_cast<float>(sumXsq[c]);
+            }
+            if (legYId && dataPtrs.count(legYId) && dataPtrs.at(legYId)) {
+                // Legacy path: write [mean, var] into a single flat buffer (C + C floats)
+                float* meanOut = static_cast<float*>(dataPtrs.at(legYId));
+                float* varOut  = meanOut + C;
                 double count = static_cast<double>(N * HW);
-                meanOut[c] = static_cast<float>(sum / count);
-                varOut[c]  = static_cast<float>(sq / count - meanOut[c] * meanOut[c]);
+                for (int c = 0; c < C; ++c) {
+                    float mean = static_cast<float>(sumX[c] / count);
+                    meanOut[c] = mean;
+                    varOut[c]  = static_cast<float>(sumXsq[c] / count - mean * mean);
+                }
             }
             break;
         }
