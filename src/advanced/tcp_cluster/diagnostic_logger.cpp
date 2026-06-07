@@ -5,6 +5,7 @@
 #include "vgre/advanced/tcp_cluster/internal/diagnostic_logger.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/os_backend.h"
 #include <chrono>
 #include <iomanip>
 #include <sstream>
@@ -427,7 +428,7 @@ void DiagnosticLogger::flushMetrics() {
             filename += "vgre_tcp_cluster_metrics.json";
         }
     } else {
-        filename = "/tmp/vgre_tcp_cluster_metrics.json";
+        filename = vgre::os::get_temp_dir() + "/vgre_tcp_cluster_metrics.json";
     }
     try {
         std::ofstream file(filename);

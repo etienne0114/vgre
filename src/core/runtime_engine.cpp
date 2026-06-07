@@ -171,7 +171,12 @@ VGREResult RuntimeEngine::initialize() {
 
 VGREResult RuntimeEngine::shutdown() {
   // Export profiler trace before tearing down subsystems.
-  advanced::RuntimeProfiler::instance().exportToFile("vgre_trace.json");
+  {
+    const char* tracePath = ::getenv("VGRE_TRACE_PATH");
+    std::string traceFile = tracePath ? std::string(tracePath)
+                                      : vgre::os::get_temp_dir() + "/vgre_trace.json";
+    advanced::RuntimeProfiler::instance().exportToFile(traceFile);
+  }
 
   // First, drain all pending scheduler work BEFORE acquiring our mutex.
   // This prevents deadlocks where worker threads (completing tasks)

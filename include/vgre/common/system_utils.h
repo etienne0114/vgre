@@ -99,8 +99,9 @@ inline std::string findIncludeDir() {
         if (cur.has_parent_path()) cur = cur.parent_path();
     }
 
-    // 3. Platform-specific absolute fallbacks
+    // 3. Platform-specific absolute fallbacks — check existence before returning.
 #ifdef _WIN32
+    // LOCALAPPDATA: %AppData%\Local\VGRE\include
     const char* localAppData = std::getenv("LOCALAPPDATA");
     if (localAppData) {
         std::filesystem::path p(localAppData);
@@ -110,17 +111,31 @@ inline std::string findIncludeDir() {
             return p.string();
         }
     }
-    return "C:/Program Files/VGRE/include";
+    // PROGRAMFILES: C:\Program Files\VGRE\include (system-wide install)
+    const char* progFiles = std::getenv("PROGRAMFILES");
+    if (progFiles) {
+        std::filesystem::path p(progFiles);
+        p /= "VGRE";
+        p /= "include";
+        if (std::filesystem::exists(p / "vgre/common/types.h")) {
+            return p.string();
+        }
+    }
+    return "";  // not found — caller must handle
 #elif defined(__APPLE__)
-    if (std::filesystem::exists("/usr/local/include/vgre/common/types.h")) {
-        return "/usr/local/include";
+    for (const char* prefix : {"/usr/local/include", "/opt/homebrew/include",
+                                "/opt/local/include"}) {
+        std::filesystem::path p(prefix);
+        if (std::filesystem::exists(p / "vgre/common/types.h")) return prefix;
     }
-    if (std::filesystem::exists("/opt/homebrew/include/vgre/common/types.h")) {
-        return "/opt/homebrew/include";
-    }
-    return "/usr/local/include";
+    return "";  // not found
 #else
-    return "/usr/local/include";
+    for (const char* prefix : {"/usr/local/include", "/usr/include",
+                                "/opt/local/include"}) {
+        std::filesystem::path p(prefix);
+        if (std::filesystem::exists(p / "vgre/common/types.h")) return prefix;
+    }
+    return "";  // not found
 #endif
 }
 

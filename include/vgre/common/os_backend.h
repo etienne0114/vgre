@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Platform detection
@@ -408,6 +409,39 @@ inline std::size_t get_l2_cache_size() noexcept {
         }
     }
     return kDefault;
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// vgre::os::get_temp_dir — writable per-user temporary directory.
+// Returns path WITHOUT trailing separator. Checks TMPDIR / TEMP env vars first
+// so tests and containers can redirect writes without touching /tmp.
+// ─────────────────────────────────────────────────────────────────────────────
+inline std::string get_temp_dir() noexcept {
+#if defined(_WIN32)
+    char buf[MAX_PATH + 1];
+    DWORD len = ::GetTempPathA(static_cast<DWORD>(sizeof(buf)), buf);
+    if (len > 0 && len < static_cast<DWORD>(sizeof(buf))) {
+        std::string p(buf, len);
+        while (!p.empty() && (p.back() == '\\' || p.back() == '/')) p.pop_back();
+        return p;
+    }
+    const char* tmp = ::getenv("TEMP");
+    if (!tmp || !tmp[0]) tmp = ::getenv("TMP");
+    if (tmp && tmp[0]) return std::string(tmp);
+    return "C:\\Temp";
+#else
+    const char* tmp = ::getenv("TMPDIR");
+    if (tmp && tmp[0]) {
+        std::string p(tmp);
+        while (!p.empty() && p.back() == '/') p.pop_back();
+        return p;
+    }
+#  ifdef __APPLE__
+    return "/private/tmp";
+#  else
+    return "/tmp";
+#  endif
 #endif
 }
 
