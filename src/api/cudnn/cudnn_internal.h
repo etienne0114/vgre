@@ -763,6 +763,7 @@ struct MultiHeadAttnDesc {
     int seqLen;
     int batchSize;
     float scaling;
+    const void* cachedWeights = nullptr;  // cached from most recent Forward call
 };
 
 // ── Pointwise operation modes (cudnnPointwiseMode_t) ─────────────────────────

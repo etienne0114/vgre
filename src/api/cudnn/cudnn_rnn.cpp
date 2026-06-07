@@ -276,8 +276,18 @@ static cudnnStatus_t rnn_forward(
 // ── Public forward API ─────────────────────────────────────────────────────────
 
 cudnnStatus_t cudnnGetRNNWorkspaceSize(
-    cudnnHandle_t, cudnnRNNDescriptor_t, int, cudnnTensorDescriptor_t*, size_t* s)
-{ if (!s) return CUDNN_STATUS_INVALID_VALUE; *s=0; return CUDNN_STATUS_SUCCESS; }
+    cudnnHandle_t, cudnnRNNDescriptor_t rnnDesc, int T,
+    cudnnTensorDescriptor_t* xDesc, size_t* s)
+{
+    if (!s) return CUDNN_STATUS_INVALID_VALUE;
+    if (!rnnDesc || !xDesc || T <= 0) { *s = 0; return CUDNN_STATUS_SUCCESS; }
+    auto* rd = (RNNDesc*)rnnDesc;
+    int H = rd->hiddenSize, B = ((TensorDesc*)xDesc[0])->n, nL = rd->numLayers;
+    // Workspace: nL layers × T steps × B batch × H hidden × (h_fwd + h_bwd scratch)
+    int fs = fwd_slots(rd->mode);
+    *s = static_cast<size_t>(nL) * T * B * H * fs * sizeof(float);
+    return CUDNN_STATUS_SUCCESS;
+}
 
 cudnnStatus_t cudnnGetRNNTrainingReserveSize(
     cudnnHandle_t, cudnnRNNDescriptor_t rnnDesc, int T,
