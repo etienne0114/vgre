@@ -3,6 +3,13 @@
 #include "vgre/common/logger.h"
 #include <cstdlib>
 #include <cstring>
+#if defined(_WIN32)
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  include <dbghelp.h>
+#else
+#  include <dlfcn.h>
+#endif
 
 namespace vgre {
 namespace runtime {
@@ -130,6 +137,46 @@ void CDPExecutor::deviceSynchronize() {
 } // namespace runtime
 } // namespace vgre
 
+// Resolve a function pointer to its symbol name at run-time.
+// Used as a fallback when a CDP kernel is not found by address in the
+// RuntimeEngine map (e.g., the pointer came from a different DSO).
+// Returns empty string on failure.
+static std::string cdp_resolve_symbol_name(void* fnPtr) {
+    if (!fnPtr) return "";
+#if defined(_WIN32)
+    char buf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME] = {};
+    SYMBOL_INFO* sym = reinterpret_cast<SYMBOL_INFO*>(buf);
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen   = MAX_SYM_NAME;
+    DWORD64 disp = 0;
+    if (SymFromAddr(GetCurrentProcess(),
+                    static_cast<DWORD64>(reinterpret_cast<uintptr_t>(fnPtr)),
+                    &disp, sym)) {
+        return std::string(sym->Name, sym->NameLen);
+    }
+    return "";
+#else
+    Dl_info info{};
+    if (dladdr(fnPtr, &info) && info.dli_sname && info.dli_sname[0] != '\0')
+        return std::string(info.dli_sname);
+    return "";
+#endif
+}
+
+// Strip __device_stub__ and __cuda_device__ prefixes that nvcc emits for
+// device-function stubs so we can match against the bare kernel name.
+static std::string cdp_strip_stub_prefix(const std::string& name) {
+    static const char* kPrefixes[] = {
+        "__device_stub__", "__cuda_device__", "__global__", nullptr
+    };
+    for (int i = 0; kPrefixes[i]; ++i) {
+        size_t plen = std::strlen(kPrefixes[i]);
+        if (name.size() > plen && name.compare(0, plen, kPrefixes[i]) == 0)
+            return name.substr(plen);
+    }
+    return name;
+}
+
 // ── C interface called from device-side CDP stubs ─────────────────────────────
 extern "C" {
 
@@ -149,8 +196,25 @@ void vgre_cdp_launch_device(void* kernelFn, void* paramBuf,
     auto& engine = vgre::core::RuntimeEngine::instance();
     uint64_t kid = engine.lookupKernelIdByFn(kernelFn);
     if (kid == 0) {
-        VGRE_LOG_ERROR("CDP", "cudaLaunchDevice: kernel function not registered");
-        return;
+        // Primary lookup failed — try resolving the symbol name at run-time and
+        // matching against the kernel name registry (handles cross-DSO pointers).
+        std::string symName = cdp_resolve_symbol_name(kernelFn);
+        if (!symName.empty()) {
+            std::string stripped = cdp_strip_stub_prefix(symName);
+            kid = static_cast<uint64_t>(engine.lookupKernelIdByName(stripped.c_str()));
+            if (kid != 0) {
+                VGRE_LOG_INFO("CDP",
+                    "cudaLaunchDevice: resolved kernel by name '" + stripped +
+                    "' (from symbol '" + symName + "') -> kid=" + std::to_string(kid));
+            }
+        }
+        if (kid == 0) {
+            VGRE_LOG_ERROR("CDP",
+                "cudaLaunchDevice: kernel function not registered"
+                " (ptr=" + [&]{ char buf[20]; snprintf(buf, sizeof(buf), "%p", kernelFn); return std::string(buf); }() +
+                (symName.empty() ? "" : ", sym=" + symName) + ")");
+            return;
+        }
     }
 
     vgre::runtime::CDPKernelRequest req;

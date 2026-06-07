@@ -970,6 +970,8 @@ if(WIN32)
     set_target_properties(vgre PROPERTIES
         WINDOWS_EXPORT_ALL_SYMBOLS ON
         MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    # cdp_executor.cpp uses SymFromAddr from dbghelp for kernel name resolution
+    target_link_libraries(vgre PRIVATE dbghelp)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1078,6 +1080,8 @@ if(WIN32)
     set_target_properties(vgre_cudart PROPERTIES
         WINDOWS_EXPORT_ALL_SYMBOLS ON
         MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    # cdp_executor.cpp uses SymFromAddr from dbghelp for kernel name resolution
+    target_link_libraries(vgre_cudart PRIVATE dbghelp)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
