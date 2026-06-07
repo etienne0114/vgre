@@ -185,7 +185,8 @@ vgre_err_t cudaSignalExternalSemaphoresAsync(
         if (s->efd >= 0) {
             uint64_t v = paramsArray ? paramsArray[i].fence.value : 1ULL;
             if (v == 0) v = 1;
-            (void)write(s->efd, &v, sizeof(v)); // non-blocking; ignore EAGAIN
+            ssize_t wr;
+            do { wr = write(s->efd, &v, sizeof(v)); } while (wr < 0 && errno == EINTR);
         }
 #elif defined(_WIN32)
         if (s->hEvent) SetEvent(s->hEvent);

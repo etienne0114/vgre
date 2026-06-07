@@ -7,6 +7,8 @@
 
 extern "C" {
 
+thread_local CUcontext g_current_ctx = nullptr;
+
 VGRE_PUBLIC_API
 CUresult cuInit(unsigned int flags) {
   (void)flags;

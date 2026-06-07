@@ -149,8 +149,9 @@ public:
         
         // Test bad_alloc handling
         try {
-            // Try to allocate an impossibly large amount of memory
-            size_t huge_size = SIZE_MAX;
+            // Try to allocate an impossibly large amount of memory.
+            // volatile prevents the compiler from evaluating the size at compile time.
+            volatile size_t huge_size = SIZE_MAX;
             void* ptr = std::malloc(huge_size);
             if (ptr) {
                 std::free(ptr);
@@ -334,8 +335,9 @@ public:
             std::free(aligned_ptr);
         }
         
-        // Test calloc failure
-        void* calloc_ptr = std::calloc(SIZE_MAX / 2, 2); // Likely to overflow
+        // Test calloc failure — volatile prevents compile-time overflow evaluation.
+        volatile size_t half_max = SIZE_MAX / 2;
+        void* calloc_ptr = std::calloc(half_max, 2); // Likely to overflow
         if (calloc_ptr) {
             std::free(calloc_ptr);
             std::cout << "WARNING: Overflow calloc succeeded unexpectedly" << std::endl;

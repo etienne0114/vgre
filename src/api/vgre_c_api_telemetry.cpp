@@ -705,7 +705,7 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
     } else {
         nodes[i].available = 0;
     }
-    strncpy(nodes[i].igpu_name, conn.igpu_name, sizeof(nodes[i].igpu_name) - 1);
+    snprintf(nodes[i].igpu_name, sizeof(nodes[i].igpu_name), "%s", conn.igpu_name);
 
     to_sync.push_back(nodes[i]);
   }

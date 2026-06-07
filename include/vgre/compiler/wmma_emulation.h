@@ -887,8 +887,10 @@ inline void vgre_cp_reduce_async_add_f32(float* dst, const float* src, unsigned 
         unsigned expected = a->load(std::memory_order_seq_cst);
         unsigned desired;
         do {
-            float f = src[i] + *reinterpret_cast<const float*>(&expected);
-            desired = *reinterpret_cast<const unsigned*>(&f);
+            float expected_f, f;
+            std::memcpy(&expected_f, &expected, sizeof(expected_f));
+            f = src[i] + expected_f;
+            std::memcpy(&desired, &f, sizeof(desired));
         } while (!a->compare_exchange_weak(
             expected, desired,
             std::memory_order_seq_cst, std::memory_order_seq_cst));
@@ -902,8 +904,10 @@ inline void vgre_cp_reduce_async_add_f64(double* dst, const double* src, unsigne
         unsigned long long expected = a->load(std::memory_order_seq_cst);
         unsigned long long desired;
         do {
-            double f = src[i] + *reinterpret_cast<const double*>(&expected);
-            desired = *reinterpret_cast<const unsigned long long*>(&f);
+            double expected_d, f;
+            std::memcpy(&expected_d, &expected, sizeof(expected_d));
+            f = src[i] + expected_d;
+            std::memcpy(&desired, &f, sizeof(desired));
         } while (!a->compare_exchange_weak(
             expected, desired,
             std::memory_order_seq_cst, std::memory_order_seq_cst));
@@ -917,9 +921,10 @@ inline void vgre_cp_reduce_async_min_f32(float* dst, const float* src, unsigned 
         unsigned expected = a->load(std::memory_order_seq_cst);
         unsigned desired;
         do {
-            float f = (src[i] < *reinterpret_cast<const float*>(&expected))
-                      ? src[i] : *reinterpret_cast<const float*>(&expected);
-            desired = *reinterpret_cast<const unsigned*>(&f);
+            float expected_f, f;
+            std::memcpy(&expected_f, &expected, sizeof(expected_f));
+            f = (src[i] < expected_f) ? src[i] : expected_f;
+            std::memcpy(&desired, &f, sizeof(desired));
         } while (!a->compare_exchange_weak(
             expected, desired,
             std::memory_order_seq_cst, std::memory_order_seq_cst));
@@ -933,9 +938,10 @@ inline void vgre_cp_reduce_async_max_f32(float* dst, const float* src, unsigned 
         unsigned expected = a->load(std::memory_order_seq_cst);
         unsigned desired;
         do {
-            float f = (src[i] > *reinterpret_cast<const float*>(&expected))
-                      ? src[i] : *reinterpret_cast<const float*>(&expected);
-            desired = *reinterpret_cast<const unsigned*>(&f);
+            float expected_f, f;
+            std::memcpy(&expected_f, &expected, sizeof(expected_f));
+            f = (src[i] > expected_f) ? src[i] : expected_f;
+            std::memcpy(&desired, &f, sizeof(desired));
         } while (!a->compare_exchange_weak(
             expected, desired,
             std::memory_order_seq_cst, std::memory_order_seq_cst));
