@@ -231,10 +231,11 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
   uint64_t staticFlopCount = 0;
   bool flopCountVerified = false;
   bool usesSyncthreads = false;
-  MemoryManager* rawMm = memoryManager_.get();
+  MemoryManager* rawMm = nullptr;
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    rawMm = &currentMemoryManager();
     auto irIt = kernelIRCache_.find(id);
     if (irIt != kernelIRCache_.end()) {
       kName = irIt->second.name;
@@ -246,31 +247,29 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       usesSyncthreads = irIt->second.usesSyncthreads;
     }
 
-    if (stream != 0 && currentDeviceId_ >= 0 &&
-        currentDeviceId_ < static_cast<DeviceId>(devices_.size())) {
-      (void)devices_[currentDeviceId_]->getStreamPriority(stream,
-                                                          streamPriority);
+    DeviceId devId = tlCurrentDeviceId_;
+    if (stream != 0 && devId >= 0 &&
+        devId < static_cast<DeviceId>(devices_.size())) {
+      (void)devices_[devId]->getStreamPriority(stream, streamPriority);
     }
   }
 
-  // v0.1.2 Extraordinary Sophistication: Authoritative UVM Pre-fetching
   // Proactively touch managed pointer arguments to trigger background migration
-  // before the scheduler worker thread hits the first instruction. This hides
-  // UVM page-fault latency from the execution pipeline.
+  // before the scheduler worker thread hits the first instruction.
   for (size_t i = 0; i < argTypes.size(); ++i) {
     if (argTypes[i] == ArgType::POINTER) {
       void *ptr = nullptr;
       if (i < argValues->size() && !(*argValues)[i].empty()) {
         ::memcpy(&ptr, (*argValues)[i].data(), sizeof(void*));
       }
-      if (ptr && memoryManager_->isValidHandle(ptr)) {
-          size_t sz = memoryManager_->getAllocationSize(ptr);
-          memoryManager_->memPrefetchAsync(ptr, sz, 0);
+      if (ptr && rawMm->isValidHandle(ptr)) {
+          size_t sz = rawMm->getAllocationSize(ptr);
+          rawMm->memPrefetchAsync(ptr, sz, 0);
       }
     }
   }
 
-  auto fut = scheduler_->submitStreamTask(stream,
+  auto fut = currentScheduler().submitStreamTask(stream,
                                            [exec, fn, gridDim, blockDim,
                                             safeArgs, argValues, sharedMem,
                                             argTypes, staticSharedMem, kName, gridOffset,

@@ -396,8 +396,8 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode> &nodes
                 uint64_t raw = 0;
                 memcpy(&raw, node.capturedArgs[ai].data(), sizeof(uint64_t));
                 void *ptr = reinterpret_cast<void *>(raw);
-                if (memoryManager_ && memoryManager_->isValidHandle(ptr))
-                  memBytes += memoryManager_->getAllocationSize(ptr);
+                if (!deviceMemManagers_.empty() && currentMemoryManager().isValidHandle(ptr))
+                  memBytes += currentMemoryManager().getAllocationSize(ptr);
               } else if (irIt->second.argTypes[ai] == ArgType::STRUCT) {
                 if (ai < irIt->second.argSizes.size())
                   memBytes += irIt->second.argSizes[ai] * totalThreads;
@@ -569,19 +569,23 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode> &nodes
                     std::to_string(stream));
 
   auto exec = executor_.get();
-  auto mm = memoryManager_.get();
+  MemoryManager *mm = nullptr;
+  Scheduler *sched = nullptr;
   int streamPriority = 0;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (stream != 0 && currentDeviceId_ >= 0 &&
-        currentDeviceId_ < static_cast<DeviceId>(devices_.size())) {
-      (void)devices_[currentDeviceId_]->getStreamPriority(stream, streamPriority);
+    mm = &currentMemoryManager();
+    sched = &currentScheduler();
+    DeviceId devId = tlCurrentDeviceId_;
+    if (stream != 0 && devId >= 0 &&
+        devId < static_cast<DeviceId>(devices_.size())) {
+      (void)devices_[devId]->getStreamPriority(stream, streamPriority);
     }
   }
 
   // Execute the compiled DAG in topological order within a single stream task.
   // Sequential iteration avoids scheduler deadlock; body subgraphs run inline.
-  scheduler_->submitStreamTask(
+  sched->submitStreamTask(
       stream,
       [exec, mm, compiledOps]() { executeOpsInline(*compiledOps, exec, mm); },
       streamPriority);

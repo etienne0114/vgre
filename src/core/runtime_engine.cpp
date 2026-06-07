@@ -33,6 +33,9 @@
 namespace vgre {
 namespace core {
 
+// Thread-local device binding: default to device 0.
+thread_local DeviceId RuntimeEngine::tlCurrentDeviceId_ = 0;
+
 // ── Constructor / Destructor ───────────────────────────────────────────────
 RuntimeEngine::RuntimeEngine() = default;
 RuntimeEngine::~RuntimeEngine() {
@@ -75,9 +78,11 @@ VGREResult RuntimeEngine::initialize() {
   graphManager_ = std::make_unique<GraphManager>();
 
   // Create virtual devices based on hardware resources or Environment Override.
-  // We aim for 1 virtual device per NUMA node to model real-world memory topology.
+  // VGRE_VIRTUAL_DEVICE_COUNT is the canonical env var; VGRE_DEVICE_COUNT is
+  // a legacy alias.  Both accept an integer 1..8.
   int deviceCount = 1;
-  const char *envCount = vgre_get_config("VGRE_DEVICE_COUNT");
+  const char *envCount = vgre_get_config("VGRE_VIRTUAL_DEVICE_COUNT");
+  if (!envCount) envCount = vgre_get_config("VGRE_DEVICE_COUNT");
   if (envCount) {
       deviceCount = std::atoi(envCount);
   } else {
@@ -125,32 +130,51 @@ VGREResult RuntimeEngine::initialize() {
     deviceCount = std::min(deviceCount, 16);
   }
 
+  // Safety cap: max 8 virtual devices per spec (Track H).
+  deviceCount = std::max(1, std::min(deviceCount, 8));
+
   VGRE_LOG_INFO("RuntimeEngine",
                 "Creating " + std::to_string(deviceCount) +
                     " hardware-aligned virtual devices...");
+
+  // Partition host threads equally across devices (minimum 1 per device).
+  const int totalCores = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+  const int threadsPerDevice = std::max(1, totalCores / deviceCount);
 
   for (int i = 0; i < deviceCount; ++i) {
     auto dev = std::make_unique<VirtualGPUDevice>(i);
     dev->detectHardware();
 
-    // Link Adaptive Execution Engine to real hardware metrics
     if (i == 0) {
-      // Background Ground-Truth calibration is now managed internally by
-      // AdaptiveExecutionEngine to prevent deadlocks during DLL load.
       vgre::DeviceProperties dp = dev->getProperties();
-      int cores = static_cast<int>(std::thread::hardware_concurrency());
       auto& aee = advanced::AdaptiveExecutionEngine::instance();
-      aee.updateHardwareMetrics(cores, dp.clockRate / 1000000.0, 0.0);
+      aee.updateHardwareMetrics(totalCores, dp.clockRate / 1000000.0, 0.0);
     }
     dev->createContext();
+
+    // Per-device MemoryManager: each device gets its share of the total memory.
+    const size_t devMem = devices_.empty()
+        ? dev->getProperties().totalGlobalMem
+        : (dev->getProperties().totalGlobalMem / static_cast<size_t>(deviceCount));
+    deviceMemManagers_.push_back(std::make_unique<MemoryManager>(devMem));
+
+    // Per-device Scheduler: device 0 uses the global Scheduler::instance() so
+    // that existing direct Scheduler::instance() callers still route correctly.
+    // Devices 1..N get freshly constructed schedulers with partitioned threads.
+    if (i == 0) {
+      deviceSchedulers_.push_back(&Scheduler::instance());
+    } else {
+      ownedDeviceSchedulers_.push_back(std::make_unique<Scheduler>(threadsPerDevice));
+      deviceSchedulers_.push_back(ownedDeviceSchedulers_.back().get());
+    }
+
     devices_.push_back(std::move(dev));
   }
 
-  currentDeviceId_ = 0;
+  tlCurrentDeviceId_ = 0;
 
-  // Global memory manager shared by active devices.
-  memoryManager_ = std::make_unique<MemoryManager>(
-      devices_[0]->getProperties().totalGlobalMem);
+  // scheduler_ stays pointing at the global singleton (device 0 scheduler).
+  scheduler_ = &Scheduler::instance();
 
   initialized_ = true;
 
@@ -199,11 +223,18 @@ VGREResult RuntimeEngine::shutdown() {
   vgre::advanced::TCPClusterManager::instance().shutdown();
 
   scheduler_ = nullptr;
+  deviceSchedulers_.clear();
+  // Destroy owned schedulers (devices 1..N) in reverse order so their worker
+  // threads join cleanly before any shared state is torn down.
+  for (int i = static_cast<int>(ownedDeviceSchedulers_.size()) - 1; i >= 0; --i) {
+    ownedDeviceSchedulers_[i].reset();
+  }
+  ownedDeviceSchedulers_.clear();
+  deviceMemManagers_.clear();
   executor_.reset();
   vectorEngine_.reset();
   translator_.reset();
   parser_.reset();
-  memoryManager_.reset();
   devices_.clear();
 
   kernelCache_.clear();
@@ -216,7 +247,7 @@ VGREResult RuntimeEngine::shutdown() {
   lastCapturedNodeId_.clear();
   captureSeedDeps_.clear();
   nextKernelId_ = 1;
-  currentDeviceId_ = 0;
+  tlCurrentDeviceId_ = 0;
   initialized_ = false;
 
   VGRE_LOG_INFO("RuntimeEngine", "Shutdown complete");
@@ -235,19 +266,38 @@ int RuntimeEngine::getDeviceCount() const {
 }
 
 VGREResult RuntimeEngine::setDevice(DeviceId id) {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (id < 0 || id >= static_cast<DeviceId>(devices_.size())) {
-    VGRE_LOG_ERROR("RuntimeEngine", "Invalid device ID: " + std::to_string(id) + " (Device Count: " + std::to_string(devices_.size()) + ")");
-    return VGREResult::ERR_INVALID_DEVICE;
+  // Validate under the lock, then write to the thread-local.
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (id < 0 || id >= static_cast<DeviceId>(devices_.size())) {
+      VGRE_LOG_ERROR("RuntimeEngine",
+          "Invalid device ID: " + std::to_string(id) +
+          " (Device Count: " + std::to_string(devices_.size()) + ")");
+      return VGREResult::ERR_INVALID_DEVICE;
+    }
   }
-  currentDeviceId_ = id;
-  VGRE_LOG_DEBUG("RuntimeEngine", "Switched to device " + std::to_string(id));
+  tlCurrentDeviceId_ = id;
+  VGRE_LOG_DEBUG("RuntimeEngine", "Thread bound to device " + std::to_string(id));
   return VGREResult::SUCCESS;
 }
 
 DeviceId RuntimeEngine::getDeviceId() const {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  return currentDeviceId_;
+  return tlCurrentDeviceId_;
+}
+
+// ── Per-device sub-system access ───────────────────────────────────────────
+Scheduler &RuntimeEngine::currentScheduler() {
+  DeviceId id = tlCurrentDeviceId_;
+  if (id < 0 || id >= static_cast<DeviceId>(deviceSchedulers_.size()))
+    id = 0;
+  return *deviceSchedulers_[static_cast<size_t>(id)];
+}
+
+MemoryManager &RuntimeEngine::currentMemoryManager() {
+  DeviceId id = tlCurrentDeviceId_;
+  if (id < 0 || id >= static_cast<DeviceId>(deviceMemManagers_.size()))
+    id = 0;
+  return *deviceMemManagers_[static_cast<size_t>(id)];
 }
 
 VGREResult RuntimeEngine::getDeviceProperties(DeviceId id,
@@ -563,15 +613,14 @@ VGREResult RuntimeEngine::streamSynchronize(StreamId stream) {
   VirtualGPUDevice *dev = nullptr;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!initialized_ || !scheduler_)
+    if (!initialized_ || deviceSchedulers_.empty())
       return VGREResult::ERR_NOT_INITIALIZED;
-    sched = scheduler_;
+    sched = &currentScheduler();
     if (stream != 0) {
-      if (currentDeviceId_ < 0 ||
-          currentDeviceId_ >= static_cast<DeviceId>(devices_.size())) {
+      DeviceId id = tlCurrentDeviceId_;
+      if (id < 0 || id >= static_cast<DeviceId>(devices_.size()))
         return VGREResult::ERR_INVALID_DEVICE;
-      }
-      dev = devices_[currentDeviceId_].get();
+      dev = devices_[id].get();
     }
   }
   if (stream != 0) {
@@ -586,10 +635,10 @@ VGREResult RuntimeEngine::malloc(size_t size, MemoryHandle &outHandle) {
   DeviceId deviceId = 0;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!initialized_ || !memoryManager_)
+    if (!initialized_ || deviceMemManagers_.empty())
       return VGREResult::ERR_NOT_INITIALIZED;
-    mm = memoryManager_.get();
-    deviceId = currentDeviceId_;
+    mm = &currentMemoryManager();
+    deviceId = tlCurrentDeviceId_;
   }
   return mm->allocate(size, outHandle, deviceId);
 }
@@ -597,34 +646,31 @@ VGREResult RuntimeEngine::malloc(size_t size, MemoryHandle &outHandle) {
 VGREResult RuntimeEngine::mallocManaged(size_t size, MemoryHandle &outHandle,
                                         unsigned int flags) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (!initialized_)
+  if (!initialized_ || deviceMemManagers_.empty())
     return VGREResult::ERR_NOT_INITIALIZED;
-
-  return memoryManager_->allocateManaged(size, outHandle, currentDeviceId_,
-                                         flags);
+  return currentMemoryManager().allocateManaged(size, outHandle,
+                                                tlCurrentDeviceId_, flags);
 }
 
 VGREResult RuntimeEngine::deviceCanAccessPeer(DeviceId device,
                                               DeviceId peerDevice,
                                               int *canAccess) {
-  MemoryManager *mm = nullptr;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!initialized_ || !memoryManager_)
+    if (!initialized_ || deviceMemManagers_.empty())
       return VGREResult::ERR_NOT_INITIALIZED;
     if (device < 0 || peerDevice < 0 ||
         device >= static_cast<DeviceId>(devices_.size()) ||
         peerDevice >= static_cast<DeviceId>(devices_.size())) {
       return VGREResult::ERR_INVALID_DEVICE;
     }
-    mm = memoryManager_.get();
   }
   if (!canAccess)
     return VGREResult::ERR_INVALID_VALUE;
 
-  // Virtual devices in the same process can always "technically" access each
-  // other, but we enforce specific hardware-aware peer access rules.
-  *canAccess = mm->canAccessPeer(device, peerDevice) ? 1 : 0;
+  // All virtual devices in the same process share address space — P2P is
+  // always available (same as cudaDeviceCanAccessPeer returning 1).
+  *canAccess = 1;
   return VGREResult::SUCCESS;
 }
 
@@ -633,15 +679,15 @@ VGREResult RuntimeEngine::deviceEnablePeerAccess(DeviceId peerDevice) {
   DeviceId current = 0;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!initialized_ || !memoryManager_)
+    if (!initialized_ || deviceMemManagers_.empty())
       return VGREResult::ERR_NOT_INITIALIZED;
-    current = currentDeviceId_;
+    current = tlCurrentDeviceId_;
     if (current < 0 || current >= static_cast<DeviceId>(devices_.size()) ||
         peerDevice < 0 ||
         peerDevice >= static_cast<DeviceId>(devices_.size())) {
       return VGREResult::ERR_INVALID_DEVICE;
     }
-    mm = memoryManager_.get();
+    mm = &currentMemoryManager();
   }
   return mm->enablePeerAccess(current, peerDevice);
 }
@@ -651,15 +697,15 @@ VGREResult RuntimeEngine::deviceDisablePeerAccess(DeviceId peerDevice) {
   DeviceId current = 0;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!initialized_ || !memoryManager_)
+    if (!initialized_ || deviceMemManagers_.empty())
       return VGREResult::ERR_NOT_INITIALIZED;
-    current = currentDeviceId_;
+    current = tlCurrentDeviceId_;
     if (current < 0 || current >= static_cast<DeviceId>(devices_.size()) ||
         peerDevice < 0 ||
         peerDevice >= static_cast<DeviceId>(devices_.size())) {
       return VGREResult::ERR_INVALID_DEVICE;
     }
-    mm = memoryManager_.get();
+    mm = &currentMemoryManager();
   }
   return mm->disablePeerAccess(current, peerDevice);
 }
@@ -968,20 +1014,20 @@ VGREResult RuntimeEngine::graphUpdateMemcpyNode(GraphId graph, uint64_t nodeId,
 // ── Sub-system access ──────────────────────────────────────────────────────
 MemoryManager &RuntimeEngine::getMemoryManager() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (!initialized_ || !memoryManager_) {
+  if (!initialized_ || deviceMemManagers_.empty()) {
     throw VGREException(VGREResult::ERR_NOT_INITIALIZED,
                         "Runtime engine is not initialized");
   }
-  return *memoryManager_;
+  return currentMemoryManager();
 }
 
 Scheduler &RuntimeEngine::getScheduler() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (!initialized_ || !scheduler_) {
+  if (!initialized_ || deviceSchedulers_.empty()) {
     throw VGREException(VGREResult::ERR_NOT_INITIALIZED,
                         "Runtime engine is not initialized");
   }
-  return *scheduler_;
+  return currentScheduler();
 }
 
 VirtualGPUDevice &RuntimeEngine::getDevice() {
@@ -990,11 +1036,11 @@ VirtualGPUDevice &RuntimeEngine::getDevice() {
     throw VGREException(VGREResult::ERR_NOT_INITIALIZED,
                         "Runtime engine is not initialized");
   }
-  if (currentDeviceId_ < 0 ||
-      currentDeviceId_ >= static_cast<DeviceId>(devices_.size())) {
+  DeviceId id = tlCurrentDeviceId_;
+  if (id < 0 || id >= static_cast<DeviceId>(devices_.size())) {
     throw VGREException(VGREResult::ERR_INVALID_DEVICE, "Invalid device ID");
   }
-  return *devices_[currentDeviceId_];
+  return *devices_[id];
 }
 
 VirtualGPUDevice &RuntimeEngine::getDevice(DeviceId id) {
