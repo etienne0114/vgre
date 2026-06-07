@@ -178,6 +178,16 @@ cusparseStatus_t cusparseCreateCoo(cusparseSpMatDescr_t *spMatDescr,
                                     cusparseIndexBase_t idxBase,
                                     cudaDataType_t valueType);
 
+// ── ELL (ELLPACK) sparse matrix descriptor ────────────────────────────────────
+// ellColInd and ellValue are (rows × ellWidth) arrays stored row-major.
+// Padding column index: -1 for CUSPARSE_INDEX_BASE_ZERO, 0 for ONE.
+cusparseStatus_t cusparseCreateEll(cusparseSpMatDescr_t *spMatDescr,
+                                    int64_t rows, int64_t cols, int64_t ellWidth,
+                                    void *ellColInd, void *ellValue,
+                                    cusparseIndexType_t ellIdxType,
+                                    cusparseIndexBase_t idxBase,
+                                    cudaDataType_t valueType);
+
 // ── CSC sparse matrix descriptor ─────────────────────────────────────────────
 cusparseStatus_t cusparseCreateCsc(cusparseSpMatDescr_t *spMatDescr,
                                     int64_t rows, int64_t cols, int64_t nnz,
