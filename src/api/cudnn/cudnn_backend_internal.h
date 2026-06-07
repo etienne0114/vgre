@@ -250,7 +250,19 @@ enum cudnnBackendAttributeName_t {
     CUDNN_ATTR_OPERATION_RNN_HXDESC              = 735, // initial hidden-state tensor ID (nullable)
     CUDNN_ATTR_OPERATION_RNN_HYDESC              = 736, // final hidden-state tensor ID (nullable)
     CUDNN_ATTR_OPERATION_RNN_CXDESC              = 737, // initial cell-state tensor ID (LSTM, nullable)
-    CUDNN_ATTR_OPERATION_RNN_CYDESC              = 738  // final cell-state tensor ID (LSTM, nullable)
+    CUDNN_ATTR_OPERATION_RNN_CYDESC              = 738, // final cell-state tensor ID (LSTM, nullable)
+
+    // CONCAT operation attributes (CUDNN_BACKEND_OPERATION_CONCAT_DESCRIPTOR)
+    // Axis-aware concatenation of N input tensors along the specified dimension.
+    CUDNN_ATTR_OPERATION_CONCAT_XDESCS  = 800, // list of N input tensor IDs (uint64 array)
+    CUDNN_ATTR_OPERATION_CONCAT_YDESC   = 801, // output tensor ID
+    CUDNN_ATTR_OPERATION_CONCAT_AXIS    = 802, // int64: axis 0=N, 1=C, 2=H, 3=W
+
+    // GEN_STATS operation attributes (CUDNN_BACKEND_OPERATION_GEN_STATS_DESCRIPTOR)
+    // Generates per-channel sum ΣX and sum-of-squares ΣX² for use by BN_FINALIZE.
+    CUDNN_ATTR_OPERATION_GENSTATS_XDESC       = 810, // input tensor ID
+    CUDNN_ATTR_OPERATION_GENSTATS_SUMDESC     = 811, // ΣX output tensor ID  [1,C,1,1]
+    CUDNN_ATTR_OPERATION_GENSTATS_SQ_SUM_DESC = 812  // ΣX² output tensor ID [1,C,1,1]
 };
 
 struct BackendNode {
