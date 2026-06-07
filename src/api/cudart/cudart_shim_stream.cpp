@@ -12,6 +12,7 @@
 #include "vgre/common/elf_reader.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
+#include "vgre/core/texture_manager.h"
 #include "vgre/core/virtual_gpu_device.h"
 #include <cstdio>
 #include <cstring>
@@ -328,10 +329,19 @@ cudaError_t cudaArrayGetMemoryRequirements(
     int           device)
 {
     if (!memRequirements) return cudaErrorInvalidValue;
-    (void)array; (void)device;
-    // VGRE arrays are plain host memory; report a 4 KiB minimum size and
-    // 512-byte alignment (matching the CUDA driver's documented minimum).
-    memRequirements->size      = 4096;
+    (void)device;
+    // cudaArray_t is stored as a TextureId cast to pointer.
+    auto texId = static_cast<vgre::core::TextureId>(reinterpret_cast<uintptr_t>(array));
+    vgre::core::TextureManager::ArrayInfo info{};
+    size_t byteSize = 4096;  // minimum if lookup fails
+    if (array && vgre::core::TextureManager::instance().getCudaArrayInfo(texId, info)) {
+        size_t elems = (info.width  > 0 ? info.width  : 1) *
+                       (info.height > 0 ? info.height : 1) *
+                       (info.depth  > 0 ? info.depth  : 1);
+        byteSize = elems * (info.elementSize > 0 ? info.elementSize : 4);
+        if (byteSize < 512) byteSize = 512;
+    }
+    memRequirements->size      = byteSize;
     memRequirements->alignment = 512;
     memset(memRequirements->reserved, 0, sizeof(memRequirements->reserved));
     return cudaSuccess;
@@ -343,8 +353,20 @@ cudaError_t cudaMipmappedArrayGetMemoryRequirements(
     int                   device)
 {
     if (!memRequirements) return cudaErrorInvalidValue;
-    (void)mipArray; (void)device;
-    memRequirements->size      = 4096;
+    (void)device;
+    auto texId = static_cast<vgre::core::TextureId>(reinterpret_cast<uintptr_t>(mipArray));
+    vgre::core::TextureManager::ArrayInfo info{};
+    size_t byteSize = 4096;
+    if (mipArray && vgre::core::TextureManager::instance().getCudaArrayInfo(texId, info)) {
+        // Mip chain total: level 0 + halved levels; approximate as 2× level 0 (geometric series ≤ 2×).
+        size_t level0 = (info.width  > 0 ? info.width  : 1) *
+                        (info.height > 0 ? info.height : 1) *
+                        (info.depth  > 0 ? info.depth  : 1) *
+                        (info.elementSize > 0 ? info.elementSize : 4);
+        byteSize = level0 * 2;
+        if (byteSize < 512) byteSize = 512;
+    }
+    memRequirements->size      = byteSize;
     memRequirements->alignment = 512;
     memset(memRequirements->reserved, 0, sizeof(memRequirements->reserved));
     return cudaSuccess;

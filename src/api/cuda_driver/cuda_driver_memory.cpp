@@ -107,7 +107,8 @@ struct CUmemoryPool_st {
 
 static CUmemoryPool_st g_defaultPool;
 static std::mutex       g_poolMu;
-static std::unordered_map<CUdeviceptr, CUmemoryPool_st*> g_ptrToPool;  // Track which pool owns each allocation
+static std::unordered_map<CUdeviceptr, CUmemoryPool_st*> g_ptrToPool;
+static std::unordered_map<CUdeviceptr, size_t>           g_ptrToSize;
 
 } // namespace
 
@@ -135,6 +136,7 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream /*hStream*
   if (err == vgre::api::cudaSuccess) {
     std::lock_guard<std::mutex> lk(g_poolMu);
     g_ptrToPool[*dptr] = &g_defaultPool;
+    g_ptrToSize[*dptr] = bytesize;
     g_defaultPool.usedMemCurrent += bytesize;
     g_defaultPool.reservedMemCurrent += bytesize;
     if (g_defaultPool.usedMemCurrent > g_defaultPool.usedMemHigh) {
@@ -148,18 +150,20 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream /*hStream*
 }
 
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream /*hStream*/) {
-  std::lock_guard<std::mutex> lk(g_poolMu);
-  auto it = g_ptrToPool.find(dptr);
-  if (it != g_ptrToPool.end()) {
-    CUmemoryPool_st* pool = it->second;
-    // Estimate allocation size (not tracked precisely in this implementation)
-    // Use a reasonable default estimate for tracking purposes
-    size_t estimatedSize = 4096;  // Conservative estimate
-    pool->usedMemCurrent = (pool->usedMemCurrent > estimatedSize) ? pool->usedMemCurrent - estimatedSize : 0;
-    pool->reservedMemCurrent = (pool->reservedMemCurrent > estimatedSize) ? pool->reservedMemCurrent - estimatedSize : 0;
-    g_ptrToPool.erase(it);
+  size_t allocSize = 0;
+  {
+    std::lock_guard<std::mutex> lk(g_poolMu);
+    auto it = g_ptrToPool.find(dptr);
+    if (it != g_ptrToPool.end()) {
+      CUmemoryPool_st* pool = it->second;
+      auto szIt = g_ptrToSize.find(dptr);
+      allocSize = (szIt != g_ptrToSize.end()) ? szIt->second : 0;
+      pool->usedMemCurrent     = (pool->usedMemCurrent     > allocSize) ? pool->usedMemCurrent     - allocSize : 0;
+      pool->reservedMemCurrent = (pool->reservedMemCurrent > allocSize) ? pool->reservedMemCurrent - allocSize : 0;
+      g_ptrToPool.erase(it);
+      g_ptrToSize.erase(dptr);
+    }
   }
-  lk.~lock_guard();  // Unlock before calling free
   auto err = vgre::api::CUDAInterceptor::instance().free(dptr);
   return toCU(err);
 }

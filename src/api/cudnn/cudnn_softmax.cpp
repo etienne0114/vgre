@@ -1,8 +1,15 @@
 // cuDNN softmax forward + backward
+//
+// CUDNN_SOFTMAX_FAST (0) and CUDNN_SOFTMAX_ACCURATE (1) both use max-subtracted
+// exp/sum on CPU — the GPU-FAST skips max subtraction to avoid a global reduce,
+// but on CPU the overhead is negligible and max subtraction prevents overflow.
+// CUDNN_SOFTMAX_LOG (2): log-softmax = x_i - max - log(sum(exp(x-max))).
 
 #include "cudnn_internal.h"
 
 #include "vgre/common/openmp_helper.h"
+#include <algorithm>
+#include <cmath>
 
 extern "C" {
 
@@ -18,6 +25,10 @@ cudnnStatus_t cudnnSoftmaxForward(cudnnHandle_t,
     float a=*(const float*)alpha, b=*(const float*)beta;
     const float* xf=(const float*)x; float* yf=(float*)y;
 
+    // mode=0: CUDNN_SOFTMAX_MODE_INSTANCE (softmax over all C*H*W per sample)
+    // mode=1: CUDNN_SOFTMAX_MODE_CHANNEL  (softmax over C per spatial position)
+    const bool doLog = (algo == 2);
+
     if (mode == 0) {
         int VEC = C * HW;
         #ifdef _OPENMP
@@ -29,7 +40,12 @@ cudnnStatus_t cudnnSoftmaxForward(cudnnHandle_t,
             float maxv = *std::max_element(row, row+VEC);
             float sum = 0.f;
             for (int i=0; i<VEC; ++i) sum += expf(row[i] - maxv);
-            for (int i=0; i<VEC; ++i) out[i] = a*(expf(row[i]-maxv)/sum) + b*out[i];
+            if (doLog) {
+                float logSum = maxv + logf(sum);
+                for (int i=0; i<VEC; ++i) out[i] = a*(row[i] - logSum) + b*out[i];
+            } else {
+                for (int i=0; i<VEC; ++i) out[i] = a*(expf(row[i]-maxv)/sum) + b*out[i];
+            }
         }
     } else {
         #ifdef _OPENMP
@@ -41,13 +57,21 @@ cudnnStatus_t cudnnSoftmaxForward(cudnnHandle_t,
             for (int c=1; c<C; ++c) maxv = std::max(maxv, xf[n*C*HW + c*HW + hw]);
             float sum = 0.f;
             for (int c=0; c<C; ++c) sum += expf(xf[n*C*HW + c*HW + hw] - maxv);
-            for (int c=0; c<C; ++c) {
-                float v = expf(xf[n*C*HW + c*HW + hw] - maxv) / sum;
-                yf[n*C*HW + c*HW + hw] = a*v + b*yf[n*C*HW + c*HW + hw];
+            if (doLog) {
+                float logSum = maxv + logf(sum);
+                for (int c=0; c<C; ++c) {
+                    int idx = n*C*HW + c*HW + hw;
+                    yf[idx] = a*(xf[idx] - logSum) + b*yf[idx];
+                }
+            } else {
+                for (int c=0; c<C; ++c) {
+                    int idx = n*C*HW + c*HW + hw;
+                    float v = expf(xf[idx] - maxv) / sum;
+                    yf[idx] = a*v + b*yf[idx];
+                }
             }
         }
     }
-    (void)algo;
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -74,18 +98,31 @@ cudnnStatus_t cudnnSoftmaxBackward(cudnnHandle_t,
     const float* dyf=(const float*)dy;
     float* dxf=(float*)dx;
 
+    // For log-softmax backward: dx_i = dy_i - exp(y_i) * sum(dy)
+    // For regular softmax backward (FAST or ACCURATE): dx_i = y_i*(dy_i - sum(dy_j*y_j))
+    const bool doLog = (algo == 2);
+
     if (mode == 0) {
         int VEC = C * HW;
         #ifdef _OPENMP
         #pragma omp parallel for if (N > 4)
         #endif
         for (int n=0; n<N; ++n) {
-            float sum_dy_y = 0.f;
-            for (int i=0; i<VEC; ++i)
-                sum_dy_y += dyf[n*VEC+i] * yf[n*VEC+i];
-            for (int i=0; i<VEC; ++i) {
-                float v = yf[n*VEC+i] * (dyf[n*VEC+i] - sum_dy_y);
-                dxf[n*VEC+i] = a*v + b*dxf[n*VEC+i];
+            if (doLog) {
+                float sum_dy = 0.f;
+                for (int i=0; i<VEC; ++i) sum_dy += dyf[n*VEC+i];
+                for (int i=0; i<VEC; ++i) {
+                    float v = dyf[n*VEC+i] - expf(yf[n*VEC+i]) * sum_dy;
+                    dxf[n*VEC+i] = a*v + b*dxf[n*VEC+i];
+                }
+            } else {
+                float sum_dy_y = 0.f;
+                for (int i=0; i<VEC; ++i)
+                    sum_dy_y += dyf[n*VEC+i] * yf[n*VEC+i];
+                for (int i=0; i<VEC; ++i) {
+                    float v = yf[n*VEC+i] * (dyf[n*VEC+i] - sum_dy_y);
+                    dxf[n*VEC+i] = a*v + b*dxf[n*VEC+i];
+                }
             }
         }
     } else {
@@ -94,19 +131,28 @@ cudnnStatus_t cudnnSoftmaxBackward(cudnnHandle_t,
         #endif
         for (int n=0; n<N; ++n)
         for (int hw=0; hw<HW; ++hw) {
-            float sum_dy_y = 0.f;
-            for (int c=0; c<C; ++c) {
-                int idx = n*C*HW + c*HW + hw;
-                sum_dy_y += dyf[idx] * yf[idx];
-            }
-            for (int c=0; c<C; ++c) {
-                int idx = n*C*HW + c*HW + hw;
-                float v = yf[idx] * (dyf[idx] - sum_dy_y);
-                dxf[idx] = a*v + b*dxf[idx];
+            if (doLog) {
+                float sum_dy = 0.f;
+                for (int c=0; c<C; ++c) sum_dy += dyf[n*C*HW + c*HW + hw];
+                for (int c=0; c<C; ++c) {
+                    int idx = n*C*HW + c*HW + hw;
+                    float v = dyf[idx] - expf(yf[idx]) * sum_dy;
+                    dxf[idx] = a*v + b*dxf[idx];
+                }
+            } else {
+                float sum_dy_y = 0.f;
+                for (int c=0; c<C; ++c) {
+                    int idx = n*C*HW + c*HW + hw;
+                    sum_dy_y += dyf[idx] * yf[idx];
+                }
+                for (int c=0; c<C; ++c) {
+                    int idx = n*C*HW + c*HW + hw;
+                    float v = yf[idx] * (dyf[idx] - sum_dy_y);
+                    dxf[idx] = a*v + b*dxf[idx];
+                }
             }
         }
     }
-    (void)algo;
     return CUDNN_STATUS_SUCCESS;
 }
 

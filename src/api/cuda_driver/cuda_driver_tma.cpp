@@ -63,10 +63,16 @@ CUresult cuTensorMapEncodeTiled(
         return CUDA_ERROR_INVALID_VALUE;
     if (tensorRank < 1 || tensorRank > 5)
         return CUDA_ERROR_INVALID_VALUE;
+    // cuTensorMap requires all elementStrides == 1 (CUDA limitation as of SM90).
+    if (elementStrides) {
+        for (unsigned i = 0; i < tensorRank; ++i) {
+            if (elementStrides[i] != 1)
+                return CUDA_ERROR_INVALID_VALUE;
+        }
+    }
 
     memset(tensorMap, 0, sizeof(VgreTMADescriptor));
 
-    (void)elementStrides; // per-dim element strides not modelled in CPU emulation
     tensorMap->baseAddr  = globalAddress;
     tensorMap->elemBytes = tmaElemBytes(tensorDataType);
     tensorMap->rank      = tensorRank;
@@ -123,7 +129,12 @@ CUresult cuTensorMapEncodeIm2col(
     if (tensorRank < 3 || tensorRank > 5)
         return CUDA_ERROR_INVALID_VALUE;
 
-    (void)elementStrides; // per-dim element strides not modelled in CPU emulation
+    if (elementStrides) {
+        for (unsigned i = 0; i < tensorRank; ++i) {
+            if (elementStrides[i] != 1)
+                return CUDA_ERROR_INVALID_VALUE;
+        }
+    }
     memset(tensorMap, 0, sizeof(VgreTMADescriptor));
 
     tensorMap->baseAddr  = globalAddress;
