@@ -1,6 +1,9 @@
 #include "vgre/api/nccl_internal.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/os_backend.h"
+#include <algorithm>
 #include <cstdlib>
+#include <thread>
 
 // Algorithm thresholds (bytes):
 //   ≤ kTreeThreshold : flat barrier (latency-optimal, O(1) sync rounds)
@@ -8,6 +11,92 @@
 //   > kRingThreshold : ring allreduce (bandwidth-optimal for large tensors)
 static constexpr size_t kTreeThreshold = 64ULL  * 1024;        // 64 KB
 static constexpr size_t kRingThreshold = 1024ULL * 1024;       // 1 MB
+
+// ── Tensor-Parallel Lock-Free AllReduce ───────────────────────────────────────
+// Called when VGRE_TP_DEGREE is set and all ranks are in the same process.
+// Uses atomic_thread_fence(acq_rel) between stages instead of condvar waits,
+// avoiding kernel-mode wakeups on same-process tensor-parallel workloads.
+//
+// Algorithm (two-phase: reduce-scatter then all-gather):
+//   Phase 1 barrier: all ranks publish sendbuff/recvbuff pointers (release) and
+//                    spin-wait on tp_gen for the last rank to bump it (acquire).
+//   Reduce-scatter: each rank independently reduces its owned chunk [rank*chunk, (rank+1)*chunk)
+//                   from all ranks' sendbuffs into its own recvbuff slice.
+//   Phase 2 barrier: spin-wait until all chunk reductions are done.
+//   All-gather: each rank copies every other rank's reduced chunk from that rank's
+//               recvbuff slice into its own recvbuff.
+static ncclResult_t tp_ring_allreduce(const void* sendbuff, void* recvbuff, size_t count,
+                                       ncclDataType_t datatype, ncclRedOp_t op, ncclComm* c) {
+    auto& st    = *c->state;
+    const int N = st.nranks;
+    const int R = c->rank;
+    const size_t esz   = nccl_elem_size(datatype);
+    const size_t chunk = (count + N - 1) / N;
+
+    // ── Phase 1: publish buffers, barrier ─────────────────────────────────
+    st.tp_sendbufs[R].store(reinterpret_cast<uintptr_t>(sendbuff), std::memory_order_release);
+    st.tp_recvbufs[R].store(reinterpret_cast<uintptr_t>(recvbuff), std::memory_order_release);
+    std::atomic_thread_fence(std::memory_order_acq_rel);
+
+    const int gen1 = st.tp_gen.load(std::memory_order_acquire);
+    if (st.tp_arrived.fetch_add(1, std::memory_order_acq_rel) + 1 == N) {
+        st.tp_arrived.store(0, std::memory_order_relaxed);
+        st.tp_gen.store(gen1 + 1, std::memory_order_release);
+    } else {
+        while (st.tp_gen.load(std::memory_order_acquire) == gen1)
+            std::this_thread::yield();
+    }
+    // All pointer stores by all ranks are now visible.
+    std::atomic_thread_fence(std::memory_order_acquire);
+
+    // ── Reduce-scatter: each rank reduces its owned chunk ─────────────────
+    const size_t my_start = R * chunk;
+    const size_t my_end   = std::min(my_start + chunk, count);
+    const size_t my_len   = (my_end > my_start) ? my_end - my_start : 0UL;
+
+    if (my_len > 0) {
+        uint8_t* out = static_cast<uint8_t*>(recvbuff) + my_start * esz;
+        // Initialise output from this rank's own slice
+        memcpy(out, static_cast<const uint8_t*>(sendbuff) + my_start * esz, my_len * esz);
+        // Accumulate slices from all other ranks
+        for (int r = 0; r < N; ++r) {
+            if (r == R) continue;
+            const uint8_t* src = reinterpret_cast<const uint8_t*>(
+                st.tp_sendbufs[r].load(std::memory_order_relaxed)) + my_start * esz;
+            apply_reduce(out, src, my_len, datatype, op);
+        }
+        if (op == ncclAvg)
+            scale_avg(out, my_len, datatype, N);
+    }
+
+    // ── Phase 2: barrier after reduce-scatter ─────────────────────────────
+    const int gen2 = st.tp_gen.load(std::memory_order_acquire);
+    if (st.tp_arrived.fetch_add(1, std::memory_order_acq_rel) + 1 == N) {
+        st.tp_arrived.store(0, std::memory_order_relaxed);
+        st.tp_gen.store(gen2 + 1, std::memory_order_release);
+    } else {
+        while (st.tp_gen.load(std::memory_order_acquire) == gen2)
+            std::this_thread::yield();
+    }
+    std::atomic_thread_fence(std::memory_order_acquire);
+
+    // ── All-gather: copy each rank's fully-reduced chunk to our recvbuff ──
+    for (int r = 0; r < N; ++r) {
+        if (r == R) continue;
+        const size_t r_start = r * chunk;
+        const size_t r_end   = std::min(r_start + chunk, count);
+        const size_t r_len   = (r_end > r_start) ? r_end - r_start : 0UL;
+        if (r_len == 0) continue;
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(
+            st.tp_recvbufs[r].load(std::memory_order_relaxed)) + r_start * esz;
+        memcpy(static_cast<uint8_t*>(recvbuff) + r_start * esz, src, r_len * esz);
+    }
+
+    VGRE_LOG_DEBUG("NCCL", "tp_ring_allreduce: rank=" + std::to_string(R) +
+                   " count=" + std::to_string(count));
+    return ncclSuccess;
+}
+
 extern "C" {
 
 static ncclResult_t ring_allreduce(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm*);
@@ -22,6 +111,16 @@ ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
                             ncclComm_t comm, void* /*stream*/) {
     if (!comm || !sendbuff || !recvbuff) return ncclInvalidArgument;
     auto* c = static_cast<ncclComm*>(comm);
+
+    // Tensor-parallel same-process fast path.
+    // Active when VGRE_TP_DEGREE is set, all ranks are in this process
+    // (creator_pid == getpid()), and nranks does not exceed tp_degree.
+    // Bypasses TCPCluster and condvar — uses atomic fence barriers only.
+    if (c->state->tp_degree > 0 &&
+        c->nranks <= c->state->tp_degree &&
+        c->state->creator_pid == vgre::os::getpid()) {
+        return tp_ring_allreduce(sendbuff, recvbuff, count, datatype, op, c);
+    }
 
     // Multi-node: if TCPCluster is active with remote peers, route through it
     // for true distributed allReduce (Sum, Prod, Max, Min, Avg).
