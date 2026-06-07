@@ -181,7 +181,60 @@ enum cudnnBackendAttributeName_t {
     CUDNN_ATTR_OPERATION_RNG_YDESC               = 720, // output tensor desc
     CUDNN_ATTR_OPERATION_RNG_SEED                = 721, // uint64 seed for Philox4x32
     CUDNN_ATTR_OPERATION_RNG_DIST                = 722, // 0=uniform[0,1), 1=normal(0,1), 2=Bernoulli
-    CUDNN_ATTR_OPERATION_RNG_BERNOULLI_PROB      = 723  // keep probability for Bernoulli (float)
+    CUDNN_ATTR_OPERATION_RNG_BERNOULLI_PROB      = 723, // keep probability for Bernoulli (float)
+
+    // BN_BWD_WEIGHTS operation attributes
+    // (CUDNN_BACKEND_OPERATION_BN_BWD_WEIGHTS_DESCRIPTOR)
+    // Computes dγ and dβ (weight gradients) for batch normalization backward.
+    // Also optionally computes dx (data gradient) for fused conv+BN backward.
+    // Uses saved mean and inv-std from the matching forward training pass.
+    CUDNN_ATTR_BN_BWD_WEIGHTS_SCALE_DESC    = 760, // tensor: γ [1,C,1,1]
+    CUDNN_ATTR_BN_BWD_WEIGHTS_MEAN_DESC     = 761, // tensor: saved batch mean [1,C,1,1]
+    CUDNN_ATTR_BN_BWD_WEIGHTS_INVSTD_DESC   = 762, // tensor: saved batch inv-std [1,C,1,1]
+    CUDNN_ATTR_BN_BWD_WEIGHTS_X_DESC        = 763, // tensor: forward input x [N,C,H,W]
+    CUDNN_ATTR_BN_BWD_WEIGHTS_DY_DESC       = 764, // tensor: upstream gradient dy [N,C,H,W]
+    CUDNN_ATTR_BN_BWD_WEIGHTS_DX_DESC       = 765, // tensor: data gradient dx out [N,C,H,W]
+    CUDNN_ATTR_BN_BWD_WEIGHTS_DSCALE_DESC   = 766, // tensor: dγ output [1,C,1,1]
+    CUDNN_ATTR_BN_BWD_WEIGHTS_DBIAS_DESC    = 767, // tensor: dβ output [1,C,1,1]
+    CUDNN_ATTR_BN_BWD_WEIGHTS_EPSILON       = 768, // float: epsilon (must match forward)
+
+    // BN_FINALIZE_STATISTICS operation attributes
+    // (CUDNN_BACKEND_OPERATION_BN_FINALIZE_STATISTICS_DESCRIPTOR)
+    // Mirrors the cuDNN v8 backend attribute set for the finalize phase.
+    // After the per-GPU sum/sum-of-squares accumulation, BnFinalize:
+    //   mean[c] = sumX[c] / NHWC
+    //   var[c]  = sumXsq[c] / NHWC - mean[c]²
+    //   runMean[c] = (1-f)*prevMean[c] + f*mean[c]
+    //   runVar[c]  = (1-f)*prevVar[c]  + f*var[c]
+    //   savedInvStd[c] = 1/sqrt(var[c] + eps)
+    CUDNN_ATTR_BN_FINALIZE_STATS_SUM_DESC          = 740, // tensor: accumulated ΣX  [1,C,1,1]
+    CUDNN_ATTR_BN_FINALIZE_STATS_SQ_SUM_DESC       = 741, // tensor: accumulated ΣX² [1,C,1,1]
+    CUDNN_ATTR_BN_FINALIZE_SCALE_DESC              = 742, // tensor: γ [1,C,1,1]
+    CUDNN_ATTR_BN_FINALIZE_BIAS_DESC               = 743, // tensor: β [1,C,1,1]
+    CUDNN_ATTR_BN_FINALIZE_PREV_RUNNING_MEAN_DESC  = 744, // tensor: running mean in
+    CUDNN_ATTR_BN_FINALIZE_PREV_RUNNING_VAR_DESC   = 745, // tensor: running var in
+    CUDNN_ATTR_BN_FINALIZE_UPDATED_RUNNING_MEAN_DESC = 746, // tensor: running mean out
+    CUDNN_ATTR_BN_FINALIZE_UPDATED_RUNNING_VAR_DESC  = 747, // tensor: running var out
+    CUDNN_ATTR_BN_FINALIZE_SAVED_MEAN_DESC         = 748, // tensor: saved mean for bwd
+    CUDNN_ATTR_BN_FINALIZE_SAVED_INV_STD_DESC      = 749, // tensor: saved inv-std for bwd
+    CUDNN_ATTR_BN_FINALIZE_EXP_AVG_FACTOR          = 750, // float: exponential moving-avg factor
+    CUDNN_ATTR_BN_FINALIZE_EPSILON                 = 751, // float: epsilon
+    CUDNN_ATTR_BN_FINALIZE_ACCUM_COUNT             = 752, // int64: N*H*W (elements per channel)
+
+    // RNN operation attributes (CUDNN_BACKEND_OPERATION_RNN_DESCRIPTOR)
+    // HANDLE stores the cudnnRNNDescriptor_t (RNNDesc*) as a uint64 pointer value.
+    // SEQ_LEN is the number of timesteps T. WDESC/HXDESC/HYDESC are tensor IDs in the
+    // variant pack (same ID space as XDESC/YDESC). These mirror the cuDNN v8 backend
+    // attribute names (actual SDK values are vendor-specific; we assign 730–737).
+    CUDNN_ATTR_OPERATION_RNN_HANDLE              = 730, // cudnnRNNDescriptor_t cast to uint64
+    CUDNN_ATTR_OPERATION_RNN_SEQ_LEN             = 731, // int64: number of timesteps T
+    CUDNN_ATTR_OPERATION_RNN_XDESC               = 732, // input tensor ID (variant-pack key)
+    CUDNN_ATTR_OPERATION_RNN_YDESC               = 733, // output tensor ID
+    CUDNN_ATTR_OPERATION_RNN_WDESC               = 734, // weight tensor ID
+    CUDNN_ATTR_OPERATION_RNN_HXDESC              = 735, // initial hidden-state tensor ID (nullable)
+    CUDNN_ATTR_OPERATION_RNN_HYDESC              = 736, // final hidden-state tensor ID (nullable)
+    CUDNN_ATTR_OPERATION_RNN_CXDESC              = 737, // initial cell-state tensor ID (LSTM, nullable)
+    CUDNN_ATTR_OPERATION_RNN_CYDESC              = 738  // final cell-state tensor ID (LSTM, nullable)
 };
 
 struct BackendNode {
