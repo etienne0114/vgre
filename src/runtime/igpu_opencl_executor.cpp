@@ -568,6 +568,7 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
                                        const dim3 &gridDim,
                                        const dim3 &blockDim, void **args,
                                        const std::vector<size_t> &argSizes,
+                                       size_t sharedMemBytes,
                                        const size_t globalWorkOffset[3]) {
   if (!initialized_) {
     auto init_res = initialize();
@@ -696,11 +697,10 @@ VGREResult IGPUOpenCLExecutor::execute(const std::string &kernelName,
     // VGRE passes this via the RuntimeEngine launch path; we use a fixed
     // per-param size of max(sharedMemPerArg, 128) bytes as a safe lower bound
     // when no shared memory was explicitly requested.
-    size_t localMemTotal = 0;
-    // Try to read sharedMem from a thread-local store (set by the caller).
-    // If not available, use 4 KB as a safe default for typical reductions.
+    // Use the sharedMemBytes from the kernel launch; fall back to 4 KB
+    // if the caller passed 0 (no dynamic shared memory requested).
     const size_t kDefaultSharedBytes = 4096;
-    localMemTotal = kDefaultSharedBytes;
+    size_t localMemTotal = (sharedMemBytes > 0) ? sharedMemBytes : kDefaultSharedBytes;
 
     size_t perArg = localMemTotal / static_cast<size_t>(compiled.localMemArgCount);
     if (perArg < 64) perArg = 64;

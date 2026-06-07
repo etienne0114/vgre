@@ -219,15 +219,18 @@ CUresult cuCtxDetach(CUcontext ctx) {
 
 CUresult cuDeviceGetUuid(unsigned char *uuid, CUdevice dev) {
   if (!uuid) return CUDA_ERROR_INVALID_VALUE;
-  // Generate deterministic UUID from device ordinal
-  // Format: GPU-VGRE-XXXX-0000-0000-0000-000000000XXX
-  static const unsigned char kVgreUuidPrefix[12] = {
-      0x47, 0x50, 0x55, 0x2d, 0x56, 0x47, 0x52, 0x45,
-      0x2d, 0x30, 0x30, 0x30
-  };
-  memcpy(uuid, kVgreUuidPrefix, 12);
-  uuid[12] = 0x00; uuid[13] = 0x00;
-  uuid[14] = 0x00; uuid[15] = static_cast<unsigned char>(dev);
+  // Deterministic 16-byte UUID (RFC 4122 variant 2, version 4 layout):
+  //   Bytes 0-3:  "VGRE" magic (0x56 0x47 0x52 0x45)
+  //   Bytes 4-7:  device ordinal as big-endian uint32 — unique across >255 devices
+  //   Bytes 8-11: fixed VGRE marker 0x00 0x00 0x00 0x00
+  //   Bytes 12-15: reserved zeros
+  memset(uuid, 0, 16);
+  uuid[0] = 0x56; uuid[1] = 0x47; uuid[2] = 0x52; uuid[3] = 0x45;  // "VGRE"
+  uint32_t devU = static_cast<uint32_t>(dev);
+  uuid[4]  = static_cast<unsigned char>((devU >> 24) & 0xFF);
+  uuid[5]  = static_cast<unsigned char>((devU >> 16) & 0xFF);
+  uuid[6]  = static_cast<unsigned char>((devU >>  8) & 0xFF);
+  uuid[7]  = static_cast<unsigned char>( devU        & 0xFF);
   return CUDA_SUCCESS;
 }
 
