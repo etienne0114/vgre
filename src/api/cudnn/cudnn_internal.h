@@ -676,6 +676,13 @@ enum cudnnBatchNormMode_t {
     CUDNN_BATCHNORM_SPATIAL        = 1
 };
 
+// cudnnBatchNormOps_t: operation mode for BN-Ex fused variants (cuDNN 7.4+)
+enum cudnnBatchNormOps_t {
+    CUDNN_BATCHNORM_OPS_BN             = 0,  // BN only (no activation)
+    CUDNN_BATCHNORM_OPS_BN_ACTIVATION  = 1,  // BN followed by activation
+    CUDNN_BATCHNORM_OPS_BN_ADD_ACTIVATION = 2 // BN + elementwise add + activation
+};
+
 // ── Normalization (cuDNN 8.5+) ────────────────────────────────────────────────
 enum cudnnNormMode_t {
     CUDNN_NORM_PER_ACTIVATION = 0,  // layer norm: per element scale/bias

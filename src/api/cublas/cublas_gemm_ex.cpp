@@ -569,4 +569,133 @@ cublasStatus_t cublasGemmGroupedBatchedEx(
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// ── Mixed-precision level-1 _Ex functions ─────────────────────────────────────
+// These extend AXPY/DOT/NRM2/SCAL/ROT to accept explicit cudaDataType descriptors
+// for input, output, and accumulation. All paths cast to float64 accumulators.
+// enum values mirror CUDA_R_16F=2, CUDA_R_32F=0, CUDA_R_64F=1, CUDA_R_16BF=14
+
+static double read_scalar_ex(const void* p, int dtype) {
+    if (!p) return 0.0;
+    switch (dtype) {
+        case 0:  return static_cast<double>(*(const float*)p);
+        case 1:  return *(const double*)p;
+        case 2: { uint16_t h; memcpy(&h, p, 2);
+                  uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                      (static_cast<uint32_t>((h >> 10) & 0x1f) == 0 ? 0 :
+                       (static_cast<uint32_t>((h >> 10) & 0x1f) + 112u) << 23) |
+                      (static_cast<uint32_t>(h & 0x3ff) << 13);
+                  float f; memcpy(&f, &bits, 4); return static_cast<double>(f); }
+        case 14:{ uint16_t h; memcpy(&h, p, 2);
+                  uint32_t bits = (static_cast<uint32_t>(h & 0x8000) << 16) |
+                      (static_cast<uint32_t>((h >> 7) & 0xff) + 0u) << 23 |
+                      (static_cast<uint32_t>(h & 0x7f) << 16);
+                  float f; memcpy(&f, &bits, 4); return static_cast<double>(f); }
+        default: return static_cast<double>(*(const float*)p);
+    }
+}
+static double read_elem_ex(const void* base, int i, int dtype) {
+    if (!base) return 0.0;
+    return read_scalar_ex(static_cast<const char*>(base) + i * (dtype == 1 ? 8 : dtype == 2 ? 2 : dtype == 14 ? 2 : 4), dtype);
+}
+static void write_elem_ex(void* base, int i, int dtype, double val) {
+    if (!base) return;
+    char* p = static_cast<char*>(base) + i * (dtype == 1 ? 8 : dtype == 2 ? 2 : dtype == 14 ? 2 : 4);
+    switch (dtype) {
+        case 0:  { float f = static_cast<float>(val); memcpy(p, &f, 4); break; }
+        case 1:  memcpy(p, &val, 8); break;
+        case 2:  { float f = static_cast<float>(val); uint32_t b; memcpy(&b, &f, 4);
+                   uint16_t h = static_cast<uint16_t>(((b >> 16) & 0x8000) |
+                       (((b >> 23) & 0xff) == 0 ? 0 : (((b >> 23) & 0xff) - 112) << 10) |
+                       ((b >> 13) & 0x3ff)); memcpy(p, &h, 2); break; }
+        case 14: { float f = static_cast<float>(val); uint32_t b; memcpy(&b, &f, 4);
+                   uint16_t h = static_cast<uint16_t>(b >> 16); memcpy(p, &h, 2); break; }
+        default: { float f = static_cast<float>(val); memcpy(p, &f, 4); break; }
+    }
+}
+
+cublasStatus_t cublasAxpyEx(cublasHandle_t /*handle*/, int n,
+    const void* alpha, int alphaType,
+    const void* x, int xType, int incx,
+    void* y, int yType, int incy,
+    int executionType) {
+    (void)executionType;
+    if (!alpha || !x || !y || n <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    double a = read_scalar_ex(alpha, alphaType);
+    for (int i = 0; i < n; ++i) {
+        double xv = read_elem_ex(x, i * incx, xType);
+        double yv = read_elem_ex(y, i * incy, yType);
+        write_elem_ex(y, i * incy, yType, a * xv + yv);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDotEx(cublasHandle_t /*handle*/, int n,
+    const void* x, int xType, int incx,
+    const void* y, int yType, int incy,
+    void* result, int resultType,
+    int executionType) {
+    (void)executionType;
+    if (!x || !y || !result || n <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    double acc = 0.0;
+    for (int i = 0; i < n; ++i)
+        acc += read_elem_ex(x, i * incx, xType) * read_elem_ex(y, i * incy, yType);
+    write_elem_ex(result, 0, resultType, acc);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDotcEx(cublasHandle_t handle, int n,
+    const void* x, int xType, int incx,
+    const void* y, int yType, int incy,
+    void* result, int resultType,
+    int executionType) {
+    // For real types, dotc == dotu
+    return cublasDotEx(handle, n, x, xType, incx, y, yType, incy, result, resultType, executionType);
+}
+
+cublasStatus_t cublasNrm2Ex(cublasHandle_t /*handle*/, int n,
+    const void* x, int xType, int incx,
+    void* result, int resultType,
+    int executionType) {
+    (void)executionType;
+    if (!x || !result || n <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    double acc = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double v = read_elem_ex(x, i * incx, xType);
+        acc += v * v;
+    }
+    write_elem_ex(result, 0, resultType, std::sqrt(acc));
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasScalEx(cublasHandle_t /*handle*/, int n,
+    const void* alpha, int alphaType,
+    void* x, int xType, int incx,
+    int executionType) {
+    (void)executionType;
+    if (!alpha || !x || n <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    double a = read_scalar_ex(alpha, alphaType);
+    for (int i = 0; i < n; ++i)
+        write_elem_ex(x, i * incx, xType, a * read_elem_ex(x, i * incx, xType));
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasRotEx(cublasHandle_t /*handle*/, int n,
+    void* x, int xType, int incx,
+    void* y, int yType, int incy,
+    const void* c, int csType,
+    const void* s, int ssType,
+    int executionType) {
+    (void)executionType;
+    if (!x || !y || !c || !s || n <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    double cv = read_scalar_ex(c, csType);
+    double sv = read_scalar_ex(s, ssType);
+    for (int i = 0; i < n; ++i) {
+        double xi = read_elem_ex(x, i * incx, xType);
+        double yi = read_elem_ex(y, i * incy, yType);
+        write_elem_ex(x, i * incx, xType,  cv * xi + sv * yi);
+        write_elem_ex(y, i * incy, yType, -sv * xi + cv * yi);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 } // extern "C"
