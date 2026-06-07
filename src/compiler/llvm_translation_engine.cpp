@@ -888,6 +888,133 @@ vgre::VGREResult LLVMTranslationEngine::translate(vgre::KernelIR &ir,
   return doTranslate(ir, outFn);
 }
 
+// ── compileBitcodeKernel: LLVM bitcode → ORC JIT, bypassing Clang (Track N) ──
+// 1. Check in-memory cache
+// 2. Check disk cache (SHA-256 of bitcode bytes + kernel name)
+// 3. Parse bitcode; strip nvvm.annotations (NVPTX-specific, unsupported by host JIT)
+// 4. Emit as LLVM IR text; run O2 optimisation pass; JIT via ORC
+// 5. Write disk cache; update in-memory cache
+vgre::VGREResult LLVMTranslationEngine::compileBitcodeKernel(
+    const std::vector<uint8_t> &bc,
+    const std::string &kernelName,
+    vgre::CompiledKernelFn &outFn) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+  // Step 1: in-memory cache
+  auto it = cache_.find(kernelName);
+  if (it != cache_.end()) {
+    outFn = it->second;
+    return vgre::VGREResult::SUCCESS;
+  }
+
+  // Step 2: disk cache (keyed by SHA-256 of bc bytes + kernel name)
+  std::string cacheInput(reinterpret_cast<const char *>(bc.data()), bc.size());
+  cacheInput += '\0';
+  cacheInput += kernelName;
+  std::string cacheKey = computePtxCacheKey(cacheInput, "");
+  std::string bcPath   = getElfCachePath(cacheKey);
+  std::string irCode;
+
+  {
+    std::vector<uint8_t> cached = readElfCache(bcPath);
+    if (!cached.empty()) {
+      auto mbuf = llvm::MemoryBuffer::getMemBufferCopy(
+          llvm::StringRef(reinterpret_cast<const char *>(cached.data()), cached.size()),
+          "cached_bc");
+      llvm::Expected<std::unique_ptr<llvm::Module>> modOrErr =
+          llvm::parseBitcodeFile(mbuf->getMemBufferRef(),
+                                 *llvmState_->context.getContext());
+      if (modOrErr) {
+        llvm::raw_string_ostream rso(irCode);
+        rso << *(*modOrErr);
+        rso.flush();
+        VGRE_LOG_INFO("LLVMTranslationEngine",
+                      "BC direct: disk cache HIT for '" + kernelName + "'");
+      } else {
+        llvm::consumeError(modOrErr.takeError());
+        irCode.clear();
+      }
+    }
+  }
+
+  if (irCode.empty()) {
+    // Step 3: parse the bitcode blob
+    auto mbuf = llvm::MemoryBuffer::getMemBufferCopy(
+        llvm::StringRef(reinterpret_cast<const char *>(bc.data()), bc.size()),
+        "bitcode");
+    llvm::Expected<std::unique_ptr<llvm::Module>> modOrErr =
+        llvm::parseBitcodeFile(mbuf->getMemBufferRef(),
+                               *llvmState_->context.getContext());
+    if (!modOrErr) {
+      llvm::consumeError(modOrErr.takeError());
+      VGRE_LOG_ERROR("LLVMTranslationEngine",
+                     "BC direct: failed to parse bitcode for '" + kernelName + "'");
+      return vgre::VGREResult::ERR_COMPILATION;
+    }
+    auto &mod = *modOrErr;
+
+    // Step 4: strip nvvm.annotations — NVPTX-specific; host ORC JIT rejects them
+    if (auto *nvvmMD = mod->getNamedMetadata("nvvm.annotations"))
+      mod->eraseNamedMetadata(nvvmMD);
+
+    // Emit as LLVM IR text for the existing O2 + JIT path
+    llvm::raw_string_ostream rso(irCode);
+    rso << *mod;
+    rso.flush();
+
+    // Write disk cache
+    {
+      llvm::SmallVector<char, 0> bcBuf;
+      llvm::raw_svector_ostream bcos(bcBuf);
+      llvm::WriteBitcodeToFile(*mod, bcos);
+      std::vector<uint8_t> bcBytes(
+          reinterpret_cast<const uint8_t *>(bcBuf.data()),
+          reinterpret_cast<const uint8_t *>(bcBuf.data()) + bcBuf.size());
+      writeElfCache(bcPath, bcBytes);
+    }
+    VGRE_LOG_INFO("LLVMTranslationEngine",
+                  "BC direct: parsed and cached bitcode for '" + kernelName + "'");
+  }
+
+  // Step 5: O2 optimisation pass
+  {
+    auto buf = llvm::MemoryBuffer::getMemBuffer(irCode);
+    llvm::SMDiagnostic diagErr;
+    auto optMod = llvm::parseIR(*buf, diagErr, *llvmState_->context.getContext());
+    if (optMod) {
+      llvm::LoopAnalysisManager LAM;
+      llvm::FunctionAnalysisManager FAM;
+      llvm::CGSCCAnalysisManager CGAM;
+      llvm::ModuleAnalysisManager MAM;
+      llvm::PassBuilder PB;
+      PB.registerModuleAnalyses(MAM);
+      PB.registerCGSCCAnalyses(CGAM);
+      PB.registerFunctionAnalyses(FAM);
+      PB.registerLoopAnalyses(LAM);
+      PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+      llvm::ModulePassManager MPM =
+          PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2);
+      MPM.run(*optMod, MAM);
+      irCode.clear();
+      llvm::raw_string_ostream textStream(irCode);
+      textStream << *optMod;
+    }
+  }
+
+  // Step 6: JIT via ORC (reuse the existing compileJIT path)
+  vgre::KernelIR dummyIR;
+  dummyIR.name = kernelName;
+  outFn = compileJIT(irCode, kernelName, dummyIR);
+  if (!outFn) {
+    VGRE_LOG_ERROR("LLVMTranslationEngine",
+                   "BC direct: JIT failed for '" + kernelName + "'");
+    return vgre::VGREResult::ERR_COMPILATION;
+  }
+
+  cache_[kernelName] = outFn;
+  return vgre::VGREResult::SUCCESS;
+}
+
 vgre::JITFuture LLVMTranslationEngine::prepare(vgre::KernelIR &ir) {
   auto irPtr = std::make_shared<vgre::KernelIR>(ir);
   std::promise<vgre::JITResult> promise;

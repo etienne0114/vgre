@@ -473,6 +473,38 @@ VGREResult RuntimeEngine::getKernelFromModule(ModuleHandle module,
   return VGREResult::SUCCESS;
 }
 
+VGREResult RuntimeEngine::registerPrecompiledKernel(const std::string &name,
+                                                     CompiledKernelFn fn,
+                                                     KernelId &outId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!initialized_)
+    return VGREResult::ERR_NOT_INITIALIZED;
+  if (!fn)
+    return VGREResult::ERR_INVALID_VALUE;
+
+  auto existIt = kernelNames_.find(name);
+  if (existIt != kernelNames_.end()) {
+    outId = existIt->second;
+    kernelCache_[outId] = fn;
+    kernelFnAddrMap_[fn.get()] = outId;
+    return VGREResult::SUCCESS;
+  }
+
+  outId = nextKernelId_++;
+  kernelCache_[outId] = fn;
+  kernelFnAddrMap_[fn.get()] = outId;
+  kernelNames_[name] = outId;
+  KernelIR ir;
+  ir.name = name;
+  ir.source = "__llvm_bitcode__";
+  kernelIRCache_[outId] = ir;
+
+  VGRE_LOG_INFO("RuntimeEngine", "Precompiled kernel '" + name +
+                                     "' registered as ID " +
+                                     std::to_string(outId));
+  return VGREResult::SUCCESS;
+}
+
 VGREResult RuntimeEngine::fuseKernels(const std::vector<KernelId> &ids,
                                       KernelId &outFusedId, std::string* outName) {
 #ifndef ENABLE_VGRE_KERNEL_FUSION

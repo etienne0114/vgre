@@ -44,6 +44,10 @@ using namespace vgre::common;
 
 using namespace vgre::fatbin;
 
+// Sentinel stored as module source when the image is raw LLVM bitcode.
+// The actual bytes are stored separately in CUDAModuleRegistry::moduleBitcode_.
+static constexpr const char kLLVMBCMarker[] = "__llvm_bitcode__";
+
 static std::string extractPTXFromImage(const void *image, size_t sizeHint = 0) {
   if (!image)
     return "";
@@ -53,6 +57,13 @@ static std::string extractPTXFromImage(const void *image, size_t sizeHint = 0) {
   const uint8_t  *bytes  = reinterpret_cast<const uint8_t *>(image);
   const char     *data   = reinterpret_cast<const char *>(image);
   size_t scanSize = sizeHint > 0 ? sizeHint : 2 * 1024 * 1024;
+
+  // ── 0. LLVM bitcode: magic 'B' 'C' (0x42 0x43) ──────────────────────────
+  // Return the sentinel — raw bytes are stored by registerModuleData separately.
+  if (bytes[0] == 0x42 && bytes[1] == 0x43) {
+    VGRE_LOG_INFO("CUDART", "Detected LLVM bitcode (.bc) module");
+    return kLLVMBCMarker;
+  }
 
   // ── 1. ELF container (.cubin or thin ELF with PTX sections) ─────────────
   if (header[0] == ELF_MAGIC) {
@@ -132,6 +143,7 @@ public:
     modules_.clear();
     moduleVariables_.clear();
     moduleSources_.clear();
+    moduleBitcode_.clear();
     hostToName_.clear();
     hostToSource_.clear();
     nameToHost_.clear();
@@ -171,6 +183,13 @@ public:
     modules_[handle] = {};
     moduleSources_[handle] = extractedSource;
 
+    // LLVM bitcode: store the raw bytes alongside the sentinel source string
+    // so cuModuleGetFunction can retrieve and JIT them directly (Track N).
+    if (extractedSource == kLLVMBCMarker) {
+      const uint8_t *bc = static_cast<const uint8_t *>(data);
+      moduleBitcode_[handle] = std::vector<uint8_t>(bc, bc + size);
+    }
+
     // Enhanced metadata extraction for binary images
     ELFReader reader(data, size);
     if (reader.isValid()) {
@@ -201,6 +220,15 @@ public:
       return it->second;
     }
     return "";
+  }
+
+  // Returns the raw LLVM bitcode bytes for a module registered with BC image data.
+  // Returns nullptr/0 if the module was not loaded from bitcode.
+  const std::vector<uint8_t> *lookupModuleBitcode(void *handlePtr) const {
+    if (!handlePtr) return nullptr;
+    auto *handle = reinterpret_cast<const ModuleHandleWrapper *>(handlePtr);
+    auto it = moduleBitcode_.find(const_cast<ModuleHandleWrapper *>(handle));
+    return (it != moduleBitcode_.end()) ? &it->second : nullptr;
   }
 
   bool unregisterModule(void *handlePtr) {
@@ -244,6 +272,7 @@ public:
 
       modules_.erase(handle);
       moduleSources_.erase(handle);
+      moduleBitcode_.erase(handle);
       delete handle;
     }
     for (void *ptr : varsToFree) {
@@ -426,6 +455,8 @@ private:
   std::unordered_map<ModuleHandleWrapper *, std::vector<const void *>>
       moduleVariables_;
   std::unordered_map<ModuleHandleWrapper *, std::string> moduleSources_;
+  // Raw bitcode bytes for modules loaded via cuModuleLoadData with LLVM BC blobs (Track N).
+  std::unordered_map<ModuleHandleWrapper *, std::vector<uint8_t>> moduleBitcode_;
   std::unordered_map<const void *, std::string> hostToName_;
   std::unordered_map<const void *, std::string> hostToSource_;
   std::unordered_map<std::string, const void *> nameToHost_;
@@ -479,6 +510,21 @@ extern "C" void vgre_register_texture_ref(void *handle, const char *name, void *
 
 extern "C" void *vgre_lookup_texture_ref(void *handle, const char *name) {
   return CUDAModuleRegistry::instance().lookupTextureRef(handle, name);
+}
+
+extern "C" const std::vector<uint8_t> *vgre_get_module_bitcode(void *handle) {
+  return CUDAModuleRegistry::instance().lookupModuleBitcode(handle);
+}
+
+// VGRE extension: load a raw LLVM bitcode blob as a CUmodule.
+// Unlike cuModuleLoadData, this API accepts an explicit byte count so the
+// bitcode can be stored correctly (raw LLVM bitcode is not self-delimiting).
+// Returns a module handle cast to int* on success, NULL on failure.
+extern "C" void *vgre_cuModuleLoadBitcode(const void *bc, size_t bc_size) {
+  if (!bc || bc_size < 4) return nullptr;
+  const uint8_t *bytes = static_cast<const uint8_t *>(bc);
+  if (bytes[0] != 0x42 || bytes[1] != 0x43) return nullptr;
+  return CUDAModuleRegistry::instance().registerModuleData(bc, bc_size);
 }
 
 extern "C" const char *vgre_get_module_source(void *handle) {

@@ -69,6 +69,10 @@ public:
 
   VGREResult loadModule(const std::string &path, ModuleHandle &outModule);
 
+  // Register an already-JIT-compiled kernel function directly (Track N bitcode path).
+  VGREResult registerPrecompiledKernel(const std::string &name,
+                                        CompiledKernelFn fn, KernelId &outId);
+
   VGREResult getKernelFromModule(ModuleHandle module, const std::string &name,
                                  KernelId &outId);
 

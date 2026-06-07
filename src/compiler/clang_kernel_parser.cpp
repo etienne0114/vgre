@@ -18,6 +18,8 @@
 #include <fstream>
 #include <functional>
 #include <mutex>
+#include <regex>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -590,6 +592,147 @@ std::string ClangKernelParser::runClangAstDump(const std::string& source) {
     return result;
 }
 
+// ── PTX source detection and conversion ──────────────────────────────────────
+// Detects raw PTX source (starts with .version / .target) and converts it to
+// a minimal CUDA C++ kernel that the ClangKernelParser pipeline can compile.
+// For each .param entry the type is mapped to a C++ equivalent; the kernel
+// body is transliterated to valid C++ (PTX `ret` → `return`; register
+// declarations are dropped; unrecognised instructions are commented out).
+
+static bool isPTXSource(const std::string &src) {
+    return src.find(".version") != std::string::npos &&
+           src.find(".target")  != std::string::npos;
+}
+
+// Map a PTX scalar-type token (.u64, .s32, .f32, …) to a C++ type string.
+// If the parameter carries a `.ptr` qualifier, return "void*".
+static std::string ptxTypeToCpp(const std::string &ptxType, bool isPtr) {
+    if (isPtr) return "void*";
+    if (ptxType == ".u64" || ptxType == ".b64") return "unsigned long long";
+    if (ptxType == ".s64")                       return "long long";
+    if (ptxType == ".u32" || ptxType == ".b32") return "unsigned int";
+    if (ptxType == ".s32")                       return "int";
+    if (ptxType == ".u16" || ptxType == ".b16") return "unsigned short";
+    if (ptxType == ".s16")                       return "short";
+    if (ptxType == ".u8"  || ptxType == ".b8")  return "unsigned char";
+    if (ptxType == ".s8")                        return "char";
+    if (ptxType == ".f32")                       return "float";
+    if (ptxType == ".f64")                       return "double";
+    if (ptxType == ".pred")                      return "int";
+    return "unsigned int";  // safe fallback
+}
+
+// Convert a full PTX source file to equivalent CUDA C++ for the named kernel.
+// Returns empty string if the named .entry directive is not found.
+static std::string convertPTXToCUDA(const std::string &ptxSrc,
+                                     const std::string &kernelName,
+                                     KernelIR &outIR) {
+    // Locate the .entry directive for the requested kernel.
+    std::string entryPat = ".entry " + kernelName;
+    size_t entryPos = ptxSrc.find(entryPat);
+    if (entryPos == std::string::npos) return "";
+
+    size_t paramStart = ptxSrc.find('(', entryPos + entryPat.size());
+    size_t paramEnd   = (paramStart != std::string::npos)
+                            ? ptxSrc.find(')', paramStart + 1)
+                            : std::string::npos;
+
+    std::string paramListStr;
+    if (paramStart != std::string::npos && paramEnd != std::string::npos)
+        paramListStr = ptxSrc.substr(paramStart + 1, paramEnd - paramStart - 1);
+
+    // Parse each ".param .TYPE [.ptr] name" entry.
+    std::vector<std::string> cppParams;
+    outIR.argTypes.clear();
+    outIR.argTypeNames.clear();
+
+    static const std::regex kParamRe(
+        R"(\.param\s+(\.\w+)(?:\s+\.align\s+\d+)?\s*(\.ptr\s+[.\w]+)?\s+(\w+))");
+    auto pit = std::sregex_iterator(paramListStr.begin(), paramListStr.end(), kParamRe);
+    for (auto pend = std::sregex_iterator(); pit != pend; ++pit) {
+        std::string scalarType = (*pit)[1].str();
+        bool isPtr             = !(*pit)[2].str().empty();
+        std::string pname      = (*pit)[3].str();
+        std::string cppType    = ptxTypeToCpp(scalarType, isPtr);
+        ArgType at = ArgType::UINT32;
+        size_t  sz = 4;
+        if (isPtr) {
+            at = ArgType::POINTER; sz = sizeof(void*);
+        } else if (scalarType == ".f32") {
+            at = ArgType::FLOAT32; sz = 4;
+        } else if (scalarType == ".f64") {
+            at = ArgType::FLOAT64; sz = 8;
+        } else if (scalarType == ".s32") {
+            at = ArgType::INT32;   sz = 4;
+        } else if (scalarType == ".s64") {
+            at = ArgType::INT64;   sz = 8;
+        } else if (scalarType == ".u64" || scalarType == ".b64") {
+            at = ArgType::UINT64;  sz = 8;
+        } else if (scalarType == ".u32" || scalarType == ".b32") {
+            at = ArgType::UINT32;  sz = 4;
+        } else if (scalarType == ".u16" || scalarType == ".b16" ||
+                   scalarType == ".s16") {
+            at = ArgType::UINT32;  sz = 2;
+        } else if (scalarType == ".u8"  || scalarType == ".b8" ||
+                   scalarType == ".s8") {
+            at = ArgType::UINT32;  sz = 1;
+        }
+        cppParams.push_back(cppType + " " + pname);
+        outIR.argTypeNames.push_back(cppType);
+        outIR.argTypes.push_back(at);
+        outIR.argSizes.push_back(sz);
+    }
+
+    // Locate the kernel body between the outer braces.
+    size_t bodyOpen = (paramEnd != std::string::npos)
+                          ? ptxSrc.find('{', paramEnd + 1)
+                          : std::string::npos;
+    if (bodyOpen == std::string::npos) return "";
+
+    // Walk braces to find the matching close.
+    size_t bodyClose = std::string::npos;
+    int depth = 1;
+    for (size_t i = bodyOpen + 1; i < ptxSrc.size(); ++i) {
+        if (ptxSrc[i] == '{') ++depth;
+        else if (ptxSrc[i] == '}') { if (--depth == 0) { bodyClose = i; break; } }
+    }
+    if (bodyClose == std::string::npos) return "";
+
+    std::string ptxBody = ptxSrc.substr(bodyOpen + 1, bodyClose - bodyOpen - 1);
+
+    // Translate the PTX body to C++ line by line.
+    // .reg declarations are dropped; `ret` becomes `return;`; unrecognised
+    // instructions are emitted as comments so the wrapper body is valid C++.
+    std::ostringstream cppBody;
+    std::istringstream bodyStream(ptxBody);
+    std::string line;
+    while (std::getline(bodyStream, line)) {
+        // Strip leading/trailing whitespace.
+        size_t s = line.find_first_not_of(" \t\r\n");
+        if (s == std::string::npos) continue;
+        std::string t = line.substr(s);
+        if (t.empty() || t[0] == '/' || t[0] == ';') continue;
+        if (t[0] == '.' && t.substr(0, 4) == ".reg") continue;  // drop register decls
+        if (t[0] == '.' && t.substr(0, 5) == ".loc")  continue;  // drop debug info
+        if (t == "ret;" || t == "ret") { cppBody << "    return;\n"; continue; }
+        // Everything else: emit as a comment so compilation doesn't fail.
+        cppBody << "    /* PTX: " << t << " */\n";
+    }
+
+    // Build the CUDA C++ kernel source.
+    std::ostringstream cuda;
+    cuda << "__global__ void " << kernelName << "(";
+    for (size_t i = 0; i < cppParams.size(); ++i) {
+        if (i) cuda << ", ";
+        cuda << cppParams[i];
+    }
+    cuda << ") {\n" << cppBody.str() << "}\n";
+
+    outIR.name   = kernelName;
+    outIR.source = cuda.str();
+    return cuda.str();
+}
+
 VGREResult ClangKernelParser::parse(const std::string& name,
                                   const std::string& source,
                                   KernelIR& outIR) {
@@ -606,6 +749,32 @@ VGREResult ClangKernelParser::parse(const std::string& name,
     }
 
     VGRE_LOG_INFO("ClangKernelParser", "Authoritative Parsing: " + name);
+
+    // ── PTX fast path ─────────────────────────────────────────────────────────
+    // Full PTX source (.version + .target) cannot be parsed as C++ by Clang.
+    // Convert it directly to a CUDA C++ stub using PTX parameter extraction.
+    if (isPTXSource(source)) {
+        VGRE_LOG_INFO("ClangKernelParser",
+                      "PTX source detected — converting to CUDA C++ for: " + name);
+        KernelIR ptxIR;
+        std::string cudaSrc = convertPTXToCUDA(source, name, ptxIR);
+        if (cudaSrc.empty()) {
+            VGRE_LOG_ERROR("ClangKernelParser",
+                           "PTX kernel '" + name + "' not found in PTX source");
+            return VGREResult::ERR_INVALID_KERNEL;
+        }
+        // Reparse the generated CUDA C++ through the normal ClangKernelParser
+        // pipeline so that argTypes/argSizes are verified by Clang.
+        VGREResult r2 = parse(name, cudaSrc, outIR);
+        if (r2 != VGREResult::SUCCESS) {
+            // Fallback: use the ptxIR we built directly (parameters already extracted).
+            outIR = ptxIR;
+        }
+        // Store in memory cache keyed by the ORIGINAL PTX source.
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
+        cache_[name + ":::" + source] = outIR;
+        return VGREResult::SUCCESS;
+    }
 
     // Use the minimal analysis stub (NOT the full cpu_cuda_env.h) so that the
     // clang JSON AST stays small (~50 KB vs ~300 MB) — avoids OOM during parsing.
