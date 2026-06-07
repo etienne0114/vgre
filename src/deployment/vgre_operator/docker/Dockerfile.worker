@@ -33,7 +33,7 @@ RUN cmake -B build -G Ninja \
 
 FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libssl3 libomp-18 \
+    libssl3 libomp-18 libstdc++6 libgcc-s1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/build/libvgre*.so* /usr/local/lib/

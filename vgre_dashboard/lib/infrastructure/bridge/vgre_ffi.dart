@@ -266,14 +266,23 @@ class VgreBridge {
     try {
       _lib = DynamicLibrary.open(libPath);
     } catch (e) {
-      // Enhanced error message to help diagnose DLL loading issues
-      String errorDetails = 'Failed to load VGRE native library from: $libPath\n';
-      errorDetails += 'Error: $e\n';
-      errorDetails += 'Common causes:\n';
-      errorDetails += '  1. DLL dependencies missing (LLVM, OpenMP)\n';
-      errorDetails += '  2. Unsupported architecture mismatch\n';
-      errorDetails += '  3. File is corrupted or incomplete\n';
-      errorDetails += 'Fix: Ensure PATH includes %LOCALAPPDATA%\\VGRE\\lib and rebuild using vgre_sync.bat\n';
+      final platform = () {
+        if (Platform.isWindows) return 'Windows';
+        if (Platform.isMacOS) return 'macOS';
+        return 'Linux';
+      }();
+      final libHint = Platform.isWindows
+          ? 'Ensure %LOCALAPPDATA%\\VGRE\\lib is on PATH and run vgre_sync.bat to rebuild.'
+          : Platform.isMacOS
+              ? 'Ensure \$HOME/.vgre/lib is on DYLD_LIBRARY_PATH and run: vgre-start --rebuild'
+              : 'Ensure \$HOME/.vgre/lib is on LD_LIBRARY_PATH and run: vgre-start --rebuild';
+      final errorDetails = 'Failed to load VGRE native library [$platform] from: $libPath\n'
+          'Error: $e\n'
+          'Common causes:\n'
+          '  1. Native library dependencies missing (LLVM, OpenMP, libssl)\n'
+          '  2. Architecture mismatch (x86_64 vs arm64)\n'
+          '  3. Library file is corrupted or incomplete\n'
+          'Fix: $libHint\n';
       print('VGRE FFI Error: $errorDetails');
       rethrow;
     }
