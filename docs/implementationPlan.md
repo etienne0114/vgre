@@ -1,5 +1,7 @@
 # VGRE Implementation Plan for Gaps, Security, and Cross-Platform Issues
 
+**Last Updated**: 2026-06-07
+
 This document outlines the technical plan and roadmap for resolving the remaining gaps, stubs, mocks, security vulnerabilities, and cross-platform compatibility issues within the VGRE (Virtual GPU Runtime Engine) codebase.
 
 ---
@@ -60,14 +62,14 @@ Implement `sendQPInfo()` and `recvQPInfo()` in `src/advanced/rdma_transport.cpp`
 
 ---
 
-## Phase 3: cuDNN Graph API Extensions
+## Phase 3: cuDNN Graph API Extensions ✅ Complete
 
 ### 3.1 Objective
 Implement the fused execution path for `CONV_NORM` fusions and support the RNG descriptor API, removing `CUDNN_STATUS_NOT_SUPPORTED` and sequential fallbacks.
 
-### 3.2 Proposed Changes
-- **CONV_NORM Fusion Execution**: Update `executeFusedPair` in `cudnn_graph.cpp` to handle `FusionKind::CONV_NORM`. Implement an optimized CPU operator that executes 2D convolution and applies batch normalization in-place, reducing memory bandwidth overhead.
-- **RNG Backend Implementation**: Replace the RNG descriptor stub with a functional random number generator leveraging thread-safe host RNG. Implement `CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR` to generate dropout/noise arrays during forward/backward passes.
+### 3.2 Status — Completed 2026-06-07
+- **CONV_NORM Fusion Execution**: `cudnn_executeFusedConvBN()` implemented with two paths — inference folds BN into Conv weights (`W_f=W·γ/σ`, `b_f=β-γμ/σ`), training uses two-pass Conv→mean/var→normalize.
+- **RNG Backend**: Philox 4×32 (10 rounds) with uniform, normal (Box-Muller), and Bernoulli distributions. `CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR` fully functional.
 
 ---
 
@@ -82,17 +84,16 @@ Transition `cuda_driver_module.cpp` from collecting PTX blobs in-memory to perfo
 
 ---
 
-## Phase 5: Security Hardening
+## Phase 5: Security Hardening — Partially Complete
 
-### 5.1 Objective
-Resolve plaintext fallbacks, cryptographic weaknesses, credential exposures, unsanitized compiler entrypoints, and insecure IPC permissions.
+### 5.1 Completed Items
+- **Strict Transport Security** ✅ — `packet_handler.cpp` rejects non-handshake packets with `ERR_AUTH_FAILED` when SecureChannel is not yet initialized.
+- **PTX Input Sanitization** ✅ — `validateKernelSource()` in `llvm_translation_engine.cpp` blocks syscall opcodes and dangerous function calls before JIT compilation.
+- **IPC Shared Memory Permissions** ✅ — `shm_open()` permission changed from `0666` to `0600`.
 
-### 5.2 Proposed Changes
-- **Strict Transport Security**: Disable plain text fallbacks in `packet_handler.cpp` and `tcp_cluster_transport.cpp`. Throw validation errors and terminate handshakes rather than transmitting data unencrypted.
-- **Dynamic Cryptographic Salt**: Remove hardcoded salt strings in `token_manager_fallback.cpp`. Generate cryptographically secure salts dynamically via system entropy sources (e.g. `BCryptGenRandom` / `/dev/urandom`) and store the salt alongside the encrypted credentials.
-- **Secure Key/Credential Loading**: Replace environment credential reads with a protected API configuration query or directly stream tokens into memory from secure platform vaults (DPAPI, macOS Keychain, Linux Keyrings) without exposing them to host process lists.
-- **PTX Input Sanitization**: Implement a parser/validator in `llvm_translation_engine.cpp` that parses incoming PTX code prior to LLVM ORC JIT compilation, stripping illegal assembly operations and ensuring constraints on inline host system calls.
-- **IPC Shared Memory Permissions**: Force `shm_open` and shared mapping flags in `shm_manager.cpp` to map pages exclusively to owner-level operations (`0600`) and configure Windows security descriptors to prevent local user hijacking.
+### 5.2 Remaining
+- **Dynamic Cryptographic Salt**: `token_manager_fallback.cpp` still uses hardcoded identity seed — needs per-token random salt stored alongside credentials.
+- **Secure Key/Credential Loading**: Environment variable credential reads (`VGRE_TCP_AUTH_TOKEN`) still expose tokens to `ps` output — move to in-memory-only vault reads.
 
 ---
 

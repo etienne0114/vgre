@@ -1,5 +1,7 @@
 # VGRE Missing Features, Stubs, Mocks, Security and Cross-Platform Issues
 
+**Last Updated**: 2026-06-07
+
 This document catalogues all current gaps, partial implementations, stubs, mocks, fallbacks, security vulnerabilities, and cross-platform compatibility issues within the VGRE (Virtual GPU Runtime Engine) codebase.
 
 ---

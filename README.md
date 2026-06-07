@@ -2,7 +2,7 @@
 
 **A CUDA emulation runtime** that allows CUDA applications to run on CPU without a physical GPU.
 
-> **PROJECT STATUS**: CI-Ready — **191/191 tests passing**. Full CUDA, BLAS, DNN, FFT/RNG/solver/sparse, NCCL, profiling, and distributed-cluster paths are implemented. Advanced mathematical hardening (Track 5/7/8/9/10) is complete. See `docs/missingFeatures.md` for the remaining hardware-level architectural boundaries.
+> **PROJECT STATUS**: CI-Ready — **192/192 tests passing**. Full CUDA, BLAS, DNN, FFT/RNG/solver/sparse, NCCL, profiling, and distributed-cluster paths are implemented. Zero compiler warnings; warnings-as-errors enabled. Auto-detected SIMD, RDMA, TPM2, and libsecret features active at build time. See `docs/missingFeatures.md` for the remaining hardware-level architectural boundaries.
 
 ## What is VGRE?
 
@@ -24,7 +24,7 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 
 ## Current Status
 
-**Core Stability**: ✅ 191/191 tests passing, zero critical issues  
+**Core Stability**: ✅ 192/192 tests passing, zero warnings, zero critical issues  
 **CUDA Runtime API Coverage**: ~95% (~101+ of ~110 commonly-used functions)  
 **CUDA Driver API Coverage**: ~95% (~56+ of ~60 commonly-used functions)  
 **cuBLAS Coverage**: Level-1/2/3 real + complex C/Z + Hermitian core API implemented  
@@ -72,8 +72,15 @@ See [Cross-Platform Status](docs/CROSS_PLATFORM_STATUS.md) for detailed platform
 - cuSPARSE: CSR/COO/CSC SpMV/SpMM, SparseToDense, DenseToSparse, SpSV, SpGEMM, ILU0, IC0
 - cuBLASLt: matmul with heuristic cache, scale pointers, amaxD, and full epilogue set
 
+### Recent Improvements (2026-06-07) 🎉
+- ✅ **Zero compiler warnings** — All `-Wall -Wextra` warnings resolved: strict-aliasing `reinterpret_cast` replaced with `std::memcpy`, `warn_unused_result` captures, `static thread_local` in headers converted to `extern thread_local` (real semantic bug: each TU had its own independent `g_current_ctx` copy), `volatile` for optimization-unreachable test code, `snprintf` replacing truncating `strncpy`. Warnings-as-errors (`-Werror`) enabled globally.
+- ✅ **Auto-detected features** — CMake now auto-probes libibverbs, libtss2-esys, libsecret-1, and `/proc/cpuinfo`/`sysctl` for native SIMD. All four features default ON when their libraries are installed; build never fails due to missing optional deps.
+- ✅ **K8s deployment hardening** — New `--is-master` flag in `vgre-worker` for headless master mode in containers. Device plugin rewritten: proper `context.Context` in all gRPC methods, `grpc.NewClient` + `insecure.NewCredentials`, `VGRE_DEVICE_PLUGIN_PATH` env var overrides kubelet socket path, `<-stream.Context().Done()` replaces infinite sleep in `ListAndWatch`. Dockerfiles switched to distroless base image; C++ runtime libs added.
+- ✅ **Cross-platform FFI error messages** — `vgre_ffi.dart` now emits OS-specific library load hints (Linux: `LD_LIBRARY_PATH`, macOS: `DYLD_LIBRARY_PATH`, Windows: `%LOCALAPPDATA%\VGRE\lib`) instead of Windows-only error text.
+- ✅ **`g_current_ctx` cross-TU bug fixed** — `static thread_local` in a shared header gave every translation unit its own independent per-thread context pointer; `cuCtxSetCurrent` in one TU was invisible to `cuCtxGetCurrent` in another. Fixed with `extern thread_local` + single canonical definition.
+
 ### Recent Improvements (2026-05-30) 🎉
-- ✅ **Heuristic Elimination (Track 9/10)** — Dynamic bandwidth calibration (Z-score, DDR/HBM detection), CPUID-based FLOPS/IPC detection, powers-of-2 thread search, and problem-size-based algorithm selection replace all prior hardcoded magic numbers. **191/191 tests passing**.
+- ✅ **Heuristic Elimination (Track 9/10)** — Dynamic bandwidth calibration (Z-score, DDR/HBM detection), CPUID-based FLOPS/IPC detection, powers-of-2 thread search, and problem-size-based algorithm selection replace all prior hardcoded magic numbers. **192/192 tests passing**.
 - ✅ **Advanced Math Hardening (Track 8)** — Zero-copy sparse matrix views (CSR↔CSC, CSR→BSR), cache-oblivious matmul/transpose/conv2D, mixed-precision (FP16/BF16/FP8/INT8), block-sparse SIMD (AVX-512/AVX2), and Intel AMX tensor core emulation, all fully integrated.
 - ✅ **TLB & SPSC Hardening (Track 7)** — 3-level TLB cache (L1 thread-local 256×8-way AVX2, L2 thread-local 1024×16-way, shared sharded 16×256×4-way), SPSC ring per-stream fast path, and NUMA-aware thread affinity registry.
 - ✅ **OpenMP Parallelization** — All major O(n²) and O(n³) CPU compute paths use conditional `#pragma omp parallel for`. Shared `include/vgre/common/openmp_helper.h` header.
@@ -125,10 +132,10 @@ See `docs/missingFeatures.md` for the complete exhaustive list.
 ## Quick Start
 
 ```bash
-# Build
+# Build — optional features (RDMA, TPM2, libsecret, SIMD) auto-detected
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
+cmake --build . -j$(nproc)
 
 # Run tests
 ctest --output-on-failure -j$(nproc)

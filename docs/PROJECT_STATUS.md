@@ -1,17 +1,24 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-05-30 (Code-Verified Audit, Track 9/10 Heuristic Elimination Complete)  
-**Build Status**: ✅ 191/191 tests passing  
-**Production Readiness**: **CI/CD-Ready & Core-Emulation Stable** (Full numerical path fidelity; no stubs, no mock values, no hardcoded heuristics)
+**Last Updated**: 2026-06-07 (Deployment Hardening, Zero Warnings, Auto-Feature Detection)  
+**Build Status**: ✅ 192/192 tests passing  
+**Production Readiness**: **CI/CD-Ready & Core-Emulation Stable** (Full numerical path fidelity; no stubs, no mock values, no hardcoded heuristics; zero compiler warnings with `-Werror`)
 
 VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime designed to execute unmodified CUDA, cuBLAS, cuDNN, cuSPARSE, cuSolver, cuRAND, and NCCL workloads on standard x86-64 and ARM64 CPU architectures. It intercepts GPU API calls at load time and runs them on host hardware using an LLVM-18 JIT compilation pipeline and a thread-safe parallel execution model.
+
+### 2026-06-07 Session Fixes
+- **Zero compiler warnings** — strict-aliasing type-punning replaced with `std::memcpy`, all `warn_unused_result` captures added, `static thread_local` cross-TU semantic bug resolved via `extern thread_local`. Warnings-as-errors (`-Werror`) enabled globally.
+- **`g_current_ctx` cross-TU bug** — `static thread_local` in a shared header gave each TU its own independent per-thread CUDA context pointer. `cuCtxSetCurrent` in one TU was invisible to `cuCtxGetCurrent` in another. Fixed: `extern thread_local` + single definition in `cuda_driver_device_context.cpp`.
+- **K8s deployment** — `--is-master` flag added to `vgre-worker` for headless container master mode. K8s device plugin rewired: `context.Context` in all gRPC handlers, `grpc.NewClient` + `insecure.NewCredentials`, `VGRE_DEVICE_PLUGIN_PATH` env var, proper `<-stream.Context().Done()`. Distroless base image; C++ runtime libraries added to Dockerfiles.
+- **Auto-detected build features** — CMake probes libibverbs, libtss2-esys, libsecret-1, and CPU SIMD at configure time; all four default ON when installed; build never aborts on missing optional deps.
+- **Cross-platform FFI errors** — `vgre_ffi.dart` emits OS-specific hints on library load failure (Linux/macOS/Windows).
 
 ---
 
 ## 1. Core Platform Verification
 
 Across Linux, Windows (10+ Build 1803+), and macOS, VGRE has been validated using property-based exploration, race-condition analysis, and static-destruction verification:
-- **100% Core Passes**: All 191 regression, integration, and platform-specific tests pass cleanly.
+- **100% Core Passes**: All 192 regression, integration, and platform-specific tests pass cleanly.
 - **Zero Simulation/Zero Stubs**: Every compute path runs real CPU math (via AVX/ARM64 vector instructions and OpenBLAS/LAPACK backends), ensuring bit-identical outputs to real hardware.
 - **Teardown Stability**: Thread lifecycles, socket listeners, and memory heaps are managed deterministically. Static destruction deadlocks have been fully eliminated.
 
@@ -19,7 +26,7 @@ Across Linux, Windows (10+ Build 1803+), and macOS, VGRE has been validated usin
 
 ## 2. Genuinely Missing or Partially Implemented Features
 
-As of May 30, 2026, all software-emulatable features are implemented. The remaining gaps are hardware-level constraints where CPU emulation must naturally fall back to a high-fidelity proxy or report platform limits. 
+As of June 7, 2026, all software-emulatable features are implemented. The remaining gaps are hardware-level constraints where CPU emulation must naturally fall back to a high-fidelity proxy or report platform limits. 
 
 For the comprehensive, definitive list of boundary conditions (such as physical PMU counters, SASS binary execution, and GPUDirect RDMA), please see [missingFeatures.md](missingFeatures.md).
 
@@ -64,18 +71,18 @@ The following components are fully implemented, verified via regression tests, a
 
 ## 4. Test Suite Summary
 
-The VGRE test suite runs 191 tests covering all aspects of memory management, compiler translation, compute libraries, and clustering:
+The VGRE test suite runs 192 tests covering all aspects of memory management, compiler translation, compute libraries, and clustering:
 
 | Suite | Focus | Tests Run | Result |
 |---|---|---|---|
 | Unit | TLB, Scheduler, Concurrency, Security, Data Structures | 49 | ✅ Passed |
 | Integration | JIT, Graphs, UVM, Streams, Multi-Device, Cluster | 42 | ✅ Passed |
-| API | cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSolver, cuRAND, CUDA RT | 70 | ✅ Passed |
+| API | cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSolver, cuRAND, CUDA RT | 71 | ✅ Passed |
 | Compiler | Clang Parser, FLOP Counting, PTX Kernel Parser | 4 | ✅ Passed |
 | Core | Dirty Page Tracking, Radix Sort, Texture, VEB Tree | 7 | ✅ Passed |
 | Advanced | TCP Cluster Security, Hybrid Auth, Diagnostic Logger | 18 | ✅ Passed |
 | Platform | Cross-Platform Worker | 1 | ✅ Passed |
-| **Total** | | **194 test files → 191 CTest targets** | **✅ All Passed** |
+| **Total** | | **192 CTest targets** | **✅ All Passed** |
 
 ---
 

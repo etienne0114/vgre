@@ -34,6 +34,10 @@ spec:
 4. **DaemonSet / Deployment**: `vgre-<cluster-name>-workers` executing the compute node worker daemons.
 5. **NetworkPolicy**: `vgre-<cluster-name>-network-policy` locking down communication between VGRE components.
 
+## Master Node: Headless Mode
+
+The master Deployment uses `vgre-worker --is-master` (not `--master`) as its ENTRYPOINT. This starts the coordinator in headless container mode: binds on the cluster port, accepts worker connections, does not launch the Flutter dashboard. The Dockerfile at `docker/Dockerfile.master` is configured correctly.
+
 ## Local Development and Building
 
 ### Prerequisites

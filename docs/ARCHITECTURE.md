@@ -1,7 +1,7 @@
 # VGRE Architecture & Design
 
-**Version**: 11.0.0
-**Last Updated**: 2026-05-30
+**Version**: 11.1.0
+**Last Updated**: 2026-06-07
 
 ---
 
@@ -78,6 +78,9 @@ VGRE (Virtual GPU Runtime Engine) is a CUDA emulation runtime that intercepts GP
 - **Linux/macOS**: `LD_PRELOAD` environment variable loads `libvgre_cudart.so`
 - **Windows**: DLL replacement or PATH manipulation
 - **Python**: ctypes bindings to C API
+
+**Thread-Local CUDA Context (`g_current_ctx`)**:
+`g_current_ctx` is declared `extern thread_local` in `cuda_driver_internal.h` with a single canonical definition in `cuda_driver_device_context.cpp`. All translation units share one per-thread instance — `cuCtxSetCurrent` and `cuCtxGetCurrent` are always coherent regardless of which TU calls them. (Prior `static thread_local` in the header gave each TU its own independent copy, causing `cuCtxGetCurrent` to always return `nullptr` when called from a TU other than the one that ran `cuCtxSetCurrent`.)
 
 ### 2. Runtime Engine (`src/core/runtime_engine.cpp`)
 
@@ -316,6 +319,9 @@ launchRemoteKernel()
 - Manual node list via `VGRE_CLUSTER_NODES` env var
 - Mesh topology support via `VGRE_MESH_PEERS`
 - IPv6 dual-stack: all TCP paths via `getaddrinfo(AF_UNSPEC)` with IPv4 fallback
+
+**Headless Master Mode**:
+Pass `--is-master` to `vgre-worker` to start in master/coordinator mode without supplying an upstream master address. Used by the K8s master Deployment (`Dockerfile.master` ENTRYPOINT). This calls `TCPClusterManager::initialize(true, "", port)` — the node binds as master and accepts incoming worker connections.
 
 **Workload Partitioning** (3D recursive bisection):
 - Capacity computed once per node (not per comparison) via pre-built `caps[]` vector
@@ -684,11 +690,11 @@ VGRE_MESH_PEERS=ip:port,...           # Mesh topology
 - [ ] Flash Attention integration
 - [ ] Fused transformer kernels
 - [x] OpenTelemetry/Prometheus metrics export
-- [ ] Kubernetes operator for cluster orchestration
+- [x] Kubernetes operator for cluster orchestration (`src/deployment/vgre_operator/`, `src/deployment/k8s_device_plugin/`)
 - [x] WebSocket transport for WAN clusters
 - [x] Zero-copy shared memory for local clusters
 
 ---
 
-**Version**: 11.0.0
-**Last Updated**: 2026-05-30
+**Version**: 11.1.0
+**Last Updated**: 2026-06-07
