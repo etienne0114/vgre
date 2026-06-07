@@ -202,29 +202,31 @@ void blockSparseMM(const BlockSparseMatrix<T, IndexType>& A,
     std::memset(C, 0, C_rows * C_cols * sizeof(T));
     
     IndexType block_size = A.block_size;
-    
+
+    // Pre-allocate temp block outside both loops — avoids per-iteration allocation
+    // and supports arbitrary block_size (not just ≤16).
+    std::vector<T> temp_block(static_cast<std::size_t>(block_size) * block_size);
+
     for (IndexType b_a = 0; b_a < A.num_blocks; ++b_a) {
         IndexType block_row_a = A.block_row_indices[b_a];
         IndexType block_col_a = A.block_col_indices[b_a];
         const T* block_a = A.block_values + b_a * block_size * block_size;
-        
+
         for (IndexType b_b = 0; b_b < B.num_blocks; ++b_b) {
             IndexType block_row_b = B.block_row_indices[b_b];
             IndexType block_col_b = B.block_col_indices[b_b];
-            
+
             // Only multiply if column of A matches row of B
             if (block_col_a != block_row_b) continue;
-            
+
             const T* block_b = B.block_values + b_b * block_size * block_size;
-            
+
             IndexType row_start = block_row_a * block_size;
             IndexType row_end = std::min((block_row_a + 1) * block_size, C_rows);
             IndexType col_start = block_col_b * block_size;
             IndexType col_end = std::min((block_col_b + 1) * block_size, C_cols);
-            
-            // Temporary block for multiplication result
-            T temp_block[16 * 16];  // Max block size 16x16
-            simdBlockMultiply(block_a, block_b, temp_block, block_size);
+
+            simdBlockMultiply(block_a, block_b, temp_block.data(), block_size);
             
             // Add to C
             for (IndexType i = row_start; i < row_end; ++i) {

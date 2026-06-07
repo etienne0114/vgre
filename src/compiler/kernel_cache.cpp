@@ -42,7 +42,7 @@ VGREResult KernelCache::initialize(const std::string& cacheDir) {
         if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_PROFILE, NULL, 0, path))) {
             cacheDir_ = std::string(path) + "\\.vgre\\cache";
         } else {
-            cacheDir_ = "C:\\vgre_cache";
+            cacheDir_ = vgre::os::get_temp_dir() + "\\vgre_cache";
         }
 #else
         const char* home = vgre_get_config("HOME");
@@ -57,7 +57,7 @@ VGREResult KernelCache::initialize(const std::string& cacheDir) {
         } else {
             // Configurable cache directory via VGRE_CACHE_DIR
             const char* e = vgre_get_config("VGRE_CACHE_DIR");
-            cacheDir_ = e ? e : "/tmp/vgre_cache";
+            cacheDir_ = e ? e : (vgre::os::get_temp_dir() + "/vgre_cache");
         }
 #endif
     }

@@ -185,7 +185,7 @@ std::string ResourceLedger::computeLedgerPath() const {
   // Configurable ledger path via VGRE_LEDGER_PATH
   const char* e = vgre_get_config("VGRE_LEDGER_PATH");
   if (e) return e;
-  return "/tmp/vgre_ledger.json";
+  return vgre::os::get_temp_dir() + "/vgre_ledger.json";
 #endif
 }
 

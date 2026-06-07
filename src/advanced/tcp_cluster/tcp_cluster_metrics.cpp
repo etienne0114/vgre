@@ -7,6 +7,7 @@
 #include "vgre/advanced/tcp_cluster/internal/diagnostic_logger.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/os_backend.h"
 #include <fstream>
 
 namespace vgre {
@@ -68,7 +69,7 @@ void TCPClusterManager::exportMetricsForMonitoring() {
                 out_path += "vgre_tcp_cluster_metrics.json";
             }
         } else {
-            out_path = "/tmp/vgre_tcp_cluster_metrics.json";
+            out_path = vgre::os::get_temp_dir() + "/vgre_tcp_cluster_metrics.json";
         }
         std::ofstream f(out_path);
         if (f.is_open()) { f << json.str(); f.close(); }

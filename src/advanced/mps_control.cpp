@@ -137,7 +137,26 @@ static bool readAll(mps_handle_t fd, void* buf, size_t len) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 MPSServer::MPSServer(const std::string& socketPath, int maxClients)
-    : socketPath_(socketPath), maxClients_(maxClients) {}
+    : socketPath_(socketPath), maxClients_(maxClients) {
+    if (socketPath_.empty()) {
+        // Prefer an env override, then XDG_RUNTIME_DIR (Linux), then TMPDIR, then /tmp.
+        const char* env = ::getenv("VGRE_MPS_SOCKET_PATH");
+        if (env && env[0]) {
+            socketPath_ = env;
+        } else {
+#if defined(_WIN32)
+            socketPath_ = "\\\\.\\pipe\\vgre_mps";
+#else
+            const char* runtimeDir = ::getenv("XDG_RUNTIME_DIR");
+            if (runtimeDir && runtimeDir[0]) {
+                socketPath_ = std::string(runtimeDir) + "/vgre_mps.sock";
+            } else {
+                socketPath_ = vgre::os::get_temp_dir() + "/vgre_mps.sock";
+            }
+#endif
+        }
+    }
+}
 
 MPSServer::~MPSServer() {
     stop();
@@ -146,10 +165,23 @@ MPSServer::~MPSServer() {
 bool MPSServer::start() {
 #if defined(_WIN32)
     // Windows: use named pipe instead of Unix domain socket.
-    std::string pipeName = "\\\\.\\pipe\\" + socketPath_;
-    // Normalize: if socketPath_ already starts with \\.\pipe\, use as-is.
-    if (socketPath_.find("\\\\.\\pipe\\") == 0) pipeName = socketPath_;
-    else if (socketPath_.find("/tmp/") == 0) pipeName = "\\\\.\\pipe\\vgre_mps";
+    std::string pipeName;
+    if (socketPath_.find("\\\\.\\pipe\\") == 0 || socketPath_.find("\\\\?\\pipe\\") == 0) {
+        // Already a properly-formed named pipe path.
+        pipeName = socketPath_;
+    } else if (!socketPath_.empty() && socketPath_[0] == '/') {
+        // POSIX-style path (e.g. /tmp/vgre_mps.sock, /run/user/.../vgre_mps.sock):
+        // derive pipe name from the basename.
+        auto sep = socketPath_.rfind('/');
+        std::string base = (sep != std::string::npos) ? socketPath_.substr(sep + 1) : socketPath_;
+        if (base.empty()) base = "vgre_mps";
+        // Strip .sock suffix for a cleaner pipe name.
+        if (base.size() > 5 && base.substr(base.size() - 5) == ".sock")
+            base = base.substr(0, base.size() - 5);
+        pipeName = "\\\\.\\pipe\\" + base;
+    } else {
+        pipeName = "\\\\.\\pipe\\" + socketPath_;
+    }
 
     // Build a DACL allowing only CREATOR_OWNER + SYSTEM — no other local users.
     PSECURITY_DESCRIPTOR pSD = nullptr;
@@ -214,7 +246,13 @@ bool MPSServer::start() {
     // Use getpwuid(getuid()) as authoritative home directory instead of $HOME
     // so that the path cannot be spoofed by the calling environment.
     std::string secureSocketPath = socketPath_;
-    if (socketPath_.find("/tmp/") == 0) {
+    // Relocate from any world-writable temp directory (/tmp, /var/tmp) to $HOME/.vgre/
+    // to prevent local privilege escalation via socket hijacking.
+    // Paths under XDG_RUNTIME_DIR, TMPDIR (macOS per-user), or $HOME are already safe.
+    auto isWorldWritableTmp = [](const std::string& p) {
+        return p.find("/tmp/") == 0 || p.find("/var/tmp/") == 0;
+    };
+    if (isWorldWritableTmp(socketPath_)) {
         const char* homeDir = nullptr;
 #if !defined(_WIN32)
         struct passwd *pw = getpwuid(getuid());

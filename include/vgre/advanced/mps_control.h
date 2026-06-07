@@ -111,7 +111,7 @@ class MPSServer {
 public:
     static constexpr int kDefaultMaxClients = 16;
 
-    explicit MPSServer(const std::string& socketPath = "/tmp/vgre_mps.sock",
+    explicit MPSServer(const std::string& socketPath = "",
                        int maxClients = kDefaultMaxClients);
     ~MPSServer();
 

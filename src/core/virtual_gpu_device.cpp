@@ -19,6 +19,9 @@
 #if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
 #include <cpuid.h>
 #endif
+#if defined(_WIN32) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>  // __cpuid — CPU brand string on Windows x86/x64
+#endif
 
 namespace vgre {
 namespace core {
@@ -26,7 +29,32 @@ namespace core {
 // ── Helpers: read CPU info from /proc/cpuinfo ──────────────────────────────
 static std::string readCPUModelName() {
 #if defined(_WIN32)
-  return "VGRE Virtual GPU (Windows CPU)";
+#  if defined(_M_X64) || defined(_M_IX86)
+  // CPUID leaves 0x80000002–0x80000004 give the processor brand string.
+  int info[4] = {};
+  __cpuid(info, static_cast<int>(0x80000000u));
+  if (static_cast<unsigned>(info[0]) >= 0x80000004u) {
+    char brand[49] = {};
+    __cpuid(reinterpret_cast<int*>(&brand[ 0]), static_cast<int>(0x80000002u));
+    __cpuid(reinterpret_cast<int*>(&brand[16]), static_cast<int>(0x80000003u));
+    __cpuid(reinterpret_cast<int*>(&brand[32]), static_cast<int>(0x80000004u));
+    brand[48] = '\0';
+    std::string result(brand);
+    auto first = result.find_first_not_of(" \t");
+    if (first != std::string::npos) result.erase(0, first);
+    while (!result.empty() && std::isspace(static_cast<unsigned char>(result.back())))
+      result.pop_back();
+    if (!result.empty()) return result;
+  }
+  return "VGRE Virtual CPU (x86 Windows)";
+#  else
+  // ARM Windows: PROCESSOR_IDENTIFIER env var carries model description.
+  const char* id = ::getenv("PROCESSOR_IDENTIFIER");
+  if (id && id[0]) return std::string(id);
+  const char* arch = ::getenv("PROCESSOR_ARCHITECTURE");
+  if (arch && arch[0]) return std::string("VGRE Virtual CPU (") + arch + " Windows)";
+  return "VGRE Virtual CPU (ARM Windows)";
+#  endif
 #elif defined(__APPLE__)
   // Configurable CPU name buffer size via VGRE_CPU_NAME_BUFFER_SIZE (default 256)
   static const int kCpuNameBufferSize = []() -> int {
@@ -271,11 +299,11 @@ void VirtualGPUDevice::detectHardware() {
         classFile >> classCode;
         // 0x030000 is VGA, 0x030200 is 3D controller
         if (classCode.find("0x030") != std::string::npos) {
-          unsigned int bus, dev, func;
-          if (sscanf(entry->d_name, "%*x:%x:%x.%u", &bus, &dev, &func) == 3) {
+          unsigned int domain, bus, dev, func;
+          if (sscanf(entry->d_name, "%x:%x:%x.%u", &domain, &bus, &dev, &func) == 4) {
             props_.pciBusId = static_cast<int>(bus) + static_cast<int>(id_);
             props_.pciDeviceId = static_cast<int>(dev);
-            props_.pciDomainId = 0;
+            props_.pciDomainId = static_cast<int>(domain);
             found = true;
             break;
           }

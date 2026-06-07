@@ -169,13 +169,101 @@ void avx512bf16Matmul(const uint16_t* A, const uint16_t* B, float* C,
 #endif
 
 #ifdef __AMX__
+
+// Convert FP32 → BF16 with round-to-nearest-even (standard IEEE truncation).
+static inline uint16_t f32_to_bf16(float f) noexcept {
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(bits));
+    uint32_t lsb = (bits >> 16) & 1u;
+    bits += 0x7FFFu + lsb;
+    return static_cast<uint16_t>(bits >> 16);
+}
+
+// AMX tile configuration block — must be 64-byte aligned per ISA spec.
+struct alignas(64) TileCfg {
+    uint8_t  palette;       // 1 = AMX palette (only valid value)
+    uint8_t  start_row;     // used for restartability, 0 for normal use
+    uint8_t  pad[14];
+    uint16_t colsz[16];     // byte-width of each tile's columns (up to 64)
+    uint8_t  rows[16];      // row count for each tile (up to 16)
+};
+
 void amxMatmul(const void* A, const void* B, void* C,
-              size_t m, size_t n, size_t k,
-              size_t lda, size_t ldb, size_t ldc) {
-    // Intel AMX implementation
-    // This requires specific tile configuration and AMX intrinsics
-    // Simplified fallback for now
-    simdMatmul((const float*)A, (const float*)B, (float*)C, m, n, k, lda, ldb, ldc);
+               size_t m, size_t n, size_t k,
+               size_t lda, size_t ldb, size_t ldc) {
+    const float* fA = static_cast<const float*>(A);
+    const float* fB = static_cast<const float*>(B);
+    float*       fC = static_cast<float*>(C);
+
+    // Zero output — same convention as simdMatmul.
+    for (size_t i = 0; i < m; ++i)
+        std::memset(fC + i * ldc, 0, n * sizeof(float));
+
+    // AMX-BF16 tile dimensions:
+    //   TMM0 — A tile:    tile_m rows × tile_k BF16 cols  → colsz = tile_k×2 (max 64 bytes → tile_k≤32)
+    //   TMM1 — B tile:    ceil(tile_k/2) VNNI rows × tile_n×2 BF16 words → colsz = tile_n×4
+    //   TMM2 — C tile:    tile_m rows × tile_n FP32 cols  → colsz = tile_n×4 (max 64 bytes → tile_n≤16)
+    constexpr size_t TM = 16;
+    constexpr size_t TN = 16;
+    constexpr size_t TK = 32;
+
+    for (size_t mi = 0; mi < m; mi += TM) {
+        const size_t tm = std::min(TM, m - mi);
+
+        for (size_t ni = 0; ni < n; ni += TN) {
+            const size_t tn = std::min(TN, n - ni);
+
+            // Per (mi,ni) accumulator in main memory — loaded/stored each K-slice.
+            alignas(64) float c_buf[TM * TN] = {};
+
+            for (size_t ki = 0; ki < k; ki += TK) {
+                const size_t tk  = std::min(TK, k - ki);
+                const size_t tk2 = (tk + 1) / 2;  // VNNI rows = ⌈tk/2⌉
+
+                // Pack A: tm×tk FP32 → tm×tk BF16 (row-major, stride=TK elements).
+                alignas(64) uint16_t pbA[TM * TK] = {};
+                for (size_t i = 0; i < tm; ++i)
+                    for (size_t j = 0; j < tk; ++j)
+                        pbA[i * TK + j] = f32_to_bf16(fA[(mi + i) * lda + (ki + j)]);
+
+                // Pack B into VNNI format: tk2 rows × (tn×2) BF16 words.
+                // VNNI element [row=r, col=2*j+{0,1}] = B[ki + 2r + {0,1}][ni + j].
+                alignas(64) uint16_t pbB[TK * TN] = {};  // tk2*tn*2 ≤ TK*TN
+                for (size_t j = 0; j < tn; ++j) {
+                    for (size_t i = 0; i < tk; i += 2) {
+                        const size_t r = i / 2;
+                        pbB[r * (TN * 2) + j * 2 + 0] =
+                            f32_to_bf16(fB[(ki + i)     * ldb + (ni + j)]);
+                        pbB[r * (TN * 2) + j * 2 + 1] =
+                            (i + 1 < tk) ? f32_to_bf16(fB[(ki + i + 1) * ldb + (ni + j)]) : 0u;
+                    }
+                }
+
+                // Configure tiles for this (tm, tn, tk) shape.
+                TileCfg cfg = {};
+                cfg.palette  = 1;
+                cfg.rows[0]  = static_cast<uint8_t>(tm);
+                cfg.rows[1]  = static_cast<uint8_t>(tk2);
+                cfg.rows[2]  = static_cast<uint8_t>(tm);
+                cfg.colsz[0] = static_cast<uint16_t>(tk  * sizeof(uint16_t)); // A: tk BF16/row
+                cfg.colsz[1] = static_cast<uint16_t>(tn  * 2 * sizeof(uint16_t)); // B: tn pairs/VNNI row
+                cfg.colsz[2] = static_cast<uint16_t>(tn  * sizeof(float));    // C: tn FP32/row
+                _tile_loadconfig(&cfg);
+
+                _tile_loadd(0, pbA,   static_cast<int>(TK  * sizeof(uint16_t)));
+                _tile_loadd(1, pbB,   static_cast<int>(TN  * 2 * sizeof(uint16_t)));
+                _tile_loadd(2, c_buf, static_cast<int>(TN  * sizeof(float)));
+                _tdpbf16ps(2, 0, 1);  // TMM2 += TMM0 × TMM1 (BF16 in, FP32 accumulate)
+                _tile_stored(2, c_buf, static_cast<int>(TN * sizeof(float)));
+            }
+
+            // Write accumulated block to output.
+            for (size_t i = 0; i < tm; ++i)
+                for (size_t j = 0; j < tn; ++j)
+                    fC[(mi + i) * ldc + (ni + j)] = c_buf[i * TN + j];
+        }
+    }
+    _tile_release();
 }
 #endif
 
