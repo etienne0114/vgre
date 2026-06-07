@@ -43,7 +43,7 @@ option(VGRE_BUILD_SLURM_GRES  "Build the SLURM GRES vGPU plugin"        ON)
 
 # ── Feature toggles ───────────────────────────────────────────────────────────
 option(VGRE_ENABLE_NATIVE_SIMD
-    "Enable host-specific SIMD flags (AVX2/AVX-512). OFF = portable binaries."  OFF)
+    "Enable host-specific SIMD flags (AVX2/AVX-512). OFF = portable binaries."  ON)
 # Windows: LAPACK does not ship by default — require explicit opt-in once the
 # user has installed Intel oneAPI MKL or vcpkg OpenBLAS (-DVGRE_USE_LAPACK=ON).
 # Linux/macOS: default ON because liblapack-dev / Accelerate are readily available.
@@ -57,8 +57,17 @@ option(VGRE_USE_LAPACK
     ${_vgre_lapack_default})
 option(VGRE_USE_FFTW3
     "Use FFTW3 as cuFFT backend; falls back to built-in Cooley-Tukey"    ON)
+# Auto-detect libibverbs so RDMA defaults ON when the library is present.
+find_library(_rdma_autodetect  NAMES ibverbs)
+find_path   (_rdma_inc_autodetect NAMES infiniband/verbs.h)
+if(_rdma_autodetect AND _rdma_inc_autodetect)
+    set(_VGRE_RDMA_AUTO_DEFAULT ON)
+else()
+    set(_VGRE_RDMA_AUTO_DEFAULT OFF)
+endif()
 option(VGRE_ENABLE_RDMA
-    "Enable RDMA/RoCE zero-copy cluster transport (requires libibverbs)" OFF)
+    "Enable RDMA/RoCE zero-copy cluster transport (requires libibverbs)"
+    ${_VGRE_RDMA_AUTO_DEFAULT})
 # Auto-detect gRPC availability before the option is evaluated so callers
 # don't have to pass -DVGRE_ENABLE_GRPC=ON on systems where it is present.
 find_library(_grpc_autodetect NAMES grpc++)
@@ -79,14 +88,31 @@ else()
     option(VGRE_USE_OPENCL_BACKEND "Enable OpenCL integrated GPU backend" ON)
 endif()
 
-# ── Linux-only optional security backends ─────────────────────────────────────
+# ── Linux-only optional security backends — auto-detect if deps present ────────
 if(UNIX AND NOT APPLE)
-    option(VGRE_USE_TPM2      "Enable TPM 2.0 hardware security (tss2-esys)" OFF)
-    option(VGRE_USE_LIBSECRET "Enable GNOME Keyring / KWallet (libsecret-1)" OFF)
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(_tpm2_probe   QUIET tss2-esys tss2-mu tss2-tctildr)
+        pkg_check_modules(_secret_probe QUIET libsecret-1)
+    endif()
+    if(_tpm2_probe_FOUND)
+        set(_VGRE_TPM2_AUTO_DEFAULT ON)
+    else()
+        set(_VGRE_TPM2_AUTO_DEFAULT OFF)
+    endif()
+    if(_secret_probe_FOUND)
+        set(_VGRE_LIBSECRET_AUTO_DEFAULT ON)
+    else()
+        set(_VGRE_LIBSECRET_AUTO_DEFAULT OFF)
+    endif()
+    option(VGRE_USE_TPM2      "Enable TPM 2.0 hardware security (tss2-esys)"
+           ${_VGRE_TPM2_AUTO_DEFAULT})
+    option(VGRE_USE_LIBSECRET "Enable GNOME Keyring / KWallet (libsecret-1)"
+           ${_VGRE_LIBSECRET_AUTO_DEFAULT})
 endif()
 
 # ── CI / quality ──────────────────────────────────────────────────────────────
-option(VGRE_WARNINGS_AS_ERRORS "Treat all compiler warnings as errors (for CI)" OFF)
+option(VGRE_WARNINGS_AS_ERRORS "Treat all compiler warnings as errors (for CI)" ON)
 
 # ── Runtime feature gates (default ON — validated; OFF provides rollback path) ─
 option(ENABLE_VGRE_TLB
@@ -677,10 +703,11 @@ if(VGRE_ENABLE_RDMA)
         set(_VGRE_RDMA_LIBS  "${IBVERBS_LIB}")
         message(STATUS "RDMA: enabled — libibverbs at ${IBVERBS_LIB}")
     else()
-        message(FATAL_ERROR
-            "VGRE_ENABLE_RDMA=ON but libibverbs not found.\n"
-            "  Install : sudo apt install libibverbs-dev rdma-core\n"
-            "  Disable : cmake -DVGRE_ENABLE_RDMA=OFF")
+        message(WARNING
+            "VGRE_ENABLE_RDMA=ON but libibverbs not found — RDMA disabled.\n"
+            "  Install: sudo apt install libibverbs-dev rdma-core\n"
+            "  TCP cluster transport remains active.")
+        set(VGRE_ENABLE_RDMA OFF CACHE BOOL "" FORCE)
     endif()
 else()
     message(STATUS "RDMA: disabled (pass -DVGRE_ENABLE_RDMA=ON to enable)")
@@ -1232,7 +1259,16 @@ endif()
 # ──────────────────────────────────────────────────────────────────────────────
 # §21b  Kubernetes VGRE Operator  (Go, optional)
 # ──────────────────────────────────────────────────────────────────────────────
-option(VGRE_BUILD_K8S_OPERATOR "Build the Kubernetes VGRE Operator (requires Go 1.22+)" OFF)
+# Auto-detect Go toolchain for K8s operator build.
+find_program(_go_autodetect go)
+set(_k8s_operator_dir "${PROJECT_SOURCE_DIR}/src/deployment/vgre_operator")
+if(_go_autodetect AND EXISTS "${_k8s_operator_dir}/go.mod")
+    set(_VGRE_K8S_AUTO_DEFAULT ON)
+else()
+    set(_VGRE_K8S_AUTO_DEFAULT OFF)
+endif()
+option(VGRE_BUILD_K8S_OPERATOR "Build the Kubernetes VGRE Operator (requires Go 1.22+)"
+       ${_VGRE_K8S_AUTO_DEFAULT})
 set(_VGRE_K8S_OPERATOR_FOUND FALSE)
 if(VGRE_BUILD_K8S_OPERATOR)
     find_program(GO_EXECUTABLE go DOC "Go toolchain 'go' binary")
