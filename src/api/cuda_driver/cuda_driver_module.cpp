@@ -1,7 +1,9 @@
 // CUDA Driver API — cuda driver module
 
 #include "cuda_driver_internal.h"
+#include "vgre/api/fatbinary_utils.h"
 #include "vgre/common/platform.h"
+#include "../../compiler/sass/sass_decoder.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -242,15 +244,86 @@ CUresult cuLinkCreate_v2(unsigned int numOptions, int *options, void **optionVal
     return cuLinkCreate(numOptions, options, optionValues, stateOut);
 }
 
-CUresult cuLinkAddData(CUlinkState state, int /*type*/, void *data, size_t size,
+CUresult cuLinkAddData(CUlinkState state, int type, void *data, size_t size,
                        const char * /*name*/, unsigned int /*numOptions*/,
                        int * /*options*/, void ** /*optionValues*/) {
     if (!state || !data || size == 0) return CUDA_ERROR_INVALID_VALUE;
     auto *ls = reinterpret_cast<CUlinkStateImpl*>(state);
-    ls->ptxBuffers.push_back(
-        std::vector<uint8_t>(static_cast<uint8_t*>(data),
-                             static_cast<uint8_t*>(data) + size));
-    return CUDA_SUCCESS;
+
+    // CU_JIT_INPUT_PTX (1): raw PTX text bytes, store directly
+    if (type == 1) {
+        ls->ptxBuffers.push_back(
+            std::vector<uint8_t>(static_cast<uint8_t*>(data),
+                                 static_cast<uint8_t*>(data) + size));
+        return CUDA_SUCCESS;
+    }
+
+    // CU_JIT_INPUT_FATBINARY (2): extract embedded PTX from fatbinary container
+    if (type == 2) {
+        std::string ptx = vgre::fatbin::parseSections(
+            static_cast<const uint8_t*>(data), size);
+        if (ptx == vgre::fatbin::kSassOnlyMarker || ptx.empty()) {
+            VGRE_LOG_ERROR("cuLinkAddData",
+                ptx == vgre::fatbin::kSassOnlyMarker
+                    ? "Fatbinary has no PTX sections (SASS-only). "
+                      "Rebuild with -gencode arch=compute_XX,code=compute_XX."
+                    : "Failed to extract PTX from fatbinary container.");
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        ls->ptxBuffers.push_back(std::vector<uint8_t>(ptx.begin(), ptx.end()));
+        return CUDA_SUCCESS;
+    }
+
+    // CU_JIT_INPUT_OBJECT (3): host ELF object embedding a .nv_fatbin section
+    if (type == 3) {
+        vgre::common::ELFReader elf(data, size);
+        size_t fbSize = 0;
+        const char* fbPtr = elf.getSectionData(".nv_fatbin", fbSize);
+        if (!fbPtr || fbSize == 0)
+            fbPtr = elf.getSectionData(".nvFatBinSegment", fbSize);
+        if (!fbPtr || fbSize == 0) {
+            VGRE_LOG_ERROR("cuLinkAddData",
+                "ELF object has no .nv_fatbin/.nvFatBinSegment section.");
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        std::string ptx = vgre::fatbin::parseSections(
+            reinterpret_cast<const uint8_t*>(fbPtr), fbSize);
+        if (ptx == vgre::fatbin::kSassOnlyMarker || ptx.empty()) {
+            VGRE_LOG_ERROR("cuLinkAddData",
+                "No extractable PTX in .nv_fatbin section of ELF object.");
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        ls->ptxBuffers.push_back(std::vector<uint8_t>(ptx.begin(), ptx.end()));
+        return CUDA_SUCCESS;
+    }
+
+    // CU_JIT_INPUT_CUBIN (0): standalone ELF cubin — look for .nv_ptx or SASS-decode
+    if (type == 0) {
+        vgre::common::ELFReader elf(data, size);
+        size_t ptxSecSize = 0;
+        const char* ptxPtr = elf.getSectionData(".nv_ptx", ptxSecSize);
+        if (ptxPtr && ptxSecSize > 0) {
+            ls->ptxBuffers.push_back(
+                std::vector<uint8_t>(ptxPtr, ptxPtr + ptxSecSize));
+            return CUDA_SUCCESS;
+        }
+        std::string decoded = vgre::sass::decodeSassToPtx(
+            static_cast<const uint8_t*>(data), size);
+        if (decoded.empty()) {
+            VGRE_LOG_ERROR("cuLinkAddData",
+                "CU_JIT_INPUT_CUBIN: no .nv_ptx section and SASS decode failed.");
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        ls->ptxBuffers.push_back(
+            std::vector<uint8_t>(decoded.begin(), decoded.end()));
+        return CUDA_SUCCESS;
+    }
+
+    // CU_JIT_INPUT_LIBRARY (4) and CU_JIT_INPUT_NVVM (5) are not supported
+    VGRE_LOG_ERROR("cuLinkAddData",
+        "Unsupported CUjitInputType=" + std::to_string(type) +
+        " — only CUBIN(0), PTX(1), FATBINARY(2), OBJECT(3) are supported.");
+    return CUDA_ERROR_INVALID_VALUE;
 }
 
 CUresult cuLinkAddData_v2(CUlinkState state, int type, void *data, size_t size,
@@ -259,11 +332,10 @@ CUresult cuLinkAddData_v2(CUlinkState state, int type, void *data, size_t size,
     return cuLinkAddData(state, type, data, size, name, numOptions, options, optionValues);
 }
 
-CUresult cuLinkAddFile(CUlinkState state, int /*type*/, const char *path,
-                       unsigned int /*numOptions*/, int * /*options*/,
-                       void ** /*optionValues*/) {
+CUresult cuLinkAddFile(CUlinkState state, int type, const char *path,
+                       unsigned int numOptions, int *options,
+                       void **optionValues) {
     if (!state || !path) return CUDA_ERROR_INVALID_VALUE;
-    // Attempt to load file content as PTX
     std::vector<uint8_t> buf;
     {
         FILE *f = fopen(path, "rb");
@@ -277,9 +349,8 @@ CUresult cuLinkAddFile(CUlinkState state, int /*type*/, const char *path,
         fclose(f);
     }
     if (buf.empty()) return CUDA_ERROR_INVALID_VALUE;
-    auto *ls = reinterpret_cast<CUlinkStateImpl*>(state);
-    ls->ptxBuffers.push_back(std::move(buf));
-    return CUDA_SUCCESS;
+    return cuLinkAddData(state, type, buf.data(), buf.size(),
+                         path, numOptions, options, optionValues);
 }
 
 CUresult cuLinkAddFile_v2(CUlinkState state, int type, const char *path,

@@ -7,6 +7,7 @@
  */
 
 #include "vgre/api/cuda_interceptor.h"
+#include "vgre/api/fatbinary_utils.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/platform.h"
 #include "vgre/common/elf_reader.h"
@@ -23,9 +24,6 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-#ifdef VGRE_HAS_ZLIB
-#include <zlib.h>
-#endif
 
 // To avoid name conflicts, we define exactly the symbols frameworks need.
 
@@ -44,115 +42,7 @@ struct dim3 {
 
 using namespace vgre::common;
 
-// ── NVIDIA fatbinary container parser ────────────────────────────────────────
-// Parses the binary container format that nvcc embeds in .cubin / .fatbin files.
-// Returns the first PTX payload found (kind=2), or empty string if only SASS
-// (kind=1) sections are present.
-//
-// Fatbin header (16 bytes):
-//   magic(4)=0xba55ed50 | version(2)=1 | headerSize(2)=16 | fatSize(8)
-// Per-section header (headerSize bytes, then dataSize bytes payload):
-//   kind(4): 1=cubin/SASS, 2=PTX | headerSize(4) | dataSize(8)
-//   minor(1)+major(1)+flags(2)(at offset 16) | cubinVer(4) | uncompressedSize(8)
-static constexpr uint32_t kFatbinMagic    = 0xba55ed50u;
-static constexpr uint32_t kFatbinMagicOld = 0xba55ed01u;
-static constexpr uint32_t kFatbinWrapper  = 0x466243b1u; // __fatBinC_Wrapper_t magic
-static constexpr uint32_t kFatbinKindSASS = 1u;
-static constexpr uint32_t kFatbinKindPTX  = 2u;
-
-// Sentinel stored in moduleSources_ when a module contains only SASS sections.
-static const std::string kSassOnlyMarker = "__VGRE_SASS_ONLY__";
-
-struct FatbinContainerHdr {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t headerSize;
-    uint64_t fatSize;
-};
-
-struct FatbinSectionHdr {
-    uint32_t kind;
-    uint32_t headerSize;
-    uint64_t dataSize;
-    // offset 16: minor(1) + major(1) + flags(2)
-    uint8_t  minorSM;
-    uint8_t  majorSM;
-    uint16_t flags;
-    // offset 20: cubinVersion(4)
-    uint32_t cubinVersion;
-    // offset 24: uncompressedSize(8)
-    uint64_t uncompressedSize;
-    // padding to headerSize follows; then dataSize bytes of payload
-};
-
-static std::string parseFatbinSections(const uint8_t* ptr, size_t totalBytes) {
-    if (totalBytes < sizeof(FatbinContainerHdr)) return "";
-    const auto* hdr = reinterpret_cast<const FatbinContainerHdr*>(ptr);
-    if (hdr->magic != kFatbinMagic && hdr->magic != kFatbinMagicOld) return "";
-    if (hdr->headerSize < 16 || hdr->headerSize > 64) return "";
-
-    size_t sectionOffset = hdr->headerSize;
-    size_t fatEnd = hdr->headerSize + static_cast<size_t>(hdr->fatSize);
-    if (fatEnd > totalBytes) fatEnd = totalBytes;
-
-    bool hasSASS = false;
-    while (sectionOffset + sizeof(FatbinSectionHdr) <= fatEnd) {
-        const auto* sec = reinterpret_cast<const FatbinSectionHdr*>(ptr + sectionOffset);
-        if (sec->headerSize < 32 || sec->headerSize > 4096) break;
-        if (sec->dataSize > totalBytes) break;
-
-        size_t payloadOff = sectionOffset + sec->headerSize;
-        size_t payloadEnd = payloadOff + static_cast<size_t>(sec->dataSize);
-        if (payloadEnd > totalBytes) break;
-
-        if (sec->kind == kFatbinKindPTX && sec->dataSize > 0) {
-            const char* ptxData = reinterpret_cast<const char*>(ptr + payloadOff);
-            VGRE_LOG_INFO("CUDART", "Found PTX section in fatbinary (" +
-                          std::to_string(sec->dataSize) + " bytes, sm_" +
-                          std::to_string(sec->majorSM) + std::to_string(sec->minorSM) + ")");
-
-            if (sec->uncompressedSize > 0) {
-                // Compressed PTX (zlib/deflate, identified by uncompressedSize > 0)
-#ifdef VGRE_HAS_ZLIB
-                uLongf destLen = static_cast<uLongf>(sec->uncompressedSize) + 1;
-                std::vector<char> decompressed(destLen + 1, '\0');
-                int ret = uncompress(
-                    reinterpret_cast<Bytef*>(decompressed.data()), &destLen,
-                    reinterpret_cast<const Bytef*>(ptxData),
-                    static_cast<uLong>(sec->dataSize));
-                if (ret == Z_OK && destLen > 0) {
-                    VGRE_LOG_INFO("CUDART", "Decompressed PTX section: " +
-                                  std::to_string(destLen) + " bytes");
-                    return std::string(decompressed.data(), destLen);
-                }
-                VGRE_LOG_WARN("CUDART", "zlib decompression failed (ret=" +
-                              std::to_string(ret) + ") — trying linear scan");
-#else
-                VGRE_LOG_WARN("CUDART",
-                    "Compressed PTX section found but zlib not available "
-                    "(build with -DVGRE_ENABLE_ZLIB=ON). Falling back to linear scan.");
-#endif
-                return ""; // signal caller to fall through to linear scan
-            }
-            return std::string(ptxData, static_cast<size_t>(sec->dataSize));
-        } else if (sec->kind == kFatbinKindSASS) {
-            hasSASS = true;
-            VGRE_LOG_INFO("CUDART", "Found SASS/cubin section in fatbinary (sm_" +
-                          std::to_string(sec->majorSM) + std::to_string(sec->minorSM) +
-                          ", " + std::to_string(sec->dataSize) + " bytes)");
-        }
-        sectionOffset = payloadEnd;
-    }
-
-    if (hasSASS) {
-        VGRE_LOG_WARN("CUDART",
-            "Fatbinary contains SASS-only sections (no embedded PTX). "
-            "VGRE requires PTX for JIT compilation. "
-            "Rebuild with -lineinfo or ensure PTX is embedded (-gencode arch=compute_XX,code=compute_XX).");
-        return kSassOnlyMarker;
-    }
-    return "";
-}
+using namespace vgre::fatbin;
 
 static std::string extractPTXFromImage(const void *image, size_t sizeHint = 0) {
   if (!image)
@@ -189,7 +79,7 @@ static std::string extractPTXFromImage(const void *image, size_t sizeHint = 0) {
   }
 
   // ── 2. __fatBinC_Wrapper_t: wrapper struct whose [2] field is a data ptr ─
-  if (header[0] == kFatbinWrapper) {
+  if (header[0] == kWrapper) {
     // Layout: magic(4), version(4), data*(8), filename*(8)
     const uint64_t* wrapperFields = reinterpret_cast<const uint64_t*>(image);
     // data pointer is in the second 8-byte slot (bytes 8-15)
@@ -197,16 +87,16 @@ static std::string extractPTXFromImage(const void *image, size_t sizeHint = 0) {
     if (dataPtr != 0) {
       const uint8_t* fatbinData = reinterpret_cast<const uint8_t*>(
           static_cast<uintptr_t>(dataPtr));
-      std::string parsed = parseFatbinSections(fatbinData, 64 * 1024 * 1024u);
+      std::string parsed = parseSections(fatbinData, 64 * 1024 * 1024u);
       if (!parsed.empty()) return parsed;
     }
   }
 
   // ── 3. Raw fatbin container ──────────────────────────────────────────────
-  if (header[0] == kFatbinMagic || header[0] == kFatbinMagicOld) {
-    std::string parsed = parseFatbinSections(bytes, scanSize);
+  if (header[0] == kMagic || header[0] == kMagicOld) {
+    std::string parsed = parseSections(bytes, scanSize);
     if (!parsed.empty()) return parsed;
-    // parseFatbinSections returned "" → compressed PTX; fall through to linear scan
+    // parseSections returned "" → compressed PTX; fall through to linear scan
   }
 
   // ── 4. Fallback: linear scan for PTX signature (.version + .target) ──────

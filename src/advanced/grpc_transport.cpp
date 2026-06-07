@@ -5,6 +5,7 @@
 
 #include "vgre/advanced/grpc_transport.h"
 #include "vgre/common/logger.h"
+#include <cstdlib>
 
 #ifdef VGRE_HAS_GRPC
 // Generated protobuf + gRPC headers (produced by cmake custom_command)
@@ -178,14 +179,16 @@ public:
         const vgre::cluster::DeviceInfoRequest*,
         vgre::cluster::DeviceInfoResponse* resp) override
     {
-        resp->set_device_name("VGRE Virtual GPU");
-        resp->set_total_mem(vgre::core::MemoryManager::instance().getTotalMemory());
-        resp->set_free_mem(vgre::core::MemoryManager::instance().getTotalMemory()
-                         - vgre::core::MemoryManager::instance().getUsedMemory());
-        resp->set_compute_major(8);
-        resp->set_compute_minor(0);
-        resp->set_sm_count(1);
-        resp->set_max_threads_sm(2048);
+        vgre::DeviceProperties props;
+        vgre::core::RuntimeEngine::instance().getDeviceProperties(0, props);
+        auto& mm = vgre::core::MemoryManager::instance();
+        resp->set_device_name(props.name);
+        resp->set_total_mem(mm.getTotalMemory());
+        resp->set_free_mem(mm.getTotalMemory() - mm.getUsedMemory());
+        resp->set_compute_major(static_cast<uint32_t>(props.major));
+        resp->set_compute_minor(static_cast<uint32_t>(props.minor));
+        resp->set_sm_count(static_cast<uint32_t>(props.multiProcessorCount));
+        resp->set_max_threads_sm(static_cast<uint32_t>(props.maxThreadsPerSM));
         return grpc::Status::OK;
     }
 
@@ -359,26 +362,67 @@ bool VGREGRPCClient::getDeviceInfo(DeviceInfo& out) {
 }
 
 #else
-// ── Stub implementations when gRPC is disabled ───────────────────────────────
-VGREGRPCServer::VGREGRPCServer(const std::string& a) : listenAddr_(a) {}
+// ── No-gRPC implementations — emit diagnostics instead of silently failing ───
+static constexpr const char* kNotBuiltMsg =
+    "gRPC transport not built. "
+    "Rebuild with -DVGRE_ENABLE_GRPC=ON and install libgrpc++-dev.";
+
+VGREGRPCServer::VGREGRPCServer(const std::string& a) : listenAddr_(a) {
+    const char* grpc_port = std::getenv("VGRE_GRPC_PORT");
+    if (grpc_port && grpc_port[0] != '\0') {
+        VGRE_LOG_WARN("gRPC", std::string("VGRE_GRPC_PORT=") + grpc_port +
+            " is set but VGRE was not built with gRPC support. " + kNotBuiltMsg);
+    }
+}
 VGREGRPCServer::~VGREGRPCServer() {}
-bool VGREGRPCServer::start() { return false; }
+
+bool VGREGRPCServer::start() {
+    VGRE_LOG_ERROR("gRPC", kNotBuiltMsg);
+    return false;
+}
 void VGREGRPCServer::wait()  {}
 void VGREGRPCServer::stop(int) {}
 
-VGREGRPCClient::VGREGRPCClient(const std::string& a) : targetAddr_(a) {}
+VGREGRPCClient::VGREGRPCClient(const std::string& a) : targetAddr_(a) {
+    VGRE_LOG_ERROR("gRPC",
+        std::string("Cannot connect to gRPC target '") + a + "': " + kNotBuiltMsg);
+}
 VGREGRPCClient::~VGREGRPCClient() {}
-bool     VGREGRPCClient::isConnected()  const { return false; }
-uint64_t VGREGRPCClient::allocMemory(uint64_t)  { return 0; }
-bool     VGREGRPCClient::freeMemory(uint64_t)   { return false; }
-bool     VGREGRPCClient::memcpyH2D(uint64_t, const void*, uint64_t) { return false; }
-bool     VGREGRPCClient::memcpyD2H(void*, uint64_t, uint64_t)       { return false; }
-int      VGREGRPCClient::launchKernel(const char*,
+
+bool VGREGRPCClient::isConnected() const { return false; }
+
+uint64_t VGREGRPCClient::allocMemory(uint64_t) {
+    VGRE_LOG_ERROR("gRPC", std::string("allocMemory failed: ") + kNotBuiltMsg);
+    return 0;
+}
+bool VGREGRPCClient::freeMemory(uint64_t) {
+    VGRE_LOG_ERROR("gRPC", std::string("freeMemory failed: ") + kNotBuiltMsg);
+    return false;
+}
+bool VGREGRPCClient::memcpyH2D(uint64_t, const void*, uint64_t) {
+    VGRE_LOG_ERROR("gRPC", std::string("memcpyH2D failed: ") + kNotBuiltMsg);
+    return false;
+}
+bool VGREGRPCClient::memcpyD2H(void*, uint64_t, uint64_t) {
+    VGRE_LOG_ERROR("gRPC", std::string("memcpyD2H failed: ") + kNotBuiltMsg);
+    return false;
+}
+int VGREGRPCClient::launchKernel(const char* name,
     uint32_t, uint32_t, uint32_t,
     uint32_t, uint32_t, uint32_t,
-    uint64_t, const void*, uint32_t) { return -1; }
-bool     VGREGRPCClient::sync(uint64_t)      { return false; }
-bool     VGREGRPCClient::getDeviceInfo(DeviceInfo&) { return false; }
+    uint64_t, const void*, uint32_t) {
+    VGRE_LOG_ERROR("gRPC",
+        std::string("launchKernel('") + (name ? name : "") + "') failed: " + kNotBuiltMsg);
+    return -1;
+}
+bool VGREGRPCClient::sync(uint64_t) {
+    VGRE_LOG_ERROR("gRPC", std::string("sync failed: ") + kNotBuiltMsg);
+    return false;
+}
+bool VGREGRPCClient::getDeviceInfo(DeviceInfo&) {
+    VGRE_LOG_ERROR("gRPC", std::string("getDeviceInfo failed: ") + kNotBuiltMsg);
+    return false;
+}
 #endif
 
 } // namespace grpc_transport
