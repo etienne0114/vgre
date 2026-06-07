@@ -21,7 +21,10 @@
 
 #include "vgre/common/os_backend.h"
 #if defined(__linux__)
-#include <sys/eventfd.h>  // eventfd() — semaphore file descriptor
+#  include <sys/eventfd.h>  // eventfd() — semaphore file descriptor
+#elif defined(__APPLE__)
+#  include <semaphore.h>    // sem_t, sem_init, sem_post, sem_trywait
+#  include <time.h>         // nanosleep
 #endif
 
 // ── External semaphore handle types (mirror CUDA headers) ────────────────────
@@ -38,6 +41,8 @@ struct ExtSem {
     int type = 0;
 #if defined(__linux__)
     int efd = -1;          // eventfd or timeline eventfd
+#elif defined(__APPLE__)
+    sem_t* psem = nullptr;
 #elif defined(_WIN32)
     HANDLE hEvent = nullptr;
 #endif
@@ -67,9 +72,8 @@ std::unordered_map<uint64_t, ExtSem*>& getExtSems() {
 
 using cudaExternalSemaphore_t = uint64_t;
 using vgre_err_t = int;
-static constexpr vgre_err_t kOK          = 0;
-static constexpr vgre_err_t kInvalidVal  = 1;
-static constexpr vgre_err_t kNotSupported= 801;
+static constexpr vgre_err_t kOK         = 0;
+static constexpr vgre_err_t kInvalidVal = 1;
 
 struct cudaExternalSemaphoreHandleDesc {
     int type;
@@ -107,36 +111,54 @@ vgre_err_t cudaImportExternalSemaphore(
 
 #if defined(__linux__)
     if (desc->type == CUDA_EXTERNAL_SEM_OPAQUE_FD) {
-        // Duplicate the caller's fd so we own the lifetime
         s->efd = dup(desc->handle.fd);
-        if (s->efd < 0) {
-            // If dup fails, create our own eventfd
+        if (s->efd < 0)
             s->efd = eventfd(0, EFD_NONBLOCK | EFD_SEMAPHORE);
-        }
     } else if (desc->type == CUDA_EXTERNAL_SEM_TIMELINE_FD) {
         s->efd = dup(desc->handle.fd);
         if (s->efd < 0) s->efd = eventfd(0, EFD_NONBLOCK);
     } else if (desc->type == CUDA_EXTERNAL_SEM_NVSCISYNCOBJ) {
-        // NVSCI sync objects are not supported in this implementation
-        delete s;
-        return kNotSupported;
+        // Proxy the NvSciSyncObj through a local eventfd. Real cross-device
+        // NvSci requires NVIDIA hardware and libnvscisync — not available in the
+        // CPU emulator. Single-process CUDA↔CUDA ordering works correctly.
+        s->efd = eventfd(0, EFD_NONBLOCK);
+        VGRE_LOG_INFO("ExtSem",
+            "NvSciSyncObj proxied via local eventfd (in-process ordering only)");
     } else {
-        // Unsupported type: create a local semaphore for forward-compat
         s->efd = eventfd(0, EFD_NONBLOCK | EFD_SEMAPHORE);
         VGRE_LOG_WARN("ExtSem",
-            "cudaImportExternalSemaphore: unsupported handle type " +
+            "cudaImportExternalSemaphore: unknown handle type " +
             std::to_string(desc->type) + " — using local eventfd");
     }
+#elif defined(__APPLE__)
+    s->psem = static_cast<sem_t*>(std::malloc(sizeof(sem_t)));
+    if (!s->psem) { delete s; return kInvalidVal; }
+    if (sem_init(s->psem, 0, 0) != 0) {
+        std::free(s->psem); s->psem = nullptr;
+        delete s; return kInvalidVal;
+    }
+    if (desc->type == CUDA_EXTERNAL_SEM_NVSCISYNCOBJ) {
+        VGRE_LOG_INFO("ExtSem",
+            "NvSciSyncObj proxied via POSIX semaphore on macOS (in-process ordering only)");
+    } else if (desc->type != CUDA_EXTERNAL_SEM_OPAQUE_FD &&
+               desc->type != CUDA_EXTERNAL_SEM_TIMELINE_FD &&
+               desc->type != CUDA_EXTERNAL_SEM_OPAQUE_WIN32) {
+        VGRE_LOG_WARN("ExtSem",
+            "cudaImportExternalSemaphore: unknown handle type " +
+            std::to_string(desc->type) + " — using local semaphore");
+    }
 #elif defined(_WIN32)
-    if (desc->type == CUDA_EXTERNAL_SEM_OPAQUE_WIN32) {
-        s->hEvent = desc->handle.win32.handle
-            ? DuplicateHandle(GetCurrentProcess(),
-                              static_cast<HANDLE>(desc->handle.win32.handle),
-                              GetCurrentProcess(), nullptr, 0, FALSE,
-                              DUPLICATE_SAME_ACCESS)
-                  ? desc->handle.win32.handle : nullptr
-            : CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (desc->type == CUDA_EXTERNAL_SEM_OPAQUE_WIN32 && desc->handle.win32.handle) {
+        HANDLE dup = nullptr;
+        DuplicateHandle(GetCurrentProcess(),
+                        static_cast<HANDLE>(desc->handle.win32.handle),
+                        GetCurrentProcess(), &dup, 0, FALSE,
+                        DUPLICATE_SAME_ACCESS);
+        s->hEvent = dup ? dup : CreateEvent(nullptr, FALSE, FALSE, nullptr);
     } else {
+        if (desc->type == CUDA_EXTERNAL_SEM_NVSCISYNCOBJ)
+            VGRE_LOG_INFO("ExtSem",
+                "NvSciSyncObj proxied via Win32 Event (in-process ordering only)");
         s->hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     }
 #endif
@@ -160,6 +182,8 @@ vgre_err_t cudaDestroyExternalSemaphore(cudaExternalSemaphore_t extSem) {
     auto* s = it->second;
 #if defined(__linux__)
     if (s->efd >= 0) close(s->efd);
+#elif defined(__APPLE__)
+    if (s->psem) { sem_destroy(s->psem); std::free(s->psem); }
 #elif defined(_WIN32)
     if (s->hEvent) CloseHandle(s->hEvent);
 #endif
@@ -188,6 +212,8 @@ vgre_err_t cudaSignalExternalSemaphoresAsync(
             ssize_t wr;
             do { wr = write(s->efd, &v, sizeof(v)); } while (wr < 0 && errno == EINTR);
         }
+#elif defined(__APPLE__)
+        if (s->psem) sem_post(s->psem);
 #elif defined(_WIN32)
         if (s->hEvent) SetEvent(s->hEvent);
 #endif
@@ -219,7 +245,7 @@ vgre_err_t cudaWaitExternalSemaphoresAsync(
 
 #if defined(__linux__)
         if (s->efd >= 0) {
-            // Poll + read until value ≥ waitVal or timeout
+            // Poll + read until value >= waitVal or timeout
             while (std::chrono::steady_clock::now() < deadline) {
                 struct pollfd pfd{s->efd, POLLIN, 0};
                 int ret = poll(&pfd, 1, 5); // 5 ms timeout
@@ -229,6 +255,15 @@ vgre_err_t cudaWaitExternalSemaphoresAsync(
                         if (val >= waitVal) break;
                     }
                 }
+            }
+        }
+#elif defined(__APPLE__)
+        if (s->psem) {
+            // macOS lacks sem_timedwait — spin with usleep using a 100 µs step
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (sem_trywait(s->psem) == 0) break;
+                struct timespec ts{0, 100000}; // 100 µs
+                nanosleep(&ts, nullptr);
             }
         }
 #elif defined(_WIN32)
