@@ -50,6 +50,10 @@ list(PREPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ── Build scope ───────────────────────────────────────────────────────────────
+# VGRE_MINIMAL: a lean core-runtime profile for size-constrained deployments —
+# it forces every optional integration OFF (see the override block below), so the
+# image carries only the CUDA/cuBLAS/JIT core. Enable with -DVGRE_MINIMAL=ON.
+option(VGRE_MINIMAL           "Lean core runtime: disable all optional integrations" OFF)
 option(VGRE_BUILD_TESTS       "Build the VGRE CTest test suite"          ON)
 option(VGRE_BUILD_EXAMPLES    "Build the VGRE example programs"          ON)
 option(VGRE_BUILD_DASHBOARD   "Build the Flutter dashboard"              ON)
@@ -147,6 +151,21 @@ option(ENABLE_VGRE_AMX
 option(VGRE_ENABLE_ZLIB
     "Use system zlib to decompress compressed PTX sections in fat binaries"
     ON)
+
+# ── Minimal profile: force every optional integration OFF ─────────────────────
+# Applied after the optional options are declared so it overrides their defaults
+# (and any cached value) to give a reproducible lean build. The core runtime
+# (CUDA/cuBLAS/cuSOLVER via LAPACK, LLVM JIT, scheduler) is always retained.
+if(VGRE_MINIMAL)
+    foreach(_opt
+            VGRE_BUILD_TESTS VGRE_BUILD_EXAMPLES VGRE_BUILD_DASHBOARD
+            VGRE_BUILD_SLURM_GRES VGRE_ENABLE_RDMA VGRE_ENABLE_GRPC
+            VGRE_USE_FFTW3 VGRE_USE_OPENCL_BACKEND VGRE_USE_TPM2
+            VGRE_USE_LIBSECRET VGRE_ENABLE_ZLIB)
+        set(${_opt} OFF CACHE BOOL "disabled by VGRE_MINIMAL" FORCE)
+    endforeach()
+    message(STATUS "VGRE_MINIMAL=ON → optional integrations disabled (lean core runtime)")
+endif()
 
 # Hide developer-only knobs from cmake-gui unless explicitly set
 mark_as_advanced(VGRE_WARNINGS_AS_ERRORS VGRE_USE_TPM2 VGRE_USE_LIBSECRET)
@@ -1342,6 +1361,18 @@ if(VGRE_BUILD_K8S_OPERATOR)
 else()
     message(STATUS "K8s Operator: disabled (pass -DVGRE_BUILD_K8S_OPERATOR=ON to enable)")
 endif()
+
+# ── Footprint report (Track 20) ───────────────────────────────────────────────
+# `cmake --build build --target vgre_footprint` prints the runtime library sizes
+# (as built and stripped) plus the active optional-feature profile, so the lean
+# VGRE_MINIMAL build can be measured against the full one.
+add_custom_target(vgre_footprint
+    COMMAND ${CMAKE_COMMAND} -E echo
+        "Profile: minimal=${VGRE_MINIMAL} grpc=${VGRE_ENABLE_GRPC} rdma=${VGRE_ENABLE_RDMA} opencl=${VGRE_USE_OPENCL_BACKEND} fftw3=${VGRE_USE_FFTW3} zlib=${VGRE_ENABLE_ZLIB} lapack=${VGRE_USE_LAPACK}"
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tools/footprint_report.sh
+        $<TARGET_FILE:vgre> $<TARGET_FILE:vgre_cudart>
+    DEPENDS vgre vgre_cudart
+    VERBATIM)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # §22  Install rules  (GNUInstallDirs — no hardcoded lib/bin/include paths)
