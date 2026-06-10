@@ -27,7 +27,7 @@ This document tracks every remaining implementation task — real gaps, security
 | O | Kernel auto-vectorization hints | ✅ Done |
 | P | MPS per-client resource quotas | 🔴 Not started |
 | Q | Nsight-compatible `.nsys-rep` export | 🔴 Not started |
-| R | Signed JIT cache (HMAC validation) | 🔴 Not started |
+| R | Signed JIT cache (HMAC validation) | ✅ Done |
 | S | Cluster work stealing | 🔴 Not started |
 | T | Cache key includes CPU arch (CPUID) | ✅ Done |
 | U | cuSPARSE SpGEMM reuse | 🔴 Not started |
