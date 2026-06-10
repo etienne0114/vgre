@@ -16,7 +16,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 
 | # | Track | Pri | Maps to | Status |
 |---|---|---|---|---|
-| 1 | CI matrix (Linux/Windows/macOS) build+test | P0 | §3.1 | 🔴 Not started |
+| 1 | CI matrix (Linux/Windows/macOS) build+test | P0 | §3.1 | 🟡 Workflow added |
 | 2 | Honest status docs (no false "validated") | P0 | §3.1 | 🟡 In progress |
 | 3 | Prometheus `/metrics` endpoint | P0 | §4.1 | 🔴 Not started |
 | 4 | Health/readiness probes + graceful drain | P0 | §4.2 | 🔴 Not started |
