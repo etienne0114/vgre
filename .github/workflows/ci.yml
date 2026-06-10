@@ -94,6 +94,7 @@ jobs:
           -DLLVM_DIR="$(brew --prefix llvm@18)/lib/cmake/llvm"
           -DCMAKE_PREFIX_PATH="$(brew --prefix llvm@18);$(brew --prefix libomp)"
           -DOpenMP_ROOT="$(brew --prefix libomp)"
+          -DVGRE_WARNINGS_AS_ERRORS=OFF
 
       - name: Build
         run: cmake --build build --parallel

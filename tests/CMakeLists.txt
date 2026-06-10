@@ -544,7 +544,10 @@ set_tests_properties(ConfigBuildInfo PROPERTIES TIMEOUT 30)
 add_executable(test_flash_attention integration/test_flash_attention.cpp)
 target_link_libraries(test_flash_attention PRIVATE vgre)
 add_test(NAME FlashAttention COMMAND test_flash_attention)
-set_tests_properties(FlashAttention PROPERTIES TIMEOUT 120)
+# JIT-compiles its kernels, so serialise it against the other LLVM-JIT tests:
+# under -j2 CI load a concurrent clang fork can transiently fail the first
+# (cold) compile, which surfaced as a non-deterministic non-causal failure.
+set_tests_properties(FlashAttention PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
 
 add_executable(test_cublaslt api/test_cublaslt.cpp)
 target_link_libraries(test_cublaslt PRIVATE vgre_cudart)

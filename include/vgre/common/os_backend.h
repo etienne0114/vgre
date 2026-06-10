@@ -365,7 +365,9 @@ inline bool make_directory(const char* path) noexcept {
 // Returns 4 MiB when the OS query fails or is unsupported.
 // ─────────────────────────────────────────────────────────────────────────────
 inline std::size_t get_l2_cache_size() noexcept {
-    static const std::size_t kDefault = 4 * 1024 * 1024;
+    // Used by the Windows and Linux branches; the macOS branch has its own
+    // Apple-Silicon-specific 12 MiB fallback, so it's conditionally unused there.
+    [[maybe_unused]] static const std::size_t kDefault = 4 * 1024 * 1024;
 #if defined(_WIN32)
     // Walk the processor cache hierarchy via GetLogicalProcessorInformation.
     DWORD bufSz = 0;
