@@ -803,6 +803,12 @@ target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/inc
 add_test(NAME CurandSkipAhead COMMAND test_curand_skipahead)
 set_tests_properties(CurandSkipAhead PROPERTIES TIMEOUT 30)
 
+# Header-only FP8/FP4 quantized GEMM test.
+add_executable(test_fp_quant unit/test_fp_quant.cpp)
+target_include_directories(test_fp_quant PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME FPQuantGemm COMMAND test_fp_quant)
+set_tests_properties(FPQuantGemm PROPERTIES TIMEOUT 30)
+
 add_executable(test_memory_pool unit/test_memory_pool.cpp)
 target_link_libraries(test_memory_pool PRIVATE vgre)
 add_test(NAME MemoryPool COMMAND test_memory_pool)

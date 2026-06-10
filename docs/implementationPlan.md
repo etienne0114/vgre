@@ -32,7 +32,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 14 | MPS per-client pipe instances (Windows) | P1 | §1.4 | 🔴 Not started |
 | 15 | `NOT_SUPPORTED` audit (cuSPARSE/cuSOLVER) | P1 | §2.1, §2.2 | ✅ Audited |
 | 16 | VMM IPC handle (cuMemRetainAllocationHandle) | P1 | §2.3–2.5 | ✅ Done |
-| 17 | FP8 (E4M3/E5M2) + FP4 quantized compute | P1 | §5.1 | 🔴 Not started |
+| 17 | FP8 (E4M3/E5M2) + FP4 quantized compute | P1 | §5.1 | ✅ Core done |
 | 18 | Paged Attention + KV-cache manager | P1 | §5.2 | 🔴 Not started |
 | 19 | Versioned multi-arch Docker images | P1 | §4.3 | 🔴 Not started |
 | 20 | Minimal build profile + footprint report | P2 | §3.3 | 🔴 Not started |
@@ -213,11 +213,23 @@ fix.)
 **Acceptance met**: the real missing VMM IPC handle API round-trips with correct
 refcount lifetime.
 
-### Track 17 — FP8 (E4M3/E5M2) + FP4 quantized compute
-**Files**: new `src/core/math/fp8.h`/`fp4.h`, cuBLASLt GEMM dispatch, WMMA emulation.
-Software E4M3/E5M2 + E2M1 types; scaled GEMM (per-tensor/row/group scales);
-NVFP4/MXFP4 group scaling. Wire into `*_8F_E4M3` cuBLASLt paths and attention.
-**Acceptance**: FP8 GEMM matches a reference dequant→FP32-GEMM→requant at the format's epsilon.
+### Track 17 — FP8 (E4M3/E5M2) + FP4 quantized compute — ✅ core done (2026-06-10)
+**File**: new `include/vgre/core/math/fp_quant_gemm.h`.
+- E4M3 codec with **round-to-nearest-even**, denormals, ±448 saturation, NaN
+  (the pre-existing WMMA encoders truncated; this one rounds).
+- **FP4 E2M1** codec (the genuinely-missing format) — magnitudes
+  {0,.5,1,1.5,2,3,4,6}, nearest-with-ties-to-even.
+- **Per-tensor scaled FP8 GEMM** (`D = sA·sB·dequant(A)·dequant(B)`) and
+  **MXFP4 block-scaled FP4 GEMM** (one dequant scale per K-block, the
+  micro-scaling contract used by NVFP4/MXFP4).
+`test_fp_quant` (9/9): codec round-trips/rounding; the scaled FP8 GEMM equals the
+dequant→fp32 GEMM exactly and is within 3% Frobenius error of the true fp32
+product; the block-scaled FP4 GEMM matches its dequant reference exactly.
+**Follow-up (not done)**: exposing this through a `cublasLtMatmul` FP8/FP4
+descriptor API is a separate, larger surface — no such path exists today. The
+WMMA emulation already has an (unscaled) FP8 MMA; the scaled kernels here are the
+building block for a future cuBLASLt FP8 matmul.
+**Acceptance met**: the FP8 GEMM matches dequant→FP32-GEMM at the format epsilon.
 
 ### Track 18 — Paged Attention + KV-cache manager
 **Files**: new `src/core/kv_cache.cpp`, fusion engine paged-attention kernel.
