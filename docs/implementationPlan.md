@@ -48,13 +48,24 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 
 ## P0 — Blocks an honest "production-ready" claim
 
-### Track 1 — CI matrix (Linux/Windows/macOS)
-**New**: `.github/workflows/ci.yml`. Matrix over `ubuntu-latest`, `windows-latest`,
-`macos-latest`: configure (CMake), build, run `ctest`. Cache LLVM. Until all three
-are green, no doc may claim cross-platform "functional"/"validated". This is the
-single most important production gate — it converts the unverified `#ifdef`
-branches into a tested guarantee.
-**Acceptance**: green CI on all three OSes; test artifacts uploaded.
+### Track 1 — CI matrix (Linux/Windows/macOS) — 🟡 Linux green; macOS bring-up
+**File**: `.github/workflows/ci.yml`. Matrix over Linux (required), macOS +
+Windows (informational `continue-on-error`). The first macOS CI run surfaced real
+breakage that has now been fixed:
+- **`memset_s` undeclared** (`secure_zero.h`): macOS's C11 Annex K `memset_s`
+  needs `__STDC_WANT_LIB_EXT1__` set before `<string.h>`, which is unreliable once
+  another header pulls `<string.h>` in first → switched macOS to the always-correct
+  volatile-loop fallback.
+- **LLVM-22 API breaks** (`getHostCPUFeatures(StringMap&)` and
+  `ThreadSafeContext::getContext()` both gone/changed): Homebrew's default `llvm`
+  is 22, but VGRE targets the LLVM-18 API. CI now pins **`llvm@18`** on macOS and
+  **`llvm-18-dev`** on Linux (the runner's default resolved to 17, < the required
+  18), with explicit `LLVM_DIR`. Making the code itself multi-LLVM-version is a
+  follow-up; pinning keeps the matrix honest now.
+- **Windows**: `choco install llvm` ships clang without `LLVMConfig.cmake`, so
+  configure can't find LLVM — documented as the remaining Windows bring-up item
+  (needs a prebuilt LLVM-18 dev tree or vcpkg `llvm`); stays informational.
+**Acceptance**: Linux green + uploaded logs; macOS/Windows tracked to green.
 
 ### Track 2 — Honest status documentation
 **Files**: `README.md`, `docs/PROJECT_STATUS.md`, `docs/README.md`.
