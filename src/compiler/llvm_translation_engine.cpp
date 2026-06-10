@@ -949,7 +949,10 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
   // FIPS 180-4). The host-arch tag (CPU name + sorted feature flags) ensures a
   // cache built for one microarchitecture is never reused on another (avoids
   // SIGILL from e.g. AVX-512 code on an AVX2 host).
-  std::string cacheKey  = computePtxCacheKey(wrapper, hostArchCacheTag());
+  // Track 23: the fast-tier opt level is part of the key so an -O1 build never
+  // serves an -O3 cache entry (or vice versa) when the threshold changes.
+  std::string cacheKey  = computePtxCacheKey(
+      wrapper, hostArchCacheTag() + "-" + jitFastTierOptTag(wrapper.size()));
   std::string bcPath    = getElfCachePath(cacheKey);
 
   std::string irCode;
