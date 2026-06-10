@@ -10,20 +10,20 @@ This document tracks every remaining implementation task — real gaps, security
 
 | Track | Title | Status |
 |---|---|---|
-| A | gRPC stub diagnostics | 🔴 Not started |
-| B | cuLink FATBIN/CUBIN input handling | 🔴 Not started |
+| A | gRPC stub diagnostics | ✅ Done |
+| B | cuLink FATBIN/CUBIN input handling | ✅ Done |
 | C | CDP kernelFn name-based fallback | 🔴 Not started |
-| D | NVSCI sync object proxy | 🔴 Not started |
+| D | NVSCI sync object proxy | ✅ Done |
 | E | cuDNN backend API — full coverage | 🟡 Partial |
-| F | Security: token KDF salt + env leak | 🔴 Not started |
+| F | Security: token KDF salt + env leak | ✅ Done |
 | G | Windows WSAPoll liveness probe | 🔴 Not started |
 | H | Multiple virtual GPU devices | 🔴 Not started |
-| I | Flash Attention GQA | 🔴 Not started |
-| J | NVTX → Perfetto trace export | 🔴 Not started |
-| K | Dynamic CUDA Graph node fusion | 🔴 Not started |
+| I | Flash Attention GQA | ✅ Done |
+| J | NVTX → Perfetto trace export | ✅ Done |
+| K | Dynamic CUDA Graph node fusion | ✅ Done |
 | L | ELLPACK / Blocked-ELL sparse formats | ✅ Done |
 | M | Tensor parallel intra-process AllReduce | ✅ Done |
-| N | PTX → LLVM bitcode direct path (Triton) | 🔴 Not started |
+| N | PTX → LLVM bitcode direct path (Triton) | ✅ Done |
 | O | Kernel auto-vectorization hints | ✅ Done |
 | P | MPS per-client resource quotas | 🔴 Not started |
 | Q | Nsight-compatible `.nsys-rep` export | 🔴 Not started |
