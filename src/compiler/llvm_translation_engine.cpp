@@ -2,6 +2,7 @@
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/platform.h"
+#include "vgre/common/secure_zero.h"
 #include "vgre/common/retry.h"
 #include "vgre/common/system_utils.h"
 
@@ -603,6 +604,83 @@ static std::array<uint8_t,32> sha256_bytes(const uint8_t* data, size_t len) {
     return digest;
 }
 
+// HMAC-SHA256 (RFC 2104) over the inline SHA-256 above.  Kept self-contained so
+// the compiler module retains no link dependency on libvgre_advanced's crypto.
+static std::array<uint8_t,32> hmac_sha256_inline(const uint8_t* key, size_t keyLen,
+                                                 const uint8_t* msg, size_t msgLen) {
+    uint8_t k[64];
+    std::memset(k, 0, sizeof(k));
+    if (keyLen > 64) {
+        auto kh = sha256_bytes(key, keyLen);
+        std::memcpy(k, kh.data(), 32);
+    } else {
+        std::memcpy(k, key, keyLen);
+    }
+    uint8_t ipad[64], opad[64];
+    for (int i = 0; i < 64; ++i) {
+        ipad[i] = static_cast<uint8_t>(k[i] ^ 0x36u);
+        opad[i] = static_cast<uint8_t>(k[i] ^ 0x5cu);
+    }
+    std::vector<uint8_t> inner;
+    inner.reserve(64 + msgLen);
+    inner.insert(inner.end(), ipad, ipad + 64);
+    inner.insert(inner.end(), msg, msg + msgLen);
+    auto innerHash = sha256_bytes(inner.data(), inner.size());
+
+    uint8_t outer[64 + 32];
+    std::memcpy(outer, opad, 64);
+    std::memcpy(outer + 64, innerHash.data(), 32);
+    auto mac = sha256_bytes(outer, sizeof(outer));
+
+    vgre::common::vgre_secure_zero(k, sizeof(k));
+    vgre::common::vgre_secure_zero(ipad, sizeof(ipad));
+    vgre::common::vgre_secure_zero(opad, sizeof(opad));
+    return mac;
+}
+
+// Constant-time equality for 32-byte tags (defeats timing oracles on the MAC).
+static bool ct_equal_32(const uint8_t* a, const uint8_t* b) {
+    uint8_t diff = 0;
+    for (int i = 0; i < 32; ++i) diff |= static_cast<uint8_t>(a[i] ^ b[i]);
+    return diff == 0;
+}
+
+// Per-machine JIT-cache signing key (Track R).  Derives HMAC(secret, label)
+// where the secret is the cluster auth token when configured (a real secret not
+// stored on disk in plaintext) or a machine-identity string otherwise.  The
+// resulting MAC over each cache entry lets the loader reject binaries an
+// attacker substituted in ~/.vgre/cache without knowing the key.  Computed once.
+static const std::array<uint8_t,32>& jitCacheSigningKey() {
+    static const std::array<uint8_t,32> key = [] {
+        std::string secret;
+        const char* tok = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
+        if (tok && tok[0] != '\0') {
+            secret = tok;  // cluster auth token: strongest available secret
+        } else {
+            // Single-node fallback: bind to machine identity.  Not secret from a
+            // local attacker who can read these files, but still raises the bar
+            // versus an unkeyed checksum and binds the cache to this host.
+            secret = "vgre_jit_cache_machine_v1";
+#if defined(__linux__)
+            std::ifstream mid("/etc/machine-id");
+            if (mid) { std::string s; mid >> s; secret += ":" + s; }
+            std::ifstream uuid("/sys/class/dmi/id/product_uuid");
+            if (uuid) { std::string s; uuid >> s; secret += ":" + s; }
+#endif
+            const char* host = vgre_get_config("HOSTNAME");
+            if (host && *host) secret += std::string(":") + host;
+        }
+        static const char kLabel[] = "vgre_jit_cache_v1";
+        auto mac = hmac_sha256_inline(
+            reinterpret_cast<const uint8_t*>(secret.data()), secret.size(),
+            reinterpret_cast<const uint8_t*>(kLabel), sizeof(kLabel) - 1);
+        if (!secret.empty())
+            vgre::common::vgre_secure_zero(&secret[0], secret.size());
+        return mac;
+    }();
+    return key;
+}
+
 // ── JIT Disk Cache Helpers ─────────────────────────────────────────────────
 
 // Cache key = SHA-256(ptx_source || compile_flags) as 64 lowercase hex chars.
@@ -676,13 +754,16 @@ static std::string getElfCachePath(const std::string& key) {
     return dir + "/" + key + ".elf";
 }
 
-// Atomic write: write elf_bytes + 32-byte SHA-256 footer to {path}.tmp, then
-// rename() to {path}.  Returns false on any I/O error.
+// Atomic write: write elf_bytes + 32-byte HMAC-SHA256 footer to {path}.tmp, then
+// rename() to {path}.  Returns false on any I/O error.  The footer is keyed
+// (Track R) so a tampered cache entry is rejected on read.
 static bool writeElfCache(const std::string& path,
                            const std::vector<uint8_t>& elf_bytes) {
     std::string tmp = path + ".tmp";
-    // Compute SHA-256 footer over content
-    auto footer = sha256_bytes(elf_bytes.data(), elf_bytes.size());
+    // Compute keyed HMAC-SHA256 footer over content.
+    const auto& sk = jitCacheSigningKey();
+    auto footer = hmac_sha256_inline(sk.data(), sk.size(),
+                                     elf_bytes.data(), elf_bytes.size());
 
     {
         std::ofstream ofs(tmp, std::ios::binary);
@@ -704,8 +785,9 @@ static bool writeElfCache(const std::string& path,
     return true;
 }
 
-// Read cache file, verify 32-byte SHA-256 footer.  Returns content bytes on
-// success; empty vector on missing file or integrity failure.
+// Read cache file, verify the 32-byte keyed HMAC-SHA256 footer (Track R).
+// Returns content bytes on success; empty vector on missing file, corruption,
+// or signature mismatch (tampering / wrong machine / legacy unkeyed footer).
 static std::vector<uint8_t> readElfCache(const std::string& path) {
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs) return {};
@@ -717,12 +799,23 @@ static std::vector<uint8_t> readElfCache(const std::string& path) {
     if (all.size() < 32) return {};  // too small to have a footer
 
     std::vector<uint8_t> content(all.begin(), all.end() - 32);
-    std::array<uint8_t,32> stored_hash{};
-    std::copy(all.end() - 32, all.end(), stored_hash.begin());
+    std::array<uint8_t,32> stored_mac{};
+    std::copy(all.end() - 32, all.end(), stored_mac.begin());
 
-    auto computed = sha256_bytes(content.data(), content.size());
-    if (computed != stored_hash) return {};  // corruption detected
-
+    const auto& sk = jitCacheSigningKey();
+    auto computed = hmac_sha256_inline(sk.data(), sk.size(),
+                                       content.data(), content.size());
+    if (!ct_equal_32(computed.data(), stored_mac.data())) {
+        // Either corruption, a cache produced on another machine / with a
+        // different key, or deliberate tampering.  Refuse to load and let the
+        // caller recompile (which overwrites the entry with a valid signature).
+        VGRE_LOG_WARN("LLVMTranslationEngine",
+                      "JIT cache signature mismatch — discarding and recompiling: " +
+                      path);
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        return {};
+    }
     return content;
 }
 
