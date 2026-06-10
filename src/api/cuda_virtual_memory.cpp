@@ -57,6 +57,7 @@ struct PhysAlloc {
     size_t size;
     bool   mapped = false; // mprotect(R|W) applied
     void*  hSection = nullptr; // Windows section handle
+    int    refcount = 1;   // cuMemCreate=1; cuMemRetainAllocationHandle++; cuMemRelease--
 };
 
 struct VAReservation {
@@ -244,6 +245,13 @@ CUresult cuMemRelease(CUmemGenericAllocationHandle handle) {
     auto it = getPhysAllocs().find(handle);
     if (it == getPhysAllocs().end()) return CUDA_ERROR_INVALID_VALUE;
     auto& pa = it->second;
+    // Refcounted: cuMemRetainAllocationHandle may hold additional references.
+    // Only free the physical backing when the last reference is released.
+    if (--pa.refcount > 0) {
+        VGRE_LOG_DEBUG("VirtualMemory", "cuMemRelease: handle=" +
+                       std::to_string(handle) + " refcount=" + std::to_string(pa.refcount));
+        return CUDA_SUCCESS;
+    }
 #if defined(__linux__) || defined(__APPLE__)
     munmap(pa.ptr, pa.size);
 #elif defined(_WIN32)
@@ -603,6 +611,31 @@ CUresult cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* handle,
     }
     *handle = in->allocHandle;
     return CUDA_SUCCESS;
+}
+
+// cuMemRetainAllocationHandle — return the allocation handle that backs a mapped
+// virtual address, incrementing its reference count. The caller owns the new
+// reference and must cuMemRelease it. This is what lets a process recover a
+// handle from an `addr` (e.g. to re-export it for IPC) without the original
+// handle. Looks up the mapping range that contains `addr`.
+CUresult cuMemRetainAllocationHandle(CUmemGenericAllocationHandle* handle,
+                                     void* addr) {
+    if (!handle || !addr) return CUDA_ERROR_INVALID_VALUE;
+    std::lock_guard<std::mutex> lk(getVMMutex());
+    const uintptr_t a = reinterpret_cast<uintptr_t>(addr);
+    for (const auto& kv : getMappings()) {
+        const uintptr_t vaStart = kv.first;
+        const uint64_t  h       = kv.second;
+        auto pit = getPhysAllocs().find(h);
+        if (pit == getPhysAllocs().end()) continue;
+        const uintptr_t vaEnd = vaStart + pit->second.size;
+        if (a >= vaStart && a < vaEnd) {
+            ++pit->second.refcount;     // caller now owns a reference
+            *handle = h;
+            return CUDA_SUCCESS;
+        }
+    }
+    return CUDA_ERROR_INVALID_VALUE;    // addr not in any mapped allocation
 }
 
 // ── Multicast (multi-GPU broadcast) ──────────────────────────────────────────

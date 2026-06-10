@@ -43,6 +43,7 @@ CUresult cuMulticastAddDevice(uint64_t mcHandle, int device);
 CUresult cuMulticastBindMem(uint64_t mcHandle, size_t mcOffset,
                               uint64_t memHandle, size_t offset,
                               size_t size, uint64_t flags);
+CUresult cuMemRetainAllocationHandle(CUmemGenericAllocationHandle* handle, void* addr);
 } // extern "C"
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -299,6 +300,46 @@ static bool test_setaccess() {
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
+// test_retain_handle (Track 16):
+//   Map a physical allocation at a VA, recover its handle from an address inside
+//   the range via cuMemRetainAllocationHandle (refcount now 2), release the
+//   original handle (still backed — refcount 1), verify the memory is still
+//   usable, then release the retained reference (frees on the last release).
+static bool test_retain_handle() {
+    static constexpr size_t MB = 1024ULL * 1024;
+    CUdeviceptr va = 0;
+    CHECK(cuMemAddressReserve(&va, 2 * MB, 0, 0, 0) == CUDA_SUCCESS, "reserve failed");
+    CUmemGenericAllocationHandle h = 0;
+    CHECK(cuMemCreate(&h, 2 * MB, nullptr, 0) == CUDA_SUCCESS, "create failed");
+    CHECK(cuMemMap(va, 2 * MB, 0, h, 0) == CUDA_SUCCESS, "map failed");
+
+    CUmemAccessDesc_t acc{};
+    cuMemSetAccess(va, 2 * MB, &acc, 1);
+    volatile int* p = reinterpret_cast<volatile int*>(va + 1024);
+    *p = 0x5A5A5A5A;
+
+    // Recover the handle from an address inside the mapped range.
+    CUmemGenericAllocationHandle h2 = 0;
+    CHECK(cuMemRetainAllocationHandle(&h2, reinterpret_cast<void*>(va + 4096)) == CUDA_SUCCESS,
+          "cuMemRetainAllocationHandle failed");
+    CHECK(h2 == h, "retained handle does not match the original");
+
+    // An address outside any mapping must fail.
+    CUmemGenericAllocationHandle hBad = 0;
+    CHECK(cuMemRetainAllocationHandle(&hBad, reinterpret_cast<void*>(va + 8 * MB)) != CUDA_SUCCESS,
+          "retain should reject an unmapped address");
+
+    // Release the ORIGINAL reference — still backed by the retained one.
+    CHECK(cuMemRelease(h) == CUDA_SUCCESS, "first release failed");
+    CHECK(*p == 0x5A5A5A5A, "memory freed after only one of two references released");
+
+    // Release the retained reference — now the last; frees the backing.
+    CHECK(cuMemRelease(h2) == CUDA_SUCCESS, "second release failed");
+    cuMemUnmap(va, 2 * MB);
+    cuMemAddressFree(va, 2 * MB);
+    return true;
+}
+
 int main() {
     std::cout << "=== CUDA Virtual Memory Unit Tests (QUEUE-13) ===\n\n";
 
@@ -316,6 +357,7 @@ int main() {
     run(test_double_unmap,             "test_double_unmap");
     run(test_bounds_check,             "test_bounds_check");
     run(test_setaccess,                "test_setaccess");
+    run(test_retain_handle,            "test_retain_handle");
 
     std::cout << "\n" << passed << "/" << (passed + failed) << " tests passed.\n";
     return (failed == 0) ? 0 : 1;

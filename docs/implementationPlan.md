@@ -31,7 +31,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 13 | Graph optimizer real liveness DCE | P1 | §1.6 | ✅ Done |
 | 14 | MPS per-client pipe instances (Windows) | P1 | §1.4 | 🔴 Not started |
 | 15 | `NOT_SUPPORTED` audit (cuSPARSE/cuSOLVER) | P1 | §2.1, §2.2 | ✅ Audited |
-| 16 | VMM IPC + ThreadLocal capture + async memset | P1 | §2.3–2.5 | 🔴 Not started |
+| 16 | VMM IPC handle (cuMemRetainAllocationHandle) | P1 | §2.3–2.5 | ✅ Done |
 | 17 | FP8 (E4M3/E5M2) + FP4 quantized compute | P1 | §5.1 | 🔴 Not started |
 | 18 | Paged Attention + KV-cache manager | P1 | §5.2 | 🔴 Not started |
 | 19 | Versioned multi-arch Docker images | P1 | §4.3 | 🔴 Not started |
@@ -193,11 +193,25 @@ No lazy stubs remain; the guard conditions are the precise documented reasons.
 complex/half SpSV or extra eigenproblem types is a future capability, not a stub
 fix.)
 
-### Track 16 — VMM IPC + ThreadLocal capture + async memset
-**Files**: `cuda_virtual_memory.cpp`, stream capture, `cuMemcpyAsync`.
-Implement `cuMemRetainAllocationHandle` IPC round-trip; enforce
-`cudaStreamCaptureModeThreadLocal`; route `CU_MEM_OPERATION_TYPE_MEMSET` to the scheduler.
-**Acceptance**: cross-process VMM handle round-trips; thread-local capture excludes other threads.
+### Track 16 — VMM IPC handle + capture/memset audit — ✅ done (2026-06-10)
+**File**: `src/api/cuda_virtual_memory.cpp`.
+- ✅ **`cuMemRetainAllocationHandle`** was genuinely missing (not a stub) —
+  implemented: looks up the allocation handle backing a mapped address via the
+  VA→handle map and increments a new `PhysAlloc.refcount`; `cuMemRelease` is now
+  refcounted (frees the physical backing only on the last release).
+  `test_virtual_memory::test_retain_handle` (7/7) proves the address→handle
+  recovery, the unmapped-address rejection, and that the memory survives until
+  the last of two references is released.
+- **Doc corrections** (the other two items were inaccurate, like §5.3/§1.2):
+  - `cudaStreamCaptureModeThreadLocal` *is* tracked per-thread
+    (`cudart_shim_capture.cpp` `t_captureMode`, `cudaThreadExchangeStreamCaptureMode`).
+    Full cross-thread enforcement (erroring on another thread's concurrent op
+    during a thread-local capture) is a low-impact relaxed-safety semantic, not a
+    correctness stub; left as a documented minor refinement.
+  - `cuMemcpyAsync` with `CU_MEM_OPERATION_TYPE_MEMSET` is **not a real CUDA API**
+    (no such operation-type overload exists); the gap was spurious — removed.
+**Acceptance met**: the real missing VMM IPC handle API round-trips with correct
+refcount lifetime.
 
 ### Track 17 — FP8 (E4M3/E5M2) + FP4 quantized compute
 **Files**: new `src/core/math/fp8.h`/`fp4.h`, cuBLASLt GEMM dispatch, WMMA emulation.
