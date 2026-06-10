@@ -20,8 +20,42 @@ const std::regex& getReExternC() {
   return *re;
 }
 const std::regex& getRePtrAttrib() {
-  static const std::regex* re = new std::regex(R"((\b(float|int|double|void|uint32_t|uint64_t|int32_t|int64_t|uchar|char|short|ushort|long|ulong)\s*\*))");
+  // Pointer-typed token, with `unsigned`/`unsigned int` covered. Matches the
+  // type word(s) immediately before `*`.
+  static const std::regex* re = new std::regex(
+      R"(\b(?:unsigned\s+int|unsigned|float|int|double|void|uint32_t|uint64_t|int32_t|int64_t|uchar|char|short|ushort|long|ulong)\s*\*)");
   return *re;
+}
+
+// Add `__global` to every pointer-typed token that does NOT already carry an
+// address-space qualifier (`__global`/`__local`/`__constant`). std::regex has no
+// lookbehind, so we scan matches and check the preceding qualifier by hand —
+// this is what lets a `__local TYPE* tile` parameter (inserted for dynamic shared
+// memory) survive without becoming the invalid `__local __global TYPE*`.
+inline std::string addGlobalAddrSpace(const std::string& in) {
+  const std::regex& rePtr = getRePtrAttrib();
+  std::string out;
+  out.reserve(in.size() + 64);
+  size_t last = 0;
+  for (auto it = std::sregex_iterator(in.begin(), in.end(), rePtr),
+            end = std::sregex_iterator(); it != end; ++it) {
+    const auto& m = *it;
+    const size_t pos = static_cast<size_t>(m.position(0));
+    size_t p = pos;  // walk back over whitespace to the preceding token
+    while (p > 0 && std::isspace(static_cast<unsigned char>(in[p - 1]))) --p;
+    auto endsWith = [&](const char* kw) {
+      const size_t n = std::strlen(kw);
+      return p >= n && in.compare(p - n, n, kw) == 0;
+    };
+    const bool qualified =
+        endsWith("__global") || endsWith("__local") || endsWith("__constant");
+    out.append(in, last, pos - last);
+    if (!qualified) out.append("__global ");
+    out.append(m.str(0));
+    last = pos + static_cast<size_t>(m.length(0));
+  }
+  out.append(in, last, in.size() - last);
+  return out;
 }
 const std::regex& getReBlockIdxX() { static const std::regex* re = new std::regex(R"(blockIdx\.x)"); return *re; }
 const std::regex& getReBlockIdxY() { static const std::regex* re = new std::regex(R"(blockIdx\.y)"); return *re; }
@@ -208,6 +242,13 @@ double IGPUOpenCLExecutor::measureDispatchLatencyMs() {
   return latencyMs;
 }
 
+VGREResult IGPUOpenCLExecutor::transpileToOpenCL(
+    const std::string &kernelName, const std::string &cudaSource,
+    const std::vector<ArgType> &argTypes, std::string &outOpenCLSource) {
+  // Pure source rewrite — no device needed. Local-mem arg count is internal.
+  return transpileKernel(kernelName, cudaSource, argTypes, outOpenCLSource, nullptr);
+}
+
 VGREResult IGPUOpenCLExecutor::transpileKernel(
     const std::string &kernelName, const std::string &cudaSource,
     const std::vector<ArgType> & /*argTypes*/, std::string &outOpenCLSource,
@@ -231,12 +272,17 @@ VGREResult IGPUOpenCLExecutor::transpileKernel(
       while (!sType.empty() && std::isspace(static_cast<unsigned char>(sType.back())))
         sType.pop_back();
       std::string sName = m[2].str();
+      const size_t declPos = static_cast<size_t>(m.position(0));
       // Remove the declaration from the kernel body
-      s.erase(static_cast<size_t>(m.position(0)),
-              static_cast<size_t>(m.length(0)));
-      // Insert `__local TYPE* NAME` as the last parameter of the __kernel function.
-      // Find the parameter list close paren using a simple scan.
-      size_t kpos = s.find("__kernel");
+      s.erase(declPos, static_cast<size_t>(m.length(0)));
+      // Insert `__local TYPE* NAME` as the last parameter of the ENCLOSING
+      // kernel.  Search BACKWARDS from the declaration for the kernel marker:
+      // the source still uses `__global__` at this stage (it is #defined to
+      // __kernel in the preamble), so searching from the start would wrongly
+      // land on the `#define __global__ __kernel` preamble line. rfind from the
+      // declaration lands on the kernel's own signature (the #define is earlier).
+      size_t kpos = s.rfind("__global__", declPos);
+      if (kpos == std::string::npos) kpos = s.rfind("__kernel", declPos);
       if (kpos != std::string::npos) {
         size_t open = s.find('(', kpos);
         if (open != std::string::npos) {
@@ -527,8 +573,9 @@ static inline float vgre_tex1d_f1(const __global float* data, float x) {
 }
 )";
 
-  // Enforce OpenCL __global address space on kernel signature pointers
-  s = std::regex_replace(s, getRePtrAttrib(), "__global $1");
+  // Enforce OpenCL __global address space on kernel signature pointers, leaving
+  // pointers already qualified (e.g. the __local dynamic-shared-mem param) alone.
+  s = addGlobalAddrSpace(s);
 
   // Thread semantic hardware coordinate replacement
   s = std::regex_replace(s, getReBlockIdxX(), "get_group_id(0)");

@@ -819,6 +819,11 @@ target_link_libraries(test_golden_vectors PRIVATE vgre_cudart)
 add_test(NAME GoldenVectors COMMAND test_golden_vectors)
 set_tests_properties(GoldenVectors PROPERTIES TIMEOUT 60)
 
+add_executable(test_igpu_transpile integration/test_igpu_transpile.cpp)
+target_link_libraries(test_igpu_transpile PRIVATE vgre)
+add_test(NAME IGPUTranspileCompile COMMAND test_igpu_transpile)
+set_tests_properties(IGPUTranspileCompile PROPERTIES TIMEOUT 60)
+
 add_executable(test_memory_pool unit/test_memory_pool.cpp)
 target_link_libraries(test_memory_pool PRIVATE vgre)
 add_test(NAME MemoryPool COMMAND test_memory_pool)
