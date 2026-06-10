@@ -531,6 +531,11 @@ target_link_libraries(test_ptx_translate PRIVATE vgre)
 add_test(NAME PTXTranslate COMMAND test_ptx_translate)
 set_tests_properties(PTXTranslate PROPERTIES TIMEOUT 30)
 
+add_executable(test_metrics_server api/test_metrics_server.cpp)
+target_link_libraries(test_metrics_server PRIVATE vgre_cudart)
+add_test(NAME MetricsServer COMMAND test_metrics_server)
+set_tests_properties(MetricsServer PROPERTIES TIMEOUT 120)
+
 add_executable(test_cublaslt api/test_cublaslt.cpp)
 target_link_libraries(test_cublaslt PRIVATE vgre_cudart)
 add_test(NAME CuBLASLtFunctional COMMAND test_cublaslt)

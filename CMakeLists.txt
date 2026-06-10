@@ -1056,6 +1056,7 @@ set(_VGRE_CUDART_SOURCES
     src/api/vgre_c_api.cpp
     src/api/vgre_c_api_graphs.cpp
     src/api/vgre_c_api_telemetry.cpp
+    src/api/metrics_server.cpp
 )
 
 # Compile the hot GEMM kernel with AVX2+FMA unconditionally when the compiler

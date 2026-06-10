@@ -18,7 +18,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 |---|---|---|---|---|
 | 1 | CI matrix (Linux/Windows/macOS) build+test | P0 | §3.1 | 🟡 Workflow added |
 | 2 | Honest status docs (no false "validated") | P0 | §3.1 | ✅ Done |
-| 3 | Prometheus `/metrics` endpoint | P0 | §4.1 | 🔴 Not started |
+| 3 | Prometheus `/metrics` endpoint | P0 | §4.1 | ✅ Done |
 | 4 | Health/readiness probes + graceful drain | P0 | §4.2 | 🔴 Not started |
 | 5 | Config registry + validation + `build_info` | P0 | §4.4, §4.3 | 🔴 Not started |
 | 6 | Parallel-test stability (RESOURCE_LOCK) | P0 | §6.1 | 🔴 Not started |
