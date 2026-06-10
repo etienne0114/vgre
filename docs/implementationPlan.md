@@ -32,7 +32,7 @@ This document tracks every remaining implementation task — real gaps, security
 | T | Cache key includes CPU arch (CPUID) | ✅ Done |
 | U | cuSPARSE SpGEMM reuse | ✅ Done |
 | V | iGPU OpenCL transpiler — SIMD extensions | 🟡 Partial |
-| W | Device-side cuRAND via JIT injection | 🔴 Not started |
+| W | Device-side cuRAND via JIT injection | ✅ Done |
 
 ---
 
