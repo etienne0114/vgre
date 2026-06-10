@@ -13,7 +13,7 @@ namespace vgre {
 namespace advanced {
 
 void TCPClusterManager::processClientStagingBuffer() {
-  fprintf(stderr, "VGRE-DIAG processClientStagingBuffer: thread started\n"); fflush(stderr);
+  VGRE_LOG_DEBUG("TCPCluster", "processClientStagingBuffer: thread started");
   while (enabled_) {
     std::unique_lock<std::mutex> lock(staging_mutex_);
     staging_cv_.wait(lock,
