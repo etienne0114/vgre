@@ -278,6 +278,10 @@ VGRE_EXPORT void vgre_metrics_maybe_autostart(void);    /* honours VGRE_METRICS_
  * kernels finish. Call on SIGTERM for a zero-loss rolling restart. */
 VGRE_EXPORT int  vgre_drain(void);
 
+/* Build identity as a JSON string: version, git hash, build type, SIMD level,
+ * and enabled features. Stable C string (do not free). */
+VGRE_EXPORT const char *vgre_get_build_info(void);
+
 /**
  * @brief Retrieves recent log lines from the engine.
  *

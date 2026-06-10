@@ -18,6 +18,20 @@ if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
         "Create a build directory: cmake -B build && cmake --build build")
 endif()
 
+# Build identity for vgre_get_build_info() (Track 5). Captured into a generated
+# header so a new commit only recompiles build_info.cpp, not the whole library.
+execute_process(COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE VGRE_GIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT VGRE_GIT_HASH)
+    set(VGRE_GIT_HASH "unknown")
+endif()
+configure_file(${CMAKE_SOURCE_DIR}/cmake/build_config.h.in
+               ${CMAKE_BINARY_DIR}/generated/vgre/common/build_config.h @ONLY)
+include_directories(${CMAKE_BINARY_DIR}/generated)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # §1  CMake modules & module path
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1057,6 +1071,7 @@ set(_VGRE_CUDART_SOURCES
     src/api/vgre_c_api_graphs.cpp
     src/api/vgre_c_api_telemetry.cpp
     src/api/metrics_server.cpp
+    src/api/build_info.cpp
 )
 
 # Compile the hot GEMM kernel with AVX2+FMA unconditionally when the compiler
@@ -1096,6 +1111,11 @@ _vgre_configure_library(vgre_cudart PRIVATE)
 # LAPACK::LAPACK is always a valid target (interface stub when fallback is used).
 target_link_libraries(vgre_cudart PRIVATE LAPACK::LAPACK)
 target_link_libraries(vgre_cudart PUBLIC SQLite::SQLite3)  # Track Q: Nsight export
+# build_info.cpp + nsight_exporter.cpp are also compiled into vgre_cudart; mirror
+# the VGRE_HAS_SQLITE define so the SQLite path is enabled there too (Track 5/Q).
+if(SQLITE3_LIBRARY)
+    target_compile_definitions(vgre_cudart PRIVATE VGRE_HAS_SQLITE)
+endif()
 if(VGRE_LAPACK_FALLBACK)
     target_compile_definitions(vgre_cudart PRIVATE VGRE_LAPACK_FALLBACK)
 endif()

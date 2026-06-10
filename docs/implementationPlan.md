@@ -20,7 +20,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 2 | Honest status docs (no false "validated") | P0 | §3.1 | ✅ Done |
 | 3 | Prometheus `/metrics` endpoint | P0 | §4.1 | ✅ Done |
 | 4 | Health/readiness probes + graceful drain | P0 | §4.2 | ✅ Done |
-| 5 | Config registry + validation + `build_info` | P0 | §4.4, §4.3 | 🔴 Not started |
+| 5 | Config registry + validation + `build_info` | P0 | §4.4, §4.3 | ✅ Done |
 | 6 | Parallel-test stability (RESOURCE_LOCK) | P0 | §6.1 | 🔴 Not started |
 | 7 | Flash Attention real tiled online-softmax | P1 | §1.1 | 🔴 Not started |
 | 8 | NCCL pipelined ring (reduce-scatter/all-gather) | P1 | §1.2 | ✅ Done |

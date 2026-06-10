@@ -536,6 +536,11 @@ target_link_libraries(test_metrics_server PRIVATE vgre_cudart)
 add_test(NAME MetricsServer COMMAND test_metrics_server)
 set_tests_properties(MetricsServer PROPERTIES TIMEOUT 120)
 
+add_executable(test_config_buildinfo api/test_config_buildinfo.cpp)
+target_link_libraries(test_config_buildinfo PRIVATE vgre_cudart)
+add_test(NAME ConfigBuildInfo COMMAND test_config_buildinfo)
+set_tests_properties(ConfigBuildInfo PROPERTIES TIMEOUT 30)
+
 add_executable(test_cublaslt api/test_cublaslt.cpp)
 target_link_libraries(test_cublaslt PRIVATE vgre_cudart)
 add_test(NAME CuBLASLtFunctional COMMAND test_cublaslt)
