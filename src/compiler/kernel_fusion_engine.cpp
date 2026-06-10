@@ -7,8 +7,10 @@
 #include "vgre/compiler/kernel_fusion_engine.h"
 #include "vgre/common/logger.h"
 #include <algorithm>
+#include <cctype>
 #include <cfloat>
 #include <cmath>
+#include <cstring>
 #include <regex>
 #include <sstream>
 
@@ -29,13 +31,37 @@ void KernelFusionEngine::registerPattern(const std::string& name,
 // ── Pattern detection ─────────────────────────────────────────────────────
 FusionPattern KernelFusionEngine::detectFlashAttention(const KernelIR& ir) {
     const std::string& src = ir.source;
+
+    // Recognise a float pointer parameter named `name` (e.g. "const float* V"),
+    // matching "*V", "* V", "*  V" with a non-identifier delimiter after the
+    // name.  Attention kernels often declare Q/K/V as parameters but only index
+    // some of them in a given snippet, so keying purely on `V[` usage misses
+    // valid kernels.
+    auto hasPtrParam = [&src](const char* name) {
+        const size_t n = std::strlen(name);
+        for (size_t pos = src.find('*'); pos != std::string::npos;
+             pos = src.find('*', pos + 1)) {
+            size_t i = pos + 1;
+            while (i < src.size() &&
+                   std::isspace(static_cast<unsigned char>(src[i])))
+                ++i;
+            if (src.compare(i, n, name) == 0) {
+                size_t after = i + n;
+                char c = (after < src.size()) ? src[after] : '\0';
+                if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_'))
+                    return true;
+            }
+        }
+        return false;
+    };
+
     // Flash Attention signature: Q, K, V matrices + softmax + scale
     bool hasQ = src.find("query") != std::string::npos ||
-                src.find("Q[") != std::string::npos;
+                src.find("Q[") != std::string::npos || hasPtrParam("Q");
     bool hasK = src.find("key") != std::string::npos ||
-                src.find("K[") != std::string::npos;
+                src.find("K[") != std::string::npos || hasPtrParam("K");
     bool hasV = src.find("value") != std::string::npos ||
-                src.find("V[") != std::string::npos;
+                src.find("V[") != std::string::npos || hasPtrParam("V");
     bool hasSoftmax = src.find("exp") != std::string::npos &&
                       src.find("sum") != std::string::npos;
     bool hasScale = src.find("sqrt") != std::string::npos ||

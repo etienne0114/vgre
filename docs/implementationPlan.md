@@ -24,7 +24,7 @@ This document tracks every remaining implementation task — real gaps, security
 | L | ELLPACK / Blocked-ELL sparse formats | ✅ Done |
 | M | Tensor parallel intra-process AllReduce | ✅ Done |
 | N | PTX → LLVM bitcode direct path (Triton) | 🔴 Not started |
-| O | Kernel auto-vectorization hints | 🔴 Not started |
+| O | Kernel auto-vectorization hints | ✅ Done |
 | P | MPS per-client resource quotas | 🔴 Not started |
 | Q | Nsight-compatible `.nsys-rep` export | 🔴 Not started |
 | R | Signed JIT cache (HMAC validation) | 🔴 Not started |
