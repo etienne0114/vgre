@@ -729,9 +729,12 @@ size_t KernelParser::computeStructSize(const std::string& typeName,
             // Remove array suffix
             auto arrBracket = nestedType.find('[');
             if (arrBracket != std::string::npos) nestedType = nestedType.substr(0, arrBracket);
-            // Remove struct/class/union keywords
-            static const std::regex reStructKw(R"(\b(struct|class|union)\s+)");
-            nestedType = std::regex_replace(nestedType, reStructKw, "");
+            // Remove struct/class/union keywords.  Leaky static (never
+            // destroyed): the parser runs on the JIT worker, which may execute
+            // during process teardown when static locals are being destroyed.
+            static const std::regex *reStructKw =
+                new std::regex(R"(\b(struct|class|union)\s+)");
+            nestedType = std::regex_replace(nestedType, *reStructKw, "");
             // Strip leading/trailing whitespace
             while (!nestedType.empty() && std::isspace(static_cast<unsigned char>(nestedType.front())))
                 nestedType.erase(nestedType.begin());

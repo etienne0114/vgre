@@ -15,6 +15,17 @@ extern thread_local int t_workerIdx;
 // ── Worker loop ────────────────────────────────────────────────────────────
 void Scheduler::workerLoop(int workerIdx) {
   t_workerIdx = workerIdx;
+
+  // The constructor spawns workers before buildNumaTopology() finishes writing
+  // workerNumaNodes_ / workerNumaNodeSet_ (affinity pinning needs the live
+  // thread handles).  Wait for the topology to be published before reading it,
+  // otherwise this read races the constructor's writes.  No tasks can be queued
+  // until the constructor returns, so spinning here costs nothing at startup.
+  while (!topologyReady_.load(std::memory_order_acquire) &&
+         !shutdown_.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+
   int myNode = (workerIdx >= 0 && workerIdx < static_cast<int>(workerNumaNodes_.size()))
                ? workerNumaNodes_[workerIdx]
                : -1;

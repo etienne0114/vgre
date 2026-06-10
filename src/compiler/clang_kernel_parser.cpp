@@ -646,9 +646,11 @@ static std::string convertPTXToCUDA(const std::string &ptxSrc,
     outIR.argTypes.clear();
     outIR.argTypeNames.clear();
 
-    static const std::regex kParamRe(
+    // Leaky static (never destroyed): runs on the JIT worker, which may execute
+    // during process teardown while static locals are being destroyed.
+    static const std::regex *kParamRe = new std::regex(
         R"(\.param\s+(\.\w+)(?:\s+\.align\s+\d+)?\s*(\.ptr\s+[.\w]+)?\s+(\w+))");
-    auto pit = std::sregex_iterator(paramListStr.begin(), paramListStr.end(), kParamRe);
+    auto pit = std::sregex_iterator(paramListStr.begin(), paramListStr.end(), *kParamRe);
     for (auto pend = std::sregex_iterator(); pit != pend; ++pit) {
         std::string scalarType = (*pit)[1].str();
         bool isPtr             = !(*pit)[2].str().empty();

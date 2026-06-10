@@ -86,9 +86,10 @@ public:
                           const std::string &fusedName,
                           KernelIR &outFusedIR);
 
-private:
   // Generate a C++ wrapper that provides the CUDA execution environment
   std::string generateWrapperSource(const KernelIR &ir);
+
+private:
   // Compile the generated C++ into LLVM IR using a clang++ subprocess
   VGREResult compileToLLVMIR(const std::string &cppSource,
                              const std::string &kernelName, std::string &outIR);
@@ -113,6 +114,18 @@ private:
   std::thread workerThread_;
   std::atomic<bool> shutdown_{false};
   void workerLoop();
+
+  // Idempotently stop and join the background compile worker.  Safe to call
+  // multiple times (destructor + atexit handler).
+  void stopWorker();
+
+  // atexit handler that joins every live engine's worker.  Registered once on
+  // first construction.  Because the engine is constructed *after* the Scheduler
+  // singleton, this handler runs *before* ~Scheduler (atexit is LIFO), so the
+  // LLVM worker is never running SelectionDAGISel while process teardown
+  // (static destructors) is in progress — that overlap is undefined behaviour
+  // and crashes intermittently inside LLVM codegen.
+  static void joinAllWorkersAtExit();
 
   // Cache: kernel name → compiled function
   std::unordered_map<std::string, CompiledKernelFn> cache_;
