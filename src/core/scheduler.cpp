@@ -67,11 +67,6 @@ Scheduler::Scheduler(int numThreads) : numThreads_(numThreads) {
 
   buildNumaTopology();
 
-  // Publish the fully-built topology to the worker threads.  Release here
-  // pairs with the acquire load at the top of workerLoop(), so every worker
-  // sees the completed workerNumaNodes_ / workerNumaNodeSet_ contents.
-  topologyReady_.store(true, std::memory_order_release);
-
   VGRE_LOG_INFO("Scheduler", "Started thread pool with " +
                                  std::to_string(numThreads_) + " workers");
 }

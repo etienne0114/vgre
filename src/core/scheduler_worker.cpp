@@ -15,19 +15,16 @@ extern thread_local int t_workerIdx;
 // ── Worker loop ────────────────────────────────────────────────────────────
 void Scheduler::workerLoop(int workerIdx) {
   t_workerIdx = workerIdx;
-
-  // The constructor spawns workers before buildNumaTopology() finishes writing
-  // workerNumaNodes_ / workerNumaNodeSet_ (affinity pinning needs the live
-  // thread handles).  Wait for the topology to be published before reading it,
-  // otherwise this read races the constructor's writes.  No tasks can be queued
-  // until the constructor returns, so spinning here costs nothing at startup.
-  while (!topologyReady_.load(std::memory_order_acquire) &&
-         !shutdown_.load(std::memory_order_acquire)) {
-    std::this_thread::yield();
-  }
-
+  // workerNumaNodes_ is a per-worker NUMA-locality hint written once by
+  // buildNumaTopology() (which runs after the workers are spawned because
+  // affinity pinning needs the live thread handles).  Reading it here therefore
+  // races that write — but it is a benign perf hint (worst case: a steal targets
+  // a non-local node during the first microseconds).  Use atomic load/store
+  // (acquire/release) on the individual ints so the access is well-defined and
+  // race-detector-clean, WITHOUT a topology barrier (a blocking/spinning barrier
+  // here livelocks the constructor thread under CPU oversubscription).
   int myNode = (workerIdx >= 0 && workerIdx < static_cast<int>(workerNumaNodes_.size()))
-               ? workerNumaNodes_[workerIdx]
+               ? __atomic_load_n(&workerNumaNodes_[workerIdx], __ATOMIC_ACQUIRE)
                : -1;
 
   while (true) {
@@ -55,7 +52,8 @@ void Scheduler::workerLoop(int workerIdx) {
           int targetIdx = (workerIdx + i) % numThreads_;
           bool sameNuma = (myNode >= 0 &&
                            targetIdx < static_cast<int>(workerNumaNodes_.size()) &&
-                           workerNumaNodes_[targetIdx] == myNode);
+                           __atomic_load_n(&workerNumaNodes_[targetIdx],
+                                           __ATOMIC_ACQUIRE) == myNode);
           if (phase == 0 && !sameNuma) continue; // phase 0: same NUMA only
           if (phase == 1 && sameNuma)  continue; // phase 1: remote NUMA only
           WorkItem* p = nullptr;

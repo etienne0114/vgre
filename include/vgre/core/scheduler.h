@@ -436,12 +436,6 @@ private:
   mutable std::mutex mutex_;
   std::condition_variable cv_;
   std::atomic<bool> shutdown_{false};
-  // Set true once buildNumaTopology() has fully populated workerNumaNodes_ and
-  // workerNumaNodeSet_.  Worker threads must not read that topology data until
-  // this flag is observed (acquire) — the constructor spawns workers before
-  // building the topology (affinity pinning needs the live thread handles), so
-  // without this handoff the workers would race the constructor's writes.
-  std::atomic<bool> topologyReady_{false};
   std::atomic<uint64_t> completed_{0};
   std::atomic<uint64_t> pending_{0};
   int numThreads_;
