@@ -121,6 +121,14 @@ target_link_libraries(test_extern_shared PRIVATE vgre)
 add_test(NAME ExternSharedIntegration COMMAND test_extern_shared)
 set_tests_properties(ExternSharedIntegration PROPERTIES FIXTURES_REQUIRED KMPRegistrationClean)
 
+add_executable(test_device_curand integration/test_device_curand.cpp)
+target_link_libraries(test_device_curand PRIVATE vgre)
+add_test(NAME DeviceCurandIntegration COMMAND test_device_curand)
+set_tests_properties(DeviceCurandIntegration PROPERTIES
+    TIMEOUT 120
+    FIXTURES_REQUIRED KMPRegistrationClean
+    RESOURCE_LOCK vgre_llvm_jit)
+
 add_executable(test_extern_c_kernel integration/test_extern_c_kernel.cpp)
 target_link_libraries(test_extern_c_kernel PRIVATE vgre)
 add_test(NAME ExternCKernelIntegration COMMAND test_extern_c_kernel)

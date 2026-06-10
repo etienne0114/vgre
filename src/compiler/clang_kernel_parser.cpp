@@ -196,6 +196,42 @@ namespace cooperative_groups {
     template<typename Group, typename T>
     inline T exclusive_scan(const Group&, T, T init = T{}) { return init; }
 } // namespace cooperative_groups
+
+// ── Device cuRAND stub — declarations only (Track W) ────────────────────────
+// The real generators live in cuda_device_libs/curand_kernel.h and are used by
+// the JIT compilation path.  These declarations let the AST-analysis pass parse
+// kernels that call curand_init/curand_uniform/curand_normal/etc. without
+// pulling in the heavy header.
+struct curandStateXORWOW       { unsigned int d; unsigned int v[5]; unsigned int boxmuller_flag; float boxmuller_extra; };
+struct curandStatePhilox4_32_10_t { unsigned int c[4]; unsigned int k[2]; unsigned int output[4]; unsigned int pos; };
+struct curandStateMRG32k3a     { double s1[3]; double s2[3]; };
+struct curandStateMtgp32       { unsigned int s[16]; int pos; };
+typedef curandStateXORWOW curandState;
+typedef curandStateXORWOW curandState_t;
+typedef curandStatePhilox4_32_10_t curandStatePhilox4_32_10;
+typedef curandStateMRG32k3a curandStateMRG32k3a_t;
+typedef curandStateMtgp32 curandStateMtgp32_t;
+// Declare the per-state distribution API for every supported generator.
+#define VGRE_CURAND_DECL(ST)                                                   \
+    void         curand_init(unsigned long long, unsigned long long,           \
+                             unsigned long long, ST*);                         \
+    unsigned int curand(ST*);                                                  \
+    float        curand_uniform(ST*);                                          \
+    double       curand_uniform_double(ST*);                                   \
+    float        curand_normal(ST*);                                           \
+    double       curand_normal_double(ST*);                                    \
+    float        curand_log_normal(ST*, float, float);                         \
+    double       curand_log_normal_double(ST*, double, double);               \
+    unsigned int curand_poisson(ST*, double);
+VGRE_CURAND_DECL(curandStateXORWOW)
+VGRE_CURAND_DECL(curandStatePhilox4_32_10_t)
+VGRE_CURAND_DECL(curandStateMRG32k3a)
+VGRE_CURAND_DECL(curandStateMtgp32)
+#undef VGRE_CURAND_DECL
+struct float2 { float x; float y; };
+struct double2 { double x; double y; };
+float2  curand_normal2(curandStateXORWOW*);
+double2 curand_normal2_double(curandStateXORWOW*);
 )VGRE_STUB";
 
 // ── Process-level caches shared across all ClangKernelParser instances ──────
