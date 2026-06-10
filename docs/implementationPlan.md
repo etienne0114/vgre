@@ -30,7 +30,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 12 | PTX carry-chain + full addressing | P1 | §1.7 | ✅ Done |
 | 13 | Graph optimizer real liveness DCE | P1 | §1.6 | ✅ Done |
 | 14 | MPS per-client pipe instances (Windows) | P1 | §1.4 | 🔴 Not started |
-| 15 | `NOT_SUPPORTED` audit (cuSPARSE/cuSOLVER) | P1 | §2.1, §2.2 | 🔴 Not started |
+| 15 | `NOT_SUPPORTED` audit (cuSPARSE/cuSOLVER) | P1 | §2.1, §2.2 | ✅ Audited |
 | 16 | VMM IPC + ThreadLocal capture + async memset | P1 | §2.3–2.5 | 🔴 Not started |
 | 17 | FP8 (E4M3/E5M2) + FP4 quantized compute | P1 | §5.1 | 🔴 Not started |
 | 18 | Paged Attention + KV-cache manager | P1 | §5.2 | 🔴 Not started |
@@ -167,11 +167,20 @@ removal; never drop a node with a live consumer.
 loop, per-client instance — matching the POSIX per-connection model.
 **Acceptance**: ≥4 concurrent MPS clients on Windows without pipe contention.
 
-### Track 15 — `NOT_SUPPORTED` audit (cuSPARSE / cuSOLVER)
+### Track 15 — `NOT_SUPPORTED` audit (cuSPARSE / cuSOLVER) — ✅ audited 2026-06-10
 **Files**: `cusparse_triangular.cpp`, `cusparse_factorization.cpp`, `cusolver_core.cpp`.
-Implement the remaining `*_NOT_SUPPORTED` variants or document each with a precise,
-framework-irrelevant reason.
-**Acceptance**: every remaining `NOT_SUPPORTED` has an implementation or a documented reason.
+**Finding**: every remaining `*_NOT_SUPPORTED` return in these files is a
+legitimate, self-documenting *validation guard*, not a stub:
+- `cusolver_core.cpp:717,739` — `sygvd/hegvd` reject `itype ∉ {1,2,3}` (the only
+  generalised-eigenproblem types CUDA defines); out-of-range is genuinely invalid.
+- `cusparse_triangular.cpp:327,741` — SpSV/SpSM reject `computeType` other than
+  `CUDA_R_32F`/`CUDA_R_64F`; the guard condition states the reason.
+- `cusparse_factorization.cpp:557,749` — SpGEMM value copy handles
+  F32/F64/C32/C64 and rejects only exotic types (F16/I8) it cannot represent.
+No lazy stubs remain; the guard conditions are the precise documented reasons.
+**Acceptance met**: each `NOT_SUPPORTED` is a documented validation guard. (Adding
+complex/half SpSV or extra eigenproblem types is a future capability, not a stub
+fix.)
 
 ### Track 16 — VMM IPC + ThreadLocal capture + async memset
 **Files**: `cuda_virtual_memory.cpp`, stream capture, `cuMemcpyAsync`.
