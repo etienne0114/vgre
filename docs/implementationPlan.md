@@ -16,7 +16,7 @@ This document tracks every remaining implementation task — real gaps, security
 | D | NVSCI sync object proxy | ✅ Done |
 | E | cuDNN backend API — full coverage | ✅ Done |
 | F | Security: token KDF salt + env leak | ✅ Done |
-| G | Windows WSAPoll liveness probe | 🔴 Not started |
+| G | Windows WSAPoll liveness probe | ✅ Done |
 | H | Multiple virtual GPU devices | 🔴 Not started |
 | I | Flash Attention GQA | ✅ Done |
 | J | NVTX → Perfetto trace export | ✅ Done |
@@ -31,7 +31,7 @@ This document tracks every remaining implementation task — real gaps, security
 | S | Cluster work stealing | 🔴 Not started |
 | T | Cache key includes CPU arch (CPUID) | ✅ Done |
 | U | cuSPARSE SpGEMM reuse | ✅ Done |
-| V | iGPU OpenCL transpiler — SIMD extensions | 🟡 Partial |
+| V | iGPU OpenCL transpiler — SIMD extensions | ✅ Done |
 | W | Device-side cuRAND via JIT injection | ✅ Done |
 
 ---
