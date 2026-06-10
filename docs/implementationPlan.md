@@ -1,420 +1,225 @@
-# VGRE Implementation Plan
+# VGRE Implementation Plan — Phase 2
 
-**Last Updated**: 2026-06-07
+**Last Updated**: 2026-06-10
 
-This document tracks every remaining implementation task — real gaps, security hardening, and new capabilities. All completed work has been removed. Only unfinished items are listed.
+Phase 1 (tracks **A–W**) is complete and has been removed from this plan; see git
+history (`feat(track-*)`, `fix(track-*)`) and `docs/missingFeatures.md`'s preamble.
+
+Phase 2 below is the *real* remaining work to make VGRE honestly production-ready.
+Every track maps to a verified gap in `docs/missingFeatures.md` (cited by §). Tracks
+are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P1**
+= major capability/coverage, **P2** = fidelity/innovation.
 
 ---
 
 ## Completion Tracker
 
-| Track | Title | Status |
-|---|---|---|
-| A | gRPC stub diagnostics | ✅ Done |
-| B | cuLink FATBIN/CUBIN input handling | ✅ Done |
-| C | CDP kernelFn name-based fallback | ✅ Done |
-| D | NVSCI sync object proxy | ✅ Done |
-| E | cuDNN backend API — full coverage | ✅ Done |
-| F | Security: token KDF salt + env leak | ✅ Done |
-| G | Windows WSAPoll liveness probe | ✅ Done |
-| H | Multiple virtual GPU devices | ✅ Done |
-| I | Flash Attention GQA | ✅ Done |
-| J | NVTX → Perfetto trace export | ✅ Done |
-| K | Dynamic CUDA Graph node fusion | ✅ Done |
-| L | ELLPACK / Blocked-ELL sparse formats | ✅ Done |
-| M | Tensor parallel intra-process AllReduce | ✅ Done |
-| N | PTX → LLVM bitcode direct path (Triton) | ✅ Done |
-| O | Kernel auto-vectorization hints | ✅ Done |
-| P | MPS per-client resource quotas | ✅ Done |
-| Q | Nsight-compatible `.nsys-rep` export | ✅ Done |
-| R | Signed JIT cache (HMAC validation) | ✅ Done |
-| S | Cluster work stealing | ✅ Done |
-| T | Cache key includes CPU arch (CPUID) | ✅ Done |
-| U | cuSPARSE SpGEMM reuse | ✅ Done |
-| V | iGPU OpenCL transpiler — SIMD extensions | ✅ Done |
-| W | Device-side cuRAND via JIT injection | ✅ Done |
+| # | Track | Pri | Maps to | Status |
+|---|---|---|---|---|
+| 1 | CI matrix (Linux/Windows/macOS) build+test | P0 | §3.1 | 🔴 Not started |
+| 2 | Honest status docs (no false "validated") | P0 | §3.1 | 🟡 In progress |
+| 3 | Prometheus `/metrics` endpoint | P0 | §4.1 | 🔴 Not started |
+| 4 | Health/readiness probes + graceful drain | P0 | §4.2 | 🔴 Not started |
+| 5 | Config registry + validation + `build_info` | P0 | §4.4, §4.3 | 🔴 Not started |
+| 6 | Parallel-test stability (RESOURCE_LOCK) | P0 | §6.1 | 🔴 Not started |
+| 7 | Flash Attention real tiled online-softmax | P1 | §1.1 | 🔴 Not started |
+| 8 | NCCL pipelined ring (reduce-scatter/all-gather) | P1 | §1.2 | 🔴 Not started |
+| 9 | WMMA real fragment-layout MMA | P1 | §1.3 | 🔴 Not started |
+| 10 | cuSPARSE `sparse_view` conversions | P1 | §1.5 | 🔴 Not started |
+| 11 | cuRAND logarithmic skip-ahead | P1 | §1.8 | 🔴 Not started |
+| 12 | PTX carry-chain + full addressing | P1 | §1.7 | 🔴 Not started |
+| 13 | Graph optimizer real liveness DCE | P1 | §1.6 | 🔴 Not started |
+| 14 | MPS per-client pipe instances (Windows) | P1 | §1.4 | 🔴 Not started |
+| 15 | `NOT_SUPPORTED` audit (cuSPARSE/cuSOLVER) | P1 | §2.1, §2.2 | 🔴 Not started |
+| 16 | VMM IPC + ThreadLocal capture + async memset | P1 | §2.3–2.5 | 🔴 Not started |
+| 17 | FP8 (E4M3/E5M2) + FP4 quantized compute | P1 | §5.1 | 🔴 Not started |
+| 18 | Paged Attention + KV-cache manager | P1 | §5.2 | 🔴 Not started |
+| 19 | Versioned multi-arch Docker images | P1 | §4.3 | 🔴 Not started |
+| 20 | Minimal build profile + footprint report | P2 | §3.3 | 🔴 Not started |
+| 21 | macOS affinity (P/E cores) + documented boundary | P2 | §3.2 | 🔴 Not started |
+| 22 | Continuous batching request scheduler | P2 | §5.3 | 🔴 Not started |
+| 23 | Large-PTX fast-tier JIT (compile speed) | P2 | §5.4 | 🔴 Not started |
+| 24 | PyTorch/vLLM end-to-end validation harness | P2 | §5.5 | 🔴 Not started |
+| 25 | iGPU transpiler OpenCL-C compile check | P2 | §6.2 | 🔴 Not started |
+| 26 | Golden numerical-vector suite | P2 | §6.3 | 🔴 Not started |
+| 27 | perf_event_open proxy counters | P2 | §5.6 | 🔴 Not started |
 
 ---
 
-## Track A — gRPC Stub Diagnostics
+## P0 — Blocks an honest "production-ready" claim
 
-**File**: `src/advanced/grpc_transport.cpp`
+### Track 1 — CI matrix (Linux/Windows/macOS)
+**New**: `.github/workflows/ci.yml`. Matrix over `ubuntu-latest`, `windows-latest`,
+`macos-latest`: configure (CMake), build, run `ctest`. Cache LLVM. Until all three
+are green, no doc may claim cross-platform "functional"/"validated". This is the
+single most important production gate — it converts the unverified `#ifdef`
+branches into a tested guarantee.
+**Acceptance**: green CI on all three OSes; test artifacts uploaded.
 
-When `VGRE_ENABLE_GRPC` is OFF at build time, gRPC methods silently return error codes. Add a build-time marker so the stub implementation returns `VGREResult::ERR_NOT_BUILT` with a log message:
+### Track 2 — Honest status documentation
+**Files**: `README.md`, `docs/PROJECT_STATUS.md`, `docs/README.md`.
+Replace "Cross-Platform: all functional" / "validated across Win/macOS" with the
+truth: *Linux verified; Windows/macOS code-complete but unverified pending Track 1.*
+Update stale test counts. Soften "zero stubs" to enumerate the known simplified
+paths (§1). State the production-readiness gates (Tracks 1,3,4,5,6).
+**Acceptance**: no doc asserts a capability that isn't CI-verified.
 
-```
-[VGRE-ERROR] gRPC transport: built without gRPC support.
-             Rebuild with -DVGRE_ENABLE_GRPC=ON and install libgrpc++-dev.
-```
+### Track 3 — Prometheus `/metrics` endpoint
+**New**: `src/api/metrics_server.cpp` + C API `vgre_start_metrics_server(port)`.
+A minimal embedded HTTP/1.1 server (no new deps — raw socket) serving Prometheus
+text format: `vgre_kernels_total`, `vgre_jit_compile_seconds`, `vgre_jit_cache_hits_total`,
+`vgre_scheduler_queue_depth`, `vgre_host_memory_bytes`, per-device gauges. Enabled
+by `VGRE_METRICS_PORT`.
+**Acceptance**: `curl localhost:$PORT/metrics` returns valid Prometheus exposition.
 
-Also: if `VGRE_GRPC_PORT` is set in the environment at runtime but gRPC is not built, emit a startup warning rather than silently ignoring the variable.
+### Track 4 — Health/readiness probes + graceful drain
+**Files**: metrics server (`/healthz`, `/readyz`), `src/core/runtime_engine.cpp`
+(`vgre_drain()`), worker CLI SIGTERM handler. `/readyz` returns 200 once the JIT
+pipeline is warm and (if clustered) the master link is up. SIGTERM → stop
+accepting work, drain in-flight kernels, exit 0.
+**Acceptance**: k8s-style probe sequence works; SIGTERM mid-load loses no kernels.
 
----
+### Track 5 — Config registry + validation + build info
+**New**: `src/common/config_registry.cpp`. Single source of truth for every
+`VGRE_*` var: name, type, range, default. Validate at startup, log the effective
+config once, warn on unknown `VGRE_*`. Add `vgre_get_build_info()` → version,
+git hash, enabled features (SIMD level, gRPC/RDMA/OpenCL/SQLite on/off).
+**Acceptance**: invalid `VGRE_*` value is rejected with a clear message, not
+silently ignored; `vgre --version` prints build info.
 
-## Track B — cuLink FATBIN and CUBIN Input
-
-**File**: `src/api/cuda_driver/cuda_driver_module.cpp`
-
-`cuLinkAddData` currently ignores `CU_JIT_INPUT_FATBINARY` and `CU_JIT_INPUT_OBJECT` blobs.
-
-**Changes required**:
-1. Detect input type in `cuLinkAddData`.
-2. For `CU_JIT_INPUT_FATBINARY`: parse the ELF-like fatbinary container, locate the embedded `.ptx` section (PTX is always present in NVCC-generated fatbins for compute capability ≥ sm_30), and extract it as a PTX buffer.
-3. For `CU_JIT_INPUT_OBJECT`: scan for a `.nv_fatbin` ELF section containing the fatbinary, then apply step 2.
-4. For all other unrecognized types: return `CUDA_ERROR_INVALID_VALUE` with a descriptive log message (do not silently succeed with an empty result).
-
----
-
-## Track C — CDP kernelFn Name-Based Fallback
-
-**File**: `src/runtime/cdp_executor.cpp`, `src/core/runtime_engine.cpp`
-
-`vgre_cdp_launch_device` resolves child kernels by address via `lookupKernelIdByFn`. If the address is not in `kernelFnAddrMap_` (e.g., the kernel was registered by name only), the child launch is silently dropped.
-
-**Changes required**:
-1. In `vgre_cdp_launch_device`: when `kid == 0`, log a warning instead of silently returning.
-2. In `RuntimeEngine`: expose `lookupKernelIdByName(const char*)` that searches `kernelRegistry_` by name.
-3. In `vgre_cdp_launch_device`: on `kid == 0`, attempt name-based lookup using a symbol table extracted from the parent kernel's PTX module (the kernel name is recoverable from the PTX `.entry` directive that produced the function pointer).
-
----
-
-## Track D — NVSCI Sync Object Proxy
-
-**File**: `src/api/cuda_external_semaphore.cpp`
-
-`CUDA_EXTERNAL_SEM_NVSCISYNCOBJ` is currently "not supported" and does nothing.
-
-**Implementation**:
-- Linux: back each NvSci sync object with a `eventfd(0, EFD_SEMAPHORE)`. `cudaSignalExternalSemaphoresAsync` writes `1` to the eventfd; `cudaWaitExternalSemaphoresAsync` does a blocking `read` from it, dispatched on a background thread so the CUDA stream does not stall.
-- Windows: back with `CreateEvent(NULL, FALSE, FALSE, NULL)`. Signal → `SetEvent`; wait → `WaitForSingleObject(handle, INFINITE)` on a background thread.
-- macOS: same as Linux via `kqueue` + `kevent` on a pipe fd.
-
-This covers the most common use case: Jetson-style pipeline sync between DLA and GPU stages, emulated entirely in software.
-
----
-
-## Track E — cuDNN Backend API Full Coverage
-
-**File**: `src/api/cudnn/cudnn_backend_api.cpp`
-
-**Audit task**: Find every `return CUDNN_STATUS_NOT_SUPPORTED` in the file. For each one:
-
-1. Identify the operation descriptor type and variant.
-2. If the operation is a pointwise activation not yet handled (e.g., GELU exact, soft-plus, ELU, CELU, hard-swish), add a case to the pointwise dispatch table.
-3. If the operation is a reduction not yet handled (variance, norm, amax), add a case to the reduction dispatch.
-4. If the operation requires a truly unimplementable GPU-specific feature (e.g., in-place SM-level fencing), document it clearly and return `CUDNN_STATUS_NOT_SUPPORTED` with a log message naming the specific missing feature.
-
-**Acceptance**: `grep -c "CUDNN_STATUS_NOT_SUPPORTED" cudnn_backend_api.cpp` returns 0 (or only cases with explicit documented reasons).
+### Track 6 — Parallel-test stability
+**Problem**: under `ctest -j$(nproc)` a *different* clang/JIT test (ClangEnhanced,
+VectorAddition, ExternShared, …) intermittently fails/aborts each run from CPU +
+fork oversubscription (~N processes each forking `clang -O3 -march=native` and
+spawning a worker pool). All pass standalone.
+**Approaches tried (2026-06-10) that did NOT work — do not repeat blindly**:
+- `VGRE_DEFAULT_THREAD_COUNT=4` for tests: *backfired* — fewer threads made each
+  test slower, increasing temporal overlap and thus concurrency pressure.
+- A cross-process `flock` compile gate (`VGRE_MAX_CONCURRENT_COMPILES`): at a low
+  limit it made failures *more* frequent (nested same-thread compiles + scarce
+  slots; even with a reentrancy guard the suite was not stabilized and
+  ClangEnhanced began failing every run). Reverted.
+**Better directions to try next**: (a) CI runs at a *bounded* `-j` / `ctest
+--test-load $(nproc)` rather than `-j$(nproc)`; (b) `PROCESSORS` property on the
+heavy tests so CTest's load-aware scheduler accounts for them; (c) a per-test
+`RESOURCE_LOCK` only on the few heaviest, measured to actually help (not a blanket
+lock). Validate any approach with ≥10 consecutive full runs before claiming fixed.
+**Acceptance**: 10 consecutive full runs (at the chosen CI parallelism) are 100% green.
 
 ---
 
-## Track F — Security: Token KDF Salt and Environment Credential Leak
+## P1 — Major capability & coverage
 
-### F.1 — Dynamic KDF Salt
+### Track 7 — Flash Attention real tiled online-softmax
+**File**: `src/compiler/kernel_fusion_engine.cpp` (lines ~588, ~683).
+Replace the per-position K/V recompute + per-element reduction with the
+FlashAttention-2 tiled algorithm: stream K/V tiles, maintain running max & sum,
+rescale the accumulator. Keep the GQA detection from Phase 1.
+**Acceptance**: fused output matches a naive softmax-attention reference at 1e-4;
+memory traffic is O(N·d), not O(N²).
 
-**File**: `src/advanced/token/token_manager_fallback.cpp:296`
+### Track 8 — NCCL pipelined ring AllReduce
+**File**: `src/api/nccl/nccl_collectives.cpp` (~227, ~244). Per-rank slice
+ownership; reduce-scatter then all-gather, overlapping steps (no global barrier
+per round). Retain Kahan-compensated accumulation.
+**Acceptance**: bit-identical to current results; measurable overlap vs barrier model.
 
-The legacy code path uses the literal `"vgre_fallback_kdf"` (17 bytes) as the PBKDF2 password when machine-specific identity detection fails. Replace with:
+### Track 9 — WMMA real fragment-layout MMA
+**File**: `include/vgre/compiler/wmma_emulation.h` (~333, ~502). Implement true
+fragment layouts per shape (m16n16k16 etc.) with correct accumulator tiling for
+FP16/BF16/TF32/INT8 inputs + FP32/INT32 accumulate.
+**Acceptance**: results bit-comparable to a reference MMA for each supported precision.
 
-```cpp
-uint8_t random_salt[32];
-#if defined(__linux__)
-getrandom(random_salt, sizeof(random_salt), 0);
-#else
-// /dev/urandom or BCryptGenRandom
-#endif
-// Store random_salt alongside the encrypted token file (in a .salt sidecar file).
-// On decrypt, read the sidecar; if absent, use legacy path and re-derive.
-```
+### Track 10 — cuSPARSE `sparse_view` conversions
+**File**: `src/api/cusparse/sparse_view.cpp:106`. Implement the missing
+CSR↔CSC↔COO↔BSR↔ELL conversions.
+**Acceptance**: round-trip conversion preserves the matrix; `cusparseSparseToDense`/`DenseToSparse` agree.
 
-Existing tokens using the legacy path must be transparently migrated on first successful unlock.
+### Track 11 — cuRAND logarithmic skip-ahead
+**File**: `include/vgre/compiler/cuda_device_libs/curand_kernel.h:90`. XORWOW jump
+via GF(2) matrix exponentiation; Philox via counter addition. O(log n), not O(n).
+**Acceptance**: `curand_init(seed, seq, offset)` with offset=10^9 returns the same
+stream as the reference, fast.
 
-### F.2 — Environment Credential Zeroization
+### Track 12 — PTX carry-chain + full addressing
+**File**: `src/compiler/ptx/ptx_translator_map.cpp` (~81, ~394). Explicit carry
+flag across `addc/subc/madc`; full addressing grammar (`[reg+imm]`, `ld.v2/v4`).
+**Acceptance**: 128-bit add and vectorized loads produce correct results.
 
-**File**: `src/advanced/token/token_manager_fallback.cpp`, `src/advanced/tcp_cluster/configuration_manager_file_io.cpp`
+### Track 13 — Graph optimizer real liveness DCE
+**File**: `src/core/graph_optimizer.cpp:461`. Liveness over the graph DAG before
+removal; never drop a node with a live consumer.
+**Acceptance**: a graph with a node feeding a live output is not mis-eliminated.
 
-After reading `VGRE_TCP_AUTH_TOKEN` from the environment:
+### Track 14 — MPS per-client pipe instances (Windows)
+**File**: `src/advanced/mps_control.cpp:469`. `PIPE_UNLIMITED_INSTANCES` + accept
+loop, per-client instance — matching the POSIX per-connection model.
+**Acceptance**: ≥4 concurrent MPS clients on Windows without pipe contention.
 
-```cpp
-const char* env_token = std::getenv("VGRE_TCP_AUTH_TOKEN");
-if (env_token) {
-    std::string token(env_token);
-    // Zeroize env var in-place before returning
-    volatile char* p = const_cast<volatile char*>(env_token);
-    while (*p) *p++ = '\0';
-    ::unsetenv("VGRE_TCP_AUTH_TOKEN");
-    return token;
-}
-```
+### Track 15 — `NOT_SUPPORTED` audit (cuSPARSE / cuSOLVER)
+**Files**: `cusparse_triangular.cpp`, `cusparse_factorization.cpp`, `cusolver_core.cpp`.
+Implement the remaining `*_NOT_SUPPORTED` variants or document each with a precise,
+framework-irrelevant reason.
+**Acceptance**: every remaining `NOT_SUPPORTED` has an implementation or a documented reason.
 
-Document in the USER_GUIDE that `VGRE_TCP_AUTH_TOKEN_FILE` is the secure path; `VGRE_TCP_AUTH_TOKEN` is available only for containerized ephemeral deployments.
+### Track 16 — VMM IPC + ThreadLocal capture + async memset
+**Files**: `cuda_virtual_memory.cpp`, stream capture, `cuMemcpyAsync`.
+Implement `cuMemRetainAllocationHandle` IPC round-trip; enforce
+`cudaStreamCaptureModeThreadLocal`; route `CU_MEM_OPERATION_TYPE_MEMSET` to the scheduler.
+**Acceptance**: cross-process VMM handle round-trips; thread-local capture excludes other threads.
 
----
+### Track 17 — FP8 (E4M3/E5M2) + FP4 quantized compute
+**Files**: new `src/core/math/fp8.h`/`fp4.h`, cuBLASLt GEMM dispatch, WMMA emulation.
+Software E4M3/E5M2 + E2M1 types; scaled GEMM (per-tensor/row/group scales);
+NVFP4/MXFP4 group scaling. Wire into `*_8F_E4M3` cuBLASLt paths and attention.
+**Acceptance**: FP8 GEMM matches a reference dequant→FP32-GEMM→requant at the format's epsilon.
 
-## Track G — Windows WSAPoll Liveness Probe
+### Track 18 — Paged Attention + KV-cache manager
+**Files**: new `src/core/kv_cache.cpp`, fusion engine paged-attention kernel.
+Block-allocator KV-cache (PagedAttention layout), block table, paged-attention kernel.
+Foundation for serving (continuous batching builds on this).
+**Acceptance**: paged attention matches contiguous attention; block table grows/frees correctly.
 
-**File**: `src/advanced/tcp_cluster/client_loop.cpp`
-
-WSAPoll does not reliably report `POLLHUP`/`POLLERR` on reset connections. After any `WSAPoll` timeout with no events on the control socket, issue a zero-byte TCP probe:
-
-```cpp
-#if defined(_WIN32)
-char probe = 0;
-int r = send(sock, &probe, 0, 0);
-if (r == SOCKET_ERROR) {
-    int e = WSAGetLastError();
-    if (e == WSAECONNRESET || e == WSAECONNABORTED || e == WSAENETRESET) {
-        // Connection is dead — trigger reconnect
-        handleDisconnect();
-    }
-}
-#endif
-```
-
----
-
-## Track H — Multiple Virtual GPU Devices
-
-**Files**: `src/core/runtime_engine.cpp`, `src/api/cudart/cudart_shim_device_attrs.cpp`, `src/api/cuda_interceptor.cpp`
-
-VGRE exposes one virtual device. PyTorch DDP, Horovod, and any framework that calls `cudaGetDeviceCount()` expecting ≥ 2 devices cannot run multi-GPU training without modification.
-
-**Design**:
-1. `RuntimeEngine` holds a vector of `VirtualDevice` structs, each with its own `BlockWorkerPool`, `MemoryManager`, and `Scheduler`. Count controlled by `VGRE_VIRTUAL_DEVICE_COUNT` (default 1, max 8).
-2. `cudaGetDeviceCount` returns `VGRE_VIRTUAL_DEVICE_COUNT`.
-3. `cudaSetDevice(i)` / `cudaGetDevice()` bind to the thread-local `VirtualDevice[i]`.
-4. Intra-node P2P: `cudaMemcpyPeer(dst, dstDev, src, srcDev, n)` → `memcpy` (same process memory space, so no serialization needed). Report `cudaDeviceCanAccessPeer == 1` for all virtual device pairs.
-5. Partition host cores equally: with 16 physical cores and `VGRE_VIRTUAL_DEVICE_COUNT=4`, each virtual device gets 4-core affinity.
-
----
-
-## Track I — Flash Attention GQA (Grouped Query Attention)
-
-**File**: `src/compiler/kernel_fusion_engine.cpp`
-
-The current `detectFlashAttention` does not recognize GQA patterns (used by LLaMA-2, Mistral, Gemma, Falcon, Phi-3).
-
-**Changes required**:
-1. Extend pattern detection to identify `kv_head_repeat` stride: `K` and `V` matrices have stride `num_kv_heads` vs Q's `num_heads`, with `num_heads % num_kv_heads == 0`.
-2. In `genFlashAttentionSource`: emit an outer loop over query head groups that iterates `num_heads / num_kv_heads` Q heads per K/V head, reusing the K/V tile in cache for each Q group.
-3. Add a unit test: `test_flash_attention_gqa` with `num_heads=32, num_kv_heads=8` (LLaMA-2 7B config).
+### Track 19 — Versioned multi-arch Docker images
+**Files**: `Dockerfile`, CI release job. SemVer tags; amd64+arm64 images to GHCR
+pinned by digest; image runs the smoke test.
+**Acceptance**: `docker run ghcr.io/.../vgre:<tag> vgre --version` works on both arches.
 
 ---
 
-## Track J — NVTX → Perfetto Trace Export
-
-**File**: `src/api/vgre_c_api_telemetry.cpp` (new function), `include/vgre/api/vgre_c_api.h`
-
-**New API**:
-```c
-int vgre_export_perfetto_trace(const char* output_path);
-```
-
-**Implementation**:
-1. Serialize the VGRE telemetry timeline into Perfetto's `TracePacket` protobuf format.
-2. For each kernel execution: emit a `TrackEvent` slice with kernel name, duration, and grid/block dims as debug annotations.
-3. For each memory operation: emit a counter event on the `MemoryBandwidth` track.
-4. Write to `output_path` as a binary `.perfetto-trace` file.
-5. Update `docs/USER_GUIDE.md` with a section on opening the trace in `ui.perfetto.dev`.
-
----
-
-## Track K — Dynamic CUDA Graph Node Fusion
-
-**File**: `src/api/cudart/cudart_shim_graph_exec.cpp`, `src/core/graph/graph_executor.cpp`
-
-After `VGRE_GRAPH_FUSION_THRESHOLD` replays (configurable, default 3), analyze the replay log for consecutive compatible nodes:
-- Two `MEMCPY_H2D` nodes that feed one kernel with no inter-kernel dependency → fuse into a single multi-buffer copy node.
-- Two kernels with compatible grid/block dims, no shared output dependency, same stream → fuse into a single JIT kernel that sequentially executes both bodies.
-
-The optimized graph is stored as a second `CompiledGraph` alongside the original. Subsequent replays use the optimized version. `cudaGraphExecUpdate_v2` invalidates the optimized graph if the topology changes.
-
----
-
-## Track L — ELLPACK and Blocked-ELL Sparse Formats
-
-**File**: `src/api/cusparse/cusparse_core.cpp`
-
-`cusparseCreateEll` must stop returning `CUSPARSE_STATUS_NOT_SUPPORTED`.
-
-**Implementation**:
-1. `SpMV_ELLPACK`: store column indices and values as `(N × max_nnz_per_row)` dense matrices. For each row, iterate `max_nnz_per_row` slots; skip padding slots (`col_idx == -1`). Use AVX2/AVX-512 vector loads for value rows (aligned to 32/64 bytes).
-2. `SpMM_ELLPACK`: outer loop over output columns; inner loop is `SpMV_ELLPACK` per column. Parallelize outer loop with `#pragma omp parallel for`.
-3. Wire into the `cusparseSpMV` / `cusparseSpMM` dispatch switch on `cusparseFormat_t == CUSPARSE_FORMAT_ELL`.
-
----
-
-## Track M — Tensor Parallel Intra-Process AllReduce
-
-**Dependencies**: Track H (multiple virtual devices) must be complete first.
-
-**File**: `src/api/nccl/nccl_communicator.cpp`
-
-When all communicator ranks are virtual devices in the same process, `ncclAllReduce` can bypass TCP entirely:
-
-1. Detect same-process topology: if all `ncclUniqueId` holders share the same `getpid()`, use the shared-memory AllReduce path.
-2. Implement a ring AllReduce over shared process memory: each rank writes its slice to a shared buffer, reads and accumulates from the next rank's slot. Use `std::atomic_thread_fence(std::memory_order_acq_rel)` between steps.
-3. Configure via `VGRE_TP_DEGREE=N`. Document in USER_GUIDE as the "tensor-parallel fast path".
-
----
-
-## Track N — PTX → LLVM Bitcode Direct Path
-
-**File**: `src/compiler/llvm_translation_engine.cpp`
-
-Triton and MLIR produce LLVM bitcode (`.bc`) directly, not PTX text. The current `cuModuleLoadData` path attempts PTX parsing on bitcode and fails or produces wrong output.
-
-**Changes required**:
-1. Detect LLVM bitcode magic bytes (`0x42 0x43` — "BC") at the start of the data blob.
-2. Call `llvm::parseBitcodeFile(MemoryBufferRef, Context)` instead of the PTX text scanner.
-3. Strip `nvvm.annotations` metadata (these are NVPTX-specific; the ORC JIT compiles for the host CPU, not NVPTX).
-4. Submit the parsed `llvm::Module` directly to the ORC JIT `IRLayer` — bypassing the Clang compilation step.
-5. Cache the resulting native code by hash of the bitcode blob.
-
----
-
-## Track O — Kernel Auto-Vectorization Hints
-
-**File**: `src/compiler/llvm_translation_engine.cpp`
-
-After kernel IR analysis (register count, shared memory, detected access pattern), inject LLVM metadata before JIT:
-
-| Access pattern | Annotation injected |
-|---|---|
-| Element-wise (no dependencies) | `llvm.loop.vectorize.width = VGRE_SIMD_WIDTH` |
-| Reduction | `llvm.loop.vectorize.width = VGRE_SIMD_WIDTH`, `interleave.count = 4` |
-| Stencil (stride-1 read/write) | `llvm.loop.vectorize.width = VGRE_SIMD_WIDTH`, `llvm.loop.unroll.count = 2` |
-| Scatter/gather (indirect indexing) | No hint (auto-vectorizer would pessimize) |
-
-Use the existing pattern classifier in `adaptive_execution_engine.cpp` to detect the access pattern. This integrates with the existing `-O3 -march=native` compilation and requires no new dependencies.
-
----
-
-## Track P — MPS Per-Client Resource Quotas
-
-**File**: `src/advanced/mps_control.cpp`
-
-When `VGRE_MPS_PIPE` is active, any connected client can exhaust all system memory or CPU. Add a quota layer:
-
-1. Define `VgreMPSPolicy`:
-   ```cpp
-   struct VgreMPSPolicy {
-       size_t maxMemoryBytes   = SIZE_MAX;  // per-client allocation limit
-       float  maxThreadFraction = 1.0f;     // fraction of worker pool
-       size_t maxQueueDepth    = 256;       // pending kernel limit
-   };
-   ```
-2. Load from JSON via `VGRE_MPS_POLICY_FILE` (same format as `VGRE_CONFIG_FILE`).
-3. Enforce in `handleMalloc` (return `cudaErrorMemoryAllocation` on quota exceeded), in `handleLaunch` (queue and return `cudaSuccess` but throttle execution to `maxThreadFraction`), and in `handleEnqueue` (return `cudaErrorLaunchTimeout` on depth exceeded).
-
----
-
-## Track Q — Nsight-Compatible Trace Export
-
-**File**: new `src/api/nsight_exporter.cpp`
-
-Implement export to Nsight Systems' SQLite-based `.nsys-rep` format (schema is publicly documented).
-
-**Minimum viable schema**:
-- `StringIds` table: kernel names, API names
-- `KernelLaunches` table: kernel name id, start_ns, end_ns, gridX/Y/Z, blockX/Y/Z
-- `MemcpyOps` table: direction, size_bytes, start_ns, end_ns
-- `NvtxEvents` table: domain, range_name, start_ns, end_ns
-
-**New API**:
-```c
-int vgre_export_nsight_trace(const char* output_path);
-```
-
----
-
-## Track R — Signed JIT Cache
-
-**File**: `src/compiler/kernel_cache.cpp`
-
-The disk cache verifies compiled binaries by source SHA-256 only. An attacker with `~/.vgre/cache/` write access can substitute malicious `.so` files.
-
-**Fix**:
-1. Derive a cache signing key: `HMAC-SHA256(cluster_auth_token, "vgre_jit_cache_v1")`.
-2. On cache write: compute `HMAC-SHA256(signing_key, compiled_binary_bytes)` and store alongside the `.so` as a `.hmac` sidecar.
-3. On cache read: recompute HMAC and compare with constant-time `crypto::secure_compare`. On mismatch: log `[VGRE-SECURITY] JIT cache tamper detected`, delete the entry, and recompile.
-4. If no cluster auth token is available (single-node use): use machine-identity-derived key from `token_manager_fallback.cpp` (post-Track-F fix).
-
----
-
-## Track S — Cluster Work Stealing
-
-**File**: `src/advanced/tcp_cluster.cpp`
-
-The 3D recursive bisection partitioner assigns fixed slices at kernel launch time. Slow workers (thermal throttle, NUMA miss) create stragglers.
-
-**Protocol**:
-1. Workers report slice completion time to master via a new `WORK_COMPLETE` packet (includes actual vs estimated duration).
-2. Master tracks completion times with EWMA (α=0.25, already implemented for accuracy factor).
-3. If a worker finishes more than `VGRE_STEAL_THRESHOLD_MS` (default 50 ms) before the slowest outstanding worker is projected to finish, master sends the idle worker a `STEAL_WORK` packet with a sub-slice of the slowest worker's remaining range.
-4. The slow worker continues its original slice; the idle worker steals the tail. Both report completion independently. Master deduplicates using range tags.
-
----
-
-## Track T — Cache Key Includes CPU Architecture
-
-**File**: `src/compiler/kernel_cache.cpp`
-
-JIT binaries cached on an AVX-512 machine will cause `SIGILL` on an AVX2 host. The cache key must include the detected SIMD feature set.
-
-**Change**:
-```cpp
-std::string cacheKey(const std::string& source, const std::string& flags) {
-    std::string cpuFeats = VGRESIMDDetector::getFeatureString(); // "avx2|aes|f16c"
-    return sha256(source + "|" + flags + "|" + cpuFeats);
-}
-```
-
-`VGRESIMDDetector::getFeatureString()` reads CPUID and returns a sorted, canonical feature string. This changes all existing cache keys — existing entries are invalidated on next access (cache miss → recompile → new entry).
-
----
-
-## Track U — cuSPARSE SpGEMM Reuse
-
-**File**: `src/api/cusparse/cusparse_factorization.cpp`
-
-`cusparseSpGEMM` is implemented (one-shot). `cusparseSpGEMM_reuse` — which separates symbolic analysis (sparsity structure) from numeric computation (values) — is missing.
-
-**Design**:
-1. `cusparseSpGEMM_reuse_work_estimation`: run the symbolic CSR SpGEMM analysis (`nnz` computation via row-wise intersection); store the result `(rowPtrC, colIndC)` in the `SpGEMMDescr`.
-2. `cusparseSpGEMM_reuse_nnz`: return the stored `nnzC`.
-3. `cusparseSpGEMM_reuse_copy`: allocate `valC` and run only the numeric phase (value accumulation), reusing the pre-computed `colIndC`.
-4. All three operations share the same `SpGEMMDescr` handle — allocation is done once.
-
----
-
-## Track V — iGPU OpenCL Transpiler Extensions
-
-**File**: `src/runtime/igpu_opencl_executor.cpp`
-
-Current gaps in the CUDA→OpenCL C transpiler:
-
-| Feature | Current handling | Fix needed |
-|---|---|---|
-| `tex1D`/`tex2D`/`tex3D` | Not translated → CPU fallback | Emit `read_imagef(image, sampler, coord)` |
-| `extern __shared__ float s[]` | Not translated → CPU fallback | Detect dynamic shared mem size from launch params; emit `local float s[N]` in the kernel preamble |
-| `__shfl_sync` / `__ballot_sync` | Stripped | Emit OpenCL 2.0 sub-group functions (`sub_group_shuffle`, `sub_group_ballot`) where available; fall back to local memory exchange otherwise |
-| Device `printf` | Stripped | Emit `printf` (supported in OpenCL 1.2+ for debugging) |
-| `asm volatile` | Stripped with a comment | Acceptable — emit a `// asm volatile stripped` comment for clarity |
-
----
-
-## Track W — Device-Side cuRAND via JIT Injection
-
-**File**: `src/compiler/llvm_translation_engine.cpp`, `src/api/curand/curand_shim.cpp`
-
-Device-side `curand_uniform(state)`, `curand_normal(state)`, `curand_log_normal(state)` are currently unimplemented in the JIT path.
-
-**Implementation**:
-1. At PTX scan time, detect `curand_uniform` / `curand_normal` calls (they appear as `call.uni` PTX instructions to `_Z15curand_uniformPj`-style mangled names).
-2. Replace each call site with an inlined XORWOW step using the VGRE XORWOW state layout:
-   ```
-   // XORWOW step: t = x ^ (x >> 2); x = w; w = v; v = y; y = z; z = t ^ z ^ (t << 1) ^ (z << 4)
-   ```
-3. The `curandState_t*` argument maps to a per-thread offset in the kernel's shared memory or argument space.
-4. `curand_normal` emits a Box-Muller pair in registers: saves one sample for the next call via a carry slot in the state struct.
+## P2 — Fidelity & innovation
+
+### Track 20 — Minimal build profile + footprint report
+`-DVGRE_MINIMAL` dropping every optional dep; measured `.so` size + idle RSS report
+in docs; static assert no hard dep on optional libs.
+
+### Track 21 — macOS affinity (P/E cores) + documented boundary
+`src/core/scheduler_numa.cpp` macOS path: use `thread_policy_set` affinity tags;
+handle Apple-Silicon performance/efficiency core split; document the boundary.
+
+### Track 22 — Continuous batching request scheduler
+*(Conditional IF/WHILE/SWITCH graph nodes are already implemented — verified — so
+this slot is the genuinely-missing serving layer.)* A request queue + batch
+scheduler over the paged KV-cache (Track 18): admit new sequences and evict
+finished ones at token boundaries (continuous/in-flight batching, vLLM-style).
+This is what makes VGRE a model *server*, not just a kernel runner.
+
+### Track 23 — Large-PTX fast-tier JIT
+Fast `-O1` first-compile tier + background re-JIT to `-O3`; parallel module
+compilation; measure & cap p99 first-call latency on multi-MB modules.
+
+### Track 24 — PyTorch/vLLM end-to-end validation harness
+Gated CI job: CPU-only PyTorch + VGRE shim runs a tiny model fwd/bwd; assert
+numerical agreement with a reference. Proves "runs unmodified CUDA frameworks".
+
+### Track 25 — iGPU transpiler OpenCL-C compile check
+Host-side `clang -cl-std` compile of the generated OpenCL string so the
+transpiler's output (shuffle/ballot/textures) is validated even without a device.
+
+### Track 26 — Golden numerical-vector suite
+`tests/test_golden_vectors`: cuBLAS GEMM, cuDNN conv, FFT, RNG distributions vs
+NumPy/SciPy/OpenBLAS references at tight tolerance.
+
+### Track 27 — perf_event_open proxy counters
+Optional `VGRE_USE_PERF_COUNTERS`: real L1/L2/IPC via Linux `perf_event_open`,
+documented as proxies for the GPU PMU heuristics.
