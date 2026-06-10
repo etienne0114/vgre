@@ -626,6 +626,39 @@ static std::string computePtxCacheKey(const std::string& ptx,
     return key;
 }
 
+// Canonical host-architecture tag mixed into every JIT cache key.
+//
+// The disk cache stores host-native machine code (compiled with -march=native /
+// the detected host CPU + features).  Without an arch component in the key, a
+// cache directory copied from an AVX-512 machine to an AVX2-only host would be
+// re-used and execute AVX-512 instructions on hardware that lacks them → SIGILL.
+// Including the CPU name + sorted enabled feature flags makes such entries miss
+// (recompile) instead of crashing.  Computed once; the result is stable for the
+// life of the process.
+static const std::string& hostArchCacheTag() {
+    static const std::string tag = [] {
+        std::string t = "cpu=" + llvm::sys::getHostCPUName().str() + ";feat=";
+        llvm::StringMap<bool> feats;
+        if (llvm::sys::getHostCPUFeatures(feats)) {
+            std::vector<std::string> enabled;
+            enabled.reserve(feats.size());
+            for (const auto& f : feats)
+                if (f.second)
+                    enabled.push_back(f.first().str());
+            // Sort for a canonical, ASLR-independent ordering.
+            std::sort(enabled.begin(), enabled.end());
+            for (const auto& f : enabled) {
+                t += f;
+                t += ',';
+            }
+        }
+        VGRE_LOG_INFO("LLVMTranslationEngine",
+                      "JIT cache arch tag: " + t);
+        return t;
+    }();
+    return tag;
+}
+
 // Two-level cache path: $VGRE_CACHE_DIR/{key[0:2]}/{key}.elf
 static std::string getElfCachePath(const std::string& key) {
     std::string base;
@@ -818,10 +851,12 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
   std::string wrapper = generateWrapperSource(ir);
 
   // ── QUEUE-28: SHA-256 keyed disk bitcode cache ────────────────────────────
-  // Cache key invariant: SHA-256(wrapper_source || "") is a collision-resistant
-  // fingerprint (2^{128} second-preimage resistance, FIPS 180-4). Two wrappers
-  // that differ in any byte produce different keys with overwhelming probability.
-  std::string cacheKey  = computePtxCacheKey(wrapper, "");
+  // Cache key invariant: SHA-256(wrapper_source || host_arch_tag) is a
+  // collision-resistant fingerprint (2^{128} second-preimage resistance,
+  // FIPS 180-4). The host-arch tag (CPU name + sorted feature flags) ensures a
+  // cache built for one microarchitecture is never reused on another (avoids
+  // SIGILL from e.g. AVX-512 code on an AVX2 host).
+  std::string cacheKey  = computePtxCacheKey(wrapper, hostArchCacheTag());
   std::string bcPath    = getElfCachePath(cacheKey);
 
   std::string irCode;
@@ -968,11 +1003,13 @@ vgre::VGREResult LLVMTranslationEngine::compileBitcodeKernel(
     return vgre::VGREResult::SUCCESS;
   }
 
-  // Step 2: disk cache (keyed by SHA-256 of bc bytes + kernel name)
+  // Step 2: disk cache (keyed by SHA-256 of bc bytes + kernel name + host arch).
+  // The host-arch tag prevents reuse of host-native code across incompatible
+  // microarchitectures (e.g. AVX-512 → AVX2) which would otherwise SIGILL.
   std::string cacheInput(reinterpret_cast<const char *>(bc.data()), bc.size());
   cacheInput += '\0';
   cacheInput += kernelName;
-  std::string cacheKey = computePtxCacheKey(cacheInput, "");
+  std::string cacheKey = computePtxCacheKey(cacheInput, hostArchCacheTag());
   std::string bcPath   = getElfCachePath(cacheKey);
   std::string irCode;
 

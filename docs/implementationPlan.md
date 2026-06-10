@@ -12,7 +12,7 @@ This document tracks every remaining implementation task — real gaps, security
 |---|---|---|
 | A | gRPC stub diagnostics | ✅ Done |
 | B | cuLink FATBIN/CUBIN input handling | ✅ Done |
-| C | CDP kernelFn name-based fallback | 🔴 Not started |
+| C | CDP kernelFn name-based fallback | ✅ Done |
 | D | NVSCI sync object proxy | ✅ Done |
 | E | cuDNN backend API — full coverage | 🟡 Partial |
 | F | Security: token KDF salt + env leak | ✅ Done |
@@ -29,7 +29,7 @@ This document tracks every remaining implementation task — real gaps, security
 | Q | Nsight-compatible `.nsys-rep` export | 🔴 Not started |
 | R | Signed JIT cache (HMAC validation) | 🔴 Not started |
 | S | Cluster work stealing | 🔴 Not started |
-| T | Cache key includes CPU arch (CPUID) | 🔴 Not started |
+| T | Cache key includes CPU arch (CPUID) | ✅ Done |
 | U | cuSPARSE SpGEMM reuse | 🔴 Not started |
 | V | iGPU OpenCL transpiler — SIMD extensions | 🟡 Partial |
 | W | Device-side cuRAND via JIT injection | 🔴 Not started |
