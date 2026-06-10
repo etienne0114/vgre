@@ -42,7 +42,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 24 | PyTorch/vLLM end-to-end validation harness | P2 | §5.5 | 🔴 Not started |
 | 25 | iGPU transpiler OpenCL-C compile check | P2 | §6.2 | 🔴 Not started |
 | 26 | Golden numerical-vector suite | P2 | §6.3 | ✅ Done |
-| 27 | perf_event_open proxy counters | P2 | §5.6 | 🔴 Not started |
+| 27 | perf_event_open proxy counters | P2 | §5.6 | ✅ Core present |
 
 ---
 
@@ -310,6 +310,17 @@ diag(10,21)); cuRAND uniform (in-range, mean≈0.5, var≈1/12) and normal(0,1)
 (mean≈0, var≈1). A cuDNN conv golden can be added later, but the GEMM/FFT/RNG
 oracles already give the consolidated tight-tolerance suite §6.3 asked for.
 
-### Track 27 — perf_event_open proxy counters
-Optional `VGRE_USE_PERF_COUNTERS`: real L1/L2/IPC via Linux `perf_event_open`,
-documented as proxies for the GPU PMU heuristics.
+### Track 27 — perf_event_open proxy counters — ✅ core already present (2026-06-10)
+**Finding**: the IPC half is already implemented. `cupti_shim.cpp` has a
+`HwPmuSampler` (RAII, thread-local) that opens `perf_event_open(PERF_TYPE_HARDWARE,
+PERF_COUNT_HW_INSTRUCTIONS)` with `ENABLE`/`RESET`/`read` and **auto-falls back to
+the RuntimeProfiler instruction-mix proxies** when perf is unavailable — i.e. it
+auto-detects rather than needing the `VGRE_USE_PERF_COUNTERS` opt-in the original
+design proposed (auto-detect is strictly better). macOS uses thread CPU time.
+**Remaining increment (not added)**: real L1D/LL cache hit-rate events
+(`PERF_TYPE_HW_CACHE`) to back `l1_global_load_hit_rate`. Deliberately NOT added
+here: this host has `perf_event_paranoid=4`, so perf-event reads cannot be
+exercised at all — adding unverifiable counter code into the (passing, complex)
+CUPTI shim would be speculative. Left as a CI/host-with-perf task.
+**Status**: the perf_event_open IPC counter + documented proxy fallback exist and
+satisfy the core of §5.6; cache-event proxies await a host where perf is readable.
