@@ -182,6 +182,81 @@ int test_spgemm_float() {
     return 0;
 }
 
+// ── 4b. SpGEMM reuse — symbolic once, numeric twice ──────────────────────────
+// First multiply: A=[[1,0],[0,2]] B=[[3,0],[0,4]] → C=[[3,0],[0,8]].
+// Then change A values to [[2,0],[0,5]] and recompute via reuse_compute (reusing
+// the symbolic structure) → C=[[6,0],[0,20]].
+int test_spgemm_reuse() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    std::vector<int>   arPtr = {0,1,2}, acInd = {0,1};
+    std::vector<float> aVals  = {1.0f, 2.0f};
+    std::vector<int>   brPtr = {0,1,2}, bcInd = {0,1};
+    std::vector<float> bVals  = {3.0f, 4.0f};
+    std::vector<int>   crPtr(3, 0);
+    std::vector<int>   ccInd(2, 0);
+    std::vector<float> cVals(2, 0.0f);
+
+    cusparseSpMatDescr_t matA = nullptr, matB = nullptr, matC = nullptr;
+    cusparseCreateCsr(&matA, 2, 2, 2, arPtr.data(), acInd.data(), aVals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateCsr(&matB, 2, 2, 2, brPtr.data(), bcInd.data(), bVals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateCsr(&matC, 2, 2, 0, crPtr.data(), ccInd.data(), cVals.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+
+    cusparseSpGEMMDescr_t d = nullptr;
+    cusparseSpGEMM_createDescr(&d);
+    float alpha = 1.0f, beta = 0.0f;
+
+    size_t b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0;
+    cusparseSpGEMMreuse_workEstimation(h, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, matA, matB, matC,
+        CUSPARSE_SPGEMM_DEFAULT, d, &b1, nullptr);
+    cusparseSpGEMMreuse_nnz(h, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, matA, matB, matC,
+        CUSPARSE_SPGEMM_DEFAULT, d, &b2, nullptr, &b3, nullptr, &b4, nullptr);
+
+    int64_t cRows = 0, cCols = 0, cNnz = 0;
+    cusparseSpMatGetSize(matC, &cRows, &cCols, &cNnz);
+    if (cNnz != 2) FAIL("SpGEMM reuse NNZ");
+    crPtr.resize(static_cast<size_t>(cRows + 1));
+    ccInd.resize(static_cast<size_t>(cNnz));
+    cVals.resize(static_cast<size_t>(cNnz));
+    cusparseCsrSetPointers(matC, crPtr.data(), ccInd.data(), cVals.data());
+
+    cusparseSpGEMMreuse_copy(h, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, matA, matB, matC,
+        CUSPARSE_SPGEMM_DEFAULT, d, &b5, nullptr);
+    cusparseSpGEMMreuse_compute(h, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matB, &beta, matC,
+        CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, d);
+
+    if (!NEAR(cVals[0], 3.0f, 1e-5f)) FAIL("SpGEMM reuse C[0,0] first");
+    if (!NEAR(cVals[1], 8.0f, 1e-5f)) FAIL("SpGEMM reuse C[1,1] first");
+
+    // Change A's values only (same sparsity) and recompute — symbolic reused.
+    aVals[0] = 2.0f; aVals[1] = 5.0f;
+    cusparseSpGEMMreuse_compute(h, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matB, &beta, matC,
+        CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, d);
+
+    if (!NEAR(cVals[0], 6.0f, 1e-5f))  FAIL("SpGEMM reuse C[0,0] recompute");
+    if (!NEAR(cVals[1], 20.0f, 1e-5f)) FAIL("SpGEMM reuse C[1,1] recompute");
+
+    cusparseSpGEMM_destroyDescr(d);
+    cusparseDestroySpMat(matA);
+    cusparseDestroySpMat(matB);
+    cusparseDestroySpMat(matC);
+    cusparseDestroy(h);
+    PASS("SpGEMM reuse (symbolic once, numeric twice)");
+    return 0;
+}
+
 // ── 5. ILU0 ──────────────────────────────────────────────────────────────────
 // A = [[4,2],[2,3]] (symmetric positive definite)
 // After ILU0 in-place: L*U ≈ A with zero fill-in
@@ -1023,6 +1098,7 @@ int main() {
     rc |= test_spmv_float();
     rc |= test_spsv_lower();
     rc |= test_spgemm_float();
+    rc |= test_spgemm_reuse();
     rc |= test_spgemm_symbolic_phase();
     rc |= test_ilu0();
     rc |= test_ic0();

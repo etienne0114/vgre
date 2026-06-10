@@ -30,7 +30,7 @@ This document tracks every remaining implementation task — real gaps, security
 | R | Signed JIT cache (HMAC validation) | ✅ Done |
 | S | Cluster work stealing | 🔴 Not started |
 | T | Cache key includes CPU arch (CPUID) | ✅ Done |
-| U | cuSPARSE SpGEMM reuse | 🔴 Not started |
+| U | cuSPARSE SpGEMM reuse | ✅ Done |
 | V | iGPU OpenCL transpiler — SIMD extensions | 🟡 Partial |
 | W | Device-side cuRAND via JIT injection | 🔴 Not started |
 

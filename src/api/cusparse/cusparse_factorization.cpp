@@ -502,6 +502,62 @@ static cusparseStatus_t ilu0_residual_check(int m, const T *val,
     return CUSPARSE_STATUS_SUCCESS;
 }
 
+// Write the computed C sparsity structure (row pointers + column indices) from
+// the SpGEMM state into the user-allocated C descriptor arrays.  Shared by the
+// one-shot copy and the reuse-API copy phases.
+static void spgemmWriteStructureToC(CsrMat &C, const SpGEMMState &st) {
+    int cBase = (C.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
+    int64_t m = st.cRows;
+    for (int64_t i = 0; i <= m; ++i) {
+        int64_t v = st.cRowPtr[static_cast<size_t>(i)] + cBase;
+        if (C.rowOffsetType == CUSPARSE_INDEX_64I)
+            static_cast<int64_t*>(C.rowOffsets)[i] = v;
+        else
+            static_cast<int32_t*>(C.rowOffsets)[i] = static_cast<int32_t>(v);
+    }
+    for (int64_t k = 0; k < st.cNnz; ++k) {
+        int64_t v = st.cColInd[static_cast<size_t>(k)] + cBase;
+        if (C.colIndType == CUSPARSE_INDEX_64I)
+            static_cast<int64_t*>(C.colInd)[k] = v;
+        else
+            static_cast<int32_t*>(C.colInd)[k] = static_cast<int32_t>(v);
+    }
+}
+
+// Write the computed C values from the SpGEMM state into the user-allocated C
+// descriptor values array, converting to the requested compute type.  Shared by
+// the one-shot copy and the reuse-API compute phases.
+static cusparseStatus_t spgemmWriteValuesToC(CsrMat &C, const SpGEMMState &st,
+                                             cudaDataType_t computeType) {
+    if (computeType == CUDA_R_32F)
+        memcpy(C.values, st.cValF.data(), static_cast<size_t>(st.cNnz) * sizeof(float));
+    else if (computeType == CUDA_R_64F)
+        memcpy(C.values, st.cValD.data(), static_cast<size_t>(st.cNnz) * sizeof(double));
+    else if (computeType == CUDA_R_16F) {
+        uint16_t *out = static_cast<uint16_t*>(C.values);
+        for (int64_t k = 0; k < st.cNnz; ++k)
+            out[static_cast<size_t>(k)] = f2h_sp(st.cValF[static_cast<size_t>(k)]);
+    } else if (computeType == CUDA_R_16BF) {
+        uint16_t *out = static_cast<uint16_t*>(C.values);
+        for (int64_t k = 0; k < st.cNnz; ++k)
+            out[static_cast<size_t>(k)] = f2bf_sp(st.cValF[static_cast<size_t>(k)]);
+    } else if (computeType == CUDA_C_32F) {
+        float *out = static_cast<float*>(C.values);
+        for (int64_t k = 0; k < st.cNnz; ++k) {
+            out[2*k]   = static_cast<float>(st.cValZ[static_cast<size_t>(k)].real());
+            out[2*k+1] = static_cast<float>(st.cValZ[static_cast<size_t>(k)].imag());
+        }
+    } else if (computeType == CUDA_C_64F) {
+        double *out = static_cast<double*>(C.values);
+        for (int64_t k = 0; k < st.cNnz; ++k) {
+            out[2*k]   = st.cValZ[static_cast<size_t>(k)].real();
+            out[2*k+1] = st.cValZ[static_cast<size_t>(k)].imag();
+        }
+    } else
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
 extern "C" {
 
 // ── SpGEMM descriptor ─────────────────────────────────────────────────────────
@@ -762,54 +818,11 @@ cusparseStatus_t cusparseSpGEMM_copy(cusparseHandle_t /*h*/,
     if (stIt == g_spgemmStates.end()) return CUSPARSE_STATUS_INVALID_VALUE;
     const SpGEMMState &st = stIt->second;
 
-    int cBase = (C.idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
-    int64_t m = st.cRows;
-
-    // Write row pointers
-    for (int64_t i = 0; i <= m; ++i) {
-        int64_t v = st.cRowPtr[static_cast<size_t>(i)] + cBase;
-        if (C.rowOffsetType == CUSPARSE_INDEX_64I)
-            static_cast<int64_t*>(C.rowOffsets)[i] = v;
-        else
-            static_cast<int32_t*>(C.rowOffsets)[i] = static_cast<int32_t>(v);
-    }
-
-    // Write column indices
-    for (int64_t k = 0; k < st.cNnz; ++k) {
-        int64_t v = st.cColInd[static_cast<size_t>(k)] + cBase;
-        if (C.colIndType == CUSPARSE_INDEX_64I)
-            static_cast<int64_t*>(C.colInd)[k] = v;
-        else
-            static_cast<int32_t*>(C.colInd)[k] = static_cast<int32_t>(v);
-    }
-
-    // Write values
-    if (computeType == CUDA_R_32F)
-        memcpy(C.values, st.cValF.data(), static_cast<size_t>(st.cNnz) * sizeof(float));
-    else if (computeType == CUDA_R_64F)
-        memcpy(C.values, st.cValD.data(), static_cast<size_t>(st.cNnz) * sizeof(double));
-    else if (computeType == CUDA_R_16F) {
-        uint16_t *out = static_cast<uint16_t*>(C.values);
-        for (int64_t k = 0; k < st.cNnz; ++k)
-            out[static_cast<size_t>(k)] = f2h_sp(st.cValF[static_cast<size_t>(k)]);
-    } else if (computeType == CUDA_R_16BF) {
-        uint16_t *out = static_cast<uint16_t*>(C.values);
-        for (int64_t k = 0; k < st.cNnz; ++k)
-            out[static_cast<size_t>(k)] = f2bf_sp(st.cValF[static_cast<size_t>(k)]);
-    } else if (computeType == CUDA_C_32F) {
-        float *out = static_cast<float*>(C.values);
-        for (int64_t k = 0; k < st.cNnz; ++k) {
-            out[2*k]   = static_cast<float>(st.cValZ[static_cast<size_t>(k)].real());
-            out[2*k+1] = static_cast<float>(st.cValZ[static_cast<size_t>(k)].imag());
-        }
-    } else if (computeType == CUDA_C_64F) {
-        double *out = static_cast<double*>(C.values);
-        for (int64_t k = 0; k < st.cNnz; ++k) {
-            out[2*k]   = st.cValZ[static_cast<size_t>(k)].real();
-            out[2*k+1] = st.cValZ[static_cast<size_t>(k)].imag();
-        }
-    } else
-        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    // Write the structure and values into the user C arrays via shared helpers.
+    spgemmWriteStructureToC(C, st);
+    if (cusparseStatus_t vs = spgemmWriteValuesToC(C, st, computeType);
+        vs != CUSPARSE_STATUS_SUCCESS)
+        return vs;
 
     // Apply beta * old_C for positions that existed in both old and new C
     if (std::fabs(betaD) > 1e-15 && !oldValsRe.empty()) {
@@ -843,6 +856,189 @@ cusparseStatus_t cusparseSpGEMM_copy(cusparseHandle_t /*h*/,
         }
     }
 
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── SpGEMM reuse API (Track U) ────────────────────────────────────────────────
+// Separates the symbolic analysis (sparsity structure of C, computed once) from
+// the numeric phase (values of C, recomputable many times when only A/B values
+// change but their sparsity patterns do not).  This is what GNN/iterative solver
+// frameworks use to amortise the symbolic SpGEMM across repeated multiplies.
+// The phases share the same SpGEMMState descriptor as the one-shot API.
+
+// Phase 1: symbolic structure of C.  No alpha/beta/computeType needed.
+cusparseStatus_t cusparseSpGEMMreuse_workEstimation(
+        cusparseHandle_t h, cusparseOperation_t opA, cusparseOperation_t opB,
+        cusparseSpMatDescr_t matA, cusparseSpMatDescr_t matB,
+        cusparseSpMatDescr_t matC, cusparseSpGEMMAlg_t alg,
+        cusparseSpGEMMDescr_t spgemmDescr,
+        size_t *bufferSize1, void *externalBuffer1) {
+    // Reuse the one-shot symbolic phase; it ignores alpha/beta/computeType.
+    float dummy = 0.0f;
+    return cusparseSpGEMM_workEstimation(h, opA, opB, &dummy, matA, matB, &dummy,
+                                         matC, CUDA_R_32F, alg, spgemmDescr,
+                                         bufferSize1, externalBuffer1);
+}
+
+// Phase 2: report NNZ of C.  Symbolic structure was computed in phase 1, so this
+// only needs to surface the result and size the working buffers.
+cusparseStatus_t cusparseSpGEMMreuse_nnz(
+        cusparseHandle_t /*h*/, cusparseOperation_t /*opA*/, cusparseOperation_t /*opB*/,
+        cusparseSpMatDescr_t /*matA*/, cusparseSpMatDescr_t /*matB*/,
+        cusparseSpMatDescr_t matC, cusparseSpGEMMAlg_t /*alg*/,
+        cusparseSpGEMMDescr_t spgemmDescr,
+        size_t *bufferSize2, void * /*externalBuffer2*/,
+        size_t *bufferSize3, void * /*externalBuffer3*/,
+        size_t *bufferSize4, void * /*externalBuffer4*/) {
+    std::lock_guard<std::mutex> lkG(g_spgemmMutex);
+    auto stIt = g_spgemmStates.find(reinterpret_cast<uintptr_t>(spgemmDescr));
+    if (stIt == g_spgemmStates.end() || !stIt->second.symbolicDone) {
+        if (bufferSize2) *bufferSize2 = 0;
+        if (bufferSize3) *bufferSize3 = 0;
+        if (bufferSize4) *bufferSize4 = 0;
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const SpGEMMState &st = stIt->second;
+    {
+        std::lock_guard<std::mutex> lkD(g_descrMutex);
+        auto cIt = g_csrMats.find(reinterpret_cast<uintptr_t>(matC));
+        if (cIt != g_csrMats.end()) {
+            cIt->second.nnz  = st.cNnz;
+            cIt->second.rows = st.cRows;
+            cIt->second.cols = st.cCols;
+        }
+    }
+    // Working-buffer sizes: structural data already lives in the descriptor, so
+    // no external buffers are required by this in-memory implementation.
+    if (bufferSize2) *bufferSize2 = 0;
+    if (bufferSize3) *bufferSize3 = 0;
+    if (bufferSize4) *bufferSize4 = 0;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Phase 3: write the (fixed) sparsity structure of C into the user C arrays.
+cusparseStatus_t cusparseSpGEMMreuse_copy(
+        cusparseHandle_t /*h*/, cusparseOperation_t /*opA*/, cusparseOperation_t /*opB*/,
+        cusparseSpMatDescr_t /*matA*/, cusparseSpMatDescr_t /*matB*/,
+        cusparseSpMatDescr_t matC, cusparseSpGEMMAlg_t /*alg*/,
+        cusparseSpGEMMDescr_t spgemmDescr,
+        size_t *bufferSize5, void * /*externalBuffer5*/) {
+    if (bufferSize5) *bufferSize5 = 0;
+    std::lock_guard<std::mutex> lkD(g_descrMutex);
+    auto cIt = g_csrMats.find(reinterpret_cast<uintptr_t>(matC));
+    if (cIt == g_csrMats.end()) return CUSPARSE_STATUS_INVALID_VALUE;
+    CsrMat &C = cIt->second;
+    if (!C.rowOffsets || !C.colInd) return CUSPARSE_STATUS_INVALID_VALUE;
+
+    std::lock_guard<std::mutex> lkG(g_spgemmMutex);
+    auto stIt = g_spgemmStates.find(reinterpret_cast<uintptr_t>(spgemmDescr));
+    if (stIt == g_spgemmStates.end() || !stIt->second.symbolicDone)
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    spgemmWriteStructureToC(C, stIt->second);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Phase 4: numeric C = alpha*A*B + beta*C.  Reuses the cached symbolic structure
+// (symbolicDone == true) so only values are recomputed; callable repeatedly
+// after updating A/B values.  Because the structure is identical across calls,
+// beta accumulation is an element-wise add by physical index.
+cusparseStatus_t cusparseSpGEMMreuse_compute(
+        cusparseHandle_t h, cusparseOperation_t opA, cusparseOperation_t opB,
+        const void *alpha, cusparseSpMatDescr_t matA, cusparseSpMatDescr_t matB,
+        const void *beta, cusparseSpMatDescr_t matC, cudaDataType_t computeType,
+        cusparseSpGEMMAlg_t alg, cusparseSpGEMMDescr_t spgemmDescr) {
+    // Resolve C and snapshot its current values (needed only for beta != 0).
+    std::vector<double> oldRe, oldIm;
+    bool wantBeta = false;
+    double betaRe = 0.0, betaIm = 0.0;
+    {
+        std::lock_guard<std::mutex> lkD(g_descrMutex);
+        auto cIt = g_csrMats.find(reinterpret_cast<uintptr_t>(matC));
+        if (cIt == g_csrMats.end()) return CUSPARSE_STATUS_INVALID_VALUE;
+        const CsrMat &C = cIt->second;
+        bool cplx = (computeType == CUDA_C_32F || computeType == CUDA_C_64F);
+        if (beta) {
+            if (computeType == CUDA_R_64F)        betaRe = *static_cast<const double*>(beta);
+            else if (computeType == CUDA_C_64F) { betaRe = static_cast<const double*>(beta)[0];
+                                                  betaIm = static_cast<const double*>(beta)[1]; }
+            else if (computeType == CUDA_C_32F) { betaRe = static_cast<const float*>(beta)[0];
+                                                  betaIm = static_cast<const float*>(beta)[1]; }
+            else                                  betaRe = *static_cast<const float*>(beta);
+        }
+        wantBeta = (std::fabs(betaRe) > 1e-15 || std::fabs(betaIm) > 1e-15) &&
+                   C.values && C.nnz > 0;
+        if (wantBeta) {
+            int64_t nnz = C.nnz;
+            oldRe.resize(static_cast<size_t>(nnz));
+            if (cplx) oldIm.resize(static_cast<size_t>(nnz));
+            for (int64_t k = 0; k < nnz; ++k) {
+                if (computeType == CUDA_R_32F)
+                    oldRe[static_cast<size_t>(k)] = static_cast<float*>(C.values)[k];
+                else if (computeType == CUDA_R_64F)
+                    oldRe[static_cast<size_t>(k)] = static_cast<double*>(C.values)[k];
+                else if (computeType == CUDA_R_16F)
+                    oldRe[static_cast<size_t>(k)] = h2f_sp(static_cast<uint16_t*>(C.values)[k]);
+                else if (computeType == CUDA_R_16BF)
+                    oldRe[static_cast<size_t>(k)] = bf2f_sp(static_cast<uint16_t*>(C.values)[k]);
+                else if (computeType == CUDA_C_32F) {
+                    oldRe[static_cast<size_t>(k)] = static_cast<float*>(C.values)[2*k];
+                    oldIm[static_cast<size_t>(k)] = static_cast<float*>(C.values)[2*k+1];
+                } else if (computeType == CUDA_C_64F) {
+                    oldRe[static_cast<size_t>(k)] = static_cast<double*>(C.values)[2*k];
+                    oldIm[static_cast<size_t>(k)] = static_cast<double*>(C.values)[2*k+1];
+                }
+            }
+        }
+    }
+
+    // Numeric phase: reuse the one-shot compute (applies alpha, reuses symbolic).
+    size_t b2 = 0;
+    cusparseStatus_t s = cusparseSpGEMM_compute(h, opA, opB, alpha, matA, matB, beta,
+                                                matC, computeType, alg, spgemmDescr,
+                                                &b2, nullptr);
+    if (s != CUSPARSE_STATUS_SUCCESS) return s;
+
+    // Write the freshly computed values (= alpha*A*B) into the user C array.
+    std::lock_guard<std::mutex> lkD(g_descrMutex);
+    auto cIt = g_csrMats.find(reinterpret_cast<uintptr_t>(matC));
+    if (cIt == g_csrMats.end()) return CUSPARSE_STATUS_INVALID_VALUE;
+    CsrMat &C = cIt->second;
+    if (!C.values) return CUSPARSE_STATUS_INVALID_VALUE;
+    std::lock_guard<std::mutex> lkG(g_spgemmMutex);
+    auto stIt = g_spgemmStates.find(reinterpret_cast<uintptr_t>(spgemmDescr));
+    if (stIt == g_spgemmStates.end()) return CUSPARSE_STATUS_INVALID_VALUE;
+    const SpGEMMState &st = stIt->second;
+    if (cusparseStatus_t vs = spgemmWriteValuesToC(C, st, computeType);
+        vs != CUSPARSE_STATUS_SUCCESS)
+        return vs;
+
+    // Add beta*old_C element-wise (structure is identical, so index k aligns).
+    if (wantBeta) {
+        for (int64_t k = 0; k < st.cNnz && k < static_cast<int64_t>(oldRe.size()); ++k) {
+            double oR = oldRe[static_cast<size_t>(k)];
+            if (computeType == CUDA_R_32F)
+                static_cast<float*>(C.values)[k]  += static_cast<float>(betaRe * oR);
+            else if (computeType == CUDA_R_64F)
+                static_cast<double*>(C.values)[k] += betaRe * oR;
+            else if (computeType == CUDA_R_16F)
+                static_cast<uint16_t*>(C.values)[k] =
+                    f2h_sp(h2f_sp(static_cast<uint16_t*>(C.values)[k]) +
+                           static_cast<float>(betaRe * oR));
+            else if (computeType == CUDA_R_16BF)
+                static_cast<uint16_t*>(C.values)[k] =
+                    f2bf_sp(bf2f_sp(static_cast<uint16_t*>(C.values)[k]) +
+                            static_cast<float>(betaRe * oR));
+            else if (computeType == CUDA_C_32F) {
+                double oI = oldIm[static_cast<size_t>(k)];
+                static_cast<float*>(C.values)[2*k]   += static_cast<float>(betaRe*oR - betaIm*oI);
+                static_cast<float*>(C.values)[2*k+1] += static_cast<float>(betaRe*oI + betaIm*oR);
+            } else if (computeType == CUDA_C_64F) {
+                double oI = oldIm[static_cast<size_t>(k)];
+                static_cast<double*>(C.values)[2*k]   += betaRe*oR - betaIm*oI;
+                static_cast<double*>(C.values)[2*k+1] += betaRe*oI + betaIm*oR;
+            }
+        }
+    }
     return CUSPARSE_STATUS_SUCCESS;
 }
 
