@@ -766,6 +766,11 @@ add_executable(test_texture_manager core/test_texture_manager.cpp)
 target_link_libraries(test_texture_manager PRIVATE vgre)
 add_test(NAME TextureManager COMMAND test_texture_manager)
 
+add_executable(test_graph_dce core/test_graph_dce.cpp)
+target_link_libraries(test_graph_dce PRIVATE vgre)
+add_test(NAME GraphDCE COMMAND test_graph_dce)
+set_tests_properties(GraphDCE PROPERTIES TIMEOUT 120)
+
 add_executable(test_memory_pool unit/test_memory_pool.cpp)
 target_link_libraries(test_memory_pool PRIVATE vgre)
 add_test(NAME MemoryPool COMMAND test_memory_pool)
