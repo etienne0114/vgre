@@ -1046,6 +1046,7 @@ set(_VGRE_CUDART_SOURCES
     src/api/cusparse/cusparse_triangular.cpp
     src/api/cusparse/cusparse_factorization.cpp
     src/api/cusparse/cusparse_spvec.cpp
+    src/api/cusparse/sparse_view.cpp
     src/api/cusolver/cusolver_core.cpp
     src/api/cusolver/cusolver_type_erasure.cpp
     $<$<BOOL:${VGRE_LAPACK_FALLBACK}>:src/api/cusolver/lapack_fallback.cpp>

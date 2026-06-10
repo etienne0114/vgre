@@ -5,6 +5,7 @@
 // cusparse_triangular.cpp, sharing state via cusparse_state.h.
 
 #include "cusparse_state.h"
+#include "sparse_view.h"
 
 // ── Minimal complex types ─────────────────────────────────────────────────────
 struct cuComplex { float x, y; };
@@ -707,26 +708,66 @@ cusparseStatus_t cusparseCreateCoo(cusparseSpMatDescr_t *spMatDescr,
                                     cusparseIndexType_t cooIdxType,
                                     cusparseIndexBase_t idxBase, cudaDataType_t valueType) {
     if (!spMatDescr || rows <= 0 || cols <= 0 || nnz < 0) return CUSPARSE_STATUS_INVALID_VALUE;
-    std::vector<int32_t> rowOff(static_cast<size_t>(rows + 1), 0);
     int base = (idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
-    if (cooIdxType == CUSPARSE_INDEX_64I) {
-        const int64_t *ri = static_cast<const int64_t *>(cooRowInd);
-        for (int64_t i = 0; i < nnz; ++i) rowOff[ri[i] - base + 1]++;
-    } else {
-        const int32_t *ri = static_cast<const int32_t *>(cooRowInd);
-        for (int64_t i = 0; i < nnz; ++i) rowOff[ri[i] - base + 1]++;
-    }
-    for (int64_t i = 1; i <= rows; ++i) rowOff[i] += rowOff[i-1];
 
     std::lock_guard<std::mutex> lk(g_descrMutex);
     uintptr_t id = g_nextDescr++;
     CsrMat &m = g_csrMats[id];
     m.rows = rows; m.cols = cols; m.nnz = nnz;
-    m.colInd = cooColInd; m.values = cooValues;
     m.idxBase = idxBase; m.valueType = valueType;
-    g_cooRowOffsets[id] = std::move(rowOff);
-    m.rowOffsets = g_cooRowOffsets[id].data();
     m.rowOffsetType = CUSPARSE_INDEX_32I;
+    m.colIndType    = CUSPARSE_INDEX_32I;
+
+    // COO → CSR must REORDER colInd/values into row-major order, not merely build
+    // the row pointers: an unsorted COO (cuSPARSE permits it) would otherwise
+    // yield a CSR whose per-row column slices reference the wrong entries. For
+    // the dominant int32-index, base-0, float/double case reuse the sparse-view
+    // stable counting-sort converter (which owns the reordered arrays).
+    bool usedView = false;
+    if (cooIdxType == CUSPARSE_INDEX_32I && base == 0) {
+        using vgre::sparse::SparseMatrixView;
+        using vgre::sparse::SparseFormat;
+        auto adopt = [&](auto csr) {
+            m.ownedRowOffsets = csr.ownRow;
+            m.ownedColInd     = csr.ownCol;
+            m.ownedValues     = csr.ownVal;
+            m.rowOffsets = csr.rowOffsets;
+            m.colInd     = csr.colIndices;
+            m.values     = csr.values;
+        };
+        if (valueType == CUDA_R_32F) {
+            SparseMatrixView<float, int32_t> coo(cooRowInd, cooColInd, cooValues,
+                static_cast<int32_t>(rows), static_cast<int32_t>(cols),
+                static_cast<int32_t>(nnz), 1, SparseFormat::COO);
+            auto csr = coo.toView(SparseFormat::CSR);
+            if (!csr.isView && csr.values) { adopt(csr); usedView = true; }
+        } else if (valueType == CUDA_R_64F) {
+            SparseMatrixView<double, int32_t> coo(cooRowInd, cooColInd, cooValues,
+                static_cast<int32_t>(rows), static_cast<int32_t>(cols),
+                static_cast<int32_t>(nnz), 1, SparseFormat::COO);
+            auto csr = coo.toView(SparseFormat::CSR);
+            if (!csr.isView && csr.values) { adopt(csr); usedView = true; }
+        }
+    }
+
+    if (!usedView) {
+        // Fallback (int64 indices, base-1, or non-float/double values): build only
+        // the row pointers and alias the caller's arrays. Correct when the COO is
+        // already row-sorted (the cuSPARSE contract for these paths).
+        std::vector<int32_t> rowOff(static_cast<size_t>(rows + 1), 0);
+        if (cooIdxType == CUSPARSE_INDEX_64I) {
+            const int64_t *ri = static_cast<const int64_t *>(cooRowInd);
+            for (int64_t i = 0; i < nnz; ++i) rowOff[ri[i] - base + 1]++;
+        } else {
+            const int32_t *ri = static_cast<const int32_t *>(cooRowInd);
+            for (int64_t i = 0; i < nnz; ++i) rowOff[ri[i] - base + 1]++;
+        }
+        for (int64_t i = 1; i <= rows; ++i) rowOff[i] += rowOff[i-1];
+        m.colInd = cooColInd; m.values = cooValues;
+        g_cooRowOffsets[id] = std::move(rowOff);
+        m.rowOffsets = g_cooRowOffsets[id].data();
+    }
+
     *spMatDescr = reinterpret_cast<cusparseSpMatDescr_t>(id);
     return CUSPARSE_STATUS_SUCCESS;
 }

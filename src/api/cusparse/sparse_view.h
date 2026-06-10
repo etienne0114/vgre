@@ -1,12 +1,15 @@
-// Zero-Copy Sparse Matrix View System
-// Implements lightweight view-based sparse matrix format conversions
-// avoiding deep copies and memory allocations
+// Sparse Matrix View / Conversion System
+// Zero-copy views where the layout is genuinely identical; real (owned)
+// conversions otherwise. Conversions are correct (they represent the SAME
+// matrix in the target format, not its transpose).
 
 #ifndef VGRE_SPARSE_VIEW_H
 #define VGRE_SPARSE_VIEW_H
 
 #include <cstdint>
 #include <cstddef>
+#include <memory>
+#include <vector>
 
 namespace vgre {
 namespace sparse {
@@ -20,41 +23,58 @@ enum class SparseFormat {
     BSC   // Block Sparse Column
 };
 
-// Zero-copy view descriptor for sparse matrices
+// Sparse matrix descriptor. When isView==true the pointer fields alias
+// caller-owned arrays (zero-copy). When isView==false the matrix owns its arrays
+// via the shared_ptr buffers below and the pointer fields alias into them, so a
+// converted matrix is self-contained and copyable.
+//
+// Array meanings by format (length in []):
+//   CSR : rowOffsets[rows+1] = row pointers, colIndices[nnz] = column indices
+//   CSC : rowOffsets[cols+1] = column pointers, colIndices[nnz] = row indices
+//   COO : rowOffsets[nnz]    = row indices,    colIndices[nnz] = column indices
+//   BSR : rowOffsets[rows/bs+1] block-row pointers, colIndices = block columns
 template<typename T = float, typename IndexType = int32_t>
 struct SparseMatrixView {
-    void* rowOffsets;      // Pointer to row offset array (CSR/BSR) or column offset (CSC/BSC)
-    void* colIndices;      // Pointer to column index array (CSR/BSR) or row index (CSC/BSC)
-    void* values;          // Pointer to values array
-    IndexType rows;        // Number of rows
-    IndexType cols;        // Number of columns
-    IndexType nnz;         // Number of non-zero elements
-    IndexType blockSize;   // Block size for BSR/BSC (1 for CSR/CSC/COO)
-    SparseFormat format;   // Matrix format
-    bool isView;           // True if this is a view (no ownership)
-    
-    // Default constructor
-    SparseMatrixView() 
+    void* rowOffsets;
+    void* colIndices;
+    void* values;
+    IndexType rows;
+    IndexType cols;
+    IndexType nnz;
+    IndexType blockSize;
+    SparseFormat format;
+    bool isView;
+
+    // Owned backing storage (non-null only when isView==false).
+    std::shared_ptr<std::vector<IndexType>> ownRow;
+    std::shared_ptr<std::vector<IndexType>> ownCol;
+    std::shared_ptr<std::vector<T>>         ownVal;
+
+    SparseMatrixView()
         : rowOffsets(nullptr), colIndices(nullptr), values(nullptr),
           rows(0), cols(0), nnz(0), blockSize(1), format(SparseFormat::CSR),
           isView(true) {}
-    
-    // Constructor from existing data (zero-copy view)
+
     SparseMatrixView(void* rowOff, void* colInd, void* vals,
                      IndexType r, IndexType c, IndexType n,
                      IndexType bs = 1, SparseFormat fmt = SparseFormat::CSR)
         : rowOffsets(rowOff), colIndices(colInd), values(vals),
           rows(r), cols(c), nnz(n), blockSize(bs), format(fmt),
           isView(true) {}
-    
-    // Convert view to different format (zero-copy if possible)
+
+    // Convert to a different format. Returns a zero-copy view when the layout is
+    // identical, otherwise a newly-allocated owned matrix. An empty matrix
+    // (nnz==0, all null) is returned for an unsupported format pair.
     SparseMatrixView<T, IndexType> toView(SparseFormat targetFormat) const;
-    
-    // Check if zero-copy conversion is possible
+
+    // True only when the target shares this matrix's exact array layout, so the
+    // conversion needs no allocation or data movement.
     bool canConvertZeroCopy(SparseFormat targetFormat) const;
+
+    bool valid() const { return values != nullptr || nnz == 0; }
 };
 
-// View-based format conversion functions
+// Convenience wrappers (all delegate to toView and return correct results).
 template<typename T, typename IndexType>
 SparseMatrixView<T, IndexType> csrToCscView(const SparseMatrixView<T, IndexType>& csr);
 

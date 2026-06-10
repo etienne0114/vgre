@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -29,6 +30,12 @@ struct CsrMat {
     cusparseDiagType_t  diagType      = CUSPARSE_DIAG_TYPE_NON_UNIT;
     bool isCSC = false;
     std::vector<int64_t> d2sRowCounts;
+    // Owned backing storage for converted matrices (e.g. COO→CSR reorder). Keeps
+    // the arrays alive for the descriptor's lifetime; null for pure views. Held
+    // as shared_ptr<void> so any element type can be retained type-erased.
+    std::shared_ptr<void> ownedRowOffsets;
+    std::shared_ptr<void> ownedColInd;
+    std::shared_ptr<void> ownedValues;
 };
 
 struct DnVec {

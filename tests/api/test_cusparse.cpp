@@ -1090,10 +1090,55 @@ int test_ellpack_spmv_transposed() {
 }
 
 // ── Driver ────────────────────────────────────────────────────────────────────
+// ── COO SpMV with UNSORTED input (Track 10) ──────────────────────────────────
+// cusparseCreateCoo must reorder entries into row order, not just count rows.
+// Matrix A (3×3):  [10 0 20; 0 30 0; 40 0 50]   x=[1,2,3]  =>  y=[70,60,190].
+// The COO entries are given in a deliberately NON row-major order; the previous
+// count-only conversion would have produced a CSR with mis-grouped columns and a
+// wrong SpMV result.
+int test_coo_unsorted_spmv() {
+    cusparseHandle_t h = nullptr;
+    cusparseCreate(&h);
+
+    // Unsorted COO: (2,0,40),(0,2,20),(1,1,30),(0,0,10),(2,2,50)
+    std::vector<int>   cooRow = {2, 0, 1, 0, 2};
+    std::vector<int>   cooCol = {0, 2, 1, 0, 2};
+    std::vector<float> cooVal = {40, 20, 30, 10, 50};
+    std::vector<float> x = {1, 2, 3};
+    std::vector<float> y = {0, 0, 0};
+
+    cusparseSpMatDescr_t matA = nullptr;
+    cusparseDnVecDescr_t vecX = nullptr, vecY = nullptr;
+    cusparseCreateCoo(&matA, 3, 3, 5, cooRow.data(), cooCol.data(), cooVal.data(),
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseCreateDnVec(&vecX, 3, x.data(), CUDA_R_32F);
+    cusparseCreateDnVec(&vecY, 3, y.data(), CUDA_R_32F);
+
+    float alpha = 1.0f, beta = 0.0f;
+    size_t bufSize = 0;
+    cusparseSpMV_bufferSize(h, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA,
+                            vecX, &beta, vecY, CUDA_R_32F, &bufSize);
+    std::vector<char> buf(bufSize + 1);
+    cusparseSpMV(h, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA,
+                 vecX, &beta, vecY, CUDA_R_32F, buf.data());
+
+    if (!NEAR(y[0], 70.0f, 1e-4f)) FAIL("COO-unsorted SpMV y[0]");
+    if (!NEAR(y[1], 60.0f, 1e-4f)) FAIL("COO-unsorted SpMV y[1]");
+    if (!NEAR(y[2], 190.0f, 1e-4f)) FAIL("COO-unsorted SpMV y[2]");
+
+    cusparseDestroySpMat(matA);
+    cusparseDestroyDnVec(vecX);
+    cusparseDestroyDnVec(vecY);
+    cusparseDestroy(h);
+    PASS("COO unsorted SpMV (reorder)");
+    return 0;
+}
+
 int main() {
     std::cout << "=== cuSPARSE Shim Functional Tests ===\n";
     int rc = 0;
     rc |= test_handle();
+    rc |= test_coo_unsorted_spmv();
     rc |= test_null_rejection();
     rc |= test_spmv_float();
     rc |= test_spsv_lower();
