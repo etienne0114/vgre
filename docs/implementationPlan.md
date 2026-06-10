@@ -22,7 +22,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 4 | Health/readiness probes + graceful drain | P0 | §4.2 | ✅ Done |
 | 5 | Config registry + validation + `build_info` | P0 | §4.4, §4.3 | ✅ Done |
 | 6 | Parallel-test stability (bounded -j + targeted lock) | P0 | §6.1 | ✅ Done |
-| 7 | Flash Attention real tiled online-softmax | P1 | §1.1 | 🔴 Not started |
+| 7 | Flash Attention real tiled online-softmax | P1 | §1.1 | ✅ Done |
 | 8 | NCCL pipelined ring (reduce-scatter/all-gather) | P1 | §1.2 | ✅ Done |
 | 9 | WMMA real fragment-layout MMA | P1 | §1.3 | 🔴 Not started |
 | 10 | cuSPARSE `sparse_view` conversions | P1 | §1.5 | ✅ Done |

@@ -112,7 +112,9 @@ static void testFlashAttentionOutputShape() {
 
     // Verify output uses d_head stride (not seq_len)
     assert(fusedSrc.find("O[row * d_head + d]") != std::string::npos);
-    assert(fusedSrc.find("V[col * d_head + v_col]") != std::string::npos);
+    // V is read at the d_head stride into the per-row accumulator (Track 7: the
+    // corrected online-softmax indexes V by d, not by a separate v_col tile).
+    assert(fusedSrc.find("V[col * d_head + d]") != std::string::npos);
     // Verify no seq_len x seq_len output pattern
     assert(fusedSrc.find("O[row * seq_len + col]") == std::string::npos);
 

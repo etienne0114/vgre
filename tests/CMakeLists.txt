@@ -541,6 +541,11 @@ target_link_libraries(test_config_buildinfo PRIVATE vgre_cudart)
 add_test(NAME ConfigBuildInfo COMMAND test_config_buildinfo)
 set_tests_properties(ConfigBuildInfo PROPERTIES TIMEOUT 30)
 
+add_executable(test_flash_attention integration/test_flash_attention.cpp)
+target_link_libraries(test_flash_attention PRIVATE vgre)
+add_test(NAME FlashAttention COMMAND test_flash_attention)
+set_tests_properties(FlashAttention PROPERTIES TIMEOUT 120)
+
 add_executable(test_cublaslt api/test_cublaslt.cpp)
 target_link_libraries(test_cublaslt PRIVATE vgre_cudart)
 add_test(NAME CuBLASLtFunctional COMMAND test_cublaslt)
