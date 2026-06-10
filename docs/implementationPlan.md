@@ -27,7 +27,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 9 | WMMA real fragment-layout MMA | P1 | §1.3 | 🔴 Not started |
 | 10 | cuSPARSE `sparse_view` conversions | P1 | §1.5 | ✅ Done |
 | 11 | cuRAND logarithmic skip-ahead | P1 | §1.8 | ✅ Done |
-| 12 | PTX carry-chain + full addressing | P1 | §1.7 | 🔴 Not started |
+| 12 | PTX carry-chain + full addressing | P1 | §1.7 | ✅ Done |
 | 13 | Graph optimizer real liveness DCE | P1 | §1.6 | ✅ Done |
 | 14 | MPS per-client pipe instances (Windows) | P1 | §1.4 | 🔴 Not started |
 | 15 | `NOT_SUPPORTED` audit (cuSPARSE/cuSOLVER) | P1 | §2.1, §2.2 | 🔴 Not started |

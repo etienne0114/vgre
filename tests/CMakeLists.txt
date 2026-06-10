@@ -526,6 +526,11 @@ target_include_directories(test_sparse_view PRIVATE ${CMAKE_SOURCE_DIR}/src/api/
 add_test(NAME SparseViewConversions COMMAND test_sparse_view)
 set_tests_properties(SparseViewConversions PROPERTIES TIMEOUT 30)
 
+add_executable(test_ptx_translate api/test_ptx_translate.cpp)
+target_link_libraries(test_ptx_translate PRIVATE vgre)
+add_test(NAME PTXTranslate COMMAND test_ptx_translate)
+set_tests_properties(PTXTranslate PROPERTIES TIMEOUT 30)
+
 add_executable(test_cublaslt api/test_cublaslt.cpp)
 target_link_libraries(test_cublaslt PRIVATE vgre_cudart)
 add_test(NAME CuBLASLtFunctional COMMAND test_cublaslt)
