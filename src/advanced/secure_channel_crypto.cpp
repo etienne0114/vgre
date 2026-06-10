@@ -234,9 +234,48 @@ void hmac_sha256(const uint8_t *key, size_t keyLen, const uint8_t *data,
 void pbkdf2_sha256(const uint8_t *password, size_t passwordLen,
                    const uint8_t *salt, size_t saltLen, uint32_t iterations,
                    uint8_t *derivedKey, size_t derivedKeyLen) {
+  // PBKDF2-HMAC-SHA256 with the standard key-schedule reuse optimization: the
+  // HMAC key only depends on `password`, so the SHA-256 state after absorbing
+  // the (key XOR ipad) and (key XOR opad) blocks is computed ONCE and reused for
+  // every one of the (typically hundreds of thousands of) iterations.  A naive
+  // implementation re-hashes those two 64-byte blocks inside every HMAC call —
+  // ~2× the SHA-256 compressions.  Result is bit-identical to the naive form
+  // (RFC 8018), just ~2× faster.
+  uint8_t keyBlock[64];
+  memset(keyBlock, 0, sizeof(keyBlock));
+  if (passwordLen > 64) {
+    sha256(password, passwordLen, keyBlock);
+  } else {
+    memcpy(keyBlock, password, passwordLen);
+  }
+  uint8_t iPad[64], oPad[64];
+  for (int i = 0; i < 64; ++i) {
+    iPad[i] = static_cast<uint8_t>(keyBlock[i] ^ 0x36);
+    oPad[i] = static_cast<uint8_t>(keyBlock[i] ^ 0x5c);
+  }
+  // Base contexts: state after the (key⊕pad) block (one SHA-256 transform each).
+  SHA256Context innerBase, outerBase;
+  sha256_init(innerBase);
+  sha256_update(innerBase, iPad, 64);
+  sha256_init(outerBase);
+  sha256_update(outerBase, oPad, 64);
+
+  // HMAC(password, msg) reusing the cached base states.  sha256_final wipes the
+  // context it is given, so each call works on a copy of the base context.
+  auto hmacReuse = [&](const uint8_t *msg, size_t msgLen,
+                       uint8_t out[kSHA256DigestLen]) {
+    SHA256Context c = innerBase;          // copy: 1 transform already absorbed
+    sha256_update(c, msg, msgLen);
+    uint8_t inner[kSHA256DigestLen];
+    sha256_final(c, inner);
+    SHA256Context o = outerBase;
+    sha256_update(o, inner, kSHA256DigestLen);
+    sha256_final(o, out);
+    memset(inner, 0, sizeof(inner));
+  };
+
   uint32_t blockIndex = 1;
   size_t offset = 0;
-
   while (offset < derivedKeyLen) {
     // U_1 = HMAC(password, salt || INT_32_BE(blockIndex))
     std::vector<uint8_t> saltBlock(saltLen + 4);
@@ -247,14 +286,14 @@ void pbkdf2_sha256(const uint8_t *password, size_t passwordLen,
     saltBlock[saltLen + 3] = static_cast<uint8_t>(blockIndex);
 
     uint8_t U[kSHA256DigestLen];
-    hmac_sha256(password, passwordLen, saltBlock.data(), saltBlock.size(), U);
+    hmacReuse(saltBlock.data(), saltBlock.size(), U);
 
     uint8_t T[kSHA256DigestLen];
     memcpy(T, U, kSHA256DigestLen);
 
     for (uint32_t iter = 1; iter < iterations; ++iter) {
       uint8_t Unext[kSHA256DigestLen];
-      hmac_sha256(password, passwordLen, U, kSHA256DigestLen, Unext);
+      hmacReuse(U, kSHA256DigestLen, Unext);
       memcpy(U, Unext, kSHA256DigestLen);
       for (size_t j = 0; j < kSHA256DigestLen; ++j) {
         T[j] ^= U[j];
@@ -266,6 +305,13 @@ void pbkdf2_sha256(const uint8_t *password, size_t passwordLen,
     offset += copyLen;
     ++blockIndex;
   }
+
+  // Wipe key material.
+  memset(keyBlock, 0, sizeof(keyBlock));
+  memset(iPad, 0, sizeof(iPad));
+  memset(oPad, 0, sizeof(oPad));
+  memset(&innerBase, 0, sizeof(innerBase));
+  memset(&outerBase, 0, sizeof(outerBase));
 }
 
 // ── Cryptographic random bytes ───────────────────────────────────────────
