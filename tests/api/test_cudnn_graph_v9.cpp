@@ -214,7 +214,59 @@ int main() {
         }
     }
 
-    // 10. Cleanup
+    // ── 11. Unary ERF pointwise op (Track E: extended pointwise modes) ────────
+    // Reuses x/y tensor descriptors; applies y = erf(x) via a unary pointwise op.
+    #define CUDNN_POINTWISE_ERF 42
+    {
+        void* pwErf = nullptr;
+        CHECKDNN(cudnnBackendCreateDescriptor(CUDNN_BACKEND_POINTWISE_DESCRIPTOR, &pwErf));
+        int64_t mode = CUDNN_POINTWISE_ERF;
+        CHECKDNN(cudnnBackendSetAttribute(pwErf, CUDNN_ATTR_POINTWISE_MODE, 4, 1, &mode));
+        CHECKDNN(cudnnBackendFinalize(pwErf));
+
+        void* opErf = nullptr;
+        CHECKDNN(cudnnBackendCreateDescriptor(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR, &opErf));
+        uintptr_t xId = reinterpret_cast<uintptr_t>(xDesc);
+        uintptr_t yId = reinterpret_cast<uintptr_t>(yDesc);
+        uintptr_t pwId = reinterpret_cast<uintptr_t>(pwErf);
+        CHECKDNN(cudnnBackendSetAttribute(opErf, CUDNN_ATTR_OPERATION_POINTWISE_XDESC, 5, 1, &xId));
+        CHECKDNN(cudnnBackendSetAttribute(opErf, CUDNN_ATTR_OPERATION_POINTWISE_YDESC, 5, 1, &yId));
+        CHECKDNN(cudnnBackendSetAttribute(opErf, CUDNN_ATTR_OPERATION_POINTWISE_PW_DESCRIPTOR, 5, 1, &pwId));
+        CHECKDNN(cudnnBackendFinalize(opErf));
+
+        CudnnGraph* g2 = nullptr;
+        CHECKDNN(cudnnGraphCreate(&g2, nullptr));
+        CHECKDNN(cudnnGraphAddNode(g2, opErf));
+        CHECKDNN(cudnnGraphBuildAndCheck(g2, nullptr));
+
+        float xe[N] = {0.0f, 0.5f, 1.0f, -1.0f};
+        float ye[N] = {0.0f, 0.0f, 0.0f, 0.0f};
+        void* vp2 = nullptr;
+        CHECKDNN(cudnnBackendCreateDescriptor(CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR, &vp2));
+        uintptr_t ids2[2]  = { xId, yId };
+        uintptr_t ptrs2[2] = { reinterpret_cast<uintptr_t>(xe),
+                               reinterpret_cast<uintptr_t>(ye) };
+        CHECKDNN(cudnnBackendSetAttribute(vp2, CUDNN_ATTR_VARIANT_PACK_UNIQUE_IDS,    5, 2, ids2));
+        CHECKDNN(cudnnBackendSetAttribute(vp2, CUDNN_ATTR_VARIANT_PACK_DATA_POINTERS, 5, 2, ptrs2));
+        CHECKDNN(cudnnBackendFinalize(vp2));
+
+        CHECKDNN(cudnnGraphExecute(nullptr, g2, vp2));
+
+        for (int i = 0; i < N; ++i) {
+            float want = std::erf(xe[i]);
+            if (std::fabs(ye[i] - want) > 1e-5f) {
+                std::cerr << "ERF mismatch at [" << i << "]: got " << ye[i]
+                          << ", expected " << want << "\n";
+                return 1;
+            }
+        }
+        cudnnGraphDestroy(g2);
+        cudnnBackendDestroyDescriptor(vp2);
+        cudnnBackendDestroyDescriptor(opErf);
+        cudnnBackendDestroyDescriptor(pwErf);
+    }
+
+    // 12. Cleanup
     cudnnGraphDestroy(graph);
     cudnnBackendDestroyDescriptor(vpDesc);
     cudnnBackendDestroyDescriptor(opDesc);
@@ -223,6 +275,6 @@ int main() {
     cudnnBackendDestroyDescriptor(bDesc);
     cudnnBackendDestroyDescriptor(xDesc);
 
-    std::cout << "PASSED: cuDNN v9 Graph API — pointwise ADD verified\n";
+    std::cout << "PASSED: cuDNN v9 Graph API — pointwise ADD + unary ERF verified\n";
     return 0;
 }

@@ -1764,6 +1764,11 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
                 case CUDNN_POINTWISE_CEIL:       y = std::ceil(x); break;
                 case CUDNN_POINTWISE_FLOOR:      y = std::floor(x); break;
                 case CUDNN_POINTWISE_RECIPROCAL: y = x != 0.f ? 1.f / x : 0.f; break;
+                case CUDNN_POINTWISE_ERF:        y = std::erf(x); break;
+                case CUDNN_POINTWISE_RSQRT:      y = x > 0.f ? 1.f / std::sqrt(x) : 0.f; break;
+                case CUDNN_POINTWISE_SIN:        y = std::sin(x); break;
+                case CUDNN_POINTWISE_COS:        y = std::cos(x); break;
+                case CUDNN_POINTWISE_TAN:        y = std::tan(x); break;
                 case CUDNN_POINTWISE_RELU_FWD:   y = x > 0.f ? x : 0.f; break;
                 case CUDNN_POINTWISE_TANH_FWD:   y = std::tanh(x); break;
                 case CUDNN_POINTWISE_SIGMOID_FWD:y = 1.f / (1.f + std::exp(-x)); break;
@@ -2020,6 +2025,14 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
         }
 
         default:
+            // Every backend operation descriptor type defined by this shim is
+            // handled above.  Reaching here means a client built a graph with an
+            // operation type VGRE does not model; report it explicitly with the
+            // numeric type so the gap is diagnosable rather than silent.
+            VGRE_LOG_ERROR("cuDNN",
+                "cudnnBackendExecute: unsupported backend operation type " +
+                std::to_string(static_cast<int>(opNode->type)) +
+                " — no execution path implemented for this descriptor.");
             return CUDNN_STATUS_NOT_SUPPORTED;
         }
     }
