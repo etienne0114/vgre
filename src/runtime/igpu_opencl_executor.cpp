@@ -379,6 +379,12 @@ inline float __attribute__((overloadable)) atomicAdd(volatile __global float* p,
 #define __shfl_down_sync(m, v, d) intel_sub_group_shuffle_down(v, v, d)
 #define __shfl_up_sync(m, v, d) intel_sub_group_shuffle_up(v, v, d)
 #define __shfl_xor_sync(m, v, l) intel_sub_group_shuffle_xor(v, l)
+// Warp vote/ballot via Intel sub-group ballot (one bit per sub-group lane).
+#define __ballot_sync(m, p) (intel_sub_group_ballot(p) & (unsigned int)(m))
+#define __any_sync(m, p)    ((intel_sub_group_ballot((p) != 0) & (unsigned int)(m)) != 0u)
+#define __all_sync(m, p)    ((intel_sub_group_ballot((p) != 0) & (unsigned int)(m)) == \
+                             (intel_sub_group_ballot(1) & (unsigned int)(m)))
+#define __activemask()      (intel_sub_group_ballot(1))
 #else
 // Software warp-shuffle fallback using __local memory.
 // Handles three cases correctly:
@@ -432,11 +438,36 @@ inline float __attribute__((overloadable)) atomicAdd(volatile __global float* p,
     int _r = _vgre_shfl_buf[_warp_id & 3][_src]; \
     barrier(CLK_LOCAL_MEM_FENCE); \
     (__typeof__(val))_r; })
-#endif
 
-// Warp Vote Primitives
-#define __any_sync(m, p) (any(p))
-#define __all_sync(m, p) (all(p))
+// Warp vote/ballot fallback via __local memory (no sub-group extension).
+// Each lane atomically sets its bit in the warp's shared word; barriers bound
+// the read so every lane observes the full ballot.  Mirrors the 4-warp×32-lane
+// buffer shape used by the shuffle fallback (work-groups ≤ 128 threads).
+#define _VGRE_VOTE_DECL \
+    __local volatile unsigned int _vgre_vote_buf[4]; \
+    int _vwarp = (int)get_local_id(0) >> 5; \
+    int _vlane = (int)get_local_id(0) & 31; \
+    int _vwgs  = (int)get_local_size(0); \
+    int _vwidth = (_vwgs < 32) ? _vwgs : 32; \
+    unsigned int _vactive = (_vwidth >= 32) ? 0xFFFFFFFFu : ((1u << _vwidth) - 1u);
+
+#define __ballot_sync(mask, pred) ({ \
+    _VGRE_VOTE_DECL \
+    if (_vlane == 0) _vgre_vote_buf[_vwarp & 3] = 0u; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if ((pred) != 0) atomic_or((__local unsigned int*)&_vgre_vote_buf[_vwarp & 3], (1u << _vlane)); \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    unsigned int _vr = _vgre_vote_buf[_vwarp & 3] & (unsigned int)(mask) & _vactive; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    _vr; })
+
+#define __any_sync(mask, pred) (__ballot_sync(mask, pred) != 0u)
+#define __all_sync(mask, pred) ({ \
+    int _aw = (int)get_local_size(0); _aw = (_aw < 32) ? _aw : 32; \
+    unsigned int _am = (_aw >= 32) ? 0xFFFFFFFFu : ((1u << _aw) - 1u); \
+    (__ballot_sync(mask, pred) == ((unsigned int)(mask) & _am)); })
+#define __activemask() (__ballot_sync(0xFFFFFFFFu, 1))
+#endif
 
 // Bit Manipulation
 #define __popc(x) popcount(x)
