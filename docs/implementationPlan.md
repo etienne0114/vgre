@@ -33,7 +33,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 15 | `NOT_SUPPORTED` audit (cuSPARSE/cuSOLVER) | P1 | §2.1, §2.2 | ✅ Audited |
 | 16 | VMM IPC handle (cuMemRetainAllocationHandle) | P1 | §2.3–2.5 | ✅ Done |
 | 17 | FP8 (E4M3/E5M2) + FP4 quantized compute | P1 | §5.1 | ✅ Core done |
-| 18 | Paged Attention + KV-cache manager | P1 | §5.2 | 🔴 Not started |
+| 18 | Paged Attention + KV-cache manager | P1 | §5.2 | ✅ Done |
 | 19 | Versioned multi-arch Docker images | P1 | §4.3 | 🔴 Not started |
 | 20 | Minimal build profile + footprint report | P2 | §3.3 | 🔴 Not started |
 | 21 | macOS affinity (P/E cores) + documented boundary | P2 | §3.2 | 🔴 Not started |
@@ -231,11 +231,19 @@ WMMA emulation already has an (unscaled) FP8 MMA; the scaled kernels here are th
 building block for a future cuBLASLt FP8 matmul.
 **Acceptance met**: the FP8 GEMM matches dequant→FP32-GEMM at the format epsilon.
 
-### Track 18 — Paged Attention + KV-cache manager
-**Files**: new `src/core/kv_cache.cpp`, fusion engine paged-attention kernel.
-Block-allocator KV-cache (PagedAttention layout), block table, paged-attention kernel.
-Foundation for serving (continuous batching builds on this).
-**Acceptance**: paged attention matches contiguous attention; block table grows/frees correctly.
+### Track 18 — Paged Attention + KV-cache manager — ✅ done (2026-06-10)
+**Files**: new `include/vgre/core/kv_cache.h`, `src/core/kv_cache.cpp`.
+`KVCacheManager`: a fixed-block pool with a free list; `appendToken` grows a
+sequence's per-sequence **block table** (logical→physical), allocating one block
+at a time, so sequences need no contiguous memory (vLLM PagedAttention layout).
+`pagedAttention` runs an online-softmax over a sequence's KV by walking its block
+table (full or causal-up-to-position). `freeSequence` returns blocks to the pool;
+exhaustion is reported, not crashed.
+`test_kv_cache` (9/9): deliberately fragments the pool so a sequence gets
+**non-contiguous** blocks, then shows paged attention matches a contiguous
+reference to 1.2e-7 (full and causal), the free list tracks alloc/free, and pool
+exhaustion returns false. Continuous batching on top of this is Track 22.
+**Acceptance met**: paged == contiguous; block table grows/frees correctly.
 
 ### Track 19 — Versioned multi-arch Docker images
 **Files**: `Dockerfile`, CI release job. SemVer tags; amd64+arm64 images to GHCR
