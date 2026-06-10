@@ -495,6 +495,18 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   return oss.str();
 }
 
+int LLVMTranslationEngine::jitFastTierOptLevel(size_t srcBytes) {
+  static const size_t kThreshold = []() -> size_t {
+    if (const char *e = std::getenv("VGRE_JIT_FASTTIER_BYTES")) {
+      char *end = nullptr;
+      unsigned long v = std::strtoul(e, &end, 10);
+      if (end != e && v > 0) return static_cast<size_t>(v);
+    }
+    return static_cast<size_t>(128 * 1024);  // 128 KiB of generated C++
+  }();
+  return srcBytes > kThreshold ? 1 : 3;
+}
+
 VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
                                                   const std::string &kernelName,
                                                   std::string &outIR) {
@@ -530,13 +542,11 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
   // -O3 -march=native -fno-math-errno -fno-trapping-math: safe FP optimisations
   //   without the dangerous reassociation that -ffast-math enables.
   // kJITFlags is embedded in cache key so changing flags invalidates stale .ll files.
-  static const std::string kJITFlags =
-#if defined(_WIN32)
-      "O3-native-nomatherrno-notrapping-win";
-#else
-      "O3-native-nomatherrno-notrapping-posix";
-#endif
-  (void)kJITFlags;  // used in doTranslate for cache key
+  // Track 23: choose the optimisation level by source size. Large generated
+  // sources compile far faster at -O1; small kernels keep -O3. The chosen level
+  // is also woven into the disk-cache key (doTranslate) so the two never collide.
+  const int optLvl = jitFastTierOptLevel(cppSource.size());
+  const char *const optFlag = (optLvl == 1) ? "-O1" : "-O3";
 
   // Run clang with bounded retries on *transient* failures only — fork()
   // exhaustion (EAGAIN/ENOMEM) or the child being killed by a signal (e.g. the
@@ -548,7 +558,8 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
     bool transient = false;
 #if defined(_WIN32)
     {
-      std::string cmd = "clang++ -S -emit-llvm -O3 -march=native -fno-math-errno"
+      std::string cmd = std::string("clang++ -S -emit-llvm ") + optFlag +
+                        " -march=native -fno-math-errno"
                         " -fno-trapping-math -Xclang -I\"" + includePath + "\" \""
                         + tmpCpp + "\" -o \"" + tmpIR + "\" > \"" + logFile + "\" 2>&1";
       int st = std::system(cmd.c_str());
@@ -563,7 +574,7 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
         if (lf) { int lfd = fileno(lf); dup2(lfd, STDOUT_FILENO); dup2(lfd, STDERR_FILENO); }
         const char* argv[] = {
           "clang++", "-S", "-emit-llvm",
-          "-O3", "-march=native", "-fno-math-errno", "-fno-trapping-math",
+          optFlag, "-march=native", "-fno-math-errno", "-fno-trapping-math",
           "-fvisibility=default",
           "-I", includePath.c_str(),
           tmpCpp.c_str(), "-o", tmpIR.c_str(),

@@ -90,6 +90,16 @@ public:
   std::string generateWrapperSource(const KernelIR &ir);
 
 private:
+  // Track 23 — fast-tier JIT optimisation level for large generated sources.
+  // clang -O3 dominates JIT latency on big kernels; above a byte threshold we
+  // compile at -O1 (far faster to compile, marginally slower at runtime). Returns
+  // 1 or 3. The threshold is VGRE_JIT_FASTTIER_BYTES (default 128 KiB). The level
+  // is folded into the disk-cache key so an -O1 and -O3 build never collide.
+  static int jitFastTierOptLevel(size_t srcBytes);
+  static const char *jitFastTierOptTag(size_t srcBytes) {
+    return jitFastTierOptLevel(srcBytes) == 1 ? "O1" : "O3";
+  }
+
   // Compile the generated C++ into LLVM IR using a clang++ subprocess
   VGREResult compileToLLVMIR(const std::string &cppSource,
                              const std::string &kernelName, std::string &outIR);
