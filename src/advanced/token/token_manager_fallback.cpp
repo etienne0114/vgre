@@ -269,14 +269,6 @@ std::array<uint8_t, 32> HardwareTokenManager::getMachineKey(const uint8_t dynami
     }
 #endif // !_WIN32
 
-    // Mix the dynamic salt with machine identity using HMAC-SHA256.
-    // This binds the derived key to BOTH the per-token random salt
-    // AND the physical machine, preventing precomputation attacks.
-    uint8_t salt[32];
-    crypto::hmac_sha256(dynamicSalt, 32,
-                        reinterpret_cast<const uint8_t*>(identity.data()),
-                        identity.size(), salt);
-
     // PBKDF2 iteration count: default 600k (NIST SP 800-132 2025 minimum).
     // Operators can override via VGRE_PBKDF2_ITERATIONS for performance tuning,
     // mirroring the same pattern used in SecureChannel::deriveSessionKey().
@@ -292,14 +284,19 @@ std::array<uint8_t, 32> HardwareTokenManager::getMachineKey(const uint8_t dynami
         }
     }
 
+    // Correct PBKDF2 construction: the machine identity is the SECRET password
+    // (stretched by the iteration count) and the per-token random dynamicSalt is
+    // the public salt (stored alongside the token, defeats precomputation).
+    // This replaces the previous use of a constant literal ("vgre_fallback_kdf")
+    // as the password, which inverted PBKDF2's security model by forcing all
+    // entropy into the salt and stretching a publicly-known string instead.
     std::array<uint8_t, 32> key{};
     crypto::pbkdf2_sha256(
-        reinterpret_cast<const uint8_t*>("vgre_fallback_kdf"), 17,
-        salt, sizeof(salt),
+        reinterpret_cast<const uint8_t*>(identity.data()), identity.size(),
+        dynamicSalt, 32,
         pbkdf2Iters,
         key.data(), key.size());
 
-    vgre::common::vgre_secure_zero(salt, sizeof(salt));
     // Zero the identity string containing machine-specific entropy sources.
     if (!identity.empty())
         vgre::common::vgre_secure_zero(&identity[0], identity.size());

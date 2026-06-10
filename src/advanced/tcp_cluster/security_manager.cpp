@@ -7,6 +7,7 @@
 #include "vgre/common/secure_zero.h"
 #include "vgre/common/sockets.h"
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <atomic>
 #include <unordered_map>
@@ -98,7 +99,37 @@ SecurityManager::SecurityManager(TCPClusterManager* parent) : parent_(parent) {
   VGRE_LOG_INFO("TCPCluster", "SecurityManager initialized - Mode: STRICT");
 }
 
+namespace {
+// Track F.2: keep VGRE_TCP_AUTH_TOKEN out of the process environment so the raw
+// credential is not visible via /proc/PID/environ or `ps e` on shared hosts.
+// The value is first migrated into the in-process config store so every
+// vgre_get_config("VGRE_TCP_AUTH_TOKEN") reader keeps working; then the OS
+// environment entry is zeroized in place and removed.  VGRE_TCP_AUTH_TOKEN_FILE
+// remains the recommended path for production (never placed in the environment).
+void scrubAuthTokenFromEnvironment() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        char* raw = std::getenv("VGRE_TCP_AUTH_TOKEN");
+        if (!raw || raw[0] == '\0') return;
+        // Preserve the value for in-process readers via the config store.
+        vgre_set_config("VGRE_TCP_AUTH_TOKEN", raw);
+        // Zeroize the environ buffer in place, then drop the entry entirely.
+        vgre::common::vgre_secure_zero(raw, std::strlen(raw));
+#if defined(_WIN32)
+        _putenv_s("VGRE_TCP_AUTH_TOKEN", "");
+#else
+        ::unsetenv("VGRE_TCP_AUTH_TOKEN");
+#endif
+        VGRE_LOG_INFO("TCPCluster",
+            "VGRE_TCP_AUTH_TOKEN scrubbed from process environment "
+            "(migrated to in-process config). Prefer VGRE_TCP_AUTH_TOKEN_FILE.");
+    });
+}
+} // namespace
+
 VGREResult SecurityManager::enableSecurity(bool enabled) {
+  // Remove the raw token from the environment as early as the security path runs.
+  scrubAuthTokenFromEnvironment();
   std::string token;
   { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
   // If auth_token_str_ is not set, try reading from config store (avoids setenv/getenv race)
