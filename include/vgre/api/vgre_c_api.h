@@ -263,6 +263,17 @@ VGRE_EXPORT int vgre_export_perfetto_trace(const char *output_path);
  */
 VGRE_EXPORT int vgre_export_nsight_trace(const char *output_path);
 
+/* ── Metrics / health endpoint (Track 3/4) ──────────────────────────────────
+ * Tiny embedded HTTP server on 127.0.0.1:<port> exposing:
+ *   GET /metrics  → Prometheus text exposition
+ *   GET /healthz  → 200 (liveness)
+ *   GET /readyz   → 200 ready / 503 not-ready
+ * Autostarted from VGRE_METRICS_PORT by the runtime; or start manually. */
+VGRE_EXPORT int  vgre_start_metrics_server(int port);   /* 0 on success */
+VGRE_EXPORT void vgre_stop_metrics_server(void);
+VGRE_EXPORT void vgre_metrics_set_ready(int ready);     /* readiness gate */
+VGRE_EXPORT void vgre_metrics_maybe_autostart(void);    /* honours VGRE_METRICS_PORT */
+
 /**
  * @brief Retrieves recent log lines from the engine.
  *

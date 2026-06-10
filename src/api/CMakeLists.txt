@@ -50,6 +50,7 @@ add_library(vgre_api OBJECT
     vgre_c_api_graphs.cpp
     vgre_c_api_telemetry.cpp
     nsight_exporter.cpp
+    metrics_server.cpp
     cupti/cupti_shim.cpp
 )
 

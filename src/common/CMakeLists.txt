@@ -3,6 +3,7 @@
 add_library(vgre_common OBJECT
     input_validation.cpp
     siphash.cpp
+    metrics_registry.cpp
 )
 
 target_include_directories(vgre_common PUBLIC

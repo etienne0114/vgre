@@ -2,6 +2,7 @@
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/advanced/runtime_profiler.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/metrics_registry.h"
 #include "vgre/core/graph_manager.h"
 #include "vgre/core/kernel_tuner.h"
 #include "vgre/core/memory_manager.h"
@@ -86,6 +87,8 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       (blockDim.y == 0 && blockDim.z != 0)) {
     return VGREResult::ERR_INVALID_VALUE;
   }
+
+  vgre::common::MetricsRegistry::instance().addKernelLaunch();  // /metrics counter
 
   CompiledKernelFn fn;
   std::shared_ptr<std::vector<std::vector<uint8_t>>> argValues;

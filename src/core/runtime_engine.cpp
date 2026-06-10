@@ -6,6 +6,7 @@
 #include "vgre/advanced/ipc_manager.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/metrics_registry.h"
 #include "vgre/compiler/kernel_parser.h"
 #include "vgre/compiler/llvm_translation_engine.h"
 #include "vgre/core/graph_manager.h"
@@ -186,6 +187,15 @@ VGREResult RuntimeEngine::initialize() {
   } else {
       VGRE_LOG_INFO("RuntimeEngine", "IPC Service disabled via VGRE_IPC_MODE=OFF");
   }
+
+  // Metrics/health endpoint (Track 3/4): register a live gauge for the scheduler
+  // queue depth, then autostart the server if VGRE_METRICS_PORT is set.
+  vgre::common::MetricsRegistry::instance().registerGauge(
+      "vgre_scheduler_queue_depth", "Pending tasks in the scheduler queue.",
+      [this]() -> double {
+        return static_cast<double>(scheduler_ ? scheduler_->getPendingTasks() : 0);
+      });
+  vgre_metrics_maybe_autostart();
 
   VGRE_LOG_INFO("RuntimeEngine", "VGRE Runtime Engine initialized with " +
                                      std::to_string(devices_.size()) +
