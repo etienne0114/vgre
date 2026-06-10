@@ -83,10 +83,14 @@ jobs:
         # Build with Homebrew llvm@18's clang++, not AppleClang: AppleClang
         # rejects `-fopenmp` (it needs -Xpreprocessor), and using the same
         # toolchain we link LLVM 18 against keeps the ABI consistent.
+        # Homebrew clang@18 needs an explicit -isysroot or its libc++ <cstddef>
+        # fails to find libc++'s <stddef.h> (the Homebrew include dir otherwise
+        # shadows the C++ headers). CMAKE_OSX_SYSROOT points at the active SDK.
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER="$(brew --prefix llvm@18)/bin/clang"
           -DCMAKE_CXX_COMPILER="$(brew --prefix llvm@18)/bin/clang++"
+          -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)"
           -DLLVM_DIR="$(brew --prefix llvm@18)/lib/cmake/llvm"
           -DCMAKE_PREFIX_PATH="$(brew --prefix llvm@18);$(brew --prefix libomp)"
           -DOpenMP_ROOT="$(brew --prefix libomp)"

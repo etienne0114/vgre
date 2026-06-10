@@ -819,10 +819,16 @@ target_link_libraries(test_golden_vectors PRIVATE vgre_cudart)
 add_test(NAME GoldenVectors COMMAND test_golden_vectors)
 set_tests_properties(GoldenVectors PROPERTIES TIMEOUT 60)
 
-add_executable(test_igpu_transpile integration/test_igpu_transpile.cpp)
-target_link_libraries(test_igpu_transpile PRIVATE vgre)
-add_test(NAME IGPUTranspileCompile COMMAND test_igpu_transpile)
-set_tests_properties(IGPUTranspileCompile PROPERTIES TIMEOUT 60)
+# The iGPU transpiler compile-check needs the OpenCL backend: the executor
+# header includes <CL/cl.h> and transpileToOpenCL lives in the OpenCL-gated .cpp.
+# Only build it when the backend is enabled (otherwise the OpenCL headers are
+# absent, e.g. on CI runners without an OpenCL SDK).
+if(VGRE_USE_OPENCL_BACKEND)
+    add_executable(test_igpu_transpile integration/test_igpu_transpile.cpp)
+    target_link_libraries(test_igpu_transpile PRIVATE vgre)
+    add_test(NAME IGPUTranspileCompile COMMAND test_igpu_transpile)
+    set_tests_properties(IGPUTranspileCompile PROPERTIES TIMEOUT 60)
+endif()
 
 # PyTorch end-to-end validation harness (Track 24): runs VGRE's cuBLAS via
 # ctypes and compares to torch. Prefers the project .venv (which has torch); the
