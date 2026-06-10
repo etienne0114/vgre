@@ -984,7 +984,7 @@ target_include_directories(vgre
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 _vgre_configure_library(vgre PUBLIC)
-target_link_libraries(vgre PRIVATE SQLite::SQLite3)  # Track Q: Nsight export
+target_link_libraries(vgre PUBLIC SQLite::SQLite3)  # Track Q: Nsight export
 
 if(WIN32)
     target_sources(vgre PRIVATE "${PROJECT_SOURCE_DIR}/src/api/vgre_api.def")
@@ -1093,7 +1093,7 @@ _vgre_configure_library(vgre_cudart PRIVATE)
 # cuSOLVER shim — link system LAPACK if available, else compile built-in fallback.
 # LAPACK::LAPACK is always a valid target (interface stub when fallback is used).
 target_link_libraries(vgre_cudart PRIVATE LAPACK::LAPACK)
-target_link_libraries(vgre_cudart PRIVATE SQLite::SQLite3)  # Track Q: Nsight export
+target_link_libraries(vgre_cudart PUBLIC SQLite::SQLite3)  # Track Q: Nsight export
 if(VGRE_LAPACK_FALLBACK)
     target_compile_definitions(vgre_cudart PRIVATE VGRE_LAPACK_FALLBACK)
 endif()
