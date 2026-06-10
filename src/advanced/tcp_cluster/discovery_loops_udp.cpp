@@ -89,7 +89,7 @@ std::string senderToString(const sockaddr_storage& ss) {
 } // anonymous namespace
 
 void DiscoveryManager::udpDiscoveryLoop() {
-    fprintf(stderr, "VGRE-DIAG udpDiscoveryLoop: thread started\n"); fflush(stderr);
+    VGRE_LOG_DEBUG("TCPCluster", "udpDiscoveryLoop: thread started");
     // NOTE: data_processor_thread_ is already started by initialize() before
     // this function runs. Do NOT reassign it here — assigning to a joinable
     // std::thread calls std::terminate().

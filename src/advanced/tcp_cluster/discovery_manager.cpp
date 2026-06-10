@@ -304,7 +304,7 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
 // ── UDP Worker Announcer Loop (Worker broadcasts presence) ────────────────
 
 void DiscoveryManager::udpWorkerAnnouncerLoop() {
-  fprintf(stderr, "VGRE-DIAG udpWorkerAnnouncerLoop: thread started\n"); fflush(stderr);
+  VGRE_LOG_DEBUG("TCPCluster", "udpWorkerAnnouncerLoop: thread started");
   VgreSocketGuard udp_guard(socket(AF_INET, SOCK_DGRAM, 0));
   if (udp_guard.get() == VGRE_INVALID_SOCKET) return;
   vgre_set_nosigpipe(udp_guard.get()); // suppress SIGPIPE on macOS

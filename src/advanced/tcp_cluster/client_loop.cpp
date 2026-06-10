@@ -57,7 +57,7 @@ using vgre::common::vgre_send_all;
 // (server_fd_ == INVALID_SOCKET) this is a one-shot: on disconnect enabled_
 // is cleared and the function returns so udpDiscoveryLoop can reconnect.
 void TCPClusterManager::clientLoop() {
-  fprintf(stderr, "VGRE-DIAG clientLoop: thread started\n"); fflush(stderr);
+  VGRE_LOG_DEBUG("TCPCluster", "clientLoop: thread started");
   while (enabled_) {
     // ── Wait for a valid master connection ────────────────────────
     // Standby workers start with client_fd_ = INVALID_SOCKET. serverLoop
