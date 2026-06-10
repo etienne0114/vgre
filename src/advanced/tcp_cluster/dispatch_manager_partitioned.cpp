@@ -39,7 +39,17 @@ VGREResult DispatchManager::launchPartitionedKernel(uint64_t kernel_id, const ui
   PartitionPlan plan;
   if (WorkloadPartitioner::instance().createPartitionPlan(grid_dim, block_dim, nodes, plan) != VGREResult::SUCCESS) return VGREResult::ERR_INVALID_VALUE;
 
-  { std::lock_guard<std::mutex> lock(parent_->partition_mutex_); partition_results_.clear(); }
+  { std::lock_guard<std::mutex> lock(parent_->partition_mutex_); partition_results_.clear(); partition_meta_.clear(); }
+
+  // Record each partition's target node + block count so completion times can be
+  // fed back into the partitioner's adaptive accuracy factors (Track S).
+  for (const auto& slice : plan.slices) {
+    double blocks = static_cast<double>(slice.partition_dim[0]) *
+                    static_cast<double>(slice.partition_dim[1]) *
+                    static_cast<double>(slice.partition_dim[2]);
+    std::lock_guard<std::mutex> lock(parent_->partition_mutex_);
+    partition_meta_[slice.partition_id] = {slice.node_address, blocks};
+  }
 
   for (const auto& slice : plan.slices) {
     if (slice.worker_idx == -1) {
@@ -48,8 +58,10 @@ VGREResult DispatchManager::launchPartitionedKernel(uint64_t kernel_id, const ui
       auto start = std::chrono::high_resolution_clock::now();
       auto kr = core::RuntimeEngine::instance().launchKernel(kernel_id, gd, bd, args, shared_mem, 0, dim3(slice.grid_start[0], 0, 0));
       auto end = std::chrono::high_resolution_clock::now();
-      double exec_time = std::chrono::duration<double>(end - start).count();
-      storePartitionResult(slice.partition_id, kernel_id, kr, exec_time);
+      // Milliseconds, matching the remote worker's execution_time_ms so adaptive
+      // load-balancing compares like with like (remote reports ms).
+      double exec_time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+      storePartitionResult(slice.partition_id, kernel_id, kr, exec_time_ms);
     } else {
       std::lock_guard<std::recursive_mutex> lock(parent_->clients_mutex_);
       auto& client = parent_->clients_[slice.worker_idx];
@@ -72,6 +84,32 @@ VGREResult DispatchManager::collectPartitionResults(uint64_t kernel_id, uint32_t
   while (partition_results_.size() < total_partitions) {
     if (parent_->partition_cv_.wait_until(lock, deadline) == std::cv_status::timeout) return VGREResult::ERR_TIMEOUT;
   }
+
+  // Adaptive load balancing (Track S): feed measured per-node completion times
+  // back into the WorkloadPartitioner.  The fastest node (highest blocks/ms)
+  // defines the reference throughput; a node that took longer than its
+  // proportional share gets a lower accuracy factor (EWMA α=0.25) and therefore
+  // a smaller slice on the next launch — converging the cluster toward balanced
+  // finish times without splitting in-flight work.
+  {
+    double refThroughput = 0.0;  // blocks per millisecond
+    for (const auto& pr : partition_results_) {
+      auto it = partition_meta_.find(pr.partition_id);
+      if (it == partition_meta_.end() || pr.execution_time_ms <= 0.0) continue;
+      double tp = it->second.second / pr.execution_time_ms;
+      if (tp > refThroughput) refThroughput = tp;
+    }
+    if (refThroughput > 0.0) {
+      for (const auto& pr : partition_results_) {
+        auto it = partition_meta_.find(pr.partition_id);
+        if (it == partition_meta_.end() || pr.execution_time_ms <= 0.0) continue;
+        double predicted_ms = it->second.second / refThroughput;  // ideal time at ref speed
+        WorkloadPartitioner::instance().recordActualExecution(
+            it->second.first, predicted_ms, pr.execution_time_ms);
+      }
+    }
+  }
+
   for (const auto& pr : partition_results_) if (pr.result != VGREResult::SUCCESS) return pr.result;
   return VGREResult::SUCCESS;
 }

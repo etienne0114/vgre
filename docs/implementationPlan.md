@@ -28,7 +28,7 @@ This document tracks every remaining implementation task — real gaps, security
 | P | MPS per-client resource quotas | ✅ Done |
 | Q | Nsight-compatible `.nsys-rep` export | ✅ Done |
 | R | Signed JIT cache (HMAC validation) | ✅ Done |
-| S | Cluster work stealing | 🔴 Not started |
+| S | Cluster work stealing | ✅ Done |
 | T | Cache key includes CPU arch (CPUID) | ✅ Done |
 | U | cuSPARSE SpGEMM reuse | ✅ Done |
 | V | iGPU OpenCL transpiler — SIMD extensions | ✅ Done |
