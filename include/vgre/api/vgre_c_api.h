@@ -34,6 +34,7 @@ extern "C" {
 #define VGRE_ERROR_IO -6
 #define VGRE_ERROR_AUTH_FAILED -7
 #define VGRE_ERROR_CRYPTO -8
+#define VGRE_ERROR_NOT_SUPPORTED -9
 #define VGRE_ERROR_GENERIC -99
 
 /* ── Memcpy direction ───────────────────────────────────────────────────────
@@ -249,6 +250,18 @@ VGRE_EXPORT int vgre_get_kernel_history_json(const char *kernel_name, char **out
  * @return 0 on success, non-zero on error.
  */
 VGRE_EXPORT int vgre_export_perfetto_trace(const char *output_path);
+
+/**
+ * @brief Export the telemetry timeline as an Nsight Systems .nsys-rep file.
+ *
+ * Writes a SQLite database with the minimum Nsight schema (StringIds,
+ * KernelLaunches, MemcpyOps, NvtxEvents) so VGRE traces can be opened with the
+ * familiar NVIDIA Nsight Systems tooling.
+ *
+ * @param output_path  Filesystem path for the .nsys-rep (SQLite) file.
+ * @return 0 on success, non-zero on error.
+ */
+VGRE_EXPORT int vgre_export_nsight_trace(const char *output_path);
 
 /**
  * @brief Retrieves recent log lines from the engine.
