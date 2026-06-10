@@ -37,7 +37,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 19 | Versioned multi-arch Docker images | P1 | §4.3 | 🟡 Artifacts ready |
 | 20 | Minimal build profile + footprint report | P2 | §3.3 | 🔴 Not started |
 | 21 | macOS affinity (P/E cores) + documented boundary | P2 | §3.2 | 🔴 Not started |
-| 22 | Continuous batching request scheduler | P2 | §5.3 | 🔴 Not started |
+| 22 | Continuous batching request scheduler | P2 | §5.3 | ✅ Done |
 | 23 | Large-PTX fast-tier JIT (compile speed) | P2 | §5.4 | 🔴 Not started |
 | 24 | PyTorch/vLLM end-to-end validation harness | P2 | §5.5 | 🔴 Not started |
 | 25 | iGPU transpiler OpenCL-C compile check | P2 | §6.2 | 🔴 Not started |
@@ -276,12 +276,18 @@ in docs; static assert no hard dep on optional libs.
 `src/core/scheduler_numa.cpp` macOS path: use `thread_policy_set` affinity tags;
 handle Apple-Silicon performance/efficiency core split; document the boundary.
 
-### Track 22 — Continuous batching request scheduler
-*(Conditional IF/WHILE/SWITCH graph nodes are already implemented — verified — so
-this slot is the genuinely-missing serving layer.)* A request queue + batch
-scheduler over the paged KV-cache (Track 18): admit new sequences and evict
-finished ones at token boundaries (continuous/in-flight batching, vLLM-style).
-This is what makes VGRE a model *server*, not just a kernel runner.
+### Track 22 — Continuous batching request scheduler — ✅ done (2026-06-10)
+**Files**: `ContinuousBatchScheduler` in `include/vgre/core/kv_cache.h` +
+`src/core/kv_cache.cpp`. A request queue + in-flight batch scheduler over the
+paged KV-cache (Track 18): each `step()` retires finished sequences (reclaiming
+their KV blocks), admits waiting requests while batch slots AND KV blocks allow
+(prefilling the prompt), then advances every running request by one decode token.
+New requests submitted mid-flight join at the next step — true continuous
+batching, not a static batch. `test_kv_cache` (15/15) runs 4 requests of
+different lengths through a small pool with `maxBatch=2` (so they cannot all run
+at once), submits a 4th request *mid-run*, and verifies all four finish,
+concurrency never exceeds the batch limit, it takes more than one batch's worth
+of steps, and the KV pool is fully reclaimed at the end.
 
 ### Track 23 — Large-PTX fast-tier JIT
 Fast `-O1` first-compile tier + background re-JIT to `-O3`; parallel module

@@ -114,6 +114,36 @@ int main() {
         if (!tiny.appendToken(7, z.data(), z.data())) { exhausted = true; break; }
     check("pool exhaustion returns false (no crash)", exhausted && tiny.seqLen(7) == 8);
 
+    // ── Continuous-batching scheduler (Track 22) ─────────────────────────────
+    {
+        // Small pool so capacity is the binding constraint; maxBatch=2 so the 4
+        // requests cannot all run at once — they must be batched continuously.
+        KVCacheManager pool(8, 4, 1, 4);            // 8 blocks
+        const int total0 = pool.freeBlocks();
+        ContinuousBatchScheduler sched(pool, /*maxBatch=*/2);
+
+        sched.addRequest(/*id=*/1, /*promptLen=*/3, /*maxNew=*/2);
+        sched.addRequest(2, 2, 3);
+        sched.addRequest(3, 4, 1);
+        check("4 reqs queued (one added mid-run later)", sched.waitingCount() == 3);
+
+        int maxConcurrent = 0, steps = 0;
+        bool addedLate = false;
+        while (!sched.allDone() && steps < 1000) {
+            int running = sched.step();
+            maxConcurrent = std::max(maxConcurrent, running);
+            // Submit a 4th request mid-flight at step 2 — continuous batching must
+            // still admit and complete it without a fresh batch.
+            if (steps == 2 && !addedLate) { sched.addRequest(4, 2, 2); addedLate = true; }
+            ++steps;
+        }
+        check("scheduler drains all requests", sched.allDone());
+        check("all 4 requests finished (incl. the late one)", sched.finishedCount() == 4);
+        check("never exceeded maxBatch=2 concurrently", maxConcurrent <= 2);
+        check("continuous batching (>1 batch worth of steps)", steps > 3);
+        check("KV pool fully reclaimed after all retire", pool.freeBlocks() == total0);
+    }
+
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }
