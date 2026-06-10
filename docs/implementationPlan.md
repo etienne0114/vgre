@@ -28,7 +28,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 10 | cuSPARSE `sparse_view` conversions | P1 | §1.5 | 🔴 Not started |
 | 11 | cuRAND logarithmic skip-ahead | P1 | §1.8 | 🔴 Not started |
 | 12 | PTX carry-chain + full addressing | P1 | §1.7 | 🔴 Not started |
-| 13 | Graph optimizer real liveness DCE | P1 | §1.6 | 🔴 Not started |
+| 13 | Graph optimizer real liveness DCE | P1 | §1.6 | ✅ Done |
 | 14 | MPS per-client pipe instances (Windows) | P1 | §1.4 | 🔴 Not started |
 | 15 | `NOT_SUPPORTED` audit (cuSPARSE/cuSOLVER) | P1 | §2.1, §2.2 | 🔴 Not started |
 | 16 | VMM IPC + ThreadLocal capture + async memset | P1 | §2.3–2.5 | 🔴 Not started |

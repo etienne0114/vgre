@@ -111,6 +111,14 @@ VGREResult GraphOptimizer::sortTopologically(Graph& graph) {
     }
 
     graph.nodes = std::move(sortedNodes);
+
+    // The node vector was reordered, so the O(1) nodeId→index map is stale.
+    // Rebuild it — otherwise dependency resolution / execution that indexes via
+    // nodeIndex would read the wrong (pre-sort) slots.
+    graph.nodeIndex.clear();
+    for (size_t i = 0; i < graph.nodes.size(); ++i)
+        graph.nodeIndex[graph.nodes[i].nodeId] = i;
+
     return VGREResult::SUCCESS;
 }
 
@@ -444,23 +452,44 @@ VGREResult GraphOptimizer::fuseNodes(Graph& graph, size_t idxA, size_t idxB) {
         }
     }
 
-    // Update successors of B to depend on the fused node
-    uint64_t targetId = nodeB.nodeId;
+    // Capture ids before mutating graph.nodes (references and indices into the
+    // vector are invalidated by the push_back/erase below).
+    const uint64_t idA     = nodeA.nodeId;
+    const uint64_t idB     = nodeB.nodeId;
+    const uint64_t idFused = fused.nodeId;
+
+    // Rewire EVERY consumer of A or B onto the fused node. The previous code
+    // redirected only B's consumers, so any node that depended on A (other than
+    // B) was left pointing at a node about to be erased — a dangling edge that
+    // drops a live consumer. After rewiring, dedup (a node that consumed both A
+    // and B would otherwise list the fused node twice) and strip any self-edge.
     for (auto& n : graph.nodes) {
+        if (n.nodeId == idA || n.nodeId == idB) continue;  // A/B are erased below
+        bool touched = false;
         for (auto& d : n.deps) {
-            if (d == targetId) d = fused.nodeId;
+            if (d == idA || d == idB) { d = idFused; touched = true; }
+        }
+        if (touched) {
+            // deps is a predecessor *set* — order is irrelevant, so dedup in place.
+            std::sort(n.deps.begin(), n.deps.end());
+            n.deps.erase(std::unique(n.deps.begin(), n.deps.end()), n.deps.end());
+            n.deps.erase(std::remove(n.deps.begin(), n.deps.end(), n.nodeId),
+                         n.deps.end());
         }
     }
 
-    // Replace A and B with the fused node
-    // To maintain topological integrity during the pass, we'll mark them for deletion
-    // but for now we'll just insert and the caller will handle the "changed" loop.
+    // Insert the fused node, then remove A and B (erase the larger index first so
+    // the smaller index stays valid).
     graph.nodes.push_back(std::move(fused));
-    
-    // Remove old nodes (this is tricky mid-iteration, we'll use a removal list if needed)
-    // For simplicity in this v0.1.1 baseline, we'll just remove them
     graph.nodes.erase(graph.nodes.begin() + std::max(idxA, idxB));
     graph.nodes.erase(graph.nodes.begin() + std::min(idxA, idxB));
+
+    // The node vector was reordered, so the O(1) nodeId→index map is now stale.
+    // Rebuild it; otherwise downstream dependency resolution / execution would
+    // index shifted or erased slots.
+    graph.nodeIndex.clear();
+    for (size_t i = 0; i < graph.nodes.size(); ++i)
+        graph.nodeIndex[graph.nodes[i].nodeId] = i;
 
     return VGREResult::SUCCESS;
 }
