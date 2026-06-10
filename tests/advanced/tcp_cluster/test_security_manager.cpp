@@ -9,9 +9,11 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/error_codes.h"
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <thread>
 
 using namespace vgre::advanced;
 using namespace vgre;
@@ -113,6 +115,65 @@ void test_performServerHandshake_no_socket_safe() {
     pass("performServerHandshake_no_socket_safe");
 }
 
+// ─── auth rate-limiting (QUEUE-70: exponential backoff) ───────────────────────
+
+// Math invariant: penalty(k) = min(2^(k-1), MAX_BACKOFF_SEC) seconds, strictly
+// increasing (until the cap), so repeated failures from the same IP are
+// throttled with geometrically growing lockout windows.
+void test_auth_penalty_grows_exponentially_then_caps() {
+    assert(SecurityManager::authPenaltySec(1) == 1);
+    assert(SecurityManager::authPenaltySec(2) == 2);
+    assert(SecurityManager::authPenaltySec(3) == 4);
+    assert(SecurityManager::authPenaltySec(4) == 8);
+    assert(SecurityManager::authPenaltySec(5) == 16);
+    assert(SecurityManager::authPenaltySec(6) == 32);
+    // Cap at MAX_BACKOFF_SEC (300s) once 2^(k-1) would exceed it.
+    assert(SecurityManager::authPenaltySec(20) == 300);
+    pass("auth_penalty_grows_exponentially_then_caps");
+}
+
+// Simulates 10 consecutive failed handshakes from the same IP and verifies
+// that after the 6th failure the IP enters a backoff window whose duration
+// exceeds 200ms — i.e. a 7th handshake attempt arriving immediately after the
+// 6th is guaranteed to be rejected (rate-limited) for at least 200ms.
+void test_rate_limit_blocks_seventh_attempt_for_over_200ms() {
+    const std::string ip = "203.0.113.42"; // TEST-NET-3, won't collide with real traffic
+
+    SecurityManager::testClearRateLimit(ip);
+    assert(!SecurityManager::testIsRateLimited(ip));
+
+    for (int failures = 1; failures <= 10; ++failures) {
+        SecurityManager::testInjectAuthFailure(ip);
+
+        if (failures >= 5) {
+            // From the 5th consecutive failure onward the IP must be locked out.
+            assert(SecurityManager::testIsRateLimited(ip));
+        }
+
+        if (failures == 6) {
+            auto t6 = std::chrono::steady_clock::now();
+
+            // penalty(6) = 32s >> 200ms, so the 7th attempt is blocked well
+            // past the 200ms mark.
+            int penalty_sec = SecurityManager::authPenaltySec(failures);
+            assert(penalty_sec * 1000 > 200);
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(210));
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t6).count();
+            assert(elapsed_ms > 200);
+
+            // A 7th attempt arriving here (>200ms after the 6th) is still
+            // rejected by the rate limiter.
+            assert(SecurityManager::testIsRateLimited(ip));
+        }
+    }
+
+    SecurityManager::testClearRateLimit(ip);
+    assert(!SecurityManager::testIsRateLimited(ip));
+    pass("rate_limit_blocks_seventh_attempt_for_over_200ms");
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -125,6 +186,8 @@ int main() {
     test_getSecurityInfo_does_not_crash();
     test_rotateSessionKey_null_client_safe();
     test_performServerHandshake_no_socket_safe();
+    test_auth_penalty_grows_exponentially_then_caps();
+    test_rate_limit_blocks_seventh_attempt_for_over_200ms();
 
     std::cout << "\nAll SecurityManager unit tests PASSED.\n";
     return 0;
