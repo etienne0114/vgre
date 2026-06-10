@@ -125,9 +125,20 @@ per round). Retain Kahan-compensated accumulation.
 **Acceptance**: bit-identical to current results; measurable overlap vs barrier model.
 
 ### Track 9 — WMMA real fragment-layout MMA
-**File**: `include/vgre/compiler/wmma_emulation.h` (~333, ~502). Implement true
-fragment layouts per shape (m16n16k16 etc.) with correct accumulator tiling for
-FP16/BF16/TF32/INT8 inputs + FP32/INT32 accumulate.
+**File**: `include/vgre/compiler/wmma_emulation.h` (~333, ~502).
+**Scoping note (2026-06-10):** the high-level `nvcuda::wmma::mma_sync` C++ API is
+already correct — `load_matrix_sync` materialises the full tile per serial thread
+and the AVX-512 GEMM operates on it. The defect is confined to the low-level
+raw-PTX `mma.sync.aligned.*` helpers (`vgre_mma_m16n8k16_*`, the "flat
+dot-product" at ~333), used by Triton/CUTLASS-generated PTX. These are
+**warp-collective**: a single lane holds only 8 of the 16 K-elements of A and 4
+of B, so its 4 output elements cannot be computed correctly in isolation. A
+correct fix is therefore NOT local — it requires buffering all 32 lanes' A/B/C
+fragments for a warp, computing the full 16×8×16 (etc.) GEMM once, and scattering
+the per-lane D fragments back, which needs warp-level coordination in the serial
+execution model. **Deferred** until the warp-collective fragment buffer exists;
+implementing the per-shape fragment→lane maps (PTX ISA 9.7.13.4.x) is the second
+half. Do not "fix" the helper in place — any per-lane-only result is still wrong.
 **Acceptance**: results bit-comparable to a reference MMA for each supported precision.
 
 ### Track 10 — cuSPARSE `sparse_view` conversions
