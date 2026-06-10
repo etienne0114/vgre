@@ -1,0 +1,21 @@
+# Keep the Docker build context small — the image builds from source in-container,
+# so host build artifacts, VCS, and the heavy dashboard tree are not needed.
+build/
+build-*/
+cmake-build-*/
+.git/
+.github/
+*.o
+*.a
+*.so
+*.so.*
+generated/
+vgre_dashboard/build/
+vgre_dashboard/.dart_tool/
+.venv/
+__pycache__/
+*.pyc
+src/deployment/k8s_device_plugin/vgre-device-plugin
+.vscode/
+.idea/
+*.log
