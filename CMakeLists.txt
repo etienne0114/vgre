@@ -614,6 +614,26 @@ if(NOT TARGET LAPACK::LAPACK)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
+# §8a  SQLite3  (Nsight Systems .nsys-rep export — Track Q)
+# Accept the versioned runtime (libsqlite3.so.0) when no -dev symlink is present;
+# only the ABI-stable C API is used (declared locally in nsight_exporter.cpp).
+# Always provide a SQLite::SQLite3 interface target so link lines stay uniform;
+# the exporter degrades gracefully (returns an error) if SQLite is unavailable.
+# ──────────────────────────────────────────────────────────────────────────────
+find_library(SQLITE3_LIBRARY
+    NAMES sqlite3 libsqlite3.so.0 libsqlite3.so
+    PATHS /usr/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/local/lib)
+if(NOT TARGET SQLite::SQLite3)
+    add_library(SQLite::SQLite3 INTERFACE IMPORTED)
+    if(SQLITE3_LIBRARY)
+        target_link_libraries(SQLite::SQLite3 INTERFACE ${SQLITE3_LIBRARY})
+        message(STATUS "  SQLite3 for Nsight export: ${SQLITE3_LIBRARY}")
+    else()
+        message(STATUS "  SQLite3 not found — Nsight .nsys-rep export will be a no-op")
+    endif()
+endif()
+
+# ──────────────────────────────────────────────────────────────────────────────
 # §8b Optional: SuiteSparse / UMFPACK  (full fill-in sparse factorization)
 # ──────────────────────────────────────────────────────────────────────────────
 option(VGRE_USE_UMFPACK "Link SuiteSparse UMFPACK for full fill-in sparse LU (cuSPARSE extension)" OFF)
@@ -964,6 +984,7 @@ target_include_directories(vgre
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 _vgre_configure_library(vgre PUBLIC)
+target_link_libraries(vgre PRIVATE SQLite::SQLite3)  # Track Q: Nsight export
 
 if(WIN32)
     target_sources(vgre PRIVATE "${PROJECT_SOURCE_DIR}/src/api/vgre_api.def")
@@ -1072,6 +1093,7 @@ _vgre_configure_library(vgre_cudart PRIVATE)
 # cuSOLVER shim — link system LAPACK if available, else compile built-in fallback.
 # LAPACK::LAPACK is always a valid target (interface stub when fallback is used).
 target_link_libraries(vgre_cudart PRIVATE LAPACK::LAPACK)
+target_link_libraries(vgre_cudart PRIVATE SQLite::SQLite3)  # Track Q: Nsight export
 if(VGRE_LAPACK_FALLBACK)
     target_compile_definitions(vgre_cudart PRIVATE VGRE_LAPACK_FALLBACK)
 endif()

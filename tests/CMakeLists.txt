@@ -582,6 +582,18 @@ add_executable(test_cudnn_graph_v9 api/test_cudnn_graph_v9.cpp)
 target_link_libraries(test_cudnn_graph_v9 PRIVATE vgre)
 add_test(NAME CudnnGraphV9 COMMAND test_cudnn_graph_v9)
 
+# Track Q: Nsight .nsys-rep export (links SQLite for read-back verification).
+add_executable(test_nsight_export api/test_nsight_export.cpp)
+target_link_libraries(test_nsight_export PRIVATE vgre)
+if(SQLITE3_LIBRARY)
+    target_link_libraries(test_nsight_export PRIVATE SQLite::SQLite3)
+    add_test(NAME NsightExport COMMAND test_nsight_export)
+    set_tests_properties(NsightExport PROPERTIES
+        TIMEOUT 120
+        FIXTURES_REQUIRED KMPRegistrationClean
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
+
 add_executable(test_ptx_cross_module_link api/test_ptx_cross_module_link.cpp)
 target_link_libraries(test_ptx_cross_module_link PRIVATE vgre_cudart)
 add_test(NAME PTXCrossModuleLink COMMAND test_ptx_cross_module_link)

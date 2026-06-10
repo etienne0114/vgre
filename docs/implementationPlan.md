@@ -26,7 +26,7 @@ This document tracks every remaining implementation task — real gaps, security
 | N | PTX → LLVM bitcode direct path (Triton) | ✅ Done |
 | O | Kernel auto-vectorization hints | ✅ Done |
 | P | MPS per-client resource quotas | ✅ Done |
-| Q | Nsight-compatible `.nsys-rep` export | 🔴 Not started |
+| Q | Nsight-compatible `.nsys-rep` export | ✅ Done |
 | R | Signed JIT cache (HMAC validation) | ✅ Done |
 | S | Cluster work stealing | 🔴 Not started |
 | T | Cache key includes CPU arch (CPUID) | ✅ Done |

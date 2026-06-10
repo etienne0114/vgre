@@ -49,6 +49,7 @@ add_library(vgre_api OBJECT
     vgre_c_api.cpp
     vgre_c_api_graphs.cpp
     vgre_c_api_telemetry.cpp
+    nsight_exporter.cpp
     cupti/cupti_shim.cpp
 )
 
@@ -78,3 +79,8 @@ target_include_directories(vgre_cudart_shims PUBLIC
 target_include_directories(vgre_api PUBLIC
     ${PROJECT_SOURCE_DIR}/include
 )
+
+# Track Q: enable the real Nsight SQLite exporter only when SQLite was found.
+if(SQLITE3_LIBRARY)
+    target_compile_definitions(vgre_api PRIVATE VGRE_HAS_SQLITE)
+endif()
