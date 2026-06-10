@@ -682,6 +682,7 @@ add_test(NAME CostBenefitModel COMMAND test_cost_benefit_model)
 add_executable(test_hardware_token_manager advanced/test_hardware_token_manager.cpp)
 target_link_libraries(test_hardware_token_manager PRIVATE vgre)
 add_test(NAME HardwareTokenManager COMMAND test_hardware_token_manager)
+set_tests_properties(HardwareTokenManager PROPERTIES TIMEOUT 60)
 
 add_executable(test_mps_quota advanced/test_mps_quota.cpp)
 target_link_libraries(test_mps_quota PRIVATE vgre)
@@ -1033,6 +1034,17 @@ get_directory_property(vgre_full_test_list TESTS)
 set_tests_properties(${vgre_full_test_list} PROPERTIES
     ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
 )
+
+# HardwareTokenManager validates token encrypt/decrypt/store *correctness*, not
+# KDF strength, so run it with the minimum PBKDF2 iteration count instead of the
+# deliberately-expensive 600k production default (the test was the suite's single
+# biggest time sink). Re-set ENVIRONMENT here, AFTER the global setter above
+# (which replaces — not appends — the property), preserving the global vars.
+# Production code is unaffected; only this test process gets the override.
+if("HardwareTokenManager" IN_LIST vgre_full_test_list)
+    set_tests_properties(HardwareTokenManager PROPERTIES
+        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_PBKDF2_ITERATIONS=10000")
+endif()
 
 # ── Network/TCP serialization ──────────────────────────────────────────────
 # All tests that bind to TCP/UDP ports share vgre_tcp_cluster_port so CTest
