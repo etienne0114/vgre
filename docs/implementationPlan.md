@@ -40,7 +40,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 22 | Continuous batching request scheduler | P2 | §5.3 | ✅ Done |
 | 23 | Large-PTX fast-tier JIT (compile speed) | P2 | §5.4 | 🔴 Not started |
 | 24 | PyTorch/vLLM end-to-end validation harness | P2 | §5.5 | 🔴 Not started |
-| 25 | iGPU transpiler OpenCL-C compile check | P2 | §6.2 | 🔴 Not started |
+| 25 | iGPU transpiler OpenCL-C compile check | P2 | §6.2 | ✅ Done |
 | 26 | Golden numerical-vector suite | P2 | §6.3 | ✅ Done |
 | 27 | perf_event_open proxy counters | P2 | §5.6 | ✅ Core present |
 
@@ -297,9 +297,25 @@ compilation; measure & cap p99 first-call latency on multi-MB modules.
 Gated CI job: CPU-only PyTorch + VGRE shim runs a tiny model fwd/bwd; assert
 numerical agreement with a reference. Proves "runs unmodified CUDA frameworks".
 
-### Track 25 — iGPU transpiler OpenCL-C compile check
-Host-side `clang -cl-std` compile of the generated OpenCL string so the
-transpiler's output (shuffle/ballot/textures) is validated even without a device.
+### Track 25 — iGPU transpiler OpenCL-C compile check — ✅ done (2026-06-10)
+**Files**: `tests/integration/test_igpu_transpile.cpp`, public
+`IGPUOpenCLExecutor::transpileToOpenCL`, transpiler fixes in
+`src/runtime/igpu_opencl_executor.cpp`.
+The test transpiles CUDA kernels (element-wise, warp-shuffle, ballot/vote,
+dynamic shared memory) and compiles each with `clang -x cl -cl-std=CL1.2`
+(Intel sub-group intrinsics stubbed so the structure validates without an Intel
+runtime; SKIPs cleanly if the host clang lacks OpenCL). **It found and I fixed
+three real transpiler bugs that emitted uncompilable OpenCL**:
+1. Dynamic shared memory: the `__local TYPE* NAME` parameter was never added —
+   the param-insertion searched `__kernel` from the start and hit the
+   `#define __global__ __kernel` preamble instead of the kernel; now it scans
+   backwards from the declaration to the enclosing kernel.
+2. `unsigned*` / `unsigned int*` kernel pointers were left without an address
+   space (the type list omitted `unsigned`) → invalid kernel arg.
+3. The inserted `__local` shared-mem pointer also got `__global` prepended
+   (`__local __global TYPE*`); the `__global` pass is now qualifier-aware
+   (std::regex has no lookbehind, so it scans the preceding token by hand).
+4/4 transpiled kernels now compile; the 3 iGPU/OpenCL tests stay green.
 
 ### Track 26 — Golden numerical-vector suite — ✅ done (2026-06-10)
 `tests/api/test_golden_vectors.cpp` (7/7): fixed inputs checked against

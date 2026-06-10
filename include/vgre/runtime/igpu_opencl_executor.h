@@ -51,6 +51,14 @@ public:
   // Provide the Singleton instance
   static IGPUOpenCLExecutor &instance();
 
+  // Transpile a CUDA kernel to OpenCL-C WITHOUT a device (pure source rewrite).
+  // Exposes the transpiler so callers (and a host-side OpenCL-C compile check)
+  // can inspect/validate the generated kernel even when no iGPU is present.
+  VGREResult transpileToOpenCL(const std::string &kernelName,
+                               const std::string &cudaSource,
+                               const std::vector<ArgType> &argTypes,
+                               std::string &outOpenCLSource);
+
 private:
   struct CompiledKernel {
     cl_program program = nullptr;
