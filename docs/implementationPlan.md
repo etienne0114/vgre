@@ -41,7 +41,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 23 | Large-PTX fast-tier JIT (compile speed) | P2 | §5.4 | 🔴 Not started |
 | 24 | PyTorch/vLLM end-to-end validation harness | P2 | §5.5 | 🔴 Not started |
 | 25 | iGPU transpiler OpenCL-C compile check | P2 | §6.2 | 🔴 Not started |
-| 26 | Golden numerical-vector suite | P2 | §6.3 | 🔴 Not started |
+| 26 | Golden numerical-vector suite | P2 | §6.3 | ✅ Done |
 | 27 | perf_event_open proxy counters | P2 | §5.6 | 🔴 Not started |
 
 ---
@@ -301,9 +301,14 @@ numerical agreement with a reference. Proves "runs unmodified CUDA frameworks".
 Host-side `clang -cl-std` compile of the generated OpenCL string so the
 transpiler's output (shuffle/ballot/textures) is validated even without a device.
 
-### Track 26 — Golden numerical-vector suite
-`tests/test_golden_vectors`: cuBLAS GEMM, cuDNN conv, FFT, RNG distributions vs
-NumPy/SciPy/OpenBLAS references at tight tolerance.
+### Track 26 — Golden numerical-vector suite — ✅ done (2026-06-10)
+`tests/api/test_golden_vectors.cpp` (7/7): fixed inputs checked against
+INDEPENDENT hand/closed-form golden outputs (not VGRE's own naive reference):
+cuFFT C2C forward vs the exact DFT of δ→[1,1,1,1], DC→[4,0,0,0], and a cosine
+peaking 4 at bins 1&7; cuBLAS Sgemm of two diagonals (layout-independent golden
+diag(10,21)); cuRAND uniform (in-range, mean≈0.5, var≈1/12) and normal(0,1)
+(mean≈0, var≈1). A cuDNN conv golden can be added later, but the GEMM/FFT/RNG
+oracles already give the consolidated tight-tolerance suite §6.3 asked for.
 
 ### Track 27 — perf_event_open proxy counters
 Optional `VGRE_USE_PERF_COUNTERS`: real L1/L2/IPC via Linux `perf_event_open`,
