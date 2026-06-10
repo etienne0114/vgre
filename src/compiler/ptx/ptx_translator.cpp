@@ -68,7 +68,13 @@ std::string PTXTranslator::translate(const std::string& source) {
     // Pattern: asm [volatile] ("ptx_body" : constraints...)
     // We match both single-string and multi-line forms.
     // Match: asm [volatile] ("body" : constraints)
-    static const std::regex kAsmRe(
+    // Leaky static (never destroyed): the JIT background worker may run this
+    // translation while the process is exiting and main-thread __cxa_atexit
+    // handlers are destroying static locals.  A by-value static std::regex would
+    // be freed out from under the worker (use-after-free / data race) and
+    // corrupt the generated wrapper, which then crashes deep in LLVM codegen.
+    // Heap-allocating once with no destructor eliminates that teardown race.
+    static const std::regex *kAsmRe = new std::regex(
         "\\b(?:__asm__|asm)\\s*(?:volatile\\s*)?\\(\\s*\"([^\"\\\\]*(?:\\\\.[^\"\\\\]*)*)\"\\s*(:[^)]*)?\\s*\\)",
         std::regex::ECMAScript);
 
@@ -76,7 +82,7 @@ std::string PTXTranslator::translate(const std::string& source) {
     std::string out;
     out.reserve(source.size());
 
-    auto it  = std::sregex_iterator(result.begin(), result.end(), kAsmRe);
+    auto it  = std::sregex_iterator(result.begin(), result.end(), *kAsmRe);
     auto end = std::sregex_iterator();
     size_t pos = 0;
 

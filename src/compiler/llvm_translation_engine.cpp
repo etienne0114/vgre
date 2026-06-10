@@ -6,6 +6,7 @@
 #include "vgre/common/system_utils.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <cstdio>
 #include <filesystem>
@@ -38,6 +39,7 @@
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
+#include <llvm/ExecutionEngine/Orc/CompileUtils.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IRReader/IRReader.h>
@@ -61,6 +63,7 @@
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Support/ErrorHandling.h>
 #if defined(__GNUC__) || defined(__clang__)
 #  pragma GCC diagnostic pop
 #elif defined(_MSC_VER)
@@ -156,10 +159,40 @@ struct LLVMState {
   std::unique_ptr<llvm::orc::LLJIT> jit;
 };
 
+// Registry of live engines + the atexit handler that drains their workers.
+// Both the mutex and the vector are leaky statics (heap-allocated, never
+// destroyed): ~LLVMTranslationEngine and the atexit handler both touch them
+// during process teardown, so they must outlive every other static's
+// destruction — a by-value static would be freed first and cause a
+// use-after-free when an engine deregisters itself.
+namespace {
+std::mutex &engineRegistryMutex() {
+  static std::mutex *m = new std::mutex();
+  return *m;
+}
+std::vector<LLVMTranslationEngine *> &engineRegistry() {
+  static std::vector<LLVMTranslationEngine *> *v =
+      new std::vector<LLVMTranslationEngine *>();
+  return *v;
+}
+} // namespace
+
 LLVMTranslationEngine::LLVMTranslationEngine() {
   llvm::InitializeNativeTarget();
   llvm::InitializeNativeTargetAsmPrinter();
   llvm::InitializeNativeTargetAsmParser();
+
+  // Route LLVM fatal codegen errors (report_fatal_error) through the VGRE log
+  // so they are captured with context instead of being printed raw to stderr.
+  static std::once_flag s_feOnce;
+  std::call_once(s_feOnce, [] {
+    llvm::install_fatal_error_handler(
+        [](void *, const char *reason, bool) {
+          VGRE_LOG_ERROR("LLVMTranslationEngine",
+                         std::string("LLVM fatal codegen error: ") + reason);
+        },
+        nullptr);
+  });
 
   auto JTMB = llvm::orc::JITTargetMachineBuilder::detectHost();
   if (!JTMB) {
@@ -198,8 +231,22 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
       JTMB->addFeatures(features);
   }
 
+  // Use ConcurrentIRCompiler instead of the default single-TargetMachine
+  // SimpleCompiler.  VGRE compiles kernels from multiple threads (the background
+  // worker plus any host thread that triggers materialization via a symbol
+  // lookup).  SimpleCompiler holds one shared TargetMachine that is NOT
+  // thread-safe — concurrent SelectionDAG codegen on it corrupts the DAG and
+  // crashes in DAGTypeLegalizer / EVT.  ConcurrentIRCompiler builds a fresh
+  // TargetMachine per compilation from the JITTargetMachineBuilder, so each
+  // thread's codegen is fully independent.
   auto jit = llvm::orc::LLJITBuilder()
-                 .setJITTargetMachineBuilder(std::move(*JTMB))
+                 .setJITTargetMachineBuilder(*JTMB)
+                 .setCompileFunctionCreator(
+                     [JTMB = *JTMB](llvm::orc::JITTargetMachineBuilder)
+                         -> llvm::Expected<
+                             std::unique_ptr<llvm::orc::IRCompileLayer::IRCompiler>> {
+                       return std::make_unique<llvm::orc::ConcurrentIRCompiler>(JTMB);
+                     })
                  .create();
   if (jit) {
     llvmState_ = std::make_unique<LLVMState>();
@@ -229,7 +276,20 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
     auto &MainJD = llvmState_->jit->getMainJITDylib();
     auto &ES = llvmState_->jit->getExecutionSession();
     auto Mangle = llvm::orc::MangleAndInterner(ES, llvmState_->jit->getDataLayout());
-    
+
+    // Install error reporter once at startup so concurrent compilations never
+    // race on setErrorReporter() and so JIT errors go to the VGRE log instead
+    // of stderr.
+    ES.setErrorReporter([](llvm::Error Err) {
+      if (Err) {
+        std::string msg;
+        llvm::raw_string_ostream os(msg);
+        os << Err;
+        VGRE_LOG_WARN("LLVMTranslationEngine", "JIT Session Error: " + msg);
+        llvm::consumeError(std::move(Err));
+      }
+    });
+
     llvm::orc::SymbolMap Symbols;
     Symbols[Mangle("vgre_jit_get_thread_id")] = {
         llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_get_thread_id)),
@@ -362,24 +422,73 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
                    "Failed to initialize LLVM JIT Engine.");
   }
   workerThread_ = std::thread(&LLVMTranslationEngine::workerLoop, this);
+
+  // Prime the full translation pipeline synchronously on this (main) thread so
+  // that every static/singleton the compile path touches — regex tables,
+  // VectorEngine, the logger, and LLVM's lazily-created codegen state — is
+  // constructed *now*, during engine construction.  This is what makes the
+  // atexit drainer below correct: those statics register their destructors here
+  // (or earlier), so the atexit handler — registered immediately after — runs
+  // *before* any of them at exit.  Without this priming the background worker
+  // could initialise a static during its first compile, registering that
+  // static's destructor *after* the atexit handler; the destructor would then
+  // run *before* the worker is joined and be used-after-free if a compile is
+  // still in flight at process exit.
+  if (llvmState_) {
+    vgre::KernelIR warmupIr;
+    warmupIr.name   = "__vgre_jit_warmup";
+    warmupIr.source = "extern \"C\" __global__ void __vgre_jit_warmup() {}";
+    vgre::CompiledKernelFn warmupFn;
+    // Drive a full compile (source generation, clang IR, ORC codegen, static
+    // FLOP analysis) so EVERY destructible static the background worker touches
+    // — including LLVM's lazily-created SelectionDAG/codegen state — is built on
+    // this (main) thread now.  The result is cached on disk, so only the very
+    // first process system-wide pays the clang cost.  Without this, the worker
+    // would construct those statics during its first compile, registering their
+    // destructors after the atexit handler below; at process exit they would run
+    // before the worker is joined and be used while a compile is still in flight,
+    // corrupting the SelectionDAG (intermittent crashes in vector legalization).
+    (void)doTranslate(warmupIr, warmupFn);
+  }
+
+  // Register this engine and ensure the atexit drainer is installed exactly
+  // once.  Registered after the priming above so it runs before every
+  // worker-touched static's destructor, guaranteeing the LLVM worker is joined
+  // before any teardown overlaps its codegen.
+  {
+    std::lock_guard<std::mutex> lock(engineRegistryMutex());
+    engineRegistry().push_back(this);
+  }
+  static std::once_flag s_atexitOnce;
+  std::call_once(s_atexitOnce,
+                 [] { std::atexit(&LLVMTranslationEngine::joinAllWorkersAtExit); });
+}
+
+void LLVMTranslationEngine::stopWorker() {
+  shutdown_ = true;
+  queueCv_.notify_all();
+  // Block until the worker finishes its current compilation task.  The LLJIT
+  // and LLVMContext (llvmState_) must not be destroyed while the worker is
+  // still running SelectionDAGISel.  Equally important: this must complete
+  // before any process-teardown static destructors run, since LLVM codegen
+  // concurrent with static destruction is undefined behaviour.
+  if (workerThread_.joinable())
+    workerThread_.join();
+}
+
+void LLVMTranslationEngine::joinAllWorkersAtExit() {
+  std::lock_guard<std::mutex> lock(engineRegistryMutex());
+  for (LLVMTranslationEngine *eng : engineRegistry()) {
+    if (eng)
+      eng->stopWorker();
+  }
 }
 
 LLVMTranslationEngine::~LLVMTranslationEngine() {
-    shutdown_ = true;
-    queueCv_.notify_all();
-    if (workerThread_.joinable()) {
-        // Move ownership into a detached joiner so the destructor never blocks
-        // indefinitely if a JIT compilation is in progress.  The joiner signals
-        // via a promise so we can wait up to 10 s before giving up.
-        auto p = std::make_shared<std::promise<void>>();
-        auto f = p->get_future();
-        std::thread joiner([p, inner = std::move(workerThread_)]() mutable {
-            inner.join();
-            p->set_value();
-        });
-        joiner.detach();
-        f.wait_for(std::chrono::seconds(10));
-    }
+  stopWorker();
+  std::lock_guard<std::mutex> lock(engineRegistryMutex());
+  auto &reg = engineRegistry();
+  reg.erase(std::remove(reg.begin(), reg.end(), this), reg.end());
 }
 
 
@@ -642,23 +751,28 @@ static std::string validateKernelSource(const std::string& src) {
     // ── 1. Inline-assembly system-call opcodes ────────────────────────────────
     // Match `asm` / `asm volatile` blocks containing syscall, sysenter, int 0x80.
     // Pattern: asm[_volatile]?(...) where the string argument contains the opcode.
-    static const std::regex kSyscallAsm(
+    // Leaky statics (never destroyed): validateKernelSource runs on the JIT
+    // background worker, which may still be executing while the process is
+    // exiting and main-thread __cxa_atexit handlers destroy static locals.  A
+    // by-value static std::regex would be freed under the worker (use-after-free
+    // / data race).  Heap-allocating once with no destructor avoids that.
+    static const std::regex *kSyscallAsm = new std::regex(
         R"(asm\s*(?:volatile\s*)?\([^)]*\b(syscall|sysenter|int\s+0x80|int\s+0X80)\b)",
         std::regex::icase | std::regex::ECMAScript);
     std::smatch m;
-    if (std::regex_search(src, m, kSyscallAsm))
+    if (std::regex_search(src, m, *kSyscallAsm))
         return "inline-asm syscall opcode '" + m[1].str() + "'";
 
     // ── 2. Dangerous OS/shell/network calls ──────────────────────────────────
     // Exact word boundary match to avoid false positives (e.g. "socket" in a
     // comment, or "execInfo" as a variable name).
-    static const std::regex kDangerousFn(
+    static const std::regex *kDangerousFn = new std::regex(
         R"(\b(system|popen|execv|execvp|execve|execl|execlp|execle|)"
         R"(fork|vfork|posix_spawn|socket|connect|bind|listen|accept|)"
         R"(send|recv|sendto|recvfrom|gethostbyname|getaddrinfo|)"
         R"(dlopen|dlsym|LoadLibraryA|LoadLibraryW|GetProcAddress)\s*\()",
         std::regex::ECMAScript);
-    if (std::regex_search(src, m, kDangerousFn))
+    if (std::regex_search(src, m, *kDangerousFn))
         return "dangerous OS/network function call '" + m[1].str() + "'";
 
     return ""; // accepted
@@ -723,11 +837,12 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
           llvm::StringRef(reinterpret_cast<const char*>(cachedBc.data()),
                           cachedBc.size()),
           "cached_bc");
+      // Use a fresh LLVMContext for the temporary decode-to-text step so the
+      // persistent llvmState_->context is never contaminated.
+      llvm::LLVMContext cacheCtx;
       llvm::Expected<std::unique_ptr<llvm::Module>> modOrErr =
-          llvm::parseBitcodeFile(mbuf->getMemBufferRef(),
-                                 *llvmState_->context.getContext());
+          llvm::parseBitcodeFile(mbuf->getMemBufferRef(), cacheCtx);
       if (modOrErr) {
-        // Re-emit as LLVM IR text so the existing optimization and JIT path works.
         llvm::raw_string_ostream rso(irCode);
         rso << *(*modOrErr);
         rso.flush();
@@ -753,15 +868,14 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
     if (r != vgre::VGREResult::SUCCESS) {
       return r;
     }
-    // Serialize the compiled IR to LLVM bitcode and write atomically to the
-    // disk cache.  Invariant: writeElfCache appends SHA-256(content) as a
-    // 32-byte footer; readElfCache verifies it, so single-bit corruption is
-    // detected on the next load.
+    // Persist compiled IR to the disk cache.  Use a fresh LLVMContext so the
+    // persistent llvmState_->context is never contaminated by a temporary
+    // module's type tables.
     {
+      llvm::LLVMContext cacheCtx;
       auto buf = llvm::MemoryBuffer::getMemBuffer(irCode);
       llvm::SMDiagnostic diagErr;
-      auto modForCache = llvm::parseIR(*buf, diagErr,
-                                       *llvmState_->context.getContext());
+      auto modForCache = llvm::parseIR(*buf, diagErr, cacheCtx);
       if (modForCache) {
         llvm::SmallVector<char, 0> bcBuf;
         {
@@ -776,17 +890,12 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
                         "Failed to write BC cache for kernel: " + ir.name);
         }
 
-        // LRU eviction: honour VGRE_CACHE_MAX_MB if set.
-        // Invariant: after eviction, total .bc files in cache_dir <= max_bytes
-        // (monotone decrease — only deletions, no new writes during eviction).
         const char* maxMbEnv = std::getenv("VGRE_CACHE_MAX_MB");
         if (maxMbEnv && *maxMbEnv) {
           char* end = nullptr;
           long maxMb = std::strtol(maxMbEnv, &end, 10);
           if (end != maxMbEnv && maxMb > 0) {
             std::string evictDir = bcPath.substr(0, bcPath.find('/', 1));
-            // Derive the two-level root from bcPath: strip "/{shard}/{key}.bc"
-            // bcPath = "{base}/{shard}/{key}.bc" — evict the whole base.
             auto pos2 = bcPath.rfind('/');
             if (pos2 != std::string::npos) {
               auto pos1 = bcPath.rfind('/', pos2 - 1);
@@ -802,55 +911,6 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
     }
   }
 
-  // Adaptive per-module IR optimization based on kernel complexity.
-  // Simple kernels (< 1000 estimated instructions) compile faster with -O1;
-  // medium kernels use -O2; complex/warp/shared-memory kernels get -O3.
-  // This reduces JIT latency for short kernels by up to 40% at the cost of
-  // slightly lower throughput (outweighed by faster dispatch for small work).
-  const char *envOpt = vgre_get_config("VGRE_JIT_OPT_LEVEL");
-  if (!envOpt && !loadedFromCache) {
-    uint64_t estInstr = ir.estimatedInstructionCount;
-    bool needsHighOpt = ir.usesWarpShuffle || ir.usesSharedMem ||
-                        ir.staticFlopCount > 50000;
-    llvm::OptimizationLevel irOptLevel = llvm::OptimizationLevel::O2;
-    if (needsHighOpt || estInstr > 5000) {
-        irOptLevel = llvm::OptimizationLevel::O3;
-    } else if (estInstr < 500 && !needsHighOpt) {
-        irOptLevel = llvm::OptimizationLevel::O1;
-    }
-
-    auto buf = llvm::MemoryBuffer::getMemBuffer(irCode);
-    llvm::SMDiagnostic diagErr;
-    auto optMod = llvm::parseIR(*buf, diagErr, *llvmState_->context.getContext());
-    if (optMod) {
-        llvm::LoopAnalysisManager LAM;
-        llvm::FunctionAnalysisManager FAM;
-        llvm::CGSCCAnalysisManager CGAM;
-        llvm::ModuleAnalysisManager MAM;
-        llvm::PassBuilder PB;
-        PB.registerModuleAnalyses(MAM);
-        PB.registerCGSCCAnalyses(CGAM);
-        PB.registerFunctionAnalyses(FAM);
-        PB.registerLoopAnalyses(LAM);
-        PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
-        llvm::ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(irOptLevel);
-        MPM.run(*optMod, MAM);
-        llvm::raw_string_ostream rso(irCode);
-        irCode.clear();
-        llvm::raw_string_ostream irStream(irCode);
-        llvm::WriteBitcodeToFile(*optMod, irStream); // not text; use string form
-        // Re-emit as text IR for further processing.
-        irCode.clear();
-        llvm::raw_string_ostream textStream(irCode);
-        textStream << *optMod;
-        VGRE_LOG_DEBUG("LLVMTranslationEngine",
-                       "Adaptive IR opt for '" + ir.name + "': " +
-                           std::to_string(estInstr) + " inst → level " +
-                           (irOptLevel == llvm::OptimizationLevel::O3 ? "O3" :
-                            irOptLevel == llvm::OptimizationLevel::O1 ? "O1" : "O2"));
-    }
-  }
-
   outFn = compileJIT(irCode, ir.name + "_wrapper", ir);
   if (!outFn) {
     return vgre::VGREResult::ERR_COMPILATION;
@@ -859,9 +919,10 @@ vgre::VGREResult LLVMTranslationEngine::doTranslate(vgre::KernelIR &ir,
   // Phase 8: Extract precise FLOP and Instruction count from JIT-ed module before completion
   // This ensures the dashboard gets the most authoritative performance metric.
   {
+      llvm::LLVMContext flopCtx;
       auto buffer = llvm::MemoryBuffer::getMemBuffer(irCode);
       llvm::SMDiagnostic err;
-      auto module = llvm::parseIR(*buffer, err, *llvmState_->context.getContext());
+      auto module = llvm::parseIR(*buffer, err, flopCtx);
       if (module) {
           uint64_t instCount = 0;
           ir.staticFlopCount    = analyzeStaticFlops(*module, &instCount);
@@ -921,9 +982,9 @@ vgre::VGREResult LLVMTranslationEngine::compileBitcodeKernel(
       auto mbuf = llvm::MemoryBuffer::getMemBufferCopy(
           llvm::StringRef(reinterpret_cast<const char *>(cached.data()), cached.size()),
           "cached_bc");
+      llvm::LLVMContext cacheCtx;
       llvm::Expected<std::unique_ptr<llvm::Module>> modOrErr =
-          llvm::parseBitcodeFile(mbuf->getMemBufferRef(),
-                                 *llvmState_->context.getContext());
+          llvm::parseBitcodeFile(mbuf->getMemBufferRef(), cacheCtx);
       if (modOrErr) {
         llvm::raw_string_ostream rso(irCode);
         rso << *(*modOrErr);
@@ -942,9 +1003,9 @@ vgre::VGREResult LLVMTranslationEngine::compileBitcodeKernel(
     auto mbuf = llvm::MemoryBuffer::getMemBufferCopy(
         llvm::StringRef(reinterpret_cast<const char *>(bc.data()), bc.size()),
         "bitcode");
+    llvm::LLVMContext parseCtx;
     llvm::Expected<std::unique_ptr<llvm::Module>> modOrErr =
-        llvm::parseBitcodeFile(mbuf->getMemBufferRef(),
-                               *llvmState_->context.getContext());
+        llvm::parseBitcodeFile(mbuf->getMemBufferRef(), parseCtx);
     if (!modOrErr) {
       llvm::consumeError(modOrErr.takeError());
       VGRE_LOG_ERROR("LLVMTranslationEngine",
@@ -976,32 +1037,7 @@ vgre::VGREResult LLVMTranslationEngine::compileBitcodeKernel(
                   "BC direct: parsed and cached bitcode for '" + kernelName + "'");
   }
 
-  // Step 5: O2 optimisation pass
-  {
-    auto buf = llvm::MemoryBuffer::getMemBuffer(irCode);
-    llvm::SMDiagnostic diagErr;
-    auto optMod = llvm::parseIR(*buf, diagErr, *llvmState_->context.getContext());
-    if (optMod) {
-      llvm::LoopAnalysisManager LAM;
-      llvm::FunctionAnalysisManager FAM;
-      llvm::CGSCCAnalysisManager CGAM;
-      llvm::ModuleAnalysisManager MAM;
-      llvm::PassBuilder PB;
-      PB.registerModuleAnalyses(MAM);
-      PB.registerCGSCCAnalyses(CGAM);
-      PB.registerFunctionAnalyses(FAM);
-      PB.registerLoopAnalyses(LAM);
-      PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
-      llvm::ModulePassManager MPM =
-          PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2);
-      MPM.run(*optMod, MAM);
-      irCode.clear();
-      llvm::raw_string_ostream textStream(irCode);
-      textStream << *optMod;
-    }
-  }
-
-  // Step 6: JIT via ORC (reuse the existing compileJIT path)
+  // Step 5: JIT via ORC (LLJIT's IRTransformLayer applies O2 optimization internally)
   vgre::KernelIR dummyIR;
   dummyIR.name = kernelName;
   outFn = compileJIT(irCode, kernelName, dummyIR);

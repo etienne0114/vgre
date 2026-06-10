@@ -4,6 +4,7 @@
 #include "vgre/common/platform.h"
 #include "vgre/common/retry.h"
 #include "vgre/common/system_utils.h"
+#include "vgre/runtime/vector_engine.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -231,6 +232,64 @@ bool rewriteStaticShared(std::string &source, size_t &totalBytes) {
 }
 } // namespace
 
+// ── Track O: Kernel auto-vectorization hints ─────────────────────────────────
+// Computes the optimal SIMD vectorize_width and interleave_count for the
+// inner thread-dispatch loop in the JIT wrapper, based on:
+//   1. Physical CPU capabilities (from VectorEngine::caps()).
+//   2. Kernel characteristics extracted during ClangKernelParser parsing.
+//
+// Heuristic:
+//   - Syncthreads kernel: width=1 (threads must run in a specific order).
+//   - Warp-shuffle kernel: width=2 (pairs of logical lanes interact).
+//   - Shared-memory kernel: width=4 (cache-line fits 4 × f32).
+//   - FLOP-dense (>50 k static FLOPs) + AVX-512 present: width=16 (AVX-512 f32).
+//   - FLOP-dense + AVX2 present: width=8.
+//   - Light kernel (< 500 instructions) + AVX2: width=8, interleave=4
+//     (instruction-level parallelism dominates; aggressive software pipelining).
+//   - Default: width=4, interleave=2.
+//
+// The vectorize_count applies ONLY to the innermost tx loop.
+struct VectorHints {
+    int vectorWidth    = 4;
+    int interleaveCount = 2;
+};
+
+static VectorHints computeVectorHints(const KernelIR &ir) {
+    const auto &caps = vgre::runtime::VectorEngine::instance().getCapabilities();
+
+    // Kernels with cross-thread dependencies cannot be vectorized across threads.
+    if (ir.usesSyncthreads)
+        return {1, 1};
+    if (ir.usesWarpShuffle)
+        return {2, 1};
+    if (ir.usesSharedMem)
+        return {4, 1};
+
+    // FLOP-dense kernels benefit from the widest available SIMD.
+    bool flopDense = ir.staticFlopCount > 50'000;
+    if (flopDense) {
+        if (caps.hasAVX512) return {16, 2};
+        if (caps.hasAVX2)   return {8,  2};
+        if (caps.hasAVX)    return {4,  2};
+        return {2, 1};
+    }
+
+    // Light kernels: high interleave beats wide SIMD for ILP.
+    bool lightKernel = ir.estimatedInstructionCount < 500 &&
+                       ir.staticFlopCount < 1'000;
+    if (lightKernel) {
+        if (caps.hasAVX2)  return {8, 4};
+        if (caps.hasSSE4)  return {4, 4};
+        return {2, 2};
+    }
+
+    // General case — match the widest available integer/float SIMD.
+    if (caps.hasAVX2)  return {8, 2};
+    if (caps.hasAVX)   return {4, 2};
+    if (caps.hasSSE4)  return {4, 1};
+    if (caps.hasSSE2)  return {2, 1};
+    return {1, 1};
+}
 
 std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   std::ostringstream oss;
@@ -405,13 +464,24 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   oss << "    return;\n";
   oss << "  }\n\n";
 
-  // True LLVM SIMD Auto-Vectorization
-  // We force Clang to map CUDA tx,ty,tz threads directly to physical AVX/SIMD hardware CPU lanes.
-  // This replaces the "OpenMP thread virtualization" logic by utilizing actual hardware concurrency
-  // for threads within a block via SIMD auto-vectorization, avoiding POSIX thread explosion and TLS crashes.
-  oss << "  #pragma clang loop vectorize(enable) interleave(enable)\n";
+  // Track O: per-kernel SIMD vectorization hints.
+  // vectorWidth and interleaveCount are derived from kernel characteristics
+  // (FLOP density, shared memory, syncthreads, warp shuffles) and CPU caps.
+  VectorHints vh = computeVectorHints(ir);
+  VGRE_LOG_INFO("LLVMTranslationEngine",
+                "Vectorization hints for '" + ir.name + "': width=" +
+                    std::to_string(vh.vectorWidth) + " interleave=" +
+                    std::to_string(vh.interleaveCount));
+
   oss << "  for (uint32_t tz = 0; tz < bdz; ++tz) {\n";
   oss << "    for (uint32_t ty = 0; ty < bdy; ++ty) {\n";
+  if (vh.vectorWidth > 1) {
+    oss << "      #pragma clang loop vectorize(enable)"
+        << " vectorize_width(" << vh.vectorWidth << ")"
+        << " interleave_count(" << vh.interleaveCount << ")\n";
+  } else {
+    oss << "      #pragma clang loop vectorize(disable)\n";
+  }
   oss << "      for (uint32_t tx = 0; tx < bdx; ++tx) {\n";
   oss << "        vgre_call_kernel(tx, ty, tz);\n";
   oss << "      }\n";
@@ -594,19 +664,6 @@ LLVMTranslationEngine::compileJIT(const std::string &irCode,
 
   // Mangle and intern the entry point name for reliable JIT resolution
   // (ES and MainJD already available above)
-
-  // CRITICAL: Explicitly set a silent error reporter to avoid printing to stderr
-  // and causing crashes if a lookup fails.
-  ES.setErrorReporter([](llvm::Error Err) {
-    if (Err) {
-      std::string msg;
-      llvm::raw_string_ostream os(msg);
-      os << Err;
-      VGRE_LOG_WARN("LLVMTranslationEngine", "JIT Session Error: " + msg);
-      llvm::consumeError(std::move(Err));
-    }
-  });
-
   auto Mangle = llvm::orc::MangleAndInterner(ES, llvmState_->jit->getDataLayout());
   auto sym = ES.lookup({&JD}, Mangle(entryPoint));
 
