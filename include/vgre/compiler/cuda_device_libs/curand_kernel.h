@@ -85,11 +85,76 @@ inline unsigned int xorwow_next(curandStateXORWOW* s) {
     return s->v[4] + s->d;
 }
 
-// Skip-ahead for XORWOW: advance by 2^67 for subsequence, 1 for offset.
-// We use a simple Horner/matrix fast-skip via polynomial over GF(2)^160.
-// Simplified: advance by n calls to xorwow_next (offset <= 2^20 is practical).
+// The v-state half of one XORWOW step (no Weyl counter, no output). Every
+// operation is XOR/shift/copy, so this map is LINEAR over GF(2)^160 — which is
+// what makes the logarithmic skip-ahead below possible.
+inline void xorwow_step_v(unsigned int v[5]) {
+    unsigned int t = v[0] ^ (v[0] >> 2);
+    v[0] = v[1];
+    v[1] = v[2];
+    v[2] = v[3];
+    v[3] = v[4];
+    v[4] = (v[4] ^ (v[4] << 4)) ^ (t ^ (t << 1));
+}
+
+// 160×160 transition matrix over GF(2), stored column-major: col[i] is the image
+// of basis vector e_i (the 160-bit state with only bit i set) under one step.
+struct XorwowMat { unsigned int col[160][5]; };
+
+inline void xorwow_matvec(const XorwowMat& M, const unsigned int x[5],
+                          unsigned int out[5]) {
+    out[0] = out[1] = out[2] = out[3] = out[4] = 0;
+    for (int i = 0; i < 160; ++i) {
+        if ((x[i >> 5] >> (i & 31)) & 1u)
+            for (int w = 0; w < 5; ++w) out[w] ^= M.col[i][w];
+    }
+}
+
+// C = A∘B (apply B then A): column j of C is A applied to column j of B.
+inline void xorwow_matmul(const XorwowMat& A, const XorwowMat& B, XorwowMat& C) {
+    for (int i = 0; i < 160; ++i) xorwow_matvec(A, B.col[i], C.col[i]);
+}
+
+inline void xorwow_identity(XorwowMat& I) {
+    for (int i = 0; i < 160; ++i) {
+        for (int w = 0; w < 5; ++w) I.col[i][w] = 0;
+        I.col[i][i >> 5] = 1u << (i & 31);
+    }
+}
+
+inline void xorwow_build_step_matrix(XorwowMat& M) {
+    for (int i = 0; i < 160; ++i) {
+        unsigned int v[5] = {0, 0, 0, 0, 0};
+        v[i >> 5] = 1u << (i & 31);
+        xorwow_step_v(v);
+        for (int w = 0; w < 5; ++w) M.col[i][w] = v[w];
+    }
+}
+
+// Skip-ahead for XORWOW. The Weyl counter is arithmetic (d += 362437 per step),
+// so advance it in O(1). The v-state evolves by the GF(2) matrix M, so n steps =
+// M^n · v, computed by binary exponentiation in O(log n) — replacing the old
+// O(n) loop that made large offsets (e.g. 10^9) impractical.
 inline void xorwow_skip(curandStateXORWOW* s, unsigned long long n) {
-    for (unsigned long long i = 0; i < n; ++i) xorwow_next(s);
+    if (n == 0) return;
+    if (n < 128) {  // direct iteration wins for tiny skips (no matrix build)
+        for (unsigned long long i = 0; i < n; ++i) xorwow_next(s);
+        return;
+    }
+    XorwowMat base; xorwow_build_step_matrix(base);
+    XorwowMat result; xorwow_identity(result);
+    unsigned long long e = n;
+    while (e) {
+        if (e & 1ull) { XorwowMat tmp; xorwow_matmul(result, base, tmp); result = tmp; }
+        e >>= 1;
+        if (e) { XorwowMat sq; xorwow_matmul(base, base, sq); base = sq; }
+    }
+    unsigned int out[5];
+    xorwow_matvec(result, s->v, out);
+    for (int w = 0; w < 5; ++w) s->v[w] = out[w];
+    // d advanced 362437 per step; low 32 bits of 362437*n (computed mod 2^64,
+    // truncated to 32 bits, which equals the exact mod-2^32 result).
+    s->d += static_cast<unsigned int>(362437ULL * n);
 }
 
 // ── Philox 4×32-10 ────────────────────────────────────────────────────────────
