@@ -413,21 +413,23 @@ extern "C" __global__ void )" << ir.name << R"(_fused_flash_attn_gqa(
             if (s_vals[k] > local_max) local_max = s_vals[k];
         }
 
-        // Online softmax update.
+        // Online softmax update: rescale the existing acc/sum ONCE for the new
+        // max, then ADD this block's contributions (rescale outside the per-key
+        // loop, otherwise acc is zeroed on every key).
         const float new_max   = (row_max > local_max) ? row_max : local_max;
         const float exp_scale = expf(row_max - new_max);
-        float local_sum = 0.0f;
+        for (int d = 0; d < d_head && d < 128; ++d) acc[d] *= exp_scale;
+        row_sum *= exp_scale;
         for (int k = 0; k < BK; ++k) {
             const int col = kv_start + k;
             if (col >= seq_len) continue;
             if (s_vals[k] > -3.402823466e+38f / 2.0f) {
                 const float e = expf(s_vals[k] - new_max);
-                local_sum += e;
+                row_sum += e;
                 for (int d = 0; d < d_head && d < 128; ++d)
-                    acc[d] = acc[d] * exp_scale + e * Vh[col * d_head + d];
+                    acc[d] += e * Vh[col * d_head + d];
             }
         }
-        row_sum = row_sum * exp_scale + local_sum;
         row_max = new_max;
     }
 
@@ -452,91 +454,62 @@ extern "C" __global__ void )" << ir.name << R"(_fused_flash_attn(
     float* __restrict__ O,
     int seq_len, int d_head, float scale) {
 
-    int tid = threadIdx.x;
-    int bid = blockIdx.x;
-    int BM = 64, BN = 64, BK = 32;
-    int num_blocks_m = (seq_len + BM - 1) / BM;
-    int num_blocks_n = (seq_len + BN - 1) / BN;
+    // One query row per thread (global id). FlashAttention-2 online softmax:
+    // stream K/V in BK-sized blocks keeping a running (max, sum) and rescaling
+    // the output accumulator when the max grows — O(seq_len * d_head) memory, no
+    // full S = QK^T materialised.
+    const int BK = 32;
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= seq_len) return;
 
-    // Each block handles one (m, n) tile
-    int block_m = bid / num_blocks_n;
-    int block_n = bid % num_blocks_n;
-    int m_start = block_m * BM;
-    int n_start = block_n * BN;
+    float acc[128];                       // per-row output accumulator (d_head <= 128)
+    for (int d = 0; d < d_head && d < 128; ++d) acc[d] = 0.0f;
+    float row_max = -3.402823466e+38f;    // running max  (m_i)
+    float row_sum = 0.0f;                 // running denom (l_i)
 
-    // Thread-local accumulator for O tile
-    float acc[64]; // max BN
-    #pragma unroll
-    for (int i = 0; i < BN; ++i) acc[i] = 0.0f;
+    for (int kv_blk = 0; kv_blk < (seq_len + BK - 1) / BK; ++kv_blk) {
+        const int kv_start = kv_blk * BK;
 
-    // Online softmax state
-    float row_max = -3.402823466e+38f;
-    float row_sum = 0.0f;
-
-    // Iterate over K/V blocks
-    for (int k_block = 0; k_block < (seq_len + BK - 1) / BK; ++k_block) {
-        int k_start = k_block * BK;
-
-        // Compute S = Q @ K^T for this tile (online, row by row)
-        for (int m = 0; m < BM; ++m) {
-            int row = m_start + m;
-            if (row >= seq_len) break;
-
-            // Compute dot products with K rows
-            float s_vals[32]; // max BK
-            float local_max = -3.402823466e+38f;
-
-            for (int k = 0; k < BK; ++k) {
-                int col = k_start + k;
-                if (col >= seq_len) { s_vals[k] = -3.402823466e+38f; continue; }
-
-                // Causal mask
-                if ()" << (causal ? "row < col" : "false") << R"( ) {
-                    s_vals[k] = -3.402823466e+38f;
-                    continue;
-                }
-
-                float dot = 0.0f;
-                for (int d = 0; d < d_head; ++d) {
-                    dot += Q[row * d_head + d] * K[col * d_head + d];
-                }
-                s_vals[k] = dot * scale;
-                local_max = fmaxf(local_max, s_vals[k]);
+        float s_vals[32];
+        float local_max = -3.402823466e+38f;
+        for (int k = 0; k < BK; ++k) {
+            const int col = kv_start + k;
+            if (col >= seq_len) { s_vals[k] = -3.402823466e+38f; continue; }
+            // Causal mask: a query at `row` may not attend to a future key `col`.
+            if ()" << (causal ? "col > row" : "false") << R"() {
+                s_vals[k] = -3.402823466e+38f;
+                continue;
             }
-
-            // Online softmax update
-            float new_max = fmaxf(row_max, local_max);
-            float exp_scale = expf(row_max - new_max);
-            float local_sum = 0.0f;
-            for (int k = 0; k < BK; ++k) {
-                if (s_vals[k] > -3.402823466e+38f / 2.0f) {
-                    float e = expf(s_vals[k] - new_max);
-                    local_sum += e;
-                    int col = k_start + k;
-                    for (int n = 0; n < BN; ++n) {
-                        int v_col = n_start + n;
-                        if (v_col < d_head) {
-                            acc[n] += e * V[col * d_head + v_col];
-                        }
-                    }
-                }
-            }
-            row_sum = row_sum * exp_scale + local_sum;
-            row_max = new_max;
+            float dot = 0.0f;
+            for (int d = 0; d < d_head && d < 128; ++d)
+                dot += Q[row * d_head + d] * K[col * d_head + d];
+            s_vals[k] = dot * scale;
+            if (s_vals[k] > local_max) local_max = s_vals[k];
         }
+
+        // Online softmax: update the running max, rescale the EXISTING acc and
+        // sum ONCE by exp(old_max - new_max), then ADD this block's
+        // contributions (the rescale must be outside the per-key loop, else acc
+        // would be zeroed on every key).
+        const float new_max   = (row_max > local_max) ? row_max : local_max;
+        const float exp_scale = expf(row_max - new_max);
+        for (int d = 0; d < d_head && d < 128; ++d) acc[d] *= exp_scale;
+        row_sum *= exp_scale;
+        for (int k = 0; k < BK; ++k) {
+            const int col = kv_start + k;
+            if (col >= seq_len) continue;
+            if (s_vals[k] <= -3.402823466e+38f / 2.0f) continue;
+            const float e = expf(s_vals[k] - new_max);
+            row_sum += e;
+            for (int d = 0; d < d_head && d < 128; ++d)
+                acc[d] += e * V[col * d_head + d];
+        }
+        row_max = new_max;
     }
 
-    // Write back O tile, normalized (output is seq_len x d_head)
-    for (int m = 0; m < BM; ++m) {
-        int row = m_start + m;
-        if (row >= seq_len) break;
-        for (int n = 0; n < BN; ++n) {
-            int d = n_start + n;
-            if (d < d_head) {
-                O[row * d_head + d] = acc[n] / (row_sum > 0.0f ? row_sum : 1.0f);
-            }
-        }
-    }
+    if (row_sum > 0.0f)
+        for (int d = 0; d < d_head && d < 128; ++d)
+            O[row * d_head + d] = acc[d] / row_sum;
 }
 )";
     return ss.str();
@@ -582,10 +555,15 @@ extern "C" __global__ void )" << ir.name << R"(_fused_transformer(
     float attn_out[256];
     for (int d = 0; d < d_model; ++d) attn_out[d] = 0.0f;
 
-    // Compute attention weights against all positions
+    // Self-attention via a single-pass online softmax (FlashAttention-style):
+    // keep a running max and denominator, rescaling the accumulator when the max
+    // grows, so the softmax is correct without a second pass or an O(seq) score
+    // buffer. K/V are recomputed per position (correct; caching would only change
+    // performance, not the result).
+    float run_max = -3.402823466e+38f;
+    float run_sum = 0.0f;
     for (int pos = 0; pos < seq_len; ++pos) {
         int pos_offset = (b * seq_len + pos) * d_model;
-        // Recompute K and V for position pos (simplified; real impl caches)
         float k_pos[256], v_pos[256];
         for (int d = 0; d < d_model; ++d) {
             k_pos[d] = 0.0f; v_pos[d] = 0.0f;
@@ -599,24 +577,16 @@ extern "C" __global__ void )" << ir.name << R"(_fused_transformer(
         for (int d = 0; d < d_model; ++d) dot += q[d] * k_pos[d];
         float score = dot * scale;
 
-        // Softmax across positions
-        float max_score = -1e9f;
-        for (int p2 = 0; p2 < seq_len; ++p2) {
-            float dot2 = 0.0f;
-            for (int d = 0; d < d_model; ++d) dot2 += q[d] * k_pos[d];
-            max_score = fmaxf(max_score, dot2 * scale);
-        }
-        float sum = 0.0f;
-        for (int p2 = 0; p2 < seq_len; ++p2) {
-            float dot2 = 0.0f;
-            for (int d = 0; d < d_model; ++d) dot2 += q[d] * k_pos[d];
-            sum += expf(dot2 * scale - max_score);
-        }
-        float weight = expf(score - max_score) / sum;
-
+        float new_max = fmaxf(run_max, score);
+        float resc    = expf(run_max - new_max);
+        float e       = expf(score - new_max);
+        run_sum = run_sum * resc + e;
         for (int d = 0; d < d_model; ++d)
-            attn_out[d] += weight * v_pos[d];
+            attn_out[d] = attn_out[d] * resc + e * v_pos[d];
+        run_max = new_max;
     }
+    if (run_sum > 0.0f)
+        for (int d = 0; d < d_model; ++d) attn_out[d] /= run_sum;
 
     // Output projection
     float proj[256];
