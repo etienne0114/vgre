@@ -274,6 +274,10 @@ VGRE_EXPORT void vgre_stop_metrics_server(void);
 VGRE_EXPORT void vgre_metrics_set_ready(int ready);     /* readiness gate */
 VGRE_EXPORT void vgre_metrics_maybe_autostart(void);    /* honours VGRE_METRICS_PORT */
 
+/* Graceful drain: mark not-ready (/readyz→503) then block until in-flight
+ * kernels finish. Call on SIGTERM for a zero-loss rolling restart. */
+VGRE_EXPORT int  vgre_drain(void);
+
 /**
  * @brief Retrieves recent log lines from the engine.
  *
