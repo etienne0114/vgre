@@ -68,8 +68,12 @@ int main() {
         check("curand_init(offset) matches iterative offset", sameState(viaInit, viaIter));
     }
 
-    // Performance: a 10^9 skip must be fast (O(log n)). The old O(n) loop would
-    // take seconds; the matrix path is microseconds.
+    // Performance: a 10^9 skip must be fast (O(log n)). The old O(n) loop runs
+    // 10^9 xorwow_next calls — multiple SECONDS even at -O2, and ~10× that under
+    // a -O0 (debug/sanitizer) build. The matrix path is a fixed ~log2(10^9)≈30
+    // matrix multiplies, single-digit ms at -O2. Use a generous 1000 ms bound so
+    // the test is robust across -O0 builds and contended CI runners while still
+    // unambiguously proving the behaviour is logarithmic, not linear.
     {
         curandStateXORWOW s = seed0;
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -77,7 +81,7 @@ int main() {
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         printf("  [info] skip(1e9) took %.3f ms\n", ms);
-        check("skip(1e9) completes in < 50 ms (logarithmic)", ms < 50.0);
+        check("skip(1e9) completes in < 1000 ms (logarithmic, not O(n))", ms < 1000.0);
     }
 
     printf("\n%d / %d passed\n", g_pass, g_total);
