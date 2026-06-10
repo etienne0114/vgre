@@ -338,6 +338,51 @@ cusparseStatus_t cusparseSpGEMM_copy(cusparseHandle_t handle,
                                       cusparseSpGEMMAlg_t alg,
                                       cusparseSpGEMMDescr_t spgemmDescr);
 
+// ── SpGEMM reuse API ──────────────────────────────────────────────────────────
+// Amortises the symbolic (sparsity-structure) analysis across repeated numeric
+// multiplies of the same A/B pattern (used by GNN / iterative solvers).
+cusparseStatus_t cusparseSpGEMMreuse_workEstimation(cusparseHandle_t handle,
+                                                     cusparseOperation_t opA,
+                                                     cusparseOperation_t opB,
+                                                     cusparseSpMatDescr_t matA,
+                                                     cusparseSpMatDescr_t matB,
+                                                     cusparseSpMatDescr_t matC,
+                                                     cusparseSpGEMMAlg_t alg,
+                                                     cusparseSpGEMMDescr_t spgemmDescr,
+                                                     size_t *bufferSize1,
+                                                     void *externalBuffer1);
+cusparseStatus_t cusparseSpGEMMreuse_nnz(cusparseHandle_t handle,
+                                          cusparseOperation_t opA,
+                                          cusparseOperation_t opB,
+                                          cusparseSpMatDescr_t matA,
+                                          cusparseSpMatDescr_t matB,
+                                          cusparseSpMatDescr_t matC,
+                                          cusparseSpGEMMAlg_t alg,
+                                          cusparseSpGEMMDescr_t spgemmDescr,
+                                          size_t *bufferSize2, void *externalBuffer2,
+                                          size_t *bufferSize3, void *externalBuffer3,
+                                          size_t *bufferSize4, void *externalBuffer4);
+cusparseStatus_t cusparseSpGEMMreuse_copy(cusparseHandle_t handle,
+                                           cusparseOperation_t opA,
+                                           cusparseOperation_t opB,
+                                           cusparseSpMatDescr_t matA,
+                                           cusparseSpMatDescr_t matB,
+                                           cusparseSpMatDescr_t matC,
+                                           cusparseSpGEMMAlg_t alg,
+                                           cusparseSpGEMMDescr_t spgemmDescr,
+                                           size_t *bufferSize5, void *externalBuffer5);
+cusparseStatus_t cusparseSpGEMMreuse_compute(cusparseHandle_t handle,
+                                              cusparseOperation_t opA,
+                                              cusparseOperation_t opB,
+                                              const void *alpha,
+                                              cusparseSpMatDescr_t matA,
+                                              cusparseSpMatDescr_t matB,
+                                              const void *beta,
+                                              cusparseSpMatDescr_t matC,
+                                              cudaDataType_t computeType,
+                                              cusparseSpGEMMAlg_t alg,
+                                              cusparseSpGEMMDescr_t spgemmDescr);
+
 // ── Incomplete factorization (ILU0 / IC0) ─────────────────────────────────────
 // ILU(0): in-place incomplete LU factorization with zero fill-in.
 // IC(0):  in-place incomplete Cholesky factorization with zero fill-in.
