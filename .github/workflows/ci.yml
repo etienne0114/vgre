@@ -1,0 +1,104 @@
+name: CI
+
+# Track 1 (Phase 2): build + test on Linux, macOS and Windows so the
+# cross-platform #ifdef branches stop being unverified. Linux is the verified
+# baseline and is REQUIRED. macOS/Windows run informationally
+# (continue-on-error) while their platform issues are worked down; remove the
+# continue-on-error once each is green, then the README/PROJECT_STATUS may
+# honestly claim that platform as supported.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Linux: the verified baseline (required) ──────────────────────────────
+  linux:
+    name: linux-x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain + deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build clang llvm-dev libclang-dev \
+            libomp-dev libsqlite3-dev liblapack-dev
+          clang++ --version
+          cmake --version
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        # Bounded parallelism + load awareness: the JIT tests each fork clang and
+        # spin a worker pool, so an unbounded -j oversubscribes the runner and
+        # times them out (Phase 2, Track 6). --test-load caps concurrent load.
+        working-directory: build
+        run: ctest --output-on-failure -j 2 --test-load 4 --timeout 300
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-test-logs
+          path: build/Testing/Temporary/
+
+  # ── macOS: bring-up (informational until green) ──────────────────────────
+  macos:
+    name: macos-arm64
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          brew install llvm libomp ninja sqlite lapack || true
+          echo "LLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm" >> "$GITHUB_ENV"
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_PREFIX_PATH="$(brew --prefix llvm);$(brew --prefix libomp)"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure -j 2 --test-load 4 --timeout 300
+
+  # ── Windows: bring-up (informational until green) ────────────────────────
+  windows:
+    name: windows-x86_64
+    runs-on: windows-2022
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: choco install llvm ninja sqlite -y
+
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure -j 2 --timeout 300

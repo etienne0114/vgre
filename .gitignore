@@ -58,9 +58,12 @@ AGENT.md
 CLAUDE.md
 .windsurfrules
 .jetro/
-.github/
+# Ignore AI-agent configs under .github but KEEP CI workflows tracked.
+.github/agents/
+.github/copilot-instructions.md
 .cursor/
 .agents/
+!.github/workflows/
 .env
 
 # In-source CMake build artifacts (from running cmake in source tree)
