@@ -34,7 +34,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build clang-18 llvm-18-dev libclang-18-dev \
-            libomp-18-dev libsqlite3-dev liblapack-dev
+            libomp-18-dev libsqlite3-dev liblapack-dev \
+            libkeyutils-dev libssl-dev zlib1g-dev
           clang++ --version
           cmake --version
 
