@@ -824,6 +824,20 @@ target_link_libraries(test_igpu_transpile PRIVATE vgre)
 add_test(NAME IGPUTranspileCompile COMMAND test_igpu_transpile)
 set_tests_properties(IGPUTranspileCompile PROPERTIES TIMEOUT 60)
 
+# PyTorch end-to-end validation harness (Track 24): runs VGRE's cuBLAS via
+# ctypes and compares to torch. Prefers the project .venv (which has torch); the
+# script self-SKIPs if torch/numpy are unavailable.
+if(EXISTS "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+    set(_vgre_py "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+else()
+    find_program(_vgre_py NAMES python3 python)
+endif()
+if(_vgre_py)
+    add_test(NAME PyTorchValidation
+             COMMAND ${_vgre_py} ${CMAKE_CURRENT_SOURCE_DIR}/integration/pytorch_validation.py)
+    set_tests_properties(PyTorchValidation PROPERTIES TIMEOUT 120)
+endif()
+
 add_executable(test_memory_pool unit/test_memory_pool.cpp)
 target_link_libraries(test_memory_pool PRIVATE vgre)
 add_test(NAME MemoryPool COMMAND test_memory_pool)
