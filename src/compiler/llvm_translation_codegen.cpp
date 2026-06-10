@@ -16,6 +16,8 @@
 #include <vector>
 #include <cctype>
 #include <unordered_set>
+#include <chrono>
+#include <thread>
 
 #ifndef _WIN32
 #include <sys/wait.h>
@@ -536,37 +538,63 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
 #endif
   (void)kJITFlags;  // used in doTranslate for cache key
 
+  // Run clang with bounded retries on *transient* failures only — fork()
+  // exhaustion (EAGAIN/ENOMEM) or the child being killed by a signal (e.g. the
+  // OOM killer) under heavy parallel load.  A clean non-zero clang exit is a
+  // genuine compile error and is NOT retried.
   int exitCode = 1;
+  const int kMaxClangAttempts = 4;
+  for (int attempt = 0; attempt < kMaxClangAttempts; ++attempt) {
+    bool transient = false;
 #if defined(_WIN32)
-  {
-    std::string cmd = "clang++ -S -emit-llvm -O3 -march=native -fno-math-errno"
-                      " -fno-trapping-math -Xclang -I\"" + includePath + "\" \""
-                      + tmpCpp + "\" -o \"" + tmpIR + "\" > \"" + logFile + "\" 2>&1";
-    int st = std::system(cmd.c_str());
-    exitCode = st;
-  }
+    {
+      std::string cmd = "clang++ -S -emit-llvm -O3 -march=native -fno-math-errno"
+                        " -fno-trapping-math -Xclang -I\"" + includePath + "\" \""
+                        + tmpCpp + "\" -o \"" + tmpIR + "\" > \"" + logFile + "\" 2>&1";
+      int st = std::system(cmd.c_str());
+      exitCode = st;
+      transient = (st == -1);  // command interpreter could not be started
+    }
 #else
-  {
-    pid_t pid = fork();
-    if (pid == 0) {
-      FILE* lf = std::fopen(logFile.c_str(), "w");
-      if (lf) { int lfd = fileno(lf); dup2(lfd, STDOUT_FILENO); dup2(lfd, STDERR_FILENO); }
-      const char* argv[] = {
-        "clang++", "-S", "-emit-llvm",
-        "-O3", "-march=native", "-fno-math-errno", "-fno-trapping-math",
-        "-fvisibility=default",
-        "-I", includePath.c_str(),
-        tmpCpp.c_str(), "-o", tmpIR.c_str(),
-        nullptr
-      };
-      execvp("clang++", const_cast<char* const*>(argv));
-      std::_Exit(127);
-    } else if (pid > 0) {
-      int wst = 0; waitpid(pid, &wst, 0);
-      exitCode = WIFEXITED(wst) ? WEXITSTATUS(wst) : 1;
+    {
+      pid_t pid = fork();
+      if (pid == 0) {
+        FILE* lf = std::fopen(logFile.c_str(), "w");
+        if (lf) { int lfd = fileno(lf); dup2(lfd, STDOUT_FILENO); dup2(lfd, STDERR_FILENO); }
+        const char* argv[] = {
+          "clang++", "-S", "-emit-llvm",
+          "-O3", "-march=native", "-fno-math-errno", "-fno-trapping-math",
+          "-fvisibility=default",
+          "-I", includePath.c_str(),
+          tmpCpp.c_str(), "-o", tmpIR.c_str(),
+          nullptr
+        };
+        execvp("clang++", const_cast<char* const*>(argv));
+        std::_Exit(127);
+      } else if (pid > 0) {
+        int wst = 0; waitpid(pid, &wst, 0);
+        if (WIFEXITED(wst)) {
+          exitCode = WEXITSTATUS(wst);  // clang ran; exit code is authoritative
+        } else {
+          exitCode = 1;                 // killed by signal — transient
+          transient = true;
+        }
+      } else {
+        exitCode = 1;                   // fork() failed — transient
+        transient = true;
+      }
+    }
+#endif
+    if (exitCode == 0 || !transient) break;  // success or a real compile error
+    if (attempt + 1 < kMaxClangAttempts) {
+      VGRE_LOG_WARN("LLVMTranslationEngine",
+                    "clang compile transient failure (attempt " +
+                    std::to_string(attempt + 1) + "/" +
+                    std::to_string(kMaxClangAttempts) + ") for " + kernelName +
+                    " — retrying after backoff");
+      std::this_thread::sleep_for(std::chrono::milliseconds(50 * (attempt + 1)));
     }
   }
-#endif
 
   if (exitCode != 0) {
     std::ifstream lfs(logFile);
