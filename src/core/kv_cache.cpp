@@ -107,5 +107,77 @@ void pagedAttention(const float* q, int head, SeqId seq,
         for (int i = 0; i < d; ++i) out[i] /= runSum;
 }
 
+// ── Continuous-batching scheduler ────────────────────────────────────────────
+
+ContinuousBatchScheduler::ContinuousBatchScheduler(KVCacheManager& kv, int maxBatch)
+    : kv_(kv), maxBatch_(maxBatch < 1 ? 1 : maxBatch) {}
+
+void ContinuousBatchScheduler::addRequest(SeqId id, int promptLen, int maxNewTokens) {
+    Request r;
+    r.id = id; r.promptLen = promptLen; r.maxNewTokens = maxNewTokens;
+    r.state = Request::WAITING;
+    waiting_.push_back(r);
+}
+
+int ContinuousBatchScheduler::blocksFor(int tokens) const {
+    const int bs = kv_.blockSize();
+    return (tokens + bs - 1) / bs;
+}
+
+bool ContinuousBatchScheduler::appendOneToken(SeqId id) {
+    // Token content is abstracted: append a zeroed K/V token (real serving would
+    // append the layer's K/V). Returns false if the pool is exhausted.
+    static thread_local std::vector<float> zero;
+    const int stride = kv_.numHeads() * kv_.headDim();
+    if (static_cast<int>(zero.size()) < stride) zero.assign(stride, 0.0f);
+    return kv_.appendToken(id, zero.data(), zero.data());
+}
+
+int ContinuousBatchScheduler::step() {
+    // 1. Retire finished running requests; reclaim their KV blocks.
+    {
+        std::vector<Request> stillRunning;
+        stillRunning.reserve(running_.size());
+        for (auto& r : running_) {
+            if (r.generated >= r.maxNewTokens) {
+                r.state = Request::FINISHED;
+                kv_.freeSequence(r.id);   // return blocks to the pool
+                ++finished_;
+            } else {
+                stillRunning.push_back(r);
+            }
+        }
+        running_.swap(stillRunning);
+    }
+
+    // 2. Admit waiting requests while batch slots AND KV blocks allow. Prefill
+    //    the prompt (block reservation needs ceil((promptLen+maxNew)/blockSize)
+    //    in the worst case, but we admit on the prompt cost and let decode grow).
+    {
+        std::vector<Request> stillWaiting;
+        for (auto& r : waiting_) {
+            if (static_cast<int>(running_.size()) < maxBatch_ &&
+                kv_.freeBlocks() >= blocksFor(r.promptLen > 0 ? r.promptLen : 1)) {
+                // Prefill the prompt tokens into the KV cache.
+                bool ok = true;
+                for (int t = 0; t < r.promptLen && ok; ++t) ok = appendOneToken(r.id);
+                if (ok) { r.state = Request::RUNNING; running_.push_back(r); }
+                else    { kv_.freeSequence(r.id); stillWaiting.push_back(r); } // roll back, retry later
+            } else {
+                stillWaiting.push_back(r);
+            }
+        }
+        waiting_.swap(stillWaiting);
+    }
+
+    // 3. Advance each running request by one decode token.
+    for (auto& r : running_) {
+        if (appendOneToken(r.id)) ++r.generated;
+        // If the pool is momentarily exhausted the request simply does not
+        // advance this step; it will progress once a finished request frees space.
+    }
+    return static_cast<int>(running_.size());
+}
+
 } // namespace core
 } // namespace vgre

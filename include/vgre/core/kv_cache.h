@@ -70,6 +70,51 @@ void pagedAttention(const float* q, int head, SeqId seq,
                     const KVCacheManager& kv, float scale, float* out,
                     int causalUpTo = -1);
 
+// ── Continuous-batching request scheduler (Track 22) ─────────────────────────
+// vLLM-style in-flight batching over the paged KV-cache: requests of different
+// lengths are admitted into a running batch as capacity frees up, advanced one
+// token per scheduler step, and retired (their KV blocks reclaimed) the moment
+// they finish — without waiting for the whole batch. New requests submitted
+// mid-flight join at the next step.
+struct Request {
+    SeqId id = 0;
+    int promptLen = 0;       // tokens prefilled on admission
+    int maxNewTokens = 0;    // tokens to generate
+    int generated = 0;       // generated so far
+    enum State { WAITING, RUNNING, FINISHED } state = WAITING;
+};
+
+class ContinuousBatchScheduler {
+public:
+    ContinuousBatchScheduler(KVCacheManager& kv, int maxBatch);
+
+    // Submit a request (queued WAITING). Token *content* is abstracted: the
+    // scheduler models lifecycle + KV growth, appending zeroed K/V per token.
+    void addRequest(SeqId id, int promptLen, int maxNewTokens);
+
+    // Run one scheduling step:
+    //   1. retire finished running requests (reclaim their KV blocks),
+    //   2. admit waiting requests while batch slots AND KV blocks allow (prefill),
+    //   3. advance each running request by one decode token (append to its KV).
+    // Returns the number of requests still running after the step.
+    int step();
+
+    bool allDone() const { return waiting_.empty() && running_.empty(); }
+    int runningCount()  const { return static_cast<int>(running_.size()); }
+    int waitingCount()  const { return static_cast<int>(waiting_.size()); }
+    int finishedCount() const { return finished_; }
+
+private:
+    int blocksFor(int tokens) const;        // ceil(tokens / blockSize)
+    bool appendOneToken(SeqId id);          // append a zeroed K/V token to a seq
+
+    KVCacheManager& kv_;
+    int maxBatch_;
+    std::vector<Request> waiting_;
+    std::vector<Request> running_;
+    int finished_ = 0;
+};
+
 } // namespace core
 } // namespace vgre
 
