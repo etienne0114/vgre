@@ -7,6 +7,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/metrics_registry.h"
+#include "vgre/common/config_registry.h"
 #include "vgre/compiler/kernel_parser.h"
 #include "vgre/compiler/llvm_translation_engine.h"
 #include "vgre/core/graph_manager.h"
@@ -61,6 +62,10 @@ VGREResult RuntimeEngine::initialize() {
 #endif
 
   VGRE_LOG_INFO("RuntimeEngine", "Initializing VGRE Runtime Engine...");
+
+  // Validate VGRE_* configuration once and log the effective settings (Track 5):
+  // bad values are reported with their allowed range; unknown VGRE_* vars warn.
+  vgre::common::ConfigRegistry::instance().validateAndLog();
 
   // Force StreamDepTracker construction BEFORE Scheduler.
   // Meyers singletons are destroyed in reverse construction order.  Workers
