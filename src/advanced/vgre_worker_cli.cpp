@@ -200,6 +200,11 @@ int main(int argc, char** argv) {
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
+        } else if (arg == "--version" || arg == "-v") {
+            // Build identity (version, git hash, SIMD, features) — for
+            // `docker run <image> --version` and ops triage.
+            std::cout << vgre_get_build_info() << "\n";
+            return 0;
         } else if (!arg.empty() && arg[0] == '-') {
             std::cerr << "[Worker] Unknown option: " << arg << "\n"
                       << "         Run: vgre-worker --help\n";

@@ -34,7 +34,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 16 | VMM IPC handle (cuMemRetainAllocationHandle) | P1 | §2.3–2.5 | ✅ Done |
 | 17 | FP8 (E4M3/E5M2) + FP4 quantized compute | P1 | §5.1 | ✅ Core done |
 | 18 | Paged Attention + KV-cache manager | P1 | §5.2 | ✅ Done |
-| 19 | Versioned multi-arch Docker images | P1 | §4.3 | 🔴 Not started |
+| 19 | Versioned multi-arch Docker images | P1 | §4.3 | 🟡 Artifacts ready |
 | 20 | Minimal build profile + footprint report | P2 | §3.3 | 🔴 Not started |
 | 21 | macOS affinity (P/E cores) + documented boundary | P2 | §3.2 | 🔴 Not started |
 | 22 | Continuous batching request scheduler | P2 | §5.3 | 🔴 Not started |
@@ -245,10 +245,24 @@ reference to 1.2e-7 (full and causal), the free list tracks alloc/free, and pool
 exhaustion returns false. Continuous batching on top of this is Track 22.
 **Acceptance met**: paged == contiguous; block table grows/frees correctly.
 
-### Track 19 — Versioned multi-arch Docker images
-**Files**: `Dockerfile`, CI release job. SemVer tags; amd64+arm64 images to GHCR
-pinned by digest; image runs the smoke test.
-**Acceptance**: `docker run ghcr.io/.../vgre:<tag> vgre --version` works on both arches.
+### Track 19 — Versioned multi-arch Docker images — 🟡 artifacts ready (2026-06-10)
+**Files**: `Dockerfile`, `.dockerignore`, `.github/workflows/release.yml`,
+`vgre-worker --version`.
+- Multi-stage `Dockerfile`: a builder compiles the runtime + worker (Release,
+  LLVM-18) and `cmake --install`s to `/opt/vgre`; a slim runtime stage carries
+  only `lib/`, `bin/`, and the runtime deps (clang/llvm for the JIT, OpenMP,
+  BLAS, SQLite), runs as a non-root user, OCI version/revision labels, and a
+  HEALTHCHECK of `vgre-worker --version`.
+- `release.yml`: on a `vX.Y.Z` tag, buildx builds **linux/amd64 + linux/arm64**
+  and pushes to GHCR with SemVer tags + OCI labels, then prints the digest to pin.
+- Added `vgre-worker --version` (prints the build-info JSON) — verified locally.
+**Verified locally**: `cmake --install` produces exactly the `/opt/vgre/{lib,bin}`
+layout the runtime stage copies, and the installed worker `--version` runs with
+`LD_LIBRARY_PATH=lib`. The full multi-arch image build/push runs in CI (buildx is
+not available on this host), so this is 🟡 like Track 1 until the first tagged
+release is green.
+**Acceptance (pending CI)**: `docker run ghcr.io/.../vgre:<tag> --version` works on
+both arches.
 
 ---
 
