@@ -31,15 +31,15 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 **cuDNN Coverage**: Major legacy ops + backward/training + Backend API attention routing implemented  
 **NCCL Coverage**: ~95% (all major collectives + p2p)  
 **PTX ISA Coverage**: ~95% (~110+ of ~115 commonly-used instructions)  
-**Critical Issues**: 0  
-**Cross-Platform**: Linux, Windows, macOS all functional
+**Critical Issues**: 0 known on the verified (Linux) platform  
+**Cross-Platform**: Linux **verified**; Windows/macOS **code-complete but unverified** (no CI yet — see Phase 2, Track 1)
 
-### Platform Support ✅
-- ✅ **Linux**: Full support (all core features + NUMA + Linux Keyring)
-- ✅ **Windows**: Full support (all core features + Credential Manager + shared memory)
-- ✅ **macOS**: Full support (all core features + Keychain)
+### Platform Support
+- ✅ **Linux**: Verified — built and full test suite passing on x86-64 (NUMA + Linux Keyring).
+- ⚠️ **Windows**: Code-complete (Credential Manager, shared memory, Winsock paths are written and compile-guarded) but **not yet built or tested in CI**. Treat as experimental until the cross-platform CI matrix (Phase 2, Track 1) is green.
+- ⚠️ **macOS**: Code-complete (Keychain, kqueue paths) but **not yet built or tested in CI**; NUMA affinity is a no-op approximation on macOS. Experimental until CI-verified.
 
-See [Cross-Platform Status](docs/CROSS_PLATFORM_STATUS.md) for detailed platform analysis.
+> The earlier "all functional / validated across all three OSes" claim was aspirational — the build and tests have only ever run on Linux. Bringing up the GitHub Actions matrix (Linux/Windows/macOS) is the top production gate. See `docs/implementationPlan.md` Track 1 and `docs/missingFeatures.md` §3.1.
 
 ### What Works ✅
 - **CUDA Runtime API** (~101+ functions): memory alloc/free (`cudaMalloc`, `cudaFree`, `cudaMallocManaged`, `cudaMallocAsync`, `cudaMallocFromPoolAsync`, `cudaMallocPitch`, `cudaMallocArray`, `cudaMalloc3DArray`, `cudaMalloc3D`), stream create/destroy/query/sync/wait-event/add-callback/launch-host-func, events (create/record/query/sync/destroy/elapsed-time), error introspection (`cudaGetErrorName`/`GetErrorString`), symbol copies (`cudaMemcpyToSymbol`/`FromSymbol` sync+async), array allocation (1D/2D/3D via `TextureManager`), pointer introspection (`cudaPointerGetAttributes`), device queries, peer access, kernel launch (`cudaLaunchKernel`, `cudaLaunchCooperativeKernel`, `cudaLaunchKernelExC`), graph APIs (capture, instantiate, launch, clone, destroy, exec update, all 11 node types including kernel, memset, host, child, empty, event-record/wait, mem-alloc/free), texture/surface objects (`cudaCreateTextureObject`, `cudaDestroyTextureObject`, `cudaCreateSurfaceObject`, `cudaDestroySurfaceObject`, legacy `cudaBindTexture`/`cudaBindTextureToArray`/`cudaBindTexture2D`/`cudaBindSurfaceToArray`), external memory/semaphore (`cudaImportExternalMemory`, `cudaDestroyExternalMemory`), stream capture introspection (`cudaStreamIsCapturing`, `cudaStreamGetCaptureInfo_v2`), device/function attributes (`cudaFuncGetAttributes`, `cudaDeviceGetLimit`/`SetLimit`, `cudaDeviceGetCacheConfig`/`SetCacheConfig`), memset 2D/3D/Async variants.

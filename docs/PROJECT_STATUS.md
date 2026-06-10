@@ -1,8 +1,17 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-06-07 (Deployment Hardening, Zero Warnings, Auto-Feature Detection)  
-**Build Status**: ✅ 192/192 tests passing  
-**Production Readiness**: **CI/CD-Ready & Core-Emulation Stable** (Full numerical path fidelity; no stubs, no mock values, no hardcoded heuristics; zero compiler warnings with `-Werror`)
+**Last Updated**: 2026-06-10 (Honest re-baseline: Phase-2 plan, cross-platform reality)  
+**Build Status (Linux)**: ✅ full `ctest` suite passing (198 tests) on x86-64 Linux  
+**Production Readiness**: **NOT YET — core-emulation stable on Linux, but five P0 gates remain** (no CI for Windows/macOS, no live `/metrics`, no health probes, no config validation, parallel-test flakiness). See `docs/implementationPlan.md` Phase 2 (Tracks 1–6).
+
+> **Correction (2026-06-10):** earlier revisions of this file claimed
+> "CI/CD-Ready", "validated across Linux, Windows, macOS", and "zero stubs".
+> That was inaccurate. The truth: the build and tests run on **Linux only**;
+> Windows/macOS code is compile-guarded but **unverified** (there is no CI). A
+> handful of compute paths are deliberately **simplified** (Flash Attention
+> recomputes K/V, NCCL ring uses a barrier-per-round model, WMMA is a flat
+> dot-product — see `docs/missingFeatures.md` §1). This file now tracks the real
+> path to production rather than asserting it.
 
 VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime designed to execute unmodified CUDA, cuBLAS, cuDNN, cuSPARSE, cuSolver, cuRAND, and NCCL workloads on standard x86-64 and ARM64 CPU architectures. It intercepts GPU API calls at load time and runs them on host hardware using an LLVM-18 JIT compilation pipeline and a thread-safe parallel execution model.
 
@@ -17,10 +26,23 @@ VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime desi
 
 ## 1. Core Platform Verification
 
-Across Linux, Windows (10+ Build 1803+), and macOS, VGRE has been validated using property-based exploration, race-condition analysis, and static-destruction verification:
-- **100% Core Passes**: All 192 regression, integration, and platform-specific tests pass cleanly.
-- **Zero Simulation/Zero Stubs**: Every compute path runs real CPU math (via AVX/ARM64 vector instructions and OpenBLAS/LAPACK backends), ensuring bit-identical outputs to real hardware.
-- **Teardown Stability**: Thread lifecycles, socket listeners, and memory heaps are managed deterministically. Static destruction deadlocks have been fully eliminated.
+**Verified on Linux (x86-64) only.** The full `ctest` suite (198 tests) passes
+on Linux, exercised with property-based exploration, ThreadSanitizer race
+analysis, and static-destruction verification. **Windows and macOS are not yet
+verified** — their code paths are compile-guarded but have never been built or
+run in CI (Phase 2, Track 1 brings up the matrix).
+
+- **Linux core passes**: full regression + integration + platform suite green on x86-64.
+- **Mostly real compute, with documented exceptions**: nearly every path runs real
+  CPU math (AVX/ARM64 SIMD + OpenBLAS/LAPACK). The exceptions are the simplified
+  paths in `docs/missingFeatures.md` §1 (Flash Attention K/V recompute, NCCL
+  barrier-per-round ring, WMMA flat dot-product, etc.) and the documented
+  hardware-boundary proxies (CUPTI PMU counters).
+- **Teardown stability**: thread lifecycles, socket listeners, and memory heaps are
+  managed deterministically; the JIT-worker static-destruction crash is fixed.
+- **Known test caveat**: under `ctest -j`, heavy clang/JIT tests can intermittently
+  time out from CPU oversubscription (all pass standalone). Phase 2, Track 6
+  serializes them so CI is deterministic.
 
 ---
 
