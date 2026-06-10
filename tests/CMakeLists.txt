@@ -520,6 +520,12 @@ add_executable(test_cusparse api/test_cusparse.cpp)
 target_link_libraries(test_cusparse PRIVATE vgre_cudart)
 add_test(NAME CuSPARSEFunctional COMMAND test_cusparse)
 
+add_executable(test_sparse_view api/test_sparse_view.cpp)
+target_link_libraries(test_sparse_view PRIVATE vgre)
+target_include_directories(test_sparse_view PRIVATE ${CMAKE_SOURCE_DIR}/src/api/cusparse)
+add_test(NAME SparseViewConversions COMMAND test_sparse_view)
+set_tests_properties(SparseViewConversions PROPERTIES TIMEOUT 30)
+
 add_executable(test_cublaslt api/test_cublaslt.cpp)
 target_link_libraries(test_cublaslt PRIVATE vgre_cudart)
 add_test(NAME CuBLASLtFunctional COMMAND test_cublaslt)
