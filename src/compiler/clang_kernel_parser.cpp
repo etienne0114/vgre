@@ -14,12 +14,14 @@
 #  pragma warning(pop)
 #endif
 #include <cstdio>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <mutex>
 #include <regex>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -542,65 +544,88 @@ std::string ClangKernelParser::runClangAstDump(const std::string& source) {
     std::string result;
     int status = -1;
 
+    // Run the clang AST dump with bounded retries on *transient* failures only
+    // (pipe()/fork() resource exhaustion, or the child killed by a signal under
+    // heavy parallel load).  A clean non-zero clang exit is a genuine parse error
+    // and is not retried.
+    const int kMaxAstAttempts = 4;
+    for (int attempt = 0; attempt < kMaxAstAttempts; ++attempt) {
+      result.clear();
+      status = -1;
+      bool transient = false;
 #if defined(_WIN32)
-    {
-      std::string cmd = "\"" + clangPath + "\" -Xclang -ast-dump=json -fsyntax-only -xc++ -w"
-                        " -fno-delayed-template-parsing -I\"" + includePath + "\" \""
-                        + tempPath + "\" 2>&1";
-      char buffer[8192];
-      FILE* pipe = _popen(cmd.c_str(), "r");
-      if (pipe) {
-          result.reserve(65536);
-          while (fgets(buffer, sizeof(buffer), pipe)) result += buffer;
-          status = _pclose(pipe);
-      } else {
-          VGRE_LOG_ERROR("ClangKernelParser", "popen failed");
-          return "";
+      {
+        std::string cmd = "\"" + clangPath + "\" -Xclang -ast-dump=json -fsyntax-only -xc++ -w"
+                          " -fno-delayed-template-parsing -I\"" + includePath + "\" \""
+                          + tempPath + "\" 2>&1";
+        char buffer[8192];
+        FILE* pipe = _popen(cmd.c_str(), "r");
+        if (pipe) {
+            result.reserve(65536);
+            while (fgets(buffer, sizeof(buffer), pipe)) result += buffer;
+            status = _pclose(pipe);
+        } else {
+            transient = true;  // command interpreter could not be started
+        }
       }
-    }
 #else
-    {
-      // Pipe: parent reads child's stdout+stderr.
-      int pipefds[2];
-      if (::pipe(pipefds) != 0) {
-          VGRE_LOG_ERROR("ClangKernelParser", "pipe() failed");
-          return "";
+      {
+        // Pipe: parent reads child's stdout+stderr.
+        int pipefds[2];
+        if (::pipe(pipefds) != 0) {
+            transient = true;  // fd exhaustion
+        } else {
+          pid_t pid = fork();
+          if (pid == 0) {
+              // Child: redirect stdout+stderr into write end of pipe.
+              close(pipefds[0]);
+              dup2(pipefds[1], STDOUT_FILENO);
+              dup2(pipefds[1], STDERR_FILENO);
+              close(pipefds[1]);
+              const char* argv[] = {
+                clangPath.c_str(),
+                "-Xclang", "-ast-dump=json",
+                "-fsyntax-only", "-xc++", "-w",
+                "-fno-delayed-template-parsing",
+                "-I", includePath.c_str(),
+                tempPath.c_str(),
+                nullptr
+              };
+              execvp(clangPath.c_str(), const_cast<char* const*>(argv));
+              std::_Exit(127);
+          } else if (pid > 0) {
+              close(pipefds[1]);
+              result.reserve(65536);
+              char buffer[8192];
+              ssize_t n;
+              while ((n = read(pipefds[0], buffer, sizeof(buffer))) > 0)
+                  result.append(buffer, static_cast<size_t>(n));
+              close(pipefds[0]);
+              int wstatus = 0;
+              waitpid(pid, &wstatus, 0);
+              if (WIFEXITED(wstatus)) {
+                  status = WEXITSTATUS(wstatus);  // clang ran; exit code authoritative
+              } else {
+                  status = 1;                     // killed by signal — transient
+                  transient = true;
+              }
+          } else {
+              close(pipefds[0]);
+              close(pipefds[1]);
+              transient = true;  // fork() failed
+          }
+        }
       }
-      pid_t pid = fork();
-      if (pid == 0) {
-          // Child: redirect stdout+stderr into write end of pipe.
-          close(pipefds[0]);
-          dup2(pipefds[1], STDOUT_FILENO);
-          dup2(pipefds[1], STDERR_FILENO);
-          close(pipefds[1]);
-          const char* argv[] = {
-            clangPath.c_str(),
-            "-Xclang", "-ast-dump=json",
-            "-fsyntax-only", "-xc++", "-w",
-            "-fno-delayed-template-parsing",
-            "-I", includePath.c_str(),
-            tempPath.c_str(),
-            nullptr
-          };
-          execvp(clangPath.c_str(), const_cast<char* const*>(argv));
-          std::_Exit(127);
-      } else if (pid > 0) {
-          close(pipefds[1]);
-          result.reserve(65536);
-          char buffer[8192];
-          ssize_t n;
-          while ((n = read(pipefds[0], buffer, sizeof(buffer))) > 0)
-              result.append(buffer, static_cast<size_t>(n));
-          close(pipefds[0]);
-          int wstatus = 0;
-          waitpid(pid, &wstatus, 0);
-          status = WIFEXITED(wstatus) ? WEXITSTATUS(wstatus) : 1;
-      } else {
-          VGRE_LOG_ERROR("ClangKernelParser", "fork() failed");
-          return "";
+#endif
+      if (!transient) break;  // got a real result (success or genuine parse error)
+      if (attempt + 1 < kMaxAstAttempts) {
+          VGRE_LOG_WARN("ClangKernelParser",
+              "clang AST dump transient failure (attempt " +
+              std::to_string(attempt + 1) + "/" + std::to_string(kMaxAstAttempts) +
+              ") — retrying after backoff");
+          std::this_thread::sleep_for(std::chrono::milliseconds(50 * (attempt + 1)));
       }
     }
-#endif
 
     if (status != 0) {
         VGRE_LOG_ERROR("ClangKernelParser",
