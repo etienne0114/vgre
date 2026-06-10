@@ -300,6 +300,27 @@ MemoryManager &RuntimeEngine::currentMemoryManager() {
   return *deviceMemManagers_[static_cast<size_t>(id)];
 }
 
+MemoryManager &RuntimeEngine::memoryManagerForHandle(MemoryHandle handle) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!initialized_ || deviceMemManagers_.empty()) {
+    throw VGREException(VGREResult::ERR_NOT_INITIALIZED,
+                        "Runtime engine is not initialized");
+  }
+  // Fast path: the current device usually owns the pointer.
+  DeviceId cur = tlCurrentDeviceId_;
+  if (cur >= 0 && cur < static_cast<DeviceId>(deviceMemManagers_.size()) &&
+      deviceMemManagers_[static_cast<size_t>(cur)]->isValidHandle(handle))
+    return *deviceMemManagers_[static_cast<size_t>(cur)];
+  // Otherwise find whichever device allocated it (multi-device: a pointer made
+  // on device A may be freed/copied while device B is current).
+  for (auto &mm : deviceMemManagers_)
+    if (mm->isValidHandle(handle))
+      return *mm;
+  // No device owns it — return the current manager so the operation reports a
+  // consistent ERR_INVALID_VALUE rather than crashing.
+  return currentMemoryManager();
+}
+
 VGREResult RuntimeEngine::getDeviceProperties(DeviceId id,
                                               DeviceProperties &outProps) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);

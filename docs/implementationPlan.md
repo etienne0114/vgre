@@ -17,7 +17,7 @@ This document tracks every remaining implementation task — real gaps, security
 | E | cuDNN backend API — full coverage | ✅ Done |
 | F | Security: token KDF salt + env leak | ✅ Done |
 | G | Windows WSAPoll liveness probe | ✅ Done |
-| H | Multiple virtual GPU devices | 🔴 Not started |
+| H | Multiple virtual GPU devices | ✅ Done |
 | I | Flash Attention GQA | ✅ Done |
 | J | NVTX → Perfetto trace export | ✅ Done |
 | K | Dynamic CUDA Graph node fusion | ✅ Done |

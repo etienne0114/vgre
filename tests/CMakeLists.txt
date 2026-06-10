@@ -63,6 +63,10 @@ add_test(NAME GraphCAPIIntegration COMMAND test_graph_c_api)
 add_executable(test_multi_device integration/test_multi_device.cpp)
 target_link_libraries(test_multi_device PRIVATE vgre)
 add_test(NAME MultiDeviceIntegration COMMAND test_multi_device)
+# Force ≥2 virtual devices so the multi-device path is actually exercised even on
+# single-NUMA-node CI hosts (otherwise the test SKIPs).
+set_tests_properties(MultiDeviceIntegration PROPERTIES
+    ENVIRONMENT "VGRE_VIRTUAL_DEVICE_COUNT=2")
 
 add_executable(test_multi_device_cooperative_comprehensive integration/test_multi_device_cooperative_comprehensive.cpp)
 target_link_libraries(test_multi_device_cooperative_comprehensive PRIVATE vgre)

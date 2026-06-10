@@ -333,6 +333,13 @@ public:
 
   // Access sub-systems
   MemoryManager &getMemoryManager();
+  // Returns the MemoryManager of the device that actually owns `handle`,
+  // regardless of the calling thread's current device.  CUDA pointer operations
+  // (cudaFree, cudaMemcpy, …) work on a pointer no matter which device is
+  // current, so they must resolve the owning device rather than assuming the
+  // current one.  Falls back to the current device's manager if no device owns
+  // the handle (so the caller still gets a well-defined error).
+  MemoryManager &memoryManagerForHandle(MemoryHandle handle);
   Scheduler &getScheduler();
   VirtualGPUDevice &getDevice();
   VirtualGPUDevice &getDevice(DeviceId id);

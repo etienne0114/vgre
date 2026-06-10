@@ -75,8 +75,9 @@ cudaError_t CUDAInterceptor::mallocManaged(void **devPtr, size_t size,
 cudaError_t CUDAInterceptor::memAdvise(const void *devPtr, size_t count, int advice, int device) {
   if (!initialized_ || !core::RuntimeEngine::instance().isInitialized())
     return cudaErrorNotInitialized;
-  auto r = core::RuntimeEngine::instance().getMemoryManager().memAdvise(
-      devPtr, count, advice, device);
+  auto r = core::RuntimeEngine::instance()
+               .memoryManagerForHandle(const_cast<void *>(devPtr))
+               .memAdvise(devPtr, count, advice, device);
   return convertResult(r);
 }
 
@@ -84,8 +85,9 @@ cudaError_t CUDAInterceptor::memPrefetchAsync(const void *devPtr, size_t count, 
   if (!initialized_ || !core::RuntimeEngine::instance().isInitialized())
     return cudaErrorNotInitialized;
   (void)stream; // CPU page fault prefetch is immediate.
-  auto r = core::RuntimeEngine::instance().getMemoryManager().memPrefetchAsync(
-      devPtr, count, dstDevice);
+  auto r = core::RuntimeEngine::instance()
+               .memoryManagerForHandle(const_cast<void *>(devPtr))
+               .memPrefetchAsync(devPtr, count, dstDevice);
   return convertResult(r);
 }
 
@@ -98,7 +100,9 @@ cudaError_t CUDAInterceptor::free(void *devPtr) {
   if (!devPtr)
     return cudaSuccess; // cudaFree(NULL) is valid
 
-  auto r = core::RuntimeEngine::instance().getMemoryManager().free(devPtr);
+  // Resolve the owning device: cudaFree must work regardless of which device is
+  // current (the pointer may have been allocated under a different device).
+  auto r = core::RuntimeEngine::instance().memoryManagerForHandle(devPtr).free(devPtr);
   cudaError_t err = convertResult(r);
   return err;
 }
@@ -116,21 +120,27 @@ cudaError_t CUDAInterceptor::memcpy(void *dst, const void *src, size_t count,
     return cudaErrorInvalidValue;
   }
 
-  auto &mm = core::RuntimeEngine::instance().getMemoryManager();
+  // Route to the MemoryManager owning the device-side pointer so copies work
+  // regardless of the current device (multi-device correctness).
+  auto &eng = core::RuntimeEngine::instance();
   VGREResult r;
 
   switch (kind) {
   case cudaMemcpyHostToDevice:
-    r = mm.copyHostToDevice(const_cast<void *>(static_cast<const void *>(dst)),
-                            src, count);
+    r = eng.memoryManagerForHandle(dst).copyHostToDevice(
+        const_cast<void *>(static_cast<const void *>(dst)), src, count);
     break;
   case cudaMemcpyDeviceToHost:
-    r = mm.copyDeviceToHost(
-        dst, const_cast<MemoryHandle>(static_cast<const void *>(src)), count);
+    r = eng.memoryManagerForHandle(const_cast<MemoryHandle>(src))
+            .copyDeviceToHost(
+                dst, const_cast<MemoryHandle>(static_cast<const void *>(src)),
+                count);
     break;
   case cudaMemcpyDeviceToDevice:
-    r = mm.copyDeviceToDevice(
-        dst, const_cast<MemoryHandle>(static_cast<const void *>(src)), count);
+    r = eng.memoryManagerForHandle(const_cast<MemoryHandle>(src))
+            .copyDeviceToDevice(
+                dst, const_cast<MemoryHandle>(static_cast<const void *>(src)),
+                count);
     break;
   case cudaMemcpyHostToHost:
     ::memcpy(dst, src, count);
@@ -443,7 +453,8 @@ cudaError_t CUDAInterceptor::memset(void *devPtr, int value, size_t count) {
   if (!devPtr || count == 0)
     return cudaErrorInvalidValue;
 
-  auto &mm = core::RuntimeEngine::instance().getMemoryManager();
+  // Resolve the owning device so memset works regardless of current device.
+  auto &mm = core::RuntimeEngine::instance().memoryManagerForHandle(devPtr);
   if (!mm.isValidHandle(devPtr))
     return cudaErrorInvalidValue;
 
