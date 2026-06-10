@@ -2,7 +2,7 @@
 
 **A CUDA emulation runtime** that allows CUDA applications to run on CPU without a physical GPU.
 
-> **PROJECT STATUS**: CI-Ready — **192/192 tests passing**. Full CUDA, BLAS, DNN, FFT/RNG/solver/sparse, NCCL, profiling, and distributed-cluster paths are implemented. Zero compiler warnings; warnings-as-errors enabled. Auto-detected SIMD, RDMA, TPM2, and libsecret features active at build time. See `docs/missingFeatures.md` for the remaining hardware-level architectural boundaries.
+> **PROJECT STATUS**: **Linux-verified, not yet production-ready.** The full `ctest` suite passes on **x86-64 Linux**; CUDA, BLAS, DNN, FFT/RNG/solver/sparse, NCCL, profiling, and distributed-cluster paths are implemented with zero compiler warnings (warnings-as-errors enabled). A CI matrix (Linux/macOS/Windows) was just added — **Windows/macOS are code-complete but unverified** until that CI is green. Several P0 production gates remain (live metrics, health probes, config validation). See `docs/implementationPlan.md` (Phase 2) for the path to production and `docs/missingFeatures.md` for known simplified paths and hardware boundaries.
 
 ## What is VGRE?
 
@@ -24,7 +24,7 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 
 ## Current Status
 
-**Core Stability**: ✅ 192/192 tests passing, zero warnings, zero critical issues  
+**Core Stability**: ✅ full `ctest` suite passing on x86-64 Linux, zero warnings, zero critical issues (Linux)  
 **CUDA Runtime API Coverage**: ~95% (~101+ of ~110 commonly-used functions)  
 **CUDA Driver API Coverage**: ~95% (~56+ of ~60 commonly-used functions)  
 **cuBLAS Coverage**: Level-1/2/3 real + complex C/Z + Hermitian core API implemented  
@@ -80,7 +80,7 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 - ✅ **`g_current_ctx` cross-TU bug fixed** — `static thread_local` in a shared header gave every translation unit its own independent per-thread context pointer; `cuCtxSetCurrent` in one TU was invisible to `cuCtxGetCurrent` in another. Fixed with `extern thread_local` + single canonical definition.
 
 ### Recent Improvements (2026-05-30) 🎉
-- ✅ **Heuristic Elimination (Track 9/10)** — Dynamic bandwidth calibration (Z-score, DDR/HBM detection), CPUID-based FLOPS/IPC detection, powers-of-2 thread search, and problem-size-based algorithm selection replace all prior hardcoded magic numbers. **192/192 tests passing**.
+- ✅ **Heuristic Elimination (Track 9/10)** — Dynamic bandwidth calibration (Z-score, DDR/HBM detection), CPUID-based FLOPS/IPC detection, powers-of-2 thread search, and problem-size-based algorithm selection replace all prior hardcoded magic numbers. the full Linux test suite passing.
 - ✅ **Advanced Math Hardening (Track 8)** — Zero-copy sparse matrix views (CSR↔CSC, CSR→BSR), cache-oblivious matmul/transpose/conv2D, mixed-precision (FP16/BF16/FP8/INT8), block-sparse SIMD (AVX-512/AVX2), and Intel AMX tensor core emulation, all fully integrated.
 - ✅ **TLB & SPSC Hardening (Track 7)** — 3-level TLB cache (L1 thread-local 256×8-way AVX2, L2 thread-local 1024×16-way, shared sharded 16×256×4-way), SPSC ring per-stream fast path, and NUMA-aware thread affinity registry.
 - ✅ **OpenMP Parallelization** — All major O(n²) and O(n³) CPU compute paths use conditional `#pragma omp parallel for`. Shared `include/vgre/common/openmp_helper.h` header.
