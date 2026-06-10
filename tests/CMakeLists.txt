@@ -777,6 +777,12 @@ target_link_libraries(test_graph_dce PRIVATE vgre)
 add_test(NAME GraphDCE COMMAND test_graph_dce)
 set_tests_properties(GraphDCE PROPERTIES TIMEOUT 120)
 
+# Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
+add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
+target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME CurandSkipAhead COMMAND test_curand_skipahead)
+set_tests_properties(CurandSkipAhead PROPERTIES TIMEOUT 30)
+
 add_executable(test_memory_pool unit/test_memory_pool.cpp)
 target_link_libraries(test_memory_pool PRIVATE vgre)
 add_test(NAME MemoryPool COMMAND test_memory_pool)
