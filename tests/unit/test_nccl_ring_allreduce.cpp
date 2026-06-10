@@ -227,6 +227,12 @@ int main() {
     test_allreduce_sum(2,  16);
     test_allreduce_sum(4,  64);
     test_allreduce_sum(8,  32);
+    // Medium buffers (64 KB – 1 MB): now routed to the ring reduce-scatter/
+    // all-gather path (formerly a centralised binary tree). 32768 floats = 128 KB,
+    // 200000 floats ≈ 800 KB.
+    test_allreduce_sum(2,  32768);
+    test_allreduce_sum(4,  32768);
+    test_allreduce_sum(8,  200000);
     // Large buffers: ring path (> 1 MB)
     test_large_buffer(2);
     test_large_buffer(4);

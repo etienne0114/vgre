@@ -6,11 +6,10 @@
 #include <thread>
 
 // Algorithm thresholds (bytes):
-//   ≤ kTreeThreshold : flat barrier (latency-optimal, O(1) sync rounds)
-//   kTreeThreshold – kRingThreshold : binary tree reduce (distributed work, log2(N) rounds)
-//   > kRingThreshold : ring allreduce (bandwidth-optimal for large tensors)
-static constexpr size_t kTreeThreshold = 64ULL  * 1024;        // 64 KB
-static constexpr size_t kRingThreshold = 1024ULL * 1024;       // 1 MB
+//   ≤ kSmallThreshold : flat barrier (latency-optimal, O(1) sync rounds)
+//   > kSmallThreshold : ring reduce-scatter + all-gather (per-rank chunk
+//                       ownership, bandwidth-optimal, no centralised root)
+static constexpr size_t kTreeThreshold = 64ULL * 1024;         // 64 KB
 
 // ── Tensor-Parallel Lock-Free AllReduce ───────────────────────────────────────
 // Called when VGRE_TP_DEGREE is set and all ranks are in the same process.
@@ -100,7 +99,6 @@ static ncclResult_t tp_ring_allreduce(const void* sendbuff, void* recvbuff, size
 extern "C" {
 
 static ncclResult_t ring_allreduce(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm*);
-static ncclResult_t tree_allreduce(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm*);
 
 // Algorithm: ring-buffer barrier with root-reduce
 //   Phase 0: each rank deposits its sendbuf pointer
@@ -141,14 +139,16 @@ ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
     }
 
     // Algorithm selection:
-    //   small  (≤64 KB)   → flat barrier (lowest latency, root does all work)
-    //   medium (64KB-1MB) → binary tree (distributes reduction across log2(N) levels)
-    //   large  (>1 MB)    → ring (bandwidth-optimal, chunk-pipelined)
+    //   small  (≤64 KB)        → flat barrier (lowest latency, root does all work)
+    //   larger (>64 KB)        → ring reduce-scatter + all-gather (each rank owns
+    //                            one chunk; no centralised root, no per-round
+    //                            global barrier on a single accumulator)
+    // The ring (ring_allreduce) is the bandwidth-optimal, per-rank-slice
+    // algorithm; it superseded a centralised binary-tree path that reduced all
+    // data through rank 0's result_buf (correct but serialised on the root).
     size_t bytes = count * nccl_elem_size(datatype);
-    if (c->state->nranks > 1 && bytes > kRingThreshold)
-        return ring_allreduce(sendbuff, recvbuff, count, datatype, op, c);
     if (c->state->nranks > 1 && bytes > kTreeThreshold)
-        return tree_allreduce(sendbuff, recvbuff, count, datatype, op, c);
+        return ring_allreduce(sendbuff, recvbuff, count, datatype, op, c);
     auto& st = *c->state;
     const size_t elem_sz = nccl_elem_size(datatype);
     const size_t total   = count * elem_sz;
@@ -189,155 +189,6 @@ ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
         st.wait_pred(lk, [&]{ return st.arrived_phase1 == 0; });
     }
 
-    return ncclSuccess;
-}
-// ── Binary Tree AllReduce (latency+bandwidth balanced for medium tensors) ────
-// Used when kTreeThreshold < bytes ≤ kRingThreshold (64 KB – 1 MB).
-//
-// Algorithm (reduce phase, log2(ceil(nranks)) rounds):
-//   Round r=0,1,...: ranks whose index is divisible by 2^(r+1) receive from
-//   (rank + 2^r), reduce into their local buffer, then advance.
-//   After all rounds rank 0 holds the full reduction.
-//
-// Broadcast phase (reverse): rank 0 fans out result back down the tree.
-//
-// In shared-memory context "send" = deposit pointer; "recv" = memcpy from slot.
-// The result is identical to flat-barrier reduce but work is distributed across
-// log2(N) ranks at each level instead of serialising all reduction on rank 0.
-static ncclResult_t tree_allreduce(const void* sendbuff, void* recvbuff,
-    size_t count, ncclDataType_t datatype, ncclRedOp_t op, ncclComm* c)
-{
-    auto& st = *c->state;
-    const int    nranks  = st.nranks;
-    const int    rank    = c->rank;
-    const size_t elem_sz = nccl_elem_size(datatype);
-    const size_t total   = count * elem_sz;
-
-    // ── Phase 0: all ranks deposit their send buffers ─────────────────────
-    {
-        std::unique_lock<std::mutex> lk(st.mu);
-        const int gen = st.generation;
-        st.sendbufs[rank] = sendbuff;
-        st.arrived_phase0++;
-        if (st.arrived_phase0 == nranks) {
-            // Allocate tree workspace: each rank gets a private scratch slot.
-            // We reuse result_buf (sized total) as the "active" buffer.
-            st.result_buf.resize(total);
-            // Copy each rank's data into a scratch vector indexed by rank.
-            // (In a real distributed system each rank would own its own buffer;
-            //  here we centralise for thread safety while keeping the tree logic.)
-            st.arrived_phase0 = 0;
-            st.generation++;
-            st.cv.notify_all();
-        } else {
-            st.wait_pred(lk, [&]{ return st.generation != gen; });
-        }
-    }
-
-    // ── Reduce phase (bottom-up binary tree) ─────────────────────────────
-    // We implement the tree via log2(nranks) barrier rounds.
-    // Each active rank in round r reduces from its right child (rank + 2^r)
-    // if that child exists, then signals "done with this round".
-    // We use a per-round generation counter stored in tree_phase0_count /
-    // tree_phase1_count in the shared state. Since those fields don't exist yet
-    // we use the standard generation + arrived counters with a separate mu lock.
-    // For simplicity we fall back to a barrier-per-round model sharing
-    // st.generation as the epoch.  Two-phase per round:
-    //   arrived_phase0 counts ranks active in this round.
-    //   When all arrive, root of this sub-tree does the reduction step,
-    //   then we advance generation and proceed to the next round.
-
-    // Build per-rank scratch buffer (stack-allocated for small tensors).
-    std::vector<uint8_t> myBuf(total);
-    memcpy(myBuf.data(), sendbuff, total);
-
-    int step = 1;
-    while (step < nranks) {
-        std::unique_lock<std::mutex> lk(st.mu);
-        const int gen = st.generation;
-
-        // Deposit my current partial result into sendbufs slot for this round.
-        // We overwrite the slot so the parent can read from it.
-        st.sendbufs[rank] = myBuf.data();
-        st.arrived_phase0++;
-
-        if (st.arrived_phase0 == nranks) {
-            // Every rank participates in the barrier; only "receiver" ranks
-            // (those whose rank % (2*step) == 0) actually reduce.
-            for (int r = 0; r + step < nranks; r += 2 * step) {
-                // rank r reduces from rank r+step
-                const void* childBuf = st.sendbufs[r + step];
-                if (r == 0) {
-                    // r=0 reduces into result_buf directly
-                    memcpy(st.result_buf.data(), st.sendbufs[0], total);
-                    apply_reduce(st.result_buf.data(), childBuf, count, datatype, op);
-                    // push the result back into sendbufs[0] so next round reads it
-                    st.sendbufs[0] = st.result_buf.data();
-                } else {
-                    // Other receivers: reduce child into parent's myBuf.
-                    // We can't update myBuf here (it belongs to another thread),
-                    // so we use a temporary stored in gather_slots[r].
-                    st.gather_slots[r].resize(total);
-                    memcpy(st.gather_slots[r].data(), st.sendbufs[r], total);
-                    apply_reduce(st.gather_slots[r].data(), childBuf, count, datatype, op);
-                    st.sendbufs[r] = st.gather_slots[r].data();
-                }
-            }
-            st.arrived_phase0 = 0;
-            st.generation++;
-            st.cv.notify_all();
-        } else {
-            bool ok = st.wait_pred(lk, [&]{ return st.generation != gen; });
-            if (!ok) return ncclSystemError;
-        }
-
-        // Update my local buffer from sendbufs if I was a receiver this round.
-        if (rank % (2 * step) == 0) {
-            // I was a receiver — my result is in sendbufs[rank] which now points
-            // to either result_buf (rank 0) or gather_slots[rank].
-            // We already hold the lock; read after the barrier above.
-            if (st.sendbufs[rank] != myBuf.data()) {
-                memcpy(myBuf.data(), st.sendbufs[rank], total);
-            }
-        }
-        step <<= 1;
-    }
-
-    // ── After reduce: rank 0 has the full result in result_buf ──────────
-    {
-        std::unique_lock<std::mutex> lk(st.mu);
-        const int gen = st.generation;
-        if (rank == 0) {
-            // Ensure result_buf holds the final answer (already set above).
-            if (op == ncclAvg) scale_avg(st.result_buf.data(), count, datatype, nranks);
-            st.arrived_phase0 = nranks; // signal ready
-            st.generation++;
-            st.cv.notify_all();
-        } else {
-            st.arrived_phase0++;
-            st.wait_pred(lk, [&]{ return st.generation != gen; });
-        }
-    }
-
-    // ── Broadcast phase: all ranks copy from result_buf ────────────────
-    memcpy(recvbuff, st.result_buf.data(), total);
-
-    {
-        std::unique_lock<std::mutex> lk(st.mu);
-        st.arrived_phase1++;
-        if (st.arrived_phase1 == nranks) {
-            st.arrived_phase0 = 0;
-            st.arrived_phase1 = 0;
-            st.result_buf.clear();
-            for (auto& s : st.gather_slots) s.clear();
-            st.cv.notify_all();
-        } else {
-            st.wait_pred(lk, [&]{ return st.arrived_phase1 == 0; });
-        }
-    }
-
-    VGRE_LOG_DEBUG("NCCL", "tree_allreduce: " + std::to_string(total) +
-                   " bytes, " + std::to_string(nranks) + " ranks");
     return ncclSuccess;
 }
 
