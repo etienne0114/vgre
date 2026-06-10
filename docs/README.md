@@ -29,7 +29,7 @@ graph TD
 ### 1. 📈 [PROJECT_STATUS.md](PROJECT_STATUS.md)
 *   **Purpose**: The single source of truth for VGRE capability, build metrics, and gaps.
 *   **Key Contents**:
-    *   Test suite statistics (192/192 passes).
+    *   Test suite statistics (full Linux suite passing).
     *   Core numerical verification guarantees.
     *   **Actual, verified hardware limitations and gaps** (SASS binary limits, CUPTI hardware counter scaling, and physical GPUDirect RDMA proxies) with no historical clutter.
 *   **Read When**: You want to check what specific CUDA/library features are numerical-exact or where emulation boundary conditions reside.
@@ -108,7 +108,7 @@ mkdir -p build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 cmake --build . -j$(nproc)
 
-# 2. Run the complete test suite (192/192 passing)
+# 2. Run the complete test suite (full Linux suite passing)
 ctest --output-on-failure -j$(nproc)
 ```
 
