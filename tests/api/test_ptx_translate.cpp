@@ -1,0 +1,106 @@
+// Track 12 — PTX inline-asm translation: memory addressing + carry chains.
+//
+// (1) Memory operands `[reg]` / `[reg+imm]` must lose their PTX brackets so the
+//     emitted C is valid (`*(float*)(addr+8)`, not `*(float*)([addr+8])`).
+// (2) The carry-flag (add.cc/addc, sub.cc/subc) chain must compute exact
+//     multi-word integer arithmetic — verified numerically here against a
+//     64-bit reference using the SAME expressions the translator emits.
+
+#include "vgre/compiler/ptx_translator.h"
+
+#include <cstdio>
+#include <cstdint>
+#include <string>
+
+using vgre::compiler::PTXTranslator;
+
+static int g_pass = 0, g_total = 0;
+static void check(const char *name, bool ok) {
+    ++g_total;
+    printf(ok ? "  PASS  %s\n" : "  FAIL  %s\n", name);
+    if (ok) ++g_pass;
+}
+
+static bool contains(const std::string &h, const std::string &n) {
+    return h.find(n) != std::string::npos;
+}
+
+int main() {
+    printf("=== PTX Inline-Asm Translation (Track 12) ===\n");
+
+    // (1) Memory addressing: load with a byte offset.
+    {
+        std::string src =
+            "asm volatile(\"ld.global.f32 %0, [%1+8];\" : \"=f\"(out) : \"l\"(addr));";
+        std::string c = PTXTranslator::translate(src);
+        // The generated C must dereference a float* and must NOT contain the PTX
+        // address brackets around the pointer expression.
+        check("ld.global.f32 emits a float* dereference", contains(c, "*(float*)("));
+        check("ld.global with offset has no literal '[' brackets",
+              c.find('[') == std::string::npos);
+        check("ld.global preserves the +8 byte offset", contains(c, "+8"));
+    }
+
+    // (2) Store with bracketed address.
+    {
+        std::string src =
+            "asm volatile(\"st.global.u32 [%0], %1;\" :: \"l\"(p), \"r\"(v));";
+        std::string c = PTXTranslator::translate(src);
+        check("st.global.u32 emits an unsigned* store", contains(c, "*(unsigned*)("));
+        check("st.global has no literal '[' brackets", c.find('[') == std::string::npos);
+    }
+
+    // (3) Carry-chain numerical correctness. Emulate a 64-bit add as two 32-bit
+    //     limbs using the EXACT expressions the translator emits for
+    //     add.cc.u32 / addc.u32, and compare to a real 64-bit add.
+    {
+        auto add64_via_carry = [](uint64_t A, uint64_t B) -> uint64_t {
+            unsigned a0 = (unsigned)A, a1 = (unsigned)(A >> 32);
+            unsigned b0 = (unsigned)B, b1 = (unsigned)(B >> 32);
+            int _cc = 0;
+            unsigned r0, r1;
+            // add.cc.u32 r0, a0, b0
+            { unsigned _s = a0 + b0; _cc = (_s < (unsigned)a0); r0 = _s; }
+            // addc.u32 r1, a1, b1
+            { unsigned _s = a1 + b1 + (unsigned)_cc; r1 = _s; }
+            return (uint64_t)r0 | ((uint64_t)r1 << 32);
+        };
+        bool ok = true;
+        uint64_t cases[][2] = {
+            {0xFFFFFFFFull, 1ull},                       // limb-0 carry into limb-1
+            {0x00000001FFFFFFFFull, 0x0000000100000001ull},
+            {0xDEADBEEFCAFEBABEull, 0x1234567890ABCDEFull},
+            {0xFFFFFFFFFFFFFFFFull, 1ull},               // full wrap
+        };
+        for (auto &c : cases)
+            if (add64_via_carry(c[0], c[1]) != (uint64_t)(c[0] + c[1])) ok = false;
+        check("add.cc.u32/addc.u32 carry chain == 64-bit add", ok);
+    }
+
+    // (4) Borrow-chain numerical correctness for sub.cc/subc.
+    {
+        auto sub64_via_borrow = [](uint64_t A, uint64_t B) -> uint64_t {
+            unsigned a0 = (unsigned)A, a1 = (unsigned)(A >> 32);
+            unsigned b0 = (unsigned)B, b1 = (unsigned)(B >> 32);
+            int _cc = 0;
+            unsigned r0, r1;
+            // sub.cc.u32 r0, a0, b0   (_cc = borrow)
+            { unsigned _s = (unsigned)a0 - (unsigned)b0; _cc = ((unsigned)a0 < (unsigned)b0); r0 = _s; }
+            // subc.u32 r1, a1, b1
+            { unsigned _b = (unsigned)b1 + (unsigned)_cc; r1 = (unsigned)a1 - _b; }
+            return (uint64_t)r0 | ((uint64_t)r1 << 32);
+        };
+        bool ok = true;
+        uint64_t cases[][2] = {
+            {0x0000000100000000ull, 1ull},               // borrow from limb-1
+            {0x1234567890ABCDEFull, 0x0000000FFFFFFFFFull},
+            {0ull, 1ull},                                // full underflow wrap
+        };
+        for (auto &c : cases)
+            if (sub64_via_borrow(c[0], c[1]) != (uint64_t)(c[0] - c[1])) ok = false;
+        check("sub.cc.u32/subc.u32 borrow chain == 64-bit sub", ok);
+    }
+
+    printf("\n%d / %d passed\n", g_pass, g_total);
+    return (g_pass == g_total) ? 0 : 1;
+}

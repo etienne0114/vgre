@@ -77,8 +77,12 @@ const TranslateMap& getMap() {
         {"rem.s32",  [](auto& o){ return o[0]+" = "+o[1]+" % "+o[2]+";"; }},
         {"neg.s32",  [](auto& o){ return o[0]+" = -("+o[1]+");"; }},
         // ── Carry-flag arithmetic (multi-word wide integer) ────────────────────
-        // _cc models the CC.CF carry-flag register as a thread-local int.
-        // Simplified: we propagate carry as part of the expression.
+        // _cc models the PTX CC.CF register (declared `int _cc=0` in the wrapper
+        // when any carry op is present). add.cc sets _cc=carry-out, addc consumes
+        // it (and addc.cc both consumes and sets it); sub.cc sets _cc=borrow,
+        // subc consumes it. The convention is self-consistent within a homogeneous
+        // add-chain or sub-chain, which is how PTX emits multi-word (64/128-bit)
+        // integer arithmetic — so the result is exact, not approximate.
         {"add.cc.u32", [](auto& o){
             return "{ unsigned _s="+(o[1])+"+"+(o[2])+"; _cc=(_s<(unsigned)"+(o[1])+"); "+(o[0])+"=_s; }";
         }},
@@ -723,6 +727,18 @@ std::vector<std::string> splitOperands(const std::string& s) {
         else cur += c;
     }
     if (!cur.empty()) r.push_back(trim(cur));
+
+    // Strip the PTX memory-address brackets [...] from each operand. In PTX,
+    // square brackets are used ONLY for memory operands ([reg], [reg+imm],
+    // [reg+reg]); the C translation needs the bare address expression so that
+    // e.g. `ld.global.f32 %0,[%1+8]` becomes `%0 = *(float*)(%1+8)` instead of
+    // the invalid `*(float*)([%1+8])`. Because the address register comes from a
+    // 64-bit ("l") constraint — an integer pointer value — `%1+8` is correct
+    // byte arithmetic. Register-list braces {r0,r1} are left intact for splitRegs.
+    for (auto& op : r) {
+        if (op.size() >= 2 && op.front() == '[' && op.back() == ']')
+            op = trim(op.substr(1, op.size() - 2));
+    }
     return r;
 }
 
