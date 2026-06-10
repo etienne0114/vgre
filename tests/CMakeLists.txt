@@ -797,6 +797,11 @@ target_link_libraries(test_graph_dce PRIVATE vgre)
 add_test(NAME GraphDCE COMMAND test_graph_dce)
 set_tests_properties(GraphDCE PROPERTIES TIMEOUT 120)
 
+add_executable(test_kv_cache core/test_kv_cache.cpp)
+target_link_libraries(test_kv_cache PRIVATE vgre)
+add_test(NAME KVCachePaged COMMAND test_kv_cache)
+set_tests_properties(KVCachePaged PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
