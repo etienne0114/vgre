@@ -659,6 +659,11 @@ add_executable(test_hardware_token_manager advanced/test_hardware_token_manager.
 target_link_libraries(test_hardware_token_manager PRIVATE vgre)
 add_test(NAME HardwareTokenManager COMMAND test_hardware_token_manager)
 
+add_executable(test_mps_quota advanced/test_mps_quota.cpp)
+target_link_libraries(test_mps_quota PRIVATE vgre)
+add_test(NAME MPSQuota COMMAND test_mps_quota)
+set_tests_properties(MPSQuota PROPERTIES TIMEOUT 60)
+
 add_executable(test_input_validation unit/test_input_validation.cpp)
 target_link_libraries(test_input_validation PRIVATE vgre)
 add_test(NAME InputValidation COMMAND test_input_validation)

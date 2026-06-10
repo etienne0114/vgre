@@ -26,6 +26,11 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <cmath>
+#include <condition_variable>
+#include <fstream>
+#include <sstream>
+#include <llvm/Support/JSON.h>
 
 #include "vgre/common/os_backend.h"
 #if defined(_WIN32)
@@ -77,6 +82,61 @@ static void* mpsResolve(uint64_t handle) {
     std::lock_guard<std::mutex> lk(getAllocMutex());
     auto it = getAllocMap().find(handle);
     return it != getAllocMap().end() ? it->second : nullptr;
+}
+
+// ── Per-client resource quotas (Track P) ─────────────────────────────────────
+// The policy is loaded once from VGRE_MPS_POLICY_FILE; each connected client
+// (identified by its slot id) gets a ClientQuota that tracks live device memory
+// and bounds in-flight / concurrent kernel launches.
+
+static const VgreMPSPolicy& mpsPolicy() {
+    static const VgreMPSPolicy pol = [] {
+        const char* path = vgre_get_config("VGRE_MPS_POLICY_FILE");
+        return loadMPSPolicy(path ? path : "");
+    }();
+    return pol;
+}
+
+struct ClientQuota {
+    std::mutex mtx;
+    std::condition_variable cv;
+    uint64_t allocatedBytes = 0;  // live device memory held by this client
+    uint32_t inFlight       = 0;  // launches accepted but not yet completed
+    uint32_t running        = 0;  // launches currently executing (concurrency)
+};
+
+static std::mutex& quotaMutex() { static std::mutex m; return m; }
+static std::unordered_map<uint32_t, std::shared_ptr<ClientQuota>>& quotaMap() {
+    static std::unordered_map<uint32_t, std::shared_ptr<ClientQuota>> m;
+    return m;
+}
+static std::shared_ptr<ClientQuota> clientQuota(uint32_t slot) {
+    std::lock_guard<std::mutex> lk(quotaMutex());
+    auto& q = quotaMap()[slot];
+    if (!q) q = std::make_shared<ClientQuota>();
+    return q;
+}
+static void releaseClientQuota(uint32_t slot) {
+    std::lock_guard<std::mutex> lk(quotaMutex());
+    quotaMap().erase(slot);
+}
+
+// devPtr handle → (owning slot, byte count) so FREE refunds the right client.
+static std::mutex& allocOwnerMutex() { static std::mutex m; return m; }
+static std::unordered_map<uint64_t, std::pair<uint32_t,uint64_t>>& allocOwnerMap() {
+    static std::unordered_map<uint64_t, std::pair<uint32_t,uint64_t>> m;
+    return m;
+}
+
+// Concurrency cap derived from maxThreadFraction and the host thread count.
+static uint32_t mpsMaxConcurrent() {
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    float frac = mpsPolicy().maxThreadFraction;
+    if (frac <= 0.0f) frac = 1.0f;          // 0/negative → treat as unlimited
+    if (frac > 1.0f)  frac = 1.0f;
+    uint32_t n = static_cast<uint32_t>(std::floor(frac * static_cast<float>(hw)));
+    return n < 1 ? 1u : n;
 }
 
 // Helper: write exactly len bytes to fd; returns false on error.
@@ -131,6 +191,50 @@ static bool readAll(mps_handle_t fd, void* buf, size_t len) {
 }
 
 } // namespace
+
+// ── MPS policy file loader (Track P) ──────────────────────────────────────────
+// JSON shape (all fields optional):
+//   { "maxMemoryBytes": 1073741824, "maxThreadFraction": 0.5, "maxQueueDepth": 64 }
+VgreMPSPolicy loadMPSPolicy(const std::string& path) {
+    VgreMPSPolicy pol;  // defaults
+    if (path.empty()) return pol;
+
+    std::ifstream f(path);
+    if (!f) {
+        VGRE_LOG_WARN("MPS", "VGRE_MPS_POLICY_FILE='" + path +
+                              "' could not be opened — using default (unlimited) quotas.");
+        return pol;
+    }
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string content = ss.str();
+
+    llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(content);
+    if (!parsed) {
+        llvm::consumeError(parsed.takeError());
+        VGRE_LOG_WARN("MPS", "VGRE_MPS_POLICY_FILE='" + path +
+                              "' is not valid JSON — using default quotas.");
+        return pol;
+    }
+    const llvm::json::Object* obj = parsed->getAsObject();
+    if (!obj) {
+        VGRE_LOG_WARN("MPS", "VGRE_MPS_POLICY_FILE='" + path +
+                              "' is not a JSON object — using default quotas.");
+        return pol;
+    }
+    if (auto v = obj->getInteger("maxMemoryBytes"); v && *v >= 0)
+        pol.maxMemoryBytes = static_cast<uint64_t>(*v);
+    if (auto v = obj->getNumber("maxThreadFraction"); v && *v > 0.0)
+        pol.maxThreadFraction = static_cast<float>(*v);
+    if (auto v = obj->getInteger("maxQueueDepth"); v && *v > 0)
+        pol.maxQueueDepth = static_cast<uint32_t>(*v);
+
+    VGRE_LOG_INFO("MPS", "Loaded MPS policy: maxMemoryBytes=" +
+        std::to_string(pol.maxMemoryBytes) + " maxThreadFraction=" +
+        std::to_string(pol.maxThreadFraction) + " maxQueueDepth=" +
+        std::to_string(pol.maxQueueDepth));
+    return pol;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  MPSServer
@@ -425,7 +529,27 @@ void MPSServer::handleClient(mps_handle_t fd, uint32_t slotId) {
         case MPSMsgType::MALLOC: {
             MPSMallocReq req{};
             if (!readAll(fd, &req, sizeof(req))) break;
-            uint64_t handle = mpsAlloc(req.size);
+
+            // Track P: enforce the per-client memory quota before allocating.
+            auto q = clientQuota(slotId);
+            uint64_t handle = 0;
+            {
+                std::lock_guard<std::mutex> lk(q->mtx);
+                if (q->allocatedBytes + req.size > mpsPolicy().maxMemoryBytes) {
+                    VGRE_LOG_WARN("MPS", "slot=" + std::to_string(slotId) +
+                        " MALLOC of " + std::to_string(req.size) +
+                        " denied: would exceed maxMemoryBytes (" +
+                        std::to_string(q->allocatedBytes) + "/" +
+                        std::to_string(mpsPolicy().maxMemoryBytes) + ")");
+                } else {
+                    handle = mpsAlloc(req.size);
+                    if (handle) {
+                        q->allocatedBytes += req.size;
+                        std::lock_guard<std::mutex> ol(allocOwnerMutex());
+                        allocOwnerMap()[handle] = {slotId, req.size};
+                    }
+                }
+            }
             MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::MALLOC_RESP),
                           sizeof(MPSMallocResp) };
             MPSMallocResp rsp{ handle ? 0u : 1u, handle };
@@ -438,6 +562,25 @@ void MPSServer::handleClient(mps_handle_t fd, uint32_t slotId) {
             MPSFreeReq req{};
             if (!readAll(fd, &req, sizeof(req))) break;
             bool ok = mpsFree(req.devPtr);
+            if (ok) {
+                // Track P: refund the freed bytes to the owning client's quota.
+                std::pair<uint32_t,uint64_t> owner{0,0};
+                bool found = false;
+                {
+                    std::lock_guard<std::mutex> ol(allocOwnerMutex());
+                    auto it = allocOwnerMap().find(req.devPtr);
+                    if (it != allocOwnerMap().end()) {
+                        owner = it->second; found = true;
+                        allocOwnerMap().erase(it);
+                    }
+                }
+                if (found) {
+                    auto q = clientQuota(owner.first);
+                    std::lock_guard<std::mutex> lk(q->mtx);
+                    q->allocatedBytes = (q->allocatedBytes >= owner.second)
+                                        ? q->allocatedBytes - owner.second : 0;
+                }
+            }
             MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::FREE_RESP),
                           sizeof(MPSFreeResp) };
             MPSFreeResp rsp{ ok ? 0u : 1u };
@@ -548,12 +691,44 @@ void MPSServer::handleClient(mps_handle_t fd, uint32_t slotId) {
                 break;
             }
 
+            // Track P: enforce per-client queue depth, then throttle the number
+            // of concurrent launches to the client's thread-fraction share.
+            auto q = clientQuota(slotId);
+            {
+                std::unique_lock<std::mutex> lk(q->mtx);
+                if (q->inFlight >= mpsPolicy().maxQueueDepth) {
+                    lk.unlock();
+                    VGRE_LOG_WARN("MPS", "slot=" + std::to_string(slotId) +
+                        " LAUNCH denied: queue depth " + std::to_string(q->inFlight) +
+                        " >= maxQueueDepth " + std::to_string(mpsPolicy().maxQueueDepth));
+                    MPSHeader rh{ static_cast<uint32_t>(MPSMsgType::LAUNCH_RESP),
+                                  sizeof(MPSLaunchResp) };
+                    MPSLaunchResp rsp{ 1u };  // launch rejected (queue full)
+                    writeAll(fd, &rh, sizeof(rh));
+                    writeAll(fd, &rsp, sizeof(rsp));
+                    break;
+                }
+                ++q->inFlight;
+                // Throttle execution: wait until this client's concurrent run
+                // count is below its core-share cap (maxThreadFraction).
+                const uint32_t maxConc = mpsMaxConcurrent();
+                q->cv.wait(lk, [&]{ return q->running < maxConc; });
+                ++q->running;
+            }
+
             auto& engine = vgre::core::RuntimeEngine::instance();
             vgre::VGREResult rc = engine.launchKernel(kernelName, "",
                 {req.gridX, req.gridY, req.gridZ},
                 {req.blockX, req.blockY, req.blockZ},
                 args.empty() ? nullptr : args.data(),
                 req.sharedMemBytes);
+
+            {
+                std::lock_guard<std::mutex> lk(q->mtx);
+                if (q->running)  --q->running;
+                if (q->inFlight) --q->inFlight;
+            }
+            q->cv.notify_all();
 
             VGRE_LOG_DEBUG("MPS", "Launched kernel '" + std::string(kernelName) +
                            "' via MPS. Result=" + std::to_string(static_cast<int>(rc)));
@@ -576,6 +751,7 @@ void MPSServer::handleClient(mps_handle_t fd, uint32_t slotId) {
 
         case MPSMsgType::DISCONNECT:
             VGRE_LOG_INFO("MPS", "Client disconnected: slot=" + std::to_string(slotId));
+            releaseClientQuota(slotId);  // Track P: drop this client's quota state
 #if defined(_WIN32)
             CloseHandle(fd);
 #else
@@ -592,6 +768,7 @@ void MPSServer::handleClient(mps_handle_t fd, uint32_t slotId) {
             break;
         }
     }
+    releaseClientQuota(slotId);  // Track P: client loop ended — drop quota state
 #if defined(_WIN32)
     CloseHandle(fd);
 #else
