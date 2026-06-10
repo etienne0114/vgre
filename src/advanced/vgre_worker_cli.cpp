@@ -377,8 +377,13 @@ int main(int argc, char** argv) {
     }
 
     vgre::Logger::instance().log(vgre::LogLevel::INFO, "Worker", "Shutting down worker...");
-    std::cout << "[Worker] Shutdown signal received. Cleaning up...\n";
+    std::cout << "[Worker] Shutdown signal received. Draining in-flight work...\n";
     std::cout.flush();
+    // Graceful drain (Track 4): mark not-ready and finish in-flight kernels
+    // before tearing down the cluster link, so a rolling restart loses no work.
+    vgre_drain();
     cluster.shutdown();
+    std::cout << "[Worker] Drain complete. Exiting 0.\n";
+    std::cout.flush();
     return 0;
 }

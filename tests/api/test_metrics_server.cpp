@@ -120,6 +120,12 @@ int main() {
         printf("  [skip] kernel registration failed (JIT unavailable) — counter wiring untested\n");
     }
 
+    // ── Graceful drain (Track 4): marks not-ready and finishes in-flight work ─
+    int dr = vgre_drain();
+    check("vgre_drain() returns success", dr == 0);
+    std::string r3 = httpGet(port, "/readyz");
+    check("/readyz is 503 after drain (LB stops routing)", r3.find("503") != std::string::npos);
+
     vgre_stop_metrics_server();
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;

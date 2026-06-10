@@ -235,6 +235,18 @@ int vgre_synchronize(void) {
   return to_status(r);
 }
 
+// Graceful drain (Track 4): flip readiness to not-ready so an orchestrator stops
+// routing new work to this instance, then block until all in-flight kernels have
+// completed. Safe to call when uninitialised (nothing to drain). Used by the
+// worker CLI on SIGTERM so a rolling restart loses no work.
+int vgre_drain(void) {
+  vgre_metrics_set_ready(0);                       // /readyz → 503, LB drains us
+  if (require_initialized() != VGRE_SUCCESS)
+    return VGRE_SUCCESS;                           // not initialised → nothing in flight
+  auto r = vgre::core::RuntimeEngine::instance().synchronize();
+  return to_status(r);
+}
+
 // ── Memory Management ──────────────────────────────────────────────────────
 
 int vgre_malloc(void **ptr, size_t size) {
