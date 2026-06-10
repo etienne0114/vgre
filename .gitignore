@@ -91,6 +91,9 @@ src/**/*.a
 # Compiled worker binaries in source tree
 src/**/vgre-worker
 
+# Compiled Go device-plugin binary (built from main.go, which IS tracked)
+src/deployment/k8s_device_plugin/vgre-device-plugin
+
 # Runtime trace output files
 vgre_trace.json
 tests/vgre_trace.json

@@ -183,6 +183,31 @@ static vgre::core::TextureDescriptor makeTD(size_t width, size_t height) {
     return td;
 }
 
+// Map a cudaChannelFormatDesc to the VGRE scalar element type using the format
+// kind (desc->f: 0=Float, 1=Signed, 2=Unsigned) and the primary component width
+// (desc->x bits).  Mirrors CUDA's channel-format semantics so the sampler
+// decodes texels with the correct width AND signedness (incl. FP16 halves).
+static vgre::core::TextureElementType
+elementTypeFromChannelDesc(const cudaChannelFormatDesc *desc) {
+    using ET = vgre::core::TextureElementType;
+    const int bits = desc ? desc->x : 32;
+    const int kind = desc ? desc->f : 0;  // default: Float
+    switch (kind) {
+        case 0:  // cudaChannelFormatKindFloat
+            if (bits >= 64) return ET::FLOAT64;
+            if (bits <= 16) return ET::FP16;
+            return ET::FLOAT32;
+        case 1:  // cudaChannelFormatKindSigned
+            if (bits <= 8)  return ET::INT8;
+            if (bits <= 16) return ET::INT16;
+            return ET::INT32;
+        default: // cudaChannelFormatKindUnsigned (and any other)
+            if (bits <= 8)  return ET::UINT8;
+            if (bits <= 16) return ET::UINT16;
+            return ET::UINT32;
+    }
+}
+
 extern "C" cudaError_t cudaBindTexture(
         size_t *offset,
         const void *texref,
@@ -199,7 +224,12 @@ extern "C" cudaError_t cudaBindTexture(
     size_t numElements = (elementSize > 0) ? size / elementSize : size;
 
     vgre::core::TextureDescriptor td = makeTD(numElements, 1);
-    td.elementType = vgre::core::TextureElementType::FLOAT32;
+    // Map the channel format kind (desc->f: 0=Float, 1=Signed, 2=Unsigned) and
+    // the primary component width (desc->x) to the scalar element type, so the
+    // sampler decodes texels correctly.  Previously this was hardcoded to
+    // FLOAT32, which silently corrupted FP16 / integer textures (e.g. a 16-bit
+    // half was read as a 32-bit float).
+    td.elementType = elementTypeFromChannelDesc(desc);
     vgre::core::TextureId tid = 0;
     auto r = vgre::core::TextureManager::instance().createTexture(
         tid, devPtr, numElements, 1, elementSize, td);
