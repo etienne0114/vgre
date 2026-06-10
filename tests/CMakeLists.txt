@@ -814,6 +814,11 @@ target_include_directories(test_fp_quant PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME FPQuantGemm COMMAND test_fp_quant)
 set_tests_properties(FPQuantGemm PROPERTIES TIMEOUT 30)
 
+add_executable(test_golden_vectors api/test_golden_vectors.cpp)
+target_link_libraries(test_golden_vectors PRIVATE vgre_cudart)
+add_test(NAME GoldenVectors COMMAND test_golden_vectors)
+set_tests_properties(GoldenVectors PROPERTIES TIMEOUT 60)
+
 add_executable(test_memory_pool unit/test_memory_pool.cpp)
 target_link_libraries(test_memory_pool PRIVATE vgre)
 add_test(NAME MemoryPool COMMAND test_memory_pool)
