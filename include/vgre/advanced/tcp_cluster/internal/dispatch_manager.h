@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <string>
 #include <map>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <mutex>
@@ -161,6 +162,12 @@ private:
     double execution_time_ms;
   };
   std::vector<PartitionResult> partition_results_;
+
+  // partition_id → (target node address, block count) for the current launch.
+  // Lets collectPartitionResults() feed measured execution time back into the
+  // WorkloadPartitioner's per-node accuracy factor (adaptive load balancing:
+  // slow nodes receive proportionally smaller slices on the next launch).
+  std::unordered_map<uint32_t, std::pair<std::string, double>> partition_meta_;
 };
 
 } // namespace advanced

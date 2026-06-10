@@ -48,6 +48,13 @@ void DispatchManager::storeRemoteResult(uint64_t kernel_id, VGREResult result) {
 
 void DispatchManager::storePartitionResult(uint32_t partition_id, uint64_t kernel_id, VGREResult result, double execution_time_ms) {
   std::lock_guard<std::mutex> lock(parent_->partition_mutex_);
+  // Deduplicate by partition_id: a partition may legitimately report twice
+  // (network retransmission, or a speculative backup dispatch of a straggler).
+  // First result wins so the outstanding count in collectPartitionResults stays
+  // accurate and never over-counts.
+  for (const auto& existing : partition_results_)
+    if (existing.partition_id == partition_id)
+      return;
   PartitionResult pr{partition_id, kernel_id, result, execution_time_ms};
   partition_results_.push_back(pr);
   parent_->partition_cv_.notify_all();
