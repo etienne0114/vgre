@@ -14,7 +14,7 @@ This document tracks every remaining implementation task — real gaps, security
 | B | cuLink FATBIN/CUBIN input handling | ✅ Done |
 | C | CDP kernelFn name-based fallback | ✅ Done |
 | D | NVSCI sync object proxy | ✅ Done |
-| E | cuDNN backend API — full coverage | 🟡 Partial |
+| E | cuDNN backend API — full coverage | ✅ Done |
 | F | Security: token KDF salt + env leak | ✅ Done |
 | G | Windows WSAPoll liveness probe | 🔴 Not started |
 | H | Multiple virtual GPU devices | 🔴 Not started |

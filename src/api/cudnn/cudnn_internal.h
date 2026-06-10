@@ -819,6 +819,11 @@ enum cudnnPointwiseMode_t {
     CUDNN_POINTWISE_GELU_APPROX_TANH_FWD = 39,
     CUDNN_POINTWISE_GELU_APPROX_TANH_BWD = 40,
     CUDNN_POINTWISE_RECIPROCAL    = 41,
+    CUDNN_POINTWISE_ERF           = 42,  // unary: error function (exact GELU)
+    CUDNN_POINTWISE_RSQRT         = 43,  // unary: 1/sqrt(x) (RMS/LayerNorm)
+    CUDNN_POINTWISE_SIN           = 44,  // unary
+    CUDNN_POINTWISE_COS           = 45,  // unary
+    CUDNN_POINTWISE_TAN           = 46,  // unary
 };
 
 // ── cudnnForwardMode_t (cuDNN v8.5+) ─────────────────────────────────────────
