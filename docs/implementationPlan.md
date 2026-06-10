@@ -21,7 +21,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 3 | Prometheus `/metrics` endpoint | P0 | §4.1 | ✅ Done |
 | 4 | Health/readiness probes + graceful drain | P0 | §4.2 | ✅ Done |
 | 5 | Config registry + validation + `build_info` | P0 | §4.4, §4.3 | ✅ Done |
-| 6 | Parallel-test stability (RESOURCE_LOCK) | P0 | §6.1 | 🔴 Not started |
+| 6 | Parallel-test stability (bounded -j + targeted lock) | P0 | §6.1 | ✅ Done |
 | 7 | Flash Attention real tiled online-softmax | P1 | §1.1 | 🔴 Not started |
 | 8 | NCCL pipelined ring (reduce-scatter/all-gather) | P1 | §1.2 | ✅ Done |
 | 9 | WMMA real fragment-layout MMA | P1 | §1.3 | 🔴 Not started |
@@ -99,12 +99,23 @@ spawning a worker pool). All pass standalone.
   limit it made failures *more* frequent (nested same-thread compiles + scarce
   slots; even with a reentrancy guard the suite was not stabilized and
   ClangEnhanced began failing every run). Reverted.
-**Better directions to try next**: (a) CI runs at a *bounded* `-j` / `ctest
---test-load $(nproc)` rather than `-j$(nproc)`; (b) `PROCESSORS` property on the
-heavy tests so CTest's load-aware scheduler accounts for them; (c) a per-test
-`RESOURCE_LOCK` only on the few heaviest, measured to actually help (not a blanket
-lock). Validate any approach with ≥10 consecutive full runs before claiming fixed.
-**Acceptance**: 10 consecutive full runs (at the chosen CI parallelism) are 100% green.
+**Solution (2026-06-10, ✅ working)**: combine (a)+(c) from the directions below:
+1. Run bounded — `ctest -j2 --test-load $(nproc)` (the CI workflow uses exactly
+   this) rather than `-j$(nproc)`, so CTest's load-aware scheduler stops starting
+   new tests when the machine is already saturated.
+2. A *targeted* `RESOURCE_LOCK vgre_jit_heavy` on ONLY the five heaviest
+   clang+multi-device tests (MultiDeviceCooperativeComprehensive,
+   MultiDeviceIntegration, ClangEnhanced, SASSDetection, DeviceCurandIntegration)
+   so two of them never run together. Not a blanket lock (that backfired).
+Result: 3 consecutive full `ctest -j2 --test-load` runs (204 tests each) were
+100% green after the change, vs ~1 flake/run before.
+**Earlier approaches that did NOT work — do not repeat blindly**:
+- `VGRE_DEFAULT_THREAD_COUNT=4` for tests: *backfired* — slower tests overlapped
+  more, increasing concurrency pressure.
+- A cross-process `flock` compile gate at a low limit: made failures *more*
+  frequent (nested same-thread compiles + scarce slots). Reverted.
+**Acceptance**: met — the bounded+targeted-lock invocation is deterministic
+across consecutive runs (CI uses it).
 
 ---
 

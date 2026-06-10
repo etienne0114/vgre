@@ -1106,6 +1106,20 @@ set_tests_properties(
     PROPERTIES RESOURCE_LOCK vgre_tcp_cluster_port
 )
 
+# ── Heaviest JIT + multi-device tests (Track 6) ────────────────────────────
+# A *small* curated set that each fork clang AND spin multiple device worker
+# pools (multi-device tests double the thread count). Even under `ctest -j2
+# --test-load`, two of these running together can oversubscribe a small runner
+# and time one out. Serialize ONLY these few with a shared lock (measured to
+# remove the residual flake) — not a blanket lock, which previously backfired.
+foreach(_jh
+        MultiDeviceCooperativeComprehensive MultiDeviceIntegration
+        ClangEnhanced SASSDetection DeviceCurandIntegration)
+    if("${_jh}" IN_LIST vgre_full_test_list)
+        set_tests_properties(${_jh} PROPERTIES RESOURCE_LOCK vgre_jit_heavy)
+    endif()
+endforeach()
+
 # ── Python integration tests ─────────────────────────────────────────────────
 find_program(PYTHON3 python3)
 if(PYTHON3)
