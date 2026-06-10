@@ -25,7 +25,7 @@ This document tracks every remaining implementation task — real gaps, security
 | M | Tensor parallel intra-process AllReduce | ✅ Done |
 | N | PTX → LLVM bitcode direct path (Triton) | ✅ Done |
 | O | Kernel auto-vectorization hints | ✅ Done |
-| P | MPS per-client resource quotas | 🔴 Not started |
+| P | MPS per-client resource quotas | ✅ Done |
 | Q | Nsight-compatible `.nsys-rep` export | 🔴 Not started |
 | R | Signed JIT cache (HMAC validation) | ✅ Done |
 | S | Cluster work stealing | 🔴 Not started |

@@ -104,6 +104,21 @@ using mps_handle_t = int;
 constexpr mps_handle_t MPS_INVALID_HANDLE = -1;
 #endif
 
+// ── Per-client resource policy ──────────────────────────────────────────────
+// Loaded once from VGRE_MPS_POLICY_FILE (JSON).  Bounds what a single MPS client
+// may consume so one runaway process cannot starve the others.  Defaults impose
+// no practical limit (backwards compatible when no policy file is configured).
+struct VgreMPSPolicy {
+    uint64_t maxMemoryBytes    = UINT64_MAX; // per-client device-memory cap
+    float    maxThreadFraction = 1.0f;       // fraction of worker pool a client
+                                             // may occupy concurrently
+    uint32_t maxQueueDepth     = 256;        // per-client in-flight launch cap
+};
+
+// Parse a VgreMPSPolicy from a JSON file.  Returns the defaults (and logs) when
+// the path is empty/unreadable; unknown/invalid fields keep their default.
+VgreMPSPolicy loadMPSPolicy(const std::string& path);
+
 // ── Server ────────────────────────────────────────────────────────────────────
 // MPSServer runs in the daemon process.  Call start() once; it spawns an
 // accept loop in a background thread.  stop() tears it down.
