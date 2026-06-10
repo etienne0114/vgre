@@ -85,6 +85,28 @@ bool testIntegerFormats() {
     mgr.destroyTexture(id);
   }
 
+  // Test FP16 (half-precision float). Known IEEE-754 half bit patterns:
+  //   1.0 = 0x3C00, 2.0 = 0x4000, 0.5 = 0x3800, -1.0 = 0xBC00, 0.0 = 0x0000
+  {
+    std::vector<uint16_t> data   = {0x3C00, 0x4000, 0x3800, 0xBC00, 0x0000};
+    std::vector<double>   expect = {1.0,    2.0,    0.5,    -1.0,    0.0};
+    TextureDescriptor desc;
+    desc.elementType = TextureElementType::FP16;
+    desc.filterMode = TextureFilterMode::POINT;
+
+    TextureId id;
+    VGREResult result = mgr.createTexture(id, data.data(), data.size(), 1,
+                                          sizeof(uint16_t), desc);
+    TEST_ASSERT(result == VGREResult::SUCCESS, "Failed to create FP16 texture");
+
+    for (size_t i = 0; i < data.size(); i++) {
+      double value = mgr.readElementAsDouble(id, static_cast<int>(i));
+      TEST_ASSERT_NEAR(value, expect[i], 0.001, "FP16 half decode mismatch");
+    }
+
+    mgr.destroyTexture(id);
+  }
+
   std::cout << "  ✓ Integer format support passed" << std::endl;
   return true;
 }

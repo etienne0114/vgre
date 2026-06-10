@@ -63,9 +63,12 @@ static void makeChannelDesc(struct cudaChannelFormatDesc *desc,
     desc->x = bitsPerElement;
     using ET = vgre::core::TextureElementType;
     switch (type) {
-        case ET::FLOAT32: case ET::FLOAT64: desc->f = 0 /*cudaChannelFormatKindFloat*/; break;
-        case ET::INT8:  case ET::INT16:  case ET::INT32:  desc->f = 1 /*Signed*/;   break;
-        default:                                           desc->f = 2 /*Unsigned*/; break;
+        // FP16 is a half-precision FLOAT format — it must report
+        // cudaChannelFormatKindFloat, not be lumped into the unsigned default
+        // (otherwise cudaArrayGetInfo mis-describes half textures as uint16).
+        case ET::FP16:  case ET::FLOAT32: case ET::FLOAT64: desc->f = 0 /*Float*/;   break;
+        case ET::INT8:  case ET::INT16:   case ET::INT32:   desc->f = 1 /*Signed*/;  break;
+        default:                                            desc->f = 2 /*Unsigned*/; break;
     }
 }
 

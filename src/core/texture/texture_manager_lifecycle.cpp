@@ -118,6 +118,7 @@ VGREResult TextureManager::createTextureView(TextureId &outId,
     case TextureElementType::INT32:
     case TextureElementType::UINT32: elementSize = 4; break;
     case TextureElementType::FLOAT64: elementSize = 8; break;
+    case TextureElementType::FP16:
     case TextureElementType::INT16:
     case TextureElementType::UINT16: elementSize = 2; break;
     case TextureElementType::INT8:
