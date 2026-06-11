@@ -55,6 +55,12 @@ static VGREResult safe_call(Fn&& fn) {
     } catch (const std::exception&) {
         // VGREException or similar — treat as ERR_NOT_INITIALIZED
         return VGREResult::ERR_NOT_INITIALIZED;
+    } catch (...) {
+        // Catch-all: across a shared-library boundary on macOS the typeinfo for
+        // a thrown VGREException may not match `const std::exception&` reliably;
+        // this test only asserts "errors, does not crash", so treat any escape
+        // as the expected not-initialized error.
+        return VGREResult::ERR_NOT_INITIALIZED;
     }
 }
 
