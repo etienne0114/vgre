@@ -267,12 +267,22 @@ static VectorHints computeVectorHints(const KernelIR &ir) {
     if (ir.usesSharedMem)
         return {4, 1};
 
+    // AArch64 carries no x86 SIMD caps but has mandatory 128-bit NEON (4× fp32)
+    // with FMA, so treat it like a 4-wide SIMD target instead of falling to
+    // scalar {1,1} (which would disable vectorization for every kernel).
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    const bool kNeon = true;
+#else
+    const bool kNeon = false;
+#endif
+
     // FLOP-dense kernels benefit from the widest available SIMD.
     bool flopDense = ir.staticFlopCount > 50'000;
     if (flopDense) {
         if (caps.hasAVX512) return {16, 2};
         if (caps.hasAVX2)   return {8,  2};
         if (caps.hasAVX)    return {4,  2};
+        if (kNeon)          return {4,  2};
         return {2, 1};
     }
 
@@ -282,6 +292,7 @@ static VectorHints computeVectorHints(const KernelIR &ir) {
     if (lightKernel) {
         if (caps.hasAVX2)  return {8, 4};
         if (caps.hasSSE4)  return {4, 4};
+        if (kNeon)         return {4, 4};
         return {2, 2};
     }
 
@@ -290,6 +301,7 @@ static VectorHints computeVectorHints(const KernelIR &ir) {
     if (caps.hasAVX)   return {4, 2};
     if (caps.hasSSE4)  return {4, 1};
     if (caps.hasSSE2)  return {2, 1};
+    if (kNeon)         return {4, 2};
     return {1, 1};
 }
 

@@ -83,12 +83,13 @@ inline float __fmul_rn(float a, float b) { return a * b; }
 #  define __device__
 #  define __host__
 #elif defined(__APPLE__)
-// Mach-O section names MUST be "segment,section" — clang rejects a bare name
-// ("mach-o section specifier requires a segment and section separated by a
-// comma"), which broke every JIT kernel compile on macOS. The parser matches
-// the "vgre_global" substring so the __TEXT, prefix is transparent.
-#  define __global__ __attribute__((section("__TEXT,vgre_global")))
-#  define __device__ __attribute__((section("__TEXT,vgre_device")))
+// The section attribute is ONLY a discovery marker for the AST parser (which
+// uses its own stub, not this header). The JIT path finds kernels by name, so
+// the section is vestigial here — and a bare ELF name is rejected by Mach-O
+// while a custom __TEXT subsection placed by arm64 JITLink risked mis-aligned
+// instruction fetch (SIGBUS) at execution. Drop it on macOS, like Windows.
+#  define __global__
+#  define __device__
 #  define __host__
 #else
 #  define __global__ __attribute__((section("vgre_global")))

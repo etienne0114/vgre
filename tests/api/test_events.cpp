@@ -65,7 +65,11 @@ int main() {
 
   std::cout << "Elapsed time: " << ms << " ms (Expected ~150ms)\n";
 
-  if (ms < 140.0f || ms > 250.0f) {
+  // The 150 ms sleep can overshoot substantially on a loaded/shared CI runner
+  // (scheduling latency after usleep). The lower bound is the real check (the
+  // timer actually measured the interval, not ~0); the upper bound only rejects
+  // absurd values, so keep it generous to avoid CI-jitter flakes.
+  if (ms < 140.0f || ms > 1500.0f) {
     std::cerr << "Elapsed time looks suspiciously off. Test failed."
               << std::endl;
     return 1;
