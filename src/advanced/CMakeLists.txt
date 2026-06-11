@@ -81,6 +81,16 @@ target_link_libraries(vgre_advanced PRIVATE
     vgre_llvm_iface
 )
 
+# macOS: adaptive_execution_engine.cpp probes IOKit (AppleSMC) for thermal state.
+# PUBLIC so consumers of these objects (shared libs + tests) resolve the symbols.
+if(APPLE)
+    find_library(_vgre_adv_iokit IOKit)
+    find_library(_vgre_adv_cf CoreFoundation)
+    if(_vgre_adv_iokit AND _vgre_adv_cf)
+        target_link_libraries(vgre_advanced PUBLIC ${_vgre_adv_iokit} ${_vgre_adv_cf})
+    endif()
+endif()
+
 # Propagate SIMD compile options to vgre_advanced so that AES-NI/PCLMUL/AVX2
 # intrinsics in secure_channel_crypto.cpp etc. compile with the right ISA flags.
 if(VGRE_SIMD_COMPILE_OPTIONS)
