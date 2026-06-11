@@ -567,6 +567,15 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
   const int optLvl = jitFastTierOptLevel(cppSource.size());
   const char *const optFlag = (optLvl == 1) ? "-O1" : "-O3";
 
+  // Host-CPU tuning flag. The JIT targets the host arch, so pick by build arch:
+  // x86 uses -march=native; AArch64 clang rejects -march=native and uses
+  // -mcpu=native (this is why JIT kernel compiles failed on Apple-Silicon macOS).
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+  const char *const archFlag = "-mcpu=native";
+#else
+  const char *const archFlag = "-march=native";
+#endif
+
   // Run clang with bounded retries on *transient* failures only — fork()
   // exhaustion (EAGAIN/ENOMEM) or the child being killed by a signal (e.g. the
   // OOM killer) under heavy parallel load.  A clean non-zero clang exit is a
@@ -578,7 +587,7 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
 #if defined(_WIN32)
     {
       std::string cmd = std::string("clang++ -S -emit-llvm ") + optFlag +
-                        " -march=native -fno-math-errno"
+                        " " + archFlag + " -fno-math-errno"
                         " -fno-trapping-math -Xclang -I\"" + includePath + "\" \""
                         + tmpCpp + "\" -o \"" + tmpIR + "\" > \"" + logFile + "\" 2>&1";
       int st = std::system(cmd.c_str());
@@ -593,7 +602,7 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
         if (lf) { int lfd = fileno(lf); dup2(lfd, STDOUT_FILENO); dup2(lfd, STDERR_FILENO); }
         const char* argv[] = {
           "clang++", "-S", "-emit-llvm",
-          optFlag, "-march=native", "-fno-math-errno", "-fno-trapping-math",
+          optFlag, archFlag, "-fno-math-errno", "-fno-trapping-math",
           "-fvisibility=default",
           "-I", includePath.c_str(),
           tmpCpp.c_str(), "-o", tmpIR.c_str(),

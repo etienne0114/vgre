@@ -317,6 +317,12 @@ namespace core {
 static PVOID& getVehHandler() { static PVOID h = nullptr; return h; }
 #else
 static struct sigaction& getOldSigaction() { static struct sigaction sa{}; return sa; }
+#if defined(__APPLE__)
+// macOS raises SIGBUS (not SIGSEGV) for a write to an mprotect-protected page,
+// so the UVM dirty-page handler must catch SIGBUS too; keep its prior action
+// separately for correct chaining.
+static struct sigaction& getOldSigactionBus() { static struct sigaction sa{}; return sa; }
+#endif
 #endif
 static std::atomic<bool>& getHandlerInstalled() { static std::atomic<bool> v{false}; return v; }
 static std::atomic<int>& getInstanceCount() { static std::atomic<int> v{0}; return v; }
@@ -452,12 +458,22 @@ void MemoryManager::setupSignalHandler() {
   sigemptyset(&sa.sa_mask);
   // Block SIGSEGV during handler to prevent re-entrancy
   sigaddset(&sa.sa_mask, SIGSEGV);
+#if defined(__APPLE__)
+  sigaddset(&sa.sa_mask, SIGBUS);   // both fire on macOS protection faults
+#endif
   sa.sa_sigaction = MemoryManager::segfaultHandler;
   if (sigaction(SIGSEGV, &sa, &getOldSigaction()) == -1) {
     VGRE_LOG_ERROR("MemoryManager", "Failed to setup SIGSEGV handler for UVM");
   } else {
     getHandlerInstalled().store(true, std::memory_order_release);
   }
+#if defined(__APPLE__)
+  // macOS delivers SIGBUS for write-to-read-only-page mprotect faults; install
+  // the same handler so UVM write tracking works (it raises a Bus error otherwise).
+  if (sigaction(SIGBUS, &sa, &getOldSigactionBus()) == -1) {
+    VGRE_LOG_ERROR("MemoryManager", "Failed to setup SIGBUS handler for UVM");
+  }
+#endif
 #endif
 }
 
@@ -471,6 +487,9 @@ void MemoryManager::teardownSignalHandler() {
 #else
   if (getHandlerInstalled().load(std::memory_order_acquire)) {
     sigaction(SIGSEGV, &getOldSigaction(), nullptr);
+#if defined(__APPLE__)
+    sigaction(SIGBUS, &getOldSigactionBus(), nullptr);
+#endif
     getHandlerInstalled().store(false, std::memory_order_release);
   }
 #if defined(__APPLE__)
@@ -687,7 +706,11 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
   }
 
 fallback:
+#if defined(__APPLE__)
+  auto& old_sa = (sig == SIGBUS) ? getOldSigactionBus() : getOldSigaction();
+#else
   auto& old_sa = getOldSigaction();
+#endif
   if (old_sa.sa_flags & SA_SIGINFO) {
     if (old_sa.sa_sigaction &&
         reinterpret_cast<void *>(old_sa.sa_sigaction) !=

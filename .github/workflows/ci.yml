@@ -108,7 +108,11 @@ jobs:
 
       - name: Test
         working-directory: build
-        run: ctest --output-on-failure -j 2 --test-load 4 --timeout 300
+        # macOS runners are small (3 vCPU / ~7 GB). Each JIT test forks clang -O3
+        # AND spins the block-worker pool; under -j2 that oversubscribes RAM/forks
+        # and the heavier kernel compiles fail ("Failed to register kernel"). Run
+        # serially on macOS — slower but stable — until the pool is right-sized.
+        run: ctest --output-on-failure -j 1 --timeout 300
 
   # ── Windows: bring-up (informational until green) ────────────────────────
   windows:

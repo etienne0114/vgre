@@ -350,13 +350,18 @@ public:
         std::vector<size_t> alignments = {1, 2, 4, 8, 16};
         
         for (size_t align : alignments) {
-            void* aligned_ptr = std::aligned_alloc(align, 1024);
+            // C11/POSIX require the alignment to be a power of two AND at least
+            // sizeof(void*); macOS/Windows enforce this (glibc is lenient). Use a
+            // valid request — a stronger alignment still satisfies the smaller one
+            // the test verifies below.
+            size_t req_align = (align < sizeof(void*)) ? sizeof(void*) : align;
+            void* aligned_ptr = std::aligned_alloc(req_align, 1024);
             if (!aligned_ptr) {
                 std::cout << "FAIL: aligned_alloc failed for alignment " << align << std::endl;
                 all_passed = false;
                 continue;
             }
-            
+
             // Check alignment
             if (reinterpret_cast<uintptr_t>(aligned_ptr) % align != 0) {
                 std::cout << "FAIL: Pointer not properly aligned for " << align << " bytes" << std::endl;
