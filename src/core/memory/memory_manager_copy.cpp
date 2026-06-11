@@ -24,18 +24,23 @@ namespace core {
  * @brief Non-temporal streaming memcpy for large buffers.
  * Bypasses the cache for writes to prevent cache pollution on large data transfers.
  */
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#define VGRE_STREAMING_MEMCPY_X86 1
+#endif
+
+#if defined(VGRE_STREAMING_MEMCPY_X86) && (defined(__GNUC__) || defined(__clang__))
 __attribute__((target("avx")))
 #endif
 static void streamingMemcpy(void* dst, const void* src, size_t bytes) {
+#if defined(VGRE_STREAMING_MEMCPY_X86)
     uint8_t* d = static_cast<uint8_t*>(dst);
     const uint8_t* s = static_cast<const uint8_t*>(src);
 
     // Threshold for streaming stores (1MB). Must be 32-byte aligned for AVX.
-    if (bytes >= 1024 * 1024 && 
-        (reinterpret_cast<uintptr_t>(d) & 31) == 0 && 
+    if (bytes >= 1024 * 1024 &&
+        (reinterpret_cast<uintptr_t>(d) & 31) == 0 &&
         (reinterpret_cast<uintptr_t>(s) & 31) == 0) {
-        
+
         size_t i = 0;
         for (; i + 32 <= bytes; i += 32) {
             __m256i val = _mm256_load_si256(reinterpret_cast<const __m256i*>(s + i));
@@ -48,6 +53,11 @@ static void streamingMemcpy(void* dst, const void* src, size_t bytes) {
     } else {
         memcpy(dst, src, bytes);
     }
+#else
+    // Non-x86 (e.g. Apple-Silicon arm64): no AVX streaming stores — the standard
+    // library memcpy already uses the platform's best non-temporal path.
+    memcpy(dst, src, bytes);
+#endif
 }
 
 std::unordered_map<MemoryHandle, Allocation>::iterator

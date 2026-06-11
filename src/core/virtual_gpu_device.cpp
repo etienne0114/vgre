@@ -269,8 +269,10 @@ void VirtualGPUDevice::detectHardware() {
   MEMORYSTATUSEX memInfo;
   memInfo.dwLength = sizeof(MEMORYSTATUSEX);
   GlobalMemoryStatusEx(&memInfo);
+  // kMaxMemoryGB is local to the constructor, so the 32 GB cap is inlined here
+  // (same value) on every platform.
   size_t vram = static_cast<size_t>(memInfo.ullTotalPhys * 0.75);
-  size_t cap = kMaxMemoryGB * 1024ULL * 1024 * 1024;
+  size_t cap = 32ULL * 1024 * 1024 * 1024;
   props_.totalGlobalMem = std::min(vram, cap);
 #elif defined(__APPLE__)
   int mib[2];
@@ -280,7 +282,7 @@ void VirtualGPUDevice::detectHardware() {
   size_t length = sizeof(int64_t);
   sysctl(mib, 2, &physical_memory, &length, NULL, 0);
   size_t vram = static_cast<size_t>(physical_memory * 0.75);
-  size_t cap = kMaxMemoryGB * 1024ULL * 1024 * 1024;
+  size_t cap = 32ULL * 1024 * 1024 * 1024;
   props_.totalGlobalMem = std::min(vram, cap);
 #else
   // Fallback for other platforms: use conservative default (same values as
