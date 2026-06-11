@@ -1163,6 +1163,17 @@ if(WIN32)
     target_link_libraries(vgre_cudart PRIVATE dbghelp)
 endif()
 
+# macOS: cupti_shim.cpp probes IOKit/CoreFoundation to detect a physical GPU.
+if(APPLE)
+    find_library(_vgre_iokit IOKit)
+    find_library(_vgre_corefoundation CoreFoundation)
+    if(_vgre_iokit AND _vgre_corefoundation)
+        target_link_libraries(vgre        PRIVATE ${_vgre_iokit} ${_vgre_corefoundation})
+        target_link_libraries(vgre_cudart PRIVATE ${_vgre_iokit} ${_vgre_corefoundation})
+        message(STATUS "macOS: linking IOKit + CoreFoundation for GPU detection")
+    endif()
+endif()
+
 # ──────────────────────────────────────────────────────────────────────────────
 # §18  Test helper function  (used by tests/CMakeLists.txt)
 # ──────────────────────────────────────────────────────────────────────────────
