@@ -142,6 +142,7 @@ extern "C" {
   static VGRE_THREAD_LOCAL dim3_pod t_gridDim = {1, 1, 1};
   static VGRE_THREAD_LOCAL void* t_sharedMem    = nullptr;
   static VGRE_THREAD_LOCAL void* t_warpBuffer   = nullptr;  // per-block warp exchange
+  static VGRE_THREAD_LOCAL void* t_mmaBuffer    = nullptr;  // per-warp tensor-core frags
 
   VGRE_PUBLIC_API vgre::dim3* vgre_jit_get_threadIdx() { return (vgre::dim3*)&t_threadIdx; }
   VGRE_PUBLIC_API vgre::dim3* vgre_jit_get_blockIdx() { return (vgre::dim3*)&t_blockIdx; }
@@ -149,6 +150,7 @@ extern "C" {
   VGRE_PUBLIC_API vgre::dim3* vgre_jit_get_gridDim() { return (vgre::dim3*)&t_gridDim; }
   VGRE_PUBLIC_API void** vgre_jit_get_sharedMem() { return &t_sharedMem; }
   VGRE_PUBLIC_API void** vgre_jit_get_warp_buffer() { return &t_warpBuffer; }
+  VGRE_PUBLIC_API void** vgre_jit_get_mma_buffer() { return &t_mmaBuffer; }
   VGRE_PUBLIC_API void vgre_jit_set_shared_mem(void* smem) { t_sharedMem = smem; }
 }
 
@@ -350,6 +352,10 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
     };
     Symbols[Mangle("vgre_jit_get_warp_buffer")] = {
         llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_get_warp_buffer)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_get_mma_buffer")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_get_mma_buffer)),
         llvm::JITSymbolFlags::Exported
     };
     // CDP symbols are declared at namespace scope (see below)

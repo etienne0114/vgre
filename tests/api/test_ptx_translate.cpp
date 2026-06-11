@@ -101,6 +101,26 @@ int main() {
         check("sub.cc.u32/subc.u32 borrow chain == 64-bit sub", ok);
     }
 
+    // (5) Tensor-core mma.sync (Track 9): the four brace-grouped operands
+    //     {d0..3},{a0..3},{b0..1},{c0..3} must FLATTEN into the 14 individual
+    //     registers the warp-collective helper expects (splitOperands keeps each
+    //     {..} as one token, so the helper call must expand them).
+    {
+        std::string src =
+            "asm volatile("
+            "\"mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+            "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\" "
+            ": \"=f\"(d0),\"=f\"(d1),\"=f\"(d2),\"=f\"(d3));";
+        std::string c = PTXTranslator::translate(src);
+        check("mma.sync emits the warp-collective f16 helper",
+              contains(c, "vgre_mma_m16n8k16_f32_f16("));
+        // All 14 register tokens must appear individually (flattened, not braces).
+        bool all14 = true;
+        for (int i = 0; i <= 13; ++i) all14 = all14 && contains(c, "%" + std::to_string(i));
+        check("mma.sync flattens all 14 brace-grouped operands", all14);
+        check("mma.sync leaves no brace-grouped operands ({%)", c.find("{%") == std::string::npos);
+    }
+
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

@@ -23,8 +23,10 @@
 // These are defined in llvm_translation_engine.cpp / gpu_thread_context.cpp.
 extern "C" {
   void**       vgre_jit_get_warp_buffer();
+  void**       vgre_jit_get_mma_buffer();   // per-warp tensor-core fragment scratch
   void         vgre_jit_block_barrier_sync();
   vgre::dim3*  vgre_jit_get_threadIdx();
+  vgre::dim3*  vgre_jit_get_blockDim();
 }
 
 namespace vgre_cuda {

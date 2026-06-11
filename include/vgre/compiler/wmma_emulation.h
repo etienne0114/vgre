@@ -9,9 +9,22 @@
 
 #include "cpu_cuda_fp16.h"
 #include "vgre/runtime/vector_engine.h"  // SIMDCapabilities, fp32_to_bf16
+#include "vgre/common/types.h"           // vgre::dim3 (warp-collective mma)
 #include <atomic>
 #include <cstring>
 #include <cmath>
+
+// JIT runtime hooks used by the warp-collective mma.sync helpers below. Defined
+// in llvm_translation_engine.cpp / gpu_thread_context.cpp and resolved via the
+// JIT symbol table for kernel code (and the host library otherwise). Declared
+// here too so this header is self-contained when not pulled in through
+// cpu_cuda_env.h (the signatures match cpu_cuda_warp.h's identical decls).
+extern "C" {
+  void**      vgre_jit_get_mma_buffer();
+  void        vgre_jit_block_barrier_sync();
+  vgre::dim3* vgre_jit_get_threadIdx();
+  vgre::dim3* vgre_jit_get_blockDim();
+}
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -299,10 +312,101 @@ inline void mma_sync(
 } // namespace wmma
 } // namespace nvcuda
 
-// ── Ampere mma.sync PTX helper functions ─────────────────────────────────────
+// ── Ampere mma.sync PTX helper functions (warp-collective) ───────────────────
 // These are called by PTX-translated kernels that emit mma.sync.aligned.*
-// instructions.  Each performs a small tiled GEMM corresponding to the
-// Ampere mma instruction shape.
+// instructions.  A `mma.sync` is **warp-collective**: each of the 32 lanes holds
+// only a *fragment* of A, B and C (e.g. for m16n8k16.f16 a lane holds 8 of A's
+// 256 elements), so a single lane's 4 output elements cannot be computed in
+// isolation.  VGRE runs warp-collective ops with one OS thread per lane sharing
+// a per-warp scratch buffer + a block barrier (see codegen `usesMma`), exactly
+// like __shfl/__ballot.  Each helper therefore: (1) deposits its lane's raw
+// input registers into the warp scratch, (2) barriers, (3) reconstructs the full
+// A/B/C tiles using the PTX-ISA fragment→(row,col) maps (ISA 9.7.14.4.x),
+// (4) computes D = A·B + C, (5) extracts this lane's 4 output elements.  Results
+// are then bit-faithful to the hardware fragment layout for the supported types.
+
+namespace vgre_mma_detail {
+
+// IEEE-correct fp16 bit-pattern → float (handles subnormals / inf / NaN by
+// reusing vgre_cuda::__half's conversion operator).
+inline float f16b(uint16_t bits) { vgre_cuda::__half h; h.__x = bits; return static_cast<float>(h); }
+// bf16 = upper 16 bits of the fp32 representation.
+inline float bf16b(uint16_t bits) {
+    uint32_t u = static_cast<uint32_t>(bits) << 16; float f; memcpy(&f, &u, 4); return f;
+}
+// TF32 = fp32 with the low 13 mantissa bits cleared (19-bit significand).
+inline float tf32b(uint32_t bits) {
+    uint32_t u = bits & 0xFFFFE000u; float f; memcpy(&f, &u, 4); return f;
+}
+inline float bits_as_f32(uint32_t bits) { float f; memcpy(&f, &bits, 4); return f; }
+inline int   i8(uint32_t r, int i) { return static_cast<int>(static_cast<int8_t>((r >> (8 * i)) & 0xFFu)); }
+
+// Per-warp fragment exchange over the JIT scratch buffer (32 lanes × 16 u32).
+struct WarpMMA { uint32_t* base = nullptr; int lane = 0; bool ok = false; };
+inline WarpMMA mma_begin() {
+    WarpMMA c;
+    void** p = vgre_jit_get_mma_buffer();
+    if (!p || !*p) return c;                       // not threaded → collective impossible
+    c.base = static_cast<uint32_t*>(*p);
+    vgre::dim3* tid = vgre_jit_get_threadIdx();
+    vgre::dim3* bd  = vgre_jit_get_blockDim();
+    uint32_t linear = tid->x + tid->y * bd->x + tid->z * bd->x * bd->y;
+    c.lane = static_cast<int>(linear & 31u);        // one warp per block (matches __shfl model)
+    c.ok = true;
+    return c;
+}
+constexpr int kStride = 16;                         // u32 slots per lane
+inline uint32_t* mma_slot(const WarpMMA& c, int lane) { return c.base + lane * kStride; }
+inline void mma_deposit(const WarpMMA& c, const uint32_t* regs, int nReg) {
+    uint32_t* s = mma_slot(c, c.lane);
+    for (int i = 0; i < nReg; ++i) s[i] = regs[i];
+    vgre_jit_block_barrier_sync();                  // publish all lanes' fragments
+}
+inline void mma_end() { vgre_jit_block_barrier_sync(); }   // hold scratch until all lanes read
+
+// m16n8k16, 16-bit A/B (f16 or bf16) → f32.  DecA/DecB: uint16_t bits → float.
+template <typename Dec>
+inline void mma_m16n8k16_16bit(
+    float& d0, float& d1, float& d2, float& d3,
+    unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+    unsigned b0, unsigned b1,
+    float c0, float c1, float c2, float c3, Dec dec)
+{
+    WarpMMA ctx = mma_begin();
+    if (!ctx.ok) { d0 = c0; d1 = c1; d2 = c2; d3 = c3; return; }
+    uint32_t regs[10] = { a0, a1, a2, a3, b0, b1 };
+    memcpy(&regs[6], &c0, 4); memcpy(&regs[7], &c1, 4);
+    memcpy(&regs[8], &c2, 4); memcpy(&regs[9], &c3, 4);
+    mma_deposit(ctx, regs, 10);
+
+    float A[16][16], B[16][8], C[16][8];
+    for (int L = 0; L < 32; ++L) {
+        const uint32_t* r = mma_slot(ctx, L);
+        const int g = L >> 2, t = L & 3;
+        const float av[8] = {
+            dec(uint16_t(r[0] & 0xFFFF)), dec(uint16_t(r[0] >> 16)),
+            dec(uint16_t(r[1] & 0xFFFF)), dec(uint16_t(r[1] >> 16)),
+            dec(uint16_t(r[2] & 0xFFFF)), dec(uint16_t(r[2] >> 16)),
+            dec(uint16_t(r[3] & 0xFFFF)), dec(uint16_t(r[3] >> 16)) };
+        A[g][2*t+0]   = av[0]; A[g][2*t+1]   = av[1];   // k-block 0, rows g
+        A[g+8][2*t+0] = av[2]; A[g+8][2*t+1] = av[3];   // k-block 0, rows g+8
+        A[g][2*t+8]   = av[4]; A[g][2*t+9]   = av[5];   // k-block 1, rows g
+        A[g+8][2*t+8] = av[6]; A[g+8][2*t+9] = av[7];   // k-block 1, rows g+8
+        const float bv[4] = {
+            dec(uint16_t(r[4] & 0xFFFF)), dec(uint16_t(r[4] >> 16)),
+            dec(uint16_t(r[5] & 0xFFFF)), dec(uint16_t(r[5] >> 16)) };
+        B[2*t+0][g] = bv[0]; B[2*t+1][g] = bv[1];       // k-block 0
+        B[2*t+8][g] = bv[2]; B[2*t+9][g] = bv[3];       // k-block 1
+        C[g][2*t+0]   = bits_as_f32(r[6]); C[g][2*t+1]   = bits_as_f32(r[7]);
+        C[g+8][2*t+0] = bits_as_f32(r[8]); C[g+8][2*t+1] = bits_as_f32(r[9]);
+    }
+    const int g = ctx.lane >> 2, t = ctx.lane & 3;
+    auto dot = [&](int m, int n) { float s = C[m][n]; for (int k = 0; k < 16; ++k) s += A[m][k] * B[k][n]; return s; };
+    d0 = dot(g, 2*t+0); d1 = dot(g, 2*t+1); d2 = dot(g+8, 2*t+0); d3 = dot(g+8, 2*t+1);
+    mma_end();
+}
+
+} // namespace vgre_mma_detail
 
 // m16n8k16 FP16→FP32
 inline void vgre_mma_m16n8k16_f32_f16(
@@ -311,31 +415,8 @@ inline void vgre_mma_m16n8k16_f32_f16(
     unsigned b0, unsigned b1,
     float c0, float c1, float c2, float c3)
 {
-    // Unpack FP16 operands and do a scalar 16×8×16 GEMM accumulation.
-    // Each 'a' reg holds 2 FP16 values; each 'b' reg holds 2 FP16 values.
-    // For correctness in the CPU serial model we simply accumulate.
-    auto f16_lo = [](unsigned r) -> float {
-        uint16_t lo = static_cast<uint16_t>(r & 0xFFFF);
-        uint32_t f; memcpy(&f, &lo, sizeof(uint16_t));
-        f = (f & 0x8000u) << 16 | (((f & 0x7C00u) + 0x1C000u) << 13) | ((f & 0x03FFu) << 13);
-        float rv; memcpy(&rv, &f, sizeof(float)); return rv;
-    };
-    auto f16_hi = [](unsigned r) -> float {
-        uint16_t hi = static_cast<uint16_t>(r >> 16);
-        uint32_t f; memcpy(&f, &hi, sizeof(uint16_t));
-        f = (f & 0x8000u) << 16 | (((f & 0x7C00u) + 0x1C000u) << 13) | ((f & 0x03FFu) << 13);
-        float rv; memcpy(&rv, &f, sizeof(float)); return rv;
-    };
-    // A fragments: a0=(a[0],a[1]), a1=(a[2],a[3]), a2=(a[4],a[5]), a3=(a[6],a[7])
-    float A[8] = { f16_lo(a0), f16_hi(a0), f16_lo(a1), f16_hi(a1),
-                   f16_lo(a2), f16_hi(a2), f16_lo(a3), f16_hi(a3) };
-    float B[4] = { f16_lo(b0), f16_hi(b0), f16_lo(b1), f16_hi(b1) };
-    // Simplified: treat as flat dot-product contribution to 4 output accumulators
-    float acc[4] = {c0, c1, c2, c3};
-    for (int i = 0; i < 4; ++i)
-        for (int k = 0; k < 4; ++k)
-            acc[i] += A[k] * B[k % 4];
-    d0 = acc[0]; d1 = acc[1]; d2 = acc[2]; d3 = acc[3];
+    vgre_mma_detail::mma_m16n8k16_16bit(d0, d1, d2, d3, a0, a1, a2, a3, b0, b1,
+                                        c0, c1, c2, c3, vgre_mma_detail::f16b);
 }
 
 // m16n8k16 BF16→FP32
@@ -345,40 +426,40 @@ inline void vgre_mma_m16n8k16_f32_bf16(
     unsigned b0, unsigned b1,
     float c0, float c1, float c2, float c3)
 {
-    // BF16: top 16 bits of FP32 representation
-    auto bf16_lo = [](unsigned r) -> float {
-        uint32_t f = (r & 0xFFFF) << 16;
-        float rv; memcpy(&rv, &f, sizeof(float)); return rv;
-    };
-    auto bf16_hi = [](unsigned r) -> float {
-        uint32_t f = (r & 0xFFFF0000u);
-        float rv; memcpy(&rv, &f, sizeof(float)); return rv;
-    };
-    float A[8] = { bf16_lo(a0), bf16_hi(a0), bf16_lo(a1), bf16_hi(a1),
-                   bf16_lo(a2), bf16_hi(a2), bf16_lo(a3), bf16_hi(a3) };
-    float B[4] = { bf16_lo(b0), bf16_hi(b0), bf16_lo(b1), bf16_hi(b1) };
-    float acc[4] = {c0, c1, c2, c3};
-    for (int i = 0; i < 4; ++i)
-        for (int k = 0; k < 4; ++k)
-            acc[i] += A[k] * B[k % 4];
-    d0 = acc[0]; d1 = acc[1]; d2 = acc[2]; d3 = acc[3];
+    vgre_mma_detail::mma_m16n8k16_16bit(d0, d1, d2, d3, a0, a1, a2, a3, b0, b1,
+                                        c0, c1, c2, c3, vgre_mma_detail::bf16b);
 }
 
-// m16n8k8 TF32→FP32 (TF32 is FP32 with 10-bit mantissa truncation)
+// m16n8k8 TF32→FP32 (TF32 = FP32 with the low 13 mantissa bits cleared).
+// Operands: D{0..3}, A{0..3} (4 tf32 regs), B{0..1} (2 tf32 regs), C{0..3}.
 inline void vgre_mma_m16n8k8_tf32(
     float& d0, float& d1, float& d2, float& d3,
-    unsigned a0, unsigned a1,
+    unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+    unsigned b0, unsigned b1,
     float c0, float c1, float c2, float c3)
 {
-    // TF32: round to nearest with 10-bit mantissa (mask lower 13 bits)
-    auto tf32 = [](unsigned r) -> float {
-        uint32_t masked = r & 0xFFFFE000u;
-        float rv; memcpy(&rv, &masked, sizeof(float)); return rv;
-    };
-    float A[2] = { tf32(a0), tf32(a1) };
-    float acc[4] = {c0, c1, c2, c3};
-    for (int i = 0; i < 4; ++i) acc[i] += A[i % 2] * A[(i+1) % 2];
-    d0 = acc[0]; d1 = acc[1]; d2 = acc[2]; d3 = acc[3];
+    using namespace vgre_mma_detail;
+    WarpMMA ctx = mma_begin();
+    if (!ctx.ok) { d0 = c0; d1 = c1; d2 = c2; d3 = c3; return; }
+    uint32_t regs[10] = { a0, a1, a2, a3, b0, b1 };
+    memcpy(&regs[6], &c0, 4); memcpy(&regs[7], &c1, 4);
+    memcpy(&regs[8], &c2, 4); memcpy(&regs[9], &c3, 4);
+    mma_deposit(ctx, regs, 10);
+
+    float A[16][8], B[8][8], C[16][8];
+    for (int L = 0; L < 32; ++L) {
+        const uint32_t* r = mma_slot(ctx, L);
+        const int g = L >> 2, t = L & 3;
+        A[g][t]     = tf32b(r[0]); A[g+8][t]     = tf32b(r[1]);   // cols t
+        A[g][t+4]   = tf32b(r[2]); A[g+8][t+4]   = tf32b(r[3]);   // cols t+4
+        B[t][g]     = tf32b(r[4]); B[t+4][g]     = tf32b(r[5]);
+        C[g][2*t+0]   = bits_as_f32(r[6]); C[g][2*t+1]   = bits_as_f32(r[7]);
+        C[g+8][2*t+0] = bits_as_f32(r[8]); C[g+8][2*t+1] = bits_as_f32(r[9]);
+    }
+    const int g = ctx.lane >> 2, t = ctx.lane & 3;
+    auto dot = [&](int m, int n) { float s = C[m][n]; for (int k = 0; k < 8; ++k) s += A[m][k] * B[k][n]; return s; };
+    d0 = dot(g, 2*t+0); d1 = dot(g, 2*t+1); d2 = dot(g+8, 2*t+0); d3 = dot(g+8, 2*t+1);
+    mma_end();
 }
 
 // m8n8k4 FP64 — double-precision matrix multiply
@@ -475,23 +556,43 @@ inline void vgre_mma_m8n8k128_b1_xor(
     d1 = c1 + bits;
 }
 
-// ── INT8 MMA ──────────────────────────────────────────────────────────────────
-// m16n8k32 INT8×INT8→INT32
+// ── INT8 MMA (warp-collective) ──────────────────────────────────────────────
+// m16n8k32 INT8×INT8→INT32.  Operands: D{0..3}, A{0..3} (16 s8 = 4 regs × 4 s8),
+// B{0..1} (8 s8 = 2 regs × 4 s8), C{0..3}.  Each register packs 4 consecutive-k
+// s8 for a given row (A) / column (B).
 inline void vgre_mma_m16n8k32_s8(
     int& d0, int& d1, int& d2, int& d3,
-    unsigned a0, unsigned /*a1*/,
-    unsigned b0,
+    unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+    unsigned b0, unsigned b1,
     int c0, int c1, int c2, int c3)
 {
-    // Unpack 4× INT8 per register
-    auto i8 = [](unsigned r, int i) -> int {
-        return static_cast<int>(static_cast<int8_t>((r >> (8 * i)) & 0xFF));
-    };
-    int acc[4] = {c0, c1, c2, c3};
-    for (int k = 0; k < 4; ++k)
-        for (int n = 0; n < 4; ++n)
-            acc[n] += i8(a0, k) * i8(b0, k);
-    d0 = acc[0]; d1 = acc[1]; d2 = acc[2]; d3 = acc[3];
+    using namespace vgre_mma_detail;
+    WarpMMA ctx = mma_begin();
+    if (!ctx.ok) { d0 = c0; d1 = c1; d2 = c2; d3 = c3; return; }
+    uint32_t regs[10] = { a0, a1, a2, a3, b0, b1,
+                          (uint32_t)c0, (uint32_t)c1, (uint32_t)c2, (uint32_t)c3 };
+    mma_deposit(ctx, regs, 10);
+
+    int A[16][32], B[32][8], C[16][8];
+    for (int L = 0; L < 32; ++L) {
+        const uint32_t* r = mma_slot(ctx, L);
+        const int g = L >> 2, t = L & 3;
+        for (int e = 0; e < 4; ++e) {
+            const int kc = 4 * t + e;                 // k within the 0..15 half
+            A[g][kc]       = i8(r[0], e);             // k-half 0, rows g
+            A[g+8][kc]     = i8(r[1], e);             // k-half 0, rows g+8
+            A[g][kc+16]    = i8(r[2], e);             // k-half 1, rows g
+            A[g+8][kc+16]  = i8(r[3], e);             // k-half 1, rows g+8
+            B[kc][g]       = i8(r[4], e);             // k-half 0
+            B[kc+16][g]    = i8(r[5], e);             // k-half 1
+        }
+        C[g][2*t+0]   = (int)r[6]; C[g][2*t+1]   = (int)r[7];
+        C[g+8][2*t+0] = (int)r[8]; C[g+8][2*t+1] = (int)r[9];
+    }
+    const int g = ctx.lane >> 2, t = ctx.lane & 3;
+    auto dot = [&](int m, int n) { int s = C[m][n]; for (int k = 0; k < 32; ++k) s += A[m][k] * B[k][n]; return s; };
+    d0 = dot(g, 2*t+0); d1 = dot(g, 2*t+1); d2 = dot(g+8, 2*t+0); d3 = dot(g+8, 2*t+1);
+    mma_end();
 }
 
 // ── Hopper wgmma PTX helper functions ────────────────────────────────────────

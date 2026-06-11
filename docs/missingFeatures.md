@@ -34,15 +34,24 @@ actual source location.
 - **Gap**: the ring AllReduce shares one buffer and synchronizes with a barrier each step rather than each rank owning its slice and pipelining reduce-scatter + all-gather. Functionally correct, but serializes what should overlap.
 - **Fix**: per-rank slice ownership; pipelined reduce-scatter/all-gather; keep the Kahan-compensated reduction (that part is already good).
 
-### 1.3 WMMA / Tensor-core emulation — flat dot-product
-- **Location**: `include/vgre/compiler/wmma_emulation.h:333` (`// Simplified: treat as flat dot-product contribution`), `:502` (descriptor encoding "simplified")
-- **Gap**: `wmma::mma_sync` is emulated as a flat dot-product rather than a tiled 16×16×16 (or 8×8×4) fragment MMA with the real fragment-to-lane mapping. Numerically close for FP32 accumulate but wrong fragment layout means mixed-precision (FP16/BF16/TF32/INT8) accumulation order and rounding differ from hardware.
-- **Fix**: implement the real fragment layout per shape (m16n16k16, etc.) with correct accumulator tiling so results are bit-comparable for the supported precisions.
+### 1.3 WMMA / Tensor-core emulation — flat dot-product — ✅ FIXED (2026-06-11, Track 9)
+- **Location**: `include/vgre/compiler/wmma_emulation.h` (raw-PTX `vgre_mma_*` helpers).
+- **Was**: the raw-PTX `mma.sync` helpers computed a meaningless flat dot-product
+  AND always threw (brace operands weren't flattened), so the PTX tensor-core path
+  never ran. **Now**: a real warp-collective MMA — each lane deposits its fragment
+  into a per-warp scratch buffer, barriers, the full tile GEMM is reconstructed via
+  the PTX-ISA fragment→(row,col) maps, and per-lane outputs are scattered back.
+  Implemented for FP16/BF16/TF32/INT8 (the precisions this gap names). Verified
+  bit-exact (f16 0.00e+00, s8 exact) by `test_tensorcore_mma`. See
+  implementationPlan.md Track 9.
 
-### 1.4 MPS multi-client transport — "simplified" pipe handling
-- **Location**: `src/advanced/mps_control.cpp:469` (`// For multi-client we need to create a new pipe each time. Simplified:`)
-- **Gap**: the Windows named-pipe multi-client path is simplified; concurrent clients may contend on one pipe instance.
-- **Fix**: per-client pipe instance (Windows `CreateNamedPipe` with `PIPE_UNLIMITED_INSTANCES` + an accept loop), matching the POSIX per-connection socket model.
+### 1.4 MPS multi-client transport — "simplified" pipe handling — ✅ FIXED (2026-06-11, Track 14)
+- **Location**: `src/advanced/mps_control.cpp` (`createSecurePipeInstance`, accept loop).
+- **Was**: the accept loop re-created each next-client instance with a NULL DACL
+  (dropping the CREATOR_OWNER+SYSTEM ACL — a security regression) and a `maxClients_`
+  instance cap. **Now**: `createSecurePipeInstance()` builds the full DACL and uses
+  `PIPE_UNLIMITED_INSTANCES`, and is shared by `start()` and the accept loop so every
+  per-client instance is equally secured with no cap. See implementationPlan.md Track 14.
 
 ### 1.5 cuSPARSE format conversion — `sparse_view` incomplete
 - **Location**: `src/api/cusparse/sparse_view.cpp:106` (`// This would need a full conversion implementation`)
@@ -96,9 +105,14 @@ should either be implemented or carry a documented, framework-irrelevant reason.
 - **Reality**: there is no `.github/workflows`. The build and full test suite have only ever run on Linux. The `#if defined(_WIN32)` / `__APPLE__` branches compile in isolation but have **never been built or tested end-to-end** on those OSes.
 - **Fix**: add a GitHub Actions matrix (`ubuntu-latest`, `windows-latest`, `macos-latest`) that configures, builds, and runs the test suite. Until that is green, the README/PROJECT_STATUS must say "Linux verified; Win/macOS unverified."
 
-### 3.2 macOS NUMA / affinity is a stub
-- **Location**: `src/core/scheduler_numa.cpp:16` (`// macOS: simplified approach based on physical CPU count`)
-- **Gap**: macOS has no `pthread_setaffinity_np`; the affinity path is a no-op approximation. Acceptable as a boundary but must be documented and the perf-core/efficiency-core split (Apple Silicon) handled.
+### 3.2 macOS NUMA / affinity is a stub — ✅ FIXED (2026-06-11, Track 21)
+- **Location**: `src/core/scheduler_numa.cpp`.
+- **Was**: the active macOS branch was a physical-CPU-count stub; a real
+  `thread_policy_set` P/E-core implementation existed but was dead code (shadowed by
+  a duplicate `#elif __APPLE__`). **Now**: the stub is removed so the real path
+  compiles — workers are split by Apple-Silicon performance (`hw.perflevel0`) vs
+  efficiency (`hw.perflevel1`) cores via `THREAD_AFFINITY_POLICY` tags. Documented
+  boundary: macOS removed hard pinning, so these are scheduler hints, not hard pins.
 
 ### 3.3 Lightweight footprint audit (unmeasured)
 - **Gap**: binary size, RSS at idle, and the dependency surface (LLVM-18, OpenBLAS/LAPACK, optional libibverbs/libsecret/tss2/OpenCL/grpc/protobuf/sqlite) have never been measured or minimized. A "lightweight" claim needs: a `-DVGRE_MINIMAL` build that drops every optional dep, a measured `.so` size, and a documented runtime memory floor.
