@@ -38,6 +38,9 @@
 #include <mach/thread_info.h>
 #include <mach/mach_time.h>
 #include <dlfcn.h>
+#include <sys/stat.h>
+#include <IOKit/IOKitLib.h>             // io_iterator_t, IOServiceMatching, …
+#include <CoreFoundation/CoreFoundation.h>  // CFDataRef, CFRelease, …
 #endif
 
 #if defined(_WIN32)
