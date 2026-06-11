@@ -101,7 +101,11 @@ public:
         std::vector<size_t> test_sizes = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024};
         
         for (size_t size : test_sizes) {
-            void* aligned_ptr = std::aligned_alloc(8, size);
+            // C11 requires aligned_alloc's size to be a multiple of the alignment.
+            // glibc is lenient, but macOS/Windows enforce it (return NULL otherwise),
+            // so round the request up to a multiple of 8.
+            size_t alloc_size = (size + 7) & ~static_cast<size_t>(7);
+            void* aligned_ptr = std::aligned_alloc(8, alloc_size);
             if (!aligned_ptr) {
                 std::cout << "FAIL: aligned_alloc failed for size " << size << std::endl;
                 all_passed = false;
