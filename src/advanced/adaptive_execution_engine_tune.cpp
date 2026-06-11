@@ -184,8 +184,8 @@ void AdaptiveExecutionEngine::updateHardwareMetrics(int cores, double clockGHz,
       int simdLanes = 1;
       bool hasFMA = false;
       
-#if defined(__GNUC__) || defined(__clang__)
-      // GCC/Clang: use builtin CPU feature detection
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+      // x86 GCC/Clang: __builtin_cpu_supports is an x86-only target builtin.
       if (__builtin_cpu_supports("avx512f")) {
           simdLanes = 16;
           hasFMA = true;  // AVX-512F includes FMA
@@ -196,8 +196,12 @@ void AdaptiveExecutionEngine::updateHardwareMetrics(int cores, double clockGHz,
           simdLanes = 4;
           hasFMA = __builtin_cpu_supports("fma");
       }
-#elif defined(_MSC_VER)
-      // MSVC: use __cpuid for feature detection
+#elif defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+      // ARM64 (Apple Silicon, etc.): 128-bit NEON → 4 fp32 lanes, with FMA (FMLA).
+      simdLanes = 4;
+      hasFMA = true;
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+      // MSVC x86: use __cpuid for feature detection
       int regs[4];
       __cpuid(regs, 1);
       bool hasAVX = (regs[2] & (1 << 28)) != 0;
