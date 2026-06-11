@@ -25,8 +25,7 @@
 #endif
 
 #if defined(__APPLE__)
-#include <IOKit/IOKitLib.h>
-#include <sys/loadavg.h>
+#include <IOKit/IOKitLib.h>   // linked via IOKit framework (see CMakeLists APPLE)
 #include <sys/sysctl.h>
 #endif
 
