@@ -112,6 +112,10 @@ jobs:
         # AND spins the block-worker pool; under -j2 that oversubscribes RAM/forks
         # and the heavier kernel compiles fail ("Failed to register kernel"). Run
         # serially on macOS — slower but stable — until the pool is right-sized.
+        # VGRE_LOG_LEVEL=ERROR surfaces the JIT/parse error text (the logger
+        # defaults to NONE) so macOS bring-up failures are diagnosable from CI.
+        env:
+          VGRE_LOG_LEVEL: ERROR
         run: ctest --output-on-failure -j 1 --timeout 300
 
   # ── Windows: bring-up (informational until green) ────────────────────────
