@@ -86,3 +86,15 @@ target_include_directories(vgre_api PUBLIC
 if(SQLITE3_LIBRARY)
     target_compile_definitions(vgre_api PRIVATE VGRE_HAS_SQLITE)
 endif()
+
+# macOS: cupti_shim.cpp probes IOKit/CoreFoundation for a physical GPU. Attach the
+# frameworks as a PUBLIC usage requirement so every consumer of these objects —
+# the vgre/vgre_cudart shared libs AND test executables that link the vgre_api
+# objects directly — resolves _IOServiceMatching/_CFRelease/etc.
+if(APPLE)
+    find_library(_vgre_api_iokit IOKit)
+    find_library(_vgre_api_cf CoreFoundation)
+    if(_vgre_api_iokit AND _vgre_api_cf)
+        target_link_libraries(vgre_api PUBLIC ${_vgre_api_iokit} ${_vgre_api_cf})
+    endif()
+endif()
