@@ -566,7 +566,17 @@ LONG
 }
 #else
 void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
+  // A write to an mprotect-protected page is a SIGSEGV/SEGV_ACCERR on Linux but a
+  // SIGBUS on macOS (with a BUS_* si_code, NOT SEGV_ACCERR). Only gate SIGSEGV on
+  // SEGV_ACCERR; for SIGBUS fall through to the region-bounds lookup below, which
+  // is the real security gate (it only re-protects addresses inside a managed
+  // UVM region). Without this, the macOS SIGBUS handler bailed immediately and
+  // the UVM write fault crashed ("Bus error").
+#if defined(__APPLE__)
+  if (sig == SIGSEGV && si->si_code != SEGV_ACCERR) goto fallback;
+#else
   if (si->si_code != SEGV_ACCERR) goto fallback;
+#endif
 
   void *addr;
   MemoryManager *mgr;
