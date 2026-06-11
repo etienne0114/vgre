@@ -385,6 +385,13 @@ if(APPLE)
         set(OpenMP_CXX_FLAGS     "-Xpreprocessor -fopenmp -I${_brew_libomp}/include")
         set(OpenMP_CXX_LIB_NAMES "omp")
         set(OpenMP_omp_LIBRARY   "${_brew_libomp}/lib/libomp.dylib")
+        # Cache the prefix so vgre_target_link_openmp() can see it even when a
+        # target is defined in a subdirectory (function scope inherits a copy of
+        # the parent scope at add_subdirectory time, but a CACHE var is always
+        # visible). libomp is keg-only on Homebrew: omp.h lives under its own
+        # prefix, NOT /opt/homebrew/include, so every target needs the explicit
+        # -I or `#include <omp.h>` fails (the macOS CI build failure).
+        set(VGRE_APPLE_LIBOMP "${_brew_libomp}" CACHE INTERNAL "Homebrew libomp prefix")
         message(STATUS "OpenMP: Homebrew libomp at ${_brew_libomp}")
     else()
         message(WARNING
@@ -438,7 +445,16 @@ function(vgre_target_link_openmp target_name visibility)
         # GCC and non-driver Clang: use -fopenmp compile flag.
         target_compile_options(${target_name} ${visibility} "-fopenmp")
 
-        if(_VGRE_LIBOMP_EXTRA)
+        if(APPLE AND VGRE_APPLE_LIBOMP)
+            # Homebrew libomp is keg-only: add its include dir (for <omp.h>) and
+            # lib dir (for -lomp) explicitly — Homebrew clang@18 accepts -fopenmp
+            # but does not know where the separate libomp keg lives.
+            target_include_directories(${target_name} ${visibility}
+                "${VGRE_APPLE_LIBOMP}/include")
+            target_link_directories(${target_name} ${visibility}
+                "${VGRE_APPLE_LIBOMP}/lib")
+            target_link_libraries(${target_name} ${visibility} "-lomp")
+        elseif(_VGRE_LIBOMP_EXTRA)
             # Force the linker to find libomp by passing the directory and -lomp explicitly.
             get_filename_component(_omp_dir "${_VGRE_LIBOMP_EXTRA}" DIRECTORY)
             target_link_directories(${target_name} ${visibility} "${_omp_dir}")

@@ -549,6 +549,12 @@ add_test(NAME FlashAttention COMMAND test_flash_attention)
 # (cold) compile, which surfaced as a non-deterministic non-causal failure.
 set_tests_properties(FlashAttention PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
 
+add_executable(test_tensorcore_mma integration/test_tensorcore_mma.cpp)
+target_link_libraries(test_tensorcore_mma PRIVATE vgre)
+add_test(NAME TensorCoreMMA COMMAND test_tensorcore_mma)
+# JIT-compiles warp-collective mma kernels — serialise with the other JIT tests.
+set_tests_properties(TensorCoreMMA PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+
 add_executable(test_cublaslt api/test_cublaslt.cpp)
 target_link_libraries(test_cublaslt PRIVATE vgre_cudart)
 add_test(NAME CuBLASLtFunctional COMMAND test_cublaslt)

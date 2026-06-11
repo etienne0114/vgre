@@ -24,19 +24,19 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 6 | Parallel-test stability (bounded -j + targeted lock) | P0 | §6.1 | ✅ Done |
 | 7 | Flash Attention real tiled online-softmax | P1 | §1.1 | ✅ Done |
 | 8 | NCCL pipelined ring (reduce-scatter/all-gather) | P1 | §1.2 | ✅ Done |
-| 9 | WMMA real fragment-layout MMA | P1 | §1.3 | 🔴 Not started |
+| 9 | WMMA real fragment-layout MMA | P1 | §1.3 | ✅ Done |
 | 10 | cuSPARSE `sparse_view` conversions | P1 | §1.5 | ✅ Done |
 | 11 | cuRAND logarithmic skip-ahead | P1 | §1.8 | ✅ Done |
 | 12 | PTX carry-chain + full addressing | P1 | §1.7 | ✅ Done |
 | 13 | Graph optimizer real liveness DCE | P1 | §1.6 | ✅ Done |
-| 14 | MPS per-client pipe instances (Windows) | P1 | §1.4 | 🔴 Not started |
+| 14 | MPS per-client pipe instances (Windows) | P1 | §1.4 | ✅ Done |
 | 15 | `NOT_SUPPORTED` audit (cuSPARSE/cuSOLVER) | P1 | §2.1, §2.2 | ✅ Audited |
 | 16 | VMM IPC handle (cuMemRetainAllocationHandle) | P1 | §2.3–2.5 | ✅ Done |
 | 17 | FP8 (E4M3/E5M2) + FP4 quantized compute | P1 | §5.1 | ✅ Core done |
 | 18 | Paged Attention + KV-cache manager | P1 | §5.2 | ✅ Done |
 | 19 | Versioned multi-arch Docker images | P1 | §4.3 | 🟡 Artifacts ready |
 | 20 | Minimal build profile + footprint report | P2 | §3.3 | ✅ Done |
-| 21 | macOS affinity (P/E cores) + documented boundary | P2 | §3.2 | 🔴 Not started |
+| 21 | macOS affinity (P/E cores) + documented boundary | P2 | §3.2 | ✅ Done |
 | 22 | Continuous batching request scheduler | P2 | §5.3 | ✅ Done |
 | 23 | Large-PTX fast-tier JIT (compile speed) | P2 | §5.4 | ✅ Done |
 | 24 | PyTorch end-to-end validation harness | P2 | §5.5 | ✅ Done |
@@ -62,9 +62,17 @@ breakage that has now been fixed:
   **`llvm-18-dev`** on Linux (the runner's default resolved to 17, < the required
   18), with explicit `LLVM_DIR`. Making the code itself multi-LLVM-version is a
   follow-up; pinning keeps the matrix honest now.
-- **Windows**: `choco install llvm` ships clang without `LLVMConfig.cmake`, so
-  configure can't find LLVM — documented as the remaining Windows bring-up item
-  (needs a prebuilt LLVM-18 dev tree or vcpkg `llvm`); stays informational.
+- **macOS `omp.h` not found** (2026-06-11): `vgre_target_link_openmp()` applied
+  `-fopenmp` but never the keg-only libomp include path, so every TU including
+  `openmp_helper.h` failed. Fixed: capture the libomp prefix in a CACHE var
+  (`VGRE_APPLE_LIBOMP`, visible inside the function across subdirectories) and add
+  its `include/` + `lib/` to each target on APPLE.
+- **Windows LLVM** (2026-06-11): `choco install llvm` ships clang without
+  `LLVMConfig.cmake`, so configure couldn't find LLVM. Switched the Windows job to
+  download the **official LLVM-18.1.8 windows-msvc release** (bundles
+  `lib/cmake/llvm/`) and build with its `clang-cl`. This resolves the configure
+  blocker; remaining Windows build/link issues are surfaced by CI (stays
+  informational `continue-on-error`).
 **Acceptance**: Linux green + uploaded logs; macOS/Windows tracked to green.
 
 ### Track 2 — Honest status documentation
@@ -146,22 +154,39 @@ ownership; reduce-scatter then all-gather, overlapping steps (no global barrier
 per round). Retain Kahan-compensated accumulation.
 **Acceptance**: bit-identical to current results; measurable overlap vs barrier model.
 
-### Track 9 — WMMA real fragment-layout MMA
-**File**: `include/vgre/compiler/wmma_emulation.h` (~333, ~502).
-**Scoping note (2026-06-10):** the high-level `nvcuda::wmma::mma_sync` C++ API is
-already correct — `load_matrix_sync` materialises the full tile per serial thread
-and the AVX-512 GEMM operates on it. The defect is confined to the low-level
-raw-PTX `mma.sync.aligned.*` helpers (`vgre_mma_m16n8k16_*`, the "flat
-dot-product" at ~333), used by Triton/CUTLASS-generated PTX. These are
-**warp-collective**: a single lane holds only 8 of the 16 K-elements of A and 4
-of B, so its 4 output elements cannot be computed correctly in isolation. A
-correct fix is therefore NOT local — it requires buffering all 32 lanes' A/B/C
-fragments for a warp, computing the full 16×8×16 (etc.) GEMM once, and scattering
-the per-lane D fragments back, which needs warp-level coordination in the serial
-execution model. **Deferred** until the warp-collective fragment buffer exists;
-implementing the per-shape fragment→lane maps (PTX ISA 9.7.13.4.x) is the second
-half. Do not "fix" the helper in place — any per-lane-only result is still wrong.
-**Acceptance**: results bit-comparable to a reference MMA for each supported precision.
+### Track 9 — WMMA real fragment-layout MMA — ✅ done (2026-06-11)
+**Files**: `include/vgre/compiler/wmma_emulation.h`, `src/compiler/ptx/ptx_translator_map.cpp`,
+`src/compiler/llvm_translation_codegen.cpp`, `src/compiler/llvm_translation_engine.cpp`,
+`include/vgre/compiler/cpu_cuda_warp.h`.
+**What was wrong**: the raw-PTX `mma.sync.aligned.*` helpers (`vgre_mma_m16n8k16_*`,
+etc., used by Triton/CUTLASS-generated PTX) computed a meaningless "flat
+dot-product" — `acc[i] += A[k]*B[k]` into all 4 outputs identically. These are
+**warp-collective**: a lane holds only a *fragment* (8 of A's 256 elements for
+m16n8k16.f16), so its outputs can't be computed alone. Worse, `splitOperands`
+keeps each `{d0,d1,d2,d3}` brace group as ONE token, so the old lambdas indexing
+`o[0..13]` *always threw* — the PTX path never actually ran.
+**Fix (the warp-collective buffer the old note said was needed)**:
+- Added a per-warp tensor-core fragment scratch (`vgre_jit_get_mma_buffer`, a
+  32-lane × 16-u32 buffer) alongside the existing warp-shuffle buffer; codegen
+  detects `vgre_mma_` in the translated source (`usesMma`), allocates the buffer,
+  and forces one-OS-thread-per-lane dispatch + the block barrier — the exact
+  mechanism `__shfl`/`__ballot` already use.
+- Each helper now deposits its lane's raw registers, barriers, reconstructs the
+  full A/B/C tiles via the PTX-ISA fragment→(row,col) maps (ISA 9.7.14.4.x),
+  computes `D = A·B + C`, and scatters this lane's 4 outputs back.
+- Implemented the real layouts for **m16n8k16 f16, m16n8k16 bf16, m16n8k8 tf32,
+  m16n8k32 s8** (the precisions §1.3 names). Fixed the tf32/s8 helper signatures
+  (they were missing B / extra A operands) and added `mma_emit()` to flatten the
+  brace groups into the correct flat register list.
+**Test** (`test_tensorcore_mma`, `TensorCoreMMA`): packs A/B/C into per-lane
+fragments via the canonical ISA layout, drives the helper through the real
+`vgre_jit_block_dispatch` warp path, reassembles D and checks it against an
+INDEPENDENT `A·B+C` reference — f16 matches to **0.00e+00**, s8 is **bit-exact**.
+A wrong fragment map yields a wrong D, so this proves the layout. The PTX
+brace-flattening is covered in `test_ptx_translate` (mma.sync → 14-operand call).
+**Acceptance met**: results bit-comparable to a reference MMA per precision.
+**Out of scope (untouched, niche, not in §1.3)**: the m8n8k32 s4/u4, m8n8k128 b1,
+and m8n8k4 f64 helpers — these would each need their own ISA fragment map.
 
 ### Track 10 — cuSPARSE `sparse_view` conversions
 **File**: `src/api/cusparse/sparse_view.cpp:106`. Implement the missing
@@ -184,10 +209,20 @@ flag across `addc/subc/madc`; full addressing grammar (`[reg+imm]`, `ld.v2/v4`).
 removal; never drop a node with a live consumer.
 **Acceptance**: a graph with a node feeding a live output is not mis-eliminated.
 
-### Track 14 — MPS per-client pipe instances (Windows)
-**File**: `src/advanced/mps_control.cpp:469`. `PIPE_UNLIMITED_INSTANCES` + accept
-loop, per-client instance — matching the POSIX per-connection model.
-**Acceptance**: ≥4 concurrent MPS clients on Windows without pipe contention.
+### Track 14 — MPS per-client pipe instances (Windows) — ✅ done (2026-06-11)
+**Files**: `src/advanced/mps_control.cpp`, `include/vgre/advanced/mps_control.h`.
+The accept loop already handed each client its own pipe instance, but two real
+defects remained: (1) it re-created the next instance with `maxClients_` as the
+instance cap, and (2) it passed a **NULL** security descriptor on re-create,
+silently dropping the CREATOR_OWNER+SYSTEM DACL that `start()` set on the first
+instance (a security regression — later clients' pipes were world-accessible).
+Extracted `createSecurePipeInstance()` (builds the DACL, creates with
+**`PIPE_UNLIMITED_INSTANCES`**) and call it from BOTH `start()` and the accept
+loop, so every per-client instance carries the same ACL and there is no instance
+cap. The "Simplified:" comment was stale and is removed.
+**Acceptance**: concurrent MPS clients each get an equally-secured instance with
+no contention. (Windows-only path; verified by inspection + the Windows CI build
+once Track 1's Windows bring-up configures.)
 
 ### Track 15 — `NOT_SUPPORTED` audit (cuSPARSE / cuSOLVER) — ✅ audited 2026-06-10
 **Files**: `cusparse_triangular.cpp`, `cusparse_factorization.cpp`, `cusolver_core.cpp`.
@@ -292,9 +327,16 @@ cleanly and roughly halves the on-disk footprint — full build 196.9 MB
 **Acceptance met**: a lean profile drops the optional deps and the footprint is
 measured/reported.
 
-### Track 21 — macOS affinity (P/E cores) + documented boundary
-`src/core/scheduler_numa.cpp` macOS path: use `thread_policy_set` affinity tags;
-handle Apple-Silicon performance/efficiency core split; document the boundary.
+### Track 21 — macOS affinity (P/E cores) + documented boundary — ✅ done (2026-06-11)
+`src/core/scheduler_numa.cpp`. The real implementation (Mach `thread_policy_set`
+with `THREAD_AFFINITY_POLICY`, splitting workers by Apple-Silicon performance
+(`hw.perflevel0.physicalcpu`) vs efficiency (`hw.perflevel1.physicalcpu`) cores)
+already existed — but as **dead code**: there were two `#elif defined(__APPLE__)`
+branches, and the earlier physical-CPU-count *stub* shadowed the real one (the
+preprocessor takes the first match). Removed the stub so the real P/E-core
+affinity-tag path is now compiled, and documented the boundary: macOS removed
+hard CPU pinning (`pthread_setaffinity_np`), so these are scheduler *hints* that
+group same-tag workers for L2 affinity, not hard pins.
 
 ### Track 22 — Continuous batching request scheduler — ✅ done (2026-06-10)
 **Files**: `ContinuousBatchScheduler` in `include/vgre/core/kv_cache.h` +

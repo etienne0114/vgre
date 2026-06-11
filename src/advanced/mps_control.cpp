@@ -266,28 +266,13 @@ MPSServer::~MPSServer() {
     stop();
 }
 
-bool MPSServer::start() {
 #if defined(_WIN32)
-    // Windows: use named pipe instead of Unix domain socket.
-    std::string pipeName;
-    if (socketPath_.find("\\\\.\\pipe\\") == 0 || socketPath_.find("\\\\?\\pipe\\") == 0) {
-        // Already a properly-formed named pipe path.
-        pipeName = socketPath_;
-    } else if (!socketPath_.empty() && socketPath_[0] == '/') {
-        // POSIX-style path (e.g. /tmp/vgre_mps.sock, /run/user/.../vgre_mps.sock):
-        // derive pipe name from the basename.
-        auto sep = socketPath_.rfind('/');
-        std::string base = (sep != std::string::npos) ? socketPath_.substr(sep + 1) : socketPath_;
-        if (base.empty()) base = "vgre_mps";
-        // Strip .sock suffix for a cleaner pipe name.
-        if (base.size() > 5 && base.substr(base.size() - 5) == ".sock")
-            base = base.substr(0, base.size() - 5);
-        pipeName = "\\\\.\\pipe\\" + base;
-    } else {
-        pipeName = "\\\\.\\pipe\\" + socketPath_;
-    }
-
-    // Build a DACL allowing only CREATOR_OWNER + SYSTEM — no other local users.
+// Create one secure named-pipe instance with a CREATOR_OWNER + SYSTEM DACL and
+// PIPE_UNLIMITED_INSTANCES so every concurrent client gets its own instance with
+// the same ACL. Called for the initial listen instance (start) and for each
+// subsequent per-client instance (acceptLoop) — previously acceptLoop re-created
+// the pipe with a NULL DACL, silently dropping the security descriptor.
+mps_handle_t MPSServer::createSecurePipeInstance(const std::string& pipeName) {
     PSECURITY_DESCRIPTOR pSD = nullptr;
     PACL pACL = nullptr;
     PSID pOwnerSid = nullptr, pSystemSid = nullptr;
@@ -319,11 +304,11 @@ bool MPSServer::start() {
     sa.lpSecurityDescriptor = pSD;
     sa.bInheritHandle = FALSE;
 
-    listenFd_ = CreateNamedPipeA(
+    HANDLE h = CreateNamedPipeA(
         pipeName.c_str(),
         PIPE_ACCESS_DUPLEX,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        maxClients_,
+        PIPE_UNLIMITED_INSTANCES,
         65536, 65536,
         0, &sa);
 
@@ -332,9 +317,35 @@ bool MPSServer::start() {
     if (pACL) LocalFree(pACL);
     if (pSD) LocalFree(pSD);
 
-    if (listenFd_ == INVALID_HANDLE_VALUE) {
+    return (h == INVALID_HANDLE_VALUE) ? MPS_INVALID_HANDLE
+                                       : reinterpret_cast<mps_handle_t>(h);
+}
+#endif
+
+bool MPSServer::start() {
+#if defined(_WIN32)
+    // Windows: use named pipe instead of Unix domain socket.
+    std::string pipeName;
+    if (socketPath_.find("\\\\.\\pipe\\") == 0 || socketPath_.find("\\\\?\\pipe\\") == 0) {
+        // Already a properly-formed named pipe path.
+        pipeName = socketPath_;
+    } else if (!socketPath_.empty() && socketPath_[0] == '/') {
+        // POSIX-style path (e.g. /tmp/vgre_mps.sock, /run/user/.../vgre_mps.sock):
+        // derive pipe name from the basename.
+        auto sep = socketPath_.rfind('/');
+        std::string base = (sep != std::string::npos) ? socketPath_.substr(sep + 1) : socketPath_;
+        if (base.empty()) base = "vgre_mps";
+        // Strip .sock suffix for a cleaner pipe name.
+        if (base.size() > 5 && base.substr(base.size() - 5) == ".sock")
+            base = base.substr(0, base.size() - 5);
+        pipeName = "\\\\.\\pipe\\" + base;
+    } else {
+        pipeName = "\\\\.\\pipe\\" + socketPath_;
+    }
+
+    listenFd_ = createSecurePipeInstance(pipeName);
+    if (listenFd_ == MPS_INVALID_HANDLE) {
         VGRE_LOG_ERROR("MPS", "CreateNamedPipe failed: " + std::to_string(GetLastError()));
-        listenFd_ = MPS_INVALID_HANDLE;
         return false;
     }
     socketPath_ = pipeName; // store resolved pipe name
@@ -466,21 +477,20 @@ void MPSServer::acceptLoop() {
             break;
         }
         // On Windows the "listen fd" IS the client pipe after ConnectNamedPipe.
-        // For multi-client we need to create a new pipe each time. Simplified:
-        // we create a fresh pipe for the next client and hand off the current one.
+        // Hand off the connected instance to a worker and create a fresh, equally
+        // secured instance for the next client (per-client pipe instances, the
+        // POSIX per-connection model). createSecurePipeInstance re-applies the
+        // full DACL and uses PIPE_UNLIMITED_INSTANCES so concurrent clients never
+        // contend on one instance.
         uint32_t slot = slotCounter.fetch_add(1, std::memory_order_relaxed);
         VGRE_LOG_INFO("MPS", "Client connected: slot=" + std::to_string(slot));
         mps_handle_t clientFd = listenFd_;
-        // Create next pipe for the following client.
-        std::string pipeName = socketPath_;
-        listenFd_ = CreateNamedPipeA(
-            pipeName.c_str(), PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            maxClients_, 65536, 65536, 0, nullptr);
-        if (listenFd_ == INVALID_HANDLE_VALUE) {
+        listenFd_ = createSecurePipeInstance(socketPath_);
+        if (listenFd_ == MPS_INVALID_HANDLE) {
             VGRE_LOG_ERROR("MPS", "CreateNamedPipe for next client failed");
-            listenFd_ = MPS_INVALID_HANDLE;
             running_.store(false);
+            // Still service the already-connected client before exiting the loop.
+            std::thread([this, clientFd, slot]{ handleClient(clientFd, slot); }).detach();
             break;
         }
         std::thread([this, clientFd, slot]{ handleClient(clientFd, slot); }).detach();

@@ -139,6 +139,13 @@ public:
 private:
     void acceptLoop();
     void handleClient(mps_handle_t h, uint32_t slotId);
+#if defined(_WIN32)
+    // Create one secure named-pipe instance (CREATOR_OWNER + SYSTEM DACL,
+    // PIPE_UNLIMITED_INSTANCES). Used by both start() and acceptLoop() so every
+    // per-client instance carries the same ACL. Returns MPS_INVALID_HANDLE on
+    // failure. `pipeName` must be the resolved \\.\pipe\... path.
+    mps_handle_t createSecurePipeInstance(const std::string& pipeName);
+#endif
 
     std::string socketPath_;
     mps_handle_t listenFd_   = MPS_INVALID_HANDLE;

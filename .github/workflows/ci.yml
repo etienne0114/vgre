@@ -111,17 +111,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # NOTE: choco's `llvm` package ships clang but NOT the LLVM CMake package
-      # (no LLVMConfig.cmake), so the configure step still fails to find LLVM.
-      # Windows needs a prebuilt LLVM-18 dev tree with CMake config (official
-      # LLVM release artifact or a vcpkg `llvm` port) — tracked as the remaining
-      # Windows bring-up item; the job stays continue-on-error until then.
-      - name: Install LLVM
-        run: choco install llvm ninja sqlite -y
+      # choco's `llvm` ships clang but NOT the LLVM CMake package (no
+      # LLVMConfig.cmake), so `find_package(LLVM)` fails at configure. Use the
+      # official LLVM-18 Windows release tarball instead — it bundles
+      # lib/cmake/llvm/ — and build with its own clang++ (MSVC-ABI) so the JIT
+      # links the LLVM-18 API VGRE targets. Matches the macOS llvm@18 pin.
+      - name: Install LLVM 18 (with CMake config) + Ninja
+        shell: pwsh
+        run: |
+          choco install ninja sqlite -y --no-progress
+          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz"
+          curl.exe -L --retry 3 -o "$env:RUNNER_TEMP\llvm.tar.xz" $url
+          New-Item -ItemType Directory -Force -Path C:\llvm | Out-Null
+          tar -xf "$env:RUNNER_TEMP\llvm.tar.xz" -C C:\llvm --strip-components=1
+          "C:\llvm\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & C:\llvm\bin\clang++.exe --version
 
       - name: Configure
         shell: pwsh
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        # Build with LLVM-18's clang-cl driver so the MSVC-ABI runtime (VS 2022 on
+        # the runner) and the LLVM-18 libraries agree. VS provides the Windows SDK
+        # + STL; clang-cl picks them up via the standard registry probe.
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER="C:/llvm/bin/clang-cl.exe"
+          -DCMAKE_CXX_COMPILER="C:/llvm/bin/clang-cl.exe"
+          -DLLVM_DIR="C:/llvm/lib/cmake/llvm"
+          -DVGRE_WARNINGS_AS_ERRORS=OFF
 
       - name: Build
         run: cmake --build build --parallel

@@ -346,6 +346,13 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   std::string translatedSource = PTXTranslator::translate(kernelSource);
   oss << translatedSource << "\n\n";
 
+  // Raw-PTX tensor-core mma.sync lowers to warp-collective vgre_mma_*() helpers
+  // (wmma_emulation.h). Like __shfl/__ballot, a correct result needs every lane
+  // of the warp resident simultaneously (each lane holds only a fragment of
+  // A/B/C), so the kernel MUST run with one OS thread per lane and a per-warp
+  // fragment scratch buffer. Detect the call and force threaded dispatch below.
+  const bool usesMma = translatedSource.find("vgre_mma_") != std::string::npos;
+
   // Helper: block-threading toggle (using cached host-side configuration)
   oss << "static inline bool vgre_block_threads_enabled() {\n";
   oss << "  return " << (blockThreadsEnabled_ ? "true" : "false") << ";\n";
@@ -380,10 +387,19 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
 
   // Thread-local kernel launcher
   oss << "  alignas(64) uint64_t vgre_warp_buf[32] = {};\n";
-  oss << "  auto vgre_call_kernel = [=, &vgre_warp_buf](uint32_t tx, uint32_t ty, uint32_t tz) {\n";
+  // Per-warp tensor-core fragment scratch: 32 lanes × 16 u32 (64 B/lane) — holds
+  // each lane's raw mma.sync input registers (≤10) so the collective helper can
+  // reconstruct the full A/B/C tiles. Only emitted when the kernel uses mma.
+  if (usesMma)
+    oss << "  alignas(64) uint32_t vgre_mma_buf[32 * 16] = {};\n";
+  oss << "  auto vgre_call_kernel = [=, &vgre_warp_buf"
+      << (usesMma ? ", &vgre_mma_buf" : "")
+      << "](uint32_t tx, uint32_t ty, uint32_t tz) {\n";
   // Set shared memory pointer (thread-local, but BlockWorkerPool will override for multi-threaded blocks)
   oss << "    *vgre_jit_get_sharedMem() = smem;\n";
   oss << "    *vgre_jit_get_warp_buffer() = (void*)vgre_warp_buf;\n";
+  if (usesMma)
+    oss << "    *vgre_jit_get_mma_buffer() = (void*)vgre_mma_buf;\n";
   oss << "    *vgre_jit_get_threadIdx() = vgre_cuda::dim3(tx, ty, tz);\n";
   oss << "    *vgre_jit_get_blockIdx() = vgre_cuda::dim3(bx, by, bz);\n";
   oss << "    *vgre_jit_get_blockDim() = vgre_cuda::dim3(bdx, bdy, bdz);\n";
@@ -437,7 +453,7 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
 
   // Optional per-block threading for __syncthreads correctness (capped)
   oss << "  uint32_t totalThreads = bdx * bdy * bdz;\n";
-  bool forceParallel = ir.usesSyncthreads || ir.usesWarpShuffle;
+  bool forceParallel = ir.usesSyncthreads || ir.usesWarpShuffle || usesMma;
   oss << "  const bool vgre_force_block_threads = "
       << (forceParallel ? "true" : "false") << ";\n";
   // Shuffle/syncthreads kernels MUST use threaded dispatch even for single-thread
@@ -453,10 +469,13 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   oss << "      uint32_t bdx, bdy, bdz;\n";
   oss << "      decltype(vgre_call_kernel)* launcher;\n";
   oss << "      void* warpBuf;\n";
-  oss << "    } ctx = {bdx, bdy, bdz, &vgre_call_kernel, (void*)vgre_warp_buf};\n";
+  oss << "      void* mmaBuf;\n";
+  oss << "    } ctx = {bdx, bdy, bdz, &vgre_call_kernel, (void*)vgre_warp_buf, "
+      << (usesMma ? "(void*)vgre_mma_buf" : "nullptr") << "};\n";
   oss << "    auto block_job = [](int tid, void* arg_ptr) {\n";
   oss << "        auto* pCtx = (JobContext*)arg_ptr;\n";
   oss << "        *vgre_jit_get_warp_buffer() = pCtx->warpBuf;\n";
+  oss << "        if (pCtx->mmaBuf) *vgre_jit_get_mma_buffer() = pCtx->mmaBuf;\n";
   oss << "        uint32_t tx = tid % pCtx->bdx;\n";
   oss << "        uint32_t ty = (tid / pCtx->bdx) % pCtx->bdy;\n";
   oss << "        uint32_t tz = tid / (pCtx->bdx * pCtx->bdy);\n";

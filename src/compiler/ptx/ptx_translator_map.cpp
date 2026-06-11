@@ -30,6 +30,33 @@ static std::vector<std::string> splitRegs(const std::string& s) {
     return r;
 }
 
+// Flatten brace-grouped mma operands {d..},{a..},{b..},{c..} into one flat
+// register list. splitOperands keeps each {..} as a single token (depth-aware
+// comma split), so an mma.sync arrives as 4 tokens; the per-lane helpers want
+// the individual registers in d,a,b,c order.
+static std::vector<std::string> flattenRegs(const std::vector<std::string>& o) {
+    std::vector<std::string> f;
+    for (const auto& tok : o) {
+        auto regs = splitRegs(stripDelimiters(tok));
+        for (auto& r : regs) f.push_back(r);
+    }
+    return f;
+}
+
+// Emit a warp-collective mma helper call fn(d.., a.., b.., c..) from the
+// flattened operands, validating the exact register count the shape requires
+// (a wrong count means the PTX shape was mis-mapped — fail loudly, not silently).
+static std::string mma_emit(const std::vector<std::string>& o,
+                            const char* fn, std::size_t expect) {
+    auto f = flattenRegs(o);
+    if (f.size() != expect)
+        throw std::runtime_error(std::string(fn) + ": expected " +
+            std::to_string(expect) + " mma operands, got " + std::to_string(f.size()));
+    std::string s = std::string(fn) + "(";
+    for (std::size_t i = 0; i < f.size(); ++i) { s += f[i]; if (i + 1 < f.size()) s += ","; }
+    return s + ");";
+}
+
 // Emit ldmatrix: load N uint32_t words from shared memory into register list.
 // PTX: ldmatrix.sync.aligned.m8n8.xN.shared.b16  {r0[,r1[,r2[,r3]]]}, [addr]
 // After splitOperands: o[0] = "{r0,...}", o[1] = "[addr]"
@@ -124,34 +151,26 @@ const TranslateMap& getMap() {
         // Emulated via the existing AVX-512 WMMA path from wmma_emulation.h.
         // Operand notation: D (out), A, B, C (in) — all fragmented across a warp.
         // In VGRE's serial CPU model, we treat each fragment as a complete tile.
+        // Operands flatten to D{0..3}, A{..}, B{..}, C{0..3}. The helpers are
+        // warp-collective (wmma_emulation.h): each lane deposits its fragment,
+        // barriers, the full tile GEMM is reconstructed, then this lane's 4
+        // outputs are scattered back — bit-faithful to the PTX fragment layout.
         {"mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32", [](auto& o){
-            // d[0..3], a[0..7](f16 packed), b[0..3](f16 packed), c[0..3]
-            return "vgre_mma_m16n8k16_f32_f16("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
-                   +o[4]+","+o[5]+","+o[6]+","+o[7]+","
-                   +o[8]+","+o[9]+","
-                   +o[10]+","+o[11]+","+o[12]+","+o[13]+");";
+            return mma_emit(o, "vgre_mma_m16n8k16_f32_f16", 14);   // 4d+4a+2b+4c
         }},
         {"mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32", [](auto& o){
-            return "vgre_mma_m16n8k8_tf32("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
-                   +o[4]+","+o[5]+","
-                   +o[6]+","+o[7]+","+o[8]+","+o[9]+");";
+            return mma_emit(o, "vgre_mma_m16n8k8_tf32", 14);       // 4d+4a+2b+4c
         }},
         {"mma.sync.aligned.m8n8k4.row.col.f64", [](auto& o){
             return "vgre_mma_m8n8k4_f64("+o[0]+","+o[1]+","+o[2]+","+o[3]+");";
         }},
         // BF16 variants (used by Hopper/Ampere BF16 GEMMs)
         {"mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32", [](auto& o){
-            return "vgre_mma_m16n8k16_f32_bf16("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
-                   +o[4]+","+o[5]+","+o[6]+","+o[7]+","
-                   +o[8]+","+o[9]+","
-                   +o[10]+","+o[11]+","+o[12]+","+o[13]+");";
+            return mma_emit(o, "vgre_mma_m16n8k16_f32_bf16", 14);  // 4d+4a+2b+4c
         }},
         // INT8 mma (INT8×INT8 → INT32 accumulate)
         {"mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32", [](auto& o){
-            return "vgre_mma_m16n8k32_s8("+o[0]+","+o[1]+","+o[2]+","+o[3]+","
-                   +o[4]+","+o[5]+","
-                   +o[6]+","
-                   +o[7]+","+o[8]+","+o[9]+","+o[10]+");";
+            return mma_emit(o, "vgre_mma_m16n8k32_s8", 14);        // 4d+4a+2b+4c
         }},
         // INT4 mma (s4×s4 → s32 accumulate, m8n8k32, satfinite)  — 4.1.15
         {"mma.sync.aligned.m8n8k32.row.col.satfinite.s32.s4.s4.s32", [](auto& o){

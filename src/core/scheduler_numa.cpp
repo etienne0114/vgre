@@ -12,8 +12,12 @@
 #include <sys/sysctl.h>
 #include <mach/thread_policy.h>
 #include <mach/thread_act.h>
-// macOS doesn't expose NUMA topology like Linux
-// We'll use a simplified approach based on physical CPU count
+#include <pthread.h>            // pthread_mach_thread_np
+// macOS exposes no Linux-style NUMA topology and removed hard CPU pinning
+// (pthread_setaffinity_np). Instead we use Mach THREAD_AFFINITY_POLICY tags to
+// GROUP workers, split by Apple-Silicon performance (perflevel0) vs efficiency
+// (perflevel1) cores so same-group workers share an L2 affinity hint. This is a
+// scheduler *hint*, not a hard pin — the documented macOS boundary.
 #endif
 
 namespace vgre {
@@ -106,19 +110,6 @@ void Scheduler::buildNumaTopology() {
                      "Worker " + std::to_string(i) + " pinned to NUMA node " +
                      std::to_string(nodeId));
     }
-  }
-#elif defined(__APPLE__)
-  // macOS: NUMA topology not exposed in same way as Linux
-  // Use physical CPU count as approximation
-  int physicalCores = 0;
-  size_t len = sizeof(physicalCores);
-  if (sysctlbyname("hw.physicalcpu", &physicalCores, &len, nullptr, 0) == 0) {
-      VGRE_LOG_INFO("Scheduler", "macOS NUMA approximation: " + std::to_string(physicalCores) + " physical cores");
-      // macOS typically has unified memory architecture, so treat as single NUMA node
-      workerNumaNodes_.assign(numThreads_, 0);
-      workerNumaNodeSet_.insert(0);
-  } else {
-      VGRE_LOG_DEBUG("Scheduler", "macOS NUMA: detection failed, using default");
   }
 #elif defined(_WIN32)
   ULONG highestNode = 0;
