@@ -86,6 +86,11 @@ jobs:
         # Homebrew clang@18 needs an explicit -isysroot or its libc++ <cstddef>
         # fails to find libc++'s <stddef.h> (the Homebrew include dir otherwise
         # shadows the C++ headers). CMAKE_OSX_SYSROOT points at the active SDK.
+        # Homebrew llvm@18's clang uses its OWN (newer) libc++ headers, which
+        # reference libc++abi symbols (__cxa_init_primary_exception,
+        # exception_ptr::__from_native_exception_pointer) absent from the Xcode
+        # SDK's older libc++abi → link fails. Point the linker + rpath at the
+        # bundled libc++ so headers and library agree (Homebrew llvm caveat).
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER="$(brew --prefix llvm@18)/bin/clang"
@@ -94,6 +99,8 @@ jobs:
           -DLLVM_DIR="$(brew --prefix llvm@18)/lib/cmake/llvm"
           -DCMAKE_PREFIX_PATH="$(brew --prefix llvm@18);$(brew --prefix libomp)"
           -DOpenMP_ROOT="$(brew --prefix libomp)"
+          -DCMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix llvm@18)/lib/c++ -Wl,-rpath,$(brew --prefix llvm@18)/lib/c++"
+          -DCMAKE_SHARED_LINKER_FLAGS="-L$(brew --prefix llvm@18)/lib/c++ -Wl,-rpath,$(brew --prefix llvm@18)/lib/c++"
           -DVGRE_WARNINGS_AS_ERRORS=OFF
 
       - name: Build
