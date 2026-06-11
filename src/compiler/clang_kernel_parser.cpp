@@ -63,10 +63,16 @@ typedef unsigned int       uint32_t;
 typedef unsigned long long uint64_t;
 typedef unsigned long      size_t;
 
-// CUDA kernel annotations — must produce SectionAttr "vgre_global" so that
-// hasSectionAttr() in the parser can identify __global__ functions.
+// CUDA kernel annotations — must produce a SectionAttr whose name contains
+// "vgre_global" so hasSectionAttr() can identify __global__ functions. Mach-O
+// requires the "segment,section" form (clang rejects a bare name on Apple).
+#if defined(__APPLE__)
+#define __global__ __attribute__((section("__TEXT,vgre_global")))
+#define __device__ __attribute__((section("__TEXT,vgre_device")))
+#else
 #define __global__ __attribute__((section("vgre_global")))
 #define __device__ __attribute__((section("vgre_device")))
+#endif
 #define __host__
 #define __shared__
 #define __restrict__
@@ -873,14 +879,17 @@ VGREResult ClangKernelParser::parse(const std::string& name,
     if (!inner) return VGREResult::ERR_INVALID_KERNEL;
 
     bool found = false;
-    // Helper: check whether a FunctionDecl node has the SectionAttr "vgre_global"
+    // Helper: check whether a FunctionDecl node has a SectionAttr whose name
+    // contains "vgre_global". Substring match so the macOS Mach-O form
+    // "__TEXT,vgre_global" is recognised the same as the ELF "vgre_global".
     auto hasSectionAttr = [](const llvm::json::Object* funcObj) -> bool {
         const auto* inner = funcObj->getArray("inner");
         if (!inner) return false;
         for (const auto& child : *inner) {
             const auto* childObj = child.getAsObject();
             if (childObj && childObj->getString("kind").value_or("") == "SectionAttr" &&
-                childObj->getString("section_name").value_or("") == "vgre_global") {
+                childObj->getString("section_name").value_or("").find("vgre_global") !=
+                    llvm::StringRef::npos) {
                 return true;
             }
         }
