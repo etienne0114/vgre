@@ -823,6 +823,12 @@ target_link_libraries(test_int4_weight_quant PRIVATE vgre)
 add_test(NAME Int4WeightQuant COMMAND test_int4_weight_quant)
 set_tests_properties(Int4WeightQuant PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-9: MoE top-k router + grouped expert GEMM.
+add_executable(test_moe core/test_moe.cpp)
+target_link_libraries(test_moe PRIVATE vgre)
+add_test(NAME MoEGroupedGemm COMMAND test_moe)
+set_tests_properties(MoEGroupedGemm PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
