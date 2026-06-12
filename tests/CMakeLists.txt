@@ -907,6 +907,12 @@ target_link_libraries(test_tma PRIVATE vgre)
 add_test(NAME TensorMemoryAccelerator COMMAND test_tma)
 set_tests_properties(TensorMemoryAccelerator PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-6: Thread-block clusters + Distributed Shared Memory (DSMEM).
+add_executable(test_cluster core/test_cluster.cpp)
+target_link_libraries(test_cluster PRIVATE vgre Threads::Threads)
+add_test(NAME ThreadBlockCluster COMMAND test_cluster)
+set_tests_properties(ThreadBlockCluster PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
