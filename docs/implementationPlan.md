@@ -48,7 +48,7 @@ All tracks start **🔴 Planned**.
 | P3-17 | Tensor/pipeline parallel primitives | P2 | §6.3 | ✅ Done |
 | P3-18 | Bit-deterministic mode | P1 | §7.1 | ✅ Done |
 | P3-19 | Differential testing harness | P2 | §7.2 | ✅ Done |
-| P3-20 | UVM oversubscription + disk eviction | P2 | §8.1 | 🔴 Planned |
+| P3-20 | UVM oversubscription + disk eviction | P2 | §8.1 | ✅ Done |
 | P3-21 | Occupancy + roofline + flame graphs | P2 | §8.2 | ✅ Done |
 
 ---
@@ -198,11 +198,18 @@ tester that fuzzes shapes/dtypes per op vs. an independent oracle
 (NumPy/SciPy/OpenBLAS), gated in CI. **Acceptance**: a CI job failing on any op
 that diverges from its oracle.
 
-### P3-20 — UVM oversubscription + disk-backed eviction
-**File**: `src/core/memory/memory_manager*.cpp`. An LRU page evictor that spills
-cold managed pages to a backing file and faults them back via the existing
-SIGSEGV/SIGBUS handler. **Acceptance**: a workload allocating > host RAM completes
-correctly.
+### P3-20 — UVM oversubscription + disk-backed eviction ✅ DONE
+`include/vgre/core/memory/page_evictor.h` (a byte-budgeted disk-backed LRU,
+unit-tested at 8× oversubscription) plus the live wiring in `memory_manager`:
+`VGRE_UVM_HOST_BUDGET_BYTES` opts in (0 ⇒ default path untouched); when resident
+managed bytes exceed the budget, `maybeEvictManaged_locked` spills the LRU regions
+to a backing file and reclaims their pages (`mprotect PROT_NONE` +
+`madvise MADV_DONTNEED`), and `ensureManagedResident` — hooked at the
+`cudaMemPrefetchAsync` boundary, out of signal context (no async-signal I/O) —
+restores a region from disk and re-evicts to honor the budget; `free` drops a
+region's eviction state. **Acceptance**: a 16 MiB managed workload under a 4 MiB
+budget completes with byte-exact data through 28 disk evictions, resident bytes
+capped at budget (`test_uvm_oversubscription`, `test_page_evictor`).
 
 ### P3-21 — Occupancy + roofline + flame graphs
 **File**: profiler + `src/api/nsight_exporter.cpp` / metrics server. An SM

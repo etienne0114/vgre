@@ -931,6 +931,12 @@ target_link_libraries(test_page_evictor PRIVATE vgre)
 add_test(NAME UVMPageEvictor COMMAND test_page_evictor)
 set_tests_properties(UVMPageEvictor PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-20: end-to-end oversubscription through the live MemoryManager.
+add_executable(test_uvm_oversubscription integration/test_uvm_oversubscription.cpp)
+target_link_libraries(test_uvm_oversubscription PRIVATE vgre)
+add_test(NAME UVMOversubscription COMMAND test_uvm_oversubscription)
+set_tests_properties(UVMOversubscription PROPERTIES TIMEOUT 60)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)

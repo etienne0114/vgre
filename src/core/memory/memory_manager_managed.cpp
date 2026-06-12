@@ -2,8 +2,16 @@
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/advanced/memory_compression.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/os_backend.h"      // vgre::os::mprotect_rw / mprotect_none
+#include "vgre/api/vgre_c_api.h"         // vgre_get_config (eviction budget env)
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/virtual_gpu_device.h"
+
+#include <climits>
+#include <shared_mutex>
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/mman.h>                    // madvise / MADV_DONTNEED
+#endif
 
 #include <chrono>
 #include <cstdlib>
@@ -108,8 +116,116 @@ VGREResult MemoryManager::memAdvise(const void *ptr, size_t count, int advice, D
   return VGREResult::SUCCESS;
 }
 
+// ── UVM oversubscription: disk-backed LRU eviction (P3-20) ───────────────────
+// 64-bit backing-file seek (the spill file can exceed 2 GiB under oversubscription).
+static inline void vgre_evict_seek(std::FILE* f, long long off) {
+#if defined(_WIN32)
+  _fseeki64(f, off, SEEK_SET);
+#else
+  fseeko(f, static_cast<off_t>(off), SEEK_SET);
+#endif
+}
+
+// Evict least-recently-used counted-resident managed regions to the backing file
+// until resident bytes fit the budget. Never evicts `keep`. evictMutex_ held.
+void MemoryManager::maybeEvictManaged_locked(void* keep) {
+  if (hostBudgetBytes_ == 0) return;
+  while (residentManagedBytes_.load(std::memory_order_relaxed) > hostBudgetBytes_) {
+    // Pick the LRU victim among counted-resident regions (oldest lastAccessTime).
+    void* victim = nullptr; size_t vsize = 0; long long oldest = LLONG_MAX;
+    {
+      std::shared_lock<std::shared_mutex> lk(mutex_);
+      for (void* base : resCounted_) {
+        if (base == keep) continue;
+        ManagedRegion* r = findRegionByPtr(base);
+        if (!r) continue;
+        long long t = r->lastAccessTime.load(std::memory_order_relaxed);
+        if (t < oldest) { oldest = t; victim = base; vsize = r->size; }
+      }
+    }
+    if (!victim) break;  // nothing else evictable (only `keep` remains)
+
+    // Assign a permanent backing slot on first eviction of this region.
+    long long off;
+    auto sit = evictSlot_.find(victim);
+    if (sit == evictSlot_.end()) { off = evictFileEnd_; evictFileEnd_ += static_cast<long long>(vsize); evictSlot_[victim] = off; }
+    else off = sit->second;
+
+    if (!evictFile_) evictFile_ = std::tmpfile();
+    if (evictFile_) {
+      vgre::os::mprotect_rw(victim, vsize);                 // make readable to spill
+      vgre_evict_seek(evictFile_, off);
+      std::fwrite(victim, 1, vsize, evictFile_);
+      std::fflush(evictFile_);
+    }
+    vgre::os::mprotect_none(victim, vsize);                 // fault on access ⇒ via ensureManagedResident
+#if defined(__linux__) || defined(__APPLE__)
+    ::madvise(victim, vsize, MADV_DONTNEED);                // reclaim physical RAM
+#endif
+    {
+      std::shared_lock<std::shared_mutex> lk(mutex_);
+      if (ManagedRegion* r = findRegionByPtr(victim))
+        r->isResidentOnHost.store(false, std::memory_order_relaxed);
+    }
+    resCounted_.erase(victim);
+    evictedSet_.insert(victim);
+    residentManagedBytes_.fetch_sub(vsize, std::memory_order_relaxed);
+    managedEvictions_.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void MemoryManager::ensureManagedResident(void* ptr) {
+  // Lazy one-time budget init (0 ⇒ oversubscription disabled; default path intact).
+  static std::once_flag s_budgetOnce;
+  std::call_once(s_budgetOnce, [this] {
+    if (const char* e = vgre_get_config("VGRE_UVM_HOST_BUDGET_BYTES")) {
+      try { long long v = std::stoll(e); if (v > 0) hostBudgetBytes_ = static_cast<size_t>(v); }
+      catch (...) {}
+    }
+  });
+  if (hostBudgetBytes_ == 0 || !ptr) return;
+
+  std::lock_guard<std::mutex> elk(evictMutex_);
+  void* base = nullptr; size_t size = 0; bool wasResident = false;
+  {
+    std::shared_lock<std::shared_mutex> lk(mutex_);
+    ManagedRegion* r = findRegionContaining(reinterpret_cast<uintptr_t>(ptr));
+    if (!r) return;                                    // not a managed region
+    base = r->ptr; size = r->size;
+    wasResident = r->isResidentOnHost.load(std::memory_order_relaxed);
+  }
+  const bool evicted = evictedSet_.count(base) != 0;
+  if (wasResident && !evicted && resCounted_.count(base)) return;   // already resident + counted
+
+  vgre::os::mprotect_rw(base, size);                    // make pages accessible
+  if (evicted) {                                       // restore contents from disk
+    auto sit = evictSlot_.find(base);
+    if (evictFile_ && sit != evictSlot_.end()) {
+      vgre_evict_seek(evictFile_, sit->second);
+      size_t got = std::fread(base, 1, size, evictFile_);
+      (void)got;
+    }
+    evictedSet_.erase(base);
+  }
+  {
+    std::shared_lock<std::shared_mutex> lk(mutex_);
+    if (ManagedRegion* r = findRegionByPtr(base)) {
+      r->isResidentOnHost.store(true, std::memory_order_relaxed);
+      r->lastAccessTime.store(static_cast<long long>(vgre::os::get_monotonic_time_ns()),
+                              std::memory_order_relaxed);
+    }
+  }
+  if (resCounted_.insert(base).second)
+    residentManagedBytes_.fetch_add(size, std::memory_order_relaxed);
+  maybeEvictManaged_locked(base);                      // keep within budget (never evict `base`)
+}
+
 VGREResult MemoryManager::memPrefetchAsync(const void *ptr, size_t count, DeviceId dstDevice) {
   if (!ptr || count == 0) return VGREResult::SUCCESS;
+
+  // UVM oversubscription: fault the region back from disk (and honor the host
+  // budget) before physically touching its pages below.
+  ensureManagedResident(const_cast<void*>(ptr));
 
   // Physically force page faults ahead of time on the CPU executor thread.
   // This physically migrates pages into the active resident set before bulk kernel execution.
