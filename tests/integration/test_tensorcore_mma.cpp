@@ -17,6 +17,7 @@
 
 #include "vgre/compiler/wmma_emulation.h"   // vgre_mma_* (warp-collective helpers)
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -185,10 +186,68 @@ static bool runS8() {
     return maxErr == 0;
 }
 
+// ── TMA store (shared → global) — the JIT-path helpers in wmma_emulation.h ────
+// cp.async.bulk.tensor.2d.global.shared::cta.bulk_group lowers to
+// vgre_tma_store_2d_b. Validates the interior box scatter, out-of-bounds clipping
+// (real TMA store drops OOB elements — must not overrun the tensor), and that the
+// store is the exact inverse of the load (load→store reproduces the tensor).
+static void runTmaStore() {
+    const int H = 8, W = 8, bh = 4, bw = 4, GUARD = 4;
+    std::vector<float> G(H * W + GUARD, -1.0f);
+    for (int i = 0; i < GUARD; ++i) G[H * W + i] = 7777.0f;   // guard cells past the tensor
+
+    VgreTMADescriptor d{};
+    d.baseAddr  = G.data();
+    d.elemBytes = sizeof(float);
+    d.dim[0] = W; d.dim[1] = H;                                // global bounds
+    d.stride[0] = (uint32_t)(W * sizeof(float));               // row byte stride (2d convention)
+    d.boxDim[0] = bw; d.boxDim[1] = bh;
+
+    // 1) Interior store lands the box at (col=2,row=1); other cells untouched.
+    float tile[bh * bw];
+    for (int i = 0; i < bh * bw; ++i) tile[i] = 100.0f + i;
+    vgre_tma_store_2d_b(&d, tile, /*col*/2, /*row*/1);
+    bool ok1 = (G[0] == -1.0f);
+    for (int i = 0; i < bh; ++i)
+        for (int j = 0; j < bw; ++j)
+            if (G[(1 + i) * W + (2 + j)] != tile[i * bw + j]) ok1 = false;
+    check("TMA 2d store writes the interior box to global", ok1);
+
+    // 2) Box overhanging the tensor at (col=6,row=6): only [6..7]x[6..7] valid; the
+    //    OOB quadrant must be dropped and the guard cells must be intact.
+    std::fill(G.begin(), G.begin() + H * W, -1.0f);
+    for (int i = 0; i < bh * bw; ++i) tile[i] = 500.0f + i;
+    vgre_tma_store_2d_b(&d, tile, 6, 6);
+    bool ok2 = true;
+    for (int i = 0; i < bh; ++i)
+        for (int j = 0; j < bw; ++j) {
+            int gr = 6 + i, gc = 6 + j;
+            if (gr < H && gc < W && G[gr * W + gc] != tile[i * bw + j]) ok2 = false;
+        }
+    for (int i = 0; i < GUARD; ++i) if (G[H * W + i] != 7777.0f) ok2 = false;   // no overrun
+    check("TMA 2d store clips out-of-bounds (no overrun, real TMA padding)", ok2);
+
+    // 3) load→store round-trip reproduces the whole tensor exactly.
+    std::vector<float> src(H * W), dstG(H * W, 0.0f);
+    for (int i = 0; i < H * W; ++i) src[i] = (float)i * 0.5f - 3.0f;
+    VgreTMADescriptor ds = d; ds.baseAddr = src.data();
+    VgreTMADescriptor dd = d; dd.baseAddr = dstG.data();
+    float box[bh * bw];
+    for (int y = 0; y < H; y += bh)
+        for (int x = 0; x < W; x += bw) {
+            vgre_tma_load_2d_b(box, &ds, x, y);
+            vgre_tma_store_2d_b(&dd, box, x, y);
+        }
+    bool ok3 = true;
+    for (int i = 0; i < H * W; ++i) if (dstG[i] != src[i]) ok3 = false;
+    check("TMA load->store round-trip reproduces the tensor exactly", ok3);
+}
+
 int main() {
     printf("=== Tensor-core mma.sync warp-collective correctness (Track 9) ===\n");
     check("m16n8k16 f16*f16->f32 matches A*B+C reference", runF16());
     check("m16n8k32 s8*s8->s32 matches A*B+C reference (exact)", runS8());
+    runTmaStore();
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

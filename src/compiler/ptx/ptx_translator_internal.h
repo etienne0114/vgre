@@ -89,6 +89,39 @@ static inline AsmConstraints parseConstraints(const std::string& cs) {
     return r;
 }
 
+// cp.async.bulk.tensor.Nd.global.shared::cta.bulk_group [tensorMap, {coords}], [src]
+// — the Hopper TMA store (shared → global). After splitOperands strips the [ ]:
+//   o[0] = "tensorMap, {c0[,c1,...]}"      o[1] = src smem
+// Lowers to the real strided box scatter vgre_tma_store_<rank>d_b(desc, src, …),
+// which clips out-of-bounds box rows/cols (real TMA store boundary behavior).
+// Shared by getMap() (1d/2d) and getConversionMap() (3d/4d/5d) so the parsing is
+// defined once.
+[[maybe_unused]] static std::string tma_store_emit(
+        const std::vector<std::string>& o, int rank) {
+    if (o.size() < 2) return "/* cp.async.bulk.tensor store: bad operands */";
+    const std::string& s = o[0];
+    const auto comma = s.find(',');
+    const std::string tmap = (comma == std::string::npos) ? s : trim(s.substr(0, comma));
+    std::string ctok = (comma == std::string::npos) ? std::string() : trim(s.substr(comma + 1));
+    if (ctok.size() >= 2 && ctok.front() == '{' && ctok.back() == '}')
+        ctok = trim(ctok.substr(1, ctok.size() - 2));
+    std::vector<std::string> coords;
+    {
+        std::string cur;
+        for (char ch : ctok) {
+            if (ch == ',') { if (!trim(cur).empty()) coords.push_back(trim(cur)); cur.clear(); }
+            else cur += ch;
+        }
+        if (!trim(cur).empty()) coords.push_back(trim(cur));
+    }
+    std::string call = "vgre_tma_store_" + std::to_string(rank) + "d_b("
+        "(const VgreTMADescriptor*)(uintptr_t)(" + tmap + "),"
+        "(const void*)(uintptr_t)(" + o[1] + ")";
+    for (int d = 0; d < rank; ++d)
+        call += "," + (d < static_cast<int>(coords.size()) ? coords[d] : std::string("0"));
+    return call + ");";
+}
+
 // Map from PTX opcode to C++ lambda (string substitution).
 // %0, %1, ... refer to operands in order (outputs first, then inputs).
 using TranslateMap = std::unordered_map<std::string,

@@ -886,15 +886,28 @@ struct VgreTMADescriptor {
 static_assert(sizeof(VgreTMADescriptor) == 128, "VgreTMADescriptor must be 128 bytes");
 
 // ── 2D tiled load/store (explicit tile dims) ──────────────────────────────────
+// Real-TMA boundary semantics: a box overhanging the global tensor zero-fills the
+// out-of-bounds region on load and drops it on store.  Bounds come from the
+// descriptor's global dims (dim[0]=width/cols, dim[1]=height/rows); when those are
+// 0 the bounds are unknown and the full box is copied (backward compatible).
 inline void vgre_tma_load_2d(void* dst, const VgreTMADescriptor* desc,
                                uint32_t c, uint32_t r, uint32_t tileW, uint32_t tileH)
 {
     const uint8_t* base = reinterpret_cast<const uint8_t*>(desc->baseAddr);
     uint8_t* out = reinterpret_cast<uint8_t*>(dst);
-    for (uint32_t row = 0; row < tileH; ++row)
-        memcpy(out + row * tileW * desc->elemBytes,
-                    base + (r + row) * desc->stride[0] + c * desc->elemBytes,
-                    tileW * desc->elemBytes);
+    const size_t e = desc->elemBytes;
+    const uint32_t W = desc->dim[0], H = desc->dim[1];   // global bounds (0 ⇒ unknown)
+    for (uint32_t row = 0; row < tileH; ++row) {
+        uint8_t* orow = out + (size_t)row * tileW * e;
+        const uint32_t gr = r + row;
+        if (H && gr >= H) { memset(orow, 0, (size_t)tileW * e); continue; }   // OOB row → zero
+        uint32_t validW = tileW;
+        if (W) { if (c >= W) validW = 0; else if (c + tileW > W) validW = W - c; }
+        if (validW)
+            memcpy(orow, base + (size_t)gr * desc->stride[0] + (size_t)c * e, (size_t)validW * e);
+        if (validW < tileW)
+            memset(orow + (size_t)validW * e, 0, (size_t)(tileW - validW) * e); // OOB cols → zero
+    }
 }
 
 inline void vgre_tma_store_2d(const VgreTMADescriptor* desc, const void* src,
@@ -902,10 +915,17 @@ inline void vgre_tma_store_2d(const VgreTMADescriptor* desc, const void* src,
 {
     uint8_t* base = reinterpret_cast<uint8_t*>(desc->baseAddr);
     const uint8_t* in = reinterpret_cast<const uint8_t*>(src);
-    for (uint32_t row = 0; row < tileH; ++row)
-        memcpy(base + (r + row) * desc->stride[0] + c * desc->elemBytes,
-                    in + row * tileW * desc->elemBytes,
-                    tileW * desc->elemBytes);
+    const size_t e = desc->elemBytes;
+    const uint32_t W = desc->dim[0], H = desc->dim[1];   // global bounds (0 ⇒ unknown)
+    for (uint32_t row = 0; row < tileH; ++row) {
+        const uint32_t gr = r + row;
+        if (H && gr >= H) continue;                                          // OOB row → drop
+        uint32_t validW = tileW;
+        if (W) { if (c >= W) validW = 0; else if (c + tileW > W) validW = W - c; }
+        if (validW)
+            memcpy(base + (size_t)gr * desc->stride[0] + (size_t)c * e,
+                   in + (size_t)row * tileW * e, (size_t)validW * e);        // drop OOB cols
+    }
 }
 
 // ── 2D load/store using boxDim from descriptor (cuTensorMapEncodeTiled path) ──
@@ -1041,6 +1061,93 @@ inline void vgre_tma_load_5d_b(void* dst, const VgreTMADescriptor* desc,
     vgre_tma_load_5d(dst, desc, x, y, z, w, v,
                      desc->boxDim[0], desc->boxDim[1], desc->boxDim[2],
                      desc->boxDim[3], desc->boxDim[4]);
+}
+
+// ── 1D TMA store (shared → global) with out-of-bounds clipping ───────────────
+inline void vgre_tma_store_1d_b(const VgreTMADescriptor* desc, const void* src, uint32_t x)
+{
+    uint8_t* base = reinterpret_cast<uint8_t*>(desc->baseAddr);
+    const size_t e = desc->elemBytes;
+    const uint32_t W = desc->dim[0];            // global bound (0 ⇒ unknown)
+    uint32_t tw = desc->boxDim[0], validW = tw;
+    if (W) { if (x >= W) validW = 0; else if (x + tw > W) validW = W - x; }
+    if (validW) memcpy(base + (size_t)x * e, src, (size_t)validW * e);
+}
+
+// ── 3D / 4D / 5D TMA store (shared → global), exact inverse of the loads ──────
+// cp.async.bulk.tensor.{3,4,5}d.global.shared::cta.bulk_group scatter a box from
+// box-contiguous SMEM back to the strided global tensor.  The offset formula is
+// identical to the matching load so store∘load is the identity round-trip.
+inline void vgre_tma_store_3d(const VgreTMADescriptor* desc, const void* src,
+                              uint32_t x, uint32_t y, uint32_t z,
+                              uint32_t tw, uint32_t th, uint32_t td)
+{
+    uint8_t* base = reinterpret_cast<uint8_t*>(desc->baseAddr);
+    const uint8_t* in = reinterpret_cast<const uint8_t*>(src);
+    const size_t e = desc->elemBytes;
+    for (uint32_t d = 0; d < td; ++d)
+        for (uint32_t row = 0; row < th; ++row) {
+            size_t src_off = (d * th + row) * tw * e;
+            size_t dst_off = ((z + d) * desc->stride[1] + (y + row) * desc->stride[0] + x) * e;
+            memcpy(base + dst_off, in + src_off, tw * e);
+        }
+}
+
+inline void vgre_tma_store_3d_b(const VgreTMADescriptor* desc, const void* src,
+                                uint32_t x, uint32_t y, uint32_t z)
+{
+    vgre_tma_store_3d(desc, src, x, y, z, desc->boxDim[0], desc->boxDim[1], desc->boxDim[2]);
+}
+
+inline void vgre_tma_store_4d(const VgreTMADescriptor* desc, const void* src,
+                              uint32_t x, uint32_t y, uint32_t z, uint32_t w,
+                              uint32_t tw, uint32_t th, uint32_t td, uint32_t tq)
+{
+    uint8_t* base = reinterpret_cast<uint8_t*>(desc->baseAddr);
+    const uint8_t* in = reinterpret_cast<const uint8_t*>(src);
+    const size_t e = desc->elemBytes;
+    for (uint32_t q = 0; q < tq; ++q)
+        for (uint32_t d = 0; d < td; ++d)
+            for (uint32_t row = 0; row < th; ++row) {
+                size_t src_off = ((q * td + d) * th + row) * tw * e;
+                size_t dst_off = ((w + q) * desc->stride[2] + (z + d) * desc->stride[1]
+                                  + (y + row) * desc->stride[0] + x) * e;
+                memcpy(base + dst_off, in + src_off, tw * e);
+            }
+}
+
+inline void vgre_tma_store_4d_b(const VgreTMADescriptor* desc, const void* src,
+                                uint32_t x, uint32_t y, uint32_t z, uint32_t w)
+{
+    vgre_tma_store_4d(desc, src, x, y, z, w,
+                      desc->boxDim[0], desc->boxDim[1], desc->boxDim[2], desc->boxDim[3]);
+}
+
+inline void vgre_tma_store_5d(const VgreTMADescriptor* desc, const void* src,
+                              uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t v,
+                              uint32_t tw, uint32_t th, uint32_t td, uint32_t tq, uint32_t tp)
+{
+    uint8_t* base = reinterpret_cast<uint8_t*>(desc->baseAddr);
+    const uint8_t* in = reinterpret_cast<const uint8_t*>(src);
+    const size_t e = desc->elemBytes;
+    for (uint32_t p = 0; p < tp; ++p)
+        for (uint32_t q = 0; q < tq; ++q)
+            for (uint32_t d = 0; d < td; ++d)
+                for (uint32_t row = 0; row < th; ++row) {
+                    size_t src_off = ((((p * tq + q) * td + d) * th + row) * tw) * e;
+                    size_t dst_off = (((v + p) * desc->stride[3] + (w + q) * desc->stride[2]
+                                       + (z + d) * desc->stride[1]
+                                       + (y + row) * desc->stride[0] + x)) * e;
+                    memcpy(base + dst_off, in + src_off, tw * e);
+                }
+}
+
+inline void vgre_tma_store_5d_b(const VgreTMADescriptor* desc, const void* src,
+                                uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t v)
+{
+    vgre_tma_store_5d(desc, src, x, y, z, w, v,
+                      desc->boxDim[0], desc->boxDim[1], desc->boxDim[2],
+                      desc->boxDim[3], desc->boxDim[4]);
 }
 
 // ── cp.reduce.async (CPU serial emulation) ───────────────────────────────────
