@@ -889,6 +889,12 @@ target_link_libraries(test_deterministic PRIVATE vgre)
 add_test(NAME DeterministicMode COMMAND test_deterministic)
 set_tests_properties(DeterministicMode PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-10: prefix caching (content-addressed KV-block sharing).
+add_executable(test_prefix_cache core/test_prefix_cache.cpp)
+target_link_libraries(test_prefix_cache PRIVATE vgre)
+add_test(NAME PrefixCaching COMMAND test_prefix_cache)
+set_tests_properties(PrefixCaching PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
