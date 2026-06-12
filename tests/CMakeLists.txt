@@ -847,6 +847,12 @@ target_link_libraries(test_mx_quant PRIVATE vgre)
 add_test(NAME MXFormats COMMAND test_mx_quant)
 set_tests_properties(MXFormats PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-17: tensor/pipeline parallel primitives (Megatron-LM).
+add_executable(test_tensor_parallel core/test_tensor_parallel.cpp)
+target_link_libraries(test_tensor_parallel PRIVATE vgre)
+add_test(NAME TensorParallel COMMAND test_tensor_parallel)
+set_tests_properties(TensorParallel PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
