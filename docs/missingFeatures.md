@@ -204,7 +204,7 @@ fidelity / research-frontier.
   tree with a fixed shape), a fixed worker count, and counter-based RNG seeding.
   Acceptance: two runs of a non-trivial workload are byte-identical.
 
-### 7.2 Differential testing harness — P2
+### 7.2 Differential testing harness — P2 — ✅ DONE
 - **Design**: extend the golden-vector suite (Track 26) into a property-based
   differential tester that fuzzes shapes/dtypes for each op and compares against
   an independent oracle (NumPy/SciPy/OpenBLAS) at tight tolerance, gated in CI.
