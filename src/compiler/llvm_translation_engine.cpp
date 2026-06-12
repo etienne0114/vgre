@@ -162,23 +162,6 @@ struct LLVMState {
   std::unique_ptr<llvm::orc::LLJIT> jit;
 };
 
-// Registry of live engines + the atexit handler that drains their workers.
-// Both the mutex and the vector are leaky statics (heap-allocated, never
-// destroyed): ~LLVMTranslationEngine and the atexit handler both touch them
-// during process teardown, so they must outlive every other static's
-// destruction — a by-value static would be freed first and cause a
-// use-after-free when an engine deregisters itself.
-namespace {
-std::mutex &engineRegistryMutex() {
-  static std::mutex *m = new std::mutex();
-  return *m;
-}
-std::vector<LLVMTranslationEngine *> &engineRegistry() {
-  static std::vector<LLVMTranslationEngine *> *v =
-      new std::vector<LLVMTranslationEngine *>();
-  return *v;
-}
-} // namespace
 
 LLVMTranslationEngine::LLVMTranslationEngine() {
   llvm::InitializeNativeTarget();
@@ -428,75 +411,26 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
     VGRE_LOG_ERROR("LLVMTranslationEngine",
                    "Failed to initialize LLVM JIT Engine.");
   }
-  workerThread_ = std::thread(&LLVMTranslationEngine::workerLoop, this);
-
-  // Prime the full translation pipeline synchronously on this (main) thread so
-  // that every static/singleton the compile path touches — regex tables,
-  // VectorEngine, the logger, and LLVM's lazily-created codegen state — is
-  // constructed *now*, during engine construction.  This is what makes the
-  // atexit drainer below correct: those statics register their destructors here
-  // (or earlier), so the atexit handler — registered immediately after — runs
-  // *before* any of them at exit.  Without this priming the background worker
-  // could initialise a static during its first compile, registering that
-  // static's destructor *after* the atexit handler; the destructor would then
-  // run *before* the worker is joined and be used-after-free if a compile is
-  // still in flight at process exit.
+  // Prime the full translation pipeline synchronously on this thread so the
+  // first real kernel launch doesn't pay the one-time cost of constructing
+  // every static/singleton the compile path touches — regex tables,
+  // VectorEngine, the logger, and LLVM's lazily-created codegen state — and so
+  // the empty kernel is materialised in the on-disk cache.  prepare() compiles
+  // synchronously (see its definition), so all JIT codegen runs on the calling
+  // thread during an active launch; there is no background compile thread that
+  // could still be inside SelectionDAGISel while process teardown runs static
+  // destructors (that overlap is undefined behaviour and was the source of the
+  // intermittent SASSDetection crash in LLVM's vector legalization).
   if (llvmState_) {
     vgre::KernelIR warmupIr;
     warmupIr.name   = "__vgre_jit_warmup";
     warmupIr.source = "extern \"C\" __global__ void __vgre_jit_warmup() {}";
     vgre::CompiledKernelFn warmupFn;
-    // Drive a full compile (source generation, clang IR, ORC codegen, static
-    // FLOP analysis) so EVERY destructible static the background worker touches
-    // — including LLVM's lazily-created SelectionDAG/codegen state — is built on
-    // this (main) thread now.  The result is cached on disk, so only the very
-    // first process system-wide pays the clang cost.  Without this, the worker
-    // would construct those statics during its first compile, registering their
-    // destructors after the atexit handler below; at process exit they would run
-    // before the worker is joined and be used while a compile is still in flight,
-    // corrupting the SelectionDAG (intermittent crashes in vector legalization).
     (void)doTranslate(warmupIr, warmupFn);
   }
-
-  // Register this engine and ensure the atexit drainer is installed exactly
-  // once.  Registered after the priming above so it runs before every
-  // worker-touched static's destructor, guaranteeing the LLVM worker is joined
-  // before any teardown overlaps its codegen.
-  {
-    std::lock_guard<std::mutex> lock(engineRegistryMutex());
-    engineRegistry().push_back(this);
-  }
-  static std::once_flag s_atexitOnce;
-  std::call_once(s_atexitOnce,
-                 [] { std::atexit(&LLVMTranslationEngine::joinAllWorkersAtExit); });
 }
 
-void LLVMTranslationEngine::stopWorker() {
-  shutdown_ = true;
-  queueCv_.notify_all();
-  // Block until the worker finishes its current compilation task.  The LLJIT
-  // and LLVMContext (llvmState_) must not be destroyed while the worker is
-  // still running SelectionDAGISel.  Equally important: this must complete
-  // before any process-teardown static destructors run, since LLVM codegen
-  // concurrent with static destruction is undefined behaviour.
-  if (workerThread_.joinable())
-    workerThread_.join();
-}
-
-void LLVMTranslationEngine::joinAllWorkersAtExit() {
-  std::lock_guard<std::mutex> lock(engineRegistryMutex());
-  for (LLVMTranslationEngine *eng : engineRegistry()) {
-    if (eng)
-      eng->stopWorker();
-  }
-}
-
-LLVMTranslationEngine::~LLVMTranslationEngine() {
-  stopWorker();
-  std::lock_guard<std::mutex> lock(engineRegistryMutex());
-  auto &reg = engineRegistry();
-  reg.erase(std::remove(reg.begin(), reg.end(), this), reg.end());
-}
+LLVMTranslationEngine::~LLVMTranslationEngine() = default;
 
 
 // ── Self-contained SHA-256 (RFC 6234) ─────────────────────────────────────
@@ -1191,50 +1125,31 @@ vgre::VGREResult LLVMTranslationEngine::compileBitcodeKernel(
 }
 
 vgre::JITFuture LLVMTranslationEngine::prepare(vgre::KernelIR &ir) {
-  auto irPtr = std::make_shared<vgre::KernelIR>(ir);
+  // Compile synchronously on the calling thread and hand back an already-ready
+  // future. A background compile thread that is still inside SelectionDAGISel when
+  // the process begins teardown races with static destruction (LLVM codegen
+  // concurrent with atexit/global-dtor sequencing is undefined behaviour), which
+  // surfaced as the intermittent SASSDetection SIGSEGV in EVT/SelectionDAG under
+  // load. Doing the translation inline removes that entire class of teardown race;
+  // the result is cached (in-memory + on disk), so the cost is paid once and the
+  // caller still resolves the future exactly as before.
   std::promise<vgre::JITResult> promise;
-  auto future = promise.get_future().share();
-  
-  {
-      std::lock_guard<std::mutex> lock(queueMutex_);
-      taskQueue_.push_back({irPtr, std::move(promise)});
+  vgre::CompiledKernelFn fn = nullptr;
+  vgre::VGREResult res = doTranslate(ir, fn);
+
+  vgre::JITResult jres;
+  if (res == vgre::VGREResult::SUCCESS && fn) {
+    jres.fn                        = fn;
+    jres.argSizes                  = ir.argSizes;
+    jres.sharedMemSize             = ir.sharedMemSize;
+    jres.estimatedInstructionCount = ir.estimatedInstructionCount;
+    jres.staticFlopCount           = ir.staticFlopCount;
+  } else {
+    jres.fn = nullptr;
   }
-  queueCv_.notify_one();
-  
-  return future;
+  promise.set_value(std::move(jres));
+  return promise.get_future().share();
 }
-
-void LLVMTranslationEngine::workerLoop() {
-    while (!shutdown_) {
-        CompileTask task;
-        {
-            std::unique_lock<std::mutex> lock(queueMutex_);
-            queueCv_.wait(lock, [this] { return shutdown_ || !taskQueue_.empty(); });
-            if (shutdown_ && taskQueue_.empty()) break;
-            if (taskQueue_.empty()) continue;
-            
-            task = std::move(taskQueue_.front());
-            taskQueue_.pop_front();
-        }
-        
-        vgre::CompiledKernelFn fn = nullptr;
-        vgre::VGREResult res = this->doTranslate(*task.ir, fn);
-        if (res == vgre::VGREResult::SUCCESS && fn) {
-            vgre::JITResult jres;
-            jres.fn = fn;
-            jres.argSizes = task.ir->argSizes;
-            jres.sharedMemSize = task.ir->sharedMemSize;
-            jres.estimatedInstructionCount = task.ir->estimatedInstructionCount;
-            jres.staticFlopCount = task.ir->staticFlopCount;
-            task.promise.set_value(jres);
-        } else {
-            vgre::JITResult errRes;
-            errRes.fn = nullptr;
-            task.promise.set_value(errRes);
-        }
-    }
-}
-
 
 bool LLVMTranslationEngine::isCached(const std::string &kernelName) const {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
