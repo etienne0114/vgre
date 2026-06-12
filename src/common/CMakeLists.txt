@@ -5,6 +5,7 @@ add_library(vgre_common OBJECT
     siphash.cpp
     metrics_registry.cpp
     config_registry.cpp
+    json.cpp
 )
 
 target_include_directories(vgre_common PUBLIC
