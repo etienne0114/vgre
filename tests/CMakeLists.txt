@@ -62,6 +62,12 @@ target_link_libraries(test_graph_capture_fidelity PRIVATE vgre)
 add_test(NAME GraphCaptureFidelity COMMAND test_graph_capture_fidelity)
 set_tests_properties(GraphCaptureFidelity PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-13: Triton IR (TTIR) frontend — parse + run from IR.
+add_executable(test_triton_frontend integration/test_triton_frontend.cpp)
+target_link_libraries(test_triton_frontend PRIVATE vgre)
+add_test(NAME TritonFrontend COMMAND test_triton_frontend)
+set_tests_properties(TritonFrontend PROPERTIES TIMEOUT 30)
+
 add_executable(test_graph_c_api integration/test_graph_c_api.cpp)
 target_link_libraries(test_graph_c_api PRIVATE vgre)
 add_test(NAME GraphCAPIIntegration COMMAND test_graph_c_api)

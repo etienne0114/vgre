@@ -162,12 +162,16 @@ fidelity / research-frontier.
 
 ## 5. Frontends & graph fidelity
 
-### 5.1 Triton IR frontend — P2
-- **Gap**: VGRE consumes Triton's *emitted PTX*; it cannot ingest Triton's own IR
-  (TTIR/TTGIR MLIR). A direct frontend would avoid PTX round-trips and support
-  Triton features that lower poorly to PTX.
-- **Design**: an MLIR/TTIR → VGRE-IR lowering path feeding the existing JIT.
-  Acceptance: a representative Triton kernel runs from IR with matching output.
+### 5.1 Triton IR frontend — P2 — ✅ DONE
+- **Was**: VGRE consumed Triton's *emitted PTX*; it could not ingest Triton's own
+  IR (TTIR MLIR), forcing a PTX round-trip.
+- **Done**: `include/vgre/compiler/triton/triton_frontend.h` — a from-scratch
+  TTIR parser + per-lane interpreter (no MLIR dependency, no PTX round-trip) for
+  `tt.func`/`get_program_id`/`make_range`/`splat`/`addptr`/masked `load`/`store`
+  + `arith.*`. A Triton program's block-SIMD ops lower to per-lane scalar
+  semantics run over the grid. Verified by `test_triton_frontend`: the canonical
+  vector-add and a fused 2·x+y kernel run directly from TTIR (boundary-masked,
+  N not a multiple of BLOCK) with output bit-equal to the reference.
 
 ### 5.2 Full CUDA-Graph capture-from-stream fidelity — P2 — ✅ DONE
 - **Was**: kernel/memcpy capture recorded nodes, but `cudaMemsetAsync` on a
