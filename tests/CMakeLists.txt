@@ -673,6 +673,12 @@ target_link_libraries(test_secret_store PRIVATE vgre)
 add_test(NAME SecretsStore COMMAND test_secret_store)
 set_tests_properties(SecretsStore PROPERTIES TIMEOUT 30)
 
+# Backup / DR: content-addressed snapshot archive.
+add_executable(test_backup_archive backup/test_backup_archive.cpp)
+target_link_libraries(test_backup_archive PRIVATE vgre)
+add_test(NAME BackupArchive COMMAND test_backup_archive)
+set_tests_properties(BackupArchive PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)
