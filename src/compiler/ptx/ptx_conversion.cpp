@@ -5,6 +5,45 @@
 namespace vgre {
 namespace compiler {
 
+// ── Blackwell tcgen05 emitters (P3-7) ────────────────────────────────────────
+// tcgen05.mma [d-tmem], a-desc, b-desc [, idesc, enable-input-d] accumulates
+// D = A·B (+D when enable-input-d) into the TMEM address d-tmem. After
+// splitOperands: o[0]=d-tmem addr, o[1]=descA, o[2]=descB, o[4]=enable (if any).
+static std::string tcgen05_mma_emit(const std::vector<std::string>& o,
+                                    int M, int N, int K, int kind) {
+    const std::string acc = o.size() > 4 ? o[4] : std::string("1");  // enable_input_d
+    return "vgre_jit_tcgen05_mma((uint32_t)(" + (o.size() > 0 ? o[0] : std::string("0")) +
+           "),(uint64_t)(" + (o.size() > 1 ? o[1] : std::string("0")) +
+           "),(uint64_t)(" + (o.size() > 2 ? o[2] : std::string("0")) + ")," +
+           std::to_string(M) + "," + std::to_string(N) + "," + std::to_string(K) + "," +
+           std::to_string(kind) + ",(int)(" + acc + "));";
+}
+
+// tcgen05.ld.sync.aligned.<shape>.xN.b32 {r0..r_{N-1}}, [taddr]  — load N words
+// from TMEM into the register list. o[0]={regs}, o[1]=taddr (brackets stripped).
+static std::string tcgen05_ld_emit(const std::vector<std::string>& o, int n) {
+    if (o.size() < 2) return "/* tcgen05.ld: bad operands */";
+    auto regs = splitOperands(o[0].size() >= 2 && o[0].front() == '{'
+                              ? o[0].substr(1, o[0].size() - 2) : o[0]);
+    std::string out = "{ uint32_t _tl[" + std::to_string(n) + "]; "
+                      "vgre_jit_tcgen05_ld(_tl,(uint32_t)(" + o[1] + "),1," + std::to_string(n) + ");";
+    for (int i = 0; i < n && i < static_cast<int>(regs.size()); ++i)
+        out += " " + regs[i] + " = _tl[" + std::to_string(i) + "];";
+    return out + " }";
+}
+
+// tcgen05.st.sync.aligned.<shape>.xN.b32 [taddr], {r0..r_{N-1}}  — store N words
+// from the register list into TMEM. o[0]=taddr, o[1]={regs}.
+static std::string tcgen05_st_emit(const std::vector<std::string>& o, int n) {
+    if (o.size() < 2) return "/* tcgen05.st: bad operands */";
+    auto regs = splitOperands(o[1].size() >= 2 && o[1].front() == '{'
+                              ? o[1].substr(1, o[1].size() - 2) : o[1]);
+    std::string out = "{ uint32_t _ts[" + std::to_string(n) + "] = {";
+    for (int i = 0; i < n; ++i) { out += (i < (int)regs.size() ? regs[i] : "0"); if (i + 1 < n) out += ","; }
+    out += "}; vgre_jit_tcgen05_st((uint32_t)(" + o[0] + "),_ts,1," + std::to_string(n) + "); }";
+    return out;
+}
+
 const TranslateMap& getConversionMap() {
     static const TranslateMap kMap = {
         // ── Missing cvt.* variants (float ↔ integer, signed/unsigned) ────────
@@ -117,31 +156,55 @@ const TranslateMap& getConversionMap() {
             return "vgre_cp_reduce_async_max_f32((float*)("+o[0]+"),(const float*)("+o[1]+
                    "),"+(o.size()>2?o[2]:std::string("1"))+");";
         }},
-        // ── tcgen05.mma (Blackwell SM100) ──────────────────────────────────
-        {"tcgen05.mma.cta_group::1.m64n256k16.f32.bf16.bf16", [](auto& o){
-            return "vgre_tcgen05_m64n256k16_bf16_f32((float*)(uintptr_t)("+o[0]+
-                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
+        // ── tcgen05.mma (Blackwell SM100) — accumulate into a TMEM address ─────
+        // o[0] is the TMEM accumulator address (from tcgen05.alloc), not a raw
+        // pointer; the result is read back with tcgen05.ld. kind: 0=bf16 1=f16
+        // 2=tf32 3=e4m3 4=e5m2 5=e4m3e5m2.
+        {"tcgen05.mma.cta_group::1.m64n256k16.f32.bf16.bf16",
+            [](auto& o){ return tcgen05_mma_emit(o, 64, 256, 16, 0); }},
+        {"tcgen05.mma.cta_group::1.m64n128k16.f32.bf16.bf16",
+            [](auto& o){ return tcgen05_mma_emit(o, 64, 128, 16, 0); }},
+        {"tcgen05.mma.cta_group::1.m64n256k16.f32.f16.f16",
+            [](auto& o){ return tcgen05_mma_emit(o, 64, 256, 16, 1); }},
+        {"tcgen05.mma.cta_group::1.m64n128k16.f32.f16.f16",
+            [](auto& o){ return tcgen05_mma_emit(o, 64, 128, 16, 1); }},
+        {"tcgen05.mma.cta_group::1.m64n256k8.f32.tf32.tf32",
+            [](auto& o){ return tcgen05_mma_emit(o, 64, 256, 8, 2); }},
+        {"tcgen05.mma.cta_group::1.m128n256k16.f32.bf16.bf16",
+            [](auto& o){ return tcgen05_mma_emit(o, 128, 256, 16, 0); }},
+        // FP8 (E4M3 / E5M2, K=32) tcgen05.mma into TMEM.
+        {"tcgen05.mma.cta_group::1.m64n256k32.f32.e4m3.e4m3",
+            [](auto& o){ return tcgen05_mma_emit(o, 64, 256, 32, 3); }},
+        {"tcgen05.mma.cta_group::1.m64n128k32.f32.e4m3.e4m3",
+            [](auto& o){ return tcgen05_mma_emit(o, 64, 128, 32, 3); }},
+        {"tcgen05.mma.cta_group::1.m64n256k32.f32.e5m2.e5m2",
+            [](auto& o){ return tcgen05_mma_emit(o, 64, 256, 32, 4); }},
+        // ── tcgen05 TMEM data path: alloc / dealloc / ld / st / cp / sync ──────
+        // tcgen05.alloc writes the allocated TMEM address into shared memory.
+        {"tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32", [](auto& o){
+            return "*(uint32_t*)(" + (o.size()>0?o[0]:std::string("0")) +
+                   ") = vgre_jit_tmem_alloc((int)(" + (o.size()>1?o[1]:std::string("0")) + "));";
         }},
-        {"tcgen05.mma.cta_group::1.m64n128k16.f32.bf16.bf16", [](auto& o){
-            return "vgre_tcgen05_m64n128k16_bf16_f32((float*)(uintptr_t)("+o[0]+
-                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
+        {"tcgen05.dealloc.cta_group::1.sync.aligned.b32", [](auto& o){
+            return "vgre_jit_tmem_dealloc((uint32_t)(" + (o.size()>0?o[0]:std::string("0")) +
+                   "),(int)(" + (o.size()>1?o[1]:std::string("0")) + "));";
         }},
-        {"tcgen05.mma.cta_group::1.m64n256k16.f32.f16.f16", [](auto& o){
-            return "vgre_tcgen05_m64n256k16_f16_f32((float*)(uintptr_t)("+o[0]+
-                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
-        }},
-        {"tcgen05.mma.cta_group::1.m64n128k16.f32.f16.f16", [](auto& o){
-            return "vgre_tcgen05_m64n128k16_f16_f32((float*)(uintptr_t)("+o[0]+
-                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
-        }},
-        {"tcgen05.mma.cta_group::1.m64n256k8.f32.tf32.tf32", [](auto& o){
-            return "vgre_tcgen05_m64n256k8_tf32_f32((float*)(uintptr_t)("+o[0]+
-                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
-        }},
-        {"tcgen05.mma.cta_group::1.m128n256k16.f32.bf16.bf16", [](auto& o){
-            return "vgre_tcgen05_m128n256k16_bf16_f32((float*)(uintptr_t)("+o[0]+
-                   "),(uint64_t)("+o[1]+"),(uint64_t)("+o[2]+"));";
-        }},
+        {"tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned",
+            [](auto&){ return "vgre_jit_tmem_relinquish();"; }},
+        {"tcgen05.ld.sync.aligned.32x32b.x1.b32",  [](auto& o){ return tcgen05_ld_emit(o, 1); }},
+        {"tcgen05.ld.sync.aligned.32x32b.x2.b32",  [](auto& o){ return tcgen05_ld_emit(o, 2); }},
+        {"tcgen05.ld.sync.aligned.32x32b.x4.b32",  [](auto& o){ return tcgen05_ld_emit(o, 4); }},
+        {"tcgen05.ld.sync.aligned.32x32b.x8.b32",  [](auto& o){ return tcgen05_ld_emit(o, 8); }},
+        {"tcgen05.st.sync.aligned.32x32b.x1.b32",  [](auto& o){ return tcgen05_st_emit(o, 1); }},
+        {"tcgen05.st.sync.aligned.32x32b.x2.b32",  [](auto& o){ return tcgen05_st_emit(o, 2); }},
+        {"tcgen05.st.sync.aligned.32x32b.x4.b32",  [](auto& o){ return tcgen05_st_emit(o, 4); }},
+        {"tcgen05.st.sync.aligned.32x32b.x8.b32",  [](auto& o){ return tcgen05_st_emit(o, 8); }},
+        // Commit / wait / fence — synchronous on CPU (the MMA already completed).
+        {"tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64", [](auto&){ return "/* tcgen05.commit serial */"; }},
+        {"tcgen05.wait::ld.sync.aligned",  [](auto&){ return "/* tcgen05.wait::ld serial */"; }},
+        {"tcgen05.wait::st.sync.aligned",  [](auto&){ return "/* tcgen05.wait::st serial */"; }},
+        {"tcgen05.fence::before_thread_sync", [](auto&){ return "__atomic_thread_fence(__ATOMIC_SEQ_CST);"; }},
+        {"tcgen05.fence::after_thread_sync",  [](auto&){ return "__atomic_thread_fence(__ATOMIC_SEQ_CST);"; }},
         // ── mbarrier (Hopper SM90 async pipeline synchronization) ──────────────
         // CPU serial emulation: all async copies complete synchronously, so
         // barriers are trivially satisfied.  init=noop, arrive=complete token,
