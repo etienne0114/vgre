@@ -363,7 +363,11 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   // of the warp resident simultaneously (each lane holds only a fragment of
   // A/B/C), so the kernel MUST run with one OS thread per lane and a per-warp
   // fragment scratch buffer. Detect the call and force threaded dispatch below.
-  const bool usesMma = translatedSource.find("vgre_mma_") != std::string::npos;
+  // Raw-PTX mma.sync (vgre_mma_*) and the warp-group-collective wgmma
+  // (vgre_wgmma_wg_*) both need one OS thread per lane so the distributed
+  // fragments are computed by the right lane — force threaded dispatch.
+  const bool usesMma = translatedSource.find("vgre_mma_") != std::string::npos
+                    || translatedSource.find("vgre_wgmma_wg_") != std::string::npos;
 
   // Helper: block-threading toggle (using cached host-side configuration)
   oss << "static inline bool vgre_block_threads_enabled() {\n";

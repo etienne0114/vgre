@@ -595,15 +595,16 @@ inline void vgre_mma_m16n8k32_s8(
     mma_end();
 }
 
-// ── Hopper wgmma PTX helper functions ────────────────────────────────────────
-// These are called by PTX-translated kernels that emit wgmma.mma_async.*
-// instructions.  In VGRE's CPU serial model the "warp-group" is a single
-// thread, so we perform the full MxNxK GEMM here.
+// ── Hopper wgmma PTX helper functions (legacy full-tile path) ────────────────
+// Real CUTLASS/Triton wgmma.mma_async PTX has a DISTRIBUTED accumulator and is
+// handled by the warp-group-collective path above (vgre_wgmma_wg_*): each of the
+// 128 lanes computes only its N/2 output fragment. The full-tile helpers BELOW
+// are the backward-compatible path for VGRE's older scalar PTX convention
+// (descA, descB, d-ptr), where a single thread holds the whole m64×N tile; the
+// GEMM math is identical, only the accumulator distribution differs.
 //
-// Descriptor encoding (simplified for CPU emulation):
-//   The 64-bit matrix descriptor carries the base pointer of the operand
-//   matrix in bits [63:4] (address >> 4).  We reconstruct the pointer as
-//   (desc << 4) cast to the element type.
+// Descriptor encoding: the 64-bit matrix descriptor carries the base pointer of
+// the operand matrix in bits [63:4] (address >> 4); reconstructed as (desc << 4).
 
 namespace detail {
 
@@ -646,7 +647,72 @@ inline float wgmma_f16_to_f32(uint16_t v) {
     float rv; memcpy(&rv, &f, 4); return rv;
 }
 
+// This lane's position within its warp-group (one warp-group = 128 lanes).
+inline int wgmma_lane() {
+    vgre::dim3* t = vgre_jit_get_threadIdx();
+    vgre::dim3* b = vgre_jit_get_blockDim();
+    return static_cast<int>((t->x + t->y * b->x + t->z * b->x * b->y) & 127u);
+}
+
+// (row,col) of this lane's accumulator register `e` for an m64×N f32 tile
+// (PTX ISA 9.7.14.5.2 wgmma .f32 fragment layout): the warp-group's 64×N output
+// is tiled 16 rows per warp and 8 cols per register-quad; within each 16×8 sub-
+// tile the layout is the mma.m16n8 accumulator pattern.
+inline void wgmma_frag_rc(int wgLane, int e, int* row, int* col) {
+    const int warp = (wgLane >> 5) & 3, lane = wgLane & 31;
+    const int groupID = lane >> 2, tig = lane & 3;
+    const int tile = e >> 2, sub = e & 3;          // 4 regs (c0..c3) per 8-col tile
+    *row = warp * 16 + groupID + ((sub >= 2) ? 8 : 0);
+    *col = tile * 8 + 2 * tig + (sub & 1);
+}
+
 } // namespace detail
+
+// ── Real warp-group-collective wgmma (Hopper) ────────────────────────────────
+// A wgmma is executed by an entire 128-lane warp-group; the M×N accumulator is
+// DISTRIBUTED across the lanes (each holds N/2 fp32 for an m64×N tile) and the
+// A/B operands live in shared memory addressed by 64-bit descriptors. Each lane
+// computes ONLY its N/2 output elements from the shared tiles — the true
+// hardware semantics. A is [64,K] row-major, B is [K,N] row-major (canonical
+// wgmma operand layout); elements are decoded by decA/decB.
+template <typename DecA, typename DecB>
+inline void vgre_wgmma_collective(float* dFrag, int N, int K,
+                                  const void* A, const void* B, DecA decA, DecB decB) {
+    const int wgLane = detail::wgmma_lane();
+    const int nFrag = N / 2;
+    for (int e = 0; e < nFrag; ++e) {
+        int row, col; detail::wgmma_frag_rc(wgLane, e, &row, &col);
+        float acc = dFrag[e];
+        for (int k = 0; k < K; ++k)
+            acc += decA(A, static_cast<size_t>(row) * K + k) *
+                   decB(B, static_cast<size_t>(k) * N + col);
+        dFrag[e] = acc;
+    }
+}
+
+// Per-dtype collective entry points. descA/descB carry the operand base pointer
+// (VGRE convention: host pointer >> 4). dFrag = THIS lane's N/2 accumulators.
+inline void vgre_wgmma_wg_bf16(float* dFrag, int N, uint64_t descA, uint64_t descB) {
+    const void* A = detail::wgmma_desc_ptr_bf16(descA);
+    const void* B = detail::wgmma_desc_ptr_bf16(descB);
+    vgre_wgmma_collective(dFrag, N, 16, A, B,
+        [](const void* p, size_t i){ return detail::wgmma_bf16_to_f32(static_cast<const uint16_t*>(p)[i]); },
+        [](const void* p, size_t i){ return detail::wgmma_bf16_to_f32(static_cast<const uint16_t*>(p)[i]); });
+}
+inline void vgre_wgmma_wg_f16(float* dFrag, int N, uint64_t descA, uint64_t descB) {
+    const void* A = detail::wgmma_desc_ptr_f16(descA);
+    const void* B = detail::wgmma_desc_ptr_f16(descB);
+    vgre_wgmma_collective(dFrag, N, 16, A, B,
+        [](const void* p, size_t i){ return detail::wgmma_f16_to_f32(static_cast<const uint16_t*>(p)[i]); },
+        [](const void* p, size_t i){ return detail::wgmma_f16_to_f32(static_cast<const uint16_t*>(p)[i]); });
+}
+inline void vgre_wgmma_wg_tf32(float* dFrag, int N, uint64_t descA, uint64_t descB) {
+    const void* A = detail::wgmma_desc_ptr_f32(descA);
+    const void* B = detail::wgmma_desc_ptr_f32(descB);
+    auto tf = [](const void* p, size_t i){ uint32_t u; memcpy(&u, static_cast<const float*>(p) + i, 4);
+                                           u &= 0xFFFFE000u; float f; memcpy(&f, &u, 4); return f; };
+    vgre_wgmma_collective(dFrag, N, 8, A, B, tf, tf);   // m64nNk8
+}
 
 // wgmma.mma_async m64n256k16 BF16→FP32
 // d[0..64*256-1]: FP32 accumulator (in/out)
