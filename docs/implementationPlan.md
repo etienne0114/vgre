@@ -32,7 +32,7 @@ are ordered by priority: **P0** = blocks an honest "production-ready" claim, **P
 | 14 | MPS per-client pipe instances (Windows) | P1 | §1.4 | ✅ Done |
 | 15 | `NOT_SUPPORTED` audit (cuSPARSE/cuSOLVER) | P1 | §2.1, §2.2 | ✅ Audited |
 | 16 | VMM IPC handle (cuMemRetainAllocationHandle) | P1 | §2.3–2.5 | ✅ Done |
-| 17 | FP8 (E4M3/E5M2) + FP4 quantized compute | P1 | §5.1 | ✅ Core done |
+| 17 | FP8 (E4M3/E5M2) + FP4 quantized compute | P1 | §5.1 | ✅ Done (cuBLASLt FP8) |
 | 18 | Paged Attention + KV-cache manager | P1 | §5.2 | ✅ Done |
 | 19 | Versioned multi-arch Docker images | P1 | §4.3 | 🟡 Artifacts ready |
 | 20 | Minimal build profile + footprint report | P2 | §3.3 | ✅ Done |
@@ -297,11 +297,17 @@ refcount lifetime.
 `test_fp_quant` (9/9): codec round-trips/rounding; the scaled FP8 GEMM equals the
 dequant→fp32 GEMM exactly and is within 3% Frobenius error of the true fp32
 product; the block-scaled FP4 GEMM matches its dequant reference exactly.
-**Follow-up (not done)**: exposing this through a `cublasLtMatmul` FP8/FP4
-descriptor API is a separate, larger surface — no such path exists today. The
-WMMA emulation already has an (unscaled) FP8 MMA; the scaled kernels here are the
-building block for a future cuBLASLt FP8 matmul.
-**Acceptance met**: the FP8 GEMM matches dequant→FP32-GEMM at the format epsilon.
+**Follow-up — ✅ done (2026-06-12): cuBLASLt FP8 matmul.** Wired the codecs into
+`cublasLtMatmul` (`src/api/cublaslt/cublaslt_matmul.cpp`): when an operand layout
+is `CUDA_R_8F_E4M3`/`CUDA_R_8F_E5M2`, A/B/C are dequantized via `vgre::quant`
+(E5M2 codec added) with the per-tensor scales from the existing
+`CUBLASLT_MATMUL_DESC_{A,B,C,D}_SCALE_POINTER` descriptor attributes — the
+cuBLASLt contract `D = α·sA·sB·(A·B) + β·sC·C`; FP8 output is quantized with the
+D scale. `test_cublaslt` (`CuBLASLtFunctional`) adds 3 FP8 cases (E4M3, E5M2,
+mixed) asserting the scaled matmul equals the dequant→FP32 GEMM AND that the
+scale is actually applied (unscaled would differ).
+**Acceptance met**: the FP8 GEMM matches dequant→FP32-GEMM at the format epsilon,
+end-to-end through the public cuBLASLt API.
 
 ### Track 18 — Paged Attention + KV-cache manager — ✅ done (2026-06-10)
 **Files**: new `include/vgre/core/kv_cache.h`, `src/core/kv_cache.cpp`.

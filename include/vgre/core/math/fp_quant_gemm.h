@@ -36,7 +36,7 @@ inline uint8_t f32_to_e4m3(float f) {
     float a = std::fabs(f);
     if (a >= 448.0f) return sign | 0x7E;                          // saturate to ±448
     if (a == 0.0f) return sign;
-    int e; float mant = std::frexp(a, &e);  // a = mant·2^e, mant in [0.5,1)
+    int e; (void)std::frexp(a, &e);          // sets e (a = mant·2^e, mant∈[0.5,1))
     // normalised exponent for (1.m): a = 1.x · 2^(E), E = e-1
     int E = e - 1;
     if (E < -6) {  // denormal region: value = m/8 · 2^-6
@@ -51,6 +51,43 @@ inline uint8_t f32_to_e4m3(float f) {
     if (m8 == 8) { ++E; m8 = 0; }
     if (E > 8) return sign | 0x7E;
     return sign | (static_cast<uint8_t>(E + 7) << 3) | static_cast<uint8_t>(m8 & 0x07);
+}
+
+// ── FP8 E5M2 (1 sign, 5 exp bias-15, 2 mantissa) — same exp field as fp16 ─────
+// Wider range than E4M3 (handles ±57344 + Inf/NaN), coarser mantissa; used for
+// gradients / dynamic-range-heavy tensors in FP8 training.
+inline float e5m2_to_f32(uint8_t b) {
+    const uint32_t sign = (b >> 7) & 1u, exp = (b >> 2) & 0x1Fu, m = b & 0x03u;
+    float v;
+    if (exp == 0) {                       // subnormal (or zero): 2^-14 · (m/4)
+        v = std::ldexp(static_cast<float>(m) / 4.0f, -14);
+    } else if (exp == 0x1F) {             // Inf / NaN
+        v = (m == 0) ? HUGE_VALF : std::nanf("");
+    } else {                              // normal: 2^(exp-15) · (1 + m/4)
+        v = std::ldexp(1.0f + static_cast<float>(m) / 4.0f, static_cast<int>(exp) - 15);
+    }
+    return sign ? -v : v;
+}
+
+// round-to-nearest-even float → E5M2.
+inline uint8_t f32_to_e5m2(float f) {
+    if (std::isnan(f)) return 0x7F;                                  // S11111.11 = NaN
+    const uint8_t sign = std::signbit(f) ? 0x80 : 0x00;
+    float a = std::fabs(f);
+    if (std::isinf(a) || a >= 57344.0f + 4096.0f) return sign | 0x7C; // ±Inf / saturate
+    if (a == 0.0f) return sign;
+    int e; (void)std::frexp(a, &e);                                 // sets e (a = mant·2^e)
+    int E = e - 1;                          // exponent of 1.x form
+    if (E < -14) {  // subnormal: value = m/4 · 2^-14
+        int m = static_cast<int>(std::lround(a / std::ldexp(1.0f, -14) * 4.0f));
+        if (m >= 4) return sign | (1u << 2);                        // rounded into exp=1
+        return sign | static_cast<uint8_t>(m);
+    }
+    float scaled = a / std::ldexp(1.0f, E);                          // in [1,2)
+    int m4 = static_cast<int>(std::lround(scaled * 4.0f)) - 4;       // 0..4 (4 = carry)
+    if (m4 == 4) { ++E; m4 = 0; }
+    if (E > 15) return sign | 0x7C;                                 // overflow → Inf
+    return sign | (static_cast<uint8_t>(E + 15) << 2) | static_cast<uint8_t>(m4 & 0x03);
 }
 
 // ── FP4 E2M1 (1 sign, 2 exp bias-1, 1 mantissa): {0,.5,1,1.5,2,3,4,6} ─────────

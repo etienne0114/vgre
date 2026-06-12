@@ -114,7 +114,9 @@ typedef enum {
     CUDA_R_4I = 22,
     CUDA_R_4U = 23,
     CUDA_R_16I = 24,
-    CUDA_R_16U = 25
+    CUDA_R_16U = 25,
+    CUDA_R_8F_E4M3 = 28,   // FP8 E4M3 (Track 17 — scaled FP8 matmul)
+    CUDA_R_8F_E5M2 = 29    // FP8 E5M2
 } cublasLtDatatype_t;
 
 // ── Order ────────────────────────────────────────────────────────────────────

@@ -158,9 +158,15 @@ Researched against the 2026 production-serving baseline (vLLM/TensorRT-LLM ops).
 Grounded in the 2026 inference stack (FP8 is "the single most impactful config",
 paged attention + continuous batching are the vLLM core).
 
-### 5.1 FP8 (E4M3 / E5M2) and FP4 quantized compute
-- **Gap**: VGRE has FP16/BF16/INT8 paths but **no FP8 or FP4**. FP8 is the default production quantization on Hopper/Blackwell and the single biggest throughput lever; vLLM/TensorRT-LLM ship FP8 by default. Without it VGRE cannot emulate modern quantized inference.
-- **Design**: FP8 E4M3/E5M2 software types + scaled matmul (per-tensor/row scales), FP4 (E2M1) with group scales (NVFP4/MXFP4). Wire into cuBLASLt `*_8F_E4M3` GEMM and the WMMA emulation.
+### 5.1 FP8 (E4M3 / E5M2) and FP4 quantized compute — ✅ DONE (Track 17)
+- **Was**: VGRE had FP16/BF16/INT8 but no FP8/FP4.
+- **Now**: FP8 E4M3/E5M2 + FP4 E2M1 software codecs and scaled GEMMs
+  (`vgre::quant`), and — completing the track — wired into **`cublasLtMatmul`**:
+  `CUDA_R_8F_E4M3`/`E5M2` operands are dequantized with the per-tensor
+  `CUBLASLT_MATMUL_DESC_*_SCALE_POINTER` scales, FP8 output is quantized with the
+  D scale. Verified end-to-end (`CuBLASLtFunctional`): the scaled FP8 matmul
+  equals the dequant→FP32 GEMM. (Block-scaled FP4/NVFP4 path exists as
+  `fp4_gemm_block_scaled`; a cuBLASLt FP4 descriptor surface is a future add.)
 
 ### 5.2 Paged Attention + KV-cache manager (vLLM backend)
 - **Gap**: no paged KV-cache, no block table, no continuous batching. These are what make VGRE usable as a *serving* backend rather than a single-kernel emulator.

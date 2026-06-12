@@ -2,8 +2,10 @@
 // FP16 compute path, descriptor lifecycle.
 
 #include "vgre/api/cublaslt_shim.h"
+#include "vgre/core/math/fp_quant_gemm.h"   // Track 17 — FP8 codecs for input/reference
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -302,6 +304,70 @@ int test_algo_heuristics_plural() {
 }
 
 // ── Driver ────────────────────────────────────────────────────────────────────
+// ── FP8 scaled matmul (Track 17) ─────────────────────────────────────────────
+// A,B are FP8 E4M3 with per-tensor dequant scales; output FP32. The scaled GEMM
+// must equal the GEMM of the dequantized (scale·stored) matrices. Column-major,
+// like test_sgemm_float. Real A=[[2,4],[6,8]] via stored {1,3,2,4}·sA=2; real
+// B=[[1,1],[1,1]] via stored {1,1,1,1}·sB=1 → C=[[6,6],[14,14]] (col-major
+// {6,14,6,14}). Without the scale the result would be {3,7,3,7}, so this proves
+// the scale pointer is honored.
+static int fp8_case(cublasLtDatatype_t aType, cublasLtDatatype_t bType) {
+    using namespace vgre::quant;
+    cublasLtHandle_t h = nullptr; cublasLtCreate(&h);
+    cublasLtMatmulDesc_t desc = nullptr;
+    cublasLtMatrixLayout_t layA=nullptr, layB=nullptr, layC=nullptr;
+    cublasLtMatmulDescCreate(&desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    cublasLtMatrixLayoutCreate(&layA, aType, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&layB, bType, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&layC, CUDA_R_32F, 2, 2, 2);
+
+    float sA = 2.0f, sB = 1.0f;
+    auto enc = [&](int t, float v){ return t==CUDA_R_8F_E5M2 ? f32_to_e5m2(v) : f32_to_e4m3(v); };
+    auto dec = [&](int t, uint8_t b){ return t==CUDA_R_8F_E5M2 ? e5m2_to_f32(b) : e4m3_to_f32(b); };
+    // stored A (col-major) = {1,3,2,4}; stored B = {1,1,1,1}
+    uint8_t A[4] = { enc(aType,1), enc(aType,3), enc(aType,2), enc(aType,4) };
+    uint8_t B[4] = { enc(bType,1), enc(bType,1), enc(bType,1), enc(bType,1) };
+    float C[4] = {}; float alpha=1.0f, beta=0.0f;
+
+    // The attribute value IS a pointer to the scale, so pass the address of a
+    // pointer variable (the setter copies sizeof(void*) bytes as the pointer).
+    const void *pA = &sA, *pB = &sB;
+    cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &pA, sizeof(void*));
+    cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &pB, sizeof(void*));
+
+    auto s = cublasLtMatmul(h, desc, &alpha, A, layA, B, layB, &beta, C, layC,
+                            C, layC, nullptr, nullptr, 0, nullptr);
+    if (s != CUBLAS_STATUS_SUCCESS) FAIL("fp8 matmul status");
+
+    // Reference: GEMM of the dequantized matrices (col-major).
+    float Ar[4], Br[4];
+    for (int i=0;i<4;++i){ Ar[i]=sA*dec(aType,A[i]); Br[i]=sB*dec(bType,B[i]); }
+    // col-major 2x2: Cref[r + c*2] = sum_k Ar[r + k*2]*Br[k + c*2]
+    float Cref[4];
+    for (int r=0;r<2;++r) for (int c=0;c<2;++c){
+        float acc=0; for(int kk=0;kk<2;++kk) acc += Ar[r+kk*2]*Br[kk+c*2];
+        Cref[r+c*2]=acc;
+    }
+    for (int i=0;i<4;++i) if (!NEAR(C[i], Cref[i], 1e-3)) FAIL("fp8 result != dequant reference");
+    // Sanity: the scale must matter (unscaled would give C[0]=3, not 6).
+    if (NEAR(C[0], 3.0f, 1e-3)) FAIL("fp8 A-scale was not applied");
+
+    cublasLtMatmulDescDestroy(desc);
+    cublasLtMatrixLayoutDestroy(layA); cublasLtMatrixLayoutDestroy(layB);
+    cublasLtMatrixLayoutDestroy(layC); cublasLtDestroy(h);
+    return 0;
+}
+
+int test_fp8_matmul() {
+    if (fp8_case(CUDA_R_8F_E4M3, CUDA_R_8F_E4M3)) return 1;
+    PASS("FP8 E4M3 scaled matmul == dequant reference");
+    if (fp8_case(CUDA_R_8F_E5M2, CUDA_R_8F_E5M2)) return 1;
+    PASS("FP8 E5M2 scaled matmul == dequant reference");
+    if (fp8_case(CUDA_R_8F_E4M3, CUDA_R_8F_E5M2)) return 1;  // mixed A=E4M3, B=E5M2
+    PASS("FP8 mixed E4M3×E5M2 scaled matmul == dequant reference");
+    return 0;
+}
+
 int main() {
     std::cout << "=== cuBLASLt Shim Functional Tests ===\n";
     int rc = 0;
@@ -316,6 +382,7 @@ int main() {
     rc |= test_version_queries();
     rc |= test_status_strings();
     rc |= test_algo_heuristics_plural();
+    rc |= test_fp8_matmul();
     if (rc == 0) std::cout << "\nAll cuBLASLt tests passed!\n";
     return rc;
 }

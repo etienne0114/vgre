@@ -3,6 +3,7 @@
 
 #include "cublaslt_state.h"
 #include "vgre/common/openmp_helper.h"
+#include "vgre/core/math/fp_quant_gemm.h"   // Track 17 — FP8 E4M3/E5M2 codecs
 
 #include <cmath>
 #include <cstring>
@@ -155,6 +156,21 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         std::vector<float> Bf(static_cast<size_t>(k * n));
         std::vector<float> Cf(static_cast<size_t>(m * n));
 
+        // Track 17 — FP8 per-tensor dequant scales (CUBLASLT_MATMUL_DESC_*_SCALE_
+        // POINTER). The scale is a multiplier: real value = scale · stored_fp8.
+        // Folding sA into A's decode and sB into B's decode yields the cuBLASLt
+        // contract D = α·sA·sB·(A·B) + β·sC·C. fp8 decoders from vgre::quant.
+        const float sA = d.aScalePtr ? *static_cast<const float*>(d.aScalePtr) : 1.0f;
+        const float sB = d.bScalePtr ? *static_cast<const float*>(d.bScalePtr) : 1.0f;
+        const float sC = d.cScalePtr ? *static_cast<const float*>(d.cScalePtr) : 1.0f;
+        const float sD = d.dScalePtr ? *static_cast<const float*>(d.dScalePtr) : 1.0f;
+        auto decodeFp8 = [](int type, uint8_t b) -> float {
+            return (type == CUDA_R_8F_E5M2) ? vgre::quant::e5m2_to_f32(b)
+                                            : vgre::quant::e4m3_to_f32(b);
+        };
+        const bool aFp8 = (la.type == CUDA_R_8F_E4M3 || la.type == CUDA_R_8F_E5M2);
+        const bool bFp8 = (lb.type == CUDA_R_8F_E4M3 || lb.type == CUDA_R_8F_E5M2);
+
         // FP16 ↔ float helpers
         auto h2f = [](uint16_t h) -> float {
             uint32_t bits = (static_cast<uint32_t>(h & 0x8000u) << 16) |
@@ -191,6 +207,9 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         } else if (la.type == CUDA_R_8I) {
             const int8_t *p = static_cast<const int8_t*>(A);
             for (int i = 0; i < m * k; ++i) Af[static_cast<size_t>(i)] = static_cast<float>(p[i]);
+        } else if (aFp8) {
+            const uint8_t *p = static_cast<const uint8_t*>(A);
+            for (int i = 0; i < m * k; ++i) Af[static_cast<size_t>(i)] = sA * decodeFp8(la.type, p[i]);
         } else {
             memcpy(Af.data(), A, static_cast<size_t>(m * k) * sizeof(float));
         }
@@ -205,6 +224,9 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         } else if (lb.type == CUDA_R_8I) {
             const int8_t *p = static_cast<const int8_t*>(B);
             for (int i = 0; i < k * n; ++i) Bf[static_cast<size_t>(i)] = static_cast<float>(p[i]);
+        } else if (bFp8) {
+            const uint8_t *p = static_cast<const uint8_t*>(B);
+            for (int i = 0; i < k * n; ++i) Bf[static_cast<size_t>(i)] = sB * decodeFp8(lb.type, p[i]);
         } else {
             memcpy(Bf.data(), B, static_cast<size_t>(k * n) * sizeof(float));
         }
@@ -222,6 +244,9 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         } else if (lc.type == CUDA_R_32I) {
             const int32_t *p = static_cast<const int32_t*>(C);
             for (int i = 0; i < m * n; ++i) Cf[static_cast<size_t>(i)] = static_cast<float>(p[i]);
+        } else if (lc.type == CUDA_R_8F_E4M3 || lc.type == CUDA_R_8F_E5M2) {
+            const uint8_t *p = static_cast<const uint8_t*>(C);
+            for (int i = 0; i < m * n; ++i) Cf[static_cast<size_t>(i)] = sC * decodeFp8(lc.type, p[i]);
         } else {
             memcpy(Cf.data(), C, static_cast<size_t>(m * n) * sizeof(float));
         }
@@ -242,6 +267,13 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         } else if (lc.type == CUDA_R_32I) {
             int32_t *p = static_cast<int32_t*>(C);
             for (size_t i = 0; i < static_cast<size_t>(m * n); ++i) p[i] = static_cast<int32_t>(Cf[i]);
+        } else if (lc.type == CUDA_R_8F_E4M3) {
+            // FP8 output: quantize the computed result scaled by the D scale.
+            uint8_t *p = static_cast<uint8_t*>(C);
+            for (size_t i = 0; i < static_cast<size_t>(m * n); ++i) p[i] = vgre::quant::f32_to_e4m3(Cf[i] * sD);
+        } else if (lc.type == CUDA_R_8F_E5M2) {
+            uint8_t *p = static_cast<uint8_t*>(C);
+            for (size_t i = 0; i < static_cast<size_t>(m * n); ++i) p[i] = vgre::quant::f32_to_e5m2(Cf[i] * sD);
         } else {
             memcpy(C, Cf.data(), static_cast<size_t>(m * n) * sizeof(float));
         }
@@ -258,6 +290,9 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
                 memcpy(D, C, count * sizeof(double));
             else if (lc.type == CUDA_R_16F || lc.type == CUDA_R_16BF)
                 memcpy(D, C, count * sizeof(uint16_t));
+            else if (lc.type == CUDA_R_8F_E4M3 || lc.type == CUDA_R_8F_E5M2 ||
+                     lc.type == CUDA_R_8I)
+                memcpy(D, C, count);   // 1 byte/element
         }
     }
 
