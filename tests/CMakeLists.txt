@@ -811,6 +811,12 @@ target_link_libraries(test_kv_cache PRIVATE vgre)
 add_test(NAME KVCachePaged COMMAND test_kv_cache)
 set_tests_properties(KVCachePaged PROPERTIES TIMEOUT 30)
 
+# Header-only utility (gradient_checkpointing.h) — wires it into the build/tests.
+add_executable(test_gradient_checkpointing core/test_gradient_checkpointing.cpp)
+target_link_libraries(test_gradient_checkpointing PRIVATE vgre)
+add_test(NAME GradientCheckpointing COMMAND test_gradient_checkpointing)
+set_tests_properties(GradientCheckpointing PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
