@@ -883,6 +883,12 @@ target_link_libraries(test_differential PRIVATE vgre)
 add_test(NAME DifferentialFuzz COMMAND test_differential)
 set_tests_properties(DifferentialFuzz PROPERTIES TIMEOUT 60)
 
+# Phase 3, P3-18: bit-deterministic mode.
+add_executable(test_deterministic core/test_deterministic.cpp)
+target_link_libraries(test_deterministic PRIVATE vgre)
+add_test(NAME DeterministicMode COMMAND test_deterministic)
+set_tests_properties(DeterministicMode PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)

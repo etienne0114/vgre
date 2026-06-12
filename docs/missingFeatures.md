@@ -196,7 +196,7 @@ fidelity / research-frontier.
 
 ## 7. Determinism & differential verification
 
-### 7.1 Bit-deterministic mode — P1
+### 7.1 Bit-deterministic mode — P1 — ✅ DONE
 - **Gap**: reductions (GEMM, attention, NCCL) and RNG depend on thread
   scheduling, so runs are not bit-reproducible — a real blocker for debugging and
   regression gating.
