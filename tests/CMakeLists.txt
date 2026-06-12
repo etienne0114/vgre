@@ -919,6 +919,12 @@ target_link_libraries(test_cluster_exec PRIVATE vgre Threads::Threads)
 add_test(NAME ClusterExecution COMMAND test_cluster_exec)
 set_tests_properties(ClusterExecution PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-7: Blackwell tcgen05 Tensor Memory (TMEM) data path.
+add_executable(test_tmem core/test_tmem.cpp)
+target_link_libraries(test_tmem PRIVATE vgre)
+add_test(NAME TensorMemoryTcgen05 COMMAND test_tmem)
+set_tests_properties(TensorMemoryTcgen05 PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
