@@ -49,7 +49,7 @@ All tracks start **🔴 Planned**.
 | P3-18 | Bit-deterministic mode | P1 | §7.1 | 🔴 Planned |
 | P3-19 | Differential testing harness | P2 | §7.2 | 🔴 Planned |
 | P3-20 | UVM oversubscription + disk eviction | P2 | §8.1 | 🔴 Planned |
-| P3-21 | Occupancy + roofline + flame graphs | P2 | §8.2 | 🔴 Planned |
+| P3-21 | Occupancy + roofline + flame graphs | P2 | §8.2 | ✅ Done |
 
 ---
 

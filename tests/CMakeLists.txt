@@ -865,6 +865,12 @@ target_link_libraries(test_interconnect PRIVATE vgre)
 add_test(NAME InterconnectCostModel COMMAND test_interconnect)
 set_tests_properties(InterconnectCostModel PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-21: SM occupancy calculator + roofline.
+add_executable(test_occupancy core/test_occupancy.cpp)
+target_link_libraries(test_occupancy PRIVATE vgre)
+add_test(NAME OccupancyRoofline COMMAND test_occupancy)
+set_tests_properties(OccupancyRoofline PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
