@@ -31,6 +31,7 @@ add_library(vgre_advanced OBJECT
     tcp_cluster/discovery_loops_proactive.cpp
     tcp_cluster/packet_handler.cpp
     tcp_cluster/security_manager.cpp
+    tcp_cluster/security_audit_bridge.cpp
     tcp_cluster/memory_sync_manager.cpp
     tcp_cluster/collective_ops_manager.cpp
     tcp_cluster/dispatch_manager_core.cpp
