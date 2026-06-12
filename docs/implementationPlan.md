@@ -39,7 +39,7 @@ All tracks start **🔴 Planned**.
 | P3-8 | Speculative decoding (draft+verify) | P1 | §3.1 | 🔴 Planned |
 | P3-9 | MoE: top-k router + grouped GEMM | P1 | §3.2 | ✅ Done |
 | P3-10 | Prefix caching + chunked prefill | P2 | §3.3 | 🔴 Planned |
-| P3-11 | Structured attention masks | P2 | §3.4 | 🔴 Planned |
+| P3-11 | Structured attention masks | P2 | §3.4 | ✅ Done |
 | P3-12 | Mamba/SSM selective-scan | P2 | §4.1 | ✅ Done |
 | P3-13 | Triton IR frontend | P2 | §5.1 | 🔴 Planned |
 | P3-14 | CUDA-graph capture-from-stream fidelity | P2 | §5.2 | 🔴 Planned |
