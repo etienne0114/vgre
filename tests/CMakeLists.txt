@@ -835,6 +835,12 @@ target_link_libraries(test_ssm_scan PRIVATE vgre)
 add_test(NAME SSMSelectiveScan COMMAND test_ssm_scan)
 set_tests_properties(SSMSelectiveScan PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-11: structured attention masks (sliding-window/sink/ALiBi).
+add_executable(test_attention_masks core/test_attention_masks.cpp)
+target_link_libraries(test_attention_masks PRIVATE vgre)
+add_test(NAME StructuredAttentionMasks COMMAND test_attention_masks)
+set_tests_properties(StructuredAttentionMasks PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
