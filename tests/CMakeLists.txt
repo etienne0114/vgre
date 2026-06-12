@@ -925,6 +925,12 @@ target_link_libraries(test_tmem PRIVATE vgre)
 add_test(NAME TensorMemoryTcgen05 COMMAND test_tmem)
 set_tests_properties(TensorMemoryTcgen05 PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-20: UVM oversubscription via disk-backed LRU eviction.
+add_executable(test_page_evictor core/test_page_evictor.cpp)
+target_link_libraries(test_page_evictor PRIVATE vgre)
+add_test(NAME UVMPageEvictor COMMAND test_page_evictor)
+set_tests_properties(UVMPageEvictor PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
