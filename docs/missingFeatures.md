@@ -65,7 +65,7 @@ fidelity / research-frontier.
 
 ## 2. Next-gen tensor & memory architecture emulation
 
-### 2.1 Hopper `wgmma.mma_async` warp-group MMA — P1
+### 2.1 Hopper `wgmma.mma_async` warp-group MMA — P1 — ✅ DONE
 - **Location**: `include/vgre/compiler/wmma_emulation.h` (wgmma helpers, with the
   "simplified descriptor" note); `src/compiler/ptx/ptx_translator_map.cpp`.
 - **Gap**: the Hopper warp-group MMA (`wgmma.mma_async.sync.aligned.mNkNxN`) is

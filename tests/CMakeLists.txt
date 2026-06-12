@@ -555,6 +555,12 @@ add_test(NAME TensorCoreMMA COMMAND test_tensorcore_mma)
 # JIT-compiles warp-collective mma kernels — serialise with the other JIT tests.
 set_tests_properties(TensorCoreMMA PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
 
+# Phase 3, P3-4: Hopper warp-group MMA (wgmma).
+add_executable(test_wgmma integration/test_wgmma.cpp)
+target_link_libraries(test_wgmma PRIVATE vgre)
+add_test(NAME WgmmaWarpGroup COMMAND test_wgmma)
+set_tests_properties(WgmmaWarpGroup PROPERTIES TIMEOUT 60)
+
 add_executable(test_cublaslt api/test_cublaslt.cpp)
 target_link_libraries(test_cublaslt PRIVATE vgre_cudart)
 add_test(NAME CuBLASLtFunctional COMMAND test_cublaslt)

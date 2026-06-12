@@ -121,6 +121,22 @@ int main() {
         check("mma.sync leaves no brace-grouped operands ({%)", c.find("{%") == std::string::npos);
     }
 
+    // (6) Hopper wgmma with a REAL distributed accumulator ({d0..d31}, descA,
+    //     descB) must route to the warp-group-collective helper (Track P3-4),
+    //     packing the 32 (=N/2 for n64) accumulator registers.
+    {
+        std::string regs = "{";
+        for (int i = 0; i < 32; ++i) { regs += "%" + std::to_string(i); if (i < 31) regs += ","; }
+        regs += "}";
+        std::string src = "asm volatile("
+            "\"wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 " + regs + ", %32, %33;\" : );";
+        std::string c = PTXTranslator::translate(src);
+        check("wgmma brace-group → warp-group collective helper",
+              contains(c, "vgre_wgmma_wg_bf16(_wgd,64,"));
+        check("wgmma packs the 32 distributed accumulator registers",
+              contains(c, "float _wgd[32]"));
+    }
+
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

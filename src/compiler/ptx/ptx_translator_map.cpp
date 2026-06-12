@@ -57,6 +57,26 @@ static std::string mma_emit(const std::vector<std::string>& o,
     return s + ");";
 }
 
+// Emit a warp-group wgmma call from REAL PTX operands: o[0]={d0..d_{N/2-1}}
+// (distributed accumulator), o[1]=A descriptor, o[2]=B descriptor. Packs the
+// accumulator registers into a local array, calls the collective helper (each
+// lane computes its fragment), and unpacks them back. fn = vgre_wgmma_wg_*.
+static std::string wgmma_emit_collective(const std::vector<std::string>& o,
+                                         const char* fn, int N) {
+    if (o.size() < 3)
+        throw std::runtime_error(std::string(fn) + ": wgmma needs {d},descA,descB");
+    auto regs = splitRegs(stripDelimiters(o[0]));
+    if (static_cast<int>(regs.size()) != N / 2)
+        throw std::runtime_error(std::string(fn) + ": expected " + std::to_string(N / 2) +
+                                 " accumulator regs, got " + std::to_string(regs.size()));
+    std::string s = "{ float _wgd[" + std::to_string(N / 2) + "]={";
+    for (std::size_t i = 0; i < regs.size(); ++i) { s += regs[i]; if (i + 1 < regs.size()) s += ","; }
+    s += "}; " + std::string(fn) + "(_wgd," + std::to_string(N) + ",(uint64_t)(" + o[1] +
+         "),(uint64_t)(" + o[2] + "));";
+    for (std::size_t i = 0; i < regs.size(); ++i) s += " " + regs[i] + "=_wgd[" + std::to_string(i) + "];";
+    return s + " }";
+}
+
 // Emit ldmatrix: load N uint32_t words from shared memory into register list.
 // PTX: ldmatrix.sync.aligned.m8n8.xN.shared.b16  {r0[,r1[,r2[,r3]]]}, [addr]
 // After splitOperands: o[0] = "{r0,...}", o[1] = "[addr]"
@@ -233,35 +253,39 @@ const TranslateMap& getMap() {
         // operand layout: o[0]=descA, o[1]=descB, o[2]=d_ptr (FP32 accumulator)
         // The accumulator pointer is the output of wgmma; callers pass
         // reinterpret_cast<uint64_t>(d_array) as o[2].
+        // Real CUTLASS/Triton PTX uses a brace-grouped distributed accumulator
+        // ({d0..d_{N/2-1}}, descA, descB) → the warp-group-collective helper.
+        // VGRE's older scalar convention (descA, descB, d-ptr) is auto-detected
+        // and routed to the full-tile helper for backward compatibility.
         {"wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16", [](auto& o){
+            if (!o.empty() && !o[0].empty() && o[0][0]=='{') return wgmma_emit_collective(o, "vgre_wgmma_wg_bf16", 256);
             auto d = o.size() > 2 ? o[2] : std::string("nullptr");
-            return "vgre_wgmma_m64n256k16_bf16_f32((float*)(uintptr_t)("+d+"),"
-                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+            return "vgre_wgmma_m64n256k16_bf16_f32((float*)(uintptr_t)("+d+"),(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
         }},
         {"wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16", [](auto& o){
+            if (!o.empty() && !o[0].empty() && o[0][0]=='{') return wgmma_emit_collective(o, "vgre_wgmma_wg_bf16", 128);
             auto d = o.size() > 2 ? o[2] : std::string("nullptr");
-            return "vgre_wgmma_m64n128k16_bf16_f32((float*)(uintptr_t)("+d+"),"
-                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+            return "vgre_wgmma_m64n128k16_bf16_f32((float*)(uintptr_t)("+d+"),(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
         }},
         {"wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16", [](auto& o){
+            if (!o.empty() && !o[0].empty() && o[0][0]=='{') return wgmma_emit_collective(o, "vgre_wgmma_wg_bf16", 64);
             auto d = o.size() > 2 ? o[2] : std::string("nullptr");
-            return "vgre_wgmma_m64n64k16_bf16_f32((float*)(uintptr_t)("+d+"),"
-                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+            return "vgre_wgmma_m64n64k16_bf16_f32((float*)(uintptr_t)("+d+"),(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
         }},
         {"wgmma.mma_async.sync.aligned.m64n256k16.f32.f16.f16", [](auto& o){
+            if (!o.empty() && !o[0].empty() && o[0][0]=='{') return wgmma_emit_collective(o, "vgre_wgmma_wg_f16", 256);
             auto d = o.size() > 2 ? o[2] : std::string("nullptr");
-            return "vgre_wgmma_m64n256k16_f16_f32((float*)(uintptr_t)("+d+"),"
-                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+            return "vgre_wgmma_m64n256k16_f16_f32((float*)(uintptr_t)("+d+"),(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
         }},
         {"wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16", [](auto& o){
+            if (!o.empty() && !o[0].empty() && o[0][0]=='{') return wgmma_emit_collective(o, "vgre_wgmma_wg_f16", 128);
             auto d = o.size() > 2 ? o[2] : std::string("nullptr");
-            return "vgre_wgmma_m64n128k16_f16_f32((float*)(uintptr_t)("+d+"),"
-                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+            return "vgre_wgmma_m64n128k16_f16_f32((float*)(uintptr_t)("+d+"),(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
         }},
         {"wgmma.mma_async.sync.aligned.m64n256k8.f32.tf32.tf32", [](auto& o){
+            if (!o.empty() && !o[0].empty() && o[0][0]=='{') return wgmma_emit_collective(o, "vgre_wgmma_wg_tf32", 256);
             auto d = o.size() > 2 ? o[2] : std::string("nullptr");
-            return "vgre_wgmma_m64n256k8_tf32_f32((float*)(uintptr_t)("+d+"),"
-                   "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
+            return "vgre_wgmma_m64n256k8_tf32_f32((float*)(uintptr_t)("+d+"),(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
         }},
         // ── FP8 wgmma.mma_async (Hopper/Blackwell tcgen05 FP8 tiles, K=32) ──
         // E4M3×E4M3→FP32 (most common in Flash-Attention-3 and FP8 transformers)
