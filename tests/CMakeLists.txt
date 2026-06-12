@@ -56,6 +56,12 @@ add_executable(test_cuda_graphs integration/test_cuda_graphs.cpp)
 target_link_libraries(test_cuda_graphs PRIVATE vgre)
 add_test(NAME CUDAGraphsIntegration COMMAND test_cuda_graphs)
 
+# Phase 3, P3-14: CUDA-graph capture-from-stream fidelity (memset node capture).
+add_executable(test_graph_capture_fidelity integration/test_graph_capture_fidelity.cpp)
+target_link_libraries(test_graph_capture_fidelity PRIVATE vgre)
+add_test(NAME GraphCaptureFidelity COMMAND test_graph_capture_fidelity)
+set_tests_properties(GraphCaptureFidelity PROPERTIES TIMEOUT 30)
+
 add_executable(test_graph_c_api integration/test_graph_c_api.cpp)
 target_link_libraries(test_graph_c_api PRIVATE vgre)
 add_test(NAME GraphCAPIIntegration COMMAND test_graph_c_api)

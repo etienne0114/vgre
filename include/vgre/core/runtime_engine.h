@@ -341,6 +341,7 @@ public:
   VGREResult streamCopyAttributes(StreamId dst, StreamId src);
 
   VGREResult recordMemcpyToGraph(StreamId stream, void *dst, const void *src, size_t count, int kind);
+  VGREResult recordMemsetToGraph(StreamId stream, void *dst, int value, size_t count);
 
   // Access sub-systems
   MemoryManager &getMemoryManager();

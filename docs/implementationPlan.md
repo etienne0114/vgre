@@ -42,7 +42,7 @@ All tracks start **🔴 Planned**.
 | P3-11 | Structured attention masks | P2 | §3.4 | ✅ Done |
 | P3-12 | Mamba/SSM selective-scan | P2 | §4.1 | ✅ Done |
 | P3-13 | Triton IR frontend | P2 | §5.1 | 🔴 Planned |
-| P3-14 | CUDA-graph capture-from-stream fidelity | P2 | §5.2 | 🔴 Planned |
+| P3-14 | CUDA-graph capture-from-stream fidelity | P2 | §5.2 | ✅ Done |
 | P3-15 | Virtual NVLink topology + collective cost model | P1 | §6.1 | ✅ Done |
 | P3-16 | NVSHMEM symmetric memory (one-sided) | P2 | §6.2 | ✅ Done |
 | P3-17 | Tensor/pipeline parallel primitives | P2 | §6.3 | ✅ Done |
@@ -176,11 +176,19 @@ An MLIR/TTIR → VGRE-IR lowering feeding the existing JIT (vs. consuming emitte
 PTX). **Acceptance**: a representative Triton kernel runs from IR with matching
 output.
 
-### P3-14 — CUDA-graph capture-from-stream fidelity
-**File**: `src/api/cudart/cudart_shim_capture.cpp`, `src/core/runtime_engine_graph.cpp`.
-Record every stream op during capture into graph nodes with real dependencies;
-replay bit-identical to eager. **Acceptance**: a captured+replayed multi-kernel
-torch graph equals eager.
+### P3-14 — CUDA-graph capture-from-stream fidelity ✅ DONE
+Kernel + memcpy capture already recorded nodes with implicit stream-serialization
+deps; two fidelity bugs closed the gap. (1) `cudaMemsetAsync` on a capturing
+stream executed **eagerly** instead of recording a node — so the memset ran once
+at capture and was missing from the replayed graph; now `memsetAsync` records a
+MEMSET node via `recordMemsetToGraph` (same serialization-dep chain). (2) Captured
+MEMCPY nodes stored the **CUDA** `cudaMemcpyKind` (H2D=1/D2H=2/D2D=3) but the graph
+executor compares `VGRE_MEMCPY_*` (H2D=0/D2H=1/D2D=2), so a captured D2D matched no
+branch (skipped) and H2D/D2H replayed the wrong direction; `recordMemcpyToGraph`
+now converts cuda→VGRE kind. **Acceptance**: a captured two-op graph (memset →
+dependent D2D memcpy) replays bit-identical to eager — memset deferred during
+capture, both ops replay in captured order, reproduced across launches
+(`test_graph_capture_fidelity`).
 
 ### P3-16 — NVSHMEM symmetric memory (one-sided)
 A symmetric heap + one-sided `put/get/atomic` over the existing RDMA/TCP

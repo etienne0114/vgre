@@ -951,9 +951,57 @@ VGREResult RuntimeEngine::recordMemcpyToGraph(StreamId stream, void *dst, const 
     }
   }
 
+  // memcpyAsync passes the CUDA cudaMemcpyKind (1=H2D, 2=D2H, 3=D2D), but graph
+  // MEMCPY nodes execute against the VGRE_MEMCPY_* enum (0=H2D, 1=D2H, 2=D2D).
+  // Convert so the node replays the correct direction — otherwise a captured D2D
+  // (3) matches no branch and is skipped, and H2D/D2H replay as the wrong way.
+  int vkind;
+  switch (kind) {
+    case 1:  vkind = VGRE_MEMCPY_HOST_TO_DEVICE;   break;  // cudaMemcpyHostToDevice
+    case 2:  vkind = VGRE_MEMCPY_DEVICE_TO_HOST;   break;  // cudaMemcpyDeviceToHost
+    case 3:  vkind = VGRE_MEMCPY_DEVICE_TO_DEVICE; break;  // cudaMemcpyDeviceToDevice
+    default: vkind = VGRE_MEMCPY_DEVICE_TO_DEVICE; break;  // H2H/Default → resolve by pointer
+  }
+
   uint64_t nodeId = 0;
   auto r = graphManager_->addMemcpyNodeWithDepsOut(
-      it->second, dst, const_cast<void*>(src), count, kind, deps, nodeId);
+      it->second, dst, const_cast<void*>(src), count, vkind, deps, nodeId);
+  if (r == VGREResult::SUCCESS) {
+    lastCapturedNodeId_[stream] = nodeId;
+  }
+  return r;
+}
+
+// Capture a cudaMemsetAsync issued on a capturing stream as a MEMSET graph node,
+// so it is replayed on every graph launch (not executed once at capture time).
+// Uses the same implicit stream-serialization as memcpy/kernel capture: the node
+// depends on the previous node captured on this stream (or the seed deps after a
+// stream-wait-event), giving a faithful capture-from-stream dependency chain.
+VGREResult RuntimeEngine::recordMemsetToGraph(StreamId stream, void *dst, int value, size_t count) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!initialized_ || !graphManager_)
+    return VGREResult::ERR_NOT_INITIALIZED;
+
+  auto it = captureState_.find(stream);
+  if (it == captureState_.end())
+    return VGREResult::ERR_INVALID_VALUE;
+
+  VGRE_LOG_DEBUG("RuntimeEngine", "Capturing memset on stream " + std::to_string(stream));
+  std::vector<uint64_t> deps;
+  auto seedIt = captureSeedDeps_.find(stream);
+  if (seedIt != captureSeedDeps_.end() && !seedIt->second.empty()) {
+    deps = seedIt->second;
+    seedIt->second.clear();
+  } else {
+    auto lastNodeIt = lastCapturedNodeId_.find(stream);
+    if (lastNodeIt != lastCapturedNodeId_.end() && lastNodeIt->second != 0) {
+      deps.push_back(lastNodeIt->second);
+    }
+  }
+
+  uint64_t nodeId = 0;
+  // 1-D memset: pitch = width = count, height = depth = 1.
+  auto r = graphManager_->addMemsetNode(it->second, dst, value, count, count, 1, 1, deps, nodeId);
   if (r == VGREResult::SUCCESS) {
     lastCapturedNodeId_[stream] = nodeId;
   }
