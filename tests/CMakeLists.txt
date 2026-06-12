@@ -68,6 +68,12 @@ target_link_libraries(test_triton_frontend PRIVATE vgre)
 add_test(NAME TritonFrontend COMMAND test_triton_frontend)
 set_tests_properties(TritonFrontend PROPERTIES TIMEOUT 30)
 
+# Phase-3 extension API (vgre::ext) — capability modules through the shipped lib.
+add_executable(test_vgre_ext integration/test_vgre_ext.cpp)
+target_link_libraries(test_vgre_ext PRIVATE vgre)
+add_test(NAME Phase3ExtAPI COMMAND test_vgre_ext)
+set_tests_properties(Phase3ExtAPI PROPERTIES TIMEOUT 30)
+
 add_executable(test_graph_c_api integration/test_graph_c_api.cpp)
 target_link_libraries(test_graph_c_api PRIVATE vgre)
 add_test(NAME GraphCAPIIntegration COMMAND test_graph_c_api)
