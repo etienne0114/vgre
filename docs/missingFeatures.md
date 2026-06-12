@@ -172,7 +172,7 @@ fidelity / research-frontier.
 
 ## 6. Multi-GPU / distributed realism
 
-### 6.1 Virtual NVLink/NVSwitch topology + collective cost model — P1
+### 6.1 Virtual NVLink/NVSwitch topology + collective cost model — P1 — ✅ DONE
 - **Gap**: multi-vGPU collectives (NCCL) compute correct results but model no
   interconnect topology — ranks share host memory at host bandwidth, so
   collective *timing* is unrealistic for scaling studies.

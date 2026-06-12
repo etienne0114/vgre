@@ -859,6 +859,12 @@ target_link_libraries(test_speculative PRIVATE vgre)
 add_test(NAME SpeculativeDecoding COMMAND test_speculative)
 set_tests_properties(SpeculativeDecoding PROPERTIES TIMEOUT 60)
 
+# Phase 3, P3-15: interconnect topology + collective cost model.
+add_executable(test_interconnect core/test_interconnect.cpp)
+target_link_libraries(test_interconnect PRIVATE vgre)
+add_test(NAME InterconnectCostModel COMMAND test_interconnect)
+set_tests_properties(InterconnectCostModel PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
