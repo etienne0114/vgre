@@ -10,6 +10,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/common/sockets.h"
+#include "vgre/core/runtime_engine.h"
 #include <cassert>
 #include <iostream>
 #include <memory>
@@ -136,6 +137,13 @@ void test_initializeShmForClient_no_shm_does_not_crash() {
 
 int main() {
     std::cout << "=== MemorySyncManager Unit Tests ===\n";
+
+    // Initialize the runtime engine so the sync methods reach their real
+    // input-validation error paths instead of throwing ERR_NOT_INITIALIZED.
+    // (On macOS that exception does not unwind across the libvgre .dylib
+    // boundary into safe_call's catch, terminating the process; the methods
+    // already return errors cleanly once the engine is up.)
+    vgre::core::RuntimeEngine::instance().initialize();
 
     test_construction_succeeds();
     test_streamArguments_invalid_socket_returns_error();

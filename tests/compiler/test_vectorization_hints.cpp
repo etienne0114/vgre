@@ -108,8 +108,15 @@ int main() {
             check("FLOP-dense + AVX: vectorize_width(4)",
                   pragmaHas(src, "vectorize_width(4)"));
         } else {
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+            // AArch64 reports no x86 caps but has mandatory 128-bit NEON (4× f32),
+            // so computeVectorHints treats FLOP-dense as a 4-wide target.
+            check("FLOP-dense + NEON: vectorize_width(4)",
+                  pragmaHas(src, "vectorize_width(4)"));
+#else
             check("FLOP-dense + scalar: vectorize_width(2)",
                   pragmaHas(src, "vectorize_width(2)"));
+#endif
         }
     }
 

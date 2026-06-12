@@ -73,7 +73,33 @@ breakage that has now been fixed:
   `lib/cmake/llvm/`) and build with its `clang-cl`. This resolves the configure
   blocker; remaining Windows build/link issues are surfaced by CI (stays
   informational `continue-on-error`).
-**Acceptance**: Linux green + uploaded logs; macOS/Windows tracked to green.
+
+**macOS arm64 bring-up — build green + test pass-rate driven from 0 → ~99%
+(2026-06-11).** Once the build linked, the first full macOS run was 89% and each
+fix surfaced the next layer (the logger defaults to NONE, so the CI test step now
+sets `VGRE_LOG_LEVEL=ERROR` to make JIT/parse errors visible). Fixes, in order:
+  - **libc++ ABI**: Homebrew llvm@18's clang uses its own newer libc++ headers;
+    link its bundled libc++ (`-L<llvm>/lib/c++` + rpath) so `exception_ptr`/
+    `__cxa_init_primary_exception` resolve.
+  - **IOKit/CoreFoundation**: cupti_shim + adaptive_execution_engine probe IOKit;
+    include the headers and link the frameworks PUBLIC on the object libs.
+  - **arm64 portability**: guard x86 streaming-memcpy/`__builtin_cpu_supports`
+    bodies; drop Solaris `<sys/loadavg.h>`; inline the 32 GB cap; `-mcpu=native`
+    instead of `-march=native`; NEON-aware vectorization hints.
+  - **UVM SIGBUS**: macOS raises SIGBUS (not SIGSEGV) for mprotect write faults
+    AND with a BUS_* si_code — install the SIGBUS handler and stop gating it on
+    SEGV_ACCERR (the region-bounds lookup is the real security gate).
+  - **JIT kernels (the big one, ~15 tests)**: `__global__` used
+    `section("vgre_global")`, invalid on Mach-O ("requires segment,section") — so
+    EVERY kernel failed to compile. Use `__TEXT,vgre_global` in the AST stub
+    (parser matches by substring) and drop the vestigial section from the JIT env
+    on macOS (a custom `__TEXT` subsection under arm64 JITLink risked SIGBUS).
+  - **Test portability**: aligned_alloc size/alignment validity (macOS strict);
+    timing tolerance; cross-`.dylib` exception catch-all; serial `ctest -j1`
+    (the small runner oversubscribed forks under -j2).
+**Acceptance**: Linux green + uploaded logs; macOS builds green and runs the
+suite (continue-on-error while the last arm64-specific items close); Windows
+tracked to green.
 
 ### Track 2 — Honest status documentation
 **Files**: `README.md`, `docs/PROJECT_STATUS.md`, `docs/README.md`.
