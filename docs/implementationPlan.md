@@ -44,7 +44,7 @@ All tracks start **🔴 Planned**.
 | P3-13 | Triton IR frontend | P2 | §5.1 | 🔴 Planned |
 | P3-14 | CUDA-graph capture-from-stream fidelity | P2 | §5.2 | 🔴 Planned |
 | P3-15 | Virtual NVLink topology + collective cost model | P1 | §6.1 | ✅ Done |
-| P3-16 | NVSHMEM symmetric memory (one-sided) | P2 | §6.2 | 🔴 Planned |
+| P3-16 | NVSHMEM symmetric memory (one-sided) | P2 | §6.2 | ✅ Done |
 | P3-17 | Tensor/pipeline parallel primitives | P2 | §6.3 | ✅ Done |
 | P3-18 | Bit-deterministic mode | P1 | §7.1 | 🔴 Planned |
 | P3-19 | Differential testing harness | P2 | §7.2 | 🔴 Planned |

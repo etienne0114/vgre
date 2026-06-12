@@ -181,7 +181,7 @@ fidelity / research-frontier.
   so reported timings track real multi-GPU behavior. Acceptance: AllReduce timing
   scales with the configured topology; numerics unchanged.
 
-### 6.2 NVSHMEM symmetric memory (one-sided put/get) — P2
+### 6.2 NVSHMEM symmetric memory (one-sided put/get) — P2 — ✅ DONE
 - **Design**: a symmetric heap + one-sided `put/get/atomic` over the existing
   RDMA/TCP transport, the substrate for NVSHMEM-style collectives and
   fine-grained overlap. Acceptance: a one-sided ring AllReduce matches the
