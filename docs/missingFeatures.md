@@ -106,7 +106,7 @@ fidelity / research-frontier.
 
 ## 3. Serving-layer innovation (on Tracks 18/22)
 
-### 3.1 Speculative decoding (draft + verify) — P1
+### 3.1 Speculative decoding (draft + verify) — P1 — ✅ DONE
 - **Gap**: the continuous-batch scheduler (`ContinuousBatchScheduler`,
   `include/vgre/core/kv_cache.h`) advances one token/step. Modern serving uses a
   small draft model (or Medusa/EAGLE heads) to propose K tokens, then the target

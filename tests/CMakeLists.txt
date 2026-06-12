@@ -853,6 +853,12 @@ target_link_libraries(test_tensor_parallel PRIVATE vgre)
 add_test(NAME TensorParallel COMMAND test_tensor_parallel)
 set_tests_properties(TensorParallel PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-8: speculative decoding (draft + verify).
+add_executable(test_speculative core/test_speculative.cpp)
+target_link_libraries(test_speculative PRIVATE vgre)
+add_test(NAME SpeculativeDecoding COMMAND test_speculative)
+set_tests_properties(SpeculativeDecoding PROPERTIES TIMEOUT 60)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
