@@ -871,6 +871,12 @@ target_link_libraries(test_occupancy PRIVATE vgre)
 add_test(NAME OccupancyRoofline COMMAND test_occupancy)
 set_tests_properties(OccupancyRoofline PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-16: NVSHMEM symmetric memory + one-sided collectives.
+add_executable(test_nvshmem core/test_nvshmem.cpp)
+target_link_libraries(test_nvshmem PRIVATE vgre)
+add_test(NAME NvshmemSymmetricMem COMMAND test_nvshmem)
+set_tests_properties(NvshmemSymmetricMem PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
