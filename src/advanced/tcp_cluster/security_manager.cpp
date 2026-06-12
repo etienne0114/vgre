@@ -2,10 +2,12 @@
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include "vgre/advanced/hardware_token_manager.h"
+#include "vgre/compliance/audit_log.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/secure_zero.h"
 #include "vgre/common/sockets.h"
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -72,7 +74,22 @@ namespace {
     g_ratelimit.backoff_until.erase(ip);
   }
   const int HANDSHAKE_TIMEOUT_SEC = []() { const char* e = vgre_get_config("VGRE_CLUSTER_HANDSHAKE_TIMEOUT_SEC"); return (e && std::atoi(e) > 0) ? std::atoi(e) : 5; }();
-  void logSecurityEvent(const std::string& event, const std::string& ip, const std::string& details) { VGRE_LOG_INFO("TCPCluster.Security", "[" + event + "] " + ip + ": " + details); }
+  void logSecurityEvent(const std::string& event, const std::string& ip, const std::string& details) {
+    VGRE_LOG_INFO("TCPCluster.Security", "[" + event + "] " + ip + ": " + details);
+    // Mirror security events into the tamper-evident compliance audit trail
+    // (no-op unless VGRE_AUDIT_LOG is configured).  Auth/violation failures map
+    // to a DENIED outcome at WARNING severity; everything else is an INFO record.
+    auto lc = event;
+    std::transform(lc.begin(), lc.end(), lc.begin(), [](unsigned char c){ return std::tolower(c); });
+    bool failure = lc.find("fail") != std::string::npos || lc.find("violation") != std::string::npos ||
+                   lc.find("denied") != std::string::npos || lc.find("reject") != std::string::npos ||
+                   lc.find("unauthorized") != std::string::npos;
+    vgre::compliance::AuditLog::global().emit(
+        ip.empty() ? "unknown" : ip, "cluster." + event, "cluster",
+        failure ? vgre::compliance::AuditOutcome::DENIED : vgre::compliance::AuditOutcome::SUCCESS,
+        failure ? vgre::compliance::AuditSeverity::WARNING : vgre::compliance::AuditSeverity::INFO,
+        {{"details", details}});
+  }
   bool recordViolation(const std::string& ip, const std::string& type) {
     std::lock_guard<std::mutex> lock(g_metrics.violation_mutex);
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();
