@@ -13,6 +13,7 @@ add_library(vgre_compiler STATIC
     texture_builtins.cpp
     kernel_fusion_engine.cpp
     sass/sass_decoder.cpp
+    triton/triton_frontend.cpp
 )
 
 target_include_directories(vgre_compiler PUBLIC

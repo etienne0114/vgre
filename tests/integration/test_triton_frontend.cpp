@@ -98,12 +98,13 @@ int main() {
                     m.funcs[0].args.size() == 4 && !m.funcs[0].body.empty();
     check("parses tt.func signature + body from TTIR", structOk);
 
-    // (2) Run vector-add from IR and match x + y.
+    // (2) Run vector-add from IR via the compiled library entry (run_kernel) and
+    //     match x + y — exercises the shipped API, not just the header.
     {
         std::vector<float> out(N, -999.0f);
         std::vector<KernelArg> args = {
             {true, x.data(), 0}, {true, y.data(), 0}, {true, out.data(), 0}, {false, nullptr, N}};
-        Interpreter::run(m.funcs[0], args, ceilDiv(N, 256));
+        run_kernel(kVecAdd, "add_kernel", args, ceilDiv(N, 256));
         double maxErr = 0.0;
         for (int i = 0; i < N; ++i) maxErr = std::max(maxErr, (double)std::fabs(out[i] - (x[i] + y[i])));
         printf("  [info] vector-add max abs err = %.2e (grid=%d, BLOCK=256, N=%d)\n",

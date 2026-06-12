@@ -119,6 +119,35 @@ int main() {
     check("4-CTA cluster DSMEM reduction == sum of all peers", runClusterReduction(4));
     check("8-CTA cluster DSMEM reduction == sum of all peers", runClusterReduction(8));
 
+    // (2b) DSMEM *write*: each CTA writes a value into its right neighbor's shared
+    //      memory via dsmem_store; after the barrier every CTA reads the value its
+    //      left neighbor deposited. Proves cross-CTA writes (not just reads).
+    {
+        const unsigned N = 4;
+        Cluster cl(N);
+        std::vector<int> got(N, -1);
+        std::vector<std::thread> ts;
+        for (unsigned r = 0; r < N; ++r) {
+            ts.emplace_back([&, r] {
+                int inbox = 0;
+                cl.register_smem(r, &inbox);
+                cl.sync();                                   // all inboxes registered
+                unsigned right = (r + 1) % N;
+                vgre::cluster::dsmem_store(cl, r, &inbox, right, (int)(100 + r));  // write peer's inbox
+                cl.sync();                                   // all writes landed
+                got[r] = inbox;                              // value my left neighbor wrote
+                cl.sync();
+            });
+        }
+        for (auto& t : ts) t.join();
+        bool ok = true;
+        for (unsigned r = 0; r < N; ++r) {
+            unsigned left = (r + N - 1) % N;
+            if (got[r] != (int)(100 + left)) ok = false;
+        }
+        check("dsmem_store writes into a peer CTA's shared memory", ok);
+    }
+
     // (3) Cluster rank ↔ coordinate round-trips over a 2×2×2 cluster shape.
     {
         ClusterDim d{2, 2, 2};

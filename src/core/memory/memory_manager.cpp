@@ -3,6 +3,7 @@
 #include "vgre/advanced/memory_compression.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
+#include "vgre/core/memory/page_evictor.h"  // DiskBackedLRU full type (unique_ptr dtor + forget)
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/virtual_gpu_device.h"
 
@@ -989,23 +990,20 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
 }
 
 VGREResult MemoryManager::free(MemoryHandle handle) {
-  // UVM oversubscription (P3-20): drop any eviction state for this region before
-  // it is unmapped, so a future allocation reusing the address never restores
-  // stale spilled data. Lock order evictMutex_ → mutex_ matches
-  // ensureManagedResident, so this cannot deadlock. No-op unless oversubscribed.
-  if (hostBudgetBytes_ != 0) {
+  // UVM oversubscription (P3-20): drop this region from the evictor before it is
+  // unmapped, so a future allocation reusing the address never restores stale
+  // spilled data. Lock order evictMutex_ → mutex_ matches ensureManagedResident,
+  // so this cannot deadlock. No-op unless oversubscription is active.
+  if (evictor_) {
     std::lock_guard<std::mutex> elk(evictMutex_);
-    void* ptr = nullptr; size_t sz = 0;
+    void* ptr = nullptr;
     {
       std::shared_lock<std::shared_mutex> lk(mutex_);
       auto it = allocations_.find(handle);
-      if (it != allocations_.end()) { ptr = it->second.ptr; sz = it->second.size; }
+      if (it != allocations_.end()) ptr = it->second.ptr;
     }
-    if (ptr) {
-      if (resCounted_.erase(ptr)) residentManagedBytes_.fetch_sub(sz, std::memory_order_relaxed);
-      evictedSet_.erase(ptr);
-      evictSlot_.erase(ptr);
-    }
+    if (ptr && evictor_)
+      evictor_->forget(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
   }
 
   std::unique_lock<std::shared_mutex> lock(mutex_);

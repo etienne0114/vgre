@@ -331,6 +331,13 @@ private:
     }
 };
 
+// ── Compiled library entry ────────────────────────────────────────────────────
+// Parse a TTIR module and run `kernelName` (or the first kernel if empty) over a
+// 1-D grid. Defined in src/compiler/triton/triton_frontend.cpp so the frontend is
+// part of the shipped library (not header-only) and reachable as a public API.
+void run_kernel(const std::string& ttir, const std::string& kernelName,
+                const std::vector<KernelArg>& args, int gridX);
+
 }  // namespace triton
 }  // namespace vgre
 

@@ -73,11 +73,6 @@ public:
         return dstBase + off;
     }
 
-    // Read-only peer base (for raw DSMEM addressing / typed helpers).
-    void* smem_base(unsigned rank) const {
-        return smemBase_[rank].load(std::memory_order_acquire);
-    }
-
     // barrier.cluster (cluster.sync) — all `size` CTAs rendezvous. Sense-reversing
     // (generation counter) so it is correct when reused across cluster phases.
     void sync() {
