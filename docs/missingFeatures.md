@@ -222,7 +222,7 @@ fidelity / research-frontier.
   file and faults them back on access (reusing the existing SIGSEGV/SIGBUS fault
   handler). Acceptance: a workload allocating > host RAM completes correctly.
 
-### 8.2 Occupancy calculator + roofline + flame graphs — P2
+### 8.2 Occupancy calculator + roofline + flame graphs — P2 — ✅ DONE
 - **Design**: an SM occupancy model (registers/SMEM/warps per block → active
   warps), a roofline (FLOP/byte vs. measured) view, and a flame-graph export from
   the existing trace, surfaced via the metrics/Nsight exporter. Acceptance: the
