@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
@@ -25,6 +26,8 @@
 
 namespace vgre {
 namespace core {
+
+namespace uvm { class DiskBackedLRU; }  // P3-20 eviction policy (page_evictor.h)
 
 // ── Allocation record ──────────────────────────────────────────────────────
 struct Allocation {
@@ -449,32 +452,28 @@ private:
 
   // ── UVM oversubscription: disk-backed LRU eviction (P3-20) ───────────────
   // Opt-in via VGRE_UVM_HOST_BUDGET_BYTES (0 ⇒ disabled, default path unchanged).
-  // When resident managed bytes exceed the budget, the least-recently-used
-  // managed regions are spilled to a backing file and their physical pages
-  // reclaimed (mprotect PROT_NONE + madvise MADV_DONTNEED). ensureManagedResident
-  // faults a region back from disk at the prefetch boundary (out of signal
-  // context — the SIGSEGV handler is not involved, avoiding async-signal I/O).
-  size_t                                hostBudgetBytes_ = 0;
-  std::atomic<size_t>                   residentManagedBytes_{0};
-  std::mutex                            evictMutex_;
-  std::FILE*                            evictFile_   = nullptr;
-  long long                             evictFileEnd_ = 0;
-  std::unordered_map<void*, long long>  evictSlot_;    // region base → permanent backing offset
-  std::unordered_set<void*>             evictedSet_;   // currently-spilled region bases
-  std::unordered_set<void*>             resCounted_;   // region bases counted as RAM-resident
-  std::atomic<uint64_t>                 managedEvictions_{0};
-  // Evict LRU counted regions until within budget; never evicts `keep`. evictMutex_ held.
-  void maybeEvictManaged_locked(void* keep);
+  // The LRU + budget *policy* is the shared vgre::core::uvm::DiskBackedLRU; this
+  // manager supplies the *physical* spill/restore via its hooks: spill =
+  // mprotect_rw → pwrite(backing) → mprotect_none + madvise(MADV_DONTNEED);
+  // restore = mprotect_rw → pread(backing). ensureManagedResident runs at the
+  // prefetch boundary (out of signal context — the SIGSEGV handler is not
+  // involved, avoiding async-signal-unsafe file I/O).
+  size_t      hostBudgetBytes_ = 0;
+  mutable std::mutex evictMutex_;
+  std::FILE*  evictFile_ = nullptr;                          // spill backing store
+  std::unique_ptr<vgre::core::uvm::DiskBackedLRU> evictor_;  // LRU + budget policy
+  void initEvictorLocked();                                  // build evictor_ from env (evictMutex_ held)
+  void setManagedResident(void* base, bool resident);        // update region residency flag
 
 public:
   // Oversubscription diagnostics (P3-20).
-  uint64_t getManagedEvictions()    const { return managedEvictions_.load(std::memory_order_relaxed); }
-  size_t   getResidentManagedBytes() const { return residentManagedBytes_.load(std::memory_order_relaxed); }
+  uint64_t getManagedEvictions() const;
+  size_t   getResidentManagedBytes() const;
 
   // Ensure the managed region covering `ptr` is resident in host RAM — restore it
-  // from disk if it was evicted, count it, and evict cold regions to honor the
-  // budget. Called at the prefetch/use boundary (out of signal context). No-op
-  // unless VGRE_UVM_HOST_BUDGET_BYTES enables oversubscription.
+  // from disk if it was evicted, and evict cold regions to honor the budget.
+  // Called at the prefetch/use boundary (out of signal context). No-op unless
+  // VGRE_UVM_HOST_BUDGET_BYTES enables oversubscription.
   void ensureManagedResident(void* ptr);
 
 private:

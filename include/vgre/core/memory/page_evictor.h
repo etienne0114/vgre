@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <list>
 #include <unordered_map>
 
@@ -42,13 +43,32 @@ inline int evictor_seek(std::FILE* f, long long off) {
 
 class DiskBackedLRU {
 public:
-    explicit DiskBackedLRU(std::size_t budgetBytes)
-        : budget_(budgetBytes), file_(std::tmpfile()) {}
+    // A physical spill/restore operation: move `bytes` at `ptr` to/from the backing
+    // store at `fileOff`. When hooks are supplied the LRU only does policy
+    // (victim selection + budget) and the caller owns the physical mechanics — e.g.
+    // the UVM manager spills via mprotect+madvise+pwrite on the real mmap'd pages.
+    // With no hooks, the default self-contained backing (a temp file) is used.
+    using PageOp = std::function<void(void* ptr, std::size_t bytes, long long fileOff)>;
+
+    explicit DiskBackedLRU(std::size_t budgetBytes, PageOp spill = {}, PageOp restore = {})
+        : budget_(budgetBytes), spill_(std::move(spill)), restore_(std::move(restore)),
+          file_(spill_ ? nullptr : std::tmpfile()) {}
     ~DiskBackedLRU() { if (file_) std::fclose(file_); }
     DiskBackedLRU(const DiskBackedLRU&) = delete;
     DiskBackedLRU& operator=(const DiskBackedLRU&) = delete;
 
-    bool ok() const { return file_ != nullptr; }
+    bool ok() const { return file_ != nullptr || (spill_ && restore_); }
+    bool known(uint64_t id) const { return regions_.count(id) != 0; }
+
+    // Drop a region from tracking (e.g. when its memory is freed) so a future
+    // allocation reusing the id/address never restores stale spilled data.
+    void forget(uint64_t id) {
+        auto it = regions_.find(id);
+        if (it == regions_.end()) return;
+        if (it->second.resident) residentBytes_ -= it->second.bytes;
+        lru_.erase(it->second.lruIt);
+        regions_.erase(it);
+    }
 
     // Register a resident region (reserves a stable backing slot), then evict the
     // LRU resident regions if this pushed resident bytes over budget.
@@ -122,6 +142,7 @@ private:
     }
 
     void spillToDisk(Region& r) {
+        if (spill_) { spill_(r.ptr, r.bytes, r.fileOff); return; }  // caller-owned mechanics
         if (file_ && r.bytes) {
             evictor_seek(file_, r.fileOff);
             std::fwrite(r.ptr, 1, r.bytes, file_);
@@ -130,6 +151,7 @@ private:
         std::memset(r.ptr, 0xEE, r.bytes);  // simulate physical reclaim
     }
     void restoreFromDisk(Region& r) {
+        if (restore_) { restore_(r.ptr, r.bytes, r.fileOff); return; }
         if (file_ && r.bytes) {
             evictor_seek(file_, r.fileOff);
             std::size_t got = std::fread(r.ptr, 1, r.bytes, file_);
@@ -138,6 +160,8 @@ private:
     }
 
     std::size_t budget_;
+    PageOp      spill_;
+    PageOp      restore_;
     std::size_t residentBytes_ = 0;
     std::size_t peak_          = 0;
     long long   fileEnd_       = 0;
