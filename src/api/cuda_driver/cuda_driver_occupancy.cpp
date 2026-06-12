@@ -12,6 +12,7 @@
 // smemPerBlock   = dynamicSMemSize + kSmemOverhead (1 KB alignment).
 
 #include "cuda_driver_internal.h"
+#include "vgre/core/occupancy.h"   // vgre::perf::compute_occupancy — the shared occupancy model
 #include <algorithm>
 
 // Ampere-class virtual device: 164 KB shared memory per SM (GA100/GA102/GA104).
@@ -19,36 +20,38 @@ static constexpr size_t kSharedMemPerSM = 167936;
 // 1 KB per-block overhead for bookkeeping/alignment (matches cuOccupancy docs).
 static constexpr size_t kSmemOverhead   = 1024;
 
-// Compute maxActiveBlocksPerSM using the four hardware constraints.
+// maxActiveBlocksPerSM via the shared vgre::perf occupancy model (the single
+// source of the block/warp/register/shared-memory math, P3-21), plus the CUDA
+// thread-count constraint and the per-block shared-memory overflow check that the
+// driver API adds on top.
 static int computeMaxActiveBlocks(const vgre::DeviceProperties& props,
                                   int threadsPerBlock, size_t dynamicSMem) {
     if (threadsPerBlock <= 0) return 0;
 
-    const int warpSize    = (props.warpSize > 0)        ? props.warpSize        : 32;
+    const int warpSize     = (props.warpSize > 0)        ? props.warpSize        : 32;
     const int maxThreadsSM = (props.maxThreadsPerSM > 0) ? props.maxThreadsPerSM : 2048;
-    const int maxWarpsSM  = (props.maxWarpsPerSM > 0)   ? props.maxWarpsPerSM   : 64;
-    const int maxBlocksSM = (props.maxBlocksPerSM > 0)  ? props.maxBlocksPerSM  : 32;
 
-    // Constraint 1: thread count.
-    int blk_threads = maxThreadsSM / threadsPerBlock;
-
-    // Constraint 2: warp count.  warpsPerBlock = ceil(threadsPerBlock / warpSize).
-    int warpsPerBlock = (threadsPerBlock + warpSize - 1) / warpSize;
-    int blk_warps     = maxWarpsSM / warpsPerBlock;
-
-    // Constraint 3: shared memory.
-    // If dynamicSMem == 0, shared memory does not limit occupancy.
-    int blk_smem = maxBlocksSM;
+    // Per-block shared-memory request (+ the documented 1 KB overhead); a request
+    // exceeding the per-block maximum yields zero occupancy.
+    size_t smemPerBlock = 0;
     if (dynamicSMem > 0) {
-        size_t smemPerBlock = dynamicSMem + kSmemOverhead;
-        if (smemPerBlock > props.sharedMemPerBlock)
-            return 0; // request exceeds per-block maximum
-        blk_smem = static_cast<int>(kSharedMemPerSM / smemPerBlock);
+        smemPerBlock = dynamicSMem + kSmemOverhead;
+        if (smemPerBlock > props.sharedMemPerBlock) return 0;
     }
 
-    // Constraint 4: hardware block limit.
-    int result = std::min({blk_threads, blk_warps, blk_smem, maxBlocksSM});
-    return (result > 0) ? result : 0;
+    vgre::perf::SMLimits sm;
+    sm.warpSize       = warpSize;
+    sm.maxWarpsPerSM  = (props.maxWarpsPerSM > 0)  ? props.maxWarpsPerSM  : 64;
+    sm.maxBlocksPerSM = (props.maxBlocksPerSM > 0) ? props.maxBlocksPerSM : 32;
+    sm.smemPerSM      = static_cast<int>(kSharedMemPerSM);
+    vgre::perf::KernelUsage k;
+    k.threadsPerBlock = threadsPerBlock;
+    k.regsPerThread   = 0;                          // device-function reg usage not modeled here
+    k.smemPerBlock    = static_cast<int>(smemPerBlock);
+
+    int blocks = vgre::perf::compute_occupancy(sm, k).activeBlocksPerSM;
+    blocks = std::min(blocks, maxThreadsSM / threadsPerBlock);   // CUDA thread-count limit
+    return (blocks > 0) ? blocks : 0;
 }
 
 extern "C" {

@@ -49,6 +49,7 @@ add_library(vgre_api OBJECT
     vgre_c_api.cpp
     vgre_c_api_graphs.cpp
     vgre_c_api_telemetry.cpp
+    vgre_ext.cpp
     nsight_exporter.cpp
     metrics_server.cpp
     build_info.cpp
