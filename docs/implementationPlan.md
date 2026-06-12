@@ -36,7 +36,7 @@ All tracks start **🔴 Planned**.
 | P3-5 | TMA `cp.async.bulk(.tensor)` | P1 | §2.2 | 🔴 Planned |
 | P3-6 | Thread-block clusters + distributed SMEM | P2 | §2.3 | 🔴 Planned |
 | P3-7 | Blackwell `tcgen05` + tensor memory | P2 | §2.4 | 🔴 Planned |
-| P3-8 | Speculative decoding (draft+verify) | P1 | §3.1 | 🔴 Planned |
+| P3-8 | Speculative decoding (draft+verify) | P1 | §3.1 | ✅ Done |
 | P3-9 | MoE: top-k router + grouped GEMM | P1 | §3.2 | ✅ Done |
 | P3-10 | Prefix caching + chunked prefill | P2 | §3.3 | 🔴 Planned |
 | P3-11 | Structured attention masks | P2 | §3.4 | ✅ Done |
