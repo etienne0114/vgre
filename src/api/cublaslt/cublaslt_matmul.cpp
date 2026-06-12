@@ -171,6 +171,22 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         const bool aFp8 = (la.type == CUDA_R_8F_E4M3 || la.type == CUDA_R_8F_E5M2);
         const bool bFp8 = (lb.type == CUDA_R_8F_E4M3 || lb.type == CUDA_R_8F_E5M2);
 
+        // Track P3-1 — FP4 (NVFP4/MXFP4): operands are E2M1 packed 2 nibbles/byte,
+        // dequantized per K-block (block size from *_SCALE_MODE) by a float scale
+        // array, or by a single per-tensor scale when the block size is 0. The
+        // micro-scaling contract: real[i,k] = scale[i, k/block] · e2m1(nibble).
+        const bool aFp4 = (la.type == CUDA_R_4F_E2M1);
+        const bool bFp4 = (lb.type == CUDA_R_4F_E2M1);
+        const int  aBlk = d.aScaleBlock, bBlk = d.bScaleBlock;
+        const int  aNb  = (aBlk > 0) ? (k + aBlk - 1) / aBlk : 1;  // A scales [M, aNb]
+        const float* aBS = static_cast<const float*>(d.aScalePtr);
+        const float* bBS = static_cast<const float*>(d.bScalePtr);
+        auto e2m1 = [](const uint8_t* p, size_t idx) {
+            const uint8_t nib = (idx & 1u) ? static_cast<uint8_t>(p[idx >> 1] >> 4)
+                                           : static_cast<uint8_t>(p[idx >> 1] & 0x0Fu);
+            return vgre::quant::e2m1_to_f32(nib);
+        };
+
         // FP16 ↔ float helpers
         auto h2f = [](uint16_t h) -> float {
             uint32_t bits = (static_cast<uint32_t>(h & 0x8000u) << 16) |
@@ -210,6 +226,19 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         } else if (aFp8) {
             const uint8_t *p = static_cast<const uint8_t*>(A);
             for (int i = 0; i < m * k; ++i) Af[static_cast<size_t>(i)] = sA * decodeFp8(la.type, p[i]);
+        } else if (aFp4) {
+            // A is [m,k]; map each (row,col) to its flat index per the layout so
+            // the block-scale lookup (per row, per K-block) is layout-correct.
+            const uint8_t *p = static_cast<const uint8_t*>(A);
+            const bool col = (la.order == CUBLASLT_ORDER_COL);
+            const int64_t lda = la.ld ? la.ld : (col ? m : k);
+            for (int mm = 0; mm < m; ++mm)
+                for (int kk = 0; kk < k; ++kk) {
+                    const size_t idx = col ? static_cast<size_t>(kk) * lda + mm
+                                           : static_cast<size_t>(mm) * lda + kk;
+                    const float sc = aBS ? (aBlk > 0 ? aBS[mm * aNb + kk / aBlk] : aBS[0]) : 1.0f;
+                    Af[idx] = sc * e2m1(p, idx);
+                }
         } else {
             memcpy(Af.data(), A, static_cast<size_t>(m * k) * sizeof(float));
         }
@@ -227,6 +256,18 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t /*lightHandle*/,
         } else if (bFp8) {
             const uint8_t *p = static_cast<const uint8_t*>(B);
             for (int i = 0; i < k * n; ++i) Bf[static_cast<size_t>(i)] = sB * decodeFp8(lb.type, p[i]);
+        } else if (bFp4) {
+            // B is [k,n]; block scales are [k/block, n].
+            const uint8_t *p = static_cast<const uint8_t*>(B);
+            const bool col = (lb.order == CUBLASLT_ORDER_COL);
+            const int64_t ldb = lb.ld ? lb.ld : (col ? k : n);
+            for (int kk = 0; kk < k; ++kk)
+                for (int nn = 0; nn < n; ++nn) {
+                    const size_t idx = col ? static_cast<size_t>(nn) * ldb + kk
+                                           : static_cast<size_t>(kk) * ldb + nn;
+                    const float sc = bBS ? (bBlk > 0 ? bBS[(kk / bBlk) * n + nn] : bBS[0]) : 1.0f;
+                    Bf[idx] = sc * e2m1(p, idx);
+                }
         } else {
             memcpy(Bf.data(), B, static_cast<size_t>(k * n) * sizeof(float));
         }

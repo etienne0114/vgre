@@ -29,7 +29,7 @@ All tracks start **🔴 Planned**.
 
 | # | Track | Pri | Maps to | Status |
 |---|---|---|---|---|
-| P3-1 | FP4 (NVFP4/MXFP4) through cuBLASLt | P1 | §1.1 | 🔴 Planned |
+| P3-1 | FP4 (NVFP4/MXFP4) through cuBLASLt | P1 | §1.1 | ✅ Done |
 | P3-2 | Weight-only INT4 (AWQ/GPTQ, W4A16) | P1 | §1.2 | ✅ Done |
 | P3-3 | Microscaling (MX) format family | P2 | §1.3 | 🔴 Planned |
 | P3-4 | Hopper `wgmma.mma_async` warp-group MMA | P1 | §2.1 | 🔴 Planned |

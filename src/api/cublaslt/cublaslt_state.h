@@ -36,6 +36,8 @@ struct MatmulDesc {
     const void *bScalePtr     = nullptr;
     const void *cScalePtr     = nullptr;
     const void *dScalePtr     = nullptr;
+    int        aScaleBlock    = 0;   // FP4 micro-scale block size along K (0 = scalar)
+    int        bScaleBlock    = 0;
     void       *amaxDPtr      = nullptr;
     void       *epilogueAuxPtr = nullptr;
     int64_t    epilogueAuxLd  = 0;
