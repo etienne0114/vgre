@@ -192,6 +192,30 @@ int main() {
               contains(mapa, "%1") && contains(mapa, "%2"));
     }
 
+    // (10) Blackwell tcgen05 TMEM data path (P3-7): alloc writes a TMEM address to
+    //      SMEM, mma accumulates into a TMEM address, ld reads it back out — all
+    //      via the vgre_jit_tmem*/tcgen05 helpers (not "not supported").
+    {
+        std::string alloc = PTXTranslator::translate(
+            "asm volatile(\"tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 "
+            "[%0], %1;\" :: \"l\"(p), \"r\"(n));");
+        check("tcgen05.alloc -> vgre_jit_tmem_alloc into SMEM",
+              contains(alloc, "vgre_jit_tmem_alloc("));
+
+        std::string mma = PTXTranslator::translate(
+            "asm volatile(\"tcgen05.mma.cta_group::1.m64n256k16.f32.bf16.bf16 "
+            "[%0], %1, %2, %3;\" :: \"r\"(d),\"l\"(a),\"l\"(b),\"r\"(idesc));");
+        check("tcgen05.mma -> vgre_jit_tcgen05_mma accumulating into TMEM",
+              contains(mma, "vgre_jit_tcgen05_mma(") &&
+              contains(mma, ",64,256,16,0,"));
+
+        std::string ld = PTXTranslator::translate(
+            "asm volatile(\"tcgen05.ld.sync.aligned.32x32b.x2.b32 {%0,%1}, [%2];\" "
+            ": \"=r\"(r0),\"=r\"(r1) : \"r\"(taddr));");
+        check("tcgen05.ld -> vgre_jit_tcgen05_ld reads the TMEM fragment",
+              contains(ld, "vgre_jit_tcgen05_ld(") && contains(ld, "%0") && contains(ld, "%1"));
+    }
+
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

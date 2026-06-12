@@ -24,6 +24,16 @@ extern "C" {
   unsigned vgre_jit_cluster_ctarank();
   unsigned vgre_jit_cluster_nctarank();
 
+  // Blackwell tcgen05 Tensor Memory (P3-7): alloc/dealloc + ld/st/cp + mma.
+  unsigned vgre_jit_tmem_alloc(int nCols);
+  void     vgre_jit_tmem_dealloc(unsigned addr, int nCols);
+  void     vgre_jit_tmem_relinquish();
+  void     vgre_jit_tcgen05_ld(unsigned* dst, unsigned addr, int lanes, int wordsPerLane);
+  void     vgre_jit_tcgen05_st(unsigned addr, const unsigned* src, int lanes, int wordsPerLane);
+  void     vgre_jit_tcgen05_cp(unsigned addr, const void* smem, int lanes, int wordsPerLane);
+  void     vgre_jit_tcgen05_mma(unsigned addr, unsigned long long descA, unsigned long long descB,
+                                int M, int N, int K, int kind, int accumulate);
+
   // Dynamic TLS-based built-ins for stable parallel JIT linkage
   vgre::dim3* vgre_jit_get_threadIdx();
   vgre::dim3* vgre_jit_get_blockIdx();

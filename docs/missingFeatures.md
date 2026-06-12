@@ -99,13 +99,17 @@ fidelity / research-frontier.
   `test_cluster` (DSMEM reductions over 2/4/8-CTA clusters, barrier ordering) and
   `test_cluster_exec` (end-to-end through the executor).
 
-### 2.4 Blackwell `tcgen05` 5th-gen tensor cores + tensor memory — P2
-- **Location**: `src/compiler/ptx/ptx_conversion.cpp` already lists
-  `tcgen05.mma.*` shapes (decoded, but the MMA + tensor-memory (`tmem`) semantics
-  are placeholder-level).
-- **Design**: model `tmem` as a per-CTA scratch region and implement the
-  `tcgen05.mma`/`tcgen05.ld`/`tcgen05.st` data path. Acceptance: a tcgen05 GEMM
-  matches the reference.
+### 2.4 Blackwell `tcgen05` 5th-gen tensor cores + tensor memory — P2 — ✅ DONE
+- **Was**: `tcgen05.mma.*` shapes were decoded but wrote to a plain pointer; the
+  tensor-memory (`tmem`) data path (accumulator-in-TMEM, `alloc`/`ld`/`st`/`cp`)
+  did not exist.
+- **Done**: `include/vgre/core/tmem.h` (128-lane × 512-column per-CTA TMEM:
+  column allocator + (lane,column) tile scatter/gather + K-loop accumulate +
+  ld/st/cp). `vgre_jit_tcgen05_mma` accumulates the fixed-shape tensor-core math
+  into a TMEM address; `vgre_jit_tmem_alloc`/`tcgen05_ld`/`_st`/`_cp` (thread-local
+  per-CTA TMEM) back the JIT path; PTX `tcgen05.mma`/`.alloc`/`.dealloc`/`.ld`/
+  `.st`/`.cp`/`.commit`/`.wait`/`.fence` lower to them. Verified: `test_tmem`
+  (BF16 K-loop GEMM through TMEM err 9.5e-7, FP8 E4M3 err 0, + alloc/ld/st/cp).
 
 ---
 

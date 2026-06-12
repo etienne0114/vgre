@@ -35,7 +35,7 @@ All tracks start **🔴 Planned**.
 | P3-4 | Hopper `wgmma.mma_async` warp-group MMA | P1 | §2.1 | ✅ Done |
 | P3-5 | TMA `cp.async.bulk(.tensor)` | P1 | §2.2 | ✅ Done |
 | P3-6 | Thread-block clusters + distributed SMEM | P2 | §2.3 | ✅ Done |
-| P3-7 | Blackwell `tcgen05` + tensor memory | P2 | §2.4 | 🔴 Planned |
+| P3-7 | Blackwell `tcgen05` + tensor memory | P2 | §2.4 | ✅ Done |
 | P3-8 | Speculative decoding (draft+verify) | P1 | §3.1 | ✅ Done |
 | P3-9 | MoE: top-k router + grouped GEMM | P1 | §3.2 | ✅ Done |
 | P3-10 | Prefix caching + chunked prefill | P2 | §3.3 | ✅ Done |
@@ -143,10 +143,18 @@ parses the cluster-dimension launch attribute and routes to
 DSMEM correctly — plus 4/8-CTA and 2×2 cluster DSMEM reductions, barrier ordering,
 and the executor path (`test_cluster`, `test_cluster_exec`).
 
-### P3-7 — Blackwell `tcgen05` + tensor memory
-**File**: `src/compiler/ptx/ptx_conversion.cpp` (tcgen05 shapes already decoded).
-Model `tmem` as per-CTA scratch and implement the `tcgen05.mma/.ld/.st` data
-path. **Acceptance**: a tcgen05 GEMM matches the reference.
+### P3-7 — Blackwell `tcgen05` + tensor memory ✅ DONE
+`include/vgre/core/tmem.h` models Tensor Memory exactly — a per-CTA 128-lane ×
+512-column 32-bit arena with a column bump-allocator (`tcgen05.alloc`), tile
+scatter/gather in the real (lane,column) accumulator layout, accumulate-in-place
+for the K-loop, and `ld`/`st`/`cp` word moves. The accumulator now lives in TMEM
+(not a plain pointer): `vgre_jit_tcgen05_mma` runs the existing fixed-shape
+tensor-core math into a temp then accumulates into a TMEM address, and
+`vgre_jit_tmem_alloc`/`tcgen05_ld`/`tcgen05_st`/`tcgen05_cp` (thread-local
+per-CTA TMEM) back the JIT path. PTX `tcgen05.mma`/`.alloc`/`.dealloc`/`.ld`/`.st`
+/`.cp`/`.commit`/`.wait`/`.fence` lower to those helpers. **Acceptance**: a
+tcgen05 GEMM through TMEM matches the reference — BF16 M64N256K32 K-loop
+(err 9.5e-7) and FP8 E4M3 (err 0) in `test_tmem` (8/8), plus PTX-lowering checks.
 
 ### P3-10 — Prefix caching + chunked prefill
 **File**: `include/vgre/core/kv_cache.h`. Content-hash a prompt's block table and

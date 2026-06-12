@@ -49,6 +49,20 @@ extern "C" VGRE_PUBLIC_API void*    vgre_jit_mapa_shared_cluster(void* addr, uns
 extern "C" VGRE_PUBLIC_API unsigned vgre_jit_cluster_ctarank();
 extern "C" VGRE_PUBLIC_API unsigned vgre_jit_cluster_nctarank();
 
+// ── Blackwell tcgen05 Tensor Memory (TMEM) data path (P3-7) ──────────────────
+// A per-CTA TMEM lives on each worker thread (lazily created, reset per launch).
+// tcgen05.alloc/.dealloc manage columns; the MMA accumulates into a TMEM address;
+// tcgen05.ld/.st/.cp move fragments between registers/SMEM and TMEM.
+extern "C" VGRE_PUBLIC_API uint32_t vgre_jit_tmem_alloc(int nCols);
+extern "C" VGRE_PUBLIC_API void     vgre_jit_tmem_dealloc(uint32_t addr, int nCols);
+extern "C" VGRE_PUBLIC_API void     vgre_jit_tmem_relinquish();
+extern "C" VGRE_PUBLIC_API void     vgre_jit_tcgen05_ld(uint32_t* dst, uint32_t addr, int lanes, int wordsPerLane);
+extern "C" VGRE_PUBLIC_API void     vgre_jit_tcgen05_st(uint32_t addr, const uint32_t* src, int lanes, int wordsPerLane);
+extern "C" VGRE_PUBLIC_API void     vgre_jit_tcgen05_cp(uint32_t addr, const void* smem, int lanes, int wordsPerLane);
+// MMA into a TMEM accumulator: kind 0=bf16 1=f16 2=tf32 3=e4m3 4=e5m2 5=e4m3e5m2.
+extern "C" VGRE_PUBLIC_API void     vgre_jit_tcgen05_mma(uint32_t addr, uint64_t descA, uint64_t descB,
+                                                         int M, int N, int K, int kind, int accumulate);
+
 // ── Shared Memory ──────────────────────────────────────────────────────────
 // Per-block shared memory buffer. Allocated once per block execution and
 // zeroed at the start of each block. Kernels can use typed accessors to
