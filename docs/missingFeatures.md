@@ -34,7 +34,7 @@ fidelity / research-frontier.
 
 ## 1. Blackwell-era quantized compute
 
-### 1.1 FP4 (NVFP4 / MXFP4) through cuBLASLt — P1
+### 1.1 FP4 (NVFP4 / MXFP4) through cuBLASLt — P1 — ✅ DONE
 - **Have**: `vgre::quant::fp4_gemm_block_scaled` (block-scaled E2M1) and FP8 in
   `cublasLtMatmul` (Track 17).
 - **Gap**: no `CUDA_R_4F_E2M1` operand path in `cublasLtMatmul`, and no
@@ -47,7 +47,7 @@ fidelity / research-frontier.
   32-element block). Acceptance: scaled FP4 matmul == dequant→FP32 GEMM within
   the format epsilon, through the public API.
 
-### 1.2 Weight-only INT4 (AWQ / GPTQ, W4A16) — P1
+### 1.2 Weight-only INT4 (AWQ / GPTQ, W4A16) — P1 — ✅ DONE
 - **Gap**: the dominant *deployed* LLM-weight format is 4-bit group-quantized
   weights with FP16 activations (AWQ/GPTQ) — VGRE has no W4A16 path.
 - **Design**: a group-wise INT4 codec (per-group scale + zero-point, group size
@@ -55,7 +55,7 @@ fidelity / research-frontier.
   custom-kernel call with INT4 weights + FP16 activations works. Acceptance:
   matches a reference dequant-then-GEMM; reproduces an AWQ checkpoint's logits.
 
-### 1.3 Microscaling (MX) format family — P2
+### 1.3 Microscaling (MX) format family — P2 — ✅ DONE
 - **Design**: generalize the FP4 block-scale machinery to MXFP8/MXFP6/MXFP4 and
   MXINT8 (OCP MX spec: 32-element blocks, shared UE8M0 power-of-two scale) as
   `vgre::quant` codecs + a uniform `mx_gemm` entry. Acceptance: round-trip +
@@ -116,7 +116,7 @@ fidelity / research-frontier.
   and rolls the KV-cache back to the accepted length. Acceptance: accepted
   sequence is distribution-identical to plain greedy/sampled decode.
 
-### 3.2 MoE: top-k router + grouped expert GEMM — P1
+### 3.2 MoE: top-k router + grouped expert GEMM — P1 — ✅ DONE
 - **Gap**: Mixture-of-Experts is the dominant frontier-LLM scaling axis (Mixtral,
   DeepSeek, GPT-OSS) and VGRE has no expert routing or grouped/batched GEMM.
 - **Design**: a top-k softmax router producing per-token expert assignments, a
@@ -133,7 +133,7 @@ fidelity / research-frontier.
   interleave with decode. Acceptance: two requests with a shared prefix reuse the
   prefix's physical blocks; outputs unchanged.
 
-### 3.4 Structured attention masks — P2
+### 3.4 Structured attention masks — P2 — ✅ DONE
 - **Design**: sliding-window, attention-sink, and ALiBi-bias variants of the
   paged-attention kernel (the masks modern long-context models use). Acceptance:
   each matches a naive masked-softmax reference.
@@ -142,7 +142,7 @@ fidelity / research-frontier.
 
 ## 4. New model architectures
 
-### 4.1 Mamba / SSM selective-scan — P2
+### 4.1 Mamba / SSM selective-scan — P2 — ✅ DONE
 - **Gap**: state-space models (Mamba-2, Jamba) use a parallel *selective scan*,
   not attention — VGRE has no associative-scan primitive for it.
 - **Design**: a chunked parallel associative scan (Blelloch-style, which VGRE
@@ -187,7 +187,7 @@ fidelity / research-frontier.
   fine-grained overlap. Acceptance: a one-sided ring AllReduce matches the
   two-phase reference.
 
-### 6.3 Tensor / pipeline parallel primitives — P2
+### 6.3 Tensor / pipeline parallel primitives — P2 — ✅ DONE
 - **Design**: column/row-parallel linear + all-reduce/all-gather helpers and a
   P2P send/recv pipeline stage over existing P2P, so a sharded model runs.
   Acceptance: a 2-way tensor-parallel MLP equals the unsharded result.
