@@ -901,6 +901,12 @@ target_link_libraries(test_prefix_cache PRIVATE vgre)
 add_test(NAME PrefixCaching COMMAND test_prefix_cache)
 set_tests_properties(PrefixCaching PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-5: Tensor Memory Accelerator (TMA).
+add_executable(test_tma core/test_tma.cpp)
+target_link_libraries(test_tma PRIVATE vgre)
+add_test(NAME TensorMemoryAccelerator COMMAND test_tma)
+set_tests_properties(TensorMemoryAccelerator PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)

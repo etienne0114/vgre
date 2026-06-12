@@ -137,6 +137,21 @@ int main() {
               contains(c, "float _wgd[32]"));
     }
 
+    // (7) The dominant Hopper TMA load (cluster-scope global→shared with mbarrier
+    //     completion, Track P3-5) must lower to the real strided box copy — not
+    //     "not supported". o[1] = "tensorMap, {coords}" is parsed into the map +
+    //     coordinates.
+    {
+        std::string src = "asm volatile("
+            "\"cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes "
+            "[%0], [%1, {%2, %3}], [%4];\" : );";
+        std::string c = PTXTranslator::translate(src);
+        check("TMA cluster load → real vgre_tma_load_2d_dispatch",
+              contains(c, "vgre_tma_load_2d_dispatch("));
+        check("TMA load parses the tensor-map and {coords}",
+              contains(c, "VgreTMADescriptor") && contains(c, "%2") && contains(c, "%3"));
+    }
+
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

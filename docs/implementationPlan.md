@@ -33,7 +33,7 @@ All tracks start **🔴 Planned**.
 | P3-2 | Weight-only INT4 (AWQ/GPTQ, W4A16) | P1 | §1.2 | ✅ Done |
 | P3-3 | Microscaling (MX) format family | P2 | §1.3 | ✅ Done |
 | P3-4 | Hopper `wgmma.mma_async` warp-group MMA | P1 | §2.1 | ✅ Done |
-| P3-5 | TMA `cp.async.bulk(.tensor)` | P1 | §2.2 | 🔴 Planned |
+| P3-5 | TMA `cp.async.bulk(.tensor)` | P1 | §2.2 | ✅ Done |
 | P3-6 | Thread-block clusters + distributed SMEM | P2 | §2.3 | 🔴 Planned |
 | P3-7 | Blackwell `tcgen05` + tensor memory | P2 | §2.4 | 🔴 Planned |
 | P3-8 | Speculative decoding (draft+verify) | P1 | §3.1 | ✅ Done |

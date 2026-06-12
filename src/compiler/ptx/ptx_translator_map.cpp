@@ -77,6 +77,27 @@ static std::string wgmma_emit_collective(const std::vector<std::string>& o,
     return s + " }";
 }
 
+// cp.async.bulk.tensor.Nd.shared::cluster.global.mbarrier::complete_tx::bytes
+// [smem], [tensorMap, {coords}], [mbar] — the dominant Hopper TMA load that feeds
+// wgmma. operands: o[0]=dst smem, o[1]="tensorMap, {c0[,c1]}", o[2]=mbar. Lowers
+// to the real strided box load (OOB zero-fill via the existing helpers); the
+// mbarrier is satisfied synchronously since the copy completes in-line.
+static std::string tma_cluster_load_emit(const std::vector<std::string>& o, int rank) {
+    if (o.size() < 2) return "/* cp.async.bulk.tensor: bad operands */";
+    const std::string& s = o[1];
+    const auto comma = s.find(',');
+    const std::string tmap = (comma == std::string::npos) ? s : trim(s.substr(0, comma));
+    const std::string ctok = (comma == std::string::npos) ? std::string() : trim(s.substr(comma + 1));
+    auto coords = splitRegs(stripDelimiters(ctok));
+    const std::string c0 = coords.size() > 0 ? coords[0] : "0";
+    const std::string c1 = coords.size() > 1 ? coords[1] : "0";
+    if (rank == 1)
+        return "vgre_cp_async_bulk((void*)(uintptr_t)(" + o[0] + "),"
+               "(const void*)(uintptr_t)(" + tmap + "),0);";
+    return "vgre_tma_load_2d_dispatch((void*)(uintptr_t)(" + o[0] + "),"
+           "(const VgreTMADescriptor*)(uintptr_t)(" + tmap + ")," + c0 + "," + c1 + ");";
+}
+
 // Emit ldmatrix: load N uint32_t words from shared memory into register list.
 // PTX: ldmatrix.sync.aligned.m8n8.xN.shared.b16  {r0[,r1[,r2[,r3]]]}, [addr]
 // After splitOperands: o[0] = "{r0,...}", o[1] = "[addr]"
@@ -349,6 +370,13 @@ const TranslateMap& getMap() {
             return "vgre_cp_async_bulk((void*)(uintptr_t)("+o[0]+"),"
                    "(const void*)(uintptr_t)("+o[1]+"),"+(o.size()>2?o[2]:std::string("0"))+");";
         }},
+        // Dominant Hopper load: cluster-scope global→shared with mbarrier completion.
+        {"cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes",
+            [](auto& o){ return tma_cluster_load_emit(o, 2); }},
+        {"cp.async.bulk.tensor.2d.tile.shared::cluster.global.mbarrier::complete_tx::bytes",
+            [](auto& o){ return tma_cluster_load_emit(o, 2); }},
+        {"cp.async.bulk.tensor.1d.shared::cluster.global.mbarrier::complete_tx::bytes",
+            [](auto& o){ return tma_cluster_load_emit(o, 1); }},
         // TMA fence/commit — no-ops in serial CPU model (no async pipeline)
         {"cp.async.bulk.commit_group",  [](auto&){ return "/* cp.async.bulk.commit_group */"; }},
         {"cp.async.bulk.wait_group",    [](auto&){ return "/* cp.async.bulk.wait_group */"; }},

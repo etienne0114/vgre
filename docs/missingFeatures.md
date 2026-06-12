@@ -77,7 +77,7 @@ fidelity / research-frontier.
   Triton Hopper kernels. Acceptance: bit-comparable to a reference GEMM for the
   supported wgmma shapes/precisions.
 
-### 2.2 TMA — `cp.async.bulk` / `cp.async.bulk.tensor` — P1
+### 2.2 TMA — `cp.async.bulk` / `cp.async.bulk.tensor` — P1 — ✅ DONE
 - **Gap**: no Tensor Memory Accelerator. Hopper/Blackwell kernels move tiles with
   asynchronous bulk + tensor-descriptor copies gated by an mbarrier; VGRE's PTX
   translator has no `cp.async.bulk*` and no `cuTensorMapEncodeTiled` descriptor.
