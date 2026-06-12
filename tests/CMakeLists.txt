@@ -841,6 +841,12 @@ target_link_libraries(test_attention_masks PRIVATE vgre)
 add_test(NAME StructuredAttentionMasks COMMAND test_attention_masks)
 set_tests_properties(StructuredAttentionMasks PROPERTIES TIMEOUT 30)
 
+# Phase 3, P3-3: OCP Microscaling (MX) format family.
+add_executable(test_mx_quant core/test_mx_quant.cpp)
+target_link_libraries(test_mx_quant PRIVATE vgre)
+add_test(NAME MXFormats COMMAND test_mx_quant)
+set_tests_properties(MXFormats PROPERTIES TIMEOUT 30)
+
 # Header-only test of the device cuRAND skip-ahead (no JIT/link needed).
 add_executable(test_curand_skipahead unit/test_curand_skipahead.cpp)
 target_include_directories(test_curand_skipahead PRIVATE ${CMAKE_SOURCE_DIR}/include)
