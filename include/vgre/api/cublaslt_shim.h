@@ -83,7 +83,12 @@ typedef enum {
     CUBLASLT_MATMUL_DESC_AMAX_D            = 10,
     CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER = 11,
     CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD   = 12,
-    CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE    = 13
+    CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE    = 13,
+    // FP4 micro-scaling block size along K (Track P3-1): 16 = NVFP4, 32 = MXFP4,
+    // 0 = per-tensor scalar (FP8 semantics). The matching *_SCALE_POINTER then
+    // points to a float array of per-(row/col, K-block) dequant scales.
+    CUBLASLT_MATMUL_DESC_A_SCALE_MODE      = 14,
+    CUBLASLT_MATMUL_DESC_B_SCALE_MODE      = 15
 } cublasLtMatmulDescAttributes_t;
 
 // ── Compute type ─────────────────────────────────────────────────────────────
@@ -116,7 +121,8 @@ typedef enum {
     CUDA_R_16I = 24,
     CUDA_R_16U = 25,
     CUDA_R_8F_E4M3 = 28,   // FP8 E4M3 (Track 17 — scaled FP8 matmul)
-    CUDA_R_8F_E5M2 = 29    // FP8 E5M2
+    CUDA_R_8F_E5M2 = 29,   // FP8 E5M2
+    CUDA_R_4F_E2M1 = 30    // FP4 E2M1 (Track P3-1 — block-scaled NVFP4/MXFP4)
 } cublasLtDatatype_t;
 
 // ── Order ────────────────────────────────────────────────────────────────────

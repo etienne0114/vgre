@@ -185,6 +185,12 @@ cublasStatus_t cublasLtMatmulDescSetAttribute(cublasLtMatmulDesc_t matmulDesc,
     case CUBLASLT_MATMUL_DESC_D_SCALE_POINTER:
         if (sizeInBytes >= sizeof(void*)) memcpy(&d.dScalePtr, buf, sizeof(void*));
         break;
+    case CUBLASLT_MATMUL_DESC_A_SCALE_MODE:
+        if (sizeInBytes >= sizeof(int)) d.aScaleBlock = *static_cast<const int*>(buf);
+        break;
+    case CUBLASLT_MATMUL_DESC_B_SCALE_MODE:
+        if (sizeInBytes >= sizeof(int)) d.bScaleBlock = *static_cast<const int*>(buf);
+        break;
     case CUBLASLT_MATMUL_DESC_AMAX_D:
         if (sizeInBytes >= sizeof(void*)) memcpy(&d.amaxDPtr, buf, sizeof(void*));
         break;

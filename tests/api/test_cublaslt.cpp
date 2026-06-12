@@ -368,6 +368,51 @@ int test_fp8_matmul() {
     return 0;
 }
 
+// ── FP4 block-scaled matmul (Track P3-1, NVFP4/MXFP4) ────────────────────────
+// A,B are FP4 E2M1 (2 nibbles/byte) with per-row/col, per-K-block dequant scales
+// (block size from *_SCALE_MODE). Same 2×2 as the FP8 case: real A=[[2,4],[6,8]]
+// via stored {1,2 / 3,4}·rowscale 2; real B=[[1,1],[1,1]]; expect C={6,14,6,14}
+// col-major. Block scale must matter (unscaled would give {3,7,3,7}).
+int test_fp4_matmul() {
+    using namespace vgre::quant;
+    cublasLtHandle_t h = nullptr; cublasLtCreate(&h);
+    cublasLtMatmulDesc_t desc = nullptr;
+    cublasLtMatrixLayout_t layA=nullptr, layB=nullptr, layC=nullptr;
+    cublasLtMatmulDescCreate(&desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    cublasLtMatrixLayoutCreate(&layA, CUDA_R_4F_E2M1, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&layB, CUDA_R_4F_E2M1, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&layC, CUDA_R_32F, 2, 2, 2);
+
+    auto pack = [](uint8_t lo, uint8_t hi){ return (uint8_t)((lo & 0xF) | ((hi & 0xF) << 4)); };
+    // A col-major stored nibbles {1,3,2,4}; B {1,1,1,1}.
+    uint8_t A[2] = { pack(f32_to_e2m1(1), f32_to_e2m1(3)),
+                     pack(f32_to_e2m1(2), f32_to_e2m1(4)) };
+    uint8_t B[2] = { pack(f32_to_e2m1(1), f32_to_e2m1(1)),
+                     pack(f32_to_e2m1(1), f32_to_e2m1(1)) };
+    float aScales[2] = {2.0f, 2.0f};  // [M=2, 1 block]: row 0/1 scale
+    float bScales[2] = {1.0f, 1.0f};  // [1 block, N=2]: col 0/1 scale
+    float C[4] = {}; float alpha=1.0f, beta=0.0f;
+    int blk = 2;                      // one K-block covers K=2
+
+    const void *pA = aScales, *pB = bScales;
+    cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &pA, sizeof(void*));
+    cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &pB, sizeof(void*));
+    cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &blk, sizeof(int));
+    cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &blk, sizeof(int));
+
+    auto s = cublasLtMatmul(h, desc, &alpha, A, layA, B, layB, &beta, C, layC,
+                            C, layC, nullptr, nullptr, 0, nullptr);
+    if (s != CUBLAS_STATUS_SUCCESS) FAIL("fp4 matmul status");
+    if (!NEAR(C[0], 6.f, 1e-3)  || !NEAR(C[1], 14.f, 1e-3) ||
+        !NEAR(C[2], 6.f, 1e-3)  || !NEAR(C[3], 14.f, 1e-3)) FAIL("fp4 block-scaled result");
+    PASS("FP4 E2M1 block-scaled matmul == dequant reference");
+
+    cublasLtMatmulDescDestroy(desc);
+    cublasLtMatrixLayoutDestroy(layA); cublasLtMatrixLayoutDestroy(layB);
+    cublasLtMatrixLayoutDestroy(layC); cublasLtDestroy(h);
+    return 0;
+}
+
 int main() {
     std::cout << "=== cuBLASLt Shim Functional Tests ===\n";
     int rc = 0;
@@ -383,6 +428,7 @@ int main() {
     rc |= test_status_strings();
     rc |= test_algo_heuristics_plural();
     rc |= test_fp8_matmul();
+    rc |= test_fp4_matmul();
     if (rc == 0) std::cout << "\nAll cuBLASLt tests passed!\n";
     return rc;
 }
