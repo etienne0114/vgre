@@ -125,7 +125,7 @@ fidelity / research-frontier.
   output matches a dense reference that runs every token through its top-k
   experts.
 
-### 3.3 Prefix caching + chunked prefill — P2
+### 3.3 Prefix caching + chunked prefill — P2 — ✅ DONE
 - **Gap**: `KVCacheManager` allocates per-sequence blocks with no cross-sequence
   sharing; long shared system prompts re-compute/re-store identical KV.
 - **Design**: content-hash the prompt's block table and share read-only KV blocks
