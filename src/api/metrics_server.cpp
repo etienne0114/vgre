@@ -10,10 +10,14 @@
 
 #include "vgre/common/metrics_registry.h"
 #include "vgre/common/logger.h"
+#include "vgre/identity/jwt_verifier.h"
+#include "vgre/identity/rbac.h"
 
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <thread>
 
@@ -49,6 +53,81 @@ void sendResponse(SOCKET fd, const char *status, const char *contentType,
     ::send(fd, resp.data(), static_cast<int>(resp.size()), 0);
 }
 
+// ── Optional Bearer-JWT protection for /metrics (opt-in) ──────────────────
+// When VGRE_METRICS_JWKS (a JWKS file path) is set, /metrics requires a valid
+// "Authorization: Bearer <jwt>" whose role/scope grants "metrics:read".
+// VGRE_METRICS_ISSUER / VGRE_METRICS_AUDIENCE optionally tighten claim checks.
+struct MetricsAuth {
+    bool enabled = false;
+    vgre::identity::Jwks jwks;
+    vgre::identity::RbacPolicy rbac;
+    vgre::identity::JwtPolicy policy;
+};
+
+const MetricsAuth &metricsAuth() {
+    static MetricsAuth a = [] {
+        MetricsAuth m;
+        const char *jwksPath = std::getenv("VGRE_METRICS_JWKS");
+        if (jwksPath && *jwksPath) {
+            std::ifstream f(jwksPath, std::ios::binary);
+            std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (!body.empty() &&
+                vgre::identity::Jwks::parse(body, m.jwks) == vgre::VGREResult::SUCCESS) {
+                m.enabled = true;
+                if (const char *is = std::getenv("VGRE_METRICS_ISSUER")) m.policy.expectedIssuer = is;
+                if (const char *au = std::getenv("VGRE_METRICS_AUDIENCE")) m.policy.expectedAudience = au;
+                m.rbac.grant("metrics-reader", "metrics:read");
+                m.rbac.grant("metrics:read", "metrics:read"); // scope-as-role
+                m.rbac.grant("admin", "*");
+                VGRE_LOG_INFO("Metrics", "/metrics protected by Bearer-JWT (JWKS loaded)");
+            } else {
+                VGRE_LOG_ERROR("Metrics", "VGRE_METRICS_JWKS set but JWKS failed to load");
+            }
+        }
+        return m;
+    }();
+    return a;
+}
+
+bool extractBearer(const std::string &req, std::string &token) {
+    std::string low;
+    low.reserve(req.size());
+    for (char c : req) low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    size_t h = low.find("authorization:");
+    if (h == std::string::npos) return false;
+    size_t lineEnd = req.find("\r\n", h);
+    if (lineEnd == std::string::npos) lineEnd = req.size();
+    size_t b = low.find("bearer ", h);
+    if (b == std::string::npos || b > lineEnd) return false;
+    std::string t = req.substr(b + 7, lineEnd - (b + 7));
+    while (!t.empty() && (t.front() == ' ' || t.front() == '\t')) t.erase(t.begin());
+    while (!t.empty() && (t.back() == ' ' || t.back() == '\t' || t.back() == '\r')) t.pop_back();
+    token = t;
+    return !token.empty();
+}
+
+// Returns true if the request may read /metrics. On denial, writes the HTTP
+// error response itself and returns false.
+bool authorizeMetrics(SOCKET fd, const std::string &req) {
+    const MetricsAuth &a = metricsAuth();
+    if (!a.enabled) return true; // open (default; localhost-bound)
+    std::string token;
+    if (!extractBearer(req, token)) {
+        sendResponse(fd, "401 Unauthorized", "text/plain", "missing bearer token\n");
+        return false;
+    }
+    vgre::identity::JwtClaims claims;
+    if (vgre::identity::JwtVerifier::verify(token, a.jwks, a.policy, claims) != vgre::VGREResult::SUCCESS) {
+        sendResponse(fd, "401 Unauthorized", "text/plain", "invalid token\n");
+        return false;
+    }
+    if (a.rbac.authorize(claims, "metrics:read") != vgre::VGREResult::SUCCESS) {
+        sendResponse(fd, "403 Forbidden", "text/plain", "insufficient scope\n");
+        return false;
+    }
+    return true;
+}
+
 void handle(SOCKET fd) {
     char buf[1024];
     int n = ::recv(fd, buf, sizeof(buf) - 1, 0);
@@ -64,6 +143,7 @@ void handle(SOCKET fd) {
     }
 
     if (path == "/metrics") {
+        if (!authorizeMetrics(fd, req)) return;
         sendResponse(fd, "200 OK", "text/plain; version=0.0.4",
                      vgre::common::MetricsRegistry::instance().render());
     } else if (path == "/healthz") {

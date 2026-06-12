@@ -319,6 +319,25 @@ endif()
 add_test(NAME mTLSCertPinningECDSA COMMAND test_mtls)
 set_tests_properties(mTLSCertPinningECDSA PROPERTIES TIMEOUT 30)
 
+# Identity: OIDC/JWT verification (RS256/ES256) + RBAC. Generates in-memory keys
+# via OpenSSL EVP, so it links OpenSSL::Crypto directly (like test_mtls).
+add_executable(test_jwt_rbac identity/test_jwt_rbac.cpp)
+target_link_libraries(test_jwt_rbac PRIVATE vgre)
+if(OpenSSL_FOUND)
+    target_link_libraries(test_jwt_rbac PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+add_test(NAME IdentityJwtRbac COMMAND test_jwt_rbac)
+set_tests_properties(IdentityJwtRbac PROPERTIES TIMEOUT 30)
+
+# Identity: end-to-end /metrics Bearer-JWT protection (real HTTP server + token).
+add_executable(test_metrics_jwt identity/test_metrics_jwt.cpp)
+target_link_libraries(test_metrics_jwt PRIVATE vgre)
+if(OpenSSL_FOUND)
+    target_link_libraries(test_metrics_jwt PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+add_test(NAME IdentityMetricsJwt COMMAND test_metrics_jwt)
+set_tests_properties(IdentityMetricsJwt PROPERTIES TIMEOUT 30)
+
 add_executable(test_events api/test_events.cpp)
 target_link_libraries(test_events PRIVATE vgre_cudart)
 add_test(NAME Events COMMAND test_events)
