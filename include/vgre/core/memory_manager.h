@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <map>
 #include <mutex>
 #include <shared_mutex>
@@ -445,6 +446,38 @@ private:
   // O(log n) helpers for masterRegions_ lookups
   ManagedRegion* findRegionByPtr(void* ptr);           // O(log n) exact key lookup
   ManagedRegion* findRegionContaining(uintptr_t addr); // O(log n) finds region that contains addr
+
+  // ── UVM oversubscription: disk-backed LRU eviction (P3-20) ───────────────
+  // Opt-in via VGRE_UVM_HOST_BUDGET_BYTES (0 ⇒ disabled, default path unchanged).
+  // When resident managed bytes exceed the budget, the least-recently-used
+  // managed regions are spilled to a backing file and their physical pages
+  // reclaimed (mprotect PROT_NONE + madvise MADV_DONTNEED). ensureManagedResident
+  // faults a region back from disk at the prefetch boundary (out of signal
+  // context — the SIGSEGV handler is not involved, avoiding async-signal I/O).
+  size_t                                hostBudgetBytes_ = 0;
+  std::atomic<size_t>                   residentManagedBytes_{0};
+  std::mutex                            evictMutex_;
+  std::FILE*                            evictFile_   = nullptr;
+  long long                             evictFileEnd_ = 0;
+  std::unordered_map<void*, long long>  evictSlot_;    // region base → permanent backing offset
+  std::unordered_set<void*>             evictedSet_;   // currently-spilled region bases
+  std::unordered_set<void*>             resCounted_;   // region bases counted as RAM-resident
+  std::atomic<uint64_t>                 managedEvictions_{0};
+  // Evict LRU counted regions until within budget; never evicts `keep`. evictMutex_ held.
+  void maybeEvictManaged_locked(void* keep);
+
+public:
+  // Oversubscription diagnostics (P3-20).
+  uint64_t getManagedEvictions()    const { return managedEvictions_.load(std::memory_order_relaxed); }
+  size_t   getResidentManagedBytes() const { return residentManagedBytes_.load(std::memory_order_relaxed); }
+
+  // Ensure the managed region covering `ptr` is resident in host RAM — restore it
+  // from disk if it was evicted, count it, and evict cold regions to honor the
+  // budget. Called at the prefetch/use boundary (out of signal context). No-op
+  // unless VGRE_UVM_HOST_BUDGET_BYTES enables oversubscription.
+  void ensureManagedResident(void* ptr);
+
+private:
 
   // Delta-Sync: Dirty Page Management
   std::atomic<double> h2dBandwidth_{25.0};

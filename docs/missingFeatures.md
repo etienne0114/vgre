@@ -223,13 +223,17 @@ fidelity / research-frontier.
 
 ## 8. Memory & observability
 
-### 8.1 UVM oversubscription with disk-backed eviction — P2
-- **Gap**: managed memory is capped by host RAM. Real UVM oversubscribes device
-  memory and migrates cold pages; VGRE's UVM (`memory_manager`) has dirty-page
-  tracking but no eviction-to-disk.
-- **Design**: an LRU page evictor that spills cold managed pages to a backing
-  file and faults them back on access (reusing the existing SIGSEGV/SIGBUS fault
-  handler). Acceptance: a workload allocating > host RAM completes correctly.
+### 8.1 UVM oversubscription with disk-backed eviction — P2 — ✅ DONE
+- **Was**: managed memory was capped by host RAM — dirty-page tracking but no
+  eviction-to-disk, so a >RAM working set could not run.
+- **Done**: `include/vgre/core/memory/page_evictor.h` (a byte-budgeted disk-backed
+  LRU) + live wiring in `memory_manager`: opt-in via `VGRE_UVM_HOST_BUDGET_BYTES`;
+  over budget, the LRU managed regions spill to a backing file and their pages are
+  reclaimed (`mprotect PROT_NONE` + `madvise MADV_DONTNEED`); `ensureManagedResident`
+  (hooked at `cudaMemPrefetchAsync`, out of signal context — no async-signal I/O)
+  restores from disk and re-evicts to honor the budget; `free` clears a region's
+  eviction state. Verified: `test_uvm_oversubscription` (16 MiB under a 4 MiB
+  budget, byte-exact through 28 evictions) and `test_page_evictor` (8× oversub).
 
 ### 8.2 Occupancy calculator + roofline + flame graphs — P2 — ✅ DONE
 - **Design**: an SM occupancy model (registers/SMEM/warps per block → active

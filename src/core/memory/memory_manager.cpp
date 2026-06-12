@@ -989,6 +989,25 @@ VGREResult MemoryManager::allocate(size_t size, MemoryHandle &outHandle,
 }
 
 VGREResult MemoryManager::free(MemoryHandle handle) {
+  // UVM oversubscription (P3-20): drop any eviction state for this region before
+  // it is unmapped, so a future allocation reusing the address never restores
+  // stale spilled data. Lock order evictMutex_ → mutex_ matches
+  // ensureManagedResident, so this cannot deadlock. No-op unless oversubscribed.
+  if (hostBudgetBytes_ != 0) {
+    std::lock_guard<std::mutex> elk(evictMutex_);
+    void* ptr = nullptr; size_t sz = 0;
+    {
+      std::shared_lock<std::shared_mutex> lk(mutex_);
+      auto it = allocations_.find(handle);
+      if (it != allocations_.end()) { ptr = it->second.ptr; sz = it->second.size; }
+    }
+    if (ptr) {
+      if (resCounted_.erase(ptr)) residentManagedBytes_.fetch_sub(sz, std::memory_order_relaxed);
+      evictedSet_.erase(ptr);
+      evictSlot_.erase(ptr);
+    }
+  }
+
   std::unique_lock<std::shared_mutex> lock(mutex_);
   auto it = allocations_.find(handle);
   if (it == allocations_.end())
