@@ -86,13 +86,18 @@ fidelity / research-frontier.
   mbarrier-arrival completion (the JIT already has a block barrier). Acceptance:
   a TMA-based tiled GEMM/attention kernel produces correct results.
 
-### 2.3 Thread-block clusters + distributed shared memory — P2
-- **Gap**: SM90 thread-block clusters (`cluster.sync`, `mapa`,
+### 2.3 Thread-block clusters + distributed shared memory — P2 — ✅ DONE
+- **Was**: SM90 thread-block clusters (`cluster.sync`, `mapa`,
   `cluster.map_shared_rank`, cluster dims in the launch) and cross-block DSMEM
-  are unsupported — the block-worker model is per-block only.
-- **Design**: a cluster grouping over `BlockWorkerPool`, a cluster barrier, and a
-  rank→SMEM map so one block can address a peer block's shared memory.
-  Acceptance: a 2-block-cluster reduction reads a peer's DSMEM correctly.
+  were unsupported — the block-worker model was per-block only.
+- **Done**: `include/vgre/core/cluster.h` (rank→SMEM map + sense-reversing cluster
+  barrier) + `CPUParallelExecutor::executeClustered` (tiles the grid into clusters
+  whose CTAs run concurrently on `BlockWorkerPool`, installs the per-CTA cluster
+  context). PTX `barrier.cluster.arrive/wait` + `mapa.shared::cluster` lower to the
+  `vgre_jit_cluster_*` helpers; prelude `cooperative_groups::this_cluster()`;
+  `cuLaunchKernelEx` reads the cluster-dimension launch attribute. Verified:
+  `test_cluster` (DSMEM reductions over 2/4/8-CTA clusters, barrier ordering) and
+  `test_cluster_exec` (end-to-end through the executor).
 
 ### 2.4 Blackwell `tcgen05` 5th-gen tensor cores + tensor memory — P2
 - **Location**: `src/compiler/ptx/ptx_conversion.cpp` already lists

@@ -200,6 +200,35 @@ public:
 
 inline multi_grid_group this_multi_grid() { return multi_grid_group{}; }
 
+// ── cluster_group (Hopper SM90 thread-block clusters, P3-6) ──────────────────
+// cooperative_groups::this_cluster() over VGRE's executor cluster path: sync() is
+// the cluster barrier, map_shared_rank() is Distributed Shared Memory (retarget a
+// shared-memory pointer to a peer CTA), and block_rank()/num_blocks() report this
+// CTA's rank-in-cluster and the cluster size from the installed cluster context.
+extern "C" {
+  void     vgre_jit_cluster_sync();
+  void*    vgre_jit_mapa_shared_cluster(void* addr, unsigned dstRank);
+  unsigned vgre_jit_cluster_ctarank();
+  unsigned vgre_jit_cluster_nctarank();
+}
+
+class cluster_group {
+public:
+    inline void sync() const { vgre_jit_cluster_sync(); }
+    inline unsigned int num_blocks() const  { return vgre_jit_cluster_nctarank(); }
+    inline unsigned int block_rank() const   { return vgre_jit_cluster_ctarank(); }
+    inline unsigned int dim_blocks() const   { return vgre_jit_cluster_nctarank(); }
+
+    // map_shared_rank: address of `addr` (in this CTA's shared memory) within the
+    // shared memory of CTA `rank` in the cluster (Distributed Shared Memory).
+    template <typename T>
+    inline T* map_shared_rank(T* addr, unsigned int rank) const {
+        return static_cast<T*>(vgre_jit_mapa_shared_cluster(static_cast<void*>(addr), rank));
+    }
+};
+
+inline cluster_group this_cluster() { return cluster_group{}; }
+
 // ── reduce() ─────────────────────────────────────────────────────────────────
 // Binary reduction across a thread_group using shfl_xor.
 template<typename Group, typename T, typename BinaryOp>

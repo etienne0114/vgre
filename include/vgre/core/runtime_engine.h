@@ -115,11 +115,22 @@ public:
                           StreamId stream = 0,
                           const dim3 &gridOffset = dim3(0, 0, 0));
 
-  // Cooperative kernel launch: grid-wide barrier via serialized block phases
+  // Cooperative kernel launch: grid-wide barrier via serialized block phases.
+  // clusterDim > {1,1,1} routes to the thread-block-cluster path (P3-6): the
+  // grid is tiled into clusters whose CTAs run concurrently with a shared cluster
+  // barrier + Distributed Shared Memory (executor executeClustered).
   VGREResult launchCooperativeKernel(KernelId id, const dim3 &gridDim,
                                      const dim3 &blockDim, void **args,
                                      size_t sharedMem = 0, StreamId stream = 0,
-                                     const dim3 &gridOffset = dim3(0, 0, 0));
+                                     const dim3 &gridOffset = dim3(0, 0, 0),
+                                     const dim3 &clusterDim = dim3(1, 1, 1));
+
+  // Thread-block-cluster launch (Hopper, P3-6): convenience entry that routes to
+  // the cooperative path with the given cluster shape.
+  VGREResult launchClusteredKernel(KernelId id, const dim3 &gridDim,
+                                    const dim3 &blockDim, const dim3 &clusterDim,
+                                    void **args, size_t sharedMem = 0,
+                                    StreamId stream = 0);
   VGREResult launchCooperativeKernel(const std::string &name,
                                      const std::string &source,
                                      const dim3 &gridDim, const dim3 &blockDim,

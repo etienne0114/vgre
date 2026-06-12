@@ -384,6 +384,24 @@ const TranslateMap& getMap() {
         {"wgmma.wait_group.sync.aligned", [](auto&){
             return "__atomic_thread_fence(__ATOMIC_SEQ_CST);";
         }},
+        // ── Thread-block cluster (Hopper SM90, P3-6) ──────────────────────────
+        // barrier.cluster.arrive marks arrival; the matching .wait performs the
+        // rendezvous — so arrive is a no-op and wait calls the cluster barrier.
+        // (cluster.sync / this_cluster().sync() lower to an arrive+wait pair.)
+        {"barrier.cluster.arrive",         [](auto&){ return "/* barrier.cluster.arrive */"; }},
+        {"barrier.cluster.arrive.relaxed", [](auto&){ return "/* barrier.cluster.arrive.relaxed */"; }},
+        {"barrier.cluster.wait",           [](auto&){ return "vgre_jit_cluster_sync();"; }},
+        {"barrier.cluster.wait.acquire",   [](auto&){ return "vgre_jit_cluster_sync();"; }},
+        // mapa.shared::cluster.uN  d, a, b — map shared addr `a` to peer CTA `b`'s
+        // shared memory (Distributed Shared Memory). Returns the peer host address.
+        {"mapa.shared::cluster.u32", [](auto& o){
+            return o[0]+" = (uint32_t)(uintptr_t)vgre_jit_mapa_shared_cluster("
+                   "(void*)(uintptr_t)("+o[1]+"),(unsigned)("+o[2]+"));";
+        }},
+        {"mapa.shared::cluster.u64", [](auto& o){
+            return o[0]+" = (uint64_t)(uintptr_t)vgre_jit_mapa_shared_cluster("
+                   "(void*)(uintptr_t)("+o[1]+"),(unsigned)("+o[2]+"));";
+        }},
         // ── ldmatrix / stmatrix — load/store WMMA tile fragments ──────────────
         // In the serial CPU model, shared memory is a host pointer.
         // ldmatrix loads N×uint32 (16 bytes per fragment) from smem into registers.

@@ -170,6 +170,28 @@ int main() {
               contains(c, "%3") && contains(c, "%1") && contains(c, "%2"));
     }
 
+    // (9) Hopper thread-block cluster (P3-6): barrier.cluster.wait must lower to
+    //     the cluster barrier, and mapa.shared::cluster must lower to the DSMEM
+    //     address-retarget helper (not "not supported").
+    {
+        std::string sync = PTXTranslator::translate(
+            "asm volatile(\"barrier.cluster.wait;\" : );");
+        check("barrier.cluster.wait -> vgre_jit_cluster_sync",
+              contains(sync, "vgre_jit_cluster_sync("));
+
+        std::string arrive = PTXTranslator::translate(
+            "asm volatile(\"barrier.cluster.arrive;\" : );");
+        check("barrier.cluster.arrive does not rendezvous (arrive is a no-op)",
+              !contains(arrive, "vgre_jit_cluster_sync("));
+
+        std::string mapa = PTXTranslator::translate(
+            "asm volatile(\"mapa.shared::cluster.u64 %0, %1, %2;\" "
+            ": \"=l\"(d) : \"l\"(a), \"r\"(rank));");
+        check("mapa.shared::cluster -> vgre_jit_mapa_shared_cluster (DSMEM)",
+              contains(mapa, "vgre_jit_mapa_shared_cluster(") &&
+              contains(mapa, "%1") && contains(mapa, "%2"));
+    }
+
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

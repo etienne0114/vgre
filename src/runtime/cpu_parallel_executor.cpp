@@ -4,6 +4,7 @@
 #include "vgre/runtime/gpu_thread_context.h"
 #include "vgre/runtime/block_worker_pool.h"
 #include "vgre/runtime/gpu_cache.h"
+#include "vgre/core/cluster.h"
 #include "vgre/core/memory_manager.h"
 #include "vgre/core/runtime_engine.h"
 
@@ -452,6 +453,117 @@ VGREResult CPUParallelExecutor::executeCooperative(CompiledKernelFn fn,
     if (totalBytes > 0) { aee.recordRealMemoryAccess(totalBytes); tryRecordBandwidth(totalBytes, gridMs); }
 
     totalBlocks_ += totalBlocks;
+    return vgre::VGREResult::SUCCESS;
+}
+
+// ── Clustered kernel execution (Hopper thread-block clusters, P3-6) ──────────
+// The grid is tiled into clusters of shape clusterDim; the CTAs of each cluster
+// run concurrently on distinct pool workers sharing one Cluster, so the kernel's
+// cluster.sync() rendezvouses them and mapa.shared::cluster reaches a peer CTA's
+// shared memory (Distributed Shared Memory). Clusters run one after another (each
+// is independent). Each worker CTA registers its shared buffer into the cluster
+// and installs the cluster context (vgre_jit_set_cluster) before running, so the
+// JIT cluster helpers resolve to this cluster. Degenerate/oversized/non-dividing
+// configurations fall back to the standard grid execution (no DSMEM).
+VGREResult CPUParallelExecutor::executeClustered(CompiledKernelFn fn,
+                                                 const dim3 &gridDim,
+                                                 const dim3 &blockDim,
+                                                 const dim3 &clusterDim,
+                                                 void **args,
+                                                 size_t sharedMemSize,
+                                                 uint64_t flopsPerBlock,
+                                                 uint64_t bytesPerBlock) {
+    auto& pool = vgre::runtime::BlockWorkerPool::instance();
+    pool.initialize();
+    const uint32_t clusterSize = clusterDim.total();
+    const size_t   poolCap     = pool.getCapacity();
+    const bool divisible = clusterDim.x && clusterDim.y && clusterDim.z &&
+                           (gridDim.x % clusterDim.x == 0) &&
+                           (gridDim.y % clusterDim.y == 0) &&
+                           (gridDim.z % clusterDim.z == 0);
+    // A cluster's CTAs must all be co-resident (one per worker) for the cluster
+    // barrier to complete; a unit cluster has no DSMEM peers.
+    if (clusterSize <= 1 || clusterSize > poolCap || !divisible) {
+        if (clusterSize > 1)
+            VGRE_LOG_WARN("CPUParallelExecutor",
+                "Cluster launch (size " + std::to_string(clusterSize) +
+                ") falls back to non-clustered execution");
+        return execute(fn, gridDim, blockDim, args, sharedMemSize,
+                       flopsPerBlock, bytesPerBlock);
+    }
+
+    totalLaunches_++;
+    const uint32_t cgx = gridDim.x / clusterDim.x;
+    const uint32_t cgy = gridDim.y / clusterDim.y;
+    const uint32_t cgz = gridDim.z / clusterDim.z;
+    const uint32_t numClusters = cgx * cgy * cgz;
+
+    struct ClusterCtx {
+        const CompiledKernelFn* fn;
+        const dim3* blockDim;
+        const dim3* gridDim;
+        void** args;
+        size_t sharedMemSize;
+        dim3 clusterDim;
+        uint32_t ox, oy, oz;                       // cluster origin block coords
+        vgre::cluster::Cluster* cluster;
+    };
+
+    uint64_t totalFlops = 0, totalBytes = 0;
+    auto gridStart = std::chrono::steady_clock::now();
+
+    for (uint32_t c = 0; c < numClusters; ++c) {
+        const uint32_t Cx = c % cgx;
+        const uint32_t Cy = (c / cgx) % cgy;
+        const uint32_t Cz = c / (cgx * cgy);
+
+        vgre::cluster::Cluster cluster(clusterSize);
+        ClusterCtx ctx{
+            &fn, &blockDim, &gridDim, args, sharedMemSize, clusterDim,
+            Cx * clusterDim.x, Cy * clusterDim.y, Cz * clusterDim.z, &cluster
+        };
+
+        // One task per CTA in the cluster — all run concurrently; dispatch blocks
+        // until the whole cluster finishes, so every CTA's shared buffer stays
+        // alive (and registered) for the duration of the cluster.
+        pool.dispatch(static_cast<int>(clusterSize),
+            [](int tid, void* arg) {
+                ClusterCtx* c = static_cast<ClusterCtx*>(arg);
+                const uint32_t rank = static_cast<uint32_t>(tid);
+                const uint32_t ix = rank % c->clusterDim.x;
+                const uint32_t iy = (rank / c->clusterDim.x) % c->clusterDim.y;
+                const uint32_t iz = rank / (c->clusterDim.x * c->clusterDim.y);
+
+                SharedMemory* smem = getThreadSharedMem(c->sharedMemSize);
+                smem->reset();
+                c->cluster->register_smem(rank, smem->raw());   // publish DSMEM base
+                vgre_jit_set_cluster(c->cluster, rank);         // install cluster ctx
+
+                dim3 blockIdx(c->ox + ix, c->oy + iy, c->oz + iz);
+                dim3 tIdx(0, 0, 0);
+                vgre::runtime::GPUThreadContext::setWarpMask(0xFFFFFFFF);
+                vgre::runtime::GPUThreadContext::clearBlockBarrier();
+
+                (**c->fn)(c->args, &blockIdx, &tIdx, c->blockDim,
+                          c->gridDim, smem->raw(), smem->size());
+
+                vgre::runtime::GPUThreadContext::clearWarpMask();
+                vgre::runtime::GPUThreadContext::clearBlockBarrier();
+                vgre_jit_clear_cluster();
+            },
+            &ctx);
+
+        totalFlops += static_cast<uint64_t>(clusterSize) * flopsPerBlock;
+        totalBytes += static_cast<uint64_t>(clusterSize) * bytesPerBlock;
+    }
+
+    double gridMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - gridStart).count();
+    auto& aee = vgre::advanced::AdaptiveExecutionEngine::instance();
+    if (totalFlops > 0) aee.recordRealFlops(totalFlops);
+    if (totalBytes > 0) { aee.recordRealMemoryAccess(totalBytes); tryRecordBandwidth(totalBytes, gridMs); }
+
+    totalBlocks_ += gridDim.total();
     return vgre::VGREResult::SUCCESS;
 }
 

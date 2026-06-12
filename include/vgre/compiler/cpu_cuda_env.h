@@ -18,6 +18,12 @@ extern "C" {
   void vgre_jit_set_block_barrier(void*);
   void vgre_jit_clear_block_barrier();
 
+  // Thread-block cluster (P3-6): cluster barrier + Distributed Shared Memory.
+  void     vgre_jit_cluster_sync();
+  void*    vgre_jit_mapa_shared_cluster(void* addr, unsigned dstRank);
+  unsigned vgre_jit_cluster_ctarank();
+  unsigned vgre_jit_cluster_nctarank();
+
   // Dynamic TLS-based built-ins for stable parallel JIT linkage
   vgre::dim3* vgre_jit_get_threadIdx();
   vgre::dim3* vgre_jit_get_blockIdx();

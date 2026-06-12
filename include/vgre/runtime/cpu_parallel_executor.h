@@ -48,6 +48,19 @@ public:
                                uint64_t bytesPerBlock = 0,
                                const dim3 &gridOffset = dim3(0, 0, 0));
 
+  // Execute a clustered kernel (Hopper thread-block clusters, P3-6). The grid is
+  // tiled into clusters of shape clusterDim (which must divide gridDim); the CTAs
+  // of each cluster run concurrently with a shared Cluster so cluster.sync and
+  // Distributed Shared Memory (mapa.shared::cluster) work across them. Clusters
+  // themselves run one after another (each is independent). clusterDim.total()
+  // must be <= maxThreads_ so the cluster barrier always completes; a unit
+  // cluster falls back to the standard execute() path.
+  VGREResult executeClustered(CompiledKernelFn fn, const dim3 &gridDim,
+                              const dim3 &blockDim, const dim3 &clusterDim,
+                              void **args, size_t sharedMemSize = 0,
+                              uint64_t flopsPerBlock = 0,
+                              uint64_t bytesPerBlock = 0);
+
   // Setters
   void setMaxThreads(int n);
   int getMaxThreads() const;

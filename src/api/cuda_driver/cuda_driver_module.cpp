@@ -222,9 +222,60 @@ struct CUlaunchConfig {
     unsigned int numAttrs;
 };
 
+// CUlaunchAttribute ABI (CUDA 12): { id(4); pad(4); value-union(64) } = 72 bytes.
+// We only read the cluster-dimension attribute (id == 4) at value offset 8. The
+// parse is read-only and sanity-checked; anything unexpected makes us ignore the
+// attributes and launch normally — so this is never worse than the prior behavior
+// (which ignored cluster dims entirely).
+extern "C++" {
+namespace {
+struct VgreLaunchAttribute {
+    int  id;            // CUlaunchAttributeID
+    char pad[4];
+    union {
+        unsigned char raw[64];
+        struct { unsigned x, y, z; } clusterDim;
+    } value;
+};
+constexpr int kClusterDimAttrId = 4;   // CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
+
+// Returns the cluster shape if a sane cluster-dimension attribute is present,
+// else {0,0,0} (meaning "no cluster").
+vgre::dim3 parseClusterDim(const void* attrs, unsigned numAttrs) {
+    if (!attrs || numAttrs == 0 || numAttrs > 32) return vgre::dim3(0, 0, 0);
+    const auto* a = static_cast<const VgreLaunchAttribute*>(attrs);
+    for (unsigned i = 0; i < numAttrs; ++i) {
+        if (a[i].id != kClusterDimAttrId) continue;
+        unsigned x = a[i].value.clusterDim.x;
+        unsigned y = a[i].value.clusterDim.y;
+        unsigned z = a[i].value.clusterDim.z;
+        // Portable cluster sizes are small; reject anything implausible.
+        if (x >= 1 && y >= 1 && z >= 1 && x <= 32 && y <= 32 && z <= 32 &&
+            (uint64_t)x * y * z <= 32)
+            return vgre::dim3(x, y, z);
+        break;
+    }
+    return vgre::dim3(0, 0, 0);
+}
+} // namespace
+} // extern "C++"
+
 CUresult cuLaunchKernelEx(const CUlaunchConfig *config, CUfunction f,
                           void **kernelParams, void **extra) {
     if (!config || f == 0) return CUDA_ERROR_INVALID_VALUE;
+
+    // Hopper thread-block clusters (P3-6): if a cluster-dimension attribute is
+    // present, route to the clustered execution path (cluster barrier + DSMEM).
+    vgre::dim3 cluster = parseClusterDim(config->attrs, config->numAttrs);
+    if (cluster.total() > 1) {
+        vgre::dim3 grid(config->gridDimX, config->gridDimY, config->gridDimZ);
+        vgre::dim3 block(config->blockDimX, config->blockDimY, config->blockDimZ);
+        auto r = vgre::core::RuntimeEngine::instance().launchClusteredKernel(
+            static_cast<vgre::KernelId>(f), grid, block, cluster,
+            kernelParams, config->sharedMemBytes, config->hStream);
+        return (r == vgre::VGREResult::SUCCESS) ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+    }
+
     return cuLaunchKernel(f,
         config->gridDimX, config->gridDimY, config->gridDimZ,
         config->blockDimX, config->blockDimY, config->blockDimZ,
