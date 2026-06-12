@@ -101,9 +101,20 @@ should either be implemented or carry a documented, framework-irrelevant reason.
 
 ## 3. Cross-Platform & Footprint (the "works on all three OSes" claim is unverified)
 
-### 3.1 No CI — Windows/macOS support is compile-guarded but unproven
-- **Reality**: there is no `.github/workflows`. The build and full test suite have only ever run on Linux. The `#if defined(_WIN32)` / `__APPLE__` branches compile in isolation but have **never been built or tested end-to-end** on those OSes.
-- **Fix**: add a GitHub Actions matrix (`ubuntu-latest`, `windows-latest`, `macos-latest`) that configures, builds, and runs the test suite. Until that is green, the README/PROJECT_STATUS must say "Linux verified; Win/macOS unverified."
+### 3.1 CI matrix — ✅ Linux + macOS verified; Windows bring-up (2026-06-11)
+- **Now**: `.github/workflows/ci.yml` runs a Linux/macOS/Windows matrix.
+  - **Linux** (required): green — all 211 tests, incl. the warp-collective
+    `TensorCoreMMA`.
+  - **macOS arm64** (was `continue-on-error`): now **builds green and runs the
+    full suite at ~100%** after the bring-up in implementationPlan Track 1
+    (libc++ ABI, IOKit/CoreFoundation, arm64 SIMD/page/SIGBUS portability, and
+    the Mach-O `__global__` section fix that had blocked every JIT kernel). The
+    `#if __APPLE__` branches are now genuinely exercised end-to-end.
+  - **Windows** (`continue-on-error`): the configure blocker (no
+    `LLVMConfig.cmake` from choco) is resolved by downloading the official
+    LLVM-18 release; remaining build/link items are tracked in CI.
+- **Remaining**: drop macOS `continue-on-error` once 100% is locked across a few
+  runs; finish Windows build/link bring-up.
 
 ### 3.2 macOS NUMA / affinity is a stub — ✅ FIXED (2026-06-11, Track 21)
 - **Location**: `src/core/scheduler_numa.cpp`.
