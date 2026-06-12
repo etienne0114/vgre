@@ -714,7 +714,9 @@ VGREResult RuntimeEngine::launchCooperativeKernel(KernelId id,
                                                    void **args,
                                                    size_t sharedMem,
                                                    StreamId stream,
-                                                   const dim3 &gridOffset) {
+                                                   const dim3 &gridOffset,
+                                                   const dim3 &clusterDim) {
+  (void)gridOffset;
   if (gridDim.x == 0 || blockDim.x == 0)
     return VGREResult::ERR_INVALID_VALUE;
   if ((gridDim.y == 0 && gridDim.z != 0) ||
@@ -869,9 +871,31 @@ VGREResult RuntimeEngine::launchCooperativeKernel(KernelId id,
     }
   }
 
+  // Thread-block clusters (P3-6): tile the grid into clusters whose CTAs run
+  // concurrently with a shared cluster barrier + Distributed Shared Memory.
+  if (clusterDim.total() > 1) {
+    VGRE_LOG_INFO("RuntimeEngine",
+                  "Clustered kernel launch: dispatching via executeClustered "
+                  "(cluster=" + std::to_string(clusterDim.total()) + " CTAs)");
+    return executor_->executeClustered(fn, gridDim, blockDim, clusterDim,
+                                       safeArgs->data(), sharedMem,
+                                       flopsPerBlock, bytesPerBlock);
+  }
+
   return executor_->executeCooperative(fn, gridDim, blockDim,
                                        safeArgs->data(), sharedMem,
                                        flopsPerBlock, bytesPerBlock);
+}
+
+// Thread-block-cluster launch entry (P3-6): route to the cooperative path with
+// the requested cluster shape.
+VGREResult RuntimeEngine::launchClusteredKernel(KernelId id, const dim3 &gridDim,
+                                                const dim3 &blockDim,
+                                                const dim3 &clusterDim,
+                                                void **args, size_t sharedMem,
+                                                StreamId stream) {
+  return launchCooperativeKernel(id, gridDim, blockDim, args, sharedMem, stream,
+                                 dim3(0, 0, 0), clusterDim);
 }
 
 } // namespace core

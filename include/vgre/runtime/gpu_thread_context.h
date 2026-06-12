@@ -36,6 +36,19 @@ extern "C" VGRE_PUBLIC_API void vgre_jit_set_block_barrier(void *barrier);
 extern "C" VGRE_PUBLIC_API void vgre_jit_clear_block_barrier();
 extern "C" VGRE_PUBLIC_API void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
 
+// ── Thread-block cluster context (P3-6) ──────────────────────────────────────
+// The executor's clustered path installs the current CTA's Cluster + cluster-rank
+// on each worker thread before running the kernel; the JIT helpers below read
+// that context. With no cluster installed they degenerate to a size-1 self
+// cluster (sync is a no-op, mapa returns the address unchanged) — the correct
+// behavior for a non-clustered launch.
+extern "C" VGRE_PUBLIC_API void     vgre_jit_set_cluster(void* cluster, unsigned rank);
+extern "C" VGRE_PUBLIC_API void     vgre_jit_clear_cluster();
+extern "C" VGRE_PUBLIC_API void     vgre_jit_cluster_sync();
+extern "C" VGRE_PUBLIC_API void*    vgre_jit_mapa_shared_cluster(void* addr, unsigned dstRank);
+extern "C" VGRE_PUBLIC_API unsigned vgre_jit_cluster_ctarank();
+extern "C" VGRE_PUBLIC_API unsigned vgre_jit_cluster_nctarank();
+
 // ── Shared Memory ──────────────────────────────────────────────────────────
 // Per-block shared memory buffer. Allocated once per block execution and
 // zeroed at the start of each block. Kernels can use typed accessors to

@@ -34,7 +34,7 @@ All tracks start **🔴 Planned**.
 | P3-3 | Microscaling (MX) format family | P2 | §1.3 | ✅ Done |
 | P3-4 | Hopper `wgmma.mma_async` warp-group MMA | P1 | §2.1 | ✅ Done |
 | P3-5 | TMA `cp.async.bulk(.tensor)` | P1 | §2.2 | ✅ Done |
-| P3-6 | Thread-block clusters + distributed SMEM | P2 | §2.3 | 🔴 Planned |
+| P3-6 | Thread-block clusters + distributed SMEM | P2 | §2.3 | ✅ Done |
 | P3-7 | Blackwell `tcgen05` + tensor memory | P2 | §2.4 | 🔴 Planned |
 | P3-8 | Speculative decoding (draft+verify) | P1 | §3.1 | ✅ Done |
 | P3-9 | MoE: top-k router + grouped GEMM | P1 | §3.2 | ✅ Done |
@@ -127,10 +127,21 @@ Generalize the FP4 block-scale machinery to MXFP8/MXFP6/MXFP4 + MXINT8 (OCP MX:
 32-element blocks, shared UE8M0 scale) as `vgre::quant` codecs + a uniform
 `mx_gemm`. **Acceptance**: round-trip + scaled-GEMM equivalence per format.
 
-### P3-6 — Thread-block clusters + distributed shared memory
-A cluster grouping over `BlockWorkerPool`, a cluster barrier (`cluster.sync`), and
-a rank→SMEM map (`cluster.map_shared_rank`) so a block addresses a peer block's
-SMEM. **Acceptance**: a 2-block-cluster reduction reads a peer's DSMEM correctly.
+### P3-6 — Thread-block clusters + distributed shared memory ✅ DONE
+`include/vgre/core/cluster.h`: a rank→SMEM-base table with `map_shared_rank`
+(`mapa.shared::cluster` — retarget an address to a peer CTA's shared memory) and a
+sense-reversing cluster barrier (`cluster.sync`). Wired end-to-end:
+`CPUParallelExecutor::executeClustered` tiles the grid into clusters whose CTAs run
+concurrently on the `BlockWorkerPool`, registering each CTA's shared buffer and
+installing the per-CTA cluster context (`vgre_jit_set_cluster`); the JIT helpers
+`vgre_jit_cluster_sync` / `vgre_jit_mapa_shared_cluster` / `vgre_jit_cluster_{c,nc}tarank`
+read it. PTX `barrier.cluster.arrive/wait` + `mapa.shared::cluster.{u32,u64}` lower
+to those helpers; the prelude exposes `cooperative_groups::this_cluster()`
+(`sync` / `map_shared_rank` / `block_rank` / `num_blocks`); `cuLaunchKernelEx`
+parses the cluster-dimension launch attribute and routes to
+`launchClusteredKernel`. **Acceptance**: a 2-block-cluster reduction reads a peer's
+DSMEM correctly — plus 4/8-CTA and 2×2 cluster DSMEM reductions, barrier ordering,
+and the executor path (`test_cluster`, `test_cluster_exec`).
 
 ### P3-7 — Blackwell `tcgen05` + tensor memory
 **File**: `src/compiler/ptx/ptx_conversion.cpp` (tcgen05 shapes already decoded).
