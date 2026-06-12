@@ -648,6 +648,12 @@ target_link_libraries(test_audit_log PRIVATE vgre)
 add_test(NAME ComplianceAuditLog COMMAND test_audit_log)
 set_tests_properties(ComplianceAuditLog PROPERTIES TIMEOUT 30)
 
+# Secrets: sealed, versioned secret store (rotation + access policy).
+add_executable(test_secret_store secrets/test_secret_store.cpp)
+target_link_libraries(test_secret_store PRIVATE vgre)
+add_test(NAME SecretsStore COMMAND test_secret_store)
+set_tests_properties(SecretsStore PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)

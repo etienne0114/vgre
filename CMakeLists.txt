@@ -1010,6 +1010,7 @@ vgre_add_subdirectory(src/api)
 vgre_add_subdirectory(src/runtime)
 vgre_add_subdirectory(src/advanced)
 vgre_add_subdirectory(src/compliance)
+vgre_add_subdirectory(src/secrets)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1023,6 +1024,7 @@ add_library(vgre SHARED
     $<TARGET_OBJECTS:vgre_runtime>
     $<TARGET_OBJECTS:vgre_advanced>
     $<TARGET_OBJECTS:vgre_compliance>
+    $<TARGET_OBJECTS:vgre_secrets>
 )
 set_target_properties(vgre PROPERTIES
     VERSION   ${PROJECT_VERSION}
@@ -1131,6 +1133,7 @@ target_sources(vgre_cudart PRIVATE
     $<TARGET_OBJECTS:vgre_runtime>
     $<TARGET_OBJECTS:vgre_advanced>
     $<TARGET_OBJECTS:vgre_compliance>
+    $<TARGET_OBJECTS:vgre_secrets>
     $<TARGET_OBJECTS:vgre_cudart_shims>
 )
 set_target_properties(vgre_cudart PROPERTIES
