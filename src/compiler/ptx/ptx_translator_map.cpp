@@ -353,19 +353,16 @@ const TranslateMap& getMap() {
             return "vgre_tcgen05_m128n256k32_e4m3_f32((float*)(uintptr_t)("+d+"),"
                    "(uint64_t)("+o[0]+"),(uint64_t)("+o[1]+"));";
         }},
-        // TMA bulk async copy: cp.async.bulk copies from global→shared in one call.
-        // CPU serial emulation: synchronous memcpy (no async staging needed).
-        {"cp.async.bulk.tensor.1d.global.shared::cta.bulk_group", [](auto& o){
-            return "vgre_cp_async_bulk((void*)(uintptr_t)("+o[0]+"),"
-                   "(const void*)(uintptr_t)("+o[1]+"),"+(o.size()>2?o[2]:std::string("0"))+");";
-        }},
-        {"cp.async.bulk.tensor.2d.global.shared::cta.bulk_group", [](auto& o){
-            // o[0]=dst, o[1]=tma_desc, o[2]=x, o[3]=y; tile dims come from desc->boxDim
-            return "vgre_tma_load_2d_dispatch((void*)(uintptr_t)("+o[0]+"),"
-                   "(const VgreTMADescriptor*)(uintptr_t)("+o[1]+"),"
-                   +(o.size()>2?o[2]:std::string("0"))+","
-                   +(o.size()>3?o[3]:std::string("0"))+");";
-        }},
+        // TMA bulk tensor STORE (shared → global): cp.async.bulk.tensor.Nd with
+        // dst=global, src=shared. Real PTX bundles the target as [tensorMap,{coords}]
+        // and the source SMEM as the second operand → tma_store_emit parses both and
+        // lowers to the strided box scatter (OOB-clipped). The 3d/4d/5d forms live in
+        // getConversionMap; 1d/2d here.
+        {"cp.async.bulk.tensor.1d.global.shared::cta.bulk_group",
+            [](auto& o){ return tma_store_emit(o, 1); }},
+        {"cp.async.bulk.tensor.2d.global.shared::cta.bulk_group",
+            [](auto& o){ return tma_store_emit(o, 2); }},
+        // cp.async.bulk.tensor.1d.shared::cta.global is the 1d LOAD (dst=shared).
         {"cp.async.bulk.tensor.1d.shared::cta.global", [](auto& o){
             return "vgre_cp_async_bulk((void*)(uintptr_t)("+o[0]+"),"
                    "(const void*)(uintptr_t)("+o[1]+"),"+(o.size()>2?o[2]:std::string("0"))+");";

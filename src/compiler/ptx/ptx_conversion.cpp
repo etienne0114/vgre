@@ -94,30 +94,12 @@ const TranslateMap& getConversionMap() {
         // ── TMA 3D / 4D / 5D bulk copy ─────────────────────────────────────
         // Tile dimensions come from desc->boxDim (set by cuTensorMapEncodeTiled),
         // NOT from PTX instruction operands.  Use the _b variants.
-        {"cp.async.bulk.tensor.3d.global.shared::cta.bulk_group", [](auto& o){
-            return "vgre_tma_load_3d_b((void*)(uintptr_t)("+o[0]+"),"
-                   "(const VgreTMADescriptor*)(uintptr_t)("+o[1]+"),"
-                   +(o.size()>2?o[2]:std::string("0"))+","
-                   +(o.size()>3?o[3]:std::string("0"))+","
-                   +(o.size()>4?o[4]:std::string("0"))+");";
-        }},
-        {"cp.async.bulk.tensor.4d.global.shared::cta.bulk_group", [](auto& o){
-            return "vgre_tma_load_4d_b((void*)(uintptr_t)("+o[0]+"),"
-                   "(const VgreTMADescriptor*)(uintptr_t)("+o[1]+"),"
-                   +(o.size()>2?o[2]:std::string("0"))+","
-                   +(o.size()>3?o[3]:std::string("0"))+","
-                   +(o.size()>4?o[4]:std::string("0"))+","
-                   +(o.size()>5?o[5]:std::string("0"))+");";
-        }},
-        {"cp.async.bulk.tensor.5d.global.shared::cta.bulk_group", [](auto& o){
-            return "vgre_tma_load_5d_b((void*)(uintptr_t)("+o[0]+"),"
-                   "(const VgreTMADescriptor*)(uintptr_t)("+o[1]+"),"
-                   +(o.size()>2?o[2]:std::string("0"))+","
-                   +(o.size()>3?o[3]:std::string("0"))+","
-                   +(o.size()>4?o[4]:std::string("0"))+","
-                   +(o.size()>5?o[5]:std::string("0"))+","
-                   +(o.size()>6?o[6]:std::string("0"))+");";
-        }},
+        {"cp.async.bulk.tensor.3d.global.shared::cta.bulk_group",
+            [](auto& o){ return tma_store_emit(o, 3); }},
+        {"cp.async.bulk.tensor.4d.global.shared::cta.bulk_group",
+            [](auto& o){ return tma_store_emit(o, 4); }},
+        {"cp.async.bulk.tensor.5d.global.shared::cta.bulk_group",
+            [](auto& o){ return tma_store_emit(o, 5); }},
         // ── cp.reduce.async (shared → global atomic reduction) ─────────────
         {"cp.reduce.async.add.f32", [](auto& o){
             return "vgre_cp_reduce_async_add_f32((float*)("+o[0]+"),(const float*)("+o[1]+
@@ -227,22 +209,9 @@ const TranslateMap& getConversionMap() {
                    "); if(_td) _td->baseAddr=(void*)(uintptr_t)("+
                    (o.size()>1?o[1]:std::string("0"))+"); } /* tensormap.replace.tile.global_address */";
         }},
-        // ── cp.async.bulk TMA store variants (shared → global) ─────────────────
-        {"cp.async.bulk.tensor.2d.global.shared::cta.bulk_group", [](auto& o){
-            return "vgre_tma_store_2d_b((void*)(uintptr_t)("+
-                   (o.size()>0?o[0]:std::string("0"))+"),"
-                   "(const VgreTMADescriptor*)(uintptr_t)("+
-                   (o.size()>1?o[1]:std::string("0"))+"),"
-                   +(o.size()>2?o[2]:std::string("0"))+","
-                   +(o.size()>3?o[3]:std::string("0"))+");";
-        }},
-        {"cp.async.bulk.tensor.1d.global.shared::cta.bulk_group.store", [](auto& o){
-            return "vgre_cp_async_bulk((void*)(uintptr_t)("+
-                   (o.size()>0?o[0]:std::string("0"))+"),"
-                   "(const void*)(uintptr_t)("+
-                   (o.size()>1?o[1]:std::string("0"))+"),"
-                   +(o.size()>2?o[2]:std::string("1"))+");";
-        }},
+        // NOTE: the 1d/2d cp.async.bulk.tensor STORE opcodes are handled in
+        // getMap() (via tma_store_emit) — getMap is searched first, so duplicating
+        // them here would be dead code. Only the 3d/4d/5d store forms live above.
         // ── Prefetch / cache hint variants (no-ops on CPU) ─────────────────────
         {"cp.async.bulk.prefetch.tensor.2d.l2.global",  [](auto&){ return "/* cp.async.bulk.prefetch 2D */"; }},
         {"cp.async.bulk.prefetch.tensor.3d.l2.global",  [](auto&){ return "/* cp.async.bulk.prefetch 3D */"; }},

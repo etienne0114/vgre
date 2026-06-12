@@ -83,6 +83,15 @@ Hopper kernels run).
 `cp.async.bulk.tensor.Nd.shared::cluster.global` → strided memcpy with mbarrier
 arrival completion (the JIT block barrier is the substrate). **Acceptance**: a
 TMA-tiled GEMM/attention kernel produces correct results.
+**Fix (store path)**: the `cp.async.bulk.tensor.Nd.global.shared::cta.bulk_group`
+**store** opcodes were mis-lowered to TMA *loads* (the 2d form was additionally
+shadowed across maps and its store helper had a swapped descriptor/source argument),
+so every TMA store silently became a load — results never written back. Now all
+1d–5d store forms lower through one `tma_store_emit` parser (real
+`[tensorMap,{coords}], [src]` operand layout) to `vgre_tma_store_<rank>d_b`, the
+exact inverse of the load, with out-of-bounds box clipping (no overrun, matching
+real TMA store boundary semantics). Regression-guarded by a store-direction
+translation check + an interior/OOB/round-trip runtime test.
 
 ### P3-8 — Speculative decoding (draft + verify)
 **File**: `ContinuousBatchScheduler` in `include/vgre/core/kv_cache.h` +

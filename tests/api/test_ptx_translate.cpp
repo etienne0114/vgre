@@ -152,6 +152,24 @@ int main() {
               contains(c, "VgreTMADescriptor") && contains(c, "%2") && contains(c, "%3"));
     }
 
+    // (8) The Hopper TMA STORE (shared→global) cp.async.bulk.tensor.2d
+    //     .global.shared::cta.bulk_group must lower to a STORE — vgre_tma_store_2d_b
+    //     with the descriptor first and the source SMEM second — NOT a load. (This
+    //     opcode was previously mis-mapped to vgre_tma_load_2d_dispatch, silently
+    //     turning every TMA store into a load.) Real PTX bundles the target as
+    //     [tensorMap, {coords}] and the source as the second operand.
+    {
+        std::string src = "asm volatile("
+            "\"cp.async.bulk.tensor.2d.global.shared::cta.bulk_group "
+            "[%0, {%1, %2}], [%3];\" : );";
+        std::string c = PTXTranslator::translate(src);
+        check("TMA store → vgre_tma_store_2d_b (a store, not a load)",
+              contains(c, "vgre_tma_store_2d_b(") && !contains(c, "vgre_tma_load"));
+        check("TMA store passes descriptor first then source SMEM",
+              contains(c, "VgreTMADescriptor") && contains(c, "%0") &&
+              contains(c, "%3") && contains(c, "%1") && contains(c, "%2"));
+    }
+
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }
