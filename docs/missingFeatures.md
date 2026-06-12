@@ -35,6 +35,32 @@ Priorities: **P0** = critical security/reliability blockers; **P1** = enterprise
 
 ---
 
+## 0. Reality Audit (2026-06-13) — corrections to the roadmap below
+
+A codebase audit found that **several tracks below were written as "gaps/missing" but are
+already implemented with real, non-stub code.** The roadmap was authored from generic
+enterprise research without auditing `src/`. Corrected status (evidence in parentheses):
+
+| Track | Roadmap said | **Actual status** | Evidence |
+|---|---|---|---|
+| 1.1 TPM attestation | missing | **DONE** (HW attestation) | `src/advanced/token/token_manager_tpm2.cpp` — real TSS2 ESAPI, `/dev/tpmrm0` NV define/write |
+| 1.2 Crypto suite | "basic AES-256-CTR only" | **DONE** except PQC | `secure_channel_crypto.cpp` (1431 ln): AES-256-GCM/CTR, ChaCha20-Poly1305, X25519 ECDH, HKDF, HMAC-SHA256 |
+| 2.1 Monitoring | "basic Prometheus" | **DONE** | `src/api/metrics_server.cpp` real `/metrics` + health/readiness; `runtime_profiler` OTLP/JSON trace export to `/v1/traces` |
+| 4.1 K8s orchestration | missing | **DONE** except MIG | `src/deployment/k8s_device_plugin/` (Go device plugin + daemonset) + `vgre_operator/` (kubebuilder operator, controllers, CRD, RBAC) |
+| 5.1 RDMA/InfiniBand | "TCP only" | **DONE** | `src/advanced/rdma_transport.cpp` — real libibverbs (`infiniband/verbs.h`, 47 `ibv_*` calls) |
+| 5.2 Cluster scheduler | — | **DONE** (SLURM) | `src/deployment/slurm_gres/slurm_gres_vgpu.cpp` |
+| MPS / NCCL | — | **DONE** | `src/advanced/mps_control.cpp` (1005 ln); `tcp_cluster/collective_ops_manager.cpp` |
+
+**Genuinely missing (verified absent), addressed one-by-one in §below:** audit/compliance
+log w/ crypto integrity (1.3), post-quantum crypto (1.2), fuzzing (1.4), enterprise
+identity OIDC/SAML+RBAC (11.1), secrets management (9.3), backup/DR checkpoint-restore
+(9.1), MIG partitioning (4.1), elastic/fault-tolerant training (5.2), and the
+external-integration tracks (Datadog/Vault/Istio/Terraform/Metal/TensorRT/PyTorch-XLA)
+whose *self-contained primitives* are the only parts implementable to the project's
+"real, no-stub" standard without the external system present.
+
+---
+
 ## 1. Security Hardening & Compliance — P0 CRITICAL
 
 ### 1.1 GPU Runtime Security Framework — P0

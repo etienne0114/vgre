@@ -642,6 +642,12 @@ target_link_libraries(test_profiler_timeline PRIVATE vgre)
 add_test(NAME ProfilerTimeline COMMAND test_profiler_timeline)
 set_tests_properties(ProfilerTimeline PROPERTIES TIMEOUT 30)
 
+# Compliance: tamper-evident audit log + GDPR crypto-erasure.
+add_executable(test_audit_log compliance/test_audit_log.cpp)
+target_link_libraries(test_audit_log PRIVATE vgre)
+add_test(NAME ComplianceAuditLog COMMAND test_audit_log)
+set_tests_properties(ComplianceAuditLog PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)
