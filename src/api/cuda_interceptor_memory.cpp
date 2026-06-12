@@ -480,6 +480,14 @@ cudaError_t CUDAInterceptor::memsetAsync(void *devPtr, int value, size_t count,
   if (!devPtr || count == 0)
     return cudaErrorInvalidValue;
 
+  // If this stream is capturing a graph, record a MEMSET node instead of
+  // executing — so the memset replays on every graph launch (capture fidelity).
+  if (core::RuntimeEngine::instance().isStreamCapturing(stream)) {
+    auto r = core::RuntimeEngine::instance().recordMemsetToGraph(
+        stream, devPtr, value, count);
+    return convertResult(r);
+  }
+
   // We capture the parameters and perform the synchronous set on the stream's
   // worker thread
   int priority = 0;

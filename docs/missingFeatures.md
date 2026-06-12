@@ -169,13 +169,17 @@ fidelity / research-frontier.
 - **Design**: an MLIR/TTIR → VGRE-IR lowering path feeding the existing JIT.
   Acceptance: a representative Triton kernel runs from IR with matching output.
 
-### 5.2 Full CUDA-Graph capture-from-stream fidelity — P2
-- **Gap**: conditional graph nodes and explicit graph build work (Track 16 note),
-  but capturing an *arbitrary* stream of library calls (`torch.compile`'s CUDA
-  graphs) into a replayable graph is only partially faithful.
-- **Design**: record every stream op during capture into graph nodes with their
-  real dependencies; replay must be bit-identical to eager. Acceptance: a
-  captured+replayed multi-kernel torch graph equals eager execution.
+### 5.2 Full CUDA-Graph capture-from-stream fidelity — P2 — ✅ DONE
+- **Was**: kernel/memcpy capture recorded nodes, but `cudaMemsetAsync` on a
+  capturing stream ran eagerly (missing from the graph), and captured MEMCPY nodes
+  stored the CUDA `cudaMemcpyKind` while the executor compared `VGRE_MEMCPY_*` —
+  so a captured D2D was skipped and H2D/D2H replayed the wrong direction.
+- **Done**: `memsetAsync` records a MEMSET node (`recordMemsetToGraph`) with the
+  same stream-serialization deps as memcpy/kernel; `recordMemcpyToGraph` converts
+  cuda→`VGRE_MEMCPY_*` so every kind replays correctly. Verified by
+  `test_graph_capture_fidelity` — a captured memset → dependent D2D memcpy graph
+  replays bit-identical to eager (memset deferred during capture, ordered replay,
+  repeatable across launches).
 
 ---
 
