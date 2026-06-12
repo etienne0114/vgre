@@ -109,33 +109,8 @@ private:
                               const std::string &entryPoint,
                               KernelIR &ir);
 
-  // Internal translation shared between sync/async paths
+  // Internal translation used by prepare(); compiles on the calling thread.
   VGREResult doTranslate(KernelIR &ir, CompiledKernelFn &outFn);
-
-
-  // Background compilation queue
-  struct CompileTask {
-      std::shared_ptr<KernelIR> ir;
-      std::promise<JITResult> promise;
-  };
-  std::deque<CompileTask> taskQueue_;
-  std::mutex queueMutex_;
-  std::condition_variable queueCv_;
-  std::thread workerThread_;
-  std::atomic<bool> shutdown_{false};
-  void workerLoop();
-
-  // Idempotently stop and join the background compile worker.  Safe to call
-  // multiple times (destructor + atexit handler).
-  void stopWorker();
-
-  // atexit handler that joins every live engine's worker.  Registered once on
-  // first construction.  Because the engine is constructed *after* the Scheduler
-  // singleton, this handler runs *before* ~Scheduler (atexit is LIFO), so the
-  // LLVM worker is never running SelectionDAGISel while process teardown
-  // (static destructors) is in progress — that overlap is undefined behaviour
-  // and crashes intermittently inside LLVM codegen.
-  static void joinAllWorkersAtExit();
 
   // Cache: kernel name → compiled function
   std::unordered_map<std::string, CompiledKernelFn> cache_;
