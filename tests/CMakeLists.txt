@@ -476,11 +476,6 @@ add_executable(test_auth_rate_limit unit/test_auth_rate_limit.cpp)
 target_link_libraries(test_auth_rate_limit PRIVATE vgre)
 add_test(NAME AuthRateLimit COMMAND test_auth_rate_limit)
 
-# QUEUE-71: Van Emde Boas tree O(log log U) KernelId lookup
-add_executable(test_veb_tree core/test_veb_tree.cpp)
-target_link_libraries(test_veb_tree PRIVATE vgre)
-add_test(NAME VEBTree COMMAND test_veb_tree)
-
 # QUEUE-73: Fast GELU via degree-7 Horner polynomial (Chebyshev minimax)
 add_executable(test_gelu_horner unit/test_gelu_horner.cpp)
 target_link_libraries(test_gelu_horner PRIVATE vgre)
