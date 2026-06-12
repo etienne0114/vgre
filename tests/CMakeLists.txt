@@ -642,6 +642,11 @@ target_link_libraries(test_cudnn_graph_v9 PRIVATE vgre)
 add_test(NAME CudnnGraphV9 COMMAND test_cudnn_graph_v9)
 
 # Track Q: Nsight .nsys-rep export (links SQLite for read-back verification).
+add_executable(test_profiler_timeline unit/test_profiler_timeline.cpp)
+target_link_libraries(test_profiler_timeline PRIVATE vgre)
+add_test(NAME ProfilerTimeline COMMAND test_profiler_timeline)
+set_tests_properties(ProfilerTimeline PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)

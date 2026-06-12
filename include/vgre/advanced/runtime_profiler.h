@@ -3,6 +3,7 @@
 
 #include "vgre/common/types.h"
 #include "vgre/common/error_codes.h"
+#include "vgre/core/skip_list.h"   // timestamp-ordered event timeline
 
 #include <string>
 #include <vector>
@@ -89,6 +90,12 @@ public:
     std::vector<ProfileEvent> getEventsByKernel(const std::string& kernelName) const;
     std::vector<ProfileEvent> getAllEvents() const;
 
+    // Time-window query: all events whose timestamp_ms is in [startMs, endMs],
+    // returned in ascending time order. Backed by a timestamp-ordered skip-list
+    // timeline, so this is O(log n + k) rather than an O(n) scan + sort — useful
+    // for trace windows and overlap/occupancy-over-time analysis.
+    std::vector<ProfileEvent> getEventsInWindow(uint64_t startMs, uint64_t endMs) const;
+
     // Export
     std::string toJSON() const;
     std::string toChromeTraceJSON() const; // Phase 10: standard tracing
@@ -149,6 +156,10 @@ private:
         std::chrono::steady_clock::time_point>    timers_;
     // Phase 10: per-kernel accumulated instruction mix (CUPTI-equivalent)
     std::unordered_map<std::string, InstructionSample> instructionMixes_;
+    // Timestamp-ordered timeline: key = (timestamp_ms << 20) | seq, value = index
+    // into events_. Maintains events in time order for O(log n + k) window queries.
+    SkipList<uint64_t, std::size_t, 20> timeline_;
+    uint64_t                            timelineSeq_ = 0;
     mutable std::recursive_mutex                  mutex_;
 };
 
