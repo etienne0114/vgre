@@ -20,8 +20,8 @@ CDPExecutor& CDPExecutor::instance() {
 }
 
 void CDPExecutor::enqueueChildKernel(const CDPKernelRequest& req) {
-    std::lock_guard<std::mutex> lk(mutex_);
-    queue_.push_back(req);
+    // Lock-free push — concurrent device threads enqueue children without a mutex.
+    queue_.push(req);
     VGRE_LOG_DEBUG("CDP", "Enqueued child kernel id=" + std::to_string(req.kernelId) +
                    " grid=(" + std::to_string(req.gridDim.x) + "," +
                    std::to_string(req.gridDim.y) + "," +
@@ -29,11 +29,10 @@ void CDPExecutor::enqueueChildKernel(const CDPKernelRequest& req) {
 }
 
 VGREResult CDPExecutor::drainChildKernels() {
+    // Serial drain between kernel waves: pop everything pushed by the producers.
     std::vector<CDPKernelRequest> local;
-    {
-        std::lock_guard<std::mutex> lk(mutex_);
-        local.swap(queue_);
-    }
+    CDPKernelRequest req;
+    while (queue_.pop(req)) local.push_back(std::move(req));
     if (local.empty()) return VGREResult::SUCCESS;
 
     auto& engine = core::RuntimeEngine::instance();
@@ -60,7 +59,6 @@ VGREResult CDPExecutor::drainChildKernels() {
 }
 
 bool CDPExecutor::hasPending() const {
-    std::lock_guard<std::mutex> lk(mutex_);
     return !queue_.empty();
 }
 

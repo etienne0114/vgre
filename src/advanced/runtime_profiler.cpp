@@ -95,7 +95,24 @@ void RuntimeProfiler::recordEvent(const ProfileEvent& event) {
             std::chrono::system_clock::now().time_since_epoch()).count();
     }
     events_.push_back(ev);
+    // Index into the timestamp-ordered timeline. The composite key keeps events in
+    // time order while staying unique when several share a millisecond.
+    const uint64_t key = (ev.timestamp_ms << 20) | (timelineSeq_++ & 0xFFFFFull);
+    timeline_.insert(key, events_.size() - 1);
     updateStats(ev.kernelName, ev);
+}
+
+std::vector<ProfileEvent> RuntimeProfiler::getEventsInWindow(uint64_t startMs,
+                                                             uint64_t endMs) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::vector<ProfileEvent> result;
+    if (endMs < startMs) return result;
+    const uint64_t lo = startMs << 20;
+    const uint64_t hi = (endMs + 1) << 20;                 // half-open: covers endMs's ms
+    timeline_.range(lo, hi, [&](const uint64_t&, const std::size_t& idx) {
+        if (idx < events_.size()) result.push_back(events_[idx]);
+    });
+    return result;
 }
 
 // ── Timer ──────────────────────────────────────────────────────────────────
@@ -560,6 +577,8 @@ void RuntimeProfiler::clear() {
     stats_.clear();
     timers_.clear();
     instructionMixes_.clear();
+    timeline_.clear();
+    timelineSeq_ = 0;
 }
 
 // ── Singleton ──────────────────────────────────────────────────────────────

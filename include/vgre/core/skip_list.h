@@ -63,6 +63,15 @@ public:
     SkipList(const SkipList&)            = delete;
     SkipList& operator=(const SkipList&) = delete;
 
+    // Remove all elements (keeps the list reusable).
+    void clear() {
+        Node* cur = head_->forward[0];
+        while (cur) { Node* nx = cur->forward[0]; delete cur; cur = nx; }
+        for (int i = 0; i < MaxLevel; ++i) head_->forward[i] = nullptr;
+        level_ = 0;
+        size_  = 0;
+    }
+
     std::size_t size()  const noexcept { return size_; }
     bool        empty() const noexcept { return size_ == 0; }
 
@@ -160,6 +169,23 @@ public:
         while (cur) {
             f(cur->key, cur->value);
             cur = cur->forward[0];
+        }
+    }
+
+    // Half-open range query: calls f(key, value) for every node with lo <= key < hi,
+    // in ascending key order. Descends to the first key >= lo via the skip pointers
+    // (O(log n)) then walks the bottom level, so it is O(log n + k) for k results —
+    // the efficient ordered-range scan a full ordered map provides.
+    template <typename F>
+    void range(const Key& lo, const Key& hi, F&& f) const {
+        const Node* cur = head_;
+        for (int i = level_ - 1; i >= 0; --i)
+            while (cur->forward[i] && cur->forward[i]->key < lo)
+                cur = cur->forward[i];
+        const Node* nx = cur->forward[0];
+        while (nx && nx->key < hi) {
+            f(nx->key, nx->value);
+            nx = nx->forward[0];
         }
     }
 };

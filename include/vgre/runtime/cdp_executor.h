@@ -8,6 +8,7 @@
 
 #include "vgre/common/error_codes.h"
 #include "vgre/common/types.h"
+#include "vgre/core/treiber_stack.h"   // lock-free concurrent child-kernel enqueue
 #include <cstdint>
 #include <vector>
 #include <mutex>
@@ -52,8 +53,12 @@ public:
 
 private:
     CDPExecutor() = default;
-    mutable std::mutex mutex_;
-    std::vector<CDPKernelRequest> queue_;
+    mutable std::mutex mutex_;                         // guards paramBuffers_ only
+    // Child-kernel queue: concurrent device threads push lock-free during a kernel
+    // wave; the drain pops serially between waves (so pop is never concurrent — the
+    // Treiber-stack reclamation hazard cannot arise). Removes the mutex from the
+    // hot enqueue path. Sibling order is unspecified by CUDA, so LIFO drain is fine.
+    vgre::core::TreiberStack<CDPKernelRequest> queue_;
     std::vector<void*> paramBuffers_;
 };
 
