@@ -242,6 +242,12 @@ class Translator:
             return rt.dot(b, ref(0), ref(1)), None
         if name == "stablehlo.dot_general":
             lb, rb, lc, rc = self._dot_dims(op)
+            lshape, rshape = _shape(op.operands[0]), _shape(op.operands[1])
+            # fast path: a plain 2-D matmul [M,K]·[K,N] (no batch) uses the
+            # contiguous Dot kernel instead of the general per-element gather.
+            if (not lb and not rb and lc == [1] and rc == [0]
+                    and len(lshape) == 2 and len(rshape) == 2):
+                return rt.dot(b, ref(0), ref(1)), None
             return rt.dot_general(b, ref(0), ref(1), lb, rb, lc, rc, _shape(op.results[0])), None
         if name == "stablehlo.concatenate":
             dim = int(op.attributes["dimension"])

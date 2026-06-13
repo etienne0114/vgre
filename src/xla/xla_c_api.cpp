@@ -166,10 +166,55 @@ bool deserialize(const std::string& blob, HloModule& out) {
 }
 
 // ── executable registry + C ABI ─────────────────────────────────────────────
+// Executables are stored as shared_ptr<const HloModule>: compile installs an
+// immutable module; execute grabs the shared_ptr under a brief lock and then
+// evaluates WITHOUT holding the lock and WITHOUT copying the module. Because
+// HloModule::evaluate is const and keeps all state in locals, many threads can
+// execute the same (or different) executables concurrently.
 namespace {
 std::mutex& exeMu() { static std::mutex m; return m; }
-std::map<uint64_t, HloModule>& exes() { static std::map<uint64_t, HloModule> e; return e; }
+std::map<uint64_t, std::shared_ptr<const HloModule>>& exes() {
+    static std::map<uint64_t, std::shared_ptr<const HloModule>> e; return e;
+}
 uint64_t& nextHandle() { static uint64_t h = 1; return h; }
+
+// Thread-local last error, surfaced to callers via vgre_xla_last_error().
+std::string& lastError() { thread_local std::string e; return e; }
+void setError(const std::string& m) { lastError() = m; }
+
+std::shared_ptr<const HloModule> lookup(uint64_t exe) {
+    std::lock_guard<std::mutex> lk(exeMu());
+    auto it = exes().find(exe);
+    return it == exes().end() ? nullptr : it->second;
+}
+
+// Bind C input buffers to the module's Parameter literals (by param_index).
+bool bindParams(const HloModule& mod, const float* const* in_data, const int64_t* in_numel,
+                int n_in, std::vector<Literal>& params) {
+    params.assign(n_in, Literal{});
+    for (size_t i = 0; i < mod.size(); ++i) {
+        const HloInstruction& I = mod.instr((int)i);
+        if (I.op != HloOp::Parameter) continue;
+        int pi = I.param_index;
+        if (pi < 0 || pi >= n_in) { setError("parameter index out of range"); return false; }
+        if (in_numel[pi] != I.shape.numel()) {
+            setError("input " + std::to_string(pi) + " size mismatch (got " +
+                     std::to_string(in_numel[pi]) + ", expected " + std::to_string(I.shape.numel()) + ")");
+            return false;
+        }
+        Literal lit; lit.shape = I.shape;
+        lit.data.assign(in_data[pi], in_data[pi] + in_numel[pi]);
+        params[pi] = std::move(lit);
+    }
+    return true;
+}
+
+uint64_t installModule(std::shared_ptr<const HloModule> m) {
+    std::lock_guard<std::mutex> lk(exeMu());
+    uint64_t h = nextHandle()++;
+    exes()[h] = std::move(m);
+    return h;
+}
 } // namespace
 
 } // namespace xla
@@ -177,54 +222,41 @@ uint64_t& nextHandle() { static uint64_t h = 1; return h; }
 
 using namespace vgre::xla;
 
+extern "C" const char* vgre_xla_last_error(void) { return lastError().c_str(); }
+
 extern "C" uint64_t vgre_xla_compile(const void* blob, size_t len) {
-    if (!blob || !len) return 0;
-    HloModule m;
-    if (!deserialize(std::string((const char*)blob, len), m)) return 0;
-    std::lock_guard<std::mutex> lk(exeMu());
-    uint64_t h = nextHandle()++;
-    exes()[h] = std::move(m);
-    return h;
+    if (!blob || !len) { setError("null/empty blob"); return 0; }
+    auto m = std::make_shared<HloModule>();
+    if (!deserialize(std::string((const char*)blob, len), *m)) { setError("malformed HLO blob"); return 0; }
+    std::string verr;
+    if (!m->validate(verr)) { setError("invalid module: " + verr); return 0; }
+    return installModule(std::move(m));
 }
 
 extern "C" int64_t vgre_xla_output_numel(uint64_t exe) {
-    std::lock_guard<std::mutex> lk(exeMu());
-    auto it = exes().find(exe);
-    if (it == exes().end()) return -1;
-    return it->second.instr(it->second.root()).shape.numel();
+    auto mod = lookup(exe);
+    if (!mod) { setError("invalid executable handle"); return -1; }
+    return mod->instr(mod->root()).shape.numel();
 }
 
 extern "C" int64_t vgre_xla_execute(uint64_t exe, const float* const* in_data,
                                     const int64_t* in_numel, int n_in,
                                     float* out_data, int64_t out_capacity) {
-    HloModule mod;
-    {
-        std::lock_guard<std::mutex> lk(exeMu());
-        auto it = exes().find(exe);
-        if (it == exes().end()) return -1;
-        mod = it->second; // copy out; evaluate() is const but keep the lock short
-    }
-    std::vector<Literal> params(n_in);
-    // Fill parameters by their param_index from the instruction list.
-    for (size_t i = 0; i < mod.size(); ++i) {
-        const HloInstruction& I = mod.instr((int)i);
-        if (I.op != HloOp::Parameter) continue;
-        int pi = I.param_index;
-        if (pi < 0 || pi >= n_in) return -1;
-        Literal lit;
-        lit.shape = I.shape;
-        int64_t nm = in_numel[pi];
-        if (nm != I.shape.numel()) return -1;
-        lit.data.assign(in_data[pi], in_data[pi] + nm);
-        params[pi] = std::move(lit);
-    }
+    auto mod = lookup(exe);
+    if (!mod) { setError("invalid executable handle"); return -1; }
+    std::vector<Literal> params;
+    if (!bindParams(*mod, in_data, in_numel, n_in, params)) return -1;
     Literal res;
     try {
-        res = mod.evaluate(params);
+        res = mod->evaluate(params);
+    } catch (const std::exception& e) {
+        setError(std::string("evaluation failed: ") + e.what());
+        return -1;
     } catch (...) {
+        setError("evaluation failed: unknown error");
         return -1;
     }
-    if ((int64_t)res.data.size() > out_capacity) return -1;
+    if ((int64_t)res.data.size() > out_capacity) { setError("output capacity too small"); return -1; }
     std::memcpy(out_data, res.data.data(), res.data.size() * sizeof(float));
     return (int64_t)res.data.size();
 }
@@ -235,28 +267,18 @@ extern "C" int64_t vgre_xla_execute(uint64_t exe, const float* const* in_data,
 extern "C" int64_t vgre_xla_execute_multi(uint64_t exe, const float* const* in_data,
                                           const int64_t* in_numel, int n_in,
                                           float* out_data, int64_t out_capacity) {
-    HloModule mod;
-    {
-        std::lock_guard<std::mutex> lk(exeMu());
-        auto it = exes().find(exe);
-        if (it == exes().end()) return -1;
-        mod = it->second;
-    }
-    std::vector<Literal> params(n_in);
-    for (size_t i = 0; i < mod.size(); ++i) {
-        const HloInstruction& I = mod.instr((int)i);
-        if (I.op != HloOp::Parameter) continue;
-        int pi = I.param_index;
-        if (pi < 0 || pi >= n_in) return -1;
-        Literal lit; lit.shape = I.shape;
-        if (in_numel[pi] != I.shape.numel()) return -1;
-        lit.data.assign(in_data[pi], in_data[pi] + in_numel[pi]);
-        params[pi] = std::move(lit);
-    }
+    auto mod = lookup(exe);
+    if (!mod) { setError("invalid executable handle"); return -1; }
+    std::vector<Literal> params;
+    if (!bindParams(*mod, in_data, in_numel, n_in, params)) return -1;
     std::vector<Literal> res;
     try {
-        res = mod.evaluateMulti(params);
+        res = mod->evaluateMulti(params);
+    } catch (const std::exception& e) {
+        setError(std::string("evaluation failed: ") + e.what());
+        return -1;
     } catch (...) {
+        setError("evaluation failed: unknown error");
         return -1;
     }
     int64_t total = 0;
@@ -546,18 +568,17 @@ extern "C" int vgre_xla_b_scatter(uint64_t b, int operand, int indices, int upda
 }
 
 extern "C" uint64_t vgre_xla_b_compile(uint64_t b) {
-    HloModule m;
+    auto m = std::make_shared<HloModule>();
     {
         std::lock_guard<std::mutex> lk(bldMu());
         auto it = blds().find(b);
-        if (it == blds().end()) return 0;
-        m = std::move(it->second);
+        if (it == blds().end()) { setError("invalid builder handle"); return 0; }
+        *m = std::move(it->second);
         blds().erase(it);
     }
-    std::lock_guard<std::mutex> lk(exeMu());
-    uint64_t h = nextHandle()++;
-    exes()[h] = std::move(m);
-    return h;
+    std::string verr;
+    if (!m->validate(verr)) { setError("invalid module: " + verr); return 0; }
+    return installModule(std::move(m));
 }
 
 extern "C" void vgre_xla_b_free(uint64_t b) {

@@ -13,3 +13,6 @@ set_target_properties(vgre_xla PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(TARGET Threads::Threads)
     target_link_libraries(vgre_xla PUBLIC Threads::Threads)
 endif()
+# NB: the interpreter parallelizes hot loops with std::thread (see parallelFor in
+# hlo_evaluator.cpp), NOT OpenMP — libomp's TLS is incompatible with the
+# RTLD_DEEPBIND loading used for in-process TensorFlow coexistence.
