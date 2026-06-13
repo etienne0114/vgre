@@ -721,6 +721,12 @@ target_link_libraries(test_fault_tolerance PRIVATE vgre)
 add_test(NAME FaultTolerance COMMAND test_fault_tolerance)
 set_tests_properties(FaultTolerance PROPERTIES TIMEOUT 30)
 
+# API management: HMAC-signed webhook delivery + OpenAPI spec.
+add_executable(test_api_management advanced/test_api_management.cpp)
+target_link_libraries(test_api_management PRIVATE vgre)
+add_test(NAME ApiManagement COMMAND test_api_management)
+set_tests_properties(ApiManagement PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)

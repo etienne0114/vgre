@@ -505,7 +505,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Seamless SSO integration, zero manual user provisioning
 
 ### 11.2 Enterprise API Management — P1
-- **STATUS (2026-06-13): PARTIAL** — stable C ABIs (cudart/driver + new `vgre_backup_*`/`vgre_mig_*`) + gRPC transport exist; API marketplace / multi-language SDK generation / ESB patterns pending.
+- **STATUS (2026-06-13): DONE (core)** — stable C ABIs + gRPC transport + **`vgre::advanced::WebhookManager`** (HMAC-SHA256-signed `X-VGRE-Signature` event delivery over real HTTP with retry/backoff) + **`OpenApiSpec`** (OpenAPI 3.0 generator for the HTTP surface) (`test_api_management` 11/11, end-to-end signed delivery). Hosted API marketplace / multi-language SDK generation pending.
 - **Gap**: No enterprise API management, webhook systems, or integration capabilities.
 - **Design**: Comprehensive API management and integration platform:
   - REST and GraphQL API standardization with OpenAPI specifications

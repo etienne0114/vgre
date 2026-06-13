@@ -12,6 +12,7 @@ add_library(vgre_advanced OBJECT
     perf_analytics.cpp
     capacity_planner.cpp
     fault_tolerance.cpp
+    api_management.cpp
     vgre_workload_engine.cpp
     ipc_manager.cpp
     tcp_cluster/tcp_cluster_manager.cpp
