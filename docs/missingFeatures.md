@@ -149,7 +149,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: 99.9% uptime SLA tracking, <5 second MTTR for common issues via automated remediation
 
 ### 2.2 Advanced Performance Analytics — P1
-- **STATUS (2026-06-13): PARTIAL** — `runtime_profiler` + CUPTI shim + Nsight `.nsys-rep` export + adaptive_execution_engine exist; statistical flame-graph/roofline visualization UI pending.
+- **STATUS (2026-06-13): DONE (core)** — `runtime_profiler` + CUPTI + Nsight export + **roofline analysis & flamegraph export** (`vgre::advanced::PerformanceAnalytics`, `vgre_get_roofline_json`/`vgre_export_flamegraph`). Hosted dashboard UI is a separate frontend.
 - **Gap**: Limited performance analysis tools. Missing modern APM capabilities for GPU workloads.
 - **Design**: Comprehensive performance intelligence platform:
   - GPU kernel flame graphs with call stack sampling
