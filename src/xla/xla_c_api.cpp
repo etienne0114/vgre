@@ -4,6 +4,7 @@
 #include "vgre/xla/xla_c_api.h"
 #include "vgre/xla/hlo_serialize.h"
 
+#include <atomic>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -178,9 +179,15 @@ std::map<uint64_t, std::shared_ptr<const HloModule>>& exes() {
 }
 uint64_t& nextHandle() { static uint64_t h = 1; return h; }
 
+// Process-wide telemetry counters (lock-free), exposed via vgre_xla_stats() for
+// enterprise observability of the engine.
+std::atomic<uint64_t>& compileCount() { static std::atomic<uint64_t> c{0}; return c; }
+std::atomic<uint64_t>& executeCount() { static std::atomic<uint64_t> c{0}; return c; }
+std::atomic<uint64_t>& errorCount()   { static std::atomic<uint64_t> c{0}; return c; }
+
 // Thread-local last error, surfaced to callers via vgre_xla_last_error().
 std::string& lastError() { thread_local std::string e; return e; }
-void setError(const std::string& m) { lastError() = m; }
+void setError(const std::string& m) { lastError() = m; errorCount().fetch_add(1, std::memory_order_relaxed); }
 
 std::shared_ptr<const HloModule> lookup(uint64_t exe) {
     std::lock_guard<std::mutex> lk(exeMu());
@@ -213,6 +220,7 @@ uint64_t installModule(std::shared_ptr<const HloModule> m) {
     std::lock_guard<std::mutex> lk(exeMu());
     uint64_t h = nextHandle()++;
     exes()[h] = std::move(m);
+    compileCount().fetch_add(1, std::memory_order_relaxed);
     return h;
 }
 } // namespace
@@ -223,6 +231,12 @@ uint64_t installModule(std::shared_ptr<const HloModule> m) {
 using namespace vgre::xla;
 
 extern "C" const char* vgre_xla_last_error(void) { return lastError().c_str(); }
+
+extern "C" void vgre_xla_stats(uint64_t* compiles, uint64_t* executes, uint64_t* errors) {
+    if (compiles) *compiles = compileCount().load(std::memory_order_relaxed);
+    if (executes) *executes = executeCount().load(std::memory_order_relaxed);
+    if (errors) *errors = errorCount().load(std::memory_order_relaxed);
+}
 
 extern "C" uint64_t vgre_xla_compile(const void* blob, size_t len) {
     if (!blob || !len) { setError("null/empty blob"); return 0; }
@@ -258,6 +272,7 @@ extern "C" int64_t vgre_xla_execute(uint64_t exe, const float* const* in_data,
     }
     if ((int64_t)res.data.size() > out_capacity) { setError("output capacity too small"); return -1; }
     std::memcpy(out_data, res.data.data(), res.data.size() * sizeof(float));
+    executeCount().fetch_add(1, std::memory_order_relaxed);
     return (int64_t)res.data.size();
 }
 
@@ -289,6 +304,7 @@ extern "C" int64_t vgre_xla_execute_multi(uint64_t exe, const float* const* in_d
         std::memcpy(out_data + off, r.data.data(), r.data.size() * sizeof(float));
         off += (int64_t)r.data.size();
     }
+    executeCount().fetch_add(1, std::memory_order_relaxed);
     return total;
 }
 

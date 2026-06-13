@@ -99,6 +99,7 @@ class VgreHlo:
         self.lib = _load_libvgre(lib_path or _find_lib())
         L = self.lib
         L.vgre_xla_last_error.restype = c_char_p
+        L.vgre_xla_stats.argtypes = [POINTER(c_uint64), POINTER(c_uint64), POINTER(c_uint64)]
         L.vgre_xla_builder_new.restype = c_uint64
         L.vgre_xla_b_parameter.argtypes = [c_uint64, c_int, _I64P, c_int]
         L.vgre_xla_b_parameter.restype = c_int
@@ -387,6 +388,12 @@ class VgreHlo:
     def _last_error(self) -> str:
         e = self.lib.vgre_xla_last_error()
         return e.decode() if e else "(no detail)"
+
+    def stats(self) -> dict:
+        """Engine telemetry: cumulative {compiles, executes, errors}."""
+        c, e, x = c_uint64(0), c_uint64(0), c_uint64(0)
+        self.lib.vgre_xla_stats(ctypes.byref(c), ctypes.byref(e), ctypes.byref(x))
+        return {"compiles": c.value, "executes": e.value, "errors": x.value}
 
     def free(self, exe):
         self.lib.vgre_xla_free(exe)

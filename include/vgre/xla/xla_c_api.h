@@ -17,6 +17,11 @@ extern "C" {
 // (empty string if none). Valid until the next failing call on this thread.
 const char* vgre_xla_last_error(void);
 
+// Process-wide engine telemetry for enterprise observability: cumulative counts
+// of successful compiles, successful executes, and failures. Any pointer may be
+// NULL. Lock-free; safe to call concurrently.
+void vgre_xla_stats(uint64_t* compiles, uint64_t* executes, uint64_t* errors);
+
 // Compile a serialized HLO module (from vgre_xla_serialize / HloModule) into an
 // executable. Returns a non-zero handle, or 0 on parse/validation error
 // (see vgre_xla_last_error).

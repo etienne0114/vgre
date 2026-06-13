@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <thread>
 
@@ -66,18 +67,35 @@ float applyUnary(HloOp op, float a) {
         default: throw std::runtime_error("not a unary op");
     }
 }
+// Worker cap for the interpreter's parallel loops. Defaults to min(hw, 8) but is
+// overridable with VGRE_XLA_THREADS so a multi-tenant host can bound the cores a
+// single executable consumes (set to 1 for fully deterministic, serial
+// execution). Evaluated once.
+unsigned maxWorkers() {
+    static const unsigned cap = [] {
+        unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+        unsigned def = std::min(hw, 8u);
+        if (const char* e = std::getenv("VGRE_XLA_THREADS")) {
+            long v = std::strtol(e, nullptr, 10);
+            if (v >= 1) return std::min<unsigned>((unsigned)v, hw);
+        }
+        return def;
+    }();
+    return cap;
+}
+
 // Parallelize a 0..n loop across hardware threads when the work is large enough.
 // Uses std::thread (not OpenMP — libomp's TLS breaks under RTLD_DEEPBIND, which
 // the in-process TensorFlow loading relies on). `body(i)` must be independent
 // across i (the interpreter writes disjoint output elements) and not throw.
 template <class Fn>
 void parallelFor(int64_t n, int64_t work_estimate, Fn body) {
-    static const unsigned kHW = std::max(1u, std::thread::hardware_concurrency());
-    if (n <= 1 || kHW < 2 || work_estimate < 8192) {
+    static const unsigned kCap = maxWorkers();
+    if (n <= 1 || kCap < 2 || work_estimate < 8192) {
         for (int64_t i = 0; i < n; ++i) body(i);
         return;
     }
-    unsigned nt = std::min<unsigned>(kHW, 8);
+    unsigned nt = kCap;
     if ((int64_t)nt > n) nt = (unsigned)n;
     int64_t chunk = (n + nt - 1) / nt;
     std::vector<std::thread> ts;
