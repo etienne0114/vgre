@@ -234,7 +234,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Successful deployment on production Kubernetes clusters, MIG resource sharing with isolation
 
 ### 4.2 Advanced ML Framework Integration — P1
-- **STATUS (2026-06-13): MISSING** — PyTorch-XLA / TF-XLA / JAX / ONNX-Runtime providers require those frameworks installed and their plugin ABIs; the CUDA Runtime/Driver surface they target is already emulated.
+- **STATUS (2026-06-13): PARTIAL (PyTorch DONE)** — real **PyTorch out-of-tree backend** (`frameworks/pytorch/`, PrivateUse1 device "vgre"): tensor alloc via emulated `cudaMalloc`, H2D/D2H via `cudaMemcpy`, **matmul via emulated cuBLAS** (`cublasSgemm`), CPU fallback for the rest; an unmodified PyTorch program (`relu(x@W)`) runs on VGRE (`PyTorchBackend` ctest 9/9). TensorFlow/JAX integration instead needs a PJRT/XLA HLO-compiler backend — a substantially larger effort.
 - **Gap**: Basic CUDA compatibility insufficient for modern ML frameworks requiring specialized optimizations.
 - **Design**: Deep ML framework integration:
   - PyTorch XLA backend with graph optimization
@@ -598,8 +598,8 @@ Every track whose remainder is implementable to the project's real/no-stub stand
 - **PARTIAL (core in-tree; rest needs external system)**: 5.3 multi-cloud (TF module ✓; cloud creds),
   6.1 dev-tools, 6.2 docs, 7.2 multi-vendor (HIP ✓; oneAPI/Metal), 10.3 edge (latency routing ✓; CDN), 3.3 multi-arch.
 - **MISSING — genuinely blocked (would require faking)**: 3.1 Windows CI/DirectML/AD (needs Windows),
-  3.2 Apple Metal (Apple Silicon hardware), 4.2 PyTorch/TF/JAX backends (need the frameworks),
-  7.1 Post-Blackwell/Rubin (unreleased, no public ISA).
+  3.2 Apple Metal (Apple Silicon hardware), 4.2 TF/JAX backends (need a PJRT/XLA HLO compiler;
+  PyTorch backend is DONE), 7.1 Post-Blackwell/Rubin (unreleased, no public ISA).
 
 **Phase 4 Success Metrics**:
 - **Security**: Pass SOC 2 Type II audit, resist all known GPU attack vectors, PCI DSS Level 1 compliance

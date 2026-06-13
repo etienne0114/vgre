@@ -701,6 +701,17 @@ if(Python3_EXECUTABLE)
     set_tests_properties(IaCManifests PROPERTIES TIMEOUT 30)
 endif()
 
+# PyTorch backend (§4.2): runs a real PyTorch program on VGRE via a PrivateUse1
+# device (alloc/copy → emulated CUDA, matmul → emulated cuBLAS). Uses the project
+# .venv python (which has torch); skipped if that interpreter isn't present. The
+# first run JIT-compiles the extension against libtorch (hence the long timeout).
+if(EXISTS ${PROJECT_SOURCE_DIR}/.venv/bin/python)
+    add_test(NAME PyTorchBackend COMMAND ${PROJECT_SOURCE_DIR}/.venv/bin/python
+        ${PROJECT_SOURCE_DIR}/frameworks/pytorch/test_vgre_backend.py)
+    set_tests_properties(PyTorchBackend PROPERTIES TIMEOUT 600
+        ENVIRONMENT "VGRE_BUILD_DIR=${CMAKE_BINARY_DIR}")
+endif()
+
 # Compliance: tamper-evident audit log + GDPR crypto-erasure.
 add_executable(test_audit_log compliance/test_audit_log.cpp)
 target_link_libraries(test_audit_log PRIVATE vgre)
