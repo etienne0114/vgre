@@ -33,6 +33,8 @@ _UNARY = {
     "stablehlo.logistic": "Logistic",
     "stablehlo.cosine": "Cos", "stablehlo.sine": "Sin",
     "stablehlo.not": "Not", "stablehlo.is_finite": "IsFinite",
+    "stablehlo.round_nearest_even": "RoundNearestEven",
+    "stablehlo.round_nearest_afz": "RoundNearestAfz",
     "chlo.erf": "Erf", "chlo.erfc": "Erfc",
 }
 _REDUCE_KIND = {
