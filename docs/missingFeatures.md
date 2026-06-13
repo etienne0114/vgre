@@ -247,7 +247,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Training throughput within 5% of native CUDA on standard benchmarks (ResNet, BERT, GPT)
 
 ### 4.3 Model Serving & Inference Optimization — P1
-- **STATUS (2026-06-13): PARTIAL** — `core/kv_cache.cpp` provides a PagedAttention-style KV cache primitive; TensorRT-LLM/vLLM compatibility layers require those external runtimes.
+- **STATUS (2026-06-13): DONE (core)** — the self-contained vLLM-style serving primitives all exist + tested: **PagedAttention** block manager (`vgre::core::KVCacheManager` — block pool, per-sequence block tables, online-softmax `pagedAttention`), **continuous in-flight batching** (`ContinuousBatchScheduler` — admit/retire/advance with KV reclamation, mid-flight joins; `test_kv_cache`), and **speculative decoding** (`vgre::serving`, rejection-sampling accept + residual resample, distribution-equivalent; `test_speculative`). TensorRT-LLM/vLLM *compatibility layers*, cross-instance model sharding, and A/B-canary deployment need those external runtimes / a live fleet.
 - **Gap**: Advanced serving optimizations missing for production inference workloads.
 - **Design**: Production inference acceleration:
   - TensorRT-LLM compatibility layer for optimized inference
