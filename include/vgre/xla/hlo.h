@@ -53,6 +53,7 @@ enum class HloOp {
     Erf, Erfc, Cos, Sin,  // appended (keep ordinals of earlier ops stable)
     While, Tuple, GetTupleElement, DynamicSlice, DynamicUpdateSlice,  // control flow
     Reverse,
+    Sort, ReduceGeneral, And, Or, Xor, Not,  // sort/argmax + boolean ops
 };
 
 struct HloInstruction {
@@ -95,6 +96,7 @@ struct HloInstruction {
     std::vector<std::shared_ptr<HloModule>> subs;
     int64_t     gte_index = 0;          // GetTupleElement
     std::vector<int64_t> dyn_slice_sizes;  // DynamicSlice
+    int64_t     sort_dim = 0;           // Sort dimension; ReduceGeneral n-ary via operands
 };
 
 class HloModule {
@@ -146,6 +148,14 @@ public:
                      std::vector<int64_t> sizes, Shape out);
     int dynamicUpdateSlice(int operand, int update, const std::vector<int>& starts, Shape out);
     int reverse(int x, std::vector<int64_t> dims);
+    int iota(Shape out, int64_t dim);
+    // Sort `operands` together along `dim` using comparator `cmp` (2*n scalar
+    // params -> bool "a precedes b"). Produces n sorted arrays (a tuple).
+    int sort(const std::vector<int>& operands, int64_t dim, std::shared_ptr<HloModule> cmp);
+    // Variadic reduce: operands = [inputs(n)..., inits(n)...], body folds them
+    // (2n params -> n outputs). Produces n reduced arrays (a tuple).
+    int reduceGeneral(const std::vector<int>& operands, std::vector<int64_t> dims,
+                      std::shared_ptr<HloModule> body, Shape primary);
 
 private:
     std::vector<HloInstruction> instrs_;

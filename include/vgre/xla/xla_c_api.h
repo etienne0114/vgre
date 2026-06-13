@@ -93,6 +93,12 @@ int vgre_xla_b_dynamic_update_slice(uint64_t b, int operand, int update,
                                     const int* starts, int n_starts,
                                     const int64_t* out_dims, int n_out);
 int vgre_xla_b_reverse(uint64_t b, int x, const int64_t* dims, int n);
+int vgre_xla_b_iota(uint64_t b, const int64_t* out_dims, int n_out, int64_t dim);
+// `cmp`/`body` are builder handles (consumed) for the comparator / reducer.
+int vgre_xla_b_sort(uint64_t b, const int* operands, int n_ops, int64_t dim, uint64_t cmp);
+int vgre_xla_b_reduce_general(uint64_t b, const int* operands, int n_ops,
+                              const int64_t* dims, int n_dims, uint64_t body,
+                              const int64_t* primary_dims, int n_primary);
 
 void vgre_xla_b_set_root(uint64_t b, int id);
 

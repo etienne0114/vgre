@@ -22,6 +22,7 @@ _BINARY = {
     "stablehlo.multiply": "Multiply", "stablehlo.divide": "Divide",
     "stablehlo.maximum": "Maximum", "stablehlo.minimum": "Minimum",
     "stablehlo.power": "Power",
+    "stablehlo.and": "And", "stablehlo.or": "Or", "stablehlo.xor": "Xor",
 }
 _UNARY = {
     "stablehlo.negate": "Negate", "stablehlo.exponential": "Exp",
@@ -31,6 +32,7 @@ _UNARY = {
     "stablehlo.floor": "Floor", "stablehlo.ceil": "Ceil",
     "stablehlo.logistic": "Logistic",
     "stablehlo.cosine": "Cos", "stablehlo.sine": "Sin",
+    "stablehlo.not": "Not",
     "chlo.erf": "Erf", "chlo.erfc": "Erfc",
 }
 _REDUCE_KIND = {
@@ -103,6 +105,12 @@ class Translator:
                 return ids, scs
             if name == "stablehlo.while":
                 rids = self._emit_while(b, op, val2id, const_scalar)
+            elif name == "stablehlo.sort":
+                rids = self._emit_sort(b, op, val2id)
+            elif name == "stablehlo.reduce" and len(op.results) > 1:
+                rids = self._emit_reduce_variadic(b, op, val2id)
+            elif name in ("chlo.top_k", "stablehlo.top_k"):
+                rids = self._emit_top_k(b, op, val2id)
             elif name in ("func.call", "call"):
                 rids, rscs = self._emit_call(b, op, val2id, const_scalar)
                 for k, res in enumerate(op.results):
@@ -150,6 +158,61 @@ class Translator:
         primary = _shape(op.results[0]) if len(op.results) else []
         w = rt.while_op(b, init_ids, cb, bb, primary)  # consumes cb, bb
         return [rt.get_tuple_element(b, w, k, _shape(res)) for k, res in enumerate(op.results)]
+
+    def _emit_sort(self, b, op, val2id):
+        """stablehlo.sort: build the comparator sub-module, emit Sort, expose
+        each sorted operand via get_tuple_element."""
+        rt = self.rt
+        operands = [val2id[o] for o in op.operands]
+        dim = int(op.attributes["dimension"])
+        cblk = op.regions[0].blocks[0]
+        cb = rt.new_builder()
+        cargs = [rt.parameter(cb, i, _shape(a)) for i, a in enumerate(cblk.arguments)]
+        cids, _ = self._emit_block(cb, cblk, cargs)
+        rt.set_root(cb, cids[0])
+        s = rt.sort(b, operands, dim, cb)  # consumes cb
+        return [rt.get_tuple_element(b, s, k, _shape(res)) for k, res in enumerate(op.results)]
+
+    def _emit_reduce_variadic(self, b, op, val2id):
+        """Variadic stablehlo.reduce (e.g. argmax over value+index): build the
+        reducer body sub-module and emit ReduceGeneral."""
+        rt = self.rt
+        operands = [val2id[o] for o in op.operands]   # n inputs then n inits
+        dims = _i64_list(op.attributes["dimensions"])
+        bblk = op.regions[0].blocks[0]
+        bb = rt.new_builder()
+        bargs = [rt.parameter(bb, i, _shape(a)) for i, a in enumerate(bblk.arguments)]
+        bids, _ = self._emit_block(bb, bblk, bargs)
+        rt.set_root(bb, rt.tuple(bb, bids))
+        r = rt.reduce_general(b, operands, dims, bb, _shape(op.results[0]))
+        return [rt.get_tuple_element(b, r, k, _shape(res)) for k, res in enumerate(op.results)]
+
+    def _emit_top_k(self, b, op, val2id):
+        """chlo.top_k -> iota + descending sort(value, index) + slice first k.
+        Returns (top values, top indices)."""
+        rt = self.rt
+        operand = val2id[op.operands[0]]
+        in_shape = _shape(op.operands[0])
+        out_shape = _shape(op.results[0])
+        last = len(in_shape) - 1
+        k = out_shape[last]
+        idx = rt.iota(b, in_shape, last)
+        # descending comparator: a precedes b iff a_value > b_value
+        cb = rt.new_builder()
+        a0 = rt.parameter(cb, 0, [])
+        b0 = rt.parameter(cb, 1, [])
+        rt.parameter(cb, 2, [])
+        rt.parameter(cb, 3, [])
+        rt.set_root(cb, rt.compare(cb, a0, b0, "GT"))
+        s = rt.sort(b, [operand, idx], last, cb)
+        sv = rt.get_tuple_element(b, s, 0, in_shape)
+        si = rt.get_tuple_element(b, s, 1, in_shape)
+        starts = [0] * len(in_shape)
+        limits = list(in_shape)
+        limits[last] = k
+        strides = [1] * len(in_shape)
+        return [rt.slice(b, sv, starts, limits, strides, out_shape),
+                rt.slice(b, si, starts, limits, strides, out_shape)]
 
     # ── op emission ──────────────────────────────────────────────────────────
     def _emit(self, rt, b, op, name, val2id, const_scalar):
@@ -211,6 +274,9 @@ class Translator:
         if name == "stablehlo.reverse":
             dims = _i64_list(op.attributes["dimensions"])
             return rt.reverse(b, ref(0), dims), None
+        if name == "stablehlo.iota":
+            dim = int(op.attributes["iota_dimension"])
+            return rt.iota(b, _shape(op.results[0]), dim), None
         if name == "stablehlo.compare":
             d = self._compare_dir(op)
             return rt.compare(b, ref(0), ref(1), d), None

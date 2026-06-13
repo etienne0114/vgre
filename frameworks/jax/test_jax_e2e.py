@@ -139,6 +139,54 @@ def main():
     bv = rng.standard_normal((16,)).astype(np.float32)
     case("lstm cell via scan", lstm_seq, xs, Wi, Wh, bv)
 
+    # ── sort / top-k / argmax (generation & sampling) ────────────────────────
+    s2 = rng.standard_normal((3, 6)).astype(np.float32)
+    case("sort ascending", lambda a: jnp.sort(a, -1), s2)
+    case("argsort", lambda a: jnp.argsort(a, -1).astype(jnp.float32), s2)
+    case("top_k values", lambda a: jax.lax.top_k(a, 3)[0], s2)
+    case("top_k indices", lambda a: jax.lax.top_k(a, 3)[1].astype(jnp.float32), s2)
+    case("argmax (greedy decode)", lambda a: jnp.argmax(a, -1).astype(jnp.float32), s2)
+    case("argmin", lambda a: jnp.argmin(a, -1).astype(jnp.float32), s2)
+    case("logical and>0", lambda a, b: jnp.logical_and(a > 0, b > 0).astype(jnp.float32), s2, s2)
+
+    # ── scaled models: a GPT transformer block (causal) and a ResNet block ───
+    def gpt_block(z, Wq, Wk, Wv, Wo, Wf1, Wf2):
+        B, T, D = z.shape; H = 2; dh = D // H
+        def ln(u):
+            m = u.mean(-1, keepdims=True); v = u.var(-1, keepdims=True)
+            return (u - m) / jnp.sqrt(v + 1e-5)
+        hn = ln(z)
+        q = (hn @ Wq).reshape(B, T, H, dh).transpose(0, 2, 1, 3)
+        k = (hn @ Wk).reshape(B, T, H, dh).transpose(0, 2, 1, 3)
+        v = (hn @ Wv).reshape(B, T, H, dh).transpose(0, 2, 1, 3)
+        s = (q @ k.transpose(0, 1, 3, 2)) / np.float32(np.sqrt(dh))
+        mask = jnp.tril(jnp.ones((T, T)))
+        s = jnp.where(mask[None, None] > 0, s, np.float32(-1e9))
+        o = (jax.nn.softmax(s, -1) @ v).transpose(0, 2, 1, 3).reshape(B, T, D) @ Wo
+        z = z + o
+        return z + jax.nn.gelu(ln(z) @ Wf1) @ Wf2
+    D = 8
+    gpt_args = [rng.standard_normal((2, 4, D)).astype(np.float32)] + \
+        [rng.standard_normal((D, D)).astype(np.float32) for _ in range(4)] + \
+        [rng.standard_normal((D, 16)).astype(np.float32), rng.standard_normal((16, D)).astype(np.float32)]
+    case("GPT block (causal attention)", gpt_block, *gpt_args)
+
+    def resnet_block(z, w1, w2, g1, b1, g2, b2):
+        def bn(u, g, bb):
+            m = u.mean((0, 2, 3), keepdims=True); v = u.var((0, 2, 3), keepdims=True)
+            return (u - m) / jnp.sqrt(v + 1e-5) * g.reshape(1, -1, 1, 1) + bb.reshape(1, -1, 1, 1)
+        def cv(u, w):
+            return jax.lax.conv_general_dilated(u, w, (1, 1), "SAME",
+                                                dimension_numbers=("NCHW", "OIHW", "NCHW"))
+        h = jax.nn.relu(bn(cv(z, w1), g1, b1))
+        return jax.nn.relu(z + bn(cv(h, w2), g2, b2))
+    C = 4
+    rn_args = [rng.standard_normal((2, C, 8, 8)).astype(np.float32),
+               rng.standard_normal((C, C, 3, 3)).astype(np.float32),
+               rng.standard_normal((C, C, 3, 3)).astype(np.float32)] + \
+        [rng.standard_normal((C,)).astype(np.float32) for _ in range(4)]
+    case("ResNet block (conv-bn-residual)", resnet_block, *rn_args)
+
     print(f"\n{PASS} / {PASS + FAIL} passed")
     return 0 if FAIL == 0 else 1
 
