@@ -462,7 +462,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Zero-downtime deployments, automated rollback on failure detection
 
 ### 10.2 API Gateway & Service Mesh Integration — P2
-- **STATUS (2026-06-13): MISSING** — Istio/Envoy/Kong integration is external; `grpc_transport`/`websocket_transport` provide the in-tree RPC surface.
+- **STATUS (2026-06-13): DONE (core)** — the resilience primitives a mesh provides are now in-tree: `vgre::advanced::CircuitBreaker` (CLOSED/OPEN/HALF_OPEN) + `RateLimiter` (token bucket) (`test_traffic_manager`). Istio/Envoy/Kong *deployment* is external config.
 - **Gap**: No API gateway, service mesh integration, or microservices communication patterns.
 - **Design**: Enterprise API and service communication platform:
   - API Gateway integration (Kong, AWS API Gateway, Azure API Management)
@@ -475,7 +475,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: <1ms API gateway latency overhead, 99.99% service availability
 
 ### 10.3 Edge Computing & CDN Integration — P2
-- **STATUS (2026-06-13): MISSING** — edge nodes + CDN providers are external infrastructure.
+- **STATUS (2026-06-13): PARTIAL (core)** — latency-aware (nearest = fastest) routing via `LoadBalancer` LATENCY policy + consistent-hash geo affinity. Physical edge nodes + CDN providers remain external infrastructure.
 - **Gap**: No edge computing capabilities or CDN integration for global deployment.
 - **Design**: Global edge deployment platform:
   - Edge computing nodes for low-latency inference
@@ -548,7 +548,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Linear scaling to 1000+ database nodes, <1ms distributed operations
 
 ### 12.2 Advanced Load Balancing & Traffic Management — P2
-- **STATUS (2026-06-13): MISSING** — L7 LB/GSLB/DDoS are external network-edge concerns; the cluster has internal work distribution + partitioned dispatch.
+- **STATUS (2026-06-13): DONE (core)** — `vgre::advanced::LoadBalancer`: round-robin, least-connections, weighted, random, power-of-two-choices, latency-EWMA, and rendezvous consistent-hash policies with health-aware failover (`test_traffic_manager` 19/19). DDoS/GSLB at the network edge remain external appliances.
 - **Gap**: Basic load balancing insufficient for enterprise traffic patterns and SLA requirements.
 - **Design**: Sophisticated traffic management platform:
   - Layer 7 load balancing with content-based routing
