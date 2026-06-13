@@ -697,6 +697,12 @@ target_link_libraries(test_pqc PRIVATE vgre)
 add_test(NAME PostQuantumKEM COMMAND test_pqc)
 set_tests_properties(PostQuantumKEM PROPERTIES TIMEOUT 60)
 
+# Perf analytics: roofline model + flamegraph collapsed-stack.
+add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
+target_link_libraries(test_perf_analytics PRIVATE vgre)
+add_test(NAME PerfAnalytics COMMAND test_perf_analytics)
+set_tests_properties(PerfAnalytics PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)
