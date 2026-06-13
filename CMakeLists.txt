@@ -1036,6 +1036,7 @@ vgre_add_subdirectory(src/identity)
 vgre_add_subdirectory(src/backup)
 vgre_add_subdirectory(src/mig)
 vgre_add_subdirectory(src/pqc)
+vgre_add_subdirectory(src/xla)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1054,6 +1055,7 @@ add_library(vgre SHARED
     $<TARGET_OBJECTS:vgre_backup>
     $<TARGET_OBJECTS:vgre_mig>
     $<TARGET_OBJECTS:vgre_pqc>
+    $<TARGET_OBJECTS:vgre_xla>
 )
 set_target_properties(vgre PROPERTIES
     VERSION   ${PROJECT_VERSION}
@@ -1168,6 +1170,7 @@ target_sources(vgre_cudart PRIVATE
     $<TARGET_OBJECTS:vgre_backup>
     $<TARGET_OBJECTS:vgre_mig>
     $<TARGET_OBJECTS:vgre_pqc>
+    $<TARGET_OBJECTS:vgre_xla>
     $<TARGET_OBJECTS:vgre_cudart_shims>
 )
 set_target_properties(vgre_cudart PROPERTIES
