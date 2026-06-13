@@ -429,7 +429,9 @@ frameworks, every result validated against the framework's own output (full deta
   jax to ~1e-7); **int8 quantized** inference.
 - **Production**: thread-safe concurrent execution (no per-call module copy), module validation,
   structured `vgre_xla_last_error()`, `std::thread` multicore parallelism + a 2-D matmul fast path
-  (chained 256×256 matmul 1399 ms → 148 ms).
+  (chained 256×256 matmul 1399 ms → 148 ms), **multi-tenant resource governance** via
+  `VGRE_XLA_THREADS` (bounds cores per executable; `1` = deterministic serial), and **engine
+  telemetry** (`vgre_xla_stats()` — cumulative compile/execute/error counts) for observability.
 - **Remaining (external only)**: device-level `jax.jit(backend='vgre')` PJRT plugin registration
   needs the version-pinned upstream `pjrt_c_api.h` + MLIR C++ libs (not in the wheels); the
   StableHLO-level path delivers the identical compute. Hugging Face / ONNX-Runtime / MLflow are

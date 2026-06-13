@@ -136,6 +136,29 @@ int main() {
         vgre_xla_free(ce);
     }
 
+    // ── production: engine telemetry (vgre_xla_stats) ────────────────────────
+    {
+        uint64_t c0 = 0, e0 = 0, x0 = 0;
+        vgre_xla_stats(&c0, &e0, &x0);
+        // compile + execute a trivial module, then confirm the counters advanced
+        HloModule tm;
+        int p = tm.parameter(0, Shape{{2}});
+        tm.unary(HloOp::Negate, p);
+        std::string tb = serialize(tm);
+        uint64_t te = vgre_xla_compile(tb.data(), tb.size());
+        std::vector<float> ti = {1, 2}, to(2, 0);
+        const float* tip[1] = {ti.data()};
+        int64_t tin[1] = {2};
+        vgre_xla_execute(te, tip, tin, 1, to.data(), 2);
+        vgre_xla_execute(99999999, tip, tin, 1, to.data(), 2);  // one failure
+        uint64_t c1 = 0, e1 = 0, x1 = 0;
+        vgre_xla_stats(&c1, &e1, &x1);
+        check("stats: compile count advanced", c1 > c0);
+        check("stats: execute count advanced", e1 > e0);
+        check("stats: error count advanced", x1 > x0);
+        vgre_xla_free(te);
+    }
+
     std::printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }
