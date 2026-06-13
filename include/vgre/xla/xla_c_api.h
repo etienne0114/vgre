@@ -78,6 +78,22 @@ int vgre_xla_b_reduce_window(uint64_t b, int x, int init, const char* kind,
                              const int64_t* pad_lo, const int64_t* pad_hi,
                              const int64_t* base_dil, const int64_t* win_dil, int n);
 
+// — control flow —
+// `cond`/`body` are builder handles (from vgre_xla_builder_new) that this call
+// consumes: their modules become the loop's cond/body sub-computations.
+int vgre_xla_b_while(uint64_t b, const int* inits, int n_init, uint64_t cond, uint64_t body,
+                     const int64_t* primary_dims, int n_primary);
+int vgre_xla_b_tuple(uint64_t b, const int* elems, int n);
+int vgre_xla_b_get_tuple_element(uint64_t b, int src, int index,
+                                 const int64_t* out_dims, int n_out);
+int vgre_xla_b_dynamic_slice(uint64_t b, int operand, const int* starts, int n_starts,
+                             const int64_t* sizes, int n_sizes,
+                             const int64_t* out_dims, int n_out);
+int vgre_xla_b_dynamic_update_slice(uint64_t b, int operand, int update,
+                                    const int* starts, int n_starts,
+                                    const int64_t* out_dims, int n_out);
+int vgre_xla_b_reverse(uint64_t b, int x, const int64_t* dims, int n);
+
 void vgre_xla_b_set_root(uint64_t b, int id);
 
 // Finalize the builder into an executable (consumes the builder). Returns an

@@ -76,10 +76,10 @@ class Translator:
             fn = self._main_func(module)
             block = fn.body.blocks[0]
             arg_ids = [rt.parameter(b, i, _shape(a)) for i, a in enumerate(block.arguments)]
-            root, _ = self._emit_block(b, block, arg_ids)
-            if root is None:
+            ids, _ = self._emit_block(b, block, arg_ids)
+            if not ids:
                 raise NotImplementedError("function has no return")
-            rt.set_root(b, root)
+            rt.set_root(b, ids[0])
             exe = rt.compile(b)
             b = 0  # consumed
             return Executable(rt, exe)
@@ -90,24 +90,35 @@ class Translator:
     def _emit_block(self, b, block, arg_ids):
         """Emit a block with its arguments pre-bound to instruction ids.
 
-        Returns (return_id, return_scalar) for the block's func.return."""
+        Returns (return_ids, return_scalars) for the block's terminator — a list
+        because while-bodies / multi-result calls yield several values."""
         rt = self.rt
         val2id: dict = dict(zip(block.arguments, arg_ids))
         const_scalar: dict = {}  # value -> python float (for reduce inits / call args)
         for op in block.operations:
             name = op.operation.name
-            if name == "func.return":
-                rv = op.operands[0]
-                return val2id[rv], const_scalar.get(rv)
-            if name in ("func.call", "call"):
-                rid, sc = self._emit_call(b, op, val2id, const_scalar)
+            if name in ("func.return", "stablehlo.return"):
+                ids = [val2id[o] for o in op.operands]
+                scs = [const_scalar.get(o) for o in op.operands]
+                return ids, scs
+            if name == "stablehlo.while":
+                rids = self._emit_while(b, op, val2id, const_scalar)
+            elif name in ("func.call", "call"):
+                rids, rscs = self._emit_call(b, op, val2id, const_scalar)
+                for k, res in enumerate(op.results):
+                    val2id[res] = rids[k]
+                    if k < len(rscs) and rscs[k] is not None:
+                        const_scalar[res] = rscs[k]
+                continue
             else:
                 rid, sc = self._emit(rt, b, op, name, val2id, const_scalar)
-            if rid is not None:
-                val2id[op.results[0]] = rid
-                if sc is not None:
+                rids = [rid] if rid is not None else []
+                if rid is not None and sc is not None:
                     const_scalar[op.results[0]] = sc
-        return None, None
+            for k, res in enumerate(op.results):
+                if k < len(rids):
+                    val2id[res] = rids[k]
+        return [], []
 
     def _emit_call(self, b, op, val2id, const_scalar):
         callee_name = str(op.attributes["callee"]).strip('"@')
@@ -115,8 +126,30 @@ class Translator:
         if callee is None:
             raise NotImplementedError(f"call to unknown function {callee_name}")
         arg_ids = [val2id[o] for o in op.operands]
-        rid, sc = self._emit_block(b, callee.body.blocks[0], arg_ids)
-        return rid, sc
+        return self._emit_block(b, callee.body.blocks[0], arg_ids)
+
+    def _emit_while(self, b, op, val2id, const_scalar):
+        """Translate a stablehlo.while: build cond/body sub-modules, emit the loop,
+        then expose each loop-carried result via get_tuple_element."""
+        rt = self.rt
+        init_ids = [val2id[o] for o in op.operands]
+        cond_region, body_region = op.regions[0], op.regions[1]
+
+        cb = rt.new_builder()
+        cblk = cond_region.blocks[0]
+        cargs = [rt.parameter(cb, i, _shape(a)) for i, a in enumerate(cblk.arguments)]
+        cids, _ = self._emit_block(cb, cblk, cargs)
+        rt.set_root(cb, cids[0])
+
+        bb = rt.new_builder()
+        bblk = body_region.blocks[0]
+        bargs = [rt.parameter(bb, i, _shape(a)) for i, a in enumerate(bblk.arguments)]
+        bids, _ = self._emit_block(bb, bblk, bargs)
+        rt.set_root(bb, rt.tuple(bb, bids))  # body yields the carried tuple
+
+        primary = _shape(op.results[0]) if len(op.results) else []
+        w = rt.while_op(b, init_ids, cb, bb, primary)  # consumes cb, bb
+        return [rt.get_tuple_element(b, w, k, _shape(res)) for k, res in enumerate(op.results)]
 
     # ── op emission ──────────────────────────────────────────────────────────
     def _emit(self, rt, b, op, name, val2id, const_scalar):
@@ -160,6 +193,13 @@ class Translator:
             return self._emit_gather(rt, b, op, ref), None
         if name == "stablehlo.reduce_window":
             return self._emit_reduce_window(rt, b, op, ref), None
+        if name == "stablehlo.dynamic_slice":
+            sizes = _i64_list(op.attributes["slice_sizes"])
+            starts = [val2id[o] for o in op.operands[1:]]
+            return rt.dynamic_slice(b, ref(0), starts, sizes, _shape(op.results[0])), None
+        if name == "stablehlo.dynamic_update_slice":
+            starts = [val2id[o] for o in op.operands[2:]]
+            return rt.dynamic_update_slice(b, ref(0), ref(1), starts, _shape(op.results[0])), None
         if name == "stablehlo.broadcast_in_dim":
             bdims = _i64_list(op.attributes["broadcast_dimensions"])
             return rt.broadcast(b, ref(0), _shape(op.results[0]), bdims), None
@@ -168,6 +208,9 @@ class Translator:
         if name == "stablehlo.transpose":
             perm = _i64_list(op.attributes["permutation"])
             return rt.transpose(b, ref(0), perm), None
+        if name == "stablehlo.reverse":
+            dims = _i64_list(op.attributes["dimensions"])
+            return rt.reverse(b, ref(0), dims), None
         if name == "stablehlo.compare":
             d = self._compare_dir(op)
             return rt.compare(b, ref(0), ref(1), d), None

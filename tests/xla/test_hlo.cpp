@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <memory>
 
 using namespace vgre::xla;
 
@@ -217,6 +218,63 @@ int main() {
         Literal r = m.evaluate({Literal::make({{3, 2}}, {10, 11, 20, 21, 30, 31}),
                                 Literal::make({{2, 1}}, {2, 0})});
         check("gather embedding", approx(r.data, {30, 31, 10, 11}));
+    }
+
+    // ── Reverse along a dim ──────────────────────────────────────────────
+    {
+        HloModule m;
+        int a = m.parameter(0, Shape{{2, 3}});
+        m.reverse(a, {1});
+        Literal r = m.evaluate({Literal::make({{2, 3}}, {1, 2, 3, 4, 5, 6})});
+        check("reverse axis1", approx(r.data, {3, 2, 1, 6, 5, 4}));
+    }
+
+    // ── DynamicSlice / DynamicUpdateSlice ────────────────────────────────
+    {
+        HloModule m;
+        int a = m.parameter(0, Shape{{5}});
+        int s = m.parameter(1, Shape{{}});             // scalar start
+        m.dynamicSlice(a, {s}, {2}, Shape{{2}});
+        Literal r = m.evaluate({Literal::r1({10, 11, 12, 13, 14}), Literal::scalar(2)});
+        check("dynamic_slice", approx(r.data, {12, 13}));   // clamp-safe
+    }
+    {
+        HloModule m;
+        int a = m.parameter(0, Shape{{5}});
+        int u = m.parameter(1, Shape{{2}});
+        int s = m.parameter(2, Shape{{}});
+        m.dynamicUpdateSlice(a, u, {s}, Shape{{5}});
+        Literal r = m.evaluate({Literal::r1({0, 0, 0, 0, 0}), Literal::r1({7, 8}), Literal::scalar(1)});
+        check("dynamic_update_slice", approx(r.data, {0, 7, 8, 0, 0}));
+    }
+
+    // ── While: count i from 0..4 accumulating acc += i (loop-carried tuple) ─
+    {
+        // cond(i, acc) = i < 5
+        auto cond = std::make_shared<HloModule>();
+        {
+            int i = cond->parameter(0, Shape{{}});
+            cond->parameter(1, Shape{{}});             // acc (unused in cond)
+            int lim = cond->constant(Literal::scalar(5));
+            cond->setRoot(cond->compare(i, lim, "LT"));
+        }
+        // body(i, acc) = (i+1, acc+i)
+        auto body = std::make_shared<HloModule>();
+        {
+            int i = body->parameter(0, Shape{{}});
+            int acc = body->parameter(1, Shape{{}});
+            int one = body->constant(Literal::scalar(1));
+            int i1 = body->binary(HloOp::Add, i, one);
+            int acc1 = body->binary(HloOp::Add, acc, i);
+            body->setRoot(body->tuple({i1, acc1}));
+        }
+        HloModule m;
+        int i0 = m.constant(Literal::scalar(0));
+        int a0 = m.constant(Literal::scalar(0));
+        int w = m.whileOp({i0, a0}, cond, body, Shape{{}});
+        m.setRoot(m.getTupleElement(w, 1, Shape{{}}));   // final acc
+        Literal r = m.evaluate({});
+        check("while loop (0+1+2+3+4)", approx(r.data, {10}));
     }
 
     std::printf("\n%d / %d passed\n", g_pass, g_total);

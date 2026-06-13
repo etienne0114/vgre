@@ -732,7 +732,7 @@ if(EXISTS ${PROJECT_SOURCE_DIR}/.venv/bin/python)
     # backend and run on VGRE vs Keras. Self-skips if keras isn't installed.
     add_test(NAME KerasModelsBackend COMMAND ${PROJECT_SOURCE_DIR}/.venv/bin/python
         ${PROJECT_SOURCE_DIR}/frameworks/keras/test_keras_e2e.py)
-    set_tests_properties(KerasModelsBackend PROPERTIES TIMEOUT 400
+    set_tests_properties(KerasModelsBackend PROPERTIES TIMEOUT 700
         ENVIRONMENT "VGRE_BUILD_DIR=${CMAKE_BINARY_DIR}")
 endif()
 

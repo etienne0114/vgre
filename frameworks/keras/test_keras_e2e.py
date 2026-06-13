@@ -1,99 +1,72 @@
 """End-to-end: run real Keras 3 models on the VGRE HLO engine.
 
-Builds complete neural networks with the high-level Keras API — CNN classifier,
-BatchNorm/LayerNorm MLPs, a Transformer MultiHeadAttention block — runs each on
-VGRE (Keras JAX backend → jax.jit → StableHLO → VGRE HLO) and asserts the output
-matches Keras' own inference. Real models, real layers, no mocks.
+Each model (CNN, BatchNorm/LayerNorm MLPs, a Transformer block, and the recurrent
+family SimpleRNN/LSTM/GRU/stacked/Bidirectional) is built + lowered to StableHLO
+in an isolated subprocess (keras_worker.py) — some layers pull in TensorFlow,
+whose LLVM collides with libvgre's if co-loaded. This driver, which never imports
+Keras, parses that StableHLO, runs it on VGRE and asserts the output matches
+Keras' own inference. The recurrent models exercise the engine's control flow
+(while / dynamic-slice / dynamic-update-slice / reverse).
 """
 import os
+import subprocess
 import sys
-
-os.environ["KERAS_BACKEND"] = "jax"
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+import tempfile
 
 import numpy as np
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "jax"))
+
 try:
-    import keras
-    from keras import layers
-    import vgre_keras
+    from jax.interpreters import mlir as jmlir
+    from jaxlib.mlir import ir
+    import vgre_jax
+    from vgre_jax.translate import Translator
 except ImportError as e:
     print(f"SKIP: prerequisites missing ({e})")
     sys.exit(0)
 
-np.random.seed(0)
-PASS = FAIL = 0
+PY = sys.executable
+CASES = ["mlp", "cnn", "batchnorm", "layernorm_gelu", "transformer",
+         "simple_rnn", "lstm", "gru", "stacked_lstm", "bidirectional"]
 
 
-def check(name, model, x):
-    global PASS, FAIL
-    x = np.asarray(x, np.float32)
-    model(x)  # build / initialise variables
-    ref = np.asarray(model(x, training=False), np.float32).ravel()
-    try:
-        got = vgre_keras.run_model(model, x)
-    except Exception as e:
-        print(f"  FAIL  {name}: {type(e).__name__}: {str(e)[:80]}")
-        FAIL += 1
-        return
-    ok = got.shape == ref.shape and np.allclose(got, ref, rtol=1e-3, atol=1e-3)
-    print(f"  {'PASS' if ok else 'FAIL'}  {name}"
-          + ("" if ok else f"  (maxdiff {np.max(np.abs(got-ref)):.3g})"))
-    PASS += ok
-    FAIL += (not ok)
-
-
-def mlp():
-    return keras.Sequential([
-        keras.Input((8,)), layers.Dense(16, activation="relu"),
-        layers.Dense(8, activation="tanh"), layers.Dense(3, activation="softmax")])
-
-
-def cnn():
-    return keras.Sequential([
-        keras.Input((1, 8, 8)),
-        layers.Conv2D(4, 3, padding="same", activation="relu", data_format="channels_first"),
-        layers.MaxPooling2D(2, data_format="channels_first"),
-        layers.Conv2D(8, 3, padding="same", activation="relu", data_format="channels_first"),
-        layers.AveragePooling2D(2, data_format="channels_first"),
-        layers.Flatten(), layers.Dense(10, activation="softmax")])
-
-
-def bn_mlp():
-    return keras.Sequential([
-        keras.Input((8,)), layers.Dense(16), layers.BatchNormalization(),
-        layers.Activation("relu"), layers.Dense(4)])
-
-
-def ln_mlp():
-    return keras.Sequential([
-        keras.Input((8,)), layers.Dense(16), layers.LayerNormalization(),
-        layers.Activation("gelu"), layers.Dense(4)])
-
-
-class TransformerBlock(keras.Model):
-    def __init__(self):
-        super().__init__()
-        self.att = layers.MultiHeadAttention(num_heads=2, key_dim=8)
-        self.ln1 = layers.LayerNormalization()
-        self.ln2 = layers.LayerNormalization()
-        self.ff1 = layers.Dense(32, activation="relu")
-        self.ff2 = layers.Dense(16)
-
-    def call(self, x, training=False):
-        h = self.ln1(x + self.att(x, x, training=training))
-        return self.ln2(h + self.ff2(self.ff1(h)))
+def run_case(name, tmp):
+    out = os.path.join(tmp, name)
+    r = subprocess.run([PY, os.path.join(HERE, "keras_worker.py"), name, out],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        tail = (r.stderr.strip().splitlines() or ["?"])[-1]
+        return False, f"worker failed: {tail}"
+    with jmlir.make_ir_context():
+        mod = ir.Module.parse(open(os.path.join(out, "m.mlir")).read())
+        exe = Translator().compile_module(mod)
+    x = np.load(os.path.join(out, "in_0.npy"))
+    got = exe(x)
+    ref = np.load(os.path.join(out, "ref.npy"))
+    ok = got.shape == ref.shape and np.allclose(got, ref, rtol=2e-3, atol=2e-3)
+    return ok, ("" if ok else f"maxdiff {np.max(np.abs(got-ref)):.3g}")
 
 
 def main():
+    probe = subprocess.run([PY, "-c", "import keras"], capture_output=True, text=True,
+                           env={**os.environ, "KERAS_BACKEND": "jax"})
+    if probe.returncode != 0:
+        print("SKIP: keras not importable")
+        return 0
     print("=== Keras 3 models → StableHLO → VGRE HLO (vs Keras) ===")
-    check("MLP classifier", mlp(), np.random.randn(4, 8))
-    check("CNN classifier", cnn(), np.random.randn(2, 1, 8, 8))
-    check("BatchNorm MLP", bn_mlp(), np.random.randn(4, 8))
-    check("LayerNorm+GELU MLP", ln_mlp(), np.random.randn(4, 8))
-    check("Transformer block", TransformerBlock(), np.random.randn(2, 6, 16))
-    print(f"\n{PASS} / {PASS + FAIL} passed")
-    return 0 if FAIL == 0 else 1
+    npass = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in CASES:
+            try:
+                ok, msg = run_case(name, tmp)
+            except Exception as e:
+                ok, msg = False, f"{type(e).__name__}: {str(e)[:90]}"
+            print(f"  {'PASS' if ok else 'FAIL'}  {name}" + (f"  ({msg})" if not ok else ""))
+            npass += ok
+    print(f"\n{npass} / {len(CASES)} passed")
+    return 0 if npass == len(CASES) else 1
 
 
 if __name__ == "__main__":

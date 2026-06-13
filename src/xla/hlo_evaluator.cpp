@@ -69,8 +69,9 @@ bool cmp(const std::string& dir, float a, float b) {
 
 } // namespace
 
-Literal HloModule::evaluate(const std::vector<Literal>& params) const {
-    std::vector<Literal> vals(instrs_.size());
+std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params) const {
+    std::vector<Literal> vals(instrs_.size());              // primary (element-0) value
+    std::vector<std::vector<Literal>> multi(instrs_.size()); // full tuple for Tuple/While
 
     for (size_t idx = 0; idx < instrs_.size(); ++idx) {
         const HloInstruction& I = instrs_[idx];
@@ -423,12 +424,103 @@ Literal HloModule::evaluate(const std::vector<Literal>& params) const {
                 }
                 break;
             }
+            case HloOp::Tuple: {
+                std::vector<Literal> elems;
+                for (int op : I.operands) elems.push_back(vals[op]);
+                out = elems.empty() ? Literal{} : elems[0];
+                multi[idx] = std::move(elems);
+                break;
+            }
+            case HloOp::GetTupleElement: {
+                const auto& src = multi[I.operands[0]];
+                if (I.gte_index < 0 || I.gte_index >= (int64_t)src.size())
+                    throw std::runtime_error("GetTupleElement index out of range");
+                out = src[I.gte_index];
+                break;
+            }
+            case HloOp::While: {
+                if (I.subs.size() < 2 || !I.subs[0] || !I.subs[1])
+                    throw std::runtime_error("While missing cond/body");
+                std::vector<Literal> carried;
+                for (int op : I.operands) carried.push_back(vals[op]);
+                int64_t guard = 0;
+                for (;;) {
+                    Literal c = I.subs[0]->evaluate(carried);
+                    if (c.data.empty() || c.data[0] == 0.0f) break;
+                    carried = I.subs[1]->evaluateMulti(carried);
+                    if (++guard > 100000000) throw std::runtime_error("While exceeded iteration guard");
+                }
+                out = carried.empty() ? Literal{} : carried[0];
+                multi[idx] = std::move(carried);
+                break;
+            }
+            case HloOp::DynamicSlice: {
+                const Literal& a = vals[I.operands[0]];
+                auto aSt = rowMajorStrides(a.shape);
+                auto oSt = rowMajorStrides(I.shape);
+                int rank = (int)a.shape.rank();
+                std::vector<int64_t> start(rank);
+                for (int d = 0; d < rank; ++d) {
+                    int64_t s = (int64_t)std::llround(vals[I.operands[1 + d]].data[0]);
+                    int64_t maxS = a.shape.dims[d] - I.dyn_slice_sizes[d];
+                    start[d] = s < 0 ? 0 : (s > maxS ? maxS : s);  // XLA clamps start
+                }
+                std::vector<int64_t> oc(rank), ac(rank);
+                for (int64_t o = 0; o < I.shape.numel(); ++o) {
+                    decode(o, oSt, oc);
+                    for (int d = 0; d < rank; ++d) ac[d] = start[d] + oc[d];
+                    out.data[o] = a.data[encode(ac, aSt)];
+                }
+                break;
+            }
+            case HloOp::Reverse: {
+                const Literal& a = vals[I.operands[0]];
+                auto st = rowMajorStrides(a.shape);
+                std::vector<bool> rev(a.shape.rank(), false);
+                for (int64_t d : I.dimensions) rev[d] = true;
+                std::vector<int64_t> oc(a.shape.rank()), ic(a.shape.rank());
+                for (int64_t o = 0; o < I.shape.numel(); ++o) {
+                    decode(o, st, oc);
+                    for (int64_t d = 0; d < a.shape.rank(); ++d)
+                        ic[d] = rev[d] ? a.shape.dims[d] - 1 - oc[d] : oc[d];
+                    out.data[o] = a.data[encode(ic, st)];
+                }
+                break;
+            }
+            case HloOp::DynamicUpdateSlice: {
+                const Literal& a = vals[I.operands[0]];
+                const Literal& u = vals[I.operands[1]];
+                out = a;  // copy then overwrite the window
+                auto aSt = rowMajorStrides(a.shape);
+                auto uSt = rowMajorStrides(u.shape);
+                int rank = (int)a.shape.rank();
+                std::vector<int64_t> start(rank);
+                for (int d = 0; d < rank; ++d) {
+                    int64_t s = (int64_t)std::llround(vals[I.operands[2 + d]].data[0]);
+                    int64_t maxS = a.shape.dims[d] - u.shape.dims[d];
+                    start[d] = s < 0 ? 0 : (s > maxS ? maxS : s);
+                }
+                std::vector<int64_t> uc(rank), ac(rank);
+                for (int64_t i = 0; i < u.shape.numel(); ++i) {
+                    decode(i, uSt, uc);
+                    for (int d = 0; d < rank; ++d) ac[d] = start[d] + uc[d];
+                    out.data[encode(ac, aSt)] = u.data[i];
+                }
+                break;
+            }
         }
         vals[idx] = std::move(out);
     }
 
     if (root_ < 0 || root_ >= (int)vals.size()) throw std::runtime_error("HloModule has no root");
-    return vals[root_];
+    if (!multi[root_].empty()) return multi[root_];
+    return {vals[root_]};
+}
+
+Literal HloModule::evaluate(const std::vector<Literal>& params) const {
+    auto r = evaluateMulti(params);
+    if (r.empty()) throw std::runtime_error("HloModule produced no result");
+    return std::move(r[0]);
 }
 
 // ── module + builder ────────────────────────────────────────────────────────
@@ -525,6 +617,40 @@ int HloModule::gather(int operand, int indices, Shape out) {
 int HloModule::reduceWindow(int x, int init, const std::string& kind, Shape out) {
     HloInstruction i; i.op = HloOp::ReduceWindow; i.operands = {x, init}; i.shape = std::move(out);
     i.reduce_kind = kind;
+    return add(std::move(i));
+}
+int HloModule::whileOp(const std::vector<int>& inits, std::shared_ptr<HloModule> cond,
+                       std::shared_ptr<HloModule> body, Shape primary) {
+    HloInstruction i; i.op = HloOp::While; i.operands = inits; i.shape = std::move(primary);
+    i.subs = {std::move(cond), std::move(body)};
+    return add(std::move(i));
+}
+int HloModule::tuple(const std::vector<int>& elems) {
+    HloInstruction i; i.op = HloOp::Tuple; i.operands = elems;
+    i.shape = elems.empty() ? Shape{} : instrs_[elems[0]].shape;
+    return add(std::move(i));
+}
+int HloModule::getTupleElement(int src, int index, Shape out) {
+    HloInstruction i; i.op = HloOp::GetTupleElement; i.operands = {src}; i.gte_index = index;
+    i.shape = std::move(out);
+    return add(std::move(i));
+}
+int HloModule::dynamicSlice(int operand, const std::vector<int>& starts,
+                            std::vector<int64_t> sizes, Shape out) {
+    HloInstruction i; i.op = HloOp::DynamicSlice; i.operands = {operand};
+    for (int s : starts) i.operands.push_back(s);
+    i.dyn_slice_sizes = std::move(sizes); i.shape = std::move(out);
+    return add(std::move(i));
+}
+int HloModule::dynamicUpdateSlice(int operand, int update, const std::vector<int>& starts, Shape out) {
+    HloInstruction i; i.op = HloOp::DynamicUpdateSlice; i.operands = {operand, update};
+    for (int s : starts) i.operands.push_back(s);
+    i.shape = std::move(out);
+    return add(std::move(i));
+}
+int HloModule::reverse(int x, std::vector<int64_t> dims) {
+    HloInstruction i; i.op = HloOp::Reverse; i.operands = {x}; i.shape = instrs_[x].shape;
+    i.dimensions = std::move(dims);
     return add(std::move(i));
 }
 

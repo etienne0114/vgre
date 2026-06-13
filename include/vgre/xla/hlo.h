@@ -13,11 +13,14 @@
 #define VGRE_XLA_HLO_H
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace vgre {
 namespace xla {
+
+class HloModule;  // forward decl: While embeds cond/body sub-computations
 
 struct Shape {
     std::vector<int64_t> dims;
@@ -48,6 +51,8 @@ enum class HloOp {
     Dot, Reduce,
     DotGeneral, Concatenate, Slice, Pad, Convolution, Gather, ReduceWindow,
     Erf, Erfc, Cos, Sin,  // appended (keep ordinals of earlier ops stable)
+    While, Tuple, GetTupleElement, DynamicSlice, DynamicUpdateSlice,  // control flow
+    Reverse,
 };
 
 struct HloInstruction {
@@ -84,6 +89,12 @@ struct HloInstruction {
     // ReduceWindow: operands = {input, init}; reduce_kind is the combiner.
     std::vector<int64_t> rw_window_dims, rw_window_strides, rw_pad_low, rw_pad_high,
                          rw_base_dil, rw_window_dil;
+    // Control flow: While embeds subs[0]=cond, subs[1]=body (each a self-contained
+    // module whose parameters are the loop-carried values). Tuple/GetTupleElement
+    // carry multiple values; DynamicSlice/Update take scalar start operands.
+    std::vector<std::shared_ptr<HloModule>> subs;
+    int64_t     gte_index = 0;          // GetTupleElement
+    std::vector<int64_t> dyn_slice_sizes;  // DynamicSlice
 };
 
 class HloModule {
@@ -98,6 +109,9 @@ public:
     // Evaluate the module given parameter literals (indexed by Parameter.param_index).
     // Returns the root instruction's literal.
     Literal evaluate(const std::vector<Literal>& params) const;
+    // Like evaluate() but returns all root values (the root may be a Tuple, e.g. a
+    // while-body that yields several loop-carried tensors).
+    std::vector<Literal> evaluateMulti(const std::vector<Literal>& params) const;
 
     // ── builder conveniences (return the new instruction index) ──
     int parameter(int index, Shape shape);
@@ -123,6 +137,15 @@ public:
     HloInstruction& last() { return instrs_.back(); }  // tweak attrs after a builder call
     int gather(int operand, int indices, Shape out);
     int reduceWindow(int x, int init, const std::string& kind, Shape out);  // attrs on returned instr
+    // control flow
+    int whileOp(const std::vector<int>& inits, std::shared_ptr<HloModule> cond,
+                std::shared_ptr<HloModule> body, Shape primary);
+    int tuple(const std::vector<int>& elems);
+    int getTupleElement(int src, int index, Shape out);
+    int dynamicSlice(int operand, const std::vector<int>& starts,
+                     std::vector<int64_t> sizes, Shape out);
+    int dynamicUpdateSlice(int operand, int update, const std::vector<int>& starts, Shape out);
+    int reverse(int x, std::vector<int64_t> dims);
 
 private:
     std::vector<HloInstruction> instrs_;
