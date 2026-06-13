@@ -8,7 +8,11 @@ emulation runtime with 249 source files, 240 test files, and advanced implementa
 - **Core Architecture**: Complete JIT compilation pipeline, UVM memory management, advanced security
 - **API Coverage**: 95%+ CUDA Runtime/Driver API, comprehensive cuBLAS/cuDNN/NCCL integration
 - **Advanced Features**: TCP cluster networking, hardware-backed authentication, adaptive execution
-- **Linux Verification**: Full test suite passing with zero compiler warnings on x86-64 Linux
+- **ML stack**: real neural networks from PyTorch / JAX / TensorFlow / Keras run end-to-end on the
+  CPU — inference, autoregressive generation, **training (backprop + SGD)**, and int8 quantization —
+  on a thread-safe, multicore HLO engine (`vgre::xla`)
+- **Verification**: full test suite passing with zero compiler warnings on x86-64 Linux; built +
+  `ctest`ed on a 3-OS CI matrix (Linux / macOS / Windows) + WASM & RISC-V cross-execution
 
 **Current Status**: Phases 1-3 core functionality complete with production foundations in place. 
 VGRE successfully democratizes GPU computing by enabling CUDA workloads on standard CPU hardware,
@@ -178,7 +182,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 3. Cross-Platform Production Readiness — P1
 
 ### 3.1 Windows Production Deployment — P1
-- **STATUS (2026-06-13): PARTIAL** — Windows socket manager (`tcp_cluster/windows_socket_manager_*`) + Win32 credential token store + WINDOWS_EXPORT_ALL_SYMBOLS build done; Windows CI / DirectML / Active Directory integration pending.
+- **STATUS (2026-06-13): PARTIAL (Windows CI live)** — Windows socket manager (`tcp_cluster/windows_socket_manager_*`) + Win32 credential token store + WINDOWS_EXPORT_ALL_SYMBOLS build done. **Windows CI is now live**: `.github/workflows/ci.yml` has a `windows-2022` job that installs LLVM-18, builds with the MSVC ABI, and runs the full `ctest` suite (incl. the XLA engine tests, which are pure portable std C++). DirectML / Active Directory integration still need Windows-specific work against those APIs.
 - **Critical Gap**: Windows support exists but lacks production readiness (no CI, untested deployment paths).
 - **Industry Context**: Enterprise Windows environments require robust DirectX integration, Windows containers, Active Directory integration.
 - **Design**: Full Windows enterprise support:
@@ -204,7 +208,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Native M2/M3 Pro performance parity with x86_64, MPS acceleration for common ML kernels
 
 ### 3.3 Comprehensive Multi-Architecture Support — P1
-- **STATUS (2026-06-13): DONE (core)** — x86-64 + ARM64 (SIMD-guarded) + **WebAssembly** (`frameworks/wasm/`, clang wasm32 → WASM sandbox, `WasmKernels` 6/6) + **RISC-V** (`frameworks/riscv/`, riscv64-linux-gnu-gcc → run under qemu-riscv64, `RiscvKernels` 6 kernels match reference). The portable kernels (`vgre_kernels.c`) cross-compile unchanged to all four targets. Full per-arch performance-parity CI is the remaining hardening.
+- **STATUS (2026-06-13): DONE (core)** — x86-64 + ARM64 (SIMD-guarded) + **WebAssembly** (`frameworks/wasm/`, clang wasm32 → WASM sandbox, `WasmKernels` 6/6) + **RISC-V** (`frameworks/riscv/`, riscv64-linux-gnu-gcc → run under qemu-riscv64, `RiscvKernels` 6 kernels match reference). The portable kernels (`vgre_kernels.c`) cross-compile unchanged to all four targets. A real **3-OS CI matrix** (`.github/workflows/ci.yml`: linux-x86_64 / macos-arm64 / windows-x86_64) builds and `ctest`s on each. Full per-arch performance-parity benchmarking is the remaining hardening.
 - **Gap**: Limited ARM64 testing and optimization, missing RISC-V support for emerging edge deployments.
 - **Design**: Complete multi-architecture matrix:
   - ARM64 optimization with NEON intrinsics and SVE2 support
@@ -591,15 +595,24 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 Every track whose remainder is implementable to the project's real/no-stub standard
 **without an external system or hardware** has been delivered (real code/artifacts + tests):
 - **DONE (core)**: 1.1 sec(TPM+CET+bounds-check), 1.2 crypto+PQC, 1.3 audit, 1.4 fuzzing,
-  2.1 observability, 2.2 roofline/flamegraph, 2.3 capacity-planning, 4.1 K8s+MIG, 4.3 serving,
+  2.1 observability, 2.2 roofline/flamegraph, 2.3 capacity-planning, 4.1 K8s+MIG,
+  **4.2 ML frameworks (PyTorch + JAX + TensorFlow + Keras: inference, generation, training,
+  quantization — production-hardened engine; see §4.2)**, 4.3 serving,
   5.1 RDMA, 5.2 fault-tolerance, 6.3 chaos+mutation, 8.1 AIOps, 8.2 sec-analytics, 9.1 backup/DR,
   9.2 ETL, 9.3 secrets, 10.1 GitOps, 10.2 mesh-primitives, 11.1 identity, 11.2 webhooks/OpenAPI,
   11.3 compliance, 12.1 distributed-coordination, 12.2 load-balancing, 12.3 Helm.
+- **DONE (cross-platform build/test)**: 3.3 multi-arch — the engine is pure portable std C++
+  and the CI (`​.github/workflows/ci.yml`) builds **and runs ctest** on a real 3-OS matrix
+  (linux-x86_64 / macos-arm64 / windows-x86_64), plus WASM (clang wasm32→node) and RISC-V
+  (riscv64-gcc→qemu) cross-execution of the compute kernels.
 - **PARTIAL (core in-tree; rest needs external system)**: 5.3 multi-cloud (TF module ✓; cloud creds),
-  6.1 dev-tools, 6.2 docs, 7.2 multi-vendor (HIP ✓; oneAPI/Metal), 10.3 edge (latency routing ✓; CDN), 3.3 multi-arch.
-- **MISSING — genuinely blocked (would require faking)**: 3.1 Windows CI/DirectML/AD (needs Windows),
-  3.2 Apple Metal (Apple Silicon hardware), 4.2 TF/JAX backends (need a PJRT/XLA HLO compiler;
-  PyTorch backend is DONE), 7.1 Post-Blackwell/Rubin (unreleased, no public ISA).
+  6.1 dev-tools, 6.2 docs, 7.2 multi-vendor (HIP ✓; oneAPI/Metal), 10.3 edge (latency routing ✓; CDN),
+  3.1 Windows (the C++ engine builds+tests on windows-2022 in CI; DirectML / Active Directory
+  integration still need Windows-specific work against those APIs).
+- **MISSING — genuinely blocked (would require faking)**: 3.2 Apple Metal (Apple Silicon hardware),
+  device-level PJRT plugin registration for §4.2 (`jax.jit(backend='vgre')` — needs the version-pinned
+  upstream `pjrt_c_api.h` + MLIR C++ libraries not shipped in the wheels; the StableHLO-level path
+  already delivers the identical compute), 7.1 Post-Blackwell/Rubin (unreleased, no public ISA).
 
 **Phase 4 Success Metrics**:
 - **Security**: Pass SOC 2 Type II audit, resist all known GPU attack vectors, PCI DSS Level 1 compliance

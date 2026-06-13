@@ -11,8 +11,11 @@ CUDA emulation platform with 249 source files, 240 test files, and advanced impl
 - **Deployment Infrastructure**: Kubernetes device plugin, operator framework, SLURM integration
 
 **Current Achievement**: Core CUDA emulation platform complete with sophisticated distributed 
-computing capabilities, advanced security, and comprehensive library support. All functionality 
-verified on x86-64 Linux with zero compiler warnings and comprehensive test coverage.
+computing capabilities, advanced security, and comprehensive library support — **plus a full ML
+stack**: real neural networks from PyTorch, JAX, TensorFlow and Keras run end-to-end on the CPU
+(inference, autoregressive generation, **training/backprop**, and int8 quantization) via a
+production-hardened HLO execution engine. Verified on x86-64 Linux (full suite, zero warnings) and
+built+tested on a 3-OS CI matrix (Linux / macOS / Windows) with WASM and RISC-V cross-execution.
 
 **Phase 4 Objective**: Transform VGRE from sophisticated GPU emulator into enterprise-ready 
 production platform capable of Fortune 500 deployment with complete compliance frameworks, 
@@ -46,16 +49,20 @@ status of the matrix tracks below:
 | P4-4 Fuzzing | **DONE** — libFuzzer + smoke ctest | `tools/fuzzing` (e89f063) |
 | P4-5 Monitoring | **DONE** — Prometheus + OTLP | `metrics_server.cpp`, `runtime_profiler` |
 | P4-11 K8s orchestration | **DONE** — device plugin + operator + **MIG** | `src/deployment/`, `vgre::mig` (6bb1a99) |
+| P4-12 ML framework integration | **DONE** — PyTorch + JAX + TF + Keras: inference, generation, **training**, quantization on a production-hardened HLO engine | `frameworks/{pytorch,jax,tf,keras}`, `vgre::xla` (`src/xla/`) |
+| P4-10 Multi-architecture | **DONE (core)** — WASM + RISC-V cross-exec; 3-OS CI matrix (Linux/macOS/Windows) | `frameworks/{wasm,riscv}`, `.github/workflows/ci.yml` |
+| P4-8 Windows deployment | **PARTIAL** — Windows CI builds+tests the engine (windows-2022); DirectML/AD pending | `.github/workflows/ci.yml`, `tcp_cluster/windows_socket_manager_*` |
 | P4-14 RDMA | **DONE** — real libibverbs | `rdma_transport.cpp` |
 | P4-24 Backup/DR | **DONE (core)** — content-addressed archive | `vgre::backup` (edca0f3) |
 | P4-26 Secrets | **DONE (core)** — sealed versioned store | `vgre::secrets` (e381a31) |
 | P4-27 Identity/SSO | **DONE (core)** — OIDC/JWT + RBAC | `vgre::identity` (b532465) |
 
-Remaining tracks (P4-7/8/9/10/12/13/15/16/17/19/20/21/22/23/25/28/29/30/31/32/33/34/35) are
-either PARTIAL or require an external system/hardware (cloud, IdP, Vault, Istio, Metal,
-TensorRT, PyTorch-XLA, RISC-V) to be implemented honestly — their in-tree primitives already
-exist where applicable. The 24-30 month / 50-60 engineer / $35-50M figures below are the
-original aspirational estimate, not a reflection of remaining work.
+P4-10 (multi-arch) and **P4-12 (ML framework integration)** are now **DONE** (see the table above
+and the detailed tracks). The remaining tracks (P4-7/8/9/13/15/16/17/19/20/21/22/23/25/28/29/30/31/
+32/33/34/35) are either PARTIAL or require an external system/hardware (cloud, IdP, Vault, Istio,
+Metal, TensorRT, live fleet) to be implemented honestly — their in-tree primitives already exist
+where applicable. The 24-30 month / 50-60 engineer / $35-50M figures below are the original
+aspirational estimate, not a reflection of remaining work.
 
 ---
 
@@ -244,6 +251,10 @@ original aspirational estimate, not a reflection of remaining work.
 ### P1 — Enterprise Deployment Requirements
 
 #### P4-5 — Production Monitoring & Alerting
+**STATUS (2026-06-13): DONE (core)** — real Prometheus `/metrics` + health/readiness
+(`metrics_server.cpp`, JWT-protectable) and OpenTelemetry OTLP/JSON trace export
+(`runtime_profiler` → `/v1/traces`). See `missingFeatures.md` §2.1. Datadog/New-Relic/Splunk +
+ML anomaly detection are external integrations (the in-tree EWMA/MAD detector is §8.1).
 **Files**: `src/observability/monitoring/`, `include/vgre/observability/`, `src/observability/alerting/`
 **Objective**: Enterprise-grade observability stack for distributed GPU workloads
 **Key Components**:
@@ -262,6 +273,9 @@ original aspirational estimate, not a reflection of remaining work.
 **Performance Requirements**: <1% overhead for monitoring instrumentation
 
 #### P4-6 — Advanced Performance Analytics  
+**STATUS (2026-06-13): DONE (core)** — `runtime_profiler` + CUPTI + Nsight export + roofline
+analysis & flamegraph export (`vgre::advanced::PerformanceAnalytics`, `vgre_get_roofline_json` /
+`vgre_export_flamegraph`). See `missingFeatures.md` §2.2. Hosted dashboard UI is a separate frontend.
 **Files**: `src/profiling/advanced/`, `include/vgre/profiling/analytics.h`, `tools/performance/`
 **Objective**: Comprehensive performance intelligence platform for GPU workloads
 **Key Components**:
@@ -280,6 +294,10 @@ original aspirational estimate, not a reflection of remaining work.
 **Integration**: Seamless integration with existing Nsight workflow for minimal user friction
 
 #### P4-7 — Capacity Planning & Resource Optimization
+**STATUS (2026-06-13): DONE (core)** — `vgre::advanced::CapacityPlanner`: Holt-Winters seasonal
+demand forecasting + First-Fit-Decreasing multi-dimensional bin-packing + headroom-aware node
+sizing (`test_capacity_planner` 12/12), on top of the scheduler + MIG QoS. See `missingFeatures.md`
+§2.3. Spot-instance/cloud cost optimization needs live cloud pricing APIs.
 **Files**: `src/scheduling/enterprise/`, `include/vgre/scheduling/capacity.h`, `ml-models/capacity/`
 **Objective**: AI-driven resource management system for enterprise GPU clusters
 **Key Components**:
@@ -302,7 +320,13 @@ original aspirational estimate, not a reflection of remaining work.
 ### P1 — Cross-Platform Production Readiness
 
 #### P4-8 — Windows Production Deployment
-**Files**: `src/windows/`, `scripts/windows/deployment/`, `containers/windows/`, `tests/windows/`
+**STATUS (2026-06-13): PARTIAL (Windows CI live)** — `.github/workflows/ci.yml` has a `windows-2022`
+job that installs LLVM-18, configures + builds with the MSVC ABI, and runs the full `ctest` suite;
+plus the Windows socket manager + Win32 credential store + `WINDOWS_EXPORT_ALL_SYMBOLS`. The
+XLA/ML engine is pure portable std C++ and builds/tests there unchanged. DirectML, Active
+Directory/Kerberos, Windows containers, and the PowerShell module need Windows-specific work
+against those APIs.
+**Files**: `.github/workflows/ci.yml`, `src/tcp_cluster/windows_socket_manager_*`
 **Objective**: Full Windows enterprise support for production GPU workloads
 **Key Components**:
 - Windows Server Core container support with GPU passthrough and isolation
@@ -320,6 +344,10 @@ original aspirational estimate, not a reflection of remaining work.
 **Performance Target**: <10% performance penalty compared to Linux for equivalent workloads
 
 #### P4-9 — macOS Silicon & Unified Memory Optimization
+**STATUS (2026-06-13): PARTIAL** — the engine + framework backends are pure portable std C++ and
+build/`ctest` on `macos-arm64` in CI (the Python loader resolves `libvgre.dylib`); the macOS
+keychain token backend exists. The **Metal Performance Shaders** acceleration backend genuinely
+requires Apple Silicon + Metal hardware to implement honestly (see `missingFeatures.md` §3.2).
 **Files**: `src/macos/`, `include/vgre/macos/metal.h`, `src/macos/unified_memory.cpp`
 **Objective**: Native Apple Silicon support with Metal Performance Shaders acceleration
 **Key Components**:
@@ -338,7 +366,14 @@ original aspirational estimate, not a reflection of remaining work.
 **Performance Target**: Match or exceed x86_64 performance on equivalent thermal budgets
 
 #### P4-10 — Comprehensive Multi-Architecture Support
-**Files**: `src/arch/`, `cmake/ArchOptimization.cmake`, `tests/arch/`, `ci/multi-arch/`
+**STATUS (2026-06-13): DONE (core)** — the portable compute kernels (`frameworks/{wasm,riscv}/
+vgre_kernels.c`) cross-compile and **run** on **WebAssembly** (clang wasm32 → node, `WasmKernels`)
+and **RISC-V** (riscv64-linux-gnu-gcc → qemu-riscv64, `RiscvKernels`), and a real **3-OS CI matrix**
+(`.github/workflows/ci.yml`: linux-x86_64 / macos-arm64 / windows-x86_64) builds and `ctest`s on
+each. The XLA engine is platform-API-free std C++; the Python framework loader resolves
+`libvgre.{so,dylib,dll}` per platform. Per-arch performance-parity benchmarking is the remaining
+hardening.
+**Files**: `frameworks/{wasm,riscv}/`, `.github/workflows/ci.yml`
 **Objective**: Complete multi-architecture support matrix for diverse deployment environments
 **Key Components**:
 - ARM64 optimization with NEON intrinsics and Scalable Vector Extensions (SVE2)
@@ -378,7 +413,28 @@ original aspirational estimate, not a reflection of remaining work.
 **Enterprise Features**: Multi-cluster federation, disaster recovery, compliance reporting
 
 #### P4-12 — Advanced ML Framework Integration  
-**Files**: `src/frameworks/pytorch/`, `python/torch_xla_backend/`, `src/frameworks/tensorflow/`
+**STATUS (2026-06-13): DONE** — VGRE runs **real neural networks end-to-end** from all four major
+frameworks, every result validated against the framework's own output (full detail in
+`missingFeatures.md` §4.2):
+- **PyTorch** — out-of-tree PrivateUse1 "vgre" backend (alloc/copy via emulated CUDA, matmul via
+  emulated cuBLAS); `PyTorchBackend` 9/9.
+- **JAX / TensorFlow / Keras 3** — an XLA **HLO execution engine** (`vgre::xla`, `src/xla/`) that
+  consumes the StableHLO these frameworks lower to and runs it on the CPU. `JaxStableHloBackend`
+  58/58, `TensorFlowStableHloBackend` 16/16, `KerasModelsBackend` 10/10, `XlaHloInterpreter` 24/24,
+  `XlaExecutableCApi` 16/16 — all **in-process** (the LLVM/protobuf-vs-TF symbol collision is fixed
+  with `RTLD_DEEPBIND`).
+- **Coverage**: CNN / Transformer / RNN-LSTM-GRU-Bidirectional / GPT block / ResNet block;
+  **autoregressive generation** (greedy decode, KV-cache, top-k/sort/argmax/scatter);
+  **training** (backprop incl. conv backward, multi-output SGD, a loss-decreasing loop matching
+  jax to ~1e-7); **int8 quantized** inference.
+- **Production**: thread-safe concurrent execution (no per-call module copy), module validation,
+  structured `vgre_xla_last_error()`, `std::thread` multicore parallelism + a 2-D matmul fast path
+  (chained 256×256 matmul 1399 ms → 148 ms).
+- **Remaining (external only)**: device-level `jax.jit(backend='vgre')` PJRT plugin registration
+  needs the version-pinned upstream `pjrt_c_api.h` + MLIR C++ libs (not in the wheels); the
+  StableHLO-level path delivers the identical compute. Hugging Face / ONNX-Runtime / MLflow are
+  thin layers over these backends.
+**Files**: `frameworks/{pytorch,jax,tf,keras}/`, `vgre::xla` (`src/xla/`, `include/vgre/xla/`)
 **Objective**: Deep integration with modern ML frameworks for optimal performance
 **Key Components**:
 - PyTorch XLA backend with graph optimization and kernel fusion
@@ -396,7 +452,14 @@ original aspirational estimate, not a reflection of remaining work.
 **Performance Target**: Match native CUDA performance while providing superior debugging and portability
 
 #### P4-13 — Model Serving & Inference Optimization
-**Files**: `src/serving/tensorrt/`, `include/vgre/serving/`, `src/serving/optimization/`
+**STATUS (2026-06-13): DONE (core)** — the vLLM-style serving primitives exist + tested:
+**PagedAttention** (`vgre::core::KVCacheManager` — block pool, per-sequence block tables,
+online-softmax), **continuous in-flight batching** (`ContinuousBatchScheduler`), and **speculative
+decoding** (`vgre::serving`, distribution-equivalent rejection sampling). The §4.2 XLA engine also
+runs real **autoregressive generation** (greedy decode + KV-cache) end-to-end. See
+`missingFeatures.md` §4.3. TensorRT-LLM/vLLM *compatibility layers* and A/B-canary need those
+external runtimes / a live fleet.
+**Files**: `src/serving/`, `src/core/kv_cache.cpp`, `include/vgre/serving/`
 **Objective**: Production-grade inference acceleration and serving infrastructure
 **Key Components**:
 - TensorRT-LLM compatibility layer for optimized large language model inference
