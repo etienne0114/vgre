@@ -1,0 +1,36 @@
+# Default values for the VGRE chart.
+nameOverride: ""
+fullnameOverride: ""
+namespace: kube-system
+
+devicePlugin:
+  enabled: true
+  image:
+    repository: vgre-device-plugin
+    tag: latest
+    pullPolicy: IfNotPresent
+  gpusPerNode: 1
+  resourceName: vgre.io/gpu
+  privileged: true
+
+operator:
+  enabled: true
+  replicas: 1
+  image:
+    repository: vgre-operator
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "500m"
+      memory: 512Mi
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""

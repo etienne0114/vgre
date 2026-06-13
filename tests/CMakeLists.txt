@@ -689,6 +689,11 @@ if(Python3_EXECUTABLE)
         --cxx    ${CMAKE_CXX_COMPILER}
         --min-score 1.0)
     set_tests_properties(MutationTesting PROPERTIES TIMEOUT 60)
+
+    # Deploy: validate the VGRE Helm chart (structural + helm lint when present).
+    add_test(NAME HelmChart COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/deploy/helm/validate_chart.py)
+    set_tests_properties(HelmChart PROPERTIES TIMEOUT 30)
 endif()
 
 # Compliance: tamper-evident audit log + GDPR crypto-erasure.

@@ -561,7 +561,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Handles 1M+ concurrent connections, sub-millisecond routing decisions
 
 ### 12.3 Container Orchestration & Service Discovery — P2
-- **STATUS (2026-06-13): PARTIAL** — kubebuilder operator + device plugin (§4.1) cover core orchestration; Helm charts + multi-cluster federation pending.
+- **STATUS (2026-06-13): DONE (core)** — kubebuilder operator + device plugin (§4.1) + **Helm chart** (`deploy/helm/vgre/`: device-plugin DaemonSet + operator Deployment + ServiceAccount/ClusterRole(Binding), parameterised `values.yaml`, `_helpers.tpl`, NOTES) with a structural+`helm lint` validator (`HelmChart` ctest). Multi-cluster workload federation pending.
 - **Gap**: Basic containerization insufficient for enterprise orchestration requirements.
 - **Design**: Advanced container orchestration platform:
   - Helm charts for complex application deployment

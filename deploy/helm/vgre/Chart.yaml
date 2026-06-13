@@ -1,0 +1,10 @@
+apiVersion: v2
+name: vgre
+description: Virtual GPU Runtime Engine — Kubernetes device plugin + operator (CPU-based CUDA emulation)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords: [gpu, cuda, emulation, device-plugin, operator, mig]
+home: https://github.com/etienne0114/virtual-gpu-runtime
+maintainers:
+  - name: VGRE

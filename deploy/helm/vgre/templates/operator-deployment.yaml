@@ -1,0 +1,39 @@
+{{- if .Values.operator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vgre.fullname" . }}-operator
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "vgre.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "vgre.name" . }}-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "vgre.name" . }}-operator
+    spec:
+      serviceAccountName: {{ include "vgre.serviceAccountName" . }}
+      containers:
+        - name: operator
+          image: "{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag }}"
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          resources:
+            requests:
+              cpu: {{ .Values.operator.resources.requests.cpu }}
+              memory: {{ .Values.operator.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.operator.resources.limits.cpu }}
+              memory: {{ .Values.operator.resources.limits.memory }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+{{- end }}
