@@ -234,7 +234,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Successful deployment on production Kubernetes clusters, MIG resource sharing with isolation
 
 ### 4.2 Advanced ML Framework Integration — P1
-- **STATUS (2026-06-13): PARTIAL (PyTorch DONE)** — real **PyTorch out-of-tree backend** (`frameworks/pytorch/`, PrivateUse1 device "vgre"): tensor alloc via emulated `cudaMalloc`, H2D/D2H via `cudaMemcpy`, **matmul via emulated cuBLAS** (`cublasSgemm`), CPU fallback for the rest; an unmodified PyTorch program (`relu(x@W)`) runs on VGRE (`PyTorchBackend` ctest 9/9). TensorFlow/JAX integration instead needs a PJRT/XLA HLO-compiler backend — a substantially larger effort.
+- **STATUS (2026-06-13): PARTIAL (PyTorch DONE; JAX/TF in progress)** — (1) real **PyTorch out-of-tree backend** (`frameworks/pytorch/`, PrivateUse1 "vgre": alloc/copy via emulated CUDA, matmul via emulated cuBLAS; `PyTorchBackend` 9/9). (2) **XLA HLO execution engine** for JAX/TF (`vgre::xla`, `src/xla/`): an explicit HLO computation graph + interpreter for the core ops (elementwise, dot/matmul, broadcast, reshape, transpose, reduce sum/max/min/prod, compare/select, iota, exp/tanh/…) — runs e.g. `relu(x@W+b)` and softmax (`XlaHloInterpreter` 10/10). This is the engine JAX/TF lower into; remaining to reach end-to-end JAX: the PJRT C ABI shim + StableHLO→HLO translation.
 - **Gap**: Basic CUDA compatibility insufficient for modern ML frameworks requiring specialized optimizations.
 - **Design**: Deep ML framework integration:
   - PyTorch XLA backend with graph optimization

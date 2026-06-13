@@ -769,6 +769,12 @@ target_link_libraries(test_pqc PRIVATE vgre)
 add_test(NAME PostQuantumKEM COMMAND test_pqc)
 set_tests_properties(PostQuantumKEM PROPERTIES TIMEOUT 60)
 
+# XLA HLO interpreter (§4.2): the compute engine JAX/TF/PyTorch-XLA lower into.
+add_executable(test_hlo xla/test_hlo.cpp)
+target_link_libraries(test_hlo PRIVATE vgre)
+add_test(NAME XlaHloInterpreter COMMAND test_hlo)
+set_tests_properties(XlaHloInterpreter PROPERTIES TIMEOUT 30)
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)
