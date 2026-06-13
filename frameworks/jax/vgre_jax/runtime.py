@@ -50,6 +50,25 @@ def _find_lib() -> str:
     raise FileNotFoundError("libvgre.so not found; set VGRE_LIB or build the project")
 
 
+def _load_libvgre(path: str):
+    """Load libvgre.so so it coexists in-process with TensorFlow / jaxlib.
+
+    libvgre statically links LLVM (for the JIT) and dynamically links system
+    protobuf/abseil (gRPC transport). TensorFlow bundles its OWN LLVM + protobuf
+    with global symbols; if TF is loaded first, libvgre's references would bind to
+    TF's copies (different state) and crash at dlopen. RTLD_DEEPBIND makes libvgre
+    prefer its own dependency tree over already-loaded globals, so each library
+    uses its matching copy. RTLD_LOCAL keeps libvgre's symbols out of the global
+    scope so it cannot interpose anyone else.
+    """
+    mode = os.RTLD_NOW | os.RTLD_LOCAL
+    deepbind = getattr(os, "RTLD_DEEPBIND", 0)  # Linux/glibc; 0 elsewhere
+    try:
+        return ctypes.CDLL(path, mode=mode | deepbind)
+    except OSError:
+        return ctypes.CDLL(path, mode=mode)  # fallback if DEEPBIND unsupported
+
+
 def _i64arr(xs):
     arr = (c_int64 * len(xs))(*[int(v) for v in xs])
     return arr, len(xs)
@@ -59,7 +78,7 @@ class VgreHlo:
     """Thin owner of one libvgre handle, exposing the builder + execute ABI."""
 
     def __init__(self, lib_path: str | None = None):
-        self.lib = ctypes.CDLL(lib_path or _find_lib())
+        self.lib = _load_libvgre(lib_path or _find_lib())
         L = self.lib
         L.vgre_xla_builder_new.restype = c_uint64
         L.vgre_xla_b_parameter.argtypes = [c_uint64, c_int, _I64P, c_int]

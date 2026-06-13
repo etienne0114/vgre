@@ -724,7 +724,7 @@ if(EXISTS ${PROJECT_SOURCE_DIR}/.venv/bin/python)
     # and execute, asserting against TF's own result. Self-skips if tf isn't present.
     add_test(NAME TensorFlowStableHloBackend COMMAND ${PROJECT_SOURCE_DIR}/.venv/bin/python
         ${PROJECT_SOURCE_DIR}/frameworks/tf/test_tf_e2e.py)
-    set_tests_properties(TensorFlowStableHloBackend PROPERTIES TIMEOUT 600
+    set_tests_properties(TensorFlowStableHloBackend PROPERTIES TIMEOUT 400
         ENVIRONMENT "VGRE_BUILD_DIR=${CMAKE_BINARY_DIR}")
 
     # Keras 3 high-level models end-to-end (§4.2): full CNN / BatchNorm & LayerNorm
@@ -732,7 +732,7 @@ if(EXISTS ${PROJECT_SOURCE_DIR}/.venv/bin/python)
     # backend and run on VGRE vs Keras. Self-skips if keras isn't installed.
     add_test(NAME KerasModelsBackend COMMAND ${PROJECT_SOURCE_DIR}/.venv/bin/python
         ${PROJECT_SOURCE_DIR}/frameworks/keras/test_keras_e2e.py)
-    set_tests_properties(KerasModelsBackend PROPERTIES TIMEOUT 700
+    set_tests_properties(KerasModelsBackend PROPERTIES TIMEOUT 500
         ENVIRONMENT "VGRE_BUILD_DIR=${CMAKE_BINARY_DIR}")
 endif()
 

@@ -1218,6 +1218,24 @@ if(APPLE)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
+# §17b  In-process coexistence with TensorFlow / jaxlib (LLVM/protobuf collision)
+# ──────────────────────────────────────────────────────────────────────────────
+# libvgre statically links LLVM-18 (the JIT) and dynamically links system
+# protobuf/abseil (gRPC transport). TensorFlow bundles its OWN LLVM + protobuf
+# with global symbols. If TF is loaded into the process first, libvgre's LLVM
+# static initializers / protobuf imports would bind to TF's incompatible copies
+# and segfault at dlopen.
+#
+# The fix lives on the *loading* side, not here: the Python loader opens libvgre
+# with RTLD_DEEPBIND | RTLD_LOCAL (see frameworks/jax/vgre_jax/runtime.py).
+# DEEPBIND makes libvgre prefer its own dependency tree over already-loaded
+# globals (so it uses its own LLVM + the system protobuf, not TF's), and
+# RTLD_LOCAL keeps libvgre's symbols out of the global scope so it never
+# interposes anyone else. This is robust to load order and needs no linker symbol
+# hiding — which is important because some unit tests (e.g. test_flop_counting)
+# deliberately share libvgre's exported LLVM symbols.
+
+# ──────────────────────────────────────────────────────────────────────────────
 # §18  Test helper function  (used by tests/CMakeLists.txt)
 # ──────────────────────────────────────────────────────────────────────────────
 #

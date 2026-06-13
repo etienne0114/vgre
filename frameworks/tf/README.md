@@ -5,21 +5,22 @@ TensorFlow's own output. A `tf.function(..., jit_compile=True)` is XLA-compiled
 and its StableHLO is translated to VGRE HLO and executed — the same translator
 used for the JAX backend (`frameworks/jax/vgre_jax`).
 
-## Two-process design (required)
-
-TensorFlow and jaxlib each bundle their **own** MLIR/LLVM; importing both into one
-process and parsing MLIR segfaults. So lowering is isolated:
+## In-process (TensorFlow + VGRE in one process)
 
 ```
-tf_worker.py  (TF process)         test_tf_e2e.py  (TF-free driver)
-  tf.function(jit_compile=True)
-  experimental_get_compiler_ir       parse StableHLO (jaxlib MLIR)
-    -> StableHLO text  ───file───►    -> Translator -> VGRE HLO
-  run eager -> reference  ──────►      -> execute on VGRE, compare to reference
+tf.function(jit_compile=True).experimental_get_compiler_ir(stage='stablehlo')
+  -> parse StableHLO (jaxlib MLIR) -> Translator -> VGRE HLO engine -> result
+                                                      (vs TF eager output)
 ```
 
-`tf_worker.py` dumps `m.mlir` + `in_*.npy` + `ref.npy` per case; the driver parses
-and runs them on VGRE. The driver never imports TensorFlow.
+libvgre statically links LLVM (for the JIT) and dynamically links system
+protobuf/abseil (gRPC transport); TensorFlow bundles its **own** LLVM + protobuf.
+To coexist in one process, libvgre is loaded with **`RTLD_DEEPBIND`** (see
+`vgre_jax/runtime.py`) so it binds to its own copies of those libraries instead of
+TensorFlow's globals, and it is linked with `--exclude-libs ALL` + a version
+script (`cmake/llvm_isolation.map`) so its bundled LLVM symbols stay private. No
+subprocess isolation is needed. (`tf_worker.py` holds the case definitions and can
+still dump StableHLO to a directory for standalone debugging.)
 
 ## Run
 
