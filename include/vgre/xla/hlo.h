@@ -46,7 +46,7 @@ enum class HloOp {
     Compare, Select,
     Broadcast, Reshape, Transpose,
     Dot, Reduce,
-    DotGeneral, Concatenate, Slice, Pad, Convolution, Gather,
+    DotGeneral, Concatenate, Slice, Pad, Convolution, Gather, ReduceWindow,
 };
 
 struct HloInstruction {
@@ -80,6 +80,9 @@ struct HloInstruction {
     // Gather (embedding-style): operands = {operand, indices}.
     std::vector<int64_t> gather_offset_dims, gather_collapsed, gather_start_map, gather_slice_sizes;
     int64_t     gather_index_vector_dim = 0;
+    // ReduceWindow: operands = {input, init}; reduce_kind is the combiner.
+    std::vector<int64_t> rw_window_dims, rw_window_strides, rw_pad_low, rw_pad_high,
+                         rw_base_dil, rw_window_dil;
 };
 
 class HloModule {
@@ -118,6 +121,7 @@ public:
     int convolution(int lhs, int rhs, Shape out);  // attributes set on returned instr
     HloInstruction& last() { return instrs_.back(); }  // tweak attrs after a builder call
     int gather(int operand, int indices, Shape out);
+    int reduceWindow(int x, int init, const std::string& kind, Shape out);  // attrs on returned instr
 
 private:
     std::vector<HloInstruction> instrs_;

@@ -98,6 +98,10 @@ def main():
         dimension_numbers=("NCHW", "OIHW", "NCHW")),
         rng.standard_normal((1, 4, 5, 5)).astype(np.float32),
         rng.standard_normal((4, 2, 3, 3)).astype(np.float32))
+    case("maxpool2d", lambda im: jax.lax.reduce_window(
+        im, -jnp.inf, jax.lax.max, (1, 1, 2, 2), (1, 1, 2, 2), "VALID"), img)
+    case("avgpool2d", lambda im: jax.lax.reduce_window(
+        im, 0.0, jax.lax.add, (1, 1, 2, 2), (1, 1, 2, 2), "VALID") / 4.0, img)
     case("embedding gather", lambda t, i: t[i.astype(jnp.int32)], tbl, ids.astype(np.float32))
     case("2-layer MLP", lambda a, w1, b1, w2, b2: jax.nn.sigmoid(
         jnp.maximum(a @ w1 + b1, 0.0) @ w2 + b2),

@@ -24,7 +24,7 @@ OP = {
     "Broadcast": 23, "Reshape": 24, "Transpose": 25,
     "Dot": 26, "Reduce": 27,
     "DotGeneral": 28, "Concatenate": 29, "Slice": 30, "Pad": 31,
-    "Convolution": 32, "Gather": 33,
+    "Convolution": 32, "Gather": 33, "ReduceWindow": 34,
 }
 
 _I64P = POINTER(c_int64)
@@ -98,6 +98,9 @@ class VgreHlo:
         L.vgre_xla_b_gather.argtypes = [c_uint64, c_int, c_int, _I64P, c_int, _I64P, c_int,
                                         _I64P, c_int, _I64P, c_int, _I64P, c_int, c_int]
         L.vgre_xla_b_gather.restype = c_int
+        L.vgre_xla_b_reduce_window.argtypes = [c_uint64, c_int, c_int, c_char_p, _I64P, c_int,
+                                               _I64P, _I64P, _I64P, _I64P, _I64P, _I64P, c_int]
+        L.vgre_xla_b_reduce_window.restype = c_int
         L.vgre_xla_b_set_root.argtypes = [c_uint64, c_int]
         L.vgre_xla_b_compile.argtypes = [c_uint64]
         L.vgre_xla_b_compile.restype = c_uint64
@@ -192,6 +195,15 @@ class VgreHlo:
         sma, nsm = _i64arr(start_map); ssa, nss = _i64arr(slice_sizes)
         return _ck(self.lib.vgre_xla_b_gather(b, operand, indices, oa, on, ofa, nof, ca, nc,
                                               sma, nsm, ssa, nss, int(index_vector_dim)), "gather")
+
+    def reduce_window(self, b, x, init, kind, out_dims, win_dims, win_strides,
+                      pad_lo, pad_hi, base_dil, win_dil):
+        oa, on = _i64arr(out_dims)
+        wd, n = _i64arr(win_dims); ws, _ = _i64arr(win_strides)
+        pl, _ = _i64arr(pad_lo); ph, _ = _i64arr(pad_hi)
+        bd, _ = _i64arr(base_dil); wl, _ = _i64arr(win_dil)
+        return _ck(self.lib.vgre_xla_b_reduce_window(b, x, init, kind.encode(), oa, on,
+                                                     wd, ws, pl, ph, bd, wl, n), "reduce_window")
 
     def set_root(self, b, idx):
         self.lib.vgre_xla_b_set_root(b, idx)

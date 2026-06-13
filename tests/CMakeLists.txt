@@ -718,6 +718,14 @@ if(EXISTS ${PROJECT_SOURCE_DIR}/.venv/bin/python)
         ${PROJECT_SOURCE_DIR}/frameworks/jax/test_jax_e2e.py)
     set_tests_properties(JaxStableHloBackend PROPERTIES TIMEOUT 300
         ENVIRONMENT "VGRE_BUILD_DIR=${CMAKE_BINARY_DIR}")
+
+    # TensorFlow end-to-end (§4.2): XLA-compile a tf.function, dump its StableHLO in
+    # an isolated subprocess (TF + jaxlib MLIR cannot co-load), translate to VGRE HLO
+    # and execute, asserting against TF's own result. Self-skips if tf isn't present.
+    add_test(NAME TensorFlowStableHloBackend COMMAND ${PROJECT_SOURCE_DIR}/.venv/bin/python
+        ${PROJECT_SOURCE_DIR}/frameworks/tf/test_tf_e2e.py)
+    set_tests_properties(TensorFlowStableHloBackend PROPERTIES TIMEOUT 600
+        ENVIRONMENT "VGRE_BUILD_DIR=${CMAKE_BINARY_DIR}")
 endif()
 
 # WASM target (§3.3): compile VGRE compute kernels to wasm32 (clang) and run them
