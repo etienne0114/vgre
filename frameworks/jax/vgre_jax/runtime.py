@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 from ctypes import c_char_p, c_float, c_int, c_int64, c_uint64, c_void_p, POINTER
 
 import numpy as np
@@ -36,6 +37,15 @@ _I64P = POINTER(c_int64)
 _F32P = POINTER(c_float)
 
 
+def _lib_names() -> tuple:
+    """Platform-specific shared-library file names for libvgre."""
+    if sys.platform == "win32":
+        return ("vgre.dll", "libvgre.dll")
+    if sys.platform == "darwin":
+        return ("libvgre.dylib", "libvgre.so")
+    return ("libvgre.so",)
+
+
 def _find_lib() -> str:
     env = os.environ.get("VGRE_LIB")
     if env and os.path.exists(env):
@@ -43,28 +53,34 @@ def _find_lib() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
     # frameworks/jax/vgre_jax -> repo root
     root = os.path.abspath(os.path.join(here, "..", "..", ".."))
-    for cand in (
-        os.path.join(os.environ.get("VGRE_BUILD_DIR", os.path.join(root, "build")), "libvgre.so"),
-        os.path.join(root, "build", "libvgre.so"),
-    ):
-        if os.path.exists(cand):
-            return cand
-    raise FileNotFoundError("libvgre.so not found; set VGRE_LIB or build the project")
+    build_dir = os.environ.get("VGRE_BUILD_DIR", os.path.join(root, "build"))
+    for d in (build_dir, os.path.join(root, "build")):
+        for name in _lib_names():
+            cand = os.path.join(d, name)
+            if os.path.exists(cand):
+                return cand
+    raise FileNotFoundError(
+        f"VGRE shared library ({'/'.join(_lib_names())}) not found; "
+        "set VGRE_LIB or VGRE_BUILD_DIR, or build the project")
 
 
 def _load_libvgre(path: str):
-    """Load libvgre.so so it coexists in-process with TensorFlow / jaxlib.
+    """Load libvgre so it coexists in-process with TensorFlow / jaxlib.
 
     libvgre statically links LLVM (for the JIT) and dynamically links system
     protobuf/abseil (gRPC transport). TensorFlow bundles its OWN LLVM + protobuf
-    with global symbols; if TF is loaded first, libvgre's references would bind to
-    TF's copies (different state) and crash at dlopen. RTLD_DEEPBIND makes libvgre
-    prefer its own dependency tree over already-loaded globals, so each library
-    uses its matching copy. RTLD_LOCAL keeps libvgre's symbols out of the global
-    scope so it cannot interpose anyone else.
+    with global symbols; on glibc, if TF is loaded first, libvgre's references
+    would bind to TF's copies (different state) and crash at dlopen. RTLD_DEEPBIND
+    makes libvgre prefer its own dependency tree over already-loaded globals.
+    RTLD_LOCAL keeps libvgre's symbols out of the global scope.
+
+    The RTLD_* flags are POSIX-only and absent on Windows, where the default
+    loader semantics already isolate each DLL's imports — so we just load plainly.
     """
-    mode = os.RTLD_NOW | os.RTLD_LOCAL
-    deepbind = getattr(os, "RTLD_DEEPBIND", 0)  # Linux/glibc; 0 elsewhere
+    if sys.platform == "win32":            # Windows: no dlopen flags; default isolation
+        return ctypes.CDLL(path)
+    mode = getattr(os, "RTLD_NOW", 0) | getattr(os, "RTLD_LOCAL", 0)
+    deepbind = getattr(os, "RTLD_DEEPBIND", 0)  # Linux/glibc only; 0 on macOS
     try:
         return ctypes.CDLL(path, mode=mode | deepbind)
     except OSError:
