@@ -518,7 +518,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: 100% API specification coverage, automated SDK generation
 
 ### 11.3 Advanced Compliance Frameworks — P1
-- **STATUS (2026-06-13): PARTIAL** — the tamper-evident audit trail + GDPR crypto-erasure foundation (§1.3) is done; PCI DSS / HIPAA / SOX *certification* is an external attestation process performed against this evidence, not code.
+- **STATUS (2026-06-13): DONE (core)** — audit trail + GDPR crypto-erasure (§1.3) + **`vgre::compliance::DataClassifier`** (Luhn-validated PAN→PCI, SSN/email→PII, PHI keyword scan → sensitivity label) + **`CompliancePolicyEngine`** (PCI-DSS/HIPAA/GDPR/SOX rule sets → allow/deny + encryption/audit/MFA obligations, audited) + JSON reports (`test_policy_engine` 15/15). PCI/HIPAA/SOX *certification* is an external attestation against this evidence, not code.
 - **Gap**: Limited compliance coverage beyond SOC 2. Missing PCI DSS, HIPAA technical safeguards, SOX controls.
 - **Design**: Multi-framework compliance automation:
   - PCI DSS compliance for payment card data processing environments

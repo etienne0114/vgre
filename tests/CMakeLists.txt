@@ -667,6 +667,12 @@ target_link_libraries(test_audit_log PRIVATE vgre)
 add_test(NAME ComplianceAuditLog COMMAND test_audit_log)
 set_tests_properties(ComplianceAuditLog PROPERTIES TIMEOUT 30)
 
+# Compliance: data classification + policy-as-code engine.
+add_executable(test_policy_engine compliance/test_policy_engine.cpp)
+target_link_libraries(test_policy_engine PRIVATE vgre)
+add_test(NAME CompliancePolicyEngine COMMAND test_policy_engine)
+set_tests_properties(CompliancePolicyEngine PROPERTIES TIMEOUT 30)
+
 # Secrets: sealed, versioned secret store (rotation + access policy).
 add_executable(test_secret_store secrets/test_secret_store.cpp)
 target_link_libraries(test_secret_store PRIVATE vgre)

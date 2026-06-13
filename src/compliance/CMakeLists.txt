@@ -1,6 +1,7 @@
 # §  vgre_compliance — enterprise audit / compliance (tamper-evident audit log)
 add_library(vgre_compliance OBJECT
     audit_log.cpp
+    policy_engine.cpp
 )
 
 target_include_directories(vgre_compliance PUBLIC
