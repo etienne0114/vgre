@@ -15,6 +15,7 @@ add_library(vgre_advanced OBJECT
     api_management.cpp
     traffic_manager.cpp
     distributed.cpp
+    aiops.cpp
     vgre_workload_engine.cpp
     ipc_manager.cpp
     tcp_cluster/tcp_cluster_manager.cpp

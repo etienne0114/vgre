@@ -774,6 +774,12 @@ target_link_libraries(test_distributed PRIVATE vgre)
 add_test(NAME DistributedPrimitives COMMAND test_distributed)
 set_tests_properties(DistributedPrimitives PROPERTIES TIMEOUT 30)
 
+# AIOps + security analytics: anomaly detection + audit-log threat analysis.
+add_executable(test_aiops advanced/test_aiops.cpp)
+target_link_libraries(test_aiops PRIVATE vgre)
+add_test(NAME AIOpsAnalytics COMMAND test_aiops)
+set_tests_properties(AIOpsAnalytics PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)
