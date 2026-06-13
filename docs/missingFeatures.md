@@ -162,7 +162,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Identifies performance regressions within 1%, provides actionable optimization recommendations
 
 ### 2.3 Capacity Planning & Resource Optimization — P1
-- **STATUS (2026-06-13): PARTIAL** — scheduler + `workload_partitioner` + MIG per-tenant QoS isolation (§4.1) done; ML-based workload prediction / cost-aware autoscaling pending.
+- **STATUS (2026-06-13): DONE (core)** — scheduler + `workload_partitioner` + MIG QoS + **`vgre::advanced::CapacityPlanner`**: Holt-Winters seasonal demand forecasting + First-Fit-Decreasing multi-dimensional bin-packing + headroom-aware node sizing (`test_capacity_planner` 12/12). Spot-instance/cloud cost optimization needs live cloud pricing APIs.
 - **Gap**: No intelligent resource allocation or capacity planning for enterprise GPU clusters.
 - **Design**: AI-driven resource management system:
   - ML-based workload prediction and capacity planning
