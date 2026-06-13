@@ -51,6 +51,28 @@ int vgre_xla_b_reduce(uint64_t b, int x, const int64_t* dims, int n_dims,
 int vgre_xla_b_compare(uint64_t b, int lhs, int rhs, const char* dir);
 int vgre_xla_b_select(uint64_t b, int pred, int on_true, int on_false);
 
+// — extended ops (real-model coverage) —
+int vgre_xla_b_dot_general(uint64_t b, int lhs, int rhs,
+                           const int64_t* lb, int nlb, const int64_t* rb, int nrb,
+                           const int64_t* lc, int nlc, const int64_t* rc, int nrc,
+                           const int64_t* out_dims, int n_out);
+int vgre_xla_b_concatenate(uint64_t b, const int* xs, int n_xs, int64_t dim,
+                           const int64_t* out_dims, int n_out);
+int vgre_xla_b_slice(uint64_t b, int x, const int64_t* starts, const int64_t* limits,
+                     const int64_t* strides, int n, const int64_t* out_dims, int n_out);
+int vgre_xla_b_pad(uint64_t b, int x, int pad_val, const int64_t* low, const int64_t* high,
+                   const int64_t* interior, int n, const int64_t* out_dims, int n_out);
+int vgre_xla_b_convolution(uint64_t b, int lhs, int rhs, const int64_t* out_dims, int n_out,
+                           int in_batch, int in_feat, int k_out, int k_in,
+                           int out_batch, int out_feat,
+                           const int64_t* in_sp, const int64_t* k_sp, const int64_t* out_sp, int n_sp,
+                           const int64_t* strides, const int64_t* pad_lo, const int64_t* pad_hi,
+                           const int64_t* rhs_dil, int groups);
+int vgre_xla_b_gather(uint64_t b, int operand, int indices, const int64_t* out_dims, int n_out,
+                      const int64_t* offset_dims, int n_off, const int64_t* collapsed, int n_col,
+                      const int64_t* start_map, int n_sm, const int64_t* slice_sizes, int n_ss,
+                      int index_vector_dim);
+
 void vgre_xla_b_set_root(uint64_t b, int id);
 
 // Finalize the builder into an executable (consumes the builder). Returns an

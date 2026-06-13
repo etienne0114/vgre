@@ -27,6 +27,9 @@ _UNARY = {
     "stablehlo.negate": "Negate", "stablehlo.exponential": "Exp",
     "stablehlo.log": "Log", "stablehlo.tanh": "Tanh",
     "stablehlo.abs": "Abs", "stablehlo.rsqrt": "Rsqrt",
+    "stablehlo.sqrt": "Sqrt", "stablehlo.sign": "Sign",
+    "stablehlo.floor": "Floor", "stablehlo.ceil": "Ceil",
+    "stablehlo.logistic": "Logistic",
 }
 _REDUCE_KIND = {
     "stablehlo.add": "sum", "stablehlo.maximum": "max",
@@ -122,14 +125,34 @@ class Translator:
             return rt.binary(b, _BINARY[name], ref(0), ref(1)), None
         if name in _UNARY:
             return rt.unary(b, _UNARY[name], ref(0)), None
+        if name == "chlo.square":
+            return rt.binary(b, "Multiply", ref(0), ref(0)), None
         if name == "stablehlo.constant":
             data = _const_floats(op.attributes["value"])
             shp = _shape(op.results[0])
             sc = float(data[0]) if data.size == 1 else None
             return rt.constant(b, shp, data), sc
         if name == "stablehlo.dot_general":
-            self._check_plain_matmul(op)
-            return rt.dot(b, ref(0), ref(1)), None
+            lb, rb, lc, rc = self._dot_dims(op)
+            return rt.dot_general(b, ref(0), ref(1), lb, rb, lc, rc, _shape(op.results[0])), None
+        if name == "stablehlo.concatenate":
+            dim = int(op.attributes["dimension"])
+            ids = [val2id[o] for o in op.operands]
+            return rt.concatenate(b, ids, dim, _shape(op.results[0])), None
+        if name == "stablehlo.slice":
+            starts = _i64_list(op.attributes["start_indices"])
+            limits = _i64_list(op.attributes["limit_indices"])
+            strides = _i64_list(op.attributes["strides"])
+            return rt.slice(b, ref(0), starts, limits, strides, _shape(op.results[0])), None
+        if name == "stablehlo.pad":
+            low = _i64_list(op.attributes["edge_padding_low"])
+            high = _i64_list(op.attributes["edge_padding_high"])
+            interior = _i64_list(op.attributes["interior_padding"])
+            return rt.pad(b, ref(0), ref(1), low, high, interior, _shape(op.results[0])), None
+        if name == "stablehlo.convolution":
+            return self._emit_conv(rt, b, op, ref), None
+        if name == "stablehlo.gather":
+            return self._emit_gather(rt, b, op, ref), None
         if name == "stablehlo.broadcast_in_dim":
             bdims = _i64_list(op.attributes["broadcast_dimensions"])
             return rt.broadcast(b, ref(0), _shape(op.results[0]), bdims), None
@@ -146,10 +169,8 @@ class Translator:
         if name == "stablehlo.reduce":
             return self._emit_reduce(rt, b, op, ref, const_scalar), None
         if name == "stablehlo.convert":
-            # f32 -> f32 identity (dtype-narrowing is out of scope; verify same).
-            if str(ShapedType(op.results[0].type).element_type) != \
-               str(ShapedType(op.operands[0].type).element_type):
-                raise NotImplementedError(f"convert across dtypes: {op}")
+            # The engine is single-dtype float32; convert is dtype plumbing
+            # (f32<->bf16, integer index parameters carried as float). Identity.
             return ref(0), None
         raise NotImplementedError(f"unsupported StableHLO op: {name}")
 
@@ -179,22 +200,57 @@ class Translator:
         return m.group(1)
 
     @staticmethod
-    def _check_plain_matmul(op):
+    def _ints(s, key):
+        m = re.search(key + r"\s*=\s*\[([^\]]*)\]", s)
+        if not m:
+            return []
+        return [int(x) for x in re.split(r"[,\s]+", m.group(1).strip()) if x]
+
+    @classmethod
+    def _dot_dims(cls, op):
         s = str(op.attributes["dot_dimension_numbers"])
-        # require lhs[...,K]·rhs[K,...] 2D matmul, no batch dims
-        lhs_c = re.search(r"lhs_contracting_dimensions\s*=\s*\[([^\]]*)\]", s)
-        rhs_c = re.search(r"rhs_contracting_dimensions\s*=\s*\[([^\]]*)\]", s)
-        lhs_b = re.search(r"lhs_batching_dimensions\s*=\s*\[([^\]]*)\]", s)
-        rhs_b = re.search(r"rhs_batching_dimensions\s*=\s*\[([^\]]*)\]", s)
-        def vals(m):
-            return [x for x in re.split(r"[,\s]+", m.group(1).strip()) if x] if m else []
-        if vals(lhs_b) or vals(rhs_b):
-            raise NotImplementedError(f"batched dot_general not supported: {s}")
-        lc, rc = vals(lhs_c), vals(rhs_c)
-        lrank = len(ShapedType(op.operands[0].type).shape)
-        rrank = len(ShapedType(op.operands[1].type).shape)
-        if lrank != 2 or rrank != 2 or lc != ["1"] or rc != ["0"]:
-            raise NotImplementedError(f"only plain 2D matmul supported: {s}")
+        return (cls._ints(s, "lhs_batching_dimensions"),
+                cls._ints(s, "rhs_batching_dimensions"),
+                cls._ints(s, "lhs_contracting_dimensions"),
+                cls._ints(s, "rhs_contracting_dimensions"))
+
+    def _emit_conv(self, rt, b, op, ref):
+        s = str(op.attributes["dimension_numbers"])
+        # #stablehlo.conv<[b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1]>
+        m = re.search(r"<\[([^\]]*)\]x\[([^\]]*)\]->\[([^\]]*)\]>", s)
+        if not m:
+            raise NotImplementedError(f"conv dimension_numbers: {s}")
+        def spec(group):
+            toks = [t.strip() for t in group.split(",")]
+            return toks
+        in_s, k_s, out_s = spec(m.group(1)), spec(m.group(2)), spec(m.group(3))
+        dn = {
+            "in_batch": in_s.index("b"), "in_feat": in_s.index("f"),
+            "k_out": k_s.index("o"), "k_in": k_s.index("i"),
+            "out_batch": out_s.index("b"), "out_feat": out_s.index("f"),
+            "in_sp": [in_s.index(str(d)) for d in range(len(in_s) - 2)],
+            "k_sp": [k_s.index(str(d)) for d in range(len(k_s) - 2)],
+            "out_sp": [out_s.index(str(d)) for d in range(len(out_s) - 2)],
+        }
+        strides = _i64_list(op.attributes["window_strides"])
+        rhs_dil = _i64_list(op.attributes["rhs_dilation"])
+        pad = np.asarray(op.attributes["padding"]).reshape(-1, 2)
+        pad_lo = [int(x) for x in pad[:, 0]]
+        pad_hi = [int(x) for x in pad[:, 1]]
+        groups = int(op.attributes["feature_group_count"])
+        return rt.convolution(b, ref(0), ref(1), _shape(op.results[0]), dn,
+                              strides, pad_lo, pad_hi, rhs_dil, groups)
+
+    def _emit_gather(self, rt, b, op, ref):
+        s = str(op.attributes["dimension_numbers"])
+        offset = self._ints(s, "offset_dims")
+        collapsed = self._ints(s, "collapsed_slice_dims")
+        start_map = self._ints(s, "start_index_map")
+        ivd_m = re.search(r"index_vector_dim\s*=\s*(\d+)", s)
+        ivd = int(ivd_m.group(1)) if ivd_m else 0
+        slice_sizes = _i64_list(op.attributes["slice_sizes"])
+        return rt.gather(b, ref(0), ref(1), _shape(op.results[0]),
+                         offset, collapsed, start_map, slice_sizes, ivd)
 
     @staticmethod
     def _main_func(module):

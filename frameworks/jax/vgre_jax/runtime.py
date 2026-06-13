@@ -19,9 +19,12 @@ OP = {
     "Add": 3, "Subtract": 4, "Multiply": 5, "Divide": 6,
     "Maximum": 7, "Minimum": 8, "Power": 9,
     "Negate": 10, "Exp": 11, "Log": 12, "Tanh": 13, "Abs": 14, "Rsqrt": 15,
-    "Compare": 16, "Select": 17,
-    "Broadcast": 18, "Reshape": 19, "Transpose": 20,
-    "Dot": 21, "Reduce": 22,
+    "Sqrt": 16, "Sign": 17, "Floor": 18, "Ceil": 19, "Logistic": 20,
+    "Compare": 21, "Select": 22,
+    "Broadcast": 23, "Reshape": 24, "Transpose": 25,
+    "Dot": 26, "Reduce": 27,
+    "DotGeneral": 28, "Concatenate": 29, "Slice": 30, "Pad": 31,
+    "Convolution": 32, "Gather": 33,
 }
 
 _I64P = POINTER(c_int64)
@@ -78,6 +81,23 @@ class VgreHlo:
         L.vgre_xla_b_compare.restype = c_int
         L.vgre_xla_b_select.argtypes = [c_uint64, c_int, c_int, c_int]
         L.vgre_xla_b_select.restype = c_int
+        L.vgre_xla_b_dot_general.argtypes = [c_uint64, c_int, c_int, _I64P, c_int, _I64P, c_int,
+                                             _I64P, c_int, _I64P, c_int, _I64P, c_int]
+        L.vgre_xla_b_dot_general.restype = c_int
+        L.vgre_xla_b_concatenate.argtypes = [c_uint64, POINTER(c_int), c_int, c_int64, _I64P, c_int]
+        L.vgre_xla_b_concatenate.restype = c_int
+        L.vgre_xla_b_slice.argtypes = [c_uint64, c_int, _I64P, _I64P, _I64P, c_int, _I64P, c_int]
+        L.vgre_xla_b_slice.restype = c_int
+        L.vgre_xla_b_pad.argtypes = [c_uint64, c_int, c_int, _I64P, _I64P, _I64P, c_int, _I64P, c_int]
+        L.vgre_xla_b_pad.restype = c_int
+        L.vgre_xla_b_convolution.argtypes = [c_uint64, c_int, c_int, _I64P, c_int,
+                                             c_int, c_int, c_int, c_int, c_int, c_int,
+                                             _I64P, _I64P, _I64P, c_int,
+                                             _I64P, _I64P, _I64P, _I64P, c_int]
+        L.vgre_xla_b_convolution.restype = c_int
+        L.vgre_xla_b_gather.argtypes = [c_uint64, c_int, c_int, _I64P, c_int, _I64P, c_int,
+                                        _I64P, c_int, _I64P, c_int, _I64P, c_int, c_int]
+        L.vgre_xla_b_gather.restype = c_int
         L.vgre_xla_b_set_root.argtypes = [c_uint64, c_int]
         L.vgre_xla_b_compile.argtypes = [c_uint64]
         L.vgre_xla_b_compile.restype = c_uint64
@@ -133,6 +153,45 @@ class VgreHlo:
 
     def select(self, b, pred, on_true, on_false):
         return _ck(self.lib.vgre_xla_b_select(b, pred, on_true, on_false), "select")
+
+    def dot_general(self, b, lhs, rhs, lb, rb, lc, rc, out_dims):
+        la, ln = _i64arr(lb); ra, rn = _i64arr(rb)
+        ca, cn = _i64arr(lc); da, dn = _i64arr(rc)
+        oa, on = _i64arr(out_dims)
+        return _ck(self.lib.vgre_xla_b_dot_general(b, lhs, rhs, la, ln, ra, rn, ca, cn, da, dn, oa, on),
+                   "dot_general")
+
+    def concatenate(self, b, xs, dim, out_dims):
+        xa = (c_int * len(xs))(*[int(v) for v in xs])
+        oa, on = _i64arr(out_dims)
+        return _ck(self.lib.vgre_xla_b_concatenate(b, xa, len(xs), int(dim), oa, on), "concatenate")
+
+    def slice(self, b, x, starts, limits, strides, out_dims):
+        sa, n = _i64arr(starts); la, _ = _i64arr(limits); ta, _ = _i64arr(strides)
+        oa, on = _i64arr(out_dims)
+        return _ck(self.lib.vgre_xla_b_slice(b, x, sa, la, ta, n, oa, on), "slice")
+
+    def pad(self, b, x, pad_val, low, high, interior, out_dims):
+        la, n = _i64arr(low); ha, _ = _i64arr(high); ia, _ = _i64arr(interior)
+        oa, on = _i64arr(out_dims)
+        return _ck(self.lib.vgre_xla_b_pad(b, x, pad_val, la, ha, ia, n, oa, on), "pad")
+
+    def convolution(self, b, lhs, rhs, out_dims, dn, strides, pad_lo, pad_hi, rhs_dil, groups):
+        oa, on = _i64arr(out_dims)
+        isa, nsp = _i64arr(dn["in_sp"]); ksa, _ = _i64arr(dn["k_sp"]); osa, _ = _i64arr(dn["out_sp"])
+        sta, _ = _i64arr(strides); pla, _ = _i64arr(pad_lo); pha, _ = _i64arr(pad_hi); rda, _ = _i64arr(rhs_dil)
+        return _ck(self.lib.vgre_xla_b_convolution(
+            b, lhs, rhs, oa, on,
+            dn["in_batch"], dn["in_feat"], dn["k_out"], dn["k_in"], dn["out_batch"], dn["out_feat"],
+            isa, ksa, osa, nsp, sta, pla, pha, rda, int(groups)), "convolution")
+
+    def gather(self, b, operand, indices, out_dims, offset_dims, collapsed, start_map,
+               slice_sizes, index_vector_dim):
+        oa, on = _i64arr(out_dims)
+        ofa, nof = _i64arr(offset_dims); ca, nc = _i64arr(collapsed)
+        sma, nsm = _i64arr(start_map); ssa, nss = _i64arr(slice_sizes)
+        return _ck(self.lib.vgre_xla_b_gather(b, operand, indices, oa, on, ofa, nof, ca, nc,
+                                              sma, nsm, ssa, nss, int(index_vector_dim)), "gather")
 
     def set_root(self, b, idx):
         self.lib.vgre_xla_b_set_root(b, idx)
