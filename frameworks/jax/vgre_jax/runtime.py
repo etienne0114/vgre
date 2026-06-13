@@ -29,7 +29,7 @@ OP = {
     "While": 39, "Tuple": 40, "GetTupleElement": 41,
     "DynamicSlice": 42, "DynamicUpdateSlice": 43, "Reverse": 44,
     "Sort": 45, "ReduceGeneral": 46, "And": 47, "Or": 48, "Xor": 49, "Not": 50,
-    "Scatter": 51,
+    "Scatter": 51, "IsFinite": 52,
 }
 
 _I64P = POINTER(c_int64)
@@ -156,6 +156,8 @@ class VgreHlo:
         L.vgre_xla_execute.restype = c_int64
         L.vgre_xla_output_numel.argtypes = [c_uint64]
         L.vgre_xla_output_numel.restype = c_int64
+        L.vgre_xla_execute_multi.argtypes = [c_uint64, POINTER(_F32P), _I64P, c_int, _F32P, c_int64]
+        L.vgre_xla_execute_multi.restype = c_int64
         L.vgre_xla_free.argtypes = [c_uint64]
 
     # ── builder ──────────────────────────────────────────────────────────────
@@ -341,6 +343,29 @@ class VgreHlo:
         if n < 0:
             raise RuntimeError("vgre_xla_execute failed")
         return np.array(out[:n], dtype=np.float32)
+
+    def execute_multi(self, exe, inputs, out_numels) -> list:
+        """Execute a tuple-root module; returns one ndarray per output, split by
+        the given per-output element counts."""
+        bufs = [np.ascontiguousarray(x, dtype=np.float32).ravel() for x in inputs]
+        ptr_arr = (_F32P * len(bufs))()
+        numel_arr = (c_int64 * len(bufs))()
+        keep = []
+        for i, buf in enumerate(bufs):
+            ca = (c_float * buf.size)(*buf.tolist())
+            keep.append(ca)
+            ptr_arr[i] = ctypes.cast(ca, _F32P)
+            numel_arr[i] = buf.size
+        total = int(sum(out_numels))
+        out = (c_float * total)()
+        n = self.lib.vgre_xla_execute_multi(exe, ptr_arr, numel_arr, len(bufs), out, total)
+        if n < 0:
+            raise RuntimeError("vgre_xla_execute_multi failed")
+        flat = np.array(out[:n], dtype=np.float32)
+        res, off = [], 0
+        for k in out_numels:
+            res.append(flat[off:off + k]); off += k
+        return res
 
     def free(self, exe):
         self.lib.vgre_xla_free(exe)

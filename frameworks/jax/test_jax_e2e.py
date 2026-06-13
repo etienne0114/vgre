@@ -26,7 +26,9 @@ PASS = FAIL = 0
 
 def case(name, f, *args):
     global PASS, FAIL
-    args = [np.asarray(a, dtype=np.float32) for a in args]
+    # convert leaf arrays to float32, preserving pytree structure (e.g. a params list)
+    args = [jax.tree_util.tree_map(lambda v: jnp.asarray(np.asarray(v, np.float32)), a)
+            for a in args]
     jit = jax.jit(f)
     ref = np.asarray(jit(*args), dtype=np.float32).ravel()
     try:
@@ -43,6 +45,7 @@ def case(name, f, *args):
 
 
 def main():
+    global PASS, FAIL
     print("=== JAX → StableHLO → VGRE HLO (end-to-end vs jax CPU) ===")
     rng = np.random.default_rng(0)
     x = rng.standard_normal((2, 3)).astype(np.float32)
@@ -233,6 +236,47 @@ def main():
         return toks
     prompt = jnp.asarray(rng.integers(1, Vv, size=(2, 3)).astype(np.float32))
     case("GPT greedy autoregressive (6 tokens)", lambda p: generate(p, 6), prompt)
+
+    # ── training: gradients, optimizer step, and a real SGD loop ─────────────
+    P = [jnp.asarray(rng.standard_normal(s).astype(np.float32)) for s in [(4, 8), (8,), (8, 3), (3,)]]
+    Xtr = jnp.asarray(rng.standard_normal((10, 4)).astype(np.float32))
+    Ytr = jnp.asarray(np.eye(3)[rng.integers(0, 3, 10)].astype(np.float32))
+
+    def xent(params, x, y):
+        W1, b1, W2, b2 = params
+        h = jnp.maximum(x @ W1 + b1, 0.0)
+        logits = h @ W2 + b2
+        logp = logits - jax.nn.logsumexp(logits, -1, keepdims=True)
+        return -jnp.mean(jnp.sum(y * logp, -1))
+
+    case("cross-entropy loss", lambda p, x, y: xent(p, x, y).reshape(1), P, Xtr, Ytr)
+    case("dW1 gradient (backprop)", lambda p, x, y: jax.grad(xent)(p, x, y)[0], P, Xtr, Ytr)
+    case("dW2 gradient (backprop)", lambda p, x, y: jax.grad(xent)(p, x, y)[2], P, Xtr, Ytr)
+
+    # multi-output: one SGD step returns the whole updated parameter set
+    def sgd_step(params, x, y):
+        g = jax.grad(xent)(params, x, y)
+        return [p - 0.3 * gg for p, gg in zip(params, g)]
+    jit_step = jax.jit(sgd_step)
+    ref_leaves = [np.asarray(v, np.float32).ravel() for v in jax.tree_util.tree_leaves(jit_step(P, Xtr, Ytr))]
+    got_leaves = vgre_jax.run_multi(jit_step, P, Xtr, Ytr)
+    ok = len(got_leaves) == len(ref_leaves) and all(
+        np.allclose(g, r, rtol=1e-3, atol=1e-3) for g, r in zip(got_leaves, ref_leaves))
+    print(f"  {'PASS' if ok else 'FAIL'}  SGD step (multi-output, 4 updated params)")
+    PASS += ok; FAIL += (not ok)
+
+    # a 5-step training loop on VGRE: loss must decrease and match jax
+    shapes = [(4, 8), (8,), (8, 3), (3,)]
+    vp = [np.asarray(p, np.float32) for p in P]
+    losses = []
+    for _ in range(5):
+        losses.append(float(np.asarray(jax.jit(xent)(tuple(jnp.asarray(q) for q in vp), Xtr, Ytr))))
+        flat = vgre_jax.run_multi(jit_step, tuple(jnp.asarray(q) for q in vp), Xtr, Ytr)
+        vp = [flat[i].reshape(shapes[i]) for i in range(4)]
+    decreasing = all(losses[i] > losses[i + 1] for i in range(len(losses) - 1))
+    print(f"  {'PASS' if decreasing else 'FAIL'}  training loop loss decreases "
+          f"({losses[0]:.3f} -> {losses[-1]:.3f})")
+    PASS += decreasing; FAIL += (not decreasing)
 
     print(f"\n{PASS} / {PASS + FAIL} passed")
     return 0 if FAIL == 0 else 1

@@ -32,7 +32,7 @@ _UNARY = {
     "stablehlo.floor": "Floor", "stablehlo.ceil": "Ceil",
     "stablehlo.logistic": "Logistic",
     "stablehlo.cosine": "Cos", "stablehlo.sine": "Sin",
-    "stablehlo.not": "Not",
+    "stablehlo.not": "Not", "stablehlo.is_finite": "IsFinite",
     "chlo.erf": "Erf", "chlo.erfc": "Erfc",
 }
 _REDUCE_KIND = {
@@ -81,10 +81,15 @@ class Translator:
             ids, _ = self._emit_block(b, block, arg_ids)
             if not ids:
                 raise NotImplementedError("function has no return")
-            rt.set_root(b, ids[0])
+            # output leaf shapes (a function may return several arrays / a pytree)
+            ret = [op for op in block.operations
+                   if op.operation.name in ("func.return", "stablehlo.return")][-1]
+            out_shapes = [_shape(v) for v in ret.operands]
+            root = rt.tuple(b, ids) if len(ids) > 1 else ids[0]
+            rt.set_root(b, root)
             exe = rt.compile(b)
             b = 0  # consumed
-            return Executable(rt, exe)
+            return Executable(rt, exe, out_shapes)
         finally:
             if b:
                 rt.free_builder(b)
@@ -424,13 +429,24 @@ class Translator:
 
 
 class Executable:
-    def __init__(self, rt: VgreHlo, exe: int):
+    def __init__(self, rt: VgreHlo, exe: int, out_shapes=None):
         self.rt = rt
         self.exe = exe
+        self.out_shapes = out_shapes or []
 
     def __call__(self, *inputs) -> np.ndarray:
         arrs = [np.asarray(x, dtype=np.float32) for x in inputs]
         return self.rt.execute(self.exe, arrs)
+
+    def call_multi(self, *inputs) -> list:
+        """Execute and return one flat ndarray per output leaf (in order)."""
+        arrs = [np.asarray(x, dtype=np.float32) for x in inputs]
+        numels = [int(np.prod(s)) if s else 1 for s in self.out_shapes]
+        return self.rt.execute_multi(self.exe, arrs, numels)
+
+    @property
+    def n_outputs(self) -> int:
+        return len(self.out_shapes)
 
     def output_numel(self) -> int:
         return self.rt.output_numel(self.exe)

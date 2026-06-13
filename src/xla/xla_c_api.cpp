@@ -229,6 +229,47 @@ extern "C" int64_t vgre_xla_execute(uint64_t exe, const float* const* in_data,
     return (int64_t)res.data.size();
 }
 
+// Multi-output execute: when the root is a Tuple (a function returning several
+// arrays / a pytree), write every output flattened+concatenated into out_data
+// and return the total element count. The caller splits by known per-output sizes.
+extern "C" int64_t vgre_xla_execute_multi(uint64_t exe, const float* const* in_data,
+                                          const int64_t* in_numel, int n_in,
+                                          float* out_data, int64_t out_capacity) {
+    HloModule mod;
+    {
+        std::lock_guard<std::mutex> lk(exeMu());
+        auto it = exes().find(exe);
+        if (it == exes().end()) return -1;
+        mod = it->second;
+    }
+    std::vector<Literal> params(n_in);
+    for (size_t i = 0; i < mod.size(); ++i) {
+        const HloInstruction& I = mod.instr((int)i);
+        if (I.op != HloOp::Parameter) continue;
+        int pi = I.param_index;
+        if (pi < 0 || pi >= n_in) return -1;
+        Literal lit; lit.shape = I.shape;
+        if (in_numel[pi] != I.shape.numel()) return -1;
+        lit.data.assign(in_data[pi], in_data[pi] + in_numel[pi]);
+        params[pi] = std::move(lit);
+    }
+    std::vector<Literal> res;
+    try {
+        res = mod.evaluateMulti(params);
+    } catch (...) {
+        return -1;
+    }
+    int64_t total = 0;
+    for (const auto& r : res) total += (int64_t)r.data.size();
+    if (total > out_capacity) return -1;
+    int64_t off = 0;
+    for (const auto& r : res) {
+        std::memcpy(out_data + off, r.data.data(), r.data.size() * sizeof(float));
+        off += (int64_t)r.data.size();
+    }
+    return total;
+}
+
 extern "C" void vgre_xla_free(uint64_t exe) {
     std::lock_guard<std::mutex> lk(exeMu());
     exes().erase(exe);

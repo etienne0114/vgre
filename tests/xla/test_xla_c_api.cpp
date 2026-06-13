@@ -71,6 +71,27 @@ int main() {
     vgre_xla_free(exe);
     check("freed handle no longer executes", vgre_xla_output_numel(exe) == -1);
 
+    // ── multi-output: a module whose root is a Tuple (e.g. a training step) ──
+    {
+        HloModule mm;
+        int p = mm.parameter(0, Shape{{2}});
+        int q = mm.parameter(1, Shape{{2}});
+        int sum = mm.binary(HloOp::Add, p, q);
+        int diff = mm.binary(HloOp::Subtract, p, q);
+        mm.setRoot(mm.tuple({sum, diff}));            // two outputs
+        std::string blob2 = serialize(mm);
+        uint64_t e2 = vgre_xla_compile(blob2.data(), blob2.size());
+        std::vector<float> pd = {5, 7}, qd = {1, 2};
+        const float* ins2[2] = {pd.data(), qd.data()};
+        int64_t nm2[2] = {2, 2};
+        std::vector<float> out2(4, 0.0f);
+        int64_t got = vgre_xla_execute_multi(e2, ins2, nm2, 2, out2.data(), 4);
+        check("execute_multi returns 4 total elements", got == 4);
+        // [sum(5+1,7+2)=6,9][diff(5-1,7-2)=4,5]
+        check("execute_multi concatenates both outputs", approx(out2, {6, 9, 4, 5}));
+        vgre_xla_free(e2);
+    }
+
     std::printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }
