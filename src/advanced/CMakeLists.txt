@@ -13,6 +13,7 @@ add_library(vgre_advanced OBJECT
     capacity_planner.cpp
     fault_tolerance.cpp
     api_management.cpp
+    traffic_manager.cpp
     vgre_workload_engine.cpp
     ipc_manager.cpp
     tcp_cluster/tcp_cluster_manager.cpp
