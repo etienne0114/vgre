@@ -694,6 +694,11 @@ if(Python3_EXECUTABLE)
     add_test(NAME HelmChart COMMAND ${Python3_EXECUTABLE}
         ${PROJECT_SOURCE_DIR}/deploy/helm/validate_chart.py)
     set_tests_properties(HelmChart PROPERTIES TIMEOUT 30)
+
+    # Deploy: validate Terraform module + GitOps (ArgoCD/Kustomize/Flux) manifests.
+    add_test(NAME IaCManifests COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/deploy/validate_iac.py)
+    set_tests_properties(IaCManifests PROPERTIES TIMEOUT 30)
 endif()
 
 # Compliance: tamper-evident audit log + GDPR crypto-erasure.

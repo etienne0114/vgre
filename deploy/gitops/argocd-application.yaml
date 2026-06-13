@@ -1,0 +1,32 @@
+# ArgoCD Application — GitOps continuous delivery of VGRE from this repo.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vgre
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/etienne0114/virtual-gpu-runtime
+    targetRevision: main
+    path: deploy/helm/vgre
+    helm:
+      valueFiles:
+        - values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
