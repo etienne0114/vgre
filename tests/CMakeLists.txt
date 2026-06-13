@@ -709,6 +709,12 @@ target_link_libraries(test_capacity_planner PRIVATE vgre)
 add_test(NAME CapacityPlanner COMMAND test_capacity_planner)
 set_tests_properties(CapacityPlanner PROPERTIES TIMEOUT 30)
 
+# Fault tolerance: Byzantine-robust aggregation + elastic membership.
+add_executable(test_fault_tolerance advanced/test_fault_tolerance.cpp)
+target_link_libraries(test_fault_tolerance PRIVATE vgre)
+add_test(NAME FaultTolerance COMMAND test_fault_tolerance)
+set_tests_properties(FaultTolerance PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)

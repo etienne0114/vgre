@@ -278,7 +278,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: <1μs latency for small message allreduce, linear scaling to 1024+ nodes
 
 ### 5.2 Elastic & Fault-Tolerant Training — P2
-- **STATUS (2026-06-13): PARTIAL** — checkpoint/restore with integrity validation provided by `vgre::backup::BackupArchive` (§9.1, commit edca0f3); elastic node membership + Byzantine fault tolerance pending.
+- **STATUS (2026-06-13): DONE (core)** — checkpoint/restore via `vgre::backup` (§9.1) + **`vgre::advanced::RobustAggregator`** (coordinate-wise median, trimmed mean, Krum/Multi-Krum Byzantine-robust aggregation) + **`ElasticMembership`** (dynamic join/leave, dense ranks, epoch-bumped rendezvous) (`test_fault_tolerance` 14/14). Gradient compression + hierarchical parameter servers pending.
 - **Gap**: No support for dynamic scaling or fault recovery in distributed training workloads.
 - **Design**: Production-grade distributed training:
   - Elastic training with dynamic node addition/removal
