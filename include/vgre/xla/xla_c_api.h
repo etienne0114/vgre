@@ -72,6 +72,11 @@ int vgre_xla_b_gather(uint64_t b, int operand, int indices, const int64_t* out_d
                       const int64_t* offset_dims, int n_off, const int64_t* collapsed, int n_col,
                       const int64_t* start_map, int n_sm, const int64_t* slice_sizes, int n_ss,
                       int index_vector_dim);
+int vgre_xla_b_reduce_window(uint64_t b, int x, int init, const char* kind,
+                             const int64_t* out_dims, int n_out,
+                             const int64_t* win_dims, const int64_t* win_strides,
+                             const int64_t* pad_lo, const int64_t* pad_hi,
+                             const int64_t* base_dil, const int64_t* win_dil, int n);
 
 void vgre_xla_b_set_root(uint64_t b, int id);
 

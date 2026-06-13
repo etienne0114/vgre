@@ -385,6 +385,39 @@ Literal HloModule::evaluate(const std::vector<Literal>& params) const {
                 }
                 break;
             }
+            case HloOp::ReduceWindow: {
+                const Literal& in = vals[I.operands[0]];
+                float init = vals[I.operands[1]].data[0];
+                int rank = (int)in.shape.rank();
+                auto inSt = rowMajorStrides(in.shape);
+                auto oSt = rowMajorStrides(I.shape);
+                int64_t wnum = 1;
+                for (int64_t w : I.rw_window_dims) wnum *= w;
+                std::vector<int64_t> oc(rank), wc(rank), ic(rank);
+                for (int64_t o = 0; o < I.shape.numel(); ++o) {
+                    decode(o, oSt, oc);
+                    float acc = init;
+                    for (int64_t w = 0; w < wnum; ++w) {
+                        int64_t rem = w; bool inb = true;
+                        for (int d = rank - 1; d >= 0; --d) { wc[d] = rem % I.rw_window_dims[d]; rem /= I.rw_window_dims[d]; }
+                        for (int d = 0; d < rank; ++d) {
+                            int64_t pos = oc[d] * I.rw_window_strides[d] - I.rw_pad_low[d]
+                                          + wc[d] * I.rw_window_dil[d];
+                            if (pos < 0 || pos >= in.shape.dims[d]) { inb = false; break; }
+                            ic[d] = pos;
+                        }
+                        if (!inb) continue;  // outside padding contributes the identity
+                        float x = in.data[encode(ic, inSt)];
+                        if (I.reduce_kind == "sum") acc += x;
+                        else if (I.reduce_kind == "max") acc = acc > x ? acc : x;
+                        else if (I.reduce_kind == "min") acc = acc < x ? acc : x;
+                        else if (I.reduce_kind == "prod") acc *= x;
+                        else throw std::runtime_error("bad reduce_window kind");
+                    }
+                    out.data[o] = acc;
+                }
+                break;
+            }
         }
         vals[idx] = std::move(out);
     }
@@ -482,6 +515,11 @@ int HloModule::convolution(int lhs, int rhs, Shape out) {
 }
 int HloModule::gather(int operand, int indices, Shape out) {
     HloInstruction i; i.op = HloOp::Gather; i.operands = {operand, indices}; i.shape = std::move(out);
+    return add(std::move(i));
+}
+int HloModule::reduceWindow(int x, int init, const std::string& kind, Shape out) {
+    HloInstruction i; i.op = HloOp::ReduceWindow; i.operands = {x, init}; i.shape = std::move(out);
+    i.reduce_kind = kind;
     return add(std::move(i));
 }
 

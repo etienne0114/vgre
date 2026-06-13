@@ -132,6 +132,9 @@ class Translator:
             shp = _shape(op.results[0])
             sc = float(data[0]) if data.size == 1 else None
             return rt.constant(b, shp, data), sc
+        if name == "stablehlo.dot":
+            # plain 2-D matmul [M,K]·[K,N] (TF emits this; jax emits dot_general)
+            return rt.dot(b, ref(0), ref(1)), None
         if name == "stablehlo.dot_general":
             lb, rb, lc, rc = self._dot_dims(op)
             return rt.dot_general(b, ref(0), ref(1), lb, rb, lc, rc, _shape(op.results[0])), None
@@ -153,6 +156,8 @@ class Translator:
             return self._emit_conv(rt, b, op, ref), None
         if name == "stablehlo.gather":
             return self._emit_gather(rt, b, op, ref), None
+        if name == "stablehlo.reduce_window":
+            return self._emit_reduce_window(rt, b, op, ref), None
         if name == "stablehlo.broadcast_in_dim":
             bdims = _i64_list(op.attributes["broadcast_dimensions"])
             return rt.broadcast(b, ref(0), _shape(op.results[0]), bdims), None
@@ -169,9 +174,10 @@ class Translator:
         if name == "stablehlo.reduce":
             return self._emit_reduce(rt, b, op, ref, const_scalar), None
         if name == "stablehlo.convert":
-            # The engine is single-dtype float32; convert is dtype plumbing
-            # (f32<->bf16, integer index parameters carried as float). Identity.
-            return ref(0), None
+            # Single-dtype float32 engine: convert is dtype plumbing (f32<->bf16,
+            # integer index params carried as float). Identity — and propagate a
+            # known scalar so a converted constant can still seed a reduce init.
+            return ref(0), const_scalar.get(op.operands[0])
         raise NotImplementedError(f"unsupported StableHLO op: {name}")
 
     def _emit_reduce(self, rt, b, op, ref, const_scalar):
@@ -240,6 +246,26 @@ class Translator:
         groups = int(op.attributes["feature_group_count"])
         return rt.convolution(b, ref(0), ref(1), _shape(op.results[0]), dn,
                               strides, pad_lo, pad_hi, rhs_dil, groups)
+
+    def _emit_reduce_window(self, rt, b, op, ref):
+        # combiner op in the body decides the kind (max-pool / sum-pool / ...).
+        body = op.regions[0].blocks[0]
+        kind = None
+        for inner in body.operations:
+            if inner.operation.name in _REDUCE_KIND:
+                kind = _REDUCE_KIND[inner.operation.name]
+                break
+        if kind is None:
+            raise NotImplementedError(f"unsupported reduce_window combiner: {op}")
+        win = _i64_list(op.attributes["window_dimensions"])
+        strides = _i64_list(op.attributes["window_strides"])
+        wdil = _i64_list(op.attributes["window_dilations"])
+        bdil = _i64_list(op.attributes["base_dilations"])
+        pad = np.asarray(op.attributes["padding"]).reshape(-1, 2)
+        pad_lo = [int(v) for v in pad[:, 0]]
+        pad_hi = [int(v) for v in pad[:, 1]]
+        return rt.reduce_window(b, ref(0), ref(1), kind, _shape(op.results[0]),
+                                win, strides, pad_lo, pad_hi, bdil, wdil)
 
     def _emit_gather(self, rt, b, op, ref):
         s = str(op.attributes["dimension_numbers"])

@@ -89,6 +89,9 @@ std::string serialize(const HloModule& m) {
         putVec(b, I.gather_offset_dims); putVec(b, I.gather_collapsed);
         putVec(b, I.gather_start_map); putVec(b, I.gather_slice_sizes);
         putI64(b, I.gather_index_vector_dim);
+        putVec(b, I.rw_window_dims); putVec(b, I.rw_window_strides);
+        putVec(b, I.rw_pad_low); putVec(b, I.rw_pad_high);
+        putVec(b, I.rw_base_dil); putVec(b, I.rw_window_dil);
     }
     putU32(b, (uint32_t)m.root());
     return b;
@@ -131,6 +134,9 @@ bool deserialize(const std::string& blob, HloModule& out) {
         I.gather_offset_dims = getVec(r); I.gather_collapsed = getVec(r);
         I.gather_start_map = getVec(r); I.gather_slice_sizes = getVec(r);
         I.gather_index_vector_dim = r.i64();
+        I.rw_window_dims = getVec(r); I.rw_window_strides = getVec(r);
+        I.rw_pad_low = getVec(r); I.rw_pad_high = getVec(r);
+        I.rw_base_dil = getVec(r); I.rw_window_dil = getVec(r);
         out.add(std::move(I));
     }
     int root = (int)r.u32();
@@ -363,6 +369,21 @@ extern "C" int vgre_xla_b_gather(uint64_t b, int operand, int indices, const int
         I.gather_start_map = vec(start_map, n_sm);
         I.gather_slice_sizes = vec(slice_sizes, n_ss);
         I.gather_index_vector_dim = index_vector_dim;
+        return id;
+    });
+}
+
+extern "C" int vgre_xla_b_reduce_window(uint64_t b, int x, int init, const char* kind,
+                                        const int64_t* out_dims, int n_out,
+                                        const int64_t* win_dims, const int64_t* win_strides,
+                                        const int64_t* pad_lo, const int64_t* pad_hi,
+                                        const int64_t* base_dil, const int64_t* win_dil, int n) {
+    return withBuilder(b, [&](HloModule& m) {
+        int id = m.reduceWindow(x, init, kind ? kind : "max", Shape{vec(out_dims, n_out)});
+        HloInstruction& I = m.last();
+        I.rw_window_dims = vec(win_dims, n); I.rw_window_strides = vec(win_strides, n);
+        I.rw_pad_low = vec(pad_lo, n); I.rw_pad_high = vec(pad_hi, n);
+        I.rw_base_dil = vec(base_dil, n); I.rw_window_dil = vec(win_dil, n);
         return id;
     });
 }
