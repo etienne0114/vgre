@@ -2,6 +2,7 @@
 
 #include "cuda_driver_internal.h"
 #include "vgre/common/platform.h"
+#include "vgre/mig/mig_manager.h"
 #include <unordered_map>
 #include <mutex>
 
@@ -50,7 +51,10 @@ CUresult cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
   vgre::api::cudaDeviceProp_t prop{};
   auto err = vgre::api::CUDAInterceptor::instance().getDeviceProperties(&prop, dev);
   if (err != vgre::api::cudaSuccess) return toCU(err);
-  *bytes = prop.totalGlobalMem;
+  // When this process is pinned to a MIG instance (VGRE_MIG_DEVICE), report the
+  // instance's memory budget rather than the whole device — real MIG behaviour.
+  vgre::mig::MigManager::instance().configureDevice(prop.totalGlobalMem, 7, 8);
+  *bytes = vgre::mig::MigManager::instance().effectiveDeviceMemory(prop.totalGlobalMem);
   return CUDA_SUCCESS;
 }
 

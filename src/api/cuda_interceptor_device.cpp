@@ -8,6 +8,7 @@
 #include "vgre/core/scheduler.h"
 #include "vgre/core/texture_manager.h"
 #include "vgre/core/virtual_gpu_device.h"
+#include "vgre/mig/mig_manager.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -367,8 +368,13 @@ cudaError_t CUDAInterceptor::memGetInfo(size_t *freeBytes,
     return cudaErrorInvalidValue;
 
   auto &mm = core::RuntimeEngine::instance().getMemoryManager();
-  const size_t total = mm.getTotalMemory();
+  size_t total = mm.getTotalMemory();
   const size_t used = mm.getUsedMemory();
+  // Honor MIG partitioning: a process pinned to an instance (VGRE_MIG_DEVICE)
+  // sees that instance's memory budget, not the whole physical device.
+  auto &mig = vgre::mig::MigManager::instance();
+  mig.configureDevice(total, 7, 8);
+  total = mig.effectiveDeviceMemory(total);
   *totalBytes = total;
   *freeBytes = (used >= total) ? 0 : (total - used);
   return cudaSuccess;
