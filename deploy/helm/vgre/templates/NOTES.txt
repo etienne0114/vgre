@@ -1,0 +1,11 @@
+VGRE has been deployed.
+
+  Device plugin (DaemonSet): {{ include "vgre.fullname" . }}-device-plugin
+  Operator (Deployment):     {{ include "vgre.fullname" . }}-operator
+  Advertised GPU resource:   {{ .Values.devicePlugin.resourceName }}
+
+Request an emulated GPU in a pod with:
+
+  resources:
+    limits:
+      {{ .Values.devicePlugin.resourceName }}: 1
