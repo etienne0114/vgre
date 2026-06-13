@@ -5,15 +5,16 @@ against Keras' own inference. A Keras model's forward pass is jax-traceable
 (Keras JAX backend), so it lowers to StableHLO and runs on VGRE unchanged.
 
 ```
-keras_worker.py  (subprocess)          test_keras_e2e.py  (libvgre driver)
-  KERAS_BACKEND=jax; build model
-  jax.jit(model).lower -> StableHLO ─file─► parse (jaxlib MLIR) -> VGRE HLO
-  run -> reference ──────────────────────►  execute on VGRE, compare to Keras
+KERAS_BACKEND=jax; keras model(x, training=False)
+  -> jax.jit -> StableHLO -> VGRE translator -> VGRE HLO engine -> result
+                                                  (vs keras model(x))
 ```
 
-Lowering runs in an isolated subprocess: some layers (e.g. `Bidirectional`) pull
-in **TensorFlow**, whose bundled LLVM collides with libvgre.so's LLVM if loaded
-in the same process. The driver never imports Keras/TF.
+Runs in one process. Some layers (e.g. `Bidirectional`) pull in **TensorFlow**,
+which bundles its own LLVM + protobuf; libvgre is loaded with **`RTLD_DEEPBIND`**
+(see `vgre_jax/runtime.py`) plus a linker version script so it binds to its own
+copies and coexists with TensorFlow without the LLVM/protobuf symbol collision.
+(`keras_worker.py` holds the model builders.)
 
 ## Verified models (test_keras_e2e.py, 10/10 vs Keras)
 
