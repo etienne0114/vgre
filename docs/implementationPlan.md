@@ -1,6 +1,6 @@
 # VGRE Implementation Plan — Phase 4 (Production Enterprise Readiness)
 
-**Last Updated**: 2026-06-12
+**Last Updated**: 2026-06-13
 
 **Comprehensive Codebase Analysis (2026-06-12)** reveals VGRE as a sophisticated, production-ready 
 CUDA emulation platform with 249 source files, 240 test files, and advanced implementations across:
@@ -26,7 +26,36 @@ cross-platform verification, enterprise observability, and advanced deployment a
 - Cross-platform Windows/macOS production support critical for enterprise adoption
 - Advanced observability with ML-based anomaly detection required for 99.99% SLA
 
-**Status: Phase 4 PLANNING** — 50 tracks across 12 categories targeting enterprise production readiness
+**Status: Phase 4 IN PROGRESS** — 50 tracks across 12 categories; the self-contained,
+software-implementable subset is being delivered. See `missingFeatures.md` §0 for the full
+per-track STATUS lines and Reality Audit.
+
+---
+
+## Reality correction (2026-06-13)
+
+This plan was authored from generic enterprise research **without auditing `src/`**, so its
+effort/dependency tables describe several already-shipped subsystems as greenfield. Corrected
+status of the matrix tracks below:
+
+| Plan track | Real status | Where |
+|---|---|---|
+| P4-1 Security framework | **PARTIAL** — TPM2 attestation done | `token_manager_tpm2.cpp` |
+| P4-2 Crypto / PQC | **DONE** — AES-GCM/ChaCha/X25519 + ML-KEM-768 hybrid | `secure_channel_crypto.cpp`, `vgre::pqc` (e803964) |
+| P4-3 Audit & compliance | **DONE (core)** — tamper-evident log + GDPR erasure | `vgre::compliance` (cda87ad) |
+| P4-4 Fuzzing | **DONE** — libFuzzer + smoke ctest | `tools/fuzzing` (e89f063) |
+| P4-5 Monitoring | **DONE** — Prometheus + OTLP | `metrics_server.cpp`, `runtime_profiler` |
+| P4-11 K8s orchestration | **DONE** — device plugin + operator + **MIG** | `src/deployment/`, `vgre::mig` (6bb1a99) |
+| P4-14 RDMA | **DONE** — real libibverbs | `rdma_transport.cpp` |
+| P4-24 Backup/DR | **DONE (core)** — content-addressed archive | `vgre::backup` (edca0f3) |
+| P4-26 Secrets | **DONE (core)** — sealed versioned store | `vgre::secrets` (e381a31) |
+| P4-27 Identity/SSO | **DONE (core)** — OIDC/JWT + RBAC | `vgre::identity` (b532465) |
+
+Remaining tracks (P4-7/8/9/10/12/13/15/16/17/19/20/21/22/23/25/28/29/30/31/32/33/34/35) are
+either PARTIAL or require an external system/hardware (cloud, IdP, Vault, Istio, Metal,
+TensorRT, PyTorch-XLA, RISC-V) to be implemented honestly — their in-tree primitives already
+exist where applicable. The 24-30 month / 50-60 engineer / $35-50M figures below are the
+original aspirational estimate, not a reflection of remaining work.
 
 ---
 
@@ -137,6 +166,7 @@ cross-platform verification, enterprise observability, and advanced deployment a
 ### P0 — Critical Security Foundation
 
 #### P4-1 — GPU Runtime Security Framework
+**STATUS (2026-06-13): PARTIAL** — TPM 2.0 attestation DONE (`token_manager_tpm2.cpp`, real TSS2 ESAPI NV storage). Intel CET / SEV-SNP·TDX enclaves / HSM / FIPS-140 certification require hardware + external audit.
 **Files**: `src/security/framework/`, `include/vgre/security/attestation.h`, `src/security/memory_protection.cpp`
 **Objective**: Implement comprehensive GPU security framework addressing enterprise security requirements
 **Key Components**:
@@ -154,7 +184,8 @@ cross-platform verification, enterprise observability, and advanced deployment a
 **Risk Mitigation**: Hardware dependency risks mitigated through software fallbacks; compliance risks addressed through early legal/audit review
 
 #### P4-2 — Advanced Cryptographic Infrastructure  
-**Files**: `src/security/crypto/pqc/`, `include/vgre/security/crypto.h`, `src/security/crypto/hardware.cpp`
+**STATUS (2026-06-13): DONE (core)** — `vgre::pqc` (commit e803964) ships FIPS-202 Keccak (NIST KATs), ML-KEM-768 (FIPS 203, round-trip + FO + pinned vector validated), and an X25519+ML-KEM-768 hybrid KEM, on top of the existing AES-256-GCM/ChaCha20/X25519/HKDF suite. Homomorphic/threshold crypto + Intel QAT remain out of scope.
+**Files**: `include/vgre/pqc/{keccak,mlkem,hybrid_kem}.h`, `src/pqc/*` (planned paths below superseded)
 **Objective**: Next-generation cryptographic stack for post-quantum and zero-trust architectures
 **Key Components**:
 - Post-quantum cryptography (CRYSTALS-Kyber for key exchange, CRYSTALS-Dilithium for signatures)
@@ -171,7 +202,8 @@ cross-platform verification, enterprise observability, and advanced deployment a
 **Implementation Notes**: Gradual rollout with hybrid classical/post-quantum mode for compatibility
 
 #### P4-3 — Comprehensive Audit & Compliance Framework
-**Files**: `src/compliance/audit/`, `include/vgre/compliance/`, `src/compliance/reporting/`
+**STATUS (2026-06-13): DONE (core)** — `vgre::compliance::AuditLog` (commit cda87ad): HMAC hash-chained tamper-evident log + GDPR Art. 17 crypto-erasure with verifiable deletion certificate, wired into cluster security events. SOC 2/FedRAMP "reporting" is external attestation against this trail.
+**Files**: `include/vgre/compliance/audit_log.h`, `src/compliance/audit_log.cpp`
 **Objective**: Enterprise-grade audit, compliance, and regulatory framework
 **Key Components**:
 - Immutable audit logging with cryptographic integrity using Merkle tree structures
@@ -189,7 +221,8 @@ cross-platform verification, enterprise observability, and advanced deployment a
 **Risk Mitigation**: Early engagement with legal/compliance teams; phased rollout starting with internal audit
 
 #### P4-4 — Advanced Fuzzing & Vulnerability Testing
-**Files**: `tools/security/fuzzing/`, `tests/security/`, `src/security/testing/`
+**STATUS (2026-06-13): DONE (core)** — libFuzzer targets over JSON/JWT/PTX parsers + deterministic `FuzzSmoke` ctest (commit e89f063). SAST/DAST vendor scanners are external.
+**Files**: `tools/fuzzing/`, `tests/fuzzing/test_fuzz_smoke.cpp`
 **Objective**: GPU-native security testing framework for comprehensive vulnerability detection
 **Key Components**:
 - Property-based fuzzing for CUDA API surface using coverage-guided mutation
@@ -326,7 +359,8 @@ cross-platform verification, enterprise observability, and advanced deployment a
 ### P1 — AI Infrastructure Integration
 
 #### P4-11 — Kubernetes-Native GPU Orchestration
-**Files**: `k8s/operators/`, `src/k8s/device-plugin/`, `manifests/production/`, `helm-charts/`
+**STATUS (2026-06-13): DONE except multi-cluster federation** — Go device plugin + daemonset + kubebuilder operator (CRD/controllers/RBAC) + **MIG partitioning** with per-tenant budget isolation (`vgre::mig`, commit 6bb1a99).
+**Files**: `src/deployment/k8s_device_plugin/`, `src/deployment/vgre_operator/`, `src/mig/`
 **Objective**: Deep Kubernetes integration for modern ML infrastructure deployment
 **Key Components**:
 - Custom Resource Definitions (CRDs) for VGRE GPU resources with lifecycle management

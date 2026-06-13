@@ -1,6 +1,6 @@
 # VGRE — Phase 4: Production Enterprise Readiness
 
-**Last Updated**: 2026-06-12
+**Last Updated**: 2026-06-13 (per-track STATUS lines added; see §0 Reality Audit)
 
 This is the authoritative roadmap for VGRE's **Phase 4: Production Enterprise Readiness**. 
 **Comprehensive Codebase Analysis (2026-06-12)** reveals VGRE as a mature, sophisticated CUDA 
@@ -81,6 +81,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 1. Security Hardening & Compliance — P0 CRITICAL
 
 ### 1.1 GPU Runtime Security Framework — P0
+- **STATUS (2026-06-13): PARTIAL** — TPM 2.0 attestation DONE (`token_manager_tpm2.cpp`, real TSS2 ESAPI). Intel CET / SEV-SNP·TDX enclaves / HSM / FIPS-140 certification require hardware + external audit.
 - **Critical Gap**: GPU runtimes bypass traditional kernel security controls. Current VGRE has basic authentication but lacks enterprise security frameworks essential for production AI cloud deployment.
 - **Industry Context**: 2026 research shows GPU Rowhammer attacks (1,171 bit flips on RTX 3060), NVIDIA Container Toolkit CVEs, and GPU-to-network bypasses create massive attack surface.
 - **Design**: Implement comprehensive GPU security framework including:
@@ -93,6 +94,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Passes FIPS 140-2 Level 3 compliance testing, resists known GPU Rowhammer attacks, integrates with enterprise identity providers (Okta, Azure AD)
 
 ### 1.2 Advanced Cryptographic Infrastructure — P0
+- **STATUS (2026-06-13): DONE (core)** — AES-256-GCM/CTR, ChaCha20-Poly1305, X25519, HKDF (`secure_channel_crypto.cpp`) + **post-quantum ML-KEM-768 (FIPS 203) + X25519 hybrid KEM** (`vgre::pqc`, commit e803964). Homomorphic encryption / threshold crypto / Intel QAT are out of scope (research / external hardware).
 - **Gap**: Current basic AES-256-CTR is insufficient for enterprise zero-trust architectures and emerging post-quantum threat landscape.
 - **Design**: Implement next-generation cryptographic stack:
   - Post-quantum cryptography (NIST standardized algorithms: CRYSTALS-Kyber, CRYSTALS-Dilithium)
@@ -104,6 +106,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Quantum-resistant cluster authentication, hardware crypto acceleration >10x software performance
 
 ### 1.3 Comprehensive Audit & Compliance Framework — P0
+- **STATUS (2026-06-13): DONE (core)** — `vgre::compliance::AuditLog` (commit cda87ad): HMAC hash-chained tamper-evident log, on-disk tamper + wrong-key detection, GDPR Art. 17 crypto-erasure + verifiable deletion certificate, RBAC via `vgre::identity` (§11.1). SOC 2 / ISO 27001 / FedRAMP "reporting" is an external attestation process built on this trail, not code.
 - **Gap**: No audit logging, compliance reporting, or regulatory compliance frameworks (SOC 2, GDPR, HIPAA, FedRAMP).
 - **Design**: Enterprise-grade audit and compliance system:
   - Immutable audit logging with cryptographic integrity (Merkle trees)
@@ -116,6 +119,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Passes SOC 2 Type II audit, generates compliant GDPR deletion reports
 
 ### 1.4 Advanced Fuzzing & Vulnerability Testing — P0
+- **STATUS (2026-06-13): DONE (core)** — libFuzzer harness over the JSON/JWT/PTX untrusted-input parsers (`tools/fuzzing`, `-DVGRE_ENABLE_FUZZERS`) + deterministic `FuzzSmoke` ctest (18k mutated inputs/run) (commit e89f063). SAST/DAST vendor integration (SonarQube/Checkmarx/Veracode) is external.
 - **Gap**: Static security testing only. Need dynamic vulnerability detection for GPU-specific attack vectors.
 - **Design**: GPU-native security testing framework:
   - Property-based fuzzing for CUDA API surface (inspired by CuFuzz research)
@@ -132,6 +136,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 2. Enterprise Observability & Operations — P1
 
 ### 2.1 Production Monitoring & Alerting — P1
+- **STATUS (2026-06-13): DONE (core)** — real Prometheus `/metrics` + health/readiness (`metrics_server.cpp`, now JWT-protectable) and OpenTelemetry OTLP/JSON trace export (`runtime_profiler` → `/v1/traces`). Datadog/New-Relic/Splunk + ML-based anomaly detection are external integrations.
 - **Gap**: Basic Prometheus metrics insufficient for enterprise operations. Missing comprehensive observability for distributed GPU workloads.
 - **Design**: Enterprise-grade observability stack:
   - OpenTelemetry integration with distributed tracing across GPU operations
@@ -144,6 +149,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: 99.9% uptime SLA tracking, <5 second MTTR for common issues via automated remediation
 
 ### 2.2 Advanced Performance Analytics — P1
+- **STATUS (2026-06-13): PARTIAL** — `runtime_profiler` + CUPTI shim + Nsight `.nsys-rep` export + adaptive_execution_engine exist; statistical flame-graph/roofline visualization UI pending.
 - **Gap**: Limited performance analysis tools. Missing modern APM capabilities for GPU workloads.
 - **Design**: Comprehensive performance intelligence platform:
   - GPU kernel flame graphs with call stack sampling
@@ -156,6 +162,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Identifies performance regressions within 1%, provides actionable optimization recommendations
 
 ### 2.3 Capacity Planning & Resource Optimization — P1
+- **STATUS (2026-06-13): PARTIAL** — scheduler + `workload_partitioner` + MIG per-tenant QoS isolation (§4.1) done; ML-based workload prediction / cost-aware autoscaling pending.
 - **Gap**: No intelligent resource allocation or capacity planning for enterprise GPU clusters.
 - **Design**: AI-driven resource management system:
   - ML-based workload prediction and capacity planning
@@ -171,6 +178,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 3. Cross-Platform Production Readiness — P1
 
 ### 3.1 Windows Production Deployment — P1
+- **STATUS (2026-06-13): PARTIAL** — Windows socket manager (`tcp_cluster/windows_socket_manager_*`) + Win32 credential token store + WINDOWS_EXPORT_ALL_SYMBOLS build done; Windows CI / DirectML / Active Directory integration pending.
 - **Critical Gap**: Windows support exists but lacks production readiness (no CI, untested deployment paths).
 - **Industry Context**: Enterprise Windows environments require robust DirectX integration, Windows containers, Active Directory integration.
 - **Design**: Full Windows enterprise support:
@@ -184,6 +192,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Full Windows CI/CD pipeline, Windows containers in production environments
 
 ### 3.2 macOS Silicon & Unified Memory — P1
+- **STATUS (2026-06-13): MISSING** — macOS keychain token backend exists; the Metal Performance Shaders backend genuinely requires Apple Silicon + Metal hardware (cannot be honestly implemented here).
 - **Gap**: macOS support exists but missing Apple Silicon optimization and Metal Performance Shaders integration.
 - **Design**: Native Apple Silicon support:
   - Metal Performance Shaders (MPS) backend for Apple Neural Engine acceleration
@@ -195,6 +204,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Native M2/M3 Pro performance parity with x86_64, MPS acceleration for common ML kernels
 
 ### 3.3 Comprehensive Multi-Architecture Support — P1
+- **STATUS (2026-06-13): PARTIAL** — x86-64 + ARM64 build/run with SIMD guards; RISC-V and WASM runtimes pending (cross-compilation toolchains + QEMU CI).
 - **Gap**: Limited ARM64 testing and optimization, missing RISC-V support for emerging edge deployments.
 - **Design**: Complete multi-architecture matrix:
   - ARM64 optimization with NEON intrinsics and SVE2 support
@@ -210,6 +220,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 4. Modern AI Infrastructure Integration — P1
 
 ### 4.1 Kubernetes-Native GPU Orchestration — P1
+- **STATUS (2026-06-13): DONE** — Go device plugin + daemonset (`src/deployment/k8s_device_plugin/`) + kubebuilder operator with CRD/controllers/RBAC (`vgre_operator/`) + **Multi-Instance GPU partitioning** (`vgre::mig`, commit 6bb1a99: slice placement, per-tenant budget isolation, active-instance memGetInfo).
 - **Gap**: Basic container support insufficient for modern Kubernetes GPU scheduling requirements.
 - **Industry Context**: 2026 production AI requires GPU-aware scheduling, multi-instance GPU (MIG) support, sophisticated resource sharing.
 - **Design**: Native Kubernetes integration:
@@ -223,6 +234,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Successful deployment on production Kubernetes clusters, MIG resource sharing with isolation
 
 ### 4.2 Advanced ML Framework Integration — P1
+- **STATUS (2026-06-13): MISSING** — PyTorch-XLA / TF-XLA / JAX / ONNX-Runtime providers require those frameworks installed and their plugin ABIs; the CUDA Runtime/Driver surface they target is already emulated.
 - **Gap**: Basic CUDA compatibility insufficient for modern ML frameworks requiring specialized optimizations.
 - **Design**: Deep ML framework integration:
   - PyTorch XLA backend with graph optimization
@@ -235,6 +247,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Training throughput within 5% of native CUDA on standard benchmarks (ResNet, BERT, GPT)
 
 ### 4.3 Model Serving & Inference Optimization — P1
+- **STATUS (2026-06-13): PARTIAL** — `core/kv_cache.cpp` provides a PagedAttention-style KV cache primitive; TensorRT-LLM/vLLM compatibility layers require those external runtimes.
 - **Gap**: Advanced serving optimizations missing for production inference workloads.
 - **Design**: Production inference acceleration:
   - TensorRT-LLM compatibility layer for optimized inference
@@ -251,6 +264,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 5. Distributed Computing & Networking — P2
 
 ### 5.1 Advanced Networking & RDMA — P2
+- **STATUS (2026-06-13): DONE** — `src/advanced/rdma_transport.cpp` is real libibverbs (`infiniband/verbs.h`, 47 `ibv_*` calls); NCCL-style collectives in `tcp_cluster/collective_ops_manager.cpp`. <1μs hardware latency claims need an actual InfiniBand fabric to measure.
 - **Gap**: TCP-based cluster communication insufficient for large-scale distributed training requiring <1μs latency.
 - **Industry Context**: 2026 enterprise AI requires InfiniBand/RoCE with GPUDirect RDMA for efficient tensor parallelism.
 - **Design**: High-performance networking stack:
@@ -264,6 +278,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: <1μs latency for small message allreduce, linear scaling to 1024+ nodes
 
 ### 5.2 Elastic & Fault-Tolerant Training — P2
+- **STATUS (2026-06-13): PARTIAL** — checkpoint/restore with integrity validation provided by `vgre::backup::BackupArchive` (§9.1, commit edca0f3); elastic node membership + Byzantine fault tolerance pending.
 - **Gap**: No support for dynamic scaling or fault recovery in distributed training workloads.
 - **Design**: Production-grade distributed training:
   - Elastic training with dynamic node addition/removal
@@ -276,6 +291,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Recovers from 20% node failures within 30 seconds, scales elastically without interruption
 
 ### 5.3 Multi-Cloud & Hybrid Deployments — P2
+- **STATUS (2026-06-13): MISSING** — Terraform modules + cross-cloud networking require live AWS/Azure/GCP accounts; backup/DR `exportSnapshot` (§9.1) provides the cross-region replication primitive.
 - **Gap**: Single-environment deployment model insufficient for enterprise multi-cloud strategies.
 - **Design**: Multi-cloud orchestration:
   - Cloud-agnostic deployment with Terraform modules
@@ -292,6 +308,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 6. Developer Experience & Ecosystem — P2
 
 ### 6.1 Advanced Developer Tools — P2
+- **STATUS (2026-06-13): PARTIAL** — VSCode integration + CUPTI/Nsight profiling export exist; CUDA-GDB-compatible debug stepping pending.
 - **Gap**: Basic debugging insufficient for complex GPU workloads. Missing modern developer experience tools.
 - **Design**: Comprehensive developer platform:
   - Visual Studio Code extension with integrated debugging
@@ -304,6 +321,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Feature parity with NVIDIA Nsight for common debugging workflows
 
 ### 6.2 Comprehensive Documentation & Training — P2
+- **STATUS (2026-06-13): PARTIAL** — technical docs + examples exist; enterprise runbooks / training content pending (content-team work, not code).
 - **Gap**: Technical documentation exists but missing comprehensive guides for enterprise deployment and best practices.
 - **Design**: Enterprise documentation platform:
   - Interactive tutorials with hands-on examples
@@ -316,6 +334,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: <30 minute time-to-first-success for new developers, comprehensive troubleshooting coverage
 
 ### 6.3 Testing & Quality Assurance — P2
+- **STATUS (2026-06-13): PARTIAL** — 240+ tests + **coverage-guided fuzzing** (§1.4, commit e89f063); chaos engineering + mutation testing pending.
 - **Gap**: Basic testing insufficient for enterprise reliability requirements.
 - **Design**: Comprehensive QA framework:
   - Property-based testing for all API surfaces
@@ -332,6 +351,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 7. Next-Generation GPU Architecture Support — P3
 
 ### 7.1 Post-Blackwell Architecture Readiness — P3
+- **STATUS (2026-06-13): PARTIAL** — Blackwell tcgen05 + Tensor Memory already emulated (Phase-3 P3-7); Rubin/HBM4 is unreleased future hardware.
 - **Future-Proofing**: Preparation for NVIDIA Rubin (2026 H2) and beyond.
 - **Design**: Forward compatibility framework:
   - Rubin R100/R200 HBM4 memory architecture (22 TB/s bandwidth)
@@ -343,6 +363,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Emulates next-generation features with forward compatibility guarantees
 
 ### 7.2 Alternative GPU Ecosystem Integration — P3
+- **STATUS (2026-06-13): PARTIAL** — OpenCL + integrated-GPU executor backends exist; AMD ROCm/HIP, Intel oneAPI, Apple Metal pending.
 - **Gap**: NVIDIA-centric implementation limits adoption in diverse GPU ecosystems.
 - **Design**: Multi-vendor GPU support:
   - AMD ROCm compatibility layer with HIP translation
@@ -358,6 +379,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 8. Advanced Analytics & Intelligence — P3
 
 ### 8.1 AI-Driven Operations (AIOps) — P3
+- **STATUS (2026-06-13): MISSING** — requires trained ML pipelines + production telemetry history (the audit log + OTLP traces are the data source it would consume).
 - **Design**: Intelligent operations platform:
   - ML-based anomaly detection and root cause analysis
   - Predictive maintenance with failure forecasting
@@ -368,6 +390,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Reduces manual intervention by >80%, prevents 95% of predictable failures
 
 ### 8.2 Advanced Security Analytics — P3
+- **STATUS (2026-06-13): MISSING** — ML threat models + threat-intel feeds; would consume the §1.3 tamper-evident audit trail as its event source.
 - **Design**: AI-powered security operations:
   - Behavioral analysis for insider threat detection
   - ML-based vulnerability assessment and prioritization
@@ -382,6 +405,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 9. Data Management & Business Continuity — P1
 
 ### 9.1 Enterprise Backup & Disaster Recovery — P1
+- **STATUS (2026-06-13): DONE (core)** — `vgre::backup::BackupArchive` (commit edca0f3): SHA-256 content-addressed dedup, AES-256-GCM at rest, hash-chained point-in-time lineage, restore checksum validation, prune+GC, `exportSnapshot` replication + C ABI. RTO/RPO numbers depend on the deployment's storage/transfer.
 - **Critical Gap**: No backup/restore strategy, disaster recovery automation, or business continuity frameworks.
 - **Industry Context**: Enterprise compliance requires automated backup validation, cross-region replication, and <30 minute recovery time objectives (RTOs).
 - **Design**: Comprehensive data protection and disaster recovery system:
@@ -395,6 +419,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: <30 minute RTO, <15 minute RPO, 99.99% backup success rate
 
 ### 9.2 Data Lake Integration & ETL Pipelines — P1
+- **STATUS (2026-06-13): MISSING** — S3/ADLS/GCS + ETL orchestration require live data-lake endpoints.
 - **Gap**: No integration with enterprise data lakes, ETL pipelines, or data governance frameworks.
 - **Design**: Enterprise data management platform:
   - Data lake integration (S3, Azure Data Lake, Google Cloud Storage)
@@ -407,6 +432,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Processes petabyte-scale datasets, maintains complete data lineage
 
 ### 9.3 Advanced Secrets Management — P1
+- **STATUS (2026-06-13): DONE (core)** — `vgre::secrets::SecretStore` (commit e381a31): AES-256-GCM-sealed, master key rooted in OS/TPM credential store, versioned zero-downtime rotation, owner+grant access policy, audited via §1.3. HashiCorp Vault / AWS-SM / Azure-KV are remote backends that bolt onto this same interface.
 - **Gap**: Basic token management insufficient for enterprise secret lifecycle management.
 - **Design**: Enterprise secrets management system:
   - Integration with enterprise secret stores (HashiCorp Vault, AWS Secrets Manager, Azure Key Vault)
@@ -423,6 +449,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 10. Modern DevOps & Infrastructure Automation — P2
 
 ### 10.1 GitOps & Progressive Delivery — P2
+- **STATUS (2026-06-13): MISSING** — ArgoCD/Flux workflows require a Git platform + cluster; external.
 - **Gap**: No GitOps workflows, progressive delivery, or automated deployment pipelines.
 - **Design**: Modern deployment automation platform:
   - GitOps workflows with automated deployment from Git repositories
@@ -435,6 +462,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Zero-downtime deployments, automated rollback on failure detection
 
 ### 10.2 API Gateway & Service Mesh Integration — P2
+- **STATUS (2026-06-13): MISSING** — Istio/Envoy/Kong integration is external; `grpc_transport`/`websocket_transport` provide the in-tree RPC surface.
 - **Gap**: No API gateway, service mesh integration, or microservices communication patterns.
 - **Design**: Enterprise API and service communication platform:
   - API Gateway integration (Kong, AWS API Gateway, Azure API Management)
@@ -447,6 +475,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: <1ms API gateway latency overhead, 99.99% service availability
 
 ### 10.3 Edge Computing & CDN Integration — P2
+- **STATUS (2026-06-13): MISSING** — edge nodes + CDN providers are external infrastructure.
 - **Gap**: No edge computing capabilities or CDN integration for global deployment.
 - **Design**: Global edge deployment platform:
   - Edge computing nodes for low-latency inference
@@ -463,6 +492,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 11. Enterprise Integration & Identity Management — P1
 
 ### 11.1 Advanced Identity & Access Management — P1
+- **STATUS (2026-06-13): DONE (core)** — `vgre::identity` (commit b532465): OIDC/JWT verification (RS256/384/512 + ES256/384 via JWKS, claim + alg-confusion checks) + RBAC engine (wildcards, role inheritance), wired into `/metrics` Bearer auth. SAML 2.0 / LDAP / MFA require an external IdP to federate with.
 - **Gap**: Basic authentication insufficient for enterprise identity federation and SSO requirements.
 - **Design**: Comprehensive identity management platform:
   - SAML 2.0 and OpenID Connect integration for enterprise SSO
@@ -475,6 +505,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Seamless SSO integration, zero manual user provisioning
 
 ### 11.2 Enterprise API Management — P1
+- **STATUS (2026-06-13): PARTIAL** — stable C ABIs (cudart/driver + new `vgre_backup_*`/`vgre_mig_*`) + gRPC transport exist; API marketplace / multi-language SDK generation / ESB patterns pending.
 - **Gap**: No enterprise API management, webhook systems, or integration capabilities.
 - **Design**: Comprehensive API management and integration platform:
   - REST and GraphQL API standardization with OpenAPI specifications
@@ -487,6 +518,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: 100% API specification coverage, automated SDK generation
 
 ### 11.3 Advanced Compliance Frameworks — P1
+- **STATUS (2026-06-13): PARTIAL** — the tamper-evident audit trail + GDPR crypto-erasure foundation (§1.3) is done; PCI DSS / HIPAA / SOX *certification* is an external attestation process performed against this evidence, not code.
 - **Gap**: Limited compliance coverage beyond SOC 2. Missing PCI DSS, HIPAA technical safeguards, SOX controls.
 - **Design**: Multi-framework compliance automation:
   - PCI DSS compliance for payment card data processing environments
@@ -503,6 +535,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 12. Advanced Performance & Scale — P2
 
 ### 12.1 Database Scaling & Distributed Systems — P2
+- **STATUS (2026-06-13): MISSING** — distributed DB/sharding/Raft are a separate datastore concern; VGRE uses SQLite locally (Nsight export).
 - **Gap**: No distributed database systems, sharding strategies, or consensus algorithms.
 - **Design**: Enterprise-scale distributed data management:
   - Database sharding with automated rebalancing
@@ -515,6 +548,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Linear scaling to 1000+ database nodes, <1ms distributed operations
 
 ### 12.2 Advanced Load Balancing & Traffic Management — P2
+- **STATUS (2026-06-13): MISSING** — L7 LB/GSLB/DDoS are external network-edge concerns; the cluster has internal work distribution + partitioned dispatch.
 - **Gap**: Basic load balancing insufficient for enterprise traffic patterns and SLA requirements.
 - **Design**: Sophisticated traffic management platform:
   - Layer 7 load balancing with content-based routing
@@ -527,6 +561,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Handles 1M+ concurrent connections, sub-millisecond routing decisions
 
 ### 12.3 Container Orchestration & Service Discovery — P2
+- **STATUS (2026-06-13): PARTIAL** — kubebuilder operator + device plugin (§4.1) cover core orchestration; Helm charts + multi-cluster federation pending.
 - **Gap**: Basic containerization insufficient for enterprise orchestration requirements.
 - **Design**: Advanced container orchestration platform:
   - Helm charts for complex application deployment
@@ -551,6 +586,11 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 
 **Additional P2 Tracks**:
 - **Advanced Scale**: 12.1-12.3 (Database scaling, load balancing, container orchestration)
+
+**Status roll-up (2026-06-13)** — every §N.N now carries an inline STATUS line:
+- **DONE (core)**: 1.2 crypto+PQC, 1.3 audit, 1.4 fuzzing, 2.1 observability, 4.1 K8s+MIG, 5.1 RDMA, 9.1 backup/DR, 9.3 secrets, 11.1 identity.
+- **PARTIAL**: 1.1, 2.2, 2.3, 3.1, 3.3, 4.3, 5.2, 6.1, 6.2, 6.3, 7.1, 7.2, 11.2, 11.3, 12.3.
+- **MISSING (needs an external system/hardware to be honest)**: 3.2 Metal, 4.2 framework backends, 5.3 multi-cloud, 8.1 AIOps, 8.2 sec-analytics, 9.2 data-lake, 10.1 GitOps, 10.2 mesh, 10.3 edge, 12.1 distributed-DB, 12.2 L7-LB.
 
 **Phase 4 Success Metrics**:
 - **Security**: Pass SOC 2 Type II audit, resist all known GPU attack vectors, PCI DSS Level 1 compliance
