@@ -9,6 +9,7 @@
 #include "vgre/advanced/ipc_manager.h"
 #include "vgre/advanced/resource_ledger.h"
 #include "vgre/advanced/runtime_profiler.h"
+#include "vgre/advanced/perf_analytics.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/vgre_workload_engine.h"
 #include "vgre/common/error_codes.h"
@@ -483,6 +484,24 @@ int vgre_get_kernel_history_json(const char *kernel_name, char **out_json) {
 void vgre_free_string(char *str) {
   if (str)
     free(str);
+}
+
+int vgre_get_roofline_json(char **out_json) {
+  if (!out_json)
+    return VGRE_ERROR_INVALID_VALUE;
+  std::string j = vgre::advanced::PerformanceAnalytics::toRooflineJSON(
+      vgre::advanced::PerformanceAnalytics::autodetectPeaks());
+  *out_json = strdup(j.c_str());
+  return *out_json ? VGRE_SUCCESS : VGRE_ERROR_OUT_OF_MEMORY;
+}
+
+int vgre_export_flamegraph(const char *path) {
+  if (!path)
+    return VGRE_ERROR_INVALID_VALUE;
+  return vgre::advanced::PerformanceAnalytics::exportFlamegraph(path) ==
+                 vgre::VGREResult::SUCCESS
+             ? VGRE_SUCCESS
+             : VGRE_ERROR_INVALID_VALUE;
 }
 
 int vgre_set_profiler_enabled(int enabled) {

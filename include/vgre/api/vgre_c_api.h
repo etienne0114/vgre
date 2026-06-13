@@ -236,6 +236,14 @@ VGRE_EXPORT int vgre_get_memory_info_json(char **out_json);
 VGRE_EXPORT int vgre_get_kernel_history_json(const char *kernel_name, char **out_json);
 
 /**
+ * @brief Roofline analysis (per-kernel memory/compute bound + efficiency) as JSON.
+ * @param out_json Allocated C string; free with vgre_free_string().
+ */
+VGRE_EXPORT int vgre_get_roofline_json(char **out_json);
+/** @brief Write a collapsed-stack flamegraph (.folded) of profiled kernels. */
+VGRE_EXPORT int vgre_export_flamegraph(const char *path);
+
+/**
  * @brief Exports the VGRE telemetry timeline as a Perfetto binary trace.
  *
  * Serializes all recorded kernel and memory events into Perfetto's
