@@ -59,6 +59,23 @@ external-integration tracks (Datadog/Vault/Istio/Terraform/Metal/TensorRT/PyTorc
 whose *self-contained primitives* are the only parts implementable to the project's
 "real, no-stub" standard without the external system present.
 
+### Implemented this phase (2026-06-13) — real, tested, no-stub
+
+| Track | Module | Test | Commit |
+|---|---|---|---|
+| 1.3 Audit/compliance log | `vgre::compliance::AuditLog` — HMAC hash-chain, tamper detection, GDPR crypto-erasure + deletion cert | `test_audit_log` 18/18 | cda87ad |
+| 9.3 Secrets management | `vgre::secrets::SecretStore` — AES-256-GCM sealed, TPM-rooted master key, versioned rotation, access policy | `test_secret_store` 22/22 | e381a31 |
+| 11.1 Identity (OIDC/JWT+RBAC) | `vgre::identity` — RS256/384/512 + ES256/384 JWT verify vs JWKS, claim checks, RBAC; wired into `/metrics` Bearer auth | `test_jwt_rbac` 18/18, `test_metrics_jwt` 6/6 | b532465 |
+| 9.1 Backup/DR | `vgre::backup::BackupArchive` — content-addressed dedup, encryption-at-rest, point-in-time lineage, restore validation, prune+GC, replication | `test_backup_archive` 23/23 | edca0f3 |
+| 4.1 MIG partitioning | `vgre::mig::MigManager` — slice placement, per-instance budget isolation, active-instance memGetInfo; NVML-style C API | `test_mig` 26/26 | 6bb1a99 |
+| 1.4 Fuzzing | libFuzzer harness (JSON/JWT/PTX) + deterministic `FuzzSmoke` (18k inputs/run) | `test_fuzz_smoke` | e89f063 |
+| 1.2 Post-quantum crypto | `vgre::pqc` — FIPS-202 Keccak (NIST KATs), ML-KEM-768 (FIPS 203), X25519 hybrid KEM | `test_pqc` 15/15 | e803964 |
+
+Remaining genuinely-missing tracks require an external system to be honest (Datadog/Splunk,
+Vault server, SAML IdP, Istio/Envoy, Terraform/cloud, Metal hardware, TensorRT/vLLM,
+PyTorch-XLA, RISC-V/WASM) — their self-contained primitives (OTLP export, sealed secrets,
+OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit above.
+
 ---
 
 ## 1. Security Hardening & Compliance — P0 CRITICAL
