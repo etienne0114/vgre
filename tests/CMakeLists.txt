@@ -710,6 +710,14 @@ if(EXISTS ${PROJECT_SOURCE_DIR}/.venv/bin/python)
         ${PROJECT_SOURCE_DIR}/frameworks/pytorch/test_vgre_backend.py)
     set_tests_properties(PyTorchBackend PROPERTIES TIMEOUT 600
         ENVIRONMENT "VGRE_BUILD_DIR=${CMAKE_BINARY_DIR}")
+
+    # JAX end-to-end (§4.2 step 3): lower a jax.jit fn to StableHLO, translate it to
+    # VGRE HLO via the builder C ABI, execute on the engine, and assert the result
+    # matches jax's own CPU backend. Self-skips at runtime if jax isn't installed.
+    add_test(NAME JaxStableHloBackend COMMAND ${PROJECT_SOURCE_DIR}/.venv/bin/python
+        ${PROJECT_SOURCE_DIR}/frameworks/jax/test_jax_e2e.py)
+    set_tests_properties(JaxStableHloBackend PROPERTIES TIMEOUT 300
+        ENVIRONMENT "VGRE_BUILD_DIR=${CMAKE_BINARY_DIR}")
 endif()
 
 # WASM target (§3.3): compile VGRE compute kernels to wasm32 (clang) and run them

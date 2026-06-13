@@ -120,7 +120,10 @@ Literal HloModule::evaluate(const std::vector<Literal>& params) const {
                 std::vector<int64_t> oc(I.shape.dims.size()), ic(a.shape.dims.size());
                 for (int64_t i = 0; i < out.shape.numel(); ++i) {
                     decode(i, outSt, oc);
-                    for (size_t k = 0; k < I.dimensions.size(); ++k) ic[k] = oc[I.dimensions[k]];
+                    // Map each input dim to its output dim; size-1 input dims are
+                    // stretched (degenerate broadcast), so clamp their index to 0.
+                    for (size_t k = 0; k < I.dimensions.size(); ++k)
+                        ic[k] = (a.shape.dims[k] == 1) ? 0 : oc[I.dimensions[k]];
                     out.data[i] = a.data[encode(ic, inSt)];
                 }
                 break;

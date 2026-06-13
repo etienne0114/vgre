@@ -29,6 +29,36 @@ int64_t vgre_xla_output_numel(uint64_t exe);
 
 void vgre_xla_free(uint64_t exe);
 
+// ── builder C ABI ────────────────────────────────────────────────────────────
+// Construct an HLO module op-by-op (the target a StableHLO→HLO translator emits
+// into, avoiding any duplicate serialization format on the frontend side). Each
+// op returns the new instruction's id (>=0) or -1 on error. `op` codes are the
+// HloOp enum ordinals. dims/perm arrays are int64; pass ndim=0 for a scalar.
+
+uint64_t vgre_xla_builder_new(void);
+
+int vgre_xla_b_parameter(uint64_t b, int index, const int64_t* dims, int ndim);
+int vgre_xla_b_constant(uint64_t b, const int64_t* dims, int ndim, const float* data, int n);
+int vgre_xla_b_binary(uint64_t b, int op, int lhs, int rhs);
+int vgre_xla_b_unary(uint64_t b, int op, int x);
+int vgre_xla_b_broadcast(uint64_t b, int x, const int64_t* out_dims, int n_out,
+                         const int64_t* bcast_dims, int n_bd);
+int vgre_xla_b_reshape(uint64_t b, int x, const int64_t* out_dims, int n_out);
+int vgre_xla_b_transpose(uint64_t b, int x, const int64_t* perm, int n_perm);
+int vgre_xla_b_dot(uint64_t b, int lhs, int rhs);
+int vgre_xla_b_reduce(uint64_t b, int x, const int64_t* dims, int n_dims,
+                      const char* kind, float init);
+int vgre_xla_b_compare(uint64_t b, int lhs, int rhs, const char* dir);
+int vgre_xla_b_select(uint64_t b, int pred, int on_true, int on_false);
+
+void vgre_xla_b_set_root(uint64_t b, int id);
+
+// Finalize the builder into an executable (consumes the builder). Returns an
+// executable handle usable with vgre_xla_execute / _output_numel / _free, or 0.
+uint64_t vgre_xla_b_compile(uint64_t b);
+// Discard a builder that was never compiled.
+void vgre_xla_b_free(uint64_t b);
+
 #ifdef __cplusplus
 }
 #endif
