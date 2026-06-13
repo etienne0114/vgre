@@ -775,6 +775,12 @@ target_link_libraries(test_hlo PRIVATE vgre)
 add_test(NAME XlaHloInterpreter COMMAND test_hlo)
 set_tests_properties(XlaHloInterpreter PROPERTIES TIMEOUT 30)
 
+# XLA executable C ABI: serialize → compile → execute (PJRT lifecycle substrate).
+add_executable(test_xla_c_api xla/test_xla_c_api.cpp)
+target_link_libraries(test_xla_c_api PRIVATE vgre)
+add_test(NAME XlaExecutableCApi COMMAND test_xla_c_api)
+set_tests_properties(XlaExecutableCApi PROPERTIES TIMEOUT 30)
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)

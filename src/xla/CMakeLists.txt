@@ -1,6 +1,7 @@
 # §  vgre_xla — XLA/HLO execution engine (the compute core of a PJRT backend)
 add_library(vgre_xla OBJECT
     hlo_evaluator.cpp
+    xla_c_api.cpp
 )
 
 target_include_directories(vgre_xla PUBLIC
