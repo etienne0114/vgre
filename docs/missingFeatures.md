@@ -419,7 +419,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: <30 minute RTO, <15 minute RPO, 99.99% backup success rate
 
 ### 9.2 Data Lake Integration & ETL Pipelines — P1
-- **STATUS (2026-06-13): MISSING** — S3/ADLS/GCS + ETL orchestration require live data-lake endpoints.
+- **STATUS (2026-06-13): DONE (core)** — `vgre::data::ETLPipeline`: extract→schema-validate→transform→load engine with data-quality validation (required fields + int/double typing, quarantine + reasons), pluggable map/filter transforms, a stage-by-stage lineage trace, and a local-filesystem CSV connector (`test_etl` 10/10). S3/ADLS/GCS connectors implement the same extract/load interface but need live cloud endpoints + credentials.
 - **Gap**: No integration with enterprise data lakes, ETL pipelines, or data governance frameworks.
 - **Design**: Enterprise data management platform:
   - Data lake integration (S3, Azure Data Lake, Google Cloud Storage)

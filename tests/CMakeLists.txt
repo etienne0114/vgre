@@ -780,6 +780,12 @@ target_link_libraries(test_aiops PRIVATE vgre)
 add_test(NAME AIOpsAnalytics COMMAND test_aiops)
 set_tests_properties(AIOpsAnalytics PROPERTIES TIMEOUT 30)
 
+# ETL pipeline: extract/validate/transform/load + data quality + lineage.
+add_executable(test_etl advanced/test_etl.cpp)
+target_link_libraries(test_etl PRIVATE vgre)
+add_test(NAME ETLPipeline COMMAND test_etl)
+set_tests_properties(ETLPipeline PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)
