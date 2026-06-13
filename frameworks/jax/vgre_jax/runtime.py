@@ -29,6 +29,7 @@ OP = {
     "While": 39, "Tuple": 40, "GetTupleElement": 41,
     "DynamicSlice": 42, "DynamicUpdateSlice": 43, "Reverse": 44,
     "Sort": 45, "ReduceGeneral": 46, "And": 47, "Or": 48, "Xor": 49, "Not": 50,
+    "Scatter": 51,
 }
 
 _I64P = POINTER(c_int64)
@@ -144,6 +145,9 @@ class VgreHlo:
         L.vgre_xla_b_reduce_general.argtypes = [c_uint64, POINTER(c_int), c_int, _I64P, c_int,
                                                 c_uint64, _I64P, c_int]
         L.vgre_xla_b_reduce_general.restype = c_int
+        L.vgre_xla_b_scatter.argtypes = [c_uint64, c_int, c_int, c_int, c_uint64,
+                                         _I64P, c_int, _I64P, c_int, _I64P, c_int, c_int64]
+        L.vgre_xla_b_scatter.restype = c_int
         L.vgre_xla_b_set_root.argtypes = [c_uint64, c_int]
         L.vgre_xla_b_compile.argtypes = [c_uint64]
         L.vgre_xla_b_compile.restype = c_uint64
@@ -296,6 +300,14 @@ class VgreHlo:
         pa, pn = _i64arr(primary_dims)
         return _ck(self.lib.vgre_xla_b_reduce_general(b, oa, len(operands), da, dn,
                                                       body_builder, pa, pn), "reduce_general")
+
+    def scatter(self, b, operand, indices, updates, combiner, uwd, iwd, dto, index_vector_dim):
+        ua, un = _i64arr(uwd)
+        ia, in_ = _i64arr(iwd)
+        da, dn = _i64arr(dto)
+        return _ck(self.lib.vgre_xla_b_scatter(b, operand, indices, updates, combiner,
+                                               ua, un, ia, in_, da, dn, int(index_vector_dim)),
+                   "scatter")
 
     def set_root(self, b, idx):
         self.lib.vgre_xla_b_set_root(b, idx)

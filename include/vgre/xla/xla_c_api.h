@@ -99,6 +99,10 @@ int vgre_xla_b_sort(uint64_t b, const int* operands, int n_ops, int64_t dim, uin
 int vgre_xla_b_reduce_general(uint64_t b, const int* operands, int n_ops,
                               const int64_t* dims, int n_dims, uint64_t body,
                               const int64_t* primary_dims, int n_primary);
+int vgre_xla_b_scatter(uint64_t b, int operand, int indices, int updates, uint64_t combiner,
+                       const int64_t* update_window_dims, int n_uwd,
+                       const int64_t* inserted_window_dims, int n_iwd,
+                       const int64_t* dims_to_operand, int n_dto, int64_t index_vector_dim);
 
 void vgre_xla_b_set_root(uint64_t b, int id);
 

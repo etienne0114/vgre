@@ -254,6 +254,8 @@ class Translator:
             return self._emit_conv(rt, b, op, ref), None
         if name == "stablehlo.gather":
             return self._emit_gather(rt, b, op, ref), None
+        if name == "stablehlo.scatter":
+            return self._emit_scatter(b, op, val2id), None
         if name == "stablehlo.reduce_window":
             return self._emit_reduce_window(rt, b, op, ref), None
         if name == "stablehlo.dynamic_slice":
@@ -377,6 +379,24 @@ class Translator:
         pad_hi = [int(v) for v in pad[:, 1]]
         return rt.reduce_window(b, ref(0), ref(1), kind, _shape(op.results[0]),
                                 win, strides, pad_lo, pad_hi, bdil, wdil)
+
+    def _emit_scatter(self, b, op, val2id):
+        rt = self.rt
+        operand = val2id[op.operands[0]]
+        indices = val2id[op.operands[1]]
+        updates = val2id[op.operands[2]]
+        s = str(op.attributes["scatter_dimension_numbers"])
+        uwd = self._ints(s, "update_window_dims")
+        iwd = self._ints(s, "inserted_window_dims")
+        dto = self._ints(s, "scatter_dims_to_operand_dims")
+        ivd_m = re.search(r"index_vector_dim\s*=\s*(\d+)", s)
+        ivd = int(ivd_m.group(1)) if ivd_m else 0
+        cblk = op.regions[0].blocks[0]
+        cb = rt.new_builder()
+        cargs = [rt.parameter(cb, i, _shape(a)) for i, a in enumerate(cblk.arguments)]
+        cids, _ = self._emit_block(cb, cblk, cargs)
+        rt.set_root(cb, cids[0])
+        return rt.scatter(b, operand, indices, updates, cb, uwd, iwd, dto, ivd)
 
     def _emit_gather(self, rt, b, op, ref):
         s = str(op.attributes["dimension_numbers"])

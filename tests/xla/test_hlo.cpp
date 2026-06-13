@@ -326,6 +326,30 @@ int main() {
         check("reduceGeneral argmax", approx(out.data, {1, 2}));  // row0 max@1, row1 max@2
     }
 
+    // ── Scatter: a.at[:,2].set(v) — set column 2 of a 2x4 matrix ──────────
+    {
+        auto comb = std::make_shared<HloModule>();        // combiner returns the update
+        {
+            comb->parameter(0, Shape{{}});                // existing (ignored)
+            int u = comb->parameter(1, Shape{{}});
+            comb->setRoot(u);
+        }
+        HloModule m;
+        int operand = m.parameter(0, Shape{{2, 4}});
+        int idxv = m.parameter(1, Shape{{1}});            // scatter index = [2]
+        int updates = m.parameter(2, Shape{{2}});         // new column values
+        int s = m.scatter(operand, idxv, updates, comb);
+        HloInstruction& I = m.last();
+        I.scatter_update_window_dims = {0};               // updates dim 0 -> operand rows
+        I.scatter_inserted_window_dims = {1};             // operand col is inserted (from index)
+        I.scatter_dims_to_operand = {1};                  // index addresses operand dim 1
+        I.scatter_index_vector_dim = 0;
+        m.setRoot(s);
+        Literal r = m.evaluate({Literal::make({{2, 4}}, {0, 0, 0, 0, 0, 0, 0, 0}),
+                                Literal::r1({2}), Literal::r1({7, 9})});
+        check("scatter set column", approx(r.data, {0, 0, 7, 0, 0, 0, 9, 0}));
+    }
+
     std::printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

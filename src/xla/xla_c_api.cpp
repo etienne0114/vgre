@@ -96,6 +96,8 @@ std::string serialize(const HloModule& m) {
         putI64(b, I.gte_index);
         putVec(b, I.dyn_slice_sizes);
         putI64(b, I.sort_dim);
+        putVec(b, I.scatter_update_window_dims); putVec(b, I.scatter_inserted_window_dims);
+        putVec(b, I.scatter_dims_to_operand); putI64(b, I.scatter_index_vector_dim);
         putU32(b, (uint32_t)I.subs.size());            // control-flow sub-computations
         for (const auto& s : I.subs) putStr(b, s ? serialize(*s) : std::string());
     }
@@ -146,6 +148,8 @@ bool deserialize(const std::string& blob, HloModule& out) {
         I.gte_index = r.i64();
         I.dyn_slice_sizes = getVec(r);
         I.sort_dim = r.i64();
+        I.scatter_update_window_dims = getVec(r); I.scatter_inserted_window_dims = getVec(r);
+        I.scatter_dims_to_operand = getVec(r); I.scatter_index_vector_dim = r.i64();
         uint32_t nsub = r.u32();
         for (uint32_t s = 0; s < nsub && r.ok; ++s) {
             std::string sb = r.str();
@@ -480,6 +484,23 @@ extern "C" int vgre_xla_b_reduce_general(uint64_t b, const int* operands, int n_
     return withBuilder(b, [&](HloModule& m) {
         return m.reduceGeneral(ivec(operands, n_ops), vec(dims, n_dims), bodyM,
                                Shape{vec(primary_dims, n_primary)});
+    });
+}
+
+extern "C" int vgre_xla_b_scatter(uint64_t b, int operand, int indices, int updates, uint64_t combiner,
+                                  const int64_t* update_window_dims, int n_uwd,
+                                  const int64_t* inserted_window_dims, int n_iwd,
+                                  const int64_t* dims_to_operand, int n_dto, int64_t index_vector_dim) {
+    auto cm = takeBuilderModule(combiner);
+    if (!cm) return -1;
+    return withBuilder(b, [&](HloModule& m) {
+        int id = m.scatter(operand, indices, updates, cm);
+        HloInstruction& I = m.last();
+        I.scatter_update_window_dims = vec(update_window_dims, n_uwd);
+        I.scatter_inserted_window_dims = vec(inserted_window_dims, n_iwd);
+        I.scatter_dims_to_operand = vec(dims_to_operand, n_dto);
+        I.scatter_index_vector_dim = index_vector_dim;
+        return id;
     });
 }
 
