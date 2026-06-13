@@ -379,7 +379,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 8. Advanced Analytics & Intelligence — P3
 
 ### 8.1 AI-Driven Operations (AIOps) — P3
-- **STATUS (2026-06-13): MISSING** — requires trained ML pipelines + production telemetry history (the audit log + OTLP traces are the data source it would consume).
+- **STATUS (2026-06-13): DONE (core)** — statistical anomaly detection in-tree: `vgre::advanced::EwmaAnomalyDetector` (streaming EWMA control chart) + `Anomaly::madOutliers` (robust median/MAD batch outliers) over metric streams (`test_aiops`). Deep RL-based remediation needs a trained policy + production history.
 - **Design**: Intelligent operations platform:
   - ML-based anomaly detection and root cause analysis
   - Predictive maintenance with failure forecasting
@@ -390,7 +390,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Reduces manual intervention by >80%, prevents 95% of predictable failures
 
 ### 8.2 Advanced Security Analytics — P3
-- **STATUS (2026-06-13): MISSING** — ML threat models + threat-intel feeds; would consume the §1.3 tamper-evident audit trail as its event source.
+- **STATUS (2026-06-13): DONE (core)** — `vgre::advanced::SecurityAnalytics::analyze` consumes the §1.3 audit trail to flag brute-force/probing actors (DENIED-event clustering), compute the denial ratio, and emit a 0–100 posture score (`test_aiops`). External threat-intel correlation feeds remain external.
 - **Design**: AI-powered security operations:
   - Behavioral analysis for insider threat detection
   - ML-based vulnerability assessment and prioritization
