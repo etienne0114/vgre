@@ -27,6 +27,12 @@ int64_t vgre_xla_execute(uint64_t exe, const float* const* in_data, const int64_
 // Number of elements the root result will produce (for sizing out_data), or -1.
 int64_t vgre_xla_output_numel(uint64_t exe);
 
+// Multi-output execute: for a root that is a Tuple (a function returning several
+// arrays / a pytree), writes all outputs flattened+concatenated and returns the
+// total element count (-1 on error). The caller splits by known per-output sizes.
+int64_t vgre_xla_execute_multi(uint64_t exe, const float* const* in_data, const int64_t* in_numel,
+                               int n_in, float* out_data, int64_t out_capacity);
+
 void vgre_xla_free(uint64_t exe);
 
 // ── builder C ABI ────────────────────────────────────────────────────────────

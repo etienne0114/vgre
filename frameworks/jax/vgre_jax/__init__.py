@@ -18,7 +18,7 @@ import numpy as np
 
 from .translate import Executable, Translator
 
-__all__ = ["Translator", "Executable", "compile_jit", "run"]
+__all__ = ["Translator", "Executable", "compile_jit", "run", "run_multi"]
 
 
 def compile_jit(jitted, *args, lib_path: str | None = None) -> Executable:
@@ -28,9 +28,32 @@ def compile_jit(jitted, *args, lib_path: str | None = None) -> Executable:
 
 
 def run(jitted, *args, lib_path: str | None = None) -> np.ndarray:
-    """Compile + execute on VGRE, returning a flat float32 result."""
+    """Compile + execute on VGRE, returning a flat float32 result.
+
+    `args` may contain pytrees (e.g. a tuple/list/dict of parameter arrays, as in
+    training): JAX flattens them into separate StableHLO parameters, so we flatten
+    to leaves in the same canonical order before handing buffers to the engine.
+    """
+    import jax
     exe = compile_jit(jitted, *args, lib_path=lib_path)
     try:
-        return exe(*args)
+        leaves = jax.tree_util.tree_leaves(args)
+        return exe(*leaves)
+    finally:
+        exe.close()
+
+
+def run_multi(jitted, *args, lib_path: str | None = None) -> list:
+    """Compile + execute a function that returns several arrays / a pytree.
+
+    Returns a list of flat float32 arrays, one per output leaf, in the same order
+    as ``jax.tree_util.tree_leaves(jitted(*args))``. Use for e.g. a training step
+    that returns the updated parameter set.
+    """
+    import jax
+    exe = compile_jit(jitted, *args, lib_path=lib_path)
+    try:
+        leaves = jax.tree_util.tree_leaves(args)
+        return exe.call_multi(*leaves)
     finally:
         exe.close()

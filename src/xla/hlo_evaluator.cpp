@@ -55,6 +55,7 @@ float applyUnary(HloOp op, float a) {
         case HloOp::Ceil: return std::ceil(a);
         case HloOp::Logistic: return 1.0f / (1.0f + std::exp(-a));
         case HloOp::Not: return (a != 0.0f) ? 0.0f : 1.0f;
+        case HloOp::IsFinite: return std::isfinite(a) ? 1.0f : 0.0f;
         case HloOp::Erf: return std::erf(a);
         case HloOp::Erfc: return std::erfc(a);
         case HloOp::Cos: return std::cos(a);
@@ -113,6 +114,7 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
             case HloOp::Negate: case HloOp::Exp: case HloOp::Log: case HloOp::Tanh:
             case HloOp::Abs: case HloOp::Rsqrt: case HloOp::Sqrt: case HloOp::Sign:
             case HloOp::Floor: case HloOp::Ceil: case HloOp::Logistic: case HloOp::Not:
+            case HloOp::IsFinite:
             case HloOp::Erf: case HloOp::Erfc: case HloOp::Cos: case HloOp::Sin: {
                 const Literal& a = vals[I.operands[0]];
                 for (size_t i = 0; i < a.data.size(); ++i) out.data[i] = applyUnary(I.op, a.data[i]);
