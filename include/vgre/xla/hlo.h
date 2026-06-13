@@ -54,7 +54,7 @@ enum class HloOp {
     While, Tuple, GetTupleElement, DynamicSlice, DynamicUpdateSlice,  // control flow
     Reverse,
     Sort, ReduceGeneral, And, Or, Xor, Not,  // sort/argmax + boolean ops
-    Scatter, IsFinite,
+    Scatter, IsFinite, RoundNearestEven, RoundNearestAfz,
 };
 
 struct HloInstruction {

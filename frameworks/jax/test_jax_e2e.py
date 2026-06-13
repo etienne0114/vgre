@@ -278,6 +278,27 @@ def main():
           f"({losses[0]:.3f} -> {losses[-1]:.3f})")
     PASS += decreasing; FAIL += (not decreasing)
 
+    # ── int8 quantized inference ─────────────────────────────────────────────
+    def _q(v, s):
+        return jnp.clip(jnp.round(v / s), -127, 127)
+    qx = rng.standard_normal((5, 8)).astype(np.float32)
+    qw = rng.standard_normal((8, 4)).astype(np.float32)
+    qb = rng.standard_normal((4,)).astype(np.float32)
+    case("round_nearest_even", lambda a: jnp.round(a * 4) / 4, qx)
+    case("quantized matmul (fake-quant int8)",
+         lambda x, w: (_q(x, 0.05) @ _q(w, 0.05)) * (0.05 * 0.05), qx, qw)
+
+    def i8_dot(x, w):
+        xq = jnp.clip(jnp.round(x * 32), -127, 127).astype(jnp.int8)
+        wq = jnp.clip(jnp.round(w * 32), -127, 127).astype(jnp.int8)
+        acc = jax.lax.dot_general(xq, wq, (((1,), (0,)), ((), ())),
+                                  preferred_element_type=jnp.int32)
+        return acc.astype(jnp.float32) / (32.0 * 32.0)
+    case("int8 dot_general (int32 accum)", i8_dot, qx, qw)
+    case("quantized MLP layer + relu",
+         lambda x, w, b: jnp.maximum((_q(x, 0.04) @ _q(w, 0.03)) * (0.04 * 0.03) + b, 0.0),
+         qx, qw, qb)
+
     print(f"\n{PASS} / {PASS + FAIL} passed")
     return 0 if FAIL == 0 else 1
 

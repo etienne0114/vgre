@@ -29,7 +29,7 @@ OP = {
     "While": 39, "Tuple": 40, "GetTupleElement": 41,
     "DynamicSlice": 42, "DynamicUpdateSlice": 43, "Reverse": 44,
     "Sort": 45, "ReduceGeneral": 46, "And": 47, "Or": 48, "Xor": 49, "Not": 50,
-    "Scatter": 51, "IsFinite": 52,
+    "Scatter": 51, "IsFinite": 52, "RoundNearestEven": 53, "RoundNearestAfz": 54,
 }
 
 _I64P = POINTER(c_int64)
