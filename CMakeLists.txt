@@ -370,6 +370,27 @@ else()
     message(STATUS "SIMD: disabled for portability (VGRE_ENABLE_NATIVE_SIMD=OFF)")
 endif()
 
+# ── Control-flow integrity + stack hardening (docs/missingFeatures.md §1.1) ──
+# Intel CET (IBT + shadow-stack markers via -fcf-protection) gives control-flow
+# integrity on the security-critical paths; stack-clash + stack-protector guard
+# against stack-based corruption. Probed so unsupported toolchains are skipped.
+option(VGRE_HARDENING "Enable control-flow integrity (Intel CET) + stack hardening" ON)
+if(VGRE_HARDENING AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    check_cxx_compiler_flag("-fcf-protection=full"     _cc_cet)
+    check_cxx_compiler_flag("-fstack-clash-protection" _cc_stackclash)
+    check_cxx_compiler_flag("-fstack-protector-strong" _cc_ssp)
+    if(_cc_cet)
+        add_compile_options(-fcf-protection=full)
+        message(STATUS "Hardening: Intel CET (-fcf-protection=full) enabled")
+    endif()
+    if(_cc_stackclash)
+        add_compile_options(-fstack-clash-protection)
+    endif()
+    if(_cc_ssp)
+        add_compile_options(-fstack-protector-strong)
+    endif()
+endif()
+
 # ──────────────────────────────────────────────────────────────────────────────
 # §6  OpenMP  (consolidated, cross-platform, no global link_libraries())
 # ──────────────────────────────────────────────────────────────────────────────

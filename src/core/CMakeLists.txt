@@ -1,6 +1,7 @@
 add_library(vgre_core OBJECT
     virtual_gpu_device.cpp
     memory/memory_manager.cpp
+    memory/bounds_checker.cpp
     memory/memory_manager_managed.cpp
     memory/memory_manager_copy.cpp
     memory/pool_allocator.cpp

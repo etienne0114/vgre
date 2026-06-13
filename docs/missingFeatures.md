@@ -81,7 +81,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 1. Security Hardening & Compliance — P0 CRITICAL
 
 ### 1.1 GPU Runtime Security Framework — P0
-- **STATUS (2026-06-13): PARTIAL** — TPM 2.0 attestation DONE (`token_manager_tpm2.cpp`, real TSS2 ESAPI). Intel CET / SEV-SNP·TDX enclaves / HSM / FIPS-140 certification require hardware + external audit.
+- **STATUS (2026-06-13): DONE (software-implementable parts)** — TPM 2.0 attestation (`token_manager_tpm2.cpp`) + **Intel CET control-flow integrity** (`-fcf-protection=full` + stack-clash/stack-protector hardening, probed in CMake under `VGRE_HARDENING`) + **AddressSanitizer-style device-memory bounds checker** (`vgre::core::BoundsChecker`: red-zone canaries detect kernel over/under-flow; opt-in via `VGRE_MEMCHECK`) (`test_bounds_checker` 9/9). SEV-SNP/TDX confidential-computing enclaves, HSM, and FIPS-140 certification require hardware + external audit.
 - **Critical Gap**: GPU runtimes bypass traditional kernel security controls. Current VGRE has basic authentication but lacks enterprise security frameworks essential for production AI cloud deployment.
 - **Industry Context**: 2026 research shows GPU Rowhammer attacks (1,171 bit flips on RTX 3060), NVIDIA Container Toolkit CVEs, and GPU-to-network bypasses create massive attack surface.
 - **Design**: Implement comprehensive GPU security framework including:
