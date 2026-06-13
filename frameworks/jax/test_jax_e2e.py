@@ -108,6 +108,37 @@ def main():
         x, W, b, rng.standard_normal((4, 2)).astype(np.float32),
         rng.standard_normal((2,)).astype(np.float32))
 
+    # ── control flow (while / dynamic-slice / scan) ──────────────────────────
+    seq = rng.standard_normal((6,)).astype(np.float32)
+    case("scan cumsum", lambda xs: jax.lax.scan(lambda c, v: (c + v, c + v),
+         np.float32(0), xs)[1], seq)
+    case("scan final carry", lambda xs: jax.lax.scan(lambda c, v: (c * 0.9 + v, c),
+         np.float32(0), xs)[0], seq)
+    case("fori_loop sum", lambda s: jax.lax.fori_loop(
+        0, 6, lambda i, acc: acc + s[i], np.float32(0)), seq)
+    case("while_loop", lambda s: jax.lax.while_loop(
+        lambda st: st[0] < 5, lambda st: (st[0] + 1, st[1] + s[st[0]]),
+        (0, np.float32(0)))[1], seq)
+
+    # a hand-written LSTM cell rolled over time with lax.scan (real recurrence)
+    def lstm_seq(xs, Wi, Wh, bvec):
+        def step(carry, xt):
+            h, c = carry
+            z = xt @ Wi + h @ Wh + bvec
+            i, f, g, o = jnp.split(z, 4, axis=-1)
+            i, f, o = jax.nn.sigmoid(i), jax.nn.sigmoid(f), jax.nn.sigmoid(o)
+            c = f * c + i * jnp.tanh(g)
+            h = o * jnp.tanh(c)
+            return (h, c), h
+        h0 = jnp.zeros((xs.shape[0], 4)); c0 = jnp.zeros((xs.shape[0], 4))
+        (hN, _), _ = jax.lax.scan(step, (h0, c0), xs.transpose(1, 0, 2))
+        return hN
+    xs = rng.standard_normal((2, 5, 3)).astype(np.float32)
+    Wi = rng.standard_normal((3, 16)).astype(np.float32)
+    Wh = rng.standard_normal((4, 16)).astype(np.float32)
+    bv = rng.standard_normal((16,)).astype(np.float32)
+    case("lstm cell via scan", lstm_seq, xs, Wi, Wh, bv)
+
     print(f"\n{PASS} / {PASS + FAIL} passed")
     return 0 if FAIL == 0 else 1
 

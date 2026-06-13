@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
 
 namespace vgre {
@@ -92,6 +93,10 @@ std::string serialize(const HloModule& m) {
         putVec(b, I.rw_window_dims); putVec(b, I.rw_window_strides);
         putVec(b, I.rw_pad_low); putVec(b, I.rw_pad_high);
         putVec(b, I.rw_base_dil); putVec(b, I.rw_window_dil);
+        putI64(b, I.gte_index);
+        putVec(b, I.dyn_slice_sizes);
+        putU32(b, (uint32_t)I.subs.size());            // control-flow sub-computations
+        for (const auto& s : I.subs) putStr(b, s ? serialize(*s) : std::string());
     }
     putU32(b, (uint32_t)m.root());
     return b;
@@ -137,6 +142,15 @@ bool deserialize(const std::string& blob, HloModule& out) {
         I.rw_window_dims = getVec(r); I.rw_window_strides = getVec(r);
         I.rw_pad_low = getVec(r); I.rw_pad_high = getVec(r);
         I.rw_base_dil = getVec(r); I.rw_window_dil = getVec(r);
+        I.gte_index = r.i64();
+        I.dyn_slice_sizes = getVec(r);
+        uint32_t nsub = r.u32();
+        for (uint32_t s = 0; s < nsub && r.ok; ++s) {
+            std::string sb = r.str();
+            auto sm = std::make_shared<HloModule>();
+            if (!sb.empty() && deserialize(sb, *sm)) I.subs.push_back(sm);
+            else I.subs.push_back(nullptr);
+        }
         out.add(std::move(I));
     }
     int root = (int)r.u32();
@@ -386,6 +400,62 @@ extern "C" int vgre_xla_b_reduce_window(uint64_t b, int x, int init, const char*
         I.rw_base_dil = vec(base_dil, n); I.rw_window_dil = vec(win_dil, n);
         return id;
     });
+}
+
+// ── control flow builders ────────────────────────────────────────────────────
+namespace {
+// Move a builder's module out of the registry as a shared sub-computation.
+std::shared_ptr<HloModule> takeBuilderModule(uint64_t h) {
+    std::lock_guard<std::mutex> lk(bldMu());
+    auto it = blds().find(h);
+    if (it == blds().end()) return nullptr;
+    auto m = std::make_shared<HloModule>(std::move(it->second));
+    blds().erase(it);
+    return m;
+}
+std::vector<int> ivec(const int* p, int n) { return std::vector<int>(p, p + n); }
+}
+
+extern "C" int vgre_xla_b_while(uint64_t b, const int* inits, int n_init, uint64_t cond, uint64_t body,
+                                const int64_t* primary_dims, int n_primary) {
+    auto condM = takeBuilderModule(cond);
+    auto bodyM = takeBuilderModule(body);
+    if (!condM || !bodyM) return -1;
+    return withBuilder(b, [&](HloModule& m) {
+        return m.whileOp(ivec(inits, n_init), condM, bodyM, Shape{vec(primary_dims, n_primary)});
+    });
+}
+
+extern "C" int vgre_xla_b_tuple(uint64_t b, const int* elems, int n) {
+    return withBuilder(b, [&](HloModule& m) { return m.tuple(ivec(elems, n)); });
+}
+
+extern "C" int vgre_xla_b_get_tuple_element(uint64_t b, int src, int index,
+                                            const int64_t* out_dims, int n_out) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.getTupleElement(src, index, Shape{vec(out_dims, n_out)});
+    });
+}
+
+extern "C" int vgre_xla_b_dynamic_slice(uint64_t b, int operand, const int* starts, int n_starts,
+                                        const int64_t* sizes, int n_sizes,
+                                        const int64_t* out_dims, int n_out) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.dynamicSlice(operand, ivec(starts, n_starts), vec(sizes, n_sizes),
+                              Shape{vec(out_dims, n_out)});
+    });
+}
+
+extern "C" int vgre_xla_b_dynamic_update_slice(uint64_t b, int operand, int update,
+                                               const int* starts, int n_starts,
+                                               const int64_t* out_dims, int n_out) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.dynamicUpdateSlice(operand, update, ivec(starts, n_starts), Shape{vec(out_dims, n_out)});
+    });
+}
+
+extern "C" int vgre_xla_b_reverse(uint64_t b, int x, const int64_t* dims, int n) {
+    return withBuilder(b, [&](HloModule& m) { return m.reverse(x, vec(dims, n)); });
 }
 
 extern "C" uint64_t vgre_xla_b_compile(uint64_t b) {

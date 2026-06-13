@@ -26,6 +26,8 @@ OP = {
     "DotGeneral": 28, "Concatenate": 29, "Slice": 30, "Pad": 31,
     "Convolution": 32, "Gather": 33, "ReduceWindow": 34,
     "Erf": 35, "Erfc": 36, "Cos": 37, "Sin": 38,
+    "While": 39, "Tuple": 40, "GetTupleElement": 41,
+    "DynamicSlice": 42, "DynamicUpdateSlice": 43, "Reverse": 44,
 }
 
 _I64P = POINTER(c_int64)
@@ -102,6 +104,19 @@ class VgreHlo:
         L.vgre_xla_b_reduce_window.argtypes = [c_uint64, c_int, c_int, c_char_p, _I64P, c_int,
                                                _I64P, _I64P, _I64P, _I64P, _I64P, _I64P, c_int]
         L.vgre_xla_b_reduce_window.restype = c_int
+        _IP = POINTER(c_int)
+        L.vgre_xla_b_while.argtypes = [c_uint64, _IP, c_int, c_uint64, c_uint64, _I64P, c_int]
+        L.vgre_xla_b_while.restype = c_int
+        L.vgre_xla_b_tuple.argtypes = [c_uint64, _IP, c_int]
+        L.vgre_xla_b_tuple.restype = c_int
+        L.vgre_xla_b_get_tuple_element.argtypes = [c_uint64, c_int, c_int, _I64P, c_int]
+        L.vgre_xla_b_get_tuple_element.restype = c_int
+        L.vgre_xla_b_dynamic_slice.argtypes = [c_uint64, c_int, _IP, c_int, _I64P, c_int, _I64P, c_int]
+        L.vgre_xla_b_dynamic_slice.restype = c_int
+        L.vgre_xla_b_dynamic_update_slice.argtypes = [c_uint64, c_int, c_int, _IP, c_int, _I64P, c_int]
+        L.vgre_xla_b_dynamic_update_slice.restype = c_int
+        L.vgre_xla_b_reverse.argtypes = [c_uint64, c_int, _I64P, c_int]
+        L.vgre_xla_b_reverse.restype = c_int
         L.vgre_xla_b_set_root.argtypes = [c_uint64, c_int]
         L.vgre_xla_b_compile.argtypes = [c_uint64]
         L.vgre_xla_b_compile.restype = c_uint64
@@ -205,6 +220,40 @@ class VgreHlo:
         bd, _ = _i64arr(base_dil); wl, _ = _i64arr(win_dil)
         return _ck(self.lib.vgre_xla_b_reduce_window(b, x, init, kind.encode(), oa, on,
                                                      wd, ws, pl, ph, bd, wl, n), "reduce_window")
+
+    def _intarr(self, xs):
+        return (c_int * len(xs))(*[int(v) for v in xs])
+
+    def while_op(self, b, inits, cond_builder, body_builder, primary_dims):
+        ia = self._intarr(inits)
+        pa, pn = _i64arr(primary_dims)
+        return _ck(self.lib.vgre_xla_b_while(b, ia, len(inits), cond_builder, body_builder, pa, pn),
+                   "while")
+
+    def tuple(self, b, elems):
+        ea = self._intarr(elems)
+        return _ck(self.lib.vgre_xla_b_tuple(b, ea, len(elems)), "tuple")
+
+    def get_tuple_element(self, b, src, index, out_dims):
+        oa, on = _i64arr(out_dims)
+        return _ck(self.lib.vgre_xla_b_get_tuple_element(b, src, index, oa, on), "get_tuple_element")
+
+    def dynamic_slice(self, b, operand, starts, sizes, out_dims):
+        sa = self._intarr(starts)
+        za, zn = _i64arr(sizes)
+        oa, on = _i64arr(out_dims)
+        return _ck(self.lib.vgre_xla_b_dynamic_slice(b, operand, sa, len(starts), za, zn, oa, on),
+                   "dynamic_slice")
+
+    def dynamic_update_slice(self, b, operand, update, starts, out_dims):
+        sa = self._intarr(starts)
+        oa, on = _i64arr(out_dims)
+        return _ck(self.lib.vgre_xla_b_dynamic_update_slice(b, operand, update, sa, len(starts), oa, on),
+                   "dynamic_update_slice")
+
+    def reverse(self, b, x, dims):
+        a, n = _i64arr(dims)
+        return _ck(self.lib.vgre_xla_b_reverse(b, x, a, n), "reverse")
 
     def set_root(self, b, idx):
         self.lib.vgre_xla_b_set_root(b, idx)

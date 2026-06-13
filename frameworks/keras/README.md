@@ -1,41 +1,43 @@
 # VGRE Keras backend (high-level models on VGRE)
 
 Runs **complete Keras 3 neural networks** on the VGRE HLO engine, validated
-against Keras' own inference. This is the high-level DL framework layer on top of
-the JAX/StableHLO path: a Keras model's forward pass is jax-traceable (Keras JAX
-backend), so it lowers to StableHLO and runs on VGRE unchanged.
+against Keras' own inference. A Keras model's forward pass is jax-traceable
+(Keras JAX backend), so it lowers to StableHLO and runs on VGRE unchanged.
 
 ```
-KERAS_BACKEND=jax
-keras.Model(x, training=False)
-  -> jax.jit -> StableHLO  -> VGRE translator -> VGRE HLO engine -> result
-                                                   (vs keras model(x))
+keras_worker.py  (subprocess)          test_keras_e2e.py  (libvgre driver)
+  KERAS_BACKEND=jax; build model
+  jax.jit(model).lower -> StableHLO ─file─► parse (jaxlib MLIR) -> VGRE HLO
+  run -> reference ──────────────────────►  execute on VGRE, compare to Keras
 ```
 
-## Verified models (test_keras_e2e.py, 5/5 vs Keras)
+Lowering runs in an isolated subprocess: some layers (e.g. `Bidirectional`) pull
+in **TensorFlow**, whose bundled LLVM collides with libvgre.so's LLVM if loaded
+in the same process. The driver never imports Keras/TF.
+
+## Verified models (test_keras_e2e.py, 10/10 vs Keras)
 
 | Model | Layers exercised |
 |-------|------------------|
-| MLP classifier | Dense, relu/tanh, softmax |
-| CNN classifier | Conv2D, MaxPooling2D, AveragePooling2D, Flatten, Dense, softmax |
-| BatchNorm MLP | Dense, **BatchNormalization** (inference moving stats), relu |
+| MLP / CNN | Dense, Conv2D, Max/AveragePooling2D, Flatten, softmax |
+| BatchNorm MLP | Dense, **BatchNormalization** (inference moving stats) |
 | LayerNorm + GELU MLP | Dense, **LayerNormalization**, **GELU** (erf) |
-| Transformer block | **MultiHeadAttention**, LayerNormalization, residual + FFN |
+| Transformer block | **MultiHeadAttention**, LayerNorm, residual + FFN |
+| SimpleRNN / LSTM / GRU | recurrence via **while** + dynamic-slice/update |
+| stacked LSTM | `return_sequences` + a second recurrent layer |
+| **Bidirectional LSTM** | forward + reversed (`reverse`) passes, concatenated |
 
-A full transformer encoder block and a conv net both run on the CPU emulator with
-no model changes — every op they emit (convolution, dot_general/attention,
-reduce_window pooling, batch/layer norm, gelu/erf, softmax) is in the engine.
+Transformers, conv nets **and** recurrent nets all run on the CPU emulator with
+no model changes. The recurrent family exercises the engine's control flow
+(`while` with embedded cond/body sub-computations, `dynamic_slice`,
+`dynamic_update_slice`, `reverse`).
 
 ## Run
 
 ```bash
-.venv/bin/python frameworks/keras/test_keras_e2e.py     # 5/5
+.venv/bin/python frameworks/keras/test_keras_e2e.py     # 10/10
 # or:  ctest -R KerasModelsBackend
 ```
 
-```python
-import os; os.environ["KERAS_BACKEND"] = "jax"
-import keras, numpy as np, vgre_keras
-model = keras.Sequential([...])
-out = vgre_keras.run_model(model, x)     # executed on VGRE
-```
+`vgre_keras.run_model(model, x)` also runs a Keras model in-process for models
+that don't import TensorFlow.
