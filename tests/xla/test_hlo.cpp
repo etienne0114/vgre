@@ -137,6 +137,88 @@ int main() {
         check("exp(x - max(x))", approx(r.data, {std::exp(-2.f), std::exp(-1.f), std::exp(0.f)}));
     }
 
+    // ── DotGeneral: batched matmul [B,M,K]·[B,K,N] ───────────────────────
+    {
+        HloModule m;
+        int a = m.parameter(0, Shape{{2, 2, 3}});
+        int b = m.parameter(1, Shape{{2, 3, 2}});
+        m.dotGeneral(a, b, {0}, {0}, {2}, {1}, Shape{{2, 2, 2}});
+        Literal r = m.evaluate({
+            Literal::make({{2, 2, 3}}, {1, 2, 3, 4, 5, 6, 1, 0, 0, 0, 1, 0}),
+            Literal::make({{2, 3, 2}}, {1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0}),
+        });
+        // batch0: [[1,2,3],[4,5,6]]·[[1,0],[0,1],[1,1]] = [[4,5],[10,11]]
+        check("dotGeneral batched matmul", approx(r.data, {4, 5, 10, 11, 1, 0, 0, 1}));
+    }
+
+    // ── Concatenate along dim 1 ──────────────────────────────────────────
+    {
+        HloModule m;
+        int a = m.parameter(0, Shape{{2, 2}});
+        int b = m.parameter(1, Shape{{2, 1}});
+        m.concatenate({a, b}, 1, Shape{{2, 3}});
+        Literal r = m.evaluate({Literal::make({{2, 2}}, {1, 2, 3, 4}), Literal::make({{2, 1}}, {5, 6})});
+        check("concatenate", approx(r.data, {1, 2, 5, 3, 4, 6}));
+    }
+
+    // ── Slice [0:4:2, 1:3] ───────────────────────────────────────────────
+    {
+        HloModule m;
+        int a = m.parameter(0, Shape{{4, 3}});
+        m.slice(a, {0, 1}, {4, 3}, {2, 1}, Shape{{2, 2}});
+        Literal r = m.evaluate({Literal::make({{4, 3}}, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11})});
+        check("slice strided", approx(r.data, {1, 2, 7, 8}));  // rows 0,2 cols 1,2
+    }
+
+    // ── Pad: edge low/high with fill value ───────────────────────────────
+    {
+        HloModule m;
+        int a = m.parameter(0, Shape{{2, 2}});
+        int pv = m.constant(Literal::scalar(9.0f));
+        m.pad(a, pv, {1, 0}, {0, 1}, {0, 0}, Shape{{3, 3}});
+        Literal r = m.evaluate({Literal::make({{2, 2}}, {1, 2, 3, 4})});
+        check("pad edges", approx(r.data, {9, 9, 9, 1, 2, 9, 3, 4, 9}));
+    }
+
+    // ── Convolution: 1x1x3x3 input, 1x1x2x2 kernel, VALID, NCHW/OIHW ──────
+    {
+        HloModule m;
+        int in = m.parameter(0, Shape{{1, 1, 3, 3}});
+        int w = m.parameter(1, Shape{{1, 1, 2, 2}});
+        int id = m.convolution(in, w, Shape{{1, 1, 2, 2}});
+        HloInstruction& I = m.last();
+        I.conv_in_batch = 0; I.conv_in_feat = 1; I.conv_in_spatial = {2, 3};
+        I.conv_k_out = 0; I.conv_k_in = 1; I.conv_k_spatial = {2, 3};
+        I.conv_out_batch = 0; I.conv_out_feat = 1; I.conv_out_spatial = {2, 3};
+        I.conv_strides = {1, 1}; I.conv_pad_low = {0, 0}; I.conv_pad_high = {0, 0};
+        I.conv_rhs_dil = {1, 1}; I.conv_lhs_dil = {1, 1}; I.conv_groups = 1;
+        m.setRoot(id);
+        Literal r = m.evaluate({
+            Literal::make({{1, 1, 3, 3}}, {1, 2, 3, 4, 5, 6, 7, 8, 9}),
+            Literal::make({{1, 1, 2, 2}}, {1, 0, 0, 1}),  // main-diagonal sum per window
+        });
+        // out: [1+5, 2+6, 4+8, 5+9] = [6, 8, 12, 14]
+        check("convolution 2x2 VALID", approx(r.data, {6, 8, 12, 14}));
+    }
+
+    // ── Gather: embedding lookup rows {2,0} of a 3x2 table ───────────────
+    {
+        HloModule m;
+        int t = m.parameter(0, Shape{{3, 2}});
+        int idx = m.parameter(1, Shape{{2, 1}});
+        int id = m.gather(t, idx, Shape{{2, 2}});
+        HloInstruction& I = m.last();
+        I.gather_offset_dims = {1};
+        I.gather_collapsed = {0};
+        I.gather_start_map = {0};
+        I.gather_slice_sizes = {1, 2};
+        I.gather_index_vector_dim = 1;
+        m.setRoot(id);
+        Literal r = m.evaluate({Literal::make({{3, 2}}, {10, 11, 20, 21, 30, 31}),
+                                Literal::make({{2, 1}}, {2, 0})});
+        check("gather embedding", approx(r.data, {30, 31, 10, 11}));
+    }
+
     std::printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

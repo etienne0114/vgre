@@ -39,6 +39,15 @@ Shape getShape(Reader& r) {
     for (uint32_t i = 0; i < n && r.ok; ++i) s.dims.push_back(r.i64());
     return s;
 }
+void putVec(std::string& b, const std::vector<int64_t>& v) {
+    putU32(b, (uint32_t)v.size());
+    for (int64_t x : v) putI64(b, x);
+}
+std::vector<int64_t> getVec(Reader& r) {
+    std::vector<int64_t> v; uint32_t n = r.u32();
+    for (uint32_t i = 0; i < n && r.ok; ++i) v.push_back(r.i64());
+    return v;
+}
 
 constexpr char kMagic[6] = {'V','X','L','A','1','\0'};
 } // namespace
@@ -63,6 +72,23 @@ std::string serialize(const HloModule& m) {
         putStr(b, I.compare_dir);
         putStr(b, I.reduce_kind);
         putF32(b, I.init_value);
+        // extended-op attributes
+        putVec(b, I.lhs_batch); putVec(b, I.rhs_batch);
+        putVec(b, I.lhs_contract); putVec(b, I.rhs_contract);
+        putVec(b, I.slice_starts); putVec(b, I.slice_limits); putVec(b, I.slice_strides);
+        putVec(b, I.pad_low); putVec(b, I.pad_high); putVec(b, I.pad_interior);
+        putF32(b, I.pad_value);
+        putI64(b, I.concat_dim);
+        putI64(b, I.conv_in_batch); putI64(b, I.conv_in_feat);
+        putI64(b, I.conv_k_out); putI64(b, I.conv_k_in);
+        putI64(b, I.conv_out_batch); putI64(b, I.conv_out_feat);
+        putVec(b, I.conv_in_spatial); putVec(b, I.conv_k_spatial); putVec(b, I.conv_out_spatial);
+        putVec(b, I.conv_strides); putVec(b, I.conv_pad_low); putVec(b, I.conv_pad_high);
+        putVec(b, I.conv_lhs_dil); putVec(b, I.conv_rhs_dil);
+        putI64(b, I.conv_groups);
+        putVec(b, I.gather_offset_dims); putVec(b, I.gather_collapsed);
+        putVec(b, I.gather_start_map); putVec(b, I.gather_slice_sizes);
+        putI64(b, I.gather_index_vector_dim);
     }
     putU32(b, (uint32_t)m.root());
     return b;
@@ -89,6 +115,22 @@ bool deserialize(const std::string& blob, HloModule& out) {
         I.compare_dir = r.str();
         I.reduce_kind = r.str();
         I.init_value = r.f32();
+        I.lhs_batch = getVec(r); I.rhs_batch = getVec(r);
+        I.lhs_contract = getVec(r); I.rhs_contract = getVec(r);
+        I.slice_starts = getVec(r); I.slice_limits = getVec(r); I.slice_strides = getVec(r);
+        I.pad_low = getVec(r); I.pad_high = getVec(r); I.pad_interior = getVec(r);
+        I.pad_value = r.f32();
+        I.concat_dim = r.i64();
+        I.conv_in_batch = r.i64(); I.conv_in_feat = r.i64();
+        I.conv_k_out = r.i64(); I.conv_k_in = r.i64();
+        I.conv_out_batch = r.i64(); I.conv_out_feat = r.i64();
+        I.conv_in_spatial = getVec(r); I.conv_k_spatial = getVec(r); I.conv_out_spatial = getVec(r);
+        I.conv_strides = getVec(r); I.conv_pad_low = getVec(r); I.conv_pad_high = getVec(r);
+        I.conv_lhs_dil = getVec(r); I.conv_rhs_dil = getVec(r);
+        I.conv_groups = r.i64();
+        I.gather_offset_dims = getVec(r); I.gather_collapsed = getVec(r);
+        I.gather_start_map = getVec(r); I.gather_slice_sizes = getVec(r);
+        I.gather_index_vector_dim = r.i64();
         out.add(std::move(I));
     }
     int root = (int)r.u32();
@@ -251,6 +293,78 @@ extern "C" int vgre_xla_b_select(uint64_t b, int pred, int on_true, int on_false
 
 extern "C" void vgre_xla_b_set_root(uint64_t b, int id) {
     withBuilder(b, [&](HloModule& m) { m.setRoot(id); return 0; });
+}
+
+namespace { std::vector<int64_t> vec(const int64_t* p, int n) { return std::vector<int64_t>(p, p + n); } }
+
+extern "C" int vgre_xla_b_dot_general(uint64_t b, int lhs, int rhs,
+                                      const int64_t* lb, int nlb, const int64_t* rb, int nrb,
+                                      const int64_t* lc, int nlc, const int64_t* rc, int nrc,
+                                      const int64_t* out_dims, int n_out) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.dotGeneral(lhs, rhs, vec(lb, nlb), vec(rb, nrb), vec(lc, nlc), vec(rc, nrc),
+                            Shape{vec(out_dims, n_out)});
+    });
+}
+
+extern "C" int vgre_xla_b_concatenate(uint64_t b, const int* xs, int n_xs, int64_t dim,
+                                      const int64_t* out_dims, int n_out) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.concatenate(std::vector<int>(xs, xs + n_xs), dim, Shape{vec(out_dims, n_out)});
+    });
+}
+
+extern "C" int vgre_xla_b_slice(uint64_t b, int x, const int64_t* starts, const int64_t* limits,
+                                const int64_t* strides, int n, const int64_t* out_dims, int n_out) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.slice(x, vec(starts, n), vec(limits, n), vec(strides, n), Shape{vec(out_dims, n_out)});
+    });
+}
+
+extern "C" int vgre_xla_b_pad(uint64_t b, int x, int pad_val, const int64_t* low, const int64_t* high,
+                              const int64_t* interior, int n, const int64_t* out_dims, int n_out) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.pad(x, pad_val, vec(low, n), vec(high, n), vec(interior, n), Shape{vec(out_dims, n_out)});
+    });
+}
+
+extern "C" int vgre_xla_b_convolution(uint64_t b, int lhs, int rhs, const int64_t* out_dims, int n_out,
+                                      int in_batch, int in_feat, int k_out, int k_in,
+                                      int out_batch, int out_feat,
+                                      const int64_t* in_sp, const int64_t* k_sp, const int64_t* out_sp, int n_sp,
+                                      const int64_t* strides, const int64_t* pad_lo, const int64_t* pad_hi,
+                                      const int64_t* rhs_dil, int groups) {
+    return withBuilder(b, [&](HloModule& m) {
+        int id = m.convolution(lhs, rhs, Shape{vec(out_dims, n_out)});
+        HloInstruction& I = m.last();
+        I.conv_in_batch = in_batch; I.conv_in_feat = in_feat;
+        I.conv_k_out = k_out; I.conv_k_in = k_in;
+        I.conv_out_batch = out_batch; I.conv_out_feat = out_feat;
+        I.conv_in_spatial = vec(in_sp, n_sp); I.conv_k_spatial = vec(k_sp, n_sp);
+        I.conv_out_spatial = vec(out_sp, n_sp);
+        I.conv_strides = vec(strides, n_sp);
+        I.conv_pad_low = vec(pad_lo, n_sp); I.conv_pad_high = vec(pad_hi, n_sp);
+        I.conv_rhs_dil = vec(rhs_dil, n_sp);
+        I.conv_lhs_dil.assign(n_sp, 1);
+        I.conv_groups = groups < 1 ? 1 : groups;
+        return id;
+    });
+}
+
+extern "C" int vgre_xla_b_gather(uint64_t b, int operand, int indices, const int64_t* out_dims, int n_out,
+                                 const int64_t* offset_dims, int n_off, const int64_t* collapsed, int n_col,
+                                 const int64_t* start_map, int n_sm, const int64_t* slice_sizes, int n_ss,
+                                 int index_vector_dim) {
+    return withBuilder(b, [&](HloModule& m) {
+        int id = m.gather(operand, indices, Shape{vec(out_dims, n_out)});
+        HloInstruction& I = m.last();
+        I.gather_offset_dims = vec(offset_dims, n_off);
+        I.gather_collapsed = vec(collapsed, n_col);
+        I.gather_start_map = vec(start_map, n_sm);
+        I.gather_slice_sizes = vec(slice_sizes, n_ss);
+        I.gather_index_vector_dim = index_vector_dim;
+        return id;
+    });
 }
 
 extern "C" uint64_t vgre_xla_b_compile(uint64_t b) {

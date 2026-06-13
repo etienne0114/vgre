@@ -42,10 +42,11 @@ struct Literal {
 enum class HloOp {
     Parameter, Constant, Iota,
     Add, Subtract, Multiply, Divide, Maximum, Minimum, Power,
-    Negate, Exp, Log, Tanh, Abs, Rsqrt,
+    Negate, Exp, Log, Tanh, Abs, Rsqrt, Sqrt, Sign, Floor, Ceil, Logistic,
     Compare, Select,
     Broadcast, Reshape, Transpose,
     Dot, Reduce,
+    DotGeneral, Concatenate, Slice, Pad, Convolution, Gather,
 };
 
 struct HloInstruction {
@@ -61,6 +62,24 @@ struct HloInstruction {
     std::string compare_dir;           // Compare: "GT","GE","LT","LE","EQ","NE"
     std::string reduce_kind;           // Reduce: "sum","max","min","prod"
     float       init_value = 0.0f;     // Reduce init
+
+    // DotGeneral: paired batch/contracting dimension lists for lhs & rhs.
+    std::vector<int64_t> lhs_batch, rhs_batch, lhs_contract, rhs_contract;
+    // Slice: per-dim [start, limit) with stride.
+    std::vector<int64_t> slice_starts, slice_limits, slice_strides;
+    // Pad: per-dim low/high edge padding + interior padding; pad_value fills.
+    std::vector<int64_t> pad_low, pad_high, pad_interior;
+    float       pad_value = 0.0f;
+    int64_t     concat_dim = 0;        // Concatenate dimension (operands are the inputs)
+    // Convolution dimension numbers (general layout) + window config.
+    int64_t     conv_in_batch = 0, conv_in_feat = 0, conv_k_out = 0, conv_k_in = 0,
+                conv_out_batch = 0, conv_out_feat = 0;
+    std::vector<int64_t> conv_in_spatial, conv_k_spatial, conv_out_spatial;
+    std::vector<int64_t> conv_strides, conv_pad_low, conv_pad_high, conv_lhs_dil, conv_rhs_dil;
+    int64_t     conv_groups = 1;
+    // Gather (embedding-style): operands = {operand, indices}.
+    std::vector<int64_t> gather_offset_dims, gather_collapsed, gather_start_map, gather_slice_sizes;
+    int64_t     gather_index_vector_dim = 0;
 };
 
 class HloModule {
@@ -88,6 +107,17 @@ public:
     int reduce(int x, std::vector<int64_t> dims, const std::string& kind, float init);
     int compare(int lhs, int rhs, const std::string& dir);
     int select(int pred, int on_true, int on_false);
+    // General batched contraction; `out` is the result shape (computed by caller).
+    int dotGeneral(int lhs, int rhs, std::vector<int64_t> lb, std::vector<int64_t> rb,
+                   std::vector<int64_t> lc, std::vector<int64_t> rc, Shape out);
+    int concatenate(const std::vector<int>& xs, int64_t dim, Shape out);
+    int slice(int x, std::vector<int64_t> starts, std::vector<int64_t> limits,
+              std::vector<int64_t> strides, Shape out);
+    int pad(int x, int pad_val, std::vector<int64_t> low, std::vector<int64_t> high,
+            std::vector<int64_t> interior, Shape out);
+    int convolution(int lhs, int rhs, Shape out);  // attributes set on returned instr
+    HloInstruction& last() { return instrs_.back(); }  // tweak attrs after a builder call
+    int gather(int operand, int indices, Shape out);
 
 private:
     std::vector<HloInstruction> instrs_;
