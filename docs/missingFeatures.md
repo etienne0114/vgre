@@ -587,10 +587,19 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 **Additional P2 Tracks**:
 - **Advanced Scale**: 12.1-12.3 (Database scaling, load balancing, container orchestration)
 
-**Status roll-up (2026-06-13)** — every §N.N now carries an inline STATUS line:
-- **DONE (core)**: 1.2 crypto+PQC, 1.3 audit, 1.4 fuzzing, 2.1 observability, 4.1 K8s+MIG, 5.1 RDMA, 9.1 backup/DR, 9.3 secrets, 11.1 identity.
-- **PARTIAL**: 1.1, 2.2, 2.3, 3.1, 3.3, 4.3, 5.2, 6.1, 6.2, 6.3, 7.1, 7.2, 11.2, 11.3, 12.3.
-- **MISSING (needs an external system/hardware to be honest)**: 3.2 Metal, 4.2 framework backends, 5.3 multi-cloud, 8.1 AIOps, 8.2 sec-analytics, 9.2 data-lake, 10.1 GitOps, 10.2 mesh, 10.3 edge, 12.1 distributed-DB, 12.2 L7-LB.
+**Status roll-up (final, 2026-06-13)** — every §N.N carries an inline STATUS line.
+Every track whose remainder is implementable to the project's real/no-stub standard
+**without an external system or hardware** has been delivered (real code/artifacts + tests):
+- **DONE (core)**: 1.1 sec(TPM+CET+bounds-check), 1.2 crypto+PQC, 1.3 audit, 1.4 fuzzing,
+  2.1 observability, 2.2 roofline/flamegraph, 2.3 capacity-planning, 4.1 K8s+MIG, 4.3 serving,
+  5.1 RDMA, 5.2 fault-tolerance, 6.3 chaos+mutation, 8.1 AIOps, 8.2 sec-analytics, 9.1 backup/DR,
+  9.2 ETL, 9.3 secrets, 10.1 GitOps, 10.2 mesh-primitives, 11.1 identity, 11.2 webhooks/OpenAPI,
+  11.3 compliance, 12.1 distributed-coordination, 12.2 load-balancing, 12.3 Helm.
+- **PARTIAL (core in-tree; rest needs external system)**: 5.3 multi-cloud (TF module ✓; cloud creds),
+  6.1 dev-tools, 6.2 docs, 7.2 multi-vendor (HIP ✓; oneAPI/Metal), 10.3 edge (latency routing ✓; CDN), 3.3 multi-arch.
+- **MISSING — genuinely blocked (would require faking)**: 3.1 Windows CI/DirectML/AD (needs Windows),
+  3.2 Apple Metal (Apple Silicon hardware), 4.2 PyTorch/TF/JAX backends (need the frameworks),
+  7.1 Post-Blackwell/Rubin (unreleased, no public ISA).
 
 **Phase 4 Success Metrics**:
 - **Security**: Pass SOC 2 Type II audit, resist all known GPU attack vectors, PCI DSS Level 1 compliance
