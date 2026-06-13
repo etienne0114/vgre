@@ -726,6 +726,14 @@ if(EXISTS ${PROJECT_SOURCE_DIR}/.venv/bin/python)
         ${PROJECT_SOURCE_DIR}/frameworks/tf/test_tf_e2e.py)
     set_tests_properties(TensorFlowStableHloBackend PROPERTIES TIMEOUT 600
         ENVIRONMENT "VGRE_BUILD_DIR=${CMAKE_BINARY_DIR}")
+
+    # Keras 3 high-level models end-to-end (§4.2): full CNN / BatchNorm & LayerNorm
+    # MLPs / a Transformer (MultiHeadAttention) block lowered via the Keras JAX
+    # backend and run on VGRE vs Keras. Self-skips if keras isn't installed.
+    add_test(NAME KerasModelsBackend COMMAND ${PROJECT_SOURCE_DIR}/.venv/bin/python
+        ${PROJECT_SOURCE_DIR}/frameworks/keras/test_keras_e2e.py)
+    set_tests_properties(KerasModelsBackend PROPERTIES TIMEOUT 400
+        ENVIRONMENT "VGRE_BUILD_DIR=${CMAKE_BINARY_DIR}")
 endif()
 
 # WASM target (§3.3): compile VGRE compute kernels to wasm32 (clang) and run them

@@ -30,6 +30,8 @@ _UNARY = {
     "stablehlo.sqrt": "Sqrt", "stablehlo.sign": "Sign",
     "stablehlo.floor": "Floor", "stablehlo.ceil": "Ceil",
     "stablehlo.logistic": "Logistic",
+    "stablehlo.cosine": "Cos", "stablehlo.sine": "Sin",
+    "chlo.erf": "Erf", "chlo.erfc": "Erfc",
 }
 _REDUCE_KIND = {
     "stablehlo.add": "sum", "stablehlo.maximum": "max",

@@ -25,6 +25,7 @@ OP = {
     "Dot": 26, "Reduce": 27,
     "DotGeneral": 28, "Concatenate": 29, "Slice": 30, "Pad": 31,
     "Convolution": 32, "Gather": 33, "ReduceWindow": 34,
+    "Erf": 35, "Erfc": 36, "Cos": 37, "Sin": 38,
 }
 
 _I64P = POINTER(c_int64)
