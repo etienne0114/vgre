@@ -187,6 +187,53 @@ def main():
         [rng.standard_normal((C,)).astype(np.float32) for _ in range(4)]
     case("ResNet block (conv-bn-residual)", resnet_block, *rn_args)
 
+    # ── scatter (.at[].set/add) + KV-cache + autoregressive generation ───────
+    grid = rng.standard_normal((2, 5)).astype(np.float32)
+    col = rng.standard_normal((2,)).astype(np.float32)
+    case("scatter .at[:,2].set", lambda a, v: a.at[:, 2].set(v), grid, col)
+    case("scatter .at[:,2].add", lambda a, v: a.at[:, 2].add(v), grid, col)
+    case("KV-cache dynamic_update_slice",
+         lambda c, u: jax.lax.dynamic_update_slice(c, u, (0, 0, 3, 0)),
+         rng.standard_normal((1, 2, 6, 4)).astype(np.float32),
+         rng.standard_normal((1, 2, 1, 4)).astype(np.float32))
+
+    # a real small GPT doing greedy autoregressive decoding (grow-by-concat)
+    Vv, Dd, Hh = 16, 8, 2
+    dh2 = Dd // Hh
+    Wemb = jnp.asarray(rng.standard_normal((Vv, Dd)).astype(np.float32))
+    Wpos = jnp.asarray(rng.standard_normal((16, Dd)).astype(np.float32))
+    Wqk = [jnp.asarray(rng.standard_normal((Dd, Dd)).astype(np.float32)) for _ in range(4)]
+    Wff = [jnp.asarray(rng.standard_normal((Dd, 16)).astype(np.float32)),
+           jnp.asarray(rng.standard_normal((16, Dd)).astype(np.float32))]
+
+    def _ln(z):
+        m = z.mean(-1, keepdims=True); v = z.var(-1, keepdims=True)
+        return (z - m) / jnp.sqrt(v + 1e-5)
+
+    def _logits(tokens):
+        B, Tt = tokens.shape
+        h = Wemb[tokens.astype(jnp.int32)] + Wpos[:Tt]
+        hn = _ln(h)
+        q = (hn @ Wqk[0]).reshape(B, Tt, Hh, dh2).transpose(0, 2, 1, 3)
+        k = (hn @ Wqk[1]).reshape(B, Tt, Hh, dh2).transpose(0, 2, 1, 3)
+        v = (hn @ Wqk[2]).reshape(B, Tt, Hh, dh2).transpose(0, 2, 1, 3)
+        s = (q @ k.transpose(0, 1, 3, 2)) / np.float32(np.sqrt(dh2))
+        mask = jnp.tril(jnp.ones((Tt, Tt)))
+        s = jnp.where(mask[None, None] > 0, s, np.float32(-1e9))
+        o = (jax.nn.softmax(s, -1) @ v).transpose(0, 2, 1, 3).reshape(B, Tt, Dd) @ Wqk[3]
+        h = h + o
+        h = h + jax.nn.gelu(_ln(h) @ Wff[0]) @ Wff[1]
+        return _ln(h) @ Wemb.T
+
+    def generate(prompt, n_new):
+        toks = prompt
+        for _ in range(n_new):
+            nxt = jnp.argmax(_logits(toks)[:, -1, :], -1).astype(jnp.float32)
+            toks = jnp.concatenate([toks, nxt[:, None]], axis=1)
+        return toks
+    prompt = jnp.asarray(rng.integers(1, Vv, size=(2, 3)).astype(np.float32))
+    case("GPT greedy autoregressive (6 tokens)", lambda p: generate(p, 6), prompt)
+
     print(f"\n{PASS} / {PASS + FAIL} passed")
     return 0 if FAIL == 0 else 1
 

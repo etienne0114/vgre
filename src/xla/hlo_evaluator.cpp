@@ -571,6 +571,47 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
                 multi[idx] = std::move(acc);
                 break;
             }
+            case HloOp::Scatter: {
+                const Literal& operand = vals[I.operands[0]];
+                const Literal& sidx = vals[I.operands[1]];
+                const Literal& updates = vals[I.operands[2]];
+                out = operand;  // copy then combine updates in
+                int ro = (int)operand.shape.rank(), ru = (int)updates.shape.rank(),
+                    ri = (int)sidx.shape.rank();
+                auto oSt = rowMajorStrides(operand.shape), uSt = rowMajorStrides(updates.shape),
+                     iSt = rowMajorStrides(sidx.shape);
+                std::vector<bool> isWin(ru, false);
+                for (int64_t d : I.scatter_update_window_dims) isWin[d] = true;
+                std::vector<int64_t> updScatter;          // update dims that index scatter rows
+                for (int d = 0; d < ru; ++d) if (!isWin[d]) updScatter.push_back(d);
+                std::vector<bool> isIns(ro, false);
+                for (int64_t d : I.scatter_inserted_window_dims) isIns[d] = true;
+                int ncomp = (int)I.scatter_dims_to_operand.size();
+                std::vector<int64_t> uc(ru), ic(ri, 0), oc(ro);
+                for (int64_t u = 0; u < updates.shape.numel(); ++u) {
+                    decode(u, uSt, uc);
+                    int b = 0;
+                    for (int d = 0; d < ri; ++d) {
+                        if (d == I.scatter_index_vector_dim) { ic[d] = 0; continue; }
+                        ic[d] = uc[updScatter[b++]];
+                    }
+                    std::vector<int64_t> start(ro, 0);
+                    for (int k = 0; k < ncomp; ++k) {
+                        if (I.scatter_index_vector_dim < ri) ic[I.scatter_index_vector_dim] = k;
+                        start[I.scatter_dims_to_operand[k]] = (int64_t)std::llround(sidx.data[encode(ic, iSt)]);
+                    }
+                    int j = 0;
+                    for (int d = 0; d < ro; ++d) {
+                        oc[d] = start[d] + (isIns[d] ? 0 : uc[I.scatter_update_window_dims[j++]]);
+                        if (oc[d] < 0) oc[d] = 0;
+                        if (oc[d] >= operand.shape.dims[d]) oc[d] = operand.shape.dims[d] - 1;
+                    }
+                    int64_t oi = encode(oc, oSt);
+                    out.data[oi] = I.subs[0]->evaluate(
+                        {Literal::scalar(out.data[oi]), Literal::scalar(updates.data[u])}).data[0];
+                }
+                break;
+            }
             case HloOp::DynamicUpdateSlice: {
                 const Literal& a = vals[I.operands[0]];
                 const Literal& u = vals[I.operands[1]];
@@ -751,6 +792,11 @@ int HloModule::reduceGeneral(const std::vector<int>& operands, std::vector<int64
                              std::shared_ptr<HloModule> body, Shape primary) {
     HloInstruction i; i.op = HloOp::ReduceGeneral; i.operands = operands;
     i.dimensions = std::move(dims); i.subs = {std::move(body)}; i.shape = std::move(primary);
+    return add(std::move(i));
+}
+int HloModule::scatter(int operand, int indices, int updates, std::shared_ptr<HloModule> combiner) {
+    HloInstruction i; i.op = HloOp::Scatter; i.operands = {operand, indices, updates};
+    i.subs = {std::move(combiner)}; i.shape = instrs_[operand].shape;
     return add(std::move(i));
 }
 

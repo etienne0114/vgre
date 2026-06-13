@@ -54,6 +54,7 @@ enum class HloOp {
     While, Tuple, GetTupleElement, DynamicSlice, DynamicUpdateSlice,  // control flow
     Reverse,
     Sort, ReduceGeneral, And, Or, Xor, Not,  // sort/argmax + boolean ops
+    Scatter,
 };
 
 struct HloInstruction {
@@ -97,6 +98,9 @@ struct HloInstruction {
     int64_t     gte_index = 0;          // GetTupleElement
     std::vector<int64_t> dyn_slice_sizes;  // DynamicSlice
     int64_t     sort_dim = 0;           // Sort dimension; ReduceGeneral n-ary via operands
+    // Scatter (inverse of Gather; operands = {operand, indices, updates}, subs[0]=combiner)
+    std::vector<int64_t> scatter_update_window_dims, scatter_inserted_window_dims, scatter_dims_to_operand;
+    int64_t     scatter_index_vector_dim = 0;
 };
 
 class HloModule {
@@ -156,6 +160,7 @@ public:
     // (2n params -> n outputs). Produces n reduced arrays (a tuple).
     int reduceGeneral(const std::vector<int>& operands, std::vector<int64_t> dims,
                       std::shared_ptr<HloModule> body, Shape primary);
+    int scatter(int operand, int indices, int updates, std::shared_ptr<HloModule> combiner);
 
 private:
     std::vector<HloInstruction> instrs_;
