@@ -47,6 +47,7 @@ enum class HloOp {
     Broadcast, Reshape, Transpose,
     Dot, Reduce,
     DotGeneral, Concatenate, Slice, Pad, Convolution, Gather, ReduceWindow,
+    Erf, Erfc, Cos, Sin,  // appended (keep ordinals of earlier ops stable)
 };
 
 struct HloInstruction {

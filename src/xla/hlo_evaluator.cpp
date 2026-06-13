@@ -50,6 +50,10 @@ float applyUnary(HloOp op, float a) {
         case HloOp::Floor: return std::floor(a);
         case HloOp::Ceil: return std::ceil(a);
         case HloOp::Logistic: return 1.0f / (1.0f + std::exp(-a));
+        case HloOp::Erf: return std::erf(a);
+        case HloOp::Erfc: return std::erfc(a);
+        case HloOp::Cos: return std::cos(a);
+        case HloOp::Sin: return std::sin(a);
         default: throw std::runtime_error("not a unary op");
     }
 }
@@ -101,7 +105,8 @@ Literal HloModule::evaluate(const std::vector<Literal>& params) const {
             }
             case HloOp::Negate: case HloOp::Exp: case HloOp::Log: case HloOp::Tanh:
             case HloOp::Abs: case HloOp::Rsqrt: case HloOp::Sqrt: case HloOp::Sign:
-            case HloOp::Floor: case HloOp::Ceil: case HloOp::Logistic: {
+            case HloOp::Floor: case HloOp::Ceil: case HloOp::Logistic:
+            case HloOp::Erf: case HloOp::Erfc: case HloOp::Cos: case HloOp::Sin: {
                 const Literal& a = vals[I.operands[0]];
                 for (size_t i = 0; i < a.data.size(); ++i) out.data[i] = applyUnary(I.op, a.data[i]);
                 break;
