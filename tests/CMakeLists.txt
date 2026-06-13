@@ -691,6 +691,12 @@ target_link_libraries(test_fuzz_smoke PRIVATE vgre_fuzz_targets)
 add_test(NAME FuzzSmoke COMMAND test_fuzz_smoke)
 set_tests_properties(FuzzSmoke PROPERTIES TIMEOUT 60)
 
+# PQC: FIPS-202 Keccak KATs + ML-KEM-768 (FIPS 203) + X25519 hybrid KEM.
+add_executable(test_pqc pqc/test_pqc.cpp)
+target_link_libraries(test_pqc PRIVATE vgre)
+add_test(NAME PostQuantumKEM COMMAND test_pqc)
+set_tests_properties(PostQuantumKEM PROPERTIES TIMEOUT 60)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)
