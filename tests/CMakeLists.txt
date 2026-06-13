@@ -667,6 +667,12 @@ target_link_libraries(test_bounds_checker PRIVATE vgre)
 add_test(NAME BoundsChecker COMMAND test_bounds_checker)
 set_tests_properties(BoundsChecker PROPERTIES TIMEOUT 30)
 
+# HIP/ROCm compatibility layer (delegates to the cuda* runtime → links vgre_cudart).
+add_executable(test_hip_compat integration/test_hip_compat.cpp)
+target_link_libraries(test_hip_compat PRIVATE vgre_cudart)
+add_test(NAME HipCompat COMMAND test_hip_compat)
+set_tests_properties(HipCompat PROPERTIES TIMEOUT 30)
+
 # QA: chaos fault injector.
 add_executable(test_fault_injector common/test_fault_injector.cpp)
 target_link_libraries(test_fault_injector PRIVATE vgre)

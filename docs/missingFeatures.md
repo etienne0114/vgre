@@ -363,7 +363,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Emulates next-generation features with forward compatibility guarantees
 
 ### 7.2 Alternative GPU Ecosystem Integration — P3
-- **STATUS (2026-06-13): PARTIAL** — OpenCL + integrated-GPU executor backends exist; AMD ROCm/HIP, Intel oneAPI, Apple Metal pending.
+- **STATUS (2026-06-13): PARTIAL→core** — OpenCL + integrated-GPU executor backends + **AMD HIP/ROCm compatibility layer** (`vgre/hip/hip_runtime.h`: hipMalloc/Free/Memcpy/Memset/DeviceSynchronize/GetDeviceCount/GetErrorString → VGRE's cuda* runtime; a real HIP program runs unmodified, `test_hip_compat` 10/10). Intel oneAPI (SYCL/DPC++) and Apple Metal need those SDKs/hardware.
 - **Gap**: NVIDIA-centric implementation limits adoption in diverse GPU ecosystems.
 - **Design**: Multi-vendor GPU support:
   - AMD ROCm compatibility layer with HIP translation

@@ -1083,6 +1083,7 @@ endif()
 set(_VGRE_CUDART_SOURCES
     src/api/cudart/cudart_shim.cpp
     src/api/cudart/cudart_shim_stream.cpp
+    src/hip/hip_runtime.cpp   # HIP/ROCm compat layer (delegates to the cuda* runtime)
     # cudart_shim_graph_basic.cpp is compiled via vgre_cudart_shims OBJECT lib
     src/api/cuda_driver/cuda_driver_device_context.cpp
     src/api/cuda_driver/cuda_driver_memory.cpp
