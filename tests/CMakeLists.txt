@@ -703,6 +703,12 @@ target_link_libraries(test_perf_analytics PRIVATE vgre)
 add_test(NAME PerfAnalytics COMMAND test_perf_analytics)
 set_tests_properties(PerfAnalytics PROPERTIES TIMEOUT 30)
 
+# Capacity planner: Holt-Winters forecasting + FFD bin-packing.
+add_executable(test_capacity_planner advanced/test_capacity_planner.cpp)
+target_link_libraries(test_capacity_planner PRIVATE vgre)
+add_test(NAME CapacityPlanner COMMAND test_capacity_planner)
+set_tests_properties(CapacityPlanner PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)
