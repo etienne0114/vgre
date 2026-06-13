@@ -165,3 +165,110 @@ extern "C" void vgre_xla_free(uint64_t exe) {
     std::lock_guard<std::mutex> lk(exeMu());
     exes().erase(exe);
 }
+
+// ── builder C ABI ────────────────────────────────────────────────────────────
+namespace vgre { namespace xla { namespace {
+std::mutex& bldMu() { static std::mutex m; return m; }
+std::map<uint64_t, HloModule>& blds() { static std::map<uint64_t, HloModule> b; return b; }
+
+// Run `fn(module)` under the builder lock; return its result or -1 if no builder.
+template <class Fn>
+int withBuilder(uint64_t b, Fn fn) {
+    std::lock_guard<std::mutex> lk(bldMu());
+    auto it = blds().find(b);
+    if (it == blds().end()) return -1;
+    return fn(it->second);
+}
+}}} // namespace vgre::xla::(anon)
+
+extern "C" uint64_t vgre_xla_builder_new(void) {
+    std::lock_guard<std::mutex> lk(bldMu());
+    uint64_t h = nextHandle()++;
+    blds()[h];  // default-construct
+    return h;
+}
+
+extern "C" int vgre_xla_b_parameter(uint64_t b, int index, const int64_t* dims, int ndim) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.parameter(index, Shape{std::vector<int64_t>(dims, dims + ndim)});
+    });
+}
+
+extern "C" int vgre_xla_b_constant(uint64_t b, const int64_t* dims, int ndim,
+                                   const float* data, int n) {
+    return withBuilder(b, [&](HloModule& m) {
+        Shape s{std::vector<int64_t>(dims, dims + ndim)};
+        return m.constant(Literal::make(s, std::vector<float>(data, data + n)));
+    });
+}
+
+extern "C" int vgre_xla_b_binary(uint64_t b, int op, int lhs, int rhs) {
+    return withBuilder(b, [&](HloModule& m) { return m.binary((HloOp)op, lhs, rhs); });
+}
+
+extern "C" int vgre_xla_b_unary(uint64_t b, int op, int x) {
+    return withBuilder(b, [&](HloModule& m) { return m.unary((HloOp)op, x); });
+}
+
+extern "C" int vgre_xla_b_broadcast(uint64_t b, int x, const int64_t* out_dims, int n_out,
+                                    const int64_t* bcast_dims, int n_bd) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.broadcast(x, Shape{std::vector<int64_t>(out_dims, out_dims + n_out)},
+                           std::vector<int64_t>(bcast_dims, bcast_dims + n_bd));
+    });
+}
+
+extern "C" int vgre_xla_b_reshape(uint64_t b, int x, const int64_t* out_dims, int n_out) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.reshape(x, Shape{std::vector<int64_t>(out_dims, out_dims + n_out)});
+    });
+}
+
+extern "C" int vgre_xla_b_transpose(uint64_t b, int x, const int64_t* perm, int n_perm) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.transpose(x, std::vector<int64_t>(perm, perm + n_perm));
+    });
+}
+
+extern "C" int vgre_xla_b_dot(uint64_t b, int lhs, int rhs) {
+    return withBuilder(b, [&](HloModule& m) { return m.dot(lhs, rhs); });
+}
+
+extern "C" int vgre_xla_b_reduce(uint64_t b, int x, const int64_t* dims, int n_dims,
+                                 const char* kind, float init) {
+    return withBuilder(b, [&](HloModule& m) {
+        return m.reduce(x, std::vector<int64_t>(dims, dims + n_dims), kind ? kind : "sum", init);
+    });
+}
+
+extern "C" int vgre_xla_b_compare(uint64_t b, int lhs, int rhs, const char* dir) {
+    return withBuilder(b, [&](HloModule& m) { return m.compare(lhs, rhs, dir ? dir : "GT"); });
+}
+
+extern "C" int vgre_xla_b_select(uint64_t b, int pred, int on_true, int on_false) {
+    return withBuilder(b, [&](HloModule& m) { return m.select(pred, on_true, on_false); });
+}
+
+extern "C" void vgre_xla_b_set_root(uint64_t b, int id) {
+    withBuilder(b, [&](HloModule& m) { m.setRoot(id); return 0; });
+}
+
+extern "C" uint64_t vgre_xla_b_compile(uint64_t b) {
+    HloModule m;
+    {
+        std::lock_guard<std::mutex> lk(bldMu());
+        auto it = blds().find(b);
+        if (it == blds().end()) return 0;
+        m = std::move(it->second);
+        blds().erase(it);
+    }
+    std::lock_guard<std::mutex> lk(exeMu());
+    uint64_t h = nextHandle()++;
+    exes()[h] = std::move(m);
+    return h;
+}
+
+extern "C" void vgre_xla_b_free(uint64_t b) {
+    std::lock_guard<std::mutex> lk(bldMu());
+    blds().erase(b);
+}
