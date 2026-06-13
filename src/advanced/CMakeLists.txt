@@ -11,6 +11,7 @@ add_library(vgre_advanced OBJECT
     runtime_profiler_instruction.cpp
     perf_analytics.cpp
     capacity_planner.cpp
+    fault_tolerance.cpp
     vgre_workload_engine.cpp
     ipc_manager.cpp
     tcp_cluster/tcp_cluster_manager.cpp
