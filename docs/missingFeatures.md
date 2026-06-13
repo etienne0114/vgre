@@ -291,7 +291,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Recovers from 20% node failures within 30 seconds, scales elastically without interruption
 
 ### 5.3 Multi-Cloud & Hybrid Deployments — P2
-- **STATUS (2026-06-13): MISSING** — Terraform modules + cross-cloud networking require live AWS/Azure/GCP accounts; backup/DR `exportSnapshot` (§9.1) provides the cross-region replication primitive.
+- **STATUS (2026-06-13): PARTIAL (artifacts)** — real Terraform module (`deploy/terraform/`: versions/variables/main/outputs, deploys the Helm chart via the helm provider) validated by `deploy/validate_iac.py` (`IaCManifests` ctest; runs `terraform fmt` when the CLI is present). Cross-cloud networking + applying to live AWS/Azure/GCP need accounts/credentials.
 - **Gap**: Single-environment deployment model insufficient for enterprise multi-cloud strategies.
 - **Design**: Multi-cloud orchestration:
   - Cloud-agnostic deployment with Terraform modules
@@ -449,7 +449,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 10. Modern DevOps & Infrastructure Automation — P2
 
 ### 10.1 GitOps & Progressive Delivery — P2
-- **STATUS (2026-06-13): MISSING** — ArgoCD/Flux workflows require a Git platform + cluster; external.
+- **STATUS (2026-06-13): DONE (manifests)** — `deploy/gitops/`: ArgoCD Application (auto-sync, prune, self-heal, retry/backoff) + Flux Kustomization + Kustomize base/prod overlay (replica patch), validated by `IaCManifests` ctest (`kustomize build` when the CLI is present). Applying them needs a Git platform + cluster.
 - **Gap**: No GitOps workflows, progressive delivery, or automated deployment pipelines.
 - **Design**: Modern deployment automation platform:
   - GitOps workflows with automated deployment from Git repositories
