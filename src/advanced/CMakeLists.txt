@@ -14,6 +14,7 @@ add_library(vgre_advanced OBJECT
     fault_tolerance.cpp
     api_management.cpp
     traffic_manager.cpp
+    distributed.cpp
     vgre_workload_engine.cpp
     ipc_manager.cpp
     tcp_cluster/tcp_cluster_manager.cpp

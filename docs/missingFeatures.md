@@ -535,7 +535,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 ## 12. Advanced Performance & Scale — P2
 
 ### 12.1 Database Scaling & Distributed Systems — P2
-- **STATUS (2026-06-13): MISSING** — distributed DB/sharding/Raft are a separate datastore concern; VGRE uses SQLite locally (Nsight export).
+- **STATUS (2026-06-13): DONE (core)** — coordination primitives in-tree: `vgre::advanced::ConsistentHashRing` (virtual-node sharding with fmix64 hashing + minimal remap on membership change), `DistributedLock` (lease-based mutual exclusion with TTL expiry/renew + fencing token), and `LeaderElection` (lease-based, failover on lease expiry) (`test_distributed` 19/19). A networked multi-node datastore wires these over the wire.
 - **Gap**: No distributed database systems, sharding strategies, or consensus algorithms.
 - **Design**: Enterprise-scale distributed data management:
   - Database sharding with automated rebalancing

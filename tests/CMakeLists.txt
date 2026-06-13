@@ -768,6 +768,12 @@ target_link_libraries(test_traffic_manager PRIVATE vgre)
 add_test(NAME TrafficManager COMMAND test_traffic_manager)
 set_tests_properties(TrafficManager PROPERTIES TIMEOUT 30)
 
+# Distributed: consistent hashing + distributed lock + leader election.
+add_executable(test_distributed advanced/test_distributed.cpp)
+target_link_libraries(test_distributed PRIVATE vgre)
+add_test(NAME DistributedPrimitives COMMAND test_distributed)
+set_tests_properties(DistributedPrimitives PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)
