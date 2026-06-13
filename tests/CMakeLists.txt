@@ -685,6 +685,12 @@ target_link_libraries(test_mig PRIVATE vgre)
 add_test(NAME MigPartitioning COMMAND test_mig)
 set_tests_properties(MigPartitioning PROPERTIES TIMEOUT 30)
 
+# Fuzzing: deterministic smoke test over the JSON/JWT/PTX fuzz-target cores.
+add_executable(test_fuzz_smoke fuzzing/test_fuzz_smoke.cpp)
+target_link_libraries(test_fuzz_smoke PRIVATE vgre_fuzz_targets)
+add_test(NAME FuzzSmoke COMMAND test_fuzz_smoke)
+set_tests_properties(FuzzSmoke PROPERTIES TIMEOUT 60)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)

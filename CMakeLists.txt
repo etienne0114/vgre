@@ -1253,6 +1253,7 @@ endfunction()
 # ──────────────────────────────────────────────────────────────────────────────
 if(VGRE_BUILD_TESTS)
     enable_testing()
+    vgre_add_subdirectory(tools/fuzzing)  # fuzz target cores (before tests, which link them)
     vgre_add_subdirectory(tests)
 endif()
 
