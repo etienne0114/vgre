@@ -661,6 +661,12 @@ target_link_libraries(test_profiler_timeline PRIVATE vgre)
 add_test(NAME ProfilerTimeline COMMAND test_profiler_timeline)
 set_tests_properties(ProfilerTimeline PROPERTIES TIMEOUT 30)
 
+# Security: device-memory bounds checker (red-zone canaries).
+add_executable(test_bounds_checker core/test_bounds_checker.cpp)
+target_link_libraries(test_bounds_checker PRIVATE vgre)
+add_test(NAME BoundsChecker COMMAND test_bounds_checker)
+set_tests_properties(BoundsChecker PROPERTIES TIMEOUT 30)
+
 # Compliance: tamper-evident audit log + GDPR crypto-erasure.
 add_executable(test_audit_log compliance/test_audit_log.cpp)
 target_link_libraries(test_audit_log PRIVATE vgre)
