@@ -6,6 +6,7 @@ add_library(vgre_common OBJECT
     metrics_registry.cpp
     config_registry.cpp
     json.cpp
+    fault_injector.cpp
 )
 
 target_include_directories(vgre_common PUBLIC

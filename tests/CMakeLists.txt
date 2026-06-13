@@ -667,6 +667,24 @@ target_link_libraries(test_bounds_checker PRIVATE vgre)
 add_test(NAME BoundsChecker COMMAND test_bounds_checker)
 set_tests_properties(BoundsChecker PROPERTIES TIMEOUT 30)
 
+# QA: chaos fault injector.
+add_executable(test_fault_injector common/test_fault_injector.cpp)
+target_link_libraries(test_fault_injector PRIVATE vgre)
+add_test(NAME ChaosFaultInjector COMMAND test_fault_injector)
+set_tests_properties(ChaosFaultInjector PROPERTIES TIMEOUT 30)
+
+# QA: mutation-testing runner — must kill 100% of demo mutants (strong test).
+find_program(Python3_EXECUTABLE NAMES python3 python)
+if(Python3_EXECUTABLE)
+    add_test(NAME MutationTesting COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/tools/testing/mutate.py
+        --target ${PROJECT_SOURCE_DIR}/tools/testing/mutation_demo/target.cpp
+        --test   ${PROJECT_SOURCE_DIR}/tools/testing/mutation_demo/test.cpp
+        --cxx    ${CMAKE_CXX_COMPILER}
+        --min-score 1.0)
+    set_tests_properties(MutationTesting PROPERTIES TIMEOUT 60)
+endif()
+
 # Compliance: tamper-evident audit log + GDPR crypto-erasure.
 add_executable(test_audit_log compliance/test_audit_log.cpp)
 target_link_libraries(test_audit_log PRIVATE vgre)

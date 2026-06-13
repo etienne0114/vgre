@@ -334,7 +334,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: <30 minute time-to-first-success for new developers, comprehensive troubleshooting coverage
 
 ### 6.3 Testing & Quality Assurance — P2
-- **STATUS (2026-06-13): PARTIAL** — 240+ tests + **coverage-guided fuzzing** (§1.4, commit e89f063); chaos engineering + mutation testing pending.
+- **STATUS (2026-06-13): DONE (core)** — 240+ tests + fuzzing (§1.4) + **chaos fault injection** (`vgre::testing::FaultInjector`: named fault points with once/after-N/every-N/rate/always policies + latency + `VGRE_FAULT_INJECT` env + `VGRE_FAULT_GUARD` macro; `test_fault_injector` 14/14) + **mutation testing** (`tools/testing/mutate.py`: comment/string-masked operator mutation engine, killed/survived scoring; `MutationTesting` ctest kills 100% of the demo's mutants). Property-based testing across the full API surface is incremental.
 - **Gap**: Basic testing insufficient for enterprise reliability requirements.
 - **Design**: Comprehensive QA framework:
   - Property-based testing for all API surfaces
