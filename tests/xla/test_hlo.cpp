@@ -277,6 +277,55 @@ int main() {
         check("while loop (0+1+2+3+4)", approx(r.data, {10}));
     }
 
+    // ── Sort: ascending along last dim via a LT comparator ───────────────
+    {
+        auto cmp = std::make_shared<HloModule>();
+        {
+            int a = cmp->parameter(0, Shape{{}});
+            int b = cmp->parameter(1, Shape{{}});
+            cmp->setRoot(cmp->compare(a, b, "LT"));
+        }
+        HloModule m;
+        int x = m.parameter(0, Shape{{2, 3}});
+        int s = m.sort({x}, 1, cmp);
+        m.setRoot(m.getTupleElement(s, 0, Shape{{2, 3}}));
+        Literal r = m.evaluate({Literal::make({{2, 3}}, {3, 1, 2, 9, 7, 8})});
+        check("sort ascending", approx(r.data, {1, 2, 3, 7, 8, 9}));
+    }
+
+    // ── Iota ─────────────────────────────────────────────────────────────
+    {
+        HloModule m;
+        m.iota(Shape{{2, 3}}, 1);
+        Literal r = m.evaluate({});
+        check("iota dim1", approx(r.data, {0, 1, 2, 0, 1, 2}));
+    }
+
+    // ── ReduceGeneral: argmax over (value, index) along dim 1 ─────────────
+    {
+        // reducer(accV, accI, elV, elI) = (max(accV,elV), index of the max)
+        auto body = std::make_shared<HloModule>();
+        {
+            int accV = body->parameter(0, Shape{{}});
+            int accI = body->parameter(1, Shape{{}});
+            int elV = body->parameter(2, Shape{{}});
+            int elI = body->parameter(3, Shape{{}});
+            int gt = body->compare(accV, elV, "GE");          // keep acc on ties/greater
+            int nv = body->select(gt, accV, elV);
+            int ni = body->select(gt, accI, elI);
+            body->setRoot(body->tuple({nv, ni}));
+        }
+        HloModule m;
+        int v = m.parameter(0, Shape{{2, 3}});
+        int idx = m.iota(Shape{{2, 3}}, 1);
+        int negInf = m.constant(Literal::scalar(-1e30f));
+        int zero = m.constant(Literal::scalar(0.0f));
+        int r = m.reduceGeneral({v, idx, negInf, zero}, {1}, body, Shape{{2}});
+        m.setRoot(m.getTupleElement(r, 1, Shape{{2}}));        // the argmax indices
+        Literal out = m.evaluate({Literal::make({{2, 3}}, {3, 9, 2, 5, 1, 8})});
+        check("reduceGeneral argmax", approx(out.data, {1, 2}));  // row0 max@1, row1 max@2
+    }
+
     std::printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

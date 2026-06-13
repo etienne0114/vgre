@@ -2,6 +2,7 @@
 
 #include "vgre/xla/hlo.h"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -34,6 +35,9 @@ float applyBinary(HloOp op, float a, float b) {
         case HloOp::Maximum: return a > b ? a : b;
         case HloOp::Minimum: return a < b ? a : b;
         case HloOp::Power: return std::pow(a, b);
+        case HloOp::And: return (a != 0.0f && b != 0.0f) ? 1.0f : 0.0f;
+        case HloOp::Or: return (a != 0.0f || b != 0.0f) ? 1.0f : 0.0f;
+        case HloOp::Xor: return ((a != 0.0f) != (b != 0.0f)) ? 1.0f : 0.0f;
         default: throw std::runtime_error("not a binary op");
     }
 }
@@ -50,6 +54,7 @@ float applyUnary(HloOp op, float a) {
         case HloOp::Floor: return std::floor(a);
         case HloOp::Ceil: return std::ceil(a);
         case HloOp::Logistic: return 1.0f / (1.0f + std::exp(-a));
+        case HloOp::Not: return (a != 0.0f) ? 0.0f : 1.0f;
         case HloOp::Erf: return std::erf(a);
         case HloOp::Erfc: return std::erfc(a);
         case HloOp::Cos: return std::cos(a);
@@ -97,7 +102,8 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
                 break;
             }
             case HloOp::Add: case HloOp::Subtract: case HloOp::Multiply: case HloOp::Divide:
-            case HloOp::Maximum: case HloOp::Minimum: case HloOp::Power: {
+            case HloOp::Maximum: case HloOp::Minimum: case HloOp::Power:
+            case HloOp::And: case HloOp::Or: case HloOp::Xor: {
                 const Literal& a = vals[I.operands[0]];
                 const Literal& b = vals[I.operands[1]];
                 if (!(a.shape == b.shape)) throw std::runtime_error("binary op shape mismatch");
@@ -106,7 +112,7 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
             }
             case HloOp::Negate: case HloOp::Exp: case HloOp::Log: case HloOp::Tanh:
             case HloOp::Abs: case HloOp::Rsqrt: case HloOp::Sqrt: case HloOp::Sign:
-            case HloOp::Floor: case HloOp::Ceil: case HloOp::Logistic:
+            case HloOp::Floor: case HloOp::Ceil: case HloOp::Logistic: case HloOp::Not:
             case HloOp::Erf: case HloOp::Erfc: case HloOp::Cos: case HloOp::Sin: {
                 const Literal& a = vals[I.operands[0]];
                 for (size_t i = 0; i < a.data.size(); ++i) out.data[i] = applyUnary(I.op, a.data[i]);
@@ -487,6 +493,84 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
                 }
                 break;
             }
+            case HloOp::Sort: {
+                int n = (int)I.operands.size();
+                std::vector<const Literal*> ins;
+                for (int op : I.operands) ins.push_back(&vals[op]);
+                const Shape& shp = ins[0]->shape;
+                int rank = (int)shp.rank();
+                int64_t sd = I.sort_dim;
+                int64_t L = shp.dims[sd];
+                auto st = rowMajorStrides(shp);
+                std::vector<Literal> outs(n);
+                for (int k = 0; k < n; ++k) outs[k] = *ins[k];
+                // iterate over every slice along `sd` (all other coords fixed)
+                int64_t outer = shp.numel() / (L == 0 ? 1 : L);
+                std::vector<int64_t> base(rank);
+                for (int64_t s = 0; s < outer; ++s) {
+                    // decode s into coords with sd skipped
+                    int64_t rem = s;
+                    for (int d = rank - 1; d >= 0; --d) {
+                        if (d == sd) { base[d] = 0; continue; }
+                        base[d] = rem % shp.dims[d]; rem /= shp.dims[d];
+                    }
+                    std::vector<int64_t> pos(L);
+                    for (int64_t i = 0; i < L; ++i) {
+                        auto c = base; c[sd] = i; pos[i] = encode(c, st);
+                    }
+                    std::vector<int64_t> perm(L);
+                    for (int64_t i = 0; i < L; ++i) perm[i] = i;
+                    auto precedes = [&](int64_t ia, int64_t ib) {
+                        // comparator params are grouped per operand: (a_k, b_k) for each k
+                        std::vector<Literal> p;
+                        for (int k = 0; k < n; ++k) {
+                            p.push_back(Literal::scalar(ins[k]->data[pos[ia]]));
+                            p.push_back(Literal::scalar(ins[k]->data[pos[ib]]));
+                        }
+                        return I.subs[0]->evaluate(p).data[0] != 0.0f;
+                    };
+                    std::stable_sort(perm.begin(), perm.end(), precedes);
+                    for (int k = 0; k < n; ++k)
+                        for (int64_t i = 0; i < L; ++i)
+                            outs[k].data[pos[i]] = ins[k]->data[pos[perm[i]]];
+                }
+                out = outs.empty() ? Literal{} : outs[0];
+                multi[idx] = std::move(outs);
+                break;
+            }
+            case HloOp::ReduceGeneral: {
+                int n = (int)I.operands.size() / 2;       // n inputs + n inits
+                std::vector<const Literal*> ins, inits;
+                for (int k = 0; k < n; ++k) ins.push_back(&vals[I.operands[k]]);
+                for (int k = 0; k < n; ++k) inits.push_back(&vals[I.operands[n + k]]);
+                const Shape& ishape = ins[0]->shape;
+                auto inSt = rowMajorStrides(ishape);
+                auto outSt = rowMajorStrides(I.shape);
+                std::vector<bool> isRed(ishape.rank(), false);
+                for (int64_t d : I.dimensions) isRed[d] = true;
+                std::vector<int> keep;
+                for (int d = 0; d < (int)ishape.rank(); ++d) if (!isRed[d]) keep.push_back(d);
+                // n accumulators, each I.shape-sized, seeded with the init scalars
+                std::vector<Literal> acc(n);
+                for (int k = 0; k < n; ++k) {
+                    acc[k].shape = I.shape;
+                    acc[k].data.assign(I.shape.numel(), inits[k]->data[0]);
+                }
+                std::vector<int64_t> ic(ishape.rank()), oc(keep.size());
+                for (int64_t i = 0; i < ishape.numel(); ++i) {
+                    decode(i, inSt, ic);
+                    for (size_t k = 0; k < keep.size(); ++k) oc[k] = ic[keep[k]];
+                    int64_t o = encode(oc, outSt);
+                    std::vector<Literal> params;
+                    for (int k = 0; k < n; ++k) params.push_back(Literal::scalar(acc[k].data[o]));
+                    for (int k = 0; k < n; ++k) params.push_back(Literal::scalar(ins[k]->data[i]));
+                    std::vector<Literal> res = I.subs[0]->evaluateMulti(params);
+                    for (int k = 0; k < n; ++k) acc[k].data[o] = res[k].data[0];
+                }
+                out = acc.empty() ? Literal{} : acc[0];
+                multi[idx] = std::move(acc);
+                break;
+            }
             case HloOp::DynamicUpdateSlice: {
                 const Literal& a = vals[I.operands[0]];
                 const Literal& u = vals[I.operands[1]];
@@ -651,6 +735,22 @@ int HloModule::dynamicUpdateSlice(int operand, int update, const std::vector<int
 int HloModule::reverse(int x, std::vector<int64_t> dims) {
     HloInstruction i; i.op = HloOp::Reverse; i.operands = {x}; i.shape = instrs_[x].shape;
     i.dimensions = std::move(dims);
+    return add(std::move(i));
+}
+int HloModule::iota(Shape out, int64_t dim) {
+    HloInstruction i; i.op = HloOp::Iota; i.shape = std::move(out); i.iota_dim = dim;
+    return add(std::move(i));
+}
+int HloModule::sort(const std::vector<int>& operands, int64_t dim, std::shared_ptr<HloModule> cmp) {
+    HloInstruction i; i.op = HloOp::Sort; i.operands = operands; i.sort_dim = dim;
+    i.subs = {std::move(cmp)};
+    i.shape = operands.empty() ? Shape{} : instrs_[operands[0]].shape;
+    return add(std::move(i));
+}
+int HloModule::reduceGeneral(const std::vector<int>& operands, std::vector<int64_t> dims,
+                             std::shared_ptr<HloModule> body, Shape primary) {
+    HloInstruction i; i.op = HloOp::ReduceGeneral; i.operands = operands;
+    i.dimensions = std::move(dims); i.subs = {std::move(body)}; i.shape = std::move(primary);
     return add(std::move(i));
 }
 

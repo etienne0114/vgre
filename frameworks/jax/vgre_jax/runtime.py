@@ -28,6 +28,7 @@ OP = {
     "Erf": 35, "Erfc": 36, "Cos": 37, "Sin": 38,
     "While": 39, "Tuple": 40, "GetTupleElement": 41,
     "DynamicSlice": 42, "DynamicUpdateSlice": 43, "Reverse": 44,
+    "Sort": 45, "ReduceGeneral": 46, "And": 47, "Or": 48, "Xor": 49, "Not": 50,
 }
 
 _I64P = POINTER(c_int64)
@@ -136,6 +137,13 @@ class VgreHlo:
         L.vgre_xla_b_dynamic_update_slice.restype = c_int
         L.vgre_xla_b_reverse.argtypes = [c_uint64, c_int, _I64P, c_int]
         L.vgre_xla_b_reverse.restype = c_int
+        L.vgre_xla_b_iota.argtypes = [c_uint64, _I64P, c_int, c_int64]
+        L.vgre_xla_b_iota.restype = c_int
+        L.vgre_xla_b_sort.argtypes = [c_uint64, POINTER(c_int), c_int, c_int64, c_uint64]
+        L.vgre_xla_b_sort.restype = c_int
+        L.vgre_xla_b_reduce_general.argtypes = [c_uint64, POINTER(c_int), c_int, _I64P, c_int,
+                                                c_uint64, _I64P, c_int]
+        L.vgre_xla_b_reduce_general.restype = c_int
         L.vgre_xla_b_set_root.argtypes = [c_uint64, c_int]
         L.vgre_xla_b_compile.argtypes = [c_uint64]
         L.vgre_xla_b_compile.restype = c_uint64
@@ -273,6 +281,21 @@ class VgreHlo:
     def reverse(self, b, x, dims):
         a, n = _i64arr(dims)
         return _ck(self.lib.vgre_xla_b_reverse(b, x, a, n), "reverse")
+
+    def iota(self, b, out_dims, dim):
+        a, n = _i64arr(out_dims)
+        return _ck(self.lib.vgre_xla_b_iota(b, a, n, int(dim)), "iota")
+
+    def sort(self, b, operands, dim, cmp_builder):
+        oa = self._intarr(operands)
+        return _ck(self.lib.vgre_xla_b_sort(b, oa, len(operands), int(dim), cmp_builder), "sort")
+
+    def reduce_general(self, b, operands, dims, body_builder, primary_dims):
+        oa = self._intarr(operands)
+        da, dn = _i64arr(dims)
+        pa, pn = _i64arr(primary_dims)
+        return _ck(self.lib.vgre_xla_b_reduce_general(b, oa, len(operands), da, dn,
+                                                      body_builder, pa, pn), "reduce_general")
 
     def set_root(self, b, idx):
         self.lib.vgre_xla_b_set_root(b, idx)

@@ -95,6 +95,7 @@ std::string serialize(const HloModule& m) {
         putVec(b, I.rw_base_dil); putVec(b, I.rw_window_dil);
         putI64(b, I.gte_index);
         putVec(b, I.dyn_slice_sizes);
+        putI64(b, I.sort_dim);
         putU32(b, (uint32_t)I.subs.size());            // control-flow sub-computations
         for (const auto& s : I.subs) putStr(b, s ? serialize(*s) : std::string());
     }
@@ -144,6 +145,7 @@ bool deserialize(const std::string& blob, HloModule& out) {
         I.rw_base_dil = getVec(r); I.rw_window_dil = getVec(r);
         I.gte_index = r.i64();
         I.dyn_slice_sizes = getVec(r);
+        I.sort_dim = r.i64();
         uint32_t nsub = r.u32();
         for (uint32_t s = 0; s < nsub && r.ok; ++s) {
             std::string sb = r.str();
@@ -456,6 +458,29 @@ extern "C" int vgre_xla_b_dynamic_update_slice(uint64_t b, int operand, int upda
 
 extern "C" int vgre_xla_b_reverse(uint64_t b, int x, const int64_t* dims, int n) {
     return withBuilder(b, [&](HloModule& m) { return m.reverse(x, vec(dims, n)); });
+}
+
+extern "C" int vgre_xla_b_iota(uint64_t b, const int64_t* out_dims, int n_out, int64_t dim) {
+    return withBuilder(b, [&](HloModule& m) { return m.iota(Shape{vec(out_dims, n_out)}, dim); });
+}
+
+extern "C" int vgre_xla_b_sort(uint64_t b, const int* operands, int n_ops, int64_t dim, uint64_t cmp) {
+    auto cmpM = takeBuilderModule(cmp);
+    if (!cmpM) return -1;
+    return withBuilder(b, [&](HloModule& m) {
+        return m.sort(ivec(operands, n_ops), dim, cmpM);
+    });
+}
+
+extern "C" int vgre_xla_b_reduce_general(uint64_t b, const int* operands, int n_ops,
+                                         const int64_t* dims, int n_dims, uint64_t body,
+                                         const int64_t* primary_dims, int n_primary) {
+    auto bodyM = takeBuilderModule(body);
+    if (!bodyM) return -1;
+    return withBuilder(b, [&](HloModule& m) {
+        return m.reduceGeneral(ivec(operands, n_ops), vec(dims, n_dims), bodyM,
+                               Shape{vec(primary_dims, n_primary)});
+    });
 }
 
 extern "C" uint64_t vgre_xla_b_compile(uint64_t b) {
