@@ -720,6 +720,13 @@ if(NODE_EXE)
     set_tests_properties(WasmKernels PROPERTIES TIMEOUT 60)
 endif()
 
+# RISC-V target (§3.3): cross-compile the same kernels to riscv64 and run them
+# under QEMU. Self-skips if the riscv64 toolchain / qemu-riscv64 isn't installed.
+if(Python3_EXECUTABLE)
+    add_test(NAME RiscvKernels COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/frameworks/riscv/test_riscv.py)
+    set_tests_properties(RiscvKernels PROPERTIES TIMEOUT 60)
+endif()
+
 # Compliance: tamper-evident audit log + GDPR crypto-erasure.
 add_executable(test_audit_log compliance/test_audit_log.cpp)
 target_link_libraries(test_audit_log PRIVATE vgre)
