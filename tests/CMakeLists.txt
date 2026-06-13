@@ -712,6 +712,14 @@ if(EXISTS ${PROJECT_SOURCE_DIR}/.venv/bin/python)
         ENVIRONMENT "VGRE_BUILD_DIR=${CMAKE_BINARY_DIR}")
 endif()
 
+# WASM target (§3.3): compile VGRE compute kernels to wasm32 (clang) and run them
+# in a WebAssembly sandbox (node). The test self-skips if clang can't target wasm.
+find_program(NODE_EXE NAMES node nodejs)
+if(NODE_EXE)
+    add_test(NAME WasmKernels COMMAND ${NODE_EXE} ${PROJECT_SOURCE_DIR}/frameworks/wasm/test_wasm.mjs)
+    set_tests_properties(WasmKernels PROPERTIES TIMEOUT 60)
+endif()
+
 # Compliance: tamper-evident audit log + GDPR crypto-erasure.
 add_executable(test_audit_log compliance/test_audit_log.cpp)
 target_link_libraries(test_audit_log PRIVATE vgre)

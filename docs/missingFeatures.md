@@ -204,7 +204,7 @@ OIDC verify, NCCL collectives, RDMA) already exist in-tree per the Reality Audit
 - **Acceptance**: Native M2/M3 Pro performance parity with x86_64, MPS acceleration for common ML kernels
 
 ### 3.3 Comprehensive Multi-Architecture Support — P1
-- **STATUS (2026-06-13): PARTIAL** — x86-64 + ARM64 build/run with SIMD guards; RISC-V and WASM runtimes pending (cross-compilation toolchains + QEMU CI).
+- **STATUS (2026-06-13): PARTIAL (WASM done)** — x86-64 + ARM64 build/run with SIMD guards + **WebAssembly target** (`frameworks/wasm/`: VGRE compute kernels — vadd/saxpy/relu/reduce/sgemm — compiled to a freestanding wasm32 module via clang and run in a WASM sandbox; `WasmKernels` ctest 6/6, no emscripten needed). RISC-V needs a `riscv64` cross-toolchain + QEMU (not installed); the kernels cross-compile unchanged once present.
 - **Gap**: Limited ARM64 testing and optimization, missing RISC-V support for emerging edge deployments.
 - **Design**: Complete multi-architecture matrix:
   - ARM64 optimization with NEON intrinsics and SVE2 support
