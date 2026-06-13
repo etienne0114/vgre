@@ -679,6 +679,12 @@ target_link_libraries(test_backup_archive PRIVATE vgre)
 add_test(NAME BackupArchive COMMAND test_backup_archive)
 set_tests_properties(BackupArchive PROPERTIES TIMEOUT 30)
 
+# MIG: multi-instance GPU partitioning (multi-tenant isolation).
+add_executable(test_mig mig/test_mig.cpp)
+target_link_libraries(test_mig PRIVATE vgre)
+add_test(NAME MigPartitioning COMMAND test_mig)
+set_tests_properties(MigPartitioning PROPERTIES TIMEOUT 30)
+
 add_executable(test_nsight_export api/test_nsight_export.cpp)
 target_link_libraries(test_nsight_export PRIVATE vgre)
 if(SQLITE3_LIBRARY)
