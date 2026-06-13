@@ -5,8 +5,11 @@
 #include "vgre/xla/hlo_serialize.h"
 #include "vgre/xla/xla_c_api.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <thread>
 #include <vector>
 
 using namespace vgre::xla;
@@ -90,6 +93,47 @@ int main() {
         // [sum(5+1,7+2)=6,9][diff(5-1,7-2)=4,5]
         check("execute_multi concatenates both outputs", approx(out2, {6, 9, 4, 5}));
         vgre_xla_free(e2);
+    }
+
+    // ── production: structured error reporting via vgre_xla_last_error ───────
+    {
+        std::vector<float> tmp(4);
+        const float* z[3] = {nullptr, nullptr, nullptr};
+        int64_t zn[3] = {0, 0, 0};
+        vgre_xla_execute(424242, z, zn, 0, tmp.data(), 4);
+        check("bad-handle error message set", std::strlen(vgre_xla_last_error()) > 0);
+        check("garbage-blob compile error message set",
+              (vgre_xla_compile("xx", 2) == 0) && std::strlen(vgre_xla_last_error()) > 0);
+    }
+
+    // ── production: concurrent execution of one executable from many threads ─
+    {
+        HloModule cm;
+        int a = cm.parameter(0, Shape{{64, 64}});
+        int b = cm.parameter(1, Shape{{64, 64}});
+        cm.dot(a, b);                                   // 64x64 matmul (hits parallelFor)
+        std::string cblob = serialize(cm);
+        uint64_t ce = vgre_xla_compile(cblob.data(), cblob.size());
+        std::vector<float> A(64 * 64, 1.0f), B(64 * 64, 2.0f);
+        const float* ci[2] = {A.data(), B.data()};
+        int64_t cn[2] = {64 * 64, 64 * 64};
+        std::atomic<int> ok_count{0};
+        const int NT = 8;
+        std::vector<std::thread> threads;
+        for (int t = 0; t < NT; ++t) {
+            threads.emplace_back([&] {
+                for (int rep = 0; rep < 20; ++rep) {
+                    std::vector<float> o(64 * 64, -1.0f);
+                    int64_t n = vgre_xla_execute(ce, ci, cn, 2, o.data(), 64 * 64);
+                    // each row·col = sum_k 1*2 = 128 for all elements
+                    bool good = (n == 64 * 64) && o[0] == 128.0f && o[64 * 64 - 1] == 128.0f;
+                    if (good) ok_count.fetch_add(1);
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+        check("concurrent execution: all threads correct", ok_count.load() == NT * 20);
+        vgre_xla_free(ce);
     }
 
     std::printf("\n%d / %d passed\n", g_pass, g_total);

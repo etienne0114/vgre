@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <thread>
 
 namespace vgre {
 namespace xla {
@@ -65,6 +66,30 @@ float applyUnary(HloOp op, float a) {
         default: throw std::runtime_error("not a unary op");
     }
 }
+// Parallelize a 0..n loop across hardware threads when the work is large enough.
+// Uses std::thread (not OpenMP — libomp's TLS breaks under RTLD_DEEPBIND, which
+// the in-process TensorFlow loading relies on). `body(i)` must be independent
+// across i (the interpreter writes disjoint output elements) and not throw.
+template <class Fn>
+void parallelFor(int64_t n, int64_t work_estimate, Fn body) {
+    static const unsigned kHW = std::max(1u, std::thread::hardware_concurrency());
+    if (n <= 1 || kHW < 2 || work_estimate < 8192) {
+        for (int64_t i = 0; i < n; ++i) body(i);
+        return;
+    }
+    unsigned nt = std::min<unsigned>(kHW, 8);
+    if ((int64_t)nt > n) nt = (unsigned)n;
+    int64_t chunk = (n + nt - 1) / nt;
+    std::vector<std::thread> ts;
+    ts.reserve(nt);
+    for (unsigned t = 0; t < nt; ++t) {
+        int64_t lo = (int64_t)t * chunk, hi = std::min(n, lo + chunk);
+        if (lo >= hi) break;
+        ts.emplace_back([lo, hi, &body] { for (int64_t i = lo; i < hi; ++i) body(i); });
+    }
+    for (auto& th : ts) th.join();
+}
+
 bool cmp(const std::string& dir, float a, float b) {
     if (dir == "GT") return a > b;
     if (dir == "GE") return a >= b;
@@ -178,12 +203,13 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
                 const Literal& b = vals[I.operands[1]]; // [K,N]
                 int64_t M = a.shape.dims[0], K = a.shape.dims[1], N = b.shape.dims[1];
                 if (b.shape.dims[0] != K) throw std::runtime_error("dot contracting-dim mismatch");
-                for (int64_t i = 0; i < M; ++i)
+                parallelFor(M, M * N * K, [&](int64_t i) {
                     for (int64_t j = 0; j < N; ++j) {
                         float s = 0;
                         for (int64_t k = 0; k < K; ++k) s += a.data[i * K + k] * b.data[k * N + j];
                         out.data[i * N + j] = s;
                     }
+                });
                 break;
             }
             case HloOp::Reduce: {
@@ -237,8 +263,8 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
                 for (int64_t d : I.lhs_contract) C *= a.shape.dims[d];
                 std::vector<int64_t> cExt(I.lhs_contract.size());
                 for (size_t k = 0; k < I.lhs_contract.size(); ++k) cExt[k] = a.shape.dims[I.lhs_contract[k]];
-                std::vector<int64_t> oc(I.shape.rank()), ai(a.shape.rank()), bi(b.shape.rank());
-                for (int64_t o = 0; o < I.shape.numel(); ++o) {
+                parallelFor(I.shape.numel(), I.shape.numel() * C, [&](int64_t o) {
+                    std::vector<int64_t> oc(I.shape.rank()), ai(a.shape.rank()), bi(b.shape.rank());
                     decode(o, oSt, oc);
                     // output layout: [batch..., lhs_free..., rhs_free...]
                     for (int64_t k = 0; k < nb; ++k) {
@@ -259,7 +285,7 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
                         s += a.data[encode(ai, aSt)] * b.data[encode(bi, bSt)];
                     }
                     out.data[o] = s;
-                }
+                });
                 break;
             }
             case HloOp::Concatenate: {
@@ -317,8 +343,8 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
                 int64_t Cin = in.shape.dims[I.conv_in_feat];
                 int64_t Cout = I.shape.dims[I.conv_out_feat];
                 int64_t cinPerG = Cin / I.conv_groups, coutPerG = Cout / I.conv_groups;
-                std::vector<int64_t> oc(I.shape.rank()), ic(in.shape.rank()), kc(w.shape.rank());
-                for (int64_t o = 0; o < I.shape.numel(); ++o) {
+                parallelFor(I.shape.numel(), I.shape.numel() * cinPerG * 9, [&](int64_t o) {
+                    std::vector<int64_t> oc(I.shape.rank()), ic(in.shape.rank()), kc(w.shape.rank());
                     decode(o, oSt, oc);
                     int64_t n = oc[I.conv_out_batch], co = oc[I.conv_out_feat];
                     int64_t g = co / coutPerG;
@@ -350,7 +376,7 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
                         }
                     }
                     out.data[o] = acc;
-                }
+                });
                 break;
             }
             case HloOp::Gather: {
@@ -409,8 +435,8 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
                 auto oSt = rowMajorStrides(I.shape);
                 int64_t wnum = 1;
                 for (int64_t w : I.rw_window_dims) wnum *= w;
-                std::vector<int64_t> oc(rank), wc(rank), ic(rank);
                 for (int64_t o = 0; o < I.shape.numel(); ++o) {
+                    std::vector<int64_t> oc(rank), wc(rank), ic(rank);
                     decode(o, oSt, oc);
                     float acc = init;
                     for (int64_t w = 0; w < wnum; ++w) {
@@ -650,6 +676,30 @@ Literal HloModule::evaluate(const std::vector<Literal>& params) const {
     auto r = evaluateMulti(params);
     if (r.empty()) throw std::runtime_error("HloModule produced no result");
     return std::move(r[0]);
+}
+
+bool HloModule::validate(std::string& err) const {
+    if (instrs_.empty()) { err = "empty module"; return false; }
+    for (size_t i = 0; i < instrs_.size(); ++i) {
+        const HloInstruction& I = instrs_[i];
+        for (int op : I.operands) {
+            if (op < 0 || op >= (int)i) {     // operands must be earlier (acyclic, ordered)
+                err = "instruction " + std::to_string(i) + " references invalid operand " +
+                      std::to_string(op);
+                return false;
+            }
+        }
+        if (I.op == HloOp::Parameter && I.param_index < 0) {
+            err = "instruction " + std::to_string(i) + " has negative parameter index";
+            return false;
+        }
+        for (const auto& s : I.subs) {
+            std::string se;
+            if (s && !s->validate(se)) { err = "sub-computation: " + se; return false; }
+        }
+    }
+    if (root_ < 0 || root_ >= (int)instrs_.size()) { err = "root index out of range"; return false; }
+    return true;
 }
 
 // ── module + builder ────────────────────────────────────────────────────────

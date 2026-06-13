@@ -119,6 +119,11 @@ public:
     // while-body that yields several loop-carried tensors).
     std::vector<Literal> evaluateMulti(const std::vector<Literal>& params) const;
 
+    // Structural validation: operands reference earlier instructions (the graph is
+    // a topologically-ordered DAG), parameter/root indices are in range, and all
+    // sub-computations validate. Returns false with a message on the first problem.
+    bool validate(std::string& err) const;
+
     // ── builder conveniences (return the new instruction index) ──
     int parameter(int index, Shape shape);
     int constant(Literal lit);

@@ -13,8 +13,13 @@
 extern "C" {
 #endif
 
+// Human-readable description of the most recent failure on the calling thread
+// (empty string if none). Valid until the next failing call on this thread.
+const char* vgre_xla_last_error(void);
+
 // Compile a serialized HLO module (from vgre_xla_serialize / HloModule) into an
-// executable. Returns a non-zero handle, or 0 on parse error.
+// executable. Returns a non-zero handle, or 0 on parse/validation error
+// (see vgre_xla_last_error).
 uint64_t vgre_xla_compile(const void* blob, size_t len);
 
 // Execute `exe`. `in_data`/`in_numel` are parallel arrays of length `n_in`, one

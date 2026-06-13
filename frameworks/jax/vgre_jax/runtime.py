@@ -82,6 +82,7 @@ class VgreHlo:
     def __init__(self, lib_path: str | None = None):
         self.lib = _load_libvgre(lib_path or _find_lib())
         L = self.lib
+        L.vgre_xla_last_error.restype = c_char_p
         L.vgre_xla_builder_new.restype = c_uint64
         L.vgre_xla_b_parameter.argtypes = [c_uint64, c_int, _I64P, c_int]
         L.vgre_xla_b_parameter.restype = c_int
@@ -341,7 +342,7 @@ class VgreHlo:
         out = (c_float * cap)()
         n = self.lib.vgre_xla_execute(exe, ptr_arr, numel_arr, len(bufs), out, cap)
         if n < 0:
-            raise RuntimeError("vgre_xla_execute failed")
+            raise RuntimeError(f"vgre_xla_execute failed: {self._last_error()}")
         return np.array(out[:n], dtype=np.float32)
 
     def execute_multi(self, exe, inputs, out_numels) -> list:
@@ -360,12 +361,16 @@ class VgreHlo:
         out = (c_float * total)()
         n = self.lib.vgre_xla_execute_multi(exe, ptr_arr, numel_arr, len(bufs), out, total)
         if n < 0:
-            raise RuntimeError("vgre_xla_execute_multi failed")
+            raise RuntimeError(f"vgre_xla_execute_multi failed: {self._last_error()}")
         flat = np.array(out[:n], dtype=np.float32)
         res, off = [], 0
         for k in out_numels:
             res.append(flat[off:off + k]); off += k
         return res
+
+    def _last_error(self) -> str:
+        e = self.lib.vgre_xla_last_error()
+        return e.decode() if e else "(no detail)"
 
     def free(self, exe):
         self.lib.vgre_xla_free(exe)
