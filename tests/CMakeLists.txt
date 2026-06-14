@@ -819,6 +819,13 @@ target_link_libraries(test_thread_pool PRIVATE vgre Threads::Threads)
 add_test(NAME XlaThreadPool COMMAND test_thread_pool)
 set_tests_properties(XlaThreadPool PROPERTIES TIMEOUT 60)
 
+# Real BLAS/tiled GEMM: correctness (all transpose combos + batched) + >=10x
+# throughput vs the naive triple loop (milestone L2).
+add_executable(test_blas_gemm xla/test_blas_gemm.cpp)
+target_link_libraries(test_blas_gemm PRIVATE vgre Threads::Threads)
+add_test(NAME XlaBlasGemm COMMAND test_blas_gemm)
+set_tests_properties(XlaBlasGemm PROPERTIES TIMEOUT 120)
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)

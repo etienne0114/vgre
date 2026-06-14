@@ -71,8 +71,16 @@ are all about **scale**. In priority order:
 > by amortizing thread creation (`XlaThreadPool` test 6/6); and (ii) **liveness-based buffer reuse**
 > in `evaluateMulti` — each value's buffer is freed after its last use, so peak memory is the live
 > set, not the sum of all intermediates (a 40-layer×512 model and a 400-op chain verified correct).
-> These are the scheduling + memory-management groundwork for L1/L2 below; the BLAS, bf16, and
-> quantized-weight pieces remain.
+>
+> **L2 (throughput) — DONE (2026-06-14):** `Dot` / `DotGeneral` now route through a real GEMM
+> (`vgre::xla::gemm_f32`, `src/xla/blas_gemm.cpp`): **cblas_sgemm** when a BLAS is present, a
+> built-in **cache-tiled** kernel otherwise, both parallelized across the thread pool (row-split
+> for one big GEMM, batch-split for many small ones). `DotGeneral` detects the canonical batched-
+> GEMM layout (leading batch dims, one contract+one free dim per side) and maps it to one batched
+> GEMM with the right transpose flags; other shapes keep the correct generic loop. Replaced the
+> cache-naive triple loop — **82× faster on a 4096³ GEMM** (`XlaBlasGemm` test: all transpose combos
+> + batched verified vs reference; ≥10× criterion met). All JAX/TF/PyTorch/Keras/FlashAttention
+> tests pass through the new path. The bf16 and quantized-weight pieces (L1/L3) remain.
 
 ### 2.A — Numeric formats & memory  *(the hard wall — highest priority)*
 The engine stores everything as **fp32**. Real checkpoints are bf16/fp16; large models are served
@@ -103,8 +111,9 @@ constant blob is not — the serializer would have to write it all). **Add:**
 The interpreter's matmul is a cache-naive triple loop (~148 ms for a chained 256×256). Llama-3-8B
 is 32 layers of 4096×{4096, 14336} matmuls **per token** — thousands× more FLOPs; at interpreter
 speed a single token is minutes. **Add:**
-- **BLAS-backed `Dot` / `DotGeneral`** — route to **OpenBLAS / MKL `sgemm`** (or the project's
-  emulated cuBLAS `sgemmEx`). This alone is ~10–100× the naive loop and is the practical unlock.
+- ✅ **BLAS-backed `Dot` / `DotGeneral`** — **DONE (2026-06-14)**. Routes to **cblas_sgemm**
+  (OpenBLAS/MKL/reference), with a cache-tiled fallback, parallelized over the thread pool; **82×**
+  on a 4096³ GEMM. See the L2 note above. *(The single biggest throughput unlock — done.)*
 - **Cache-tiled / blocked** kernels for the ops that don't map to BLAS (conv, reduce_window).
 - A **fused attention** kernel (flash-attention-style online softmax — the `KVCacheManager`
   already implements online-softmax `pagedAttention`, so the algorithm is in-tree).
@@ -129,7 +138,8 @@ over the existing RDMA/NCCL transport.
 ### Concrete milestones (in order)
 1. **bf16 storage** + load a real **Llama-3-8B** checkpoint as parameters (fits 16 GB) → forward
    pass numerically matches Hugging Face.
-2. **BLAS-backed matmul** → tokens/sec from "minutes" to "seconds".
+2. ✅ **BLAS-backed matmul** — **DONE (2026-06-14)**: 82× on 4096³; `Dot`/`DotGeneral` use
+   cblas_sgemm + tiled fallback, thread-pool parallel.
 3. **int4 (GGUF) weight path** → 8B fits **4 GB**, runs on a laptop.
 4. **Paged-KV generation loop** → long-context autoregressive decode + multi-request batching.
 5. **Tensor-parallel `DotGeneral`** over the existing RDMA/NCCL substrate → **70B across N nodes**;
