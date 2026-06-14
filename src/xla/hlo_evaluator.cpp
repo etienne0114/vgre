@@ -2,6 +2,7 @@
 
 #include "vgre/xla/hlo.h"
 #include "vgre/xla/thread_pool.h"
+#include "vgre/xla/blas_gemm.h"
 
 #include <algorithm>
 #include <cmath>
@@ -216,13 +217,9 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
                 const Literal& b = vals[I.operands[1]]; // [K,N]
                 int64_t M = a.shape.dims[0], K = a.shape.dims[1], N = b.shape.dims[1];
                 if (b.shape.dims[0] != K) throw std::runtime_error("dot contracting-dim mismatch");
-                parallelFor(M, M * N * K, [&](int64_t i) {
-                    for (int64_t j = 0; j < N; ++j) {
-                        float s = 0;
-                        for (int64_t k = 0; k < K; ++k) s += a.data[i * K + k] * b.data[k * N + j];
-                        out.data[i * N + j] = s;
-                    }
-                });
+                // [M,K]·[K,N] is a plain row-major GEMM → real BLAS/tiled kernel.
+                gemm_f32(/*transA=*/false, /*transB=*/false, M, N, K,
+                         a.data.data(), b.data.data(), out.data.data(), /*batch=*/1);
                 break;
             }
             case HloOp::Reduce: {
@@ -254,6 +251,40 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
             case HloOp::DotGeneral: {
                 const Literal& a = vals[I.operands[0]];
                 const Literal& b = vals[I.operands[1]];
+                // ── Fast path: canonical batched GEMM → real BLAS/tiled kernel ──
+                // Triggers for the layout real models emit: batch dims are the
+                // leading dims on both operands, exactly one contracting dim and
+                // one free dim per side. Each batch slice is then a contiguous
+                // 2-D matrix and the whole op is `batch` independent GEMMs. Any
+                // other shape falls through to the generic loop below.
+                {
+                    const int64_t nb = (int64_t)I.lhs_batch.size();
+                    bool leadingBatch = (nb == (int64_t)I.rhs_batch.size());
+                    for (int64_t k = 0; leadingBatch && k < nb; ++k)
+                        leadingBatch = (I.lhs_batch[k] == k && I.rhs_batch[k] == k);
+                    if (leadingBatch &&
+                        I.lhs_contract.size() == 1 && I.rhs_contract.size() == 1 &&
+                        a.shape.rank() == nb + 2 && b.shape.rank() == nb + 2) {
+                        const int64_t lc = I.lhs_contract[0], rc = I.rhs_contract[0];
+                        // contract/free must be the two trailing (non-batch) dims
+                        if (lc >= nb && rc >= nb) {
+                            const bool transA = (lc == nb);        // lhs slice [K,M] vs [M,K]
+                            const bool transB = (rc == nb + 1);    // rhs slice [N,K] vs [K,N]
+                            const int64_t M = transA ? a.shape.dims[nb + 1] : a.shape.dims[nb];
+                            const int64_t K = a.shape.dims[lc];
+                            const int64_t N = transB ? b.shape.dims[nb] : b.shape.dims[nb + 1];
+                            int64_t batch = 1;
+                            for (int64_t k = 0; k < nb; ++k) batch *= a.shape.dims[k];
+                            // Output is [batch..., M, N] row-major by construction.
+                            if (b.shape.dims[rc] == K && I.shape.numel() == batch * M * N) {
+                                gemm_f32(transA, transB, M, N, K,
+                                         a.data.data(), b.data.data(),
+                                         out.data.data(), batch);
+                                break;
+                            }
+                        }
+                    }
+                }
                 auto aSt = rowMajorStrides(a.shape), bSt = rowMajorStrides(b.shape);
                 auto oSt = rowMajorStrides(I.shape);
                 // free dims = dims that are neither batch nor contracting, in order

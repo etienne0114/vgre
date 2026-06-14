@@ -683,6 +683,29 @@ if(NOT TARGET LAPACK::LAPACK)
     add_library(LAPACK::LAPACK INTERFACE IMPORTED)
 endif()
 
+# ── CBLAS for the HLO engine's GEMM (Dot/DotGeneral) ──────────────────────────
+# The XLA interpreter routes matmul through cblas_sgemm when a real BLAS with the
+# C interface is present; otherwise it uses a built-in cache-tiled kernel (see
+# src/xla/blas_gemm.cpp). This is independent of VGRE_USE_LAPACK above — we probe
+# directly for cblas.h + a library exporting cblas_sgemm so it works with system
+# reference BLAS, OpenBLAS, or MKL.
+set(_VGRE_XLA_BLAS_FOUND FALSE)
+find_path(_VGRE_CBLAS_INCLUDE cblas.h
+    PATHS /usr/include /usr/include/x86_64-linux-gnu /usr/local/include
+          /opt/homebrew/opt/openblas/include /usr/local/opt/openblas/include)
+find_library(_VGRE_CBLAS_LIB
+    NAMES openblas cblas blas
+    PATHS /usr/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/local/lib
+          /opt/homebrew/opt/openblas/lib /usr/local/opt/openblas/lib)
+if(_VGRE_CBLAS_INCLUDE AND _VGRE_CBLAS_LIB)
+    set(_VGRE_XLA_BLAS_FOUND TRUE)
+    set(_VGRE_XLA_BLAS_INCLUDE "${_VGRE_CBLAS_INCLUDE}")
+    set(_VGRE_XLA_BLAS_LIBS    "${_VGRE_CBLAS_LIB}")
+    message(STATUS "XLA GEMM: cblas_sgemm via ${_VGRE_CBLAS_LIB}")
+else()
+    message(STATUS "XLA GEMM: no cblas — using built-in cache-tiled kernel")
+endif()
+
 # ──────────────────────────────────────────────────────────────────────────────
 # §8a  SQLite3  (Nsight Systems .nsys-rep export — Track Q)
 # Accept the versioned runtime (libsqlite3.so.0) when no -dev symlink is present;
@@ -980,6 +1003,11 @@ function(_vgre_configure_library target_name visibility)
     if(_VGRE_OPENCL_FOUND)
         target_compile_definitions(${target_name} PRIVATE VGRE_HAS_OPENCL_BACKEND)
         target_link_libraries(${target_name} PRIVATE OpenCL::OpenCL)
+    endif()
+    # XLA GEMM: link the BLAS that provides cblas_sgemm (the compile-time
+    # VGRE_XLA_HAS_BLAS def + include live on the vgre_xla OBJECT lib).
+    if(_VGRE_XLA_BLAS_FOUND)
+        target_link_libraries(${target_name} PRIVATE ${_VGRE_XLA_BLAS_LIBS})
     endif()
     if(_VGRE_RDMA_FOUND)
         target_compile_definitions(${target_name} PRIVATE VGRE_HAS_RDMA)
