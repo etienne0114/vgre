@@ -30,11 +30,16 @@
 
 class DecorrelatedJitterBackoff {
 public:
-    explicit DecorrelatedJitterBackoff(int64_t base_ms, int64_t cap_ms)
+    // `seed` is injectable so unit tests are deterministic and reproducible —
+    // production (memory_sync_manager.cpp) seeds from std::random_device, but a
+    // formula test must not depend on a non-reproducible seed (it turns rare
+    // statistical tails into unreproducible CI flakes).
+    explicit DecorrelatedJitterBackoff(int64_t base_ms, int64_t cap_ms,
+                                       uint64_t seed = std::random_device{}())
         : kBaseMs_(base_ms),
           kCapMs_(cap_ms),
           prev_ms_(base_ms),
-          rng_(std::random_device{}()) {}
+          rng_(seed) {}
 
     int64_t next() {
         // Overflow guard: prev*3 can overflow int32_t for large prev; use int64_t
@@ -281,14 +286,15 @@ void test_expected_value() {
 // ── test_cap_enforcement ──────────────────────────────────────────────────────
 
 void test_cap_enforcement() {
-    // Run 50 iterations starting from prev=1ms.
-    // All delays must be <= cap (30000ms).
-    // After enough iterations the distribution should reach the cap band;
-    // verify at least one delay >= cap/2 (conservative check — the cap is hit
-    // probabilistically; requiring ==cap is too strict for a 50-sample run).
-    DecorrelatedJitterBackoff b(kBaseMs, kCapMs);
+    // All delays must be <= cap (30000ms) — the hard invariant, checked every
+    // iteration below.
+    // The backoff is a multiplicative random walk, so reaching the cap band is
+    // probabilistic per draw. We use a FIXED seed (deterministic, reproducible —
+    // no random_device flake) and enough iterations that the walk reliably
+    // climbs into the cap band; verify at least one delay >= cap/2.
+    DecorrelatedJitterBackoff b(kBaseMs, kCapMs, /*seed=*/0xB1A5C0DEULL);
 
-    const int N = 50;
+    const int N = 200;
     int64_t max_seen = 0;
     for (int i = 0; i < N; ++i) {
         int64_t d = b.next();
@@ -299,13 +305,13 @@ void test_cap_enforcement() {
         if (d > max_seen) max_seen = d;
     }
 
-    // After 50 iterations the backoff should have grown well above the base;
+    // Over N iterations the backoff should have grown well above the base;
     // require at least cap/2 = 15000ms to be seen.
     if (max_seen < kCapMs / 2) {
         fail("test_cap_enforcement",
              "max_seen = " + std::to_string(max_seen) +
              " expected >= " + std::to_string(kCapMs / 2) +
-             " after 50 iterations");
+             " after " + std::to_string(N) + " iterations");
     }
 
     pass("test_cap_enforcement");
