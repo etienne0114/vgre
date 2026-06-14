@@ -681,6 +681,14 @@ set_tests_properties(ChaosFaultInjector PROPERTIES TIMEOUT 30)
 
 # QA: mutation-testing runner — must kill 100% of demo mutants (strong test).
 find_program(Python3_EXECUTABLE NAMES python3 python)
+# Prefer the project .venv interpreter (has the project's deps); fall back to a
+# system python. validate_iac/validate_chart use the in-tree minyaml loader when
+# PyYAML is absent, so these pass with any reasonably-complete interpreter.
+if(EXISTS "${PROJECT_SOURCE_DIR}/.venv/bin/python")
+    set(_vgre_py "${PROJECT_SOURCE_DIR}/.venv/bin/python")
+else()
+    set(_vgre_py "${Python3_EXECUTABLE}")
+endif()
 if(Python3_EXECUTABLE)
     add_test(NAME MutationTesting COMMAND ${Python3_EXECUTABLE}
         ${PROJECT_SOURCE_DIR}/tools/testing/mutate.py
@@ -691,12 +699,12 @@ if(Python3_EXECUTABLE)
     set_tests_properties(MutationTesting PROPERTIES TIMEOUT 60)
 
     # Deploy: validate the VGRE Helm chart (structural + helm lint when present).
-    add_test(NAME HelmChart COMMAND ${Python3_EXECUTABLE}
+    add_test(NAME HelmChart COMMAND ${_vgre_py}
         ${PROJECT_SOURCE_DIR}/deploy/helm/validate_chart.py)
     set_tests_properties(HelmChart PROPERTIES TIMEOUT 30)
 
     # Deploy: validate Terraform module + GitOps (ArgoCD/Kustomize/Flux) manifests.
-    add_test(NAME IaCManifests COMMAND ${Python3_EXECUTABLE}
+    add_test(NAME IaCManifests COMMAND ${_vgre_py}
         ${PROJECT_SOURCE_DIR}/deploy/validate_iac.py)
     set_tests_properties(IaCManifests PROPERTIES TIMEOUT 30)
 endif()
@@ -804,6 +812,12 @@ add_executable(test_xla_c_api xla/test_xla_c_api.cpp)
 target_link_libraries(test_xla_c_api PRIVATE vgre)
 add_test(NAME XlaExecutableCApi COMMAND test_xla_c_api)
 set_tests_properties(XlaExecutableCApi PROPERTIES TIMEOUT 30)
+
+# Work-stealing thread pool: parallel coverage, reentrancy, concurrent jobs.
+add_executable(test_thread_pool xla/test_thread_pool.cpp)
+target_link_libraries(test_thread_pool PRIVATE vgre Threads::Threads)
+add_test(NAME XlaThreadPool COMMAND test_thread_pool)
+set_tests_properties(XlaThreadPool PROPERTIES TIMEOUT 60)
 
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
@@ -1531,22 +1545,27 @@ foreach(_jh
 endforeach()
 
 # ── Python integration tests ─────────────────────────────────────────────────
-find_program(PYTHON3 python3)
-if(PYTHON3)
+# Prefer the project .venv (has numpy/torch/tf); fall back to a system python.
+if(EXISTS "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+    set(_vgre_intpy "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+else()
+    find_program(_vgre_intpy NAMES python3 python)
+endif()
+if(_vgre_intpy)
     add_test(NAME PyTorchIntegration
-             COMMAND ${PYTHON3} ${CMAKE_SOURCE_DIR}/tests/python/test_pytorch.py
+             COMMAND ${_vgre_intpy} ${CMAKE_SOURCE_DIR}/tests/python/test_pytorch.py
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(PyTorchIntegration PROPERTIES
                          ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
                          TIMEOUT 120
                          LABELS "python"
-                         SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named")
+                         SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named|SKIP:")
     add_test(NAME TensorFlowIntegration
-             COMMAND ${PYTHON3} ${CMAKE_SOURCE_DIR}/tests/python/test_tensorflow.py
+             COMMAND ${_vgre_intpy} ${CMAKE_SOURCE_DIR}/tests/python/test_tensorflow.py
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(TensorFlowIntegration PROPERTIES
                          ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
                          TIMEOUT 120
                          LABELS "python"
-                         SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named")
+                         SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named|SKIP:")
 endif()

@@ -2,6 +2,7 @@
 add_library(vgre_xla OBJECT
     hlo_evaluator.cpp
     xla_c_api.cpp
+    thread_pool.cpp
 )
 
 target_include_directories(vgre_xla PUBLIC

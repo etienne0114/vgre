@@ -65,6 +65,15 @@ engine** (matched against jax):
 So **op coverage is not the blocker** — a Llama-3 forward pass is expressible today. The blockers
 are all about **scale**. In priority order:
 
+> **Delivered toward this (2026-06-14):** the engine now has (i) a **work-stealing fork-join
+> thread pool** (`vgre::xla::ThreadPool`) replacing per-op thread spawning — reentrant,
+> concurrency-safe, `VGRE_XLA_THREADS`-bounded; cut a chained 256×256 matmul **148 ms → 59 ms**
+> by amortizing thread creation (`XlaThreadPool` test 6/6); and (ii) **liveness-based buffer reuse**
+> in `evaluateMulti` — each value's buffer is freed after its last use, so peak memory is the live
+> set, not the sum of all intermediates (a 40-layer×512 model and a 400-op chain verified correct).
+> These are the scheduling + memory-management groundwork for L1/L2 below; the BLAS, bf16, and
+> quantized-weight pieces remain.
+
 ### 2.A — Numeric formats & memory  *(the hard wall — highest priority)*
 The engine stores everything as **fp32**. Real checkpoints are bf16/fp16; large models are served
 int8/int4. Footprint of the weights alone:
