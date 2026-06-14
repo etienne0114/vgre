@@ -117,69 +117,95 @@ FP8::operator float() const {
     return to_float();
 }
 
+// IEEE-754-style 8-bit minifloat codec, parameterized by (E exp bits, M mantissa
+// bits, bias). Both formats use the all-ones exponent for inf/NaN, biased
+// exponent 0 for ±0 and subnormals, and round-to-nearest-even on narrowing —
+// the same rules CPython/ml_dtypes/CUDA use, so values (including the subnormal
+// band, which the previous code flushed to zero) and round-trips are correct.
+
+// Round `value` (binary point after bit `shift`) to `shift` fewer bits, RNE.
+static inline uint32_t fp8_round_shift(uint32_t value, int shift) {
+    if (shift <= 0) return value << (-shift);
+    const uint32_t q = value >> shift;
+    const uint32_t rem = value & ((1u << shift) - 1);
+    const uint32_t half = 1u << (shift - 1);
+    return q + ((rem > half || (rem == half && (q & 1u))) ? 1u : 0u);  // ties → even
+}
+
 FP8 FP8::from_float(float f, FP8Format fmt) {
     FP8 result;
     result.format = fmt;
-    
+    const int M = (fmt == FP8Format::E4M3) ? 3 : 2;
+    const int E = (fmt == FP8Format::E4M3) ? 4 : 5;
+    const int bias = (1 << (E - 1)) - 1;     // 7 (E4M3) / 15 (E5M2)
+    const uint32_t be_max = (1u << E) - 1;    // all-ones exponent → inf/NaN
+
     uint32_t f_bits;
     std::memcpy(&f_bits, &f, sizeof(f_bits));
-    
-    uint32_t sign = (f_bits >> 31) & 0x1;
-    int32_t exponent = ((f_bits >> 23) & 0xFF) - 127;
-    uint32_t mantissa = f_bits & 0x007FFFFF;
-    
-    int exp_bits = (fmt == FP8Format::E4M3) ? 4 : 5;
-    int mant_bits = (fmt == FP8Format::E4M3) ? 3 : 2;
-    int exp_bias = (fmt == FP8Format::E4M3) ? 7 : 15;
-    
-    if (fmt == FP8Format::E4M3) {
-        // E4M3 format (training)
-        if (exponent > 7) {
-            result.bits = (sign << 7) | 0x78;  // Infinity
-        } else if (exponent < -6) {
-            result.bits = sign << 7;  // Zero
-        } else {
-            result.bits = (sign << 7) | ((exponent + exp_bias) << mant_bits) | (mantissa >> (23 - mant_bits));
-        }
-    } else {
-        // E5M2 format (inference)
-        if (exponent > 15) {
-            result.bits = (sign << 7) | 0x7C;  // Infinity
-        } else if (exponent < -14) {
-            result.bits = sign << 7;  // Zero
-        } else {
-            result.bits = (sign << 7) | ((exponent + exp_bias) << mant_bits) | (mantissa >> (23 - mant_bits));
-        }
+    const uint32_t sign = (f_bits >> 31) & 0x1u;
+    const uint32_t fexp = (f_bits >> 23) & 0xFFu;
+    const uint32_t fman = f_bits & 0x7FFFFFu;
+
+    if (fexp == 0xFFu) {  // source inf/NaN → target inf/NaN
+        result.bits = (uint8_t)((sign << 7) | (be_max << M) | (fman ? (1u << (M - 1)) : 0u));
+        return result;
     }
-    
+
+    int e;                       // unbiased exponent of |f|
+    uint32_t sig;                // 24-bit significand (leading 1 at bit 23 for normals)
+    if (fexp != 0u) { e = (int)fexp - 127; sig = fman | (1u << 23); }
+    else if (fman == 0u) { result.bits = (uint8_t)(sign << 7); return result; }  // ±0
+    else { e = -126; sig = fman; }                                               // subnormal float
+
+    int target_be = e + bias;    // biased exponent if encoded as a normal
+    if (target_be >= 1 && target_be <= (int)be_max - 1) {
+        uint32_t q = fp8_round_shift(sig, 23 - M);   // keep M+1 bits (1 + M frac)
+        if (q >= (1u << (M + 1))) { q >>= 1; ++target_be; }  // rounding carried into exponent
+        if (target_be >= (int)be_max) {                       // overflow → inf
+            result.bits = (uint8_t)((sign << 7) | (be_max << M));
+            return result;
+        }
+        result.bits = (uint8_t)((sign << 7) | ((uint32_t)target_be << M) | (q & ((1u << M) - 1)));
+        return result;
+    }
+
+    // Subnormal / underflow (target biased exponent <= 0).
+    const int shift = (23 - M) + (1 - target_be);
+    if (shift >= 32) { result.bits = (uint8_t)(sign << 7); return result; }      // → ±0
+    uint32_t q = fp8_round_shift(sig, shift);
+    if (q == 0u) { result.bits = (uint8_t)(sign << 7); return result; }          // → ±0
+    if (q >= (1u << M)) { result.bits = (uint8_t)((sign << 7) | (1u << M)); return result; }  // → min normal
+    result.bits = (uint8_t)((sign << 7) | q);                                    // subnormal (be=0)
     return result;
 }
 
 float FP8::to_float() const {
-    int exp_bits = (format == FP8Format::E4M3) ? 4 : 5;
-    int mant_bits = (format == FP8Format::E4M3) ? 3 : 2;
-    int exp_bias = (format == FP8Format::E4M3) ? 7 : 15;
-    
-    uint32_t sign = (bits >> 7) & 0x1;
-    int32_t exponent = ((bits >> mant_bits) & ((1 << exp_bits) - 1)) - exp_bias;
-    uint32_t mantissa = bits & ((1 << mant_bits) - 1);
-    
+    const int M = (format == FP8Format::E4M3) ? 3 : 2;
+    const int E = (format == FP8Format::E4M3) ? 4 : 5;
+    const int bias = (1 << (E - 1)) - 1;
+    const uint32_t be_max = (1u << E) - 1;
+
+    const uint32_t sign = (bits >> 7) & 0x1u;
+    const uint32_t be   = (bits >> M) & ((1u << E) - 1u);
+    const uint32_t frac = bits & ((1u << M) - 1u);
+
     uint32_t f_bits;
-    
-    if (exponent == -exp_bias) {
-        if (mantissa == 0) {
-            f_bits = sign << 31;
-        } else {
-            // Subnormal (simplified)
-            f_bits = sign << 31;
+    if (be == be_max) {                       // inf (frac==0) / NaN (frac!=0)
+        f_bits = (sign << 31) | 0x7F800000u | (frac ? (1u << 22) : 0u);
+    } else if (be == 0u) {
+        if (frac == 0u) {
+            f_bits = sign << 31;              // ±0
+        } else {                              // subnormal: frac · 2^(1-bias-M)
+            int e = 1 - bias;
+            uint32_t m = frac;
+            while ((m & (1u << M)) == 0u) { m <<= 1; --e; }   // normalize into 1.m form
+            m &= (1u << M) - 1u;
+            f_bits = (sign << 31) | ((uint32_t)(e + 127) << 23) | (m << (23 - M));
         }
-    } else if (exponent == exp_bias + 1) {
-        // Infinity or NaN
-        f_bits = (sign << 31) | 0x7F800000;
-    } else {
-        f_bits = (sign << 31) | ((exponent + 127) << 23) | (mantissa << (23 - mant_bits));
+    } else {                                  // normal
+        f_bits = (sign << 31) | ((uint32_t)((int)be - bias + 127) << 23) | (frac << (23 - M));
     }
-    
+
     float result;
     std::memcpy(&result, &f_bits, sizeof(result));
     return result;
