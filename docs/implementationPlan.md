@@ -1,579 +1,92 @@
-# VGRE Implementation Plan — Phase 4 (Production Enterprise Readiness)
+# VGRE Implementation Plan — Remaining Work
 
-**Last Updated**: 2026-06-13
+**Last Updated**: 2026-06-14
 
-**Comprehensive Codebase Analysis (2026-06-12)** reveals VGRE as a sophisticated, production-ready 
-CUDA emulation platform with 249 source files, 240 test files, and advanced implementations across:
-- **Core Architecture**: Complete LLVM JIT compilation, UVM memory management, distributed clustering
-- **Security Framework**: Hardware-backed authentication, AES-256-CTR encryption, advanced security manager
-- **API Completeness**: 95%+ CUDA Runtime/Driver API, comprehensive cuBLAS/cuDNN/NCCL integration  
-- **Advanced Systems**: TCP cluster networking, adaptive execution engine, comprehensive testing framework
-- **Deployment Infrastructure**: Kubernetes device plugin, operator framework, SLURM integration
+The original Phase-4 enterprise roadmap (50 tracks) has been **delivered down to its
+software-implementable core** — every track buildable to the project's "real, no-stub" standard
+without external hardware/accounts is done, tested, and committed (see `missingFeatures.md`
+intro and git history for the full list). This plan now contains **only the remaining work**:
+a short list of externally-blocked tracks, and the real engineering programme to run
+**large models (GPT-3, Llama 3)** on the engine.
 
-**Current Achievement**: Core CUDA emulation platform complete with sophisticated distributed 
-computing capabilities, advanced security, and comprehensive library support — **plus a full ML
-stack**: real neural networks from PyTorch, JAX, TensorFlow and Keras run end-to-end on the CPU
-(inference, autoregressive generation, **training/backprop**, and int8 quantization) via a
-production-hardened HLO execution engine. Verified on x86-64 Linux (full suite, zero warnings) and
-built+tested on a 3-OS CI matrix (Linux / macOS / Windows) with WASM and RISC-V cross-execution.
-
-**Phase 4 Objective**: Transform VGRE from sophisticated GPU emulator into enterprise-ready 
-production platform capable of Fortune 500 deployment with complete compliance frameworks, 
-cross-platform verification, enterprise observability, and advanced deployment automation.
-
-**Enterprise Research Findings (2026-2027)**:
-- GPU security vulnerabilities (Rowhammer attacks, container toolkit CVEs) require comprehensive hardening
-- Production AI infrastructure demands <1μs tensor parallelism latency with InfiniBand/RoCE
-- Enterprise deployment requires SOC 2/GDPR/HIPAA compliance with automated audit reporting  
-- Kubernetes-native GPU orchestration essential for modern ML infrastructure
-- Cross-platform Windows/macOS production support critical for enterprise adoption
-- Advanced observability with ML-based anomaly detection required for 99.99% SLA
-
-**Status: Phase 4 IN PROGRESS** — 50 tracks across 12 categories; the self-contained,
-software-implementable subset is being delivered. See `missingFeatures.md` §0 for the full
-per-track STATUS lines and Reality Audit.
+The "24-30 month / 50-60 engineer / $35-50M" estimates from the original plan were aspirational
+research figures and are **not** a reflection of the remaining scope below.
 
 ---
 
-## Reality correction (2026-06-13)
+## A. Externally-blocked tracks (not code we can write here)
 
-This plan was authored from generic enterprise research **without auditing `src/`**, so its
-effort/dependency tables describe several already-shipped subsystems as greenfield. Corrected
-status of the matrix tracks below:
+These need hardware, an account/credential, an auditor, or content work. The in-tree primitives
+already exist where applicable.
 
-| Plan track | Real status | Where |
-|---|---|---|
-| P4-1 Security framework | **PARTIAL** — TPM2 attestation done | `token_manager_tpm2.cpp` |
-| P4-2 Crypto / PQC | **DONE** — AES-GCM/ChaCha/X25519 + ML-KEM-768 hybrid | `secure_channel_crypto.cpp`, `vgre::pqc` (e803964) |
-| P4-3 Audit & compliance | **DONE (core)** — tamper-evident log + GDPR erasure | `vgre::compliance` (cda87ad) |
-| P4-4 Fuzzing | **DONE** — libFuzzer + smoke ctest | `tools/fuzzing` (e89f063) |
-| P4-5 Monitoring | **DONE** — Prometheus + OTLP | `metrics_server.cpp`, `runtime_profiler` |
-| P4-11 K8s orchestration | **DONE** — device plugin + operator + **MIG** | `src/deployment/`, `vgre::mig` (6bb1a99) |
-| P4-12 ML framework integration | **DONE** — PyTorch + JAX + TF + Keras: inference, generation, **training**, quantization on a production-hardened HLO engine | `frameworks/{pytorch,jax,tf,keras}`, `vgre::xla` (`src/xla/`) |
-| P4-10 Multi-architecture | **DONE (core)** — WASM + RISC-V cross-exec; 3-OS CI matrix (Linux/macOS/Windows) | `frameworks/{wasm,riscv}`, `.github/workflows/ci.yml` |
-| P4-8 Windows deployment | **PARTIAL** — Windows CI builds+tests the engine (windows-2022); DirectML/AD pending | `.github/workflows/ci.yml`, `tcp_cluster/windows_socket_manager_*` |
-| P4-14 RDMA | **DONE** — real libibverbs | `rdma_transport.cpp` |
-| P4-24 Backup/DR | **DONE (core)** — content-addressed archive | `vgre::backup` (edca0f3) |
-| P4-26 Secrets | **DONE (core)** — sealed versioned store | `vgre::secrets` (e381a31) |
-| P4-27 Identity/SSO | **DONE (core)** — OIDC/JWT + RBAC | `vgre::identity` (b532465) |
+| Track | Remaining | Blocker |
+|-------|-----------|---------|
+| Security framework | SEV-SNP/TDX, HSM, FIPS-140 cert | confidential-computing hardware + auditor |
+| Cryptography | homomorphic/threshold crypto, Intel QAT | research scope / crypto-accelerator hardware |
+| Windows deployment | DirectML, AD/Kerberos, containers, PowerShell | Windows APIs/SDKs (engine already builds+tests on windows-2022) |
+| macOS / Apple Silicon | Metal Performance Shaders backend | Apple Silicon + Metal hardware (engine builds+tests on macos-arm64) |
+| Model serving | TensorRT-LLM/vLLM compat layers, A/B-canary | external runtimes / live fleet |
+| Multi-cloud | apply to live AWS/Azure/GCP | cloud accounts + credentials |
+| Multi-vendor | Intel oneAPI (SYCL), Apple Metal | those SDKs/hardware (AMD HIP/ROCm done) |
+| Edge / CDN | physical edge nodes, CDN | external infrastructure |
+| Docs & training | enterprise runbooks, video content | content-team work |
+| Post-Blackwell (Rubin) | Rubin/HBM4 emulation | unreleased hardware, no public ISA |
 
-P4-10 (multi-arch) and **P4-12 (ML framework integration)** are now **DONE** (see the table above
-and the detailed tracks). The remaining tracks (P4-7/8/9/13/15/16/17/19/20/21/22/23/25/28/29/30/31/
-32/33/34/35) are either PARTIAL or require an external system/hardware (cloud, IdP, Vault, Istio,
-Metal, TensorRT, live fleet) to be implemented honestly — their in-tree primitives already exist
-where applicable. The 24-30 month / 50-60 engineer / $35-50M figures below are the original
-aspirational estimate, not a reflection of remaining work.
+**One purely-software remaining track:** **CUDA-GDB-compatible debugging** — a GDB
+remote-serial-protocol server backed by a PTX/SASS single-step interpreter (the JIT currently
+compiles to native, so there is no per-instruction interpreter to step). This is a large
+self-contained build; it is a candidate for a dedicated future phase.
 
 ---
 
-## Phase 4 Implementation Matrix
+## B. The forward programme — run GPT-3 / Llama 3 on the engine
 
-### P0 — Critical Security & Reliability (Q1-Q2 2026)
+**Premise (verified, not aspirational):** every Llama-3 / GPT-3 building block already runs
+correctly on the VGRE HLO engine and matches jax — **RMSNorm, RoPE, SwiGLU/SiLU,
+Grouped-Query Attention, and a full Llama decoder layer**. Op coverage is *complete*. The work
+left is **scale** — memory, numeric formats, weight loading, throughput, distribution. Full
+technical detail is in `missingFeatures.md` §2; the milestone plan:
 
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-1 | GPU Runtime Security Framework | Security Core | 8 weeks | TPM 2.0, Intel CET | High |
-| P4-2 | Advanced Cryptographic Infrastructure | Security/Crypto | 6 weeks | Post-quantum libs | Medium |
-| P4-3 | Comprehensive Audit & Compliance | Compliance | 10 weeks | Legal review | High |
-| P4-4 | Advanced Fuzzing & Vulnerability Testing | Security/Testing | 6 weeks | Fuzzing tools | Medium |
+### Milestone L1 — bf16 storage + real checkpoint loading
+- Add **bf16/fp16** as a stored tensor type (typed buffer in `Literal`), so weights load at native
+  width (8B → 16 GB instead of 32 GB fp32).
+- Feed weights as **parameters/external buffers**, not baked constants (the training pytree path
+  already does this); add a memory-mapped **safetensors loader**.
+- **Exit:** a real **Llama-3-8B** forward pass on VGRE numerically matches Hugging Face.
 
-**P0 Delivery Target**: End of Q2 2026 — Critical security framework enabling enterprise evaluation
+### Milestone L2 — BLAS-backed matmul (throughput)
+- Route `Dot` / `DotGeneral` to **OpenBLAS / MKL `sgemm`** (or the emulated cuBLAS `sgemmEx`);
+  cache-tile the remaining ops; add a fused flash-attention kernel (online softmax already in
+  `KVCacheManager`).
+- **Exit:** decode latency from "minutes/token" to "seconds/token".
 
-### P1 — Enterprise Deployment Requirements (Q3-Q4 2026)
+### Milestone L3 — int4/int8 quantized weights
+- Load **GGUF / GPTQ / AWQ** checkpoints; dequantize per-group inside the matmul (extend the
+  existing int8 `dot_general` path to grouped int4).
+- **Exit:** Llama-3-8B fits **4 GB** and runs on a laptop CPU.
 
-#### Observability & Operations (Q3 2026)
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-5 | Production Monitoring & Alerting | Observability | 6 weeks | OpenTelemetry | Low |
-| P4-6 | Advanced Performance Analytics | Profiling | 8 weeks | APM integration | Medium |
-| P4-7 | Capacity Planning & Resource Optimization | Scheduling | 10 weeks | ML models | High |
+### Milestone L4 — production generation loop
+- Wire the engine's autoregressive loop to the built **paged KV-cache** and **continuous-batching
+  scheduler**; add a tokenizer binding.
+- **Exit:** long-context (8K–128K), multi-request LLM serving on CPU.
 
-#### Cross-Platform Production (Q3 2026)  
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-8 | Windows Production Deployment | Platform/Windows | 8 weeks | Windows CI | Medium |
-| P4-9 | macOS Silicon & Unified Memory | Platform/macOS | 6 weeks | Metal integration | Medium |
-| P4-10 | Multi-Architecture Support | Platform/Arch | 10 weeks | Cross-compilation | High |
+### Milestone L5 — distributed (models that don't fit one box)
+- Add a **sharding pass** that splits `DotGeneral`/`Convolution` across ranks and inserts the
+  collective (all-reduce/all-gather) a framework's `shard_map`/GSPMD requests, driven over the
+  **existing RDMA transport + NCCL-style collectives**.
+- **Exit:** **Llama-3-70B** tensor-parallel across N nodes; pipeline parallelism for 175B/405B.
 
-#### AI Infrastructure Integration (Q4 2026)
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-11 | Kubernetes-Native GPU Orchestration | K8s Integration | 12 weeks | CRD/Operators | High |
-| P4-12 | Advanced ML Framework Integration | Frameworks | 10 weeks | PyTorch XLA | High |
-| P4-13 | Model Serving & Inference Optimization | Serving | 8 weeks | TensorRT-LLM | Medium |
-
-#### Data Management & Business Continuity (Q4 2026)
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-24 | Enterprise Backup & Disaster Recovery | Backup/DR | 10 weeks | Cloud APIs | Medium |
-| P4-25 | Data Lake Integration & ETL Pipelines | Data Platform | 12 weeks | Data Lake APIs | High |
-| P4-26 | Advanced Secrets Management | Security/Secrets | 8 weeks | Vault integration | Medium |
-
-#### Enterprise Integration & Identity (Q4 2026)  
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-27 | Advanced Identity & Access Management | Identity/SSO | 10 weeks | SAML/OIDC | Medium |
-| P4-28 | Enterprise API Management | Integration | 8 weeks | API Gateway | Medium |
-| P4-29 | Advanced Compliance Frameworks | Compliance | 12 weeks | Legal review | High |
-
-**P1 Delivery Target**: End of Q4 2026 — Enterprise-ready deployment platform
-
-### P2 — Advanced Production Optimization (Q1-Q2 2027)
-
-#### Distributed Computing & Networking (Q1 2027)
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-14 | Advanced Networking & RDMA | Networking | 12 weeks | InfiniBand | High |
-| P4-15 | Elastic & Fault-Tolerant Training | Distributed | 10 weeks | Checkpoint/restart | High |
-| P4-16 | Multi-Cloud & Hybrid Deployments | Cloud/Hybrid | 8 weeks | Terraform | Medium |
-
-#### Modern DevOps & Infrastructure Automation (Q1-Q2 2027)
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-30 | GitOps & Progressive Delivery | DevOps/GitOps | 10 weeks | Git integration | Medium |
-| P4-31 | API Gateway & Service Mesh Integration | Networking/Mesh | 12 weeks | Istio/Envoy | High |
-| P4-32 | Edge Computing & CDN Integration | Edge/CDN | 14 weeks | CDN providers | High |
-
-#### Developer Experience & Ecosystem (Q1-Q2 2027)
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-17 | Advanced Developer Tools | DevTools | 8 weeks | VSCode API | Medium |
-| P4-18 | Comprehensive Documentation & Training | Documentation | 6 weeks | Content team | Low |
-| P4-19 | Testing & Quality Assurance | QA/Testing | 10 weeks | Chaos tools | Medium |
-
-#### Advanced Performance & Scale (Q2 2027)
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-33 | Database Scaling & Distributed Systems | Data/Distributed | 14 weeks | Consensus algos | High |
-| P4-34 | Advanced Load Balancing & Traffic Management | Networking/LB | 10 weeks | Load balancers | Medium |
-| P4-35 | Container Orchestration & Service Discovery | K8s/Containers | 12 weeks | Helm/Operators | High |
-
-**P2 Delivery Target**: End of Q2 2027 — Production optimization and developer experience
-
-### P3 — Future-Proofing & Ecosystem (Q3-Q4 2027)
-
-#### Next-Generation Architecture Support (Q3 2027)
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-20 | Post-Blackwell Architecture Readiness | Arch/Future | 12 weeks | Hardware specs | High |
-| P4-21 | Alternative GPU Ecosystem Integration | Multi-vendor | 14 weeks | ROCm/oneAPI | High |
-
-#### Advanced Analytics & Intelligence (Q4 2027)
-| # | Track | Component | Est. Effort | Dependencies | Risk |
-|---|---|---|---|---|---|
-| P4-22 | AI-Driven Operations (AIOps) | AIOps | 10 weeks | ML pipelines | High |
-| P4-23 | Advanced Security Analytics | Security/ML | 8 weeks | Threat intel | Medium |
-
-**P3 Delivery Target**: End of Q4 2027 — Future-ready enterprise platform
+**Honest scope:** L1–L4 are real, self-contained, CPU-only engineering achievable in-tree and
+would let VGRE genuinely run Llama-3-8B without a GPU. L5 reuses the existing cluster substrate but
+is a substantial distributed-systems effort. The whole programme keeps VGRE's core promise:
+**large-model inference and training on commodity CPUs, no GPU required.**
 
 ---
 
-## Detailed Implementation Tracks
+## Success criteria (revised, concrete)
 
-### P0 — Critical Security Foundation
-
-#### P4-1 — GPU Runtime Security Framework
-**STATUS (2026-06-13): PARTIAL** — TPM 2.0 attestation DONE (`token_manager_tpm2.cpp`, real TSS2 ESAPI NV storage). Intel CET / SEV-SNP·TDX enclaves / HSM / FIPS-140 certification require hardware + external audit.
-**Files**: `src/security/framework/`, `include/vgre/security/attestation.h`, `src/security/memory_protection.cpp`
-**Objective**: Implement comprehensive GPU security framework addressing enterprise security requirements
-**Key Components**:
-- Hardware-backed attestation using TPM 2.0 for secure boot verification  
-- Memory protection with Intel CET integration for control-flow integrity
-- GPU memory sanitization preventing buffer overflows and use-after-free
-- Secure enclave integration (Intel TDX, AMD SEV-SNP) for confidential computing
-- HSM integration for cryptographic operations and key management
-**Dependencies**: TPM 2.0 hardware support, Intel CET compiler support, secure enclave availability
-**Acceptance Criteria**: 
-- Passes FIPS 140-2 Level 3 compliance testing
-- Resists known GPU Rowhammer attacks (>1000 bit flip attempts)
-- Integrates with enterprise identity providers (Okta, Azure AD, LDAP)
-- Zero tolerance for memory safety vulnerabilities in security-critical paths
-**Risk Mitigation**: Hardware dependency risks mitigated through software fallbacks; compliance risks addressed through early legal/audit review
-
-#### P4-2 — Advanced Cryptographic Infrastructure  
-**STATUS (2026-06-13): DONE (core)** — `vgre::pqc` (commit e803964) ships FIPS-202 Keccak (NIST KATs), ML-KEM-768 (FIPS 203, round-trip + FO + pinned vector validated), and an X25519+ML-KEM-768 hybrid KEM, on top of the existing AES-256-GCM/ChaCha20/X25519/HKDF suite. Homomorphic/threshold crypto + Intel QAT remain out of scope.
-**Files**: `include/vgre/pqc/{keccak,mlkem,hybrid_kem}.h`, `src/pqc/*` (planned paths below superseded)
-**Objective**: Next-generation cryptographic stack for post-quantum and zero-trust architectures
-**Key Components**:
-- Post-quantum cryptography (CRYSTALS-Kyber for key exchange, CRYSTALS-Dilithium for signatures)
-- Hardware-accelerated cryptography using AES-NI, SHA-NI, Intel QuickAssist Technology
-- Homomorphic encryption primitives for secure multi-party ML computation
-- Threshold cryptography for distributed key management in cluster deployments
-- Perfect Forward Secrecy for all inter-node communications
-**Dependencies**: NIST PQC library availability, hardware crypto acceleration support
-**Acceptance Criteria**:
-- Quantum-resistant authentication for all cluster communications
-- Hardware crypto acceleration delivers >10x performance vs software implementation
-- Homomorphic encryption supports basic ML operations (matrix multiply, activation functions)
-- Zero cryptographic vulnerabilities in security audit
-**Implementation Notes**: Gradual rollout with hybrid classical/post-quantum mode for compatibility
-
-#### P4-3 — Comprehensive Audit & Compliance Framework
-**STATUS (2026-06-13): DONE (core)** — `vgre::compliance::AuditLog` (commit cda87ad): HMAC hash-chained tamper-evident log + GDPR Art. 17 crypto-erasure with verifiable deletion certificate, wired into cluster security events. SOC 2/FedRAMP "reporting" is external attestation against this trail.
-**Files**: `include/vgre/compliance/audit_log.h`, `src/compliance/audit_log.cpp`
-**Objective**: Enterprise-grade audit, compliance, and regulatory framework
-**Key Components**:
-- Immutable audit logging with cryptographic integrity using Merkle tree structures
-- Real-time compliance monitoring with automated violation detection and alerting
-- Automated compliance reporting for SOC 2 Type II, ISO 27001, FedRAMP standards
-- ML model governance with data lineage tracking and model provenance
-- GDPR/CCPA "right to be forgotten" implementation with cryptographic deletion proofs
-- RBAC with fine-grained permissions at operation and resource levels
-**Dependencies**: Legal team review, compliance framework selection, external audit preparation
-**Acceptance Criteria**:
-- Successfully passes SOC 2 Type II audit with zero findings
-- Generates compliant GDPR deletion reports with cryptographic proofs
-- Real-time compliance dashboard with <1 minute violation detection
-- Complete audit trail for all privileged operations with tamper evidence
-**Risk Mitigation**: Early engagement with legal/compliance teams; phased rollout starting with internal audit
-
-#### P4-4 — Advanced Fuzzing & Vulnerability Testing
-**STATUS (2026-06-13): DONE (core)** — libFuzzer targets over JSON/JWT/PTX parsers + deterministic `FuzzSmoke` ctest (commit e89f063). SAST/DAST vendor scanners are external.
-**Files**: `tools/fuzzing/`, `tests/fuzzing/test_fuzz_smoke.cpp`
-**Objective**: GPU-native security testing framework for comprehensive vulnerability detection
-**Key Components**:
-- Property-based fuzzing for CUDA API surface using coverage-guided mutation
-- Kernel fuzzing with GPU-specific attack vector testing (memory corruption, timing attacks)
-- Memory safety fuzzing for UVM and device memory operations
-- Side-channel vulnerability detection (timing attacks, cache-based attacks)
-- Automated security regression testing integrated with CI/CD pipeline
-- SAST/DAST integration (SonarQube, Checkmarx, Veracode)
-**Dependencies**: GPU fuzzing framework development, CI/CD integration, security scanner APIs
-**Acceptance Criteria**:
-- Discovers and prevents all classes of known GPU vulnerabilities
-- Integrates with enterprise security scanners providing unified vulnerability reporting
-- Achieves >90% code coverage in security-critical paths
-- Automated daily security regression testing with zero tolerance policy
-**Implementation Strategy**: Start with CUDA API fuzzing, expand to kernel and memory fuzzing
-
----
-
-### P1 — Enterprise Deployment Requirements
-
-#### P4-5 — Production Monitoring & Alerting
-**STATUS (2026-06-13): DONE (core)** — real Prometheus `/metrics` + health/readiness
-(`metrics_server.cpp`, JWT-protectable) and OpenTelemetry OTLP/JSON trace export
-(`runtime_profiler` → `/v1/traces`). See `missingFeatures.md` §2.1. Datadog/New-Relic/Splunk +
-ML anomaly detection are external integrations (the in-tree EWMA/MAD detector is §8.1).
-**Files**: `src/observability/monitoring/`, `include/vgre/observability/`, `src/observability/alerting/`
-**Objective**: Enterprise-grade observability stack for distributed GPU workloads
-**Key Components**:
-- OpenTelemetry integration with distributed tracing across GPU operations and cluster boundaries
-- Advanced GPU metrics: utilization heatmaps, memory pressure indicators, kernel efficiency scoring
-- ML-based anomaly detection for predictive failure analysis and capacity planning
-- Enterprise monitoring integration (Datadog, New Relic, Dynatrace, Splunk)
-- Role-based dashboards for DevOps, ML Engineers, Security teams
-- SLA/SLI tracking with automated SLO violation reporting and remediation
-**Dependencies**: OpenTelemetry framework, enterprise monitoring APIs, ML model development
-**Acceptance Criteria**:
-- 99.9% uptime SLA tracking with automated reporting
-- <5 second MTTR for common issues through automated remediation
-- Predictive failure detection with >95% accuracy and <5% false positive rate
-- Complete observability across distributed multi-node GPU workloads
-**Performance Requirements**: <1% overhead for monitoring instrumentation
-
-#### P4-6 — Advanced Performance Analytics  
-**STATUS (2026-06-13): DONE (core)** — `runtime_profiler` + CUPTI + Nsight export + roofline
-analysis & flamegraph export (`vgre::advanced::PerformanceAnalytics`, `vgre_get_roofline_json` /
-`vgre_export_flamegraph`). See `missingFeatures.md` §2.2. Hosted dashboard UI is a separate frontend.
-**Files**: `src/profiling/advanced/`, `include/vgre/profiling/analytics.h`, `tools/performance/`
-**Objective**: Comprehensive performance intelligence platform for GPU workloads
-**Key Components**:
-- GPU kernel flame graphs with statistical call stack sampling
-- Roofline model visualization with bottleneck identification and optimization recommendations
-- Memory access pattern analysis with cache efficiency scoring
-- Cross-node performance correlation in distributed training scenarios
-- Automated performance regression detection with statistical significance testing
-- Integration with NVIDIA profiling tools (Nsight Systems, Nsight Compute, Intel VTune)
-**Dependencies**: Statistical analysis libraries, profiling tool APIs, visualization frameworks
-**Acceptance Criteria**:
-- Identifies performance regressions within 1% accuracy using statistical methods
-- Provides actionable optimization recommendations with estimated performance impact
-- Complete performance attribution from application level to hardware counters
-- Automated performance bisection for regression root cause analysis
-**Integration**: Seamless integration with existing Nsight workflow for minimal user friction
-
-#### P4-7 — Capacity Planning & Resource Optimization
-**STATUS (2026-06-13): DONE (core)** — `vgre::advanced::CapacityPlanner`: Holt-Winters seasonal
-demand forecasting + First-Fit-Decreasing multi-dimensional bin-packing + headroom-aware node
-sizing (`test_capacity_planner` 12/12), on top of the scheduler + MIG QoS. See `missingFeatures.md`
-§2.3. Spot-instance/cloud cost optimization needs live cloud pricing APIs.
-**Files**: `src/scheduling/enterprise/`, `include/vgre/scheduling/capacity.h`, `ml-models/capacity/`
-**Objective**: AI-driven resource management system for enterprise GPU clusters
-**Key Components**:
-- ML-based workload prediction using historical usage patterns and seasonality
-- Intelligent GPU scheduling with multi-dimensional bin-packing optimization
-- Multi-tenant resource isolation with guaranteed QoS and SLA enforcement
-- Cost optimization with spot instance integration and intelligent preemption handling
-- Automated scaling based on queue depth, latency SLAs, and cost constraints
-- Integration with cluster schedulers (Kubernetes, Slurm, LSF, PBS)
-**Dependencies**: ML model development, cluster scheduler APIs, cloud provider APIs
-**Acceptance Criteria**:
-- Reduces GPU idle time by >30% through intelligent scheduling
-- Maintains <5% SLA violation rate during scaling events
-- Achieves >20% cost reduction through optimized instance selection
-- Scales elastically to handle 10x traffic spikes within defined SLA bounds
-**ML Models**: Time-series forecasting, multi-objective optimization, reinforcement learning for scheduling
-
----
-
-### P1 — Cross-Platform Production Readiness
-
-#### P4-8 — Windows Production Deployment
-**STATUS (2026-06-13): PARTIAL (Windows CI live)** — `.github/workflows/ci.yml` has a `windows-2022`
-job that installs LLVM-18, configures + builds with the MSVC ABI, and runs the full `ctest` suite;
-plus the Windows socket manager + Win32 credential store + `WINDOWS_EXPORT_ALL_SYMBOLS`. The
-XLA/ML engine is pure portable std C++ and builds/tests there unchanged. DirectML, Active
-Directory/Kerberos, Windows containers, and the PowerShell module need Windows-specific work
-against those APIs.
-**Files**: `.github/workflows/ci.yml`, `src/tcp_cluster/windows_socket_manager_*`
-**Objective**: Full Windows enterprise support for production GPU workloads
-**Key Components**:
-- Windows Server Core container support with GPU passthrough and isolation
-- DirectX 12/DirectML integration for Windows-native ML workloads
-- Windows Authentication integration (Kerberos, NTLM, Azure Active Directory)
-- Windows Event Log integration for enterprise monitoring and compliance
-- PowerShell module for Windows automation, deployment, and management
-- Windows Defender integration for runtime security scanning and threat detection
-**Dependencies**: Windows CI infrastructure, DirectX SDK, Windows authentication APIs
-**Acceptance Criteria**:
-- Full Windows CI/CD pipeline with automated testing across Windows Server versions
-- Production-ready Windows containers with GPU acceleration
-- Seamless Active Directory integration for enterprise authentication
-- Complete feature parity with Linux deployment for core functionality
-**Performance Target**: <10% performance penalty compared to Linux for equivalent workloads
-
-#### P4-9 — macOS Silicon & Unified Memory Optimization
-**STATUS (2026-06-13): PARTIAL** — the engine + framework backends are pure portable std C++ and
-build/`ctest` on `macos-arm64` in CI (the Python loader resolves `libvgre.dylib`); the macOS
-keychain token backend exists. The **Metal Performance Shaders** acceleration backend genuinely
-requires Apple Silicon + Metal hardware to implement honestly (see `missingFeatures.md` §3.2).
-**Files**: `src/macos/`, `include/vgre/macos/metal.h`, `src/macos/unified_memory.cpp`
-**Objective**: Native Apple Silicon support with Metal Performance Shaders acceleration
-**Key Components**:
-- Metal Performance Shaders (MPS) backend for Apple Neural Engine acceleration
-- Unified Memory optimization leveraging M-series processor architecture
-- Xcode integration with native debugging support and GPU frame capture
-- macOS Security Framework integration for keychain and secure enclave access
-- Native Apple Silicon containers and deployment automation
-- Performance optimization for M2/M3 Pro/Max/Ultra configurations
-**Dependencies**: Metal Performance Shaders framework, Xcode toolchain, macOS Security APIs
-**Acceptance Criteria**:
-- Native M2/M3 Pro performance parity with x86_64 baseline implementations
-- MPS acceleration for common ML kernels (GEMM, convolution, attention)
-- Complete Xcode debugging workflow with GPU frame analysis
-- Unified Memory optimization delivering >2x memory bandwidth utilization
-**Performance Target**: Match or exceed x86_64 performance on equivalent thermal budgets
-
-#### P4-10 — Comprehensive Multi-Architecture Support
-**STATUS (2026-06-13): DONE (core)** — the portable compute kernels (`frameworks/{wasm,riscv}/
-vgre_kernels.c`) cross-compile and **run** on **WebAssembly** (clang wasm32 → node, `WasmKernels`)
-and **RISC-V** (riscv64-linux-gnu-gcc → qemu-riscv64, `RiscvKernels`), and a real **3-OS CI matrix**
-(`.github/workflows/ci.yml`: linux-x86_64 / macos-arm64 / windows-x86_64) builds and `ctest`s on
-each. The XLA engine is platform-API-free std C++; the Python framework loader resolves
-`libvgre.{so,dylib,dll}` per platform. Per-arch performance-parity benchmarking is the remaining
-hardening.
-**Files**: `frameworks/{wasm,riscv}/`, `.github/workflows/ci.yml`
-**Objective**: Complete multi-architecture support matrix for diverse deployment environments
-**Key Components**:
-- ARM64 optimization with NEON intrinsics and Scalable Vector Extensions (SVE2)
-- RISC-V support for emerging edge AI deployment scenarios
-- WebAssembly runtime for secure sandboxed execution in browser environments
-- Cross-compilation toolchain with architecture-specific optimization profiles
-- Automated testing infrastructure across all supported architectures
-**Dependencies**: Cross-compilation toolchains, QEMU for testing, WASM runtime integration
-**Acceptance Criteria**:
-- Full CI matrix covering x86_64, ARM64, RISC-V with automated performance testing
-- Architecture-specific performance parity within 15% of native optimized implementations
-- WASM runtime supporting subset of CUDA operations for browser-based ML
-- Production deployment success on ARM64 edge devices and RISC-V systems
-**Innovation**: First CUDA emulator with comprehensive RISC-V support for edge AI
-
----
-
-### P1 — AI Infrastructure Integration
-
-#### P4-11 — Kubernetes-Native GPU Orchestration
-**STATUS (2026-06-13): DONE except multi-cluster federation** — Go device plugin + daemonset + kubebuilder operator (CRD/controllers/RBAC) + **MIG partitioning** with per-tenant budget isolation (`vgre::mig`, commit 6bb1a99).
-**Files**: `src/deployment/k8s_device_plugin/`, `src/deployment/vgre_operator/`, `src/mig/`
-**Objective**: Deep Kubernetes integration for modern ML infrastructure deployment
-**Key Components**:
-- Custom Resource Definitions (CRDs) for VGRE GPU resources with lifecycle management
-- Kubernetes Device Plugin for automatic VGRE GPU discovery, allocation, and health monitoring
-- Multi-Instance GPU (MIG) virtualization enabling secure multi-tenant resource sharing
-- Pod-level GPU resource guarantees and limits with QoS enforcement
-- Integration with Kubernetes autoscaling (HPA, VPA, Cluster Autoscaler)
-- Fine-grained RBAC integration for GPU resource access control and audit
-**Dependencies**: Kubernetes operator framework, device plugin APIs, CRD validation
-**Acceptance Criteria**:
-- Successful deployment on production Kubernetes clusters (1.28+) with zero downtime
-- MIG resource sharing with strong isolation and performance guarantees
-- Automatic failover and recovery for GPU node failures within 30 seconds
-- Integration with major Kubernetes distributions (EKS, GKE, AKS, OpenShift)
-**Enterprise Features**: Multi-cluster federation, disaster recovery, compliance reporting
-
-#### P4-12 — Advanced ML Framework Integration  
-**STATUS (2026-06-13): DONE** — VGRE runs **real neural networks end-to-end** from all four major
-frameworks, every result validated against the framework's own output (full detail in
-`missingFeatures.md` §4.2):
-- **PyTorch** — out-of-tree PrivateUse1 "vgre" backend (alloc/copy via emulated CUDA, matmul via
-  emulated cuBLAS); `PyTorchBackend` 9/9.
-- **JAX / TensorFlow / Keras 3** — an XLA **HLO execution engine** (`vgre::xla`, `src/xla/`) that
-  consumes the StableHLO these frameworks lower to and runs it on the CPU. `JaxStableHloBackend`
-  58/58, `TensorFlowStableHloBackend` 16/16, `KerasModelsBackend` 10/10, `XlaHloInterpreter` 24/24,
-  `XlaExecutableCApi` 16/16 — all **in-process** (the LLVM/protobuf-vs-TF symbol collision is fixed
-  with `RTLD_DEEPBIND`).
-- **Coverage**: CNN / Transformer / RNN-LSTM-GRU-Bidirectional / GPT block / ResNet block;
-  **autoregressive generation** (greedy decode, KV-cache, top-k/sort/argmax/scatter);
-  **training** (backprop incl. conv backward, multi-output SGD, a loss-decreasing loop matching
-  jax to ~1e-7); **int8 quantized** inference.
-- **Production**: thread-safe concurrent execution (no per-call module copy), module validation,
-  structured `vgre_xla_last_error()`, `std::thread` multicore parallelism + a 2-D matmul fast path
-  (chained 256×256 matmul 1399 ms → 148 ms), **multi-tenant resource governance** via
-  `VGRE_XLA_THREADS` (bounds cores per executable; `1` = deterministic serial), and **engine
-  telemetry** (`vgre_xla_stats()` — cumulative compile/execute/error counts) for observability.
-- **Remaining (external only)**: device-level `jax.jit(backend='vgre')` PJRT plugin registration
-  needs the version-pinned upstream `pjrt_c_api.h` + MLIR C++ libs (not in the wheels); the
-  StableHLO-level path delivers the identical compute. Hugging Face / ONNX-Runtime / MLflow are
-  thin layers over these backends.
-**Files**: `frameworks/{pytorch,jax,tf,keras}/`, `vgre::xla` (`src/xla/`, `include/vgre/xla/`)
-**Objective**: Deep integration with modern ML frameworks for optimal performance
-**Key Components**:
-- PyTorch XLA backend with graph optimization and kernel fusion
-- TensorFlow XLA/MLIR integration for advanced compiler optimizations
-- JAX backend with automatic differentiation and advanced transformations
-- Hugging Face Transformers acceleration with model-specific optimizations
-- ONNX Runtime provider implementation for cross-framework compatibility
-- MLflow integration for experiment tracking, model registry, and deployment
-**Dependencies**: Framework integration APIs, XLA compiler, MLIR infrastructure
-**Acceptance Criteria**:
-- Training throughput within 5% of native CUDA on standard benchmarks (ResNet-50, BERT-Large, GPT-3)
-- Seamless framework migration with minimal code changes required
-- Advanced optimizations: kernel fusion, memory layout optimization, precision scaling
-- Production model serving with <10ms additional latency overhead
-**Performance Target**: Match native CUDA performance while providing superior debugging and portability
-
-#### P4-13 — Model Serving & Inference Optimization
-**STATUS (2026-06-13): DONE (core)** — the vLLM-style serving primitives exist + tested:
-**PagedAttention** (`vgre::core::KVCacheManager` — block pool, per-sequence block tables,
-online-softmax), **continuous in-flight batching** (`ContinuousBatchScheduler`), and **speculative
-decoding** (`vgre::serving`, distribution-equivalent rejection sampling). The §4.2 XLA engine also
-runs real **autoregressive generation** (greedy decode + KV-cache) end-to-end. See
-`missingFeatures.md` §4.3. TensorRT-LLM/vLLM *compatibility layers* and A/B-canary need those
-external runtimes / a live fleet.
-**Files**: `src/serving/`, `src/core/kv_cache.cpp`, `include/vgre/serving/`
-**Objective**: Production-grade inference acceleration and serving infrastructure
-**Key Components**:
-- TensorRT-LLM compatibility layer for optimized large language model inference
-- vLLM integration with continuous batching, PagedAttention, and speculative decoding
-- Dynamic batching with intelligent request routing and load balancing
-- Model sharding and pipeline parallelism across multiple instances
-- A/B testing framework for safe model deployment and performance comparison
-- Canary deployment with automated rollback on quality degradation detection
-**Dependencies**: TensorRT APIs, vLLM integration, model optimization frameworks
-**Acceptance Criteria**:
-- Inference latency within 10% of TensorRT baseline for equivalent model configurations
-- Support for 1000+ concurrent requests with <95th percentile latency SLA
-- Automated model optimization with quantization and graph optimization
-- Zero-downtime model updates with traffic splitting and gradual rollout
-**Innovation**: First open-source CUDA emulator with enterprise-grade model serving capabilities
-
----
-
-## Implementation Phases & Milestones
-
-### Phase 4A — Security Foundation (Months 1-6)
-**Critical Path**: P4-1 → P4-2 → P4-3 → P4-4
-**Milestone**: Enterprise security audit readiness
-**Success Criteria**: Pass preliminary SOC 2 assessment, resist known attack vectors
-**Team**: 4 security engineers, 2 platform engineers
-
-### Phase 4B — Platform Readiness (Months 4-9)  
-**Parallel Tracks**: P4-5,P4-6,P4-7 + P4-8,P4-9,P4-10
-**Milestone**: Cross-platform production deployment capability
-**Success Criteria**: Windows/macOS production deployments, comprehensive monitoring
-**Team**: 6 platform engineers, 3 DevOps engineers, 2 performance engineers
-
-### Phase 4C — AI Infrastructure (Months 7-12)
-**Sequential Tracks**: P4-11 → P4-12 → P4-13, P4-24,P4-25,P4-26 + P4-27,P4-28,P4-29
-**Milestone**: Enterprise ML infrastructure integration and data management
-**Success Criteria**: Production Kubernetes deployment, framework performance parity, enterprise identity integration
-**Team**: 4 AI infrastructure engineers, 3 Kubernetes specialists, 2 ML engineers, 3 data engineers, 2 identity specialists
-
-### Phase 4D — Advanced Infrastructure (Months 10-24)
-**Optimization Tracks**: P4-14,P4-15,P4-16 + P4-30,P4-31,P4-32 + P4-17,P4-18,P4-19 + P4-33,P4-34,P4-35
-**Milestone**: Production optimization, modern DevOps, and advanced scaling
-**Success Criteria**: Multi-cloud deployment, GitOps workflows, advanced networking, comprehensive tooling, database scaling
-**Team**: 5 distributed systems engineers, 3 networking specialists, 4 developer experience engineers, 4 DevOps engineers, 3 database specialists
-
-### Phase 4E — Future Readiness (Months 20-30)
-**Innovation Tracks**: P4-20,P4-21 + P4-22,P4-23
-**Milestone**: Next-generation architecture support and AI-driven operations
-**Success Criteria**: Multi-vendor GPU support, automated operations, predictive analytics
-**Team**: 3 architecture specialists, 4 AI/ML engineers, 2 research engineers
-
----
-
-## Resource Requirements & Success Metrics
-
-### Team Composition (Total: 50-60 engineers)
-- **Security Specialists**: 8 engineers (cryptography, compliance, penetration testing, secrets management)  
-- **Platform Engineers**: 10 engineers (Windows, macOS, multi-arch, containerization, edge computing)
-- **AI Infrastructure**: 9 engineers (Kubernetes, ML frameworks, model serving, data lakes)
-- **Distributed Systems**: 8 engineers (networking, fault tolerance, multi-cloud, consensus algorithms)
-- **Developer Experience**: 6 engineers (tooling, documentation, testing, API management)  
-- **DevOps & Automation**: 6 engineers (GitOps, progressive delivery, infrastructure automation)
-- **Data & Identity**: 5 engineers (backup/DR, ETL pipelines, identity federation, compliance)
-- **Research & Innovation**: 4 engineers (future architectures, emerging technologies, competitive analysis)
-- **Product & Strategy**: 4 engineers (market analysis, partnership development, business strategy)
-
-### Strategic Market Position
-VGRE's core value proposition - democratizing GPU computing through CPU emulation - addresses 
-a massive market opportunity while providing technological sovereignty benefits:
-- **Total Addressable Market**: $50B+ GPU computing market with enterprise AI infrastructure segment
-- **Competitive Advantage**: First production-ready, enterprise-grade CUDA emulation platform
-- **Economic Impact**: 40-60% cost reduction vs. native GPU infrastructure at enterprise scale
-- **Strategic Value**: Hardware independence, vendor lock-in elimination, geographic flexibility
-
-### Revolutionary Impact Assessment
-Phase 4 completion positions VGRE as transformational infrastructure comparable to major 
-open source achievements:
-- **Technological Sovereignty**: Nations/organizations gain AI capability independence
-- **Economic Democratization**: Small organizations access enterprise-grade AI infrastructure  
-- **Educational Revolution**: GPU programming education without hardware barriers
-- **Innovation Acceleration**: Consistent development environments reduce deployment friction
-- **Market Disruption**: Breaks NVIDIA's virtual monopoly on GPU computing infrastructure
-
-### Infrastructure Requirements
-- **Security Lab**: Hardware security modules, TPM-enabled systems, penetration testing tools, compliance audit tools
-- **Multi-Platform CI**: Windows Server, macOS, ARM64, RISC-V testing infrastructure, edge device testing  
-- **Kubernetes Clusters**: Multi-cloud test environments (AWS EKS, Azure AKS, Google GKE), service mesh testing
-- **Performance Lab**: High-end GPU systems for benchmarking and optimization, database clustering hardware
-- **Network Testing**: InfiniBand/RoCE hardware for advanced networking validation, CDN testing infrastructure
-- **Data Infrastructure**: Multi-petabyte data lakes, backup/restore testing environments, ETL pipeline testing
-
-### Success Metrics
-- **Security**: SOC 2 Type II certification, zero critical vulnerabilities, 100% compliance framework coverage, PCI DSS Level 1 compliance
-- **Reliability**: 99.99% uptime SLA, <30 second recovery time, linear scaling to 10,000 GPUs, <30 minute disaster recovery RTO
-- **Performance**: <5% overhead vs native CUDA, >95% framework compatibility, <10ms serving latency, handles 1M+ concurrent connections  
-- **Adoption**: 3+ Fortune 500 deployments, 10,000+ developers, enterprise marketplace presence
-- **Quality**: 95%+ test coverage, automated CI/CD, zero production regressions
-- **Compliance**: HIPAA technical safeguards certification, complete audit trails, automated compliance reporting
-
-### Investment & ROI Analysis  
-**Estimated Investment**: $35-50M over 30 months (team, infrastructure, compliance, training)
-**Market Opportunity**: $50B+ GPU computing market, enterprise AI infrastructure segment
-**Competitive Advantage**: First production-ready, enterprise-grade CUDA emulation platform with complete compliance frameworks
-**Revenue Potential**: Enterprise licensing, support services, managed cloud offerings, compliance consulting
-
-**Strategic ROI Beyond Financial Returns**:
-- **Technological Independence**: Reduced dependence on single vendor for critical AI infrastructure
-- **Market Position**: First-mover advantage in hardware-independent GPU computing
-- **Economic Impact**: Enable $25-40M annual savings for enterprise customers
-- **Innovation Catalyst**: Accelerate AI development through democratized access
-
-This comprehensive Phase 4 plan transforms VGRE from sophisticated GPU emulator into the 
-foundational infrastructure for democratized AI computing - enabling organizations worldwide 
-to deploy production AI capabilities without hardware vendor dependencies, geographic 
-constraints, or prohibitive infrastructure costs. The successful execution positions VGRE 
-as the defining platform for next-generation AI infrastructure sovereignty.
+- **L1:** Llama-3-8B forward output matches HF reference to fp32 tolerance.
+- **L2:** ≥10× matmul speedup vs the naive interpreter loop on 4096² GEMM.
+- **L3:** Llama-3-8B int4 resident in ≤4 GB RSS; output perplexity within tolerance of the bf16 run.
+- **L4:** sustained multi-request decode with paged KV; no per-token reallocation of the model.
+- **L5:** 70B tensor-parallel across nodes with correctness matching a single-node bf16 reference.
