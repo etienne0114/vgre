@@ -265,6 +265,13 @@ add_executable(test_dirty_page_tracking core/test_dirty_page_tracking.cpp)
 target_link_libraries(test_dirty_page_tracking PRIVATE vgre)
 add_test(NAME DirtyPageTracking COMMAND test_dirty_page_tracking)
 
+# FP8 (E4M3/E5M2) minifloat codec — round-trip + subnormal correctness.
+add_executable(test_fp8_minifloat core/test_fp8_minifloat.cpp)
+target_link_libraries(test_fp8_minifloat PRIVATE vgre)
+target_include_directories(test_fp8_minifloat PRIVATE ${PROJECT_SOURCE_DIR}/src/core/math)
+add_test(NAME FP8Minifloat COMMAND test_fp8_minifloat)
+set_tests_properties(FP8Minifloat PROPERTIES TIMEOUT 30)
+
 # QUEUE-60: Blelloch (1990) parallel prefix scan
 add_executable(test_prefix_scan core/test_prefix_scan.cpp)
 target_link_libraries(test_prefix_scan PRIVATE vgre)
