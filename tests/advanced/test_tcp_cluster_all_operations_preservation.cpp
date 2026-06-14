@@ -437,14 +437,22 @@ void property_allreduce_operation_consistency() {
     for (size_t size : data_sizes) {
         for (int datatype : datatypes) {
             if (size == 0) continue; // Skip zero-size allocations
-            
-            // Create test data
-            std::vector<float> test_data(size / sizeof(float), 1.0f);
-            
+
+            // Honor the allReduce contract: `ptr` must point to `count`
+            // elements, each vgre_get_type_size(datatype) bytes. Size the
+            // buffer to the *actual* datatype element size. Passing a float
+            // buffer while declaring an 8-byte datatype (POINTER/INT64) makes
+            // the library read count*8 bytes from a 4*count-byte buffer — an
+            // out-of-bounds read that segfaults at large sizes.
+            size_t element_size = vgre_get_type_size(datatype);
+            size_t count = size / element_size;
+            if (count == 0) continue;
+            std::vector<uint8_t> test_data(count * element_size, 0x3f);
+
             // Property: AllReduce should not crash
-            VGREResult result = manager.allReduce(test_data.data(), test_data.size(), datatype);
-            
-            std::cout << "  [INFO] AllReduce size=" << size << " type=" << datatype 
+            VGREResult result = manager.allReduce(test_data.data(), count, datatype);
+
+            std::cout << "  [INFO] AllReduce size=" << size << " type=" << datatype
                       << " result: " << static_cast<int>(result) << std::endl;
         }
     }
