@@ -973,6 +973,12 @@ target_link_libraries(test_mps_quota PRIVATE vgre)
 add_test(NAME MPSQuota COMMAND test_mps_quota)
 set_tests_properties(MPSQuota PROPERTIES TIMEOUT 60)
 
+# Portable software RDMA — one-sided WRITE/READ over TCP on every platform.
+add_executable(test_software_rdma advanced/test_software_rdma.cpp)
+target_link_libraries(test_software_rdma PRIVATE vgre)
+add_test(NAME SoftwareRDMA COMMAND test_software_rdma)
+set_tests_properties(SoftwareRDMA PROPERTIES TIMEOUT 60)
+
 add_executable(test_adaptive_partition advanced/test_adaptive_partition.cpp)
 target_link_libraries(test_adaptive_partition PRIVATE vgre)
 add_test(NAME AdaptivePartition COMMAND test_adaptive_partition)
