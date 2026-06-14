@@ -28,10 +28,15 @@ extern "C" {
   unsigned vgre_jit_tmem_alloc(int nCols);
   void     vgre_jit_tmem_dealloc(unsigned addr, int nCols);
   void     vgre_jit_tmem_relinquish();
-  void     vgre_jit_tcgen05_ld(unsigned* dst, unsigned addr, int lanes, int wordsPerLane);
-  void     vgre_jit_tcgen05_st(unsigned addr, const unsigned* src, int lanes, int wordsPerLane);
-  void     vgre_jit_tcgen05_cp(unsigned addr, const void* smem, int lanes, int wordsPerLane);
-  void     vgre_jit_tcgen05_mma(unsigned addr, unsigned long long descA, unsigned long long descB,
+  // NB: these signatures must match include/vgre/runtime/gpu_thread_context.h
+  // byte-for-byte — both declare the same extern "C" symbols, and a generated
+  // JIT translation unit includes both. uint32_t/uint64_t (not unsigned / unsigned
+  // long long: uint64_t != unsigned long long on LP64, which clang flags as a
+  // conflicting type and fails every kernel compile).
+  void     vgre_jit_tcgen05_ld(uint32_t* dst, uint32_t addr, int lanes, int wordsPerLane);
+  void     vgre_jit_tcgen05_st(uint32_t addr, const uint32_t* src, int lanes, int wordsPerLane);
+  void     vgre_jit_tcgen05_cp(uint32_t addr, const void* smem, int lanes, int wordsPerLane);
+  void     vgre_jit_tcgen05_mma(uint32_t addr, uint64_t descA, uint64_t descB,
                                 int M, int N, int K, int kind, int accumulate);
 
   // Dynamic TLS-based built-ins for stable parallel JIT linkage

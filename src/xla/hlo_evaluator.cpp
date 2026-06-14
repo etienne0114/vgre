@@ -1,10 +1,12 @@
 // VGRE XLA backend — HLO interpreter (impl).  See include/vgre/xla/hlo.h.
 
 #include "vgre/xla/hlo.h"
+#include "vgre/xla/thread_pool.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <stdexcept>
 #include <thread>
 
@@ -67,45 +69,26 @@ float applyUnary(HloOp op, float a) {
         default: throw std::runtime_error("not a unary op");
     }
 }
-// Worker cap for the interpreter's parallel loops. Defaults to min(hw, 8) but is
-// overridable with VGRE_XLA_THREADS so a multi-tenant host can bound the cores a
-// single executable consumes (set to 1 for fully deterministic, serial
-// execution). Evaluated once.
-unsigned maxWorkers() {
-    static const unsigned cap = [] {
-        unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-        unsigned def = std::min(hw, 8u);
-        if (const char* e = std::getenv("VGRE_XLA_THREADS")) {
-            long v = std::strtol(e, nullptr, 10);
-            if (v >= 1) return std::min<unsigned>((unsigned)v, hw);
-        }
-        return def;
-    }();
-    return cap;
-}
-
-// Parallelize a 0..n loop across hardware threads when the work is large enough.
-// Uses std::thread (not OpenMP — libomp's TLS breaks under RTLD_DEEPBIND, which
-// the in-process TensorFlow loading relies on). `body(i)` must be independent
-// across i (the interpreter writes disjoint output elements) and not throw.
+// Parallelize a 0..n loop over the shared work-stealing pool when the work is
+// large enough. The pool is sized by VGRE_XLA_THREADS (default min(hw,8); set 1
+// for deterministic serial execution) so a multi-tenant host can bound cores per
+// executable. `body(i)` must be independent across i (the interpreter writes
+// disjoint output elements) and must not throw.
 template <class Fn>
 void parallelFor(int64_t n, int64_t work_estimate, Fn body) {
-    static const unsigned kCap = maxWorkers();
-    if (n <= 1 || kCap < 2 || work_estimate < 8192) {
+    if (n <= 1 || work_estimate < 8192) {
         for (int64_t i = 0; i < n; ++i) body(i);
         return;
     }
-    unsigned nt = kCap;
-    if ((int64_t)nt > n) nt = (unsigned)n;
-    int64_t chunk = (n + nt - 1) / nt;
-    std::vector<std::thread> ts;
-    ts.reserve(nt);
-    for (unsigned t = 0; t < nt; ++t) {
-        int64_t lo = (int64_t)t * chunk, hi = std::min(n, lo + chunk);
-        if (lo >= hi) break;
-        ts.emplace_back([lo, hi, &body] { for (int64_t i = lo; i < hi; ++i) body(i); });
+    ThreadPool& pool = ThreadPool::global();
+    if (pool.concurrency() < 2) {           // VGRE_XLA_THREADS=1 → serial
+        for (int64_t i = 0; i < n; ++i) body(i);
+        return;
     }
-    for (auto& th : ts) th.join();
+    // a few chunks per worker keeps load balanced via stealing
+    int64_t grain = std::max<int64_t>(1, n / (static_cast<int64_t>(pool.concurrency()) * 4));
+    std::function<void(int64_t)> fn(body);
+    pool.parallelFor(n, grain, fn);
 }
 
 bool cmp(const std::string& dir, float a, float b) {
@@ -123,6 +106,18 @@ bool cmp(const std::string& dir, float a, float b) {
 std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params) const {
     std::vector<Literal> vals(instrs_.size());              // primary (element-0) value
     std::vector<std::vector<Literal>> multi(instrs_.size()); // full tuple for Tuple/While
+
+    // Liveness for buffer reuse: every op produces a *fresh* output from reads of
+    // its operands (no aliasing), so an operand's buffer is dead — and can be
+    // freed — after the last instruction that reads it. This bounds peak memory
+    // by the live set rather than the sum of all intermediates, which is what
+    // lets deep/large models fit in limited RAM. last_use[v] = max index that
+    // references v as an operand (the root is pinned).
+    std::vector<int64_t> last_use(instrs_.size(), -1);
+    for (size_t j = 0; j < instrs_.size(); ++j)
+        for (int op : instrs_[j].operands)
+            if (op >= 0 && op < (int)instrs_.size()) last_use[op] = (int64_t)j;
+    if (root_ >= 0 && root_ < (int)instrs_.size()) last_use[root_] = (int64_t)instrs_.size();
 
     for (size_t idx = 0; idx < instrs_.size(); ++idx) {
         const HloInstruction& I = instrs_[idx];
@@ -683,6 +678,15 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
             }
         }
         vals[idx] = std::move(out);
+
+        // Release operands whose last use was this instruction (frees the buffer
+        // and its tuple slot). Safe because all ops copy their inputs.
+        for (int op : I.operands) {
+            if (op >= 0 && op < (int)instrs_.size() && last_use[op] == (int64_t)idx) {
+                std::vector<float>().swap(vals[op].data);
+                if (!multi[op].empty()) std::vector<Literal>().swap(multi[op]);
+            }
+        }
     }
 
     if (root_ < 0 || root_ >= (int)vals.size()) throw std::runtime_error("HloModule has no root");

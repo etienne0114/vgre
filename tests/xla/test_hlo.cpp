@@ -350,6 +350,25 @@ int main() {
         check("scatter set column", approx(r.data, {0, 0, 7, 0, 0, 0, 9, 0}));
     }
 
+    // ── deep chain: exercises liveness-based buffer reuse (free dead operands) ─
+    {
+        // 400 deep ops: each iteration does (x+1)-1 (bounded → stays 3). Every
+        // op's input dies immediately, so the live set is O(1) while the graph is
+        // O(400). Correctness here means the free-after-last-use pass never
+        // released a still-needed buffer.
+        HloModule m;
+        int cur = m.parameter(0, Shape{{4}});
+        int one = m.constant(Literal::r1({1, 1, 1, 1}));
+        for (int k = 0; k < 200; ++k) {
+            cur = m.binary(HloOp::Add, cur, one);        // +1
+            cur = m.binary(HloOp::Subtract, cur, one);   // -1  → net 0
+        }
+        m.setRoot(cur);
+        Literal r = m.evaluate({Literal::r1({3, 3, 3, 3})});
+        check("deep 400-op chain (buffer reuse correctness)",
+              approx(r.data, {3, 3, 3, 3}));
+    }
+
     std::printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

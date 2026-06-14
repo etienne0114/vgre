@@ -16,7 +16,11 @@ import shutil
 import subprocess
 import sys
 
-import yaml
+try:
+    import yaml  # use PyYAML when available
+except ImportError:  # otherwise fall back to the in-tree dependency-free loader
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import minyaml as yaml
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 errors = []
