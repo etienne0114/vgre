@@ -74,6 +74,7 @@ add_library(vgre_advanced OBJECT
     token/token_manager_tpm2.cpp
     token/token_manager_fallback.cpp
     rdma_transport.cpp
+    software_rdma.cpp
     mps_control.cpp
     grpc_transport.cpp
     websocket_transport.cpp
