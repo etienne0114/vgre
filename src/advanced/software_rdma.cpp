@@ -126,8 +126,14 @@ void SoftwareRDMA::serveConn(long long fd) {
         } else if (op == OP_READ) {
             if (!vgre_send_all(s, &status, 1)) break;
             if (status == ST_OK) {
-                if (!vgre_send_all(s, static_cast<uint8_t*>(reg.addr) + off, (size_t)len)) break;
+                // Count the read *before* transmitting the payload, so the
+                // counter is committed by the time the client's read() returns
+                // (it returns as soon as it has received the bytes). Counting
+                // after the send races the client and intermittently loses the
+                // update under load — mirror the WRITE path, which increments
+                // before sending the ack the client waits on.
                 bytes_read_.fetch_add(len, std::memory_order_relaxed);
+                if (!vgre_send_all(s, static_cast<uint8_t*>(reg.addr) + off, (size_t)len)) break;
             }
         } else {
             break;  // unknown opcode
