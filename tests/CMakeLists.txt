@@ -833,6 +833,12 @@ target_link_libraries(test_blas_gemm PRIVATE vgre Threads::Threads)
 add_test(NAME XlaBlasGemm COMMAND test_blas_gemm)
 set_tests_properties(XlaBlasGemm PROPERTIES TIMEOUT 120)
 
+# Memory-mapped safetensors checkpoint loader (F32/F16/BF16/int dtypes) — L1.
+add_executable(test_safetensors xla/test_safetensors.cpp)
+target_link_libraries(test_safetensors PRIVATE vgre)
+add_test(NAME XlaSafetensors COMMAND test_safetensors)
+set_tests_properties(XlaSafetensors PROPERTIES TIMEOUT 30)
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)
