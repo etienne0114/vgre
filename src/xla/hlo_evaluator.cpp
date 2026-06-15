@@ -721,6 +721,7 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
             if (op >= 0 && op < (int)instrs_.size() && last_use[op] == (int64_t)idx) {
                 std::vector<float>().swap(vals[op].data);
                 std::vector<uint16_t>().swap(vals[op].half);
+                std::vector<uint8_t>().swap(vals[op].quant);
                 if (!multi[op].empty()) std::vector<Literal>().swap(multi[op]);
             }
         }

@@ -98,9 +98,11 @@ int8/int4. Footprint of the weights alone:
   conversions). Weights stay at native 16-bit width in RAM (8B → 16 GB vs 32 GB); the evaluator
   decompresses a bf16 `Parameter`/`Constant` to f32 only transiently as its consumer runs, and
   buffer reuse frees it — peak f32 RAM = live set, not the whole model. Test `XlaBf16Literal`.
-- **Quantized-weight path (int4/int8)** — load **GGUF / GPTQ / AWQ** checkpoints and dequantize
-  per group inside the matmul kernel. The int8 `dot_general` path already exists; extend it to
-  grouped int4. *This is the single biggest unlock: it puts an 8B model in 4 GB — laptop RAM.*
+- ✅ **Quantized-weight path (int4/int8)** — **DONE (2026-06-16)** for GGUF Q8_0/Q4_0/Q4_1:
+  `vgre::xla::GGUF` (`src/xla/gguf.cpp`) mmaps a `.gguf` checkpoint; `Literal` holds the ggml block
+  formats natively (`DType{Q8_0,Q4_0,Q4_1}`, dequant in `include/vgre/xla/quant.h`) so int4 weights
+  are **~4.5 bit/weight resident (8B → ~4.5 GB)** and dequantize to f32 only on use. Test
+  `XlaGgufQuant`. *Remaining:* Q4_K/Q6_K super-block K-quants + GPTQ/AWQ, and dequant-in-GEMM.
 
 ### 2.B — Weight loading at scale
 Today model weights are **baked into the StableHLO as constants** (fine for toy models; a 16 GB
@@ -149,7 +151,9 @@ over the existing RDMA/NCCL transport.
    match remains (needs the 16 GB external checkpoint).
 2. ✅ **BLAS-backed matmul** — **DONE (2026-06-14)**: 82× on 4096³; `Dot`/`DotGeneral` use
    cblas_sgemm + tiled fallback, thread-pool parallel.
-3. **int4 (GGUF) weight path** → 8B fits **4 GB**, runs on a laptop.
+3. ✅ **int4 (GGUF) weight path** — **DONE (2026-06-16)**: GGUF loader + native Q8_0/Q4_0/Q4_1
+   `Literal` storage (8B → ~4.5 GB resident). Q4_K/Q6_K + GPTQ/AWQ remain; real-8B run needs an
+   external int4 checkpoint.
 4. **Paged-KV generation loop** → long-context autoregressive decode + multi-request batching.
 5. **Tensor-parallel `DotGeneral`** over the existing RDMA/NCCL substrate → **70B across N nodes**;
    pipeline parallelism → 175B / 405B.

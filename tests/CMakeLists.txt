@@ -846,6 +846,13 @@ target_link_libraries(test_bf16_literal PRIVATE vgre)
 add_test(NAME XlaBf16Literal COMMAND test_bf16_literal)
 set_tests_properties(XlaBf16Literal PROPERTIES TIMEOUT 30)
 
+# int4/GGUF (L3): Q8_0/Q4_0/Q4_1 block dequant, native quantized Literal storage,
+# memory-mapped GGUF loader, int4 weight through the engine.
+add_executable(test_gguf_quant xla/test_gguf_quant.cpp)
+target_link_libraries(test_gguf_quant PRIVATE vgre)
+add_test(NAME XlaGgufQuant COMMAND test_gguf_quant)
+set_tests_properties(XlaGgufQuant PROPERTIES TIMEOUT 30)
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)
