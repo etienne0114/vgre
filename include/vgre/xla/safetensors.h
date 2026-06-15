@@ -49,9 +49,12 @@ public:
     bool contains(const std::string& name) const;
     const TensorInfo* info(const std::string& name) const;
 
-    // Materialize `name` into `out` as a row-major f32 Literal (shape preserved),
-    // dequantizing F16/BF16 and widening F64/int. False if absent or malformed.
-    bool load(const std::string& name, Literal& out) const;
+    // Materialize `name` into `out` (shape preserved). By default produces a
+    // row-major f32 Literal, dequantizing F16/BF16 and widening F64/int. With
+    // keepNative=true, an F16/BF16 tensor is kept at native width (half the RAM)
+    // as a bf16/f16 Literal — the engine decompresses it to f32 transiently when
+    // it is consumed. Other dtypes always widen to f32. False if absent/malformed.
+    bool load(const std::string& name, Literal& out, bool keepNative = false) const;
 
     // Total bytes of the mapped file (header + blob).
     uint64_t mappedBytes() const { return map_len_; }

@@ -839,6 +839,13 @@ target_link_libraries(test_safetensors PRIVATE vgre)
 add_test(NAME XlaSafetensors COMMAND test_safetensors)
 set_tests_properties(XlaSafetensors PROPERTIES TIMEOUT 30)
 
+# bf16/f16 native Literal storage (the rest of L1) — half-width weights + engine
+# decompression; matmul with bf16 params matches fp32.
+add_executable(test_bf16_literal xla/test_bf16_literal.cpp)
+target_link_libraries(test_bf16_literal PRIVATE vgre)
+add_test(NAME XlaBf16Literal COMMAND test_bf16_literal)
+set_tests_properties(XlaBf16Literal PROPERTIES TIMEOUT 30)
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)

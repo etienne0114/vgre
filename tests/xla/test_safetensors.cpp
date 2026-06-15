@@ -102,6 +102,20 @@ int main() {
 
     CHECK(!st->load("nope", l), "load missing returns false");
 
+    // Native-width load: bf16 stays 16-bit (half the RAM), engine dequants later.
+    {
+        Literal nat;
+        CHECK(st->load("w_bf16", nat, /*keepNative=*/true), "load bf16 native");
+        CHECK(nat.dtype == vgre::xla::DType::BF16, "kept as bf16");
+        CHECK(nat.storageBytes() == 6, "bf16 native = 3*2 bytes (half of f32's 12)");
+        CHECK(nat.toF32().data == (std::vector<float>{1.0f, -2.0f, 0.5f}), "native bf16 → f32 matches");
+
+        Literal natf16;
+        CHECK(st->load("w_f16", natf16, true) && natf16.dtype == vgre::xla::DType::F16,
+              "load f16 native keeps f16");
+        CHECK(natf16.toF32().data == (std::vector<float>{1.0f, 2.0f, -0.5f}), "native f16 → f32 matches");
+    }
+
     // ── Error handling ──────────────────────────────────────────────────────
     CHECK(SafeTensors::open("/no/such/file.safetensors") == nullptr, "missing file → nullptr");
     {

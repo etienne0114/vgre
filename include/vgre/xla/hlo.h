@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+#include "vgre/xla/half.h"
+
 namespace vgre {
 namespace xla {
 
@@ -33,13 +35,70 @@ struct Shape {
     bool operator==(const Shape& o) const { return dims == o.dims; }
 };
 
-// Dense row-major float32 tensor.
+// Storage element type. Compute is always done in f32 (the evaluator reads
+// every operand as f32); bf16/f16 exist so large read-only tensors — model
+// weights — stay at native width in RAM (16 GB vs 32 GB for an 8B model). A bf16
+// parameter is decompressed to f32 only transiently, when the op consuming it
+// runs, then freed by the engine's liveness-based buffer reuse.
+enum class DType { F32, F16, BF16 };
+
+// Dense row-major tensor. F32 payload lives in `data`; F16/BF16 payload lives in
+// `half` (raw 16-bit codes). Exactly one is populated, per `dtype`.
 struct Literal {
     Shape shape;
-    std::vector<float> data;
+    std::vector<float> data;          // valid iff dtype == F32
+    DType dtype = DType::F32;
+    std::vector<uint16_t> half;       // valid iff dtype == F16 or BF16
+
     static Literal scalar(float v) { return Literal{Shape{{}}, {v}}; }
     static Literal r1(std::vector<float> v) { Shape s{{(int64_t)v.size()}}; return Literal{s, std::move(v)}; }
     static Literal make(Shape s, std::vector<float> d) { return Literal{std::move(s), std::move(d)}; }
+
+    int64_t numel() const {
+        return dtype == DType::F32 ? (int64_t)data.size() : (int64_t)half.size();
+    }
+    bool isF32() const { return dtype == DType::F32; }
+
+    // Dequantizing element accessor (works for any dtype).
+    float at(int64_t i) const {
+        switch (dtype) {
+            case DType::F32:  return data[(size_t)i];
+            case DType::BF16: return bf16_to_f32(half[(size_t)i]);
+            case DType::F16:  return f16_to_f32(half[(size_t)i]);
+        }
+        return 0.0f;
+    }
+
+    // Bytes of tensor payload actually held (the memory-footprint metric).
+    size_t storageBytes() const {
+        return dtype == DType::F32 ? data.size() * sizeof(float) : half.size() * sizeof(uint16_t);
+    }
+
+    // Materialize an f32 copy (identity-copy when already f32). The evaluator
+    // calls this so the compute path never has to know about half formats.
+    Literal toF32() const {
+        if (dtype == DType::F32) return *this;
+        Literal o; o.shape = shape; o.dtype = DType::F32;
+        o.data.resize(half.size());
+        for (size_t i = 0; i < half.size(); ++i) o.data[i] = at((int64_t)i);
+        return o;
+    }
+
+    // Compress an f32 Literal to bf16/f16 storage (round-to-nearest-even).
+    Literal toBF16() const {
+        Literal src = toF32();
+        Literal o; o.shape = src.shape; o.dtype = DType::BF16;
+        o.half.resize(src.data.size());
+        for (size_t i = 0; i < src.data.size(); ++i) o.half[i] = f32_to_bf16(src.data[i]);
+        return o;
+    }
+    Literal toF16() const {
+        Literal src = toF32();
+        Literal o; o.shape = src.shape; o.dtype = DType::F16;
+        o.half.resize(src.data.size());
+        for (size_t i = 0; i < src.data.size(); ++i) o.half[i] = f32_to_f16(src.data[i]);
+        return o;
+    }
 };
 
 enum class HloOp {
