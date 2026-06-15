@@ -47,12 +47,17 @@ Grouped-Query Attention, and a full Llama decoder layer**. Op coverage is *compl
 left is **scale** — memory, numeric formats, weight loading, throughput, distribution. Full
 technical detail is in `missingFeatures.md` §2; the milestone plan:
 
-### Milestone L1 — bf16 storage + real checkpoint loading
-- Add **bf16/fp16** as a stored tensor type (typed buffer in `Literal`), so weights load at native
-  width (8B → 16 GB instead of 32 GB fp32).
-- Feed weights as **parameters/external buffers**, not baked constants (the training pytree path
-  already does this); add a memory-mapped **safetensors loader**.
-- **Exit:** a real **Llama-3-8B** forward pass on VGRE numerically matches Hugging Face.
+### Milestone L1 — bf16 storage + real checkpoint loading  *(partial — loader DONE)*
+- ✅ **Memory-mapped safetensors loader (2026-06-16):** `vgre::xla::SafeTensors`
+  (`src/xla/safetensors.cpp`) mmaps a checkpoint once and materializes tensors into engine-native
+  f32 `Literal`s, dequantizing F16/BF16 (incl. subnormals) and widening F64/int. Cross-platform
+  (`mmap` / Win32 `MapViewOfFile`). Test `XlaSafetensors`. Loaded `Literal`s feed straight in as
+  `Parameter`s — the "weights as parameters, not baked constants" path.
+- *Remaining:* add **bf16/fp16** as a *stored* tensor type (typed buffer in `Literal`) so weights
+  also stay at native width *in RAM* (8B → 16 GB vs 32 GB) — a broad engine change touching every
+  op. Until then the loader dequantizes to f32 on load (correct, but full fp32 RAM footprint).
+- **Exit (needs a 16 GB external checkpoint):** a real **Llama-3-8B** forward pass on VGRE
+  numerically matches Hugging Face.
 
 ### Milestone L2 — BLAS-backed matmul (throughput) — ✅ DONE (2026-06-14)
 - `Dot` / `DotGeneral` route to **cblas_sgemm** (OpenBLAS/MKL/reference) via

@@ -104,7 +104,12 @@ Today model weights are **baked into the StableHLO as constants** (fine for toy 
 constant blob is not — the serializer would have to write it all). **Add:**
 - Feed weights as **parameters / external buffers** rather than constants — the pytree-argument
   flattening path already does exactly this for training, so the plumbing exists.
-- A **memory-mapped `safetensors` / `GGUF` loader** so a checkpoint is `mmap`'d once, not copied.
+- ✅ **Memory-mapped `safetensors` loader** — **DONE (2026-06-16)**: `vgre::xla::SafeTensors`
+  (`src/xla/safetensors.cpp`) mmaps a checkpoint once (no copy of the weights), parses the JSON
+  header, and materializes any tensor into an engine-native f32 `Literal` on demand — dequantizing
+  **F16 / BF16** (incl. subnormals) and widening F64/int dtypes. Cross-platform (`mmap` / Win32
+  `MapViewOfFile`). A loaded `Literal` is exactly what the engine consumes as a `Parameter`, so real
+  checkpoint weights drive computation directly. Test `XlaSafetensors`. *(GGUF loader → L3.)*
 - A **tokenizer** binding (tiktoken / SentencePiece — external lib) for text-in / text-out.
 
 ### 2.C — Throughput  *(matmul is the bottleneck)*
