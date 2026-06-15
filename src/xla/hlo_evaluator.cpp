@@ -130,10 +130,15 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
             case HloOp::Parameter: {
                 if (I.param_index < 0 || I.param_index >= (int)params.size())
                     throw std::runtime_error("missing parameter");
-                out = params[I.param_index];
+                // Weights may be supplied bf16/f16 (native checkpoint width);
+                // decompress to f32 here. The bf16 source stays resident in
+                // `params`, and this f32 copy is freed after the value's last
+                // use by liveness-based buffer reuse (below) — so peak f32 RAM
+                // is the live set, not the whole model.
+                out = params[I.param_index].toF32();
                 break;
             }
-            case HloOp::Constant: out = I.literal; break;
+            case HloOp::Constant: out = I.literal.isF32() ? I.literal : I.literal.toF32(); break;
             case HloOp::Iota: {
                 auto st = rowMajorStrides(I.shape);
                 std::vector<int64_t> c(I.shape.dims.size());
@@ -715,6 +720,7 @@ std::vector<Literal> HloModule::evaluateMulti(const std::vector<Literal>& params
         for (int op : I.operands) {
             if (op >= 0 && op < (int)instrs_.size() && last_use[op] == (int64_t)idx) {
                 std::vector<float>().swap(vals[op].data);
+                std::vector<uint16_t>().swap(vals[op].half);
                 if (!multi[op].empty()) std::vector<Literal>().swap(multi[op]);
             }
         }

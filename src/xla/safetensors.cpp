@@ -46,40 +46,6 @@ int dtypeBytes(SafeTensors::DType d) {
     }
 }
 
-inline float bf16_to_f32(uint16_t h) {
-    uint32_t bits = (uint32_t)h << 16;  // bf16 is the high 16 bits of an f32
-    float f;
-    std::memcpy(&f, &bits, sizeof(f));
-    return f;
-}
-
-// IEEE-754 half (E5M10, bias 15) → float, with subnormals and inf/NaN.
-inline float f16_to_f32(uint16_t h) {
-    const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
-    const uint32_t exp = (h >> 10) & 0x1Fu;
-    const uint32_t man = h & 0x3FFu;
-    uint32_t bits;
-    if (exp == 0) {
-        if (man == 0) {
-            bits = sign;  // ±0
-        } else {
-            // subnormal: normalize into float form
-            int e = -1;
-            uint32_t m = man;
-            do { m <<= 1; ++e; } while ((m & 0x400u) == 0);
-            m &= 0x3FFu;
-            bits = sign | ((uint32_t)(127 - 15 - e) << 23) | (m << 13);
-        }
-    } else if (exp == 0x1F) {
-        bits = sign | 0x7F800000u | (man << 13);  // inf / NaN
-    } else {
-        bits = sign | ((exp - 15 + 127) << 23) | (man << 13);
-    }
-    float f;
-    std::memcpy(&f, &bits, sizeof(f));
-    return f;
-}
-
 template <class T>
 void widen(const uint8_t* src, int64_t n, std::vector<float>& out) {
     out.resize((size_t)n);
@@ -204,13 +170,26 @@ const SafeTensors::TensorInfo* SafeTensors::info(const std::string& name) const 
     return nullptr;
 }
 
-bool SafeTensors::load(const std::string& name, Literal& out) const {
+bool SafeTensors::load(const std::string& name, Literal& out, bool keepNative) const {
     const TensorInfo* ti = info(name);
     if (!ti) return false;
     const uint8_t* src = base_ + blob_off_ + ti->begin;
     const int64_t n = ti->numel();
 
     out.shape.dims = ti->shape;
+
+    // Native-width path: keep BF16/F16 as 16-bit codes (half the RAM); the engine
+    // dequantizes to f32 only when the tensor is consumed.
+    if (keepNative && (ti->dtype == DType::BF16 || ti->dtype == DType::F16)) {
+        out.data.clear();
+        out.dtype = (ti->dtype == DType::BF16) ? vgre::xla::DType::BF16 : vgre::xla::DType::F16;
+        out.half.resize((size_t)n);
+        std::memcpy(out.half.data(), src, (size_t)n * 2);
+        return true;
+    }
+    out.dtype = vgre::xla::DType::F32;
+    out.half.clear();
+
     switch (ti->dtype) {
         case DType::F32:
             out.data.resize((size_t)n);

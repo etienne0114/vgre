@@ -47,17 +47,22 @@ Grouped-Query Attention, and a full Llama decoder layer**. Op coverage is *compl
 left is **scale** — memory, numeric formats, weight loading, throughput, distribution. Full
 technical detail is in `missingFeatures.md` §2; the milestone plan:
 
-### Milestone L1 — bf16 storage + real checkpoint loading  *(partial — loader DONE)*
+### Milestone L1 — bf16 storage + real checkpoint loading  *(in-tree work DONE)*
 - ✅ **Memory-mapped safetensors loader (2026-06-16):** `vgre::xla::SafeTensors`
-  (`src/xla/safetensors.cpp`) mmaps a checkpoint once and materializes tensors into engine-native
-  f32 `Literal`s, dequantizing F16/BF16 (incl. subnormals) and widening F64/int. Cross-platform
-  (`mmap` / Win32 `MapViewOfFile`). Test `XlaSafetensors`. Loaded `Literal`s feed straight in as
-  `Parameter`s — the "weights as parameters, not baked constants" path.
-- *Remaining:* add **bf16/fp16** as a *stored* tensor type (typed buffer in `Literal`) so weights
-  also stay at native width *in RAM* (8B → 16 GB vs 32 GB) — a broad engine change touching every
-  op. Until then the loader dequantizes to f32 on load (correct, but full fp32 RAM footprint).
+  (`src/xla/safetensors.cpp`) mmaps a checkpoint once and materializes tensors into `Literal`s,
+  dequantizing F16/BF16 (incl. subnormals) and widening F64/int. Cross-platform (`mmap` / Win32
+  `MapViewOfFile`). `load(..., keepNative=true)` keeps BF16/F16 at 16-bit width. Test `XlaSafetensors`.
+- ✅ **bf16/f16 native `Literal` storage (2026-06-16):** `Literal` is now dtype-tagged
+  (`DType{F32,F16,BF16}`) with a 16-bit `half` buffer + `toF32/toBF16/toF16/at/storageBytes`
+  (`include/vgre/xla/half.h` holds the RNE conversions). Weights stay at **native 16-bit width in
+  RAM** (8B → 16 GB vs 32 GB); the evaluator decompresses a bf16 `Parameter`/`Constant` to f32 only
+  as the consuming op runs, and liveness-based buffer reuse frees it after last use — so peak f32
+  RAM is the **live set**, not the whole model. Compute stays f32 (no per-op change; CPU bf16
+  arithmetic isn't faster — the win is memory). Test `XlaBf16Literal`: matmul with bf16 params
+  matches fp32 within ~1.8%.
 - **Exit (needs a 16 GB external checkpoint):** a real **Llama-3-8B** forward pass on VGRE
-  numerically matches Hugging Face.
+  numerically matches Hugging Face — the only remaining piece, and it is purely an external
+  download + wiring, no further engine work for the bf16 path.
 
 ### Milestone L2 — BLAS-backed matmul (throughput) — ✅ DONE (2026-06-14)
 - `Dot` / `DotGeneral` route to **cblas_sgemm** (OpenBLAS/MKL/reference) via

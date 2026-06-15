@@ -93,8 +93,11 @@ int8/int4. Footprint of the weights alone:
 | GPT-3 / Llama-3-405B | 175–405 B | 0.7–1.6 TB | 0.35–0.8 TB | … | … |
 
 **Add:**
-- **bf16/fp16 storage** in the engine's tensor type (a typed buffer instead of `std::vector<float>`),
-  so weights load at native width — halves the memory wall and the bandwidth cost.
+- ✅ **bf16/fp16 storage** in the engine's tensor type — **DONE (2026-06-16)**: `Literal` is
+  dtype-tagged (`DType{F32,F16,BF16}`) with a 16-bit `half` buffer (`include/vgre/xla/half.h` RNE
+  conversions). Weights stay at native 16-bit width in RAM (8B → 16 GB vs 32 GB); the evaluator
+  decompresses a bf16 `Parameter`/`Constant` to f32 only transiently as its consumer runs, and
+  buffer reuse frees it — peak f32 RAM = live set, not the whole model. Test `XlaBf16Literal`.
 - **Quantized-weight path (int4/int8)** — load **GGUF / GPTQ / AWQ** checkpoints and dequantize
   per group inside the matmul kernel. The int8 `dot_general` path already exists; extend it to
   grouped int4. *This is the single biggest unlock: it puts an 8B model in 4 GB — laptop RAM.*
@@ -141,8 +144,9 @@ all-reduce the partials) and/or **pipeline parallelism** (assign layer ranges to
 over the existing RDMA/NCCL transport.
 
 ### Concrete milestones (in order)
-1. **bf16 storage** + load a real **Llama-3-8B** checkpoint as parameters (fits 16 GB) → forward
-   pass numerically matches Hugging Face.
+1. ✅ **bf16 storage** + safetensors checkpoint loading — **DONE (2026-06-16)**: native 16-bit
+   `Literal` storage (8B → 16 GB) + mmap safetensors loader. Only the real-Llama-3-8B numeric
+   match remains (needs the 16 GB external checkpoint).
 2. ✅ **BLAS-backed matmul** — **DONE (2026-06-14)**: 82× on 4096³; `Dot`/`DotGeneral` use
    cblas_sgemm + tiled fallback, thread-pool parallel.
 3. **int4 (GGUF) weight path** → 8B fits **4 GB**, runs on a laptop.
