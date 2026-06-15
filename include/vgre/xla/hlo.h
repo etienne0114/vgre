@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "vgre/xla/half.h"
+#include "vgre/xla/quant.h"
 
 namespace vgre {
 namespace xla {
@@ -36,26 +37,39 @@ struct Shape {
 };
 
 // Storage element type. Compute is always done in f32 (the evaluator reads
-// every operand as f32); bf16/f16 exist so large read-only tensors — model
-// weights — stay at native width in RAM (16 GB vs 32 GB for an 8B model). A bf16
-// parameter is decompressed to f32 only transiently, when the op consuming it
-// runs, then freed by the engine's liveness-based buffer reuse.
-enum class DType { F32, F16, BF16 };
+// every operand as f32); the narrow formats exist so large read-only tensors —
+// model weights — stay at native width in RAM: bf16/f16 → 16 GB for an 8B model,
+// int4 (Q4_0/Q4_1) → ~4.5 GB, vs 32 GB fp32. A narrow parameter is decompressed
+// to f32 only transiently, when the op consuming it runs, then freed by the
+// engine's liveness-based buffer reuse. Q*_* are ggml/GGUF block formats.
+enum class DType { F32, F16, BF16, Q8_0, Q4_0, Q4_1 };
 
-// Dense row-major tensor. F32 payload lives in `data`; F16/BF16 payload lives in
-// `half` (raw 16-bit codes). Exactly one is populated, per `dtype`.
+inline int ggmlTypeOf(DType d) {
+    switch (d) { case DType::Q8_0: return 8; case DType::Q4_0: return 2;
+                 case DType::Q4_1: return 3; default: return -1; }
+}
+inline bool isQuant(DType d) { return ggmlTypeOf(d) >= 0; }
+
+// Dense row-major tensor. Exactly one payload is populated per `dtype`: `data`
+// (F32), `half` (F16/BF16 codes), or `quant` (ggml block bytes).
 struct Literal {
     Shape shape;
     std::vector<float> data;          // valid iff dtype == F32
     DType dtype = DType::F32;
     std::vector<uint16_t> half;       // valid iff dtype == F16 or BF16
+    std::vector<uint8_t> quant;       // valid iff dtype is a Q*_* block format
 
     static Literal scalar(float v) { return Literal{Shape{{}}, {v}}; }
     static Literal r1(std::vector<float> v) { Shape s{{(int64_t)v.size()}}; return Literal{s, std::move(v)}; }
     static Literal make(Shape s, std::vector<float> d) { return Literal{std::move(s), std::move(d)}; }
 
     int64_t numel() const {
-        return dtype == DType::F32 ? (int64_t)data.size() : (int64_t)half.size();
+        switch (dtype) {
+            case DType::F32:  return (int64_t)data.size();
+            case DType::F16:
+            case DType::BF16: return (int64_t)half.size();
+            default:          return shape.numel();  // quantized: count from shape
+        }
     }
     bool isF32() const { return dtype == DType::F32; }
 
@@ -65,22 +79,39 @@ struct Literal {
             case DType::F32:  return data[(size_t)i];
             case DType::BF16: return bf16_to_f32(half[(size_t)i]);
             case DType::F16:  return f16_to_f32(half[(size_t)i]);
+            default: {  // quantized: dequant the containing block, return element
+                const int64_t b = i / kQK;
+                float blk[kQK];
+                dequantBlock(ggmlTypeOf(dtype),
+                             quant.data() + b * quantBlockBytes(ggmlTypeOf(dtype)),
+                             kQK, blk);
+                return blk[i % kQK];
+            }
         }
-        return 0.0f;
     }
 
     // Bytes of tensor payload actually held (the memory-footprint metric).
     size_t storageBytes() const {
-        return dtype == DType::F32 ? data.size() * sizeof(float) : half.size() * sizeof(uint16_t);
+        switch (dtype) {
+            case DType::F32:  return data.size() * sizeof(float);
+            case DType::F16:
+            case DType::BF16: return half.size() * sizeof(uint16_t);
+            default:          return quant.size();
+        }
     }
 
     // Materialize an f32 copy (identity-copy when already f32). The evaluator
-    // calls this so the compute path never has to know about half formats.
+    // calls this so the compute path never has to know about narrow formats.
     Literal toF32() const {
         if (dtype == DType::F32) return *this;
         Literal o; o.shape = shape; o.dtype = DType::F32;
-        o.data.resize(half.size());
-        for (size_t i = 0; i < half.size(); ++i) o.data[i] = at((int64_t)i);
+        const int64_t n = numel();
+        o.data.resize((size_t)n);
+        if (dtype == DType::BF16 || dtype == DType::F16) {
+            for (int64_t i = 0; i < n; ++i) o.data[(size_t)i] = at(i);
+        } else {  // quantized — bulk dequant
+            dequantBlock(ggmlTypeOf(dtype), quant.data(), n, o.data.data());
+        }
         return o;
     }
 

@@ -77,10 +77,18 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   algorithm already exists in `KVCacheManager`) — optional, the BLAS path already makes attention
   matmuls fast.
 
-### Milestone L3 — int4/int8 quantized weights
-- Load **GGUF / GPTQ / AWQ** checkpoints; dequantize per-group inside the matmul (extend the
-  existing int8 `dot_general` path to grouped int4).
-- **Exit:** Llama-3-8B fits **4 GB** and runs on a laptop CPU.
+### Milestone L3 — int4/int8 quantized weights  *(in-tree work DONE)*
+- ✅ **GGUF loader + native block-quant `Literal` storage (2026-06-16):**
+  `vgre::xla::GGUF` (`src/xla/gguf.cpp`) mmaps a llama.cpp `.gguf` checkpoint, parses the
+  magic/version/typed-metadata/tensor-info header, and loads tensors as f32 or — with
+  `keepNative` — at native quantized width. `Literal` gained `DType{Q8_0,Q4_0,Q4_1}` block storage
+  (ggml layouts; dequant kernels in `include/vgre/xla/quant.h`), so an int4 weight is **~4.5
+  bits/weight resident** (8B → ~4.5 GB) and the engine dequantizes it to f32 only when its consumer
+  runs — same transient-dequant path as bf16, so a Q4_0 `Parameter` matmul is *identical* to the
+  dequantized-f32 matmul, with no per-op change. Test `XlaGgufQuant`.
+- *Remaining:* the super-block K-quants (Q4_K/Q6_K, used by many HF GGUFs) and GPTQ/AWQ packings;
+  dequant-inside-the-GEMM-kernel (vs materialize-then-GEMM) for less transient f32.
+- **Exit (needs an external int4 checkpoint):** Llama-3-8B fits ~4.5 GB and runs on a laptop CPU.
 
 ### Milestone L4 — production generation loop
 - Wire the engine's autoregressive loop to the built **paged KV-cache** and **continuous-batching

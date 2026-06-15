@@ -5,6 +5,7 @@ add_library(vgre_xla OBJECT
     thread_pool.cpp
     blas_gemm.cpp
     safetensors.cpp
+    gguf.cpp
 )
 
 target_include_directories(vgre_xla PUBLIC
