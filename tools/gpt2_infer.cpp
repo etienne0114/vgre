@@ -11,6 +11,7 @@
 #include "vgre/xla/safetensors.h"
 #include "vgre/xla/gguf.h"
 #include "vgre/xla/blas_gemm.h"
+#include "vgre/xla/quant_gemm.h"
 #include "vgre/xla/tokenizer.h"
 #include "vgre/xla/generation.h"
 
@@ -44,7 +45,16 @@ static std::vector<float> linear(const std::vector<float>& X, int64_t M, int64_t
                                  const Literal& W, const Literal* bias) {
     int64_t N = W.shape.dims[1];
     std::vector<float> Y((size_t)(M * N));
-    gemm_f32(false, false, M, N, K, X.data(), W.data.data(), Y.data(), 1);
+    if (vgre::xla::isQuant(W.dtype)) {
+        // Quantized weight: dequantize per-block *inside* the matmul — the full
+        // f32 weight is never materialized (weights stay ~4.5 bits resident).
+        vgre::xla::gemm_q(M, N, K, X.data(), W.quant.data(), vgre::xla::ggmlTypeOf(W.dtype), Y.data());
+    } else if (W.isF32()) {
+        gemm_f32(false, false, M, N, K, X.data(), W.data.data(), Y.data(), 1);
+    } else {
+        Literal wf = W.toF32();
+        gemm_f32(false, false, M, N, K, X.data(), wf.data.data(), Y.data(), 1);
+    }
     if (bias)
         for (int64_t m = 0; m < M; ++m)
             for (int64_t n = 0; n < N; ++n) Y[(size_t)(m * N + n)] += bias->data[(size_t)n];
@@ -139,15 +149,18 @@ int main(int argc, char** argv) {
     size_t residentBytes = 0;
     const char* fmt = "f32";
 
-    if (isGguf) {  // quantized real model (Q8_0/Q4_0/F16) via vgre::xla::GGUF
+    if (isGguf) {  // quantized real model (Q8_0/Q4_0/Q4_K/F16) via vgre::xla::GGUF
         auto g = vgre::xla::GGUF::open(path);
         if (!g) { std::fprintf(stderr, "gguf open failed\n"); return 1; }
-        fmt = "gguf-quantized";
+        fmt = "gguf-quantized (dequant-in-GEMM)";
         for (const auto& n : g->names()) {
-            const auto* ti = g->info(n);
-            int64_t qb = vgre::xla::quantStorageBytes(ti->ggml_type, ti->numel());
-            residentBytes += qb > 0 ? (size_t)qb : (size_t)ti->numel() * (ti->ggml_type == 1 ? 2 : 4);
-            Literal l; g->load(n, l);  // dequantizes Q8_0/Q4_0/F16 → f32
+            Literal l;
+            g->load(n, l, /*keepNative=*/true);  // keep Q*_*/F16 compressed
+            // wte/wpe drive embedding lookup + the lm_head GEMM by raw .data, so
+            // materialize just those to f32; matmul weights stay quantized and go
+            // through gemm_q (dequant-in-GEMM).
+            if ((n == "wte.weight" || n == "wpe.weight") && !l.isF32()) l = l.toF32();
+            residentBytes += l.storageBytes();
             M.w.emplace(n, std::move(l));
         }
     } else {
