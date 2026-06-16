@@ -96,6 +96,12 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
 - ✅ **Loader verified on real GGUF (2026-06-16):** `vgre::xla::GGUF` reads a canonical `.gguf`
   written by the official `gguf` library and dequantizes **F32 / F16 / Q8_0 / Q4_0 bit-identically**
   to `gguf.quants.dequantize` (`tools/make_probe_gguf.py` + `checkpoint_probe`).
+- ✅ **End-to-end quantized real model (2026-06-16):** real GPT-2 converted to a GGUF with the
+  official writer (`tools/gpt2_to_gguf.py`), loaded back through `vgre::xla::GGUF`, and run on the
+  engine (`tools/gpt2_infer <file>.gguf`). **Q8_0**: resident **548 → 220 MB**, top-1 token
+  unchanged (" the"), top-5 identical to f32 (near-lossless). **Q4_0 (int4)**: resident **177 MB**
+  (~1/3 of f32), top-1 still correct (" the") with the expected int4 logit perturbation. The int4
+  weight path runs a real pretrained model.
 - *Remaining:* the super-block K-quants (Q4_K/Q6_K, used by many HF GGUFs) and GPTQ/AWQ packings;
   dequant-inside-the-GEMM-kernel (vs materialize-then-GEMM) for less transient f32.
 - **Exit (needs an external int4 checkpoint):** Llama-3-8B fits ~4.5 GB and runs on a laptop CPU.
