@@ -1333,6 +1333,7 @@ endif()
 
 if(VGRE_BUILD_EXAMPLES)
     vgre_add_subdirectory(examples)
+    vgre_add_subdirectory(tools)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
