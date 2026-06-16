@@ -865,6 +865,12 @@ target_link_libraries(test_tokenizer PRIVATE vgre)
 add_test(NAME XlaTokenizer COMMAND test_tokenizer)
 set_tests_properties(XlaTokenizer PROPERTIES TIMEOUT 30)
 
+# Tensor + pipeline parallelism (L5): sharded matmul + collectives == single node.
+add_executable(test_parallel xla/test_parallel.cpp)
+target_link_libraries(test_parallel PRIVATE vgre Threads::Threads)
+add_test(NAME XlaParallel COMMAND test_parallel)
+set_tests_properties(XlaParallel PROPERTIES TIMEOUT 30)
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)

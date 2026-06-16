@@ -145,12 +145,17 @@ learns merges, `encode`/`decode` inverses, `loadMerges()` imports a model's merg
 
 ### 2.E — Distributed execution  *(70B / 175B / 405B — don't fit one box)*
 Models beyond one machine need **tensor parallelism** (shard each matmul's columns across ranks,
-all-reduce the partials) and/or **pipeline parallelism** (assign layer ranges to ranks). The
-**cluster substrate already exists** — RDMA transport (`rdma_transport.cpp`), NCCL-style collectives
-(`collective_ops_manager.cpp`), elastic membership — but **the XLA engine is single-node**. Add a
-**sharding pass** that splits `DotGeneral` / `Convolution` across ranks and inserts the collective
-(all-reduce / all-gather) that a framework's `shard_map` / GSPMD annotations request, then drives it
-over the existing RDMA/NCCL transport.
+all-reduce the partials) and/or **pipeline parallelism** (assign layer ranges to ranks).
+
+✅ **Sharding executor — DONE (2026-06-16):** `vgre::xla` parallel module (`src/xla/parallel.cpp`)
+implements Megatron-style **column-parallel** (per-rank GEMM + all-gather) and **row-parallel**
+(per-rank GEMM + all-reduce sum) matmul, the **column→row MLP** pattern (one all-reduce/FFN), and
+**pipeline layer partitioning** — all verified equal to single-node (test `XlaParallel`). The
+`Communicator` (all-gather/all-reduce) is in-process for single-box TP + tests.
+*Remaining:* bind the `Communicator` to the **already-built** cluster transport for real multi-node
+runs — RDMA (`rdma_transport.cpp` + the portable `SoftwareRDMA`), NCCL-style collectives
+(`collective_ops_manager.cpp`) — and a graph-level GSPMD pass that auto-inserts collectives from
+`shard_map` annotations (this runtime executor is their target).
 
 ### Concrete milestones (in order)
 1. ✅ **bf16 storage** + safetensors checkpoint loading — **DONE (2026-06-16)**: native 16-bit
@@ -163,8 +168,10 @@ over the existing RDMA/NCCL transport.
    external int4 checkpoint.
 4. ✅ **Paged-KV generation loop** — **DONE (2026-06-16)**: `vgre::xla::generate` + samplers,
    HloModule-driven, wired to `KVCacheManager`. Tokenizer (external vocab/merges) remains.
-5. **Tensor-parallel `DotGeneral`** over the existing RDMA/NCCL substrate → **70B across N nodes**;
-   pipeline parallelism → 175B / 405B.
+5. ✅ **Tensor-parallel `DotGeneral`** sharding executor — **DONE (2026-06-16)**: column/row-parallel
+   matmul + collectives + pipeline partition (`src/xla/parallel.cpp`, test `XlaParallel`). Remaining:
+   bind the `Communicator` to the real RDMA/NCCL transport for N-node runs (70B/175B/405B) + a GSPMD
+   graph pass.
 
 **Honest framing:** items 1–4 are real, self-contained engineering achievable in-tree (no external
 hardware) and would make VGRE genuinely run Llama-3-8B on a CPU; item 5 reuses the existing cluster
