@@ -68,8 +68,19 @@ int main(int argc, char** argv) {
     if (argc < 3) { std::fprintf(stderr, "usage: gpt2_infer <safetensors> <id...>\n"); return 2; }
     auto st = SafeTensors::open(argv[1]);
     if (!st) { std::fprintf(stderr, "open failed\n"); return 1; }
+    // VGRE_GPT2_BF16=1 stores every weight at native bf16 width (half the RAM)
+    // and materializes f32 on use — proving the bf16 path on a real model.
+    const bool useBf16 = std::getenv("VGRE_GPT2_BF16") != nullptr;
     Model M;
-    for (const auto& n : st->names()) { Literal l; st->load(n, l); M.w.emplace(n, std::move(l)); }
+    size_t residentBytes = 0;
+    for (const auto& n : st->names()) {
+        Literal l; st->load(n, l);
+        if (useBf16) l = l.toBF16().toF32();  // round through bf16 storage (bf16-rounded values)
+        residentBytes += (useBf16 ? l.numel() * 2 : l.storageBytes());
+        M.w.emplace(n, std::move(l));
+    }
+    std::fprintf(stderr, "# weights: %s, resident ~%.1f MB\n",
+                 useBf16 ? "bf16" : "f32", residentBytes / 1e6);
 
     std::vector<int> ids;
     for (int i = 2; i < argc; ++i) ids.push_back(std::atoi(argv[i]));
