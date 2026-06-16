@@ -107,11 +107,21 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
 - **Exit (needs a real checkpoint + its tokenizer file):** long-context (8K–128K), multi-request
   LLM serving on CPU.
 
-### Milestone L5 — distributed (models that don't fit one box)
-- Add a **sharding pass** that splits `DotGeneral`/`Convolution` across ranks and inserts the
-  collective (all-reduce/all-gather) a framework's `shard_map`/GSPMD requests, driven over the
-  **existing RDMA transport + NCCL-style collectives**.
-- **Exit:** **Llama-3-70B** tensor-parallel across N nodes; pipeline parallelism for 175B/405B.
+### Milestone L5 — distributed (models that don't fit one box)  *(sharding DONE)*
+- ✅ **Tensor + pipeline sharding (2026-06-16):** `vgre::xla` parallel module (`src/xla/parallel.cpp`)
+  — Megatron-style **column-parallel** (shard W along N → per-rank GEMM → all-gather) and
+  **row-parallel** (shard W along K + X along K → per-rank GEMM → all-reduce sum) matmul, each
+  verified bit-identical / within float-reassociation tolerance of single-node for ranks 1–4 incl.
+  uneven splits; the **Megatron column→row MLP** (one all-reduce per FFN, ReLU kept local on each
+  rank's column slice) matches single-node; plus **pipeline partitioning** (balanced contiguous
+  layer ranges) + staged execution. The `Communicator` (all-gather / all-reduce) is in-process for
+  single-box TP + tests. Test `XlaParallel`.
+- *Remaining:* bind `Communicator` to the cluster transport for true multi-node runs (the
+  collectives already exist — `collective_ops_manager.cpp` NCCL-style + the portable `SoftwareRDMA`);
+  and a graph-level GSPMD pass that auto-inserts collectives from `shard_map` annotations (this
+  module is the runtime sharding executor those would target).
+- **Exit (needs a real N-node cluster):** **Llama-3-70B** tensor-parallel across N nodes; pipeline
+  parallelism for 175B/405B.
 
 **Honest scope:** L1–L4 are real, self-contained, CPU-only engineering achievable in-tree and
 would let VGRE genuinely run Llama-3-8B without a GPU. L5 reuses the existing cluster substrate but

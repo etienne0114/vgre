@@ -8,6 +8,7 @@ add_library(vgre_xla OBJECT
     gguf.cpp
     generation.cpp
     tokenizer.cpp
+    parallel.cpp
 )
 
 target_include_directories(vgre_xla PUBLIC
