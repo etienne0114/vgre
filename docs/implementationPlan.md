@@ -107,7 +107,14 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   (`include/vgre/xla/quant.h`), `Literal` `DType{Q4_K,Q6_K}` storage, and GGUF load — verified
   **bit-identical to `gguf.quants.dequantize`** over random super-blocks (`tools/validate_kquant.py`),
   plus hand-constructed in-suite checks (`XlaGgufQuant`).
-- *Remaining:* GPTQ/AWQ packings and dequant-inside-the-GEMM-kernel (vs materialize-then-GEMM).
+- ✅ **Dequant-inside-the-GEMM (2026-06-16):** `gemm_q` (`src/xla/quant_gemm.cpp`) multiplies a
+  block-quantized weight by dequantizing one column-block of one row at a time *inside* the matmul —
+  peak transient f32 is O(N), not O(K·N), so the weight is never fully materialized. Identical to
+  `gemm_f32(X, dequant(W))` for Q8_0/Q4_0/Q4_1/Q4_K/Q6_K incl. M=1 decode (`XlaQuantGemm`),
+  thread-pool parallel over N-blocks. Wired into `gpt2_infer`'s GGUF path: real GPT-2 runs with its
+  matmul weights staying quantized in RAM **and** through compute (≈298 MB vs 548 MB f32), logits
+  identical to the materialized path.
+- *Remaining:* GPTQ/AWQ packings.
 - **Exit (needs an external int4 checkpoint):** Llama-3-8B fits ~4.5 GB and runs on a laptop CPU.
 
 ### Milestone L4 — production generation loop  *(in-tree work DONE)*

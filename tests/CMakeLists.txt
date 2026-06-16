@@ -853,6 +853,13 @@ target_link_libraries(test_gguf_quant PRIVATE vgre)
 add_test(NAME XlaGgufQuant COMMAND test_gguf_quant)
 set_tests_properties(XlaGgufQuant PROPERTIES TIMEOUT 30)
 
+# Dequant-inside-the-GEMM (L3): gemm_q == gemm_f32(dequant) without materializing
+# the full f32 weight.
+add_executable(test_quant_gemm xla/test_quant_gemm.cpp)
+target_link_libraries(test_quant_gemm PRIVATE vgre Threads::Threads)
+add_test(NAME XlaQuantGemm COMMAND test_quant_gemm)
+set_tests_properties(XlaQuantGemm PROPERTIES TIMEOUT 30)
+
 # Generation (L4): samplers + autoregressive loop + paged KV-cache integration.
 add_executable(test_generation xla/test_generation.cpp)
 target_link_libraries(test_generation PRIVATE vgre)
