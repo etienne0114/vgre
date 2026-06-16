@@ -42,11 +42,12 @@ struct Shape {
 // int4 (Q4_0/Q4_1) → ~4.5 GB, vs 32 GB fp32. A narrow parameter is decompressed
 // to f32 only transiently, when the op consuming it runs, then freed by the
 // engine's liveness-based buffer reuse. Q*_* are ggml/GGUF block formats.
-enum class DType { F32, F16, BF16, Q8_0, Q4_0, Q4_1 };
+enum class DType { F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q6_K };
 
 inline int ggmlTypeOf(DType d) {
     switch (d) { case DType::Q8_0: return 8; case DType::Q4_0: return 2;
-                 case DType::Q4_1: return 3; default: return -1; }
+                 case DType::Q4_1: return 3; case DType::Q4_K: return 12;
+                 case DType::Q6_K: return 14; default: return -1; }
 }
 inline bool isQuant(DType d) { return ggmlTypeOf(d) >= 0; }
 
@@ -80,12 +81,12 @@ struct Literal {
             case DType::BF16: return bf16_to_f32(half[(size_t)i]);
             case DType::F16:  return f16_to_f32(half[(size_t)i]);
             default: {  // quantized: dequant the containing block, return element
-                const int64_t b = i / kQK;
-                float blk[kQK];
-                dequantBlock(ggmlTypeOf(dtype),
-                             quant.data() + b * quantBlockBytes(ggmlTypeOf(dtype)),
-                             kQK, blk);
-                return blk[i % kQK];
+                const int gt = ggmlTypeOf(dtype);
+                const int be = quantBlockElems(gt);
+                const int64_t b = i / be;
+                float blk[kQK_K];  // large enough for both 32- and 256-weight blocks
+                dequantBlock(gt, quant.data() + b * quantBlockBytes(gt), be, blk);
+                return blk[i % be];
             }
         }
     }

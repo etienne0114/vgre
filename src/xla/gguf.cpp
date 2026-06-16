@@ -82,7 +82,7 @@ int64_t typeStorageBytes(int ggml_type, int64_t n) {
     switch (ggml_type) {
         case 0: return n * 4;                       // F32
         case 1: return n * 2;                       // F16
-        case 2: case 3: case 8:                     // Q4_0 / Q4_1 / Q8_0
+        case 2: case 3: case 8: case 12: case 14:   // Q4_0/Q4_1/Q8_0/Q4_K/Q6_K
             return quantStorageBytes(ggml_type, n);
         default: return -1;                         // unsupported / unknown size
     }
@@ -225,10 +225,11 @@ bool GGUF::load(const std::string& name, Literal& out, bool keepNative) const {
         std::memcpy(out.half.data(), src, (size_t)n * 2);
         return true;
     }
-    if (keepNative && (gt == 2 || gt == 3 || gt == 8)) {  // Q4_0 / Q4_1 / Q8_0 native
+    if (keepNative && (gt == 2 || gt == 3 || gt == 8 || gt == 12 || gt == 14)) {  // native block-quant
         const int64_t bytes = quantStorageBytes(gt, n);
         if (bytes <= 0) return false;
-        out.dtype = (gt == 8) ? DType::Q8_0 : (gt == 2 ? DType::Q4_0 : DType::Q4_1);
+        out.dtype = (gt == 8) ? DType::Q8_0 : (gt == 2) ? DType::Q4_0 : (gt == 3) ? DType::Q4_1
+                                            : (gt == 12) ? DType::Q4_K : DType::Q6_K;
         out.quant.resize((size_t)bytes);
         std::memcpy(out.quant.data(), src, (size_t)bytes);
         return true;
@@ -247,7 +248,7 @@ bool GGUF::load(const std::string& name, Literal& out, bool keepNative) const {
                 out.data[(size_t)i] = f16_to_f32(h);
             }
             return true;
-        case 2: case 3: case 8:  // Q4_0 / Q4_1 / Q8_0
+        case 2: case 3: case 8: case 12: case 14:  // Q4_0/Q4_1/Q8_0/Q4_K/Q6_K
             return dequantBlock(gt, src, n, out.data.data());
         default:
             return false;  // unsupported ggml type
