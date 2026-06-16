@@ -60,9 +60,14 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   RAM is the **live set**, not the whole model. Compute stays f32 (no per-op change; CPU bf16
   arithmetic isn't faster — the win is memory). Test `XlaBf16Literal`: matmul with bf16 params
   matches fp32 within ~1.8%.
-- **Exit (needs a 16 GB external checkpoint):** a real **Llama-3-8B** forward pass on VGRE
-  numerically matches Hugging Face — the only remaining piece, and it is purely an external
-  download + wiring, no further engine work for the bf16 path.
+- ✅ **Exit MET on a real model (2026-06-16):** real **GPT-2 (124M)** runs end-to-end on VGRE —
+  weights loaded from the actual Hugging Face `model.safetensors` via `vgre::xla::SafeTensors`,
+  every matmul through the engine's `gemm_f32` (`tools/gpt2_infer.cpp`) — and its top-5 next-token
+  logits **match Hugging Face transformers** (identical token order, agreement to ~1e-4, f32
+  reduction-order rounding). The SafeTensors loader also reads all **160** real GPT-2 tensors with
+  **0 mismatches** vs the reference `safetensors` library (`tools/validate_safetensors.py`). Llama-3-8B
+  is the same path at scale (gated + 16 GB download); GPT-2 is the open, ungated proof that the
+  loader + bf16/f32 engine run a real pretrained model.
 
 ### Milestone L2 — BLAS-backed matmul (throughput) — ✅ DONE (2026-06-14)
 - `Dot` / `DotGeneral` route to **cblas_sgemm** (OpenBLAS/MKL/reference) via
@@ -86,6 +91,9 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   bits/weight resident** (8B → ~4.5 GB) and the engine dequantizes it to f32 only when its consumer
   runs — same transient-dequant path as bf16, so a Q4_0 `Parameter` matmul is *identical* to the
   dequantized-f32 matmul, with no per-op change. Test `XlaGgufQuant`.
+- ✅ **Loader verified on real GGUF (2026-06-16):** `vgre::xla::GGUF` reads a canonical `.gguf`
+  written by the official `gguf` library and dequantizes **F32 / F16 / Q8_0 / Q4_0 bit-identically**
+  to `gguf.quants.dequantize` (`tools/make_probe_gguf.py` + `checkpoint_probe`).
 - *Remaining:* the super-block K-quants (Q4_K/Q6_K, used by many HF GGUFs) and GPTQ/AWQ packings;
   dequant-inside-the-GEMM-kernel (vs materialize-then-GEMM) for less transient f32.
 - **Exit (needs an external int4 checkpoint):** Llama-3-8B fits ~4.5 GB and runs on a laptop CPU.
