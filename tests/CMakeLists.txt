@@ -853,6 +853,12 @@ target_link_libraries(test_gguf_quant PRIVATE vgre)
 add_test(NAME XlaGgufQuant COMMAND test_gguf_quant)
 set_tests_properties(XlaGgufQuant PROPERTIES TIMEOUT 30)
 
+# Generation (L4): samplers + autoregressive loop + paged KV-cache integration.
+add_executable(test_generation xla/test_generation.cpp)
+target_link_libraries(test_generation PRIVATE vgre)
+add_test(NAME XlaGeneration COMMAND test_generation)
+set_tests_properties(XlaGeneration PROPERTIES TIMEOUT 30)
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)

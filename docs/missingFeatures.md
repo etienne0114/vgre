@@ -131,10 +131,14 @@ speed a single token is minutes. **Add:**
   `shared_ptr<const HloModule>` executable design already supports this.
 
 ### 2.D — KV-cache generation at scale
-Greedy decode + `dynamic_update_slice` KV-cache already work for a toy GPT. For long context
-(8K–128K), wire the engine's generation loop to the **paged KV-cache** (`vgre::core::KVCacheManager`,
-already built) so cache memory grows in blocks, and to the **continuous-batching scheduler**
-(`ContinuousBatchScheduler`, already built) for multi-request serving.
+✅ **Generation driver — DONE (2026-06-16):** `vgre::xla::generate` + `sampleToken`
+(`src/xla/generation.cpp`) is a model-agnostic autoregressive loop over a `step(prevToken,pos)→
+logits` callable, with greedy / temperature / top-k / top-p sampling and EOS+length stop. It drives
+a real `HloModule` per token and wires to the **paged KV-cache** (`vgre::core::KVCacheManager`) —
+cache grows in blocks per step, reclaimed on finish — and the **continuous-batching scheduler**
+(`ContinuousBatchScheduler`) is built for multi-request serving. Test `XlaGeneration`. *Remaining:*
+a **tokenizer** (byte-level BPE / SentencePiece) for text-in/out — needs a model-specific
+vocab+merges file (the external piece).
 
 ### 2.E — Distributed execution  *(70B / 175B / 405B — don't fit one box)*
 Models beyond one machine need **tensor parallelism** (shard each matmul's columns across ranks,
@@ -154,7 +158,8 @@ over the existing RDMA/NCCL transport.
 3. ✅ **int4 (GGUF) weight path** — **DONE (2026-06-16)**: GGUF loader + native Q8_0/Q4_0/Q4_1
    `Literal` storage (8B → ~4.5 GB resident). Q4_K/Q6_K + GPTQ/AWQ remain; real-8B run needs an
    external int4 checkpoint.
-4. **Paged-KV generation loop** → long-context autoregressive decode + multi-request batching.
+4. ✅ **Paged-KV generation loop** — **DONE (2026-06-16)**: `vgre::xla::generate` + samplers,
+   HloModule-driven, wired to `KVCacheManager`. Tokenizer (external vocab/merges) remains.
 5. **Tensor-parallel `DotGeneral`** over the existing RDMA/NCCL substrate → **70B across N nodes**;
    pipeline parallelism → 175B / 405B.
 
