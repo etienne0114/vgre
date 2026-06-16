@@ -152,10 +152,12 @@ implements Megatron-style **column-parallel** (per-rank GEMM + all-gather) and *
 (per-rank GEMM + all-reduce sum) matmul, the **column→row MLP** pattern (one all-reduce/FFN), and
 **pipeline layer partitioning** — all verified equal to single-node (test `XlaParallel`). The
 `Communicator` (all-gather/all-reduce) is in-process for single-box TP + tests.
-*Remaining:* bind the `Communicator` to the **already-built** cluster transport for real multi-node
-runs — RDMA (`rdma_transport.cpp` + the portable `SoftwareRDMA`), NCCL-style collectives
-(`collective_ops_manager.cpp`) — and a graph-level GSPMD pass that auto-inserts collectives from
-`shard_map` annotations (this runtime executor is their target).
+✅ **Over the real transport (2026-06-16):** `columnParallelMatmulRdma` / `rowParallelMatmulRdma`
+(`src/xla/parallel_rdma.cpp`) run the all-gather/all-reduce over the portable **SoftwareRDMA** layer
+— each rank registers its partial and the gatherer pulls every partial with one-sided RDMA reads over
+real sockets (loopback; same code across machines). Result == single-node, full output verified to
+cross sockets (`XlaParallelRdma`). *Remaining:* a graph-level GSPMD pass auto-inserting collectives
+from `shard_map`, and a physical multi-node run.
 
 ### Concrete milestones (in order)
 1. ✅ **bf16 storage** + safetensors checkpoint loading — **DONE (2026-06-16)**: native 16-bit

@@ -871,6 +871,12 @@ target_link_libraries(test_parallel PRIVATE vgre Threads::Threads)
 add_test(NAME XlaParallel COMMAND test_parallel)
 set_tests_properties(XlaParallel PROPERTIES TIMEOUT 30)
 
+# L5 over the real transport: tensor-parallel collectives via SoftwareRDMA.
+add_executable(test_parallel_rdma xla/test_parallel_rdma.cpp)
+target_link_libraries(test_parallel_rdma PRIVATE vgre Threads::Threads)
+add_test(NAME XlaParallelRdma COMMAND test_parallel_rdma)
+set_tests_properties(XlaParallelRdma PROPERTIES TIMEOUT 60)
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)
