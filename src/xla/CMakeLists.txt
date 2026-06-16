@@ -6,6 +6,7 @@ add_library(vgre_xla OBJECT
     blas_gemm.cpp
     safetensors.cpp
     gguf.cpp
+    generation.cpp
 )
 
 target_include_directories(vgre_xla PUBLIC

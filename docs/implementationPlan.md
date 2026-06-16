@@ -90,10 +90,18 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   dequant-inside-the-GEMM-kernel (vs materialize-then-GEMM) for less transient f32.
 - **Exit (needs an external int4 checkpoint):** Llama-3-8B fits ~4.5 GB and runs on a laptop CPU.
 
-### Milestone L4 — production generation loop
-- Wire the engine's autoregressive loop to the built **paged KV-cache** and **continuous-batching
-  scheduler**; add a tokenizer binding.
-- **Exit:** long-context (8K–128K), multi-request LLM serving on CPU.
+### Milestone L4 — production generation loop  *(driver DONE; tokenizer remains)*
+- ✅ **Autoregressive driver + samplers (2026-06-16):** `vgre::xla::generate` + `sampleToken`
+  (`src/xla/generation.cpp`) — model-agnostic loop over a `step(prevToken,pos)→logits` callable
+  with greedy / temperature / top-k / top-p (nucleus) sampling, EOS + length stop. Drives a real
+  `HloModule` forward pass per token and integrates with the built **paged KV-cache**
+  (`vgre::core::KVCacheManager`) — the cache grows one token/step and reclaims blocks on finish.
+  The **continuous-batching scheduler** (`ContinuousBatchScheduler`) is already built for
+  multi-request serving. Test `XlaGeneration`.
+- *Remaining:* a **tokenizer** (byte-level BPE / SentencePiece) for text-in/text-out — it needs a
+  real vocab+merges file (model-specific data), so it is the genuinely external piece.
+- **Exit (needs tokenizer + a real checkpoint):** long-context (8K–128K), multi-request LLM serving
+  on CPU.
 
 ### Milestone L5 — distributed (models that don't fit one box)
 - Add a **sharding pass** that splits `DotGeneral`/`Convolution` across ranks and inserts the
