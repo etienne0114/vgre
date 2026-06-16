@@ -113,6 +113,9 @@ class TelemetryActive extends TelemetryState {
   final int deviceCount;
   // Worker addresses that transitioned to unavailable since last poll tick.
   final List<String> disconnectNotices;
+  // Wall-clock of the last successful backend telemetry poll. The UI compares it
+  // to now to show LIVE vs STALE — so stale data is never presented as live.
+  final DateTime? lastUpdated;
 
   const TelemetryActive({
     required this.telemetry,
@@ -122,6 +125,7 @@ class TelemetryActive extends TelemetryState {
     required this.deviceCount,
     this.selectedKernelName,
     this.disconnectNotices = const [],
+    this.lastUpdated,
   });
   @override
   List<Object?> get props => [
@@ -132,6 +136,7 @@ class TelemetryActive extends TelemetryState {
     backendVersion,
     deviceCount,
     disconnectNotices,
+    lastUpdated,
   ];
 }
 
@@ -183,6 +188,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
             backendVersion: s.backendVersion,
             deviceCount: s.deviceCount,
             selectedKernelName: s.selectedKernelName,
+            lastUpdated: s.lastUpdated,
           ),
         );
       }
@@ -201,6 +207,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
             backendVersion: s.backendVersion,
             deviceCount: s.deviceCount,
             selectedKernelName: s.selectedKernelName,
+            lastUpdated: s.lastUpdated,
           ),
         );
       }
@@ -226,6 +233,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
             backendVersion: s.backendVersion,
             deviceCount: s.deviceCount,
             selectedKernelName: s.selectedKernelName,
+            lastUpdated: s.lastUpdated,
           ),
         );
       }
@@ -244,6 +252,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
             backendVersion: s.backendVersion,
             deviceCount: s.deviceCount,
             selectedKernelName: s.selectedKernelName,
+            lastUpdated: s.lastUpdated,
           ),
         );
       }
@@ -311,6 +320,8 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
             backendVersion: _backendVersion,
             deviceCount: s.deviceCount,
             selectedKernelName: _selectedKernelName,
+            disconnectNotices: s.disconnectNotices,
+            lastUpdated: s.lastUpdated,
           ),
         );
       }
@@ -341,6 +352,7 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
           deviceCount: _deviceCount,
           selectedKernelName: _selectedKernelName,
           disconnectNotices: event.disconnectNotices,
+          lastUpdated: DateTime.now(),
         ),
       );
     });

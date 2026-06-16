@@ -16,9 +16,9 @@ class ClusterHeatmapWidget extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.3),
+        color: Colors.black.withValues(alpha: 0.3),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.blueAccent.withOpacity(0.5)),
+        border: Border.all(color: Colors.blueAccent.withValues(alpha: 0.5)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -50,7 +50,6 @@ class ClusterHeatmapWidget extends StatelessWidget {
                   );
                 }
                 final columns = math.max(1, (math.sqrt(nodes.length)).ceil());
-                final rows = (nodes.length / columns).ceil();
 
                 return GridView.builder(
                   gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
@@ -66,8 +65,8 @@ class ClusterHeatmapWidget extends StatelessWidget {
 
                     // Color gradient based on temperature
                     final color = Color.lerp(
-                      Colors.blueAccent.withOpacity(0.8),
-                      Colors.redAccent.withOpacity(0.8),
+                      Colors.blueAccent.withValues(alpha: 0.8),
+                      Colors.redAccent.withValues(alpha: 0.8),
                       (temp - 30) / 50, // 30C to 80C range
                     )!;
 
@@ -80,7 +79,7 @@ class ClusterHeatmapWidget extends StatelessWidget {
                           borderRadius: BorderRadius.circular(8),
                           boxShadow: [
                             BoxShadow(
-                              color: color.withOpacity(0.4),
+                              color: color.withValues(alpha: 0.4),
                               blurRadius: 10,
                               spreadRadius: 2,
                             ),
