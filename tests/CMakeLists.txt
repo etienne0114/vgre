@@ -877,6 +877,13 @@ target_link_libraries(test_parallel_rdma PRIVATE vgre Threads::Threads)
 add_test(NAME XlaParallelRdma COMMAND test_parallel_rdma)
 set_tests_properties(XlaParallelRdma PROPERTIES TIMEOUT 60)
 
+# L5 GSPMD: auto-partition an annotated HloModule (propagate sharding + insert
+# collectives) == single-node.
+add_executable(test_gspmd xla/test_gspmd.cpp)
+target_link_libraries(test_gspmd PRIVATE vgre Threads::Threads)
+add_test(NAME XlaGspmd COMMAND test_gspmd)
+set_tests_properties(XlaGspmd PROPERTIES TIMEOUT 30)
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)

@@ -147,8 +147,14 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   across machines). Result equals single-node; the test asserts the full output actually crossed
   sockets (`XlaParallelRdma`, verified under load). Tensor parallelism is now distributed over a real
   network transport, not in-process memcpy.
-- *Remaining:* a graph-level GSPMD pass that auto-inserts collectives from `shard_map` annotations
-  (this runtime sharding executor is its target), and exercising it across physical nodes.
+- ✅ **GSPMD auto-partitioner (2026-06-16):** `gspmdExecute` (`src/xla/gspmd.cpp`) takes an
+  HloModule + a per-parameter `Sharding` annotation, **propagates the sharding through the graph**
+  (elementwise ops flow it through; a Dot with a sharded contraction → row-parallel, a sharded
+  output dim → column-parallel) and **auto-inserts the collectives** (all-reduce after a sharded
+  contraction, all-gather to replicate at the root) — no hand-written calls. Verified == single-node
+  for column/row-parallel single matmuls and the **Megatron MLP** (one auto-inserted all-reduce from
+  the annotations alone) across ranks 1–4 (`XlaGspmd`).
+- *Remaining:* exercising it across physical nodes (the loopback transport + the executor are done).
 - **Exit (needs a real N-node cluster):** **Llama-3-70B** tensor-parallel across N nodes; pipeline
   parallelism for 175B/405B.
 
