@@ -56,6 +56,12 @@ public:
     // it is consumed. Other dtypes always widen to f32. False if absent/malformed.
     bool load(const std::string& name, Literal& out, bool keepNative = false) const;
 
+    // Load an I32 tensor as raw int32 (no f32 widening) — required for GPTQ/AWQ
+    // packed tensors whose int32 values exceed f32's exact integer range. Fills
+    // `shape` too. False if absent or not I32.
+    bool loadInt32(const std::string& name, std::vector<int32_t>& out,
+                   std::vector<int64_t>& shape) const;
+
     // Total bytes of the mapped file (header + blob).
     uint64_t mappedBytes() const { return map_len_; }
 

@@ -21,6 +21,10 @@ target_link_libraries(gpt2_tokenize PRIVATE vgre)
 add_executable(quant_dequant quant_dequant.cpp)
 target_link_libraries(quant_dequant PRIVATE vgre)
 
+# gptq_dequant: dequant a GPTQ/AWQ linear from a real safetensors file.
+add_executable(gptq_dequant gptq_dequant.cpp)
+target_link_libraries(gptq_dequant PRIVATE vgre)
+
 # Optional reproducible real-checkpoint validation (skipped unless the model
 # files exist + VGRE_RUN_REAL_CHECKPOINT_TESTS=ON, so the default suite needs no
 # multi-hundred-MB download). Reproduce locally:

@@ -12,6 +12,7 @@ add_library(vgre_xla OBJECT
     parallel_rdma.cpp
     gspmd.cpp
     quant_gemm.cpp
+    gptq.cpp
 )
 
 target_include_directories(vgre_xla PUBLIC
