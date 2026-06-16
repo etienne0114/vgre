@@ -226,5 +226,17 @@ bool SafeTensors::load(const std::string& name, Literal& out, bool keepNative) c
     return true;
 }
 
+bool SafeTensors::loadInt32(const std::string& name, std::vector<int32_t>& out,
+                            std::vector<int64_t>& shape) const {
+    const TensorInfo* ti = info(name);
+    if (!ti || ti->dtype != DType::I32) return false;
+    const uint8_t* src = base_ + blob_off_ + ti->begin;
+    const int64_t n = ti->numel();
+    out.resize((size_t)n);
+    std::memcpy(out.data(), src, (size_t)n * 4);
+    shape = ti->shape;
+    return true;
+}
+
 }  // namespace xla
 }  // namespace vgre

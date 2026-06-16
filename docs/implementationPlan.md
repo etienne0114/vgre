@@ -114,7 +114,13 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   thread-pool parallel over N-blocks. Wired into `gpt2_infer`'s GGUF path: real GPT-2 runs with its
   matmul weights staying quantized in RAM **and** through compute (≈298 MB vs 548 MB f32), logits
   identical to the materialized path.
-- *Remaining:* GPTQ/AWQ packings.
+- ✅ **GPTQ / AWQ 4-bit safetensors (2026-06-16):** `gptqDequantize` / `awqDequantize`
+  (`src/xla/gptq.cpp`) turn the four GPTQ/AWQ tensors (qweight/qzeros/scales/g_idx) back into an
+  f32 weight — GPTQ's nibble-along-`in` packing + `+1` zero convention + act-order `g_idx`, and AWQ's
+  nibble-along-`out` `[0,2,4,6,1,3,5,7]` order. `SafeTensors::loadInt32` reads the packed int32
+  tensors without f32 widening (packed values exceed f32's exact range). Validated by in-suite
+  round-trip (`XlaGptq`) **and** against an independent numpy packer through a real safetensors file
+  (`tools/validate_gptq.py` → sums match exactly).
 - **Exit (needs an external int4 checkpoint):** Llama-3-8B fits ~4.5 GB and runs on a laptop CPU.
 
 ### Milestone L4 — production generation loop  *(in-tree work DONE)*

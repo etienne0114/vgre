@@ -103,7 +103,9 @@ int8/int4. Footprint of the weights alone:
   formats natively (`DType{Q8_0,Q4_0,Q4_1}`, dequant in `include/vgre/xla/quant.h`) so int4 weights
   are **~4.5 bit/weight resident (8B → ~4.5 GB)** and dequantize to f32 only on use. Test
   `XlaGgufQuant`. ✅ **Q4_K/Q6_K super-block K-quants DONE (2026-06-16)** — dequant bit-identical to
-  `gguf.quants.dequantize` (`tools/validate_kquant.py`). *Remaining:* GPTQ/AWQ + dequant-in-GEMM.
+  `gguf.quants.dequantize` (`tools/validate_kquant.py`). ✅ **GPTQ/AWQ 4-bit safetensors + dequant-in-
+  GEMM DONE (2026-06-16)** — `gptqDequantize`/`awqDequantize` (`src/xla/gptq.cpp`, validated vs an
+  independent numpy packer) and `gemm_q` (dequant inside the matmul).
 
 ### 2.B — Weight loading at scale
 Today model weights are **baked into the StableHLO as constants** (fine for toy models; a 16 GB
