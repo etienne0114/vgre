@@ -116,12 +116,20 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   multi-request serving. Test `XlaGeneration`.
 - ✅ **Byte-level BPE tokenizer (2026-06-16):** `vgre::xla::BpeTokenizer` (`src/xla/tokenizer.cpp`),
   built from scratch — 256-byte base vocab (every input round-trips, no UNK, UTF-8 implicit),
-  `train()` learns merges from a corpus, `encode()`/`decode()` are inverses, and `loadMerges()`
-  imports a real model's ordered merge list. Test `XlaTokenizer`. *(Glue remaining: parsing GPT-2
-  `vocab.json`+`merges.txt` / HF `tokenizer.json` — the byte↔unicode remap + JSON — to ingest a
-  specific shipped tokenizer file.)*
-- **Exit (needs a real checkpoint + its tokenizer file):** long-context (8K–128K), multi-request
-  LLM serving on CPU.
+  `train()` learns merges, `encode()`/`decode()` inverses, `loadMerges()` imports a merge list.
+- ✅ **Real GPT-2 tokenizer file ingestion (2026-06-16):** `loadGpt2(vocab.json, merges.txt)` —
+  builds GPT-2's byte↔unicode table, parses the vocab + ordered merges, and does GPT-2
+  pre-tokenization (contractions / ` ?\p{L}+` / ` ?\p{N}+` / symbols / `\s+(?!\S)`).
+  `encodeGpt2`/`decodeGpt2` emit/consume the model's exact ids — **11/11 exact vs the Hugging Face
+  GPT-2 tokenizer** (multi-space, UTF-8 `naïve café`, contractions, digits/symbols). Tests
+  `XlaTokenizer` (synthetic loadGpt2) + optional `RealGpt2Tokenizer`.
+- ✅ **Full text→text on the real model (2026-06-16):** `gpt2_infer <model> --gen N "prompt"`
+  pipes prompt → my GPT-2 tokenizer → engine forward (`gemm_f32`, real weights) → L4 `argmax` → my
+  decoder, and its greedy continuation is **token-for-token identical to Hugging Face GPT-2**
+  `model.generate` — from the f32 safetensors *and* the int4 Q4_0 GGUF. The whole CPU pipeline
+  (load → tokenize → generate → detokenize) reproduces real GPT-2.
+- **Exit (for very long context / many-request throughput):** the loop + paged-KV + tokenizer all
+  exist; large-scale serving just needs a bigger model checkpoint.
 
 ### Milestone L5 — distributed (models that don't fit one box)  *(sharding DONE)*
 - ✅ **Tensor + pipeline sharding (2026-06-16):** `vgre::xla` parallel module (`src/xla/parallel.cpp`)

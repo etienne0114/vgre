@@ -5,6 +5,8 @@
 #include "vgre/xla/tokenizer.h"
 
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -79,6 +81,29 @@ int main() {
         // A merge whose operands aren't known yet is skipped, not fatal.
         BpeTokenizer t2;
         CHECK(t2.loadMerges({{"xy", "z"}}) == 0, "merge with unknown operand skipped");
+    }
+
+    // ── GPT-2 file ingestion (loadGpt2): ASCII letters map to themselves in
+    //    GPT-2's byte→unicode table, so a synthetic vocab.json/merges.txt needs
+    //    no remapping. Verifies the file parser + vocab-id mapping + merges.
+    {
+        namespace fs = std::filesystem;
+        fs::path vj = fs::temp_directory_path() / "vgre_vocab.json";
+        fs::path mt = fs::temp_directory_path() / "vgre_merges.txt";
+        { std::ofstream f(vj); f << R"({"a":10,"b":11,"c":12,"ab":20,"abc":30})"; }
+        { std::ofstream f(mt); f << "#version: 0.2\na b\nab c\n"; }  // a+b→ab, ab+c→abc
+
+        BpeTokenizer t;
+        CHECK(t.loadGpt2(vj.string(), mt.string()), "loadGpt2 parses vocab+merges");
+        CHECK(t.gpt2Ready(), "gpt2 mode active");
+        // "abc": a+b→ab, ab+c→abc → single vocab id 30.
+        auto ids = t.encodeGpt2("abc");
+        CHECK(ids == std::vector<int>{30}, "encodeGpt2 applies merges → model vocab id");
+        CHECK(t.decodeGpt2(ids) == "abc", "decodeGpt2 round-trip via model ids");
+        // "ab" → id 20; a lone "a" → its byte id 10.
+        CHECK(t.encodeGpt2("ab") == std::vector<int>{20}, "encodeGpt2 partial merge");
+        CHECK(t.encodeGpt2("a") == std::vector<int>{10}, "encodeGpt2 single token");
+        fs::remove(vj); fs::remove(mt);
     }
 
     if (g_fail == 0) { std::printf("test_tokenizer: ALL CHECKS PASSED\n"); return 0; }

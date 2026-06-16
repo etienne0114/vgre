@@ -3,13 +3,39 @@
 #include "vgre/xla/tokenizer.h"
 
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 #include <unordered_map>
+
+#include "vgre/common/json.h"
 
 namespace vgre {
 namespace xla {
 
 namespace {
 inline bool isSpace(unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+inline bool isAsciiLetter(unsigned char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+inline bool isAsciiDigit(unsigned char c) { return c >= '0' && c <= '9'; }
+// GPT-2 \p{L}: ASCII letters plus any non-ASCII byte (UTF-8 letters stay together).
+inline bool isLetterByte(unsigned char c) { return isAsciiLetter(c) || c >= 0x80; }
+
+// Decode a UTF-8 string to codepoints.
+std::vector<int> utf8Decode(const std::string& s) {
+    std::vector<int> cps;
+    size_t i = 0, n = s.size();
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        int cp, len;
+        if (c < 0x80) { cp = c; len = 1; }
+        else if ((c >> 5) == 0x6) { cp = c & 0x1F; len = 2; }
+        else if ((c >> 4) == 0xE) { cp = c & 0x0F; len = 3; }
+        else { cp = c & 0x07; len = 4; }
+        for (int k = 1; k < len && i + k < n; ++k) cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+        cps.push_back(cp);
+        i += len;
+    }
+    return cps;
+}
 }  // namespace
 
 BpeTokenizer::BpeTokenizer() {
@@ -142,6 +168,137 @@ std::string BpeTokenizer::decode(const std::vector<int>& ids) const {
     std::string out;
     for (int id : ids)
         if (id >= 0 && id < (int)vocab_.size()) out += vocab_[id];
+    return out;
+}
+
+// ── Real GPT-2 tokenizer ingestion ───────────────────────────────────────────
+
+bool BpeTokenizer::loadGpt2(const std::string& vocabJsonPath, const std::string& mergesTxtPath) {
+    // GPT-2 byte→unicode table (bytes_to_unicode): printable byte ranges map to
+    // themselves; the rest map to 256+n. Build byte↔codepoint maps.
+    byteToCp_.assign(256, 0);
+    std::vector<int> bs;
+    for (int b = '!'; b <= '~'; ++b) bs.push_back(b);
+    for (int b = 0xA1; b <= 0xAC; ++b) bs.push_back(b);
+    for (int b = 0xAE; b <= 0xFF; ++b) bs.push_back(b);
+    std::vector<int> cs = bs;
+    int n = 0;
+    std::vector<char> inBs(256, 0);
+    for (int b : bs) inBs[b] = 1;
+    for (int b = 0; b < 256; ++b)
+        if (!inBs[b]) { bs.push_back(b); cs.push_back(256 + n); ++n; }
+    for (size_t i = 0; i < bs.size(); ++i) { byteToCp_[bs[i]] = cs[i]; cpToByte_[cs[i]] = bs[i]; }
+
+    // Codepoints (a token string) → raw byte expansion.
+    auto cpsToBytes = [&](const std::string& s) {
+        std::string out;
+        for (int cp : utf8Decode(s)) {
+            auto it = cpToByte_.find(cp);
+            if (it != cpToByte_.end()) out += (char)(unsigned char)it->second;
+        }
+        return out;
+    };
+
+    // vocab.json: token(remapped) → id.
+    std::ifstream vf(vocabJsonPath, std::ios::binary);
+    if (!vf) return false;
+    std::stringstream ss; ss << vf.rdbuf();
+    common::json::Value root;
+    if (!common::json::parse(ss.str(), root) || !root.isObject()) return false;
+    for (const auto& kv : root.obj) {
+        int id = (int)kv.second.asNumber(-1);
+        if (id < 0) continue;
+        std::string bytes = cpsToBytes(kv.first);
+        bytesToVocabId_[bytes] = id;
+        vocabIdToBytes_[id] = bytes;
+    }
+
+    // merges.txt: ordered "A B" lines (skip a leading #version comment).
+    std::ifstream mf(mergesTxtPath);
+    if (!mf) return false;
+    std::vector<std::pair<std::string, std::string>> merges;
+    std::string line;
+    while (std::getline(mf, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        size_t sp = line.find(' ');
+        if (sp == std::string::npos) continue;
+        merges.emplace_back(cpsToBytes(line.substr(0, sp)), cpsToBytes(line.substr(sp + 1)));
+    }
+    loadMerges(merges);
+    gpt2_ = true;
+    return true;
+}
+
+// GPT-2 pre-tokenization: contractions, ` ?\p{L}+`, ` ?\p{N}+`, ` ?[^\s\p{L}\p{N}]+`,
+// and whitespace runs (a single space attaches to the following word). ASCII-exact;
+// UTF-8 letters stay within a word via the >=0x80 rule.
+std::vector<std::vector<int>> BpeTokenizer::pretokenizeGpt2(const std::string& text) const {
+    std::vector<std::vector<int>> pieces;
+    const std::string& t = text;
+    size_t i = 0, n = t.size();
+    auto emit = [&](size_t a, size_t b) {
+        std::vector<int> p;
+        for (size_t k = a; k < b; ++k) p.push_back((unsigned char)t[k]);
+        pieces.push_back(std::move(p));
+    };
+    while (i < n) {
+        unsigned char c = (unsigned char)t[i];
+        // contractions: 's 't 're 've 'm 'll 'd
+        if (c == '\'' && i + 1 < n) {
+            std::string r = t.substr(i, std::min<size_t>(3, n - i));
+            const char* cons[] = {"'re", "'ve", "'ll", "'s", "'t", "'m", "'d"};
+            bool done = false;
+            for (const char* k : cons)
+                if (r.compare(0, std::string(k).size(), k) == 0) { emit(i, i + std::string(k).size()); i += std::string(k).size(); done = true; break; }
+            if (done) continue;
+        }
+        size_t start = i;
+        size_t k = i;
+        if (c == ' ' && i + 1 < n && !isSpace((unsigned char)t[i + 1])) k = i + 1;  // optional leading space
+        unsigned char d = (k < n) ? (unsigned char)t[k] : 0;
+        if (k < n && isLetterByte(d)) {
+            size_t j = k; while (j < n && isLetterByte((unsigned char)t[j])) ++j; emit(start, j); i = j;
+        } else if (k < n && isAsciiDigit(d)) {
+            size_t j = k; while (j < n && isAsciiDigit((unsigned char)t[j])) ++j; emit(start, j); i = j;
+        } else if (k < n && !isSpace(d)) {
+            size_t j = k; while (j < n && !isSpace((unsigned char)t[j]) && !isLetterByte((unsigned char)t[j]) && !isAsciiDigit((unsigned char)t[j])) ++j;
+            emit(start, j); i = j;
+        } else {  // whitespace run (\s+(?!\S)): a trailing space 0x20 before a word
+                  // is left for the next ` ?\X+` rule to attach to that word.
+            size_t j = i; while (j < n && isSpace((unsigned char)t[j])) ++j;
+            size_t end = j;
+            if (j < n && (unsigned char)t[j - 1] == ' ' && j - 1 > i) end = j - 1;
+            emit(i, end); i = end;
+        }
+    }
+    return pieces;
+}
+
+std::vector<int> BpeTokenizer::encodeGpt2(const std::string& text) const {
+    std::vector<int> ids;
+    for (auto& piece : pretokenizeGpt2(text)) {
+        std::vector<int> p = piece;
+        applyMerges(p);
+        for (int internalId : p) {
+            const std::string& bytes = vocab_[internalId];
+            auto it = bytesToVocabId_.find(bytes);
+            if (it != bytesToVocabId_.end()) ids.push_back(it->second);
+            else  // fallback: emit each byte's vocab id
+                for (unsigned char b : bytes) {
+                    auto bi = bytesToVocabId_.find(std::string(1, (char)b));
+                    if (bi != bytesToVocabId_.end()) ids.push_back(bi->second);
+                }
+        }
+    }
+    return ids;
+}
+
+std::string BpeTokenizer::decodeGpt2(const std::vector<int>& ids) const {
+    std::string out;
+    for (int id : ids) {
+        auto it = vocabIdToBytes_.find(id);
+        if (it != vocabIdToBytes_.end()) out += it->second;
+    }
     return out;
 }
 
