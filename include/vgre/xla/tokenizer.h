@@ -42,6 +42,17 @@ public:
     // Raw byte expansion of a token id (empty if out of range).
     std::string tokenBytes(int id) const;
 
+    // ── Real GPT-2 / GPT-style tokenizer file ingestion ──────────────────────
+    // Load a shipped GPT-2 tokenizer: vocab.json (token→id, in GPT-2's byte→
+    // unicode remapping) + merges.txt (ordered BPE merge rules). Sets up the
+    // byte↔unicode table, the model's own vocab-id mapping, GPT-2 pre-tokenization
+    // (regex-equivalent word splitting), and the merges. After this,
+    // encodeGpt2/decodeGpt2 emit/consume the model's exact token ids.
+    bool loadGpt2(const std::string& vocabJsonPath, const std::string& mergesTxtPath);
+    bool gpt2Ready() const { return gpt2_; }
+    std::vector<int> encodeGpt2(const std::string& text) const;
+    std::string decodeGpt2(const std::vector<int>& ids) const;
+
 private:
     // Each token id maps to its byte expansion; ids 0..255 are single bytes.
     std::vector<std::string> vocab_;
@@ -52,6 +63,14 @@ private:
     int addMerge(int a, int b);                       // create/return merged id
     std::vector<std::vector<int>> pretokenize(const std::string& text) const;
     void applyMerges(std::vector<int>& piece) const;  // greedy BPE on one piece
+
+    // GPT-2 mode state (populated by loadGpt2).
+    bool gpt2_ = false;
+    std::vector<int> byteToCp_;                       // byte → remap codepoint (256)
+    std::map<int, int> cpToByte_;                     // remap codepoint → byte
+    std::map<std::string, int> bytesToVocabId_;       // token byte-expansion → gpt2 id
+    std::map<int, std::string> vocabIdToBytes_;
+    std::vector<std::vector<int>> pretokenizeGpt2(const std::string& text) const;
 };
 
 }  // namespace xla

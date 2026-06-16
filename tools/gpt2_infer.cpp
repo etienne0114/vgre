@@ -11,6 +11,8 @@
 #include "vgre/xla/safetensors.h"
 #include "vgre/xla/gguf.h"
 #include "vgre/xla/blas_gemm.h"
+#include "vgre/xla/tokenizer.h"
+#include "vgre/xla/generation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -65,6 +67,66 @@ static float geluNew(float x) {
     return 0.5f * x * (1.0f + std::tanh(0.7978845608028654f * (x + 0.044715f * x * x * x)));
 }
 
+// Full GPT-2 forward pass over `ids`; returns the [vocab] logits at the last
+// position. All matmuls go through the engine GEMM.
+static std::vector<float> forward(const Model& M, const std::vector<int>& ids) {
+    const int64_t T = (int64_t)ids.size();
+    const Literal& wte = M.get("wte.weight");
+    const Literal& wpe = M.get("wpe.weight");
+
+    std::vector<float> x((size_t)(T * kEmbd));
+    for (int64_t t = 0; t < T; ++t)
+        for (int i = 0; i < kEmbd; ++i)
+            x[(size_t)(t * kEmbd + i)] = wte.data[(size_t)(ids[(size_t)t] * kEmbd + i)] +
+                                        wpe.data[(size_t)(t * kEmbd + i)];
+
+    const float scale = 1.0f / std::sqrt((float)kHeadDim);
+    for (int L = 0; L < kLayer; ++L) {
+        std::string p = "h." + std::to_string(L) + ".";
+        std::vector<float> h = x;
+        layernorm(h, T, M.get(p + "ln_1.weight"), M.get(p + "ln_1.bias"));
+        std::vector<float> qkv = linear(h, T, kEmbd, M.get(p + "attn.c_attn.weight"),
+                                        &M.get(p + "attn.c_attn.bias"));
+        auto qAt = [&](int64_t t, int hd, int d) { return qkv[(size_t)(t * 3 * kEmbd + 0 * kEmbd + hd * kHeadDim + d)]; };
+        auto kAt = [&](int64_t t, int hd, int d) { return qkv[(size_t)(t * 3 * kEmbd + 1 * kEmbd + hd * kHeadDim + d)]; };
+        auto vAt = [&](int64_t t, int hd, int d) { return qkv[(size_t)(t * 3 * kEmbd + 2 * kEmbd + hd * kHeadDim + d)]; };
+
+        std::vector<float> att((size_t)(T * kEmbd), 0.0f);
+        std::vector<float> scores((size_t)T);
+        for (int hd = 0; hd < kHead; ++hd)
+            for (int64_t i = 0; i < T; ++i) {
+                float mx = -INFINITY;
+                for (int64_t j = 0; j <= i; ++j) {
+                    float s = 0; for (int d = 0; d < kHeadDim; ++d) s += qAt(i, hd, d) * kAt(j, hd, d);
+                    scores[(size_t)j] = s * scale; mx = std::max(mx, scores[(size_t)j]);
+                }
+                double sum = 0;
+                for (int64_t j = 0; j <= i; ++j) { scores[(size_t)j] = std::exp(scores[(size_t)j] - mx); sum += scores[(size_t)j]; }
+                for (int d = 0; d < kHeadDim; ++d) {
+                    double o = 0;
+                    for (int64_t j = 0; j <= i; ++j) o += scores[(size_t)j] * vAt(j, hd, d);
+                    att[(size_t)(i * kEmbd + hd * kHeadDim + d)] = (float)(o / sum);
+                }
+            }
+        std::vector<float> attProj = linear(att, T, kEmbd, M.get(p + "attn.c_proj.weight"),
+                                            &M.get(p + "attn.c_proj.bias"));
+        for (size_t i = 0; i < x.size(); ++i) x[i] += attProj[i];
+
+        std::vector<float> h2 = x;
+        layernorm(h2, T, M.get(p + "ln_2.weight"), M.get(p + "ln_2.bias"));
+        std::vector<float> fc = linear(h2, T, kEmbd, M.get(p + "mlp.c_fc.weight"), &M.get(p + "mlp.c_fc.bias"));
+        for (float& v : fc) v = geluNew(v);
+        std::vector<float> proj = linear(fc, T, 4 * kEmbd, M.get(p + "mlp.c_proj.weight"), &M.get(p + "mlp.c_proj.bias"));
+        for (size_t i = 0; i < x.size(); ++i) x[i] += proj[i];
+    }
+    layernorm(x, T, M.get("ln_f.weight"), M.get("ln_f.bias"));
+
+    std::vector<float> lastv(&x[(size_t)((T - 1) * kEmbd)], &x[(size_t)((T - 1) * kEmbd)] + kEmbd);
+    std::vector<float> logits((size_t)kVocab);
+    gemm_f32(false, true, 1, kVocab, kEmbd, lastv.data(), wte.data.data(), logits.data(), 1);
+    return logits;
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) { std::fprintf(stderr, "usage: gpt2_infer <safetensors|gguf> <id...>\n"); return 2; }
     std::string path = argv[1];
@@ -101,72 +163,35 @@ int main(int argc, char** argv) {
     }
     std::fprintf(stderr, "# weights: %s, resident ~%.1f MB\n", fmt, residentBytes / 1e6);
 
-    std::vector<int> ids;
-    for (int i = 2; i < argc; ++i) ids.push_back(std::atoi(argv[i]));
-    const int64_t T = (int64_t)ids.size();
-
-    const Literal& wte = M.get("wte.weight");   // [vocab, 768]
-    const Literal& wpe = M.get("wpe.weight");   // [1024, 768]
-
-    // Token + positional embeddings → x[T, 768].
-    std::vector<float> x((size_t)(T * kEmbd));
-    for (int64_t t = 0; t < T; ++t)
-        for (int i = 0; i < kEmbd; ++i)
-            x[(size_t)(t * kEmbd + i)] = wte.data[(size_t)(ids[t] * kEmbd + i)] +
-                                        wpe.data[(size_t)(t * kEmbd + i)];
-
-    const float scale = 1.0f / std::sqrt((float)kHeadDim);
-    for (int L = 0; L < kLayer; ++L) {
-        std::string p = "h." + std::to_string(L) + ".";
-
-        // ── Attention block ──
-        std::vector<float> h = x;
-        layernorm(h, T, M.get(p + "ln_1.weight"), M.get(p + "ln_1.bias"));
-        // qkv[T, 2304] = h · c_attn.weight(+bias). GPT-2 Conv1D stores [in,out].
-        std::vector<float> qkv = linear(h, T, kEmbd, M.get(p + "attn.c_attn.weight"),
-                                        &M.get(p + "attn.c_attn.bias"));
-        auto qAt = [&](int64_t t, int hd, int d) { return qkv[(size_t)(t * 3 * kEmbd + 0 * kEmbd + hd * kHeadDim + d)]; };
-        auto kAt = [&](int64_t t, int hd, int d) { return qkv[(size_t)(t * 3 * kEmbd + 1 * kEmbd + hd * kHeadDim + d)]; };
-        auto vAt = [&](int64_t t, int hd, int d) { return qkv[(size_t)(t * 3 * kEmbd + 2 * kEmbd + hd * kHeadDim + d)]; };
-
-        std::vector<float> att((size_t)(T * kEmbd), 0.0f);  // [T, 768]
-        std::vector<float> scores((size_t)T);
-        for (int hd = 0; hd < kHead; ++hd)
-            for (int64_t i = 0; i < T; ++i) {
-                float mx = -INFINITY;
-                for (int64_t j = 0; j <= i; ++j) {  // causal
-                    float s = 0; for (int d = 0; d < kHeadDim; ++d) s += qAt(i, hd, d) * kAt(j, hd, d);
-                    scores[(size_t)j] = s * scale; mx = std::max(mx, scores[(size_t)j]);
-                }
-                double sum = 0;
-                for (int64_t j = 0; j <= i; ++j) { scores[(size_t)j] = std::exp(scores[(size_t)j] - mx); sum += scores[(size_t)j]; }
-                for (int d = 0; d < kHeadDim; ++d) {
-                    double o = 0;
-                    for (int64_t j = 0; j <= i; ++j) o += scores[(size_t)j] * vAt(j, hd, d);
-                    att[(size_t)(i * kEmbd + hd * kHeadDim + d)] = (float)(o / sum);
-                }
-            }
-        std::vector<float> attProj = linear(att, T, kEmbd, M.get(p + "attn.c_proj.weight"),
-                                            &M.get(p + "attn.c_proj.bias"));
-        for (size_t i = 0; i < x.size(); ++i) x[i] += attProj[i];  // residual
-
-        // ── MLP block ──
-        std::vector<float> h2 = x;
-        layernorm(h2, T, M.get(p + "ln_2.weight"), M.get(p + "ln_2.bias"));
-        std::vector<float> fc = linear(h2, T, kEmbd, M.get(p + "mlp.c_fc.weight"), &M.get(p + "mlp.c_fc.bias"));
-        for (float& v : fc) v = geluNew(v);
-        std::vector<float> proj = linear(fc, T, 4 * kEmbd, M.get(p + "mlp.c_proj.weight"), &M.get(p + "mlp.c_proj.bias"));
-        for (size_t i = 0; i < x.size(); ++i) x[i] += proj[i];  // residual
+    // ── Text generation mode: gpt2_infer <model> --gen N "prompt" ──
+    // Needs VGRE_GPT2_VOCAB + VGRE_GPT2_MERGES (the real tokenizer files).
+    if (argc >= 5 && std::string(argv[2]) == "--gen") {
+        const char* vp = std::getenv("VGRE_GPT2_VOCAB");
+        const char* mp = std::getenv("VGRE_GPT2_MERGES");
+        if (!vp || !mp) { std::fprintf(stderr, "set VGRE_GPT2_VOCAB and VGRE_GPT2_MERGES\n"); return 2; }
+        vgre::xla::BpeTokenizer tok;
+        if (!tok.loadGpt2(vp, mp)) { std::fprintf(stderr, "tokenizer load failed\n"); return 1; }
+        int nNew = std::atoi(argv[3]);
+        std::string prompt = argv[4];
+        std::vector<int> ids = tok.encodeGpt2(prompt);
+        const size_t promptLen = ids.size();
+        const int kEot = 50256;  // GPT-2 <|endoftext|>
+        for (int s = 0; s < nNew; ++s) {
+            std::vector<float> logits = forward(M, ids);
+            int next = vgre::xla::argmax(logits);  // greedy (L4 sampler)
+            ids.push_back(next);
+            if (next == kEot) break;
+        }
+        std::vector<int> gen(ids.begin() + promptLen, ids.end());
+        std::printf("%s%s\n", prompt.c_str(), tok.decodeGpt2(gen).c_str());
+        return 0;
     }
 
-    layernorm(x, T, M.get("ln_f.weight"), M.get("ln_f.bias"));
+    // ── Validation mode: gpt2_infer <model> <id...> → top-5 next-token logits ──
+    std::vector<int> ids;
+    for (int i = 2; i < argc; ++i) ids.push_back(std::atoi(argv[i]));
+    std::vector<float> logits = forward(M, ids);
 
-    // Logits for the last position: x_last[768] · wte^T  → [vocab].
-    std::vector<float> last(&x[(size_t)((T - 1) * kEmbd)], &x[(size_t)((T - 1) * kEmbd)] + kEmbd);
-    std::vector<float> logits((size_t)kVocab);
-    gemm_f32(false, true, 1, kVocab, kEmbd, last.data(), wte.data.data(), logits.data(), 1);
-
-    // Top-5.
     std::vector<int> idx(kVocab);
     for (int64_t i = 0; i < kVocab; ++i) idx[(size_t)i] = (int)i;
     std::partial_sort(idx.begin(), idx.begin() + 5, idx.end(),

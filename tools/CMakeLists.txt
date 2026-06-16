@@ -6,10 +6,15 @@
 add_executable(checkpoint_probe checkpoint_probe.cpp)
 target_link_libraries(checkpoint_probe PRIVATE vgre)
 
-# gpt2_infer: real GPT-2 (124M) inference — weights via vgre::xla::SafeTensors,
-# matmuls via vgre::xla::gemm_f32. Matches Hugging Face logits (tools/gpt2_reference.py).
+# gpt2_infer: real GPT-2 (124M) inference — weights via vgre::xla::SafeTensors /
+# GGUF, matmuls via vgre::xla::gemm_f32; --gen does full text→text generation with
+# the real GPT-2 tokenizer. Matches Hugging Face (tools/gpt2_reference.py).
 add_executable(gpt2_infer gpt2_infer.cpp)
 target_link_libraries(gpt2_infer PRIVATE vgre)
+
+# gpt2_tokenize: encode text with a real GPT-2 tokenizer (loadGpt2).
+add_executable(gpt2_tokenize gpt2_tokenize.cpp)
+target_link_libraries(gpt2_tokenize PRIVATE vgre)
 
 # Optional reproducible real-checkpoint validation (skipped unless the model
 # files exist + VGRE_RUN_REAL_CHECKPOINT_TESTS=ON, so the default suite needs no
@@ -24,4 +29,12 @@ if(VGRE_BUILD_TESTS AND DEFINED ENV{VGRE_RUN_REAL_CHECKPOINT_TESTS}
             python3 ${CMAKE_CURRENT_SOURCE_DIR}/validate_safetensors.py
             $<TARGET_FILE:checkpoint_probe> "$ENV{VGRE_GPT2_SAFETENSORS}")
     set_tests_properties(RealGpt2Safetensors PROPERTIES TIMEOUT 300)
+
+    if(EXISTS "$ENV{VGRE_GPT2_VOCAB}" AND EXISTS "$ENV{VGRE_GPT2_MERGES}")
+        add_test(NAME RealGpt2Tokenizer
+            COMMAND ${CMAKE_COMMAND} -E env
+                python3 ${CMAKE_CURRENT_SOURCE_DIR}/validate_tokenizer.py
+                $<TARGET_FILE:gpt2_tokenize> "$ENV{VGRE_GPT2_VOCAB}" "$ENV{VGRE_GPT2_MERGES}")
+        set_tests_properties(RealGpt2Tokenizer PROPERTIES TIMEOUT 300)
+    endif()
 endif()
