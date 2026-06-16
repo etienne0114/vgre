@@ -67,6 +67,12 @@ add_dependencies(${BINARY_NAME} flutter_assemble)
 set_target_properties(${BINARY_NAME}
   PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/intermediates_do_not_run"
+  # The Flutter engine (libflutter_linux_gtk.so) and the bundled libs live in
+  # bundle/lib next to the executable. Embed $ORIGIN/lib in the runpath so the
+  # bundle runs standalone (e.g. `flutter run -d linux`) without relying on a
+  # launch wrapper that sets LD_LIBRARY_PATH.
+  BUILD_RPATH "$ORIGIN/lib"
+  INSTALL_RPATH "$ORIGIN/lib"
 )
 
 
