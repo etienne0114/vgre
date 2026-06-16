@@ -136,9 +136,12 @@ speed a single token is minutes. **Add:**
 logits` callable, with greedy / temperature / top-k / top-p sampling and EOS+length stop. It drives
 a real `HloModule` per token and wires to the **paged KV-cache** (`vgre::core::KVCacheManager`) —
 cache grows in blocks per step, reclaimed on finish — and the **continuous-batching scheduler**
-(`ContinuousBatchScheduler`) is built for multi-request serving. Test `XlaGeneration`. *Remaining:*
-a **tokenizer** (byte-level BPE / SentencePiece) for text-in/out — needs a model-specific
-vocab+merges file (the external piece).
+(`ContinuousBatchScheduler`) is built for multi-request serving. Test `XlaGeneration`.
+✅ **Tokenizer — DONE (2026-06-16):** `vgre::xla::BpeTokenizer` (`src/xla/tokenizer.cpp`), a
+from-scratch byte-level BPE — 256-byte base vocab (every input round-trips, no UNK), `train()`
+learns merges, `encode`/`decode` inverses, `loadMerges()` imports a model's merge list. Test
+`XlaTokenizer`. Remaining glue: parsing a specific shipped GPT-2 `vocab.json`+`merges.txt` / HF
+`tokenizer.json` (byte↔unicode remap + JSON).
 
 ### 2.E — Distributed execution  *(70B / 175B / 405B — don't fit one box)*
 Models beyond one machine need **tensor parallelism** (shard each matmul's columns across ranks,

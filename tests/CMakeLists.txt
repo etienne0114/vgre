@@ -859,6 +859,12 @@ target_link_libraries(test_generation PRIVATE vgre)
 add_test(NAME XlaGeneration COMMAND test_generation)
 set_tests_properties(XlaGeneration PROPERTIES TIMEOUT 30)
 
+# Byte-level BPE tokenizer (L4 text front end): train / encode / decode.
+add_executable(test_tokenizer xla/test_tokenizer.cpp)
+target_link_libraries(test_tokenizer PRIVATE vgre)
+add_test(NAME XlaTokenizer COMMAND test_tokenizer)
+set_tests_properties(XlaTokenizer PROPERTIES TIMEOUT 30)
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)

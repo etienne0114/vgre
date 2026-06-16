@@ -90,7 +90,7 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   dequant-inside-the-GEMM-kernel (vs materialize-then-GEMM) for less transient f32.
 - **Exit (needs an external int4 checkpoint):** Llama-3-8B fits ~4.5 GB and runs on a laptop CPU.
 
-### Milestone L4 — production generation loop  *(driver DONE; tokenizer remains)*
+### Milestone L4 — production generation loop  *(in-tree work DONE)*
 - ✅ **Autoregressive driver + samplers (2026-06-16):** `vgre::xla::generate` + `sampleToken`
   (`src/xla/generation.cpp`) — model-agnostic loop over a `step(prevToken,pos)→logits` callable
   with greedy / temperature / top-k / top-p (nucleus) sampling, EOS + length stop. Drives a real
@@ -98,10 +98,14 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   (`vgre::core::KVCacheManager`) — the cache grows one token/step and reclaims blocks on finish.
   The **continuous-batching scheduler** (`ContinuousBatchScheduler`) is already built for
   multi-request serving. Test `XlaGeneration`.
-- *Remaining:* a **tokenizer** (byte-level BPE / SentencePiece) for text-in/text-out — it needs a
-  real vocab+merges file (model-specific data), so it is the genuinely external piece.
-- **Exit (needs tokenizer + a real checkpoint):** long-context (8K–128K), multi-request LLM serving
-  on CPU.
+- ✅ **Byte-level BPE tokenizer (2026-06-16):** `vgre::xla::BpeTokenizer` (`src/xla/tokenizer.cpp`),
+  built from scratch — 256-byte base vocab (every input round-trips, no UNK, UTF-8 implicit),
+  `train()` learns merges from a corpus, `encode()`/`decode()` are inverses, and `loadMerges()`
+  imports a real model's ordered merge list. Test `XlaTokenizer`. *(Glue remaining: parsing GPT-2
+  `vocab.json`+`merges.txt` / HF `tokenizer.json` — the byte↔unicode remap + JSON — to ingest a
+  specific shipped tokenizer file.)*
+- **Exit (needs a real checkpoint + its tokenizer file):** long-context (8K–128K), multi-request
+  LLM serving on CPU.
 
 ### Milestone L5 — distributed (models that don't fit one box)
 - Add a **sharding pass** that splits `DotGeneral`/`Convolution` across ranks and inserts the

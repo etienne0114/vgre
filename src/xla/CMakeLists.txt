@@ -7,6 +7,7 @@ add_library(vgre_xla OBJECT
     safetensors.cpp
     gguf.cpp
     generation.cpp
+    tokenizer.cpp
 )
 
 target_include_directories(vgre_xla PUBLIC
