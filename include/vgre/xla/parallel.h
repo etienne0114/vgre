@@ -51,6 +51,17 @@ Literal columnParallelMatmul(const Literal& X, const Literal& W, int ranks);
 // Equal to single-node up to float reassociation.
 Literal rowParallelMatmul(const Literal& X, const Literal& W, int ranks);
 
+// ── Tensor-parallel matmul over the real transport ───────────────────────────
+// Same decomposition as above, but the collective runs over the portable
+// SoftwareRDMA layer — each rank registers its partial and the others read it
+// with one-sided RDMA reads (real sockets), not in-process memcpy. Proves the
+// sharding drives over an actual network transport; the result equals
+// single-node. `rdmaBytesMoved` (optional) reports bytes transferred over RDMA.
+Literal columnParallelMatmulRdma(const Literal& X, const Literal& W, int ranks,
+                                 uint64_t* rdmaBytesMoved = nullptr);
+Literal rowParallelMatmulRdma(const Literal& X, const Literal& W, int ranks,
+                              uint64_t* rdmaBytesMoved = nullptr);
+
 // ── Pipeline parallelism ─────────────────────────────────────────────────────
 // Partition `numLayers` into `stages` balanced contiguous [begin,end) ranges
 // (earlier stages get the +1 when it doesn't divide evenly).

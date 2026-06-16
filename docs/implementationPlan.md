@@ -140,10 +140,15 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   rank's column slice) matches single-node; plus **pipeline partitioning** (balanced contiguous
   layer ranges) + staged execution. The `Communicator` (all-gather / all-reduce) is in-process for
   single-box TP + tests. Test `XlaParallel`.
-- *Remaining:* bind `Communicator` to the cluster transport for true multi-node runs (the
-  collectives already exist — `collective_ops_manager.cpp` NCCL-style + the portable `SoftwareRDMA`);
-  and a graph-level GSPMD pass that auto-inserts collectives from `shard_map` annotations (this
-  module is the runtime sharding executor those would target).
+- ✅ **Collectives over the real transport (2026-06-16):** `columnParallelMatmulRdma` /
+  `rowParallelMatmulRdma` (`src/xla/parallel_rdma.cpp`) run the all-gather / all-reduce over the
+  portable **SoftwareRDMA** layer — each rank registers its partial and the gathering rank pulls
+  every partial with **one-sided RDMA reads over real sockets** (loopback in-process; identical code
+  across machines). Result equals single-node; the test asserts the full output actually crossed
+  sockets (`XlaParallelRdma`, verified under load). Tensor parallelism is now distributed over a real
+  network transport, not in-process memcpy.
+- *Remaining:* a graph-level GSPMD pass that auto-inserts collectives from `shard_map` annotations
+  (this runtime sharding executor is its target), and exercising it across physical nodes.
 - **Exit (needs a real N-node cluster):** **Llama-3-70B** tensor-parallel across N nodes; pipeline
   parallelism for 175B/405B.
 
