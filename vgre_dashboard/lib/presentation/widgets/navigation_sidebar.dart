@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -134,6 +135,10 @@ class _VgreNavigationSidebarState extends State<VgreNavigationSidebar> {
                     ),
                     child: Column(
                       children: [
+                        const _ConnectionStatusBadge(),
+                        const SizedBox(height: 12),
+                        const Divider(color: Colors.white10, height: 1),
+                        const SizedBox(height: 12),
                         _footerItem("RUNTIME", "v$version"),
                         const SizedBox(height: 12),
                         _footerItem("NODES", "$nodeCount CONNECTED"),
@@ -360,6 +365,93 @@ class _NavItem extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Live/stale backend-connection indicator. Ticks every second and compares the
+/// last successful telemetry poll (TelemetryActive.lastUpdated) to now, so the
+/// UI never presents stale data as live: LIVE (fresh), DELAYED, or STALE.
+class _ConnectionStatusBadge extends StatefulWidget {
+  const _ConnectionStatusBadge();
+
+  @override
+  State<_ConnectionStatusBadge> createState() => _ConnectionStatusBadgeState();
+}
+
+class _ConnectionStatusBadgeState extends State<_ConnectionStatusBadge> {
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.read<TelemetryBloc>().state;
+    final DateTime? last =
+        (state is TelemetryActive) ? state.lastUpdated : null;
+
+    String label;
+    Color color;
+    if (last == null) {
+      label = "CONNECTING";
+      color = VgreTheme.neonBlue;
+    } else {
+      final ageMs = DateTime.now().difference(last).inMilliseconds;
+      if (ageMs <= 2000) {
+        label = "LIVE";
+        color = VgreTheme.neonGreen;
+      } else if (ageMs <= 6000) {
+        label = "DELAYED";
+        color = const Color(0xFFFFB020);
+      } else {
+        label = "STALE";
+        color = VgreTheme.neonRed;
+      }
+    }
+
+    return Row(
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            boxShadow: [BoxShadow(color: color.withValues(alpha: 0.6), blurRadius: 8)],
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          label,
+          style: GoogleFonts.jetBrainsMono(
+            color: color,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.2,
+          ),
+        ),
+        const Spacer(),
+        Text(
+          "BACKEND",
+          style: GoogleFonts.jetBrainsMono(
+            color: VgreTheme.textMuted,
+            fontSize: 9,
+            letterSpacing: 1.5,
+          ),
+        ),
+      ],
     );
   }
 }

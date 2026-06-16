@@ -2,6 +2,7 @@ import 'dart:ffi';
 import 'dart:convert';
 import 'dart:io';
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart';
 
 // ── VGRE C API Types ───────────────────────────────────────────────────────
 @Packed(8)
@@ -283,7 +284,7 @@ class VgreBridge {
           '  2. Architecture mismatch (x86_64 vs arm64)\n'
           '  3. Library file is corrupted or incomplete\n'
           'Fix: $libHint\n';
-      print('VGRE FFI Error: $errorDetails');
+      debugPrint('VGRE FFI Error: $errorDetails');
       rethrow;
     }
 
@@ -387,14 +388,14 @@ class VgreBridge {
     try {
       final result = _init();
       if (result != 0) {
-        print('VGRE Init returned error code: $result');
+        debugPrint('VGRE Init returned error code: $result');
         throw Exception('vgre_init() returned error $result');
       }
-      print('VGRE Runtime Engine initialized successfully');
+      debugPrint('VGRE Runtime Engine initialized successfully');
       return result;
     } catch (e, trace) {
-      print('VGRE initialization error: $e');
-      print('Stack trace: $trace');
+      debugPrint('VGRE initialization error: $e');
+      debugPrint('Stack trace: $trace');
       rethrow;
     }
   }
