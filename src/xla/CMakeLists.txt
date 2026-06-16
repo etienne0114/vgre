@@ -10,6 +10,7 @@ add_library(vgre_xla OBJECT
     tokenizer.cpp
     parallel.cpp
     parallel_rdma.cpp
+    gspmd.cpp
 )
 
 target_include_directories(vgre_xla PUBLIC
