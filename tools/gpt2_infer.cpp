@@ -9,6 +9,7 @@
 //
 //   gpt2_infer <model.safetensors> <id0> <id1> ...
 #include "vgre/xla/safetensors.h"
+#include "vgre/xla/gguf.h"
 #include "vgre/xla/blas_gemm.h"
 
 #include <algorithm>
@@ -65,22 +66,40 @@ static float geluNew(float x) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) { std::fprintf(stderr, "usage: gpt2_infer <safetensors> <id...>\n"); return 2; }
-    auto st = SafeTensors::open(argv[1]);
-    if (!st) { std::fprintf(stderr, "open failed\n"); return 1; }
+    if (argc < 3) { std::fprintf(stderr, "usage: gpt2_infer <safetensors|gguf> <id...>\n"); return 2; }
+    std::string path = argv[1];
+    const bool isGguf = path.size() > 5 && path.substr(path.size() - 5) == ".gguf";
+
     // VGRE_GPT2_BF16=1 stores every weight at native bf16 width (half the RAM)
     // and materializes f32 on use — proving the bf16 path on a real model.
     const bool useBf16 = std::getenv("VGRE_GPT2_BF16") != nullptr;
     Model M;
     size_t residentBytes = 0;
-    for (const auto& n : st->names()) {
-        Literal l; st->load(n, l);
-        if (useBf16) l = l.toBF16().toF32();  // round through bf16 storage (bf16-rounded values)
-        residentBytes += (useBf16 ? l.numel() * 2 : l.storageBytes());
-        M.w.emplace(n, std::move(l));
+    const char* fmt = "f32";
+
+    if (isGguf) {  // quantized real model (Q8_0/Q4_0/F16) via vgre::xla::GGUF
+        auto g = vgre::xla::GGUF::open(path);
+        if (!g) { std::fprintf(stderr, "gguf open failed\n"); return 1; }
+        fmt = "gguf-quantized";
+        for (const auto& n : g->names()) {
+            const auto* ti = g->info(n);
+            int64_t qb = vgre::xla::quantStorageBytes(ti->ggml_type, ti->numel());
+            residentBytes += qb > 0 ? (size_t)qb : (size_t)ti->numel() * (ti->ggml_type == 1 ? 2 : 4);
+            Literal l; g->load(n, l);  // dequantizes Q8_0/Q4_0/F16 → f32
+            M.w.emplace(n, std::move(l));
+        }
+    } else {
+        auto st = SafeTensors::open(path);
+        if (!st) { std::fprintf(stderr, "open failed\n"); return 1; }
+        fmt = useBf16 ? "bf16" : "f32";
+        for (const auto& n : st->names()) {
+            Literal l; st->load(n, l);
+            if (useBf16) l = l.toBF16().toF32();  // round through bf16 storage
+            residentBytes += (useBf16 ? l.numel() * 2 : l.storageBytes());
+            M.w.emplace(n, std::move(l));
+        }
     }
-    std::fprintf(stderr, "# weights: %s, resident ~%.1f MB\n",
-                 useBf16 ? "bf16" : "f32", residentBytes / 1e6);
+    std::fprintf(stderr, "# weights: %s, resident ~%.1f MB\n", fmt, residentBytes / 1e6);
 
     std::vector<int> ids;
     for (int i = 2; i < argc; ++i) ids.push_back(std::atoi(argv[i]));
