@@ -102,8 +102,12 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   unchanged (" the"), top-5 identical to f32 (near-lossless). **Q4_0 (int4)**: resident **177 MB**
   (~1/3 of f32), top-1 still correct (" the") with the expected int4 logit perturbation. The int4
   weight path runs a real pretrained model.
-- *Remaining:* the super-block K-quants (Q4_K/Q6_K, used by many HF GGUFs) and GPTQ/AWQ packings;
-  dequant-inside-the-GEMM-kernel (vs materialize-then-GEMM) for less transient f32.
+- ✅ **K-quants Q4_K/Q6_K (2026-06-16):** the super-block formats most modern HF GGUFs use —
+  Q4_K (256-weight super-block, 8×6-bit sub-scales/mins, 144 B) and Q6_K (210 B) dequant kernels
+  (`include/vgre/xla/quant.h`), `Literal` `DType{Q4_K,Q6_K}` storage, and GGUF load — verified
+  **bit-identical to `gguf.quants.dequantize`** over random super-blocks (`tools/validate_kquant.py`),
+  plus hand-constructed in-suite checks (`XlaGgufQuant`).
+- *Remaining:* GPTQ/AWQ packings and dequant-inside-the-GEMM-kernel (vs materialize-then-GEMM).
 - **Exit (needs an external int4 checkpoint):** Llama-3-8B fits ~4.5 GB and runs on a laptop CPU.
 
 ### Milestone L4 — production generation loop  *(in-tree work DONE)*

@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -153,6 +154,37 @@ int main() {
         }
         fs::remove(path);
         CHECK(GGUF::open("/no/such.gguf") == nullptr, "missing file → nullptr");
+    }
+
+    // ── 3b. K-quant super-blocks (Q4_K/Q6_K): hand-constructed → known values ─
+    {
+        CHECK(quantBlockBytes(12) == 144 && quantBlockElems(12) == 256, "Q4_K block geometry");
+        CHECK(quantBlockBytes(14) == 210 && quantBlockElems(14) == 256, "Q6_K block geometry");
+
+        // Q4_K [144 B]: d=1.0, dmin=0, all sub-block scales=2, all 4-bit quants=1
+        //   → value = d·scale·q4 − dmin·min = 1·2·1 = 2.0 for all 256.
+        std::vector<uint8_t> q4k(144, 0);
+        q4k[0] = 0x00; q4k[1] = 0x3C;         // d = f16(1.0) = 0x3C00 (LE) at [0:2]
+        // dmin stays 0 (f16 0.0); scales[4..16) = 2; qs[16..144) = 0x11
+        for (int i = 4; i < 16; ++i) q4k[i] = 2;
+        for (int i = 16; i < 144; ++i) q4k[i] = 0x11;
+        Literal lq4k; lq4k.shape = Shape{{1, 256}}; lq4k.dtype = DType::Q4_K; lq4k.quant = q4k;
+        CHECK(lq4k.numel() == 256 && lq4k.storageBytes() == 144, "Q4_K Literal geometry");
+        Literal f4 = lq4k.toF32();
+        bool q4ok = f4.data.size() == 256;
+        for (float v : f4.data) q4ok &= (std::fabs(v - 2.0f) < 1e-5f);
+        CHECK(q4ok, "Q4_K dequant → known value 2.0");
+
+        // Q6_K [210 B]: ql=0, qh=0, scales=1, d=0.5 → q6=(0)-32=-32; value=0.5·1·−32=−16.
+        std::vector<uint8_t> q6k(210, 0);
+        for (int i = 192; i < 208; ++i) q6k[i] = 1;   // int8 scales = 1
+        q6k[208] = 0x00; q6k[209] = 0x38;             // d = f16(0.5) = 0x3800 (LE)
+        Literal lq6k; lq6k.shape = Shape{{1, 256}}; lq6k.dtype = DType::Q6_K; lq6k.quant = q6k;
+        CHECK(lq6k.storageBytes() == 210, "Q6_K Literal footprint");
+        Literal f6 = lq6k.toF32();
+        bool q6ok = f6.data.size() == 256;
+        for (float v : f6.data) q6ok &= (std::fabs(v - (-16.0f)) < 1e-4f);
+        CHECK(q6ok, "Q6_K dequant → known value -16.0");
     }
 
     // ── 4. int4 weight through the engine: Q4_0 param == its dequant f32 ─────

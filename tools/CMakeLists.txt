@@ -16,6 +16,11 @@ target_link_libraries(gpt2_infer PRIVATE vgre)
 add_executable(gpt2_tokenize gpt2_tokenize.cpp)
 target_link_libraries(gpt2_tokenize PRIVATE vgre)
 
+# quant_dequant: dequant raw ggml block bytes (stdin) → f32 (stdout), for
+# cross-checking the K-quant kernels vs gguf.quants.dequantize.
+add_executable(quant_dequant quant_dequant.cpp)
+target_link_libraries(quant_dequant PRIVATE vgre)
+
 # Optional reproducible real-checkpoint validation (skipped unless the model
 # files exist + VGRE_RUN_REAL_CHECKPOINT_TESTS=ON, so the default suite needs no
 # multi-hundred-MB download). Reproduce locally:
