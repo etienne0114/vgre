@@ -67,7 +67,9 @@ technical detail is in `missingFeatures.md` §2; the milestone plan:
   reduction-order rounding). The SafeTensors loader also reads all **160** real GPT-2 tensors with
   **0 mismatches** vs the reference `safetensors` library (`tools/validate_safetensors.py`). Llama-3-8B
   is the same path at scale (gated + 16 GB download); GPT-2 is the open, ungated proof that the
-  loader + bf16/f32 engine run a real pretrained model.
+  loader + bf16/f32 engine run a real pretrained model. **bf16 verified on the real model too**
+  (`VGRE_GPT2_BF16=1`): resident weights **548 MB → 274 MB (exactly half)** and the predicted next
+  token is unchanged (" the") — the native-width memory win with correct output on real weights.
 
 ### Milestone L2 — BLAS-backed matmul (throughput) — ✅ DONE (2026-06-14)
 - `Dot` / `DotGeneral` route to **cblas_sgemm** (OpenBLAS/MKL/reference) via
