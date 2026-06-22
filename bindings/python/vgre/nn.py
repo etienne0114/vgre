@@ -50,6 +50,12 @@ def _bind() -> None:
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V]; f.restype = V
     _lib.vgre_ag_reshape.argtypes = [V, P(I64), c.c_int]; _lib.vgre_ag_reshape.restype = V
     _lib.vgre_ag_softmax_cross_entropy.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_softmax_cross_entropy.restype = V
+    _lib.vgre_ag_layer_norm.argtypes = [V, V, V, c.c_float]; _lib.vgre_ag_layer_norm.restype = V
+    _lib.vgre_ag_rms_norm.argtypes = [V, V, c.c_float]; _lib.vgre_ag_rms_norm.restype = V
+    _lib.vgre_ag_embedding.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_embedding.restype = V
+    _lib.vgre_ag_rope.argtypes = [V, c.c_int, c.c_float]; _lib.vgre_ag_rope.restype = V
+    _lib.vgre_ag_attention.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_attention.restype = V
+    _lib.vgre_ag_flash_attention.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_flash_attention.restype = V
     _lib.vgre_ag_conv2d.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_conv2d.restype = V
     _lib.vgre_ag_max_pool2d.argtypes = [V, c.c_int, c.c_int]; _lib.vgre_ag_max_pool2d.restype = V
     _lib.vgre_ag_avg_pool2d.argtypes = [V, c.c_int, c.c_int]; _lib.vgre_ag_avg_pool2d.restype = V
@@ -173,6 +179,25 @@ def reshape(x: Tensor, shape: Sequence[int]) -> Tensor:
 def softmax_cross_entropy(logits: Tensor, targets: Sequence[int]) -> Tensor:
     t = (ctypes.c_int * len(targets))(*[int(v) for v in targets])
     return _new(_lib.vgre_ag_softmax_cross_entropy(logits._h, t, len(targets)), (1,))
+
+def layer_norm(x: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
+    return _new(_lib.vgre_ag_layer_norm(x._h, weight._h, bias._h, ctypes.c_float(eps)), x.shape)
+
+def rms_norm(x: Tensor, weight: Tensor, eps: float = 1e-5) -> Tensor:
+    return _new(_lib.vgre_ag_rms_norm(x._h, weight._h, ctypes.c_float(eps)), x.shape)
+
+def embedding(weight: Tensor, ids: Sequence[int]) -> Tensor:
+    t = (ctypes.c_int * len(ids))(*[int(v) for v in ids])
+    return _new(_lib.vgre_ag_embedding(weight._h, t, len(ids)), (len(ids), weight.shape[1]))
+
+def rope(x: Tensor, num_heads: int, base: float = 10000.0) -> Tensor:
+    return _new(_lib.vgre_ag_rope(x._h, num_heads, ctypes.c_float(base)), x.shape)
+
+def attention(q: Tensor, k: Tensor, v: Tensor, num_heads: int, causal: bool = True) -> Tensor:
+    return _new(_lib.vgre_ag_attention(q._h, k._h, v._h, num_heads, 1 if causal else 0), q.shape)
+
+def flash_attention(q: Tensor, k: Tensor, v: Tensor, num_heads: int, causal: bool = True) -> Tensor:
+    return _new(_lib.vgre_ag_flash_attention(q._h, k._h, v._h, num_heads, 1 if causal else 0), q.shape)
 
 def conv2d(x: Tensor, weight: Tensor, bias: Tensor = None, stride: int = 1, pad: int = 0) -> Tensor:
     N, _, H, W = x.shape

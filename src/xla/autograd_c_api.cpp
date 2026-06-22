@@ -61,6 +61,13 @@ vgre_ag vgre_ag_conv2d(vgre_ag input, vgre_ag weight, vgre_ag bias, int stride, 
     try { return wrap(conv2d(ref(input), ref(weight), bias ? ref(bias) : Var{}, stride, pad)); }
     catch (...) { return nullptr; }
 }
+vgre_ag vgre_ag_layer_norm(vgre_ag x, vgre_ag w, vgre_ag b, float eps) { try { return wrap(layer_norm(ref(x), ref(w), ref(b), eps)); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_rms_norm(vgre_ag x, vgre_ag w, float eps) { try { return wrap(rms_norm(ref(x), ref(w), eps)); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_embedding(vgre_ag w, const int* ids, int n) { try { return wrap(embedding(ref(w), std::vector<int>(ids, ids + n))); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_rope(vgre_ag x, int num_heads, float base) { try { return wrap(rope(ref(x), num_heads, base)); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal) { try { return wrap(attention(ref(q), ref(k), ref(v), num_heads, causal != 0)); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_flash_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal) { try { return wrap(flash_attention(ref(q), ref(k), ref(v), num_heads, causal != 0)); } catch (...) { return nullptr; } }
+
 vgre_ag vgre_ag_max_pool2d(vgre_ag x, int kernel, int stride) { try { return wrap(max_pool2d(ref(x), kernel, stride)); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_avg_pool2d(vgre_ag x, int kernel, int stride) { try { return wrap(avg_pool2d(ref(x), kernel, stride)); } catch (...) { return nullptr; } }
 

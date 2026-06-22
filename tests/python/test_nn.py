@@ -137,12 +137,52 @@ def test_bn_cnn() -> bool:
     return acc > 0.9
 
 
+def test_transformer_block() -> bool:
+    # A transformer block built from pure-Python vgre.nn ops, trained to memorize
+    # a fixed token sequence — proves the framework covers transformers too.
+    V, T, D, Hh = 16, 12, 32, 4
+    seq = [(i * 5 + 2) % V for i in range(T + 1)]
+    ids, tgt = seq[:-1], seq[1:]
+
+    def P(*shape, scale=0.02):
+        return nn.tensor(rng.standard_normal(shape) * scale, requires_grad=True)
+    E = P(V, D); g1 = nn.tensor(np.ones(D), requires_grad=True)
+    Wq, Wk, Wv, Wo = P(D, D), P(D, D), P(D, D), P(D, D)
+    g2 = nn.tensor(np.ones(D), requires_grad=True)
+    W1, W2 = P(D, 4 * D), P(4 * D, D)
+    gf = nn.tensor(np.ones(D), requires_grad=True); head = P(D, V)
+    params = [E, g1, Wq, Wk, Wv, Wo, g2, W1, W2, gf, head]
+    opt = nn.AdamW(params, lr=3e-3, weight_decay=0.0)
+
+    def forward():
+        x = nn.embedding(E, ids)
+        h = nn.rms_norm(x, g1)
+        q = nn.rope(nn.matmul(h, Wq), Hh); k = nn.rope(nn.matmul(h, Wk), Hh); v = nn.matmul(h, Wv)
+        a = nn.attention(q, k, v, Hh, causal=True)
+        x = x + nn.matmul(a, Wo)
+        h2 = nn.rms_norm(x, g2)
+        x = x + nn.matmul(nn.relu(nn.matmul(h2, W1)), W2)
+        return nn.matmul(nn.rms_norm(x, gf), head)
+
+    first = last = None
+    for _ in range(250):
+        opt.zero_grad()
+        loss = nn.softmax_cross_entropy(forward(), tgt)
+        loss.backward()
+        opt.step()
+        first = loss.item() if first is None else first
+        last = loss.item()
+    print(f"[transformer] loss {first:.3f} -> {last:.3f}")
+    return last < 0.05
+
+
 def main() -> int:
     ok = True
     ok &= test_mlp_xor()
     ok &= test_cnn_quadrant()
     ok &= test_module_api()
     ok &= test_bn_cnn()
+    ok &= test_transformer_block()
     if ok:
         print("PASS — vgre.nn trains MLP + CNN from pure Python")
         return 0
