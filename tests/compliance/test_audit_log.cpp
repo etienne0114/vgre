@@ -56,7 +56,7 @@ int main() {
         check("open() creates a new log", AuditLog::open(path, chainKey.data(), piiKey.data(), log) == VGREResult::SUCCESS);
 
         uint64_t s0 = 999, s1 = 999, s2 = 999;
-        log->emit("alice", "auth.login", "cluster:node-1", AuditOutcome::SUCCESS, AuditSeverity::INFO);
+        log->emit("alice", "auth.login", "cluster:node-1", AuditOutcome::Ok, AuditSeverity::Info);
         log->append([]{ AuditRecord r; r.actor="bob"; r.action="kernel.load"; r.resource="device:0"; return r; }(), s1);
         // a PII-bearing record (crypto-shreddable)
         AuditRecord pr; pr.actor="svc"; pr.action="user.export"; pr.resource="db";
@@ -141,7 +141,7 @@ int main() {
         // rebuild a clean log first
         removeAll(path);
         { std::unique_ptr<AuditLog> log; AuditLog::open(path, chainKey.data(), piiKey.data(), log);
-          log->emit("a","x","y",AuditOutcome::SUCCESS,AuditSeverity::INFO); }
+          log->emit("a","x","y",AuditOutcome::Ok,AuditSeverity::Info); }
         std::unique_ptr<AuditLog> log;
         VGREResult r = AuditLog::open(path, wrong.data(), piiKey.data(), log);
         check("wrong chain key rejects the log", r == VGREResult::ERR_CRYPTO);

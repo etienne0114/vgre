@@ -30,7 +30,7 @@ enum class SecretAction : uint8_t {
     READ   = 0,  // get / getVersion
     WRITE  = 1,  // put (create)
     ROTATE = 2,  // rotate (new version)
-    DELETE = 3,  // remove
+    Remove = 3,  // remove — 'DELETE' is #define DELETE 0x00010000L in <winnt.h>
     LIST   = 4,  // list / metadata
     ADMIN  = 5,  // setPolicy / prune
 };

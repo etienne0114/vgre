@@ -210,7 +210,7 @@ static std::vector<FusionNode> buildFusionGraph(const KernelIR& ir) {
     while (std::getline(iss, line)) {
         // Detect input/output patterns
         if (line.find("const float*") != std::string::npos || 
-            line.find("__restrict__") != std::string::npos) {
+            line.find("__restrict") != std::string::npos) {
             size_t pos = line.find('*');
             if (pos != std::string::npos) {
                 size_t start = line.find_last_of(' ', pos) + 1;
@@ -349,10 +349,10 @@ std::string KernelFusionEngine::genFlashAttentionSource(const KernelIR& ir,
         // the same group, matching the real LLaMA-2/Mistral/Gemma contract.
         ss << R"(
 extern "C" __global__ void )" << ir.name << R"(_fused_flash_attn_gqa(
-    const float* __restrict__ Q,
-    const float* __restrict__ K,
-    const float* __restrict__ V,
-    float* __restrict__ O,
+    const float* __restrict Q,
+    const float* __restrict K,
+    const float* __restrict V,
+    float* __restrict O,
     int batch, int num_heads, int num_kv_heads,
     int seq_len, int d_head, float scale) {
 
@@ -448,10 +448,10 @@ extern "C" __global__ void )" << ir.name << R"(_fused_flash_attn_gqa(
     // Tiling: each block handles BM rows of Q, BN cols of V, BK cols of K.
     ss << R"(
 extern "C" __global__ void )" << ir.name << R"(_fused_flash_attn(
-    const float* __restrict__ Q,
-    const float* __restrict__ K,
-    const float* __restrict__ V,
-    float* __restrict__ O,
+    const float* __restrict Q,
+    const float* __restrict K,
+    const float* __restrict V,
+    float* __restrict O,
     int seq_len, int d_head, float scale) {
 
     // One query row per thread (global id). FlashAttention-2 online softmax:
@@ -520,12 +520,12 @@ std::string KernelFusionEngine::genTransformerBlockSource(const KernelIR& ir) {
     std::ostringstream ss;
     ss << R"(
 extern "C" __global__ void )" << ir.name << R"(_fused_transformer(
-    const float* __restrict__ x,
-    const float* __restrict__ w_qkv,  // [d_model x 3*d_model]
-    const float* __restrict__ w_o,     // [d_model x d_model]
-    const float* __restrict__ w_fc1,   // [d_model x 4*d_model]
-    const float* __restrict__ w_fc2,   // [4*d_model x d_model]
-    float* __restrict__ out,
+    const float* __restrict x,
+    const float* __restrict w_qkv,  // [d_model x 3*d_model]
+    const float* __restrict w_o,     // [d_model x d_model]
+    const float* __restrict w_fc1,   // [d_model x 4*d_model]
+    const float* __restrict w_fc2,   // [4*d_model x d_model]
+    float* __restrict out,
     int batch, int seq_len, int d_model) {
 
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
@@ -639,11 +639,11 @@ std::string KernelFusionEngine::genLayerNormFusedSource(const KernelIR& ir) {
     std::ostringstream ss;
     ss << R"(
 extern "C" __global__ void )" << ir.name << R"(_fused_layernorm(
-    const float* __restrict__ x,
-    const float* __restrict__ gamma,
-    const float* __restrict__ beta,
-    const float* __restrict__ residual,
-    float* __restrict__ out,
+    const float* __restrict x,
+    const float* __restrict gamma,
+    const float* __restrict beta,
+    const float* __restrict residual,
+    float* __restrict out,
     int n, float eps) {
 
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
@@ -671,10 +671,10 @@ std::string KernelFusionEngine::genGemmGeluFusedSource(const KernelIR& ir) {
     std::ostringstream ss;
     ss << R"(
 extern "C" __global__ void )" << ir.name << R"(_fused_gemm_gelu(
-    const float* __restrict__ A,
-    const float* __restrict__ B,
-    const float* __restrict__ bias,
-    float* __restrict__ C,
+    const float* __restrict A,
+    const float* __restrict B,
+    const float* __restrict bias,
+    float* __restrict C,
     int M, int N, int K) {
 
     int row = blockIdx.y * blockDim.y + threadIdx.y;

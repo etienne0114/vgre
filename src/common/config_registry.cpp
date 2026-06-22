@@ -6,8 +6,8 @@
 #include <cstring>
 
 #if defined(_WIN32)
-#include <cstdlib>
-extern "C" char **_environ;
+// _environ is declared with __declspec(dllimport) in the UCRT <stdlib.h>
+// included by <cstdlib> above; re-declaring it without dllimport causes C4273.
 #define VGRE_ENVIRON _environ
 #else
 extern "C" char **environ;

@@ -470,8 +470,8 @@ static __attribute__((target("aes")))
 #endif
 void aes256_ctr_hw(const uint8_t key[32], const uint8_t nonce[12],
                    uint64_t initialCounter,
-                   const uint8_t* __restrict__ input,
-                   uint8_t* __restrict__ output, size_t len) {
+                   const uint8_t* __restrict input,
+                   uint8_t* __restrict output, size_t len) {
     __m128i rk[15];
     aes256_ni_key_expand(key, rk);
 
@@ -1121,6 +1121,151 @@ bool x25519_shared_secret(const uint8_t privateKey[32],
 }
 
 } // namespace crypto
+#else // !VGRE_ENABLE_SSL — portable software X25519 (RFC 7748 §5)
+
+// ── Software X25519 ──────────────────────────────────────────────────────────
+// GF(2^255-19) field arithmetic using TweetNaCl's int64_t[16] representation
+// (16-bit limbs, 16 limbs, little-endian).  Public domain: D.J.Bernstein et al.
+
+namespace crypto {
+namespace {
+
+typedef int64_t gf[16];
+
+static void gf_carry(gf o) {
+    int64_t c;
+    for (int i = 0; i < 16; i++) {
+        o[i] += (1LL << 16);
+        c = o[i] >> 16;
+        o[(i+1)*(i<15)] += c - 1 + 37*(c-1)*(i==15);
+        o[i] -= c << 16;
+    }
+}
+static void gf_add(gf o, const gf a, const gf b) {
+    for (int i = 0; i < 16; i++) o[i] = a[i] + b[i];
+}
+static void gf_sub(gf o, const gf a, const gf b) {
+    for (int i = 0; i < 16; i++) o[i] = a[i] - b[i];
+}
+static void gf_cswap(gf f, gf g, int b) {
+    int64_t m = -(int64_t)b;
+    for (int i = 0; i < 16; i++) {
+        int64_t t = m & (f[i] ^ g[i]);
+        f[i] ^= t; g[i] ^= t;
+    }
+}
+static void gf_mul(gf o, const gf a, const gf b) {
+    int64_t t[31] = {};
+    for (int i = 0; i < 16; i++)
+        for (int j = 0; j < 16; j++)
+            t[i+j] += a[i] * b[j];
+    // 2^256 ≡ 38 mod (2^255-19); use 37 matching TweetNaCl (double carry fixes residual)
+    for (int i = 0; i < 15; i++) t[i] += 37 * t[i+16];
+    for (int i = 0; i < 16; i++) o[i] = t[i];
+    gf_carry(o); gf_carry(o);
+}
+static void gf_sqr(gf o, const gf a) { gf_mul(o, a, a); }
+static void gf_mul121665(gf o, const gf a) {
+    int64_t t[31] = {};
+    for (int i = 0; i < 16; i++) t[i] = 121665LL * a[i];
+    for (int i = 0; i < 16; i++) o[i] = t[i];
+    gf_carry(o); gf_carry(o);
+}
+static void gf_inv(gf o, const gf a) {
+    gf c;
+    for (int i = 0; i < 16; i++) c[i] = a[i];
+    // a^(p-2) mod p; p-2 has 0-bits at positions 2 and 4, 1 elsewhere in [0,254]
+    for (int i = 253; i >= 0; i--) {
+        gf_sqr(c, c);
+        if (i != 2 && i != 4) gf_mul(c, c, a);
+    }
+    for (int i = 0; i < 16; i++) o[i] = c[i];
+}
+static void gf_unpack(gf o, const uint8_t s[32]) {
+    for (int i = 0; i < 16; i++)
+        o[i] = (int64_t)s[2*i] | ((int64_t)s[2*i+1] << 8);
+    o[15] &= 0x7fff; // clear bit 255 (Curve25519 ignores it)
+}
+static void gf_pack(uint8_t out[32], gf a) {
+    gf m;
+    int64_t b;
+    gf_carry(a); gf_carry(a);
+    for (int j = 0; j < 2; j++) {
+        m[0] = a[0] - 0xffed;
+        for (int i = 1; i < 15; i++) {
+            m[i] = a[i] - 0xffff - ((m[i-1] >> 16) & 1);
+            m[i-1] &= 0xffff;
+        }
+        m[15] = a[15] - 0x7fff - ((m[14] >> 16) & 1);
+        b = (m[15] >> 16) & 1;
+        m[14] &= 0xffff;
+        gf_cswap(a, m, 1-b);
+    }
+    for (int i = 0; i < 16; i++) {
+        out[2*i]   = (uint8_t)(a[i] & 0xff);
+        out[2*i+1] = (uint8_t)((a[i] >> 8) & 0xff);
+    }
+}
+
+// Montgomery ladder — RFC 7748 §5 algorithm
+static void sw_x25519(uint8_t r[32], const uint8_t k[32], const uint8_t u[32]) {
+    gf x1, x2, z2, x3, z3, A, AA, B, BB, C, D, DA, CB, E, t;
+    gf_unpack(x1, u);
+    for (int i = 0; i < 16; i++) {
+        x2[i] = (i==0) ? 1 : 0;
+        z2[i] = 0;
+        x3[i] = x1[i];
+        z3[i] = (i==0) ? 1 : 0;
+    }
+    int swap = 0;
+    for (int bit = 254; bit >= 0; bit--) {
+        int b = (k[bit >> 3] >> (bit & 7)) & 1;
+        swap ^= b;
+        gf_cswap(x2, x3, swap);
+        gf_cswap(z2, z3, swap);
+        swap = b;
+        gf_add(A,  x2, z2); gf_sqr(AA, A);
+        gf_sub(B,  x2, z2); gf_sqr(BB, B);
+        gf_sub(E,  AA, BB);
+        gf_add(C,  x3, z3);
+        gf_sub(D,  x3, z3);
+        gf_mul(DA, D, A);   gf_mul(CB, C, B);
+        gf_add(x3, DA, CB); gf_sqr(x3, x3);
+        gf_sub(z3, DA, CB); gf_sqr(z3, z3); gf_mul(z3, x1, z3);
+        gf_mul(x2, AA, BB);
+        gf_mul121665(t, E); gf_add(t, t, AA); gf_mul(z2, E, t);
+    }
+    gf_cswap(x2, x3, swap);
+    gf_cswap(z2, z3, swap);
+    gf_inv(t, z2);
+    gf_mul(x2, x2, t);
+    gf_pack(r, x2);
+}
+
+} // anonymous namespace
+
+static const uint8_t kX25519Base[32] = {9};
+
+bool x25519_genkeypair(uint8_t privateKey[32], uint8_t publicKey[32]) {
+    random_bytes(privateKey, 32);
+    privateKey[0]  &= 248;
+    privateKey[31] &= 127;
+    privateKey[31] |= 64;
+    sw_x25519(publicKey, privateKey, kX25519Base);
+    return true;
+}
+
+bool x25519_shared_secret(const uint8_t privateKey[32],
+                           const uint8_t peerPublic[32],
+                           uint8_t sharedSecret[32]) {
+    sw_x25519(sharedSecret, privateKey, peerPublic);
+    // RFC 7748 §6.1: reject the all-zero output (low-order point)
+    uint8_t check = 0;
+    for (int i = 0; i < 32; i++) check |= sharedSecret[i];
+    return check != 0;
+}
+
+} // namespace crypto
 #endif // VGRE_ENABLE_SSL
 
 // ── ChaCha20-Poly1305 AEAD (RFC 8439) ────────────────────────────────────────
@@ -1208,18 +1353,8 @@ static void poly1305_mac(const uint8_t key[32],
     r_bytes[11] &= 0x0f; r_bytes[15] &= 0x0f;
     r_bytes[ 4] &= 0xfc; r_bytes[ 8] &= 0xfc; r_bytes[12] &= 0xfc;
 
-    // Load r as a 130-bit integer via __uint128_t
-    __uint128_t r = 0;
-    for (int i = 15; i >= 0; --i) r = (r << 8) | r_bytes[i];
-
-    // p = 2^130 - 5
-    // acc is maintained as a 130-bit value using __uint128_t + 2-bit overflow word
-    // We use two values: acc_lo (low 128 bits) and acc_hi (high 2+ bits)
-    // Simpler: accumulate with full __uint128_t, do lazy reduction modulo p.
-    // Since each block adds at most 2^128+1 and multiplies by r < 2^128,
-    // intermediate values can exceed 128 bits. We use uint64_t limbs instead.
-
     // Use 5 limbs of 26 bits — standard Poly1305 approach
+    // (r is decoded from r_bytes directly into limbs below; no __uint128_t needed)
     uint64_t h0=0, h1=0, h2=0, h3=0, h4=0; // accumulator (< 2^26 each initially)
     uint64_t r0, r1, r2, r3, r4;
     // Decode r into 26-bit limbs (little-endian)

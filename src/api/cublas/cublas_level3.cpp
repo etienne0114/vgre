@@ -15,9 +15,9 @@
 // Processes 8 output columns at a time using 256-bit FMA.
 #if defined(__AVX2__)
 static void sgemm_nn_avx2(int M, int N, int K,
-                           float alpha, const float* __restrict__ A, int lda,
-                                        const float* __restrict__ B, int ldb,
-                           float beta,        float* __restrict__ C, int ldc)
+                           float alpha, const float* __restrict A, int lda,
+                                        const float* __restrict B, int ldb,
+                           float beta,        float* __restrict C, int ldc)
 {
     const __m256 valpha = _mm256_set1_ps(alpha);
     const __m256 vbeta  = _mm256_set1_ps(beta);
@@ -217,9 +217,9 @@ void refSgemm(bool tA, bool tB,
 // Processes 4 output columns per iteration using 256-bit FMA on doubles.
 #if defined(__AVX2__)
 static void dgemm_nn_avx2(int M, int N, int K,
-                           double alpha, const double* __restrict__ A, int lda,
-                                         const double* __restrict__ B, int ldb,
-                           double beta,        double* __restrict__ C, int ldc)
+                           double alpha, const double* __restrict A, int lda,
+                                         const double* __restrict B, int ldb,
+                           double beta,        double* __restrict C, int ldc)
 {
     const __m256d valpha = _mm256_set1_pd(alpha);
     const __m256d vbeta  = _mm256_set1_pd(beta);
