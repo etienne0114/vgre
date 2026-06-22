@@ -59,6 +59,16 @@ Var gelu(const Var& x);                          // tanh approximation
 Var silu(const Var& x);                          // x * sigmoid(x)
 // RMSNorm over the last dim of x[M,D] with a learnable gain weight[D].
 Var rms_norm(const Var& x, const Var& weight, float eps = 1e-5f);
+// LayerNorm over the last dim of x[M,D] with learnable weight[D] and bias[D].
+Var layer_norm(const Var& x, const Var& weight, const Var& bias, float eps = 1e-5f);
+// Rotary position embedding applied to x[T, num_heads*head_dim]; positions are
+// the row indices 0..T-1. A fixed orthogonal rotation (differentiable in x).
+Var rope(const Var& x, int num_heads, float base = 10000.0f);
+// Multi-head scaled-dot-product attention. Q/K/V are each [T, num_heads*head_dim]
+// (already projected). causal=true applies a lower-triangular mask. Returns the
+// attention output O[T, num_heads*head_dim].
+Var attention(const Var& q, const Var& k, const Var& v, int num_heads,
+              bool causal = true);
 // Embedding lookup: weight[V,D], ids length M -> [M,D]. Gradient scatters into
 // the used rows of weight.
 Var embedding(const Var& weight, const std::vector<int>& ids);

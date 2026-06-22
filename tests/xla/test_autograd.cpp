@@ -103,6 +103,50 @@ int main() {
         });
     }
 
+    // 6. LayerNorm with learnable weight + bias
+    checkGrads("layer_norm", {
+        make({3, 5}, randn(15, 11), true),    // x
+        make({5}, randn(5, 12), true),        // weight
+        make({5}, randn(5, 13), true),        // bias
+    }, [](const std::vector<Var>& p) {
+        Var y = layer_norm(p[0], p[1], p[2]);
+        return mean(mul(y, y));
+    });
+
+    // 7. RoPE (rotation is differentiable in x); head_dim must be even
+    checkGrads("rope", {
+        make({4, 8}, randn(32, 14), true),    // [T=4, H*Dh=8] → H=2, Dh=4
+    }, [](const std::vector<Var>& p) {
+        Var y = rope(p[0], /*num_heads=*/2);
+        return mean(mul(y, y));
+    });
+
+    // 8. Multi-head causal attention (Q,K,V each [T=4, H*Dh=6], H=2)
+    checkGrads("attention(causal)", {
+        make({4, 6}, randn(24, 15), true),    // Q
+        make({4, 6}, randn(24, 16), true),    // K
+        make({4, 6}, randn(24, 17), true),    // V
+    }, [](const std::vector<Var>& p) {
+        Var o = attention(p[0], p[1], p[2], /*num_heads=*/2, /*causal=*/true);
+        return mean(mul(o, o));
+    });
+
+    // 9. A full transformer-block forward (attention + residual + RMSNorm + MLP)
+    checkGrads("transformer block", {
+        make({4, 6}, randn(24, 18), true),    // x
+        make({6, 6}, randn(36, 19), true),    // Wqkv-ish proj
+        make({6}, randn(6, 20), true),        // norm gain
+        make({6, 8}, randn(48, 21), true),    // MLP up
+        make({8, 6}, randn(48, 22), true),    // MLP down
+    }, [](const std::vector<Var>& p) {
+        Var h = rms_norm(p[0], p[2]);
+        Var qkv = matmul(h, p[1]);
+        Var a = attention(qkv, qkv, qkv, 2, true);
+        Var x2 = add(p[0], a);                       // residual
+        Var mlp = matmul(gelu(matmul(x2, p[3])), p[4]);
+        return mean(mul(add(x2, mlp), add(x2, mlp)));
+    });
+
     if (g_fail == 0) { std::printf("test_autograd: ALL CHECKS PASSED\n"); return 0; }
     std::printf("test_autograd: %d FAILURE(S)\n", g_fail);
     return 1;

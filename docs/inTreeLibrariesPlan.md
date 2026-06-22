@@ -105,8 +105,12 @@ make the **default, no-dependency** build fast.
 > `tests/xla/test_autograd.cpp` (worst relative error ~2e-4, incl. the full embedding→matmul→CE LM
 > loss).
 >
-> **Remaining in this phase:** `rope`, multi-head causal `attention` (built from the above), and
-> `layer_norm` — then the transformer block is fully differentiable.
+> **Status (2026-06-22): COMPLETE.** Added `layer_norm` (learnable weight+bias), `rope` (rotary
+> embedding — a differentiable orthogonal rotation), and multi-head causal `attention` (per-head
+> QKᵀ/softmax/PV on the in-tree GEMM, with the full hand-derived backward). All finite-difference
+> verified, including a **complete transformer block** (RMSNorm → QKV proj → causal attention →
+> residual → GELU MLP → residual), worst relative error 3.6e-3. **VGRE can now build and
+> differentiate a real transformer.**
 
 ## Phase 3 — VGRE-Train: optimizers + loop + data
 
