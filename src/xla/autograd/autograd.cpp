@@ -634,6 +634,80 @@ Var mean(const Var& x) {
     return out;
 }
 
+// ── softmax / transpose / concat ─────────────────────────────────────────────
+Var softmax(const Var& x) {
+    if (x->shape.size() != 2) throw std::runtime_error("softmax: x must be [M,N]");
+    const int64_t M = x->shape[0], N = x->shape[1];
+    Var out = newNode({M, N}, {x}, x->requires_grad);
+    for (int64_t i = 0; i < M; ++i) {
+        const float* r = &x->data[i * N];
+        float mx = r[0]; for (int64_t j = 1; j < N; ++j) mx = std::max(mx, r[j]);
+        float s = 0.0f;
+        for (int64_t j = 0; j < N; ++j) { float e = std::exp(r[j] - mx); out->data[i * N + j] = e; s += e; }
+        const float inv = 1.0f / s;
+        for (int64_t j = 0; j < N; ++j) out->data[i * N + j] *= inv;
+    }
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, M, N]() {
+        if (!X->requires_grad) return;
+        for (int64_t i = 0; i < M; ++i) {
+            const float* p = &op->data[i * N];
+            const float* dy = &op->grad[i * N];
+            float dot = 0.0f; for (int64_t j = 0; j < N; ++j) dot += p[j] * dy[j];
+            for (int64_t j = 0; j < N; ++j) X->grad[i * N + j] += p[j] * (dy[j] - dot);
+        }
+    };
+    return out;
+}
+
+Var transpose(const Var& x) {
+    if (x->shape.size() != 2) throw std::runtime_error("transpose: x must be [M,N]");
+    const int64_t M = x->shape[0], N = x->shape[1];
+    Var out = newNode({N, M}, {x}, x->requires_grad);
+    for (int64_t i = 0; i < M; ++i)
+        for (int64_t j = 0; j < N; ++j) out->data[j * M + i] = x->data[i * N + j];
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, M, N]() {
+        if (!X->requires_grad) return;
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) X->grad[i * N + j] += op->grad[j * M + i];
+    };
+    return out;
+}
+
+Var concat(const Var& a, const Var& b, int axis) {
+    if (a->shape.size() != 2 || b->shape.size() != 2) throw std::runtime_error("concat: rank-2 only");
+    const int64_t Ma = a->shape[0], Na = a->shape[1], Mb = b->shape[0], Nb = b->shape[1];
+    if (axis == 0) {
+        if (Na != Nb) throw std::runtime_error("concat axis 0: col mismatch");
+        Var out = newNode({Ma + Mb, Na}, {a, b}, anyReq({&a, &b}));
+        std::copy(a->data.begin(), a->data.end(), out->data.begin());
+        std::copy(b->data.begin(), b->data.end(), out->data.begin() + a->data.size());
+        Node* op = out.get(); Var A = a, B = b;
+        out->backward_fn = [op, A, B]() {
+            if (A->requires_grad) for (size_t i = 0; i < A->grad.size(); ++i) A->grad[i] += op->grad[i];
+            if (B->requires_grad) for (size_t i = 0; i < B->grad.size(); ++i) B->grad[i] += op->grad[A->grad.size() + i];
+        };
+        return out;
+    } else {  // axis 1 (columns)
+        if (Ma != Mb) throw std::runtime_error("concat axis 1: row mismatch");
+        const int64_t M = Ma, N = Na + Nb;
+        Var out = newNode({M, N}, {a, b}, anyReq({&a, &b}));
+        for (int64_t i = 0; i < M; ++i) {
+            for (int64_t j = 0; j < Na; ++j) out->data[i * N + j] = a->data[i * Na + j];
+            for (int64_t j = 0; j < Nb; ++j) out->data[i * N + Na + j] = b->data[i * Nb + j];
+        }
+        Node* op = out.get(); Var A = a, B = b;
+        out->backward_fn = [op, A, B, M, N, Na, Nb]() {
+            for (int64_t i = 0; i < M; ++i) {
+                if (A->requires_grad) for (int64_t j = 0; j < Na; ++j) A->grad[i * Na + j] += op->grad[i * N + j];
+                if (B->requires_grad) for (int64_t j = 0; j < Nb; ++j) B->grad[i * Nb + j] += op->grad[i * N + Na + j];
+            }
+        };
+        return out;
+    }
+}
+
 // ── Vision: conv2d (im2col + GEMM), max_pool2d, reshape ──────────────────────
 namespace {
 // im2col for one image: input[Ci,H,W] → cols[Ci*Kh*Kw, Ho*Wo].

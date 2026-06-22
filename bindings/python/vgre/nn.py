@@ -46,8 +46,9 @@ def _bind() -> None:
     for name in ("matmul", "add", "mul"):
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V, V]; f.restype = V
     _lib.vgre_ag_scale.argtypes = [V, c.c_float]; _lib.vgre_ag_scale.restype = V
-    for name in ("relu", "gelu", "silu", "sigmoid", "tanh", "mean"):
+    for name in ("relu", "gelu", "silu", "sigmoid", "tanh", "mean", "softmax", "transpose"):
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V]; f.restype = V
+    _lib.vgre_ag_concat.argtypes = [V, V, c.c_int]; _lib.vgre_ag_concat.restype = V
     _lib.vgre_ag_reshape.argtypes = [V, P(I64), c.c_int]; _lib.vgre_ag_reshape.restype = V
     _lib.vgre_ag_softmax_cross_entropy.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_softmax_cross_entropy.restype = V
     _lib.vgre_ag_layer_norm.argtypes = [V, V, V, c.c_float]; _lib.vgre_ag_layer_norm.restype = V
@@ -171,6 +172,15 @@ def silu(x): return _unary("silu", x)
 def sigmoid(x): return _unary("sigmoid", x)
 def tanh(x): return _unary("tanh", x)
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
+def softmax(x): return _unary("softmax", x)
+def transpose(x: Tensor) -> Tensor:
+    return _new(_lib.vgre_ag_transpose(x._h), (x.shape[1], x.shape[0]))
+def concat(a: Tensor, b: Tensor, axis: int = 1) -> Tensor:
+    if axis == 0:
+        shape = (a.shape[0] + b.shape[0], a.shape[1])
+    else:
+        shape = (a.shape[0], a.shape[1] + b.shape[1])
+    return _new(_lib.vgre_ag_concat(a._h, b._h, axis), shape)
 
 def reshape(x: Tensor, shape: Sequence[int]) -> Tensor:
     shp = (ctypes.c_int64 * len(shape))(*shape)
