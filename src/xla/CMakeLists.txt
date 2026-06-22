@@ -36,6 +36,24 @@ endif()
 
 set_target_properties(vgre_xla PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# Always optimize the compute kernels, even in Debug builds. A numerical GEMM /
+# autograd path at -O0 is ~10-15× slower (the packing, accumulation and threading
+# scaffolding around the SIMD micro-kernel go unvectorized), which makes the
+# whole engine — and the test suite's timing — misleading. The SIMD micro-kernel
+# itself selects AVX2/FMA via a per-function target attribute, so no global
+# -march is needed. Sanitizer builds set their own flags and are unaffected here.
+if(NOT CMAKE_CXX_FLAGS MATCHES "fsanitize")
+    if(MSVC)
+        set_source_files_properties(
+            gemm/intree_gemm_f32.cpp autograd/autograd.cpp model/transformer.cpp
+            PROPERTIES COMPILE_OPTIONS "/O2")
+    else()
+        set_source_files_properties(
+            gemm/intree_gemm_f32.cpp autograd/autograd.cpp model/transformer.cpp
+            PROPERTIES COMPILE_OPTIONS "-O3")
+    endif()
+endif()
+
 if(TARGET Threads::Threads)
     target_link_libraries(vgre_xla PUBLIC Threads::Threads)
 endif()

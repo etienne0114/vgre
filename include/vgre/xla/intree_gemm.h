@@ -27,6 +27,15 @@ void gemm_f32_rows(bool transA, bool transB,
                    const float* A, const float* B, float* C,
                    int64_t m0, int64_t m1);
 
+// Multi-threaded single-GEMM (full M rows). Packs the shared B panel once and
+// parallelizes the row blocks across the global ThreadPool — unlike calling
+// gemm_f32_rows per row-chunk, which repacks all of B for every chunk. Use this
+// for one large matmul; for many small/batched GEMMs prefer per-batch
+// gemm_f32_rows on separate threads.
+void gemm_f32_threaded(bool transA, bool transB,
+                       int64_t M, int64_t N, int64_t K,
+                       const float* A, const float* B, float* C);
+
 // bfloat16 variant: A and B are bf16 (uint16, the high 16 bits of an f32), C is
 // fp32. The big operands stay bf16 in memory (half the footprint / bandwidth);
 // they are widened to f32 only inside the small cache-resident pack panels, and
