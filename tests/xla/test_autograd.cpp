@@ -147,6 +147,40 @@ int main() {
         return mean(mul(add(x2, mlp), add(x2, mlp)));
     });
 
+    // 10. Dropout (stochastic → property checks, not finite-diff):
+    //   p=0 is identity; p>0 drops ≈p of units, preserves the mean (inverted
+    //   dropout), and backward passes grad only through survivors (scaled).
+    {
+        const int N = 20000;
+        Var x = make({N}, randn(N, 31), true);
+        for (auto& v : x->data) v = std::abs(v) + 1.0f;   // nonzero so "==0" means dropped
+
+        Var id = dropout(x, 0.0f);
+        bool identity = (id->data == x->data);
+
+        const float p = 0.3f;
+        Var y = dropout(x, p);
+        int dropped = 0; double sy = 0.0, sx = 0.0;
+        for (int i = 0; i < N; ++i) { if (y->data[i] == 0.0f) ++dropped; sy += y->data[i]; sx += x->data[i]; }
+        double frac = (double)dropped / N;
+        double mean_ratio = sy / sx;        // ≈1 (expectation preserved)
+
+        // Backward: survivors get grad/(1-p), dropped get 0.
+        std::fill(x->grad.begin(), x->grad.end(), 0.0f);
+        for (auto& g : y->grad) g = 1.0f;
+        y->backward_fn();
+        bool bwd_ok = true;
+        const float scale = 1.0f / (1.0f - p);
+        for (int i = 0; i < N; ++i) {
+            float expect = (y->data[i] == 0.0f) ? 0.0f : scale;
+            if (std::abs(x->grad[i] - expect) > 1e-4f) { bwd_ok = false; break; }
+        }
+        bool ok = identity && std::abs(frac - p) < 0.03 && std::abs(mean_ratio - 1.0) < 0.05 && bwd_ok;
+        std::printf("%s dropout: identity@p0=%d dropfrac=%.3f mean_ratio=%.3f bwd=%d\n",
+                    ok ? "[PASS]" : "[FAIL]", (int)identity, frac, mean_ratio, (int)bwd_ok);
+        if (!ok) ++g_fail;
+    }
+
     if (g_fail == 0) { std::printf("test_autograd: ALL CHECKS PASSED\n"); return 0; }
     std::printf("test_autograd: %d FAILURE(S)\n", g_fail);
     return 1;

@@ -31,6 +31,7 @@ struct Config {
     int   max_seq  = 256;
     float rope_base = 10000.0f;
     float norm_eps  = 1e-5f;
+    float dropout   = 0.0f;      // residual dropout during training (0 = off)
 
     int ff() const { return d_ff > 0 ? d_ff : 4 * d_model; }
     int head_dim() const { return d_model / n_head; }

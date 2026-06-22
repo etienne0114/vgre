@@ -77,6 +77,10 @@ Var embedding(const Var& weight, const std::vector<int>& ids);
 Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets);
 // Mean of all elements -> scalar.
 Var mean(const Var& x);
+// Inverted dropout: with probability p zero each element, scale survivors by
+// 1/(1-p) (so the expectation is preserved and inference needs no rescaling).
+// p<=0 is an identity pass-through. Stochastic — for training only.
+Var dropout(const Var& x, float p);
 
 // ── Engine ───────────────────────────────────────────────────────────────────
 // Seed `loss` (must be scalar) with grad 1 and back-propagate through the tape.
