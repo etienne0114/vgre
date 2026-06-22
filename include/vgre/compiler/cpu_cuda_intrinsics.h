@@ -90,8 +90,28 @@ static inline int __mul24(int a, int b) {
 static inline unsigned __umul24(unsigned a, unsigned b) { return (a & 0x00FFFFFFu) * (b & 0x00FFFFFFu); }
 static inline int      __mulhi (int a, int b)           { return (int)(((long long)a * (long long)b) >> 32); }
 static inline unsigned __umulhi(unsigned a, unsigned b) { return (unsigned)(((unsigned long long)a * b) >> 32); }
+// High 64 bits of a 64×64 product. Uses __int128 where the compiler has it
+// (clang/gcc on all 64-bit targets, including Windows); otherwise a portable
+// 32×32 decomposition so the JIT header also compiles under MSVC / on targets
+// without __int128.
+#if defined(__SIZEOF_INT128__)
 static inline long long __mul64hi(long long a, long long b)            { return (long long)(((__int128)a * b) >> 64); }
 static inline unsigned long long __umul64hi(unsigned long long a, unsigned long long b) { return (unsigned long long)(((unsigned __int128)a * b) >> 64); }
+#else
+static inline unsigned long long __umul64hi(unsigned long long a, unsigned long long b) {
+    const unsigned long long al = a & 0xFFFFFFFFull, ah = a >> 32;
+    const unsigned long long bl = b & 0xFFFFFFFFull, bh = b >> 32;
+    const unsigned long long ll = al * bl, lh = al * bh, hl = ah * bl, hh = ah * bh;
+    const unsigned long long cross = (ll >> 32) + (lh & 0xFFFFFFFFull) + (hl & 0xFFFFFFFFull);
+    return hh + (lh >> 32) + (hl >> 32) + (cross >> 32);
+}
+static inline long long __mul64hi(long long a, long long b) {
+    unsigned long long hi = __umul64hi((unsigned long long)a, (unsigned long long)b);
+    if (a < 0) hi -= (unsigned long long)b;   // signed correction (two's complement)
+    if (b < 0) hi -= (unsigned long long)a;
+    return (long long)hi;
+}
+#endif
 static inline int      __sad (int a, int b, int c)                { return (a > b ? a - b : b - a) + c; }
 static inline unsigned __usad(unsigned a, unsigned b, unsigned c) { return (a > b ? a - b : b - a) + c; }
 static inline unsigned __byte_perm(unsigned lo, unsigned hi, unsigned sel) {

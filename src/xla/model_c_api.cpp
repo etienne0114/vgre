@@ -5,6 +5,7 @@
 #include "vgre/xla/optim.h"
 #include "vgre/xla/tokenizer.h"
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>

@@ -12,16 +12,28 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 BUILD_DIR="${1:-$ROOT/build}"
 
+# Portable CPU count (Linux: nproc, macOS: sysctl).
+if command -v nproc >/dev/null 2>&1; then JOBS="$(nproc)";
+elif command -v sysctl >/dev/null 2>&1; then JOBS="$(sysctl -n hw.ncpu)";
+else JOBS=4; fi
+
+# Native shared-library names differ per OS (Linux .so, macOS .dylib, Windows .dll).
+case "$(uname -s)" in
+    Darwin) LIBS="libvgre.dylib libvgre.0.dylib libvgre_cudart.dylib libvgre_cudart.0.dylib"; PRIMARY="libvgre.dylib" ;;
+    MINGW*|MSYS*|CYGWIN*) LIBS="vgre.dll vgre_cudart.dll"; PRIMARY="vgre.dll" ;;
+    *)      LIBS="libvgre.so libvgre.so.0 libvgre.so.0.1.0 libvgre_cudart.so libvgre_cudart.so.0"; PRIMARY="libvgre.so" ;;
+esac
+
 echo "==> Ensuring native libraries are built in $BUILD_DIR"
-if [[ ! -f "$BUILD_DIR/libvgre.so" ]]; then
+if [[ ! -e "$BUILD_DIR/$PRIMARY" ]]; then
     cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
-    cmake --build "$BUILD_DIR" --target vgre vgre_cudart -j"$(nproc)"
+    cmake --build "$BUILD_DIR" --target vgre vgre_cudart -j"$JOBS"
 fi
 
 echo "==> Bundling shared libraries into vgre/lib/"
 mkdir -p "$HERE/vgre/lib"
-for so in libvgre.so libvgre.so.0 libvgre.so.0.1.0 libvgre_cudart.so libvgre_cudart.so.0; do
-    [[ -e "$BUILD_DIR/$so" ]] && cp -aP "$BUILD_DIR/$so" "$HERE/vgre/lib/" || true
+for lib in $LIBS; do
+    if [[ -e "$BUILD_DIR/$lib" ]]; then cp -P "$BUILD_DIR/$lib" "$HERE/vgre/lib/" || cp "$BUILD_DIR/$lib" "$HERE/vgre/lib/"; fi
 done
 
 echo "==> Building wheel"

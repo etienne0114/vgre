@@ -2,6 +2,7 @@
 
 #include "vgre/xla/model.h"
 
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <stdexcept>

@@ -55,8 +55,12 @@ bool save_checkpoint(GPT& model, const std::string& path) {
 
     std::ofstream out(path, std::ios::binary);
     if (!out) return false;
+    // safetensors mandates a little-endian u64 header length; write the bytes
+    // explicitly so the file is identical regardless of host endianness.
     const uint64_t hlen = header.size();
-    out.write(reinterpret_cast<const char*>(&hlen), 8);   // LE on x86/arm64
+    unsigned char lenLE[8];
+    for (int i = 0; i < 8; ++i) lenLE[i] = (unsigned char)((hlen >> (8 * i)) & 0xFF);
+    out.write(reinterpret_cast<const char*>(lenLE), 8);
     out.write(header.data(), (std::streamsize)header.size());
     for (const auto& [name, p] : named)
         out.write(reinterpret_cast<const char*>(p->data.data()),
