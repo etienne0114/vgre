@@ -45,6 +45,9 @@ def _bind() -> None:
     _lib.vgre_lm_train_step.restype = c.c_float
     _lib.vgre_lm_loss.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int]
     _lib.vgre_lm_loss.restype = c.c_float
+    _lib.vgre_lm_accumulate.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int, c.c_float]
+    _lib.vgre_lm_accumulate.restype = c.c_float
+    _lib.vgre_lm_optim_step.argtypes = [c.c_void_p, c.c_float, c.c_float]
     _lib.vgre_lm_generate.argtypes = [c.c_void_p, P(c.c_int), c.c_int, c.c_int,
                                       c.c_float, c.c_int, c.c_float, c.c_float,
                                       c.c_uint, P(c.c_int), c.c_int]
@@ -158,6 +161,28 @@ class LanguageModel:
         if loss < 0:
             raise RuntimeError("train_step failed")
         return float(loss)
+
+    def train_batch(self, batch, lr: float, clip: float = 1.0) -> float:
+        """Mini-batch AdamW step: accumulate gradients over a batch of
+        (ids, targets) sequences (each loss averaged by 1/len(batch)), then one
+        clipped optimizer update. Returns the mean batch loss. More stable than
+        the single-sequence train_step."""
+        if not batch:
+            return 0.0
+        inv = 1.0 / len(batch)
+        total = 0.0
+        for ids, tgt in batch:
+            if len(ids) != len(tgt):
+                raise ValueError("ids and targets must be the same length")
+            T = len(ids)
+            a = (ctypes.c_int * T)(*ids)
+            b = (ctypes.c_int * T)(*tgt)
+            l = _lib.vgre_lm_accumulate(self._h, a, b, T, ctypes.c_float(inv))
+            if l < 0:
+                raise RuntimeError("accumulate failed")
+            total += l
+        _lib.vgre_lm_optim_step(self._h, ctypes.c_float(lr), ctypes.c_float(clip))
+        return total * inv
 
     def loss(self, ids: List[int], targets: List[int]) -> float:
         """Forward-only cross-entropy loss (no gradient step) — for validation."""

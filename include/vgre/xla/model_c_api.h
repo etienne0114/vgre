@@ -37,6 +37,16 @@ VGRE_PUBLIC_API float vgre_lm_train_step(vgre_lm* m, const int* ids,
 // update (use for validation). Returns the scalar loss (or -1).
 VGRE_PUBLIC_API float vgre_lm_loss(vgre_lm* m, const int* ids, const int* tgt, int T);
 
+// Gradient accumulation: forward + backward for one sequence, scaling its
+// contribution by loss_scale (pass 1/batch_size to average a mini-batch), with
+// NO optimizer step and NO grad reset — call repeatedly to sum gradients, then
+// vgre_lm_optim_step once. Returns the (unscaled) loss for reporting (or -1).
+VGRE_PUBLIC_API float vgre_lm_accumulate(vgre_lm* m, const int* ids, const int* tgt,
+                                         int T, float loss_scale);
+// Apply one optimizer update from the accumulated gradients: clip the global
+// grad-norm to `clip` (<=0 disables), AdamW step at `lr`, then zero the grads.
+VGRE_PUBLIC_API void vgre_lm_optim_step(vgre_lm* m, float lr, float clip);
+
 // Cosine learning-rate schedule with linear warmup (stateless helper): for
 // `step` in [0,total), warms up linearly over `warmup` steps then decays from
 // base_lr to min_lr along a cosine. Lets a trainer pass a real LR schedule to
