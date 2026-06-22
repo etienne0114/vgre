@@ -63,7 +63,9 @@ int vgre_lm_generate(vgre_lm* m, const int* prompt, int prompt_len, int n_new,
     if (!m || !prompt || prompt_len <= 0 || !out || max_out <= 0) return -1;
     try {
         std::vector<int> p(prompt, prompt + prompt_len);
-        std::vector<int> g = model::generate(*m->gpt, p, n_new, temperature, seed);
+        // Use the KV-cached path: O(T) per token, token-identical to the
+        // reference for greedy decoding.
+        std::vector<int> g = m->gpt->generate_cached(p, n_new, temperature, seed);
         const int n = (int)std::min<size_t>(g.size(), (size_t)max_out);
         std::memcpy(out, g.data(), sizeof(int) * (size_t)n);
         return n;
