@@ -60,6 +60,8 @@ Var scale(const Var& a, float s);               // a * scalar
 Var relu(const Var& x);
 Var gelu(const Var& x);                          // exact: 0.5x(1+erf(x/√2))
 Var silu(const Var& x);                          // x * sigmoid(x)
+Var sigmoid(const Var& x);                       // 1/(1+e^-x)
+Var tanh_(const Var& x);                         // tanh
 // RMSNorm over the last dim of x[M,D] with a learnable gain weight[D].
 Var rms_norm(const Var& x, const Var& weight, float eps = 1e-5f);
 // LayerNorm over the last dim of x[M,D] with learnable weight[D] and bias[D].
@@ -95,6 +97,15 @@ Var conv2d(const Var& input, const Var& weight, const Var& bias,
            int stride = 1, int pad = 0);
 // 2-D max pooling: input[N,C,H,W] -> [N,C,Ho,Wo].
 Var max_pool2d(const Var& input, int kernel, int stride);
+// 2-D average pooling: input[N,C,H,W] -> [N,C,Ho,Wo].
+Var avg_pool2d(const Var& input, int kernel, int stride);
+// Batch normalization over [N,C,H,W] (per-channel statistics). gamma/beta are
+// learnable [C]. running_mean/running_var are persistent [C] buffers: in training
+// they are normalized with batch stats and the running buffers are EMA-updated;
+// in eval they are normalized with the running buffers (no batch dependence).
+Var batch_norm2d(const Var& x, const Var& gamma, const Var& beta,
+                 std::vector<float>& running_mean, std::vector<float>& running_var,
+                 bool training, float momentum = 0.1f, float eps = 1e-5f);
 // Reshape (data unchanged; total size must match). Gradient flows through.
 Var reshape(const Var& x, std::vector<int64_t> shape);
 // Inverted dropout: with probability p zero each element, scale survivors by
