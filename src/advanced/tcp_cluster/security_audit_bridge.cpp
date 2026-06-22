@@ -25,8 +25,8 @@ void mirror_security_event_to_audit(const std::string& event, const std::string&
                    lc.find("unauthorized") != std::string::npos;
     vgre::compliance::AuditLog::global().emit(
         ip.empty() ? "unknown" : ip, "cluster." + event, "cluster",
-        failure ? vgre::compliance::AuditOutcome::DENIED : vgre::compliance::AuditOutcome::SUCCESS,
-        failure ? vgre::compliance::AuditSeverity::WARNING : vgre::compliance::AuditSeverity::INFO,
+        failure ? vgre::compliance::AuditOutcome::Denied : vgre::compliance::AuditOutcome::Ok,
+        failure ? vgre::compliance::AuditSeverity::Warn : vgre::compliance::AuditSeverity::Info,
         {{"details", details}});
 }
 

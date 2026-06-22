@@ -325,9 +325,9 @@ float VectorEngine::vectorSum(const float* a, size_t n) {
 // Error bound: AVX2 |e₁| ≤ e₀² ≤ 2⁻²⁴ (within float32 23-bit mantissa);
 //              AVX-512 |e₁| ≤ 2⁻²⁸. One step suffices for both.
 // Complexity: O(n/8) AVX2 or O(n/16) AVX-512 iterations.
-void VectorEngine::vectorDiv(const float* __restrict__ a,
-                              const float* __restrict__ b,
-                              float* __restrict__ c, size_t n) {
+void VectorEngine::vectorDiv(const float* __restrict a,
+                              const float* __restrict b,
+                              float* __restrict c, size_t n) {
     size_t i = 0;
 #ifdef VGRE_HAS_AVX512
     {
@@ -403,8 +403,8 @@ void VectorEngine::vectorSqrt(const float* a, float* c, size_t n) {
 //   a < 0, NaN → NaN
 // The Halley step can corrupt specials (0→NaN, Inf→NaN due to 0*Inf), so the
 // AVX2 path uses a masked blend to preserve the hardware-computed specials.
-void VectorEngine::vectorRsqrt(const float* __restrict__ a,
-                                float* __restrict__ out, size_t n) {
+void VectorEngine::vectorRsqrt(const float* __restrict a,
+                                float* __restrict out, size_t n) {
     size_t i = 0;
 #if defined(VGRE_HAS_AVX2)
     const __m256 three  = _mm256_set1_ps(3.0f);

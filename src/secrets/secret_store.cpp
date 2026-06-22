@@ -85,7 +85,7 @@ const char* actionName(SecretAction a) {
         case SecretAction::READ:   return "secret.read";
         case SecretAction::WRITE:  return "secret.write";
         case SecretAction::ROTATE: return "secret.rotate";
-        case SecretAction::DELETE: return "secret.delete";
+        case SecretAction::Remove: return "secret.delete";
         case SecretAction::LIST:   return "secret.list";
         case SecretAction::ADMIN:  return "secret.admin";
     }
@@ -243,10 +243,10 @@ struct SecretStore::Impl {
                bool allowed) const {
         vgre::compliance::AuditLog::global().emit(
             principal, actionName(a), "secret:" + name,
-            allowed ? vgre::compliance::AuditOutcome::SUCCESS
-                    : vgre::compliance::AuditOutcome::DENIED,
-            allowed ? vgre::compliance::AuditSeverity::NOTICE
-                    : vgre::compliance::AuditSeverity::WARNING);
+            allowed ? vgre::compliance::AuditOutcome::Ok
+                    : vgre::compliance::AuditOutcome::Denied,
+            allowed ? vgre::compliance::AuditSeverity::Notice
+                    : vgre::compliance::AuditSeverity::Warn);
     }
 };
 
@@ -398,16 +398,16 @@ vgre::VGREResult SecretStore::remove(const std::string& principal, const std::st
     if (!impl_ || !impl_->opened) return vgre::VGREResult::ERR_NOT_INITIALIZED;
     std::lock_guard<std::mutex> lk(impl_->mu);
     auto it = impl_->secrets.find(name);
-    if (it == impl_->secrets.end()) { impl_->audit(principal, SecretAction::DELETE, name, false); return vgre::VGREResult::ERR_NOT_FOUND; }
-    if (!impl_->authorize(it->second, principal, SecretAction::DELETE)) {
-        impl_->audit(principal, SecretAction::DELETE, name, false);
+    if (it == impl_->secrets.end()) { impl_->audit(principal, SecretAction::Remove, name, false); return vgre::VGREResult::ERR_NOT_FOUND; }
+    if (!impl_->authorize(it->second, principal, SecretAction::Remove)) {
+        impl_->audit(principal, SecretAction::Remove, name, false);
         return vgre::VGREResult::ERR_AUTH_FAILED;
     }
     for (auto& v : it->second.versions)
         std::fill(v.sealed.begin(), v.sealed.end(), '\0'); // scrub in memory
     impl_->secrets.erase(it);
     impl_->persist();
-    impl_->audit(principal, SecretAction::DELETE, name, true);
+    impl_->audit(principal, SecretAction::Remove, name, true);
     return vgre::VGREResult::SUCCESS;
 }
 

@@ -137,8 +137,8 @@ PolicyDecision CompliancePolicyEngine::evaluate(const PolicyContext& ctx) const 
     AuditLog::global().emit(
         ctx.principal.empty() ? "system" : ctx.principal,
         std::string("compliance.") + ctx.action, ctx.resource,
-        dec.effect == PolicyEffect::DENY ? AuditOutcome::DENIED : AuditOutcome::SUCCESS,
-        dec.effect == PolicyEffect::DENY ? AuditSeverity::CRITICAL : AuditSeverity::NOTICE,
+        dec.effect == PolicyEffect::DENY ? AuditOutcome::Denied : AuditOutcome::Ok,
+        dec.effect == PolicyEffect::DENY ? AuditSeverity::Critical : AuditSeverity::Notice,
         {{"rule", dec.ruleId}, {"class", std::to_string((int)ctx.classification)}});
     return dec;
 }

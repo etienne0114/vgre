@@ -77,9 +77,9 @@ static void generateRandomToken(uint8_t* token, size_t size) {
         // Fallback to std::random_device
         std::random_device rd;
         std::mt19937_64 gen(rd());
-        std::uniform_int_distribution<uint8_t> dist(0, 255);
+        std::uniform_int_distribution<unsigned short> dist(0, 255);
         for (size_t i = 0; i < size; ++i) {
-            token[i] = dist(gen);
+            token[i] = static_cast<uint8_t>(dist(gen));
         }
     }
 #elif defined(__APPLE__)
@@ -96,9 +96,9 @@ static void generateRandomToken(uint8_t* token, size_t size) {
     // Fallback
     std::random_device rd;
     std::mt19937_64 gen(rd());
-    std::uniform_int_distribution<uint8_t> dist(0, 255);
+    std::uniform_int_distribution<unsigned short> dist(0, 255);
     for (size_t i = 0; i < size; ++i) {
-        token[i] = dist(gen);
+        token[i] = static_cast<uint8_t>(dist(gen));
     }
 #endif
 }
@@ -216,10 +216,13 @@ bool IPCManager::initialize(bool isMaster) {
 
   state_ = (GlobalState *)MapViewOfFile(shm_fd_, FILE_MAP_ALL_ACCESS, 0, 0,
                                         sizeof(GlobalState));
+  auto cleanupPosix = [this]() {
+    if (state_) { UnmapViewOfFile(state_); state_ = nullptr; }
+    if (shm_fd_) { CloseHandle(shm_fd_); shm_fd_ = nullptr; }
+  };
   if (!state_) {
     logInitFailure("Failed to map shared memory");
-    CloseHandle(shm_fd_);
-    shm_fd_ = nullptr;
+    cleanupPosix();
     return false;
   }
 #else

@@ -16,7 +16,11 @@
 namespace vgre {
 namespace core {
 
-enum class GuardStatus { OK, UNDERFLOW, OVERFLOW, UNKNOWN_PTR };
+// PascalCase values avoid collision with MSVC's <float.h> macros:
+//   #define OVERFLOW 3  and  #define UNDERFLOW 4  (for the old matherr() API).
+// Those macros arrive transitively through <mutex>/<unordered_map> on MSVC and
+// would be macro-expanded anywhere the bare token appears (including ::OVERFLOW).
+enum class GuardStatus { Ok, Underflow, Overflow, UnknownPtr };
 
 class BoundsChecker {
 public:

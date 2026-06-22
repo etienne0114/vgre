@@ -24,7 +24,7 @@ void Scheduler::workerLoop(int workerIdx) {
   // race-detector-clean, WITHOUT a topology barrier (a blocking/spinning barrier
   // here livelocks the constructor thread under CPU oversubscription).
   int myNode = (workerIdx >= 0 && workerIdx < static_cast<int>(workerNumaNodes_.size()))
-               ? __atomic_load_n(&workerNumaNodes_[workerIdx], __ATOMIC_ACQUIRE)
+               ? VGRE_ATOMIC_LOAD_ACQUIRE(&workerNumaNodes_[workerIdx])
                : -1;
 
   while (true) {
@@ -52,8 +52,7 @@ void Scheduler::workerLoop(int workerIdx) {
           int targetIdx = (workerIdx + i) % numThreads_;
           bool sameNuma = (myNode >= 0 &&
                            targetIdx < static_cast<int>(workerNumaNodes_.size()) &&
-                           __atomic_load_n(&workerNumaNodes_[targetIdx],
-                                           __ATOMIC_ACQUIRE) == myNode);
+                           VGRE_ATOMIC_LOAD_ACQUIRE(&workerNumaNodes_[targetIdx]) == myNode);
           if (phase == 0 && !sameNuma) continue; // phase 0: same NUMA only
           if (phase == 1 && sameNuma)  continue; // phase 1: remote NUMA only
           WorkItem* p = nullptr;

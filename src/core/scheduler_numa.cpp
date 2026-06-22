@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "vgre/common/os_backend.h"
+#include "vgre/common/cpu_barriers.h"
 #if defined(__linux__)
 #include <dirent.h>   // readdir — NUMA /sys/devices/system/node scan
 #include <fstream>
@@ -95,7 +96,7 @@ void Scheduler::buildNumaTopology() {
     // Atomic release store: pairs with the acquire load in workerLoop() so the
     // benign NUMA-hint read there is race-detector-clean (workers were already
     // spawned — affinity pinning below needs their handles).
-    __atomic_store_n(&workerNumaNodes_[i], nodeId, __ATOMIC_RELEASE);
+    VGRE_ATOMIC_STORE_RELEASE(&workerNumaNodes_[i], nodeId);
     workerNumaNodeSet_.insert(nodeId);
 
     int rc = pthread_setaffinity_np(workers_[i].native_handle(),
@@ -139,7 +140,7 @@ void Scheduler::buildNumaTopology() {
   int numNodes = static_cast<int>(nodes.size());
   for (int i = 0; i < numThreads_ && i < static_cast<int>(workers_.size()); ++i) {
     int ni = i % numNodes;
-    __atomic_store_n(&workerNumaNodes_[i], static_cast<int>(nodes[ni].nodeId), __ATOMIC_RELEASE);
+    VGRE_ATOMIC_STORE_RELEASE(&workerNumaNodes_[i], static_cast<int>(nodes[ni].nodeId));
     workerNumaNodeSet_.insert(static_cast<int>(nodes[ni].nodeId));
     HANDLE h = static_cast<HANDLE>(workers_[i].native_handle());
     if (SetThreadAffinityMask(h, static_cast<DWORD_PTR>(nodes[ni].mask)) == 0) {
@@ -174,7 +175,7 @@ void Scheduler::buildNumaTopology() {
   int numGroups = (perfCores > 0 && effCores > 0) ? 2 : 1;
   for (int i = 0; i < numThreads_ && i < static_cast<int>(workers_.size()); ++i) {
     int groupIdx = i % numGroups;
-    __atomic_store_n(&workerNumaNodes_[i], groupIdx, __ATOMIC_RELEASE);
+    VGRE_ATOMIC_STORE_RELEASE(&workerNumaNodes_[i], groupIdx);
     workerNumaNodeSet_.insert(groupIdx);
 
     thread_affinity_policy_data_t policy = {groupIdx + 1};

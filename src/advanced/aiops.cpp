@@ -69,7 +69,7 @@ SecurityReport SecurityAnalytics::analyze(const std::vector<vgre::compliance::Au
 
     std::map<std::string, int> deniedByActor;
     for (const auto& e : events) {
-        if (e.outcome == AuditOutcome::DENIED) {
+        if (e.outcome == AuditOutcome::Denied) {
             ++rep.deniedEvents;
             ++deniedByActor[e.actor];
         }
