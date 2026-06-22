@@ -4,6 +4,7 @@ add_library(vgre_xla OBJECT
     xla_c_api.cpp
     thread_pool.cpp
     blas_gemm.cpp
+    gemm/intree_gemm_f32.cpp
     safetensors.cpp
     gguf.cpp
     generation.cpp
