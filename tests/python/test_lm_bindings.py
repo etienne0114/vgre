@@ -59,6 +59,16 @@ def main() -> int:
     print(f"[3b] forward-only loss = {vl:.4f}")
     assert vl >= 0.0 and vl < first, "loss() should report a valid, post-training loss"
 
+    # Mini-batch training (gradient accumulation) also reduces loss.
+    bf, bl = None, None
+    for _ in range(20):
+        batch = [(ids[s:s + T], ids[s + 1:s + 1 + T])
+                 for s in (random.randint(0, len(ids) - T - 1) for _ in range(4))]
+        bl = lm.train_batch(batch, lr=2e-3)
+        bf = bl if bf is None else bf
+    print(f"[3c] mini-batch loss {bf:.4f} -> {bl:.4f}")
+    assert bl <= bf, "train_batch should not increase loss"
+
     gen = lm.generate(tok.encode("Shall I compare"), n_new=12, temperature=0.0)
     decoded = tok.decode(gen)
     print(f"[4] generated: {decoded!r}")

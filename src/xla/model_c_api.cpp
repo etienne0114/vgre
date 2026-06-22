@@ -66,6 +66,28 @@ float vgre_lm_train_step(vgre_lm* m, const int* ids, const int* tgt, int T, floa
     } catch (...) { return -1.0f; }
 }
 
+float vgre_lm_accumulate(vgre_lm* m, const int* ids, const int* tgt, int T, float loss_scale) {
+    if (!m || !ids || !tgt || T <= 0) return -1.0f;
+    try {
+        std::vector<int> v_ids(ids, ids + T), v_tgt(tgt, tgt + T);
+        autograd::Var loss = autograd::softmax_cross_entropy(m->gpt->forward(v_ids), v_tgt);
+        // Scale the loss so a mini-batch of N sequences averages (pass 1/N).
+        autograd::Var seed = (loss_scale == 1.0f) ? loss : autograd::scale(loss, loss_scale);
+        autograd::backward(seed);   // grads accumulate (+=) into the leaf params
+        return loss->data[0];
+    } catch (...) { return -1.0f; }
+}
+
+void vgre_lm_optim_step(vgre_lm* m, float lr, float clip) {
+    if (!m) return;
+    try {
+        m->opt->set_lr(lr);
+        if (clip > 0.0f) optim::clip_grad_norm(m->gpt->parameters(), clip);
+        m->opt->step();
+        m->opt->zero_grad();
+    } catch (...) {}
+}
+
 float vgre_cosine_lr(long long step, long long warmup, long long total,
                      float base_lr, float min_lr) {
     return optim::cosine_lr(step, warmup, total, base_lr, min_lr);
