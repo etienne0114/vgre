@@ -122,8 +122,15 @@ make the **default, no-dependency** build fast.
 > residual → GELU MLP → output proj) **overfits a fixed token sequence to loss ~2e-5** (from
 > ln V ≈ 2.77). VGRE trains a transformer end-to-end on CPU with zero external dependencies.
 >
-> **Remaining in this phase:** the streaming **data pipeline** (public-domain corpus + the existing
-> BPE tokenizer, packed to context length) and **checkpoint save/load** via the safetensors writer.
+> **Status (2026-06-22): data pipeline + checkpoint I/O DONE.** `TokenStream` yields random
+> next-token windows from a tokenized corpus; checkpoints are written as **standard safetensors**
+> (`src/xla/model/checkpoint.cpp`, Config in `__metadata__`) and read back through the existing
+> `vgre::xla::SafeTensors` loader — so trained weights round-trip and serve on the existing inference
+> path. `tests/xla/test_lm_pipeline.cpp` runs the whole loop **offline** on an embedded public-domain
+> corpus (Shakespeare, Sonnet 18): train the BPE tokenizer → encode → train the GPT
+> (loss 5.87 → 0.006) → save → reload into a fresh model (**identical logits, max|diff| = 0**) →
+> generate + decode to real text (*"Shall I compare thee to a summer's … day? Thou art more
+> lovely"*). The whole train→checkpoint→serve→generate path is in-tree with no external download.
 
 - Optimizers: SGD(+momentum), Adam, **AdamW**; global grad-norm clipping; cosine LR + warmup.
 - **Mixed precision**: bf16 compute / fp32 master weights (halves memory, leans on AMX/the new GEMM).

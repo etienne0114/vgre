@@ -8,6 +8,7 @@ add_library(vgre_xla OBJECT
     autograd/autograd.cpp
     autograd/optim.cpp
     model/transformer.cpp
+    model/checkpoint.cpp
     safetensors.cpp
     gguf.cpp
     generation.cpp

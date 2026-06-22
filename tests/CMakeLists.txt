@@ -869,6 +869,13 @@ target_link_libraries(test_model PRIVATE vgre Threads::Threads)
 add_test(NAME XlaModel COMMAND test_model)
 set_tests_properties(XlaModel PROPERTIES TIMEOUT 240)
 
+# VGRE-LM full pipeline: real text → BPE → train → checkpoint round-trip →
+# generate + decode (all offline, embedded public-domain corpus).
+add_executable(test_lm_pipeline xla/test_lm_pipeline.cpp)
+target_link_libraries(test_lm_pipeline PRIVATE vgre Threads::Threads)
+add_test(NAME XlaLmPipeline COMMAND test_lm_pipeline)
+set_tests_properties(XlaLmPipeline PROPERTIES TIMEOUT 240)
+
 # Memory-mapped safetensors checkpoint loader (F32/F16/BF16/int dtypes) — L1.
 add_executable(test_safetensors xla/test_safetensors.cpp)
 target_link_libraries(test_safetensors PRIVATE vgre)
