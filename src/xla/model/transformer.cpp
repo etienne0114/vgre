@@ -361,7 +361,7 @@ void GPT::set_int8_inference(bool on) {
         quant(L.Wgate->data, D, F, L.Wgate_q8); quant(L.Wup->data, D, F, L.Wup_q8);
         quant(L.Wdown->data, F, D, L.Wdown_q8);
     }
-    if (lm_head_) quant(lm_head_->data, D, V, lm_head_q8_);   // tied head stays fp32
+    if (lm_head_) quant(lm_head_->data, D, V, lm_head_q8_);   // untied head; tied uses tok_emb_q8_
 }
 
 void GPT::drop_fp32_weights() {
@@ -387,7 +387,7 @@ void GPT::set_bf16_inference(bool on) {
         for (size_t i = 0; i < src.size(); ++i) dst[i] = f32_to_bf16(src[i]);
     };
     toBf16(tok_emb_->data, tok_emb_bf16_);
-    if (lm_head_) toBf16(lm_head_->data, lm_head_bf16_);   // tied head stays fp32
+    if (lm_head_) toBf16(lm_head_->data, lm_head_bf16_);   // untied head; tied uses tok_emb_bf16_
     for (auto& L : layers_) {
         toBf16(L.Wq->data, L.Wq_bf16);     toBf16(L.Wk->data, L.Wk_bf16);
         toBf16(L.Wv->data, L.Wv_bf16);     toBf16(L.Wo->data, L.Wo_bf16);

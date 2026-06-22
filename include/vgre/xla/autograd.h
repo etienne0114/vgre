@@ -58,7 +58,7 @@ Var add(const Var& a, const Var& b);
 Var mul(const Var& a, const Var& b);            // elementwise, same shape
 Var scale(const Var& a, float s);               // a * scalar
 Var relu(const Var& x);
-Var gelu(const Var& x);                          // tanh approximation
+Var gelu(const Var& x);                          // exact: 0.5x(1+erf(x/√2))
 Var silu(const Var& x);                          // x * sigmoid(x)
 // RMSNorm over the last dim of x[M,D] with a learnable gain weight[D].
 Var rms_norm(const Var& x, const Var& weight, float eps = 1e-5f);
