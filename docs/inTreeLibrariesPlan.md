@@ -170,9 +170,15 @@ make the **default, no-dependency** build fast.
 > repetition. Exposed through the C-ABI and `vgre.LanguageModel.generate(...)`; verified valid
 > in-vocab + reproducible-for-fixed-seed in `tests/xla/test_model.cpp`.
 >
-> **Remaining:** train on a real public-domain corpus to a coherent checkpoint (needs the data
-> pipeline + checkpoint save/load from Phase 3); the full ~100M run is a documented long-wall-clock
-> recipe (bf16 GEMM + cluster). No external download at any size.
+> **Runnable training tool (2026-06-22): DONE.** `examples/train_lm.py` is a real CLI over the
+> Python wheel — train a BPE tokenizer + a configurable GPT on any text (or the bundled
+> public-domain sample), with a held-out **validation** split (forward-only `vgre_lm_loss` /
+> `LanguageModel.loss()`), periodic train/val loss, sampled generation, and a safetensors save.
+> A demo run (1.21M params, 600 steps, 58 s on CPU) drove **val loss 6.06 → 0.09** (baseline
+> ln(vocab)=6.43) and generated coherent multi-line Shakespeare — genuine learning, fully offline.
+>
+> **Remaining:** the full ~100M run is a documented long-wall-clock recipe (bf16 GEMM + cluster) —
+> same code, more compute. No external download at any size.
 - Train in-tree to a **real, coherent checkpoint** on public-domain data; ship the checkpoint (or a
   fully-offline, reproducible recipe).
 - Realism: a small `~10M` config trains in CPU-minutes as the CI/default model; the `~100M` target

@@ -42,6 +42,8 @@ def _bind() -> None:
     _lib.vgre_lm_set_bf16_inference.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_train_step.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int, c.c_float]
     _lib.vgre_lm_train_step.restype = c.c_float
+    _lib.vgre_lm_loss.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int]
+    _lib.vgre_lm_loss.restype = c.c_float
     _lib.vgre_lm_generate.argtypes = [c.c_void_p, P(c.c_int), c.c_int, c.c_int,
                                       c.c_float, c.c_int, c.c_float, c.c_float,
                                       c.c_uint, P(c.c_int), c.c_int]
@@ -140,6 +142,18 @@ class LanguageModel:
         if loss < 0:
             raise RuntimeError("train_step failed")
         return float(loss)
+
+    def loss(self, ids: List[int], targets: List[int]) -> float:
+        """Forward-only cross-entropy loss (no gradient step) — for validation."""
+        if len(ids) != len(targets):
+            raise ValueError("ids and targets must be the same length")
+        T = len(ids)
+        a = (ctypes.c_int * T)(*ids)
+        b = (ctypes.c_int * T)(*targets)
+        v = _lib.vgre_lm_loss(self._h, a, b, T)
+        if v < 0:
+            raise RuntimeError("loss failed")
+        return float(v)
 
     def generate(self, prompt: List[int], n_new: int = 32, temperature: float = 0.0,
                  top_k: int = 0, top_p: float = 1.0, repetition_penalty: float = 1.0,

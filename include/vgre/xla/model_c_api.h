@@ -29,6 +29,10 @@ VGRE_PUBLIC_API void      vgre_lm_set_bf16_inference(vgre_lm* m, int on);
 VGRE_PUBLIC_API float vgre_lm_train_step(vgre_lm* m, const int* ids,
                                          const int* tgt, int T, float lr);
 
+// Forward-only cross-entropy loss for a sequence — no backward, no optimizer
+// update (use for validation). Returns the scalar loss (or -1).
+VGRE_PUBLIC_API float vgre_lm_loss(vgre_lm* m, const int* ids, const int* tgt, int T);
+
 // Autoregressive generation (KV-cached). Sampling controls: temperature<=0 →
 // greedy; top_k>0 keeps the top-k logits; top_p<1 applies nucleus cutoff;
 // repetition_penalty>1 penalizes already-seen tokens. Writes up to max_out ids
