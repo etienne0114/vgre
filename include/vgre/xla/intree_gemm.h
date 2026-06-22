@@ -27,6 +27,16 @@ void gemm_f32_rows(bool transA, bool transB,
                    const float* A, const float* B, float* C,
                    int64_t m0, int64_t m1);
 
+// bfloat16 variant: A and B are bf16 (uint16, the high 16 bits of an f32), C is
+// fp32. The big operands stay bf16 in memory (half the footprint / bandwidth);
+// they are widened to f32 only inside the small cache-resident pack panels, and
+// accumulation is in fp32 — the standard mixed-precision contract for ML. Same
+// transpose/layout conventions as gemm_f32_rows.
+void gemm_bf16_rows(bool transA, bool transB,
+                    int64_t M, int64_t N, int64_t K,
+                    const uint16_t* A, const uint16_t* B, float* C,
+                    int64_t m0, int64_t m1);
+
 // Which micro-kernel ISA the runtime selected: "avx512", "avx2", or "scalar".
 // For tests/telemetry only.
 const char* gemm_f32_isa();
