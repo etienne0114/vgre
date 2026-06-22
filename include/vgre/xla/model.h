@@ -69,6 +69,14 @@ public:
     void set_bf16_inference(bool on);
     bool bf16_inference() const { return bf16_inference_; }
 
+    // Enable weight-only int8 inference: each big matmul weight is quantized to
+    // int8 with a per-output-channel symmetric scale (~4× smaller than fp32) and
+    // dequantized inside the GEMV during generate_cached. fp32 activations /
+    // accumulation. Mutually exclusive with bf16 inference; training is
+    // unaffected. Idempotent; pass false to disable.
+    void set_int8_inference(bool on);
+    bool int8_inference() const { return int8_inference_; }
+
     // All trainable parameters (for the optimizer).
     std::vector<Var>& parameters() { return params_; }
     // Canonically-named parameters (for checkpoint save/load), e.g.
@@ -78,11 +86,15 @@ public:
     int64_t num_parameters() const;
 
 private:
+    // int8 weight + per-output-channel scale, for weight-only int8 inference.
+    struct Q8 { std::vector<int8_t> w; std::vector<float> scale; };
     struct Layer {
         Var ln1_g, Wq, Wk, Wv, Wo, ln2_g, Wgate, Wup, Wdown;
         // bf16 (uint16) caches of the big matmul weights, built on demand.
         std::vector<uint16_t> Wq_bf16, Wk_bf16, Wv_bf16, Wo_bf16,
                               Wgate_bf16, Wup_bf16, Wdown_bf16;
+        // int8 caches of the same weights.
+        Q8 Wq_q8, Wk_q8, Wv_q8, Wo_q8, Wgate_q8, Wup_q8, Wdown_q8;
     };
     Config            cfg_;
     Var               tok_emb_;     // [V, D]
@@ -91,7 +103,9 @@ private:
     Var               lm_head_;     // [D, V]
     std::vector<Var>  params_;
     bool                  bf16_inference_ = false;
+    bool                  int8_inference_ = false;
     std::vector<uint16_t> tok_emb_bf16_, lm_head_bf16_;
+    Q8                    lm_head_q8_;   // tok_emb stays fp32/bf16 (gather, not matmul)
 };
 
 // Autoregressive generation. temperature<=0 → greedy argmax; otherwise sample
