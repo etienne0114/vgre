@@ -31,6 +31,10 @@ VGRE_PUBLIC_API void      vgre_lm_set_bf16_inference(vgre_lm* m, int on);
 // scale, fp32 accumulation). Mutually exclusive with bf16. on=0 disables.
 VGRE_PUBLIC_API void      vgre_lm_set_int8_inference(vgre_lm* m, int on);
 
+// Free the fp32 master weights after quantizing so the resident footprint truly
+// drops to ½× (bf16) / ¼× (int8). Serve-only afterwards (training will fail).
+VGRE_PUBLIC_API void      vgre_lm_drop_fp32_weights(vgre_lm* m);
+
 // One AdamW training step on a single sequence (ids/tgt length T, tgt = next
 // tokens). Applies grad-norm clipping at 1.0. Returns the scalar loss (or -1).
 VGRE_PUBLIC_API float vgre_lm_train_step(vgre_lm* m, const int* ids,

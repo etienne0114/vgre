@@ -54,6 +54,10 @@ void vgre_lm_set_int8_inference(vgre_lm* m, int on) {
     if (m) m->gpt->set_int8_inference(on != 0);
 }
 
+void vgre_lm_drop_fp32_weights(vgre_lm* m) {
+    if (m) try { m->gpt->drop_fp32_weights(); } catch (...) {}
+}
+
 float vgre_lm_train_step(vgre_lm* m, const int* ids, const int* tgt, int T, float lr) {
     if (!m || !ids || !tgt || T <= 0) return -1.0f;
     try {

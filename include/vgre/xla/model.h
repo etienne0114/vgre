@@ -79,6 +79,14 @@ public:
     void set_int8_inference(bool on);
     bool int8_inference() const { return int8_inference_; }
 
+    // Free the fp32 master copies of the big weights after quantizing, so the
+    // resident footprint actually drops to the bf16 (½×) / int8 (¼×) size.
+    // Requires set_bf16_inference / set_int8_inference first. The model becomes
+    // SERVE-ONLY afterwards (forward()/training will throw); generation uses the
+    // quantized caches. Tiny norm gains stay fp32.
+    void drop_fp32_weights();
+    bool fp32_dropped() const { return fp32_dropped_; }
+
     // All trainable parameters (for the optimizer).
     std::vector<Var>& parameters() { return params_; }
     // Canonically-named parameters (for checkpoint save/load), e.g.
@@ -106,8 +114,12 @@ private:
     std::vector<Var>  params_;
     bool                  bf16_inference_ = false;
     bool                  int8_inference_ = false;
+    bool                  fp32_dropped_   = false;
     std::vector<uint16_t> tok_emb_bf16_, lm_head_bf16_;
-    Q8                    lm_head_q8_;   // tok_emb stays fp32/bf16 (gather, not matmul)
+    // int8 caches. tok_emb is quantized PER ROW (per token): the row scale serves
+    // both the embedding gather (dequant a row) and, when tied, the output head
+    // (per-vocab output scale). lm_head (untied) is quantized per output channel.
+    Q8                    tok_emb_q8_, lm_head_q8_;
 };
 
 // Autoregressive generation. temperature<=0 → greedy argmax; otherwise sample

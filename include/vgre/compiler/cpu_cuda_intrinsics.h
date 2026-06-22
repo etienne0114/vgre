@@ -136,7 +136,19 @@ static inline void __threadfence_system() { std::atomic_thread_fence(std::memory
 
 // ── Misc ────────────────────────────────────────────────────────────────────
 static inline float __saturatef(float x) { return x != x ? 0.0f : (x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x)); }
-static inline void  __nanosleep(unsigned) { std::atomic_thread_fence(std::memory_order_seq_cst); }
+// Real busy-backoff for ~ns nanoseconds (the CPU analogue of the GPU's
+// __nanosleep): spin the CPU's pause/yield instruction a proportional number of
+// times. Like the hardware intrinsic this is an "at least" lower-bound hint, not
+// a precise sleep — but it genuinely backs off the core rather than no-op'ing.
+static inline void __nanosleep(unsigned ns) {
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+    for (unsigned i = 0; i < ns; ++i) __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    for (unsigned i = 0; i < ns; ++i) __asm__ __volatile__("yield");
+#else
+    for (volatile unsigned i = 0; i < ns; ++i) { }
+#endif
+}
 static inline void  __trap()  { std::abort(); }
 
 // ── Single-precision rounded arithmetic ─────────────────────────────────────
