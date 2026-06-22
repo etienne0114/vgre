@@ -88,6 +88,37 @@ int64_t GPT::num_parameters() const {
     return n;
 }
 
+std::vector<std::pair<std::string, Var>> GPT::named_parameters() {
+    std::vector<std::pair<std::string, Var>> out;
+    out.emplace_back("tok_emb", tok_emb_);
+    for (size_t i = 0; i < layers_.size(); ++i) {
+        const std::string pre = "layers." + std::to_string(i) + ".";
+        const Layer& L = layers_[i];
+        out.emplace_back(pre + "ln1_g", L.ln1_g);
+        out.emplace_back(pre + "Wq",    L.Wq);
+        out.emplace_back(pre + "Wk",    L.Wk);
+        out.emplace_back(pre + "Wv",    L.Wv);
+        out.emplace_back(pre + "Wo",    L.Wo);
+        out.emplace_back(pre + "ln2_g", L.ln2_g);
+        out.emplace_back(pre + "Wgate", L.Wgate);
+        out.emplace_back(pre + "Wup",   L.Wup);
+        out.emplace_back(pre + "Wdown", L.Wdown);
+    }
+    out.emplace_back("final_g", final_g_);
+    out.emplace_back("lm_head", lm_head_);
+    return out;
+}
+
+void TokenStream::sample(int T, std::mt19937& rng,
+                         std::vector<int>& ids, std::vector<int>& tgt) const {
+    if ((int)tokens_.size() < T + 1)
+        throw std::runtime_error("TokenStream: corpus shorter than context+1");
+    std::uniform_int_distribution<size_t> ud(0, tokens_.size() - (size_t)T - 1);
+    const size_t s = ud(rng);
+    ids.assign(tokens_.begin() + s, tokens_.begin() + s + T);
+    tgt.assign(tokens_.begin() + s + 1, tokens_.begin() + s + 1 + T);
+}
+
 std::vector<int> generate(GPT& model, std::vector<int> prompt, int n_new,
                           float temperature, uint32_t seed) {
     const Config& cfg = model.config();
