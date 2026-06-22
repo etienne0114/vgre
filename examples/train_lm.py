@@ -72,6 +72,8 @@ def main() -> int:
     ap.add_argument("--batch", type=int, default=1, help="sequences per optimizer step")
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--warmup", type=int, default=0, help="LR warmup steps (default 10%)")
+    ap.add_argument("--dropout", type=float, default=0.0, help="residual dropout (training)")
+    ap.add_argument("--tie", action="store_true", help="tie input/output embeddings")
     ap.add_argument("--serve-dtype", choices=["f32", "bf16", "int8"], default="f32",
                     help="weight precision used for the final generation")
     ap.add_argument("--out", default="vgre_lm.safetensors")
@@ -97,7 +99,8 @@ def main() -> int:
     print(f"[data] vocab={V} tokens={len(ids)} (train={len(train_ids)} val={len(val_ids)})")
 
     lm = vgre.LanguageModel(vocab=V, n_layer=args.layers, d_model=args.dim,
-                            n_head=args.heads, max_seq=max(args.ctx + 1, 64), seed=args.seed)
+                            n_head=args.heads, max_seq=max(args.ctx + 1, 64),
+                            dropout=args.dropout, tie_embeddings=args.tie, seed=args.seed)
     print(f"[model] {lm.num_parameters/1e6:.2f}M parameters "
           f"({args.layers}L x d{args.dim} x {args.heads}h)")
 

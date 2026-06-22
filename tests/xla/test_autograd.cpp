@@ -103,6 +103,17 @@ int main() {
         });
     }
 
+    // 5b. linear_tied: logits = x · Wᵀ (weight tying)
+    {
+        std::vector<int> tgt = {1, 0, 2};
+        checkGrads("linear_tied+sce", {
+            make({3, 5}, randn(15, 23), true),   // x [T=3, D=5]
+            make({4, 5}, randn(20, 24), true),   // tied table W [V=4, D=5]
+        }, [tgt](const std::vector<Var>& p) {
+            return softmax_cross_entropy(linear_tied(p[0], p[1]), tgt);
+        });
+    }
+
     // 6. LayerNorm with learnable weight + bias
     checkGrads("layer_norm", {
         make({3, 5}, randn(15, 11), true),    // x

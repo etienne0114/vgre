@@ -120,6 +120,33 @@ int main() {
         else { std::printf("[FAIL] sampling produced invalid/non-reproducible output\n"); ++g_fail; }
     }
 
+    // ── Weight tying: fewer params, still trains + generates ─────────────────
+    {
+        Config tc = cfg;
+        tc.tie_embeddings = true;
+        GPT tied(tc, /*seed=*/7);
+        std::printf("tied model params = %lld (untied was %lld)\n",
+                    (long long)tied.num_parameters(), (long long)gpt.num_parameters());
+        bool fewer = tied.num_parameters() < gpt.num_parameters();
+        AdamW topt(tied.parameters(), 3e-3f);
+        float f0 = 0, lN = 0;
+        for (int step = 0; step < 300; ++step) {
+            topt.zero_grad();
+            autograd::Var loss = autograd::softmax_cross_entropy(tied.forward(ids), tgt);
+            autograd::backward(loss);
+            clip_grad_norm(tied.parameters(), 1.0f);
+            topt.step();
+            if (step == 0) f0 = loss->data[0];
+            lN = loss->data[0];
+        }
+        std::vector<int> g = tied.generate_cached({seq[0]}, T);
+        int mm = 0; for (int i = 0; i <= T && i < (int)g.size(); ++i) if (g[i] == seq[i]) ++mm;
+        std::printf("tied: loss %.3f->%.3f, gen matches %d/%d\n", f0, lN, mm, T + 1);
+        if (fewer && lN < 0.1f && mm >= T - 1)
+            std::printf("[PASS] weight-tied model: fewer params, trains + generates\n");
+        else { std::printf("[FAIL] weight-tied model\n"); ++g_fail; }
+    }
+
     // ── ~100M target config: verify the parameter count of the scaled model ──
     {
         Config big;

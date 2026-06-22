@@ -13,9 +13,12 @@ extern "C" {
 // ── Language model ───────────────────────────────────────────────────────────
 typedef struct vgre_lm vgre_lm;
 
-// Create a GPT. d_ff<=0 → 4*d_model. Returns NULL on invalid config.
+// Create a GPT. d_ff<=0 → 4*d_model. dropout is the training residual-dropout
+// rate (0 = off); tie_embeddings!=0 shares the token embedding as the output
+// projection. Returns NULL on invalid config.
 VGRE_PUBLIC_API vgre_lm* vgre_lm_create(int vocab, int n_layer, int d_model,
                                         int n_head, int d_ff, int max_seq,
+                                        float dropout, int tie_embeddings,
                                         unsigned seed);
 VGRE_PUBLIC_API void      vgre_lm_free(vgre_lm* m);
 VGRE_PUBLIC_API long long vgre_lm_num_params(const vgre_lm* m);

@@ -49,6 +49,9 @@ Var make(std::vector<int64_t> shape, std::vector<float> data,
 // ── Differentiable ops ───────────────────────────────────────────────────────
 // Row-major 2-D matmul: A[M,K] · B[K,N] -> [M,N]. (Both operands rank-2.)
 Var matmul(const Var& a, const Var& b);
+// Tied linear: x[M,D] · Wᵀ -> [M,V], where W is stored [V,D] (e.g. a shared
+// token-embedding table used as the output projection — weight tying).
+Var linear_tied(const Var& x, const Var& w);
 // Elementwise add. b is either the same shape as a, or a 1-D bias [N] broadcast
 // over the rows of a 2-D a[M,N].
 Var add(const Var& a, const Var& b);
