@@ -610,6 +610,159 @@ Var mean(const Var& x) {
     return out;
 }
 
+// ── Vision: conv2d (im2col + GEMM), max_pool2d, reshape ──────────────────────
+namespace {
+// im2col for one image: input[Ci,H,W] → cols[Ci*Kh*Kw, Ho*Wo].
+void im2col(const float* in, int Ci, int H, int W, int Kh, int Kw,
+            int stride, int pad, int Ho, int Wo, float* cols) {
+    const int K = Ci * Kh * Kw, P = Ho * Wo;
+    for (int ci = 0; ci < Ci; ++ci)
+        for (int kh = 0; kh < Kh; ++kh)
+            for (int kw = 0; kw < Kw; ++kw) {
+                const int row = (ci * Kh + kh) * Kw + kw;
+                for (int ho = 0; ho < Ho; ++ho) {
+                    const int h = ho * stride + kh - pad;
+                    for (int wo = 0; wo < Wo; ++wo) {
+                        const int w = wo * stride + kw - pad;
+                        const bool in_b = (h >= 0 && h < H && w >= 0 && w < W);
+                        cols[(int64_t)row * P + ho * Wo + wo] =
+                            in_b ? in[((int64_t)ci * H + h) * W + w] : 0.0f;
+                    }
+                }
+                (void)K;
+            }
+}
+// col2im: scatter-add cols[Ci*Kh*Kw, Ho*Wo] back into dInput[Ci,H,W].
+void col2im(const float* cols, int Ci, int H, int W, int Kh, int Kw,
+            int stride, int pad, int Ho, int Wo, float* dIn) {
+    const int P = Ho * Wo;
+    for (int ci = 0; ci < Ci; ++ci)
+        for (int kh = 0; kh < Kh; ++kh)
+            for (int kw = 0; kw < Kw; ++kw) {
+                const int row = (ci * Kh + kh) * Kw + kw;
+                for (int ho = 0; ho < Ho; ++ho) {
+                    const int h = ho * stride + kh - pad;
+                    if (h < 0 || h >= H) continue;
+                    for (int wo = 0; wo < Wo; ++wo) {
+                        const int w = wo * stride + kw - pad;
+                        if (w < 0 || w >= W) continue;
+                        dIn[((int64_t)ci * H + h) * W + w] += cols[(int64_t)row * P + ho * Wo + wo];
+                    }
+                }
+            }
+}
+}  // namespace
+
+Var conv2d(const Var& input, const Var& weight, const Var& bias, int stride, int pad) {
+    if (input->shape.size() != 4 || weight->shape.size() != 4)
+        throw std::runtime_error("conv2d: input[N,Ci,H,W], weight[Co,Ci,Kh,Kw]");
+    const int N = (int)input->shape[0], Ci = (int)input->shape[1];
+    const int H = (int)input->shape[2], W = (int)input->shape[3];
+    const int Co = (int)weight->shape[0], Kh = (int)weight->shape[2], Kw = (int)weight->shape[3];
+    if ((int)weight->shape[1] != Ci) throw std::runtime_error("conv2d: channel mismatch");
+    const bool hasBias = bias && bias->size() == Co;
+    const int Ho = (H + 2 * pad - Kh) / stride + 1;
+    const int Wo = (W + 2 * pad - Kw) / stride + 1;
+    if (Ho <= 0 || Wo <= 0) throw std::runtime_error("conv2d: output size <= 0");
+    const int K = Ci * Kh * Kw, P = Ho * Wo;
+
+    std::vector<Var> parents = {input, weight};
+    if (hasBias) parents.push_back(bias);
+    Var out = newNode({N, Co, Ho, Wo}, parents,
+                      anyReq({&input, &weight}) || (hasBias && bias->requires_grad));
+
+    std::vector<float> cols((size_t)K * P);
+    for (int n = 0; n < N; ++n) {
+        im2col(input->data.data() + (int64_t)n * Ci * H * W, Ci, H, W, Kh, Kw, stride, pad, Ho, Wo, cols.data());
+        // out[n][Co,P] = weight[Co,K] · cols[K,P]
+        intree::gemm_f32_threaded(false, false, Co, P, K,
+                                  weight->data.data(), cols.data(),
+                                  out->data.data() + (int64_t)n * Co * P);
+        if (hasBias)
+            for (int co = 0; co < Co; ++co) {
+                float* o = out->data.data() + ((int64_t)n * Co + co) * P;
+                const float b = bias->data[co];
+                for (int p = 0; p < P; ++p) o[p] += b;
+            }
+    }
+
+    Node* op = out.get();
+    Var In = input, Wt = weight, Bs = hasBias ? bias : Var{};
+    out->backward_fn = [op, In, Wt, Bs, N, Ci, H, W, Co, Kh, Kw, stride, pad, Ho, Wo, K, P]() {
+        std::vector<float> cols((size_t)K * P);
+        for (int n = 0; n < N; ++n) {
+            const float* dout = op->grad.data() + (int64_t)n * Co * P;   // [Co,P]
+            im2col(In->data.data() + (int64_t)n * Ci * H * W, Ci, H, W, Kh, Kw, stride, pad, Ho, Wo, cols.data());
+            if (Wt->requires_grad) {
+                // dW[Co,K] += dout[Co,P] · colsᵀ[P,K]
+                std::vector<float> dW((size_t)Co * K, 0.0f);
+                intree::gemm_f32_threaded(false, true, Co, K, P, dout, cols.data(), dW.data());
+                for (size_t i = 0; i < dW.size(); ++i) Wt->grad[i] += dW[i];
+            }
+            if (In->requires_grad) {
+                // dcols[K,P] = Wtᵀ[K,Co] · dout[Co,P]; then col2im → dInput
+                std::vector<float> dcols((size_t)K * P, 0.0f);
+                intree::gemm_f32_threaded(true, false, K, P, Co, Wt->data.data(), dout, dcols.data());
+                col2im(dcols.data(), Ci, H, W, Kh, Kw, stride, pad, Ho, Wo,
+                       In->grad.data() + (int64_t)n * Ci * H * W);
+            }
+            if (Bs && Bs->requires_grad)
+                for (int co = 0; co < Co; ++co) {
+                    float s = 0.0f;
+                    for (int p = 0; p < P; ++p) s += dout[(int64_t)co * P + p];
+                    Bs->grad[co] += s;
+                }
+        }
+    };
+    return out;
+}
+
+Var max_pool2d(const Var& input, int kernel, int stride) {
+    if (input->shape.size() != 4) throw std::runtime_error("max_pool2d: input[N,C,H,W]");
+    const int N = (int)input->shape[0], C = (int)input->shape[1];
+    const int H = (int)input->shape[2], W = (int)input->shape[3];
+    const int Ho = (H - kernel) / stride + 1, Wo = (W - kernel) / stride + 1;
+    if (Ho <= 0 || Wo <= 0) throw std::runtime_error("max_pool2d: output size <= 0");
+    Var out = newNode({N, C, Ho, Wo}, {input}, input->requires_grad);
+    auto argmax = std::make_shared<std::vector<int64_t>>((size_t)N * C * Ho * Wo);  // flat input index
+    for (int n = 0; n < N; ++n)
+        for (int c = 0; c < C; ++c) {
+            const float* in = input->data.data() + ((int64_t)n * C + c) * H * W;
+            for (int ho = 0; ho < Ho; ++ho)
+                for (int wo = 0; wo < Wo; ++wo) {
+                    float best = -1e30f; int64_t bi = 0;
+                    for (int kh = 0; kh < kernel; ++kh)
+                        for (int kw = 0; kw < kernel; ++kw) {
+                            const int h = ho * stride + kh, w = wo * stride + kw;
+                            const int64_t idx = (int64_t)h * W + w;
+                            if (in[idx] > best) { best = in[idx]; bi = idx; }
+                        }
+                    const int64_t o = (((int64_t)n * C + c) * Ho + ho) * Wo + wo;
+                    out->data[o] = best;
+                    (*argmax)[o] = ((int64_t)n * C + c) * H * W + bi;   // flat input index
+                }
+        }
+    Node* op = out.get(); Var In = input;
+    out->backward_fn = [op, In, argmax]() {
+        if (!In->requires_grad) return;
+        for (size_t o = 0; o < argmax->size(); ++o) In->grad[(*argmax)[o]] += op->grad[o];
+    };
+    return out;
+}
+
+Var reshape(const Var& x, std::vector<int64_t> shape) {
+    int64_t n = 1; for (int64_t d : shape) n *= d;
+    if (n != x->size()) throw std::runtime_error("reshape: size mismatch");
+    Var out = newNode(shape, {x}, x->requires_grad);
+    out->data = x->data;                       // same values, new shape
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X]() {
+        if (!X->requires_grad) return;
+        for (size_t i = 0; i < X->grad.size(); ++i) X->grad[i] += op->grad[i];
+    };
+    return out;
+}
+
 // ── Reverse-mode engine ──────────────────────────────────────────────────────
 void backward(const Var& loss) {
     if (loss->size() != 1) throw std::runtime_error("backward: loss must be scalar");

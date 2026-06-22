@@ -855,6 +855,13 @@ target_link_libraries(test_autograd PRIVATE vgre Threads::Threads)
 add_test(NAME XlaAutograd COMMAND test_autograd)
 set_tests_properties(XlaAutograd PROPERTIES TIMEOUT 120)
 
+# Vision ops: conv2d / max_pool2d gradients + a real CNN that learns quadrant
+# classification (the autograd engine is general, not transformer-only).
+add_executable(test_conv xla/test_conv.cpp)
+target_link_libraries(test_conv PRIVATE vgre Threads::Threads)
+add_test(NAME XlaConv COMMAND test_conv)
+set_tests_properties(XlaConv PROPERTIES TIMEOUT 180)
+
 # VGRE-Train: AdamW on a quadratic + overfitting a 1-layer transformer end-to-end
 # (proves autograd + attention + optimizer actually learn).
 add_executable(test_train xla/test_train.cpp)

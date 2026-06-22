@@ -131,6 +131,12 @@ make the **default, no-dependency** build fast.
 > backward (Dᵢ = Σ dO·O). Verified **numerically identical** to `attention()` (max|diff| 1.2e-7) and
 > finite-diff gradient-correct; `Config.flash_attention` opts a model into it (trains to the same
 > loss, generates identically). Lower activation memory for long-context training.
+>
+> **Vision ops (2026-06-22): DONE.** `conv2d` (via im2col + the in-tree GEMM, with full dW/dInput/
+> dbias backward), `max_pool2d` (argmax-routed backward), and `reshape` — so the engine trains
+> **CNNs**, not just transformers. Finite-diff verified, and a real CNN (conv→relu→max-pool→linear)
+> trains to **100 % accuracy** classifying the bright-patch quadrant of an 8×8 image
+> (`tests/xla/test_conv.cpp`). VGRE-Autograd is now a general neural-network framework.
 
 ## Phase 3 — VGRE-Train: optimizers + loop + data
 

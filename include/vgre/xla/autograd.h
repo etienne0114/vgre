@@ -86,6 +86,17 @@ Var embedding(const Var& weight, const std::vector<int>& ids);
 Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets);
 // Mean of all elements -> scalar.
 Var mean(const Var& x);
+
+// ── Vision ops (so the engine trains CNNs, not only transformers) ────────────
+// 2-D convolution via im2col + GEMM. input[N,Ci,H,W], weight[Co,Ci,Kh,Kw],
+// bias[Co] (or an empty/size-0 Var for no bias). Returns [N,Co,Ho,Wo] with
+// Ho=(H+2·pad−Kh)/stride+1 (same for W).
+Var conv2d(const Var& input, const Var& weight, const Var& bias,
+           int stride = 1, int pad = 0);
+// 2-D max pooling: input[N,C,H,W] -> [N,C,Ho,Wo].
+Var max_pool2d(const Var& input, int kernel, int stride);
+// Reshape (data unchanged; total size must match). Gradient flows through.
+Var reshape(const Var& x, std::vector<int64_t> shape);
 // Inverted dropout: with probability p zero each element, scale survivors by
 // 1/(1-p) (so the expectation is preserved and inference needs no rescaling).
 // p<=0 is an identity pass-through. Stochastic — for training only.
