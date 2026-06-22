@@ -841,6 +841,13 @@ target_link_libraries(test_blas_gemm PRIVATE vgre Threads::Threads)
 add_test(NAME XlaBlasGemm COMMAND test_blas_gemm)
 set_tests_properties(XlaBlasGemm PROPERTIES TIMEOUT 120)
 
+# In-tree bf16 GEMM: bf16 storage, f32 accumulation — correctness vs a double
+# ground truth computed from the same bf16-rounded inputs.
+add_executable(test_gemm_bf16 xla/test_gemm_bf16.cpp)
+target_link_libraries(test_gemm_bf16 PRIVATE vgre Threads::Threads)
+add_test(NAME XlaGemmBf16 COMMAND test_gemm_bf16)
+set_tests_properties(XlaGemmBf16 PROPERTIES TIMEOUT 120)
+
 # Memory-mapped safetensors checkpoint loader (F32/F16/BF16/int dtypes) — L1.
 add_executable(test_safetensors xla/test_safetensors.cpp)
 target_link_libraries(test_safetensors PRIVATE vgre)

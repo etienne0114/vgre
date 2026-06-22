@@ -14,6 +14,7 @@
 // transpose flags are folded into the packing so the hot loop is layout-free.
 
 #include "vgre/xla/intree_gemm.h"
+#include "vgre/xla/half.h"
 
 #include <algorithm>
 #include <cstring>
@@ -54,17 +55,24 @@ Isa detectIsa() {
 
 const Isa g_isa = detectIsa();
 
-// ── Packing (folds in transpose) ─────────────────────────────────────────────
+// ── Element widening to f32 (folds storage dtype into packing) ───────────────
+// Pack always produces f32 panels for the shared micro-kernel. The input matrix
+// keeps its native storage width; only the small cache-resident panel is f32.
+inline float to_f32(float x)    { return x; }                 // fp32 passthrough
+inline float to_f32(uint16_t x) { return bf16_to_f32(x); }    // bf16 → f32
+
+// ── Packing (folds in transpose + widening) ──────────────────────────────────
 // A(m,k): transA ? A[k*M+m] : A[m*K+k].  Pack rows [ic, ic+mr) × cols [pc,pc+kc)
 // into MR-row panels: dst[k*MR + r], zero-padded for r >= mr.
-inline void packA(bool transA, int64_t M, int64_t K, const float* A,
+template <typename T>
+inline void packA(bool transA, int64_t M, int64_t K, const T* A,
                   int64_t ic, int mr, int64_t pc, int kc, float* dst) {
     for (int k = 0; k < kc; ++k) {
         const int64_t kk = pc + k;
         float* col = dst + (int64_t)k * MR;
         for (int r = 0; r < mr; ++r) {
             const int64_t mm = ic + r;
-            col[r] = transA ? A[kk * M + mm] : A[mm * K + kk];
+            col[r] = to_f32(transA ? A[kk * M + mm] : A[mm * K + kk]);
         }
         for (int r = mr; r < MR; ++r) col[r] = 0.0f;
     }
@@ -72,14 +80,15 @@ inline void packA(bool transA, int64_t M, int64_t K, const float* A,
 
 // B(k,n): transB ? B[n*K+k] : B[k*N+n].  Pack rows [pc,pc+kc) × cols [jc,jc+nr)
 // into NR-col panels: dst[k*NR + c], zero-padded for c >= nr.
-inline void packB(bool transB, int64_t N, int64_t K, const float* B,
+template <typename T>
+inline void packB(bool transB, int64_t N, int64_t K, const T* B,
                   int64_t pc, int kc, int64_t jc, int nr, float* dst) {
     for (int k = 0; k < kc; ++k) {
         const int64_t kk = pc + k;
         float* row = dst + (int64_t)k * NR;
         for (int c = 0; c < nr; ++c) {
             const int64_t nn = jc + c;
-            row[c] = transB ? B[nn * K + kk] : B[kk * N + nn];
+            row[c] = to_f32(transB ? B[nn * K + kk] : B[kk * N + nn]);
         }
         for (int c = nr; c < NR; ++c) row[c] = 0.0f;
     }
@@ -140,20 +149,15 @@ inline void microKernel(int kc, const float* Ap, const float* Bp, float* cbuf) {
     microScalar(kc, Ap, Bp, cbuf);
 }
 
-}  // namespace
-
-const char* gemm_f32_isa() {
-    switch (g_isa) {
-        case Isa::Avx512: return "avx512";   // currently runs the AVX2 micro-kernel path
-        case Isa::Avx2:   return "avx2";
-        default:          return "scalar";
-    }
-}
-
-void gemm_f32_rows(bool transA, bool transB,
-                   int64_t M, int64_t N, int64_t K,
-                   const float* A, const float* B, float* C,
-                   int64_t m0, int64_t m1) {
+// ── Shared blocking driver (templated on operand storage type) ───────────────
+// TA/TB are the in-memory storage types of A/B (float or bf16-as-uint16). The
+// pack step widens them to f32, so a single micro-kernel + blocking strategy
+// serves every input dtype. Output and accumulation are always f32.
+template <typename TA, typename TB>
+void gemm_rows_impl(bool transA, bool transB,
+                    int64_t M, int64_t N, int64_t K,
+                    const TA* A, const TB* B, float* C,
+                    int64_t m0, int64_t m1) {
     (void)M;
     if (m1 <= m0 || N <= 0 || K <= 0) return;
 
@@ -206,6 +210,30 @@ void gemm_f32_rows(bool transA, bool transB,
             }
         }
     }
+}
+
+}  // namespace
+
+const char* gemm_f32_isa() {
+    switch (g_isa) {
+        case Isa::Avx512: return "avx512";   // currently runs the AVX2 micro-kernel path
+        case Isa::Avx2:   return "avx2";
+        default:          return "scalar";
+    }
+}
+
+void gemm_f32_rows(bool transA, bool transB,
+                   int64_t M, int64_t N, int64_t K,
+                   const float* A, const float* B, float* C,
+                   int64_t m0, int64_t m1) {
+    gemm_rows_impl<float, float>(transA, transB, M, N, K, A, B, C, m0, m1);
+}
+
+void gemm_bf16_rows(bool transA, bool transB,
+                    int64_t M, int64_t N, int64_t K,
+                    const uint16_t* A, const uint16_t* B, float* C,
+                    int64_t m0, int64_t m1) {
+    gemm_rows_impl<uint16_t, uint16_t>(transA, transB, M, N, K, A, B, C, m0, m1);
 }
 
 }  // namespace intree

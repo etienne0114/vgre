@@ -44,8 +44,17 @@ complex external features to reach the advanced ones.
 > The test (`tests/xla/test_blas_gemm.cpp`) was upgraded to a double-precision ground truth +
 > norm-wise metric (the correct way to score a numerical GEMM).
 >
-> **Remaining in this phase:** bf16/fp16/int8/fp64 micro-kernels; an AVX-512 (16×N) micro-kernel;
-> shared-Bpack threading to avoid per-thread repack; auto-tuned block sizes.
+> **Status (2026-06-22): bf16 path DONE.** `gemm_bf16_rows` (bf16 storage, f32 accumulation):
+> the blocking driver is now templated on operand storage type, widening bf16→f32 only inside
+> the cache-resident pack panels — so the big operands stay bf16 (half the memory/bandwidth) and
+> the proven f32 micro-kernel is reused unchanged. Verified vs a double ground truth from the same
+> bf16-rounded inputs (`tests/xla/test_gemm_bf16.cpp`, norm-wise error < 1e-4 = the f32-vs-double
+> accumulation gap). This is the matmul training will run on.
+>
+> **Remaining in this phase:** fp16/int8/fp64 storage variants (trivial via the same template +
+> `to_f32` overload / a VNNI int8 micro-kernel); an AVX-512 (16×N) micro-kernel; shared-Bpack
+> threading to avoid per-thread repack; auto-tuned block sizes. Deferred — the autograd/trainer
+> (Phase 2/3) is the higher-value next step toward the model.
 
 **Goal**: replace both the `cblas_sgemm` fast path and the scalar fallback in
 `src/xla/blas_gemm.cpp` with our own SIMD micro-kernel. Target ≥10× over the scalar fallback and
