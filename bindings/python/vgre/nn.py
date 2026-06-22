@@ -18,7 +18,9 @@ include/vgre/xla/autograd_c_api.h.
         opt.step()
 """
 import ctypes
-from typing import List, Sequence
+import json
+import struct
+from typing import List, Sequence, Tuple
 
 import numpy as np
 
@@ -192,18 +194,21 @@ def avg_pool2d(x: Tensor, kernel: int, stride: int) -> Tensor:
 class Module:
     """Base class: collects child Parameters/Modules for the optimizer."""
 
-    def parameters(self) -> List["Tensor"]:
-        ps: List[Tensor] = []
-        for v in vars(self).values():
-            if isinstance(v, Tensor) and v not in ps:
-                ps.append(v)
+    def named_parameters(self, prefix: str = "") -> List[Tuple[str, "Tensor"]]:
+        out: List[Tuple[str, Tensor]] = []
+        for name, v in vars(self).items():
+            if isinstance(v, Tensor):
+                out.append((prefix + name, v))
             elif isinstance(v, Module):
-                ps += v.parameters()
+                out += v.named_parameters(prefix + name + ".")
             elif isinstance(v, (list, tuple)):
-                for it in v:
+                for i, it in enumerate(v):
                     if isinstance(it, Module):
-                        ps += it.parameters()
-        return ps
+                        out += it.named_parameters(f"{prefix}{name}.{i}.")
+        return out
+
+    def parameters(self) -> List["Tensor"]:
+        return [t for _, t in self.named_parameters()]
 
     def __call__(self, x):
         return self.forward(x)
@@ -258,12 +263,40 @@ class Sequential(Module):
             x = l(x)
         return x
 
-    def parameters(self):
-        ps: List[Tensor] = []
-        for l in self.layers:
-            if isinstance(l, Module):
-                ps += l.parameters()
-        return ps
+
+# ── Checkpoint I/O (standard safetensors; loadable by VGRE's SafeTensors) ────
+def save(model: "Module", path: str) -> None:
+    """Save a module's named parameters as a standard safetensors file."""
+    header, blob = {}, bytearray()
+    for name, t in model.named_parameters():
+        a = np.ascontiguousarray(t.numpy(), dtype=np.float32)
+        start = len(blob)
+        blob += a.tobytes()
+        header[name] = {"dtype": "F32", "shape": list(a.shape), "data_offsets": [start, len(blob)]}
+    hb = json.dumps(header).encode("utf-8")
+    hb += b" " * ((-(8 + len(hb))) % 8)            # 8-byte align the data blob
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(hb)))
+        f.write(hb)
+        f.write(blob)
+
+
+def load(model: "Module", path: str) -> None:
+    """Load parameters by name into a module with a matching architecture."""
+    with open(path, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(n))
+        blob = f.read()
+    tensors = {}
+    for name, info in header.items():
+        if name == "__metadata__":
+            continue
+        b, e = info["data_offsets"]
+        tensors[name] = np.frombuffer(blob[b:e], dtype=np.float32).reshape(info["shape"])
+    for name, t in model.named_parameters():
+        if name not in tensors:
+            raise KeyError(f"checkpoint missing parameter '{name}'")
+        t.set_(tensors[name])
 
 
 class AdamW:
