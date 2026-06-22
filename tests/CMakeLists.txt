@@ -862,6 +862,13 @@ target_link_libraries(test_train PRIVATE vgre Threads::Threads)
 add_test(NAME XlaTrain COMMAND test_train)
 set_tests_properties(XlaTrain PROPERTIES TIMEOUT 180)
 
+# VGRE-LM: a real multi-layer Llama-style GPT — train to memorize a sequence,
+# greedily regenerate it, and check the ~100M-config parameter count.
+add_executable(test_model xla/test_model.cpp)
+target_link_libraries(test_model PRIVATE vgre Threads::Threads)
+add_test(NAME XlaModel COMMAND test_model)
+set_tests_properties(XlaModel PROPERTIES TIMEOUT 240)
+
 # Memory-mapped safetensors checkpoint loader (F32/F16/BF16/int dtypes) — L1.
 add_executable(test_safetensors xla/test_safetensors.cpp)
 target_link_libraries(test_safetensors PRIVATE vgre)

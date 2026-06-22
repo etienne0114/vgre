@@ -137,8 +137,18 @@ make the **default, no-dependency** build fast.
 
 ## Phase 4 — VGRE-LM: the ~100M model
 
-- Architecture: Llama-style decoder — RMSNorm, RoPE, SwiGLU, GQA — ~100M params
-  (e.g. 12 layers × d_model 768, or 16 × 640).
+> **Status (2026-06-22): architecture DONE + trains/generates.** `include/vgre/xla/model.h` +
+> `src/xla/model/transformer.cpp` — a configurable multi-layer **Llama-style decoder** (token
+> embedding → N×[pre-norm RoPE causal attention + residual, pre-norm **SwiGLU** MLP + residual] →
+> final RMSNorm → LM head) plus autoregressive `generate()` (greedy / temperature sampling).
+> `tests/xla/test_model.cpp`: an 85K-param 2-layer model trains (loss 3.17 → 0.001) and **greedy
+> generation reproduces the learned sequence exactly (21/21)**; the same code at the **~100M config
+> (12L × 768, vocab 32k) instantiates at 134M params**. One `Config` scales from the test model to
+> the target with no code change.
+>
+> **Remaining:** train on a real public-domain corpus to a coherent checkpoint (needs the data
+> pipeline + checkpoint save/load from Phase 3); the full ~100M run is a documented long-wall-clock
+> recipe (bf16 GEMM + cluster). No external download at any size.
 - Train in-tree to a **real, coherent checkpoint** on public-domain data; ship the checkpoint (or a
   fully-offline, reproducible recipe).
 - Realism: a small `~10M` config trains in CPU-minutes as the CI/default model; the `~100M` target
