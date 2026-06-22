@@ -20,6 +20,10 @@ VGRE_PUBLIC_API vgre_lm* vgre_lm_create(int vocab, int n_layer, int d_model,
 VGRE_PUBLIC_API void      vgre_lm_free(vgre_lm* m);
 VGRE_PUBLIC_API long long vgre_lm_num_params(const vgre_lm* m);
 
+// Enable bf16-weight inference (half the matmul-weight footprint/bandwidth,
+// fp32 accumulation). Affects generate only; training stays fp32. on=0 disables.
+VGRE_PUBLIC_API void      vgre_lm_set_bf16_inference(vgre_lm* m, int on);
+
 // One AdamW training step on a single sequence (ids/tgt length T, tgt = next
 // tokens). Applies grad-norm clipping at 1.0. Returns the scalar loss (or -1).
 VGRE_PUBLIC_API float vgre_lm_train_step(vgre_lm* m, const int* ids,

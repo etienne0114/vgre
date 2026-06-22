@@ -51,10 +51,16 @@ complex external features to reach the advanced ones.
 > bf16-rounded inputs (`tests/xla/test_gemm_bf16.cpp`, norm-wise error < 1e-4 = the f32-vs-double
 > accumulation gap). This is the matmul training will run on.
 >
+> **bf16 now live in the model (2026-06-22).** `GPT::set_bf16_inference(true)` caches the big
+> matmul weights as bf16 and routes `generate_cached` through `gemm_bf16_rows` (half the
+> weight footprint/bandwidth, fp32 accumulation). Verified: bf16-weight greedy generation
+> reproduces the learned sequence exactly (21/21) and matches fp32 output from Python.
+> Exposed via the C-ABI (`vgre_lm_set_bf16_inference`) and `vgre.LanguageModel.set_bf16_inference()`.
+> The shared-B multi-threaded driver (`gemm_f32_threaded`) also landed — see the perf note below.
+>
 > **Remaining in this phase:** fp16/int8/fp64 storage variants (trivial via the same template +
-> `to_f32` overload / a VNNI int8 micro-kernel); an AVX-512 (16×N) micro-kernel; shared-Bpack
-> threading to avoid per-thread repack; auto-tuned block sizes. Deferred — the autograd/trainer
-> (Phase 2/3) is the higher-value next step toward the model.
+> `to_f32` overload / a VNNI int8 micro-kernel); an AVX-512 (16×N) micro-kernel; auto-tuned block
+> sizes.
 
 **Goal**: replace both the `cblas_sgemm` fast path and the scalar fallback in
 `src/xla/blas_gemm.cpp` with our own SIMD micro-kernel. Target ≥10× over the scalar fallback and

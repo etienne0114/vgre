@@ -77,6 +77,18 @@ int main() {
         else { std::printf("[FAIL] KV-cache output differs from reference\n"); ++g_fail; }
     }
 
+    // ── bf16 inference: half-footprint weights, results still correct ────────
+    {
+        gpt.set_bf16_inference(true);
+        std::vector<int> gb = gpt.generate_cached({seq[0]}, T);   // greedy, bf16 weights
+        int m2 = 0;
+        for (int i = 0; i <= T && i < (int)gb.size(); ++i) if (gb[i] == seq[i]) ++m2;
+        std::printf("bf16 inference: generation matches %d/%d\n", m2, T + 1);
+        if (m2 == T + 1) std::printf("[PASS] bf16-weight inference reproduces the sequence\n");
+        else { std::printf("[FAIL] bf16 inference diverged (%d/%d)\n", m2, T + 1); ++g_fail; }
+        gpt.set_bf16_inference(false);
+    }
+
     // ── Sampling controls: top-k / top-p / repetition-penalty produce valid,
     //    in-vocabulary tokens and are reproducible for a fixed seed ────────────
     {
