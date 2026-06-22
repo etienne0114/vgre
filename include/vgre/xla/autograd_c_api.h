@@ -46,6 +46,12 @@ VGRE_PUBLIC_API vgre_ag vgre_ag_conv2d(vgre_ag input, vgre_ag weight, vgre_ag bi
                                        int stride, int pad);
 VGRE_PUBLIC_API vgre_ag vgre_ag_max_pool2d(vgre_ag x, int kernel, int stride);
 VGRE_PUBLIC_API vgre_ag vgre_ag_avg_pool2d(vgre_ag x, int kernel, int stride);
+// Batch norm over [N,C,H,W]. running_mean/running_var are C-length buffers,
+// read and (in training) EMA-updated in place.
+VGRE_PUBLIC_API vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag beta,
+                                             float* running_mean, float* running_var,
+                                             int channels, int training,
+                                             float momentum, float eps);
 
 // ── Engine ───────────────────────────────────────────────────────────────────
 VGRE_PUBLIC_API void vgre_ag_backward(vgre_ag loss);   // loss must be scalar

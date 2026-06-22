@@ -115,11 +115,34 @@ def test_module_api() -> bool:
     return acc == 1.0 and same
 
 
+def test_bn_cnn() -> bool:
+    # A Sequential conv→BN→relu→pool→flatten→linear CNN with batch norm.
+    nn.seed(1)
+    model = nn.Sequential(
+        nn.Conv2d(1, 4, 3, stride=1, pad=1), nn.BatchNorm2d(4), nn.ReLU(),
+        nn.MaxPool2d(2), nn.Flatten(), nn.Linear(4 * 4 * 4, 4))
+    opt = nn.AdamW(model.parameters(), lr=5e-3, weight_decay=0.0)
+    model.train()
+    for _ in range(300):
+        X, y = make_batch(16)
+        opt.zero_grad()
+        loss = nn.softmax_cross_entropy(model(nn.tensor(X)), y)
+        loss.backward()
+        opt.step()
+    model.eval()   # BN now uses running statistics
+    Xe, ye = make_batch(64)
+    logits = model(nn.tensor(Xe)).numpy()
+    acc = float(np.mean(np.argmax(logits, axis=1) == np.array(ye)))
+    print(f"[bn-cnn] eval accuracy = {acc*100:.0f}%")
+    return acc > 0.9
+
+
 def main() -> int:
     ok = True
     ok &= test_mlp_xor()
     ok &= test_cnn_quadrant()
     ok &= test_module_api()
+    ok &= test_bn_cnn()
     if ok:
         print("PASS — vgre.nn trains MLP + CNN from pure Python")
         return 0
