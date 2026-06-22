@@ -62,6 +62,16 @@ float vgre_lm_train_step(vgre_lm* m, const int* ids, const int* tgt, int T, floa
     } catch (...) { return -1.0f; }
 }
 
+float vgre_lm_loss(vgre_lm* m, const int* ids, const int* tgt, int T) {
+    if (!m || !ids || !tgt || T <= 0) return -1.0f;
+    try {
+        std::vector<int> v_ids(ids, ids + T), v_tgt(tgt, tgt + T);
+        // Forward only — no backward(), no optimizer step.
+        autograd::Var loss = autograd::softmax_cross_entropy(m->gpt->forward(v_ids), v_tgt);
+        return loss->data[0];
+    } catch (...) { return -1.0f; }
+}
+
 int vgre_lm_generate(vgre_lm* m, const int* prompt, int prompt_len, int n_new,
                      float temperature, int top_k, float top_p,
                      float repetition_penalty, unsigned seed, int* out, int max_out) {

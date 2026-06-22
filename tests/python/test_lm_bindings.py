@@ -53,6 +53,12 @@ def main() -> int:
     print(f"[3] loss {first:.3f} -> {last:.3f}")
     assert last < first * 0.5, "model must learn"
 
+    # Forward-only loss() must not perturb training (no optimizer update) and
+    # should be low after training.
+    vl = lm.loss(ids[:T], ids[1:T + 1])
+    print(f"[3b] forward-only loss = {vl:.4f}")
+    assert vl >= 0.0 and vl < first, "loss() should report a valid, post-training loss"
+
     gen = lm.generate(tok.encode("Shall I compare"), n_new=12, temperature=0.0)
     decoded = tok.decode(gen)
     print(f"[4] generated: {decoded!r}")
