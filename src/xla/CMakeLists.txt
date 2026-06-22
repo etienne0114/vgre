@@ -6,6 +6,7 @@ add_library(vgre_xla OBJECT
     blas_gemm.cpp
     gemm/intree_gemm_f32.cpp
     autograd/autograd.cpp
+    autograd/optim.cpp
     safetensors.cpp
     gguf.cpp
     generation.cpp

@@ -855,6 +855,13 @@ target_link_libraries(test_autograd PRIVATE vgre Threads::Threads)
 add_test(NAME XlaAutograd COMMAND test_autograd)
 set_tests_properties(XlaAutograd PROPERTIES TIMEOUT 120)
 
+# VGRE-Train: AdamW on a quadratic + overfitting a 1-layer transformer end-to-end
+# (proves autograd + attention + optimizer actually learn).
+add_executable(test_train xla/test_train.cpp)
+target_link_libraries(test_train PRIVATE vgre Threads::Threads)
+add_test(NAME XlaTrain COMMAND test_train)
+set_tests_properties(XlaTrain PROPERTIES TIMEOUT 180)
+
 # Memory-mapped safetensors checkpoint loader (F32/F16/BF16/int dtypes) — L1.
 add_executable(test_safetensors xla/test_safetensors.cpp)
 target_link_libraries(test_safetensors PRIVATE vgre)

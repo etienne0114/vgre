@@ -114,6 +114,17 @@ make the **default, no-dependency** build fast.
 
 ## Phase 3 — VGRE-Train: optimizers + loop + data
 
+> **Status (2026-06-22): optimizers DONE + full training stack proven.**
+> `include/vgre/xla/optim.h` + `src/xla/autograd/optim.cpp`: **AdamW** (decoupled weight decay),
+> **SGD** (+momentum), global **grad-norm clipping**, and a **cosine LR schedule with warmup**.
+> `tests/xla/test_train.cpp` proves end-to-end learning: AdamW drives a quadratic to its optimum
+> (loss 2e-13), and a **real 1-layer transformer** (embedding → RMSNorm → causal attention →
+> residual → GELU MLP → output proj) **overfits a fixed token sequence to loss ~2e-5** (from
+> ln V ≈ 2.77). VGRE trains a transformer end-to-end on CPU with zero external dependencies.
+>
+> **Remaining in this phase:** the streaming **data pipeline** (public-domain corpus + the existing
+> BPE tokenizer, packed to context length) and **checkpoint save/load** via the safetensors writer.
+
 - Optimizers: SGD(+momentum), Adam, **AdamW**; global grad-norm clipping; cosine LR + warmup.
 - **Mixed precision**: bf16 compute / fp32 master weights (halves memory, leans on AMX/the new GEMM).
 - **Gradient checkpointing** to fit 100M activations in RAM.
