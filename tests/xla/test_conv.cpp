@@ -62,6 +62,31 @@ int main() {
         return mean(mul(max_pool2d(p[0], 2, 2), max_pool2d(p[0], 2, 2)));
     });
 
+    // 2b. avg_pool2d, sigmoid, tanh gradients
+    checkGrads("avg_pool2d", {
+        make({1, 2, 6, 6}, randn(72, 5), true),
+    }, [](const std::vector<Var>& p) {
+        return mean(mul(avg_pool2d(p[0], 2, 2), avg_pool2d(p[0], 2, 2)));
+    });
+    checkGrads("sigmoid+tanh", {
+        make({4, 5}, randn(20, 6), true),
+    }, [](const std::vector<Var>& p) {
+        return mean(add(sigmoid(p[0]), tanh_(p[0])));
+    });
+
+    // 2c. batch_norm2d gradients (training mode; batch stats depend on x)
+    {
+        std::vector<float> rm, rv;
+        checkGrads("batch_norm2d", {
+            make({3, 2, 4, 4}, randn(96, 8), true),   // x
+            make({2}, randn(2, 9), true),             // gamma
+            make({2}, randn(2, 10), true),            // beta
+        }, [&rm, &rv](const std::vector<Var>& p) {
+            Var y = batch_norm2d(p[0], p[1], p[2], rm, rv, /*training=*/true);
+            return mean(mul(y, y));
+        });
+    }
+
     // 3. Train a small CNN to classify the bright-patch quadrant.
     {
         const int Npix = 8, B = 16;

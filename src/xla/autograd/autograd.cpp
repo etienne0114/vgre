@@ -224,6 +224,30 @@ Var silu(const Var& x) {
     return out;
 }
 
+Var sigmoid(const Var& x) {
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    const int64_t n = x->size();
+    for (int64_t i = 0; i < n; ++i) out->data[i] = 1.0f / (1.0f + std::exp(-x->data[i]));
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, n]() {
+        if (!X->requires_grad) return;
+        for (int64_t i = 0; i < n; ++i) { const float s = op->data[i]; X->grad[i] += op->grad[i] * s * (1.0f - s); }
+    };
+    return out;
+}
+
+Var tanh_(const Var& x) {
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    const int64_t n = x->size();
+    for (int64_t i = 0; i < n; ++i) out->data[i] = std::tanh(x->data[i]);
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, n]() {
+        if (!X->requires_grad) return;
+        for (int64_t i = 0; i < n; ++i) { const float t = op->data[i]; X->grad[i] += op->grad[i] * (1.0f - t * t); }
+    };
+    return out;
+}
+
 // ── RMSNorm over last dim of x[M,D]; y = x / rms(x) * weight ──────────────────
 Var rms_norm(const Var& x, const Var& weight, float eps) {
     if (x->shape.size() != 2) throw std::runtime_error("rms_norm: x must be [M,D]");
@@ -746,6 +770,133 @@ Var max_pool2d(const Var& input, int kernel, int stride) {
     out->backward_fn = [op, In, argmax]() {
         if (!In->requires_grad) return;
         for (size_t o = 0; o < argmax->size(); ++o) In->grad[(*argmax)[o]] += op->grad[o];
+    };
+    return out;
+}
+
+Var avg_pool2d(const Var& input, int kernel, int stride) {
+    if (input->shape.size() != 4) throw std::runtime_error("avg_pool2d: input[N,C,H,W]");
+    const int N = (int)input->shape[0], C = (int)input->shape[1];
+    const int H = (int)input->shape[2], W = (int)input->shape[3];
+    const int Ho = (H - kernel) / stride + 1, Wo = (W - kernel) / stride + 1;
+    if (Ho <= 0 || Wo <= 0) throw std::runtime_error("avg_pool2d: output size <= 0");
+    Var out = newNode({N, C, Ho, Wo}, {input}, input->requires_grad);
+    const float invK = 1.0f / (float)(kernel * kernel);
+    for (int n = 0; n < N; ++n)
+        for (int c = 0; c < C; ++c) {
+            const float* in = input->data.data() + ((int64_t)n * C + c) * H * W;
+            float* o = out->data.data() + ((int64_t)n * C + c) * Ho * Wo;
+            for (int ho = 0; ho < Ho; ++ho)
+                for (int wo = 0; wo < Wo; ++wo) {
+                    float s = 0.0f;
+                    for (int kh = 0; kh < kernel; ++kh)
+                        for (int kw = 0; kw < kernel; ++kw)
+                            s += in[(int64_t)(ho * stride + kh) * W + (wo * stride + kw)];
+                    o[ho * Wo + wo] = s * invK;
+                }
+        }
+    Node* op = out.get(); Var In = input;
+    out->backward_fn = [op, In, N, C, H, W, Ho, Wo, kernel, stride, invK]() {
+        if (!In->requires_grad) return;
+        for (int n = 0; n < N; ++n)
+            for (int c = 0; c < C; ++c) {
+                float* dIn = In->grad.data() + ((int64_t)n * C + c) * H * W;
+                const float* dO = op->grad.data() + ((int64_t)n * C + c) * Ho * Wo;
+                for (int ho = 0; ho < Ho; ++ho)
+                    for (int wo = 0; wo < Wo; ++wo) {
+                        const float g = dO[ho * Wo + wo] * invK;
+                        for (int kh = 0; kh < kernel; ++kh)
+                            for (int kw = 0; kw < kernel; ++kw)
+                                dIn[(int64_t)(ho * stride + kh) * W + (wo * stride + kw)] += g;
+                    }
+            }
+    };
+    return out;
+}
+
+// Batch norm over [N,C,H,W], per channel. Training uses batch stats and updates
+// the running buffers (EMA); eval uses the running buffers.
+Var batch_norm2d(const Var& x, const Var& gamma, const Var& beta,
+                 std::vector<float>& running_mean, std::vector<float>& running_var,
+                 bool training, float momentum, float eps) {
+    if (x->shape.size() != 4) throw std::runtime_error("batch_norm2d: x[N,C,H,W]");
+    const int N = (int)x->shape[0], C = (int)x->shape[1];
+    const int H = (int)x->shape[2], W = (int)x->shape[3];
+    if ((int)gamma->shape[0] != C || (int)beta->shape[0] != C)
+        throw std::runtime_error("batch_norm2d: gamma/beta must be [C]");
+    if ((int)running_mean.size() != C) { running_mean.assign(C, 0.0f); running_var.assign(C, 1.0f); }
+    const int64_t M = (int64_t)N * H * W;   // elements per channel
+
+    Var out = newNode(x->shape, {x, gamma, beta}, anyReq({&x, &gamma, &beta}));
+    auto inv = std::make_shared<std::vector<float>>(C);    // 1/√(var+eps) per channel
+    auto xhat = std::make_shared<std::vector<float>>(x->data.size());
+
+    for (int c = 0; c < C; ++c) {
+        float mean, var;
+        if (training) {
+            double sum = 0.0;
+            for (int n = 0; n < N; ++n) {
+                const float* xc = x->data.data() + ((int64_t)n * C + c) * H * W;
+                for (int64_t i = 0; i < (int64_t)H * W; ++i) sum += xc[i];
+            }
+            mean = (float)(sum / (double)M);
+            double v = 0.0;
+            for (int n = 0; n < N; ++n) {
+                const float* xc = x->data.data() + ((int64_t)n * C + c) * H * W;
+                for (int64_t i = 0; i < (int64_t)H * W; ++i) { double d = xc[i] - mean; v += d * d; }
+            }
+            var = (float)(v / (double)M);
+            running_mean[c] = (1.0f - momentum) * running_mean[c] + momentum * mean;
+            running_var[c]  = (1.0f - momentum) * running_var[c]  + momentum * var;
+        } else {
+            mean = running_mean[c]; var = running_var[c];
+        }
+        (*inv)[c] = 1.0f / std::sqrt(var + eps);
+        for (int n = 0; n < N; ++n) {
+            const float* xc = x->data.data() + ((int64_t)n * C + c) * H * W;
+            float* oc = out->data.data() + ((int64_t)n * C + c) * H * W;
+            for (int64_t i = 0; i < (int64_t)H * W; ++i) {
+                const float xh = (xc[i] - mean) * (*inv)[c];
+                (*xhat)[((int64_t)n * C + c) * H * W + i] = xh;
+                oc[i] = gamma->data[c] * xh + beta->data[c];
+            }
+        }
+    }
+
+    Node* op = out.get(); Var X = x, G = gamma, B = beta;
+    out->backward_fn = [op, X, G, B, inv, xhat, N, C, H, W, M, training]() {
+        const int64_t HW = (int64_t)H * W;
+        for (int c = 0; c < C; ++c) {
+            // dGamma = Σ dy·xhat ; dBeta = Σ dy
+            double dg = 0.0, db = 0.0;
+            for (int n = 0; n < N; ++n) {
+                const float* dy = op->grad.data() + ((int64_t)n * C + c) * HW;
+                const float* xh = xhat->data() + ((int64_t)n * C + c) * HW;
+                for (int64_t i = 0; i < HW; ++i) { dg += (double)dy[i] * xh[i]; db += dy[i]; }
+            }
+            if (G->requires_grad) G->grad[c] += (float)dg;
+            if (B->requires_grad) B->grad[c] += (float)db;
+            if (!X->requires_grad) continue;
+            // dx = (gamma·inv/M)·(M·dy − Σdy − xhat·Σ(dy·xhat))   [batch stats]
+            // In eval mode batch stats are constant ⇒ dx = gamma·inv·dy.
+            const float gi = G->data[c] * (*inv)[c];
+            if (!training) {
+                for (int n = 0; n < N; ++n) {
+                    const float* dy = op->grad.data() + ((int64_t)n * C + c) * HW;
+                    float* dx = X->grad.data() + ((int64_t)n * C + c) * HW;
+                    for (int64_t i = 0; i < HW; ++i) dx[i] += gi * dy[i];
+                }
+            } else {
+                const float s = gi / (float)M;
+                for (int n = 0; n < N; ++n) {
+                    const float* dy = op->grad.data() + ((int64_t)n * C + c) * HW;
+                    const float* xh = xhat->data() + ((int64_t)n * C + c) * HW;
+                    float* dx = X->grad.data() + ((int64_t)n * C + c) * HW;
+                    for (int64_t i = 0; i < HW; ++i)
+                        dx[i] += s * ((float)M * dy[i] - (float)db - xh[i] * (float)dg);
+                }
+            }
+        }
     };
     return out;
 }
