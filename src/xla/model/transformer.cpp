@@ -2,6 +2,7 @@
 
 #include "vgre/xla/model.h"
 #include "vgre/xla/intree_gemm.h"
+#include "vgre/xla/half.h"
 
 #include <algorithm>
 #include <cmath>
@@ -184,15 +185,34 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     std::vector<float> h2(D), gate(F), up(F), ff(D), logits(V);
     std::vector<float> scores(cfg_.max_seq);
 
+    const bool bf16 = bf16_inference_;
+    std::vector<uint16_t> xbf;   // activation scratch for bf16 GEMV
+    // Matrix-vector y[N] = x[K]·W[K,N], dispatching to the bf16 GEMM when the
+    // bf16 weight cache (Wb) is active, else the fp32 GEMV.
+    auto mv = [&](const float* xv, const float* Wf, const uint16_t* Wb, float* y, int K, int N) {
+        if (bf16) {
+            xbf.resize(K);
+            for (int i = 0; i < K; ++i) xbf[i] = f32_to_bf16(xv[i]);
+            intree::gemm_bf16_rows(false, false, 1, N, K, xbf.data(), Wb, y, 0, 1);
+        } else {
+            gemv(xv, Wf, y, K, N);
+        }
+    };
+
     // Decode one token at absolute position `pos`; writes next-token logits.
     auto decode = [&](int token, int pos) {
-        std::memcpy(x.data(), &tok_emb_->data[(int64_t)token * D], sizeof(float) * D);
+        if (bf16) {
+            const uint16_t* row = &tok_emb_bf16_[(int64_t)token * D];
+            for (int i = 0; i < D; ++i) x[i] = bf16_to_f32(row[i]);
+        } else {
+            std::memcpy(x.data(), &tok_emb_->data[(int64_t)token * D], sizeof(float) * D);
+        }
         for (int l = 0; l < L; ++l) {
             const Layer& Ly = layers_[l];
             rmsNormVec(x.data(), Ly.ln1_g->data.data(), h.data(), D, cfg_.norm_eps);
-            gemv(h.data(), Ly.Wq->data.data(), q.data(), D, D);
-            gemv(h.data(), Ly.Wk->data.data(), k.data(), D, D);
-            gemv(h.data(), Ly.Wv->data.data(), v.data(), D, D);
+            mv(h.data(), Ly.Wq->data.data(), Ly.Wq_bf16.data(), q.data(), D, D);
+            mv(h.data(), Ly.Wk->data.data(), Ly.Wk_bf16.data(), k.data(), D, D);
+            mv(h.data(), Ly.Wv->data.data(), Ly.Wv_bf16.data(), v.data(), D, D);
             ropeVec(q.data(), H, Dh, pos, cfg_.rope_base);
             ropeVec(k.data(), H, Dh, pos, cfg_.rope_base);
             std::memcpy(&Kc[l][(size_t)pos * D], k.data(), sizeof(float) * D);
@@ -216,17 +236,17 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                     attnOut[off + d] = acc;
                 }
             }
-            gemv(attnOut.data(), Ly.Wo->data.data(), proj.data(), D, D);
+            mv(attnOut.data(), Ly.Wo->data.data(), Ly.Wo_bf16.data(), proj.data(), D, D);
             for (int i = 0; i < D; ++i) x[i] += proj[i];                  // residual
             rmsNormVec(x.data(), Ly.ln2_g->data.data(), h2.data(), D, cfg_.norm_eps);
-            gemv(h2.data(), Ly.Wgate->data.data(), gate.data(), D, F);
-            gemv(h2.data(), Ly.Wup->data.data(),   up.data(),   D, F);
+            mv(h2.data(), Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), gate.data(), D, F);
+            mv(h2.data(), Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   up.data(),   D, F);
             for (int i = 0; i < F; ++i) gate[i] = siluf(gate[i]) * up[i]; // SwiGLU
-            gemv(gate.data(), Ly.Wdown->data.data(), ff.data(), F, D);
+            mv(gate.data(), Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), ff.data(), F, D);
             for (int i = 0; i < D; ++i) x[i] += ff[i];                    // residual
         }
         rmsNormVec(x.data(), final_g_->data.data(), h.data(), D, cfg_.norm_eps);
-        gemv(h.data(), lm_head_->data.data(), logits.data(), D, V);
+        mv(h.data(), lm_head_->data.data(), lm_head_bf16_.data(), logits.data(), D, V);
     };
 
     if (prompt.empty()) return prompt;
@@ -239,6 +259,24 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
         decode(next, pos++);
     }
     return prompt;
+}
+
+void GPT::set_bf16_inference(bool on) {
+    bf16_inference_ = on;
+    if (!on) return;
+    auto toBf16 = [](const std::vector<float>& src, std::vector<uint16_t>& dst) {
+        if (dst.size() == src.size()) return;     // already built
+        dst.resize(src.size());
+        for (size_t i = 0; i < src.size(); ++i) dst[i] = f32_to_bf16(src[i]);
+    };
+    toBf16(tok_emb_->data, tok_emb_bf16_);
+    toBf16(lm_head_->data, lm_head_bf16_);
+    for (auto& L : layers_) {
+        toBf16(L.Wq->data, L.Wq_bf16);     toBf16(L.Wk->data, L.Wk_bf16);
+        toBf16(L.Wv->data, L.Wv_bf16);     toBf16(L.Wo->data, L.Wo_bf16);
+        toBf16(L.Wgate->data, L.Wgate_bf16); toBf16(L.Wup->data, L.Wup_bf16);
+        toBf16(L.Wdown->data, L.Wdown_bf16);
+    }
 }
 
 std::vector<std::pair<std::string, Var>> GPT::named_parameters() {

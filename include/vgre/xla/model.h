@@ -62,6 +62,13 @@ public:
         return generate_cached(std::move(prompt), n_new, SampleConfig{});
     }
 
+    // Enable bf16-weight inference: the big matmul weights are cached as bf16
+    // (uint16) and generate_cached runs on the in-tree bf16 GEMM (half the weight
+    // bandwidth/footprint, fp32 accumulation). Training/the fp32 path are
+    // unaffected. Idempotent; pass false to disable.
+    void set_bf16_inference(bool on);
+    bool bf16_inference() const { return bf16_inference_; }
+
     // All trainable parameters (for the optimizer).
     std::vector<Var>& parameters() { return params_; }
     // Canonically-named parameters (for checkpoint save/load), e.g.
@@ -73,6 +80,9 @@ public:
 private:
     struct Layer {
         Var ln1_g, Wq, Wk, Wv, Wo, ln2_g, Wgate, Wup, Wdown;
+        // bf16 (uint16) caches of the big matmul weights, built on demand.
+        std::vector<uint16_t> Wq_bf16, Wk_bf16, Wv_bf16, Wo_bf16,
+                              Wgate_bf16, Wup_bf16, Wdown_bf16;
     };
     Config            cfg_;
     Var               tok_emb_;     // [V, D]
@@ -80,6 +90,8 @@ private:
     Var               final_g_;     // [D]
     Var               lm_head_;     // [D, V]
     std::vector<Var>  params_;
+    bool                  bf16_inference_ = false;
+    std::vector<uint16_t> tok_emb_bf16_, lm_head_bf16_;
 };
 
 // Autoregressive generation. temperature<=0 → greedy argmax; otherwise sample
