@@ -87,10 +87,29 @@ def test_cnn_quadrant() -> bool:
     return acc > 0.9
 
 
+def test_module_api() -> bool:
+    # Same XOR task, built with the PyTorch-like module API.
+    nn.seed(0)
+    model = nn.Sequential(nn.Linear(2, 8), nn.ReLU(), nn.Linear(8, 2))
+    opt = nn.AdamW(model.parameters(), lr=5e-2, weight_decay=0.0)
+    X = nn.tensor(np.array([[0, 0], [0, 1], [1, 0], [1, 1]], dtype=np.float32))
+    Y = [0, 1, 1, 0]
+    loss = None
+    for _ in range(400):
+        opt.zero_grad()
+        loss = nn.softmax_cross_entropy(model(X), Y)
+        loss.backward()
+        opt.step()
+    acc = float(np.mean(np.argmax(model(X).numpy(), axis=1) == np.array(Y)))
+    print(f"[module] Sequential MLP xor accuracy = {acc*100:.0f}%  loss = {loss.item():.4f}")
+    return acc == 1.0
+
+
 def main() -> int:
     ok = True
     ok &= test_mlp_xor()
     ok &= test_cnn_quadrant()
+    ok &= test_module_api()
     if ok:
         print("PASS — vgre.nn trains MLP + CNN from pure Python")
         return 0

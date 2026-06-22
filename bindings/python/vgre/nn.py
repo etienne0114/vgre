@@ -188,6 +188,84 @@ def avg_pool2d(x: Tensor, kernel: int, stride: int) -> Tensor:
                 (N, C, (H - kernel) // stride + 1, (W - kernel) // stride + 1))
 
 
+# ── Layer modules (PyTorch-like ergonomics over the functional ops) ──────────
+class Module:
+    """Base class: collects child Parameters/Modules for the optimizer."""
+
+    def parameters(self) -> List["Tensor"]:
+        ps: List[Tensor] = []
+        for v in vars(self).values():
+            if isinstance(v, Tensor) and v not in ps:
+                ps.append(v)
+            elif isinstance(v, Module):
+                ps += v.parameters()
+            elif isinstance(v, (list, tuple)):
+                for it in v:
+                    if isinstance(it, Module):
+                        ps += it.parameters()
+        return ps
+
+    def __call__(self, x):
+        return self.forward(x)
+
+
+def _kaiming(fan_in: int, *shape) -> "Tensor":
+    std = (2.0 / fan_in) ** 0.5
+    return tensor(rng.standard_normal(shape) * std, requires_grad=True)
+
+
+# module-level RNG so layer init is reproducible
+rng = np.random.default_rng(1234)
+
+
+def seed(s: int) -> None:
+    """Reseed the layer-initialization RNG."""
+    global rng
+    rng = np.random.default_rng(s)
+
+
+class Linear(Module):
+    def __init__(self, in_features: int, out_features: int, bias: bool = True):
+        self.W = _kaiming(in_features, in_features, out_features)
+        self.b = tensor(np.zeros(out_features), requires_grad=True) if bias else None
+
+    def forward(self, x):
+        y = matmul(x, self.W)
+        return add(y, self.b) if self.b is not None else y
+
+
+class Conv2d(Module):
+    def __init__(self, in_ch: int, out_ch: int, kernel: int, stride: int = 1,
+                 pad: int = 0, bias: bool = True):
+        self.weight = _kaiming(in_ch * kernel * kernel, out_ch, in_ch, kernel, kernel)
+        self.bias = tensor(np.zeros(out_ch), requires_grad=True) if bias else None
+        self.stride, self.pad = stride, pad
+
+    def forward(self, x):
+        return conv2d(x, self.weight, self.bias, self.stride, self.pad)
+
+
+class ReLU(Module):
+    def forward(self, x): return relu(x)
+
+
+class Sequential(Module):
+    def __init__(self, *layers):
+        self.layers = list(layers)
+
+    def forward(self, x):
+        for l in self.layers:
+            x = l(x)
+        return x
+
+    def parameters(self):
+        ps: List[Tensor] = []
+        for l in self.layers:
+            if isinstance(l, Module):
+                ps += l.parameters()
+        return ps
+
+
 class AdamW:
     """AdamW over a list of parameter Tensors (those created requires_grad=True)."""
 
