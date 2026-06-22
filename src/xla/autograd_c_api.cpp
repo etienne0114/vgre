@@ -4,6 +4,8 @@
 #include "vgre/xla/autograd.h"
 #include "vgre/xla/optim.h"
 
+#include <algorithm>   // std::copy
+#include <utility>     // std::move
 #include <vector>
 
 using namespace vgre::xla::autograd;
