@@ -1632,6 +1632,21 @@ elseif(Python3_FOUND)
     )
 endif()
 
+# vgre.nn: build + train an MLP and a CNN from pure Python on the autograd C ABI.
+set(_vgre_nn_py "${VGRE_VENV_PYTHON}")
+if(NOT EXISTS "${_vgre_nn_py}")
+    set(_vgre_nn_py "${Python3_EXECUTABLE}")
+endif()
+if(_vgre_nn_py)
+    add_test(NAME PythonNn COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn.py)
+    set_tests_properties(PythonNn PROPERTIES
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        LABELS "python;e2e"
+        TIMEOUT 240
+        SKIP_RETURN_CODE 77
+    )
+endif()
+
 # ── Global Test Configuration ──────────────────────────────────────────────
 # Disable background hardware benchmarks and optional IPC services during
 # tests to ensure deterministic performance and prevent CPU resource
