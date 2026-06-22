@@ -1603,6 +1603,28 @@ else()
     endif()
 endif()
 
+# VGRE-LM Python bindings: train a tiny GPT + tokenizer, generate, checkpoint
+# round-trip — all through the ctypes wheel API, offline.
+if(EXISTS "${VGRE_VENV_PYTHON}")
+    add_test(NAME PythonLmBindings
+        COMMAND "${VGRE_VENV_PYTHON}" ${CMAKE_SOURCE_DIR}/tests/python/test_lm_bindings.py)
+    set_tests_properties(PythonLmBindings PROPERTIES
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        LABELS "python;e2e"
+        TIMEOUT 240
+        SKIP_RETURN_CODE 77
+    )
+elseif(Python3_FOUND)
+    add_test(NAME PythonLmBindings
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/python/test_lm_bindings.py)
+    set_tests_properties(PythonLmBindings PROPERTIES
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        LABELS "python;e2e"
+        TIMEOUT 240
+        SKIP_RETURN_CODE 77
+    )
+endif()
+
 # ── Global Test Configuration ──────────────────────────────────────────────
 # Disable background hardware benchmarks and optional IPC services during
 # tests to ensure deterministic performance and prevent CPU resource

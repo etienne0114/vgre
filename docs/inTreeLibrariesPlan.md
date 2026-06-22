@@ -164,12 +164,20 @@ make the **default, no-dependency** build fast.
 
 ## Phase 5 — Packaging: the pip wheel
 
+> **Status (2026-06-22): wheel DONE.** A C ABI (`include/vgre/xla/model_c_api.h` +
+> `src/xla/model_c_api.cpp`) exposes the LM + BPE tokenizer; the existing ctypes package gains
+> `vgre.LanguageModel` and `vgre.Tokenizer` (`bindings/python/vgre/lm.py`). `pyproject.toml` +
+> `build_wheel.sh` compile the native libs, bundle them under `vgre/lib/`, and build
+> `vgre-0.1.0-py3-none-any.whl`. **Verified end-to-end in a clean venv**: `pip install` the wheel,
+> then from an unrelated directory with no env vars, `import vgre` finds the bundled `libvgre.so`,
+> trains a GPT (loss 5.71 → 0.20), and generates real text — **fully offline**. CI-covered by
+> `tests/python/test_lm_bindings.py` (ctest `PythonLmBindings`).
+>
+> **Remaining polish:** a `manylinux`/`cibuildwheel` CI job for redistributable wheels and trimming
+> the bundled LLVM footprint (the wheel currently carries the full `libvgre.so`).
+
 - Thin Python package over the existing C-API (`vgre_c_api`) via pybind11/cffi exposing: init,
   malloc/memcpy, register/launch CUDA kernel, **and** tensor / train / generate.
-- Bundle `libvgre` + `libvgre_cudart`; vendor only the needed LLVM runtime components (or static
-  link) to keep the wheel lean; `manylinux` build via **cibuildwheel**.
-- Acceptance: `pip install vgre && python -c "import vgre; ..."` runs a CUDA kernel, trains the tiny
-  model, and generates text — **fully offline**.
 
 ---
 
