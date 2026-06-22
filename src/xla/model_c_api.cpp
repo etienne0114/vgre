@@ -59,13 +59,16 @@ float vgre_lm_train_step(vgre_lm* m, const int* ids, const int* tgt, int T, floa
 }
 
 int vgre_lm_generate(vgre_lm* m, const int* prompt, int prompt_len, int n_new,
-                     float temperature, unsigned seed, int* out, int max_out) {
+                     float temperature, int top_k, float top_p,
+                     float repetition_penalty, unsigned seed, int* out, int max_out) {
     if (!m || !prompt || prompt_len <= 0 || !out || max_out <= 0) return -1;
     try {
         std::vector<int> p(prompt, prompt + prompt_len);
-        // Use the KV-cached path: O(T) per token, token-identical to the
-        // reference for greedy decoding.
-        std::vector<int> g = m->gpt->generate_cached(p, n_new, temperature, seed);
+        model::GPT::SampleConfig sc;
+        sc.temperature = temperature; sc.top_k = top_k; sc.top_p = top_p;
+        sc.repetition_penalty = repetition_penalty; sc.seed = seed;
+        // KV-cached path: O(T) per token.
+        std::vector<int> g = m->gpt->generate_cached(p, n_new, sc);
         const int n = (int)std::min<size_t>(g.size(), (size_t)max_out);
         std::memcpy(out, g.data(), sizeof(int) * (size_t)n);
         return n;

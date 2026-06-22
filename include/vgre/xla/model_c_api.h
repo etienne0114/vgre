@@ -25,11 +25,14 @@ VGRE_PUBLIC_API long long vgre_lm_num_params(const vgre_lm* m);
 VGRE_PUBLIC_API float vgre_lm_train_step(vgre_lm* m, const int* ids,
                                          const int* tgt, int T, float lr);
 
-// Autoregressive generation. temperature<=0 → greedy. Writes up to max_out ids
+// Autoregressive generation (KV-cached). Sampling controls: temperature<=0 →
+// greedy; top_k>0 keeps the top-k logits; top_p<1 applies nucleus cutoff;
+// repetition_penalty>1 penalizes already-seen tokens. Writes up to max_out ids
 // (prompt + generated) into out; returns the count written (or -1 on error).
 VGRE_PUBLIC_API int vgre_lm_generate(vgre_lm* m, const int* prompt, int prompt_len,
-                                     int n_new, float temperature, unsigned seed,
-                                     int* out, int max_out);
+                                     int n_new, float temperature, int top_k,
+                                     float top_p, float repetition_penalty,
+                                     unsigned seed, int* out, int max_out);
 
 // Checkpoint I/O (standard safetensors). Return 1 on success, 0 on failure.
 VGRE_PUBLIC_API int vgre_lm_save(vgre_lm* m, const char* path);

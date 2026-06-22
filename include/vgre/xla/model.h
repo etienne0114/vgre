@@ -43,12 +43,24 @@ public:
     // Forward a single sequence of token ids → logits [T, vocab].
     Var forward(const std::vector<int>& ids);
 
+    // Sampling controls for generation. Defaults reproduce plain greedy decoding.
+    struct SampleConfig {
+        float    temperature = 0.0f;   // <=0 → greedy argmax
+        int      top_k = 0;            // 0 → disabled; else keep top-k logits
+        float    top_p = 1.0f;         // 1 → disabled; else nucleus (cumulative-prob) cutoff
+        float    repetition_penalty = 1.0f;  // 1 → disabled; >1 penalizes already-seen tokens
+        uint32_t seed = 0;
+    };
+
     // Fast autoregressive generation with a per-layer K/V cache: O(T) work per
     // new token instead of re-running the full forward (which is O(T²) per step).
-    // Pure raw-float inference (no autograd tape); produces token-identical
-    // results to the reference generate() free function. temperature<=0 → greedy.
+    // Pure raw-float inference (no autograd tape). The greedy 2-arg form is
+    // token-identical to the reference generate() free function.
     std::vector<int> generate_cached(std::vector<int> prompt, int n_new,
-                                     float temperature = 0.0f, uint32_t seed = 0);
+                                     const SampleConfig& cfg);
+    std::vector<int> generate_cached(std::vector<int> prompt, int n_new) {
+        return generate_cached(std::move(prompt), n_new, SampleConfig{});
+    }
 
     // All trainable parameters (for the optimizer).
     std::vector<Var>& parameters() { return params_; }

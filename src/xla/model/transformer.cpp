@@ -118,14 +118,63 @@ inline void ropeVec(float* v, int H, int Dh, int pos, float base) {
     }
 }
 inline float siluf(float x) { return x / (1.0f + std::exp(-x)); }
+
+// Pick the next token from logits[V] given the sampling controls and history.
+int sampleToken(std::vector<float>& logits, const std::vector<int>& history,
+                const GPT::SampleConfig& sc, std::mt19937& rng) {
+    const int V = (int)logits.size();
+    // Repetition penalty: push down logits of already-emitted tokens.
+    if (sc.repetition_penalty != 1.0f)
+        for (int t : history)
+            if (t >= 0 && t < V)
+                logits[t] = (logits[t] > 0.0f) ? logits[t] / sc.repetition_penalty
+                                               : logits[t] * sc.repetition_penalty;
+
+    const bool greedy = (sc.temperature <= 0.0f) && (sc.top_k <= 0) && (sc.top_p >= 1.0f);
+    if (greedy) {
+        int best = 0;
+        for (int j = 1; j < V; ++j) if (logits[j] > logits[best]) best = j;
+        return best;
+    }
+
+    const float temp = sc.temperature > 0.0f ? sc.temperature : 1.0f;
+    // Rank tokens by logit (desc) for top-k / top-p filtering.
+    std::vector<int> idx(V);
+    for (int j = 0; j < V; ++j) idx[j] = j;
+    int keep = V;
+    if (sc.top_k > 0 && sc.top_k < V) keep = sc.top_k;
+    std::partial_sort(idx.begin(), idx.begin() + keep, idx.end(),
+                      [&](int a, int b) { return logits[a] > logits[b]; });
+    idx.resize(keep);
+
+    // Softmax over the kept logits (temperature-scaled).
+    float mx = logits[idx[0]];
+    std::vector<float> p(keep);
+    float sum = 0.0f;
+    for (int i = 0; i < keep; ++i) { p[i] = std::exp((logits[idx[i]] - mx) / temp); sum += p[i]; }
+    for (auto& x : p) x /= sum;
+
+    // Nucleus (top-p): keep the smallest prefix whose cumulative prob ≥ top_p.
+    if (sc.top_p < 1.0f) {
+        float cum = 0.0f; int cut = keep;
+        for (int i = 0; i < keep; ++i) { cum += p[i]; if (cum >= sc.top_p) { cut = i + 1; break; } }
+        p.resize(cut); idx.resize(cut);
+        float s = 0.0f; for (float x : p) s += x; for (auto& x : p) x /= s;
+    }
+
+    std::uniform_real_distribution<float> ud(0.0f, 1.0f);
+    float r = ud(rng), acc = 0.0f;
+    for (size_t i = 0; i < p.size(); ++i) { acc += p[i]; if (r <= acc) return idx[i]; }
+    return idx.back();
+}
 }  // namespace
 
 std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
-                                      float temperature, uint32_t seed) {
+                                      const SampleConfig& sc) {
     const int D = cfg_.d_model, H = cfg_.n_head, Dh = cfg_.head_dim();
     const int F = cfg_.ff(), V = cfg_.vocab, L = cfg_.n_layer;
     const float scale = 1.0f / std::sqrt((float)Dh);
-    std::mt19937 rng(seed);
+    std::mt19937 rng(sc.seed);
 
     // Per-layer K/V caches: [max_seq, D].
     std::vector<std::vector<float>> Kc(L), Vc(L);
@@ -185,20 +234,7 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     for (size_t i = 0; i < prompt.size(); ++i) decode(prompt[i], pos++);  // prefill
 
     for (int step = 0; step < n_new && pos < cfg_.max_seq; ++step) {
-        int next;
-        if (temperature <= 0.0f) {
-            next = 0;
-            for (int j = 1; j < V; ++j) if (logits[j] > logits[next]) next = j;
-        } else {
-            float mx = logits[0];
-            for (int j = 1; j < V; ++j) mx = std::max(mx, logits[j]);
-            float sum = 0.0f;
-            std::vector<float> p(V);
-            for (int j = 0; j < V; ++j) { p[j] = std::exp((logits[j] - mx) / temperature); sum += p[j]; }
-            std::uniform_real_distribution<float> ud(0.0f, sum);
-            float r = ud(rng), acc = 0.0f; next = V - 1;
-            for (int j = 0; j < V; ++j) { acc += p[j]; if (r <= acc) { next = j; break; } }
-        }
+        const int next = sampleToken(logits, prompt, sc, rng);
         prompt.push_back(next);
         decode(next, pos++);
     }
