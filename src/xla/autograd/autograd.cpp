@@ -181,28 +181,25 @@ Var relu(const Var& x) {
     return out;
 }
 
-// GELU (tanh approximation): 0.5x(1 + tanh(√(2/π)(x + 0.044715x³)))
+// Exact GELU: 0.5·x·(1 + erf(x/√2)).
+//   d/dx = 0.5·(1 + erf(x/√2)) + x·(1/√(2π))·exp(-x²/2)
 Var gelu(const Var& x) {
     Var out = newNode(x->shape, {x}, x->requires_grad);
     const int64_t n = x->size();
-    const float c = std::sqrt(2.0f / kPi);
+    const float kInvSqrt2  = 0.70710678118654752440f;   // 1/√2
+    const float kInvSqrt2Pi = 0.39894228040143267794f;  // 1/√(2π)
     for (int64_t i = 0; i < n; ++i) {
         const float v = x->data[i];
-        const float u = c * (v + 0.044715f * v * v * v);
-        out->data[i] = 0.5f * v * (1.0f + std::tanh(u));
+        out->data[i] = 0.5f * v * (1.0f + std::erf(v * kInvSqrt2));
     }
     Node* op = out.get(); Var X = x;
-    out->backward_fn = [op, X, n, c]() {
+    out->backward_fn = [op, X, n, kInvSqrt2, kInvSqrt2Pi]() {
         if (!X->requires_grad) return;
         for (int64_t i = 0; i < n; ++i) {
             const float v = X->data[i];
-            const float v3 = v * v * v;
-            const float u = c * (v + 0.044715f * v3);
-            const float t = std::tanh(u);
-            const float dudv = c * (1.0f + 3.0f * 0.044715f * v * v);
-            // d/dv [0.5 v (1+t)] = 0.5(1+t) + 0.5 v (1-t²) du/dv
-            const float dv = 0.5f * (1.0f + t) + 0.5f * v * (1.0f - t * t) * dudv;
-            X->grad[i] += op->grad[i] * dv;
+            const float cdf = 0.5f * (1.0f + std::erf(v * kInvSqrt2));
+            const float pdf = kInvSqrt2Pi * std::exp(-0.5f * v * v);
+            X->grad[i] += op->grad[i] * (cdf + v * pdf);
         }
     };
     return out;
@@ -223,6 +220,30 @@ Var silu(const Var& x) {
             // d/dx [x·σ] = σ + x·σ(1-σ)
             X->grad[i] += op->grad[i] * (s + X->data[i] * s * (1.0f - s));
         }
+    };
+    return out;
+}
+
+Var sigmoid(const Var& x) {
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    const int64_t n = x->size();
+    for (int64_t i = 0; i < n; ++i) out->data[i] = 1.0f / (1.0f + std::exp(-x->data[i]));
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, n]() {
+        if (!X->requires_grad) return;
+        for (int64_t i = 0; i < n; ++i) { const float s = op->data[i]; X->grad[i] += op->grad[i] * s * (1.0f - s); }
+    };
+    return out;
+}
+
+Var tanh_(const Var& x) {
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    const int64_t n = x->size();
+    for (int64_t i = 0; i < n; ++i) out->data[i] = std::tanh(x->data[i]);
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, n]() {
+        if (!X->requires_grad) return;
+        for (int64_t i = 0; i < n; ++i) { const float t = op->data[i]; X->grad[i] += op->grad[i] * (1.0f - t * t); }
     };
     return out;
 }
@@ -433,6 +454,87 @@ Var attention(const Var& q, const Var& k, const Var& v, int num_heads, bool caus
     return out;
 }
 
+// ── Flash (online-softmax) attention ─────────────────────────────────────────
+// Same math as attention() but stores only O[T,Dh] and the per-row logsumexp
+// L[T] per head (O(T) extra) instead of the full T×T probabilities; the backward
+// recomputes scores on the fly (FA2-style, using D_i = Σ_d dO[i,d]·O[i,d]).
+Var flash_attention(const Var& q, const Var& k, const Var& v, int num_heads, bool causal) {
+    if (q->shape.size() != 2 || q->shape != k->shape || q->shape != v->shape)
+        throw std::runtime_error("flash_attention: Q/K/V must share shape [T, H*Dh]");
+    const int64_t T = q->shape[0], Dm = q->shape[1];
+    const int64_t Dh = Dm / num_heads;
+    if (Dh * num_heads != Dm) throw std::runtime_error("flash_attention: bad head_dim");
+    const float scale = 1.0f / std::sqrt((float)Dh);
+
+    Var out = newNode({T, Dm}, {q, k, v}, anyReq({&q, &k, &v}));
+    // Per-head logsumexp L[T], cached for the backward recompute.
+    auto Lcache = std::make_shared<std::vector<float>>((size_t)num_heads * T, 0.0f);
+
+    const float* Q = q->data.data();
+    const float* K = k->data.data();
+    const float* V = v->data.data();
+    for (int h = 0; h < num_heads; ++h) {
+        const int64_t col = (int64_t)h * Dh;
+        float* L = Lcache->data() + (size_t)h * T;
+        for (int64_t i = 0; i < T; ++i) {
+            const int64_t lim = causal ? i : (T - 1);
+            const float* qi = Q + i * Dm + col;
+            float m = -1e30f, l = 0.0f;
+            std::vector<float> acc((size_t)Dh, 0.0f);
+            for (int64_t j = 0; j <= lim; ++j) {
+                const float* kj = K + j * Dm + col;
+                float s = 0.0f;
+                for (int64_t d = 0; d < Dh; ++d) s += qi[d] * kj[d];
+                s *= scale;
+                const float m_new = std::max(m, s);
+                const float corr = std::exp(m - m_new);
+                const float p = std::exp(s - m_new);
+                l = l * corr + p;
+                const float* vj = V + j * Dm + col;
+                for (int64_t d = 0; d < Dh; ++d) acc[d] = acc[d] * corr + p * vj[d];
+                m = m_new;
+            }
+            const float inv = (l > 0.0f) ? 1.0f / l : 0.0f;
+            float* oi = out->data.data() + i * Dm + col;
+            for (int64_t d = 0; d < Dh; ++d) oi[d] = acc[d] * inv;
+            L[i] = m + std::log(l > 0.0f ? l : 1.0f);   // logsumexp
+        }
+    }
+
+    Node* op = out.get(); Var Qv = q, Kv = k, Vv = v;
+    out->backward_fn = [op, Qv, Kv, Vv, Lcache, T, Dm, Dh, num_heads, scale, causal]() {
+        const float* Q = Qv->data.data();
+        const float* K = Kv->data.data();
+        const float* V = Vv->data.data();
+        const float* O = op->data.data();
+        const float* dO = op->grad.data();
+        for (int h = 0; h < num_heads; ++h) {
+            const int64_t col = (int64_t)h * Dh;
+            const float* L = Lcache->data() + (size_t)h * T;
+            for (int64_t i = 0; i < T; ++i) {
+                const int64_t lim = causal ? i : (T - 1);
+                const float* qi = Q + i * Dm + col;
+                const float* dOi = dO + i * Dm + col;
+                const float* Oi = O + i * Dm + col;
+                float Di = 0.0f;                          // FA2: D_i = Σ_d dO·O
+                for (int64_t d = 0; d < Dh; ++d) Di += dOi[d] * Oi[d];
+                for (int64_t j = 0; j <= lim; ++j) {
+                    const float* kj = K + j * Dm + col;
+                    const float* vj = V + j * Dm + col;
+                    float s = 0.0f, dp = 0.0f;
+                    for (int64_t d = 0; d < Dh; ++d) { s += qi[d] * kj[d]; dp += dOi[d] * vj[d]; }
+                    const float p  = std::exp(s * scale - L[i]);   // P[i,j]
+                    const float ds = p * (dp - Di) * scale;        // dS[i,j]
+                    if (Qv->requires_grad) { float* dq = Qv->grad.data() + i * Dm + col; for (int64_t d = 0; d < Dh; ++d) dq[d] += ds * kj[d]; }
+                    if (Kv->requires_grad) { float* dk = Kv->grad.data() + j * Dm + col; for (int64_t d = 0; d < Dh; ++d) dk[d] += ds * qi[d]; }
+                    if (Vv->requires_grad) { float* dv = Vv->grad.data() + j * Dm + col; for (int64_t d = 0; d < Dh; ++d) dv[d] += p * dOi[d]; }
+                }
+            }
+        }
+    };
+    return out;
+}
+
 // ── Embedding: weight[V,D], ids[M] -> [M,D] ──────────────────────────────────
 Var embedding(const Var& weight, const std::vector<int>& ids) {
     if (weight->shape.size() != 2) throw std::runtime_error("embedding: weight must be [V,D]");
@@ -528,6 +630,286 @@ Var mean(const Var& x) {
         if (!X->requires_grad) return;
         const float g = op->grad[0] / (float)n;
         for (int64_t i = 0; i < n; ++i) X->grad[i] += g;
+    };
+    return out;
+}
+
+// ── Vision: conv2d (im2col + GEMM), max_pool2d, reshape ──────────────────────
+namespace {
+// im2col for one image: input[Ci,H,W] → cols[Ci*Kh*Kw, Ho*Wo].
+void im2col(const float* in, int Ci, int H, int W, int Kh, int Kw,
+            int stride, int pad, int Ho, int Wo, float* cols) {
+    const int K = Ci * Kh * Kw, P = Ho * Wo;
+    for (int ci = 0; ci < Ci; ++ci)
+        for (int kh = 0; kh < Kh; ++kh)
+            for (int kw = 0; kw < Kw; ++kw) {
+                const int row = (ci * Kh + kh) * Kw + kw;
+                for (int ho = 0; ho < Ho; ++ho) {
+                    const int h = ho * stride + kh - pad;
+                    for (int wo = 0; wo < Wo; ++wo) {
+                        const int w = wo * stride + kw - pad;
+                        const bool in_b = (h >= 0 && h < H && w >= 0 && w < W);
+                        cols[(int64_t)row * P + ho * Wo + wo] =
+                            in_b ? in[((int64_t)ci * H + h) * W + w] : 0.0f;
+                    }
+                }
+                (void)K;
+            }
+}
+// col2im: scatter-add cols[Ci*Kh*Kw, Ho*Wo] back into dInput[Ci,H,W].
+void col2im(const float* cols, int Ci, int H, int W, int Kh, int Kw,
+            int stride, int pad, int Ho, int Wo, float* dIn) {
+    const int P = Ho * Wo;
+    for (int ci = 0; ci < Ci; ++ci)
+        for (int kh = 0; kh < Kh; ++kh)
+            for (int kw = 0; kw < Kw; ++kw) {
+                const int row = (ci * Kh + kh) * Kw + kw;
+                for (int ho = 0; ho < Ho; ++ho) {
+                    const int h = ho * stride + kh - pad;
+                    if (h < 0 || h >= H) continue;
+                    for (int wo = 0; wo < Wo; ++wo) {
+                        const int w = wo * stride + kw - pad;
+                        if (w < 0 || w >= W) continue;
+                        dIn[((int64_t)ci * H + h) * W + w] += cols[(int64_t)row * P + ho * Wo + wo];
+                    }
+                }
+            }
+}
+}  // namespace
+
+Var conv2d(const Var& input, const Var& weight, const Var& bias, int stride, int pad) {
+    if (input->shape.size() != 4 || weight->shape.size() != 4)
+        throw std::runtime_error("conv2d: input[N,Ci,H,W], weight[Co,Ci,Kh,Kw]");
+    const int N = (int)input->shape[0], Ci = (int)input->shape[1];
+    const int H = (int)input->shape[2], W = (int)input->shape[3];
+    const int Co = (int)weight->shape[0], Kh = (int)weight->shape[2], Kw = (int)weight->shape[3];
+    if ((int)weight->shape[1] != Ci) throw std::runtime_error("conv2d: channel mismatch");
+    const bool hasBias = bias && bias->size() == Co;
+    const int Ho = (H + 2 * pad - Kh) / stride + 1;
+    const int Wo = (W + 2 * pad - Kw) / stride + 1;
+    if (Ho <= 0 || Wo <= 0) throw std::runtime_error("conv2d: output size <= 0");
+    const int K = Ci * Kh * Kw, P = Ho * Wo;
+
+    std::vector<Var> parents = {input, weight};
+    if (hasBias) parents.push_back(bias);
+    Var out = newNode({N, Co, Ho, Wo}, parents,
+                      anyReq({&input, &weight}) || (hasBias && bias->requires_grad));
+
+    std::vector<float> cols((size_t)K * P);
+    for (int n = 0; n < N; ++n) {
+        im2col(input->data.data() + (int64_t)n * Ci * H * W, Ci, H, W, Kh, Kw, stride, pad, Ho, Wo, cols.data());
+        // out[n][Co,P] = weight[Co,K] · cols[K,P]
+        intree::gemm_f32_threaded(false, false, Co, P, K,
+                                  weight->data.data(), cols.data(),
+                                  out->data.data() + (int64_t)n * Co * P);
+        if (hasBias)
+            for (int co = 0; co < Co; ++co) {
+                float* o = out->data.data() + ((int64_t)n * Co + co) * P;
+                const float b = bias->data[co];
+                for (int p = 0; p < P; ++p) o[p] += b;
+            }
+    }
+
+    Node* op = out.get();
+    Var In = input, Wt = weight, Bs = hasBias ? bias : Var{};
+    out->backward_fn = [op, In, Wt, Bs, N, Ci, H, W, Co, Kh, Kw, stride, pad, Ho, Wo, K, P]() {
+        std::vector<float> cols((size_t)K * P);
+        for (int n = 0; n < N; ++n) {
+            const float* dout = op->grad.data() + (int64_t)n * Co * P;   // [Co,P]
+            im2col(In->data.data() + (int64_t)n * Ci * H * W, Ci, H, W, Kh, Kw, stride, pad, Ho, Wo, cols.data());
+            if (Wt->requires_grad) {
+                // dW[Co,K] += dout[Co,P] · colsᵀ[P,K]
+                std::vector<float> dW((size_t)Co * K, 0.0f);
+                intree::gemm_f32_threaded(false, true, Co, K, P, dout, cols.data(), dW.data());
+                for (size_t i = 0; i < dW.size(); ++i) Wt->grad[i] += dW[i];
+            }
+            if (In->requires_grad) {
+                // dcols[K,P] = Wtᵀ[K,Co] · dout[Co,P]; then col2im → dInput
+                std::vector<float> dcols((size_t)K * P, 0.0f);
+                intree::gemm_f32_threaded(true, false, K, P, Co, Wt->data.data(), dout, dcols.data());
+                col2im(dcols.data(), Ci, H, W, Kh, Kw, stride, pad, Ho, Wo,
+                       In->grad.data() + (int64_t)n * Ci * H * W);
+            }
+            if (Bs && Bs->requires_grad)
+                for (int co = 0; co < Co; ++co) {
+                    float s = 0.0f;
+                    for (int p = 0; p < P; ++p) s += dout[(int64_t)co * P + p];
+                    Bs->grad[co] += s;
+                }
+        }
+    };
+    return out;
+}
+
+Var max_pool2d(const Var& input, int kernel, int stride) {
+    if (input->shape.size() != 4) throw std::runtime_error("max_pool2d: input[N,C,H,W]");
+    const int N = (int)input->shape[0], C = (int)input->shape[1];
+    const int H = (int)input->shape[2], W = (int)input->shape[3];
+    const int Ho = (H - kernel) / stride + 1, Wo = (W - kernel) / stride + 1;
+    if (Ho <= 0 || Wo <= 0) throw std::runtime_error("max_pool2d: output size <= 0");
+    Var out = newNode({N, C, Ho, Wo}, {input}, input->requires_grad);
+    auto argmax = std::make_shared<std::vector<int64_t>>((size_t)N * C * Ho * Wo);  // flat input index
+    for (int n = 0; n < N; ++n)
+        for (int c = 0; c < C; ++c) {
+            const float* in = input->data.data() + ((int64_t)n * C + c) * H * W;
+            for (int ho = 0; ho < Ho; ++ho)
+                for (int wo = 0; wo < Wo; ++wo) {
+                    float best = -1e30f; int64_t bi = 0;
+                    for (int kh = 0; kh < kernel; ++kh)
+                        for (int kw = 0; kw < kernel; ++kw) {
+                            const int h = ho * stride + kh, w = wo * stride + kw;
+                            const int64_t idx = (int64_t)h * W + w;
+                            if (in[idx] > best) { best = in[idx]; bi = idx; }
+                        }
+                    const int64_t o = (((int64_t)n * C + c) * Ho + ho) * Wo + wo;
+                    out->data[o] = best;
+                    (*argmax)[o] = ((int64_t)n * C + c) * H * W + bi;   // flat input index
+                }
+        }
+    Node* op = out.get(); Var In = input;
+    out->backward_fn = [op, In, argmax]() {
+        if (!In->requires_grad) return;
+        for (size_t o = 0; o < argmax->size(); ++o) In->grad[(*argmax)[o]] += op->grad[o];
+    };
+    return out;
+}
+
+Var avg_pool2d(const Var& input, int kernel, int stride) {
+    if (input->shape.size() != 4) throw std::runtime_error("avg_pool2d: input[N,C,H,W]");
+    const int N = (int)input->shape[0], C = (int)input->shape[1];
+    const int H = (int)input->shape[2], W = (int)input->shape[3];
+    const int Ho = (H - kernel) / stride + 1, Wo = (W - kernel) / stride + 1;
+    if (Ho <= 0 || Wo <= 0) throw std::runtime_error("avg_pool2d: output size <= 0");
+    Var out = newNode({N, C, Ho, Wo}, {input}, input->requires_grad);
+    const float invK = 1.0f / (float)(kernel * kernel);
+    for (int n = 0; n < N; ++n)
+        for (int c = 0; c < C; ++c) {
+            const float* in = input->data.data() + ((int64_t)n * C + c) * H * W;
+            float* o = out->data.data() + ((int64_t)n * C + c) * Ho * Wo;
+            for (int ho = 0; ho < Ho; ++ho)
+                for (int wo = 0; wo < Wo; ++wo) {
+                    float s = 0.0f;
+                    for (int kh = 0; kh < kernel; ++kh)
+                        for (int kw = 0; kw < kernel; ++kw)
+                            s += in[(int64_t)(ho * stride + kh) * W + (wo * stride + kw)];
+                    o[ho * Wo + wo] = s * invK;
+                }
+        }
+    Node* op = out.get(); Var In = input;
+    out->backward_fn = [op, In, N, C, H, W, Ho, Wo, kernel, stride, invK]() {
+        if (!In->requires_grad) return;
+        for (int n = 0; n < N; ++n)
+            for (int c = 0; c < C; ++c) {
+                float* dIn = In->grad.data() + ((int64_t)n * C + c) * H * W;
+                const float* dO = op->grad.data() + ((int64_t)n * C + c) * Ho * Wo;
+                for (int ho = 0; ho < Ho; ++ho)
+                    for (int wo = 0; wo < Wo; ++wo) {
+                        const float g = dO[ho * Wo + wo] * invK;
+                        for (int kh = 0; kh < kernel; ++kh)
+                            for (int kw = 0; kw < kernel; ++kw)
+                                dIn[(int64_t)(ho * stride + kh) * W + (wo * stride + kw)] += g;
+                    }
+            }
+    };
+    return out;
+}
+
+// Batch norm over [N,C,H,W], per channel. Training uses batch stats and updates
+// the running buffers (EMA); eval uses the running buffers.
+Var batch_norm2d(const Var& x, const Var& gamma, const Var& beta,
+                 std::vector<float>& running_mean, std::vector<float>& running_var,
+                 bool training, float momentum, float eps) {
+    if (x->shape.size() != 4) throw std::runtime_error("batch_norm2d: x[N,C,H,W]");
+    const int N = (int)x->shape[0], C = (int)x->shape[1];
+    const int H = (int)x->shape[2], W = (int)x->shape[3];
+    if ((int)gamma->shape[0] != C || (int)beta->shape[0] != C)
+        throw std::runtime_error("batch_norm2d: gamma/beta must be [C]");
+    if ((int)running_mean.size() != C) { running_mean.assign(C, 0.0f); running_var.assign(C, 1.0f); }
+    const int64_t M = (int64_t)N * H * W;   // elements per channel
+
+    Var out = newNode(x->shape, {x, gamma, beta}, anyReq({&x, &gamma, &beta}));
+    auto inv = std::make_shared<std::vector<float>>(C);    // 1/√(var+eps) per channel
+    auto xhat = std::make_shared<std::vector<float>>(x->data.size());
+
+    for (int c = 0; c < C; ++c) {
+        float mean, var;
+        if (training) {
+            double sum = 0.0;
+            for (int n = 0; n < N; ++n) {
+                const float* xc = x->data.data() + ((int64_t)n * C + c) * H * W;
+                for (int64_t i = 0; i < (int64_t)H * W; ++i) sum += xc[i];
+            }
+            mean = (float)(sum / (double)M);
+            double v = 0.0;
+            for (int n = 0; n < N; ++n) {
+                const float* xc = x->data.data() + ((int64_t)n * C + c) * H * W;
+                for (int64_t i = 0; i < (int64_t)H * W; ++i) { double d = xc[i] - mean; v += d * d; }
+            }
+            var = (float)(v / (double)M);
+            running_mean[c] = (1.0f - momentum) * running_mean[c] + momentum * mean;
+            running_var[c]  = (1.0f - momentum) * running_var[c]  + momentum * var;
+        } else {
+            mean = running_mean[c]; var = running_var[c];
+        }
+        (*inv)[c] = 1.0f / std::sqrt(var + eps);
+        for (int n = 0; n < N; ++n) {
+            const float* xc = x->data.data() + ((int64_t)n * C + c) * H * W;
+            float* oc = out->data.data() + ((int64_t)n * C + c) * H * W;
+            for (int64_t i = 0; i < (int64_t)H * W; ++i) {
+                const float xh = (xc[i] - mean) * (*inv)[c];
+                (*xhat)[((int64_t)n * C + c) * H * W + i] = xh;
+                oc[i] = gamma->data[c] * xh + beta->data[c];
+            }
+        }
+    }
+
+    Node* op = out.get(); Var X = x, G = gamma, B = beta;
+    out->backward_fn = [op, X, G, B, inv, xhat, N, C, H, W, M, training]() {
+        const int64_t HW = (int64_t)H * W;
+        for (int c = 0; c < C; ++c) {
+            // dGamma = Σ dy·xhat ; dBeta = Σ dy
+            double dg = 0.0, db = 0.0;
+            for (int n = 0; n < N; ++n) {
+                const float* dy = op->grad.data() + ((int64_t)n * C + c) * HW;
+                const float* xh = xhat->data() + ((int64_t)n * C + c) * HW;
+                for (int64_t i = 0; i < HW; ++i) { dg += (double)dy[i] * xh[i]; db += dy[i]; }
+            }
+            if (G->requires_grad) G->grad[c] += (float)dg;
+            if (B->requires_grad) B->grad[c] += (float)db;
+            if (!X->requires_grad) continue;
+            // dx = (gamma·inv/M)·(M·dy − Σdy − xhat·Σ(dy·xhat))   [batch stats]
+            // In eval mode batch stats are constant ⇒ dx = gamma·inv·dy.
+            const float gi = G->data[c] * (*inv)[c];
+            if (!training) {
+                for (int n = 0; n < N; ++n) {
+                    const float* dy = op->grad.data() + ((int64_t)n * C + c) * HW;
+                    float* dx = X->grad.data() + ((int64_t)n * C + c) * HW;
+                    for (int64_t i = 0; i < HW; ++i) dx[i] += gi * dy[i];
+                }
+            } else {
+                const float s = gi / (float)M;
+                for (int n = 0; n < N; ++n) {
+                    const float* dy = op->grad.data() + ((int64_t)n * C + c) * HW;
+                    const float* xh = xhat->data() + ((int64_t)n * C + c) * HW;
+                    float* dx = X->grad.data() + ((int64_t)n * C + c) * HW;
+                    for (int64_t i = 0; i < HW; ++i)
+                        dx[i] += s * ((float)M * dy[i] - (float)db - xh[i] * (float)dg);
+                }
+            }
+        }
+    };
+    return out;
+}
+
+Var reshape(const Var& x, std::vector<int64_t> shape) {
+    int64_t n = 1; for (int64_t d : shape) n *= d;
+    if (n != x->size()) throw std::runtime_error("reshape: size mismatch");
+    Var out = newNode(shape, {x}, x->requires_grad);
+    out->data = x->data;                       // same values, new shape
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X]() {
+        if (!X->requires_grad) return;
+        for (size_t i = 0; i < X->grad.size(); ++i) X->grad[i] += op->grad[i];
     };
     return out;
 }

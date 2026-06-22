@@ -103,6 +103,35 @@ int main() {
         gpt.set_int8_inference(false);
     }
 
+    // ── drop_fp32_weights: resident fp32 weight bytes actually fall, and the
+    //    (serve-only) int8 model still generates correctly ────────────────────
+    {
+        GPT serve(cfg, /*seed=*/7);
+        AdamW so(serve.parameters(), 3e-3f);
+        for (int step = 0; step < 300; ++step) {     // train a fresh copy
+            so.zero_grad();
+            autograd::backward(autograd::softmax_cross_entropy(serve.forward(ids), tgt));
+            clip_grad_norm(serve.parameters(), 1.0f);
+            so.step();
+        }
+        auto fp32bytes = [](GPT& g) {
+            size_t b = 0;
+            for (auto& nv : g.named_parameters()) b += nv.second->data.size() * sizeof(float);
+            return b;
+        };
+        const size_t before = fp32bytes(serve);
+        serve.set_int8_inference(true);
+        serve.drop_fp32_weights();
+        const size_t after = fp32bytes(serve);
+        std::vector<int> g = serve.generate_cached({seq[0]}, T);
+        int mm = 0; for (int i = 0; i <= T && i < (int)g.size(); ++i) if (g[i] == seq[i]) ++mm;
+        std::printf("drop_fp32: fp32 weight bytes %zu -> %zu, gen matches %d/%d\n",
+                    before, after, mm, T + 1);
+        if (after < before / 4 && mm >= T - 1)
+            std::printf("[PASS] drop_fp32_weights frees the master + still serves int8\n");
+        else { std::printf("[FAIL] drop_fp32_weights\n"); ++g_fail; }
+    }
+
     // ── Sampling controls: top-k / top-p / repetition-penalty produce valid,
     //    in-vocabulary tokens and are reproducible for a fixed seed ────────────
     {
@@ -118,6 +147,29 @@ int main() {
                     a.size(), (int)(a == b));
         if (ok) std::printf("[PASS] top-k/top-p sampling valid + deterministic for fixed seed\n");
         else { std::printf("[FAIL] sampling produced invalid/non-reproducible output\n"); ++g_fail; }
+    }
+
+    // ── Flash attention: a model using it trains to the same place ──────────
+    {
+        Config fc = cfg;
+        fc.flash_attention = true;
+        GPT fgpt(fc, /*seed=*/7);   // same seed/config as the baseline gpt above
+        AdamW fo(fgpt.parameters(), 3e-3f);
+        float fl = 0;
+        for (int step = 0; step < 300; ++step) {
+            fo.zero_grad();
+            autograd::Var loss = autograd::softmax_cross_entropy(fgpt.forward(ids), tgt);
+            autograd::backward(loss);
+            clip_grad_norm(fgpt.parameters(), 1.0f);
+            fo.step();
+            fl = loss->data[0];
+        }
+        std::vector<int> g = fgpt.generate_cached({seq[0]}, T);
+        int mm = 0; for (int i = 0; i <= T && i < (int)g.size(); ++i) if (g[i] == seq[i]) ++mm;
+        std::printf("flash-attn model: loss->%.3f gen matches %d/%d\n", fl, mm, T + 1);
+        if (fl < 0.05f && mm == T + 1)
+            std::printf("[PASS] flash-attention model trains + generates\n");
+        else { std::printf("[FAIL] flash-attention model\n"); ++g_fail; }
     }
 
     // ── Weight tying: fewer params, still trains + generates ─────────────────

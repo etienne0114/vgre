@@ -41,6 +41,7 @@ def _bind() -> None:
     _lib.vgre_lm_num_params.restype = c.c_longlong
     _lib.vgre_lm_set_bf16_inference.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_set_int8_inference.argtypes = [c.c_void_p, c.c_int]
+    _lib.vgre_lm_drop_fp32_weights.argtypes = [c.c_void_p]
     _lib.vgre_lm_train_step.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int, c.c_float]
     _lib.vgre_lm_train_step.restype = c.c_float
     _lib.vgre_lm_loss.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int]
@@ -154,6 +155,12 @@ class LanguageModel:
         scale, fp32 accumulation). Mutually exclusive with bf16; training stays
         fp32."""
         _lib.vgre_lm_set_int8_inference(self._h, 1 if on else 0)
+
+    def drop_fp32_weights(self) -> None:
+        """Free the fp32 master weights after enabling bf16/int8 inference, so the
+        resident footprint truly drops to ½×/¼×. SERVE-ONLY afterwards (no more
+        training)."""
+        _lib.vgre_lm_drop_fp32_weights(self._h)
 
     def train_step(self, ids: List[int], targets: List[int], lr: float = 3e-3) -> float:
         if len(ids) != len(targets):

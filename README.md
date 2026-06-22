@@ -175,7 +175,7 @@ lm = vgre.LanguageModel(vocab=tok.vocab_size, n_layer=6, d_model=256, n_head=8,
                         dropout=0.1, tie_embeddings=True)
 for step in range(2000):
     lm.train_batch(batch, lr=vgre.cosine_lr(step, 100, 2000, 3e-3))   # mini-batch
-lm.set_int8_inference(True)                                           # ¼× weights
+lm.set_int8_inference(True); lm.drop_fp32_weights()                  # ¼× resident
 print(tok.decode(lm.generate(ids, n_new=64, temperature=0.8, top_k=40, top_p=0.95)))
 lm.save("model.safetensors")
 ```

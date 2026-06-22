@@ -142,11 +142,34 @@ void microAvx2(int kc, const float* Ap, const float* Bp, float* cbuf) {
     _mm256_storeu_ps(cbuf + 64, c40); _mm256_storeu_ps(cbuf + 72, c41);
     _mm256_storeu_ps(cbuf + 80, c50); _mm256_storeu_ps(cbuf + 88, c51);
 }
+
+// ── AVX-512 micro-kernel: 6×16 (6 rows × one __m512) ─────────────────────────
+// Same algorithm as microAvx2, one 16-wide ZMM per row (NR == 16). Selected on
+// CPUs with AVX-512F; correct by construction (identical math, wider vectors).
+__attribute__((target("avx512f")))
+void microAvx512(int kc, const float* Ap, const float* Bp, float* cbuf) {
+    __m512 c0 = _mm512_setzero_ps(), c1 = _mm512_setzero_ps(), c2 = _mm512_setzero_ps();
+    __m512 c3 = _mm512_setzero_ps(), c4 = _mm512_setzero_ps(), c5 = _mm512_setzero_ps();
+    for (int k = 0; k < kc; ++k) {
+        const float* a = Ap + (int64_t)k * MR;
+        const __m512 b = _mm512_loadu_ps(Bp + (int64_t)k * NR);   // NR == 16
+        c0 = _mm512_fmadd_ps(_mm512_set1_ps(a[0]), b, c0);
+        c1 = _mm512_fmadd_ps(_mm512_set1_ps(a[1]), b, c1);
+        c2 = _mm512_fmadd_ps(_mm512_set1_ps(a[2]), b, c2);
+        c3 = _mm512_fmadd_ps(_mm512_set1_ps(a[3]), b, c3);
+        c4 = _mm512_fmadd_ps(_mm512_set1_ps(a[4]), b, c4);
+        c5 = _mm512_fmadd_ps(_mm512_set1_ps(a[5]), b, c5);
+    }
+    _mm512_storeu_ps(cbuf +  0, c0); _mm512_storeu_ps(cbuf + 16, c1);
+    _mm512_storeu_ps(cbuf + 32, c2); _mm512_storeu_ps(cbuf + 48, c3);
+    _mm512_storeu_ps(cbuf + 64, c4); _mm512_storeu_ps(cbuf + 80, c5);
+}
 #endif
 
 inline void microKernel(int kc, const float* Ap, const float* Bp, float* cbuf) {
 #if defined(VGRE_GEMM_X86) && (defined(__GNUC__) || defined(__clang__))
-    if (g_isa != Isa::Scalar) { microAvx2(kc, Ap, Bp, cbuf); return; }
+    if (g_isa == Isa::Avx512) { microAvx512(kc, Ap, Bp, cbuf); return; }
+    if (g_isa == Isa::Avx2)   { microAvx2(kc, Ap, Bp, cbuf); return; }
 #endif
     microScalar(kc, Ap, Bp, cbuf);
 }
@@ -276,7 +299,7 @@ void gemm_threaded_impl(bool transA, bool transB,
 
 const char* gemm_f32_isa() {
     switch (g_isa) {
-        case Isa::Avx512: return "avx512";   // currently runs the AVX2 micro-kernel path
+        case Isa::Avx512: return "avx512";
         case Isa::Avx2:   return "avx2";
         default:          return "scalar";
     }
