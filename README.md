@@ -144,11 +144,52 @@ ctest --output-on-failure -j$(nproc)
 ./examples/vector_addition
 ```
 
+## VGRE-LM — train and run your own language model on CPU 🧠
+
+Beyond running CUDA, VGRE includes a **from-scratch, in-tree machine-learning stack** so you can
+**train and serve your own transformer language model entirely on CPU** — with **no GPU, no external
+BLAS, no PyTorch/JAX, and no downloaded checkpoint**. Everything runs on VGRE's own components:
+
+- **SIMD GEMM** (BLIS-style AVX2/FMA micro-kernel, multi-threaded; fp32 + bf16) — fast matmul with
+  zero external BLAS dependency.
+- **Reverse-mode autograd** over a full differentiable transformer (RMSNorm, RoPE, causal attention,
+  SwiGLU, embedding, cross-entropy, dropout, weight tying) — every gradient finite-difference verified.
+- **Training**: AdamW / SGD, gradient clipping, **cosine LR schedule**, **mini-batch / gradient
+  accumulation**, a from-scratch **BPE tokenizer**, and standard-**safetensors** checkpoints.
+- **VGRE-LM**: a configurable **Llama-style decoder** with **KV-cached** generation and
+  **top-k / top-p / repetition-penalty** sampling, served in **fp32 / bf16 (½×) / int8 (¼×)** weights.
+- **Python wheel**: `pip install vgre` → `import vgre` and train/generate offline.
+
+```bash
+# Train a tiny model on the bundled public-domain sample (CPU, fully offline):
+PYTHONPATH=bindings/python LD_LIBRARY_PATH=build \
+  python examples/train_lm.py --steps 600 --serve-dtype int8
+```
+
+```python
+import vgre
+tok = vgre.Tokenizer().train(open("corpus.txt").read(), num_merges=1024)
+ids = tok.encode("Once upon a time")
+
+lm = vgre.LanguageModel(vocab=tok.vocab_size, n_layer=6, d_model=256, n_head=8,
+                        dropout=0.1, tie_embeddings=True)
+for step in range(2000):
+    lm.train_batch(batch, lr=vgre.cosine_lr(step, 100, 2000, 3e-3))   # mini-batch
+lm.set_int8_inference(True)                                           # ¼× weights
+print(tok.decode(lm.generate(ids, n_new=64, temperature=0.8, top_k=40, top_p=0.95)))
+lm.save("model.safetensors")
+```
+
+The same code scales unchanged from a few-thousand-parameter test model to a ~100M Llama config.
+See [`docs/inTreeLibrariesPlan.md`](docs/inTreeLibrariesPlan.md) and
+[`bindings/python/README.md`](bindings/python/README.md).
+
 ## Documentation
 
 - [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) — Canonical source of truth for all verified capabilities, test status, and coverage metrics
 - [`docs/missingFeatures.md`](docs/missingFeatures.md) — Definitive registry of permanent hardware-level architectural limitations (boundary conditions)
 - [`docs/implementationPlan.md`](docs/implementationPlan.md) — Forward-looking roadmap tracking advanced future expansions (SASS, RDMA, etc.)
+- [`docs/inTreeLibrariesPlan.md`](docs/inTreeLibrariesPlan.md) — The in-tree ML stack (GEMM, autograd, VGRE-LM, wheel): the from-scratch CPU train-and-serve programme
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — System architecture and execution pipeline
 - [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) — User guide and setup instructions
 - [`docs/api_reference.md`](docs/api_reference.md) — API reference for C/Python bindings

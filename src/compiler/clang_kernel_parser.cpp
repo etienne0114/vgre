@@ -26,9 +26,13 @@
 #include <unordered_set>
 
 #include "vgre/common/os_backend.h"
+#include <atomic>
 #if !defined(_WIN32)
 #include <pwd.h>       // getpwuid — home dir for temp files
 #include <sys/wait.h>  // waitpid — clang subprocess
+#include <unistd.h>    // getpid — unique temp-file naming
+#else
+#include <process.h>   // _getpid
 #endif
 
 namespace vgre {
@@ -87,6 +91,10 @@ struct dim3 {
     unsigned int total() const { return x * y * z; }
 };
 extern dim3 threadIdx, blockIdx, blockDim, gridDim;
+// The JIT header exposes dynamic shared memory as the `sharedMem` pseudo-variable
+// (#define sharedMem (*vgre_jit_get_sharedMem())). Declare it here so kernels that
+// reference it (e.g. `float* s = (float*)sharedMem;`) parse during AST analysis.
+extern void* sharedMem;
 
 void __syncthreads();
 void __syncwarp(unsigned mask = 0xffffffff);
@@ -117,6 +125,45 @@ template<typename T> T atomicMin(T*, T);
 template<typename T> T atomicMax(T*, T);
 template<typename T> T atomicOr(T*, T);
 template<typename T> T atomicAnd(T*, T);
+template<typename T> T atomicXor(T*, T);
+unsigned atomicInc(unsigned*, unsigned);
+unsigned atomicDec(unsigned*, unsigned);
+
+// Read-only cache load, fences, block-vote barriers
+template<typename T> T __ldg(const T*);
+void __threadfence(); void __threadfence_block(); void __threadfence_system();
+int  __syncthreads_count(int); int __syncthreads_and(int); int __syncthreads_or(int);
+void __nanosleep(unsigned); void __trap();
+
+// Scalar/bit/integer intrinsics
+float __saturatef(float);
+float __int_as_float(int); int __float_as_int(float);
+float __uint_as_float(unsigned); unsigned __float_as_uint(float);
+long long __double_as_longlong(double); double __longlong_as_double(long long);
+int __double2hiint(double); int __double2loint(double); double __hiloint2double(int, int);
+int __mul24(int, int); unsigned __umul24(unsigned, unsigned);
+int __mulhi(int, int); unsigned __umulhi(unsigned, unsigned);
+int __sad(int, int, int); unsigned __usad(unsigned, unsigned, unsigned);
+unsigned __byte_perm(unsigned, unsigned, unsigned);
+float rsqrtf(float); float rcbrtf(float);
+float norm3df(float, float, float); float rnorm3df(float, float, float);
+float __fmaf_rn(float, float, float); float __frcp_rn(float); float __fdiv_rn(float, float);
+double __dadd_rn(double, double); double __dmul_rn(double, double);
+
+// Fast-math intrinsics (the stub omits <cmath>, so declare these directly —
+// no clash with glibc's internal libm names here).
+float __expf(float); float __exp2f(float); float __exp10f(float);
+float __logf(float); float __log2f(float); float __log10f(float);
+float __sinf(float); float __cosf(float); float __tanf(float);
+float __powf(float, float); void __sincosf(float, float*, float*);
+
+// Warp-level reductions (sm_80+)
+unsigned __reduce_add_sync(unsigned, unsigned); int __reduce_add_sync(unsigned, int);
+unsigned __reduce_min_sync(unsigned, unsigned); int __reduce_min_sync(unsigned, int);
+unsigned __reduce_max_sync(unsigned, unsigned); int __reduce_max_sync(unsigned, int);
+unsigned __reduce_and_sync(unsigned, unsigned);
+unsigned __reduce_or_sync(unsigned, unsigned);
+unsigned __reduce_xor_sync(unsigned, unsigned);
 
 // Warp primitives
 template<typename T> T __shfl_sync(unsigned mask, T var, int srcLane, int width = 32);
@@ -236,8 +283,32 @@ VGRE_CURAND_DECL(curandStatePhilox4_32_10_t)
 VGRE_CURAND_DECL(curandStateMRG32k3a)
 VGRE_CURAND_DECL(curandStateMtgp32)
 #undef VGRE_CURAND_DECL
-struct float2 { float x; float y; };
-struct double2 { double x; double y; };
+// Built-in vector types + make_* (declarations sufficient for AST parsing).
+struct float1 { float x; };
+struct float2 { float x, y; };
+struct float3 { float x, y, z; };
+struct float4 { float x, y, z, w; };
+struct double1 { double x; };
+struct double2 { double x, y; };
+struct double3 { double x, y, z; };
+struct double4 { double x, y, z, w; };
+struct int1 { int x; };
+struct int2 { int x, y; };
+struct int3 { int x, y, z; };
+struct int4 { int x, y, z, w; };
+struct uint1 { unsigned x; };
+struct uint2 { unsigned x, y; };
+struct uint3 { unsigned x, y, z; };
+struct uint4 { unsigned x, y, z, w; };
+struct char4 { signed char x, y, z, w; };
+struct uchar4 { unsigned char x, y, z, w; };
+float2 make_float2(float, float); float3 make_float3(float, float, float);
+float4 make_float4(float, float, float, float);
+int2 make_int2(int, int); int3 make_int3(int, int, int); int4 make_int4(int, int, int, int);
+uint2 make_uint2(unsigned, unsigned); uint4 make_uint4(unsigned, unsigned, unsigned, unsigned);
+double2 make_double2(double, double); double4 make_double4(double, double, double, double);
+char4 make_char4(signed char, signed char, signed char, signed char);
+uchar4 make_uchar4(unsigned char, unsigned char, unsigned char, unsigned char);
 float2  curand_normal2(curandStateXORWOW*);
 double2 curand_normal2_double(curandStateXORWOW*);
 )VGRE_STUB";
@@ -530,8 +601,22 @@ std::string ClangKernelParser::runClangAstDump(const std::string& source) {
     VGRE_LOG_WARN("ClangKernelParser", "✗ Cache MISS - running Clang (this will be slow ~25s)");
     
     auto tmpDir = std::filesystem::temp_directory_path();
-    std::string tempPath = (tmpDir / "vgre_kernel_tmp.cu").string();
-    
+    // Unique temp-file name per process + per call. A previously-fixed name
+    // ("vgre_kernel_tmp.cu") raced when multiple processes/threads ran AST
+    // analysis concurrently: each clobbered the others' file, so clang read a
+    // half-written or wrong source and aborted. Key on pid + source hash + an
+    // atomic counter so concurrent AST dumps never collide.
+    static std::atomic<uint64_t> s_astTmpSeq{0};
+#if defined(_WIN32)
+    long pid = _getpid();
+#else
+    long pid = static_cast<long>(::getpid());
+#endif
+    std::string tempName = "vgre_kernel_" + std::to_string(pid) + "_" +
+                           sourceHash.substr(0, 16) + "_" +
+                           std::to_string(s_astTmpSeq.fetch_add(1)) + ".cu";
+    std::string tempPath = (tmpDir / tempName).string();
+
     std::ofstream ofs(tempPath);
     if (!ofs.is_open()) {
         VGRE_LOG_ERROR("ClangKernelParser", "Failed to create temp file: " + tempPath);
@@ -1026,13 +1111,17 @@ VGREResult ClangKernelParser::parse(const std::string& name,
         outIR.usesSharedMem = (source.find("__shared__") != std::string::npos ||
                                source.find("sharedMem") != std::string::npos);
         outIR.usesSyncthreads  = (source.find("__syncthreads") != std::string::npos);
-        outIR.usesWarpShuffle  = (source.find("__shfl_sync") != std::string::npos
-                               || source.find("__shfl_down_sync") != std::string::npos
-                               || source.find("__shfl_up_sync") != std::string::npos
-                               || source.find("__shfl_xor_sync") != std::string::npos
+        // All warp-cooperative intrinsics need the per-block warp buffer: the
+        // raw shuffles/ballot plus the vote helpers (__any_sync/__all_sync use
+        // __ballot_sync) and the sm_80+ warp reductions (__reduce_*_sync use
+        // __shfl_xor_sync). Missing any of these forces a serial fallback that
+        // returns a thread's own value instead of the cross-lane result.
+        outIR.usesWarpShuffle  = (source.find("__shfl") != std::string::npos
                                || source.find("__ballot_sync") != std::string::npos
-                               || source.find("__shfl(") != std::string::npos
-                               || source.find("__shfl_down(") != std::string::npos);
+                               || source.find("__any_sync") != std::string::npos
+                               || source.find("__all_sync") != std::string::npos
+                               || source.find("__reduce_") != std::string::npos
+                               || source.find("__match_") != std::string::npos);
 
         // Authoritative Instruction Estimation (AST-based)
         outIR.estimatedInstructionCount = countInstructionsRecursively(kernelObj);

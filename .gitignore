@@ -106,3 +106,10 @@ test_configuration_manager.cpp
 
 # AI-generated task notes (not project documentation)
 TASK_*.md
+
+# Python wheel build artifacts
+bindings/python/dist/
+bindings/python/build/
+bindings/python/*.egg-info/
+bindings/python/vgre/lib/
+bindings/python/vgre/*.egg-info/

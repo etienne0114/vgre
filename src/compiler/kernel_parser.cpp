@@ -520,13 +520,17 @@ VGREResult KernelParser::parse(const std::string& name,
     // Check for shared memory usage
     outIR.usesSharedMem    = (source.find("__shared__") != std::string::npos);
     outIR.usesSyncthreads  = (source.find("__syncthreads") != std::string::npos);
-    outIR.usesWarpShuffle  = (source.find("__shfl_sync") != std::string::npos
-                           || source.find("__shfl_down_sync") != std::string::npos
-                           || source.find("__shfl_up_sync") != std::string::npos
-                           || source.find("__shfl_xor_sync") != std::string::npos
+    // Any warp-cooperative intrinsic needs the per-block warp exchange buffer.
+    // Besides the raw shuffles/ballot, this includes the vote helpers
+    // (__any_sync/__all_sync route through __ballot_sync) and the sm_80+ warp
+    // reductions (__reduce_*_sync route through __shfl_xor_sync); without the
+    // buffer those silently fall back to returning a thread's own value.
+    outIR.usesWarpShuffle  = (source.find("__shfl") != std::string::npos
                            || source.find("__ballot_sync") != std::string::npos
-                           || source.find("__shfl(") != std::string::npos
-                           || source.find("__shfl_down(") != std::string::npos);
+                           || source.find("__any_sync") != std::string::npos
+                           || source.find("__all_sync") != std::string::npos
+                           || source.find("__reduce_") != std::string::npos
+                           || source.find("__match_") != std::string::npos);
     outIR.usesDynamicParallelism = (source.find("cudaLaunchDevice") != std::string::npos
                                  || source.find("cudaGetParameterBuffer") != std::string::npos);
 

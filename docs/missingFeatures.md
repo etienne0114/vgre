@@ -1,6 +1,6 @@
 # VGRE — Remaining Work
 
-**Last Updated**: 2026-06-16
+**Last Updated**: 2026-06-22
 
 This document tracks **only what is not yet done**. Everything implementable to the project's
 "real, no-stub" standard *without external hardware/accounts* has been delivered, tested, and
@@ -18,6 +18,73 @@ large-model programme**:
 
 What is left falls into two buckets, both **external**: hardware / accounts / auditors / content
 (§1), and the two large-model items that need a real cluster or a gated multi-GB download (§2).
+
+A **2026-06-22 deep audit of the CUDA-C JIT execution path** found one previously-undocumented
+**in-tree** gap — the device-side intrinsic surface — now closed (§0). It is recorded here for
+provenance even though the work is complete.
+
+---
+
+## 0. Device-side CUDA intrinsics in the JIT path — FOUND & FIXED (2026-06-22)
+
+**What was found.** VGRE JIT-compiles a CUDA-C kernel by emitting
+`#include "vgre/compiler/cpu_cuda_env.h"` ahead of the user source and compiling it as host C++
+(`src/compiler/llvm_translation_engine.cpp:1300`). That environment header only declared four
+atomics (`atomicAdd/Sub/Exch/CAS`) and a handful of helpers. A large slice of the **standard
+device-intrinsic surface that real CUDA / ML / DL kernels depend on was missing**, so any kernel
+using it compiled during AST analysis (the analysis stub forward-declared *some* of them) but then
+**failed JIT compilation** with `use of undeclared identifier`. Confirmed empirically by compiling
+probe kernels against the header. Missing set:
+
+| Group | Missing intrinsics (now added) |
+|-------|--------------------------------|
+| Atomics | `atomicMax`, `atomicMin`, `atomicAnd`, `atomicOr`, `atomicXor`, `atomicInc`, `atomicDec` (CUDA wrap-around semantics) |
+| Read-only / fences | `__ldg`, `__threadfence`, `__threadfence_block`, `__threadfence_system` |
+| Block vote | `__syncthreads_count`, `__syncthreads_and`, `__syncthreads_or` (needed new runtime barrier-reduce) |
+| Warp reduce | `__reduce_{add,min,max,and,or,xor}_sync` (sm_80+) |
+| Bit reinterpret | `__int_as_float`, `__float_as_int`, `__uint_as_float`, `__float_as_uint`, `__double_as_longlong`, `__longlong_as_double`, `__double2hiint/loint`, `__hiloint2double` |
+| Integer | `__mul24`, `__umul24`, `__mulhi`, `__umulhi`, `__mul64hi`, `__umul64hi`, `__sad`, `__usad`, `__byte_perm` |
+| Rounded arith | `__fmaf_rn/rz/ru/rd`, `__fadd_rz/ru/rd`, `__fmul_*`, `__frcp_rn`, `__fdiv_rn`, `__fsqrt_rn`, `__frsqrt_rn`, and the `__d*_rn` double forms |
+| Fast math | `__expf`, `__exp2f`, `__exp10f`, `__logf`, `__log2f`, `__log10f`, `__sinf`, `__cosf`, `__tanf`, `__powf`, `__sincosf` |
+| CUDA-named math | `rsqrtf`, `rsqrt`, `rcbrtf`, `norm3df`, `rnorm3df`, `norm4df`, `rnorm4df`, `normf`, `rnormf`, `rhypotf`, `sinpif`, `cospif`, `sincospif` |
+| Built-in vector types | `float1..4`, `double1..4`, `int1..4`, `uint1..4`, `char/uchar/short/ushort/long/ulong N`, `longlong/ulonglong N` + all `make_*` |
+| Misc | `__saturatef`, `__nanosleep`, `__trap` |
+
+**How it was fixed.**
+- New header `include/vgre/compiler/cpu_cuda_intrinsics.h` providing exact CPU implementations of
+  every intrinsic above plus the built-in vector types; included from `cpu_cuda_env.h`. Fast-math
+  names that collide with glibc's (declared-but-unlinkable) internal libm symbols are aliased to the
+  public libm function via guarded function-like macros, so they resolve on glibc, musl, macOS and
+  Windows alike.
+- Atomics (`Max/Min/And/Or/Xor/Inc/Dec`) added to `cpu_cuda_env.h` with correct CUDA semantics
+  (CAS loops; `Inc/Dec` wrap-around).
+- `__syncthreads_count/_and/_or` required true block-wide reduction: added
+  `BlockBarrier::arrive_and_reduce` + `vgre_jit_block_barrier_reduce` runtime hook
+  (`gpu_thread_context.{h,cpp}`), registered as a JIT symbol.
+- `__reduce_*_sync` built as a butterfly over the existing `__shfl_xor_sync`.
+- The AST-analysis stub (`clang_kernel_parser.cpp`) was extended with matching declarations + vector
+  types so the analysis pass and the JIT pass agree.
+- Verified by `tests/integration/test_device_intrinsics.cpp` (atomics, `__ldg`, fences, block-vote,
+  vector-typed `float4` vectorized load, warp reduce) executed end-to-end through the JIT.
+
+**Status: complete.** No remaining device-intrinsic gap is known in the JIT path.
+
+### 0.1 Correctness/robustness bugs found & fixed in the same audit (2026-06-22)
+
+- **AST-stub missing `sharedMem`** — the Clang AST-analysis stub never declared the
+  `sharedMem` pseudo-variable, so any kernel using dynamic shared memory failed AST analysis on
+  a *cold* cache (`use of undeclared identifier 'sharedMem'`). It only appeared green because CI
+  ran with warm KernelIR caches. Declared `extern void* sharedMem;` in the stub.
+- **Warp-buffer under-detection** — the per-block warp exchange buffer was only allocated when the
+  source textually contained `__shfl*`; `__any_sync`/`__all_sync`/`__reduce_*_sync` route through
+  shuffle/ballot internally and silently fell back to a thread's own value. Broadened the scan in
+  both parser paths.
+- **AST temp-file race** — `runClangAstDump` wrote every kernel to a single fixed temp path
+  (`/tmp/vgre_kernel_tmp.cu`); concurrent AST analyses (separate processes/threads) clobbered each
+  other, so clang read a half-written file and aborted. This surfaced as flaky
+  `ClangParser/ClangEnhanced/KernelParserEnhanced` failures under `ctest -j`. Now keyed on
+  pid + source-hash + atomic counter, matching the already-unique JIT codegen temp names.
+  Full suite verified **281/281 green at `ctest -j6` with a fresh cache.**
 
 ---
 

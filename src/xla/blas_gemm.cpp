@@ -8,9 +8,15 @@
 #include <vector>
 
 #include "vgre/xla/thread_pool.h"
+#include "vgre/xla/intree_gemm.h"
 
-#ifdef VGRE_XLA_HAS_BLAS
+// The in-tree SIMD GEMM is the default fast path — VGRE ships a high-performance
+// matmul with no external BLAS dependency. Define VGRE_PREFER_SYSTEM_BLAS to use
+// cblas instead (only meaningful when built with VGRE_XLA_HAS_BLAS, e.g. for A/B
+// benchmarking against OpenBLAS).
+#if defined(VGRE_XLA_HAS_BLAS) && defined(VGRE_PREFER_SYSTEM_BLAS)
 #include <cblas.h>
+#define VGRE_GEMM_USE_CBLAS 1
 #endif
 
 namespace vgre {
@@ -31,7 +37,7 @@ void gemm_rows(bool transA, bool transB,
     const int64_t Msub = m1 - m0;
     if (Msub <= 0) return;
 
-#ifdef VGRE_XLA_HAS_BLAS
+#ifdef VGRE_GEMM_USE_CBLAS
     // A sub-block: NoTrans → rows [m0,m1) of [M,K] start at A + m0*K, lda=K.
     //              Trans   → cols [m0,m1) of stored [K,M] start at A + m0, lda=M.
     const int   lda  = transA ? (int)M : (int)K;
@@ -45,43 +51,21 @@ void gemm_rows(bool transA, bool transB,
                 1.0f, Asub, lda, B, ldb,
                 0.0f, Csub, (int)N);
 #else
-    // ── Cache-tiled fallback (no BLAS) ──────────────────────────────────────
-    // Blocked i-k-j with an accumulation tile, so the inner j-loop streams
-    // contiguous rows of B and C — far better locality than the naive i-j-k
-    // triple loop, and auto-vectorizable. A(m,k)/B(k,n) accessors fold in the
-    // transpose so callers never have to physically transpose.
-    constexpr int64_t BK = 256;   // K-block (keeps a B panel warm in L2)
-    constexpr int64_t BJ = 256;   // N-block
-    auto Aat = [&](int64_t m, int64_t k) -> float {
-        return transA ? A[k * M + m] : A[m * K + k];
-    };
-    for (int64_t i = m0; i < m1; ++i) {
-        float* crow = C + i * N;
-        std::memset(crow, 0, sizeof(float) * (size_t)N);
-        for (int64_t k0 = 0; k0 < K; k0 += BK) {
-            const int64_t k1 = std::min(k0 + BK, K);
-            for (int64_t j0 = 0; j0 < N; j0 += BJ) {
-                const int64_t j1 = std::min(j0 + BJ, N);
-                for (int64_t k = k0; k < k1; ++k) {
-                    const float a = Aat(i, k);
-                    if (a == 0.0f) continue;
-                    if (transB) {
-                        for (int64_t j = j0; j < j1; ++j) crow[j] += a * B[j * K + k];
-                    } else {
-                        const float* brow = B + k * N;
-                        for (int64_t j = j0; j < j1; ++j) crow[j] += a * brow[j];
-                    }
-                }
-            }
-        }
-    }
+    // ── In-tree SIMD GEMM (default — no external BLAS) ───────────────────────
+    // BLIS-style packed, register-blocked AVX2/FMA micro-kernel. Computes the
+    // output row range [m0,m1) of C; the transpose flags are folded into the
+    // packing exactly as the cblas path folds them into lda/ldb.
+    intree::gemm_f32_rows(transA, transB, M, N, K, A, B, C, m0, m1);
 #endif
 }
 
 }  // namespace
 
 bool blas_available() {
-#ifdef VGRE_XLA_HAS_BLAS
+    // Reports whether the active GEMM path is the system cblas. The in-tree SIMD
+    // GEMM is now the default, so this is true only when explicitly built to
+    // prefer system BLAS (VGRE_PREFER_SYSTEM_BLAS).
+#ifdef VGRE_GEMM_USE_CBLAS
     return true;
 #else
     return false;
@@ -126,21 +110,21 @@ void gemm_f32(bool transA, bool transB,
         };
         pool.parallelFor(batch_count, grain, body);
     } else {
-        // Few (often 1) large GEMMs: split each one's output rows across the pool.
-        const int64_t blocks = P * 4;
-        const int64_t rowGrain = std::max<int64_t>(1, M / blocks);
-        for (int64_t bI = 0; bI < batch_count; ++bI) {
-            const float* Ab = A + bI * aStride;
-            const float* Bb = B + bI * bStride;
-            float* Cb = C + bI * cStride;
-            const int64_t nChunks = (M + rowGrain - 1) / rowGrain;
-            std::function<void(int64_t)> body = [&](int64_t chunk) {
-                const int64_t r0 = chunk * rowGrain;
-                const int64_t r1 = std::min(r0 + rowGrain, M);
-                gemm_rows(transA, transB, M, N, K, Ab, Bb, Cb, r0, r1);
-            };
-            pool.parallelFor(nChunks, 1, body);
-        }
+        // Few (often 1) large GEMMs.
+#ifdef VGRE_GEMM_USE_CBLAS
+        // cblas threads internally; just hand it each batch's full row range.
+        for (int64_t bI = 0; bI < batch_count; ++bI)
+            gemm_rows(transA, transB, M, N, K,
+                      A + bI * aStride, B + bI * bStride, C + bI * cStride, 0, M);
+#else
+        // In-tree: a properly-threaded GEMM per batch. This packs the shared B
+        // panel once and parallelizes the row blocks — the per-row-chunk
+        // gemm_rows split used to repack all of B for every chunk, which
+        // collapsed throughput on large matrices.
+        for (int64_t bI = 0; bI < batch_count; ++bI)
+            intree::gemm_f32_threaded(transA, transB, M, N, K,
+                                      A + bI * aStride, B + bI * bStride, C + bI * cStride);
+#endif
     }
 }
 

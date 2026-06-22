@@ -166,9 +166,11 @@ def _find_library() -> Optional[str]:
                     if candidate.is_file():
                         return str(candidate)
 
-    # 4. Relative to this file (project build dir)
+    # 4. Relative to this file (bundled-in-wheel, then project build dir)
     this_dir = Path(__file__).resolve().parent
     search_dirs = [
+        this_dir / "lib",                                 # libs bundled inside the wheel
+        this_dir,
         this_dir / ".." / ".." / ".." / "build",         # bindings/python/vgre -> build
         this_dir / ".." / ".." / ".." / "build" / "lib",
         Path.cwd() / "build",

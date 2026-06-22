@@ -1,6 +1,6 @@
 # VGRE Implementation Plan — Remaining Work
 
-**Last Updated**: 2026-06-16
+**Last Updated**: 2026-06-22
 
 The original Phase-4 enterprise roadmap (50 tracks) **and** the large-model programme (L1–L5) have
 been delivered down to their software-implementable core — every track buildable to the project's
@@ -8,6 +8,33 @@ been delivered down to their software-implementable core — every track buildab
 `missingFeatures.md` and git history for the full delivered set). This plan now contains **only the
 remaining work**: a short list of externally-blocked tracks, and the two large-model items that
 need a real cluster or a gated download.
+
+---
+
+## 0. Device-intrinsic completeness for the CUDA-C JIT path (2026-06-22) — DONE
+
+A deep audit of the CUDA-C → JIT execution path (the path the public `vgre_register_kernel` /
+`launchKernel` API and `test_cuda_on_cpu.py` exercise) found the device-side intrinsic surface in
+`cpu_cuda_env.h` was incomplete: standard atomics beyond `add/sub/exch/cas`, `__ldg`, memory
+fences, block-vote barriers, warp reductions, bit-reinterpret/integer/rounded/fast-math intrinsics,
+the CUDA-named math helpers (`rsqrtf`, `norm3df`, …) and **all built-in `floatN`/`intN`/… vector
+types** were absent. Kernels using them passed AST analysis but failed JIT compilation. This is the
+exact surface that "running arbitrary CUDA / ML / DL kernels" depends on.
+
+**Plan executed (single track, no external dependency):**
+
+1. Add `include/vgre/compiler/cpu_cuda_intrinsics.h` (vector types + all scalar/bit/integer/math
+   intrinsics) and include it from `cpu_cuda_env.h`. Resolve the glibc `__expf`-family symbol clash
+   with guarded function-like macros aliasing the public libm functions.
+2. Add the missing atomics (`Max/Min/And/Or/Xor/Inc/Dec`) with correct CUDA semantics to
+   `cpu_cuda_env.h`.
+3. Add a real block-wide reduction (`BlockBarrier::arrive_and_reduce` +
+   `vgre_jit_block_barrier_reduce`, registered as a JIT symbol) to back
+   `__syncthreads_count/_and/_or`; build `__reduce_*_sync` over `__shfl_xor_sync`.
+4. Mirror every new symbol + vector type into the AST-analysis stub so both passes agree.
+5. Add `tests/integration/test_device_intrinsics.cpp` running these through the JIT end-to-end.
+
+**Status: complete and tested.** See `missingFeatures.md` §0 for the full intrinsic list.
 
 ---
 
