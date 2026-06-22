@@ -72,6 +72,12 @@ Var rope(const Var& x, int num_heads, float base = 10000.0f);
 // attention output O[T, num_heads*head_dim].
 Var attention(const Var& q, const Var& k, const Var& v, int num_heads,
               bool causal = true);
+// Flash (online-softmax) attention: numerically identical to attention() but
+// stores only O(T) per head (the output + per-row logsumexp) instead of the full
+// T×T score matrix, recomputing scores in the backward pass. Lower activation
+// memory for long sequences; same result and gradients.
+Var flash_attention(const Var& q, const Var& k, const Var& v, int num_heads,
+                    bool causal = true);
 // Embedding lookup: weight[V,D], ids length M -> [M,D]. Gradient scatters into
 // the used rows of weight.
 Var embedding(const Var& weight, const std::vector<int>& ids);

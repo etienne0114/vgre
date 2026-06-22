@@ -430,6 +430,87 @@ Var attention(const Var& q, const Var& k, const Var& v, int num_heads, bool caus
     return out;
 }
 
+// ── Flash (online-softmax) attention ─────────────────────────────────────────
+// Same math as attention() but stores only O[T,Dh] and the per-row logsumexp
+// L[T] per head (O(T) extra) instead of the full T×T probabilities; the backward
+// recomputes scores on the fly (FA2-style, using D_i = Σ_d dO[i,d]·O[i,d]).
+Var flash_attention(const Var& q, const Var& k, const Var& v, int num_heads, bool causal) {
+    if (q->shape.size() != 2 || q->shape != k->shape || q->shape != v->shape)
+        throw std::runtime_error("flash_attention: Q/K/V must share shape [T, H*Dh]");
+    const int64_t T = q->shape[0], Dm = q->shape[1];
+    const int64_t Dh = Dm / num_heads;
+    if (Dh * num_heads != Dm) throw std::runtime_error("flash_attention: bad head_dim");
+    const float scale = 1.0f / std::sqrt((float)Dh);
+
+    Var out = newNode({T, Dm}, {q, k, v}, anyReq({&q, &k, &v}));
+    // Per-head logsumexp L[T], cached for the backward recompute.
+    auto Lcache = std::make_shared<std::vector<float>>((size_t)num_heads * T, 0.0f);
+
+    const float* Q = q->data.data();
+    const float* K = k->data.data();
+    const float* V = v->data.data();
+    for (int h = 0; h < num_heads; ++h) {
+        const int64_t col = (int64_t)h * Dh;
+        float* L = Lcache->data() + (size_t)h * T;
+        for (int64_t i = 0; i < T; ++i) {
+            const int64_t lim = causal ? i : (T - 1);
+            const float* qi = Q + i * Dm + col;
+            float m = -1e30f, l = 0.0f;
+            std::vector<float> acc((size_t)Dh, 0.0f);
+            for (int64_t j = 0; j <= lim; ++j) {
+                const float* kj = K + j * Dm + col;
+                float s = 0.0f;
+                for (int64_t d = 0; d < Dh; ++d) s += qi[d] * kj[d];
+                s *= scale;
+                const float m_new = std::max(m, s);
+                const float corr = std::exp(m - m_new);
+                const float p = std::exp(s - m_new);
+                l = l * corr + p;
+                const float* vj = V + j * Dm + col;
+                for (int64_t d = 0; d < Dh; ++d) acc[d] = acc[d] * corr + p * vj[d];
+                m = m_new;
+            }
+            const float inv = (l > 0.0f) ? 1.0f / l : 0.0f;
+            float* oi = out->data.data() + i * Dm + col;
+            for (int64_t d = 0; d < Dh; ++d) oi[d] = acc[d] * inv;
+            L[i] = m + std::log(l > 0.0f ? l : 1.0f);   // logsumexp
+        }
+    }
+
+    Node* op = out.get(); Var Qv = q, Kv = k, Vv = v;
+    out->backward_fn = [op, Qv, Kv, Vv, Lcache, T, Dm, Dh, num_heads, scale, causal]() {
+        const float* Q = Qv->data.data();
+        const float* K = Kv->data.data();
+        const float* V = Vv->data.data();
+        const float* O = op->data.data();
+        const float* dO = op->grad.data();
+        for (int h = 0; h < num_heads; ++h) {
+            const int64_t col = (int64_t)h * Dh;
+            const float* L = Lcache->data() + (size_t)h * T;
+            for (int64_t i = 0; i < T; ++i) {
+                const int64_t lim = causal ? i : (T - 1);
+                const float* qi = Q + i * Dm + col;
+                const float* dOi = dO + i * Dm + col;
+                const float* Oi = O + i * Dm + col;
+                float Di = 0.0f;                          // FA2: D_i = Σ_d dO·O
+                for (int64_t d = 0; d < Dh; ++d) Di += dOi[d] * Oi[d];
+                for (int64_t j = 0; j <= lim; ++j) {
+                    const float* kj = K + j * Dm + col;
+                    const float* vj = V + j * Dm + col;
+                    float s = 0.0f, dp = 0.0f;
+                    for (int64_t d = 0; d < Dh; ++d) { s += qi[d] * kj[d]; dp += dOi[d] * vj[d]; }
+                    const float p  = std::exp(s * scale - L[i]);   // P[i,j]
+                    const float ds = p * (dp - Di) * scale;        // dS[i,j]
+                    if (Qv->requires_grad) { float* dq = Qv->grad.data() + i * Dm + col; for (int64_t d = 0; d < Dh; ++d) dq[d] += ds * kj[d]; }
+                    if (Kv->requires_grad) { float* dk = Kv->grad.data() + j * Dm + col; for (int64_t d = 0; d < Dh; ++d) dk[d] += ds * qi[d]; }
+                    if (Vv->requires_grad) { float* dv = Vv->grad.data() + j * Dm + col; for (int64_t d = 0; d < Dh; ++d) dv[d] += p * dOi[d]; }
+                }
+            }
+        }
+    };
+    return out;
+}
+
 // ── Embedding: weight[V,D], ids[M] -> [M,D] ──────────────────────────────────
 Var embedding(const Var& weight, const std::vector<int>& ids) {
     if (weight->shape.size() != 2) throw std::runtime_error("embedding: weight must be [V,D]");
