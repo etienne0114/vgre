@@ -70,6 +70,9 @@ def main() -> int:
     ap.add_argument("--ctx", type=int, default=64, help="context length (tokens)")
     ap.add_argument("--steps", type=int, default=600)
     ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--warmup", type=int, default=0, help="LR warmup steps (default 10%)")
+    ap.add_argument("--serve-dtype", choices=["f32", "bf16", "int8"], default="f32",
+                    help="weight precision used for the final generation")
     ap.add_argument("--out", default="vgre_lm.safetensors")
     ap.add_argument("--seed", type=int, default=1234)
     args = ap.parse_args()
@@ -116,16 +119,26 @@ def main() -> int:
         return tot / n
 
     import math
-    print(f"[train] unigram-ish baseline loss ~= ln(vocab) = {math.log(V):.3f}")
+    warmup = args.warmup if args.warmup > 0 else max(1, args.steps // 10)
+    print(f"[train] baseline loss ~= ln(vocab) = {math.log(V):.3f}; "
+          f"cosine LR {args.lr:g} (warmup {warmup})")
     t0 = time.time()
     for step in range(1, args.steps + 1):
         x, y = window(train_ids)
-        loss = lm.train_step(x, y, lr=args.lr)
+        lr = vgre.cosine_lr(step - 1, warmup, args.steps, args.lr)
+        loss = lm.train_step(x, y, lr=lr)
         if step % max(1, args.steps // 10) == 0 or step == 1:
             vl = val_loss()
-            print(f"[train] step {step:5d}/{args.steps}  train_loss={loss:.4f}  val_loss={vl:.4f}")
+            print(f"[train] step {step:5d}/{args.steps}  lr={lr:.2e}  "
+                  f"train_loss={loss:.4f}  val_loss={vl:.4f}")
     dt = time.time() - t0
     print(f"[train] {args.steps} steps in {dt:.1f}s ({args.steps/dt:.1f} steps/s)")
+
+    if args.serve_dtype == "bf16":
+        lm.set_bf16_inference(True)
+    elif args.serve_dtype == "int8":
+        lm.set_int8_inference(True)
+    print(f"[serve] generating with {args.serve_dtype} weights")
 
     prompt_text = "Shall I compare"
     prompt = tok.encode(prompt_text)

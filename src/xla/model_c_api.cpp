@@ -66,6 +66,11 @@ float vgre_lm_train_step(vgre_lm* m, const int* ids, const int* tgt, int T, floa
     } catch (...) { return -1.0f; }
 }
 
+float vgre_cosine_lr(long long step, long long warmup, long long total,
+                     float base_lr, float min_lr) {
+    return optim::cosine_lr(step, warmup, total, base_lr, min_lr);
+}
+
 float vgre_lm_loss(vgre_lm* m, const int* ids, const int* tgt, int T) {
     if (!m || !ids || !tgt || T <= 0) return -1.0f;
     try {
