@@ -176,6 +176,41 @@ def test_transformer_block() -> bool:
     return last < 0.05
 
 
+def test_gpt_module() -> bool:
+    # A small GPT assembled from vgre.nn modules — the ergonomic transformer path.
+    nn.seed(3)
+    V, T, D = 16, 12, 32
+    seq = [(i * 5 + 2) % V for i in range(T + 1)]
+    ids, tgt = seq[:-1], seq[1:]
+
+    class GPT(nn.Module):
+        def __init__(self):
+            self.embed = nn.Embedding(V, D)
+            self.blocks = [nn.TransformerBlock(D, num_heads=4) for _ in range(2)]
+            self.norm = nn.RMSNorm(D)
+            self.head = nn.Linear(D, V, bias=False)
+
+        def forward(self, ids):
+            x = self.embed(ids)
+            for b in self.blocks:
+                x = b(x)
+            return self.head(self.norm(x))
+
+    model = GPT()
+    opt = nn.AdamW(model.parameters(), lr=3e-3, weight_decay=0.0)
+    first = last = None
+    for _ in range(250):
+        opt.zero_grad()
+        loss = nn.softmax_cross_entropy(model(ids), tgt)
+        loss.backward()
+        opt.step()
+        first = loss.item() if first is None else first
+        last = loss.item()
+    nparams = sum(t.size for _, t in model.named_parameters())
+    print(f"[gpt-module] {nparams} params, loss {first:.3f} -> {last:.3f}")
+    return last < 0.05
+
+
 def main() -> int:
     ok = True
     ok &= test_mlp_xor()
@@ -183,6 +218,7 @@ def main() -> int:
     ok &= test_module_api()
     ok &= test_bn_cnn()
     ok &= test_transformer_block()
+    ok &= test_gpt_module()
     if ok:
         print("PASS — vgre.nn trains MLP + CNN from pure Python")
         return 0

@@ -330,6 +330,56 @@ class BatchNorm2d(Module):
                             self.running_var, self.training, self.momentum, self.eps)
 
 
+class Embedding(Module):
+    def __init__(self, vocab: int, dim: int):
+        self.weight = tensor(rng.standard_normal((vocab, dim)) * 0.02, requires_grad=True)
+    def forward(self, ids):
+        return embedding(self.weight, ids)
+
+
+class LayerNorm(Module):
+    def __init__(self, dim: int, eps: float = 1e-5):
+        self.weight = tensor(np.ones(dim), requires_grad=True)
+        self.bias = tensor(np.zeros(dim), requires_grad=True)
+        self.eps = eps
+    def forward(self, x):
+        return layer_norm(x, self.weight, self.bias, self.eps)
+
+
+class RMSNorm(Module):
+    def __init__(self, dim: int, eps: float = 1e-5):
+        self.weight = tensor(np.ones(dim), requires_grad=True)
+        self.eps = eps
+    def forward(self, x):
+        return rms_norm(x, self.weight, self.eps)
+
+
+class MultiHeadAttention(Module):
+    def __init__(self, dim: int, num_heads: int, causal: bool = True, use_rope: bool = True):
+        self.q, self.k, self.v, self.o = (Linear(dim, dim, bias=False) for _ in range(4))
+        self.num_heads, self.causal, self.use_rope = num_heads, causal, use_rope
+    def forward(self, x):
+        q, k, v = self.q(x), self.k(x), self.v(x)
+        if self.use_rope:
+            q = rope(q, self.num_heads); k = rope(k, self.num_heads)
+        a = attention(q, k, v, self.num_heads, self.causal)
+        return self.o(a)
+
+
+class TransformerBlock(Module):
+    """Pre-norm decoder block: x + Attn(RMSNorm(x)), then x + MLP(RMSNorm(x))."""
+    def __init__(self, dim: int, num_heads: int, ff: int = 0, causal: bool = True):
+        ff = ff or 4 * dim
+        self.n1 = RMSNorm(dim)
+        self.attn = MultiHeadAttention(dim, num_heads, causal)
+        self.n2 = RMSNorm(dim)
+        self.fc1, self.fc2 = Linear(dim, ff), Linear(ff, dim)
+    def forward(self, x):
+        x = x + self.attn(self.n1(x))
+        h = self.fc2(gelu(self.fc1(self.n2(x))))
+        return x + h
+
+
 class MaxPool2d(Module):
     def __init__(self, kernel: int, stride: int = None):
         self.kernel, self.stride = kernel, stride or kernel
