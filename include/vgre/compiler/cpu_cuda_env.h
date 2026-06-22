@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "vgre/common/types.h"
+#include "cpu_cuda_intrinsics.h"
 #include "cpu_cuda_fp16.h"
 #include "cpu_cuda_warp.h"
 #include "wmma_emulation.h"
@@ -71,17 +72,65 @@ extern "C" {
 template <typename T> inline T atomicAdd(T *addr, T val) { return __atomic_fetch_add(addr, val, __ATOMIC_SEQ_CST); }
 template <typename T> inline T atomicSub(T *addr, T val) { return __atomic_fetch_sub(addr, val, __ATOMIC_SEQ_CST); }
 template <typename T> inline T atomicExch(T *addr, T val) { return __atomic_exchange_n(addr, val, __ATOMIC_SEQ_CST); }
-template <typename T> inline T atomicCAS(T *addr, T comp, T val) { 
-    T expected = comp; 
-    __atomic_compare_exchange_n(addr, &expected, val, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); 
-    return expected; 
+template <typename T> inline T atomicCAS(T *addr, T comp, T val) {
+    T expected = comp;
+    __atomic_compare_exchange_n(addr, &expected, val, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return expected;
+}
+
+// Bitwise atomics — integer types only (matches CUDA).
+template <typename T> inline T atomicAnd(T *addr, T val) { return __atomic_fetch_and(addr, val, __ATOMIC_SEQ_CST); }
+template <typename T> inline T atomicOr (T *addr, T val) { return __atomic_fetch_or (addr, val, __ATOMIC_SEQ_CST); }
+template <typename T> inline T atomicXor(T *addr, T val) { return __atomic_fetch_xor(addr, val, __ATOMIC_SEQ_CST); }
+
+// Min/Max atomics via compare-and-swap. Works for int/unsigned/long long and,
+// like CUDA's float/double atomicMin/Max extensions, any comparable scalar.
+template <typename T> inline T atomicMin(T *addr, T val) {
+    T old = __atomic_load_n(addr, __ATOMIC_RELAXED);
+    while (val < old && !__atomic_compare_exchange_n(addr, &old, val, true,
+                            __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}
+    return old;
+}
+template <typename T> inline T atomicMax(T *addr, T val) {
+    T old = __atomic_load_n(addr, __ATOMIC_RELAXED);
+    while (val > old && !__atomic_compare_exchange_n(addr, &old, val, true,
+                            __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}
+    return old;
+}
+
+// atomicInc/atomicDec — unsigned counters with CUDA wrap-around semantics.
+//   atomicInc: old' = (old >= val) ? 0 : old + 1
+//   atomicDec: old' = (old == 0 || old > val) ? val : old - 1
+inline unsigned int atomicInc(unsigned int *addr, unsigned int val) {
+    unsigned int old = __atomic_load_n(addr, __ATOMIC_RELAXED);
+    unsigned int next;
+    do { next = (old >= val) ? 0u : old + 1u; }
+    while (!__atomic_compare_exchange_n(addr, &old, next, true,
+                __ATOMIC_SEQ_CST, __ATOMIC_RELAXED));
+    return old;
+}
+inline unsigned int atomicDec(unsigned int *addr, unsigned int val) {
+    unsigned int old = __atomic_load_n(addr, __ATOMIC_RELAXED);
+    unsigned int next;
+    do { next = (old == 0u || old > val) ? val : old - 1u; }
+    while (!__atomic_compare_exchange_n(addr, &old, next, true,
+                __ATOMIC_SEQ_CST, __ATOMIC_RELAXED));
+    return old;
 }
 
 extern "C" void vgre_jit_block_barrier_sync();
 extern "C" void vgre_jit_syncgrid();
+// Block-wide barrier reduce (op: 0=popcount/count, 1=AND, 2=OR). Returns the
+// reduced value to every thread in the block. Backs __syncthreads_count/and/or.
+extern "C" int  vgre_jit_block_barrier_reduce(int predicate, int op);
 
 // Block barrier: synchronizes threads in a block using the host environment
 inline void __syncthreads() { vgre_jit_block_barrier_sync(); }
+
+// Barrier + block-wide vote (CUDA __syncthreads_count / _and / _or).
+inline int __syncthreads_count(int predicate) { return vgre_jit_block_barrier_reduce(predicate, 0); }
+inline int __syncthreads_and  (int predicate) { return vgre_jit_block_barrier_reduce(predicate, 1); }
+inline int __syncthreads_or   (int predicate) { return vgre_jit_block_barrier_reduce(predicate, 2); }
 
 // ── Cooperative Groups & CUB Fallback ───────────────────────────────────────
 // Full cooperative groups API (thread_block, thread_block_tile, coalesced_group,
