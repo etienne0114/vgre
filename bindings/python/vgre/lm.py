@@ -42,7 +42,8 @@ def _bind() -> None:
     _lib.vgre_lm_train_step.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int, c.c_float]
     _lib.vgre_lm_train_step.restype = c.c_float
     _lib.vgre_lm_generate.argtypes = [c.c_void_p, P(c.c_int), c.c_int, c.c_int,
-                                      c.c_float, c.c_uint, P(c.c_int), c.c_int]
+                                      c.c_float, c.c_int, c.c_float, c.c_float,
+                                      c.c_uint, P(c.c_int), c.c_int]
     _lib.vgre_lm_generate.restype = c.c_int
     _lib.vgre_lm_save.argtypes = [c.c_void_p, c.c_char_p]
     _lib.vgre_lm_save.restype = c.c_int
@@ -135,12 +136,20 @@ class LanguageModel:
         return float(loss)
 
     def generate(self, prompt: List[int], n_new: int = 32, temperature: float = 0.0,
+                 top_k: int = 0, top_p: float = 1.0, repetition_penalty: float = 1.0,
                  seed: int = 0) -> List[int]:
+        """KV-cached autoregressive generation.
+
+        temperature<=0 → greedy; top_k>0 keeps the top-k logits; top_p<1 applies
+        nucleus (cumulative-probability) sampling; repetition_penalty>1 discourages
+        repeating already-emitted tokens.
+        """
         cap = len(prompt) + n_new + 8
         p = (ctypes.c_int * len(prompt))(*prompt)
         out = (ctypes.c_int * cap)()
         n = _lib.vgre_lm_generate(self._h, p, len(prompt), int(n_new),
-                                  float(temperature), int(seed) & 0xFFFFFFFF, out, cap)
+                                  float(temperature), int(top_k), float(top_p),
+                                  float(repetition_penalty), int(seed) & 0xFFFFFFFF, out, cap)
         if n < 0:
             raise RuntimeError("generate failed")
         return list(out[:n])

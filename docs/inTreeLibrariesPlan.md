@@ -159,6 +159,11 @@ make the **default, no-dependency** build fast.
 > faster (2.1× even at tiny scale; the gap widens with model/sequence size). The C-ABI / Python
 > `generate` now use it.
 >
+> **Sampling (2026-06-22): DONE.** `SampleConfig` adds **temperature, top-k, top-p (nucleus), and
+> repetition-penalty** — the standard decoding controls real LMs need to avoid degenerate
+> repetition. Exposed through the C-ABI and `vgre.LanguageModel.generate(...)`; verified valid
+> in-vocab + reproducible-for-fixed-seed in `tests/xla/test_model.cpp`.
+>
 > **Remaining:** train on a real public-domain corpus to a coherent checkpoint (needs the data
 > pipeline + checkpoint save/load from Phase 3); the full ~100M run is a documented long-wall-clock
 > recipe (bf16 GEMM + cluster). No external download at any size.

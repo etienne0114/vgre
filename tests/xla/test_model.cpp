@@ -66,7 +66,7 @@ int main() {
         auto t0 = std::chrono::steady_clock::now();
         std::vector<int> ref = model::generate(gpt, prompt, T, 0.0f);
         auto t1 = std::chrono::steady_clock::now();
-        std::vector<int> cac = gpt.generate_cached(prompt, T, 0.0f);
+        std::vector<int> cac = gpt.generate_cached(prompt, T);  // greedy (default)
         auto t2 = std::chrono::steady_clock::now();
         double ref_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         double cac_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
@@ -75,6 +75,23 @@ int main() {
         bool same = (ref == cac);
         if (same) std::printf("[PASS] KV-cache generation token-identical to reference\n");
         else { std::printf("[FAIL] KV-cache output differs from reference\n"); ++g_fail; }
+    }
+
+    // ── Sampling controls: top-k / top-p / repetition-penalty produce valid,
+    //    in-vocabulary tokens and are reproducible for a fixed seed ────────────
+    {
+        GPT::SampleConfig sc;
+        sc.temperature = 0.9f; sc.top_k = 8; sc.top_p = 0.95f;
+        sc.repetition_penalty = 1.2f; sc.seed = 42;
+        std::vector<int> a = gpt.generate_cached({seq[0]}, T, sc);
+        std::vector<int> b = gpt.generate_cached({seq[0]}, T, sc);   // same seed
+        bool inRange = true;
+        for (int t : a) inRange = inRange && (t >= 0 && t < cfg.vocab);
+        bool ok = inRange && (a == b) && (int)a.size() == T + 1;
+        std::printf("sampled (top_k=8,top_p=0.95,rep=1.2): %zu tokens, reproducible=%d\n",
+                    a.size(), (int)(a == b));
+        if (ok) std::printf("[PASS] top-k/top-p sampling valid + deterministic for fixed seed\n");
+        else { std::printf("[FAIL] sampling produced invalid/non-reproducible output\n"); ++g_fail; }
     }
 
     // ── ~100M target config: verify the parameter count of the scaled model ──
