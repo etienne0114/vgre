@@ -44,6 +44,14 @@ VGRE_PUBLIC_API vgre_ag vgre_ag_reshape(vgre_ag x, const int64_t* shape, int ndi
 VGRE_PUBLIC_API vgre_ag vgre_ag_softmax_cross_entropy(vgre_ag logits, const int* targets, int n);
 VGRE_PUBLIC_API vgre_ag vgre_ag_conv2d(vgre_ag input, vgre_ag weight, vgre_ag bias,
                                        int stride, int pad);
+// Transformer ops (so transformers are buildable from Python too).
+VGRE_PUBLIC_API vgre_ag vgre_ag_layer_norm(vgre_ag x, vgre_ag weight, vgre_ag bias, float eps);
+VGRE_PUBLIC_API vgre_ag vgre_ag_rms_norm(vgre_ag x, vgre_ag weight, float eps);
+VGRE_PUBLIC_API vgre_ag vgre_ag_embedding(vgre_ag weight, const int* ids, int n);
+VGRE_PUBLIC_API vgre_ag vgre_ag_rope(vgre_ag x, int num_heads, float base);
+VGRE_PUBLIC_API vgre_ag vgre_ag_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal);
+VGRE_PUBLIC_API vgre_ag vgre_ag_flash_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal);
+
 VGRE_PUBLIC_API vgre_ag vgre_ag_max_pool2d(vgre_ag x, int kernel, int stride);
 VGRE_PUBLIC_API vgre_ag vgre_ag_avg_pool2d(vgre_ag x, int kernel, int stride);
 // Batch norm over [N,C,H,W]. running_mean/running_var are C-length buffers,
