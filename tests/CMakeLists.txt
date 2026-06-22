@@ -138,6 +138,14 @@ set_tests_properties(WarpShuffleJITIntegration PROPERTIES
     FIXTURES_REQUIRED KMPRegistrationClean
     RESOURCE_LOCK vgre_llvm_jit)
 
+add_executable(test_device_intrinsics integration/test_device_intrinsics.cpp)
+target_link_libraries(test_device_intrinsics PRIVATE vgre)
+add_test(NAME DeviceIntrinsicsIntegration COMMAND test_device_intrinsics)
+set_tests_properties(DeviceIntrinsicsIntegration PROPERTIES
+    TIMEOUT 180
+    FIXTURES_REQUIRED KMPRegistrationClean
+    RESOURCE_LOCK vgre_llvm_jit)
+
 add_executable(test_extern_shared integration/test_extern_shared.cpp)
 target_link_libraries(test_extern_shared PRIVATE vgre)
 add_test(NAME ExternSharedIntegration COMMAND test_extern_shared)
@@ -832,6 +840,41 @@ add_executable(test_blas_gemm xla/test_blas_gemm.cpp)
 target_link_libraries(test_blas_gemm PRIVATE vgre Threads::Threads)
 add_test(NAME XlaBlasGemm COMMAND test_blas_gemm)
 set_tests_properties(XlaBlasGemm PROPERTIES TIMEOUT 120)
+
+# In-tree bf16 GEMM: bf16 storage, f32 accumulation — correctness vs a double
+# ground truth computed from the same bf16-rounded inputs.
+add_executable(test_gemm_bf16 xla/test_gemm_bf16.cpp)
+target_link_libraries(test_gemm_bf16 PRIVATE vgre Threads::Threads)
+add_test(NAME XlaGemmBf16 COMMAND test_gemm_bf16)
+set_tests_properties(XlaGemmBf16 PROPERTIES TIMEOUT 120)
+
+# VGRE-Autograd: reverse-mode autodiff; every backward rule checked vs a central
+# finite difference of the same forward graph.
+add_executable(test_autograd xla/test_autograd.cpp)
+target_link_libraries(test_autograd PRIVATE vgre Threads::Threads)
+add_test(NAME XlaAutograd COMMAND test_autograd)
+set_tests_properties(XlaAutograd PROPERTIES TIMEOUT 120)
+
+# VGRE-Train: AdamW on a quadratic + overfitting a 1-layer transformer end-to-end
+# (proves autograd + attention + optimizer actually learn).
+add_executable(test_train xla/test_train.cpp)
+target_link_libraries(test_train PRIVATE vgre Threads::Threads)
+add_test(NAME XlaTrain COMMAND test_train)
+set_tests_properties(XlaTrain PROPERTIES TIMEOUT 180)
+
+# VGRE-LM: a real multi-layer Llama-style GPT — train to memorize a sequence,
+# greedily regenerate it, and check the ~100M-config parameter count.
+add_executable(test_model xla/test_model.cpp)
+target_link_libraries(test_model PRIVATE vgre Threads::Threads)
+add_test(NAME XlaModel COMMAND test_model)
+set_tests_properties(XlaModel PROPERTIES TIMEOUT 240)
+
+# VGRE-LM full pipeline: real text → BPE → train → checkpoint round-trip →
+# generate + decode (all offline, embedded public-domain corpus).
+add_executable(test_lm_pipeline xla/test_lm_pipeline.cpp)
+target_link_libraries(test_lm_pipeline PRIVATE vgre Threads::Threads)
+add_test(NAME XlaLmPipeline COMMAND test_lm_pipeline)
+set_tests_properties(XlaLmPipeline PROPERTIES TIMEOUT 240)
 
 # Memory-mapped safetensors checkpoint loader (F32/F16/BF16/int dtypes) — L1.
 add_executable(test_safetensors xla/test_safetensors.cpp)
@@ -1558,6 +1601,28 @@ else()
             SKIP_RETURN_CODE 77
         )
     endif()
+endif()
+
+# VGRE-LM Python bindings: train a tiny GPT + tokenizer, generate, checkpoint
+# round-trip — all through the ctypes wheel API, offline.
+if(EXISTS "${VGRE_VENV_PYTHON}")
+    add_test(NAME PythonLmBindings
+        COMMAND "${VGRE_VENV_PYTHON}" ${CMAKE_SOURCE_DIR}/tests/python/test_lm_bindings.py)
+    set_tests_properties(PythonLmBindings PROPERTIES
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        LABELS "python;e2e"
+        TIMEOUT 240
+        SKIP_RETURN_CODE 77
+    )
+elseif(Python3_FOUND)
+    add_test(NAME PythonLmBindings
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/python/test_lm_bindings.py)
+    set_tests_properties(PythonLmBindings PROPERTIES
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        LABELS "python;e2e"
+        TIMEOUT 240
+        SKIP_RETURN_CODE 77
+    )
 endif()
 
 # ── Global Test Configuration ──────────────────────────────────────────────

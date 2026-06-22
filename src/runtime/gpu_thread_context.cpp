@@ -51,6 +51,15 @@ void GPUThreadContext::blockBarrier() {
   }
 }
 
+int GPUThreadContext::blockBarrierReduce(int predicate, int op) {
+  if (t_blockBarrier) {
+    return t_blockBarrier->arrive_and_reduce(predicate, op);
+  }
+  // Single-thread block (no barrier installed): the reduction is just this
+  // thread's own predicate (count = 0/1, AND/OR = predicate truthiness).
+  return (predicate != 0) ? 1 : 0;
+}
+
 extern "C" VGRE_PUBLIC_API
 void vgre_jit_set_block_barrier(void *barrier) {
   GPUThreadContext::setBlockBarrier(reinterpret_cast<BlockBarrier *>(barrier));
@@ -65,6 +74,11 @@ void vgre_jit_clear_block_barrier() {
 extern "C" VGRE_PUBLIC_API
 void vgre_jit_block_barrier_sync() {
   GPUThreadContext::blockBarrier();
+}
+
+extern "C" VGRE_PUBLIC_API
+int vgre_jit_block_barrier_reduce(int predicate, int op) {
+  return GPUThreadContext::blockBarrierReduce(predicate, op);
 }
 
 
