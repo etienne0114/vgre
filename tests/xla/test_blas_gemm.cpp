@@ -23,21 +23,24 @@ static int g_fail = 0;
     } while (0)
 
 // Independent reference: C[M,N] = A·B with optional logical transposes, written
-// the obvious way so it can't share a bug with the kernel under test.
-static std::vector<float> refGemm(bool tA, bool tB, int M, int N, int K,
-                                  const std::vector<float>& A,
-                                  const std::vector<float>& B, int batch) {
-    std::vector<float> C((size_t)batch * M * N, 0.0f);
+// the obvious way so it can't share a bug with the kernel under test. The
+// accumulator is double so this is the numerical ground truth — an fp32 kernel
+// (FMA-based) is then judged against the *true* value, not against another fp32
+// summation whose own rounding order would otherwise dominate the comparison.
+static std::vector<double> refGemm(bool tA, bool tB, int M, int N, int K,
+                                   const std::vector<float>& A,
+                                   const std::vector<float>& B, int batch) {
+    std::vector<double> C((size_t)batch * M * N, 0.0);
     for (int bi = 0; bi < batch; ++bi) {
         const float* a = A.data() + (size_t)bi * M * K;
         const float* b = B.data() + (size_t)bi * K * N;
-        float* c = C.data() + (size_t)bi * M * N;
+        double* c = C.data() + (size_t)bi * M * N;
         for (int m = 0; m < M; ++m)
             for (int n = 0; n < N; ++n) {
-                float s = 0.0f;
+                double s = 0.0;
                 for (int k = 0; k < K; ++k) {
-                    float av = tA ? a[(size_t)k * M + m] : a[(size_t)m * K + k];
-                    float bv = tB ? b[(size_t)n * K + k] : b[(size_t)k * N + n];
+                    double av = tA ? a[(size_t)k * M + m] : a[(size_t)m * K + k];
+                    double bv = tB ? b[(size_t)n * K + k] : b[(size_t)k * N + n];
                     s += av * bv;
                 }
                 c[(size_t)m * N + n] = s;
@@ -46,14 +49,18 @@ static std::vector<float> refGemm(bool tA, bool tB, int M, int N, int K,
     return C;
 }
 
-static double maxRelErr(const std::vector<float>& x, const std::vector<float>& y) {
-    double m = 0.0;
+// Norm-wise relative error  ||X - Y||_F / (||Y||_F + eps).  This is the standard
+// way to score a numerical GEMM: per-element relative error is ill-defined near
+// cancellation (a near-zero true output makes any tiny absolute slip look huge),
+// whereas the Frobenius-norm ratio measures the error that actually matters.
+static double normRelErr(const std::vector<float>& x, const std::vector<double>& y) {
+    double num = 0.0, den = 0.0;
     for (size_t i = 0; i < x.size(); ++i) {
-        double d = std::fabs((double)x[i] - (double)y[i]);
-        double scale = std::fabs((double)y[i]) + 1e-4;
-        m = std::max(m, d / scale);
+        double d = (double)x[i] - y[i];
+        num += d * d;
+        den += y[i] * y[i];
     }
-    return m;
+    return std::sqrt(num) / (std::sqrt(den) + 1e-12);
 }
 
 static void testCase(bool tA, bool tB, int M, int N, int K, int batch) {
@@ -67,16 +74,19 @@ static void testCase(bool tA, bool tB, int M, int N, int K, int batch) {
     gemm_f32(tA, tB, M, N, K, A.data(), B.data(), C.data(), batch);
 
     auto R = refGemm(tA, tB, M, N, K, A, B, batch);
-    double err = maxRelErr(C, R);
+    double err = normRelErr(C, R);
     char name[128];
-    std::snprintf(name, sizeof(name), "gemm tA=%d tB=%d M=%d N=%d K=%d batch=%d relerr=%.2e",
+    std::snprintf(name, sizeof(name), "gemm tA=%d tB=%d M=%d N=%d K=%d batch=%d normrelerr=%.2e",
                   tA, tB, M, N, K, batch, err);
-    CHECK(err < 1e-3, name);
+    // fp32 norm-wise error grows ~sqrt(K)*eps; 1e-4 is comfortably above that and
+    // far below anything a real bug would produce.
+    CHECK(err < 1e-4, name);
 }
 
 int main() {
-    std::printf("blas_available = %s\n", vgre::xla::blas_available() ? "true (cblas_sgemm)"
-                                                                     : "false (tiled fallback)");
+    std::printf("blas_available = %s\n", vgre::xla::blas_available()
+                    ? "true (system cblas_sgemm)"
+                    : "false (in-tree SIMD GEMM — no external BLAS)");
 
     // ── Correctness: every transpose combo, square + rectangular + batched ──
     for (bool tA : {false, true})
