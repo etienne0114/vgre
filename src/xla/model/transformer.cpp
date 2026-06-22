@@ -80,7 +80,8 @@ Var GPT::forward(const std::vector<int>& ids) {
         Var q = rope(matmul(h, L.Wq), H, cfg_.rope_base);
         Var k = rope(matmul(h, L.Wk), H, cfg_.rope_base);
         Var v = matmul(h, L.Wv);
-        Var a = attention(q, k, v, H, /*causal=*/true);
+        Var a = cfg_.flash_attention ? flash_attention(q, k, v, H, /*causal=*/true)
+                                     : attention(q, k, v, H, /*causal=*/true);
         x = add(x, dropout(matmul(a, L.Wo), cfg_.dropout));     // residual (+dropout)
 
         // Pre-norm SwiGLU MLP: (silu(x·Wgate) ⊙ (x·Wup)) · Wdown.

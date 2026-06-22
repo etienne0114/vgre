@@ -149,6 +149,29 @@ int main() {
         else { std::printf("[FAIL] sampling produced invalid/non-reproducible output\n"); ++g_fail; }
     }
 
+    // ── Flash attention: a model using it trains to the same place ──────────
+    {
+        Config fc = cfg;
+        fc.flash_attention = true;
+        GPT fgpt(fc, /*seed=*/7);   // same seed/config as the baseline gpt above
+        AdamW fo(fgpt.parameters(), 3e-3f);
+        float fl = 0;
+        for (int step = 0; step < 300; ++step) {
+            fo.zero_grad();
+            autograd::Var loss = autograd::softmax_cross_entropy(fgpt.forward(ids), tgt);
+            autograd::backward(loss);
+            clip_grad_norm(fgpt.parameters(), 1.0f);
+            fo.step();
+            fl = loss->data[0];
+        }
+        std::vector<int> g = fgpt.generate_cached({seq[0]}, T);
+        int mm = 0; for (int i = 0; i <= T && i < (int)g.size(); ++i) if (g[i] == seq[i]) ++mm;
+        std::printf("flash-attn model: loss->%.3f gen matches %d/%d\n", fl, mm, T + 1);
+        if (fl < 0.05f && mm == T + 1)
+            std::printf("[PASS] flash-attention model trains + generates\n");
+        else { std::printf("[FAIL] flash-attention model\n"); ++g_fail; }
+    }
+
     // ── Weight tying: fewer params, still trains + generates ─────────────────
     {
         Config tc = cfg;

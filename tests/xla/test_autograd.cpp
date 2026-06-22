@@ -142,6 +142,30 @@ int main() {
         return mean(mul(o, o));
     });
 
+    // 8b. Flash attention: gradients match finite differences ...
+    checkGrads("flash_attention", {
+        make({4, 6}, randn(24, 25), true),
+        make({4, 6}, randn(24, 26), true),
+        make({4, 6}, randn(24, 27), true),
+    }, [](const std::vector<Var>& p) {
+        Var o = flash_attention(p[0], p[1], p[2], /*num_heads=*/2, /*causal=*/true);
+        return mean(mul(o, o));
+    });
+    // ... and its OUTPUT is numerically identical to the standard attention.
+    {
+        Var q = make({5, 8}, randn(40, 41), false);
+        Var k = make({5, 8}, randn(40, 42), false);
+        Var v = make({5, 8}, randn(40, 43), false);
+        Var a = attention(q, k, v, 2, true);
+        Var f = flash_attention(q, k, v, 2, true);
+        double worst = 0.0;
+        for (size_t i = 0; i < a->data.size(); ++i)
+            worst = std::max(worst, std::fabs((double)a->data[i] - f->data[i]));
+        bool ok = worst < 1e-5;
+        std::printf("%s flash==attention output  max|diff|=%.2e\n", ok ? "[PASS]" : "[FAIL]", worst);
+        if (!ok) ++g_fail;
+    }
+
     // 9. A full transformer-block forward (attention + residual + RMSNorm + MLP)
     checkGrads("transformer block", {
         make({4, 6}, randn(24, 18), true),    // x
