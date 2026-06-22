@@ -848,6 +848,13 @@ target_link_libraries(test_gemm_bf16 PRIVATE vgre Threads::Threads)
 add_test(NAME XlaGemmBf16 COMMAND test_gemm_bf16)
 set_tests_properties(XlaGemmBf16 PROPERTIES TIMEOUT 120)
 
+# VGRE-Autograd: reverse-mode autodiff; every backward rule checked vs a central
+# finite difference of the same forward graph.
+add_executable(test_autograd xla/test_autograd.cpp)
+target_link_libraries(test_autograd PRIVATE vgre Threads::Threads)
+add_test(NAME XlaAutograd COMMAND test_autograd)
+set_tests_properties(XlaAutograd PROPERTIES TIMEOUT 120)
+
 # Memory-mapped safetensors checkpoint loader (F32/F16/BF16/int dtypes) — L1.
 add_executable(test_safetensors xla/test_safetensors.cpp)
 target_link_libraries(test_safetensors PRIVATE vgre)
