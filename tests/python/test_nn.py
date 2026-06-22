@@ -102,7 +102,17 @@ def test_module_api() -> bool:
         opt.step()
     acc = float(np.mean(np.argmax(model(X).numpy(), axis=1) == np.array(Y)))
     print(f"[module] Sequential MLP xor accuracy = {acc*100:.0f}%  loss = {loss.item():.4f}")
-    return acc == 1.0
+
+    # Checkpoint round-trip: save, load into a fresh model, identical output.
+    before = model(X).numpy()
+    nn.save(model, "/tmp/vgre_nn_model.safetensors")
+    nn.seed(999)
+    fresh = nn.Sequential(nn.Linear(2, 8), nn.ReLU(), nn.Linear(8, 2))
+    nn.load(fresh, "/tmp/vgre_nn_model.safetensors")
+    after = fresh(X).numpy()
+    same = bool(np.max(np.abs(before - after)) < 1e-5)
+    print(f"[module] checkpoint round-trip identical = {same}")
+    return acc == 1.0 and same
 
 
 def main() -> int:
