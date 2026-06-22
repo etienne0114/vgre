@@ -54,6 +54,9 @@ def _bind() -> None:
     _lib.vgre_lm_load.argtypes = [c.c_void_p, c.c_char_p]
     _lib.vgre_lm_load.restype = c.c_int
 
+    _lib.vgre_cosine_lr.argtypes = [c.c_longlong, c.c_longlong, c.c_longlong, c.c_float, c.c_float]
+    _lib.vgre_cosine_lr.restype = c.c_float
+
     _lib.vgre_bpe_create.restype = c.c_void_p
     _lib.vgre_bpe_free.argtypes = [c.c_void_p]
     _lib.vgre_bpe_train.argtypes = [c.c_void_p, c.c_char_p, c.c_int]
@@ -70,6 +73,12 @@ def _require():
     if not NATIVE_AVAILABLE or _lib is None:
         raise RuntimeError("libvgre not found — build it and set LD_LIBRARY_PATH/VGRE_LIB_PATH")
     _bind()
+
+
+def cosine_lr(step: int, warmup: int, total: int, base_lr: float, min_lr: float = 0.0) -> float:
+    """Cosine learning-rate schedule with linear warmup (matches the C++ trainer)."""
+    _require()
+    return float(_lib.vgre_cosine_lr(int(step), int(warmup), int(total), float(base_lr), float(min_lr)))
 
 
 class Tokenizer:

@@ -37,6 +37,13 @@ VGRE_PUBLIC_API float vgre_lm_train_step(vgre_lm* m, const int* ids,
 // update (use for validation). Returns the scalar loss (or -1).
 VGRE_PUBLIC_API float vgre_lm_loss(vgre_lm* m, const int* ids, const int* tgt, int T);
 
+// Cosine learning-rate schedule with linear warmup (stateless helper): for
+// `step` in [0,total), warms up linearly over `warmup` steps then decays from
+// base_lr to min_lr along a cosine. Lets a trainer pass a real LR schedule to
+// vgre_lm_train_step instead of a fixed rate.
+VGRE_PUBLIC_API float vgre_cosine_lr(long long step, long long warmup,
+                                     long long total, float base_lr, float min_lr);
+
 // Autoregressive generation (KV-cached). Sampling controls: temperature<=0 →
 // greedy; top_k>0 keeps the top-k logits; top_p<1 applies nucleus cutoff;
 // repetition_penalty>1 penalizes already-seen tokens. Writes up to max_out ids
