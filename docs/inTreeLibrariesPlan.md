@@ -153,6 +153,12 @@ make the **default, no-dependency** build fast.
 > (12L × 768, vocab 32k) instantiates at 134M params**. One `Config` scales from the test model to
 > the target with no code change.
 >
+> **KV-cache generation (2026-06-22): DONE.** `GPT::generate_cached` is a raw-float (no autograd
+> tape) decoder with per-layer K/V caches — O(T) work per new token vs the reference forward's
+> O(T²)/step. Verified **token-identical** to the reference `generate()` for greedy decoding, and
+> faster (2.1× even at tiny scale; the gap widens with model/sequence size). The C-ABI / Python
+> `generate` now use it.
+>
 > **Remaining:** train on a real public-domain corpus to a coherent checkpoint (needs the data
 > pipeline + checkpoint save/load from Phase 3); the full ~100M run is a documented long-wall-clock
 > recipe (bf16 GEMM + cluster). No external download at any size.

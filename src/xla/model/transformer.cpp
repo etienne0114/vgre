@@ -1,9 +1,11 @@
 // VGRE-LM — see include/vgre/xla/model.h.
 
 #include "vgre/xla/model.h"
+#include "vgre/xla/intree_gemm.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <random>
 #include <stdexcept>
 
@@ -87,6 +89,120 @@ int64_t GPT::num_parameters() const {
     int64_t n = 0;
     for (const auto& p : params_) n += p->size();
     return n;
+}
+
+namespace {
+// y[N] = x[K] · W[K,N]  (row-major W). Uses the in-tree SIMD GEMM (M=1).
+inline void gemv(const float* x, const float* W, float* y, int K, int N) {
+    intree::gemm_f32_threaded(false, false, 1, N, K, x, W, y);
+}
+// In-place RMSNorm of x[D] with gain g[D].
+inline void rmsNormVec(const float* x, const float* g, float* out, int D, float eps) {
+    float ss = 0.0f;
+    for (int i = 0; i < D; ++i) ss += x[i] * x[i];
+    const float inv = 1.0f / std::sqrt(ss / (float)D + eps);
+    for (int i = 0; i < D; ++i) out[i] = x[i] * inv * g[i];
+}
+// RoPE on a single vector v[H*Dh] at absolute position pos.
+inline void ropeVec(float* v, int H, int Dh, int pos, float base) {
+    const int half = Dh / 2;
+    for (int h = 0; h < H; ++h) {
+        float* p = v + h * Dh;
+        for (int i = 0; i < half; ++i) {
+            const float theta = (float)pos * std::pow(base, -2.0f * (float)i / (float)Dh);
+            const float c = std::cos(theta), s = std::sin(theta);
+            const float a = p[2 * i], b = p[2 * i + 1];
+            p[2 * i]     = a * c - b * s;
+            p[2 * i + 1] = a * s + b * c;
+        }
+    }
+}
+inline float siluf(float x) { return x / (1.0f + std::exp(-x)); }
+}  // namespace
+
+std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
+                                      float temperature, uint32_t seed) {
+    const int D = cfg_.d_model, H = cfg_.n_head, Dh = cfg_.head_dim();
+    const int F = cfg_.ff(), V = cfg_.vocab, L = cfg_.n_layer;
+    const float scale = 1.0f / std::sqrt((float)Dh);
+    std::mt19937 rng(seed);
+
+    // Per-layer K/V caches: [max_seq, D].
+    std::vector<std::vector<float>> Kc(L), Vc(L);
+    for (int l = 0; l < L; ++l) { Kc[l].resize((size_t)cfg_.max_seq * D); Vc[l].resize((size_t)cfg_.max_seq * D); }
+
+    std::vector<float> x(D), h(D), q(D), k(D), v(D), attnOut(D), proj(D);
+    std::vector<float> h2(D), gate(F), up(F), ff(D), logits(V);
+    std::vector<float> scores(cfg_.max_seq);
+
+    // Decode one token at absolute position `pos`; writes next-token logits.
+    auto decode = [&](int token, int pos) {
+        std::memcpy(x.data(), &tok_emb_->data[(int64_t)token * D], sizeof(float) * D);
+        for (int l = 0; l < L; ++l) {
+            const Layer& Ly = layers_[l];
+            rmsNormVec(x.data(), Ly.ln1_g->data.data(), h.data(), D, cfg_.norm_eps);
+            gemv(h.data(), Ly.Wq->data.data(), q.data(), D, D);
+            gemv(h.data(), Ly.Wk->data.data(), k.data(), D, D);
+            gemv(h.data(), Ly.Wv->data.data(), v.data(), D, D);
+            ropeVec(q.data(), H, Dh, pos, cfg_.rope_base);
+            ropeVec(k.data(), H, Dh, pos, cfg_.rope_base);
+            std::memcpy(&Kc[l][(size_t)pos * D], k.data(), sizeof(float) * D);
+            std::memcpy(&Vc[l][(size_t)pos * D], v.data(), sizeof(float) * D);
+            // Per-head attention over cached positions 0..pos.
+            for (int hd = 0; hd < H; ++hd) {
+                const int off = hd * Dh;
+                float mx = -1e30f;
+                for (int j = 0; j <= pos; ++j) {
+                    float s = 0.0f;
+                    const float* kj = &Kc[l][(size_t)j * D + off];
+                    for (int d = 0; d < Dh; ++d) s += q[off + d] * kj[d];
+                    s *= scale; scores[j] = s; if (s > mx) mx = s;
+                }
+                float sum = 0.0f;
+                for (int j = 0; j <= pos; ++j) { scores[j] = std::exp(scores[j] - mx); sum += scores[j]; }
+                const float inv = 1.0f / sum;
+                for (int d = 0; d < Dh; ++d) {
+                    float acc = 0.0f;
+                    for (int j = 0; j <= pos; ++j) acc += scores[j] * inv * Vc[l][(size_t)j * D + off + d];
+                    attnOut[off + d] = acc;
+                }
+            }
+            gemv(attnOut.data(), Ly.Wo->data.data(), proj.data(), D, D);
+            for (int i = 0; i < D; ++i) x[i] += proj[i];                  // residual
+            rmsNormVec(x.data(), Ly.ln2_g->data.data(), h2.data(), D, cfg_.norm_eps);
+            gemv(h2.data(), Ly.Wgate->data.data(), gate.data(), D, F);
+            gemv(h2.data(), Ly.Wup->data.data(),   up.data(),   D, F);
+            for (int i = 0; i < F; ++i) gate[i] = siluf(gate[i]) * up[i]; // SwiGLU
+            gemv(gate.data(), Ly.Wdown->data.data(), ff.data(), F, D);
+            for (int i = 0; i < D; ++i) x[i] += ff[i];                    // residual
+        }
+        rmsNormVec(x.data(), final_g_->data.data(), h.data(), D, cfg_.norm_eps);
+        gemv(h.data(), lm_head_->data.data(), logits.data(), D, V);
+    };
+
+    if (prompt.empty()) return prompt;
+    int pos = 0;
+    for (size_t i = 0; i < prompt.size(); ++i) decode(prompt[i], pos++);  // prefill
+
+    for (int step = 0; step < n_new && pos < cfg_.max_seq; ++step) {
+        int next;
+        if (temperature <= 0.0f) {
+            next = 0;
+            for (int j = 1; j < V; ++j) if (logits[j] > logits[next]) next = j;
+        } else {
+            float mx = logits[0];
+            for (int j = 1; j < V; ++j) mx = std::max(mx, logits[j]);
+            float sum = 0.0f;
+            std::vector<float> p(V);
+            for (int j = 0; j < V; ++j) { p[j] = std::exp((logits[j] - mx) / temperature); sum += p[j]; }
+            std::uniform_real_distribution<float> ud(0.0f, sum);
+            float r = ud(rng), acc = 0.0f; next = V - 1;
+            for (int j = 0; j < V; ++j) { acc += p[j]; if (r <= acc) { next = j; break; } }
+        }
+        prompt.push_back(next);
+        decode(next, pos++);
+    }
+    return prompt;
 }
 
 std::vector<std::pair<std::string, Var>> GPT::named_parameters() {

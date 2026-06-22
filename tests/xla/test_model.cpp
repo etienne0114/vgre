@@ -8,6 +8,8 @@
 #include "vgre/xla/model.h"
 #include "vgre/xla/optim.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -57,6 +59,23 @@ int main() {
     std::printf("generation matches %d/%d positions\n", matches, T + 1);
     if (matches == T + 1) std::printf("[PASS] greedy generation reproduces sequence\n");
     else { std::printf("[FAIL] generation mismatch\n"); ++g_fail; }
+
+    // ── KV-cache generation: token-identical to the reference, and faster ────
+    {
+        std::vector<int> prompt = {seq[0]};
+        auto t0 = std::chrono::steady_clock::now();
+        std::vector<int> ref = model::generate(gpt, prompt, T, 0.0f);
+        auto t1 = std::chrono::steady_clock::now();
+        std::vector<int> cac = gpt.generate_cached(prompt, T, 0.0f);
+        auto t2 = std::chrono::steady_clock::now();
+        double ref_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        double cac_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        std::printf("KV-cache: ref=%.1fms cached=%.1fms (%.1fx)  len ref=%zu cac=%zu\n",
+                    ref_ms, cac_ms, ref_ms / std::max(cac_ms, 1e-3), ref.size(), cac.size());
+        bool same = (ref == cac);
+        if (same) std::printf("[PASS] KV-cache generation token-identical to reference\n");
+        else { std::printf("[FAIL] KV-cache output differs from reference\n"); ++g_fail; }
+    }
 
     // ── ~100M target config: verify the parameter count of the scaled model ──
     {

@@ -43,6 +43,13 @@ public:
     // Forward a single sequence of token ids → logits [T, vocab].
     Var forward(const std::vector<int>& ids);
 
+    // Fast autoregressive generation with a per-layer K/V cache: O(T) work per
+    // new token instead of re-running the full forward (which is O(T²) per step).
+    // Pure raw-float inference (no autograd tape); produces token-identical
+    // results to the reference generate() free function. temperature<=0 → greedy.
+    std::vector<int> generate_cached(std::vector<int> prompt, int n_new,
+                                     float temperature = 0.0f, uint32_t seed = 0);
+
     // All trainable parameters (for the optimizer).
     std::vector<Var>& parameters() { return params_; }
     // Canonically-named parameters (for checkpoint save/load), e.g.
