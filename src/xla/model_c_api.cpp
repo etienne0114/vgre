@@ -26,11 +26,13 @@ struct vgre_bpe {
 extern "C" {
 
 vgre_lm* vgre_lm_create(int vocab, int n_layer, int d_model, int n_head,
-                        int d_ff, int max_seq, unsigned seed) {
+                        int d_ff, int max_seq, float dropout, int tie_embeddings,
+                        unsigned seed) {
     try {
         model::Config c;
         c.vocab = vocab; c.n_layer = n_layer; c.d_model = d_model;
         c.n_head = n_head; c.d_ff = d_ff; c.max_seq = max_seq;
+        c.dropout = dropout; c.tie_embeddings = (tie_embeddings != 0);
         auto h = new vgre_lm();
         h->gpt = std::make_unique<model::GPT>(c, seed);
         h->opt = std::make_unique<optim::AdamW>(h->gpt->parameters(), 3e-3f);

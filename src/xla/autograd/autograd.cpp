@@ -85,6 +85,36 @@ Var matmul(const Var& a, const Var& b) {
     return out;
 }
 
+// ── linear_tied: out[M,V] = x[M,D] · Wᵀ, W stored [V,D] (weight tying) ───────
+Var linear_tied(const Var& x, const Var& w) {
+    if (x->shape.size() != 2 || w->shape.size() != 2)
+        throw std::runtime_error("linear_tied: operands must be rank-2");
+    const int64_t M = x->shape[0], D = x->shape[1], V = w->shape[0];
+    if (w->shape[1] != D) throw std::runtime_error("linear_tied: dim mismatch");
+
+    Var out = newNode({M, V}, {x, w}, anyReq({&x, &w}));
+    // out[m,v] = Σ_d x[m,d]·W[v,d]  → gemm(tA=F, tB=T, M, V, D, x, W)
+    intree::gemm_f32_threaded(false, true, M, V, D, x->data.data(), w->data.data(), out->data.data());
+
+    Node* op = out.get();
+    Var X = x, W = w;
+    out->backward_fn = [op, X, W, M, V, D]() {
+        // dX[M,D] += dOut[M,V] · W[V,D]   → gemm(F, F, M, D, V, dOut, W)
+        if (X->requires_grad) {
+            std::vector<float> dX((size_t)M * D, 0.0f);
+            intree::gemm_f32_threaded(false, false, M, D, V, op->grad.data(), W->data.data(), dX.data());
+            for (size_t i = 0; i < dX.size(); ++i) X->grad[i] += dX[i];
+        }
+        // dW[V,D] += dOutᵀ[V,M] · X[M,D]  → gemm(T, F, V, D, M, dOut, X)
+        if (W->requires_grad) {
+            std::vector<float> dW((size_t)V * D, 0.0f);
+            intree::gemm_f32_threaded(true, false, V, D, M, op->grad.data(), X->data.data(), dW.data());
+            for (size_t i = 0; i < dW.size(); ++i) W->grad[i] += dW[i];
+        }
+    };
+    return out;
+}
+
 // ── add: same-shape, or 1-D bias [N] broadcast over rows of a[M,N] ───────────
 Var add(const Var& a, const Var& b) {
     Var out = newNode(a->shape, {a, b}, anyReq({&a, &b}));

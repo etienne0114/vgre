@@ -32,6 +32,7 @@ struct Config {
     float rope_base = 10000.0f;
     float norm_eps  = 1e-5f;
     float dropout   = 0.0f;      // residual dropout during training (0 = off)
+    bool  tie_embeddings = false; // share the token embedding as the output projection
 
     int ff() const { return d_ff > 0 ? d_ff : 4 * d_model; }
     int head_dim() const { return d_model / n_head; }

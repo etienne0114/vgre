@@ -59,7 +59,11 @@ GPT::GPT(const Config& cfg, uint32_t seed) : cfg_(cfg) {
         L.Wdown = initParam({F, D}, s_proj, rng, params_);
     }
     final_g_ = initOnes(D, params_);
-    lm_head_ = initParam({D, V}, 0.02f, rng, params_);
+    // Weight tying: reuse the token embedding [V,D] as the output projection
+    // (logits = x · tok_embᵀ) instead of a separate lm_head [D,V]. Saves V*D
+    // parameters. lm_head_ stays null in that case.
+    if (!cfg_.tie_embeddings)
+        lm_head_ = initParam({D, V}, 0.02f, rng, params_);
 }
 
 Var GPT::forward(const std::vector<int>& ids) {
@@ -83,7 +87,9 @@ Var GPT::forward(const std::vector<int>& ids) {
         x = add(x, dropout(ff, cfg_.dropout));                  // residual (+dropout)
     }
     Var xn = rms_norm(x, final_g_, cfg_.norm_eps);
-    return matmul(xn, lm_head_);                       // logits [T, V]
+    // Output projection — tied (xn · tok_embᵀ) or a dedicated lm_head.
+    return cfg_.tie_embeddings ? linear_tied(xn, tok_emb_)
+                               : matmul(xn, lm_head_);  // logits [T, V]
 }
 
 int64_t GPT::num_parameters() const {
@@ -264,7 +270,13 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             for (int i = 0; i < D; ++i) x[i] += ff[i];                    // residual
         }
         rmsNormVec(x.data(), final_g_->data.data(), h.data(), D, cfg_.norm_eps);
-        mv(h.data(), lm_head_->data.data(), lm_head_bf16_.data(), &lm_head_q8_, logits.data(), D, V);
+        if (cfg_.tie_embeddings) {
+            // Tied head: logits[v] = Σ_d h[d]·tok_emb[v,d]  (always fp32 tok_emb).
+            intree::gemm_f32_threaded(false, true, 1, V, D, h.data(),
+                                      tok_emb_->data.data(), logits.data());
+        } else {
+            mv(h.data(), lm_head_->data.data(), lm_head_bf16_.data(), &lm_head_q8_, logits.data(), D, V);
+        }
     };
 
     if (prompt.empty()) return prompt;
@@ -308,7 +320,7 @@ void GPT::set_int8_inference(bool on) {
         quant(L.Wgate->data, D, F, L.Wgate_q8); quant(L.Wup->data, D, F, L.Wup_q8);
         quant(L.Wdown->data, F, D, L.Wdown_q8);
     }
-    quant(lm_head_->data, D, V, lm_head_q8_);
+    if (lm_head_) quant(lm_head_->data, D, V, lm_head_q8_);   // tied head stays fp32
 }
 
 void GPT::set_bf16_inference(bool on) {
@@ -321,7 +333,7 @@ void GPT::set_bf16_inference(bool on) {
         for (size_t i = 0; i < src.size(); ++i) dst[i] = f32_to_bf16(src[i]);
     };
     toBf16(tok_emb_->data, tok_emb_bf16_);
-    toBf16(lm_head_->data, lm_head_bf16_);
+    if (lm_head_) toBf16(lm_head_->data, lm_head_bf16_);   // tied head stays fp32
     for (auto& L : layers_) {
         toBf16(L.Wq->data, L.Wq_bf16);     toBf16(L.Wk->data, L.Wk_bf16);
         toBf16(L.Wv->data, L.Wv_bf16);     toBf16(L.Wo->data, L.Wo_bf16);
@@ -347,7 +359,7 @@ std::vector<std::pair<std::string, Var>> GPT::named_parameters() {
         out.emplace_back(pre + "Wdown", L.Wdown);
     }
     out.emplace_back("final_g", final_g_);
-    out.emplace_back("lm_head", lm_head_);
+    if (lm_head_) out.emplace_back("lm_head", lm_head_);   // absent when tied
     return out;
 }
 
