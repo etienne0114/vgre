@@ -33,14 +33,14 @@ using vgre_socket_t = vgre::common::vgre_socket_t;
 // Built-in SHA-256 per RFC 6234 — no external dependency required.
 namespace crypto {
 
-// ── X25519 + HKDF-SHA256 forward declarations ─────────────────────────────
-// Defined in secure_channel_crypto.cpp; used by SecureChannel::executeKeyExchange.
-#ifdef VGRE_ENABLE_SSL
+// ── X25519 forward declarations ───────────────────────────────────────────────
+// OpenSSL path: secure_channel_crypto.cpp #ifdef VGRE_ENABLE_SSL
+// Software path: same file, #else branch (TweetNaCl field arithmetic)
+// Always available regardless of VGRE_ENABLE_SSL.
 bool x25519_genkeypair(uint8_t privateKey[32], uint8_t publicKey[32]);
 bool x25519_shared_secret(const uint8_t privateKey[32],
                            const uint8_t peerPublic[32],
                            uint8_t sharedSecret[32]);
-#endif // VGRE_ENABLE_SSL
 void derive_session_key_from_dh(const uint8_t sharedSecret[32], uint8_t sessionKey[32]);
 
 constexpr size_t kSHA256DigestLen = 32;

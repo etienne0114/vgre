@@ -50,10 +50,10 @@ int main() {
             AuditRecord r; r.actor = actor; r.action = "auth.login"; r.outcome = o; events.push_back(r);
         };
         // attacker: 7 denied logins (brute force). normal users: a few successes.
-        for (int i = 0; i < 7; ++i) add("attacker", AuditOutcome::DENIED);
-        for (int i = 0; i < 10; ++i) add("alice", AuditOutcome::SUCCESS);
-        add("bob", AuditOutcome::SUCCESS);
-        add("bob", AuditOutcome::DENIED); // 1 denial — below threshold
+        for (int i = 0; i < 7; ++i) add("attacker", AuditOutcome::Denied);
+        for (int i = 0; i < 10; ++i) add("alice", AuditOutcome::Ok);
+        add("bob", AuditOutcome::Ok);
+        add("bob", AuditOutcome::Denied); // 1 denial — below threshold
 
         SecurityReport rep = SecurityAnalytics::analyze(events, /*bruteForceThreshold*/5);
         check("total + denied counts correct", rep.totalEvents == 19 && rep.deniedEvents == 8);
@@ -64,7 +64,7 @@ int main() {
 
         // a clean trail → perfect posture, no findings
         std::vector<AuditRecord> clean;
-        for (int i = 0; i < 20; ++i) { AuditRecord r; r.actor = "u"; r.outcome = AuditOutcome::SUCCESS; clean.push_back(r); }
+        for (int i = 0; i < 20; ++i) { AuditRecord r; r.actor = "u"; r.outcome = AuditOutcome::Ok; clean.push_back(r); }
         SecurityReport ok = SecurityAnalytics::analyze(clean);
         check("clean trail → posture 100, no threats", ok.postureScore == 100.0 && ok.findings.empty());
     }

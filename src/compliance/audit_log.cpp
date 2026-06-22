@@ -475,8 +475,8 @@ vgre::VGREResult AuditLog::forget(const std::string& subjectId, DeletionCertific
     tomb.actor = "system:compliance";
     tomb.action = "gdpr.erasure";
     tomb.resource = "subject:" + sidHex;
-    tomb.outcome = AuditOutcome::SUCCESS;
-    tomb.severity = AuditSeverity::NOTICE;
+    tomb.outcome = AuditOutcome::Ok;
+    tomb.severity = AuditSeverity::Notice;
     tomb.attributes["method"] = "crypto-shred-aes256gcm";
     tomb.attributes["affected_records"] = std::to_string(affected.size());
     uint64_t tombSeq = 0;

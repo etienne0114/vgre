@@ -50,3 +50,26 @@
 #else
 #  define VGRE_FULL_BARRIER() __sync_synchronize()
 #endif
+
+// ── Atomic load/store (acquire/release) on int* ──────────────────────────────
+// GCC/Clang expose __atomic_load_n/__atomic_store_n builtins with explicit
+// memory-order arguments.  MSVC has no equivalent builtins; on x86/x64 (TSO)
+// volatile reads already carry acquire semantics and volatile writes carry
+// release semantics.  On ARM64/MSVC the compiler emits ldaex/stlex.
+// _ReadWriteBarrier() suppresses compiler reordering across the access.
+#if defined(_MSC_VER)
+inline int  vgre_atomic_load_acquire (const int* p) noexcept {
+    int v = *reinterpret_cast<const volatile int*>(p);
+    _ReadWriteBarrier();
+    return v;
+}
+inline void vgre_atomic_store_release(int* p, int v) noexcept {
+    _ReadWriteBarrier();
+    *reinterpret_cast<volatile int*>(p) = v;
+}
+#  define VGRE_ATOMIC_LOAD_ACQUIRE(ptr)        vgre_atomic_load_acquire(ptr)
+#  define VGRE_ATOMIC_STORE_RELEASE(ptr, val)  vgre_atomic_store_release((ptr), (val))
+#else
+#  define VGRE_ATOMIC_LOAD_ACQUIRE(ptr)        __atomic_load_n((ptr), __ATOMIC_ACQUIRE)
+#  define VGRE_ATOMIC_STORE_RELEASE(ptr, val)  __atomic_store_n((ptr), (val), __ATOMIC_RELEASE)
+#endif

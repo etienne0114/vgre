@@ -185,12 +185,12 @@ std::string ErrorHandlingPatterns::getSocketErrorString(int error_code) {
       }
       return 256;
   }();
-  char buffer[kErrorBufferSize];
+  std::vector<char> buffer(kErrorBufferSize, '\0');
   if (FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
                      NULL, error_code,
-                     MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buffer,
+                     MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buffer.data(),
                      kErrorBufferSize, NULL)) {
-    std::string s(buffer);
+    std::string s(buffer.data());
     while (!s.empty() &&
            (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
       s.pop_back();

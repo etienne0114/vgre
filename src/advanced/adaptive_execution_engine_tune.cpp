@@ -206,7 +206,7 @@ void AdaptiveExecutionEngine::updateHardwareMetrics(int cores, double clockGHz,
       __cpuid(regs, 1);
       bool hasAVX = (regs[2] & (1 << 28)) != 0;
       bool hasAVX2 = false;  // Need extended leaf for AVX2
-      bool hasFMA = (regs[2] & (1 << 12)) != 0;
+      hasFMA = (regs[2] & (1 << 12)) != 0;
       
       if (hasAVX) {
           simdLanes = 8;  // AVX baseline

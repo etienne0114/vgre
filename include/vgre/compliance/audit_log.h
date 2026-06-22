@@ -42,8 +42,11 @@
 namespace vgre {
 namespace compliance {
 
-enum class AuditOutcome : uint8_t { SUCCESS = 0, DENIED = 1, ERROR = 2 };
-enum class AuditSeverity : uint8_t { INFO = 0, NOTICE = 1, WARNING = 2, CRITICAL = 3 };
+// PascalCase values avoid Windows SDK macro collisions:
+//   <wingdi.h>: #define ERROR 0
+//   <winnt.h>:  no WARNING, but naming is kept consistent with GuardStatus
+enum class AuditOutcome  : uint8_t { Ok = 0, Denied = 1, Err = 2 };
+enum class AuditSeverity : uint8_t { Info = 0, Notice = 1, Warn = 2, Critical = 3 };
 
 // One audit event.  `subjectId` + `piiPlaintext` are optional; when present the
 // plaintext is crypto-sealed (see header note) and `piiPlaintext` is cleared
@@ -54,8 +57,8 @@ struct AuditRecord {
     std::string   actor;              // who performed the action
     std::string   action;            // e.g. "auth.login", "secret.read", "kernel.load"
     std::string   resource;          // e.g. "device:0", "cluster:node-3"
-    AuditOutcome  outcome = AuditOutcome::SUCCESS;
-    AuditSeverity severity = AuditSeverity::INFO;
+    AuditOutcome  outcome = AuditOutcome::Ok;
+    AuditSeverity severity = AuditSeverity::Info;
     std::map<std::string, std::string> attributes;
 
     // Optional crypto-shreddable PII payload (pseudonymised: subjectId should be
@@ -82,7 +85,7 @@ struct AuditQuery {
     std::string resourceEquals;  // empty = any
     uint64_t    sinceNs = 0;      // inclusive lower bound (0 = from start)
     uint64_t    untilNs = UINT64_MAX; // inclusive upper bound
-    AuditSeverity minSeverity = AuditSeverity::INFO;
+    AuditSeverity minSeverity = AuditSeverity::Info;
     size_t      limit = 0;        // 0 = unlimited
 };
 

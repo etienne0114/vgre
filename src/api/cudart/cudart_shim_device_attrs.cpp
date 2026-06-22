@@ -20,7 +20,9 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
-#ifndef _WIN32
+#if defined(_WIN32)
+#include <windows.h>  // MEMORYSTATUSEX, GlobalMemoryStatusEx
+#else
 #include <unistd.h>   // sysconf
 #endif
 

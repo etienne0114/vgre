@@ -28,8 +28,8 @@ int main() {
         auto* p = static_cast<uint8_t*>(bc.guardedAlloc(N));
         check("guardedAlloc returns a pointer", p != nullptr);
         std::memset(p, 0x11, N);             // write exactly within bounds
-        check("in-bounds write keeps red zones intact", bc.check(p) == GuardStatus::OK);
-        check("clean free reports OK", bc.guardedFree(p) == GuardStatus::OK);
+        check("in-bounds write keeps red zones intact", bc.check(p) == GuardStatus::Ok);
+        check("clean free reports OK", bc.guardedFree(p) == GuardStatus::Ok);
     }
 
     // ── overflow: write 1 byte past the end → detected ───────────────────
@@ -37,8 +37,8 @@ int main() {
         const size_t N = 100;
         auto* p = static_cast<uint8_t*>(bc.guardedAlloc(N));
         p[N] = 0xFF;                          // 1 byte past the user region
-        check("overflow detected by check()", bc.check(p) == GuardStatus::OVERFLOW);
-        check("overflow detected at free()", bc.guardedFree(p) == GuardStatus::OVERFLOW);
+        check("overflow detected by check()", bc.check(p) == GuardStatus::Overflow);
+        check("overflow detected at free()", bc.guardedFree(p) == GuardStatus::Overflow);
     }
 
     // ── underflow: write 1 byte before the start → detected ──────────────
@@ -46,14 +46,14 @@ int main() {
         const size_t N = 64;
         auto* p = static_cast<uint8_t*>(bc.guardedAlloc(N));
         p[-1] = 0xFF;                         // 1 byte before the user region
-        check("underflow detected", bc.check(p) == GuardStatus::UNDERFLOW);
+        check("underflow detected", bc.check(p) == GuardStatus::Underflow);
         bc.guardedFree(p);
     }
 
     // ── unknown pointer ──────────────────────────────────────────────────
     {
         int local = 0;
-        check("unknown pointer reported", bc.check(&local) == GuardStatus::UNKNOWN_PTR);
+        check("unknown pointer reported", bc.check(&local) == GuardStatus::UnknownPtr);
     }
 
     // ── checkAll over several live allocations ───────────────────────────
@@ -65,7 +65,7 @@ int main() {
         std::vector<std::pair<const void*, GuardStatus>> bad;
         size_t n = bc.checkAll(bad);
         check("checkAll finds exactly the corrupted allocation",
-              n == 1 && !bad.empty() && bad[0].first == b && bad[0].second == GuardStatus::OVERFLOW);
+              n == 1 && !bad.empty() && bad[0].first == b && bad[0].second == GuardStatus::Overflow);
         bc.guardedFree(a); bc.guardedFree(b); bc.guardedFree(c);
         check("all freed → no live allocations", bc.liveCount() == 0);
     }
