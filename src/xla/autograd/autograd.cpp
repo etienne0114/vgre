@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <random>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -459,6 +460,29 @@ Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets) {
                 float d = probs[i * V + j] - (j == tgt[i] ? 1.0f : 0.0f);
                 L->grad[i * V + j] += g * d;
             }
+    };
+    return out;
+}
+
+Var dropout(const Var& x, float p) {
+    if (p <= 0.0f) return x;                 // identity (no node added)
+    if (p >= 1.0f) p = 0.999f;               // guard against div-by-zero
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    static thread_local std::mt19937 rng(0xD0D0);
+    std::uniform_real_distribution<float> u(0.0f, 1.0f);
+    const int64_t n = x->size();
+    const float scale = 1.0f / (1.0f - p);
+    auto mask = std::make_shared<std::vector<uint8_t>>((size_t)n);
+    for (int64_t i = 0; i < n; ++i) {
+        const uint8_t keep = (u(rng) >= p) ? 1 : 0;
+        (*mask)[i] = keep;
+        out->data[i] = keep ? x->data[i] * scale : 0.0f;
+    }
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, mask, scale, n]() {
+        if (!X->requires_grad) return;
+        for (int64_t i = 0; i < n; ++i)
+            if ((*mask)[i]) X->grad[i] += op->grad[i] * scale;
     };
     return out;
 }

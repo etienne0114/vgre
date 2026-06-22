@@ -75,12 +75,12 @@ Var GPT::forward(const std::vector<int>& ids) {
         Var k = rope(matmul(h, L.Wk), H, cfg_.rope_base);
         Var v = matmul(h, L.Wv);
         Var a = attention(q, k, v, H, /*causal=*/true);
-        x = add(x, matmul(a, L.Wo));                   // residual
+        x = add(x, dropout(matmul(a, L.Wo), cfg_.dropout));     // residual (+dropout)
 
         // Pre-norm SwiGLU MLP: (silu(x·Wgate) ⊙ (x·Wup)) · Wdown.
         Var h2 = rms_norm(x, L.ln2_g, cfg_.norm_eps);
         Var ff = matmul(mul(silu(matmul(h2, L.Wgate)), matmul(h2, L.Wup)), L.Wdown);
-        x = add(x, ff);                                // residual
+        x = add(x, dropout(ff, cfg_.dropout));                  // residual (+dropout)
     }
     Var xn = rms_norm(x, final_g_, cfg_.norm_eps);
     return matmul(xn, lm_head_);                       // logits [T, V]
