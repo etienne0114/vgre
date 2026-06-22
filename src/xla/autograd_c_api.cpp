@@ -49,6 +49,9 @@ vgre_ag vgre_ag_silu(vgre_ag x)               { try { return wrap(silu(ref(x)));
 vgre_ag vgre_ag_sigmoid(vgre_ag x)            { try { return wrap(sigmoid(ref(x))); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_tanh(vgre_ag x)               { try { return wrap(tanh_(ref(x))); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_mean(vgre_ag x)               { try { return wrap(mean(ref(x))); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_softmax(vgre_ag x)            { try { return wrap(softmax(ref(x))); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_transpose(vgre_ag x)          { try { return wrap(transpose(ref(x))); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_concat(vgre_ag a, vgre_ag b, int axis) { try { return wrap(concat(ref(a), ref(b), axis)); } catch (...) { return nullptr; } }
 
 vgre_ag vgre_ag_reshape(vgre_ag x, const int64_t* shape, int ndim) {
     try { return wrap(reshape(ref(x), std::vector<int64_t>(shape, shape + ndim))); } catch (...) { return nullptr; }

@@ -40,6 +40,9 @@ VGRE_PUBLIC_API vgre_ag vgre_ag_silu(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_sigmoid(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_tanh(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_mean(vgre_ag x);
+VGRE_PUBLIC_API vgre_ag vgre_ag_softmax(vgre_ag x);
+VGRE_PUBLIC_API vgre_ag vgre_ag_transpose(vgre_ag x);
+VGRE_PUBLIC_API vgre_ag vgre_ag_concat(vgre_ag a, vgre_ag b, int axis);
 VGRE_PUBLIC_API vgre_ag vgre_ag_reshape(vgre_ag x, const int64_t* shape, int ndim);
 VGRE_PUBLIC_API vgre_ag vgre_ag_softmax_cross_entropy(vgre_ag logits, const int* targets, int n);
 VGRE_PUBLIC_API vgre_ag vgre_ag_conv2d(vgre_ag input, vgre_ag weight, vgre_ag bias,
