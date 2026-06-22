@@ -287,6 +287,26 @@ template<typename T> inline T __shfl_up  (T val, unsigned delta, int width=32) {
 template<typename T> inline T __shfl_down(T val, unsigned delta, int width=32) { return __shfl_down_sync(0xFFFFFFFF, val, delta, width); }
 template<typename T> inline T __shfl_xor (T val, int laneMask, int width=32)   { return __shfl_xor_sync(0xFFFFFFFF, val, laneMask, width); }
 
+// ── Warp-level reduce (sm_80+ __reduce_*_sync) ───────────────────────────────
+// Built as a butterfly over __shfl_xor_sync so every active lane ends with the
+// reduction over all lanes selected by `mask`. Each variant matches the CUDA
+// intrinsic of the same name.
+template<typename T, typename Op>
+static inline T vgre_warp_reduce(unsigned mask, T val, Op op) {
+    for (int offset = 16; offset > 0; offset >>= 1)
+        val = op(val, __shfl_xor_sync(mask, val, offset, 32));
+    return val;
+}
+inline unsigned __reduce_add_sync(unsigned mask, unsigned val) { return vgre_warp_reduce(mask, val, [](unsigned a, unsigned b){ return a + b; }); }
+inline unsigned __reduce_min_sync(unsigned mask, unsigned val) { return vgre_warp_reduce(mask, val, [](unsigned a, unsigned b){ return a < b ? a : b; }); }
+inline unsigned __reduce_max_sync(unsigned mask, unsigned val) { return vgre_warp_reduce(mask, val, [](unsigned a, unsigned b){ return a > b ? a : b; }); }
+inline int      __reduce_add_sync(unsigned mask, int val)      { return vgre_warp_reduce(mask, val, [](int a, int b){ return a + b; }); }
+inline int      __reduce_min_sync(unsigned mask, int val)      { return vgre_warp_reduce(mask, val, [](int a, int b){ return a < b ? a : b; }); }
+inline int      __reduce_max_sync(unsigned mask, int val)      { return vgre_warp_reduce(mask, val, [](int a, int b){ return a > b ? a : b; }); }
+inline unsigned __reduce_and_sync(unsigned mask, unsigned val) { return vgre_warp_reduce(mask, val, [](unsigned a, unsigned b){ return a & b; }); }
+inline unsigned __reduce_or_sync (unsigned mask, unsigned val) { return vgre_warp_reduce(mask, val, [](unsigned a, unsigned b){ return a | b; }); }
+inline unsigned __reduce_xor_sync(unsigned mask, unsigned val) { return vgre_warp_reduce(mask, val, [](unsigned a, unsigned b){ return a ^ b; }); }
+
 } // namespace vgre_cuda
 
 #endif // VGRE_COMPILER_CPU_CUDA_WARP_H

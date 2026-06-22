@@ -138,6 +138,14 @@ set_tests_properties(WarpShuffleJITIntegration PROPERTIES
     FIXTURES_REQUIRED KMPRegistrationClean
     RESOURCE_LOCK vgre_llvm_jit)
 
+add_executable(test_device_intrinsics integration/test_device_intrinsics.cpp)
+target_link_libraries(test_device_intrinsics PRIVATE vgre)
+add_test(NAME DeviceIntrinsicsIntegration COMMAND test_device_intrinsics)
+set_tests_properties(DeviceIntrinsicsIntegration PROPERTIES
+    TIMEOUT 180
+    FIXTURES_REQUIRED KMPRegistrationClean
+    RESOURCE_LOCK vgre_llvm_jit)
+
 add_executable(test_extern_shared integration/test_extern_shared.cpp)
 target_link_libraries(test_extern_shared PRIVATE vgre)
 add_test(NAME ExternSharedIntegration COMMAND test_extern_shared)

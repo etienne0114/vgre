@@ -113,6 +113,7 @@ extern "C" {
   void vgre_jit_set_block_barrier(void*);
   void vgre_jit_clear_block_barrier();
   void vgre_jit_block_barrier_sync();
+  int  vgre_jit_block_barrier_reduce(int predicate, int op);
   void vgre_jit_report_flops(uint64_t);
   void vgre_jit_report_memory(uint64_t);
   void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
@@ -291,6 +292,10 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
     };
     Symbols[Mangle("vgre_jit_block_barrier_sync")] = {
         llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_block_barrier_sync)),
+        llvm::JITSymbolFlags::Exported
+    };
+    Symbols[Mangle("vgre_jit_block_barrier_reduce")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_block_barrier_reduce)),
         llvm::JITSymbolFlags::Exported
     };
     Symbols[Mangle("vgre_jit_in_threaded_context")] = {

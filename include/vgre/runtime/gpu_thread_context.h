@@ -29,12 +29,15 @@ public:
   static BlockBarrier* getBlockBarrier();
   static void clearBlockBarrier();
   static void blockBarrier();
+  static int  blockBarrierReduce(int predicate, int op);
 };
 
 // C-friendly wrappers exported for JIT symbol resolution.
 extern "C" VGRE_PUBLIC_API void vgre_jit_set_block_barrier(void *barrier);
 extern "C" VGRE_PUBLIC_API void vgre_jit_clear_block_barrier();
 extern "C" VGRE_PUBLIC_API void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
+// Barrier + block-wide vote (backs __syncthreads_count/_and/_or).
+extern "C" VGRE_PUBLIC_API int  vgre_jit_block_barrier_reduce(int predicate, int op);
 
 // ── Thread-block cluster context (P3-6) ──────────────────────────────────────
 // The executor's clustered path installs the current CTA's Cluster + cluster-rank
@@ -179,12 +182,41 @@ public:
     }
   }
 
+  // Barrier + block-wide reduction of `predicate` across all threads.
+  // op: 0 = count of nonzero predicates (CUDA __syncthreads_count)
+  //     1 = AND  (nonzero iff every predicate is nonzero — __syncthreads_and)
+  //     2 = OR   (nonzero iff any predicate is nonzero  — __syncthreads_or)
+  // Every thread receives the same reduced result. Reuses the generation barrier
+  // so it is safe to interleave with arrive_and_wait() across launches.
+  int arrive_and_reduce(int predicate, int op) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    const int gen = generation_;
+    if (waiting_ == 0) reduceAccum_ = (op == 1) ? 1 : 0;   // AND identity is 1
+    const int p = (predicate != 0) ? 1 : 0;
+    switch (op) {
+      case 1:  reduceAccum_ = reduceAccum_ && p; break;     // AND
+      case 2:  reduceAccum_ = reduceAccum_ || p; break;     // OR
+      default: reduceAccum_ += p;                break;     // count
+    }
+    if (++waiting_ == count_) {
+      reduceResult_ = reduceAccum_;
+      waiting_ = 0;
+      ++generation_;
+      cv_.notify_all();
+      return reduceResult_;
+    }
+    cv_.wait(lock, [this, gen] { return generation_ != gen; });
+    return reduceResult_;
+  }
+
 private:
   std::mutex mutex_;
   std::condition_variable cv_;
   int count_;
   int waiting_;
   int generation_;
+  int reduceAccum_ = 0;
+  int reduceResult_ = 0;
 };
 
 // ── Atomic Operations ──────────────────────────────────────────────────────

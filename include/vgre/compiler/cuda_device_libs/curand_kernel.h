@@ -392,8 +392,14 @@ inline float curand_normal(curandStateMRG32k3a* state) {
     return z0;
 }
 
-// curand_normal2 — generates float2 (two independent samples)
+// curand_normal2 — generates float2 (two independent samples).
+// `float2` may already be provided by cpu_cuda_intrinsics.h (the JIT path); only
+// define it here when this header is used standalone (e.g. the AST-analysis stub
+// path defines VGRE_CUDA_VECTOR_TYPES_DEFINED itself).
+#ifndef VGRE_CUDA_VECTOR_TYPES_DEFINED
+#define VGRE_CUDA_VECTOR_TYPES_DEFINED 1
 struct float2 { float x, y; };
+#endif
 inline float2 curand_normal2(curandStateXORWOW* state) {
     float u1 = curand_uniform(state), u2 = curand_uniform(state);
     float z0, z1;
