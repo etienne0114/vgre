@@ -110,10 +110,10 @@ static void compute_bt_rowsums(const int8_t* BT, int32_t* sums, int N, int K) {
 // ─────────────────────────────────────────────────────────────────────────────
 #if defined(__AVXVNNI__) || defined(__AVX_VNNI__)
 static void gemm_int8_avxvnni(
-        const int8_t* __restrict__ A,
-        const int8_t* __restrict__ BT,      // B transposed: N×K
-        const int32_t* __restrict__ btSums, // per-row sums of BT
-        int32_t* __restrict__ C,
+        const int8_t* __restrict A,
+        const int8_t* __restrict BT,      // B transposed: N×K
+        const int32_t* __restrict btSums, // per-row sums of BT
+        int32_t* __restrict C,
         int M, int N, int K) {
 
     for (int m = 0; m < M; ++m) {
@@ -193,9 +193,9 @@ static void gemm_int8_avxvnni(
 // ─────────────────────────────────────────────────────────────────────────────
 #if defined(__AVX2__)
 static void gemm_int8_avx2(
-        const int8_t* __restrict__ A,
-        const int8_t* __restrict__ BT, // B transposed: N×K
-        int32_t* __restrict__ C,
+        const int8_t* __restrict A,
+        const int8_t* __restrict BT, // B transposed: N×K
+        int32_t* __restrict C,
         int M, int N, int K) {
 
     for (int m = 0; m < M; ++m) {
@@ -271,9 +271,9 @@ static void pack_B_amx(const vgre_bf16* B, vgre_bf16* Bpk, int K, int N) {
 }
 
 static void gemm_bf16_amx(
-        const vgre_bf16* __restrict__ A,
-        const vgre_bf16* __restrict__ Bpk, // AMX-packed B
-        float* __restrict__ C,
+        const vgre_bf16* __restrict A,
+        const vgre_bf16* __restrict Bpk, // AMX-packed B
+        float* __restrict C,
         int M, int N, int K) {
     (void)A; (void)Bpk; (void)C; (void)M; (void)N; (void)K;
 #if defined(__AMX_BF16__) && defined(__AMX_TILE__)

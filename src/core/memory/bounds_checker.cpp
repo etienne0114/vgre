@@ -46,23 +46,23 @@ void* BoundsChecker::guardedAlloc(size_t size) {
 GuardStatus BoundsChecker::checkRegion_locked(const uint8_t* base, size_t size) const {
     size_t rz = redzone_;
     for (size_t i = 0; i < rz; ++i)
-        if (base[i] != canaryByte(i)) return GuardStatus::UNDERFLOW;
+        if (base[i] != canaryByte(i)) return GuardStatus::Underflow;
     for (size_t i = 0; i < rz; ++i)
-        if (base[rz + size + i] != canaryByte(i)) return GuardStatus::OVERFLOW;
-    return GuardStatus::OK;
+        if (base[rz + size + i] != canaryByte(i)) return GuardStatus::Overflow;
+    return GuardStatus::Ok;
 }
 
 GuardStatus BoundsChecker::check(const void* userPtr) const {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = live_.find(userPtr);
-    if (it == live_.end()) return GuardStatus::UNKNOWN_PTR;
+    if (it == live_.end()) return GuardStatus::UnknownPtr;
     return checkRegion_locked(it->second.base, it->second.size);
 }
 
 GuardStatus BoundsChecker::guardedFree(void* userPtr) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = live_.find(userPtr);
-    if (it == live_.end()) return GuardStatus::UNKNOWN_PTR;
+    if (it == live_.end()) return GuardStatus::UnknownPtr;
     GuardStatus st = checkRegion_locked(it->second.base, it->second.size);
     std::free(it->second.base);
     live_.erase(it);
@@ -74,7 +74,7 @@ size_t BoundsChecker::checkAll(std::vector<std::pair<const void*, GuardStatus>>&
     size_t bad = 0;
     for (const auto& kv : live_) {
         GuardStatus st = checkRegion_locked(kv.second.base, kv.second.size);
-        if (st != GuardStatus::OK) { out.emplace_back(kv.first, st); ++bad; }
+        if (st != GuardStatus::Ok) { out.emplace_back(kv.first, st); ++bad; }
     }
     return bad;
 }

@@ -4,6 +4,7 @@
 #include "vgre/common/openmp_helper.h"
 
 #include <cstdint>
+#include <cstring>
 
 // SplitMix64 avalanche hash: maps a 64-bit counter to a uniform 64-bit hash.
 // Used as a counter-based RNG: hash(seed ^ index) → uniform mask.
@@ -21,7 +22,7 @@ static inline uint64_t splitmix64(uint64_t x) {
 static inline float hashToFloat(uint64_t h) {
     // Top 23 mantissa bits → IEEE-754 float in [1,2); subtract 1 → [0,1).
     uint32_t m = static_cast<uint32_t>(h >> 41) | 0x3f800000u;
-    float f; __builtin_memcpy(&f, &m, sizeof(f));
+    float f; std::memcpy(&f, &m, sizeof(f));
     return f - 1.0f;
 }
 

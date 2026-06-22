@@ -58,10 +58,10 @@ vgre::VGREResult RbacPolicy::authorize(const JwtClaims& claims, const std::strin
 
     vgre::compliance::AuditLog::global().emit(
         claims.sub.empty() ? "anonymous" : claims.sub, "authz.check", permission,
-        allowed ? vgre::compliance::AuditOutcome::SUCCESS
-                : vgre::compliance::AuditOutcome::DENIED,
-        allowed ? vgre::compliance::AuditSeverity::INFO
-                : vgre::compliance::AuditSeverity::WARNING,
+        allowed ? vgre::compliance::AuditOutcome::Ok
+                : vgre::compliance::AuditOutcome::Denied,
+        allowed ? vgre::compliance::AuditSeverity::Info
+                : vgre::compliance::AuditSeverity::Warn,
         {{"issuer", claims.iss}});
 
     return allowed ? vgre::VGREResult::SUCCESS : vgre::VGREResult::ERR_AUTH_FAILED;
