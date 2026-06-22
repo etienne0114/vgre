@@ -9,6 +9,7 @@ from .runtime import Runtime  # type: ignore
 from .memory import DeviceArray, ManagedArray  # type: ignore
 from .stream import Stream  # type: ignore
 from .graph import Graph  # type: ignore
+from .lm import LanguageModel, Tokenizer  # type: ignore
 
 try:
     from ._native import NATIVE_AVAILABLE  # type: ignore
@@ -19,5 +20,6 @@ __version__ = "0.1.0"
 __all__ = [
     "VirtualDevice", "Kernel", "Runtime",
     "DeviceArray", "ManagedArray", "Stream", "Graph",
+    "LanguageModel", "Tokenizer",
     "NATIVE_AVAILABLE",
 ]
