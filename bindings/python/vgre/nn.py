@@ -1,0 +1,213 @@
+"""
+vgre.nn — a tiny PyTorch-like autograd framework on VGRE's CPU engine.
+
+Build and train arbitrary models (MLPs, CNNs, …) from pure Python — reverse-mode
+autodiff, conv/pool/norm/activation ops, and AdamW — with no GPU and no external
+ML library. Tensors wrap VGRE-Autograd nodes via the C ABI in
+include/vgre/xla/autograd_c_api.h.
+
+    import numpy as np, vgre.nn as nn
+    W = nn.tensor(np.random.randn(4, 3) * 0.1, requires_grad=True)
+    b = nn.tensor(np.zeros(3), requires_grad=True)
+    opt = nn.AdamW([W, b], lr=1e-2)
+    for step in range(200):
+        opt.zero_grad()
+        logits = nn.matmul(x, W) + b           # x: nn.Tensor [N,4]
+        loss = nn.softmax_cross_entropy(logits, targets)
+        loss.backward()
+        opt.step()
+"""
+import ctypes
+from typing import List, Sequence
+
+import numpy as np
+
+from ._native import _lib, NATIVE_AVAILABLE
+
+_bound = False
+
+
+def _bind() -> None:
+    global _bound
+    if _bound or _lib is None:
+        return
+    c, P, V = ctypes, ctypes.POINTER, ctypes.c_void_p
+    I64 = c.c_int64
+    _lib.vgre_ag_tensor.argtypes = [P(I64), c.c_int, P(c.c_float), c.c_int]; _lib.vgre_ag_tensor.restype = V
+    _lib.vgre_ag_free.argtypes = [V]
+    _lib.vgre_ag_size.argtypes = [V]; _lib.vgre_ag_size.restype = I64
+    _lib.vgre_ag_ndim.argtypes = [V]; _lib.vgre_ag_ndim.restype = c.c_int
+    _lib.vgre_ag_shape.argtypes = [V, P(I64)]
+    _lib.vgre_ag_get_data.argtypes = [V, P(c.c_float)]
+    _lib.vgre_ag_set_data.argtypes = [V, P(c.c_float)]
+    _lib.vgre_ag_get_grad.argtypes = [V, P(c.c_float)]
+    for name in ("matmul", "add", "mul"):
+        f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V, V]; f.restype = V
+    _lib.vgre_ag_scale.argtypes = [V, c.c_float]; _lib.vgre_ag_scale.restype = V
+    for name in ("relu", "gelu", "silu", "sigmoid", "tanh", "mean"):
+        f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V]; f.restype = V
+    _lib.vgre_ag_reshape.argtypes = [V, P(I64), c.c_int]; _lib.vgre_ag_reshape.restype = V
+    _lib.vgre_ag_softmax_cross_entropy.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_softmax_cross_entropy.restype = V
+    _lib.vgre_ag_conv2d.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_conv2d.restype = V
+    _lib.vgre_ag_max_pool2d.argtypes = [V, c.c_int, c.c_int]; _lib.vgre_ag_max_pool2d.restype = V
+    _lib.vgre_ag_avg_pool2d.argtypes = [V, c.c_int, c.c_int]; _lib.vgre_ag_avg_pool2d.restype = V
+    _lib.vgre_ag_backward.argtypes = [V]
+    _lib.vgre_ag_adamw.argtypes = [P(V), c.c_int, c.c_float, c.c_float]; _lib.vgre_ag_adamw.restype = V
+    _lib.vgre_ag_adamw_set_lr.argtypes = [V, c.c_float]
+    _lib.vgre_ag_adamw_step.argtypes = [V, c.c_float]
+    _lib.vgre_ag_adamw_zero_grad.argtypes = [V]
+    _lib.vgre_ag_adamw_free.argtypes = [V]
+    _bound = True
+
+
+def _require():
+    if not NATIVE_AVAILABLE or _lib is None:
+        raise RuntimeError("libvgre not found — build it and set LD_LIBRARY_PATH/VGRE_LIB_PATH")
+    _bind()
+
+
+def _f32(a) -> np.ndarray:
+    return np.ascontiguousarray(a, dtype=np.float32)
+
+
+class Tensor:
+    """An autograd tensor. Wrap data with nn.tensor(); ops return new Tensors."""
+
+    __slots__ = ("_h", "_shape")
+
+    def __init__(self, handle, shape):
+        self._h = handle
+        self._shape = tuple(int(s) for s in shape)
+
+    @property
+    def shape(self):
+        return self._shape
+
+    @property
+    def size(self) -> int:
+        return int(np.prod(self._shape)) if self._shape else 1
+
+    def numpy(self) -> np.ndarray:
+        out = np.empty(self.size, dtype=np.float32)
+        _lib.vgre_ag_get_data(self._h, out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+        return out.reshape(self._shape)
+
+    def grad(self) -> np.ndarray:
+        out = np.empty(self.size, dtype=np.float32)
+        _lib.vgre_ag_get_grad(self._h, out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+        return out.reshape(self._shape)
+
+    def set_(self, data) -> None:
+        d = _f32(data).reshape(-1)
+        _lib.vgre_ag_set_data(self._h, d.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+
+    def item(self) -> float:
+        return float(self.numpy().reshape(-1)[0])
+
+    def backward(self) -> None:
+        _lib.vgre_ag_backward(self._h)
+
+    # operator overloads
+    def __matmul__(self, other): return matmul(self, other)
+    def __add__(self, other):    return add(self, other)
+    def __mul__(self, other):
+        return scale(self, float(other)) if isinstance(other, (int, float)) else mul(self, other)
+    __rmul__ = __mul__
+
+    def __del__(self):
+        h = getattr(self, "_h", None)
+        if h and _lib is not None:
+            _lib.vgre_ag_free(h)
+            self._h = None
+
+
+def tensor(data, requires_grad: bool = False) -> Tensor:
+    _require()
+    a = _f32(data)
+    shp = (ctypes.c_int64 * a.ndim)(*a.shape)
+    h = _lib.vgre_ag_tensor(shp, a.ndim, a.reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                            1 if requires_grad else 0)
+    if not h:
+        raise RuntimeError("tensor creation failed")
+    return Tensor(h, a.shape)
+
+
+def _new(h, shape) -> Tensor:
+    if not h:
+        raise RuntimeError("op failed")
+    return Tensor(h, shape)
+
+
+# ── functional ops ───────────────────────────────────────────────────────────
+def matmul(a: Tensor, b: Tensor) -> Tensor:
+    return _new(_lib.vgre_ag_matmul(a._h, b._h), (a.shape[0], b.shape[1]))
+
+def add(a: Tensor, b: Tensor) -> Tensor:
+    return _new(_lib.vgre_ag_add(a._h, b._h), a.shape)
+
+def mul(a: Tensor, b: Tensor) -> Tensor:
+    return _new(_lib.vgre_ag_mul(a._h, b._h), a.shape)
+
+def scale(a: Tensor, s: float) -> Tensor:
+    return _new(_lib.vgre_ag_scale(a._h, ctypes.c_float(s)), a.shape)
+
+def _unary(name, x):
+    return _new(getattr(_lib, "vgre_ag_" + name)(x._h), x.shape)
+
+def relu(x): return _unary("relu", x)
+def gelu(x): return _unary("gelu", x)
+def silu(x): return _unary("silu", x)
+def sigmoid(x): return _unary("sigmoid", x)
+def tanh(x): return _unary("tanh", x)
+def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
+
+def reshape(x: Tensor, shape: Sequence[int]) -> Tensor:
+    shp = (ctypes.c_int64 * len(shape))(*shape)
+    return _new(_lib.vgre_ag_reshape(x._h, shp, len(shape)), tuple(shape))
+
+def softmax_cross_entropy(logits: Tensor, targets: Sequence[int]) -> Tensor:
+    t = (ctypes.c_int * len(targets))(*[int(v) for v in targets])
+    return _new(_lib.vgre_ag_softmax_cross_entropy(logits._h, t, len(targets)), (1,))
+
+def conv2d(x: Tensor, weight: Tensor, bias: Tensor = None, stride: int = 1, pad: int = 0) -> Tensor:
+    N, _, H, W = x.shape
+    Co, _, Kh, Kw = weight.shape
+    Ho = (H + 2 * pad - Kh) // stride + 1
+    Wo = (W + 2 * pad - Kw) // stride + 1
+    bh = bias._h if bias is not None else None
+    return _new(_lib.vgre_ag_conv2d(x._h, weight._h, bh, stride, pad), (N, Co, Ho, Wo))
+
+def max_pool2d(x: Tensor, kernel: int, stride: int) -> Tensor:
+    N, C, H, W = x.shape
+    return _new(_lib.vgre_ag_max_pool2d(x._h, kernel, stride),
+                (N, C, (H - kernel) // stride + 1, (W - kernel) // stride + 1))
+
+def avg_pool2d(x: Tensor, kernel: int, stride: int) -> Tensor:
+    N, C, H, W = x.shape
+    return _new(_lib.vgre_ag_avg_pool2d(x._h, kernel, stride),
+                (N, C, (H - kernel) // stride + 1, (W - kernel) // stride + 1))
+
+
+class AdamW:
+    """AdamW over a list of parameter Tensors (those created requires_grad=True)."""
+
+    def __init__(self, params: List[Tensor], lr: float = 1e-3, weight_decay: float = 0.01):
+        _require()
+        self._params = list(params)
+        arr = (ctypes.c_void_p * len(params))(*[p._h for p in params])
+        self._o = _lib.vgre_ag_adamw(arr, len(params), float(lr), float(weight_decay))
+
+    def set_lr(self, lr: float):
+        _lib.vgre_ag_adamw_set_lr(self._o, float(lr))
+
+    def step(self, clip: float = 1.0):
+        _lib.vgre_ag_adamw_step(self._o, float(clip))
+
+    def zero_grad(self):
+        _lib.vgre_ag_adamw_zero_grad(self._o)
+
+    def __del__(self):
+        o = getattr(self, "_o", None)
+        if o and _lib is not None:
+            _lib.vgre_ag_adamw_free(o)
+            self._o = None

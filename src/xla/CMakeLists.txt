@@ -10,6 +10,7 @@ add_library(vgre_xla OBJECT
     model/transformer.cpp
     model/checkpoint.cpp
     model_c_api.cpp
+    autograd_c_api.cpp
     safetensors.cpp
     gguf.cpp
     generation.cpp
