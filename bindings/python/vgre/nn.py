@@ -53,6 +53,9 @@ def _bind() -> None:
     _lib.vgre_ag_conv2d.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_conv2d.restype = V
     _lib.vgre_ag_max_pool2d.argtypes = [V, c.c_int, c.c_int]; _lib.vgre_ag_max_pool2d.restype = V
     _lib.vgre_ag_avg_pool2d.argtypes = [V, c.c_int, c.c_int]; _lib.vgre_ag_avg_pool2d.restype = V
+    _lib.vgre_ag_batch_norm2d.argtypes = [V, V, V, P(c.c_float), P(c.c_float),
+                                          c.c_int, c.c_int, c.c_float, c.c_float]
+    _lib.vgre_ag_batch_norm2d.restype = V
     _lib.vgre_ag_backward.argtypes = [V]
     _lib.vgre_ag_adamw.argtypes = [P(V), c.c_int, c.c_float, c.c_float]; _lib.vgre_ag_adamw.restype = V
     _lib.vgre_ag_adamw_set_lr.argtypes = [V, c.c_float]
@@ -189,10 +192,44 @@ def avg_pool2d(x: Tensor, kernel: int, stride: int) -> Tensor:
     return _new(_lib.vgre_ag_avg_pool2d(x._h, kernel, stride),
                 (N, C, (H - kernel) // stride + 1, (W - kernel) // stride + 1))
 
+def batch_norm2d(x: Tensor, gamma: Tensor, beta: Tensor, running_mean: np.ndarray,
+                 running_var: np.ndarray, training: bool, momentum: float = 0.1,
+                 eps: float = 1e-5) -> Tensor:
+    C = x.shape[1]
+    rm = np.ascontiguousarray(running_mean, dtype=np.float32)
+    rv = np.ascontiguousarray(running_var, dtype=np.float32)
+    h = _lib.vgre_ag_batch_norm2d(x._h, gamma._h, beta._h,
+                                  rm.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                                  rv.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                                  C, 1 if training else 0, float(momentum), float(eps))
+    running_mean[:] = rm   # buffers were updated in place
+    running_var[:] = rv
+    return _new(h, x.shape)
+
 
 # ── Layer modules (PyTorch-like ergonomics over the functional ops) ──────────
 class Module:
     """Base class: collects child Parameters/Modules for the optimizer."""
+
+    training = True
+
+    def _children(self):
+        for v in vars(self).values():
+            if isinstance(v, Module):
+                yield v
+            elif isinstance(v, (list, tuple)):
+                for it in v:
+                    if isinstance(it, Module):
+                        yield it
+
+    def train(self, mode: bool = True):
+        self.training = mode
+        for ch in self._children():
+            ch.train(mode)
+        return self
+
+    def eval(self):
+        return self.train(False)
 
     def named_parameters(self, prefix: str = "") -> List[Tuple[str, "Tensor"]]:
         out: List[Tuple[str, Tensor]] = []
@@ -252,6 +289,38 @@ class Conv2d(Module):
 
 class ReLU(Module):
     def forward(self, x): return relu(x)
+
+
+class BatchNorm2d(Module):
+    def __init__(self, channels: int, momentum: float = 0.1, eps: float = 1e-5):
+        self.gamma = tensor(np.ones(channels), requires_grad=True)
+        self.beta = tensor(np.zeros(channels), requires_grad=True)
+        # Persistent (non-grad) running statistics.
+        self.running_mean = np.zeros(channels, dtype=np.float32)
+        self.running_var = np.ones(channels, dtype=np.float32)
+        self.momentum, self.eps = momentum, eps
+
+    def forward(self, x):
+        return batch_norm2d(x, self.gamma, self.beta, self.running_mean,
+                            self.running_var, self.training, self.momentum, self.eps)
+
+
+class MaxPool2d(Module):
+    def __init__(self, kernel: int, stride: int = None):
+        self.kernel, self.stride = kernel, stride or kernel
+    def forward(self, x): return max_pool2d(x, self.kernel, self.stride)
+
+
+class AvgPool2d(Module):
+    def __init__(self, kernel: int, stride: int = None):
+        self.kernel, self.stride = kernel, stride or kernel
+    def forward(self, x): return avg_pool2d(x, self.kernel, self.stride)
+
+
+class Flatten(Module):
+    def forward(self, x):
+        N = x.shape[0]
+        return reshape(x, (N, x.size // N))
 
 
 class Sequential(Module):

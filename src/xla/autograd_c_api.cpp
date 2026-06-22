@@ -64,6 +64,21 @@ vgre_ag vgre_ag_conv2d(vgre_ag input, vgre_ag weight, vgre_ag bias, int stride, 
 vgre_ag vgre_ag_max_pool2d(vgre_ag x, int kernel, int stride) { try { return wrap(max_pool2d(ref(x), kernel, stride)); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_avg_pool2d(vgre_ag x, int kernel, int stride) { try { return wrap(avg_pool2d(ref(x), kernel, stride)); } catch (...) { return nullptr; } }
 
+vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag beta,
+                             float* running_mean, float* running_var, int channels,
+                             int training, float momentum, float eps) {
+    try {
+        // Bridge the caller's C buffers to the op's std::vector (copy in, run, copy out).
+        std::vector<float> rm(running_mean, running_mean + channels);
+        std::vector<float> rv(running_var, running_var + channels);
+        Var out = batch_norm2d(ref(x), ref(gamma), ref(beta), rm, rv,
+                               training != 0, momentum, eps);
+        std::copy(rm.begin(), rm.end(), running_mean);
+        std::copy(rv.begin(), rv.end(), running_var);
+        return wrap(std::move(out));
+    } catch (...) { return nullptr; }
+}
+
 void vgre_ag_backward(vgre_ag loss) { try { backward(ref(loss)); } catch (...) {} }
 
 vgre_ag_opt vgre_ag_adamw(vgre_ag* params, int n, float lr, float weight_decay) {
