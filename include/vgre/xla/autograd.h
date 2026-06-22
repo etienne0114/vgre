@@ -1,0 +1,81 @@
+// VGRE-Autograd — a compact reverse-mode automatic differentiation engine.
+//
+// This is the gradient engine VGRE's in-tree trainer is built on. It is a
+// tape-based ("define-by-run") autodiff over dense fp32 tensors: each op records
+// a node holding its output and a closure that scatters the output's gradient
+// back into its inputs. `backward()` walks the tape in reverse-topological order.
+//
+// The heavy linear-algebra op (matmul) runs on the in-tree SIMD GEMM
+// (vgre/xla/intree_gemm.h), so training rides the same fast, dependency-free
+// path as inference. All correctness is pinned by finite-difference checks
+// (tests/xla/test_autograd.cpp).
+#ifndef VGRE_XLA_AUTOGRAD_H
+#define VGRE_XLA_AUTOGRAD_H
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <vector>
+
+namespace vgre {
+namespace xla {
+namespace autograd {
+
+struct Node;
+using Var = std::shared_ptr<Node>;
+
+// A value in the computation graph: its data, its accumulated gradient, and the
+// local backward rule (which reads this->grad and accumulates into parents).
+struct Node {
+    std::vector<int64_t> shape;
+    std::vector<float>   data;
+    std::vector<float>   grad;            // same length as data; lazily zeroed
+    bool                 requires_grad = false;
+    std::vector<Var>     parents;
+    std::function<void()> backward_fn;    // empty for leaves
+
+    int64_t size() const {
+        int64_t n = 1;
+        for (int64_t d : shape) n *= d;
+        return n;
+    }
+};
+
+// ── Construction ─────────────────────────────────────────────────────────────
+Var make(std::vector<int64_t> shape, bool requires_grad = false);            // zeros
+Var make(std::vector<int64_t> shape, std::vector<float> data,
+         bool requires_grad = false);
+
+// ── Differentiable ops ───────────────────────────────────────────────────────
+// Row-major 2-D matmul: A[M,K] · B[K,N] -> [M,N]. (Both operands rank-2.)
+Var matmul(const Var& a, const Var& b);
+// Elementwise add. b is either the same shape as a, or a 1-D bias [N] broadcast
+// over the rows of a 2-D a[M,N].
+Var add(const Var& a, const Var& b);
+Var mul(const Var& a, const Var& b);            // elementwise, same shape
+Var scale(const Var& a, float s);               // a * scalar
+Var relu(const Var& x);
+Var gelu(const Var& x);                          // tanh approximation
+Var silu(const Var& x);                          // x * sigmoid(x)
+// RMSNorm over the last dim of x[M,D] with a learnable gain weight[D].
+Var rms_norm(const Var& x, const Var& weight, float eps = 1e-5f);
+// Embedding lookup: weight[V,D], ids length M -> [M,D]. Gradient scatters into
+// the used rows of weight.
+Var embedding(const Var& weight, const std::vector<int>& ids);
+// Fused softmax + cross-entropy over rows of logits[M,V] against integer
+// targets (length M). Returns a scalar mean loss; numerically stable.
+Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets);
+// Mean of all elements -> scalar.
+Var mean(const Var& x);
+
+// ── Engine ───────────────────────────────────────────────────────────────────
+// Seed `loss` (must be scalar) with grad 1 and back-propagate through the tape.
+void backward(const Var& loss);
+// Reset gradients of the given parameters to zero (call before each step).
+void zero_grad(const std::vector<Var>& params);
+
+}  // namespace autograd
+}  // namespace xla
+}  // namespace vgre
+
+#endif  // VGRE_XLA_AUTOGRAD_H

@@ -95,10 +95,18 @@ make the **default, no-dependency** build fast.
 
 ## Phase 2 — VGRE-Autograd: reverse-mode autodiff
 
-- A `Tensor` (shape/dtype/strides + optional grad) and a tape-based reverse-mode engine.
-- Core differentiable ops built on VGRE-GEMM: `matmul`, `add/mul`, `gelu/relu/silu`, `softmax`,
-  `rms_norm/layer_norm`, `embedding`, `rope`, `attention` (QKV + causal mask), `cross_entropy`.
-- Validated by finite-difference gradient checks (`tests/xla/test_autograd.cpp`).
+> **Status (2026-06-22): core DONE.** `include/vgre/xla/autograd.h` + `src/xla/autograd/autograd.cpp`
+> — a tape-based ("define-by-run") reverse-mode engine over dense fp32 tensors. `backward()` does an
+> iterative post-order DFS topo-sort and runs each node's local backward closure in reverse. The
+> heavy op (`matmul`) runs on the in-tree GEMM, so training rides the same fast, dependency-free path
+> as inference. Ops implemented + finite-difference-verified: `matmul`, `add` (same-shape + bias
+> broadcast), `mul`, `scale`, `relu`, `gelu`, `silu`, `rms_norm`, `embedding`, fused
+> `softmax_cross_entropy`, `mean`. All backward rules checked vs central finite differences in
+> `tests/xla/test_autograd.cpp` (worst relative error ~2e-4, incl. the full embedding→matmul→CE LM
+> loss).
+>
+> **Remaining in this phase:** `rope`, multi-head causal `attention` (built from the above), and
+> `layer_norm` — then the transformer block is fully differentiable.
 
 ## Phase 3 — VGRE-Train: optimizers + loop + data
 
