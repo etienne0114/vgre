@@ -110,21 +110,21 @@ void gemm_f32(bool transA, bool transB,
         };
         pool.parallelFor(batch_count, grain, body);
     } else {
-        // Few (often 1) large GEMMs: split each one's output rows across the pool.
-        const int64_t blocks = P * 4;
-        const int64_t rowGrain = std::max<int64_t>(1, M / blocks);
-        for (int64_t bI = 0; bI < batch_count; ++bI) {
-            const float* Ab = A + bI * aStride;
-            const float* Bb = B + bI * bStride;
-            float* Cb = C + bI * cStride;
-            const int64_t nChunks = (M + rowGrain - 1) / rowGrain;
-            std::function<void(int64_t)> body = [&](int64_t chunk) {
-                const int64_t r0 = chunk * rowGrain;
-                const int64_t r1 = std::min(r0 + rowGrain, M);
-                gemm_rows(transA, transB, M, N, K, Ab, Bb, Cb, r0, r1);
-            };
-            pool.parallelFor(nChunks, 1, body);
-        }
+        // Few (often 1) large GEMMs.
+#ifdef VGRE_GEMM_USE_CBLAS
+        // cblas threads internally; just hand it each batch's full row range.
+        for (int64_t bI = 0; bI < batch_count; ++bI)
+            gemm_rows(transA, transB, M, N, K,
+                      A + bI * aStride, B + bI * bStride, C + bI * cStride, 0, M);
+#else
+        // In-tree: a properly-threaded GEMM per batch. This packs the shared B
+        // panel once and parallelizes the row blocks — the per-row-chunk
+        // gemm_rows split used to repack all of B for every chunk, which
+        // collapsed throughput on large matrices.
+        for (int64_t bI = 0; bI < batch_count; ++bI)
+            intree::gemm_f32_threaded(transA, transB, M, N, K,
+                                      A + bI * aStride, B + bI * bStride, C + bI * cStride);
+#endif
     }
 }
 

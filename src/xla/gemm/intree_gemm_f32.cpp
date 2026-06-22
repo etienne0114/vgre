@@ -15,9 +15,11 @@
 
 #include "vgre/xla/intree_gemm.h"
 #include "vgre/xla/half.h"
+#include "vgre/xla/thread_pool.h"
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <vector>
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
@@ -212,6 +214,64 @@ void gemm_rows_impl(bool transA, bool transB,
     }
 }
 
+// ── Multi-threaded driver (shared B panel, parallel row blocks) ──────────────
+// BLIS-style parallelization of the 2nd loop around the micro-kernel: for each
+// (jc,pc) the B panel is packed ONCE into a shared buffer, then the M-row blocks
+// (ic) are distributed across the thread pool. Each thread packs only its own A
+// panel; B is read-only shared. Row blocks write disjoint rows of C, and the pc
+// loop is sequential so the firstK store / later accumulate is race-free.
+template <typename TA, typename TB>
+void gemm_threaded_impl(bool transA, bool transB,
+                        int64_t M, int64_t N, int64_t K,
+                        const TA* A, const TB* B, float* C) {
+    if (M <= 0 || N <= 0 || K <= 0) return;
+    vgre::xla::ThreadPool& pool = vgre::xla::ThreadPool::global();
+
+    std::vector<float> Bpack((size_t)KC * NC);   // shared, read-only during the parallel region
+    for (int64_t jc = 0; jc < N; jc += NC) {
+        const int nc = (int)std::min<int64_t>(NC, N - jc);
+        for (int64_t pc = 0; pc < K; pc += KC) {
+            const int kc = (int)std::min<int64_t>(KC, K - pc);
+            const bool firstK = (pc == 0);
+
+            for (int jr = 0; jr < nc; jr += NR) {
+                const int nr = std::min(NR, nc - jr);
+                packB(transB, N, K, B, pc, kc, jc + jr, nr, Bpack.data() + (size_t)jr * KC);
+            }
+
+            const int64_t nIc = (M + MC - 1) / MC;
+            const float* Bp0 = Bpack.data();
+            std::function<void(int64_t)> body = [&](int64_t blk) {
+                const int64_t ic = blk * MC;
+                const int mc = (int)std::min<int64_t>(MC, M - ic);
+                thread_local std::vector<float> Apack;
+                if ((int64_t)Apack.size() < (int64_t)MC * KC) Apack.assign((size_t)MC * KC, 0.0f);
+                alignas(64) float cbuf[MR * NR];
+
+                for (int ir = 0; ir < mc; ir += MR) {
+                    const int mr = std::min(MR, mc - ir);
+                    packA(transA, M, K, A, ic + ir, mr, pc, kc, Apack.data() + (size_t)ir * KC);
+                }
+                for (int jr = 0; jr < nc; jr += NR) {
+                    const int nr = std::min(NR, nc - jr);
+                    const float* Bp = Bp0 + (size_t)jr * KC;
+                    for (int ir = 0; ir < mc; ir += MR) {
+                        const int mr = std::min(MR, mc - ir);
+                        microKernel(kc, Apack.data() + (size_t)ir * KC, Bp, cbuf);
+                        for (int r = 0; r < mr; ++r) {
+                            float* crow = C + (ic + ir + r) * N + (jc + jr);
+                            const float* src = cbuf + r * NR;
+                            if (firstK) for (int c = 0; c < nr; ++c) crow[c]  = src[c];
+                            else        for (int c = 0; c < nr; ++c) crow[c] += src[c];
+                        }
+                    }
+                }
+            };
+            pool.parallelFor(nIc, 1, body);
+        }
+    }
+}
+
 }  // namespace
 
 const char* gemm_f32_isa() {
@@ -234,6 +294,12 @@ void gemm_bf16_rows(bool transA, bool transB,
                     const uint16_t* A, const uint16_t* B, float* C,
                     int64_t m0, int64_t m1) {
     gemm_rows_impl<uint16_t, uint16_t>(transA, transB, M, N, K, A, B, C, m0, m1);
+}
+
+void gemm_f32_threaded(bool transA, bool transB,
+                       int64_t M, int64_t N, int64_t K,
+                       const float* A, const float* B, float* C) {
+    gemm_threaded_impl<float, float>(transA, transB, M, N, K, A, B, C);
 }
 
 }  // namespace intree

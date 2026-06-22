@@ -58,8 +58,10 @@ Var matmul(const Var& a, const Var& b) {
     if (b->shape[0] != K) throw std::runtime_error("matmul: inner dim mismatch");
 
     Var out = newNode({M, N}, {a, b}, anyReq({&a, &b}));
-    intree::gemm_f32_rows(false, false, M, N, K,
-                          a->data.data(), b->data.data(), out->data.data(), 0, M);
+    // Use the multi-threaded GEMM: model weight matmuls are large, and for small
+    // matrices the pool runs the single row block inline (no thread overhead).
+    intree::gemm_f32_threaded(false, false, M, N, K,
+                              a->data.data(), b->data.data(), out->data.data());
 
     Node* op = out.get();
     Var A = a, B = b;
@@ -67,15 +69,15 @@ Var matmul(const Var& a, const Var& b) {
         // dA[M,K] += dC[M,N] · Bᵀ  → gemm(tA=F, tB=T, M, K, N, dC, B)
         if (A->requires_grad) {
             std::vector<float> dA((size_t)M * K, 0.0f);
-            intree::gemm_f32_rows(false, true, M, K, N,
-                                  op->grad.data(), B->data.data(), dA.data(), 0, M);
+            intree::gemm_f32_threaded(false, true, M, K, N,
+                                      op->grad.data(), B->data.data(), dA.data());
             for (size_t i = 0; i < dA.size(); ++i) A->grad[i] += dA[i];
         }
         // dB[K,N] += Aᵀ · dC[M,N]  → gemm(tA=T, tB=F, K, N, M, A, dC)
         if (B->requires_grad) {
             std::vector<float> dB((size_t)K * N, 0.0f);
-            intree::gemm_f32_rows(true, false, K, N, M,
-                                  A->data.data(), op->grad.data(), dB.data(), 0, K);
+            intree::gemm_f32_threaded(true, false, K, N, M,
+                                      A->data.data(), op->grad.data(), dB.data());
             for (size_t i = 0; i < dB.size(); ++i) B->grad[i] += dB[i];
         }
     };
