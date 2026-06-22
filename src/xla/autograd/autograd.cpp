@@ -181,28 +181,25 @@ Var relu(const Var& x) {
     return out;
 }
 
-// GELU (tanh approximation): 0.5x(1 + tanh(√(2/π)(x + 0.044715x³)))
+// Exact GELU: 0.5·x·(1 + erf(x/√2)).
+//   d/dx = 0.5·(1 + erf(x/√2)) + x·(1/√(2π))·exp(-x²/2)
 Var gelu(const Var& x) {
     Var out = newNode(x->shape, {x}, x->requires_grad);
     const int64_t n = x->size();
-    const float c = std::sqrt(2.0f / kPi);
+    const float kInvSqrt2  = 0.70710678118654752440f;   // 1/√2
+    const float kInvSqrt2Pi = 0.39894228040143267794f;  // 1/√(2π)
     for (int64_t i = 0; i < n; ++i) {
         const float v = x->data[i];
-        const float u = c * (v + 0.044715f * v * v * v);
-        out->data[i] = 0.5f * v * (1.0f + std::tanh(u));
+        out->data[i] = 0.5f * v * (1.0f + std::erf(v * kInvSqrt2));
     }
     Node* op = out.get(); Var X = x;
-    out->backward_fn = [op, X, n, c]() {
+    out->backward_fn = [op, X, n, kInvSqrt2, kInvSqrt2Pi]() {
         if (!X->requires_grad) return;
         for (int64_t i = 0; i < n; ++i) {
             const float v = X->data[i];
-            const float v3 = v * v * v;
-            const float u = c * (v + 0.044715f * v3);
-            const float t = std::tanh(u);
-            const float dudv = c * (1.0f + 3.0f * 0.044715f * v * v);
-            // d/dv [0.5 v (1+t)] = 0.5(1+t) + 0.5 v (1-t²) du/dv
-            const float dv = 0.5f * (1.0f + t) + 0.5f * v * (1.0f - t * t) * dudv;
-            X->grad[i] += op->grad[i] * dv;
+            const float cdf = 0.5f * (1.0f + std::erf(v * kInvSqrt2));
+            const float pdf = kInvSqrt2Pi * std::exp(-0.5f * v * v);
+            X->grad[i] += op->grad[i] * (cdf + v * pdf);
         }
     };
     return out;

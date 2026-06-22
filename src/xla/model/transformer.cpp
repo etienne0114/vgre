@@ -67,6 +67,8 @@ GPT::GPT(const Config& cfg, uint32_t seed) : cfg_(cfg) {
 }
 
 Var GPT::forward(const std::vector<int>& ids) {
+    if (fp32_dropped_)
+        throw std::runtime_error("GPT::forward: model is serve-only (fp32 weights dropped)");
     if ((int)ids.size() > cfg_.max_seq)
         throw std::runtime_error("GPT::forward: sequence longer than max_seq");
     const int H = cfg_.n_head;
@@ -225,7 +227,11 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
 
     // Decode one token at absolute position `pos`; writes next-token logits.
     auto decode = [&](int token, int pos) {
-        if (bf16) {
+        if (int8) {
+            const int8_t* row = &tok_emb_q8_.w[(int64_t)token * D];
+            const float s = tok_emb_q8_.scale[token];
+            for (int i = 0; i < D; ++i) x[i] = (float)row[i] * s;
+        } else if (bf16) {
             const uint16_t* row = &tok_emb_bf16_[(int64_t)token * D];
             for (int i = 0; i < D; ++i) x[i] = bf16_to_f32(row[i]);
         } else {
@@ -271,9 +277,25 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
         }
         rmsNormVec(x.data(), final_g_->data.data(), h.data(), D, cfg_.norm_eps);
         if (cfg_.tie_embeddings) {
-            // Tied head: logits[v] = Σ_d h[d]·tok_emb[v,d]  (always fp32 tok_emb).
-            intree::gemm_f32_threaded(false, true, 1, V, D, h.data(),
-                                      tok_emb_->data.data(), logits.data());
+            // Tied head: logits[v] = Σ_d h[d]·tok_emb[v,d], using the same
+            // quantized embedding table as the gather (per-row int8 scale = the
+            // per-vocab output scale; bf16/​fp32 likewise).
+            if (int8) {
+                for (int v = 0; v < V; ++v) {
+                    const int8_t* row = &tok_emb_q8_.w[(size_t)v * D];
+                    float acc = 0.0f;
+                    for (int d = 0; d < D; ++d) acc += h[d] * (float)row[d];
+                    logits[v] = acc * tok_emb_q8_.scale[v];
+                }
+            } else if (bf16) {
+                xbf.resize(D);
+                for (int d = 0; d < D; ++d) xbf[d] = f32_to_bf16(h[d]);
+                intree::gemm_bf16_rows(false, true, 1, V, D, xbf.data(),
+                                       tok_emb_bf16_.data(), logits.data(), 0, 1);
+            } else {
+                intree::gemm_f32_threaded(false, true, 1, V, D, h.data(),
+                                          tok_emb_->data.data(), logits.data());
+            }
         } else {
             mv(h.data(), lm_head_->data.data(), lm_head_bf16_.data(), &lm_head_q8_, logits.data(), D, V);
         }
@@ -296,6 +318,24 @@ void GPT::set_int8_inference(bool on) {
     if (on) bf16_inference_ = false;   // mutually exclusive
     if (!on) return;
     const int D = cfg_.d_model, V = cfg_.vocab, F = cfg_.ff();
+    // Per-ROW symmetric int8 quantization of a [R,C] table (one scale per row).
+    auto quantRows = [](const std::vector<float>& W, int R, int C, Q8& q) {
+        if ((int64_t)q.w.size() == (int64_t)R * C) return;
+        q.w.resize((size_t)R * C);
+        q.scale.resize(R);
+        for (int r = 0; r < R; ++r) {
+            float amax = 0.0f;
+            for (int c = 0; c < C; ++c) amax = std::max(amax, std::fabs(W[(size_t)r * C + c]));
+            const float s = amax > 0.0f ? amax / 127.0f : 1.0f;
+            q.scale[r] = s;
+            const float inv = 1.0f / s;
+            for (int c = 0; c < C; ++c) {
+                int v = (int)std::lround(W[(size_t)r * C + c] * inv);
+                q.w[(size_t)r * C + c] = (int8_t)std::max(-127, std::min(127, v));
+            }
+        }
+    };
+    quantRows(tok_emb_->data, V, D, tok_emb_q8_);   // embedding gather + tied head
     // Per-output-channel symmetric int8 quantization of a [K,N] weight.
     auto quant = [](const std::vector<float>& W, int K, int N, Q8& q) {
         if ((int64_t)q.w.size() == (int64_t)K * N) return;   // already built
@@ -321,6 +361,19 @@ void GPT::set_int8_inference(bool on) {
         quant(L.Wdown->data, F, D, L.Wdown_q8);
     }
     if (lm_head_) quant(lm_head_->data, D, V, lm_head_q8_);   // tied head stays fp32
+}
+
+void GPT::drop_fp32_weights() {
+    if (!bf16_inference_ && !int8_inference_)
+        throw std::runtime_error("drop_fp32_weights: enable bf16/int8 inference first");
+    auto freeData = [](Var& v) { if (v) { std::vector<float>().swap(v->data); std::vector<float>().swap(v->grad); } };
+    freeData(tok_emb_);
+    freeData(lm_head_);   // null when tied — freeData no-ops
+    for (auto& L : layers_) {
+        freeData(L.Wq); freeData(L.Wk); freeData(L.Wv); freeData(L.Wo);
+        freeData(L.Wgate); freeData(L.Wup); freeData(L.Wdown);
+    }
+    fp32_dropped_ = true;  // model is serve-only now (norm gains kept fp32)
 }
 
 void GPT::set_bf16_inference(bool on) {
