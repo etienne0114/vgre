@@ -120,6 +120,20 @@ inline void ropeVec(float* v, int H, int Dh, int pos, float base) {
 }
 inline float siluf(float x) { return x / (1.0f + std::exp(-x)); }
 
+// Weight-only int8 GEMV: y[n] = scale[n] · Σ_k x[k]·W8[k,n], W8 row-major [K,N].
+// k-outer so each int8 weight row is read contiguously (the inner loop
+// auto-vectorizes at -O3). `acc` is a caller-provided scratch of length N.
+inline void gemv_int8(const float* x, const int8_t* W8, const float* scale,
+                      float* y, int K, int N, std::vector<float>& acc) {
+    acc.assign(N, 0.0f);
+    for (int k = 0; k < K; ++k) {
+        const float xk = x[k];
+        const int8_t* row = W8 + (size_t)k * N;
+        for (int n = 0; n < N; ++n) acc[n] += xk * (float)row[n];
+    }
+    for (int n = 0; n < N; ++n) y[n] = acc[n] * scale[n];
+}
+
 // Pick the next token from logits[V] given the sampling controls and history.
 int sampleToken(std::vector<float>& logits, const std::vector<int>& history,
                 const GPT::SampleConfig& sc, std::mt19937& rng) {
@@ -186,11 +200,15 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     std::vector<float> scores(cfg_.max_seq);
 
     const bool bf16 = bf16_inference_;
+    const bool int8 = int8_inference_;
     std::vector<uint16_t> xbf;   // activation scratch for bf16 GEMV
-    // Matrix-vector y[N] = x[K]·W[K,N], dispatching to the bf16 GEMM when the
-    // bf16 weight cache (Wb) is active, else the fp32 GEMV.
-    auto mv = [&](const float* xv, const float* Wf, const uint16_t* Wb, float* y, int K, int N) {
-        if (bf16) {
+    std::vector<float> i8acc;    // accumulator scratch for int8 GEMV
+    // Matrix-vector y[N] = x[K]·W[K,N], dispatching to int8 / bf16 / fp32 weights.
+    auto mv = [&](const float* xv, const float* Wf, const uint16_t* Wb,
+                  const Q8* q8, float* y, int K, int N) {
+        if (int8) {
+            gemv_int8(xv, q8->w.data(), q8->scale.data(), y, K, N, i8acc);
+        } else if (bf16) {
             xbf.resize(K);
             for (int i = 0; i < K; ++i) xbf[i] = f32_to_bf16(xv[i]);
             intree::gemm_bf16_rows(false, false, 1, N, K, xbf.data(), Wb, y, 0, 1);
@@ -210,9 +228,9 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
         for (int l = 0; l < L; ++l) {
             const Layer& Ly = layers_[l];
             rmsNormVec(x.data(), Ly.ln1_g->data.data(), h.data(), D, cfg_.norm_eps);
-            mv(h.data(), Ly.Wq->data.data(), Ly.Wq_bf16.data(), q.data(), D, D);
-            mv(h.data(), Ly.Wk->data.data(), Ly.Wk_bf16.data(), k.data(), D, D);
-            mv(h.data(), Ly.Wv->data.data(), Ly.Wv_bf16.data(), v.data(), D, D);
+            mv(h.data(), Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, q.data(), D, D);
+            mv(h.data(), Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, k.data(), D, D);
+            mv(h.data(), Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, v.data(), D, D);
             ropeVec(q.data(), H, Dh, pos, cfg_.rope_base);
             ropeVec(k.data(), H, Dh, pos, cfg_.rope_base);
             std::memcpy(&Kc[l][(size_t)pos * D], k.data(), sizeof(float) * D);
@@ -236,17 +254,17 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                     attnOut[off + d] = acc;
                 }
             }
-            mv(attnOut.data(), Ly.Wo->data.data(), Ly.Wo_bf16.data(), proj.data(), D, D);
+            mv(attnOut.data(), Ly.Wo->data.data(), Ly.Wo_bf16.data(), &Ly.Wo_q8, proj.data(), D, D);
             for (int i = 0; i < D; ++i) x[i] += proj[i];                  // residual
             rmsNormVec(x.data(), Ly.ln2_g->data.data(), h2.data(), D, cfg_.norm_eps);
-            mv(h2.data(), Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), gate.data(), D, F);
-            mv(h2.data(), Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   up.data(),   D, F);
+            mv(h2.data(), Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), &Ly.Wgate_q8, gate.data(), D, F);
+            mv(h2.data(), Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   &Ly.Wup_q8,   up.data(),   D, F);
             for (int i = 0; i < F; ++i) gate[i] = siluf(gate[i]) * up[i]; // SwiGLU
-            mv(gate.data(), Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), ff.data(), F, D);
+            mv(gate.data(), Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), &Ly.Wdown_q8, ff.data(), F, D);
             for (int i = 0; i < D; ++i) x[i] += ff[i];                    // residual
         }
         rmsNormVec(x.data(), final_g_->data.data(), h.data(), D, cfg_.norm_eps);
-        mv(h.data(), lm_head_->data.data(), lm_head_bf16_.data(), logits.data(), D, V);
+        mv(h.data(), lm_head_->data.data(), lm_head_bf16_.data(), &lm_head_q8_, logits.data(), D, V);
     };
 
     if (prompt.empty()) return prompt;
@@ -261,8 +279,41 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     return prompt;
 }
 
+void GPT::set_int8_inference(bool on) {
+    int8_inference_ = on;
+    if (on) bf16_inference_ = false;   // mutually exclusive
+    if (!on) return;
+    const int D = cfg_.d_model, V = cfg_.vocab, F = cfg_.ff();
+    // Per-output-channel symmetric int8 quantization of a [K,N] weight.
+    auto quant = [](const std::vector<float>& W, int K, int N, Q8& q) {
+        if ((int64_t)q.w.size() == (int64_t)K * N) return;   // already built
+        q.w.resize((size_t)K * N);
+        q.scale.resize(N);
+        for (int n = 0; n < N; ++n) {
+            float amax = 0.0f;
+            for (int k = 0; k < K; ++k) amax = std::max(amax, std::fabs(W[(size_t)k * N + n]));
+            const float s = amax > 0.0f ? amax / 127.0f : 1.0f;
+            q.scale[n] = s;
+            const float inv = 1.0f / s;
+            for (int k = 0; k < K; ++k) {
+                int v = (int)std::lround(W[(size_t)k * N + n] * inv);
+                v = std::max(-127, std::min(127, v));
+                q.w[(size_t)k * N + n] = (int8_t)v;
+            }
+        }
+    };
+    for (auto& L : layers_) {
+        quant(L.Wq->data, D, D, L.Wq_q8); quant(L.Wk->data, D, D, L.Wk_q8);
+        quant(L.Wv->data, D, D, L.Wv_q8); quant(L.Wo->data, D, D, L.Wo_q8);
+        quant(L.Wgate->data, D, F, L.Wgate_q8); quant(L.Wup->data, D, F, L.Wup_q8);
+        quant(L.Wdown->data, F, D, L.Wdown_q8);
+    }
+    quant(lm_head_->data, D, V, lm_head_q8_);
+}
+
 void GPT::set_bf16_inference(bool on) {
     bf16_inference_ = on;
+    if (on) int8_inference_ = false;   // mutually exclusive
     if (!on) return;
     auto toBf16 = [](const std::vector<float>& src, std::vector<uint16_t>& dst) {
         if (dst.size() == src.size()) return;     // already built

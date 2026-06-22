@@ -24,6 +24,10 @@ VGRE_PUBLIC_API long long vgre_lm_num_params(const vgre_lm* m);
 // fp32 accumulation). Affects generate only; training stays fp32. on=0 disables.
 VGRE_PUBLIC_API void      vgre_lm_set_bf16_inference(vgre_lm* m, int on);
 
+// Enable weight-only int8 inference (~4× smaller matmul weights, per-channel
+// scale, fp32 accumulation). Mutually exclusive with bf16. on=0 disables.
+VGRE_PUBLIC_API void      vgre_lm_set_int8_inference(vgre_lm* m, int on);
+
 // One AdamW training step on a single sequence (ids/tgt length T, tgt = next
 // tokens). Applies grad-norm clipping at 1.0. Returns the scalar loss (or -1).
 VGRE_PUBLIC_API float vgre_lm_train_step(vgre_lm* m, const int* ids,

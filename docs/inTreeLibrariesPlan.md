@@ -58,6 +58,14 @@ complex external features to reach the advanced ones.
 > Exposed via the C-ABI (`vgre_lm_set_bf16_inference`) and `vgre.LanguageModel.set_bf16_inference()`.
 > The shared-B multi-threaded driver (`gemm_f32_threaded`) also landed — see the perf note below.
 >
+> **Weight-only int8 inference (2026-06-22).** `GPT::set_int8_inference(true)` quantizes the big
+> matmul weights to int8 with a per-output-channel symmetric scale (~**4× smaller** than fp32) and
+> dequantizes inside a vectorized int8 GEMV (`gemv_int8`), fp32 activations/accumulation. Mutually
+> exclusive with bf16; training untouched. Verified: int8-weight greedy generation stays coherent
+> (reproduces the learned sequence; fp32==bf16==int8 output on the overfit model). Exposed via
+> `vgre_lm_set_int8_inference` / `vgre.LanguageModel.set_int8_inference()`. So VGRE-LM now serves in
+> **fp32 / bf16 (½×) / int8 (¼×)** — a 134M model fits in ~134 MB at int8.
+>
 > **Remaining in this phase:** fp16/int8/fp64 storage variants (trivial via the same template +
 > `to_f32` overload / a VNNI int8 micro-kernel); an AVX-512 (16×N) micro-kernel; auto-tuned block
 > sizes.

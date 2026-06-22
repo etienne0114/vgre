@@ -40,6 +40,7 @@ def _bind() -> None:
     _lib.vgre_lm_num_params.argtypes = [c.c_void_p]
     _lib.vgre_lm_num_params.restype = c.c_longlong
     _lib.vgre_lm_set_bf16_inference.argtypes = [c.c_void_p, c.c_int]
+    _lib.vgre_lm_set_int8_inference.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_train_step.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int, c.c_float]
     _lib.vgre_lm_train_step.restype = c.c_float
     _lib.vgre_lm_loss.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int]
@@ -131,6 +132,12 @@ class LanguageModel:
         """Run generation on bf16-cached weights (half the matmul-weight
         footprint/bandwidth, fp32 accumulation). Training stays fp32."""
         _lib.vgre_lm_set_bf16_inference(self._h, 1 if on else 0)
+
+    def set_int8_inference(self, on: bool = True) -> None:
+        """Run generation on weight-only int8 weights (~4× smaller, per-channel
+        scale, fp32 accumulation). Mutually exclusive with bf16; training stays
+        fp32."""
+        _lib.vgre_lm_set_int8_inference(self._h, 1 if on else 0)
 
     def train_step(self, ids: List[int], targets: List[int], lr: float = 3e-3) -> float:
         if len(ids) != len(targets):

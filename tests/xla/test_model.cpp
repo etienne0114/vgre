@@ -89,6 +89,20 @@ int main() {
         gpt.set_bf16_inference(false);
     }
 
+    // ── int8 weight-only inference: ~4× smaller weights, still coherent ──────
+    {
+        gpt.set_int8_inference(true);
+        std::vector<int> gi = gpt.generate_cached({seq[0]}, T);   // greedy, int8 weights
+        int m3 = 0;
+        for (int i = 0; i <= T && i < (int)gi.size(); ++i) if (gi[i] == seq[i]) ++m3;
+        std::printf("int8 inference: generation matches %d/%d\n", m3, T + 1);
+        // int8 is lossy (per-channel symmetric); allow a couple of flips but it
+        // must clearly still follow the learned sequence.
+        if (m3 >= T - 1) std::printf("[PASS] int8-weight inference stays coherent\n");
+        else { std::printf("[FAIL] int8 inference diverged (%d/%d)\n", m3, T + 1); ++g_fail; }
+        gpt.set_int8_inference(false);
+    }
+
     // ── Sampling controls: top-k / top-p / repetition-penalty produce valid,
     //    in-vocabulary tokens and are reproducible for a fixed seed ────────────
     {
