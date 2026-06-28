@@ -211,8 +211,28 @@ def test_gpt_module() -> bool:
     return last < 0.05
 
 
+def test_dropout_and_tied() -> bool:
+    x = nn.tensor(np.ones((4, 8), np.float32))
+    d = nn.Dropout(0.5)
+    d.train()
+    out_train = d(x).numpy()
+    d.eval()
+    out_eval = d(x).numpy()
+    # Train mode drops ~half the units (and scales survivors by 2); eval = identity.
+    frac_zero = float(np.mean(out_train == 0.0))
+    eval_identity = bool(np.allclose(out_eval, 1.0))
+    # linear_tied: x[2,3] · Wᵀ where W is [4,3] -> [2,4]
+    W = nn.tensor(np.arange(12, dtype=np.float32).reshape(4, 3))
+    xt = nn.tensor(np.ones((2, 3), np.float32))
+    tied = nn.linear_tied(xt, W).numpy()
+    tied_ok = tied.shape == (2, 4) and np.allclose(tied[0], W.numpy().sum(axis=1))
+    print(f"[dropout] train zero-frac={frac_zero:.2f} eval-identity={eval_identity}  linear_tied={tied_ok}")
+    return 0.2 < frac_zero < 0.8 and eval_identity and tied_ok
+
+
 def main() -> int:
     ok = True
+    ok &= test_dropout_and_tied()
     ok &= test_mlp_xor()
     ok &= test_cnn_quadrant()
     ok &= test_module_api()
