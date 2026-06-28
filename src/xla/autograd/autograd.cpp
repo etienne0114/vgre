@@ -115,6 +115,48 @@ Var linear_tied(const Var& x, const Var& w) {
     return out;
 }
 
+// ── bmm: batched matmul a[B,M,K] · b[B,K,N] -> [B,M,N] ───────────────────────
+Var bmm(const Var& a, const Var& b) {
+    if (a->shape.size() != 3 || b->shape.size() != 3)
+        throw std::runtime_error("bmm: operands must be rank-3 [B,M,K]·[B,K,N]");
+    const int64_t B = a->shape[0], M = a->shape[1], K = a->shape[2];
+    const int64_t N = b->shape[2];
+    if (b->shape[0] != B || b->shape[1] != K)
+        throw std::runtime_error("bmm: batch/inner dim mismatch");
+
+    Var out = newNode({B, M, N}, {a, b}, anyReq({&a, &b}));
+    for (int64_t bi = 0; bi < B; ++bi)
+        intree::gemm_f32_threaded(false, false, M, N, K,
+                                  a->data.data() + bi * M * K,
+                                  b->data.data() + bi * K * N,
+                                  out->data.data() + bi * M * N);
+
+    Node* op = out.get();
+    Var A = a, Bv = b;
+    out->backward_fn = [op, A, Bv, B, M, N, K]() {
+        for (int64_t bi = 0; bi < B; ++bi) {
+            const float* dC = op->grad.data() + bi * M * N;
+            if (A->requires_grad) {
+                // dA[M,K] += dC[M,N] · Bᵀ  → gemm(F, T, M, K, N, dC, B)
+                std::vector<float> dA((size_t)M * K, 0.0f);
+                intree::gemm_f32_threaded(false, true, M, K, N, dC,
+                                          Bv->data.data() + bi * K * N, dA.data());
+                float* g = A->grad.data() + bi * M * K;
+                for (size_t i = 0; i < dA.size(); ++i) g[i] += dA[i];
+            }
+            if (Bv->requires_grad) {
+                // dB[K,N] += Aᵀ · dC[M,N]  → gemm(T, F, K, N, M, A, dC)
+                std::vector<float> dB((size_t)K * N, 0.0f);
+                intree::gemm_f32_threaded(true, false, K, N, M,
+                                          A->data.data() + bi * M * K, dC, dB.data());
+                float* g = Bv->grad.data() + bi * K * N;
+                for (size_t i = 0; i < dB.size(); ++i) g[i] += dB[i];
+            }
+        }
+    };
+    return out;
+}
+
 // ── add: same-shape, or 1-D bias [N] broadcast over rows of a[M,N] ───────────
 Var add(const Var& a, const Var& b) {
     Var out = newNode(a->shape, {a, b}, anyReq({&a, &b}));

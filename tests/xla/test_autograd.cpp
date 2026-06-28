@@ -114,6 +114,15 @@ int main() {
         });
     }
 
+    // 5b2. batched matmul (bmm): a[B,M,K] · b[B,K,N]
+    checkGrads("bmm", {
+        make({2, 3, 4}, randn(24, 61), true),
+        make({2, 4, 3}, randn(24, 62), true),
+    }, [](const std::vector<Var>& p) {
+        Var c = bmm(p[0], p[1]);       // [2,3,3]
+        return mean(mul(c, c));
+    });
+
     // 5c. softmax / transpose / concat
     checkGrads("softmax", {
         make({3, 5}, randn(15, 51), true),
