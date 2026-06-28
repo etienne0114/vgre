@@ -18,7 +18,9 @@ include/vgre/xla/autograd_c_api.h.
         opt.step()
 """
 import ctypes
-from typing import List, Sequence
+import json
+import struct
+from typing import List, Sequence, Tuple
 
 import numpy as np
 
@@ -44,13 +46,23 @@ def _bind() -> None:
     for name in ("matmul", "add", "mul"):
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V, V]; f.restype = V
     _lib.vgre_ag_scale.argtypes = [V, c.c_float]; _lib.vgre_ag_scale.restype = V
-    for name in ("relu", "gelu", "silu", "sigmoid", "tanh", "mean"):
+    for name in ("relu", "gelu", "silu", "sigmoid", "tanh", "mean", "softmax", "transpose"):
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V]; f.restype = V
+    _lib.vgre_ag_concat.argtypes = [V, V, c.c_int]; _lib.vgre_ag_concat.restype = V
     _lib.vgre_ag_reshape.argtypes = [V, P(I64), c.c_int]; _lib.vgre_ag_reshape.restype = V
     _lib.vgre_ag_softmax_cross_entropy.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_softmax_cross_entropy.restype = V
+    _lib.vgre_ag_layer_norm.argtypes = [V, V, V, c.c_float]; _lib.vgre_ag_layer_norm.restype = V
+    _lib.vgre_ag_rms_norm.argtypes = [V, V, c.c_float]; _lib.vgre_ag_rms_norm.restype = V
+    _lib.vgre_ag_embedding.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_embedding.restype = V
+    _lib.vgre_ag_rope.argtypes = [V, c.c_int, c.c_float]; _lib.vgre_ag_rope.restype = V
+    _lib.vgre_ag_attention.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_attention.restype = V
+    _lib.vgre_ag_flash_attention.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_flash_attention.restype = V
     _lib.vgre_ag_conv2d.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_conv2d.restype = V
     _lib.vgre_ag_max_pool2d.argtypes = [V, c.c_int, c.c_int]; _lib.vgre_ag_max_pool2d.restype = V
     _lib.vgre_ag_avg_pool2d.argtypes = [V, c.c_int, c.c_int]; _lib.vgre_ag_avg_pool2d.restype = V
+    _lib.vgre_ag_batch_norm2d.argtypes = [V, V, V, P(c.c_float), P(c.c_float),
+                                          c.c_int, c.c_int, c.c_float, c.c_float]
+    _lib.vgre_ag_batch_norm2d.restype = V
     _lib.vgre_ag_backward.argtypes = [V]
     _lib.vgre_ag_adamw.argtypes = [P(V), c.c_int, c.c_float, c.c_float]; _lib.vgre_ag_adamw.restype = V
     _lib.vgre_ag_adamw_set_lr.argtypes = [V, c.c_float]
@@ -160,6 +172,15 @@ def silu(x): return _unary("silu", x)
 def sigmoid(x): return _unary("sigmoid", x)
 def tanh(x): return _unary("tanh", x)
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
+def softmax(x): return _unary("softmax", x)
+def transpose(x: Tensor) -> Tensor:
+    return _new(_lib.vgre_ag_transpose(x._h), (x.shape[1], x.shape[0]))
+def concat(a: Tensor, b: Tensor, axis: int = 1) -> Tensor:
+    if axis == 0:
+        shape = (a.shape[0] + b.shape[0], a.shape[1])
+    else:
+        shape = (a.shape[0], a.shape[1] + b.shape[1])
+    return _new(_lib.vgre_ag_concat(a._h, b._h, axis), shape)
 
 def reshape(x: Tensor, shape: Sequence[int]) -> Tensor:
     shp = (ctypes.c_int64 * len(shape))(*shape)
@@ -168,6 +189,25 @@ def reshape(x: Tensor, shape: Sequence[int]) -> Tensor:
 def softmax_cross_entropy(logits: Tensor, targets: Sequence[int]) -> Tensor:
     t = (ctypes.c_int * len(targets))(*[int(v) for v in targets])
     return _new(_lib.vgre_ag_softmax_cross_entropy(logits._h, t, len(targets)), (1,))
+
+def layer_norm(x: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
+    return _new(_lib.vgre_ag_layer_norm(x._h, weight._h, bias._h, ctypes.c_float(eps)), x.shape)
+
+def rms_norm(x: Tensor, weight: Tensor, eps: float = 1e-5) -> Tensor:
+    return _new(_lib.vgre_ag_rms_norm(x._h, weight._h, ctypes.c_float(eps)), x.shape)
+
+def embedding(weight: Tensor, ids: Sequence[int]) -> Tensor:
+    t = (ctypes.c_int * len(ids))(*[int(v) for v in ids])
+    return _new(_lib.vgre_ag_embedding(weight._h, t, len(ids)), (len(ids), weight.shape[1]))
+
+def rope(x: Tensor, num_heads: int, base: float = 10000.0) -> Tensor:
+    return _new(_lib.vgre_ag_rope(x._h, num_heads, ctypes.c_float(base)), x.shape)
+
+def attention(q: Tensor, k: Tensor, v: Tensor, num_heads: int, causal: bool = True) -> Tensor:
+    return _new(_lib.vgre_ag_attention(q._h, k._h, v._h, num_heads, 1 if causal else 0), q.shape)
+
+def flash_attention(q: Tensor, k: Tensor, v: Tensor, num_heads: int, causal: bool = True) -> Tensor:
+    return _new(_lib.vgre_ag_flash_attention(q._h, k._h, v._h, num_heads, 1 if causal else 0), q.shape)
 
 def conv2d(x: Tensor, weight: Tensor, bias: Tensor = None, stride: int = 1, pad: int = 0) -> Tensor:
     N, _, H, W = x.shape
@@ -187,23 +227,60 @@ def avg_pool2d(x: Tensor, kernel: int, stride: int) -> Tensor:
     return _new(_lib.vgre_ag_avg_pool2d(x._h, kernel, stride),
                 (N, C, (H - kernel) // stride + 1, (W - kernel) // stride + 1))
 
+def batch_norm2d(x: Tensor, gamma: Tensor, beta: Tensor, running_mean: np.ndarray,
+                 running_var: np.ndarray, training: bool, momentum: float = 0.1,
+                 eps: float = 1e-5) -> Tensor:
+    C = x.shape[1]
+    rm = np.ascontiguousarray(running_mean, dtype=np.float32)
+    rv = np.ascontiguousarray(running_var, dtype=np.float32)
+    h = _lib.vgre_ag_batch_norm2d(x._h, gamma._h, beta._h,
+                                  rm.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                                  rv.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                                  C, 1 if training else 0, float(momentum), float(eps))
+    running_mean[:] = rm   # buffers were updated in place
+    running_var[:] = rv
+    return _new(h, x.shape)
+
 
 # ── Layer modules (PyTorch-like ergonomics over the functional ops) ──────────
 class Module:
     """Base class: collects child Parameters/Modules for the optimizer."""
 
-    def parameters(self) -> List["Tensor"]:
-        ps: List[Tensor] = []
+    training = True
+
+    def _children(self):
         for v in vars(self).values():
-            if isinstance(v, Tensor) and v not in ps:
-                ps.append(v)
-            elif isinstance(v, Module):
-                ps += v.parameters()
+            if isinstance(v, Module):
+                yield v
             elif isinstance(v, (list, tuple)):
                 for it in v:
                     if isinstance(it, Module):
-                        ps += it.parameters()
-        return ps
+                        yield it
+
+    def train(self, mode: bool = True):
+        self.training = mode
+        for ch in self._children():
+            ch.train(mode)
+        return self
+
+    def eval(self):
+        return self.train(False)
+
+    def named_parameters(self, prefix: str = "") -> List[Tuple[str, "Tensor"]]:
+        out: List[Tuple[str, Tensor]] = []
+        for name, v in vars(self).items():
+            if isinstance(v, Tensor):
+                out.append((prefix + name, v))
+            elif isinstance(v, Module):
+                out += v.named_parameters(prefix + name + ".")
+            elif isinstance(v, (list, tuple)):
+                for i, it in enumerate(v):
+                    if isinstance(it, Module):
+                        out += it.named_parameters(f"{prefix}{name}.{i}.")
+        return out
+
+    def parameters(self) -> List["Tensor"]:
+        return [t for _, t in self.named_parameters()]
 
     def __call__(self, x):
         return self.forward(x)
@@ -249,6 +326,88 @@ class ReLU(Module):
     def forward(self, x): return relu(x)
 
 
+class BatchNorm2d(Module):
+    def __init__(self, channels: int, momentum: float = 0.1, eps: float = 1e-5):
+        self.gamma = tensor(np.ones(channels), requires_grad=True)
+        self.beta = tensor(np.zeros(channels), requires_grad=True)
+        # Persistent (non-grad) running statistics.
+        self.running_mean = np.zeros(channels, dtype=np.float32)
+        self.running_var = np.ones(channels, dtype=np.float32)
+        self.momentum, self.eps = momentum, eps
+
+    def forward(self, x):
+        return batch_norm2d(x, self.gamma, self.beta, self.running_mean,
+                            self.running_var, self.training, self.momentum, self.eps)
+
+
+class Embedding(Module):
+    def __init__(self, vocab: int, dim: int):
+        self.weight = tensor(rng.standard_normal((vocab, dim)) * 0.02, requires_grad=True)
+    def forward(self, ids):
+        return embedding(self.weight, ids)
+
+
+class LayerNorm(Module):
+    def __init__(self, dim: int, eps: float = 1e-5):
+        self.weight = tensor(np.ones(dim), requires_grad=True)
+        self.bias = tensor(np.zeros(dim), requires_grad=True)
+        self.eps = eps
+    def forward(self, x):
+        return layer_norm(x, self.weight, self.bias, self.eps)
+
+
+class RMSNorm(Module):
+    def __init__(self, dim: int, eps: float = 1e-5):
+        self.weight = tensor(np.ones(dim), requires_grad=True)
+        self.eps = eps
+    def forward(self, x):
+        return rms_norm(x, self.weight, self.eps)
+
+
+class MultiHeadAttention(Module):
+    def __init__(self, dim: int, num_heads: int, causal: bool = True, use_rope: bool = True):
+        self.q, self.k, self.v, self.o = (Linear(dim, dim, bias=False) for _ in range(4))
+        self.num_heads, self.causal, self.use_rope = num_heads, causal, use_rope
+    def forward(self, x):
+        q, k, v = self.q(x), self.k(x), self.v(x)
+        if self.use_rope:
+            q = rope(q, self.num_heads); k = rope(k, self.num_heads)
+        a = attention(q, k, v, self.num_heads, self.causal)
+        return self.o(a)
+
+
+class TransformerBlock(Module):
+    """Pre-norm decoder block: x + Attn(RMSNorm(x)), then x + MLP(RMSNorm(x))."""
+    def __init__(self, dim: int, num_heads: int, ff: int = 0, causal: bool = True):
+        ff = ff or 4 * dim
+        self.n1 = RMSNorm(dim)
+        self.attn = MultiHeadAttention(dim, num_heads, causal)
+        self.n2 = RMSNorm(dim)
+        self.fc1, self.fc2 = Linear(dim, ff), Linear(ff, dim)
+    def forward(self, x):
+        x = x + self.attn(self.n1(x))
+        h = self.fc2(gelu(self.fc1(self.n2(x))))
+        return x + h
+
+
+class MaxPool2d(Module):
+    def __init__(self, kernel: int, stride: int = None):
+        self.kernel, self.stride = kernel, stride or kernel
+    def forward(self, x): return max_pool2d(x, self.kernel, self.stride)
+
+
+class AvgPool2d(Module):
+    def __init__(self, kernel: int, stride: int = None):
+        self.kernel, self.stride = kernel, stride or kernel
+    def forward(self, x): return avg_pool2d(x, self.kernel, self.stride)
+
+
+class Flatten(Module):
+    def forward(self, x):
+        N = x.shape[0]
+        return reshape(x, (N, x.size // N))
+
+
 class Sequential(Module):
     def __init__(self, *layers):
         self.layers = list(layers)
@@ -258,12 +417,40 @@ class Sequential(Module):
             x = l(x)
         return x
 
-    def parameters(self):
-        ps: List[Tensor] = []
-        for l in self.layers:
-            if isinstance(l, Module):
-                ps += l.parameters()
-        return ps
+
+# ── Checkpoint I/O (standard safetensors; loadable by VGRE's SafeTensors) ────
+def save(model: "Module", path: str) -> None:
+    """Save a module's named parameters as a standard safetensors file."""
+    header, blob = {}, bytearray()
+    for name, t in model.named_parameters():
+        a = np.ascontiguousarray(t.numpy(), dtype=np.float32)
+        start = len(blob)
+        blob += a.tobytes()
+        header[name] = {"dtype": "F32", "shape": list(a.shape), "data_offsets": [start, len(blob)]}
+    hb = json.dumps(header).encode("utf-8")
+    hb += b" " * ((-(8 + len(hb))) % 8)            # 8-byte align the data blob
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(hb)))
+        f.write(hb)
+        f.write(blob)
+
+
+def load(model: "Module", path: str) -> None:
+    """Load parameters by name into a module with a matching architecture."""
+    with open(path, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(n))
+        blob = f.read()
+    tensors = {}
+    for name, info in header.items():
+        if name == "__metadata__":
+            continue
+        b, e = info["data_offsets"]
+        tensors[name] = np.frombuffer(blob[b:e], dtype=np.float32).reshape(info["shape"])
+    for name, t in model.named_parameters():
+        if name not in tensors:
+            raise KeyError(f"checkpoint missing parameter '{name}'")
+        t.set_(tensors[name])
 
 
 class AdamW:

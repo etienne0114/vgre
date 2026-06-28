@@ -4,6 +4,8 @@
 #include "vgre/xla/autograd.h"
 #include "vgre/xla/optim.h"
 
+#include <algorithm>   // std::copy
+#include <utility>     // std::move
 #include <vector>
 
 using namespace vgre::xla::autograd;
@@ -49,6 +51,9 @@ vgre_ag vgre_ag_silu(vgre_ag x)               { try { return wrap(silu(ref(x)));
 vgre_ag vgre_ag_sigmoid(vgre_ag x)            { try { return wrap(sigmoid(ref(x))); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_tanh(vgre_ag x)               { try { return wrap(tanh_(ref(x))); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_mean(vgre_ag x)               { try { return wrap(mean(ref(x))); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_softmax(vgre_ag x)            { try { return wrap(softmax(ref(x))); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_transpose(vgre_ag x)          { try { return wrap(transpose(ref(x))); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_concat(vgre_ag a, vgre_ag b, int axis) { try { return wrap(concat(ref(a), ref(b), axis)); } catch (...) { return nullptr; } }
 
 vgre_ag vgre_ag_reshape(vgre_ag x, const int64_t* shape, int ndim) {
     try { return wrap(reshape(ref(x), std::vector<int64_t>(shape, shape + ndim))); } catch (...) { return nullptr; }
@@ -61,8 +66,30 @@ vgre_ag vgre_ag_conv2d(vgre_ag input, vgre_ag weight, vgre_ag bias, int stride, 
     try { return wrap(conv2d(ref(input), ref(weight), bias ? ref(bias) : Var{}, stride, pad)); }
     catch (...) { return nullptr; }
 }
+vgre_ag vgre_ag_layer_norm(vgre_ag x, vgre_ag w, vgre_ag b, float eps) { try { return wrap(layer_norm(ref(x), ref(w), ref(b), eps)); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_rms_norm(vgre_ag x, vgre_ag w, float eps) { try { return wrap(rms_norm(ref(x), ref(w), eps)); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_embedding(vgre_ag w, const int* ids, int n) { try { return wrap(embedding(ref(w), std::vector<int>(ids, ids + n))); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_rope(vgre_ag x, int num_heads, float base) { try { return wrap(rope(ref(x), num_heads, base)); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal) { try { return wrap(attention(ref(q), ref(k), ref(v), num_heads, causal != 0)); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_flash_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal) { try { return wrap(flash_attention(ref(q), ref(k), ref(v), num_heads, causal != 0)); } catch (...) { return nullptr; } }
+
 vgre_ag vgre_ag_max_pool2d(vgre_ag x, int kernel, int stride) { try { return wrap(max_pool2d(ref(x), kernel, stride)); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_avg_pool2d(vgre_ag x, int kernel, int stride) { try { return wrap(avg_pool2d(ref(x), kernel, stride)); } catch (...) { return nullptr; } }
+
+vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag beta,
+                             float* running_mean, float* running_var, int channels,
+                             int training, float momentum, float eps) {
+    try {
+        // Bridge the caller's C buffers to the op's std::vector (copy in, run, copy out).
+        std::vector<float> rm(running_mean, running_mean + channels);
+        std::vector<float> rv(running_var, running_var + channels);
+        Var out = batch_norm2d(ref(x), ref(gamma), ref(beta), rm, rv,
+                               training != 0, momentum, eps);
+        std::copy(rm.begin(), rm.end(), running_mean);
+        std::copy(rv.begin(), rv.end(), running_var);
+        return wrap(std::move(out));
+    } catch (...) { return nullptr; }
+}
 
 void vgre_ag_backward(vgre_ag loss) { try { backward(ref(loss)); } catch (...) {} }
 

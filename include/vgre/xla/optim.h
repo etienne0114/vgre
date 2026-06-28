@@ -6,6 +6,7 @@
 #ifndef VGRE_XLA_OPTIM_H
 #define VGRE_XLA_OPTIM_H
 
+#include <cstdint>   // int64_t in the public API (cosine_lr / AdamW step counter)
 #include <vector>
 
 #include "vgre/xla/autograd.h"

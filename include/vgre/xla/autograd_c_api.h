@@ -40,12 +40,29 @@ VGRE_PUBLIC_API vgre_ag vgre_ag_silu(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_sigmoid(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_tanh(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_mean(vgre_ag x);
+VGRE_PUBLIC_API vgre_ag vgre_ag_softmax(vgre_ag x);
+VGRE_PUBLIC_API vgre_ag vgre_ag_transpose(vgre_ag x);
+VGRE_PUBLIC_API vgre_ag vgre_ag_concat(vgre_ag a, vgre_ag b, int axis);
 VGRE_PUBLIC_API vgre_ag vgre_ag_reshape(vgre_ag x, const int64_t* shape, int ndim);
 VGRE_PUBLIC_API vgre_ag vgre_ag_softmax_cross_entropy(vgre_ag logits, const int* targets, int n);
 VGRE_PUBLIC_API vgre_ag vgre_ag_conv2d(vgre_ag input, vgre_ag weight, vgre_ag bias,
                                        int stride, int pad);
+// Transformer ops (so transformers are buildable from Python too).
+VGRE_PUBLIC_API vgre_ag vgre_ag_layer_norm(vgre_ag x, vgre_ag weight, vgre_ag bias, float eps);
+VGRE_PUBLIC_API vgre_ag vgre_ag_rms_norm(vgre_ag x, vgre_ag weight, float eps);
+VGRE_PUBLIC_API vgre_ag vgre_ag_embedding(vgre_ag weight, const int* ids, int n);
+VGRE_PUBLIC_API vgre_ag vgre_ag_rope(vgre_ag x, int num_heads, float base);
+VGRE_PUBLIC_API vgre_ag vgre_ag_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal);
+VGRE_PUBLIC_API vgre_ag vgre_ag_flash_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal);
+
 VGRE_PUBLIC_API vgre_ag vgre_ag_max_pool2d(vgre_ag x, int kernel, int stride);
 VGRE_PUBLIC_API vgre_ag vgre_ag_avg_pool2d(vgre_ag x, int kernel, int stride);
+// Batch norm over [N,C,H,W]. running_mean/running_var are C-length buffers,
+// read and (in training) EMA-updated in place.
+VGRE_PUBLIC_API vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag beta,
+                                             float* running_mean, float* running_var,
+                                             int channels, int training,
+                                             float momentum, float eps);
 
 // ── Engine ───────────────────────────────────────────────────────────────────
 VGRE_PUBLIC_API void vgre_ag_backward(vgre_ag loss);   // loss must be scalar
