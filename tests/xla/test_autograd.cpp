@@ -114,6 +114,23 @@ int main() {
         });
     }
 
+    // 5c. softmax / transpose / concat
+    checkGrads("softmax", {
+        make({3, 5}, randn(15, 51), true),
+    }, [](const std::vector<Var>& p) { return mean(mul(softmax(p[0]), softmax(p[0]))); });
+    checkGrads("transpose", {
+        make({3, 4}, randn(12, 52), true),
+    }, [](const std::vector<Var>& p) {
+        return mean(mul(transpose(p[0]), transpose(p[0])));
+    });
+    checkGrads("concat", {
+        make({2, 3}, randn(6, 53), true),
+        make({2, 4}, randn(8, 54), true),
+    }, [](const std::vector<Var>& p) {
+        Var c = concat(p[0], p[1], /*axis=*/1);   // [2,7]
+        return mean(mul(c, c));
+    });
+
     // 6. LayerNorm with learnable weight + bias
     checkGrads("layer_norm", {
         make({3, 5}, randn(15, 11), true),    // x

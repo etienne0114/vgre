@@ -102,7 +102,113 @@ def test_module_api() -> bool:
         opt.step()
     acc = float(np.mean(np.argmax(model(X).numpy(), axis=1) == np.array(Y)))
     print(f"[module] Sequential MLP xor accuracy = {acc*100:.0f}%  loss = {loss.item():.4f}")
-    return acc == 1.0
+
+    # Checkpoint round-trip: save, load into a fresh model, identical output.
+    before = model(X).numpy()
+    nn.save(model, "/tmp/vgre_nn_model.safetensors")
+    nn.seed(999)
+    fresh = nn.Sequential(nn.Linear(2, 8), nn.ReLU(), nn.Linear(8, 2))
+    nn.load(fresh, "/tmp/vgre_nn_model.safetensors")
+    after = fresh(X).numpy()
+    same = bool(np.max(np.abs(before - after)) < 1e-5)
+    print(f"[module] checkpoint round-trip identical = {same}")
+    return acc == 1.0 and same
+
+
+def test_bn_cnn() -> bool:
+    # A Sequential conv→BN→relu→pool→flatten→linear CNN with batch norm.
+    nn.seed(1)
+    model = nn.Sequential(
+        nn.Conv2d(1, 4, 3, stride=1, pad=1), nn.BatchNorm2d(4), nn.ReLU(),
+        nn.MaxPool2d(2), nn.Flatten(), nn.Linear(4 * 4 * 4, 4))
+    opt = nn.AdamW(model.parameters(), lr=5e-3, weight_decay=0.0)
+    model.train()
+    for _ in range(300):
+        X, y = make_batch(16)
+        opt.zero_grad()
+        loss = nn.softmax_cross_entropy(model(nn.tensor(X)), y)
+        loss.backward()
+        opt.step()
+    model.eval()   # BN now uses running statistics
+    Xe, ye = make_batch(64)
+    logits = model(nn.tensor(Xe)).numpy()
+    acc = float(np.mean(np.argmax(logits, axis=1) == np.array(ye)))
+    print(f"[bn-cnn] eval accuracy = {acc*100:.0f}%")
+    return acc > 0.9
+
+
+def test_transformer_block() -> bool:
+    # A transformer block built from pure-Python vgre.nn ops, trained to memorize
+    # a fixed token sequence — proves the framework covers transformers too.
+    V, T, D, Hh = 16, 12, 32, 4
+    seq = [(i * 5 + 2) % V for i in range(T + 1)]
+    ids, tgt = seq[:-1], seq[1:]
+
+    def P(*shape, scale=0.02):
+        return nn.tensor(rng.standard_normal(shape) * scale, requires_grad=True)
+    E = P(V, D); g1 = nn.tensor(np.ones(D), requires_grad=True)
+    Wq, Wk, Wv, Wo = P(D, D), P(D, D), P(D, D), P(D, D)
+    g2 = nn.tensor(np.ones(D), requires_grad=True)
+    W1, W2 = P(D, 4 * D), P(4 * D, D)
+    gf = nn.tensor(np.ones(D), requires_grad=True); head = P(D, V)
+    params = [E, g1, Wq, Wk, Wv, Wo, g2, W1, W2, gf, head]
+    opt = nn.AdamW(params, lr=3e-3, weight_decay=0.0)
+
+    def forward():
+        x = nn.embedding(E, ids)
+        h = nn.rms_norm(x, g1)
+        q = nn.rope(nn.matmul(h, Wq), Hh); k = nn.rope(nn.matmul(h, Wk), Hh); v = nn.matmul(h, Wv)
+        a = nn.attention(q, k, v, Hh, causal=True)
+        x = x + nn.matmul(a, Wo)
+        h2 = nn.rms_norm(x, g2)
+        x = x + nn.matmul(nn.relu(nn.matmul(h2, W1)), W2)
+        return nn.matmul(nn.rms_norm(x, gf), head)
+
+    first = last = None
+    for _ in range(250):
+        opt.zero_grad()
+        loss = nn.softmax_cross_entropy(forward(), tgt)
+        loss.backward()
+        opt.step()
+        first = loss.item() if first is None else first
+        last = loss.item()
+    print(f"[transformer] loss {first:.3f} -> {last:.3f}")
+    return last < 0.05
+
+
+def test_gpt_module() -> bool:
+    # A small GPT assembled from vgre.nn modules — the ergonomic transformer path.
+    nn.seed(3)
+    V, T, D = 16, 12, 32
+    seq = [(i * 5 + 2) % V for i in range(T + 1)]
+    ids, tgt = seq[:-1], seq[1:]
+
+    class GPT(nn.Module):
+        def __init__(self):
+            self.embed = nn.Embedding(V, D)
+            self.blocks = [nn.TransformerBlock(D, num_heads=4) for _ in range(2)]
+            self.norm = nn.RMSNorm(D)
+            self.head = nn.Linear(D, V, bias=False)
+
+        def forward(self, ids):
+            x = self.embed(ids)
+            for b in self.blocks:
+                x = b(x)
+            return self.head(self.norm(x))
+
+    model = GPT()
+    opt = nn.AdamW(model.parameters(), lr=3e-3, weight_decay=0.0)
+    first = last = None
+    for _ in range(250):
+        opt.zero_grad()
+        loss = nn.softmax_cross_entropy(model(ids), tgt)
+        loss.backward()
+        opt.step()
+        first = loss.item() if first is None else first
+        last = loss.item()
+    nparams = sum(t.size for _, t in model.named_parameters())
+    print(f"[gpt-module] {nparams} params, loss {first:.3f} -> {last:.3f}")
+    return last < 0.05
 
 
 def main() -> int:
@@ -110,6 +216,9 @@ def main() -> int:
     ok &= test_mlp_xor()
     ok &= test_cnn_quadrant()
     ok &= test_module_api()
+    ok &= test_bn_cnn()
+    ok &= test_transformer_block()
+    ok &= test_gpt_module()
     if ok:
         print("PASS — vgre.nn trains MLP + CNN from pure Python")
         return 0

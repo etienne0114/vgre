@@ -88,6 +88,12 @@ Var embedding(const Var& weight, const std::vector<int>& ids);
 Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets);
 // Mean of all elements -> scalar.
 Var mean(const Var& x);
+// Row-wise softmax over the last dim of x[M,N].
+Var softmax(const Var& x);
+// 2-D transpose: x[M,N] -> [N,M].
+Var transpose(const Var& x);
+// Concatenate two rank-2 tensors along axis 0 (rows) or 1 (cols).
+Var concat(const Var& a, const Var& b, int axis);
 
 // ── Vision ops (so the engine trains CNNs, not only transformers) ────────────
 // 2-D convolution via im2col + GEMM. input[N,Ci,H,W], weight[Co,Ci,Kh,Kw],
