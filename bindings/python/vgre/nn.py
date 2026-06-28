@@ -43,9 +43,10 @@ def _bind() -> None:
     _lib.vgre_ag_get_data.argtypes = [V, P(c.c_float)]
     _lib.vgre_ag_set_data.argtypes = [V, P(c.c_float)]
     _lib.vgre_ag_get_grad.argtypes = [V, P(c.c_float)]
-    for name in ("matmul", "add", "mul"):
+    for name in ("matmul", "add", "mul", "linear_tied"):
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V, V]; f.restype = V
     _lib.vgre_ag_scale.argtypes = [V, c.c_float]; _lib.vgre_ag_scale.restype = V
+    _lib.vgre_ag_dropout.argtypes = [V, c.c_float]; _lib.vgre_ag_dropout.restype = V
     for name in ("relu", "gelu", "silu", "sigmoid", "tanh", "mean", "softmax", "transpose"):
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V]; f.restype = V
     _lib.vgre_ag_concat.argtypes = [V, V, c.c_int]; _lib.vgre_ag_concat.restype = V
@@ -153,6 +154,14 @@ def _new(h, shape) -> Tensor:
 # ── functional ops ───────────────────────────────────────────────────────────
 def matmul(a: Tensor, b: Tensor) -> Tensor:
     return _new(_lib.vgre_ag_matmul(a._h, b._h), (a.shape[0], b.shape[1]))
+
+def linear_tied(x: Tensor, w: Tensor) -> Tensor:
+    """x[M,D] · Wᵀ where W is [V,D] (weight tying)."""
+    return _new(_lib.vgre_ag_linear_tied(x._h, w._h), (x.shape[0], w.shape[0]))
+
+def dropout(x: Tensor, p: float) -> Tensor:
+    """Inverted dropout (stochastic; training only)."""
+    return _new(_lib.vgre_ag_dropout(x._h, float(p)), x.shape)
 
 def add(a: Tensor, b: Tensor) -> Tensor:
     return _new(_lib.vgre_ag_add(a._h, b._h), a.shape)
@@ -324,6 +333,13 @@ class Conv2d(Module):
 
 class ReLU(Module):
     def forward(self, x): return relu(x)
+
+
+class Dropout(Module):
+    def __init__(self, p: float = 0.5):
+        self.p = p
+    def forward(self, x):
+        return dropout(x, self.p) if (self.training and self.p > 0) else x
 
 
 class BatchNorm2d(Module):
