@@ -8,11 +8,15 @@ name: CI
 # honestly claim that platform as supported.
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  # CI auto-runs on push / pull_request are PAUSED to save Actions minutes while
+  # iterating. Run it on demand from the Actions tab → "CI" → "Run workflow"
+  # (workflow_dispatch). To re-enable automatic runs, uncomment the push /
+  # pull_request blocks below.
   workflow_dispatch:
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
