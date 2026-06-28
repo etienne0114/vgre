@@ -54,6 +54,7 @@ void vgre_ag_get_grad(vgre_ag t, float* out) { if (t && out) std::copy(ref(t)->g
 
 vgre_ag vgre_ag_matmul(vgre_ag a, vgre_ag b)  { try { return wrap(matmul(ref(a), ref(b))); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_linear_tied(vgre_ag x, vgre_ag w) { try { return wrap(linear_tied(ref(x), ref(w))); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_bmm(vgre_ag a, vgre_ag b) { try { return wrap(bmm(ref(a), ref(b))); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_dropout(vgre_ag x, float p)   { try { return wrap(dropout(ref(x), p)); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_add(vgre_ag a, vgre_ag b)     { try { return wrap(add(ref(a), ref(b))); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_mul(vgre_ag a, vgre_ag b)     { try { return wrap(mul(ref(a), ref(b))); } catch (...) { return nullptr; } }

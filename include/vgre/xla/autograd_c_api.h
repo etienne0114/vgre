@@ -32,6 +32,7 @@ VGRE_PUBLIC_API void    vgre_ag_get_grad(vgre_ag t, float* out);
 // ── Differentiable ops (each returns a NEW handle) ───────────────────────────
 VGRE_PUBLIC_API vgre_ag vgre_ag_matmul(vgre_ag a, vgre_ag b);
 VGRE_PUBLIC_API vgre_ag vgre_ag_linear_tied(vgre_ag x, vgre_ag w);  // x·Wᵀ (W is [V,D])
+VGRE_PUBLIC_API vgre_ag vgre_ag_bmm(vgre_ag a, vgre_ag b);          // batched matmul
 VGRE_PUBLIC_API vgre_ag vgre_ag_dropout(vgre_ag x, float p);        // inverted dropout (training)
 VGRE_PUBLIC_API vgre_ag vgre_ag_add(vgre_ag a, vgre_ag b);
 VGRE_PUBLIC_API vgre_ag vgre_ag_mul(vgre_ag a, vgre_ag b);

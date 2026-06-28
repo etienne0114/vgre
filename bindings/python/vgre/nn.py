@@ -43,7 +43,7 @@ def _bind() -> None:
     _lib.vgre_ag_get_data.argtypes = [V, P(c.c_float)]
     _lib.vgre_ag_set_data.argtypes = [V, P(c.c_float)]
     _lib.vgre_ag_get_grad.argtypes = [V, P(c.c_float)]
-    for name in ("matmul", "add", "mul", "linear_tied"):
+    for name in ("matmul", "add", "mul", "linear_tied", "bmm"):
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V, V]; f.restype = V
     _lib.vgre_ag_scale.argtypes = [V, c.c_float]; _lib.vgre_ag_scale.restype = V
     _lib.vgre_ag_dropout.argtypes = [V, c.c_float]; _lib.vgre_ag_dropout.restype = V
@@ -159,6 +159,10 @@ def matmul(a: Tensor, b: Tensor) -> Tensor:
 def linear_tied(x: Tensor, w: Tensor) -> Tensor:
     """x[M,D] · Wᵀ where W is [V,D] (weight tying)."""
     return _new(_lib.vgre_ag_linear_tied(x._h, w._h), (x.shape[0], w.shape[0]))
+
+def bmm(a: Tensor, b: Tensor) -> Tensor:
+    """Batched matmul a[B,M,K] · b[B,K,N] -> [B,M,N]."""
+    return _new(_lib.vgre_ag_bmm(a._h, b._h), (a.shape[0], a.shape[1], b.shape[2]))
 
 def dropout(x: Tensor, p: float) -> Tensor:
     """Inverted dropout (stochastic; training only)."""
