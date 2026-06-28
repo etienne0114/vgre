@@ -66,10 +66,11 @@ def _bind() -> None:
     _lib.vgre_ag_batch_norm2d.restype = V
     _lib.vgre_ag_backward.argtypes = [V]
     _lib.vgre_ag_adamw.argtypes = [P(V), c.c_int, c.c_float, c.c_float]; _lib.vgre_ag_adamw.restype = V
-    _lib.vgre_ag_adamw_set_lr.argtypes = [V, c.c_float]
-    _lib.vgre_ag_adamw_step.argtypes = [V, c.c_float]
-    _lib.vgre_ag_adamw_zero_grad.argtypes = [V]
-    _lib.vgre_ag_adamw_free.argtypes = [V]
+    _lib.vgre_ag_sgd.argtypes = [P(V), c.c_int, c.c_float, c.c_float, c.c_float]; _lib.vgre_ag_sgd.restype = V
+    _lib.vgre_ag_opt_set_lr.argtypes = [V, c.c_float]
+    _lib.vgre_ag_opt_step.argtypes = [V, c.c_float]
+    _lib.vgre_ag_opt_zero_grad.argtypes = [V]
+    _lib.vgre_ag_opt_free.argtypes = [V]
     _bound = True
 
 
@@ -469,26 +470,44 @@ def load(model: "Module", path: str) -> None:
         t.set_(tensors[name])
 
 
-class AdamW:
-    """AdamW over a list of parameter Tensors (those created requires_grad=True)."""
+class _Optimizer:
+    """Shared optimizer handle wrapper (generic step/zero_grad/lr/free)."""
 
-    def __init__(self, params: List[Tensor], lr: float = 1e-3, weight_decay: float = 0.01):
-        _require()
+    def __init__(self, handle, params):
         self._params = list(params)
-        arr = (ctypes.c_void_p * len(params))(*[p._h for p in params])
-        self._o = _lib.vgre_ag_adamw(arr, len(params), float(lr), float(weight_decay))
+        self._o = handle
 
     def set_lr(self, lr: float):
-        _lib.vgre_ag_adamw_set_lr(self._o, float(lr))
+        _lib.vgre_ag_opt_set_lr(self._o, float(lr))
 
     def step(self, clip: float = 1.0):
-        _lib.vgre_ag_adamw_step(self._o, float(clip))
+        _lib.vgre_ag_opt_step(self._o, float(clip))
 
     def zero_grad(self):
-        _lib.vgre_ag_adamw_zero_grad(self._o)
+        _lib.vgre_ag_opt_zero_grad(self._o)
 
     def __del__(self):
         o = getattr(self, "_o", None)
         if o and _lib is not None:
-            _lib.vgre_ag_adamw_free(o)
+            _lib.vgre_ag_opt_free(o)
             self._o = None
+
+
+class AdamW(_Optimizer):
+    """AdamW over a list of parameter Tensors (those created requires_grad=True)."""
+
+    def __init__(self, params: List[Tensor], lr: float = 1e-3, weight_decay: float = 0.01):
+        _require()
+        arr = (ctypes.c_void_p * len(params))(*[p._h for p in params])
+        super().__init__(_lib.vgre_ag_adamw(arr, len(params), float(lr), float(weight_decay)), params)
+
+
+class SGD(_Optimizer):
+    """SGD (optional momentum) over a list of parameter Tensors."""
+
+    def __init__(self, params: List[Tensor], lr: float = 1e-2, momentum: float = 0.0,
+                 weight_decay: float = 0.0):
+        _require()
+        arr = (ctypes.c_void_p * len(params))(*[p._h for p in params])
+        super().__init__(_lib.vgre_ag_sgd(arr, len(params), float(lr), float(momentum),
+                                          float(weight_decay)), params)

@@ -69,13 +69,16 @@ VGRE_PUBLIC_API vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag b
 // ── Engine ───────────────────────────────────────────────────────────────────
 VGRE_PUBLIC_API void vgre_ag_backward(vgre_ag loss);   // loss must be scalar
 
-// ── AdamW over a set of parameter handles ────────────────────────────────────
+// ── Optimizers over a set of parameter handles (AdamW or SGD) ────────────────
 VGRE_PUBLIC_API vgre_ag_opt vgre_ag_adamw(vgre_ag* params, int n, float lr,
                                           float weight_decay);
-VGRE_PUBLIC_API void vgre_ag_adamw_set_lr(vgre_ag_opt o, float lr);
-VGRE_PUBLIC_API void vgre_ag_adamw_step(vgre_ag_opt o, float clip);  // clip<=0 → none
-VGRE_PUBLIC_API void vgre_ag_adamw_zero_grad(vgre_ag_opt o);
-VGRE_PUBLIC_API void vgre_ag_adamw_free(vgre_ag_opt o);
+VGRE_PUBLIC_API vgre_ag_opt vgre_ag_sgd(vgre_ag* params, int n, float lr,
+                                        float momentum, float weight_decay);
+// Generic step/zero-grad/lr/free (work for whichever optimizer the handle wraps).
+VGRE_PUBLIC_API void vgre_ag_opt_set_lr(vgre_ag_opt o, float lr);
+VGRE_PUBLIC_API void vgre_ag_opt_step(vgre_ag_opt o, float clip);   // clip<=0 → none
+VGRE_PUBLIC_API void vgre_ag_opt_zero_grad(vgre_ag_opt o);
+VGRE_PUBLIC_API void vgre_ag_opt_free(vgre_ag_opt o);
 
 #ifdef __cplusplus
 }

@@ -230,8 +230,25 @@ def test_dropout_and_tied() -> bool:
     return 0.2 < frac_zero < 0.8 and eval_identity and tied_ok
 
 
+def test_sgd() -> bool:
+    # SGD (with momentum) also minimizes a simple quadratic.
+    w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
+    target = nn.tensor(np.array([3, -2, 0.5, 7], np.float32))
+    opt = nn.SGD([w], lr=0.1, momentum=0.9)
+    loss = None
+    for _ in range(300):
+        opt.zero_grad()
+        diff = nn.add(w, nn.scale(target, -1.0))
+        loss = nn.mean(nn.mul(diff, diff))
+        loss.backward()
+        opt.step(clip=0.0)
+    print(f"[sgd] quadratic loss -> {loss.item():.2e}")
+    return loss.item() < 1e-3
+
+
 def main() -> int:
     ok = True
+    ok &= test_sgd()
     ok &= test_dropout_and_tied()
     ok &= test_mlp_xor()
     ok &= test_cnn_quadrant()

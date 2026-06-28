@@ -10,7 +10,10 @@
 
 using namespace vgre::xla::autograd;
 using vgre::xla::optim::AdamW;
+using vgre::xla::optim::SGD;
 using vgre::xla::optim::clip_grad_norm;
+
+#include <memory>
 
 // A handle is a heap-allocated Var (shared_ptr<Node>): copying it into op
 // results / the optimizer keeps the underlying node alive via reference counts.
@@ -19,7 +22,15 @@ inline Var&  ref(vgre_ag h) { return *reinterpret_cast<Var*>(h); }
 inline vgre_ag wrap(Var v)  { return reinterpret_cast<vgre_ag>(new Var(std::move(v))); }
 }
 
-struct vgre_ag_optimizer { AdamW adam; std::vector<Var> params; };
+// Holds either an AdamW or an SGD; the generic step/zero_grad/set_lr dispatch.
+struct vgre_ag_optimizer {
+    std::vector<Var>      params;
+    std::unique_ptr<AdamW> adam;
+    std::unique_ptr<SGD>   sgd;
+    void step(float clip) { if (clip > 0.0f) clip_grad_norm(params, clip); if (adam) adam->step(); else sgd->step(); }
+    void zero_grad()      { if (adam) adam->zero_grad(); else sgd->zero_grad(); }
+    void set_lr(float lr) { if (adam) adam->set_lr(lr); else sgd->set_lr(lr); }
+};
 
 extern "C" {
 
@@ -95,23 +106,34 @@ vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag beta,
 
 void vgre_ag_backward(vgre_ag loss) { try { backward(ref(loss)); } catch (...) {} }
 
+namespace {
+std::vector<Var> collectParams(vgre_ag* params, int n) {
+    std::vector<Var> p; p.reserve(n);
+    for (int i = 0; i < n; ++i) p.push_back(ref(params[i]));
+    return p;
+}
+inline vgre_ag_optimizer* opt(vgre_ag_opt o) { return reinterpret_cast<vgre_ag_optimizer*>(o); }
+}
+
 vgre_ag_opt vgre_ag_adamw(vgre_ag* params, int n, float lr, float weight_decay) {
     try {
-        std::vector<Var> p;
-        p.reserve(n);
-        for (int i = 0; i < n; ++i) p.push_back(ref(params[i]));
-        auto* o = new vgre_ag_optimizer{AdamW(p, lr, 0.9f, 0.999f, 1e-8f, weight_decay), std::move(p)};
+        auto* o = new vgre_ag_optimizer();
+        o->params = collectParams(params, n);
+        o->adam = std::make_unique<AdamW>(o->params, lr, 0.9f, 0.999f, 1e-8f, weight_decay);
         return reinterpret_cast<vgre_ag_opt>(o);
     } catch (...) { return nullptr; }
 }
-void vgre_ag_adamw_set_lr(vgre_ag_opt o, float lr) { if (o) reinterpret_cast<vgre_ag_optimizer*>(o)->adam.set_lr(lr); }
-void vgre_ag_adamw_step(vgre_ag_opt o, float clip) {
-    if (!o) return;
-    auto* opt = reinterpret_cast<vgre_ag_optimizer*>(o);
-    if (clip > 0.0f) clip_grad_norm(opt->params, clip);
-    opt->adam.step();
+vgre_ag_opt vgre_ag_sgd(vgre_ag* params, int n, float lr, float momentum, float weight_decay) {
+    try {
+        auto* o = new vgre_ag_optimizer();
+        o->params = collectParams(params, n);
+        o->sgd = std::make_unique<SGD>(o->params, lr, momentum, weight_decay);
+        return reinterpret_cast<vgre_ag_opt>(o);
+    } catch (...) { return nullptr; }
 }
-void vgre_ag_adamw_zero_grad(vgre_ag_opt o) { if (o) reinterpret_cast<vgre_ag_optimizer*>(o)->adam.zero_grad(); }
-void vgre_ag_adamw_free(vgre_ag_opt o)      { delete reinterpret_cast<vgre_ag_optimizer*>(o); }
+void vgre_ag_opt_set_lr(vgre_ag_opt o, float lr) { if (o) opt(o)->set_lr(lr); }
+void vgre_ag_opt_step(vgre_ag_opt o, float clip)  { if (o) opt(o)->step(clip); }
+void vgre_ag_opt_zero_grad(vgre_ag_opt o)         { if (o) opt(o)->zero_grad(); }
+void vgre_ag_opt_free(vgre_ag_opt o)              { delete opt(o); }
 
 }  // extern "C"
