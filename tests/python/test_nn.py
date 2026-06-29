@@ -336,8 +336,35 @@ def test_tensor_parallel() -> bool:
     return d < 1e-5
 
 
+def test_error_reporting() -> bool:
+    # Production hardening: a native failure must surface as a Python exception
+    # with a message, not silently corrupt training. Previously the C ABI
+    # swallowed exceptions (catch(...){}); now it records them in a thread-local
+    # channel that nn raises from.
+    raised = False
+    try:
+        # inner dims 3 vs 5 — matmul must reject this.
+        nn.matmul(nn.tensor(np.zeros((2, 3), np.float32)),
+                  nn.tensor(np.zeros((5, 4), np.float32)))
+    except RuntimeError as e:
+        raised = bool(str(e).strip()) and "op failed" in str(e)
+
+    # A subsequent valid op must succeed and leave the error channel clear.
+    W = nn.tensor(np.random.default_rng(0).standard_normal((4, 3)).astype(np.float32),
+                  requires_grad=True)
+    loss = nn.softmax_cross_entropy(
+        nn.matmul(nn.tensor(np.random.default_rng(1).standard_normal((2, 4)).astype(np.float32)), W),
+        [0, 1])
+    loss.backward()
+    cleared = nn._last_error() == "" and np.isfinite(W.grad()).all()
+
+    print(f"[error-reporting] invalid op raised={raised}  valid-after cleared={cleared}")
+    return raised and cleared
+
+
 def main() -> int:
     ok = True
+    ok &= test_error_reporting()
     ok &= test_tensor_parallel()
     ok &= test_distributed_dp()
     ok &= test_checkpoint()

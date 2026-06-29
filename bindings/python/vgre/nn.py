@@ -43,6 +43,8 @@ def _bind() -> None:
         return
     c, P, V = ctypes, ctypes.POINTER, ctypes.c_void_p
     I64 = c.c_int64
+    _lib.vgre_ag_last_error.argtypes = []; _lib.vgre_ag_last_error.restype = c.c_char_p
+    _lib.vgre_ag_clear_error.argtypes = []
     _lib.vgre_ag_tensor.argtypes = [P(I64), c.c_int, P(c.c_float), c.c_int]; _lib.vgre_ag_tensor.restype = V
     _lib.vgre_ag_free.argtypes = [V]
     _lib.vgre_ag_size.argtypes = [V]; _lib.vgre_ag_size.restype = I64
@@ -143,9 +145,15 @@ class Tensor:
         return float(self.numpy().reshape(-1)[0])
 
     def backward(self) -> None:
+        # backward() returns void; the C ABI clears the error channel on entry,
+        # so a non-empty message afterwards means the backward pass actually
+        # failed (e.g. a shape mismatch) instead of silently leaving stale grads.
         _lib.vgre_ag_backward(self._h)
         # checkpoint callbacks are invoked during backward; release them after.
         _CKPT_CBS.clear()
+        err = _last_error()
+        if err:
+            raise RuntimeError(f"backward failed: {err}")
 
     # operator overloads
     def __matmul__(self, other): return matmul(self, other)
@@ -161,6 +169,14 @@ class Tensor:
             self._h = None
 
 
+def _last_error() -> str:
+    """Message from the last failed native op on this thread ('' if none)."""
+    if _lib is None:
+        return ""
+    msg = _lib.vgre_ag_last_error()
+    return msg.decode() if msg else ""
+
+
 def tensor(data, requires_grad: bool = False) -> Tensor:
     _require()
     a = _f32(data)
@@ -168,13 +184,13 @@ def tensor(data, requires_grad: bool = False) -> Tensor:
     h = _lib.vgre_ag_tensor(shp, a.ndim, a.reshape(-1).ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
                             1 if requires_grad else 0)
     if not h:
-        raise RuntimeError("tensor creation failed")
+        raise RuntimeError(f"tensor creation failed: {_last_error() or 'unknown error'}")
     return Tensor(h, a.shape)
 
 
 def _new(h, shape) -> Tensor:
     if not h:
-        raise RuntimeError("op failed")
+        raise RuntimeError(f"op failed: {_last_error() or 'unknown error'}")
     return Tensor(h, shape)
 
 
