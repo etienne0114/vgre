@@ -139,6 +139,19 @@ int main() {
         Var c = concat(p[0], p[1], /*axis=*/1);   // [2,7]
         return mean(mul(c, c));
     });
+    // rank-3 transpose (swap last two dims) + rank-3 softmax (over last dim)
+    checkGrads("transpose3d", {
+        make({2, 3, 4}, randn(24, 55), true),
+    }, [](const std::vector<Var>& p) {
+        Var t = transpose(p[0]);                  // [2,4,3]
+        return mean(mul(t, t));
+    });
+    checkGrads("softmax3d", {
+        make({2, 3, 4}, randn(24, 56), true),
+    }, [](const std::vector<Var>& p) {
+        Var s = softmax(p[0]);                     // softmax over last dim
+        return mean(mul(s, s));
+    });
 
     // 6. LayerNorm with learnable weight + bias
     checkGrads("layer_norm", {

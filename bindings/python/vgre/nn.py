@@ -188,7 +188,10 @@ def tanh(x): return _unary("tanh", x)
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
 def transpose(x: Tensor) -> Tensor:
-    return _new(_lib.vgre_ag_transpose(x._h), (x.shape[1], x.shape[0]))
+    """Swap the last two dims: [M,N]->[N,M] or [B,M,N]->[B,N,M]."""
+    s = x.shape
+    out_shape = (s[1], s[0]) if len(s) == 2 else (s[0], s[2], s[1])
+    return _new(_lib.vgre_ag_transpose(x._h), out_shape)
 def concat(a: Tensor, b: Tensor, axis: int = 1) -> Tensor:
     if axis == 0:
         shape = (a.shape[0] + b.shape[0], a.shape[1])

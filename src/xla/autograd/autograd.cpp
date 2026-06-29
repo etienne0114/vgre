@@ -678,9 +678,13 @@ Var mean(const Var& x) {
 
 // ── softmax / transpose / concat ─────────────────────────────────────────────
 Var softmax(const Var& x) {
-    if (x->shape.size() != 2) throw std::runtime_error("softmax: x must be [M,N]");
-    const int64_t M = x->shape[0], N = x->shape[1];
-    Var out = newNode({M, N}, {x}, x->requires_grad);
+    // Softmax over the LAST dim; accepts rank-2 [M,N] or rank-3 [B,M,N] (the
+    // leading dims fold into the row count M since each row of N is contiguous).
+    if (x->shape.size() != 2 && x->shape.size() != 3)
+        throw std::runtime_error("softmax: x must be rank-2 [M,N] or rank-3 [B,M,N]");
+    const int64_t N = x->shape.back();
+    const int64_t M = x->size() / N;
+    Var out = newNode(x->shape, {x}, x->requires_grad);
     for (int64_t i = 0; i < M; ++i) {
         const float* r = &x->data[i * N];
         float mx = r[0]; for (int64_t j = 1; j < N; ++j) mx = std::max(mx, r[j]);
@@ -703,18 +707,39 @@ Var softmax(const Var& x) {
 }
 
 Var transpose(const Var& x) {
-    if (x->shape.size() != 2) throw std::runtime_error("transpose: x must be [M,N]");
-    const int64_t M = x->shape[0], N = x->shape[1];
-    Var out = newNode({N, M}, {x}, x->requires_grad);
-    for (int64_t i = 0; i < M; ++i)
-        for (int64_t j = 0; j < N; ++j) out->data[j * M + i] = x->data[i * N + j];
-    Node* op = out.get(); Var X = x;
-    out->backward_fn = [op, X, M, N]() {
-        if (!X->requires_grad) return;
+    // rank-2: [M,N] -> [N,M].  rank-3: [B,M,N] -> [B,N,M] (swap the last two dims,
+    // per batch — what batched bilinear / attention need).
+    if (x->shape.size() == 2) {
+        const int64_t M = x->shape[0], N = x->shape[1];
+        Var out = newNode({N, M}, {x}, x->requires_grad);
         for (int64_t i = 0; i < M; ++i)
-            for (int64_t j = 0; j < N; ++j) X->grad[i * N + j] += op->grad[j * M + i];
-    };
-    return out;
+            for (int64_t j = 0; j < N; ++j) out->data[j * M + i] = x->data[i * N + j];
+        Node* op = out.get(); Var X = x;
+        out->backward_fn = [op, X, M, N]() {
+            if (!X->requires_grad) return;
+            for (int64_t i = 0; i < M; ++i)
+                for (int64_t j = 0; j < N; ++j) X->grad[i * N + j] += op->grad[j * M + i];
+        };
+        return out;
+    }
+    if (x->shape.size() == 3) {
+        const int64_t B = x->shape[0], M = x->shape[1], N = x->shape[2];
+        Var out = newNode({B, N, M}, {x}, x->requires_grad);
+        for (int64_t b = 0; b < B; ++b)
+            for (int64_t i = 0; i < M; ++i)
+                for (int64_t j = 0; j < N; ++j)
+                    out->data[(b * N + j) * M + i] = x->data[(b * M + i) * N + j];
+        Node* op = out.get(); Var X = x;
+        out->backward_fn = [op, X, B, M, N]() {
+            if (!X->requires_grad) return;
+            for (int64_t b = 0; b < B; ++b)
+                for (int64_t i = 0; i < M; ++i)
+                    for (int64_t j = 0; j < N; ++j)
+                        X->grad[(b * M + i) * N + j] += op->grad[(b * N + j) * M + i];
+        };
+        return out;
+    }
+    throw std::runtime_error("transpose: x must be rank-2 [M,N] or rank-3 [B,M,N]");
 }
 
 Var concat(const Var& a, const Var& b, int axis) {
