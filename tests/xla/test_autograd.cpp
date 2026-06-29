@@ -265,6 +265,42 @@ int main() {
         if (!ok) ++g_fail;
     }
 
+    // 10. Gradient checkpointing: grads identical to the non-checkpointed graph.
+    {
+        Var x  = make({3, 4}, randn(12, 73), true);
+        Var W1 = make({4, 6}, randn(24, 71), true);
+        Var W2 = make({6, 4}, randn(24, 72), true);
+        // segment: z = relu(x·W1)·W2  (intermediate relu/matmul activations are
+        // what checkpointing drops + recomputes).
+        auto seg = [](const std::vector<Var>& p) {
+            return matmul(relu(matmul(p[0], p[1])), p[2]);
+        };
+        std::vector<Var> inp = {x, W1, W2};
+
+        zero_grad(inp);
+        Var z = seg(inp);
+        backward(mean(mul(z, z)));
+        std::vector<std::vector<float>> ref = {x->grad, W1->grad, W2->grad};
+
+        zero_grad(inp);
+        Var zc = checkpoint(seg, inp);
+        backward(mean(mul(zc, zc)));
+        std::vector<std::vector<float>> got = {x->grad, W1->grad, W2->grad};
+
+        double worst = 0.0;
+        for (size_t p = 0; p < ref.size(); ++p)
+            for (size_t i = 0; i < ref[p].size(); ++i)
+                worst = std::max(worst, (double)std::fabs(ref[p][i] - got[p][i]));
+        // Output value must also match.
+        double outDiff = 0.0;
+        for (size_t i = 0; i < z->data.size(); ++i)
+            outDiff = std::max(outDiff, (double)std::fabs(z->data[i] - zc->data[i]));
+        bool ok = worst < 1e-6 && outDiff < 1e-6;
+        std::printf("%s checkpoint: grad max|diff|=%.2e out max|diff|=%.2e\n",
+                    ok ? "[PASS]" : "[FAIL]", worst, outDiff);
+        if (!ok) ++g_fail;
+    }
+
     if (g_fail == 0) { std::printf("test_autograd: ALL CHECKS PASSED\n"); return 0; }
     std::printf("test_autograd: %d FAILURE(S)\n", g_fail);
     return 1;
