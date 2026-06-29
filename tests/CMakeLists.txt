@@ -1654,6 +1654,21 @@ if(_vgre_nn_py)
         TIMEOUT 240
         SKIP_RETURN_CODE 77
     )
+
+    # Real 2-process data-parallel training over the lightweight libvgre_nn
+    # collective: spawns rank 0 + rank 1, each trains a data shard, then
+    # all_reduce_gradients() syncs over a real TCP socket. Requires the
+    # vgre_nn target (env points the workers at libvgre_nn.so).
+    if(TARGET vgre_nn)
+        add_test(NAME PythonNnDistributed
+                 COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn_distributed.py)
+        set_tests_properties(PythonNnDistributed PROPERTIES
+            ENVIRONMENT "VGRE_IPC_MODE=OFF;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_NN_LIB=$<TARGET_FILE:vgre_nn>"
+            LABELS "python;e2e"
+            TIMEOUT 120
+            SKIP_RETURN_CODE 77
+        )
+    endif()
 endif()
 
 # ── Global Test Configuration ──────────────────────────────────────────────
