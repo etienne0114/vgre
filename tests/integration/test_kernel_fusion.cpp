@@ -21,6 +21,7 @@
 
 using namespace vgre;
 using namespace vgre::compiler;
+using namespace vgre::core;
 
 static bool approxEqual(float a, float b, float eps = 1e-4f) {
     return std::fabs(a - b) < eps;
@@ -212,17 +213,110 @@ static void testFlashAttentionGQA() {
     std::cout << "[PASS] GQA generated source is free of stubs" << std::endl;
 }
 
+// ── Test: Fused residual + LayerNorm — detection AND real execution ─────────
+// LayerNorm normalises over the feature dimension, so the generated kernel must
+// reduce mean/variance across each row. A per-element form (var == 0) would
+// collapse the output to `beta`; this test JIT-compiles and launches the kernel
+// and checks it against a CPU LayerNorm reference, catching that regression.
+static void testLayerNormFusedExecution() {
+    std::cout << "\n--- Test: Fused Residual+LayerNorm Execution ---" << std::endl;
+
+    KernelIR ir;
+    ir.name = "ln_resid";
+    // Must mention layer_norm + residual + dropout to trip LAYER_NORM_FUSED.
+    ir.source = R"(
+        extern "C" __global__ void ln_resid(const float* x, const float* residual,
+                                             const float* gamma, const float* beta,
+                                             float* out, int n, int d) {
+            // layer_norm with residual add and dropout mask
+            float mean = 0, variance = 0; int mask = 1; (void)mask;
+        }
+    )";
+
+    auto& fusion = KernelFusionEngine::instance();
+    auto meta = fusion.tryFuse(ir);
+    assert(meta.pattern == FusionPattern::LAYER_NORM_FUSED && "must detect LN fusion");
+
+    const std::string& src = meta.fusedSource;
+    // Structure: must reduce over the feature dim (row * d), not per-element.
+    assert(src.find("row * d") != std::string::npos && "must index rows of width d");
+    assert(src.find("var = v2 - mean * mean") == std::string::npos &&
+           "must not use the broken per-element variance");
+
+    // Real execution: one thread per row, reduce over d features.
+    const int n_rows = 8, d = 16;
+    const float eps = 1e-5f;
+    std::vector<float> x(n_rows * d), residual(n_rows * d), gamma(d), beta(d),
+                       out(n_rows * d, -999.0f);
+    for (int r = 0; r < n_rows; ++r)
+        for (int i = 0; i < d; ++i) {
+            x[r * d + i]        = 0.1f * (i + 1) + 0.5f * r;
+            residual[r * d + i] = 0.05f * (d - i);
+        }
+    for (int i = 0; i < d; ++i) { gamma[i] = 1.0f + 0.01f * i; beta[i] = 0.001f * i; }
+
+    KernelId k = 0;
+    if (RuntimeEngine::instance().registerKernel(meta.fusedKernelName, src, k) !=
+            VGREResult::SUCCESS || k == 0) {
+        std::cerr << "[FAIL] could not register fused LayerNorm kernel" << std::endl;
+        std::abort();
+    }
+
+    auto& mm = RuntimeEngine::instance().getMemoryManager();
+    MemoryHandle dx = nullptr, dr = nullptr, dg = nullptr, db = nullptr, dout = nullptr;
+    const size_t rb = (size_t)n_rows * d * sizeof(float), fb = (size_t)d * sizeof(float);
+    mm.allocate(rb, dx); mm.allocate(rb, dr); mm.allocate(fb, dg);
+    mm.allocate(fb, db); mm.allocate(rb, dout);
+    mm.copyHostToDevice(dx, x.data(), rb);
+    mm.copyHostToDevice(dr, residual.data(), rb);
+    mm.copyHostToDevice(dg, gamma.data(), fb);
+    mm.copyHostToDevice(db, beta.data(), fb);
+
+    int nr = n_rows, dd = d; float ep = eps;
+    void* args[] = {&dx, &dg, &db, &dr, &dout, &nr, &dd, &ep};
+    dim3 grid((unsigned)n_rows, 1, 1), block(1, 1, 1);   // one row per thread/block
+    RuntimeEngine::instance().launchKernel(k, grid, block, args, 0, 0, dim3(0, 0, 0));
+    RuntimeEngine::instance().synchronize();
+    mm.copyDeviceToHost(out.data(), dout, rb);
+
+    // CPU reference LayerNorm over (x + residual), affine by gamma/beta.
+    double maxErr = 0.0;
+    for (int r = 0; r < n_rows; ++r) {
+        double mean = 0;
+        for (int i = 0; i < d; ++i) mean += x[r * d + i] + residual[r * d + i];
+        mean /= d;
+        double var = 0;
+        for (int i = 0; i < d; ++i) {
+            double c = (x[r * d + i] + residual[r * d + i]) - mean;
+            var += c * c;
+        }
+        var /= d;
+        double rstd = 1.0 / std::sqrt(var + eps);
+        for (int i = 0; i < d; ++i) {
+            double ref = ((x[r * d + i] + residual[r * d + i]) - mean) * rstd * gamma[i] + beta[i];
+            maxErr = std::max(maxErr, std::fabs(ref - out[r * d + i]));
+        }
+    }
+    printf("  [info] fused LayerNorm max abs err vs CPU ref = %.2e\n", maxErr);
+    assert(maxErr < 1e-4 && "fused LayerNorm must match CPU reference");
+    std::cout << "[PASS] Fused Residual+LayerNorm computes correct normalisation"
+              << std::endl;
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "VGRE Kernel Fusion Integration Tests" << std::endl;
     std::cout << "========================================" << std::endl;
 
+    RuntimeEngine::instance().initialize();
+
     testFlashAttentionDetection();
     testGemmGeluDetection();
     testFlashAttentionOutputShape();
     testNoPlaceholders();
     testFlashAttentionGQA();
+    testLayerNormFusedExecution();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;
