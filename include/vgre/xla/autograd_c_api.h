@@ -78,6 +78,12 @@ typedef vgre_ag (*vgre_ag_builder)(vgre_ag* inputs, int n, void* user);
 VGRE_PUBLIC_API vgre_ag vgre_ag_checkpoint(vgre_ag_builder fn, void* user,
                                            vgre_ag* inputs, int n);
 
+// Distributed data-parallel: sum-reduce each parameter's gradient across all
+// cluster nodes (over the TCP/RDMA transport) and divide by the world size, so
+// every node holds the averaged gradient before stepping. Single-node (world=1)
+// is a no-op. Call after backward(), before the optimizer step.
+VGRE_PUBLIC_API void vgre_ag_all_reduce_grads(vgre_ag* params, int n);
+
 // ── Optimizers over a set of parameter handles (AdamW or SGD) ────────────────
 VGRE_PUBLIC_API vgre_ag_opt vgre_ag_adamw(vgre_ag* params, int n, float lr,
                                           float weight_decay);

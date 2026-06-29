@@ -74,6 +74,8 @@ def _bind() -> None:
     _lib.vgre_ag_batch_norm2d.restype = V
     _lib.vgre_ag_backward.argtypes = [V]
     _lib.vgre_ag_checkpoint.argtypes = [_BUILDER, V, P(V), c.c_int]; _lib.vgre_ag_checkpoint.restype = V
+    _lib.vgre_ag_all_reduce_grads.argtypes = [P(V), c.c_int]
+    _lib.vgre_cluster_world_size.argtypes = []; _lib.vgre_cluster_world_size.restype = c.c_int
     _lib.vgre_ag_adamw.argtypes = [P(V), c.c_int, c.c_float, c.c_float]; _lib.vgre_ag_adamw.restype = V
     _lib.vgre_ag_sgd.argtypes = [P(V), c.c_int, c.c_float, c.c_float, c.c_float]; _lib.vgre_ag_sgd.restype = V
     _lib.vgre_ag_opt_set_lr.argtypes = [V, c.c_float]
@@ -187,6 +189,23 @@ def linear_tied(x: Tensor, w: Tensor) -> Tensor:
 def bmm(a: Tensor, b: Tensor) -> Tensor:
     """Batched matmul a[B,M,K] · b[B,K,N] -> [B,M,N]."""
     return _new(_lib.vgre_ag_bmm(a._h, b._h), (a.shape[0], a.shape[1], b.shape[2]))
+
+
+def world_size() -> int:
+    """Number of cluster nodes participating in collectives (1 if standalone)."""
+    _require()
+    return int(_lib.vgre_cluster_world_size())
+
+
+def all_reduce_gradients(params: List["Tensor"]) -> None:
+    """Distributed data-parallel gradient sync: average each parameter's gradient
+    across all cluster nodes (sum-all-reduce over TCP/RDMA, then ÷ world_size).
+    Call after backward(), before optimizer.step(). Single-node → no-op. This is
+    what lets a model train across a CPU cluster: each node runs its own data
+    shard, then this averages the gradients so every node stays in sync."""
+    _require()
+    arr = (ctypes.c_void_p * len(params))(*[t._h for t in params])
+    _lib.vgre_ag_all_reduce_grads(arr, len(params))
 
 
 def checkpoint(fn, inputs: List["Tensor"]) -> "Tensor":

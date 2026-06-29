@@ -107,6 +107,27 @@ vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag beta,
 
 void vgre_ag_backward(vgre_ag loss) { try { backward(ref(loss)); } catch (...) {} }
 
+// Cluster collectives (implemented in the api/advanced layer; resolved within
+// libvgre). Declared here to avoid a header dependency inversion.
+extern "C" int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype);
+extern "C" int vgre_cluster_world_size(void);
+
+void vgre_ag_all_reduce_grads(vgre_ag* params, int n) {
+    try {
+        const int world = vgre_cluster_world_size();   // >= 1
+        for (int i = 0; i < n; ++i) {
+            Var& p = ref(params[i]);
+            if (p->grad.empty()) continue;
+            // VGRE_ARG_FLOAT32 == 3. Sum across nodes in place (no-op single-node).
+            vgre_cluster_all_reduce(p->grad.data(), p->grad.size(), 3);
+            if (world > 1) {
+                const float inv = 1.0f / (float)world;
+                for (float& g : p->grad) g *= inv;
+            }
+        }
+    } catch (...) {}
+}
+
 vgre_ag vgre_ag_checkpoint(vgre_ag_builder fn, void* user, vgre_ag* inputs, int n) {
     try {
         std::vector<Var> ins;
