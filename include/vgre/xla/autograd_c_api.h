@@ -70,6 +70,14 @@ VGRE_PUBLIC_API vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag b
 // ── Engine ───────────────────────────────────────────────────────────────────
 VGRE_PUBLIC_API void vgre_ag_backward(vgre_ag loss);   // loss must be scalar
 
+// Gradient checkpointing. `fn` is a builder callback: given the input handles it
+// constructs a subgraph and returns the output handle. checkpoint drops the
+// subgraph's intermediate activations after forward and recomputes them (by
+// re-invoking fn) during backward. `user` is passed through to fn unchanged.
+typedef vgre_ag (*vgre_ag_builder)(vgre_ag* inputs, int n, void* user);
+VGRE_PUBLIC_API vgre_ag vgre_ag_checkpoint(vgre_ag_builder fn, void* user,
+                                           vgre_ag* inputs, int n);
+
 // ── Optimizers over a set of parameter handles (AdamW or SGD) ────────────────
 VGRE_PUBLIC_API vgre_ag_opt vgre_ag_adamw(vgre_ag* params, int n, float lr,
                                           float weight_decay);

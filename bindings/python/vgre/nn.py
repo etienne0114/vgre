@@ -28,6 +28,14 @@ from ._native import _lib, NATIVE_AVAILABLE
 
 _bound = False
 
+# Builder callback type for gradient checkpointing:
+#   vgre_ag (*)(vgre_ag* inputs, int n, void* user)
+_BUILDER = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+                            ctypes.c_int, ctypes.c_void_p)
+# Keep checkpoint callbacks alive from forward through backward (they are invoked
+# during backward to recompute). Tensor.backward() clears this afterwards.
+_CKPT_CBS: list = []
+
 
 def _bind() -> None:
     global _bound
@@ -65,6 +73,7 @@ def _bind() -> None:
                                           c.c_int, c.c_int, c.c_float, c.c_float]
     _lib.vgre_ag_batch_norm2d.restype = V
     _lib.vgre_ag_backward.argtypes = [V]
+    _lib.vgre_ag_checkpoint.argtypes = [_BUILDER, V, P(V), c.c_int]; _lib.vgre_ag_checkpoint.restype = V
     _lib.vgre_ag_adamw.argtypes = [P(V), c.c_int, c.c_float, c.c_float]; _lib.vgre_ag_adamw.restype = V
     _lib.vgre_ag_sgd.argtypes = [P(V), c.c_int, c.c_float, c.c_float, c.c_float]; _lib.vgre_ag_sgd.restype = V
     _lib.vgre_ag_opt_set_lr.argtypes = [V, c.c_float]
@@ -87,11 +96,24 @@ def _f32(a) -> np.ndarray:
 class Tensor:
     """An autograd tensor. Wrap data with nn.tensor(); ops return new Tensors."""
 
-    __slots__ = ("_h", "_shape")
+    __slots__ = ("_h", "_shape", "_owns")
 
-    def __init__(self, handle, shape):
+    def __init__(self, handle, shape, owns: bool = True):
         self._h = handle
         self._shape = tuple(int(s) for s in shape)
+        self._owns = owns
+
+    @classmethod
+    def _from_handle(cls, handle, owns: bool = True) -> "Tensor":
+        """Wrap an existing handle, querying its shape from the engine."""
+        nd = _lib.vgre_ag_ndim(handle)
+        buf = (ctypes.c_int64 * max(nd, 1))()
+        _lib.vgre_ag_shape(handle, buf)
+        return cls(handle, tuple(buf[i] for i in range(nd)), owns=owns)
+
+    def _release(self):
+        """Relinquish ownership of the handle (caller/engine now owns it)."""
+        self._h = None
 
     @property
     def shape(self):
@@ -120,6 +142,8 @@ class Tensor:
 
     def backward(self) -> None:
         _lib.vgre_ag_backward(self._h)
+        # checkpoint callbacks are invoked during backward; release them after.
+        _CKPT_CBS.clear()
 
     # operator overloads
     def __matmul__(self, other): return matmul(self, other)
@@ -130,7 +154,7 @@ class Tensor:
 
     def __del__(self):
         h = getattr(self, "_h", None)
-        if h and _lib is not None:
+        if h and getattr(self, "_owns", True) and _lib is not None:
             _lib.vgre_ag_free(h)
             self._h = None
 
@@ -163,6 +187,29 @@ def linear_tied(x: Tensor, w: Tensor) -> Tensor:
 def bmm(a: Tensor, b: Tensor) -> Tensor:
     """Batched matmul a[B,M,K] · b[B,K,N] -> [B,M,N]."""
     return _new(_lib.vgre_ag_bmm(a._h, b._h), (a.shape[0], a.shape[1], b.shape[2]))
+
+
+def checkpoint(fn, inputs: List["Tensor"]) -> "Tensor":
+    """Gradient checkpointing: run fn(inputs) but drop its intermediate
+    activations, recomputing them during backward (saves memory, costs one extra
+    forward). fn takes a list of Tensors and returns one Tensor. Output and
+    gradients are identical to fn(inputs)."""
+    _require()
+
+    def _cb(handles, n, user):
+        ins = [Tensor._from_handle(handles[i], owns=False) for i in range(n)]
+        out = fn(ins)
+        h = out._h
+        out._release()          # hand the output handle to the engine
+        return h
+
+    cb = _BUILDER(_cb)
+    _CKPT_CBS.append(cb)        # keep alive until backward() clears it
+    arr = (ctypes.c_void_p * len(inputs))(*[t._h for t in inputs])
+    h = _lib.vgre_ag_checkpoint(cb, None, arr, len(inputs))
+    if not h:
+        raise RuntimeError("checkpoint failed")
+    return Tensor._from_handle(h)
 
 def dropout(x: Tensor, p: float) -> Tensor:
     """Inverted dropout (stochastic; training only)."""

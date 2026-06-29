@@ -246,8 +246,41 @@ def test_sgd() -> bool:
     return loss.item() < 1e-3
 
 
+def test_checkpoint() -> bool:
+    # Gradient checkpointing: identical grads/loss to the non-checkpointed graph.
+    def run(use_ckpt):
+        r = np.random.default_rng(0)
+        W1 = nn.tensor(r.standard_normal((4, 6)).astype(np.float32), requires_grad=True)
+        W2 = nn.tensor(r.standard_normal((6, 4)).astype(np.float32), requires_grad=True)
+        x = nn.tensor(r.standard_normal((3, 4)).astype(np.float32), requires_grad=True)
+        seg = lambda p: nn.matmul(nn.relu(nn.matmul(p[0], p[1])), p[2])
+        z = nn.checkpoint(seg, [x, W1, W2]) if use_ckpt else seg([x, W1, W2])
+        loss = nn.mean(nn.mul(z, z))
+        loss.backward()
+        return W1.grad(), W2.grad(), x.grad(), loss.item()
+    a = run(False)
+    b = run(True)
+    d = max(float(np.max(np.abs(a[i] - b[i]))) for i in range(3))
+    d = max(d, abs(a[3] - b[3]))
+    # And a checkpointed TransformerBlock trains (forward+backward+step).
+    nn.seed(0)
+    blk = nn.TransformerBlock(32, num_heads=4)
+    opt = nn.AdamW(blk.parameters(), lr=1e-3, weight_decay=0.0)
+    xb = nn.tensor(np.random.default_rng(1).standard_normal((4, 8, 32)).astype(np.float32))
+    f0 = fN = None
+    for _ in range(15):
+        opt.zero_grad()
+        loss = nn.mean(nn.mul(nn.checkpoint(lambda p: blk(p[0]), [xb]),
+                              nn.checkpoint(lambda p: blk(p[0]), [xb])))
+        loss.backward(); opt.step()
+        f0 = loss.item() if f0 is None else f0; fN = loss.item()
+    print(f"[checkpoint] grad/out max|diff|={d:.2e}  ckpt-block loss {f0:.4f}->{fN:.4f}")
+    return d < 1e-5 and fN < f0
+
+
 def main() -> int:
     ok = True
+    ok &= test_checkpoint()
     ok &= test_sgd()
     ok &= test_dropout_and_tied()
     ok &= test_mlp_xor()

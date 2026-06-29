@@ -1110,9 +1110,11 @@ void backward(const Var& loss) {
 Var checkpoint(const std::function<Var(const std::vector<Var>&)>& fn,
                const std::vector<Var>& inputs) {
     Var fwd = fn(inputs);                 // forward value; this tape is discarded below
-    bool req = false;
-    for (auto& in : inputs) req = req || in->requires_grad;
-    Var out = newNode(fwd->shape, inputs, req);
+    // The output must require grad so upstream ops fill its grad: the recompute
+    // back-props into ALL leaves that require grad inside fn — including params
+    // captured by fn that are not in `inputs` (each leaf still gates on its own
+    // requires_grad, so non-grad leaves are unaffected).
+    Var out = newNode(fwd->shape, inputs, /*requires_grad=*/true);
     out->data = fwd->data;                // keep ONLY the output activation
     // `fwd` (and the segment's intermediates) are released when this returns.
 
