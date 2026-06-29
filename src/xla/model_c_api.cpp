@@ -23,6 +23,22 @@ struct vgre_bpe {
     BpeTokenizer tok;
 };
 
+// Cluster collectives (resolved within libvgre). When a cluster is connected
+// (world>1), average the model's gradients across nodes so the LanguageModel
+// trains data-parallel across a CPU cluster; single-node it is skipped.
+extern "C" int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype);
+extern "C" int vgre_cluster_world_size(void);
+static void all_reduce_lm_grads(model::GPT& g) {
+    const int world = vgre_cluster_world_size();
+    if (world <= 1) return;
+    const float inv = 1.0f / (float)world;
+    for (auto& p : g.parameters()) {
+        if (p->grad.empty()) continue;
+        vgre_cluster_all_reduce(p->grad.data(), p->grad.size(), 3 /*FLOAT32*/);
+        for (float& gr : p->grad) gr *= inv;
+    }
+}
+
 extern "C" {
 
 vgre_lm* vgre_lm_create(int vocab, int n_layer, int d_model, int n_head,
@@ -66,6 +82,7 @@ float vgre_lm_train_step(vgre_lm* m, const int* ids, const int* tgt, int T, floa
         m->opt->zero_grad();
         autograd::Var loss = autograd::softmax_cross_entropy(m->gpt->forward(v_ids), v_tgt);
         autograd::backward(loss);
+        all_reduce_lm_grads(*m->gpt);                 // cluster grad sync (no-op single-node)
         optim::clip_grad_norm(m->gpt->parameters(), 1.0f);
         m->opt->step();
         return loss->data[0];
@@ -88,6 +105,7 @@ void vgre_lm_optim_step(vgre_lm* m, float lr, float clip) {
     if (!m) return;
     try {
         m->opt->set_lr(lr);
+        all_reduce_lm_grads(*m->gpt);                 // cluster grad sync (no-op single-node)
         if (clip > 0.0f) optim::clip_grad_norm(m->gpt->parameters(), clip);
         m->opt->step();
         m->opt->zero_grad();
