@@ -947,6 +947,15 @@ target_link_libraries(test_gspmd PRIVATE vgre Threads::Threads)
 add_test(NAME XlaGspmd COMMAND test_gspmd)
 set_tests_properties(XlaGspmd PROPERTIES TIMEOUT 30)
 
+# Lightweight libvgre_nn distributed collective: real 2-process TCP all-reduce
+# (cluster_collective.cpp), proving the LLVM-free ML library is not single-node.
+if(TARGET vgre_nn)
+    add_executable(test_cluster_collective xla/test_cluster_collective.cpp)
+    target_link_libraries(test_cluster_collective PRIVATE vgre_nn Threads::Threads)
+    add_test(NAME XlaClusterCollective COMMAND test_cluster_collective)
+    set_tests_properties(XlaClusterCollective PROPERTIES TIMEOUT 30)
+endif()
+
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
 target_link_libraries(test_perf_analytics PRIVATE vgre)
