@@ -181,6 +181,16 @@ int main() {
         return mean(mul(o, o));
     });
 
+    // 8a2. Batched multi-head causal attention (Q,K,V [B=2,T=4,H*Dh=6], H=2)
+    checkGrads("attention(batched)", {
+        make({2, 4, 6}, randn(48, 28), true),
+        make({2, 4, 6}, randn(48, 29), true),
+        make({2, 4, 6}, randn(48, 30), true),
+    }, [](const std::vector<Var>& p) {
+        Var o = attention(p[0], p[1], p[2], /*num_heads=*/2, /*causal=*/true);
+        return mean(mul(o, o));
+    });
+
     // 8b. Flash attention: gradients match finite differences ...
     checkGrads("flash_attention", {
         make({4, 6}, randn(24, 25), true),

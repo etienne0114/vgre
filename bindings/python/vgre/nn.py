@@ -324,6 +324,13 @@ class Linear(Module):
         self.b = tensor(np.zeros(out_features), requires_grad=True) if bias else None
 
     def forward(self, x):
+        s = x.shape
+        if len(s) == 3:                       # [B,T,D]: flatten → matmul → reshape
+            flat = reshape(x, (s[0] * s[1], s[2]))
+            y = matmul(flat, self.W)
+            if self.b is not None:
+                y = add(y, self.b)            # [B*T,O]+[O] bias broadcast (2-D)
+            return reshape(y, (s[0], s[1], self.W.shape[1]))
         y = matmul(x, self.W)
         return add(y, self.b) if self.b is not None else y
 

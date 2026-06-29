@@ -292,11 +292,13 @@ Var tanh_(const Var& x) {
 
 // ── RMSNorm over last dim of x[M,D]; y = x / rms(x) * weight ──────────────────
 Var rms_norm(const Var& x, const Var& weight, float eps) {
-    if (x->shape.size() != 2) throw std::runtime_error("rms_norm: x must be [M,D]");
-    const int64_t M = x->shape[0], D = x->shape[1];
+    if (x->shape.size() != 2 && x->shape.size() != 3)
+        throw std::runtime_error("rms_norm: x must be rank-2 [M,D] or rank-3 [B,T,D]");
+    const int64_t D = x->shape.back();          // normalize over the last dim
+    const int64_t M = x->size() / D;            // leading dims fold into rows
     if (weight->shape.size() != 1 || weight->shape[0] != D)
         throw std::runtime_error("rms_norm: weight must be [D]");
-    Var out = newNode({M, D}, {x, weight}, anyReq({&x, &weight}));
+    Var out = newNode(x->shape, {x, weight}, anyReq({&x, &weight}));
     std::vector<float> inv(M);  // 1/rms per row
     for (int64_t i = 0; i < M; ++i) {
         float ss = 0.0f;
@@ -331,12 +333,14 @@ Var rms_norm(const Var& x, const Var& weight, float eps) {
 
 // ── LayerNorm over last dim of x[M,D]; y = (x-µ)/√(σ²+eps) * w + b ────────────
 Var layer_norm(const Var& x, const Var& weight, const Var& bias, float eps) {
-    if (x->shape.size() != 2) throw std::runtime_error("layer_norm: x must be [M,D]");
-    const int64_t M = x->shape[0], D = x->shape[1];
+    if (x->shape.size() != 2 && x->shape.size() != 3)
+        throw std::runtime_error("layer_norm: x must be rank-2 [M,D] or rank-3 [B,T,D]");
+    const int64_t D = x->shape.back();
+    const int64_t M = x->size() / D;
     if (weight->shape.size() != 1 || weight->shape[0] != D ||
         bias->shape.size() != 1 || bias->shape[0] != D)
         throw std::runtime_error("layer_norm: weight/bias must be [D]");
-    Var out = newNode({M, D}, {x, weight, bias}, anyReq({&x, &weight, &bias}));
+    Var out = newNode(x->shape, {x, weight, bias}, anyReq({&x, &weight, &bias}));
     std::vector<float> mu(M), inv(M);                  // mean, 1/√(var+eps) per row
     std::vector<float> xhat((size_t)M * D);            // normalized, cached
     for (int64_t i = 0; i < M; ++i) {
@@ -378,31 +382,37 @@ Var layer_norm(const Var& x, const Var& weight, const Var& bias, float eps) {
     return out;
 }
 
-// ── RoPE on x[T, H*Dh]: rotate dim-pairs by angle (pos · base^(-2i/Dh)) ───────
+// ── RoPE on x[T,H*Dh] or [B,T,H*Dh]: rotate dim-pairs by angle pos·base^(-2i/Dh)
 Var rope(const Var& x, int num_heads, float base) {
-    if (x->shape.size() != 2) throw std::runtime_error("rope: x must be [T, H*Dh]");
-    const int64_t T = x->shape[0], D = x->shape[1];
+    if (x->shape.size() != 2 && x->shape.size() != 3)
+        throw std::runtime_error("rope: x must be [T,H*Dh] or [B,T,H*Dh]");
+    const bool batched = x->shape.size() == 3;
+    const int64_t B = batched ? x->shape[0] : 1;
+    const int64_t T = x->shape[batched ? 1 : 0];
+    const int64_t D = x->shape[batched ? 2 : 1];
     const int64_t Dh = D / num_heads;
     if (Dh * num_heads != D || (Dh & 1)) throw std::runtime_error("rope: bad head_dim");
-    Var out = newNode({T, D}, {x}, x->requires_grad);
+    Var out = newNode(x->shape, {x}, x->requires_grad);
     const int64_t half = Dh / 2;
-    for (int64_t t = 0; t < T; ++t)
-        for (int h = 0; h < num_heads; ++h) {
-            const int64_t off = t * D + (int64_t)h * Dh;
-            for (int64_t i = 0; i < half; ++i) {
-                const float theta = (float)t * std::pow(base, -2.0f * (float)i / (float)Dh);
-                const float cs = std::cos(theta), sn = std::sin(theta);
-                const float a = x->data[off + 2 * i], b = x->data[off + 2 * i + 1];
-                out->data[off + 2 * i]     = a * cs - b * sn;
-                out->data[off + 2 * i + 1] = a * sn + b * cs;
-            }
-        }
-    Node* op = out.get(); Var X = x;
-    out->backward_fn = [op, X, T, D, Dh, num_heads, half, base]() {
-        if (!X->requires_grad) return;
+    for (int64_t b = 0; b < B; ++b)
         for (int64_t t = 0; t < T; ++t)
             for (int h = 0; h < num_heads; ++h) {
-                const int64_t off = t * D + (int64_t)h * Dh;
+                const int64_t off = (b * T + t) * D + (int64_t)h * Dh;
+                for (int64_t i = 0; i < half; ++i) {
+                    const float theta = (float)t * std::pow(base, -2.0f * (float)i / (float)Dh);
+                    const float cs = std::cos(theta), sn = std::sin(theta);
+                    const float a = x->data[off + 2 * i], bb = x->data[off + 2 * i + 1];
+                    out->data[off + 2 * i]     = a * cs - bb * sn;
+                    out->data[off + 2 * i + 1] = a * sn + bb * cs;
+                }
+            }
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, B, T, D, Dh, num_heads, half, base]() {
+        if (!X->requires_grad) return;
+        for (int64_t b = 0; b < B; ++b)
+        for (int64_t t = 0; t < T; ++t)
+            for (int h = 0; h < num_heads; ++h) {
+                const int64_t off = (b * T + t) * D + (int64_t)h * Dh;
                 for (int64_t i = 0; i < half; ++i) {
                     const float theta = (float)t * std::pow(base, -2.0f * (float)i / (float)Dh);
                     const float cs = std::cos(theta), sn = std::sin(theta);
@@ -417,30 +427,35 @@ Var rope(const Var& x, int num_heads, float base) {
 }
 
 // ── Multi-head scaled-dot-product attention (optionally causal) ──────────────
+// Accepts rank-2 [T, H*Dh] (single sequence) or rank-3 [B, T, H*Dh] (batched);
+// the batch dim folds into an outer loop so the per-(batch,head) math is shared.
 Var attention(const Var& q, const Var& k, const Var& v, int num_heads, bool causal) {
-    if (q->shape.size() != 2 || q->shape != k->shape || q->shape != v->shape)
-        throw std::runtime_error("attention: Q/K/V must share shape [T, H*Dh]");
-    const int64_t T = q->shape[0], D = q->shape[1];
+    if ((q->shape.size() != 2 && q->shape.size() != 3) || q->shape != k->shape || q->shape != v->shape)
+        throw std::runtime_error("attention: Q/K/V must share shape [T,H*Dh] or [B,T,H*Dh]");
+    const bool batched = q->shape.size() == 3;
+    const int64_t B  = batched ? q->shape[0] : 1;
+    const int64_t T  = q->shape[batched ? 1 : 0];
+    const int64_t D  = q->shape[batched ? 2 : 1];
     const int64_t Dh = D / num_heads;
     if (Dh * num_heads != D) throw std::runtime_error("attention: bad head_dim");
     const float scale = 1.0f / std::sqrt((float)Dh);
 
-    Var out = newNode({T, D}, {q, k, v}, anyReq({&q, &k, &v}));
-    // Cache the per-head softmax probs P[h][T*T] for backward.
-    auto P = std::make_shared<std::vector<float>>((size_t)num_heads * T * T, 0.0f);
+    Var out = newNode(q->shape, {q, k, v}, anyReq({&q, &k, &v}));
+    // Per (batch,head) softmax probs cached for backward.
+    auto P = std::make_shared<std::vector<float>>((size_t)B * num_heads * T * T, 0.0f);
 
     std::vector<float> Qh(T * Dh), Kh(T * Dh), Vh(T * Dh), S(T * T), Oh(T * Dh);
+    for (int64_t b = 0; b < B; ++b)
     for (int h = 0; h < num_heads; ++h) {
-        const int64_t col = (int64_t)h * Dh;
+        const int64_t col = b * T * D + (int64_t)h * Dh;     // base offset into [B,T,D]
         for (int64_t t = 0; t < T; ++t)
             for (int64_t d = 0; d < Dh; ++d) {
-                Qh[t * Dh + d] = q->data[t * D + col + d];
-                Kh[t * Dh + d] = k->data[t * D + col + d];
-                Vh[t * Dh + d] = v->data[t * D + col + d];
+                Qh[t * Dh + d] = q->data[col + t * D + d];
+                Kh[t * Dh + d] = k->data[col + t * D + d];
+                Vh[t * Dh + d] = v->data[col + t * D + d];
             }
-        // S = scale * Qh · Khᵀ
         intree::gemm_f32_rows(false, true, T, T, Dh, Qh.data(), Kh.data(), S.data(), 0, T);
-        float* Ph = P->data() + (size_t)h * T * T;
+        float* Ph = P->data() + ((size_t)b * num_heads + h) * T * T;
         for (int64_t i = 0; i < T; ++i) {
             const int64_t lim = causal ? i : (T - 1);
             float mx = -1e30f;
@@ -449,47 +464,43 @@ Var attention(const Var& q, const Var& k, const Var& v, int num_heads, bool caus
             for (int64_t j = 0; j <= lim; ++j) { float e = std::exp(S[i * T + j] - mx); Ph[i * T + j] = e; sum += e; }
             const float invs = 1.0f / sum;
             for (int64_t j = 0; j <= lim; ++j) Ph[i * T + j] *= invs;
-            for (int64_t j = lim + 1; j < T; ++j) Ph[i * T + j] = 0.0f;  // masked
+            for (int64_t j = lim + 1; j < T; ++j) Ph[i * T + j] = 0.0f;
         }
-        // Oh = Ph · Vh
         intree::gemm_f32_rows(false, false, T, Dh, T, Ph, Vh.data(), Oh.data(), 0, T);
         for (int64_t t = 0; t < T; ++t)
-            for (int64_t d = 0; d < Dh; ++d) out->data[t * D + col + d] = Oh[t * Dh + d];
+            for (int64_t d = 0; d < Dh; ++d) out->data[col + t * D + d] = Oh[t * Dh + d];
     }
 
     Node* op = out.get(); Var Q = q, K = k, V = v;
-    out->backward_fn = [op, Q, K, V, P, T, D, Dh, num_heads, scale]() {
+    out->backward_fn = [op, Q, K, V, P, B, T, D, Dh, num_heads, scale]() {
         std::vector<float> Qh(T * Dh), Kh(T * Dh), Vh(T * Dh), dO(T * Dh);
         std::vector<float> dV(T * Dh), dP(T * T), dS(T * T), dQ(T * Dh), dK(T * Dh);
+        for (int64_t b = 0; b < B; ++b)
         for (int h = 0; h < num_heads; ++h) {
-            const int64_t col = (int64_t)h * Dh;
-            const float* Ph = P->data() + (size_t)h * T * T;
+            const int64_t col = b * T * D + (int64_t)h * Dh;
+            const float* Ph = P->data() + ((size_t)b * num_heads + h) * T * T;
             for (int64_t t = 0; t < T; ++t)
                 for (int64_t d = 0; d < Dh; ++d) {
-                    Qh[t * Dh + d] = Q->data[t * D + col + d];
-                    Kh[t * Dh + d] = K->data[t * D + col + d];
-                    Vh[t * Dh + d] = V->data[t * D + col + d];
-                    dO[t * Dh + d] = op->grad[t * D + col + d];
+                    Qh[t * Dh + d] = Q->data[col + t * D + d];
+                    Kh[t * Dh + d] = K->data[col + t * D + d];
+                    Vh[t * Dh + d] = V->data[col + t * D + d];
+                    dO[t * Dh + d] = op->grad[col + t * D + d];
                 }
-            // dV = Pᵀ · dO
             intree::gemm_f32_rows(true, false, T, Dh, T, Ph, dO.data(), dV.data(), 0, T);
-            // dP = dO · Vhᵀ
             intree::gemm_f32_rows(false, true, T, T, Dh, dO.data(), Vh.data(), dP.data(), 0, T);
-            // dS = softmax-backward(P, dP), row-wise: dS_ij = P_ij(dP_ij - Σ_k P_ik dP_ik)
             for (int64_t i = 0; i < T; ++i) {
                 float dot = 0.0f;
                 for (int64_t j = 0; j < T; ++j) dot += Ph[i * T + j] * dP[i * T + j];
                 for (int64_t j = 0; j < T; ++j)
                     dS[i * T + j] = Ph[i * T + j] * (dP[i * T + j] - dot) * scale;
             }
-            // dQ = dS · K ; dK = dSᵀ · Q  (scale already folded into dS)
             intree::gemm_f32_rows(false, false, T, Dh, T, dS.data(), Kh.data(), dQ.data(), 0, T);
             intree::gemm_f32_rows(true, false, T, Dh, T, dS.data(), Qh.data(), dK.data(), 0, T);
             for (int64_t t = 0; t < T; ++t)
                 for (int64_t d = 0; d < Dh; ++d) {
-                    if (Q->requires_grad) Q->grad[t * D + col + d] += dQ[t * Dh + d];
-                    if (K->requires_grad) K->grad[t * D + col + d] += dK[t * Dh + d];
-                    if (V->requires_grad) V->grad[t * D + col + d] += dV[t * Dh + d];
+                    if (Q->requires_grad) Q->grad[col + t * D + d] += dQ[t * Dh + d];
+                    if (K->requires_grad) K->grad[col + t * D + d] += dK[t * Dh + d];
+                    if (V->requires_grad) V->grad[col + t * D + d] += dV[t * Dh + d];
                 }
         }
     };
