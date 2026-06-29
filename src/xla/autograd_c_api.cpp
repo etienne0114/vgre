@@ -15,6 +15,11 @@ using vgre::xla::optim::clip_grad_norm;
 
 #include <memory>
 
+// Cluster collectives (implemented in the api/advanced layer; resolved within
+// libvgre). Declared here to avoid a header dependency inversion.
+extern "C" int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype);
+extern "C" int vgre_cluster_world_size(void);
+
 // A handle is a heap-allocated Var (shared_ptr<Node>): copying it into op
 // results / the optimizer keeps the underlying node alive via reference counts.
 namespace {
@@ -65,6 +70,17 @@ vgre_ag vgre_ag_silu(vgre_ag x)               { try { return wrap(silu(ref(x)));
 vgre_ag vgre_ag_sigmoid(vgre_ag x)            { try { return wrap(sigmoid(ref(x))); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_tanh(vgre_ag x)               { try { return wrap(tanh_(ref(x))); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_mean(vgre_ag x)               { try { return wrap(mean(ref(x))); } catch (...) { return nullptr; } }
+
+// Tensor-parallel collective: forward sums across cluster ranks (the hook calls
+// the cluster all-reduce; single-node no-op), backward identity. The first call
+// installs the cluster transport as the autograd all-reduce hook.
+static void cluster_all_reduce_hook(float* data, int64_t count) {
+    if (data && count > 0) vgre_cluster_all_reduce(data, (size_t)count, 3 /*FLOAT32*/);
+}
+vgre_ag vgre_ag_all_reduce(vgre_ag x) {
+    set_all_reduce_hook(&cluster_all_reduce_hook);   // idempotent
+    try { return wrap(all_reduce(ref(x))); } catch (...) { return nullptr; }
+}
 vgre_ag vgre_ag_softmax(vgre_ag x)            { try { return wrap(softmax(ref(x))); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_transpose(vgre_ag x)          { try { return wrap(transpose(ref(x))); } catch (...) { return nullptr; } }
 vgre_ag vgre_ag_concat(vgre_ag a, vgre_ag b, int axis) { try { return wrap(concat(ref(a), ref(b), axis)); } catch (...) { return nullptr; } }
@@ -106,11 +122,6 @@ vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag beta,
 }
 
 void vgre_ag_backward(vgre_ag loss) { try { backward(ref(loss)); } catch (...) {} }
-
-// Cluster collectives (implemented in the api/advanced layer; resolved within
-// libvgre). Declared here to avoid a header dependency inversion.
-extern "C" int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype);
-extern "C" int vgre_cluster_world_size(void);
 
 void vgre_ag_all_reduce_grads(vgre_ag* params, int n) {
     try {

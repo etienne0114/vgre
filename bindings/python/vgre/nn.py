@@ -55,7 +55,7 @@ def _bind() -> None:
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V, V]; f.restype = V
     _lib.vgre_ag_scale.argtypes = [V, c.c_float]; _lib.vgre_ag_scale.restype = V
     _lib.vgre_ag_dropout.argtypes = [V, c.c_float]; _lib.vgre_ag_dropout.restype = V
-    for name in ("relu", "gelu", "silu", "sigmoid", "tanh", "mean", "softmax", "transpose"):
+    for name in ("relu", "gelu", "silu", "sigmoid", "tanh", "mean", "softmax", "transpose", "all_reduce"):
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V]; f.restype = V
     _lib.vgre_ag_concat.argtypes = [V, V, c.c_int]; _lib.vgre_ag_concat.restype = V
     _lib.vgre_ag_reshape.argtypes = [V, P(I64), c.c_int]; _lib.vgre_ag_reshape.restype = V
@@ -253,6 +253,11 @@ def sigmoid(x): return _unary("sigmoid", x)
 def tanh(x): return _unary("tanh", x)
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
+def all_reduce(x):
+    """Differentiable sum-all-reduce across cluster ranks (identity backward).
+    Tensor parallelism: a row-parallel layer is all_reduce(matmul(x_shard, W_shard))
+    where each rank holds only W_shard, so a layer too big for one node fits."""
+    return _unary("all_reduce", x)
 def transpose(x: Tensor) -> Tensor:
     """Swap the last two dims: [M,N]->[N,M] or [B,M,N]->[B,N,M]."""
     s = x.shape
