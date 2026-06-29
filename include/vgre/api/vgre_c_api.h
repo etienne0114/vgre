@@ -425,6 +425,12 @@ VGRE_EXPORT int vgre_credits_reset(void);
  */
 VGRE_EXPORT int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype);
 
+/**
+ * @brief Number of nodes participating in collectives (self + active peers, >=1).
+ *        Use it to average all-reduced (summed) gradients in data-parallel training.
+ */
+VGRE_EXPORT int vgre_cluster_world_size(void);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

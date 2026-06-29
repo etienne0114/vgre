@@ -543,6 +543,24 @@ int vgre_cluster_set_security(int enabled) {
   return to_status_tel(vgre::advanced::TCPClusterManager::instance().enableSecurity(enabled != 0));
 }
 
+// Sum-reduce `count` elements of `datatype` across all cluster nodes, in place
+// (the result is identical on every node). Over the TCP/RDMA transport. With no
+// peers connected this is a single-node no-op (sum over one). Previously the
+// header declared this but it had no definition — wiring it to the implemented
+// CollectiveOpsManager::allReduce.
+int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype) {
+  if (!ptr || count == 0) return VGRE_ERROR_INVALID_VALUE;
+  return to_status_tel(vgre::advanced::TCPClusterManager::instance().allReduce(
+      ptr, count, datatype, vgre::advanced::ReductionOp::Sum));
+}
+
+// Number of nodes participating in collectives (self + active peers; >= 1).
+// Lets data-parallel trainers average all-reduced gradients by the world size.
+int vgre_cluster_world_size(void) {
+  auto st = vgre::advanced::TCPClusterManager::instance().getMeshTopologyStatus();
+  return static_cast<int>(st.active_peers) + 1;
+}
+
 int vgre_cluster_get_security_info(vgre_security_info_t *info) {
   if (!info) return VGRE_ERROR_INVALID_VALUE;
 

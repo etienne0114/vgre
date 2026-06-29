@@ -278,8 +278,49 @@ def test_checkpoint() -> bool:
     return d < 1e-5 and fN < f0
 
 
+def test_distributed_dp() -> bool:
+    # Data-parallel correctness: averaging per-shard gradients == the full-batch
+    # gradient (because the loss is a mean). all_reduce_gradients does exactly
+    # this averaging across nodes, so distributed DP training matches single-node.
+    r = np.random.default_rng(0)
+    W = nn.tensor(r.standard_normal((6, 4)).astype(np.float32), requires_grad=True)
+    X = r.standard_normal((8, 6)).astype(np.float32)      # 8 samples
+    y = [int(v) for v in r.integers(0, 4, size=8)]
+
+    def grad_on(rows):
+        for p in [W]:
+            p.set_(p.numpy())                              # (no-op; keep value)
+        # zero grad via an optimizer-less reset: re-create not needed; use a step
+        # of all_reduce? simpler: read grads after a fresh backward on a clone.
+        Wc = nn.tensor(W.numpy(), requires_grad=True)
+        xb = nn.tensor(X[rows])
+        loss = nn.softmax_cross_entropy(nn.matmul(xb, Wc), [y[i] for i in rows])
+        loss.backward()
+        return Wc.grad()
+
+    g_full = grad_on(list(range(8)))
+    g_a = grad_on(list(range(0, 4)))
+    g_b = grad_on(list(range(4, 8)))
+    dp = 0.5 * (g_a + g_b)
+    diff = float(np.max(np.abs(g_full - dp)))
+
+    # Single-node all_reduce_gradients must be a no-op (world_size==1).
+    ws = nn.world_size()
+    Wn = nn.tensor(W.numpy(), requires_grad=True)
+    loss = nn.softmax_cross_entropy(nn.matmul(nn.tensor(X), Wn), y)
+    loss.backward()
+    before = Wn.grad().copy()
+    nn.all_reduce_gradients([Wn])
+    noop_diff = float(np.max(np.abs(before - Wn.grad())))
+
+    print(f"[distributed] world_size={ws}  DP-identity max|diff|={diff:.2e}  "
+          f"single-node all_reduce no-op diff={noop_diff:.2e}")
+    return diff < 1e-5 and noop_diff < 1e-6
+
+
 def main() -> int:
     ok = True
+    ok &= test_distributed_dp()
     ok &= test_checkpoint()
     ok &= test_sgd()
     ok &= test_dropout_and_tied()
