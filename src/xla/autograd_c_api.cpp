@@ -5,6 +5,8 @@
 #include "vgre/xla/optim.h"
 
 #include <algorithm>   // std::copy
+#include <exception>
+#include <string>
 #include <utility>     // std::move
 #include <vector>
 
@@ -14,6 +16,26 @@ using vgre::xla::optim::SGD;
 using vgre::xla::optim::clip_grad_norm;
 
 #include <memory>
+
+// ── Error reporting ─────────────────────────────────────────────────────────
+// The autograd/model C-ABI returns opaque handles (nullptr on failure) or void,
+// so exceptions must not cross the C boundary. Instead of swallowing them
+// silently — which would let a failed backward() corrupt training unnoticed —
+// each catch records the message in a thread-local string the caller can read
+// via vgre_ag_last_error(). model_c_api.cpp shares this sink through the
+// internal vgre_ag__set_error() symbol below.
+namespace {
+std::string& agLastError() { thread_local std::string e; return e; }
+}
+extern "C" const char* vgre_ag_last_error(void) { return agLastError().c_str(); }
+extern "C" void vgre_ag_clear_error(void) { agLastError().clear(); }
+extern "C" void vgre_ag__set_error(const char* msg) {
+    agLastError() = (msg && *msg) ? msg : "unknown error";
+}
+// Record the in-flight exception, then run the trailing statement (e.g. return).
+#define AG_CATCH(stmt)                                                       \
+    catch (const std::exception& ex) { vgre_ag__set_error(ex.what()); stmt; } \
+    catch (...) { vgre_ag__set_error("unknown error"); stmt; }
 
 // Cluster collectives (implemented in the api/advanced layer; resolved within
 // libvgre). Declared here to avoid a header dependency inversion.
@@ -45,7 +67,7 @@ vgre_ag vgre_ag_tensor(const int64_t* shape, int ndim, const float* data, int re
         Var v = make(s, requires_grad != 0);
         if (data) std::copy(data, data + v->size(), v->data.begin());
         return wrap(std::move(v));
-    } catch (...) { return nullptr; }
+    } AG_CATCH(return nullptr)
 }
 void    vgre_ag_free(vgre_ag t)   { delete reinterpret_cast<Var*>(t); }
 int64_t vgre_ag_size(vgre_ag t)   { return t ? ref(t)->size() : 0; }
@@ -57,19 +79,19 @@ void vgre_ag_get_data(vgre_ag t, float* out) { if (t && out) std::copy(ref(t)->d
 void vgre_ag_set_data(vgre_ag t, const float* in) { if (t && in) std::copy(in, in + ref(t)->size(), ref(t)->data.begin()); }
 void vgre_ag_get_grad(vgre_ag t, float* out) { if (t && out) std::copy(ref(t)->grad.begin(), ref(t)->grad.end(), out); }
 
-vgre_ag vgre_ag_matmul(vgre_ag a, vgre_ag b)  { try { return wrap(matmul(ref(a), ref(b))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_linear_tied(vgre_ag x, vgre_ag w) { try { return wrap(linear_tied(ref(x), ref(w))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_bmm(vgre_ag a, vgre_ag b) { try { return wrap(bmm(ref(a), ref(b))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_dropout(vgre_ag x, float p)   { try { return wrap(dropout(ref(x), p)); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_add(vgre_ag a, vgre_ag b)     { try { return wrap(add(ref(a), ref(b))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_mul(vgre_ag a, vgre_ag b)     { try { return wrap(mul(ref(a), ref(b))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_scale(vgre_ag a, float s)     { try { return wrap(scale(ref(a), s)); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_relu(vgre_ag x)               { try { return wrap(relu(ref(x))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_gelu(vgre_ag x)               { try { return wrap(gelu(ref(x))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_silu(vgre_ag x)               { try { return wrap(silu(ref(x))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_sigmoid(vgre_ag x)            { try { return wrap(sigmoid(ref(x))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_tanh(vgre_ag x)               { try { return wrap(tanh_(ref(x))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_mean(vgre_ag x)               { try { return wrap(mean(ref(x))); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_matmul(vgre_ag a, vgre_ag b)  { try { return wrap(matmul(ref(a), ref(b))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_linear_tied(vgre_ag x, vgre_ag w) { try { return wrap(linear_tied(ref(x), ref(w))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_bmm(vgre_ag a, vgre_ag b) { try { return wrap(bmm(ref(a), ref(b))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_dropout(vgre_ag x, float p)   { try { return wrap(dropout(ref(x), p)); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_add(vgre_ag a, vgre_ag b)     { try { return wrap(add(ref(a), ref(b))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_mul(vgre_ag a, vgre_ag b)     { try { return wrap(mul(ref(a), ref(b))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_scale(vgre_ag a, float s)     { try { return wrap(scale(ref(a), s)); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_relu(vgre_ag x)               { try { return wrap(relu(ref(x))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_gelu(vgre_ag x)               { try { return wrap(gelu(ref(x))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_silu(vgre_ag x)               { try { return wrap(silu(ref(x))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_sigmoid(vgre_ag x)            { try { return wrap(sigmoid(ref(x))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_tanh(vgre_ag x)               { try { return wrap(tanh_(ref(x))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_mean(vgre_ag x)               { try { return wrap(mean(ref(x))); } AG_CATCH(return nullptr) }
 
 // Tensor-parallel collective: forward sums across cluster ranks (the hook calls
 // the cluster all-reduce; single-node no-op), backward identity. The first call
@@ -79,32 +101,32 @@ static void cluster_all_reduce_hook(float* data, int64_t count) {
 }
 vgre_ag vgre_ag_all_reduce(vgre_ag x) {
     set_all_reduce_hook(&cluster_all_reduce_hook);   // idempotent
-    try { return wrap(all_reduce(ref(x))); } catch (...) { return nullptr; }
+    try { return wrap(all_reduce(ref(x))); } AG_CATCH(return nullptr)
 }
-vgre_ag vgre_ag_softmax(vgre_ag x)            { try { return wrap(softmax(ref(x))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_transpose(vgre_ag x)          { try { return wrap(transpose(ref(x))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_concat(vgre_ag a, vgre_ag b, int axis) { try { return wrap(concat(ref(a), ref(b), axis)); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_softmax(vgre_ag x)            { try { return wrap(softmax(ref(x))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_transpose(vgre_ag x)          { try { return wrap(transpose(ref(x))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_concat(vgre_ag a, vgre_ag b, int axis) { try { return wrap(concat(ref(a), ref(b), axis)); } AG_CATCH(return nullptr) }
 
 vgre_ag vgre_ag_reshape(vgre_ag x, const int64_t* shape, int ndim) {
-    try { return wrap(reshape(ref(x), std::vector<int64_t>(shape, shape + ndim))); } catch (...) { return nullptr; }
+    try { return wrap(reshape(ref(x), std::vector<int64_t>(shape, shape + ndim))); } AG_CATCH(return nullptr)
 }
 vgre_ag vgre_ag_softmax_cross_entropy(vgre_ag logits, const int* targets, int n) {
     try { return wrap(softmax_cross_entropy(ref(logits), std::vector<int>(targets, targets + n))); }
-    catch (...) { return nullptr; }
+    AG_CATCH(return nullptr)
 }
 vgre_ag vgre_ag_conv2d(vgre_ag input, vgre_ag weight, vgre_ag bias, int stride, int pad) {
     try { return wrap(conv2d(ref(input), ref(weight), bias ? ref(bias) : Var{}, stride, pad)); }
-    catch (...) { return nullptr; }
+    AG_CATCH(return nullptr)
 }
-vgre_ag vgre_ag_layer_norm(vgre_ag x, vgre_ag w, vgre_ag b, float eps) { try { return wrap(layer_norm(ref(x), ref(w), ref(b), eps)); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_rms_norm(vgre_ag x, vgre_ag w, float eps) { try { return wrap(rms_norm(ref(x), ref(w), eps)); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_embedding(vgre_ag w, const int* ids, int n) { try { return wrap(embedding(ref(w), std::vector<int>(ids, ids + n))); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_rope(vgre_ag x, int num_heads, float base) { try { return wrap(rope(ref(x), num_heads, base)); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal) { try { return wrap(attention(ref(q), ref(k), ref(v), num_heads, causal != 0)); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_flash_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal) { try { return wrap(flash_attention(ref(q), ref(k), ref(v), num_heads, causal != 0)); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_layer_norm(vgre_ag x, vgre_ag w, vgre_ag b, float eps) { try { return wrap(layer_norm(ref(x), ref(w), ref(b), eps)); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_rms_norm(vgre_ag x, vgre_ag w, float eps) { try { return wrap(rms_norm(ref(x), ref(w), eps)); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_embedding(vgre_ag w, const int* ids, int n) { try { return wrap(embedding(ref(w), std::vector<int>(ids, ids + n))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_rope(vgre_ag x, int num_heads, float base) { try { return wrap(rope(ref(x), num_heads, base)); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal) { try { return wrap(attention(ref(q), ref(k), ref(v), num_heads, causal != 0)); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_flash_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal) { try { return wrap(flash_attention(ref(q), ref(k), ref(v), num_heads, causal != 0)); } AG_CATCH(return nullptr) }
 
-vgre_ag vgre_ag_max_pool2d(vgre_ag x, int kernel, int stride) { try { return wrap(max_pool2d(ref(x), kernel, stride)); } catch (...) { return nullptr; } }
-vgre_ag vgre_ag_avg_pool2d(vgre_ag x, int kernel, int stride) { try { return wrap(avg_pool2d(ref(x), kernel, stride)); } catch (...) { return nullptr; } }
+vgre_ag vgre_ag_max_pool2d(vgre_ag x, int kernel, int stride) { try { return wrap(max_pool2d(ref(x), kernel, stride)); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_avg_pool2d(vgre_ag x, int kernel, int stride) { try { return wrap(avg_pool2d(ref(x), kernel, stride)); } AG_CATCH(return nullptr) }
 
 vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag beta,
                              float* running_mean, float* running_var, int channels,
@@ -118,10 +140,14 @@ vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag beta,
         std::copy(rm.begin(), rm.end(), running_mean);
         std::copy(rv.begin(), rv.end(), running_var);
         return wrap(std::move(out));
-    } catch (...) { return nullptr; }
+    } AG_CATCH(return nullptr)
 }
 
-void vgre_ag_backward(vgre_ag loss) { try { backward(ref(loss)); } catch (...) {} }
+void vgre_ag_backward(vgre_ag loss) {
+    agLastError().clear();   // so callers can detect failure of this void call
+    try { backward(ref(loss)); }
+    AG_CATCH()
+}
 
 void vgre_ag_all_reduce_grads(vgre_ag* params, int n) {
     try {
@@ -136,7 +162,7 @@ void vgre_ag_all_reduce_grads(vgre_ag* params, int n) {
                 for (float& g : p->grad) g *= inv;
             }
         }
-    } catch (...) {}
+    } AG_CATCH()
 }
 
 vgre_ag vgre_ag_checkpoint(vgre_ag_builder fn, void* user, vgre_ag* inputs, int n) {
@@ -159,7 +185,7 @@ vgre_ag vgre_ag_checkpoint(vgre_ag_builder fn, void* user, vgre_ag* inputs, int 
             return out;
         };
         return wrap(checkpoint(cppfn, ins));
-    } catch (...) { return nullptr; }
+    } AG_CATCH(return nullptr)
 }
 
 namespace {
@@ -177,7 +203,7 @@ vgre_ag_opt vgre_ag_adamw(vgre_ag* params, int n, float lr, float weight_decay) 
         o->params = collectParams(params, n);
         o->adam = std::make_unique<AdamW>(o->params, lr, 0.9f, 0.999f, 1e-8f, weight_decay);
         return reinterpret_cast<vgre_ag_opt>(o);
-    } catch (...) { return nullptr; }
+    } AG_CATCH(return nullptr)
 }
 vgre_ag_opt vgre_ag_sgd(vgre_ag* params, int n, float lr, float momentum, float weight_decay) {
     try {
@@ -185,7 +211,7 @@ vgre_ag_opt vgre_ag_sgd(vgre_ag* params, int n, float lr, float momentum, float 
         o->params = collectParams(params, n);
         o->sgd = std::make_unique<SGD>(o->params, lr, momentum, weight_decay);
         return reinterpret_cast<vgre_ag_opt>(o);
-    } catch (...) { return nullptr; }
+    } AG_CATCH(return nullptr)
 }
 void vgre_ag_opt_set_lr(vgre_ag_opt o, float lr) { if (o) opt(o)->set_lr(lr); }
 void vgre_ag_opt_step(vgre_ag_opt o, float clip)  { if (o) opt(o)->step(clip); }

@@ -18,6 +18,14 @@ extern "C" {
 typedef void* vgre_ag;        // an autograd tensor (node) handle
 typedef void* vgre_ag_opt;    // an optimizer handle
 
+// ── Error reporting ──────────────────────────────────────────────────────────
+// Ops return nullptr (handles) or a sentinel on failure; void calls (backward,
+// optimizer step) report through this thread-local channel. The string is empty
+// when the last operation on this thread succeeded. vgre_ag_clear_error() resets
+// it; vgre_ag_backward() clears it on entry so callers can detect its failure.
+VGRE_PUBLIC_API const char* vgre_ag_last_error(void);
+VGRE_PUBLIC_API void        vgre_ag_clear_error(void);
+
 // ── Construction / lifetime / accessors ──────────────────────────────────────
 VGRE_PUBLIC_API vgre_ag vgre_ag_tensor(const int64_t* shape, int ndim,
                                        const float* data, int requires_grad);
