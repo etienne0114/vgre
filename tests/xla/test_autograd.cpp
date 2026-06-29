@@ -301,6 +301,32 @@ int main() {
         if (!ok) ++g_fail;
     }
 
+    // 11. all_reduce gradient (single-node → identity, so backward is identity).
+    checkGrads("all_reduce", {
+        make({3, 4}, randn(12, 81), true),
+    }, [](const std::vector<Var>& p) {
+        Var a = all_reduce(p[0]);
+        return mean(mul(a, a));
+    });
+
+    // 12. Tensor-parallel (row-parallel) matmul identity: each rank computes
+    //     x_shard·W_shard over its contraction shard; summing the partials (what
+    //     all_reduce does across nodes) equals the full matmul. So a layer whose
+    //     weight is sharded across nodes produces the correct full output.
+    {
+        Var x0 = make({2, 3}, randn(6, 82), true), x1 = make({2, 3}, randn(6, 83), true);
+        Var W0 = make({3, 4}, randn(12, 84), true), W1 = make({3, 4}, randn(12, 85), true);
+        Var partials = add(matmul(x0, W0), matmul(x1, W1));         // Σ_shards
+        Var full = matmul(concat(x0, x1, 1), concat(W0, W1, 0));    // unsharded
+        double d = 0.0;
+        for (size_t i = 0; i < full->data.size(); ++i)
+            d = std::max(d, (double)std::fabs(partials->data[i] - full->data[i]));
+        bool ok = d < 1e-5;
+        std::printf("%s tensor-parallel row-matmul: shard-sum vs full max|diff|=%.2e\n",
+                    ok ? "[PASS]" : "[FAIL]", d);
+        if (!ok) ++g_fail;
+    }
+
     if (g_fail == 0) { std::printf("test_autograd: ALL CHECKS PASSED\n"); return 0; }
     std::printf("test_autograd: %d FAILURE(S)\n", g_fail);
     return 1;

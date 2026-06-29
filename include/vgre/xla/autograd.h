@@ -125,6 +125,19 @@ Var dropout(const Var& x, float p);
 // Seed `loss` (must be scalar) with grad 1 and back-propagate through the tape.
 void backward(const Var& loss);
 
+// ── Tensor/model parallelism ─────────────────────────────────────────────────
+// Differentiable all-reduce (sum across cluster ranks): forward sums x in place
+// across nodes, backward is identity (each rank's input contributed with weight
+// 1, and the summed output's grad is replicated). With no cluster (world=1) it
+// is a no-op. The reduction is performed by an injected hook so the autograd
+// engine stays decoupled from the transport layer.
+using AllReduceHook = void (*)(float* data, int64_t count);
+void set_all_reduce_hook(AllReduceHook fn);   // installed by the C-ABI/runtime
+Var all_reduce(const Var& x);
+// This is the one collective tensor/pipeline parallelism is built from:
+//   row-parallel linear:  y = all_reduce(matmul(x_shard, W_shard))   (W sharded by
+//   its contraction dim across ranks, so a layer too large for one node fits).
+
 // Gradient checkpointing: evaluate fn(inputs) but discard the segment's
 // intermediate activations, recomputing them during backward (trades compute
 // for memory). Output and gradients are identical to calling fn(inputs)

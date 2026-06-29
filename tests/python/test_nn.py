@@ -318,8 +318,27 @@ def test_distributed_dp() -> bool:
     return diff < 1e-5 and noop_diff < 1e-6
 
 
+def test_tensor_parallel() -> bool:
+    # Row-parallel (tensor) parallelism: the weight's contraction dim is sharded
+    # across ranks. Each rank computes x_shard·W_shard; all_reduce sums the
+    # partials into the full output. Verify the composition equals the unsharded
+    # matmul (world=1 → all_reduce is identity, so this is the in-process sum;
+    # on a cluster each rank holds ONE shard and all_reduce sums across nodes).
+    r = np.random.default_rng(0)
+    X = r.standard_normal((2, 6)).astype(np.float32)
+    W = r.standard_normal((6, 4)).astype(np.float32)
+    full = nn.matmul(nn.tensor(X), nn.tensor(W)).numpy()
+    parts = nn.add(
+        nn.all_reduce(nn.matmul(nn.tensor(X[:, :3]), nn.tensor(W[:3]))),
+        nn.all_reduce(nn.matmul(nn.tensor(X[:, 3:]), nn.tensor(W[3:]))))
+    d = float(np.max(np.abs(parts.numpy() - full)))
+    print(f"[tensor-parallel] row-parallel shard-sum vs full max|diff|={d:.2e}  ws={nn.world_size()}")
+    return d < 1e-5
+
+
 def main() -> int:
     ok = True
+    ok &= test_tensor_parallel()
     ok &= test_distributed_dp()
     ok &= test_checkpoint()
     ok &= test_sgd()

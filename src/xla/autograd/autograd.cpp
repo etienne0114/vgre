@@ -1066,6 +1066,26 @@ Var reshape(const Var& x, std::vector<int64_t> shape) {
     return out;
 }
 
+// ── Tensor/model parallelism: differentiable all-reduce ──────────────────────
+namespace {
+AllReduceHook g_all_reduce_hook = nullptr;   // injected by the runtime (cluster)
+}
+void set_all_reduce_hook(AllReduceHook fn) { g_all_reduce_hook = fn; }
+
+Var all_reduce(const Var& x) {
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    out->data = x->data;
+    if (g_all_reduce_hook) g_all_reduce_hook(out->data.data(), (int64_t)out->data.size());
+    // else: world=1, identity.
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X]() {
+        if (!X->requires_grad) return;
+        // d(Σ_r x_r)/dx_r = 1; the summed output's grad is replicated to each rank.
+        for (size_t i = 0; i < X->grad.size(); ++i) X->grad[i] += op->grad[i];
+    };
+    return out;
+}
+
 // ── Reverse-mode engine ──────────────────────────────────────────────────────
 namespace {
 // Run backprop from `root` (its grad already seeded) in reverse-topo order.

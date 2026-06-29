@@ -43,6 +43,9 @@ VGRE_PUBLIC_API vgre_ag vgre_ag_silu(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_sigmoid(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_tanh(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_mean(vgre_ag x);
+// Differentiable all-reduce (sum across cluster ranks; identity backward) — the
+// collective tensor/model parallelism is built from. Single-node is a no-op.
+VGRE_PUBLIC_API vgre_ag vgre_ag_all_reduce(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_softmax(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_transpose(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_concat(vgre_ag a, vgre_ag b, int axis);
