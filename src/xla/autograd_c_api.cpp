@@ -107,6 +107,29 @@ vgre_ag vgre_ag_batch_norm2d(vgre_ag x, vgre_ag gamma, vgre_ag beta,
 
 void vgre_ag_backward(vgre_ag loss) { try { backward(ref(loss)); } catch (...) {} }
 
+vgre_ag vgre_ag_checkpoint(vgre_ag_builder fn, void* user, vgre_ag* inputs, int n) {
+    try {
+        std::vector<Var> ins;
+        ins.reserve(n);
+        for (int i = 0; i < n; ++i) ins.push_back(ref(inputs[i]));
+        // Bridge the C builder callback to the C++ checkpoint's std::function:
+        // wrap each input Var in a temp handle, invoke fn, copy out the result Var,
+        // then free the temp handles (the callee must NOT free the inputs and must
+        // hand over the output handle — Python's wrapper releases ownership).
+        auto cppfn = [fn, user](const std::vector<Var>& vs) -> Var {
+            std::vector<vgre_ag> hs;
+            hs.reserve(vs.size());
+            for (const auto& v : vs) hs.push_back(reinterpret_cast<vgre_ag>(new Var(v)));
+            vgre_ag outh = fn(hs.data(), (int)hs.size(), user);
+            Var out = ref(outh);
+            for (auto h : hs) delete reinterpret_cast<Var*>(h);
+            delete reinterpret_cast<Var*>(outh);
+            return out;
+        };
+        return wrap(checkpoint(cppfn, ins));
+    } catch (...) { return nullptr; }
+}
+
 namespace {
 std::vector<Var> collectParams(vgre_ag* params, int n) {
     std::vector<Var> p; p.reserve(n);
