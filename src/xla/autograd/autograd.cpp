@@ -1067,18 +1067,22 @@ Var reshape(const Var& x, std::vector<int64_t> shape) {
 }
 
 // ── Reverse-mode engine ──────────────────────────────────────────────────────
-void backward(const Var& loss) {
-    if (loss->size() != 1) throw std::runtime_error("backward: loss must be scalar");
-
-    // Reverse-topological order via iterative post-order DFS over parents.
+namespace {
+// Run backprop from `root` (its grad already seeded) in reverse-topo order.
+// Traversal does not descend into `stops` and does not call their backward_fn —
+// they are treated as the segment's leaves (gradients accumulate INTO them).
+// This backs both the full backward() (empty stops) and checkpoint's bounded
+// recompute (stops = the checkpointed segment's inputs).
+void runBackward(Node* root, const std::unordered_set<Node*>& stops) {
     std::vector<Node*> order;
     std::unordered_set<Node*> visited;
     std::vector<std::pair<Node*, size_t>> stack;
-    stack.push_back({loss.get(), 0});
-    visited.insert(loss.get());
+    stack.push_back({root, 0});
+    visited.insert(root);
     while (!stack.empty()) {
         auto& [node, idx] = stack.back();
-        if (idx < node->parents.size()) {
+        const bool isStop = (node != root) && stops.count(node);
+        if (!isStop && idx < node->parents.size()) {
             Node* p = node->parents[idx].get();
             ++idx;
             if (p && visited.insert(p).second) stack.push_back({p, 0});
@@ -1087,10 +1091,42 @@ void backward(const Var& loss) {
             stack.pop_back();
         }
     }
-
-    loss->grad.assign(1, 1.0f);
     for (auto it = order.rbegin(); it != order.rend(); ++it)
-        if ((*it)->backward_fn) (*it)->backward_fn();
+        if (!stops.count(*it) && (*it)->backward_fn) (*it)->backward_fn();
+}
+}  // namespace
+
+void backward(const Var& loss) {
+    if (loss->size() != 1) throw std::runtime_error("backward: loss must be scalar");
+    loss->grad.assign(1, 1.0f);
+    runBackward(loss.get(), /*stops=*/{});
+}
+
+// ── Gradient checkpointing ───────────────────────────────────────────────────
+// Run `fn(inputs)` but DROP the segment's intermediate activations after forward;
+// recompute them in backward (trading compute for memory). Output matches
+// fn(inputs) exactly; gradients are identical. The recompute backprops only
+// within the segment, accumulating into the real `inputs`' grads.
+Var checkpoint(const std::function<Var(const std::vector<Var>&)>& fn,
+               const std::vector<Var>& inputs) {
+    Var fwd = fn(inputs);                 // forward value; this tape is discarded below
+    bool req = false;
+    for (auto& in : inputs) req = req || in->requires_grad;
+    Var out = newNode(fwd->shape, inputs, req);
+    out->data = fwd->data;                // keep ONLY the output activation
+    // `fwd` (and the segment's intermediates) are released when this returns.
+
+    Node* op = out.get();
+    std::vector<Var> ins = inputs;
+    auto fnCopy = fn;
+    out->backward_fn = [op, fnCopy, ins]() {
+        Var re = fnCopy(ins);             // recompute the segment (fresh tape)
+        re->grad = op->grad;              // seed with the incoming gradient
+        std::unordered_set<Node*> stops;
+        for (auto& in : ins) stops.insert(in.get());
+        runBackward(re.get(), stops);     // backprop within the segment → ins' grads
+    };
+    return out;
 }
 
 void zero_grad(const std::vector<Var>& params) {

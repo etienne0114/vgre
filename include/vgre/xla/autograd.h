@@ -124,6 +124,13 @@ Var dropout(const Var& x, float p);
 // ── Engine ───────────────────────────────────────────────────────────────────
 // Seed `loss` (must be scalar) with grad 1 and back-propagate through the tape.
 void backward(const Var& loss);
+
+// Gradient checkpointing: evaluate fn(inputs) but discard the segment's
+// intermediate activations, recomputing them during backward (trades compute
+// for memory). Output and gradients are identical to calling fn(inputs)
+// directly. Use it to wrap memory-heavy sub-networks (e.g. a transformer block).
+Var checkpoint(const std::function<Var(const std::vector<Var>&)>& fn,
+               const std::vector<Var>& inputs);
 // Reset gradients of the given parameters to zero (call before each step).
 void zero_grad(const std::vector<Var>& params);
 
