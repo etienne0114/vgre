@@ -3,6 +3,7 @@
  */
 
 #include "vgre/api/vgre_c_api.h"
+#include "vgre/runtime/gpu_thread_context.h"
 #include <atomic>
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/runtime/gpu_cache.h"
@@ -528,12 +529,12 @@ int vgre_set_service_mode(int is_master) {
 }
 
 int vgre_set_block_threads(int enabled) {
-  // Note: BlockWorkerPool::initialize() has already run at this point and will
-  // never re-read VGRE_BLOCK_THREADS, so calling setenv() here is both useless
-  // and unsafe (setenv reallocates environ without locking against concurrent
-  // getenv calls on other threads). This function is a no-op for now.
-  // Future: implement a thread-safe runtime flag if needed.
-  VGRE_LOG_INFO("VGRE", std::string("VGRE_BLOCK_THREADS set to ") + (enabled ? "1" : "0"));
+  // Flip the process-wide atomic that JIT-generated launchers consult on every
+  // launch (see vgre_jit_block_threads_enabled in gpu_thread_context.cpp).
+  // Takes effect immediately, including for already-compiled kernels.
+  vgre::runtime::vgre_jit_set_block_threads(enabled);
+  VGRE_LOG_INFO("VGRE", std::string("Block-threaded dispatch ") +
+                            (enabled ? "enabled" : "disabled") + " at runtime");
   return VGRE_SUCCESS;
 }
 

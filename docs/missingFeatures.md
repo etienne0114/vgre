@@ -104,7 +104,7 @@ The in-tree primitives already exist where applicable; only the externally-gated
 | 6.1 | Developer tools | CUDA-GDB-compatible debug stepping | a PTX/SASS single-step **interpreter** (the JIT compiles to native) — large self-contained build, a candidate future phase |
 | 6.2 | Documentation & training | enterprise runbooks, video/tutorial content | **content-team** work, not code |
 | 7.1 | Post-Blackwell (Rubin) | Rubin/HBM4 emulation | **unreleased** hardware, no public ISA |
-| 7.2 | Multi-vendor | Intel oneAPI (SYCL/DPC++), Apple Metal | those **SDKs / hardware** (AMD HIP/ROCm is built) |
+| 7.2 | Multi-vendor | Intel oneAPI (SYCL/DPC++), Apple Metal; hipBLAS/hipDNN library shims | those **SDKs / hardware** (AMD HIP core runtime — device mgmt, streams, events, memory, module load + JIT kernel launch — is built and tested end-to-end as of 2026-07-02; the ROC library shims above remain) |
 | 10.3 | Edge / CDN | physical edge nodes, CDN providers | external **infrastructure** (latency-aware routing is built) |
 
 **6.1 (CUDA-GDB) is the only purely-software item here** — a GDB remote-serial-protocol server over

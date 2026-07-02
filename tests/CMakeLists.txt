@@ -1028,6 +1028,14 @@ add_executable(test_ptx_fp8 api/test_ptx_fp8.cpp)
 target_link_libraries(test_ptx_fp8 PRIVATE vgre_cudart)
 add_test(NAME PTXFp8Translation COMMAND test_ptx_fp8)
 
+# ── HIP/ROCm compatibility layer (src/hip/hip_runtime.cpp) ───────────────────
+add_executable(test_hip_runtime api/test_hip_runtime.cpp)
+target_link_libraries(test_hip_runtime PRIVATE vgre_cudart)
+add_test(NAME HIPRuntimeLayer COMMAND test_hip_runtime)
+set_tests_properties(HIPRuntimeLayer PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+    TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+
 add_executable(test_sass_detection api/test_sass_detection.cpp)
 target_link_libraries(test_sass_detection PRIVATE vgre_cudart)
 add_test(NAME SASSDetection COMMAND test_sass_detection)
@@ -1508,6 +1516,14 @@ target_link_libraries(test_event_flags PRIVATE vgre)
 add_test(NAME EventFlags COMMAND test_event_flags)
 set_tests_properties(EventFlags PROPERTIES
     ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
+
+# ── Runtime block-threading toggle (vgre_set_block_threads is a real control) ─
+add_executable(test_block_threads_toggle unit/test_block_threads_toggle.cpp)
+target_link_libraries(test_block_threads_toggle PRIVATE vgre)
+add_test(NAME BlockThreadsToggle COMMAND test_block_threads_toggle)
+set_tests_properties(BlockThreadsToggle PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+    TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
 
 # ── QUEUE-57: cuSOLVER sygvd generalized eigenvalue ──────────────────────────
 add_executable(test_cusolver_sygvd api/test_cusolver_sygvd.cpp)

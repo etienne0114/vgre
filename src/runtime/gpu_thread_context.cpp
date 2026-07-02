@@ -3,6 +3,7 @@
 #include "vgre/core/cluster.h"
 #include "vgre/core/tmem.h"
 #include "vgre/compiler/wmma_emulation.h"   // tcgen05/wgmma shape helpers (MMA math)
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -81,6 +82,20 @@ int vgre_jit_block_barrier_reduce(int predicate, int op) {
   return GPUThreadContext::blockBarrierReduce(predicate, op);
 }
 
+
+// Process-wide block-threading flag. Seeded from VGRE_BLOCK_THREADS at engine
+// init; mutable at runtime via vgre_set_block_threads() (C API / Python).
+static std::atomic<int> g_blockThreadsEnabled{0};
+
+extern "C" VGRE_PUBLIC_API
+int vgre_jit_block_threads_enabled() {
+    return g_blockThreadsEnabled.load(std::memory_order_relaxed);
+}
+
+extern "C" VGRE_PUBLIC_API
+void vgre_jit_set_block_threads(int enabled) {
+    g_blockThreadsEnabled.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
 
 extern "C" VGRE_PUBLIC_API
 void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg) {

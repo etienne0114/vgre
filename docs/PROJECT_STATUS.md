@@ -1,8 +1,27 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-06-10 (Honest re-baseline: Phase-2 plan, cross-platform reality)  
-**Build Status (Linux)**: ✅ full `ctest` suite passing (198 tests) on x86-64 Linux  
-**Production Readiness**: **NOT YET — core-emulation stable on Linux, but five P0 gates remain** (no CI for Windows/macOS, no live `/metrics`, no health probes, no config validation, parallel-test flakiness). See `docs/implementationPlan.md` Phase 2 (Tracks 1–6).
+**Last Updated**: 2026-07-02 (audit re-verification: fresh Release rebuild, full suite green)  
+**Build Status (Linux)**: ✅ full `ctest` suite passing (**293 tests, `-j12`**) on x86-64 Linux  
+**Production Readiness**: core emulation is stable and verified on Linux. The
+single hard external blocker is **GitHub Actions billing** — every CI run since
+2026-06-22 fails at job start ("recent account payments have failed"), so the
+Windows/macOS matrix cannot execute and those platforms remain unverified in
+practice (their jobs are also `workflow_dispatch`-only). Fix billing, re-enable
+the push/PR triggers in `.github/workflows/ci.yml`, and get one green
+windows-2022 + macos-arm64 run before claiming those platforms.
+
+> **2026-07-02 audit deltas** (see git log for the commits):
+> - HIP/ROCm layer expanded from a 9-function memcpy veneer to the real core
+>   runtime surface (streams, events, async memory, device props/attrs, module
+>   load + JIT kernel launch), with an end-to-end numerically-verified test.
+> - `vgre_set_block_threads` was a logged no-op returning success; it is now a
+>   real runtime flag consulted by every JIT-generated launcher (tested).
+> - `cuModuleGetFunction` on a module whose image had no extractable source
+>   crashed the process inside ORC (uncaught `std::length_error`); foreign
+>   handles are now validated and return `CUDA_ERROR_INVALID_VALUE`.
+> - `getActiveKernelCount()` always returned 0 (counter never incremented);
+>   live and cumulative kernel-launch counters are now maintained and the gRPC
+>   `kernels_launched` metric reports the cumulative total.
 
 > **Correction (2026-06-10):** earlier revisions of this file claimed
 > "CI/CD-Ready", "validated across Linux, Windows, macOS", and "zero stubs".
