@@ -1684,6 +1684,31 @@ if(_vgre_nn_py)
             TIMEOUT 120
             SKIP_RETURN_CODE 77
         )
+
+        # Multi-step DP: 8 full train iterations across 2 real processes with
+        # AdamW state under gradient sync — catches cross-step drift and is
+        # checked against a single-process full-batch run of the same loop.
+        add_test(NAME PythonNnDistributedMultistep
+                 COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn_distributed_multistep.py)
+        set_tests_properties(PythonNnDistributedMultistep PROPERTIES
+            ENVIRONMENT "VGRE_IPC_MODE=OFF;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_NN_LIB=$<TARGET_FILE:vgre_nn>"
+            LABELS "python;e2e"
+            TIMEOUT 120
+            SKIP_RETURN_CODE 77
+        )
+
+        # Tensor parallelism across 2 real processes: sharded-weight forward
+        # reconstructs the full matmul via the TCP all_reduce, shard gradients
+        # match the row-blocks of the full gradient, and a sharded SGD run
+        # reassembles to the single-process full-model trajectory.
+        add_test(NAME PythonNnTensorParallel
+                 COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn_tensor_parallel.py)
+        set_tests_properties(PythonNnTensorParallel PROPERTIES
+            ENVIRONMENT "VGRE_IPC_MODE=OFF;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_NN_LIB=$<TARGET_FILE:vgre_nn>"
+            LABELS "python;e2e"
+            TIMEOUT 120
+            SKIP_RETURN_CODE 77
+        )
     endif()
 endif()
 
