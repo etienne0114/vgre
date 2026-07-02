@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Running CUDA Apps · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Running CUDA Apps.">
+<link rel="canonical" href="https://vgre.dev/docs/running-cuda.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link active" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
+  <main class="content">
+    <h1>Running CUDA Applications</h1><p class="lead">How VGRE intercepts and executes CUDA on the CPU.</p><h2>Execution model</h2><p>VGRE parses CUDA-C kernels through a Clang AST, lowers them to LLVM IR, and JIT-compiles to native code with <code>-O3 -march=native</code>. Kernel grids run on an OpenMP thread pool with SIMD vectorization; managed memory is backed by an OS page-fault handler.</p><h2>What works</h2><ul><li>CUDA Runtime API (~101 functions): memory, streams, events, graphs, textures/surfaces, cooperative launch, CDP.</li><li>CUDA Driver API (~56 functions): contexts, modules, PTX load + JIT link.</li><li>cuBLAS (L1/L2/L3, complex), cuDNN (conv/pool/norm/attention/RNN), cuFFT/cuRAND/cuSOLVER/cuSPARSE.</li><li>NCCL collectives (~95%) and OpenCL 1.2.</li><li>PTX ISA (~95% of common instructions), kernel fusion, persistent JIT cache.</li></ul><h2>Performance expectations</h2><p>CPU execution is typically 10–50× slower than a real GPU for compute-bound kernels; AVX-512 + OpenMP narrow the gap substantially for memory-bound work. Call <code>getMemoryBandwidthStats()</code> to measure your effective bandwidth and the estimated GPU speedup factor for your specific workload.</p><div class="callout tip"><div class="callout-title">Tip</div><p>Best fit: learning CUDA, CI/CD test runs, moderate vector/matrix/graph workloads, and distributed CPU-cluster compute. Not a replacement for a GPU on latency-critical, heavy-FLOP production inference.</p></div>
+    <div class="page-nav"><a href="installation.html"><div class="dir">← Previous</div><div class="ttl">Installation</div></a><a class="next" href="cluster.html"><div class="dir">Next →</div><div class="ttl">Distributed Clusters</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js"></script>
+<script src="assets/docs.js"></script>
+</body>
+</html>

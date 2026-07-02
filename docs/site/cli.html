@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLI Tools · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. CLI Tools.">
+<link rel="canonical" href="https://vgre.dev/docs/cli.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link active" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
+  <main class="content">
+    <h1>CLI Tools</h1><p class="lead">The command-line utilities installed with VGRE.</p><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody><tr><td><code>vgre-dashboard</code></td><td>Launch the real-time Flutter monitor.</td></tr><tr><td><code>vgre-start</code></td><td>Start a master or worker node (<code>--master</code> / <code>--worker</code> / <code>--test</code>).</td></tr><tr><td><code>vgre-token</code></td><td>Generate / set / fingerprint the shared cluster auth token.</td></tr><tr><td><code>vgre-discover</code></td><td>Public-IP discovery and cross-LAN registration.</td></tr><tr><td><code>vgre_ptx_gdbserver</code></td><td>Serve a PTX kernel to a stock gdb for step debugging.</td></tr><tr><td><code>gpt2_infer</code></td><td>Real GPT-2 inference from safetensors/GGUF (matches Hugging Face).</td></tr></tbody></table><h2>Examples</h2><pre><code class="lang-bash">vgre-start --test                       # local self-test
+vgre-token generate                     # new token + fingerprint
+vgre-discover --set-master              # publish public IP
+gpt2_infer model.safetensors --gen &#x27;Hello&#x27;</code></pre>
+    <div class="page-nav"><a href="api.html"><div class="dir">← Previous</div><div class="ttl">API Reference</div></a><a class="next" href="architecture.html"><div class="dir">Next →</div><div class="ttl">Architecture</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js"></script>
+<script src="assets/docs.js"></script>
+</body>
+</html>

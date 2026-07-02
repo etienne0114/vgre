@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Introduction · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Introduction.">
+<link rel="canonical" href="https://vgre.dev/docs/index.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link active" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
+  <main class="content">
+    <h1>VGRE — Virtual GPU Runtime</h1><p class="lead">Run unmodified CUDA on any CPU — no GPU required. Plus a full local-AI stack: train, fine-tune with LoRA, retrieve with an in-tree vector index, and generate — all offline, all dependency-free.</p><div class="badges"><span class="badge ok">Linux verified</span><span class="badge ok">300/300 tests</span><span class="badge ">CUDA ~95%</span><span class="badge ">PTX ~95%</span><span class="badge ok">Zero external vendor lock-in</span></div><p>VGRE intercepts CUDA and OpenCL API calls and executes kernels on the CPU using an LLVM ORC JIT, OpenMP + AVX2/AVX-512 SIMD, OS-level unified memory, and an authenticated TCP cluster transport. The same engine ships an in-tree machine-learning stack so you can go from CUDA experiments to real model training and RAG without a second toolchain.</p><div class="card-grid"><a class="card" href="quickstart.html"><div class="card-icon">🚀</div><h3>Quick Start</h3><p>Install and run your first CUDA program on CPU in five minutes.</p></a><a class="card" href="local-ai.html"><div class="card-icon">🧠</div><h3>Local AI</h3><p>LoRA fine-tuning, HNSW vector search, and the in-tree language model.</p></a><a class="card" href="cluster.html"><div class="card-icon">🔗</div><h3>Clusters</h3><p>Scale across machines over WAN with encrypted, authenticated channels.</p></a><a class="card" href="debugging.html"><div class="card-icon">🐞</div><h3>PTX Debugging</h3><p>Step through PTX kernels with a stock gdb — CUDA-GDB-style, no GPU.</p></a><a class="card" href="dashboard.html"><div class="card-icon">📊</div><h3>Dashboard</h3><p>Real-time telemetry, kernel explorer, cluster topology, memory analysis.</p></a><a class="card" href="api.html"><div class="card-icon">📚</div><h3>API Reference</h3><p>Python, C ABI, CUDA-runtime shim, and dashboard telemetry APIs.</p></a></div><h2>Why VGRE</h2><ul><li><strong>No GPU needed</strong> — learn CUDA, run CI, and develop on any x86-64 or ARM64 machine.</li><li><strong>One stack, both jobs</strong> — GPU emulation and a real ML training/inference/RAG stack in the same runtime.</li><li><strong>Built from scratch</strong> — the JIT, tokenizer, vector index, collectives, and crypto are in-tree, not third-party wrappers, so there is no vendor lock-in and no per-seat dependency cost.</li><li><strong>Private by default</strong> — the entire embed → index → retrieve → generate → fine-tune loop runs offline; your data never leaves the machine.</li></ul><div class="callout warn"><div class="callout-title">Warning</div><p>VGRE is <strong>Linux-verified</strong>. Windows and macOS are code-complete and compile-guarded but not yet CI-verified — treat them as experimental. See the <a href="faq.html">FAQ</a> for the current platform matrix.</p></div>
+    <div class="page-nav"><span></span><a class="next" href="quickstart.html"><div class="dir">Next →</div><div class="ttl">Quick Start</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js"></script>
+<script src="assets/docs.js"></script>
+</body>
+</html>

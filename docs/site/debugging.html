@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Debugging PTX (GDB) · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Debugging PTX (GDB).">
+<link rel="canonical" href="https://vgre.dev/docs/debugging.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link active" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
+  <main class="content">
+    <h1>Debugging PTX with GDB</h1><p class="lead">CUDA-GDB-style single-stepping through PTX kernels using a stock gdb — no GPU, no cuda-gdb install.</p><h2>How it works</h2><p>VGRE ships a PTX single-step interpreter and a GDB remote-serial-protocol server. Each CUDA thread appears as a GDB thread (a lane); the kernel's own virtual PTX registers are exposed to <code>info registers</code>; and breakpoints, <code>stepi</code>, and memory inspection all behave normally in an unmodified gdb.</p><h2>Start the stub</h2><pre><code class="lang-bash">vgre_ptx_gdbserver kernel.ptx saxpy 1 4 2000 \
+    f32:2.0 buf:f32:4=1,2,3,4 buf:f32:4=10,20,30,40 u32:4
+# prints the instruction listing, buffer addresses, and:
+#   gdb remote stub listening on 127.0.0.1:2000</code></pre><h2>Attach a normal gdb</h2><pre><code class="lang-bash">gdb -ex &#x27;target remote 127.0.0.1:2000&#x27;
+(gdb) info threads          # CUDA lanes of the running CTA
+(gdb) break *0x12           # breakpoint by instruction index
+(gdb) continue
+(gdb) info registers ptx_f4 rip
+(gdb) stepi
+(gdb) x/4fw 0x...           # read global memory</code></pre><div class="callout tip"><div class="callout-title">Tip</div><p>The interpreter covers the arithmetic/control/memory core nvcc emits for compute kernels, with <code>bar.sync</code>-aware lane scheduling. Verified end-to-end against a real gdb 15 client.</p></div>
+    <div class="page-nav"><a href="local-ai.html"><div class="dir">← Previous</div><div class="ttl">Local AI: LoRA · RAG · LM</div></a><a class="next" href="env-vars.html"><div class="dir">Next →</div><div class="ttl">Environment Variables</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js"></script>
+<script src="assets/docs.js"></script>
+</body>
+</html>
