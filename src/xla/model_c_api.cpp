@@ -171,12 +171,34 @@ void vgre_bpe_train(vgre_bpe* t, const char* corpus, int num_merges) {
     try { t->tok.train(std::string(corpus), num_merges); } LM_CATCH()
 }
 
-int vgre_bpe_vocab_size(const vgre_bpe* t) { return t ? t->tok.vocabSize() : 0; }
+int vgre_bpe_vocab_size(const vgre_bpe* t) {
+    if (!t) return 0;
+    return t->tok.hfReady() ? t->tok.hfVocabSize() : t->tok.vocabSize();
+}
+
+int vgre_bpe_load_hf(vgre_bpe* t, const char* tokenizer_json_path) {
+    if (!t || !tokenizer_json_path) return 0;
+    try { return t->tok.loadHf(std::string(tokenizer_json_path)) ? 1 : 0; } LM_CATCH(return 0)
+}
+
+int vgre_bpe_load_gpt2(vgre_bpe* t, const char* vocab_json_path, const char* merges_txt_path) {
+    if (!t || !vocab_json_path || !merges_txt_path) return 0;
+    try {
+        return t->tok.loadGpt2(std::string(vocab_json_path), std::string(merges_txt_path)) ? 1 : 0;
+    } LM_CATCH(return 0)
+}
+
+int vgre_bpe_special_id(const vgre_bpe* t, const char* content) {
+    if (!t || !content) return -1;
+    try { return t->tok.specialTokenId(std::string(content)); } LM_CATCH(return -1)
+}
 
 int vgre_bpe_encode(const vgre_bpe* t, const char* text, int* out, int max_out) {
     if (!t || !text || !out || max_out <= 0) return -1;
     try {
-        std::vector<int> ids = t->tok.encode(std::string(text));
+        std::vector<int> ids = t->tok.hfReady()   ? t->tok.encodeHf(std::string(text))
+                               : t->tok.gpt2Ready() ? t->tok.encodeGpt2(std::string(text))
+                                                    : t->tok.encode(std::string(text));
         const int n = (int)std::min<size_t>(ids.size(), (size_t)max_out);
         std::memcpy(out, ids.data(), sizeof(int) * (size_t)n);
         return n;
@@ -186,7 +208,10 @@ int vgre_bpe_encode(const vgre_bpe* t, const char* text, int* out, int max_out) 
 int vgre_bpe_decode(const vgre_bpe* t, const int* ids, int n, char* out, int max_out) {
     if (!t || !ids || n < 0 || !out || max_out <= 0) return -1;
     try {
-        std::string s = t->tok.decode(std::vector<int>(ids, ids + n));
+        std::vector<int> v(ids, ids + n);
+        std::string s = t->tok.hfReady()     ? t->tok.decodeHf(v)
+                        : t->tok.gpt2Ready() ? t->tok.decodeGpt2(v)
+                                             : t->tok.decode(v);
         const int len = (int)std::min<size_t>(s.size(), (size_t)(max_out - 1));
         std::memcpy(out, s.data(), (size_t)len);
         out[len] = '\0';

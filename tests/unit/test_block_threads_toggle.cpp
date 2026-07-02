@@ -10,6 +10,9 @@
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/runtime/gpu_thread_context.h"
 
+// Tests build in Release (-DNDEBUG); the flag-flip verification lives in
+// asserts — they must be real.
+#undef NDEBUG
 #include <cassert>
 #include <cstdio>
 #include <cstring>

@@ -70,6 +70,12 @@ def _bind() -> None:
     _lib.vgre_bpe_encode.restype = c.c_int
     _lib.vgre_bpe_decode.argtypes = [c.c_void_p, P(c.c_int), c.c_int, c.c_char_p, c.c_int]
     _lib.vgre_bpe_decode.restype = c.c_int
+    _lib.vgre_bpe_load_hf.argtypes = [c.c_void_p, c.c_char_p]
+    _lib.vgre_bpe_load_hf.restype = c.c_int
+    _lib.vgre_bpe_load_gpt2.argtypes = [c.c_void_p, c.c_char_p, c.c_char_p]
+    _lib.vgre_bpe_load_gpt2.restype = c.c_int
+    _lib.vgre_bpe_special_id.argtypes = [c.c_void_p, c.c_char_p]
+    _lib.vgre_bpe_special_id.restype = c.c_int
     _bound = True
 
 
@@ -97,6 +103,25 @@ class Tokenizer:
     def train(self, corpus: str, num_merges: int = 512) -> "Tokenizer":
         _lib.vgre_bpe_train(self._h, corpus.encode("utf-8"), int(num_merges))
         return self
+
+    def load_hf(self, tokenizer_json_path: str) -> "Tokenizer":
+        """Load a Hugging Face `tokenizer.json` (byte-level BPE family: GPT-2/
+        Whisper, Llama-3, Qwen, Phi, DeepSeek, …) incl. special tokens; encode/
+        decode then emit/consume that model's exact ids."""
+        if not _lib.vgre_bpe_load_hf(self._h, tokenizer_json_path.encode("utf-8")):
+            raise RuntimeError(f"could not load tokenizer.json from {tokenizer_json_path}")
+        return self
+
+    def load_gpt2(self, vocab_json_path: str, merges_txt_path: str) -> "Tokenizer":
+        """Load the two-file GPT-2 tokenizer form (vocab.json + merges.txt)."""
+        if not _lib.vgre_bpe_load_gpt2(self._h, vocab_json_path.encode("utf-8"),
+                                       merges_txt_path.encode("utf-8")):
+            raise RuntimeError("could not load GPT-2 vocab.json/merges.txt")
+        return self
+
+    def special_id(self, content: str) -> int:
+        """Id of an added/special token (e.g. '<|im_end|>'); -1 if absent."""
+        return int(_lib.vgre_bpe_special_id(self._h, content.encode("utf-8")))
 
     @property
     def vocab_size(self) -> int:

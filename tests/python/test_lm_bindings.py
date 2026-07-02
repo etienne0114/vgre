@@ -83,6 +83,25 @@ def main() -> int:
     assert gen == g2, "checkpoint reload must reproduce generation"
     print("[5] checkpoint round-trip OK")
 
+    # HF tokenizer.json binding (byte-level BPE family): exact ids vs the
+    # checked-in HF `tokenizers` reference, if the real fixture is present.
+    hf = os.path.expanduser("~/.vgre_cache/hf_gpt2/tokenizer.json")
+    if os.path.exists(hf):
+        import json
+        t2 = vgre.Tokenizer().load_hf(hf)
+        assert t2.vocab_size == 50257, "gpt2 vocab size via load_hf"
+        assert t2.special_id("<|endoftext|>") == 50256, "gpt2 special id"
+        with open(os.path.join(ROOT, "tests", "data",
+                               "hf_tokenizer_ref_gpt2.json")) as f:
+            ref = json.load(f)
+        for case in ref["cases"]:
+            got = t2.encode(case["text"])
+            assert got == case["ids"], f"HF id mismatch on {case['text']!r}"
+            assert t2.decode(got) == case["text"], "HF decode roundtrip"
+        print(f"[6] load_hf: {len(ref['cases'])} GPT-2 reference cases exact")
+    else:
+        print("[6] load_hf fixture absent — skipped")
+
     print("PASS — VGRE-LM Python bindings train, generate, and checkpoint")
     return 0
 

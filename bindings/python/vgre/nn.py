@@ -422,6 +422,99 @@ class Linear(Module):
         return add(y, self.b) if self.b is not None else y
 
 
+class LoRALinear(Module):
+    """Low-Rank Adaptation (LoRA, arXiv:2106.09685) over a frozen base weight:
+
+        y = x @ W_frozen [+ b_frozen] + (alpha/r) · (x @ A) @ B
+
+    Only A [in, r] and B [r, out] train — r·(in+out) parameters instead of
+    in·out — which is what makes fine-tuning practical on a CPU/laptop. B is
+    zero-initialized so training starts exactly at the base model. All compute
+    (the three matmuls and the backward) runs in the C++ autograd engine; this
+    class only composes existing differentiable ops.
+
+        layer = nn.LoRALinear(768, 768, r=8, alpha=16)          # fresh base
+        layer = nn.LoRALinear.from_linear(pretrained, r=8)      # adapt existing
+        opt   = nn.AdamW(layer.adapter_parameters(), lr=1e-3)   # train A,B only
+        layer.merge()      # fold the adapter into W for zero-overhead inference
+    """
+
+    def __init__(self, in_features: int, out_features: int, r: int = 8,
+                 alpha: float = 16.0, bias: bool = True, base_weight=None,
+                 base_bias=None):
+        if r <= 0:
+            raise ValueError("LoRA rank r must be positive")
+        # Frozen base (requires_grad=False → excluded from autograd updates).
+        w = _f32(base_weight) if base_weight is not None else \
+            _f32(rng.standard_normal((in_features, out_features)) *
+                 (2.0 / in_features) ** 0.5)
+        if w.shape != (in_features, out_features):
+            raise ValueError(f"base_weight must be [{in_features},{out_features}]")
+        self.W = tensor(w, requires_grad=False)
+        if bias:
+            b = _f32(base_bias) if base_bias is not None else np.zeros(out_features)
+            self.b = tensor(b, requires_grad=False)
+        else:
+            self.b = None
+        # Trainable adapter: A ~ N(0, 1/r) (standard LoRA init), B = 0 so the
+        # initial delta is exactly zero.
+        self.A = tensor(rng.standard_normal((in_features, r)) / float(r),
+                        requires_grad=True)
+        self.B = tensor(np.zeros((r, out_features)), requires_grad=True)
+        self.r = r
+        self.alpha = float(alpha)
+
+    @classmethod
+    def from_linear(cls, linear: "Linear", r: int = 8, alpha: float = 16.0) -> "LoRALinear":
+        """Wrap an existing Linear's weights as the frozen base."""
+        w = linear.W.numpy()
+        b = linear.b.numpy() if linear.b is not None else None
+        return cls(w.shape[0], w.shape[1], r=r, alpha=alpha,
+                   bias=b is not None, base_weight=w, base_bias=b)
+
+    @property
+    def scaling(self) -> float:
+        return self.alpha / self.r
+
+    def adapter_parameters(self) -> List["Tensor"]:
+        """The trainable tensors (A, B) — pass these to the optimizer."""
+        return [self.A, self.B]
+
+    def forward(self, x):
+        s = x.shape
+        if len(s) == 3:                       # [B,T,D]: flatten → compute → reshape
+            x2 = reshape(x, (s[0] * s[1], s[2]))
+            y2 = self._forward2d(x2)
+            return reshape(y2, (s[0], s[1], self.W.shape[1]))
+        return self._forward2d(x)
+
+    def _forward2d(self, x):
+        y = matmul(x, self.W)
+        delta = scale(matmul(matmul(x, self.A), self.B), self.scaling)
+        y = add(y, delta)
+        return add(y, self.b) if self.b is not None else y
+
+    def merge(self) -> None:
+        """Fold the adapter into the base weight (W += (alpha/r)·A@B) and reset
+        B to zero, so forward() is unchanged but the delta path contributes
+        nothing — zero-overhead inference after merging."""
+        self.W.set_(self.W.numpy() + self.scaling * (self.A.numpy() @ self.B.numpy()))
+        self.B.set_(np.zeros(self.B.shape, dtype=np.float32))
+
+    def save_adapter(self, path: str) -> None:
+        """Persist only the adapter (A, B, r, alpha) — kilobytes, not the model."""
+        np.savez(path, A=self.A.numpy(), B=self.B.numpy(),
+                 r=np.int64(self.r), alpha=np.float64(self.alpha))
+
+    def load_adapter(self, path: str) -> None:
+        d = np.load(path)
+        if int(d["r"]) != self.r:
+            raise ValueError(f"adapter rank {int(d['r'])} != layer rank {self.r}")
+        self.A.set_(d["A"])
+        self.B.set_(d["B"])
+        self.alpha = float(d["alpha"])
+
+
 class Conv2d(Module):
     def __init__(self, in_ch: int, out_ch: int, kernel: int, stride: int = 1,
                  pad: int = 0, bias: bool = True):

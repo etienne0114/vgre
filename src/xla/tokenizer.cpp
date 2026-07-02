@@ -14,10 +14,6 @@ namespace xla {
 
 namespace {
 inline bool isSpace(unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
-inline bool isAsciiLetter(unsigned char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
-inline bool isAsciiDigit(unsigned char c) { return c >= '0' && c <= '9'; }
-// GPT-2 \p{L}: ASCII letters plus any non-ASCII byte (UTF-8 letters stay together).
-inline bool isLetterByte(unsigned char c) { return isAsciiLetter(c) || c >= 0x80; }
 
 // Decode a UTF-8 string to codepoints.
 std::vector<int> utf8Decode(const std::string& s) {
@@ -35,6 +31,60 @@ std::vector<int> utf8Decode(const std::string& s) {
         i += len;
     }
     return cps;
+}
+
+// As above, but also records each codepoint's starting byte offset (plus a
+// final sentinel = text size) so pre-tokenized pieces can be sliced as bytes.
+void utf8DecodeOffsets(const std::string& s, std::vector<uint32_t>& cps,
+                       std::vector<size_t>& off) {
+    cps.clear();
+    off.clear();
+    size_t i = 0, n = s.size();
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        uint32_t cp;
+        int len;
+        if (c < 0x80) { cp = c; len = 1; }
+        else if ((c >> 5) == 0x6) { cp = c & 0x1F; len = 2; }
+        else if ((c >> 4) == 0xE) { cp = c & 0x0F; len = 3; }
+        else { cp = c & 0x07; len = 4; }
+        for (int k = 1; k < len && i + k < n; ++k)
+            cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+        cps.push_back(cp);
+        off.push_back(i);
+        i += (size_t)len;
+        if (i > n) i = n;
+    }
+    off.push_back(n);
+}
+
+// ── Codepoint classification: real UCD range tables (see the generator at
+// tools/gen_unicode_tables.py) — exact \p{L} / \p{N}, matching the regex
+// engines behind Hugging Face `tokenizers`. ────────────────────────────────
+struct CpRange { uint32_t lo, hi; };
+#include "vgre/xla/unicode_tables.inc"
+
+bool inRanges(uint32_t cp, const CpRange* r, size_t n) {
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (cp > r[mid].hi) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < n && cp >= r[lo].lo && cp <= r[lo].hi;
+}
+inline bool isUL(uint32_t cp) { return inRanges(cp, kUnicodeLetterRanges, kUnicodeLetterRangesCount); }
+inline bool isUN(uint32_t cp) { return inRanges(cp, kUnicodeNumberRanges, kUnicodeNumberRangesCount); }
+// Unicode White_Space (regex \s).
+inline bool isUWs(uint32_t cp) {
+    switch (cp) {
+        case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x20:
+        case 0x85: case 0xA0: case 0x1680: case 0x2028: case 0x2029:
+        case 0x202F: case 0x205F: case 0x3000:
+            return true;
+        default:
+            return cp >= 0x2000 && cp <= 0x200A;
+    }
 }
 }  // namespace
 
@@ -171,12 +221,14 @@ std::string BpeTokenizer::decode(const std::vector<int>& ids) const {
     return out;
 }
 
-// ── Real GPT-2 tokenizer ingestion ───────────────────────────────────────────
+// ── Real GPT-2 / Hugging Face tokenizer ingestion ────────────────────────────
 
-bool BpeTokenizer::loadGpt2(const std::string& vocabJsonPath, const std::string& mergesTxtPath) {
-    // GPT-2 byte→unicode table (bytes_to_unicode): printable byte ranges map to
-    // themselves; the rest map to 256+n. Build byte↔codepoint maps.
+// GPT-2 byte→unicode table (bytes_to_unicode): printable byte ranges map to
+// themselves; the rest map to 256+n. Builds the byte↔codepoint maps shared by
+// every byte-level BPE model (GPT-2, Llama-3, Qwen, …).
+void BpeTokenizer::buildByteLevelTable() {
     byteToCp_.assign(256, 0);
+    cpToByte_.clear();
     std::vector<int> bs;
     for (int b = '!'; b <= '~'; ++b) bs.push_back(b);
     for (int b = 0xA1; b <= 0xAC; ++b) bs.push_back(b);
@@ -188,16 +240,20 @@ bool BpeTokenizer::loadGpt2(const std::string& vocabJsonPath, const std::string&
     for (int b = 0; b < 256; ++b)
         if (!inBs[b]) { bs.push_back(b); cs.push_back(256 + n); ++n; }
     for (size_t i = 0; i < bs.size(); ++i) { byteToCp_[bs[i]] = cs[i]; cpToByte_[cs[i]] = bs[i]; }
+}
 
-    // Codepoints (a token string) → raw byte expansion.
-    auto cpsToBytes = [&](const std::string& s) {
-        std::string out;
-        for (int cp : utf8Decode(s)) {
-            auto it = cpToByte_.find(cp);
-            if (it != cpToByte_.end()) out += (char)(unsigned char)it->second;
-        }
-        return out;
-    };
+// Remapped codepoints (a token string as stored in vocab/merges) → raw bytes.
+std::string BpeTokenizer::cpsToBytes(const std::string& s) const {
+    std::string out;
+    for (int cp : utf8Decode(s)) {
+        auto it = cpToByte_.find(cp);
+        if (it != cpToByte_.end()) out += (char)(unsigned char)it->second;
+    }
+    return out;
+}
+
+bool BpeTokenizer::loadGpt2(const std::string& vocabJsonPath, const std::string& mergesTxtPath) {
+    buildByteLevelTable();
 
     // vocab.json: token(remapped) → id.
     std::ifstream vf(vocabJsonPath, std::ios::binary);
@@ -225,77 +281,335 @@ bool BpeTokenizer::loadGpt2(const std::string& vocabJsonPath, const std::string&
         merges.emplace_back(cpsToBytes(line.substr(0, sp)), cpsToBytes(line.substr(sp + 1)));
     }
     loadMerges(merges);
+    split_ = SplitRule{};  // GPT-2 pattern: exact-case contractions, ' ?' prefixes,
+                           // unbounded digit runs, plain punct, no newline rule
     gpt2_ = true;
     return true;
 }
 
-// GPT-2 pre-tokenization: contractions, ` ?\p{L}+`, ` ?\p{N}+`, ` ?[^\s\p{L}\p{N}]+`,
-// and whitespace runs (a single space attaches to the following word). ASCII-exact;
-// UTF-8 letters stay within a word via the >=0x80 rule.
-std::vector<std::vector<int>> BpeTokenizer::pretokenizeGpt2(const std::string& text) const {
+// Pre-tokenization: the model's split regex, executed codepoint-exactly.
+// GPT-2 (split_ defaults):
+//   's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
+// cl100k / Llama-3 / Qwen family (knobs from loadHf):
+//   (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}|
+//    ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+// Alternatives are tried in pattern order at each position, exactly like the
+// regex alternation; `\s+(?!\S)` leaves the run's last whitespace codepoint to
+// attach to the following token.
+std::vector<std::vector<int>> BpeTokenizer::pretokenizeMapped(const std::string& text) const {
+    std::vector<uint32_t> cps;
+    std::vector<size_t> off;
+    utf8DecodeOffsets(text, cps, off);
+    const size_t m = cps.size();
+
     std::vector<std::vector<int>> pieces;
-    const std::string& t = text;
-    size_t i = 0, n = t.size();
-    auto emit = [&](size_t a, size_t b) {
+    auto emit = [&](size_t a, size_t b) {  // codepoint indices [a, b)
         std::vector<int> p;
-        for (size_t k = a; k < b; ++k) p.push_back((unsigned char)t[k]);
+        p.reserve(off[b] - off[a]);
+        for (size_t k = off[a]; k < off[b]; ++k) p.push_back((unsigned char)text[k]);
         pieces.push_back(std::move(p));
     };
-    while (i < n) {
-        unsigned char c = (unsigned char)t[i];
-        // contractions: 's 't 're 've 'm 'll 'd
-        if (c == '\'' && i + 1 < n) {
-            std::string r = t.substr(i, std::min<size_t>(3, n - i));
-            const char* cons[] = {"'re", "'ve", "'ll", "'s", "'t", "'m", "'d"};
-            bool done = false;
-            for (const char* k : cons)
-                if (r.compare(0, std::string(k).size(), k) == 0) { emit(i, i + std::string(k).size()); i += std::string(k).size(); done = true; break; }
-            if (done) continue;
+
+    size_t i = 0;
+    while (i < m) {
+        uint32_t c = cps[i];
+
+        // 1. contractions: 's 't 're 've 'm 'll 'd (case-insensitive iff (?i:)).
+        if (c == '\'' && i + 1 < m) {
+            auto low = [&](uint32_t x) {
+                return (split_.ciContractions && x >= 'A' && x <= 'Z') ? x + 32 : x;
+            };
+            uint32_t c1 = low(cps[i + 1]);
+            uint32_t c2 = (i + 2 < m) ? low(cps[i + 2]) : 0;
+            size_t len = 0;
+            if ((c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') ||
+                (c1 == 'l' && c2 == 'l'))
+                len = 3;
+            else if (c1 == 's' || c1 == 't' || c1 == 'm' || c1 == 'd')
+                len = 2;
+            if (len) { emit(i, i + len); i += len; continue; }
         }
-        size_t start = i;
-        size_t k = i;
-        if (c == ' ' && i + 1 < n && !isSpace((unsigned char)t[i + 1])) k = i + 1;  // optional leading space
-        unsigned char d = (k < n) ? (unsigned char)t[k] : 0;
-        if (k < n && isLetterByte(d)) {
-            size_t j = k; while (j < n && isLetterByte((unsigned char)t[j])) ++j; emit(start, j); i = j;
-        } else if (k < n && isAsciiDigit(d)) {
-            size_t j = k; while (j < n && isAsciiDigit((unsigned char)t[j])) ++j; emit(start, j); i = j;
-        } else if (k < n && !isSpace(d)) {
-            size_t j = k; while (j < n && !isSpace((unsigned char)t[j]) && !isLetterByte((unsigned char)t[j]) && !isAsciiDigit((unsigned char)t[j])) ++j;
-            emit(start, j); i = j;
-        } else {  // whitespace run (\s+(?!\S)): a trailing space 0x20 before a word
-                  // is left for the next ` ?\X+` rule to attach to that word.
-            size_t j = i; while (j < n && isSpace((unsigned char)t[j])) ++j;
+
+        // 2. letters with an optional one-codepoint prefix:
+        //    GPT-2 ' ?\p{L}+' vs cl100k '[^\r\n\p{L}\p{N}]?\p{L}+'.
+        {
+            size_t k = i;
+            bool prefixOk = split_.anyLetterPrefix
+                                ? (!isUL(c) && !isUN(c) && c != '\r' && c != '\n')
+                                : (c == ' ');
+            if (prefixOk && i + 1 < m && isUL(cps[i + 1])) k = i + 1;
+            if (k < m && isUL(cps[k])) {
+                size_t j = k + 1;
+                while (j < m && isUL(cps[j])) ++j;
+                emit(i, j);
+                i = j;
+                continue;
+            }
+        }
+
+        // 3. digits: GPT-2 ' ?\p{N}+' vs cl100k '\p{N}{1,max}' (no prefix).
+        {
+            size_t k = i;
+            if (split_.digitMax == 0 && c == ' ' && i + 1 < m && isUN(cps[i + 1]))
+                k = i + 1;
+            if (k < m && isUN(cps[k])) {
+                size_t j = k + 1;
+                while (j < m && isUN(cps[j]) &&
+                       (split_.digitMax == 0 || j - k < (size_t)split_.digitMax))
+                    ++j;
+                emit(i, j);
+                i = j;
+                continue;
+            }
+        }
+
+        // 4. ' ?[^\s\p{L}\p{N}]+' with an optional '[\r\n]*' tail (cl100k).
+        {
+            size_t k = i;
+            if (c == ' ' && i + 1 < m) k = i + 1;
+            if (k < m && !isUWs(cps[k]) && !isUL(cps[k]) && !isUN(cps[k])) {
+                size_t j = k + 1;
+                while (j < m && !isUWs(cps[j]) && !isUL(cps[j]) && !isUN(cps[j])) ++j;
+                if (split_.punctNewlineTail)
+                    while (j < m && (cps[j] == '\r' || cps[j] == '\n')) ++j;
+                emit(i, j);
+                i = j;
+                continue;
+            }
+        }
+
+        // 5–7. whitespace: ['\s*[\r\n]+' |] '\s+(?!\S)' | '\s+'.
+        if (isUWs(c)) {
+            size_t j = i + 1;
+            while (j < m && isUWs(cps[j])) ++j;
+            if (split_.newlineRun) {
+                size_t lastNl = (size_t)-1;
+                for (size_t t2 = i; t2 < j; ++t2)
+                    if (cps[t2] == '\r' || cps[t2] == '\n') lastNl = t2;
+                if (lastNl != (size_t)-1) { emit(i, lastNl + 1); i = lastNl + 1; continue; }
+            }
             size_t end = j;
-            if (j < n && (unsigned char)t[j - 1] == ' ' && j - 1 > i) end = j - 1;
-            emit(i, end); i = end;
+            if (j < m && j - i >= 2) end = j - 1;  // \s+(?!\S): leave the last ws
+            emit(i, end);
+            i = end;
+            continue;
         }
+
+        emit(i, i + 1);  // unreachable in practice (rule 4 covers non-ws symbols)
+        ++i;
     }
     return pieces;
 }
 
-std::vector<int> BpeTokenizer::encodeGpt2(const std::string& text) const {
-    std::vector<int> ids;
-    for (auto& piece : pretokenizeGpt2(text)) {
+// BPE + model-vocab mapping over one specials-free segment.
+void BpeTokenizer::encodeMappedSegment(const std::string& segment, std::vector<int>& out) const {
+    for (auto& piece : pretokenizeMapped(segment)) {
         std::vector<int> p = piece;
         applyMerges(p);
         for (int internalId : p) {
             const std::string& bytes = vocab_[internalId];
             auto it = bytesToVocabId_.find(bytes);
-            if (it != bytesToVocabId_.end()) ids.push_back(it->second);
+            if (it != bytesToVocabId_.end()) out.push_back(it->second);
             else  // fallback: emit each byte's vocab id
                 for (unsigned char b : bytes) {
                     auto bi = bytesToVocabId_.find(std::string(1, (char)b));
-                    if (bi != bytesToVocabId_.end()) ids.push_back(bi->second);
+                    if (bi != bytesToVocabId_.end()) out.push_back(bi->second);
                 }
         }
     }
+}
+
+std::vector<int> BpeTokenizer::encodeGpt2(const std::string& text) const {
+    std::vector<int> ids;
+    encodeMappedSegment(text, ids);
     return ids;
 }
 
 std::string BpeTokenizer::decodeGpt2(const std::vector<int>& ids) const {
     std::string out;
     for (int id : ids) {
+        auto it = vocabIdToBytes_.find(id);
+        if (it != vocabIdToBytes_.end()) out += it->second;
+    }
+    return out;
+}
+
+// ── Unified Hugging Face tokenizer.json ──────────────────────────────────────
+
+namespace {
+
+// Known split patterns → knobs. Exact string match keeps this honest: an
+// unrecognized pattern fails loadHf instead of silently mis-tokenizing.
+const char* kPatGpt2 =
+    "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+";
+const char* kPatGpt2Alt =
+    "'(?:[sdmt]|ll|ve|re)| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+";
+const char* kPatCl100k =
+    "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| "
+    "?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+const char* kPatQwen =
+    "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| "
+    "?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+
+}  // namespace
+
+int BpeTokenizer::specialTokenId(const std::string& content) const {
+    for (const auto& sp : specials_)
+        if (sp.first == content) return sp.second;
+    return -1;
+}
+
+bool BpeTokenizer::loadHf(const std::string& tokenizerJsonPath) {
+    std::ifstream f(tokenizerJsonPath, std::ios::binary);
+    if (!f) return false;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    common::json::Value root;
+    if (!common::json::parse(ss.str(), root) || !root.isObject()) return false;
+
+    // model: must be BPE.
+    const common::json::Value* model = root.find("model");
+    if (!model || !model->isObject()) return false;
+    const common::json::Value* mtype = model->find("type");
+    if (mtype && mtype->asString("BPE") != "BPE") return false;
+
+    // normalizer: only the identity-on-NFC-text kinds these models use.
+    const common::json::Value* norm = root.find("normalizer");
+    if (norm && !norm->isNull()) {
+        std::string nt = norm->find("type") ? norm->find("type")->asString() : "";
+        if (nt != "NFC") return false;  // Metaspace/Prepend/… = SentencePiece → unsupported
+    }
+
+    // pre_tokenizer: must contain ByteLevel; may contain one Split pattern.
+    const common::json::Value* pre = root.find("pre_tokenizer");
+    if (!pre || pre->isNull()) return false;
+    bool byteLevel = false;
+    std::string splitPat;
+    auto scanPre = [&](const common::json::Value& p) {
+        std::string pt = p.find("type") ? p.find("type")->asString() : "";
+        if (pt == "ByteLevel") {
+            byteLevel = true;
+            if (p.find("add_prefix_space") && p.find("add_prefix_space")->asBool(false))
+                byteLevel = false;  // prefix-space models (RoBERTa-era) unsupported
+        } else if (pt == "Split") {
+            const common::json::Value* pat = p.find("pattern");
+            if (pat && pat->find("Regex")) splitPat = pat->find("Regex")->asString();
+        }
+    };
+    std::string preType = pre->find("type") ? pre->find("type")->asString() : "";
+    if (preType == "Sequence") {
+        const common::json::Value* subs = pre->find("pretokenizers");
+        if (!subs || !subs->isArray()) return false;
+        for (const auto& p : subs->arr) scanPre(p);
+    } else {
+        scanPre(*pre);
+    }
+    if (!byteLevel) return false;
+
+    SplitRule sr;  // ByteLevel's built-in regex = the GPT-2 pattern (defaults)
+    if (!splitPat.empty()) {
+        if (splitPat == kPatCl100k) {
+            sr.ciContractions = true; sr.anyLetterPrefix = true; sr.digitMax = 3;
+            sr.punctNewlineTail = true; sr.newlineRun = true;
+        } else if (splitPat == kPatQwen) {
+            sr.ciContractions = true; sr.anyLetterPrefix = true; sr.digitMax = 1;
+            sr.punctNewlineTail = true; sr.newlineRun = true;
+        } else if (splitPat == kPatGpt2 || splitPat == kPatGpt2Alt) {
+            sr = SplitRule{};
+        } else {
+            return false;  // unknown split family — refuse rather than approximate
+        }
+    }
+
+    buildByteLevelTable();
+    bytesToVocabId_.clear();
+    vocabIdToBytes_.clear();
+
+    // model.vocab: token(remapped) → id.
+    const common::json::Value* vocab = model->find("vocab");
+    if (!vocab || !vocab->isObject()) return false;
+    int maxId = -1;
+    for (const auto& kv : vocab->obj) {
+        int id = (int)kv.second.asNumber(-1);
+        if (id < 0) continue;
+        std::string bytes = cpsToBytes(kv.first);
+        bytesToVocabId_[bytes] = id;
+        vocabIdToBytes_[id] = bytes;
+        if (id > maxId) maxId = id;
+    }
+    if (maxId < 0) return false;
+
+    // model.merges: legacy "A B" strings or newer ["A","B"] pairs.
+    const common::json::Value* merges = model->find("merges");
+    if (!merges || !merges->isArray()) return false;
+    std::vector<std::pair<std::string, std::string>> ms;
+    ms.reserve(merges->arr.size());
+    for (const auto& mv : merges->arr) {
+        if (mv.isString()) {
+            size_t sp = mv.str.find(' ');
+            if (sp == std::string::npos) continue;
+            ms.emplace_back(cpsToBytes(mv.str.substr(0, sp)),
+                            cpsToBytes(mv.str.substr(sp + 1)));
+        } else if (mv.isArray() && mv.arr.size() == 2) {
+            ms.emplace_back(cpsToBytes(mv.arr[0].asString()),
+                            cpsToBytes(mv.arr[1].asString()));
+        }
+    }
+    loadMerges(ms);
+
+    // added_tokens: literal-match specials with reserved ids.
+    specials_.clear();
+    specialById_.clear();
+    const common::json::Value* added = root.find("added_tokens");
+    if (added && added->isArray()) {
+        for (const auto& tv : added->arr) {
+            const common::json::Value* content = tv.find("content");
+            const common::json::Value* idv = tv.find("id");
+            if (!content || !idv) continue;
+            int id = (int)idv->asNumber(-1);
+            if (content->str.empty() || id < 0) continue;
+            specials_.emplace_back(content->str, id);
+            specialById_[id] = content->str;
+            if (id > maxId) maxId = id;
+        }
+    }
+    std::sort(specials_.begin(), specials_.end(),
+              [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+
+    split_ = sr;
+    hfVocabSize_ = maxId + 1;
+    hf_ = true;
+    gpt2_ = false;
+    return true;
+}
+
+std::vector<int> BpeTokenizer::encodeHf(const std::string& text) const {
+    std::vector<int> ids;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        // Earliest special occurrence wins; specials_ is longest-first, so at
+        // equal positions the longest token matches (HF added-token semantics).
+        size_t best = std::string::npos, bi = 0;
+        for (size_t s = 0; s < specials_.size(); ++s) {
+            size_t at = text.find(specials_[s].first, pos);
+            if (at < best) { best = at; bi = s; }
+        }
+        if (best == std::string::npos) {
+            encodeMappedSegment(text.substr(pos), ids);
+            break;
+        }
+        if (best > pos) encodeMappedSegment(text.substr(pos, best - pos), ids);
+        ids.push_back(specials_[bi].second);
+        pos = best + specials_[bi].first.size();
+    }
+    return ids;
+}
+
+std::string BpeTokenizer::decodeHf(const std::vector<int>& ids) const {
+    std::string out;
+    for (int id : ids) {
+        auto sp = specialById_.find(id);
+        if (sp != specialById_.end()) { out += sp->second; continue; }
         auto it = vocabIdToBytes_.find(id);
         if (it != vocabIdToBytes_.end()) out += it->second;
     }

@@ -81,6 +81,16 @@ VGRE_PUBLIC_API vgre_bpe* vgre_bpe_create(void);
 VGRE_PUBLIC_API void      vgre_bpe_free(vgre_bpe* t);
 VGRE_PUBLIC_API void      vgre_bpe_train(vgre_bpe* t, const char* corpus, int num_merges);
 VGRE_PUBLIC_API int       vgre_bpe_vocab_size(const vgre_bpe* t);
+// Load a Hugging Face `tokenizer.json` (byte-level BPE family: GPT-2/Whisper,
+// Llama-3, Qwen, Phi, DeepSeek, …) including special tokens. After a successful
+// load, vgre_bpe_encode/decode emit/consume that model's exact ids. Returns 1
+// on success, 0 on failure (unsupported model type is a failure, not a guess).
+VGRE_PUBLIC_API int       vgre_bpe_load_hf(vgre_bpe* t, const char* tokenizer_json_path);
+// Load the two-file GPT-2 form (vocab.json + merges.txt). Returns 1/0.
+VGRE_PUBLIC_API int       vgre_bpe_load_gpt2(vgre_bpe* t, const char* vocab_json_path,
+                                             const char* merges_txt_path);
+// Id of an added/special token (e.g. "<|im_end|>") after load_hf; -1 if absent.
+VGRE_PUBLIC_API int       vgre_bpe_special_id(const vgre_bpe* t, const char* content);
 // Encode `text` to token ids; writes up to max_out ids; returns count (or -1).
 VGRE_PUBLIC_API int       vgre_bpe_encode(const vgre_bpe* t, const char* text,
                                           int* out, int max_out);
