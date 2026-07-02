@@ -935,6 +935,22 @@ target_link_libraries(test_tokenizer PRIVATE vgre)
 add_test(NAME XlaTokenizer COMMAND test_tokenizer)
 set_tests_properties(XlaTokenizer PROPERTIES TIMEOUT 30)
 
+# CUDA-GDB debug stepping (§6.1): PTX single-step interpreter (saxpy across
+# CTAs, bar.sync shared-memory reduction, breakpoint/step semantics) + the GDB
+# remote-serial-protocol server exercised over a real localhost socket.
+add_executable(test_ptx_debugger debug/test_ptx_debugger.cpp)
+target_link_libraries(test_ptx_debugger PRIVATE vgre Threads::Threads)
+add_test(NAME DebugPtxDebugger COMMAND test_ptx_debugger)
+set_tests_properties(DebugPtxDebugger PROPERTIES TIMEOUT 60)
+
+# Same stack driven by a real, unmodified gdb client in batch mode over TCP
+# (threads-as-lanes, break/continue/stepi, register + memory inspection).
+# Skips (77) when gdb is not installed.
+add_executable(test_gdb_client debug/test_gdb_client.cpp)
+target_link_libraries(test_gdb_client PRIVATE vgre Threads::Threads)
+add_test(NAME DebugGdbClient COMMAND test_gdb_client)
+set_tests_properties(DebugGdbClient PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+
 # Unified HF tokenizer.json engine: synthetic full-surface checks always run;
 # token-for-token parity vs the HF `tokenizers` reference ids (tests/data/)
 # runs when the real GPT-2/Qwen2.5 tokenizer files are present (else skip 77).

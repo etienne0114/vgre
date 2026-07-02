@@ -101,14 +101,14 @@ The in-tree primitives already exist where applicable; only the externally-gated
 | 4.2 | ML frameworks | device-level `jax.jit(backend='vgre')` PJRT plugin | needs upstream `pjrt_c_api.h` + MLIR C++ libs **not in the wheels** (StableHLO path already runs JAX/TF/PyTorch) |
 | 4.3 | Model serving | TensorRT-LLM / vLLM *compatibility layers*, A/B-canary rollout | those external **runtimes** / a live **fleet** (PagedAttention, continuous batching, generation are built) |
 | 5.3 | Multi-cloud | apply to live AWS/Azure/GCP, cross-cloud networking | cloud **accounts + credentials** (Terraform module is built + validated) |
-| 6.1 | Developer tools | CUDA-GDB-compatible debug stepping | a PTX/SASS single-step **interpreter** (the JIT compiles to native) — large self-contained build, a candidate future phase |
+| 6.1 | Developer tools | ~~CUDA-GDB-compatible debug stepping~~ **DONE 2026-07-02** | Built in-tree: `src/debug/ptx_interpreter.cpp` (PTX single-step interpreter: per-thread register files + PC, bar.sync-aware lane scheduling, real global/shared/param memory, instruction breakpoints) + `src/debug/gdb_rsp_server.cpp` (stock GDB remote-serial-protocol stub: tdesc with the kernel's own PTX registers, threads-as-lanes, Z0/s/c, memory R/W) + `tools/vgre_ptx_gdbserver` CLI. Verified with a **real unmodified gdb 15 client** end-to-end (break on a store, inspect `ptx_f4`/`rip`, watch memory flip across `stepi`, run to exit) — `DebugGdbClient` (skip-77 without gdb) + always-on `DebugPtxDebugger` (interpreter exactness incl. bar.sync tree reduction + raw RSP protocol with verified checksums). |
 | 6.2 | Documentation & training | enterprise runbooks, video/tutorial content | **content-team** work, not code |
 | 7.1 | Post-Blackwell (Rubin) | Rubin/HBM4 emulation | **unreleased** hardware, no public ISA |
 | 7.2 | Multi-vendor | Intel oneAPI (SYCL/DPC++), Apple Metal; hipBLAS/hipDNN library shims | those **SDKs / hardware** (AMD HIP core runtime — device mgmt, streams, events, memory, module load + JIT kernel launch — is built and tested end-to-end as of 2026-07-02; the ROC library shims above remain) |
 | 10.3 | Edge / CDN | physical edge nodes, CDN providers | external **infrastructure** (latency-aware routing is built) |
 
-**6.1 (CUDA-GDB) is the only purely-software item here** — a GDB remote-serial-protocol server over
-a PTX single-step interpreter. Everything else needs hardware, an account, an auditor, or content.
+**6.1 (CUDA-GDB) — the last purely-software item — was completed 2026-07-02** (see the table row).
+Everything else in this section needs hardware, an account, an auditor, or content.
 
 ---
 
@@ -152,9 +152,19 @@ The rewrite also made the two-file GPT-2 path regex-exact (the old byte-approxim
 mis-grouped mid-text `\n\n` runs and non-ASCII digit/symbol boundaries; cross-checked equal to
 the tokenizer.json path on the same corpus).
 
-**Optional in-tree polish** (not blocking; the existing paths already cover these):
-- a dedicated **fused flash-attention** kernel (the online-softmax algorithm is already in
-  `KVCacheManager::pagedAttention`; the BLAS GEMM path already makes attention matmuls fast).
+**Fused flash-attention — already done (stale entry removed 2026-07-02).** It exists at all
+three levels and is tested: the JIT-fused FA2 online-softmax kernel
+(`KernelFusionEngine::genFlashAttentionSource`, verified element-wise vs naive attention in
+`tests/integration/test_flash_attention.cpp`), the O(T)-memory autograd `flash_attention` with
+the FA2 recompute backward (`src/xla/autograd/autograd.cpp`, trained + generation-checked via
+`ModelConfig::flash_attention` in `test_model.cpp`), and the online-softmax
+`KVCacheManager::pagedAttention` inference path.
+
+**No optional in-tree polish items remain.** §6.1 (CUDA-GDB debug stepping) — previously the
+only purely-software track left — was completed 2026-07-02 (PTX single-step interpreter + GDB
+RSP stub + `vgre_ptx_gdbserver`, verified with a real gdb client). **Every remaining item in
+this file is blocked on something outside the code**: hardware, accounts, an auditor, gated
+downloads, or CI billing.
 
 Everything buildable in-tree to the real-no-stub standard is implemented and tested; the remaining
 items are environmental (a cluster, a gated download), not missing engine code.
