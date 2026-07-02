@@ -348,7 +348,9 @@ VGRE_EXPORT int vgre_set_service_mode(int is_master);
 
 /**
  * @brief Enables or disables per-block OS thread execution for __syncthreads correctness.
- * This toggles the VGRE_BLOCK_THREADS environment flag at runtime.
+ * Flips a process-wide runtime flag consulted by every kernel launch (initially
+ * seeded from the VGRE_BLOCK_THREADS configuration); takes effect immediately,
+ * including for kernels that were already JIT-compiled.
  */
 VGRE_EXPORT int vgre_set_block_threads(int enabled);
 

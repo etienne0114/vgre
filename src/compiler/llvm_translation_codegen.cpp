@@ -326,6 +326,7 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   oss << "  void vgre_jit_block_dispatch(int, void(*)(int, void*), void*);\n";
   oss << "  void vgre_jit_syncgrid();\n";
   oss << "  bool vgre_jit_in_threaded_context();\n";
+  oss << "  int vgre_jit_block_threads_enabled();\n";
   oss << "}\n\n";
   // Note: texture/surface builtins (vgre_tex1D_f32, vgre_tex2D_f32, etc.) are
   // already declared via the #include "vgre/compiler/cpu_cuda_env.h" above.
@@ -369,9 +370,11 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
   const bool usesMma = translatedSource.find("vgre_mma_") != std::string::npos
                     || translatedSource.find("vgre_wgmma_wg_") != std::string::npos;
 
-  // Helper: block-threading toggle (using cached host-side configuration)
+  // Helper: block-threading toggle — resolved at launch time through the
+  // JIT-registered runtime hook so vgre_set_block_threads() applies to
+  // already-compiled (and disk-cached) kernels.
   oss << "static inline bool vgre_block_threads_enabled() {\n";
-  oss << "  return " << (blockThreadsEnabled_ ? "true" : "false") << ";\n";
+  oss << "  return vgre_jit_block_threads_enabled() != 0;\n";
   oss << "}\n\n";
 
   oss << "extern \"C\" {\n";

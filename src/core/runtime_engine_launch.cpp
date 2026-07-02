@@ -363,9 +363,11 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
         }
     }
 
+    vgre::advanced::AdaptiveExecutionEngine::instance().kernelLaunchBegin();
     exec->execute(fn, effectiveGrid, effectiveBlock, safeArgs->data(),
                   totalSharedMem, flopsPerBlock, bytesPerBlock, gridOffset,
                   usesSyncthreads);
+    vgre::advanced::AdaptiveExecutionEngine::instance().kernelLaunchEnd();
 
     auto end = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(end - start).count();

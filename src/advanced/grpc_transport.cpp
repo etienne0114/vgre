@@ -207,7 +207,7 @@ public:
         resp->set_mem_utilization(total > 0 ? static_cast<float>(used) / total : 0.0f);
         resp->set_mem_used_bytes(used);
         resp->set_temperature_c(ae.getDeviceTemperature());
-        resp->set_kernels_launched(ae.getActiveKernelCount()); // approximating
+        resp->set_kernels_launched(ae.getTotalKernelsLaunched());
         
         return grpc::Status::OK;
     }
