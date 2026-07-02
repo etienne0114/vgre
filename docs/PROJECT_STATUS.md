@@ -22,6 +22,12 @@ windows-2022 + macos-arm64 run before claiming those platforms.
 > - `getActiveKernelCount()` always returned 0 (counter never incremented);
 >   live and cumulative kernel-launch counters are now maintained and the gRPC
 >   `kernels_launched` metric reports the cumulative total.
+> - Distributed-training verification deepened: multi-step (8-iteration)
+>   2-process data-parallel AdamW training (zero cross-step drift; matches the
+>   single-process full-batch trajectory) and cross-process tensor parallelism
+>   (sharded forward/backward + sharded SGD reassembling the full-model run)
+>   now run over the real TCP collective in CI-shaped tests
+>   (`PythonNnDistributedMultistep`, `PythonNnTensorParallel`).
 
 > **Correction (2026-06-10):** earlier revisions of this file claimed
 > "CI/CD-Ready", "validated across Linux, Windows, macOS", and "zero stubs".

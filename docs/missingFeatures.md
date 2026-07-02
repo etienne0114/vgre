@@ -121,7 +121,7 @@ remain, and both are **outside the code**:
 
 | Remaining | Why it isn't in-tree |
 |-----------|----------------------|
-| **Physical multi-node run** (Llama-3-70B tensor-parallel across N machines; 175B/405B pipeline) | The transport, NCCL-style + SoftwareRDMA collectives, the tensor/pipeline executor, and the GSPMD auto-partitioner are all built and verified over **real loopback sockets**. A true cross-machine run needs **actual networked machines**. |
+| **Physical multi-node run** (Llama-3-70B tensor-parallel across N machines; 175B/405B pipeline) | The transport, NCCL-style + SoftwareRDMA collectives, the tensor/pipeline executor, and the GSPMD auto-partitioner are all built and verified over **real loopback sockets**. As of 2026-07-02 the libvgre_nn stack is additionally verified across **real OS processes** over the TCP collective: multi-step (8-iteration) data-parallel AdamW training with zero cross-step drift and trajectory-equivalence to a single-process full-batch run (`PythonNnDistributedMultistep`), and cross-process tensor parallelism — sharded-weight forward reconstruction, row-block gradient correctness, and a sharded SGD+momentum run reassembling the full-model trajectory (`PythonNnTensorParallel`). A true cross-machine run needs **actual networked machines**. |
 | **Frontier-scale checkpoints** (Llama-3-8B/70B/405B, GPT-3) | Identical code path to the GPT-2 run already demonstrated end-to-end — it just needs a **license-gated, multi-GB download** (Llama-3 is gated; 8B is 16 GB bf16 / ~4.5 GB int4). |
 
 **Optional in-tree polish** (not blocking; the existing paths already cover these):
