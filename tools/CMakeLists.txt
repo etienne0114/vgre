@@ -25,6 +25,11 @@ target_link_libraries(quant_dequant PRIVATE vgre)
 add_executable(gptq_dequant gptq_dequant.cpp)
 target_link_libraries(gptq_dequant PRIVATE vgre)
 
+# vgre_ptx_gdbserver: debug a PTX kernel with stock gdb (CUDA-GDB-style
+# stepping over the PTX single-step interpreter + RSP stub).
+add_executable(vgre_ptx_gdbserver ptx_gdbserver.cpp)
+target_link_libraries(vgre_ptx_gdbserver PRIVATE vgre)
+
 # Optional reproducible real-checkpoint validation (skipped unless the model
 # files exist + VGRE_RUN_REAL_CHECKPOINT_TESTS=ON, so the default suite needs no
 # multi-hundred-MB download). Reproduce locally:
