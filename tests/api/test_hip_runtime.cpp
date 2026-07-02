@@ -13,6 +13,8 @@
 
 #include "vgre/hip/hip_runtime.h"
 
+// Tests build in Release (-DNDEBUG); keep the value asserts real.
+#undef NDEBUG
 #include <cassert>
 #include <cmath>
 #include <cstdio>

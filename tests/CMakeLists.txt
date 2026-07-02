@@ -828,6 +828,13 @@ target_link_libraries(test_xla_c_api PRIVATE vgre)
 add_test(NAME XlaExecutableCApi COMMAND test_xla_c_api)
 set_tests_properties(XlaExecutableCApi PROPERTIES TIMEOUT 30)
 
+# From-scratch HNSW ANN index (local-RAG retrieval): recall@10 vs brute force,
+# self-retrieval, save/load roundtrip, error paths — cosine + squared-L2.
+add_executable(test_vector_index xla/test_vector_index.cpp)
+target_link_libraries(test_vector_index PRIVATE vgre)
+add_test(NAME XlaVectorIndex COMMAND test_vector_index)
+set_tests_properties(XlaVectorIndex PROPERTIES TIMEOUT 60)
+
 # Work-stealing thread pool: parallel coverage, reentrancy, concurrent jobs.
 add_executable(test_thread_pool xla/test_thread_pool.cpp)
 target_link_libraries(test_thread_pool PRIVATE vgre Threads::Threads)
@@ -927,6 +934,19 @@ add_executable(test_tokenizer xla/test_tokenizer.cpp)
 target_link_libraries(test_tokenizer PRIVATE vgre)
 add_test(NAME XlaTokenizer COMMAND test_tokenizer)
 set_tests_properties(XlaTokenizer PROPERTIES TIMEOUT 30)
+
+# Unified HF tokenizer.json engine: synthetic full-surface checks always run;
+# token-for-token parity vs the HF `tokenizers` reference ids (tests/data/)
+# runs when the real GPT-2/Qwen2.5 tokenizer files are present (else skip 77).
+add_executable(test_tokenizer_hf xla/test_tokenizer_hf.cpp)
+target_link_libraries(test_tokenizer_hf PRIVATE vgre)
+add_test(NAME XlaTokenizerHf COMMAND test_tokenizer_hf
+         ${CMAKE_SOURCE_DIR}/tests/data
+         $ENV{HOME}/.vgre_cache/hf_gpt2/tokenizer.json
+         $ENV{HOME}/.vgre_cache/hf_qwen2/tokenizer.json
+         $ENV{HOME}/.vgre_cache/hf_gpt2/vocab.json
+         $ENV{HOME}/.vgre_cache/hf_gpt2/merges.txt)
+set_tests_properties(XlaTokenizerHf PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
 
 # Tensor + pipeline parallelism (L5): sharded matmul + collectives == single node.
 add_executable(test_parallel xla/test_parallel.cpp)
@@ -1692,6 +1712,18 @@ if(_vgre_nn_py)
                  COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn_distributed_multistep.py)
         set_tests_properties(PythonNnDistributedMultistep PROPERTIES
             ENVIRONMENT "VGRE_IPC_MODE=OFF;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_NN_LIB=$<TARGET_FILE:vgre_nn>"
+            LABELS "python;e2e"
+            TIMEOUT 120
+            SKIP_RETURN_CODE 77
+        )
+
+        # LoRA adapters (CPU fine-tuning: grad-correctness vs NumPy, frozen
+        # base, training, merge, adapter save/load) + HNSW VectorIndex binding
+        # (recall vs brute force, save/load) — the local-AI additions.
+        add_test(NAME PythonNnLoraVector
+                 COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn_lora_vector.py)
+        set_tests_properties(PythonNnLoraVector PROPERTIES
+            ENVIRONMENT "VGRE_IPC_MODE=OFF;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_LIB_PATH=$<TARGET_FILE:vgre_nn>"
             LABELS "python;e2e"
             TIMEOUT 120
             SKIP_RETURN_CODE 77

@@ -20,6 +20,7 @@ add_library(vgre_xla OBJECT
     gspmd.cpp
     quant_gemm.cpp
     gptq.cpp
+    vector_index.cpp
 )
 
 target_include_directories(vgre_xla PUBLIC
@@ -92,6 +93,7 @@ if(VGRE_BUILD_NN_LIB)
         parallel.cpp
         gspmd.cpp
         cluster_collective.cpp
+        vector_index.cpp
         ${PROJECT_SOURCE_DIR}/src/common/json.cpp
     )
     target_include_directories(vgre_nn PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
