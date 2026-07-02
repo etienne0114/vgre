@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local AI: LoRA · RAG · LM · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Local AI: LoRA · RAG · LM.">
+<link rel="canonical" href="https://vgre.dev/docs/local-ai.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link active" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
+  <main class="content">
+    <h1>Local AI: LoRA · RAG · LM</h1><p class="lead">A complete offline machine-learning stack built into the runtime — no PyTorch, no FAISS, no external tokenizer library.</p><h2>LoRA fine-tuning</h2><p><code>vgre.nn.LoRALinear</code> adds trainable low-rank adapters over a frozen base weight, so you can fine-tune on a CPU/laptop with a fraction of the parameters. Adapters merge back to the base for zero-overhead inference.</p><pre><code class="lang-python">from vgre import nn
+layer = nn.LoRALinear.from_linear(pretrained, r=8, alpha=16)
+opt   = nn.AdamW(layer.adapter_parameters(), lr=1e-3)   # trains A,B only
+# ... training loop ...
+layer.merge()                 # fold adapter into W for fast inference
+layer.save_adapter(&#x27;style.npz&#x27;)   # kilobytes, not the whole model</code></pre><h2>Vector search (HNSW)</h2><p><code>vgre.vector.VectorIndex</code> is a from-scratch Malkov–Yashunin HNSW index — cosine or L2, binary save/load, recall@10 ≈ 0.99 vs brute force.</p><pre><code class="lang-python">import numpy as np
+from vgre.vector import VectorIndex
+ix = VectorIndex(dim=64, metric=&#x27;cosine&#x27;)
+ix.add(embeddings, ids=np.arange(len(embeddings)))
+ids, dists = ix.search(query_vec, k=10)
+ix.save(&#x27;docs.vgvx&#x27;)</code></pre><h2>Tokenizer + language model</h2><p>Load any modern Hugging Face <code>tokenizer.json</code> (GPT-2, Llama-3, Qwen, Phi, DeepSeek) and get that model's exact token ids — verified token-for-token against the real HF <code>tokenizers</code> library.</p><pre><code class="lang-python">import vgre
+tok = vgre.Tokenizer().load_hf(&#x27;tokenizer.json&#x27;)
+ids = tok.encode(&#x27;Hello, world!&#x27;)
+assert tok.decode(ids) == &#x27;Hello, world!&#x27;</code></pre><div class="callout tip"><div class="callout-title">Tip</div><p>Together these complete a fully local <strong>embed → index → retrieve → generate → fine-tune</strong> RAG loop that never touches the network.</p></div>
+    <div class="page-nav"><a href="dashboard.html"><div class="dir">← Previous</div><div class="ttl">The Dashboard</div></a><a class="next" href="debugging.html"><div class="dir">Next →</div><div class="ttl">Debugging PTX (GDB)</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js"></script>
+<script src="assets/docs.js"></script>
+</body>
+</html>

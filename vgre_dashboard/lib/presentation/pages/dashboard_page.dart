@@ -98,15 +98,7 @@ class _DashboardPageState extends State<DashboardPage> {
       case 5:
         return const DashboardSettingsPage();
       default:
-        return Center(
-          child: Text(
-            "FEATURE ${_selectedIndex + 1}",
-            style: const TextStyle(
-              color: VgreTheme.textMuted,
-              letterSpacing: 2,
-            ),
-          ),
-        );
+        return const DashboardOverviewContent();
     }
   }
 }

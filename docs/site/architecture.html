@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Architecture.">
+<link rel="canonical" href="https://vgre.dev/docs/architecture.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link active" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
+  <main class="content">
+    <h1>Architecture</h1><p class="lead">How the pieces fit together.</p><h2>Layers</h2><ol><li><strong>Interception</strong> — CUDA/OpenCL API shims capture calls at load time.</li><li><strong>Compilation</strong> — Clang AST → LLVM IR → ORC JIT native code, with a persistent disk+memory cache.</li><li><strong>Execution</strong> — OpenMP thread pool + AVX2/AVX-512 SIMD; block/warp scheduling and shared-memory emulation.</li><li><strong>Memory</strong> — UVM via an OS page-fault handler; stream-ordered pools; LZ4-compressed cluster transfers.</li><li><strong>Distribution</strong> — authenticated, encrypted TCP transport; NCCL-style + software-RDMA collectives; tensor/pipeline parallelism and a GSPMD auto-partitioner.</li><li><strong>ML stack</strong> — autograd, BLAS GEMM, tokenizer, samplers, LoRA, HNSW, checkpoint loaders (safetensors / GGUF).</li></ol><h2>Design principles</h2><ul><li>Real implementations only — no stubs, mocks, or placeholder math in shipped paths.</li><li>From-scratch primitives (JIT, tokenizer, vector index, crypto, collectives) to avoid vendor lock-in.</li><li>Warnings-as-errors, and a 300-test suite gating every change on Linux.</li></ul><p>Full detail in <code>docs/ARCHITECTURE.md</code>.</p>
+    <div class="page-nav"><a href="cli.html"><div class="dir">← Previous</div><div class="ttl">CLI Tools</div></a><a class="next" href="faq.html"><div class="dir">Next →</div><div class="ttl">FAQ &amp; Troubleshooting</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js"></script>
+<script src="assets/docs.js"></script>
+</body>
+</html>

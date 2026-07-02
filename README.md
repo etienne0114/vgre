@@ -186,6 +186,7 @@ See [`docs/inTreeLibrariesPlan.md`](docs/inTreeLibrariesPlan.md) and
 
 ## Documentation
 
+- **[Documentation website](docs/site/index.html)** — the polished, browsable docs (Getting Started, Guides, API, CLI). Open `docs/site/index.html` directly, or serve with `python3 -m http.server --directory docs/site`. The dashboard's **Help & Docs** sidebar opens these pages in your browser.
 - [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) — Canonical source of truth for all verified capabilities, test status, and coverage metrics
 - [`docs/missingFeatures.md`](docs/missingFeatures.md) — Definitive registry of permanent hardware-level architectural limitations (boundary conditions)
 - [`docs/implementationPlan.md`](docs/implementationPlan.md) — Forward-looking roadmap tracking advanced future expansions (SASS, RDMA, etc.)

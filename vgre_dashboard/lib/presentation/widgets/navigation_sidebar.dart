@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../application/telemetry_bloc.dart';
 import '../../core/theme/vgre_theme.dart';
+import '../../core/docs_links.dart';
 
 class VgreNavigationSidebar extends StatefulWidget {
   final int selectedIndex;
@@ -111,6 +112,35 @@ class _VgreNavigationSidebarState extends State<VgreNavigationSidebar> {
                   isCompact: widget.isCompact,
                   selectedIndex: widget.selectedIndex,
                   onTap: () => widget.onDestinationSelected(5),
+                ),
+                const SizedBox(height: 16),
+                if (!widget.isCompact) _navHeader("HELP & DOCS"),
+                // These open the documentation website in the default browser
+                // rather than switching the in-app page (index stays -1 so none
+                // ever highlights as the active page).
+                _ExternalNavItem(
+                  icon: Icons.menu_book_outlined,
+                  label: "Documentation",
+                  url: DocsLinks.home,
+                  isCompact: widget.isCompact,
+                ),
+                _ExternalNavItem(
+                  icon: Icons.rocket_launch_outlined,
+                  label: "Quick Start",
+                  url: DocsLinks.quickStart,
+                  isCompact: widget.isCompact,
+                ),
+                _ExternalNavItem(
+                  icon: Icons.api_outlined,
+                  label: "API Reference",
+                  url: DocsLinks.apiReference,
+                  isCompact: widget.isCompact,
+                ),
+                _ExternalNavItem(
+                  icon: Icons.code_off_outlined,
+                  label: "Source on GitHub",
+                  url: DocsLinks.github,
+                  isCompact: widget.isCompact,
                 ),
                 const SizedBox(height: 16),
               ],
@@ -361,6 +391,86 @@ class _NavItem extends StatelessWidget {
                     ),
                 ],
               ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A sidebar entry that opens a documentation URL in the user's browser instead
+/// of switching the in-app page. Visually matches [_NavItem] (never "active")
+/// and adds an external-link affordance; on failure it shows a snackbar with the
+/// URL so the user can still reach it.
+class _ExternalNavItem extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String url;
+  final bool isCompact;
+
+  const _ExternalNavItem({
+    required this.icon,
+    required this.label,
+    required this.url,
+    required this.isCompact,
+  });
+
+  Future<void> _open(BuildContext context) async {
+    final ok = await DocsLinks.open(url);
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: VgreTheme.surface,
+          content: Text(
+            'Could not open browser. Docs: $url',
+            style: const TextStyle(color: Colors.white),
+          ),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () => _open(context),
+          borderRadius: BorderRadius.circular(12),
+          hoverColor: VgreTheme.primaryNeon.withValues(alpha: 0.05),
+          child: Tooltip(
+            message: isCompact ? label : url,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                mainAxisAlignment:
+                    isCompact ? MainAxisAlignment.center : MainAxisAlignment.start,
+                children: [
+                  Icon(icon, size: 20, color: VgreTheme.textMuted),
+                  if (!isCompact) ...[
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Text(
+                        label,
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: VgreTheme.textMuted,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                    ),
+                    Icon(
+                      Icons.north_east,
+                      size: 14,
+                      color: VgreTheme.textMuted.withValues(alpha: 0.6),
+                    ),
+                  ],
+                ],
+              ),
             ),
           ),
         ),
