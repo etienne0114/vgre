@@ -368,6 +368,18 @@ VGREResult SecurityManager::performServerHandshake(std::shared_ptr<TCPClusterMan
   uint8_t expectedKV[crypto::kSHA256DigestLen]; computeKeyVerification(token, "VGRE_KEYVER_WORKER_v1", clientHs.nonce, expectedKV);
   if (!crypto::secure_compare(clientHs.key_verification, expectedKV, crypto::kSHA256DigestLen)) {
     // Production policy: always fail closed on auth mismatch.
+    // Log the master's own token fingerprint so the operator can compare it
+    // against the worker's (printed on the worker side) and see at a glance
+    // which node has the wrong ~/.vgre/token. This is the #1 cause of
+    // "handshake failed with result 15" when enabling the secure channel.
+    const std::string mfp = computeTokenHash(token);
+    VGRE_LOG_ERROR("TCPCluster",
+        "Master: secure handshake auth FAILED for worker " + client.ip_address +
+        " — token mismatch (master SHA256: " +
+        (mfp.size() >= 16 ? mfp.substr(0, 16) : mfp) +
+        "...). The worker's token differs. Copy this node's token to the worker: "
+        "`vgre-token copy` here, then `vgre-token set <TOKEN>` on the worker "
+        "(both must show the same `vgre-token fingerprint`).");
     vgre::common::vgre_close_socket(client.socket_fd);
     client.socket_fd = vgre::common::VGRE_INVALID_SOCKET;
     client.active = false;
@@ -415,6 +427,10 @@ VGREResult SecurityManager::performClientHandshake() {
   { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
 
   if (token.empty()) {
+    VGRE_LOG_ERROR("TCPCluster",
+        "Worker: secure cluster enabled but no auth token is loaded — set "
+        "VGRE_TCP_AUTH_TOKEN_FILE (e.g. ~/.vgre/token) or run `vgre-token set "
+        "<TOKEN>` with the master's token, then reconnect.");
     std::lock_guard<std::mutex> lock(parent_->client_mutex_);
     vgre::common::vgre_close_socket(parent_->client_fd_);
     parent_->client_fd_ = vgre::common::VGRE_INVALID_SOCKET;
