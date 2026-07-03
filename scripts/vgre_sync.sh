@@ -416,7 +416,10 @@ if [[ "$OS" == "Darwin" ]]; then
     fi
 else
     _LIB="libvgre.so"
-    _LIB_SIZE=$(stat -c%s "$_LIB" 2>/dev/null || stat -f%z "$_LIB" 2>/dev/null || echo 0)
+    # -L follows the SONAME symlink chain (libvgre.so -> .so.0 -> .so.0.1.0) so we
+    # measure the real 53 MB library, not the 12-byte symlink. GNU stat first,
+    # then BSD stat as a fallback.
+    _LIB_SIZE=$(stat -Lc%s "$_LIB" 2>/dev/null || stat -Lf%z "$_LIB" 2>/dev/null || echo 0)
     if ldd "$_LIB" 2>/dev/null | grep -q "libasan"; then
         echo "❌ ERROR: $_LIB is an ASAN build — re-run cmake with -DCMAKE_BUILD_TYPE=Release"
         echo "   Run: cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j\$(nproc) vgre"
