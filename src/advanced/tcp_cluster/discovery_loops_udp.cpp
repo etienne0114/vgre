@@ -24,6 +24,7 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "vgre/common/os_backend.h"
@@ -243,8 +244,29 @@ void DiscoveryManager::udpDiscoveryLoop() {
                 }
                 std::string prefix = msg.substr(0, msg.size() - hmacField.size() - 1);
                 if (!CryptoUtils::verifyHmacHex(token, prefix, hmacField)) {
-                    VGRE_LOG_WARN("TCPCluster",
-                        "UDP master ping from " + senderIp + " failed HMAC — ignoring");
+                    static std::unordered_map<std::string,
+                        std::chrono::steady_clock::time_point> last_hmac_warn;
+                    const auto now = std::chrono::steady_clock::now();
+                    bool should_log = true;
+                    {
+                        auto it = last_hmac_warn.find(senderIp);
+                        if (it != last_hmac_warn.end() &&
+                            now - it->second < std::chrono::seconds(30)) {
+                            should_log = false;
+                        }
+                    }
+                    if (should_log) {
+                        last_hmac_warn[senderIp] = now;
+                        const std::string fp = CryptoUtils::computeTokenFingerprint(token);
+                        VGRE_LOG_WARN("TCPCluster",
+                            "UDP master ping from " + senderIp +
+                            " failed HMAC — master uses a DIFFERENT auth token than this worker "
+                            "(worker SHA256: " +
+                            (fp.size() >= 16 ? fp.substr(0, 16) : fp) +
+                            "...). Sync tokens: on master run "
+                            "'vgre-token fingerprint' (must match), then "
+                            "'vgre-token set <TOKEN>' or scp ~/.vgre/token from this node.");
+                    }
                     continue;
                 }
             }
