@@ -524,13 +524,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
         echo "⚠️  vgre-worker binary not found at $WORKER_SRC — skipping"
     fi
 
-    # Install token manager, cluster launch, and discovery scripts into bin
-    for _script in vgre-token.sh vgre-start.sh vgre-discover.sh; do
-        if [[ -f "$SCRIPT_DIR/$_script" ]]; then
-            chmod +x "$SCRIPT_DIR/$_script"
-            ln -sf "$SCRIPT_DIR/$_script" "$BIN_DIR/${_script%.sh}"
-        fi
-    done
+    # CLI symlinks installed below via vgre_install_cli_symlinks
 
     # Copy JIT headers
     mkdir -p "$INSTALL_DIR/include"
@@ -691,13 +685,7 @@ EOF
     chmod +x "$INSTALL_DIR/vgre-worker"
     ln -sf "$INSTALL_DIR/vgre-launch.sh" "$BIN_DIR/vgre-dashboard"
     ln -sf "$INSTALL_DIR/vgre-worker" "$BIN_DIR/vgre-worker"
-    # Install token manager, cluster launch, and discovery scripts into bin
-    for _script in vgre-token.sh vgre-start.sh vgre-discover.sh; do
-        if [[ -f "$SCRIPT_DIR/$_script" ]]; then
-            chmod +x "$SCRIPT_DIR/$_script"
-            ln -sf "$SCRIPT_DIR/$_script" "$BIN_DIR/${_script%.sh}"
-        fi
-    done
+    # CLI symlinks installed below via vgre_install_cli_symlinks
 fi
 
 # ── vgre-worker self-check ────────────────────────────────────────────────────

@@ -252,7 +252,7 @@ cmd_install() {
     info "Installing VGRE CLI tools to $(vgre_cli_bin_dir)..."
     vgre_install_cli_symlinks "$SCRIPT_DIR"
     vgre_ensure_cli_path
-    ok "CLI symlinks installed: vgre-token, vgre-start, vgre-discover"
+    ok "CLI symlinks installed to $(vgre_cli_bin_dir)"
     if command -v brew >/dev/null 2>&1 && [ -w "$(brew --prefix 2>/dev/null)/bin" ]; then
         ok "Also linked into $(brew --prefix)/bin (already on PATH)"
     fi
@@ -266,7 +266,7 @@ cmd_help() {
 vgre-token — VGRE Auth Token Manager
 
 Usage:
-  vgre-token install               Install CLI symlinks and add ~/.local/bin to PATH
+  vgre-token install               Install all VGRE CLI tools and add ~/.local/bin to PATH
   vgre-token generate              Generate a new secure 64-hex token
   vgre-token show                  Print the stored token value
   vgre-token fingerprint           Print the SHA-256 fingerprint

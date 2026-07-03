@@ -618,27 +618,11 @@ DEVLAUNCHEOF
 fi
 
 # ── Link CLI commands into PATH ───────────────────────────────────────────────
-mkdir -p "$BIN_DIR"
-if [[ -f "$REPO_DIR/scripts/vgre-start.sh" ]]; then
-    chmod +x "$REPO_DIR/scripts/vgre-start.sh"
-    ln -sf "$REPO_DIR/scripts/vgre-start.sh" "$BIN_DIR/vgre-start" 2>/dev/null || true
-    ok "vgre-start  → $BIN_DIR/vgre-start"
-fi
-if [[ -f "$REPO_DIR/scripts/vgre-token.sh" ]]; then
-    chmod +x "$REPO_DIR/scripts/vgre-token.sh"
-    ln -sf "$REPO_DIR/scripts/vgre-token.sh" "$BIN_DIR/vgre-token" 2>/dev/null || true
-    ok "vgre-token  → $BIN_DIR/vgre-token"
-fi
-if [[ -f "$REPO_DIR/scripts/vgre-discover.sh" ]]; then
-    chmod +x "$REPO_DIR/scripts/vgre-discover.sh"
-    ln -sf "$REPO_DIR/scripts/vgre-discover.sh" "$BIN_DIR/vgre-discover" 2>/dev/null || true
-    ok "vgre-discover → $BIN_DIR/vgre-discover"
-fi
-
-# Ensure ~/.local/bin is on PATH in shell profiles and ~/.vgre/env
 # shellcheck source=scripts/vgre-cli-install.sh
 . "$REPO_DIR/scripts/vgre-cli-install.sh"
+vgre_install_cli_symlinks "$REPO_DIR/scripts"
 vgre_ensure_cli_path
+ok "CLI tools installed → $BIN_DIR (run vgre-token install to refresh)"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
