@@ -132,6 +132,8 @@ public:
    */
   VGREResult coordinateRestartWithPeers(uint32_t restart_delay_ms = 5000);
   VGREResult enableSecurity(bool enabled);
+  /** Load cluster auth token from VGRE_TCP_AUTH_TOKEN(_FILE) into memory. */
+  bool loadAuthToken();
   bool isSecurityEnabled() const { return security_enabled_.load(); }
   SessionInfo getSecurityInfo() const;
   VGREResult launchPartitionedKernel(uint64_t kernel_id,

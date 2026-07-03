@@ -154,6 +154,15 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   VGRE_LOG_DEBUG("TCPCluster", "initialize: enabled=true host='" + host +
       "' port=" + std::to_string(port));
 
+  // Load auth token early so UDP HMAC verification and secure handshakes work
+  // on workers that only receive VGRE_TCP_AUTH_TOKEN_FILE from the launcher.
+  if (loadAuthToken()) {
+    VGRE_LOG_DEBUG("TCPCluster", "initialize: cluster auth token loaded");
+  } else {
+    VGRE_LOG_WARN("TCPCluster",
+        "initialize: no cluster auth token configured (secure mode unavailable)");
+  }
+
   if (is_master_) {
     VGRE_LOG_DEBUG("TCPCluster", "initialize: MASTER path, creating server socket");
     server_fd_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
