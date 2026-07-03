@@ -148,10 +148,42 @@ std::string defaultClusterTokenFilePath() {
   return {};
 }
 
+bool readClusterTokenFile(std::string& out) {
+  const std::string path = defaultClusterTokenFilePath();
+  if (path.empty()) return false;
+  std::ifstream f(path);
+  if (!f) return false;
+  std::getline(f, out);
+  out.erase(std::remove_if(out.begin(), out.end(),
+                           [](unsigned char c) { return std::isspace(c); }),
+            out.end());
+  return !out.empty();
+}
+
 } // namespace
 
 bool SecurityManager::loadAuthToken(bool allow_auto_generate) {
   scrubAuthTokenFromEnvironment();
+
+  // Always re-read the token file when it exists so `vgre-token set` on disk
+  // takes effect without restarting master/worker processes.
+  {
+    std::string fileToken;
+    if (readClusterTokenFile(fileToken)) {
+      std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_);
+      if (parent_->auth_token_str_ != fileToken) {
+        const bool had = !parent_->auth_token_str_.empty();
+        parent_->auth_token_str_ = std::move(fileToken);
+        const std::string fp = computeTokenHash(parent_->auth_token_str_);
+        VGRE_LOG_INFO("TCPCluster",
+            std::string(had ? "Cluster auth token reloaded from file"
+                            : "Cluster auth token loaded") +
+            " (SHA256: " + (fp.size() >= 16 ? fp.substr(0, 16) : fp) + "...)");
+      }
+      return true;
+    }
+  }
+
   {
     std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_);
     if (!parent_->auth_token_str_.empty()) return true;
@@ -161,20 +193,6 @@ bool SecurityManager::loadAuthToken(bool allow_auto_generate) {
   const char* env_token = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
   if (env_token && env_token[0] != '\0') {
     token = env_token;
-  }
-  if (token.empty()) {
-    const std::string tokenPath = defaultClusterTokenFilePath();
-    if (!tokenPath.empty()) {
-      std::ifstream f(tokenPath);
-      if (f) {
-        std::getline(f, token);
-        token.erase(std::remove_if(token.begin(), token.end(),
-                                   [](unsigned char c) { return std::isspace(c); }),
-                     token.end());
-      } else if (vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE")) {
-        VGRE_LOG_WARN("TCPCluster", "Could not read auth token file: " + tokenPath);
-      }
-    }
   }
   if (token.empty()) {
     std::string s_token;

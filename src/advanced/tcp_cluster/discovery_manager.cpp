@@ -227,6 +227,7 @@ void DiscoveryManager::udpAnnouncerLoop() {
     if (advAddr && advAddr[0] != '\0')
         ping_msg += ':' + std::string(advAddr);
 
+    parent_->loadAuthToken();
     std::string token;
     { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
     if (!token.empty()) ping_msg += ':' + CryptoUtils::computeHmacHex(token, ping_msg);
@@ -356,6 +357,7 @@ void DiscoveryManager::udpWorkerAnnouncerLoop() {
 
   while (parent_ && parent_->enabled_ && !parent_->is_master_) {
     // Recompute each iteration in case the auth token changes after start.
+    parent_->loadAuthToken();
     std::string ping_msg = "VGRE_WORKER_PING:" + std::to_string(parent_->port_);
     std::string token;
     { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
