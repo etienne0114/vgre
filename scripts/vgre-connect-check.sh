@@ -3,7 +3,7 @@
 #
 # Usage:
 #   vgre-connect-check <HOST:PORT>
-#   vgre-connect-check 102.22.143.9:7777
+#   vgre-connect-check <HOST:PORT>
 #
 # Exit 0 when TCP port is open; exit 1 with actionable diagnostics otherwise.
 
@@ -41,22 +41,40 @@ fi
 if [[ $_tcp_open -eq 1 ]]; then
     echo "[OK] TCP $HOST:$MPORT is reachable."
 else
-    echo "[FAIL] TCP $HOST:$MPORT is NOT reachable (connection timed out or refused)."
+    _tcp_err="timeout"
+    if command -v nc >/dev/null 2>&1; then
+        _nc_out=$(nc -z -G 5 -w 5 "$HOST" "$MPORT" 2>&1) || true
+        if echo "$_nc_out" | grep -qi "refused"; then
+            _tcp_err="refused"
+        fi
+    fi
+
+    echo "[FAIL] TCP $HOST:$MPORT is NOT reachable."
+    if [[ "$_tcp_err" == "refused" ]]; then
+        echo "       Connection refused — host is reachable but nothing accepts port $MPORT."
+        echo "       On master: vgre-start --master  &&  ss -tlnp | grep $MPORT"
+    else
+        echo "       Connection timed out — usually router/NAT (port-forward) or ISP CGNAT."
+        echo "       Master may work on LAN (192.168.x.x) but public IP is not forwarded."
+    fi
     echo ""
-    echo "The worker cannot join until the master accepts inbound TCP on this port."
+    echo "The worker cannot join until inbound TCP $MPORT reaches the master."
     echo ""
     echo "On the LINUX MASTER, run these checks:"
-    echo "  vgre-start --master                    # or: vgre-worker --is-master --port $MPORT"
-    echo "  ss -tlnp | grep $MPORT                 # must show 0.0.0.0:$MPORT or *:$MPORT LISTEN"
+    echo "  ss -tlnp | grep $MPORT                 # must show 0.0.0.0:$MPORT LISTEN"
+    echo "  hostname -I | awk '{print \$1}'          # LAN IP for router port-forward"
     echo "  curl -4 -s ifconfig.me                 # confirm public IP matches $HOST"
-    echo "  vgre-token fingerprint                 # must match worker fingerprint"
+    echo "  vgre-discover --register               # optional cross-LAN lookup"
+    echo "  vgre-token fingerprint                 # must match worker"
     echo ""
-    echo "Firewall / NAT (on master + router):"
-    echo "  sudo ufw allow $MPORT/tcp"
-    echo "  sudo ufw allow 7778/udp               # LAN discovery (optional)"
-    echo "  Port-forward TCP $MPORT → master LAN IP on your router"
+    echo "Router (required unless using Tailscale):"
+    echo "  Port-forward TCP $MPORT → <master LAN IP>"
+    echo "  On master: hostname -I | awk '{print \$1}'"
     echo ""
-    echo "Tip: use Tailscale/ZeroTier — both nodes get routable IPs, no port-forward."
+    echo "Full Linux checklist:"
+    echo "  vgre-print-linux-setup --public-ip $HOST"
+    echo ""
+    echo "Tip: Tailscale on both nodes — no port-forward.  brew install --cask tailscale"
     exit 1
 fi
 

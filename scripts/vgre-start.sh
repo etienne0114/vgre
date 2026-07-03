@@ -319,7 +319,14 @@ case "$MODE" in
         [[ -z "$_TARGET" && -n "${VGRE_CLUSTER_MASTER_ADDRESS:-}" ]] && _TARGET="$VGRE_CLUSTER_MASTER_ADDRESS"
 
         if [[ $SKIP_CONNECT_CHECK -eq 0 && -n "$_TARGET" ]]; then
-            _check_master_tcp "$_TARGET" || exit 1
+            _check_master_tcp "$_TARGET" || {
+                _PRINT_SETUP="$SCRIPT_DIR/vgre-print-linux-setup.sh"
+                if [[ -x "$_PRINT_SETUP" ]]; then
+                    echo ""
+                    bash "$_PRINT_SETUP" --public-ip "${_TARGET%%:*}" 2>/dev/null || true
+                fi
+                exit 1
+            }
         fi
 
         exec "$WORKER_BIN" --port "$PORT" "${EXTRA_ARGS[@]}"

@@ -19,6 +19,22 @@ vgre_cli_bin_dir() {
     printf '%s\n' "${VGRE_BIN_DIR:-$HOME/.local/bin}"
 }
 
+# Single source of truth for CLI wrapper scripts (basename without .sh for commands).
+vgre_cli_script_names() {
+    printf '%s\n' \
+        vgre-token \
+        vgre-start \
+        vgre-discover \
+        vgre-connect-check \
+        vgre-print-linux-setup \
+        vgre-mac-worker-setup
+}
+
+vgre_cli_script_files() {
+    _name="$1"
+    printf '%s.sh\n' "$_name"
+}
+
 vgre_ensure_cli_path() {
     BIN_DIR=$(vgre_cli_bin_dir)
     VGRE_DIR="${VGRE_DIR:-$HOME/.vgre}"
@@ -70,23 +86,38 @@ vgre_install_cli_symlinks() {
     SCRIPT_DIR="$1"
     BIN_DIR=$(vgre_cli_bin_dir)
     mkdir -p "$BIN_DIR"
-    for _script in vgre-token.sh vgre-start.sh vgre-discover.sh vgre-connect-check.sh; do
+    vgre_cli_script_names | while read -r _name; do
+        _script=$(vgre_cli_script_files "$_name")
         if [ -f "$SCRIPT_DIR/$_script" ]; then
             chmod +x "$SCRIPT_DIR/$_script" 2>/dev/null || true
-            ln -sf "$SCRIPT_DIR/$_script" "$BIN_DIR/${_script%.sh}"
+            ln -sf "$SCRIPT_DIR/$_script" "$BIN_DIR/$_name"
         fi
     done
 
-    # macOS Homebrew: $(brew --prefix)/bin is on PATH in Terminal, Cursor, and
-    # most IDE shells, whereas ~/.local/bin may not load until a profile is sourced.
     if command -v brew >/dev/null 2>&1; then
         _brew_bin="$(brew --prefix 2>/dev/null)/bin"
         if [ -n "$_brew_bin" ] && [ -d "$_brew_bin" ] && [ -w "$_brew_bin" ]; then
-            for _script in vgre-token.sh vgre-start.sh vgre-discover.sh vgre-connect-check.sh; do
+            vgre_cli_script_names | while read -r _name; do
+                _script=$(vgre_cli_script_files "$_name")
                 if [ -f "$SCRIPT_DIR/$_script" ]; then
-                    ln -sf "$SCRIPT_DIR/$_script" "$_brew_bin/${_script%.sh}"
+                    ln -sf "$SCRIPT_DIR/$_script" "$_brew_bin/$_name"
                 fi
             done
         fi
     fi
 }
+
+# When run directly: bash scripts/vgre-cli-install.sh
+if [ "$(basename "$0")" = "vgre-cli-install.sh" ]; then
+    _VGRE_CLI_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+    vgre_install_cli_symlinks "$_VGRE_CLI_DIR"
+    vgre_ensure_cli_path
+    printf 'VGRE CLI installed:\n'
+    vgre_cli_script_names | while read -r _name; do
+        printf '  %s/%s\n' "$(vgre_cli_bin_dir)" "$_name"
+    done
+    if command -v brew >/dev/null 2>&1 && [ -w "$(brew --prefix 2>/dev/null)/bin" ]; then
+        printf '  (also linked in %s/bin)\n' "$(brew --prefix)"
+    fi
+    printf '\nOpen a new terminal or run:  source ~/.vgre/env\n'
+fi
