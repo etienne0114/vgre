@@ -33,11 +33,14 @@
 sudo apt install -y cmake ninja-build clang llvm-18-dev \
     libomp-dev libssl-dev libsqlite3-dev
 
+# macOS (Homebrew — paths discovered automatically at configure time)
+brew install cmake llvm@18 libomp ninja sqlite
+
 # Flutter (for the dashboard) — one of:
 sudo snap install flutter --classic
 # or: brew install --cask flutter</code></pre><h2>Build</h2><pre><code class="lang-bash">cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
-ctest --test-dir build -j$(nproc)     # full suite, 300/300 on Linux</code></pre><h2>System requirements</h2><table><thead><tr><th>Component</th><th>Minimum</th><th>Recommended</th></tr></thead><tbody><tr><td>CPU</td><td>x86-64 (SSE4) or ARM64</td><td>AVX2 / AVX-512, 8+ cores</td></tr><tr><td>RAM</td><td>4 GB</td><td>16 GB+ (large-model work)</td></tr><tr><td>OS</td><td>Linux (glibc 2.31+)</td><td>Ubuntu 22.04 / 24.04</td></tr><tr><td>Compiler</td><td>Clang 16 / GCC 11</td><td>Clang 18 + LLVM 18</td></tr></tbody></table><h2>Platform support</h2><table><thead><tr><th>Platform</th><th>Status</th><th>Notes</th></tr></thead><tbody><tr><td>Linux x86-64</td><td>✅ Verified</td><td>Full test suite green; NUMA + keyring.</td></tr><tr><td>Linux ARM64</td><td>✅ Builds/tests</td><td>SIMD via NEON.</td></tr><tr><td>Windows</td><td>⚠️ Experimental</td><td>Code-complete (CredMan, Winsock); not yet CI-verified.</td></tr><tr><td>macOS</td><td>⚠️ Experimental</td><td>Code-complete (Keychain, kqueue); NUMA is a no-op.</td></tr></tbody></table>
+ctest --test-dir build -j$(nproc)     # full suite, 300/300 on Linux</code></pre><h2>System requirements</h2><table><thead><tr><th>Component</th><th>Minimum</th><th>Recommended</th></tr></thead><tbody><tr><td>CPU</td><td>x86-64 (SSE4) or ARM64</td><td>AVX2 / AVX-512, 8+ cores</td></tr><tr><td>RAM</td><td>4 GB</td><td>16 GB+ (large-model work)</td></tr><tr><td>OS</td><td>Linux (glibc 2.31+)</td><td>Ubuntu 22.04 / 24.04</td></tr><tr><td>Compiler</td><td>Clang 16 / GCC 11</td><td>Clang 18 + LLVM 18</td></tr></tbody></table><h2>Platform support</h2><table><thead><tr><th>Platform</th><th>Status</th><th>Notes</th></tr></thead><tbody><tr><td>Linux x86-64</td><td>✅ Verified</td><td>Full test suite green; NUMA + keyring.</td></tr><tr><td>Linux ARM64</td><td>✅ Builds/tests</td><td>SIMD via NEON.</td></tr><tr><td>macOS ARM64/Intel</td><td>✅ Build-verified</td><td>Auto Homebrew llvm@18; JIT + integration tests pass locally; full serial ctest bring-up ongoing.</td></tr><tr><td>Windows</td><td>⚠️ Experimental</td><td>Code-complete (CredMan, Winsock); not yet CI-verified.</td></tr></tbody></table>
     <div class="page-nav"><a href="quickstart.html"><div class="dir">← Previous</div><div class="ttl">Quick Start</div></a><a class="next" href="running-cuda.html"><div class="dir">Next →</div><div class="ttl">Running CUDA Apps</div></a></div>
   </main>
   <aside class="toc">

@@ -327,7 +327,12 @@ float AdaptiveExecutionEngine::getDeviceTemperature() const {
     };
 
     io_service_t service = IOServiceGetMatchingService(
-        kIOMasterPortDefault, IOServiceMatching("AppleSMC"));
+#if defined(kIOMainPortDefault)
+        kIOMainPortDefault,
+#else
+        kIOMasterPortDefault,
+#endif
+        IOServiceMatching("AppleSMC"));
     if (service != IO_OBJECT_NULL) {
       io_connect_t conn = IO_OBJECT_NULL;
       kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0, &conn);

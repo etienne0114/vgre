@@ -5,11 +5,15 @@
 
 cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/VGREPlatform.cmake)
+
 project(VGRE
     VERSION     0.1.0
     DESCRIPTION "Virtual GPU Runtime Engine — CPU-based CUDA API emulator"
     LANGUAGES   C CXX
 )
+
+vgre_apply_macos_link_flags()
 
 # Guard against in-source builds.
 if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
@@ -383,7 +387,7 @@ if(VGRE_HARDENING AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         add_compile_options(-fcf-protection=full)
         message(STATUS "Hardening: Intel CET (-fcf-protection=full) enabled")
     endif()
-    if(_cc_stackclash)
+    if(_cc_stackclash AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_compile_options(-fstack-clash-protection)
     endif()
     if(_cc_ssp)
@@ -401,6 +405,11 @@ if(APPLE)
     if(_brew)
         execute_process(COMMAND "${_brew}" --prefix libomp
             OUTPUT_VARIABLE _brew_libomp OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    endif()
+    if(NOT _brew_libomp OR NOT EXISTS "${_brew_libomp}")
+        if(DEFINED ENV{OpenMP_ROOT} AND EXISTS "$ENV{OpenMP_ROOT}")
+            set(_brew_libomp "$ENV{OpenMP_ROOT}")
+        endif()
     endif()
     if(_brew_libomp AND EXISTS "${_brew_libomp}")
         set(OpenMP_CXX_FLAGS     "-Xpreprocessor -fopenmp -I${_brew_libomp}/include")
@@ -462,9 +471,17 @@ function(vgre_target_link_openmp target_name visibility)
             target_compile_options(${target_name} ${visibility} /openmp)
         endif()
         # MSVC /openmp links the runtime automatically; no extra lib needed.
+    elseif(TARGET OpenMP::OpenMP_CXX)
+        # Propagates platform-correct flags (e.g. -Xpreprocessor -fopenmp on Apple Clang).
+        target_link_libraries(${target_name} ${visibility} OpenMP::OpenMP_CXX)
     else()
         # GCC and non-driver Clang: use -fopenmp compile flag.
-        target_compile_options(${target_name} ${visibility} "-fopenmp")
+        if(APPLE)
+            target_compile_options(${target_name} ${visibility}
+                "-Xpreprocessor" "-fopenmp")
+        else()
+            target_compile_options(${target_name} ${visibility} "-fopenmp")
+        endif()
 
         if(APPLE AND VGRE_APPLE_LIBOMP)
             # Homebrew libomp is keg-only: add its include dir (for <omp.h>) and
@@ -690,13 +707,19 @@ endif()
 # directly for cblas.h + a library exporting cblas_sgemm so it works with system
 # reference BLAS, OpenBLAS, or MKL.
 set(_VGRE_XLA_BLAS_FOUND FALSE)
-find_path(_VGRE_CBLAS_INCLUDE cblas.h
-    PATHS /usr/include /usr/include/x86_64-linux-gnu /usr/local/include
-          /opt/homebrew/opt/openblas/include /usr/local/opt/openblas/include)
+set(_VGRE_CBLAS_SEARCH_PATHS /usr/include /usr/include/x86_64-linux-gnu /usr/local/include)
+set(_VGRE_CBLAS_LIB_SEARCH /usr/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/local/lib)
+if(APPLE)
+    vgre_brew_prefix(openblas _VGRE_OPENBLAS_PREFIX)
+    if(_VGRE_OPENBLAS_PREFIX)
+        list(APPEND _VGRE_CBLAS_SEARCH_PATHS "${_VGRE_OPENBLAS_PREFIX}/include")
+        list(APPEND _VGRE_CBLAS_LIB_SEARCH "${_VGRE_OPENBLAS_PREFIX}/lib")
+    endif()
+endif()
+find_path(_VGRE_CBLAS_INCLUDE cblas.h PATHS ${_VGRE_CBLAS_SEARCH_PATHS})
 find_library(_VGRE_CBLAS_LIB
     NAMES openblas cblas blas
-    PATHS /usr/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/local/lib
-          /opt/homebrew/opt/openblas/lib /usr/local/opt/openblas/lib)
+    PATHS ${_VGRE_CBLAS_LIB_SEARCH})
 if(_VGRE_CBLAS_INCLUDE AND _VGRE_CBLAS_LIB)
     set(_VGRE_XLA_BLAS_FOUND TRUE)
     set(_VGRE_XLA_BLAS_INCLUDE "${_VGRE_CBLAS_INCLUDE}")
@@ -716,6 +739,13 @@ endif()
 find_library(SQLITE3_LIBRARY
     NAMES sqlite3 libsqlite3.so.0 libsqlite3.so
     PATHS /usr/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/local/lib)
+if(APPLE AND NOT SQLITE3_LIBRARY)
+    vgre_brew_prefix(sqlite3 _VGRE_SQLITE_PREFIX)
+    if(_VGRE_SQLITE_PREFIX)
+        find_library(SQLITE3_LIBRARY NAMES sqlite3
+            PATHS "${_VGRE_SQLITE_PREFIX}/lib" NO_DEFAULT_PATH)
+    endif()
+endif()
 if(NOT TARGET SQLite::SQLite3)
     add_library(SQLite::SQLite3 INTERFACE IMPORTED)
     if(SQLITE3_LIBRARY)
@@ -742,11 +772,17 @@ if(VGRE_USE_UMFPACK)
     endif()
     if(NOT _umfpack_found)
         # Fallback: manual header+lib search
-        find_path(UMFPACK_INCLUDE_DIR umfpack.h
-            PATHS /usr/include/suitesparse /usr/local/include/suitesparse
-                  /opt/homebrew/include/suitesparse /usr/include)
-        find_library(UMFPACK_LIBRARY NAMES umfpack
-            PATHS /usr/lib /usr/local/lib /opt/homebrew/lib)
+        set(_UMFPACK_INC_PATHS /usr/include/suitesparse /usr/local/include/suitesparse /usr/include)
+        set(_UMFPACK_LIB_PATHS /usr/lib /usr/local/lib)
+        if(APPLE)
+            vgre_brew_prefix(suite-sparse _VGRE_SUITESPARSE_PREFIX)
+            if(_VGRE_SUITESPARSE_PREFIX)
+                list(APPEND _UMFPACK_INC_PATHS "${_VGRE_SUITESPARSE_PREFIX}/include/suitesparse")
+                list(APPEND _UMFPACK_LIB_PATHS "${_VGRE_SUITESPARSE_PREFIX}/lib")
+            endif()
+        endif()
+        find_path(UMFPACK_INCLUDE_DIR umfpack.h PATHS ${_UMFPACK_INC_PATHS})
+        find_library(UMFPACK_LIBRARY NAMES umfpack PATHS ${_UMFPACK_LIB_PATHS})
         if(UMFPACK_INCLUDE_DIR AND UMFPACK_LIBRARY)
             if(NOT TARGET UMFPACK::UMFPACK)
                 add_library(UMFPACK::UMFPACK UNKNOWN IMPORTED)

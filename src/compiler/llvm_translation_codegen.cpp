@@ -615,19 +615,20 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
     }
 #else
     {
+      const std::string clangBin = vgre::common::findCompilerPath();
       pid_t pid = fork();
       if (pid == 0) {
         FILE* lf = std::fopen(logFile.c_str(), "w");
         if (lf) { int lfd = fileno(lf); dup2(lfd, STDOUT_FILENO); dup2(lfd, STDERR_FILENO); }
         const char* argv[] = {
-          "clang++", "-S", "-emit-llvm",
+          clangBin.c_str(), "-S", "-emit-llvm",
           optFlag, archFlag, "-fno-math-errno", "-fno-trapping-math",
           "-fvisibility=default",
           "-I", includePath.c_str(),
           tmpCpp.c_str(), "-o", tmpIR.c_str(),
           nullptr
         };
-        execvp("clang++", const_cast<char* const*>(argv));
+        execvp(clangBin.c_str(), const_cast<char* const*>(argv));
         std::_Exit(127);
       } else if (pid > 0) {
         int wst = 0; waitpid(pid, &wst, 0);

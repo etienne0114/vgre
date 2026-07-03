@@ -11,7 +11,10 @@ This script loads libvgre.so through ctypes and exercises:
   - Result verification
 
 Usage:
+    # Linux
     LD_LIBRARY_PATH=build python3 test_cuda_on_cpu.py
+    # macOS
+    DYLD_LIBRARY_PATH=build python3 test_cuda_on_cpu.py
 """
 
 import ctypes
@@ -25,18 +28,33 @@ except ImportError:
     sys.exit(77)  # CTest SKIP_RETURN_CODE
 
 # ---------------------------------------------------------------------------
-# Locate libvgre.so
+# Locate libvgre (platform-specific shared-library name)
 # ---------------------------------------------------------------------------
 BUILD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build")
-LIB_PATH = os.path.join(BUILD_DIR, "libvgre.so")
+
+def _vgre_library_path():
+    if sys.platform == "darwin":
+        candidates = ("libvgre.dylib", "libvgre.so")
+    elif sys.platform == "win32":
+        candidates = ("vgre.dll", "libvgre.dll")
+    else:
+        candidates = ("libvgre.so",)
+    for name in candidates:
+        path = os.path.join(BUILD_DIR, name)
+        if os.path.exists(path):
+            return path
+    return os.path.join(BUILD_DIR, candidates[0])
+
+LIB_PATH = _vgre_library_path()
 
 if not os.path.exists(LIB_PATH):
     print(f"ERROR: {LIB_PATH} not found. Build first: cmake --build build")
     sys.exit(1)
 
-# Prepend build dir so the dynamic linker finds libvgre_cudart.so as well.
-if BUILD_DIR not in os.environ.get("LD_LIBRARY_PATH", ""):
-    os.environ["LD_LIBRARY_PATH"] = BUILD_DIR + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+# Prepend build dir so the dynamic linker finds libvgre_cudart as well.
+_lib_env = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+if BUILD_DIR not in os.environ.get(_lib_env, ""):
+    os.environ[_lib_env] = BUILD_DIR + os.pathsep + os.environ.get(_lib_env, "")
 
 lib = ctypes.CDLL(LIB_PATH)
 

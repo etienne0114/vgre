@@ -113,7 +113,7 @@ def page_index():
            "Run unmodified CUDA on any CPU — no GPU required. Plus a full local-AI "
            "stack: train, fine-tune with LoRA, retrieve with an in-tree vector "
            "index, and generate — all offline, all dependency-free."),
-        badges([("Linux verified", True), ("300/300 tests", True),
+        badges([("Linux verified", True), ("macOS build-verified", True),
                 ("CUDA ~95%", False), ("PTX ~95%", False), ("Zero external vendor lock-in", True)]),
         p("VGRE intercepts CUDA and OpenCL API calls and executes kernels on the CPU "
           "using an LLVM ORC JIT, OpenMP + AVX2/AVX-512 SIMD, OS-level unified memory, "
@@ -135,10 +135,12 @@ def page_index():
             "<strong>Built from scratch</strong> — the JIT, tokenizer, vector index, collectives, and crypto are in-tree, not third-party wrappers, so there is no vendor lock-in and no per-seat dependency cost.",
             "<strong>Private by default</strong> — the entire embed → index → retrieve → generate → fine-tune loop runs offline; your data never leaves the machine.",
         ]),
-        callout(p("VGRE is <strong>Linux-verified</strong>. Windows and macOS are "
-                  "code-complete and compile-guarded but not yet CI-verified — treat "
-                  "them as experimental. See the "
-                  '<a href="faq.html">FAQ</a> for the current platform matrix.'), "warn"),
+        callout(p("VGRE is <strong>Linux-verified</strong> (full <code>ctest</code> green). "
+                  "<strong>macOS</strong> is build-verified on Apple Silicon — native engine, "
+                  "JIT, and integration tests pass locally with auto-detected Homebrew "
+                  "<code>llvm@18</code>. <strong>Windows</strong> is code-complete but not yet "
+                  "CI-verified. Hardware-only gaps (Metal MPS, NVIDIA PMU) are in "
+                  '<a href="faq.html">FAQ</a> / <code>missingFeatures.md</code>.'), "warn"),
     ])
 
 
@@ -184,6 +186,8 @@ def page_installation():
         code("# Ubuntu / Debian\n"
              "sudo apt install -y cmake ninja-build clang llvm-18-dev \\\n"
              "    libomp-dev libssl-dev libsqlite3-dev\n\n"
+             "# macOS (Homebrew — paths discovered automatically at configure time)\n"
+             "brew install cmake llvm@18 libomp ninja sqlite\n\n"
              "# Flutter (for the dashboard) — one of:\n"
              "sudo snap install flutter --classic\n"
              "# or: brew install --cask flutter"),
@@ -202,8 +206,8 @@ def page_installation():
         table(["Platform", "Status", "Notes"], [
             ["Linux x86-64", "✅ Verified", "Full test suite green; NUMA + keyring."],
             ["Linux ARM64", "✅ Builds/tests", "SIMD via NEON."],
+            ["macOS ARM64/Intel", "✅ Build-verified", "Auto Homebrew llvm@18; JIT + integration tests pass locally; full serial ctest bring-up ongoing."],
             ["Windows", "⚠️ Experimental", "Code-complete (CredMan, Winsock); not yet CI-verified."],
-            ["macOS", "⚠️ Experimental", "Code-complete (Keychain, kqueue); NUMA is a no-op."],
         ]),
     ])
 
@@ -476,12 +480,24 @@ def page_faq():
           "closer with AVX-512. VGRE targets learning, CI, development, and moderate "
           "workloads — not latency-critical production inference."),
         h3("Which platforms are supported?"),
-        p("Linux x86-64/ARM64 is verified. Windows and macOS are code-complete but not "
-          "yet CI-verified; treat them as experimental."),
+        p("<strong>Linux x86-64/ARM64</strong> is fully verified (full <code>ctest</code> green). "
+          "<strong>macOS</strong> (Apple Silicon and Intel) is build-verified: the native engine "
+          "compiles with auto-detected Homebrew <code>llvm@18</code>, runs JIT kernels, and passes "
+          "integration tests locally — run <code>bash install_local.sh</code>. "
+          "<strong>Windows</strong> is code-complete but not yet CI-verified."),
+        h3("macOS: OpenMP or JIT failures?"),
+        ul([
+            "Install <code>brew install llvm@18 libomp</code> and reconfigure: "
+            "<code>rm -f build/CMakeCache.txt && cmake -B build</code>.",
+            "Ensure Clang is discoverable: <code>export PATH=\"$(brew --prefix llvm@18)/bin:$PATH\"</code> "
+            "or <code>export VGRE_CLANG_PATH=$(brew --prefix llvm@18)/bin/clang++</code>.",
+            "Run tests serially: <code>ctest -j1 --timeout 300</code>.",
+        ]),
         h3("The dashboard won't start / can't find the library."),
         ul([
             "Rebuild and reinstall, then open a <strong>new</strong> terminal so <code>~/.vgre/env</code> is loaded.",
-            "Check <code>VGRE_LIB_PATH</code> points to a real <code>libvgre.so</code> / <code>vgre.dll</code>.",
+            "Check library path: Linux <code>LD_LIBRARY_PATH</code>, macOS <code>DYLD_LIBRARY_PATH</code> — both set in <code>~/.vgre/env</code> after install.",
+            "Check <code>VGRE_LIB_PATH</code> points to a real <code>libvgre.so</code> / <code>libvgre.dylib</code> / <code>vgre.dll</code>.",
             "Windows: ensure <code>%LOCALAPPDATA%\\VGRE</code> and <code>...\\VGRE\\lib</code> are on <code>PATH</code>.",
         ]),
         h3("A CUDA call returns an error."),

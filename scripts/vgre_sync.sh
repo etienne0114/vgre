@@ -87,23 +87,39 @@ _check_and_install_deps() {
             fi
         fi
     done
+    # Homebrew llvm@18 is keg-only: llvm-config is not on PATH by default.
+    if [[ $LLVM_FOUND -eq 0 && "$OS" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+        local _brew_cfg
+        _brew_cfg="$(brew --prefix llvm@18 2>/dev/null)/bin/llvm-config"
+        if [[ -x "$_brew_cfg" ]]; then
+            local VER
+            VER=$("$_brew_cfg" --version 2>/dev/null | grep -oE '^[0-9]+' || echo "0")
+            if [[ "$VER" == "18" ]]; then
+                LLVM_FOUND=1
+                echo "  [OK] LLVM $("$_brew_cfg" --version) ($_brew_cfg)"
+            fi
+        fi
+    fi
     if [[ $LLVM_FOUND -eq 0 ]]; then
         echo "  [MISSING] LLVM 18 dev libraries (llvm-18, clang-18, libclang-18-dev)"
         MISSING_APT+=(llvm-18-dev clang-18 libclang-18-dev); MISSING_DNF+=(llvm18-devel clang18-devel)
-        MISSING_BREW+=(llvm)
+        MISSING_BREW+=(llvm@18)
         NEED_INSTALL=1
     fi
 
     # OpenMP
     local OMP_FOUND=0
+    if [[ "$OS" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+        _OMP_PREFIX="$(brew --prefix libomp 2>/dev/null || true)"
+        if [[ -n "$_OMP_PREFIX" && -f "${_OMP_PREFIX}/lib/libomp.dylib" ]]; then
+            OMP_FOUND=1
+            echo "  [OK] OpenMP present (${_OMP_PREFIX}/lib/libomp.dylib)"
+        fi
+    fi
     for lib in /usr/lib/x86_64-linux-gnu/libomp.so \
                /usr/lib/aarch64-linux-gnu/libomp.so \
                /usr/lib/libomp.so \
-               /usr/lib64/libomp.so \
-               /opt/homebrew/lib/libomp.dylib \
-               /opt/homebrew/opt/libomp/lib/libomp.dylib \
-               /usr/local/opt/libomp/lib/libomp.dylib \
-               /usr/local/lib/libomp.dylib; do
+               /usr/lib64/libomp.so; do
         [[ -f "$lib" ]] && OMP_FOUND=1 && break
     done
     command -v dpkg >/dev/null 2>&1 && dpkg -l libomp-dev >/dev/null 2>&1 && OMP_FOUND=1
@@ -111,7 +127,7 @@ _check_and_install_deps() {
         echo "  [MISSING] OpenMP (libomp-dev)"
         MISSING_APT+=(libomp-dev); MISSING_DNF+=(libomp-devel); MISSING_BREW+=(libomp)
         NEED_INSTALL=1
-    else
+    elif [[ "$OS" != "Darwin" ]]; then
         echo "  [OK] OpenMP present"
     fi
 
@@ -137,14 +153,18 @@ _check_and_install_deps() {
     # jemalloc — required at runtime to avoid glibc malloc arena assertions
     # when Flutter (libc++) and VGRE (libstdc++) threads share the same heap.
     local JEMALLOC_FOUND=0
+    if [[ "$OS" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+        _JEM_PREFIX="$(brew --prefix jemalloc 2>/dev/null || true)"
+        if [[ -n "$_JEM_PREFIX" && -f "${_JEM_PREFIX}/lib/libjemalloc.2.dylib" ]]; then
+            JEMALLOC_FOUND=1
+            echo "  [OK] jemalloc (${_JEM_PREFIX}/lib/libjemalloc.2.dylib)"
+        fi
+    fi
     for lib in /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
                /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 \
                /usr/lib64/libjemalloc.so.2 \
                /usr/lib/libjemalloc.so.2 \
-               /usr/local/lib/libjemalloc.so.2 \
-               /opt/homebrew/lib/libjemalloc.2.dylib \
-               /opt/homebrew/opt/jemalloc/lib/libjemalloc.2.dylib \
-               /usr/local/lib/libjemalloc.2.dylib; do
+               /usr/local/lib/libjemalloc.so.2; do
         [[ -f "$lib" ]] && JEMALLOC_FOUND=1 && echo "  [OK] jemalloc ($lib)" && break
     done
     if [[ $JEMALLOC_FOUND -eq 0 ]]; then
@@ -209,6 +229,18 @@ _check_and_install_deps() {
         echo "  [WARN] Flutter unavailable — dashboard build will be skipped"
     fi
 
+    # macOS Flutter desktop requires full Xcode (Command Line Tools alone are insufficient).
+    if [[ "$OS" == "Darwin" ]]; then
+        if xcrun xcodebuild -version >/dev/null 2>&1; then
+            echo "  [OK] Xcode $(xcrun xcodebuild -version 2>/dev/null | head -1)"
+        else
+            echo "  [WARN] Xcode not installed — Flutter macOS dashboard cannot be built"
+            echo "         Install from https://developer.apple.com/xcode/ then run:"
+            echo "           sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer"
+            echo "           sudo xcodebuild -runFirstLaunch"
+        fi
+    fi
+
     # Final hard check
     local HARD_FAIL=0
     for CMD in cmake git; do
@@ -252,11 +284,18 @@ elif [[ -n "$VGRE_TCP_AUTH_TOKEN" ]]; then
     chmod 600 "$TOKEN_FILE"
     export VGRE_TCP_AUTH_TOKEN_FILE="$TOKEN_FILE"
 else
-    TOKEN_FILE=""
-    echo "⚠️  No auth token configured."
-    echo "   Run  vgre-token generate  after install to create one (recommended)."
-    echo "   Or:  bash install_local.sh  to build and generate the token in one step."
-    echo "   Cluster will use hardware secure storage (TPM/Keyring) or allow manual input."
+    echo "🔑 No auth token found — generating one automatically..."
+    mkdir -p "$HOME/.vgre"
+    TOKEN_FILE="$HOME/.vgre/token"
+    if command -v openssl >/dev/null 2>&1; then
+        _TOKEN=$(openssl rand -hex 32)
+    else
+        _TOKEN=$(od -An -tx1 /dev/urandom | tr -d ' \n' | head -c 64)
+    fi
+    printf '%s' "$_TOKEN" > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+    export VGRE_TCP_AUTH_TOKEN_FILE="$TOKEN_FILE"
+    echo "🔐 Auth token saved to $TOKEN_FILE"
 fi
 
 FLUTTER_CACHE_PATH="${FLUTTER_CACHE_PATH:-$HOME/.cache/flutter}"
@@ -310,6 +349,40 @@ else
             fi
         fi
     done
+    if [[ -z "$_LLVM_CMAKE_ARG" && "$OS" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+        _brew_cfg="$(brew --prefix llvm@18 2>/dev/null)/bin/llvm-config"
+        if [[ -x "$_brew_cfg" ]]; then
+            _ver=$("$_brew_cfg" --version 2>/dev/null | grep -oE '^[0-9]+' || echo "0")
+            if [[ "$_ver" == "18" ]]; then
+                _cmake_dir=$("$_brew_cfg" --cmakedir 2>/dev/null || true)
+                if [[ -n "$_cmake_dir" ]] && [[ -f "$_cmake_dir/LLVMConfig.cmake" ]]; then
+                    _LLVM_CMAKE_ARG="-DLLVM_DIR=$_cmake_dir"
+                    echo "  [LLVM] Detected via $_brew_cfg: $_cmake_dir"
+                fi
+            fi
+        fi
+    fi
+fi
+
+# macOS: mirror CI configure flags (Homebrew llvm@18 + libomp; no hardcoded prefixes).
+_MACOS_CMAKE_EXTRA=()
+if [[ "$OS" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+    _LLVM18_PREFIX="$(brew --prefix llvm@18 2>/dev/null || true)"
+    _LIBOMP_PREFIX="$(brew --prefix libomp 2>/dev/null || true)"
+    if [[ -n "$_LLVM18_PREFIX" && -x "$_LLVM18_PREFIX/bin/clang++" ]]; then
+        echo "  [macOS] Using Homebrew llvm@18 at $_LLVM18_PREFIX"
+        _MACOS_CMAKE_EXTRA+=(
+            -DCMAKE_C_COMPILER="${_LLVM18_PREFIX}/bin/clang"
+            -DCMAKE_CXX_COMPILER="${_LLVM18_PREFIX}/bin/clang++"
+            -DLLVM_DIR="${_LLVM18_PREFIX}/lib/cmake/llvm"
+        )
+        [[ -n "$_LIBOMP_PREFIX" ]] && _MACOS_CMAKE_EXTRA+=(
+            -DOpenMP_ROOT="${_LIBOMP_PREFIX}"
+            -DCMAKE_PREFIX_PATH="${_LLVM18_PREFIX};${_LIBOMP_PREFIX}"
+        )
+        _SDK="$(xcrun --show-sdk-path 2>/dev/null || true)"
+        [[ -n "$_SDK" ]] && _MACOS_CMAKE_EXTRA+=(-DCMAKE_OSX_SYSROOT="$_SDK")
+    fi
 fi
 
 # Prefer Ninja for faster incremental builds; fall back to make.
@@ -322,7 +395,7 @@ fi
 
 cmake .. $_GEN_ARG -DCMAKE_BUILD_TYPE=Release \
     -DVGRE_ENABLE_NATIVE_SIMD="$VGRE_ENABLE_NATIVE_SIMD_FLAG" \
-    $_LLVM_CMAKE_ARG
+    $_LLVM_CMAKE_ARG "${_MACOS_CMAKE_EXTRA[@]}"
 
 _NCPU=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 if [[ "$_BUILD_CMD" == "ninja" ]]; then
@@ -333,9 +406,10 @@ fi
 
 # Verify the built library is a Release build (no ASAN symbols).
 # An ASan build is 2-3x larger and will abort on the first heap error it detects.
+_MIN_LIB_BYTES=1048576
 if [[ "$OS" == "Darwin" ]]; then
     _LIB="libvgre.dylib"
-    _LIB_SIZE=$(stat -f%z "$_LIB" 2>/dev/null || echo 0)
+    _LIB_SIZE=$(stat -Lf%z "$_LIB" 2>/dev/null || echo 0)
     if otool -L "$_LIB" 2>/dev/null | grep -qE "libasan|libclang_rt.asan"; then
         echo "❌ ERROR: $_LIB is an ASAN build — re-run cmake with -DCMAKE_BUILD_TYPE=Release"
         exit 1
@@ -349,37 +423,57 @@ else
         exit 1
     fi
 fi
+if [[ "$_LIB_SIZE" -lt "$_MIN_LIB_BYTES" ]]; then
+    echo "❌ ERROR: $_LIB is only ${_LIB_SIZE} bytes (expected ≥ ${_MIN_LIB_BYTES}) — build may have failed or symlink was measured"
+    exit 1
+fi
 echo "✅ $_LIB verified: Release build, ${_LIB_SIZE} bytes"
 cd ..
 
 # 2. Build Flutter Dashboard
-echo "🎨 Building VGRE Dashboard (Release)..."
-cd vgre_dashboard
+_DASHBOARD_BUILT=0
+if command -v flutter >/dev/null 2>&1; then
+    if [[ "$OS" == "Darwin" ]] && ! xcrun xcodebuild -version >/dev/null 2>&1; then
+        echo "⚠️  Skipping dashboard build: full Xcode is required on macOS."
+        echo "   Native engine, worker, and libraries will still be deployed."
+        echo "   After installing Xcode, re-run: ./scripts/vgre_sync.sh"
+    else
+        echo "🎨 Building VGRE Dashboard (Release)..."
+        cd vgre_dashboard
 
-# Unset CC/CXX to allow Flutter to use its own system-appropriate toolchain (usually clang)
-# and avoid linker resolution issues in LLVM directories.
-unset CC
-unset CXX
+        # Unset CC/CXX to allow Flutter to use its own system-appropriate toolchain (usually clang)
+        # and avoid linker resolution issues in LLVM directories.
+        unset CC
+        unset CXX
 
-# Workaround for Flutter/Dart linker resolution issue on Ubuntu with LLVM-18.
-# Dart's AOT compiler often expects 'ld' to be in the same dir as the compiler.
-# If 'clang' is version 18, it looks in /usr/lib/llvm-18/bin where 'ld' is missing.
-# We create a local bin dir and symlink gcc/g++/ld there so Dart finds a consistent
-# toolchain. Linux-only: macOS uses Apple Clang which does not have this issue.
-if [[ "$OS" == "Linux" ]]; then
-    mkdir -p "$PROJECT_ROOT/build/vgre_bin"
-    _GCC_BIN="$(command -v gcc 2>/dev/null || true)"
-    _GPP_BIN="$(command -v g++ 2>/dev/null || true)"
-    _LD_BIN="$(command -v ld 2>/dev/null || true)"
-    [[ -x "$_GCC_BIN" ]] && ln -sf "$_GCC_BIN" "$PROJECT_ROOT/build/vgre_bin/clang"
-    [[ -x "$_GPP_BIN" ]] && ln -sf "$_GPP_BIN" "$PROJECT_ROOT/build/vgre_bin/clang++"
-    [[ -x "$_LD_BIN" ]] && ln -sf "$_LD_BIN" "$PROJECT_ROOT/build/vgre_bin/ld"
-    [[ -x "$_LD_BIN" ]] && ln -sf "$_LD_BIN" "$PROJECT_ROOT/build/vgre_bin/ld.lld"
-    export PATH="$PROJECT_ROOT/build/vgre_bin:$PATH"
+        # Workaround for Flutter/Dart linker resolution issue on Ubuntu with LLVM-18.
+        # Dart's AOT compiler often expects 'ld' to be in the same dir as the compiler.
+        # If 'clang' is version 18, it looks in /usr/lib/llvm-18/bin where 'ld' is missing.
+        # We create a local bin dir and symlink gcc/g++/ld there so Dart finds a consistent
+        # toolchain. Linux-only: macOS uses Apple Clang which does not have this issue.
+        if [[ "$OS" == "Linux" ]]; then
+            mkdir -p "$PROJECT_ROOT/build/vgre_bin"
+            _GCC_BIN="$(command -v gcc 2>/dev/null || true)"
+            _GPP_BIN="$(command -v g++ 2>/dev/null || true)"
+            _LD_BIN="$(command -v ld 2>/dev/null || true)"
+            [[ -x "$_GCC_BIN" ]] && ln -sf "$_GCC_BIN" "$PROJECT_ROOT/build/vgre_bin/clang"
+            [[ -x "$_GPP_BIN" ]] && ln -sf "$_GPP_BIN" "$PROJECT_ROOT/build/vgre_bin/clang++"
+            [[ -x "$_LD_BIN" ]] && ln -sf "$_LD_BIN" "$PROJECT_ROOT/build/vgre_bin/ld"
+            [[ -x "$_LD_BIN" ]] && ln -sf "$_LD_BIN" "$PROJECT_ROOT/build/vgre_bin/ld.lld"
+            export PATH="$PROJECT_ROOT/build/vgre_bin:$PATH"
+        fi
+
+        if [[ "$OS" == "Darwin" && ! -d macos ]]; then
+            flutter create --platforms=macos .
+        fi
+        flutter build $(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/macos/') --release
+        _DASHBOARD_BUILT=1
+        cd ..
+    fi
+else
+    echo "⚠️  Flutter not found — dashboard build skipped"
 fi
-
-flutter build $(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/macos/') --release
-cd ..
+cd "$PROJECT_ROOT"
 
 # 3. Prepare Installation Directory
 echo "📂 Deploying to $INSTALL_DIR..."
@@ -387,15 +481,26 @@ mkdir -p "$INSTALL_DIR/lib"
 mkdir -p "$BIN_DIR"
 
 if [[ "$(uname)" == "Darwin" ]]; then
-    # macOS deployment
+    # macOS deployment — always install native libraries; dashboard is optional.
     APP_BUNDLE="$PROJECT_ROOT/vgre_dashboard/build/macos/Build/Products/Release/vgre_dashboard.app"
-    cp -r "$APP_BUNDLE" "$INSTALL_DIR/"
+    mkdir -p "$INSTALL_DIR/lib"
+    for _dylib in build/libvgre*.dylib build/libvgre_cudart*.dylib; do
+        [[ -e "$_dylib" ]] || continue
+        cp -Lf "$_dylib" "$INSTALL_DIR/lib/"
+    done
+    echo "✅ Native libraries installed to $INSTALL_DIR/lib/"
 
-    # Embed the native library inside the app bundle (preferred) or fall back to lib/
-    cp build/libvgre.dylib "$INSTALL_DIR/vgre_dashboard.app/Contents/Frameworks/" 2>/dev/null || \
-        cp build/libvgre.dylib "$INSTALL_DIR/lib/"
-    cp build/libvgre_cudart.dylib "$INSTALL_DIR/vgre_dashboard.app/Contents/Frameworks/" 2>/dev/null || \
-        cp build/libvgre_cudart.dylib "$INSTALL_DIR/lib/" 2>/dev/null || true
+    if [[ -d "$APP_BUNDLE" ]]; then
+        cp -R "$APP_BUNDLE" "$INSTALL_DIR/"
+        mkdir -p "$INSTALL_DIR/vgre_dashboard.app/Contents/Frameworks"
+        for _dylib in build/libvgre*.dylib build/libvgre_cudart*.dylib; do
+            [[ -e "$_dylib" ]] || continue
+            cp -Lf "$_dylib" "$INSTALL_DIR/vgre_dashboard.app/Contents/Frameworks/"
+        done
+        echo "✅ Flutter dashboard (.app) installed."
+    else
+        echo "⚠️  Dashboard .app not found — install Xcode and re-run sync to build the GUI."
+    fi
 
     # Deploy vgre-worker
     WORKER_SRC="$PROJECT_ROOT/build/src/advanced/vgre-worker"
@@ -428,8 +533,39 @@ if [[ "$(uname)" == "Darwin" ]]; then
     mkdir -p "$INSTALL_DIR/include"
     cp -r "$PROJECT_ROOT/include/vgre" "$INSTALL_DIR/include/" 2>/dev/null || true
 
-    # Dashboard launcher symlink
-    ln -sf "$INSTALL_DIR/vgre_dashboard.app/Contents/MacOS/vgre_dashboard" "$BIN_DIR/vgre-dashboard"
+    # Dashboard launcher symlink (only when .app was built)
+    if [[ -x "$INSTALL_DIR/vgre_dashboard.app/Contents/MacOS/vgre_dashboard" ]]; then
+        ln -sf "$INSTALL_DIR/vgre_dashboard.app/Contents/MacOS/vgre_dashboard" "$BIN_DIR/vgre-dashboard"
+    fi
+
+    # macOS launch wrapper (DYLD_LIBRARY_PATH + optional jemalloc preload)
+    LAUNCH_SCRIPT="$INSTALL_DIR/vgre-launch.sh"
+    {
+        echo '#!/bin/bash'
+        echo '[ -f "$HOME/.profile" ] && source "$HOME/.profile" 2>/dev/null'
+        echo '[ -f "$HOME/.zprofile" ] && source "$HOME/.zprofile" 2>/dev/null'
+        echo "export DYLD_LIBRARY_PATH=\"$INSTALL_DIR/lib:\${DYLD_LIBRARY_PATH:-}\""
+        echo "export VGRE_INSTALL_DIR=\"$INSTALL_DIR\""
+        if [[ -n "$VGRE_TCP_AUTH_TOKEN_FILE" ]]; then
+            echo "export VGRE_TCP_AUTH_TOKEN_FILE=\"$VGRE_TCP_AUTH_TOKEN_FILE\""
+        elif [[ -f "${TOKEN_FILE:-$HOME/.vgre/token}" ]]; then
+            echo "export VGRE_TCP_AUTH_TOKEN_FILE=\"${TOKEN_FILE:-$HOME/.vgre/token}\""
+        fi
+        _JEM_PREFIX=""
+        command -v brew >/dev/null 2>&1 && _JEM_PREFIX="$(brew --prefix jemalloc 2>/dev/null || true)"
+        if [[ -n "$_JEM_PREFIX" && -f "${_JEM_PREFIX}/lib/libjemalloc.2.dylib" ]]; then
+            echo "export DYLD_INSERT_LIBRARIES=\"${_JEM_PREFIX}/lib/libjemalloc.2.dylib\${DYLD_INSERT_LIBRARIES:+:\$DYLD_INSERT_LIBRARIES}\""
+        fi
+        echo 'DASH_EXEC="'"$INSTALL_DIR"'/vgre_dashboard.app/Contents/MacOS/vgre_dashboard"'
+        echo 'if [[ -x "$DASH_EXEC" ]]; then'
+        echo '  exec "$DASH_EXEC" "$@"'
+        echo 'fi'
+        echo 'echo "VGRE dashboard not installed. Install Xcode from https://developer.apple.com/xcode/ and re-run ./scripts/vgre_sync.sh" >&2'
+        echo 'echo "Native engine is ready at '"$INSTALL_DIR"'/lib/ — use vgre-worker for cluster mode." >&2'
+        echo 'exit 1'
+    } > "$LAUNCH_SCRIPT"
+    chmod +x "$LAUNCH_SCRIPT"
+    ln -sf "$LAUNCH_SCRIPT" "$BIN_DIR/vgre-launch.sh" 2>/dev/null || true
 else
     # Linux deployment — Flutter's bundle directory is per-arch (x64 / arm64).
     _BUNDLE_ARCH="x64"
@@ -583,6 +719,12 @@ if [[ -x "$_WORKER_BIN" ]]; then
         echo "[OK] vgre-worker startup self-check passed"
     fi
 fi
+
+# Ensure VGRE CLI tools are on PATH (~/.local/bin)
+# shellcheck source=vgre-cli-install.sh
+. "$SCRIPT_DIR/vgre-cli-install.sh"
+vgre_install_cli_symlinks "$SCRIPT_DIR"
+vgre_ensure_cli_path
 
 echo ""
 echo "✅ VGRE Sync Complete!"

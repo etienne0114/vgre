@@ -160,19 +160,38 @@ check_and_install_deps() {
         ok "Build driver: $(command -v make 2>/dev/null || command -v ninja)"
     fi
 
-    # ── LLVM ──────────────────────────────────────────────────────────────────
-    local LLVM_OK=0
-    for llvm_cfg in llvm-config llvm-config-18 llvm-config-17 llvm-config-16; do
+    # ── LLVM 18 (required for JIT) ───────────────────────────────────────────
+    local LLVM_OK=0 LLVM_CFG=""
+    for llvm_cfg in llvm-config-18 llvm-config; do
         if command -v "$llvm_cfg" >/dev/null 2>&1; then
-            ok "LLVM: $($llvm_cfg --version) (${llvm_cfg})"
-            LLVM_OK=1; break
+            local _llvm_ver
+            _llvm_ver=$("$llvm_cfg" --version 2>/dev/null | grep -oE '^[0-9]+' || echo "0")
+            if [[ "$_llvm_ver" == "18" ]]; then
+                LLVM_CFG="$llvm_cfg"
+                LLVM_OK=1
+                break
+            fi
         fi
     done
-    if [[ $LLVM_OK -eq 0 ]]; then
-        warn "LLVM dev libraries not found (required for JIT compilation)"
-        APT_MISSING+=(llvm-dev clang libclang-dev)
-        DNF_MISSING+=(llvm-devel clang-devel)
-        BREW_MISSING+=(llvm)
+    if [[ $LLVM_OK -eq 0 && "$OS" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+        local _brew_cfg
+        _brew_cfg="$(brew --prefix llvm@18 2>/dev/null)/bin/llvm-config"
+        if [[ -x "$_brew_cfg" ]]; then
+            local _llvm_ver
+            _llvm_ver=$("$_brew_cfg" --version 2>/dev/null | grep -oE '^[0-9]+' || echo "0")
+            if [[ "$_llvm_ver" == "18" ]]; then
+                LLVM_CFG="$_brew_cfg"
+                LLVM_OK=1
+            fi
+        fi
+    fi
+    if [[ $LLVM_OK -eq 1 ]]; then
+        ok "LLVM: $($LLVM_CFG --version) (${LLVM_CFG})"
+    else
+        warn "LLVM 18 dev libraries not found (required for JIT compilation)"
+        APT_MISSING+=(llvm-18-dev clang-18 libclang-18-dev)
+        DNF_MISSING+=(llvm18-devel clang18-devel)
+        BREW_MISSING+=(llvm@18)
         ALL_OK=0
     fi
 
@@ -262,6 +281,10 @@ check_and_install_deps() {
     else
         warn "Flutter not available — dashboard build will be skipped."
     fi
+    if [[ "$OS" == "Darwin" ]] && ! xcrun xcodebuild -version >/dev/null 2>&1; then
+        warn "Xcode not installed — Flutter macOS dashboard cannot be built."
+        warn "Install from https://developer.apple.com/xcode/ then: sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer"
+    fi
 
     # ── Final pass: re-verify critical tools ──────────────────────────────────
     echo ""
@@ -303,7 +326,7 @@ if [[ $NO_BUILD -eq 0 ]]; then
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -Wno-dev \
         2>&1 | tail -5
-    cmake --build "$REPO_DIR/build" -j"$(nproc)" 2>&1 | tail -5
+    cmake --build "$REPO_DIR/build" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)" 2>&1 | tail -5
     ok "Native engine built."
 else
     info "Skipping build (--no-build)."
@@ -345,12 +368,17 @@ FLUTTER_ARCH="x64"
 [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]] && FLUTTER_ARCH="arm64"
 if [[ $NO_BUILD -eq 0 ]]; then
     if command -v flutter >/dev/null 2>&1; then
-        info "Building Flutter dashboard ($FLUTTER_TARGET/$FLUTTER_ARCH)..."
-        cd "$REPO_DIR/vgre_dashboard"
-        flutter pub get --quiet
-        flutter build "$FLUTTER_TARGET" --release 2>&1 | tail -5
-        ok "Flutter dashboard built."
-        cd "$REPO_DIR"
+        if [[ "$OS" == "Darwin" ]] && ! xcrun xcodebuild -version >/dev/null 2>&1; then
+            warn "Skipping dashboard build: full Xcode is required on macOS."
+        else
+            info "Building Flutter dashboard ($FLUTTER_TARGET/$FLUTTER_ARCH)..."
+            cd "$REPO_DIR/vgre_dashboard"
+            flutter pub get --quiet
+            [[ "$OS" == "Darwin" && ! -d macos ]] && flutter create --platforms=macos .
+            flutter build "$FLUTTER_TARGET" --release 2>&1 | tail -5
+            ok "Flutter dashboard built."
+            cd "$REPO_DIR"
+        fi
     else
         warn "flutter not found — skipping dashboard build. Install from https://flutter.dev/docs/get-started/install"
     fi
@@ -399,6 +427,8 @@ cat > "$ENV_FILE" <<ENVEOF
 export VGRE_INSTALL_DIR="$INSTALL_DIR"
 export VGRE_LIB_PATH="$VGRE_LIB_DIR/$LIB_NAME"
 export LD_LIBRARY_PATH="$VGRE_LIB_DIR:\${LD_LIBRARY_PATH:-}"
+export DYLD_LIBRARY_PATH="$VGRE_LIB_DIR:\${DYLD_LIBRARY_PATH:-}"
+export PATH="$BIN_DIR:\${PATH}"
 
 # ── Auth token ────────────────────────────────────────────────────────────────
 export VGRE_TCP_AUTH_TOKEN_FILE="$TOKEN_FILE"
@@ -435,7 +465,7 @@ ok "Environment file written to $ENV_FILE"
 SOURCE_LINE="# VGRE environment"$'\n'"[[ -f \"$ENV_FILE\" ]] && source \"$ENV_FILE\""
 PROFILE_UPDATED=$SKIP_PROFILE
 [[ $SKIP_PROFILE -eq 1 ]] && info "Skipping shell-profile update (--skip-profile)."
-for PROFILE in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+for PROFILE in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.profile"; do
     [[ $SKIP_PROFILE -eq 1 ]] && break
     if [[ -f "$PROFILE" ]] && ! grep -q "vgre/env" "$PROFILE" 2>/dev/null; then
         printf '\n%s\n' "$SOURCE_LINE" >> "$PROFILE"
@@ -444,7 +474,7 @@ for PROFILE in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.prof
     fi
 done
 if [[ $PROFILE_UPDATED -eq 0 ]] && ! grep -qr "vgre/env" \
-        "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.profile" 2>/dev/null; then
+        "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.profile" 2>/dev/null; then
     printf '\n%s\n' "$SOURCE_LINE" >> "$HOME/.profile"
     ok "Added env sourcing to ~/.profile"
 fi
@@ -604,6 +634,11 @@ if [[ -f "$REPO_DIR/scripts/vgre-discover.sh" ]]; then
     ln -sf "$REPO_DIR/scripts/vgre-discover.sh" "$BIN_DIR/vgre-discover" 2>/dev/null || true
     ok "vgre-discover → $BIN_DIR/vgre-discover"
 fi
+
+# Ensure ~/.local/bin is on PATH in shell profiles and ~/.vgre/env
+# shellcheck source=scripts/vgre-cli-install.sh
+. "$REPO_DIR/scripts/vgre-cli-install.sh"
+vgre_ensure_cli_path
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""

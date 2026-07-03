@@ -23,8 +23,7 @@
 #if defined(__linux__)
 #  include <sys/eventfd.h>  // eventfd() — semaphore file descriptor
 #elif defined(__APPLE__)
-#  include <semaphore.h>    // sem_t, sem_init, sem_post, sem_trywait
-#  include <time.h>         // nanosleep
+#  include <dispatch/dispatch.h>
 #endif
 
 // ── External semaphore handle types (mirror CUDA headers) ────────────────────
@@ -42,7 +41,7 @@ struct ExtSem {
 #if defined(__linux__)
     int efd = -1;          // eventfd or timeline eventfd
 #elif defined(__APPLE__)
-    sem_t* psem = nullptr;
+    dispatch_semaphore_t dsem = nullptr; // unnamed POSIX sem is deprecated on macOS
 #elif defined(_WIN32)
     HANDLE hEvent = nullptr;
 #endif
@@ -131,12 +130,8 @@ vgre_err_t cudaImportExternalSemaphore(
             std::to_string(desc->type) + " — using local eventfd");
     }
 #elif defined(__APPLE__)
-    s->psem = static_cast<sem_t*>(std::malloc(sizeof(sem_t)));
-    if (!s->psem) { delete s; return kInvalidVal; }
-    if (sem_init(s->psem, 0, 0) != 0) {
-        std::free(s->psem); s->psem = nullptr;
-        delete s; return kInvalidVal;
-    }
+    s->dsem = dispatch_semaphore_create(0);
+    if (!s->dsem) { delete s; return kInvalidVal; }
     if (desc->type == CUDA_EXTERNAL_SEM_NVSCISYNCOBJ) {
         VGRE_LOG_INFO("ExtSem",
             "NvSciSyncObj proxied via POSIX semaphore on macOS (in-process ordering only)");
@@ -183,7 +178,7 @@ vgre_err_t cudaDestroyExternalSemaphore(cudaExternalSemaphore_t extSem) {
 #if defined(__linux__)
     if (s->efd >= 0) close(s->efd);
 #elif defined(__APPLE__)
-    if (s->psem) { sem_destroy(s->psem); std::free(s->psem); }
+    if (s->dsem) dispatch_release(s->dsem);
 #elif defined(_WIN32)
     if (s->hEvent) CloseHandle(s->hEvent);
 #endif
@@ -213,7 +208,7 @@ vgre_err_t cudaSignalExternalSemaphoresAsync(
             do { wr = write(s->efd, &v, sizeof(v)); } while (wr < 0 && errno == EINTR);
         }
 #elif defined(__APPLE__)
-        if (s->psem) sem_post(s->psem);
+        if (s->dsem) dispatch_semaphore_signal(s->dsem);
 #elif defined(_WIN32)
         if (s->hEvent) SetEvent(s->hEvent);
 #endif
@@ -258,12 +253,11 @@ vgre_err_t cudaWaitExternalSemaphoresAsync(
             }
         }
 #elif defined(__APPLE__)
-        if (s->psem) {
-            // macOS lacks sem_timedwait — spin with usleep using a 100 µs step
+        if (s->dsem) {
             while (std::chrono::steady_clock::now() < deadline) {
-                if (sem_trywait(s->psem) == 0) break;
-                struct timespec ts{0, 100000}; // 100 µs
-                nanosleep(&ts, nullptr);
+                if (dispatch_semaphore_wait(s->dsem,
+                        dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_MSEC)) == 0)
+                    break;
             }
         }
 #elif defined(_WIN32)
