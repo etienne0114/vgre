@@ -45,7 +45,6 @@ vgre_dashboard/linux/flutter/ephemeral/
 Testing/
 
 # VGRE Install & logs
-/install_local.sh
 launch.sh
 *.log
 
