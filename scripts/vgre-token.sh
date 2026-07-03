@@ -7,7 +7,8 @@
 #   vgre-token fingerprint           Print the SHA-256 fingerprint
 #   vgre-token set <TOKEN>           Store a specific token (from another node)
 #   vgre-token verify                Check env-var matches the stored file
-#   vgre-token copy                  Print the scp command to share with a worker
+#   vgre-token copy                  Print scp command to share with a worker
+#   vgre-token push <user@HOST>      Copy token file to master or worker via scp
 #   vgre-token revoke                Delete the stored token (prompts for confirmation)
 #
 # The token is stored in ~/.vgre/token (chmod 600).
@@ -218,10 +219,24 @@ cmd_verify() {
 
 cmd_copy() {
     [ -f "$TOKEN_FILE" ] || die "No token found. Run: vgre-token generate"
-    printf "\n${BOLD}Copy token to a worker machine:${RESET}\n\n"
-    printf "  ${CYAN}scp %s user@WORKER_IP:%s${RESET}\n\n" "$TOKEN_FILE" "$TOKEN_FILE"
-    printf "${DIM}Replace  user@WORKER_IP  with the actual worker address."
-    printf "\nRun  vgre-token fingerprint  on both machines to confirm they match.${RESET}\n\n"
+    FP=$(_sha256 "$(_read_token)")
+    printf "\n${BOLD}Copy token to another cluster node (master or worker):${RESET}\n\n"
+    printf "  ${CYAN}scp %s user@REMOTE_IP:%s${RESET}\n\n" "$TOKEN_FILE" "$TOKEN_FILE"
+    printf "  ${BOLD}This node fingerprint:${RESET} ${CYAN}%s${RESET}\n\n" "$FP"
+    printf "${DIM}On the remote node run  vgre-token fingerprint  — it MUST match."
+    printf "\nThen restart vgre-start --master or --worker on the remote node.${RESET}\n\n"
+}
+
+cmd_push() {
+    [ -n "${1:-}" ] || die "Usage: vgre-token push user@HOST"
+    [ -f "$TOKEN_FILE" ] || die "No token found. Run: vgre-token generate"
+    info "Copying token to $1:$TOKEN_FILE ..."
+    _ensure_dir
+    scp "$TOKEN_FILE" "$1:$TOKEN_FILE"
+    ok "Token copied. On the remote host run:"
+    printf "  ${CYAN}vgre-token fingerprint${RESET}   # must match this node\n"
+    printf "  ${CYAN}vgre-start --master${RESET}      # or --worker\n\n"
+    _print_fingerprint_block "$(_read_token)"
 }
 
 cmd_revoke() {
@@ -305,6 +320,7 @@ case "$CMD" in
     set)         cmd_set "${1:-}" ;;
     verify)      cmd_verify ;;
     copy)        cmd_copy ;;
+    push)        cmd_push "${1:-}" ;;
     revoke)      cmd_revoke ;;
     help|--help|-h) cmd_help ;;
     *)
