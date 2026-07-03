@@ -253,6 +253,9 @@ cmd_install() {
     vgre_install_cli_symlinks "$SCRIPT_DIR"
     vgre_ensure_cli_path
     ok "CLI symlinks installed: vgre-token, vgre-start, vgre-discover"
+    if command -v brew >/dev/null 2>&1 && [ -w "$(brew --prefix 2>/dev/null)/bin" ]; then
+        ok "Also linked into $(brew --prefix)/bin (already on PATH)"
+    fi
     ok "PATH updated for this session and future terminals"
     printf "\n${DIM}If a command is still not found, run:  . %s${RESET}\n\n" "$ENV_FILE"
 }

@@ -17,6 +17,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <vector>
+
+#if !defined(_WIN32)
+#include <ifaddrs.h>
+#include <net/if.h>
+#endif
 
 namespace vgre {
 namespace advanced {
@@ -35,6 +41,42 @@ using vgre::common::vgre_set_nosigpipe;
 using vgre::common::VgreSocketGuard;
 
 // HMAC helpers moved to CryptoUtils in shared_utilities.h
+
+namespace {
+
+// Send a UDP datagram to 255.255.255.255 and every interface broadcast address.
+// macOS and some routers drop global broadcast; subnet-directed broadcast is required.
+void sendUdpBroadcast(vgre_socket_t sock, const char* msg, size_t len, int port) {
+  int opt = 1;
+  vgre_setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+
+  auto sendOne = [&](uint32_t addr) {
+    if (addr == 0) return;
+    struct sockaddr_in dest{};
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = addr;
+    dest.sin_port = htons(static_cast<uint16_t>(port));
+    sendto(sock, msg, len, 0, reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
+  };
+
+  sendOne(INADDR_BROADCAST);
+
+#if !defined(_WIN32)
+  struct ifaddrs* ifap = nullptr;
+  if (getifaddrs(&ifap) == 0) {
+    for (struct ifaddrs* ifa = ifap; ifa; ifa = ifa->ifa_next) {
+      if (!ifa->ifa_broadaddr || ifa->ifa_broadaddr->sa_family != AF_INET) continue;
+      if (!(ifa->ifa_flags & IFF_UP) || (ifa->ifa_flags & IFF_LOOPBACK)) continue;
+      auto* bcast = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_broadaddr);
+      if (bcast->sin_addr.s_addr != INADDR_BROADCAST)
+        sendOne(bcast->sin_addr.s_addr);
+    }
+    freeifaddrs(ifap);
+  }
+#endif
+}
+
+} // anonymous namespace
 
 // ── UDP Port Configuration ────────────────────────────────────────────────
 // Both ports are configurable via env vars so operators can avoid conflicts
@@ -162,10 +204,7 @@ void DiscoveryManager::udpAnnouncerLoop() {
   int opt = 1;
   vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
 
-  struct sockaddr_in broadcast_addr{};
-  broadcast_addr.sin_family = AF_INET;
-  broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-  broadcast_addr.sin_port = htons(static_cast<uint16_t>(DiscoveryManager::getUdpAnnouncePort()));
+  const int announcePort = DiscoveryManager::getUdpAnnouncePort();
 
   VGRE_LOG_INFO("TCPCluster", "Master: UDP Announcer active (broadcasting master presence)...");
 
@@ -192,8 +231,7 @@ void DiscoveryManager::udpAnnouncerLoop() {
     { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
     if (!token.empty()) ping_msg += ':' + CryptoUtils::computeHmacHex(token, ping_msg);
 
-    sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0,
-           (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+    sendUdpBroadcast(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), announcePort);
     std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
     parent_->shutdown_cv_.wait_for(lock, std::chrono::seconds(2), [this]() { return !parent_->enabled_; });
   }
@@ -312,10 +350,7 @@ void DiscoveryManager::udpWorkerAnnouncerLoop() {
   int opt = 1;
   vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
 
-  struct sockaddr_in broadcast_addr{};
-  broadcast_addr.sin_family = AF_INET;
-  broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-  broadcast_addr.sin_port = htons(static_cast<uint16_t>(DiscoveryManager::getUdpWorkerPort())); // Master scans this port
+  const int workerUdpPort = DiscoveryManager::getUdpWorkerPort();
 
   VGRE_LOG_INFO("TCPCluster", "Worker: Proactive Announcer active (seeking master)...");
 
@@ -325,8 +360,7 @@ void DiscoveryManager::udpWorkerAnnouncerLoop() {
     std::string token;
     { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
     if (!token.empty()) ping_msg += ':' + CryptoUtils::computeHmacHex(token, ping_msg);
-    sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0,
-           (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+    sendUdpBroadcast(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), workerUdpPort);
     std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
     parent_->shutdown_cv_.wait_for(lock, std::chrono::seconds(5), [this]() { return !parent_->enabled_ || parent_->is_master_; });
   }

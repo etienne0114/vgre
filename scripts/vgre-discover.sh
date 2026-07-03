@@ -69,21 +69,60 @@ _detect_public_ip() {
     return 1
 }
 
+# Deterministic bucket from auth token — same token on master and worker ⇒ same bucket.
+_token_bucket_id() {
+    local fp
+    fp=$(_token_fingerprint)
+    [[ -n "$fp" ]] || return 1
+    echo "vgre-${fp:0:16}"
+}
+
+# Bucket for lookups: env > file > token-derived (no auto-create).
+_resolve_bucket_for_lookup() {
+    if [[ -n "${VGRE_DISCOVERY_BUCKET_ID:-}" ]]; then
+        echo "$VGRE_DISCOVERY_BUCKET_ID"
+        return 0
+    fi
+    if [[ -f "$BUCKET_ID_FILE" ]]; then
+        tr -d '[:space:]' < "$BUCKET_ID_FILE"
+        return 0
+    fi
+    _token_bucket_id
+}
+
+_persist_master_address() {
+    local addr="$1"
+    local env_file="${VGRE_DIR}/env"
+    mkdir -p "$VGRE_DIR"
+    [[ -f "$env_file" ]] || touch "$env_file"
+    chmod 600 "$env_file"
+    local tmp
+    tmp=$(mktemp)
+    if grep -q "VGRE_CLUSTER_MASTER_ADDRESS" "$env_file" 2>/dev/null; then
+        grep -v "VGRE_CLUSTER_MASTER_ADDRESS" "$env_file" > "$tmp"
+    else
+        cp "$env_file" "$tmp" 2>/dev/null || : > "$tmp"
+    fi
+    printf '\nexport VGRE_CLUSTER_MASTER_ADDRESS="%s"\n' "$addr" >> "$tmp"
+    mv -f "$tmp" "$env_file"
+}
+
 # Get or create the per-cluster kvdb.io bucket.
-# Priority:  VGRE_DISCOVERY_BUCKET_ID env var  >  ~/.vgre/discovery_bucket file  >  auto-create.
-# The bucket ID is persisted to the file on first use so future sessions work without the env var.
+# Priority: VGRE_DISCOVERY_BUCKET_ID > ~/.vgre/discovery_bucket > token bucket > auto-create.
 _bucket_id() {
     local bid=""
 
     if [[ -n "${VGRE_DISCOVERY_BUCKET_ID:-}" ]]; then
         bid="$VGRE_DISCOVERY_BUCKET_ID"
     elif [[ -f "$BUCKET_ID_FILE" ]]; then
-        bid=$(cat "$BUCKET_ID_FILE")
+        bid=$(tr -d '[:space:]' < "$BUCKET_ID_FILE")
+    else
+        bid=$(_token_bucket_id 2>/dev/null) || true
     fi
 
     # Persist to file so subsequent sessions don't need the env var.
     if [[ -n "$bid" ]]; then
-        if [[ ! -f "$BUCKET_ID_FILE" ]] || [[ "$(cat "$BUCKET_ID_FILE")" != "$bid" ]]; then
+        if [[ ! -f "$BUCKET_ID_FILE" ]] || [[ "$(tr -d '[:space:]' < "$BUCKET_ID_FILE")" != "$bid" ]]; then
             echo "$bid" > "$BUCKET_ID_FILE"
             chmod 600 "$BUCKET_ID_FILE"
         fi
@@ -91,7 +130,7 @@ _bucket_id() {
         return 0
     fi
 
-    # Auto-create a new bucket.  kvdb.io sends a verification email; the bucket
+    # Legacy fallback: auto-create a random kvdb.io bucket.
     # is writable only after confirming that email.
     echo "[INFO] No discovery bucket configured — creating one at kvdb.io (free)..." >&2
     echo "[INFO] You will receive a verification email. Visit https://kvdb.io/login to activate." >&2
@@ -265,29 +304,27 @@ cmd_register() {
 
 cmd_find() {
     local bucket="${1:-}"
+    local quiet="${2:-0}"
     if [[ -z "$bucket" ]]; then
-        # Try locally stored bucket ID
-        if [[ -f "$BUCKET_ID_FILE" ]]; then
-            bucket=$(cat "$BUCKET_ID_FILE")
-        elif [[ -n "${VGRE_DISCOVERY_BUCKET_ID:-}" ]]; then
-            bucket="$VGRE_DISCOVERY_BUCKET_ID"
-        else
-            echo "[ERROR] Usage: vgre-discover --find <BUCKET_ID>" >&2
+        bucket=$(_resolve_bucket_for_lookup 2>/dev/null) || bucket=""
+        if [[ -z "$bucket" ]]; then
+            [[ "$quiet" == "1" ]] && return 1
+            echo "[ERROR] Usage: vgre-discover --find [BUCKET_ID]" >&2
             echo "        Get the BUCKET_ID from the master: vgre-discover --register" >&2
             exit 1
         fi
     fi
 
     local key
-    key=$(_discovery_key) || exit 1
+    key=$(_discovery_key) || { [[ "$quiet" == "1" ]] && return 1; exit 1; }
 
     # Save bucket ID to file so future sessions don't need the env var.
-    if [[ ! -f "$BUCKET_ID_FILE" ]] || [[ "$(cat "$BUCKET_ID_FILE")" != "$bucket" ]]; then
+    if [[ ! -f "$BUCKET_ID_FILE" ]] || [[ "$(tr -d '[:space:]' < "$BUCKET_ID_FILE")" != "$bucket" ]]; then
         echo "$bucket" > "$BUCKET_ID_FILE"
         chmod 600 "$BUCKET_ID_FILE"
     fi
 
-    echo "[...] Looking up master in bucket ${bucket}..."
+    [[ "$quiet" != "1" ]] && echo "[...] Looking up master in bucket ${bucket}..."
     local tmp_body
     tmp_body=$(mktemp)
     local http_code
@@ -298,12 +335,15 @@ cmd_find() {
     rm -f "$tmp_body"
 
     if [[ "$http_code" == "404" || -z "$payload" || "$payload" == "Not Found" ]]; then
+        [[ "$quiet" == "1" ]] && return 1
         echo "[ERROR] No master registered in bucket ${bucket}." >&2
         echo "        Ask the master to run: vgre-discover --register" >&2
+        echo "        (or: vgre-start --master — registers automatically)" >&2
         exit 1
     fi
 
     if [[ "$http_code" != "200" ]]; then
+        [[ "$quiet" == "1" ]] && return 1
         echo "[ERROR] Lookup failed (HTTP ${http_code})." >&2
         if [[ -n "$payload" ]]; then
             echo "        Server says: ${payload}" >&2
@@ -324,6 +364,7 @@ cmd_find() {
 
     # Verify token fingerprint matches (first 16 chars)
     if [[ -n "$stored_fp" && -n "$local_fp" && "${local_fp:0:16}" != "$stored_fp" ]]; then
+        [[ "$quiet" == "1" ]] && return 1
         echo "[ERROR] Token fingerprint mismatch!" >&2
         echo "        Registered: $stored_fp" >&2
         echo "        Local:      ${local_fp:0:16}" >&2
@@ -331,19 +372,24 @@ cmd_find() {
         exit 1
     fi
 
-    echo ""
-    echo "[OK] Master found: $addr"
-    echo ""
-    echo "Connect with:"
-    echo "  vgre-start --worker --master-address $addr"
-    echo ""
+    [[ "$quiet" != "1" ]] && echo ""
+    [[ "$quiet" != "1" ]] && echo "[OK] Master found: $addr"
+    [[ "$quiet" != "1" ]] && echo ""
+    [[ "$quiet" != "1" ]] && echo "Connect with:"
+    [[ "$quiet" != "1" ]] && echo "  vgre-start --worker --master-address $addr"
+    [[ "$quiet" != "1" ]] && echo ""
 
-    # Save master address for use by vgre-start
+    # Save master address for vgre-start and the worker process.
     local ip
     ip=$(echo "$addr" | cut -d: -f1)
     echo "${ip}" > "$PUBLIC_IP_FILE"
+    _persist_master_address "$addr"
     export VGRE_CLUSTER_MASTER_ADDRESS="$addr"
     echo "VGRE_CLUSTER_MASTER_ADDRESS=$addr"
+}
+
+cmd_find_auto() {
+    cmd_find "" 1
 }
 
 cmd_unregister() {
@@ -367,7 +413,8 @@ case "${1:-}" in
     ""|--show)      cmd_show ;;
     --set-master)   cmd_set_master ;;
     --register)     cmd_register ;;
-    --find)         shift; cmd_find "${1:-}" ;;
+    --find)         shift; cmd_find "${1:-}" 0 ;;
+    --find-auto)    cmd_find_auto ;;
     --unregister)   cmd_unregister ;;
     --help|-h)
         cat <<'HELP'

@@ -47,6 +47,7 @@ PORT="${VGRE_PORT:-7777}"  # Must match kDefaultClusterPort in tcp_cluster_defau
 MODE=""
 MASTER_IP=""
 MASTER_ADDRESS=""
+SKIP_CONNECT_CHECK=0
 EXTRA_ARGS=()
 
 # ── Parse Arguments ───────────────────────────────────────────────────────────
@@ -59,6 +60,7 @@ while [[ $# -gt 0 ]]; do
         --master-address)   MASTER_ADDRESS="$2"; shift ;;
         --port)             PORT="$2"; shift ;;
         --threads)          EXTRA_ARGS+=("--threads" "$2"); shift ;;
+        --skip-connect-check) SKIP_CONNECT_CHECK=1 ;;
         --help|-h)
             cat <<'EOF'
 vgre-start -- VGRE Cluster Launcher
@@ -73,6 +75,7 @@ Usage:
 Options:
   --port <N>       TCP port (default 7777)
   --threads <N>    Worker thread count (default: auto)
+  --skip-connect-check  Skip TCP preflight (worker WAN mode)
 EOF
             exit 0
             ;;
@@ -167,21 +170,101 @@ _ping_ok() {
     fi
 }
 
+_resolve_discover_script() {
+    local cand
+    for cand in \
+        "$(command -v vgre-discover 2>/dev/null || true)" \
+        "$INSTALL_DIR/vgre-discover" \
+        "$SCRIPT_DIR/vgre-discover.sh"; do
+        [[ -n "$cand" && -x "$cand" ]] && { echo "$cand"; return 0; }
+    done
+    return 1
+}
+
+# Cross-LAN: workers with the same token look up the master's public IP via kvdb.io.
+_try_cross_lan_master_discovery() {
+    [[ -n "$MASTER_ADDRESS" || -n "$MASTER_IP" ]] && return 0
+    [[ -n "${VGRE_CLUSTER_MASTER_ADDRESS:-}" ]] && return 0
+
+    local _discover
+    _discover="$(_resolve_discover_script)" || return 0
+
+    echo "[...] Cross-LAN discovery: looking up master (token-keyed kvdb.io)..."
+    local _found
+    _found=$(bash "$_discover" --find-auto 2>/dev/null | grep "^VGRE_CLUSTER_MASTER_ADDRESS=" || true)
+    if [[ -n "$_found" ]]; then
+        # shellcheck disable=SC2163
+        export "$_found"
+        MASTER_ADDRESS="$VGRE_CLUSTER_MASTER_ADDRESS"
+        echo "[OK] Master found via cross-LAN discovery: $MASTER_ADDRESS"
+        return 0
+    fi
+
+    echo "[INFO] Cross-LAN: no registered master yet."
+    echo "       On the Linux master run:  vgre-start --master"
+    echo "       (registers public IP automatically; same token required)"
+    echo "       Falling back to LAN UDP broadcast (same subnet only)..."
+    echo ""
+    return 0
+}
+
+# Fail fast when the master TCP port is unreachable (WAN / explicit address modes).
+_check_master_tcp() {
+    local addr="$1"
+    [[ -z "$addr" ]] && return 0
+    local host="${addr%%:*}"
+    local mport="${addr##*:}"
+    [[ "$mport" == "$host" ]] && mport="$PORT"
+
+    local check_script=""
+    for cand in \
+        "$(command -v vgre-connect-check 2>/dev/null || true)" \
+        "$SCRIPT_DIR/vgre-connect-check.sh"; do
+        [[ -n "$cand" && -x "$cand" ]] && { check_script="$cand"; break; }
+    done
+
+    if [[ -n "$check_script" ]]; then
+        VGRE_CLUSTER_MASTER_ADDRESS="$host:$mport" bash "$check_script" "$host:$mport"
+        return $?
+    fi
+
+    if command -v nc >/dev/null 2>&1; then
+        if nc -z -G 8 -w 8 "$host" "$mport" 2>/dev/null; then
+            echo "[OK] Master TCP $host:$mport is reachable."
+            return 0
+        fi
+    fi
+
+    echo ""
+    echo "❌ Cannot reach master at $host:$mport (TCP timeout/refused)."
+    echo "   Run: vgre-connect-check $host:$mport"
+    echo "   On Linux master: vgre-start --master  &&  ss -tlnp | grep $mport"
+    echo "   Open firewall: sudo ufw allow $mport/tcp"
+    echo "   Port-forward TCP $mport on your router to the master machine."
+    return 1
+}
+
 # ── Start ─────────────────────────────────────────────────────────────────────
 case "$MODE" in
 
     master)
         # Auto-detect real public IP so master broadcasts with it in UDP pings.
         # Workers on different LANs will receive the correct public address.
-        _DISCOVER="$(command -v vgre-discover 2>/dev/null || true)"
-        [[ -z "$_DISCOVER" ]] && [[ -x "$INSTALL_DIR/vgre-discover" ]] && _DISCOVER="$INSTALL_DIR/vgre-discover"
-        [[ -z "$_DISCOVER" ]] && [[ -x "$SCRIPT_DIR/vgre-discover.sh" ]] && _DISCOVER="$SCRIPT_DIR/vgre-discover.sh"
+        _DISCOVER="$(_resolve_discover_script || true)"
         if [[ -n "$_DISCOVER" ]]; then
             echo "[...] Detecting public IP for WAN broadcast..."
             # Run in a sub-shell so its 'export' doesn't affect this script's env;
             # instead capture the printed assignment and eval it.
             _ADV=$(bash "$_DISCOVER" --set-master 2>/dev/null | grep "^VGRE_CLUSTER_ADVERTISED_ADDRESS=" || true)
             [[ -n "$_ADV" ]] && export "$_ADV" && echo "[OK] $_ADV"
+            echo "[...] Registering master for cross-LAN workers (token-keyed kvdb.io)..."
+            if bash "$_DISCOVER" --register 2>/dev/null; then
+                echo "[OK] Master registered for cross-LAN discovery (same token on workers)."
+            else
+                echo "[WARN] Cross-LAN registration skipped (check internet / kvdb.io)."
+                echo "       Workers on other networks need: vgre-start --worker --master-address <IP>:$PORT"
+            fi
+            echo ""
         fi
 
         echo "Starting VGRE Master Node..."
@@ -189,14 +272,18 @@ case "$MODE" in
         echo "  Token: $TOKEN_FILE"
         echo ""
         export VGRE_PORT="$PORT"
-        DASHBOARD_BIN="$(_resolve_dashboard)" || {
-            echo "❌ Dashboard not found in $INSTALL_DIR. Run install_local.sh first."
-            exit 1
-        }
+        DASHBOARD_BIN="$(_resolve_dashboard)" || true
+        if [[ -z "$DASHBOARD_BIN" ]] && [[ -x "$WORKER_BIN" ]]; then
+            echo "[WARN] Dashboard not found — starting headless master (vgre-worker --is-master)."
+            export VGRE_PORT="$PORT"
+            exec "$WORKER_BIN" --is-master --port "$PORT" "${EXTRA_ARGS[@]}"
+        fi
+        DASHBOARD_BIN="${DASHBOARD_BIN:?Dashboard not found in $INSTALL_DIR. Run install_local.sh or vgre_sync.sh first.}"
         exec "$DASHBOARD_BIN"
         ;;
 
     worker)
+        _try_cross_lan_master_discovery
         if [[ -n "$MASTER_ADDRESS" ]]; then
             # WAN / explicit hostname:port — handled by getaddrinfo in C++ engine
             export VGRE_CLUSTER_MASTER_ADDRESS="$MASTER_ADDRESS"
@@ -213,12 +300,28 @@ case "$MODE" in
                 fi
             fi
             echo "Starting VGRE Worker → master at $MASTER_IP:$PORT"
+        elif [[ -n "${VGRE_CLUSTER_MASTER_ADDRESS:-}" ]]; then
+            echo "Starting VGRE Worker → master at $VGRE_CLUSTER_MASTER_ADDRESS (configured)"
         else
             echo "Starting VGRE Worker (auto-discovering master on local subnet)..."
         fi
         echo "  Port:  $PORT"
         echo "  Token: $TOKEN_FILE"
         echo ""
+
+        # WAN links: longer connect timeout unless user already set one.
+        [[ -z "${VGRE_CLUSTER_CONNECT_TIMEOUT_SEC:-}" ]] && \
+            export VGRE_CLUSTER_CONNECT_TIMEOUT_SEC=30
+
+        _TARGET=""
+        [[ -n "$MASTER_ADDRESS" ]] && _TARGET="$MASTER_ADDRESS"
+        [[ -z "$_TARGET" && -n "$MASTER_IP" ]] && _TARGET="${MASTER_IP}:${PORT}"
+        [[ -z "$_TARGET" && -n "${VGRE_CLUSTER_MASTER_ADDRESS:-}" ]] && _TARGET="$VGRE_CLUSTER_MASTER_ADDRESS"
+
+        if [[ $SKIP_CONNECT_CHECK -eq 0 && -n "$_TARGET" ]]; then
+            _check_master_tcp "$_TARGET" || exit 1
+        fi
+
         exec "$WORKER_BIN" --port "$PORT" "${EXTRA_ARGS[@]}"
         ;;
 
