@@ -84,7 +84,7 @@ void TCPClusterManager::clientLoop() {
       VGRE_LOG_INFO("TCPCluster", "Worker: Starting security handshake...");
       VGREResult sr = performClientSecureHandshake();
 
-      if (sr != VGREResult::SUCCESS) {
+        if (sr != VGREResult::SUCCESS) {
         VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed with result: " + std::to_string(static_cast<int>(sr)) + " — dropping connection");
         {
           std::lock_guard<std::mutex> lock(client_mutex_);
@@ -94,8 +94,8 @@ void TCPClusterManager::clientLoop() {
             has_master_fd_.store(false, std::memory_order_release);
           }
         }
-        if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
-        continue; // standby: wait for next master
+        // Retry on next connection (UDP discovery or explicit reconnect).
+        continue;
       } else {
         VGRE_LOG_INFO("TCPCluster", "Worker: Security handshake completed successfully");
       }
@@ -119,7 +119,6 @@ void TCPClusterManager::clientLoop() {
               has_master_fd_.store(false, std::memory_order_release);
             }
           }
-          if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
           continue;
         }
 
@@ -164,7 +163,6 @@ void TCPClusterManager::clientLoop() {
               has_master_fd_.store(false, std::memory_order_release);
             }
           }
-          if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
           continue;
         }
 
@@ -186,7 +184,6 @@ void TCPClusterManager::clientLoop() {
               has_master_fd_.store(false, std::memory_order_release);
             }
           }
-          if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
           continue;
         }
 
@@ -203,8 +200,7 @@ void TCPClusterManager::clientLoop() {
                 has_master_fd_.store(false, std::memory_order_release);
               }
             }
-            if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
-            continue;
+          continue;
           }
         }
 
@@ -570,21 +566,13 @@ void TCPClusterManager::clientLoop() {
     // will set client_fd_ on the next inbound master connection.
     if (server_fd_ == VGRE_INVALID_SOCKET) {
       std::string host;
-      int port;
+      int port = port_;
       {
         std::lock_guard<std::mutex> lk(client_mutex_);
         host = host_;
-        port = port_;
       }
 
-      if (host.empty() || host == "0.0.0.0") {
-        // UDP auto-discovery mode — re-enter discovery loop.
-        // udpDiscoveryLoop() is still running and will reconnect when a
-        // master ping arrives; this thread just loops back to Phase 0 and
-        // waits for client_fd_ to become valid again.
-        VGRE_LOG_INFO("TCPCluster",
-            "Worker: master disconnected — re-entering UDP auto-discovery");
-      } else {
+      if (explicit_master_connect_ && !host.empty() && host != "0.0.0.0") {
         // Explicit master address — try a direct reconnect before looping.
         // Use getaddrinfo so hostnames, IPv4, and IPv6 literals all work.
         VGRE_LOG_INFO("TCPCluster",
@@ -598,6 +586,16 @@ void TCPClusterManager::clientLoop() {
                                 [this]() { return !enabled_; });
         }
         if (!enabled_) return;
+
+        // UDP discovery may have reconnected during the backoff window.
+        {
+          std::lock_guard<std::mutex> lk(client_mutex_);
+          if (client_fd_ != VGRE_INVALID_SOCKET) {
+            VGRE_LOG_INFO("TCPCluster",
+                "Worker: discovery already reconnected — skipping direct dial");
+            continue;
+          }
+        }
 
         char portStr[8];
         snprintf(portStr, sizeof(portStr), "%d", port);
@@ -625,11 +623,17 @@ void TCPClusterManager::clientLoop() {
           freeaddrinfo(res);
           if (sock != VGRE_INVALID_SOCKET) {
             std::lock_guard<std::mutex> lk(client_mutex_);
-            client_fd_ = sock;
-            has_master_fd_.store(true, std::memory_order_release);
-            VGRE_LOG_INFO("TCPCluster",
-                "Worker: reconnected to master at " +
-                host + ":" + std::to_string(port));
+            if (client_fd_ != VGRE_INVALID_SOCKET) {
+              vgre_close_socket(sock);
+              VGRE_LOG_INFO("TCPCluster",
+                  "Worker: discovery won race — dropped redundant direct dial");
+            } else {
+              client_fd_ = sock;
+              has_master_fd_.store(true, std::memory_order_release);
+              VGRE_LOG_INFO("TCPCluster",
+                  "Worker: reconnected to master at " +
+                  host + ":" + std::to_string(port));
+            }
           } else {
             VGRE_LOG_WARN("TCPCluster",
                 "Worker: direct reconnect failed — proactive loop will retry");
@@ -638,6 +642,13 @@ void TCPClusterManager::clientLoop() {
         // Whether or not direct reconnect succeeded, loop back to Phase 0.
         // The proactive reconnect thread (startProactiveConnections) will
         // keep retrying with exponential backoff in the background.
+      } else {
+        // UDP auto-discovery mode — re-enter discovery loop.
+        // udpDiscoveryLoop() is still running and will reconnect when a
+        // master ping arrives; this thread just loops back to Phase 0 and
+        // waits for client_fd_ to become valid again.
+        VGRE_LOG_INFO("TCPCluster",
+            "Worker: master disconnected — re-entering UDP auto-discovery");
       }
     } else {
       VGRE_LOG_INFO("TCPCluster", "Worker: Standby — waiting for next master connection...");
